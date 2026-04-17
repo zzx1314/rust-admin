@@ -1,0 +1,11 @@
+jwt_secret = "your-secret-key"
+database_url = "sqlite:/home/zhangzexin/IdeaProjects/x-rust/data/users.db?mode=rwc"
+
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[redis]
+host = "localhost"
+port = 6379
+password = "123456"

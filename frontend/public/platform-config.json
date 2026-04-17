@@ -1,0 +1,43 @@
+{
+  "Version": "6.0.0",
+  "Title": "充电桩管理平台",
+  "FixedHeader": true,
+  "HiddenSideBar": false,
+  "MultiTagsCache": false,
+  "KeepAlive": true,
+  "Locale": "zh",
+  "Layout": "double",
+  "Theme": "default",
+  "DarkMode": false,
+  "OverallStyle": "light",
+  "Grey": false,
+  "Weak": false,
+  "HideTabs": false,
+  "HideFooter": false,
+  "Stretch": false,
+  "SidebarStatus": true,
+  "EpThemeColor": "#409EFF",
+  "ShowLogo": true,
+  "ShowModel": "smart",
+  "MenuArrowIconNoTransition": false,
+  "CachingAsyncRoutes": false,
+  "TooltipEffect": "light",
+  "ResponsiveStorageNameSpace": "responsivemax-",
+  "MenuSearchHistory": 6,
+  "MapConfigure": {
+    "amapKey": "adc139d56406f3844c8f1cf1c6b65c41",
+    "options": {
+      "resizeEnable": true,
+      "center": [113.6401, 34.72468],
+      "zoom": 12
+    }
+  },
+  "VersionList": [
+    {
+      "content": "V1.0.0",
+      "timestamp": "2024-09-23",
+      "size": "large",
+      "type": "primary"
+    }
+  ]
+}

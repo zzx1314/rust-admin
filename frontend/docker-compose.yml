@@ -1,0 +1,9 @@
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: x-platform-frontend
+    ports:
+      - "80:80"
+    restart: unless-stopped
