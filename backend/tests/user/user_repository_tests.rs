@@ -20,7 +20,7 @@ impl TestDb {
     async fn new() -> Self {
         let id = uuid::Uuid::new_v4();
         let db_path = format!(
-            "/home/zhangzexin/IdeaProjects/x-rust/data/user_repo_{}.db",
+            "/home/zhangzexin/IdeaProjects/rust-admin/backend/data/user_repo_{}.db",
             id
         );
         let url = format!("sqlite:{}", db_path);

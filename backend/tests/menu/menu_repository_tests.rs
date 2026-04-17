@@ -11,7 +11,7 @@ fn uid() -> String {
 fn test_db_path() -> String {
     let id = Uuid::new_v4();
     format!(
-        "/home/zhangzexin/IdeaProjects/x-rust/data/menu_test_{}.db",
+        "/home/zhangzexin/IdeaProjects/rust-admin/backend/data/menu_test_{}.db",
         id
     )
 }

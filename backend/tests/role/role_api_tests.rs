@@ -13,7 +13,7 @@ use x_rust::common::util::encrypt_password;
 fn test_db_path() -> String {
     let id = Uuid::new_v4();
     format!(
-        "/home/zhangzexin/IdeaProjects/x-rust/data/role_api_test_{}.db",
+        "/home/zhangzexin/IdeaProjects/rust-admin/backend/data/role_api_test_{}.db",
         id
     )
 }

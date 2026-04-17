@@ -56,7 +56,7 @@ impl TokenStore for FakeTokenStore {
 fn test_db_path() -> String {
     let id = uuid::Uuid::new_v4();
     format!(
-        "/home/zhangzexin/IdeaProjects/x-rust/data/org_api_{}.db",
+        "/home/zhangzexin/IdeaProjects/rust-admin/backend/data/org_api_{}.db",
         id
     )
 }

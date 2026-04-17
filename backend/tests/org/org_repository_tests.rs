@@ -7,7 +7,7 @@ use x_rust::org::repository::SeaOrmOrgRepository;
 fn test_db_path() -> String {
     let id = Uuid::new_v4();
     format!(
-        "/home/zhangzexin/IdeaProjects/x-rust/data/org_test_{}.db",
+        "/home/zhangzexin/IdeaProjects/rust-admin/backend/data/org_test_{}.db",
         id
     )
 }
