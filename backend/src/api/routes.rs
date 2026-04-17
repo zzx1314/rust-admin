@@ -1,12 +1,12 @@
 use axum::{
+    Router,
     middleware::from_fn_with_state,
     routing::{get, post, put},
-    Router,
 };
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::api::middleware::require_auth;
 use crate::api::AppState;
+use crate::api::middleware::require_auth;
 use crate::auth::handlers::{
     check_token_handler, login_handler, logout_handler, me_handler, refresh_handler,
 };

@@ -68,8 +68,8 @@ pub struct UserLoginData {
     pub nickname: Option<String>,
     pub roles: Vec<i32>,
     pub permissions: Vec<String>,
-    pub accessToken: String,
-    pub refreshToken: String,
+    pub access_token: String,
+    pub refresh_token: String,
     pub expires: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
@@ -96,8 +96,8 @@ impl UserLoginVO {
                 nickname,
                 roles,
                 permissions,
-                accessToken: access_token,
-                refreshToken: refresh_token,
+                access_token: access_token,
+                refresh_token: refresh_token,
                 expires,
                 user_id: Some(user_id),
             },
@@ -248,7 +248,11 @@ impl AuthService {
         })
     }
 
-    pub async fn login_with_vo(&self, username: &str, password: &str) -> Result<UserLoginVO, AppError> {
+    pub async fn login_with_vo(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<UserLoginData, AppError> {
         let user = self
             .user_repo
             .find_by_username(username)
@@ -311,31 +315,38 @@ impl AuthService {
             .map(|dt| dt.format("%Y/%m/%d %H:%M:%S").to_string())
             .unwrap_or_default();
 
-        Ok(UserLoginVO::new(
-            access_token,
-            refresh_token,
+        Ok(UserLoginData {
+            access_token: access_token,
+            refresh_token: refresh_token,
             expires,
-            user_id.clone(),
-            user.username.clone(),
-            None,
-            user.real_name.clone(),
+            user_id: Some(user_id.clone()),
+            username: user.username.clone(),
+            avatar: None,
+            nickname: user.real_name.clone(),
             roles,
             permissions,
-        ))
+        })
     }
 
     async fn get_user_roles(&self, user_id: &str) -> Result<Vec<i32>, AppError> {
-        let roles = self.role_repo.find_roles_by_user_id(user_id).await
+        let roles = self
+            .role_repo
+            .find_roles_by_user_id(user_id)
+            .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
-        Ok(roles.into_iter().map(|r| r.id.parse().unwrap_or(0)).collect())
+        Ok(roles
+            .into_iter()
+            .map(|r| r.id.parse().unwrap_or(0))
+            .collect())
     }
 
     async fn get_user_permissions(&self, user_id: &str) -> Result<Vec<String>, AppError> {
-        let roles = self.role_repo.find_roles_by_user_id(user_id).await
+        let roles = self
+            .role_repo
+            .find_roles_by_user_id(user_id)
+            .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
-        let permissions: Vec<String> = roles.iter()
-            .filter_map(|r| r.code.clone())
-            .collect();
+        let permissions: Vec<String> = roles.iter().filter_map(|r| r.code.clone()).collect();
         Ok(permissions)
     }
 
@@ -428,7 +439,10 @@ impl AuthService {
         })
     }
 
-    pub async fn refresh_token_with_vo(&self, refresh_token: &str) -> Result<TokenRefreshVO, AppError> {
+    pub async fn refresh_token_with_vo(
+        &self,
+        refresh_token: &str,
+    ) -> Result<TokenRefreshVO, AppError> {
         let token_data = decode::<Claims>(
             refresh_token,
             &DecodingKey::from_secret(self.jwt_secret.as_bytes()),
@@ -493,7 +507,10 @@ impl AuthService {
     }
 
     pub async fn get_user_info(&self, user_id: &str) -> Result<UserInfoVO, AppError> {
-        let user = self.user_repo.find_by_id(user_id).await
+        let user = self
+            .user_repo
+            .find_by_id(user_id)
+            .await
             .map_err(AppError::DatabaseErrorSeaOrm)?
             .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
         Ok(UserInfoVO::from_user(&user))

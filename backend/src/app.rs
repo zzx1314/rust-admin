@@ -15,13 +15,13 @@ use crate::menu::repository::SeaOrmMenuRepository;
 use crate::menu::service::MenuService;
 use crate::migration::Migrator;
 use crate::org::repository::SeaOrmOrgRepository;
-use sea_orm_migration::MigratorTrait;
 use crate::org::service::OrgService;
 use crate::role::repository::SeaOrmRoleRepository;
 use crate::role::service::RoleService;
 use crate::sys_auth::service::SysAuthService;
 use crate::user::repository::SeaOrmUserRepository;
 use crate::user::service::UserService;
+use sea_orm_migration::MigratorTrait;
 
 pub struct App {
     conn: DatabaseConnection,
@@ -33,7 +33,9 @@ impl App {
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
-        Migrator::up(&conn, None).await.map_err(AppError::DatabaseErrorSeaOrm)?;
+        Migrator::up(&conn, None)
+            .await
+            .map_err(AppError::DatabaseErrorSeaOrm)?;
 
         Ok(Self { conn })
     }
@@ -49,7 +51,12 @@ impl App {
 
         let redis_url = config.redis.url();
         let token_store: Arc<dyn TokenStore> = Arc::new(RedisTokenStore::new(&redis_url));
-        let auth_service = Arc::new(AuthService::new(user_repo, token_store, role_repo.clone(), &config.jwt_secret));
+        let auth_service = Arc::new(AuthService::new(
+            user_repo,
+            token_store,
+            role_repo.clone(),
+            &config.jwt_secret,
+        ));
 
         let menu_repo: Arc<dyn MenuRepository> = Arc::new(SeaOrmMenuRepository::new(conn.clone()));
         let menu_service = Arc::new(MenuService::new(menu_repo.clone(), role_repo.clone()));

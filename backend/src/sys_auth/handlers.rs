@@ -2,8 +2,8 @@ use crate::api::AppState;
 use crate::common::error::{ApiResponse, AppError};
 use crate::sys_auth::domain::{SetMenuAuthRequest, SysAuthMenuVo};
 use axum::{
-    extract::{Path, State},
     Json,
+    extract::{Path, State},
 };
 use serde::Deserialize;
 

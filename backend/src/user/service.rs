@@ -25,7 +25,10 @@ pub struct UserService {
 
 impl UserService {
     pub fn new(user_repo: Arc<dyn UserRepository>, role_repo: Arc<dyn RoleRepository>) -> Self {
-        Self { user_repo, role_repo }
+        Self {
+            user_repo,
+            role_repo,
+        }
     }
 
     pub async fn create_user(&self, req: CreateUserRequest) -> Result<User, AppError> {
@@ -103,15 +106,25 @@ impl UserService {
             .ok_or_else(|| AppError::Unauthorized("Invalid username or password".to_string()))
     }
 
-    pub async fn update_password(&self, user_id: &str, old_password: Option<&str>, new_password: &str) -> Result<PasswordUpdateResponse, AppError> {
-        let user = self.user_repo.find_by_id(user_id).await
+    pub async fn update_password(
+        &self,
+        user_id: &str,
+        old_password: Option<&str>,
+        new_password: &str,
+    ) -> Result<PasswordUpdateResponse, AppError> {
+        let user = self
+            .user_repo
+            .find_by_id(user_id)
+            .await
             .map_err(AppError::DatabaseErrorSeaOrm)?
             .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
         if let (Some(old_pwd), Some(password_hash)) = (old_password, &user.password)
             && !crate::common::util::md5_verify(old_pwd, password_hash)
         {
-            return Err(AppError::BadRequest("Old password is incorrect".to_string()));
+            return Err(AppError::BadRequest(
+                "Old password is incorrect".to_string(),
+            ));
         }
 
         let decrypted = decrypt_password(new_password)
@@ -132,7 +145,9 @@ impl UserService {
             sex: None,
         };
 
-        self.user_repo.update(user_id, &req).await
+        self.user_repo
+            .update(user_id, &req)
+            .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
         Ok(PasswordUpdateResponse {
@@ -142,7 +157,9 @@ impl UserService {
     }
 
     pub async fn get_users_by_role(&self, role_id: &str) -> Result<Vec<User>, AppError> {
-        self.role_repo.find_users_by_role_id(role_id).await
+        self.role_repo
+            .find_users_by_role_id(role_id)
+            .await
             .map_err(AppError::DatabaseErrorSeaOrm)
     }
 
@@ -161,7 +178,9 @@ impl UserService {
             enable: None,
             sex: None,
         };
-        self.user_repo.update(user_id, &req).await
+        self.user_repo
+            .update(user_id, &req)
+            .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
         Ok(())
     }
@@ -180,7 +199,9 @@ impl UserService {
             enable: Some(enable),
             sex: None,
         };
-        self.user_repo.update(user_id, &req).await
+        self.user_repo
+            .update(user_id, &req)
+            .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
         Ok(())
     }

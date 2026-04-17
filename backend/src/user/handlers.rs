@@ -87,12 +87,15 @@ pub async fn get_users_by_role_handler(
     Query(query): Query<RoleIdQuery>,
 ) -> Result<Json<UsersByRoleResponse>, AppError> {
     let users = state.user_service.get_users_by_role(&query.role_id).await?;
-    let data: Vec<UserInfoSimple> = users.into_iter().map(|u| UserInfoSimple {
-        id: u.id,
-        username: u.username,
-        real_name: u.real_name,
-        phone: u.phone,
-    }).collect();
+    let data: Vec<UserInfoSimple> = users
+        .into_iter()
+        .map(|u| UserInfoSimple {
+            id: u.id,
+            username: u.username,
+            real_name: u.real_name,
+            phone: u.phone,
+        })
+        .collect();
     Ok(Json(UsersByRoleResponse {
         success: true,
         data,
@@ -103,10 +106,14 @@ pub async fn edit_password_handler(
     State(state): State<AppState>,
     Json(req): Json<PasswordUpdateRequest>,
 ) -> Result<Json<crate::user::service::PasswordUpdateResponse>, AppError> {
-    let user_id = req.user_id.clone().ok_or_else(|| {
-        AppError::BadRequest("user_id is required".to_string())
-    })?;
-    let response = state.user_service.update_password(&user_id, req.old_password.as_deref(), &req.password).await?;
+    let user_id = req
+        .user_id
+        .clone()
+        .ok_or_else(|| AppError::BadRequest("user_id is required".to_string()))?;
+    let response = state
+        .user_service
+        .update_password(&user_id, req.old_password.as_deref(), &req.password)
+        .await?;
     Ok(Json(response))
 }
 
@@ -133,7 +140,10 @@ pub async fn reset_user_password_handler(
     Json(req): Json<ResetPwdRequest>,
 ) -> Result<Json<OperationResponse>, AppError> {
     let default_password = "123456";
-    state.user_service.reset_password(&req.id, default_password).await?;
+    state
+        .user_service
+        .reset_password(&req.id, default_password)
+        .await?;
     Ok(Json(OperationResponse {
         success: true,
         msg: "密码重置成功".to_string(),
@@ -144,9 +154,17 @@ pub async fn toggle_user_enable_handler(
     State(state): State<AppState>,
     Json(req): Json<EnableRequest>,
 ) -> Result<Json<OperationResponse>, AppError> {
-    state.user_service.toggle_enable(&req.id, req.enable).await?;
+    state
+        .user_service
+        .toggle_enable(&req.id, req.enable)
+        .await?;
     Ok(Json(OperationResponse {
         success: true,
-        msg: if req.enable == 1 { "启用成功" } else { "禁用成功" }.to_string(),
+        msg: if req.enable == 1 {
+            "启用成功"
+        } else {
+            "禁用成功"
+        }
+        .to_string(),
     }))
 }

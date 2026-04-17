@@ -2,7 +2,9 @@ use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use x_rust::common::error::AppError;
-use x_rust::common::traits::{DynFuture, RoleRepository, SeaOrmOptResult, SeaOrmResult, UserRepository};
+use x_rust::common::traits::{
+    DynFuture, RoleRepository, SeaOrmOptResult, SeaOrmResult, UserRepository,
+};
 use x_rust::common::util::encrypt_password;
 use x_rust::role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequest};
 use x_rust::user::domain::{CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO};
@@ -257,7 +259,10 @@ impl RoleRepository for FakeRoleRepository {
     fn find_all(&self) -> DynFuture<SeaOrmResult<Vec<Role>>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
-    fn find_all_with_page(&self, _query: &RolePageQuery) -> DynFuture<SeaOrmResult<(Vec<Role>, i64)>> {
+    fn find_all_with_page(
+        &self,
+        _query: &RolePageQuery,
+    ) -> DynFuture<SeaOrmResult<(Vec<Role>, i64)>> {
         Box::pin(async move { Ok((Vec::new(), 0)) })
     }
     fn update(&self, _id: &str, _req: &UpdateRoleRequest) -> DynFuture<SeaOrmOptResult<Role>> {
@@ -269,7 +274,11 @@ impl RoleRepository for FakeRoleRepository {
     fn assign_role_to_user(&self, _user_id: &str, _role_id: &str) -> DynFuture<SeaOrmResult<()>> {
         Box::pin(async move { Ok(()) })
     }
-    fn remove_role_from_user(&self, _user_id: &str, _role_id: &str) -> DynFuture<SeaOrmResult<bool>> {
+    fn remove_role_from_user(
+        &self,
+        _user_id: &str,
+        _role_id: &str,
+    ) -> DynFuture<SeaOrmResult<bool>> {
         Box::pin(async move { Ok(false) })
     }
     fn find_roles_by_user_id(&self, _user_id: &str) -> DynFuture<SeaOrmResult<Vec<Role>>> {

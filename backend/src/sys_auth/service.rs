@@ -12,7 +12,10 @@ pub struct SysAuthService {
 
 impl SysAuthService {
     pub fn new(menu_repo: Arc<dyn MenuRepository>, role_repo: Arc<dyn RoleRepository>) -> Self {
-        Self { menu_repo, role_repo }
+        Self {
+            menu_repo,
+            role_repo,
+        }
     }
 
     pub async fn get_role_auth(&self, role_code: &str) -> Result<Vec<SysAuthMenuVo>, AppError> {
@@ -37,15 +40,10 @@ impl SysAuthService {
 
         let role_menu_ids: HashSet<String> = role_menus.iter().map(|m| m.id.clone()).collect();
 
-        let buttons: Vec<&Menu> = role_menus
-            .iter()
-            .filter(|m| m.r#type == Some(2))
-            .collect();
+        let buttons: Vec<&Menu> = role_menus.iter().filter(|m| m.r#type == Some(2)).collect();
 
-        let parent_ids: HashSet<String> = buttons
-            .iter()
-            .filter_map(|b| b.parent_id.clone())
-            .collect();
+        let parent_ids: HashSet<String> =
+            buttons.iter().filter_map(|b| b.parent_id.clone()).collect();
 
         let mut result: Vec<SysAuthMenuVo> = Vec::new();
 
@@ -96,7 +94,12 @@ impl SysAuthService {
         Ok(result)
     }
 
-    fn build_menu_path(&self, menu_id: &str, all_menu_map: &HashMap<String, Menu>, path: &mut Vec<String>) {
+    fn build_menu_path(
+        &self,
+        menu_id: &str,
+        all_menu_map: &HashMap<String, Menu>,
+        path: &mut Vec<String>,
+    ) {
         if let Some(menu) = all_menu_map.get(menu_id) {
             path.push(menu.name.clone());
             if let Some(parent_id) = &menu.parent_id {
@@ -113,7 +116,9 @@ impl SysAuthService {
             .find_by_code(&req.role_code)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?
-            .ok_or_else(|| AppError::NotFound(format!("Role with code {} not found", req.role_code)))?;
+            .ok_or_else(|| {
+                AppError::NotFound(format!("Role with code {} not found", req.role_code))
+            })?;
 
         if req.auth_list.is_empty() {
             self.role_repo
@@ -151,7 +156,12 @@ impl SysAuthService {
         Ok(())
     }
 
-    fn collect_parent_ids(&self, menu: &Menu, menu_map: &HashMap<String, Menu>, set: &mut HashSet<String>) {
+    fn collect_parent_ids(
+        &self,
+        menu: &Menu,
+        menu_map: &HashMap<String, Menu>,
+        set: &mut HashSet<String>,
+    ) {
         if let Some(parent_id) = &menu.parent_id {
             if !parent_id.is_empty() {
                 set.insert(parent_id.clone());

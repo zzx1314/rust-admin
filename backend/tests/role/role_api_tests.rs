@@ -127,7 +127,12 @@ async fn create_test_app() -> (axum::Router, TestDb) {
     let user_service = Arc::new(UserService::new(user_repo.clone(), role_repo.clone()));
     let role_service = Arc::new(RoleService::new(role_repo.clone()));
     let token_store: Arc<dyn TokenStore> = Arc::new(FakeTokenStore::new());
-    let auth_service = Arc::new(AuthService::new(user_repo, token_store, role_repo.clone(), "test-secret"));
+    let auth_service = Arc::new(AuthService::new(
+        user_repo,
+        token_store,
+        role_repo.clone(),
+        "test-secret",
+    ));
     let menu_repo: Arc<dyn MenuRepository> = Arc::new(SeaOrmMenuRepository::new(conn.clone()));
     let menu_service = Arc::new(MenuService::new(menu_repo.clone(), role_repo.clone()));
     let org_repo: Arc<dyn OrgRepository> = Arc::new(SeaOrmOrgRepository::new(conn.clone()));

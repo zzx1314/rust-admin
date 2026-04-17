@@ -1,8 +1,8 @@
 use crate::api::AppState;
-use crate::auth::service::{CheckTokenVO, TokenRefreshVO, UserInfoVO, UserLoginVO};
+use crate::auth::service::{CheckTokenVO, TokenRefreshVO, UserInfoVO, UserLoginData};
 use crate::common::error::AppError;
 use crate::common::util::decrypt_password;
-use axum::{extract::Path, Form, Json, extract::State, http::StatusCode};
+use axum::{Form, Json, extract::Path, extract::State, http::StatusCode};
 use axum_extra::TypedHeader;
 use axum_extra::extract::CookieJar;
 use axum_extra::headers::Authorization;
@@ -26,11 +26,14 @@ pub struct RefreshRequest {
 pub async fn login_handler(
     State(state): State<AppState>,
     Form(req): Form<LoginRequest>,
-) -> Result<Json<UserLoginVO>, AppError> {
+) -> Result<Json<UserLoginData>, AppError> {
     let password = decrypt_password(&req.password)
         .map_err(|e| AppError::BadRequest(format!("Password decryption failed: {}", e)))?;
 
-    let response = state.auth_service.login_with_vo(&req.username, &password).await?;
+    let response = state
+        .auth_service
+        .login_with_vo(&req.username, &password)
+        .await?;
     Ok(Json(response))
 }
 
@@ -88,7 +91,10 @@ pub async fn refresh_handler(
     State(state): State<AppState>,
     Path(refresh_token): Path<String>,
 ) -> Result<Json<TokenRefreshVO>, AppError> {
-    let response = state.auth_service.refresh_token_with_vo(&refresh_token).await?;
+    let response = state
+        .auth_service
+        .refresh_token_with_vo(&refresh_token)
+        .await?;
     Ok(Json(response))
 }
 
