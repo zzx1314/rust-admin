@@ -2,7 +2,7 @@ use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Serialize, Deserialize)]
-#[sea_orm(table_name = "user_roles")]
+#[sea_orm(table_name = "p_sys_user_role")]
 pub struct Model {
     #[sea_orm(primary_key, column_name = "user_id", column_type = "Text")]
     pub user_id: String,
