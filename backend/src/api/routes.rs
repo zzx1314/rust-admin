@@ -1,13 +1,15 @@
 use axum::{
-    Router,
     middleware::from_fn_with_state,
-    routing::{get, post},
+    routing::{get, post, put},
+    Router,
 };
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::api::AppState;
 use crate::api::middleware::require_auth;
-use crate::auth::handlers::{login_handler, logout_handler, me_handler, refresh_handler};
+use crate::api::AppState;
+use crate::auth::handlers::{
+    check_token_handler, login_handler, logout_handler, me_handler, refresh_handler,
+};
 use crate::menu::handlers::{
     create_menu_handler, delete_menu_handler, get_all_menus_handler, get_menu_handler,
     get_menu_tree_handler, get_menus_by_parent_handler, get_user_menu_handler, update_menu_handler,
@@ -22,16 +24,27 @@ use crate::role::handlers::{
     remove_role_from_user_handler, update_role_handler,
 };
 use crate::user::handlers::{
-    create_user_handler, delete_user_handler, get_all_users_handler, get_user_handler,
-    get_users_page_handler, update_user_handler,
+    create_user_handler, delete_user_handler, edit_password_handler, get_all_users_handler,
+    get_user_handler, get_users_by_role_handler, get_users_page_handler, update_user_handler,
 };
 
 pub fn auth_routes() -> Router<AppState> {
     Router::new()
-        .route("/auth/login", post(login_handler))
-        .route("/auth/logout", post(logout_handler))
-        .route("/auth/me", get(me_handler))
-        .route("/auth/refresh", post(refresh_handler))
+        .route("/token", post(login_handler))
+        .route("/token/logout", post(logout_handler))
+        .route("/token/refresh/{refresh_token}", get(refresh_handler))
+        .route("/token/check_token", get(check_token_handler))
+}
+
+pub fn sys_user_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/sysUser/info", get(me_handler))
+        .route("/sysUser/edit", put(edit_password_handler))
+        .route(
+            "/sysUser/getUserByRoleIdNoPage",
+            get(get_users_by_role_handler),
+        )
+        .layer(from_fn_with_state(state.clone(), require_auth))
 }
 
 pub fn user_routes(state: AppState) -> Router<AppState> {
@@ -105,12 +118,16 @@ pub fn org_routes(state: AppState) -> Router<AppState> {
 }
 
 pub fn create_router(state: AppState) -> Router {
-    Router::new()
+    let api_router = Router::new()
         .merge(auth_routes())
+        .merge(sys_user_routes(state.clone()))
         .merge(user_routes(state.clone()))
         .merge(role_routes(state.clone()))
         .merge(menu_routes(state.clone()))
-        .merge(org_routes(state.clone()))
+        .merge(org_routes(state.clone()));
+
+    Router::new()
+        .nest("/api", api_router)
         .layer(TraceLayer::new_for_http())
         .layer(
             CorsLayer::new()

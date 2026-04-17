@@ -1,8 +1,8 @@
 use crate::api::AppState;
-use crate::auth::service::{LoginResponse, UserResponse};
-use crate::common::error::{ApiResponse, AppError};
+use crate::auth::service::{CheckTokenVO, TokenRefreshVO, UserInfoVO, UserLoginVO};
+use crate::common::error::AppError;
 use crate::common::util::decrypt_password;
-use axum::{Form, Json, extract::State, http::StatusCode};
+use axum::{extract::Path, Form, Json, extract::State, http::StatusCode};
 use axum_extra::TypedHeader;
 use axum_extra::extract::CookieJar;
 use axum_extra::headers::Authorization;
@@ -26,12 +26,12 @@ pub struct RefreshRequest {
 pub async fn login_handler(
     State(state): State<AppState>,
     Form(req): Form<LoginRequest>,
-) -> Result<Json<ApiResponse<LoginResponse>>, AppError> {
+) -> Result<Json<UserLoginVO>, AppError> {
     let password = decrypt_password(&req.password)
         .map_err(|e| AppError::BadRequest(format!("Password decryption failed: {}", e)))?;
 
-    let response = state.auth_service.login(&req.username, &password).await?;
-    Ok(Json(ApiResponse::ok(response)))
+    let response = state.auth_service.login_with_vo(&req.username, &password).await?;
+    Ok(Json(response))
 }
 
 pub async fn logout_handler(
@@ -55,17 +55,26 @@ pub async fn logout_handler(
 pub async fn me_handler(
     State(state): State<AppState>,
     auth: TypedHeader<Authorization<Bearer>>,
-) -> Result<Json<ApiResponse<UserResponse>>, AppError> {
+) -> Result<Json<UserInfoVO>, AppError> {
     let token = auth.token();
     let user_id = state.auth_service.validate_token(token).await?;
-    let user = state.user_service.get_user(&user_id).await?;
-    Ok(Json(ApiResponse::ok(user.into())))
+    let user_info = state.auth_service.get_user_info(&user_id).await?;
+    Ok(Json(user_info))
 }
 
 pub async fn refresh_handler(
     State(state): State<AppState>,
-    Form(req): Form<RefreshRequest>,
-) -> Result<Json<ApiResponse<LoginResponse>>, AppError> {
-    let response = state.auth_service.refresh_token(&req.refresh_token).await?;
-    Ok(Json(ApiResponse::ok(response)))
+    Path(refresh_token): Path<String>,
+) -> Result<Json<TokenRefreshVO>, AppError> {
+    let response = state.auth_service.refresh_token_with_vo(&refresh_token).await?;
+    Ok(Json(response))
+}
+
+pub async fn check_token_handler(
+    State(state): State<AppState>,
+    auth: TypedHeader<Authorization<Bearer>>,
+) -> Result<Json<CheckTokenVO>, AppError> {
+    let token = auth.token();
+    let result = state.auth_service.check_token(token).await?;
+    Ok(Json(result))
 }

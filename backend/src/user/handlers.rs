@@ -2,6 +2,7 @@ use crate::api::AppState;
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
 use crate::user::domain::{CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO};
+use crate::user::service::PasswordUpdateRequest;
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -60,4 +61,51 @@ pub async fn delete_user_handler(
 ) -> Result<(StatusCode, ()), AppError> {
     state.user_service.delete_user(&params.id).await?;
     Ok((StatusCode::NO_CONTENT, ()))
+}
+
+#[derive(Deserialize)]
+pub struct RoleIdQuery {
+    pub role_id: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct UsersByRoleResponse {
+    pub success: bool,
+    pub data: Vec<UserInfoSimple>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct UserInfoSimple {
+    pub id: String,
+    pub username: String,
+    pub real_name: Option<String>,
+    pub phone: Option<String>,
+}
+
+pub async fn get_users_by_role_handler(
+    State(state): State<AppState>,
+    Query(query): Query<RoleIdQuery>,
+) -> Result<Json<UsersByRoleResponse>, AppError> {
+    let users = state.user_service.get_users_by_role(&query.role_id).await?;
+    let data: Vec<UserInfoSimple> = users.into_iter().map(|u| UserInfoSimple {
+        id: u.id,
+        username: u.username,
+        real_name: u.real_name,
+        phone: u.phone,
+    }).collect();
+    Ok(Json(UsersByRoleResponse {
+        success: true,
+        data,
+    }))
+}
+
+pub async fn edit_password_handler(
+    State(state): State<AppState>,
+    Json(req): Json<PasswordUpdateRequest>,
+) -> Result<Json<crate::user::service::PasswordUpdateResponse>, AppError> {
+    let user_id = req.user_id.clone().ok_or_else(|| {
+        AppError::BadRequest("user_id is required".to_string())
+    })?;
+    let response = state.user_service.update_password(&user_id, req.old_password.as_deref(), &req.password).await?;
+    Ok(Json(response))
 }

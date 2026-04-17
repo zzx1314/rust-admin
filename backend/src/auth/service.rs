@@ -6,7 +6,7 @@ use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode}
 use serde::{Deserialize, Serialize};
 
 use crate::common::error::AppError;
-use crate::common::traits::{TokenStore, UserRepository};
+use crate::common::traits::{RoleRepository, TokenStore, UserRepository};
 use crate::user::domain::User;
 
 const ACCESS_TOKEN_TTL_SECS: u64 = 24 * 60 * 60;
@@ -53,9 +53,118 @@ pub struct LoginResponse {
     pub user: UserResponse,
 }
 
+/// Frontend-compatible login response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UserLoginVO {
+    pub success: bool,
+    pub data: UserLoginData,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[allow(non_snake_case)]
+pub struct UserLoginData {
+    pub avatar: Option<String>,
+    pub username: String,
+    pub nickname: Option<String>,
+    pub roles: Vec<i32>,
+    pub permissions: Vec<String>,
+    pub accessToken: String,
+    pub refreshToken: String,
+    pub expires: String,
+    pub user_id: String,
+}
+
+impl UserLoginVO {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        access_token: String,
+        refresh_token: String,
+        expires: String,
+        user_id: String,
+        username: String,
+        avatar: Option<String>,
+        nickname: Option<String>,
+        roles: Vec<i32>,
+        permissions: Vec<String>,
+    ) -> Self {
+        Self {
+            success: true,
+            data: UserLoginData {
+                avatar,
+                username,
+                nickname,
+                roles,
+                permissions,
+                accessToken: access_token,
+                refreshToken: refresh_token,
+                expires,
+                user_id,
+            },
+        }
+    }
+}
+
+/// Frontend-compatible refresh token response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TokenRefreshVO {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_in: i64,
+}
+
+/// Frontend-compatible user info response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UserInfoVO {
+    pub success: bool,
+    pub data: UserInfoData,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UserInfoData {
+    pub avatar: Option<String>,
+    pub username: String,
+    pub nickname: Option<String>,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    pub description: Option<String>,
+}
+
+impl UserInfoVO {
+    pub fn from_user(user: &User) -> Self {
+        Self {
+            success: true,
+            data: UserInfoData {
+                avatar: None,
+                username: user.username.clone(),
+                nickname: user.real_name.clone(),
+                email: user.email.clone(),
+                phone: user.phone.clone(),
+                description: user.remarks.clone(),
+            },
+        }
+    }
+}
+
+/// Check token response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CheckTokenVO {
+    pub success: bool,
+    pub msg: String,
+}
+
+impl CheckTokenVO {
+    pub fn valid() -> Self {
+        Self {
+            success: true,
+            msg: "token有效".to_string(),
+        }
+    }
+}
+
 pub struct AuthService {
     user_repo: Arc<dyn UserRepository>,
     token_store: Arc<dyn TokenStore>,
+    role_repo: Arc<dyn RoleRepository>,
     jwt_secret: String,
 }
 
@@ -63,11 +172,13 @@ impl AuthService {
     pub fn new(
         user_repo: Arc<dyn UserRepository>,
         token_store: Arc<dyn TokenStore>,
+        role_repo: Arc<dyn RoleRepository>,
         jwt_secret: &str,
     ) -> Self {
         Self {
             user_repo,
             token_store,
+            role_repo,
             jwt_secret: jwt_secret.to_string(),
         }
     }
@@ -134,6 +245,97 @@ impl AuthService {
             token_type: "Bearer".to_string(),
             user: user.into(),
         })
+    }
+
+    pub async fn login_with_vo(&self, username: &str, password: &str) -> Result<UserLoginVO, AppError> {
+        let user = self
+            .user_repo
+            .find_by_username(username)
+            .await
+            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .ok_or_else(|| AppError::Unauthorized("Invalid username or password".to_string()))?;
+
+        let password_hash = user
+            .password
+            .as_ref()
+            .ok_or_else(|| AppError::Unauthorized("Invalid username or password".to_string()))?;
+
+        let valid = md5_verify(password, password_hash);
+
+        if !valid {
+            return Err(AppError::Unauthorized(
+                "Invalid username or password".to_string(),
+            ));
+        }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let access_exp = now + ACCESS_TOKEN_TTL_SECS;
+        let refresh_exp = now + REFRESH_TOKEN_TTL_SECS;
+
+        let user_id = user.id.clone();
+        let access_claims = Claims {
+            sub: user_id.clone(),
+            username: user.username.clone(),
+            exp: access_exp,
+            iat: now,
+        };
+
+        let refresh_claims = Claims {
+            sub: user_id.clone(),
+            username: user.username.clone(),
+            exp: refresh_exp,
+            iat: now,
+        };
+
+        let encoding_key = EncodingKey::from_secret(self.jwt_secret.as_bytes());
+
+        let access_token = encode(&Header::default(), &access_claims, &encoding_key)
+            .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
+
+        let refresh_token = encode(&Header::default(), &refresh_claims, &encoding_key)
+            .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
+
+        self.token_store
+            .set_token(&user_id, &access_token, ACCESS_TOKEN_TTL_SECS)
+            .await?;
+
+        let roles = self.get_user_roles(&user_id).await?;
+        let permissions = self.get_user_permissions(&user_id).await?;
+
+        let expires = chrono::DateTime::from_timestamp(access_exp as i64, 0)
+            .map(|dt| dt.format("%Y/%m/%d %H:%M:%S").to_string())
+            .unwrap_or_default();
+
+        Ok(UserLoginVO::new(
+            access_token,
+            refresh_token,
+            expires,
+            user_id.clone(),
+            user.username.clone(),
+            None,
+            user.real_name.clone(),
+            roles,
+            permissions,
+        ))
+    }
+
+    async fn get_user_roles(&self, user_id: &str) -> Result<Vec<i32>, AppError> {
+        let roles = self.role_repo.find_roles_by_user_id(user_id).await
+            .map_err(AppError::DatabaseErrorSeaOrm)?;
+        Ok(roles.into_iter().map(|r| r.id.parse().unwrap_or(0)).collect())
+    }
+
+    async fn get_user_permissions(&self, user_id: &str) -> Result<Vec<String>, AppError> {
+        let roles = self.role_repo.find_roles_by_user_id(user_id).await
+            .map_err(AppError::DatabaseErrorSeaOrm)?;
+        let permissions: Vec<String> = roles.iter()
+            .filter_map(|r| r.code.clone())
+            .collect();
+        Ok(permissions)
     }
 
     pub async fn logout(&self, user_id: &str) -> Result<(), AppError> {
@@ -223,5 +425,81 @@ impl AuthService {
             token_type: "Bearer".to_string(),
             user: user.into(),
         })
+    }
+
+    pub async fn refresh_token_with_vo(&self, refresh_token: &str) -> Result<TokenRefreshVO, AppError> {
+        let token_data = decode::<Claims>(
+            refresh_token,
+            &DecodingKey::from_secret(self.jwt_secret.as_bytes()),
+            &Validation::default(),
+        )
+        .map_err(|_| AppError::Unauthorized("Invalid refresh token".to_string()))?;
+
+        let user_id = token_data.claims.sub;
+        let username = &token_data.claims.username;
+
+        let user = self
+            .user_repo
+            .find_by_username(username)
+            .await
+            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .ok_or_else(|| AppError::Unauthorized("User not found".to_string()))?;
+
+        if user.id != user_id {
+            return Err(AppError::Unauthorized("User ID mismatch".to_string()));
+        }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let access_exp = now + ACCESS_TOKEN_TTL_SECS;
+        let refresh_exp = now + REFRESH_TOKEN_TTL_SECS;
+
+        let user_id = user.id.clone();
+        let access_claims = Claims {
+            sub: user_id.clone(),
+            username: user.username.clone(),
+            exp: access_exp,
+            iat: now,
+        };
+
+        let refresh_claims = Claims {
+            sub: user_id.clone(),
+            username: user.username.clone(),
+            exp: refresh_exp,
+            iat: now,
+        };
+
+        let encoding_key = EncodingKey::from_secret(self.jwt_secret.as_bytes());
+
+        let new_access_token = encode(&Header::default(), &access_claims, &encoding_key)
+            .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
+
+        let new_refresh_token = encode(&Header::default(), &refresh_claims, &encoding_key)
+            .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
+
+        self.token_store
+            .set_token(&user_id, &new_access_token, ACCESS_TOKEN_TTL_SECS)
+            .await?;
+
+        Ok(TokenRefreshVO {
+            access_token: new_access_token,
+            refresh_token: new_refresh_token,
+            expires_in: ACCESS_TOKEN_TTL_SECS as i64,
+        })
+    }
+
+    pub async fn get_user_info(&self, user_id: &str) -> Result<UserInfoVO, AppError> {
+        let user = self.user_repo.find_by_id(user_id).await
+            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+        Ok(UserInfoVO::from_user(&user))
+    }
+
+    pub async fn check_token(&self, token: &str) -> Result<CheckTokenVO, AppError> {
+        let _ = self.validate_token(token).await?;
+        Ok(CheckTokenVO::valid())
     }
 }
