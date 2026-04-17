@@ -28,6 +28,7 @@ pub trait UserRepository: Send + Sync {
 pub trait RoleRepository: Send + Sync {
     fn create(&self, role: &CreateRoleRequest, id: &str) -> DynFuture<SeaOrmResult<Role>>;
     fn find_by_id(&self, id: &str) -> DynFuture<SeaOrmOptResult<Role>>;
+    fn find_by_code(&self, code: &str) -> DynFuture<SeaOrmOptResult<Role>>;
     fn find_all(&self) -> DynFuture<SeaOrmResult<Vec<Role>>>;
     fn find_all_with_page(
         &self,
@@ -40,6 +41,7 @@ pub trait RoleRepository: Send + Sync {
     fn remove_role_from_user(&self, user_id: &str, role_id: &str) -> DynFuture<SeaOrmResult<bool>>;
     fn find_roles_by_user_id(&self, user_id: &str) -> DynFuture<SeaOrmResult<Vec<Role>>>;
     fn find_users_by_role_id(&self, role_id: &str) -> DynFuture<SeaOrmResult<Vec<User>>>;
+    fn set_menus(&self, role_id: &str, menu_ids: &[String]) -> DynFuture<SeaOrmResult<()>>;
 }
 
 pub trait TokenStore: Send + Sync {

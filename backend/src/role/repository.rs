@@ -5,6 +5,8 @@ use crate::role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequ
 use crate::role::entity::ActiveModel as RoleActiveModel;
 use crate::role::entity::Column as RoleColumn;
 use crate::role::entity::Entity as RoleEntity;
+use crate::role::sys_role_menu::ActiveModel as SysRoleMenuActiveModel;
+use crate::role::sys_role_menu::Entity as SysRoleMenuEntity;
 use crate::role::user_role::ActiveModel as UserRoleActiveModel;
 use crate::role::user_role::Column as UserRoleColumn;
 use crate::role::user_role::Entity as UserRoleEntity;
@@ -55,6 +57,20 @@ impl RoleRepository for SeaOrmRoleRepository {
             Box::pin(async move {
                 let role = RoleEntity::find()
                     .filter(RoleColumn::Id.eq(&id))
+                    .filter(RoleColumn::IsDeleted.eq(0))
+                    .one(&*conn)
+                    .await?;
+                Ok(role)
+            })
+        })
+    }
+
+    fn find_by_code(&self, code: &str) -> DynFuture<SeaOrmOptResult<Role>> {
+        let code = code.to_string();
+        self.with_conn(move |conn| {
+            Box::pin(async move {
+                let role = RoleEntity::find()
+                    .filter(RoleColumn::Code.eq(&code))
                     .filter(RoleColumn::IsDeleted.eq(0))
                     .one(&*conn)
                     .await?;
@@ -248,6 +264,28 @@ impl RoleRepository for SeaOrmRoleRepository {
                     }
                 }
                 Ok(users)
+            })
+        })
+    }
+
+    fn set_menus(&self, role_id: &str, menu_ids: &[String]) -> DynFuture<SeaOrmResult<()>> {
+        let role_id = role_id.to_string();
+        let menu_ids = menu_ids.to_vec();
+        self.with_conn(move |conn| {
+            Box::pin(async move {
+                SysRoleMenuEntity::delete_many()
+                    .filter(crate::role::sys_role_menu::Column::RoleId.eq(&role_id))
+                    .exec(&*conn)
+                    .await?;
+
+                for menu_id in menu_ids {
+                    let active_model = SysRoleMenuActiveModel {
+                        role_id: ActiveValue::set(role_id.clone()),
+                        menu_id: ActiveValue::set(menu_id),
+                    };
+                    SysRoleMenuEntity::insert(active_model).exec(&*conn).await?;
+                }
+                Ok(())
             })
         })
     }

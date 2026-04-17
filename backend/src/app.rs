@@ -17,6 +17,7 @@ use crate::org::repository::SeaOrmOrgRepository;
 use crate::org::service::OrgService;
 use crate::role::repository::SeaOrmRoleRepository;
 use crate::role::service::RoleService;
+use crate::sys_auth::service::SysAuthService;
 use crate::user::repository::SeaOrmUserRepository;
 use crate::user::service::UserService;
 
@@ -47,10 +48,12 @@ impl App {
         let auth_service = Arc::new(AuthService::new(user_repo, token_store, role_repo.clone(), &config.jwt_secret));
 
         let menu_repo: Arc<dyn MenuRepository> = Arc::new(SeaOrmMenuRepository::new(conn.clone()));
-        let menu_service = Arc::new(MenuService::new(menu_repo, role_repo.clone()));
+        let menu_service = Arc::new(MenuService::new(menu_repo.clone(), role_repo.clone()));
 
         let org_repo: Arc<dyn OrgRepository> = Arc::new(SeaOrmOrgRepository::new(conn.clone()));
         let org_service = Arc::new(OrgService::new(org_repo));
+
+        let sys_auth_service = Arc::new(SysAuthService::new(menu_repo, role_repo.clone()));
 
         AppState {
             user_service,
@@ -58,6 +61,7 @@ impl App {
             auth_service,
             menu_service,
             org_service,
+            sys_auth_service,
         }
     }
 

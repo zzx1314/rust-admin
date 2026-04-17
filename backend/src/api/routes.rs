@@ -1,6 +1,6 @@
 use axum::{
     middleware::from_fn_with_state,
-    routing::{delete, get, post, put},
+    routing::{get, post, put},
     Router,
 };
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -24,6 +24,7 @@ use crate::role::handlers::{
     get_role_handler, get_role_users_handler, get_roles_nolog_handler, get_roles_page_handler,
     get_user_roles_handler, remove_role_from_user_handler, update_role_handler,
 };
+use crate::sys_auth::handlers::{get_menu_data_handler, set_menu_auth_handler};
 use crate::user::handlers::{
     create_user_handler, delete_user_handler, edit_password_handler, get_all_users_handler,
     get_user_handler, get_users_by_role_handler, get_users_page_handler,
@@ -111,7 +112,6 @@ pub fn menu_routes(state: AppState) -> Router<AppState> {
         .route("/sysMenu/tree", get(get_menu_tree_handler))
         .route("/sysMenu/parent", get(get_menus_by_parent_handler))
         .route("/sysMenu/user-menu", get(get_user_menu_handler))
-        .route("/sysMenu/{id}", delete(delete_menu_handler))
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 
@@ -134,6 +134,16 @@ pub fn org_routes(state: AppState) -> Router<AppState> {
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 
+pub fn sys_auth_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route(
+            "/sysAuth/getMenuData/{role_code}",
+            get(get_menu_data_handler),
+        )
+        .route("/sysAuth/setMenuAuth", post(set_menu_auth_handler))
+        .layer(from_fn_with_state(state.clone(), require_auth))
+}
+
 pub fn create_router(state: AppState) -> Router {
     let api_router = Router::new()
         .merge(auth_routes())
@@ -141,7 +151,8 @@ pub fn create_router(state: AppState) -> Router {
         .merge(user_routes(state.clone()))
         .merge(role_routes(state.clone()))
         .merge(menu_routes(state.clone()))
-        .merge(org_routes(state.clone()));
+        .merge(org_routes(state.clone()))
+        .merge(sys_auth_routes(state.clone()));
 
     Router::new()
         .nest("/api", api_router)

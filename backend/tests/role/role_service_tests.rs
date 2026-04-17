@@ -256,6 +256,23 @@ impl RoleRepository for FakeRoleRepository {
                 .collect())
         })
     }
+
+    fn find_by_code(&self, code: &str) -> DynFuture<SeaOrmOptResult<Role>> {
+        let roles = self.roles.clone();
+        let code = code.to_string();
+        Box::pin(async move {
+            Ok(roles
+                .lock()
+                .unwrap()
+                .values()
+                .find(|r| r.code.as_ref() == Some(&code) && r.is_deleted == 0)
+                .cloned())
+        })
+    }
+
+    fn set_menus(&self, _role_id: &str, _menu_ids: &[String]) -> DynFuture<SeaOrmResult<()>> {
+        Box::pin(async move { Ok(()) })
+    }
 }
 
 // ==================== Role Service Tests ====================

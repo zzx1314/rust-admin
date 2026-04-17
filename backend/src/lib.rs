@@ -3,6 +3,7 @@ pub mod common;
 pub mod menu;
 pub mod org;
 pub mod role;
+pub mod sys_auth;
 pub mod user;
 
 pub mod api;

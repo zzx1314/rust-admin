@@ -2,6 +2,7 @@ use crate::auth::service::AuthService;
 use crate::menu::service::MenuService;
 use crate::org::service::OrgService;
 use crate::role::service::RoleService;
+use crate::sys_auth::service::SysAuthService;
 use crate::user::service::UserService;
 use std::sync::Arc;
 
@@ -15,4 +16,5 @@ pub struct AppState {
     pub auth_service: Arc<AuthService>,
     pub menu_service: Arc<MenuService>,
     pub org_service: Arc<OrgService>,
+    pub sys_auth_service: Arc<SysAuthService>,
 }
