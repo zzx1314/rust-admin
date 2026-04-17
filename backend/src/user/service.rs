@@ -146,6 +146,45 @@ impl UserService {
             .map_err(AppError::DatabaseErrorSeaOrm)
     }
 
+    pub async fn reset_password(&self, user_id: &str, password: &str) -> Result<(), AppError> {
+        let hashed = md5_encrypt(password);
+        let req = UpdateUserRequest {
+            username: None,
+            phone: None,
+            email: None,
+            real_name: None,
+            password: Some(hashed),
+            org_id: None,
+            remarks: None,
+            card: None,
+            is_show: None,
+            enable: None,
+            sex: None,
+        };
+        self.user_repo.update(user_id, &req).await
+            .map_err(AppError::DatabaseErrorSeaOrm)?;
+        Ok(())
+    }
+
+    pub async fn toggle_enable(&self, user_id: &str, enable: i32) -> Result<(), AppError> {
+        let req = UpdateUserRequest {
+            username: None,
+            phone: None,
+            email: None,
+            real_name: None,
+            password: None,
+            org_id: None,
+            remarks: None,
+            card: None,
+            is_show: None,
+            enable: Some(enable),
+            sex: None,
+        };
+        self.user_repo.update(user_id, &req).await
+            .map_err(AppError::DatabaseErrorSeaOrm)?;
+        Ok(())
+    }
+
     async fn generate_id(&self) -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
         SystemTime::now()

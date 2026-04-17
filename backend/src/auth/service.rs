@@ -71,7 +71,8 @@ pub struct UserLoginData {
     pub accessToken: String,
     pub refreshToken: String,
     pub expires: String,
-    pub user_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 
 impl UserLoginVO {
@@ -98,7 +99,7 @@ impl UserLoginVO {
                 accessToken: access_token,
                 refreshToken: refresh_token,
                 expires,
-                user_id,
+                user_id: Some(user_id),
             },
         }
     }
@@ -121,12 +122,12 @@ pub struct UserInfoVO {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserInfoData {
-    pub avatar: Option<String>,
+    pub avatar: String,
     pub username: String,
-    pub nickname: Option<String>,
-    pub email: Option<String>,
-    pub phone: Option<String>,
-    pub description: Option<String>,
+    pub nickname: String,
+    pub email: String,
+    pub phone: String,
+    pub description: String,
 }
 
 impl UserInfoVO {
@@ -134,12 +135,12 @@ impl UserInfoVO {
         Self {
             success: true,
             data: UserInfoData {
-                avatar: None,
+                avatar: user.card.clone().unwrap_or_default(),
                 username: user.username.clone(),
-                nickname: user.real_name.clone(),
-                email: user.email.clone(),
-                phone: user.phone.clone(),
-                description: user.remarks.clone(),
+                nickname: user.real_name.clone().unwrap_or_default(),
+                email: user.email.clone().unwrap_or_default(),
+                phone: user.phone.clone().unwrap_or_default(),
+                description: user.remarks.clone().unwrap_or_default(),
             },
         }
     }

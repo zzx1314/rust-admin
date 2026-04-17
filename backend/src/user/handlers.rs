@@ -109,3 +109,44 @@ pub async fn edit_password_handler(
     let response = state.user_service.update_password(&user_id, req.old_password.as_deref(), &req.password).await?;
     Ok(Json(response))
 }
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ResetPwdRequest {
+    pub id: String,
+    pub password: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct EnableRequest {
+    pub id: String,
+    pub enable: i32,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct OperationResponse {
+    pub success: bool,
+    pub msg: String,
+}
+
+pub async fn reset_user_password_handler(
+    State(state): State<AppState>,
+    Json(req): Json<ResetPwdRequest>,
+) -> Result<Json<OperationResponse>, AppError> {
+    let default_password = "123456";
+    state.user_service.reset_password(&req.id, default_password).await?;
+    Ok(Json(OperationResponse {
+        success: true,
+        msg: "密码重置成功".to_string(),
+    }))
+}
+
+pub async fn toggle_user_enable_handler(
+    State(state): State<AppState>,
+    Json(req): Json<EnableRequest>,
+) -> Result<Json<OperationResponse>, AppError> {
+    state.user_service.toggle_enable(&req.id, req.enable).await?;
+    Ok(Json(OperationResponse {
+        success: true,
+        msg: if req.enable == 1 { "启用成功" } else { "禁用成功" }.to_string(),
+    }))
+}

@@ -88,3 +88,10 @@ pub async fn get_role_users_handler(
     let users = state.role_service.get_users_for_role(&role_id).await?;
     Ok(Json(ApiResponse::ok(users)))
 }
+
+pub async fn get_roles_nolog_handler(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<Vec<Role>>>, AppError> {
+    let roles = state.role_service.get_all_roles().await?;
+    Ok(Json(ApiResponse::ok(roles)))
+}

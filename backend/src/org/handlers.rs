@@ -8,6 +8,17 @@ use axum::{
 };
 use serde::Deserialize;
 
+#[derive(Debug, serde::Deserialize)]
+pub struct RemoveByIdsRequest {
+    pub ids: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct RemoveByIdsResponse {
+    pub success: bool,
+    pub msg: String,
+}
+
 #[derive(Deserialize)]
 pub struct OrgIdParam {
     id: String,
@@ -75,4 +86,17 @@ pub async fn delete_org_handler(
 ) -> Result<(StatusCode, ()), AppError> {
     state.org_service.delete_org(&params.id).await?;
     Ok((StatusCode::NO_CONTENT, ()))
+}
+
+pub async fn remove_orgs_by_ids_handler(
+    State(state): State<AppState>,
+    Json(req): Json<RemoveByIdsRequest>,
+) -> Result<Json<RemoveByIdsResponse>, AppError> {
+    for id in req.ids {
+        state.org_service.delete_org(&id).await?;
+    }
+    Ok(Json(RemoveByIdsResponse {
+        success: true,
+        msg: "删除成功".to_string(),
+    }))
 }

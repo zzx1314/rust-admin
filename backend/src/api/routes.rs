@@ -1,6 +1,6 @@
 use axum::{
     middleware::from_fn_with_state,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Router,
 };
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -16,16 +16,18 @@ use crate::menu::handlers::{
 };
 use crate::org::handlers::{
     create_org_handler, delete_org_handler, get_all_orgs_handler, get_org_handler,
-    get_org_tree_handler, get_orgs_by_parent_handler, update_org_handler,
+    get_org_tree_handler, get_orgs_by_parent_handler, remove_orgs_by_ids_handler,
+    update_org_handler,
 };
 use crate::role::handlers::{
     assign_role_to_user_handler, create_role_handler, delete_role_handler, get_all_roles_handler,
-    get_role_handler, get_role_users_handler, get_roles_page_handler, get_user_roles_handler,
-    remove_role_from_user_handler, update_role_handler,
+    get_role_handler, get_role_users_handler, get_roles_nolog_handler, get_roles_page_handler,
+    get_user_roles_handler, remove_role_from_user_handler, update_role_handler,
 };
 use crate::user::handlers::{
     create_user_handler, delete_user_handler, edit_password_handler, get_all_users_handler,
-    get_user_handler, get_users_by_role_handler, get_users_page_handler, update_user_handler,
+    get_user_handler, get_users_by_role_handler, get_users_page_handler,
+    reset_user_password_handler, toggle_user_enable_handler, update_user_handler,
 };
 
 pub fn auth_routes() -> Router<AppState> {
@@ -49,71 +51,86 @@ pub fn sys_user_routes(state: AppState) -> Router<AppState> {
 
 pub fn user_routes(state: AppState) -> Router<AppState> {
     Router::new()
-        .route("/users/page", get(get_users_page_handler))
+        .route("/sysUser/getPage", get(get_users_page_handler))
         .route(
-            "/users/",
+            "/sysUser",
             post(create_user_handler).get(get_all_users_handler),
         )
         .route(
-            "/users/{id}",
+            "/sysUser/{id}",
             get(get_user_handler)
                 .put(update_user_handler)
                 .delete(delete_user_handler),
         )
+        .route("/sysUser/resetPwd", put(reset_user_password_handler))
+        .route("/sysUser/enable", put(toggle_user_enable_handler))
         .route(
-            "/users/{user_id}/roles/{role_id}",
+            "/sysUser/{user_id}/roles/{role_id}",
             post(assign_role_to_user_handler).delete(remove_role_from_user_handler),
         )
-        .route("/users/{user_id}/roles", get(get_user_roles_handler))
+        .route("/sysUser/{user_id}/roles", get(get_user_roles_handler))
+        .route(
+            "/sysUser/getUserByRoleId/{role_id}",
+            get(get_users_by_role_handler),
+        )
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 
 pub fn role_routes(state: AppState) -> Router<AppState> {
     Router::new()
-        .route("/roles/page", get(get_roles_page_handler))
+        .route("/sysRole/getPage", get(get_roles_page_handler))
         .route(
-            "/roles/",
+            "/sysRole",
             post(create_role_handler).get(get_all_roles_handler),
         )
         .route(
-            "/roles/{id}",
+            "/sysRole/{id}",
             get(get_role_handler)
                 .put(update_role_handler)
                 .delete(delete_role_handler),
         )
-        .route("/roles/{id}/users", get(get_role_users_handler))
+        .route("/sysRole/getAll", get(get_all_roles_handler))
+        .route("/sysRole/listNoLog", get(get_roles_nolog_handler))
+        .route("/sysRole/{id}/users", get(get_role_users_handler))
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 
 pub fn menu_routes(state: AppState) -> Router<AppState> {
     Router::new()
+        .route("/sysMenu/getAll", get(get_all_menus_handler))
         .route(
-            "/menus/",
+            "/sysMenu",
             post(create_menu_handler).get(get_all_menus_handler),
         )
         .route(
-            "/menus/{id}",
+            "/sysMenu/{id}",
             get(get_menu_handler)
                 .put(update_menu_handler)
                 .delete(delete_menu_handler),
         )
-        .route("/menus/tree", get(get_menu_tree_handler))
-        .route("/menus/parent", get(get_menus_by_parent_handler))
-        .route("/menus/user-menu", get(get_user_menu_handler))
+        .route("/sysMenu/tree", get(get_menu_tree_handler))
+        .route("/sysMenu/parent", get(get_menus_by_parent_handler))
+        .route("/sysMenu/user-menu", get(get_user_menu_handler))
+        .route("/sysMenu/{id}", delete(delete_menu_handler))
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 
 pub fn org_routes(state: AppState) -> Router<AppState> {
     Router::new()
-        .route("/orgs/", post(create_org_handler).get(get_all_orgs_handler))
+        .route("/sysOrg/allList", get(get_all_orgs_handler))
         .route(
-            "/orgs/{id}",
+            "/sysOrg/",
+            post(create_org_handler).get(get_all_orgs_handler),
+        )
+        .route(
+            "/sysOrg/{id}",
             get(get_org_handler)
                 .put(update_org_handler)
                 .delete(delete_org_handler),
         )
-        .route("/orgs/tree", get(get_org_tree_handler))
-        .route("/orgs/parent", get(get_orgs_by_parent_handler))
+        .route("/sysOrg/removeByIds", post(remove_orgs_by_ids_handler))
+        .route("/sysOrg/tree", get(get_org_tree_handler))
+        .route("/sysOrg/parent", get(get_orgs_by_parent_handler))
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 

@@ -34,11 +34,24 @@ pub async fn login_handler(
     Ok(Json(response))
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct LogoutResponse {
+    pub success: bool,
+    pub msg: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct LogoutApiResponse {
+    pub code: u16,
+    pub msg: String,
+    pub data: LogoutResponse,
+}
+
 pub async fn logout_handler(
     State(state): State<AppState>,
     jar: CookieJar,
     auth: TypedHeader<Authorization<Bearer>>,
-) -> Result<(StatusCode, CookieJar), AppError> {
+) -> Result<(StatusCode, CookieJar, Json<LogoutApiResponse>), AppError> {
     let token = auth.token();
     let user_id = state.auth_service.validate_token(token).await?;
     state.auth_service.logout(&user_id).await?;
@@ -49,7 +62,16 @@ pub async fn logout_handler(
             .http_only(true),
     );
 
-    Ok((StatusCode::NO_CONTENT, jar))
+    let response = LogoutApiResponse {
+        code: 10200,
+        msg: "success".to_string(),
+        data: LogoutResponse {
+            success: true,
+            msg: "退出成功".to_string(),
+        },
+    };
+
+    Ok((StatusCode::OK, jar, Json(response)))
 }
 
 pub async fn me_handler(
