@@ -74,8 +74,8 @@ impl MenuRepository for FakeMenuRepository {
                 role_code,
                 disabled,
                 find_auth_id,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
+                create_time: Utc::now(),
+                update_time: Utc::now(),
             };
             menus.lock().unwrap().insert(id, menu.clone());
             Ok(menu)
@@ -214,7 +214,7 @@ impl MenuRepository for FakeMenuRepository {
                 if let Some(v) = find_auth_id {
                     menu.find_auth_id = Some(v);
                 }
-                menu.updated_at = Utc::now();
+                menu.update_time = Utc::now();
                 Ok(Some(menu.clone()))
             } else {
                 Ok(None)

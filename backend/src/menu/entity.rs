@@ -39,10 +39,10 @@ pub struct Model {
     pub disabled: Option<bool>,
     #[sea_orm(column_name = "find_auth_id", column_type = "Integer", nullable)]
     pub find_auth_id: Option<i32>,
-    #[sea_orm(column_name = "created_at", column_type = "Timestamp")]
-    pub created_at: DateTime<Utc>,
-    #[sea_orm(column_name = "updated_at", column_type = "Timestamp")]
-    pub updated_at: DateTime<Utc>,
+    #[sea_orm(column_name = "create_time", column_type = "Timestamp")]
+    pub create_time: DateTime<Utc>,
+    #[sea_orm(column_name = "update_time", column_type = "Timestamp")]
+    pub update_time: DateTime<Utc>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -99,8 +99,8 @@ async fn test_menu_repo_create_and_find() {
     assert_eq!(found_menu.role_code, Some("admin".to_string()));
     assert_eq!(found_menu.disabled, Some(false));
     assert_eq!(found_menu.find_auth_id, Some(1));
-    assert_eq!(found_menu.created_at, created_menu.created_at);
-    assert_eq!(found_menu.updated_at, created_menu.updated_at);
+    assert_eq!(found_menu.create_time, created_menu.create_time);
+    assert_eq!(found_menu.update_time, created_menu.update_time);
 }
 
 #[tokio::test]

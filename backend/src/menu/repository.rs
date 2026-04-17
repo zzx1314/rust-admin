@@ -47,7 +47,7 @@ impl MenuRepository for SeaOrmMenuRepository {
                 let menus = MenuEntity::find()
                     .filter(MenuColumn::IsDeleted.eq(0))
                     .order_by(MenuColumn::Sort, order_asc())
-                    .order_by(MenuColumn::CreatedAt, order_asc())
+                    .order_by(MenuColumn::CreateTime, order_asc())
                     .all(&*conn)
                     .await?
                     .into_iter()
@@ -86,7 +86,7 @@ impl MenuRepository for SeaOrmMenuRepository {
                 let menus = MenuEntity::find()
                     .filter(cond)
                     .order_by(MenuColumn::Sort, order_asc())
-                    .order_by(MenuColumn::CreatedAt, order_asc())
+                    .order_by(MenuColumn::CreateTime, order_asc())
                     .all(&*conn)
                     .await?
                     .into_iter()
@@ -102,7 +102,7 @@ impl MenuRepository for SeaOrmMenuRepository {
                 let menus = MenuEntity::find()
                     .filter(MenuColumn::IsDeleted.eq(0))
                     .order_by(MenuColumn::Sort, order_asc())
-                    .order_by(MenuColumn::CreatedAt, order_asc())
+                    .order_by(MenuColumn::CreateTime, order_asc())
                     .all(&*conn)
                     .await?
                     .into_iter()
@@ -180,7 +180,7 @@ impl MenuRepository for SeaOrmMenuRepository {
 
                 if let Some(mut menu) = menu {
                     menu.is_deleted = 1;
-                    menu.updated_at = chrono::Utc::now();
+                    menu.update_time = chrono::Utc::now();
                     let mut active_model: MenuActiveModel = menu.into();
                     active_model.is_deleted = ActiveValue::Set(1);
                     MenuEntity::update(active_model).exec(&*conn).await?;

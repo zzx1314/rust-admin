@@ -210,8 +210,8 @@ impl CreateMenuRequest {
             role_code: ActiveValue::set(self.role_code.clone()),
             disabled: ActiveValue::set(self.disabled),
             find_auth_id: ActiveValue::set(self.find_auth_id),
-            created_at: ActiveValue::set(now),
-            updated_at: ActiveValue::set(now),
+            create_time: ActiveValue::set(now),
+            update_time: ActiveValue::set(now),
         }
     }
 }
@@ -236,7 +236,7 @@ impl UpdateMenuRequest {
             role_code: set_opt_string(self.role_code.clone()),
             disabled: set_opt_bool(self.disabled),
             find_auth_id: set_opt_i32(self.find_auth_id),
-            updated_at: ActiveValue::set(Utc::now()),
+            update_time: ActiveValue::set(Utc::now()),
             ..Default::default()
         }
     }
