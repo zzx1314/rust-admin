@@ -13,7 +13,9 @@ use crate::common::traits::{
 use crate::config::AppConfig;
 use crate::menu::repository::SeaOrmMenuRepository;
 use crate::menu::service::MenuService;
+use crate::migration::Migrator;
 use crate::org::repository::SeaOrmOrgRepository;
+use sea_orm_migration::MigratorTrait;
 use crate::org::service::OrgService;
 use crate::role::repository::SeaOrmRoleRepository;
 use crate::role::service::RoleService;
@@ -30,6 +32,8 @@ impl App {
         let conn = sea_orm::Database::connect(database_url)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
+
+        Migrator::up(&conn, None).await.map_err(AppError::DatabaseErrorSeaOrm)?;
 
         Ok(Self { conn })
     }

@@ -1,9 +1,0 @@
--- Add new columns from Java SysRole entity
-ALTER TABLE roles ADD COLUMN code TEXT;
-ALTER TABLE roles ADD COLUMN create_time TIMESTAMP DEFAULT '1970-01-01 00:00:00';
-ALTER TABLE roles ADD COLUMN update_time TIMESTAMP DEFAULT '1970-01-01 00:00:00';
-ALTER TABLE roles ADD COLUMN is_deleted INT DEFAULT 0;
-ALTER TABLE roles ADD COLUMN remarks TEXT;
-ALTER TABLE roles ADD COLUMN is_edit INT;
-ALTER TABLE roles ADD COLUMN ds_type INT;
-ALTER TABLE roles ADD COLUMN ds_scope TEXT;

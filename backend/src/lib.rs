@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod common;
 pub mod menu;
+pub mod migration;
 pub mod org;
 pub mod role;
 pub mod sys_auth;

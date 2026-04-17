@@ -1,8 +1,14 @@
--- Migration: restructure users table to match SysUser schema
--- Drop old table and recreate with all fields
+use sea_orm_migration::prelude::*;
 
-DROP TABLE IF EXISTS users;
+#[derive(DeriveMigrationName)]
+pub struct Migration;
 
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager.get_connection().execute_unprepared("DROP TABLE IF EXISTS users").await?;
+
+        let sql = r#"
 CREATE TABLE users (
     id TEXT PRIMARY KEY,
     username TEXT NOT NULL UNIQUE,
@@ -25,4 +31,8 @@ CREATE TABLE users (
     enable INTEGER DEFAULT 1,
     first_login INTEGER DEFAULT 1,
     sex TEXT
-);
+)"#;
+        manager.get_connection().execute_unprepared(sql).await?;
+        Ok(())
+    }
+}
