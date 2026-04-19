@@ -13,10 +13,10 @@ pub struct Model {
     pub code: Option<String>,
     #[sea_orm(column_name = "description", column_type = "Text", nullable)]
     pub description: Option<String>,
-    #[sea_orm(column_name = "create_time", column_type = "Timestamp", nullable)]
-    pub create_time: Option<DateTime<Utc>>,
-    #[sea_orm(column_name = "update_time", column_type = "Timestamp", nullable)]
-    pub update_time: Option<DateTime<Utc>>,
+    #[sea_orm(column_name = "create_time", column_type = "Timestamp")]
+    pub create_time: DateTime<Utc>,
+    #[sea_orm(column_name = "update_time", column_type = "Timestamp")]
+    pub update_time: DateTime<Utc>,
     #[sea_orm(column_name = "is_deleted", column_type = "Integer")]
     pub is_deleted: i32,
     #[sea_orm(column_name = "remarks", column_type = "Text", nullable)]

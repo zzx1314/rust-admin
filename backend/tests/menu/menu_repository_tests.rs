@@ -36,7 +36,64 @@ impl TestDb {
             .connect(&url)
             .await
             .unwrap();
-        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS p_sys_menu (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                code TEXT,
+                permission TEXT,
+                path_url TEXT,
+                icon TEXT,
+                parent_id TEXT,
+                component TEXT,
+                sort INTEGER DEFAULT 0,
+                keep_alive INTEGER DEFAULT 0,
+                type INTEGER DEFAULT 0,
+                create_time TEXT NOT NULL,
+                update_time TEXT NOT NULL,
+                is_deleted INTEGER DEFAULT 0,
+                remarks TEXT,
+                leaf INTEGER DEFAULT 0,
+                role_code TEXT,
+                disabled INTEGER DEFAULT 0,
+                find_auth_id INTEGER
+            )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS p_sys_role (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                code TEXT,
+                create_time TEXT NOT NULL,
+                update_time TEXT NOT NULL,
+                is_deleted INTEGER DEFAULT 0,
+                remarks TEXT,
+                description TEXT,
+                is_edit INTEGER DEFAULT 1,
+                ds_type INTEGER,
+                ds_scope TEXT
+            )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS p_sys_role_menu (
+                role_id TEXT NOT NULL,
+                menu_id TEXT NOT NULL,
+                PRIMARY KEY (role_id, menu_id)
+            )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
         pool.close().await;
 
         let conn = Database::connect(&url).await.unwrap();

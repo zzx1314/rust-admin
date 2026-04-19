@@ -80,10 +80,125 @@ impl TestDb {
             .connect(&url)
             .await
             .expect("Failed to connect");
-        sqlx::migrate!("./migrations")
-            .run(&pool)
-            .await
-            .expect("Failed to migrate");
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS p_sys_user (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                email TEXT,
+                phone TEXT,
+                password TEXT,
+                org_id TEXT,
+                lock_time TEXT,
+                last_login_time TEXT,
+                try_count INTEGER DEFAULT 0,
+                lock_flag INTEGER DEFAULT 1,
+                create_time TEXT NOT NULL,
+                update_time TEXT NOT NULL,
+                is_deleted INTEGER DEFAULT 0,
+                remarks TEXT,
+                real_name TEXT,
+                pass_update_time TEXT,
+                card TEXT,
+                is_show INTEGER DEFAULT 1,
+                enable INTEGER DEFAULT 1,
+                first_login INTEGER DEFAULT 1,
+                sex TEXT
+            )"
+        )
+        .execute(&pool)
+        .await
+        .expect("Failed to create user table");
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS p_sys_role (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                code TEXT,
+                create_time TEXT NOT NULL,
+                update_time TEXT NOT NULL,
+                is_deleted INTEGER DEFAULT 0,
+                remarks TEXT,
+                description TEXT,
+                is_edit INTEGER DEFAULT 1,
+                ds_type INTEGER,
+                ds_scope TEXT
+            )"
+        )
+        .execute(&pool)
+        .await
+        .expect("Failed to create role table");
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS p_sys_user_role (
+                user_id TEXT NOT NULL,
+                role_id TEXT NOT NULL,
+                PRIMARY KEY (user_id, role_id)
+            )"
+        )
+        .execute(&pool)
+        .await
+        .expect("Failed to create user_role table");
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS p_sys_menu (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                code TEXT,
+                permission TEXT,
+                path_url TEXT,
+                icon TEXT,
+                parent_id TEXT,
+                component TEXT,
+                sort INTEGER DEFAULT 0,
+                keep_alive INTEGER DEFAULT 0,
+                type INTEGER DEFAULT 0,
+                create_time TEXT NOT NULL,
+                update_time TEXT NOT NULL,
+                is_deleted INTEGER DEFAULT 0,
+                remarks TEXT,
+                leaf INTEGER DEFAULT 0,
+                role_code TEXT,
+                disabled INTEGER DEFAULT 0,
+                find_auth_id INTEGER
+            )"
+        )
+        .execute(&pool)
+        .await
+        .expect("Failed to create menu table");
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS p_sys_role_menu (
+                role_id TEXT NOT NULL,
+                menu_id TEXT NOT NULL,
+                PRIMARY KEY (role_id, menu_id)
+            )"
+        )
+        .execute(&pool)
+        .await
+        .expect("Failed to create role_menu table");
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS p_sys_org (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                sort INTEGER DEFAULT 0,
+                parent_id TEXT,
+                create_time TEXT NOT NULL,
+                update_time TEXT NOT NULL,
+                is_deleted INTEGER DEFAULT 0,
+                remarks TEXT,
+                org_duty TEXT,
+                desrc TEXT,
+                type TEXT,
+                parent_name TEXT,
+                is_out INTEGER
+            )"
+        )
+        .execute(&pool)
+        .await
+        .expect("Failed to create org table");
+
         pool.close().await;
 
         Self { path: db_path }
@@ -203,7 +318,7 @@ async fn login(app: axum::Router, test_db: &TestDb) -> String {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auth/login")
+                .uri("/api/token")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
                     "username=testuser&password={}&grant_type=password&scope=server",
@@ -227,28 +342,15 @@ async fn login(app: axum::Router, test_db: &TestDb) -> String {
     }
 
     let json: Value = serde_json::from_slice(&body).unwrap();
-    json.get("data")
-        .unwrap_or_else(|| {
-            panic!(
-                "Missing 'data' field in response: {}",
-                serde_json::to_string_pretty(&json).unwrap()
-            )
-        })
-        .get("access_token")
-        .unwrap_or_else(|| {
-            panic!(
-                "Missing 'access_token' field in data: {}",
-                serde_json::to_string_pretty(&json).unwrap()
-            )
-        })
-        .as_str()
-        .unwrap_or_else(|| {
-            panic!(
-                "'access_token' is not a string: {}",
-                serde_json::to_string_pretty(&json).unwrap()
-            )
-        })
-        .to_string()
+
+    if let Some(access_token) = json.get("access_token") {
+        access_token.as_str().unwrap().to_string()
+    } else {
+        panic!(
+            "Login failed, response: {}",
+            serde_json::to_string_pretty(&json).unwrap()
+        );
+    }
 }
 
 #[tokio::test]
@@ -261,7 +363,7 @@ async fn test_get_org_tree_no_filter() {
             &token,
             Request::builder()
                 .method("GET")
-                .uri("/orgs/tree")
+                .uri("/api/sysOrg/tree")
                 .body(Body::empty())
                 .unwrap(),
         ))
@@ -285,7 +387,7 @@ async fn test_get_org_tree_with_name_filter() {
             &token,
             Request::builder()
                 .method("POST")
-                .uri("/orgs/")
+                .uri("/api/sysOrg")
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"name":"Engineering","sort":1}"#))
                 .unwrap(),
@@ -298,7 +400,7 @@ async fn test_get_org_tree_with_name_filter() {
             &token,
             Request::builder()
                 .method("POST")
-                .uri("/orgs/")
+                .uri("/api/sysOrg")
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"name":"Sales","sort":2}"#))
                 .unwrap(),
@@ -311,7 +413,7 @@ async fn test_get_org_tree_with_name_filter() {
             &token,
             Request::builder()
                 .method("GET")
-                .uri("/orgs/tree?name=Eng")
+                .uri("/api/sysOrg/tree?name=Eng")
                 .body(Body::empty())
                 .unwrap(),
         ))
@@ -337,7 +439,7 @@ async fn test_get_org_tree_with_type_filter() {
             &token,
             Request::builder()
                 .method("POST")
-                .uri("/orgs/")
+                .uri("/api/sysOrg")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"name":"Company","sort":1,"type":"company"}"#,
@@ -352,7 +454,7 @@ async fn test_get_org_tree_with_type_filter() {
             &token,
             Request::builder()
                 .method("POST")
-                .uri("/orgs/")
+                .uri("/api/sysOrg")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"name":"Dept","sort":2,"type":"department"}"#,
@@ -367,7 +469,7 @@ async fn test_get_org_tree_with_type_filter() {
             &token,
             Request::builder()
                 .method("GET")
-                .uri("/orgs/tree?type=department")
+                .uri("/api/sysOrg/tree?type=department")
                 .body(Body::empty())
                 .unwrap(),
         ))
@@ -394,7 +496,7 @@ async fn test_org_crud_flow() {
             &token,
             Request::builder()
                 .method("POST")
-                .uri("/orgs/")
+                .uri("/api/sysOrg")
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"name":"Initial Org","sort":1}"#))
                 .unwrap(),
@@ -415,7 +517,7 @@ async fn test_org_crud_flow() {
             &token,
             Request::builder()
                 .method("GET")
-                .uri(&format!("/orgs/{}", org_id))
+                .uri(&format!("/api/sysOrg/{}", org_id))
                 .body(Body::empty())
                 .unwrap(),
         ))
@@ -433,7 +535,7 @@ async fn test_org_crud_flow() {
             &token,
             Request::builder()
                 .method("PUT")
-                .uri(&format!("/orgs/{}", org_id))
+                .uri(&format!("/api/sysOrg/{}", org_id))
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"name":"Updated Org","sort":10}"#))
                 .unwrap(),
@@ -455,7 +557,7 @@ async fn test_org_crud_flow() {
             &token,
             Request::builder()
                 .method("DELETE")
-                .uri(&format!("/orgs/{}", org_id))
+                .uri(&format!("/api/sysOrg/{}", org_id))
                 .body(Body::empty())
                 .unwrap(),
         ))
@@ -468,7 +570,7 @@ async fn test_org_crud_flow() {
             &token,
             Request::builder()
                 .method("GET")
-                .uri(&format!("/orgs/{}", org_id))
+                .uri(&format!("/api/sysOrg/{}", org_id))
                 .body(Body::empty())
                 .unwrap(),
         ))
@@ -488,7 +590,7 @@ async fn test_get_orgs_by_parent() {
             &token,
             Request::builder()
                 .method("POST")
-                .uri("/orgs/")
+                .uri("/api/sysOrg")
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"name":"Parent Org","sort":1}"#))
                 .unwrap(),
@@ -513,7 +615,7 @@ async fn test_get_orgs_by_parent() {
             &token,
             Request::builder()
                 .method("POST")
-                .uri("/orgs/")
+                .uri("/api/sysOrg")
                 .header("content-type", "application/json")
                 .body(Body::from(format!(
                     r#"{{"name":"Child 1","sort":2,"parent_id":"{}"}}"#,
@@ -529,7 +631,7 @@ async fn test_get_orgs_by_parent() {
             &token,
             Request::builder()
                 .method("POST")
-                .uri("/orgs/")
+                .uri("/api/sysOrg")
                 .header("content-type", "application/json")
                 .body(Body::from(format!(
                     r#"{{"name":"Child 2","sort":3,"parent_id":"{}"}}"#,
@@ -545,7 +647,7 @@ async fn test_get_orgs_by_parent() {
             &token,
             Request::builder()
                 .method("GET")
-                .uri(&format!("/orgs/parent?parent_id={}", parent_id))
+                .uri(&format!("/api/sysOrg/parent?parent_id={}", parent_id))
                 .body(Body::empty())
                 .unwrap(),
         ))
@@ -568,7 +670,7 @@ async fn test_org_requires_auth() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/orgs/tree")
+                .uri("/api/sysOrg/tree")
                 .body(Body::empty())
                 .unwrap(),
         )

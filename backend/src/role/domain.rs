@@ -69,7 +69,8 @@ impl CreateRoleRequest {
             is_edit: ActiveValue::set(Some(false)),
             ds_type: ActiveValue::set(self.ds_type),
             ds_scope: ActiveValue::set(self.ds_scope.clone()),
-            update_time: ActiveValue::set(Some(chrono::Utc::now())),
+            create_time: ActiveValue::set(chrono::Utc::now()),
+            update_time: ActiveValue::set(chrono::Utc::now()),
             is_deleted: ActiveValue::set(0),
             ..Default::default()
         }
@@ -87,7 +88,7 @@ impl UpdateRoleRequest {
             is_edit: set_opt_bool(self.is_edit),
             ds_type: set_opt_i32(self.ds_type),
             ds_scope: set_opt_string(self.ds_scope.clone()),
-            update_time: ActiveValue::set(Some(chrono::Utc::now())),
+            update_time: ActiveValue::set(chrono::Utc::now()),
             is_deleted: ActiveValue::unchanged(0),
             ..Default::default()
         }

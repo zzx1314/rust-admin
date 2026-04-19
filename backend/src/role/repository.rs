@@ -177,7 +177,7 @@ impl RoleRepository for SeaOrmRoleRepository {
 
                 if let Some(mut role) = role {
                     role.is_deleted = 1;
-                    role.update_time = Some(chrono::Utc::now());
+                    role.update_time = chrono::Utc::now();
                     let mut active_model: RoleActiveModel = role.into();
                     active_model.is_deleted = ActiveValue::Set(1);
                     RoleEntity::update(active_model).exec(&*conn).await?;

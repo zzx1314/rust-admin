@@ -32,7 +32,28 @@ impl TestDb {
             .connect(&url)
             .await
             .unwrap();
-        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS p_sys_org (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                sort INTEGER DEFAULT 0,
+                parent_id TEXT,
+                create_time TEXT NOT NULL,
+                update_time TEXT NOT NULL,
+                is_deleted INTEGER DEFAULT 0,
+                remarks TEXT,
+                org_duty TEXT,
+                desrc TEXT,
+                type TEXT,
+                parent_name TEXT,
+                is_out INTEGER
+            )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
         pool.close().await;
 
         let conn = Database::connect(&url).await.unwrap();

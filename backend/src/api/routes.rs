@@ -119,7 +119,7 @@ pub fn org_routes(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/sysOrg/allList", get(get_all_orgs_handler))
         .route(
-            "/sysOrg/",
+            "/sysOrg",
             post(create_org_handler).get(get_all_orgs_handler),
         )
         .route(

@@ -41,8 +41,8 @@ impl RoleRepository for FakeRoleRepository {
                 name: name.clone(),
                 code,
                 description: description.clone(),
-                create_time: Some(Utc::now()),
-                update_time: Some(Utc::now()),
+                create_time: Utc::now(),
+                update_time: Utc::now(),
                 is_deleted: 0,
                 remarks,
                 is_edit: Some(false),
@@ -135,7 +135,7 @@ impl RoleRepository for FakeRoleRepository {
                 if let Some(s) = ds_scope {
                     role.ds_scope = Some(s);
                 }
-                role.update_time = Some(Utc::now());
+                role.update_time = Utc::now();
                 Ok(Some(role.clone()))
             } else {
                 Ok(None)

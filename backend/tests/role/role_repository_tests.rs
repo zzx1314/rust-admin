@@ -34,7 +34,66 @@ impl TestDb {
             .connect(&url)
             .await
             .unwrap();
-        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS p_sys_user (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                email TEXT,
+                phone TEXT,
+                password TEXT,
+                org_id TEXT,
+                lock_time TEXT,
+                last_login_time TEXT,
+                try_count INTEGER DEFAULT 0,
+                lock_flag INTEGER DEFAULT 1,
+                create_time TEXT NOT NULL,
+                update_time TEXT NOT NULL,
+                is_deleted INTEGER DEFAULT 0,
+                remarks TEXT,
+                real_name TEXT,
+                pass_update_time TEXT,
+                card TEXT,
+                is_show INTEGER DEFAULT 1,
+                enable INTEGER DEFAULT 1,
+                first_login INTEGER DEFAULT 1,
+                sex TEXT
+            )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS p_sys_role (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                code TEXT,
+                create_time TEXT NOT NULL,
+                update_time TEXT NOT NULL,
+                is_deleted INTEGER DEFAULT 0,
+                remarks TEXT,
+                description TEXT,
+                is_edit INTEGER DEFAULT 1,
+                ds_type INTEGER,
+                ds_scope TEXT
+            )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS p_sys_user_role (
+                user_id TEXT NOT NULL,
+                role_id TEXT NOT NULL,
+                PRIMARY KEY (user_id, role_id)
+            )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
         pool.close().await;
 
         let conn = Database::connect(&url).await.unwrap();
