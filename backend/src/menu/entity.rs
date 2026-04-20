@@ -37,11 +37,11 @@ pub struct Model {
     pub role_code: Option<String>,
     #[sea_orm(column_name = "disabled", column_type = "Boolean", nullable)]
     pub disabled: Option<bool>,
-    #[sea_orm(column_name = "find_auth_id", column_type = "Integer", nullable)]
-    pub find_auth_id: Option<i32>,
+    #[sea_orm(column_name = "find_auth_id", column_type = "Text", nullable)]
+    pub find_auth_id: Option<String>,
     #[sea_orm(column_name = "create_time", column_type = "Timestamp")]
     pub create_time: DateTime<Utc>,
-    #[sea_orm(column_name = "update_time", column_type = "Timestamp")]
+    #[sea_orm(column_name = "update_time", column_type = "Timestamp", nullable)]
     pub update_time: DateTime<Utc>,
 }
 

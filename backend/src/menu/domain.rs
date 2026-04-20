@@ -22,7 +22,7 @@ pub struct CreateMenuRequest {
     pub leaf: Option<bool>,
     pub role_code: Option<String>,
     pub disabled: Option<bool>,
-    pub find_auth_id: Option<i32>,
+    pub find_auth_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -41,7 +41,7 @@ pub struct UpdateMenuRequest {
     pub leaf: Option<bool>,
     pub role_code: Option<String>,
     pub disabled: Option<bool>,
-    pub find_auth_id: Option<i32>,
+    pub find_auth_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -209,7 +209,7 @@ impl CreateMenuRequest {
             leaf: ActiveValue::set(self.leaf),
             role_code: ActiveValue::set(self.role_code.clone()),
             disabled: ActiveValue::set(self.disabled),
-            find_auth_id: ActiveValue::set(self.find_auth_id),
+            find_auth_id: set_opt_string(self.find_auth_id.clone()),
             create_time: ActiveValue::set(now),
             update_time: ActiveValue::set(now),
         }
@@ -235,7 +235,7 @@ impl UpdateMenuRequest {
             leaf: set_opt_bool(self.leaf),
             role_code: set_opt_string(self.role_code.clone()),
             disabled: set_opt_bool(self.disabled),
-            find_auth_id: set_opt_i32(self.find_auth_id),
+            find_auth_id: set_opt_string(self.find_auth_id.clone()),
             update_time: ActiveValue::set(Utc::now()),
             ..Default::default()
         }
