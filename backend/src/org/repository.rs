@@ -23,30 +23,30 @@ impl_repo_conn!(SeaOrmOrgRepository);
 
 #[async_trait]
 impl OrgRepository for SeaOrmOrgRepository {
-    fn create(&self, req: &CreateOrgRequest, id: &str) -> DynFuture<SeaOrmResult<Org>> {
+    fn create(&self, req: &CreateOrgRequest, id: &i64) -> DynFuture<SeaOrmResult<Org>> {
         let req = req.clone();
-        let id_str = id.to_string();
+        let id = *id;
 
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let now = chrono::Utc::now();
-                let active_model = req.to_active_model(&id_str, now);
+                let active_model = req.to_active_model(id, now);
 
                 OrgEntity::insert(active_model).exec(&*conn).await?;
 
-                let org = OrgEntity::find_by_id(&id_str).one(&*conn).await?;
+                let org = OrgEntity::find_by_id(id).one(&*conn).await?;
 
                 Ok(org.unwrap())
             })
         })
     }
 
-    fn find_by_id(&self, id: &str) -> DynFuture<SeaOrmOptResult<Org>> {
-        let id = id.to_string();
+    fn find_by_id(&self, id: &i64) -> DynFuture<SeaOrmOptResult<Org>> {
+        let id = *id;
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let org = OrgEntity::find()
-                    .filter(OrgColumn::Id.eq(&id))
+                    .filter(OrgColumn::Id.eq(id))
                     .filter(OrgColumn::IsDeleted.eq(0))
                     .one(&*conn)
                     .await?;
@@ -71,13 +71,12 @@ impl OrgRepository for SeaOrmOrgRepository {
         })
     }
 
-    fn find_by_parent_id(&self, parent_id: Option<&str>) -> DynFuture<SeaOrmResult<Vec<Org>>> {
-        let parent_id = parent_id.map(String::from);
+    fn find_by_parent_id(&self, parent_id: Option<i64>) -> DynFuture<SeaOrmResult<Vec<Org>>> {
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let mut cond = make_condition().add(OrgColumn::IsDeleted.eq(0));
 
-                if let Some(ref pid) = parent_id {
+                if let Some(pid) = parent_id {
                     cond = cond.add(OrgColumn::ParentId.eq(pid));
                 } else {
                     cond = cond.add(OrgColumn::ParentId.is_null());
@@ -152,13 +151,13 @@ impl OrgRepository for SeaOrmOrgRepository {
         })
     }
 
-    fn update(&self, id: &str, req: &UpdateOrgRequest) -> DynFuture<SeaOrmOptResult<Org>> {
-        let id_str = id.to_string();
+    fn update(&self, id: &i64, req: &UpdateOrgRequest) -> DynFuture<SeaOrmOptResult<Org>> {
+        let id = *id;
         let req = req.clone();
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let exists = OrgEntity::find()
-                    .filter(OrgColumn::Id.eq(&id_str))
+                    .filter(OrgColumn::Id.eq(id))
                     .filter(OrgColumn::IsDeleted.eq(0))
                     .one(&*conn)
                     .await?;
@@ -167,15 +166,15 @@ impl OrgRepository for SeaOrmOrgRepository {
                     return Ok(None);
                 }
 
-                let active_model = req.to_active_model(&id_str);
+                let active_model = req.to_active_model(id);
                 OrgEntity::update(active_model)
-                    .filter(OrgColumn::Id.eq(&id_str))
+                    .filter(OrgColumn::Id.eq(id))
                     .filter(OrgColumn::IsDeleted.eq(0))
                     .exec(&*conn)
                     .await?;
 
                 let org = OrgEntity::find()
-                    .filter(OrgColumn::Id.eq(&id_str))
+                    .filter(OrgColumn::Id.eq(id))
                     .filter(OrgColumn::IsDeleted.eq(0))
                     .one(&*conn)
                     .await?;
@@ -184,12 +183,12 @@ impl OrgRepository for SeaOrmOrgRepository {
         })
     }
 
-    fn delete(&self, id: &str) -> DynFuture<SeaOrmResult<bool>> {
-        let id = id.to_string();
+    fn delete(&self, id: &i64) -> DynFuture<SeaOrmResult<bool>> {
+        let id = *id;
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let org = OrgEntity::find()
-                    .filter(OrgColumn::Id.eq(&id))
+                    .filter(OrgColumn::Id.eq(id))
                     .filter(OrgColumn::IsDeleted.eq(0))
                     .one(&*conn)
                     .await?;

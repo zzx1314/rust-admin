@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 #[derive(Deserialize)]
 pub struct UserIdParam {
-    id: String,
+    id: i64,
 }
 
 pub async fn create_user_handler(
@@ -65,7 +65,7 @@ pub async fn delete_user_handler(
 
 #[derive(Deserialize)]
 pub struct RoleIdQuery {
-    pub role_id: String,
+    pub role_id: i64,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -76,7 +76,7 @@ pub struct UsersByRoleResponse {
 
 #[derive(Debug, serde::Serialize)]
 pub struct UserInfoSimple {
-    pub id: String,
+    pub id: i64,
     pub username: String,
     pub real_name: Option<String>,
     pub phone: Option<String>,
@@ -108,7 +108,6 @@ pub async fn edit_password_handler(
 ) -> Result<Json<crate::user::service::PasswordUpdateResponse>, AppError> {
     let user_id = req
         .user_id
-        .clone()
         .ok_or_else(|| AppError::BadRequest("user_id is required".to_string()))?;
     let response = state
         .user_service
@@ -119,13 +118,13 @@ pub async fn edit_password_handler(
 
 #[derive(Debug, serde::Deserialize)]
 pub struct ResetPwdRequest {
-    pub id: String,
+    pub id: i64,
     pub password: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 pub struct EnableRequest {
-    pub id: String,
+    pub id: i64,
     pub enable: i32,
 }
 

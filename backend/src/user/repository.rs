@@ -26,9 +26,9 @@ impl_repo_conn!(SeaOrmUserRepository);
 
 #[async_trait]
 impl UserRepository for SeaOrmUserRepository {
-    fn create(&self, req: &CreateUserRequest, id: &str) -> DynFuture<SeaOrmResult<User>> {
+    fn create(&self, req: &CreateUserRequest, id: &i64) -> DynFuture<SeaOrmResult<User>> {
         let req = req.clone();
-        let id = id.to_string();
+        let id = *id;
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let now = chrono::Utc::now();
@@ -43,8 +43,8 @@ impl UserRepository for SeaOrmUserRepository {
         })
     }
 
-    fn find_by_id(&self, id: &str) -> DynFuture<SeaOrmOptResult<User>> {
-        let id = id.to_string();
+    fn find_by_id(&self, id: &i64) -> DynFuture<SeaOrmOptResult<User>> {
+        let id = *id;
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let user = UserEntity::find_by_id(id)
@@ -151,9 +151,9 @@ impl UserRepository for SeaOrmUserRepository {
         })
     }
 
-    fn update(&self, id: &str, req: &UpdateUserRequest) -> DynFuture<SeaOrmOptResult<User>> {
+    fn update(&self, id: &i64, req: &UpdateUserRequest) -> DynFuture<SeaOrmOptResult<User>> {
         let req = req.clone();
-        let id = id.to_string();
+        let id = *id;
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let exists = UserEntity::find()
@@ -166,7 +166,7 @@ impl UserRepository for SeaOrmUserRepository {
                     return Ok(None);
                 }
 
-                let active_model = req.to_active_model(id.clone());
+                let active_model = req.to_active_model(id.clone(), chrono::Utc::now());
                 UserEntity::update(active_model)
                     .filter(UserColumn::Id.eq(id.clone()))
                     .filter(UserColumn::IsDeleted.eq(0))
@@ -183,8 +183,8 @@ impl UserRepository for SeaOrmUserRepository {
         })
     }
 
-    fn delete(&self, id: &str) -> DynFuture<SeaOrmResult<bool>> {
-        let id = id.to_string();
+    fn delete(&self, id: &i64) -> DynFuture<SeaOrmResult<bool>> {
+        let id = *id;
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let user = UserEntity::find()

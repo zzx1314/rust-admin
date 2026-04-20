@@ -9,7 +9,7 @@ use std::sync::Arc;
 pub struct PasswordUpdateRequest {
     pub old_password: Option<String>,
     pub password: String,
-    pub user_id: Option<String>,
+    pub user_id: Option<i64>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -45,7 +45,7 @@ impl UserService {
             .map_err(AppError::DatabaseErrorSeaOrm)
     }
 
-    pub async fn get_user(&self, id: &str) -> Result<User, AppError> {
+    pub async fn get_user(&self, id: &i64) -> Result<User, AppError> {
         self.user_repo
             .find_by_id(id)
             .await
@@ -77,7 +77,7 @@ impl UserService {
         ))
     }
 
-    pub async fn update_user(&self, id: &str, req: UpdateUserRequest) -> Result<User, AppError> {
+    pub async fn update_user(&self, id: &i64, req: UpdateUserRequest) -> Result<User, AppError> {
         self.user_repo
             .update(id, &req)
             .await
@@ -85,7 +85,7 @@ impl UserService {
             .ok_or_else(|| AppError::NotFound(format!("User with id {} not found", id)))
     }
 
-    pub async fn delete_user(&self, id: &str) -> Result<(), AppError> {
+    pub async fn delete_user(&self, id: &i64) -> Result<(), AppError> {
         let deleted = self
             .user_repo
             .delete(id)
@@ -108,7 +108,7 @@ impl UserService {
 
     pub async fn update_password(
         &self,
-        user_id: &str,
+        user_id: &i64,
         old_password: Option<&str>,
         new_password: &str,
     ) -> Result<PasswordUpdateResponse, AppError> {
@@ -137,7 +137,7 @@ impl UserService {
             email: None,
             real_name: None,
             password: Some(hashed),
-            org_id: None,
+            org_id: 0,
             remarks: None,
             card: None,
             is_show: None,
@@ -156,14 +156,14 @@ impl UserService {
         })
     }
 
-    pub async fn get_users_by_role(&self, role_id: &str) -> Result<Vec<User>, AppError> {
+    pub async fn get_users_by_role(&self, role_id: &i64) -> Result<Vec<User>, AppError> {
         self.role_repo
             .find_users_by_role_id(role_id)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)
     }
 
-    pub async fn reset_password(&self, user_id: &str, password: &str) -> Result<(), AppError> {
+    pub async fn reset_password(&self, user_id: &i64, password: &str) -> Result<(), AppError> {
         let hashed = md5_encrypt(password);
         let req = UpdateUserRequest {
             username: None,
@@ -171,7 +171,7 @@ impl UserService {
             email: None,
             real_name: None,
             password: Some(hashed),
-            org_id: None,
+            org_id: 0,
             remarks: None,
             card: None,
             is_show: None,
@@ -185,14 +185,14 @@ impl UserService {
         Ok(())
     }
 
-    pub async fn toggle_enable(&self, user_id: &str, enable: i32) -> Result<(), AppError> {
+    pub async fn toggle_enable(&self, user_id: &i64, enable: i32) -> Result<(), AppError> {
         let req = UpdateUserRequest {
             username: None,
             phone: None,
             email: None,
             real_name: None,
             password: None,
-            org_id: None,
+            org_id: 0,
             remarks: None,
             card: None,
             is_show: None,
@@ -206,12 +206,11 @@ impl UserService {
         Ok(())
     }
 
-    async fn generate_id(&self) -> String {
+    async fn generate_id(&self) -> i64 {
         use std::time::{SystemTime, UNIX_EPOCH};
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_millis()
-            .to_string()
+            .as_millis() as i64
     }
 }

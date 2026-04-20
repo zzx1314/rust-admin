@@ -57,7 +57,7 @@ pub async fn logout_handler(
 ) -> Result<(StatusCode, CookieJar, Json<LogoutApiResponse>), AppError> {
     let token = auth.token();
     let user_id = state.auth_service.validate_token(token).await?;
-    state.auth_service.logout(&user_id).await?;
+    state.auth_service.logout(user_id).await?;
 
     let jar = jar.remove(
         axum_extra::extract::cookie::Cookie::build(("auth_token", ""))
@@ -83,7 +83,7 @@ pub async fn me_handler(
 ) -> Result<Json<UserInfoVO>, AppError> {
     let token = auth.token();
     let user_id = state.auth_service.validate_token(token).await?;
-    let user_info = state.auth_service.get_user_info(&user_id).await?;
+    let user_info = state.auth_service.get_user_info(user_id).await?;
     Ok(Json(user_info))
 }
 

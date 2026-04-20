@@ -13,7 +13,7 @@ pub struct CreateUserRequest {
     pub email: Option<String>,
     pub real_name: Option<String>,
     pub password: Option<String>,
-    pub org_id: Option<String>,
+    pub org_id: i64,
     pub remarks: Option<String>,
     pub card: Option<String>,
     pub sex: Option<String>,
@@ -26,7 +26,7 @@ pub struct UpdateUserRequest {
     pub email: Option<String>,
     pub real_name: Option<String>,
     pub password: Option<String>,
-    pub org_id: Option<String>,
+    pub org_id: i64,
     pub remarks: Option<String>,
     pub card: Option<String>,
     pub is_show: Option<i32>,
@@ -64,12 +64,12 @@ impl UserPageQuery {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UserVO {
-    pub id: String,
+    pub id: i64,
     pub username: String,
     pub phone: Option<String>,
     pub email: Option<String>,
     pub real_name: Option<String>,
-    pub org_id: Option<String>,
+    pub org_id: i64,
     pub org_name: Option<String>,
     pub lock_time: Option<DateTime<Utc>>,
     pub last_login_time: Option<DateTime<Utc>>,
@@ -124,7 +124,7 @@ fn default_size() -> i64 {
 }
 
 impl CreateUserRequest {
-    pub fn to_active_model(&self, id: String, now: DateTime<Utc>) -> UserActiveModel {
+    pub fn to_active_model(&self, id: i64, now: DateTime<Utc>) -> UserActiveModel {
         UserActiveModel {
             id: ActiveValue::set(id),
             username: ActiveValue::set(self.username.clone()),
@@ -132,7 +132,7 @@ impl CreateUserRequest {
             email: set_opt_string(self.email.clone()),
             real_name: set_opt_string(self.real_name.clone()),
             password: set_opt_string(self.password.clone()),
-            org_id: set_opt_string(self.org_id.clone()),
+            org_id: ActiveValue::set(self.org_id),
             lock_time: ActiveValue::set(None),
             last_login_time: ActiveValue::set(None),
             try_count: ActiveValue::set(Some(0)),
@@ -152,7 +152,7 @@ impl CreateUserRequest {
 }
 
 impl UpdateUserRequest {
-    pub fn to_active_model(&self, id: String) -> UserActiveModel {
+    pub fn to_active_model(&self, id: i64, now: DateTime<Utc>) -> UserActiveModel {
         UserActiveModel {
             id: ActiveValue::unchanged(id),
             username: set_string(self.username.clone()),
@@ -160,13 +160,13 @@ impl UpdateUserRequest {
             email: set_opt_string(self.email.clone()),
             real_name: set_opt_string(self.real_name.clone()),
             password: set_opt_string(self.password.clone()),
-            org_id: set_opt_string(self.org_id.clone()),
+            org_id: ActiveValue::set(self.org_id),
             remarks: set_opt_string(self.remarks.clone()),
             card: set_opt_string(self.card.clone()),
             is_show: set_opt_i32(self.is_show),
             enable: set_opt_i32(self.enable),
             sex: set_opt_string(self.sex.clone()),
-            update_time: ActiveValue::set(Utc::now()),
+            update_time: ActiveValue::set(now),
             is_deleted: ActiveValue::unchanged(0),
             ..Default::default()
         }

@@ -5,7 +5,6 @@ use crate::menu::domain::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use uuid::Uuid;
 
 pub struct MenuService {
     menu_repo: Arc<dyn MenuRepository>,
@@ -21,14 +20,14 @@ impl MenuService {
     }
 
     pub async fn create_menu(&self, req: CreateMenuRequest) -> Result<Menu, AppError> {
-        let id = Uuid::new_v4().to_string();
+        let id = self.generate_id().await;
         self.menu_repo
             .create(&req, &id)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)
     }
 
-    pub async fn get_menu(&self, id: &str) -> Result<Menu, AppError> {
+    pub async fn get_menu(&self, id: &i64) -> Result<Menu, AppError> {
         self.menu_repo
             .find_by_id(id)
             .await
@@ -52,7 +51,7 @@ impl MenuService {
 
     pub async fn get_menus_by_parent(
         &self,
-        parent_id: Option<&str>,
+        parent_id: Option<i64>,
     ) -> Result<Vec<Menu>, AppError> {
         self.menu_repo
             .find_by_parent_id(parent_id)
@@ -60,7 +59,7 @@ impl MenuService {
             .map_err(AppError::DatabaseErrorSeaOrm)
     }
 
-    pub async fn update_menu(&self, id: &str, req: UpdateMenuRequest) -> Result<Menu, AppError> {
+    pub async fn update_menu(&self, id: &i64, req: UpdateMenuRequest) -> Result<Menu, AppError> {
         self.menu_repo
             .update(id, &req)
             .await
@@ -68,7 +67,7 @@ impl MenuService {
             .ok_or_else(|| AppError::NotFound(format!("Menu with id {} not found", id)))
     }
 
-    pub async fn delete_menu(&self, id: &str) -> Result<(), AppError> {
+    pub async fn delete_menu(&self, id: &i64) -> Result<(), AppError> {
         let deleted = self
             .menu_repo
             .delete(id)
@@ -82,9 +81,10 @@ impl MenuService {
     }
 
     pub async fn get_user_menu(&self, user_id: &str) -> Result<Vec<MenuTree>, AppError> {
+        let user_id: i64 = user_id.parse().map_err(|_| AppError::BadRequest("Invalid user id".to_string()))?;
         let roles = self
             .role_repo
-            .find_roles_by_user_id(user_id)
+            .find_roles_by_user_id(&user_id)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
@@ -98,13 +98,12 @@ impl MenuService {
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
-        let buttons_by_parent: HashMap<String, Vec<String>> = menus
+        let buttons_by_parent: HashMap<i64, Vec<String>> = menus
             .iter()
             .filter(|m| m.r#type == Some(2))
             .filter_map(|m| {
                 m.parent_id
-                    .as_ref()
-                    .and_then(|pid| m.permission.as_ref().map(|p| (pid.clone(), p.clone())))
+                    .and_then(|pid| m.permission.as_ref().map(|p| (pid, p.clone())))
             })
             .fold(HashMap::new(), |mut acc, (pid, perm)| {
                 acc.entry(pid).or_default().push(perm);
@@ -148,5 +147,13 @@ impl MenuService {
         let trees: Vec<MenuTree> = vos.into_iter().map(MenuTree::from).collect();
 
         Ok(build_menu_tree(trees))
+    }
+
+    async fn generate_id(&self) -> i64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
     }
 }

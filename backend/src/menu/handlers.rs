@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct ParentIdQuery {
-    parent_id: Option<String>,
+    parent_id: Option<i64>,
 }
 
 pub async fn create_menu_handler(
@@ -26,7 +26,7 @@ pub async fn create_menu_handler(
 
 pub async fn get_menu_handler(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(id): Path<i64>,
 ) -> Result<Json<ApiResponse<Menu>>, AppError> {
     let menu = state.menu_service.get_menu(&id).await?;
     Ok(Json(ApiResponse::ok(menu)))
@@ -52,14 +52,14 @@ pub async fn get_menus_by_parent_handler(
 ) -> Result<Json<ApiResponse<Vec<Menu>>>, AppError> {
     let menus = state
         .menu_service
-        .get_menus_by_parent(query.parent_id.as_deref())
+        .get_menus_by_parent(query.parent_id)
         .await?;
     Ok(Json(ApiResponse::ok(menus)))
 }
 
 pub async fn update_menu_handler(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(id): Path<i64>,
     Json(req): Json<UpdateMenuRequest>,
 ) -> Result<Json<ApiResponse<Menu>>, AppError> {
     let menu = state.menu_service.update_menu(&id, req).await?;
@@ -68,7 +68,7 @@ pub async fn update_menu_handler(
 
 pub async fn delete_menu_handler(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(id): Path<i64>,
 ) -> Result<(StatusCode, ()), AppError> {
     state.menu_service.delete_menu(&id).await?;
     Ok((StatusCode::NO_CONTENT, ()))
@@ -80,6 +80,6 @@ pub async fn get_user_menu_handler(
 ) -> Result<Json<ApiResponse<Vec<MenuTree>>>, AppError> {
     let token = auth.token();
     let user_id = state.auth_service.validate_token(token).await?;
-    let tree = state.menu_service.get_user_menu(&user_id).await?;
+    let tree = state.menu_service.get_user_menu(&user_id.to_string()).await?;
     Ok(Json(ApiResponse::ok(tree)))
 }

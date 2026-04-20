@@ -4,7 +4,7 @@ use std::collections::HashSet;
 #[derive(Debug, Deserialize, Clone)]
 pub struct SetMenuAuthRequest {
     pub role_code: String,
-    pub auth_list: Vec<String>,
+    pub auth_list: Vec<i64>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -13,14 +13,14 @@ pub struct SysAuthMenuVo {
     pub title: String,
     pub auth_list: Vec<SysAuthTitleVo>,
     #[serde(rename = "useAuthList")]
-    pub use_auth_list: HashSet<String>,
+    pub use_auth_list: HashSet<i64>,
     #[serde(rename = "isCheckAll")]
     pub is_check_all: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
 pub struct SysAuthTitleVo {
-    pub id: String,
+    pub id: i64,
     pub name: String,
     pub permission: Option<String>,
 }

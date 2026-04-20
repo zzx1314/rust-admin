@@ -25,17 +25,17 @@ impl_repo_conn!(SeaOrmMenuRepository);
 
 #[async_trait]
 impl MenuRepository for SeaOrmMenuRepository {
-    fn create(&self, menu: &CreateMenuRequest, id: &str) -> DynFuture<SeaOrmResult<Menu>> {
-        let id_str = id.to_string();
+    fn create(&self, menu: &CreateMenuRequest, id: &i64) -> DynFuture<SeaOrmResult<Menu>> {
+        let id = *id;
         let menu = menu.clone();
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let now = chrono::Utc::now();
-                let active_model = menu.to_active_model(&id_str, now);
+                let active_model = menu.to_active_model(id, now);
 
                 MenuEntity::insert(active_model).exec(&*conn).await?;
 
-                let created = MenuEntity::find_by_id(&id_str).one(&*conn).await?;
+                let created = MenuEntity::find_by_id(id).one(&*conn).await?;
                 Ok(created.unwrap())
             })
         })
@@ -57,12 +57,12 @@ impl MenuRepository for SeaOrmMenuRepository {
         })
     }
 
-    fn find_by_id(&self, id: &str) -> DynFuture<SeaOrmOptResult<Menu>> {
-        let id = id.to_string();
+    fn find_by_id(&self, id: &i64) -> DynFuture<SeaOrmOptResult<Menu>> {
+        let id = *id;
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let menu = MenuEntity::find()
-                    .filter(MenuColumn::Id.eq(&id))
+                    .filter(MenuColumn::Id.eq(id))
                     .filter(MenuColumn::IsDeleted.eq(0))
                     .one(&*conn)
                     .await?;
@@ -71,13 +71,12 @@ impl MenuRepository for SeaOrmMenuRepository {
         })
     }
 
-    fn find_by_parent_id(&self, parent_id: Option<&str>) -> DynFuture<SeaOrmResult<Vec<Menu>>> {
-        let parent_id = parent_id.map(String::from);
+    fn find_by_parent_id(&self, parent_id: Option<i64>) -> DynFuture<SeaOrmResult<Vec<Menu>>> {
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let mut cond = make_condition().add(MenuColumn::IsDeleted.eq(0));
 
-                if let Some(ref pid) = parent_id {
+                if let Some(pid) = parent_id {
                     cond = cond.add(MenuColumn::ParentId.eq(pid));
                 } else {
                     cond = cond.add(MenuColumn::ParentId.is_null());
@@ -112,42 +111,42 @@ impl MenuRepository for SeaOrmMenuRepository {
         })
     }
 
-    fn find_menus_by_role_id(&self, role_id: &str) -> DynFuture<SeaOrmResult<Vec<Menu>>> {
-        let role_id = role_id.to_string();
+    fn find_menus_by_role_id(&self, role_id: &i64) -> DynFuture<SeaOrmResult<Vec<Menu>>> {
+        let role_id = *role_id;
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let sys_role_menus = SysRoleMenuEntity::find()
-                    .filter(SysRoleMenuColumn::RoleId.eq(&role_id))
+                    .filter(SysRoleMenuColumn::RoleId.eq(role_id))
                     .all(&*conn)
                     .await?;
 
-                let mut menu_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut menu_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
                 let mut menus = Vec::new();
                 for srm in sys_role_menus {
-                    if let Some(menu) = MenuEntity::find_by_id(&srm.menu_id)
+                    if let Some(menu) = MenuEntity::find_by_id(srm.menu_id)
                         .filter(MenuColumn::IsDeleted.eq(0))
                         .one(&*conn)
                         .await?
                     {
-                        if menu.parent_id.is_some() && !menu.parent_id.as_ref().unwrap().is_empty() {
-                            menu_ids.insert(menu.parent_id.clone().unwrap());
+                        if menu.parent_id.is_some() && menu.parent_id.unwrap() != 0 {
+                            menu_ids.insert(menu.parent_id.unwrap());
                         }
-                        menu_ids.insert(menu.id.clone());
+                        menu_ids.insert(menu.id);
                         menus.push(Menu::from(menu));
                     }
                 }
 
                 while !menu_ids.is_empty() {
-                    let parent_ids: Vec<String> = menu_ids.iter().cloned().collect();
+                    let parent_ids: Vec<i64> = menu_ids.iter().cloned().collect();
                     menu_ids.clear();
                     for pid in parent_ids {
-                        if let Some(parent) = MenuEntity::find_by_id(&pid)
+                        if let Some(parent) = MenuEntity::find_by_id(pid)
                             .filter(MenuColumn::IsDeleted.eq(0))
                             .one(&*conn)
                             .await?
                         {
-                            if parent.parent_id.is_some() && !parent.parent_id.as_ref().unwrap().is_empty() {
-                                let grandparent_id = parent.parent_id.clone().unwrap();
+                            if parent.parent_id.is_some() && parent.parent_id.unwrap() != 0 {
+                                let grandparent_id = parent.parent_id.unwrap();
                                 if !menus.iter().any(|m| m.id == grandparent_id) {
                                     menu_ids.insert(grandparent_id);
                                 }
@@ -164,13 +163,13 @@ impl MenuRepository for SeaOrmMenuRepository {
         })
     }
 
-    fn update(&self, id: &str, req: &UpdateMenuRequest) -> DynFuture<SeaOrmOptResult<Menu>> {
-        let id_str = id.to_string();
+    fn update(&self, id: &i64, req: &UpdateMenuRequest) -> DynFuture<SeaOrmOptResult<Menu>> {
+        let id = *id;
         let req = req.clone();
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let exists = MenuEntity::find()
-                    .filter(MenuColumn::Id.eq(&id_str))
+                    .filter(MenuColumn::Id.eq(id))
                     .filter(MenuColumn::IsDeleted.eq(0))
                     .one(&*conn)
                     .await?;
@@ -179,15 +178,15 @@ impl MenuRepository for SeaOrmMenuRepository {
                     return Ok(None);
                 }
 
-                let active_model = req.to_active_model(&id_str);
+                let active_model = req.to_active_model(id);
                 MenuEntity::update(active_model)
-                    .filter(MenuColumn::Id.eq(&id_str))
+                    .filter(MenuColumn::Id.eq(id))
                     .filter(MenuColumn::IsDeleted.eq(0))
                     .exec(&*conn)
                     .await?;
 
                 let menu = MenuEntity::find()
-                    .filter(MenuColumn::Id.eq(&id_str))
+                    .filter(MenuColumn::Id.eq(id))
                     .filter(MenuColumn::IsDeleted.eq(0))
                     .one(&*conn)
                     .await?;
@@ -196,12 +195,12 @@ impl MenuRepository for SeaOrmMenuRepository {
         })
     }
 
-    fn delete(&self, id: &str) -> DynFuture<SeaOrmResult<bool>> {
-        let id = id.to_string();
+    fn delete(&self, id: &i64) -> DynFuture<SeaOrmResult<bool>> {
+        let id = *id;
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let menu = MenuEntity::find()
-                    .filter(MenuColumn::Id.eq(&id))
+                    .filter(MenuColumn::Id.eq(id))
                     .filter(MenuColumn::IsDeleted.eq(0))
                     .one(&*conn)
                     .await?;

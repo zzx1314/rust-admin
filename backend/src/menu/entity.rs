@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Serialize, Deserialize)]
 #[sea_orm(table_name = "p_sys_menu")]
 pub struct Model {
-    #[sea_orm(primary_key, column_name = "id", column_type = "Text")]
-    pub id: String,
+    #[sea_orm(primary_key, column_name = "id")]
+    pub id: i64,
     #[sea_orm(column_name = "name", column_type = "Text")]
     pub name: String,
     #[sea_orm(column_name = "code", column_type = "Text", nullable)]
@@ -17,8 +17,8 @@ pub struct Model {
     pub path_url: Option<String>,
     #[sea_orm(column_name = "icon", column_type = "Text", nullable)]
     pub icon: Option<String>,
-    #[sea_orm(column_name = "parent_id", column_type = "Text", nullable)]
-    pub parent_id: Option<String>,
+    #[sea_orm(column_name = "parent_id", column_type = "Integer", nullable)]
+    pub parent_id: Option<i64>,
     #[sea_orm(column_name = "component", column_type = "Text", nullable)]
     pub component: Option<String>,
     #[sea_orm(column_name = "sort", column_type = "Integer", nullable)]
@@ -37,8 +37,8 @@ pub struct Model {
     pub role_code: Option<String>,
     #[sea_orm(column_name = "disabled", column_type = "Boolean", nullable)]
     pub disabled: Option<bool>,
-    #[sea_orm(column_name = "find_auth_id", column_type = "Text", nullable)]
-    pub find_auth_id: Option<String>,
+    #[sea_orm(column_name = "find_auth_id", column_type = "Integer", nullable)]
+    pub find_auth_id: Option<i64>,
     #[sea_orm(column_name = "create_time", column_type = "Timestamp")]
     pub create_time: DateTime<Utc>,
     #[sea_orm(column_name = "update_time", column_type = "Timestamp", nullable)]

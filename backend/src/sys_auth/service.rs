@@ -25,12 +25,12 @@ impl SysAuthService {
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
-        let all_menu_map: HashMap<String, Menu> =
-            all_menus.into_iter().map(|m| (m.id.clone(), m)).collect();
+        let all_menu_map: HashMap<i64, Menu> =
+            all_menus.into_iter().map(|m| (m.id, m)).collect();
 
         let role_menus = self
             .menu_repo
-            .find_menus_by_role_id(role_code)
+            .find_menus_by_role_id(&role_code.parse().unwrap_or(0))
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
@@ -38,12 +38,12 @@ impl SysAuthService {
             return Ok(Vec::new());
         }
 
-        let role_menu_ids: HashSet<String> = role_menus.iter().map(|m| m.id.clone()).collect();
+        let role_menu_ids: HashSet<i64> = role_menus.iter().map(|m| m.id).collect();
 
         let buttons: Vec<&Menu> = role_menus.iter().filter(|m| m.r#type == Some(2)).collect();
 
-        let parent_ids: HashSet<String> =
-            buttons.iter().filter_map(|b| b.parent_id.clone()).collect();
+        let parent_ids: HashSet<i64> =
+            buttons.iter().filter_map(|b| b.parent_id).collect();
 
         let mut result: Vec<SysAuthMenuVo> = Vec::new();
 
@@ -55,23 +55,23 @@ impl SysAuthService {
 
             let parent_buttons: Vec<&Menu> = buttons
                 .iter()
-                .filter(|b| b.parent_id.as_ref() == Some(&parent_id))
+                .filter(|b| b.parent_id == Some(parent_id))
                 .map(|b| *b)
                 .collect();
 
             let auth_list: Vec<SysAuthTitleVo> = parent_buttons
                 .iter()
                 .map(|b| SysAuthTitleVo {
-                    id: b.id.clone(),
+                    id: b.id,
                     name: b.name.clone(),
                     permission: b.permission.clone(),
                 })
                 .collect();
 
-            let use_auth_list: HashSet<String> = parent_buttons
+            let use_auth_list: HashSet<i64> = parent_buttons
                 .iter()
                 .filter(|b| role_menu_ids.contains(&b.id))
-                .map(|b| b.id.clone())
+                .map(|b| b.id)
                 .collect();
 
             let is_check_all = auth_list.len() == use_auth_list.len();
@@ -96,15 +96,15 @@ impl SysAuthService {
 
     fn build_menu_path(
         &self,
-        menu_id: &str,
-        all_menu_map: &HashMap<String, Menu>,
+        menu_id: &i64,
+        all_menu_map: &HashMap<i64, Menu>,
         path: &mut Vec<String>,
     ) {
         if let Some(menu) = all_menu_map.get(menu_id) {
             path.push(menu.name.clone());
-            if let Some(parent_id) = &menu.parent_id {
-                if !parent_id.is_empty() {
-                    self.build_menu_path(parent_id, all_menu_map, path);
+            if let Some(parent_id) = menu.parent_id {
+                if parent_id != 0 {
+                    self.build_menu_path(&parent_id, all_menu_map, path);
                 }
             }
         }
@@ -134,19 +134,19 @@ impl SysAuthService {
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
-        let menu_map: HashMap<String, Menu> =
-            all_menus.into_iter().map(|m| (m.id.clone(), m)).collect();
+        let menu_map: HashMap<i64, Menu> =
+            all_menus.into_iter().map(|m| (m.id, m)).collect();
 
-        let mut menu_id_set: HashSet<String> = HashSet::new();
+        let mut menu_id_set: HashSet<i64> = HashSet::new();
 
         for auth_id in &req.auth_list {
             if let Some(menu) = menu_map.get(auth_id) {
-                menu_id_set.insert(menu.id.clone());
+                menu_id_set.insert(menu.id);
                 self.collect_parent_ids(menu, &menu_map, &mut menu_id_set);
             }
         }
 
-        let menu_ids: Vec<String> = menu_id_set.into_iter().collect();
+        let menu_ids: Vec<i64> = menu_id_set.into_iter().collect();
 
         self.role_repo
             .set_menus(&role.id, &menu_ids)
@@ -159,13 +159,13 @@ impl SysAuthService {
     fn collect_parent_ids(
         &self,
         menu: &Menu,
-        menu_map: &HashMap<String, Menu>,
-        set: &mut HashSet<String>,
+        menu_map: &HashMap<i64, Menu>,
+        set: &mut HashSet<i64>,
     ) {
-        if let Some(parent_id) = &menu.parent_id {
-            if !parent_id.is_empty() {
-                set.insert(parent_id.clone());
-                if let Some(parent) = menu_map.get(parent_id) {
+        if let Some(parent_id) = menu.parent_id {
+            if parent_id != 0 {
+                set.insert(parent_id);
+                if let Some(parent) = menu_map.get(&parent_id) {
                     self.collect_parent_ids(parent, menu_map, set);
                 }
             }

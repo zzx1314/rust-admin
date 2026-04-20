@@ -14,7 +14,7 @@ const REFRESH_TOKEN_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
-    sub: String,
+    sub: i64,
     username: String,
     exp: u64,
     iat: u64,
@@ -22,12 +22,12 @@ struct Claims {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserResponse {
-    pub id: String,
+    pub id: i64,
     pub username: String,
     pub real_name: Option<String>,
     pub email: Option<String>,
     pub phone: Option<String>,
-    pub org_id: Option<String>,
+    pub org_id: i64,
     pub enable: Option<i32>,
 }
 
@@ -66,13 +66,13 @@ pub struct UserLoginData {
     pub avatar: Option<String>,
     pub username: String,
     pub nickname: Option<String>,
-    pub roles: Vec<i32>,
+    pub roles: Vec<i64>,
     pub permissions: Vec<String>,
     pub access_token: String,
     pub refresh_token: String,
     pub expires: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_id: Option<String>,
+    pub user_id: Option<i64>,
 }
 
 impl UserLoginVO {
@@ -81,11 +81,11 @@ impl UserLoginVO {
         access_token: String,
         refresh_token: String,
         expires: String,
-        user_id: String,
+        user_id: i64,
         username: String,
         avatar: Option<String>,
         nickname: Option<String>,
-        roles: Vec<i32>,
+        roles: Vec<i64>,
         permissions: Vec<String>,
     ) -> Self {
         Self {
@@ -213,16 +213,17 @@ impl AuthService {
         let access_exp = now + ACCESS_TOKEN_TTL_SECS;
         let refresh_exp = now + REFRESH_TOKEN_TTL_SECS;
 
-        let user_id = user.id.clone();
+        let user_id = user.id;
+        let user_id_str = user_id.to_string();
         let access_claims = Claims {
-            sub: user_id.clone(),
+            sub: user_id,
             username: user.username.clone(),
             exp: access_exp,
             iat: now,
         };
 
         let refresh_claims = Claims {
-            sub: user_id.clone(),
+            sub: user_id,
             username: user.username.clone(),
             exp: refresh_exp,
             iat: now,
@@ -237,7 +238,7 @@ impl AuthService {
             .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
 
         self.token_store
-            .set_token(&user_id, &access_token, ACCESS_TOKEN_TTL_SECS)
+            .set_token(&user_id_str, &access_token, ACCESS_TOKEN_TTL_SECS)
             .await?;
 
         Ok(LoginResponse {
@@ -281,16 +282,17 @@ impl AuthService {
         let access_exp = now + ACCESS_TOKEN_TTL_SECS;
         let refresh_exp = now + REFRESH_TOKEN_TTL_SECS;
 
-        let user_id = user.id.clone();
+        let user_id = user.id;
+        let user_id_str = user_id.to_string();
         let access_claims = Claims {
-            sub: user_id.clone(),
+            sub: user_id,
             username: user.username.clone(),
             exp: access_exp,
             iat: now,
         };
 
         let refresh_claims = Claims {
-            sub: user_id.clone(),
+            sub: user_id,
             username: user.username.clone(),
             exp: refresh_exp,
             iat: now,
@@ -305,7 +307,7 @@ impl AuthService {
             .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
 
         self.token_store
-            .set_token(&user_id, &access_token, ACCESS_TOKEN_TTL_SECS)
+            .set_token(&user_id_str, &access_token, ACCESS_TOKEN_TTL_SECS)
             .await?;
 
         let roles = self.get_user_roles(&user_id).await?;
@@ -319,7 +321,7 @@ impl AuthService {
             access_token: access_token,
             refresh_token: refresh_token,
             expires,
-            user_id: Some(user_id.clone()),
+            user_id: Some(user_id),
             username: user.username.clone(),
             avatar: None,
             nickname: user.real_name.clone(),
@@ -328,7 +330,7 @@ impl AuthService {
         })
     }
 
-    async fn get_user_roles(&self, user_id: &str) -> Result<Vec<i32>, AppError> {
+    async fn get_user_roles(&self, user_id: &i64) -> Result<Vec<i64>, AppError> {
         let roles = self
             .role_repo
             .find_roles_by_user_id(user_id)
@@ -336,11 +338,11 @@ impl AuthService {
             .map_err(AppError::DatabaseErrorSeaOrm)?;
         Ok(roles
             .into_iter()
-            .map(|r| r.id.parse().unwrap_or(0))
+            .map(|r| r.id)
             .collect())
     }
 
-    async fn get_user_permissions(&self, user_id: &str) -> Result<Vec<String>, AppError> {
+    async fn get_user_permissions(&self, user_id: &i64) -> Result<Vec<String>, AppError> {
         let roles = self
             .role_repo
             .find_roles_by_user_id(user_id)
@@ -350,11 +352,11 @@ impl AuthService {
         Ok(permissions)
     }
 
-    pub async fn logout(&self, user_id: &str) -> Result<(), AppError> {
-        self.token_store.delete_token(user_id).await
+    pub async fn logout(&self, user_id: i64) -> Result<(), AppError> {
+        self.token_store.delete_token(&user_id.to_string()).await
     }
 
-    pub async fn validate_token(&self, token: &str) -> Result<String, AppError> {
+    pub async fn validate_token(&self, token: &str) -> Result<i64, AppError> {
         let token_data = decode::<Claims>(
             token,
             &DecodingKey::from_secret(self.jwt_secret.as_bytes()),
@@ -364,7 +366,7 @@ impl AuthService {
 
         let user_id = token_data.claims.sub;
 
-        let stored_token = self.token_store.get_token(&user_id).await?;
+        let stored_token = self.token_store.get_token(&user_id.to_string()).await?;
 
         match stored_token {
             Some(stored) if stored == token => Ok(user_id),
@@ -428,7 +430,7 @@ impl AuthService {
             .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
 
         self.token_store
-            .set_token(&user_id, &new_access_token, ACCESS_TOKEN_TTL_SECS)
+            .set_token(&user_id.to_string(), &new_access_token, ACCESS_TOKEN_TTL_SECS)
             .await?;
 
         Ok(LoginResponse {
@@ -496,7 +498,7 @@ impl AuthService {
             .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
 
         self.token_store
-            .set_token(&user_id, &new_access_token, ACCESS_TOKEN_TTL_SECS)
+            .set_token(&user_id.to_string(), &new_access_token, ACCESS_TOKEN_TTL_SECS)
             .await?;
 
         Ok(TokenRefreshVO {
@@ -506,10 +508,10 @@ impl AuthService {
         })
     }
 
-    pub async fn get_user_info(&self, user_id: &str) -> Result<UserInfoVO, AppError> {
+    pub async fn get_user_info(&self, user_id: i64) -> Result<UserInfoVO, AppError> {
         let user = self
             .user_repo
-            .find_by_id(user_id)
+            .find_by_id(&user_id)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?
             .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;

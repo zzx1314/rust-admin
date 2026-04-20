@@ -34,29 +34,29 @@ impl_repo_conn!(SeaOrmRoleRepository);
 
 #[async_trait]
 impl RoleRepository for SeaOrmRoleRepository {
-    fn create(&self, req: &CreateRoleRequest, id: &str) -> DynFuture<SeaOrmResult<Role>> {
+    fn create(&self, req: &CreateRoleRequest, id: &i64) -> DynFuture<SeaOrmResult<Role>> {
         let req = req.clone();
-        let id_str = id.to_string();
+        let id = *id;
 
         self.with_conn(move |conn| {
             Box::pin(async move {
-                let active_model = req.to_active_model(&id_str);
+                let active_model = req.to_active_model(id);
 
                 RoleEntity::insert(active_model).exec(&*conn).await?;
 
-                let role = RoleEntity::find_by_id(&id_str).one(&*conn).await?;
+                let role = RoleEntity::find_by_id(id).one(&*conn).await?;
 
                 Ok(role.unwrap())
             })
         })
     }
 
-    fn find_by_id(&self, id: &str) -> DynFuture<SeaOrmOptResult<Role>> {
-        let id = id.to_string();
+    fn find_by_id(&self, id: &i64) -> DynFuture<SeaOrmOptResult<Role>> {
+        let id = *id;
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let role = RoleEntity::find()
-                    .filter(RoleColumn::Id.eq(&id))
+                    .filter(RoleColumn::Id.eq(id))
                     .filter(RoleColumn::IsDeleted.eq(0))
                     .one(&*conn)
                     .await?;
@@ -134,13 +134,13 @@ impl RoleRepository for SeaOrmRoleRepository {
         })
     }
 
-    fn update(&self, id: &str, req: &UpdateRoleRequest) -> DynFuture<SeaOrmOptResult<Role>> {
-        let id_str = id.to_string();
+    fn update(&self, id: &i64, req: &UpdateRoleRequest) -> DynFuture<SeaOrmOptResult<Role>> {
+        let id = *id;
         let req = req.clone();
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let exists = RoleEntity::find()
-                    .filter(RoleColumn::Id.eq(&id_str))
+                    .filter(RoleColumn::Id.eq(id))
                     .filter(RoleColumn::IsDeleted.eq(0))
                     .one(&*conn)
                     .await?;
@@ -149,15 +149,15 @@ impl RoleRepository for SeaOrmRoleRepository {
                     return Ok(None);
                 }
 
-                let active_model = req.to_active_model(&id_str);
+                let active_model = req.to_active_model(id);
                 RoleEntity::update(active_model)
-                    .filter(RoleColumn::Id.eq(&id_str))
+                    .filter(RoleColumn::Id.eq(id))
                     .filter(RoleColumn::IsDeleted.eq(0))
                     .exec(&*conn)
                     .await?;
 
                 let role = RoleEntity::find()
-                    .filter(RoleColumn::Id.eq(&id_str))
+                    .filter(RoleColumn::Id.eq(id))
                     .filter(RoleColumn::IsDeleted.eq(0))
                     .one(&*conn)
                     .await?;
@@ -165,12 +165,12 @@ impl RoleRepository for SeaOrmRoleRepository {
             })
         })
     }
-    fn delete(&self, id: &str) -> DynFuture<SeaOrmResult<bool>> {
-        let id = id.to_string();
+    fn delete(&self, id: &i64) -> DynFuture<SeaOrmResult<bool>> {
+        let id = *id;
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let role = RoleEntity::find()
-                    .filter(RoleColumn::Id.eq(&id))
+                    .filter(RoleColumn::Id.eq(id))
                     .filter(RoleColumn::IsDeleted.eq(0))
                     .one(&*conn)
                     .await?;
@@ -189,9 +189,9 @@ impl RoleRepository for SeaOrmRoleRepository {
         })
     }
 
-    fn assign_role_to_user(&self, user_id: &str, role_id: &str) -> DynFuture<SeaOrmResult<()>> {
-        let user_id = user_id.to_string();
-        let role_id = role_id.to_string();
+    fn assign_role_to_user(&self, user_id: &i64, role_id: &i64) -> DynFuture<SeaOrmResult<()>> {
+        let user_id = *user_id;
+        let role_id = *role_id;
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let active_model = UserRoleActiveModel {
@@ -204,9 +204,9 @@ impl RoleRepository for SeaOrmRoleRepository {
         })
     }
 
-    fn remove_role_from_user(&self, user_id: &str, role_id: &str) -> DynFuture<SeaOrmResult<bool>> {
-        let user_id = user_id.to_string();
-        let role_id = role_id.to_string();
+    fn remove_role_from_user(&self, user_id: &i64, role_id: &i64) -> DynFuture<SeaOrmResult<bool>> {
+        let user_id = *user_id;
+        let role_id = *role_id;
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let result = UserRoleEntity::delete_many()
@@ -219,18 +219,18 @@ impl RoleRepository for SeaOrmRoleRepository {
         })
     }
 
-    fn find_roles_by_user_id(&self, user_id: &str) -> DynFuture<SeaOrmResult<Vec<Role>>> {
-        let user_id = user_id.to_string();
+    fn find_roles_by_user_id(&self, user_id: &i64) -> DynFuture<SeaOrmResult<Vec<Role>>> {
+        let user_id = *user_id;
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let user_roles = UserRoleEntity::find()
-                    .filter(UserRoleColumn::UserId.eq(&user_id))
+                    .filter(UserRoleColumn::UserId.eq(user_id))
                     .all(&*conn)
                     .await?;
 
                 let mut roles = Vec::new();
                 for ur in user_roles {
-                    if let Some(role) = RoleEntity::find_by_id(&ur.role_id)
+                    if let Some(role) = RoleEntity::find_by_id(ur.role_id)
                         .filter(RoleColumn::IsDeleted.eq(0))
                         .one(&*conn)
                         .await?
@@ -243,19 +243,19 @@ impl RoleRepository for SeaOrmRoleRepository {
         })
     }
 
-    fn find_users_by_role_id(&self, role_id: &str) -> DynFuture<SeaOrmResult<Vec<User>>> {
-        let role_id = role_id.to_string();
+    fn find_users_by_role_id(&self, role_id: &i64) -> DynFuture<SeaOrmResult<Vec<User>>> {
+        let role_id = *role_id;
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let user_roles = UserRoleEntity::find()
-                    .filter(UserRoleColumn::RoleId.eq(&role_id))
+                    .filter(UserRoleColumn::RoleId.eq(role_id))
                     .all(&*conn)
                     .await?;
 
                 let mut users = Vec::new();
                 for ur in user_roles {
                     if let Some(user) = UserEntity::find()
-                        .filter(UserColumn::Id.eq(&ur.user_id))
+                        .filter(UserColumn::Id.eq(ur.user_id))
                         .filter(UserColumn::IsDeleted.eq(0))
                         .one(&*conn)
                         .await?
@@ -268,19 +268,19 @@ impl RoleRepository for SeaOrmRoleRepository {
         })
     }
 
-    fn set_menus(&self, role_id: &str, menu_ids: &[String]) -> DynFuture<SeaOrmResult<()>> {
-        let role_id = role_id.to_string();
+    fn set_menus(&self, role_id: &i64, menu_ids: &[i64]) -> DynFuture<SeaOrmResult<()>> {
+        let role_id = *role_id;
         let menu_ids = menu_ids.to_vec();
         self.with_conn(move |conn| {
             Box::pin(async move {
                 SysRoleMenuEntity::delete_many()
-                    .filter(crate::role::sys_role_menu::Column::RoleId.eq(&role_id))
+                    .filter(crate::role::sys_role_menu::Column::RoleId.eq(role_id))
                     .exec(&*conn)
                     .await?;
 
                 for menu_id in menu_ids {
                     let active_model = SysRoleMenuActiveModel {
-                        role_id: ActiveValue::set(role_id.clone()),
+                        role_id: ActiveValue::set(role_id),
                         menu_id: ActiveValue::set(menu_id),
                     };
                     SysRoleMenuEntity::insert(active_model).exec(&*conn).await?;

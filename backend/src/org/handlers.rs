@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 #[derive(Debug, serde::Deserialize)]
 pub struct RemoveByIdsRequest {
-    pub ids: Vec<String>,
+    pub ids: Vec<i64>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -21,12 +21,12 @@ pub struct RemoveByIdsResponse {
 
 #[derive(Deserialize)]
 pub struct OrgIdParam {
-    id: String,
+    id: i64,
 }
 
 #[derive(Deserialize)]
 pub struct ParentQueryParam {
-    parent_id: Option<String>,
+    parent_id: Option<i64>,
 }
 
 pub async fn create_org_handler(
@@ -66,7 +66,7 @@ pub async fn get_orgs_by_parent_handler(
 ) -> Result<Json<ApiResponse<Vec<Org>>>, AppError> {
     let orgs = state
         .org_service
-        .get_orgs_by_parent(query.parent_id.as_deref())
+        .get_orgs_by_parent(query.parent_id)
         .await?;
     Ok(Json(ApiResponse::ok(orgs)))
 }

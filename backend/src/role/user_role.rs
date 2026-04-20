@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Serialize, Deserialize)]
 #[sea_orm(table_name = "p_sys_user_role")]
 pub struct Model {
-    #[sea_orm(primary_key, column_name = "user_id", column_type = "Text")]
-    pub user_id: String,
-    #[sea_orm(primary_key, column_name = "role_id", column_type = "Text")]
-    pub role_id: String,
+    #[sea_orm(primary_key, column_name = "user_id")]
+    pub user_id: i64,
+    #[sea_orm(primary_key, column_name = "role_id")]
+    pub role_id: i64,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

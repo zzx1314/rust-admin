@@ -5,14 +5,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Serialize, Deserialize)]
 #[sea_orm(table_name = "p_sys_org")]
 pub struct Model {
-    #[sea_orm(primary_key, column_name = "id", column_type = "Text")]
-    pub id: String,
+    #[sea_orm(primary_key, column_name = "id")]
+    pub id: i64,
     #[sea_orm(column_name = "name", column_type = "Text")]
     pub name: String,
     #[sea_orm(column_name = "sort", column_type = "Integer", nullable)]
     pub sort: Option<i32>,
-    #[sea_orm(column_name = "parent_id", column_type = "Text", nullable)]
-    pub parent_id: Option<String>,
+    #[sea_orm(column_name = "parent_id", column_type = "Integer", nullable)]
+    pub parent_id: Option<i64>,
     #[sea_orm(column_name = "parent_name", column_type = "Text", nullable)]
     pub parent_name: Option<String>,
     #[sea_orm(column_name = "org_duty", column_type = "Text", nullable)]

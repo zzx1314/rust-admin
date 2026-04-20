@@ -19,7 +19,7 @@ pub async fn create_role_handler(
 
 pub async fn get_role_handler(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(id): Path<i64>,
 ) -> Result<Json<ApiResponse<Role>>, AppError> {
     let role = state.role_service.get_role(&id).await?;
     Ok(Json(ApiResponse::ok(role)))
@@ -42,7 +42,7 @@ pub async fn get_roles_page_handler(
 
 pub async fn update_role_handler(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(id): Path<i64>,
     Json(req): Json<UpdateRoleRequest>,
 ) -> Result<Json<ApiResponse<Role>>, AppError> {
     let role = state.role_service.update_role(&id, req).await?;
@@ -51,7 +51,7 @@ pub async fn update_role_handler(
 
 pub async fn delete_role_handler(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(id): Path<i64>,
 ) -> Result<(StatusCode, ()), AppError> {
     state.role_service.delete_role(&id).await?;
     Ok((StatusCode::NO_CONTENT, ()))
@@ -59,7 +59,7 @@ pub async fn delete_role_handler(
 
 pub async fn assign_role_to_user_handler(
     State(state): State<AppState>,
-    Path((user_id, role_id)): Path<(String, String)>,
+    Path((user_id, role_id)): Path<(i64, i64)>,
 ) -> Result<(StatusCode, ()), AppError> {
     state.role_service.assign_role(&user_id, &role_id).await?;
     Ok((StatusCode::CREATED, ()))
@@ -67,7 +67,7 @@ pub async fn assign_role_to_user_handler(
 
 pub async fn remove_role_from_user_handler(
     State(state): State<AppState>,
-    Path((user_id, role_id)): Path<(String, String)>,
+    Path((user_id, role_id)): Path<(i64, i64)>,
 ) -> Result<(StatusCode, ()), AppError> {
     state.role_service.remove_role(&user_id, &role_id).await?;
     Ok((StatusCode::NO_CONTENT, ()))
@@ -75,7 +75,7 @@ pub async fn remove_role_from_user_handler(
 
 pub async fn get_user_roles_handler(
     State(state): State<AppState>,
-    Path(user_id): Path<String>,
+    Path(user_id): Path<i64>,
 ) -> Result<Json<ApiResponse<Vec<Role>>>, AppError> {
     let roles = state.role_service.get_roles_for_user(&user_id).await?;
     Ok(Json(ApiResponse::ok(roles)))
@@ -83,7 +83,7 @@ pub async fn get_user_roles_handler(
 
 pub async fn get_role_users_handler(
     State(state): State<AppState>,
-    Path(role_id): Path<String>,
+    Path(role_id): Path<i64>,
 ) -> Result<Json<ApiResponse<Vec<User>>>, AppError> {
     let users = state.role_service.get_users_for_role(&role_id).await?;
     Ok(Json(ApiResponse::ok(users)))

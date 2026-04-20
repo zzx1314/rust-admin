@@ -13,7 +13,7 @@ pub struct CreateMenuRequest {
     pub permission: Option<String>,
     pub path_url: Option<String>,
     pub icon: Option<String>,
-    pub parent_id: Option<String>,
+    pub parent_id: Option<i64>,
     pub component: Option<String>,
     pub sort: Option<i32>,
     pub keep_alive: Option<i32>,
@@ -22,7 +22,7 @@ pub struct CreateMenuRequest {
     pub leaf: Option<bool>,
     pub role_code: Option<String>,
     pub disabled: Option<bool>,
-    pub find_auth_id: Option<String>,
+    pub find_auth_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -32,7 +32,7 @@ pub struct UpdateMenuRequest {
     pub permission: Option<String>,
     pub path_url: Option<String>,
     pub icon: Option<String>,
-    pub parent_id: Option<String>,
+    pub parent_id: Option<i64>,
     pub component: Option<String>,
     pub sort: Option<i32>,
     pub keep_alive: Option<i32>,
@@ -41,7 +41,7 @@ pub struct UpdateMenuRequest {
     pub leaf: Option<bool>,
     pub role_code: Option<String>,
     pub disabled: Option<bool>,
-    pub find_auth_id: Option<String>,
+    pub find_auth_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -57,13 +57,13 @@ pub struct MenuMeta {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MenuVo {
-    pub id: String,
+    pub id: i64,
     pub name: String,
     pub code: Option<String>,
     pub permission: Option<String>,
     pub path_url: Option<String>,
     pub icon: Option<String>,
-    pub parent_id: Option<String>,
+    pub parent_id: Option<i64>,
     pub component: Option<String>,
     pub sort: Option<i32>,
     pub keep_alive: Option<i32>,
@@ -100,7 +100,7 @@ impl From<Menu> for MenuVo {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MenuTree {
-    pub id: String,
+    pub id: i64,
     pub name: String,
     pub code: Option<String>,
     pub permission: Option<String>,
@@ -108,7 +108,7 @@ pub struct MenuTree {
     pub path_url: Option<String>,
     pub icon: Option<String>,
     #[serde(rename = "parentId")]
-    pub parent_id: Option<String>,
+    pub parent_id: Option<i64>,
     pub component: Option<String>,
     pub sort: Option<i32>,
     pub keep_alive: Option<i32>,
@@ -144,18 +144,18 @@ impl From<MenuVo> for MenuTree {
 }
 
 pub fn build_menu_tree(menu_trees: Vec<MenuTree>) -> Vec<MenuTree> {
-    let mut id_map: std::collections::HashMap<String, MenuTree> = std::collections::HashMap::new();
+    let mut id_map: std::collections::HashMap<i64, MenuTree> = std::collections::HashMap::new();
     let mut roots: Vec<MenuTree> = Vec::new();
 
     for menu in &menu_trees {
-        id_map.insert(menu.id.clone(), menu.clone());
+        id_map.insert(menu.id, menu.clone());
     }
 
     for menu in menu_trees {
-        let pid = menu.parent_id.clone();
-        match &pid {
-            Some(p) if !p.is_empty() && p != "-1" => {
-                if id_map.contains_key(p) {
+        let pid = menu.parent_id;
+        match pid {
+            Some(p) if p != 0 => {
+                if id_map.contains_key(&p) {
                 } else {
                     roots.push(menu);
                 }
@@ -166,11 +166,11 @@ pub fn build_menu_tree(menu_trees: Vec<MenuTree>) -> Vec<MenuTree> {
         }
     }
 
-    fn attach_children(menu: &mut MenuTree, id_map: &std::collections::HashMap<String, MenuTree>) {
-        let children_ids: Vec<String> = id_map
+    fn attach_children(menu: &mut MenuTree, id_map: &std::collections::HashMap<i64, MenuTree>) {
+        let children_ids: Vec<i64> = id_map
             .iter()
-            .filter(|(_, m)| m.parent_id.as_ref() == Some(&menu.id))
-            .map(|(k, _)| k.clone())
+            .filter(|(_, m)| m.parent_id == Some(menu.id))
+            .map(|(k, _)| *k)
             .collect();
 
         if !children_ids.is_empty() {
@@ -203,15 +203,15 @@ pub fn build_menu_tree(menu_trees: Vec<MenuTree>) -> Vec<MenuTree> {
 
 
 impl CreateMenuRequest {
-    pub fn to_active_model(&self, id: &str, now: DateTime<Utc>) -> MenuActiveModel {
+    pub fn to_active_model(&self, id: i64, now: DateTime<Utc>) -> MenuActiveModel {
         MenuActiveModel {
-            id: ActiveValue::set(id.to_string()),
+            id: ActiveValue::set(id),
             name: ActiveValue::set(self.name.clone()),
             code: ActiveValue::set(self.code.clone()),
             permission: ActiveValue::set(self.permission.clone()),
             path_url: ActiveValue::set(self.path_url.clone()),
             icon: ActiveValue::set(self.icon.clone()),
-            parent_id: ActiveValue::set(self.parent_id.clone()),
+            parent_id: ActiveValue::set(self.parent_id),
             component: ActiveValue::set(self.component.clone()),
             sort: ActiveValue::set(self.sort),
             keep_alive: ActiveValue::set(self.keep_alive),
@@ -221,7 +221,7 @@ impl CreateMenuRequest {
             leaf: ActiveValue::set(self.leaf),
             role_code: ActiveValue::set(self.role_code.clone()),
             disabled: ActiveValue::set(self.disabled),
-            find_auth_id: set_opt_string(self.find_auth_id.clone()),
+            find_auth_id: set_opt_i64(self.find_auth_id),
             create_time: ActiveValue::set(now),
             update_time: ActiveValue::set(now),
         }
@@ -229,15 +229,15 @@ impl CreateMenuRequest {
 }
 
 impl UpdateMenuRequest {
-    pub fn to_active_model(&self, id: &str) -> MenuActiveModel {
+    pub fn to_active_model(&self, id: i64) -> MenuActiveModel {
         MenuActiveModel {
-            id: ActiveValue::unchanged(id.to_string()),
+            id: ActiveValue::unchanged(id),
             name: set_string(self.name.clone()),
             code: set_opt_string(self.code.clone()),
             permission: set_opt_string(self.permission.clone()),
             path_url: set_opt_string(self.path_url.clone()),
             icon: set_opt_string(self.icon.clone()),
-            parent_id: set_opt_string(self.parent_id.clone()),
+            parent_id: set_opt_i64(self.parent_id),
             component: set_opt_string(self.component.clone()),
             sort: set_opt_i32(self.sort),
             keep_alive: set_opt_i32(self.keep_alive),
@@ -247,7 +247,7 @@ impl UpdateMenuRequest {
             leaf: set_opt_bool(self.leaf),
             role_code: set_opt_string(self.role_code.clone()),
             disabled: set_opt_bool(self.disabled),
-            find_auth_id: set_opt_string(self.find_auth_id.clone()),
+            find_auth_id: set_opt_i64(self.find_auth_id),
             update_time: ActiveValue::set(Utc::now()),
             ..Default::default()
         }
@@ -269,6 +269,13 @@ fn set_opt_string(opt: Option<String>) -> ActiveValue<Option<String>> {
 }
 
 fn set_opt_i32(opt: Option<i32>) -> ActiveValue<Option<i32>> {
+    match opt {
+        Some(v) => ActiveValue::set(Some(v)),
+        None => ActiveValue::not_set(),
+    }
+}
+
+fn set_opt_i64(opt: Option<i64>) -> ActiveValue<Option<i64>> {
     match opt {
         Some(v) => ActiveValue::set(Some(v)),
         None => ActiveValue::not_set(),

@@ -10,7 +10,7 @@ pub type Org = OrgModel;
 pub struct CreateOrgRequest {
     pub name: String,
     pub sort: Option<i32>,
-    pub parent_id: Option<String>,
+    pub parent_id: Option<i64>,
     pub parent_name: Option<String>,
     pub org_duty: Option<String>,
     pub desrc: Option<String>,
@@ -23,7 +23,7 @@ pub struct CreateOrgRequest {
 pub struct UpdateOrgRequest {
     pub name: Option<String>,
     pub sort: Option<i32>,
-    pub parent_id: Option<String>,
+    pub parent_id: Option<i64>,
     pub parent_name: Option<String>,
     pub org_duty: Option<String>,
     pub desrc: Option<String>,
@@ -34,10 +34,10 @@ pub struct UpdateOrgRequest {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OrgTreeDto {
-    pub id: String,
+    pub id: i64,
     pub name: String,
     pub sort: Option<i32>,
-    pub parent_id: Option<String>,
+    pub parent_id: Option<i64>,
     pub parent_name: Option<String>,
     pub org_duty: Option<String>,
     pub desrc: Option<String>,
@@ -76,28 +76,28 @@ pub struct OrgTreeQuery {
 }
 
 pub fn build_org_tree(orgs: Vec<OrgTreeDto>) -> Vec<OrgTreeDto> {
-    let mut id_map: std::collections::HashMap<String, OrgTreeDto> =
+    let mut id_map: std::collections::HashMap<i64, OrgTreeDto> =
         std::collections::HashMap::new();
 
     for org in &orgs {
-        id_map.insert(org.id.clone(), org.clone());
+        id_map.insert(org.id, org.clone());
     }
 
-    let mut root_ids: Vec<String> = Vec::new();
+    let mut root_ids: Vec<i64> = Vec::new();
 
     for org in &orgs {
         match &org.parent_id {
-            Some(pid) if !pid.is_empty() && id_map.contains_key(pid) => {}
+            Some(pid) if *pid != 0 && id_map.contains_key(pid) => {}
             _ => {
-                root_ids.push(org.id.clone());
+                root_ids.push(org.id);
             }
         }
     }
 
     fn build_children(
         node: &mut OrgTreeDto,
-        id_map: &std::collections::HashMap<String, OrgTreeDto>,
-        children_of: &std::collections::HashMap<String, Vec<String>>,
+        id_map: &std::collections::HashMap<i64, OrgTreeDto>,
+        children_of: &std::collections::HashMap<i64, Vec<i64>>,
     ) {
         if let Some(child_ids) = children_of.get(&node.id) {
             let mut children: Vec<OrgTreeDto> = child_ids
@@ -112,17 +112,17 @@ pub fn build_org_tree(orgs: Vec<OrgTreeDto>) -> Vec<OrgTreeDto> {
         }
     }
 
-    let mut children_of: std::collections::HashMap<String, Vec<String>> =
+    let mut children_of: std::collections::HashMap<i64, Vec<i64>> =
         std::collections::HashMap::new();
     for org in &orgs {
         if let Some(ref pid) = org.parent_id
-            && !pid.is_empty()
+            && *pid != 0
             && id_map.contains_key(pid)
         {
             children_of
-                .entry(pid.clone())
+                .entry(*pid)
                 .or_default()
-                .push(org.id.clone());
+                .push(org.id);
         }
     }
 
@@ -140,12 +140,12 @@ pub fn build_org_tree(orgs: Vec<OrgTreeDto>) -> Vec<OrgTreeDto> {
 }
 
 impl CreateOrgRequest {
-    pub fn to_active_model(&self, id: &str, now: DateTime<Utc>) -> OrgActiveModel {
+    pub fn to_active_model(&self, id: i64, now: DateTime<Utc>) -> OrgActiveModel {
         OrgActiveModel {
-            id: ActiveValue::set(id.to_string()),
+            id: ActiveValue::set(id),
             name: ActiveValue::set(self.name.clone()),
             sort: ActiveValue::set(self.sort),
-            parent_id: ActiveValue::set(self.parent_id.clone()),
+            parent_id: ActiveValue::set(self.parent_id),
             parent_name: ActiveValue::set(self.parent_name.clone()),
             org_duty: ActiveValue::set(self.org_duty.clone()),
             desrc: ActiveValue::set(self.desrc.clone()),
@@ -160,12 +160,12 @@ impl CreateOrgRequest {
 }
 
 impl UpdateOrgRequest {
-    pub fn to_active_model(&self, id: &str) -> OrgActiveModel {
+    pub fn to_active_model(&self, id: i64) -> OrgActiveModel {
         OrgActiveModel {
-            id: ActiveValue::unchanged(id.to_string()),
+            id: ActiveValue::unchanged(id),
             name: set_string(self.name.clone()),
             sort: set_opt_i32(self.sort),
-            parent_id: set_opt_string(self.parent_id.clone()),
+            parent_id: set_opt_i64(self.parent_id),
             parent_name: set_opt_string(self.parent_name.clone()),
             org_duty: set_opt_string(self.org_duty.clone()),
             desrc: set_opt_string(self.desrc.clone()),
@@ -201,6 +201,13 @@ fn set_opt_bool(opt: Option<bool>) -> ActiveValue<Option<bool>> {
 }
 
 fn set_opt_i32(opt: Option<i32>) -> ActiveValue<Option<i32>> {
+    match opt {
+        Some(v) => ActiveValue::set(Some(v)),
+        None => ActiveValue::not_set(),
+    }
+}
+
+fn set_opt_i64(opt: Option<i64>) -> ActiveValue<Option<i64>> {
     match opt {
         Some(v) => ActiveValue::set(Some(v)),
         None => ActiveValue::not_set(),

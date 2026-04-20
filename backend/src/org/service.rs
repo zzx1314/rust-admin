@@ -5,7 +5,6 @@ use crate::org::domain::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use uuid::Uuid;
 
 pub struct OrgService {
     org_repo: Arc<dyn OrgRepository>,
@@ -17,14 +16,14 @@ impl OrgService {
     }
 
     pub async fn create_org(&self, req: CreateOrgRequest) -> Result<Org, AppError> {
-        let id = Uuid::new_v4().to_string();
+        let id = self.generate_id().await;
         self.org_repo
             .create(&req, &id)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)
     }
 
-    pub async fn get_org(&self, id: &str) -> Result<Org, AppError> {
+    pub async fn get_org(&self, id: &i64) -> Result<Org, AppError> {
         self.org_repo
             .find_by_id(id)
             .await
@@ -62,9 +61,9 @@ impl OrgService {
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
-        let all_id_map: HashMap<String, &Org> =
-            all_orgs.iter().map(|o| (o.id.clone(), o)).collect();
-        let mut collected: HashMap<String, Org> = HashMap::new();
+        let all_id_map: HashMap<i64, &Org> =
+            all_orgs.iter().map(|o| (o.id, o)).collect();
+        let mut collected: HashMap<i64, Org> = HashMap::new();
 
         for org in &matched {
             let mut current = Some(org);
@@ -72,28 +71,28 @@ impl OrgService {
                 if collected.contains_key(&o.id) {
                     break;
                 }
-                collected.insert(o.id.clone(), o.clone());
-                current = o.parent_id.as_ref().and_then(|pid| {
-                    if pid.is_empty() || pid == &o.id {
+                collected.insert(o.id, o.clone());
+                current = o.parent_id.and_then(|pid| {
+                    if pid == 0 || pid == o.id {
                         None
                     } else {
-                        all_id_map.get(pid).copied()
+                        all_id_map.get(&pid).copied()
                     }
                 });
             }
 
-            let mut queue: Vec<String> = vec![org.id.clone()];
+            let mut queue: Vec<i64> = vec![org.id];
             let mut idx = 0;
             while idx < queue.len() {
-                let parent_id = queue[idx].clone();
+                let parent_id = queue[idx];
                 idx += 1;
                 for o in &all_orgs {
                     if let Some(ref pid) = o.parent_id
-                        && pid == &parent_id
+                        && *pid == parent_id
                         && !collected.contains_key(&o.id)
                     {
-                        collected.insert(o.id.clone(), o.clone());
-                        queue.push(o.id.clone());
+                        collected.insert(o.id, o.clone());
+                        queue.push(o.id);
                     }
                 }
             }
@@ -106,14 +105,14 @@ impl OrgService {
         Ok(build_org_tree(dtos))
     }
 
-    pub async fn get_orgs_by_parent(&self, parent_id: Option<&str>) -> Result<Vec<Org>, AppError> {
+    pub async fn get_orgs_by_parent(&self, parent_id: Option<i64>) -> Result<Vec<Org>, AppError> {
         self.org_repo
             .find_by_parent_id(parent_id)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)
     }
 
-    pub async fn update_org(&self, id: &str, req: UpdateOrgRequest) -> Result<Org, AppError> {
+    pub async fn update_org(&self, id: &i64, req: UpdateOrgRequest) -> Result<Org, AppError> {
         self.org_repo
             .update(id, &req)
             .await
@@ -121,7 +120,7 @@ impl OrgService {
             .ok_or_else(|| AppError::NotFound(format!("Org with id {} not found", id)))
     }
 
-    pub async fn delete_org(&self, id: &str) -> Result<(), AppError> {
+    pub async fn delete_org(&self, id: &i64) -> Result<(), AppError> {
         let deleted = self
             .org_repo
             .delete(id)
@@ -132,5 +131,13 @@ impl OrgService {
             return Err(AppError::NotFound(format!("Org with id {} not found", id)));
         }
         Ok(())
+    }
+
+    async fn generate_id(&self) -> i64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
     }
 }

@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Serialize, Deserialize)]
 #[sea_orm(table_name = "p_sys_user")]
 pub struct Model {
-    #[sea_orm(primary_key, column_name = "id", column_type = "Text")]
-    pub id: String,
+    #[sea_orm(primary_key, column_name = "id")]
+    pub id: i64,
     #[sea_orm(column_name = "username", column_type = "Text")]
     pub username: String,
     #[sea_orm(column_name = "phone", column_type = "Text", nullable)]
@@ -17,8 +17,8 @@ pub struct Model {
     pub real_name: Option<String>,
     #[sea_orm(column_name = "password", column_type = "Text", nullable)]
     pub password: Option<String>,
-    #[sea_orm(column_name = "org_id", column_type = "Text", nullable)]
-    pub org_id: Option<String>,
+    #[sea_orm(column_name = "org_id", column_type = "Integer", nullable)]
+    pub org_id: i64,
     #[sea_orm(column_name = "lock_time", column_type = "Timestamp", nullable)]
     pub lock_time: Option<DateTime<Utc>>,
     #[sea_orm(column_name = "last_login_time", column_type = "Timestamp", nullable)]

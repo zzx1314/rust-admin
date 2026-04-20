@@ -59,9 +59,9 @@ fn default_size() -> i64 {
 }
 
 impl CreateRoleRequest {
-    pub fn to_active_model(&self, id: &str) -> RoleActiveModel {
+    pub fn to_active_model(&self, id: i64) -> RoleActiveModel {
         RoleActiveModel {
-            id: ActiveValue::set(id.to_string()),
+            id: ActiveValue::set(id),
             name: ActiveValue::set(self.name.clone()),
             code: ActiveValue::set(self.code.clone()),
             description: ActiveValue::set(self.description.clone()),
@@ -78,9 +78,9 @@ impl CreateRoleRequest {
 }
 
 impl UpdateRoleRequest {
-    pub fn to_active_model(&self, id: &str) -> RoleActiveModel {
+    pub fn to_active_model(&self, id: i64) -> RoleActiveModel {
         RoleActiveModel {
-            id: ActiveValue::unchanged(id.to_string()),
+            id: ActiveValue::unchanged(id),
             name: set_string(self.name.clone()),
             code: set_opt_string(self.code.clone()),
             description: set_opt_string(self.description.clone()),
