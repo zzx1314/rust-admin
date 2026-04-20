@@ -7,5 +7,5 @@ type Result = {
 };
 
 export const getAsyncRoutes = () => {
-  return http.request<Result>("get", "/api/sysMenu");
+  return http.request<Result>("get", "/api/sysMenu/user-menu");
 };

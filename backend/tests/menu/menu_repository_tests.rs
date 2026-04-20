@@ -1,7 +1,7 @@
 use sea_orm::Database;
 use uuid::Uuid;
 use x_rust::common::traits::MenuRepository;
-use x_rust::menu::domain::{CreateMenuRequest, UpdateMenuRequest};
+use x_rust::menu::domain::{build_menu_tree, CreateMenuRequest, MenuTree, UpdateMenuRequest};
 use x_rust::menu::repository::SeaOrmMenuRepository;
 
 fn uid() -> String {
@@ -57,7 +57,7 @@ impl TestDb {
                 leaf INTEGER DEFAULT 0,
                 role_code TEXT,
                 disabled INTEGER DEFAULT 0,
-                find_auth_id INTEGER
+                find_auth_id TEXT
             )"
         )
         .execute(&pool)
@@ -132,7 +132,7 @@ async fn test_menu_repo_create_and_find() {
         leaf: Some(true),
         role_code: Some("admin".to_string()),
         disabled: Some(false),
-        find_auth_id: Some(1),
+        find_auth_id: Some("1".to_string()),
     };
 
     let created_menu = repo.create(&req, &id).await.unwrap();
@@ -155,7 +155,7 @@ async fn test_menu_repo_create_and_find() {
     assert_eq!(found_menu.leaf, Some(true));
     assert_eq!(found_menu.role_code, Some("admin".to_string()));
     assert_eq!(found_menu.disabled, Some(false));
-    assert_eq!(found_menu.find_auth_id, Some(1));
+    assert_eq!(found_menu.find_auth_id, Some("1".to_string()));
     assert_eq!(found_menu.create_time, created_menu.create_time);
     assert_eq!(found_menu.update_time, created_menu.update_time);
 }
@@ -385,7 +385,7 @@ async fn test_menu_repo_update() {
         leaf: Some(true),
         role_code: Some("new-role".to_string()),
         disabled: Some(true),
-        find_auth_id: Some(2),
+        find_auth_id: Some("2".to_string()),
     };
 
     let updated_menu = repo.update(&id, &update_req).await.unwrap().unwrap();
@@ -404,7 +404,7 @@ async fn test_menu_repo_update() {
     assert_eq!(updated_menu.leaf, Some(true));
     assert_eq!(updated_menu.role_code, Some("new-role".to_string()));
     assert_eq!(updated_menu.disabled, Some(true));
-    assert_eq!(updated_menu.find_auth_id, Some(2));
+    assert_eq!(updated_menu.find_auth_id, Some("2".to_string()));
 }
 
 #[tokio::test]
@@ -511,3 +511,56 @@ async fn test_menu_repo_create_with_minimal_fields() {
     assert_eq!(created.name, "Minimal Menu");
     assert_eq!(created.is_deleted, 0);
 }
+
+#[tokio::test]
+async fn test_build_menu_tree_with_minus_one_parent() {
+    let root = MenuTree {
+        id: "1000".to_string(),
+        name: "系统管理".to_string(),
+        code: None,
+        permission: None,
+        path_url: Some("/system".to_string()),
+        icon: Some("ri:settings-3-line".to_string()),
+        parent_id: Some("-1".to_string()),
+        component: None,
+        sort: Some(1),
+        keep_alive: Some(0),
+        r#type: Some(1),
+        remarks: None,
+        leaf: Some(false),
+        disabled: Some(false),
+        meta: None,
+        children: None,
+    };
+
+    let child = MenuTree {
+        id: "1001".to_string(),
+        name: "用户管理".to_string(),
+        code: None,
+        permission: None,
+        path_url: Some("/system/user".to_string()),
+        icon: Some("ri:user-line".to_string()),
+        parent_id: Some("1000".to_string()),
+        component: None,
+        sort: Some(1),
+        keep_alive: Some(0),
+        r#type: Some(1),
+        remarks: None,
+        leaf: Some(true),
+        disabled: Some(false),
+        meta: None,
+        children: None,
+    };
+
+    let tree = build_menu_tree(vec![root, child]);
+
+    assert_eq!(tree.len(), 1, "Should have 1 root");
+    let root_node = &tree[0];
+    assert_eq!(root_node.id, "1000", "Root id should match");
+
+    assert!(root_node.children.is_some(), "Root should have children");
+    let children = root_node.children.as_ref().unwrap();
+    assert_eq!(children.len(), 1, "Root should have 1 child");
+    assert_eq!(children[0].id, "1001", "Child should be 用户管理");
+}
+

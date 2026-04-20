@@ -115,6 +115,10 @@ impl MenuService {
             .into_iter()
             .map(|m| {
                 let mut vo = MenuVo::from(m);
+                let roles = vo
+                    .role_code
+                    .as_ref()
+                    .map(|rc| rc.split(',').map(|s| s.trim().to_string()).collect());
                 if let Some(auths) = buttons_by_parent.get(&vo.id) {
                     vo.meta = Some(MenuMeta {
                         icon: vo.icon.clone(),
@@ -122,6 +126,7 @@ impl MenuService {
                         show_parent: vo.leaf,
                         title: Some(vo.name.clone()),
                         auths: Some(auths.clone()),
+                        roles,
                     });
                 } else {
                     vo.meta = Some(MenuMeta {
@@ -130,6 +135,7 @@ impl MenuService {
                         show_parent: vo.leaf,
                         title: Some(vo.name.clone()),
                         auths: None,
+                        roles,
                     });
                 }
                 vo

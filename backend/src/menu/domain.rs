@@ -48,9 +48,11 @@ pub struct UpdateMenuRequest {
 pub struct MenuMeta {
     pub icon: Option<String>,
     pub rank: Option<i32>,
+    #[serde(rename = "showParent")]
     pub show_parent: Option<bool>,
     pub title: Option<String>,
     pub auths: Option<Vec<String>>,
+    pub roles: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -69,6 +71,7 @@ pub struct MenuVo {
     pub remarks: Option<String>,
     pub leaf: Option<bool>,
     pub disabled: Option<bool>,
+    pub role_code: Option<String>,
     pub meta: Option<MenuMeta>,
 }
 
@@ -89,6 +92,7 @@ impl From<Menu> for MenuVo {
             remarks: menu.remarks,
             leaf: menu.leaf,
             disabled: menu.disabled,
+            role_code: menu.role_code,
             meta: None,
         }
     }
@@ -100,8 +104,10 @@ pub struct MenuTree {
     pub name: String,
     pub code: Option<String>,
     pub permission: Option<String>,
+    #[serde(rename = "path")]
     pub path_url: Option<String>,
     pub icon: Option<String>,
+    #[serde(rename = "parentId")]
     pub parent_id: Option<String>,
     pub component: Option<String>,
     pub sort: Option<i32>,
@@ -137,22 +143,19 @@ impl From<MenuVo> for MenuTree {
     }
 }
 
-pub fn build_menu_tree(menus: Vec<MenuTree>) -> Vec<MenuTree> {
+pub fn build_menu_tree(menu_trees: Vec<MenuTree>) -> Vec<MenuTree> {
     let mut id_map: std::collections::HashMap<String, MenuTree> = std::collections::HashMap::new();
     let mut roots: Vec<MenuTree> = Vec::new();
 
-    for menu in &menus {
+    for menu in &menu_trees {
         id_map.insert(menu.id.clone(), menu.clone());
     }
 
-    for menu in menus {
-        match &menu.parent_id {
-            Some(pid) if !pid.is_empty() => {
-                if let Some(parent) = id_map.get_mut(pid) {
-                    if parent.children.is_none() {
-                        parent.children = Some(Vec::new());
-                    }
-                    parent.children.as_mut().unwrap().push(menu);
+    for menu in menu_trees {
+        let pid = menu.parent_id.clone();
+        match &pid {
+            Some(p) if !p.is_empty() && p != "-1" => {
+                if id_map.contains_key(p) {
                 } else {
                     roots.push(menu);
                 }
@@ -163,32 +166,41 @@ pub fn build_menu_tree(menus: Vec<MenuTree>) -> Vec<MenuTree> {
         }
     }
 
-    roots.sort_by(|a, b| {
-        a.meta
-            .as_ref()
-            .and_then(|m| m.rank)
-            .unwrap_or(0)
-            .cmp(&b.meta.as_ref().and_then(|m| m.rank).unwrap_or(0))
-    });
+    fn attach_children(menu: &mut MenuTree, id_map: &std::collections::HashMap<String, MenuTree>) {
+        let children_ids: Vec<String> = id_map
+            .iter()
+            .filter(|(_, m)| m.parent_id.as_ref() == Some(&menu.id))
+            .map(|(k, _)| k.clone())
+            .collect();
 
-    fn sort_children(nodes: &mut [MenuTree]) {
-        for node in nodes.iter_mut() {
-            if let Some(children) = &mut node.children {
-                children.sort_by(|a, b| {
-                    a.meta
-                        .as_ref()
-                        .and_then(|m| m.rank)
-                        .unwrap_or(0)
-                        .cmp(&b.meta.as_ref().and_then(|m| m.rank).unwrap_or(0))
-                });
-                sort_children(children);
+        if !children_ids.is_empty() {
+            let mut children = Vec::new();
+            for cid in children_ids {
+                if let Some(mut child) = id_map.get(&cid).cloned() {
+                    attach_children(&mut child, id_map);
+                    children.push(child);
+                }
             }
+            children.sort_by(|a, b| {
+                a.meta.as_ref().and_then(|m| m.rank).unwrap_or(0)
+                    .cmp(&b.meta.as_ref().and_then(|m| m.rank).unwrap_or(0))
+            });
+            menu.children = Some(children);
         }
     }
 
-    sort_children(&mut roots);
+    for root in &mut roots {
+        attach_children(root, &id_map);
+    }
+
+    roots.sort_by(|a, b| {
+        a.meta.as_ref().and_then(|m| m.rank).unwrap_or(0)
+            .cmp(&b.meta.as_ref().and_then(|m| m.rank).unwrap_or(0))
+    });
+
     roots
 }
+
 
 impl CreateMenuRequest {
     pub fn to_active_model(&self, id: &str, now: DateTime<Utc>) -> MenuActiveModel {
