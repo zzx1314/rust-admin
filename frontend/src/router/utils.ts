@@ -375,11 +375,22 @@ function addAsyncRoutes(arrRoutes: Array<RouteRecordRaw>) {
     if (v.meta?.frameSrc) {
       v.component = IFrame;
     } else {
-      // 对后端传component组件路径和不传做兼容（如果后端传component组件路径，那么path可以随便写，如果不传，component组件路径会跟path保持一致）
       const index = v?.component
-        ? modulesRoutesKeys.findIndex(ev => ev.includes(v.component as any))
-        : modulesRoutesKeys.findIndex(ev => ev.includes(v.path));
-      v.component = modulesRoutes[modulesRoutesKeys[index]];
+        ? modulesRoutesKeys.findIndex(
+            ev => ev.includes(v.component as any) && ev.endsWith("index.vue")
+          )
+        : modulesRoutesKeys.findIndex(
+            ev => ev.includes(v.path) && ev.endsWith("index.vue")
+          );
+
+      if (index !== -1) {
+        v.component = modulesRoutes[modulesRoutesKeys[index]];
+      } else {
+        // 父级目录路由找不到组件，component 置空让 Vue Router 走默认渲染
+        // 或者赋值为 Layout 组件，取决于你的路由结构
+        console.warn(`路由 ${String(v.name)} 未找到对应组件，path: ${v.path}`);
+        v.component = undefined;
+      }
     }
     if (v?.children && v.children.length) {
       addAsyncRoutes(v.children);
