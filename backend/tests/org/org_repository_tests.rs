@@ -35,10 +35,10 @@ impl TestDb {
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS p_sys_org (
-                id TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
                 sort INTEGER DEFAULT 0,
-                parent_id TEXT,
+                parent_id INTEGER,
                 create_time TEXT NOT NULL,
                 update_time TEXT NOT NULL,
                 is_deleted INTEGER DEFAULT 0,
@@ -87,11 +87,11 @@ async fn test_org_repo_create_and_find() {
         remarks: None,
     };
 
-    let created_org = repo.create(&req, "org-1").await.unwrap();
+    let created_org = repo.create(&req, &1i64).await.unwrap();
 
-    let found_org = repo.find_by_id("org-1").await.unwrap().unwrap();
+    let found_org = repo.find_by_id(&1i64).await.unwrap().unwrap();
 
-    assert_eq!(found_org.id, "org-1");
+    assert_eq!(found_org.id, 1);
     assert_eq!(found_org.name, "Engineering");
     assert_eq!(found_org.sort, Some(1));
     assert_eq!(found_org.r#type, Some("department".to_string()));
@@ -115,7 +115,7 @@ async fn test_org_repo_find_all() {
         is_out: None,
         remarks: None,
     };
-    repo.create(&req1, "o1").await.unwrap();
+    repo.create(&req1, &1i64).await.unwrap();
 
     let req2 = CreateOrgRequest {
         name: "Org 2".to_string(),
@@ -128,13 +128,13 @@ async fn test_org_repo_find_all() {
         is_out: None,
         remarks: None,
     };
-    repo.create(&req2, "o2").await.unwrap();
+    repo.create(&req2, &2i64).await.unwrap();
 
     let orgs = repo.find_all().await.unwrap();
 
     assert_eq!(orgs.len(), 2);
-    assert!(orgs.iter().any(|o| o.id == "o1" && o.name == "Org 1"));
-    assert!(orgs.iter().any(|o| o.id == "o2" && o.name == "Org 2"));
+    assert!(orgs.iter().any(|o| o.id == 1 && o.name == "Org 1"));
+    assert!(orgs.iter().any(|o| o.id == 2 && o.name == "Org 2"));
 }
 
 #[tokio::test]
@@ -153,12 +153,12 @@ async fn test_org_repo_find_tree() {
         is_out: None,
         remarks: None,
     };
-    repo.create(&req1, "root").await.unwrap();
+    repo.create(&req1, &1i64).await.unwrap();
 
     let req2 = CreateOrgRequest {
         name: "Child".to_string(),
         sort: Some(2),
-        parent_id: Some("root".to_string()),
+        parent_id: Some(1),
         parent_name: Some("Root".to_string()),
         org_duty: None,
         desrc: None,
@@ -166,7 +166,7 @@ async fn test_org_repo_find_tree() {
         is_out: None,
         remarks: None,
     };
-    repo.create(&req2, "child").await.unwrap();
+    repo.create(&req2, &2i64).await.unwrap();
 
     let tree = repo.find_tree().await.unwrap();
     assert_eq!(tree.len(), 2);
@@ -189,7 +189,7 @@ async fn test_org_repo_find_tree_with_filter_no_filter() {
             is_out: None,
             remarks: None,
         },
-        "a",
+        &1i64,
     )
     .await
     .unwrap();
@@ -206,7 +206,7 @@ async fn test_org_repo_find_tree_with_filter_no_filter() {
             is_out: None,
             remarks: None,
         },
-        "b",
+        &2i64,
     )
     .await
     .unwrap();
@@ -236,7 +236,7 @@ async fn test_org_repo_find_tree_with_filter_name() {
             is_out: None,
             remarks: None,
         },
-        "eng",
+        &1i64,
     )
     .await
     .unwrap();
@@ -253,7 +253,7 @@ async fn test_org_repo_find_tree_with_filter_name() {
             is_out: None,
             remarks: None,
         },
-        "sales",
+        &2i64,
     )
     .await
     .unwrap();
@@ -284,7 +284,7 @@ async fn test_org_repo_find_tree_with_filter_type() {
             is_out: None,
             remarks: None,
         },
-        "c",
+        &1i64,
     )
     .await
     .unwrap();
@@ -301,7 +301,7 @@ async fn test_org_repo_find_tree_with_filter_type() {
             is_out: None,
             remarks: None,
         },
-        "d",
+        &2i64,
     )
     .await
     .unwrap();
@@ -332,7 +332,7 @@ async fn test_org_repo_find_tree_with_filter_combined() {
             is_out: None,
             remarks: None,
         },
-        "eng",
+        &1i64,
     )
     .await
     .unwrap();
@@ -349,7 +349,7 @@ async fn test_org_repo_find_tree_with_filter_combined() {
             is_out: None,
             remarks: None,
         },
-        "sales",
+        &2i64,
     )
     .await
     .unwrap();
@@ -366,7 +366,7 @@ async fn test_org_repo_find_tree_with_filter_combined() {
             is_out: None,
             remarks: None,
         },
-        "mkt",
+        &3i64,
     )
     .await
     .unwrap();
@@ -396,7 +396,7 @@ async fn test_org_repo_find_by_parent_id() {
             is_out: None,
             remarks: None,
         },
-        "parent",
+        &1i64,
     )
     .await
     .unwrap();
@@ -405,7 +405,7 @@ async fn test_org_repo_find_by_parent_id() {
         &CreateOrgRequest {
             name: "Child 1".to_string(),
             sort: Some(2),
-            parent_id: Some("parent".to_string()),
+            parent_id: Some(1i64),
             parent_name: Some("Parent".to_string()),
             org_duty: None,
             desrc: None,
@@ -413,7 +413,7 @@ async fn test_org_repo_find_by_parent_id() {
             is_out: None,
             remarks: None,
         },
-        "child1",
+        &2i64,
     )
     .await
     .unwrap();
@@ -422,7 +422,7 @@ async fn test_org_repo_find_by_parent_id() {
         &CreateOrgRequest {
             name: "Child 2".to_string(),
             sort: Some(3),
-            parent_id: Some("parent".to_string()),
+            parent_id: Some(1i64),
             parent_name: Some("Parent".to_string()),
             org_duty: None,
             desrc: None,
@@ -430,12 +430,12 @@ async fn test_org_repo_find_by_parent_id() {
             is_out: None,
             remarks: None,
         },
-        "child2",
+        &3i64,
     )
     .await
     .unwrap();
 
-    let children = repo.find_by_parent_id(Some("parent")).await.unwrap();
+    let children = repo.find_by_parent_id(Some(1)).await.unwrap();
     assert_eq!(children.len(), 2);
 }
 
@@ -456,7 +456,7 @@ async fn test_org_repo_update() {
             is_out: None,
             remarks: None,
         },
-        "org-1",
+        &1i64,
     )
     .await
     .unwrap();
@@ -473,7 +473,7 @@ async fn test_org_repo_update() {
         remarks: None,
     };
 
-    let updated_org = repo.update("org-1", &update_req).await.unwrap().unwrap();
+    let updated_org = repo.update(&1i64, &update_req).await.unwrap().unwrap();
 
     assert_eq!(updated_org.name, "Updated");
     assert_eq!(updated_org.sort, Some(10));
@@ -497,7 +497,7 @@ async fn test_org_repo_update_not_found() {
         remarks: None,
     };
 
-    let result = repo.update("nonexistent", &update_req).await.unwrap();
+    let result = repo.update(&9999i64, &update_req).await.unwrap();
     assert!(result.is_none());
 }
 
@@ -518,15 +518,15 @@ async fn test_org_repo_delete() {
             is_out: None,
             remarks: None,
         },
-        "org-del",
+        &1i64,
     )
     .await
     .unwrap();
 
-    let deleted = repo.delete("org-del").await.unwrap();
+    let deleted = repo.delete(&1i64).await.unwrap();
     assert!(deleted);
 
-    let found = repo.find_by_id("org-del").await.unwrap();
+    let found = repo.find_by_id(&1i64).await.unwrap();
     assert!(found.is_none());
 }
 
@@ -535,6 +535,6 @@ async fn test_org_repo_delete_not_found() {
     let test_db = TestDb::new().await;
     let repo = SeaOrmOrgRepository::new(test_db.conn.clone().into());
 
-    let deleted = repo.delete("nonexistent").await.unwrap();
+    let deleted = repo.delete(&9999i64).await.unwrap();
     assert!(!deleted);
 }

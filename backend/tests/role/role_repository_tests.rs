@@ -37,12 +37,12 @@ impl TestDb {
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS p_sys_user (
-                id TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY,
                 username TEXT NOT NULL,
                 email TEXT,
                 phone TEXT,
                 password TEXT,
-                org_id TEXT,
+                org_id INTEGER,
                 lock_time TEXT,
                 last_login_time TEXT,
                 try_count INTEGER DEFAULT 0,
@@ -66,7 +66,7 @@ impl TestDb {
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS p_sys_role (
-                id TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
                 code TEXT,
                 create_time TEXT NOT NULL,
@@ -85,8 +85,8 @@ impl TestDb {
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS p_sys_user_role (
-                user_id TEXT NOT NULL,
-                role_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                role_id INTEGER NOT NULL,
                 PRIMARY KEY (user_id, role_id)
             )"
         )
@@ -115,7 +115,7 @@ async fn test_role_repo_create_and_find() {
     let test_db = TestDb::new().await;
     let repo = SeaOrmRoleRepository::new(test_db.conn.clone().into());
 
-    let id = "role-1";
+    let id = 1i64;
     let req = CreateRoleRequest {
         name: "Admin".to_string(),
         code: Some("ADMIN".to_string()),
@@ -125,9 +125,9 @@ async fn test_role_repo_create_and_find() {
         ds_scope: None,
     };
 
-    let created_role = repo.create(&req, id).await.unwrap();
+    let created_role = repo.create(&req, &id).await.unwrap();
 
-    let found_role = repo.find_by_id(id).await.unwrap().unwrap();
+    let found_role = repo.find_by_id(&id).await.unwrap().unwrap();
 
     assert_eq!(found_role.id, id);
     assert_eq!(found_role.name, "Admin");
@@ -145,7 +145,7 @@ async fn test_role_repo_find_users_by_role() {
     let repo = SeaOrmRoleRepository::new(test_db.conn.clone().into());
     let user_repo = SeaOrmUserRepository::new(test_db.conn.clone().into());
 
-    let role_id = "role-1";
+    let role_id = 1i64;
     let role_req = CreateRoleRequest {
         name: "Admin".to_string(),
         code: None,
@@ -154,7 +154,7 @@ async fn test_role_repo_find_users_by_role() {
         ds_type: None,
         ds_scope: None,
     };
-    repo.create(&role_req, role_id).await.unwrap();
+    repo.create(&role_req, &role_id).await.unwrap();
 
     let user_req1 = CreateUserRequest {
         username: "johndoe".to_string(),
@@ -162,12 +162,12 @@ async fn test_role_repo_find_users_by_role() {
         email: Some("john@example.com".to_string()),
         real_name: Some("John Doe".to_string()),
         password: None,
-        org_id: None,
+        org_id: 1,
         remarks: None,
         card: None,
         sex: None,
     };
-    let user1 = user_repo.create(&user_req1, "1").await.unwrap();
+    let user1 = user_repo.create(&user_req1, &1i64).await.unwrap();
     let user_id1 = user1.id;
 
     let user_req2 = CreateUserRequest {
@@ -176,18 +176,18 @@ async fn test_role_repo_find_users_by_role() {
         email: Some("jane@example.com".to_string()),
         real_name: Some("Jane Smith".to_string()),
         password: None,
-        org_id: None,
+        org_id: 1,
         remarks: None,
         card: None,
         sex: None,
     };
-    let user2 = user_repo.create(&user_req2, "2").await.unwrap();
+    let user2 = user_repo.create(&user_req2, &2i64).await.unwrap();
     let user_id2 = user2.id;
 
-    repo.assign_role_to_user(&user_id1, role_id).await.unwrap();
-    repo.assign_role_to_user(&user_id2, role_id).await.unwrap();
+    repo.assign_role_to_user(&user_id1, &role_id).await.unwrap();
+    repo.assign_role_to_user(&user_id2, &role_id).await.unwrap();
 
-    let users = repo.find_users_by_role_id(role_id).await.unwrap();
+    let users = repo.find_users_by_role_id(&role_id).await.unwrap();
 
     assert_eq!(users.len(), 2);
     assert!(users.iter().any(|u| u.id == user_id1
@@ -203,7 +203,7 @@ async fn test_role_repo_find_all() {
     let test_db = TestDb::new().await;
     let repo = SeaOrmRoleRepository::new(test_db.conn.clone().into());
 
-    let id1 = "role-1";
+    let id1 = 1i64;
     let req1 = CreateRoleRequest {
         name: "Admin".to_string(),
         code: None,
@@ -212,9 +212,9 @@ async fn test_role_repo_find_all() {
         ds_type: None,
         ds_scope: None,
     };
-    repo.create(&req1, id1).await.unwrap();
+    repo.create(&req1, &id1).await.unwrap();
 
-    let id2 = "role-2";
+    let id2 = 2i64;
     let req2 = CreateRoleRequest {
         name: "User".to_string(),
         code: None,
@@ -223,7 +223,7 @@ async fn test_role_repo_find_all() {
         ds_type: None,
         ds_scope: None,
     };
-    repo.create(&req2, id2).await.unwrap();
+    repo.create(&req2, &id2).await.unwrap();
 
     let roles = repo.find_all().await.unwrap();
 
@@ -241,7 +241,7 @@ async fn test_role_repo_update() {
     let test_db = TestDb::new().await;
     let repo = SeaOrmRoleRepository::new(test_db.conn.clone().into());
 
-    let id = "role-1";
+    let id = 1i64;
     let req = CreateRoleRequest {
         name: "Admin".to_string(),
         code: None,
@@ -250,7 +250,7 @@ async fn test_role_repo_update() {
         ds_type: None,
         ds_scope: None,
     };
-    repo.create(&req, id).await.unwrap();
+    repo.create(&req, &id).await.unwrap();
 
     let update_req = UpdateRoleRequest {
         name: Some("Super Admin".to_string()),
@@ -262,7 +262,7 @@ async fn test_role_repo_update() {
         ds_scope: None,
     };
 
-    let updated_role = repo.update(id, &update_req).await.unwrap().unwrap();
+    let updated_role = repo.update(&id, &update_req).await.unwrap().unwrap();
 
     assert_eq!(updated_role.name, "Super Admin");
     assert_eq!(
@@ -284,15 +284,15 @@ async fn test_role_repo_assign_and_remove() {
         email: Some("john@example.com".to_string()),
         real_name: Some("John Doe".to_string()),
         password: None,
-        org_id: None,
+        org_id: 1,
         remarks: None,
         card: None,
         sex: None,
     };
-    let user = user_repo.create(&user_req, "1").await.unwrap();
-    let user_id_str = user.id;
+    let user = user_repo.create(&user_req, &1i64).await.unwrap();
+    let user_id = user.id;
 
-    let role_id = "role-1";
+    let role_id = 1i64;
     let role_req = CreateRoleRequest {
         name: "Admin".to_string(),
         code: None,
@@ -301,23 +301,23 @@ async fn test_role_repo_assign_and_remove() {
         ds_type: None,
         ds_scope: None,
     };
-    repo.create(&role_req, role_id).await.unwrap();
+    repo.create(&role_req, &role_id).await.unwrap();
 
-    repo.assign_role_to_user(&user_id_str, role_id)
+    repo.assign_role_to_user(&user_id, &role_id)
         .await
         .unwrap();
 
-    let roles = repo.find_roles_by_user_id(&user_id_str).await.unwrap();
+    let roles = repo.find_roles_by_user_id(&user_id).await.unwrap();
     assert_eq!(roles.len(), 1);
     assert_eq!(roles[0].id, role_id);
 
     let removed = repo
-        .remove_role_from_user(&user_id_str, role_id)
+        .remove_role_from_user(&user_id, &role_id)
         .await
         .unwrap();
     assert!(removed);
 
-    let roles_after = repo.find_roles_by_user_id(&user_id_str).await.unwrap();
+    let roles_after = repo.find_roles_by_user_id(&user_id).await.unwrap();
     assert!(roles_after.is_empty());
 }
 
@@ -333,15 +333,15 @@ async fn test_role_repo_find_roles_by_user() {
         email: Some("john@example.com".to_string()),
         real_name: None,
         password: None,
-        org_id: None,
+        org_id: 1,
         remarks: None,
         card: None,
         sex: None,
     };
-    let user = user_repo.create(&user_req, "1").await.unwrap();
-    let user_id_str = user.id;
+    let user = user_repo.create(&user_req, &1i64).await.unwrap();
+    let user_id = user.id;
 
-    let role_id1 = "role-1";
+    let role_id1 = 1i64;
     let role_req1 = CreateRoleRequest {
         name: "Admin".to_string(),
         code: None,
@@ -350,9 +350,9 @@ async fn test_role_repo_find_roles_by_user() {
         ds_type: None,
         ds_scope: None,
     };
-    repo.create(&role_req1, role_id1).await.unwrap();
+    repo.create(&role_req1, &role_id1).await.unwrap();
 
-    let role_id2 = "role-2";
+    let role_id2 = 2i64;
     let role_req2 = CreateRoleRequest {
         name: "User".to_string(),
         code: None,
@@ -361,16 +361,16 @@ async fn test_role_repo_find_roles_by_user() {
         ds_type: None,
         ds_scope: None,
     };
-    repo.create(&role_req2, role_id2).await.unwrap();
+    repo.create(&role_req2, &role_id2).await.unwrap();
 
-    repo.assign_role_to_user(&user_id_str, role_id1)
+    repo.assign_role_to_user(&user_id, &role_id1)
         .await
         .unwrap();
-    repo.assign_role_to_user(&user_id_str, role_id2)
+    repo.assign_role_to_user(&user_id, &role_id2)
         .await
         .unwrap();
 
-    let roles = repo.find_roles_by_user_id(&user_id_str).await.unwrap();
+    let roles = repo.find_roles_by_user_id(&user_id).await.unwrap();
 
     assert_eq!(roles.len(), 2);
     assert!(roles.iter().any(|r| r.id == role_id1 && r.name == "Admin"));
@@ -382,7 +382,7 @@ async fn test_role_repo_delete() {
     let test_db = TestDb::new().await;
     let repo = SeaOrmRoleRepository::new(test_db.conn.clone().into());
 
-    let id = "role-1";
+    let id = 1i64;
     let req = CreateRoleRequest {
         name: "Admin".to_string(),
         code: None,
@@ -391,11 +391,11 @@ async fn test_role_repo_delete() {
         ds_type: None,
         ds_scope: None,
     };
-    repo.create(&req, id).await.unwrap();
+    repo.create(&req, &id).await.unwrap();
 
-    let deleted = repo.delete(id).await.unwrap();
+    let deleted = repo.delete(&id).await.unwrap();
     assert!(deleted);
 
-    let found_role = repo.find_by_id(id).await.unwrap();
+    let found_role = repo.find_by_id(&id).await.unwrap();
     assert!(found_role.is_none());
 }

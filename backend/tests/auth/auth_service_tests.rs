@@ -13,7 +13,7 @@ use x_rust::user::domain::{CreateUserRequest, User, UserPageQuery, UserVO};
 // ==================== Fake User Repository ====================
 
 struct FakeUserRepository {
-    users: Arc<Mutex<HashMap<String, User>>>,
+    users: Arc<Mutex<HashMap<i64, User>>>,
 }
 
 impl FakeUserRepository {
@@ -25,18 +25,18 @@ impl FakeUserRepository {
 
     #[allow(dead_code)]
     fn insert_user(&self, user: User) {
-        self.users.lock().unwrap().insert(user.id.clone(), user);
+        self.users.lock().unwrap().insert(user.id, user);
     }
 }
 
 impl UserRepository for FakeUserRepository {
-    fn create(&self, req: &CreateUserRequest, id: &str) -> DynFuture<SeaOrmResult<User>> {
+    fn create(&self, req: &CreateUserRequest, id: &i64) -> DynFuture<SeaOrmResult<User>> {
         let users = self.users.clone();
         let req = req.clone();
-        let id = id.to_string();
+        let id = *id;
         Box::pin(async move {
             let user = User {
-                id: id.clone(),
+                id,
                 username: req.username.clone(),
                 phone: req.phone.clone(),
                 email: req.email.clone(),
@@ -63,9 +63,9 @@ impl UserRepository for FakeUserRepository {
         })
     }
 
-    fn find_by_id(&self, id: &str) -> DynFuture<SeaOrmOptResult<User>> {
+    fn find_by_id(&self, id: &i64) -> DynFuture<SeaOrmOptResult<User>> {
         let users = self.users.clone();
-        let id = id.to_string();
+        let id = *id;
         Box::pin(async move { Ok(users.lock().unwrap().get(&id).cloned()) })
     }
 
@@ -102,16 +102,16 @@ impl UserRepository for FakeUserRepository {
 
     fn update(
         &self,
-        id: &str,
+        id: &i64,
         req: &x_rust::user::domain::UpdateUserRequest,
     ) -> DynFuture<SeaOrmOptResult<User>> {
         let users = self.users.clone();
-        let id = id.to_string();
+        let id = *id;
         let username = req.username.clone();
         let phone = req.phone.clone();
         let email = req.email.clone();
         let real_name = req.real_name.clone();
-        let org_id = req.org_id.clone();
+        let org_id = req.org_id;
         let remarks = req.remarks.clone();
         let card = req.card.clone();
         let is_show = req.is_show;
@@ -132,9 +132,7 @@ impl UserRepository for FakeUserRepository {
                 if let Some(v) = real_name {
                     user.real_name = Some(v);
                 }
-                if let Some(v) = org_id {
-                    user.org_id = Some(v);
-                }
+                user.org_id = org_id;
                 if let Some(v) = remarks {
                     user.remarks = Some(v);
                 }
@@ -158,9 +156,9 @@ impl UserRepository for FakeUserRepository {
         })
     }
 
-    fn delete(&self, id: &str) -> DynFuture<SeaOrmResult<bool>> {
+    fn delete(&self, id: &i64) -> DynFuture<SeaOrmResult<bool>> {
         let users = self.users.clone();
-        let id = id.to_string();
+        let id = *id;
         Box::pin(async move { Ok(users.lock().unwrap().remove(&id).is_some()) })
     }
 
@@ -221,10 +219,10 @@ impl TokenStore for FakeTokenStore {
 struct FakeRoleRepository;
 
 impl RoleRepository for FakeRoleRepository {
-    fn create(&self, _req: &CreateRoleRequest, _id: &str) -> DynFuture<SeaOrmResult<Role>> {
+    fn create(&self, _req: &CreateRoleRequest, _id: &i64) -> DynFuture<SeaOrmResult<Role>> {
         Box::pin(async move { unimplemented!() })
     }
-    fn find_by_id(&self, _id: &str) -> DynFuture<SeaOrmOptResult<Role>> {
+    fn find_by_id(&self, _id: &i64) -> DynFuture<SeaOrmOptResult<Role>> {
         Box::pin(async move { Ok(None) })
     }
     fn find_by_code(&self, _code: &str) -> DynFuture<SeaOrmOptResult<Role>> {
@@ -239,29 +237,29 @@ impl RoleRepository for FakeRoleRepository {
     ) -> DynFuture<SeaOrmResult<(Vec<Role>, i64)>> {
         Box::pin(async move { Ok((Vec::new(), 0)) })
     }
-    fn update(&self, _id: &str, _req: &UpdateRoleRequest) -> DynFuture<SeaOrmOptResult<Role>> {
+    fn update(&self, _id: &i64, _req: &UpdateRoleRequest) -> DynFuture<SeaOrmOptResult<Role>> {
         Box::pin(async move { Ok(None) })
     }
-    fn delete(&self, _id: &str) -> DynFuture<SeaOrmResult<bool>> {
+    fn delete(&self, _id: &i64) -> DynFuture<SeaOrmResult<bool>> {
         Box::pin(async move { Ok(false) })
     }
-    fn assign_role_to_user(&self, _user_id: &str, _role_id: &str) -> DynFuture<SeaOrmResult<()>> {
+    fn assign_role_to_user(&self, _user_id: &i64, _role_id: &i64) -> DynFuture<SeaOrmResult<()>> {
         Box::pin(async move { Ok(()) })
     }
     fn remove_role_from_user(
         &self,
-        _user_id: &str,
-        _role_id: &str,
+        _user_id: &i64,
+        _role_id: &i64,
     ) -> DynFuture<SeaOrmResult<bool>> {
         Box::pin(async move { Ok(false) })
     }
-    fn find_roles_by_user_id(&self, _user_id: &str) -> DynFuture<SeaOrmResult<Vec<Role>>> {
+    fn find_roles_by_user_id(&self, _user_id: &i64) -> DynFuture<SeaOrmResult<Vec<Role>>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
-    fn find_users_by_role_id(&self, _role_id: &str) -> DynFuture<SeaOrmResult<Vec<User>>> {
+    fn find_users_by_role_id(&self, _role_id: &i64) -> DynFuture<SeaOrmResult<Vec<User>>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
-    fn set_menus(&self, _role_id: &str, _menu_ids: &[String]) -> DynFuture<SeaOrmResult<()>> {
+    fn set_menus(&self, _role_id: &i64, _menu_ids: &[i64]) -> DynFuture<SeaOrmResult<()>> {
         Box::pin(async move { Ok(()) })
     }
 }
@@ -291,18 +289,18 @@ async fn test_login_success() {
         email: Some("test@example.com".to_string()),
         real_name: Some("Test User".to_string()),
         password: Some(password_hash),
-        org_id: None,
+        org_id: 0,
         remarks: None,
         card: None,
         sex: None,
     };
-    user_repo.create(&req, "1").await.unwrap();
+    user_repo.create(&req, &1i64).await.unwrap();
 
     let result = service.login("testuser", "password123").await.unwrap();
     assert!(!result.access_token.is_empty());
     assert!(!result.refresh_token.is_empty());
     assert_eq!(result.token_type, "Bearer");
-    assert_eq!(result.user.id, "1");
+    assert_eq!(result.user.id, 1);
     assert_eq!(result.user.username, "testuser");
 
     let stored = token_store.get_token("1").await.unwrap();
@@ -332,12 +330,12 @@ async fn test_login_wrong_password() {
         email: Some("test@example.com".to_string()),
         real_name: None,
         password: Some(password_hash),
-        org_id: None,
+        org_id: 0,
         remarks: None,
         card: None,
         sex: None,
     };
-    user_repo.create(&req, "1").await.unwrap();
+    user_repo.create(&req, &1i64).await.unwrap();
 
     let result = service.login("testuser", "wrongpassword").await;
     assert!(matches!(result, Err(AppError::Unauthorized(_))));
@@ -355,12 +353,12 @@ async fn test_login_no_password_hash() {
         email: Some("test@example.com".to_string()),
         real_name: None,
         password: None,
-        org_id: None,
+        org_id: 0,
         remarks: None,
         card: None,
         sex: None,
     };
-    user_repo.create(&req, "1").await.unwrap();
+    user_repo.create(&req, &1).await.unwrap();
 
     let result = service.login("testuser", "password123").await;
     assert!(matches!(result, Err(AppError::Unauthorized(_))));
@@ -379,12 +377,12 @@ async fn test_logout_success() {
         email: Some("test@example.com".to_string()),
         real_name: None,
         password: Some(password_hash),
-        org_id: None,
+        org_id: 0,
         remarks: None,
         card: None,
         sex: None,
     };
-    user_repo.create(&req, "1").await.unwrap();
+    user_repo.create(&req, &1i64).await.unwrap();
 
     let login_result = service.login("testuser", "password123").await.unwrap();
     assert!(!login_result.access_token.is_empty());
@@ -392,7 +390,7 @@ async fn test_logout_success() {
     let stored = token_store.get_token("1").await.unwrap();
     assert!(stored.is_some());
 
-    service.logout("1").await.unwrap();
+    service.logout(1).await.unwrap();
 
     let stored = token_store.get_token("1").await.unwrap();
     assert!(stored.is_none());
@@ -411,18 +409,18 @@ async fn test_validate_token_success() {
         email: Some("test@example.com".to_string()),
         real_name: None,
         password: Some(password_hash),
-        org_id: None,
+        org_id: 0,
         remarks: None,
         card: None,
         sex: None,
     };
-    user_repo.create(&req, "1").await.unwrap();
+    user_repo.create(&req, &1i64).await.unwrap();
 
     let login_result = service.login("testuser", "password123").await.unwrap();
     let token = login_result.access_token;
 
     let user_id = service.validate_token(&token).await.unwrap();
-    assert_eq!(user_id, "1");
+    assert_eq!(user_id, 1);
 }
 
 #[tokio::test]
@@ -438,12 +436,12 @@ async fn test_validate_token_wrong_token() {
         email: Some("test@example.com".to_string()),
         real_name: None,
         password: Some(password_hash),
-        org_id: None,
+        org_id: 0,
         remarks: None,
         card: None,
         sex: None,
     };
-    user_repo.create(&req, "1").await.unwrap();
+    user_repo.create(&req, &1i64).await.unwrap();
 
     let login_result = service.login("testuser", "password123").await.unwrap();
 
@@ -469,12 +467,12 @@ async fn test_validate_token_no_stored_token() {
         email: Some("test@example.com".to_string()),
         real_name: None,
         password: Some(password_hash),
-        org_id: None,
+        org_id: 0,
         remarks: None,
         card: None,
         sex: None,
     };
-    user_repo.create(&req, "1").await.unwrap();
+    user_repo.create(&req, &1i64).await.unwrap();
 
     let login_result = service.login("testuser", "password123").await.unwrap();
     let token = login_result.access_token;
@@ -498,12 +496,12 @@ async fn test_refresh_token_success() {
         email: Some("test@example.com".to_string()),
         real_name: None,
         password: Some(password_hash),
-        org_id: None,
+        org_id: 0,
         remarks: None,
         card: None,
         sex: None,
     };
-    user_repo.create(&req, "1").await.unwrap();
+    user_repo.create(&req, &1i64).await.unwrap();
 
     let login_result = service.login("testuser", "password123").await.unwrap();
 
@@ -515,7 +513,7 @@ async fn test_refresh_token_success() {
     assert!(!refresh_result.access_token.is_empty());
     assert!(!refresh_result.refresh_token.is_empty());
     assert_eq!(refresh_result.token_type, "Bearer");
-    assert_eq!(refresh_result.user.id, "1");
+    assert_eq!(refresh_result.user.id, 1);
 
     let stored = token_store.get_token("1").await.unwrap();
     assert_eq!(stored, Some(refresh_result.access_token));
@@ -544,16 +542,16 @@ async fn test_refresh_token_user_not_found() {
         email: Some("test@example.com".to_string()),
         real_name: None,
         password: Some(password_hash),
-        org_id: None,
+        org_id: 0,
         remarks: None,
         card: None,
         sex: None,
     };
-    user_repo.create(&req, "1").await.unwrap();
+    user_repo.create(&req, &1i64).await.unwrap();
 
     let login_result = service.login("testuser", "password123").await.unwrap();
 
-    user_repo.delete("1").await.unwrap();
+    user_repo.delete(&1).await.unwrap();
 
     let result = service.refresh_token(&login_result.refresh_token).await;
     assert!(matches!(result, Err(AppError::Unauthorized(_))));

@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS p_sys_user (
     try_count INTEGER DEFAULT 0,
     lock_flag INTEGER DEFAULT 1,
     create_time TEXT NOT NULL,
-    update_time TEXT NOT NULL,
+    update_time TEXT,
     is_deleted INTEGER DEFAULT 0,
     remarks TEXT,
     real_name TEXT,
@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS p_sys_menu (
     leaf INTEGER DEFAULT 0,
     role_code TEXT,
     disabled INTEGER DEFAULT 0,
-    find_auth_id TEXT
+    find_auth_id INTEGER
 );
 
 -- 角色菜单关联表

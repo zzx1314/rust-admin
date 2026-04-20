@@ -7,7 +7,7 @@ use x_rust::org::domain::{CreateOrgRequest, Org, OrgTreeDto, OrgTreeQuery, Updat
 use x_rust::org::service::OrgService;
 
 struct FakeOrgRepository {
-    data: Arc<Mutex<HashMap<String, Org>>>,
+    data: Arc<Mutex<HashMap<i64, Org>>>,
 }
 
 fn flatten_org_tree_names(orgs: &[OrgTreeDto]) -> Vec<&str> {
@@ -30,12 +30,12 @@ impl FakeOrgRepository {
 }
 
 impl OrgRepository for FakeOrgRepository {
-    fn create(&self, req: &CreateOrgRequest, id: &str) -> DynFuture<SeaOrmResult<Org>> {
+    fn create(&self, req: &CreateOrgRequest, id: &i64) -> DynFuture<SeaOrmResult<Org>> {
         let data = self.data.clone();
-        let id = id.to_string();
+        let id_value = *id;
         let name = req.name.clone();
         let sort = req.sort;
-        let parent_id = req.parent_id.clone();
+        let parent_id = req.parent_id;
         let parent_name = req.parent_name.clone();
         let org_duty = req.org_duty.clone();
         let desrc = req.desrc.clone();
@@ -45,7 +45,7 @@ impl OrgRepository for FakeOrgRepository {
         Box::pin(async move {
             let now = Utc::now();
             let org = Org {
-                id: id.clone(),
+                id: id_value,
                 name,
                 sort,
                 parent_id,
@@ -59,14 +59,14 @@ impl OrgRepository for FakeOrgRepository {
                 is_deleted: 0,
                 remarks,
             };
-            data.lock().unwrap().insert(id, org.clone());
+            data.lock().unwrap().insert(id_value, org.clone());
             Ok(org)
         })
     }
 
-    fn find_by_id(&self, id: &str) -> DynFuture<SeaOrmOptResult<Org>> {
+    fn find_by_id(&self, id: &i64) -> DynFuture<SeaOrmOptResult<Org>> {
         let data = self.data.clone();
-        let id = id.to_string();
+        let id = *id;
         Box::pin(async move { Ok(data.lock().unwrap().get(&id).cloned()) })
     }
 
@@ -83,9 +83,9 @@ impl OrgRepository for FakeOrgRepository {
         })
     }
 
-    fn find_by_parent_id(&self, parent_id: Option<&str>) -> DynFuture<SeaOrmResult<Vec<Org>>> {
+    fn find_by_parent_id(&self, parent_id: Option<i64>) -> DynFuture<SeaOrmResult<Vec<Org>>> {
         let data = self.data.clone();
-        let parent_id = parent_id.map(String::from);
+        let parent_id = parent_id;
         Box::pin(async move {
             Ok(data
                 .lock()
@@ -148,12 +148,12 @@ impl OrgRepository for FakeOrgRepository {
         })
     }
 
-    fn update(&self, id: &str, req: &UpdateOrgRequest) -> DynFuture<SeaOrmOptResult<Org>> {
+    fn update(&self, id: &i64, req: &UpdateOrgRequest) -> DynFuture<SeaOrmOptResult<Org>> {
         let data = self.data.clone();
-        let id = id.to_string();
+        let id = *id;
         let name = req.name.clone();
         let sort = req.sort;
-        let parent_id = req.parent_id.clone();
+        let parent_id = req.parent_id;
         let parent_name = req.parent_name.clone();
         let org_duty = req.org_duty.clone();
         let desrc = req.desrc.clone();
@@ -198,9 +198,9 @@ impl OrgRepository for FakeOrgRepository {
         })
     }
 
-    fn delete(&self, id: &str) -> DynFuture<SeaOrmResult<bool>> {
+    fn delete(&self, id: &i64) -> DynFuture<SeaOrmResult<bool>> {
         let data = self.data.clone();
-        let id = id.to_string();
+        let id = *id;
         Box::pin(async move {
             let mut data_lock = data.lock().unwrap();
             if let Some(org) = data_lock.get_mut(&id) {
@@ -237,7 +237,7 @@ async fn test_create_org_success() {
 async fn test_get_org_success() {
     let repo = Arc::new(FakeOrgRepository::new());
     let service = OrgService::new(repo.clone());
-    let org_id = "org-1".to_string();
+    let org_id = 1i64;
     repo.create(
         &CreateOrgRequest {
             name: "Sales".to_string(),
@@ -263,7 +263,7 @@ async fn test_get_org_success() {
 async fn test_get_org_not_found() {
     let repo = Arc::new(FakeOrgRepository::new());
     let service = OrgService::new(repo);
-    let result = service.get_org("nonexistent-id").await;
+    let result = service.get_org(&9999i64).await;
     assert!(matches!(result, Err(AppError::NotFound(_))));
 }
 
@@ -283,7 +283,7 @@ async fn test_get_all_orgs() {
             is_out: None,
             remarks: None,
         },
-        "o1",
+        &1i64,
     )
     .await
     .unwrap();
@@ -299,7 +299,7 @@ async fn test_get_all_orgs() {
             is_out: None,
             remarks: None,
         },
-        "o2",
+        &2i64,
     )
     .await
     .unwrap();
@@ -323,7 +323,7 @@ async fn test_get_org_tree_no_filter() {
             is_out: None,
             remarks: None,
         },
-        "root",
+        &1i64,
     )
     .await
     .unwrap();
@@ -331,7 +331,7 @@ async fn test_get_org_tree_no_filter() {
         &CreateOrgRequest {
             name: "Child".to_string(),
             sort: Some(2),
-            parent_id: Some("root".to_string()),
+            parent_id: Some(1i64),
             parent_name: Some("Root".to_string()),
             org_duty: None,
             desrc: None,
@@ -339,7 +339,7 @@ async fn test_get_org_tree_no_filter() {
             is_out: None,
             remarks: None,
         },
-        "child",
+        &2i64,
     )
     .await
     .unwrap();
@@ -369,7 +369,7 @@ async fn test_get_org_tree_with_name_filter() {
             is_out: None,
             remarks: None,
         },
-        "root",
+        &1i64,
     )
     .await
     .unwrap();
@@ -377,7 +377,7 @@ async fn test_get_org_tree_with_name_filter() {
         &CreateOrgRequest {
             name: "Engineering Dept".to_string(),
             sort: Some(2),
-            parent_id: Some("root".to_string()),
+            parent_id: Some(1i64),
             parent_name: Some("Company".to_string()),
             org_duty: None,
             desrc: None,
@@ -385,7 +385,7 @@ async fn test_get_org_tree_with_name_filter() {
             is_out: None,
             remarks: None,
         },
-        "dept",
+        &2i64,
     )
     .await
     .unwrap();
@@ -393,7 +393,7 @@ async fn test_get_org_tree_with_name_filter() {
         &CreateOrgRequest {
             name: "Backend Team".to_string(),
             sort: Some(3),
-            parent_id: Some("dept".to_string()),
+            parent_id: Some(2i64),
             parent_name: Some("Engineering Dept".to_string()),
             org_duty: None,
             desrc: None,
@@ -401,7 +401,7 @@ async fn test_get_org_tree_with_name_filter() {
             is_out: None,
             remarks: None,
         },
-        "team",
+        &3i64,
     )
     .await
     .unwrap();
@@ -444,7 +444,7 @@ async fn test_get_org_tree_with_type_filter() {
             is_out: None,
             remarks: None,
         },
-        "root",
+        &1i64,
     )
     .await
     .unwrap();
@@ -452,7 +452,7 @@ async fn test_get_org_tree_with_type_filter() {
         &CreateOrgRequest {
             name: "Dept A".to_string(),
             sort: Some(2),
-            parent_id: Some("root".to_string()),
+            parent_id: Some(1i64),
             parent_name: Some("Company".to_string()),
             org_duty: None,
             desrc: None,
@@ -460,7 +460,7 @@ async fn test_get_org_tree_with_type_filter() {
             is_out: None,
             remarks: None,
         },
-        "dept-a",
+        &2i64,
     )
     .await
     .unwrap();
@@ -468,7 +468,7 @@ async fn test_get_org_tree_with_type_filter() {
         &CreateOrgRequest {
             name: "Dept B".to_string(),
             sort: Some(3),
-            parent_id: Some("root".to_string()),
+            parent_id: Some(1i64),
             parent_name: Some("Company".to_string()),
             org_duty: None,
             desrc: None,
@@ -476,7 +476,7 @@ async fn test_get_org_tree_with_type_filter() {
             is_out: None,
             remarks: None,
         },
-        "dept-b",
+        &3i64,
     )
     .await
     .unwrap();
@@ -511,7 +511,7 @@ async fn test_get_org_tree_filter_expands_ancestors() {
             is_out: None,
             remarks: None,
         },
-        "gp",
+        &1i64,
     )
     .await
     .unwrap();
@@ -519,7 +519,7 @@ async fn test_get_org_tree_filter_expands_ancestors() {
         &CreateOrgRequest {
             name: "Parent".to_string(),
             sort: Some(2),
-            parent_id: Some("gp".to_string()),
+            parent_id: Some(1i64),
             parent_name: Some("Grandparent".to_string()),
             org_duty: None,
             desrc: None,
@@ -527,7 +527,7 @@ async fn test_get_org_tree_filter_expands_ancestors() {
             is_out: None,
             remarks: None,
         },
-        "p",
+        &2i64,
     )
     .await
     .unwrap();
@@ -535,7 +535,7 @@ async fn test_get_org_tree_filter_expands_ancestors() {
         &CreateOrgRequest {
             name: "Child".to_string(),
             sort: Some(3),
-            parent_id: Some("p".to_string()),
+            parent_id: Some(2i64),
             parent_name: Some("Parent".to_string()),
             org_duty: None,
             desrc: None,
@@ -543,7 +543,7 @@ async fn test_get_org_tree_filter_expands_ancestors() {
             is_out: None,
             remarks: None,
         },
-        "c",
+        &3i64,
     )
     .await
     .unwrap();
@@ -578,7 +578,7 @@ async fn test_get_org_tree_filter_expands_descendants() {
             is_out: None,
             remarks: None,
         },
-        "r",
+        &1i64,
     )
     .await
     .unwrap();
@@ -586,7 +586,7 @@ async fn test_get_org_tree_filter_expands_descendants() {
         &CreateOrgRequest {
             name: "Child 1".to_string(),
             sort: Some(2),
-            parent_id: Some("r".to_string()),
+            parent_id: Some(1i64),
             parent_name: Some("Root Match".to_string()),
             org_duty: None,
             desrc: None,
@@ -594,7 +594,7 @@ async fn test_get_org_tree_filter_expands_descendants() {
             is_out: None,
             remarks: None,
         },
-        "c1",
+        &2i64,
     )
     .await
     .unwrap();
@@ -602,7 +602,7 @@ async fn test_get_org_tree_filter_expands_descendants() {
         &CreateOrgRequest {
             name: "Grandchild".to_string(),
             sort: Some(3),
-            parent_id: Some("c1".to_string()),
+            parent_id: Some(2i64),
             parent_name: Some("Child 1".to_string()),
             org_duty: None,
             desrc: None,
@@ -610,7 +610,7 @@ async fn test_get_org_tree_filter_expands_descendants() {
             is_out: None,
             remarks: None,
         },
-        "gc",
+        &3i64,
     )
     .await
     .unwrap();
@@ -653,7 +653,7 @@ async fn test_get_orgs_by_parent() {
             is_out: None,
             remarks: None,
         },
-        "parent",
+        &1i64,
     )
     .await
     .unwrap();
@@ -661,7 +661,7 @@ async fn test_get_orgs_by_parent() {
         &CreateOrgRequest {
             name: "Child 1".to_string(),
             sort: None,
-            parent_id: Some("parent".to_string()),
+            parent_id: Some(1i64),
             parent_name: Some("Parent".to_string()),
             org_duty: None,
             desrc: None,
@@ -669,7 +669,7 @@ async fn test_get_orgs_by_parent() {
             is_out: None,
             remarks: None,
         },
-        "child1",
+        &2i64,
     )
     .await
     .unwrap();
@@ -677,7 +677,7 @@ async fn test_get_orgs_by_parent() {
         &CreateOrgRequest {
             name: "Child 2".to_string(),
             sort: None,
-            parent_id: Some("parent".to_string()),
+            parent_id: Some(1i64),
             parent_name: Some("Parent".to_string()),
             org_duty: None,
             desrc: None,
@@ -685,11 +685,11 @@ async fn test_get_orgs_by_parent() {
             is_out: None,
             remarks: None,
         },
-        "child2",
+        &3i64,
     )
     .await
     .unwrap();
-    let result = service.get_orgs_by_parent(Some("parent")).await.unwrap();
+    let result = service.get_orgs_by_parent(Some(1)).await.unwrap();
     assert_eq!(result.len(), 2);
 }
 
@@ -697,7 +697,7 @@ async fn test_get_orgs_by_parent() {
 async fn test_update_org_success() {
     let repo = Arc::new(FakeOrgRepository::new());
     let service = OrgService::new(repo.clone());
-    let org_id = "org-1".to_string();
+    let org_id = 1i64;
     repo.create(
         &CreateOrgRequest {
             name: "Old Name".to_string(),
@@ -745,7 +745,7 @@ async fn test_update_org_not_found() {
         is_out: None,
         remarks: None,
     };
-    let result = service.update_org("nonexistent-id", req).await;
+    let result = service.update_org(&9999i64, req).await;
     assert!(matches!(result, Err(AppError::NotFound(_))));
 }
 
@@ -753,7 +753,7 @@ async fn test_update_org_not_found() {
 async fn test_delete_org_success() {
     let repo = Arc::new(FakeOrgRepository::new());
     let service = OrgService::new(repo.clone());
-    let org_id = "org-1".to_string();
+    let org_id = 1i64;
     repo.create(
         &CreateOrgRequest {
             name: "Temp Org".to_string(),
@@ -779,6 +779,6 @@ async fn test_delete_org_success() {
 async fn test_delete_org_not_found() {
     let repo = Arc::new(FakeOrgRepository::new());
     let service = OrgService::new(repo);
-    let result = service.delete_org("nonexistent-id").await;
+    let result = service.delete_org(&9999i64).await;
     assert!(matches!(result, Err(AppError::NotFound(_))));
 }

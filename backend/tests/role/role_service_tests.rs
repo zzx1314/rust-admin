@@ -10,9 +10,9 @@ use x_rust::user::domain::User;
 // ==================== Fake Role Repository ====================
 
 struct FakeRoleRepository {
-    roles: Arc<Mutex<HashMap<String, Role>>>,
-    user_roles: Arc<Mutex<HashMap<String, Vec<String>>>>,
-    role_users: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    roles: Arc<Mutex<HashMap<i64, Role>>>,
+    user_roles: Arc<Mutex<HashMap<i64, Vec<i64>>>>,
+    role_users: Arc<Mutex<HashMap<i64, Vec<i64>>>>,
 }
 
 impl FakeRoleRepository {
@@ -26,9 +26,9 @@ impl FakeRoleRepository {
 }
 
 impl RoleRepository for FakeRoleRepository {
-    fn create(&self, req: &CreateRoleRequest, id: &str) -> DynFuture<SeaOrmResult<Role>> {
+    fn create(&self, req: &CreateRoleRequest, id: &i64) -> DynFuture<SeaOrmResult<Role>> {
         let roles = self.roles.clone();
-        let id = id.to_string();
+        let id = *id;
         let name = req.name.clone();
         let code = req.code.clone();
         let description = req.description.clone();
@@ -37,7 +37,7 @@ impl RoleRepository for FakeRoleRepository {
         let ds_scope = req.ds_scope.clone();
         Box::pin(async move {
             let role = Role {
-                id: id.clone(),
+                id: id,
                 name: name.clone(),
                 code,
                 description: description.clone(),
@@ -54,9 +54,9 @@ impl RoleRepository for FakeRoleRepository {
         })
     }
 
-    fn find_by_id(&self, id: &str) -> DynFuture<SeaOrmOptResult<Role>> {
+    fn find_by_id(&self, id: &i64) -> DynFuture<SeaOrmOptResult<Role>> {
         let roles = self.roles.clone();
-        let id = id.to_string();
+        let id = *id;
         Box::pin(async move { Ok(roles.lock().unwrap().get(&id).cloned()) })
     }
 
@@ -101,9 +101,9 @@ impl RoleRepository for FakeRoleRepository {
         })
     }
 
-    fn update(&self, id: &str, req: &UpdateRoleRequest) -> DynFuture<SeaOrmOptResult<Role>> {
+    fn update(&self, id: &i64, req: &UpdateRoleRequest) -> DynFuture<SeaOrmOptResult<Role>> {
         let roles = self.roles.clone();
-        let id = id.to_string();
+        let id = *id;
         let name = req.name.clone();
         let code = req.code.clone();
         let description = req.description.clone();
@@ -143,24 +143,24 @@ impl RoleRepository for FakeRoleRepository {
         })
     }
 
-    fn delete(&self, id: &str) -> DynFuture<SeaOrmResult<bool>> {
+    fn delete(&self, id: &i64) -> DynFuture<SeaOrmResult<bool>> {
         let roles = self.roles.clone();
-        let id = id.to_string();
+        let id = *id;
         Box::pin(async move { Ok(roles.lock().unwrap().remove(&id).is_some()) })
     }
 
-    fn assign_role_to_user(&self, user_id: &str, role_id: &str) -> DynFuture<SeaOrmResult<()>> {
+    fn assign_role_to_user(&self, user_id: &i64, role_id: &i64) -> DynFuture<SeaOrmResult<()>> {
         let user_roles = self.user_roles.clone();
         let role_users = self.role_users.clone();
-        let user_id = user_id.to_string();
-        let role_id = role_id.to_string();
+        let user_id = *user_id;
+        let role_id = *role_id;
         Box::pin(async move {
             user_roles
                 .lock()
                 .unwrap()
-                .entry(user_id.clone())
+                .entry(user_id)
                 .or_default()
-                .push(role_id.clone());
+                .push(role_id);
             role_users
                 .lock()
                 .unwrap()
@@ -171,11 +171,11 @@ impl RoleRepository for FakeRoleRepository {
         })
     }
 
-    fn remove_role_from_user(&self, user_id: &str, role_id: &str) -> DynFuture<SeaOrmResult<bool>> {
+    fn remove_role_from_user(&self, user_id: &i64, role_id: &i64) -> DynFuture<SeaOrmResult<bool>> {
         let user_roles = self.user_roles.clone();
         let role_users = self.role_users.clone();
-        let user_id = user_id.to_string();
-        let role_id = role_id.to_string();
+        let user_id = *user_id;
+        let role_id = *role_id;
         Box::pin(async move {
             let removed_from_user = user_roles
                 .lock()
@@ -197,10 +197,10 @@ impl RoleRepository for FakeRoleRepository {
         })
     }
 
-    fn find_roles_by_user_id(&self, user_id: &str) -> DynFuture<SeaOrmResult<Vec<Role>>> {
+    fn find_roles_by_user_id(&self, user_id: &i64) -> DynFuture<SeaOrmResult<Vec<Role>>> {
         let roles = self.roles.clone();
         let user_roles = self.user_roles.clone();
-        let user_id = user_id.to_string();
+        let user_id = *user_id;
         Box::pin(async move {
             let roles_lock = roles.lock().unwrap();
             let user_roles_lock = user_roles.lock().unwrap();
@@ -217,9 +217,9 @@ impl RoleRepository for FakeRoleRepository {
         })
     }
 
-    fn find_users_by_role_id(&self, role_id: &str) -> DynFuture<SeaOrmResult<Vec<User>>> {
+    fn find_users_by_role_id(&self, role_id: &i64) -> DynFuture<SeaOrmResult<Vec<User>>> {
         let role_users = self.role_users.clone();
-        let role_id = role_id.to_string();
+        let role_id = *role_id;
         Box::pin(async move {
             let users = role_users
                 .lock()
@@ -231,13 +231,13 @@ impl RoleRepository for FakeRoleRepository {
                 .into_iter()
                 .enumerate()
                 .map(|(i, uid)| User {
-                    id: uid.parse().unwrap_or_else(|_| (i + 1).to_string()),
+                    id: uid,
                     username: format!("User {}", uid),
                     phone: None,
                     email: Some(format!("{}@example.com", uid)),
                     real_name: None,
                     password: None,
-                    org_id: None,
+                    org_id: 1,
                     lock_time: None,
                     last_login_time: None,
                     try_count: Some(0),
@@ -270,7 +270,7 @@ impl RoleRepository for FakeRoleRepository {
         })
     }
 
-    fn set_menus(&self, _role_id: &str, _menu_ids: &[String]) -> DynFuture<SeaOrmResult<()>> {
+    fn set_menus(&self, _role_id: &i64, _menu_ids: &[i64]) -> DynFuture<SeaOrmResult<()>> {
         Box::pin(async move { Ok(()) })
     }
 }
@@ -301,7 +301,7 @@ async fn test_get_role_success() {
     let repo = Arc::new(FakeRoleRepository::new());
     let service = RoleService::new(repo.clone());
 
-    let role_id = "role-1".to_string();
+    let role_id = 1i64;
     repo.create(
         &CreateRoleRequest {
             name: "Editor".to_string(),
@@ -326,7 +326,7 @@ async fn test_get_role_not_found() {
     let repo = Arc::new(FakeRoleRepository::new());
     let service = RoleService::new(repo);
 
-    let result = service.get_role("nonexistent-id").await;
+    let result = service.get_role(&999i64).await;
     assert!(matches!(result, Err(AppError::NotFound(_))));
 }
 
@@ -344,7 +344,7 @@ async fn test_get_all_roles() {
             ds_type: None,
             ds_scope: None,
         },
-        "r1",
+        &1i64,
     )
     .await
     .unwrap();
@@ -357,7 +357,7 @@ async fn test_get_all_roles() {
             ds_type: None,
             ds_scope: None,
         },
-        "r2",
+        &2i64,
     )
     .await
     .unwrap();
@@ -371,7 +371,7 @@ async fn test_update_role_success() {
     let repo = Arc::new(FakeRoleRepository::new());
     let service = RoleService::new(repo.clone());
 
-    let role_id = "role-1".to_string();
+    let role_id = 1i64;
     repo.create(
         &CreateRoleRequest {
             name: "Old Name".to_string(),
@@ -414,7 +414,7 @@ async fn test_update_role_not_found() {
         ds_type: None,
         ds_scope: None,
     };
-    let result = service.update_role("nonexistent-id", req).await;
+    let result = service.update_role(&999i64, req).await;
     assert!(matches!(result, Err(AppError::NotFound(_))));
 }
 
@@ -423,7 +423,7 @@ async fn test_delete_role_success() {
     let repo = Arc::new(FakeRoleRepository::new());
     let service = RoleService::new(repo.clone());
 
-    let role_id = "role-1".to_string();
+    let role_id = 1i64;
     repo.create(
         &CreateRoleRequest {
             name: "Temp".to_string(),
@@ -450,7 +450,7 @@ async fn test_delete_role_not_found() {
     let repo = Arc::new(FakeRoleRepository::new());
     let service = RoleService::new(repo);
 
-    let result = service.delete_role("nonexistent-id").await;
+    let result = service.delete_role(&999i64).await;
     assert!(matches!(result, Err(AppError::NotFound(_))));
 }
 
@@ -468,12 +468,12 @@ async fn test_assign_role_success() {
             ds_type: None,
             ds_scope: None,
         },
-        "role-1",
+        &1i64,
     )
     .await
     .unwrap();
 
-    let result = service.assign_role("user-1", "role-1").await;
+    let result = service.assign_role(&1i64, &1i64).await;
     assert!(result.is_ok());
 }
 
@@ -482,7 +482,7 @@ async fn test_assign_role_not_found() {
     let repo = Arc::new(FakeRoleRepository::new());
     let service = RoleService::new(repo);
 
-    let result = service.assign_role("user-1", "nonexistent-role").await;
+    let result = service.assign_role(&1i64, &999i64).await;
     assert!(matches!(result, Err(AppError::NotFound(_))));
 }
 
@@ -500,13 +500,13 @@ async fn test_remove_role_success() {
             ds_type: None,
             ds_scope: None,
         },
-        "role-1",
+        &1i64,
     )
     .await
     .unwrap();
-    service.assign_role("user-1", "role-1").await.unwrap();
+    service.assign_role(&1i64, &1i64).await.unwrap();
 
-    let result = service.remove_role("user-1", "role-1").await;
+    let result = service.remove_role(&1i64, &1i64).await;
     assert!(result.is_ok());
 }
 
@@ -515,7 +515,7 @@ async fn test_remove_role_not_found() {
     let repo = Arc::new(FakeRoleRepository::new());
     let service = RoleService::new(repo);
 
-    let result = service.remove_role("user-1", "role-1").await;
+    let result = service.remove_role(&1i64, &1i64).await;
     assert!(matches!(result, Err(AppError::NotFound(_))));
 }
 
@@ -533,7 +533,7 @@ async fn test_get_roles_for_user() {
             ds_type: None,
             ds_scope: None,
         },
-        "role-1",
+        &1i64,
     )
     .await
     .unwrap();
@@ -546,14 +546,14 @@ async fn test_get_roles_for_user() {
             ds_type: None,
             ds_scope: None,
         },
-        "role-2",
+        &2i64,
     )
     .await
     .unwrap();
-    service.assign_role("user-1", "role-1").await.unwrap();
-    service.assign_role("user-1", "role-2").await.unwrap();
+    service.assign_role(&1i64, &1i64).await.unwrap();
+    service.assign_role(&1i64, &2i64).await.unwrap();
 
-    let result = service.get_roles_for_user("user-1").await.unwrap();
+    let result = service.get_roles_for_user(&1i64).await.unwrap();
     assert_eq!(result.len(), 2);
 }
 
@@ -571,13 +571,13 @@ async fn test_get_users_for_role() {
             ds_type: None,
             ds_scope: None,
         },
-        "role-1",
+        &1i64,
     )
     .await
     .unwrap();
-    service.assign_role("user-1", "role-1").await.unwrap();
-    service.assign_role("user-2", "role-1").await.unwrap();
+    service.assign_role(&1i64, &1i64).await.unwrap();
+    service.assign_role(&2i64, &1i64).await.unwrap();
 
-    let result = service.get_users_for_role("role-1").await.unwrap();
+    let result = service.get_users_for_role(&1i64).await.unwrap();
     assert_eq!(result.len(), 2);
 }

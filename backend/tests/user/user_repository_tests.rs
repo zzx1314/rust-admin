@@ -3,13 +3,12 @@ use x_rust::common::traits::UserRepository;
 use x_rust::user::domain::{CreateUserRequest, UpdateUserRequest};
 use x_rust::user::repository::SeaOrmUserRepository;
 
-fn uid() -> String {
+fn uid() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_nanos()
-        .to_string()
+        .as_nanos() as i64
 }
 
 struct TestDb {
@@ -38,12 +37,12 @@ impl TestDb {
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS p_sys_user (
-                id TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY,
                 username TEXT NOT NULL,
                 email TEXT,
                 phone TEXT,
                 password TEXT,
-                org_id TEXT,
+                org_id INTEGER,
                 lock_time TEXT,
                 last_login_time TEXT,
                 try_count INTEGER DEFAULT 0,
@@ -174,7 +173,7 @@ async fn test_user_repo_create_and_find() {
         email: Some("john@example.com".to_string()),
         real_name: Some("John Doe".to_string()),
         password: None,
-        org_id: None,
+        org_id: 1,
         remarks: None,
         card: None,
         sex: None,
@@ -196,7 +195,7 @@ async fn test_user_repo_find_by_id_not_found() {
     let (pool, _test_db) = create_test_db().await;
     let repo = SeaOrmUserRepository::new(pool.into());
 
-    let result = repo.find_by_id("999").await.unwrap();
+    let result = repo.find_by_id(&999i64).await.unwrap();
     assert!(result.is_none());
 }
 
@@ -211,7 +210,7 @@ async fn test_user_repo_find_all() {
         email: Some("john@example.com".to_string()),
         real_name: None,
         password: None,
-        org_id: None,
+        org_id: 1,
         remarks: None,
         card: None,
         sex: None,
@@ -226,7 +225,7 @@ async fn test_user_repo_find_all() {
         email: Some("jane@example.com".to_string()),
         real_name: None,
         password: None,
-        org_id: None,
+        org_id: 1,
         remarks: None,
         card: None,
         sex: None,
@@ -252,7 +251,7 @@ async fn test_user_repo_update() {
         email: None,
         real_name: None,
         password: None,
-        org_id: None,
+        org_id: 1,
         remarks: None,
         card: None,
         sex: None,
@@ -265,7 +264,7 @@ async fn test_user_repo_update() {
         email: Some("updated@example.com".to_string()),
         real_name: None,
         password: None,
-        org_id: None,
+        org_id: 1,
         remarks: None,
         card: None,
         is_show: None,
@@ -290,7 +289,7 @@ async fn test_user_repo_update_not_found() {
         email: None,
         real_name: None,
         password: None,
-        org_id: None,
+        org_id: 1,
         remarks: None,
         card: None,
         is_show: None,
@@ -298,7 +297,7 @@ async fn test_user_repo_update_not_found() {
         sex: None,
     };
 
-    let result = repo.update("999", &update_req).await.unwrap();
+    let result = repo.update(&999i64, &update_req).await.unwrap();
     assert!(result.is_none());
 }
 
@@ -314,7 +313,7 @@ async fn test_user_repo_delete() {
         email: Some("delete@example.com".to_string()),
         real_name: None,
         password: None,
-        org_id: None,
+        org_id: 1,
         remarks: None,
         card: None,
         sex: None,
@@ -333,6 +332,6 @@ async fn test_user_repo_delete_not_found() {
     let (pool, _test_db) = create_test_db().await;
     let repo = SeaOrmUserRepository::new(pool.into());
 
-    let deleted = repo.delete("999").await.unwrap();
+    let deleted = repo.delete(&999i64).await.unwrap();
     assert!(!deleted);
 }

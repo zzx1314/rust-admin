@@ -83,12 +83,12 @@ impl TestDb {
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS p_sys_user (
-                id TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY,
                 username TEXT NOT NULL,
                 email TEXT,
                 phone TEXT,
                 password TEXT,
-                org_id TEXT,
+                org_id INTEGER,
                 lock_time TEXT,
                 last_login_time TEXT,
                 try_count INTEGER DEFAULT 0,
@@ -112,7 +112,7 @@ impl TestDb {
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS p_sys_role (
-                id TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
                 code TEXT,
                 create_time TEXT NOT NULL,
@@ -142,7 +142,7 @@ impl TestDb {
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS p_sys_menu (
-                id TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
                 code TEXT,
                 permission TEXT,
@@ -180,7 +180,7 @@ impl TestDb {
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS p_sys_org (
-                id TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
                 sort INTEGER DEFAULT 0,
                 parent_id TEXT,
@@ -294,12 +294,12 @@ async fn login(app: axum::Router, test_db: &TestDb) -> String {
                 email: None,
                 real_name: None,
                 password: Some(password_hash),
-                org_id: None,
+                org_id: 1,
                 remarks: None,
                 card: None,
                 sex: None,
             },
-            "1",
+            &1i64,
         )
         .await
         .ok();
@@ -343,7 +343,7 @@ async fn test_create_user() {
                 .uri("/api/sysUser")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"username":"newuser","email":"test2@example.com","real_name":"Test User"}"#,
+                    r#"{"username":"newuser","email":"test2@example.com","real_name":"Test User","org_id":1}"#,
                 ))
                 .unwrap(),
         ))
@@ -402,7 +402,7 @@ async fn test_user_crud_flow() {
                 .uri("/api/sysUser")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"username":"initial","email":"initial@example.com"}"#,
+                    r#"{"username":"initial","email":"initial@example.com","org_id":1}"#,
                 ))
                 .unwrap(),
         ))
@@ -414,7 +414,7 @@ async fn test_user_crud_flow() {
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
     let user = json.get("data").unwrap();
-    let user_id = user.get("id").unwrap().as_str().unwrap();
+    let user_id = user.get("id").unwrap().as_i64().unwrap();
 
     let get_resp = app
         .clone()
@@ -439,7 +439,7 @@ async fn test_user_crud_flow() {
                 .uri(&format!("/api/sysUser/{}", user_id))
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"username":"updated","email":"updated@example.com"}"#,
+                    r#"{"username":"updated","email":"updated@example.com","org_id":1}"#,
                 ))
                 .unwrap(),
         ))
@@ -532,7 +532,7 @@ async fn test_get_users_page_with_params() {
                     .uri("/api/sysUser")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
-                        r#"{{"username":"pageuser{}","email":"pageuser{}@example.com"}}"#,
+                        r#"{{"username":"pageuser{}","email":"pageuser{}@example.com","org_id":1}}"#,
                         i, i
                     )))
                     .unwrap(),

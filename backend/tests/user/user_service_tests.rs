@@ -13,7 +13,7 @@ use x_rust::user::service::UserService;
 // ==================== Fake User Repository ====================
 
 struct FakeUserRepository {
-    users: Arc<Mutex<HashMap<String, User>>>,
+    users: Arc<Mutex<HashMap<i64, User>>>,
 }
 
 impl FakeUserRepository {
@@ -25,13 +25,13 @@ impl FakeUserRepository {
 }
 
 impl UserRepository for FakeUserRepository {
-    fn create(&self, req: &CreateUserRequest, id: &str) -> DynFuture<SeaOrmResult<User>> {
+    fn create(&self, req: &CreateUserRequest, id: &i64) -> DynFuture<SeaOrmResult<User>> {
         let users = self.users.clone();
         let req = req.clone();
-        let id = id.to_string();
+        let id = *id;
         Box::pin(async move {
             let user = User {
-                id: id.clone(),
+                id: id,
                 username: req.username.clone(),
                 phone: req.phone.clone(),
                 email: req.email.clone(),
@@ -58,9 +58,9 @@ impl UserRepository for FakeUserRepository {
         })
     }
 
-    fn find_by_id(&self, id: &str) -> DynFuture<SeaOrmOptResult<User>> {
+    fn find_by_id(&self, id: &i64) -> DynFuture<SeaOrmOptResult<User>> {
         let users = self.users.clone();
-        let id = id.to_string();
+        let id = *id;
         Box::pin(async move { Ok(users.lock().unwrap().get(&id).cloned()) })
     }
 
@@ -95,14 +95,14 @@ impl UserRepository for FakeUserRepository {
         Box::pin(async move { Ok(users.lock().unwrap().values().cloned().collect()) })
     }
 
-    fn update(&self, id: &str, req: &UpdateUserRequest) -> DynFuture<SeaOrmOptResult<User>> {
+    fn update(&self, id: &i64, req: &UpdateUserRequest) -> DynFuture<SeaOrmOptResult<User>> {
         let users = self.users.clone();
-        let id = id.to_string();
+        let id = *id;
         let username = req.username.clone();
         let phone = req.phone.clone();
         let email = req.email.clone();
         let real_name = req.real_name.clone();
-        let org_id = req.org_id.clone();
+        let org_id = req.org_id;
         let remarks = req.remarks.clone();
         let card = req.card.clone();
         let is_show = req.is_show;
@@ -123,9 +123,7 @@ impl UserRepository for FakeUserRepository {
                 if let Some(v) = real_name {
                     user.real_name = Some(v);
                 }
-                if let Some(v) = org_id {
-                    user.org_id = Some(v);
-                }
+                user.org_id = org_id;
                 if let Some(v) = remarks {
                     user.remarks = Some(v);
                 }
@@ -149,9 +147,9 @@ impl UserRepository for FakeUserRepository {
         })
     }
 
-    fn delete(&self, id: &str) -> DynFuture<SeaOrmResult<bool>> {
+    fn delete(&self, id: &i64) -> DynFuture<SeaOrmResult<bool>> {
         let users = self.users.clone();
-        let id = id.to_string();
+        let id = *id;
         Box::pin(async move { Ok(users.lock().unwrap().remove(&id).is_some()) })
     }
 
@@ -193,7 +191,8 @@ impl UserRepository for FakeUserRepository {
                         }
                     }
                     if let Some(ref v) = query.org_id {
-                        if u.org_id.as_ref() != Some(v) {
+                        let query_org_id: i64 = v.parse().unwrap_or(0);
+                        if u.org_id != query_org_id {
                             return false;
                         }
                     }
@@ -210,7 +209,7 @@ impl UserRepository for FakeUserRepository {
                     phone: u.phone.clone(),
                     email: u.email.clone(),
                     real_name: u.real_name.clone(),
-                    org_id: u.org_id.clone(),
+                    org_id: u.org_id,
                     org_name: None,
                     lock_time: u.lock_time,
                     last_login_time: u.last_login_time,
@@ -247,10 +246,10 @@ impl UserRepository for FakeUserRepository {
 struct FakeRoleRepository;
 
 impl RoleRepository for FakeRoleRepository {
-    fn create(&self, _req: &CreateRoleRequest, _id: &str) -> DynFuture<SeaOrmResult<Role>> {
+    fn create(&self, _req: &CreateRoleRequest, _id: &i64) -> DynFuture<SeaOrmResult<Role>> {
         Box::pin(async move { unimplemented!() })
     }
-    fn find_by_id(&self, _id: &str) -> DynFuture<SeaOrmOptResult<Role>> {
+    fn find_by_id(&self, _id: &i64) -> DynFuture<SeaOrmOptResult<Role>> {
         Box::pin(async move { Ok(None) })
     }
     fn find_by_code(&self, _code: &str) -> DynFuture<SeaOrmOptResult<Role>> {
@@ -265,29 +264,29 @@ impl RoleRepository for FakeRoleRepository {
     ) -> DynFuture<SeaOrmResult<(Vec<Role>, i64)>> {
         Box::pin(async move { Ok((Vec::new(), 0)) })
     }
-    fn update(&self, _id: &str, _req: &UpdateRoleRequest) -> DynFuture<SeaOrmOptResult<Role>> {
+    fn update(&self, _id: &i64, _req: &UpdateRoleRequest) -> DynFuture<SeaOrmOptResult<Role>> {
         Box::pin(async move { Ok(None) })
     }
-    fn delete(&self, _id: &str) -> DynFuture<SeaOrmResult<bool>> {
+    fn delete(&self, _id: &i64) -> DynFuture<SeaOrmResult<bool>> {
         Box::pin(async move { Ok(false) })
     }
-    fn assign_role_to_user(&self, _user_id: &str, _role_id: &str) -> DynFuture<SeaOrmResult<()>> {
+    fn assign_role_to_user(&self, _user_id: &i64, _role_id: &i64) -> DynFuture<SeaOrmResult<()>> {
         Box::pin(async move { Ok(()) })
     }
     fn remove_role_from_user(
         &self,
-        _user_id: &str,
-        _role_id: &str,
+        _user_id: &i64,
+        _role_id: &i64,
     ) -> DynFuture<SeaOrmResult<bool>> {
         Box::pin(async move { Ok(false) })
     }
-    fn find_roles_by_user_id(&self, _user_id: &str) -> DynFuture<SeaOrmResult<Vec<Role>>> {
+    fn find_roles_by_user_id(&self, _user_id: &i64) -> DynFuture<SeaOrmResult<Vec<Role>>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
-    fn find_users_by_role_id(&self, _role_id: &str) -> DynFuture<SeaOrmResult<Vec<User>>> {
+    fn find_users_by_role_id(&self, _role_id: &i64) -> DynFuture<SeaOrmResult<Vec<User>>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
-    fn set_menus(&self, _role_id: &str, _menu_ids: &[String]) -> DynFuture<SeaOrmResult<()>> {
+    fn set_menus(&self, _role_id: &i64, _menu_ids: &[i64]) -> DynFuture<SeaOrmResult<()>> {
         Box::pin(async move { Ok(()) })
     }
 }
@@ -306,7 +305,7 @@ async fn test_create_user_success() {
         email: Some("john@example.com".to_string()),
         real_name: Some("John Doe".to_string()),
         password: Some(encrypt_password("password123")),
-        org_id: None,
+        org_id: 1,
         remarks: None,
         card: None,
         sex: None,
@@ -331,14 +330,14 @@ async fn test_get_user_success() {
         email: Some("test@example.com".to_string()),
         real_name: Some("Test User".to_string()),
         password: None,
-        org_id: None,
+        org_id: 1,
         remarks: None,
         card: None,
         sex: None,
     };
-    let created = repo.create(&req, "1").await.unwrap();
+    let created = repo.create(&req, &1i64).await.unwrap();
 
-    let result = service.get_user(&created.id).await.unwrap();
+    let result = service.get_user(&1i64).await.unwrap();
     assert_eq!(result.username, "testuser");
 }
 
@@ -348,7 +347,7 @@ async fn test_get_user_not_found() {
     let role_repo = Arc::new(FakeRoleRepository);
     let service = UserService::new(repo, role_repo);
 
-    let result = service.get_user("999").await;
+    let result = service.get_user(&999i64).await;
     assert!(matches!(result, Err(AppError::NotFound(_))));
 }
 
@@ -364,12 +363,12 @@ async fn test_get_all_users() {
         email: Some("user1@example.com".to_string()),
         real_name: None,
         password: None,
-        org_id: None,
+        org_id: 1,
         remarks: None,
         card: None,
         sex: None,
     };
-    repo.create(&req1, "1").await.unwrap();
+    repo.create(&req1, &1i64).await.unwrap();
 
     let req2 = CreateUserRequest {
         username: "user2".to_string(),
@@ -377,12 +376,12 @@ async fn test_get_all_users() {
         email: Some("user2@example.com".to_string()),
         real_name: None,
         password: None,
-        org_id: None,
+        org_id: 1,
         remarks: None,
         card: None,
         sex: None,
     };
-    repo.create(&req2, "2").await.unwrap();
+    repo.create(&req2, &2i64).await.unwrap();
 
     let result = service.get_all_users().await.unwrap();
     assert_eq!(result.len(), 2);
@@ -400,12 +399,12 @@ async fn test_update_user_success() {
         email: Some("original@example.com".to_string()),
         real_name: Some("Original Name".to_string()),
         password: None,
-        org_id: None,
+        org_id: 1,
         remarks: None,
         card: None,
         sex: None,
     };
-    let created = repo.create(&req, "1").await.unwrap();
+    let created = repo.create(&req, &1i64).await.unwrap();
 
     let update_req = UpdateUserRequest {
         username: Some("updated".to_string()),
@@ -413,14 +412,14 @@ async fn test_update_user_success() {
         email: None,
         real_name: Some("Updated Name".to_string()),
         password: None,
-        org_id: None,
+        org_id: 1,
         remarks: None,
         card: None,
         is_show: None,
         enable: None,
         sex: None,
     };
-    let result = service.update_user(&created.id, update_req).await.unwrap();
+    let result = service.update_user(&1i64, update_req).await.unwrap();
     assert_eq!(result.username, "updated");
     assert_eq!(result.real_name, Some("Updated Name".to_string()));
 }
@@ -437,7 +436,7 @@ async fn test_update_user_not_found() {
         email: None,
         real_name: None,
         password: None,
-        org_id: None,
+        org_id: 1,
         remarks: None,
         card: None,
         is_show: None,
@@ -445,7 +444,7 @@ async fn test_update_user_not_found() {
         sex: None,
     };
 
-    let result = service.update_user("999", req).await;
+    let result = service.update_user(&999i64, req).await;
     assert!(matches!(result, Err(AppError::NotFound(_))));
 }
 
@@ -461,17 +460,17 @@ async fn test_delete_user_success() {
         email: Some("delete@example.com".to_string()),
         real_name: None,
         password: None,
-        org_id: None,
+        org_id: 1,
         remarks: None,
         card: None,
         sex: None,
     };
-    let created = repo.create(&req, "1").await.unwrap();
+    let created = repo.create(&req, &1i64).await.unwrap();
 
-    let result = service.delete_user(&created.id).await;
+    let result = service.delete_user(&1i64).await;
     assert!(result.is_ok());
 
-    let find_result = service.get_user(&created.id).await;
+    let find_result = service.get_user(&1i64).await;
     assert!(matches!(find_result, Err(AppError::NotFound(_))));
 }
 
@@ -481,7 +480,7 @@ async fn test_delete_user_not_found() {
     let role_repo = Arc::new(FakeRoleRepository);
     let service = UserService::new(repo, role_repo);
 
-    let result = service.delete_user("999").await;
+    let result = service.delete_user(&999i64).await;
     assert!(matches!(result, Err(AppError::NotFound(_))));
 }
 
@@ -498,12 +497,12 @@ async fn test_get_users_page_default() {
             email: Some(format!("user{}@example.com", i)),
             real_name: None,
             password: None,
-            org_id: None,
+            org_id: 1,
             remarks: None,
             card: None,
             sex: None,
         };
-        repo.create(&req, &i.to_string()).await.unwrap();
+        repo.create(&req, &(i as i64)).await.unwrap();
     }
 
     let result = service
@@ -538,12 +537,12 @@ async fn test_get_users_page_custom() {
             email: Some(format!("user{}@example.com", i)),
             real_name: None,
             password: None,
-            org_id: None,
+            org_id: 1,
             remarks: None,
             card: None,
             sex: None,
         };
-        repo.create(&req, &i.to_string()).await.unwrap();
+        repo.create(&req, &(i as i64)).await.unwrap();
     }
 
     let result = service
@@ -578,12 +577,12 @@ async fn test_get_users_page_out_of_range() {
             email: Some(format!("user{}@example.com", i)),
             real_name: None,
             password: None,
-            org_id: None,
+            org_id: 1,
             remarks: None,
             card: None,
             sex: None,
         };
-        repo.create(&req, &i.to_string()).await.unwrap();
+        repo.create(&req, &(i as i64)).await.unwrap();
     }
 
     let result = service

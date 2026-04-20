@@ -1,6 +1,7 @@
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicI64, Ordering};
 use x_rust::common::error::AppError;
 use x_rust::common::traits::{
     DynFuture, MenuRepository, RoleRepository, SeaOrmOptResult, SeaOrmResult,
@@ -10,13 +11,19 @@ use x_rust::menu::service::MenuService;
 use x_rust::role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequest};
 use x_rust::user::domain::User;
 
+static MENU_ID_COUNTER: AtomicI64 = AtomicI64::new(1);
+
+fn next_menu_id() -> i64 {
+    MENU_ID_COUNTER.fetch_add(1, Ordering::SeqCst)
+}
+
 struct FakeMenuRepository {
-    menus: Arc<Mutex<HashMap<String, Menu>>>,
+    menus: Arc<Mutex<HashMap<i64, Menu>>>,
 }
 
 struct FakeRoleRepository {
-    roles: Arc<Mutex<HashMap<String, Role>>>,
-    user_roles: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    roles: Arc<Mutex<HashMap<i64, Role>>>,
+    user_roles: Arc<Mutex<HashMap<i64, Vec<i64>>>>,
 }
 
 impl FakeMenuRepository {
@@ -37,9 +44,9 @@ impl FakeRoleRepository {
 }
 
 impl MenuRepository for FakeMenuRepository {
-    fn create(&self, req: &CreateMenuRequest, id: &str) -> DynFuture<SeaOrmResult<Menu>> {
+    fn create(&self, req: &CreateMenuRequest, id: &i64) -> DynFuture<SeaOrmResult<Menu>> {
         let menus = self.menus.clone();
-        let id = id.to_string();
+        let id = *id;
         let name = req.name.clone();
         let code = req.code.clone();
         let permission = req.permission.clone();
@@ -57,7 +64,7 @@ impl MenuRepository for FakeMenuRepository {
         let find_auth_id = req.find_auth_id.clone();
         Box::pin(async move {
             let menu = Menu {
-                id: id.clone(),
+                id,
                 name,
                 code,
                 permission,
@@ -82,9 +89,9 @@ impl MenuRepository for FakeMenuRepository {
         })
     }
 
-    fn find_by_id(&self, id: &str) -> DynFuture<SeaOrmOptResult<Menu>> {
+    fn find_by_id(&self, id: &i64) -> DynFuture<SeaOrmOptResult<Menu>> {
         let menus = self.menus.clone();
-        let id = id.to_string();
+        let id = *id;
         Box::pin(async move { Ok(menus.lock().unwrap().get(&id).cloned()) })
     }
 
@@ -101,9 +108,8 @@ impl MenuRepository for FakeMenuRepository {
         })
     }
 
-    fn find_by_parent_id(&self, parent_id: Option<&str>) -> DynFuture<SeaOrmResult<Vec<Menu>>> {
+    fn find_by_parent_id(&self, parent_id: Option<i64>) -> DynFuture<SeaOrmResult<Vec<Menu>>> {
         let menus = self.menus.clone();
-        let parent_id = parent_id.map(String::from);
         Box::pin(async move {
             Ok(menus
                 .lock()
@@ -111,8 +117,8 @@ impl MenuRepository for FakeMenuRepository {
                 .values()
                 .filter(|m| {
                     m.is_deleted == 0
-                        && match &parent_id {
-                            Some(pid) => m.parent_id.as_ref() == Some(pid),
+                        && match parent_id {
+                            Some(pid) => m.parent_id.map_or(false, |id| id == pid),
                             None => m.parent_id.is_none(),
                         }
                 })
@@ -134,23 +140,23 @@ impl MenuRepository for FakeMenuRepository {
         })
     }
 
-    fn find_menus_by_role_id(&self, role_id: &str) -> DynFuture<SeaOrmResult<Vec<Menu>>> {
+    fn find_menus_by_role_id(&self, role_id: &i64) -> DynFuture<SeaOrmResult<Vec<Menu>>> {
         let menus = self.menus.clone();
-        let role_id = role_id.to_string();
+        let role_id = *role_id;
         Box::pin(async move {
             Ok(menus
                 .lock()
                 .unwrap()
                 .values()
-                .filter(|m| m.is_deleted == 0 && m.role_code.as_ref() == Some(&role_id))
+                .filter(|m| m.is_deleted == 0 && m.role_code.as_ref().map_or(false, |c| c == &role_id.to_string()))
                 .cloned()
                 .collect())
         })
     }
 
-    fn update(&self, id: &str, req: &UpdateMenuRequest) -> DynFuture<SeaOrmOptResult<Menu>> {
+    fn update(&self, id: &i64, req: &UpdateMenuRequest) -> DynFuture<SeaOrmOptResult<Menu>> {
         let menus = self.menus.clone();
-        let id = id.to_string();
+        let id = *id;
         let name = req.name.clone();
         let code = req.code.clone();
         let permission = req.permission.clone();
@@ -222,9 +228,9 @@ impl MenuRepository for FakeMenuRepository {
         })
     }
 
-    fn delete(&self, id: &str) -> DynFuture<SeaOrmResult<bool>> {
+    fn delete(&self, id: &i64) -> DynFuture<SeaOrmResult<bool>> {
         let menus = self.menus.clone();
-        let id = id.to_string();
+        let id = *id;
         Box::pin(async move {
             let mut menus_lock = menus.lock().unwrap();
             if let Some(menu) = menus_lock.get_mut(&id) {
@@ -238,9 +244,9 @@ impl MenuRepository for FakeMenuRepository {
 }
 
 impl RoleRepository for FakeRoleRepository {
-    fn create(&self, req: &CreateRoleRequest, id: &str) -> DynFuture<SeaOrmResult<Role>> {
+    fn create(&self, req: &CreateRoleRequest, id: &i64) -> DynFuture<SeaOrmResult<Role>> {
         let roles = self.roles.clone();
-        let id = id.to_string();
+        let id = *id;
         let name = req.name.clone();
         let code = req.code.clone();
         let description = req.description.clone();
@@ -249,7 +255,7 @@ impl RoleRepository for FakeRoleRepository {
         let ds_scope = req.ds_scope.clone();
         Box::pin(async move {
             let role = Role {
-                id: id.clone(),
+                id,
                 name,
                 code,
                 description,
@@ -266,9 +272,9 @@ impl RoleRepository for FakeRoleRepository {
         })
     }
 
-    fn find_by_id(&self, id: &str) -> DynFuture<SeaOrmOptResult<Role>> {
+    fn find_by_id(&self, id: &i64) -> DynFuture<SeaOrmOptResult<Role>> {
         let roles = self.roles.clone();
-        let id = id.to_string();
+        let id = *id;
         Box::pin(async move { Ok(roles.lock().unwrap().get(&id).cloned()) })
     }
 
@@ -316,9 +322,9 @@ impl RoleRepository for FakeRoleRepository {
         })
     }
 
-    fn update(&self, id: &str, req: &UpdateRoleRequest) -> DynFuture<SeaOrmOptResult<Role>> {
+    fn update(&self, id: &i64, req: &UpdateRoleRequest) -> DynFuture<SeaOrmOptResult<Role>> {
         let roles = self.roles.clone();
-        let id = id.to_string();
+        let id = *id;
         let name = req.name.clone();
         let code = req.code.clone();
         let description = req.description.clone();
@@ -358,9 +364,9 @@ impl RoleRepository for FakeRoleRepository {
         })
     }
 
-    fn delete(&self, id: &str) -> DynFuture<SeaOrmResult<bool>> {
+    fn delete(&self, id: &i64) -> DynFuture<SeaOrmResult<bool>> {
         let roles = self.roles.clone();
-        let id = id.to_string();
+        let id = *id;
         Box::pin(async move {
             let mut roles_lock = roles.lock().unwrap();
             if let Some(role) = roles_lock.get_mut(&id) {
@@ -372,10 +378,10 @@ impl RoleRepository for FakeRoleRepository {
         })
     }
 
-    fn assign_role_to_user(&self, user_id: &str, role_id: &str) -> DynFuture<SeaOrmResult<()>> {
+    fn assign_role_to_user(&self, user_id: &i64, role_id: &i64) -> DynFuture<SeaOrmResult<()>> {
         let user_roles = self.user_roles.clone();
-        let user_id = user_id.to_string();
-        let role_id = role_id.to_string();
+        let user_id = *user_id;
+        let role_id = *role_id;
         Box::pin(async move {
             user_roles
                 .lock()
@@ -387,10 +393,10 @@ impl RoleRepository for FakeRoleRepository {
         })
     }
 
-    fn remove_role_from_user(&self, user_id: &str, role_id: &str) -> DynFuture<SeaOrmResult<bool>> {
+    fn remove_role_from_user(&self, user_id: &i64, role_id: &i64) -> DynFuture<SeaOrmResult<bool>> {
         let user_roles = self.user_roles.clone();
-        let user_id = user_id.to_string();
-        let role_id = role_id.to_string();
+        let user_id = *user_id;
+        let role_id = *role_id;
         Box::pin(async move {
             let mut map = user_roles.lock().unwrap();
             if let Some(roles) = map.get_mut(&user_id) {
@@ -403,10 +409,10 @@ impl RoleRepository for FakeRoleRepository {
         })
     }
 
-    fn find_roles_by_user_id(&self, user_id: &str) -> DynFuture<SeaOrmResult<Vec<Role>>> {
+    fn find_roles_by_user_id(&self, user_id: &i64) -> DynFuture<SeaOrmResult<Vec<Role>>> {
         let user_roles = self.user_roles.clone();
         let roles = self.roles.clone();
-        let user_id = user_id.to_string();
+        let user_id = *user_id;
         Box::pin(async move {
             let map = user_roles.lock().unwrap();
             let role_ids = map.get(&user_id).cloned().unwrap_or_default();
@@ -420,7 +426,7 @@ impl RoleRepository for FakeRoleRepository {
         })
     }
 
-    fn find_users_by_role_id(&self, _role_id: &str) -> DynFuture<SeaOrmResult<Vec<User>>> {
+    fn find_users_by_role_id(&self, _role_id: &i64) -> DynFuture<SeaOrmResult<Vec<User>>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
 
@@ -437,7 +443,7 @@ impl RoleRepository for FakeRoleRepository {
         })
     }
 
-    fn set_menus(&self, _role_id: &str, _menu_ids: &[String]) -> DynFuture<SeaOrmResult<()>> {
+    fn set_menus(&self, _role_id: &i64, _menu_ids: &[i64]) -> DynFuture<SeaOrmResult<()>> {
         Box::pin(async move { Ok(()) })
     }
 }
@@ -462,7 +468,7 @@ async fn test_create_menu_success() {
         leaf: Some(true),
         role_code: Some("admin".to_string()),
         disabled: Some(false),
-        find_auth_id: Some("1".to_string()),
+        find_auth_id: Some(1),
     };
     let result = service.create_menu(req).await.unwrap();
     assert_eq!(result.name, "Dashboard");
@@ -475,7 +481,7 @@ async fn test_get_menu_success() {
     let repo = Arc::new(FakeMenuRepository::new());
     let role_repo = Arc::new(FakeRoleRepository::new());
     let service = MenuService::new(repo.clone(), role_repo);
-    let menu_id = "menu-1".to_string();
+    let menu_id = next_menu_id();
     let req = CreateMenuRequest {
         name: "Settings".to_string(),
         code: None,
@@ -504,7 +510,7 @@ async fn test_get_menu_not_found() {
     let repo = Arc::new(FakeMenuRepository::new());
     let role_repo = Arc::new(FakeRoleRepository::new());
     let service = MenuService::new(repo, role_repo);
-    let result = service.get_menu("nonexistent-id").await;
+    let result = service.get_menu(&99999).await;
     assert!(matches!(result, Err(AppError::NotFound(_))));
 }
 
@@ -513,6 +519,8 @@ async fn test_get_all_menus() {
     let repo = Arc::new(FakeMenuRepository::new());
     let role_repo = Arc::new(FakeRoleRepository::new());
     let service = MenuService::new(repo.clone(), role_repo);
+    let m1_id = next_menu_id();
+    let m2_id = next_menu_id();
     repo.create(
         &CreateMenuRequest {
             name: "Menu 1".to_string(),
@@ -531,7 +539,7 @@ async fn test_get_all_menus() {
             disabled: None,
             find_auth_id: None,
         },
-        "m1",
+        &m1_id,
     )
     .await
     .unwrap();
@@ -553,7 +561,7 @@ async fn test_get_all_menus() {
             disabled: None,
             find_auth_id: None,
         },
-        "m2",
+        &m2_id,
     )
     .await
     .unwrap();
@@ -566,6 +574,8 @@ async fn test_get_menu_tree() {
     let repo = Arc::new(FakeMenuRepository::new());
     let role_repo = Arc::new(FakeRoleRepository::new());
     let service = MenuService::new(repo.clone(), role_repo);
+    let root_id = next_menu_id();
+    let child_id = next_menu_id();
     repo.create(
         &CreateMenuRequest {
             name: "Root".to_string(),
@@ -584,7 +594,7 @@ async fn test_get_menu_tree() {
             disabled: None,
             find_auth_id: None,
         },
-        "root",
+        &root_id,
     )
     .await
     .unwrap();
@@ -595,7 +605,7 @@ async fn test_get_menu_tree() {
             permission: None,
             path_url: None,
             icon: None,
-            parent_id: Some("root".to_string()),
+            parent_id: Some(root_id),
             component: None,
             sort: Some(2),
             keep_alive: None,
@@ -606,7 +616,7 @@ async fn test_get_menu_tree() {
             disabled: None,
             find_auth_id: None,
         },
-        "child",
+        &child_id,
     )
     .await
     .unwrap();
@@ -619,6 +629,9 @@ async fn test_get_menus_by_parent() {
     let repo = Arc::new(FakeMenuRepository::new());
     let role_repo = Arc::new(FakeRoleRepository::new());
     let service = MenuService::new(repo.clone(), role_repo);
+    let parent_id = next_menu_id();
+    let child1_id = next_menu_id();
+    let child2_id = next_menu_id();
     repo.create(
         &CreateMenuRequest {
             name: "Parent".to_string(),
@@ -637,7 +650,7 @@ async fn test_get_menus_by_parent() {
             disabled: None,
             find_auth_id: None,
         },
-        "parent",
+        &parent_id,
     )
     .await
     .unwrap();
@@ -648,7 +661,7 @@ async fn test_get_menus_by_parent() {
             permission: None,
             path_url: None,
             icon: None,
-            parent_id: Some("parent".to_string()),
+            parent_id: Some(parent_id),
             component: None,
             sort: None,
             keep_alive: None,
@@ -659,7 +672,7 @@ async fn test_get_menus_by_parent() {
             disabled: None,
             find_auth_id: None,
         },
-        "child1",
+        &child1_id,
     )
     .await
     .unwrap();
@@ -670,7 +683,7 @@ async fn test_get_menus_by_parent() {
             permission: None,
             path_url: None,
             icon: None,
-            parent_id: Some("parent".to_string()),
+            parent_id: Some(parent_id),
             component: None,
             sort: None,
             keep_alive: None,
@@ -681,11 +694,11 @@ async fn test_get_menus_by_parent() {
             disabled: None,
             find_auth_id: None,
         },
-        "child2",
+        &child2_id,
     )
     .await
     .unwrap();
-    let result = service.get_menus_by_parent(Some("parent")).await.unwrap();
+    let result = service.get_menus_by_parent(Some(parent_id)).await.unwrap();
     assert_eq!(result.len(), 2);
     let root_menus = service.get_menus_by_parent(None).await.unwrap();
     assert_eq!(root_menus.len(), 1);
@@ -696,7 +709,7 @@ async fn test_update_menu_success() {
     let repo = Arc::new(FakeMenuRepository::new());
     let role_repo = Arc::new(FakeRoleRepository::new());
     let service = MenuService::new(repo.clone(), role_repo);
-    let menu_id = "menu-1".to_string();
+    let menu_id = next_menu_id();
     repo.create(
         &CreateMenuRequest {
             name: "Old Name".to_string(),
@@ -764,7 +777,7 @@ async fn test_update_menu_not_found() {
         disabled: None,
         find_auth_id: None,
     };
-    let result = service.update_menu("nonexistent-id", req).await;
+    let result = service.update_menu(&99999, req).await;
     assert!(matches!(result, Err(AppError::NotFound(_))));
 }
 
@@ -773,7 +786,7 @@ async fn test_delete_menu_success() {
     let repo = Arc::new(FakeMenuRepository::new());
     let role_repo = Arc::new(FakeRoleRepository::new());
     let service = MenuService::new(repo.clone(), role_repo);
-    let menu_id = "menu-1".to_string();
+    let menu_id = next_menu_id();
     repo.create(
         &CreateMenuRequest {
             name: "Temp Menu".to_string(),
@@ -807,6 +820,6 @@ async fn test_delete_menu_not_found() {
     let repo = Arc::new(FakeMenuRepository::new());
     let role_repo = Arc::new(FakeRoleRepository::new());
     let service = MenuService::new(repo, role_repo);
-    let result = service.delete_menu("nonexistent-id").await;
+    let result = service.delete_menu(&99999).await;
     assert!(matches!(result, Err(AppError::NotFound(_))));
 }
