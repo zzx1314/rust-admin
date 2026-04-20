@@ -1,11 +1,11 @@
 -- 用户表
 CREATE TABLE IF NOT EXISTS p_sys_user (
-    id TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY,
     username TEXT NOT NULL,
     email TEXT,
     phone TEXT,
     password TEXT,
-    org_id TEXT,
+    org_id INTEGER,
     lock_time TEXT,
     last_login_time TEXT,
     try_count INTEGER DEFAULT 0,
@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS p_sys_user (
 
 -- 角色表
 CREATE TABLE IF NOT EXISTS p_sys_role (
-    id TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
     code TEXT,
     create_time TEXT,
@@ -40,20 +40,20 @@ CREATE TABLE IF NOT EXISTS p_sys_role (
 
 -- 用户角色关联表
 CREATE TABLE IF NOT EXISTS p_sys_user_role (
-    user_id TEXT NOT NULL,
-    role_id TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    role_id INTEGER NOT NULL,
     PRIMARY KEY (user_id, role_id)
 );
 
 -- 菜单表
 CREATE TABLE IF NOT EXISTS p_sys_menu (
-    id TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
     code TEXT,
     permission TEXT,
     path_url TEXT,
     icon TEXT,
-    parent_id TEXT,
+    parent_id INTEGER,
     component TEXT,
     sort INTEGER DEFAULT 0,
     keep_alive INTEGER DEFAULT 0,
@@ -70,14 +70,14 @@ CREATE TABLE IF NOT EXISTS p_sys_menu (
 
 -- 角色菜单关联表
 CREATE TABLE IF NOT EXISTS p_sys_role_menu (
-    role_id TEXT NOT NULL,
-    menu_id TEXT NOT NULL,
+    role_id INTEGER NOT NULL,
+    menu_id INTEGER NOT NULL,
     PRIMARY KEY (role_id, menu_id)
 );
 
 -- 字典表
 CREATE TABLE IF NOT EXISTS p_sys_dict (
-    id TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY,
     type TEXT NOT NULL,
     dict_type TEXT,
     description TEXT,
@@ -91,10 +91,10 @@ CREATE TABLE IF NOT EXISTS p_sys_dict (
 
 -- 字典项表
 CREATE TABLE IF NOT EXISTS p_sys_dict_item (
-    id TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY,
     type TEXT NOT NULL,
     label TEXT,
-    dict_id TEXT,
+    dict_id INTEGER,
     value TEXT,
     sort INTEGER DEFAULT 0,
     description TEXT,
@@ -107,10 +107,10 @@ CREATE TABLE IF NOT EXISTS p_sys_dict_item (
 
 -- 组织表
 CREATE TABLE IF NOT EXISTS p_sys_org (
-    id TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
     sort INTEGER DEFAULT 0,
-    parent_id TEXT,
+    parent_id INTEGER,
     create_time TEXT,
     update_time TEXT,
     is_deleted INTEGER DEFAULT 0,

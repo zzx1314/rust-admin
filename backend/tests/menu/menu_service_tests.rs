@@ -54,7 +54,7 @@ impl MenuRepository for FakeMenuRepository {
         let leaf = req.leaf;
         let role_code = req.role_code.clone();
         let disabled = req.disabled;
-        let find_auth_id = req.find_auth_id;
+        let find_auth_id = req.find_auth_id.clone();
         Box::pin(async move {
             let menu = Menu {
                 id: id.clone(),
@@ -165,7 +165,7 @@ impl MenuRepository for FakeMenuRepository {
         let leaf = req.leaf;
         let role_code = req.role_code.clone();
         let disabled = req.disabled;
-        let find_auth_id = req.find_auth_id;
+        let find_auth_id = req.find_auth_id.clone();
         Box::pin(async move {
             let mut menus_lock = menus.lock().unwrap();
             if let Some(menu) = menus_lock.get_mut(&id) {
@@ -462,7 +462,7 @@ async fn test_create_menu_success() {
         leaf: Some(true),
         role_code: Some("admin".to_string()),
         disabled: Some(false),
-        find_auth_id: Some(1),
+        find_auth_id: Some("1".to_string()),
     };
     let result = service.create_menu(req).await.unwrap();
     assert_eq!(result.name, "Dashboard");
