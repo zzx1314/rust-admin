@@ -240,7 +240,7 @@ async function handleAsyncRoutes(routeList) {
       )
     ]);
   }
-  // 添加 pathMatch (404)
+
   addPathMatch();
   // 等待路由刷新
   await nextTick();
