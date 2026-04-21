@@ -3,6 +3,7 @@ use crate::common::pagination::PageResponse;
 use crate::common::traits::{OrgRepository, RoleRepository, UserRepository};
 use crate::common::util::{decrypt_password, md5_encrypt};
 use crate::system::sys_user::domain::{CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO};
+use futures_util::future::join_all;
 use std::sync::Arc;
 
 #[derive(Debug, serde::Deserialize)]
@@ -76,15 +77,18 @@ impl UserService {
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
-        // Populate org_name and role_str for each user
-        for user_vo in records.iter_mut() {
-            // Get org name
-            if let Ok(Some(org)) = self.org_repo.find_by_id(&user_vo.org_id).await {
-                user_vo.org_name = Some(org.name);
+        let org_futures = records.iter().map(|u| self.org_repo.find_by_id(&u.org_id));
+        let role_futures = records.iter().map(|u| self.role_repo.find_roles_by_user_id(&u.id));
+
+        let org_results = join_all(org_futures).await;
+        let role_results = join_all(role_futures).await;
+
+        for (i, user_vo) in records.iter_mut().enumerate() {
+            if let Ok(Some(org)) = org_results[i].as_ref() {
+                user_vo.org_name = Some(org.name.clone());
             }
 
-            // Get role names and role_str
-            if let Ok(roles) = self.role_repo.find_roles_by_user_id(&user_vo.id).await {
+            if let Ok(roles) = role_results[i].as_ref() {
                 let role_names: Vec<String> = roles.iter().map(|r| r.name.clone()).collect();
                 let role_str = roles
                     .iter()
