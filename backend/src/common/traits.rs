@@ -2,6 +2,8 @@ use crate::common::error::AppError;
 use crate::menu::domain::{CreateMenuRequest, Menu, UpdateMenuRequest};
 use crate::org::domain::{CreateOrgRequest, Org, OrgTreeQuery, UpdateOrgRequest};
 use crate::role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequest};
+use crate::sys_dict::domain::{CreateSysDictRequest, SysDict, SysDictPageQuery, SysDictVO, UpdateSysDictRequest};
+use crate::sys_dict_item::domain::{CreateSysDictItemRequest, SysDictItem, SysDictItemPageQuery, SysDictItemVO, UpdateSysDictItemRequest};
 use crate::user::domain::{CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO};
 use sea_orm::DbErr;
 use std::future::Future;
@@ -74,5 +76,31 @@ pub trait OrgRepository: Send + Sync {
     fn find_tree(&self) -> DynFuture<SeaOrmResult<Vec<Org>>>;
     fn find_tree_with_filter(&self, query: &OrgTreeQuery) -> DynFuture<SeaOrmResult<Vec<Org>>>;
     fn update(&self, id: &i64, req: &UpdateOrgRequest) -> DynFuture<SeaOrmOptResult<Org>>;
+    fn delete(&self, id: &i64) -> DynFuture<SeaOrmResult<bool>>;
+}
+
+pub trait SysDictRepository: Send + Sync {
+    fn create(&self, req: &CreateSysDictRequest, id: &i64) -> DynFuture<SeaOrmResult<SysDict>>;
+    fn find_by_id(&self, id: &i64) -> DynFuture<SeaOrmOptResult<SysDict>>;
+    fn find_all(&self) -> DynFuture<SeaOrmResult<Vec<SysDict>>>;
+    fn find_all_with_page(
+        &self,
+        query: &SysDictPageQuery,
+    ) -> DynFuture<SeaOrmResult<(Vec<SysDictVO>, i64)>>;
+    fn update(&self, id: &i64, req: &UpdateSysDictRequest) -> DynFuture<SeaOrmOptResult<SysDict>>;
+    fn delete(&self, id: &i64) -> DynFuture<SeaOrmResult<bool>>;
+}
+
+pub trait SysDictItemRepository: Send + Sync {
+    fn create(&self, req: &CreateSysDictItemRequest, id: &i64) -> DynFuture<SeaOrmResult<SysDictItem>>;
+    fn find_by_id(&self, id: &i64) -> DynFuture<SeaOrmOptResult<SysDictItem>>;
+    fn find_all(&self) -> DynFuture<SeaOrmResult<Vec<SysDictItem>>>;
+    fn find_by_dict_id(&self, dict_id: &i64) -> DynFuture<SeaOrmResult<Vec<SysDictItem>>>;
+    fn find_by_type(&self, r#type: &str) -> DynFuture<SeaOrmResult<Vec<SysDictItem>>>;
+    fn find_all_with_page(
+        &self,
+        query: &SysDictItemPageQuery,
+    ) -> DynFuture<SeaOrmResult<(Vec<SysDictItemVO>, i64)>>;
+    fn update(&self, id: &i64, req: &UpdateSysDictItemRequest) -> DynFuture<SeaOrmOptResult<SysDictItem>>;
     fn delete(&self, id: &i64) -> DynFuture<SeaOrmResult<bool>>;
 }

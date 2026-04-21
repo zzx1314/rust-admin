@@ -156,7 +156,6 @@ impl OrgRepository for FakeOrgRepository {
         let org_duty = req.org_duty.clone();
         let desrc = req.desrc.clone();
         let r#type = req.r#type.clone();
-        let is_out = req.is_out;
         let remarks = req.remarks.clone();
         Box::pin(async move {
             let mut data_lock = data.lock().unwrap();

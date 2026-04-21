@@ -95,3 +95,11 @@ path = "tests/common/error_tests.rs"
 [[test]]
 name = "util_tests"
 path = "tests/common/util_tests.rs"
+
+[[test]]
+name = "sys_dict_service_tests"
+path = "tests/sys_dict/sys_dict_service_tests.rs"
+
+[[test]]
+name = "sys_dict_item_service_tests"
+path = "tests/sys_dict_item/sys_dict_item_service_tests.rs"

@@ -25,6 +25,15 @@ use crate::role::handlers::{
     get_user_roles_handler, remove_role_from_user_handler, update_role_handler,
 };
 use crate::sys_auth::handlers::{get_menu_data_handler, set_menu_auth_handler};
+use crate::sys_dict::handlers::{
+    create_dict_handler, delete_dict_handler, get_all_dicts_handler, get_dict_handler,
+    get_dicts_page_handler, update_dict_handler,
+};
+use crate::sys_dict_item::handlers::{
+    create_dict_item_handler, delete_dict_item_handler, get_all_dict_items_handler,
+    get_dict_item_handler, get_dict_items_by_dict_id_handler, get_dict_items_by_type_handler,
+    get_dict_items_page_handler, get_safe_policy_handler, update_dict_item_handler,
+};
 use crate::user::handlers::{
     create_user_handler, delete_user_handler, edit_password_handler, get_all_users_handler,
     get_user_handler, get_users_by_role_handler, get_users_page_handler,
@@ -144,6 +153,41 @@ pub fn sys_auth_routes(state: AppState) -> Router<AppState> {
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 
+pub fn sys_dict_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/sysDict/getPage", get(get_dicts_page_handler))
+        .route(
+            "/sysDict",
+            post(create_dict_handler).get(get_all_dicts_handler),
+        )
+        .route(
+            "/sysDict/{id}",
+            get(get_dict_handler)
+                .put(update_dict_handler)
+                .delete(delete_dict_handler),
+        )
+        .layer(from_fn_with_state(state.clone(), require_auth))
+}
+
+pub fn sys_dict_item_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/sysDictItem/getPage", get(get_dict_items_page_handler))
+        .route(
+            "/sysDictItem",
+            post(create_dict_item_handler).get(get_all_dict_items_handler),
+        )
+        .route(
+            "/sysDictItem/{id}",
+            get(get_dict_item_handler)
+                .put(update_dict_item_handler)
+                .delete(delete_dict_item_handler),
+        )
+        .route("/sysDictItem/getByDictId/{dict_id}", get(get_dict_items_by_dict_id_handler))
+        .route("/sysDictItem/getByType", get(get_dict_items_by_type_handler))
+        .route("/sysDict/getSafePolicy", get(get_safe_policy_handler))
+        .layer(from_fn_with_state(state.clone(), require_auth))
+}
+
 pub fn create_router(state: AppState) -> Router {
     let api_router = Router::new()
         .merge(auth_routes())
@@ -152,7 +196,9 @@ pub fn create_router(state: AppState) -> Router {
         .merge(role_routes(state.clone()))
         .merge(menu_routes(state.clone()))
         .merge(org_routes(state.clone()))
-        .merge(sys_auth_routes(state.clone()));
+        .merge(sys_auth_routes(state.clone()))
+        .merge(sys_dict_routes(state.clone()))
+        .merge(sys_dict_item_routes(state.clone()));
 
     Router::new()
         .nest("/api", api_router)

@@ -5,9 +5,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 use x_rust::api::routes::create_router;
+use x_rust::api::AppState;
 use x_rust::common::error::AppError;
-use x_rust::common::traits::{DynFuture, TokenStore};
+use x_rust::common::traits::{DynFuture, SysDictItemRepository, SysDictRepository, TokenStore};
 use x_rust::common::util::encrypt_password;
+use x_rust::sys_dict::repository::SeaOrmSysDictRepository;
+use x_rust::sys_dict::service::SysDictService;
+use x_rust::sys_dict_item::repository::SeaOrmSysDictItemRepository;
+use x_rust::sys_dict_item::service::SysDictItemService;
 
 struct FakeTokenStore {
     store: Arc<Mutex<HashMap<String, String>>>,
@@ -223,7 +228,7 @@ async fn create_test_app() -> (axum::Router, TestDb) {
     use x_rust::api::AppState;
     use x_rust::auth::service::AuthService;
     use x_rust::common::traits::{
-        MenuRepository, OrgRepository, RoleRepository, TokenStore, UserRepository,
+        MenuRepository, OrgRepository, RoleRepository, SysDictItemRepository, SysDictRepository, TokenStore, UserRepository,
     };
     use x_rust::menu::repository::SeaOrmMenuRepository;
     use x_rust::menu::service::MenuService;
@@ -232,6 +237,10 @@ async fn create_test_app() -> (axum::Router, TestDb) {
     use x_rust::role::repository::SeaOrmRoleRepository;
     use x_rust::role::service::RoleService;
     use x_rust::sys_auth::service::SysAuthService;
+    use x_rust::sys_dict::repository::SeaOrmSysDictRepository;
+    use x_rust::sys_dict::service::SysDictService;
+    use x_rust::sys_dict_item::repository::SeaOrmSysDictItemRepository;
+    use x_rust::sys_dict_item::service::SysDictItemService;
     use x_rust::user::repository::SeaOrmUserRepository;
     use x_rust::user::service::UserService;
 
@@ -252,6 +261,10 @@ async fn create_test_app() -> (axum::Router, TestDb) {
     let org_repo: Arc<dyn OrgRepository> = Arc::new(SeaOrmOrgRepository::new(conn.clone()));
     let org_service = Arc::new(OrgService::new(org_repo));
     let sys_auth_service = Arc::new(SysAuthService::new(menu_repo, role_repo.clone()));
+    let sys_dict_repo: Arc<dyn SysDictRepository> = Arc::new(SeaOrmSysDictRepository::new(conn.clone()));
+    let sys_dict_service = Arc::new(SysDictService::new(sys_dict_repo));
+    let sys_dict_item_repo: Arc<dyn SysDictItemRepository> = Arc::new(SeaOrmSysDictItemRepository::new(conn.clone()));
+    let sys_dict_item_service = Arc::new(SysDictItemService::new(sys_dict_item_repo));
 
     let state = AppState {
         user_service,
@@ -260,6 +273,8 @@ async fn create_test_app() -> (axum::Router, TestDb) {
         menu_service,
         org_service,
         sys_auth_service,
+        sys_dict_service,
+        sys_dict_item_service,
     };
     let router = create_router(state);
     (router, test_db)
