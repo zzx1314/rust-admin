@@ -6,9 +6,9 @@ use x_rust::common::traits::{
     DynFuture, RoleRepository, SeaOrmOptResult, SeaOrmResult, UserRepository,
 };
 use x_rust::common::util::encrypt_password;
-use x_rust::role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequest};
-use x_rust::user::domain::{CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO};
-use x_rust::user::service::UserService;
+use x_rust::system::sys_role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequest};
+use x_rust::system::sys_user::domain::{CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO};
+use x_rust::system::sys_user::service::UserService;
 
 // ==================== Fake User Repository ====================
 

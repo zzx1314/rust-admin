@@ -1,8 +1,8 @@
 use sea_orm::Database;
 use uuid::Uuid;
 use x_rust::common::traits::OrgRepository;
-use x_rust::org::domain::{CreateOrgRequest, OrgTreeQuery, UpdateOrgRequest};
-use x_rust::org::repository::SeaOrmOrgRepository;
+use x_rust::system::sys_org::domain::{CreateOrgRequest, OrgTreeQuery, UpdateOrgRequest};
+use x_rust::system::sys_org::repository::SeaOrmOrgRepository;
 
 fn test_db_path() -> String {
     let id = Uuid::new_v4();

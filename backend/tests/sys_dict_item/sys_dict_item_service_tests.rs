@@ -3,11 +3,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use x_rust::common::error::AppError;
 use x_rust::common::traits::{DynFuture, SeaOrmOptResult, SeaOrmResult, SysDictItemRepository};
-use x_rust::sys_dict_item::domain::{
+use x_rust::system::sys_dict_item::domain::{
     CreateSysDictItemRequest, SysDictItem, SysDictItemPageQuery, SysDictItemVO,
     UpdateSysDictItemRequest,
 };
-use x_rust::sys_dict_item::service::SysDictItemService;
+use x_rust::system::sys_dict_item::service::SysDictItemService;
 
 struct FakeSysDictItemRepository {
     items: Arc<Mutex<HashMap<i64, SysDictItem>>>,

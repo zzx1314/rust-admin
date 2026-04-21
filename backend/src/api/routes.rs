@@ -10,31 +10,31 @@ use crate::api::middleware::require_auth;
 use crate::auth::handlers::{
     check_token_handler, login_handler, logout_handler, me_handler, refresh_handler,
 };
-use crate::menu::handlers::{
+use crate::system::sys_menu::handlers::{
     create_menu_handler, delete_menu_handler, get_all_menus_handler, get_menu_handler,
     get_menu_tree_handler, get_menus_by_parent_handler, get_user_menu_handler, update_menu_handler,
 };
-use crate::org::handlers::{
+use crate::system::sys_org::handlers::{
     create_org_handler, delete_org_handler, get_all_orgs_handler, get_org_handler,
     get_org_tree_handler, get_orgs_by_parent_handler, remove_orgs_by_ids_handler,
     update_org_handler,
 };
-use crate::role::handlers::{
+use crate::system::sys_role::handlers::{
     assign_role_to_user_handler, create_role_handler, delete_role_handler, get_all_roles_handler,
     get_role_handler, get_role_users_handler, get_roles_nolog_handler, get_roles_page_handler,
     get_user_roles_handler, remove_role_from_user_handler, update_role_handler,
 };
-use crate::sys_auth::handlers::{get_menu_data_handler, set_menu_auth_handler};
-use crate::sys_dict::handlers::{
+use crate::system::sys_auth::handlers::{get_menu_data_handler, set_menu_auth_handler};
+use crate::system::sys_dict::handlers::{
     create_dict_handler, delete_dict_handler, get_all_dicts_handler, get_dict_handler,
     get_dicts_page_handler, update_dict_handler,
 };
-use crate::sys_dict_item::handlers::{
+use crate::system::sys_dict_item::handlers::{
     create_dict_item_handler, delete_dict_item_handler, get_all_dict_items_handler,
     get_dict_item_handler, get_dict_items_by_dict_id_handler, get_dict_items_by_type_handler,
     get_dict_items_page_handler, get_safe_policy_handler, update_dict_item_handler,
 };
-use crate::user::handlers::{
+use crate::system::sys_user::handlers::{
     create_user_handler, delete_user_handler, edit_password_handler, get_all_users_handler,
     get_user_handler, get_users_by_role_handler, get_users_page_handler,
     reset_user_password_handler, toggle_user_enable_handler, update_user_handler,

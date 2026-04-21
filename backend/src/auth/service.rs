@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::error::AppError;
 use crate::common::traits::{RoleRepository, TokenStore, UserRepository};
-use crate::user::domain::User;
+use crate::system::sys_user::domain::User;
 
 const ACCESS_TOKEN_TTL_SECS: u64 = 24 * 60 * 60;
 const REFRESH_TOKEN_TTL_SECS: u64 = 7 * 24 * 60 * 60;

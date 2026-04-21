@@ -12,20 +12,20 @@ use crate::common::traits::{
     TokenStore, UserRepository,
 };
 use crate::config::AppConfig;
-use crate::menu::repository::SeaOrmMenuRepository;
-use crate::menu::service::MenuService;
+use crate::system::sys_menu::repository::SeaOrmMenuRepository;
+use crate::system::sys_menu::service::MenuService;
 use crate::migration::Migrator;
-use crate::org::repository::SeaOrmOrgRepository;
-use crate::org::service::OrgService;
-use crate::role::repository::SeaOrmRoleRepository;
-use crate::role::service::RoleService;
-use crate::sys_auth::service::SysAuthService;
-use crate::sys_dict::repository::SeaOrmSysDictRepository;
-use crate::sys_dict::service::SysDictService;
-use crate::sys_dict_item::repository::SeaOrmSysDictItemRepository;
-use crate::sys_dict_item::service::SysDictItemService;
-use crate::user::repository::SeaOrmUserRepository;
-use crate::user::service::UserService;
+use crate::system::sys_org::repository::SeaOrmOrgRepository;
+use crate::system::sys_org::service::OrgService;
+use crate::system::sys_role::repository::SeaOrmRoleRepository;
+use crate::system::sys_role::service::RoleService;
+use crate::system::sys_auth::service::SysAuthService;
+use crate::system::sys_dict::repository::SeaOrmSysDictRepository;
+use crate::system::sys_dict::service::SysDictService;
+use crate::system::sys_dict_item::repository::SeaOrmSysDictItemRepository;
+use crate::system::sys_dict_item::service::SysDictItemService;
+use crate::system::sys_user::repository::SeaOrmUserRepository;
+use crate::system::sys_user::service::UserService;
 use sea_orm_migration::MigratorTrait;
 
 pub struct App {

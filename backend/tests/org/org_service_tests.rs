@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use x_rust::common::error::AppError;
 use x_rust::common::traits::{DynFuture, OrgRepository, SeaOrmOptResult, SeaOrmResult};
-use x_rust::org::domain::{CreateOrgRequest, Org, OrgTreeDto, OrgTreeQuery, UpdateOrgRequest};
-use x_rust::org::service::OrgService;
+use x_rust::system::sys_org::domain::{CreateOrgRequest, Org, OrgTreeDto, OrgTreeQuery, UpdateOrgRequest};
+use x_rust::system::sys_org::service::OrgService;
 
 struct FakeOrgRepository {
     data: Arc<Mutex<HashMap<i64, Org>>>,

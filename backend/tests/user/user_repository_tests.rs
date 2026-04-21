@@ -1,7 +1,7 @@
 use sea_orm::Database;
 use x_rust::common::traits::UserRepository;
-use x_rust::user::domain::{CreateUserRequest, UpdateUserRequest};
-use x_rust::user::repository::SeaOrmUserRepository;
+use x_rust::system::sys_user::domain::{CreateUserRequest, UpdateUserRequest};
+use x_rust::system::sys_user::repository::SeaOrmUserRepository;
 
 fn uid() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -282,7 +282,7 @@ async fn test_user_repo_update_not_found() {
     let (pool, _test_db) = create_test_db().await;
     let repo = SeaOrmUserRepository::new(pool.into());
 
-    use x_rust::user::domain::UpdateUserRequest;
+    use x_rust::system::sys_user::domain::UpdateUserRequest;
     let update_req = UpdateUserRequest {
         username: Some("updated".to_string()),
         phone: None,

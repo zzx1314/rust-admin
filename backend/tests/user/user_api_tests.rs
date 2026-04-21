@@ -226,19 +226,19 @@ async fn create_test_app() -> (axum::Router, TestDb) {
         MenuRepository, OrgRepository, RoleRepository, SysDictItemRepository, SysDictRepository,
         TokenStore, UserRepository,
     };
-    use x_rust::menu::repository::SeaOrmMenuRepository;
-    use x_rust::menu::service::MenuService;
-    use x_rust::org::repository::SeaOrmOrgRepository;
-    use x_rust::org::service::OrgService;
-    use x_rust::role::repository::SeaOrmRoleRepository;
-    use x_rust::role::service::RoleService;
-    use x_rust::sys_auth::service::SysAuthService;
-    use x_rust::sys_dict::repository::SeaOrmSysDictRepository;
-    use x_rust::sys_dict::service::SysDictService;
-    use x_rust::sys_dict_item::repository::SeaOrmSysDictItemRepository;
-    use x_rust::sys_dict_item::service::SysDictItemService;
-    use x_rust::user::repository::SeaOrmUserRepository;
-    use x_rust::user::service::UserService;
+    use x_rust::system::sys_menu::repository::SeaOrmMenuRepository;
+    use x_rust::system::sys_menu::service::MenuService;
+    use x_rust::system::sys_org::repository::SeaOrmOrgRepository;
+    use x_rust::system::sys_org::service::OrgService;
+    use x_rust::system::sys_role::repository::SeaOrmRoleRepository;
+    use x_rust::system::sys_role::service::RoleService;
+    use x_rust::system::sys_auth::service::SysAuthService;
+    use x_rust::system::sys_dict::repository::SeaOrmSysDictRepository;
+    use x_rust::system::sys_dict::service::SysDictService;
+    use x_rust::system::sys_dict_item::repository::SeaOrmSysDictItemRepository;
+    use x_rust::system::sys_dict_item::service::SysDictItemService;
+    use x_rust::system::sys_user::repository::SeaOrmUserRepository;
+    use x_rust::system::sys_user::service::UserService;
 
     let conn = Arc::new(conn);
     let user_repo: Arc<dyn UserRepository> = Arc::new(SeaOrmUserRepository::new(conn.clone()));
@@ -291,14 +291,14 @@ async fn login(app: axum::Router, test_db: &TestDb) -> String {
     use std::sync::Arc;
     use x_rust::common::traits::UserRepository;
     use x_rust::common::util::md5_encrypt;
-    use x_rust::user::domain::CreateUserRequest;
+    use x_rust::system::sys_user::domain::CreateUserRequest;
 
     let conn = Database::connect(&format!("sqlite:{}", test_db.path))
         .await
         .unwrap();
 
     let password_hash = md5_encrypt("password123");
-    let user_repo = x_rust::user::repository::SeaOrmUserRepository::new(Arc::new(conn));
+    let user_repo = x_rust::system::sys_user::repository::SeaOrmUserRepository::new(Arc::new(conn));
     user_repo
         .create(
             &CreateUserRequest {

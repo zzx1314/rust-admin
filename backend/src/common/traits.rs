@@ -1,15 +1,15 @@
 use crate::common::error::AppError;
-use crate::menu::domain::{CreateMenuRequest, Menu, UpdateMenuRequest};
-use crate::org::domain::{CreateOrgRequest, Org, OrgTreeQuery, UpdateOrgRequest};
-use crate::role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequest};
-use crate::sys_dict::domain::{
+use crate::system::sys_menu::domain::{CreateMenuRequest, Menu, UpdateMenuRequest};
+use crate::system::sys_org::domain::{CreateOrgRequest, Org, OrgTreeQuery, UpdateOrgRequest};
+use crate::system::sys_role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequest};
+use crate::system::sys_dict::domain::{
     CreateSysDictRequest, SysDict, SysDictPageQuery, SysDictVO, UpdateSysDictRequest,
 };
-use crate::sys_dict_item::domain::{
+use crate::system::sys_dict_item::domain::{
     CreateSysDictItemRequest, SysDictItem, SysDictItemPageQuery, SysDictItemVO,
     UpdateSysDictItemRequest,
 };
-use crate::user::domain::{CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO};
+use crate::system::sys_user::domain::{CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO};
 use sea_orm::DbErr;
 use std::future::Future;
 use std::pin::Pin;

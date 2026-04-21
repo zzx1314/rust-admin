@@ -7,8 +7,8 @@ use x_rust::common::traits::{
     DynFuture, RoleRepository, SeaOrmOptResult, SeaOrmResult, TokenStore, UserRepository,
 };
 use x_rust::common::util::md5_encrypt;
-use x_rust::role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequest};
-use x_rust::user::domain::{CreateUserRequest, User, UserPageQuery, UserVO};
+use x_rust::system::sys_role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequest};
+use x_rust::system::sys_user::domain::{CreateUserRequest, User, UserPageQuery, UserVO};
 
 // ==================== Fake User Repository ====================
 
@@ -103,7 +103,7 @@ impl UserRepository for FakeUserRepository {
     fn update(
         &self,
         id: &i64,
-        req: &x_rust::user::domain::UpdateUserRequest,
+        req: &x_rust::system::sys_user::domain::UpdateUserRequest,
     ) -> DynFuture<SeaOrmOptResult<User>> {
         let users = self.users.clone();
         let id = *id;

@@ -1,10 +1,10 @@
 use sea_orm::Database;
 use uuid::Uuid;
 use x_rust::common::traits::{RoleRepository, UserRepository};
-use x_rust::role::domain::{CreateRoleRequest, UpdateRoleRequest};
-use x_rust::role::repository::SeaOrmRoleRepository;
-use x_rust::user::domain::CreateUserRequest;
-use x_rust::user::repository::SeaOrmUserRepository;
+use x_rust::system::sys_role::domain::{CreateRoleRequest, UpdateRoleRequest};
+use x_rust::system::sys_role::repository::SeaOrmRoleRepository;
+use x_rust::system::sys_user::domain::CreateUserRequest;
+use x_rust::system::sys_user::repository::SeaOrmUserRepository;
 
 fn test_db_path() -> String {
     let id = Uuid::new_v4();

@@ -1,11 +1,11 @@
 use crate::auth::service::AuthService;
-use crate::menu::service::MenuService;
-use crate::org::service::OrgService;
-use crate::role::service::RoleService;
-use crate::sys_auth::service::SysAuthService;
-use crate::sys_dict::service::SysDictService;
-use crate::sys_dict_item::service::SysDictItemService;
-use crate::user::service::UserService;
+use crate::system::sys_menu::service::MenuService;
+use crate::system::sys_org::service::OrgService;
+use crate::system::sys_role::service::RoleService;
+use crate::system::sys_auth::service::SysAuthService;
+use crate::system::sys_dict::service::SysDictService;
+use crate::system::sys_dict_item::service::SysDictItemService;
+use crate::system::sys_user::service::UserService;
 use std::sync::Arc;
 
 pub mod middleware;

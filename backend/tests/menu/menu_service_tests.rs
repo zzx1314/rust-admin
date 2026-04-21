@@ -6,10 +6,10 @@ use x_rust::common::error::AppError;
 use x_rust::common::traits::{
     DynFuture, MenuRepository, RoleRepository, SeaOrmOptResult, SeaOrmResult,
 };
-use x_rust::menu::domain::{CreateMenuRequest, Menu, UpdateMenuRequest};
-use x_rust::menu::service::MenuService;
-use x_rust::role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequest};
-use x_rust::user::domain::User;
+use x_rust::system::sys_menu::domain::{CreateMenuRequest, Menu, UpdateMenuRequest};
+use x_rust::system::sys_menu::service::MenuService;
+use x_rust::system::sys_role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequest};
+use x_rust::system::sys_user::domain::User;
 
 static MENU_ID_COUNTER: AtomicI64 = AtomicI64::new(1);
 

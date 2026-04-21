@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use x_rust::common::error::AppError;
 use x_rust::common::traits::{DynFuture, RoleRepository, SeaOrmOptResult, SeaOrmResult};
-use x_rust::role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequest};
-use x_rust::role::service::RoleService;
-use x_rust::user::domain::User;
+use x_rust::system::sys_role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequest};
+use x_rust::system::sys_role::service::RoleService;
+use x_rust::system::sys_user::domain::User;
 
 // ==================== Fake Role Repository ====================
 
