@@ -111,7 +111,7 @@ watch(searchValue, val => {
 onMounted(() => {
   getDeptList().then(res => {
     if (res.code == SUCCESS) {
-      treeData.value = handleTree(res.data, "id", "parent_id", "children");
+      treeData.value = handleTree(res.data);
       console.log(treeData.value);
       nextTick(() => {
         const nodeId = treeData.value[0].id;
@@ -173,7 +173,7 @@ function findOrgTree(orgId: number, treeData: any, result: any) {
     class="h-full bg-bg_color overflow-auto"
     :style="{ minHeight: `calc(100vh - 141px)` }"
   >
-    <div class="flex items-center h-[34px] pl-2">
+    <div class="flex items-center h-8.5 pl-2">
       <p class="flex-1 ml-2 font-bold text-base truncate" title="部门列表">
         部门列表
       </p>
@@ -195,7 +195,7 @@ function findOrgTree(orgId: number, treeData: any, result: any) {
       </el-input>
       <el-dropdown :hide-on-click="false">
         <IconifyIconOffline
-          class="w-[28px] cursor-pointer"
+          class="w-7 cursor-pointer"
           width="18px"
           :icon="More2Fill"
         />

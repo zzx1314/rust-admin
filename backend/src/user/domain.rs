@@ -63,6 +63,7 @@ impl UserPageQuery {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct UserVO {
     pub id: i64,
     pub username: String,
@@ -75,7 +76,7 @@ pub struct UserVO {
     pub last_login_time: Option<DateTime<Utc>>,
     pub try_count: Option<i32>,
     pub lock_flag: Option<i32>,
-    pub create_time: DateTime<Utc>,
+    pub create_time: String,
     pub update_time: DateTime<Utc>,
     pub remarks: Option<String>,
     pub pass_update_time: Option<DateTime<Utc>>,
@@ -101,7 +102,7 @@ impl From<UserModel> for UserVO {
             last_login_time: m.last_login_time,
             try_count: m.try_count,
             lock_flag: m.lock_flag,
-            create_time: m.create_time,
+            create_time: m.create_time.format("%Y-%m-%d %H:%M:%S").to_string(),
             update_time: m.update_time,
             remarks: m.remarks,
             pass_update_time: m.pass_update_time,

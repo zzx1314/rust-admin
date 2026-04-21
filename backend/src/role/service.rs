@@ -1,7 +1,7 @@
 use crate::common::error::AppError;
 use crate::common::pagination::PageResponse;
 use crate::common::traits::RoleRepository;
-use crate::role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequest};
+use crate::role::domain::{CreateRoleRequest, Role, RolePageQuery, RoleVO, UpdateRoleRequest};
 use crate::user::domain::User;
 use std::sync::Arc;
 
@@ -37,13 +37,14 @@ impl RoleService {
             .map_err(AppError::DatabaseErrorSeaOrm)
     }
 
-    pub async fn get_roles_page(&self, req: RolePageQuery) -> Result<PageResponse<Role>, AppError> {
+    pub async fn get_roles_page(&self, req: RolePageQuery) -> Result<PageResponse<RoleVO>, AppError> {
         let (records, total) = self
             .role_repo
             .find_all_with_page(&req)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
-        Ok(PageResponse::new(records, total, req.page(), req.size()))
+        let vo_records: Vec<RoleVO> = records.into_iter().map(RoleVO::from).collect();
+        Ok(PageResponse::new(vo_records, total, req.page(), req.size()))
     }
 
     pub async fn update_role(&self, id: &i64, req: UpdateRoleRequest) -> Result<Role, AppError> {

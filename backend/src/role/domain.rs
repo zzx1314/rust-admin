@@ -1,9 +1,47 @@
 use crate::role::entity::ActiveModel as RoleActiveModel;
 use crate::role::entity::Model as RoleModel;
+use chrono::{DateTime, Utc};
 use sea_orm::ActiveValue;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+fn format_datetime(dt: DateTime<Utc>) -> String {
+    dt.format("%Y-%m-%d %H:%M:%S").to_string()
+}
 
 pub type Role = RoleModel;
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RoleVO {
+    pub id: i64,
+    pub name: String,
+    pub code: Option<String>,
+    pub description: Option<String>,
+    pub create_time: String,
+    pub update_time: String,
+    pub is_deleted: i32,
+    pub remarks: Option<String>,
+    pub is_edit: Option<bool>,
+    pub ds_type: Option<i32>,
+    pub ds_scope: Option<String>,
+}
+
+impl From<RoleModel> for RoleVO {
+    fn from(m: RoleModel) -> Self {
+        Self {
+            id: m.id,
+            name: m.name,
+            code: m.code,
+            description: m.description,
+            create_time: format_datetime(m.create_time),
+            update_time: format_datetime(m.update_time),
+            is_deleted: m.is_deleted,
+            remarks: m.remarks,
+            is_edit: m.is_edit,
+            ds_type: m.ds_type,
+            ds_scope: m.ds_scope,
+        }
+    }
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct CreateRoleRequest {

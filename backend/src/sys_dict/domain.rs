@@ -4,6 +4,10 @@ use chrono::{DateTime, Utc};
 use sea_orm::ActiveValue;
 use serde::{Deserialize, Serialize};
 
+fn format_datetime(dt: Option<DateTime<Utc>>) -> Option<String> {
+    dt.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+}
+
 pub type SysDict = SysDictModel;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -53,8 +57,8 @@ pub struct SysDictVO {
     pub dict_type: Option<String>,
     pub description: Option<String>,
     pub remarks: Option<String>,
-    pub create_time: Option<DateTime<Utc>>,
-    pub update_time: Option<DateTime<Utc>>,
+    pub create_time: Option<String>,
+    pub update_time: Option<String>,
     pub is_deleted: i32,
     pub allow_deletion: Option<i32>,
     pub is_show: Option<i32>,
@@ -68,8 +72,8 @@ impl From<SysDictModel> for SysDictVO {
             dict_type: m.dict_type,
             description: m.description,
             remarks: m.remarks,
-            create_time: m.create_time,
-            update_time: m.update_time,
+            create_time: format_datetime(m.create_time),
+            update_time: format_datetime(m.update_time),
             is_deleted: m.is_deleted,
             allow_deletion: m.allow_deletion,
             is_show: m.is_show,

@@ -4,6 +4,10 @@ use chrono::{DateTime, Utc};
 use sea_orm::ActiveValue;
 use serde::{Deserialize, Serialize};
 
+fn format_datetime(dt: DateTime<Utc>) -> String {
+    dt.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
 pub type Org = OrgModel;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -44,7 +48,7 @@ pub struct OrgTreeDto {
     pub r#type: Option<String>,
     pub is_deleted: i32,
     pub remarks: Option<String>,
-    pub create_time: DateTime<Utc>,
+    pub create_time: String,
     pub children: Option<Vec<OrgTreeDto>>,
 }
 
@@ -61,7 +65,7 @@ impl From<Org> for OrgTreeDto {
             r#type: org.r#type,
             is_deleted: org.is_deleted,
             remarks: org.remarks,
-            create_time: org.create_time,
+            create_time: format_datetime(org.create_time),
             children: None,
         }
     }
@@ -80,7 +84,7 @@ pub struct SysOrgVo {
     pub org_duty: Option<String>,
     pub desrc: Option<String>,
     pub r#type: Option<String>,
-    pub create_time: DateTime<Utc>,
+    pub create_time: String,
     pub remarks: Option<String>,
 }
 
@@ -97,7 +101,7 @@ impl From<Org> for SysOrgVo {
             org_duty: org.org_duty.clone(),
             desrc: org.desrc.clone(),
             r#type: org.r#type.clone(),
-            create_time: org.create_time,
+            create_time: format_datetime(org.create_time),
             remarks: org.remarks.clone(),
         }
     }

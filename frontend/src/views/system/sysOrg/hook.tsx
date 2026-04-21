@@ -100,7 +100,7 @@ export function useDept() {
     {
       label: "创建时间",
       minWidth: 200,
-      prop: "create_time"
+      prop: "createTime"
     },
     {
       label: "备注",
@@ -213,7 +213,7 @@ export function useDept() {
       searchForm.endTime = searchForm.endTime + " 23:59:59";
     }
     const { data } = await getDeptList(searchForm);
-    dataList.value = handleTree(data, "id", "parent_id", "children");
+    dataList.value = handleTree(data);
     setTimeout(() => {
       loading.value = false;
     }, 500);

@@ -1,7 +1,7 @@
 use crate::api::AppState;
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
-use crate::role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequest};
+use crate::role::domain::{CreateRoleRequest, Role, RolePageQuery, RoleVO, UpdateRoleRequest};
 use crate::user::domain::User;
 use axum::{
     Json,
@@ -35,7 +35,7 @@ pub async fn get_all_roles_handler(
 pub async fn get_roles_page_handler(
     State(state): State<AppState>,
     Query(req): Query<RolePageQuery>,
-) -> Result<Json<ApiResponse<PageResponse<Role>>>, AppError> {
+) -> Result<Json<ApiResponse<PageResponse<RoleVO>>>, AppError> {
     let page_response = state.role_service.get_roles_page(req).await?;
     Ok(Json(ApiResponse::ok(page_response)))
 }
