@@ -63,7 +63,6 @@ pub struct UserLoginVO {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[allow(non_snake_case)]
-#[serde(rename_all = "camelCase")]
 pub struct UserLoginData {
     pub avatar: Option<String>,
     pub username: String,
