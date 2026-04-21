@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use x_rust::common::error::AppError;
 use x_rust::common::traits::{
-    DynFuture, RoleRepository, SeaOrmOptResult, SeaOrmResult, UserRepository,
+    DynFuture, OrgRepository, RoleRepository, SeaOrmOptResult, SeaOrmResult, UserRepository,
 };
+use x_rust::system::sys_org::domain::{CreateOrgRequest, Org, OrgTreeQuery, UpdateOrgRequest};
 use x_rust::common::util::encrypt_password;
 use x_rust::system::sys_role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequest};
 use x_rust::system::sys_user::domain::{CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO};
@@ -225,6 +226,7 @@ impl UserRepository for FakeUserRepository {
                     first_login: u.first_login,
                     sex: u.sex.clone(),
                     role_names: None,
+                    role_str: None,
                 })
                 .collect();
             vec.sort_by(|a, b| b.id.cmp(&a.id));
@@ -238,6 +240,37 @@ impl UserRepository for FakeUserRepository {
                 .collect();
             Ok((records, total))
         })
+    }
+}
+
+// ==================== Fake Org Repository ====================
+
+struct FakeOrgRepository;
+
+impl OrgRepository for FakeOrgRepository {
+    fn create(&self, _req: &CreateOrgRequest, _id: &i64) -> DynFuture<SeaOrmResult<Org>> {
+        Box::pin(async move { unimplemented!() })
+    }
+    fn find_by_id(&self, _id: &i64) -> DynFuture<SeaOrmOptResult<Org>> {
+        Box::pin(async move { Ok(None) })
+    }
+    fn find_all(&self) -> DynFuture<SeaOrmResult<Vec<Org>>> {
+        Box::pin(async move { Ok(Vec::new()) })
+    }
+    fn find_by_parent_id(&self, _parent_id: Option<i64>) -> DynFuture<SeaOrmResult<Vec<Org>>> {
+        Box::pin(async move { Ok(Vec::new()) })
+    }
+    fn find_tree(&self) -> DynFuture<SeaOrmResult<Vec<Org>>> {
+        Box::pin(async move { Ok(Vec::new()) })
+    }
+    fn find_tree_with_filter(&self, _query: &OrgTreeQuery) -> DynFuture<SeaOrmResult<Vec<Org>>> {
+        Box::pin(async move { Ok(Vec::new()) })
+    }
+    fn update(&self, _id: &i64, _req: &UpdateOrgRequest) -> DynFuture<SeaOrmOptResult<Org>> {
+        Box::pin(async move { Ok(None) })
+    }
+    fn delete(&self, _id: &i64) -> DynFuture<SeaOrmResult<bool>> {
+        Box::pin(async move { Ok(false) })
     }
 }
 
@@ -297,7 +330,8 @@ impl RoleRepository for FakeRoleRepository {
 async fn test_create_user_success() {
     let repo = Arc::new(FakeUserRepository::new());
     let role_repo = Arc::new(FakeRoleRepository);
-    let service = UserService::new(repo, role_repo);
+    let org_repo = Arc::new(FakeOrgRepository);
+    let service = UserService::new(repo, role_repo, org_repo);
 
     let req = CreateUserRequest {
         username: "johndoe".to_string(),
@@ -322,7 +356,8 @@ async fn test_create_user_success() {
 async fn test_get_user_success() {
     let repo = Arc::new(FakeUserRepository::new());
     let role_repo = Arc::new(FakeRoleRepository);
-    let service = UserService::new(repo.clone(), role_repo.clone());
+    let org_repo = Arc::new(FakeOrgRepository);
+    let service = UserService::new(repo.clone(), role_repo.clone(), org_repo.clone());
 
     let req = CreateUserRequest {
         username: "testuser".to_string(),
@@ -345,7 +380,8 @@ async fn test_get_user_success() {
 async fn test_get_user_not_found() {
     let repo = Arc::new(FakeUserRepository::new());
     let role_repo = Arc::new(FakeRoleRepository);
-    let service = UserService::new(repo, role_repo);
+    let org_repo = Arc::new(FakeOrgRepository);
+    let service = UserService::new(repo, role_repo, org_repo);
 
     let result = service.get_user(&999i64).await;
     assert!(matches!(result, Err(AppError::NotFound(_))));
@@ -355,7 +391,8 @@ async fn test_get_user_not_found() {
 async fn test_get_all_users() {
     let repo = Arc::new(FakeUserRepository::new());
     let role_repo = Arc::new(FakeRoleRepository);
-    let service = UserService::new(repo.clone(), role_repo.clone());
+    let org_repo = Arc::new(FakeOrgRepository);
+    let service = UserService::new(repo.clone(), role_repo.clone(), org_repo.clone());
 
     let req1 = CreateUserRequest {
         username: "user1".to_string(),
@@ -391,7 +428,8 @@ async fn test_get_all_users() {
 async fn test_update_user_success() {
     let repo = Arc::new(FakeUserRepository::new());
     let role_repo = Arc::new(FakeRoleRepository);
-    let service = UserService::new(repo.clone(), role_repo.clone());
+    let org_repo = Arc::new(FakeOrgRepository);
+    let service = UserService::new(repo.clone(), role_repo.clone(), org_repo.clone());
 
     let req = CreateUserRequest {
         username: "original".to_string(),
@@ -428,7 +466,8 @@ async fn test_update_user_success() {
 async fn test_update_user_not_found() {
     let repo = Arc::new(FakeUserRepository::new());
     let role_repo = Arc::new(FakeRoleRepository);
-    let service = UserService::new(repo, role_repo);
+    let org_repo = Arc::new(FakeOrgRepository);
+    let service = UserService::new(repo, role_repo, org_repo);
 
     let req = UpdateUserRequest {
         username: Some("updated".to_string()),
@@ -452,7 +491,8 @@ async fn test_update_user_not_found() {
 async fn test_delete_user_success() {
     let repo = Arc::new(FakeUserRepository::new());
     let role_repo = Arc::new(FakeRoleRepository);
-    let service = UserService::new(repo.clone(), role_repo.clone());
+    let org_repo = Arc::new(FakeOrgRepository);
+    let service = UserService::new(repo.clone(), role_repo.clone(), org_repo.clone());
 
     let req = CreateUserRequest {
         username: "deleteme".to_string(),
@@ -478,7 +518,8 @@ async fn test_delete_user_success() {
 async fn test_delete_user_not_found() {
     let repo = Arc::new(FakeUserRepository::new());
     let role_repo = Arc::new(FakeRoleRepository);
-    let service = UserService::new(repo, role_repo);
+    let org_repo = Arc::new(FakeOrgRepository);
+    let service = UserService::new(repo, role_repo, org_repo);
 
     let result = service.delete_user(&999i64).await;
     assert!(matches!(result, Err(AppError::NotFound(_))));
@@ -488,7 +529,8 @@ async fn test_delete_user_not_found() {
 async fn test_get_users_page_default() {
     let repo = Arc::new(FakeUserRepository::new());
     let role_repo = Arc::new(FakeRoleRepository);
-    let service = UserService::new(repo.clone(), role_repo.clone());
+    let org_repo = Arc::new(FakeOrgRepository);
+    let service = UserService::new(repo.clone(), role_repo.clone(), org_repo.clone());
 
     for i in 1..=15 {
         let req = CreateUserRequest {
@@ -528,7 +570,8 @@ async fn test_get_users_page_default() {
 async fn test_get_users_page_custom() {
     let repo = Arc::new(FakeUserRepository::new());
     let role_repo = Arc::new(FakeRoleRepository);
-    let service = UserService::new(repo.clone(), role_repo.clone());
+    let org_repo = Arc::new(FakeOrgRepository);
+    let service = UserService::new(repo.clone(), role_repo.clone(), org_repo.clone());
 
     for i in 1..=15 {
         let req = CreateUserRequest {
@@ -568,7 +611,8 @@ async fn test_get_users_page_custom() {
 async fn test_get_users_page_out_of_range() {
     let repo = Arc::new(FakeUserRepository::new());
     let role_repo = Arc::new(FakeRoleRepository);
-    let service = UserService::new(repo.clone(), role_repo.clone());
+    let org_repo = Arc::new(FakeOrgRepository);
+    let service = UserService::new(repo.clone(), role_repo.clone(), org_repo.clone());
 
     for i in 1..=3 {
         let req = CreateUserRequest {
@@ -606,7 +650,8 @@ async fn test_get_users_page_out_of_range() {
 async fn test_get_users_page_empty() {
     let repo = Arc::new(FakeUserRepository::new());
     let role_repo = Arc::new(FakeRoleRepository);
-    let service = UserService::new(repo, role_repo);
+    let org_repo = Arc::new(FakeOrgRepository);
+    let service = UserService::new(repo, role_repo, org_repo);
 
     let result = service
         .get_users_page(UserPageQuery {

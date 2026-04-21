@@ -1,6 +1,6 @@
 use crate::common::error::AppError;
 use crate::common::pagination::PageResponse;
-use crate::common::traits::{RoleRepository, UserRepository};
+use crate::common::traits::{OrgRepository, RoleRepository, UserRepository};
 use crate::common::util::{decrypt_password, md5_encrypt};
 use crate::system::sys_user::domain::{CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO};
 use std::sync::Arc;
@@ -21,13 +21,19 @@ pub struct PasswordUpdateResponse {
 pub struct UserService {
     user_repo: Arc<dyn UserRepository>,
     role_repo: Arc<dyn RoleRepository>,
+    org_repo: Arc<dyn OrgRepository>,
 }
 
 impl UserService {
-    pub fn new(user_repo: Arc<dyn UserRepository>, role_repo: Arc<dyn RoleRepository>) -> Self {
+    pub fn new(
+        user_repo: Arc<dyn UserRepository>,
+        role_repo: Arc<dyn RoleRepository>,
+        org_repo: Arc<dyn OrgRepository>,
+    ) -> Self {
         Self {
             user_repo,
             role_repo,
+            org_repo,
         }
     }
 
@@ -64,11 +70,40 @@ impl UserService {
         &self,
         query: UserPageQuery,
     ) -> Result<PageResponse<UserVO>, AppError> {
-        let (records, total) = self
+        let (mut records, total) = self
             .user_repo
             .find_all_with_page(&query)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
+
+        // Populate org_name and role_str for each user
+        for user_vo in records.iter_mut() {
+            // Get org name
+            if let Ok(Some(org)) = self.org_repo.find_by_id(&user_vo.org_id).await {
+                user_vo.org_name = Some(org.name);
+            }
+
+            // Get role names and role_str
+            if let Ok(roles) = self.role_repo.find_roles_by_user_id(&user_vo.id).await {
+                let role_names: Vec<String> = roles.iter().map(|r| r.name.clone()).collect();
+                let role_str = roles
+                    .iter()
+                    .map(|r| r.id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                user_vo.role_names = if role_names.is_empty() {
+                    None
+                } else {
+                    Some(role_names.join(","))
+                };
+                user_vo.role_str = if role_str.is_empty() {
+                    None
+                } else {
+                    Some(role_str)
+                };
+            }
+        }
+
         Ok(PageResponse::new(
             records,
             total,

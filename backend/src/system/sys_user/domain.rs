@@ -86,6 +86,7 @@ pub struct UserVO {
     pub first_login: Option<i32>,
     pub sex: Option<String>,
     pub role_names: Option<String>,
+    pub role_str: Option<String>,
 }
 
 impl From<UserModel> for UserVO {
@@ -112,6 +113,7 @@ impl From<UserModel> for UserVO {
             first_login: m.first_login,
             sex: m.sex,
             role_names: None,
+            role_str: None,
         }
     }
 }
