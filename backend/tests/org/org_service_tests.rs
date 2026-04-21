@@ -40,7 +40,6 @@ impl OrgRepository for FakeOrgRepository {
         let org_duty = req.org_duty.clone();
         let desrc = req.desrc.clone();
         let r#type = req.r#type.clone();
-        let is_out = req.is_out;
         let remarks = req.remarks.clone();
         Box::pin(async move {
             let now = Utc::now();
@@ -53,7 +52,6 @@ impl OrgRepository for FakeOrgRepository {
                 org_duty,
                 desrc,
                 r#type,
-                is_out,
                 create_time: now,
                 update_time: now,
                 is_deleted: 0,
@@ -183,9 +181,6 @@ impl OrgRepository for FakeOrgRepository {
                 }
                 if let Some(v) = r#type {
                     org.r#type = Some(v);
-                }
-                if let Some(v) = is_out {
-                    org.is_out = Some(v);
                 }
                 if let Some(v) = remarks {
                     org.remarks = Some(v);

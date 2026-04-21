@@ -21,8 +21,6 @@ pub struct Model {
     pub desrc: Option<String>,
     #[sea_orm(column_name = "type", column_type = "Text", nullable)]
     pub r#type: Option<String>,
-    #[sea_orm(column_name = "is_out", column_type = "Boolean", nullable)]
-    pub is_out: Option<bool>,
     #[sea_orm(column_name = "create_time", column_type = "Timestamp")]
     pub create_time: DateTime<Utc>,
     #[sea_orm(column_name = "update_time", column_type = "Timestamp", nullable)]

@@ -42,7 +42,6 @@ pub struct OrgTreeDto {
     pub org_duty: Option<String>,
     pub desrc: Option<String>,
     pub r#type: Option<String>,
-    pub is_out: Option<bool>,
     pub is_deleted: i32,
     pub remarks: Option<String>,
     pub create_time: DateTime<Utc>,
@@ -60,7 +59,6 @@ impl From<Org> for OrgTreeDto {
             org_duty: org.org_duty,
             desrc: org.desrc,
             r#type: org.r#type,
-            is_out: org.is_out,
             is_deleted: org.is_deleted,
             remarks: org.remarks,
             create_time: org.create_time,
@@ -150,7 +148,6 @@ impl CreateOrgRequest {
             org_duty: ActiveValue::set(self.org_duty.clone()),
             desrc: ActiveValue::set(self.desrc.clone()),
             r#type: ActiveValue::set(self.r#type.clone()),
-            is_out: ActiveValue::set(self.is_out),
             is_deleted: ActiveValue::set(0),
             remarks: ActiveValue::set(self.remarks.clone()),
             create_time: ActiveValue::set(now),
@@ -170,7 +167,6 @@ impl UpdateOrgRequest {
             org_duty: set_opt_string(self.org_duty.clone()),
             desrc: set_opt_string(self.desrc.clone()),
             r#type: set_opt_string(self.r#type.clone()),
-            is_out: set_opt_bool(self.is_out),
             is_deleted: ActiveValue::unchanged(0),
             remarks: set_opt_string(self.remarks.clone()),
             update_time: ActiveValue::set(Utc::now()),
@@ -187,13 +183,6 @@ fn set_string(opt: Option<String>) -> ActiveValue<String> {
 }
 
 fn set_opt_string(opt: Option<String>) -> ActiveValue<Option<String>> {
-    match opt {
-        Some(v) => ActiveValue::set(Some(v)),
-        None => ActiveValue::not_set(),
-    }
-}
-
-fn set_opt_bool(opt: Option<bool>) -> ActiveValue<Option<bool>> {
     match opt {
         Some(v) => ActiveValue::set(Some(v)),
         None => ActiveValue::not_set(),
