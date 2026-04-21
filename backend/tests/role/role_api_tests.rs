@@ -335,7 +335,7 @@ async fn login(app: axum::Router, test_db: &TestDb) -> String {
     let body: Bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
 
-    if let Some(access_token) = json.get("access_token") {
+    if let Some(access_token) = json.get("accessToken") {
         access_token.as_str().unwrap().to_string()
     } else {
         panic!("Login failed, response: {:?}", json);

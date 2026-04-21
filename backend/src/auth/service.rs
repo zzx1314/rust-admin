@@ -55,6 +55,7 @@ pub struct LoginResponse {
 
 /// Frontend-compatible login response
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UserLoginVO {
     pub success: bool,
     pub data: UserLoginData,
@@ -62,6 +63,7 @@ pub struct UserLoginVO {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[allow(non_snake_case)]
+#[serde(rename_all = "camelCase")]
 pub struct UserLoginData {
     pub avatar: Option<String>,
     pub username: String,
@@ -107,6 +109,7 @@ impl UserLoginVO {
 
 /// Frontend-compatible refresh token response
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TokenRefreshVO {
     pub access_token: String,
     pub refresh_token: String,
@@ -115,12 +118,14 @@ pub struct TokenRefreshVO {
 
 /// Frontend-compatible user info response
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UserInfoVO {
     pub success: bool,
     pub data: UserInfoData,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UserInfoData {
     pub avatar: String,
     pub username: String,
@@ -148,6 +153,7 @@ impl UserInfoVO {
 
 /// Check token response
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CheckTokenVO {
     pub success: bool,
     pub msg: String,

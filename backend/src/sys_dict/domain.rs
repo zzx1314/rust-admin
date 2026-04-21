@@ -51,6 +51,7 @@ impl SysDictPageQuery {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct SysDictVO {
     pub id: i64,
     pub r#type: String,

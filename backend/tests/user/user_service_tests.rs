@@ -215,7 +215,7 @@ impl UserRepository for FakeUserRepository {
                     last_login_time: u.last_login_time,
                     try_count: u.try_count,
                     lock_flag: u.lock_flag,
-                    create_time: u.create_time,
+                    create_time: u.create_time.format("%Y-%m-%d %H:%M:%S").to_string(),
                     update_time: u.update_time,
                     remarks: u.remarks.clone(),
                     pass_update_time: u.pass_update_time,

@@ -11,6 +11,7 @@ fn format_datetime(dt: DateTime<Utc>) -> String {
 pub type Role = RoleModel;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct RoleVO {
     pub id: i64,
     pub name: String,
