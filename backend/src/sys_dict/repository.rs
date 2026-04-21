@@ -1,7 +1,9 @@
-use crate::common::base::{make_condition, order_desc, RepoExt};
+use crate::common::base::{RepoExt, make_condition, order_desc};
 use crate::common::traits::{DynFuture, SeaOrmOptResult, SeaOrmResult, SysDictRepository};
 use crate::impl_repo_conn;
-use crate::sys_dict::domain::{CreateSysDictRequest, SysDict, SysDictPageQuery, SysDictVO, UpdateSysDictRequest};
+use crate::sys_dict::domain::{
+    CreateSysDictRequest, SysDict, SysDictPageQuery, SysDictVO, UpdateSysDictRequest,
+};
 use crate::sys_dict::entity::ActiveModel;
 use crate::sys_dict::entity::Column as SysDictColumn;
 use crate::sys_dict::entity::Entity as SysDictEntity;
@@ -83,7 +85,9 @@ impl SysDictRepository for SeaOrmSysDictRepository {
                 let mut cond = make_condition();
                 let conditions: Vec<_> = [
                     req.r#type.as_ref().map(|v| SysDictColumn::Type.contains(v)),
-                    req.description.as_ref().map(|v| SysDictColumn::Description.contains(v)),
+                    req.description
+                        .as_ref()
+                        .map(|v| SysDictColumn::Description.contains(v)),
                 ]
                 .into_iter()
                 .filter_map(|c| c)

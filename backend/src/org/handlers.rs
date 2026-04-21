@@ -1,6 +1,8 @@
 use crate::api::AppState;
 use crate::common::error::{ApiResponse, AppError};
-use crate::org::domain::{CreateOrgRequest, Org, OrgTreeDto, OrgTreeQuery, UpdateOrgRequest};
+use crate::org::domain::{
+    CreateOrgRequest, Org, OrgTreeDto, OrgTreeQuery, SysOrgVo, UpdateOrgRequest,
+};
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -47,7 +49,7 @@ pub async fn get_org_handler(
 
 pub async fn get_all_orgs_handler(
     State(state): State<AppState>,
-) -> Result<Json<ApiResponse<Vec<Org>>>, AppError> {
+) -> Result<Json<ApiResponse<Vec<SysOrgVo>>>, AppError> {
     let orgs = state.org_service.get_all_orgs().await?;
     Ok(Json(ApiResponse::ok(orgs)))
 }

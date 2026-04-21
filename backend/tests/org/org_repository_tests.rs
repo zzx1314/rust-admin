@@ -48,7 +48,7 @@ impl TestDb {
                 type TEXT,
                 parent_name TEXT,
                 is_out INTEGER
-            )"
+            )",
         )
         .execute(&pool)
         .await

@@ -1,8 +1,8 @@
 use sea_orm::Database;
-use x_rust::common::traits::MenuRepository;
-use x_rust::menu::domain::{build_menu_tree, CreateMenuRequest, MenuTree, UpdateMenuRequest};
-use x_rust::menu::repository::SeaOrmMenuRepository;
 use std::sync::atomic::{AtomicI64, Ordering};
+use x_rust::common::traits::MenuRepository;
+use x_rust::menu::domain::{CreateMenuRequest, MenuTree, UpdateMenuRequest, build_menu_tree};
+use x_rust::menu::repository::SeaOrmMenuRepository;
 
 static ID_COUNTER: AtomicI64 = AtomicI64::new(1);
 
@@ -61,7 +61,7 @@ impl TestDb {
                 role_code TEXT,
                 disabled INTEGER DEFAULT 0,
                 find_auth_id INTEGER
-            )"
+            )",
         )
         .execute(&pool)
         .await
@@ -80,7 +80,7 @@ impl TestDb {
                 is_edit INTEGER DEFAULT 1,
                 ds_type INTEGER,
                 ds_scope TEXT
-            )"
+            )",
         )
         .execute(&pool)
         .await
@@ -91,7 +91,7 @@ impl TestDb {
                 role_id TEXT NOT NULL,
                 menu_id TEXT NOT NULL,
                 PRIMARY KEY (role_id, menu_id)
-            )"
+            )",
         )
         .execute(&pool)
         .await
@@ -568,4 +568,3 @@ async fn test_build_menu_tree_with_minus_one_parent() {
     assert_eq!(children.len(), 1, "Root should have 1 child");
     assert_eq!(children[0].id, 1001, "Child should be 用户管理");
 }
-

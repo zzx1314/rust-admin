@@ -80,6 +80,9 @@ pub async fn get_user_menu_handler(
 ) -> Result<Json<ApiResponse<Vec<MenuTree>>>, AppError> {
     let token = auth.token();
     let user_id = state.auth_service.validate_token(token).await?;
-    let tree = state.menu_service.get_user_menu(&user_id.to_string()).await?;
+    let tree = state
+        .menu_service
+        .get_user_menu(&user_id.to_string())
+        .await?;
     Ok(Json(ApiResponse::ok(tree)))
 }

@@ -1,7 +1,7 @@
 use chrono::Utc;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 use x_rust::common::error::AppError;
 use x_rust::common::traits::{
     DynFuture, MenuRepository, RoleRepository, SeaOrmOptResult, SeaOrmResult,
@@ -148,7 +148,12 @@ impl MenuRepository for FakeMenuRepository {
                 .lock()
                 .unwrap()
                 .values()
-                .filter(|m| m.is_deleted == 0 && m.role_code.as_ref().map_or(false, |c| c == &role_id.to_string()))
+                .filter(|m| {
+                    m.is_deleted == 0
+                        && m.role_code
+                            .as_ref()
+                            .map_or(false, |c| c == &role_id.to_string())
+                })
                 .cloned()
                 .collect())
         })

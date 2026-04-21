@@ -182,7 +182,10 @@ pub fn build_menu_tree(menu_trees: Vec<MenuTree>) -> Vec<MenuTree> {
                 }
             }
             children.sort_by(|a, b| {
-                a.meta.as_ref().and_then(|m| m.rank).unwrap_or(0)
+                a.meta
+                    .as_ref()
+                    .and_then(|m| m.rank)
+                    .unwrap_or(0)
                     .cmp(&b.meta.as_ref().and_then(|m| m.rank).unwrap_or(0))
             });
             menu.children = Some(children);
@@ -194,13 +197,15 @@ pub fn build_menu_tree(menu_trees: Vec<MenuTree>) -> Vec<MenuTree> {
     }
 
     roots.sort_by(|a, b| {
-        a.meta.as_ref().and_then(|m| m.rank).unwrap_or(0)
+        a.meta
+            .as_ref()
+            .and_then(|m| m.rank)
+            .unwrap_or(0)
             .cmp(&b.meta.as_ref().and_then(|m| m.rank).unwrap_or(0))
     });
 
     roots
 }
-
 
 impl CreateMenuRequest {
     pub fn to_active_model(&self, id: i64, now: DateTime<Utc>) -> MenuActiveModel {

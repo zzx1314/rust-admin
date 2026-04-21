@@ -58,7 +58,7 @@ impl TestDb {
                 enable INTEGER DEFAULT 1,
                 first_login INTEGER DEFAULT 1,
                 sex TEXT
-            )"
+            )",
         )
         .execute(&pool)
         .await
@@ -77,7 +77,7 @@ impl TestDb {
                 is_edit INTEGER DEFAULT 1,
                 ds_type INTEGER,
                 ds_scope TEXT
-            )"
+            )",
         )
         .execute(&pool)
         .await
@@ -88,7 +88,7 @@ impl TestDb {
                 user_id INTEGER NOT NULL,
                 role_id INTEGER NOT NULL,
                 PRIMARY KEY (user_id, role_id)
-            )"
+            )",
         )
         .execute(&pool)
         .await
@@ -303,9 +303,7 @@ async fn test_role_repo_assign_and_remove() {
     };
     repo.create(&role_req, &role_id).await.unwrap();
 
-    repo.assign_role_to_user(&user_id, &role_id)
-        .await
-        .unwrap();
+    repo.assign_role_to_user(&user_id, &role_id).await.unwrap();
 
     let roles = repo.find_roles_by_user_id(&user_id).await.unwrap();
     assert_eq!(roles.len(), 1);
@@ -363,12 +361,8 @@ async fn test_role_repo_find_roles_by_user() {
     };
     repo.create(&role_req2, &role_id2).await.unwrap();
 
-    repo.assign_role_to_user(&user_id, &role_id1)
-        .await
-        .unwrap();
-    repo.assign_role_to_user(&user_id, &role_id2)
-        .await
-        .unwrap();
+    repo.assign_role_to_user(&user_id, &role_id1).await.unwrap();
+    repo.assign_role_to_user(&user_id, &role_id2).await.unwrap();
 
     let roles = repo.find_roles_by_user_id(&user_id).await.unwrap();
 

@@ -2,8 +2,13 @@ use crate::common::error::AppError;
 use crate::menu::domain::{CreateMenuRequest, Menu, UpdateMenuRequest};
 use crate::org::domain::{CreateOrgRequest, Org, OrgTreeQuery, UpdateOrgRequest};
 use crate::role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequest};
-use crate::sys_dict::domain::{CreateSysDictRequest, SysDict, SysDictPageQuery, SysDictVO, UpdateSysDictRequest};
-use crate::sys_dict_item::domain::{CreateSysDictItemRequest, SysDictItem, SysDictItemPageQuery, SysDictItemVO, UpdateSysDictItemRequest};
+use crate::sys_dict::domain::{
+    CreateSysDictRequest, SysDict, SysDictPageQuery, SysDictVO, UpdateSysDictRequest,
+};
+use crate::sys_dict_item::domain::{
+    CreateSysDictItemRequest, SysDictItem, SysDictItemPageQuery, SysDictItemVO,
+    UpdateSysDictItemRequest,
+};
 use crate::user::domain::{CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO};
 use sea_orm::DbErr;
 use std::future::Future;
@@ -92,7 +97,11 @@ pub trait SysDictRepository: Send + Sync {
 }
 
 pub trait SysDictItemRepository: Send + Sync {
-    fn create(&self, req: &CreateSysDictItemRequest, id: &i64) -> DynFuture<SeaOrmResult<SysDictItem>>;
+    fn create(
+        &self,
+        req: &CreateSysDictItemRequest,
+        id: &i64,
+    ) -> DynFuture<SeaOrmResult<SysDictItem>>;
     fn find_by_id(&self, id: &i64) -> DynFuture<SeaOrmOptResult<SysDictItem>>;
     fn find_all(&self) -> DynFuture<SeaOrmResult<Vec<SysDictItem>>>;
     fn find_by_dict_id(&self, dict_id: &i64) -> DynFuture<SeaOrmResult<Vec<SysDictItem>>>;
@@ -101,6 +110,10 @@ pub trait SysDictItemRepository: Send + Sync {
         &self,
         query: &SysDictItemPageQuery,
     ) -> DynFuture<SeaOrmResult<(Vec<SysDictItemVO>, i64)>>;
-    fn update(&self, id: &i64, req: &UpdateSysDictItemRequest) -> DynFuture<SeaOrmOptResult<SysDictItem>>;
+    fn update(
+        &self,
+        id: &i64,
+        req: &UpdateSysDictItemRequest,
+    ) -> DynFuture<SeaOrmOptResult<SysDictItem>>;
     fn delete(&self, id: &i64) -> DynFuture<SeaOrmResult<bool>>;
 }

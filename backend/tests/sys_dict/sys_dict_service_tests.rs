@@ -2,10 +2,10 @@ use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use x_rust::common::error::AppError;
-use x_rust::common::traits::{
-    DynFuture, SeaOrmOptResult, SeaOrmResult, SysDictRepository,
+use x_rust::common::traits::{DynFuture, SeaOrmOptResult, SeaOrmResult, SysDictRepository};
+use x_rust::sys_dict::domain::{
+    CreateSysDictRequest, SysDict, SysDictPageQuery, SysDictVO, UpdateSysDictRequest,
 };
-use x_rust::sys_dict::domain::{CreateSysDictRequest, SysDict, SysDictPageQuery, SysDictVO, UpdateSysDictRequest};
 use x_rust::sys_dict::service::SysDictService;
 
 // ==================== Fake SysDict Repository ====================

@@ -1,7 +1,7 @@
 use crate::common::error::AppError;
 use crate::common::traits::OrgRepository;
 use crate::org::domain::{
-    CreateOrgRequest, Org, OrgTreeDto, OrgTreeQuery, UpdateOrgRequest, build_org_tree,
+    CreateOrgRequest, Org, OrgTreeDto, OrgTreeQuery, SysOrgVo, UpdateOrgRequest, build_org_tree,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,11 +31,13 @@ impl OrgService {
             .ok_or_else(|| AppError::NotFound(format!("Org with id {} not found", id)))
     }
 
-    pub async fn get_all_orgs(&self) -> Result<Vec<Org>, AppError> {
-        self.org_repo
+    pub async fn get_all_orgs(&self) -> Result<Vec<SysOrgVo>, AppError> {
+        let orgs = self
+            .org_repo
             .find_all()
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseErrorSeaOrm)?;
+        Ok(orgs.into_iter().map(SysOrgVo::from).collect())
     }
 
     pub async fn get_org_tree(&self, query: OrgTreeQuery) -> Result<Vec<OrgTreeDto>, AppError> {
@@ -61,8 +63,7 @@ impl OrgService {
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
-        let all_id_map: HashMap<i64, &Org> =
-            all_orgs.iter().map(|o| (o.id, o)).collect();
+        let all_id_map: HashMap<i64, &Org> = all_orgs.iter().map(|o| (o.id, o)).collect();
         let mut collected: HashMap<i64, Org> = HashMap::new();
 
         for org in &matched {

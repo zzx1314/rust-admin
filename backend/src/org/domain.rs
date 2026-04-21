@@ -67,6 +67,42 @@ impl From<Org> for OrgTreeDto {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SysOrgVo {
+    pub id: i64,
+    pub value: i64,
+    pub name: String,
+    pub label: String,
+    pub sort: Option<i32>,
+    pub parent_id: Option<i64>,
+    pub parent_name: Option<String>,
+    pub org_duty: Option<String>,
+    pub desrc: Option<String>,
+    pub r#type: Option<String>,
+    pub create_time: DateTime<Utc>,
+    pub remarks: Option<String>,
+}
+
+impl From<Org> for SysOrgVo {
+    fn from(org: Org) -> Self {
+        Self {
+            id: org.id,
+            value: org.id,
+            name: org.name.clone(),
+            label: org.name,
+            sort: org.sort,
+            parent_id: org.parent_id,
+            parent_name: org.parent_name.clone(),
+            org_duty: org.org_duty.clone(),
+            desrc: org.desrc.clone(),
+            r#type: org.r#type.clone(),
+            create_time: org.create_time,
+            remarks: org.remarks.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct OrgTreeQuery {
     pub name: Option<String>,
@@ -74,8 +110,7 @@ pub struct OrgTreeQuery {
 }
 
 pub fn build_org_tree(orgs: Vec<OrgTreeDto>) -> Vec<OrgTreeDto> {
-    let mut id_map: std::collections::HashMap<i64, OrgTreeDto> =
-        std::collections::HashMap::new();
+    let mut id_map: std::collections::HashMap<i64, OrgTreeDto> = std::collections::HashMap::new();
 
     for org in &orgs {
         id_map.insert(org.id, org.clone());
@@ -117,10 +152,7 @@ pub fn build_org_tree(orgs: Vec<OrgTreeDto>) -> Vec<OrgTreeDto> {
             && *pid != 0
             && id_map.contains_key(pid)
         {
-            children_of
-                .entry(*pid)
-                .or_default()
-                .push(org.id);
+            children_of.entry(*pid).or_default().push(org.id);
         }
     }
 

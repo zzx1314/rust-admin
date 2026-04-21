@@ -1,7 +1,9 @@
 use crate::common::error::AppError;
 use crate::common::pagination::PageResponse;
 use crate::common::traits::SysDictRepository;
-use crate::sys_dict::domain::{CreateSysDictRequest, SysDict, SysDictPageQuery, SysDictVO, UpdateSysDictRequest};
+use crate::sys_dict::domain::{
+    CreateSysDictRequest, SysDict, SysDictPageQuery, SysDictVO, UpdateSysDictRequest,
+};
 use std::sync::Arc;
 
 pub struct SysDictService {
@@ -53,7 +55,11 @@ impl SysDictService {
         ))
     }
 
-    pub async fn update_dict(&self, id: &i64, req: UpdateSysDictRequest) -> Result<SysDict, AppError> {
+    pub async fn update_dict(
+        &self,
+        id: &i64,
+        req: UpdateSysDictRequest,
+    ) -> Result<SysDict, AppError> {
         self.dict_repo
             .update(id, &req)
             .await
@@ -69,7 +75,10 @@ impl SysDictService {
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
         if !deleted {
-            return Err(AppError::NotFound(format!("SysDict with id {} not found", id)));
+            return Err(AppError::NotFound(format!(
+                "SysDict with id {} not found",
+                id
+            )));
         }
         Ok(())
     }

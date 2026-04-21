@@ -335,7 +335,7 @@ async fn test_get_user_success() {
         card: None,
         sex: None,
     };
-    let created = repo.create(&req, &1i64).await.unwrap();
+    let _created = repo.create(&req, &1i64).await.unwrap();
 
     let result = service.get_user(&1i64).await.unwrap();
     assert_eq!(result.username, "testuser");
@@ -404,7 +404,7 @@ async fn test_update_user_success() {
         card: None,
         sex: None,
     };
-    let created = repo.create(&req, &1i64).await.unwrap();
+    let _created = repo.create(&req, &1i64).await.unwrap();
 
     let update_req = UpdateUserRequest {
         username: Some("updated".to_string()),
@@ -465,7 +465,7 @@ async fn test_delete_user_success() {
         card: None,
         sex: None,
     };
-    let created = repo.create(&req, &1i64).await.unwrap();
+    let _created = repo.create(&req, &1i64).await.unwrap();
 
     let result = service.delete_user(&1i64).await;
     assert!(result.is_ok());

@@ -25,8 +25,7 @@ impl SysAuthService {
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
-        let all_menu_map: HashMap<i64, Menu> =
-            all_menus.into_iter().map(|m| (m.id, m)).collect();
+        let all_menu_map: HashMap<i64, Menu> = all_menus.into_iter().map(|m| (m.id, m)).collect();
 
         let role_menus = self
             .menu_repo
@@ -42,8 +41,7 @@ impl SysAuthService {
 
         let buttons: Vec<&Menu> = role_menus.iter().filter(|m| m.r#type == Some(2)).collect();
 
-        let parent_ids: HashSet<i64> =
-            buttons.iter().filter_map(|b| b.parent_id).collect();
+        let parent_ids: HashSet<i64> = buttons.iter().filter_map(|b| b.parent_id).collect();
 
         let mut result: Vec<SysAuthMenuVo> = Vec::new();
 
@@ -134,8 +132,7 @@ impl SysAuthService {
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
-        let menu_map: HashMap<i64, Menu> =
-            all_menus.into_iter().map(|m| (m.id, m)).collect();
+        let menu_map: HashMap<i64, Menu> = all_menus.into_iter().map(|m| (m.id, m)).collect();
 
         let mut menu_id_set: HashSet<i64> = HashSet::new();
 

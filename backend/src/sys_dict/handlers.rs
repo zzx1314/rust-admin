@@ -1,7 +1,9 @@
 use crate::api::AppState;
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
-use crate::sys_dict::domain::{CreateSysDictRequest, SysDict, SysDictPageQuery, SysDictVO, UpdateSysDictRequest};
+use crate::sys_dict::domain::{
+    CreateSysDictRequest, SysDict, SysDictPageQuery, SysDictVO, UpdateSysDictRequest,
+};
 use axum::{
     Json,
     extract::{Path, Query, State},

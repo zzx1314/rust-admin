@@ -182,8 +182,14 @@ pub fn sys_dict_item_routes(state: AppState) -> Router<AppState> {
                 .put(update_dict_item_handler)
                 .delete(delete_dict_item_handler),
         )
-        .route("/sysDictItem/getByDictId/{dict_id}", get(get_dict_items_by_dict_id_handler))
-        .route("/sysDictItem/getByType", get(get_dict_items_by_type_handler))
+        .route(
+            "/sysDictItem/getByDictId/{dict_id}",
+            get(get_dict_items_by_dict_id_handler),
+        )
+        .route(
+            "/sysDictItem/getByType",
+            get(get_dict_items_by_type_handler),
+        )
         .route("/sysDict/getSafePolicy", get(get_safe_policy_handler))
         .layer(from_fn_with_state(state.clone(), require_auth))
 }

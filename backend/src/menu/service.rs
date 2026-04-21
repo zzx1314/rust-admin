@@ -49,10 +49,7 @@ impl MenuService {
             .map_err(AppError::DatabaseErrorSeaOrm)
     }
 
-    pub async fn get_menus_by_parent(
-        &self,
-        parent_id: Option<i64>,
-    ) -> Result<Vec<Menu>, AppError> {
+    pub async fn get_menus_by_parent(&self, parent_id: Option<i64>) -> Result<Vec<Menu>, AppError> {
         self.menu_repo
             .find_by_parent_id(parent_id)
             .await
@@ -81,7 +78,9 @@ impl MenuService {
     }
 
     pub async fn get_user_menu(&self, user_id: &str) -> Result<Vec<MenuTree>, AppError> {
-        let user_id: i64 = user_id.parse().map_err(|_| AppError::BadRequest("Invalid user id".to_string()))?;
+        let user_id: i64 = user_id
+            .parse()
+            .map_err(|_| AppError::BadRequest("Invalid user id".to_string()))?;
         let roles = self
             .role_repo
             .find_roles_by_user_id(&user_id)

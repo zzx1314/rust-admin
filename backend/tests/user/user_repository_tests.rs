@@ -58,7 +58,7 @@ impl TestDb {
                 enable INTEGER DEFAULT 1,
                 first_login INTEGER DEFAULT 1,
                 sex TEXT
-            )"
+            )",
         )
         .execute(&pool)
         .await
@@ -77,7 +77,7 @@ impl TestDb {
                 is_edit INTEGER DEFAULT 1,
                 ds_type INTEGER,
                 ds_scope TEXT
-            )"
+            )",
         )
         .execute(&pool)
         .await
@@ -88,7 +88,7 @@ impl TestDb {
                 user_id TEXT NOT NULL,
                 role_id TEXT NOT NULL,
                 PRIMARY KEY (user_id, role_id)
-            )"
+            )",
         )
         .execute(&pool)
         .await
@@ -115,7 +115,7 @@ impl TestDb {
                 role_code TEXT,
                 disabled INTEGER DEFAULT 0,
                 find_auth_id TEXT
-            )"
+            )",
         )
         .execute(&pool)
         .await
@@ -135,7 +135,7 @@ impl TestDb {
                 desrc TEXT,
                 type TEXT,
                 parent_name TEXT
-            )"
+            )",
         )
         .execute(&pool)
         .await

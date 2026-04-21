@@ -1,7 +1,10 @@
 use crate::common::error::AppError;
 use crate::common::pagination::PageResponse;
 use crate::common::traits::SysDictItemRepository;
-use crate::sys_dict_item::domain::{CreateSysDictItemRequest, SysDictItem, SysDictItemPageQuery, SysDictItemVO, UpdateSysDictItemRequest};
+use crate::sys_dict_item::domain::{
+    CreateSysDictItemRequest, SysDictItem, SysDictItemPageQuery, SysDictItemVO,
+    UpdateSysDictItemRequest,
+};
 use std::sync::Arc;
 
 pub struct SysDictItemService {
@@ -13,7 +16,10 @@ impl SysDictItemService {
         Self { dict_item_repo }
     }
 
-    pub async fn create_dict_item(&self, req: CreateSysDictItemRequest) -> Result<SysDictItem, AppError> {
+    pub async fn create_dict_item(
+        &self,
+        req: CreateSysDictItemRequest,
+    ) -> Result<SysDictItem, AppError> {
         let id = self.generate_id().await;
         self.dict_item_repo
             .create(&req, &id)
@@ -36,7 +42,10 @@ impl SysDictItemService {
             .map_err(AppError::DatabaseErrorSeaOrm)
     }
 
-    pub async fn get_dict_items_by_dict_id(&self, dict_id: &i64) -> Result<Vec<SysDictItem>, AppError> {
+    pub async fn get_dict_items_by_dict_id(
+        &self,
+        dict_id: &i64,
+    ) -> Result<Vec<SysDictItem>, AppError> {
         self.dict_item_repo
             .find_by_dict_id(dict_id)
             .await
@@ -67,7 +76,11 @@ impl SysDictItemService {
         ))
     }
 
-    pub async fn update_dict_item(&self, id: &i64, req: UpdateSysDictItemRequest) -> Result<SysDictItem, AppError> {
+    pub async fn update_dict_item(
+        &self,
+        id: &i64,
+        req: UpdateSysDictItemRequest,
+    ) -> Result<SysDictItem, AppError> {
         self.dict_item_repo
             .update(id, &req)
             .await
@@ -83,12 +96,17 @@ impl SysDictItemService {
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
         if !deleted {
-            return Err(AppError::NotFound(format!("SysDictItem with id {} not found", id)));
+            return Err(AppError::NotFound(format!(
+                "SysDictItem with id {} not found",
+                id
+            )));
         }
         Ok(())
     }
 
-    pub async fn get_safe_policy(&self) -> Result<std::collections::HashMap<String, String>, AppError> {
+    pub async fn get_safe_policy(
+        &self,
+    ) -> Result<std::collections::HashMap<String, String>, AppError> {
         let items = self
             .dict_item_repo
             .find_by_type("sys_security_policy")

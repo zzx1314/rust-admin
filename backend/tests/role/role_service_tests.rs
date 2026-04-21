@@ -230,7 +230,7 @@ impl RoleRepository for FakeRoleRepository {
             Ok(users
                 .into_iter()
                 .enumerate()
-                .map(|(i, uid)| User {
+                .map(|(_i, uid)| User {
                     id: uid,
                     username: format!("User {}", uid),
                     phone: None,

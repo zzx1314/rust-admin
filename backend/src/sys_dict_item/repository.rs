@@ -1,7 +1,10 @@
-use crate::common::base::{make_condition, order_asc, RepoExt};
+use crate::common::base::{RepoExt, make_condition, order_asc};
 use crate::common::traits::{DynFuture, SeaOrmOptResult, SeaOrmResult, SysDictItemRepository};
 use crate::impl_repo_conn;
-use crate::sys_dict_item::domain::{CreateSysDictItemRequest, SysDictItem, SysDictItemPageQuery, SysDictItemVO, UpdateSysDictItemRequest};
+use crate::sys_dict_item::domain::{
+    CreateSysDictItemRequest, SysDictItem, SysDictItemPageQuery, SysDictItemVO,
+    UpdateSysDictItemRequest,
+};
 use crate::sys_dict_item::entity::ActiveModel;
 use crate::sys_dict_item::entity::Column as SysDictItemColumn;
 use crate::sys_dict_item::entity::Entity as SysDictItemEntity;
@@ -26,7 +29,11 @@ impl_repo_conn!(SeaOrmSysDictItemRepository);
 
 #[async_trait]
 impl SysDictItemRepository for SeaOrmSysDictItemRepository {
-    fn create(&self, req: &CreateSysDictItemRequest, id: &i64) -> DynFuture<SeaOrmResult<SysDictItem>> {
+    fn create(
+        &self,
+        req: &CreateSysDictItemRequest,
+        id: &i64,
+    ) -> DynFuture<SeaOrmResult<SysDictItem>> {
         let req = req.clone();
         let id = *id;
         self.with_conn(move |conn| {
@@ -112,13 +119,18 @@ impl SysDictItemRepository for SeaOrmSysDictItemRepository {
         let req = req.clone();
         self.with_conn(move |conn| {
             Box::pin(async move {
-                let base_query = SysDictItemEntity::find().filter(SysDictItemColumn::IsDeleted.eq(0));
+                let base_query =
+                    SysDictItemEntity::find().filter(SysDictItemColumn::IsDeleted.eq(0));
 
                 let mut cond = make_condition();
                 let conditions: Vec<_> = [
                     req.dict_id.map(|v| SysDictItemColumn::DictId.eq(v)),
-                    req.r#type.as_ref().map(|v| SysDictItemColumn::Type.contains(v)),
-                    req.label.as_ref().map(|v| SysDictItemColumn::Label.contains(v)),
+                    req.r#type
+                        .as_ref()
+                        .map(|v| SysDictItemColumn::Type.contains(v)),
+                    req.label
+                        .as_ref()
+                        .map(|v| SysDictItemColumn::Label.contains(v)),
                 ]
                 .into_iter()
                 .filter_map(|c| c)
@@ -150,7 +162,11 @@ impl SysDictItemRepository for SeaOrmSysDictItemRepository {
         })
     }
 
-    fn update(&self, id: &i64, req: &UpdateSysDictItemRequest) -> DynFuture<SeaOrmOptResult<SysDictItem>> {
+    fn update(
+        &self,
+        id: &i64,
+        req: &UpdateSysDictItemRequest,
+    ) -> DynFuture<SeaOrmOptResult<SysDictItem>> {
         let req = req.clone();
         let id = *id;
         self.with_conn(move |conn| {

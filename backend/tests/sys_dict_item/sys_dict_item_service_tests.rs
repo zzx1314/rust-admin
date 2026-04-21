@@ -2,10 +2,11 @@ use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use x_rust::common::error::AppError;
-use x_rust::common::traits::{
-    DynFuture, SeaOrmOptResult, SeaOrmResult, SysDictItemRepository,
+use x_rust::common::traits::{DynFuture, SeaOrmOptResult, SeaOrmResult, SysDictItemRepository};
+use x_rust::sys_dict_item::domain::{
+    CreateSysDictItemRequest, SysDictItem, SysDictItemPageQuery, SysDictItemVO,
+    UpdateSysDictItemRequest,
 };
-use x_rust::sys_dict_item::domain::{CreateSysDictItemRequest, SysDictItem, SysDictItemPageQuery, SysDictItemVO, UpdateSysDictItemRequest};
 use x_rust::sys_dict_item::service::SysDictItemService;
 
 struct FakeSysDictItemRepository {
@@ -21,7 +22,11 @@ impl FakeSysDictItemRepository {
 }
 
 impl SysDictItemRepository for FakeSysDictItemRepository {
-    fn create(&self, req: &CreateSysDictItemRequest, id: &i64) -> DynFuture<SeaOrmResult<SysDictItem>> {
+    fn create(
+        &self,
+        req: &CreateSysDictItemRequest,
+        id: &i64,
+    ) -> DynFuture<SeaOrmResult<SysDictItem>> {
         let items = self.items.clone();
         let req = req.clone();
         let id = *id;
@@ -158,7 +163,11 @@ impl SysDictItemRepository for FakeSysDictItemRepository {
         })
     }
 
-    fn update(&self, id: &i64, req: &UpdateSysDictItemRequest) -> DynFuture<SeaOrmOptResult<SysDictItem>> {
+    fn update(
+        &self,
+        id: &i64,
+        req: &UpdateSysDictItemRequest,
+    ) -> DynFuture<SeaOrmOptResult<SysDictItem>> {
         let items = self.items.clone();
         let id = *id;
         let r#type = req.r#type.clone();

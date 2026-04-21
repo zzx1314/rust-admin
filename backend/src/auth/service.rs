@@ -336,10 +336,7 @@ impl AuthService {
             .find_roles_by_user_id(user_id)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
-        Ok(roles
-            .into_iter()
-            .map(|r| r.id)
-            .collect())
+        Ok(roles.into_iter().map(|r| r.id).collect())
     }
 
     async fn get_user_permissions(&self, user_id: &i64) -> Result<Vec<String>, AppError> {
@@ -430,7 +427,11 @@ impl AuthService {
             .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
 
         self.token_store
-            .set_token(&user_id.to_string(), &new_access_token, ACCESS_TOKEN_TTL_SECS)
+            .set_token(
+                &user_id.to_string(),
+                &new_access_token,
+                ACCESS_TOKEN_TTL_SECS,
+            )
             .await?;
 
         Ok(LoginResponse {
@@ -498,7 +499,11 @@ impl AuthService {
             .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
 
         self.token_store
-            .set_token(&user_id.to_string(), &new_access_token, ACCESS_TOKEN_TTL_SECS)
+            .set_token(
+                &user_id.to_string(),
+                &new_access_token,
+                ACCESS_TOKEN_TTL_SECS,
+            )
             .await?;
 
         Ok(TokenRefreshVO {
