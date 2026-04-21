@@ -111,7 +111,7 @@ watch(searchValue, val => {
 onMounted(() => {
   getDeptList().then(res => {
     if (res.code == SUCCESS) {
-      treeData.value = handleTree(res.data);
+      treeData.value = handleTree(res.data, "id", "parent_id", "children");
       console.log(treeData.value);
       nextTick(() => {
         const nodeId = treeData.value[0].id;
