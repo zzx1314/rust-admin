@@ -105,7 +105,7 @@ impl SysDictRepository for FakeSysDictRepository {
         let dicts = self.dicts.clone();
         let query = query.clone();
         Box::pin(async move {
-            let mut vec: Vec<SysDictVO> = dicts
+            let vec: Vec<SysDictVO> = dicts
                 .lock()
                 .unwrap()
                 .values()
