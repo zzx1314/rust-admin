@@ -1,4 +1,4 @@
-use crate::common::base::{RepoExt, make_condition, order_asc};
+use crate::common::base::{RepoExt, make_condition, order_asc, order_desc};
 use crate::common::traits::{DynFuture, SeaOrmOptResult, SeaOrmResult, SysDictItemRepository};
 use crate::impl_repo_conn;
 use crate::system::sys_dict_item::domain::{
@@ -149,6 +149,7 @@ impl SysDictItemRepository for SeaOrmSysDictItemRepository {
                 let records = base_query
                     .filter(cond)
                     .order_by(SysDictItemColumn::Sort, order_asc())
+                    .order_by(SysDictItemColumn::CreateTime, order_desc())
                     .offset(Some(offset as u64))
                     .limit(req.size() as u64)
                     .all(&*conn)

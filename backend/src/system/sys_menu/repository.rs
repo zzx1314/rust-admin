@@ -1,4 +1,4 @@
-use crate::common::base::{RepoExt, make_condition, order_asc};
+use crate::common::base::{RepoExt, make_condition, order_asc, order_desc};
 use crate::common::traits::{DynFuture, MenuRepository, SeaOrmOptResult, SeaOrmResult};
 use crate::impl_repo_conn;
 use crate::system::sys_menu::domain::{CreateMenuRequest, Menu, UpdateMenuRequest};
@@ -47,7 +47,7 @@ impl MenuRepository for SeaOrmMenuRepository {
                 let menus = MenuEntity::find()
                     .filter(MenuColumn::IsDeleted.eq(0))
                     .order_by(MenuColumn::Sort, order_asc())
-                    .order_by(MenuColumn::CreateTime, order_asc())
+                    .order_by(MenuColumn::CreateTime, order_desc())
                     .all(&*conn)
                     .await?
                     .into_iter()
@@ -85,7 +85,7 @@ impl MenuRepository for SeaOrmMenuRepository {
                 let menus = MenuEntity::find()
                     .filter(cond)
                     .order_by(MenuColumn::Sort, order_asc())
-                    .order_by(MenuColumn::CreateTime, order_asc())
+                    .order_by(MenuColumn::CreateTime, order_desc())
                     .all(&*conn)
                     .await?
                     .into_iter()
@@ -101,7 +101,7 @@ impl MenuRepository for SeaOrmMenuRepository {
                 let menus = MenuEntity::find()
                     .filter(MenuColumn::IsDeleted.eq(0))
                     .order_by(MenuColumn::Sort, order_asc())
-                    .order_by(MenuColumn::CreateTime, order_asc())
+                    .order_by(MenuColumn::CreateTime, order_desc())
                     .all(&*conn)
                     .await?
                     .into_iter()
