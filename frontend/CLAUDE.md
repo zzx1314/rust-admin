@@ -112,7 +112,7 @@ import "./styles/index.scss";
 
 - API functions in `src/api/*.ts`
 - Use service from `@/api/service` (axios instance)
-- Dev proxy in vite.config.ts: `/api` → `http://192.168.41.227:8081`
+- Dev proxy in vite.config.ts: `/api` → `http://127.0.0.1:3000`
 
 ```typescript
 import { service } from "@/api/service";
@@ -137,7 +137,7 @@ export function getDronesList(params?: object, config?: AxiosRequestConfig) {
 
 ## Backend Integration
 
-This frontend connects to a Quarkus Java backend at the root directory (`../backend/`).
+This frontend connects to a Rust backend at the root directory (`../backend/`).
 - OAuth2 token endpoint: `/api/token`
 - Authorization header: `Bearer {token}`
 - Backend CLAUDE.md at `../backend/CLAUDE.md` has full backend documentation

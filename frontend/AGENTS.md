@@ -109,7 +109,7 @@ src/
 
 - API functions in `src/api/*.ts`
 - Use axios instance from `@/api/service`
-- Dev proxy: `/api` → `http://192.168.41.227:8081` (vite.config.ts)
+- Dev proxy: `/api` → `http://127.0.0.1:3000` (vite.config.ts)
 
 ```typescript
 import { service } from "@/api/service";
