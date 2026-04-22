@@ -48,7 +48,7 @@ use crate::system::sys_user::handlers::{
 pub fn auth_routes() -> Router<AppState> {
     Router::new()
         .route("/token", post(login_handler))
-        .route("/token/logout", post(logout_handler))
+        .route("/token/logout", get(logout_handler))
         .route("/token/refresh/{refresh_token}", get(refresh_handler))
         .route("/token/check_token", get(check_token_handler))
 }

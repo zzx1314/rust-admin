@@ -1,8 +1,10 @@
 use crate::api::AppState;
-use crate::auth::service::{CheckTokenVO, TokenRefreshVO, UserInfoVO, UserLoginData};
+use crate::api::middleware::RequestUser;
+use crate::auth::service::{CheckTokenVO, TokenRefreshVO, UserInfoVO};
 use crate::common::error::AppError;
 use crate::common::util::decrypt_password;
-use axum::{Form, Json, extract::Path, extract::State, http::StatusCode};
+use crate::system::sys_log::domain::CreateSysLogRequest;
+use axum::{Form, Json, extract::Path, extract::State, http::StatusCode, response::{IntoResponse, Response}};
 use axum_extra::TypedHeader;
 use axum_extra::extract::CookieJar;
 use axum_extra::headers::Authorization;
@@ -26,15 +28,21 @@ pub struct RefreshRequest {
 pub async fn login_handler(
     State(state): State<AppState>,
     Form(req): Form<LoginRequest>,
-) -> Result<Json<UserLoginData>, AppError> {
+) -> Result<Response, AppError> {
     let password = decrypt_password(&req.password)
         .map_err(|e| AppError::BadRequest(format!("Password decryption failed: {}", e)))?;
 
-    let response = state
+    let login_data = state
         .auth_service
         .login_with_vo(&req.username, &password)
         .await?;
-    Ok(Json(response))
+
+    let username = login_data.username.clone();
+    let user_id = login_data.user_id.expect("login must have user_id");
+
+    let mut response = Json(login_data).into_response();
+    response.extensions_mut().insert(RequestUser { user_id, username });
+    Ok(response)
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -54,10 +62,33 @@ pub async fn logout_handler(
     State(state): State<AppState>,
     jar: CookieJar,
     auth: TypedHeader<Authorization<Bearer>>,
-) -> Result<(StatusCode, CookieJar, Json<LogoutApiResponse>), AppError> {
+) -> Result<Response, AppError> {
     let token = auth.token();
     let user_id = state.auth_service.validate_token(token).await?;
+    let username = state
+        .auth_service
+        .extract_username(token)
+        .unwrap_or_default();
     state.auth_service.logout(user_id).await?;
+
+    let log_service = state.sys_log_service.clone();
+    let log_req = CreateSysLogRequest {
+        tenant: None,
+        type_: Some("LOGOUT".to_string()),
+        sub_type: Some("GET".to_string()),
+        biz_no: Some("/api/token/logout".to_string()),
+        operator: Some(username.clone()),
+        action: Some("/api/token/logout".to_string()),
+        fail: Some(false),
+        extra: None,
+        code_variable: None,
+        ip: None,
+    };
+    tokio::spawn(async move {
+        if let Err(e) = log_service.create_log(log_req).await {
+            tracing::error!("Failed to create logout log: {}", e);
+        }
+    });
 
     let jar = jar.remove(
         axum_extra::extract::cookie::Cookie::build(("auth_token", ""))
@@ -74,7 +105,9 @@ pub async fn logout_handler(
         },
     };
 
-    Ok((StatusCode::OK, jar, Json(response)))
+    let mut resp = (StatusCode::OK, jar, Json(response)).into_response();
+    resp.extensions_mut().insert(RequestUser { user_id, username });
+    Ok(resp)
 }
 
 pub async fn me_handler(
