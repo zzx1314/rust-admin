@@ -225,7 +225,7 @@ async fn create_test_app() -> (axum::Router, TestDb) {
     use x_rust::auth::service::AuthService;
     use x_rust::common::traits::{
         MenuRepository, OrgRepository, RoleRepository, SysDictItemRepository, SysDictRepository,
-        TokenStore, UserRepository,
+        SysLogRepository, TokenStore, UserRepository,
     };
     use x_rust::system::sys_menu::repository::SeaOrmMenuRepository;
     use x_rust::system::sys_menu::service::MenuService;
@@ -238,6 +238,8 @@ async fn create_test_app() -> (axum::Router, TestDb) {
     use x_rust::system::sys_dict::service::SysDictService;
     use x_rust::system::sys_dict_item::repository::SeaOrmSysDictItemRepository;
     use x_rust::system::sys_dict_item::service::SysDictItemService;
+    use x_rust::system::sys_log::repository::SeaOrmSysLogRepository;
+    use x_rust::system::sys_log::service::SysLogService;
     use x_rust::system::sys_user::repository::SeaOrmUserRepository;
     use x_rust::system::sys_user::service::UserService;
 
@@ -260,10 +262,13 @@ async fn create_test_app() -> (axum::Router, TestDb) {
     let sys_auth_service = Arc::new(SysAuthService::new(menu_repo, role_repo.clone()));
     let sys_dict_repo: Arc<dyn SysDictRepository> =
         Arc::new(SeaOrmSysDictRepository::new(conn.clone()));
-    let sys_dict_service = Arc::new(SysDictService::new(sys_dict_repo));
+    let sys_dict_service = Arc::new(SysDictService::new(sys_dict_repo.clone()));
     let sys_dict_item_repo: Arc<dyn SysDictItemRepository> =
         Arc::new(SeaOrmSysDictItemRepository::new(conn.clone()));
     let sys_dict_item_service = Arc::new(SysDictItemService::new(sys_dict_item_repo, sys_dict_repo));
+    let sys_log_repo: Arc<dyn SysLogRepository> =
+        Arc::new(SeaOrmSysLogRepository::new(conn.clone()));
+    let sys_log_service = Arc::new(SysLogService::new(sys_log_repo));
 
     let state = AppState {
         user_service,
@@ -274,6 +279,7 @@ async fn create_test_app() -> (axum::Router, TestDb) {
         sys_auth_service,
         sys_dict_service,
         sys_dict_item_service,
+        sys_log_service,
     };
     (create_router(state), test_db)
 }
@@ -335,7 +341,7 @@ async fn login(app: axum::Router, test_db: &TestDb) -> String {
     let body: Bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
 
-    if let Some(access_token) = json.get("accessToken") {
+    if let Some(access_token) = json.get("access_token") {
         access_token.as_str().unwrap().to_string()
     } else {
         panic!("Login failed, response: {:?}", json);

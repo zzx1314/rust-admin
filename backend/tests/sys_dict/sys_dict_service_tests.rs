@@ -59,6 +59,20 @@ impl SysDictRepository for FakeSysDictRepository {
         })
     }
 
+    fn find_by_type(&self, r#type: &str) -> DynFuture<SeaOrmOptResult<SysDict>> {
+        let dicts = self.dicts.clone();
+        let r#type = r#type.to_string();
+        Box::pin(async move {
+            let dict = dicts
+                .lock()
+                .unwrap()
+                .values()
+                .find(|d| d.r#type == r#type && d.is_deleted == 0)
+                .cloned();
+            Ok(dict)
+        })
+    }
+
     fn find_all(&self) -> DynFuture<SeaOrmResult<Vec<SysDict>>> {
         let dicts = self.dicts.clone();
         Box::pin(async move {
