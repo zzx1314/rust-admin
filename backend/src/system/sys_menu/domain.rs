@@ -1,12 +1,9 @@
+use crate::common::util::format_datetime;
 use crate::system::sys_menu::entity::ActiveModel as MenuActiveModel;
 use crate::system::sys_menu::entity::Model as MenuModel;
 use chrono::{DateTime, Utc};
 use sea_orm::ActiveValue;
 use serde::{Deserialize, Serialize};
-
-fn format_datetime(dt: DateTime<Utc>) -> String {
-    dt.format("%Y-%m-%d %H:%M:%S").to_string()
-}
 
 pub type Menu = MenuModel;
 

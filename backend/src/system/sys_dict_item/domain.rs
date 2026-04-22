@@ -1,12 +1,9 @@
+use crate::common::util::format_datetime_opt;
 use crate::system::sys_dict_item::entity::ActiveModel as SysDictItemActiveModel;
 use crate::system::sys_dict_item::entity::Model as SysDictItemModel;
 use chrono::{DateTime, Utc};
 use sea_orm::ActiveValue;
 use serde::{Deserialize, Serialize};
-
-fn format_datetime(dt: Option<DateTime<Utc>>) -> Option<String> {
-    dt.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
-}
 
 pub type SysDictItem = SysDictItemModel;
 
@@ -82,8 +79,8 @@ impl From<SysDictItemModel> for SysDictItemVO {
             value: m.value,
             sort: m.sort,
             description: m.description,
-            create_time: format_datetime(m.create_time),
-            update_time: format_datetime(m.update_time),
+            create_time: format_datetime_opt(m.create_time),
+            update_time: format_datetime_opt(m.update_time),
             is_deleted: m.is_deleted,
             remarks: m.remarks,
             allow_deletion: m.allow_deletion,

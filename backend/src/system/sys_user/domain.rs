@@ -1,3 +1,4 @@
+use crate::common::util::format_datetime;
 use crate::system::sys_user::entity::ActiveModel as UserActiveModel;
 use crate::system::sys_user::entity::Model as UserModel;
 use chrono::{DateTime, Utc};
@@ -103,7 +104,7 @@ impl From<UserModel> for UserVO {
             last_login_time: m.last_login_time,
             try_count: m.try_count,
             lock_flag: m.lock_flag,
-            create_time: m.create_time.format("%Y-%m-%d %H:%M:%S").to_string(),
+            create_time: format_datetime(m.create_time),
             update_time: m.update_time,
             remarks: m.remarks,
             pass_update_time: m.pass_update_time,

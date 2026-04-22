@@ -1,3 +1,5 @@
+use chrono::{DateTime, FixedOffset, Utc};
+
 use aes::Aes128;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
@@ -6,6 +8,18 @@ use md5::{Digest, Md5};
 type Aes128CbcDec = cbc::Decryptor<Aes128>;
 
 const DEFAULT_KEY: [u8; 16] = *b"Welcome Superred";
+
+/// Format a UTC datetime as Beijing time (UTC+8) string.
+/// Example: "2025-01-01 08:00:00"
+pub fn format_datetime(dt: DateTime<Utc>) -> String {
+    let beijing = FixedOffset::east_opt(8 * 3600).expect("valid offset");
+    dt.with_timezone(&beijing).format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// Format an optional UTC datetime as Beijing time (UTC+8) string.
+pub fn format_datetime_opt(dt: Option<DateTime<Utc>>) -> Option<String> {
+    dt.map(format_datetime)
+}
 
 /// MD5 encrypt: returns lowercase hex digest.
 pub fn md5_encrypt(input: &str) -> String {

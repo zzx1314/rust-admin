@@ -1,12 +1,9 @@
+use crate::common::util::format_datetime_opt;
 use crate::system::sys_log::entity::ActiveModel as SysLogActiveModel;
 use crate::system::sys_log::entity::Model as SysLogModel;
 use chrono::{DateTime, Utc};
 use sea_orm::ActiveValue;
 use serde::{Deserialize, Serialize};
-
-fn format_datetime(dt: Option<DateTime<Utc>>) -> Option<String> {
-    dt.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
-}
 
 pub type SysLog = SysLogModel;
 
@@ -98,7 +95,7 @@ impl From<SysLogModel> for SysLogVO {
             operator: m.operator,
             action: m.action,
             fail: m.fail,
-            create_time: format_datetime(m.create_time),
+            create_time: format_datetime_opt(m.create_time),
             extra: m.extra,
             code_variable: m.code_variable,
             ip: m.ip,
