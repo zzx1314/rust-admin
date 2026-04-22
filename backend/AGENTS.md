@@ -6,21 +6,38 @@ Layered architecture with trait-based DI, inspired by Spring patterns.
 
 ## Build / Run / Test Commands
 
-```bash
-cargo build                  # Build
-cargo build --release        # Release build
-cargo run                    # Run (DATABASE_URL defaults to sqlite:data/users.db)
-RUST_LOG=debug cargo run     # Run with debug logging
-cargo check                  # Check without building
-cargo test                   # Run all tests (unit tests only, see note below)
-cargo test -- <test_name>    # Run a single test
-cargo test --test <file>     # Run a specific test file
-cargo test --test auth_service_tests  # Run auth service tests
+### 构建
 
-# Note: Tests use UUID-based database files (e.g., user_repo_{uuid}.db) created automatically.
-cargo clippy -- -D warnings  # Lint (zero warnings required)
-cargo fmt && cargo fmt -- --check  # Format
+```bash
+cargo build                  # Debug 构建 → target/debug/x-rust
+cargo build --release        # Release 构建 → target/release/x-rust
 ```
+
+### 运行
+
+```bash
+cargo run                    # 运行（DATABASE_URL 默认 sqlite:data/users.db）
+RUST_LOG=debug cargo run     # Debug 日志运行
+```
+
+### 检查
+
+```bash
+cargo check                 # 类型检查（不编译）
+cargo clippy -- -D warnings # Lint（零警告）
+cargo fmt && cargo fmt -- --check  # 格式化
+```
+
+### 测试
+
+```bash
+cargo test                  # 所有测试
+cargo test -- <test_name>    # 运行单个测试
+cargo test --test <file>    # 运行指定测试文件
+cargo test --test auth_service_tests  # 运行 auth service tests
+```
+
+> Note: 测试使用 UUID-based 数据库文件（如 user_repo_{uuid}.db）自动创建。
 
 ## Architecture
 
