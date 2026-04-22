@@ -636,7 +636,7 @@ async fn test_get_orgs_by_parent() {
                 .uri("/api/sysOrg")
                 .header("content-type", "application/json")
                 .body(Body::from(format!(
-                    r#"{{"name":"Child 1","sort":2,"parent_id":{}}}"#,
+                    r#"{{"name":"Child 1","sort":2,"parentId":{}}}"#,
                     parent_id
                 )))
                 .unwrap(),
@@ -652,7 +652,7 @@ async fn test_get_orgs_by_parent() {
                 .uri("/api/sysOrg")
                 .header("content-type", "application/json")
                 .body(Body::from(format!(
-                    r#"{{"name":"Child 2","sort":3,"parent_id":{}}}"#,
+                    r#"{{"name":"Child 2","sort":3,"parentId":{}}}"#,
                     parent_id
                 )))
                 .unwrap(),
@@ -665,7 +665,7 @@ async fn test_get_orgs_by_parent() {
             &token,
             Request::builder()
                 .method("GET")
-                .uri(&format!("/api/sysOrg/parent?parent_id={}", parent_id))
+                .uri(&format!("/api/sysOrg/parent?parentId={}", parent_id))
                 .body(Body::empty())
                 .unwrap(),
         ))

@@ -64,6 +64,7 @@ pub async fn delete_user_handler(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RoleIdQuery {
     pub role_id: i64,
 }
@@ -117,12 +118,14 @@ pub async fn edit_password_handler(
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResetPwdRequest {
     pub id: i64,
     pub password: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EnableRequest {
     pub id: i64,
     pub enable: i32,

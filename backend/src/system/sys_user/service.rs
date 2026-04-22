@@ -7,6 +7,7 @@ use futures_util::future::join_all;
 use std::sync::Arc;
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PasswordUpdateRequest {
     pub old_password: Option<String>,
     pub password: String,

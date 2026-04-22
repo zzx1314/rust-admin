@@ -519,7 +519,7 @@ async fn test_assign_role_to_user() {
                 .uri("/api/sysUser")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"username":"John","email":"john@example.com","org_id":1}"#,
+                    r#"{"username":"John","email":"john@example.com","orgId":1}"#,
                 ))
                 .unwrap(),
         ))
@@ -586,7 +586,7 @@ async fn test_get_user_roles() {
                 .uri("/api/sysUser")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"username":"Jane","email":"jane@example.com","org_id":1}"#,
+                    r#"{"username":"Jane","email":"jane@example.com","orgId":1}"#,
                 ))
                 .unwrap(),
         ))

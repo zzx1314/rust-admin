@@ -19,8 +19,8 @@ pub struct DictItemIdParam {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DictTypeQuery {
-    #[serde(rename = "type")]
     r#type: String,
 }
 

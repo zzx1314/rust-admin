@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub type User = UserModel;
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateUserRequest {
     pub username: String,
     pub phone: Option<String>,
@@ -21,6 +22,7 @@ pub struct CreateUserRequest {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateUserRequest {
     pub username: Option<String>,
     pub phone: Option<String>,
@@ -36,6 +38,7 @@ pub struct UpdateUserRequest {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct UserPageQuery {
     #[serde(default = "default_current")]
     pub current: i64,

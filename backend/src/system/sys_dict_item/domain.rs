@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub type SysDictItem = SysDictItemModel;
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateSysDictItemRequest {
     pub r#type: String,
     pub label: Option<String>,
@@ -20,6 +21,7 @@ pub struct CreateSysDictItemRequest {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateSysDictItemRequest {
     pub r#type: Option<String>,
     pub label: Option<String>,
@@ -32,6 +34,7 @@ pub struct UpdateSysDictItemRequest {
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct SysDictItemPageQuery {
     #[serde(default = "default_current")]
     pub current: i64,

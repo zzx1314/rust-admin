@@ -6,7 +6,7 @@ use x_rust::common::traits::{
     DynFuture, OrgRepository, RoleRepository, SeaOrmOptResult, SeaOrmResult, UserRepository,
 };
 use x_rust::system::sys_org::domain::{CreateOrgRequest, Org, OrgTreeQuery, UpdateOrgRequest};
-use x_rust::common::util::encrypt_password;
+use x_rust::common::util::{encrypt_password, format_datetime, format_datetime_opt};
 use x_rust::system::sys_role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequest};
 use x_rust::system::sys_user::domain::{CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO};
 use x_rust::system::sys_user::service::UserService;
@@ -212,14 +212,14 @@ impl UserRepository for FakeUserRepository {
                     real_name: u.real_name.clone(),
                     org_id: u.org_id,
                     org_name: None,
-                    lock_time: u.lock_time,
-                    last_login_time: u.last_login_time,
+                    lock_time: format_datetime_opt(u.lock_time),
+                    last_login_time: format_datetime_opt(u.last_login_time),
                     try_count: u.try_count,
                     lock_flag: u.lock_flag,
-                    create_time: u.create_time.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    update_time: u.update_time,
+                    create_time: format_datetime(u.create_time),
+                    update_time: format_datetime(u.update_time),
                     remarks: u.remarks.clone(),
-                    pass_update_time: u.pass_update_time,
+                    pass_update_time: format_datetime_opt(u.pass_update_time),
                     card: u.card.clone(),
                     is_show: u.is_show,
                     enable: u.enable,

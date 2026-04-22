@@ -16,6 +16,7 @@ pub struct Model {
     #[sea_orm(column_name = "real_name", column_type = "Text", nullable)]
     pub real_name: Option<String>,
     #[sea_orm(column_name = "password", column_type = "Text", nullable)]
+    #[serde(skip_serializing)]
     pub password: Option<String>,
     #[sea_orm(column_name = "org_id", column_type = "Integer", nullable)]
     pub org_id: i64,

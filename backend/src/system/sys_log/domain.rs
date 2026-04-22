@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 pub type SysLog = SysLogModel;
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateSysLogRequest {
     pub tenant: Option<String>,
-    #[serde(rename = "type")]
     pub type_: Option<String>,
     pub sub_type: Option<String>,
     pub biz_no: Option<String>,
@@ -23,9 +23,9 @@ pub struct CreateSysLogRequest {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateSysLogRequest {
     pub tenant: Option<String>,
-    #[serde(rename = "type")]
     pub type_: Option<String>,
     pub sub_type: Option<String>,
     pub biz_no: Option<String>,
@@ -38,13 +38,13 @@ pub struct UpdateSysLogRequest {
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct SysLogPageQuery {
     #[serde(default = "default_current")]
     pub current: i64,
     #[serde(default = "default_size")]
     pub size: i64,
     pub tenant: Option<String>,
-    #[serde(rename = "type")]
     pub type_: Option<String>,
     pub sub_type: Option<String>,
     pub biz_no: Option<String>,

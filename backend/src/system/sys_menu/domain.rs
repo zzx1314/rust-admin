@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub type Menu = MenuModel;
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateMenuRequest {
     pub name: String,
     pub code: Option<String>,
@@ -27,6 +28,7 @@ pub struct CreateMenuRequest {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateMenuRequest {
     pub name: Option<String>,
     pub code: Option<String>,

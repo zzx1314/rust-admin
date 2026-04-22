@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub type Org = OrgModel;
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateOrgRequest {
     pub name: String,
     pub sort: Option<i32>,
@@ -21,6 +22,7 @@ pub struct CreateOrgRequest {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateOrgRequest {
     pub name: Option<String>,
     pub sort: Option<i32>,
@@ -105,6 +107,7 @@ impl From<Org> for SysOrgVo {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct OrgTreeQuery {
     pub name: Option<String>,
     pub r#type: Option<String>,

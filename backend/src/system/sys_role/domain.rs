@@ -41,6 +41,7 @@ impl From<RoleModel> for RoleVO {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateRoleRequest {
     pub name: String,
     pub code: Option<String>,
@@ -51,6 +52,7 @@ pub struct CreateRoleRequest {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateRoleRequest {
     pub name: Option<String>,
     pub code: Option<String>,
@@ -62,6 +64,7 @@ pub struct UpdateRoleRequest {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct RolePageQuery {
     #[serde(default = "default_current")]
     pub current: i64,

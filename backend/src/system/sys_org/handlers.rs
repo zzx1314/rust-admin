@@ -11,6 +11,7 @@ use axum::{
 use serde::Deserialize;
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RemoveByIdsRequest {
     pub ids: Vec<i64>,
 }
@@ -27,6 +28,7 @@ pub struct OrgIdParam {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ParentQueryParam {
     parent_id: Option<i64>,
 }

@@ -362,7 +362,7 @@ async fn test_create_user() {
                 .uri("/api/sysUser")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"username":"newuser","email":"test2@example.com","real_name":"Test User","org_id":1}"#,
+                    r#"{"username":"newuser","email":"test2@example.com","realName":"Test User","orgId":1}"#,
                 ))
                 .unwrap(),
         ))
@@ -421,7 +421,7 @@ async fn test_user_crud_flow() {
                 .uri("/api/sysUser")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"username":"initial","email":"initial@example.com","org_id":1}"#,
+                    r#"{"username":"initial","email":"initial@example.com","orgId":1}"#,
                 ))
                 .unwrap(),
         ))
@@ -458,7 +458,7 @@ async fn test_user_crud_flow() {
                 .uri(&format!("/api/sysUser/{}", user_id))
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"username":"updated","email":"updated@example.com","org_id":1}"#,
+                    r#"{"username":"updated","email":"updated@example.com","orgId":1}"#,
                 ))
                 .unwrap(),
         ))
@@ -551,7 +551,7 @@ async fn test_get_users_page_with_params() {
                     .uri("/api/sysUser")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
-                        r#"{{"username":"pageuser{}","email":"pageuser{}@example.com","org_id":1}}"#,
+                        r#"{{"username":"pageuser{}","email":"pageuser{}@example.com","orgId":1}}"#,
                         i, i
                     )))
                     .unwrap(),
