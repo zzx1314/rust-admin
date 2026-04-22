@@ -77,7 +77,7 @@ pub async fn logout_handler(
         type_: Some("LOGOUT".to_string()),
         sub_type: Some("GET".to_string()),
         biz_no: Some("/api/token/logout".to_string()),
-        operator: Some(username.clone()),
+        operator: if username.is_empty() { None } else { Some(username.clone()) },
         action: Some("/api/token/logout".to_string()),
         fail: Some(false),
         extra: None,
