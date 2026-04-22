@@ -4,6 +4,10 @@ use chrono::{DateTime, Utc};
 use sea_orm::ActiveValue;
 use serde::{Deserialize, Serialize};
 
+fn format_datetime(dt: DateTime<Utc>) -> String {
+    dt.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
 pub type Menu = MenuModel;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -56,6 +60,7 @@ pub struct MenuMeta {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct MenuVo {
     pub id: i64,
     pub name: String,
@@ -72,6 +77,8 @@ pub struct MenuVo {
     pub leaf: Option<bool>,
     pub disabled: Option<bool>,
     pub role_code: Option<String>,
+    pub create_time: String,
+    pub update_time: String,
     pub meta: Option<MenuMeta>,
 }
 
@@ -93,6 +100,8 @@ impl From<Menu> for MenuVo {
             leaf: menu.leaf,
             disabled: menu.disabled,
             role_code: menu.role_code,
+            create_time: format_datetime(menu.create_time),
+            update_time: format_datetime(menu.update_time),
             meta: None,
         }
     }
@@ -116,6 +125,8 @@ pub struct MenuTree {
     pub remarks: Option<String>,
     pub leaf: Option<bool>,
     pub disabled: Option<bool>,
+    pub create_time: String,
+    pub update_time: String,
     pub meta: Option<MenuMeta>,
     pub children: Option<Vec<MenuTree>>,
 }
@@ -137,6 +148,8 @@ impl From<MenuVo> for MenuTree {
             remarks: vo.remarks,
             leaf: vo.leaf,
             disabled: vo.disabled,
+            create_time: vo.create_time,
+            update_time: vo.update_time,
             meta: vo.meta,
             children: None,
         }

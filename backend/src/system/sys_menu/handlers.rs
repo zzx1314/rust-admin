@@ -1,6 +1,6 @@
 use crate::api::AppState;
 use crate::common::error::{ApiResponse, AppError};
-use crate::system::sys_menu::domain::{CreateMenuRequest, Menu, MenuTree, UpdateMenuRequest};
+use crate::system::sys_menu::domain::{CreateMenuRequest, Menu, MenuTree, MenuVo, UpdateMenuRequest};
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -34,9 +34,10 @@ pub async fn get_menu_handler(
 
 pub async fn get_all_menus_handler(
     State(state): State<AppState>,
-) -> Result<Json<ApiResponse<Vec<Menu>>>, AppError> {
+) -> Result<Json<ApiResponse<Vec<MenuVo>>>, AppError> {
     let menus = state.menu_service.get_all_menus().await?;
-    Ok(Json(ApiResponse::ok(menus)))
+    let vos: Vec<MenuVo> = menus.into_iter().map(MenuVo::from).collect();
+    Ok(Json(ApiResponse::ok(vos)))
 }
 
 pub async fn get_menu_tree_handler(
