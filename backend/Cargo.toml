@@ -13,6 +13,7 @@ cbc = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 config = "0.14"
 futures-util = "0.3"
+http-body-util = "0.1"
 jsonwebtoken = "9"
 md-5 = "0.10"
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
@@ -31,7 +32,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 axum-test = "18"
-http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 
 [lib]
