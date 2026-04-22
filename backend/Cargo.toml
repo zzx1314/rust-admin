@@ -85,6 +85,10 @@ name = "auth_service_tests"
 path = "tests/auth/auth_service_tests.rs"
 
 [[test]]
+name = "sys_auth_service_tests"
+path = "tests/sys_auth/sys_auth_service_tests.rs"
+
+[[test]]
 name = "email_tests"
 path = "tests/common/email_tests.rs"
 

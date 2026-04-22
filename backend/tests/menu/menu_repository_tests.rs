@@ -534,6 +534,8 @@ async fn test_build_menu_tree_with_minus_one_parent() {
         remarks: None,
         leaf: Some(false),
         disabled: Some(false),
+        create_time: "2024-01-01 00:00:00".to_string(),
+        update_time: "2024-01-01 00:00:00".to_string(),
         meta: None,
         children: None,
     };
@@ -553,6 +555,8 @@ async fn test_build_menu_tree_with_minus_one_parent() {
         remarks: None,
         leaf: Some(true),
         disabled: Some(false),
+        create_time: "2024-01-01 00:00:00".to_string(),
+        update_time: "2024-01-01 00:00:00".to_string(),
         meta: None,
         children: None,
     };

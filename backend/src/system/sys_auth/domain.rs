@@ -8,6 +8,7 @@ pub struct SetMenuAuthRequest {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct SysAuthMenuVo {
     pub id: i64,
     pub title: String,

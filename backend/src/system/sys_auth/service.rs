@@ -19,6 +19,13 @@ impl SysAuthService {
     }
 
     pub async fn get_role_auth(&self, role_code: &str) -> Result<Vec<SysAuthMenuVo>, AppError> {
+        let role = self
+            .role_repo
+            .find_by_code(role_code)
+            .await
+            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .ok_or_else(|| AppError::NotFound(format!("Role with code {} not found", role_code)))?;
+
         let all_menus = self
             .menu_repo
             .find_all()
@@ -29,7 +36,7 @@ impl SysAuthService {
 
         let role_menus = self
             .menu_repo
-            .find_menus_by_role_id(&role_code.parse().unwrap_or(0))
+            .find_menus_by_role_id(&role.id)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
