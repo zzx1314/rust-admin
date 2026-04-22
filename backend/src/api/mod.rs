@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 pub mod middleware;
 pub mod routes;
+pub mod logging_middleware;
 
 #[derive(Clone)]
 pub struct AppState {

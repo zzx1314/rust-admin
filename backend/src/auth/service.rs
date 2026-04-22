@@ -378,6 +378,16 @@ impl AuthService {
         }
     }
 
+    pub fn extract_username(&self, token: &str) -> Option<String> {
+        decode::<Claims>(
+            token,
+            &DecodingKey::from_secret(self.jwt_secret.as_bytes()),
+            &Validation::default(),
+        )
+        .ok()
+        .map(|data| data.claims.username)
+    }
+
     pub async fn refresh_token(&self, refresh_token: &str) -> Result<LoginResponse, AppError> {
         let token_data = decode::<Claims>(
             refresh_token,

@@ -111,3 +111,7 @@ path = "tests/sys_dict_item/sys_dict_item_service_tests.rs"
 [[test]]
 name = "sys_log_service_tests"
 path = "tests/sys_log/sys_log_service_tests.rs"
+
+[[test]]
+name = "logging_middleware_tests"
+path = "tests/logging/logging_middleware_tests.rs"

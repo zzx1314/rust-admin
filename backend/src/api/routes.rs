@@ -7,6 +7,7 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::api::AppState;
 use crate::api::middleware::require_auth;
+use crate::api::logging_middleware::logging_middleware;
 use crate::auth::handlers::{
     check_token_handler, login_handler, logout_handler, me_handler, refresh_handler,
 };
@@ -230,6 +231,7 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .nest("/api", api_router)
         .layer(TraceLayer::new_for_http())
+        .layer(from_fn_with_state(state.clone(), logging_middleware))
         .layer(
             CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
