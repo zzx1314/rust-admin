@@ -8,8 +8,8 @@ use crate::auth::repository::RedisTokenStore;
 use crate::auth::service::AuthService;
 use crate::common::error::AppError;
 use crate::common::traits::{
-    MenuRepository, OrgRepository, RoleRepository, SysDictItemRepository, SysDictRepository,
-    TokenStore, UserRepository,
+    MenuRepository, OrgRepository, RoleRepository, SysDictItemRepository, SysLogRepository,
+    SysDictRepository, TokenStore, UserRepository,
 };
 use crate::config::AppConfig;
 use crate::system::sys_menu::repository::SeaOrmMenuRepository;
@@ -24,6 +24,8 @@ use crate::system::sys_dict::repository::SeaOrmSysDictRepository;
 use crate::system::sys_dict::service::SysDictService;
 use crate::system::sys_dict_item::repository::SeaOrmSysDictItemRepository;
 use crate::system::sys_dict_item::service::SysDictItemService;
+use crate::system::sys_log::repository::SeaOrmSysLogRepository;
+use crate::system::sys_log::service::SysLogService;
 use crate::system::sys_user::repository::SeaOrmUserRepository;
 use crate::system::sys_user::service::UserService;
 use sea_orm_migration::MigratorTrait;
@@ -79,6 +81,10 @@ impl App {
             Arc::new(SeaOrmSysDictItemRepository::new(conn.clone()));
         let sys_dict_item_service = Arc::new(SysDictItemService::new(sys_dict_item_repo, sys_dict_repo.clone()));
 
+        let sys_log_repo: Arc<dyn SysLogRepository> =
+            Arc::new(SeaOrmSysLogRepository::new(conn.clone()));
+        let sys_log_service = Arc::new(SysLogService::new(sys_log_repo));
+
         AppState {
             user_service,
             role_service,
@@ -88,6 +94,7 @@ impl App {
             sys_auth_service,
             sys_dict_service,
             sys_dict_item_service,
+            sys_log_service,
         }
     }
 

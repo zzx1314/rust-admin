@@ -9,6 +9,9 @@ use crate::system::sys_dict_item::domain::{
     CreateSysDictItemRequest, SysDictItem, SysDictItemPageQuery, SysDictItemVO,
     UpdateSysDictItemRequest,
 };
+use crate::system::sys_log::domain::{
+    CreateSysLogRequest, SysLog, SysLogPageQuery, SysLogVO, UpdateSysLogRequest,
+};
 use crate::system::sys_user::domain::{CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO};
 use sea_orm::DbErr;
 use std::future::Future;
@@ -116,5 +119,17 @@ pub trait SysDictItemRepository: Send + Sync {
         id: &i64,
         req: &UpdateSysDictItemRequest,
     ) -> DynFuture<SeaOrmOptResult<SysDictItem>>;
+    fn delete(&self, id: &i64) -> DynFuture<SeaOrmResult<bool>>;
+}
+
+pub trait SysLogRepository: Send + Sync {
+    fn create(&self, req: &CreateSysLogRequest, id: &i64) -> DynFuture<SeaOrmResult<SysLog>>;
+    fn find_by_id(&self, id: &i64) -> DynFuture<SeaOrmOptResult<SysLog>>;
+    fn find_all(&self) -> DynFuture<SeaOrmResult<Vec<SysLog>>>;
+    fn find_all_with_page(
+        &self,
+        query: &SysLogPageQuery,
+    ) -> DynFuture<SeaOrmResult<(Vec<SysLogVO>, i64)>>;
+    fn update(&self, id: &i64, req: &UpdateSysLogRequest) -> DynFuture<SeaOrmOptResult<SysLog>>;
     fn delete(&self, id: &i64) -> DynFuture<SeaOrmResult<bool>>;
 }

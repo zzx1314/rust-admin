@@ -34,6 +34,10 @@ use crate::system::sys_dict_item::handlers::{
     get_dict_item_handler, get_dict_items_by_dict_id_handler, get_dict_items_by_type_handler,
     get_dict_items_page_handler, get_safe_policy_handler, update_dict_item_handler,
 };
+use crate::system::sys_log::handlers::{
+    create_log_handler, delete_log_handler, get_all_logs_handler, get_log_handler,
+    get_logs_page_handler, update_log_handler,
+};
 use crate::system::sys_user::handlers::{
     create_user_handler, delete_user_handler, edit_password_handler, get_all_users_handler,
     get_user_handler, get_users_by_role_handler, get_users_page_handler,
@@ -194,6 +198,22 @@ pub fn sys_dict_item_routes(state: AppState) -> Router<AppState> {
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 
+pub fn sys_log_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/sysLog/getPage", get(get_logs_page_handler))
+        .route(
+            "/sysLog",
+            post(create_log_handler).get(get_all_logs_handler),
+        )
+        .route(
+            "/sysLog/{id}",
+            get(get_log_handler)
+                .put(update_log_handler)
+                .delete(delete_log_handler),
+        )
+        .layer(from_fn_with_state(state.clone(), require_auth))
+}
+
 pub fn create_router(state: AppState) -> Router {
     let api_router = Router::new()
         .merge(auth_routes())
@@ -204,7 +224,8 @@ pub fn create_router(state: AppState) -> Router {
         .merge(org_routes(state.clone()))
         .merge(sys_auth_routes(state.clone()))
         .merge(sys_dict_routes(state.clone()))
-        .merge(sys_dict_item_routes(state.clone()));
+        .merge(sys_dict_item_routes(state.clone()))
+        .merge(sys_log_routes(state.clone()));
 
     Router::new()
         .nest("/api", api_router)

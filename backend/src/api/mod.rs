@@ -5,6 +5,7 @@ use crate::system::sys_role::service::RoleService;
 use crate::system::sys_auth::service::SysAuthService;
 use crate::system::sys_dict::service::SysDictService;
 use crate::system::sys_dict_item::service::SysDictItemService;
+use crate::system::sys_log::service::SysLogService;
 use crate::system::sys_user::service::UserService;
 use std::sync::Arc;
 
@@ -21,4 +22,5 @@ pub struct AppState {
     pub sys_auth_service: Arc<SysAuthService>,
     pub sys_dict_service: Arc<SysDictService>,
     pub sys_dict_item_service: Arc<SysDictItemService>,
+    pub sys_log_service: Arc<SysLogService>,
 }
