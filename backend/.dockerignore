@@ -1,0 +1,8 @@
+target/
+data/
+.git/
+.gitignore
+AGENTS.md
+.sisyphus
+*.md
+tests/

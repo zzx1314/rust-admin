@@ -1,0 +1,41 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: x-admin-redis
+    command: redis-server --requirepass 123456
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "123456", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: x-admin-backend
+    ports:
+      - "3000:3000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - APP_SERVER__HOST=0.0.0.0
+      - APP_SERVER__PORT=3000
+      - APP_DATABASE_URL=sqlite:data/users.db?mode=rwc
+      - APP_REDIS__HOST=redis
+      - APP_REDIS__PORT=6379
+      - APP_REDIS__PASSWORD=123456
+      - APP_JWT_SECRET=your-secret-key
+    volumes:
+      - backend-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  backend-data:

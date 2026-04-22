@@ -1,5 +1,5 @@
 jwt_secret = "your-secret-key"
-database_url = "sqlite:/home/zhangzexin/IdeaProjects/rust-admin/backend/data/users.db?mode=rwc"
+database_url = "sqlite:data/users.db?mode=rwc"
 
 [server]
 host = "127.0.0.1"
