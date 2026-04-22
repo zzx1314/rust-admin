@@ -262,7 +262,7 @@ async fn create_test_app() -> (axum::Router, TestDb) {
     let sys_dict_service = Arc::new(SysDictService::new(sys_dict_repo));
     let sys_dict_item_repo: Arc<dyn SysDictItemRepository> =
         Arc::new(SeaOrmSysDictItemRepository::new(conn.clone()));
-    let sys_dict_item_service = Arc::new(SysDictItemService::new(sys_dict_item_repo));
+    let sys_dict_item_service = Arc::new(SysDictItemService::new(sys_dict_item_repo, sys_dict_repo));
 
     let state = AppState {
         user_service,

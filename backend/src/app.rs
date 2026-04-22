@@ -73,11 +73,11 @@ impl App {
 
         let sys_dict_repo: Arc<dyn SysDictRepository> =
             Arc::new(SeaOrmSysDictRepository::new(conn.clone()));
-        let sys_dict_service = Arc::new(SysDictService::new(sys_dict_repo));
+        let sys_dict_service = Arc::new(SysDictService::new(sys_dict_repo.clone()));
 
         let sys_dict_item_repo: Arc<dyn SysDictItemRepository> =
             Arc::new(SeaOrmSysDictItemRepository::new(conn.clone()));
-        let sys_dict_item_service = Arc::new(SysDictItemService::new(sys_dict_item_repo));
+        let sys_dict_item_service = Arc::new(SysDictItemService::new(sys_dict_item_repo, sys_dict_repo.clone()));
 
         AppState {
             user_service,

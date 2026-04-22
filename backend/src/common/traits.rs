@@ -87,6 +87,7 @@ pub trait OrgRepository: Send + Sync {
 pub trait SysDictRepository: Send + Sync {
     fn create(&self, req: &CreateSysDictRequest, id: &i64) -> DynFuture<SeaOrmResult<SysDict>>;
     fn find_by_id(&self, id: &i64) -> DynFuture<SeaOrmOptResult<SysDict>>;
+    fn find_by_type(&self, r#type: &str) -> DynFuture<SeaOrmOptResult<SysDict>>;
     fn find_all(&self) -> DynFuture<SeaOrmResult<Vec<SysDict>>>;
     fn find_all_with_page(
         &self,

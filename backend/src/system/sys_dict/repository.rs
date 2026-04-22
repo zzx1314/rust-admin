@@ -58,6 +58,20 @@ impl SysDictRepository for SeaOrmSysDictRepository {
         })
     }
 
+    fn find_by_type(&self, r#type: &str) -> DynFuture<SeaOrmOptResult<SysDict>> {
+        let r#type = r#type.to_string();
+        self.with_conn(move |conn| {
+            Box::pin(async move {
+                let dict = SysDictEntity::find()
+                    .filter(SysDictColumn::Type.eq(r#type))
+                    .filter(SysDictColumn::IsDeleted.eq(0))
+                    .one(&*conn)
+                    .await?;
+                Ok(dict)
+            })
+        })
+    }
+
     fn find_all(&self) -> DynFuture<SeaOrmResult<Vec<SysDict>>> {
         self.with_conn(|conn| {
             Box::pin(async move {

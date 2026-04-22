@@ -2,12 +2,206 @@ use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use x_rust::common::error::AppError;
-use x_rust::common::traits::{DynFuture, SeaOrmOptResult, SeaOrmResult, SysDictItemRepository};
+use x_rust::common::traits::{
+    DynFuture, SeaOrmOptResult, SeaOrmResult, SysDictItemRepository, SysDictRepository,
+};
+use x_rust::system::sys_dict::domain::{
+    CreateSysDictRequest, SysDict, SysDictPageQuery, SysDictVO, UpdateSysDictRequest,
+};
 use x_rust::system::sys_dict_item::domain::{
     CreateSysDictItemRequest, SysDictItem, SysDictItemPageQuery, SysDictItemVO,
     UpdateSysDictItemRequest,
 };
 use x_rust::system::sys_dict_item::service::SysDictItemService;
+
+// ==================== Fake SysDict Repository ====================
+
+struct FakeSysDictRepository {
+    dicts: Arc<Mutex<HashMap<i64, SysDict>>>,
+}
+
+impl FakeSysDictRepository {
+    fn new() -> Self {
+        Self {
+            dicts: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl SysDictRepository for FakeSysDictRepository {
+    fn create(&self, req: &CreateSysDictRequest, id: &i64) -> DynFuture<SeaOrmResult<SysDict>> {
+        let dicts = self.dicts.clone();
+        let id = *id;
+        let r#type = req.r#type.clone();
+        let dict_type = req.dict_type.clone();
+        let description = req.description.clone();
+        let remarks = req.remarks.clone();
+        let allow_deletion = req.allow_deletion;
+        let is_show = req.is_show;
+        Box::pin(async move {
+            let dict = SysDict {
+                id,
+                r#type,
+                dict_type,
+                description,
+                remarks,
+                create_time: Some(Utc::now()),
+                update_time: Some(Utc::now()),
+                is_deleted: 0,
+                allow_deletion,
+                is_show,
+            };
+            dicts.lock().unwrap().insert(id, dict.clone());
+            Ok(dict)
+        })
+    }
+
+    fn find_by_id(&self, id: &i64) -> DynFuture<SeaOrmOptResult<SysDict>> {
+        let dicts = self.dicts.clone();
+        let id = *id;
+        Box::pin(async move {
+            let dict = dicts.lock().unwrap().get(&id).cloned();
+            if let Some(ref d) = dict {
+                if d.is_deleted == 0 {
+                    return Ok(dict);
+                }
+            }
+            Ok(None)
+        })
+    }
+
+    fn find_by_type(&self, r#type: &str) -> DynFuture<SeaOrmOptResult<SysDict>> {
+        let dicts = self.dicts.clone();
+        let r#type = r#type.to_string();
+        Box::pin(async move {
+            let dict = dicts
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|d| d.is_deleted == 0 && d.r#type == r#type)
+                .cloned()
+                .next();
+            Ok(dict)
+        })
+    }
+
+    fn find_all(&self) -> DynFuture<SeaOrmResult<Vec<SysDict>>> {
+        let dicts = self.dicts.clone();
+        Box::pin(async move {
+            Ok(dicts
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|d| d.is_deleted == 0)
+                .cloned()
+                .collect())
+        })
+    }
+
+    fn find_all_with_page(
+        &self,
+        query: &SysDictPageQuery,
+    ) -> DynFuture<SeaOrmResult<(Vec<SysDictVO>, i64)>> {
+        let dicts = self.dicts.clone();
+        let query = query.clone();
+        Box::pin(async move {
+            let mut vec: Vec<SysDictVO> = dicts
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|d| d.is_deleted == 0)
+                .filter(|d| {
+                    if let Some(ref v) = query.r#type {
+                        if !d.r#type.contains(v.as_str()) {
+                            return false;
+                        }
+                    }
+                    if let Some(ref v) = query.description {
+                        if !d.description.as_ref().map_or(false, |desc| desc.contains(v.as_str())) {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .map(|d| SysDictVO {
+                    id: d.id,
+                    r#type: d.r#type.clone(),
+                    dict_type: d.dict_type.clone(),
+                    description: d.description.clone(),
+                    remarks: d.remarks.clone(),
+                    create_time: d.create_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
+                    update_time: d.update_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
+                    is_deleted: d.is_deleted,
+                    allow_deletion: d.allow_deletion,
+                    is_show: d.is_show,
+                })
+                .collect();
+            let total = vec.len() as i64;
+            let offset = (query.page() - 1) * query.size();
+            let records: Vec<SysDictVO> = vec
+                .into_iter()
+                .skip(offset as usize)
+                .take(query.size() as usize)
+                .collect();
+            Ok((records, total))
+        })
+    }
+
+    fn update(&self, id: &i64, req: &UpdateSysDictRequest) -> DynFuture<SeaOrmOptResult<SysDict>> {
+        let dicts = self.dicts.clone();
+        let id = *id;
+        let r#type = req.r#type.clone();
+        let dict_type = req.dict_type.clone();
+        let description = req.description.clone();
+        let remarks = req.remarks.clone();
+        let allow_deletion = req.allow_deletion;
+        let is_show = req.is_show;
+        Box::pin(async move {
+            let mut dicts_lock = dicts.lock().unwrap();
+            if let Some(dict) = dicts_lock.get_mut(&id) {
+                if let Some(v) = r#type {
+                    dict.r#type = v;
+                }
+                if let Some(v) = dict_type {
+                    dict.dict_type = Some(v);
+                }
+                if let Some(v) = description {
+                    dict.description = Some(v);
+                }
+                if let Some(v) = remarks {
+                    dict.remarks = Some(v);
+                }
+                if let Some(v) = allow_deletion {
+                    dict.allow_deletion = Some(v);
+                }
+                if let Some(v) = is_show {
+                    dict.is_show = Some(v);
+                }
+                dict.update_time = Some(Utc::now());
+                Ok(Some(dict.clone()))
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
+    fn delete(&self, id: &i64) -> DynFuture<SeaOrmResult<bool>> {
+        let dicts = self.dicts.clone();
+        let id = *id;
+        Box::pin(async move {
+            let mut dicts_lock = dicts.lock().unwrap();
+            if let Some(dict) = dicts_lock.get_mut(&id) {
+                dict.is_deleted = 1;
+                dict.update_time = Some(Utc::now());
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        })
+    }
+}
+
+// ==================== Fake SysDictItem Repository ====================
 
 struct FakeSysDictItemRepository {
     items: Arc<Mutex<HashMap<i64, SysDictItem>>>,
@@ -232,7 +426,8 @@ impl SysDictItemRepository for FakeSysDictItemRepository {
 #[tokio::test]
 async fn test_create_dict_item_success() {
     let repo = Arc::new(FakeSysDictItemRepository::new());
-    let service = SysDictItemService::new(repo);
+    let dict_repo = Arc::new(FakeSysDictRepository::new());
+    let service = SysDictItemService::new(repo, dict_repo);
 
     let req = CreateSysDictItemRequest {
         r#type: "gender".to_string(),
@@ -255,7 +450,8 @@ async fn test_create_dict_item_success() {
 #[tokio::test]
 async fn test_get_dict_item_success() {
     let repo = Arc::new(FakeSysDictItemRepository::new());
-    let service = SysDictItemService::new(repo.clone());
+    let dict_repo = Arc::new(FakeSysDictRepository::new());
+    let service = SysDictItemService::new(repo.clone(), dict_repo);
 
     let req = CreateSysDictItemRequest {
         r#type: "gender".to_string(),
@@ -276,7 +472,8 @@ async fn test_get_dict_item_success() {
 #[tokio::test]
 async fn test_get_dict_item_not_found() {
     let repo = Arc::new(FakeSysDictItemRepository::new());
-    let service = SysDictItemService::new(repo);
+    let dict_repo = Arc::new(FakeSysDictRepository::new());
+    let service = SysDictItemService::new(repo, dict_repo);
 
     let result = service.get_dict_item(&999i64).await;
     assert!(matches!(result, Err(AppError::NotFound(_))));
@@ -285,7 +482,8 @@ async fn test_get_dict_item_not_found() {
 #[tokio::test]
 async fn test_get_all_dict_items() {
     let repo = Arc::new(FakeSysDictItemRepository::new());
-    let service = SysDictItemService::new(repo.clone());
+    let dict_repo = Arc::new(FakeSysDictRepository::new());
+    let service = SysDictItemService::new(repo.clone(), dict_repo);
 
     let req1 = CreateSysDictItemRequest {
         r#type: "status".to_string(),
@@ -318,7 +516,8 @@ async fn test_get_all_dict_items() {
 #[tokio::test]
 async fn test_get_dict_items_by_dict_id() {
     let repo = Arc::new(FakeSysDictItemRepository::new());
-    let service = SysDictItemService::new(repo.clone());
+    let dict_repo = Arc::new(FakeSysDictRepository::new());
+    let service = SysDictItemService::new(repo.clone(), dict_repo);
 
     let req1 = CreateSysDictItemRequest {
         r#type: "gender".to_string(),
@@ -363,7 +562,8 @@ async fn test_get_dict_items_by_dict_id() {
 #[tokio::test]
 async fn test_get_dict_items_by_type() {
     let repo = Arc::new(FakeSysDictItemRepository::new());
-    let service = SysDictItemService::new(repo.clone());
+    let dict_repo = Arc::new(FakeSysDictRepository::new());
+    let service = SysDictItemService::new(repo.clone(), dict_repo);
 
     let req1 = CreateSysDictItemRequest {
         r#type: "gender".to_string(),
@@ -396,7 +596,8 @@ async fn test_get_dict_items_by_type() {
 #[tokio::test]
 async fn test_update_dict_item_success() {
     let repo = Arc::new(FakeSysDictItemRepository::new());
-    let service = SysDictItemService::new(repo.clone());
+    let dict_repo = Arc::new(FakeSysDictRepository::new());
+    let service = SysDictItemService::new(repo.clone(), dict_repo);
 
     let req = CreateSysDictItemRequest {
         r#type: "gender".to_string(),
@@ -428,7 +629,8 @@ async fn test_update_dict_item_success() {
 #[tokio::test]
 async fn test_update_dict_item_not_found() {
     let repo = Arc::new(FakeSysDictItemRepository::new());
-    let service = SysDictItemService::new(repo);
+    let dict_repo = Arc::new(FakeSysDictRepository::new());
+    let service = SysDictItemService::new(repo, dict_repo);
 
     let req = UpdateSysDictItemRequest {
         r#type: Some("gender".to_string()),
@@ -448,7 +650,8 @@ async fn test_update_dict_item_not_found() {
 #[tokio::test]
 async fn test_delete_dict_item_success() {
     let repo = Arc::new(FakeSysDictItemRepository::new());
-    let service = SysDictItemService::new(repo.clone());
+    let dict_repo = Arc::new(FakeSysDictRepository::new());
+    let service = SysDictItemService::new(repo.clone(), dict_repo);
 
     let req = CreateSysDictItemRequest {
         r#type: "gender".to_string(),
@@ -472,7 +675,8 @@ async fn test_delete_dict_item_success() {
 #[tokio::test]
 async fn test_delete_dict_item_not_found() {
     let repo = Arc::new(FakeSysDictItemRepository::new());
-    let service = SysDictItemService::new(repo);
+    let dict_repo = Arc::new(FakeSysDictRepository::new());
+    let service = SysDictItemService::new(repo, dict_repo);
 
     let result = service.delete_dict_item(&999i64).await;
     assert!(matches!(result, Err(AppError::NotFound(_))));
@@ -481,7 +685,8 @@ async fn test_delete_dict_item_not_found() {
 #[tokio::test]
 async fn test_get_dict_items_page_default() {
     let repo = Arc::new(FakeSysDictItemRepository::new());
-    let service = SysDictItemService::new(repo.clone());
+    let dict_repo = Arc::new(FakeSysDictRepository::new());
+    let service = SysDictItemService::new(repo.clone(), dict_repo);
 
     for i in 1..=15 {
         let req = CreateSysDictItemRequest {
@@ -516,7 +721,8 @@ async fn test_get_dict_items_page_default() {
 #[tokio::test]
 async fn test_get_dict_items_page_empty() {
     let repo = Arc::new(FakeSysDictItemRepository::new());
-    let service = SysDictItemService::new(repo);
+    let dict_repo = Arc::new(FakeSysDictRepository::new());
+    let service = SysDictItemService::new(repo, dict_repo);
 
     let result = service
         .get_dict_items_page(SysDictItemPageQuery {

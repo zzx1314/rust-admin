@@ -1,6 +1,6 @@
 use crate::common::error::AppError;
 use crate::common::pagination::PageResponse;
-use crate::common::traits::SysDictItemRepository;
+use crate::common::traits::{SysDictItemRepository, SysDictRepository};
 use crate::system::sys_dict_item::domain::{
     CreateSysDictItemRequest, SysDictItem, SysDictItemPageQuery, SysDictItemVO,
     UpdateSysDictItemRequest,
@@ -9,11 +9,12 @@ use std::sync::Arc;
 
 pub struct SysDictItemService {
     dict_item_repo: Arc<dyn SysDictItemRepository>,
+    dict_repo: Arc<dyn SysDictRepository>,
 }
 
 impl SysDictItemService {
-    pub fn new(dict_item_repo: Arc<dyn SysDictItemRepository>) -> Self {
-        Self { dict_item_repo }
+    pub fn new(dict_item_repo: Arc<dyn SysDictItemRepository>, dict_repo: Arc<dyn SysDictRepository>) -> Self {
+        Self { dict_item_repo, dict_repo }
     }
 
     pub async fn create_dict_item(
@@ -107,9 +108,16 @@ impl SysDictItemService {
     pub async fn get_safe_policy(
         &self,
     ) -> Result<std::collections::HashMap<String, String>, AppError> {
+        let dict = self
+            .dict_repo
+            .find_by_type("sys_security_policy")
+            .await
+            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .ok_or_else(|| AppError::NotFound("sys_security_policy dict not found".to_string()))?;
+
         let items = self
             .dict_item_repo
-            .find_by_type("sys_security_policy")
+            .find_by_dict_id(&dict.id)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
