@@ -1,4 +1,4 @@
-use crate::common::util::format_datetime;
+use crate::common::util::{format_datetime, format_datetime_opt};
 use crate::system::sys_user::entity::ActiveModel as UserActiveModel;
 use crate::system::sys_user::entity::Model as UserModel;
 use chrono::{DateTime, Utc};
@@ -73,14 +73,14 @@ pub struct UserVO {
     pub real_name: Option<String>,
     pub org_id: i64,
     pub org_name: Option<String>,
-    pub lock_time: Option<DateTime<Utc>>,
-    pub last_login_time: Option<DateTime<Utc>>,
+    pub lock_time: Option<String>,
+    pub last_login_time: Option<String>,
     pub try_count: Option<i32>,
     pub lock_flag: Option<i32>,
     pub create_time: String,
-    pub update_time: DateTime<Utc>,
+    pub update_time: String,
     pub remarks: Option<String>,
-    pub pass_update_time: Option<DateTime<Utc>>,
+    pub pass_update_time: Option<String>,
     pub card: Option<String>,
     pub is_show: Option<i32>,
     pub enable: Option<i32>,
@@ -100,14 +100,14 @@ impl From<UserModel> for UserVO {
             real_name: m.real_name,
             org_id: m.org_id,
             org_name: None,
-            lock_time: m.lock_time,
-            last_login_time: m.last_login_time,
+            lock_time: format_datetime_opt(m.lock_time),
+            last_login_time: format_datetime_opt(m.last_login_time),
             try_count: m.try_count,
             lock_flag: m.lock_flag,
             create_time: format_datetime(m.create_time),
-            update_time: m.update_time,
+            update_time: format_datetime(m.update_time),
             remarks: m.remarks,
-            pass_update_time: m.pass_update_time,
+            pass_update_time: format_datetime_opt(m.pass_update_time),
             card: m.card,
             is_show: m.is_show,
             enable: m.enable,

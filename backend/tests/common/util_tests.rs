@@ -1,4 +1,5 @@
-use x_rust::common::util::{decrypt_password, encrypt_password, md5_encrypt, md5_verify};
+use chrono::{TimeZone, Utc};
+use x_rust::common::util::{decrypt_password, encrypt_password, format_datetime, format_datetime_opt, md5_encrypt, md5_verify};
 
 // ==================== AES Encrypt/Decrypt Roundtrip Tests ====================
 
@@ -38,6 +39,40 @@ fn test_aes_roundtrip_unicode_password() {
 fn test_aes_decrypt_invalid_base64() {
     let result = decrypt_password("not-valid-base64!!!");
     assert!(result.is_err());
+}
+
+// ==================== Beijing Time Formatting Tests ====================
+
+#[test]
+fn test_format_datetime_utc_to_beijing() {
+    // 2025-01-01T00:00:00Z (midnight UTC) = 2025-01-01 08:00:00 Beijing
+    let dt = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+    assert_eq!(format_datetime(dt), "2025-01-01 08:00:00");
+}
+
+#[test]
+fn test_format_datetime_utc_afternoon() {
+    // 2025-06-15T14:30:45Z = 2025-06-15 22:30:45 Beijing
+    let dt = Utc.with_ymd_and_hms(2025, 6, 15, 14, 30, 45).unwrap();
+    assert_eq!(format_datetime(dt), "2025-06-15 22:30:45");
+}
+
+#[test]
+fn test_format_datetime_cross_day_boundary() {
+    // 2025-12-31T20:00:00Z = 2026-01-01 04:00:00 Beijing (next day)
+    let dt = Utc.with_ymd_and_hms(2025, 12, 31, 20, 0, 0).unwrap();
+    assert_eq!(format_datetime(dt), "2026-01-01 04:00:00");
+}
+
+#[test]
+fn test_format_datetime_opt_some() {
+    let dt = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+    assert_eq!(format_datetime_opt(Some(dt)), Some("2025-01-01 08:00:00".to_string()));
+}
+
+#[test]
+fn test_format_datetime_opt_none() {
+    assert_eq!(format_datetime_opt(None), None);
 }
 
 // ==================== MD5 Tests ====================
