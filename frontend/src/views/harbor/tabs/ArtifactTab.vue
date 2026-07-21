@@ -32,11 +32,11 @@ const pagination = reactive<PaginationProps>({
 });
 
 const columns = [
-  { label: "标签", prop: "tags" },
-  { label: "大小", prop: "size" },
+  { label: "标签", prop: "tags", slot: "tags" },
+  { label: "大小", prop: "size", slot: "size" },
   { label: "推送时间", prop: "push_time" },
   { label: "拉取时间", prop: "pull_time" },
-  { label: "媒体类型", prop: "manifest_media_type" }
+  { label: "媒体类型", prop: "manifest_media_type", slot: "manifest_media_type" }
 ];
 
 const formatSize = (bytes?: number) => {
@@ -113,6 +113,7 @@ watch(() => [props.projectName, props.repoName], () => {
           adaptive
           align-whole="center"
           table-layout="auto"
+          :key="`artifacts-${repoName}-${artifacts.length}-${pagination.currentPage}`"
           :loading="loading"
           :size="size"
           :data="artifacts"

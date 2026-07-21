@@ -243,10 +243,13 @@ impl HarborService {
     ) -> Result<PageResponse<HarborArtifact>, AppError> {
         self.ensure_enabled()?;
         // Harbor API: /api/v2.0/projects/{project}/repositories/{repo_name}/artifacts
+        // Harbor repo names come as "{project}/{short_name}" (e.g. "appstore/redis"),
+        // but the artifacts endpoint expects just the short name.
+        let short_name = repo_name.split('/').last().unwrap_or(repo_name);
         let path = format!(
             "/api/v2.0/projects/{}/repositories/{}/artifacts",
             project_name,
-            urlencoding::encode(&urlencoding::encode(repo_name)),
+            short_name,
         );
         let mut url = reqwest::Url::parse(&self.client.api_url(&path))
             .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
@@ -277,7 +280,12 @@ impl HarborService {
             return Err(Self::map_harbor_error(status, &body));
         }
 
-        self.build_paginated_response::<HarborArtifact>(response, page, page_size).await
+        let mut result = self.build_paginated_response::<HarborArtifact>(response, page, page_size).await?;
+        result.records.iter_mut().for_each(|a| {
+            a.push_time = a.push_time.as_deref().map(format_iso_datetime);
+            a.pull_time = a.pull_time.as_deref().map(format_iso_datetime);
+        });
+        Ok(result)
     }
 
     pub async fn get_statistics(&self) -> Result<HarborStatistics, AppError> {
