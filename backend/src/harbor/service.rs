@@ -1,5 +1,6 @@
 use crate::common::error::AppError;
 use crate::common::pagination::PageResponse;
+use crate::common::util::format_iso_datetime;
 use crate::harbor::client::HarborClient;
 use crate::harbor::models::{
     CreateMemberRequest, CreateProjectRequest, HarborMember, HarborProject, HarborRepository,
@@ -112,7 +113,12 @@ impl HarborService {
             return Err(Self::map_harbor_error(status, &body));
         }
 
-        self.build_paginated_response::<HarborProject>(response, page, page_size).await
+        let mut result = self.build_paginated_response::<HarborProject>(response, page, page_size).await?;
+        result.records.iter_mut().for_each(|p| {
+            p.creation_time = p.creation_time.as_deref().map(format_iso_datetime);
+            p.update_time = p.update_time.as_deref().map(format_iso_datetime);
+        });
+        Ok(result)
     }
 
     pub async fn get_project_summary(
@@ -182,7 +188,12 @@ impl HarborService {
             return Err(Self::map_harbor_error(status, &body));
         }
 
-        self.build_paginated_response::<HarborRepository>(response, page, page_size).await
+        let mut result = self.build_paginated_response::<HarborRepository>(response, page, page_size).await?;
+        result.records.iter_mut().for_each(|r| {
+            r.creation_time = r.creation_time.as_deref().map(format_iso_datetime);
+            r.update_time = r.update_time.as_deref().map(format_iso_datetime);
+        });
+        Ok(result)
     }
 
     pub async fn list_members(
