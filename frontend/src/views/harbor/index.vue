@@ -10,7 +10,9 @@ const activeTab = ref<"projects" | "repos" | "members">("projects");
 const drillProject = ref("");
 const drillRepo = ref("");
 
-const showBreadcrumb = computed(() => !!drillProject.value || !!drillRepo.value);
+const showBreadcrumb = computed(
+  () => !!drillProject.value || !!drillRepo.value
+);
 
 const breadcrumbItems = computed(() => {
   const items = [
@@ -51,17 +53,7 @@ const handleSelectRepo = (name: string) => {
   drillRepo.value = name;
 };
 
-const handleRepoBack = () => {
-  drillProject.value = "";
-  drillRepo.value = "";
-};
-
-const handleArtifactBack = () => {
-  drillRepo.value = "";
-};
-
 const onTabClick = (tab: TabsPaneContext) => {
-  // When switching tabs, clear drill-down state
   activeTab.value = tab.paneName as "projects" | "repos" | "members";
   if (tab.paneName !== "repos") {
     drillProject.value = "";
@@ -73,7 +65,11 @@ const onTabClick = (tab: TabsPaneContext) => {
 <template>
   <div class="harbor-page">
     <!-- Breadcrumb -->
-    <el-breadcrumb v-if="showBreadcrumb" class="harbor-breadcrumb" separator="/">
+    <el-breadcrumb
+      v-if="showBreadcrumb"
+      class="harbor-breadcrumb"
+      separator="/"
+    >
       <el-breadcrumb-item v-for="(item, idx) in breadcrumbItems" :key="idx">
         <span
           class="breadcrumb-link"
@@ -92,25 +88,22 @@ const onTabClick = (tab: TabsPaneContext) => {
           <ProjectTab @select-project="handleSelectProject" />
         </el-tab-pane>
         <el-tab-pane label="镜像仓库" name="repos">
+          <!-- Switch between repository list and artifact detail in the same tab -->
           <RepositoryTab
+            v-if="!drillRepo"
             :project-name="drillProject"
             @select-repo="handleSelectRepo"
-            @back="handleRepoBack"
+          />
+          <ArtifactTab
+            v-else
+            :project-name="drillProject"
+            :repo-name="drillRepo"
           />
         </el-tab-pane>
         <el-tab-pane label="项目成员" name="members">
           <MemberTab />
         </el-tab-pane>
       </el-tabs>
-    </div>
-
-    <!-- Artifacts drill-down -->
-    <div v-if="drillRepo" class="harbor-artifacts-section">
-      <ArtifactTab
-        :project-name="drillProject"
-        :repo-name="drillRepo"
-        @back="handleArtifactBack"
-      />
     </div>
   </div>
 </template>
@@ -145,13 +138,6 @@ const onTabClick = (tab: TabsPaneContext) => {
 }
 
 .harbor-tabs-wrapper {
-  background: var(--el-bg-color);
-  border-radius: 6px;
-  padding: 8px 16px 0;
-}
-
-.harbor-artifacts-section {
-  margin-top: 12px;
   background: var(--el-bg-color);
   border-radius: 6px;
   padding: 8px 16px;

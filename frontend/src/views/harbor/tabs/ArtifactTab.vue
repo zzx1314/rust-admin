@@ -2,23 +2,15 @@
 import { ref, reactive, watch } from "vue";
 import type { PaginationProps } from "@pureadmin/table";
 import { PureTableBar } from "@/components/RePureTableBar";
-import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 import { ElMessage } from "element-plus";
 import {
   listArtifacts,
   type HarborArtifact
 } from "@/api/harbor";
 
-import Refresh from "~icons/ep/refresh";
-import Back from "~icons/ep/arrow-left-bold";
-
 const props = defineProps<{
   projectName: string;
   repoName: string;
-}>();
-
-const emit = defineEmits<{
-  (e: "back"): void;
 }>();
 
 const loading = ref(false);
@@ -34,8 +26,8 @@ const pagination = reactive<PaginationProps>({
 const columns = [
   { label: "标签", prop: "tags", slot: "tags" },
   { label: "大小", prop: "size", slot: "size" },
-  { label: "推送时间", prop: "push_time" },
-  { label: "拉取时间", prop: "pull_time" },
+  { label: "推送时间", prop: "push_time", slot: "push_time" },
+  { label: "拉取时间", prop: "pull_time", slot: "pull_time" },
   { label: "媒体类型", prop: "manifest_media_type", slot: "manifest_media_type" }
 ];
 
@@ -84,24 +76,6 @@ watch(() => [props.projectName, props.repoName], () => {
 
 <template>
   <div>
-    <div class="bg-bg_color w-[99/100] pl-8 pt-4 pb-4">
-      <el-form :inline="true" class="demo-form-inline">
-        <el-form-item>
-          <el-button :icon="useRenderIcon(Back)" @click="emit('back')">
-            返回仓库列表
-          </el-button>
-        </el-form-item>
-        <el-form-item label="镜像仓库">
-          <el-tag type="primary" effect="plain">{{ repoName.split('/').pop() }}</el-tag>
-        </el-form-item>
-        <el-form-item>
-          <el-button :icon="useRenderIcon(Refresh)" @click="fetchArtifacts">
-            刷新
-          </el-button>
-        </el-form-item>
-      </el-form>
-    </div>
-
     <PureTableBar
       title="Artifacts"
       :columns="columns"
@@ -128,7 +102,7 @@ watch(() => [props.projectName, props.repoName], () => {
           @page-current-change="handleCurrentChange"
         >
           <template #tags="{ row }">
-            <div class="flex flex-wrap gap-1">
+            <div class="flex flex-wrap gap-1 items-center justify-center w-full">
               <el-tag
                 v-for="tag in row.tags || []"
                 :key="tag.name"
@@ -143,6 +117,12 @@ watch(() => [props.projectName, props.repoName], () => {
           </template>
           <template #size="{ row }">
             <span class="text-sm">{{ formatSize(row.size) }}</span>
+          </template>
+          <template #push_time="{ row }">
+            <span>{{ row.push_time?.startsWith('0001-01-01') ? '-' : row.push_time }}</span>
+          </template>
+          <template #pull_time="{ row }">
+            <span>{{ row.pull_time?.startsWith('0001-01-01') ? '-' : row.pull_time }}</span>
           </template>
           <template #manifest_media_type="{ row }">
             <el-tag v-if="row.manifest_media_type" size="small" type="info" effect="plain">

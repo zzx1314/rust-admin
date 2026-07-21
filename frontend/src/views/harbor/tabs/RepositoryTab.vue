@@ -13,7 +13,6 @@ import {
 
 import Search from "~icons/ep/search";
 import Refresh from "~icons/ep/refresh";
-import Back from "~icons/ep/arrow-left-bold";
 
 const props = defineProps<{
   projectName: string;
@@ -21,7 +20,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: "selectRepo", name: string): void;
-  (e: "back"): void;
 }>();
 
 const loading = ref(false);
@@ -176,20 +174,7 @@ onMounted(() => {
           </el-form-item>
         </template>
         <template v-else>
-          <!-- Drill-down mode: back button + project tag -->
-          <el-form-item>
-            <el-button :icon="useRenderIcon(Back)" @click="emit('back')">
-              返回项目列表
-            </el-button>
-          </el-form-item>
-          <el-form-item label="当前项目">
-            <el-tag type="primary" effect="plain">{{ projectName }}</el-tag>
-          </el-form-item>
-          <el-form-item>
-            <el-button :icon="useRenderIcon(Refresh)" @click="fetchRepositories">
-              刷新
-            </el-button>
-          </el-form-item>
+          <!-- Drill-down mode: breadcrumb already provides navigation -->
         </template>
       </el-form>
     </div>
