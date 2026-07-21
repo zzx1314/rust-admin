@@ -19,7 +19,6 @@ import AddFill from "~icons/ri/add-circle-line";
 import Delete from "~icons/ep/delete";
 import View from "~icons/ep/view";
 
-
 const emit = defineEmits<{
   (e: "selectProject", name: string): void;
 }>();
@@ -154,7 +153,7 @@ onMounted(fetchProjects);
             v-model="searchName"
             placeholder="请输入项目名称"
             clearable
-            class="!w-[200px]"
+            class="w-50!"
           />
         </el-form-item>
         <el-form-item>
@@ -206,7 +205,12 @@ onMounted(fetchProjects);
               class="project-name-link"
               @click="emit('selectProject', row.name)"
             >
-              <IconifyIconOffline icon="ep:folder-opened" width="14" height="14" class="mr-1" />
+              <IconifyIconOffline
+                icon="ep:folder-opened"
+                width="14"
+                height="14"
+                class="mr-1"
+              />
               {{ row.name }}
             </span>
           </template>

@@ -51,7 +51,11 @@ const fetchProjects = async () => {
     const res = await listProjects({ page_size: 100 });
     if (res.code === 10200 && res.data) {
       projects.value = res.data.records || [];
-      if (projects.value.length > 0 && !selectedProject.value && !props.projectName) {
+      if (
+        projects.value.length > 0 &&
+        !selectedProject.value &&
+        !props.projectName
+      ) {
         selectedProject.value = projects.value[0].name;
         fetchRepositories();
       }
@@ -109,16 +113,20 @@ const onReset = () => {
 };
 
 // When projectName prop changes (drill-down), switch to that project
-watch(() => props.projectName, (val) => {
-  if (val) {
-    selectedProject.value = val;
-    repoPagination.currentPage = 1;
-    fetchRepositories();
-  }
-}, { immediate: true });
+watch(
+  () => props.projectName,
+  val => {
+    if (val) {
+      selectedProject.value = val;
+      repoPagination.currentPage = 1;
+      fetchRepositories();
+    }
+  },
+  { immediate: true }
+);
 
 // When select changes in direct mode, fetch repos
-watch(selectedProject, (val) => {
+watch(selectedProject, val => {
   if (val && !props.projectName) {
     repoPagination.currentPage = 1;
     fetchRepositories();
@@ -157,7 +165,7 @@ onMounted(() => {
               v-model="searchName"
               placeholder="搜索仓库名称"
               clearable
-              class="!w-[200px]"
+              class="w-50!"
             />
           </el-form-item>
           <el-form-item>
@@ -204,12 +212,14 @@ onMounted(() => {
           @page-current-change="handleCurrentChange"
         >
           <template #name="{ row }">
-            <span
-              class="repo-name-link"
-              @click="emit('selectRepo', row.name)"
-            >
-              <IconifyIconOffline icon="ep:box" width="14" height="14" class="mr-1" />
-              {{ row.name.split('/').pop() }}
+            <span class="repo-name-link" @click="emit('selectRepo', row.name)">
+              <IconifyIconOffline
+                icon="ep:box"
+                width="14"
+                height="14"
+                class="mr-1"
+              />
+              {{ row.name.split("/").pop() }}
             </span>
           </template>
         </pure-table>

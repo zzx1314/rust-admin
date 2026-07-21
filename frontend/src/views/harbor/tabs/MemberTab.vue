@@ -174,7 +174,7 @@ onMounted(fetchProjects);
             v-model="searchName"
             placeholder="请输入成员名称"
             clearable
-            class="!w-[200px]"
+            class="w-50!"
           />
         </el-form-item>
         <el-form-item>
