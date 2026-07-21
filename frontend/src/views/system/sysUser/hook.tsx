@@ -47,7 +47,7 @@ export function useUser() {
     role: "",
     orgId: null,
     orgName: "",
-    syncHarbor: false
+    syncHarbor: true
   });
   // 查询结果集
   const dataList = ref([]);
@@ -200,7 +200,7 @@ export function useUser() {
     addForm.value.sex = "";
     addForm.value.role = "";
     addForm.value.orgName = orgNameVal.value;
-    addForm.value.syncHarbor = false;
+    addForm.value.syncHarbor = true;
     dialogFormVisible.value = false;
   }
 
@@ -274,13 +274,16 @@ export function useUser() {
    * 处理修改
    */
   function handleUpdate(row, ref) {
-    const userInfo = JSON.stringify(row);
     console.log(row);
     openDia("修改用户", ref);
-    addForm.value = JSON.parse(userInfo);
+    // Merge with initial form to preserve fields not in API response (password, syncHarbor, etc.)
+    const formData = JSON.parse(JSON.stringify(row));
+    addForm.value = {
+      ...addForm.value,
+      ...formData,
+      role: row.roleStr ? parseInt(row.roleStr.split(",")[0]) : "",
+    };
     console.log(addForm.value);
-    // 目前是单角色，以后修改成多角色
-    addForm.value.role = row.roleList[0].id;
   }
 
   /**

@@ -24,6 +24,13 @@ pub struct HarborUser {
     pub admin_role_in_auth: Option<bool>,
 }
 
+/// Request to change a Harbor user's password
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangePasswordRequest {
+    pub old_password: String,
+    pub new_password: String,
+}
+
 /// Harbor project metadata (key-value map)
 pub type ProjectMetadata = std::collections::HashMap<String, String>;
 

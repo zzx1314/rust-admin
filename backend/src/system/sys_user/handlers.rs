@@ -180,20 +180,27 @@ pub struct OperationResponse {
 pub async fn reset_user_password_handler(
     State(state): State<AppState>,
     Json(req): Json<ResetPwdRequest>,
-) -> Result<Json<OperationResponse>, AppError> {
+) -> Result<Json<ApiResponse<OperationResponse>>, AppError> {
     let user = state.user_service.get_user(&req.id).await?;
     if user.is_edit == Some(0) {
         return Err(AppError::AuthError("Cannot modify protected user".to_string()));
     }
-    let default_password = "123456";
+    let default_password = "Aa123456";
+    let username = user.username.clone();
     state
         .user_service
         .reset_password(&req.id, default_password)
         .await?;
-    Ok(Json(OperationResponse {
+
+    // Sync new password to Harbor (log warning if it fails)
+    if let Err(e) = state.harbor_service.update_password(&username, default_password).await {
+        tracing::warn!("Failed to sync password to Harbor for '{}': {}", username, e);
+    }
+
+    Ok(Json(ApiResponse::ok(OperationResponse {
         success: true,
         msg: "密码重置成功".to_string(),
-    }))
+    })))
 }
 
 pub async fn toggle_user_enable_handler(

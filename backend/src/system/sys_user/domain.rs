@@ -32,7 +32,7 @@ pub struct UpdateUserRequest {
     pub email: Option<String>,
     pub real_name: Option<String>,
     pub password: Option<String>,
-    pub org_id: i64,
+    pub org_id: Option<i64>,
     pub remarks: Option<String>,
     pub card: Option<String>,
     pub is_show: Option<i32>,
@@ -173,7 +173,7 @@ impl UpdateUserRequest {
             email: set_opt_string(self.email.clone()),
             real_name: set_opt_string(self.real_name.clone()),
             password: set_opt_string(self.password.clone()),
-            org_id: ActiveValue::set(self.org_id),
+            org_id: set_opt_i64(self.org_id),
             remarks: set_opt_string(self.remarks.clone()),
             card: set_opt_string(self.card.clone()),
             is_show: set_opt_i32(self.is_show),
@@ -203,6 +203,13 @@ fn set_opt_string(opt: Option<String>) -> ActiveValue<Option<String>> {
 fn set_opt_i32(opt: Option<i32>) -> ActiveValue<Option<i32>> {
     match opt {
         Some(v) => ActiveValue::set(Some(v)),
+        None => ActiveValue::not_set(),
+    }
+}
+
+fn set_opt_i64(opt: Option<i64>) -> ActiveValue<i64> {
+    match opt {
+        Some(v) => ActiveValue::set(v),
         None => ActiveValue::not_set(),
     }
 }
