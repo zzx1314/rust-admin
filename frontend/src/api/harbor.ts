@@ -49,6 +49,24 @@ export interface HarborRepository {
   update_time?: string;
 }
 
+export interface HarborStatistics {
+  total_projects: number;
+  total_repositories: number;
+  total_artifacts: number;
+  total_pull_count: number;
+  public_project_count: number;
+  private_project_count: number;
+  top_repositories: RepoStat[];
+  recent_projects: HarborProject[];
+}
+
+export interface RepoStat {
+  name: string;
+  project_name: string;
+  pull_count: number;
+  artifact_count: number;
+}
+
 export interface HarborMember {
   id: number;
   project_id: number;
@@ -60,6 +78,10 @@ export interface HarborMember {
 }
 
 const projectUrl = "/api/harbor/projects";
+
+export const getHarborStatistics = () => {
+  return http.axiosGetRequest<Result<HarborStatistics>>("/api/harbor/statistics", {});
+};
 
 export const listProjects = (query?: {
   name?: string;

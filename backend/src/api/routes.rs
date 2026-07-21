@@ -218,6 +218,7 @@ pub fn sys_log_routes(state: AppState) -> Router<AppState> {
 
 pub fn harbor_routes(state: AppState) -> Router<AppState> {
     Router::new()
+        .route("/harbor/statistics", get(harbor_handlers::harbor_statistics_handler))
         .route("/harbor/projects", post(harbor_handlers::create_project_handler).get(harbor_handlers::list_projects_handler))
         .route("/harbor/projects/{project_name}/summary", get(harbor_handlers::get_project_summary_handler))
         .route("/harbor/projects/{project_name}/repositories", get(harbor_handlers::list_repositories_handler))

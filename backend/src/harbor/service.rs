@@ -4,7 +4,7 @@ use crate::common::util::format_iso_datetime;
 use crate::harbor::client::HarborClient;
 use crate::harbor::models::{
     CreateMemberRequest, CreateProjectRequest, HarborMember, HarborProject, HarborRepository,
-    ProjectQuery, ProjectSummary,
+    HarborStatistics, ProjectQuery, ProjectSummary, RepoStat,
 };
 use std::sync::Arc;
 
@@ -232,6 +232,82 @@ impl HarborService {
         }
 
         self.build_paginated_response::<HarborMember>(response, page, page_size).await
+    }
+
+    pub async fn get_statistics(&self) -> Result<HarborStatistics, AppError> {
+        self.ensure_enabled()?;
+
+        // 1. Fetch all projects
+        let query = ProjectQuery {
+            name: None,
+            public: None,
+            page: Some(1),
+            page_size: Some(100),
+        };
+        let projects_page = self.list_projects(&query).await?;
+
+        let total_projects = projects_page.total;
+        let mut public_count = 0i64;
+        let mut private_count = 0i64;
+        for p in &projects_page.records {
+            let is_pub = p.metadata.as_ref()
+                .and_then(|m| m.get("public"))
+                .map(|v| v == "true")
+                .unwrap_or(false);
+            if is_pub { public_count += 1; } else { private_count += 1; }
+        }
+
+        // 2. Fetch repositories for all projects
+        let mut total_repos = 0i64;
+        let mut total_artifacts = 0i64;
+        let mut total_pulls = 0i64;
+        let mut all_repos: Vec<RepoStat> = Vec::new();
+
+        for project in &projects_page.records {
+            let repo_page = self.list_repositories(
+                &project.name,
+                Some(1),
+                Some(100),
+            ).await?;
+
+            total_repos += repo_page.total;
+
+            for repo in &repo_page.records {
+                let pull = repo.pull_count.unwrap_or(0);
+                let artifact = repo.artifact_count.unwrap_or(0);
+                total_pulls += pull;
+                total_artifacts += artifact;
+                all_repos.push(RepoStat {
+                    name: repo.name.clone(),
+                    project_name: project.name.clone(),
+                    pull_count: pull,
+                    artifact_count: artifact,
+                });
+            }
+        }
+
+        // 3. Sort by pull_count descending, take top 5
+        all_repos.sort_by(|a, b| b.pull_count.cmp(&a.pull_count));
+        all_repos.truncate(5);
+
+        // 4. Get recent 5 projects (sorted by creation_time descending)
+        let mut recent = projects_page.records.clone();
+        recent.sort_by(|a, b| {
+            b.creation_time.as_deref().unwrap_or("")
+                .cmp(a.creation_time.as_deref().unwrap_or(""))
+        });
+        recent.truncate(5);
+
+        Ok(HarborStatistics {
+            total_projects,
+            total_repositories: total_repos,
+            total_artifacts,
+            total_pull_count: total_pulls,
+            public_project_count: public_count,
+            private_project_count: private_count,
+            top_repositories: all_repos,
+            recent_projects: recent,
+        })
     }
 
     pub async fn create_project(&self, req: CreateProjectRequest) -> Result<(), AppError> {

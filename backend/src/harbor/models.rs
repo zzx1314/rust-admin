@@ -116,6 +116,26 @@ pub struct MemberGroup {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarborStatistics {
+    pub total_projects: i64,
+    pub total_repositories: i64,
+    pub total_artifacts: i64,
+    pub total_pull_count: i64,
+    pub public_project_count: i64,
+    pub private_project_count: i64,
+    pub top_repositories: Vec<RepoStat>,
+    pub recent_projects: Vec<HarborProject>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoStat {
+    pub name: String,
+    pub project_name: String,
+    pub pull_count: i64,
+    pub artifact_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectQuery {
     pub name: Option<String>,
     pub public: Option<bool>,

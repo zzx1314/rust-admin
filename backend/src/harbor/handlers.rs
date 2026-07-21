@@ -3,7 +3,7 @@ use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
 use crate::harbor::models::{
     CreateMemberRequest, CreateProjectRequest, HarborMember, HarborProject, HarborRepository,
-    ProjectQuery, ProjectSummary,
+    HarborStatistics, ProjectQuery, ProjectSummary,
 };
 use axum::{
     Json,
@@ -46,6 +46,13 @@ pub async fn get_project_summary_handler(
         .get_project_summary(&params.project_name)
         .await?;
     Ok(Json(ApiResponse::ok(summary)))
+}
+
+pub async fn harbor_statistics_handler(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<HarborStatistics>>, AppError> {
+    let stats = state.harbor_service.get_statistics().await?;
+    Ok(Json(ApiResponse::ok(stats)))
 }
 
 pub async fn list_repositories_handler(
