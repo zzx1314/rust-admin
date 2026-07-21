@@ -7,7 +7,6 @@ use crate::system::sys_user::service::PasswordUpdateRequest;
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
 };
 use serde::Deserialize;
 
@@ -84,7 +83,7 @@ pub async fn update_user_handler(
 pub async fn delete_user_handler(
     State(state): State<AppState>,
     Path(params): Path<UserIdParam>,
-) -> Result<(StatusCode, ()), AppError> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     // Get username before deleting (needed for Harbor sync)
     let user = state.user_service.get_user(&params.id).await?;
     let username = user.username.clone();
@@ -101,7 +100,7 @@ pub async fn delete_user_handler(
         tracing::warn!("Failed to delete Harbor user '{}': {}", username, e);
     }
 
-    Ok((StatusCode::NO_CONTENT, ()))
+    Ok(Json(ApiResponse::ok(serde_json::Value::Null)))
 }
 
 #[derive(Deserialize)]
