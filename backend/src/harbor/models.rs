@@ -198,6 +198,12 @@ pub struct RepoStat {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarborInfo {
+    pub registry_url: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectQuery {
     pub name: Option<String>,
     pub public: Option<bool>,

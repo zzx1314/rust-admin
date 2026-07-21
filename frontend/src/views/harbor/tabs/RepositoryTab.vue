@@ -7,9 +7,11 @@ import { ElMessage } from "element-plus";
 import {
   listProjects,
   listRepositories,
+  getHarborInfo,
   type HarborProject,
   type HarborRepository
 } from "@/api/harbor";
+import PushCommandDialog from "../components/PushCommandDialog.vue";
 
 import Search from "~icons/ep/search";
 import Refresh from "~icons/ep/refresh";
@@ -25,6 +27,11 @@ const emit = defineEmits<{
 const loading = ref(false);
 const repositories = ref<HarborRepository[]>([]);
 const searchName = ref("");
+const registryUrl = ref("");
+
+// Push dialog state
+const pushDialogVisible = ref(false);
+const pushRepoName = ref("");
 
 // Project selector state (for direct tab access)
 const projects = ref<HarborProject[]>([]);
@@ -43,7 +50,8 @@ const columns = [
   { label: "Artifact 数", prop: "artifact_count" },
   { label: "拉取次数", prop: "pull_count" },
   { label: "创建时间", prop: "creation_time" },
-  { label: "更新时间", prop: "update_time" }
+  { label: "更新时间", prop: "update_time" },
+  { label: "操作", prop: "actions", slot: "actions", width: 100 }
 ];
 
 const fetchProjects = async () => {
@@ -133,7 +141,26 @@ watch(selectedProject, val => {
   }
 });
 
+const fetchHarborInfo = async () => {
+  try {
+    const res = await getHarborInfo();
+    if (res.code === 10200 && res.data) {
+      registryUrl.value = res.data.registry_url;
+    }
+  } catch {
+    // Use default hostname fallback
+  }
+};
+
+const openPushDialog = (repoName: string) => {
+  const project = props.projectName || selectedProject.value;
+  if (!project) return;
+  pushRepoName.value = repoName;
+  pushDialogVisible.value = true;
+};
+
 onMounted(() => {
+  fetchHarborInfo();
   if (!props.projectName) {
     fetchProjects();
   }
@@ -222,9 +249,30 @@ onMounted(() => {
               {{ row.name.split("/").pop() }}
             </span>
           </template>
+          <template #actions="{ row }">
+            <el-tooltip content="推送命令" placement="top" :show-after="300">
+              <el-button
+                size="small"
+                circle
+                type="warning"
+                plain
+                @click="openPushDialog(row.name)"
+              >
+                <IconifyIconOffline icon="ep:upload" width="14" height="14" />
+              </el-button>
+            </el-tooltip>
+          </template>
         </pure-table>
       </template>
     </PureTableBar>
+
+    <!-- Push Command Dialog -->
+    <PushCommandDialog
+      v-model:visible="pushDialogVisible"
+      :project-name="props.projectName || selectedProject"
+      :repo-name="pushRepoName"
+      :registry-url="registryUrl"
+    />
   </div>
 </template>
 

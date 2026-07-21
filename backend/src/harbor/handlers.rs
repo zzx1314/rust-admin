@@ -2,7 +2,7 @@ use crate::api::AppState;
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
 use crate::harbor::models::{
-    CreateMemberRequest, CreateProjectRequest, HarborArtifact, HarborMember, HarborProject,
+    CreateMemberRequest, CreateProjectRequest, HarborArtifact, HarborInfo, HarborMember, HarborProject,
     HarborRepository, HarborStatistics, ProjectQuery, ProjectSummary,
 };
 use axum::{
@@ -136,4 +136,11 @@ pub async fn remove_member_handler(
         .remove_member(&params.project_name, params.member_id)
         .await?;
     Ok(Json(ApiResponse::ok(())))
+}
+
+pub async fn harbor_info_handler(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<HarborInfo>>, AppError> {
+    let info = state.harbor_service.get_info();
+    Ok(Json(ApiResponse::ok(info)))
 }

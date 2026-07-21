@@ -176,3 +176,12 @@ export const removeMember = (projectName: string, memberId: number) => {
     `${projectUrl}/${projectName}/members/${memberId}`
   );
 };
+
+export interface HarborInfo {
+  registry_url: string;
+  enabled: boolean;
+}
+
+export const getHarborInfo = () => {
+  return http.axiosGetRequest<Result<HarborInfo>>("/api/harbor/info", {});
+};

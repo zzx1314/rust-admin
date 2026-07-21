@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use socket2::{Domain, Protocol, Socket, Type};
 
 use sea_orm::DatabaseConnection;
 
@@ -117,9 +118,31 @@ impl App {
         let state = self.build_state(config);
         let router = create_router(state);
 
-        let listener = tokio::net::TcpListener::bind(addr)
-            .await
+        // Enable SO_REUSEADDR + SO_REUSEPORT so the port is immediately
+        // reusable when restarting with tools like `cargo watch -x run`.
+        // SO_REUSEADDR alone does not let you bind to a port still held by
+        // a living process; SO_REUSEPORT allows exactly that.
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
+            .expect("Failed to create socket");
+        if let Err(e) = socket.set_reuse_address(true) {
+            tracing::warn!("Failed to set SO_REUSEADDR: {}", e);
+        }
+        if let Err(e) = socket.set_reuse_port(true) {
+            tracing::warn!("Failed to set SO_REUSEPORT: {}", e);
+        }
+        socket
+            .bind(&socket2::SockAddr::from(addr))
             .expect("Failed to bind to address");
+        socket
+            .listen(1024)
+            .expect("Failed to listen on socket");
+        // Tokio requires a non-blocking socket; socket2::Socket defaults to blocking.
+        socket
+            .set_nonblocking(true)
+            .expect("Failed to set non-blocking mode");
+        let std_listener: std::net::TcpListener = socket.into();
+        let listener = tokio::net::TcpListener::from_std(std_listener)
+            .expect("Failed to create tokio listener");
 
         tracing::info!("Server running on http://{}", addr);
         axum::serve(listener, router).await.expect("Server failed");

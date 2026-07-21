@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { ref, reactive, watch } from "vue";
+import { ref, reactive, watch, onMounted } from "vue";
 import type { PaginationProps } from "@pureadmin/table";
 import { PureTableBar } from "@/components/RePureTableBar";
 import { ElMessage } from "element-plus";
 import {
   listArtifacts,
+  getHarborInfo,
   type HarborArtifact
 } from "@/api/harbor";
+import ImageCommandDialog from "../components/ImageCommandDialog.vue";
 
 const props = defineProps<{
   projectName: string;
@@ -15,6 +17,9 @@ const props = defineProps<{
 
 const loading = ref(false);
 const artifacts = ref<HarborArtifact[]>([]);
+const registryUrl = ref("");
+const commandDialogVisible = ref(false);
+const selectedArtifact = ref<HarborArtifact | null>(null);
 
 const pagination = reactive<PaginationProps>({
   total: 0,
@@ -28,7 +33,8 @@ const columns = [
   { label: "大小", prop: "size", slot: "size" },
   { label: "推送时间", prop: "push_time", slot: "push_time" },
   { label: "拉取时间", prop: "pull_time", slot: "pull_time" },
-  { label: "镜像摘要", prop: "digest" }
+  { label: "镜像摘要", prop: "digest" },
+  { label: "命令", prop: "commands", slot: "commands", width: 100 }
 ];
 
 const formatSize = (bytes?: number) => {
@@ -37,6 +43,17 @@ const formatSize = (bytes?: number) => {
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
   if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
   return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+};
+
+const fetchHarborInfo = async () => {
+  try {
+    const res = await getHarborInfo();
+    if (res.code === 10200 && res.data) {
+      registryUrl.value = res.data.registry_url;
+    }
+  } catch {
+    // Use default hostname fallback
+  }
 };
 
 const fetchArtifacts = async () => {
@@ -58,6 +75,11 @@ const fetchArtifacts = async () => {
   }
 };
 
+const openCommandDialog = (artifact: HarborArtifact) => {
+  selectedArtifact.value = artifact;
+  commandDialogVisible.value = true;
+};
+
 const handleSizeChange = (val: number) => {
   pagination.pageSize = val;
   fetchArtifacts();
@@ -72,6 +94,10 @@ watch(() => [props.projectName, props.repoName], () => {
   pagination.currentPage = 1;
   fetchArtifacts();
 }, { immediate: true });
+
+onMounted(() => {
+  fetchHarborInfo();
+});
 </script>
 
 <template>
@@ -124,9 +150,30 @@ watch(() => [props.projectName, props.repoName], () => {
           <template #pull_time="{ row }">
             <span>{{ row.pull_time?.startsWith('0001-01-01') ? '-' : row.pull_time }}</span>
           </template>
-
+          <template #commands="{ row }">
+            <el-tooltip content="查看镜像命令" placement="top" :show-after="300">
+              <el-button
+                size="small"
+                circle
+                type="primary"
+                plain
+                @click="openCommandDialog(row)"
+              >
+                <IconifyIconOffline icon="ep:terminal" width="14" height="14" />
+              </el-button>
+            </el-tooltip>
+          </template>
         </pure-table>
       </template>
     </PureTableBar>
+
+    <!-- Image Command Dialog -->
+    <ImageCommandDialog
+      v-model:visible="commandDialogVisible"
+      :artifact="selectedArtifact"
+      :project-name="props.projectName"
+      :repo-name="props.repoName"
+      :registry-url="registryUrl"
+    />
   </div>
 </template>

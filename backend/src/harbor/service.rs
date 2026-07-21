@@ -4,7 +4,7 @@ use crate::common::util::format_iso_datetime;
 use crate::harbor::client::HarborClient;
 use crate::harbor::models::{
     ChangePasswordRequest, CreateHarborUserRequest, CreateMemberRequest, CreateProjectRequest, HarborArtifact,
-    HarborMember, HarborProject, HarborRepository, HarborStatistics, HarborUser,
+    HarborInfo, HarborMember, HarborProject, HarborRepository, HarborStatistics, HarborUser,
     ProjectQuery, ProjectSummary, RepoStat,
 };
 use std::sync::Arc;
@@ -16,6 +16,24 @@ pub struct HarborService {
 impl HarborService {
     pub fn new(client: Arc<HarborClient>) -> Self {
         Self { client }
+    }
+
+    pub fn get_info(&self) -> HarborInfo {
+        let registry_url = if self.client.base_url.is_empty() {
+            String::new()
+        } else {
+            // Extract host:port from the harbor URL for docker commands
+            // e.g., "http://localhost:8097" -> "localhost:8097"
+            self.client.base_url
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .trim_end_matches('/')
+                .to_string()
+        };
+        HarborInfo {
+            registry_url,
+            enabled: self.client.enabled,
+        }
     }
 
     fn ensure_enabled(&self) -> Result<(), AppError> {
