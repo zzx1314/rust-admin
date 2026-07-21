@@ -3,6 +3,7 @@ pub mod common;
 pub mod migration;
 
 pub mod system;
+pub mod harbor;
 
 pub mod api;
 pub mod app;

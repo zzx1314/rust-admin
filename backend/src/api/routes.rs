@@ -1,13 +1,14 @@
 use axum::{
     Router,
     middleware::from_fn_with_state,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::api::AppState;
 use crate::api::middleware::require_auth;
 use crate::api::logging_middleware::logging_middleware;
+use crate::harbor::handlers as harbor_handlers;
 use crate::auth::handlers::{
     check_token_handler, login_handler, logout_handler, me_handler, refresh_handler,
 };
@@ -215,6 +216,17 @@ pub fn sys_log_routes(state: AppState) -> Router<AppState> {
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 
+pub fn harbor_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/harbor/projects", post(harbor_handlers::create_project_handler).get(harbor_handlers::list_projects_handler))
+        .route("/harbor/projects/{project_name}/summary", get(harbor_handlers::get_project_summary_handler))
+        .route("/harbor/projects/{project_name}/repositories", get(harbor_handlers::list_repositories_handler))
+        .route("/harbor/projects/{project_name}/members", get(harbor_handlers::list_members_handler).post(harbor_handlers::add_member_handler))
+        .route("/harbor/projects/{project_name}/members/{member_id}", delete(harbor_handlers::remove_member_handler))
+        .route("/harbor/projects/{project_name}", delete(harbor_handlers::delete_project_handler))
+        .layer(from_fn_with_state(state.clone(), require_auth))
+}
+
 pub fn create_router(state: AppState) -> Router {
     let api_router = Router::new()
         .merge(auth_routes())
@@ -226,7 +238,8 @@ pub fn create_router(state: AppState) -> Router {
         .merge(sys_auth_routes(state.clone()))
         .merge(sys_dict_routes(state.clone()))
         .merge(sys_dict_item_routes(state.clone()))
-        .merge(sys_log_routes(state.clone()));
+        .merge(sys_log_routes(state.clone()))
+        .merge(harbor_routes(state.clone()));
 
     Router::new()
         .nest("/api", api_router)

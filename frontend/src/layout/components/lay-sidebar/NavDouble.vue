@@ -234,8 +234,8 @@ onBeforeUnmount(() => {
 }
 
 .card-header {
-  font-weight: bold;
   font-size: 16px;
+  font-weight: bold;
 }
 
 .card-body {
@@ -257,9 +257,9 @@ onBeforeUnmount(() => {
 }
 
 .form-actions :deep(.el-form-item__content) {
-  justify-content: center;
   display: flex;
   gap: 10px;
+  justify-content: center;
   margin-left: 0 !important;
 }
 </style>

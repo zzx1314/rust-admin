@@ -9,3 +9,8 @@ password = "123456"
 
 jwt_secret = "your-secret-key"
 database_url = "sqlite:data/users.db"
+
+[harbor]
+url = "http://localhost:8097"
+username = "admin"
+password = "Harbor12345"

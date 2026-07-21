@@ -15,11 +15,19 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct HarborConfig {
+    pub url: String,
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     pub server: ServerConfig,
     pub redis: RedisConfig,
     pub jwt_secret: String,
     pub database_url: String,
+    pub harbor: Option<HarborConfig>,
 }
 
 impl RedisConfig {

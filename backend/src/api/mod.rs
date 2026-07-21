@@ -1,4 +1,5 @@
 use crate::auth::service::AuthService;
+use crate::harbor::service::HarborService;
 use crate::system::sys_menu::service::MenuService;
 use crate::system::sys_org::service::OrgService;
 use crate::system::sys_role::service::RoleService;
@@ -24,4 +25,5 @@ pub struct AppState {
     pub sys_dict_service: Arc<SysDictService>,
     pub sys_dict_item_service: Arc<SysDictItemService>,
     pub sys_log_service: Arc<SysLogService>,
+    pub harbor_service: Arc<HarborService>,
 }

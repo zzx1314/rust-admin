@@ -6,6 +6,8 @@ use sea_orm::DatabaseConnection;
 use crate::api::{AppState, routes::create_router};
 use crate::auth::repository::RedisTokenStore;
 use crate::auth::service::AuthService;
+use crate::harbor::client::HarborClient;
+use crate::harbor::service::HarborService;
 use crate::common::error::AppError;
 use crate::common::traits::{
     MenuRepository, OrgRepository, RoleRepository, SysDictItemRepository, SysLogRepository,
@@ -85,6 +87,18 @@ impl App {
             Arc::new(SeaOrmSysLogRepository::new(conn.clone()));
         let sys_log_service = Arc::new(SysLogService::new(sys_log_repo));
 
+        let harbor_service = if let Some(harbor_config) = config.harbor.clone() {
+            let harbor_client = Arc::new(HarborClient::new(&harbor_config));
+            Arc::new(HarborService::new(harbor_client))
+        } else {
+            tracing::warn!("Harbor config is missing, Harbor endpoints will return an error until [harbor] is configured in config.toml");
+            Arc::new(HarborService::new(Arc::new(HarborClient::new(&crate::config::HarborConfig {
+                url: String::new(),
+                username: String::new(),
+                password: String::new(),
+            }))))
+        };
+
         AppState {
             user_service,
             role_service,
@@ -95,6 +109,7 @@ impl App {
             sys_dict_service,
             sys_dict_item_service,
             sys_log_service,
+            harbor_service,
         }
     }
 

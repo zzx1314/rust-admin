@@ -1,0 +1,125 @@
+use serde::{Deserialize, Serialize};
+
+/// Harbor project metadata (key-value map)
+pub type ProjectMetadata = std::collections::HashMap<String, String>;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarborProject {
+    #[serde(alias = "project_id")]
+    pub project_id: i64,
+    #[serde(alias = "owner_id")]
+    pub owner_id: i64,
+    pub name: String,
+    #[serde(alias = "owner_name")]
+    pub owner_name: Option<String>,
+    #[serde(alias = "repo_count")]
+    pub repo_count: Option<i64>,
+    #[serde(alias = "current_user_role_id")]
+    pub current_user_role_id: Option<i32>,
+    #[serde(alias = "current_user_role_ids")]
+    pub current_user_role_ids: Option<Vec<i32>>,
+    #[serde(alias = "creation_time")]
+    pub creation_time: Option<String>,
+    #[serde(alias = "update_time")]
+    pub update_time: Option<String>,
+    pub metadata: Option<ProjectMetadata>,
+    pub registry_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectSummary {
+    #[serde(alias = "repo_count")]
+    pub repo_count: i64,
+    #[serde(alias = "project_admin_count")]
+    pub project_admin_count: Option<i64>,
+    #[serde(alias = "maintainer_count")]
+    pub maintainer_count: Option<i64>,
+    #[serde(alias = "developer_count")]
+    pub developer_count: Option<i64>,
+    #[serde(alias = "guest_count")]
+    pub guest_count: Option<i64>,
+    #[serde(alias = "limited_guest_count")]
+    pub limited_guest_count: Option<i64>,
+    pub quota: Option<ProjectSummaryQuota>,
+    pub registry: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectSummaryQuota {
+    pub hard: Option<serde_json::Value>,
+    pub used: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarborRepository {
+    pub id: i64,
+    #[serde(alias = "project_id")]
+    pub project_id: i64,
+    pub name: String,
+    pub description: Option<String>,
+    #[serde(alias = "artifact_count")]
+    pub artifact_count: Option<i64>,
+    #[serde(alias = "pull_count")]
+    pub pull_count: Option<i64>,
+    #[serde(alias = "creation_time")]
+    pub creation_time: Option<String>,
+    #[serde(alias = "update_time")]
+    pub update_time: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarborMember {
+    pub id: i64,
+    #[serde(alias = "project_id")]
+    pub project_id: i64,
+    #[serde(alias = "entity_name")]
+    pub entity_name: String,
+    #[serde(alias = "role_name")]
+    pub role_name: String,
+    #[serde(alias = "role_id")]
+    pub role_id: i32,
+    #[serde(alias = "entity_id")]
+    pub entity_id: i64,
+    #[serde(alias = "entity_type")]
+    pub entity_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateProjectRequest {
+    #[serde(alias = "project_name")]
+    pub project_name: String,
+    pub metadata: ProjectMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateMemberRequest {
+    #[serde(alias = "role_id")]
+    pub role_id: i32,
+    #[serde(alias = "member_user")]
+    pub member_user: Option<MemberUser>,
+    #[serde(alias = "member_group")]
+    pub member_group: Option<MemberGroup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemberUser {
+    #[serde(alias = "user_id")]
+    pub user_id: Option<i64>,
+    pub username: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemberGroup {
+    pub id: Option<i64>,
+    #[serde(alias = "group_name")]
+    pub group_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectQuery {
+    pub name: Option<String>,
+    pub public: Option<bool>,
+    pub page: Option<i64>,
+    #[serde(alias = "page_size")]
+    pub page_size: Option<i64>,
+}
