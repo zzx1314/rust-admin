@@ -21,6 +21,7 @@ pub struct CreateUserRequest {
     pub sex: Option<String>,
     #[serde(default)]
     pub sync_harbor: bool,
+    pub role: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -93,6 +94,7 @@ pub struct UserVO {
     pub sex: Option<String>,
     pub role_names: Option<String>,
     pub role_str: Option<String>,
+    pub is_edit: Option<i32>,
 }
 
 impl From<UserModel> for UserVO {
@@ -120,6 +122,7 @@ impl From<UserModel> for UserVO {
             sex: m.sex,
             role_names: None,
             role_str: None,
+            is_edit: m.is_edit,
         }
     }
 }
@@ -156,6 +159,7 @@ impl CreateUserRequest {
             enable: ActiveValue::set(Some(1)),
             first_login: ActiveValue::set(Some(1)),
             sex: set_opt_string(self.sex.clone()),
+            is_edit: ActiveValue::set(Some(1)),
         }
     }
 }

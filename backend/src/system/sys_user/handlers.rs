@@ -72,6 +72,11 @@ pub async fn update_user_handler(
     Path(params): Path<UserIdParam>,
     Json(req): Json<UpdateUserRequest>,
 ) -> Result<Json<ApiResponse<User>>, AppError> {
+    // Check if user is protected
+    let existing = state.user_service.get_user(&params.id).await?;
+    if existing.is_edit == Some(0) {
+        return Err(AppError::AuthError("Cannot modify protected user".to_string()));
+    }
     let user = state.user_service.update_user(&params.id, req).await?;
     Ok(Json(ApiResponse::ok(user)))
 }
@@ -83,6 +88,11 @@ pub async fn delete_user_handler(
     // Get username before deleting (needed for Harbor sync)
     let user = state.user_service.get_user(&params.id).await?;
     let username = user.username.clone();
+
+    // Protect system users from deletion
+    if user.is_edit == Some(0) {
+        return Err(AppError::AuthError("Cannot delete protected user".to_string()));
+    }
 
     state.user_service.delete_user(&params.id).await?;
 
@@ -172,6 +182,10 @@ pub async fn reset_user_password_handler(
     State(state): State<AppState>,
     Json(req): Json<ResetPwdRequest>,
 ) -> Result<Json<OperationResponse>, AppError> {
+    let user = state.user_service.get_user(&req.id).await?;
+    if user.is_edit == Some(0) {
+        return Err(AppError::AuthError("Cannot modify protected user".to_string()));
+    }
     let default_password = "123456";
     state
         .user_service
@@ -187,6 +201,10 @@ pub async fn toggle_user_enable_handler(
     State(state): State<AppState>,
     Json(req): Json<EnableRequest>,
 ) -> Result<Json<OperationResponse>, AppError> {
+    let user = state.user_service.get_user(&req.id).await?;
+    if user.is_edit == Some(0) {
+        return Err(AppError::AuthError("Cannot modify protected user".to_string()));
+    }
     state
         .user_service
         .toggle_enable(&req.id, req.enable)

@@ -1,5 +1,5 @@
 -- 用户初始化
-INSERT INTO p_sys_user ( id, username, email, phone, password, org_id, lock_time, last_login_time, try_count, lock_flag, create_time, update_time, is_deleted, remarks, real_name, pass_update_time, card, is_show, enable, first_login, sex ) VALUES ( 1, 'sysadmin', null, null, '{MD5}afdd0b4ad2ec172c586e2150770fbf9e', 1, '2025-08-05 05:33:14', '2025-08-05 13:33:13', 0, 1, '2021-12-08 14:26:25', '2025-08-05 13:33:14', 0, null, '系统管理员', '2025-03-13 10:47:23', null, 1, 1, 1, '男' );
+INSERT INTO p_sys_user ( id, username, email, phone, password, org_id, lock_time, last_login_time, try_count, lock_flag, create_time, update_time, is_deleted, remarks, real_name, pass_update_time, card, is_show, enable, first_login, sex, is_edit ) VALUES ( 1, 'sysadmin', null, null, '{MD5}afdd0b4ad2ec172c586e2150770fbf9e', 1, '2025-08-05 05:33:14', '2025-08-05 13:33:13', 0, 1, '2021-12-08 14:26:25', '2025-08-05 13:33:14', 0, null, '系统管理员', '2025-03-13 10:47:23', null, 1, 1, 1, '男', 0 );
 
 -- 角色初始化
 INSERT INTO p_sys_role (id, name, code, create_time, update_time, is_deleted, remarks, description, is_edit, ds_type, ds_scope) VALUES (1, 'sysadm', '110', '2021-02-03 11:05:12', '2021-02-03 11:05:12', 0, '维护系统任务以及权限', '系统管理员', false, null, null);

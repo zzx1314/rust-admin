@@ -107,7 +107,7 @@ export function useUser() {
     },*/
     {
       label: "角色",
-      prop: "roleStr",
+      prop: "roleNames",
       minWidth: 130
     },
     {

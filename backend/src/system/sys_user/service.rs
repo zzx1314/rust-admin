@@ -47,10 +47,21 @@ impl UserService {
                 .map_err(|e| AppError::BadRequest(format!("Password decryption failed: {}", e)))?;
             req.password = Some(md5_encrypt(&decrypted));
         }
-        self.user_repo
+        let user = self
+            .user_repo
             .create(&req, &id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseErrorSeaOrm)?;
+
+        // Assign role if provided
+        if let Some(role_id) = req.role {
+            self.role_repo
+                .assign_role_to_user(&id, &role_id)
+                .await
+                .map_err(AppError::DatabaseErrorSeaOrm)?;
+        }
+
+        Ok(user)
     }
 
     pub async fn get_user(&self, id: &i64) -> Result<User, AppError> {

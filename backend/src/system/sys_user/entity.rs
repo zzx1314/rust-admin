@@ -48,6 +48,8 @@ pub struct Model {
     pub first_login: Option<i32>,
     #[sea_orm(column_name = "sex", column_type = "Text", nullable)]
     pub sex: Option<String>,
+    #[sea_orm(column_name = "is_edit", column_type = "Integer", nullable)]
+    pub is_edit: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

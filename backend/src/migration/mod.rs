@@ -1,6 +1,7 @@
 pub use sea_orm_migration::prelude::*;
 
 pub mod add_sys_logrecord;
+pub mod add_user_is_edit;
 pub mod p_sys_tables_from_file;
 
 pub struct Migrator;
@@ -11,6 +12,7 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(p_sys_tables_from_file::Migration),
             Box::new(add_sys_logrecord::Migration),
+            Box::new(add_user_is_edit::Migration),
         ]
     }
 }

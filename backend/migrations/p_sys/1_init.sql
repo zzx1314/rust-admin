@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS p_sys_user (
     is_show INTEGER DEFAULT 1,
     enable INTEGER DEFAULT 1,
     first_login INTEGER DEFAULT 1,
-    sex TEXT
+    sex TEXT,
+    is_edit INTEGER DEFAULT 1
 );
 
 -- 角色表
