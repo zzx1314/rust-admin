@@ -1,6 +1,7 @@
 use crate::api::AppState;
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
+use crate::common::util::decrypt_password;
 use crate::system::sys_user::domain::{CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO};
 use crate::system::sys_user::service::PasswordUpdateRequest;
 use axum::{
@@ -19,7 +20,27 @@ pub async fn create_user_handler(
     State(state): State<AppState>,
     Json(req): Json<CreateUserRequest>,
 ) -> Result<Json<ApiResponse<User>>, AppError> {
+    let sync_harbor = req.sync_harbor;
+    let harbor_password = req.password.as_deref().and_then(|p| decrypt_password(p).ok());
+
     let user = state.user_service.create_user(req).await?;
+
+    // Sync to Harbor if requested
+    if sync_harbor {
+        if let Some(password) = harbor_password {
+            let email = user.email.clone()
+                .unwrap_or_else(|| format!("{}@harbor.local", user.username));
+            let harbor_req = crate::harbor::models::CreateHarborUserRequest {
+                username: user.username.clone(),
+                password,
+                realname: user.real_name.clone().unwrap_or_else(|| user.username.clone()),
+                email: Some(email),
+                comment: None,
+            };
+            state.harbor_service.create_user(&harbor_req).await?;
+        }
+    }
+
     Ok(Json(ApiResponse::ok(user)))
 }
 
@@ -59,7 +80,17 @@ pub async fn delete_user_handler(
     State(state): State<AppState>,
     Path(params): Path<UserIdParam>,
 ) -> Result<(StatusCode, ()), AppError> {
+    // Get username before deleting (needed for Harbor sync)
+    let user = state.user_service.get_user(&params.id).await?;
+    let username = user.username.clone();
+
     state.user_service.delete_user(&params.id).await?;
+
+    // Try to delete from Harbor (log warning if it fails)
+    if let Err(e) = state.harbor_service.delete_user(&username).await {
+        tracing::warn!("Failed to delete Harbor user '{}': {}", username, e);
+    }
+
     Ok((StatusCode::NO_CONTENT, ()))
 }
 

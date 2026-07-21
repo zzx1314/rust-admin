@@ -468,6 +468,11 @@ async function getAllRole() {
               placeholder="请输入密码"
             />
           </el-form-item>
+          <el-form-item v-if="title === '新增用户'" label="Harbor 同步">
+            <el-checkbox v-model="addForm.syncHarbor">
+              同步创建 Harbor 用户
+            </el-checkbox>
+          </el-form-item>
         </el-form>
 
         <template #footer>

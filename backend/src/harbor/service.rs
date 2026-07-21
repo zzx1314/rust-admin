@@ -3,8 +3,9 @@ use crate::common::pagination::PageResponse;
 use crate::common::util::format_iso_datetime;
 use crate::harbor::client::HarborClient;
 use crate::harbor::models::{
-    CreateMemberRequest, CreateProjectRequest, HarborArtifact, HarborMember, HarborProject,
-    HarborRepository, HarborStatistics, ProjectQuery, ProjectSummary, RepoStat,
+    CreateHarborUserRequest, CreateMemberRequest, CreateProjectRequest, HarborArtifact,
+    HarborMember, HarborProject, HarborRepository, HarborStatistics, HarborUser,
+    ProjectQuery, ProjectSummary, RepoStat,
 };
 use std::sync::Arc;
 
@@ -362,6 +363,75 @@ impl HarborService {
             top_repositories: all_repos,
             recent_projects: recent,
         })
+    }
+
+    pub async fn create_user(&self, req: &CreateHarborUserRequest) -> Result<(), AppError> {
+        self.ensure_enabled()?;
+        let url = reqwest::Url::parse(&self.client.api_url("/api/v2.0/users"))
+            .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
+
+        let response = self
+            .client
+            .client
+            .post(url)
+            .headers(self.client.default_headers())
+            .json(req)
+            .send()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Harbor request failed: {}", e)))?;
+
+        self.check_response(response).await
+    }
+
+    pub async fn delete_user(&self, username: &str) -> Result<(), AppError> {
+        self.ensure_enabled()?;
+        // List all Harbor users to find the user_id for this username
+        let list_url = reqwest::Url::parse(&self.client.api_url("/api/v2.0/users?page=1&page_size=100"))
+            .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
+
+        let response = self
+            .client
+            .client
+            .get(list_url)
+            .headers(self.client.default_headers())
+            .send()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Harbor request failed: {}", e)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(Self::map_harbor_error(status, &body));
+        }
+
+        let users: Vec<HarborUser> = response.json().await.map_err(|e| {
+            AppError::BadRequest(format!("Failed to parse Harbor users: {}", e))
+        })?;
+
+        // Find the user by username
+        if let Some(user) = users.iter().find(|u| u.username == username) {
+            let delete_url = reqwest::Url::parse(&self.client.api_url(
+                &format!("/api/v2.0/users/{}", user.user_id)
+            ))
+            .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
+
+            let delete_resp = self
+                .client
+                .client
+                .delete(delete_url)
+                .headers(self.client.default_headers())
+                .send()
+                .await
+                .map_err(|e| AppError::BadRequest(format!("Harbor request failed: {}", e)))?;
+
+            self.check_response(delete_resp).await
+        } else {
+            // User doesn't exist in Harbor, that's OK
+            Ok(())
+        }
     }
 
     pub async fn create_project(&self, req: CreateProjectRequest) -> Result<(), AppError> {

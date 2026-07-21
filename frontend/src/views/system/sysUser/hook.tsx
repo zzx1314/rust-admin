@@ -13,6 +13,7 @@ import { reactive, ref, computed, nextTick } from "vue";
 import type { FormInstance } from "element-plus";
 import { SUCCESS } from "@/api/base";
 import { hasAuth } from "@/router/utils";
+import aesUtils from "@/utils/aes";
 
 export function useUser() {
   // 更多查询条件
@@ -45,7 +46,8 @@ export function useUser() {
     sex: "",
     role: "",
     orgId: null,
-    orgName: ""
+    orgName: "",
+    syncHarbor: false
   });
   // 查询结果集
   const dataList = ref([]);
@@ -198,6 +200,7 @@ export function useUser() {
     addForm.value.sex = "";
     addForm.value.role = "";
     addForm.value.orgName = orgNameVal.value;
+    addForm.value.syncHarbor = false;
     dialogFormVisible.value = false;
   }
 
@@ -418,7 +421,7 @@ export function useUser() {
       const newpassword = addForm.value.newpassword;
       const newpassword1 = addForm.value.newpassword1;
       if (newpassword === newpassword1) {
-        addForm.value.password = newpassword;
+        addForm.value.password = aesUtils.encode(newpassword, "");
         saveUser(addForm.value).then(res => {
           if (res.code === SUCCESS) {
             message("添加成功！", { type: "success" });

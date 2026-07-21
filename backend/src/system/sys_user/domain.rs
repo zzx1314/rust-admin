@@ -19,6 +19,8 @@ pub struct CreateUserRequest {
     pub remarks: Option<String>,
     pub card: Option<String>,
     pub sex: Option<String>,
+    #[serde(default)]
+    pub sync_harbor: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]

@@ -1,5 +1,29 @@
 use serde::{Deserialize, Serialize};
 
+/// Request to create a user in Harbor
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateHarborUserRequest {
+    pub username: String,
+    pub password: String,
+    pub realname: String,
+    pub email: Option<String>,
+    pub comment: Option<String>,
+}
+
+/// Harbor user info from GET /api/v2.0/users
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarborUser {
+    #[serde(alias = "user_id")]
+    pub user_id: i64,
+    pub username: String,
+    pub email: Option<String>,
+    pub realname: Option<String>,
+    #[serde(alias = "sysadmin_flag")]
+    pub sysadmin_flag: Option<bool>,
+    #[serde(alias = "admin_role_in_auth")]
+    pub admin_role_in_auth: Option<bool>,
+}
+
 /// Harbor project metadata (key-value map)
 pub type ProjectMetadata = std::collections::HashMap<String, String>;
 
