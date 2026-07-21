@@ -41,6 +41,12 @@ INSERT INTO p_sys_menu (id, name, code, permission, path_url, icon, parent_id, c
 INSERT INTO p_sys_menu (id, name, code, permission, path_url, icon, parent_id, component, sort, keep_alive, type, create_time, update_time, is_deleted, remarks, leaf, role_code, disabled, find_auth_id) VALUES (1101, '日志管理', null, null, '/system/sysLog/index', 'ri/blogger-line', 1000, 'sysLog', 8, 0, 3, '2025-03-19 15:15:00', '2024-09-11 14:13:44', 0, null, true, '110', null, 1102);
 INSERT INTO p_sys_menu (id, name, code, permission, path_url, icon, parent_id, component, sort, keep_alive, type, create_time, update_time, is_deleted, remarks, leaf, role_code, disabled, find_auth_id) VALUES (1102, '查询日志', null, 'log_find', null, null, 1101, '', 1, 0, 2, '2025-03-19 15:17:42', '2024-09-11 14:13:44', 0, null, true, '110', null, null);
 
+-- 应用商店
+INSERT INTO p_sys_menu (id, name, code, permission, path_url, icon, parent_id, component, sort, keep_alive, type, create_time, update_time, is_deleted, remarks, leaf, role_code, disabled, find_auth_id) VALUES (1103, '应用管理', null, null, '/harborParent', 'ri:store-2-line', -1, '', 2, 0, 1, '2020-09-18 14:17:36', '2025-05-30 11:31:42', 0, null, false, '110', null, null);
+INSERT INTO p_sys_menu (id, name, code, permission, path_url, icon, parent_id, component, sort, keep_alive, type, create_time, update_time, is_deleted, remarks, leaf, role_code, disabled, find_auth_id) VALUES (1104, '项目管理', null, null, '/harbor/index', 'ri:store-2-line', 1103, 'harbor', 1, 0, 3, '2020-09-18 14:17:36', '2025-05-30 11:31:42', 0, null, false, '110', null, 1105);
+INSERT INTO p_sys_menu (id, name, code, permission, path_url, icon, parent_id, component, sort, keep_alive, type, create_time, update_time, is_deleted, remarks, leaf, role_code, disabled, find_auth_id) VALUES (1105, '查询项目', null, 'harbor_find', null, null, 1104, '', 1, 0, 2, '2023-03-08 17:53:29', '2025-05-30 11:31:16', 0, null, false, '110', null, null);
+
+
 -- 角色菜单初始化
 INSERT INTO p_sys_role_menu (role_id, menu_id) VALUES (1, 1024);
 INSERT INTO p_sys_role_menu (role_id, menu_id) VALUES (1, 1025);
@@ -75,6 +81,11 @@ INSERT INTO p_sys_role_menu (role_id, menu_id) VALUES (1, 1012);
 INSERT INTO p_sys_role_menu (role_id, menu_id) VALUES (1, 1021);
 INSERT INTO p_sys_role_menu (role_id, menu_id) VALUES (1, 1022);
 INSERT INTO p_sys_role_menu (role_id, menu_id) VALUES (1, 1023);
+
+INSERT INTO p_sys_role_menu (role_id, menu_id) VALUES (1, 1103);
+INSERT INTO p_sys_role_menu (role_id, menu_id) VALUES (1, 1104);
+INSERT INTO p_sys_role_menu (role_id, menu_id) VALUES (1, 1105);
+
 
 
 -- 字典初始化

@@ -374,6 +374,9 @@ function addAsyncRoutes(arrRoutes: Array<RouteRecordRaw>) {
       v.name = (v.children[0].name as string) + "Parent";
     if (v.meta?.frameSrc) {
       v.component = IFrame;
+    } else if (v?.children && v.children.length) {
+      // 父级目录路由有子路由，不需要组件，由子路由渲染内容即可
+      v.component = undefined;
     } else {
       const index = v?.component
         ? modulesRoutesKeys.findIndex(
@@ -386,8 +389,6 @@ function addAsyncRoutes(arrRoutes: Array<RouteRecordRaw>) {
       if (index !== -1) {
         v.component = modulesRoutes[modulesRoutesKeys[index]];
       } else {
-        // 父级目录路由找不到组件，component 置空让 Vue Router 走默认渲染
-        // 或者赋值为 Layout 组件，取决于你的路由结构
         console.warn(`路由 ${String(v.name)} 未找到对应组件，path: ${v.path}`);
         v.component = undefined;
       }

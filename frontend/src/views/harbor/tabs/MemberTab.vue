@@ -132,7 +132,7 @@ onMounted(fetchProjects);
 </script>
 
 <template>
-  <div class="main">
+  <div>
     <div class="bg-bg_color w-[99/100] pl-8 pt-4 pb-4">
       <el-form :inline="true" class="demo-form-inline">
         <el-form-item label="所属项目">
@@ -234,9 +234,3 @@ onMounted(fetchProjects);
     </el-dialog>
   </div>
 </template>
-
-<style scoped lang="scss">
-.main {
-  padding: 20px;
-}
-</style>
