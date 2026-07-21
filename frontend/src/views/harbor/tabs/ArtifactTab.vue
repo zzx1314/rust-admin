@@ -28,7 +28,7 @@ const columns = [
   { label: "大小", prop: "size", slot: "size" },
   { label: "推送时间", prop: "push_time", slot: "push_time" },
   { label: "拉取时间", prop: "pull_time", slot: "pull_time" },
-  { label: "媒体类型", prop: "manifest_media_type", slot: "manifest_media_type" }
+  { label: "镜像摘要", prop: "digest" }
 ];
 
 const formatSize = (bytes?: number) => {
@@ -124,12 +124,7 @@ watch(() => [props.projectName, props.repoName], () => {
           <template #pull_time="{ row }">
             <span>{{ row.pull_time?.startsWith('0001-01-01') ? '-' : row.pull_time }}</span>
           </template>
-          <template #manifest_media_type="{ row }">
-            <el-tag v-if="row.manifest_media_type" size="small" type="info" effect="plain">
-              {{ row.manifest_media_type.split('/').pop() }}
-            </el-tag>
-            <span v-else class="text-gray-400 text-xs">-</span>
-          </template>
+
         </pure-table>
       </template>
     </PureTableBar>
