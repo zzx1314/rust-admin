@@ -1,5 +1,6 @@
 use crate::api::AppState;
 use crate::common::error::{ApiResponse, AppError};
+use crate::common::pagination::PageResponse;
 use crate::harbor::models::{
     CreateMemberRequest, CreateProjectRequest, HarborMember, HarborProject, HarborRepository,
     ProjectQuery, ProjectSummary,
@@ -31,9 +32,9 @@ pub struct PaginationQuery {
 pub async fn list_projects_handler(
     State(state): State<AppState>,
     Query(query): Query<ProjectQuery>,
-) -> Result<Json<ApiResponse<Vec<HarborProject>>>, AppError> {
-    let projects = state.harbor_service.list_projects(query).await?;
-    Ok(Json(ApiResponse::ok(projects)))
+) -> Result<Json<ApiResponse<PageResponse<HarborProject>>>, AppError> {
+    let result = state.harbor_service.list_projects(&query).await?;
+    Ok(Json(ApiResponse::ok(result)))
 }
 
 pub async fn get_project_summary_handler(
@@ -51,24 +52,24 @@ pub async fn list_repositories_handler(
     State(state): State<AppState>,
     Path(params): Path<ProjectNameParam>,
     Query(query): Query<PaginationQuery>,
-) -> Result<Json<ApiResponse<Vec<HarborRepository>>>, AppError> {
-    let repositories = state
+) -> Result<Json<ApiResponse<PageResponse<HarborRepository>>>, AppError> {
+    let result = state
         .harbor_service
         .list_repositories(&params.project_name, query.page, query.page_size)
         .await?;
-    Ok(Json(ApiResponse::ok(repositories)))
+    Ok(Json(ApiResponse::ok(result)))
 }
 
 pub async fn list_members_handler(
     State(state): State<AppState>,
     Path(params): Path<ProjectNameParam>,
     Query(query): Query<PaginationQuery>,
-) -> Result<Json<ApiResponse<Vec<HarborMember>>>, AppError> {
-    let members = state
+) -> Result<Json<ApiResponse<PageResponse<HarborMember>>>, AppError> {
+    let result = state
         .harbor_service
         .list_members(&params.project_name, query.page, query.page_size)
         .await?;
-    Ok(Json(ApiResponse::ok(members)))
+    Ok(Json(ApiResponse::ok(result)))
 }
 
 pub async fn create_project_handler(

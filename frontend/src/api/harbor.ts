@@ -6,11 +6,12 @@ type Result<T = any> = {
   data?: T;
 };
 
-type ResultList<T = any> = {
-  code: number;
-  msg: string;
-  data?: Array<T>;
-};
+export interface PaginatedData<T> {
+  records: T[];
+  total: number;
+  current: number;
+  size: number;
+}
 
 export interface HarborProject {
   project_id: number;
@@ -66,7 +67,7 @@ export const listProjects = (query?: {
   page?: number;
   page_size?: number;
 }) => {
-  return http.axiosGetRequest<ResultList<HarborProject>>(projectUrl, query);
+  return http.axiosGetRequest<Result<PaginatedData<HarborProject>>>(projectUrl, query);
 };
 
 export const createProject = (data: {
@@ -90,7 +91,7 @@ export const listRepositories = (
   projectName: string,
   query?: { page?: number; page_size?: number }
 ) => {
-  return http.axiosGetRequest<ResultList<HarborRepository>>(
+  return http.axiosGetRequest<Result<PaginatedData<HarborRepository>>>(
     `${projectUrl}/${projectName}/repositories`,
     query
   );
@@ -100,7 +101,7 @@ export const listMembers = (
   projectName: string,
   query?: { page?: number; page_size?: number }
 ) => {
-  return http.axiosGetRequest<ResultList<HarborMember>>(
+  return http.axiosGetRequest<Result<PaginatedData<HarborMember>>>(
     `${projectUrl}/${projectName}/members`,
     query
   );

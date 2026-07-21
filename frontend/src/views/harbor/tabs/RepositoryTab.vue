@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, reactive, onMounted } from "vue";
+import type { PaginationProps } from "@pureadmin/table";
 import { PureTableBar } from "@/components/RePureTableBar";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 import { ElMessage } from "element-plus";
@@ -10,14 +11,18 @@ import {
   type HarborRepository
 } from "@/api/harbor";
 
-import Search from "~icons/ep/search";
 import Refresh from "~icons/ep/refresh";
 
 const loading = ref(false);
 const projects = ref<HarborProject[]>([]);
 const repositories = ref<HarborRepository[]>([]);
 const selectedProject = ref("");
-const searchName = ref("");
+const repoPagination = reactive<PaginationProps>({
+  total: 0,
+  pageSize: 10,
+  currentPage: 1,
+  background: true
+});
 
 const columns = [
   { label: "仓库名称", prop: "name" },
@@ -31,8 +36,8 @@ const columns = [
 const fetchProjects = async () => {
   try {
     const res = await listProjects({ page_size: 100 });
-    if (res.code === 10200) {
-      projects.value = res.data || [];
+    if (res.code === 10200 && res.data) {
+      projects.value = res.data.records || [];
       if (projects.value.length > 0 && !selectedProject.value) {
         selectedProject.value = projects.value[0].name;
         fetchRepositories();
@@ -48,15 +53,12 @@ const fetchRepositories = async () => {
   loading.value = true;
   try {
     const res = await listRepositories(selectedProject.value, {
-      page_size: 100
+      page: repoPagination.currentPage,
+      page_size: repoPagination.pageSize
     });
-    if (res.code === 10200) {
-      repositories.value = res.data || [];
-      if (searchName.value) {
-        repositories.value = repositories.value.filter(item =>
-          item.name.toLowerCase().includes(searchName.value.toLowerCase())
-        );
-      }
+    if (res.code === 10200 && res.data) {
+      repositories.value = res.data.records || [];
+      repoPagination.total = res.data.total;
     }
   } catch (err: any) {
     ElMessage.error(err.message || "获取镜像仓库失败");
@@ -65,14 +67,18 @@ const fetchRepositories = async () => {
   }
 };
 
-const onSearch = () => fetchRepositories();
-const onReset = () => {
-  searchName.value = "";
+const handleSizeChange = (val: number) => {
+  repoPagination.pageSize = val;
+  fetchRepositories();
+};
+
+const handleCurrentChange = (val: number) => {
+  repoPagination.currentPage = val;
   fetchRepositories();
 };
 
 const onProjectChange = () => {
-  searchName.value = "";
+  repoPagination.currentPage = 1;
   fetchRepositories();
 };
 
@@ -98,24 +104,9 @@ onMounted(fetchProjects);
             />
           </el-select>
         </el-form-item>
-        <el-form-item label="仓库名称">
-          <el-input
-            v-model="searchName"
-            placeholder="请输入仓库名称"
-            clearable
-            class="!w-[200px]"
-          />
-        </el-form-item>
         <el-form-item>
-          <el-button
-            type="primary"
-            :icon="useRenderIcon(Search)"
-            @click="onSearch"
-          >
-            搜索
-          </el-button>
-          <el-button :icon="useRenderIcon(Refresh)" @click="onReset">
-            重置
+          <el-button :icon="useRenderIcon(Refresh)" @click="fetchRepositories">
+            刷新
           </el-button>
         </el-form-item>
       </el-form>
@@ -136,10 +127,14 @@ onMounted(fetchProjects);
           :size="size"
           :data="repositories"
           :columns="dynamicColumns"
+          :pagination="repoPagination"
+          :paginationSmall="size === 'small' ? true : false"
           :header-cell-style="{
             background: 'var(--el-table-row-hover-bg-color)',
             color: 'var(--el-text-color-primary)'
           }"
+          @page-size-change="handleSizeChange"
+          @page-current-change="handleCurrentChange"
         />
       </template>
     </PureTableBar>

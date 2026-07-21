@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, reactive, onMounted } from "vue";
+import type { PaginationProps } from "@pureadmin/table";
 import { PureTableBar } from "@/components/RePureTableBar";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -27,34 +28,60 @@ const summaryVisible = ref(false);
 const currentSummary = ref<ProjectSummary | null>(null);
 const currentProjectName = ref("");
 
-const columns = [
+const pagination = reactive<PaginationProps>({
+  total: 0,
+  pageSize: 10,
+  currentPage: 1,
+  background: true
+});
+
+const columns: TableColumnList = [
   { label: "项目名称", prop: "name" },
   { label: "所有者", prop: "owner_name" },
   { label: "仓库数", prop: "repo_count" },
   { label: "公开", prop: "is_public" },
   { label: "创建时间", prop: "creation_time" },
-  { operation: "操作", width: 200 }
+  { label: "操作", fixed: "right", width: 200, slot: "operation" }
 ];
 
 const fetchProjects = async () => {
   loading.value = true;
   try {
-    const res = await listProjects({ name: searchName.value || undefined });
-    if (res.code === 10200) {
+    const res = await listProjects({
+      name: searchName.value || undefined,
+      page: pagination.currentPage,
+      page_size: pagination.pageSize
+    });
+    if (res.code === 10200 && res.data) {
       projectList.value =
-        res.data?.map(item => ({
+        res.data.records?.map(item => ({
           ...item,
           is_public: item.metadata?.public === "true"
         })) || [];
+      pagination.total = res.data.total;
     }
   } finally {
     loading.value = false;
   }
 };
 
-const onSearch = () => fetchProjects();
+const handleSizeChange = (val: number) => {
+  pagination.pageSize = val;
+  fetchProjects();
+};
+
+const handleCurrentChange = (val: number) => {
+  pagination.currentPage = val;
+  fetchProjects();
+};
+
+const onSearch = () => {
+  pagination.currentPage = 1;
+  fetchProjects();
+};
 const onReset = () => {
   searchName.value = "";
+  pagination.currentPage = 1;
   fetchProjects();
 };
 
@@ -160,10 +187,14 @@ onMounted(fetchProjects);
           :size="size"
           :data="projectList"
           :columns="dynamicColumns"
+          :pagination="pagination"
+          :paginationSmall="size === 'small' ? true : false"
           :header-cell-style="{
             background: 'var(--el-table-row-hover-bg-color)',
             color: 'var(--el-text-color-primary)'
           }"
+          @page-size-change="handleSizeChange"
+          @page-current-change="handleCurrentChange"
         >
           <template #is_public="{ row }">
             <el-tag :type="row.is_public ? 'success' : 'info'">

@@ -1,4 +1,5 @@
 use crate::common::error::AppError;
+use crate::common::pagination::PageResponse;
 use crate::harbor::client::HarborClient;
 use crate::harbor::models::{
     CreateMemberRequest, CreateProjectRequest, HarborMember, HarborProject, HarborRepository,
@@ -24,19 +25,7 @@ impl HarborService {
         Ok(())
     }
 
-    async fn check_response(&self, response: reqwest::Response) -> Result<(), AppError> {
-        if response.status().is_success() {
-            return Ok(());
-        }
-        Err(self.map_error(response).await)
-    }
-
-    async fn map_error(&self, response: reqwest::Response) -> AppError {
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
+    fn map_harbor_error(status: reqwest::StatusCode, body: &str) -> AppError {
         match status.as_u16() {
             401 => AppError::Unauthorized(format!("Harbor unauthorized: {}", body)),
             403 => AppError::AuthError(format!("Harbor forbidden: {}", body)),
@@ -45,10 +34,49 @@ impl HarborService {
         }
     }
 
+    async fn check_response(&self, response: reqwest::Response) -> Result<(), AppError> {
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        Err(Self::map_harbor_error(status, &body))
+    }
+
+    fn extract_total_count(response: &reqwest::Response) -> i64 {
+        response
+            .headers()
+            .get("x-total-count")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0)
+    }
+
+    async fn build_paginated_response<T>(
+        &self,
+        response: reqwest::Response,
+        page: i64,
+        page_size: i64,
+    ) -> Result<PageResponse<T>, AppError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let total = Self::extract_total_count(&response);
+
+        let records: Vec<T> = response.json().await.map_err(|e| {
+            AppError::BadRequest(format!("Failed to parse Harbor response: {}", e))
+        })?;
+
+        Ok(PageResponse::new(records, total, page, page_size))
+    }
+
     pub async fn list_projects(
         &self,
-        query: ProjectQuery,
-    ) -> Result<Vec<HarborProject>, AppError> {
+        query: &ProjectQuery,
+    ) -> Result<PageResponse<HarborProject>, AppError> {
         self.ensure_enabled()?;
         let mut url = reqwest::Url::parse(&self.client.api_url("/api/v2.0/projects"))
             .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
@@ -75,13 +103,16 @@ impl HarborService {
             .await
             .map_err(|e| AppError::BadRequest(format!("Harbor request failed: {}", e)))?;
 
-        if !response.status().is_success() {
-            return Err(self.map_error(response).await);
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(Self::map_harbor_error(status, &body));
         }
 
-        response.json::<Vec<HarborProject>>().await.map_err(|e| {
-            AppError::BadRequest(format!("Failed to parse Harbor response: {}", e))
-        })
+        self.build_paginated_response::<HarborProject>(response, page, page_size).await
     }
 
     pub async fn get_project_summary(
@@ -102,8 +133,13 @@ impl HarborService {
             .await
             .map_err(|e| AppError::BadRequest(format!("Harbor request failed: {}", e)))?;
 
-        if !response.status().is_success() {
-            return Err(self.map_error(response).await);
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(Self::map_harbor_error(status, &body));
         }
 
         response.json::<ProjectSummary>().await.map_err(|e| {
@@ -116,7 +152,7 @@ impl HarborService {
         project_name: &str,
         page: Option<i64>,
         page_size: Option<i64>,
-    ) -> Result<Vec<HarborRepository>, AppError> {
+    ) -> Result<PageResponse<HarborRepository>, AppError> {
         self.ensure_enabled()?;
         let path = format!("/api/v2.0/projects/{}/repositories", project_name);
         let mut url = reqwest::Url::parse(&self.client.api_url(&path))
@@ -137,14 +173,16 @@ impl HarborService {
             .await
             .map_err(|e| AppError::BadRequest(format!("Harbor request failed: {}", e)))?;
 
-        if !response.status().is_success() {
-            return Err(self.map_error(response).await);
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(Self::map_harbor_error(status, &body));
         }
 
-        response
-            .json::<Vec<HarborRepository>>()
-            .await
-            .map_err(|e| AppError::BadRequest(format!("Failed to parse Harbor response: {}", e)))
+        self.build_paginated_response::<HarborRepository>(response, page, page_size).await
     }
 
     pub async fn list_members(
@@ -152,7 +190,7 @@ impl HarborService {
         project_name: &str,
         page: Option<i64>,
         page_size: Option<i64>,
-    ) -> Result<Vec<HarborMember>, AppError> {
+    ) -> Result<PageResponse<HarborMember>, AppError> {
         self.ensure_enabled()?;
         let path = format!("/api/v2.0/projects/{}/members", project_name);
         let mut url = reqwest::Url::parse(&self.client.api_url(&path))
@@ -173,14 +211,16 @@ impl HarborService {
             .await
             .map_err(|e| AppError::BadRequest(format!("Harbor request failed: {}", e)))?;
 
-        if !response.status().is_success() {
-            return Err(self.map_error(response).await);
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(Self::map_harbor_error(status, &body));
         }
 
-        response
-            .json::<Vec<HarborMember>>()
-            .await
-            .map_err(|e| AppError::BadRequest(format!("Failed to parse Harbor response: {}", e)))
+        self.build_paginated_response::<HarborMember>(response, page, page_size).await
     }
 
     pub async fn create_project(&self, req: CreateProjectRequest) -> Result<(), AppError> {

@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, reactive, onMounted } from "vue";
+import type { PaginationProps } from "@pureadmin/table";
 import { PureTableBar } from "@/components/RePureTableBar";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -28,6 +29,13 @@ const addForm = ref({
   role_id: 2
 });
 
+const memberPagination = reactive<PaginationProps>({
+  total: 0,
+  pageSize: 10,
+  currentPage: 1,
+  background: true
+});
+
 const roleOptions = [
   { label: "项目管理员", value: 1 },
   { label: "开发者", value: 2 },
@@ -35,18 +43,18 @@ const roleOptions = [
   { label: "维护者", value: 4 }
 ];
 
-const columns = [
+const columns: TableColumnList = [
   { label: "成员名称", prop: "entity_name" },
   { label: "角色", prop: "role_name" },
   { label: "实体类型", prop: "entity_type" },
-  { operation: "操作", width: 120 }
+  { label: "操作", fixed: "right", width: 120, slot: "operation" }
 ];
 
 const fetchProjects = async () => {
   try {
     const res = await listProjects({ page_size: 100 });
-    if (res.code === 10200) {
-      projects.value = res.data || [];
+    if (res.code === 10200 && res.data) {
+      projects.value = res.data.records || [];
       if (projects.value.length > 0 && !selectedProject.value) {
         selectedProject.value = projects.value[0].name;
         fetchMembers();
@@ -61,17 +69,13 @@ const fetchMembers = async () => {
   if (!selectedProject.value) return;
   loading.value = true;
   try {
-    const res = await listMembers(selectedProject.value, { page_size: 100 });
-    if (res.code === 10200) {
-      let data = res.data || [];
-      if (searchName.value) {
-        data = data.filter(item =>
-          item.entity_name
-            .toLowerCase()
-            .includes(searchName.value.toLowerCase())
-        );
-      }
-      members.value = data;
+    const res = await listMembers(selectedProject.value, {
+      page: memberPagination.currentPage,
+      page_size: memberPagination.pageSize
+    });
+    if (res.code === 10200 && res.data) {
+      members.value = res.data.records || [];
+      memberPagination.total = res.data.total;
     }
   } catch (err: any) {
     ElMessage.error(err.message || "获取成员失败");
@@ -80,14 +84,29 @@ const fetchMembers = async () => {
   }
 };
 
-const onSearch = () => fetchMembers();
+const handleSizeChange = (val: number) => {
+  memberPagination.pageSize = val;
+  fetchMembers();
+};
+
+const handleCurrentChange = (val: number) => {
+  memberPagination.currentPage = val;
+  fetchMembers();
+};
+
+const onSearch = () => {
+  memberPagination.currentPage = 1;
+  fetchMembers();
+};
 const onReset = () => {
   searchName.value = "";
+  memberPagination.currentPage = 1;
   fetchMembers();
 };
 
 const onProjectChange = () => {
   searchName.value = "";
+  memberPagination.currentPage = 1;
   fetchMembers();
 };
 
@@ -191,10 +210,14 @@ onMounted(fetchProjects);
           :size="size"
           :data="members"
           :columns="dynamicColumns"
+          :pagination="memberPagination"
+          :paginationSmall="size === 'small' ? true : false"
           :header-cell-style="{
             background: 'var(--el-table-row-hover-bg-color)',
             color: 'var(--el-text-color-primary)'
           }"
+          @page-size-change="handleSizeChange"
+          @page-current-change="handleCurrentChange"
         >
           <template #operation="{ row }">
             <el-button
