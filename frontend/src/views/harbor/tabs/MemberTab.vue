@@ -44,7 +44,7 @@ const columns = [
 
 const fetchProjects = async () => {
   try {
-    const res = await listProjects({ page_size: 1000 });
+    const res = await listProjects({ page_size: 100 });
     if (res.code === 10200) {
       projects.value = res.data || [];
       if (projects.value.length > 0 && !selectedProject.value) {
@@ -61,7 +61,7 @@ const fetchMembers = async () => {
   if (!selectedProject.value) return;
   loading.value = true;
   try {
-    const res = await listMembers(selectedProject.value, { page_size: 1000 });
+    const res = await listMembers(selectedProject.value, { page_size: 100 });
     if (res.code === 10200) {
       let data = res.data || [];
       if (searchName.value) {
