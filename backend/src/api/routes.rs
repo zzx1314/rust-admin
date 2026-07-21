@@ -223,6 +223,7 @@ pub fn harbor_routes(state: AppState) -> Router<AppState> {
         .route("/harbor/projects/{project_name}/summary", get(harbor_handlers::get_project_summary_handler))
         .route("/harbor/projects/{project_name}/repositories", get(harbor_handlers::list_repositories_handler))
         .route("/harbor/projects/{project_name}/members", get(harbor_handlers::list_members_handler).post(harbor_handlers::add_member_handler))
+        .route("/harbor/projects/{project_name}/artifacts", get(harbor_handlers::list_artifacts_handler))
         .route("/harbor/projects/{project_name}/members/{member_id}", delete(harbor_handlers::remove_member_handler))
         .route("/harbor/projects/{project_name}", delete(harbor_handlers::delete_project_handler))
         .layer(from_fn_with_state(state.clone(), require_auth))

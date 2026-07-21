@@ -67,6 +67,24 @@ export interface RepoStat {
   artifact_count: number;
 }
 
+export interface ArtifactTag {
+  name: string;
+  push_time?: string;
+  pull_time?: string;
+  signed?: boolean;
+}
+
+export interface HarborArtifact {
+  id: number;
+  digest?: string;
+  size?: number;
+  push_time?: string;
+  pull_time?: string;
+  tags?: ArtifactTag[];
+  manifest_media_type?: string;
+  media_type?: string;
+}
+
 export interface HarborMember {
   id: number;
   project_id: number;
@@ -106,6 +124,17 @@ export const deleteProject = (projectName: string) => {
 export const getProjectSummary = (projectName: string) => {
   return http.axiosGetRequest<Result<ProjectSummary>>(
     `${projectUrl}/${projectName}/summary`
+  );
+};
+
+export const listArtifacts = (
+  projectName: string,
+  repoName: string,
+  query?: { page?: number; page_size?: number }
+) => {
+  return http.axiosGetRequest<Result<PaginatedData<HarborArtifact>>>(
+    `${projectUrl}/${projectName}/artifacts`,
+    { ...query, repo_name: repoName }
   );
 };
 

@@ -19,6 +19,11 @@ import AddFill from "~icons/ri/add-circle-line";
 import Delete from "~icons/ep/delete";
 import View from "~icons/ep/view";
 
+
+const emit = defineEmits<{
+  (e: "selectProject", name: string): void;
+}>();
+
 const loading = ref(false);
 const projectList = ref<HarborProject[]>([]);
 const searchName = ref("");
@@ -36,7 +41,7 @@ const pagination = reactive<PaginationProps>({
 });
 
 const columns: TableColumnList = [
-  { label: "项目名称", prop: "name" },
+  { label: "项目名称", prop: "name", slot: "name" },
   { label: "所有者", prop: "owner_name" },
   { label: "仓库数", prop: "repo_count" },
   { label: "公开", prop: "is_public" },
@@ -196,6 +201,15 @@ onMounted(fetchProjects);
           @page-size-change="handleSizeChange"
           @page-current-change="handleCurrentChange"
         >
+          <template #name="{ row }">
+            <span
+              class="project-name-link"
+              @click="emit('selectProject', row.name)"
+            >
+              <IconifyIconOffline icon="ep:folder-opened" width="14" height="14" class="mr-1" />
+              {{ row.name }}
+            </span>
+          </template>
           <template #is_public="{ row }">
             <el-tag :type="row.is_public ? 'success' : 'info'">
               {{ row.is_public ? "公开" : "私有" }}
@@ -261,3 +275,17 @@ onMounted(fetchProjects);
     </el-dialog>
   </div>
 </template>
+
+<style scoped>
+.project-name-link {
+  cursor: pointer;
+  color: var(--el-color-primary);
+  display: inline-flex;
+  align-items: center;
+  transition: color 0.2s;
+}
+.project-name-link:hover {
+  color: var(--el-color-primary-dark-2);
+  text-decoration: underline;
+}
+</style>

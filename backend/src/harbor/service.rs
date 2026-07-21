@@ -3,8 +3,8 @@ use crate::common::pagination::PageResponse;
 use crate::common::util::format_iso_datetime;
 use crate::harbor::client::HarborClient;
 use crate::harbor::models::{
-    CreateMemberRequest, CreateProjectRequest, HarborMember, HarborProject, HarborRepository,
-    HarborStatistics, ProjectQuery, ProjectSummary, RepoStat,
+    CreateMemberRequest, CreateProjectRequest, HarborArtifact, HarborMember, HarborProject,
+    HarborRepository, HarborStatistics, ProjectQuery, ProjectSummary, RepoStat,
 };
 use std::sync::Arc;
 
@@ -232,6 +232,52 @@ impl HarborService {
         }
 
         self.build_paginated_response::<HarborMember>(response, page, page_size).await
+    }
+
+    pub async fn list_artifacts(
+        &self,
+        project_name: &str,
+        repo_name: &str,
+        page: Option<i64>,
+        page_size: Option<i64>,
+    ) -> Result<PageResponse<HarborArtifact>, AppError> {
+        self.ensure_enabled()?;
+        // Harbor API: /api/v2.0/projects/{project}/repositories/{repo_name}/artifacts
+        let path = format!(
+            "/api/v2.0/projects/{}/repositories/{}/artifacts",
+            project_name,
+            urlencoding::encode(&urlencoding::encode(repo_name)),
+        );
+        let mut url = reqwest::Url::parse(&self.client.api_url(&path))
+            .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
+
+        url.query_pairs_mut()
+            .append_pair("with_tag", "true");
+        let page = page.unwrap_or(1);
+        let page_size = page_size.unwrap_or(10);
+        url.query_pairs_mut().append_pair("page", &page.to_string());
+        url.query_pairs_mut()
+            .append_pair("page_size", &page_size.to_string());
+
+        let response = self
+            .client
+            .client
+            .get(url)
+            .headers(self.client.default_headers())
+            .send()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Harbor request failed: {}", e)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(Self::map_harbor_error(status, &body));
+        }
+
+        self.build_paginated_response::<HarborArtifact>(response, page, page_size).await
     }
 
     pub async fn get_statistics(&self) -> Result<HarborStatistics, AppError> {

@@ -68,6 +68,37 @@ pub struct HarborRepository {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarborArtifact {
+    pub id: i64,
+    #[serde(alias = "digest")]
+    pub digest: Option<String>,
+    #[serde(alias = "size")]
+    pub size: Option<i64>,
+    #[serde(alias = "push_time")]
+    pub push_time: Option<String>,
+    #[serde(alias = "pull_time")]
+    pub pull_time: Option<String>,
+    pub tags: Option<Vec<ArtifactTag>>,
+    #[serde(alias = "extra_attrs")]
+    pub extra_attrs: Option<serde_json::Value>,
+    #[serde(alias = "manifest_media_type")]
+    pub manifest_media_type: Option<String>,
+    #[serde(alias = "media_type")]
+    pub media_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactTag {
+    pub name: String,
+    #[serde(alias = "push_time")]
+    pub push_time: Option<String>,
+    #[serde(alias = "pull_time")]
+    pub pull_time: Option<String>,
+    #[serde(alias = "signed")]
+    pub signed: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HarborMember {
     pub id: i64,
     #[serde(alias = "project_id")]

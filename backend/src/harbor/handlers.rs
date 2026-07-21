@@ -2,8 +2,8 @@ use crate::api::AppState;
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
 use crate::harbor::models::{
-    CreateMemberRequest, CreateProjectRequest, HarborMember, HarborProject, HarborRepository,
-    HarborStatistics, ProjectQuery, ProjectSummary,
+    CreateMemberRequest, CreateProjectRequest, HarborArtifact, HarborMember, HarborProject,
+    HarborRepository, HarborStatistics, ProjectQuery, ProjectSummary,
 };
 use axum::{
     Json,
@@ -20,6 +20,14 @@ pub struct ProjectNameParam {
 pub struct MemberIdParam {
     pub project_name: String,
     pub member_id: i64,
+}
+
+#[derive(Deserialize)]
+pub struct ArtifactQuery {
+    pub repo_name: String,
+    pub page: Option<i64>,
+    #[serde(alias = "page_size")]
+    pub page_size: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -53,6 +61,18 @@ pub async fn harbor_statistics_handler(
 ) -> Result<Json<ApiResponse<HarborStatistics>>, AppError> {
     let stats = state.harbor_service.get_statistics().await?;
     Ok(Json(ApiResponse::ok(stats)))
+}
+
+pub async fn list_artifacts_handler(
+    State(state): State<AppState>,
+    Path(params): Path<ProjectNameParam>,
+    Query(query): Query<ArtifactQuery>,
+) -> Result<Json<ApiResponse<PageResponse<HarborArtifact>>>, AppError> {
+    let result = state
+        .harbor_service
+        .list_artifacts(&params.project_name, &query.repo_name, query.page, query.page_size)
+        .await?;
+    Ok(Json(ApiResponse::ok(result)))
 }
 
 pub async fn list_repositories_handler(
