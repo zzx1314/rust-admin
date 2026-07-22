@@ -53,6 +53,7 @@ impl UserRepository for FakeUserRepository {
                 enable: Some(1),
                 first_login: Some(1),
                 sex: req.sex.clone(),
+                is_edit: Some(1),
             };
             users.lock().unwrap().insert(id, user.clone());
             Ok(user)
@@ -124,7 +125,7 @@ impl UserRepository for FakeUserRepository {
                 if let Some(v) = real_name {
                     user.real_name = Some(v);
                 }
-                user.org_id = org_id;
+                user.org_id = org_id.unwrap_or(0);
                 if let Some(v) = remarks {
                     user.remarks = Some(v);
                 }
@@ -227,6 +228,7 @@ impl UserRepository for FakeUserRepository {
                     sex: u.sex.clone(),
                     role_names: None,
                     role_str: None,
+                    is_edit: None,
                 })
                 .collect();
             vec.sort_by(|a, b| b.id.cmp(&a.id));
@@ -343,6 +345,8 @@ async fn test_create_user_success() {
         remarks: None,
         card: None,
         sex: None,
+        sync_harbor: false,
+        role: None,
     };
 
     let result = service.create_user(req).await;
@@ -369,6 +373,8 @@ async fn test_get_user_success() {
         remarks: None,
         card: None,
         sex: None,
+        sync_harbor: false,
+        role: None,
     };
     let _created = repo.create(&req, &1i64).await.unwrap();
 
@@ -404,6 +410,8 @@ async fn test_get_all_users() {
         remarks: None,
         card: None,
         sex: None,
+        sync_harbor: false,
+        role: None,
     };
     repo.create(&req1, &1i64).await.unwrap();
 
@@ -417,6 +425,8 @@ async fn test_get_all_users() {
         remarks: None,
         card: None,
         sex: None,
+        sync_harbor: false,
+        role: None,
     };
     repo.create(&req2, &2i64).await.unwrap();
 
@@ -441,6 +451,8 @@ async fn test_update_user_success() {
         remarks: None,
         card: None,
         sex: None,
+        sync_harbor: false,
+        role: None,
     };
     let _created = repo.create(&req, &1i64).await.unwrap();
 
@@ -450,7 +462,7 @@ async fn test_update_user_success() {
         email: None,
         real_name: Some("Updated Name".to_string()),
         password: None,
-        org_id: 1,
+        org_id: Some(1),
         remarks: None,
         card: None,
         is_show: None,
@@ -475,7 +487,7 @@ async fn test_update_user_not_found() {
         email: None,
         real_name: None,
         password: None,
-        org_id: 1,
+        org_id: Some(1),
         remarks: None,
         card: None,
         is_show: None,
@@ -504,6 +516,8 @@ async fn test_delete_user_success() {
         remarks: None,
         card: None,
         sex: None,
+        sync_harbor: false,
+        role: None,
     };
     let _created = repo.create(&req, &1i64).await.unwrap();
 
@@ -543,6 +557,8 @@ async fn test_get_users_page_default() {
             remarks: None,
             card: None,
             sex: None,
+            sync_harbor: false,
+            role: None,
         };
         repo.create(&req, &(i as i64)).await.unwrap();
     }
@@ -584,6 +600,8 @@ async fn test_get_users_page_custom() {
             remarks: None,
             card: None,
             sex: None,
+            sync_harbor: false,
+            role: None,
         };
         repo.create(&req, &(i as i64)).await.unwrap();
     }
@@ -625,6 +643,8 @@ async fn test_get_users_page_out_of_range() {
             remarks: None,
             card: None,
             sex: None,
+            sync_harbor: false,
+            role: None,
         };
         repo.create(&req, &(i as i64)).await.unwrap();
     }

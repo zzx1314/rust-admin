@@ -252,6 +252,7 @@ impl RoleRepository for FakeRoleRepository {
                     enable: Some(1),
                     first_login: Some(1),
                     sex: None,
+                    is_edit: Some(1),
                 })
                 .collect())
         })

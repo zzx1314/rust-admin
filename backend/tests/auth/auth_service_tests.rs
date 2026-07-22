@@ -57,6 +57,7 @@ impl UserRepository for FakeUserRepository {
                 enable: Some(1),
                 first_login: Some(1),
                 sex: req.sex.clone(),
+                is_edit: Some(1),
             };
             users.lock().unwrap().insert(id, user.clone());
             Ok(user)
@@ -132,7 +133,7 @@ impl UserRepository for FakeUserRepository {
                 if let Some(v) = real_name {
                     user.real_name = Some(v);
                 }
-                user.org_id = org_id;
+                user.org_id = org_id.unwrap_or(0);
                 if let Some(v) = remarks {
                     user.remarks = Some(v);
                 }
@@ -293,6 +294,8 @@ async fn test_login_success() {
         remarks: None,
         card: None,
         sex: None,
+        sync_harbor: false,
+        role: None,
     };
     user_repo.create(&req, &1i64).await.unwrap();
 
@@ -334,6 +337,8 @@ async fn test_login_wrong_password() {
         remarks: None,
         card: None,
         sex: None,
+        sync_harbor: false,
+        role: None,
     };
     user_repo.create(&req, &1i64).await.unwrap();
 
@@ -357,6 +362,8 @@ async fn test_login_no_password_hash() {
         remarks: None,
         card: None,
         sex: None,
+        sync_harbor: false,
+        role: None,
     };
     user_repo.create(&req, &1).await.unwrap();
 
@@ -381,6 +388,8 @@ async fn test_logout_success() {
         remarks: None,
         card: None,
         sex: None,
+        sync_harbor: false,
+        role: None,
     };
     user_repo.create(&req, &1i64).await.unwrap();
 
@@ -413,6 +422,8 @@ async fn test_validate_token_success() {
         remarks: None,
         card: None,
         sex: None,
+        sync_harbor: false,
+        role: None,
     };
     user_repo.create(&req, &1i64).await.unwrap();
 
@@ -440,6 +451,8 @@ async fn test_validate_token_wrong_token() {
         remarks: None,
         card: None,
         sex: None,
+        sync_harbor: false,
+        role: None,
     };
     user_repo.create(&req, &1i64).await.unwrap();
 
@@ -471,6 +484,8 @@ async fn test_validate_token_no_stored_token() {
         remarks: None,
         card: None,
         sex: None,
+        sync_harbor: false,
+        role: None,
     };
     user_repo.create(&req, &1i64).await.unwrap();
 
@@ -500,6 +515,8 @@ async fn test_refresh_token_success() {
         remarks: None,
         card: None,
         sex: None,
+        sync_harbor: false,
+        role: None,
     };
     user_repo.create(&req, &1i64).await.unwrap();
 
@@ -546,6 +563,8 @@ async fn test_refresh_token_user_not_found() {
         remarks: None,
         card: None,
         sex: None,
+        sync_harbor: false,
+        role: None,
     };
     user_repo.create(&req, &1i64).await.unwrap();
 

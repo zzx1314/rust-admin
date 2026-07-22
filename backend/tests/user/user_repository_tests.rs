@@ -57,7 +57,8 @@ impl TestDb {
                 is_show INTEGER DEFAULT 1,
                 enable INTEGER DEFAULT 1,
                 first_login INTEGER DEFAULT 1,
-                sex TEXT
+                sex TEXT,
+                is_edit INTEGER DEFAULT 1
             )",
         )
         .execute(&pool)
@@ -177,6 +178,8 @@ async fn test_user_repo_create_and_find() {
         remarks: None,
         card: None,
         sex: None,
+        sync_harbor: false,
+        role: None,
     };
 
     let created_user = repo.create(&req, &id).await.unwrap();
@@ -214,6 +217,8 @@ async fn test_user_repo_find_all() {
         remarks: None,
         card: None,
         sex: None,
+        sync_harbor: false,
+        role: None,
     };
     let id1 = uid();
     let id2 = uid();
@@ -229,6 +234,8 @@ async fn test_user_repo_find_all() {
         remarks: None,
         card: None,
         sex: None,
+        sync_harbor: false,
+        role: None,
     };
     repo.create(&req2, &id2).await.unwrap();
 
@@ -255,6 +262,8 @@ async fn test_user_repo_update() {
         remarks: None,
         card: None,
         sex: None,
+        sync_harbor: false,
+        role: None,
     };
     repo.create(&req, &id).await.unwrap();
 
@@ -264,7 +273,7 @@ async fn test_user_repo_update() {
         email: Some("updated@example.com".to_string()),
         real_name: None,
         password: None,
-        org_id: 1,
+        org_id: Some(1),
         remarks: None,
         card: None,
         is_show: None,
@@ -289,7 +298,7 @@ async fn test_user_repo_update_not_found() {
         email: None,
         real_name: None,
         password: None,
-        org_id: 1,
+        org_id: Some(1),
         remarks: None,
         card: None,
         is_show: None,
@@ -317,6 +326,8 @@ async fn test_user_repo_delete() {
         remarks: None,
         card: None,
         sex: None,
+        sync_harbor: false,
+        role: None,
     };
     repo.create(&req, &id).await.unwrap();
 

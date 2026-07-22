@@ -103,7 +103,8 @@ impl TestDb {
                 is_show INTEGER DEFAULT 1,
                 enable INTEGER DEFAULT 1,
                 first_login INTEGER DEFAULT 1,
-                sex TEXT
+                sex TEXT,
+                is_edit INTEGER DEFAULT 1
             )",
         )
         .execute(&pool)
@@ -226,6 +227,8 @@ async fn create_test_app() -> (axum::Router, TestDb) {
         MenuRepository, OrgRepository, RoleRepository, SysDictItemRepository, SysDictRepository,
         SysLogRepository, TokenStore, UserRepository,
     };
+    use x_rust::harbor::client::HarborClient;
+    use x_rust::harbor::service::HarborService;
     use x_rust::system::sys_menu::repository::SeaOrmMenuRepository;
     use x_rust::system::sys_menu::service::MenuService;
     use x_rust::system::sys_org::repository::SeaOrmOrgRepository;
@@ -269,6 +272,13 @@ async fn create_test_app() -> (axum::Router, TestDb) {
         Arc::new(SeaOrmSysLogRepository::new(conn.clone()));
     let sys_log_service = Arc::new(SysLogService::new(sys_log_repo));
 
+    let harbor_client = Arc::new(HarborClient::new(&x_rust::config::HarborConfig {
+        url: String::new(),
+        username: String::new(),
+        password: String::new(),
+    }));
+    let harbor_service = Arc::new(HarborService::new(harbor_client));
+
     let state = AppState {
         user_service,
         role_service,
@@ -279,6 +289,7 @@ async fn create_test_app() -> (axum::Router, TestDb) {
         sys_dict_service,
         sys_dict_item_service,
         sys_log_service,
+        harbor_service,
     };
     let router = create_router(state);
     (router, test_db)
@@ -317,6 +328,8 @@ async fn login(app: axum::Router, test_db: &TestDb) -> String {
                 remarks: None,
                 card: None,
                 sex: None,
+                sync_harbor: false,
+                role: None,
             },
             &1i64,
         )
@@ -484,7 +497,7 @@ async fn test_user_crud_flow() {
         ))
         .await
         .unwrap();
-    assert_eq!(delete_resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(delete_resp.status(), StatusCode::OK);
 
     let get_after = app
         .oneshot(auth_request(
