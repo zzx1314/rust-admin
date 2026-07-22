@@ -98,7 +98,10 @@ export interface HarborMember {
 const projectUrl = "/api/harbor/projects";
 
 export const getHarborStatistics = () => {
-  return http.axiosGetRequest<Result<HarborStatistics>>("/api/harbor/statistics", {});
+  return http.axiosGetRequest<Result<HarborStatistics>>(
+    "/api/harbor/statistics",
+    {}
+  );
 };
 
 export const listProjects = (query?: {
@@ -107,7 +110,10 @@ export const listProjects = (query?: {
   page?: number;
   page_size?: number;
 }) => {
-  return http.axiosGetRequest<Result<PaginatedData<HarborProject>>>(projectUrl, query);
+  return http.axiosGetRequest<Result<PaginatedData<HarborProject>>>(
+    projectUrl,
+    query
+  );
 };
 
 export const createProject = (data: {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, watch } from "vue";
+import { ref, reactive, onMounted, watch, computed } from "vue";
 import type { PaginationProps } from "@pureadmin/table";
 import { PureTableBar } from "@/components/RePureTableBar";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
@@ -7,10 +7,10 @@ import { ElMessage } from "element-plus";
 import {
   listProjects,
   listRepositories,
-  getHarborInfo,
   type HarborProject,
   type HarborRepository
 } from "@/api/harbor";
+import { useHarborStoreHook } from "@/store/modules/harbor";
 import PushCommandDialog from "../components/PushCommandDialog.vue";
 
 import Search from "~icons/ep/search";
@@ -27,7 +27,8 @@ const emit = defineEmits<{
 const loading = ref(false);
 const repositories = ref<HarborRepository[]>([]);
 const searchName = ref("");
-const registryUrl = ref("");
+const harborStore = useHarborStoreHook();
+const registryUrl = computed(() => harborStore.registryUrl);
 
 // Push dialog state
 const pushDialogVisible = ref(false);
@@ -45,7 +46,7 @@ const repoPagination = reactive<PaginationProps>({
 });
 
 const columns = [
-  { label: "仓库名称", prop: "name", slot: "name" },
+  { label: "应用名称", prop: "name", slot: "name" },
   { label: "描述", prop: "description" },
   { label: "Artifact 数", prop: "artifact_count" },
   { label: "拉取次数", prop: "pull_count" },
@@ -141,17 +142,6 @@ watch(selectedProject, val => {
   }
 });
 
-const fetchHarborInfo = async () => {
-  try {
-    const res = await getHarborInfo();
-    if (res.code === 10200 && res.data) {
-      registryUrl.value = res.data.registry_url;
-    }
-  } catch {
-    // Use default hostname fallback
-  }
-};
-
 const openPushDialog = (repoName: string) => {
   const project = props.projectName || selectedProject.value;
   if (!project) return;
@@ -160,7 +150,7 @@ const openPushDialog = (repoName: string) => {
 };
 
 onMounted(() => {
-  fetchHarborInfo();
+  harborStore.fetchRegistryUrl();
   if (!props.projectName) {
     fetchProjects();
   }
@@ -187,7 +177,7 @@ onMounted(() => {
               />
             </el-select>
           </el-form-item>
-          <el-form-item label="仓库名称">
+          <el-form-item label="应用名称">
             <el-input
               v-model="searchName"
               placeholder="搜索仓库名称"
@@ -215,7 +205,7 @@ onMounted(() => {
     </div>
 
     <PureTableBar
-      title="镜像仓库"
+      title="应用仓库"
       :columns="columns"
       @refresh="fetchRepositories"
     >
@@ -278,12 +268,13 @@ onMounted(() => {
 
 <style scoped>
 .repo-name-link {
-  cursor: pointer;
-  color: var(--el-color-primary);
   display: inline-flex;
   align-items: center;
+  color: var(--el-color-primary);
+  cursor: pointer;
   transition: color 0.2s;
 }
+
 .repo-name-link:hover {
   color: var(--el-color-primary-dark-2);
   text-decoration: underline;

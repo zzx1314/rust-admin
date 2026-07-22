@@ -281,7 +281,7 @@ export function useUser() {
     addForm.value = {
       ...addForm.value,
       ...formData,
-      role: row.roleStr ? parseInt(row.roleStr.split(",")[0]) : "",
+      role: row.roleStr ? parseInt(row.roleStr.split(",")[0]) : ""
     };
     console.log(addForm.value);
   }

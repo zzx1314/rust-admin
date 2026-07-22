@@ -1,13 +1,10 @@
 <script setup lang="ts">
-import { ref, reactive, watch, onMounted } from "vue";
+import { ref, reactive, watch, onMounted, computed } from "vue";
 import type { PaginationProps } from "@pureadmin/table";
 import { PureTableBar } from "@/components/RePureTableBar";
 import { ElMessage } from "element-plus";
-import {
-  listArtifacts,
-  getHarborInfo,
-  type HarborArtifact
-} from "@/api/harbor";
+import { listArtifacts, type HarborArtifact } from "@/api/harbor";
+import { useHarborStoreHook } from "@/store/modules/harbor";
 import ImageCommandDialog from "../components/ImageCommandDialog.vue";
 
 const props = defineProps<{
@@ -17,7 +14,8 @@ const props = defineProps<{
 
 const loading = ref(false);
 const artifacts = ref<HarborArtifact[]>([]);
-const registryUrl = ref("");
+const harborStore = useHarborStoreHook();
+const registryUrl = computed(() => harborStore.registryUrl);
 const commandDialogVisible = ref(false);
 const selectedArtifact = ref<HarborArtifact | null>(null);
 
@@ -41,19 +39,9 @@ const formatSize = (bytes?: number) => {
   if (!bytes) return "-";
   if (bytes < 1024) return bytes + " B";
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
-  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  if (bytes < 1024 * 1024 * 1024)
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
   return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
-};
-
-const fetchHarborInfo = async () => {
-  try {
-    const res = await getHarborInfo();
-    if (res.code === 10200 && res.data) {
-      registryUrl.value = res.data.registry_url;
-    }
-  } catch {
-    // Use default hostname fallback
-  }
 };
 
 const fetchArtifacts = async () => {
@@ -90,13 +78,17 @@ const handleCurrentChange = (val: number) => {
   fetchArtifacts();
 };
 
-watch(() => [props.projectName, props.repoName], () => {
-  pagination.currentPage = 1;
-  fetchArtifacts();
-}, { immediate: true });
+watch(
+  () => [props.projectName, props.repoName],
+  () => {
+    pagination.currentPage = 1;
+    fetchArtifacts();
+  },
+  { immediate: true }
+);
 
 onMounted(() => {
-  fetchHarborInfo();
+  harborStore.fetchRegistryUrl();
 });
 </script>
 
@@ -109,11 +101,11 @@ onMounted(() => {
     >
       <template v-slot="{ size, dynamicColumns }">
         <pure-table
+          :key="`artifacts-${repoName}-${artifacts.length}-${pagination.currentPage}`"
           border
           adaptive
           align-whole="center"
           table-layout="auto"
-          :key="`artifacts-${repoName}-${artifacts.length}-${pagination.currentPage}`"
           :loading="loading"
           :size="size"
           :data="artifacts"
@@ -128,7 +120,9 @@ onMounted(() => {
           @page-current-change="handleCurrentChange"
         >
           <template #tags="{ row }">
-            <div class="flex flex-wrap gap-1 items-center justify-center w-full">
+            <div
+              class="flex flex-wrap gap-1 items-center justify-center w-full"
+            >
               <el-tag
                 v-for="tag in row.tags || []"
                 :key="tag.name"
@@ -138,20 +132,30 @@ onMounted(() => {
               >
                 {{ tag.name }}
               </el-tag>
-              <span v-if="!row.tags?.length" class="text-gray-400 text-xs">无标签</span>
+              <span v-if="!row.tags?.length" class="text-gray-400 text-xs"
+                >无标签</span
+              >
             </div>
           </template>
           <template #size="{ row }">
             <span class="text-sm">{{ formatSize(row.size) }}</span>
           </template>
           <template #push_time="{ row }">
-            <span>{{ row.push_time?.startsWith('0001-01-01') ? '-' : row.push_time }}</span>
+            <span>{{
+              row.push_time?.startsWith("0001-01-01") ? "-" : row.push_time
+            }}</span>
           </template>
           <template #pull_time="{ row }">
-            <span>{{ row.pull_time?.startsWith('0001-01-01') ? '-' : row.pull_time }}</span>
+            <span>{{
+              row.pull_time?.startsWith("0001-01-01") ? "-" : row.pull_time
+            }}</span>
           </template>
           <template #commands="{ row }">
-            <el-tooltip content="查看镜像命令" placement="top" :show-after="300">
+            <el-tooltip
+              content="查看镜像命令"
+              placement="top"
+              :show-after="300"
+            >
               <el-button
                 size="small"
                 circle

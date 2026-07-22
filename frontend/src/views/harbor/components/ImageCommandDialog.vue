@@ -49,9 +49,7 @@ const firstTag = computed(() => {
 
 const hasTags = computed(() => {
   return (
-    props.artifact?.tags &&
-    props.artifact.tags.length > 0 &&
-    firstTag.value
+    props.artifact?.tags && props.artifact.tags.length > 0 && firstTag.value
   );
 });
 
@@ -62,98 +60,100 @@ interface CommandItem {
   icon: string;
 }
 
-const commandGroups = computed((): { title: string; commands: CommandItem[] }[] => {
-  if (!props.artifact) return [];
+const commandGroups = computed(
+  (): { title: string; commands: CommandItem[] }[] => {
+    if (!props.artifact) return [];
 
-  const registry = props.registryUrl || window.location.hostname;
-  const imageRepo = `${registry}/${props.projectName}/${shortRepoName.value}`;
-  const digest = props.artifact.digest || "";
+    const registry = props.registryUrl || window.location.hostname;
+    const imageRepo = `${registry}/${props.projectName}/${shortRepoName.value}`;
+    const digest = props.artifact.digest || "";
 
-  const groups: { title: string; commands: CommandItem[] }[] = [];
+    const groups: { title: string; commands: CommandItem[] }[] = [];
 
-  // --- Pull by digest section ---
-  const digestCommands: CommandItem[] = [
-    {
-      label: "Docker",
-      command: `docker pull ${imageRepo}@${digest}`,
-      description: "Docker CLI",
-      icon: "docker"
-    },
-    {
-      label: "Podman",
-      command: `podman pull ${imageRepo}@${digest}`,
-      description: "Podman CLI",
-      icon: "podman"
-    },
-    {
-      label: "nerdctl",
-      command: `nerdctl pull ${imageRepo}@${digest}`,
-      description: "nerdctl CLI (containerd)",
-      icon: "nerdctl"
-    },
-    {
-      label: "ctr",
-      command: `ctr image pull ${imageRepo}@${digest}`,
-      description: "containerd CLI",
-      icon: "containerd"
-    },
-    {
-      label: "crictl",
-      command: `crictl pull ${imageRepo}@${digest}`,
-      description: "CRI-O CLI",
-      icon: "crio"
-    }
-  ];
-
-  groups.push({
-    title: "通过 Digest 拉取",
-    commands: digestCommands
-  });
-
-  // --- Pull by tag section ---
-  if (hasTags.value) {
-    const tag = firstTag.value;
-    const tagCommands: CommandItem[] = [
+    // --- Pull by digest section ---
+    const digestCommands: CommandItem[] = [
       {
         label: "Docker",
-        command: `docker pull ${imageRepo}:${tag}`,
+        command: `docker pull ${imageRepo}@${digest}`,
         description: "Docker CLI",
         icon: "docker"
       },
       {
         label: "Podman",
-        command: `podman pull ${imageRepo}:${tag}`,
+        command: `podman pull ${imageRepo}@${digest}`,
         description: "Podman CLI",
         icon: "podman"
       },
       {
         label: "nerdctl",
-        command: `nerdctl pull ${imageRepo}:${tag}`,
+        command: `nerdctl pull ${imageRepo}@${digest}`,
         description: "nerdctl CLI (containerd)",
         icon: "nerdctl"
       },
       {
         label: "ctr",
-        command: `ctr image pull ${imageRepo}:${tag}`,
+        command: `ctr image pull ${imageRepo}@${digest}`,
         description: "containerd CLI",
         icon: "containerd"
       },
       {
         label: "crictl",
-        command: `crictl pull ${imageRepo}:${tag}`,
+        command: `crictl pull ${imageRepo}@${digest}`,
         description: "CRI-O CLI",
         icon: "crio"
       }
     ];
 
     groups.push({
-      title: `通过 Tag 拉取 (${tag})`,
-      commands: tagCommands
+      title: "通过 Digest 拉取",
+      commands: digestCommands
     });
-  }
 
-  return groups;
-});
+    // --- Pull by tag section ---
+    if (hasTags.value) {
+      const tag = firstTag.value;
+      const tagCommands: CommandItem[] = [
+        {
+          label: "Docker",
+          command: `docker pull ${imageRepo}:${tag}`,
+          description: "Docker CLI",
+          icon: "docker"
+        },
+        {
+          label: "Podman",
+          command: `podman pull ${imageRepo}:${tag}`,
+          description: "Podman CLI",
+          icon: "podman"
+        },
+        {
+          label: "nerdctl",
+          command: `nerdctl pull ${imageRepo}:${tag}`,
+          description: "nerdctl CLI (containerd)",
+          icon: "nerdctl"
+        },
+        {
+          label: "ctr",
+          command: `ctr image pull ${imageRepo}:${tag}`,
+          description: "containerd CLI",
+          icon: "containerd"
+        },
+        {
+          label: "crictl",
+          command: `crictl pull ${imageRepo}:${tag}`,
+          description: "CRI-O CLI",
+          icon: "crio"
+        }
+      ];
+
+      groups.push({
+        title: `通过 Tag 拉取 (${tag})`,
+        commands: tagCommands
+      });
+    }
+
+    return groups;
+  }
+);
 
 const copyText = async (text: string, label: string) => {
   try {
@@ -193,12 +193,12 @@ const handleCopy = (text: string, label: string, key: string) => {
 <template>
   <el-dialog
     :model-value="dialogVisible"
-    @update:model-value="emit('update:visible', $event)"
     title="镜像命令"
     width="680px"
     :close-on-click-modal="false"
     destroy-on-close
     class="image-command-dialog"
+    @update:model-value="emit('update:visible', $event)"
   >
     <div class="command-dialog-body">
       <!-- Image path header -->
@@ -206,10 +206,7 @@ const handleCopy = (text: string, label: string, key: string) => {
         <div class="path-label">镜像路径</div>
         <div class="path-value">
           <span class="path-text">{{ imagePath }}</span>
-          <el-tooltip
-            content="复制镜像路径"
-            placement="top"
-          >
+          <el-tooltip content="复制镜像路径" placement="top">
             <el-button
               text
               size="small"
@@ -228,10 +225,12 @@ const handleCopy = (text: string, label: string, key: string) => {
       </div>
 
       <!-- Digest -->
-      <div class="digest-info" v-if="props.artifact?.digest">
+      <div v-if="props.artifact?.digest" class="digest-info">
         <div class="digest-label">摘要 (Digest)</div>
         <div class="digest-value">
-          <code class="digest-text">{{ props.artifact.digest.substring(0, 32) }}...</code>
+          <code class="digest-text"
+            >{{ props.artifact.digest.substring(0, 32) }}...</code
+          >
           <el-tooltip content="复制完整摘要" placement="top">
             <el-button
               text
@@ -240,7 +239,9 @@ const handleCopy = (text: string, label: string, key: string) => {
               @click="handleCopy(props.artifact!.digest!, '摘要', 'digest')"
             >
               <IconifyIconOffline
-                :icon="copiedIndex === 'digest' ? 'ep:check' : 'ep:copy-document'"
+                :icon="
+                  copiedIndex === 'digest' ? 'ep:check' : 'ep:copy-document'
+                "
                 :class="{ 'copied-icon': copiedIndex === 'digest' }"
                 width="14"
                 height="14"
@@ -270,11 +271,7 @@ const handleCopy = (text: string, label: string, key: string) => {
         >
           <div class="command-info">
             <span class="command-icon" :class="`icon-${cmd.icon}`">
-              <IconifyIconOffline
-                icon="ep:terminal"
-                width="18"
-                height="18"
-              />
+              <IconifyIconOffline icon="ep:terminal" width="18" height="18" />
             </span>
             <div class="command-meta">
               <span class="command-label">{{ cmd.label }}</span>
@@ -291,11 +288,21 @@ const handleCopy = (text: string, label: string, key: string) => {
               @click="handleCopy(cmd.command, cmd.label, `${gIdx}-${cIdx}`)"
             >
               <template v-if="copiedIndex === `${gIdx}-${cIdx}`">
-                <IconifyIconOffline icon="ep:check" width="14" height="14" class="mr-1" />
+                <IconifyIconOffline
+                  icon="ep:check"
+                  width="14"
+                  height="14"
+                  class="mr-1"
+                />
                 已复制
               </template>
               <template v-else>
-                <IconifyIconOffline icon="ep:copy-document" width="14" height="14" class="mr-1" />
+                <IconifyIconOffline
+                  icon="ep:copy-document"
+                  width="14"
+                  height="14"
+                  class="mr-1"
+                />
                 复制
               </template>
             </el-button>
@@ -304,7 +311,7 @@ const handleCopy = (text: string, label: string, key: string) => {
       </div>
 
       <!-- Tags info -->
-      <div class="tags-info" v-if="hasTags">
+      <div v-if="hasTags" class="tags-info">
         <span class="tags-label">可用标签:</span>
         <el-tag
           v-for="tag in props.artifact?.tags"
@@ -320,7 +327,7 @@ const handleCopy = (text: string, label: string, key: string) => {
 
       <div class="dialog-footer-info">
         <el-alert
-          title="提示：请确保已在本地登录到镜像仓库，使用 `docker login` 或对应 CLI 的登录命令进行身份验证。"
+          title="提示：请确保已在本地登录到应用仓库，使用 `docker login` 或对应 CLI 的登录命令进行身份验证。"
           type="info"
           :closable="false"
           show-icon
@@ -346,6 +353,7 @@ const handleCopy = (text: string, label: string, key: string) => {
   &::-webkit-scrollbar {
     width: 4px;
   }
+
   &::-webkit-scrollbar-thumb {
     background: var(--el-border-color-darker);
     border-radius: 4px;
@@ -353,25 +361,29 @@ const handleCopy = (text: string, label: string, key: string) => {
 }
 
 .image-path-header {
-  background: linear-gradient(135deg, var(--el-color-primary-light-9), var(--el-color-info-light-9));
-  border: 1px solid var(--el-border-color-light);
-  border-radius: 8px;
   padding: 12px 16px;
   margin-bottom: 12px;
+  background: linear-gradient(
+    135deg,
+    var(--el-color-primary-light-9),
+    var(--el-color-info-light-9)
+  );
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 8px;
 
   .path-label {
+    margin-bottom: 4px;
     font-size: 12px;
     color: var(--el-text-color-secondary);
-    margin-bottom: 4px;
   }
 
   .path-value {
     display: flex;
-    align-items: center;
     gap: 8px;
+    align-items: center;
 
     .path-text {
-      font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+      font-family: Menlo, Monaco, "Courier New", monospace;
       font-size: 14px;
       font-weight: 600;
       color: var(--el-color-primary);
@@ -386,12 +398,12 @@ const handleCopy = (text: string, label: string, key: string) => {
 
 .digest-info {
   display: flex;
-  align-items: center;
   gap: 8px;
+  align-items: center;
   padding: 8px 16px;
+  margin-bottom: 16px;
   background: var(--el-fill-color-light);
   border-radius: 6px;
-  margin-bottom: 16px;
 
   .digest-label {
     font-size: 12px;
@@ -401,12 +413,12 @@ const handleCopy = (text: string, label: string, key: string) => {
 
   .digest-value {
     display: flex;
-    align-items: center;
-    gap: 6px;
     flex: 1;
+    gap: 6px;
+    align-items: center;
 
     .digest-text {
-      font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+      font-family: Menlo, Monaco, "Courier New", monospace;
       font-size: 12px;
       color: var(--el-text-color-regular);
       background: transparent;
@@ -428,13 +440,13 @@ const handleCopy = (text: string, label: string, key: string) => {
 
 .command-group-title {
   display: flex;
-  align-items: center;
   gap: 6px;
+  align-items: center;
+  padding-bottom: 6px;
+  margin-bottom: 10px;
   font-size: 13px;
   font-weight: 600;
   color: var(--el-text-color-primary);
-  margin-bottom: 10px;
-  padding-bottom: 6px;
   border-bottom: 1px solid var(--el-border-color-light);
 
   .ml-2 {
@@ -443,38 +455,39 @@ const handleCopy = (text: string, label: string, key: string) => {
 }
 
 .command-item {
+  padding: 10px 12px;
+  margin-bottom: 8px;
   background: var(--el-fill-color-blank);
   border: 1px solid var(--el-border-color-light);
   border-radius: 8px;
-  padding: 10px 12px;
-  margin-bottom: 8px;
   transition: all 0.2s ease;
 
   &:hover {
     border-color: var(--el-color-primary-light-5);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    box-shadow: 0 2px 8px rgb(0 0 0 / 6%);
   }
 }
 
 .command-info {
   display: flex;
-  align-items: center;
   gap: 8px;
+  align-items: center;
   margin-bottom: 8px;
 
   .command-icon {
     display: flex;
+    flex-shrink: 0;
     align-items: center;
     justify-content: center;
     width: 28px;
     height: 28px;
-    border-radius: 6px;
     background: var(--el-fill-color);
-    flex-shrink: 0;
+    border-radius: 6px;
 
     &.icon-docker {
       background: #0db7ed20;
     }
+
     &.icon-podman {
       background: #892ca020;
     }
@@ -499,25 +512,26 @@ const handleCopy = (text: string, label: string, key: string) => {
 
 .command-code-row {
   display: flex;
-  align-items: center;
   gap: 8px;
+  align-items: center;
 
   .command-code {
     flex: 1;
-    font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+    padding: 6px 10px;
+    overflow-x: auto;
+    font-family: Menlo, Monaco, "Courier New", monospace;
     font-size: 12.5px;
     color: var(--el-text-color-regular);
-    background: var(--el-fill-color);
-    padding: 6px 10px;
-    border-radius: 4px;
     white-space: nowrap;
-    overflow-x: auto;
-    user-select: all;
     cursor: text;
+    user-select: all;
+    background: var(--el-fill-color);
+    border-radius: 4px;
 
     &::-webkit-scrollbar {
       height: 2px;
     }
+
     &::-webkit-scrollbar-thumb {
       background: var(--el-border-color-darker);
       border-radius: 2px;
@@ -530,8 +544,8 @@ const handleCopy = (text: string, label: string, key: string) => {
 
   .copy-btn {
     flex-shrink: 0;
-    transition: all 0.2s ease;
     min-width: 72px;
+    transition: all 0.2s ease;
 
     &.is-copied {
       border-color: var(--el-color-success);
@@ -541,13 +555,13 @@ const handleCopy = (text: string, label: string, key: string) => {
 
 .tags-info {
   display: flex;
-  align-items: center;
   flex-wrap: wrap;
   gap: 6px;
+  align-items: center;
   padding: 10px 14px;
+  margin-bottom: 12px;
   background: var(--el-fill-color-light);
   border-radius: 6px;
-  margin-bottom: 12px;
 
   .tags-label {
     font-size: 12px;

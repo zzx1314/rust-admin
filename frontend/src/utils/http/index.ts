@@ -166,7 +166,10 @@ class PureHttp {
         // 处理其他错误
         if (response.status === 500) {
           message("服务器错误", { type: "error" });
-        } else if ([400, 401, 424].includes(response.status) && response.data?.msg) {
+        } else if (
+          [400, 401, 424].includes(response.status) &&
+          response.data?.msg
+        ) {
           message(response.data.msg, { type: "error" });
         } else if (response.data?.msg) {
           message(response.data.msg, { type: "error" });

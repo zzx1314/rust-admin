@@ -130,12 +130,12 @@ const getSectionCommands = (section: string) => {
 <template>
   <el-dialog
     :model-value="dialogVisible"
-    @update:model-value="emit('update:visible', $event)"
     title="推送命令"
     width="680px"
     :close-on-click-modal="false"
     destroy-on-close
     class="push-command-dialog"
+    @update:model-value="emit('update:visible', $event)"
   >
     <div class="command-dialog-body">
       <!-- Project path header -->
@@ -165,26 +165,35 @@ const getSectionCommands = (section: string) => {
       <div class="steps-hint">
         <div class="step">
           <span class="step-num">1</span>
-          <span>为本地镜像打标签：<code>docker tag SOURCE_IMAGE[:TAG] {{ projectPath }}/REPOSITORY[:TAG]</code></span>
+          <span
+            >为本地镜像打标签：<code
+              >docker tag SOURCE_IMAGE[:TAG]
+              {{ projectPath }}/REPOSITORY[:TAG]</code
+            ></span
+          >
         </div>
         <div class="step">
           <span class="step-num">2</span>
-          <span>登录到镜像仓库：<code>docker login {{ registryHost }}</code></span>
+          <span
+            >登录到镜像仓库：<code>docker login {{ registryHost }}</code></span
+          >
         </div>
         <div class="step">
           <span class="step-num">3</span>
-          <span>推送镜像：<code>docker push {{ projectPath }}/REPOSITORY[:TAG]</code></span>
+          <span
+            >推送镜像：<code
+              >docker push {{ projectPath }}/REPOSITORY[:TAG]</code
+            ></span
+          >
         </div>
       </div>
 
       <!-- Command sections -->
-      <div
-        v-for="section in sectionKeys"
-        :key="section"
-        class="command-group"
-      >
+      <div v-for="section in sectionKeys" :key="section" class="command-group">
         <div class="command-group-title">
-          <el-icon><IconifyIconOffline icon="ep:upload" width="16" height="16" /></el-icon>
+          <el-icon
+            ><IconifyIconOffline icon="ep:upload" width="16" height="16"
+          /></el-icon>
           <span>{{ section }}</span>
           <el-tag
             v-if="section === '示例'"
@@ -213,18 +222,30 @@ const getSectionCommands = (section: string) => {
           <div class="command-code-row">
             <code class="command-code">{{ cmd.command }}</code>
             <el-button
-              :type="copiedIndex === `${section}-${cIdx}` ? 'success' : 'primary'"
+              :type="
+                copiedIndex === `${section}-${cIdx}` ? 'success' : 'primary'
+              "
               size="small"
               class="copy-btn"
               :class="{ 'is-copied': copiedIndex === `${section}-${cIdx}` }"
               @click="handleCopy(cmd.command, cmd.label, `${section}-${cIdx}`)"
             >
               <template v-if="copiedIndex === `${section}-${cIdx}`">
-                <IconifyIconOffline icon="ep:check" width="14" height="14" class="mr-1" />
+                <IconifyIconOffline
+                  icon="ep:check"
+                  width="14"
+                  height="14"
+                  class="mr-1"
+                />
                 已复制
               </template>
               <template v-else>
-                <IconifyIconOffline icon="ep:copy-document" width="14" height="14" class="mr-1" />
+                <IconifyIconOffline
+                  icon="ep:copy-document"
+                  width="14"
+                  height="14"
+                  class="mr-1"
+                />
                 复制
               </template>
             </el-button>
@@ -260,6 +281,7 @@ const getSectionCommands = (section: string) => {
   &::-webkit-scrollbar {
     width: 4px;
   }
+
   &::-webkit-scrollbar-thumb {
     background: var(--el-border-color-darker);
     border-radius: 4px;
@@ -267,25 +289,29 @@ const getSectionCommands = (section: string) => {
 }
 
 .project-path-header {
-  background: linear-gradient(135deg, var(--el-color-warning-light-9), var(--el-color-danger-light-9));
-  border: 1px solid var(--el-border-color-light);
-  border-radius: 8px;
   padding: 12px 16px;
   margin-bottom: 12px;
+  background: linear-gradient(
+    135deg,
+    var(--el-color-warning-light-9),
+    var(--el-color-danger-light-9)
+  );
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 8px;
 
   .path-label {
+    margin-bottom: 4px;
     font-size: 12px;
     color: var(--el-text-color-secondary);
-    margin-bottom: 4px;
   }
 
   .path-value {
     display: flex;
-    align-items: center;
     gap: 8px;
+    align-items: center;
 
     .path-text {
-      font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+      font-family: Menlo, Monaco, "Courier New", monospace;
       font-size: 14px;
       font-weight: 600;
       color: var(--el-color-danger);
@@ -299,18 +325,18 @@ const getSectionCommands = (section: string) => {
 }
 
 .steps-hint {
-  background: var(--el-fill-color-light);
-  border-radius: 8px;
   padding: 12px 16px;
   margin-bottom: 16px;
+  background: var(--el-fill-color-light);
+  border-radius: 8px;
 
   .step {
     display: flex;
-    align-items: center;
     gap: 8px;
+    align-items: center;
+    margin-bottom: 6px;
     font-size: 12px;
     color: var(--el-text-color-regular);
-    margin-bottom: 6px;
 
     &:last-child {
       margin-bottom: 0;
@@ -318,23 +344,23 @@ const getSectionCommands = (section: string) => {
 
     .step-num {
       display: inline-flex;
+      flex-shrink: 0;
       align-items: center;
       justify-content: center;
       width: 20px;
       height: 20px;
-      border-radius: 50%;
-      background: var(--el-color-primary);
-      color: #fff;
       font-size: 11px;
       font-weight: 600;
-      flex-shrink: 0;
+      color: #fff;
+      background: var(--el-color-primary);
+      border-radius: 50%;
     }
 
     code {
-      font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+      padding: 1px 6px;
+      font-family: Menlo, Monaco, "Courier New", monospace;
       font-size: 11px;
       background: var(--el-fill-color);
-      padding: 1px 6px;
       border-radius: 3px;
     }
   }
@@ -350,49 +376,50 @@ const getSectionCommands = (section: string) => {
 
 .command-group-title {
   display: flex;
-  align-items: center;
   gap: 6px;
+  align-items: center;
+  padding-bottom: 6px;
+  margin-bottom: 10px;
   font-size: 13px;
   font-weight: 600;
   color: var(--el-text-color-primary);
-  margin-bottom: 10px;
-  padding-bottom: 6px;
   border-bottom: 1px solid var(--el-border-color-light);
 }
 
 .command-item {
+  padding: 10px 12px;
+  margin-bottom: 8px;
   background: var(--el-fill-color-blank);
   border: 1px solid var(--el-border-color-light);
   border-radius: 8px;
-  padding: 10px 12px;
-  margin-bottom: 8px;
   transition: all 0.2s ease;
 
   &:hover {
     border-color: var(--el-color-primary-light-5);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    box-shadow: 0 2px 8px rgb(0 0 0 / 6%);
   }
 }
 
 .command-info {
   display: flex;
-  align-items: center;
   gap: 8px;
+  align-items: center;
   margin-bottom: 8px;
 
   .command-icon {
     display: flex;
+    flex-shrink: 0;
     align-items: center;
     justify-content: center;
     width: 28px;
     height: 28px;
-    border-radius: 6px;
     background: var(--el-fill-color);
-    flex-shrink: 0;
+    border-radius: 6px;
 
     &.icon-docker {
       background: #0db7ed20;
     }
+
     &.icon-podman {
       background: #892ca020;
     }
@@ -417,25 +444,26 @@ const getSectionCommands = (section: string) => {
 
 .command-code-row {
   display: flex;
-  align-items: center;
   gap: 8px;
+  align-items: center;
 
   .command-code {
     flex: 1;
-    font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+    padding: 6px 10px;
+    overflow-x: auto;
+    font-family: Menlo, Monaco, "Courier New", monospace;
     font-size: 12.5px;
     color: var(--el-text-color-regular);
-    background: var(--el-fill-color);
-    padding: 6px 10px;
-    border-radius: 4px;
     white-space: nowrap;
-    overflow-x: auto;
-    user-select: all;
     cursor: text;
+    user-select: all;
+    background: var(--el-fill-color);
+    border-radius: 4px;
 
     &::-webkit-scrollbar {
       height: 2px;
     }
+
     &::-webkit-scrollbar-thumb {
       background: var(--el-border-color-darker);
       border-radius: 2px;
@@ -448,8 +476,8 @@ const getSectionCommands = (section: string) => {
 
   .copy-btn {
     flex-shrink: 0;
-    transition: all 0.2s ease;
     min-width: 72px;
+    transition: all 0.2s ease;
 
     &.is-copied {
       border-color: var(--el-color-success);

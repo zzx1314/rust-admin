@@ -282,12 +282,13 @@ onMounted(fetchProjects);
 
 <style scoped>
 .project-name-link {
-  cursor: pointer;
-  color: var(--el-color-primary);
   display: inline-flex;
   align-items: center;
+  color: var(--el-color-primary);
+  cursor: pointer;
   transition: color 0.2s;
 }
+
 .project-name-link:hover {
   color: var(--el-color-primary-dark-2);
   text-decoration: underline;

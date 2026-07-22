@@ -87,7 +87,7 @@ const onTabClick = (tab: TabsPaneContext) => {
         <el-tab-pane label="项目概要" name="projects">
           <ProjectTab @select-project="handleSelectProject" />
         </el-tab-pane>
-        <el-tab-pane label="镜像仓库" name="repos">
+        <el-tab-pane label="应用仓库" name="repos">
           <!-- Switch between repository list and artifact detail in the same tab -->
           <RepositoryTab
             v-if="!drillRepo"
@@ -114,16 +114,16 @@ const onTabClick = (tab: TabsPaneContext) => {
 }
 
 .harbor-breadcrumb {
-  margin-bottom: 12px;
   padding: 8px 12px;
+  margin-bottom: 12px;
   background: var(--el-bg-color);
   border-radius: 6px;
 }
 
 .breadcrumb-link {
-  cursor: pointer;
-  color: var(--el-text-color-secondary);
   font-size: 13px;
+  color: var(--el-text-color-secondary);
+  cursor: pointer;
   transition: color 0.2s;
 
   &:hover {
@@ -131,15 +131,15 @@ const onTabClick = (tab: TabsPaneContext) => {
   }
 
   &.is-active {
-    color: var(--el-text-color-primary);
     font-weight: 600;
+    color: var(--el-text-color-primary);
     cursor: default;
   }
 }
 
 .harbor-tabs-wrapper {
+  padding: 8px 16px;
   background: var(--el-bg-color);
   border-radius: 6px;
-  padding: 8px 16px;
 }
 </style>

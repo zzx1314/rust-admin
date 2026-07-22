@@ -3,7 +3,11 @@ import { ref, onMounted, reactive } from "vue";
 import ReCol from "@/components/ReCol";
 import { useDark } from "./utils";
 import { ReNormalCountTo } from "@/components/ReCountTo";
-import { getHarborStatistics, type HarborStatistics, type RepoStat } from "@/api/harbor";
+import {
+  getHarborStatistics,
+  type HarborStatistics,
+  type RepoStat
+} from "@/api/harbor";
 import { ElMessage } from "element-plus";
 
 import StoreLine from "~icons/ri/store-2-line";
@@ -77,10 +81,12 @@ const publicPercent = ref(0);
 onMounted(async () => {
   await fetchStatistics();
   if (stats.value) {
-    const total = stats.value.public_project_count + stats.value.private_project_count;
-    publicPercent.value = total > 0
-      ? Math.round((stats.value.public_project_count / total) * 100)
-      : 0;
+    const total =
+      stats.value.public_project_count + stats.value.private_project_count;
+    publicPercent.value =
+      total > 0
+        ? Math.round((stats.value.public_project_count / total) * 100)
+        : 0;
   }
 });
 </script>
@@ -109,7 +115,9 @@ onMounted(async () => {
               <span class="text-md font-medium">{{ item.name }}</span>
               <div
                 class="w-10 h-10 flex justify-center items-center rounded-lg"
-                :style="{ backgroundColor: isDark ? 'transparent' : item.bgColor }"
+                :style="{
+                  backgroundColor: isDark ? 'transparent' : item.bgColor
+                }"
               >
                 <IconifyIconOffline
                   :icon="item.icon"
@@ -172,12 +180,18 @@ onMounted(async () => {
                   {{ idx + 1 }}
                 </span>
                 <div class="min-w-0 flex-1">
-                  <p class="text-sm font-medium truncate">{{ repo.project_name }}/{{ repo.name.split('/').pop() }}</p>
-                  <p class="text-xs text-gray-400 truncate">{{ repo.project_name }}</p>
+                  <p class="text-sm font-medium truncate">
+                    {{ repo.project_name }}/{{ repo.name.split("/").pop() }}
+                  </p>
+                  <p class="text-xs text-gray-400 truncate">
+                    {{ repo.project_name }}
+                  </p>
                 </div>
               </div>
               <div class="text-right flex-shrink-0 ml-3">
-                <p class="text-sm font-semibold text-orange-500">{{ repo.pull_count.toLocaleString() }}</p>
+                <p class="text-sm font-semibold text-orange-500">
+                  {{ repo.pull_count.toLocaleString() }}
+                </p>
                 <p class="text-xs text-gray-400">拉取</p>
               </div>
               <div class="text-right flex-shrink-0 ml-4">
@@ -234,15 +248,21 @@ onMounted(async () => {
                   <p class="text-xs text-gray-400">
                     {{ project.repo_count || 0 }} 个仓库
                     <template v-if="project.metadata?.public === 'true'">
-                      <el-tag size="small" type="success" class="ml-1">公开</el-tag>
+                      <el-tag size="small" type="success" class="ml-1"
+                        >公开</el-tag
+                      >
                     </template>
                     <template v-else>
-                      <el-tag size="small" type="info" class="ml-1">私有</el-tag>
+                      <el-tag size="small" type="info" class="ml-1"
+                        >私有</el-tag
+                      >
                     </template>
                   </p>
                 </div>
               </div>
-              <p class="text-xs text-gray-400 flex-shrink-0 ml-3">{{ project.creation_time }}</p>
+              <p class="text-xs text-gray-400 flex-shrink-0 ml-3">
+                {{ project.creation_time }}
+              </p>
             </div>
           </div>
           <el-empty v-else description="暂无数据" :image-size="60" />
@@ -266,20 +286,32 @@ onMounted(async () => {
             <div class="text-center">
               <div class="flex items-center justify-center gap-8 flex-wrap">
                 <div class="text-center">
-                  <div class="w-16 h-16 rounded-full bg-green-100 dark:bg-green-900/30 flex items-center justify-center mx-auto">
-                    <span class="text-2xl font-bold text-green-500">{{ stats?.public_project_count || 0 }}</span>
+                  <div
+                    class="w-16 h-16 rounded-full bg-green-100 dark:bg-green-900/30 flex items-center justify-center mx-auto"
+                  >
+                    <span class="text-2xl font-bold text-green-500">{{
+                      stats?.public_project_count || 0
+                    }}</span>
                   </div>
                   <p class="text-xs text-gray-500 mt-2">
-                    <span class="inline-block w-2 h-2 rounded-full bg-green-500 mr-1"></span>
+                    <span
+                      class="inline-block w-2 h-2 rounded-full bg-green-500 mr-1"
+                    />
                     公开项目
                   </p>
                 </div>
                 <div class="text-center">
-                  <div class="w-16 h-16 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center mx-auto">
-                    <span class="text-2xl font-bold text-blue-500">{{ stats?.private_project_count || 0 }}</span>
+                  <div
+                    class="w-16 h-16 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center mx-auto"
+                  >
+                    <span class="text-2xl font-bold text-blue-500">{{
+                      stats?.private_project_count || 0
+                    }}</span>
                   </div>
                   <p class="text-xs text-gray-500 mt-2">
-                    <span class="inline-block w-2 h-2 rounded-full bg-blue-500 mr-1"></span>
+                    <span
+                      class="inline-block w-2 h-2 rounded-full bg-blue-500 mr-1"
+                    />
                     私有项目
                   </p>
                 </div>
@@ -313,27 +345,41 @@ onMounted(async () => {
             <span class="text-md font-medium">数据汇总</span>
           </div>
           <div class="grid grid-cols-2 gap-4 py-2">
-            <div class="stat-item text-center p-3 rounded-lg bg-gray-50 dark:bg-gray-800">
-              <p class="text-2xl font-bold text-primary">{{ (stats?.total_artifacts ?? 0).toLocaleString() }}</p>
+            <div
+              class="stat-item text-center p-3 rounded-lg bg-gray-50 dark:bg-gray-800"
+            >
+              <p class="text-2xl font-bold text-primary">
+                {{ (stats?.total_artifacts ?? 0).toLocaleString() }}
+              </p>
               <p class="text-xs text-gray-400 mt-1">制品总数</p>
             </div>
-            <div class="stat-item text-center p-3 rounded-lg bg-gray-50 dark:bg-gray-800">
-              <p class="text-2xl font-bold text-orange-500">{{ (stats?.total_pull_count ?? 0).toLocaleString() }}</p>
+            <div
+              class="stat-item text-center p-3 rounded-lg bg-gray-50 dark:bg-gray-800"
+            >
+              <p class="text-2xl font-bold text-orange-500">
+                {{ (stats?.total_pull_count ?? 0).toLocaleString() }}
+              </p>
               <p class="text-xs text-gray-400 mt-1">总拉取次数</p>
             </div>
-            <div class="stat-item text-center p-3 rounded-lg bg-gray-50 dark:bg-gray-800">
-              <p class="text-2xl font-bold text-green-500">{{ stats?.total_projects ?? 0 }}</p>
+            <div
+              class="stat-item text-center p-3 rounded-lg bg-gray-50 dark:bg-gray-800"
+            >
+              <p class="text-2xl font-bold text-green-500">
+                {{ stats?.total_projects ?? 0 }}
+              </p>
               <p class="text-xs text-gray-400 mt-1">项目总数</p>
             </div>
-            <div class="stat-item text-center p-3 rounded-lg bg-gray-50 dark:bg-gray-800">
-              <p class="text-2xl font-bold text-purple-500">{{ stats?.total_repositories ?? 0 }}</p>
+            <div
+              class="stat-item text-center p-3 rounded-lg bg-gray-50 dark:bg-gray-800"
+            >
+              <p class="text-2xl font-bold text-purple-500">
+                {{ stats?.total_repositories ?? 0 }}
+              </p>
               <p class="text-xs text-gray-400 mt-1">镜像总数</p>
             </div>
           </div>
         </el-card>
       </re-col>
-
-
     </el-row>
   </div>
 </template>
@@ -366,10 +412,10 @@ onMounted(async () => {
   height: 100%;
 
   :deep(.el-card__body) {
-    height: 100%;
     display: flex;
     flex-direction: column;
     justify-content: center;
+    height: 100%;
   }
 }
 </style>
