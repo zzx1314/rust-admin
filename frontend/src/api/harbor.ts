@@ -129,7 +129,8 @@ export const deleteProject = (projectName: string) => {
 
 export const getProjectSummary = (projectName: string) => {
   return http.axiosGetRequest<Result<ProjectSummary>>(
-    `${projectUrl}/${projectName}/summary`
+    `${projectUrl}/${projectName}/summary`,
+    {}
   );
 };
 
