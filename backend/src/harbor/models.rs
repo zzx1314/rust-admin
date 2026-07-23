@@ -307,7 +307,7 @@ pub struct HarborWebhookPayload {
     #[serde(alias = "type")]
     pub event_type: String,
     #[serde(alias = "occur_at")]
-    pub occur_at: Option<String>,
+    pub occur_at: Option<serde_json::Value>,
     pub operator: Option<String>,
     #[serde(alias = "event_data")]
     pub event_data: HarborWebhookEventData,
