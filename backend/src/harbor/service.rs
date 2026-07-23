@@ -6,8 +6,8 @@ use crate::harbor::models::{
     ChangePasswordRequest, CreateHarborUserRequest, CreateMemberRequest, CreateProjectRequest,
     CreateRegistryRequest, CreateReplicationPolicyRequest, HarborArtifact, HarborInfo, HarborMember,
     HarborProject, HarborRegistry, HarborRepository, HarborStatistics, HarborUser, ProjectQuery, ProjectSummary,
-    RegistryCredential, ReplicationExecution, ReplicationExecutionRequest, ReplicationFilter, ReplicationPolicy,
-    ReplicationTrigger, RepoStat,
+    RegistryCredential, RegistryEntity, ReplicationExecution, ReplicationExecutionRequest, ReplicationFilter,
+    ReplicationPolicy, ReplicationTrigger, RepoStat,
 };
 use std::sync::Arc;
 
@@ -773,6 +773,35 @@ impl HarborService {
         false
     }
 
+    /// Harbor create endpoints (e.g. replication policies/executions) return 201 with an empty
+    /// body and the resource URL in the `Location` header. Extract the trailing numeric ID.
+    fn extract_created_id(response: &reqwest::Response, resource_name: &str) -> Result<i64, AppError> {
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|h| h.to_str().ok())
+            .ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "Harbor did not return a Location header for the created {}",
+                    resource_name
+                ))
+            })?;
+
+        let id = location
+            .split('/')
+            .last()
+            .unwrap_or("")
+            .parse::<i64>()
+            .map_err(|_| {
+                AppError::BadRequest(format!(
+                    "Invalid Location header from Harbor: {}",
+                    location
+                ))
+            })?;
+
+        Ok(id)
+    }
+
     pub async fn create_replication_policy(
         &self,
         req: &CreateReplicationPolicyRequest,
@@ -800,8 +829,11 @@ impl HarborService {
             return Err(Self::map_harbor_error(status, &body));
         }
 
-        response.json::<ReplicationPolicy>().await.map_err(|e| {
-            AppError::BadRequest(format!("Failed to parse Harbor replication policy: {}", e))
+        // Harbor returns 201 with an empty body; the new policy ID is in the Location header.
+        let id = Self::extract_created_id(&response, "replication policy")?;
+        Ok(ReplicationPolicy {
+            id,
+            name: req.name.clone(),
         })
     }
 
@@ -849,8 +881,12 @@ impl HarborService {
             return Err(Self::map_harbor_error(status, &body));
         }
 
-        response.json::<ReplicationExecution>().await.map_err(|e| {
-            AppError::BadRequest(format!("Failed to parse Harbor replication execution: {}", e))
+        // Harbor returns 201 with an empty body; the new execution ID is in the Location header.
+        let id = Self::extract_created_id(&response, "replication execution")?;
+        Ok(ReplicationExecution {
+            id,
+            policy_id,
+            status: "InProgress".to_string(),
         })
     }
 
@@ -934,8 +970,8 @@ impl HarborService {
         let req = CreateReplicationPolicyRequest {
             name: policy_name.clone(),
             description: Some(format!("Temporary policy to approve {}/{}", repository_name, tag)),
-            src_registry_id: None,
-            dest_registry_id: registry_id,
+            src_registry: None,
+            dest_registry: Some(RegistryEntity { id: registry_id }),
             dest_namespace: dest_project.to_string(),
             trigger: ReplicationTrigger {
                 trigger_settings: None,

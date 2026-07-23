@@ -247,26 +247,32 @@ pub struct CreateRegistryRequest {
 pub struct ReplicationTrigger {
     #[serde(alias = "trigger_settings")]
     pub trigger_settings: Option<serde_json::Value>,
-    #[serde(alias = "type")]
+    #[serde(rename = "type")]
     pub trigger_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicationFilter {
-    #[serde(alias = "type")]
+    #[serde(rename = "type")]
     pub filter_type: String,
     pub value: String,
+}
+
+/// Minimal registry reference used when creating a replication policy.
+/// Harbor expects `src_registry`/`dest_registry` to be objects containing an `id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryEntity {
+    pub id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateReplicationPolicyRequest {
     pub name: String,
     pub description: Option<String>,
-    #[serde(alias = "src_registry_id")]
-    pub src_registry_id: Option<i64>,
-    #[serde(alias = "dest_registry_id")]
-    pub dest_registry_id: i64,
-    #[serde(alias = "dest_namespace")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_registry: Option<RegistryEntity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dest_registry: Option<RegistryEntity>,
     pub dest_namespace: String,
     pub trigger: ReplicationTrigger,
     pub filters: Vec<ReplicationFilter>,
