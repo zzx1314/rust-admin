@@ -244,6 +244,8 @@ async fn create_test_app() -> (axum::Router, TestDb) {
     use x_rust::system::sys_log::service::SysLogService;
     use x_rust::system::sys_user::repository::SeaOrmUserRepository;
     use x_rust::system::sys_user::service::UserService;
+    use x_rust::app_review::repository::SeaOrmAppReviewRepository;
+    use x_rust::app_review::service::AppReviewService;
 
     let conn = Arc::new(conn);
     let org_repo: Arc<dyn OrgRepository> = Arc::new(SeaOrmOrgRepository::new(conn.clone()));
@@ -276,8 +278,18 @@ async fn create_test_app() -> (axum::Router, TestDb) {
         url: String::new(),
         username: String::new(),
         password: String::new(),
+        staging_project: "staging-project".to_string(),
+        production_project: "production-project".to_string(),
+        registry_endpoint_id: None,
+        registry_insecure: None,
+        webhook_secret: None,
+        replication_timeout_secs: 30,
     }));
     let harbor_service = Arc::new(HarborService::new(harbor_client));
+    let harbor_config = None;
+
+    let app_review_repo = SeaOrmAppReviewRepository::new(conn.clone());
+    let app_review_service = Arc::new(AppReviewService::new(app_review_repo, harbor_service.clone()));
 
     let state = AppState {
         user_service,
@@ -290,6 +302,8 @@ async fn create_test_app() -> (axum::Router, TestDb) {
         sys_dict_item_service,
         sys_log_service,
         harbor_service,
+        app_review_service,
+        harbor_config,
     };
 
     (create_router(state), test_db)
