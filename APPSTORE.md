@@ -35,25 +35,33 @@ graph TB
             用户管理["🔐 用户管理"]
         end
 
-        后端服务["后端服务 (Rust + Axum)\nHarbor API 代理 · 认证鉴权 · 业务逻辑"]
+        后端服务["后端服务 (Rust + Axum)\nHarbor API 代理 · 认证鉴权 · 业务逻辑\n审核流程 · 复制规则触发"]
 
         管理后台 -->|HTTP API| 后端服务
 
         Harbor["Harbor 容器镜像仓库\n192.168.41.227:8097\n项目管理 · 镜像存储 · 访问控制"]
+        
+        Staging["staging-project\n📥 开发者推送入口"]
+        Production["production-project\n📤 用户拉取出口"]
 
+        Harbor --- Staging
+        Harbor --- Production
+        
         后端服务 -->|Harbor REST API v2.0| Harbor
     end
 
     subgraph 角色与交互
-        开发者["👨‍💻 开发者\nWeb + Docker CLI\ndocker push"]
-        管理员["👤 管理员\nWeb 管理界面"]
-        部署控制台["🖥 部署控制台\nappstore_client:3002"]
+        开发者["👨‍💻 开发者\nWeb + Docker CLI\ndocker push → staging-project"]
+        管理员["👤 管理员\nWeb 管理界面\n审核 · 批准/拒绝"]
+        部署控制台["🖥 部署控制台\nappstore_client:3002\ndocker pull ← production-project"]
         Docker环境["🐳 本地 Docker 环境\ndocker pull + run"]
     end
 
-    Harbor --> 开发者
-    Harbor --> 管理员
-    Harbor --> 部署控制台
+    开发者 -->|docker push| Staging
+    Staging -.->|① Harbor Webhook 触发\n② 自动创建审核记录| 后端服务
+    管理员 -->|③ 审核批准| 后端服务
+    后端服务 -.->|④ 触发 Harbor Replication\n自动复制镜像| Production
+    Production -->|docker pull| 部署控制台
     部署控制台 --> Docker环境
 ```
 
@@ -65,15 +73,22 @@ graph TB
 192.168.41.227:8097/<项目名称>/<应用名称>:<版本号>
 ```
 
+### 项目环境
+
+| 项目 | 用途 | 推送权限 | 拉取权限 |
+|------|------|---------|---------|
+| **staging-project** (预发布) | 开发者推送镜像，触发审核 | 开发者 | 管理员 |
+| **production-project** (生产) | 审核通过后自动复制，用户拉取部署 | 仅通过复制规则 | 所有用户 |
+
 示例：
-- `192.168.41.227:8097/appstore/happy_chat:V1.0.0`
-- `192.168.41.227:8097/appstore/redis:V2.1.0`
+- `192.168.41.227:8097/staging-project/happy_chat:V1.0.0`（开发者推送）
+- `192.168.41.227:8097/production-project/happy_chat:V1.0.0`（审核通过后自动同步）
 
 ---
 
 ## 一、开发者工作流程
 
-开发者负责将构建好的 Docker 镜像发布到应用商店。
+开发者负责将构建好的 Docker 镜像发布到应用商店的 **staging-project**（预发布项目），触发审核流程，审核通过后自动同步到 **production-project**（生产项目）供用户拉取。
 
 ### 前置条件
 
@@ -100,11 +115,11 @@ docker login 192.168.41.227:8097
 docker build -t happy_chat:latest .
 # 或: docker tag <已有镜像> happy_chat:latest
 
-# 3. 打标签
-docker tag happy_chat:latest 192.168.41.227:8097/appstore/happy_chat:V1.0.0
+# 3. 打标签（推送到 staging-project，触发审核）
+docker tag happy_chat:latest 192.168.41.227:8097/staging-project/happy_chat:V1.0.0
 
 # 4. 推送
-docker push 192.168.41.227:8097/appstore/happy_chat:V1.0.0
+docker push 192.168.41.227:8097/staging-project/happy_chat:V1.0.0
 ```
 
 ---
@@ -148,6 +163,88 @@ docker push 192.168.41.227:8097/appstore/happy_chat:V1.0.0
 ### 2.4 用户管理
 
 在 **系统管理 → 用户管理** 中创建用户，用于 Docker 登录和部署控制台登录。
+
+### 2.5 应用审核
+
+应用商店采用 **预发布（staging）→ 审核 → 生产（production）** 的发布流程。开发者推送镜像到 staging-project 后，需要管理员审核通过，镜像才能自动同步到 production-project 供用户拉取。
+
+#### 审核流程概述
+
+```mermaid
+flowchart LR
+    A["👨‍💻 开发者\ndocker push"] -->|推送镜像| B["📦 staging-project"]
+    B -->|Harbor Webhook 自动触发| C["📋 创建审核记录\n（状态：待审核）"]
+    C --> D["👤 管理员审核"]
+    D -->|批准| E["✅ 触发 Harbor Replication\n从 staging-project\n复制到 production-project"]
+    D -->|拒绝| F["❌ 审核拒绝\n镜像不会进入生产"]
+    E --> G["📤 production-project\n用户可拉取"]
+```
+
+#### 2.5.1 审核记录自动创建
+
+当开发者推送镜像到 **staging-project** 时，Harbor 会自动发送 Webhook 通知后端服务，后端自动创建一条审核记录：
+
+- **触发条件**：任意新镜像推送到 `staging-project` 下的仓库
+- **自动填充字段**：源项目（staging-project）、目标项目（production-project）、仓库名称、Tag、Digest
+- **初始状态**：`pending`（待审核）
+- **去重机制**：同一仓库 + 同一 Tag 的待审核记录只会创建一条，重复推送不会重复创建
+
+> **前置条件**：需要在 Harbor 中为 staging-project 配置 Webhook，指向 `http://<后端地址>:3000/api/webhooks/harbor`，并配置 `webhook_secret`。
+
+#### 2.5.2 手动创建审核记录
+
+管理员也可以在 **应用管理 → 项目管理 → 应用仓库 → Artifact 详情** 中点击 **审核** 按钮，手动发起审核：
+
+1. 进入 **应用管理 → 项目管理**
+2. 点击项目名称进入 **应用仓库**
+3. 点击仓库名称查看 **Artifact 列表**
+4. 在目标 Artifact 行点击 **审核** 按钮
+5. 弹窗中自动填充：源项目、目标项目、仓库名称、Tag、Digest
+6. （可选）填写备注后提交，创建审核记录
+
+#### 2.5.3 审核列表
+
+在 **应用管理** 页面，点击 **应用审核** 标签页，以表格形式展示所有审核记录：
+
+| 字段 | 说明 |
+|------|------|
+| **源项目** | 镜像来源项目（staging-project） |
+| **目标项目** | 镜像目标项目（production-project） |
+| **仓库** | 应用名称 |
+| **Tag** | 版本号 |
+| **摘要** | 镜像 Digest |
+| **状态** | 待审核 / 已通过 / 已拒绝 |
+| **审核意见** | 管理员填写的审核意见 |
+| **创建时间** | 审核记录的创建时间 |
+
+**筛选功能**：
+- 按 **仓库名称** 模糊搜索
+- 按 **状态** 筛选（全部 / 待审核 / 已通过 / 已拒绝）
+
+#### 2.5.4 审核操作
+
+对状态为 **待审核** 的记录，管理员可执行以下操作：
+
+**通过审核**：
+1. 点击 **通过** 按钮
+2. （可选）在弹出的对话框中填写审核意见
+3. 确认后系统自动执行：
+   - 调用 Harbor API 创建临时复制规则
+   - 自动触发复制任务，将镜像从 `staging-project` 复制到 `production-project`
+   - 等待复制任务完成（默认超时 30 秒）
+   - 清理临时复制规则
+   - 将审核状态更新为 `approved`
+4. 提示"审核通过并已触发复制"
+
+> **技术原理**：后端通过 Harbor REST API 动态创建一个临时的 Replication Policy，设置源为 `staging-project`，目标为 `production-project`，按仓库名称和 Tag 过滤，触发手动执行，等待执行成功（Succeed）后自动删除该策略。这确保了只有审核通过的镜像才会进入生产环境。
+
+**拒绝审核**：
+1. 点击 **拒绝** 按钮
+2. （可选）在弹出的对话框中填写拒绝理由
+3. 确认后状态更新为 `rejected`
+4. 镜像不会同步到 production-project
+
+**删除审核记录**：支持删除已完成的审核记录（软删除）。
 
 ---
 
@@ -241,6 +338,9 @@ flowchart LR
 
 ```mermaid
 sequenceDiagram
+    participant Staging as staging-project
+    participant Prod as production-project
+    participant Backend as 管理后台后端
     participant Admin as 管理员
     participant Dev as 开发者
     participant Console as 部署控制台 :3002
@@ -248,22 +348,34 @@ sequenceDiagram
 
     Note over Admin,User: 准备阶段
     Admin->>Dev: 创建 Harbor 用户
-    Admin->>Admin: 创建项目
-    Admin->>Dev: 将开发者添加为项目成员
+    Admin->>Admin: 创建 staging-project / production-project
+    Admin->>Dev: 将开发者添加为 staging-project 项目成员
 
-    Note over Dev,Console: 开发阶段
+    Note over Dev,Backend: 开发 & 审核阶段
     Dev->>Dev: docker login
     Dev->>Dev: docker build
     Dev->>Dev: docker tag
-    Dev->>Dev: docker push
-    Dev->>Admin: 镜像已发布（可在后台查看）
+    Dev->>Staging: docker push（到 staging-project）
+    Staging->>Backend: Harbor Webhook（PUSH_ARTIFACT 事件）
+    Backend->>Backend: 自动创建审核记录（状态: pending）
+    Backend-->>Admin: 审核列表可查看
+    Admin->>Admin: 审核应用（填写审核意见）
+    Admin->>Backend: 点击「通过」
+    Backend->>Backend: 调用 Harbor API 创建临时 Replication Policy
+    Backend->>Backend: 触发复制任务
+    Backend->>Staging: 从 staging-project 读取镜像
+    Staging->>Prod: 复制到 production-project
+    Backend->>Backend: 等待复制成功，清理临时策略
+    Backend->>Backend: 更新状态为 approved
+    Note over Admin,Prod: 审核通过，镜像已发布到生产
 
     Note over Console,User: 部署阶段
     User->>Console: 打开浏览器访问 :3002
     User->>Console: ① 填写 Harbor 登录信息
     Console->>Console: 执行 docker login + 创建会话
-    User->>Console: ② 浏览应用列表
+    User->>Console: ② 浏览应用列表（从 production-project）
     User->>Console: ③ 填写部署参数并提交
+    Console->>Prod: docker pull 从 production-project
     Console->>Console: 拉取镜像 → 创建容器 → 启动容器
     User->>Console: ④ 管理容器（启动/停止/删除）
 ```
@@ -328,17 +440,31 @@ HARBOR_INSECURE=true cargo run
 
 ### API 一览
 
+#### 部署控制台 API（端口 3002）
+
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `GET` | `/` | 返回前端页面 |
 | `POST` | `/api/login` | 登录（执行 `docker login` + 创建会话） |
-| `GET` | `/api/images` | 从 Harbor 获取所有镜像列表 |
+| `GET` | `/api/images` | 从 Harbor 获取所有镜像列表（从 production-project） |
 | `GET` | `/api/containers` | 列出本地 Docker 容器（支持 page/per_page） |
 | `GET` | `/api/containers/:name/status` | 查询容器运行状态 |
 | `POST` | `/api/containers/:name/start` | 启动容器 |
 | `POST` | `/api/containers/:name/stop` | 停止容器 |
 | `DELETE` | `/api/containers/:name` | 删除容器 |
 | `POST` | `/api/deploy` | 拉取镜像并创建/启动容器 |
+
+#### 管理后台审核 API（端口 3000）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/api/appReviews` | 创建审核记录 |
+| `GET` | `/api/appReviews` | 分页查询审核列表（支持按状态、仓库名称筛选） |
+| `GET` | `/api/appReviews/{id}` | 获取审核详情 |
+| `POST` | `/api/appReviews/{id}/approve` | 通过审核（触发 Harbor Replication） |
+| `POST` | `/api/appReviews/{id}/reject` | 拒绝审核 |
+| `DELETE` | `/api/appReviews/{id}` | 删除审核记录 |
+| `POST` | `/api/webhooks/harbor` | Harbor Webhook 接收端点（接收 PUSH_ARTIFACT 事件） |
 
 ---
 
@@ -348,12 +474,24 @@ HARBOR_INSECURE=true cargo run
 
 推荐语义化版本号：`V1.0.0`、`V1.0.0-beta`、`V1.0.0-rc.1`
 
+### Harbor 审核与复制配置
+
+- 确保在 Harbor 中为 **staging-project** 配置 Webhook，地址为 `http://<管理后台地址>:3000/api/webhooks/harbor`，事件类型选择 **Push Artifact**
+- 配置 `backend/config/config.toml` 中的 `[harbor]` 段：
+  - `staging_project` — 预发布项目名称（默认 `staging-project`）
+  - `production_project` — 生产项目名称（默认 `production-project`）
+  - `webhook_secret` — Webhook 密钥，用于验证请求来源
+  - `replication_timeout_secs` — 等待复制完成超时时间（默认 30 秒）
+- 确保 Harbor 中有 **本地 Registry 端点**，复制规则需要引用本地端点进行项目间复制
+- 生产项目建议设为 **公开**，方便普通用户拉取镜像（无需登录）
+
 ### 安全建议
 
 - 开发者凭证应定期更换
 - 私有项目注意访问控制
 - Docker 登录凭证不要提交到代码仓库
 - 使用 `.dockerignore` 避免敏感文件进入镜像
+- 配置 `webhook_secret` 防止 Webhook 端点被恶意调用
 
 ### 部署控制台运维
 
@@ -383,6 +521,26 @@ denied: requested access to the resource is denied
 
 **原因：** 用户没有项目推送权限。
 **解决：** 联系管理员将该用户添加到项目的 **开发者** 或 **项目管理员** 角色。
+
+### 审核复制失败
+
+```
+Replication execution ... failed
+```
+
+**原因：** Harbor Replication 执行失败（目标项目不存在、网络问题等）。
+**解决：**
+1. 确认 `production-project` 已在 Harbor 中创建
+2. 确认 Harbor 中已配置本地 Registry 端点
+3. 检查 `replication_timeout_secs` 是否足够（大镜像复制可能需要更长时间）
+4. 可在 Harbor 后台手动检查复制执行记录
+
+### 审核记录未自动创建
+
+1. 确认 Harbor Webhook 已正确配置（`Push Artifact` 事件，地址为 `/api/webhooks/harbor`）
+2. 确认 `webhook_secret` 在 Harbor Webhook 配置和管理后台配置中一致
+3. 确认推送的目标项目是 `staging-project`（仅监控该项目的推送事件）
+4. 查看管理后台后端日志：`RUST_LOG=debug cargo run`
 
 ### 部署失败
 
