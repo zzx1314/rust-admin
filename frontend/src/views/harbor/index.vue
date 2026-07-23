@@ -91,26 +91,29 @@ const onTabClick = (tab: TabsPaneContext) => {
     <div class="harbor-tabs-wrapper">
       <el-tabs v-model="activeTab" @tab-click="onTabClick">
         <el-tab-pane label="项目概要" name="projects">
-          <ProjectTab @select-project="handleSelectProject" />
+          <ProjectTab
+            v-if="activeTab === 'projects'"
+            @select-project="handleSelectProject"
+          />
         </el-tab-pane>
         <el-tab-pane label="应用仓库" name="repos">
           <!-- Switch between repository list and artifact detail in the same tab -->
           <RepositoryTab
-            v-if="!drillRepo"
+            v-if="activeTab === 'repos' && !drillRepo"
             :project-name="drillProject"
             @select-repo="handleSelectRepo"
           />
           <ArtifactTab
-            v-else
+            v-if="activeTab === 'repos' && drillRepo"
             :project-name="drillProject"
             :repo-name="drillRepo"
           />
         </el-tab-pane>
         <el-tab-pane label="项目成员" name="members">
-          <MemberTab />
+          <MemberTab v-if="activeTab === 'members'" />
         </el-tab-pane>
         <el-tab-pane label="应用审核" name="reviews">
-          <ReviewTab />
+          <ReviewTab v-if="activeTab === 'reviews'" />
         </el-tab-pane>
       </el-tabs>
     </div>

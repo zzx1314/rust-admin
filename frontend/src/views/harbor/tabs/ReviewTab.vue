@@ -170,7 +170,7 @@ onMounted(fetchReviews);
 
 <template>
   <div>
-    <div class="bg-bg_color w-[99/100] pl-8 pt-4 pb-4">
+    <div class="bg-bg_color w-[99/100] pl-8 pt-4 pb-4 harbor-search-form">
       <el-form :inline="true" class="demo-form-inline">
         <el-form-item label="仓库名称">
           <el-input
@@ -215,6 +215,7 @@ onMounted(fetchReviews);
         <pure-table
           border
           adaptive
+          :adaptiveConfig="{ offsetBottom: 108 }"
           align-whole="center"
           table-layout="auto"
           :loading="loading"
