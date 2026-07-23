@@ -38,6 +38,7 @@ const pagination = reactive<PaginationProps>({
 });
 
 const commentDialogVisible = ref(false);
+const submitting = ref(false);
 const commentForm = ref({ comment: "" });
 const currentReview = ref<AppReview | null>(null);
 const currentAction = ref<"approve" | "reject">("approve");
@@ -117,7 +118,8 @@ const openCommentDialog = (row: AppReview, action: "approve" | "reject") => {
 };
 
 const submitAction = async () => {
-  if (!currentReview.value) return;
+  if (!currentReview.value || submitting.value) return;
+  submitting.value = true;
   const id = currentReview.value.id;
   const data = { reviewerComment: commentForm.value.comment };
   try {
@@ -140,6 +142,8 @@ const submitAction = async () => {
     fetchReviews();
   } catch (err: any) {
     ElMessage.error(err.message || "操作失败");
+  } finally {
+    submitting.value = false;
   }
 };
 
@@ -217,7 +221,6 @@ onMounted(fetchReviews);
           adaptive
           :adaptiveConfig="{ offsetBottom: 108 }"
           align-whole="center"
-
           :loading="loading"
           :size="size"
           :data="reviews"
@@ -287,8 +290,14 @@ onMounted(fetchReviews);
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="commentDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="submitAction">确认</el-button>
+        <el-button :disabled="submitting" @click="commentDialogVisible = false">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="submitting"
+          @click="submitAction"
+        >
+          {{ submitting ? "处理中..." : "确认" }}
+        </el-button>
       </template>
     </el-dialog>
   </div>
