@@ -36,9 +36,3 @@
 .html-weakness {
   filter: invert(80%);
 }
-
-/* Harbor 页面搜索表单统一高度，保证 adaptive 表格高度一致 */
-.harbor-search-form {
-  box-sizing: border-box;
-  min-height: 88px;
-}

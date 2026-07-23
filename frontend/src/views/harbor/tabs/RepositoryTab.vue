@@ -181,7 +181,7 @@ onMounted(() => {
 
 <template>
   <div>
-    <div class="bg-bg_color w-[99/100] pl-8 pt-4 pb-4 harbor-search-form">
+    <div class="bg-bg_color w-[99/100] pl-8 pt-4">
       <el-form :inline="true" class="demo-form-inline">
         <template v-if="!props.projectName">
           <!-- Direct tab mode: project selector -->
