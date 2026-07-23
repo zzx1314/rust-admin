@@ -43,15 +43,15 @@ const currentReview = ref<AppReview | null>(null);
 const currentAction = ref<"approve" | "reject">("approve");
 
 const columns = [
-  { label: "源项目", prop: "srcProject" },
-  { label: "目标项目", prop: "destProject" },
-  { label: "仓库", prop: "repositoryName" },
-  { label: "Tag", prop: "tag" },
-  { label: "摘要", prop: "digest" },
+  { label: "源项目", prop: "srcProject", width: 150 },
+  { label: "目标项目", prop: "destProject", width: 150 },
+  { label: "仓库", prop: "repositoryName", minWidth: 200 },
+  { label: "Tag", prop: "tag", width: 150 },
+  { label: "摘要", prop: "digest", width: 200, showOverflowTooltip: true },
   { label: "状态", prop: "status", slot: "status" },
-  { label: "审核意见", prop: "reviewerComment" },
-  { label: "创建时间", prop: "createTime" },
-  { label: "操作", prop: "actions", slot: "actions", width: 180 }
+  { label: "审核意见", prop: "reviewerComment", minWidth: 200 },
+  { label: "创建时间", prop: "createTime", minWidth: 200 },
+  { label: "操作", prop: "actions", slot: "actions", width: 250 }
 ];
 
 const statusTag = (status: string) => {
@@ -217,7 +217,7 @@ onMounted(fetchReviews);
           adaptive
           :adaptiveConfig="{ offsetBottom: 108 }"
           align-whole="center"
-          table-layout="auto"
+
           :loading="loading"
           :size="size"
           :data="reviews"
