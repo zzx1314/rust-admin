@@ -211,3 +211,120 @@ pub struct ProjectQuery {
     #[serde(alias = "page_size")]
     pub page_size: Option<i64>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarborRegistry {
+    pub id: i64,
+    pub name: String,
+    pub url: String,
+    #[serde(alias = "type")]
+    pub registry_type: String,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryCredential {
+    #[serde(rename = "type")]
+    pub credential_type: String,
+    #[serde(rename = "access_key")]
+    pub access_key: String,
+    #[serde(rename = "access_secret")]
+    pub access_secret: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateRegistryRequest {
+    pub name: String,
+    pub url: String,
+    #[serde(rename = "type")]
+    pub registry_type: String,
+    pub credential: RegistryCredential,
+    pub insecure: bool,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplicationTrigger {
+    #[serde(alias = "trigger_settings")]
+    pub trigger_settings: Option<serde_json::Value>,
+    #[serde(alias = "type")]
+    pub trigger_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplicationFilter {
+    #[serde(alias = "type")]
+    pub filter_type: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateReplicationPolicyRequest {
+    pub name: String,
+    pub description: Option<String>,
+    #[serde(alias = "src_registry_id")]
+    pub src_registry_id: Option<i64>,
+    #[serde(alias = "dest_registry_id")]
+    pub dest_registry_id: i64,
+    #[serde(alias = "dest_namespace")]
+    pub dest_namespace: String,
+    pub trigger: ReplicationTrigger,
+    pub filters: Vec<ReplicationFilter>,
+    pub enabled: bool,
+    pub deletion: bool,
+    #[serde(rename = "override")]
+    pub override_: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplicationPolicy {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplicationExecutionRequest {
+    #[serde(alias = "policy_id")]
+    pub policy_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplicationExecution {
+    pub id: i64,
+    #[serde(alias = "policy_id")]
+    pub policy_id: i64,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarborWebhookPayload {
+    #[serde(alias = "type")]
+    pub event_type: String,
+    #[serde(alias = "occur_at")]
+    pub occur_at: Option<String>,
+    pub operator: Option<String>,
+    #[serde(alias = "event_data")]
+    pub event_data: HarborWebhookEventData,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarborWebhookEventData {
+    pub resources: Vec<HarborWebhookResource>,
+    pub repository: HarborWebhookRepository,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarborWebhookResource {
+    pub digest: Option<String>,
+    pub tag: Option<String>,
+    #[serde(alias = "resource_url")]
+    pub resource_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarborWebhookRepository {
+    pub name: String,
+    pub namespace: String,
+    #[serde(alias = "repo_full_name")]
+    pub repo_full_name: Option<String>,
+}

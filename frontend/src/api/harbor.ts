@@ -184,6 +184,24 @@ export const removeMember = (projectName: string, memberId: number) => {
   );
 };
 
+export const deleteRepository = (projectName: string, repoName: string) => {
+  return http.axiosDelete<Result>(
+    `${projectUrl}/${projectName}/repositories/${encodeURIComponent(repoName)}`
+  );
+};
+
+export const deleteArtifact = (
+  projectName: string,
+  repoName: string,
+  reference: string
+) => {
+  return http.axiosDelete<Result>(
+    `${projectUrl}/${projectName}/repositories/${encodeURIComponent(
+      repoName
+    )}/artifacts/${encodeURIComponent(reference)}`
+  );
+};
+
 export interface HarborInfo {
   registry_url: string;
   enabled: boolean;

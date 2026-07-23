@@ -1,3 +1,4 @@
+pub mod app_review;
 pub mod auth;
 pub mod common;
 pub mod migration;

@@ -5,6 +5,8 @@ use socket2::{Domain, Protocol, Socket, Type};
 use sea_orm::DatabaseConnection;
 
 use crate::api::{AppState, routes::create_router};
+use crate::app_review::repository::SeaOrmAppReviewRepository;
+use crate::app_review::service::AppReviewService;
 use crate::auth::repository::RedisTokenStore;
 use crate::auth::service::AuthService;
 use crate::harbor::client::HarborClient;
@@ -88,17 +90,42 @@ impl App {
             Arc::new(SeaOrmSysLogRepository::new(conn.clone()));
         let sys_log_service = Arc::new(SysLogService::new(sys_log_repo));
 
+        let app_review_repo = SeaOrmAppReviewRepository::new(conn.clone());
+
         let harbor_service = if let Some(harbor_config) = config.harbor.clone() {
+            let registry_endpoint_id = harbor_config.registry_endpoint_id;
+            let registry_insecure = harbor_config.registry_insecure;
+            let replication_timeout_secs = harbor_config.replication_timeout_secs;
             let harbor_client = Arc::new(HarborClient::new(&harbor_config));
-            Arc::new(HarborService::new(harbor_client))
+            Arc::new(
+                HarborService::new(harbor_client)
+                    .with_registry_endpoint_id(registry_endpoint_id)
+                    .with_registry_insecure(registry_insecure)
+                    .with_replication_timeout_secs(replication_timeout_secs),
+            )
         } else {
             tracing::warn!("Harbor config is missing, Harbor endpoints will return an error until [harbor] is configured in config.toml");
             Arc::new(HarborService::new(Arc::new(HarborClient::new(&crate::config::HarborConfig {
                 url: String::new(),
                 username: String::new(),
                 password: String::new(),
+                staging_project: String::new(),
+                production_project: String::new(),
+                registry_endpoint_id: None,
+                registry_insecure: None,
+                webhook_secret: None,
+                replication_timeout_secs: 30,
             }))))
         };
+
+        let app_review_service = Arc::new(AppReviewService::new(app_review_repo, harbor_service.clone()));
+        let harbor_config = config.harbor.clone();
+
+        if let Some(harbor_cfg) = &harbor_config {
+            if harbor_cfg.webhook_secret.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                tracing::warn!("Harbor webhook secret is not configured. The /api/webhooks/harbor endpoint is publicly accessible without verification.");
+            }
+        }
 
         AppState {
             user_service,
@@ -111,6 +138,8 @@ impl App {
             sys_dict_item_service,
             sys_log_service,
             harbor_service,
+            app_review_service,
+            harbor_config,
         }
     }
 

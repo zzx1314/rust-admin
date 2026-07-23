@@ -58,6 +58,9 @@ pub enum AppError {
 
     #[error("Bad request: {0}")]
     BadRequest(String),
+
+    #[error("Conflict: {0}")]
+    Conflict(String),
 }
 
 impl AppError {
@@ -70,6 +73,7 @@ impl AppError {
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             AppError::AuthError(_) => StatusCode::FORBIDDEN,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            AppError::Conflict(_) => StatusCode::CONFLICT,
         }
     }
 
@@ -82,6 +86,7 @@ impl AppError {
             AppError::Unauthorized(_) => FAIL_CODE,
             AppError::AuthError(_) => FAIL_CODE,
             AppError::BadRequest(_) => FAIL_CODE,
+            AppError::Conflict(_) => FAIL_CODE,
         }
     }
 }

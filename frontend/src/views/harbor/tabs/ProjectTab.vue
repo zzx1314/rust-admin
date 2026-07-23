@@ -2,7 +2,6 @@
 import { ref, reactive, onMounted } from "vue";
 import type { PaginationProps } from "@pureadmin/table";
 import { PureTableBar } from "@/components/RePureTableBar";
-import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
   listProjects,
@@ -12,12 +11,6 @@ import {
   type HarborProject,
   type ProjectSummary
 } from "@/api/harbor";
-
-import Search from "~icons/ep/search";
-import Refresh from "~icons/ep/refresh";
-import AddFill from "~icons/ri/add-circle-line";
-import Delete from "~icons/ep/delete";
-import View from "~icons/ep/view";
 
 const emit = defineEmits<{
   (e: "selectProject", name: string): void;
@@ -157,27 +150,15 @@ onMounted(fetchProjects);
           />
         </el-form-item>
         <el-form-item>
-          <el-button
-            type="primary"
-            :icon="useRenderIcon(Search)"
-            @click="onSearch"
-          >
-            搜索
-          </el-button>
-          <el-button :icon="useRenderIcon(Refresh)" @click="onReset">
-            重置
-          </el-button>
+          <el-button type="primary" @click="onSearch"> 搜索 </el-button>
+          <el-button @click="onReset"> 重置 </el-button>
         </el-form-item>
       </el-form>
     </div>
 
     <PureTableBar title="项目概要" :columns="columns" @refresh="fetchProjects">
       <template #buttons>
-        <el-button
-          type="primary"
-          :icon="useRenderIcon(AddFill)"
-          @click="dialogVisible = true"
-        >
+        <el-button type="primary" @click="dialogVisible = true">
           新增项目
         </el-button>
       </template>
@@ -224,7 +205,6 @@ onMounted(fetchProjects);
               link
               type="primary"
               :size="size"
-              :icon="useRenderIcon(View)"
               @click="viewSummary(row)"
             >
               概要
@@ -233,7 +213,6 @@ onMounted(fetchProjects);
               link
               type="danger"
               :size="size"
-              :icon="useRenderIcon(Delete)"
               @click="handleDelete(row)"
             >
               删除

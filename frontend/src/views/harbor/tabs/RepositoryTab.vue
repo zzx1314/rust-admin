@@ -2,26 +2,23 @@
 import { ref, reactive, onMounted, watch, computed } from "vue";
 import type { PaginationProps } from "@pureadmin/table";
 import { PureTableBar } from "@/components/RePureTableBar";
-import { useRenderIcon } from "@/components/ReIcon/src/hooks";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import {
   listProjects,
   listRepositories,
+  deleteRepository,
   type HarborProject,
   type HarborRepository
 } from "@/api/harbor";
 import { useHarborStoreHook } from "@/store/modules/harbor";
 import PushCommandDialog from "../components/PushCommandDialog.vue";
 
-import Search from "~icons/ep/search";
-import Refresh from "~icons/ep/refresh";
-
 const props = defineProps<{
   projectName: string;
 }>();
 
 const emit = defineEmits<{
-  (e: "selectRepo", name: string): void;
+  (e: "selectRepo", payload: { project: string; repo: string }): void;
 }>();
 
 const loading = ref(false);
@@ -52,7 +49,7 @@ const columns = [
   { label: "拉取次数", prop: "pull_count" },
   { label: "创建时间", prop: "creation_time" },
   { label: "更新时间", prop: "update_time" },
-  { label: "操作", prop: "actions", slot: "actions", width: 100 }
+  { label: "操作", prop: "actions", slot: "actions", width: 220 }
 ];
 
 const fetchProjects = async () => {
@@ -149,6 +146,31 @@ const openPushDialog = (repoName: string) => {
   pushDialogVisible.value = true;
 };
 
+const handleDelete = (row: HarborRepository) => {
+  const project = props.projectName || selectedProject.value;
+  if (!project) return;
+  const shortName = row.name.split("/").pop() || row.name;
+  ElMessageBox.confirm(`确认删除应用 ${shortName} 吗？`, "提示", {
+    confirmButtonText: "确认",
+    cancelButtonText: "取消",
+    type: "warning"
+  })
+    .then(async () => {
+      try {
+        const res = await deleteRepository(project, shortName);
+        if (res.code === 10200) {
+          ElMessage.success("删除成功");
+          fetchRepositories();
+        } else {
+          ElMessage.error(res.msg || "删除失败");
+        }
+      } catch (err: any) {
+        ElMessage.error(err.message || "删除失败");
+      }
+    })
+    .catch(() => {});
+};
+
 onMounted(() => {
   harborStore.fetchRegistryUrl();
   if (!props.projectName) {
@@ -186,16 +208,8 @@ onMounted(() => {
             />
           </el-form-item>
           <el-form-item>
-            <el-button
-              type="primary"
-              :icon="useRenderIcon(Search)"
-              @click="onSearch"
-            >
-              搜索
-            </el-button>
-            <el-button :icon="useRenderIcon(Refresh)" @click="onReset">
-              重置
-            </el-button>
+            <el-button type="primary" @click="onSearch"> 搜索 </el-button>
+            <el-button @click="onReset"> 重置 </el-button>
           </el-form-item>
         </template>
         <template v-else>
@@ -229,7 +243,15 @@ onMounted(() => {
           @page-current-change="handleCurrentChange"
         >
           <template #name="{ row }">
-            <span class="repo-name-link" @click="emit('selectRepo', row.name)">
+            <span
+              class="repo-name-link"
+              @click="
+                emit('selectRepo', {
+                  project: props.projectName || selectedProject,
+                  repo: row.name
+                })
+              "
+            >
               <IconifyIconOffline
                 icon="ep:box"
                 width="14"
@@ -240,17 +262,22 @@ onMounted(() => {
             </span>
           </template>
           <template #actions="{ row }">
-            <el-tooltip content="推送命令" placement="top" :show-after="300">
-              <el-button
-                size="small"
-                circle
-                type="warning"
-                plain
-                @click="openPushDialog(row.name)"
-              >
-                <IconifyIconOffline icon="ep:upload" width="14" height="14" />
-              </el-button>
-            </el-tooltip>
+            <el-button
+              link
+              type="primary"
+              :size="size"
+              @click="openPushDialog(row.name)"
+            >
+              推送命令
+            </el-button>
+            <el-button
+              link
+              type="danger"
+              :size="size"
+              @click="handleDelete(row)"
+            >
+              删除
+            </el-button>
           </template>
         </pure-table>
       </template>

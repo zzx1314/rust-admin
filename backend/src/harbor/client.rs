@@ -7,6 +7,8 @@ pub struct HarborClient {
     pub base_url: String,
     auth_header: String,
     pub enabled: bool,
+    pub username: String,
+    pub password: String,
 }
 
 impl HarborClient {
@@ -25,6 +27,8 @@ impl HarborClient {
             base_url: config.url.trim_end_matches('/').to_string(),
             auth_header,
             enabled,
+            username: config.username.clone(),
+            password: config.password.clone(),
         }
     }
 

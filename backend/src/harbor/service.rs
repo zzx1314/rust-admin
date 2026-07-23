@@ -3,19 +3,44 @@ use crate::common::pagination::PageResponse;
 use crate::common::util::format_iso_datetime;
 use crate::harbor::client::HarborClient;
 use crate::harbor::models::{
-    ChangePasswordRequest, CreateHarborUserRequest, CreateMemberRequest, CreateProjectRequest, HarborArtifact,
-    HarborInfo, HarborMember, HarborProject, HarborRepository, HarborStatistics, HarborUser,
-    ProjectQuery, ProjectSummary, RepoStat,
+    ChangePasswordRequest, CreateHarborUserRequest, CreateMemberRequest, CreateProjectRequest,
+    CreateRegistryRequest, CreateReplicationPolicyRequest, HarborArtifact, HarborInfo, HarborMember,
+    HarborProject, HarborRegistry, HarborRepository, HarborStatistics, HarborUser, ProjectQuery, ProjectSummary,
+    RegistryCredential, ReplicationExecution, ReplicationExecutionRequest, ReplicationFilter, ReplicationPolicy,
+    ReplicationTrigger, RepoStat,
 };
 use std::sync::Arc;
 
 pub struct HarborService {
     client: Arc<HarborClient>,
+    registry_endpoint_id: Option<i64>,
+    registry_insecure: Option<bool>,
+    replication_timeout_secs: u64,
 }
 
 impl HarborService {
     pub fn new(client: Arc<HarborClient>) -> Self {
-        Self { client }
+        Self {
+            client,
+            registry_endpoint_id: None,
+            registry_insecure: None,
+            replication_timeout_secs: 30,
+        }
+    }
+
+    pub fn with_registry_endpoint_id(mut self, id: Option<i64>) -> Self {
+        self.registry_endpoint_id = id;
+        self
+    }
+
+    pub fn with_registry_insecure(mut self, insecure: Option<bool>) -> Self {
+        self.registry_insecure = insecure;
+        self
+    }
+
+    pub fn with_replication_timeout_secs(mut self, secs: u64) -> Self {
+        self.replication_timeout_secs = secs;
+        self
     }
 
     pub fn get_info(&self) -> HarborInfo {
@@ -488,6 +513,56 @@ impl HarborService {
         self.check_response(response).await
     }
 
+    pub async fn delete_repository(
+        &self,
+        project_name: &str,
+        repo_name: &str,
+    ) -> Result<(), AppError> {
+        self.ensure_enabled()?;
+        let encoded_repo_name = urlencoding::encode(repo_name);
+        let path = format!("/api/v2.0/projects/{}/repositories/{}", project_name, encoded_repo_name);
+        let url = reqwest::Url::parse(&self.client.api_url(&path))
+            .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
+
+        let response = self
+            .client
+            .client
+            .delete(url)
+            .headers(self.client.default_headers())
+            .send()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Harbor request failed: {}", e)))?;
+
+        self.check_response(response).await
+    }
+
+    pub async fn delete_artifact(
+        &self,
+        project_name: &str,
+        repo_name: &str,
+        reference: &str,
+    ) -> Result<(), AppError> {
+        self.ensure_enabled()?;
+        let encoded_repo_name = urlencoding::encode(repo_name);
+        let path = format!(
+            "/api/v2.0/projects/{}/repositories/{}/artifacts/{}",
+            project_name, encoded_repo_name, reference
+        );
+        let url = reqwest::Url::parse(&self.client.api_url(&path))
+            .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
+
+        let response = self
+            .client
+            .client
+            .delete(url)
+            .headers(self.client.default_headers())
+            .send()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Harbor request failed: {}", e)))?;
+
+        self.check_response(response).await
+    }
+
     pub async fn add_member(
         &self,
         project_name: &str,
@@ -585,5 +660,322 @@ impl HarborService {
             .map_err(|e| AppError::BadRequest(format!("Harbor request failed: {}", e)))?;
 
         self.check_response(response).await
+    }
+
+    pub async fn list_registries(&self) -> Result<Vec<HarborRegistry>, AppError> {
+        self.ensure_enabled()?;
+        let url = reqwest::Url::parse(&self.client.api_url("/api/v2.0/registries?page=1&page_size=100"))
+            .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
+
+        let response = self
+            .client
+            .client
+            .get(url)
+            .headers(self.client.default_headers())
+            .send()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Harbor request failed: {}", e)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(Self::map_harbor_error(status, &body));
+        }
+
+        response.json::<Vec<HarborRegistry>>().await.map_err(|e| {
+            AppError::BadRequest(format!("Failed to parse Harbor registries: {}", e))
+        })
+    }
+
+    pub async fn find_local_registry_endpoint(&self) -> Result<i64, AppError> {
+        self.ensure_enabled()?;
+
+        if let Some(id) = self.registry_endpoint_id {
+            return Ok(id);
+        }
+
+        let registries = self.list_registries().await?;
+        let base_url = self.normalize_registry_url(&self.client.base_url);
+
+        for registry in &registries {
+            let registry_url = self.normalize_registry_url(&registry.url);
+            if registry_url == base_url {
+                return Ok(registry.id);
+            }
+        }
+
+        self.create_local_registry_endpoint().await?;
+
+        let registries = self.list_registries().await?;
+        for registry in &registries {
+            let registry_url = self.normalize_registry_url(&registry.url);
+            if registry_url == base_url {
+                return Ok(registry.id);
+            }
+        }
+
+        Err(AppError::BadRequest(
+            "Failed to auto-create Harbor registry endpoint for the local instance. Please create one manually in Harbor or set registry_endpoint_id in config.toml.".to_string(),
+        ))
+    }
+
+    async fn create_local_registry_endpoint(&self) -> Result<(), AppError> {
+        let base_url = self.client.base_url.trim_end_matches('/').to_string();
+        let insecure = self.registry_insecure.unwrap_or_else(|| self.is_local_registry_insecure(&base_url));
+        let name = format!("local-harbor-{}", uuid::Uuid::new_v4());
+        let req = CreateRegistryRequest {
+            name: name.clone(),
+            url: base_url.clone(),
+            registry_type: "harbor".to_string(),
+            credential: RegistryCredential {
+                credential_type: "basic".to_string(),
+                access_key: self.client.username.clone(),
+                access_secret: self.client.password.clone(),
+            },
+            insecure,
+            description: Some("Auto-created local Harbor endpoint for replication".to_string()),
+        };
+
+        let url = reqwest::Url::parse(&self.client.api_url("/api/v2.0/registries"))
+            .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
+
+        let response = self
+            .client
+            .client
+            .post(url)
+            .headers(self.client.default_headers())
+            .json(&req)
+            .send()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Harbor request failed: {}", e)))?;
+
+        self.check_response(response).await
+    }
+
+    fn normalize_registry_url(&self, url: &str) -> String {
+        let url = url.trim().trim_end_matches('/');
+        let url = url.trim_start_matches("http://").trim_start_matches("https://");
+        url.to_lowercase()
+    }
+
+    fn is_local_registry_insecure(&self, base_url: &str) -> bool {
+        let lower = base_url.to_lowercase();
+        if lower.starts_with("http://") {
+            return true;
+        }
+        if let Some(host_part) = lower.strip_prefix("https://") {
+            let host = host_part.split(':').next().unwrap_or(host_part);
+            return host == "localhost" || host == "127.0.0.1" || host == "::1";
+        }
+        false
+    }
+
+    pub async fn create_replication_policy(
+        &self,
+        req: &CreateReplicationPolicyRequest,
+    ) -> Result<ReplicationPolicy, AppError> {
+        self.ensure_enabled()?;
+        let url = reqwest::Url::parse(&self.client.api_url("/api/v2.0/replication/policies"))
+            .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
+
+        let response = self
+            .client
+            .client
+            .post(url)
+            .headers(self.client.default_headers())
+            .json(req)
+            .send()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Harbor request failed: {}", e)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(Self::map_harbor_error(status, &body));
+        }
+
+        response.json::<ReplicationPolicy>().await.map_err(|e| {
+            AppError::BadRequest(format!("Failed to parse Harbor replication policy: {}", e))
+        })
+    }
+
+    pub async fn delete_replication_policy(&self, policy_id: i64) -> Result<(), AppError> {
+        self.ensure_enabled()?;
+        let path = format!("/api/v2.0/replication/policies/{}", policy_id);
+        let url = reqwest::Url::parse(&self.client.api_url(&path))
+            .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
+
+        let response = self
+            .client
+            .client
+            .delete(url)
+            .headers(self.client.default_headers())
+            .send()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Harbor request failed: {}", e)))?;
+
+        self.check_response(response).await
+    }
+
+    pub async fn trigger_replication(&self, policy_id: i64) -> Result<ReplicationExecution, AppError> {
+        self.ensure_enabled()?;
+        let url = reqwest::Url::parse(&self.client.api_url("/api/v2.0/replication/executions"))
+            .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
+
+        let req = ReplicationExecutionRequest { policy_id };
+
+        let response = self
+            .client
+            .client
+            .post(url)
+            .headers(self.client.default_headers())
+            .json(&req)
+            .send()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Harbor request failed: {}", e)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(Self::map_harbor_error(status, &body));
+        }
+
+        response.json::<ReplicationExecution>().await.map_err(|e| {
+            AppError::BadRequest(format!("Failed to parse Harbor replication execution: {}", e))
+        })
+    }
+
+    pub async fn get_replication_execution(&self, execution_id: i64) -> Result<ReplicationExecution, AppError> {
+        self.ensure_enabled()?;
+        let path = format!("/api/v2.0/replication/executions/{}", execution_id);
+        let url = reqwest::Url::parse(&self.client.api_url(&path))
+            .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
+
+        let response = self
+            .client
+            .client
+            .get(url)
+            .headers(self.client.default_headers())
+            .send()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Harbor request failed: {}", e)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(Self::map_harbor_error(status, &body));
+        }
+
+        response.json::<ReplicationExecution>().await.map_err(|e| {
+            AppError::BadRequest(format!("Failed to parse Harbor replication execution: {}", e))
+        })
+    }
+
+    pub async fn wait_for_replication_execution(&self, execution_id: i64) -> Result<ReplicationExecution, AppError> {
+        let timeout = std::time::Duration::from_secs(self.replication_timeout_secs);
+        let interval = std::time::Duration::from_secs(2);
+        let start = std::time::Instant::now();
+
+        loop {
+            let execution = self.get_replication_execution(execution_id).await?;
+            match execution.status.as_str() {
+                "Succeed" => return Ok(execution),
+                "Failed" => {
+                    return Err(AppError::BadRequest(format!(
+                        "Replication execution {} failed",
+                        execution_id
+                    )));
+                }
+                "Stopped" => {
+                    return Err(AppError::BadRequest(format!(
+                        "Replication execution {} was stopped",
+                        execution_id
+                    )));
+                }
+                _ => {}
+            }
+
+            if start.elapsed() >= timeout {
+                return Err(AppError::BadRequest(format!(
+                    "Replication execution {} timed out after {} seconds; execution may still be running",
+                    execution_id, self.replication_timeout_secs
+                )));
+            }
+
+            tokio::time::sleep(interval).await;
+        }
+    }
+
+    pub async fn replicate_artifact(
+        &self,
+        src_project: &str,
+        dest_project: &str,
+        repository_name: &str,
+        tag: &str,
+    ) -> Result<(), AppError> {
+        self.ensure_enabled()?;
+
+        let registry_id = self.find_local_registry_endpoint().await?;
+        let short_repo = repository_name.split('/').last().unwrap_or(repository_name);
+
+        let policy_name = format!("temp-approve-{}-{}", src_project, uuid::Uuid::new_v4());
+        let req = CreateReplicationPolicyRequest {
+            name: policy_name.clone(),
+            description: Some(format!("Temporary policy to approve {}/{}", repository_name, tag)),
+            src_registry_id: None,
+            dest_registry_id: registry_id,
+            dest_namespace: dest_project.to_string(),
+            trigger: ReplicationTrigger {
+                trigger_settings: None,
+                trigger_type: "manual".to_string(),
+            },
+            filters: vec![
+                ReplicationFilter {
+                    filter_type: "name".to_string(),
+                    value: format!("{}/{}", src_project, short_repo),
+                },
+                ReplicationFilter {
+                    filter_type: "tag".to_string(),
+                    value: tag.to_string(),
+                },
+                ReplicationFilter {
+                    filter_type: "resource".to_string(),
+                    value: "artifact".to_string(),
+                },
+            ],
+            enabled: true,
+            deletion: false,
+            override_: true,
+        };
+
+        let policy = self.create_replication_policy(&req).await?;
+
+        let execution = self.trigger_replication(policy.id).await.map_err(|e| {
+            let _ = self.delete_replication_policy(policy.id);
+            e
+        })?;
+
+        match self.wait_for_replication_execution(execution.id).await {
+            Ok(_) => {
+                let _ = self.delete_replication_policy(policy.id).await;
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!("Replication policy {} will not be deleted automatically because execution {} status is uncertain", policy.id, execution.id);
+                Err(e)
+            }
+        }
     }
 }

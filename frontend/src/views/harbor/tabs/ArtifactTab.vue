@@ -2,9 +2,14 @@
 import { ref, reactive, watch, onMounted, computed } from "vue";
 import type { PaginationProps } from "@pureadmin/table";
 import { PureTableBar } from "@/components/RePureTableBar";
-import { ElMessage } from "element-plus";
-import { listArtifacts, type HarborArtifact } from "@/api/harbor";
+import { ElMessage, ElMessageBox } from "element-plus";
+import {
+  listArtifacts,
+  deleteArtifact,
+  type HarborArtifact
+} from "@/api/harbor";
 import { useHarborStoreHook } from "@/store/modules/harbor";
+import { createAppReview } from "@/api/appReview";
 import ImageCommandDialog from "../components/ImageCommandDialog.vue";
 
 const props = defineProps<{
@@ -19,6 +24,17 @@ const registryUrl = computed(() => harborStore.registryUrl);
 const commandDialogVisible = ref(false);
 const selectedArtifact = ref<HarborArtifact | null>(null);
 
+const reviewDialogVisible = ref(false);
+const reviewForm = ref({
+  srcProject: props.projectName,
+  destProject: "production-project",
+  repositoryName: props.repoName,
+  tag: "",
+  digest: "",
+  artifactId: undefined as number | undefined,
+  reviewerComment: ""
+});
+
 const pagination = reactive<PaginationProps>({
   total: 0,
   pageSize: 10,
@@ -32,7 +48,7 @@ const columns = [
   { label: "推送时间", prop: "push_time", slot: "push_time" },
   { label: "拉取时间", prop: "pull_time", slot: "pull_time" },
   { label: "镜像摘要", prop: "digest" },
-  { label: "命令", prop: "commands", slot: "commands", width: 100 }
+  { label: "操作", prop: "actions", slot: "actions", width: 220 }
 ];
 
 const formatSize = (bytes?: number) => {
@@ -66,6 +82,75 @@ const fetchArtifacts = async () => {
 const openCommandDialog = (artifact: HarborArtifact) => {
   selectedArtifact.value = artifact;
   commandDialogVisible.value = true;
+};
+
+const handleDelete = (artifact: HarborArtifact) => {
+  if (!props.projectName || !props.repoName || !artifact.digest) return;
+  ElMessageBox.confirm("确认删除该 Artifact 吗？", "提示", {
+    confirmButtonText: "确认",
+    cancelButtonText: "取消",
+    type: "warning"
+  })
+    .then(async () => {
+      try {
+        const shortName = props.repoName.split("/").pop() || props.repoName;
+        const res = await deleteArtifact(
+          props.projectName,
+          shortName,
+          artifact.digest as string
+        );
+        if (res.code === 10200) {
+          ElMessage.success("删除成功");
+          fetchArtifacts();
+        } else {
+          ElMessage.error(res.msg || "删除失败");
+        }
+      } catch (err: any) {
+        ElMessage.error(err.message || "删除失败");
+      }
+    })
+    .catch(() => {});
+};
+
+const openReviewDialog = (artifact: HarborArtifact) => {
+  const firstTag = artifact.tags?.[0]?.name || "";
+  reviewForm.value = {
+    srcProject: props.projectName,
+    destProject: "production-project",
+    repositoryName: props.repoName,
+    tag: firstTag,
+    digest: artifact.digest || "",
+    artifactId: artifact.id,
+    reviewerComment: ""
+  };
+  selectedArtifact.value = artifact;
+  reviewDialogVisible.value = true;
+};
+
+const submitReview = async () => {
+  if (!reviewForm.value.tag) {
+    ElMessage.warning("请选择或填写 Tag");
+    return;
+  }
+  try {
+    const res = await createAppReview({
+      srcProject: reviewForm.value.srcProject,
+      destProject: reviewForm.value.destProject,
+      repositoryName: reviewForm.value.repositoryName,
+      tag: reviewForm.value.tag,
+      digest: reviewForm.value.digest || undefined,
+      artifactId: reviewForm.value.artifactId,
+      reviewerComment: reviewForm.value.reviewerComment || undefined
+    });
+    if (res.code === 10200) {
+      ElMessage.success("已创建审核记录");
+      reviewDialogVisible.value = false;
+    } else {
+      ElMessage.error(res.msg || "创建审核记录失败");
+    }
+  } catch (err: any) {
+    ElMessage.error(err.message || "创建审核记录失败");
+  }
 };
 
 const handleSizeChange = (val: number) => {
@@ -150,22 +235,31 @@ onMounted(() => {
               row.pull_time?.startsWith("0001-01-01") ? "-" : row.pull_time
             }}</span>
           </template>
-          <template #commands="{ row }">
-            <el-tooltip
-              content="查看镜像命令"
-              placement="top"
-              :show-after="300"
+          <template #actions="{ row }">
+            <el-button
+              link
+              type="primary"
+              :size="size"
+              @click="openCommandDialog(row)"
             >
-              <el-button
-                size="small"
-                circle
-                type="primary"
-                plain
-                @click="openCommandDialog(row)"
-              >
-                <IconifyIconOffline icon="ep:terminal" width="14" height="14" />
-              </el-button>
-            </el-tooltip>
+              镜像命令
+            </el-button>
+            <el-button
+              link
+              type="warning"
+              :size="size"
+              @click="openReviewDialog(row)"
+            >
+              审核
+            </el-button>
+            <el-button
+              link
+              type="danger"
+              :size="size"
+              @click="handleDelete(row)"
+            >
+              删除
+            </el-button>
           </template>
         </pure-table>
       </template>
@@ -179,5 +273,54 @@ onMounted(() => {
       :repo-name="props.repoName"
       :registry-url="registryUrl"
     />
+
+    <!-- Create Review Dialog -->
+    <el-dialog v-model="reviewDialogVisible" title="发起应用审核" width="500px">
+      <el-form label-width="100px">
+        <el-form-item label="源项目">
+          <el-input v-model="reviewForm.srcProject" disabled />
+        </el-form-item>
+        <el-form-item label="目标项目">
+          <el-input
+            v-model="reviewForm.destProject"
+            placeholder="production-project"
+          />
+        </el-form-item>
+        <el-form-item label="仓库">
+          <el-input v-model="reviewForm.repositoryName" disabled />
+        </el-form-item>
+        <el-form-item label="Tag">
+          <el-select
+            v-if="selectedArtifact?.tags?.length"
+            v-model="reviewForm.tag"
+            placeholder="选择 Tag"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="t in selectedArtifact.tags"
+              :key="t.name"
+              :label="t.name"
+              :value="t.name"
+            />
+          </el-select>
+          <el-input v-else v-model="reviewForm.tag" placeholder="请输入 Tag" />
+        </el-form-item>
+        <el-form-item label="摘要">
+          <el-input v-model="reviewForm.digest" disabled />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input
+            v-model="reviewForm.reviewerComment"
+            type="textarea"
+            :rows="2"
+            placeholder="请输入备注"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="reviewDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="submitReview">确认</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>

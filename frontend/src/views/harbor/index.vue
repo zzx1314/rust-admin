@@ -5,8 +5,9 @@ import ProjectTab from "./tabs/ProjectTab.vue";
 import RepositoryTab from "./tabs/RepositoryTab.vue";
 import MemberTab from "./tabs/MemberTab.vue";
 import ArtifactTab from "./tabs/ArtifactTab.vue";
+import ReviewTab from "./tabs/ReviewTab.vue";
 
-const activeTab = ref<"projects" | "repos" | "members">("projects");
+const activeTab = ref<"projects" | "repos" | "members" | "reviews">("projects");
 const drillProject = ref("");
 const drillRepo = ref("");
 
@@ -49,12 +50,17 @@ const handleSelectProject = (name: string) => {
   activeTab.value = "repos";
 };
 
-const handleSelectRepo = (name: string) => {
-  drillRepo.value = name;
+const handleSelectRepo = (payload: { project: string; repo: string }) => {
+  drillProject.value = payload.project;
+  drillRepo.value = payload.repo;
 };
 
 const onTabClick = (tab: TabsPaneContext) => {
-  activeTab.value = tab.paneName as "projects" | "repos" | "members";
+  activeTab.value = tab.paneName as
+    | "projects"
+    | "repos"
+    | "members"
+    | "reviews";
   if (tab.paneName !== "repos") {
     drillProject.value = "";
   }
@@ -102,6 +108,9 @@ const onTabClick = (tab: TabsPaneContext) => {
         </el-tab-pane>
         <el-tab-pane label="项目成员" name="members">
           <MemberTab />
+        </el-tab-pane>
+        <el-tab-pane label="应用审核" name="reviews">
+          <ReviewTab />
         </el-tab-pane>
       </el-tabs>
     </div>

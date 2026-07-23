@@ -37,6 +37,19 @@ pub struct PaginationQuery {
     pub page_size: Option<i64>,
 }
 
+#[derive(Deserialize)]
+pub struct RepoParam {
+    pub project_name: String,
+    pub repo_name: String,
+}
+
+#[derive(Deserialize)]
+pub struct ArtifactParam {
+    pub project_name: String,
+    pub repo_name: String,
+    pub reference: String,
+}
+
 pub async fn list_projects_handler(
     State(state): State<AppState>,
     Query(query): Query<ProjectQuery>,
@@ -143,4 +156,26 @@ pub async fn harbor_info_handler(
 ) -> Result<Json<ApiResponse<HarborInfo>>, AppError> {
     let info = state.harbor_service.get_info();
     Ok(Json(ApiResponse::ok(info)))
+}
+
+pub async fn delete_repository_handler(
+    State(state): State<AppState>,
+    Path(params): Path<RepoParam>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    state
+        .harbor_service
+        .delete_repository(&params.project_name, &params.repo_name)
+        .await?;
+    Ok(Json(ApiResponse::ok(())))
+}
+
+pub async fn delete_artifact_handler(
+    State(state): State<AppState>,
+    Path(params): Path<ArtifactParam>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    state
+        .harbor_service
+        .delete_artifact(&params.project_name, &params.repo_name, &params.reference)
+        .await?;
+    Ok(Json(ApiResponse::ok(())))
 }

@@ -1,4 +1,6 @@
+use crate::app_review::service::AppReviewService;
 use crate::auth::service::AuthService;
+use crate::config::HarborConfig;
 use crate::harbor::service::HarborService;
 use crate::system::sys_menu::service::MenuService;
 use crate::system::sys_org::service::OrgService;
@@ -26,4 +28,6 @@ pub struct AppState {
     pub sys_dict_item_service: Arc<SysDictItemService>,
     pub sys_log_service: Arc<SysLogService>,
     pub harbor_service: Arc<HarborService>,
+    pub app_review_service: Arc<AppReviewService>,
+    pub harbor_config: Option<HarborConfig>,
 }

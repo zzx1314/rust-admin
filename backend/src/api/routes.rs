@@ -8,6 +8,7 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use crate::api::AppState;
 use crate::api::middleware::require_auth;
 use crate::api::logging_middleware::logging_middleware;
+use crate::app_review::handlers as app_review_handlers;
 use crate::harbor::handlers as harbor_handlers;
 use crate::auth::handlers::{
     check_token_handler, login_handler, logout_handler, me_handler, refresh_handler,
@@ -222,12 +223,28 @@ pub fn harbor_routes(state: AppState) -> Router<AppState> {
         .route("/harbor/projects", post(harbor_handlers::create_project_handler).get(harbor_handlers::list_projects_handler))
         .route("/harbor/projects/{project_name}/summary", get(harbor_handlers::get_project_summary_handler))
         .route("/harbor/projects/{project_name}/repositories", get(harbor_handlers::list_repositories_handler))
+        .route("/harbor/projects/{project_name}/repositories/{repo_name}", delete(harbor_handlers::delete_repository_handler))
         .route("/harbor/projects/{project_name}/members", get(harbor_handlers::list_members_handler).post(harbor_handlers::add_member_handler))
         .route("/harbor/projects/{project_name}/artifacts", get(harbor_handlers::list_artifacts_handler))
+        .route("/harbor/projects/{project_name}/repositories/{repo_name}/artifacts/{reference}", delete(harbor_handlers::delete_artifact_handler))
         .route("/harbor/projects/{project_name}/members/{member_id}", delete(harbor_handlers::remove_member_handler))
         .route("/harbor/projects/{project_name}", delete(harbor_handlers::delete_project_handler))
         .route("/harbor/info", get(harbor_handlers::harbor_info_handler))
         .layer(from_fn_with_state(state.clone(), require_auth))
+}
+
+pub fn app_review_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/appReviews", post(app_review_handlers::create_review_handler).get(app_review_handlers::list_reviews_handler))
+        .route("/appReviews/{id}", get(app_review_handlers::get_review_handler).delete(app_review_handlers::delete_review_handler))
+        .route("/appReviews/{id}/approve", post(app_review_handlers::approve_review_handler))
+        .route("/appReviews/{id}/reject", post(app_review_handlers::reject_review_handler))
+        .layer(from_fn_with_state(state.clone(), require_auth))
+}
+
+pub fn webhook_routes() -> Router<AppState> {
+    Router::new()
+        .route("/webhooks/harbor", post(app_review_handlers::harbor_webhook_handler))
 }
 
 pub fn create_router(state: AppState) -> Router {
@@ -242,7 +259,9 @@ pub fn create_router(state: AppState) -> Router {
         .merge(sys_dict_routes(state.clone()))
         .merge(sys_dict_item_routes(state.clone()))
         .merge(sys_log_routes(state.clone()))
-        .merge(harbor_routes(state.clone()));
+        .merge(harbor_routes(state.clone()))
+        .merge(app_review_routes(state.clone()))
+        .merge(webhook_routes());
 
     Router::new()
         .nest("/api", api_router)
