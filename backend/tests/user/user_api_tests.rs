@@ -617,6 +617,51 @@ async fn test_get_users_page_with_params() {
 }
 
 #[tokio::test]
+async fn test_create_user_sync_harbor_failure_rolls_back_local_user() {
+    let (app, test_db) = create_test_app().await;
+    let token = login(app.clone(), &test_db).await;
+
+    let response = app
+        .clone()
+        .oneshot(auth_request(
+            &token,
+            Request::builder()
+                .method("POST")
+                .uri("/api/sysUser")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"username":"harborsync","email":"harborsync@example.com","password":"W+I0qjwBNl7ok3iYv9K6mQ==","orgId":1,"syncHarbor":true}"#,
+                ))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    // Harbor is not configured in tests, so the sync should fail.
+    assert!(!response.status().is_success(), "Expected Harbor sync failure to return an error");
+
+    // Verify the local user was not created.
+    let get_response = app
+        .oneshot(auth_request(
+            &token,
+            Request::builder()
+                .method("GET")
+                .uri("/api/sysUser/getPage?username=harborsync")
+                .body(Body::empty())
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let body: Bytes = to_bytes(get_response.into_body(), 1024 * 1024).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let data = json.get("data").unwrap();
+    let total = data.get("total").unwrap().as_i64().unwrap();
+    assert_eq!(total, 0, "Local user should not be created when Harbor sync fails");
+}
+
+#[tokio::test]
 async fn test_get_users_page_requires_auth() {
     let (app, _db_path) = create_test_app().await;
 
