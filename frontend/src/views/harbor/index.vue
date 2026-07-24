@@ -122,7 +122,7 @@ const onTabClick = (tab: TabsPaneContext) => {
 
 <style scoped lang="scss">
 .harbor-page {
-  padding: 16px 20px;
+  padding: 0;
 }
 
 .harbor-breadcrumb {
@@ -150,7 +150,7 @@ const onTabClick = (tab: TabsPaneContext) => {
 }
 
 .harbor-tabs-wrapper {
-  padding: 8px 16px;
+  padding: 0 12px;
   background: var(--el-bg-color);
   border-radius: 6px;
 }
