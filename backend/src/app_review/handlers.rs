@@ -143,8 +143,17 @@ pub async fn harbor_webhook_handler(
             reviewer_comment: None,
         };
 
-        match state.app_review_service.create_review(req, None).await {
-            Ok(review) => created.push(ReviewVO::from(review)),
+        match state
+            .app_review_service
+            .create_review_with_dedup(req, None)
+            .await
+        {
+            Ok(Some(review)) => created.push(ReviewVO::from(review)),
+            Ok(None) => {
+                tracing::info!(
+                    "Approved review with identical digest already exists, skipping deduplicated artifact"
+                );
+            }
             Err(AppError::Conflict(_)) => {
                 tracing::info!("Pending review already exists for artifact, skipping");
             }

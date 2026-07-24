@@ -40,6 +40,37 @@ impl AppReviewService {
             .map_err(AppError::DatabaseErrorSeaOrm)
     }
 
+    /// Create a new review for an artifact pushed from Harbor.
+    ///
+    /// If an approved review already exists for the exact same artifact digest,
+    /// returns `Ok(None)` so the caller can skip creating a duplicate review.
+    /// If the digest differs (or no digest is provided), a new pending review is
+    /// created normally.
+    pub async fn create_review_with_dedup(
+        &self,
+        req: CreateReviewRequest,
+        created_by: Option<i64>,
+    ) -> Result<Option<Review>, AppError> {
+        if let Some(digest) = req.digest.as_deref().filter(|d| !d.is_empty()) {
+            let existing = self
+                .repo
+                .find_approved_by_artifact_digest(
+                    &req.src_project,
+                    &req.repository_name,
+                    &req.tag,
+                    digest,
+                )
+                .await
+                .map_err(AppError::DatabaseErrorSeaOrm)?;
+
+            if existing.is_some() {
+                return Ok(None);
+            }
+        }
+
+        self.create_review(req, created_by).await.map(Some)
+    }
+
     pub async fn get_review(&self, id: i64) -> Result<Review, AppError> {
         self.repo
             .find_by_id(id)

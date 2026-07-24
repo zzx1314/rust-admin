@@ -10,6 +10,7 @@ use sea_orm::{
 };
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct SeaOrmAppReviewRepository {
     conn: Arc<DatabaseConnection>,
 }
@@ -59,6 +60,24 @@ impl SeaOrmAppReviewRepository {
             .filter(ReviewColumn::RepositoryName.eq(repository_name))
             .filter(ReviewColumn::Tag.eq(tag))
             .filter(ReviewColumn::Status.eq("pending"))
+            .filter(ReviewColumn::IsDeleted.eq(0))
+            .one(&*self.conn)
+            .await
+    }
+
+    pub async fn find_approved_by_artifact_digest(
+        &self,
+        src_project: &str,
+        repository_name: &str,
+        tag: &str,
+        digest: &str,
+    ) -> Result<Option<Review>, sea_orm::DbErr> {
+        ReviewEntity::find()
+            .filter(ReviewColumn::SrcProject.eq(src_project))
+            .filter(ReviewColumn::RepositoryName.eq(repository_name))
+            .filter(ReviewColumn::Tag.eq(tag))
+            .filter(ReviewColumn::Digest.eq(digest))
+            .filter(ReviewColumn::Status.eq("approved"))
             .filter(ReviewColumn::IsDeleted.eq(0))
             .one(&*self.conn)
             .await
