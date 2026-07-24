@@ -96,12 +96,14 @@ impl App {
             let registry_endpoint_id = harbor_config.registry_endpoint_id;
             let registry_insecure = harbor_config.registry_insecure;
             let replication_timeout_secs = harbor_config.replication_timeout_secs;
+            let replication_poll_interval_secs = harbor_config.replication_poll_interval_secs;
             let harbor_client = Arc::new(HarborClient::new(&harbor_config));
             Arc::new(
                 HarborService::new(harbor_client)
                     .with_registry_endpoint_id(registry_endpoint_id)
                     .with_registry_insecure(registry_insecure)
-                    .with_replication_timeout_secs(replication_timeout_secs),
+                    .with_replication_timeout_secs(replication_timeout_secs)
+                    .with_replication_poll_interval_secs(replication_poll_interval_secs),
             )
         } else {
             tracing::warn!("Harbor config is missing, Harbor endpoints will return an error until [harbor] is configured in config.toml");
@@ -115,6 +117,7 @@ impl App {
                 registry_insecure: None,
                 webhook_secret: None,
                 replication_timeout_secs: 30,
+                replication_poll_interval_secs: 1,
             }))))
         };
 

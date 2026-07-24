@@ -285,6 +285,7 @@ async fn create_test_app() -> (axum::Router, TestDb) {
         registry_insecure: None,
         webhook_secret: None,
         replication_timeout_secs: 30,
+        replication_poll_interval_secs: 1,
     }));
     let harbor_service = Arc::new(HarborService::new(harbor_client));
     let harbor_config = None;

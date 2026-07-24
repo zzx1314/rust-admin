@@ -28,6 +28,8 @@ pub struct HarborConfig {
     pub webhook_secret: Option<String>,
     #[serde(default = "default_replication_timeout")]
     pub replication_timeout_secs: u64,
+    #[serde(default = "default_replication_poll_interval")]
+    pub replication_poll_interval_secs: u64,
 }
 
 fn default_staging_project() -> String {
@@ -40,6 +42,10 @@ fn default_production_project() -> String {
 
 fn default_replication_timeout() -> u64 {
     30
+}
+
+fn default_replication_poll_interval() -> u64 {
+    1
 }
 
 #[derive(Debug, Deserialize, Clone)]

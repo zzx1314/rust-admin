@@ -16,6 +16,7 @@ pub struct HarborService {
     registry_endpoint_id: Option<i64>,
     registry_insecure: Option<bool>,
     replication_timeout_secs: u64,
+    replication_poll_interval_secs: u64,
 }
 
 impl HarborService {
@@ -25,6 +26,7 @@ impl HarborService {
             registry_endpoint_id: None,
             registry_insecure: None,
             replication_timeout_secs: 30,
+            replication_poll_interval_secs: 1,
         }
     }
 
@@ -40,6 +42,11 @@ impl HarborService {
 
     pub fn with_replication_timeout_secs(mut self, secs: u64) -> Self {
         self.replication_timeout_secs = secs;
+        self
+    }
+
+    pub fn with_replication_poll_interval_secs(mut self, secs: u64) -> Self {
+        self.replication_poll_interval_secs = secs.max(1);
         self
     }
 
@@ -921,7 +928,7 @@ impl HarborService {
 
     pub async fn wait_for_replication_execution(&self, execution_id: i64) -> Result<ReplicationExecution, AppError> {
         let timeout = std::time::Duration::from_secs(self.replication_timeout_secs);
-        let interval = std::time::Duration::from_secs(2);
+        let interval = std::time::Duration::from_secs(self.replication_poll_interval_secs);
         let start = std::time::Instant::now();
 
         loop {
