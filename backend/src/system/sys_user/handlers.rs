@@ -24,36 +24,34 @@ pub async fn create_user_handler(
 
     // If Harbor sync is requested and a usable password exists, create the Harbor user first.
     // This guarantees that a Harbor failure does not leave a half-created local user behind.
-    if sync_harbor {
-        if let Some(password) = harbor_password {
-            let username = req.username.clone();
-            let email = req
-                .email
-                .clone()
-                .unwrap_or_else(|| format!("{}@harbor.local", username));
-            let harbor_req = crate::harbor::models::CreateHarborUserRequest {
-                username: username.clone(),
-                password,
-                realname: req.real_name.clone().unwrap_or_else(|| username.clone()),
-                email: Some(email),
-                comment: None,
-            };
+    if let (true, Some(password)) = (sync_harbor, harbor_password) {
+        let username = req.username.clone();
+        let email = req
+            .email
+            .clone()
+            .unwrap_or_else(|| format!("{}@harbor.local", username));
+        let harbor_req = crate::harbor::models::CreateHarborUserRequest {
+            username: username.clone(),
+            password,
+            realname: req.real_name.clone().unwrap_or_else(|| username.clone()),
+            email: Some(email),
+            comment: None,
+        };
 
-            state.harbor_service.create_user(&harbor_req).await?;
+        state.harbor_service.create_user(&harbor_req).await?;
 
-            // Harbor succeeded; now create the local user. If the local creation fails,
-            // roll back the Harbor user on a best-effort basis and propagate the error.
-            match state.user_service.create_user(req).await {
-                Ok(user) => return Ok(Json(ApiResponse::ok(user))),
-                Err(e) => {
-                    if let Err(rollback_err) = state.harbor_service.delete_user(&username).await {
-                        tracing::warn!(
-                            "Failed to rollback Harbor user '{}' after local user creation failed: {}",
-                            username, rollback_err
-                        );
-                    }
-                    return Err(e);
+        // Harbor succeeded; now create the local user. If the local creation fails,
+        // roll back the Harbor user on a best-effort basis and propagate the error.
+        match state.user_service.create_user(req).await {
+            Ok(user) => return Ok(Json(ApiResponse::ok(user))),
+            Err(e) => {
+                if let Err(rollback_err) = state.harbor_service.delete_user(&username).await {
+                    tracing::warn!(
+                        "Failed to rollback Harbor user '{}' after local user creation failed: {}",
+                        username, rollback_err
+                    );
                 }
+                return Err(e);
             }
         }
     }
