@@ -423,49 +423,6 @@ graph LR
     Login --> DockerLogin
 ```
 
-### 启动方式
-
-```bash
-cd ~/IdeaProjects/appstore_client
-
-# 默认端口 3002
-cargo run
-
-# 指定端口
-PORT=8080 cargo run
-
-# 镜像仓库使用自签证书时开启不安全模式
-HARBOR_INSECURE=true cargo run
-```
-
-### API 一览
-
-#### 部署控制台 API（端口 3002）
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| `GET` | `/` | 返回前端页面 |
-| `POST` | `/api/login` | 登录（执行 `docker login` + 创建会话） |
-| `GET` | `/api/images` | 从镜像仓库获取所有镜像列表（从 production-project） |
-| `GET` | `/api/containers` | 列出本地 Docker 容器（支持 page/per_page） |
-| `GET` | `/api/containers/:name/status` | 查询容器运行状态 |
-| `POST` | `/api/containers/:name/start` | 启动容器 |
-| `POST` | `/api/containers/:name/stop` | 停止容器 |
-| `DELETE` | `/api/containers/:name` | 删除容器 |
-| `POST` | `/api/deploy` | 拉取镜像并创建/启动容器 |
-
-#### 管理后台审核 API（端口 3000）
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| `POST` | `/api/appReviews` | 创建审核记录 |
-| `GET` | `/api/appReviews` | 分页查询审核列表（支持按状态、仓库名称筛选） |
-| `GET` | `/api/appReviews/{id}` | 获取审核详情 |
-| `POST` | `/api/appReviews/{id}/approve` | 通过审核（触发镜像复制） |
-| `POST` | `/api/appReviews/{id}/reject` | 拒绝审核 |
-| `DELETE` | `/api/appReviews/{id}` | 删除审核记录 |
-| `POST` | `/api/webhooks/harbor` | Webhook 接收端点（接收 PUSH_ARTIFACT 事件） |
-
 ---
 
 ## 六、最佳实践
