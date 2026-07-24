@@ -2,14 +2,14 @@
 
 ## 概述
 
-应用商店平台是一个基于 **Harbor** 的容器镜像管理系统，提供应用镜像的存储、管理和一键部署能力。
+应用商店平台是一个 **镜像管理系统**，提供应用镜像的存储、管理和一键部署能力。
 
 ### 平台组件
 
 | 组件 | 说明 | 访问方式 |
 |------|------|---------|
 | **管理后台** | 管理员管理项目、成员、用户 | Web 浏览器 |
-| **Harbor 仓库** | 容器镜像存储 | `192.168.41.227:8097` |
+| **镜像仓库** | 容器镜像存储 | `192.168.41.227:8097` |
 | **部署控制台** | 用户登录拉取镜像并管理容器 | `http://<host>:3002` |
 
 ### 角色职责
@@ -35,19 +35,19 @@ graph TB
             用户管理["🔐 用户管理"]
         end
 
-        后端服务["后端服务 (Rust + Axum)\nHarbor API 代理 · 认证鉴权 · 业务逻辑\n审核流程 · 复制规则触发"]
+        后端服务["后端服务 (Rust + Axum)\n镜像仓库 API 代理 · 认证鉴权 · 业务逻辑\n审核流程 · 复制规则触发"]
 
         管理后台 -->|HTTP API| 后端服务
 
-        Harbor["Harbor 容器镜像仓库\n192.168.41.227:8097\n项目管理 · 镜像存储 · 访问控制"]
+        镜像仓库["镜像仓库\n192.168.41.227:8097\n项目管理 · 镜像存储 · 访问控制"]
         
         Staging["staging-project\n📥 开发者推送入口"]
         Production["production-project\n📤 用户拉取出口"]
 
-        Harbor --- Staging
-        Harbor --- Production
+        镜像仓库 --- Staging
+        镜像仓库 --- Production
         
-        后端服务 -->|Harbor REST API v2.0| Harbor
+        后端服务 -->|镜像仓库 API| 镜像仓库
     end
 
     subgraph 角色与交互
@@ -58,9 +58,9 @@ graph TB
     end
 
     开发者 -->|docker push| Staging
-    Staging -.->|① Harbor Webhook 触发\n② 自动创建审核记录| 后端服务
+    Staging -.->|① Webhook 触发\n② 自动创建审核记录| 后端服务
     管理员 -->|③ 审核批准| 后端服务
-    后端服务 -.->|④ 触发 Harbor Replication\n自动复制镜像| Production
+    后端服务 -.->|④ 触发镜像复制\n自动复制镜像| Production
     Production -->|docker pull| 部署控制台
     部署控制台 --> Docker环境
 ```
@@ -93,7 +93,7 @@ graph TB
 ### 前置条件
 
 - 已安装 Docker
-- 已获得 Harbor 镜像仓库的登录凭证
+- 已获得镜像仓库的登录凭证
 - 已被管理员添加到对应项目的 **开发者（Developer）** 角色
 
 ### 1.1 查看推送命令
@@ -173,23 +173,23 @@ docker push 192.168.41.227:8097/staging-project/happy_chat:V1.0.0
 ```mermaid
 flowchart LR
     A["👨‍💻 开发者\ndocker push"] -->|推送镜像| B["📦 staging-project"]
-    B -->|Harbor Webhook 自动触发| C["📋 创建审核记录\n（状态：待审核）"]
+    B -->|Webhook 自动触发| C["📋 创建审核记录\n（状态：待审核）"]
     C --> D["👤 管理员审核"]
-    D -->|批准| E["✅ 触发 Harbor Replication\n从 staging-project\n复制到 production-project"]
+    D -->|批准| E["✅ 触发镜像复制\n从 staging-project\n复制到 production-project"]
     D -->|拒绝| F["❌ 审核拒绝\n镜像不会进入生产"]
     E --> G["📤 production-project\n用户可拉取"]
 ```
 
 #### 2.5.1 审核记录自动创建
 
-当开发者推送镜像到 **staging-project** 时，Harbor 会自动发送 Webhook 通知后端服务，后端自动创建一条审核记录：
+当开发者推送镜像到 **staging-project** 时，镜像仓库会自动发送 Webhook 通知后端服务，后端自动创建一条审核记录：
 
 - **触发条件**：任意新镜像推送到 `staging-project` 下的仓库
 - **自动填充字段**：源项目（staging-project）、目标项目（production-project）、仓库名称、Tag、Digest
 - **初始状态**：`pending`（待审核）
 - **去重机制**：同一仓库 + 同一 Tag 的待审核记录只会创建一条，重复推送不会重复创建
 
-> **前置条件**：需要在 Harbor 中为 staging-project 配置 Webhook，指向 `http://<后端地址>:3000/api/webhooks/harbor`，并配置 `webhook_secret`。
+> **前置条件**：需要为 staging-project 配置 Webhook，指向 `http://<后端地址>:3000/api/webhooks/harbor`，并配置 `webhook_secret`。
 
 #### 2.5.2 手动创建审核记录
 
@@ -229,14 +229,14 @@ flowchart LR
 1. 点击 **通过** 按钮
 2. （可选）在弹出的对话框中填写审核意见
 3. 确认后系统自动执行：
-   - 调用 Harbor API 创建临时复制规则
+   - 调用镜像仓库 API 创建临时复制规则
    - 自动触发复制任务，将镜像从 `staging-project` 复制到 `production-project`
    - 等待复制任务完成（默认超时 30 秒）
    - 清理临时复制规则
    - 将审核状态更新为 `approved`
 4. 提示"审核通过并已触发复制"
 
-> **技术原理**：后端通过 Harbor REST API 动态创建一个临时的 Replication Policy，设置源为 `staging-project`，目标为 `production-project`，按仓库名称和 Tag 过滤，触发手动执行，等待执行成功（Succeed）后自动删除该策略。这确保了只有审核通过的镜像才会进入生产环境。
+> **技术原理**：后端通过镜像仓库 REST API 动态创建一个临时的 Replication Policy，设置源为 `staging-project`，目标为 `production-project`，按仓库名称和 Tag 过滤，触发手动执行，等待执行成功（Succeed）后自动删除该策略。这确保了只有审核通过的镜像才会进入生产环境。
 
 **拒绝审核**：
 1. 点击 **拒绝** 按钮
@@ -266,15 +266,15 @@ http://<部署控制台地址>:3002
 
 | 字段 | 说明 | 示例 |
 |------|------|------|
-| **应用商店地址** | Harbor 仓库地址 | `http://192.168.41.227:8097` |
-| **用户名** | Harbor 用户名 | `zhangzexin` |
-| **密码** | Harbor 密码 | `********` |
+| **应用商店地址** | 镜像仓库地址 | `http://192.168.41.227:8097` |
+| **用户名** | 镜像仓库用户名 | `zhangzexin` |
+| **密码** | 镜像仓库密码 | `********` |
 
 点击「执行 docker login」，后端自动执行 `docker login` 并创建会话。
 
 ### 3.2 浏览应用列表
 
-登录后 **应用列表** 区域展示所有可用的应用镜像（从 Harbor 获取）：
+登录后 **应用列表** 区域展示所有可用的应用镜像（从镜像仓库获取）：
 
 | 内容 | 说明 |
 |------|------|
@@ -298,7 +298,7 @@ http://<部署控制台地址>:3002
 
 ```mermaid
 flowchart LR
-    A["① Harbor 凭证认证"] --> B["② docker pull 镜像"]
+    A["① 镜像仓库凭证认证"] --> B["② docker pull 镜像"]
     B --> C["③ docker create 创建容器"]
     C --> D["④ docker start 启动容器"]
     D --> E["✅ 部署完成"]
@@ -320,7 +320,7 @@ flowchart LR
 
 ```
 1. 打开 http://部署控制台:3002
-2. 填写 Harbor 地址/用户名/密码，点击登录
+2. 填写镜像仓库地址/用户名/密码，点击登录
 3. 在应用列表中找到 appstore/happy_chat
 4. 点击「部署」
 5. 填写：
@@ -347,7 +347,7 @@ sequenceDiagram
     participant User as 用户
 
     Note over Admin,User: 准备阶段
-    Admin->>Dev: 创建 Harbor 用户
+    Admin->>Dev: 创建镜像仓库用户
     Admin->>Admin: 创建 staging-project / production-project
     Admin->>Dev: 将开发者添加为 staging-project 项目成员
 
@@ -356,12 +356,12 @@ sequenceDiagram
     Dev->>Dev: docker build
     Dev->>Dev: docker tag
     Dev->>Staging: docker push（到 staging-project）
-    Staging->>Backend: Harbor Webhook（PUSH_ARTIFACT 事件）
+    Staging->>Backend: Webhook（PUSH_ARTIFACT 事件）
     Backend->>Backend: 自动创建审核记录（状态: pending）
     Backend-->>Admin: 审核列表可查看
     Admin->>Admin: 审核应用（填写审核意见）
     Admin->>Backend: 点击「通过」
-    Backend->>Backend: 调用 Harbor API 创建临时 Replication Policy
+    Backend->>Backend: 调用镜像仓库 API 创建临时复制策略
     Backend->>Backend: 触发复制任务
     Backend->>Staging: 从 staging-project 读取镜像
     Staging->>Prod: 复制到 production-project
@@ -371,7 +371,7 @@ sequenceDiagram
 
     Note over Console,User: 部署阶段
     User->>Console: 打开浏览器访问 :3002
-    User->>Console: ① 填写 Harbor 登录信息
+    User->>Console: ① 填写镜像仓库登录信息
     Console->>Console: 执行 docker login + 创建会话
     User->>Console: ② 浏览应用列表（从 production-project）
     User->>Console: ③ 填写部署参数并提交
@@ -405,7 +405,7 @@ graph LR
 
     subgraph 外部依赖
         Docker["Docker daemon\n(bollard)"]
-        HarborAPI["Harbor API\n(reqwest)"]
+        RegistryAPI["镜像仓库 API\n(reqwest)"]
         DockerLogin["docker login\n(子进程)"]
     end
 
@@ -419,7 +419,7 @@ graph LR
     Containers --> Docker
     ContainerOps --> Docker
 
-    Images --> HarborAPI
+    Images --> RegistryAPI
     Login --> DockerLogin
 ```
 
@@ -434,7 +434,7 @@ cargo run
 # 指定端口
 PORT=8080 cargo run
 
-# Harbor 使用自签证书时开启不安全模式
+# 镜像仓库使用自签证书时开启不安全模式
 HARBOR_INSECURE=true cargo run
 ```
 
@@ -446,7 +446,7 @@ HARBOR_INSECURE=true cargo run
 |------|------|------|
 | `GET` | `/` | 返回前端页面 |
 | `POST` | `/api/login` | 登录（执行 `docker login` + 创建会话） |
-| `GET` | `/api/images` | 从 Harbor 获取所有镜像列表（从 production-project） |
+| `GET` | `/api/images` | 从镜像仓库获取所有镜像列表（从 production-project） |
 | `GET` | `/api/containers` | 列出本地 Docker 容器（支持 page/per_page） |
 | `GET` | `/api/containers/:name/status` | 查询容器运行状态 |
 | `POST` | `/api/containers/:name/start` | 启动容器 |
@@ -461,10 +461,10 @@ HARBOR_INSECURE=true cargo run
 | `POST` | `/api/appReviews` | 创建审核记录 |
 | `GET` | `/api/appReviews` | 分页查询审核列表（支持按状态、仓库名称筛选） |
 | `GET` | `/api/appReviews/{id}` | 获取审核详情 |
-| `POST` | `/api/appReviews/{id}/approve` | 通过审核（触发 Harbor Replication） |
+| `POST` | `/api/appReviews/{id}/approve` | 通过审核（触发镜像复制） |
 | `POST` | `/api/appReviews/{id}/reject` | 拒绝审核 |
 | `DELETE` | `/api/appReviews/{id}` | 删除审核记录 |
-| `POST` | `/api/webhooks/harbor` | Harbor Webhook 接收端点（接收 PUSH_ARTIFACT 事件） |
+| `POST` | `/api/webhooks/harbor` | Webhook 接收端点（接收 PUSH_ARTIFACT 事件） |
 
 ---
 
@@ -474,15 +474,15 @@ HARBOR_INSECURE=true cargo run
 
 推荐语义化版本号：`V1.0.0`、`V1.0.0-beta`、`V1.0.0-rc.1`
 
-### Harbor 审核与复制配置
+### 审核与复制配置
 
-- 确保在 Harbor 中为 **staging-project** 配置 Webhook，地址为 `http://<管理后台地址>:3000/api/webhooks/harbor`，事件类型选择 **Push Artifact**
+- 确保为 **staging-project** 配置 Webhook，地址为 `http://<管理后台地址>:3000/api/webhooks/harbor`，事件类型选择 **Push Artifact**
 - 配置 `backend/config/config.toml` 中的 `[harbor]` 段：
   - `staging_project` — 预发布项目名称（默认 `staging-project`）
   - `production_project` — 生产项目名称（默认 `production-project`）
   - `webhook_secret` — Webhook 密钥，用于验证请求来源
   - `replication_timeout_secs` — 等待复制完成超时时间（默认 30 秒）
-- 确保 Harbor 中有 **本地 Registry 端点**，复制规则需要引用本地端点进行项目间复制
+- 确保镜像仓库中有 **本地 Registry 端点**，复制规则需要引用本地端点进行项目间复制
 - 生产项目建议设为 **公开**，方便普通用户拉取镜像（无需登录）
 
 ### 安全建议
@@ -506,12 +506,12 @@ HARBOR_INSECURE=true cargo run
 ### 部署控制台登录失败
 
 ```
-Docker/Harbor 登录失败: ...
+Docker/镜像仓库登录失败: ...
 ```
 
-1. 确认 Harbor 地址、用户名、密码是否正确
-2. 确认部署控制台机器能访问 Harbor 地址
-3. 确认该用户已在 Harbor 中创建
+1. 确认镜像仓库地址、用户名、密码是否正确
+2. 确认部署控制台机器能访问镜像仓库地址
+3. 确认该用户已在镜像仓库中创建
 
 ### 推送被拒绝
 
@@ -528,17 +528,17 @@ denied: requested access to the resource is denied
 Replication execution ... failed
 ```
 
-**原因：** Harbor Replication 执行失败（目标项目不存在、网络问题等）。
+**原因：** 镜像复制执行失败（目标项目不存在、网络问题等）。
 **解决：**
-1. 确认 `production-project` 已在 Harbor 中创建
-2. 确认 Harbor 中已配置本地 Registry 端点
+1. 确认 `production-project` 已在镜像仓库中创建
+2. 确认镜像仓库中已配置本地 Registry 端点
 3. 检查 `replication_timeout_secs` 是否足够（大镜像复制可能需要更长时间）
-4. 可在 Harbor 后台手动检查复制执行记录
+4. 可在镜像仓库后台手动检查复制执行记录
 
 ### 审核记录未自动创建
 
-1. 确认 Harbor Webhook 已正确配置（`Push Artifact` 事件，地址为 `/api/webhooks/harbor`）
-2. 确认 `webhook_secret` 在 Harbor Webhook 配置和管理后台配置中一致
+1. 确认 Webhook 已正确配置（`Push Artifact` 事件，地址为 `/api/webhooks/harbor`）
+2. 确认 `webhook_secret` 在 Webhook 配置和管理后台配置中一致
 3. 确认推送的目标项目是 `staging-project`（仅监控该项目的推送事件）
 4. 查看管理后台后端日志：`RUST_LOG=debug cargo run`
 
@@ -557,5 +557,5 @@ Replication execution ... failed
 ### 管理后台数据不显示
 
 1. 检查 `backend/config/config.toml` 中 `[harbor]` 配置
-2. 确认 Harbor 服务可从后端服务器访问
+2. 确认镜像仓库服务可从后端服务器访问
 3. 查看后端日志：`RUST_LOG=debug cargo run`
