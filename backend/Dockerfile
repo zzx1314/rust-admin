@@ -9,8 +9,11 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Cache dependencies: download crates first without compiling
+# Cache dependencies: download crates first without compiling.
+# Cargo needs the library/binary source files to exist while parsing the
+# manifest (even for `cargo fetch`), so create stub files first.
 COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src && touch src/lib.rs src/main.rs
 RUN cargo fetch
 
 # Copy the real source code and build
