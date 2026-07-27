@@ -73,7 +73,11 @@ impl AppConfig {
 
         let config = Config::builder()
             .add_source(File::with_name(&config_path).required(true))
-            .add_source(Environment::with_prefix("APP").separator("__"))
+            .add_source(
+                Environment::with_prefix("APP")
+                    .prefix_separator("_")
+                    .separator("__"),
+            )
             .build()?;
 
         config.try_deserialize()
