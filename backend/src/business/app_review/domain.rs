@@ -1,5 +1,5 @@
-use crate::app_review::entity::ActiveModel as ReviewActiveModel;
-use crate::app_review::entity::Model as ReviewModel;
+use crate::business::app_review::entity::ActiveModel as ReviewActiveModel;
+use crate::business::app_review::entity::Model as ReviewModel;
 use chrono::{DateTime, Utc};
 use sea_orm::ActiveValue;
 use serde::{Deserialize, Serialize};

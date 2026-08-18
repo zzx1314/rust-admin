@@ -1,10 +1,10 @@
-use crate::app_review::domain::{
+use crate::business::app_review::domain::{
     CreateReviewRequest, Review, ReviewPageQuery, ReviewStatus, ReviewVO,
 };
-use crate::app_review::repository::SeaOrmAppReviewRepository;
+use crate::business::app_review::repository::SeaOrmAppReviewRepository;
 use crate::common::error::AppError;
 use crate::common::pagination::PageResponse;
-use crate::harbor::service::HarborService;
+use crate::business::harbor::service::HarborService;
 use std::sync::Arc;
 
 pub struct AppReviewService {

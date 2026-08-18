@@ -1,11 +1,11 @@
 use sea_orm::ConnectionTrait;
 use std::sync::Arc;
 
-use x_rust::app_review::domain::{CreateReviewRequest, ReviewStatus};
-use x_rust::app_review::repository::SeaOrmAppReviewRepository;
-use x_rust::app_review::service::AppReviewService;
-use x_rust::harbor::client::HarborClient;
-use x_rust::harbor::service::HarborService;
+use x_rust::business::app_review::domain::{CreateReviewRequest, ReviewStatus};
+use x_rust::business::app_review::repository::SeaOrmAppReviewRepository;
+use x_rust::business::app_review::service::AppReviewService;
+use x_rust::business::harbor::client::HarborClient;
+use x_rust::business::harbor::service::HarborService;
 use x_rust::config::HarborConfig;
 
 struct TestDb {

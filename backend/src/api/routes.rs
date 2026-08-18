@@ -6,11 +6,10 @@ use axum::{
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::api::AppState;
-use crate::api::middleware::require_auth;
-use crate::api::logging_middleware::logging_middleware;
-use crate::app_review::handlers as app_review_handlers;
-use crate::harbor::handlers as harbor_handlers;
-use crate::auth::handlers::{
+use crate::api::middleware::{audit_log_middleware, require_auth};
+use crate::business::app_review::handlers as app_review_handlers;
+use crate::business::harbor::handlers as harbor_handlers;
+use crate::system::auth::handlers::{
     check_token_handler, login_handler, logout_handler, me_handler, refresh_handler,
 };
 use crate::system::sys_menu::handlers::{
@@ -266,7 +265,7 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .nest("/api", api_router)
         .layer(TraceLayer::new_for_http())
-        .layer(from_fn_with_state(state.clone(), logging_middleware))
+        .layer(from_fn_with_state(state.clone(), audit_log_middleware))
         .layer(
             CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)

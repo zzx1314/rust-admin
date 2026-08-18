@@ -41,94 +41,65 @@ cargo test --test auth_service_tests  # 运行 auth service tests
 
 ## Architecture
 
-```
-src/
+```src/
 ├── main.rs                     # Entry point: tracing + app.run()
 ├── app.rs                      # Application assembler: DB pool, DI wiring
-├── lib.rs                      # Library crate root (pub mod exports)
+├── lib.rs                      # Library crate root and compatibility re-exports
 │
-├── config/                     # Configuration layer
-│   └── mod.rs                 # AppConfig (Redis URL, JWT secret, etc.)
+├── system/                     # Reusable platform/system capabilities
+│   ├── auth/                   # JWT login, logout, refresh and token storage
+│   ├── sys_user/               # System users and user-role associations
+│   ├── sys_role/               # Roles and role-user associations
+│   ├── sys_menu/               # Menus and menu trees
+│   ├── sys_org/                # Organizations and organization trees
+│   ├── sys_dict/               # System dictionaries
+│   ├── sys_dict_item/          # Dictionary items
+│   ├── sys_log/                # Audit/system logs
+│   └── sys_auth/               # Menu authorization data
 │
-├── user/                       # User module (按模块划分)
-│   ├── entity.rs              # SeaORM User entity
-│   ├── domain.rs              # User type alias + CRUD DTO + UserVO
-│   ├── user.rs               # Placeholder for future extensions (currently unused/empty)
-│   ├── repository.rs          # UserRepository trait + SeaOrmUserRepository impl
-│   ├── service.rs             # UserService (injects Arc<dyn UserRepository>)
-│   └── handlers.rs            # User CRUD + pagination HTTP handlers
-│
-├── role/                       # Role module
-│   ├── entity.rs              # SeaORM Role entity
-│   ├── user_role.rs           # User-Role relation entity
-│   ├── sys_role_menu.rs       # Role-Menu relation entity
-│   ├── domain.rs              # Role type alias + CRUD DTO
-│   ├── repository.rs          # RoleRepository trait + impl
-│   ├── service.rs             # RoleService
-│   └── handlers.rs            # Role HTTP handlers
-│
-├── menu/                       # Menu module
-│   ├── entity.rs              # SeaORM Menu entity
-│   ├── domain.rs              # Menu type alias + CRUD DTO + MenuVo + MenuTree
-│   ├── repository.rs          # MenuRepository trait + impl
-│   ├── service.rs             # MenuService
-│   └── handlers.rs            # Menu CRUD + tree HTTP handlers
-│
-├── org/                        # Org module
-│   ├── entity.rs              # SeaORM Org entity
-│   ├── domain.rs              # Org type alias + CRUD DTO + OrgTreeDto
-│   ├── repository.rs          # OrgRepository trait + impl
-│   ├── service.rs             # OrgService
-│   └── handlers.rs            # Org CRUD + tree HTTP handlers
-│
-├── auth/                       # Auth module
-│   ├── repository.rs          # TokenStore trait + RedisTokenStore impl
-│   ├── service.rs             # AuthService (JWT + TokenStore + UserRepository)
-│   └── handlers.rs            # Login/logout/validate HTTP handlers
+├── business/                   # Product/business domains
+│   ├── harbor/                 # Harbor registry integration and APIs
+│   └── app_review/             # Application artifact review workflow
 │
 ├── common/                     # Common/shared code
-│   ├── base.rs              # BaseRepository, RepoExt traits
-│   ├── sqlite/               # SQLite query helpers
-│   │   ├── mod.rs
-│   │   └── query_builder.rs
-│   ├── error.rs              # AppError enum, ApiResponse<T>, IntoResponse impl
-│   ├── traits.rs             # Repository trait definitions
-│   ├── util.rs               # md5_encrypt, encrypt_password helpers
-│   ├── pagination.rs          # PageRequest, PageResponse<T>
-│   └── value_objects.rs       # Email value object (encapsulates validation)
+│   ├── base.rs                 # BaseRepository, RepoExt traits
+│   ├── sqlite/                 # SQLite query helpers
+│   ├── error.rs                # AppError enum, ApiResponse<T>, IntoResponse impl
+│   ├── traits.rs               # Repository trait definitions
+│   ├── util.rs                 # Shared utility helpers
+│   ├── pagination.rs            # PageRequest, PageResponse<T>
+│   └── value_objects.rs         # Shared value objects
 │
-└── api/                        # HTTP interface layer
-    ├── mod.rs                 # AppState (IoC container, must be Clone)
-    ├── handlers/mod.rs        # Handler utilities (currently unused/empty)
-    ├── routes.rs              # Router assembly with .merge() per resource
-    └── middleware.rs          # require_auth middleware
+├── api/                        # HTTP interface layer
+│   ├── mod.rs                  # AppState (IoC container, must be Clone)
+│   ├── routes.rs               # Router assembly with .merge() per resource
+│   └── middleware/             # HTTP middleware
+│       ├── auth.rs             # require_auth middleware
+│       └── audit_log.rs        # Audit log middleware
+│
+├── config/                     # Configuration layer
+└── migration/                  # Database migrations
 
-tests/                          # Integration tests (organized by module)
-├── user/
-│   ├── user_service_tests.rs      # UserService unit tests + FakeUserRepository
-│   ├── user_repository_tests.rs   # UserRepository integration tests
-│   └── user_api_tests.rs          # User HTTP API tests
-├── role/
-│   ├── role_service_tests.rs      # RoleService unit tests + FakeRoleRepository
-│   ├── role_repository_tests.rs   # RoleRepository integration tests
-│   └── role_api_tests.rs          # Role HTTP API tests
-├── menu/
-│   ├── menu_service_tests.rs      # MenuService unit tests + FakeMenuRepository
-│   └── menu_repository_tests.rs   # MenuRepository integration tests
-├── org/
-│   ├── org_service_tests.rs       # OrgService unit tests + FakeOrgRepository
-│   ├── org_repository_tests.rs    # OrgRepository integration tests
-│   └── org_api_tests.rs           # Org HTTP API tests
-├── auth/
-│   └── auth_service_tests.rs      # AuthService unit tests + FakeTokenStore
-└── common/
-    ├── email_tests.rs             # Email value object tests
-    ├── error_tests.rs             # AppError tests
-    └── util_tests.rs              # Utility function tests
+
+tests/                          # Integration tests grouped by system/business domain
+├── system/
+│   ├── auth/                      # Authentication tests
+│   ├── user/                      # User tests
+│   ├── role/                      # Role tests
+│   ├── menu/                      # Menu tests
+│   ├── org/                       # Organization tests
+│   ├── sys_auth/                  # Authorization tests
+│   ├── sys_dict/                  # Dictionary tests
+│   ├── sys_dict_item/             # Dictionary item tests
+│   └── sys_log/                   # System log tests
+├── business/
+│   └── app_review_service_tests.rs # Application review tests
+├── common/                        # Shared utility/value-object tests
+└── logging/                       # HTTP middleware tests
 ```
 
 ### Test Configuration
-Tests are organized by module under `tests/<module>/`. Each test file is explicitly declared in `Cargo.toml` via `[[test]]` entries. Run with `cargo test --test <name>` (name from `[[test]]` block, not file path).
+Tests are organized under `tests/system/` and `tests/business/` according to the production module boundary. Each test file is explicitly declared in `Cargo.toml` via `[[test]]` entries. Run with `cargo test --test <name>` (name from `[[test]]` block, not file path).
 
 ### Code Conventions
 

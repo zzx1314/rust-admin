@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod sys_auth;
 pub mod sys_dict;
 pub mod sys_dict_item;

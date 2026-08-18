@@ -30,7 +30,7 @@ pub async fn create_user_handler(
             .email
             .clone()
             .unwrap_or_else(|| format!("{}@harbor.local", username));
-        let harbor_req = crate::harbor::models::CreateHarborUserRequest {
+        let harbor_req = crate::business::harbor::models::CreateHarborUserRequest {
             username: username.clone(),
             password,
             realname: req.real_name.clone().unwrap_or_else(|| username.clone()),

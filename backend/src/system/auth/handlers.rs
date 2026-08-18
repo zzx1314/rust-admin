@@ -1,6 +1,6 @@
 use crate::api::AppState;
 use crate::api::middleware::RequestUser;
-use crate::auth::service::{CheckTokenVO, TokenRefreshVO, UserInfoVO};
+use crate::system::auth::service::{CheckTokenVO, TokenRefreshVO, UserInfoVO};
 use crate::common::error::AppError;
 use crate::common::util::decrypt_password;
 use crate::system::sys_log::domain::CreateSysLogRequest;

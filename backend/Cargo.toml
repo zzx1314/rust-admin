@@ -41,55 +41,55 @@ tower = { version = "0.5", features = ["util"] }
 
 [[test]]
 name = "user_service_tests"
-path = "tests/user/user_service_tests.rs"
+path = "tests/system/user/user_service_tests.rs"
 
 [[test]]
 name = "user_repository_tests"
-path = "tests/user/user_repository_tests.rs"
+path = "tests/system/user/user_repository_tests.rs"
 
 [[test]]
 name = "user_api_tests"
-path = "tests/user/user_api_tests.rs"
+path = "tests/system/user/user_api_tests.rs"
 
 [[test]]
 name = "role_service_tests"
-path = "tests/role/role_service_tests.rs"
+path = "tests/system/role/role_service_tests.rs"
 
 [[test]]
 name = "role_repository_tests"
-path = "tests/role/role_repository_tests.rs"
+path = "tests/system/role/role_repository_tests.rs"
 
 [[test]]
 name = "role_api_tests"
-path = "tests/role/role_api_tests.rs"
+path = "tests/system/role/role_api_tests.rs"
 
 [[test]]
 name = "menu_service_tests"
-path = "tests/menu/menu_service_tests.rs"
+path = "tests/system/menu/menu_service_tests.rs"
 
 [[test]]
 name = "menu_repository_tests"
-path = "tests/menu/menu_repository_tests.rs"
+path = "tests/system/menu/menu_repository_tests.rs"
 
 [[test]]
 name = "org_service_tests"
-path = "tests/org/org_service_tests.rs"
+path = "tests/system/org/org_service_tests.rs"
 
 [[test]]
 name = "org_repository_tests"
-path = "tests/org/org_repository_tests.rs"
+path = "tests/system/org/org_repository_tests.rs"
 
 [[test]]
 name = "org_api_tests"
-path = "tests/org/org_api_tests.rs"
+path = "tests/system/org/org_api_tests.rs"
 
 [[test]]
 name = "auth_service_tests"
-path = "tests/auth/auth_service_tests.rs"
+path = "tests/system/auth/auth_service_tests.rs"
 
 [[test]]
 name = "sys_auth_service_tests"
-path = "tests/sys_auth/sys_auth_service_tests.rs"
+path = "tests/system/sys_auth/sys_auth_service_tests.rs"
 
 [[test]]
 name = "email_tests"
@@ -105,16 +105,20 @@ path = "tests/common/util_tests.rs"
 
 [[test]]
 name = "sys_dict_service_tests"
-path = "tests/sys_dict/sys_dict_service_tests.rs"
+path = "tests/system/sys_dict/sys_dict_service_tests.rs"
 
 [[test]]
 name = "sys_dict_item_service_tests"
-path = "tests/sys_dict_item/sys_dict_item_service_tests.rs"
+path = "tests/system/sys_dict_item/sys_dict_item_service_tests.rs"
 
 [[test]]
 name = "sys_log_service_tests"
-path = "tests/sys_log/sys_log_service_tests.rs"
+path = "tests/system/sys_log/sys_log_service_tests.rs"
 
 [[test]]
 name = "logging_middleware_tests"
 path = "tests/logging/logging_middleware_tests.rs"
+
+[[test]]
+name = "app_review_service_tests"
+path = "tests/business/app_review_service_tests.rs"

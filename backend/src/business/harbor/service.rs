@@ -1,8 +1,8 @@
 use crate::common::error::AppError;
 use crate::common::pagination::PageResponse;
 use crate::common::util::format_iso_datetime;
-use crate::harbor::client::HarborClient;
-use crate::harbor::models::{
+use crate::business::harbor::client::HarborClient;
+use crate::business::harbor::models::{
     ChangePasswordRequest, CreateHarborUserRequest, CreateMemberRequest, CreateProjectRequest,
     CreateRegistryRequest, CreateReplicationPolicyRequest, HarborArtifact, HarborInfo, HarborMember,
     HarborProject, HarborRegistry, HarborRepository, HarborStatistics, HarborUser, ProjectQuery, ProjectSummary,

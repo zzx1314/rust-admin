@@ -1,7 +1,7 @@
 use crate::api::AppState;
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
-use crate::harbor::models::{
+use crate::business::harbor::models::{
     CreateMemberRequest, CreateProjectRequest, HarborArtifact, HarborInfo, HarborMember, HarborProject,
     HarborRepository, HarborStatistics, ProjectQuery, ProjectSummary,
 };

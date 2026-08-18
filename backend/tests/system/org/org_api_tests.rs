@@ -222,13 +222,13 @@ async fn create_test_app() -> (axum::Router, TestDb) {
 
     use std::sync::Arc;
     use x_rust::api::AppState;
-    use x_rust::auth::service::AuthService;
+    use x_rust::system::auth::service::AuthService;
     use x_rust::common::traits::{
         MenuRepository, OrgRepository, RoleRepository, SysDictItemRepository, SysDictRepository,
         SysLogRepository, TokenStore, UserRepository,
     };
-    use x_rust::harbor::client::HarborClient;
-    use x_rust::harbor::service::HarborService;
+    use x_rust::business::harbor::client::HarborClient;
+    use x_rust::business::harbor::service::HarborService;
     use x_rust::system::sys_menu::repository::SeaOrmMenuRepository;
     use x_rust::system::sys_menu::service::MenuService;
     use x_rust::system::sys_org::repository::SeaOrmOrgRepository;
@@ -244,8 +244,8 @@ async fn create_test_app() -> (axum::Router, TestDb) {
     use x_rust::system::sys_log::service::SysLogService;
     use x_rust::system::sys_user::repository::SeaOrmUserRepository;
     use x_rust::system::sys_user::service::UserService;
-    use x_rust::app_review::repository::SeaOrmAppReviewRepository;
-    use x_rust::app_review::service::AppReviewService;
+    use x_rust::business::app_review::repository::SeaOrmAppReviewRepository;
+    use x_rust::business::app_review::service::AppReviewService;
 
     let conn = Arc::new(conn);
     let org_repo: Arc<dyn OrgRepository> = Arc::new(SeaOrmOrgRepository::new(conn.clone()));

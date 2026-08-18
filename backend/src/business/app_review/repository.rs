@@ -1,8 +1,8 @@
-use crate::app_review::domain::{CreateReviewRequest, ReviewPageQuery};
-use crate::app_review::entity::ActiveModel as ReviewActiveModel;
-use crate::app_review::entity::Column as ReviewColumn;
-use crate::app_review::entity::Entity as ReviewEntity;
-use crate::app_review::entity::Model as Review;
+use crate::business::app_review::domain::{CreateReviewRequest, ReviewPageQuery};
+use crate::business::app_review::entity::ActiveModel as ReviewActiveModel;
+use crate::business::app_review::entity::Column as ReviewColumn;
+use crate::business::app_review::entity::Entity as ReviewEntity;
+use crate::business::app_review::entity::Model as Review;
 use crate::common::base::{order_desc, BaseRepository};
 use sea_orm::{
     ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,

@@ -97,7 +97,7 @@ fn should_skip_body(headers: &axum::http::HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
-pub async fn logging_middleware(
+pub async fn audit_log_middleware(
     state: axum::extract::State<AppState>,
     mut request: Request,
     next: Next,
