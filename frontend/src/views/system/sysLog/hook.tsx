@@ -39,6 +39,31 @@ export function usePSysLogrecord() {
       id: null
     }
   });
+  function formatChangeValue(value: unknown): string {
+    if (value === null || value === undefined) return "空";
+    if (typeof value === "object") return JSON.stringify(value);
+    return String(value);
+  }
+
+  function formatChangeDetails(extra: unknown): string {
+    if (typeof extra !== "string") return "-";
+
+    try {
+      const parsed = JSON.parse(extra) as {
+        changes?: Array<{ field: string; old: unknown; new: unknown }>;
+      };
+      if (!parsed.changes?.length) return "-";
+      return parsed.changes
+        .map(
+          change =>
+            `${change.field}: ${formatChangeValue(change.old)} → ${formatChangeValue(change.new)}`
+        )
+        .join("；");
+    } catch {
+      return "-";
+    }
+  }
+
   const rules = reactive<FormRules>({
     name: [{ required: true, message: "称必填", trigger: "blur" }]
   });
@@ -85,6 +110,12 @@ export function usePSysLogrecord() {
       label: "操作内容",
       prop: "action",
       minWidth: 300
+    },
+    {
+      label: "变化字段",
+      prop: "extra",
+      minWidth: 280,
+      cellRenderer: ({ row }) => formatChangeDetails(row.extra)
     }
   ];
   const buttonClass = computed(() => {

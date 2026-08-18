@@ -100,7 +100,7 @@ impl OrgService {
         }
 
         let mut expanded: Vec<Org> = collected.into_values().collect();
-        expanded.sort_by(|a, b| a.sort.unwrap_or(0).cmp(&b.sort.unwrap_or(0)));
+        expanded.sort_by_key(|org| org.sort.unwrap_or(0));
 
         let dtos: Vec<OrgTreeDto> = expanded.into_iter().map(OrgTreeDto::from).collect();
         Ok(build_org_tree(dtos))

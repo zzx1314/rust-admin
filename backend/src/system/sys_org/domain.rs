@@ -141,7 +141,7 @@ pub fn build_org_tree(orgs: Vec<OrgTreeDto>) -> Vec<OrgTreeDto> {
                 .iter()
                 .filter_map(|cid| id_map.get(cid).cloned())
                 .collect();
-            children.sort_by(|a, b| a.sort.unwrap_or(0).cmp(&b.sort.unwrap_or(0)));
+            children.sort_by_key(|child| child.sort.unwrap_or(0));
             for child in &mut children {
                 build_children(child, id_map, children_of);
             }
@@ -164,7 +164,7 @@ pub fn build_org_tree(orgs: Vec<OrgTreeDto>) -> Vec<OrgTreeDto> {
         .iter()
         .filter_map(|id| id_map.get(id).cloned())
         .collect();
-    roots.sort_by(|a, b| a.sort.unwrap_or(0).cmp(&b.sort.unwrap_or(0)));
+    roots.sort_by_key(|root| root.sort.unwrap_or(0));
 
     for root in &mut roots {
         build_children(root, &id_map, &children_of);

@@ -296,7 +296,7 @@ impl HarborService {
         // Harbor API: /api/v2.0/projects/{project}/repositories/{repo_name}/artifacts
         // Harbor repo names come as "{project}/{short_name}" (e.g. "appstore/redis"),
         // but the artifacts endpoint expects just the short name.
-        let short_name = repo_name.split('/').last().unwrap_or(repo_name);
+        let short_name = repo_name.split('/').next_back().unwrap_or(repo_name);
         let path = format!(
             "/api/v2.0/projects/{}/repositories/{}/artifacts",
             project_name,
@@ -392,7 +392,7 @@ impl HarborService {
         }
 
         // 3. Sort by pull_count descending, take top 5
-        all_repos.sort_by(|a, b| b.pull_count.cmp(&a.pull_count));
+        all_repos.sort_by_key(|repo| std::cmp::Reverse(repo.pull_count));
         all_repos.truncate(5);
 
         // 4. Get recent 5 projects (sorted by creation_time descending)
@@ -796,7 +796,7 @@ impl HarborService {
 
         let id = location
             .split('/')
-            .last()
+            .next_back()
             .unwrap_or("")
             .parse::<i64>()
             .map_err(|_| {
@@ -971,7 +971,10 @@ impl HarborService {
         self.ensure_enabled()?;
 
         let registry_id = self.find_local_registry_endpoint().await?;
-        let short_repo = repository_name.split('/').last().unwrap_or(repository_name);
+        let short_repo = repository_name
+            .split('/')
+            .next_back()
+            .unwrap_or(repository_name);
 
         let policy_name = format!("temp-approve-{}-{}", src_project, uuid::Uuid::new_v4());
         let req = CreateReplicationPolicyRequest {
@@ -1005,10 +1008,19 @@ impl HarborService {
 
         let policy = self.create_replication_policy(&req).await?;
 
-        let execution = self.trigger_replication(policy.id).await.map_err(|e| {
-            let _ = self.delete_replication_policy(policy.id);
-            e
-        })?;
+        let execution = match self.trigger_replication(policy.id).await {
+            Ok(execution) => execution,
+            Err(error) => {
+                if let Err(cleanup_error) = self.delete_replication_policy(policy.id).await {
+                    tracing::warn!(
+                        "Failed to delete replication policy {} after trigger failure: {}",
+                        policy.id,
+                        cleanup_error
+                    );
+                }
+                return Err(error);
+            }
+        };
 
         match self.wait_for_replication_execution(execution.id).await {
             Ok(_) => {

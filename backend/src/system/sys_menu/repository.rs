@@ -128,8 +128,10 @@ impl MenuRepository for SeaOrmMenuRepository {
                         .one(&*conn)
                         .await?
                     {
-                        if menu.parent_id.is_some() && menu.parent_id.unwrap() != 0 {
-                            menu_ids.insert(menu.parent_id.unwrap());
+                        if let Some(parent_id) = menu.parent_id
+                            && parent_id != 0
+                        {
+                            menu_ids.insert(parent_id);
                         }
                         menu_ids.insert(menu.id);
                         menus.push(Menu::from(menu));
@@ -145,11 +147,11 @@ impl MenuRepository for SeaOrmMenuRepository {
                             .one(&*conn)
                             .await?
                         {
-                            if parent.parent_id.is_some() && parent.parent_id.unwrap() != 0 {
-                                let grandparent_id = parent.parent_id.unwrap();
-                                if !menus.iter().any(|m| m.id == grandparent_id) {
-                                    menu_ids.insert(grandparent_id);
-                                }
+                            if let Some(grandparent_id) = parent.parent_id
+                                && grandparent_id != 0
+                                && !menus.iter().any(|m| m.id == grandparent_id)
+                            {
+                                menu_ids.insert(grandparent_id);
                             }
                             if !menus.iter().any(|m| m.id == parent.id) {
                                 menus.push(Menu::from(parent));

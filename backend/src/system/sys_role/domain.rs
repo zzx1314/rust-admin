@@ -110,7 +110,6 @@ impl CreateRoleRequest {
             create_time: ActiveValue::set(chrono::Utc::now()),
             update_time: ActiveValue::set(chrono::Utc::now()),
             is_deleted: ActiveValue::set(0),
-            ..Default::default()
         }
     }
 }

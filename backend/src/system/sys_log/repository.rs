@@ -98,7 +98,7 @@ impl SysLogRepository for SeaOrmSysLogRepository {
                     req.ip.as_ref().map(|v| SysLogColumn::Ip.contains(v)),
                 ]
                 .into_iter()
-                .filter_map(|c| c)
+                .flatten()
                 .collect();
                 for c in conditions {
                     cond = cond.add(c);

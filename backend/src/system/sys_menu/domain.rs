@@ -166,15 +166,8 @@ pub fn build_menu_tree(menu_trees: Vec<MenuTree>) -> Vec<MenuTree> {
     for menu in menu_trees {
         let pid = menu.parent_id;
         match pid {
-            Some(p) if p != 0 => {
-                if id_map.contains_key(&p) {
-                } else {
-                    roots.push(menu);
-                }
-            }
-            _ => {
-                roots.push(menu);
-            }
+            Some(p) if p != 0 && id_map.contains_key(&p) => {}
+            _ => roots.push(menu),
         }
     }
 
@@ -193,12 +186,12 @@ pub fn build_menu_tree(menu_trees: Vec<MenuTree>) -> Vec<MenuTree> {
                     children.push(child);
                 }
             }
-            children.sort_by(|a, b| {
-                a.meta
+            children.sort_by_key(|child| {
+                child
+                    .meta
                     .as_ref()
                     .and_then(|m| m.rank)
                     .unwrap_or(0)
-                    .cmp(&b.meta.as_ref().and_then(|m| m.rank).unwrap_or(0))
             });
             menu.children = Some(children);
         }
@@ -208,12 +201,11 @@ pub fn build_menu_tree(menu_trees: Vec<MenuTree>) -> Vec<MenuTree> {
         attach_children(root, &id_map);
     }
 
-    roots.sort_by(|a, b| {
-        a.meta
+    roots.sort_by_key(|root| {
+        root.meta
             .as_ref()
             .and_then(|m| m.rank)
             .unwrap_or(0)
-            .cmp(&b.meta.as_ref().and_then(|m| m.rank).unwrap_or(0))
     });
 
     roots

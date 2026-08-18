@@ -32,7 +32,7 @@ impl UserRepository for SeaOrmUserRepository {
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let now = chrono::Utc::now();
-                let active_model = req.to_active_model(id.clone(), now);
+                let active_model = req.to_active_model(id, now);
 
                 UserEntity::insert(active_model).exec(&*conn).await?;
 
@@ -122,7 +122,7 @@ impl UserRepository for SeaOrmUserRepository {
                     req.enable.map(|v| UserColumn::Enable.eq(v)),
                 ]
                 .into_iter()
-                .filter_map(|c| c)
+                .flatten()
                 .collect();
                 for c in conditions {
                     cond = cond.add(c);
@@ -157,7 +157,7 @@ impl UserRepository for SeaOrmUserRepository {
         self.with_conn(move |conn| {
             Box::pin(async move {
                 let exists = UserEntity::find()
-                    .filter(UserColumn::Id.eq(id.clone()))
+                    .filter(UserColumn::Id.eq(id))
                     .filter(UserColumn::IsDeleted.eq(0))
                     .one(&*conn)
                     .await?;
@@ -166,9 +166,9 @@ impl UserRepository for SeaOrmUserRepository {
                     return Ok(None);
                 }
 
-                let active_model = req.to_active_model(id.clone(), chrono::Utc::now());
+                let active_model = req.to_active_model(id, chrono::Utc::now());
                 UserEntity::update(active_model)
-                    .filter(UserColumn::Id.eq(id.clone()))
+                    .filter(UserColumn::Id.eq(id))
                     .filter(UserColumn::IsDeleted.eq(0))
                     .exec(&*conn)
                     .await?;

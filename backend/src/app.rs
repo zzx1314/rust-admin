@@ -124,10 +124,14 @@ impl App {
         let app_review_service = Arc::new(AppReviewService::new(app_review_repo, harbor_service.clone()));
         let harbor_config = config.harbor.clone();
 
-        if let Some(harbor_cfg) = &harbor_config {
-            if harbor_cfg.webhook_secret.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
-                tracing::warn!("Harbor webhook secret is not configured. The /api/webhooks/harbor endpoint is publicly accessible without verification.");
-            }
+        if let Some(harbor_cfg) = &harbor_config
+            && harbor_cfg
+                .webhook_secret
+                .as_ref()
+                .map(|s| s.is_empty())
+                .unwrap_or(true)
+        {
+            tracing::warn!("Harbor webhook secret is not configured. The /api/webhooks/harbor endpoint is publicly accessible without verification.");
         }
 
         AppState {

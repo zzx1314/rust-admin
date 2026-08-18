@@ -97,8 +97,8 @@ impl UserLoginVO {
                 nickname,
                 roles,
                 permissions,
-                access_token: access_token,
-                refresh_token: refresh_token,
+                access_token,
+                refresh_token,
                 expires,
                 user_id: Some(user_id),
             },
@@ -323,8 +323,8 @@ impl AuthService {
             .unwrap_or_default();
 
         Ok(UserLoginData {
-            access_token: access_token,
-            refresh_token: refresh_token,
+            access_token,
+            refresh_token,
             expires,
             user_id: Some(user_id),
             username: user.username.clone(),
@@ -418,16 +418,16 @@ impl AuthService {
         let access_exp = now + ACCESS_TOKEN_TTL_SECS;
         let refresh_exp = now + REFRESH_TOKEN_TTL_SECS;
 
-        let user_id = user.id.clone();
+        let user_id = user.id;
         let access_claims = Claims {
-            sub: user_id.clone(),
+            sub: user_id,
             username: user.username.clone(),
             exp: access_exp,
             iat: now,
         };
 
         let refresh_claims = Claims {
-            sub: user_id.clone(),
+            sub: user_id,
             username: user.username.clone(),
             exp: refresh_exp,
             iat: now,
@@ -490,16 +490,16 @@ impl AuthService {
         let access_exp = now + ACCESS_TOKEN_TTL_SECS;
         let refresh_exp = now + REFRESH_TOKEN_TTL_SECS;
 
-        let user_id = user.id.clone();
+        let user_id = user.id;
         let access_claims = Claims {
-            sub: user_id.clone(),
+            sub: user_id,
             username: user.username.clone(),
             exp: access_exp,
             iat: now,
         };
 
         let refresh_claims = Claims {
-            sub: user_id.clone(),
+            sub: user_id,
             username: user.username.clone(),
             exp: refresh_exp,
             iat: now,

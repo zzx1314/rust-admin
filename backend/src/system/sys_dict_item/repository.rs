@@ -133,7 +133,7 @@ impl SysDictItemRepository for SeaOrmSysDictItemRepository {
                         .map(|v| SysDictItemColumn::Label.contains(v)),
                 ]
                 .into_iter()
-                .filter_map(|c| c)
+                .flatten()
                 .collect();
                 for c in conditions {
                     cond = cond.add(c);

@@ -106,7 +106,7 @@ impl RoleRepository for SeaOrmRoleRepository {
                     req.code.as_ref().map(|v| RoleColumn::Code.contains(v)),
                 ]
                 .into_iter()
-                .filter_map(|c| c)
+                .flatten()
                 .collect();
                 for c in conditions {
                     cond = cond.add(c);

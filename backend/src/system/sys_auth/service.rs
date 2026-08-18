@@ -61,7 +61,7 @@ impl SysAuthService {
             let parent_buttons: Vec<&Menu> = buttons
                 .iter()
                 .filter(|b| b.parent_id == Some(parent_id))
-                .map(|b| *b)
+                .copied()
                 .collect();
 
             let auth_list: Vec<SysAuthTitleVo> = parent_buttons
@@ -107,10 +107,10 @@ impl SysAuthService {
     ) {
         if let Some(menu) = all_menu_map.get(menu_id) {
             path.push(menu.name.clone());
-            if let Some(parent_id) = menu.parent_id {
-                if parent_id != 0 {
-                    self.build_menu_path(&parent_id, all_menu_map, path);
-                }
+            if let Some(parent_id) = menu.parent_id
+                && parent_id != 0
+            {
+                self.build_menu_path(&parent_id, all_menu_map, path);
             }
         }
     }
@@ -166,12 +166,12 @@ impl SysAuthService {
         menu_map: &HashMap<i64, Menu>,
         set: &mut HashSet<i64>,
     ) {
-        if let Some(parent_id) = menu.parent_id {
-            if parent_id != 0 {
-                set.insert(parent_id);
-                if let Some(parent) = menu_map.get(&parent_id) {
-                    self.collect_parent_ids(parent, menu_map, set);
-                }
+        if let Some(parent_id) = menu.parent_id
+            && parent_id != 0
+        {
+            set.insert(parent_id);
+            if let Some(parent) = menu_map.get(&parent_id) {
+                self.collect_parent_ids(parent, menu_map, set);
             }
         }
     }
