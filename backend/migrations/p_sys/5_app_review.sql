@@ -1,3 +1,4 @@
+-- @migration-name: add_app_review
 CREATE TABLE IF NOT EXISTS p_app_review (
     id INTEGER PRIMARY KEY,
     src_project TEXT NOT NULL,

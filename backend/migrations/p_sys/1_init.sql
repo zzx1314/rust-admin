@@ -1,3 +1,4 @@
+-- @migration-name: p_sys_tables_from_file
 -- 用户表
 CREATE TABLE IF NOT EXISTS p_sys_user (
     id INTEGER PRIMARY KEY,

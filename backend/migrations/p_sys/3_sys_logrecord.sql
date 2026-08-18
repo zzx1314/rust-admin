@@ -1,3 +1,4 @@
+-- @migration-name: add_sys_logrecord
 -- 日志表
 CREATE TABLE IF NOT EXISTS p_sys_logrecord (
     id INTEGER PRIMARY KEY,
