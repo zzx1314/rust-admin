@@ -53,7 +53,7 @@ const roleUrls = {
 const menuUrls = {
   menuPage: `/api/sysMenu/getAll`,
   saveSysMenu: `/api/sysMenu`,
-  updateSysMenuById: `/api/sysMenu`,
+  updateSysMenuById: `/api/sysMenu/`,
   deleteSysMenuById: `/api/sysMenu/`,
   getSysMenuByRoleId: `/api/sysMenu/`
 };
@@ -374,13 +374,13 @@ export const saveSysMenu = (param?: object) => {
 };
 
 /** 修改菜单 */
-export const updateSysMenuById = (param?: object) => {
-  return http.axiosPut<Result>(menuUrls.updateSysMenuById, param);
+export const updateSysMenuById = (param: { id: string | number }) => {
+  return http.axiosPut<Result>(menuUrls.updateSysMenuById + param.id, param);
 };
 
 /**删除菜单 */
-export const deleteSysMenu = (param?: object) => {
-  return http.axiosDelete<Result>(menuUrls.getSysMenuByRoleId + param);
+export const deleteSysMenu = (param: string | number) => {
+  return http.axiosDelete<Result>(menuUrls.deleteSysMenuById + param);
 };
 
 /** 获取权限菜单列表 */
