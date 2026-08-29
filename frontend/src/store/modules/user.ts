@@ -76,7 +76,7 @@ export const useUserStore = defineStore("pure-user", {
     },
     /** 登入 */
     async loginByUsername(data) {
-      data.password = aesUtils.encode(data.password, "");
+      data = { ...data, password: aesUtils.encode(data.password, "") };
       data.grant_type = "password";
       data.scope = "server";
       return new Promise<UserResult>((resolve, reject) => {

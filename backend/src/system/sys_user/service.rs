@@ -134,9 +134,11 @@ impl UserService {
 
     pub async fn update_user(&self, id: &i64, req: UpdateUserRequest) -> Result<User, AppError> {
         let role_id = req.role;
+        let mut user_req = req.clone();
+        user_req.role = None;
         let user = self
             .user_repo
-            .update(id, &req)
+            .update(id, &user_req)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?
             .ok_or_else(|| AppError::NotFound(format!("User with id {} not found", id)))?;

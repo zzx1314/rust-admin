@@ -204,6 +204,15 @@ impl AuthService {
 
         let valid = md5_verify(password, password_hash);
 
+        tracing::debug!(
+            username = %username,
+            user_id = user.id,
+            enable = ?user.enable,
+            is_deleted = user.is_deleted,
+            password_matches = valid,
+            "Login credential check"
+        );
+
         if !valid {
             return Err(AppError::Unauthorized(
                 "Invalid username or password".to_string(),
@@ -272,6 +281,15 @@ impl AuthService {
             .ok_or_else(|| AppError::Unauthorized("Invalid username or password".to_string()))?;
 
         let valid = md5_verify(password, password_hash);
+
+        tracing::debug!(
+            username = %username,
+            user_id = user.id,
+            enable = ?user.enable,
+            is_deleted = user.is_deleted,
+            password_matches = valid,
+            "Login credential check"
+        );
 
         if !valid {
             return Err(AppError::Unauthorized(

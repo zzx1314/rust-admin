@@ -302,9 +302,9 @@ class PureHttp {
               avatar: "", // 需要填充实际值
               accessToken: response.access_token,
               refreshToken: response.refresh_token,
-              expires: response.exp,
-              username: response.username, // 需要填充实际值
-              nickname: response.username, // 需要填充实际值
+              expires: response.expires,
+              username: response.username,
+              nickname: response.nickname,
               permissions: response.permissions,
               roles: response.roles,
               user_id: response.user_id
