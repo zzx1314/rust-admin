@@ -35,17 +35,69 @@ pub async fn create_review_handler(
 
 pub async fn list_reviews_handler(
     State(state): State<AppState>,
-    Query(query): Query<ReviewPageQuery>,
+    auth: TypedHeader<Authorization<Bearer>>,
+    Query(mut query): Query<ReviewPageQuery>,
 ) -> Result<Json<ApiResponse<PageResponse<ReviewVO>>>, AppError> {
+    let user_id = state.auth_service.validate_token(auth.token()).await?;
+    let roles = state.role_service.get_roles_for_user(&user_id).await?;
+    let is_admin = roles.iter().any(|role| {
+        role.code
+            .as_deref()
+            .map(|code| {
+                let code = code.trim().to_ascii_lowercase();
+                code == "admin"
+                    || code == "administrator"
+                    || code == "role_admin"
+                    || code == "sysadm"
+                    || code == "110"
+            })
+            .unwrap_or(false)
+            || role.name.trim() == "管理员"
+            || role.name.trim().eq_ignore_ascii_case("administrator")
+    });
+    tracing::info!(
+        user_id,
+        is_admin,
+        role_count = roles.len(),
+        roles = ?roles.iter().map(|role| (&role.name, &role.code)).collect::<Vec<_>>(),
+        "Loading application reviews"
+    );
+    if !is_admin {
+        query.created_by = Some(user_id);
+    }
     let result = state.app_review_service.list_reviews(query).await?;
     Ok(Json(ApiResponse::ok(result)))
 }
 
 pub async fn get_review_handler(
     State(state): State<AppState>,
+    auth: TypedHeader<Authorization<Bearer>>,
     Path(params): Path<ReviewIdParam>,
 ) -> Result<Json<ApiResponse<ReviewVO>>, AppError> {
+    let user_id = state.auth_service.validate_token(auth.token()).await?;
     let review = state.app_review_service.get_review(params.id).await?;
+    let roles = state.role_service.get_roles_for_user(&user_id).await?;
+    let is_admin = roles.iter().any(|role| {
+        role.code
+            .as_deref()
+            .map(|code| {
+                let code = code.trim().to_ascii_lowercase();
+                code == "admin"
+                    || code == "administrator"
+                    || code == "role_admin"
+                    || code == "sysadm"
+                    || code == "110"
+            })
+            .unwrap_or(false)
+            || role.name.trim() == "管理员"
+            || role.name.trim().eq_ignore_ascii_case("administrator")
+    });
+    if !is_admin && review.created_by != Some(user_id) {
+        return Err(AppError::NotFound(format!(
+            "Review with id {} not found",
+            params.id
+        )));
+    }
     Ok(Json(ApiResponse::ok(ReviewVO::from(review))))
 }
 
@@ -146,6 +198,14 @@ pub async fn harbor_webhook_handler(
             artifact_id: None,
             reviewer_comment: None,
         };
+
+        tracing::info!(
+            project = %req.src_project,
+            repository = %req.repository_name,
+            tag = %req.tag,
+            digest = ?req.digest,
+            "Creating application review from Harbor webhook"
+        );
 
         match state
             .app_review_service

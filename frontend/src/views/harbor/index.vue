@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
+import { useUserStoreHook } from "@/store/modules/user";
 import type { TabsPaneContext } from "element-plus";
 import ProjectTab from "./tabs/ProjectTab.vue";
 import RepositoryTab from "./tabs/RepositoryTab.vue";
@@ -7,6 +8,17 @@ import MemberTab from "./tabs/MemberTab.vue";
 import ArtifactTab from "./tabs/ArtifactTab.vue";
 import ReviewTab from "./tabs/ReviewTab.vue";
 
+const userStore = useUserStoreHook();
+const isAdmin = computed(() => {
+  const permissions = userStore.permissions ?? [];
+  console.log("User permissions:", permissions);
+  return (
+    permissions.some(permission => {
+      const normalized = permission.trim().toLowerCase();
+      return normalized === "110";
+    }) || ["sysadmin"].includes(userStore.username?.toLowerCase() ?? "")
+  );
+});
 const activeTab = ref<"projects" | "repos" | "members" | "reviews">("projects");
 const drillProject = ref("");
 const drillRepo = ref("");
@@ -56,6 +68,10 @@ const handleSelectRepo = (payload: { project: string; repo: string }) => {
 };
 
 const onTabClick = (tab: TabsPaneContext) => {
+  if (tab.paneName === "reviews" && !isAdmin.value) {
+    activeTab.value = "projects";
+    return;
+  }
   activeTab.value = tab.paneName as
     | "projects"
     | "repos"
@@ -112,7 +128,7 @@ const onTabClick = (tab: TabsPaneContext) => {
         <el-tab-pane label="项目成员" name="members">
           <MemberTab v-if="activeTab === 'members'" />
         </el-tab-pane>
-        <el-tab-pane label="应用审核" name="reviews">
+        <el-tab-pane v-if="isAdmin" label="应用审核" name="reviews">
           <ReviewTab v-if="activeTab === 'reviews'" />
         </el-tab-pane>
       </el-tabs>

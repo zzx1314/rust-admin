@@ -61,7 +61,11 @@ pub struct ReviewPageQuery {
     pub src_project: Option<String>,
     pub repository_name: Option<String>,
     pub status: Option<String>,
+    #[serde(skip, default)]
+    pub created_by: Option<i64>,
+    #[serde(default = "default_current")]
     pub current: i64,
+    #[serde(default = "default_size")]
     pub size: i64,
 }
 
@@ -127,6 +131,14 @@ impl CreateReviewRequest {
             is_deleted: ActiveValue::set(0),
         }
     }
+}
+
+fn default_current() -> i64 {
+    1
+}
+
+fn default_size() -> i64 {
+    10
 }
 
 fn format_datetime(dt: DateTime<Utc>) -> String {

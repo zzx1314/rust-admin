@@ -102,6 +102,9 @@ impl SeaOrmAppReviewRepository {
         if let Some(status) = &query.status {
             cond = cond.add(ReviewColumn::Status.eq(status.as_str()));
         }
+        if let Some(created_by) = query.created_by {
+            cond = cond.add(ReviewColumn::CreatedBy.eq(created_by));
+        }
         base_query = base_query.filter(cond);
 
         let total = base_query.clone().count(&*self.conn).await?;

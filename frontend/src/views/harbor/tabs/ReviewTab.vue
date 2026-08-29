@@ -240,26 +240,26 @@ onMounted(fetchReviews);
             </el-tag>
           </template>
           <template #actions="{ row }">
-            <el-button
-              v-if="row.status === 'pending'"
-              link
-              type="success"
-              :size="size"
-              :icon="useRenderIcon(Check)"
-              @click="openCommentDialog(row, 'approve')"
-            >
-              通过
-            </el-button>
-            <el-button
-              v-if="row.status === 'pending'"
-              link
-              type="danger"
-              :size="size"
-              :icon="useRenderIcon(Close)"
-              @click="openCommentDialog(row, 'reject')"
-            >
-              拒绝
-            </el-button>
+            <template v-if="row.status === 'pending'">
+              <el-button
+                link
+                type="success"
+                :size="size"
+                :icon="useRenderIcon(Check)"
+                @click="openCommentDialog(row, 'approve')"
+              >
+                通过
+              </el-button>
+              <el-button
+                link
+                type="danger"
+                :size="size"
+                :icon="useRenderIcon(Close)"
+                @click="openCommentDialog(row, 'reject')"
+              >
+                拒绝
+              </el-button>
+            </template>
             <el-button
               link
               type="danger"
