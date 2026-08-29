@@ -5,6 +5,13 @@ use crate::system::sys_menu::domain::Menu;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+fn menu_has_role_code(menu: &Menu, role_code: &str) -> bool {
+    menu.role_code
+        .as_deref()
+        .map(|codes| codes.split(',').any(|code| code.trim() == role_code))
+        .unwrap_or(false)
+}
+
 pub struct SysAuthService {
     menu_repo: Arc<dyn MenuRepository>,
     role_repo: Arc<dyn RoleRepository>,
@@ -42,16 +49,18 @@ impl SysAuthService {
 
         let role_menu_ids: HashSet<i64> = role_menus.iter().map(|m| m.id).collect();
 
-        let buttons: Vec<&Menu> = role_menus
-            .iter()
-            .filter(|m| m.r#type == Some(2) && m.is_deleted == 0)
+        let all_buttons: Vec<&Menu> = all_menu_map
+            .values()
+            .filter(|m| {
+                m.r#type == Some(2) && m.is_deleted == 0 && menu_has_role_code(m, role_code)
+            })
             .collect();
 
-        if buttons.is_empty() {
+        if all_buttons.is_empty() {
             return Ok(Vec::new());
         }
 
-        let parent_ids: HashSet<i64> = buttons.iter().filter_map(|b| b.parent_id).collect();
+        let parent_ids: HashSet<i64> = all_buttons.iter().filter_map(|b| b.parent_id).collect();
 
         let mut result: Vec<SysAuthMenuVo> = Vec::new();
 
@@ -61,14 +70,15 @@ impl SysAuthService {
             menu_path_list.reverse();
             let title = menu_path_list.join("/");
 
-            let parent_buttons: Vec<&Menu> = buttons
+            let parent_buttons: Vec<&Menu> = all_buttons
                 .iter()
                 .filter(|b| b.parent_id == Some(parent_id))
                 .copied()
                 .collect();
 
-            let auth_list: Vec<SysAuthTitleVo> = parent_buttons
+            let auth_list: Vec<SysAuthTitleVo> = all_buttons
                 .iter()
+                .filter(|b| b.parent_id == Some(parent_id))
                 .map(|b| SysAuthTitleVo {
                     id: b.id,
                     name: b.name.clone(),

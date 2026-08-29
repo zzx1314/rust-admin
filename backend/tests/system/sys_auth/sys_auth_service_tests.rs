@@ -393,6 +393,154 @@ async fn test_get_role_auth_returns_data() {
 }
 
 #[tokio::test]
+async fn test_get_role_auth_uses_menu_role_code_without_assignment() {
+    let menu_repo = Arc::new(FakeMenuRepository::new());
+    let role_repo = Arc::new(FakeRoleRepository::new());
+    let service = SysAuthService::new(menu_repo.clone(), role_repo.clone());
+
+    role_repo
+        .create(
+            &CreateRoleRequest {
+                name: "Role 111".to_string(),
+                code: Some("111".to_string()),
+                description: None,
+                remarks: None,
+                ds_type: None,
+                ds_scope: None,
+            },
+            &111,
+        )
+        .await
+        .unwrap();
+
+    menu_repo
+        .create(
+            &CreateMenuRequest {
+                name: "Stale menu".to_string(),
+                code: None,
+                permission: Some("stale:menu".to_string()),
+                path_url: None,
+                icon: None,
+                parent_id: Some(0),
+                component: None,
+                sort: None,
+                keep_alive: None,
+                r#type: Some(2),
+                remarks: None,
+                leaf: None,
+                role_code: Some("111".to_string()),
+                disabled: None,
+                find_auth_id: None,
+            },
+            &2111,
+        )
+        .await
+        .unwrap();
+
+    let result = service.get_role_auth("111").await.unwrap();
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].auth_list.len(), 1);
+}
+
+#[tokio::test]
+async fn test_get_role_auth_only_returns_menus_for_requested_role_code() {
+    let menu_repo = Arc::new(FakeMenuRepository::new());
+    let role_repo = Arc::new(FakeRoleRepository::new());
+    let service = SysAuthService::new(menu_repo.clone(), role_repo.clone());
+
+    for (id, code) in [(111_i64, "111"), (112_i64, "112")] {
+        role_repo
+            .create(
+                &CreateRoleRequest {
+                    name: format!("Role {code}"),
+                    code: Some(code.to_string()),
+                    description: None,
+                    remarks: None,
+                    ds_type: None,
+                    ds_scope: None,
+                },
+                &id,
+            )
+            .await
+            .unwrap();
+    }
+
+    menu_repo
+        .create(
+            &CreateMenuRequest {
+                name: "Role 111 button".to_string(),
+                code: None,
+                permission: Some("role111:find".to_string()),
+                path_url: None,
+                icon: None,
+                parent_id: Some(0),
+                component: None,
+                sort: None,
+                keep_alive: None,
+                r#type: Some(2),
+                remarks: None,
+                leaf: None,
+                role_code: Some("111".to_string()),
+                disabled: None,
+                find_auth_id: None,
+            },
+            &3111,
+        )
+        .await
+        .unwrap();
+    menu_repo
+        .create(
+            &CreateMenuRequest {
+                name: "Role 112 button".to_string(),
+                code: None,
+                permission: Some("role112:find".to_string()),
+                path_url: None,
+                icon: None,
+                parent_id: Some(0),
+                component: None,
+                sort: None,
+                keep_alive: None,
+                r#type: Some(2),
+                remarks: None,
+                leaf: None,
+                role_code: Some("111,112".to_string()),
+                disabled: None,
+                find_auth_id: None,
+            },
+            &3112,
+        )
+        .await
+        .unwrap();
+
+    menu_repo.assign_menu_to_role(112, 3112);
+
+    let role_111_data = service.get_role_auth("111").await.unwrap();
+    assert_eq!(role_111_data.len(), 1);
+    assert_eq!(role_111_data[0].auth_list.len(), 2);
+    assert!(
+        role_111_data[0]
+            .auth_list
+            .iter()
+            .any(|item| item.permission.as_deref() == Some("role111:find"))
+    );
+    assert!(
+        role_111_data[0]
+            .auth_list
+            .iter()
+            .any(|item| item.permission.as_deref() == Some("role112:find"))
+    );
+
+    let role_112_data = service.get_role_auth("112").await.unwrap();
+    assert_eq!(role_112_data.len(), 1);
+    assert_eq!(role_112_data[0].auth_list.len(), 1);
+    assert_eq!(
+        role_112_data[0].auth_list[0].permission.as_deref(),
+        Some("role112:find")
+    );
+}
+
+#[tokio::test]
 async fn test_get_role_auth_role_not_found() {
     let menu_repo = Arc::new(FakeMenuRepository::new());
     let role_repo = Arc::new(FakeRoleRepository::new());
