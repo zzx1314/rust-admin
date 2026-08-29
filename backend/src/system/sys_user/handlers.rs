@@ -10,6 +10,9 @@ use axum::{
     Json,
     extract::{Path, Query, State},
 };
+use axum_extra::TypedHeader;
+use axum_extra::headers::Authorization;
+use axum_extra::headers::authorization::Bearer;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -172,11 +175,13 @@ pub async fn get_users_by_role_handler(
 
 pub async fn edit_password_handler(
     State(state): State<AppState>,
+    auth: TypedHeader<Authorization<Bearer>>,
     Json(req): Json<PasswordUpdateRequest>,
 ) -> Result<Json<crate::system::sys_user::service::PasswordUpdateResponse>, AppError> {
-    let user_id = req
-        .user_id
-        .ok_or_else(|| AppError::BadRequest("user_id is required".to_string()))?;
+    // Derive the current user from the token so a foreground user can change
+    // their own password without knowing their numeric id.
+    let token = auth.token();
+    let user_id = state.auth_service.validate_token(token).await?;
     let response = state
         .user_service
         .update_password(&user_id, req.old_password.as_deref(), &req.password)

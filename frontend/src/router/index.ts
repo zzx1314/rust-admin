@@ -38,12 +38,38 @@ const modules: Record<string, any> = import.meta.glob(
   }
 );
 
+/** 账户设置：固定静态路由，隐藏于菜单（直接注册，不依赖 glob 编译新文件） */
+const AccountSettingsRoute: RouteRecordRaw = {
+  path: "/account",
+  name: "Account",
+  component: () => import("@/layout/index.vue"),
+  redirect: "/account/settings",
+  meta: {
+    title: "账户设置",
+    showLink: false,
+    rank: 99
+  },
+  children: [
+    {
+      path: "/account/settings",
+      name: "AccountSettings",
+      component: () => import("@/views/account/settings/index.vue"),
+      meta: {
+        title: "账户设置",
+        showLink: false
+      }
+    }
+  ]
+};
+
 /** 原始静态路由（未做任何处理） */
 const routes = [];
 
 Object.keys(modules).forEach(key => {
   routes.push(modules[key].default);
 });
+
+routes.push(AccountSettingsRoute);
 
 /** 导出处理后的静态路由（三级及以上的路由全部拍成二级） */
 export const constantRoutes: Array<RouteRecordRaw> = formatTwoStageRoutes(

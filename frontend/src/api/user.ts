@@ -53,20 +53,6 @@ export type UserInfoResult = {
   data: UserInfo;
 };
 
-type ResultTable = {
-  success: boolean;
-  data?: {
-    /** 列表数据 */
-    list: Array<any>;
-    /** 总条目数 */
-    total?: number;
-    /** 每页显示条目个数 */
-    pageSize?: number;
-    /** 当前页数 */
-    currentPage?: number;
-  };
-};
-
 const urls = {
   token: `/api/token`,
   refreshToken: `/api/token/refresh/`,
@@ -109,14 +95,9 @@ export const refreshTokenApi = (refresh_token?: string) => {
   );
 };
 
-/** 账户设置-个人信息 */
-export const getMine = (data?: object) => {
-  return http.request<UserInfoResult>("get", "/mine", { data });
-};
-
-/** 账户设置-个人安全日志 */
-export const getMineLogs = (data?: object) => {
-  return http.request<ResultTable>("get", "/mine-logs", { data });
+/** 账户设置-获取当前登录用户信息 */
+export const getMine = () => {
+  return http.axiosGet<UserInfoResult>(urls.getInfo);
 };
 
 /** 账户设置-修改密码 */
