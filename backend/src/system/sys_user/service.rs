@@ -133,11 +133,37 @@ impl UserService {
     }
 
     pub async fn update_user(&self, id: &i64, req: UpdateUserRequest) -> Result<User, AppError> {
-        self.user_repo
+        let role_id = req.role;
+        let user = self
+            .user_repo
             .update(id, &req)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?
-            .ok_or_else(|| AppError::NotFound(format!("User with id {} not found", id)))
+            .ok_or_else(|| AppError::NotFound(format!("User with id {} not found", id)))?;
+
+        if let Some(role_id) = role_id {
+            let current_roles = self
+                .role_repo
+                .find_roles_by_user_id(id)
+                .await
+                .map_err(AppError::DatabaseErrorSeaOrm)?;
+            for role in &current_roles {
+                if role.id != role_id {
+                    self.role_repo
+                        .remove_role_from_user(id, &role.id)
+                        .await
+                        .map_err(AppError::DatabaseErrorSeaOrm)?;
+                }
+            }
+            if !current_roles.iter().any(|role| role.id == role_id) {
+                self.role_repo
+                    .assign_role_to_user(id, &role_id)
+                    .await
+                    .map_err(AppError::DatabaseErrorSeaOrm)?;
+            }
+        }
+
+        Ok(user)
     }
 
     pub async fn delete_user(&self, id: &i64) -> Result<(), AppError> {
@@ -198,6 +224,7 @@ impl UserService {
             is_show: None,
             enable: None,
             sex: None,
+            role: None,
         };
 
         self.user_repo
@@ -232,6 +259,7 @@ impl UserService {
             is_show: None,
             enable: None,
             sex: None,
+            role: None,
         };
         self.user_repo
             .update(user_id, &req)
@@ -253,6 +281,7 @@ impl UserService {
             is_show: None,
             enable: Some(enable),
             sex: None,
+            role: None,
         };
         self.user_repo
             .update(user_id, &req)

@@ -279,6 +279,7 @@ async fn test_user_repo_update() {
         is_show: None,
         enable: None,
         sex: None,
+        role: None,
     };
 
     let updated_user = repo.update(&id, &update_req).await.unwrap().unwrap();
@@ -304,6 +305,7 @@ async fn test_user_repo_update_not_found() {
         is_show: None,
         enable: None,
         sex: None,
+        role: None,
     };
 
     let result = repo.update(&999i64, &update_req).await.unwrap();

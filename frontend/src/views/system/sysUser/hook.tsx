@@ -44,7 +44,7 @@ export function useUser() {
     newpassword1: "",
     enable: null,
     sex: "",
-    role: "",
+    role: [],
     orgId: null,
     orgName: "",
     syncHarbor: true
@@ -198,7 +198,7 @@ export function useUser() {
     addForm.value.newpassword1 = "";
     addForm.value.enable = null;
     addForm.value.sex = "";
-    addForm.value.role = "";
+    addForm.value.role = [];
     addForm.value.orgName = orgNameVal.value;
     addForm.value.syncHarbor = true;
     dialogFormVisible.value = false;
@@ -278,10 +278,14 @@ export function useUser() {
     openDia("修改用户", ref);
     // Merge with initial form to preserve fields not in API response (password, syncHarbor, etc.)
     const formData = JSON.parse(JSON.stringify(row));
+    const roleIds = String(row.roleStr ?? "")
+      .split(",")
+      .map(roleId => Number(roleId.trim()))
+      .filter(roleId => Number.isFinite(roleId));
     addForm.value = {
       ...addForm.value,
       ...formData,
-      role: row.roleStr ? parseInt(row.roleStr.split(",")[0]) : ""
+      role: roleIds.length > 0 ? roleIds[0] : ""
     };
     console.log(addForm.value);
   }
@@ -412,7 +416,11 @@ export function useUser() {
     console.log(addForm.value);
     if (addForm.value.id) {
       console.log("修改");
-      updateUser(addForm.value).then(res => {
+      const updateParam = {
+        ...addForm.value,
+        role: addForm.value.role || null
+      };
+      updateUser(updateParam).then(res => {
         if (res.code === SUCCESS) {
           message("修改成功！", { type: "success" });
           cancel();

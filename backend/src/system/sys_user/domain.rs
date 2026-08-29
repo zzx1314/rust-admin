@@ -38,6 +38,7 @@ pub struct UpdateUserRequest {
     pub is_show: Option<i32>,
     pub enable: Option<i32>,
     pub sex: Option<String>,
+    pub role: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

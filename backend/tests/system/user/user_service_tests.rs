@@ -470,6 +470,7 @@ async fn test_update_user_success() {
         is_show: None,
         enable: None,
         sex: None,
+        role: None,
     };
     let result = service.update_user(&1i64, update_req).await.unwrap();
     assert_eq!(result.username, "updated");
@@ -495,6 +496,7 @@ async fn test_update_user_not_found() {
         is_show: None,
         enable: None,
         sex: None,
+        role: None,
     };
 
     let result = service.update_user(&999i64, req).await;
