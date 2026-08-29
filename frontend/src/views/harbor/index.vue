@@ -1,25 +1,27 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
-import { useUserStoreHook } from "@/store/modules/user";
 import type { TabsPaneContext } from "element-plus";
 import ProjectTab from "./tabs/ProjectTab.vue";
 import RepositoryTab from "./tabs/RepositoryTab.vue";
 import MemberTab from "./tabs/MemberTab.vue";
 import ArtifactTab from "./tabs/ArtifactTab.vue";
 import ReviewTab from "./tabs/ReviewTab.vue";
+import { useUserStoreHook } from "@/store/modules/user";
 
 const userStore = useUserStoreHook();
 const isAdmin = computed(() => {
   const permissions = userStore.permissions ?? [];
-  console.log("User permissions:", permissions);
   return (
-    permissions.some(permission => {
-      const normalized = permission.trim().toLowerCase();
-      return normalized === "110";
-    }) || ["sysadmin"].includes(userStore.username?.toLowerCase() ?? "")
+    permissions.some(permission => permission.trim() === "110") ||
+    userStore.username?.toLowerCase() === "sysadmin"
   );
 });
-const activeTab = ref<"projects" | "repos" | "members" | "reviews">("projects");
+const isDeveloper = computed(() =>
+  (userStore.permissions ?? []).some(permission => permission.trim() === "112")
+);
+const activeTab = ref<"projects" | "repos" | "members" | "reviews">(
+  isDeveloper.value && !isAdmin.value ? "repos" : "projects"
+);
 const drillProject = ref("");
 const drillRepo = ref("");
 
@@ -68,8 +70,8 @@ const handleSelectRepo = (payload: { project: string; repo: string }) => {
 };
 
 const onTabClick = (tab: TabsPaneContext) => {
-  if (tab.paneName === "reviews" && !isAdmin.value) {
-    activeTab.value = "projects";
+  if (!isAdmin.value && tab.paneName !== "repos") {
+    activeTab.value = "repos";
     return;
   }
   activeTab.value = tab.paneName as
@@ -106,7 +108,11 @@ const onTabClick = (tab: TabsPaneContext) => {
     <!-- Tabs -->
     <div class="harbor-tabs-wrapper">
       <el-tabs v-model="activeTab" @tab-click="onTabClick">
-        <el-tab-pane label="项目概要" name="projects">
+        <el-tab-pane
+          v-if="!isDeveloper || isAdmin"
+          label="项目概要"
+          name="projects"
+        >
           <ProjectTab
             v-if="activeTab === 'projects'"
             @select-project="handleSelectProject"
@@ -125,7 +131,11 @@ const onTabClick = (tab: TabsPaneContext) => {
             :repo-name="drillRepo"
           />
         </el-tab-pane>
-        <el-tab-pane label="项目成员" name="members">
+        <el-tab-pane
+          v-if="!isDeveloper || isAdmin"
+          label="项目成员"
+          name="members"
+        >
           <MemberTab v-if="activeTab === 'members'" />
         </el-tab-pane>
         <el-tab-pane v-if="isAdmin" label="应用审核" name="reviews">

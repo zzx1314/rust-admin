@@ -51,7 +51,7 @@ const fetchProjects = async () => {
     });
     if (res.code === 10200 && res.data) {
       projectList.value =
-        res.data.records?.map(item => ({
+        res.data.records?.filter(item => item.name === "staging-project").map(item => ({
           ...item,
           is_public: item.metadata?.public === "true"
         })) || [];

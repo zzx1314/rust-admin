@@ -19,7 +19,7 @@ const pSysLogrecordUrls = {
   page: `/api/sysLog/getPage`,
   save: "/api/sysLog/save",
   delete: `/api/sysLog/`,
-  update: "/api/sysLog/update"
+  update: "/api/sysLog/"
 };
 
 // 分页
@@ -31,8 +31,8 @@ export const pSysLogrecordSave = (param?: object) => {
   return http.axiosPostRequest<Result>(pSysLogrecordUrls.save, param);
 };
 // 修改
-export const pSysLogrecordUpdate = (param?: object) => {
-  return http.axiosPut<Result>(pSysLogrecordUrls.update, param);
+export const pSysLogrecordUpdate = (param: { id: string | number; [key: string]: unknown }) => {
+  return http.axiosPut<Result>(pSysLogrecordUrls.update + param.id, param);
 };
 // 删除
 export const pSysLogrecordDelete = (param?: object) => {

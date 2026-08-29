@@ -33,7 +33,7 @@ const pushRepoName = ref("");
 
 // Project selector state (for direct tab access)
 const projects = ref<HarborProject[]>([]);
-const selectedProject = ref("");
+const selectedProject = ref("staging-project");
 
 const repoPagination = reactive<PaginationProps>({
   total: 0,
@@ -53,16 +53,15 @@ const columns = [
 ];
 
 const fetchProjects = async () => {
+  if (props.projectName) return;
   try {
     const res = await listProjects({ page_size: 100 });
     if (res.code === 10200 && res.data) {
       projects.value = res.data.records || [];
-      if (
-        projects.value.length > 0 &&
-        !selectedProject.value &&
-        !props.projectName
-      ) {
-        selectedProject.value = projects.value[0].name;
+      if (!props.projectName) {
+        if (!projects.value.some(project => project.name === selectedProject.value)) {
+          selectedProject.value = "staging-project";
+        }
         fetchRepositories();
       }
     }
@@ -185,14 +184,14 @@ onMounted(() => {
       <el-form :inline="true" class="demo-form-inline">
         <template v-if="!props.projectName">
           <!-- Direct tab mode: project selector -->
-          <el-form-item label="所属项目">
+          <el-form-item v-if="!props.projectName" label="所属项目">
             <el-select
               v-model="selectedProject"
               placeholder="请选择项目"
               style="width: 200px"
             >
               <el-option
-                v-for="p in projects"
+                v-for="p in projects.filter(item => item.name === 'staging-project')"
                 :key="p.project_id"
                 :label="p.name"
                 :value="p.name"

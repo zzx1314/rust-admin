@@ -25,7 +25,7 @@ type ResultPage = {
 const orgurls = {
   allList: `/api/sysOrg/allList`,
   saveSysOrg: `/api/sysOrg`,
-  updateById: `/api/sysOrg`,
+  updateById: `/api/sysOrg/`,
   removeById: `/api/sysOrg/`,
   removeByIds: `/api/sysOrg/removeByIds`
 };
@@ -34,7 +34,7 @@ const userUrls = {
   userPage: `/api/sysUser/getPage`,
   saveUser: "/api/sysUser",
   deleteUserById: "/api/sysUser/",
-  update: "/api/sysUser",
+  update: "/api/sysUser/",
   resetPwd: "/api/sysUser/resetPwd",
   userInfo: `/api/sysUser/info`,
   enable: `/api/sysUser/enable`,
@@ -45,7 +45,7 @@ const roleUrls = {
   rolePage: `/api/sysRole/getPage`,
   listAll: "/api/sysRole/getAll",
   save: "/api/sysRole",
-  update: "/api/sysRole",
+  update: "/api/sysRole/",
   deleteById: "/api/sysRole/",
   listNoLog: `/api/sysRole/listNoLog`
 };
@@ -86,8 +86,8 @@ const dictUrls = {
   getItemById: `/api/sysDictItem/getDictItemByDictId/`,
   saveItem: `/api/sysDictItem/save`,
   save: `/api/sysDict/save`,
-  updateItem: `/api/sysDictItem/update`,
-  update: `/api/sysDict/update`,
+  updateItem: `/api/sysDictItem/`,
+  update: `/api/sysDict/`,
   deleteIte: `/api/sysDictItem/deleteItem/`,
   delete: `/api/sysDict/deleteDict/`,
   getSafePolicy: `/api/sysDict/getSafePolicy`,
@@ -140,15 +140,15 @@ export const saveDict = (data?: object) => {
 /**
  * 修改字典项
  */
-export const updateItem = (data?: object) => {
-  return http.axiosPut<Result>(dictUrls.updateItem, data);
+export const updateItem = (data: { id: string | number; [key: string]: unknown }) => {
+  return http.axiosPut<Result>(dictUrls.updateItem + data.id, data);
 };
 
 /**
  * 修改字典
  */
-export const updateDict = (data?: object) => {
-  return http.axiosPut<Result>(dictUrls.update, data);
+export const updateDict = (data: { id: string | number; [key: string]: unknown }) => {
+  return http.axiosPut<Result>(dictUrls.update + data.id, data);
 };
 
 /**
@@ -259,8 +259,8 @@ export const saveSysOrg = (param?: object) => {
 /**
  * 修改部门
  */
-export const updateById = (param?: object) => {
-  return http.axiosPut<Result>(orgurls.updateById, param);
+export const updateById = (param: { id: string | number; [key: string]: unknown }) => {
+  return http.axiosPut<Result>(orgurls.updateById + param.id, param);
 };
 
 /**
@@ -305,8 +305,8 @@ export const removeUserById = (param: internal) => {
 };
 
 /** 修改用户 */
-export const updateUser = (param: object) => {
-  return http.axiosPut<Result>(userUrls.update, param);
+export const updateUser = (param: { id: string | number; [key: string]: unknown }) => {
+  return http.axiosPut<Result>(userUrls.update + param.id, param);
 };
 
 /**
@@ -344,8 +344,8 @@ export const saveRole = (param: object) => {
 };
 
 /** 修改角色 */
-export const updateRole = (param: object) => {
-  return http.axiosPut<Result>(roleUrls.update, param);
+export const updateRole = (param: { id: string | number; [key: string]: unknown }) => {
+  return http.axiosPut<Result>(roleUrls.update + param.id, param);
 };
 
 /** 删除角色 */
