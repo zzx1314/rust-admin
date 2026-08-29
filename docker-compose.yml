@@ -26,8 +26,8 @@ services:
     restart: unless-stopped
     volumes:
       - backend-data:/app/data
-    expose:
-      - "3000"
+    ports:
+      - "${BACKEND_PORT:-3000}:3000"
 
   frontend:
     build:
