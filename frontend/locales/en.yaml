@@ -1,6 +1,7 @@
 buttons:
   pureAccountSettings: Account
   pureLoginOut: LoginOut
+  pureManual: Manual
   pureLogin: Login
   pureOpenSystemSet: Open System Configs
   pureReload: Reload

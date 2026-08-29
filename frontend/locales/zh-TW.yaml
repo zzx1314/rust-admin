@@ -1,6 +1,7 @@
 buttons:
   pureAccountSettings: 帳戶設定
   pureLoginOut: 離開系統
+  pureManual: 使用手冊
   pureLogin: 登入
   pureOpenSystemSet: 開啟系統設定
   pureReload: 重新載入

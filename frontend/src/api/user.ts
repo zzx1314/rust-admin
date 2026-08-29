@@ -53,6 +53,11 @@ export type UserInfoResult = {
   data: UserInfo;
 };
 
+export type PasswordUpdateResult = {
+  success: boolean;
+  msg: string;
+};
+
 const urls = {
   token: `/api/token`,
   refreshToken: `/api/token/refresh/`,
@@ -102,7 +107,7 @@ export const getMine = () => {
 
 /** 账户设置-修改密码 */
 export const updatePassword = (data?: object) => {
-  return http.axiosPut<Result>(urls.updatePassword, data);
+  return http.axiosPut<PasswordUpdateResult>(urls.updatePassword, data);
 };
 
 /** 获取用户列表 */

@@ -17,6 +17,7 @@ import AccountSettingsIcon from "~icons/ri/user-settings-line";
 import LogoutCircleRLine from "~icons/ri/logout-circle-r-line";
 import Setting from "~icons/ri/settings-3-line";
 import Check from "~icons/ep/check";
+import ManualIcon from "~icons/ri/book-open-line";
 
 const menuRef = ref();
 const showLogo = ref(
@@ -48,6 +49,10 @@ const {
   getDropdownItemStyle,
   getDropdownItemClass
 } = useNav();
+
+function openManual() {
+  emitter.emit("openManual");
+}
 
 const defaultActive = computed(() =>
   !isAllEmpty(route.meta?.activePath) ? route.meta.activePath : route.path
@@ -160,6 +165,14 @@ onMounted(() => {
       <LaySidebarOverallStyle id="header-overall" />
       <!-- 消息通知 -->
       <LayNotice id="header-notice" />
+      <!-- 使用手册 -->
+      <span
+        class="navbar-bg-hover w-[40px] h-[48px] p-[11px] cursor-pointer outline-hidden flex items-center justify-center"
+        :title="t('buttons.pureManual')"
+        @click="openManual"
+      >
+        <IconifyIconOffline :icon="ManualIcon" />
+      </span>
       <!-- 退出登录 -->
       <el-dropdown trigger="click">
         <span class="el-dropdown-link navbar-bg-hover">

@@ -4,6 +4,7 @@ import mitt from "mitt";
 /** 全局公共事件需要在此处添加类型 */
 type Events = {
   openPanel: string;
+  openManual: string;
   tagOnClick: string;
   logoChange: boolean;
   tagViewsChange: string;

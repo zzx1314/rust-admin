@@ -1,6 +1,7 @@
 buttons:
   pureAccountSettings: アカウント設定
   pureLoginOut: システムからログアウト
+  pureManual: 利用マニュアル
   pureLogin: ログイン
   pureOpenSystemSet: システム設定を開く
   pureReload: 再読み込み

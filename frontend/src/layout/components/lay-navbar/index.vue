@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { emitter } from "@/utils/mitt";
 import { useNav } from "@/layout/hooks/useNav";
 import LaySearch from "../lay-search/index.vue";
 import LayNotice from "../lay-notice/index.vue";
@@ -14,6 +15,7 @@ import AccountSettingsIcon from "~icons/ri/user-settings-line";
 import LogoutCircleRLine from "~icons/ri/logout-circle-r-line";
 import Setting from "~icons/ri/settings-3-line";
 import Check from "~icons/ep/check";
+import ManualIcon from "~icons/ri/book-open-line";
 
 const {
   layout,
@@ -27,6 +29,10 @@ const {
   getDropdownItemStyle,
   getDropdownItemClass
 } = useNav();
+
+function openManual() {
+  emitter.emit("openManual");
+}
 
 const {
   t,
@@ -128,6 +134,14 @@ const {
       <LaySidebarOverallStyle id="header-overall" />
       <!-- 消息通知 -->
       <LayNotice id="header-notice" />
+      <!-- 使用手册 -->
+      <span
+        class="navbar-bg-hover w-10 h-12 p-2.75 cursor-pointer outline-hidden flex items-center justify-center"
+        :title="t('buttons.pureManual')"
+        @click="openManual"
+      >
+        <IconifyIconOffline :icon="ManualIcon" />
+      </span>
       <!-- 退出登录 -->
       <el-dropdown trigger="click">
         <span class="el-dropdown-link navbar-bg-hover select-none">

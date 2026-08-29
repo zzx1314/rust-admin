@@ -28,6 +28,7 @@ import LayTag from "./components/lay-tag/index.vue";
 import LayNavbar from "./components/lay-navbar/index.vue";
 import LayContent from "./components/lay-content/index.vue";
 import LaySetting from "./components/lay-setting/index.vue";
+import LayManual from "./components/lay-manual/index.vue";
 import NavDouble from "./components/lay-sidebar/NavDouble.vue";
 import NavVertical from "./components/lay-sidebar/NavVertical.vue";
 import NavHorizontal from "./components/lay-sidebar/NavHorizontal.vue";
@@ -204,6 +205,8 @@ const LayHeader = defineComponent({
     </div>
     <!-- 系统设置 -->
     <LaySetting />
+    <!-- 使用手册 -->
+    <LayManual />
   </div>
 </template>
 

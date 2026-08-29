@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { isAllEmpty } from "@pureadmin/utils";
+import { emitter } from "@/utils/mitt";
 import { useNav } from "@/layout/hooks/useNav";
 import { transformI18n } from "@/plugins/i18n";
 import LaySearch from "../lay-search/index.vue";
@@ -18,6 +19,7 @@ import AccountSettingsIcon from "~icons/ri/user-settings-line";
 import LogoutCircleRLine from "~icons/ri/logout-circle-r-line";
 import Setting from "~icons/ri/settings-3-line";
 import Check from "~icons/ep/check";
+import ManualIcon from "~icons/ri/book-open-line";
 
 const menuRef = ref();
 const defaultActive = ref(null);
@@ -45,6 +47,10 @@ const {
   getDropdownItemStyle,
   getDropdownItemClass
 } = useNav();
+
+function openManual() {
+  emitter.emit("openManual");
+}
 
 function getDefaultActive(routePath) {
   const wholeMenus = usePermissionStoreHook().wholeMenus;
@@ -181,6 +187,14 @@ watch(
       <LaySidebarOverallStyle id="header-overall" />
       <!-- 消息通知 -->
       <LayNotice id="header-notice" />
+      <!-- 使用手册 -->
+      <span
+        class="navbar-bg-hover w-[40px] h-[48px] p-[11px] cursor-pointer outline-hidden flex items-center justify-center"
+        :title="t('buttons.pureManual')"
+        @click="openManual"
+      >
+        <IconifyIconOffline :icon="ManualIcon" />
+      </span>
       <!-- 退出登录 -->
       <el-dropdown trigger="click">
         <span class="el-dropdown-link navbar-bg-hover select-none">
