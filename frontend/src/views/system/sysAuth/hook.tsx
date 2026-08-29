@@ -66,6 +66,7 @@ export function sysAuth() {
       setMenuAuth(params).then(res => {
         if (res.code === SUCCESS) {
           message("权限将在下次登录生效！", { type: "success" });
+          getAuthAll(currentRoleCode.value);
         }
       });
       console.log("useAuth", allUse);
@@ -73,7 +74,7 @@ export function sysAuth() {
   };
 
   /** 选中 */
-  const setCheck = (value: number) => {
+  const setCheck = async (value: number) => {
     const allUse = [];
     for (const val of sysMenuTitleVoData.value) {
       if (val.id == value) {
@@ -87,25 +88,28 @@ export function sysAuth() {
       roleCode: currentRoleCode.value,
       authList: allUse
     };
-    setMenuAuth(params).then(res => {
+    try {
+      const res = await setMenuAuth(params);
       console.log(res);
       if (res.code === SUCCESS) {
         message("权限将在下次登录生效！", { type: "success" });
+        await getAuthAll(currentRoleCode.value);
       }
-    });
+    } catch (error) {
+      console.error("保存角色菜单权限失败", error);
+    }
     console.log("useAuth", allUse);
   };
 
-  function getAuthAll(code) {
-    getMenuData(code).then(res => {
-      if (res.code === SUCCESS) {
-        sysMenuTitleVoData.value = res.data;
-        activeNames.value = res.data.map(one => one.id);
-        console.log(sysMenuTitleVoData.value);
-      } else {
-        message(res.msg, { type: "error" });
-      }
-    });
+  async function getAuthAll(code: string) {
+    currentRoleCode.value = code;
+    const res = await getMenuData(code);
+    if (res.code === SUCCESS) {
+      sysMenuTitleVoData.value = res.data ?? [];
+      activeNames.value = (res.data ?? []).map(one => one.id);
+    } else {
+      message(res.msg, { type: "error" });
+    }
   }
 
   async function getAllRole() {

@@ -2,9 +2,9 @@ use crate::business::app_review::domain::{
     CreateReviewRequest, Review, ReviewPageQuery, ReviewStatus, ReviewVO,
 };
 use crate::business::app_review::repository::SeaOrmAppReviewRepository;
+use crate::business::harbor::service::HarborService;
 use crate::common::error::AppError;
 use crate::common::pagination::PageResponse;
-use crate::business::harbor::service::HarborService;
 use std::sync::Arc;
 
 pub struct AppReviewService {
@@ -14,7 +14,10 @@ pub struct AppReviewService {
 
 impl AppReviewService {
     pub fn new(repo: SeaOrmAppReviewRepository, harbor_service: Arc<HarborService>) -> Self {
-        Self { repo, harbor_service }
+        Self {
+            repo,
+            harbor_service,
+        }
     }
 
     pub async fn create_review(
@@ -105,11 +108,18 @@ impl AppReviewService {
     ) -> Result<Review, AppError> {
         let review = self.get_review(id).await?;
         if review.status != ReviewStatus::Pending.as_str() {
-            return Err(AppError::BadRequest("Only pending reviews can be approved".to_string()));
+            return Err(AppError::BadRequest(
+                "Only pending reviews can be approved".to_string(),
+            ));
         }
 
         self.harbor_service
-            .replicate_artifact(&review.src_project, &review.dest_project, &review.repository_name, &review.tag)
+            .replicate_artifact(
+                &review.src_project,
+                &review.dest_project,
+                &review.repository_name,
+                &review.tag,
+            )
             .await?;
 
         let updated = self
@@ -130,7 +140,9 @@ impl AppReviewService {
     ) -> Result<Review, AppError> {
         let review = self.get_review(id).await?;
         if review.status != ReviewStatus::Pending.as_str() {
-            return Err(AppError::BadRequest("Only pending reviews can be rejected".to_string()));
+            return Err(AppError::BadRequest(
+                "Only pending reviews can be rejected".to_string(),
+            ));
         }
 
         let updated = self
@@ -144,9 +156,16 @@ impl AppReviewService {
     }
 
     pub async fn delete_review(&self, id: i64) -> Result<(), AppError> {
-        let deleted = self.repo.delete(id).await.map_err(AppError::DatabaseErrorSeaOrm)?;
+        let deleted = self
+            .repo
+            .delete(id)
+            .await
+            .map_err(AppError::DatabaseErrorSeaOrm)?;
         if !deleted {
-            return Err(AppError::NotFound(format!("Review with id {} not found", id)));
+            return Err(AppError::NotFound(format!(
+                "Review with id {} not found",
+                id
+            )));
         }
         Ok(())
     }

@@ -1,10 +1,16 @@
 use crate::api::AppState;
 use crate::api::middleware::RequestUser;
-use crate::system::auth::service::{CheckTokenVO, TokenRefreshVO, UserInfoVO};
 use crate::common::error::AppError;
 use crate::common::util::decrypt_password;
+use crate::system::auth::service::{CheckTokenVO, TokenRefreshVO, UserInfoVO};
 use crate::system::sys_log::domain::CreateSysLogRequest;
-use axum::{Form, Json, extract::Path, extract::State, http::StatusCode, response::{IntoResponse, Response}};
+use axum::{
+    Form, Json,
+    extract::Path,
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use axum_extra::TypedHeader;
 use axum_extra::extract::CookieJar;
 use axum_extra::headers::Authorization;
@@ -41,7 +47,9 @@ pub async fn login_handler(
     let user_id = login_data.user_id.expect("login must have user_id");
 
     let mut response = Json(login_data).into_response();
-    response.extensions_mut().insert(RequestUser { user_id, username });
+    response
+        .extensions_mut()
+        .insert(RequestUser { user_id, username });
     Ok(response)
 }
 
@@ -77,7 +85,11 @@ pub async fn logout_handler(
         type_: Some("LOGOUT".to_string()),
         sub_type: Some("GET".to_string()),
         biz_no: Some("/api/token/logout".to_string()),
-        operator: if username.is_empty() { None } else { Some(username.clone()) },
+        operator: if username.is_empty() {
+            None
+        } else {
+            Some(username.clone())
+        },
         action: Some("/api/token/logout".to_string()),
         fail: Some(false),
         extra: None,
@@ -106,7 +118,8 @@ pub async fn logout_handler(
     };
 
     let mut resp = (StatusCode::OK, jar, Json(response)).into_response();
-    resp.extensions_mut().insert(RequestUser { user_id, username });
+    resp.extensions_mut()
+        .insert(RequestUser { user_id, username });
     Ok(resp)
 }
 

@@ -1,7 +1,9 @@
 use crate::common::base::{RepoExt, make_condition, order_desc};
 use crate::common::traits::{DynFuture, SeaOrmOptResult, SeaOrmResult, UserRepository};
 use crate::impl_repo_conn;
-use crate::system::sys_user::domain::{CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO};
+use crate::system::sys_user::domain::{
+    CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO,
+};
 use crate::system::sys_user::entity::ActiveModel;
 use crate::system::sys_user::entity::Column as UserColumn;
 use crate::system::sys_user::entity::Entity as UserEntity;

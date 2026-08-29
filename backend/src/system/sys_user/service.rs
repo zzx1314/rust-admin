@@ -2,7 +2,9 @@ use crate::common::error::AppError;
 use crate::common::pagination::PageResponse;
 use crate::common::traits::{OrgRepository, RoleRepository, UserRepository};
 use crate::common::util::{decrypt_password, md5_encrypt};
-use crate::system::sys_user::domain::{CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO};
+use crate::system::sys_user::domain::{
+    CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO,
+};
 use futures_util::future::join_all;
 use std::sync::Arc;
 
@@ -90,7 +92,9 @@ impl UserService {
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
         let org_futures = records.iter().map(|u| self.org_repo.find_by_id(&u.org_id));
-        let role_futures = records.iter().map(|u| self.role_repo.find_roles_by_user_id(&u.id));
+        let role_futures = records
+            .iter()
+            .map(|u| self.role_repo.find_roles_by_user_id(&u.id));
 
         let org_results = join_all(org_futures).await;
         let role_results = join_all(role_futures).await;

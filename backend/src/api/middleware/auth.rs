@@ -28,7 +28,9 @@ pub async fn require_auth(
                 .extract_username(token)
                 .unwrap_or_default();
             let mut response = next.run(request).await;
-            response.extensions_mut().insert(RequestUser { user_id, username });
+            response
+                .extensions_mut()
+                .insert(RequestUser { user_id, username });
             Ok(response)
         }
         _ => Err(AppError::Unauthorized(

@@ -1,4 +1,4 @@
-use crate::common::base::{order_desc, RepoExt, make_condition};
+use crate::common::base::{RepoExt, make_condition, order_desc};
 use crate::common::traits::{DynFuture, SeaOrmOptResult, SeaOrmResult, SysLogRepository};
 use crate::impl_repo_conn;
 use crate::system::sys_log::domain::{
@@ -85,7 +85,9 @@ impl SysLogRepository for SeaOrmSysLogRepository {
 
                 let mut cond = make_condition();
                 let conditions: Vec<_> = [
-                    req.tenant.as_ref().map(|v| SysLogColumn::Tenant.contains(v)),
+                    req.tenant
+                        .as_ref()
+                        .map(|v| SysLogColumn::Tenant.contains(v)),
                     req.type_.as_ref().map(|v| SysLogColumn::Type.contains(v)),
                     req.sub_type
                         .as_ref()
@@ -94,7 +96,9 @@ impl SysLogRepository for SeaOrmSysLogRepository {
                     req.operator
                         .as_ref()
                         .map(|v| SysLogColumn::Operator.contains(v)),
-                    req.action.as_ref().map(|v| SysLogColumn::Action.contains(v)),
+                    req.action
+                        .as_ref()
+                        .map(|v| SysLogColumn::Action.contains(v)),
                     req.ip.as_ref().map(|v| SysLogColumn::Ip.contains(v)),
                 ]
                 .into_iter()

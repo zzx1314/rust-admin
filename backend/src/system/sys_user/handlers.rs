@@ -2,7 +2,9 @@ use crate::api::AppState;
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
 use crate::common::util::decrypt_password;
-use crate::system::sys_user::domain::{CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO};
+use crate::system::sys_user::domain::{
+    CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO,
+};
 use crate::system::sys_user::service::PasswordUpdateRequest;
 use axum::{
     Json,
@@ -20,7 +22,10 @@ pub async fn create_user_handler(
     Json(req): Json<CreateUserRequest>,
 ) -> Result<Json<ApiResponse<User>>, AppError> {
     let sync_harbor = req.sync_harbor;
-    let harbor_password = req.password.as_deref().and_then(|p| decrypt_password(p).ok());
+    let harbor_password = req
+        .password
+        .as_deref()
+        .and_then(|p| decrypt_password(p).ok());
 
     // If Harbor sync is requested and a usable password exists, create the Harbor user first.
     // This guarantees that a Harbor failure does not leave a half-created local user behind.
@@ -48,7 +53,8 @@ pub async fn create_user_handler(
                 if let Err(rollback_err) = state.harbor_service.delete_user(&username).await {
                     tracing::warn!(
                         "Failed to rollback Harbor user '{}' after local user creation failed: {}",
-                        username, rollback_err
+                        username,
+                        rollback_err
                     );
                 }
                 return Err(e);
@@ -91,7 +97,9 @@ pub async fn update_user_handler(
     // Check if user is protected
     let existing = state.user_service.get_user(&params.id).await?;
     if existing.is_edit == Some(0) {
-        return Err(AppError::AuthError("Cannot modify protected user".to_string()));
+        return Err(AppError::AuthError(
+            "Cannot modify protected user".to_string(),
+        ));
     }
     let user = state.user_service.update_user(&params.id, req).await?;
     Ok(Json(ApiResponse::ok(user)))
@@ -107,7 +115,9 @@ pub async fn delete_user_handler(
 
     // Protect system users from deletion
     if user.is_edit == Some(0) {
-        return Err(AppError::AuthError("Cannot delete protected user".to_string()));
+        return Err(AppError::AuthError(
+            "Cannot delete protected user".to_string(),
+        ));
     }
 
     state.user_service.delete_user(&params.id).await?;
@@ -200,7 +210,9 @@ pub async fn reset_user_password_handler(
 ) -> Result<Json<ApiResponse<OperationResponse>>, AppError> {
     let user = state.user_service.get_user(&req.id).await?;
     if user.is_edit == Some(0) {
-        return Err(AppError::AuthError("Cannot modify protected user".to_string()));
+        return Err(AppError::AuthError(
+            "Cannot modify protected user".to_string(),
+        ));
     }
     let default_password = "Aa123456";
     let username = user.username.clone();
@@ -210,8 +222,16 @@ pub async fn reset_user_password_handler(
         .await?;
 
     // Sync new password to Harbor (log warning if it fails)
-    if let Err(e) = state.harbor_service.update_password(&username, default_password).await {
-        tracing::warn!("Failed to sync password to Harbor for '{}': {}", username, e);
+    if let Err(e) = state
+        .harbor_service
+        .update_password(&username, default_password)
+        .await
+    {
+        tracing::warn!(
+            "Failed to sync password to Harbor for '{}': {}",
+            username,
+            e
+        );
     }
 
     Ok(Json(ApiResponse::ok(OperationResponse {
@@ -226,7 +246,9 @@ pub async fn toggle_user_enable_handler(
 ) -> Result<Json<OperationResponse>, AppError> {
     let user = state.user_service.get_user(&req.id).await?;
     if user.is_edit == Some(0) {
-        return Err(AppError::AuthError("Cannot modify protected user".to_string()));
+        return Err(AppError::AuthError(
+            "Cannot modify protected user".to_string(),
+        ));
     }
     state
         .user_service

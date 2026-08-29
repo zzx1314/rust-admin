@@ -142,7 +142,10 @@ impl UpdateSysLogRequest {
             biz_no: set_opt_string(self.biz_no.clone()),
             operator: set_opt_string(self.operator.clone()),
             action: set_opt_string(self.action.clone()),
-            fail: self.fail.map(ActiveValue::Set).unwrap_or(ActiveValue::NotSet),
+            fail: self
+                .fail
+                .map(ActiveValue::Set)
+                .unwrap_or(ActiveValue::NotSet),
             extra: set_opt_string(self.extra.clone()),
             code_variable: set_opt_string(self.code_variable.clone()),
             ip: set_opt_string(self.ip.clone()),

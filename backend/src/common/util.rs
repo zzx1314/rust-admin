@@ -1,4 +1,4 @@
-use chrono::{DateTime, FixedOffset, Utc, NaiveDateTime};
+use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
 
 use aes::Aes128;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -13,7 +13,9 @@ const DEFAULT_KEY: [u8; 16] = *b"Welcome Superred";
 /// Example: "2025-01-01 08:00:00"
 pub fn format_datetime(dt: DateTime<Utc>) -> String {
     let beijing = FixedOffset::east_opt(8 * 3600).expect("valid offset");
-    dt.with_timezone(&beijing).format("%Y-%m-%d %H:%M:%S").to_string()
+    dt.with_timezone(&beijing)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
 }
 
 /// Format an optional UTC datetime as Beijing time (UTC+8) string.
@@ -27,12 +29,18 @@ pub fn format_iso_datetime(iso_str: &str) -> String {
     let beijing = FixedOffset::east_opt(8 * 3600).expect("valid offset");
     // Parse as RFC 3339 (handles "2026-07-21T02:53:47.796Z")
     if let Ok(dt) = DateTime::parse_from_rfc3339(iso_str) {
-        return dt.with_timezone(&beijing).format("%Y-%m-%d %H:%M:%S").to_string();
+        return dt
+            .with_timezone(&beijing)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
     }
     // Fallback: try parsing as naive datetime (no timezone info)
     if let Ok(dt) = NaiveDateTime::parse_from_str(iso_str, "%Y-%m-%dT%H:%M:%S%.f") {
         let utc: DateTime<Utc> = DateTime::from_naive_utc_and_offset(dt, Utc);
-        return utc.with_timezone(&beijing).format("%Y-%m-%d %H:%M:%S").to_string();
+        return utc
+            .with_timezone(&beijing)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
     }
     iso_str.to_string()
 }

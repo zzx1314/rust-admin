@@ -36,9 +36,9 @@ interface SysRoleType {
 
 /** 点击角色 */
 const handleNodeClick = (data: SysRoleType) => {
-  getAuthAll(data.code);
   currentRoleCode.value = data.code;
-  treeRef.value?.setCheckedKeys([data.id]); // 用可选链
+  getAuthAll(data.code);
+  treeRef.value?.setCheckedKeys([data.id]);
 };
 
 watch(

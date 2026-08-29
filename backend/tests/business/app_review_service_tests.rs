@@ -114,7 +114,10 @@ async fn test_create_review_with_dedup_skips_identical_approved_artifact() {
     // Re-push the same artifact with identical digest
     let result = service.create_review_with_dedup(req, None).await.unwrap();
 
-    assert!(result.is_none(), "Should skip creating a duplicate review for an already approved artifact with the same digest");
+    assert!(
+        result.is_none(),
+        "Should skip creating a duplicate review for an already approved artifact with the same digest"
+    );
 }
 
 #[tokio::test]
@@ -130,9 +133,15 @@ async fn test_create_review_with_dedup_creates_new_review_for_different_digest()
 
     // Re-push the same tag with a different digest
     let new_req = create_request("v1.0", Some("sha256:def456"));
-    let new_review = service.create_review_with_dedup(new_req, None).await.unwrap();
+    let new_review = service
+        .create_review_with_dedup(new_req, None)
+        .await
+        .unwrap();
 
-    assert!(new_review.is_some(), "Should create a new review when digest differs");
+    assert!(
+        new_review.is_some(),
+        "Should create a new review when digest differs"
+    );
     assert_eq!(new_review.unwrap().status, ReviewStatus::Pending.as_str());
 }
 
@@ -149,9 +158,15 @@ async fn test_create_review_with_dedup_creates_review_when_no_digest() {
 
     // Re-push without digest should create a new review because we cannot deduplicate without a digest
     let new_req = create_request("v1.0", None);
-    let new_review = service.create_review_with_dedup(new_req, None).await.unwrap();
+    let new_review = service
+        .create_review_with_dedup(new_req, None)
+        .await
+        .unwrap();
 
-    assert!(new_review.is_some(), "Should create a new review when no digest is provided");
+    assert!(
+        new_review.is_some(),
+        "Should create a new review when no digest is provided"
+    );
 }
 
 #[tokio::test]
@@ -166,7 +181,13 @@ async fn test_create_review_with_dedup_creates_review_when_digest_changes_after_
 
     // Push a different artifact under the same tag
     let new_req = create_request("v1.0", Some("sha256:xyz789"));
-    let new_review = service.create_review_with_dedup(new_req, None).await.unwrap();
+    let new_review = service
+        .create_review_with_dedup(new_req, None)
+        .await
+        .unwrap();
 
-    assert!(new_review.is_some(), "Different digest should trigger a new review");
+    assert!(
+        new_review.is_some(),
+        "Different digest should trigger a new review"
+    );
 }

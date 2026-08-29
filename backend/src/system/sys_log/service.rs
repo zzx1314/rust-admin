@@ -55,11 +55,7 @@ impl SysLogService {
         ))
     }
 
-    pub async fn update_log(
-        &self,
-        id: &i64,
-        req: UpdateSysLogRequest,
-    ) -> Result<SysLog, AppError> {
+    pub async fn update_log(&self, id: &i64, req: UpdateSysLogRequest) -> Result<SysLog, AppError> {
         self.log_repo
             .update(id, &req)
             .await

@@ -355,12 +355,19 @@ async fn test_get_role_auth_returns_data() {
     let result = service.get_role_auth("admin").await;
 
     // Must succeed — not error
-    assert!(result.is_ok(), "get_role_auth should succeed, got error: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "get_role_auth should succeed, got error: {:?}",
+        result.err()
+    );
 
     let data = result.unwrap();
 
     // Data must not be empty
-    assert!(!data.is_empty(), "get_role_auth should return non-empty data");
+    assert!(
+        !data.is_empty(),
+        "get_role_auth should return non-empty data"
+    );
 
     // Verify structure: should have 1 SysAuthMenuVo for the parent page
     assert_eq!(data.len(), 1, "should have exactly 1 auth menu group");
@@ -375,7 +382,11 @@ async fn test_get_role_auth_returns_data() {
     );
 
     // Auth list should contain the 2 button permissions
-    assert_eq!(auth_menu.auth_list.len(), 2, "auth_list should have 2 buttons");
+    assert_eq!(
+        auth_menu.auth_list.len(),
+        2,
+        "auth_list should have 2 buttons"
+    );
 
     // All buttons should be checked (use_auth_list == auth_list)
     assert!(auth_menu.is_check_all, "all buttons should be checked");

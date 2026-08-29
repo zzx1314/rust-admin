@@ -1,14 +1,15 @@
-use crate::common::error::AppError;
-use crate::common::pagination::PageResponse;
-use crate::common::util::format_iso_datetime;
 use crate::business::harbor::client::HarborClient;
 use crate::business::harbor::models::{
     ChangePasswordRequest, CreateHarborUserRequest, CreateMemberRequest, CreateProjectRequest,
-    CreateRegistryRequest, CreateReplicationPolicyRequest, HarborArtifact, HarborInfo, HarborMember,
-    HarborProject, HarborRegistry, HarborRepository, HarborStatistics, HarborUser, ProjectQuery, ProjectSummary,
-    RegistryCredential, RegistryEntity, ReplicationExecution, ReplicationExecutionRequest, ReplicationFilter,
-    ReplicationPolicy, ReplicationTrigger, RepoStat,
+    CreateRegistryRequest, CreateReplicationPolicyRequest, HarborArtifact, HarborInfo,
+    HarborMember, HarborProject, HarborRegistry, HarborRepository, HarborStatistics, HarborUser,
+    ProjectQuery, ProjectSummary, RegistryCredential, RegistryEntity, ReplicationExecution,
+    ReplicationExecutionRequest, ReplicationFilter, ReplicationPolicy, ReplicationTrigger,
+    RepoStat,
 };
+use crate::common::error::AppError;
+use crate::common::pagination::PageResponse;
+use crate::common::util::format_iso_datetime;
 use std::sync::Arc;
 
 pub struct HarborService {
@@ -56,7 +57,8 @@ impl HarborService {
         } else {
             // Extract host:port from the harbor URL for docker commands
             // e.g., "http://localhost:8097" -> "localhost:8097"
-            self.client.base_url
+            self.client
+                .base_url
                 .trim_start_matches("http://")
                 .trim_start_matches("https://")
                 .trim_end_matches('/')
@@ -118,9 +120,10 @@ impl HarborService {
     {
         let total = Self::extract_total_count(&response);
 
-        let records: Vec<T> = response.json().await.map_err(|e| {
-            AppError::BadRequest(format!("Failed to parse Harbor response: {}", e))
-        })?;
+        let records: Vec<T> = response
+            .json()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Failed to parse Harbor response: {}", e)))?;
 
         Ok(PageResponse::new(records, total, page, page_size))
     }
@@ -164,7 +167,9 @@ impl HarborService {
             return Err(Self::map_harbor_error(status, &body));
         }
 
-        let mut result = self.build_paginated_response::<HarborProject>(response, page, page_size).await?;
+        let mut result = self
+            .build_paginated_response::<HarborProject>(response, page, page_size)
+            .await?;
         result.records.iter_mut().for_each(|p| {
             p.creation_time = p.creation_time.as_deref().map(format_iso_datetime);
             p.update_time = p.update_time.as_deref().map(format_iso_datetime);
@@ -199,9 +204,10 @@ impl HarborService {
             return Err(Self::map_harbor_error(status, &body));
         }
 
-        response.json::<ProjectSummary>().await.map_err(|e| {
-            AppError::BadRequest(format!("Failed to parse Harbor response: {}", e))
-        })
+        response
+            .json::<ProjectSummary>()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Failed to parse Harbor response: {}", e)))
     }
 
     pub async fn list_repositories(
@@ -239,7 +245,9 @@ impl HarborService {
             return Err(Self::map_harbor_error(status, &body));
         }
 
-        let mut result = self.build_paginated_response::<HarborRepository>(response, page, page_size).await?;
+        let mut result = self
+            .build_paginated_response::<HarborRepository>(response, page, page_size)
+            .await?;
         result.records.iter_mut().for_each(|r| {
             r.creation_time = r.creation_time.as_deref().map(format_iso_datetime);
             r.update_time = r.update_time.as_deref().map(format_iso_datetime);
@@ -282,7 +290,8 @@ impl HarborService {
             return Err(Self::map_harbor_error(status, &body));
         }
 
-        self.build_paginated_response::<HarborMember>(response, page, page_size).await
+        self.build_paginated_response::<HarborMember>(response, page, page_size)
+            .await
     }
 
     pub async fn list_artifacts(
@@ -299,14 +308,12 @@ impl HarborService {
         let short_name = repo_name.split('/').next_back().unwrap_or(repo_name);
         let path = format!(
             "/api/v2.0/projects/{}/repositories/{}/artifacts",
-            project_name,
-            short_name,
+            project_name, short_name,
         );
         let mut url = reqwest::Url::parse(&self.client.api_url(&path))
             .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
 
-        url.query_pairs_mut()
-            .append_pair("with_tag", "true");
+        url.query_pairs_mut().append_pair("with_tag", "true");
         let page = page.unwrap_or(1);
         let page_size = page_size.unwrap_or(10);
         url.query_pairs_mut().append_pair("page", &page.to_string());
@@ -331,7 +338,9 @@ impl HarborService {
             return Err(Self::map_harbor_error(status, &body));
         }
 
-        let mut result = self.build_paginated_response::<HarborArtifact>(response, page, page_size).await?;
+        let mut result = self
+            .build_paginated_response::<HarborArtifact>(response, page, page_size)
+            .await?;
         result.records.iter_mut().for_each(|a| {
             a.push_time = a.push_time.as_deref().map(format_iso_datetime);
             a.pull_time = a.pull_time.as_deref().map(format_iso_datetime);
@@ -355,11 +364,17 @@ impl HarborService {
         let mut public_count = 0i64;
         let mut private_count = 0i64;
         for p in &projects_page.records {
-            let is_pub = p.metadata.as_ref()
+            let is_pub = p
+                .metadata
+                .as_ref()
                 .and_then(|m| m.get("public"))
                 .map(|v| v == "true")
                 .unwrap_or(false);
-            if is_pub { public_count += 1; } else { private_count += 1; }
+            if is_pub {
+                public_count += 1;
+            } else {
+                private_count += 1;
+            }
         }
 
         // 2. Fetch repositories for all projects
@@ -369,11 +384,9 @@ impl HarborService {
         let mut all_repos: Vec<RepoStat> = Vec::new();
 
         for project in &projects_page.records {
-            let repo_page = self.list_repositories(
-                &project.name,
-                Some(1),
-                Some(100),
-            ).await?;
+            let repo_page = self
+                .list_repositories(&project.name, Some(1), Some(100))
+                .await?;
 
             total_repos += repo_page.total;
 
@@ -398,7 +411,9 @@ impl HarborService {
         // 4. Get recent 5 projects (sorted by creation_time descending)
         let mut recent = projects_page.records.clone();
         recent.sort_by(|a, b| {
-            b.creation_time.as_deref().unwrap_or("")
+            b.creation_time
+                .as_deref()
+                .unwrap_or("")
                 .cmp(a.creation_time.as_deref().unwrap_or(""))
         });
         recent.truncate(5);
@@ -436,8 +451,9 @@ impl HarborService {
     pub async fn delete_user(&self, username: &str) -> Result<(), AppError> {
         self.ensure_enabled()?;
         // List all Harbor users to find the user_id for this username
-        let list_url = reqwest::Url::parse(&self.client.api_url("/api/v2.0/users?page=1&page_size=100"))
-            .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
+        let list_url =
+            reqwest::Url::parse(&self.client.api_url("/api/v2.0/users?page=1&page_size=100"))
+                .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
 
         let response = self
             .client
@@ -457,15 +473,18 @@ impl HarborService {
             return Err(Self::map_harbor_error(status, &body));
         }
 
-        let users: Vec<HarborUser> = response.json().await.map_err(|e| {
-            AppError::BadRequest(format!("Failed to parse Harbor users: {}", e))
-        })?;
+        let users: Vec<HarborUser> = response
+            .json()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Failed to parse Harbor users: {}", e)))?;
 
         // Find the user by username
         if let Some(user) = users.iter().find(|u| u.username == username) {
-            let delete_url = reqwest::Url::parse(&self.client.api_url(
-                &format!("/api/v2.0/users/{}", user.user_id)
-            ))
+            let delete_url = reqwest::Url::parse(
+                &self
+                    .client
+                    .api_url(&format!("/api/v2.0/users/{}", user.user_id)),
+            )
             .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
 
             let delete_resp = self
@@ -527,7 +546,10 @@ impl HarborService {
     ) -> Result<(), AppError> {
         self.ensure_enabled()?;
         let encoded_repo_name = urlencoding::encode(repo_name);
-        let path = format!("/api/v2.0/projects/{}/repositories/{}", project_name, encoded_repo_name);
+        let path = format!(
+            "/api/v2.0/projects/{}/repositories/{}",
+            project_name, encoded_repo_name
+        );
         let url = reqwest::Url::parse(&self.client.api_url(&path))
             .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
 
@@ -593,11 +615,16 @@ impl HarborService {
         self.check_response(response).await
     }
 
-    pub async fn update_password(&self, username: &str, new_password: &str) -> Result<(), AppError> {
+    pub async fn update_password(
+        &self,
+        username: &str,
+        new_password: &str,
+    ) -> Result<(), AppError> {
         self.ensure_enabled()?;
         // List Harbor users to find the user_id
-        let list_url = reqwest::Url::parse(&self.client.api_url("/api/v2.0/users?page=1&page_size=100"))
-            .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
+        let list_url =
+            reqwest::Url::parse(&self.client.api_url("/api/v2.0/users?page=1&page_size=100"))
+                .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
 
         let response = self
             .client
@@ -617,14 +644,17 @@ impl HarborService {
             return Err(Self::map_harbor_error(status, &body));
         }
 
-        let users: Vec<HarborUser> = response.json().await.map_err(|e| {
-            AppError::BadRequest(format!("Failed to parse Harbor users: {}", e))
-        })?;
+        let users: Vec<HarborUser> = response
+            .json()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Failed to parse Harbor users: {}", e)))?;
 
         if let Some(harbor_user) = users.iter().find(|u| u.username == username) {
-            let pwd_url = reqwest::Url::parse(&self.client.api_url(
-                &format!("/api/v2.0/users/{}/password", harbor_user.user_id)
-            ))
+            let pwd_url = reqwest::Url::parse(
+                &self
+                    .client
+                    .api_url(&format!("/api/v2.0/users/{}/password", harbor_user.user_id)),
+            )
             .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
 
             let req = ChangePasswordRequest {
@@ -671,8 +701,12 @@ impl HarborService {
 
     pub async fn list_registries(&self) -> Result<Vec<HarborRegistry>, AppError> {
         self.ensure_enabled()?;
-        let url = reqwest::Url::parse(&self.client.api_url("/api/v2.0/registries?page=1&page_size=100"))
-            .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
+        let url = reqwest::Url::parse(
+            &self
+                .client
+                .api_url("/api/v2.0/registries?page=1&page_size=100"),
+        )
+        .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
 
         let response = self
             .client
@@ -692,9 +726,10 @@ impl HarborService {
             return Err(Self::map_harbor_error(status, &body));
         }
 
-        response.json::<Vec<HarborRegistry>>().await.map_err(|e| {
-            AppError::BadRequest(format!("Failed to parse Harbor registries: {}", e))
-        })
+        response
+            .json::<Vec<HarborRegistry>>()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Failed to parse Harbor registries: {}", e)))
     }
 
     pub async fn find_local_registry_endpoint(&self) -> Result<i64, AppError> {
@@ -731,7 +766,9 @@ impl HarborService {
 
     async fn create_local_registry_endpoint(&self) -> Result<(), AppError> {
         let base_url = self.client.base_url.trim_end_matches('/').to_string();
-        let insecure = self.registry_insecure.unwrap_or_else(|| self.is_local_registry_insecure(&base_url));
+        let insecure = self
+            .registry_insecure
+            .unwrap_or_else(|| self.is_local_registry_insecure(&base_url));
         let name = format!("local-harbor-{}", uuid::Uuid::new_v4());
         let req = CreateRegistryRequest {
             name: name.clone(),
@@ -764,7 +801,9 @@ impl HarborService {
 
     fn normalize_registry_url(&self, url: &str) -> String {
         let url = url.trim().trim_end_matches('/');
-        let url = url.trim_start_matches("http://").trim_start_matches("https://");
+        let url = url
+            .trim_start_matches("http://")
+            .trim_start_matches("https://");
         url.to_lowercase()
     }
 
@@ -782,7 +821,10 @@ impl HarborService {
 
     /// Harbor create endpoints (e.g. replication policies/executions) return 201 with an empty
     /// body and the resource URL in the `Location` header. Extract the trailing numeric ID.
-    fn extract_created_id(response: &reqwest::Response, resource_name: &str) -> Result<i64, AppError> {
+    fn extract_created_id(
+        response: &reqwest::Response,
+        resource_name: &str,
+    ) -> Result<i64, AppError> {
         let location = response
             .headers()
             .get(reqwest::header::LOCATION)
@@ -800,10 +842,7 @@ impl HarborService {
             .unwrap_or("")
             .parse::<i64>()
             .map_err(|_| {
-                AppError::BadRequest(format!(
-                    "Invalid Location header from Harbor: {}",
-                    location
-                ))
+                AppError::BadRequest(format!("Invalid Location header from Harbor: {}", location))
             })?;
 
         Ok(id)
@@ -862,7 +901,10 @@ impl HarborService {
         self.check_response(response).await
     }
 
-    pub async fn trigger_replication(&self, policy_id: i64) -> Result<ReplicationExecution, AppError> {
+    pub async fn trigger_replication(
+        &self,
+        policy_id: i64,
+    ) -> Result<ReplicationExecution, AppError> {
         self.ensure_enabled()?;
         let url = reqwest::Url::parse(&self.client.api_url("/api/v2.0/replication/executions"))
             .map_err(|e| AppError::BadRequest(format!("Invalid Harbor URL: {}", e)))?;
@@ -897,7 +939,10 @@ impl HarborService {
         })
     }
 
-    pub async fn get_replication_execution(&self, execution_id: i64) -> Result<ReplicationExecution, AppError> {
+    pub async fn get_replication_execution(
+        &self,
+        execution_id: i64,
+    ) -> Result<ReplicationExecution, AppError> {
         self.ensure_enabled()?;
         let path = format!("/api/v2.0/replication/executions/{}", execution_id);
         let url = reqwest::Url::parse(&self.client.api_url(&path))
@@ -922,11 +967,17 @@ impl HarborService {
         }
 
         response.json::<ReplicationExecution>().await.map_err(|e| {
-            AppError::BadRequest(format!("Failed to parse Harbor replication execution: {}", e))
+            AppError::BadRequest(format!(
+                "Failed to parse Harbor replication execution: {}",
+                e
+            ))
         })
     }
 
-    pub async fn wait_for_replication_execution(&self, execution_id: i64) -> Result<ReplicationExecution, AppError> {
+    pub async fn wait_for_replication_execution(
+        &self,
+        execution_id: i64,
+    ) -> Result<ReplicationExecution, AppError> {
         let timeout = std::time::Duration::from_secs(self.replication_timeout_secs);
         let interval = std::time::Duration::from_secs(self.replication_poll_interval_secs);
         let start = std::time::Instant::now();
@@ -979,7 +1030,10 @@ impl HarborService {
         let policy_name = format!("temp-approve-{}-{}", src_project, uuid::Uuid::new_v4());
         let req = CreateReplicationPolicyRequest {
             name: policy_name.clone(),
-            description: Some(format!("Temporary policy to approve {}/{}", repository_name, tag)),
+            description: Some(format!(
+                "Temporary policy to approve {}/{}",
+                repository_name, tag
+            )),
             src_registry: None,
             dest_registry: Some(RegistryEntity { id: registry_id }),
             dest_namespace: dest_project.to_string(),
@@ -1028,7 +1082,11 @@ impl HarborService {
                 Ok(())
             }
             Err(e) => {
-                tracing::warn!("Replication policy {} will not be deleted automatically because execution {} status is uncertain", policy.id, execution.id);
+                tracing::warn!(
+                    "Replication policy {} will not be deleted automatically because execution {} status is uncertain",
+                    policy.id,
+                    execution.id
+                );
                 Err(e)
             }
         }

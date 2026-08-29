@@ -1,7 +1,7 @@
 use crate::common::error::AppError;
 use crate::common::traits::{MenuRepository, RoleRepository};
-use crate::system::sys_menu::domain::Menu;
 use crate::system::sys_auth::domain::{SetMenuAuthRequest, SysAuthMenuVo, SysAuthTitleVo};
+use crate::system::sys_menu::domain::Menu;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -40,13 +40,16 @@ impl SysAuthService {
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
-        if role_menus.is_empty() {
-            return Ok(Vec::new());
-        }
-
         let role_menu_ids: HashSet<i64> = role_menus.iter().map(|m| m.id).collect();
 
-        let buttons: Vec<&Menu> = role_menus.iter().filter(|m| m.r#type == Some(2)).collect();
+        let buttons: Vec<&Menu> = role_menus
+            .iter()
+            .filter(|m| m.r#type == Some(2) && m.is_deleted == 0)
+            .collect();
+
+        if buttons.is_empty() {
+            return Ok(Vec::new());
+        }
 
         let parent_ids: HashSet<i64> = buttons.iter().filter_map(|b| b.parent_id).collect();
 

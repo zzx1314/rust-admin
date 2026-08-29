@@ -1,12 +1,12 @@
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use x_rust::system::auth::service::AuthService;
 use x_rust::common::error::AppError;
 use x_rust::common::traits::{
     DynFuture, RoleRepository, SeaOrmOptResult, SeaOrmResult, TokenStore, UserRepository,
 };
 use x_rust::common::util::md5_encrypt;
+use x_rust::system::auth::service::AuthService;
 use x_rust::system::sys_role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequest};
 use x_rust::system::sys_user::domain::{CreateUserRequest, User, UserPageQuery, UserVO};
 

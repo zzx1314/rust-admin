@@ -1,5 +1,8 @@
 use chrono::{TimeZone, Utc};
-use x_rust::common::util::{decrypt_password, encrypt_password, format_datetime, format_datetime_opt, md5_encrypt, md5_verify};
+use x_rust::common::util::{
+    decrypt_password, encrypt_password, format_datetime, format_datetime_opt, md5_encrypt,
+    md5_verify,
+};
 
 // ==================== AES Encrypt/Decrypt Roundtrip Tests ====================
 
@@ -67,7 +70,10 @@ fn test_format_datetime_cross_day_boundary() {
 #[test]
 fn test_format_datetime_opt_some() {
     let dt = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
-    assert_eq!(format_datetime_opt(Some(dt)), Some("2025-01-01 08:00:00".to_string()));
+    assert_eq!(
+        format_datetime_opt(Some(dt)),
+        Some("2025-01-01 08:00:00".to_string())
+    );
 }
 
 #[test]

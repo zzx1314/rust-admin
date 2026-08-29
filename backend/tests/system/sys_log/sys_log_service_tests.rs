@@ -99,7 +99,11 @@ impl SysLogRepository for FakeSysLogRepository {
                         }
                     }
                     if let Some(ref v) = query.sub_type {
-                        if !l.sub_type.as_ref().map_or(false, |t| t.contains(v.as_str())) {
+                        if !l
+                            .sub_type
+                            .as_ref()
+                            .map_or(false, |t| t.contains(v.as_str()))
+                        {
                             return false;
                         }
                     }
@@ -109,7 +113,11 @@ impl SysLogRepository for FakeSysLogRepository {
                         }
                     }
                     if let Some(ref v) = query.operator {
-                        if !l.operator.as_ref().map_or(false, |t| t.contains(v.as_str())) {
+                        if !l
+                            .operator
+                            .as_ref()
+                            .map_or(false, |t| t.contains(v.as_str()))
+                        {
                             return false;
                         }
                     }
@@ -134,7 +142,9 @@ impl SysLogRepository for FakeSysLogRepository {
                     operator: l.operator.clone(),
                     action: l.action.clone(),
                     fail: l.fail,
-                    create_time: l.create_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
+                    create_time: l
+                        .create_time
+                        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
                     extra: l.extra.clone(),
                     code_variable: l.code_variable.clone(),
                     ip: l.ip.clone(),

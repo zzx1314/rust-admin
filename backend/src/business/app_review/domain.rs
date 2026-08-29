@@ -104,7 +104,12 @@ impl From<Review> for ReviewVO {
 }
 
 impl CreateReviewRequest {
-    pub fn to_active_model(&self, id: i64, created_by: Option<i64>, now: DateTime<Utc>) -> ReviewActiveModel {
+    pub fn to_active_model(
+        &self,
+        id: i64,
+        created_by: Option<i64>,
+        now: DateTime<Utc>,
+    ) -> ReviewActiveModel {
         ReviewActiveModel {
             id: ActiveValue::set(id),
             src_project: ActiveValue::set(self.src_project.clone()),
@@ -126,5 +131,7 @@ impl CreateReviewRequest {
 
 fn format_datetime(dt: DateTime<Utc>) -> String {
     let beijing = chrono::FixedOffset::east_opt(8 * 3600).expect("valid offset");
-    dt.with_timezone(&beijing).format("%Y-%m-%d %H:%M:%S").to_string()
+    dt.with_timezone(&beijing)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
 }

@@ -1,10 +1,10 @@
 use crate::api::AppState;
+use crate::business::harbor::models::{
+    CreateMemberRequest, CreateProjectRequest, HarborArtifact, HarborInfo, HarborMember,
+    HarborProject, HarborRepository, HarborStatistics, ProjectQuery, ProjectSummary,
+};
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
-use crate::business::harbor::models::{
-    CreateMemberRequest, CreateProjectRequest, HarborArtifact, HarborInfo, HarborMember, HarborProject,
-    HarborRepository, HarborStatistics, ProjectQuery, ProjectSummary,
-};
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -83,7 +83,12 @@ pub async fn list_artifacts_handler(
 ) -> Result<Json<ApiResponse<PageResponse<HarborArtifact>>>, AppError> {
     let result = state
         .harbor_service
-        .list_artifacts(&params.project_name, &query.repo_name, query.page, query.page_size)
+        .list_artifacts(
+            &params.project_name,
+            &query.repo_name,
+            query.page,
+            query.page_size,
+        )
         .await?;
     Ok(Json(ApiResponse::ok(result)))
 }
@@ -124,7 +129,10 @@ pub async fn delete_project_handler(
     State(state): State<AppState>,
     Path(params): Path<ProjectNameParam>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    state.harbor_service.delete_project(&params.project_name).await?;
+    state
+        .harbor_service
+        .delete_project(&params.project_name)
+        .await?;
     Ok(Json(ApiResponse::ok(())))
 }
 

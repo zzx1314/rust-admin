@@ -290,12 +290,10 @@ onMounted(fetchReviews);
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button :disabled="submitting" @click="commentDialogVisible = false">取消</el-button>
-        <el-button
-          type="primary"
-          :loading="submitting"
-          @click="submitAction"
+        <el-button :disabled="submitting" @click="commentDialogVisible = false"
+          >取消</el-button
         >
+        <el-button type="primary" :loading="submitting" @click="submitAction">
           {{ submitting ? "处理中..." : "确认" }}
         </el-button>
       </template>

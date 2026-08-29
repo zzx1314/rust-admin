@@ -117,7 +117,11 @@ impl SysDictRepository for FakeSysDictRepository {
                         }
                     }
                     if let Some(ref v) = query.description {
-                        if !d.description.as_ref().map_or(false, |desc| desc.contains(v.as_str())) {
+                        if !d
+                            .description
+                            .as_ref()
+                            .map_or(false, |desc| desc.contains(v.as_str()))
+                        {
                             return false;
                         }
                     }
@@ -129,8 +133,12 @@ impl SysDictRepository for FakeSysDictRepository {
                     dict_type: d.dict_type.clone(),
                     description: d.description.clone(),
                     remarks: d.remarks.clone(),
-                    create_time: d.create_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
-                    update_time: d.update_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
+                    create_time: d
+                        .create_time
+                        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
+                    update_time: d
+                        .update_time
+                        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
                     is_deleted: d.is_deleted,
                     allow_deletion: d.allow_deletion,
                     is_show: d.is_show,
@@ -337,8 +345,12 @@ impl SysDictItemRepository for FakeSysDictItemRepository {
                     value: i.value.clone(),
                     sort: i.sort,
                     description: i.description.clone(),
-                    create_time: i.create_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
-                    update_time: i.update_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
+                    create_time: i
+                        .create_time
+                        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
+                    update_time: i
+                        .update_time
+                        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
                     is_deleted: i.is_deleted,
                     remarks: i.remarks.clone(),
                     allow_deletion: i.allow_deletion,

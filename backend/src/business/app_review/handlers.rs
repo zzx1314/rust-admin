@@ -2,14 +2,14 @@ use crate::api::AppState;
 use crate::business::app_review::domain::{
     CreateReviewRequest, ReviewActionRequest, ReviewPageQuery, ReviewVO,
 };
+use crate::business::harbor::models::HarborWebhookPayload;
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
-use crate::business::harbor::models::HarborWebhookPayload;
+use axum::http::HeaderMap;
 use axum::{
     Json,
     extract::{Path, Query, State},
 };
-use axum::http::HeaderMap;
 use axum_extra::TypedHeader;
 use axum_extra::headers::Authorization;
 use axum_extra::headers::authorization::Bearer;
@@ -90,7 +90,11 @@ pub async fn harbor_webhook_handler(
     headers: HeaderMap,
     Json(payload): Json<HarborWebhookPayload>,
 ) -> Result<Json<ApiResponse<Vec<ReviewVO>>>, AppError> {
-    if let Some(secret) = state.harbor_config.as_ref().and_then(|c| c.webhook_secret.as_ref()) {
+    if let Some(secret) = state
+        .harbor_config
+        .as_ref()
+        .and_then(|c| c.webhook_secret.as_ref())
+    {
         let provided = headers
             .get("x-webhook-secret")
             .and_then(|v| v.to_str().ok())

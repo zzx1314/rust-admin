@@ -3,10 +3,10 @@ use crate::business::app_review::entity::ActiveModel as ReviewActiveModel;
 use crate::business::app_review::entity::Column as ReviewColumn;
 use crate::business::app_review::entity::Entity as ReviewEntity;
 use crate::business::app_review::entity::Model as Review;
-use crate::common::base::{order_desc, BaseRepository};
+use crate::common::base::{BaseRepository, order_desc};
 use sea_orm::{
-    ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect,
+    ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect,
 };
 use std::sync::Arc;
 
@@ -38,7 +38,10 @@ impl SeaOrmAppReviewRepository {
         let active_model = req.to_active_model(id, created_by, now);
 
         ReviewEntity::insert(active_model).exec(&*self.conn).await?;
-        ReviewEntity::find_by_id(id).one(&*self.conn).await.map(|r| r.unwrap())
+        ReviewEntity::find_by_id(id)
+            .one(&*self.conn)
+            .await
+            .map(|r| r.unwrap())
     }
 
     pub async fn find_by_id(&self, id: i64) -> Result<Option<Review>, sea_orm::DbErr> {

@@ -186,13 +186,7 @@ pub fn build_menu_tree(menu_trees: Vec<MenuTree>) -> Vec<MenuTree> {
                     children.push(child);
                 }
             }
-            children.sort_by_key(|child| {
-                child
-                    .meta
-                    .as_ref()
-                    .and_then(|m| m.rank)
-                    .unwrap_or(0)
-            });
+            children.sort_by_key(|child| child.meta.as_ref().and_then(|m| m.rank).unwrap_or(0));
             menu.children = Some(children);
         }
     }
@@ -201,12 +195,7 @@ pub fn build_menu_tree(menu_trees: Vec<MenuTree>) -> Vec<MenuTree> {
         attach_children(root, &id_map);
     }
 
-    roots.sort_by_key(|root| {
-        root.meta
-            .as_ref()
-            .and_then(|m| m.rank)
-            .unwrap_or(0)
-    });
+    roots.sort_by_key(|root| root.meta.as_ref().and_then(|m| m.rank).unwrap_or(0));
 
     roots
 }

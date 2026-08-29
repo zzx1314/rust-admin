@@ -222,19 +222,15 @@ async fn create_test_app() -> (axum::Router, TestDb) {
 
     use std::sync::Arc;
     use x_rust::api::AppState;
-    use x_rust::system::auth::service::AuthService;
+    use x_rust::business::app_review::repository::SeaOrmAppReviewRepository;
+    use x_rust::business::app_review::service::AppReviewService;
+    use x_rust::business::harbor::client::HarborClient;
+    use x_rust::business::harbor::service::HarborService;
     use x_rust::common::traits::{
         MenuRepository, OrgRepository, RoleRepository, SysDictItemRepository, SysDictRepository,
         SysLogRepository, TokenStore, UserRepository,
     };
-    use x_rust::business::harbor::client::HarborClient;
-    use x_rust::business::harbor::service::HarborService;
-    use x_rust::system::sys_menu::repository::SeaOrmMenuRepository;
-    use x_rust::system::sys_menu::service::MenuService;
-    use x_rust::system::sys_org::repository::SeaOrmOrgRepository;
-    use x_rust::system::sys_org::service::OrgService;
-    use x_rust::system::sys_role::repository::SeaOrmRoleRepository;
-    use x_rust::system::sys_role::service::RoleService;
+    use x_rust::system::auth::service::AuthService;
     use x_rust::system::sys_auth::service::SysAuthService;
     use x_rust::system::sys_dict::repository::SeaOrmSysDictRepository;
     use x_rust::system::sys_dict::service::SysDictService;
@@ -242,17 +238,25 @@ async fn create_test_app() -> (axum::Router, TestDb) {
     use x_rust::system::sys_dict_item::service::SysDictItemService;
     use x_rust::system::sys_log::repository::SeaOrmSysLogRepository;
     use x_rust::system::sys_log::service::SysLogService;
+    use x_rust::system::sys_menu::repository::SeaOrmMenuRepository;
+    use x_rust::system::sys_menu::service::MenuService;
+    use x_rust::system::sys_org::repository::SeaOrmOrgRepository;
+    use x_rust::system::sys_org::service::OrgService;
+    use x_rust::system::sys_role::repository::SeaOrmRoleRepository;
+    use x_rust::system::sys_role::service::RoleService;
     use x_rust::system::sys_user::repository::SeaOrmUserRepository;
     use x_rust::system::sys_user::service::UserService;
-    use x_rust::business::app_review::repository::SeaOrmAppReviewRepository;
-    use x_rust::business::app_review::service::AppReviewService;
 
     let conn = Arc::new(conn);
     let org_repo: Arc<dyn OrgRepository> = Arc::new(SeaOrmOrgRepository::new(conn.clone()));
     let org_service = Arc::new(OrgService::new(org_repo.clone()));
     let user_repo: Arc<dyn UserRepository> = Arc::new(SeaOrmUserRepository::new(conn.clone()));
     let role_repo: Arc<dyn RoleRepository> = Arc::new(SeaOrmRoleRepository::new(conn.clone()));
-    let user_service = Arc::new(UserService::new(user_repo.clone(), role_repo.clone(), org_repo.clone()));
+    let user_service = Arc::new(UserService::new(
+        user_repo.clone(),
+        role_repo.clone(),
+        org_repo.clone(),
+    ));
     let role_service = Arc::new(RoleService::new(role_repo.clone()));
     let token_store: Arc<dyn TokenStore> = Arc::new(FakeTokenStore::new());
     let auth_service = Arc::new(AuthService::new(
@@ -269,7 +273,8 @@ async fn create_test_app() -> (axum::Router, TestDb) {
     let sys_dict_service = Arc::new(SysDictService::new(sys_dict_repo.clone()));
     let sys_dict_item_repo: Arc<dyn SysDictItemRepository> =
         Arc::new(SeaOrmSysDictItemRepository::new(conn.clone()));
-    let sys_dict_item_service = Arc::new(SysDictItemService::new(sys_dict_item_repo, sys_dict_repo));
+    let sys_dict_item_service =
+        Arc::new(SysDictItemService::new(sys_dict_item_repo, sys_dict_repo));
     let sys_log_repo: Arc<dyn SysLogRepository> =
         Arc::new(SeaOrmSysLogRepository::new(conn.clone()));
     let sys_log_service = Arc::new(SysLogService::new(sys_log_repo));
@@ -290,7 +295,10 @@ async fn create_test_app() -> (axum::Router, TestDb) {
     let harbor_config = None;
 
     let app_review_repo = SeaOrmAppReviewRepository::new(conn.clone());
-    let app_review_service = Arc::new(AppReviewService::new(app_review_repo, harbor_service.clone()));
+    let app_review_service = Arc::new(AppReviewService::new(
+        app_review_repo,
+        harbor_service.clone(),
+    ));
 
     let state = AppState {
         user_service,
@@ -639,7 +647,10 @@ async fn test_create_user_sync_harbor_failure_rolls_back_local_user() {
         .unwrap();
 
     // Harbor is not configured in tests, so the sync should fail.
-    assert!(!response.status().is_success(), "Expected Harbor sync failure to return an error");
+    assert!(
+        !response.status().is_success(),
+        "Expected Harbor sync failure to return an error"
+    );
 
     // Verify the local user was not created.
     let get_response = app
@@ -655,11 +666,16 @@ async fn test_create_user_sync_harbor_failure_rolls_back_local_user() {
         .unwrap();
 
     assert_eq!(get_response.status(), StatusCode::OK);
-    let body: Bytes = to_bytes(get_response.into_body(), 1024 * 1024).await.unwrap();
+    let body: Bytes = to_bytes(get_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
     let data = json.get("data").unwrap();
     let total = data.get("total").unwrap().as_i64().unwrap();
-    assert_eq!(total, 0, "Local user should not be created when Harbor sync fails");
+    assert_eq!(
+        total, 0,
+        "Local user should not be created when Harbor sync fails"
+    );
 }
 
 #[tokio::test]

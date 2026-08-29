@@ -1,29 +1,23 @@
+use socket2::{Domain, Protocol, Socket, Type};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use socket2::{Domain, Protocol, Socket, Type};
 
 use sea_orm::DatabaseConnection;
 
 use crate::api::{AppState, routes::create_router};
 use crate::business::app_review::repository::SeaOrmAppReviewRepository;
 use crate::business::app_review::service::AppReviewService;
-use crate::system::auth::repository::RedisTokenStore;
-use crate::system::auth::service::AuthService;
 use crate::business::harbor::client::HarborClient;
 use crate::business::harbor::service::HarborService;
 use crate::common::error::AppError;
 use crate::common::traits::{
-    MenuRepository, OrgRepository, RoleRepository, SysDictItemRepository, SysLogRepository,
-    SysDictRepository, TokenStore, UserRepository,
+    MenuRepository, OrgRepository, RoleRepository, SysDictItemRepository, SysDictRepository,
+    SysLogRepository, TokenStore, UserRepository,
 };
 use crate::config::AppConfig;
-use crate::system::sys_menu::repository::SeaOrmMenuRepository;
-use crate::system::sys_menu::service::MenuService;
 use crate::migration::Migrator;
-use crate::system::sys_org::repository::SeaOrmOrgRepository;
-use crate::system::sys_org::service::OrgService;
-use crate::system::sys_role::repository::SeaOrmRoleRepository;
-use crate::system::sys_role::service::RoleService;
+use crate::system::auth::repository::RedisTokenStore;
+use crate::system::auth::service::AuthService;
 use crate::system::sys_auth::service::SysAuthService;
 use crate::system::sys_dict::repository::SeaOrmSysDictRepository;
 use crate::system::sys_dict::service::SysDictService;
@@ -31,6 +25,12 @@ use crate::system::sys_dict_item::repository::SeaOrmSysDictItemRepository;
 use crate::system::sys_dict_item::service::SysDictItemService;
 use crate::system::sys_log::repository::SeaOrmSysLogRepository;
 use crate::system::sys_log::service::SysLogService;
+use crate::system::sys_menu::repository::SeaOrmMenuRepository;
+use crate::system::sys_menu::service::MenuService;
+use crate::system::sys_org::repository::SeaOrmOrgRepository;
+use crate::system::sys_org::service::OrgService;
+use crate::system::sys_role::repository::SeaOrmRoleRepository;
+use crate::system::sys_role::service::RoleService;
 use crate::system::sys_user::repository::SeaOrmUserRepository;
 use crate::system::sys_user::service::UserService;
 use sea_orm_migration::MigratorTrait;
@@ -62,7 +62,11 @@ impl App {
         let org_service = Arc::new(OrgService::new(org_repo.clone()));
 
         let user_repo: Arc<dyn UserRepository> = Arc::new(SeaOrmUserRepository::new(conn.clone()));
-        let user_service = Arc::new(UserService::new(user_repo.clone(), role_repo.clone(), org_repo.clone()));
+        let user_service = Arc::new(UserService::new(
+            user_repo.clone(),
+            role_repo.clone(),
+            org_repo.clone(),
+        ));
 
         let redis_url = config.redis.url();
         let token_store: Arc<dyn TokenStore> = Arc::new(RedisTokenStore::new(&redis_url));
@@ -84,7 +88,10 @@ impl App {
 
         let sys_dict_item_repo: Arc<dyn SysDictItemRepository> =
             Arc::new(SeaOrmSysDictItemRepository::new(conn.clone()));
-        let sys_dict_item_service = Arc::new(SysDictItemService::new(sys_dict_item_repo, sys_dict_repo.clone()));
+        let sys_dict_item_service = Arc::new(SysDictItemService::new(
+            sys_dict_item_repo,
+            sys_dict_repo.clone(),
+        ));
 
         let sys_log_repo: Arc<dyn SysLogRepository> =
             Arc::new(SeaOrmSysLogRepository::new(conn.clone()));
@@ -106,22 +113,29 @@ impl App {
                     .with_replication_poll_interval_secs(replication_poll_interval_secs),
             )
         } else {
-            tracing::warn!("Harbor config is missing, Harbor endpoints will return an error until [harbor] is configured in config.toml");
-            Arc::new(HarborService::new(Arc::new(HarborClient::new(&crate::config::HarborConfig {
-                url: String::new(),
-                username: String::new(),
-                password: String::new(),
-                staging_project: String::new(),
-                production_project: String::new(),
-                registry_endpoint_id: None,
-                registry_insecure: None,
-                webhook_secret: None,
-                replication_timeout_secs: 30,
-                replication_poll_interval_secs: 1,
-            }))))
+            tracing::warn!(
+                "Harbor config is missing, Harbor endpoints will return an error until [harbor] is configured in config.toml"
+            );
+            Arc::new(HarborService::new(Arc::new(HarborClient::new(
+                &crate::config::HarborConfig {
+                    url: String::new(),
+                    username: String::new(),
+                    password: String::new(),
+                    staging_project: String::new(),
+                    production_project: String::new(),
+                    registry_endpoint_id: None,
+                    registry_insecure: None,
+                    webhook_secret: None,
+                    replication_timeout_secs: 30,
+                    replication_poll_interval_secs: 1,
+                },
+            ))))
         };
 
-        let app_review_service = Arc::new(AppReviewService::new(app_review_repo, harbor_service.clone()));
+        let app_review_service = Arc::new(AppReviewService::new(
+            app_review_repo,
+            harbor_service.clone(),
+        ));
         let harbor_config = config.harbor.clone();
 
         if let Some(harbor_cfg) = &harbor_config
@@ -131,7 +145,9 @@ impl App {
                 .map(|s| s.is_empty())
                 .unwrap_or(true)
         {
-            tracing::warn!("Harbor webhook secret is not configured. The /api/webhooks/harbor endpoint is publicly accessible without verification.");
+            tracing::warn!(
+                "Harbor webhook secret is not configured. The /api/webhooks/harbor endpoint is publicly accessible without verification."
+            );
         }
 
         AppState {
@@ -169,9 +185,7 @@ impl App {
         socket
             .bind(&socket2::SockAddr::from(addr))
             .expect("Failed to bind to address");
-        socket
-            .listen(1024)
-            .expect("Failed to listen on socket");
+        socket.listen(1024).expect("Failed to listen on socket");
         // Tokio requires a non-blocking socket; socket2::Socket defaults to blocking.
         socket
             .set_nonblocking(true)

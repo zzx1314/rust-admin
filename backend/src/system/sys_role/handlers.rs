@@ -1,7 +1,9 @@
 use crate::api::AppState;
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
-use crate::system::sys_role::domain::{CreateRoleRequest, Role, RolePageQuery, RoleVO, UpdateRoleRequest};
+use crate::system::sys_role::domain::{
+    CreateRoleRequest, Role, RolePageQuery, RoleVO, UpdateRoleRequest,
+};
 use crate::system::sys_user::domain::User;
 use axum::{
     Json,

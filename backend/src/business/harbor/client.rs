@@ -1,5 +1,5 @@
 use crate::config::HarborConfig;
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE, AUTHORIZATION};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 
 #[derive(Clone)]
 pub struct HarborClient {

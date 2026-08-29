@@ -5,10 +5,12 @@ use x_rust::common::error::AppError;
 use x_rust::common::traits::{
     DynFuture, OrgRepository, RoleRepository, SeaOrmOptResult, SeaOrmResult, UserRepository,
 };
-use x_rust::system::sys_org::domain::{CreateOrgRequest, Org, OrgTreeQuery, UpdateOrgRequest};
 use x_rust::common::util::{encrypt_password, format_datetime, format_datetime_opt};
+use x_rust::system::sys_org::domain::{CreateOrgRequest, Org, OrgTreeQuery, UpdateOrgRequest};
 use x_rust::system::sys_role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequest};
-use x_rust::system::sys_user::domain::{CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO};
+use x_rust::system::sys_user::domain::{
+    CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO,
+};
 use x_rust::system::sys_user::service::UserService;
 
 // ==================== Fake User Repository ====================

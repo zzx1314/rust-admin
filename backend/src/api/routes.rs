@@ -12,20 +12,6 @@ use crate::business::harbor::handlers as harbor_handlers;
 use crate::system::auth::handlers::{
     check_token_handler, login_handler, logout_handler, me_handler, refresh_handler,
 };
-use crate::system::sys_menu::handlers::{
-    create_menu_handler, delete_menu_handler, get_all_menus_handler, get_menu_handler,
-    get_menu_tree_handler, get_menus_by_parent_handler, get_user_menu_handler, update_menu_handler,
-};
-use crate::system::sys_org::handlers::{
-    create_org_handler, delete_org_handler, get_all_orgs_handler, get_org_handler,
-    get_org_tree_handler, get_orgs_by_parent_handler, remove_orgs_by_ids_handler,
-    update_org_handler,
-};
-use crate::system::sys_role::handlers::{
-    assign_role_to_user_handler, create_role_handler, delete_role_handler, get_all_roles_handler,
-    get_role_handler, get_role_users_handler, get_roles_nolog_handler, get_roles_page_handler,
-    get_user_roles_handler, remove_role_from_user_handler, update_role_handler,
-};
 use crate::system::sys_auth::handlers::{get_menu_data_handler, set_menu_auth_handler};
 use crate::system::sys_dict::handlers::{
     create_dict_handler, delete_dict_handler, get_all_dicts_handler, get_dict_handler,
@@ -39,6 +25,20 @@ use crate::system::sys_dict_item::handlers::{
 use crate::system::sys_log::handlers::{
     create_log_handler, delete_log_handler, get_all_logs_handler, get_log_handler,
     get_logs_page_handler, update_log_handler,
+};
+use crate::system::sys_menu::handlers::{
+    create_menu_handler, delete_menu_handler, get_all_menus_handler, get_menu_handler,
+    get_menu_tree_handler, get_menus_by_parent_handler, get_user_menu_handler, update_menu_handler,
+};
+use crate::system::sys_org::handlers::{
+    create_org_handler, delete_org_handler, get_all_orgs_handler, get_org_handler,
+    get_org_tree_handler, get_orgs_by_parent_handler, remove_orgs_by_ids_handler,
+    update_org_handler,
+};
+use crate::system::sys_role::handlers::{
+    assign_role_to_user_handler, create_role_handler, delete_role_handler, get_all_roles_handler,
+    get_role_handler, get_role_users_handler, get_roles_nolog_handler, get_roles_page_handler,
+    get_user_roles_handler, remove_role_from_user_handler, update_role_handler,
 };
 use crate::system::sys_user::handlers::{
     create_user_handler, delete_user_handler, edit_password_handler, get_all_users_handler,
@@ -218,32 +218,79 @@ pub fn sys_log_routes(state: AppState) -> Router<AppState> {
 
 pub fn harbor_routes(state: AppState) -> Router<AppState> {
     Router::new()
-        .route("/harbor/statistics", get(harbor_handlers::harbor_statistics_handler))
-        .route("/harbor/projects", post(harbor_handlers::create_project_handler).get(harbor_handlers::list_projects_handler))
-        .route("/harbor/projects/{project_name}/summary", get(harbor_handlers::get_project_summary_handler))
-        .route("/harbor/projects/{project_name}/repositories", get(harbor_handlers::list_repositories_handler))
-        .route("/harbor/projects/{project_name}/repositories/{repo_name}", delete(harbor_handlers::delete_repository_handler))
-        .route("/harbor/projects/{project_name}/members", get(harbor_handlers::list_members_handler).post(harbor_handlers::add_member_handler))
-        .route("/harbor/projects/{project_name}/artifacts", get(harbor_handlers::list_artifacts_handler))
-        .route("/harbor/projects/{project_name}/repositories/{repo_name}/artifacts/{reference}", delete(harbor_handlers::delete_artifact_handler))
-        .route("/harbor/projects/{project_name}/members/{member_id}", delete(harbor_handlers::remove_member_handler))
-        .route("/harbor/projects/{project_name}", delete(harbor_handlers::delete_project_handler))
+        .route(
+            "/harbor/statistics",
+            get(harbor_handlers::harbor_statistics_handler),
+        )
+        .route(
+            "/harbor/projects",
+            post(harbor_handlers::create_project_handler)
+                .get(harbor_handlers::list_projects_handler),
+        )
+        .route(
+            "/harbor/projects/{project_name}/summary",
+            get(harbor_handlers::get_project_summary_handler),
+        )
+        .route(
+            "/harbor/projects/{project_name}/repositories",
+            get(harbor_handlers::list_repositories_handler),
+        )
+        .route(
+            "/harbor/projects/{project_name}/repositories/{repo_name}",
+            delete(harbor_handlers::delete_repository_handler),
+        )
+        .route(
+            "/harbor/projects/{project_name}/members",
+            get(harbor_handlers::list_members_handler).post(harbor_handlers::add_member_handler),
+        )
+        .route(
+            "/harbor/projects/{project_name}/artifacts",
+            get(harbor_handlers::list_artifacts_handler),
+        )
+        .route(
+            "/harbor/projects/{project_name}/repositories/{repo_name}/artifacts/{reference}",
+            delete(harbor_handlers::delete_artifact_handler),
+        )
+        .route(
+            "/harbor/projects/{project_name}/members/{member_id}",
+            delete(harbor_handlers::remove_member_handler),
+        )
+        .route(
+            "/harbor/projects/{project_name}",
+            delete(harbor_handlers::delete_project_handler),
+        )
         .route("/harbor/info", get(harbor_handlers::harbor_info_handler))
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 
 pub fn app_review_routes(state: AppState) -> Router<AppState> {
     Router::new()
-        .route("/appReviews", post(app_review_handlers::create_review_handler).get(app_review_handlers::list_reviews_handler))
-        .route("/appReviews/{id}", get(app_review_handlers::get_review_handler).delete(app_review_handlers::delete_review_handler))
-        .route("/appReviews/{id}/approve", post(app_review_handlers::approve_review_handler))
-        .route("/appReviews/{id}/reject", post(app_review_handlers::reject_review_handler))
+        .route(
+            "/appReviews",
+            post(app_review_handlers::create_review_handler)
+                .get(app_review_handlers::list_reviews_handler),
+        )
+        .route(
+            "/appReviews/{id}",
+            get(app_review_handlers::get_review_handler)
+                .delete(app_review_handlers::delete_review_handler),
+        )
+        .route(
+            "/appReviews/{id}/approve",
+            post(app_review_handlers::approve_review_handler),
+        )
+        .route(
+            "/appReviews/{id}/reject",
+            post(app_review_handlers::reject_review_handler),
+        )
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 
 pub fn webhook_routes() -> Router<AppState> {
-    Router::new()
-        .route("/webhooks/harbor", post(app_review_handlers::harbor_webhook_handler))
+    Router::new().route(
+        "/webhooks/harbor",
+        post(app_review_handlers::harbor_webhook_handler),
+    )
 }
 
 pub fn create_router(state: AppState) -> Router {

@@ -13,8 +13,14 @@ pub struct SysDictItemService {
 }
 
 impl SysDictItemService {
-    pub fn new(dict_item_repo: Arc<dyn SysDictItemRepository>, dict_repo: Arc<dyn SysDictRepository>) -> Self {
-        Self { dict_item_repo, dict_repo }
+    pub fn new(
+        dict_item_repo: Arc<dyn SysDictItemRepository>,
+        dict_repo: Arc<dyn SysDictRepository>,
+    ) -> Self {
+        Self {
+            dict_item_repo,
+            dict_repo,
+        }
     }
 
     pub async fn create_dict_item(

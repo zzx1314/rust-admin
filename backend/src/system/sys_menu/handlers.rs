@@ -1,6 +1,8 @@
 use crate::api::AppState;
 use crate::common::error::{ApiResponse, AppError};
-use crate::system::sys_menu::domain::{CreateMenuRequest, Menu, MenuTree, MenuVo, UpdateMenuRequest};
+use crate::system::sys_menu::domain::{
+    CreateMenuRequest, Menu, MenuTree, MenuVo, UpdateMenuRequest,
+};
 use axum::{
     Json,
     extract::{Path, Query, State},

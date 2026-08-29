@@ -1,7 +1,9 @@
 use sea_orm::Database;
 use std::sync::atomic::{AtomicI64, Ordering};
 use x_rust::common::traits::MenuRepository;
-use x_rust::system::sys_menu::domain::{CreateMenuRequest, MenuTree, UpdateMenuRequest, build_menu_tree};
+use x_rust::system::sys_menu::domain::{
+    CreateMenuRequest, MenuTree, UpdateMenuRequest, build_menu_tree,
+};
 use x_rust::system::sys_menu::repository::SeaOrmMenuRepository;
 
 static ID_COUNTER: AtomicI64 = AtomicI64::new(1);
