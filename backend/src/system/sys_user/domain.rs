@@ -31,6 +31,7 @@ pub struct UpdateUserRequest {
     pub phone: Option<String>,
     pub email: Option<String>,
     pub real_name: Option<String>,
+    #[serde(skip_deserializing)]
     pub password: Option<String>,
     pub org_id: Option<i64>,
     pub remarks: Option<String>,

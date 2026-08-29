@@ -417,7 +417,12 @@ export function useUser() {
     if (addForm.value.id) {
       console.log("修改");
       const updateParam = {
-        ...addForm.value,
+        id: addForm.value.id,
+        username: addForm.value.username,
+        realName: addForm.value.realName,
+        enable: addForm.value.enable,
+        orgId: addForm.value.orgId,
+        sex: addForm.value.sex,
         role: addForm.value.role || null
       };
       updateUser(updateParam).then(res => {
