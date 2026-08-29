@@ -8,8 +8,12 @@ import {
   deleteArtifact,
   type HarborArtifact
 } from "@/api/harbor";
+import {
+  createAppReview,
+  getAppReviews,
+  type AppReview
+} from "@/api/appReview";
 import { useHarborStoreHook } from "@/store/modules/harbor";
-import { createAppReview } from "@/api/appReview";
 import ImageCommandDialog from "../components/ImageCommandDialog.vue";
 
 const props = defineProps<{
@@ -48,6 +52,7 @@ const columns = [
   { label: "推送时间", prop: "push_time", slot: "push_time" },
   { label: "拉取时间", prop: "pull_time", slot: "pull_time" },
   { label: "镜像摘要", prop: "digest" },
+  { label: "审核状态", prop: "reviewStatus", slot: "reviewStatus", width: 120 },
   { label: "操作", prop: "actions", slot: "actions", width: 220 }
 ];
 
@@ -59,6 +64,15 @@ const formatSize = (bytes?: number) => {
     return (bytes / (1024 * 1024)).toFixed(1) + " MB";
   return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
 };
+const statusTag = (status: AppReview["status"]) => {
+  if (status === "approved")
+    return { type: "success" as const, label: "审核通过" };
+  if (status === "rejected")
+    return { type: "danger" as const, label: "审核拒绝" };
+  return { type: "warning" as const, label: "待审核" };
+};
+
+const getArtifactStatus = (artifact: HarborArtifact) => artifact.review_status;
 
 const fetchArtifacts = async () => {
   if (!props.projectName || !props.repoName) return;
@@ -235,6 +249,18 @@ onMounted(() => {
               row.pull_time?.startsWith("0001-01-01") ? "-" : row.pull_time
             }}</span>
           </template>
+          <template #reviewStatus="{ row }">
+            <el-tag
+              :type="statusTag(getArtifactStatus(row) || 'pending').type"
+              size="small"
+            >
+              {{
+                getArtifactStatus(row)
+                  ? statusTag(getArtifactStatus(row)!).label
+                  : "未提交"
+              }}
+            </el-tag>
+          </template>
           <template #actions="{ row }">
             <el-button
               link
@@ -248,9 +274,13 @@ onMounted(() => {
               link
               type="warning"
               :size="size"
+              :disabled="
+                getArtifactStatus(row) === 'pending' ||
+                getArtifactStatus(row) === 'approved'
+              "
               @click="openReviewDialog(row)"
             >
-              审核
+              {{ getArtifactStatus(row) === "rejected" ? "重新审核" : "审核" }}
             </el-button>
             <el-button
               link

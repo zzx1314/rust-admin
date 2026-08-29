@@ -116,6 +116,7 @@ pub struct HarborArtifact {
     pub manifest_media_type: Option<String>,
     #[serde(alias = "media_type")]
     pub media_type: Option<String>,
+    pub review_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

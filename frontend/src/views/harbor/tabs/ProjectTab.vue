@@ -51,10 +51,12 @@ const fetchProjects = async () => {
     });
     if (res.code === 10200 && res.data) {
       projectList.value =
-        res.data.records?.filter(item => item.name === "staging-project").map(item => ({
-          ...item,
-          is_public: item.metadata?.public === "true"
-        })) || [];
+        res.data.records
+          ?.filter(item => item.name === "staging-project")
+          .map(item => ({
+            ...item,
+            is_public: item.metadata?.public === "true"
+          })) || [];
       pagination.total = res.data.total;
     }
   } finally {

@@ -83,6 +83,7 @@ export interface HarborArtifact {
   tags?: ArtifactTag[];
   manifest_media_type?: string;
   media_type?: string;
+  review_status?: "pending" | "approved" | "rejected";
 }
 
 export interface HarborMember {

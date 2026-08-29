@@ -81,7 +81,7 @@ pub async fn list_artifacts_handler(
     Path(params): Path<ProjectNameParam>,
     Query(query): Query<ArtifactQuery>,
 ) -> Result<Json<ApiResponse<PageResponse<HarborArtifact>>>, AppError> {
-    let result = state
+    let mut result = state
         .harbor_service
         .list_artifacts(
             &params.project_name,
@@ -90,6 +90,40 @@ pub async fn list_artifacts_handler(
             query.page_size,
         )
         .await?;
+
+    let reviews = state
+        .app_review_service
+        .list_reviews(crate::business::app_review::domain::ReviewPageQuery {
+            src_project: Some(params.project_name.clone()),
+            repository_name: Some(query.repo_name.clone()),
+            status: None,
+            created_by: None,
+            current: 1,
+            size: 1000,
+        })
+        .await?;
+
+    for artifact in &mut result.records {
+        let tag = artifact
+            .tags
+            .as_ref()
+            .and_then(|tags| tags.first())
+            .map(|tag| tag.name.as_str());
+        artifact.review_status = reviews.records.iter().find_map(|review| {
+            let same_repository = review.repository_name == query.repo_name
+                || review
+                    .repository_name
+                    .ends_with(&format!("/{}", query.repo_name));
+            let same_tag = tag == Some(review.tag.as_str());
+            let same_digest = artifact.digest.as_deref() == review.digest.as_deref();
+            if same_repository && same_tag && (same_digest || review.digest.is_none()) {
+                Some(review.status.clone())
+            } else {
+                None
+            }
+        });
+    }
+
     Ok(Json(ApiResponse::ok(result)))
 }
 

@@ -59,7 +59,11 @@ const fetchProjects = async () => {
     if (res.code === 10200 && res.data) {
       projects.value = res.data.records || [];
       if (!props.projectName) {
-        if (!projects.value.some(project => project.name === selectedProject.value)) {
+        if (
+          !projects.value.some(
+            project => project.name === selectedProject.value
+          )
+        ) {
           selectedProject.value = "staging-project";
         }
         fetchRepositories();
@@ -191,7 +195,9 @@ onMounted(() => {
               style="width: 200px"
             >
               <el-option
-                v-for="p in projects.filter(item => item.name === 'staging-project')"
+                v-for="p in projects.filter(
+                  item => item.name === 'staging-project'
+                )"
                 :key="p.project_id"
                 :label="p.name"
                 :value="p.name"

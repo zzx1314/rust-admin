@@ -31,7 +31,10 @@ export const pSysLogrecordSave = (param?: object) => {
   return http.axiosPostRequest<Result>(pSysLogrecordUrls.save, param);
 };
 // 修改
-export const pSysLogrecordUpdate = (param: { id: string | number; [key: string]: unknown }) => {
+export const pSysLogrecordUpdate = (param: {
+  id: string | number;
+  [key: string]: unknown;
+}) => {
   return http.axiosPut<Result>(pSysLogrecordUrls.update + param.id, param);
 };
 // 删除

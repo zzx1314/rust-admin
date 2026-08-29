@@ -140,14 +140,20 @@ export const saveDict = (data?: object) => {
 /**
  * 修改字典项
  */
-export const updateItem = (data: { id: string | number; [key: string]: unknown }) => {
+export const updateItem = (data: {
+  id: string | number;
+  [key: string]: unknown;
+}) => {
   return http.axiosPut<Result>(dictUrls.updateItem + data.id, data);
 };
 
 /**
  * 修改字典
  */
-export const updateDict = (data: { id: string | number; [key: string]: unknown }) => {
+export const updateDict = (data: {
+  id: string | number;
+  [key: string]: unknown;
+}) => {
   return http.axiosPut<Result>(dictUrls.update + data.id, data);
 };
 
@@ -259,7 +265,10 @@ export const saveSysOrg = (param?: object) => {
 /**
  * 修改部门
  */
-export const updateById = (param: { id: string | number; [key: string]: unknown }) => {
+export const updateById = (param: {
+  id: string | number;
+  [key: string]: unknown;
+}) => {
   return http.axiosPut<Result>(orgurls.updateById + param.id, param);
 };
 
@@ -305,7 +314,10 @@ export const removeUserById = (param: internal) => {
 };
 
 /** 修改用户 */
-export const updateUser = (param: { id: string | number; [key: string]: unknown }) => {
+export const updateUser = (param: {
+  id: string | number;
+  [key: string]: unknown;
+}) => {
   return http.axiosPut<Result>(userUrls.update + param.id, param);
 };
 
@@ -344,7 +356,10 @@ export const saveRole = (param: object) => {
 };
 
 /** 修改角色 */
-export const updateRole = (param: { id: string | number; [key: string]: unknown }) => {
+export const updateRole = (param: {
+  id: string | number;
+  [key: string]: unknown;
+}) => {
   return http.axiosPut<Result>(roleUrls.update + param.id, param);
 };
 
