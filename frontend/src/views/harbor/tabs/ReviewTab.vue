@@ -11,6 +11,7 @@ import {
   deleteAppReview,
   type AppReview
 } from "@/api/appReview";
+import type { StartupConfig } from "@/api/appReview";
 
 import Refresh from "~icons/ep/refresh";
 import Search from "~icons/ep/search";
@@ -44,16 +45,27 @@ const currentReview = ref<AppReview | null>(null);
 const currentAction = ref<"approve" | "reject">("approve");
 
 const columns = [
-  { label: "源项目", prop: "srcProject", width: 150 },
-  { label: "目标项目", prop: "destProject", width: 150 },
-  { label: "仓库", prop: "repositoryName", minWidth: 200 },
-  { label: "Tag", prop: "tag", width: 150 },
-  { label: "摘要", prop: "digest", width: 200, showOverflowTooltip: true },
-  { label: "状态", prop: "status", slot: "status" },
-  { label: "审核意见", prop: "reviewerComment", minWidth: 200 },
-  { label: "创建时间", prop: "createTime", minWidth: 200 },
-  { label: "操作", prop: "actions", slot: "actions", width: 250 }
+  { label: "源项目", prop: "srcProject", width: 120 },
+  { label: "目标项目", prop: "destProject", width: 120 },
+  { label: "仓库", prop: "repositoryName", minWidth: 180 },
+  { label: "Tag", prop: "tag", width: 120 },
+  { label: "端口映射", prop: "startupConfig", slot: "ports", minWidth: 180 },
+  { label: "环境变量", prop: "startupConfig", slot: "envVars", minWidth: 180 },
+  { label: "状态", prop: "status", slot: "status", width: 100 },
+  { label: "审核意见", prop: "reviewerComment", minWidth: 150 },
+  { label: "创建时间", prop: "createTime", minWidth: 160 },
+  { label: "操作", prop: "actions", slot: "actions", width: 200 }
 ];
+
+const formatPorts = (config?: StartupConfig) => {
+  if (!config?.ports?.length) return "-";
+  return config.ports.map(p => `${p.hostPort}:${p.containerPort}`).join(", ");
+};
+
+const formatEnvVars = (config?: StartupConfig) => {
+  if (!config?.envVars?.length) return "-";
+  return config.envVars.map(e => `${e.key}=${e.value}`).join("; ");
+};
 
 const statusTag = (status: string) => {
   switch (status) {
@@ -234,6 +246,12 @@ onMounted(fetchReviews);
           @page-size-change="handleSizeChange"
           @page-current-change="handleCurrentChange"
         >
+          <template #ports="{ row }">
+            <span class="text-xs">{{ formatPorts(row.startupConfig) }}</span>
+          </template>
+          <template #envVars="{ row }">
+            <span class="text-xs">{{ formatEnvVars(row.startupConfig) }}</span>
+          </template>
           <template #status="{ row }">
             <el-tag :type="statusTag(row.status).type as any" size="small">
               {{ statusTag(row.status).label }}

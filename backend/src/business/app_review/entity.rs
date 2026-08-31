@@ -31,6 +31,8 @@ pub struct Model {
     pub create_time: DateTime<Utc>,
     #[sea_orm(column_name = "update_time", column_type = "Timestamp", nullable)]
     pub update_time: Option<DateTime<Utc>>,
+    #[sea_orm(column_name = "startup_config", column_type = "Text", nullable)]
+    pub startup_config: Option<String>,
     #[sea_orm(column_name = "is_deleted", column_type = "Integer")]
     pub is_deleted: i32,
 }

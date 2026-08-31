@@ -37,6 +37,38 @@ impl FromStr for ReviewStatus {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortMapping {
+    pub host_port: u16,
+    pub container_port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvVar {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartupConfig {
+    #[serde(default)]
+    pub ports: Vec<PortMapping>,
+    #[serde(default)]
+    pub env_vars: Vec<EnvVar>,
+}
+
+impl StartupConfig {
+    pub fn to_json_string(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+
+    pub fn from_json_str(s: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(s)
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateReviewRequest {
@@ -47,6 +79,8 @@ pub struct CreateReviewRequest {
     pub digest: Option<String>,
     pub artifact_id: Option<i64>,
     pub reviewer_comment: Option<String>,
+    #[serde(default)]
+    pub startup_config: Option<StartupConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -85,10 +119,16 @@ pub struct ReviewVO {
     pub reviewer_id: Option<i64>,
     pub create_time: String,
     pub update_time: Option<String>,
+    pub startup_config: Option<StartupConfig>,
 }
 
 impl From<Review> for ReviewVO {
     fn from(review: Review) -> Self {
+        let startup_config = review
+            .startup_config
+            .as_deref()
+            .and_then(|s| StartupConfig::from_json_str(s).ok());
+
         Self {
             id: review.id,
             src_project: review.src_project.clone(),
@@ -103,6 +143,7 @@ impl From<Review> for ReviewVO {
             reviewer_id: review.reviewer_id,
             create_time: format_datetime(review.create_time),
             update_time: review.update_time.map(format_datetime),
+            startup_config,
         }
     }
 }
@@ -114,6 +155,11 @@ impl CreateReviewRequest {
         created_by: Option<i64>,
         now: DateTime<Utc>,
     ) -> ReviewActiveModel {
+        let startup_config_json = self
+            .startup_config
+            .as_ref()
+            .and_then(|c| c.to_json_string().ok());
+
         ReviewActiveModel {
             id: ActiveValue::set(id),
             src_project: ActiveValue::set(self.src_project.clone()),
@@ -129,6 +175,7 @@ impl CreateReviewRequest {
             create_time: ActiveValue::set(now),
             update_time: ActiveValue::set(Some(now)),
             is_deleted: ActiveValue::set(0),
+            startup_config: ActiveValue::set(startup_config_json),
         }
     }
 }

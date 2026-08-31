@@ -1,6 +1,6 @@
 use crate::api::AppState;
 use crate::business::app_review::domain::{
-    CreateReviewRequest, ReviewActionRequest, ReviewPageQuery, ReviewVO,
+    CreateReviewRequest, ReviewActionRequest, ReviewPageQuery, ReviewVO, StartupConfig,
 };
 use crate::business::harbor::models::HarborWebhookPayload;
 use crate::common::error::{ApiResponse, AppError};
@@ -13,11 +13,30 @@ use axum::{
 use axum_extra::TypedHeader;
 use axum_extra::headers::Authorization;
 use axum_extra::headers::authorization::Bearer;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
 pub struct ReviewIdParam {
     pub id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartupConfigQuery {
+    pub src_project: String,
+    pub repository_name: String,
+    pub tag: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartupConfigResponse {
+    pub review_id: i64,
+    pub src_project: String,
+    pub dest_project: String,
+    pub repository_name: String,
+    pub tag: String,
+    pub startup_config: Option<StartupConfig>,
 }
 
 pub async fn create_review_handler(
@@ -137,11 +156,43 @@ pub async fn delete_review_handler(
     Ok(Json(ApiResponse::ok(())))
 }
 
+pub async fn get_startup_config_handler(
+    State(state): State<AppState>,
+    Query(query): Query<StartupConfigQuery>,
+) -> Result<Json<ApiResponse<StartupConfigResponse>>, AppError> {
+    let review = state
+        .app_review_service
+        .get_approved_by_artifact(&query.src_project, &query.repository_name, &query.tag)
+        .await?;
+
+    match review {
+        Some(review) => {
+            let startup_config = review
+                .startup_config
+                .as_deref()
+                .and_then(|s| StartupConfig::from_json_str(s).ok());
+
+            Ok(Json(ApiResponse::ok(StartupConfigResponse {
+                review_id: review.id,
+                src_project: review.src_project,
+                dest_project: review.dest_project,
+                repository_name: review.repository_name,
+                tag: review.tag,
+                startup_config,
+            })))
+        }
+        None => Err(AppError::NotFound(format!(
+            "No approved review found for {}/{}/{}",
+            query.src_project, query.repository_name, query.tag
+        ))),
+    }
+}
+
 pub async fn harbor_webhook_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<HarborWebhookPayload>,
-) -> Result<Json<ApiResponse<Vec<ReviewVO>>>, AppError> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     if let Some(secret) = state
         .harbor_config
         .as_ref()
@@ -157,7 +208,7 @@ pub async fn harbor_webhook_handler(
     }
 
     if payload.event_type != "PUSH_ARTIFACT" {
-        return Ok(Json(ApiResponse::ok(vec![])));
+        return Ok(Json(ApiResponse::ok(serde_json::json!({"message": "ignored"}))));
     }
 
     let harbor_config = state
@@ -172,58 +223,27 @@ pub async fn harbor_webhook_handler(
             repo.namespace,
             harbor_config.staging_project
         );
-        return Ok(Json(ApiResponse::ok(vec![])));
+        return Ok(Json(ApiResponse::ok(serde_json::json!({"message": "ignored"}))));
     }
 
-    let dest_project = harbor_config.production_project.clone();
-    let mut created = Vec::new();
-
-    for resource in payload.event_data.resources {
-        let tag = match resource.tag {
-            Some(tag) if !tag.is_empty() => tag,
-            _ => continue,
-        };
-
-        let repository_name = repo
+    for resource in &payload.event_data.resources {
+        let tag = resource.tag.as_deref().unwrap_or("latest");
+        let repo_name = repo
             .repo_full_name
-            .clone()
-            .unwrap_or_else(|| format!("{}/{}", repo.namespace, repo.name));
-
-        let req = CreateReviewRequest {
-            src_project: repo.namespace.clone(),
-            dest_project: dest_project.clone(),
-            repository_name,
-            tag,
-            digest: resource.digest,
-            artifact_id: None,
-            reviewer_comment: None,
-        };
+            .as_deref()
+            .unwrap_or(&repo.name);
 
         tracing::info!(
-            project = %req.src_project,
-            repository = %req.repository_name,
-            tag = %req.tag,
-            digest = ?req.digest,
-            "Creating application review from Harbor webhook"
+            project = %repo.namespace,
+            repository = %repo_name,
+            tag = %tag,
+            digest = ?resource.digest,
+            "Received push artifact webhook notification"
         );
-
-        match state
-            .app_review_service
-            .create_review_with_dedup(req, None)
-            .await
-        {
-            Ok(Some(review)) => created.push(ReviewVO::from(review)),
-            Ok(None) => {
-                tracing::info!(
-                    "Approved review with identical digest already exists, skipping deduplicated artifact"
-                );
-            }
-            Err(AppError::Conflict(_)) => {
-                tracing::info!("Pending review already exists for artifact, skipping");
-            }
-            Err(e) => return Err(e),
-        }
     }
 
-    Ok(Json(ApiResponse::ok(created)))
+    Ok(Json(ApiResponse::ok(serde_json::json!({
+        "message": "webhook received",
+        "resource_count": payload.event_data.resources.len()
+    }))))
 }

@@ -36,7 +36,9 @@ const reviewForm = ref({
   tag: "",
   digest: "",
   artifactId: undefined as number | undefined,
-  reviewerComment: ""
+  reviewerComment: "",
+  ports: [] as { hostPort: number | null; containerPort: number | null }[],
+  envVars: [] as { key: string; value: string }[]
 });
 
 const pagination = reactive<PaginationProps>({
@@ -135,7 +137,9 @@ const openReviewDialog = (artifact: HarborArtifact) => {
     tag: firstTag,
     digest: artifact.digest || "",
     artifactId: artifact.id,
-    reviewerComment: ""
+    reviewerComment: "",
+    ports: [{ hostPort: null, containerPort: null }],
+    envVars: [{ key: "", value: "" }]
   };
   selectedArtifact.value = artifact;
   reviewDialogVisible.value = true;
@@ -146,6 +150,13 @@ const submitReview = async () => {
     ElMessage.warning("请选择或填写 Tag");
     return;
   }
+  const ports = reviewForm.value.ports
+    .filter(p => p.hostPort != null && p.containerPort != null)
+    .map(p => ({
+      hostPort: Number(p.hostPort),
+      containerPort: Number(p.containerPort)
+    }));
+  const envVars = reviewForm.value.envVars.filter(e => e.key.trim() !== "");
   try {
     const res = await createAppReview({
       srcProject: reviewForm.value.srcProject,
@@ -154,7 +165,8 @@ const submitReview = async () => {
       tag: reviewForm.value.tag,
       digest: reviewForm.value.digest || undefined,
       artifactId: reviewForm.value.artifactId,
-      reviewerComment: reviewForm.value.reviewerComment || undefined
+      reviewerComment: reviewForm.value.reviewerComment || undefined,
+      startupConfig: { ports, envVars }
     });
     if (res.code === 10200) {
       ElMessage.success("已创建审核记录");
@@ -165,6 +177,22 @@ const submitReview = async () => {
   } catch (err: any) {
     ElMessage.error(err.message || "创建审核记录失败");
   }
+};
+
+const addPort = () => {
+  reviewForm.value.ports.push({ hostPort: null, containerPort: null });
+};
+
+const removePort = (index: number) => {
+  reviewForm.value.ports.splice(index, 1);
+};
+
+const addEnvVar = () => {
+  reviewForm.value.envVars.push({ key: "", value: "" });
+};
+
+const removeEnvVar = (index: number) => {
+  reviewForm.value.envVars.splice(index, 1);
 };
 
 const handleSizeChange = (val: number) => {
@@ -337,6 +365,62 @@ onMounted(() => {
         </el-form-item>
         <el-form-item label="摘要">
           <el-input v-model="reviewForm.digest" disabled />
+        </el-form-item>
+        <el-form-item label="端口映射">
+          <div class="flex flex-col gap-2 w-full">
+            <div
+              v-for="(port, idx) in reviewForm.ports"
+              :key="idx"
+              class="flex items-center gap-2"
+            >
+              <el-input-number
+                v-model="port.hostPort"
+                :min="1"
+                :max="65535"
+                placeholder="宿主机端口"
+                controls-position="right"
+                class="w-30!"
+              />
+              <span class="text-gray-500">:</span>
+              <el-input-number
+                v-model="port.containerPort"
+                :min="1"
+                :max="65535"
+                placeholder="容器端口"
+                controls-position="right"
+                class="w-30!"
+              />
+              <el-button type="danger" link @click="removePort(idx)">
+                删除
+              </el-button>
+            </div>
+            <el-button type="primary" link @click="addPort">
+              + 添加端口
+            </el-button>
+          </div>
+        </el-form-item>
+        <el-form-item label="环境变量">
+          <div class="flex flex-col gap-2 w-full">
+            <div
+              v-for="(env, idx) in reviewForm.envVars"
+              :key="idx"
+              class="flex items-center gap-2"
+            >
+              <el-input v-model="env.key" placeholder="KEY" class="w-40!" />
+              <span class="text-gray-500">=</span>
+              <el-input
+                v-model="env.value"
+                placeholder="value"
+                class="flex-1!"
+              />
+              <el-button type="danger" link @click="removeEnvVar(idx)">
+                删除
+              </el-button>
+            </div>
+            <el-button type="primary" link @click="addEnvVar">
+              + 添加环境变量
+            </el-button>
+          </div>
         </el-form-item>
         <el-form-item label="备注">
           <el-input

@@ -1,5 +1,20 @@
 import { http } from "@/utils/http";
 
+export interface PortMapping {
+  hostPort: number;
+  containerPort: number;
+}
+
+export interface EnvVar {
+  key: string;
+  value: string;
+}
+
+export interface StartupConfig {
+  ports: PortMapping[];
+  envVars: EnvVar[];
+}
+
 export interface AppReview {
   id: number;
   srcProject: string;
@@ -14,6 +29,7 @@ export interface AppReview {
   reviewerId?: number;
   createTime: string;
   updateTime?: string;
+  startupConfig?: StartupConfig;
 }
 
 export interface AppReviewPageData {
@@ -31,6 +47,7 @@ export interface CreateAppReviewRequest {
   digest?: string;
   artifactId?: number;
   reviewerComment?: string;
+  startupConfig?: StartupConfig;
 }
 
 export interface ReviewActionRequest {

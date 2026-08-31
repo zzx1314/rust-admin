@@ -86,6 +86,23 @@ impl SeaOrmAppReviewRepository {
             .await
     }
 
+    pub async fn find_approved_by_artifact(
+        &self,
+        src_project: &str,
+        repository_name: &str,
+        tag: &str,
+    ) -> Result<Option<Review>, sea_orm::DbErr> {
+        ReviewEntity::find()
+            .filter(ReviewColumn::SrcProject.eq(src_project))
+            .filter(ReviewColumn::RepositoryName.eq(repository_name))
+            .filter(ReviewColumn::Tag.eq(tag))
+            .filter(ReviewColumn::Status.eq("approved"))
+            .filter(ReviewColumn::IsDeleted.eq(0))
+            .order_by(ReviewColumn::CreateTime, order_desc())
+            .one(&*self.conn)
+            .await
+    }
+
     pub async fn find_all_with_page(
         &self,
         query: &ReviewPageQuery,

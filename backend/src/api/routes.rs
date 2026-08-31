@@ -293,6 +293,13 @@ pub fn webhook_routes() -> Router<AppState> {
     )
 }
 
+pub fn deploy_config_routes() -> Router<AppState> {
+    Router::new().route(
+        "/deploy/config",
+        get(app_review_handlers::get_startup_config_handler),
+    )
+}
+
 pub fn create_router(state: AppState) -> Router {
     let api_router = Router::new()
         .merge(auth_routes())
@@ -307,7 +314,8 @@ pub fn create_router(state: AppState) -> Router {
         .merge(sys_log_routes(state.clone()))
         .merge(harbor_routes(state.clone()))
         .merge(app_review_routes(state.clone()))
-        .merge(webhook_routes());
+        .merge(webhook_routes())
+        .merge(deploy_config_routes());
 
     Router::new()
         .nest("/api", api_router)
