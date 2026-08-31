@@ -171,6 +171,7 @@ const submitReview = async () => {
     if (res.code === 10200) {
       ElMessage.success("已创建审核记录");
       reviewDialogVisible.value = false;
+      await fetchArtifacts();
     } else {
       ElMessage.error(res.msg || "创建审核记录失败");
     }
