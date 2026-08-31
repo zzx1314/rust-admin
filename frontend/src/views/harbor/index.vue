@@ -25,16 +25,15 @@ const activeTab = ref<"projects" | "repos" | "members" | "reviews">(
 const drillProject = ref("");
 const drillRepo = ref("");
 
-const showBreadcrumb = computed(
-  () => !!drillProject.value || !!drillRepo.value
-);
+const showBreadcrumb = computed(() => true);
 
 const breadcrumbItems = computed(() => {
   const items = [
     {
       label: "应用管理",
       action: () => {
-        activeTab.value = "projects";
+        activeTab.value =
+          isDeveloper.value && !isAdmin.value ? "repos" : "projects";
         drillProject.value = "";
         drillRepo.value = "";
       }

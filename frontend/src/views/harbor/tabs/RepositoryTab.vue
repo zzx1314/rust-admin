@@ -80,9 +80,10 @@ const fetchProjects = async () => {
             project => project.name === selectedProject.value
           )
         ) {
-          selectedProject.value = "staging-project";
+          selectedProject.value =
+            visibleProjects.value[0]?.name || "staging-project";
         }
-        fetchRepositories();
+        await fetchRepositories();
       }
     }
   } catch (err: any) {
@@ -194,6 +195,8 @@ onMounted(() => {
   harborStore.fetchRegistryUrl();
   if (!props.projectName) {
     fetchProjects();
+  } else {
+    fetchRepositories();
   }
 });
 </script>
