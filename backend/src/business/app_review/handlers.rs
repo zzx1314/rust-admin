@@ -162,7 +162,11 @@ pub async fn get_startup_config_handler(
 ) -> Result<Json<ApiResponse<StartupConfigResponse>>, AppError> {
     let review = state
         .app_review_service
-        .get_approved_by_artifact(&query.src_project, &query.repository_name, &query.tag)
+        .get_approved_by_destination_artifact(
+            &query.src_project,
+            &query.repository_name,
+            &query.tag,
+        )
         .await?;
 
     match review {

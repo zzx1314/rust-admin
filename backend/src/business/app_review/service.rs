@@ -82,6 +82,18 @@ impl AppReviewService {
             .ok_or_else(|| AppError::NotFound(format!("Review with id {} not found", id)))
     }
 
+    pub async fn get_approved_by_destination_artifact(
+        &self,
+        dest_project: &str,
+        repository_name: &str,
+        tag: &str,
+    ) -> Result<Option<Review>, AppError> {
+        self.repo
+            .find_approved_by_destination_artifact(dest_project, repository_name, tag)
+            .await
+            .map_err(AppError::DatabaseErrorSeaOrm)
+    }
+
     pub async fn get_approved_by_artifact(
         &self,
         src_project: &str,

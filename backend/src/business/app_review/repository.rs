@@ -86,6 +86,28 @@ impl SeaOrmAppReviewRepository {
             .await
     }
 
+    pub async fn find_approved_by_destination_artifact(
+        &self,
+        dest_project: &str,
+        repository_name: &str,
+        tag: &str,
+    ) -> Result<Option<Review>, sea_orm::DbErr> {
+        let source_repository_name = repository_name
+            .strip_prefix(&format!("{}/", dest_project))
+            .unwrap_or(repository_name);
+        let source_repository_name = format!("{}/{}", "staging-project", source_repository_name);
+
+        ReviewEntity::find()
+            .filter(ReviewColumn::DestProject.eq(dest_project))
+            .filter(ReviewColumn::RepositoryName.eq(source_repository_name))
+            .filter(ReviewColumn::Tag.eq(tag))
+            .filter(ReviewColumn::Status.eq("approved"))
+            .filter(ReviewColumn::IsDeleted.eq(0))
+            .order_by(ReviewColumn::CreateTime, order_desc())
+            .one(&*self.conn)
+            .await
+    }
+
     pub async fn find_approved_by_artifact(
         &self,
         src_project: &str,
