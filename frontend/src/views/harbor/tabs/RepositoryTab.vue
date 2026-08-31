@@ -11,6 +11,7 @@ import {
   type HarborRepository
 } from "@/api/harbor";
 import { useHarborStoreHook } from "@/store/modules/harbor";
+import { useUserStoreHook } from "@/store/modules/user";
 import PushCommandDialog from "../components/PushCommandDialog.vue";
 
 const props = defineProps<{
@@ -25,7 +26,22 @@ const loading = ref(false);
 const repositories = ref<HarborRepository[]>([]);
 const searchName = ref("");
 const harborStore = useHarborStoreHook();
+const userStore = useUserStoreHook();
 const registryUrl = computed(() => harborStore.registryUrl);
+const isAdmin = computed(() => {
+  const permissions = userStore.permissions ?? [];
+  return (
+    permissions.some(permission => permission.trim() === "110") ||
+    userStore.username?.toLowerCase() === "sysadmin"
+  );
+});
+const visibleProjects = computed(() =>
+  isAdmin.value
+    ? projects.value.filter(project =>
+        ["production-project", "staging-project"].includes(project.name)
+      )
+    : projects.value.filter(project => project.name === "staging-project")
+);
 
 // Push dialog state
 const pushDialogVisible = ref(false);
@@ -60,7 +76,7 @@ const fetchProjects = async () => {
       projects.value = res.data.records || [];
       if (!props.projectName) {
         if (
-          !projects.value.some(
+          !visibleProjects.value.some(
             project => project.name === selectedProject.value
           )
         ) {
@@ -195,9 +211,7 @@ onMounted(() => {
               style="width: 200px"
             >
               <el-option
-                v-for="p in projects.filter(
-                  item => item.name === 'staging-project'
-                )"
+                v-for="p in visibleProjects"
                 :key="p.project_id"
                 :label="p.name"
                 :value="p.name"
