@@ -38,6 +38,14 @@ impl TestDb {
             .await
             .expect("Failed to create app review table");
 
+        let startup_config_sql = std::fs::read_to_string(
+            "/home/zhangzexin/IdeaProjects/rust-admin/backend/migrations/p_sys/6_add_startup_config.sql",
+        )
+        .expect("Failed to read startup config schema SQL file");
+        conn.execute_unprepared(&startup_config_sql)
+            .await
+            .expect("Failed to add startup_config column");
+
         Self { url, path }
     }
 }
@@ -84,6 +92,7 @@ fn create_request(tag: &str, digest: Option<&str>) -> CreateReviewRequest {
         digest: digest.map(|d| d.to_string()),
         artifact_id: None,
         reviewer_comment: None,
+        startup_config: None,
     }
 }
 

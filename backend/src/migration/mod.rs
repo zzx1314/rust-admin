@@ -284,6 +284,7 @@ mod tests {
                 "add_sys_logrecord",
                 "add_user_is_edit",
                 "add_app_review",
+                "add_startup_config",
             ]
         );
         assert_eq!(migrations[0].name(), "p_sys_tables_from_file");
