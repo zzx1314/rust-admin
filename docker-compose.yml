@@ -6,6 +6,8 @@ services:
     restart: unless-stopped
     volumes:
       - redis-data:/data
+    networks:
+      - rust-admin-net
 
   backend:
     build:
@@ -28,6 +30,8 @@ services:
       - backend-data:/app/data
     ports:
       - "${BACKEND_PORT:-3000}:3000"
+    networks:
+      - rust-admin-net
 
   frontend:
     build:
@@ -40,6 +44,16 @@ services:
     ports:
       - "${FRONTEND_PORT:-3003}:80"
     restart: unless-stopped
+    networks:
+      - rust-admin-net
+
+networks:
+  # 显式指定子网，避免 Docker 自动分配与局域网(如 192.168.1.x)冲突的网段
+  rust-admin-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${DOCKER_NETWORK_SUBNET:-10.10.0.0/16}
 
 volumes:
   backend-data:
