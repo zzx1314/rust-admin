@@ -195,12 +195,12 @@ impl AuthService {
             .find_by_username(username)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?
-            .ok_or_else(|| AppError::Unauthorized("Invalid username or password".to_string()))?;
+            .ok_or_else(|| AppError::Unauthorized("用户名或密码错误".to_string()))?;
 
         let password_hash = user
             .password
             .as_ref()
-            .ok_or_else(|| AppError::Unauthorized("Invalid username or password".to_string()))?;
+            .ok_or_else(|| AppError::Unauthorized("用户名或密码错误".to_string()))?;
 
         let valid = md5_verify(password, password_hash);
 
@@ -215,7 +215,7 @@ impl AuthService {
 
         if !valid {
             return Err(AppError::Unauthorized(
-                "Invalid username or password".to_string(),
+                "用户名或密码错误".to_string(),
             ));
         }
 
@@ -273,12 +273,12 @@ impl AuthService {
             .find_by_username(username)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?
-            .ok_or_else(|| AppError::Unauthorized("Invalid username or password".to_string()))?;
+            .ok_or_else(|| AppError::Unauthorized("用户名或密码错误".to_string()))?;
 
         let password_hash = user
             .password
             .as_ref()
-            .ok_or_else(|| AppError::Unauthorized("Invalid username or password".to_string()))?;
+            .ok_or_else(|| AppError::Unauthorized("用户名或密码错误".to_string()))?;
 
         let valid = md5_verify(password, password_hash);
 
@@ -293,7 +293,7 @@ impl AuthService {
 
         if !valid {
             return Err(AppError::Unauthorized(
-                "Invalid username or password".to_string(),
+                "用户名或密码错误".to_string(),
             ));
         }
 

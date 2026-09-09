@@ -120,7 +120,11 @@ class PureHttp {
         if (config.skipAuthRefresh) {
           return Promise.reject(error);
         }
-        const needRefresh = response.status === 401 && !config._retry;
+
+        /** 登录/注册等接口的 401 不走 token 刷新逻辑，直接走下面的错误提示 */
+        const isLoginRequest = config.url?.includes("/token");
+        const needRefresh =
+          response.status === 401 && !config._retry && !isLoginRequest;
 
         if (needRefresh && !config._retry) {
           config._retry = true;
@@ -177,8 +181,11 @@ class PureHttp {
           message("系统错误", { type: "error" });
         }
 
-        // 只在 401 未授权时登出，其他错误不断开登录
-        if (response.status === 401 || response.status === 424) {
+        // 只在 401 未授权且非登录请求时登出，避免密码错误时触发无意义的登出
+        if (
+          (response.status === 401 || response.status === 424) &&
+          !isLoginRequest
+        ) {
           useUserStoreHook().logOut();
         }
         return Promise.reject(error);

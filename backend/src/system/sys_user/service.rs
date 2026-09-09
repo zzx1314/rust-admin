@@ -186,7 +186,7 @@ impl UserService {
             .find_by_username(username)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?
-            .ok_or_else(|| AppError::Unauthorized("Invalid username or password".to_string()))
+            .ok_or_else(|| AppError::Unauthorized("用户名或密码错误".to_string()))
     }
 
     pub async fn update_password(
@@ -206,7 +206,7 @@ impl UserService {
             && !crate::common::util::md5_verify(old_pwd, password_hash)
         {
             return Err(AppError::BadRequest(
-                "Old password is incorrect".to_string(),
+                "旧密码不正确".to_string(),
             ));
         }
 
