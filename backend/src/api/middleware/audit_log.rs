@@ -1,6 +1,7 @@
-use axum::{body::Body, extract::Request, middleware::Next, response::Response};
+use axum::{body::Body, extract::{ConnectInfo, Request}, middleware::Next, response::Response};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use std::net::SocketAddr;
 
 use crate::api::AppState;
 use crate::api::middleware::RequestUser;
@@ -308,6 +309,28 @@ async fn load_existing_record(
     }
 }
 
+/// Resolve the client IP: proxy headers first (x-real-ip, then the leftmost
+/// entry of x-forwarded-for), falling back to the actual TCP peer address
+/// injected by `into_make_service_with_connect_info`.
+fn client_ip(request: &Request) -> Option<String> {
+    let headers = request.headers();
+    let from_header = headers
+        .get("x-real-ip")
+        .or_else(|| headers.get("x-forwarded-for"))
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(String::from);
+
+    from_header.or_else(|| {
+        request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0.ip().to_string())
+    })
+}
+
 pub async fn audit_log_middleware(
     state: axum::extract::State<AppState>,
     mut request: Request,
@@ -316,11 +339,7 @@ pub async fn audit_log_middleware(
     let method = request.method().to_string();
     let uri = request.uri().path().to_string();
     let query = request.uri().query().map(String::from);
-    let ip = request
-        .headers()
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from);
+    let ip = client_ip(&request);
 
     let header_operator = request
         .headers()
@@ -330,7 +349,7 @@ pub async fn audit_log_middleware(
         .and_then(|v| v.strip_prefix("Bearer "))
         .and_then(|token| state.auth_service.extract_username(token));
 
-    if method == "GET" {
+    if method == "GET" || method == "OPTIONS" {
         return next.run(request).await;
     }
 
@@ -360,6 +379,12 @@ pub async fn audit_log_middleware(
 
     let response = next.run(request).await;
     let status = response.status().as_u16();
+
+    // Skip requests that matched no route (404) — scanner/bot noise, not an auditable action.
+    if status == 404 {
+        return response;
+    }
+
     let fail = status >= 400;
 
     let after = if !fail && operation == Some(ChangeAction::Update) {
@@ -464,5 +489,45 @@ mod tests {
 
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0]["field"], "parentId");
+    }
+
+    fn request_with_headers(headers: &[(&str, &str)]) -> Request {
+        let mut builder = Request::builder();
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    #[test]
+    fn client_ip_prefers_x_real_ip() {
+        let request = request_with_headers(&[
+            ("x-real-ip", "10.0.0.1"),
+            ("x-forwarded-for", "10.0.0.2, 10.0.0.3"),
+        ]);
+        assert_eq!(client_ip(&request).as_deref(), Some("10.0.0.1"));
+    }
+
+    #[test]
+    fn client_ip_uses_leftmost_x_forwarded_for() {
+        let request =
+            request_with_headers(&[("x-forwarded-for", "10.0.0.2, 10.0.0.3")]);
+        assert_eq!(client_ip(&request).as_deref(), Some("10.0.0.2"));
+    }
+
+    #[test]
+    fn client_ip_falls_back_to_connect_info() {
+        let mut request = request_with_headers(&[]);
+        let addr: SocketAddr = "192.168.1.5:8000".parse().unwrap();
+        request.extensions_mut().insert(ConnectInfo(addr));
+        assert_eq!(client_ip(&request).as_deref(), Some("192.168.1.5"));
+    }
+
+    #[test]
+    fn client_ip_empty_header_falls_back_to_connect_info() {
+        let mut request = request_with_headers(&[("x-real-ip", "")]);
+        let addr: SocketAddr = "192.168.1.6:8000".parse().unwrap();
+        request.extensions_mut().insert(ConnectInfo(addr));
+        assert_eq!(client_ip(&request).as_deref(), Some("192.168.1.6"));
     }
 }

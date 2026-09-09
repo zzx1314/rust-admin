@@ -29,6 +29,8 @@ export default ({ mode }: ConfigEnv): UserConfigExport => {
           // 这里填写后端地址
           target: "http://127.0.0.1:3000",
           changeOrigin: true,
+          // 转发客户端真实 IP（X-Forwarded-For），供后端审计日志记录
+          xfwd: true,
           ws: true
         }
       },

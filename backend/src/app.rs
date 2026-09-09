@@ -195,7 +195,14 @@ impl App {
             .expect("Failed to create tokio listener");
 
         tracing::info!("Server running on http://{}", addr);
-        axum::serve(listener, router).await.expect("Server failed");
+        // into_make_service_with_connect_info injects the TCP peer address as a
+        // request extension, so middleware (e.g. audit log) can log the real client IP.
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .expect("Server failed");
 
         Ok(())
     }
