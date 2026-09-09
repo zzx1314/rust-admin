@@ -1,5 +1,6 @@
 import { onMounted, onUnmounted, ref } from "vue";
 import { getSafePolicy } from "@/api/system";
+import { getToken } from "@/utils/auth";
 import { useUserStoreHook } from "@/store/modules/user";
 import { message } from "@/utils/message";
 import { SUCCESS } from "@/api/base";
@@ -56,7 +57,6 @@ export function useSessionTimeout() {
   };
 
   onMounted(async () => {
-    const { getToken } = await import("@/utils/auth");
     const tokenData = getToken();
     if (!tokenData) return;
 
