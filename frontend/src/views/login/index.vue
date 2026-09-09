@@ -76,19 +76,19 @@ const onLogin = async (formEl: FormInstance | undefined) => {
               disabled.value = true;
               await nextTick();
               await new Promise(resolve => setTimeout(resolve, 0));
-              console.log("跳转路由", getTopMenu(true).path);
-              console.log("路由", router.getRoutes());
               router
                 .push(getTopMenu(true).path)
                 .then(() => {
                   message(t("login.pureLoginSuccess"), { type: "success" });
                 })
                 .finally(() => (disabled.value = false));
-              console.log("跳转成功");
             });
           } else {
             message(t("login.pureLoginFail"), { type: "error" });
           }
+        })
+        .catch(() => {
+          // 错误消息已由 HTTP 拦截器统一展示，此处仅阻止未处理的 promise rejection
         })
         .finally(() => (loading.value = false));
     }

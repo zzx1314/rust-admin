@@ -5,6 +5,7 @@ use crate::system::sys_dict_item::domain::{
     CreateSysDictItemRequest, SysDictItem, SysDictItemPageQuery, SysDictItemVO,
     UpdateSysDictItemRequest,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub struct SysDictItemService {
@@ -111,9 +112,7 @@ impl SysDictItemService {
         Ok(())
     }
 
-    pub async fn get_safe_policy(
-        &self,
-    ) -> Result<std::collections::HashMap<String, String>, AppError> {
+    pub async fn get_safe_policy(&self) -> Result<HashMap<String, String>, AppError> {
         let dict = self
             .dict_repo
             .find_by_type("sys_security_policy")
@@ -127,17 +126,52 @@ impl SysDictItemService {
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
-        let mut result = std::collections::HashMap::new();
+        let mut result = HashMap::new();
         for item in items {
             let value = item.value.unwrap_or_default();
-            if item.r#type == "sysOvertime" {
-                let parsed: i64 = value.parse().unwrap_or(0);
-                result.insert(item.r#type, (parsed + 1).to_string());
-            } else {
-                result.insert(item.r#type, value);
-            }
+            result.insert(item.r#type, value);
         }
         Ok(result)
+    }
+
+    pub async fn update_safe_policy(
+        &self,
+        policy: &HashMap<String, String>,
+    ) -> Result<(), AppError> {
+        let dict = self
+            .dict_repo
+            .find_by_type("sys_security_policy")
+            .await
+            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .ok_or_else(|| AppError::NotFound("sys_security_policy dict not found".to_string()))?;
+
+        let items = self
+            .dict_item_repo
+            .find_by_dict_id(&dict.id)
+            .await
+            .map_err(AppError::DatabaseErrorSeaOrm)?;
+
+        for item in items {
+            if let Some(new_value) = policy.get(&item.r#type) {
+                let _ = self
+                    .dict_item_repo
+                    .update(
+                        &item.id,
+                        &UpdateSysDictItemRequest {
+                            r#type: None,
+                            label: None,
+                            dict_id: None,
+                            value: Some(new_value.clone()),
+                            sort: None,
+                            description: None,
+                            remarks: None,
+                            allow_deletion: None,
+                        },
+                    )
+                    .await;
+            }
+        }
+        Ok(())
     }
 
     async fn generate_id(&self) -> i64 {

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::error::AppError;
 use crate::common::traits::{RoleRepository, TokenStore, UserRepository};
+use crate::system::sys_dict_item::service::SysDictItemService;
 use crate::system::sys_user::domain::User;
 
 const ACCESS_TOKEN_TTL_SECS: u64 = 24 * 60 * 60;
@@ -172,6 +173,7 @@ pub struct AuthService {
     token_store: Arc<dyn TokenStore>,
     role_repo: Arc<dyn RoleRepository>,
     jwt_secret: String,
+    dict_item_service: Arc<SysDictItemService>,
 }
 
 impl AuthService {
@@ -180,13 +182,46 @@ impl AuthService {
         token_store: Arc<dyn TokenStore>,
         role_repo: Arc<dyn RoleRepository>,
         jwt_secret: &str,
+        dict_item_service: Arc<SysDictItemService>,
     ) -> Self {
         Self {
             user_repo,
             token_store,
             role_repo,
             jwt_secret: jwt_secret.to_string(),
+            dict_item_service,
         }
+    }
+
+    async fn get_max_try_count(&self) -> i32 {
+        if let Ok(policy) = self.dict_item_service.get_safe_policy().await
+            && let Some(val) = policy.get("sysLoginMaxTryCount")
+            && let Ok(num) = val.trim_end_matches('次').parse::<i32>()
+        {
+            return num;
+        }
+        5
+    }
+
+    async fn get_max_lock_time_mins(&self) -> i64 {
+        if let Ok(policy) = self.dict_item_service.get_safe_policy().await
+            && let Some(val) = policy.get("sysLoginMaxLockTime")
+            && let Ok(num) = val.trim_end_matches("分钟").parse::<i64>()
+        {
+            return num;
+        }
+        5
+    }
+
+    async fn get_session_timeout_secs(&self) -> u64 {
+        if let Ok(policy) = self.dict_item_service.get_safe_policy().await
+            && let Some(val) = policy.get("sysOvertime")
+            && let Ok(num) = val.parse::<u64>()
+            && num > 0
+        {
+            return num;
+        }
+        24 * 60 * 60
     }
 
     pub async fn login(&self, username: &str, password: &str) -> Result<LoginResponse, AppError> {
@@ -196,6 +231,43 @@ impl AuthService {
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?
             .ok_or_else(|| AppError::Unauthorized("用户名或密码错误".to_string()))?;
+
+        if user.lock_flag == Some(0) {
+            let max_lock_mins = self.get_max_lock_time_mins().await;
+            if let Some(lock_time) = user.lock_time {
+                let lock_duration = chrono::Utc::now() - lock_time;
+                if lock_duration < chrono::Duration::minutes(max_lock_mins) {
+                    let remaining = max_lock_mins - lock_duration.num_minutes();
+                    return Err(AppError::Unauthorized(
+                        format!("账户已被锁定，请{}分钟后再试", remaining.max(1)),
+                    ));
+                }
+                let _ = self
+                    .user_repo
+                    .update(
+                        &user.id,
+                        &crate::system::sys_user::domain::UpdateUserRequest {
+                            username: None,
+                            phone: None,
+                            email: None,
+                            real_name: None,
+                            password: None,
+                            org_id: None,
+                            remarks: None,
+                            card: None,
+                            is_show: None,
+                            enable: None,
+                            sex: None,
+                            try_count: Some(0),
+                            lock_flag: Some(1),
+                            lock_time: None,
+                            last_login_time: None,
+                            role: None,
+                        },
+                    )
+                    .await;
+            }
+        }
 
         let password_hash = user
             .password
@@ -214,17 +286,109 @@ impl AuthService {
         );
 
         if !valid {
-            return Err(AppError::Unauthorized(
-                "用户名或密码错误".to_string(),
-            ));
+            let current_count = user.try_count.unwrap_or(0) + 1;
+            let max_count = self.get_max_try_count().await;
+
+            if current_count >= max_count {
+                let _ = self
+                    .user_repo
+                    .update(
+                        &user.id,
+                        &crate::system::sys_user::domain::UpdateUserRequest {
+                            username: None,
+                            phone: None,
+                            email: None,
+                            real_name: None,
+                            password: None,
+                            org_id: None,
+                            remarks: None,
+                            card: None,
+                            is_show: None,
+                            enable: None,
+                            sex: None,
+                            try_count: Some(current_count),
+                            lock_flag: Some(0),
+                            lock_time: Some(chrono::Utc::now()),
+                            last_login_time: None,
+                            role: None,
+                        },
+                    )
+                    .await;
+                tracing::warn!(
+                    username = %username,
+                    user_id = user.id,
+                    "Account locked after {} failed attempts",
+                    current_count
+                );
+                return Err(AppError::Unauthorized(format!(
+                    "密码错误{}次，账户已被锁定，请{}分钟后再试",
+                    current_count,
+                    self.get_max_lock_time_mins().await
+                )));
+            } else {
+                let _ = self
+                    .user_repo
+                    .update(
+                        &user.id,
+                        &crate::system::sys_user::domain::UpdateUserRequest {
+                            username: None,
+                            phone: None,
+                            email: None,
+                            real_name: None,
+                            password: None,
+                            org_id: None,
+                            remarks: None,
+                            card: None,
+                            is_show: None,
+                            enable: None,
+                            sex: None,
+                            try_count: Some(current_count),
+                            lock_flag: None,
+                            lock_time: None,
+                            last_login_time: None,
+                            role: None,
+                        },
+                    )
+                    .await;
+                return Err(AppError::Unauthorized(format!(
+                    "用户名或密码错误，还可重试{}次",
+                    max_count - current_count
+                )));
+            }
         }
+
+        let _ = self
+            .user_repo
+            .update(
+                &user.id,
+                &crate::system::sys_user::domain::UpdateUserRequest {
+                    username: None,
+                    phone: None,
+                    email: None,
+                    real_name: None,
+                    password: None,
+                    org_id: None,
+                    remarks: None,
+                    card: None,
+                    is_show: None,
+                    enable: None,
+                    sex: None,
+                    try_count: Some(0),
+                    lock_flag: Some(1),
+                    lock_time: None,
+                    last_login_time: Some(chrono::Utc::now()),
+                    role: None,
+                },
+            )
+            .await;
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
 
-        let access_exp = now + ACCESS_TOKEN_TTL_SECS;
+        let session_timeout = self.get_session_timeout_secs().await;
+        let access_exp = now + session_timeout;
         let refresh_exp = now + REFRESH_TOKEN_TTL_SECS;
 
         let user_id = user.id;
@@ -252,7 +416,7 @@ impl AuthService {
             .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
 
         self.token_store
-            .set_token(&user_id_str, &access_token, ACCESS_TOKEN_TTL_SECS)
+            .set_token(&user_id_str, &access_token, session_timeout)
             .await?;
 
         Ok(LoginResponse {
@@ -275,6 +439,43 @@ impl AuthService {
             .map_err(AppError::DatabaseErrorSeaOrm)?
             .ok_or_else(|| AppError::Unauthorized("用户名或密码错误".to_string()))?;
 
+        if user.lock_flag == Some(0) {
+            let max_lock_mins = self.get_max_lock_time_mins().await;
+            if let Some(lock_time) = user.lock_time {
+                let lock_duration = chrono::Utc::now() - lock_time;
+                if lock_duration < chrono::Duration::minutes(max_lock_mins) {
+                    let remaining = max_lock_mins - lock_duration.num_minutes();
+                    return Err(AppError::Unauthorized(
+                        format!("账户已被锁定，请{}分钟后再试", remaining.max(1)),
+                    ));
+                }
+                let _ = self
+                    .user_repo
+                    .update(
+                        &user.id,
+                        &crate::system::sys_user::domain::UpdateUserRequest {
+                            username: None,
+                            phone: None,
+                            email: None,
+                            real_name: None,
+                            password: None,
+                            org_id: None,
+                            remarks: None,
+                            card: None,
+                            is_show: None,
+                            enable: None,
+                            sex: None,
+                            try_count: Some(0),
+                            lock_flag: Some(1),
+                            lock_time: None,
+                            last_login_time: None,
+                            role: None,
+                        },
+                    )
+                    .await;
+            }
+        }
+
         let password_hash = user
             .password
             .as_ref()
@@ -292,17 +493,109 @@ impl AuthService {
         );
 
         if !valid {
-            return Err(AppError::Unauthorized(
-                "用户名或密码错误".to_string(),
-            ));
+            let current_count = user.try_count.unwrap_or(0) + 1;
+            let max_count = self.get_max_try_count().await;
+
+            if current_count >= max_count {
+                let _ = self
+                    .user_repo
+                    .update(
+                        &user.id,
+                        &crate::system::sys_user::domain::UpdateUserRequest {
+                            username: None,
+                            phone: None,
+                            email: None,
+                            real_name: None,
+                            password: None,
+                            org_id: None,
+                            remarks: None,
+                            card: None,
+                            is_show: None,
+                            enable: None,
+                            sex: None,
+                            try_count: Some(current_count),
+                            lock_flag: Some(0),
+                            lock_time: Some(chrono::Utc::now()),
+                            last_login_time: None,
+                            role: None,
+                        },
+                    )
+                    .await;
+                tracing::warn!(
+                    username = %username,
+                    user_id = user.id,
+                    "Account locked after {} failed attempts",
+                    current_count
+                );
+                return Err(AppError::Unauthorized(format!(
+                    "密码错误{}次，账户已被锁定，请{}分钟后再试",
+                    current_count,
+                    self.get_max_lock_time_mins().await
+                )));
+            } else {
+                let _ = self
+                    .user_repo
+                    .update(
+                        &user.id,
+                        &crate::system::sys_user::domain::UpdateUserRequest {
+                            username: None,
+                            phone: None,
+                            email: None,
+                            real_name: None,
+                            password: None,
+                            org_id: None,
+                            remarks: None,
+                            card: None,
+                            is_show: None,
+                            enable: None,
+                            sex: None,
+                            try_count: Some(current_count),
+                            lock_flag: None,
+                            lock_time: None,
+                            last_login_time: None,
+                            role: None,
+                        },
+                    )
+                    .await;
+                return Err(AppError::Unauthorized(format!(
+                    "用户名或密码错误，还可重试{}次",
+                    max_count - current_count
+                )));
+            }
         }
+
+        let _ = self
+            .user_repo
+            .update(
+                &user.id,
+                &crate::system::sys_user::domain::UpdateUserRequest {
+                    username: None,
+                    phone: None,
+                    email: None,
+                    real_name: None,
+                    password: None,
+                    org_id: None,
+                    remarks: None,
+                    card: None,
+                    is_show: None,
+                    enable: None,
+                    sex: None,
+                    try_count: Some(0),
+                    lock_flag: Some(1),
+                    lock_time: None,
+                    last_login_time: Some(chrono::Utc::now()),
+                    role: None,
+                },
+            )
+            .await;
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
 
-        let access_exp = now + ACCESS_TOKEN_TTL_SECS;
+        let session_timeout = self.get_session_timeout_secs().await;
+        let access_exp = now + session_timeout;
         let refresh_exp = now + REFRESH_TOKEN_TTL_SECS;
 
         let user_id = user.id;
@@ -330,7 +623,7 @@ impl AuthService {
             .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
 
         self.token_store
-            .set_token(&user_id_str, &access_token, ACCESS_TOKEN_TTL_SECS)
+            .set_token(&user_id_str, &access_token, session_timeout)
             .await?;
 
         let roles = self.get_user_roles(&user_id).await?;

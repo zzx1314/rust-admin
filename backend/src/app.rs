@@ -68,20 +68,6 @@ impl App {
             org_repo.clone(),
         ));
 
-        let redis_url = config.redis.url();
-        let token_store: Arc<dyn TokenStore> = Arc::new(RedisTokenStore::new(&redis_url));
-        let auth_service = Arc::new(AuthService::new(
-            user_repo,
-            token_store,
-            role_repo.clone(),
-            &config.jwt_secret,
-        ));
-
-        let menu_repo: Arc<dyn MenuRepository> = Arc::new(SeaOrmMenuRepository::new(conn.clone()));
-        let menu_service = Arc::new(MenuService::new(menu_repo.clone(), role_repo.clone()));
-
-        let sys_auth_service = Arc::new(SysAuthService::new(menu_repo, role_repo.clone()));
-
         let sys_dict_repo: Arc<dyn SysDictRepository> =
             Arc::new(SeaOrmSysDictRepository::new(conn.clone()));
         let sys_dict_service = Arc::new(SysDictService::new(sys_dict_repo.clone()));
@@ -92,6 +78,21 @@ impl App {
             sys_dict_item_repo,
             sys_dict_repo.clone(),
         ));
+
+        let redis_url = config.redis.url();
+        let token_store: Arc<dyn TokenStore> = Arc::new(RedisTokenStore::new(&redis_url));
+        let auth_service = Arc::new(AuthService::new(
+            user_repo,
+            token_store,
+            role_repo.clone(),
+            &config.jwt_secret,
+            sys_dict_item_service.clone(),
+        ));
+
+        let menu_repo: Arc<dyn MenuRepository> = Arc::new(SeaOrmMenuRepository::new(conn.clone()));
+        let menu_service = Arc::new(MenuService::new(menu_repo.clone(), role_repo.clone()));
+
+        let sys_auth_service = Arc::new(SysAuthService::new(menu_repo, role_repo.clone()));
 
         let sys_log_repo: Arc<dyn SysLogRepository> =
             Arc::new(SeaOrmSysLogRepository::new(conn.clone()));

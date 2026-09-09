@@ -66,7 +66,8 @@ export function useSysSeting() {
   const addFormInfo = (formRef?: FormInstance) => {
     formRef?.validate(valid => {
       if (!valid) return;
-      updateSafePolicy(addForm.value).then(res => {
+      const { type: _, ...policyData } = addForm.value;
+      updateSafePolicy(policyData).then(res => {
         if (res.code === SUCCESS) {
           ElMessage.success("保存成功，新的配置将会在下次登录生效！");
         } else {

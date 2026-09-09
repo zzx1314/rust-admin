@@ -39,6 +39,14 @@ pub struct UpdateUserRequest {
     pub is_show: Option<i32>,
     pub enable: Option<i32>,
     pub sex: Option<String>,
+    #[serde(skip_deserializing)]
+    pub try_count: Option<i32>,
+    #[serde(skip_deserializing)]
+    pub lock_flag: Option<i32>,
+    #[serde(skip_deserializing)]
+    pub lock_time: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_deserializing)]
+    pub last_login_time: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]
     pub role: Option<i64>,
 }
@@ -182,6 +190,22 @@ impl UpdateUserRequest {
             is_show: set_opt_i32(self.is_show),
             enable: set_opt_i32(self.enable),
             sex: set_opt_string(self.sex.clone()),
+            try_count: match self.try_count {
+                Some(v) => ActiveValue::set(Some(v)),
+                None => ActiveValue::not_set(),
+            },
+            lock_flag: match self.lock_flag {
+                Some(v) => ActiveValue::set(Some(v)),
+                None => ActiveValue::not_set(),
+            },
+            lock_time: match self.lock_time {
+                Some(v) => ActiveValue::set(Some(v)),
+                None => ActiveValue::not_set(),
+            },
+            last_login_time: match self.last_login_time {
+                Some(v) => ActiveValue::set(Some(v)),
+                None => ActiveValue::not_set(),
+            },
             update_time: ActiveValue::set(now),
             is_deleted: ActiveValue::unchanged(0),
             ..Default::default()

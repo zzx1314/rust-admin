@@ -279,6 +279,10 @@ async fn test_user_repo_update() {
         is_show: None,
         enable: None,
         sex: None,
+        try_count: None,
+        lock_flag: None,
+        lock_time: None,
+        last_login_time: None,
         role: None,
     };
 
@@ -305,6 +309,10 @@ async fn test_user_repo_update_not_found() {
         is_show: None,
         enable: None,
         sex: None,
+        try_count: None,
+        lock_flag: None,
+        lock_time: None,
+        last_login_time: None,
         role: None,
     };
 

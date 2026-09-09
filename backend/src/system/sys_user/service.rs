@@ -226,6 +226,10 @@ impl UserService {
             is_show: None,
             enable: None,
             sex: None,
+            try_count: None,
+            lock_flag: None,
+            lock_time: None,
+            last_login_time: None,
             role: None,
         };
 
@@ -261,6 +265,10 @@ impl UserService {
             is_show: None,
             enable: None,
             sex: None,
+            try_count: None,
+            lock_flag: None,
+            lock_time: None,
+            last_login_time: None,
             role: None,
         };
         self.user_repo
@@ -283,6 +291,10 @@ impl UserService {
             is_show: None,
             enable: Some(enable),
             sex: None,
+            try_count: None,
+            lock_flag: None,
+            lock_time: None,
+            last_login_time: None,
             role: None,
         };
         self.user_repo

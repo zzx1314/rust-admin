@@ -21,6 +21,7 @@ use crate::system::sys_dict_item::handlers::{
     create_dict_item_handler, delete_dict_item_handler, get_all_dict_items_handler,
     get_dict_item_handler, get_dict_items_by_dict_id_handler, get_dict_items_by_type_handler,
     get_dict_items_page_handler, get_safe_policy_handler, update_dict_item_handler,
+    update_safe_policy_handler,
 };
 use crate::system::sys_log::handlers::{
     create_log_handler, delete_log_handler, get_all_logs_handler, get_log_handler,
@@ -197,6 +198,10 @@ pub fn sys_dict_item_routes(state: AppState) -> Router<AppState> {
             get(get_dict_items_by_type_handler),
         )
         .route("/sysDict/getSafePolicy", get(get_safe_policy_handler))
+        .route(
+            "/sysDictItem/updateSafePolicy",
+            put(update_safe_policy_handler),
+        )
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 

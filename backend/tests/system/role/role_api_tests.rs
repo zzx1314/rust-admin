@@ -260,12 +260,6 @@ async fn create_test_app() -> (axum::Router, TestDb) {
     ));
     let role_service = Arc::new(RoleService::new(role_repo.clone()));
     let token_store: Arc<dyn TokenStore> = Arc::new(FakeTokenStore::new());
-    let auth_service = Arc::new(AuthService::new(
-        user_repo,
-        token_store,
-        role_repo.clone(),
-        "test-secret",
-    ));
     let menu_repo: Arc<dyn MenuRepository> = Arc::new(SeaOrmMenuRepository::new(conn.clone()));
     let menu_service = Arc::new(MenuService::new(menu_repo.clone(), role_repo.clone()));
     let sys_auth_service = Arc::new(SysAuthService::new(menu_repo, role_repo.clone()));
@@ -275,7 +269,14 @@ async fn create_test_app() -> (axum::Router, TestDb) {
     let sys_dict_item_repo: Arc<dyn SysDictItemRepository> =
         Arc::new(SeaOrmSysDictItemRepository::new(conn.clone()));
     let sys_dict_item_service =
-        Arc::new(SysDictItemService::new(sys_dict_item_repo, sys_dict_repo));
+        Arc::new(SysDictItemService::new(sys_dict_item_repo, sys_dict_repo.clone()));
+    let auth_service = Arc::new(AuthService::new(
+        user_repo,
+        token_store,
+        role_repo.clone(),
+        "test-secret",
+        sys_dict_item_service.clone(),
+    ));
     let sys_log_repo: Arc<dyn SysLogRepository> =
         Arc::new(SeaOrmSysLogRepository::new(conn.clone()));
     let sys_log_service = Arc::new(SysLogService::new(sys_log_repo));

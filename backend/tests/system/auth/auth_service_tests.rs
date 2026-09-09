@@ -3,10 +3,19 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use x_rust::common::error::AppError;
 use x_rust::common::traits::{
-    DynFuture, RoleRepository, SeaOrmOptResult, SeaOrmResult, TokenStore, UserRepository,
+    DynFuture, RoleRepository, SeaOrmOptResult, SeaOrmResult, SysDictItemRepository,
+    SysDictRepository, TokenStore, UserRepository,
 };
 use x_rust::common::util::md5_encrypt;
 use x_rust::system::auth::service::AuthService;
+use x_rust::system::sys_dict::domain::{
+    CreateSysDictRequest, SysDict, SysDictPageQuery, SysDictVO, UpdateSysDictRequest,
+};
+use x_rust::system::sys_dict_item::domain::{
+    CreateSysDictItemRequest, SysDictItem, SysDictItemPageQuery, SysDictItemVO,
+    UpdateSysDictItemRequest,
+};
+use x_rust::system::sys_dict_item::service::SysDictItemService;
 use x_rust::system::sys_role::domain::{CreateRoleRequest, Role, RolePageQuery, UpdateRoleRequest};
 use x_rust::system::sys_user::domain::{CreateUserRequest, User, UserPageQuery, UserVO};
 
@@ -265,6 +274,83 @@ impl RoleRepository for FakeRoleRepository {
     }
 }
 
+struct FakeSysDictRepository;
+
+impl SysDictRepository for FakeSysDictRepository {
+    fn create(
+        &self,
+        _req: &CreateSysDictRequest,
+        _id: &i64,
+    ) -> DynFuture<SeaOrmResult<SysDict>> {
+        Box::pin(async move { unimplemented!() })
+    }
+    fn find_by_id(&self, _id: &i64) -> DynFuture<SeaOrmOptResult<SysDict>> {
+        Box::pin(async move { Ok(None) })
+    }
+    fn find_by_type(&self, _type: &str) -> DynFuture<SeaOrmOptResult<SysDict>> {
+        Box::pin(async move { Ok(None) })
+    }
+    fn find_all(&self) -> DynFuture<SeaOrmResult<Vec<SysDict>>> {
+        Box::pin(async move { Ok(Vec::new()) })
+    }
+    fn find_all_with_page(
+        &self,
+        _query: &SysDictPageQuery,
+    ) -> DynFuture<SeaOrmResult<(Vec<SysDictVO>, i64)>> {
+        Box::pin(async move { Ok((Vec::new(), 0)) })
+    }
+    fn update(
+        &self,
+        _id: &i64,
+        _req: &UpdateSysDictRequest,
+    ) -> DynFuture<SeaOrmOptResult<SysDict>> {
+        Box::pin(async move { Ok(None) })
+    }
+    fn delete(&self, _id: &i64) -> DynFuture<SeaOrmResult<bool>> {
+        Box::pin(async move { Ok(false) })
+    }
+}
+
+struct FakeSysDictItemRepository;
+
+impl SysDictItemRepository for FakeSysDictItemRepository {
+    fn create(
+        &self,
+        _req: &CreateSysDictItemRequest,
+        _id: &i64,
+    ) -> DynFuture<SeaOrmResult<SysDictItem>> {
+        Box::pin(async move { unimplemented!() })
+    }
+    fn find_by_id(&self, _id: &i64) -> DynFuture<SeaOrmOptResult<SysDictItem>> {
+        Box::pin(async move { Ok(None) })
+    }
+    fn find_all(&self) -> DynFuture<SeaOrmResult<Vec<SysDictItem>>> {
+        Box::pin(async move { Ok(Vec::new()) })
+    }
+    fn find_by_dict_id(&self, _dict_id: &i64) -> DynFuture<SeaOrmResult<Vec<SysDictItem>>> {
+        Box::pin(async move { Ok(Vec::new()) })
+    }
+    fn find_by_type(&self, _type: &str) -> DynFuture<SeaOrmResult<Vec<SysDictItem>>> {
+        Box::pin(async move { Ok(Vec::new()) })
+    }
+    fn find_all_with_page(
+        &self,
+        _query: &SysDictItemPageQuery,
+    ) -> DynFuture<SeaOrmResult<(Vec<SysDictItemVO>, i64)>> {
+        Box::pin(async move { Ok((Vec::new(), 0)) })
+    }
+    fn update(
+        &self,
+        _id: &i64,
+        _req: &UpdateSysDictItemRequest,
+    ) -> DynFuture<SeaOrmOptResult<SysDictItem>> {
+        Box::pin(async move { Ok(None) })
+    }
+    fn delete(&self, _id: &i64) -> DynFuture<SeaOrmResult<bool>> {
+        Box::pin(async move { Ok(false) })
+    }
+}
+
 // ==================== Helper ====================
 
 fn create_auth_service(
@@ -272,7 +358,10 @@ fn create_auth_service(
     token_store: Arc<dyn TokenStore>,
 ) -> AuthService {
     let role_repo = Arc::new(FakeRoleRepository);
-    AuthService::new(user_repo, token_store, role_repo, "test-secret")
+    let dict_repo: Arc<dyn SysDictRepository> = Arc::new(FakeSysDictRepository);
+    let dict_item_repo: Arc<dyn SysDictItemRepository> = Arc::new(FakeSysDictItemRepository);
+    let dict_item_service = Arc::new(SysDictItemService::new(dict_item_repo, dict_repo));
+    AuthService::new(user_repo, token_store, role_repo, "test-secret", dict_item_service)
 }
 
 // ==================== Auth Service Tests ====================

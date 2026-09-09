@@ -112,3 +112,14 @@ pub async fn get_safe_policy_handler(
     let policy = state.sys_dict_item_service.get_safe_policy().await?;
     Ok(Json(ApiResponse::ok(policy)))
 }
+
+pub async fn update_safe_policy_handler(
+    State(state): State<AppState>,
+    Json(policy): Json<HashMap<String, String>>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    state
+        .sys_dict_item_service
+        .update_safe_policy(&policy)
+        .await?;
+    Ok(Json(ApiResponse::ok(())))
+}
