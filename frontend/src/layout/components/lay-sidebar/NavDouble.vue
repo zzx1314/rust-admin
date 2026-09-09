@@ -18,13 +18,34 @@ import {
   onMounted,
   onBeforeUnmount,
   onUnmounted,
-  reactive
+  reactive,
+  nextTick
 } from "vue";
 import LaySidebarItem from "../lay-sidebar/components/SidebarItem.vue";
 import LaySidebarLeftCollapse from "../lay-sidebar/components/SidebarLeftCollapse.vue";
 import LaySidebarCenterCollapse from "../lay-sidebar/components/SidebarCenterCollapse.vue";
 import { checkToken } from "@/api/user";
 import { ElMessage } from "element-plus";
+import type { ComponentPublicInstance } from "vue";
+
+// el-menu 实例，用于默认收起二级子菜单
+type MenuExposed = ComponentPublicInstance & {
+  close: (index: string) => void;
+};
+const menuRef = ref<MenuExposed | null>(null);
+
+/** 默认折叠所有展开的二级子菜单（Element Plus 会自动展开当前路由所在的子菜单） */
+function collapseAllSubMenus() {
+  // el-menu 通过 index 解析子菜单层级，取“/xxx/yyy”的前缀“/xxx”
+  const openIndexes = childMenu.value
+    .filter(menu => menu.children?.length)
+    .map(menu => menu.path as string);
+  nextTick(() => {
+    openIndexes.forEach(index => {
+      menuRef.value?.close?.(index);
+    });
+  });
+}
 
 const route = useRoute();
 const isShow = ref(false);
@@ -98,6 +119,7 @@ function handleChildMenu(menu, index) {
       ? true
       : false
   );
+  collapseAllSubMenus();
 }
 let lastPath = "";
 watch(
@@ -109,11 +131,13 @@ watch(
 
     getSubMenuData();
     menuSelect(route.path);
+    collapseAllSubMenus();
   }
 );
 
 onMounted(() => {
   getSubMenuData();
+  collapseAllSubMenus();
   emitter.on("logoChange", key => {
     showLogo.value = key;
   });
@@ -179,6 +203,7 @@ onBeforeUnmount(() => {
       </div>
       <el-scrollbar wrap-class="scrollbar-wrapper">
         <el-menu
+          ref="menuRef"
           unique-opened
           mode="vertical"
           popper-class="pure-scrollbar"
