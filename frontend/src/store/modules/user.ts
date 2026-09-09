@@ -8,8 +8,9 @@ import {
 } from "../utils";
 import { type UserResult, getLogin, refreshTokenApi } from "@/api/user";
 import { useMultiTagsStoreHook } from "./multiTags";
-import { type DataInfo, setToken, userKey } from "@/utils/auth";
+import { type DataInfo, setToken, TokenKey, userKey } from "@/utils/auth";
 
+import Cookies from "js-cookie";
 import aesUtils from "@/utils/aes";
 import { refreshConfig } from "@/config";
 
@@ -108,7 +109,19 @@ export const useUserStore = defineStore("pure-user", {
       const userInfo = storageSession().getItem<DataInfo<number>>(userKey);
       userInfo.accessToken = res.access_token;
       userInfo.refreshToken = res.refresh_token;
+      // 同步更新过期时间，防止 checkTimer 误判为已过期
+      const newExpires = Date.now() + res.expires_in * 1000;
+      userInfo.expires = newExpires;
       storageSession().setItem(userKey, userInfo);
+      // 同步更新 cookie
+      const cookieString = JSON.stringify({
+        accessToken: res.access_token,
+        expires: newExpires,
+        refreshToken: res.refresh_token
+      });
+      Cookies.set(TokenKey, cookieString, {
+        expires: res.expires_in / 86400000
+      });
       return res;
     }
   }

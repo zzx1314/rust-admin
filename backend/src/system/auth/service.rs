@@ -10,7 +10,6 @@ use crate::common::traits::{RoleRepository, TokenStore, UserRepository};
 use crate::system::sys_dict_item::service::SysDictItemService;
 use crate::system::sys_user::domain::User;
 
-const ACCESS_TOKEN_TTL_SECS: u64 = 24 * 60 * 60;
 const REFRESH_TOKEN_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -726,7 +725,8 @@ impl AuthService {
             .unwrap()
             .as_secs();
 
-        let access_exp = now + ACCESS_TOKEN_TTL_SECS;
+        let session_timeout = self.get_session_timeout_secs().await;
+        let access_exp = now + session_timeout;
         let refresh_exp = now + REFRESH_TOKEN_TTL_SECS;
 
         let user_id = user.id;
@@ -756,7 +756,7 @@ impl AuthService {
             .set_token(
                 &user_id.to_string(),
                 &new_access_token,
-                ACCESS_TOKEN_TTL_SECS,
+                session_timeout,
             )
             .await?;
 
@@ -798,7 +798,8 @@ impl AuthService {
             .unwrap()
             .as_secs();
 
-        let access_exp = now + ACCESS_TOKEN_TTL_SECS;
+        let session_timeout = self.get_session_timeout_secs().await;
+        let access_exp = now + session_timeout;
         let refresh_exp = now + REFRESH_TOKEN_TTL_SECS;
 
         let user_id = user.id;
@@ -828,14 +829,14 @@ impl AuthService {
             .set_token(
                 &user_id.to_string(),
                 &new_access_token,
-                ACCESS_TOKEN_TTL_SECS,
+                session_timeout,
             )
             .await?;
 
         Ok(TokenRefreshVO {
             access_token: new_access_token,
             refresh_token: new_refresh_token,
-            expires_in: ACCESS_TOKEN_TTL_SECS as i64,
+            expires_in: session_timeout as i64,
         })
     }
 

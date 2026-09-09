@@ -1,6 +1,5 @@
 import { onMounted, onUnmounted, ref } from "vue";
 import { getSafePolicy } from "@/api/system";
-import { getToken } from "@/utils/auth";
 import { useUserStoreHook } from "@/store/modules/user";
 import { message } from "@/utils/message";
 import { SUCCESS } from "@/api/base";
@@ -17,7 +16,6 @@ const ACTIVITY_EVENTS = [
 export function useSessionTimeout() {
   const timeoutMs = ref(0);
   let activityTimer: ReturnType<typeof setTimeout> | null = null;
-  let checkTimer: ReturnType<typeof setInterval> | null = null;
 
   const clearActivityTimer = () => {
     if (activityTimer) {
@@ -26,16 +24,8 @@ export function useSessionTimeout() {
     }
   };
 
-  const clearCheckTimer = () => {
-    if (checkTimer) {
-      clearInterval(checkTimer);
-      checkTimer = null;
-    }
-  };
-
   const logout = () => {
     clearActivityTimer();
-    clearCheckTimer();
     message("会话已过期，请重新登录", { type: "warning" });
     useUserStoreHook().logOut();
   };
@@ -48,18 +38,6 @@ export function useSessionTimeout() {
     }, timeoutMs.value);
   };
 
-  const checkTokenExpiry = () => {
-    const tokenData = getToken();
-    if (!tokenData) {
-      logout();
-      return;
-    }
-    const expires = tokenData.expires as number;
-    if (expires && expires < Date.now()) {
-      logout();
-    }
-  };
-
   const startTimer = () => {
     if (timeoutMs.value <= 0) return;
 
@@ -68,19 +46,17 @@ export function useSessionTimeout() {
     });
 
     resetActivityTimer();
-
-    checkTimer = setInterval(checkTokenExpiry, 30_000);
   };
 
   const stopTimer = () => {
     clearActivityTimer();
-    clearCheckTimer();
     ACTIVITY_EVENTS.forEach(event => {
       document.removeEventListener(event, resetActivityTimer);
     });
   };
 
   onMounted(async () => {
+    const { getToken } = await import("@/utils/auth");
     const tokenData = getToken();
     if (!tokenData) return;
 
