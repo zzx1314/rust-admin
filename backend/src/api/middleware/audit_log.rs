@@ -309,11 +309,13 @@ async fn load_existing_record(
     }
 }
 
-/// Resolve the client IP: proxy headers first (x-real-ip, then the leftmost
-/// entry of x-forwarded-for), falling back to the actual TCP peer address
-/// injected by `into_make_service_with_connect_info`.
-fn client_ip(request: &Request) -> Option<String> {
-    let headers = request.headers();
+/// Resolve the client IP from request parts: proxy headers first (x-real-ip,
+/// then the leftmost entry of x-forwarded-for), falling back to the actual TCP
+/// peer address injected by `into_make_service_with_connect_info`.
+pub(crate) fn client_ip_from_parts(
+    headers: &axum::http::HeaderMap,
+    connect_info: Option<&SocketAddr>,
+) -> Option<String> {
     let from_header = headers
         .get("x-real-ip")
         .or_else(|| headers.get("x-forwarded-for"))
@@ -323,12 +325,15 @@ fn client_ip(request: &Request) -> Option<String> {
         .filter(|v| !v.is_empty())
         .map(String::from);
 
-    from_header.or_else(|| {
-        request
-            .extensions()
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|info| info.0.ip().to_string())
-    })
+    from_header.or_else(|| connect_info.map(|info| info.ip().to_string()))
+}
+
+fn client_ip(request: &Request) -> Option<String> {
+    let connect_info = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0);
+    client_ip_from_parts(request.headers(), connect_info.as_ref())
 }
 
 pub async fn audit_log_middleware(

@@ -1,16 +1,17 @@
 use crate::api::AppState;
 use crate::api::middleware::RequestUser;
+use crate::api::middleware::audit_log::client_ip_from_parts;
 use crate::common::error::AppError;
 use crate::common::util::decrypt_password;
 use crate::system::auth::service::{CheckTokenVO, TokenRefreshVO, UserInfoVO};
 use crate::system::sys_log::domain::CreateSysLogRequest;
 use axum::{
     Form, Json,
-    extract::Path,
-    extract::State,
+    extract::{ConnectInfo, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use std::net::SocketAddr;
 use axum_extra::TypedHeader;
 use axum_extra::extract::CookieJar;
 use axum_extra::headers::Authorization;
@@ -70,6 +71,8 @@ pub async fn logout_handler(
     State(state): State<AppState>,
     jar: CookieJar,
     auth: TypedHeader<Authorization<Bearer>>,
+    headers: axum::http::HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<Response, AppError> {
     let token = auth.token();
     let user_id = state.auth_service.validate_token(token).await?;
@@ -79,6 +82,7 @@ pub async fn logout_handler(
         .unwrap_or_default();
     state.auth_service.logout(user_id).await?;
 
+    let ip = client_ip_from_parts(&headers, Some(&addr));
     let log_service = state.sys_log_service.clone();
     let log_req = CreateSysLogRequest {
         tenant: None,
@@ -94,7 +98,7 @@ pub async fn logout_handler(
         fail: Some(false),
         extra: None,
         code_variable: None,
-        ip: None,
+        ip,
     };
     tokio::spawn(async move {
         if let Err(e) = log_service.create_log(log_req).await {
