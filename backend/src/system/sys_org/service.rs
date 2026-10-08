@@ -31,17 +31,34 @@ impl OrgService {
             .ok_or_else(|| AppError::NotFound(format!("Org with id {} not found", id)))
     }
 
-    pub async fn get_all_orgs(&self) -> Result<Vec<SysOrgVo>, AppError> {
+    pub async fn get_all_orgs(&self, query: OrgTreeQuery) -> Result<Vec<SysOrgVo>, AppError> {
+        if query.name.is_none()
+            && query.r#type.is_none()
+            && query.begin_time.is_none()
+            && query.end_time.is_none()
+        {
+            let orgs = self
+                .org_repo
+                .find_all()
+                .await
+                .map_err(AppError::DatabaseErrorSeaOrm)?;
+            return Ok(orgs.into_iter().map(SysOrgVo::from).collect());
+        }
+
         let orgs = self
             .org_repo
-            .find_all()
+            .find_tree_with_filter(&query)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
         Ok(orgs.into_iter().map(SysOrgVo::from).collect())
     }
 
     pub async fn get_org_tree(&self, query: OrgTreeQuery) -> Result<Vec<OrgTreeDto>, AppError> {
-        if query.name.is_none() && query.r#type.is_none() {
+        if query.name.is_none()
+            && query.r#type.is_none()
+            && query.begin_time.is_none()
+            && query.end_time.is_none()
+        {
             let orgs = self
                 .org_repo
                 .find_tree()

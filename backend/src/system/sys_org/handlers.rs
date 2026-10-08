@@ -51,8 +51,9 @@ pub async fn get_org_handler(
 
 pub async fn get_all_orgs_handler(
     State(state): State<AppState>,
+    Query(query): Query<OrgTreeQuery>,
 ) -> Result<Json<ApiResponse<Vec<SysOrgVo>>>, AppError> {
-    let orgs = state.org_service.get_all_orgs().await?;
+    let orgs = state.org_service.get_all_orgs(query).await?;
     Ok(Json(ApiResponse::ok(orgs)))
 }
 

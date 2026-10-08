@@ -120,6 +120,8 @@ impl OrgRepository for FakeOrgRepository {
         let data = self.data.clone();
         let name = query.name.clone();
         let r#type = query.r#type.clone();
+        let begin_time = query.begin_time.clone();
+        let end_time = query.end_time.clone();
         Box::pin(async move {
             let all: Vec<Org> = data
                 .lock()
@@ -129,7 +131,7 @@ impl OrgRepository for FakeOrgRepository {
                 .cloned()
                 .collect();
 
-            if name.is_none() && r#type.is_none() {
+            if name.is_none() && r#type.is_none() && begin_time.is_none() && end_time.is_none() {
                 return Ok(all);
             }
 
@@ -299,7 +301,15 @@ async fn test_get_all_orgs() {
     )
     .await
     .unwrap();
-    let result = service.get_all_orgs().await.unwrap();
+    let result = service
+        .get_all_orgs(OrgTreeQuery {
+            name: None,
+            r#type: None,
+            begin_time: None,
+            end_time: None,
+        })
+        .await
+        .unwrap();
     assert_eq!(result.len(), 2);
 }
 
@@ -342,6 +352,8 @@ async fn test_get_org_tree_no_filter() {
     let query = OrgTreeQuery {
         name: None,
         r#type: None,
+        begin_time: None,
+        end_time: None,
     };
     let result = service.get_org_tree(query).await.unwrap();
     let names = flatten_org_tree_names(&result);
@@ -404,6 +416,8 @@ async fn test_get_org_tree_with_name_filter() {
     let query = OrgTreeQuery {
         name: Some("Backend".to_string()),
         r#type: None,
+        begin_time: None,
+        end_time: None,
     };
     let result = service.get_org_tree(query).await.unwrap();
     let names = flatten_org_tree_names(&result);
@@ -479,6 +493,8 @@ async fn test_get_org_tree_with_type_filter() {
     let query = OrgTreeQuery {
         name: None,
         r#type: Some("department".to_string()),
+        begin_time: None,
+        end_time: None,
     };
     let result = service.get_org_tree(query).await.unwrap();
     let names = flatten_org_tree_names(&result);
@@ -546,6 +562,8 @@ async fn test_get_org_tree_filter_expands_ancestors() {
     let query = OrgTreeQuery {
         name: Some("Child".to_string()),
         r#type: None,
+        begin_time: None,
+        end_time: None,
     };
     let result = service.get_org_tree(query).await.unwrap();
     let names = flatten_org_tree_names(&result);
@@ -613,6 +631,8 @@ async fn test_get_org_tree_filter_expands_descendants() {
     let query = OrgTreeQuery {
         name: Some("Root Match".to_string()),
         r#type: None,
+        begin_time: None,
+        end_time: None,
     };
     let result = service.get_org_tree(query).await.unwrap();
     let names = flatten_org_tree_names(&result);
@@ -767,7 +787,15 @@ async fn test_delete_org_success() {
     .await
     .unwrap();
     service.delete_org(&org_id).await.unwrap();
-    let all = service.get_all_orgs().await.unwrap();
+    let all = service
+        .get_all_orgs(OrgTreeQuery {
+            name: None,
+            r#type: None,
+            begin_time: None,
+            end_time: None,
+        })
+        .await
+        .unwrap();
     assert_eq!(all.len(), 0);
 }
 

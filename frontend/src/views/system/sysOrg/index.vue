@@ -66,6 +66,7 @@ const {
           v-model="searchForm.type"
           placeholder="请选择类型"
           class="!w-[180px]"
+          clearable
         >
           <el-option label="顶部门" value="top" />
           <el-option label="单位" value="company" />
@@ -82,7 +83,7 @@ const {
               placeholder="请输入开始时间"
               clearable
               class="!w-[200px]"
-              value-format="YYYY-MM-DD HH:mm:ss"
+              value-format="YYYY-MM-DD"
             />
           </el-form-item>
           <el-form-item label="结束时间：" prop="endTime">

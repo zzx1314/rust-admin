@@ -214,6 +214,8 @@ async fn test_org_repo_find_tree_with_filter_no_filter() {
     let query = OrgTreeQuery {
         name: None,
         r#type: None,
+        begin_time: None,
+        end_time: None,
     };
     let result = repo.find_tree_with_filter(&query).await.unwrap();
     assert_eq!(result.len(), 2);
@@ -261,6 +263,8 @@ async fn test_org_repo_find_tree_with_filter_name() {
     let query = OrgTreeQuery {
         name: Some("Eng".to_string()),
         r#type: None,
+        begin_time: None,
+        end_time: None,
     };
     let result = repo.find_tree_with_filter(&query).await.unwrap();
     assert_eq!(result.len(), 1);
@@ -309,6 +313,8 @@ async fn test_org_repo_find_tree_with_filter_type() {
     let query = OrgTreeQuery {
         name: None,
         r#type: Some("department".to_string()),
+        begin_time: None,
+        end_time: None,
     };
     let result = repo.find_tree_with_filter(&query).await.unwrap();
     assert_eq!(result.len(), 1);
@@ -374,6 +380,8 @@ async fn test_org_repo_find_tree_with_filter_combined() {
     let query = OrgTreeQuery {
         name: Some("Sales".to_string()),
         r#type: Some("team".to_string()),
+        begin_time: None,
+        end_time: None,
     };
     let result = repo.find_tree_with_filter(&query).await.unwrap();
     assert_eq!(result.len(), 0);

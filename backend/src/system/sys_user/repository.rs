@@ -1,5 +1,6 @@
 use crate::common::base::{RepoExt, make_condition, order_desc};
 use crate::common::traits::{DynFuture, SeaOrmOptResult, SeaOrmResult, UserRepository};
+use crate::common::util::parse_beijing_datetime;
 use crate::impl_repo_conn;
 use crate::system::sys_role::user_role::Column as UserRoleColumn;
 use crate::system::sys_role::user_role::Entity as UserRoleEntity;
@@ -10,7 +11,6 @@ use crate::system::sys_user::entity::ActiveModel;
 use crate::system::sys_user::entity::Column as UserColumn;
 use crate::system::sys_user::entity::Entity as UserEntity;
 use async_trait::async_trait;
-use chrono::TimeZone;
 use sea_orm::{
     ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
     QueryOrder, QuerySelect,
@@ -249,24 +249,4 @@ impl UserRepository for SeaOrmUserRepository {
 
 fn parse_id_list(s: &str) -> Vec<i64> {
     s.split(',').filter_map(|p| p.trim().parse().ok()).collect()
-}
-
-fn parse_beijing_datetime(s: &str, is_end: bool) -> Option<chrono::DateTime<chrono::Utc>> {
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let naive = if s.len() > 10 {
-        chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok()?
-    } else if is_end {
-        chrono::NaiveDateTime::parse_from_str(&format!("{} 23:59:59", s), "%Y-%m-%d %H:%M:%S")
-            .ok()?
-    } else {
-        chrono::NaiveDateTime::parse_from_str(&format!("{} 00:00:00", s), "%Y-%m-%d %H:%M:%S")
-            .ok()?
-    };
-    let tz = chrono::FixedOffset::east_opt(8 * 3600)?;
-    tz.from_local_datetime(&naive)
-        .single()
-        .map(|dt| dt.with_timezone(&chrono::Utc))
 }

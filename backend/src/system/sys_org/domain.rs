@@ -111,6 +111,8 @@ impl From<Org> for SysOrgVo {
 pub struct OrgTreeQuery {
     pub name: Option<String>,
     pub r#type: Option<String>,
+    pub begin_time: Option<String>,
+    pub end_time: Option<String>,
 }
 
 pub fn build_org_tree(orgs: Vec<OrgTreeDto>) -> Vec<OrgTreeDto> {

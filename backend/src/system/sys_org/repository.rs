@@ -1,5 +1,6 @@
 use crate::common::base::{RepoExt, make_condition, order_asc, order_desc};
 use crate::common::traits::{DynFuture, OrgRepository, SeaOrmOptResult, SeaOrmResult};
+use crate::common::util::parse_beijing_datetime;
 use crate::impl_repo_conn;
 use crate::system::sys_org::domain::{CreateOrgRequest, Org, OrgTreeQuery, UpdateOrgRequest};
 use crate::system::sys_org::entity::ActiveModel as OrgActiveModel;
@@ -117,7 +118,10 @@ impl OrgRepository for SeaOrmOrgRepository {
             Box::pin(async move {
                 let base_query = OrgEntity::find().filter(OrgColumn::IsDeleted.eq(0));
 
-                let has_filter = query.name.is_some() || query.r#type.is_some();
+                let has_filter = query.name.is_some()
+                    || query.r#type.is_some()
+                    || query.begin_time.is_some()
+                    || query.end_time.is_some();
 
                 if !has_filter {
                     let orgs = base_query
@@ -136,6 +140,16 @@ impl OrgRepository for SeaOrmOrgRepository {
                 }
                 if let Some(ref r#type) = query.r#type {
                     cond = cond.add(OrgColumn::Type.eq(r#type));
+                }
+                if let Some(ref begin) = query.begin_time
+                    && let Some(utc_dt) = parse_beijing_datetime(begin, false)
+                {
+                    cond = cond.add(OrgColumn::CreateTime.gte(utc_dt));
+                }
+                if let Some(ref end) = query.end_time
+                    && let Some(utc_dt) = parse_beijing_datetime(end, true)
+                {
+                    cond = cond.add(OrgColumn::CreateTime.lte(utc_dt));
                 }
 
                 let orgs = base_query

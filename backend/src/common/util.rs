@@ -1,4 +1,4 @@
-use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone, Utc};
 
 use aes::Aes128;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -43,6 +43,29 @@ pub fn format_iso_datetime(iso_str: &str) -> String {
             .to_string();
     }
     iso_str.to_string()
+}
+
+/// Parse a Beijing-time (UTC+8) date or datetime string into UTC.
+///
+/// Accepts `"YYYY-MM-DD"` (time defaults to `00:00:00`, or `23:59:59` when
+/// `is_end` is true) and `"YYYY-MM-DD HH:mm:ss"`. Returns `None` for blank
+/// or unparsable input so date filters fail open instead of erroring.
+pub fn parse_beijing_datetime(s: &str, is_end: bool) -> Option<DateTime<Utc>> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let naive = if s.len() > 10 {
+        NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok()?
+    } else if is_end {
+        NaiveDateTime::parse_from_str(&format!("{} 23:59:59", s), "%Y-%m-%d %H:%M:%S").ok()?
+    } else {
+        NaiveDateTime::parse_from_str(&format!("{} 00:00:00", s), "%Y-%m-%d %H:%M:%S").ok()?
+    };
+    let tz = FixedOffset::east_opt(8 * 3600)?;
+    tz.from_local_datetime(&naive)
+        .single()
+        .map(|dt| dt.with_timezone(&Utc))
 }
 
 /// MD5 encrypt: returns lowercase hex digest.
