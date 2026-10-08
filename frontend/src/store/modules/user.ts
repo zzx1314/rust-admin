@@ -107,20 +107,20 @@ export const useUserStore = defineStore("pure-user", {
 
       if (!res) throw new Error("refresh token failed");
       const userInfo = storageSession().getItem<DataInfo<number>>(userKey);
-      userInfo.accessToken = res.access_token;
-      userInfo.refreshToken = res.refresh_token;
+      userInfo.accessToken = res.accessToken;
+      userInfo.refreshToken = res.refreshToken;
       // 同步更新过期时间，防止 checkTimer 误判为已过期
-      const newExpires = Date.now() + res.expires_in * 1000;
+      const newExpires = Date.now() + res.expiresIn * 1000;
       userInfo.expires = newExpires;
       storageSession().setItem(userKey, userInfo);
       // 同步更新 cookie
       const cookieString = JSON.stringify({
-        accessToken: res.access_token,
+        accessToken: res.accessToken,
         expires: newExpires,
-        refreshToken: res.refresh_token
+        refreshToken: res.refreshToken
       });
       Cookies.set(TokenKey, cookieString, {
-        expires: res.expires_in / 86400000
+        expires: res.expiresIn / 86400
       });
       return res;
     }

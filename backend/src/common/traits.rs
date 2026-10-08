@@ -65,6 +65,14 @@ pub trait TokenStore: Send + Sync {
     ) -> DynFuture<Result<(), AppError>>;
     fn get_token(&self, user_id: &str) -> DynFuture<Result<Option<String>, AppError>>;
     fn delete_token(&self, user_id: &str) -> DynFuture<Result<(), AppError>>;
+    fn set_refresh_token(
+        &self,
+        user_id: &str,
+        token: &str,
+        ttl_secs: u64,
+    ) -> DynFuture<Result<(), AppError>>;
+    fn get_refresh_token(&self, user_id: &str) -> DynFuture<Result<Option<String>, AppError>>;
+    fn delete_refresh_token(&self, user_id: &str) -> DynFuture<Result<(), AppError>>;
 }
 
 pub trait MenuRepository: Send + Sync {

@@ -26,11 +26,11 @@ export type UserResult = {
 
 export type RefreshTokenResult = {
   /** `token` */
-  access_token: string;
+  accessToken: string;
   /** 用于调用刷新`accessToken`的接口时所需的`token` */
-  refresh_token: string;
-  /** `accessToken`的过期时间（格式'xxxx/xx/xx xx:xx:xx'） */
-  expires_in: number;
+  refreshToken: string;
+  /** `accessToken`的过期时间（秒） */
+  expiresIn: number;
 };
 
 export type UserInfo = {
@@ -91,7 +91,7 @@ export const userLogout = (): Promise<UserResult> => {
 
 /** 刷新`token` */
 export const refreshTokenApi = (refresh_token?: string) => {
-  return http.post<RefreshTokenResult, any>(
+  return http.get<RefreshTokenResult, any>(
     urls.refreshToken + refresh_token,
     {},
     {

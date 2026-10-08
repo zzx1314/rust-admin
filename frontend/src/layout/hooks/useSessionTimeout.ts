@@ -62,12 +62,19 @@ export function useSessionTimeout() {
 
     try {
       const res = await getSafePolicy();
-      if (res?.code === SUCCESS && res.data?.sysOvertime) {
-        const seconds = parseInt(res.data.sysOvertime, 10);
-        if (!isNaN(seconds) && seconds > 0) {
-          timeoutMs.value = seconds * 1000;
-          startTimer();
-        }
+      if (res?.code !== SUCCESS) return;
+      const raw = String(res.data?.sysOvertime ?? "").trim();
+      let seconds = NaN;
+      if (/^\d+$/.test(raw)) {
+        seconds = parseInt(raw, 10);
+      } else {
+        // 兼容库里存成 "30分钟" 这类带单位的历史值
+        const mins = raw.match(/^(\d+)\s*分钟/);
+        if (mins) seconds = parseInt(mins[1], 10) * 60;
+      }
+      if (!isNaN(seconds) && seconds > 0) {
+        timeoutMs.value = seconds * 1000;
+        startTimer();
       }
     } catch {
       // Ignore — timer simply won't start

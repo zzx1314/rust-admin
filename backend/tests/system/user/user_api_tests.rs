@@ -51,6 +51,36 @@ impl TokenStore for FakeTokenStore {
             Ok(())
         })
     }
+
+    fn set_refresh_token(
+        &self,
+        user_id: &str,
+        token: &str,
+        _ttl_secs: u64,
+    ) -> DynFuture<Result<(), AppError>> {
+        let store = self.store.clone();
+        let key = format!("auth:refresh:{}", user_id);
+        let token = token.to_string();
+        Box::pin(async move {
+            store.lock().unwrap().insert(key, token);
+            Ok(())
+        })
+    }
+
+    fn get_refresh_token(&self, user_id: &str) -> DynFuture<Result<Option<String>, AppError>> {
+        let store = self.store.clone();
+        let key = format!("auth:refresh:{}", user_id);
+        Box::pin(async move { Ok(store.lock().unwrap().get(&key).cloned()) })
+    }
+
+    fn delete_refresh_token(&self, user_id: &str) -> DynFuture<Result<(), AppError>> {
+        let store = self.store.clone();
+        let key = format!("auth:refresh:{}", user_id);
+        Box::pin(async move {
+            store.lock().unwrap().remove(&key);
+            Ok(())
+        })
+    }
 }
 
 fn test_db_path() -> String {

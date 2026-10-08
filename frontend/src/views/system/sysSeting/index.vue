@@ -100,18 +100,20 @@ const { loading, addForm, rules, cancel, addFormInfo } = useSysSeting();
             </div>
           </el-form-item>
 
-          <el-form-item label="超时时间" prop="sysOvertime" class="is-last">
+          <el-form-item label="会话超时时间" prop="sysOvertime" class="is-last">
             <div class="field">
               <el-select
                 v-model="addForm.sysOvertime"
-                placeholder="请选择登录超时时间"
+                placeholder="请选择会话超时时间"
                 class="control"
               >
                 <el-option label="15分钟" value="900" />
                 <el-option label="30分钟" value="1800" />
                 <el-option label="1小时" value="3600" />
               </el-select>
-              <span class="hint">无操作超过该时长，会话自动失效</span>
+              <span class="hint"
+                >无操作超过该时长自动退出，活跃使用会自动续期</span
+              >
             </div>
           </el-form-item>
         </el-card>

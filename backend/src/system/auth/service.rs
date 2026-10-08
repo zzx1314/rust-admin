@@ -18,6 +18,8 @@ struct Claims {
     username: String,
     exp: u64,
     iat: u64,
+    #[serde(default)]
+    jti: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -215,10 +217,20 @@ impl AuthService {
     async fn get_session_timeout_secs(&self) -> u64 {
         if let Ok(policy) = self.dict_item_service.get_safe_policy().await
             && let Some(val) = policy.get("sysOvertime")
-            && let Ok(num) = val.parse::<u64>()
-            && num > 0
         {
-            return num;
+            let text = val.trim();
+            if let Ok(num) = text.parse::<u64>()
+                && num > 0
+            {
+                return num;
+            }
+            if let Some(mins) = text
+                .strip_suffix("分钟")
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                && mins > 0
+            {
+                return mins * 60;
+            }
         }
         24 * 60 * 60
     }
@@ -397,6 +409,7 @@ impl AuthService {
             username: user.username.clone(),
             exp: access_exp,
             iat: now,
+            jti: None,
         };
 
         let refresh_claims = Claims {
@@ -404,6 +417,7 @@ impl AuthService {
             username: user.username.clone(),
             exp: refresh_exp,
             iat: now,
+            jti: Some(uuid::Uuid::new_v4().to_string()),
         };
 
         let encoding_key = EncodingKey::from_secret(self.jwt_secret.as_bytes());
@@ -416,6 +430,9 @@ impl AuthService {
 
         self.token_store
             .set_token(&user_id_str, &access_token, session_timeout)
+            .await?;
+        self.token_store
+            .set_refresh_token(&user_id_str, &refresh_token, REFRESH_TOKEN_TTL_SECS)
             .await?;
 
         Ok(LoginResponse {
@@ -604,6 +621,7 @@ impl AuthService {
             username: user.username.clone(),
             exp: access_exp,
             iat: now,
+            jti: None,
         };
 
         let refresh_claims = Claims {
@@ -611,6 +629,7 @@ impl AuthService {
             username: user.username.clone(),
             exp: refresh_exp,
             iat: now,
+            jti: Some(uuid::Uuid::new_v4().to_string()),
         };
 
         let encoding_key = EncodingKey::from_secret(self.jwt_secret.as_bytes());
@@ -623,6 +642,9 @@ impl AuthService {
 
         self.token_store
             .set_token(&user_id_str, &access_token, session_timeout)
+            .await?;
+        self.token_store
+            .set_refresh_token(&user_id_str, &refresh_token, REFRESH_TOKEN_TTL_SECS)
             .await?;
 
         let roles = self.get_user_roles(&user_id).await?;
@@ -665,7 +687,10 @@ impl AuthService {
     }
 
     pub async fn logout(&self, user_id: i64) -> Result<(), AppError> {
-        self.token_store.delete_token(&user_id.to_string()).await
+        self.token_store.delete_token(&user_id.to_string()).await?;
+        self.token_store
+            .delete_refresh_token(&user_id.to_string())
+            .await
     }
 
     pub async fn validate_token(&self, token: &str) -> Result<i64, AppError> {
@@ -720,6 +745,17 @@ impl AuthService {
             return Err(AppError::Unauthorized("User ID mismatch".to_string()));
         }
 
+        let stored_refresh = self
+            .token_store
+            .get_refresh_token(&user_id.to_string())
+            .await?;
+        match stored_refresh {
+            Some(stored) if stored.as_str() == refresh_token => {}
+            _ => {
+                return Err(AppError::Unauthorized("Invalid refresh token".to_string()));
+            }
+        }
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -735,6 +771,7 @@ impl AuthService {
             username: user.username.clone(),
             exp: access_exp,
             iat: now,
+            jti: None,
         };
 
         let refresh_claims = Claims {
@@ -742,6 +779,7 @@ impl AuthService {
             username: user.username.clone(),
             exp: refresh_exp,
             iat: now,
+            jti: Some(uuid::Uuid::new_v4().to_string()),
         };
 
         let encoding_key = EncodingKey::from_secret(self.jwt_secret.as_bytes());
@@ -757,6 +795,13 @@ impl AuthService {
                 &user_id.to_string(),
                 &new_access_token,
                 session_timeout,
+            )
+            .await?;
+        self.token_store
+            .set_refresh_token(
+                &user_id.to_string(),
+                &new_refresh_token,
+                REFRESH_TOKEN_TTL_SECS,
             )
             .await?;
 
@@ -793,6 +838,17 @@ impl AuthService {
             return Err(AppError::Unauthorized("User ID mismatch".to_string()));
         }
 
+        let stored_refresh = self
+            .token_store
+            .get_refresh_token(&user_id.to_string())
+            .await?;
+        match stored_refresh {
+            Some(stored) if stored.as_str() == refresh_token => {}
+            _ => {
+                return Err(AppError::Unauthorized("Invalid refresh token".to_string()));
+            }
+        }
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -808,6 +864,7 @@ impl AuthService {
             username: user.username.clone(),
             exp: access_exp,
             iat: now,
+            jti: None,
         };
 
         let refresh_claims = Claims {
@@ -815,6 +872,7 @@ impl AuthService {
             username: user.username.clone(),
             exp: refresh_exp,
             iat: now,
+            jti: Some(uuid::Uuid::new_v4().to_string()),
         };
 
         let encoding_key = EncodingKey::from_secret(self.jwt_secret.as_bytes());
@@ -830,6 +888,13 @@ impl AuthService {
                 &user_id.to_string(),
                 &new_access_token,
                 session_timeout,
+            )
+            .await?;
+        self.token_store
+            .set_refresh_token(
+                &user_id.to_string(),
+                &new_refresh_token,
+                REFRESH_TOKEN_TTL_SECS,
             )
             .await?;
 

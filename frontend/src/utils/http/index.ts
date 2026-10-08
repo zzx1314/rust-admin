@@ -140,7 +140,7 @@ class PureHttp {
               const res = await useUserStoreHook().handRefreshToken(
                 tokenData.refreshToken
               );
-              const newAccessToken = res.access_token;
+              const newAccessToken = res.accessToken;
 
               // 重放所有挂起请求，返回 response.data
               PureHttp.requests.forEach(req => {

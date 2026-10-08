@@ -224,6 +224,36 @@ impl TokenStore for FakeTokenStore {
             Ok(())
         })
     }
+
+    fn set_refresh_token(
+        &self,
+        user_id: &str,
+        token: &str,
+        _ttl_secs: u64,
+    ) -> DynFuture<Result<(), AppError>> {
+        let store = self.store.clone();
+        let key = format!("auth:refresh:{}", user_id);
+        let token = token.to_string();
+        Box::pin(async move {
+            store.lock().unwrap().insert(key, token);
+            Ok(())
+        })
+    }
+
+    fn get_refresh_token(&self, user_id: &str) -> DynFuture<Result<Option<String>, AppError>> {
+        let store = self.store.clone();
+        let key = format!("auth:refresh:{}", user_id);
+        Box::pin(async move { Ok(store.lock().unwrap().get(&key).cloned()) })
+    }
+
+    fn delete_refresh_token(&self, user_id: &str) -> DynFuture<Result<(), AppError>> {
+        let store = self.store.clone();
+        let key = format!("auth:refresh:{}", user_id);
+        Box::pin(async move {
+            store.lock().unwrap().remove(&key);
+            Ok(())
+        })
+    }
 }
 
 struct FakeRoleRepository;
@@ -660,6 +690,78 @@ async fn test_refresh_token_user_not_found() {
     let login_result = service.login("testuser", "password123").await.unwrap();
 
     user_repo.delete(&1).await.unwrap();
+
+    let result = service.refresh_token(&login_result.refresh_token).await;
+    assert!(matches!(result, Err(AppError::Unauthorized(_))));
+}
+
+#[tokio::test]
+async fn test_refresh_token_stores_and_rotates() {
+    let user_repo = Arc::new(FakeUserRepository::new());
+    let token_store = Arc::new(FakeTokenStore::new());
+    let service = create_auth_service(user_repo.clone(), token_store.clone());
+
+    let password_hash = md5_encrypt("password123");
+    let req = CreateUserRequest {
+        username: "testuser".to_string(),
+        phone: None,
+        email: Some("test@example.com".to_string()),
+        real_name: None,
+        password: Some(password_hash),
+        org_id: 0,
+        remarks: None,
+        card: None,
+        sex: None,
+        sync_harbor: false,
+        role: None,
+    };
+    user_repo.create(&req, &1i64).await.unwrap();
+
+    let login_result = service.login("testuser", "password123").await.unwrap();
+
+    let stored = token_store.get_refresh_token("1").await.unwrap();
+    assert_eq!(stored, Some(login_result.refresh_token.clone()));
+
+    let rotated = service
+        .refresh_token(&login_result.refresh_token)
+        .await
+        .unwrap();
+
+    let stored = token_store.get_refresh_token("1").await.unwrap();
+    assert_eq!(stored, Some(rotated.refresh_token.clone()));
+
+    let reused = service.refresh_token(&login_result.refresh_token).await;
+    assert!(matches!(reused, Err(AppError::Unauthorized(_))));
+}
+
+#[tokio::test]
+async fn test_logout_invalidates_refresh_token() {
+    let user_repo = Arc::new(FakeUserRepository::new());
+    let token_store = Arc::new(FakeTokenStore::new());
+    let service = create_auth_service(user_repo.clone(), token_store.clone());
+
+    let password_hash = md5_encrypt("password123");
+    let req = CreateUserRequest {
+        username: "testuser".to_string(),
+        phone: None,
+        email: Some("test@example.com".to_string()),
+        real_name: None,
+        password: Some(password_hash),
+        org_id: 0,
+        remarks: None,
+        card: None,
+        sex: None,
+        sync_harbor: false,
+        role: None,
+    };
+    user_repo.create(&req, &1i64).await.unwrap();
+
+    let login_result = service.login("testuser", "password123").await.unwrap();
+
+    service.logout(1).await.unwrap();
+
+    assert!(token_store.get_token("1").await.unwrap().is_none());
+    assert!(token_store.get_refresh_token("1").await.unwrap().is_none());
 
     let result = service.refresh_token(&login_result.refresh_token).await;
     assert!(matches!(result, Err(AppError::Unauthorized(_))));
