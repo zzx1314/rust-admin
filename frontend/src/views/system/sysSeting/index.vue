@@ -68,7 +68,7 @@ const { loading, addForm, rules, cancel, addFormInfo } = useSysSeting();
             </div>
           </template>
 
-          <el-form-item label="最大尝试次数" prop="sysLoginMaxTryCount">
+          <el-form-item label="尝试次数" prop="sysLoginMaxTryCount">
             <div class="field">
               <el-select
                 v-model="addForm.sysLoginMaxTryCount"
@@ -100,7 +100,7 @@ const { loading, addForm, rules, cancel, addFormInfo } = useSysSeting();
             </div>
           </el-form-item>
 
-          <el-form-item label="登录超时时间" prop="sysOvertime" class="is-last">
+          <el-form-item label="超时时间" prop="sysOvertime" class="is-last">
             <div class="field">
               <el-select
                 v-model="addForm.sysOvertime"
