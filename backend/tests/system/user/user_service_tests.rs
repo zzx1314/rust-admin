@@ -585,6 +585,9 @@ async fn test_get_users_page_default() {
             email: None,
             org_id: None,
             enable: None,
+            role: None,
+            begin_time: None,
+            end_time: None,
         })
         .await
         .unwrap();
@@ -628,6 +631,9 @@ async fn test_get_users_page_custom() {
             email: None,
             org_id: None,
             enable: None,
+            role: None,
+            begin_time: None,
+            end_time: None,
         })
         .await
         .unwrap();
@@ -671,6 +677,9 @@ async fn test_get_users_page_out_of_range() {
             email: None,
             org_id: None,
             enable: None,
+            role: None,
+            begin_time: None,
+            end_time: None,
         })
         .await
         .unwrap();
@@ -695,6 +704,9 @@ async fn test_get_users_page_empty() {
             email: None,
             org_id: None,
             enable: None,
+            role: None,
+            begin_time: None,
+            end_time: None,
         })
         .await
         .unwrap();

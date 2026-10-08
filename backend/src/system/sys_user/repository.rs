@@ -1,6 +1,8 @@
 use crate::common::base::{RepoExt, make_condition, order_desc};
 use crate::common::traits::{DynFuture, SeaOrmOptResult, SeaOrmResult, UserRepository};
 use crate::impl_repo_conn;
+use crate::system::sys_role::user_role::Column as UserRoleColumn;
+use crate::system::sys_role::user_role::Entity as UserRoleEntity;
 use crate::system::sys_user::domain::{
     CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO,
 };
@@ -8,6 +10,7 @@ use crate::system::sys_user::entity::ActiveModel;
 use crate::system::sys_user::entity::Column as UserColumn;
 use crate::system::sys_user::entity::Entity as UserEntity;
 use async_trait::async_trait;
+use chrono::TimeZone;
 use sea_orm::{
     ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
     QueryOrder, QuerySelect,
@@ -130,6 +133,29 @@ impl UserRepository for SeaOrmUserRepository {
                     cond = cond.add(c);
                 }
 
+                if let Some(role_id) = req.role {
+                    let user_roles = UserRoleEntity::find()
+                        .filter(UserRoleColumn::RoleId.eq(role_id))
+                        .all(&*conn)
+                        .await?;
+                    let user_ids: Vec<i64> = user_roles.into_iter().map(|ur| ur.user_id).collect();
+                    if user_ids.is_empty() {
+                        return Ok((vec![], 0));
+                    }
+                    cond = cond.add(UserColumn::Id.is_in(user_ids));
+                }
+
+                if let Some(ref begin) = req.begin_time
+                    && let Some(utc_dt) = parse_beijing_datetime(begin, false)
+                {
+                    cond = cond.add(UserColumn::CreateTime.gte(utc_dt));
+                }
+                if let Some(ref end) = req.end_time
+                    && let Some(utc_dt) = parse_beijing_datetime(end, true)
+                {
+                    cond = cond.add(UserColumn::CreateTime.lte(utc_dt));
+                }
+
                 let total = base_query
                     .clone()
                     .filter(cond.clone())
@@ -208,4 +234,24 @@ impl UserRepository for SeaOrmUserRepository {
             })
         })
     }
+}
+
+fn parse_beijing_datetime(s: &str, is_end: bool) -> Option<chrono::DateTime<chrono::Utc>> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let naive = if s.len() > 10 {
+        chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok()?
+    } else if is_end {
+        chrono::NaiveDateTime::parse_from_str(&format!("{} 23:59:59", s), "%Y-%m-%d %H:%M:%S")
+            .ok()?
+    } else {
+        chrono::NaiveDateTime::parse_from_str(&format!("{} 00:00:00", s), "%Y-%m-%d %H:%M:%S")
+            .ok()?
+    };
+    let tz = chrono::FixedOffset::east_opt(8 * 3600)?;
+    tz.from_local_datetime(&naive)
+        .single()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
 }

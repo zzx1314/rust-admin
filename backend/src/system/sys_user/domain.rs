@@ -64,6 +64,9 @@ pub struct UserPageQuery {
     pub email: Option<String>,
     pub org_id: Option<String>,
     pub enable: Option<i32>,
+    pub role: Option<i64>,
+    pub begin_time: Option<String>,
+    pub end_time: Option<String>,
 }
 
 impl UserPageQuery {

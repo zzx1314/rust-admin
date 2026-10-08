@@ -166,6 +166,7 @@ async function getAllRole() {
   data.map(item => {
     allCheckItem.value.push({ text: item.name, value: item.id });
   });
+  roleArry.value = [];
   roleArry.value.push(...allCheckItem.value);
 }
 </script>
@@ -209,6 +210,7 @@ async function getAllRole() {
             v-model="queryForm.role"
             placeholder="请选择角色"
             style="width: 150px"
+            clearable
           >
             <el-option
               v-for="item in roleArry"
@@ -242,7 +244,8 @@ async function getAllRole() {
                 type="date"
                 placeholder="请输入开始时间"
                 class="!w-[180px]"
-                value-format="YYYY-MM-DD HH:mm:ss"
+                value-format="YYYY-MM-DD"
+                clearable
               />
             </el-form-item>
             <el-form-item label="结束时间：" prop="endTime">
@@ -252,6 +255,7 @@ async function getAllRole() {
                 type="date"
                 class="!w-[180px]"
                 value-format="YYYY-MM-DD"
+                clearable
               />
             </el-form-item>
           </div>
