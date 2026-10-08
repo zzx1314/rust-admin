@@ -123,7 +123,6 @@ impl UserRepository for SeaOrmUserRepository {
                         .map(|v| UserColumn::RealName.contains(v)),
                     req.phone.as_ref().map(|v| UserColumn::Phone.contains(v)),
                     req.email.as_ref().map(|v| UserColumn::Email.contains(v)),
-                    req.org_id.as_ref().map(|v| UserColumn::OrgId.eq(v)),
                     req.enable.map(|v| UserColumn::Enable.eq(v)),
                 ]
                 .into_iter()
@@ -131,6 +130,18 @@ impl UserRepository for SeaOrmUserRepository {
                 .collect();
                 for c in conditions {
                     cond = cond.add(c);
+                }
+
+                let org_ids: Vec<i64> = req
+                    .org_ids
+                    .as_deref()
+                    .or(req.org_id.as_deref())
+                    .map(parse_id_list)
+                    .unwrap_or_default();
+                if org_ids.len() == 1 {
+                    cond = cond.add(UserColumn::OrgId.eq(org_ids[0]));
+                } else if !org_ids.is_empty() {
+                    cond = cond.add(UserColumn::OrgId.is_in(org_ids));
                 }
 
                 if let Some(role_id) = req.role {
@@ -234,6 +245,10 @@ impl UserRepository for SeaOrmUserRepository {
             })
         })
     }
+}
+
+fn parse_id_list(s: &str) -> Vec<i64> {
+    s.split(',').filter_map(|p| p.trim().parse().ok()).collect()
 }
 
 fn parse_beijing_datetime(s: &str, is_end: bool) -> Option<chrono::DateTime<chrono::Utc>> {

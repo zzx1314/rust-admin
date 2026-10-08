@@ -359,8 +359,12 @@ export function useUser() {
       ...page,
       ...queryForm.value
     };
-    if (query.endTime && !String(query.endTime).includes(" ")) {
-      query.endTime = query.endTime + " 23:59:59";
+    const q = query as any;
+    if (Array.isArray(q.orgIds)) {
+      q.orgIds = q.orgIds.length > 0 ? q.orgIds.join(",") : undefined;
+    }
+    if (q.endTime && !String(q.endTime).includes(" ")) {
+      q.endTime = q.endTime + " 23:59:59";
     }
     const { data } = await userPage(query);
     dataList.value = data.records;

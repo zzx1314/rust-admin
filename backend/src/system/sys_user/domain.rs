@@ -63,6 +63,7 @@ pub struct UserPageQuery {
     pub phone: Option<String>,
     pub email: Option<String>,
     pub org_id: Option<String>,
+    pub org_ids: Option<String>,
     pub enable: Option<i32>,
     pub role: Option<i64>,
     pub begin_time: Option<String>,

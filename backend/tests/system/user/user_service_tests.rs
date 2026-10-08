@@ -200,6 +200,15 @@ impl UserRepository for FakeUserRepository {
                             return false;
                         }
                     }
+                    if let Some(ref ids) = query.org_ids {
+                        let parsed: Vec<i64> = ids
+                            .split(',')
+                            .filter_map(|s| s.trim().parse().ok())
+                            .collect();
+                        if !parsed.is_empty() && !parsed.contains(&u.org_id) {
+                            return false;
+                        }
+                    }
                     if let Some(v) = query.enable {
                         if u.enable != Some(v) {
                             return false;
@@ -584,6 +593,7 @@ async fn test_get_users_page_default() {
             phone: None,
             email: None,
             org_id: None,
+            org_ids: None,
             enable: None,
             role: None,
             begin_time: None,
@@ -630,6 +640,7 @@ async fn test_get_users_page_custom() {
             phone: None,
             email: None,
             org_id: None,
+            org_ids: None,
             enable: None,
             role: None,
             begin_time: None,
@@ -676,6 +687,7 @@ async fn test_get_users_page_out_of_range() {
             phone: None,
             email: None,
             org_id: None,
+            org_ids: None,
             enable: None,
             role: None,
             begin_time: None,
@@ -703,6 +715,7 @@ async fn test_get_users_page_empty() {
             phone: None,
             email: None,
             org_id: None,
+            org_ids: None,
             enable: None,
             role: None,
             begin_time: None,
