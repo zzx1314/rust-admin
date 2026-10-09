@@ -100,7 +100,7 @@ const { loading, addForm, rules, cancel, addFormInfo } = useSysSeting();
             </div>
           </el-form-item>
 
-          <el-form-item label="会话超时时间" prop="sysOvertime" class="is-last">
+          <el-form-item label="超时时间" prop="sysOvertime" class="is-last">
             <div class="field">
               <el-select
                 v-model="addForm.sysOvertime"
