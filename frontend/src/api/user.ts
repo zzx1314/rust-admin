@@ -21,6 +21,10 @@ export type UserResult = {
     expires: string;
     /** 用户id */
     user_id?: string;
+    /** 密码是否已过期 */
+    passwordExpired?: boolean;
+    /** 密码过期时间（格式'xxxx-xx-xx xx:xx:xx'，北京时间） */
+    passwordExpireDate?: string;
   };
 };
 

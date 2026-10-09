@@ -76,6 +76,12 @@ pub struct UserLoginData {
     pub expires: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_id: Option<i64>,
+    /// Whether the password has exceeded the configured validity period.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password_expired: Option<bool>,
+    /// The moment the current password becomes invalid (Beijing time, UTC+8).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password_expire_date: Option<String>,
 }
 
 impl UserLoginVO {
@@ -103,6 +109,8 @@ impl UserLoginVO {
                 refresh_token,
                 expires,
                 user_id: Some(user_id),
+                password_expired: None,
+                password_expire_date: None,
             },
         }
     }
@@ -233,6 +241,40 @@ impl AuthService {
             }
         }
         24 * 60 * 60
+    }
+
+    /// Read the password validity period (in days) from the security policy.
+    /// Returns `None` when the policy is missing or not a positive number, in
+    /// which case passwords never expire.
+    async fn get_pass_change_days(&self) -> Option<i64> {
+        if let Ok(policy) = self.dict_item_service.get_safe_policy().await
+            && let Some(val) = policy.get("sysPassChange")
+        {
+            let text = val.trim().trim_end_matches('天').trim();
+            if let Ok(days) = text.parse::<i64>()
+                && days > 0
+            {
+                return Some(days);
+            }
+        }
+        None
+    }
+
+    /// Determine whether the user's password has expired and, if a validity
+    /// period is configured, when it expires.
+    async fn check_password_expired(&self, user: &User) -> (bool, Option<String>) {
+        let Some(days) = self.get_pass_change_days().await else {
+            return (false, None);
+        };
+        let Some(updated) = user.pass_update_time else {
+            return (false, None);
+        };
+        let expire_at = updated + chrono::Duration::days(days);
+        let expired = chrono::Utc::now() >= expire_at;
+        (
+            expired,
+            Some(crate::common::util::format_datetime(expire_at)),
+        )
     }
 
     pub async fn login(&self, username: &str, password: &str) -> Result<LoginResponse, AppError> {
@@ -650,6 +692,8 @@ impl AuthService {
         let roles = self.get_user_roles(&user_id).await?;
         let permissions = self.get_user_permissions(&user_id).await?;
 
+        let (password_expired, password_expire_date) = self.check_password_expired(&user).await;
+
         let expires = chrono::DateTime::from_timestamp(access_exp as i64, 0)
             .map(|dt| dt.format("%Y/%m/%d %H:%M:%S").to_string())
             .unwrap_or_default();
@@ -664,6 +708,8 @@ impl AuthService {
             nickname: user.real_name.clone(),
             roles,
             permissions,
+            password_expired: Some(password_expired),
+            password_expire_date,
         })
     }
 

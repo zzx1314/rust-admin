@@ -168,7 +168,10 @@ impl CreateUserRequest {
             update_time: ActiveValue::set(now),
             is_deleted: ActiveValue::set(0),
             remarks: set_opt_string(self.remarks.clone()),
-            pass_update_time: ActiveValue::set(None),
+            pass_update_time: match &self.password {
+                Some(_) => ActiveValue::set(Some(now)),
+                None => ActiveValue::set(None),
+            },
             card: set_opt_string(self.card.clone()),
             is_show: ActiveValue::set(Some(1)),
             enable: ActiveValue::set(Some(1)),
@@ -208,6 +211,10 @@ impl UpdateUserRequest {
             },
             last_login_time: match self.last_login_time {
                 Some(v) => ActiveValue::set(Some(v)),
+                None => ActiveValue::not_set(),
+            },
+            pass_update_time: match &self.password {
+                Some(_) => ActiveValue::set(Some(now)),
                 None => ActiveValue::not_set(),
             },
             update_time: ActiveValue::set(now),

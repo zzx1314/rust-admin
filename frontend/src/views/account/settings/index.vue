@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
+import { useRoute } from "vue-router";
 import { message } from "@/utils/message";
 import aesUtils from "@/utils/aes";
 import { getMine, updatePassword } from "@/api/user";
@@ -14,6 +15,7 @@ defineOptions({
   name: "AccountSettings"
 });
 
+const route = useRoute();
 const activeTab = ref("info");
 const loading = ref(false);
 const pwdFormRef = ref();
@@ -123,7 +125,10 @@ function submitPwd() {
   });
 }
 
-onMounted(getMineInfo);
+onMounted(() => {
+  if (route.query.tab === "pwd") activeTab.value = "pwd";
+  getMineInfo();
+});
 </script>
 
 <template>

@@ -8,6 +8,7 @@ import TypeIt from "@/components/ReTypeit";
 import { debounce } from "@pureadmin/utils";
 import { useNav } from "@/layout/hooks/useNav";
 import { useEventListener } from "@vueuse/core";
+import { ElMessageBox } from "element-plus";
 import type { FormInstance } from "element-plus";
 import { $t, transformI18n } from "@/plugins/i18n";
 import { useLayout } from "@/layout/hooks/useLayout";
@@ -58,6 +59,23 @@ const ruleForm = reactive({
   verifyCode: ""
 });
 
+/** 密码过期后提示用户前往修改密码 */
+const promptPasswordExpired = (expireDate?: string) => {
+  const content = expireDate
+    ? `您的密码已于 ${expireDate} 过期，为了账号安全，请尽快修改密码。`
+    : "您的密码已过期，为了账号安全，请尽快修改密码。";
+  ElMessageBox.confirm(content, "密码已过期", {
+    confirmButtonText: "去修改",
+    cancelButtonText: "稍后提醒",
+    type: "warning",
+    closeOnClickModal: false
+  })
+    .then(() => {
+      router.push({ path: "/account/settings", query: { tab: "pwd" } });
+    })
+    .catch(() => {});
+};
+
 const onLogin = async (formEl: FormInstance | undefined) => {
   if (!formEl) return;
   await formEl.validate(valid => {
@@ -80,6 +98,9 @@ const onLogin = async (formEl: FormInstance | undefined) => {
                 .push(getTopMenu(true).path)
                 .then(() => {
                   message(t("login.pureLoginSuccess"), { type: "success" });
+                  if (res.data.passwordExpired) {
+                    promptPasswordExpired(res.data.passwordExpireDate);
+                  }
                 })
                 .finally(() => (disabled.value = false));
             });

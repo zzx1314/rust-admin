@@ -314,7 +314,9 @@ class PureHttp {
               nickname: response.nickname,
               permissions: response.permissions,
               roles: response.roles,
-              user_id: response.user_id
+              user_id: response.user_id,
+              passwordExpired: response.password_expired,
+              passwordExpireDate: response.password_expire_date
             }
           };
           resolve(result);

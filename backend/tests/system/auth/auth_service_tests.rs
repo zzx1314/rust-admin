@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use x_rust::common::error::AppError;
@@ -304,7 +304,33 @@ impl RoleRepository for FakeRoleRepository {
     }
 }
 
-struct FakeSysDictRepository;
+struct FakeSysDictRepository {
+    dicts: Vec<SysDict>,
+}
+
+impl FakeSysDictRepository {
+    fn new() -> Self {
+        Self { dicts: Vec::new() }
+    }
+
+    fn with_policy() -> Self {
+        let now = Utc::now();
+        Self {
+            dicts: vec![SysDict {
+                id: 1,
+                r#type: "sys_security_policy".to_string(),
+                dict_type: None,
+                description: None,
+                remarks: None,
+                create_time: Some(now),
+                update_time: Some(now),
+                is_deleted: 0,
+                allow_deletion: None,
+                is_show: None,
+            }],
+        }
+    }
+}
 
 impl SysDictRepository for FakeSysDictRepository {
     fn create(
@@ -317,8 +343,9 @@ impl SysDictRepository for FakeSysDictRepository {
     fn find_by_id(&self, _id: &i64) -> DynFuture<SeaOrmOptResult<SysDict>> {
         Box::pin(async move { Ok(None) })
     }
-    fn find_by_type(&self, _type: &str) -> DynFuture<SeaOrmOptResult<SysDict>> {
-        Box::pin(async move { Ok(None) })
+    fn find_by_type(&self, r#type: &str) -> DynFuture<SeaOrmOptResult<SysDict>> {
+        let found = self.dicts.iter().find(|d| d.r#type == r#type).cloned();
+        Box::pin(async move { Ok(found) })
     }
     fn find_all(&self) -> DynFuture<SeaOrmResult<Vec<SysDict>>> {
         Box::pin(async move { Ok(Vec::new()) })
@@ -341,7 +368,35 @@ impl SysDictRepository for FakeSysDictRepository {
     }
 }
 
-struct FakeSysDictItemRepository;
+struct FakeSysDictItemRepository {
+    items: Vec<SysDictItem>,
+}
+
+impl FakeSysDictItemRepository {
+    fn new() -> Self {
+        Self { items: Vec::new() }
+    }
+
+    fn with_pass_change(value: &str) -> Self {
+        let now = Utc::now();
+        Self {
+            items: vec![SysDictItem {
+                id: 1,
+                r#type: "sysPassChange".to_string(),
+                label: Some("密码更换周期".to_string()),
+                dict_id: Some(1),
+                value: Some(value.to_string()),
+                sort: 0,
+                description: None,
+                create_time: Some(now),
+                update_time: Some(now),
+                is_deleted: 0,
+                remarks: None,
+                allow_deletion: None,
+            }],
+        }
+    }
+}
 
 impl SysDictItemRepository for FakeSysDictItemRepository {
     fn create(
@@ -357,8 +412,14 @@ impl SysDictItemRepository for FakeSysDictItemRepository {
     fn find_all(&self) -> DynFuture<SeaOrmResult<Vec<SysDictItem>>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
-    fn find_by_dict_id(&self, _dict_id: &i64) -> DynFuture<SeaOrmResult<Vec<SysDictItem>>> {
-        Box::pin(async move { Ok(Vec::new()) })
+    fn find_by_dict_id(&self, dict_id: &i64) -> DynFuture<SeaOrmResult<Vec<SysDictItem>>> {
+        let items: Vec<SysDictItem> = self
+            .items
+            .iter()
+            .filter(|i| i.dict_id == Some(*dict_id))
+            .cloned()
+            .collect();
+        Box::pin(async move { Ok(items) })
     }
     fn find_by_type(&self, _type: &str) -> DynFuture<SeaOrmResult<Vec<SysDictItem>>> {
         Box::pin(async move { Ok(Vec::new()) })
@@ -388,8 +449,21 @@ fn create_auth_service(
     token_store: Arc<dyn TokenStore>,
 ) -> AuthService {
     let role_repo = Arc::new(FakeRoleRepository);
-    let dict_repo: Arc<dyn SysDictRepository> = Arc::new(FakeSysDictRepository);
-    let dict_item_repo: Arc<dyn SysDictItemRepository> = Arc::new(FakeSysDictItemRepository);
+    let dict_repo: Arc<dyn SysDictRepository> = Arc::new(FakeSysDictRepository::new());
+    let dict_item_repo: Arc<dyn SysDictItemRepository> = Arc::new(FakeSysDictItemRepository::new());
+    let dict_item_service = Arc::new(SysDictItemService::new(dict_item_repo, dict_repo));
+    AuthService::new(user_repo, token_store, role_repo, "test-secret", dict_item_service)
+}
+
+fn create_auth_service_with_pass_change(
+    user_repo: Arc<dyn UserRepository>,
+    token_store: Arc<dyn TokenStore>,
+    pass_change: &str,
+) -> AuthService {
+    let role_repo = Arc::new(FakeRoleRepository);
+    let dict_repo: Arc<dyn SysDictRepository> = Arc::new(FakeSysDictRepository::with_policy());
+    let dict_item_repo: Arc<dyn SysDictItemRepository> =
+        Arc::new(FakeSysDictItemRepository::with_pass_change(pass_change));
     let dict_item_service = Arc::new(SysDictItemService::new(dict_item_repo, dict_repo));
     AuthService::new(user_repo, token_store, role_repo, "test-secret", dict_item_service)
 }
@@ -765,4 +839,81 @@ async fn test_logout_invalidates_refresh_token() {
 
     let result = service.refresh_token(&login_result.refresh_token).await;
     assert!(matches!(result, Err(AppError::Unauthorized(_))));
+}
+
+async fn seed_password_user(user_repo: &FakeUserRepository) {
+    let password_hash = md5_encrypt("password123");
+    let req = CreateUserRequest {
+        username: "testuser".to_string(),
+        phone: None,
+        email: Some("test@example.com".to_string()),
+        real_name: None,
+        password: Some(password_hash),
+        org_id: 0,
+        remarks: None,
+        card: None,
+        sex: None,
+        sync_harbor: false,
+        role: None,
+    };
+    user_repo.create(&req, &1i64).await.unwrap();
+}
+
+fn set_pass_update_time(user_repo: &FakeUserRepository, days_ago: i64) {
+    user_repo
+        .users
+        .lock()
+        .unwrap()
+        .get_mut(&1)
+        .unwrap()
+        .pass_update_time = Some(Utc::now() - Duration::days(days_ago));
+}
+
+#[tokio::test]
+async fn test_login_with_vo_flags_expired_password() {
+    let user_repo = Arc::new(FakeUserRepository::new());
+    let token_store = Arc::new(FakeTokenStore::new());
+    let service = create_auth_service_with_pass_change(user_repo.clone(), token_store, "30天");
+
+    seed_password_user(&user_repo).await;
+    set_pass_update_time(&user_repo, 40);
+
+    let data = service
+        .login_with_vo("testuser", "password123")
+        .await
+        .unwrap();
+    assert_eq!(data.password_expired, Some(true));
+    assert!(data.password_expire_date.is_some());
+}
+
+#[tokio::test]
+async fn test_login_with_vo_fresh_password_not_expired() {
+    let user_repo = Arc::new(FakeUserRepository::new());
+    let token_store = Arc::new(FakeTokenStore::new());
+    let service = create_auth_service_with_pass_change(user_repo.clone(), token_store, "30天");
+
+    seed_password_user(&user_repo).await;
+    set_pass_update_time(&user_repo, 1);
+
+    let data = service
+        .login_with_vo("testuser", "password123")
+        .await
+        .unwrap();
+    assert_eq!(data.password_expired, Some(false));
+}
+
+#[tokio::test]
+async fn test_login_with_vo_no_policy_never_expires() {
+    let user_repo = Arc::new(FakeUserRepository::new());
+    let token_store = Arc::new(FakeTokenStore::new());
+    let service = create_auth_service(user_repo.clone(), token_store);
+
+    seed_password_user(&user_repo).await;
+    set_pass_update_time(&user_repo, 3650);
+
+    let data = service
+        .login_with_vo("testuser", "password123")
+        .await
+        .unwrap();
+    assert_eq!(data.password_expired, Some(false));
 }
