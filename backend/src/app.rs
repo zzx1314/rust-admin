@@ -1,5 +1,6 @@
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use sea_orm::DatabaseConnection;
@@ -11,6 +12,7 @@ use crate::business::dog::config::repository::SeaOrmDogConfigRepository;
 use crate::business::dog::config::service::DogConfigService;
 use crate::business::dog::device::repository::SeaOrmDogDeviceRepository;
 use crate::business::dog::device::service::DogDeviceService;
+use crate::business::dog::gateway::DogGateway;
 use crate::business::dog::media::repository::SeaOrmDogMediaRepository;
 use crate::business::dog::media::service::DogMediaService;
 use crate::business::dog::model::repository::SeaOrmDogModelRepository;
@@ -52,7 +54,12 @@ use sea_orm_migration::MigratorTrait;
 
 pub struct App {
     conn: DatabaseConnection,
+    /// Directory used to store files uploaded by devices.
+    upload_dir: PathBuf,
 }
+
+/// Default directory for files uploaded by devices.
+pub const DEFAULT_UPLOAD_DIR: &str = "data/device_uploads";
 
 impl App {
     pub async fn new(database_url: &str) -> Result<Self, AppError> {
@@ -64,18 +71,43 @@ impl App {
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            upload_dir: PathBuf::from(DEFAULT_UPLOAD_DIR),
+        })
     }
 
     /// Build an `App` from an already established (and migrated) connection.
     /// Useful for tests that create their own schema.
     pub fn from_connection(conn: DatabaseConnection) -> Self {
-        Self { conn }
+        Self {
+            conn,
+            upload_dir: PathBuf::from(DEFAULT_UPLOAD_DIR),
+        }
+    }
+
+    /// Same as [`App::from_connection`] with an explicit device upload directory.
+    pub fn from_connection_with_upload_dir(
+        conn: DatabaseConnection,
+        upload_dir: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            conn,
+            upload_dir: upload_dir.into(),
+        }
+    }
+
+    pub fn upload_dir(&self) -> &std::path::Path {
+        &self.upload_dir
     }
 
     pub fn build_state(&self, config: &AppConfig) -> AppState {
         let token_store: Arc<dyn TokenStore> = Arc::new(RedisTokenStore::new(&config.redis.url()));
-        self.build_state_with_token_store(token_store, &config.jwt_secret)
+        self.build_state_with(
+            token_store,
+            &config.jwt_secret,
+            PathBuf::from(&config.dog.upload_dir),
+        )
     }
 
     /// Build the application state with an explicit token store so that tests
@@ -84,6 +116,15 @@ impl App {
         &self,
         token_store: Arc<dyn TokenStore>,
         jwt_secret: &str,
+    ) -> AppState {
+        self.build_state_with(token_store, jwt_secret, self.upload_dir.clone())
+    }
+
+    fn build_state_with(
+        &self,
+        token_store: Arc<dyn TokenStore>,
+        jwt_secret: &str,
+        upload_dir: PathBuf,
     ) -> AppState {
         let conn = Arc::new(self.conn.clone());
 
@@ -165,6 +206,8 @@ impl App {
             dog_command_repo,
         ));
 
+        let dog_gateway = Arc::new(DogGateway::new(conn.clone(), upload_dir));
+
         AppState {
             user_service,
             role_service,
@@ -185,6 +228,7 @@ impl App {
             dog_workflow_service,
             dog_services_service,
             dog_statistics_service,
+            dog_gateway,
         }
     }
 

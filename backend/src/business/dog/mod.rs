@@ -1,6 +1,7 @@
 pub mod command;
 pub mod config;
 pub mod device;
+pub mod gateway;
 pub mod media;
 pub mod model;
 pub mod route_library;

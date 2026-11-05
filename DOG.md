@@ -11,6 +11,9 @@
 | 层 | 位置 |
 | --- | --- |
 | 后端业务代码 | `backend/src/business/dog/{device,task,media,model,config,command,route_library,services,workflow,statistics}/` |
+| 设备接入网关 | `backend/src/business/dog/gateway/`（设备 token、注册、WebSocket、任务下发、文件上传、结果回写） |
+| 设备端客户端 | `client/`（Rust crate `dog-device-client`，见 `client/README.md`） |
+| 通信端到端测试 | `backend/tests/business/dog_gateway_tests.rs` |
 | 后端路由 | `backend/src/api/routes.rs`（每个子域一个 `dog_*_routes`，统一挂 `require_auth`） |
 | 服务装配 | `backend/src/app.rs` → `App::build_state_with_token_store` |
 | 数据库迁移 | `backend/migrations/dog/7_create_dog_tables.sql`（建表）、`backend/migrations/p_sys/9_add_dog_menus.sql`（菜单） |
@@ -57,6 +60,15 @@ PUT    /api/dogTask/status/{id}     仅回写任务状态
 PUT    /api/dogCommand/status/{id}  仅回写指令状态与返回值
 GET    /api/dogWorkflow/uuid/{uuid} 按工作流 UUID 查询
 GET    /api/dogStatistics/{all,allType,deviceTypeNumber}
+
+# 设备网关（设备 token 鉴权）
+GET    /api/dogGateway/auth/{deviceId}        下发设备 token（10 分钟有效）
+POST   /api/dogGateway/register               注册/刷新设备（Authorization: <token>）
+WS     /api/notice/{deviceId}/{token}         设备长连接（心跳 / 任务 / 结果 / 文件）
+
+# 设备网关（用户 JWT 鉴权）
+POST   /api/dogGateway/dispatch               手动向设备推送任意 JSON
+GET    /api/dogGateway/connections            当前在线设备
 ```
 
 - `module` ∈ `dogDevice`、`dogTask`、`dogMedia`、`dogModel`、`dogConfig`、`dogCommand`、`dogRoute`、`dogServices`、`dogWorkflow`。
@@ -72,6 +84,11 @@ GET    /api/dogStatistics/{all,allType,deviceTypeNumber}
 - **字段命名**：请求/响应使用小驼峰（登录接口 `/api/token` 例外，为 snake_case）。
 - **时间**：数据库存 UTC，响应统一转北京时间（UTC+8）字符串；查询区间按北京时间解析。
 - **主键生成**：与系统模块保持一致，使用毫秒时间戳；如需批量导入请自行指定/规避同一毫秒。
+- **设备接入**：设备先取 token（`GET /api/dogGateway/auth/{deviceId}`），再注册（`dog_device` 初始 `offline`），随后连 `WS /api/notice/{deviceId}/{token}`；心跳会把 `status` 置为 `online` 并刷新 `comm_time` 与遥测字段；WebSocket 断开（正常关闭或连接异常）时置回 `offline`。
+- **任务下发**：管理端 `POST /api/dogCommand` 创建指令后，若目标设备在线则立即通过 WebSocket 推送并把指令状态置为 `sent`；设备回报后写回 `status`/`return_value`。也可用 `POST /api/dogGateway/dispatch` 推送自定义 JSON。
+- **设备上传**：`file_start` → 二进制帧（单流上限 256 MiB）→ `file_end`，文件落盘到 `[dog] upload_dir`（默认 `data/device_uploads`）并写入 `dog_media`。
+- **设备认证信任边界**：`GET /api/dogGateway/auth/{deviceId}` 与旧网关一致，按设备号直接下发 token，不校验证书；生产环境需在入口层做 mTLS / 内网隔离 / 反向代理鉴权，或在该接口前置设备白名单。
+- **在线连接表**：内存态（`DeviceRegistry`），因此网关按单实例部署；多实例需引入共享总线（如 Redis pub/sub）。
 - **菜单**：左侧菜单由数据库驱动（`p_sys_menu` + `p_sys_role_menu`），`component` 需能唯一匹配 `frontend/src/views/<component>/index.vue`，因此这里使用 `dog/device` 这类带目录前缀的写法（避免与 `views/charging/device` 冲突）。菜单图标使用离线图标，需在 `frontend/src/components/ReIcon/src/offlineIcon.ts` 注册。
 
 ---
@@ -83,6 +100,7 @@ GET    /api/dogStatistics/{all,allType,deviceTypeNumber}
 | `数量统计`（上周/本周） | 后端返回全 0 的占位数据，尚未做按周聚合 |
 | `设备统计`（按设备类型） | 后端返回空数组，尚未实现 |
 | 工作流列表 | 无分页接口，前端表格无数据源，仅能新增 / 按 ID、UUID 查询 / 修改 / 删除 |
-| 文件上传 | 模型与媒体只保存路径字段，没有上传/下载接口 |
-| 设备通信 | 后端没有 MQTT/WebSocket 等通信层，指令与状态均为数据库记录，由外部系统回写 |
+| 文件上传 | 设备上传已实现（`/api/notice` 二进制流 → `dog_media`）；模型/媒体的管理页面仍只填写路径，没有浏览器上传接口 |
+| 设备通信 | 已实现 WebSocket 网关（心跳/任务/结果/文件）；尚未迁移旧 C 客户端的 TCP:9000 文件帧通道与其他 MQTT 接入方式 |
+| 网关多实例 | 连接表在进程内存中，多副本部署时设备只会连到其中一个实例 |
 | 按钮级权限 | 已初始化 `dog_*_find` 权限码并挂到超级管理员角色，但页面暂未使用 `v-auth` 做按钮控制 |

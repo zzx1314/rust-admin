@@ -13,6 +13,7 @@ A full-stack admin panel built with a **Rust** backend and **Vue 3** frontend. T
 - **System Log**: Operation logging with pagination and sensitive data masking
 - **Request Logging Middleware**: Automatic HTTP request tracking with response time measurement
 - **Robot Dog Business Module**: device / task / route / model / media / command / config / services / workflow CRUD plus dashboard statistics (see [DOG.md](DOG.md))
+- **Device Gateway & Client**: device token auth, WebSocket task dispatch, heartbeat/telemetry, command reporting and file upload, with a Rust device client in [`client/`](client/README.md)
 
 ## 🏗️ Architecture
 
@@ -26,9 +27,10 @@ rust-admin/
 │   │   ├── config/    # Application configuration
 │   │   ├── migration/ # Database migrations
 │   │   ├── system/    # Platform modules (user, role, menu, org, dict, log, auth)
-│   │   └── business/  # Business domain (dog: device, task, route, model, ...)
+│   │   └── business/  # Business domain (dog: device, task, route, model, gateway, ...)
 │   ├── tests/         # Integration tests (organized by module)
 │   └── config.toml    # Server, Redis, and database configuration
+├── client/            # Rust device client (auth, websocket link, task execution, upload)
 └── frontend/          # Vue 3 admin panel (vue-pure-admin)
     ├── src/
     │   ├── api/       # API service functions

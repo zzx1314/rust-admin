@@ -15,11 +15,33 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct DogConfig {
+    /// Directory where files uploaded by devices are stored.
+    #[serde(default = "default_dog_upload_dir")]
+    pub upload_dir: String,
+}
+
+fn default_dog_upload_dir() -> String {
+    "data/device_uploads".to_string()
+}
+
+impl Default for DogConfig {
+    fn default() -> Self {
+        Self {
+            upload_dir: default_dog_upload_dir(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     pub server: ServerConfig,
     pub redis: RedisConfig,
     pub jwt_secret: String,
     pub database_url: String,
+    /// Optional `[dog]` section; device uploads default to `data/device_uploads`.
+    #[serde(default)]
+    pub dog: DogConfig,
 }
 
 impl RedisConfig {
@@ -46,5 +68,17 @@ impl AppConfig {
             .build()?;
 
         config.try_deserialize()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loads_config_file_with_dog_section() {
+        let config = AppConfig::new().expect("config/config.toml must stay parseable");
+        assert!(!config.database_url.is_empty());
+        assert_eq!(config.dog.upload_dir, "data/device_uploads");
     }
 }

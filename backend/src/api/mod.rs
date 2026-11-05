@@ -1,6 +1,7 @@
 use crate::business::dog::command::service::DogCommandService;
 use crate::business::dog::config::service::DogConfigService;
 use crate::business::dog::device::service::DogDeviceService;
+use crate::business::dog::gateway::DogGateway;
 use crate::business::dog::media::service::DogMediaService;
 use crate::business::dog::model::service::DogModelService;
 use crate::business::dog::route_library::service::DogRouteLibraryService;
@@ -43,4 +44,5 @@ pub struct AppState {
     pub dog_workflow_service: Arc<DogWorkflowService>,
     pub dog_services_service: Arc<DogServicesService>,
     pub dog_statistics_service: Arc<DogStatisticsService>,
+    pub dog_gateway: Arc<DogGateway>,
 }

@@ -333,11 +333,7 @@ impl FakeSysDictRepository {
 }
 
 impl SysDictRepository for FakeSysDictRepository {
-    fn create(
-        &self,
-        _req: &CreateSysDictRequest,
-        _id: &i64,
-    ) -> DynFuture<SeaOrmResult<SysDict>> {
+    fn create(&self, _req: &CreateSysDictRequest, _id: &i64) -> DynFuture<SeaOrmResult<SysDict>> {
         Box::pin(async move { unimplemented!() })
     }
     fn find_by_id(&self, _id: &i64) -> DynFuture<SeaOrmOptResult<SysDict>> {
@@ -452,7 +448,13 @@ fn create_auth_service(
     let dict_repo: Arc<dyn SysDictRepository> = Arc::new(FakeSysDictRepository::new());
     let dict_item_repo: Arc<dyn SysDictItemRepository> = Arc::new(FakeSysDictItemRepository::new());
     let dict_item_service = Arc::new(SysDictItemService::new(dict_item_repo, dict_repo));
-    AuthService::new(user_repo, token_store, role_repo, "test-secret", dict_item_service)
+    AuthService::new(
+        user_repo,
+        token_store,
+        role_repo,
+        "test-secret",
+        dict_item_service,
+    )
 }
 
 fn create_auth_service_with_pass_change(
@@ -465,7 +467,13 @@ fn create_auth_service_with_pass_change(
     let dict_item_repo: Arc<dyn SysDictItemRepository> =
         Arc::new(FakeSysDictItemRepository::with_pass_change(pass_change));
     let dict_item_service = Arc::new(SysDictItemService::new(dict_item_repo, dict_repo));
-    AuthService::new(user_repo, token_store, role_repo, "test-secret", dict_item_service)
+    AuthService::new(
+        user_repo,
+        token_store,
+        role_repo,
+        "test-secret",
+        dict_item_service,
+    )
 }
 
 // ==================== Auth Service Tests ====================

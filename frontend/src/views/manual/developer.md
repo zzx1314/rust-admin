@@ -216,6 +216,33 @@ Authorization: Bearer <access_token>
 
 ---
 
+### 4.11 设备网关 `/api/dogGateway`
+
+设备（机器人本体）接入用的接口，鉴权方式是 **设备 token**，与用户 JWT 无关。
+
+| 接口 | 方法 | 说明 |
+| ---- | ---- | ---- |
+| `/api/dogGateway/auth/{deviceId}` | GET | 下发设备 token（10 分钟有效，使用时自动续期） |
+| `/api/dogGateway/register` | POST | 注册/刷新设备，需 `Authorization: <token>`（兼容 `Bearer <token>`）；设备初始状态 `offline` |
+| `/api/notice/{deviceId}/{token}` | WS | 设备长连接，用 URL 中的 token 鉴权 |
+| `/api/dogGateway/dispatch` | POST | 管理端手动推送任意 JSON 到设备（需用户 JWT） |
+| `/api/dogGateway/connections` | GET | 当前在线设备列表（需用户 JWT） |
+
+WebSocket 报文：
+
+| 方向 | 报文 | 说明 |
+| ---- | ---- | ---- |
+| 设备 → 服务端 | `{"type":"heartbeat","deviceId":"dog-001","status":"success","drones":{"speed":"1.2","height":"0","battery":"88","course":"90","location":"31.23,121.47"}}` | 心跳；服务端回 `{"type":"report","status":"online","msg":"success"}`，并更新 `dog_device.status/comm_time` 及遥测字段 |
+| 服务端 → 设备 | `{"type":"server-command","deviceId":"dog-001","missionId":"<指令ID>","commandId":<指令ID>,"commandName":"巡检","commandType":"task","taskId":null,"params":{...},"timestamp":"..."}` | 新建指令时若设备在线立即推送；`params` 为指令的 `commandParams`（字符串会尝试解析为 JSON） |
+| 设备 → 服务端 | `{"type":"server-command","commandId":<指令ID>,"status":"success","returnValue":"..."}` | 执行结果，写回 `dog_command.status/return_value`（也兼容 `report` 的 `id` 与 `torosReport` 的 `missionId`） |
+| 设备 → 服务端 | `{"type":"file_start","streamId":"stream-1","fileName":"a.jpg","mediaType":"image"}` → 若干二进制帧 → `{"type":"file_end","streamId":"stream-1"}` | 文件上传；服务端回 `{"type":"file_ack","streamId":"stream-1","status":"success","path":"..."}`，文件写入 `[dog] upload_dir` 并登记到 `dog_media` |
+
+其它说明：
+
+- 单条上传流上限 256 MiB，超过会被丢弃；文件名会被清洗（去掉目录与特殊字符）。
+- 连接表保存在后端进程内存中，网关按单实例部署；多副本需要引入共享总线。
+- 设备端实现见仓库 `client/`（`dog-device-client`，`client/README.md`），端到端验证见 `backend/tests/business/dog_gateway_tests.rs`。
+
 ## 5. 调用示例
 
 ```bash
@@ -255,8 +282,14 @@ cd backend && cargo run
 # 前端
 cd frontend && pnpm dev
 
-# 后端自测
+# 设备客户端（认证 → 注册 → 建链 → 心跳验证）
+cd client && cargo run -- --device-id dog-001 --once
+
+# 后端自测（含设备网关端到端测试）
 cd backend && cargo test && cargo clippy -- -D warnings
+
+# 客户端自测
+cd client && cargo test
 ```
 
 新增菜单/页面时需要同时维护：
@@ -265,3 +298,5 @@ cd backend && cargo test && cargo clippy -- -D warnings
 2. `backend/migrations/*` 中的菜单数据（左侧菜单由数据库 `p_sys_menu` 驱动，并需在 `p_sys_role_menu` 中授权）；
 3. `frontend/src/views/**` 页面与 `frontend/src/api/*.ts` 请求封装，菜单的 `component` 字段需能在 `frontend/src/views` 下唯一匹配到 `index.vue`；
 4. 若菜单用到的图标是离线图标，还需在 `frontend/src/components/ReIcon/src/offlineIcon.ts` 注册。
+
+设备上传目录通过 `backend/config/config.toml` 的 `[dog] upload_dir` 配置（默认 `data/device_uploads`）。

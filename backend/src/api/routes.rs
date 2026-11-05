@@ -10,6 +10,7 @@ use crate::api::middleware::{audit_log_middleware, require_auth};
 use crate::business::dog::command::handlers as dog_command_handlers;
 use crate::business::dog::config::handlers as dog_config_handlers;
 use crate::business::dog::device::handlers as dog_device_handlers;
+use crate::business::dog::gateway::handlers as dog_gateway_handlers;
 use crate::business::dog::media::handlers as dog_media_handlers;
 use crate::business::dog::model::handlers as dog_model_handlers;
 use crate::business::dog::route_library::handlers as dog_route_handlers;
@@ -445,6 +446,38 @@ pub fn dog_services_routes(state: AppState) -> Router<AppState> {
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 
+/// Device facing gateway routes: token issuing and registration carry a device
+/// token (not a user JWT), and the WebSocket path authenticates via its URL.
+pub fn dog_gateway_device_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/dogGateway/auth/{device_id}",
+            get(dog_gateway_handlers::device_auth_handler),
+        )
+        .route(
+            "/dogGateway/register",
+            post(dog_gateway_handlers::register_device_handler),
+        )
+        .route(
+            "/notice/{device_id}/{token}",
+            get(dog_gateway_handlers::device_notice_handler),
+        )
+}
+
+/// Admin facing gateway routes (user JWT required).
+pub fn dog_gateway_admin_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route(
+            "/dogGateway/dispatch",
+            post(dog_gateway_handlers::dispatch_handler),
+        )
+        .route(
+            "/dogGateway/connections",
+            get(dog_gateway_handlers::connections_handler),
+        )
+        .layer(from_fn_with_state(state.clone(), require_auth))
+}
+
 pub fn create_router(state: AppState) -> Router {
     let api_router = Router::new()
         .merge(auth_routes())
@@ -466,7 +499,9 @@ pub fn create_router(state: AppState) -> Router {
         .merge(dog_route_routes(state.clone()))
         .merge(dog_workflow_routes(state.clone()))
         .merge(dog_services_routes(state.clone()))
-        .merge(dog_statistics_routes(state.clone()));
+        .merge(dog_statistics_routes(state.clone()))
+        .merge(dog_gateway_device_routes())
+        .merge(dog_gateway_admin_routes(state.clone()));
 
     Router::new()
         .nest("/api", api_router)

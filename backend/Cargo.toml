@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 aes = "0.8"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 axum-extra = { version = "0.10", features = ["cookie", "typed-header"] }
 base64 = "0.22"
 bcrypt = "0.16"
@@ -35,6 +35,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 axum-test = "18"
+dog-device-client = { path = "../client" }
 tower = { version = "0.5", features = ["util"] }
 
 [lib]
@@ -118,3 +119,7 @@ path = "tests/system/sys_log/sys_log_service_tests.rs"
 [[test]]
 name = "logging_middleware_tests"
 path = "tests/logging/logging_middleware_tests.rs"
+
+[[test]]
+name = "dog_gateway_tests"
+path = "tests/business/dog_gateway_tests.rs"

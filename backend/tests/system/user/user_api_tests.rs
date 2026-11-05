@@ -564,7 +564,6 @@ async fn test_get_users_page_with_params() {
     assert_eq!(data.get("size").unwrap().as_i64().unwrap(), 2);
 }
 
-
 #[tokio::test]
 async fn test_get_users_page_requires_auth() {
     let (app, _db_path) = create_test_app().await;

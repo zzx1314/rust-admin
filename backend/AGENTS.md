@@ -60,6 +60,8 @@ cargo test --test auth_service_tests  # 运行 auth service tests
 ├── business/                   # Product/business domains
 │   └── dog/                    # Robot dog domain: device, task, media, model, config,
 │                               #   command, route library, workflow, services, statistics
+│       └── gateway/            # Device gateway: token auth, registration, WebSocket,
+│                               #   task dispatch, heartbeat, command results, uploads
 │
 ├── common/                     # Common/shared code
 │   ├── base.rs                 # BaseRepository, RepoExt traits
@@ -92,12 +94,15 @@ tests/                          # Integration tests grouped by system/business d
 │   ├── sys_dict/                  # Dictionary tests
 │   ├── sys_dict_item/             # Dictionary item tests
 │   └── sys_log/                   # System log tests
+├── business/                    # Business domain tests
+│   └── dog_gateway_tests.rs      # Device gateway end-to-end (uses the `dog-device-client` crate)
 ├── common/                        # Shared utility/value-object tests
 └── logging/                       # HTTP middleware tests
 ```
 
 ### Test Configuration
-Tests are organized under `tests/system/` according to the production module boundary. Each test file is explicitly declared in `Cargo.toml` via `[[test]]` entries. Run with `cargo test --test <name>` (name from `[[test]]` block, not file path).
+Tests are organized under `tests/system/` (and `tests/business/` for business domain
+end-to-end tests) according to the production module boundary. Each test file is explicitly declared in `Cargo.toml` via `[[test]]` entries. Run with `cargo test --test <name>` (name from `[[test]]` block, not file path).
 
 Integration tests that need an `AppState` should build it with `App::from_connection(conn)` + `build_state_with_token_store(...)` instead of wiring every service by hand.
 
