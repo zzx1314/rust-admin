@@ -4,10 +4,10 @@
 
 ## 1. 服务地址与环境
 
-| 环境   | 地址                                        |
-| ------ | ------------------------------------------- |
-| 后端   | `http://127.0.0.1:3000`（端口见 `backend/config/config.toml`） |
-| 管理后台 | `pnpm dev` 后访问 Vite 输出地址，`/api` 自动代理到后端 |
+| 环境     | 地址                                                           |
+| -------- | -------------------------------------------------------------- |
+| 后端     | `http://127.0.0.1:3000`（端口见 `backend/config/config.toml`） |
+| 管理后台 | `pnpm dev` 后访问 Vite 输出地址，`/api` 自动代理到后端         |
 
 数据库文件为 `backend/data/users.db`（SQLite），服务启动时自动执行 `backend/migrations` 下的 SQL 迁移。
 
@@ -22,12 +22,12 @@ POST /api/token
 Content-Type: application/x-www-form-urlencoded
 ```
 
-| 参数         | 必填 | 说明                                                         |
-| ------------ | ---- | ------------------------------------------------------------ |
-| `username`   | 是   | 用户名                                                       |
+| 参数         | 必填 | 说明                                                                                                                |
+| ------------ | ---- | ------------------------------------------------------------------------------------------------------------------- |
+| `username`   | 是   | 用户名                                                                                                              |
 | `password`   | 是   | 密码密文。为 AES-128-CBC + ZeroPadding 后的 Base64 字符串（与管理后台登录页一致，参考 `frontend/src/utils/aes.ts`） |
-| `grant_type` | 是   | 固定 `password`                                              |
-| `scope`      | 是   | 固定 `server`                                                |
+| `grant_type` | 是   | 固定 `password`                                                                                                     |
+| `scope`      | 是   | 固定 `server`                                                                                                       |
 
 响应（成功）：
 
@@ -60,13 +60,13 @@ Authorization: Bearer <access_token>
 
 ### 2.3 刷新 / 注销 / 校验
 
-| 接口                                  | 方法 | 说明                                       |
-| ------------------------------------- | ---- | ------------------------------------------ |
-| `/api/token/refresh/{refresh_token}`  | GET  | 用 refresh token 换新的 `accessToken`（响应为驼峰字段 `accessToken`/`refreshToken`/`expiresIn`） |
-| `/api/token/logout`                   | GET  | 注销当前 token（需 Bearer）                |
-| `/api/token/check_token`              | GET  | 校验 token 是否有效（需 Bearer）           |
-| `/api/sysUser/info`                   | GET  | 当前登录用户信息（需 Bearer）              |
-| `/api/sysMenu/user-menu`              | GET  | 当前用户可见菜单树（需 Bearer）            |
+| 接口                                 | 方法 | 说明                                                                                             |
+| ------------------------------------ | ---- | ------------------------------------------------------------------------------------------------ |
+| `/api/token/refresh/{refresh_token}` | GET  | 用 refresh token 换新的 `accessToken`（响应为驼峰字段 `accessToken`/`refreshToken`/`expiresIn`） |
+| `/api/token/logout`                  | GET  | 注销当前 token（需 Bearer）                                                                      |
+| `/api/token/check_token`             | GET  | 校验 token 是否有效（需 Bearer）                                                                 |
+| `/api/sysUser/info`                  | GET  | 当前登录用户信息（需 Bearer）                                                                    |
+| `/api/sysMenu/user-menu`             | GET  | 当前用户可见菜单树（需 Bearer）                                                                  |
 
 ---
 
@@ -75,7 +75,7 @@ Authorization: Bearer <access_token>
 ### 3.1 响应结构
 
 ```json
-{ "code": 10200, "msg": "success", "data": { } }
+{ "code": 10200, "msg": "success", "data": {} }
 ```
 
 - `code = 10200` 表示成功，其它值为错误码（HTTP 状态码同步为非 2xx）。
@@ -104,15 +104,15 @@ Authorization: Bearer <access_token>
 
 ### 4.1 设备 `/api/dogDevice`
 
-| 接口                            | 方法   | 说明 |
-| ------------------------------- | ------ | ---- |
-| `/api/dogDevice/getPage`        | GET    | 分页查询：`deviceId`、`deviceType`（模糊）、`status`（精确）、`beginTime`、`endTime`、`current`、`size` |
-| `/api/dogDevice/getAll`         | GET    | 全量列表 |
-| `/api/dogDevice`                | POST   | 新增，`deviceId` 必填；`status` 默认 `offline` |
-| `/api/dogDevice/{id}`           | GET    | 详情 |
-| `/api/dogDevice/{id}`           | PUT    | 修改（只更新传入的字段） |
-| `/api/dogDevice/{id}`           | DELETE | 软删除 |
-| `/api/dogDevice/status/{id}`    | PUT    | 仅回写状态，请求体 `{ "status": "online" }`（不传 `status` 时按 `offline` 处理） |
+| 接口                         | 方法   | 说明                                                                                                    |
+| ---------------------------- | ------ | ------------------------------------------------------------------------------------------------------- |
+| `/api/dogDevice/getPage`     | GET    | 分页查询：`deviceId`、`deviceType`（模糊）、`status`（精确）、`beginTime`、`endTime`、`current`、`size` |
+| `/api/dogDevice/getAll`      | GET    | 全量列表                                                                                                |
+| `/api/dogDevice`             | POST   | 新增，`deviceId` 必填；`status` 默认 `offline`                                                          |
+| `/api/dogDevice/{id}`        | GET    | 详情                                                                                                    |
+| `/api/dogDevice/{id}`        | PUT    | 修改（只更新传入的字段）                                                                                |
+| `/api/dogDevice/{id}`        | DELETE | 软删除                                                                                                  |
+| `/api/dogDevice/status/{id}` | PUT    | 仅回写状态，请求体 `{ "status": "online" }`（不传 `status` 时按 `offline` 处理）                        |
 
 字段：`deviceId`、`deviceType`、`status`、`deviceIp`、`model`、`speed`、`height`、`battery`、`course`、`location`、`commTime`（只读）、`createTime`、`updateTime`。
 
@@ -120,89 +120,89 @@ Authorization: Bearer <access_token>
 
 ### 4.2 任务 `/api/dogTask`
 
-| 接口                          | 方法   | 说明 |
-| ----------------------------- | ------ | ---- |
-| `/api/dogTask/getPage`        | GET    | `taskName`（模糊）、`taskStatus`（精确）、`deviceId`、`userId`、`beginTime`、`endTime`、`current`、`size` |
-| `/api/dogTask/getAll`         | GET    | 全量列表 |
-| `/api/dogTask`                | POST   | 新增，`taskName` 必填；`taskStatus` 默认 `pending` |
-| `/api/dogTask/{id}`           | GET / PUT / DELETE | 详情 / 修改 / 软删除 |
-| `/api/dogTask/status/{id}`    | PUT    | 仅回写状态，请求体 `{ "taskStatus": "running" }` |
+| 接口                       | 方法               | 说明                                                                                                      |
+| -------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------- |
+| `/api/dogTask/getPage`     | GET                | `taskName`（模糊）、`taskStatus`（精确）、`deviceId`、`userId`、`beginTime`、`endTime`、`current`、`size` |
+| `/api/dogTask/getAll`      | GET                | 全量列表                                                                                                  |
+| `/api/dogTask`             | POST               | 新增，`taskName` 必填；`taskStatus` 默认 `pending`                                                        |
+| `/api/dogTask/{id}`        | GET / PUT / DELETE | 详情 / 修改 / 软删除                                                                                      |
+| `/api/dogTask/status/{id}` | PUT                | 仅回写状态，请求体 `{ "taskStatus": "running" }`                                                          |
 
 字段：`taskName`、`taskDescription`、`taskStatus`、`workflowId`、`workflowUuid`、`deviceId`、`routeId`、`createTime`、`updateTime`。
 
 ### 4.3 路线 `/api/dogRoute`
 
-| 接口                       | 方法   | 说明 |
-| -------------------------- | ------ | ---- |
-| `/api/dogRoute/getPage`    | GET    | `routeName`、`routeType`、`routeStatus`、`beginTime`、`endTime`、`current`、`size` |
-| `/api/dogRoute/getAll`     | GET    | 全量列表 |
-| `/api/dogRoute`            | POST   | 新增，`routeName`、`modelId` 必填 |
-| `/api/dogRoute/{id}`       | GET / PUT / DELETE | 详情 / 修改 / 软删除 |
+| 接口                    | 方法               | 说明                                                                               |
+| ----------------------- | ------------------ | ---------------------------------------------------------------------------------- |
+| `/api/dogRoute/getPage` | GET                | `routeName`、`routeType`、`routeStatus`、`beginTime`、`endTime`、`current`、`size` |
+| `/api/dogRoute/getAll`  | GET                | 全量列表                                                                           |
+| `/api/dogRoute`         | POST               | 新增，`routeName`、`modelId` 必填                                                  |
+| `/api/dogRoute/{id}`    | GET / PUT / DELETE | 详情 / 修改 / 软删除                                                               |
 
 字段：`routeName`、`routeType`、`routeStatus`、`routeDescription`、`modelId`（`NOT NULL`）、`routeData`（建议 JSON 字符串）、`createTime`、`updateTime`。
 
 ### 4.4 模型 `/api/dogModel`
 
-| 接口                       | 方法   | 说明 |
-| -------------------------- | ------ | ---- |
-| `/api/dogModel/getPage`    | GET    | `modelName`、`modelType`、`beginTime`、`endTime`、`current`、`size` |
-| `/api/dogModel/getAll`     | GET    | 全量列表 |
-| `/api/dogModel`            | POST   | 新增，`modelName` 必填 |
-| `/api/dogModel/{id}`       | GET / PUT / DELETE | 详情 / 修改 / 软删除 |
+| 接口                    | 方法               | 说明                                                                |
+| ----------------------- | ------------------ | ------------------------------------------------------------------- |
+| `/api/dogModel/getPage` | GET                | `modelName`、`modelType`、`beginTime`、`endTime`、`current`、`size` |
+| `/api/dogModel/getAll`  | GET                | 全量列表                                                            |
+| `/api/dogModel`         | POST               | 新增，`modelName` 必填                                              |
+| `/api/dogModel/{id}`    | GET / PUT / DELETE | 详情 / 修改 / 软删除                                                |
 
 字段：`modelName`、`modelType`、`fileName`、`filePath`、`fileFormat`、`fileSize`、`remarks`、`createTime`、`updateTime`。
 
 ### 4.5 媒体 `/api/dogMedia`
 
-| 接口                       | 方法   | 说明 |
-| -------------------------- | ------ | ---- |
-| `/api/dogMedia/getPage`    | GET    | `mediaName`、`mediaType`、`beginTime`、`endTime`、`current`、`size` |
-| `/api/dogMedia/getAll`     | GET    | 全量列表 |
-| `/api/dogMedia`            | POST   | 新增，`mediaName` 必填 |
-| `/api/dogMedia/{id}`       | GET / PUT / DELETE | 详情 / 修改 / 软删除 |
+| 接口                    | 方法               | 说明                                                                |
+| ----------------------- | ------------------ | ------------------------------------------------------------------- |
+| `/api/dogMedia/getPage` | GET                | `mediaName`、`mediaType`、`beginTime`、`endTime`、`current`、`size` |
+| `/api/dogMedia/getAll`  | GET                | 全量列表                                                            |
+| `/api/dogMedia`         | POST               | 新增，`mediaName` 必填                                              |
+| `/api/dogMedia/{id}`    | GET / PUT / DELETE | 详情 / 修改 / 软删除                                                |
 
 字段：`mediaName`、`mediaType`、`mediaPath`、`mediaSize`、`remarks`、`createTime`、`updateTime`。
 
 ### 4.6 指令 `/api/dogCommand`
 
-| 接口                            | 方法   | 说明 |
-| ------------------------------- | ------ | ---- |
-| `/api/dogCommand/getPage`       | GET    | `commandName`、`commandType`、`status`、`deviceId`、`taskId`、`beginTime`、`endTime`、`current`、`size` |
-| `/api/dogCommand/getAll`        | GET    | 全量列表 |
-| `/api/dogCommand`               | POST   | 新增，`commandName` 必填；`status` 默认 `pending` |
-| `/api/dogCommand/{id}`          | GET / PUT / DELETE | 详情 / 修改 / 软删除 |
-| `/api/dogCommand/status/{id}`   | PUT    | 仅回写状态与返回值，请求体 `{ "status": "done", "returnValue": "..." }` |
+| 接口                          | 方法               | 说明                                                                                                    |
+| ----------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------- |
+| `/api/dogCommand/getPage`     | GET                | `commandName`、`commandType`、`status`、`deviceId`、`taskId`、`beginTime`、`endTime`、`current`、`size` |
+| `/api/dogCommand/getAll`      | GET                | 全量列表                                                                                                |
+| `/api/dogCommand`             | POST               | 新增，`commandName` 必填；`status` 默认 `pending`                                                       |
+| `/api/dogCommand/{id}`        | GET / PUT / DELETE | 详情 / 修改 / 软删除                                                                                    |
+| `/api/dogCommand/status/{id}` | PUT                | 仅回写状态与返回值，请求体 `{ "status": "done", "returnValue": "..." }`                                 |
 
 字段：`commandName`、`commandType`、`commandParams`、`deviceId`、`status`、`returnValue`、`taskId`、`createTime`、`updateTime`。
 
 ### 4.7 参数配置 `/api/dogConfig`
 
-| 接口                        | 方法   | 说明 |
-| --------------------------- | ------ | ---- |
-| `/api/dogConfig/getPage`    | GET    | `configName`、`beginTime`、`endTime`、`current`、`size` |
-| `/api/dogConfig/getAll`     | GET    | 全量列表 |
-| `/api/dogConfig`            | POST   | 新增，`configName` 必填 |
-| `/api/dogConfig/{id}`       | GET / PUT / DELETE | 详情 / 修改 / 软删除 |
+| 接口                     | 方法               | 说明                                                    |
+| ------------------------ | ------------------ | ------------------------------------------------------- |
+| `/api/dogConfig/getPage` | GET                | `configName`、`beginTime`、`endTime`、`current`、`size` |
+| `/api/dogConfig/getAll`  | GET                | 全量列表                                                |
+| `/api/dogConfig`         | POST               | 新增，`configName` 必填                                 |
+| `/api/dogConfig/{id}`    | GET / PUT / DELETE | 详情 / 修改 / 软删除                                    |
 
 字段：`configName`、`configValue`、`description`、`createTime`、`updateTime`。
 
 ### 4.8 服务 `/api/dogServices`
 
-| 接口                        | 方法   | 说明 |
-| --------------------------- | ------ | ---- |
-| `/api/dogServices/getAll`   | GET    | 全量列表（无分页）：`type`（模糊）、`beginTime`、`endTime` |
-| `/api/dogServices`          | POST   | 新增 |
-| `/api/dogServices/{id}`     | GET / PUT / DELETE | 详情 / 修改 / 软删除 |
+| 接口                      | 方法               | 说明                                                       |
+| ------------------------- | ------------------ | ---------------------------------------------------------- |
+| `/api/dogServices/getAll` | GET                | 全量列表（无分页）：`type`（模糊）、`beginTime`、`endTime` |
+| `/api/dogServices`        | POST               | 新增                                                       |
+| `/api/dogServices/{id}`   | GET / PUT / DELETE | 详情 / 修改 / 软删除                                       |
 
 字段：`type`、`params`、`createTime`、`updateTime`。
 
 ### 4.9 工作流 `/api/dogWorkflow`
 
-| 接口                                | 方法   | 说明 |
-| ----------------------------------- | ------ | ---- |
-| `/api/dogWorkflow`                  | POST   | 新增，`uuid` 必填 |
-| `/api/dogWorkflow/{id}`             | GET / PUT / DELETE | 详情 / 修改 / 软删除 |
-| `/api/dogWorkflow/uuid/{uuid}`      | GET    | 按 UUID 查询 |
+| 接口                           | 方法               | 说明                 |
+| ------------------------------ | ------------------ | -------------------- |
+| `/api/dogWorkflow`             | POST               | 新增，`uuid` 必填    |
+| `/api/dogWorkflow/{id}`        | GET / PUT / DELETE | 详情 / 修改 / 软删除 |
+| `/api/dogWorkflow/uuid/{uuid}` | GET                | 按 UUID 查询         |
 
 字段：`uuid`、`nodes`、`edges`、`taskId`、`commandJsonString`、`createTime`、`updateTime`。
 
@@ -210,11 +210,11 @@ Authorization: Bearer <access_token>
 
 ### 4.10 统计 `/api/dogStatistics`
 
-| 接口                              | 方法 | 说明 |
-| --------------------------------- | ---- | ---- |
-| `/api/dogStatistics/all`          | GET  | 设备 / 任务 / 模型 / 路线总量 |
-| `/api/dogStatistics/allType`      | GET  | 上周 / 本周数量趋势（**占位实现，当前返回全 0**） |
-| `/api/dogStatistics/deviceTypeNumber` | GET | 设备类型分布（**占位实现，当前返回空数组**） |
+| 接口                                  | 方法 | 说明                                              |
+| ------------------------------------- | ---- | ------------------------------------------------- |
+| `/api/dogStatistics/all`              | GET  | 设备 / 任务 / 模型 / 路线总量                     |
+| `/api/dogStatistics/allType`          | GET  | 上周 / 本周数量趋势（**占位实现，当前返回全 0**） |
+| `/api/dogStatistics/deviceTypeNumber` | GET  | 设备类型分布（**占位实现，当前返回空数组**）      |
 
 `/api/dogStatistics/all` 返回 4 个对象，字段为 `name`、`value`、`percent`、`data`、`bgColor`、`color`、`duration`。
 
@@ -226,41 +226,41 @@ Authorization: Bearer <access_token>
 
 `deviceId` 建议由设备端从硬件信息派生，保证一台设备一个固定 ID（客户端实现见下文）：
 
-| 优先级 | 来源 | 说明 |
-| --- | --- | --- |
-| 1 | 板级序列号（device tree） | RK35xx 等 ARM 板卡 |
-| 2 | `/proc/cpuinfo` 的 `Serial` | 树莓派等 |
-| 3 | eMMC CID | 芯片级唯一 |
-| 4 | DMI product UUID / board serial | x86 工控机 |
-| 5 | 物理网卡 MAC（跳过虚拟网卡与随机 MAC） | 通用兜底 |
-| 6 | `/etc/machine-id` | 仅兜底，克隆镜像会重复 |
+| 优先级 | 来源                                   | 说明                   |
+| ------ | -------------------------------------- | ---------------------- |
+| 1      | 板级序列号（device tree）              | RK35xx 等 ARM 板卡     |
+| 2      | `/proc/cpuinfo` 的 `Serial`            | 树莓派等               |
+| 3      | eMMC CID                               | 芯片级唯一             |
+| 4      | DMI product UUID / board serial        | x86 工控机             |
+| 5      | 物理网卡 MAC（跳过虚拟网卡与随机 MAC） | 通用兜底               |
+| 6      | `/etc/machine-id`                      | 仅兜底，克隆镜像会重复 |
 
 注册时可选上报 `deviceIdSource`（如 `mac-address`），便于排查 ID 来源。
 
 > Ubuntu 上 `/sys/class/dmi/id/*`、`/sys/block/mmcblk*/device/cid` 默认仅 root 可读；非 root 运行时会退化为物理网卡 MAC。客户端 `--explain-device-id` 可打印每个来源的探测状态，`--device-id-file` 可固定首次检测结果。
 
-| 接口 | 方法 | 说明 |
-| ---- | ---- | ---- |
-| `/api/dogGateway/auth/{deviceId}` | GET | 下发设备 token（10 分钟有效，使用时自动续期） |
-| `/api/dogGateway/register` | POST | 注册/刷新设备，需 `Authorization: <token>`（兼容 `Bearer <token>`）；设备初始状态 `offline`；`deviceId` 由设备硬件派生，可选字段 `deviceIdSource` 说明来源 |
-| `/api/notice/{deviceId}/{token}` | WS | 设备长连接，用 URL 中的 token 鉴权 |
-| `/api/dogGateway/dispatch` | POST | 管理端手动推送任意 JSON 到设备（需用户 JWT） |
-| `/api/dogGateway/connections` | GET | 当前在线设备列表（需用户 JWT） |
-| `/api/dogGateway/disconnect/{deviceId}` | POST | 主动断开设备连接（需用户 JWT）；客户端会自动重连，可用于强制刷新 token/注册或验证重连 |
-| `/api/dogGateway/assign` | POST | 绑定/分配设备（需用户 JWT，前端「设备列表 → 绑定用户」使用）：按硬件 `deviceId` 绑定设备，请求体 `{ "deviceId": "dog-001", "userId": 123 }`；`userId` 省略时为当前用户，普通用户只能认领未绑定设备 |
-| `/api/dogGateway/assign/{deviceId}` | GET | 查询设备已分配的用户（普通用户只返回自己） |
-| `/api/dogGateway/assign/{deviceId}?userId=123` | DELETE | 解绑：普通用户只能解绑自己，管理员可指定 `userId` |
+| 接口                                           | 方法   | 说明                                                                                                                                                                                               |
+| ---------------------------------------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/api/dogGateway/auth/{deviceId}`              | GET    | 下发设备 token（10 分钟有效，使用时自动续期）                                                                                                                                                      |
+| `/api/dogGateway/register`                     | POST   | 注册/刷新设备，需 `Authorization: <token>`（兼容 `Bearer <token>`）；设备初始状态 `offline`；`deviceId` 由设备硬件派生，可选字段 `deviceIdSource` 说明来源                                         |
+| `/api/notice/{deviceId}/{token}`               | WS     | 设备长连接，用 URL 中的 token 鉴权                                                                                                                                                                 |
+| `/api/dogGateway/dispatch`                     | POST   | 管理端手动推送任意 JSON 到设备（需用户 JWT）                                                                                                                                                       |
+| `/api/dogGateway/connections`                  | GET    | 当前在线设备列表（需用户 JWT）                                                                                                                                                                     |
+| `/api/dogGateway/disconnect/{deviceId}`        | POST   | 主动断开设备连接（需用户 JWT）；客户端会自动重连，可用于强制刷新 token/注册或验证重连                                                                                                              |
+| `/api/dogGateway/assign`                       | POST   | 绑定/分配设备（需用户 JWT，前端「设备列表 → 绑定用户」使用）：按硬件 `deviceId` 绑定设备，请求体 `{ "deviceId": "dog-001", "userId": 123 }`；`userId` 省略时为当前用户，普通用户只能认领未绑定设备 |
+| `/api/dogGateway/assign/{deviceId}`            | GET    | 查询设备已分配的用户（普通用户只返回自己）                                                                                                                                                         |
+| `/api/dogGateway/assign/{deviceId}?userId=123` | DELETE | 解绑：普通用户只能解绑自己，管理员可指定 `userId`                                                                                                                                                  |
 
 > 设备注册报文不包含用户信息（`register` 只上报硬件与系统信息）。归属关系通过 `assign` 接口单独建立，设备注册前不可分配（返回 400）；注册完成后可随时分配或调整。
 
 WebSocket 报文：
 
-| 方向 | 报文 | 说明 |
-| ---- | ---- | ---- |
-| 设备 → 服务端 | `{"type":"heartbeat","deviceId":"dog-001","status":"success","drones":{"speed":"1.2","height":"0","battery":"88","course":"90","location":"31.23,121.47"}}` | 心跳；服务端回 `{"type":"report","status":"online","msg":"success"}`，并更新 `dog_device.status/comm_time` 及遥测字段 |
-| 服务端 → 设备 | `{"type":"server-command","deviceId":"dog-001","missionId":"<指令ID>","commandId":<指令ID>,"commandName":"巡检","commandType":"task","taskId":null,"params":{...},"timestamp":"..."}` | 新建指令时若设备在线立即推送；`params` 为指令的 `commandParams`（字符串会尝试解析为 JSON） |
-| 设备 → 服务端 | `{"type":"server-command","commandId":<指令ID>,"status":"success","returnValue":"..."}` | 执行结果，写回 `dog_command.status/return_value`（也兼容 `report` 的 `id` 与 `torosReport` 的 `missionId`） |
-| 设备 → 服务端 | `{"type":"file_start","streamId":"stream-1","fileName":"a.jpg","mediaType":"image"}` → 若干二进制帧 → `{"type":"file_end","streamId":"stream-1"}` | 文件上传；服务端回 `{"type":"file_ack","streamId":"stream-1","status":"success","path":"..."}`，文件写入 `[dog] upload_dir` 并登记到 `dog_media` |
+| 方向          | 报文                                                                                                                                                                                  | 说明                                                                                                                                             |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 设备 → 服务端 | `{"type":"heartbeat","deviceId":"dog-001","status":"success","drones":{"speed":"1.2","height":"0","battery":"88","course":"90","location":"31.23,121.47"}}`                           | 心跳；服务端回 `{"type":"report","status":"online","msg":"success"}`，并更新 `dog_device.status/comm_time` 及遥测字段                            |
+| 服务端 → 设备 | `{"type":"server-command","deviceId":"dog-001","missionId":"<指令ID>","commandId":<指令ID>,"commandName":"巡检","commandType":"task","taskId":null,"params":{...},"timestamp":"..."}` | 新建指令时若设备在线立即推送；`params` 为指令的 `commandParams`（字符串会尝试解析为 JSON）                                                       |
+| 设备 → 服务端 | `{"type":"server-command","commandId":<指令ID>,"status":"success","returnValue":"..."}`                                                                                               | 执行结果，写回 `dog_command.status/return_value`（也兼容 `report` 的 `id` 与 `torosReport` 的 `missionId`）                                      |
+| 设备 → 服务端 | `{"type":"file_start","streamId":"stream-1","fileName":"a.jpg","mediaType":"image"}` → 若干二进制帧 → `{"type":"file_end","streamId":"stream-1"}`                                     | 文件上传；服务端回 `{"type":"file_ack","streamId":"stream-1","status":"success","path":"..."}`，文件写入 `[dog] upload_dir` 并登记到 `dog_media` |
 
 连接与重连约定：
 
@@ -279,12 +279,12 @@ WebSocket 报文：
 
 ### 4.12 园区 `/api/dogPark`
 
-| 接口 | 方法 | 说明 |
-| ---- | ---- | ---- |
-| `/api/dogPark/getPage` | GET | `parkName`（模糊）、`beginTime`、`endTime`、`current`、`size` |
-| `/api/dogPark/getAll` | GET | 全量列表（仅当前用户可见范围） |
-| `/api/dogPark` | POST | 新增，`parkName` 必填；`parkDescription`、`parkAddress` 可选 |
-| `/api/dogPark/{id}` | GET / PUT / DELETE | 详情 / 修改 / 软删除 |
+| 接口                   | 方法               | 说明                                                          |
+| ---------------------- | ------------------ | ------------------------------------------------------------- |
+| `/api/dogPark/getPage` | GET                | `parkName`（模糊）、`beginTime`、`endTime`、`current`、`size` |
+| `/api/dogPark/getAll`  | GET                | 全量列表（仅当前用户可见范围）                                |
+| `/api/dogPark`         | POST               | 新增，`parkName` 必填；`parkDescription`、`parkAddress` 可选  |
+| `/api/dogPark/{id}`    | GET / PUT / DELETE | 详情 / 修改 / 软删除                                          |
 
 响应字段：`id`、`parkName`、`parkDescription`、`parkAddress`、`userId`、`createTime`、`updateTime`。
 
@@ -292,13 +292,13 @@ WebSocket 报文：
 
 ### 4.13 地图 `/api/dogMap`
 
-| 接口 | 方法 | 说明 |
-| ---- | ---- | ---- |
-| `/api/dogMap/getPage` | GET | `mapName`（模糊）、`mapType`、`fileName`（模糊）、`parkId`、`beginTime`、`endTime`、`current`、`size` |
-| `/api/dogMap/getAll` | GET | 全量列表（仅当前用户可见范围） |
-| `/api/dogMap` | POST | 新增，`mapName` 必填；`mapType`、`remarks`、可选的 `parkId`（旧数据兼容） |
-| `/api/dogMap/upload` | POST | 上传 `.zip` 地图包（`multipart/form-data`）：`file` = 地图包，`mapInfo` = JSON 字符串 `{ "mapName": "...", "mapType": "离线地图", "remarks": "..." }`；带 `id` 时替换已有地图的包与信息，否则新建 |
-| `/api/dogMap/{id}` | GET / PUT / DELETE | 详情 / 修改 / 软删除 |
+| 接口                  | 方法               | 说明                                                                                                                                                                                              |
+| --------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/api/dogMap/getPage` | GET                | `mapName`（模糊）、`mapType`、`fileName`（模糊）、`parkId`、`beginTime`、`endTime`、`current`、`size`                                                                                             |
+| `/api/dogMap/getAll`  | GET                | 全量列表（仅当前用户可见范围）                                                                                                                                                                    |
+| `/api/dogMap`         | POST               | 新增，`mapName` 必填；`mapType`、`remarks`、可选的 `parkId`（旧数据兼容）                                                                                                                         |
+| `/api/dogMap/upload`  | POST               | 上传 `.zip` 地图包（`multipart/form-data`）：`file` = 地图包，`mapInfo` = JSON 字符串 `{ "mapName": "...", "mapType": "离线地图", "remarks": "..." }`；带 `id` 时替换已有地图的包与信息，否则新建 |
+| `/api/dogMap/{id}`    | GET / PUT / DELETE | 详情 / 修改 / 软删除                                                                                                                                                                              |
 
 - 地图包仅支持 `.zip`，保存到 `[dog] upload_dir` 下的 `maps/` 目录；响应中的 `fileName`、`filePath`、`fileFormat`、`fileSize` 由服务端写入。
 - `parkId` 可选；指定时必须为当前用户可访问的园区，否则返回 400。
@@ -310,13 +310,13 @@ WebSocket 报文：
 
 设备与用户是多对多关系（一台设备可被多个用户使用）。
 
-| 接口 | 方法 | 说明 |
-| ---- | ---- | ---- |
-| `/api/dogUserDevice/getPage` | GET | `userId`、`deviceId`、`current`、`size` |
-| `/api/dogUserDevice/getAll` | GET | 全量（按当前用户可见范围） |
-| `/api/dogUserDevice` | POST | 绑定，请求体 `{ "deviceId": 123, "userId": 456 }`；`userId` 仅管理员有效，普通用户强制为自己 |
-| `/api/dogUserDevice/{id}` | GET / DELETE | 详情 / 解绑（软删除，可重新绑定） |
-| `/api/dogUserDevice/byUser/{userId}` | GET | 某用户的全部绑定 |
+| 接口                                 | 方法         | 说明                                                                                         |
+| ------------------------------------ | ------------ | -------------------------------------------------------------------------------------------- |
+| `/api/dogUserDevice/getPage`         | GET          | `userId`、`deviceId`、`current`、`size`                                                      |
+| `/api/dogUserDevice/getAll`          | GET          | 全量（按当前用户可见范围）                                                                   |
+| `/api/dogUserDevice`                 | POST         | 绑定，请求体 `{ "deviceId": 123, "userId": 456 }`；`userId` 仅管理员有效，普通用户强制为自己 |
+| `/api/dogUserDevice/{id}`            | GET / DELETE | 详情 / 解绑（软删除，可重新绑定）                                                            |
+| `/api/dogUserDevice/byUser/{userId}` | GET          | 某用户的全部绑定                                                                             |
 
 - `deviceId` 是 `dog_device.id`（不是硬件编号）。`设备绑定` 已不再单独占用菜单，绑定/解绑在「设备列表」页完成（`/api/dogGateway/assign*` 按硬件编号操作）。
 - 普通用户只能绑定尚未被绑定的设备（认领）；管理员可把同一设备绑定给多个用户。

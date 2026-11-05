@@ -366,6 +366,7 @@ mod tests {
                 "remove_workflow_menu",
                 "reorder_map_menu",
                 "add_map_file_fields",
+                "reorder_menus",
             ]
         );
         assert_eq!(migrations[0].name(), "p_sys_tables_from_file");
@@ -511,16 +512,23 @@ mod tests {
                 .is_some()
         );
 
-        // 地图管理 must sit just below 系统管理, above 设备列表.
+        // 园区列表 sits just below 系统管理 (sort 2), 地图管理 at sort 3,
+        // 设备列表 at sort 4, 路线管理 at sort 5, 任务管理 at sort 6.
+        let park_menu_sort = Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT 1 FROM p_sys_menu WHERE id = 1301 AND is_deleted = 0 AND sort = 2",
+        );
+        assert!(connection.query_one(park_menu_sort).await.unwrap().is_some());
+
         let map_menu_sort = Statement::from_string(
             DbBackend::Sqlite,
-            "SELECT 1 FROM p_sys_menu WHERE id = 1302 AND is_deleted = 0 AND sort = 2",
+            "SELECT 1 FROM p_sys_menu WHERE id = 1302 AND is_deleted = 0 AND sort = 3",
         );
         assert!(connection.query_one(map_menu_sort).await.unwrap().is_some());
 
         let device_menu_sort = Statement::from_string(
             DbBackend::Sqlite,
-            "SELECT 1 FROM p_sys_menu WHERE id = 1201 AND is_deleted = 0 AND sort = 3",
+            "SELECT 1 FROM p_sys_menu WHERE id = 1201 AND is_deleted = 0 AND sort = 4",
         );
         assert!(
             connection
@@ -529,6 +537,19 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+
+        // 路线管理 at sort 5, 任务管理 at sort 6.
+        let route_menu_sort = Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT 1 FROM p_sys_menu WHERE id = 1203 AND is_deleted = 0 AND sort = 5",
+        );
+        assert!(connection.query_one(route_menu_sort).await.unwrap().is_some());
+
+        let task_menu_sort = Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT 1 FROM p_sys_menu WHERE id = 1202 AND is_deleted = 0 AND sort = 6",
+        );
+        assert!(connection.query_one(task_menu_sort).await.unwrap().is_some());
 
         // The 工作流 page is retired as well (backend endpoints remain).
         let workflow_menu = Statement::from_string(
