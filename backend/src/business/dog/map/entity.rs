@@ -13,8 +13,8 @@ pub struct Model {
     pub map_type: Option<String>,
     #[sea_orm(column_name = "map_data", column_type = "Text", nullable)]
     pub map_data: Option<String>,
-    #[sea_orm(column_name = "park_id", column_type = "Integer")]
-    pub park_id: i64,
+    #[sea_orm(column_name = "park_id", column_type = "Integer", nullable)]
+    pub park_id: Option<i64>,
     #[sea_orm(column_name = "user_id", column_type = "Integer")]
     pub user_id: i64,
     #[sea_orm(column_name = "create_time", column_type = "Timestamp")]
@@ -23,6 +23,16 @@ pub struct Model {
     pub update_time: Option<DateTime<Utc>>,
     #[sea_orm(column_name = "is_deleted", column_type = "Integer")]
     pub is_deleted: i32,
+    #[sea_orm(column_name = "file_name", column_type = "Text", nullable)]
+    pub file_name: Option<String>,
+    #[sea_orm(column_name = "file_path", column_type = "Text", nullable)]
+    pub file_path: Option<String>,
+    #[sea_orm(column_name = "file_format", column_type = "Text", nullable)]
+    pub file_format: Option<String>,
+    #[sea_orm(column_name = "file_size", column_type = "BigInteger", nullable)]
+    pub file_size: Option<i64>,
+    #[sea_orm(column_name = "remarks", column_type = "Text", nullable)]
+    pub remarks: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -13,7 +13,25 @@ pub struct CreateMapRequest {
     pub map_name: String,
     pub map_type: Option<String>,
     pub map_data: Option<String>,
-    pub park_id: i64,
+    pub park_id: Option<i64>,
+    pub file_name: Option<String>,
+    pub file_path: Option<String>,
+    pub file_format: Option<String>,
+    pub file_size: Option<i64>,
+    pub remarks: Option<String>,
+}
+
+/// Parsed from the `mapInfo` part of the upload request
+/// (`POST /api/dogMap/upload`).
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadMapRequest {
+    /// When present the existing map record is updated with the new package.
+    pub id: Option<i64>,
+    pub map_name: String,
+    pub map_type: Option<String>,
+    pub park_id: Option<i64>,
+    pub remarks: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -23,12 +41,18 @@ pub struct UpdateMapRequest {
     pub map_type: Option<String>,
     pub map_data: Option<String>,
     pub park_id: Option<i64>,
+    pub file_name: Option<String>,
+    pub file_path: Option<String>,
+    pub file_format: Option<String>,
+    pub file_size: Option<i64>,
+    pub remarks: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MapPageQuery {
     pub map_name: Option<String>,
+    pub file_name: Option<String>,
     pub park_id: Option<i64>,
     pub begin_time: Option<String>,
     pub end_time: Option<String>,
@@ -45,8 +69,13 @@ pub struct MapVO {
     pub map_name: String,
     pub map_type: Option<String>,
     pub map_data: Option<String>,
-    pub park_id: i64,
+    pub park_id: Option<i64>,
     pub user_id: i64,
+    pub file_name: Option<String>,
+    pub file_path: Option<String>,
+    pub file_format: Option<String>,
+    pub file_size: Option<i64>,
+    pub remarks: Option<String>,
     pub create_time: String,
     pub update_time: Option<String>,
 }
@@ -60,6 +89,11 @@ impl From<DogMap> for MapVO {
             map_data: m.map_data,
             park_id: m.park_id,
             user_id: m.user_id,
+            file_name: m.file_name,
+            file_path: m.file_path,
+            file_format: m.file_format,
+            file_size: m.file_size,
+            remarks: m.remarks,
             create_time: format_datetime(m.create_time),
             update_time: m.update_time.map(format_datetime),
         }
@@ -78,6 +112,11 @@ impl CreateMapRequest {
             create_time: ActiveValue::set(now),
             update_time: ActiveValue::set(Some(now)),
             is_deleted: ActiveValue::set(0),
+            file_name: ActiveValue::set(self.file_name.clone()),
+            file_path: ActiveValue::set(self.file_path.clone()),
+            file_format: ActiveValue::set(self.file_format.clone()),
+            file_size: ActiveValue::set(self.file_size),
+            remarks: ActiveValue::set(self.remarks.clone()),
         }
     }
 }

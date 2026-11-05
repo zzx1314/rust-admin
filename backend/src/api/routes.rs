@@ -1,5 +1,6 @@
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     middleware::from_fn_with_state,
     routing::{get, post, put},
 };
@@ -338,6 +339,11 @@ pub fn dog_map_routes(state: AppState) -> Router<AppState> {
             get(dog_map_handlers::list_all_maps_handler),
         )
         .route("/dogMap", post(dog_map_handlers::create_map_handler))
+        .route(
+            "/dogMap/upload",
+            post(dog_map_handlers::upload_map_handler)
+                .layer(DefaultBodyLimit::max(256 * 1024 * 1024)),
+        )
         .route(
             "/dogMap/{id}",
             get(dog_map_handlers::get_map_handler)

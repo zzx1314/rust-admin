@@ -11,6 +11,7 @@ const dogMapUrls = {
   page: `/api/dogMap/getPage`,
   getAll: "/api/dogMap/getAll",
   save: "/api/dogMap",
+  upload: "/api/dogMap/upload",
   update: "/api/dogMap/",
   delete: `/api/dogMap/`
 };
@@ -21,6 +22,9 @@ export const dogMapGetAll = () =>
   http.axiosGetRequest<Result>(dogMapUrls.getAll, {});
 export const dogMapSave = (param?: object) =>
   http.axiosPostRequest<Result>(dogMapUrls.save, param);
+/** 上传地图包（.zip）+ 地图信息，创建或更新地图记录 */
+export const dogMapUpload = (formData: FormData) =>
+  http.uploadFile<Result>(dogMapUrls.upload, formData);
 export const dogMapUpdate = (id: string | number, param?: object) =>
   http.axiosPut<Result>(dogMapUrls.update + id, param);
 export const dogMapDelete = (id: string | number) =>

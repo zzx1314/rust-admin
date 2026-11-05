@@ -1,22 +1,30 @@
-import { computed, nextTick, onMounted, reactive, ref } from "vue";
+import { nextTick, onMounted, reactive, ref } from "vue";
 import type { PaginationProps } from "@pureadmin/table";
-import type { FormRules } from "element-plus";
-import type { FieldValues } from "plus-pro-components";
+import type {
+  FormRules,
+  UploadFile,
+  UploadRequestOptions,
+  UploadUserFile
+} from "element-plus";
 import {
-  dogMapSave,
   dogMapPage,
+  dogMapUpload,
   dogMapUpdate,
   dogMapDelete
 } from "@/api/dogMap";
-import { dogParkGetAll } from "@/api/dogPark";
-import { CREATE_TIME_FIELDS, type DogSearchField } from "../components/search";
+import {
+  CREATE_TIME_FIELDS,
+  MAP_TYPE_OPTIONS,
+  type DogSearchField
+} from "../components/search";
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
 
 export function useDogMap() {
   const rules = reactive<FormRules>({
     mapName: [{ required: true, message: "地图名称必填", trigger: "blur" }],
-    parkId: [{ required: true, message: "所属园区ID必填", trigger: "blur" }]
+    mapType: [{ required: true, message: "地图类型必填", trigger: "change" }],
+    remarks: [{ required: true, message: "地图描述必填", trigger: "blur" }]
   });
   const columns: TableColumnList = [
     {
@@ -28,27 +36,46 @@ export function useDogMap() {
     },
     { label: "序号", type: "index", fixed: "left", width: 70 },
     { label: "地图名称", prop: "mapName", minWidth: 150 },
-    { label: "地图类型", prop: "mapType", width: 120 },
-    { label: "所属园区ID", prop: "parkId", width: 120 },
-    { label: "所属用户ID", prop: "userId", width: 120 },
+    {
+      label: "地图类型",
+      prop: "mapType",
+      width: 110,
+      cellRenderer: ({ row, props }) =>
+        row.mapType ? (
+          <el-tag
+            size={props.size}
+            type={row.mapType === "在线地图" ? "success" : "warning"}
+          >
+            {row.mapType}
+          </el-tag>
+        ) : (
+          <span>-</span>
+        )
+    },
+    { label: "文件名称", prop: "fileName", minWidth: 180 },
+    { label: "文件格式", prop: "fileFormat", width: 100 },
+    { label: "文件大小（字节）", prop: "fileSize", width: 150 },
+    { label: "描述信息", prop: "remarks", minWidth: 180 },
     { label: "创建时间", prop: "createTime", width: 180 },
     { label: "操作", fixed: "right", width: 180, slot: "operation" }
   ];
 
-  const parkOptions = ref<Array<{ label: string; value: number }>>([]);
-  const queryFields = computed<DogSearchField[]>(() => [
+  const queryFields: DogSearchField[] = [
     { label: "地图名称", prop: "mapName" },
     {
-      label: "所属园区",
-      prop: "parkId",
+      label: "地图类型",
+      prop: "mapType",
       type: "select",
-      options: parkOptions.value
-    }
-  ]);
+      options: MAP_TYPE_OPTIONS
+    },
+    { label: "文件名称", prop: "fileName" }
+  ];
   const moreQueryFields: DogSearchField[] = [...CREATE_TIME_FIELDS];
+
   const queryForm = ref({
     mapName: "",
-    parkId: "",
+    mapType: "",
+    fileName: "",
     beginTime: "",
     endTime: ""
   });
@@ -62,10 +89,28 @@ export function useDogMap() {
   });
   const dialogFormVisible = ref(false);
   const title = ref("");
-  const addForm = ref({ id: null });
+  const addForm = ref<{
+    id: number | null;
+    mapName: string;
+    mapType: string;
+    remarks: string;
+  }>({
+    id: null,
+    mapName: "",
+    mapType: "离线地图",
+    remarks: ""
+  });
+  /** 待上传的地图包（新增 / 修改时选择的新文件）。 */
+  const fileList = ref<UploadUserFile[]>([]);
+  const uploadFileTemp = ref<UploadFile>(null);
 
   function handleUpdate(row, formEl) {
-    addForm.value = JSON.parse(JSON.stringify(row));
+    addForm.value = {
+      id: row.id,
+      mapName: row.mapName ?? "",
+      mapType: row.mapType ?? "",
+      remarks: row.remarks ?? ""
+    };
     openDia("修改地图", formEl);
   }
   function handleDelete(row) {
@@ -89,26 +134,53 @@ export function useDogMap() {
   function handleSelectionChange(_val) {}
   const handleSubmitError = (err: any) => console.log(err);
 
-  const handleSubmit = (_values: FieldValues) => {
-    if (addForm.value.id) {
-      dogMapUpdate(addForm.value.id, addForm.value).then(res => {
+  /** 上传地图包并保存 / 更新地图记录。 */
+  function onUpload(options: UploadRequestOptions) {
+    const formData = new FormData();
+    formData.append("file", options.file);
+    formData.append(
+      "mapInfo",
+      JSON.stringify({
+        id: addForm.value.id ?? undefined,
+        mapName: addForm.value.mapName,
+        mapType: addForm.value.mapType || undefined,
+        remarks: addForm.value.remarks || undefined
+      })
+    );
+    return dogMapUpload(formData)
+      .then(res => {
         if (res.code === SUCCESS) {
-          message("修改成功！", { type: "success" });
+          message(addForm.value.id ? "修改成功！" : "保存成功！", {
+            type: "success"
+          });
+          options.onSuccess?.(res);
           cancel();
         } else {
           message(res.msg, { type: "error" });
+          options.onError?.(new Error(res.msg) as any);
         }
+      })
+      .catch(error => {
+        options.onError?.(error);
       });
-    } else {
-      dogMapSave(addForm.value).then(res => {
-        if (res.code === SUCCESS) {
-          message("保存成功！", { type: "success" });
-          cancel();
-        } else {
-          message(res.msg, { type: "error" });
-        }
-      });
-    }
+  }
+
+  /** 未更换地图包时，仅更新名称 / 类型 / 描述。 */
+  const handleSubmit = (_values?: unknown) => {
+    const id = addForm.value.id;
+    if (!id) return;
+    dogMapUpdate(id, {
+      mapName: addForm.value.mapName,
+      mapType: addForm.value.mapType,
+      remarks: addForm.value.remarks
+    }).then(res => {
+      if (res.code === SUCCESS) {
+        message("修改成功！", { type: "success" });
+        cancel();
+      } else {
+        message(res.msg, { type: "error" });
+      }
+    });
   };
 
   async function onSearch() {
@@ -123,34 +195,33 @@ export function useDogMap() {
   }
 
   function cancel() {
-    addForm.value = { id: null };
+    addForm.value = {
+      id: null,
+      mapName: "",
+      mapType: "离线地图",
+      remarks: ""
+    };
     queryForm.value = {
       mapName: "",
-      parkId: "",
+      mapType: "",
+      fileName: "",
       beginTime: "",
       endTime: ""
     };
+    fileList.value = [];
+    uploadFileTemp.value = null;
     dialogFormVisible.value = false;
     onSearch();
   }
   function openDia(param, formEl) {
+    fileList.value = [];
+    uploadFileTemp.value = null;
     dialogFormVisible.value = true;
     title.value = param;
-    if (formEl) nextTick(() => formEl.formInstance?.clearValidate());
+    if (formEl) nextTick(() => formEl.clearValidate?.());
   }
 
-  async function loadParkOptions() {
-    const { data } = await dogParkGetAll();
-    parkOptions.value = (data ?? []).map((park: any) => ({
-      label: park.parkName,
-      value: park.id
-    }));
-  }
-
-  onMounted(() => {
-    loadParkOptions();
-    onSearch();
-  });
+  onMounted(() => onSearch());
 
   return {
     queryForm,
@@ -164,9 +235,12 @@ export function useDogMap() {
     addForm,
     rules,
     columns,
+    fileList,
+    uploadFileTemp,
     onSearch,
     handleUpdate,
     handleDelete,
+    onUpload,
     handleSizeChange,
     handleCurrentChange,
     handleSelectionChange,

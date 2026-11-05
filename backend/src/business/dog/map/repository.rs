@@ -65,6 +65,9 @@ impl SeaOrmDogMapRepository {
         if let Some(ref map_name) = query.map_name {
             cond = cond.add(MapColumn::MapName.contains(map_name.as_str()));
         }
+        if let Some(ref file_name) = query.file_name {
+            cond = cond.add(MapColumn::FileName.contains(file_name.as_str()));
+        }
         if let Some(park_id) = query.park_id {
             cond = cond.add(MapColumn::ParkId.eq(park_id));
         }
@@ -135,7 +138,22 @@ impl SeaOrmDogMapRepository {
             active_model.map_data = ActiveValue::set(Some(map_data.clone()));
         }
         if let Some(park_id) = req.park_id {
-            active_model.park_id = ActiveValue::set(park_id);
+            active_model.park_id = ActiveValue::set(Some(park_id));
+        }
+        if let Some(file_name) = &req.file_name {
+            active_model.file_name = ActiveValue::set(Some(file_name.clone()));
+        }
+        if let Some(file_path) = &req.file_path {
+            active_model.file_path = ActiveValue::set(Some(file_path.clone()));
+        }
+        if let Some(file_format) = &req.file_format {
+            active_model.file_format = ActiveValue::set(Some(file_format.clone()));
+        }
+        if let Some(file_size) = req.file_size {
+            active_model.file_size = ActiveValue::set(Some(file_size));
+        }
+        if let Some(remarks) = &req.remarks {
+            active_model.remarks = ActiveValue::set(Some(remarks.clone()));
         }
         active_model.update_time = ActiveValue::set(Some(chrono::Utc::now()));
 

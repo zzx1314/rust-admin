@@ -26,6 +26,12 @@ export const COMMAND_STATUS_OPTIONS: DogSearchOption[] = [
   { label: "失败", value: "error" }
 ];
 
+/** 地图类型（地图包分为在线 / 离线两种）。 */
+export const MAP_TYPE_OPTIONS: DogSearchOption[] = [
+  { label: "离线地图", value: "离线地图" },
+  { label: "在线地图", value: "在线地图" }
+];
+
 /** 各页面「更多条件」里统一的创建时间范围。 */
 export const CREATE_TIME_FIELDS: DogSearchField[] = [
   { label: "开始时间", prop: "beginTime", type: "date" },

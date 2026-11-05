@@ -1,11 +1,13 @@
 use crate::api::AppState;
 use crate::api::middleware::RequestUser;
-use crate::business::dog::map::domain::{CreateMapRequest, MapPageQuery, MapVO, UpdateMapRequest};
+use crate::business::dog::map::domain::{
+    CreateMapRequest, MapPageQuery, MapVO, UpdateMapRequest, UploadMapRequest,
+};
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
 use axum::{
     Extension, Json,
-    extract::{Path, Query, State},
+    extract::{Multipart, Path, Query, State},
 };
 
 #[derive(serde::Deserialize)]
@@ -22,6 +24,65 @@ pub async fn create_map_handler(
         .dog_map_service
         .create(req, &user.data_scope())
         .await?;
+    Ok(Json(ApiResponse::ok(MapVO::from(map))))
+}
+
+/// `POST /api/dogMap/upload` — stores a `.zip` map package.
+///
+/// Multipart parts: `file` (the package) and `mapInfo`
+/// (`{ "mapName": "园区地图", "remarks": "...", "id": 1 }`, `id` updates an
+/// existing record instead of creating a new one).
+pub async fn upload_map_handler(
+    State(state): State<AppState>,
+    Extension(user): Extension<RequestUser>,
+    mut multipart: Multipart,
+) -> Result<Json<ApiResponse<MapVO>>, AppError> {
+    let mut info: Option<UploadMapRequest> = None;
+    let mut file: Option<(String, Vec<u8>)> = None;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| AppError::BadRequest(format!("无效的上传请求: {error}")))?
+    {
+        match field.name() {
+            Some("file") => {
+                let name = field.file_name().unwrap_or("map.zip").to_string();
+                let data = field
+                    .bytes()
+                    .await
+                    .map_err(|error| AppError::BadRequest(format!("读取上传文件失败: {error}")))?;
+                file = Some((name, data.to_vec()));
+            }
+            Some("mapInfo") => {
+                let text = field
+                    .text()
+                    .await
+                    .map_err(|error| AppError::BadRequest(format!("读取地图信息失败: {error}")))?;
+                info =
+                    Some(serde_json::from_str(&text).map_err(|error| {
+                        AppError::BadRequest(format!("地图信息格式错误: {error}"))
+                    })?);
+            }
+            _ => {}
+        }
+    }
+
+    let info = info.ok_or_else(|| AppError::BadRequest("缺少 mapInfo".to_string()))?;
+    let (file_name, bytes) =
+        file.ok_or_else(|| AppError::BadRequest("请上传地图包文件".to_string()))?;
+
+    let map = state
+        .dog_map_service
+        .save_upload(
+            info,
+            &file_name,
+            &bytes,
+            state.dog_gateway.upload_root(),
+            &user.data_scope(),
+        )
+        .await?;
+
     Ok(Json(ApiResponse::ok(MapVO::from(map))))
 }
 

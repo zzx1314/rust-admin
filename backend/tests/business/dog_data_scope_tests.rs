@@ -17,7 +17,7 @@ use tower::ServiceExt;
 use x_rust::api::AppState;
 use x_rust::app::App;
 use x_rust::business::dog::device::domain::CreateDeviceRequest;
-use x_rust::business::dog::map::domain::CreateMapRequest;
+use x_rust::business::dog::map::domain::{CreateMapRequest, UploadMapRequest};
 use x_rust::business::dog::park::domain::{CreateParkRequest, UpdateParkRequest};
 use x_rust::business::dog::task::domain::{CreateTaskRequest, TaskPageQuery};
 use x_rust::business::dog::user_device::domain::CreateUserDeviceRequest;
@@ -164,7 +164,12 @@ fn create_map(name: &str, park_id: i64) -> CreateMapRequest {
         map_name: name.to_string(),
         map_type: None,
         map_data: None,
-        park_id,
+        park_id: Some(park_id),
+        file_name: None,
+        file_path: None,
+        file_format: None,
+        file_size: None,
+        remarks: None,
     }
 }
 
@@ -292,7 +297,7 @@ async fn maps_follow_park_ownership() {
         .await
         .expect("user A may add a map to their park");
     assert_eq!(map.user_id, USER_A);
-    assert_eq!(map.park_id, park.id);
+    assert_eq!(map.park_id, Some(park.id));
 
     let err = state
         .dog_map_service
@@ -310,6 +315,64 @@ async fn maps_follow_park_ownership() {
         .await
         .unwrap();
     assert_eq!(admin_maps.len(), 1);
+}
+
+#[tokio::test]
+async fn maps_can_be_uploaded_as_zip_packages() {
+    let state = test_state().await;
+    let a = owner_scope(USER_A);
+    let upload_root = std::env::temp_dir().join(format!(
+        "dog_map_upload_{}_{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+
+    let map = state
+        .dog_map_service
+        .save_upload(
+            UploadMapRequest {
+                id: None,
+                map_name: "园区地图".to_string(),
+                map_type: Some("离线地图".to_string()),
+                park_id: None,
+                remarks: Some("测试地图包".to_string()),
+            },
+            "park-map.zip",
+            b"PK\x03\x04",
+            &upload_root,
+            &a,
+        )
+        .await
+        .expect("zip package should be stored");
+
+    assert_eq!(map.map_name, "园区地图");
+    assert_eq!(map.file_name.as_deref(), Some("park-map.zip"));
+    assert_eq!(map.file_format.as_deref(), Some("zip"));
+    assert_eq!(map.file_size, Some(4));
+    assert!(map.park_id.is_none());
+    let stored = upload_root.join(map.file_path.clone().unwrap());
+    assert!(stored.exists(), "uploaded package must be written to disk");
+
+    let err = state
+        .dog_map_service
+        .save_upload(
+            UploadMapRequest {
+                map_name: "错误格式".to_string(),
+                ..Default::default()
+            },
+            "map.rar",
+            b"x",
+            &upload_root,
+            &a,
+        )
+        .await
+        .expect_err("only .zip packages are accepted");
+    assert!(matches!(err, AppError::BadRequest(_)));
+
+    std::fs::remove_dir_all(&upload_root).ok();
 }
 
 #[tokio::test]
@@ -683,6 +746,78 @@ async fn gateway_assign_interface_resolves_devices_by_hardware_id() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn http_map_upload_endpoint_stores_zip_package() {
+    use sea_orm_migration::MigratorTrait;
+    use x_rust::api::routes::create_router;
+    use x_rust::migration::Migrator;
+
+    let upload_root = std::env::temp_dir().join(format!(
+        "dog_map_http_{}_{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let conn = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+    <Migrator as MigratorTrait>::up(&conn, None).await.unwrap();
+
+    let token_store = Arc::new(FakeTokenStore::new());
+    let app = App::from_connection_with_upload_dir(conn, upload_root.clone());
+    let state = app.build_state_with_token_store(token_store.clone(), JWT_SECRET);
+    let token = token_for(USER_A, "user_a");
+    token_store.insert_token(USER_A, &token);
+
+    let boundary = "----dog_map_test_boundary";
+    let map_info = json!({
+        "mapName": "园区地图",
+        "mapType": "离线地图",
+        "remarks": "测试地图包"
+    })
+    .to_string();
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"mapInfo\"\r\n\r\n{map_info}\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(
+        format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"map.zip\"\r\nContent-Type: application/zip\r\n\r\n")
+            .as_bytes(),
+    );
+    body.extend_from_slice(b"PK\x03\x04");
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/dogMap/upload")
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .header("authorization", format!("Bearer {}", token))
+        .body(Body::from(body))
+        .unwrap();
+    let response = create_router(state).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    assert_eq!(body["code"], 10200);
+    assert_eq!(body["data"]["mapName"], "园区地图");
+    assert_eq!(body["data"]["fileName"], "map.zip");
+    assert_eq!(body["data"]["fileFormat"], "zip");
+    assert_eq!(body["data"]["fileSize"], 4);
+    assert!(
+        body["data"]["filePath"]
+            .as_str()
+            .unwrap()
+            .starts_with("maps/")
+    );
+
+    std::fs::remove_dir_all(&upload_root).ok();
 }
 
 #[tokio::test]

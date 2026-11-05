@@ -61,6 +61,9 @@ pub enum AppError {
 
     #[error("Conflict: {0}")]
     Conflict(String),
+
+    #[error("Internal error: {0}")]
+    InternalError(String),
 }
 
 impl AppError {
@@ -74,6 +77,7 @@ impl AppError {
             AppError::AuthError(_) => StatusCode::FORBIDDEN,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::Conflict(_) => StatusCode::CONFLICT,
+            AppError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -87,6 +91,7 @@ impl AppError {
             AppError::AuthError(_) => FAIL_CODE,
             AppError::BadRequest(_) => FAIL_CODE,
             AppError::Conflict(_) => FAIL_CODE,
+            AppError::InternalError(_) => FAIL_CODE,
         }
     }
 }

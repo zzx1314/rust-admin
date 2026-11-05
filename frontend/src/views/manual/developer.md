@@ -294,12 +294,14 @@ WebSocket 报文：
 
 | 接口 | 方法 | 说明 |
 | ---- | ---- | ---- |
-| `/api/dogMap/getPage` | GET | `mapName`（模糊）、`parkId`、`beginTime`、`endTime`、`current`、`size` |
+| `/api/dogMap/getPage` | GET | `mapName`（模糊）、`mapType`、`fileName`（模糊）、`parkId`、`beginTime`、`endTime`、`current`、`size` |
 | `/api/dogMap/getAll` | GET | 全量列表（仅当前用户可见范围） |
-| `/api/dogMap` | POST | 新增，`mapName`、`parkId` 必填；`mapType`、`mapData` 可选 |
+| `/api/dogMap` | POST | 新增，`mapName` 必填；`mapType`、`remarks`、可选的 `parkId`（旧数据兼容） |
+| `/api/dogMap/upload` | POST | 上传 `.zip` 地图包（`multipart/form-data`）：`file` = 地图包，`mapInfo` = JSON 字符串 `{ "mapName": "...", "mapType": "离线地图", "remarks": "..." }`；带 `id` 时替换已有地图的包与信息，否则新建 |
 | `/api/dogMap/{id}` | GET / PUT / DELETE | 详情 / 修改 / 软删除 |
 
-- `parkId` 必须是当前用户可访问的园区，否则返回 400。
+- 地图包仅支持 `.zip`，保存到 `[dog] upload_dir` 下的 `maps/` 目录；响应中的 `fileName`、`filePath`、`fileFormat`、`fileSize` 由服务端写入。
+- `parkId` 可选；指定时必须为当前用户可访问的园区，否则返回 400。
 - 响应字段：`id`、`mapName`、`mapType`、`mapData`、`parkId`、`userId`、`createTime`、`updateTime`。
 
 ---

@@ -16,7 +16,7 @@
 | 通信端到端测试 | `backend/tests/business/dog_gateway_tests.rs`、`dog_data_scope_tests.rs`（数据权限） |
 | 后端路由 | `backend/src/api/routes.rs`（每个子域一个 `dog_*_routes`，统一挂 `require_auth`） |
 | 服务装配 | `backend/src/app.rs` → `App::build_state_with_token_store` |
-| 数据库迁移 | `backend/migrations/dog/7_create_dog_tables.sql`（建表）、`10_add_park_map_tables.sql`、`11_add_task_user_scope.sql`、`13_create_user_device_bindings.sql`、`backend/migrations/p_sys/9_add_dog_menus.sql` / `12_add_park_map_menus.sql` / `14_add_device_binding_menu.sql`（菜单）、`15_flatten_dog_park_menus.sql`（把机器狗 / 园区菜单提升为一级菜单）、`16_remove_device_binding_menu.sql`（下线「设备绑定」菜单，改在设备列表中绑定）、`17_remove_workflow_menu.sql`（下线「工作流」菜单）、`18_reorder_map_menu.sql`（地图管理排在系统管理之下、设备列表之上） |
+| 数据库迁移 | `backend/migrations/dog/7_create_dog_tables.sql`（建表）、`10_add_park_map_tables.sql`、`11_add_task_user_scope.sql`、`13_create_user_device_bindings.sql`、`backend/migrations/p_sys/9_add_dog_menus.sql` / `12_add_park_map_menus.sql` / `14_add_device_binding_menu.sql`（菜单）、`15_flatten_dog_park_menus.sql`（把机器狗 / 园区菜单提升为一级菜单）、`16_remove_device_binding_menu.sql`（下线「设备绑定」菜单，改在设备列表中绑定）、`17_remove_workflow_menu.sql`（下线「工作流」菜单）、`18_reorder_map_menu.sql`（地图管理排在系统管理之下、设备列表之上）、`19_add_map_file_fields.sql`（地图改为上传 .zip 包，新增文件字段且 `park_id` 可空） |
 | 前端页面 | `frontend/src/views/dog/{park,map,device,task,route,model,media,command,config,services}/` |
 | 前端请求封装 | `frontend/src/api/dog*.ts` |
 | 首页仪表盘 | `frontend/src/views/welcome/index.vue` + `frontend/src/api/dogStatistics.ts` |
@@ -33,7 +33,7 @@
 | `dog_device` | 设备 | `device_id`、`device_type`、`status`(默认 `offline`)、`device_ip`、`model`、`speed`、`height`、`battery`、`course`、`location`、`comm_time` |
 | `dog_user_device` | 用户设备绑定 | `user_id`、`device_id`(指向 `dog_device.id`)，唯一索引 `(user_id, device_id)` |
 | `dog_park` | 园区 | `park_name`、`park_description`、`park_address`、`user_id`(创建者) |
-| `dog_map` | 地图 | `map_name`、`map_type`、`map_data`、`park_id`(所属园区)、`user_id`(创建者) |
+| `dog_map` | 地图 | `map_name`、`map_type`、`file_name`、`file_path`、`file_format`、`file_size`、`remarks`、`park_id`(可选，旧数据保留)、`user_id`(创建者)；地图以 `.zip` 包上传，文件落盘到 `<upload_dir>/maps/` |
 | `dog_task` | 任务 | `task_name`、`task_description`、`task_status`(默认 `pending`)、`workflow_id`、`workflow_uuid`、`device_id`、`route_id`、`user_id`(创建者) |
 | `dog_route_library` | 路线 | `route_name`、`route_type`、`route_status`、`route_description`、`model_id`(NOT NULL)、`route_data` |
 | `dog_model` | 模型 | `model_name`、`model_type`、`file_name`、`file_path`、`file_format`、`file_size`、`remarks` |
@@ -58,6 +58,7 @@ POST   /api/<module>                新增
 GET    /api/<module>/{id}           详情
 PUT    /api/<module>/{id}           修改
 DELETE /api/<module>/{id}           软删除
+POST   /api/dogMap/upload           上传 .zip 地图包（multipart：file + mapInfo）
 PUT    /api/dogDevice/status/{id}   仅回写设备状态
 PUT    /api/dogTask/status/{id}     仅回写任务状态
 PUT    /api/dogCommand/status/{id}  仅回写指令状态与返回值
@@ -101,7 +102,7 @@ DELETE /api/dogGateway/assign/{deviceId}      解除归属（?userId= 仅管理�
 | 新增园区 / 任务 | `user_id` 由服务端从 JWT 写入（忽略请求体） | 同左 |
 | 园区 / 地图 / 任务列表 | 仅 `user_id = 当前用户` | 全部 |
 | 园区 / 地图 / 任务详情、修改、删除 | 仅本人数据，否则 404 | 全部 |
-| 地图关联园区 | 只能挂到自己的园区，否则 400 | 任意园区 |
+| 地图关联园区（可选） | 指定园区时只能挂到自己的园区，否则 400；不指定则不挂园区 | 任意园区 |
 | 设备列表 / 详情 / 修改 / 删除 | 仅已绑定到自己的设备 | 全部（含未绑定） |
 | 绑定设备 | 只能认领尚未被任何人绑定的设备，`userId` 强制为自己 | 可绑定任意用户，一台设备可被多人绑定 |
 | 按硬件编号分配（`/api/dogGateway/assign`） | 同上（只能认领未绑定设备） | 任意已注册设备 + 任意用户 |

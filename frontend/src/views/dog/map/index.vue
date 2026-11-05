@@ -1,21 +1,29 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import type { FormInstance } from "element-plus";
+import {
+  genFileId,
+  type FormInstance,
+  type UploadFile,
+  type UploadInstance,
+  type UploadProps,
+  type UploadRawFile
+} from "element-plus";
 import { useDogMap } from "./hook";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 import EditPen from "~icons/ep/edit-pen";
 import Delete from "~icons/ep/delete";
 import AddFill from "~icons/ri/add-circle-line";
+import UploadFileIcon from "~icons/ep/upload-filled";
 import { PureTableBar } from "@/components/RePureTableBar";
-import { useDogMapForm } from "./form";
 import PureTable from "@pureadmin/table";
-import { PlusDialogForm } from "plus-pro-components";
 import DogSearchForm from "../components/DogSearchForm.vue";
+import { MAP_TYPE_OPTIONS } from "../components/search";
+import { message } from "@/utils/message";
 
 defineOptions({ name: "DogMap" });
 
 const addFormRef = ref<FormInstance>();
-const { columnsForm } = useDogMapForm();
+const uploadRef = ref<UploadInstance>();
 const {
   queryForm,
   dataList,
@@ -28,17 +36,53 @@ const {
   columns,
   queryFields,
   moreQueryFields,
+  fileList,
+  uploadFileTemp,
   onSearch,
   handleUpdate,
   handleDelete,
+  onUpload,
   handleSizeChange,
   handleCurrentChange,
   handleSelectionChange,
-  handleSubmitError,
   handleSubmit,
   cancel,
   openDia
 } = useDogMap();
+
+const handleExceed: UploadProps["onExceed"] = files => {
+  uploadRef.value?.clearFiles();
+  const file = files[0] as UploadRawFile;
+  file.uid = genFileId();
+  uploadRef.value?.handleStart(file);
+};
+
+const beforeUpload = (uploadFile: UploadFile) => {
+  if (uploadFile.name.toLowerCase().endsWith(".zip")) {
+    uploadFileTemp.value = uploadFile;
+  } else {
+    uploadRef.value?.clearFiles();
+    uploadFileTemp.value = null;
+    message("请选择正确的安装包格式：.zip", { type: "error" });
+  }
+};
+
+const submitForm = async (formEl?: FormInstance) => {
+  if (!formEl) return;
+  await formEl.validate(valid => {
+    if (!valid) return;
+    // 新增必须上传地图包；修改时选了新包则重新上传，否则只更新基础信息
+    if (uploadFileTemp.value) {
+      uploadRef.value?.submit();
+      return;
+    }
+    if (!addForm.value.id) {
+      message("请上传地图包文件", { type: "error" });
+      return;
+    }
+    handleSubmit();
+  });
+};
 </script>
 <template>
   <div class="main">
@@ -107,15 +151,70 @@ const {
         </pure-table>
       </template>
     </PureTableBar>
-    <PlusDialogForm
-      ref="addFormRef"
-      v-model:visible="dialogFormVisible"
-      v-model="addForm"
-      :dialog="{ title: title }"
-      :form="{ columns: columnsForm, rules, labelWidth: '100px' }"
-      @cancel="cancel"
-      @confirm-error="handleSubmitError"
-      @confirm="handleSubmit"
-    />
+    <el-dialog
+      v-model="dialogFormVisible"
+      :title="title"
+      width="800px"
+      @close="cancel"
+    >
+      <el-form
+        ref="addFormRef"
+        :model="addForm"
+        :inline="true"
+        :rules="rules"
+        label-width="150px"
+      >
+        <el-form-item label="地图名称" prop="mapName" style="width: 100%">
+          <el-input v-model="addForm.mapName" placeholder="请输入地图名称" />
+        </el-form-item>
+        <el-form-item label="地图类型" prop="mapType" style="width: 100%">
+          <el-select v-model="addForm.mapType" placeholder="请选择地图类型">
+            <el-option
+              v-for="item in MAP_TYPE_OPTIONS"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="地图描述" prop="remarks" style="width: 100%">
+          <el-input
+            v-model="addForm.remarks"
+            type="textarea"
+            placeholder="请输入地图描述"
+          />
+        </el-form-item>
+        <el-form-item label="上传文件" prop="file">
+          <el-upload
+            ref="uploadRef"
+            v-model:file-list="fileList"
+            :http-request="onUpload"
+            :auto-upload="false"
+            :limit="1"
+            :on-exceed="handleExceed"
+            :on-change="beforeUpload"
+            style="width: 190px"
+          >
+            <template #trigger>
+              <el-button
+                :icon="useRenderIcon(UploadFileIcon)"
+                type="primary"
+                style="margin-right: 10px"
+                >选取文件</el-button
+              >
+            </template>
+            <template #tip>
+              <div class="el-upload__tip">仅支持 .zip 地图包</div>
+            </template>
+          </el-upload>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="cancel">取消</el-button>
+        <el-button type="primary" @click="submitForm(addFormRef)"
+          >确认</el-button
+        >
+      </template>
+    </el-dialog>
   </div>
 </template>

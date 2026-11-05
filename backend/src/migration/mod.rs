@@ -365,6 +365,7 @@ mod tests {
                 "remove_device_binding_menu",
                 "remove_workflow_menu",
                 "reorder_map_menu",
+                "add_map_file_fields",
             ]
         );
         assert_eq!(migrations[0].name(), "p_sys_tables_from_file");
@@ -483,6 +484,31 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+
+        // Maps are uploaded packages: the file metadata columns must exist and
+        // `park_id` must be nullable.
+        let map_file_column = Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT 1 FROM pragma_table_info('dog_map') WHERE name = 'file_path'",
+        );
+        assert!(
+            connection
+                .query_one(map_file_column)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let map_park_not_null = Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT 1 FROM pragma_table_info('dog_map') WHERE name = 'park_id' AND \"notnull\" = 0",
+        );
+        assert!(
+            connection
+                .query_one(map_park_not_null)
+                .await
+                .unwrap()
+                .is_some()
         );
 
         // 地图管理 must sit just below 系统管理, above 设备列表.
