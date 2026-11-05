@@ -56,10 +56,6 @@ export function useDogDevice() {
       )
     },
     { label: "IP地址", prop: "deviceIp", width: 150 },
-    { label: "设备型号", prop: "model", width: 100 },
-    { label: "速度", prop: "speed", width: 80 },
-    { label: "高度", prop: "height", width: 80 },
-    { label: "电量", prop: "battery", width: 80 },
     {
       label: "绑定用户",
       prop: "boundUsers",
