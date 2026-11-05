@@ -9,13 +9,17 @@ use axum::{
 };
 
 use crate::api::AppState;
+use crate::api::middleware::RequestUser;
 use crate::business::dog::device::domain::DeviceVO;
 use crate::business::dog::gateway::domain::{
-    ConnectionInfo, DEVICE_TOKEN_TTL_SECS, DeviceRegistration, DeviceTokenResponse,
-    DisconnectResult, DispatchRequest, DispatchResult,
+    AssignDeviceRequest, AssignUserQuery, ConnectionInfo, DEVICE_TOKEN_TTL_SECS,
+    DeviceRegistration, DeviceTokenResponse, DisconnectResult, DispatchRequest, DispatchResult,
 };
 use crate::business::dog::gateway::session;
+use crate::business::dog::user_device::domain::UserDeviceVO;
 use crate::common::error::{ApiResponse, AppError};
+use axum::Extension;
+use axum::extract::Query;
 
 /// `GET /api/dogGateway/auth/{deviceId}` — issue a device access token.
 pub async fn device_auth_handler(
@@ -114,6 +118,50 @@ pub async fn connections_handler(
 ) -> Result<Json<ApiResponse<Vec<ConnectionInfo>>>, AppError> {
     let connections = state.dog_gateway.connections().await;
     Ok(Json(ApiResponse::ok(connections)))
+}
+
+/// `POST /api/dogGateway/assign` — assign a registered device to a user.
+///
+/// This is the reserved hook for ownership: registration itself carries no user
+/// information, so the device is assigned by its hardware `deviceId` either
+/// here or from the user/device binding page.
+pub async fn assign_device_handler(
+    State(state): State<AppState>,
+    Extension(user): Extension<RequestUser>,
+    Json(request): Json<AssignDeviceRequest>,
+) -> Result<Json<ApiResponse<UserDeviceVO>>, AppError> {
+    let binding = state
+        .dog_user_device_service
+        .bind_by_device_code(&request.device_id, request.user_id, &user.data_scope())
+        .await?;
+    Ok(Json(ApiResponse::ok(binding)))
+}
+
+/// `GET /api/dogGateway/assign/{deviceId}` — users the device is assigned to.
+pub async fn device_assignees_handler(
+    State(state): State<AppState>,
+    Extension(user): Extension<RequestUser>,
+    Path(device_id): Path<String>,
+) -> Result<Json<ApiResponse<Vec<UserDeviceVO>>>, AppError> {
+    let bindings = state
+        .dog_user_device_service
+        .list_by_device_code(&device_id, &user.data_scope())
+        .await?;
+    Ok(Json(ApiResponse::ok(bindings)))
+}
+
+/// `DELETE /api/dogGateway/assign/{deviceId}` — remove an assignment.
+pub async fn unassign_device_handler(
+    State(state): State<AppState>,
+    Extension(user): Extension<RequestUser>,
+    Path(device_id): Path<String>,
+    Query(query): Query<AssignUserQuery>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    state
+        .dog_user_device_service
+        .unbind_by_device_code(&device_id, query.user_id, &user.data_scope())
+        .await?;
+    Ok(Json(ApiResponse::ok(())))
 }
 
 /// Accept both `Authorization: <token>` (original client) and

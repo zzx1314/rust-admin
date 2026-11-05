@@ -298,6 +298,8 @@ mod tests {
                 "add_park_map_tables",
                 "add_task_user_scope",
                 "add_park_map_menus",
+                "create_user_device_bindings",
+                "add_device_binding_menu",
             ]
         );
         assert_eq!(migrations[0].name(), "p_sys_tables_from_file");
@@ -317,6 +319,7 @@ mod tests {
             "dog_device",
             "dog_park",
             "dog_map",
+            "dog_user_device",
         ] {
             let statement = Statement::from_string(
                 DbBackend::Sqlite,
@@ -367,6 +370,24 @@ mod tests {
         assert!(
             connection
                 .query_one(park_menu_role)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        let binding_menu = Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT 1 FROM p_sys_menu WHERE id = 1210 AND is_deleted = 0",
+        );
+        assert!(connection.query_one(binding_menu).await.unwrap().is_some());
+
+        let binding_permission = Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT 1 FROM p_sys_role_menu WHERE role_id = 1 AND menu_id = 1220",
+        );
+        assert!(
+            connection
+                .query_one(binding_permission)
                 .await
                 .unwrap()
                 .is_some()

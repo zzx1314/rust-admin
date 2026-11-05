@@ -2,8 +2,10 @@ use crate::business::dog::device::domain::{
     CreateDeviceRequest, DevicePageQuery, DeviceVO, DogDevice, UpdateDeviceRequest,
 };
 use crate::business::dog::device::repository::SeaOrmDogDeviceRepository;
+use crate::common::data_scope::DataScope;
 use crate::common::error::AppError;
 use crate::common::pagination::PageResponse;
+use crate::common::util::generate_id;
 
 pub struct DogDeviceService {
     repo: SeaOrmDogDeviceRepository,
@@ -22,9 +24,9 @@ impl DogDeviceService {
             .map_err(AppError::DatabaseErrorSeaOrm)
     }
 
-    pub async fn get_by_id(&self, id: i64) -> Result<DogDevice, AppError> {
+    pub async fn get_by_id(&self, id: i64, scope: &DataScope) -> Result<DogDevice, AppError> {
         self.repo
-            .find_by_id(id)
+            .find_by_id(id, scope)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?
             .ok_or_else(|| AppError::NotFound(format!("Device with id {} not found", id)))
@@ -33,10 +35,11 @@ impl DogDeviceService {
     pub async fn list_page(
         &self,
         query: DevicePageQuery,
+        scope: &DataScope,
     ) -> Result<PageResponse<DeviceVO>, AppError> {
         let (records, total) = self
             .repo
-            .find_all_with_page(&query)
+            .find_all_with_page(&query, scope)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
@@ -48,24 +51,34 @@ impl DogDeviceService {
         ))
     }
 
-    pub async fn list_all(&self) -> Result<Vec<DogDevice>, AppError> {
+    pub async fn list_all(&self, scope: &DataScope) -> Result<Vec<DogDevice>, AppError> {
         self.repo
-            .find_all()
+            .find_all(scope)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)
     }
 
-    pub async fn update(&self, id: i64, req: UpdateDeviceRequest) -> Result<DogDevice, AppError> {
+    pub async fn update(
+        &self,
+        id: i64,
+        req: UpdateDeviceRequest,
+        scope: &DataScope,
+    ) -> Result<DogDevice, AppError> {
         self.repo
-            .update(id, &req)
+            .update(id, &req, scope)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?
             .ok_or_else(|| AppError::NotFound(format!("Device with id {} not found", id)))
     }
 
-    pub async fn update_status(&self, id: i64, status: &str) -> Result<DogDevice, AppError> {
+    pub async fn update_status(
+        &self,
+        id: i64,
+        status: &str,
+        scope: &DataScope,
+    ) -> Result<DogDevice, AppError> {
         self.repo
-            .update_status(id, status)
+            .update_status(id, status, scope)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?
             .ok_or_else(|| AppError::NotFound(format!("Device with id {} not found", id)))
@@ -79,17 +92,17 @@ impl DogDeviceService {
             .ok_or_else(|| AppError::NotFound(format!("Device with id {} not found", id)))
     }
 
-    pub async fn count(&self) -> Result<i64, AppError> {
+    pub async fn count(&self, scope: &DataScope) -> Result<i64, AppError> {
         self.repo
-            .count()
+            .count(scope)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)
     }
 
-    pub async fn delete(&self, id: i64) -> Result<(), AppError> {
+    pub async fn delete(&self, id: i64, scope: &DataScope) -> Result<(), AppError> {
         let deleted = self
             .repo
-            .delete(id)
+            .delete(id, scope)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
         if !deleted {
@@ -100,12 +113,4 @@ impl DogDeviceService {
         }
         Ok(())
     }
-}
-
-fn generate_id() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
 }

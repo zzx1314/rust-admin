@@ -59,7 +59,7 @@ impl DogStatisticsService {
         &self,
         scope: &DataScope,
     ) -> Result<Vec<StatisticsSummary>, sea_orm::DbErr> {
-        let device_count = self.device_repo.count().await?;
+        let device_count = self.device_repo.count(scope).await?;
         let task_count = self.task_repo.find_all(scope).await?.len() as i64;
         let model_count = self.model_repo.find_all().await?.len() as i64;
         let route_count = self.route_repo.find_all().await?.len() as i64;

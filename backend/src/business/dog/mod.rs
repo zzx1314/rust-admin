@@ -10,4 +10,5 @@ pub mod route_library;
 pub mod services;
 pub mod statistics;
 pub mod task;
+pub mod user_device;
 pub mod workflow;

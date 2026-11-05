@@ -1,3 +1,4 @@
+use crate::business::dog::device::repository::SeaOrmDogDeviceRepository;
 use crate::business::dog::task::domain::{
     CreateTaskRequest, DogTask, TaskPageQuery, TaskVO, UpdateTaskRequest,
 };
@@ -9,11 +10,12 @@ use crate::common::util::generate_id;
 
 pub struct DogTaskService {
     repo: SeaOrmDogTaskRepository,
+    device_repo: SeaOrmDogDeviceRepository,
 }
 
 impl DogTaskService {
-    pub fn new(repo: SeaOrmDogTaskRepository) -> Self {
-        Self { repo }
+    pub fn new(repo: SeaOrmDogTaskRepository, device_repo: SeaOrmDogDeviceRepository) -> Self {
+        Self { repo, device_repo }
     }
 
     pub async fn create(
@@ -21,6 +23,9 @@ impl DogTaskService {
         req: CreateTaskRequest,
         scope: &DataScope,
     ) -> Result<DogTask, AppError> {
+        if let Some(device_id) = req.device_id {
+            self.ensure_device_access(device_id, scope).await?;
+        }
         let id = generate_id();
         self.repo
             .create(&req, id, scope)
@@ -68,6 +73,9 @@ impl DogTaskService {
         req: UpdateTaskRequest,
         scope: &DataScope,
     ) -> Result<DogTask, AppError> {
+        if let Some(device_id) = req.device_id {
+            self.ensure_device_access(device_id, scope).await?;
+        }
         self.repo
             .update(id, &req, scope)
             .await
@@ -96,6 +104,25 @@ impl DogTaskService {
             .map_err(AppError::DatabaseErrorSeaOrm)?;
         if !deleted {
             return Err(AppError::NotFound(format!("Task with id {} not found", id)));
+        }
+        Ok(())
+    }
+
+    async fn ensure_device_access(
+        &self,
+        device_id: i64,
+        scope: &DataScope,
+    ) -> Result<(), AppError> {
+        let accessible = self
+            .device_repo
+            .exists_for_scope(device_id, scope)
+            .await
+            .map_err(AppError::DatabaseErrorSeaOrm)?;
+        if !accessible {
+            return Err(AppError::BadRequest(format!(
+                "Device with id {} not found or not accessible",
+                device_id
+            )));
         }
         Ok(())
     }

@@ -16,9 +16,11 @@ use tower::ServiceExt;
 
 use x_rust::api::AppState;
 use x_rust::app::App;
+use x_rust::business::dog::device::domain::CreateDeviceRequest;
 use x_rust::business::dog::map::domain::CreateMapRequest;
 use x_rust::business::dog::park::domain::{CreateParkRequest, UpdateParkRequest};
 use x_rust::business::dog::task::domain::{CreateTaskRequest, TaskPageQuery};
+use x_rust::business::dog::user_device::domain::CreateUserDeviceRequest;
 use x_rust::common::data_scope::DataScope;
 use x_rust::common::error::AppError;
 use x_rust::common::traits::{DynFuture, TokenStore};
@@ -175,6 +177,35 @@ fn create_task(name: &str) -> CreateTaskRequest {
         workflow_uuid: None,
         device_id: None,
         route_id: None,
+    }
+}
+
+fn create_task_for_device(name: &str, device_id: i64) -> CreateTaskRequest {
+    CreateTaskRequest {
+        device_id: Some(device_id),
+        ..create_task(name)
+    }
+}
+
+fn create_device(code: &str) -> CreateDeviceRequest {
+    CreateDeviceRequest {
+        device_id: code.to_string(),
+        device_type: None,
+        status: None,
+        device_ip: None,
+        model: None,
+        speed: None,
+        height: None,
+        battery: None,
+        course: None,
+        location: None,
+    }
+}
+
+fn bind_request(device_id: i64) -> CreateUserDeviceRequest {
+    CreateUserDeviceRequest {
+        user_id: None,
+        device_id,
     }
 }
 
@@ -419,4 +450,285 @@ async fn http_handlers_receive_the_authenticated_user() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_json(response).await;
     assert_eq!(body["data"]["total"], 0);
+}
+
+#[tokio::test]
+async fn devices_are_visible_only_to_bound_users() {
+    let state = test_state().await;
+    let a = owner_scope(USER_A);
+    let b = owner_scope(USER_B);
+
+    let device = state
+        .dog_device_service
+        .create(create_device("dev-a"))
+        .await
+        .expect("device creation must work");
+
+    assert_eq!(
+        state
+            .dog_device_service
+            .list_all(&admin_scope())
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "administrators see unbound devices"
+    );
+    assert!(
+        state
+            .dog_device_service
+            .list_all(&a)
+            .await
+            .unwrap()
+            .is_empty(),
+        "unbound devices are invisible to regular users"
+    );
+
+    let binding = state
+        .dog_user_device_service
+        .bind(bind_request(device.id), &a)
+        .await
+        .expect("user A claims the unbound device");
+    assert_eq!(binding.user_id, USER_A);
+    assert_eq!(binding.device_code.as_deref(), Some("dev-a"));
+
+    assert_eq!(
+        state.dog_device_service.list_all(&a).await.unwrap().len(),
+        1
+    );
+    assert!(
+        state
+            .dog_device_service
+            .list_all(&b)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let err = state
+        .dog_user_device_service
+        .bind(bind_request(device.id), &b)
+        .await
+        .expect_err("user B cannot claim an already bound device");
+    assert!(matches!(err, AppError::Conflict(_)));
+
+    let err = state
+        .dog_device_service
+        .get_by_id(device.id, &b)
+        .await
+        .expect_err("user B cannot read a device bound to someone else");
+    assert!(matches!(err, AppError::NotFound(_)));
+
+    state
+        .dog_user_device_service
+        .delete(binding.id, &a)
+        .await
+        .expect("user A may unbind");
+    assert!(
+        state
+            .dog_device_service
+            .list_all(&a)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let rebound = state
+        .dog_user_device_service
+        .bind(bind_request(device.id), &a)
+        .await
+        .expect("binding again restores the soft-deleted row");
+    assert_eq!(rebound.id, binding.id);
+    assert_eq!(
+        state.dog_device_service.list_all(&a).await.unwrap().len(),
+        1
+    );
+
+    // Administrators can bind any user; a device may be shared by several users.
+    state
+        .dog_user_device_service
+        .bind(
+            CreateUserDeviceRequest {
+                user_id: Some(USER_B),
+                device_id: device.id,
+            },
+            &admin_scope(),
+        )
+        .await
+        .expect("administrator binds user B to the same device");
+    assert_eq!(
+        state.dog_device_service.list_all(&b).await.unwrap().len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn tasks_reject_devices_the_user_cannot_access() {
+    let state = test_state().await;
+    let a = owner_scope(USER_A);
+    let b = owner_scope(USER_B);
+
+    let device = state
+        .dog_device_service
+        .create(create_device("dev-task"))
+        .await
+        .unwrap();
+    state
+        .dog_user_device_service
+        .bind(bind_request(device.id), &a)
+        .await
+        .unwrap();
+
+    let task = state
+        .dog_task_service
+        .create(create_task_for_device("A 任务", device.id), &a)
+        .await
+        .expect("user A may reference their own device");
+    assert_eq!(task.device_id, Some(device.id));
+
+    let err = state
+        .dog_task_service
+        .create(create_task_for_device("B 任务", device.id), &b)
+        .await
+        .expect_err("user B cannot reference a device they cannot access");
+    assert!(matches!(err, AppError::BadRequest(_)));
+
+    state
+        .dog_task_service
+        .create(
+            create_task_for_device("admin 任务", device.id),
+            &admin_scope(),
+        )
+        .await
+        .expect("administrators may reference any device");
+}
+
+#[tokio::test]
+async fn gateway_assign_interface_resolves_devices_by_hardware_id() {
+    let state = test_state().await;
+    let a = owner_scope(USER_A);
+    let b = owner_scope(USER_B);
+
+    state
+        .dog_device_service
+        .create(create_device("dev-assign"))
+        .await
+        .unwrap();
+
+    let err = state
+        .dog_user_device_service
+        .bind_by_device_code("missing-device", None, &admin_scope())
+        .await
+        .expect_err("unregistered devices cannot be assigned");
+    assert!(matches!(err, AppError::BadRequest(_)));
+
+    let binding = state
+        .dog_user_device_service
+        .bind_by_device_code("dev-assign", Some(USER_B), &admin_scope())
+        .await
+        .expect("administrators assign by hardware device id");
+    assert_eq!(binding.user_id, USER_B);
+    assert_eq!(binding.device_code.as_deref(), Some("dev-assign"));
+
+    assert_eq!(
+        state.dog_device_service.list_all(&b).await.unwrap().len(),
+        1
+    );
+    assert!(
+        state
+            .dog_device_service
+            .list_all(&a)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let err = state
+        .dog_user_device_service
+        .bind_by_device_code("dev-assign", None, &a)
+        .await
+        .expect_err("already assigned devices cannot be claimed");
+    assert!(matches!(err, AppError::Conflict(_)));
+
+    assert!(
+        state
+            .dog_user_device_service
+            .list_by_device_code("dev-assign", &a)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        state
+            .dog_user_device_service
+            .list_by_device_code("dev-assign", &admin_scope())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    state
+        .dog_user_device_service
+        .unbind_by_device_code("dev-assign", Some(USER_B), &admin_scope())
+        .await
+        .expect("administrators unassign by hardware device id");
+    assert!(
+        state
+            .dog_device_service
+            .list_all(&b)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn http_gateway_assign_endpoint_works() {
+    use x_rust::api::routes::create_router;
+
+    let token_store = Arc::new(FakeTokenStore::new());
+    let app = App::new("sqlite::memory:").await.unwrap();
+    let state = app.build_state_with_token_store(token_store.clone(), JWT_SECRET);
+    state
+        .dog_device_service
+        .create(create_device("dev-http"))
+        .await
+        .unwrap();
+    state
+        .role_service
+        .assign_role(&USER_A, &1)
+        .await
+        .expect("make user A an administrator");
+
+    let token = token_for(USER_A, "admin_a");
+    token_store.insert_token(USER_A, &token);
+    let router = create_router(state);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/dogGateway/assign")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {}", token))
+        .body(Body::from(
+            json!({ "deviceId": "dev-http", "userId": USER_B }).to_string(),
+        ))
+        .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    assert_eq!(body["code"], 10200);
+    assert_eq!(body["data"]["userId"], USER_B);
+    assert_eq!(body["data"]["deviceCode"], "dev-http");
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/api/dogGateway/assign/dev-http")
+        .header("authorization", format!("Bearer {}", token))
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    assert_eq!(body["data"].as_array().unwrap().len(), 1);
 }

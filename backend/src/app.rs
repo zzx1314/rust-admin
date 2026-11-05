@@ -28,6 +28,8 @@ use crate::business::dog::services::service::DogServicesService;
 use crate::business::dog::statistics::service::DogStatisticsService;
 use crate::business::dog::task::repository::SeaOrmDogTaskRepository;
 use crate::business::dog::task::service::DogTaskService;
+use crate::business::dog::user_device::repository::SeaOrmDogUserDeviceRepository;
+use crate::business::dog::user_device::service::DogUserDeviceService;
 use crate::business::dog::workflow::repository::SeaOrmDogWorkflowRepository;
 use crate::business::dog::workflow::service::DogWorkflowService;
 use crate::common::error::AppError;
@@ -176,8 +178,17 @@ impl App {
         let dog_device_repo = SeaOrmDogDeviceRepository::new(conn.clone());
         let dog_device_service = Arc::new(DogDeviceService::new(dog_device_repo.clone()));
 
+        let dog_user_device_repo = SeaOrmDogUserDeviceRepository::new(conn.clone());
+        let dog_user_device_service = Arc::new(DogUserDeviceService::new(
+            dog_user_device_repo,
+            dog_device_repo.clone(),
+        ));
+
         let dog_task_repo = SeaOrmDogTaskRepository::new(conn.clone());
-        let dog_task_service = Arc::new(DogTaskService::new(dog_task_repo.clone()));
+        let dog_task_service = Arc::new(DogTaskService::new(
+            dog_task_repo.clone(),
+            dog_device_repo.clone(),
+        ));
 
         let dog_park_repo = SeaOrmDogParkRepository::new(conn.clone());
         let dog_park_service = Arc::new(DogParkService::new(dog_park_repo.clone()));
@@ -229,6 +240,7 @@ impl App {
             sys_dict_item_service,
             sys_log_service,
             dog_device_service,
+            dog_user_device_service,
             dog_task_service,
             dog_park_service,
             dog_map_service,

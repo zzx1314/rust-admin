@@ -193,6 +193,28 @@ pub struct DispatchRequest {
     pub payload: Value,
 }
 
+/// Assignment request (`POST /api/dogGateway/assign`).
+///
+/// Device registration stays user agnostic; the owner is attached through
+/// this endpoint using the hardware id the device reported when registering.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignDeviceRequest {
+    pub device_id: String,
+    /// Target user. Administrators may assign anybody; regular users may only
+    /// pass their own id (omitted means "myself").
+    #[serde(default)]
+    pub user_id: Option<i64>,
+}
+
+/// Query parameters of `GET/DELETE /api/dogGateway/assign/{deviceId}`.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignUserQuery {
+    #[serde(default)]
+    pub user_id: Option<i64>,
+}
+
 /// One online device connection.
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]

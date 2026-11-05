@@ -96,6 +96,7 @@ Authorization: Bearer <access_token>
 - 分页参数为 `current`（从 1 开始）与 `size`，默认 `1` / `10`。
 - 主键 `id` 在创建时由服务端生成，客户端无需传入。
 - 园区 / 地图 / 任务按创建者做数据隔离：普通用户只能读写 `userId = 当前用户` 的记录（详情 / 修改 / 删除他人数据返回 404）；管理员（角色编码 `110`）不受限制。`userId` 由服务端从 token 写入，请求体传了也会被忽略。
+- 设备按绑定关系隔离：普通用户的设备列表只返回通过 `/api/dogUserDevice` 绑定给自己的设备；任务里的 `deviceId` 必须是可访问设备，否则返回 400。
 
 ---
 
@@ -114,6 +115,8 @@ Authorization: Bearer <access_token>
 | `/api/dogDevice/status/{id}`    | PUT    | 仅回写状态，请求体 `{ "status": "online" }`（不传 `status` 时按 `offline` 处理） |
 
 字段：`deviceId`、`deviceType`、`status`、`deviceIp`、`model`、`speed`、`height`、`battery`、`course`、`location`、`commTime`（只读）、`createTime`、`updateTime`。
+
+> 普通用户的设备查询只返回已绑定给自己的设备（见 4.14 用户设备绑定），且新增设备会自动绑定创建者；管理员不受限制。
 
 ### 4.2 任务 `/api/dogTask`
 
@@ -244,6 +247,11 @@ Authorization: Bearer <access_token>
 | `/api/dogGateway/dispatch` | POST | 管理端手动推送任意 JSON 到设备（需用户 JWT） |
 | `/api/dogGateway/connections` | GET | 当前在线设备列表（需用户 JWT） |
 | `/api/dogGateway/disconnect/{deviceId}` | POST | 主动断开设备连接（需用户 JWT）；客户端会自动重连，可用于强制刷新 token/注册或验证重连 |
+| `/api/dogGateway/assign` | POST | **预留的设备分配接口**（需用户 JWT）：按硬件 `deviceId` 分配设备，请求体 `{ "deviceId": "dog-001", "userId": 123 }`；`userId` 省略时为当前用户，普通用户只能认领未绑定设备 |
+| `/api/dogGateway/assign/{deviceId}` | GET | 查询设备已分配的用户（普通用户只返回自己） |
+| `/api/dogGateway/assign/{deviceId}?userId=123` | DELETE | 解绑：普通用户只能解绑自己，管理员可指定 `userId` |
+
+> 设备注册报文不包含用户信息（`register` 只上报硬件与系统信息）。归属关系通过 `assign` 接口单独建立，设备注册前不可分配（返回 400）；注册完成后可随时分配或调整。
 
 WebSocket 报文：
 
@@ -293,6 +301,24 @@ WebSocket 报文：
 
 - `parkId` 必须是当前用户可访问的园区，否则返回 400。
 - 响应字段：`id`、`mapName`、`mapType`、`mapData`、`parkId`、`userId`、`createTime`、`updateTime`。
+
+---
+
+### 4.14 用户设备绑定 `/api/dogUserDevice`
+
+设备与用户是多对多关系（一台设备可被多个用户使用）。
+
+| 接口 | 方法 | 说明 |
+| ---- | ---- | ---- |
+| `/api/dogUserDevice/getPage` | GET | `userId`、`deviceId`、`current`、`size` |
+| `/api/dogUserDevice/getAll` | GET | 全量（按当前用户可见范围） |
+| `/api/dogUserDevice` | POST | 绑定，请求体 `{ "deviceId": 123, "userId": 456 }`；`userId` 仅管理员有效，普通用户强制为自己 |
+| `/api/dogUserDevice/{id}` | GET / DELETE | 详情 / 解绑（软删除，可重新绑定） |
+| `/api/dogUserDevice/byUser/{userId}` | GET | 某用户的全部绑定 |
+
+- `deviceId` 是 `dog_device.id`（不是硬件编号）。
+- 普通用户只能绑定尚未被绑定的设备（认领）；管理员可把同一设备绑定给多个用户。
+- 响应字段：`id`、`userId`、`deviceId`、`deviceCode`（硬件设备号）、`createTime`。
 
 ## 5. 调用示例
 

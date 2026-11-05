@@ -10,6 +10,7 @@ use crate::business::dog::route_library::service::DogRouteLibraryService;
 use crate::business::dog::services::service::DogServicesService;
 use crate::business::dog::statistics::service::DogStatisticsService;
 use crate::business::dog::task::service::DogTaskService;
+use crate::business::dog::user_device::service::DogUserDeviceService;
 use crate::business::dog::workflow::service::DogWorkflowService;
 use crate::system::auth::service::AuthService;
 use crate::system::sys_auth::service::SysAuthService;
@@ -37,6 +38,7 @@ pub struct AppState {
     pub sys_dict_item_service: Arc<SysDictItemService>,
     pub sys_log_service: Arc<SysLogService>,
     pub dog_device_service: Arc<DogDeviceService>,
+    pub dog_user_device_service: Arc<DogUserDeviceService>,
     pub dog_task_service: Arc<DogTaskService>,
     pub dog_park_service: Arc<DogParkService>,
     pub dog_map_service: Arc<DogMapService>,
