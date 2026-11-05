@@ -8,6 +8,9 @@ import {
   dogDeviceUpdate,
   dogDeviceDelete
 } from "@/api/dogDevice";
+import { dogGatewayAssign } from "@/api/dogGateway";
+import { userPage } from "@/api/system";
+import { isPlatformAdmin } from "@/utils/permission";
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
 
@@ -46,7 +49,7 @@ export function useDogDevice() {
     { label: "电量", prop: "battery", width: 80 },
     { label: "创建时间", prop: "createTime", width: 180 },
     { label: "通信时间", prop: "commTime", width: 180 },
-    { label: "操作", fixed: "right", width: 180, slot: "operation" }
+    { label: "操作", fixed: "right", width: 260, slot: "operation" }
   ];
 
   const queryForm = ref({
@@ -67,6 +70,15 @@ export function useDogDevice() {
   const dialogFormVisible = ref(false);
   const title = ref("");
   const addForm = ref({ id: null });
+
+  const assignVisible = ref(false);
+  const assignLoading = ref(false);
+  const assignForm = ref<{ deviceId: string; userId: number | null }>({
+    deviceId: "",
+    userId: null
+  });
+  const userOptions = ref<Array<{ label: string; value: number }>>([]);
+  const canAssign = computed(() => isPlatformAdmin());
 
   const buttonClass = computed(() => [
     "!h-[20px]",
@@ -100,6 +112,47 @@ export function useDogDevice() {
   }
   function handleSelectionChange(_val) {}
   const handleSubmitError = (err: any) => console.log(err);
+
+  async function loadUserOptions() {
+    if (userOptions.value.length) return;
+    const { data } = await userPage({ current: 1, size: 1000 });
+    userOptions.value = (data?.records ?? []).map((user: any) => ({
+      label: user.realName
+        ? `${user.realName}（${user.username}）`
+        : user.username,
+      value: user.id
+    }));
+  }
+
+  function handleAssign(row) {
+    assignForm.value = { deviceId: row.deviceId, userId: null };
+    assignVisible.value = true;
+    loadUserOptions();
+  }
+
+  function submitAssign() {
+    if (!assignForm.value.userId) {
+      message("请选择要分配的用户", { type: "warning" });
+      return;
+    }
+    assignLoading.value = true;
+    dogGatewayAssign({
+      deviceId: assignForm.value.deviceId,
+      userId: assignForm.value.userId
+    })
+      .then(res => {
+        if (res.code === SUCCESS) {
+          message("分配成功！", { type: "success" });
+          assignVisible.value = false;
+          onSearch();
+        } else {
+          message(res.msg, { type: "error" });
+        }
+      })
+      .finally(() => {
+        assignLoading.value = false;
+      });
+  }
 
   const handleSubmit = (_values: FieldValues) => {
     if (addForm.value.id) {
@@ -167,9 +220,16 @@ export function useDogDevice() {
     rules,
     columns,
     buttonClass,
+    assignVisible,
+    assignLoading,
+    assignForm,
+    userOptions,
+    canAssign,
     onSearch,
     handleUpdate,
     handleDelete,
+    handleAssign,
+    submitAssign,
     handleSizeChange,
     handleCurrentChange,
     handleSelectionChange,

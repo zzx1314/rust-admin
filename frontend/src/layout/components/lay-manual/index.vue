@@ -4,7 +4,7 @@ import "md-editor-v3/lib/style.css";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { emitter } from "@/utils/mitt";
-import { useUserStoreHook } from "@/store/modules/user";
+import { isPlatformAdmin } from "@/utils/permission";
 import { useAppStoreHook } from "@/store/modules/app";
 import adminManual from "@/views/manual/admin.md?raw";
 import developerManual from "@/views/manual/developer.md?raw";
@@ -21,16 +21,9 @@ const visible = ref(false);
 const activeName = ref("developer");
 
 /**
- * 管理员角色 code（登录接口 permissions 字段即角色 code）。
- * 平台默认管理员角色 sysadm 的 code 为 "110"；如需扩展请在此追加。
+ * 管理员角色 code 见 `@/utils/permission`。
  */
-const ADMIN_ROLE_CODES = ["110", "admin", "administrator", "role_admin"];
-
-// 是否为平台管理员（决定是否展示「管理员使用手册」标签页）
-const isAdmin = computed(() => {
-  const permissions = useUserStoreHook().permissions ?? [];
-  return permissions.some(code => ADMIN_ROLE_CODES.includes(code));
-});
+const isAdmin = computed(() => isPlatformAdmin());
 
 // 普通用户：只看开发者手册；管理员：管理员 + 开发者手册
 const tabs = computed(() => {

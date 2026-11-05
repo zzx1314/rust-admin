@@ -6,6 +6,7 @@ import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 import EditPen from "~icons/ep/edit-pen";
 import Delete from "~icons/ep/delete";
 import AddFill from "~icons/ri/add-circle-line";
+import UserAddLine from "~icons/ri/user-add-line";
 import { PureTableBar } from "@/components/RePureTableBar";
 import { useCollectorBusDevForm } from "./form";
 import PureTable from "@pureadmin/table";
@@ -25,9 +26,16 @@ const {
   addForm,
   rules,
   columns,
+  assignVisible,
+  assignLoading,
+  assignForm,
+  userOptions,
+  canAssign,
   onSearch,
   handleUpdate,
   handleDelete,
+  handleAssign,
+  submitAssign,
   handleSizeChange,
   handleCurrentChange,
   handleSelectionChange,
@@ -83,6 +91,16 @@ const {
         >
           <template #operation="{ row }">
             <el-button
+              v-if="canAssign"
+              class="reset-margin"
+              link
+              type="primary"
+              :size="size"
+              :icon="useRenderIcon(UserAddLine)"
+              @click="handleAssign(row)"
+              >分配</el-button
+            >
+            <el-button
               class="reset-margin"
               link
               type="primary"
@@ -117,5 +135,34 @@ const {
       @confirm-error="handleSubmitError"
       @confirm="handleSubmit"
     />
+    <el-dialog v-model="assignVisible" title="分配设备" width="420px">
+      <el-form label-width="90px">
+        <el-form-item label="设备编号">
+          <span>{{ assignForm.deviceId }}</span>
+        </el-form-item>
+        <el-form-item label="分配用户">
+          <el-select
+            v-model="assignForm.userId"
+            filterable
+            clearable
+            placeholder="请选择用户"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="item in userOptions"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="assignVisible = false">取消</el-button>
+        <el-button type="primary" :loading="assignLoading" @click="submitAssign"
+          >确定</el-button
+        >
+      </template>
+    </el-dialog>
   </div>
 </template>

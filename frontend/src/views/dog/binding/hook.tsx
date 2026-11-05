@@ -7,6 +7,8 @@ import {
   dogUserDevicePage,
   dogUserDeviceDelete
 } from "@/api/dogUserDevice";
+import { dogDeviceGetAll } from "@/api/dogDevice";
+import { userPage } from "@/api/system";
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
 
@@ -42,6 +44,27 @@ export function useDogBinding() {
   const dialogFormVisible = ref(false);
   const title = ref("");
   const addForm = ref({ id: null });
+  const userOptions = ref<Array<{ label: string; value: number }>>([]);
+  const deviceOptions = ref<Array<{ label: string; value: number }>>([]);
+
+  async function loadOptions() {
+    const [{ data: userData }, { data: deviceData }] = await Promise.all([
+      userPage({ current: 1, size: 1000 }),
+      dogDeviceGetAll()
+    ]);
+    userOptions.value = (userData?.records ?? []).map((user: any) => ({
+      label: user.realName
+        ? `${user.realName}（${user.username}）`
+        : user.username,
+      value: user.id
+    }));
+    deviceOptions.value = (deviceData ?? []).map((device: any) => ({
+      label: device.model
+        ? `${device.deviceId}（${device.model}）`
+        : device.deviceId,
+      value: device.id
+    }));
+  }
 
   function handleDelete(row) {
     dogUserDeviceDelete(row.id).then(res => {
@@ -98,7 +121,10 @@ export function useDogBinding() {
     if (formEl) nextTick(() => formEl.formInstance?.clearValidate());
   }
 
-  onMounted(() => onSearch());
+  onMounted(() => {
+    onSearch();
+    loadOptions();
+  });
 
   return {
     queryForm,
@@ -110,6 +136,8 @@ export function useDogBinding() {
     addForm,
     rules,
     columns,
+    userOptions,
+    deviceOptions,
     onSearch,
     handleDelete,
     handleSizeChange,

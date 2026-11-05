@@ -1,12 +1,73 @@
-use sea_orm::{ConnectionTrait, DbBackend, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, DbErr, Statement, Value};
 use sea_orm_migration::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const MIGRATIONS_DIR: &str = "migrations";
 const MIGRATION_NAME_DIRECTIVE: &str = "-- @migration-name:";
 const IF_NOT_EXISTS_DIRECTIVE: &str = "-- @if-not-exists:";
+
+/// Drops `seaql_migrations` records whose migration files were removed.
+///
+/// Historical migrations (for example the deleted Harbor / app review domains)
+/// remain recorded in old databases. `Migrator::up` aborts when an applied
+/// migration has no matching file, so the stale records are pruned before the
+/// pending migrations run.
+///
+/// Returns the number of removed records.
+pub async fn prune_stale_migrations<C>(conn: &C) -> Result<u64, DbErr>
+where
+    C: ConnectionTrait,
+{
+    let backend = conn.get_database_backend();
+    if backend != DbBackend::Sqlite {
+        return Ok(0);
+    }
+
+    let table = conn
+        .query_one(Statement::from_string(
+            backend,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'seaql_migrations'",
+        ))
+        .await?;
+    if table.is_none() {
+        return Ok(0);
+    }
+
+    let known: HashSet<String> = <Migrator as MigratorTrait>::migrations()
+        .iter()
+        .map(|migration| migration.name().to_string())
+        .collect();
+
+    let applied = conn
+        .query_all(Statement::from_string(
+            backend,
+            "SELECT version FROM seaql_migrations",
+        ))
+        .await?;
+
+    let mut removed = 0u64;
+    for row in applied {
+        let version: String = row.try_get("", "version")?;
+        if known.contains(&version) {
+            continue;
+        }
+        tracing::warn!(
+            migration = %version,
+            "dropping stale migration record: its file no longer exists"
+        );
+        conn.execute(Statement::from_sql_and_values(
+            backend,
+            "DELETE FROM seaql_migrations WHERE version = ?",
+            [Value::from(version)],
+        ))
+        .await?;
+        removed += 1;
+    }
+
+    Ok(removed)
+}
 
 pub struct Migrator;
 
@@ -398,6 +459,37 @@ mod tests {
             "SELECT 1 FROM p_sys_menu WHERE id = 1104 AND is_deleted = 1",
         );
         assert!(connection.query_one(harbor_menu).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn prunes_applied_migrations_that_no_longer_have_files() {
+        let connection = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+
+        <Migrator as MigratorTrait>::up(&connection, None)
+            .await
+            .unwrap();
+
+        connection
+            .execute_unprepared(
+                "INSERT INTO seaql_migrations (version, applied_at) \
+                 VALUES ('add_app_review', 1), ('add_startup_config', 2)",
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            <Migrator as MigratorTrait>::up(&connection, None)
+                .await
+                .is_err(),
+            "up must refuse to run while stale records exist"
+        );
+
+        let removed = prune_stale_migrations(&connection).await.unwrap();
+        assert_eq!(removed, 2);
+
+        <Migrator as MigratorTrait>::up(&connection, None)
+            .await
+            .expect("migrations must run after pruning stale records");
     }
 
     #[test]

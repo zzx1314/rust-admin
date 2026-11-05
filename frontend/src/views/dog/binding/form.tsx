@@ -1,24 +1,49 @@
+import { computed } from "vue";
+import type { Ref } from "vue";
 import type { PlusColumn } from "plus-pro-components";
 
-export function useDogBindingForm() {
-  const columnsForm: PlusColumn[] = [
-    { label: "用户ID", prop: "userId", valueType: "input-number" },
-    { label: "设备ID", prop: "deviceId", valueType: "input-number" }
-  ];
+type Option = { label: string; value: number };
 
-  const columnsQueryForm: PlusColumn[] = [
+export function useDogBindingForm(
+  userOptions: Ref<Option[]>,
+  deviceOptions: Ref<Option[]>
+) {
+  const selectProps = { filterable: true, clearable: true };
+
+  const columnsForm = computed<PlusColumn[]>(() => [
     {
-      label: "用户ID",
+      label: "用户",
       prop: "userId",
-      valueType: "input-number",
+      valueType: "select",
+      fieldProps: selectProps,
+      options: userOptions.value
+    },
+    {
+      label: "设备",
+      prop: "deviceId",
+      valueType: "select",
+      fieldProps: selectProps,
+      options: deviceOptions.value
+    }
+  ]);
+
+  const columnsQueryForm = computed<PlusColumn[]>(() => [
+    {
+      label: "用户",
+      prop: "userId",
+      valueType: "select",
+      fieldProps: selectProps,
+      options: userOptions.value,
       colProps: { span: 5 }
     },
     {
-      label: "设备ID",
+      label: "设备",
       prop: "deviceId",
-      valueType: "input-number",
+      valueType: "select",
+      fieldProps: selectProps,
+      options: deviceOptions.value,
       colProps: { span: 5 }
     }
-  ];
+  ]);
   return { columnsForm, columnsQueryForm };
 }

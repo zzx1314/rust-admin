@@ -121,6 +121,7 @@ DELETE /api/dogGateway/assign/{deviceId}      解除归属（?userId= 仅管理�
 - **响应**：`{ code: 10200, msg: "success", data }`；分页 `data` 为 `{ records, total, current, size }`。
 - **字段命名**：请求/响应使用小驼峰（登录接口 `/api/token` 例外，为 snake_case）。
 - **时间**：数据库存 UTC，响应统一转北京时间（UTC+8）字符串；查询区间按北京时间解析。
+- **数据库迁移**：启动时先清理 `seaql_migrations` 中“文件已删除”的历史记录（如早年的 `add_app_review`、`add_startup_config`），再执行待应用迁移。因此删除旧业务迁移后，老库仍可平滑升级，不会因 `Migration file of version 'xxx' is missing` 启动失败。
 - **主键生成**：系统模块沿用毫秒时间戳；dog 业务统一使用 `common::util::generate_id()`（毫秒 + 原子递增），避免同一毫秒内创建多行时主键冲突。
 - **设备 ID**：由设备端从硬件信息派生（板级序列号 / eMMC CID / DMI UUID / 物理 MAC，兜底 `/etc/machine-id`），注册时通过 `deviceIdSource` 上报来源；也可用 `--device-id` 覆盖。Ubuntu 上 `sysfs` 的序列号/eMMC CID/DMI 标识默认仅 root 可读（`--explain-device-id` 可查看每个来源的状态），建议以 systemd 服务运行并配合 `--device-id-file` 固定首次检测结果。详见 `client/README.md`。
 - **设备接入**：设备先取 token（`GET /api/dogGateway/auth/{deviceId}`），再注册（`dog_device` 初始 `offline`），随后连 `WS /api/notice/{deviceId}/{token}`；心跳会把 `status` 置为 `online` 并刷新 `comm_time` 与遥测字段；WebSocket 断开（正常关闭或连接异常）时置回 `offline`。新注册的设备默认未绑定用户，需在「设备绑定」页面分配后才能被普通用户看到；管理员通过 `POST /api/dogDevice` 手工创建的设备同样保持未绑定，普通用户手工创建则会自动绑定创建者。注册报文本身不携带用户信息，因此设备归属由独立的 `POST /api/dogGateway/assign`（按硬件 `deviceId`）接口建立，便于后续接入配网/出厂预置流程时直接复用。

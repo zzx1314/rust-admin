@@ -73,6 +73,10 @@ impl App {
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
+        crate::migration::prune_stale_migrations(&conn)
+            .await
+            .map_err(AppError::DatabaseErrorSeaOrm)?;
+
         Migrator::up(&conn, None)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;

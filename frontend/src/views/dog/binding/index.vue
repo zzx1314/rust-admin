@@ -13,7 +13,6 @@ import { PlusDialogForm, PlusSearch } from "plus-pro-components";
 defineOptions({ name: "DogBinding" });
 
 const addFormRef = ref<FormInstance>();
-const { columnsForm, columnsQueryForm } = useDogBindingForm();
 const {
   queryForm,
   dataList,
@@ -24,6 +23,8 @@ const {
   addForm,
   rules,
   columns,
+  userOptions,
+  deviceOptions,
   onSearch,
   handleDelete,
   handleSizeChange,
@@ -34,6 +35,10 @@ const {
   cancel,
   openDia
 } = useDogBinding();
+const { columnsForm, columnsQueryForm } = useDogBindingForm(
+  userOptions,
+  deviceOptions
+);
 </script>
 <template>
   <div class="main">
