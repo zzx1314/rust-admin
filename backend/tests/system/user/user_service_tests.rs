@@ -356,7 +356,6 @@ async fn test_create_user_success() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
 
@@ -384,7 +383,6 @@ async fn test_get_user_success() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     let _created = repo.create(&req, &1i64).await.unwrap();
@@ -421,7 +419,6 @@ async fn test_get_all_users() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     repo.create(&req1, &1i64).await.unwrap();
@@ -436,7 +433,6 @@ async fn test_get_all_users() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     repo.create(&req2, &2i64).await.unwrap();
@@ -462,7 +458,6 @@ async fn test_update_user_success() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     let _created = repo.create(&req, &1i64).await.unwrap();
@@ -537,7 +532,6 @@ async fn test_delete_user_success() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     let _created = repo.create(&req, &1i64).await.unwrap();
@@ -578,7 +572,6 @@ async fn test_get_users_page_default() {
             remarks: None,
             card: None,
             sex: None,
-            sync_harbor: false,
             role: None,
         };
         repo.create(&req, &(i as i64)).await.unwrap();
@@ -625,7 +618,6 @@ async fn test_get_users_page_custom() {
             remarks: None,
             card: None,
             sex: None,
-            sync_harbor: false,
             role: None,
         };
         repo.create(&req, &(i as i64)).await.unwrap();
@@ -672,7 +664,6 @@ async fn test_get_users_page_out_of_range() {
             remarks: None,
             card: None,
             sex: None,
-            sync_harbor: false,
             role: None,
         };
         repo.create(&req, &(i as i64)).await.unwrap();

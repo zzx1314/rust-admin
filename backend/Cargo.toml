@@ -118,7 +118,3 @@ path = "tests/system/sys_log/sys_log_service_tests.rs"
 [[test]]
 name = "logging_middleware_tests"
 path = "tests/logging/logging_middleware_tests.rs"
-
-[[test]]
-name = "app_review_service_tests"
-path = "tests/business/app_review_service_tests.rs"

@@ -178,7 +178,6 @@ async fn test_user_repo_create_and_find() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
 
@@ -217,7 +216,6 @@ async fn test_user_repo_find_all() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     let id1 = uid();
@@ -234,7 +232,6 @@ async fn test_user_repo_find_all() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     repo.create(&req2, &id2).await.unwrap();
@@ -262,7 +259,6 @@ async fn test_user_repo_update() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     repo.create(&req, &id).await.unwrap();
@@ -336,7 +332,6 @@ async fn test_user_repo_delete() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     repo.create(&req, &id).await.unwrap();

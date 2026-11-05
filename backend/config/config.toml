@@ -9,10 +9,3 @@ port = 3000
 host = "localhost"
 port = 6379
 password = "123456"
-
-[harbor]
-url = "http://192.168.41.227:8097"
-username = "admin"
-password = "Harbor12345"
-replication_timeout_secs = 60
-replication_poll_interval_secs = 1

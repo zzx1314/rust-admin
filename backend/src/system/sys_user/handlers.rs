@@ -1,7 +1,6 @@
 use crate::api::AppState;
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
-use crate::common::util::decrypt_password;
 use crate::system::sys_user::domain::{
     CreateUserRequest, UpdateUserRequest, User, UserPageQuery, UserVO,
 };
@@ -13,7 +12,7 @@ use axum::{
 use axum_extra::TypedHeader;
 use axum_extra::headers::Authorization;
 use axum_extra::headers::authorization::Bearer;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
 pub struct UserIdParam {
@@ -24,47 +23,6 @@ pub async fn create_user_handler(
     State(state): State<AppState>,
     Json(req): Json<CreateUserRequest>,
 ) -> Result<Json<ApiResponse<User>>, AppError> {
-    let sync_harbor = req.sync_harbor;
-    let harbor_password = req
-        .password
-        .as_deref()
-        .and_then(|p| decrypt_password(p).ok());
-
-    // If Harbor sync is requested and a usable password exists, create the Harbor user first.
-    // This guarantees that a Harbor failure does not leave a half-created local user behind.
-    if let (true, Some(password)) = (sync_harbor, harbor_password) {
-        let username = req.username.clone();
-        let email = req
-            .email
-            .clone()
-            .unwrap_or_else(|| format!("{}@harbor.local", username));
-        let harbor_req = crate::business::harbor::models::CreateHarborUserRequest {
-            username: username.clone(),
-            password,
-            realname: req.real_name.clone().unwrap_or_else(|| username.clone()),
-            email: Some(email),
-            comment: None,
-        };
-
-        state.harbor_service.create_user(&harbor_req).await?;
-
-        // Harbor succeeded; now create the local user. If the local creation fails,
-        // roll back the Harbor user on a best-effort basis and propagate the error.
-        match state.user_service.create_user(req).await {
-            Ok(user) => return Ok(Json(ApiResponse::ok(user))),
-            Err(e) => {
-                if let Err(rollback_err) = state.harbor_service.delete_user(&username).await {
-                    tracing::warn!(
-                        "Failed to rollback Harbor user '{}' after local user creation failed: {}",
-                        username,
-                        rollback_err
-                    );
-                }
-                return Err(e);
-            }
-        }
-    }
-
     let user = state.user_service.create_user(req).await?;
     Ok(Json(ApiResponse::ok(user)))
 }
@@ -97,7 +55,6 @@ pub async fn update_user_handler(
     Path(params): Path<UserIdParam>,
     Json(req): Json<UpdateUserRequest>,
 ) -> Result<Json<ApiResponse<User>>, AppError> {
-    // Check if user is protected
     let existing = state.user_service.get_user(&params.id).await?;
     if existing.is_edit == Some(0) {
         return Err(AppError::AuthError(
@@ -112,24 +69,13 @@ pub async fn delete_user_handler(
     State(state): State<AppState>,
     Path(params): Path<UserIdParam>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    // Get username before deleting (needed for Harbor sync)
     let user = state.user_service.get_user(&params.id).await?;
-    let username = user.username.clone();
-
-    // Protect system users from deletion
     if user.is_edit == Some(0) {
         return Err(AppError::AuthError(
             "Cannot delete protected user".to_string(),
         ));
     }
-
     state.user_service.delete_user(&params.id).await?;
-
-    // Try to delete from Harbor (log warning if it fails)
-    if let Err(e) = state.harbor_service.delete_user(&username).await {
-        tracing::warn!("Failed to delete Harbor user '{}': {}", username, e);
-    }
-
     Ok(Json(ApiResponse::ok(serde_json::Value::Null)))
 }
 
@@ -139,13 +85,13 @@ pub struct RoleIdQuery {
     pub role_id: i64,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Serialize)]
 pub struct UsersByRoleResponse {
     pub success: bool,
     pub data: Vec<UserInfoSimple>,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Serialize)]
 pub struct UserInfoSimple {
     pub id: i64,
     pub username: String,
@@ -178,8 +124,6 @@ pub async fn edit_password_handler(
     auth: TypedHeader<Authorization<Bearer>>,
     Json(req): Json<PasswordUpdateRequest>,
 ) -> Result<Json<crate::system::sys_user::service::PasswordUpdateResponse>, AppError> {
-    // Derive the current user from the token so a foreground user can change
-    // their own password without knowing their numeric id.
     let token = auth.token();
     let user_id = state.auth_service.validate_token(token).await?;
     let response = state
@@ -189,21 +133,21 @@ pub async fn edit_password_handler(
     Ok(Json(response))
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResetPwdRequest {
     pub id: i64,
     pub password: Option<String>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnableRequest {
     pub id: i64,
     pub enable: i32,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Serialize)]
 pub struct OperationResponse {
     pub success: bool,
     pub msg: String,
@@ -220,24 +164,10 @@ pub async fn reset_user_password_handler(
         ));
     }
     let default_password = "Aa123456";
-    let username = user.username.clone();
     state
         .user_service
         .reset_password(&req.id, default_password)
         .await?;
-
-    // Sync new password to Harbor (log warning if it fails)
-    if let Err(e) = state
-        .harbor_service
-        .update_password(&username, default_password)
-        .await
-    {
-        tracing::warn!(
-            "Failed to sync password to Harbor for '{}': {}",
-            username,
-            e
-        );
-    }
 
     Ok(Json(ApiResponse::ok(OperationResponse {
         success: true,

@@ -46,8 +46,7 @@ export function useUser() {
     sex: "",
     role: [],
     orgId: null,
-    orgName: "",
-    syncHarbor: true
+    orgName: ""
   });
   // 查询结果集
   const dataList = ref([]);
@@ -200,7 +199,6 @@ export function useUser() {
     addForm.value.sex = "";
     addForm.value.role = [];
     addForm.value.orgName = orgNameVal.value;
-    addForm.value.syncHarbor = true;
     dialogFormVisible.value = false;
   }
 
@@ -276,7 +274,7 @@ export function useUser() {
   function handleUpdate(row, ref) {
     console.log(row);
     openDia("修改用户", ref);
-    // Merge with initial form to preserve fields not in API response (password, syncHarbor, etc.)
+    // Merge with initial form to preserve fields not in API response (password, etc.)
     const formData = JSON.parse(JSON.stringify(row));
     const roleIds = String(row.roleStr ?? "")
       .split(",")

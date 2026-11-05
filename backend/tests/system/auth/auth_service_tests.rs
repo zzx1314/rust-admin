@@ -487,7 +487,6 @@ async fn test_login_success() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     user_repo.create(&req, &1i64).await.unwrap();
@@ -530,7 +529,6 @@ async fn test_login_wrong_password() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     user_repo.create(&req, &1i64).await.unwrap();
@@ -555,7 +553,6 @@ async fn test_login_no_password_hash() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     user_repo.create(&req, &1).await.unwrap();
@@ -581,7 +578,6 @@ async fn test_logout_success() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     user_repo.create(&req, &1i64).await.unwrap();
@@ -615,7 +611,6 @@ async fn test_validate_token_success() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     user_repo.create(&req, &1i64).await.unwrap();
@@ -644,7 +639,6 @@ async fn test_validate_token_wrong_token() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     user_repo.create(&req, &1i64).await.unwrap();
@@ -677,7 +671,6 @@ async fn test_validate_token_no_stored_token() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     user_repo.create(&req, &1i64).await.unwrap();
@@ -708,7 +701,6 @@ async fn test_refresh_token_success() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     user_repo.create(&req, &1i64).await.unwrap();
@@ -756,7 +748,6 @@ async fn test_refresh_token_user_not_found() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     user_repo.create(&req, &1i64).await.unwrap();
@@ -786,7 +777,6 @@ async fn test_refresh_token_stores_and_rotates() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     user_repo.create(&req, &1i64).await.unwrap();
@@ -825,7 +815,6 @@ async fn test_logout_invalidates_refresh_token() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     user_repo.create(&req, &1i64).await.unwrap();
@@ -853,7 +842,6 @@ async fn seed_password_user(user_repo: &FakeUserRepository) {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     user_repo.create(&req, &1i64).await.unwrap();

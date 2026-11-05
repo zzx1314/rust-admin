@@ -1,6 +1,13 @@
-use crate::business::app_review::service::AppReviewService;
-use crate::business::harbor::service::HarborService;
-use crate::config::HarborConfig;
+use crate::business::dog::command::service::DogCommandService;
+use crate::business::dog::config::service::DogConfigService;
+use crate::business::dog::device::service::DogDeviceService;
+use crate::business::dog::media::service::DogMediaService;
+use crate::business::dog::model::service::DogModelService;
+use crate::business::dog::route_library::service::DogRouteLibraryService;
+use crate::business::dog::services::service::DogServicesService;
+use crate::business::dog::statistics::service::DogStatisticsService;
+use crate::business::dog::task::service::DogTaskService;
+use crate::business::dog::workflow::service::DogWorkflowService;
 use crate::system::auth::service::AuthService;
 use crate::system::sys_auth::service::SysAuthService;
 use crate::system::sys_dict::service::SysDictService;
@@ -26,7 +33,14 @@ pub struct AppState {
     pub sys_dict_service: Arc<SysDictService>,
     pub sys_dict_item_service: Arc<SysDictItemService>,
     pub sys_log_service: Arc<SysLogService>,
-    pub harbor_service: Arc<HarborService>,
-    pub app_review_service: Arc<AppReviewService>,
-    pub harbor_config: Option<HarborConfig>,
+    pub dog_device_service: Arc<DogDeviceService>,
+    pub dog_task_service: Arc<DogTaskService>,
+    pub dog_media_service: Arc<DogMediaService>,
+    pub dog_model_service: Arc<DogModelService>,
+    pub dog_config_service: Arc<DogConfigService>,
+    pub dog_command_service: Arc<DogCommandService>,
+    pub dog_route_library_service: Arc<DogRouteLibraryService>,
+    pub dog_workflow_service: Arc<DogWorkflowService>,
+    pub dog_services_service: Arc<DogServicesService>,
+    pub dog_statistics_service: Arc<DogStatisticsService>,
 }

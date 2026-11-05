@@ -58,8 +58,8 @@ cargo test --test auth_service_tests  # 运行 auth service tests
 │   └── sys_auth/               # Menu authorization data
 │
 ├── business/                   # Product/business domains
-│   ├── harbor/                 # Harbor registry integration and APIs
-│   └── app_review/             # Application artifact review workflow
+│   └── dog/                    # Robot dog domain: device, task, media, model, config,
+│                               #   command, route library, workflow, services, statistics
 │
 ├── common/                     # Common/shared code
 │   ├── base.rs                 # BaseRepository, RepoExt traits
@@ -92,14 +92,14 @@ tests/                          # Integration tests grouped by system/business d
 │   ├── sys_dict/                  # Dictionary tests
 │   ├── sys_dict_item/             # Dictionary item tests
 │   └── sys_log/                   # System log tests
-├── business/
-│   └── app_review_service_tests.rs # Application review tests
 ├── common/                        # Shared utility/value-object tests
 └── logging/                       # HTTP middleware tests
 ```
 
 ### Test Configuration
-Tests are organized under `tests/system/` and `tests/business/` according to the production module boundary. Each test file is explicitly declared in `Cargo.toml` via `[[test]]` entries. Run with `cargo test --test <name>` (name from `[[test]]` block, not file path).
+Tests are organized under `tests/system/` according to the production module boundary. Each test file is explicitly declared in `Cargo.toml` via `[[test]]` entries. Run with `cargo test --test <name>` (name from `[[test]]` block, not file path).
+
+Integration tests that need an `AppState` should build it with `App::from_connection(conn)` + `build_state_with_token_store(...)` instead of wiring every service by hand.
 
 ### Code Conventions
 

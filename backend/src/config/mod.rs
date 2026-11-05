@@ -15,46 +15,11 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct HarborConfig {
-    pub url: String,
-    pub username: String,
-    pub password: String,
-    #[serde(default = "default_staging_project")]
-    pub staging_project: String,
-    #[serde(default = "default_production_project")]
-    pub production_project: String,
-    pub registry_endpoint_id: Option<i64>,
-    pub registry_insecure: Option<bool>,
-    pub webhook_secret: Option<String>,
-    #[serde(default = "default_replication_timeout")]
-    pub replication_timeout_secs: u64,
-    #[serde(default = "default_replication_poll_interval")]
-    pub replication_poll_interval_secs: u64,
-}
-
-fn default_staging_project() -> String {
-    "staging-project".to_string()
-}
-
-fn default_production_project() -> String {
-    "production-project".to_string()
-}
-
-fn default_replication_timeout() -> u64 {
-    30
-}
-
-fn default_replication_poll_interval() -> u64 {
-    1
-}
-
-#[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     pub server: ServerConfig,
     pub redis: RedisConfig,
     pub jwt_secret: String,
     pub database_url: String,
-    pub harbor: Option<HarborConfig>,
 }
 
 impl RedisConfig {

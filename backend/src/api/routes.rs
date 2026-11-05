@@ -1,14 +1,22 @@
 use axum::{
     Router,
     middleware::from_fn_with_state,
-    routing::{delete, get, post, put},
+    routing::{get, post, put},
 };
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::api::AppState;
 use crate::api::middleware::{audit_log_middleware, require_auth};
-use crate::business::app_review::handlers as app_review_handlers;
-use crate::business::harbor::handlers as harbor_handlers;
+use crate::business::dog::command::handlers as dog_command_handlers;
+use crate::business::dog::config::handlers as dog_config_handlers;
+use crate::business::dog::device::handlers as dog_device_handlers;
+use crate::business::dog::media::handlers as dog_media_handlers;
+use crate::business::dog::model::handlers as dog_model_handlers;
+use crate::business::dog::route_library::handlers as dog_route_handlers;
+use crate::business::dog::services::handlers as dog_services_handlers;
+use crate::business::dog::statistics::handlers as dog_statistics_handlers;
+use crate::business::dog::task::handlers as dog_task_handlers;
+use crate::business::dog::workflow::handlers as dog_workflow_handlers;
 use crate::system::auth::handlers::{
     check_token_handler, login_handler, logout_handler, me_handler, refresh_handler,
 };
@@ -221,88 +229,220 @@ pub fn sys_log_routes(state: AppState) -> Router<AppState> {
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 
-pub fn harbor_routes(state: AppState) -> Router<AppState> {
+pub fn dog_device_routes(state: AppState) -> Router<AppState> {
     Router::new()
         .route(
-            "/harbor/statistics",
-            get(harbor_handlers::harbor_statistics_handler),
+            "/dogDevice/getPage",
+            get(dog_device_handlers::list_devices_handler),
         )
         .route(
-            "/harbor/projects",
-            post(harbor_handlers::create_project_handler)
-                .get(harbor_handlers::list_projects_handler),
+            "/dogDevice/getAll",
+            get(dog_device_handlers::list_all_devices_handler),
         )
         .route(
-            "/harbor/projects/{project_name}/summary",
-            get(harbor_handlers::get_project_summary_handler),
+            "/dogDevice",
+            post(dog_device_handlers::create_device_handler),
         )
         .route(
-            "/harbor/projects/{project_name}/repositories",
-            get(harbor_handlers::list_repositories_handler),
+            "/dogDevice/{id}",
+            get(dog_device_handlers::get_device_handler)
+                .put(dog_device_handlers::update_device_handler)
+                .delete(dog_device_handlers::delete_device_handler),
         )
         .route(
-            "/harbor/projects/{project_name}/repositories/{repo_name}",
-            delete(harbor_handlers::delete_repository_handler),
-        )
-        .route(
-            "/harbor/projects/{project_name}/members",
-            get(harbor_handlers::list_members_handler).post(harbor_handlers::add_member_handler),
-        )
-        .route(
-            "/harbor/projects/{project_name}/artifacts",
-            get(harbor_handlers::list_artifacts_handler),
-        )
-        .route(
-            "/harbor/projects/{project_name}/repositories/{repo_name}/artifacts/{reference}",
-            delete(harbor_handlers::delete_artifact_handler),
-        )
-        .route(
-            "/harbor/projects/{project_name}/members/{member_id}",
-            delete(harbor_handlers::remove_member_handler),
-        )
-        .route(
-            "/harbor/projects/{project_name}",
-            delete(harbor_handlers::delete_project_handler),
-        )
-        .route("/harbor/info", get(harbor_handlers::harbor_info_handler))
-        .layer(from_fn_with_state(state.clone(), require_auth))
-}
-
-pub fn app_review_routes(state: AppState) -> Router<AppState> {
-    Router::new()
-        .route(
-            "/appReviews",
-            post(app_review_handlers::create_review_handler)
-                .get(app_review_handlers::list_reviews_handler),
-        )
-        .route(
-            "/appReviews/{id}",
-            get(app_review_handlers::get_review_handler)
-                .delete(app_review_handlers::delete_review_handler),
-        )
-        .route(
-            "/appReviews/{id}/approve",
-            post(app_review_handlers::approve_review_handler),
-        )
-        .route(
-            "/appReviews/{id}/reject",
-            post(app_review_handlers::reject_review_handler),
+            "/dogDevice/status/{id}",
+            put(dog_device_handlers::update_device_status_handler),
         )
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 
-pub fn webhook_routes() -> Router<AppState> {
-    Router::new().route(
-        "/webhooks/harbor",
-        post(app_review_handlers::harbor_webhook_handler),
-    )
+pub fn dog_task_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route(
+            "/dogTask/getPage",
+            get(dog_task_handlers::list_tasks_handler),
+        )
+        .route(
+            "/dogTask/getAll",
+            get(dog_task_handlers::list_all_tasks_handler),
+        )
+        .route("/dogTask", post(dog_task_handlers::create_task_handler))
+        .route(
+            "/dogTask/{id}",
+            get(dog_task_handlers::get_task_handler)
+                .put(dog_task_handlers::update_task_handler)
+                .delete(dog_task_handlers::delete_task_handler),
+        )
+        .route(
+            "/dogTask/status/{id}",
+            put(dog_task_handlers::update_task_status_handler),
+        )
+        .layer(from_fn_with_state(state.clone(), require_auth))
 }
 
-pub fn deploy_config_routes() -> Router<AppState> {
-    Router::new().route(
-        "/deploy/config",
-        get(app_review_handlers::get_startup_config_handler),
-    )
+pub fn dog_media_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route(
+            "/dogMedia/getPage",
+            get(dog_media_handlers::list_media_handler),
+        )
+        .route(
+            "/dogMedia/getAll",
+            get(dog_media_handlers::list_all_media_handler),
+        )
+        .route("/dogMedia", post(dog_media_handlers::create_media_handler))
+        .route(
+            "/dogMedia/{id}",
+            get(dog_media_handlers::get_media_handler)
+                .put(dog_media_handlers::update_media_handler)
+                .delete(dog_media_handlers::delete_media_handler),
+        )
+        .layer(from_fn_with_state(state.clone(), require_auth))
+}
+
+pub fn dog_model_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route(
+            "/dogModel/getPage",
+            get(dog_model_handlers::list_models_handler),
+        )
+        .route(
+            "/dogModel/getAll",
+            get(dog_model_handlers::list_all_models_handler),
+        )
+        .route("/dogModel", post(dog_model_handlers::create_model_handler))
+        .route(
+            "/dogModel/{id}",
+            get(dog_model_handlers::get_model_handler)
+                .put(dog_model_handlers::update_model_handler)
+                .delete(dog_model_handlers::delete_model_handler),
+        )
+        .layer(from_fn_with_state(state.clone(), require_auth))
+}
+
+pub fn dog_config_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route(
+            "/dogConfig/getPage",
+            get(dog_config_handlers::list_configs_handler),
+        )
+        .route(
+            "/dogConfig/getAll",
+            get(dog_config_handlers::list_all_configs_handler),
+        )
+        .route(
+            "/dogConfig",
+            post(dog_config_handlers::create_config_handler),
+        )
+        .route(
+            "/dogConfig/{id}",
+            get(dog_config_handlers::get_config_handler)
+                .put(dog_config_handlers::update_config_handler)
+                .delete(dog_config_handlers::delete_config_handler),
+        )
+        .layer(from_fn_with_state(state.clone(), require_auth))
+}
+
+pub fn dog_command_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route(
+            "/dogCommand/getPage",
+            get(dog_command_handlers::list_commands_handler),
+        )
+        .route(
+            "/dogCommand/getAll",
+            get(dog_command_handlers::list_all_commands_handler),
+        )
+        .route(
+            "/dogCommand",
+            post(dog_command_handlers::create_command_handler),
+        )
+        .route(
+            "/dogCommand/{id}",
+            get(dog_command_handlers::get_command_handler)
+                .put(dog_command_handlers::update_command_handler)
+                .delete(dog_command_handlers::delete_command_handler),
+        )
+        .route(
+            "/dogCommand/status/{id}",
+            put(dog_command_handlers::update_command_status_handler),
+        )
+        .layer(from_fn_with_state(state.clone(), require_auth))
+}
+
+pub fn dog_route_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route(
+            "/dogRoute/getPage",
+            get(dog_route_handlers::list_routes_handler),
+        )
+        .route(
+            "/dogRoute/getAll",
+            get(dog_route_handlers::list_all_routes_handler),
+        )
+        .route("/dogRoute", post(dog_route_handlers::create_route_handler))
+        .route(
+            "/dogRoute/{id}",
+            get(dog_route_handlers::get_route_handler)
+                .put(dog_route_handlers::update_route_handler)
+                .delete(dog_route_handlers::delete_route_handler),
+        )
+        .layer(from_fn_with_state(state.clone(), require_auth))
+}
+
+pub fn dog_workflow_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route(
+            "/dogWorkflow",
+            post(dog_workflow_handlers::create_workflow_handler),
+        )
+        .route(
+            "/dogWorkflow/{id}",
+            get(dog_workflow_handlers::get_workflow_handler)
+                .put(dog_workflow_handlers::update_workflow_handler)
+                .delete(dog_workflow_handlers::delete_workflow_handler),
+        )
+        .route(
+            "/dogWorkflow/uuid/{uuid}",
+            get(dog_workflow_handlers::get_workflow_by_uuid_handler),
+        )
+        .layer(from_fn_with_state(state.clone(), require_auth))
+}
+
+pub fn dog_statistics_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route(
+            "/dogStatistics/all",
+            get(dog_statistics_handlers::statistics_all_handler),
+        )
+        .route(
+            "/dogStatistics/allType",
+            get(dog_statistics_handlers::statistics_all_type_handler),
+        )
+        .route(
+            "/dogStatistics/deviceTypeNumber",
+            get(dog_statistics_handlers::statistics_device_type_handler),
+        )
+        .layer(from_fn_with_state(state.clone(), require_auth))
+}
+
+pub fn dog_services_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route(
+            "/dogServices/getAll",
+            get(dog_services_handlers::list_all_services_handler),
+        )
+        .route(
+            "/dogServices",
+            post(dog_services_handlers::create_services_handler),
+        )
+        .route(
+            "/dogServices/{id}",
+            get(dog_services_handlers::get_services_handler)
+                .put(dog_services_handlers::update_services_handler)
+                .delete(dog_services_handlers::delete_services_handler),
+        )
+        .layer(from_fn_with_state(state.clone(), require_auth))
 }
 
 pub fn create_router(state: AppState) -> Router {
@@ -317,10 +457,16 @@ pub fn create_router(state: AppState) -> Router {
         .merge(sys_dict_routes(state.clone()))
         .merge(sys_dict_item_routes(state.clone()))
         .merge(sys_log_routes(state.clone()))
-        .merge(harbor_routes(state.clone()))
-        .merge(app_review_routes(state.clone()))
-        .merge(webhook_routes())
-        .merge(deploy_config_routes());
+        .merge(dog_device_routes(state.clone()))
+        .merge(dog_task_routes(state.clone()))
+        .merge(dog_media_routes(state.clone()))
+        .merge(dog_model_routes(state.clone()))
+        .merge(dog_config_routes(state.clone()))
+        .merge(dog_command_routes(state.clone()))
+        .merge(dog_route_routes(state.clone()))
+        .merge(dog_workflow_routes(state.clone()))
+        .merge(dog_services_routes(state.clone()))
+        .merge(dog_statistics_routes(state.clone()));
 
     Router::new()
         .nest("/api", api_router)

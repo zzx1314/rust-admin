@@ -5,10 +5,25 @@ use std::sync::Arc;
 use sea_orm::DatabaseConnection;
 
 use crate::api::{AppState, routes::create_router};
-use crate::business::app_review::repository::SeaOrmAppReviewRepository;
-use crate::business::app_review::service::AppReviewService;
-use crate::business::harbor::client::HarborClient;
-use crate::business::harbor::service::HarborService;
+use crate::business::dog::command::repository::SeaOrmDogCommandRepository;
+use crate::business::dog::command::service::DogCommandService;
+use crate::business::dog::config::repository::SeaOrmDogConfigRepository;
+use crate::business::dog::config::service::DogConfigService;
+use crate::business::dog::device::repository::SeaOrmDogDeviceRepository;
+use crate::business::dog::device::service::DogDeviceService;
+use crate::business::dog::media::repository::SeaOrmDogMediaRepository;
+use crate::business::dog::media::service::DogMediaService;
+use crate::business::dog::model::repository::SeaOrmDogModelRepository;
+use crate::business::dog::model::service::DogModelService;
+use crate::business::dog::route_library::repository::SeaOrmDogRouteLibraryRepository;
+use crate::business::dog::route_library::service::DogRouteLibraryService;
+use crate::business::dog::services::repository::SeaOrmDogServicesRepository;
+use crate::business::dog::services::service::DogServicesService;
+use crate::business::dog::statistics::service::DogStatisticsService;
+use crate::business::dog::task::repository::SeaOrmDogTaskRepository;
+use crate::business::dog::task::service::DogTaskService;
+use crate::business::dog::workflow::repository::SeaOrmDogWorkflowRepository;
+use crate::business::dog::workflow::service::DogWorkflowService;
 use crate::common::error::AppError;
 use crate::common::traits::{
     MenuRepository, OrgRepository, RoleRepository, SysDictItemRepository, SysDictRepository,
@@ -52,7 +67,24 @@ impl App {
         Ok(Self { conn })
     }
 
+    /// Build an `App` from an already established (and migrated) connection.
+    /// Useful for tests that create their own schema.
+    pub fn from_connection(conn: DatabaseConnection) -> Self {
+        Self { conn }
+    }
+
     pub fn build_state(&self, config: &AppConfig) -> AppState {
+        let token_store: Arc<dyn TokenStore> = Arc::new(RedisTokenStore::new(&config.redis.url()));
+        self.build_state_with_token_store(token_store, &config.jwt_secret)
+    }
+
+    /// Build the application state with an explicit token store so that tests
+    /// can use an in-memory implementation instead of Redis.
+    pub fn build_state_with_token_store(
+        &self,
+        token_store: Arc<dyn TokenStore>,
+        jwt_secret: &str,
+    ) -> AppState {
         let conn = Arc::new(self.conn.clone());
 
         let role_repo: Arc<dyn RoleRepository> = Arc::new(SeaOrmRoleRepository::new(conn.clone()));
@@ -79,13 +111,11 @@ impl App {
             sys_dict_repo.clone(),
         ));
 
-        let redis_url = config.redis.url();
-        let token_store: Arc<dyn TokenStore> = Arc::new(RedisTokenStore::new(&redis_url));
         let auth_service = Arc::new(AuthService::new(
             user_repo,
             token_store,
             role_repo.clone(),
-            &config.jwt_secret,
+            jwt_secret,
             sys_dict_item_service.clone(),
         ));
 
@@ -98,58 +128,42 @@ impl App {
             Arc::new(SeaOrmSysLogRepository::new(conn.clone()));
         let sys_log_service = Arc::new(SysLogService::new(sys_log_repo));
 
-        let app_review_repo = SeaOrmAppReviewRepository::new(conn.clone());
+        let dog_device_repo = SeaOrmDogDeviceRepository::new(conn.clone());
+        let dog_device_service = Arc::new(DogDeviceService::new(dog_device_repo.clone()));
 
-        let harbor_service = if let Some(harbor_config) = config.harbor.clone() {
-            let registry_endpoint_id = harbor_config.registry_endpoint_id;
-            let registry_insecure = harbor_config.registry_insecure;
-            let replication_timeout_secs = harbor_config.replication_timeout_secs;
-            let replication_poll_interval_secs = harbor_config.replication_poll_interval_secs;
-            let harbor_client = Arc::new(HarborClient::new(&harbor_config));
-            Arc::new(
-                HarborService::new(harbor_client)
-                    .with_registry_endpoint_id(registry_endpoint_id)
-                    .with_registry_insecure(registry_insecure)
-                    .with_replication_timeout_secs(replication_timeout_secs)
-                    .with_replication_poll_interval_secs(replication_poll_interval_secs),
-            )
-        } else {
-            tracing::warn!(
-                "Harbor config is missing, Harbor endpoints will return an error until [harbor] is configured in config.toml"
-            );
-            Arc::new(HarborService::new(Arc::new(HarborClient::new(
-                &crate::config::HarborConfig {
-                    url: String::new(),
-                    username: String::new(),
-                    password: String::new(),
-                    staging_project: String::new(),
-                    production_project: String::new(),
-                    registry_endpoint_id: None,
-                    registry_insecure: None,
-                    webhook_secret: None,
-                    replication_timeout_secs: 30,
-                    replication_poll_interval_secs: 1,
-                },
-            ))))
-        };
+        let dog_task_repo = SeaOrmDogTaskRepository::new(conn.clone());
+        let dog_task_service = Arc::new(DogTaskService::new(dog_task_repo.clone()));
 
-        let app_review_service = Arc::new(AppReviewService::new(
-            app_review_repo,
-            harbor_service.clone(),
+        let dog_media_repo = SeaOrmDogMediaRepository::new(conn.clone());
+        let dog_media_service = Arc::new(DogMediaService::new(dog_media_repo.clone()));
+
+        let dog_model_repo = SeaOrmDogModelRepository::new(conn.clone());
+        let dog_model_service = Arc::new(DogModelService::new(dog_model_repo.clone()));
+
+        let dog_config_repo = SeaOrmDogConfigRepository::new(conn.clone());
+        let dog_config_service = Arc::new(DogConfigService::new(dog_config_repo));
+
+        let dog_command_repo = SeaOrmDogCommandRepository::new(conn.clone());
+        let dog_command_service = Arc::new(DogCommandService::new(dog_command_repo.clone()));
+
+        let dog_route_repo = SeaOrmDogRouteLibraryRepository::new(conn.clone());
+        let dog_route_library_service =
+            Arc::new(DogRouteLibraryService::new(dog_route_repo.clone()));
+
+        let dog_workflow_repo = SeaOrmDogWorkflowRepository::new(conn.clone());
+        let dog_workflow_service = Arc::new(DogWorkflowService::new(dog_workflow_repo));
+
+        let dog_services_repo = SeaOrmDogServicesRepository::new(conn.clone());
+        let dog_services_service = Arc::new(DogServicesService::new(dog_services_repo));
+
+        let dog_statistics_service = Arc::new(DogStatisticsService::new(
+            dog_device_repo,
+            dog_task_repo,
+            dog_model_repo,
+            dog_route_repo,
+            dog_media_repo,
+            dog_command_repo,
         ));
-        let harbor_config = config.harbor.clone();
-
-        if let Some(harbor_cfg) = &harbor_config
-            && harbor_cfg
-                .webhook_secret
-                .as_ref()
-                .map(|s| s.is_empty())
-                .unwrap_or(true)
-        {
-            tracing::warn!(
-                "Harbor webhook secret is not configured. The /api/webhooks/harbor endpoint is publicly accessible without verification."
-            );
-        }
 
         AppState {
             user_service,
@@ -161,9 +175,16 @@ impl App {
             sys_dict_service,
             sys_dict_item_service,
             sys_log_service,
-            harbor_service,
-            app_review_service,
-            harbor_config,
+            dog_device_service,
+            dog_task_service,
+            dog_media_service,
+            dog_model_service,
+            dog_config_service,
+            dog_command_service,
+            dog_route_library_service,
+            dog_workflow_service,
+            dog_services_service,
+            dog_statistics_service,
         }
     }
 
@@ -171,10 +192,6 @@ impl App {
         let state = self.build_state(config);
         let router = create_router(state);
 
-        // Enable SO_REUSEADDR + SO_REUSEPORT so the port is immediately
-        // reusable when restarting with tools like `cargo watch -x run`.
-        // SO_REUSEADDR alone does not let you bind to a port still held by
-        // a living process; SO_REUSEPORT allows exactly that.
         let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
             .expect("Failed to create socket");
         if let Err(e) = socket.set_reuse_address(true) {
@@ -187,7 +204,6 @@ impl App {
             .bind(&socket2::SockAddr::from(addr))
             .expect("Failed to bind to address");
         socket.listen(1024).expect("Failed to listen on socket");
-        // Tokio requires a non-blocking socket; socket2::Socket defaults to blocking.
         socket
             .set_nonblocking(true)
             .expect("Failed to set non-blocking mode");
@@ -196,8 +212,6 @@ impl App {
             .expect("Failed to create tokio listener");
 
         tracing::info!("Server running on http://{}", addr);
-        // into_make_service_with_connect_info injects the TCP peer address as a
-        // request extension, so middleware (e.g. audit log) can log the real client IP.
         axum::serve(
             listener,
             router.into_make_service_with_connect_info::<SocketAddr>(),

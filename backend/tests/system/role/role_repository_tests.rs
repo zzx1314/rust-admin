@@ -167,7 +167,6 @@ async fn test_role_repo_find_users_by_role() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     let user1 = user_repo.create(&user_req1, &1i64).await.unwrap();
@@ -183,7 +182,6 @@ async fn test_role_repo_find_users_by_role() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     let user2 = user_repo.create(&user_req2, &2i64).await.unwrap();
@@ -293,7 +291,6 @@ async fn test_role_repo_assign_and_remove() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     let user = user_repo.create(&user_req, &1i64).await.unwrap();
@@ -342,7 +339,6 @@ async fn test_role_repo_find_roles_by_user() {
         remarks: None,
         card: None,
         sex: None,
-        sync_harbor: false,
         role: None,
     };
     let user = user_repo.create(&user_req, &1i64).await.unwrap();

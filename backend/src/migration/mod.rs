@@ -17,6 +17,7 @@ struct SqlFileMigration {
 
 struct SqlMigrationFile {
     path: PathBuf,
+    version: u64,
     precondition: Option<Precondition>,
 }
 
@@ -123,13 +124,21 @@ fn discover_migrations() -> Result<Vec<SqlFileMigration>, String> {
                     .into_iter()
                     .map(|file| SqlMigrationFile {
                         path: file.path,
+                        version: file.version,
                         precondition: file.precondition,
                     })
                     .collect(),
             }
         })
         .collect::<Vec<_>>();
-    migrations.sort_by_key(|migration| migration.files.first().map(|file| file.path.clone()));
+    // Order migrations by their numeric version (directory layout must not matter),
+    // falling back to the file path only to break ties deterministically.
+    migrations.sort_by_key(|migration| {
+        migration
+            .files
+            .first()
+            .map(|file| (file.version, file.path.clone()))
+    });
 
     Ok(migrations)
 }
@@ -283,8 +292,9 @@ mod tests {
                 "p_sys_tables_from_file",
                 "add_sys_logrecord",
                 "add_user_is_edit",
-                "add_app_review",
-                "add_startup_config",
+                "create_dog_tables",
+                "remove_harbor_menus",
+                "add_dog_menus",
             ]
         );
         assert_eq!(migrations[0].name(), "p_sys_tables_from_file");
@@ -298,7 +308,7 @@ mod tests {
             .await
             .unwrap();
 
-        for table in ["p_sys_user", "p_sys_logrecord", "p_app_review"] {
+        for table in ["p_sys_user", "p_sys_logrecord", "dog_device"] {
             let statement = Statement::from_string(
                 DbBackend::Sqlite,
                 format!(
@@ -314,6 +324,26 @@ mod tests {
             "SELECT 1 FROM pragma_table_info('p_sys_user') WHERE name = 'is_edit'",
         );
         assert!(connection.query_one(is_edit).await.unwrap().is_some());
+
+        // The dog menu tree must be registered and linked to the admin role,
+        // and the dangling Harbor menus must be soft-deleted.
+        let dog_menu = Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT 1 FROM p_sys_menu WHERE id = 1200 AND is_deleted = 0",
+        );
+        assert!(connection.query_one(dog_menu).await.unwrap().is_some());
+
+        let dog_menu_role = Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT 1 FROM p_sys_role_menu WHERE role_id = 1 AND menu_id = 1201",
+        );
+        assert!(connection.query_one(dog_menu_role).await.unwrap().is_some());
+
+        let harbor_menu = Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT 1 FROM p_sys_menu WHERE id = 1104 AND is_deleted = 1",
+        );
+        assert!(connection.query_one(harbor_menu).await.unwrap().is_some());
     }
 
     #[test]

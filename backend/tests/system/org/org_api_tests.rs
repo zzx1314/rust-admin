@@ -251,101 +251,10 @@ async fn create_test_app() -> (axum::Router, TestDb) {
         .expect("Failed to connect");
 
     use std::sync::Arc;
-    use x_rust::api::AppState;
-    use x_rust::business::app_review::repository::SeaOrmAppReviewRepository;
-    use x_rust::business::app_review::service::AppReviewService;
-    use x_rust::business::harbor::client::HarborClient;
-    use x_rust::business::harbor::service::HarborService;
-    use x_rust::common::traits::{
-        MenuRepository, OrgRepository, RoleRepository, SysDictItemRepository, SysDictRepository,
-        SysLogRepository, TokenStore, UserRepository,
-    };
-    use x_rust::system::auth::service::AuthService;
-    use x_rust::system::sys_auth::service::SysAuthService;
-    use x_rust::system::sys_dict::repository::SeaOrmSysDictRepository;
-    use x_rust::system::sys_dict::service::SysDictService;
-    use x_rust::system::sys_dict_item::repository::SeaOrmSysDictItemRepository;
-    use x_rust::system::sys_dict_item::service::SysDictItemService;
-    use x_rust::system::sys_log::repository::SeaOrmSysLogRepository;
-    use x_rust::system::sys_log::service::SysLogService;
-    use x_rust::system::sys_menu::repository::SeaOrmMenuRepository;
-    use x_rust::system::sys_menu::service::MenuService;
-    use x_rust::system::sys_org::repository::SeaOrmOrgRepository;
-    use x_rust::system::sys_org::service::OrgService;
-    use x_rust::system::sys_role::repository::SeaOrmRoleRepository;
-    use x_rust::system::sys_role::service::RoleService;
-    use x_rust::system::sys_user::repository::SeaOrmUserRepository;
-    use x_rust::system::sys_user::service::UserService;
+    use x_rust::app::App;
 
-    let conn = Arc::new(conn);
-    let org_repo: Arc<dyn OrgRepository> = Arc::new(SeaOrmOrgRepository::new(conn.clone()));
-    let org_service = Arc::new(OrgService::new(org_repo.clone()));
-    let user_repo: Arc<dyn UserRepository> = Arc::new(SeaOrmUserRepository::new(conn.clone()));
-    let role_repo: Arc<dyn RoleRepository> = Arc::new(SeaOrmRoleRepository::new(conn.clone()));
-    let user_service = Arc::new(UserService::new(
-        user_repo.clone(),
-        role_repo.clone(),
-        org_repo.clone(),
-    ));
-    let role_service = Arc::new(RoleService::new(role_repo.clone()));
-    let token_store: Arc<dyn TokenStore> = Arc::new(FakeTokenStore::new());
-    let menu_repo: Arc<dyn MenuRepository> = Arc::new(SeaOrmMenuRepository::new(conn.clone()));
-    let menu_service = Arc::new(MenuService::new(menu_repo.clone(), role_repo.clone()));
-    let sys_auth_service = Arc::new(SysAuthService::new(menu_repo, role_repo.clone()));
-    let sys_dict_repo: Arc<dyn SysDictRepository> =
-        Arc::new(SeaOrmSysDictRepository::new(conn.clone()));
-    let sys_dict_service = Arc::new(SysDictService::new(sys_dict_repo.clone()));
-    let sys_dict_item_repo: Arc<dyn SysDictItemRepository> =
-        Arc::new(SeaOrmSysDictItemRepository::new(conn.clone()));
-    let sys_dict_item_service =
-        Arc::new(SysDictItemService::new(sys_dict_item_repo, sys_dict_repo.clone()));
-    let auth_service = Arc::new(AuthService::new(
-        user_repo,
-        token_store,
-        role_repo.clone(),
-        "test-secret",
-        sys_dict_item_service.clone(),
-    ));
-    let sys_log_repo: Arc<dyn SysLogRepository> =
-        Arc::new(SeaOrmSysLogRepository::new(conn.clone()));
-    let sys_log_service = Arc::new(SysLogService::new(sys_log_repo));
-
-    let harbor_client = Arc::new(HarborClient::new(&x_rust::config::HarborConfig {
-        url: String::new(),
-        username: String::new(),
-        password: String::new(),
-        staging_project: "staging-project".to_string(),
-        production_project: "production-project".to_string(),
-        registry_endpoint_id: None,
-        registry_insecure: None,
-        webhook_secret: None,
-        replication_timeout_secs: 30,
-        replication_poll_interval_secs: 1,
-    }));
-    let harbor_service = Arc::new(HarborService::new(harbor_client));
-    let harbor_config = None;
-
-    let app_review_repo = SeaOrmAppReviewRepository::new(conn.clone());
-    let app_review_service = Arc::new(AppReviewService::new(
-        app_review_repo,
-        harbor_service.clone(),
-    ));
-
-    let state = AppState {
-        user_service,
-        role_service,
-        auth_service,
-        menu_service,
-        org_service,
-        sys_auth_service,
-        sys_dict_service,
-        sys_dict_item_service,
-        sys_log_service,
-        harbor_service,
-        app_review_service,
-        harbor_config,
-    };
-
+    let app = App::from_connection(conn);
+    let state = app.build_state_with_token_store(Arc::new(FakeTokenStore::new()), "test-secret");
     (create_router(state), test_db)
 }
 
@@ -380,7 +289,6 @@ async fn login(app: axum::Router, test_db: &TestDb) -> String {
                 remarks: None,
                 card: None,
                 sex: None,
-                sync_harbor: false,
                 role: None,
             },
             &1i64,

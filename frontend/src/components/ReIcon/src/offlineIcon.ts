@@ -48,6 +48,14 @@ import RiBarChartHorizontalLine from "~icons/ri/bar-chart-horizontal-line?raw";
 import RiBloggerLine from "~icons/ri/blogger-line?raw";
 import TdesignLockOn from "~icons/tdesign/lock-on?raw";
 import RiSendPlane2Line from "~icons/ri/send-plane-2-line?raw";
+import RiRobot2Line from "~icons/ri/robot-2-line?raw";
+import RiTaskLine from "~icons/ri/task-line?raw";
+import RiRouteLine from "~icons/ri/route-line?raw";
+import RiCpuLine from "~icons/ri/cpu-line?raw";
+import RiImageLine from "~icons/ri/image-line?raw";
+import RiSettings4Line from "~icons/ri/settings-4-line?raw";
+import RiServerLine from "~icons/ri/server-line?raw";
+import RiFlowChart from "~icons/ri/flow-chart?raw";
 import RiClapperboardAiLine from "~icons/ri/clapperboard-ai-line?raw";
 import DeviconPlainGithubcopilot from "~icons/devicon-plain/githubcopilot?raw";
 
@@ -97,6 +105,15 @@ const icons = [
   ["ri/blogger-line", RiBloggerLine],
   ["tdesign/lock-on", TdesignLockOn],
   ["ri/send-plane-2-line", RiSendPlane2Line],
+  // 机器狗业务模块菜单图标
+  ["ri/robot-2-line", RiRobot2Line],
+  ["ri/task-line", RiTaskLine],
+  ["ri/route-line", RiRouteLine],
+  ["ri/cpu-line", RiCpuLine],
+  ["ri/image-line", RiImageLine],
+  ["ri/settings-4-line", RiSettings4Line],
+  ["ri/server-line", RiServerLine],
+  ["ri/flow-chart", RiFlowChart],
   ["ri/clapperboard-ai-line", RiClapperboardAiLine],
   ["devicon/githubcopilot", DeviconPlainGithubcopilot]
 ];
