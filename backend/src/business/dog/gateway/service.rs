@@ -85,6 +85,7 @@ impl DogGateway {
         tracing::info!(
             device_id = %device.device_id,
             device_type = ?device.device_type,
+            device_id_source = ?registration.device_id_source,
             "device registered"
         );
         Ok(device)

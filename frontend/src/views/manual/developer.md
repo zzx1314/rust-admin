@@ -220,10 +220,25 @@ Authorization: Bearer <access_token>
 
 设备（机器人本体）接入用的接口，鉴权方式是 **设备 token**，与用户 JWT 无关。
 
+`deviceId` 建议由设备端从硬件信息派生，保证一台设备一个固定 ID（客户端实现见下文）：
+
+| 优先级 | 来源 | 说明 |
+| --- | --- | --- |
+| 1 | 板级序列号（device tree） | RK35xx 等 ARM 板卡 |
+| 2 | `/proc/cpuinfo` 的 `Serial` | 树莓派等 |
+| 3 | eMMC CID | 芯片级唯一 |
+| 4 | DMI product UUID / board serial | x86 工控机 |
+| 5 | 物理网卡 MAC（跳过虚拟网卡与随机 MAC） | 通用兜底 |
+| 6 | `/etc/machine-id` | 仅兜底，克隆镜像会重复 |
+
+注册时可选上报 `deviceIdSource`（如 `mac-address`），便于排查 ID 来源。
+
+> Ubuntu 上 `/sys/class/dmi/id/*`、`/sys/block/mmcblk*/device/cid` 默认仅 root 可读；非 root 运行时会退化为物理网卡 MAC。客户端 `--explain-device-id` 可打印每个来源的探测状态，`--device-id-file` 可固定首次检测结果。
+
 | 接口 | 方法 | 说明 |
 | ---- | ---- | ---- |
 | `/api/dogGateway/auth/{deviceId}` | GET | 下发设备 token（10 分钟有效，使用时自动续期） |
-| `/api/dogGateway/register` | POST | 注册/刷新设备，需 `Authorization: <token>`（兼容 `Bearer <token>`）；设备初始状态 `offline` |
+| `/api/dogGateway/register` | POST | 注册/刷新设备，需 `Authorization: <token>`（兼容 `Bearer <token>`）；设备初始状态 `offline`；`deviceId` 由设备硬件派生，可选字段 `deviceIdSource` 说明来源 |
 | `/api/notice/{deviceId}/{token}` | WS | 设备长连接，用 URL 中的 token 鉴权 |
 | `/api/dogGateway/dispatch` | POST | 管理端手动推送任意 JSON 到设备（需用户 JWT） |
 | `/api/dogGateway/connections` | GET | 当前在线设备列表（需用户 JWT） |

@@ -32,6 +32,9 @@ pub enum ClientError {
 
     #[error("timed out waiting for {0}")]
     Timeout(&'static str),
+
+    #[error("device id error: {0}")]
+    DeviceId(String),
 }
 
 impl From<tokio_tungstenite::tungstenite::Error> for ClientError {

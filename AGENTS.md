@@ -30,7 +30,10 @@ cargo clippy -- -D warnings # Lint
 ### Device client (Rust)
 ```bash
 cd client
-cargo run -- --device-id dog-001 --once    # auth + register + heartbeat check
+cargo run -- --once                         # hardware device id + auth + register + heartbeat check
+cargo run -- --print-device-id              # show the hardware-derived device id
+cargo run -- --explain-device-id            # show every probed source and its status
+cargo run -- --device-id-file /tmp/id --once # pin the detected id in a file
 cargo test                                  # Client unit tests
 cargo clippy --all-targets -- -D warnings   # Lint
 ```
@@ -58,6 +61,9 @@ cd frontend && pnpm dev
 Frontend proxies `/api` → `http://127.0.0.1:3000` (configured in `frontend/vite.config.ts`).
 
 OAuth2 token endpoint: `/api/token` with Bearer token in Authorization header.
+
+The client derives its `deviceId` from hardware (board serial / eMMC CID / DMI
+UUID / physical MAC, `/etc/machine-id` as last resort; `--device-id` overrides).
 
 Device gateway (not user JWT): `GET /api/dogGateway/auth/{deviceId}` → token,
 `POST /api/dogGateway/register`, then `WS /api/notice/{deviceId}/{token}`.

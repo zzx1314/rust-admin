@@ -263,6 +263,7 @@ async fn test_device_gateway_end_to_end() {
             device_id: DEVICE_ID.to_string(),
             device_ip: Some("192.168.1.20".to_string()),
             device_type: Some("X1".to_string()),
+            device_id_source: Some("mac-address".to_string()),
             ..DeviceRegistration::default()
         })
         .await

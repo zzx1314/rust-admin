@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use dog_device_client::device_id::{self, CandidateStatus, DeviceIdentity};
 use dog_device_client::{
     ClientError, CommandResult, DeviceClient, DeviceRegistration, Heartbeat, ServerCommand,
     Telemetry, TlsOptions,
@@ -13,11 +14,22 @@ const USAGE: &str = "\
 dog-device-client — robot dog device client
 
 USAGE:
-    dog-device-client --device-id <ID> [options]
+    dog-device-client [options]
+    dog-device-client --print-device-id
+    dog-device-client --explain-device-id
+
+The device id is derived from hardware information (board serial / eMMC CID /
+DMI UUID / physical MAC, falling back to /etc/machine-id) so every device gets
+its own stable id. Use --device-id to override it.
 
 OPTIONS:
     --server <URL>        Server base url            [env DOG_SERVER, default http://127.0.0.1:3000]
-    --device-id <ID>      Device id (required)       [env DOG_DEVICE_ID]
+    --device-id <ID>      Override the hardware derived device id [env DOG_DEVICE_ID]
+    --device-id-file <PATH>
+                          Pin the detected id in this file and reuse it later
+                          (recommended for systemd services, see README)
+    --print-device-id     Print the detected device id and exit
+    --explain-device-id   Print every probed hardware source and its status
     --device-type <TYPE>  Device type reported on register
     --ip <ADDR>           Device ip reported on register
     --interval <SECS>     Heartbeat interval         [default 30]
@@ -34,7 +46,8 @@ OPTIONS:
 #[derive(Debug, Clone)]
 struct Config {
     server: String,
-    device_id: String,
+    device_id: Option<String>,
+    device_id_file: Option<PathBuf>,
     device_type: Option<String>,
     device_ip: Option<String>,
     interval_secs: u64,
@@ -44,6 +57,8 @@ struct Config {
     cert: Option<PathBuf>,
     key: Option<PathBuf>,
     once: bool,
+    print_device_id: bool,
+    explain_device_id: bool,
 }
 
 impl Config {
@@ -58,15 +73,16 @@ impl Config {
         })
     }
 
-    fn registration(&self) -> DeviceRegistration {
+    fn registration(&self, identity: &DeviceIdentity) -> DeviceRegistration {
         DeviceRegistration {
-            device_id: self.device_id.clone(),
+            device_id: identity.id.clone(),
             device_ip: self.device_ip.clone(),
             device_type: self.device_type.clone(),
             model: None,
             os: std::env::consts::OS.to_string().into(),
             os_version: None,
             arch: std::env::consts::ARCH.to_string().into(),
+            device_id_source: Some(identity.source.to_string()),
         }
     }
 }
@@ -77,6 +93,8 @@ fn main() -> ExitCode {
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new("dog_device_client=info")),
         )
+        // keep stdout clean for `--print-device-id`
+        .with_writer(std::io::stderr)
         .init();
 
     let config = match parse_args(std::env::args().skip(1)) {
@@ -91,6 +109,37 @@ fn main() -> ExitCode {
         }
     };
 
+    // `--explain-device-id` reports the probe result itself (including the
+    // "nothing usable" case), so it runs before resolving.
+    if config.explain_device_id {
+        print_device_id_report();
+        return ExitCode::SUCCESS;
+    }
+
+    // Resolve the device id: explicit override, otherwise hardware detection.
+    let identity = match device_id::resolve_persisted(
+        config.device_id.as_deref(),
+        config.device_id_file.as_deref(),
+    ) {
+        Ok(identity) => identity,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if config.print_device_id {
+        println!("{}", identity.id);
+        eprintln!("source: {}", identity.source);
+        return ExitCode::SUCCESS;
+    }
+
+    info!(
+        device_id = %identity.id,
+        source = identity.source,
+        "device id resolved"
+    );
+
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -102,7 +151,7 @@ fn main() -> ExitCode {
         }
     };
 
-    match runtime.block_on(run(config)) {
+    match runtime.block_on(run(config, identity)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             error!(%error, "device client failed");
@@ -112,10 +161,10 @@ fn main() -> ExitCode {
     }
 }
 
-async fn run(config: Config) -> Result<(), ClientError> {
+async fn run(config: Config, identity: DeviceIdentity) -> Result<(), ClientError> {
     let tls = config.tls();
 
-    let mut client = DeviceClient::new(&config.server, &config.device_id);
+    let mut client = DeviceClient::new(&config.server, &identity.id);
     if let Some(tls) = &tls {
         client = client.with_tls(tls)?;
     }
@@ -123,13 +172,14 @@ async fn run(config: Config) -> Result<(), ClientError> {
     // 1. device authentication (access token)
     let token = client.authenticate().await?;
     info!(
-        device_id = %config.device_id,
+        device_id = %identity.id,
+        device_id_source = identity.source,
         token = %mask(&token),
         "device token acquired"
     );
 
     // 2. device registration (creates/refreshes the device record)
-    let device = client.register(&config.registration()).await?;
+    let device = client.register(&config.registration(&identity)).await?;
     info!(
         device_id = %device.device_id,
         status = %device.status,
@@ -144,7 +194,7 @@ async fn run(config: Config) -> Result<(), ClientError> {
         None => client.connect().await?,
     };
 
-    let heartbeat = Heartbeat::online(config.device_id.clone()).with_telemetry(Telemetry {
+    let heartbeat = Heartbeat::online(identity.id.clone()).with_telemetry(Telemetry {
         battery: Some("100".to_string()),
         ..Telemetry::default()
     });
@@ -265,7 +315,11 @@ async fn handle_command(
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Config>, String> {
     let mut server = std::env::var("DOG_SERVER").unwrap_or_else(|_| "http://127.0.0.1:3000".into());
-    let mut device_id = std::env::var("DOG_DEVICE_ID").unwrap_or_default();
+    let mut device_id_file = None;
+    let mut device_id = std::env::var("DOG_DEVICE_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let mut device_type = None;
     let mut device_ip = None;
     let mut interval_secs = 30u64;
@@ -275,13 +329,18 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Config>, Stri
     let mut cert = None;
     let mut key = None;
     let mut once = false;
+    let mut print_device_id = false;
+    let mut explain_device_id = false;
 
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
             "--server" => server = next_value(&mut args, "--server")?,
-            "--device-id" => device_id = next_value(&mut args, "--device-id")?,
+            "--device-id" => device_id = Some(next_value(&mut args, "--device-id")?),
+            "--device-id-file" => {
+                device_id_file = Some(PathBuf::from(next_value(&mut args, "--device-id-file")?));
+            }
             "--device-type" => device_type = Some(next_value(&mut args, "--device-type")?),
             "--ip" => device_ip = Some(next_value(&mut args, "--ip")?),
             "--interval" => {
@@ -295,17 +354,16 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Config>, Stri
             "--cert" => cert = Some(PathBuf::from(next_value(&mut args, "--cert")?)),
             "--key" => key = Some(PathBuf::from(next_value(&mut args, "--key")?)),
             "--once" => once = true,
+            "--print-device-id" => print_device_id = true,
+            "--explain-device-id" => explain_device_id = true,
             other => return Err(format!("unknown argument `{other}`")),
         }
-    }
-
-    if device_id.trim().is_empty() {
-        return Err("--device-id is required".to_string());
     }
 
     Ok(Some(Config {
         server,
         device_id,
+        device_id_file,
         device_type,
         device_ip,
         interval_secs,
@@ -315,7 +373,73 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Config>, Stri
         cert,
         key,
         once,
+        print_device_id,
+        explain_device_id,
     }))
+}
+
+/// Print every probed hardware source so field engineers can see why a device
+/// got a particular id (especially useful on Ubuntu, where some `sysfs` entries
+/// are only readable by root).
+fn print_device_id_report() {
+    let report = device_id::explain();
+
+    match &report.identity {
+        Some(identity) => {
+            println!("device id : {}", identity.id);
+            println!("source    : {}", identity.source);
+        }
+        None => {
+            println!("device id : <none> (pass --device-id or run as root)");
+        }
+    }
+    println!("candidates:");
+
+    let is_virtual_iface = |candidate: &device_id::Candidate| {
+        candidate.source == device_id::SOURCE_MAC_ADDRESS
+            && matches!(&candidate.status, CandidateStatus::Rejected(reason) if reason == "virtual interface")
+    };
+    let virtual_count = report
+        .candidates
+        .iter()
+        .filter(|candidate| is_virtual_iface(candidate))
+        .count();
+    let mut virtual_printed = false;
+
+    for candidate in &report.candidates {
+        // A container host can have dozens of docker/bridge interfaces; the
+        // report keeps them, the console output collapses them.
+        if is_virtual_iface(candidate) {
+            if !virtual_printed {
+                println!("  SKIP     mac-address            ({virtual_count} virtual interfaces)");
+                virtual_printed = true;
+            }
+            continue;
+        }
+
+        let (label, detail) = match &candidate.status {
+            CandidateStatus::Found(id) => ("FOUND", id.clone()),
+            CandidateStatus::Rejected(reason) => ("SKIP", reason.clone()),
+            CandidateStatus::PermissionDenied => (
+                "DENIED",
+                "permission denied (run as root to use)".to_string(),
+            ),
+            CandidateStatus::Missing => ("MISSING", String::new()),
+            CandidateStatus::Error(error) => ("ERROR", error.clone()),
+        };
+        println!(
+            "  {label:<8} {:<22} {:<52} {detail}",
+            candidate.source, candidate.location
+        );
+    }
+
+    if report.has_permission_denied() {
+        println!();
+        println!(
+            "hint: some hardware identifiers are root-only on Ubuntu; run as root or as a \
+             systemd service to use a more stable id"
+        );
+    }
 }
 
 fn next_value(

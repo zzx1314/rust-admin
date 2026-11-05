@@ -43,6 +43,9 @@ pub struct DeviceRegistration {
     pub os_version: Option<String>,
     #[serde(default)]
     pub arch: Option<String>,
+    /// How the device derived its id on the hardware (board serial, MAC, ...).
+    #[serde(default)]
+    pub device_id_source: Option<String>,
 }
 
 /// Device telemetry carried by a heartbeat.

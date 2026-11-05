@@ -76,6 +76,9 @@ pub struct DeviceRegistration {
     pub os_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arch: Option<String>,
+    /// How `deviceId` was derived on the device (board serial, MAC, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id_source: Option<String>,
 }
 
 /// Telemetry reported in a heartbeat (speed / height / battery / course / position).
