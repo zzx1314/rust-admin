@@ -37,9 +37,11 @@ pub async fn get_workflow_handler(
 pub async fn get_workflow_by_uuid_handler(
     State(state): State<AppState>,
     Path(params): Path<UuidParam>,
-) -> Result<Json<ApiResponse<WorkflowVO>>, AppError> {
-    let workflow = state.dog_workflow_service.get_by_uuid(&params.uuid).await?;
-    Ok(Json(ApiResponse::ok(WorkflowVO::from(workflow))))
+) -> Json<ApiResponse<Option<WorkflowVO>>> {
+    match state.dog_workflow_service.get_by_uuid(&params.uuid).await {
+        Ok(workflow) => Json(ApiResponse::ok(Some(WorkflowVO::from(workflow)))),
+        Err(_) => Json(ApiResponse::ok(None)),
+    }
 }
 
 pub async fn update_workflow_handler(
