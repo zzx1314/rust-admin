@@ -8,7 +8,7 @@
 | `ws/src/client_https_demo.c`、`device_client/src/report/Report.c` | WebSocket 长连接、心跳、文件上传 | `DeviceLink`（心跳 / 收任务 / 回报 / 上传） |
 | `tcp/tcpdemo.c` | 旧 TCP 文件帧上传（端口 9000） | 未迁移（服务端已统一为 WebSocket 通道） |
 | `cer/*.crt`、`*.key` | mTLS 材料 | `TlsOptions`（rustls，读取同样的 PEM） |
-| 硬编码 `deviceId` | 设备标识 | `device_id` 模块：从硬件信息派生（见第 2 节） |
+| 硬编码 `deviceId` | 设备标识 | `device_id` 模块：从硬件信息派生（见第 3 节） |
 
 不变的约定：认证/注册/通知的 URL 与旧客户端完全一致，所以现网 C 设备可以继续连新服务端。
 
@@ -39,7 +39,50 @@
 同时兼容旧客户端的其它回报帧：`{"type":"report","id":...,"status":...,"returnValue":...}` 与
 `{"type":"torosReport","missionId":...,...}`，都会写回对应指令的执行结果。
 
-## 2. 设备 ID（从硬件派生）
+## 2. 断线重连与心跳
+
+客户端默认**常驻自愈**：任何原因导致的连接中断都会自动重连，直到收到 `SIGINT` / `SIGTERM`。
+
+### 2.1 断线判定
+
+| 场景 | 检测方式 | 处理 |
+| --- | --- | --- |
+| 服务端主动关闭 / 服务重启 | 收到 WebSocket Close 帧或读错误 | 立即进入重连 |
+| 网络中断、网线拔出、AP 掉线（半开连接） | **心跳带确认**：发送 heartbeat 后在 `--heartbeat-timeout`（默认 10s）内没收到服务端回包 | 判定链路失效，进入重连 |
+| 空闲但链路正常 | 每 `--interval`（默认 30s）发一次 heartbeat 并等待确认 | 保持在线状态、刷新 `dog_device.comm_time` |
+
+> 只用 TCP 连接状态无法发现"网线被拔"这类半开连接，所以客户端把心跳回包作为存活判据；服务端收到心跳必定回 `{"type":"report","status":"online"}`。
+
+### 2.2 重连流程
+
+```text
+连接断开
+  │
+  ├─ 指数退避等待（1s, 2s, 4s, 8s ... 上限 --reconnect-max-delay，默认 30s，±12.5% 抖动）
+  │
+  ├─ 重新 GET /api/dogGateway/auth/{deviceId}       （token 只有 10 分钟，重连必换新）
+  ├─ 重新 POST /api/dogGateway/register             （幂等 upsert，刷新 comm_time）
+  ├─ 重新建立 WS  /api/notice/{deviceId}/{token}
+  └─ 首次心跳确认成功 → 记为已恢复；连接稳定超过 3×心跳间隔（10~120s）后退避计数清零
+```
+
+- 连续失败次数可用 `--max-reconnect-attempts N` 限制（默认无限重试）；`--no-reconnect` 表示断线即退出。
+- 运行中收到 `SIGINT`/`SIGTERM` 会先给服务端发 Close 帧再退出（systemd `stop` 可优雅下线）。
+- **已下发但未回报的指令不会自动重放**（避免重复执行）：服务端会把该指令保留在 `sent` 状态，可在管理端重新下发或人工确认。
+- 服务端可以主动断开指定设备（`POST /api/dogGateway/disconnect/{deviceId}`，内部为 `DogGateway::disconnect`），客户端会按上面的流程自动重连。
+
+### 2.3 相关参数
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--interval <SECS>` | 30 | 心跳间隔 |
+| `--heartbeat-timeout <SECS>` | 10 | 心跳回包超时，超时即判定断线 |
+| `--reconnect-delay <SECS>` | 1 | 首次重连等待 |
+| `--reconnect-max-delay <SECS>` | 30 | 退避上限 |
+| `--max-reconnect-attempts <N>` | 无限 | 连续失败上限 |
+| `--no-reconnect` | 关 | 断线不重试，进程退出（可交给 systemd `Restart=always`） |
+
+## 3. 设备 ID（从硬件派生）
 
 每台设备的 `deviceId` 默认**从硬件信息自动派生**，因此无需逐台配置；同一个硬件每次启动都会得到同一个 ID。
 
@@ -117,6 +160,7 @@ ExecStart=/opt/dog/bin/dog-device-client \
   --cert /opt/dog/certs/client.crt \
   --key /opt/dog/certs/client.key \
   --interval 30
+# 客户端自身会重连；Restart 只是进程崩溃时的第二道保险
 Restart=always
 RestartSec=5
 StateDirectory=dog-device-client
@@ -128,7 +172,7 @@ WantedBy=multi-user.target
 - `--device-id-file` 首次运行时写入检测到的 ID，之后优先复用（来源显示为 `pinned`），因此换用户/换权限启动也不会变成另一个设备。
 - 想重新按硬件生成，删掉该文件再启动即可；想临时覆盖仍可用 `--device-id`（优先级最高）。
 
-## 3. 构建与运行
+## 4. 构建与运行
 
 ```bash
 cd client
@@ -163,12 +207,14 @@ cargo build --release
 | `--device-type <TYPE>` | 注册时上报的设备类型 |
 | `--ip <ADDR>` | 注册时上报的设备 IP |
 | `--interval <SECS>` | 心跳间隔，默认 30 秒 |
+| `--heartbeat-timeout <SECS>` | 心跳回包超时（判定半开连接），默认 10 秒 |
+| `--reconnect-delay/--reconnect-max-delay/--max-reconnect-attempts/--no-reconnect` | 断线重连退避策略，见第 2 节 |
 | `--upload <PATH>` | 链路建立后上传一次该文件 |
 | `--exec <CMD>` | 收到任务时执行的 shell 命令（`DOG_COMMAND_ID` / `DOG_COMMAND_JSON` 环境变量） |
 | `--ca/--cert/--key <PEM>` | `wss://` 与 mTLS 证书（不传则使用系统根证书） |
 | `--once` | 只做认证、注册、一次心跳验证后退出 |
 
-## 4. TLS / mTLS
+## 5. TLS / mTLS
 
 ```bash
 ./target/release/dog-device-client \
@@ -184,7 +230,7 @@ cargo build --release
 > 注意：服务端 `GET /api/dogGateway/auth/{deviceId}` 沿用原网关语义，只按设备号下发 token，
 > 身份校验依赖入口层（mTLS / 内网隔离 / 反向代理）。上生产时请务必启用其中一种。
 
-## 5. 验证能通信
+## 6. 验证能通信
 
 自动化（推荐，随 `cargo test` 一起跑）：
 
@@ -202,6 +248,9 @@ cargo test --test dog_gateway_tests -- --nocapture
 5. 客户端回报结果，校验 `dog_command.status=success`、`returnValue` 落库，且 REST 查询接口返回一致；
 6. 上传文件，校验落盘内容与 `dog_media` 记录；
 7. 关闭连接，校验设备回到 `offline`。
+
+重连行为由 `test_device_gateway_reconnects_after_server_disconnect` 覆盖：通过管理端接口 `POST /api/dogGateway/disconnect/{deviceId}` 主动断开设备 →
+客户端自动重连（鉴权/注册/建链全套重来）→ 新链路上继续收到管理端下发的任务 → 优雅退出。
 
 手工验证：
 
@@ -225,7 +274,7 @@ curl -s -X POST http://127.0.0.1:3000/api/dogCommand \
 # 终端 2 的客户端日志会打印 "task received"
 ```
 
-## 6. 目录
+## 7. 目录
 
 ```text
 client/
@@ -237,6 +286,8 @@ client/
     ├── link.rs        # DeviceLink：心跳、收任务、回报、上传文件
     ├── protocol.rs    # 与后端共享的报文结构（camelCase）
     ├── device_id.rs   # 硬件信息探测与设备 ID 归一化
+    ├── session.rs     # 会话主管：鉴权/注册/建链/心跳/断线重连/优雅退出
+    ├── reconnect.rs   # 重连退避策略（指数 + 抖动 + 尝试上限）
     ├── tls.rs         # rustls 连接器与 mTLS
     ├── error.rs       # ClientError
     └── main.rs        # CLI

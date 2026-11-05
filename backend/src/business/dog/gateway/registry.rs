@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 use tokio::sync::{Mutex, mpsc};
@@ -12,10 +13,19 @@ struct DeviceToken {
     expires_at: DateTime<Utc>,
 }
 
+/// Message queued for the WebSocket writer task.
+#[derive(Debug, Clone)]
+pub enum Outgoing {
+    Text(String),
+    /// Ask the writer to close the socket gracefully (used by the admin
+    /// `disconnect` hook and tests).
+    Close,
+}
+
 /// A live device connection: every server side message is queued on `tx` and
 /// consumed by the WebSocket writer task.
 pub struct DeviceConnection {
-    pub tx: mpsc::UnboundedSender<String>,
+    pub tx: mpsc::UnboundedSender<Outgoing>,
     pub connected_at: DateTime<Utc>,
     pub remote_addr: Option<String>,
 }
@@ -28,6 +38,9 @@ pub struct DeviceConnection {
 pub struct DeviceRegistry {
     tokens: Mutex<HashMap<String, DeviceToken>>,
     connections: Mutex<HashMap<String, DeviceConnection>>,
+    /// Number of WebSocket sessions accepted since start (used for
+    /// observability and reconnection tests).
+    accepted: AtomicU64,
 }
 
 impl DeviceRegistry {
@@ -69,9 +82,10 @@ impl DeviceRegistry {
     pub async fn register(
         &self,
         device_id: &str,
-        tx: mpsc::UnboundedSender<String>,
+        tx: mpsc::UnboundedSender<Outgoing>,
         remote_addr: Option<String>,
     ) {
+        self.accepted.fetch_add(1, Ordering::Relaxed);
         let mut connections = self.connections.lock().await;
         connections.insert(
             device_id.to_string(),
@@ -93,9 +107,30 @@ impl DeviceRegistry {
     pub async fn send(&self, device_id: &str, payload: &str) -> bool {
         let connections = self.connections.lock().await;
         match connections.get(device_id) {
-            Some(connection) => connection.tx.send(payload.to_string()).is_ok(),
+            Some(connection) => connection
+                .tx
+                .send(Outgoing::Text(payload.to_string()))
+                .is_ok(),
             None => false,
         }
+    }
+
+    /// Ask the writer task to close a device connection.
+    ///
+    /// The session drops the socket afterwards, which makes the device client
+    /// reconnect (see `client/` reconnect policy) and is also handy for
+    /// maintenance or forcing a re-registration.
+    pub async fn disconnect(&self, device_id: &str) -> bool {
+        let connections = self.connections.lock().await;
+        match connections.get(device_id) {
+            Some(connection) => connection.tx.send(Outgoing::Close).is_ok(),
+            None => false,
+        }
+    }
+
+    /// Total number of accepted device WebSocket sessions since start.
+    pub fn accepted_connections(&self) -> u64 {
+        self.accepted.load(Ordering::Relaxed)
     }
 
     pub async fn is_online(&self, device_id: &str) -> bool {

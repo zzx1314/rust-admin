@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use dog_device_client::device_id::{self, CandidateStatus, DeviceIdentity};
+use dog_device_client::session::{self, CommandHandler, SessionConfig};
 use dog_device_client::{
-    ClientError, CommandResult, DeviceClient, DeviceRegistration, Heartbeat, ServerCommand,
-    Telemetry, TlsOptions,
+    ClientError, CommandResult, DeviceRegistration, ReconnectPolicy, ServerCommand, TlsOptions,
 };
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -22,6 +22,9 @@ The device id is derived from hardware information (board serial / eMMC CID /
 DMI UUID / physical MAC, falling back to /etc/machine-id) so every device gets
 its own stable id. Use --device-id to override it.
 
+The client keeps the WebSocket link alive and reconnects automatically with
+exponential backoff (configurable, enabled by default).
+
 OPTIONS:
     --server <URL>        Server base url            [env DOG_SERVER, default http://127.0.0.1:3000]
     --device-id <ID>      Override the hardware derived device id [env DOG_DEVICE_ID]
@@ -32,13 +35,19 @@ OPTIONS:
     --explain-device-id   Print every probed hardware source and its status
     --device-type <TYPE>  Device type reported on register
     --ip <ADDR>           Device ip reported on register
-    --interval <SECS>     Heartbeat interval         [default 30]
+    --interval <SECS>     Heartbeat interval                      [default 30]
+    --heartbeat-timeout <SECS>
+                          Heartbeat acknowledgement timeout       [default 10]
     --upload <PATH>       Upload this file once after the link is up
     --exec <COMMAND>      Shell command executed for every received task
                           (the task JSON is passed as DOG_COMMAND_JSON)
     --ca <PEM>            CA certificate for wss:// (defaults to system roots)
     --cert <PEM>          Client certificate for mutual TLS
     --key <PEM>           Client private key for mutual TLS
+    --no-reconnect        Exit when the link drops instead of retrying
+    --reconnect-delay <SECS>      First retry delay               [default 1]
+    --reconnect-max-delay <SECS>  Maximum retry delay             [default 30]
+    --max-reconnect-attempts <N>  Give up after N failures        [default unlimited]
     --once                Authenticate, register, verify one heartbeat, exit
     -h, --help            Show this help
 ";
@@ -51,6 +60,7 @@ struct Config {
     device_type: Option<String>,
     device_ip: Option<String>,
     interval_secs: u64,
+    heartbeat_timeout_secs: u64,
     upload: Option<PathBuf>,
     exec: Option<String>,
     ca: Option<PathBuf>,
@@ -59,6 +69,10 @@ struct Config {
     once: bool,
     print_device_id: bool,
     explain_device_id: bool,
+    no_reconnect: bool,
+    reconnect_delay_secs: u64,
+    reconnect_max_delay_secs: u64,
+    max_reconnect_attempts: Option<u32>,
 }
 
 impl Config {
@@ -84,6 +98,29 @@ impl Config {
             arch: std::env::consts::ARCH.to_string().into(),
             device_id_source: Some(identity.source.to_string()),
         }
+    }
+
+    fn reconnect_policy(&self) -> ReconnectPolicy {
+        if self.once || self.no_reconnect {
+            return ReconnectPolicy::disabled();
+        }
+
+        let interval = self.interval_secs.max(1);
+        ReconnectPolicy::default()
+            .with_initial_delay(Duration::from_secs(self.reconnect_delay_secs.max(1)))
+            .with_max_delay(Duration::from_secs(self.reconnect_max_delay_secs.max(1)))
+            .with_max_attempts(self.max_reconnect_attempts)
+            .with_healthy_after(Duration::from_secs((interval * 3).clamp(10, 120)))
+    }
+
+    fn session(&self, identity: &DeviceIdentity) -> SessionConfig {
+        let mut session = SessionConfig::new(&self.server, self.registration(identity));
+        session.tls = self.tls();
+        session.heartbeat_interval = Duration::from_secs(self.interval_secs.max(1));
+        session.heartbeat_timeout = Duration::from_secs(self.heartbeat_timeout_secs.max(1));
+        session.upload = self.upload.clone();
+        session.reconnect = self.reconnect_policy();
+        session
     }
 }
 
@@ -116,7 +153,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    // Resolve the device id: explicit override, otherwise hardware detection.
+    // Resolve the device id: explicit override, pinned file, hardware detection.
     let identity = match device_id::resolve_persisted(
         config.device_id.as_deref(),
         config.device_id_file.as_deref(),
@@ -137,6 +174,7 @@ fn main() -> ExitCode {
     info!(
         device_id = %identity.id,
         source = identity.source,
+        reconnect = !config.once && !config.no_reconnect,
         "device id resolved"
     );
 
@@ -162,220 +200,132 @@ fn main() -> ExitCode {
 }
 
 async fn run(config: Config, identity: DeviceIdentity) -> Result<(), ClientError> {
-    let tls = config.tls();
-
-    let mut client = DeviceClient::new(&config.server, &identity.id);
-    if let Some(tls) = &tls {
-        client = client.with_tls(tls)?;
-    }
-
-    // 1. device authentication (access token)
-    let token = client.authenticate().await?;
-    info!(
-        device_id = %identity.id,
-        device_id_source = identity.source,
-        token = %mask(&token),
-        "device token acquired"
-    );
-
-    // 2. device registration (creates/refreshes the device record)
-    let device = client.register(&config.registration(&identity)).await?;
-    info!(
-        device_id = %device.device_id,
-        status = %device.status,
-        device_type = ?device.device_type,
-        "device registered"
-    );
-
-    // 3. websocket link + heartbeat verification
-    info!(url = %client.websocket_url()?, "opening device websocket");
-    let mut link = match &tls {
-        Some(tls) => client.connect_with_tls(tls).await?,
-        None => client.connect().await?,
-    };
-
-    let heartbeat = Heartbeat::online(identity.id.clone()).with_telemetry(Telemetry {
-        battery: Some("100".to_string()),
-        ..Telemetry::default()
-    });
-
-    let ack = link
-        .heartbeat_with_ack(&heartbeat, Duration::from_secs(10))
-        .await?;
-    info!(ack = %ack, "heartbeat acknowledged: link verified");
+    let session_config = config.session(&identity);
 
     if config.once {
-        link.close().await?;
-        info!("--once requested, exiting");
+        let device = session::verify_once(&session_config).await?;
+        info!(
+            device_id = %device.device_id,
+            status = %device.status,
+            "--once requested, exiting"
+        );
         return Ok(());
     }
 
-    // 4. optional one-shot file upload
-    if let Some(path) = &config.upload {
-        let ack = link
-            .upload_file(path, Some("device_upload"), None, Duration::from_secs(120))
-            .await?;
+    let shutdown = spawn_shutdown_signal();
+    let handler = ShellHandler {
+        exec: config.exec.clone(),
+    };
+
+    let summary = session::run(session_config, handler, shutdown).await?;
+    info!(
+        connects = summary.connects,
+        retries = summary.retries,
+        "device client stopped"
+    );
+    Ok(())
+}
+
+/// Resolves once SIGINT (Ctrl-C) or SIGTERM (systemd stop) is received.
+fn spawn_shutdown_signal() -> tokio::sync::watch::Receiver<bool> {
+    let (tx, rx) = tokio::sync::watch::channel(false);
+
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+
+            let mut terminate = match signal(SignalKind::terminate()) {
+                Ok(signal) => signal,
+                Err(error) => {
+                    warn!(%error, "cannot listen for SIGTERM, using Ctrl-C only");
+                    let _ = tokio::signal::ctrl_c().await;
+                    let _ = tx.send(true);
+                    return;
+                }
+            };
+
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => info!("SIGINT received, shutting down"),
+                _ = terminate.recv() => info!("SIGTERM received, shutting down"),
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+            info!("Ctrl-C received, shutting down");
+        }
+
+        let _ = tx.send(true);
+    });
+
+    rx
+}
+
+/// Executes pushed tasks with `--exec` (or simply acknowledges them).
+struct ShellHandler {
+    exec: Option<String>,
+}
+
+impl CommandHandler for ShellHandler {
+    async fn handle(&mut self, command: ServerCommand) -> CommandResult {
+        let Some(command_id) = command.id() else {
+            warn!(?command, "received a task without command id, ignored");
+            return CommandResult::failure(0, "missing command id");
+        };
+
         info!(
-            file = %path.display(),
-            status = %ack.status,
-            stored = ?ack.path,
-            "file upload finished"
+            command_id,
+            name = ?command.command_name,
+            kind = ?command.command_type,
+            task_id = ?command.task_id,
+            params = %command.params_text(),
+            "task received"
         );
-    }
 
-    // 5. main loop: heartbeat on idle + execute pushed tasks
-    let interval = Duration::from_secs(config.interval_secs.max(1));
-    let mut last_heartbeat = Instant::now();
-    let mut shutdown = std::pin::pin!(tokio::signal::ctrl_c());
-    let mut stop = false;
-
-    loop {
-        let command = tokio::select! {
-            result = link.next_command(interval) => result?,
-            _ = &mut shutdown => {
-                stop = true;
-                None
+        let result = match &self.exec {
+            Some(script) => {
+                let params_text = command.params_text();
+                match tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(script)
+                    .env("DOG_COMMAND_ID", command_id.to_string())
+                    .env("DOG_COMMAND_JSON", &params_text)
+                    .output()
+                    .await
+                {
+                    Ok(output) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                        if output.status.success() {
+                            CommandResult::success(command_id, stdout)
+                        } else {
+                            CommandResult::failure(
+                                command_id,
+                                format!(
+                                    "exit={:?} stdout={} stderr={}",
+                                    output.status.code(),
+                                    stdout,
+                                    stderr
+                                ),
+                            )
+                        }
+                    }
+                    Err(error) => CommandResult::failure(
+                        command_id,
+                        format!("failed to execute task command: {error}"),
+                    ),
+                }
+            }
+            None => {
+                CommandResult::success(command_id, "received").with_params(command.params.clone())
             }
         };
 
-        if stop {
-            break;
-        }
-
-        if let Some(command) = command {
-            handle_command(&mut link, &config, command).await?;
-        }
-
-        if last_heartbeat.elapsed() >= interval {
-            link.heartbeat(&heartbeat).await?;
-            last_heartbeat = Instant::now();
-            tracing::debug!("heartbeat sent");
-        }
+        info!(command_id, status = %result.status, "task result");
+        result
     }
-
-    link.close().await?;
-    info!("device client stopped");
-    Ok(())
-}
-
-async fn handle_command(
-    link: &mut dog_device_client::DeviceLink,
-    config: &Config,
-    command: ServerCommand,
-) -> Result<(), ClientError> {
-    let Some(command_id) = command.id() else {
-        warn!(?command, "received a task without command id, ignored");
-        return Ok(());
-    };
-
-    info!(
-        command_id,
-        name = ?command.command_name,
-        kind = ?command.command_type,
-        task_id = ?command.task_id,
-        params = %command.params_text(),
-        "task received"
-    );
-
-    let params_text = command.params_text();
-    let result = match &config.exec {
-        Some(exec) => {
-            let output = tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(exec)
-                .env("DOG_COMMAND_ID", command_id.to_string())
-                .env("DOG_COMMAND_JSON", &params_text)
-                .output()
-                .await?;
-
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-
-            if output.status.success() {
-                CommandResult::success(command_id, stdout)
-            } else {
-                CommandResult::failure(
-                    command_id,
-                    format!(
-                        "exit={:?} stdout={} stderr={}",
-                        output.status.code(),
-                        stdout,
-                        stderr
-                    ),
-                )
-            }
-        }
-        None => CommandResult::success(command_id, "received").with_params(command.params.clone()),
-    };
-
-    link.report(&result).await?;
-    info!(command_id, status = %result.status, "task result reported");
-    Ok(())
-}
-
-fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Config>, String> {
-    let mut server = std::env::var("DOG_SERVER").unwrap_or_else(|_| "http://127.0.0.1:3000".into());
-    let mut device_id_file = None;
-    let mut device_id = std::env::var("DOG_DEVICE_ID")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    let mut device_type = None;
-    let mut device_ip = None;
-    let mut interval_secs = 30u64;
-    let mut upload = None;
-    let mut exec = None;
-    let mut ca = None;
-    let mut cert = None;
-    let mut key = None;
-    let mut once = false;
-    let mut print_device_id = false;
-    let mut explain_device_id = false;
-
-    let mut args = args.peekable();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-h" | "--help" => return Ok(None),
-            "--server" => server = next_value(&mut args, "--server")?,
-            "--device-id" => device_id = Some(next_value(&mut args, "--device-id")?),
-            "--device-id-file" => {
-                device_id_file = Some(PathBuf::from(next_value(&mut args, "--device-id-file")?));
-            }
-            "--device-type" => device_type = Some(next_value(&mut args, "--device-type")?),
-            "--ip" => device_ip = Some(next_value(&mut args, "--ip")?),
-            "--interval" => {
-                interval_secs = next_value(&mut args, "--interval")?
-                    .parse()
-                    .map_err(|_| "--interval expects a number of seconds".to_string())?;
-            }
-            "--upload" => upload = Some(PathBuf::from(next_value(&mut args, "--upload")?)),
-            "--exec" => exec = Some(next_value(&mut args, "--exec")?),
-            "--ca" => ca = Some(PathBuf::from(next_value(&mut args, "--ca")?)),
-            "--cert" => cert = Some(PathBuf::from(next_value(&mut args, "--cert")?)),
-            "--key" => key = Some(PathBuf::from(next_value(&mut args, "--key")?)),
-            "--once" => once = true,
-            "--print-device-id" => print_device_id = true,
-            "--explain-device-id" => explain_device_id = true,
-            other => return Err(format!("unknown argument `{other}`")),
-        }
-    }
-
-    Ok(Some(Config {
-        server,
-        device_id,
-        device_id_file,
-        device_type,
-        device_ip,
-        interval_secs,
-        upload,
-        exec,
-        ca,
-        cert,
-        key,
-        once,
-        print_device_id,
-        explain_device_id,
-    }))
 }
 
 /// Print every probed hardware source so field engineers can see why a device
@@ -442,6 +392,93 @@ fn print_device_id_report() {
     }
 }
 
+fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Config>, String> {
+    let mut server = std::env::var("DOG_SERVER").unwrap_or_else(|_| "http://127.0.0.1:3000".into());
+    let mut device_id_file = None;
+    let mut device_id = std::env::var("DOG_DEVICE_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let mut device_type = None;
+    let mut device_ip = None;
+    let mut interval_secs = 30u64;
+    let mut heartbeat_timeout_secs = 10u64;
+    let mut upload = None;
+    let mut exec = None;
+    let mut ca = None;
+    let mut cert = None;
+    let mut key = None;
+    let mut once = false;
+    let mut print_device_id = false;
+    let mut explain_device_id = false;
+    let mut no_reconnect = false;
+    let mut reconnect_delay_secs = 1u64;
+    let mut reconnect_max_delay_secs = 30u64;
+    let mut max_reconnect_attempts = None;
+
+    let mut args = args.peekable();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => return Ok(None),
+            "--server" => server = next_value(&mut args, "--server")?,
+            "--device-id" => device_id = Some(next_value(&mut args, "--device-id")?),
+            "--device-id-file" => {
+                device_id_file = Some(PathBuf::from(next_value(&mut args, "--device-id-file")?));
+            }
+            "--device-type" => device_type = Some(next_value(&mut args, "--device-type")?),
+            "--ip" => device_ip = Some(next_value(&mut args, "--ip")?),
+            "--interval" => {
+                interval_secs = parse_u64(&mut args, "--interval")?;
+            }
+            "--heartbeat-timeout" => {
+                heartbeat_timeout_secs = parse_u64(&mut args, "--heartbeat-timeout")?;
+            }
+            "--upload" => upload = Some(PathBuf::from(next_value(&mut args, "--upload")?)),
+            "--exec" => exec = Some(next_value(&mut args, "--exec")?),
+            "--ca" => ca = Some(PathBuf::from(next_value(&mut args, "--ca")?)),
+            "--cert" => cert = Some(PathBuf::from(next_value(&mut args, "--cert")?)),
+            "--key" => key = Some(PathBuf::from(next_value(&mut args, "--key")?)),
+            "--once" => once = true,
+            "--print-device-id" => print_device_id = true,
+            "--explain-device-id" => explain_device_id = true,
+            "--no-reconnect" => no_reconnect = true,
+            "--reconnect-delay" => {
+                reconnect_delay_secs = parse_u64(&mut args, "--reconnect-delay")?;
+            }
+            "--reconnect-max-delay" => {
+                reconnect_max_delay_secs = parse_u64(&mut args, "--reconnect-max-delay")?;
+            }
+            "--max-reconnect-attempts" => {
+                max_reconnect_attempts =
+                    Some(parse_u64(&mut args, "--max-reconnect-attempts")? as u32);
+            }
+            other => return Err(format!("unknown argument `{other}`")),
+        }
+    }
+
+    Ok(Some(Config {
+        server,
+        device_id,
+        device_id_file,
+        device_type,
+        device_ip,
+        interval_secs,
+        heartbeat_timeout_secs,
+        upload,
+        exec,
+        ca,
+        cert,
+        key,
+        once,
+        print_device_id,
+        explain_device_id,
+        no_reconnect,
+        reconnect_delay_secs,
+        reconnect_max_delay_secs,
+        max_reconnect_attempts,
+    }))
+}
+
 fn next_value(
     args: &mut std::iter::Peekable<impl Iterator<Item = String>>,
     name: &str,
@@ -449,10 +486,12 @@ fn next_value(
     args.next().ok_or_else(|| format!("{name} expects a value"))
 }
 
-fn mask(token: &str) -> String {
-    if token.len() <= 8 {
-        "*".repeat(token.len())
-    } else {
-        format!("{}***{}", &token[..4], &token[token.len() - 4..])
-    }
+fn parse_u64(
+    args: &mut std::iter::Peekable<impl Iterator<Item = String>>,
+    name: &str,
+) -> Result<u64, String> {
+    let value = next_value(args, name)?;
+    value
+        .parse()
+        .map_err(|_| format!("{name} expects a number, got `{value}`"))
 }

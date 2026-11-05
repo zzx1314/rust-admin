@@ -7,11 +7,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use dog_device_client::{CommandResult, DeviceClient, DeviceRegistration, Heartbeat};
+use dog_device_client::{
+    CommandHandler, CommandResult, DeviceClient, DeviceRegistration, Heartbeat, ReconnectPolicy,
+    ServerCommand, SessionConfig,
+};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use sea_orm_migration::MigratorTrait;
 use tokio::net::TcpListener;
 
+use x_rust::api::AppState;
 use x_rust::api::routes::create_router;
 use x_rust::app::App;
 use x_rust::business::dog::command::entity::{Column as CommandColumn, Entity as CommandEntity};
@@ -108,6 +112,7 @@ impl TokenStore for FakeTokenStore {
 
 struct TestServer {
     base_url: String,
+    state: AppState,
     conn: Arc<DatabaseConnection>,
     upload_dir: PathBuf,
     db_path: PathBuf,
@@ -155,6 +160,7 @@ impl TestServer {
 
         Self {
             base_url: format!("http://{host_port}"),
+            state,
             conn: Arc::new(conn),
             upload_dir,
             db_path,
@@ -434,4 +440,129 @@ async fn test_device_gateway_rejects_invalid_credentials() {
         .await
         .expect("connections request failed");
     assert_eq!(response.status(), 401);
+}
+
+/// Handler that records every task pushed by the server.
+struct RecordingHandler {
+    tx: tokio::sync::mpsc::UnboundedSender<ServerCommand>,
+}
+
+impl CommandHandler for RecordingHandler {
+    async fn handle(&mut self, command: ServerCommand) -> CommandResult {
+        let id = command.id().unwrap_or_default();
+        let _ = self.tx.send(command);
+        CommandResult::success(id, "recorded")
+    }
+}
+
+async fn wait_until<F, Fut>(what: &str, mut condition: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    for _ in 0..200 {
+        if condition().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[tokio::test]
+async fn test_device_gateway_reconnects_after_server_disconnect() {
+    let server = TestServer::start().await;
+    let user_token = server.login().await;
+
+    let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel::<ServerCommand>();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let mut session = SessionConfig::new(
+        server.base_url.clone(),
+        DeviceRegistration {
+            device_id: DEVICE_ID.to_string(),
+            device_type: Some("X1".to_string()),
+            ..DeviceRegistration::default()
+        },
+    );
+    session.heartbeat_interval = Duration::from_millis(250);
+    session.heartbeat_timeout = Duration::from_secs(1);
+    session.reconnect = ReconnectPolicy::default()
+        .with_initial_delay(Duration::from_millis(50))
+        .with_max_delay(Duration::from_millis(250))
+        .with_healthy_after(Duration::from_secs(60));
+
+    let client = tokio::spawn(dog_device_client::session::run(
+        session,
+        RecordingHandler { tx: command_tx },
+        shutdown_rx,
+    ));
+
+    // ---- first connection ------------------------------------------------
+    wait_until("device to connect", || async {
+        server.state.dog_gateway.is_online(DEVICE_ID).await
+    })
+    .await;
+    assert_eq!(server.state.dog_gateway.accepted_connections(), 1);
+
+    // ---- server forces a disconnect (admin API) --------------------------
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{}/api/dogGateway/disconnect/{DEVICE_ID}",
+            server.base_url
+        ))
+        .bearer_auth(&user_token)
+        .send()
+        .await
+        .expect("disconnect request failed");
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["data"]["disconnected"], true);
+
+    // ---- client reconnects on its own ------------------------------------
+    wait_until("device to reconnect", || async {
+        server.state.dog_gateway.accepted_connections() >= 2
+            && server.state.dog_gateway.is_online(DEVICE_ID).await
+    })
+    .await;
+    wait_device(&server.conn, |device| device.status == "online").await;
+
+    // ---- the new link carries traffic ------------------------------------
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/dogCommand", server.base_url))
+        .bearer_auth(&user_token)
+        .json(&serde_json::json!({
+            "commandName": "重连后巡检",
+            "commandType": "task",
+            "deviceId": DEVICE_ID,
+            "commandParams": "{\"head\":\"SCAN\"}",
+        }))
+        .send()
+        .await
+        .expect("create command request failed");
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value = response.json().await.unwrap();
+    let command_id = body["data"]["id"].as_i64().unwrap();
+
+    let task = tokio::time::timeout(Duration::from_secs(5), command_rx.recv())
+        .await
+        .expect("task not delivered after reconnect")
+        .expect("task channel closed");
+    assert_eq!(task.id(), Some(command_id));
+
+    // ---- graceful shutdown ------------------------------------------------
+    shutdown_tx.send(true).unwrap();
+    let summary = tokio::time::timeout(Duration::from_secs(5), client)
+        .await
+        .expect("client did not stop")
+        .expect("client task panicked")
+        .expect("client session failed");
+    assert!(
+        summary.connects >= 2,
+        "expected a reconnect (2 connections), summary: {summary:?}"
+    );
+    assert!(
+        summary.retries >= 1,
+        "expected retries, summary: {summary:?}"
+    );
 }

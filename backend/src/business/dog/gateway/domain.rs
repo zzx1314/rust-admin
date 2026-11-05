@@ -202,6 +202,14 @@ pub struct ConnectionInfo {
     pub remote_addr: Option<String>,
 }
 
+/// Result of a forced disconnect (`POST /api/dogGateway/disconnect/{deviceId}`).
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DisconnectResult {
+    pub device_id: String,
+    pub disconnected: bool,
+}
+
 /// Result of a dispatch attempt.
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]

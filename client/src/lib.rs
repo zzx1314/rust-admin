@@ -28,6 +28,8 @@ pub mod device_id;
 pub mod error;
 pub mod link;
 pub mod protocol;
+pub mod reconnect;
+pub mod session;
 pub mod tls;
 
 pub use auth::DeviceClient;
@@ -37,4 +39,6 @@ pub use link::DeviceLink;
 pub use protocol::{
     CommandResult, DeviceRegistration, DeviceSummary, FileAck, Heartbeat, ServerCommand, Telemetry,
 };
+pub use reconnect::ReconnectPolicy;
+pub use session::{CommandHandler, SessionConfig, SessionSummary};
 pub use tls::TlsOptions;

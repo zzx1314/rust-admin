@@ -475,6 +475,10 @@ pub fn dog_gateway_admin_routes(state: AppState) -> Router<AppState> {
             "/dogGateway/connections",
             get(dog_gateway_handlers::connections_handler),
         )
+        .route(
+            "/dogGateway/disconnect/{device_id}",
+            post(dog_gateway_handlers::disconnect_device_handler),
+        )
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 

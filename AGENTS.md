@@ -34,6 +34,7 @@ cargo run -- --once                         # hardware device id + auth + regist
 cargo run -- --print-device-id              # show the hardware-derived device id
 cargo run -- --explain-device-id            # show every probed source and its status
 cargo run -- --device-id-file /tmp/id --once # pin the detected id in a file
+cargo run -- --no-reconnect                # disable the default auto-reconnect
 cargo test                                  # Client unit tests
 cargo clippy --all-targets -- -D warnings   # Lint
 ```

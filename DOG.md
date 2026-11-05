@@ -68,6 +68,7 @@ WS     /api/notice/{deviceId}/{token}         设备长连接（心跳 / 任务 
 
 # 设备网关（用户 JWT 鉴权）
 POST   /api/dogGateway/dispatch               手动向设备推送任意 JSON
+POST   /api/dogGateway/disconnect/{deviceId}  主动断开设备（客户端自动重连）
 GET    /api/dogGateway/connections            当前在线设备
 ```
 
@@ -89,6 +90,7 @@ GET    /api/dogGateway/connections            当前在线设备
 - **任务下发**：管理端 `POST /api/dogCommand` 创建指令后，若目标设备在线则立即通过 WebSocket 推送并把指令状态置为 `sent`；设备回报后写回 `status`/`return_value`。也可用 `POST /api/dogGateway/dispatch` 推送自定义 JSON。
 - **设备上传**：`file_start` → 二进制帧（单流上限 256 MiB）→ `file_end`，文件落盘到 `[dog] upload_dir`（默认 `data/device_uploads`）并写入 `dog_media`。
 - **设备认证信任边界**：`GET /api/dogGateway/auth/{deviceId}` 与旧网关一致，按设备号直接下发 token，不校验证书；生产环境需在入口层做 mTLS / 内网隔离 / 反向代理鉴权，或在该接口前置设备白名单。
+- **断线重连**：客户端默认指数退避无限重连（`--reconnect-*` 可调），每次重连都重新取 token、注册、建链；半开连接靠"心跳带确认"发现（服务端收到心跳必回 `report`）。服务端可用 `DogGateway::disconnect(device_id)` 主动断开某台设备（客户端会自动重连），`DogGateway::accepted_connections()` 可用于观察重连次数。
 - **在线连接表**：内存态（`DeviceRegistry`），因此网关按单实例部署；多实例需引入共享总线（如 Redis pub/sub）。
 - **菜单**：左侧菜单由数据库驱动（`p_sys_menu` + `p_sys_role_menu`），`component` 需能唯一匹配 `frontend/src/views/<component>/index.vue`，因此这里使用 `dog/device` 这类带目录前缀的写法（避免与 `views/charging/device` 冲突）。菜单图标使用离线图标，需在 `frontend/src/components/ReIcon/src/offlineIcon.ts` 注册。
 
@@ -102,6 +104,7 @@ GET    /api/dogGateway/connections            当前在线设备
 | `设备统计`（按设备类型） | 后端返回空数组，尚未实现 |
 | 工作流列表 | 无分页接口，前端表格无数据源，仅能新增 / 按 ID、UUID 查询 / 修改 / 删除 |
 | 文件上传 | 设备上传已实现（`/api/notice` 二进制流 → `dog_media`）；模型/媒体的管理页面仍只填写路径，没有浏览器上传接口 |
-| 设备通信 | 已实现 WebSocket 网关（心跳/任务/结果/文件）；尚未迁移旧 C 客户端的 TCP:9000 文件帧通道与其他 MQTT 接入方式 |
+| 设备通信 | 已实现 WebSocket 网关（心跳/任务/结果/文件/断线重连）；尚未迁移旧 C 客户端的 TCP:9000 文件帧通道与其他 MQTT 接入方式 |
+| 离线指令重放 | 断线期间已下发未回报的指令保留在 `sent` 状态，不会自动重发（避免重复执行） |
 | 网关多实例 | 连接表在进程内存中，多副本部署时设备只会连到其中一个实例 |
 | 按钮级权限 | 已初始化 `dog_*_find` 权限码并挂到超级管理员角色，但页面暂未使用 `v-auth` 做按钮控制 |

@@ -9,6 +9,7 @@ use crate::business::dog::gateway::domain::{
     MSG_FILE_END, MSG_FILE_START, MSG_HEARTBEAT, MSG_PING, MSG_REPORT, MSG_SERVER_COMMAND,
     MSG_TOROS_REPORT, file_ack, heartbeat_ack,
 };
+use crate::business::dog::gateway::registry::Outgoing;
 
 /// In-progress binary upload of a device stream.
 struct UploadState {
@@ -21,7 +22,7 @@ struct UploadState {
 /// Drive one device WebSocket connection until it closes.
 pub async fn run(state: AppState, device_id: String, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<Outgoing>();
 
     state
         .dog_gateway
@@ -30,17 +31,36 @@ pub async fn run(state: AppState, device_id: String, socket: WebSocket) {
         .await;
     tracing::info!(device_id = %device_id, "device websocket connected");
 
-    let writer = tokio::spawn(async move {
-        while let Some(text) = rx.recv().await {
-            if sink.send(Message::Text(text.into())).await.is_err() {
-                break;
+    let mut writer = tokio::spawn(async move {
+        while let Some(message) = rx.recv().await {
+            match message {
+                Outgoing::Text(text) => {
+                    if sink.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Outgoing::Close => {
+                    let _ = sink.send(Message::Close(None)).await;
+                    let _ = sink.close().await;
+                    break;
+                }
             }
         }
     });
 
     let mut upload: Option<UploadState> = None;
 
-    while let Some(frame) = stream.next().await {
+    loop {
+        let frame = tokio::select! {
+            // the writer finished (server initiated close or socket error)
+            _ = &mut writer => break,
+            frame = stream.next() => frame,
+        };
+
+        let Some(frame) = frame else {
+            break;
+        };
+
         match frame {
             Ok(Message::Text(text)) => {
                 handle_text(&state, &device_id, text.as_str(), &mut upload).await;

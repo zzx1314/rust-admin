@@ -299,8 +299,22 @@ impl DogGateway {
         }
     }
 
+    /// Force-close the live connection of a device (it reconnects on its own).
+    pub async fn disconnect(&self, device_id: &str) -> bool {
+        let disconnected = self.registry.disconnect(device_id).await;
+        if disconnected {
+            tracing::info!(device_id = device_id, "device connection closed by server");
+        }
+        disconnected
+    }
+
     pub async fn connections(&self) -> Vec<ConnectionInfo> {
         self.registry.connections().await
+    }
+
+    /// Total number of accepted device WebSocket sessions since start.
+    pub fn accepted_connections(&self) -> u64 {
+        self.registry.accepted_connections()
     }
 
     pub async fn is_online(&self, device_id: &str) -> bool {

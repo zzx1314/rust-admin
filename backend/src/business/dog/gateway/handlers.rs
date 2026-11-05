@@ -12,7 +12,7 @@ use crate::api::AppState;
 use crate::business::dog::device::domain::DeviceVO;
 use crate::business::dog::gateway::domain::{
     ConnectionInfo, DEVICE_TOKEN_TTL_SECS, DeviceRegistration, DeviceTokenResponse,
-    DispatchRequest, DispatchResult,
+    DisconnectResult, DispatchRequest, DispatchResult,
 };
 use crate::business::dog::gateway::session;
 use crate::common::error::{ApiResponse, AppError};
@@ -91,6 +91,21 @@ pub async fn dispatch_handler(
         .dispatch_raw(&request.device_id, &request.payload)
         .await;
     Ok(Json(ApiResponse::ok(result)))
+}
+
+/// `POST /api/dogGateway/disconnect/{deviceId}` — close a device connection.
+///
+/// The device client reconnects automatically, which makes this useful to force
+/// a fresh registration/token (maintenance) and to test reconnect behaviour.
+pub async fn disconnect_device_handler(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+) -> Result<Json<ApiResponse<DisconnectResult>>, AppError> {
+    let disconnected = state.dog_gateway.disconnect(&device_id).await;
+    Ok(Json(ApiResponse::ok(DisconnectResult {
+        device_id,
+        disconnected,
+    })))
 }
 
 /// `GET /api/dogGateway/connections` — currently connected devices.

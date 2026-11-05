@@ -242,6 +242,7 @@ Authorization: Bearer <access_token>
 | `/api/notice/{deviceId}/{token}` | WS | 设备长连接，用 URL 中的 token 鉴权 |
 | `/api/dogGateway/dispatch` | POST | 管理端手动推送任意 JSON 到设备（需用户 JWT） |
 | `/api/dogGateway/connections` | GET | 当前在线设备列表（需用户 JWT） |
+| `/api/dogGateway/disconnect/{deviceId}` | POST | 主动断开设备连接（需用户 JWT）；客户端会自动重连，可用于强制刷新 token/注册或验证重连 |
 
 WebSocket 报文：
 
@@ -251,6 +252,13 @@ WebSocket 报文：
 | 服务端 → 设备 | `{"type":"server-command","deviceId":"dog-001","missionId":"<指令ID>","commandId":<指令ID>,"commandName":"巡检","commandType":"task","taskId":null,"params":{...},"timestamp":"..."}` | 新建指令时若设备在线立即推送；`params` 为指令的 `commandParams`（字符串会尝试解析为 JSON） |
 | 设备 → 服务端 | `{"type":"server-command","commandId":<指令ID>,"status":"success","returnValue":"..."}` | 执行结果，写回 `dog_command.status/return_value`（也兼容 `report` 的 `id` 与 `torosReport` 的 `missionId`） |
 | 设备 → 服务端 | `{"type":"file_start","streamId":"stream-1","fileName":"a.jpg","mediaType":"image"}` → 若干二进制帧 → `{"type":"file_end","streamId":"stream-1"}` | 文件上传；服务端回 `{"type":"file_ack","streamId":"stream-1","status":"success","path":"..."}`，文件写入 `[dog] upload_dir` 并登记到 `dog_media` |
+
+连接与重连约定：
+
+- 客户端每 `interval` 秒发一次 heartbeat，**必须收到服务端回包**才算链路健康；收不到回包（半开连接）应主动断开并重连。
+- 断线后应重新 `GET /api/dogGateway/auth/{deviceId}` 取新 token（有效期 10 分钟）、重新 `register`、再建 WS；本仓库客户端默认按指数退避自动重连。
+- 服务端主动关闭（Close 帧）同样按断线处理，客户端应自动重连。
+- 断线期间未回报的指令保留在 `sent` 状态，不会自动重放。
 
 其它说明：
 
