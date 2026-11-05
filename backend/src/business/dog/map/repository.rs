@@ -5,6 +5,7 @@ use crate::business::dog::map::entity::Entity as MapEntity;
 use crate::business::dog::map::entity::Model as Map;
 use crate::common::base::{BaseRepository, order_desc};
 use crate::common::data_scope::DataScope;
+use crate::common::util::parse_beijing_datetime;
 use sea_orm::{
     ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect,
@@ -66,6 +67,17 @@ impl SeaOrmDogMapRepository {
         }
         if let Some(park_id) = query.park_id {
             cond = cond.add(MapColumn::ParkId.eq(park_id));
+        }
+
+        if let Some(ref begin) = query.begin_time
+            && let Some(utc_dt) = parse_beijing_datetime(begin, false)
+        {
+            cond = cond.add(MapColumn::CreateTime.gte(utc_dt));
+        }
+        if let Some(ref end) = query.end_time
+            && let Some(utc_dt) = parse_beijing_datetime(end, true)
+        {
+            cond = cond.add(MapColumn::CreateTime.lte(utc_dt));
         }
 
         let total = base_query

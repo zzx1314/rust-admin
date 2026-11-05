@@ -8,6 +8,7 @@ import {
   dogModelUpdate,
   dogModelDelete
 } from "@/api/dogModel";
+import { CREATE_TIME_FIELDS, type DogSearchField } from "../components/search";
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
 
@@ -32,7 +33,17 @@ export function useDogModel() {
     { label: "创建时间", prop: "createTime", width: 180 },
     { label: "操作", fixed: "right", width: 180, slot: "operation" }
   ];
-  const queryForm = ref({ modelName: "", modelType: "" });
+  const queryFields: DogSearchField[] = [
+    { label: "模型名称", prop: "modelName" },
+    { label: "模型类型", prop: "modelType" }
+  ];
+  const moreQueryFields: DogSearchField[] = [...CREATE_TIME_FIELDS];
+  const queryForm = ref({
+    modelName: "",
+    modelType: "",
+    beginTime: "",
+    endTime: ""
+  });
   const dataList = ref([]);
   const loading = ref(true);
   const pagination = reactive<PaginationProps>({
@@ -105,7 +116,12 @@ export function useDogModel() {
   }
   function cancel() {
     addForm.value = { id: null };
-    queryForm.value = { modelName: "", modelType: "" };
+    queryForm.value = {
+      modelName: "",
+      modelType: "",
+      beginTime: "",
+      endTime: ""
+    };
     dialogFormVisible.value = false;
     onSearch();
   }
@@ -125,6 +141,8 @@ export function useDogModel() {
     addForm,
     rules,
     columns,
+    queryFields,
+    moreQueryFields,
     onSearch,
     handleUpdate,
     handleDelete,

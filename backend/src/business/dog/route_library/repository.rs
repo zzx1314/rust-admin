@@ -6,6 +6,7 @@ use crate::business::dog::route_library::entity::Column as RouteColumn;
 use crate::business::dog::route_library::entity::Entity as RouteEntity;
 use crate::business::dog::route_library::entity::Model as DogRoute;
 use crate::common::base::{BaseRepository, order_desc};
+use crate::common::util::parse_beijing_datetime;
 use sea_orm::{
     ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect,
@@ -66,6 +67,17 @@ impl SeaOrmDogRouteLibraryRepository {
         }
         if let Some(ref status) = query.route_status {
             cond = cond.add(RouteColumn::RouteStatus.eq(status.as_str()));
+        }
+
+        if let Some(ref begin) = query.begin_time
+            && let Some(utc_dt) = parse_beijing_datetime(begin, false)
+        {
+            cond = cond.add(RouteColumn::CreateTime.gte(utc_dt));
+        }
+        if let Some(ref end) = query.end_time
+            && let Some(utc_dt) = parse_beijing_datetime(end, true)
+        {
+            cond = cond.add(RouteColumn::CreateTime.lte(utc_dt));
         }
 
         let total = base_query

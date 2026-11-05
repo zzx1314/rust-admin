@@ -1,5 +1,5 @@
 use crate::business::dog::services::domain::{
-    CreateServicesRequest, DogServices, UpdateServicesRequest,
+    CreateServicesRequest, DogServices, ServicesQuery, UpdateServicesRequest,
 };
 use crate::business::dog::services::repository::SeaOrmDogServicesRepository;
 use crate::common::error::AppError;
@@ -29,9 +29,9 @@ impl DogServicesService {
             .ok_or_else(|| AppError::NotFound(format!("Service with id {} not found", id)))
     }
 
-    pub async fn list_all(&self) -> Result<Vec<DogServices>, AppError> {
+    pub async fn list_all(&self, query: &ServicesQuery) -> Result<Vec<DogServices>, AppError> {
         self.repo
-            .find_all()
+            .find_all(query)
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)
     }

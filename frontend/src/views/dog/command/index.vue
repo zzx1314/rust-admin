@@ -9,10 +9,11 @@ import AddFill from "~icons/ri/add-circle-line";
 import { PureTableBar } from "@/components/RePureTableBar";
 import { useCollectorCommandForm } from "./form";
 import PureTable from "@pureadmin/table";
-import { PlusDialogForm, PlusSearch } from "plus-pro-components";
+import { PlusDialogForm } from "plus-pro-components";
+import DogSearchForm from "../components/DogSearchForm.vue";
 defineOptions({ name: "DogCommand" });
 const addFormRef = ref<FormInstance>();
-const { columnsForm, columnsQueryForm } = useCollectorCommandForm();
+const { columnsForm } = useCollectorCommandForm();
 const {
   queryForm,
   dataList,
@@ -23,6 +24,8 @@ const {
   addForm,
   rules,
   columns,
+  queryFields,
+  moreQueryFields,
   onSearch,
   handleUpdate,
   handleDelete,
@@ -37,16 +40,14 @@ const {
 </script>
 <template>
   <div class="main">
-    <el-card
-      ><PlusSearch
-        v-model="queryForm"
-        :columns="columnsQueryForm"
-        :show-number="3"
-        label-width="80"
-        label-position="right"
-        @search="onSearch"
-        @reset="cancel"
-    /></el-card>
+    <DogSearchForm
+      v-model="queryForm"
+      :fields="queryFields"
+      :more-fields="moreQueryFields"
+      :loading="loading"
+      @search="onSearch"
+      @reset="cancel"
+    />
     <PureTableBar title="指令列表" :columns="columns" @refresh="onSearch">
       <template #buttons
         ><el-button

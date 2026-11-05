@@ -10,10 +10,14 @@ import { PureTableBar } from "@/components/RePureTableBar";
 import { useCollectorServicesForm } from "./form";
 import PureTable from "@pureadmin/table";
 import { PlusDialogForm } from "plus-pro-components";
+import DogSearchForm from "../components/DogSearchForm.vue";
 defineOptions({ name: "DogServices" });
 const addFormRef = ref<FormInstance>();
 const { columnsForm } = useCollectorServicesForm();
 const {
+  queryForm,
+  queryFields,
+  moreQueryFields,
   dataList,
   loading,
   dialogFormVisible,
@@ -32,6 +36,14 @@ const {
 </script>
 <template>
   <div class="main">
+    <DogSearchForm
+      v-model="queryForm"
+      :fields="queryFields"
+      :more-fields="moreQueryFields"
+      :loading="loading"
+      @search="onSearch"
+      @reset="cancel"
+    />
     <PureTableBar title="服务列表" :columns="columns" @refresh="onSearch">
       <template #buttons
         ><el-button

@@ -4,6 +4,7 @@ use crate::business::dog::model::entity::Column as ModelColumn;
 use crate::business::dog::model::entity::Entity as ModelEntity;
 use crate::business::dog::model::entity::Model as DogModel;
 use crate::common::base::{BaseRepository, order_desc};
+use crate::common::util::parse_beijing_datetime;
 use sea_orm::{
     ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect,
@@ -61,6 +62,17 @@ impl SeaOrmDogModelRepository {
         }
         if let Some(ref mtype) = query.model_type {
             cond = cond.add(ModelColumn::ModelType.eq(mtype.as_str()));
+        }
+
+        if let Some(ref begin) = query.begin_time
+            && let Some(utc_dt) = parse_beijing_datetime(begin, false)
+        {
+            cond = cond.add(ModelColumn::CreateTime.gte(utc_dt));
+        }
+        if let Some(ref end) = query.end_time
+            && let Some(utc_dt) = parse_beijing_datetime(end, true)
+        {
+            cond = cond.add(ModelColumn::CreateTime.lte(utc_dt));
         }
 
         let total = base_query

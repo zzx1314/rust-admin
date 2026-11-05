@@ -9,8 +9,8 @@ const dogServicesUrls = {
   delete: `/api/dogServices/`
 };
 
-export const dogServicesGetAll = () =>
-  http.axiosGetRequest<Result>(dogServicesUrls.getAll, {});
+export const dogServicesGetAll = (query?: object) =>
+  http.axiosGetRequest<Result>(dogServicesUrls.getAll, query);
 export const dogServicesSave = (param?: object) =>
   http.axiosPostRequest<Result>(dogServicesUrls.save, param);
 export const dogServicesUpdate = (id: string | number, param?: object) =>

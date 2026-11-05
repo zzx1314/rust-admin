@@ -1,10 +1,15 @@
-use crate::business::dog::services::domain::{CreateServicesRequest, UpdateServicesRequest};
+use crate::business::dog::services::domain::{
+    CreateServicesRequest, ServicesQuery, UpdateServicesRequest,
+};
 use crate::business::dog::services::entity::ActiveModel as ServicesActiveModel;
 use crate::business::dog::services::entity::Column as ServicesColumn;
 use crate::business::dog::services::entity::Entity as ServicesEntity;
 use crate::business::dog::services::entity::Model as DogServices;
 use crate::common::base::{BaseRepository, order_desc};
-use sea_orm::{ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
+use crate::common::util::parse_beijing_datetime;
+use sea_orm::{
+    ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
+};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -80,9 +85,28 @@ impl SeaOrmDogServicesRepository {
         self.find_by_id(id).await
     }
 
-    pub async fn find_all(&self) -> Result<Vec<DogServices>, sea_orm::DbErr> {
+    pub async fn find_all(
+        &self,
+        query: &ServicesQuery,
+    ) -> Result<Vec<DogServices>, sea_orm::DbErr> {
+        let mut cond = Condition::all();
+        if let Some(ref stype) = query.r#type {
+            cond = cond.add(ServicesColumn::Type.contains(stype.as_str()));
+        }
+        if let Some(ref begin) = query.begin_time
+            && let Some(utc_dt) = parse_beijing_datetime(begin, false)
+        {
+            cond = cond.add(ServicesColumn::CreateTime.gte(utc_dt));
+        }
+        if let Some(ref end) = query.end_time
+            && let Some(utc_dt) = parse_beijing_datetime(end, true)
+        {
+            cond = cond.add(ServicesColumn::CreateTime.lte(utc_dt));
+        }
+
         ServicesEntity::find()
             .filter(ServicesColumn::IsDeleted.eq(0))
+            .filter(cond)
             .order_by(ServicesColumn::CreateTime, order_desc())
             .all(&*self.conn)
             .await

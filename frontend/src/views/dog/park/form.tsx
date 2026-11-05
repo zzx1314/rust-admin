@@ -7,13 +7,5 @@ export function useDogParkForm() {
     { label: "园区地址", prop: "parkAddress", valueType: "copy" }
   ];
 
-  const columnsQueryForm: PlusColumn[] = [
-    {
-      label: "园区名称",
-      prop: "parkName",
-      valueType: "copy",
-      colProps: { span: 5 }
-    }
-  ];
-  return { columnsForm, columnsQueryForm };
+  return { columnsForm };
 }

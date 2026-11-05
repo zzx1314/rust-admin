@@ -5,6 +5,7 @@ use crate::business::dog::task::entity::Entity as TaskEntity;
 use crate::business::dog::task::entity::Model as Task;
 use crate::common::base::{BaseRepository, order_desc};
 use crate::common::data_scope::DataScope;
+use crate::common::util::parse_beijing_datetime;
 use sea_orm::{
     ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect,
@@ -80,6 +81,17 @@ impl SeaOrmDogTaskRepository {
         }
         if let Some(user_id) = query.user_id {
             cond = cond.add(TaskColumn::UserId.eq(user_id));
+        }
+
+        if let Some(ref begin) = query.begin_time
+            && let Some(utc_dt) = parse_beijing_datetime(begin, false)
+        {
+            cond = cond.add(TaskColumn::CreateTime.gte(utc_dt));
+        }
+        if let Some(ref end) = query.end_time
+            && let Some(utc_dt) = parse_beijing_datetime(end, true)
+        {
+            cond = cond.add(TaskColumn::CreateTime.lte(utc_dt));
         }
 
         let total = base_query

@@ -8,6 +8,7 @@ import {
   dogMediaUpdate,
   dogMediaDelete
 } from "@/api/dogMedia";
+import { CREATE_TIME_FIELDS, type DogSearchField } from "../components/search";
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
 
@@ -33,7 +34,17 @@ export function useDogMedia() {
     { label: "操作", fixed: "right", width: 180, slot: "operation" }
   ];
 
-  const queryForm = ref({ mediaName: "", mediaType: "" });
+  const queryFields: DogSearchField[] = [
+    { label: "媒体名称", prop: "mediaName" },
+    { label: "媒体类型", prop: "mediaType" }
+  ];
+  const moreQueryFields: DogSearchField[] = [...CREATE_TIME_FIELDS];
+  const queryForm = ref({
+    mediaName: "",
+    mediaType: "",
+    beginTime: "",
+    endTime: ""
+  });
   const dataList = ref([]);
   const loading = ref(true);
   const pagination = reactive<PaginationProps>({
@@ -106,7 +117,12 @@ export function useDogMedia() {
   }
   function cancel() {
     addForm.value = { id: null };
-    queryForm.value = { mediaName: "", mediaType: "" };
+    queryForm.value = {
+      mediaName: "",
+      mediaType: "",
+      beginTime: "",
+      endTime: ""
+    };
     dialogFormVisible.value = false;
     onSearch();
   }
@@ -126,6 +142,8 @@ export function useDogMedia() {
     addForm,
     rules,
     columns,
+    queryFields,
+    moreQueryFields,
     onSearch,
     handleUpdate,
     handleDelete,

@@ -31,6 +31,8 @@ pub struct UpdateMediaRequest {
 pub struct MediaPageQuery {
     pub media_name: Option<String>,
     pub media_type: Option<String>,
+    pub begin_time: Option<String>,
+    pub end_time: Option<String>,
     #[serde(default = "default_current")]
     pub current: i64,
     #[serde(default = "default_size")]

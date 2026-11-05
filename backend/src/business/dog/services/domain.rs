@@ -20,6 +20,14 @@ pub struct UpdateServicesRequest {
     pub params: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ServicesQuery {
+    pub r#type: Option<String>,
+    pub begin_time: Option<String>,
+    pub end_time: Option<String>,
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ServicesVO {

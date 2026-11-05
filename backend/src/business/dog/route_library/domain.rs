@@ -34,6 +34,8 @@ pub struct RoutePageQuery {
     pub route_name: Option<String>,
     pub route_type: Option<String>,
     pub route_status: Option<String>,
+    pub begin_time: Option<String>,
+    pub end_time: Option<String>,
     #[serde(default = "default_current")]
     pub current: i64,
     #[serde(default = "default_size")]

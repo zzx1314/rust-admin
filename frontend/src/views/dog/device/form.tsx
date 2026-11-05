@@ -14,39 +14,5 @@ export function useCollectorBusDevForm() {
     { label: "位置", prop: "location", valueType: "copy" }
   ];
 
-  const columnsQueryForm: PlusColumn[] = [
-    {
-      label: "设备ID",
-      prop: "deviceId",
-      valueType: "copy",
-      colProps: { span: 5 }
-    },
-    {
-      label: "设备类型",
-      prop: "deviceType",
-      valueType: "copy",
-      colProps: { span: 5 }
-    },
-    {
-      label: "状态",
-      prop: "status",
-      valueType: "copy",
-      colProps: { span: 5 }
-    },
-    {
-      label: "开始时间",
-      prop: "beginTime",
-      valueType: "date-picker",
-      fieldProps: { type: "date", valueFormat: "YYYY-MM-DD HH:mm:ss" },
-      colProps: { span: 5 }
-    },
-    {
-      label: "结束时间",
-      prop: "endTime",
-      valueType: "date-picker",
-      fieldProps: { type: "date", valueFormat: "YYYY-MM-DD" },
-      colProps: { span: 5 }
-    }
-  ];
-  return { columnsForm, columnsQueryForm };
+  return { columnsForm };
 }

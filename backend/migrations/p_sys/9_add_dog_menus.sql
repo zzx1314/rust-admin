@@ -4,8 +4,9 @@
 -- `/views/dog/*` pages are unreachable from the sidebar even though the APIs
 -- are registered.
 --
--- Layout:
---   1200 机器狗管理 (directory)
+-- Layout (the 1200 directory is retired by `flatten_dog_park_menus`, which
+-- promotes every page below to a first-level menu):
+--   1200 机器狗管理 (directory, retired by migration 15)
 --   ├── 1201 设备列表  ── 1211 查询设备
 --   ├── 1202 任务管理  ── 1212 查询任务
 --   ├── 1203 路线管理  ── 1213 查询路线
@@ -14,7 +15,7 @@
 --   ├── 1206 指令管理  ── 1216 查询指令
 --   ├── 1207 参数配置  ── 1217 查询配置
 --   ├── 1208 服务管理  ── 1218 查询服务
---   └── 1209 工作流    ── 1219 查询工作流
+--   └── 1209 工作流    ── 1219 查询工作流（由 `remove_workflow_menu` 下线）
 --
 -- `INSERT OR IGNORE` keeps this migration safe to re-run and avoids clashing
 -- with menus already created through the admin UI.

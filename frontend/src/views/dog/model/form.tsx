@@ -10,19 +10,5 @@ export function useCollectorModelForm() {
     { label: "文件大小(字节)", prop: "fileSize", valueType: "input-number" },
     { label: "备注", prop: "remarks", valueType: "textarea" }
   ];
-  const columnsQueryForm: PlusColumn[] = [
-    {
-      label: "模型名称",
-      prop: "modelName",
-      valueType: "copy",
-      colProps: { span: 5 }
-    },
-    {
-      label: "模型类型",
-      prop: "modelType",
-      valueType: "copy",
-      colProps: { span: 5 }
-    }
-  ];
-  return { columnsForm, columnsQueryForm };
+  return { columnsForm };
 }

@@ -7,15 +7,17 @@ import EditPen from "~icons/ep/edit-pen";
 import Delete from "~icons/ep/delete";
 import AddFill from "~icons/ri/add-circle-line";
 import UserAddLine from "~icons/ri/user-add-line";
+import LinkUnlink from "~icons/ri/link-unlink";
 import { PureTableBar } from "@/components/RePureTableBar";
 import { useCollectorBusDevForm } from "./form";
 import PureTable from "@pureadmin/table";
-import { PlusDialogForm, PlusSearch } from "plus-pro-components";
+import { PlusDialogForm } from "plus-pro-components";
+import DogSearchForm from "../components/DogSearchForm.vue";
 
 defineOptions({ name: "DogDevice" });
 
 const addFormRef = ref<FormInstance>();
-const { columnsForm, columnsQueryForm } = useCollectorBusDevForm();
+const { columnsForm } = useCollectorBusDevForm();
 const {
   queryForm,
   dataList,
@@ -26,16 +28,23 @@ const {
   addForm,
   rules,
   columns,
-  assignVisible,
-  assignLoading,
-  assignForm,
+  queryFields,
+  moreQueryFields,
+  canManageUsers,
+  bindVisible,
+  bindLoading,
+  bindingsLoading,
+  bindDevice,
+  bindings,
+  bindUserId,
   userOptions,
-  canAssign,
   onSearch,
   handleUpdate,
   handleDelete,
-  handleAssign,
-  submitAssign,
+  handleBind,
+  submitBind,
+  removeBinding,
+  handleUnbindSelf,
   handleSizeChange,
   handleCurrentChange,
   handleSelectionChange,
@@ -47,17 +56,14 @@ const {
 </script>
 <template>
   <div class="main">
-    <el-card>
-      <PlusSearch
-        v-model="queryForm"
-        :columns="columnsQueryForm"
-        :show-number="3"
-        label-width="80"
-        label-position="right"
-        @search="onSearch"
-        @reset="cancel"
-      />
-    </el-card>
+    <DogSearchForm
+      v-model="queryForm"
+      :fields="queryFields"
+      :more-fields="moreQueryFields"
+      :loading="loading"
+      @search="onSearch"
+      @reset="cancel"
+    />
     <PureTableBar title="设备列表" :columns="columns" @refresh="onSearch">
       <template #buttons>
         <el-button
@@ -91,15 +97,31 @@ const {
         >
           <template #operation="{ row }">
             <el-button
-              v-if="canAssign"
+              v-if="canManageUsers"
               class="reset-margin"
               link
               type="primary"
               :size="size"
               :icon="useRenderIcon(UserAddLine)"
-              @click="handleAssign(row)"
-              >分配</el-button
+              @click="handleBind(row)"
+              >绑定用户</el-button
             >
+            <el-popconfirm
+              v-else
+              title="是否确认解绑当前账号?"
+              @confirm="handleUnbindSelf(row)"
+            >
+              <template #reference>
+                <el-button
+                  class="reset-margin"
+                  link
+                  type="primary"
+                  :size="size"
+                  :icon="useRenderIcon(LinkUnlink)"
+                  >解绑</el-button
+                >
+              </template>
+            </el-popconfirm>
             <el-button
               class="reset-margin"
               link
@@ -135,14 +157,36 @@ const {
       @confirm-error="handleSubmitError"
       @confirm="handleSubmit"
     />
-    <el-dialog v-model="assignVisible" title="分配设备" width="420px">
+    <el-dialog v-model="bindVisible" title="绑定用户" width="480px">
       <el-form label-width="90px">
         <el-form-item label="设备编号">
-          <span>{{ assignForm.deviceId }}</span>
+          <span>{{ bindDevice.deviceId }}</span>
         </el-form-item>
-        <el-form-item label="分配用户">
+        <el-form-item label="已绑定">
+          <div v-if="bindingsLoading" class="text-gray-400">加载中…</div>
+          <div v-else-if="!bindings.length" class="text-gray-400">
+            暂未绑定用户
+          </div>
+          <div v-else class="flex w-full flex-col gap-2">
+            <div
+              v-for="item in bindings"
+              :key="item.userId"
+              class="flex w-full items-center justify-between"
+            >
+              <el-tag>{{ item.userName }}</el-tag>
+              <el-button
+                link
+                type="danger"
+                :icon="useRenderIcon(LinkUnlink)"
+                @click="removeBinding(item)"
+                >解绑</el-button
+              >
+            </div>
+          </div>
+        </el-form-item>
+        <el-form-item label="绑定用户">
           <el-select
-            v-model="assignForm.userId"
+            v-model="bindUserId"
             filterable
             clearable
             placeholder="请选择用户"
@@ -153,14 +197,17 @@ const {
               :key="item.value"
               :label="item.label"
               :value="item.value"
+              :disabled="
+                bindings.some(binding => binding.userId === item.value)
+              "
             />
           </el-select>
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="assignVisible = false">取消</el-button>
-        <el-button type="primary" :loading="assignLoading" @click="submitAssign"
-          >确定</el-button
+        <el-button @click="bindVisible = false">关闭</el-button>
+        <el-button type="primary" :loading="bindLoading" @click="submitBind"
+          >绑定</el-button
         >
       </template>
     </el-dialog>

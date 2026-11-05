@@ -6,6 +6,7 @@ use crate::business::dog::command::entity::Column as CommandColumn;
 use crate::business::dog::command::entity::Entity as CommandEntity;
 use crate::business::dog::command::entity::Model as DogCommand;
 use crate::common::base::{BaseRepository, order_desc};
+use crate::common::util::parse_beijing_datetime;
 use sea_orm::{
     ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect,
@@ -74,6 +75,17 @@ impl SeaOrmDogCommandRepository {
         }
         if let Some(task_id) = query.task_id {
             cond = cond.add(CommandColumn::TaskId.eq(task_id));
+        }
+
+        if let Some(ref begin) = query.begin_time
+            && let Some(utc_dt) = parse_beijing_datetime(begin, false)
+        {
+            cond = cond.add(CommandColumn::CreateTime.gte(utc_dt));
+        }
+        if let Some(ref end) = query.end_time
+            && let Some(utc_dt) = parse_beijing_datetime(end, true)
+        {
+            cond = cond.add(CommandColumn::CreateTime.lte(utc_dt));
         }
 
         let total = base_query

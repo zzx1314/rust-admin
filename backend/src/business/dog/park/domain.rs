@@ -27,6 +27,8 @@ pub struct UpdateParkRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ParkPageQuery {
     pub park_name: Option<String>,
+    pub begin_time: Option<String>,
+    pub end_time: Option<String>,
     #[serde(default = "default_current")]
     pub current: i64,
     #[serde(default = "default_size")]

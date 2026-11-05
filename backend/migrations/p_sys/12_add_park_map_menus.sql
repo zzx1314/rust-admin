@@ -1,7 +1,8 @@
 -- @migration-name: add_park_map_menus
 
--- Sidebar entries for the park/map pages:
---   1300 园区管理 (directory)
+-- Sidebar entries for the park/map pages (the 1300 directory is retired by
+-- `flatten_dog_park_menus`, which promotes both pages to first-level menus):
+--   1300 园区管理 (directory, retired by migration 15)
 --   ├── 1301 园区列表 ── 1311 查询园区
 --   └── 1302 地图管理 ── 1312 查询地图
 

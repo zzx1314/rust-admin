@@ -8,9 +8,20 @@ import {
   dogDeviceUpdate,
   dogDeviceDelete
 } from "@/api/dogDevice";
-import { dogGatewayAssign } from "@/api/dogGateway";
+import {
+  dogGatewayAssign,
+  dogGatewayAssignees,
+  dogGatewayUnassign
+} from "@/api/dogGateway";
+import { dogUserDeviceGetAll } from "@/api/dogUserDevice";
 import { userPage } from "@/api/system";
 import { isPlatformAdmin } from "@/utils/permission";
+import { useUserStoreHook } from "@/store/modules/user";
+import {
+  CREATE_TIME_FIELDS,
+  DEVICE_STATUS_OPTIONS,
+  type DogSearchField
+} from "../components/search";
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
 
@@ -18,6 +29,8 @@ export function useDogDevice() {
   const rules = reactive<FormRules>({
     deviceId: [{ required: true, message: "设备ID必填", trigger: "blur" }]
   });
+  /** 设备主键 → 已绑定用户展示名。 */
+  const boundUserNames = ref<Record<number, string[]>>({});
   const columns: TableColumnList = [
     {
       type: "selection",
@@ -47,11 +60,46 @@ export function useDogDevice() {
     { label: "速度", prop: "speed", width: 80 },
     { label: "高度", prop: "height", width: 80 },
     { label: "电量", prop: "battery", width: 80 },
+    {
+      label: "绑定用户",
+      prop: "boundUsers",
+      minWidth: 160,
+      cellRenderer: ({ row, props }) => {
+        const names = boundUserNames.value[row.id] ?? [];
+        if (!names.length) {
+          return (
+            <el-tag size={props.size} type="info">
+              未绑定
+            </el-tag>
+          );
+        }
+        return (
+          <div class="flex flex-wrap justify-center gap-1">
+            {names.map(name => (
+              <el-tag key={name} size={props.size}>
+                {name}
+              </el-tag>
+            ))}
+          </div>
+        );
+      }
+    },
     { label: "创建时间", prop: "createTime", width: 180 },
     { label: "通信时间", prop: "commTime", width: 180 },
     { label: "操作", fixed: "right", width: 260, slot: "operation" }
   ];
 
+  const queryFields: DogSearchField[] = [
+    { label: "设备ID", prop: "deviceId" },
+    { label: "设备类型", prop: "deviceType" },
+    {
+      label: "状态",
+      prop: "status",
+      type: "select",
+      options: DEVICE_STATUS_OPTIONS
+    }
+  ];
+  const moreQueryFields: DogSearchField[] = [...CREATE_TIME_FIELDS];
   const queryForm = ref({
     deviceId: "",
     deviceType: "",
@@ -71,14 +119,18 @@ export function useDogDevice() {
   const title = ref("");
   const addForm = ref({ id: null });
 
-  const assignVisible = ref(false);
-  const assignLoading = ref(false);
-  const assignForm = ref<{ deviceId: string; userId: number | null }>({
-    deviceId: "",
-    userId: null
-  });
+  /** 管理员可在任意设备上维护绑定用户。 */
+  const canManageUsers = computed(() => isPlatformAdmin());
+  const bindVisible = ref(false);
+  const bindLoading = ref(false);
+  const bindingsLoading = ref(false);
+  const bindDevice = ref<{ deviceId: string }>({ deviceId: "" });
+  const bindings = ref<Array<{ userId: number; userName: string }>>([]);
+  const bindUserId = ref<number | null>(null);
   const userOptions = ref<Array<{ label: string; value: number }>>([]);
-  const canAssign = computed(() => isPlatformAdmin());
+  const currentUsername = computed(
+    () => useUserStoreHook().username || "当前账号"
+  );
 
   const buttonClass = computed(() => [
     "!h-[20px]",
@@ -124,34 +176,110 @@ export function useDogDevice() {
     }));
   }
 
-  function handleAssign(row) {
-    assignForm.value = { deviceId: row.deviceId, userId: null };
-    assignVisible.value = true;
-    loadUserOptions();
+  function userNameOf(userId: number) {
+    const option = userOptions.value.find(item => item.value === userId);
+    return option?.label ?? `用户 ${userId}`;
   }
 
-  function submitAssign() {
-    if (!assignForm.value.userId) {
-      message("请选择要分配的用户", { type: "warning" });
+  /** 拉取当前可见的全部绑定关系，用于表格「绑定用户」列。 */
+  async function loadBoundUsers() {
+    try {
+      const { data } = await dogUserDeviceGetAll();
+      if (canManageUsers.value) await loadUserOptions();
+      const names: Record<number, string[]> = {};
+      (data ?? []).forEach((item: any) => {
+        const label = canManageUsers.value
+          ? userNameOf(item.userId)
+          : currentUsername.value;
+        const list = names[item.deviceId] ?? [];
+        if (!list.includes(label)) list.push(label);
+        names[item.deviceId] = list;
+      });
+      boundUserNames.value = names;
+    } catch {
+      boundUserNames.value = {};
+    }
+  }
+
+  /** 单个设备的绑定明细（对话框内使用）。 */
+  async function loadBindings(deviceId: string) {
+    bindingsLoading.value = true;
+    try {
+      const { data } = await dogGatewayAssignees(deviceId);
+      await loadUserOptions();
+      bindings.value = (data ?? []).map((item: any) => ({
+        userId: item.userId,
+        userName: userNameOf(item.userId)
+      }));
+    } catch {
+      bindings.value = [];
+    } finally {
+      bindingsLoading.value = false;
+    }
+  }
+
+  function handleBind(row) {
+    if (!canManageUsers.value) return;
+    bindDevice.value = { deviceId: row.deviceId };
+    bindUserId.value = null;
+    bindings.value = [];
+    bindVisible.value = true;
+    loadBindings(row.deviceId);
+  }
+
+  async function refreshBindings() {
+    await Promise.all([
+      loadBindings(bindDevice.value.deviceId),
+      loadBoundUsers()
+    ]);
+  }
+
+  async function submitBind() {
+    if (!bindUserId.value) {
+      message("请选择要绑定的用户", { type: "warning" });
       return;
     }
-    assignLoading.value = true;
-    dogGatewayAssign({
-      deviceId: assignForm.value.deviceId,
-      userId: assignForm.value.userId
-    })
-      .then(res => {
-        if (res.code === SUCCESS) {
-          message("分配成功！", { type: "success" });
-          assignVisible.value = false;
-          onSearch();
-        } else {
-          message(res.msg, { type: "error" });
-        }
-      })
-      .finally(() => {
-        assignLoading.value = false;
+    bindLoading.value = true;
+    try {
+      const res = await dogGatewayAssign({
+        deviceId: bindDevice.value.deviceId,
+        userId: bindUserId.value
       });
+      if (res.code === SUCCESS) {
+        message("绑定成功！", { type: "success" });
+        bindUserId.value = null;
+        await refreshBindings();
+      } else {
+        message(res.msg, { type: "error" });
+      }
+    } finally {
+      bindLoading.value = false;
+    }
+  }
+
+  async function removeBinding(binding: { userId: number }) {
+    const res = await dogGatewayUnassign(
+      bindDevice.value.deviceId,
+      binding.userId
+    );
+    if (res.code === SUCCESS) {
+      message("解绑成功！", { type: "success" });
+      await refreshBindings();
+    } else {
+      message(res.msg, { type: "error" });
+    }
+  }
+
+  /** 普通用户在设备列表里解绑自己（设备列表只返回已绑定设备）。 */
+  function handleUnbindSelf(row) {
+    dogGatewayUnassign(row.deviceId).then(res => {
+      if (res.code === SUCCESS) {
+        message("解绑成功！", { type: "success" });
+        onSearch();
+      } else {
+        message(res.msg, { type: "error" });
+      }
+    });
   }
 
   const handleSubmit = (_values: FieldValues) => {
@@ -180,10 +308,10 @@ export function useDogDevice() {
     loading.value = true;
     const page = { size: pagination.pageSize, current: pagination.currentPage };
     const query = { ...page, ...queryForm.value };
-    if (query.endTime) query.endTime = query.endTime + " 23:59:59";
     const { data } = await dogDevicePage(query);
     dataList.value = data.records;
     pagination.total = data.total;
+    loadBoundUsers();
     setTimeout(() => {
       loading.value = false;
     }, 500);
@@ -220,16 +348,24 @@ export function useDogDevice() {
     rules,
     columns,
     buttonClass,
-    assignVisible,
-    assignLoading,
-    assignForm,
+    queryFields,
+    moreQueryFields,
+    canManageUsers,
+    boundUserNames,
+    bindVisible,
+    bindLoading,
+    bindingsLoading,
+    bindDevice,
+    bindings,
+    bindUserId,
     userOptions,
-    canAssign,
     onSearch,
     handleUpdate,
     handleDelete,
-    handleAssign,
-    submitAssign,
+    handleBind,
+    submitBind,
+    removeBinding,
+    handleUnbindSelf,
     handleSizeChange,
     handleCurrentChange,
     handleSelectionChange,

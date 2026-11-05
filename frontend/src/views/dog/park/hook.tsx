@@ -8,6 +8,7 @@ import {
   dogParkUpdate,
   dogParkDelete
 } from "@/api/dogPark";
+import { CREATE_TIME_FIELDS, type DogSearchField } from "../components/search";
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
 
@@ -32,7 +33,15 @@ export function useDogPark() {
     { label: "操作", fixed: "right", width: 180, slot: "operation" }
   ];
 
-  const queryForm = ref({ parkName: "" });
+  const queryFields: DogSearchField[] = [
+    { label: "园区名称", prop: "parkName" }
+  ];
+  const moreQueryFields: DogSearchField[] = [...CREATE_TIME_FIELDS];
+  const queryForm = ref({
+    parkName: "",
+    beginTime: "",
+    endTime: ""
+  });
   const dataList = ref([]);
   const loading = ref(true);
   const pagination = reactive<PaginationProps>({
@@ -105,7 +114,7 @@ export function useDogPark() {
 
   function cancel() {
     addForm.value = { id: null };
-    queryForm.value = { parkName: "" };
+    queryForm.value = { parkName: "", beginTime: "", endTime: "" };
     dialogFormVisible.value = false;
     onSearch();
   }
@@ -127,6 +136,8 @@ export function useDogPark() {
     addForm,
     rules,
     columns,
+    queryFields,
+    moreQueryFields,
     onSearch,
     handleUpdate,
     handleDelete,

@@ -1,4 +1,4 @@
-import { nextTick, onMounted, reactive, ref } from "vue";
+import { computed, nextTick, onMounted, reactive, ref } from "vue";
 import type { PaginationProps } from "@pureadmin/table";
 import type { FormRules } from "element-plus";
 import type { FieldValues } from "plus-pro-components";
@@ -8,6 +8,8 @@ import {
   dogMapUpdate,
   dogMapDelete
 } from "@/api/dogMap";
+import { dogParkGetAll } from "@/api/dogPark";
+import { CREATE_TIME_FIELDS, type DogSearchField } from "../components/search";
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
 
@@ -33,7 +35,23 @@ export function useDogMap() {
     { label: "操作", fixed: "right", width: 180, slot: "operation" }
   ];
 
-  const queryForm = ref({ mapName: "", parkId: "" });
+  const parkOptions = ref<Array<{ label: string; value: number }>>([]);
+  const queryFields = computed<DogSearchField[]>(() => [
+    { label: "地图名称", prop: "mapName" },
+    {
+      label: "所属园区",
+      prop: "parkId",
+      type: "select",
+      options: parkOptions.value
+    }
+  ]);
+  const moreQueryFields: DogSearchField[] = [...CREATE_TIME_FIELDS];
+  const queryForm = ref({
+    mapName: "",
+    parkId: "",
+    beginTime: "",
+    endTime: ""
+  });
   const dataList = ref([]);
   const loading = ref(true);
   const pagination = reactive<PaginationProps>({
@@ -106,7 +124,12 @@ export function useDogMap() {
 
   function cancel() {
     addForm.value = { id: null };
-    queryForm.value = { mapName: "", parkId: "" };
+    queryForm.value = {
+      mapName: "",
+      parkId: "",
+      beginTime: "",
+      endTime: ""
+    };
     dialogFormVisible.value = false;
     onSearch();
   }
@@ -116,10 +139,23 @@ export function useDogMap() {
     if (formEl) nextTick(() => formEl.formInstance?.clearValidate());
   }
 
-  onMounted(() => onSearch());
+  async function loadParkOptions() {
+    const { data } = await dogParkGetAll();
+    parkOptions.value = (data ?? []).map((park: any) => ({
+      label: park.parkName,
+      value: park.id
+    }));
+  }
+
+  onMounted(() => {
+    loadParkOptions();
+    onSearch();
+  });
 
   return {
     queryForm,
+    queryFields,
+    moreQueryFields,
     dataList,
     loading,
     dialogFormVisible,

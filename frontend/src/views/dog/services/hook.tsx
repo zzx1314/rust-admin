@@ -7,6 +7,7 @@ import {
   dogServicesUpdate,
   dogServicesDelete
 } from "@/api/dogServices";
+import { CREATE_TIME_FIELDS, type DogSearchField } from "../components/search";
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
 
@@ -26,6 +27,9 @@ export function useDogServices() {
     { label: "创建时间", prop: "createTime", width: 180 },
     { label: "操作", fixed: "right", width: 180, slot: "operation" }
   ];
+  const queryFields: DogSearchField[] = [{ label: "类型", prop: "type" }];
+  const moreQueryFields: DogSearchField[] = [...CREATE_TIME_FIELDS];
+  const queryForm = ref({ type: "", beginTime: "", endTime: "" });
   const dataList = ref([]);
   const loading = ref(true);
   const dialogFormVisible = ref(false);
@@ -70,7 +74,7 @@ export function useDogServices() {
   };
   async function onSearch() {
     loading.value = true;
-    const { data } = await dogServicesGetAll();
+    const { data } = await dogServicesGetAll(queryForm.value);
     dataList.value = data;
     setTimeout(() => {
       loading.value = false;
@@ -78,6 +82,7 @@ export function useDogServices() {
   }
   function cancel() {
     addForm.value = { id: null };
+    queryForm.value = { type: "", beginTime: "", endTime: "" };
     dialogFormVisible.value = false;
     onSearch();
   }
@@ -88,6 +93,9 @@ export function useDogServices() {
   }
   onMounted(() => onSearch());
   return {
+    queryForm,
+    queryFields,
+    moreQueryFields,
     dataList,
     loading,
     dialogFormVisible,

@@ -37,6 +37,8 @@ pub struct TaskPageQuery {
     pub task_status: Option<String>,
     pub device_id: Option<i64>,
     pub user_id: Option<i64>,
+    pub begin_time: Option<String>,
+    pub end_time: Option<String>,
     #[serde(default = "default_current")]
     pub current: i64,
     #[serde(default = "default_size")]

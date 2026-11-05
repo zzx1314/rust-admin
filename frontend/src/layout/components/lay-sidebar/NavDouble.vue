@@ -64,14 +64,24 @@ function getSubMenuData() {
     path,
     usePermissionStoreHook().wholeMenus
   );
-  // 当前路由的父级路由信息
+  // 当前路由的父级路由信息（一级菜单没有父级时即自身）
   const parenetRoute = findRouteByPath(
     parentPathArr[0] || path,
     usePermissionStoreHook().wholeMenus
   );
-  if (!parenetRoute?.children) return;
-  subMenuData.value = parenetRoute?.children;
-  childMenu.value = parenetRoute?.children;
+  if (!parenetRoute) return;
+  // 一级菜单（没有子菜单）：高亮左侧图标栏的当前项，不展示二级菜单栏
+  if (!parenetRoute.children) {
+    childMenu.value = [];
+    subMenuData.value = [];
+    curActive.value = menuData.value.findIndex(
+      v => v.path === parenetRoute.path
+    );
+    useAppStoreHook().showDouble(false);
+    return;
+  }
+  subMenuData.value = parenetRoute.children;
+  childMenu.value = parenetRoute.children;
   useAppStoreHook().showDouble(
     childMenu.value.length > 1 || childMenu.value[0]?.meta?.showParent
       ? true

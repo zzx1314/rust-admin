@@ -5,6 +5,7 @@ use crate::business::dog::park::entity::Entity as ParkEntity;
 use crate::business::dog::park::entity::Model as Park;
 use crate::common::base::{BaseRepository, order_desc};
 use crate::common::data_scope::DataScope;
+use crate::common::util::parse_beijing_datetime;
 use sea_orm::{
     ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect,
@@ -63,6 +64,17 @@ impl SeaOrmDogParkRepository {
         let mut cond = Condition::all();
         if let Some(ref park_name) = query.park_name {
             cond = cond.add(ParkColumn::ParkName.contains(park_name.as_str()));
+        }
+
+        if let Some(ref begin) = query.begin_time
+            && let Some(utc_dt) = parse_beijing_datetime(begin, false)
+        {
+            cond = cond.add(ParkColumn::CreateTime.gte(utc_dt));
+        }
+        if let Some(ref end) = query.end_time
+            && let Some(utc_dt) = parse_beijing_datetime(end, true)
+        {
+            cond = cond.add(ParkColumn::CreateTime.lte(utc_dt));
         }
 
         let total = base_query

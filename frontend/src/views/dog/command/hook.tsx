@@ -8,6 +8,11 @@ import {
   dogCommandUpdate,
   dogCommandDelete
 } from "@/api/dogCommand";
+import {
+  COMMAND_STATUS_OPTIONS,
+  CREATE_TIME_FIELDS,
+  type DogSearchField
+} from "../components/search";
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
 
@@ -32,7 +37,30 @@ export function useDogCommand() {
     { label: "创建时间", prop: "createTime", width: 180 },
     { label: "操作", fixed: "right", width: 180, slot: "operation" }
   ];
-  const queryForm = ref({ commandName: "", commandType: "", status: "" });
+  const queryFields: DogSearchField[] = [
+    { label: "指令名称", prop: "commandName" },
+    { label: "指令类型", prop: "commandType" },
+    {
+      label: "状态",
+      prop: "status",
+      type: "select",
+      options: COMMAND_STATUS_OPTIONS
+    }
+  ];
+  const moreQueryFields: DogSearchField[] = [
+    { label: "设备ID", prop: "deviceId" },
+    { label: "任务ID", prop: "taskId", type: "number" },
+    ...CREATE_TIME_FIELDS
+  ];
+  const queryForm = ref({
+    commandName: "",
+    commandType: "",
+    status: "",
+    deviceId: "",
+    taskId: null,
+    beginTime: "",
+    endTime: ""
+  });
   const dataList = ref([]);
   const loading = ref(true);
   const pagination = reactive<PaginationProps>({
@@ -105,7 +133,15 @@ export function useDogCommand() {
   }
   function cancel() {
     addForm.value = { id: null };
-    queryForm.value = { commandName: "", commandType: "", status: "" };
+    queryForm.value = {
+      commandName: "",
+      commandType: "",
+      status: "",
+      deviceId: "",
+      taskId: null,
+      beginTime: "",
+      endTime: ""
+    };
     dialogFormVisible.value = false;
     onSearch();
   }
@@ -125,6 +161,8 @@ export function useDogCommand() {
     addForm,
     rules,
     columns,
+    queryFields,
+    moreQueryFields,
     onSearch,
     handleUpdate,
     handleDelete,

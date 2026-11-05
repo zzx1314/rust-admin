@@ -6,13 +6,5 @@ export function useCollectorConfigForm() {
     { label: "配置值", prop: "configValue", valueType: "copy" },
     { label: "描述", prop: "description", valueType: "textarea" }
   ];
-  const columnsQueryForm: PlusColumn[] = [
-    {
-      label: "配置名称",
-      prop: "configName",
-      valueType: "copy",
-      colProps: { span: 5 }
-    }
-  ];
-  return { columnsForm, columnsQueryForm };
+  return { columnsForm };
 }

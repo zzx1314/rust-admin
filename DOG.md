@@ -16,8 +16,8 @@
 | 通信端到端测试 | `backend/tests/business/dog_gateway_tests.rs`、`dog_data_scope_tests.rs`（数据权限） |
 | 后端路由 | `backend/src/api/routes.rs`（每个子域一个 `dog_*_routes`，统一挂 `require_auth`） |
 | 服务装配 | `backend/src/app.rs` → `App::build_state_with_token_store` |
-| 数据库迁移 | `backend/migrations/dog/7_create_dog_tables.sql`（建表）、`10_add_park_map_tables.sql`、`11_add_task_user_scope.sql`、`13_create_user_device_bindings.sql`、`backend/migrations/p_sys/9_add_dog_menus.sql` / `12_add_park_map_menus.sql` / `14_add_device_binding_menu.sql`（菜单） |
-| 前端页面 | `frontend/src/views/dog/{park,map,device,binding,task,route,model,media,command,config,services,workflow}/` |
+| 数据库迁移 | `backend/migrations/dog/7_create_dog_tables.sql`（建表）、`10_add_park_map_tables.sql`、`11_add_task_user_scope.sql`、`13_create_user_device_bindings.sql`、`backend/migrations/p_sys/9_add_dog_menus.sql` / `12_add_park_map_menus.sql` / `14_add_device_binding_menu.sql`（菜单）、`15_flatten_dog_park_menus.sql`（把机器狗 / 园区菜单提升为一级菜单）、`16_remove_device_binding_menu.sql`（下线「设备绑定」菜单，改在设备列表中绑定）、`17_remove_workflow_menu.sql`（下线「工作流」菜单）、`18_reorder_map_menu.sql`（地图管理排在系统管理之下、设备列表之上） |
+| 前端页面 | `frontend/src/views/dog/{park,map,device,task,route,model,media,command,config,services}/` |
 | 前端请求封装 | `frontend/src/api/dog*.ts` |
 | 首页仪表盘 | `frontend/src/views/welcome/index.vue` + `frontend/src/api/dogStatistics.ts` |
 | 在线手册 | `frontend/src/views/manual/admin.md`（管理员）、`developer.md`（接口对接） |
@@ -81,7 +81,7 @@ WS     /api/notice/{deviceId}/{token}         设备长连接（心跳 / 任务 
 POST   /api/dogGateway/dispatch               手动向设备推送任意 JSON
 POST   /api/dogGateway/disconnect/{deviceId}  主动断开设备（客户端自动重连）
 GET    /api/dogGateway/connections            当前在线设备
-POST   /api/dogGateway/assign                 按硬件 deviceId 分配设备给用户（预留接口）
+POST   /api/dogGateway/assign                 按硬件 deviceId 绑定设备给用户（设备列表页使用）
 GET    /api/dogGateway/assign/{deviceId}      查询设备归属用户
 DELETE /api/dogGateway/assign/{deviceId}      解除归属（?userId= 仅管理员有效）
 ```
@@ -124,13 +124,13 @@ DELETE /api/dogGateway/assign/{deviceId}      解除归属（?userId= 仅管理�
 - **数据库迁移**：启动时先清理 `seaql_migrations` 中“文件已删除”的历史记录（如早年的 `add_app_review`、`add_startup_config`），再执行待应用迁移。因此删除旧业务迁移后，老库仍可平滑升级，不会因 `Migration file of version 'xxx' is missing` 启动失败。
 - **主键生成**：系统模块沿用毫秒时间戳；dog 业务统一使用 `common::util::generate_id()`（毫秒 + 原子递增），避免同一毫秒内创建多行时主键冲突。
 - **设备 ID**：由设备端从硬件信息派生（板级序列号 / eMMC CID / DMI UUID / 物理 MAC，兜底 `/etc/machine-id`），注册时通过 `deviceIdSource` 上报来源；也可用 `--device-id` 覆盖。Ubuntu 上 `sysfs` 的序列号/eMMC CID/DMI 标识默认仅 root 可读（`--explain-device-id` 可查看每个来源的状态），建议以 systemd 服务运行并配合 `--device-id-file` 固定首次检测结果。详见 `client/README.md`。
-- **设备接入**：设备先取 token（`GET /api/dogGateway/auth/{deviceId}`），再注册（`dog_device` 初始 `offline`），随后连 `WS /api/notice/{deviceId}/{token}`；心跳会把 `status` 置为 `online` 并刷新 `comm_time` 与遥测字段；WebSocket 断开（正常关闭或连接异常）时置回 `offline`。新注册的设备默认未绑定用户，需在「设备绑定」页面分配后才能被普通用户看到；管理员通过 `POST /api/dogDevice` 手工创建的设备同样保持未绑定，普通用户手工创建则会自动绑定创建者。注册报文本身不携带用户信息，因此设备归属由独立的 `POST /api/dogGateway/assign`（按硬件 `deviceId`）接口建立，便于后续接入配网/出厂预置流程时直接复用。
+- **设备接入**：设备先取 token（`GET /api/dogGateway/auth/{deviceId}`），再注册（`dog_device` 初始 `offline`），随后连 `WS /api/notice/{deviceId}/{token}`；心跳会把 `status` 置为 `online` 并刷新 `comm_time` 与遥测字段；WebSocket 断开（正常关闭或连接异常）时置回 `offline`。新注册的设备默认未绑定用户，需在「设备列表」页绑定给用户后才能被普通用户看到；管理员通过 `POST /api/dogDevice` 手工创建的设备同样保持未绑定，普通用户手工创建则会自动绑定创建者。注册报文本身不携带用户信息，因此设备归属由独立的 `POST /api/dogGateway/assign`（按硬件 `deviceId`）接口建立，便于后续接入配网/出厂预置流程时直接复用。
 - **任务下发**：管理端 `POST /api/dogCommand` 创建指令后，若目标设备在线则立即通过 WebSocket 推送并把指令状态置为 `sent`；设备回报后写回 `status`/`return_value`。也可用 `POST /api/dogGateway/dispatch` 推送自定义 JSON。
 - **设备上传**：`file_start` → 二进制帧（单流上限 256 MiB）→ `file_end`，文件落盘到 `[dog] upload_dir`（默认 `data/device_uploads`）并写入 `dog_media`。
 - **设备认证信任边界**：`GET /api/dogGateway/auth/{deviceId}` 与旧网关一致，按设备号直接下发 token，不校验证书；生产环境需在入口层做 mTLS / 内网隔离 / 反向代理鉴权，或在该接口前置设备白名单。
 - **断线重连**：客户端默认指数退避无限重连（`--reconnect-*` 可调），每次重连都重新取 token、注册、建链；半开连接靠"心跳带确认"发现（服务端收到心跳必回 `report`）。服务端可用 `DogGateway::disconnect(device_id)` 主动断开某台设备（客户端会自动重连），`DogGateway::accepted_connections()` 可用于观察重连次数。
 - **在线连接表**：内存态（`DeviceRegistry`），因此网关按单实例部署；多实例需引入共享总线（如 Redis pub/sub）。
-- **菜单**：左侧菜单由数据库驱动（`p_sys_menu` + `p_sys_role_menu`），`component` 需能唯一匹配 `frontend/src/views/<component>/index.vue`，因此这里使用 `dog/device` 这类带目录前缀的写法（避免与 `views/charging/device` 冲突）。菜单图标使用离线图标，需在 `frontend/src/components/ReIcon/src/offlineIcon.ts` 注册。
+- **菜单**：左侧菜单由数据库驱动（`p_sys_menu` + `p_sys_role_menu`），`component` 需能唯一匹配 `frontend/src/views/<component>/index.vue`，因此这里使用 `dog/device` 这类带目录前缀的写法（避免与 `views/charging/device` 冲突）。菜单图标使用离线图标，需在 `frontend/src/components/ReIcon/src/offlineIcon.ts` 注册。机器狗与园区的各个页面都是**一级菜单**（`parent_id = -1`，原先的 `机器狗管理` / `园区管理` 目录已被 `15_flatten_dog_park_menus.sql` 退役），路由地址（如 `/dog/device/index`）保持不变。`设备绑定` 不再单独占菜单（`16_remove_device_binding_menu.sql`），绑定/解绑用户改在「设备列表」页完成；`工作流` 页面已下线（`17_remove_workflow_menu.sql`），后端 `/api/dogWorkflow*` 接口保留。
 
 ---
 
@@ -140,12 +140,12 @@ DELETE /api/dogGateway/assign/{deviceId}      解除归属（?userId= 仅管理�
 | --- | --- |
 | `数量统计`（上周/本周） | 后端返回全 0 的占位数据，尚未做按周聚合 |
 | `设备统计`（按设备类型） | 后端返回空数组，尚未实现 |
-| 工作流列表 | 无分页接口，前端表格无数据源，仅能新增 / 按 ID、UUID 查询 / 修改 / 删除 |
+| 工作流 | 管理后台已不再提供工作流页面（菜单随 `17_remove_workflow_menu.sql` 下线），后端仅保留新增 / 按 ID、UUID 查询 / 修改 / 删除接口，任务上的 `workflow_id` 仍可填写 |
 | 文件上传 | 设备上传已实现（`/api/notice` 二进制流 → `dog_media`）；模型/媒体的管理页面仍只填写路径，没有浏览器上传接口 |
 | 设备通信 | 已实现 WebSocket 网关（心跳/任务/结果/文件/断线重连）；尚未迁移旧 C 客户端的 TCP:9000 文件帧通道与其他 MQTT 接入方式 |
 | 离线指令重放 | 断线期间已下发未回报的指令保留在 `sent` 状态，不会自动重发（避免重复执行） |
 | 网关多实例 | 连接表在进程内存中，多副本部署时设备只会连到其中一个实例 |
 | 数据权限范围 | 园区 / 地图 / 任务按创建者隔离，设备按用户绑定隔离；路线、模型、媒体、指令仍全局可见 |
-| 设备绑定入口 | 设备由网关自动注册后默认无人可见，需在「机器狗管理 → 设备绑定」由管理员分配（或用户认领未绑定设备） |
+| 设备绑定入口 | 设备由网关自动注册后默认无人可见，管理员可在「设备列表」行内「绑定用户」弹窗绑定/解绑（普通用户只能解绑自己） |
 | 历史任务归属 | 迁移只新增 `user_id` 列，历史任务保持 `NULL`，仅管理员可见，需要时手工回填 |
 | 按钮级权限 | 已初始化 `dog_*_find` 权限码并挂到超级管理员角色，但页面暂未使用 `v-auth` 做按钮控制 |

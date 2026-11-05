@@ -8,6 +8,7 @@ import {
   dogTaskUpdate,
   dogTaskDelete
 } from "@/api/dogTask";
+import { CREATE_TIME_FIELDS, type DogSearchField } from "../components/search";
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
 
@@ -35,7 +36,23 @@ export function useDogTask() {
     { label: "操作", fixed: "right", width: 180, slot: "operation" }
   ];
 
-  const queryForm = ref({ taskName: "", taskStatus: "" });
+  const queryFields: DogSearchField[] = [
+    { label: "任务名称", prop: "taskName" },
+    { label: "任务状态", prop: "taskStatus" }
+  ];
+  const moreQueryFields: DogSearchField[] = [
+    { label: "设备ID", prop: "deviceId", type: "number" },
+    { label: "用户ID", prop: "userId", type: "number" },
+    ...CREATE_TIME_FIELDS
+  ];
+  const queryForm = ref({
+    taskName: "",
+    taskStatus: "",
+    deviceId: null,
+    userId: null,
+    beginTime: "",
+    endTime: ""
+  });
   const dataList = ref([]);
   const loading = ref(true);
   const pagination = reactive<PaginationProps>({
@@ -108,7 +125,14 @@ export function useDogTask() {
 
   function cancel() {
     addForm.value = { id: null };
-    queryForm.value = { taskName: "", taskStatus: "" };
+    queryForm.value = {
+      taskName: "",
+      taskStatus: "",
+      deviceId: null,
+      userId: null,
+      beginTime: "",
+      endTime: ""
+    };
     dialogFormVisible.value = false;
     onSearch();
   }
@@ -130,6 +154,8 @@ export function useDogTask() {
     addForm,
     rules,
     columns,
+    queryFields,
+    moreQueryFields,
     onSearch,
     handleUpdate,
     handleDelete,

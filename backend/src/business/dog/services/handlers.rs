@@ -1,11 +1,11 @@
 use crate::api::AppState;
 use crate::business::dog::services::domain::{
-    CreateServicesRequest, ServicesVO, UpdateServicesRequest,
+    CreateServicesRequest, ServicesQuery, ServicesVO, UpdateServicesRequest,
 };
 use crate::common::error::{ApiResponse, AppError};
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
 
 #[derive(serde::Deserialize)]
@@ -31,8 +31,9 @@ pub async fn get_services_handler(
 
 pub async fn list_all_services_handler(
     State(state): State<AppState>,
+    Query(query): Query<ServicesQuery>,
 ) -> Result<Json<ApiResponse<Vec<ServicesVO>>>, AppError> {
-    let services_list = state.dog_services_service.list_all().await?;
+    let services_list = state.dog_services_service.list_all(&query).await?;
     Ok(Json(ApiResponse::ok(
         services_list.into_iter().map(ServicesVO::from).collect(),
     )))

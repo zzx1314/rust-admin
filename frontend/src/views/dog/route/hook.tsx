@@ -8,6 +8,7 @@ import {
   dogRouteUpdate,
   dogRouteDelete
 } from "@/api/dogRoute";
+import { CREATE_TIME_FIELDS, type DogSearchField } from "../components/search";
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
 
@@ -32,7 +33,19 @@ export function useDogRoute() {
     { label: "创建时间", prop: "createTime", width: 180 },
     { label: "操作", fixed: "right", width: 180, slot: "operation" }
   ];
-  const queryForm = ref({ routeName: "", routeType: "", routeStatus: "" });
+  const queryFields: DogSearchField[] = [
+    { label: "路线名称", prop: "routeName" },
+    { label: "路线类型", prop: "routeType" },
+    { label: "状态", prop: "routeStatus" }
+  ];
+  const moreQueryFields: DogSearchField[] = [...CREATE_TIME_FIELDS];
+  const queryForm = ref({
+    routeName: "",
+    routeType: "",
+    routeStatus: "",
+    beginTime: "",
+    endTime: ""
+  });
   const dataList = ref([]);
   const loading = ref(true);
   const pagination = reactive<PaginationProps>({
@@ -105,7 +118,13 @@ export function useDogRoute() {
   }
   function cancel() {
     addForm.value = { id: null };
-    queryForm.value = { routeName: "", routeType: "", routeStatus: "" };
+    queryForm.value = {
+      routeName: "",
+      routeType: "",
+      routeStatus: "",
+      beginTime: "",
+      endTime: ""
+    };
     dialogFormVisible.value = false;
     onSearch();
   }
@@ -125,6 +144,8 @@ export function useDogRoute() {
     addForm,
     rules,
     columns,
+    queryFields,
+    moreQueryFields,
     onSearch,
     handleUpdate,
     handleDelete,
