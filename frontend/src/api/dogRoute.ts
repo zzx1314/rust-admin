@@ -14,11 +14,15 @@ const dogRouteUrls = {
   update: "/api/dogRoute/",
   delete: `/api/dogRoute/`
 };
-
 export const dogRoutePage = (query?: object) =>
   http.axiosGetRequest<ResultPage>(dogRouteUrls.page, query);
 export const dogRouteGetAll = () =>
   http.axiosGetRequest<Result>(dogRouteUrls.getAll, {});
+export const dogRouteGetById = (id: string | number) =>
+  http.axiosGetRequest<{ code: number; msg: string; data?: any }>(
+    dogRouteUrls.delete + id,
+    {}
+  );
 export const dogRouteSave = (param?: object) =>
   http.axiosPostRequest<Result>(dogRouteUrls.save, param);
 export const dogRouteUpdate = (id: string | number, param?: object) =>

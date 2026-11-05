@@ -1,7 +1,7 @@
 use crate::api::AppState;
 use crate::api::middleware::RequestUser;
 use crate::business::dog::map::domain::{
-    CreateMapRequest, MapPageQuery, MapVO, UpdateMapRequest, UploadMapRequest,
+    CreateMapRequest, MapImageVO, MapPageQuery, MapVO, UpdateMapRequest, UploadMapRequest,
 };
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
@@ -131,6 +131,24 @@ pub async fn update_map_handler(
         .update(params.id, req, &user.data_scope())
         .await?;
     Ok(Json(ApiResponse::ok(MapVO::from(map))))
+}
+
+/// `GET /api/dogMap/{id}/image` — 把地图包里的 `model.pgm` 转成 PNG 返回，
+/// 同时带回 `resolution` / `origin`，供路线规划页做像素↔世界坐标换算。
+pub async fn get_map_image_handler(
+    State(state): State<AppState>,
+    Extension(user): Extension<RequestUser>,
+    Path(params): Path<IdParam>,
+) -> Result<Json<ApiResponse<MapImageVO>>, AppError> {
+    let image = state
+        .dog_map_service
+        .load_image(
+            params.id,
+            state.dog_gateway.upload_root(),
+            &user.data_scope(),
+        )
+        .await?;
+    Ok(Json(ApiResponse::ok(image)))
 }
 
 pub async fn delete_map_handler(

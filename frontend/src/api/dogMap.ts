@@ -13,6 +13,7 @@ const dogMapUrls = {
   save: "/api/dogMap",
   upload: "/api/dogMap/upload",
   update: "/api/dogMap/",
+  image: "/api/dogMap/",
   delete: `/api/dogMap/`
 };
 
@@ -27,5 +28,22 @@ export const dogMapUpload = (formData: FormData) =>
   http.uploadFile<Result>(dogMapUrls.upload, formData);
 export const dogMapUpdate = (id: string | number, param?: object) =>
   http.axiosPut<Result>(dogMapUrls.update + id, param);
+
+/** 地图包渲染结果：PNG base64 + 栅格分辨率 / 原点（与 map_server 一致） */
+export type MapImageResult = {
+  code: number;
+  msg: string;
+  data?: {
+    image: string;
+    resolution: number;
+    origin: number[];
+    width: number;
+    height: number;
+  };
+};
+
+/** 获取地图图片（后端把包内 model.pgm 转成 PNG） */
+export const dogMapGetImage = (id: string | number) =>
+  http.axiosGetRequest<MapImageResult>(dogMapUrls.image + id + "/image", {});
 export const dogMapDelete = (id: string | number) =>
   http.axiosDelete<Result>(dogMapUrls.delete + id);

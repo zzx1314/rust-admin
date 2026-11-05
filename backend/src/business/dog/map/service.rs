@@ -1,6 +1,7 @@
 use crate::business::dog::map::domain::{
-    CreateMapRequest, DogMap, MapPageQuery, MapVO, UpdateMapRequest, UploadMapRequest,
+    CreateMapRequest, DogMap, MapImageVO, MapPageQuery, MapVO, UpdateMapRequest, UploadMapRequest,
 };
+use crate::business::dog::map::package::parse_map_package;
 use crate::business::dog::map::repository::SeaOrmDogMapRepository;
 use crate::business::dog::park::repository::SeaOrmDogParkRepository;
 use crate::common::data_scope::DataScope;
@@ -166,8 +167,45 @@ impl DogMapService {
         }
     }
 
-    async fn ensure_park_access(&self, park_id: i64, scope: &DataScope) -> Result<(), AppError> {
-        let park = self
+    /// 读取地图包并转成前端可直接绘制的 PNG（base64），附带栅格分辨率与原点。
+    ///
+    /// 与参考实现的 `/dronesRouteLibrary/getRoute/{modelId}` 对应：
+    /// 解压`model.pgm` → 转 PNG → base64，并解析 `model.yaml` 的
+    /// `resolution` / `origin`。
+    pub async fn load_image(
+        &self,
+        id: i64,
+        upload_root: &std::path::Path,
+        scope: &DataScope,
+    ) -> Result<MapImageVO, AppError> {
+        let map = self.get_by_id(id, scope).await?;
+        let file_path = map
+            .file_path
+            .clone()
+            .filter(|path| !path.trim().is_empty())
+            .ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "地图 {} 尚未上传地图包，无法用于路线规划",
+                    map.map_name
+                ))
+            })?;
+
+        let bytes = tokio::fs::read(upload_root.join(&file_path))
+            .await
+            .map_err(|error| AppError::InternalError(format!("读取地图包失败: {error}")))?;
+
+        let parsed = parse_map_package(&bytes)?;
+
+        Ok(MapImageVO {
+            image: parsed.png_data_url(),
+            resolution: parsed.resolution,
+            origin: parsed.origin,
+            width: parsed.width,
+            height: parsed.height,
+        })
+    }
+
+    async fn ensure_park_access(&self, park_id: i64, scope: &DataScope) -> Result<(), AppError> {        let park = self
             .park_repo
             .find_by_id(park_id, scope)
             .await

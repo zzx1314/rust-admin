@@ -345,6 +345,10 @@ pub fn dog_map_routes(state: AppState) -> Router<AppState> {
                 .layer(DefaultBodyLimit::max(256 * 1024 * 1024)),
         )
         .route(
+            "/dogMap/{id}/image",
+            get(dog_map_handlers::get_map_image_handler),
+        )
+        .route(
             "/dogMap/{id}",
             get(dog_map_handlers::get_map_handler)
                 .put(dog_map_handlers::update_map_handler)

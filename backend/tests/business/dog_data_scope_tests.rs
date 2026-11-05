@@ -869,3 +869,152 @@ async fn http_gateway_assign_endpoint_works() {
     let body = body_json(response).await;
     assert_eq!(body["data"].as_array().unwrap().len(), 1);
 }
+
+/// 构造一个最小地图包：ROS map_server 的 `model.pgm`（4x3 栅格）+ `model.yaml`
+fn sample_map_zip() -> Vec<u8> {
+    use std::io::Write;
+
+    let mut pgm = b"P5\n4 3\n255\n".to_vec();
+    pgm.extend((0..12u8).map(|value| value.saturating_mul(20)));
+    let yaml = b"image: model.pgm\nresolution: 0.05\norigin: [-8.7, -17.7, 0.0]\nnegate: 0\n";
+
+    let mut buffer = Vec::new();
+    {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut buffer));
+        let options: zip::write::SimpleFileOptions = Default::default();
+        writer.start_file("model.pgm", options).unwrap();
+        writer.write_all(&pgm).unwrap();
+        writer.start_file("model.yaml", options).unwrap();
+        writer.write_all(yaml).unwrap();
+        writer.finish().unwrap();
+    }
+    buffer
+}
+
+fn temp_upload_root(prefix: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "{}_{}_{}",
+        prefix,
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
+#[tokio::test]
+async fn map_packages_are_rendered_to_png_with_grid_metadata() {
+    let state = test_state().await;
+    let a = owner_scope(USER_A);
+    let upload_root = temp_upload_root("dog_map_image");
+
+    let zip_bytes = sample_map_zip();
+    let map = state
+        .dog_map_service
+        .save_upload(
+            UploadMapRequest {
+                id: None,
+                map_name: "园区地图".to_string(),
+                map_type: Some("离线地图".to_string()),
+                park_id: None,
+                remarks: None,
+            },
+            "park-map.zip",
+            &zip_bytes,
+            &upload_root,
+            &a,
+        )
+        .await
+        .expect("map package should be stored");
+
+    let image = state
+        .dog_map_service
+        .load_image(map.id, &upload_root, &a)
+        .await
+        .expect("uploaded package must render");
+
+    assert!(image.image.starts_with("data:image/png;base64,"));
+    assert_eq!((image.width, image.height), (4, 3));
+    assert!((image.resolution - 0.05).abs() < f64::EPSILON);
+    assert_eq!(image.origin, vec![-8.7, -17.7, 0.0]);
+
+    // 未上传地图包的地图要给出明确的错误，而不是空图
+    let park = state
+        .dog_park_service
+        .create(create_park("园区"), &a)
+        .await
+        .unwrap();
+    let empty = state
+        .dog_map_service
+        .create(create_map("无地图包", park.id), &a)
+        .await
+        .unwrap();
+    let error = state
+        .dog_map_service
+        .load_image(empty.id, &upload_root, &a)
+        .await
+        .expect_err("map without package must fail");
+    assert!(matches!(error, AppError::BadRequest(_)));
+
+    std::fs::remove_dir_all(&upload_root).ok();
+}
+
+#[tokio::test]
+async fn map_image_endpoint_serves_png_for_route_planning() {
+    use sea_orm_migration::MigratorTrait;
+    use x_rust::api::routes::create_router;
+    use x_rust::migration::Migrator;
+
+    let upload_root = temp_upload_root("dog_map_image_http");
+    let conn = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+    <Migrator as MigratorTrait>::up(&conn, None).await.unwrap();
+
+    let app = App::from_connection_with_upload_dir(conn, upload_root.clone());
+    let token_store = Arc::new(FakeTokenStore::new());
+    let state = app.build_state_with_token_store(token_store.clone(), JWT_SECRET);
+
+    let token = token_for(USER_A, "user_a");
+    token_store.insert_token(USER_A, &token);
+
+    let map = state
+        .dog_map_service
+        .save_upload(
+            UploadMapRequest {
+                id: None,
+                map_name: "园区地图".to_string(),
+                map_type: Some("离线地图".to_string()),
+                park_id: None,
+                remarks: None,
+            },
+            "park-map.zip",
+            &sample_map_zip(),
+            &upload_root,
+            &owner_scope(USER_A),
+        )
+        .await
+        .expect("map package should be stored");
+
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/dogMap/{}/image", map.id))
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = create_router(state).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = body_json(response).await;
+    assert_eq!(body["code"], 10200);
+    assert!(
+        body["data"]["image"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,")
+    );
+    assert_eq!(body["data"]["width"], 4);
+    assert_eq!(body["data"]["height"], 3);
+    assert_eq!(body["data"]["origin"][0], -8.7);
+
+    std::fs::remove_dir_all(&upload_root).ok();
+}

@@ -28,10 +28,11 @@ const {
   columns,
   queryFields,
   moreQueryFields,
-  modelOptions,
+  mapOptions,
   onSearch,
   handleUpdate,
   handleDelete,
+  designRoute,
   handleSizeChange,
   handleCurrentChange,
   handleSelectionChange,
@@ -123,6 +124,7 @@ const {
                       type="primary"
                       :size="size"
                       :icon="useRenderIcon(DropperLine)"
+                      @click="designRoute(row)"
                     >
                       设计路线
                     </el-button>
@@ -177,15 +179,15 @@ const {
             placeholder="请输入路线描述"
           />
         </el-form-item>
-        <el-form-item label="关联模型" prop="modelId">
+        <el-form-item label="关联地图" prop="modelId">
           <el-select
             v-model="addForm.modelId"
-            placeholder="请选择模型"
+            placeholder="请选择地图"
             clearable
             style="width: 100%"
           >
             <el-option
-              v-for="opt in modelOptions"
+              v-for="opt in mapOptions"
               :key="opt.value"
               :label="opt.label"
               :value="opt.value"

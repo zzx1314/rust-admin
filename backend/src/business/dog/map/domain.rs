@@ -64,8 +64,7 @@ pub struct MapPageQuery {
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct MapVO {
-    pub id: i64,
+pub struct MapVO {    pub id: i64,
     pub map_name: String,
     pub map_type: Option<String>,
     pub map_data: Option<String>,
@@ -78,6 +77,22 @@ pub struct MapVO {
     pub remarks: Option<String>,
     pub create_time: String,
     pub update_time: Option<String>,
+}
+
+/// 地图包解析结果：用于路线规划页展示栅格地图
+///
+/// 地图包与参考实现保持一致：`.zip` 内为 ROS map_server 格式的
+/// `model.pgm` + `model.yaml`。这里把 `pgm` 转成 `png` 并返回 base64，
+/// 同时带回 `resolution` / `origin`，前端据此做像素↔世界坐标换算。
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MapImageVO {
+    /// `data:image/png;base64,...`
+    pub image: String,
+    pub resolution: f64,
+    pub origin: Vec<f64>,
+    pub width: u32,
+    pub height: u32,
 }
 
 impl From<DogMap> for MapVO {

@@ -8,11 +8,15 @@ import {
   dogRouteDelete
 } from "@/api/dogRoute";
 import { dogMapGetAll } from "@/api/dogMap";
+import { useRouter } from "vue-router";
+import { useMultiTagsStoreHook } from "@/store/modules/multiTags";
 import { CREATE_TIME_FIELDS, type DogSearchField } from "../components/search";
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
 
 export function useDogRoute() {
+  // useRouter 必须在 setup 作用域调用，否则返回 undefined
+  const router = useRouter();
   const rules = reactive<FormRules>({
     routeName: [{ required: true, message: "名称必填", trigger: "blur" }],
     routeType: [{ required: true, message: "路线类型必填", trigger: "change" }]
@@ -62,6 +66,15 @@ export function useDogRoute() {
       )
     },
     { label: "路线描述", prop: "routeDescription", minWidth: 120 },
+    {
+      label: "关联地图",
+      prop: "modelId",
+      width: 100,
+      cellRenderer: ({ row }) => {
+        const map = mapOptions.value.find(m => m.value === row.modelId);
+        return map ? map.label : row.modelId;
+      }
+    },
     { label: "路线数据", prop: "routeData", minWidth: 150 },
     { label: "创建时间", prop: "createTime", width: 180 },
     { label: "操作", fixed: "right", width: 220, slot: "operation" }
@@ -254,6 +267,37 @@ export function useDogRoute() {
     if (formEl) nextTick(() => formEl.formInstance?.clearValidate());
   }
 
+  function designRoute(row) {
+    const payload = {
+      id: row.id,
+      name: row.routeName,
+      type: row.routeType || ""
+    };
+    // 标签页点击时 query 会丢失，用 sessionStorage 兼带一份上下文（只存 id 等短字段）
+    sessionStorage.setItem(
+      "dog-route-planning",
+      JSON.stringify({
+        id: row.id,
+        name: row.routeName,
+        type: row.routeType || ""
+      })
+    );
+    const query = {
+      id: String(row.id),
+      name: payload.name,
+      type: payload.type
+    };
+    useMultiTagsStoreHook().handleTags("push", {
+      path: "/dog/route/planning/index",
+      query,
+      meta: {
+        title: `${row.routeName} - 路线规划`,
+        dynamicLevel: 3
+      }
+    });
+    router.push({ path: "/dog/route/planning/index", query });
+  }
+
   function loadMapOptions() {
     dogMapGetAll().then(res => {
       if (res.code === SUCCESS && res.data) {
@@ -293,6 +337,7 @@ export function useDogRoute() {
     handleSelectionChange,
     handleSubmit,
     cancel,
-    openDia
+    openDia,
+    designRoute
   };
 }

@@ -62,6 +62,30 @@ const AccountSettingsRoute: RouteRecordRaw = {
   ]
 };
 
+/** 路线规划：固定静态路由，隐藏于菜单（直接注册，不依赖 glob 编译新文件） */
+const DogRoutePlanningRoute: RouteRecordRaw = {
+  path: "/dog/route/planning",
+  name: "DogRoutePlanning",
+  component: () => import("@/layout/index.vue"),
+  redirect: "/dog/route/planning/index",
+  meta: {
+    title: "路线规划",
+    showLink: false,
+    rank: 99
+  },
+  children: [
+    {
+      path: "/dog/route/planning/index",
+      name: "DogRoutePlanningIndex",
+      component: () => import("@/views/dog/route/planning.vue"),
+      meta: {
+        title: "路线规划",
+        showLink: false
+      }
+    }
+  ]
+};
+
 /** 原始静态路由（未做任何处理） */
 const routes = [];
 
@@ -70,6 +94,7 @@ Object.keys(modules).forEach(key => {
 });
 
 routes.push(AccountSettingsRoute);
+routes.push(DogRoutePlanningRoute);
 
 /** 导出处理后的静态路由（三级及以上的路由全部拍成二级） */
 export const constantRoutes: Array<RouteRecordRaw> = formatTwoStageRoutes(

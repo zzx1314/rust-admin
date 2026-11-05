@@ -32,6 +32,9 @@ tracing = "0.1"
 urlencoding = "2.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+# 地图包（.zip 内含 model.pgm + model.yaml）解析与转换
+zip = "2"
+image = { version = "0.25", default-features = false, features = ["png", "pnm"] }
 
 [dev-dependencies]
 axum-test = "18"
