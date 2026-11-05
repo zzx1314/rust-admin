@@ -56,6 +56,8 @@ import RiImageLine from "~icons/ri/image-line?raw";
 import RiSettings4Line from "~icons/ri/settings-4-line?raw";
 import RiServerLine from "~icons/ri/server-line?raw";
 import RiFlowChart from "~icons/ri/flow-chart?raw";
+import RiBuilding2Line from "~icons/ri/building-2-line?raw";
+import RiMap2Line from "~icons/ri/map-2-line?raw";
 import RiClapperboardAiLine from "~icons/ri/clapperboard-ai-line?raw";
 import DeviconPlainGithubcopilot from "~icons/devicon-plain/githubcopilot?raw";
 
@@ -114,6 +116,8 @@ const icons = [
   ["ri/settings-4-line", RiSettings4Line],
   ["ri/server-line", RiServerLine],
   ["ri/flow-chart", RiFlowChart],
+  ["ri/building-2-line", RiBuilding2Line],
+  ["ri/map-2-line", RiMap2Line],
   ["ri/clapperboard-ai-line", RiClapperboardAiLine],
   ["devicon/githubcopilot", DeviconPlainGithubcopilot]
 ];

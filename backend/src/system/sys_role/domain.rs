@@ -4,6 +4,10 @@ use crate::system::sys_role::entity::Model as RoleModel;
 use sea_orm::ActiveValue;
 use serde::{Deserialize, Serialize};
 
+/// Role code of the built-in system administrator (seeded role id 1).
+/// Users holding this role bypass business data scope filtering.
+pub const ADMIN_ROLE_CODE: &str = "110";
+
 pub type Role = RoleModel;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

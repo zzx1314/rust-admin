@@ -95,6 +95,7 @@ Authorization: Bearer <access_token>
 - 时间字段在响应中统一为 **北京时间** 字符串 `YYYY-MM-DD HH:mm:ss`；查询条件 `beginTime` / `endTime` 也按北京时间解析（`YYYY-MM-DD` 或 `YYYY-MM-DD HH:mm:ss`，结束时间会自动补到当天 23:59:59）。
 - 分页参数为 `current`（从 1 开始）与 `size`，默认 `1` / `10`。
 - 主键 `id` 在创建时由服务端生成，客户端无需传入。
+- 园区 / 地图 / 任务按创建者做数据隔离：普通用户只能读写 `userId = 当前用户` 的记录（详情 / 修改 / 删除他人数据返回 404）；管理员（角色编码 `110`）不受限制。`userId` 由服务端从 token 写入，请求体传了也会被忽略。
 
 ---
 
@@ -265,6 +266,33 @@ WebSocket 报文：
 - 单条上传流上限 256 MiB，超过会被丢弃；文件名会被清洗（去掉目录与特殊字符）。
 - 连接表保存在后端进程内存中，网关按单实例部署；多副本需要引入共享总线。
 - 设备端实现见仓库 `client/`（`dog-device-client`，`client/README.md`），端到端验证见 `backend/tests/business/dog_gateway_tests.rs`。
+
+---
+
+### 4.12 园区 `/api/dogPark`
+
+| 接口 | 方法 | 说明 |
+| ---- | ---- | ---- |
+| `/api/dogPark/getPage` | GET | `parkName`（模糊）、`current`、`size` |
+| `/api/dogPark/getAll` | GET | 全量列表（仅当前用户可见范围） |
+| `/api/dogPark` | POST | 新增，`parkName` 必填；`parkDescription`、`parkAddress` 可选 |
+| `/api/dogPark/{id}` | GET / PUT / DELETE | 详情 / 修改 / 软删除 |
+
+响应字段：`id`、`parkName`、`parkDescription`、`parkAddress`、`userId`、`createTime`、`updateTime`。
+
+---
+
+### 4.13 地图 `/api/dogMap`
+
+| 接口 | 方法 | 说明 |
+| ---- | ---- | ---- |
+| `/api/dogMap/getPage` | GET | `mapName`（模糊）、`parkId`、`current`、`size` |
+| `/api/dogMap/getAll` | GET | 全量列表（仅当前用户可见范围） |
+| `/api/dogMap` | POST | 新增，`mapName`、`parkId` 必填；`mapType`、`mapData` 可选 |
+| `/api/dogMap/{id}` | GET / PUT / DELETE | 详情 / 修改 / 软删除 |
+
+- `parkId` 必须是当前用户可访问的园区，否则返回 400。
+- 响应字段：`id`、`mapName`、`mapType`、`mapData`、`parkId`、`userId`、`createTime`、`updateTime`。
 
 ## 5. 调用示例
 

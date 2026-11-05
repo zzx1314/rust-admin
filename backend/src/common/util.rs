@@ -147,3 +147,28 @@ pub fn encrypt_password(plain_text: &str) -> String {
 
     BASE64.encode(ct)
 }
+
+/// Monotonic, collision-free id generator used by business services.
+///
+/// Milliseconds since the epoch alone collides when two rows are created in
+/// the same millisecond, so the value is advanced atomically instead.
+pub fn generate_id() -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static LAST_ID: AtomicI64 = AtomicI64::new(0);
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    let mut last = LAST_ID.load(Ordering::Relaxed);
+    loop {
+        let next = now_ms.max(last + 1);
+        match LAST_ID.compare_exchange_weak(last, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return next,
+            Err(current) => last = current,
+        }
+    }
+}

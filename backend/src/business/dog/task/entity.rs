@@ -21,6 +21,8 @@ pub struct Model {
     pub device_id: Option<i64>,
     #[sea_orm(column_name = "route_id", column_type = "Integer", nullable)]
     pub route_id: Option<i64>,
+    #[sea_orm(column_name = "user_id", column_type = "Integer", nullable)]
+    pub user_id: Option<i64>,
     #[sea_orm(column_name = "create_time", column_type = "Timestamp")]
     pub create_time: DateTime<Utc>,
     #[sea_orm(column_name = "update_time", column_type = "Timestamp", nullable)]

@@ -2,8 +2,10 @@ use crate::business::dog::command::service::DogCommandService;
 use crate::business::dog::config::service::DogConfigService;
 use crate::business::dog::device::service::DogDeviceService;
 use crate::business::dog::gateway::DogGateway;
+use crate::business::dog::map::service::DogMapService;
 use crate::business::dog::media::service::DogMediaService;
 use crate::business::dog::model::service::DogModelService;
+use crate::business::dog::park::service::DogParkService;
 use crate::business::dog::route_library::service::DogRouteLibraryService;
 use crate::business::dog::services::service::DogServicesService;
 use crate::business::dog::statistics::service::DogStatisticsService;
@@ -36,6 +38,8 @@ pub struct AppState {
     pub sys_log_service: Arc<SysLogService>,
     pub dog_device_service: Arc<DogDeviceService>,
     pub dog_task_service: Arc<DogTaskService>,
+    pub dog_park_service: Arc<DogParkService>,
+    pub dog_map_service: Arc<DogMapService>,
     pub dog_media_service: Arc<DogMediaService>,
     pub dog_model_service: Arc<DogModelService>,
     pub dog_config_service: Arc<DogConfigService>,

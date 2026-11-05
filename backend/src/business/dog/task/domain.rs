@@ -36,6 +36,7 @@ pub struct TaskPageQuery {
     pub task_name: Option<String>,
     pub task_status: Option<String>,
     pub device_id: Option<i64>,
+    pub user_id: Option<i64>,
     #[serde(default = "default_current")]
     pub current: i64,
     #[serde(default = "default_size")]
@@ -53,6 +54,7 @@ pub struct TaskVO {
     pub workflow_uuid: Option<String>,
     pub device_id: Option<i64>,
     pub route_id: Option<i64>,
+    pub user_id: Option<i64>,
     pub create_time: String,
     pub update_time: Option<String>,
 }
@@ -68,6 +70,7 @@ impl From<DogTask> for TaskVO {
             workflow_uuid: t.workflow_uuid,
             device_id: t.device_id,
             route_id: t.route_id,
+            user_id: t.user_id,
             create_time: format_datetime(t.create_time),
             update_time: t.update_time.map(format_datetime),
         }
@@ -75,7 +78,12 @@ impl From<DogTask> for TaskVO {
 }
 
 impl CreateTaskRequest {
-    pub fn to_active_model(&self, id: i64, now: DateTime<Utc>) -> TaskActiveModel {
+    pub fn to_active_model(
+        &self,
+        id: i64,
+        now: DateTime<Utc>,
+        user_id: Option<i64>,
+    ) -> TaskActiveModel {
         TaskActiveModel {
             id: ActiveValue::set(id),
             task_name: ActiveValue::set(self.task_name.clone()),
@@ -89,6 +97,7 @@ impl CreateTaskRequest {
             workflow_uuid: ActiveValue::set(self.workflow_uuid.clone()),
             device_id: ActiveValue::set(self.device_id),
             route_id: ActiveValue::set(self.route_id),
+            user_id: ActiveValue::set(user_id),
             create_time: ActiveValue::set(now),
             update_time: ActiveValue::set(Some(now)),
             is_deleted: ActiveValue::set(0),

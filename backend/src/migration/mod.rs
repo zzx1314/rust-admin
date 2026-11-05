@@ -295,6 +295,9 @@ mod tests {
                 "create_dog_tables",
                 "remove_harbor_menus",
                 "add_dog_menus",
+                "add_park_map_tables",
+                "add_task_user_scope",
+                "add_park_map_menus",
             ]
         );
         assert_eq!(migrations[0].name(), "p_sys_tables_from_file");
@@ -308,7 +311,13 @@ mod tests {
             .await
             .unwrap();
 
-        for table in ["p_sys_user", "p_sys_logrecord", "dog_device"] {
+        for table in [
+            "p_sys_user",
+            "p_sys_logrecord",
+            "dog_device",
+            "dog_park",
+            "dog_map",
+        ] {
             let statement = Statement::from_string(
                 DbBackend::Sqlite,
                 format!(
@@ -325,6 +334,12 @@ mod tests {
         );
         assert!(connection.query_one(is_edit).await.unwrap().is_some());
 
+        let task_user_id = Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT 1 FROM pragma_table_info('dog_task') WHERE name = 'user_id'",
+        );
+        assert!(connection.query_one(task_user_id).await.unwrap().is_some());
+
         // The dog menu tree must be registered and linked to the admin role,
         // and the dangling Harbor menus must be soft-deleted.
         let dog_menu = Statement::from_string(
@@ -338,6 +353,24 @@ mod tests {
             "SELECT 1 FROM p_sys_role_menu WHERE role_id = 1 AND menu_id = 1201",
         );
         assert!(connection.query_one(dog_menu_role).await.unwrap().is_some());
+
+        let park_menu = Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT 1 FROM p_sys_menu WHERE id = 1301 AND is_deleted = 0",
+        );
+        assert!(connection.query_one(park_menu).await.unwrap().is_some());
+
+        let park_menu_role = Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT 1 FROM p_sys_role_menu WHERE role_id = 1 AND menu_id = 1302",
+        );
+        assert!(
+            connection
+                .query_one(park_menu_role)
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         let harbor_menu = Statement::from_string(
             DbBackend::Sqlite,

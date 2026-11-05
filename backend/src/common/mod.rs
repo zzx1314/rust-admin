@@ -1,4 +1,5 @@
 pub mod base;
+pub mod data_scope;
 pub mod error;
 pub mod pagination;
 pub mod sqlite;

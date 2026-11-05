@@ -30,6 +30,7 @@ export function useDogTask() {
     { label: "工作流ID", prop: "workflowId", width: 100 },
     { label: "设备ID", prop: "deviceId", width: 100 },
     { label: "路线ID", prop: "routeId", width: 100 },
+    { label: "所属用户ID", prop: "userId", width: 120 },
     { label: "创建时间", prop: "createTime", width: 180 },
     { label: "操作", fixed: "right", width: 180, slot: "operation" }
   ];

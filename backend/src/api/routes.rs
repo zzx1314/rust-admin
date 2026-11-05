@@ -11,8 +11,10 @@ use crate::business::dog::command::handlers as dog_command_handlers;
 use crate::business::dog::config::handlers as dog_config_handlers;
 use crate::business::dog::device::handlers as dog_device_handlers;
 use crate::business::dog::gateway::handlers as dog_gateway_handlers;
+use crate::business::dog::map::handlers as dog_map_handlers;
 use crate::business::dog::media::handlers as dog_media_handlers;
 use crate::business::dog::model::handlers as dog_model_handlers;
+use crate::business::dog::park::handlers as dog_park_handlers;
 use crate::business::dog::route_library::handlers as dog_route_handlers;
 use crate::business::dog::services::handlers as dog_services_handlers;
 use crate::business::dog::statistics::handlers as dog_statistics_handlers;
@@ -281,6 +283,43 @@ pub fn dog_task_routes(state: AppState) -> Router<AppState> {
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 
+pub fn dog_park_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route(
+            "/dogPark/getPage",
+            get(dog_park_handlers::list_parks_handler),
+        )
+        .route(
+            "/dogPark/getAll",
+            get(dog_park_handlers::list_all_parks_handler),
+        )
+        .route("/dogPark", post(dog_park_handlers::create_park_handler))
+        .route(
+            "/dogPark/{id}",
+            get(dog_park_handlers::get_park_handler)
+                .put(dog_park_handlers::update_park_handler)
+                .delete(dog_park_handlers::delete_park_handler),
+        )
+        .layer(from_fn_with_state(state.clone(), require_auth))
+}
+
+pub fn dog_map_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/dogMap/getPage", get(dog_map_handlers::list_maps_handler))
+        .route(
+            "/dogMap/getAll",
+            get(dog_map_handlers::list_all_maps_handler),
+        )
+        .route("/dogMap", post(dog_map_handlers::create_map_handler))
+        .route(
+            "/dogMap/{id}",
+            get(dog_map_handlers::get_map_handler)
+                .put(dog_map_handlers::update_map_handler)
+                .delete(dog_map_handlers::delete_map_handler),
+        )
+        .layer(from_fn_with_state(state.clone(), require_auth))
+}
+
 pub fn dog_media_routes(state: AppState) -> Router<AppState> {
     Router::new()
         .route(
@@ -496,6 +535,8 @@ pub fn create_router(state: AppState) -> Router {
         .merge(sys_log_routes(state.clone()))
         .merge(dog_device_routes(state.clone()))
         .merge(dog_task_routes(state.clone()))
+        .merge(dog_park_routes(state.clone()))
+        .merge(dog_map_routes(state.clone()))
         .merge(dog_media_routes(state.clone()))
         .merge(dog_model_routes(state.clone()))
         .merge(dog_config_routes(state.clone()))

@@ -1,6 +1,6 @@
 # 机器狗业务模块（dog）
 
-本仓库的后端业务域已从早期的「应用商店 / Harbor 镜像审核」整体替换为 **机器狗（dog）业务模块**：设备档案、任务、路线、模型、媒体、指令、参数配置、服务与工作流的增删改查，以及首页统计。
+本仓库的后端业务域已从早期的「应用商店 / Harbor 镜像审核」整体替换为 **机器狗（dog）业务模块**：园区、地图、设备档案、任务、路线、模型、媒体、指令、参数配置、服务与工作流的增删改查，以及首页统计。
 
 > 历史说明：`business/harbor`、`business/app_review`、`/api/harbor/**`、`/api/appReviews/**`、`/api/webhooks/harbor`、`/api/deploy/config` 及前端 `views/harbor`、`api/harbor.ts`、`api/appReview.ts` 均已删除，配置中的 `[harbor]` 段也不再被读取。
 
@@ -10,14 +10,14 @@
 
 | 层 | 位置 |
 | --- | --- |
-| 后端业务代码 | `backend/src/business/dog/{device,task,media,model,config,command,route_library,services,workflow,statistics}/` |
+| 后端业务代码 | `backend/src/business/dog/{park,map,device,task,media,model,config,command,route_library,services,workflow,statistics}/` |
 | 设备接入网关 | `backend/src/business/dog/gateway/`（设备 token、注册、WebSocket、任务下发、文件上传、结果回写） |
 | 设备端客户端 | `client/`（Rust crate `dog-device-client`，见 `client/README.md`） |
-| 通信端到端测试 | `backend/tests/business/dog_gateway_tests.rs` |
+| 通信端到端测试 | `backend/tests/business/dog_gateway_tests.rs`、`dog_data_scope_tests.rs`（数据权限） |
 | 后端路由 | `backend/src/api/routes.rs`（每个子域一个 `dog_*_routes`，统一挂 `require_auth`） |
 | 服务装配 | `backend/src/app.rs` → `App::build_state_with_token_store` |
-| 数据库迁移 | `backend/migrations/dog/7_create_dog_tables.sql`（建表）、`backend/migrations/p_sys/9_add_dog_menus.sql`（菜单） |
-| 前端页面 | `frontend/src/views/dog/{device,task,route,model,media,command,config,services,workflow}/` |
+| 数据库迁移 | `backend/migrations/dog/7_create_dog_tables.sql`（建表）、`10_add_park_map_tables.sql`、`11_add_task_user_scope.sql`、`backend/migrations/p_sys/9_add_dog_menus.sql` / `12_add_park_map_menus.sql`（菜单） |
+| 前端页面 | `frontend/src/views/dog/{park,map,device,task,route,model,media,command,config,services,workflow}/` |
 | 前端请求封装 | `frontend/src/api/dog*.ts` |
 | 首页仪表盘 | `frontend/src/views/welcome/index.vue` + `frontend/src/api/dogStatistics.ts` |
 | 在线手册 | `frontend/src/views/manual/admin.md`（管理员）、`developer.md`（接口对接） |
@@ -31,7 +31,9 @@
 | 表 | 说明 | 关键字段 |
 | --- | --- | --- |
 | `dog_device` | 设备 | `device_id`、`device_type`、`status`(默认 `offline`)、`device_ip`、`model`、`speed`、`height`、`battery`、`course`、`location`、`comm_time` |
-| `dog_task` | 任务 | `task_name`、`task_description`、`task_status`(默认 `pending`)、`workflow_id`、`workflow_uuid`、`device_id`、`route_id` |
+| `dog_park` | 园区 | `park_name`、`park_description`、`park_address`、`user_id`(创建者) |
+| `dog_map` | 地图 | `map_name`、`map_type`、`map_data`、`park_id`(所属园区)、`user_id`(创建者) |
+| `dog_task` | 任务 | `task_name`、`task_description`、`task_status`(默认 `pending`)、`workflow_id`、`workflow_uuid`、`device_id`、`route_id`、`user_id`(创建者) |
 | `dog_route_library` | 路线 | `route_name`、`route_type`、`route_status`、`route_description`、`model_id`(NOT NULL)、`route_data` |
 | `dog_model` | 模型 | `model_name`、`model_type`、`file_name`、`file_path`、`file_format`、`file_size`、`remarks` |
 | `dog_media` | 媒体 | `media_name`、`media_type`、`media_path`、`media_size`、`remarks` |
@@ -72,9 +74,27 @@ POST   /api/dogGateway/disconnect/{deviceId}  主动断开设备（客户端自�
 GET    /api/dogGateway/connections            当前在线设备
 ```
 
-- `module` ∈ `dogDevice`、`dogTask`、`dogMedia`、`dogModel`、`dogConfig`、`dogCommand`、`dogRoute`、`dogServices`、`dogWorkflow`。
+- `module` ∈ `dogDevice`、`dogTask`、`dogPark`、`dogMap`、`dogMedia`、`dogModel`、`dogConfig`、`dogCommand`、`dogRoute`、`dogServices`、`dogWorkflow`。
 - 除 `/api/dogServices`（只有全量）与 `/api/dogWorkflow`（无列表）外，其余模块均提供 `getPage` + `getAll`。
 - 统计接口同样需要登录（`require_auth`）。
+
+---
+
+## 3.1 数据权限（园区 / 地图 / 任务）
+
+`dog_park`、`dog_map`、`dog_task` 带 `user_id`，按“谁创建谁可见”做行级隔离：
+
+| 操作 | 普通用户 | 管理员 |
+| --- | --- | --- |
+| 新增 | `user_id` 由服务端从 JWT 写入（忽略请求体） | 同左 |
+| 列表 / 全量 | 仅 `user_id = 当前用户` | 全部 |
+| 详情 / 修改 / 删除 | 仅本人数据，否则返回 404 | 全部 |
+| 地图关联园区 | 只能把地图挂到自己的园区，否则 400 | 任意园区 |
+| 首页任务数量 | 仅统计本人任务 | 全部任务 |
+
+管理员判定：用户拥有内置角色 `p_sys_role.code = '110'`（`sysadm`，种子角色 id 1）。判定在 `require_auth` 中完成，`RequestUser { user_id, username, is_admin }` 同时写入请求与响应 extensions（handler 用 `Extension<RequestUser>` 取，审计日志从响应用）。
+
+`DataScope`（`common/data_scope.rs`）是统一的过滤载体：`owner_filter()` 对管理员返回 `None`，对普通用户返回 `Some(user_id)`。设备 / 路线 / 模型 / 媒体 / 指令等表暂无归属字段，仍为全局可见，后续需要时按同样方式补 `user_id`。
 
 ---
 
@@ -84,7 +104,7 @@ GET    /api/dogGateway/connections            当前在线设备
 - **响应**：`{ code: 10200, msg: "success", data }`；分页 `data` 为 `{ records, total, current, size }`。
 - **字段命名**：请求/响应使用小驼峰（登录接口 `/api/token` 例外，为 snake_case）。
 - **时间**：数据库存 UTC，响应统一转北京时间（UTC+8）字符串；查询区间按北京时间解析。
-- **主键生成**：与系统模块保持一致，使用毫秒时间戳；如需批量导入请自行指定/规避同一毫秒。
+- **主键生成**：系统模块沿用毫秒时间戳；dog 业务统一使用 `common::util::generate_id()`（毫秒 + 原子递增），避免同一毫秒内创建多行时主键冲突。
 - **设备 ID**：由设备端从硬件信息派生（板级序列号 / eMMC CID / DMI UUID / 物理 MAC，兜底 `/etc/machine-id`），注册时通过 `deviceIdSource` 上报来源；也可用 `--device-id` 覆盖。Ubuntu 上 `sysfs` 的序列号/eMMC CID/DMI 标识默认仅 root 可读（`--explain-device-id` 可查看每个来源的状态），建议以 systemd 服务运行并配合 `--device-id-file` 固定首次检测结果。详见 `client/README.md`。
 - **设备接入**：设备先取 token（`GET /api/dogGateway/auth/{deviceId}`），再注册（`dog_device` 初始 `offline`），随后连 `WS /api/notice/{deviceId}/{token}`；心跳会把 `status` 置为 `online` 并刷新 `comm_time` 与遥测字段；WebSocket 断开（正常关闭或连接异常）时置回 `offline`。
 - **任务下发**：管理端 `POST /api/dogCommand` 创建指令后，若目标设备在线则立即通过 WebSocket 推送并把指令状态置为 `sent`；设备回报后写回 `status`/`return_value`。也可用 `POST /api/dogGateway/dispatch` 推送自定义 JSON。
@@ -107,4 +127,6 @@ GET    /api/dogGateway/connections            当前在线设备
 | 设备通信 | 已实现 WebSocket 网关（心跳/任务/结果/文件/断线重连）；尚未迁移旧 C 客户端的 TCP:9000 文件帧通道与其他 MQTT 接入方式 |
 | 离线指令重放 | 断线期间已下发未回报的指令保留在 `sent` 状态，不会自动重发（避免重复执行） |
 | 网关多实例 | 连接表在进程内存中，多副本部署时设备只会连到其中一个实例 |
+| 数据权限范围 | 目前仅 `dog_park` / `dog_map` / `dog_task` 按创建者隔离；设备、路线、模型、媒体、指令仍全局可见 |
+| 历史任务归属 | 迁移只新增 `user_id` 列，历史任务保持 `NULL`，仅管理员可见，需要时手工回填 |
 | 按钮级权限 | 已初始化 `dog_*_find` 权限码并挂到超级管理员角色，但页面暂未使用 `v-auth` 做按钮控制 |

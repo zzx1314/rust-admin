@@ -4,6 +4,7 @@ use crate::business::dog::media::repository::SeaOrmDogMediaRepository;
 use crate::business::dog::model::repository::SeaOrmDogModelRepository;
 use crate::business::dog::route_library::repository::SeaOrmDogRouteLibraryRepository;
 use crate::business::dog::task::repository::SeaOrmDogTaskRepository;
+use crate::common::data_scope::DataScope;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -54,9 +55,12 @@ impl DogStatisticsService {
         }
     }
 
-    pub async fn get_all_statistics(&self) -> Result<Vec<StatisticsSummary>, sea_orm::DbErr> {
+    pub async fn get_all_statistics(
+        &self,
+        scope: &DataScope,
+    ) -> Result<Vec<StatisticsSummary>, sea_orm::DbErr> {
         let device_count = self.device_repo.count().await?;
-        let task_count = self.task_repo.find_all().await?.len() as i64;
+        let task_count = self.task_repo.find_all(scope).await?.len() as i64;
         let model_count = self.model_repo.find_all().await?.len() as i64;
         let route_count = self.route_repo.find_all().await?.len() as i64;
 

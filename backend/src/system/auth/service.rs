@@ -291,9 +291,10 @@ impl AuthService {
                 let lock_duration = chrono::Utc::now() - lock_time;
                 if lock_duration < chrono::Duration::minutes(max_lock_mins) {
                     let remaining = max_lock_mins - lock_duration.num_minutes();
-                    return Err(AppError::Unauthorized(
-                        format!("账户已被锁定，请{}分钟后再试", remaining.max(1)),
-                    ));
+                    return Err(AppError::Unauthorized(format!(
+                        "账户已被锁定，请{}分钟后再试",
+                        remaining.max(1)
+                    )));
                 }
                 let _ = self
                     .user_repo
@@ -503,9 +504,10 @@ impl AuthService {
                 let lock_duration = chrono::Utc::now() - lock_time;
                 if lock_duration < chrono::Duration::minutes(max_lock_mins) {
                     let remaining = max_lock_mins - lock_duration.num_minutes();
-                    return Err(AppError::Unauthorized(
-                        format!("账户已被锁定，请{}分钟后再试", remaining.max(1)),
-                    ));
+                    return Err(AppError::Unauthorized(format!(
+                        "账户已被锁定，请{}分钟后再试",
+                        remaining.max(1)
+                    )));
                 }
                 let _ = self
                     .user_repo
@@ -837,11 +839,7 @@ impl AuthService {
             .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
 
         self.token_store
-            .set_token(
-                &user_id.to_string(),
-                &new_access_token,
-                session_timeout,
-            )
+            .set_token(&user_id.to_string(), &new_access_token, session_timeout)
             .await?;
         self.token_store
             .set_refresh_token(
@@ -930,11 +928,7 @@ impl AuthService {
             .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
 
         self.token_store
-            .set_token(
-                &user_id.to_string(),
-                &new_access_token,
-                session_timeout,
-            )
+            .set_token(&user_id.to_string(), &new_access_token, session_timeout)
             .await?;
         self.token_store
             .set_refresh_token(
@@ -959,6 +953,20 @@ impl AuthService {
             .map_err(AppError::DatabaseErrorSeaOrm)?
             .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
         Ok(UserInfoVO::from_user(&user))
+    }
+
+    /// Returns `true` when the user holds the built-in administrator role.
+    pub async fn is_admin(&self, user_id: i64) -> Result<bool, AppError> {
+        let roles = self
+            .role_repo
+            .find_roles_by_user_id(&user_id)
+            .await
+            .map_err(AppError::DatabaseErrorSeaOrm)?;
+        Ok(roles.iter().any(|role| {
+            role.code
+                .as_deref()
+                .is_some_and(|code| code == crate::system::sys_role::domain::ADMIN_ROLE_CODE)
+        }))
     }
 
     pub async fn check_token(&self, token: &str) -> Result<CheckTokenVO, AppError> {

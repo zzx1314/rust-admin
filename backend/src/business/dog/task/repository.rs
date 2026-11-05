@@ -4,6 +4,7 @@ use crate::business::dog::task::entity::Column as TaskColumn;
 use crate::business::dog::task::entity::Entity as TaskEntity;
 use crate::business::dog::task::entity::Model as Task;
 use crate::common::base::{BaseRepository, order_desc};
+use crate::common::data_scope::DataScope;
 use sea_orm::{
     ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect,
@@ -28,9 +29,14 @@ impl BaseRepository for SeaOrmDogTaskRepository {
 }
 
 impl SeaOrmDogTaskRepository {
-    pub async fn create(&self, req: &CreateTaskRequest, id: i64) -> Result<Task, sea_orm::DbErr> {
+    pub async fn create(
+        &self,
+        req: &CreateTaskRequest,
+        id: i64,
+        scope: &DataScope,
+    ) -> Result<Task, sea_orm::DbErr> {
         let now = chrono::Utc::now();
-        let active_model = req.to_active_model(id, now);
+        let active_model = req.to_active_model(id, now, Some(scope.user_id()));
         TaskEntity::insert(active_model).exec(&*self.conn).await?;
         TaskEntity::find_by_id(id)
             .one(&*self.conn)
@@ -38,19 +44,30 @@ impl SeaOrmDogTaskRepository {
             .map(|r| r.unwrap())
     }
 
-    pub async fn find_by_id(&self, id: i64) -> Result<Option<Task>, sea_orm::DbErr> {
-        TaskEntity::find()
+    pub async fn find_by_id(
+        &self,
+        id: i64,
+        scope: &DataScope,
+    ) -> Result<Option<Task>, sea_orm::DbErr> {
+        let mut query = TaskEntity::find()
             .filter(TaskColumn::Id.eq(id))
-            .filter(TaskColumn::IsDeleted.eq(0))
-            .one(&*self.conn)
-            .await
+            .filter(TaskColumn::IsDeleted.eq(0));
+        if let Some(owner) = scope.owner_filter() {
+            query = query.filter(TaskColumn::UserId.eq(owner));
+        }
+        query.one(&*self.conn).await
     }
 
     pub async fn find_all_with_page(
         &self,
         query: &TaskPageQuery,
+        scope: &DataScope,
     ) -> Result<(Vec<Task>, i64), sea_orm::DbErr> {
-        let base_query = TaskEntity::find().filter(TaskColumn::IsDeleted.eq(0));
+        let mut base_query = TaskEntity::find().filter(TaskColumn::IsDeleted.eq(0));
+        if let Some(owner) = scope.owner_filter() {
+            base_query = base_query.filter(TaskColumn::UserId.eq(owner));
+        }
+
         let mut cond = Condition::all();
         if let Some(ref name) = query.task_name {
             cond = cond.add(TaskColumn::TaskName.contains(name.as_str()));
@@ -60,6 +77,9 @@ impl SeaOrmDogTaskRepository {
         }
         if let Some(device_id) = query.device_id {
             cond = cond.add(TaskColumn::DeviceId.eq(device_id));
+        }
+        if let Some(user_id) = query.user_id {
+            cond = cond.add(TaskColumn::UserId.eq(user_id));
         }
 
         let total = base_query
@@ -86,12 +106,9 @@ impl SeaOrmDogTaskRepository {
         &self,
         id: i64,
         req: &UpdateTaskRequest,
+        scope: &DataScope,
     ) -> Result<Option<Task>, sea_orm::DbErr> {
-        let entity = TaskEntity::find()
-            .filter(TaskColumn::Id.eq(id))
-            .filter(TaskColumn::IsDeleted.eq(0))
-            .one(&*self.conn)
-            .await?;
+        let entity = self.find_by_id(id, scope).await?;
 
         let entity = match entity {
             Some(e) => e,
@@ -122,44 +139,60 @@ impl SeaOrmDogTaskRepository {
         }
         active_model.update_time = ActiveValue::set(Some(chrono::Utc::now()));
 
-        TaskEntity::update(active_model).exec(&*self.conn).await?;
-        self.find_by_id(id).await
+        let mut update = TaskEntity::update(active_model).filter(TaskColumn::Id.eq(id));
+        if let Some(owner) = scope.owner_filter() {
+            update = update.filter(TaskColumn::UserId.eq(owner));
+        }
+        update.exec(&*self.conn).await?;
+        self.find_by_id(id, scope).await
     }
 
     pub async fn update_status(
         &self,
         id: i64,
         status: &str,
+        scope: &DataScope,
     ) -> Result<Option<Task>, sea_orm::DbErr> {
-        let task = self.find_by_id(id).await?;
+        let task = self.find_by_id(id, scope).await?;
         if let Some(mut task) = task {
             task.task_status = status.to_string();
             task.update_time = Some(chrono::Utc::now());
             let mut active_model: TaskActiveModel = task.into();
             active_model.task_status = ActiveValue::Set(status.to_string());
-            TaskEntity::update(active_model).exec(&*self.conn).await?;
-            self.find_by_id(id).await
+            let mut update = TaskEntity::update(active_model).filter(TaskColumn::Id.eq(id));
+            if let Some(owner) = scope.owner_filter() {
+                update = update.filter(TaskColumn::UserId.eq(owner));
+            }
+            update.exec(&*self.conn).await?;
+            self.find_by_id(id, scope).await
         } else {
             Ok(None)
         }
     }
 
-    pub async fn find_all(&self) -> Result<Vec<Task>, sea_orm::DbErr> {
-        TaskEntity::find()
-            .filter(TaskColumn::IsDeleted.eq(0))
+    pub async fn find_all(&self, scope: &DataScope) -> Result<Vec<Task>, sea_orm::DbErr> {
+        let mut query = TaskEntity::find().filter(TaskColumn::IsDeleted.eq(0));
+        if let Some(owner) = scope.owner_filter() {
+            query = query.filter(TaskColumn::UserId.eq(owner));
+        }
+        query
             .order_by(TaskColumn::CreateTime, order_desc())
             .all(&*self.conn)
             .await
     }
 
-    pub async fn delete(&self, id: i64) -> Result<bool, sea_orm::DbErr> {
-        let task = self.find_by_id(id).await?;
+    pub async fn delete(&self, id: i64, scope: &DataScope) -> Result<bool, sea_orm::DbErr> {
+        let task = self.find_by_id(id, scope).await?;
         if let Some(mut task) = task {
             task.is_deleted = 1;
             task.update_time = Some(chrono::Utc::now());
             let mut active_model: TaskActiveModel = task.into();
             active_model.is_deleted = ActiveValue::Set(1);
-            TaskEntity::update(active_model).exec(&*self.conn).await?;
+            let mut update = TaskEntity::update(active_model).filter(TaskColumn::Id.eq(id));
+            if let Some(owner) = scope.owner_filter() {
+                update = update.filter(TaskColumn::UserId.eq(owner));
+            }
+            update.exec(&*self.conn).await?;
             Ok(true)
         } else {
             Ok(false)

@@ -1,6 +1,7 @@
 use crate::api::AppState;
+use crate::api::middleware::RequestUser;
 use crate::common::error::AppError;
-use axum::{Json, extract::State};
+use axum::{Extension, Json, extract::State};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -22,10 +23,11 @@ impl<T: Serialize> StatisticsResponse<T> {
 
 pub async fn statistics_all_handler(
     State(state): State<AppState>,
+    Extension(user): Extension<RequestUser>,
 ) -> Result<Json<StatisticsResponse<Vec<serde_json::Value>>>, AppError> {
     let stats = state
         .dog_statistics_service
-        .get_all_statistics()
+        .get_all_statistics(&user.data_scope())
         .await
         .map_err(AppError::DatabaseErrorSeaOrm)?;
 

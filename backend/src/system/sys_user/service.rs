@@ -205,9 +205,7 @@ impl UserService {
         if let (Some(old_pwd), Some(password_hash)) = (old_password, &user.password)
             && !crate::common::util::md5_verify(old_pwd, password_hash)
         {
-            return Err(AppError::BadRequest(
-                "旧密码不正确".to_string(),
-            ));
+            return Err(AppError::BadRequest("旧密码不正确".to_string()));
         }
 
         let decrypted = decrypt_password(new_password)

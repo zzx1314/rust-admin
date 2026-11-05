@@ -1,0 +1,162 @@
+use crate::business::dog::map::domain::{CreateMapRequest, MapPageQuery, UpdateMapRequest};
+use crate::business::dog::map::entity::ActiveModel as MapActiveModel;
+use crate::business::dog::map::entity::Column as MapColumn;
+use crate::business::dog::map::entity::Entity as MapEntity;
+use crate::business::dog::map::entity::Model as Map;
+use crate::common::base::{BaseRepository, order_desc};
+use crate::common::data_scope::DataScope;
+use sea_orm::{
+    ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect,
+};
+use std::sync::Arc;
+
+#[derive(Clone)]
+pub struct SeaOrmDogMapRepository {
+    conn: Arc<DatabaseConnection>,
+}
+
+impl SeaOrmDogMapRepository {
+    pub fn new(conn: Arc<DatabaseConnection>) -> Self {
+        Self { conn }
+    }
+
+    pub async fn create(
+        &self,
+        req: &CreateMapRequest,
+        id: i64,
+        scope: &DataScope,
+    ) -> Result<Map, sea_orm::DbErr> {
+        let now = chrono::Utc::now();
+        let active_model = req.to_active_model(id, scope.user_id(), now);
+        MapEntity::insert(active_model).exec(&*self.conn).await?;
+        MapEntity::find_by_id(id)
+            .one(&*self.conn)
+            .await
+            .map(|r| r.unwrap())
+    }
+
+    pub async fn find_by_id(
+        &self,
+        id: i64,
+        scope: &DataScope,
+    ) -> Result<Option<Map>, sea_orm::DbErr> {
+        let mut query = MapEntity::find()
+            .filter(MapColumn::Id.eq(id))
+            .filter(MapColumn::IsDeleted.eq(0));
+        if let Some(owner) = scope.owner_filter() {
+            query = query.filter(MapColumn::UserId.eq(owner));
+        }
+        query.one(&*self.conn).await
+    }
+
+    pub async fn find_all_with_page(
+        &self,
+        query: &MapPageQuery,
+        scope: &DataScope,
+    ) -> Result<(Vec<Map>, i64), sea_orm::DbErr> {
+        let mut base_query = MapEntity::find().filter(MapColumn::IsDeleted.eq(0));
+        if let Some(owner) = scope.owner_filter() {
+            base_query = base_query.filter(MapColumn::UserId.eq(owner));
+        }
+
+        let mut cond = Condition::all();
+        if let Some(ref map_name) = query.map_name {
+            cond = cond.add(MapColumn::MapName.contains(map_name.as_str()));
+        }
+        if let Some(park_id) = query.park_id {
+            cond = cond.add(MapColumn::ParkId.eq(park_id));
+        }
+
+        let total = base_query
+            .clone()
+            .filter(cond.clone())
+            .count(&*self.conn)
+            .await?;
+
+        let current = query.current.max(1);
+        let size = query.size.max(1);
+        let offset = (current - 1) * size;
+
+        let records = base_query
+            .filter(cond)
+            .order_by(MapColumn::CreateTime, order_desc())
+            .offset(Some(offset as u64))
+            .limit(size as u64)
+            .all(&*self.conn)
+            .await?;
+
+        Ok((records, total as i64))
+    }
+
+    pub async fn find_all(&self, scope: &DataScope) -> Result<Vec<Map>, sea_orm::DbErr> {
+        let mut query = MapEntity::find().filter(MapColumn::IsDeleted.eq(0));
+        if let Some(owner) = scope.owner_filter() {
+            query = query.filter(MapColumn::UserId.eq(owner));
+        }
+        query
+            .order_by(MapColumn::CreateTime, order_desc())
+            .all(&*self.conn)
+            .await
+    }
+
+    pub async fn update(
+        &self,
+        id: i64,
+        req: &UpdateMapRequest,
+        scope: &DataScope,
+    ) -> Result<Option<Map>, sea_orm::DbErr> {
+        let entity = self.find_by_id(id, scope).await?;
+        let entity = match entity {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+
+        let mut active_model: MapActiveModel = entity.into();
+        if let Some(map_name) = &req.map_name {
+            active_model.map_name = ActiveValue::set(map_name.clone());
+        }
+        if let Some(map_type) = &req.map_type {
+            active_model.map_type = ActiveValue::set(Some(map_type.clone()));
+        }
+        if let Some(map_data) = &req.map_data {
+            active_model.map_data = ActiveValue::set(Some(map_data.clone()));
+        }
+        if let Some(park_id) = req.park_id {
+            active_model.park_id = ActiveValue::set(park_id);
+        }
+        active_model.update_time = ActiveValue::set(Some(chrono::Utc::now()));
+
+        let mut update = MapEntity::update(active_model).filter(MapColumn::Id.eq(id));
+        if let Some(owner) = scope.owner_filter() {
+            update = update.filter(MapColumn::UserId.eq(owner));
+        }
+        update.exec(&*self.conn).await?;
+        self.find_by_id(id, scope).await
+    }
+
+    pub async fn delete(&self, id: i64, scope: &DataScope) -> Result<bool, sea_orm::DbErr> {
+        let map = self.find_by_id(id, scope).await?;
+        let map = match map {
+            Some(m) => m,
+            None => return Ok(false),
+        };
+
+        let mut active_model: MapActiveModel = map.into();
+        active_model.is_deleted = ActiveValue::set(1);
+        active_model.update_time = ActiveValue::set(Some(chrono::Utc::now()));
+
+        let mut update = MapEntity::update(active_model).filter(MapColumn::Id.eq(id));
+        if let Some(owner) = scope.owner_filter() {
+            update = update.filter(MapColumn::UserId.eq(owner));
+        }
+        update.exec(&*self.conn).await?;
+        Ok(true)
+    }
+}
+
+impl BaseRepository for SeaOrmDogMapRepository {
+    fn conn(&self) -> Arc<DatabaseConnection> {
+        self.conn.clone()
+    }
+}

@@ -11,12 +11,12 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use std::net::SocketAddr;
 use axum_extra::TypedHeader;
 use axum_extra::extract::CookieJar;
 use axum_extra::headers::Authorization;
 use axum_extra::headers::authorization::Bearer;
 use serde::Deserialize;
+use std::net::SocketAddr;
 
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
@@ -46,11 +46,14 @@ pub async fn login_handler(
 
     let username = login_data.username.clone();
     let user_id = login_data.user_id.expect("login must have user_id");
+    let is_admin = state.auth_service.is_admin(user_id).await?;
 
     let mut response = Json(login_data).into_response();
-    response
-        .extensions_mut()
-        .insert(RequestUser { user_id, username });
+    response.extensions_mut().insert(RequestUser {
+        user_id,
+        username,
+        is_admin,
+    });
     Ok(response)
 }
 
@@ -80,6 +83,7 @@ pub async fn logout_handler(
         .auth_service
         .extract_username(token)
         .unwrap_or_default();
+    let is_admin = state.auth_service.is_admin(user_id).await?;
     state.auth_service.logout(user_id).await?;
 
     let ip = client_ip_from_parts(&headers, Some(&addr));
@@ -122,8 +126,11 @@ pub async fn logout_handler(
     };
 
     let mut resp = (StatusCode::OK, jar, Json(response)).into_response();
-    resp.extensions_mut()
-        .insert(RequestUser { user_id, username });
+    resp.extensions_mut().insert(RequestUser {
+        user_id,
+        username,
+        is_admin,
+    });
     Ok(resp)
 }
 

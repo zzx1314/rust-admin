@@ -1,4 +1,9 @@
-use axum::{body::Body, extract::{ConnectInfo, Request}, middleware::Next, response::Response};
+use axum::{
+    body::Body,
+    extract::{ConnectInfo, Request},
+    middleware::Next,
+    response::Response,
+};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use std::net::SocketAddr;
@@ -515,8 +520,7 @@ mod tests {
 
     #[test]
     fn client_ip_uses_leftmost_x_forwarded_for() {
-        let request =
-            request_with_headers(&[("x-forwarded-for", "10.0.0.2, 10.0.0.3")]);
+        let request = request_with_headers(&[("x-forwarded-for", "10.0.0.2, 10.0.0.3")]);
         assert_eq!(client_ip(&request).as_deref(), Some("10.0.0.2"));
     }
 
