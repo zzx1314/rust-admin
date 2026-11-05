@@ -1,4 +1,10 @@
-use crate::business::dog::task::domain::{CreateTaskRequest, TaskPageQuery, UpdateTaskRequest};
+use crate::business::dog::device::entity::Column as DeviceColumn;
+use crate::business::dog::device::entity::Entity as DeviceEntity;
+use crate::business::dog::device::entity::Model as Device;
+use crate::business::dog::route_library::entity::Column as RouteColumn;
+use crate::business::dog::route_library::entity::Entity as RouteEntity;
+use crate::business::dog::route_library::entity::Model as RouteLibrary;
+use crate::business::dog::task::domain::{CreateTaskRequest, TaskPageQuery, TaskVO, UpdateTaskRequest};
 use crate::business::dog::task::entity::ActiveModel as TaskActiveModel;
 use crate::business::dog::task::entity::Column as TaskColumn;
 use crate::business::dog::task::entity::Entity as TaskEntity;
@@ -21,6 +27,10 @@ impl SeaOrmDogTaskRepository {
     pub fn new(conn: Arc<DatabaseConnection>) -> Self {
         Self { conn }
     }
+
+    pub fn conn_ref(&self) -> &Arc<DatabaseConnection> {
+        &self.conn
+    }
 }
 
 impl BaseRepository for SeaOrmDogTaskRepository {
@@ -30,6 +40,22 @@ impl BaseRepository for SeaOrmDogTaskRepository {
 }
 
 impl SeaOrmDogTaskRepository {
+    pub async fn find_device_by_id(&self, id: i64) -> Result<Option<Device>, sea_orm::DbErr> {
+        DeviceEntity::find()
+            .filter(DeviceColumn::Id.eq(id))
+            .filter(DeviceColumn::IsDeleted.eq(0))
+            .one(&*self.conn)
+            .await
+    }
+
+    pub async fn find_route_by_id(&self, id: i64) -> Result<Option<RouteLibrary>, sea_orm::DbErr> {
+        RouteEntity::find()
+            .filter(RouteColumn::Id.eq(id))
+            .filter(RouteColumn::IsDeleted.eq(0))
+            .one(&*self.conn)
+            .await
+    }
+
     pub async fn create(
         &self,
         req: &CreateTaskRequest,
@@ -59,11 +85,19 @@ impl SeaOrmDogTaskRepository {
         query.one(&*self.conn).await
     }
 
+    pub async fn find_by_id_unscoped(&self, id: i64) -> Result<Option<Task>, sea_orm::DbErr> {
+        TaskEntity::find()
+            .filter(TaskColumn::Id.eq(id))
+            .filter(TaskColumn::IsDeleted.eq(0))
+            .one(&*self.conn)
+            .await
+    }
+
     pub async fn find_all_with_page(
         &self,
         query: &TaskPageQuery,
         scope: &DataScope,
-    ) -> Result<(Vec<Task>, i64), sea_orm::DbErr> {
+    ) -> Result<(Vec<TaskVO>, i64), sea_orm::DbErr> {
         let mut base_query = TaskEntity::find().filter(TaskColumn::IsDeleted.eq(0));
         if let Some(owner) = scope.owner_filter() {
             base_query = base_query.filter(TaskColumn::UserId.eq(owner));
@@ -103,13 +137,30 @@ impl SeaOrmDogTaskRepository {
         let size = query.size.max(1);
         let offset = (current - 1) * size;
 
-        let records = base_query
+        let raw_records = base_query
             .filter(cond)
             .order_by(TaskColumn::CreateTime, order_desc())
             .offset(Some(offset as u64))
             .limit(size as u64)
             .all(&*self.conn)
             .await?;
+
+        // Resolve device_id_string and route_name
+        let mut records = Vec::with_capacity(raw_records.len());
+        for task in raw_records {
+            let mut vo = TaskVO::from(task.clone());
+            if let Some(did) = task.device_id {
+                if let Ok(Some(device)) = self.find_device_by_id(did).await {
+                    vo.device_id_string = Some(device.device_id.clone());
+                }
+            }
+            if let Some(rid) = task.route_id {
+                if let Ok(Some(route)) = self.find_route_by_id(rid).await {
+                    vo.route_name = Some(route.route_name.clone());
+                }
+            }
+            records.push(vo);
+        }
 
         Ok((records, total as i64))
     }
@@ -177,6 +228,27 @@ impl SeaOrmDogTaskRepository {
             }
             update.exec(&*self.conn).await?;
             self.find_by_id(id, scope).await
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn update_status_unscoped(
+        &self,
+        id: i64,
+        status: &str,
+    ) -> Result<Option<Task>, sea_orm::DbErr> {
+        let task = self.find_by_id_unscoped(id).await?;
+        if let Some(mut task) = task {
+            task.task_status = status.to_string();
+            task.update_time = Some(chrono::Utc::now());
+            let mut active_model: TaskActiveModel = task.into();
+            active_model.task_status = ActiveValue::Set(status.to_string());
+            TaskEntity::update(active_model)
+                .filter(TaskColumn::Id.eq(id))
+                .exec(&*self.conn)
+                .await?;
+            self.find_by_id_unscoped(id).await
         } else {
             Ok(None)
         }

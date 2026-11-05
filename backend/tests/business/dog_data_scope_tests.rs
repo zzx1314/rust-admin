@@ -18,12 +18,13 @@ use x_rust::api::AppState;
 use x_rust::app::App;
 use x_rust::business::dog::device::domain::CreateDeviceRequest;
 use x_rust::business::dog::map::domain::{CreateMapRequest, UploadMapRequest};
-use x_rust::business::dog::park::domain::{CreateParkRequest, UpdateParkRequest};
+use x_rust::business::dog::park::domain::{CreateParkRequest, ParkPageQuery, UpdateParkRequest};
 use x_rust::business::dog::task::domain::{CreateTaskRequest, TaskPageQuery};
 use x_rust::business::dog::user_device::domain::CreateUserDeviceRequest;
 use x_rust::common::data_scope::DataScope;
 use x_rust::common::error::AppError;
 use x_rust::common::traits::{DynFuture, TokenStore};
+use x_rust::system::sys_user::domain::CreateUserRequest;
 
 const USER_A: i64 = 101;
 const USER_B: i64 = 102;
@@ -277,6 +278,57 @@ async fn parks_are_visible_only_to_their_owner() {
         .await
         .unwrap();
     assert_eq!(admin_parks.len(), 1, "administrators see every park");
+}
+
+#[tokio::test]
+async fn park_list_shows_owner_username() {
+    let state = test_state().await;
+    let owner = state
+        .user_service
+        .create_user(CreateUserRequest {
+            username: "park_owner".to_string(),
+            phone: None,
+            email: None,
+            real_name: None,
+            password: None,
+            org_id: 1,
+            remarks: None,
+            card: None,
+            sex: None,
+            role: None,
+        })
+        .await
+        .expect("test user must be created");
+
+    let scope = owner_scope(owner.id);
+    state
+        .dog_park_service
+        .create(create_park("A 园区"), &scope)
+        .await
+        .expect("owner may create a park");
+
+    let page = state
+        .dog_park_service
+        .list_page(
+            ParkPageQuery {
+                park_name: None,
+                begin_time: None,
+                end_time: None,
+                current: 1,
+                size: 10,
+            },
+            &admin_scope(),
+        )
+        .await
+        .expect("administrator may list parks");
+
+    assert_eq!(page.records.len(), 1);
+    assert_eq!(page.records[0].user_id, owner.id);
+    assert_eq!(
+        page.records[0].user_name.as_deref(),
+        Some("park_owner"),
+        "park list must resolve the owner user name"
+    );
 }
 
 #[tokio::test]

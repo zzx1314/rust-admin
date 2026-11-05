@@ -43,6 +43,8 @@ pub struct ParkVO {
     pub park_description: Option<String>,
     pub park_address: Option<String>,
     pub user_id: i64,
+    /// 所属用户的用户名，列表接口按 `user_id` 关联 `p_sys_user` 填充。
+    pub user_name: Option<String>,
     pub create_time: String,
     pub update_time: Option<String>,
 }
@@ -55,6 +57,7 @@ impl From<DogPark> for ParkVO {
             park_description: p.park_description,
             park_address: p.park_address,
             user_id: p.user_id,
+            user_name: None,
             create_time: format_datetime(p.create_time),
             update_time: p.update_time.map(format_datetime),
         }

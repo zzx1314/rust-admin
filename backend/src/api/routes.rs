@@ -308,6 +308,14 @@ pub fn dog_task_routes(state: AppState) -> Router<AppState> {
             "/dogTask/status/{id}",
             put(dog_task_handlers::update_task_status_handler),
         )
+        .route(
+            "/dogTask/start/{id}",
+            post(dog_task_handlers::start_task_handler),
+        )
+        .route(
+            "/dogTask/taskStatus/{id}",
+            get(dog_task_handlers::get_task_status_handler),
+        )
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 

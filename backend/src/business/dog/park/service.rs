@@ -47,8 +47,26 @@ impl DogParkService {
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
+        let mut user_ids: Vec<i64> = records.iter().map(|p| p.user_id).collect();
+        user_ids.sort_unstable();
+        user_ids.dedup();
+        let user_names = self
+            .repo
+            .find_user_names(&user_ids)
+            .await
+            .map_err(AppError::DatabaseErrorSeaOrm)?;
+
+        let vo_list: Vec<ParkVO> = records
+            .into_iter()
+            .map(|park| {
+                let mut vo = ParkVO::from(park);
+                vo.user_name = user_names.get(&vo.user_id).cloned();
+                vo
+            })
+            .collect();
+
         Ok(PageResponse::new(
-            records.into_iter().map(ParkVO::from).collect(),
+            vo_list,
             total,
             query.current.max(1),
             query.size.max(1),

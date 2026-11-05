@@ -178,6 +178,15 @@ impl SeaOrmDogCommandRepository {
         }
     }
 
+    pub async fn find_by_task_id(&self, task_id: i64) -> Result<Vec<DogCommand>, sea_orm::DbErr> {
+        CommandEntity::find()
+            .filter(CommandColumn::TaskId.eq(task_id))
+            .filter(CommandColumn::IsDeleted.eq(0))
+            .order_by(CommandColumn::CreateTime, order_desc())
+            .all(&*self.conn)
+            .await
+    }
+
     pub async fn find_all(&self) -> Result<Vec<DogCommand>, sea_orm::DbErr> {
         CommandEntity::find()
             .filter(CommandColumn::IsDeleted.eq(0))

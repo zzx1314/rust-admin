@@ -1,6 +1,7 @@
 import { http } from "@/utils/http";
 
 type Result = { code: number; msg: string; data?: Array<any> };
+type ResultOne = { code: number; msg: string; data?: any };
 type ResultPage = {
   code: number;
   msg: string;
@@ -13,7 +14,9 @@ const dogTaskUrls = {
   save: "/api/dogTask",
   update: "/api/dogTask/",
   delete: `/api/dogTask/`,
-  status: "/api/dogTask/status/"
+  status: "/api/dogTask/status/",
+  start: "/api/dogTask/start/",
+  taskStatus: "/api/dogTask/taskStatus/"
 };
 
 export const dogTaskPage = (query?: object) =>
@@ -28,3 +31,7 @@ export const dogTaskDelete = (id: string | number) =>
   http.axiosDelete<Result>(dogTaskUrls.delete + id);
 export const dogTaskUpdateStatus = (id: string | number, param?: object) =>
   http.axiosPut<Result>(dogTaskUrls.status + id, param);
+export const dogTaskStart = (id: string | number) =>
+  http.axiosPostRequest<ResultOne>(dogTaskUrls.start + id, {});
+export const dogTaskGetTaskStatus = (id: string | number) =>
+  http.axiosGetRequest<ResultOne>(dogTaskUrls.taskStatus + id, {});

@@ -286,7 +286,9 @@ WebSocket 报文：
 | `/api/dogPark`         | POST               | 新增，`parkName` 必填；`parkDescription`、`parkAddress` 可选  |
 | `/api/dogPark/{id}`    | GET / PUT / DELETE | 详情 / 修改 / 软删除                                          |
 
-响应字段：`id`、`parkName`、`parkDescription`、`parkAddress`、`userId`、`createTime`、`updateTime`。
+响应字段：`id`、`parkName`、`parkDescription`、`parkAddress`、`userId`、`userName`、`createTime`、`updateTime`。
+
+> `getPage` 会按 `userId` 关联 `p_sys_user` 返回 `userName`（所属用户名），前端列表展示该字段；`getAll` 与详情 / 新增 / 修改接口的 `userName` 为 `null`。
 
 ---
 

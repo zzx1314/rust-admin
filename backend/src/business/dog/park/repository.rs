@@ -6,10 +6,13 @@ use crate::business::dog::park::entity::Model as Park;
 use crate::common::base::{BaseRepository, order_desc};
 use crate::common::data_scope::DataScope;
 use crate::common::util::parse_beijing_datetime;
+use crate::system::sys_user::entity::Column as UserColumn;
+use crate::system::sys_user::entity::Entity as UserEntity;
 use sea_orm::{
     ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -35,6 +38,20 @@ impl SeaOrmDogParkRepository {
             .one(&*self.conn)
             .await
             .map(|r| r.unwrap())
+    }
+
+    pub async fn find_user_names(
+        &self,
+        user_ids: &[i64],
+    ) -> Result<HashMap<i64, String>, sea_orm::DbErr> {
+        if user_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let users = UserEntity::find()
+            .filter(UserColumn::Id.is_in(user_ids.iter().copied()))
+            .all(&*self.conn)
+            .await?;
+        Ok(users.into_iter().map(|u| (u.id, u.username)).collect())
     }
 
     pub async fn find_by_id(

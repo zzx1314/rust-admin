@@ -189,9 +189,17 @@ impl App {
         ));
 
         let dog_task_repo = SeaOrmDogTaskRepository::new(conn.clone());
+        let dog_workflow_repo = SeaOrmDogWorkflowRepository::new(conn.clone());
+        let dog_command_repo = SeaOrmDogCommandRepository::new(conn.clone());
+        let dog_route_repo = SeaOrmDogRouteLibraryRepository::new(conn.clone());
+        let dog_gateway = Arc::new(DogGateway::new(conn.clone(), upload_dir));
         let dog_task_service = Arc::new(DogTaskService::new(
             dog_task_repo.clone(),
             dog_device_repo.clone(),
+            dog_workflow_repo.clone(),
+            dog_command_repo.clone(),
+            dog_route_repo.clone(),
+            dog_gateway.clone(),
         ));
 
         let dog_park_repo = SeaOrmDogParkRepository::new(conn.clone());
@@ -209,14 +217,11 @@ impl App {
         let dog_config_repo = SeaOrmDogConfigRepository::new(conn.clone());
         let dog_config_service = Arc::new(DogConfigService::new(dog_config_repo));
 
-        let dog_command_repo = SeaOrmDogCommandRepository::new(conn.clone());
         let dog_command_service = Arc::new(DogCommandService::new(dog_command_repo.clone()));
 
-        let dog_route_repo = SeaOrmDogRouteLibraryRepository::new(conn.clone());
         let dog_route_library_service =
             Arc::new(DogRouteLibraryService::new(dog_route_repo.clone()));
 
-        let dog_workflow_repo = SeaOrmDogWorkflowRepository::new(conn.clone());
         let dog_workflow_service = Arc::new(DogWorkflowService::new(dog_workflow_repo));
 
         let dog_services_repo = SeaOrmDogServicesRepository::new(conn.clone());
@@ -230,8 +235,6 @@ impl App {
             dog_media_repo,
             dog_command_repo,
         ));
-
-        let dog_gateway = Arc::new(DogGateway::new(conn.clone(), upload_dir));
 
         AppState {
             user_service,

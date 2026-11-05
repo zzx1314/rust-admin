@@ -1,7 +1,7 @@
 use crate::api::AppState;
 use crate::api::middleware::RequestUser;
 use crate::business::dog::task::domain::{
-    CreateTaskRequest, TaskPageQuery, TaskVO, UpdateTaskRequest,
+    CreateTaskRequest, TaskPageQuery, TaskStatusVO, TaskVO, UpdateTaskRequest,
 };
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
@@ -98,4 +98,28 @@ pub async fn delete_task_handler(
         .delete(params.id, &user.data_scope())
         .await?;
     Ok(Json(ApiResponse::ok(())))
+}
+
+pub async fn start_task_handler(
+    State(state): State<AppState>,
+    Extension(user): Extension<RequestUser>,
+    Path(params): Path<IdParam>,
+) -> Result<Json<ApiResponse<TaskVO>>, AppError> {
+    let task = state
+        .dog_task_service
+        .start_task(params.id, &user.data_scope())
+        .await?;
+    Ok(Json(ApiResponse::ok(TaskVO::from(task))))
+}
+
+pub async fn get_task_status_handler(
+    State(state): State<AppState>,
+    Extension(_user): Extension<RequestUser>,
+    Path(params): Path<IdParam>,
+) -> Result<Json<ApiResponse<TaskStatusVO>>, AppError> {
+    let status = state
+        .dog_task_service
+        .get_task_status(params.id)
+        .await?;
+    Ok(Json(ApiResponse::ok(status)))
 }

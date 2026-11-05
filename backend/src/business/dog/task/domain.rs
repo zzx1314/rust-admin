@@ -3,6 +3,7 @@ use crate::business::dog::task::entity::Model as TaskModel;
 use chrono::{DateTime, Utc};
 use sea_orm::ActiveValue;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 pub type DogTask = TaskModel;
 
@@ -37,6 +38,8 @@ pub struct TaskPageQuery {
     pub task_status: Option<String>,
     pub device_id: Option<i64>,
     pub user_id: Option<i64>,
+    pub route_name: Option<String>,
+    pub device_id_string: Option<String>,
     pub begin_time: Option<String>,
     pub end_time: Option<String>,
     #[serde(default = "default_current")]
@@ -55,10 +58,26 @@ pub struct TaskVO {
     pub workflow_id: Option<i64>,
     pub workflow_uuid: Option<String>,
     pub device_id: Option<i64>,
+    pub device_id_string: Option<String>,
     pub route_id: Option<i64>,
+    pub route_name: Option<String>,
     pub user_id: Option<i64>,
     pub create_time: String,
     pub update_time: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskStatusVO {
+    pub success_ids: Vec<String>,
+    pub fail_ids: Vec<String>,
+    pub error_info_map: HashMap<String, String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandJsonResponse {
+    pub command_json: String,
 }
 
 impl From<DogTask> for TaskVO {
@@ -71,7 +90,9 @@ impl From<DogTask> for TaskVO {
             workflow_id: t.workflow_id,
             workflow_uuid: t.workflow_uuid,
             device_id: t.device_id,
+            device_id_string: None,
             route_id: t.route_id,
+            route_name: None,
             user_id: t.user_id,
             create_time: format_datetime(t.create_time),
             update_time: t.update_time.map(format_datetime),

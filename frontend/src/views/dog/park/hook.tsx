@@ -28,7 +28,12 @@ export function useDogPark() {
     { label: "园区名称", prop: "parkName", minWidth: 150 },
     { label: "园区描述", prop: "parkDescription", minWidth: 200 },
     { label: "园区地址", prop: "parkAddress", minWidth: 200 },
-    { label: "所属用户ID", prop: "userId", width: 120 },
+    {
+      label: "所属用户",
+      prop: "userName",
+      minWidth: 140,
+      formatter: row => row.userName || `用户 ${row.userId}`
+    },
     { label: "创建时间", prop: "createTime", width: 180 },
     { label: "操作", fixed: "right", width: 180, slot: "operation" }
   ];
