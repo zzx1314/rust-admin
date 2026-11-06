@@ -10,6 +10,7 @@ use crate::business::dog::user_device::entity::Entity as UserDeviceEntity;
 use crate::common::base::{BaseRepository, order_desc};
 use crate::common::data_scope::DataScope;
 use crate::common::util::parse_beijing_datetime;
+use chrono::{DateTime, Utc};
 use sea_orm::sea_query::{Expr, SelectStatement};
 use sea_orm::{
     ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
@@ -247,6 +248,24 @@ impl SeaOrmDogDeviceRepository {
             scope,
         )
         .order_by(DeviceColumn::CreateTime, order_desc())
+        .all(&*self.conn)
+        .await
+    }
+
+    /// Creation timestamps at or after `since`, used by dashboard statistics.
+    pub async fn find_create_times_since(
+        &self,
+        since: DateTime<Utc>,
+        scope: &DataScope,
+    ) -> Result<Vec<DateTime<Utc>>, sea_orm::DbErr> {
+        Self::apply_scope(
+            DeviceEntity::find().filter(DeviceColumn::IsDeleted.eq(0)),
+            scope,
+        )
+        .select_only()
+        .column(DeviceColumn::CreateTime)
+        .filter(DeviceColumn::CreateTime.gte(since))
+        .into_tuple::<DateTime<Utc>>()
         .all(&*self.conn)
         .await
     }

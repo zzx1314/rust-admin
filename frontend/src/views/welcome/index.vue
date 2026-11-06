@@ -109,10 +109,19 @@ const optionsBasis: Array<OptionsType> = [{ label: "上周" }, { label: "本周"
               <ReNormalCountTo
                 :duration="item.duration"
                 :fontSize="'1.6em'"
-                :startVal="100"
+                :startVal="0"
                 :endVal="item.value"
               />
-              <p class="font-medium text-green-500">{{ item.percent }}</p>
+              <p
+                class="font-medium"
+                :class="
+                  item.percent.startsWith('-')
+                    ? 'text-red-500'
+                    : 'text-green-500'
+                "
+              >
+                {{ item.percent }}
+              </p>
             </div>
             <ChartLine
               v-if="item.data.length > 1"

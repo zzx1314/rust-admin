@@ -12,6 +12,7 @@ use crate::business::dog::task::entity::Model as Task;
 use crate::common::base::{BaseRepository, order_desc};
 use crate::common::data_scope::DataScope;
 use crate::common::util::parse_beijing_datetime;
+use chrono::{DateTime, Utc};
 use sea_orm::{
     ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect,
@@ -261,6 +262,34 @@ impl SeaOrmDogTaskRepository {
         }
         query
             .order_by(TaskColumn::CreateTime, order_desc())
+            .all(&*self.conn)
+            .await
+    }
+
+    pub async fn count(&self, scope: &DataScope) -> Result<i64, sea_orm::DbErr> {
+        let mut query = TaskEntity::find().filter(TaskColumn::IsDeleted.eq(0));
+        if let Some(owner) = scope.owner_filter() {
+            query = query.filter(TaskColumn::UserId.eq(owner));
+        }
+        query.count(&*self.conn).await.map(|c| c as i64)
+    }
+
+    /// Creation timestamps at or after `since`, used by dashboard statistics.
+    pub async fn find_create_times_since(
+        &self,
+        since: DateTime<Utc>,
+        scope: &DataScope,
+    ) -> Result<Vec<DateTime<Utc>>, sea_orm::DbErr> {
+        let mut query = TaskEntity::find()
+            .filter(TaskColumn::IsDeleted.eq(0))
+            .filter(TaskColumn::CreateTime.gte(since));
+        if let Some(owner) = scope.owner_filter() {
+            query = query.filter(TaskColumn::UserId.eq(owner));
+        }
+        query
+            .select_only()
+            .column(TaskColumn::CreateTime)
+            .into_tuple::<DateTime<Utc>>()
             .all(&*self.conn)
             .await
     }

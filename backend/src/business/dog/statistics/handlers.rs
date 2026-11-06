@@ -75,10 +75,11 @@ pub async fn statistics_all_type_handler(
 
 pub async fn statistics_device_type_handler(
     State(state): State<AppState>,
+    Extension(user): Extension<RequestUser>,
 ) -> Result<Json<StatisticsResponse<serde_json::Value>>, AppError> {
     let data = state
         .dog_statistics_service
-        .get_device_type_statistics()
+        .get_device_type_statistics(&user.data_scope())
         .await
         .map_err(AppError::DatabaseErrorSeaOrm)?;
 
