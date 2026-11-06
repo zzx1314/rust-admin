@@ -461,6 +461,7 @@ onBeforeUnmount(() => {
   left: 10px;
   z-index: 10;
 }
+
 .dnd-flow {
   position: relative;
   display: flex;
@@ -469,6 +470,7 @@ onBeforeUnmount(() => {
   color: #2c3e50;
   -webkit-font-smoothing: antialiased;
 }
+
 .dnd-flow aside {
   padding: 15px 10px;
   margin-top: 44px;
@@ -478,14 +480,17 @@ onBeforeUnmount(() => {
   background: #10b981bf;
   box-shadow: 0 5px 10px #0000004d;
 }
+
 .dnd-flow .vue-flow-wrapper {
   flex-grow: 1;
   height: 100%;
 }
+
 @media screen and (width >= 200px) {
   .dnd-flow {
     flex-direction: row;
   }
+
   .dnd-flow aside {
     min-width: 8%;
   }

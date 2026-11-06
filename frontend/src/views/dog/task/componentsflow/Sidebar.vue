@@ -52,6 +52,7 @@ const { onDragStart } = useDragAndDrop();
   flex-direction: column;
   align-items: center;
 }
+
 .node-item {
   display: flex;
   gap: 8px;
@@ -60,6 +61,7 @@ const { onDragStart } = useDragAndDrop();
   margin-bottom: 10px;
   color: black;
 }
+
 .circle-node-start {
   width: 40px;
   height: 40px;
@@ -67,6 +69,7 @@ const { onDragStart } = useDragAndDrop();
   border: 2px solid #5370ff;
   border-radius: 50%;
 }
+
 .circle-node-end {
   width: 40px;
   height: 40px;
@@ -74,6 +77,7 @@ const { onDragStart } = useDragAndDrop();
   border: 2px solid #9f0429;
   border-radius: 50%;
 }
+
 .node-text {
   width: 60px;
   font-size: 14px;

@@ -460,30 +460,37 @@ onMounted(() => {
   gap: 4px;
   align-items: center;
 }
+
 :deep(.el-card__header) {
   height: 40px;
   padding-top: 10px;
 }
+
 .label-container {
   display: flex;
   align-items: center;
   justify-content: space-between;
   width: 100%;
 }
+
 :deep(.el-card) {
   border: 2px solid transparent !important;
   border-radius: 6px;
   transition: border-color 0.2s ease;
 }
+
 :deep(.el-card.active-border) {
   border-color: #409eff !important;
 }
+
 :deep(.el-card.is-success) {
   background-color: #67c23a !important;
 }
+
 :deep(.el-card.is-error) {
   background-color: #f56c6c !important;
 }
+
 :deep(.el-form-item) {
   margin-bottom: 9px;
 }
