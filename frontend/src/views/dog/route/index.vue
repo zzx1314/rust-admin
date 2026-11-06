@@ -28,7 +28,6 @@ const {
   queryFields,
   moreQueryFields,
   mapOptions,
-  parkOptions,
   onSearch,
   handleUpdate,
   handleDelete,
@@ -135,21 +134,6 @@ const {
         :rules="rules"
         label-width="100px"
       >
-        <el-form-item label="所属园区" prop="parkId">
-          <el-select
-            v-model="addForm.parkId"
-            placeholder="请选择所属园区"
-            filterable
-            style="width: 100%"
-          >
-            <el-option
-              v-for="opt in parkOptions"
-              :key="opt.value"
-              :label="opt.label"
-              :value="opt.value"
-            />
-          </el-select>
-        </el-form-item>
         <el-form-item label="路线名称" prop="routeName">
           <el-input v-model="addForm.routeName" placeholder="请输入路线名称" />
         </el-form-item>

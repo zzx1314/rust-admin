@@ -2,7 +2,6 @@ import type { PlusColumn } from "plus-pro-components";
 
 export function useCollectorRouteForm() {
   const columnsForm: PlusColumn[] = [
-    { label: "所属园区", prop: "parkName", valueType: "copy" },
     { label: "路线名称", prop: "routeName", valueType: "copy" },
     {
       label: "路线类型",
