@@ -91,7 +91,11 @@ export function useDogTask() {
   });
   const dialogFormVisible = ref(false);
   const dialogStatusVisible = ref(false);
-  const dialogStatusData = ref({ successIds: [], failIds: [], errorInfoMap: {} });
+  const dialogStatusData = ref({
+    successIds: [],
+    failIds: [],
+    errorInfoMap: {}
+  });
   const title = ref("");
   const addForm = ref({ id: null });
 
@@ -193,7 +197,8 @@ export function useDogTask() {
 
   // 流程设计 - navigate to flow design page
   function flowRoute(row) {
-    const workflowUuid = row.workflowUuid || `${Date.now()}_${row.id}`;
+    // 没有 workflowUuid 时用稳定的 task_<id>，避免每次进入生成新 uuid 导致流程找不到
+    const workflowUuid = row.workflowUuid || `task_${row.id}`;
     router.push({
       name: "dronesFlowDesign",
       query: {

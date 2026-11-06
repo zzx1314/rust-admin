@@ -130,3 +130,7 @@ path = "tests/business/dog_gateway_tests.rs"
 [[test]]
 name = "dog_data_scope_tests"
 path = "tests/business/dog_data_scope_tests.rs"
+
+[[test]]
+name = "dog_workflow_tests"
+path = "tests/business/dog_workflow_tests.rs"

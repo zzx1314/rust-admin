@@ -18,6 +18,11 @@ pub struct UuidParam {
     pub uuid: String,
 }
 
+#[derive(serde::Deserialize)]
+pub struct TaskIdParam {
+    pub task_id: i64,
+}
+
 pub async fn create_workflow_handler(
     State(state): State<AppState>,
     Json(req): Json<CreateWorkflowRequest>,
@@ -40,6 +45,20 @@ pub async fn get_workflow_by_uuid_handler(
 ) -> Json<ApiResponse<Option<WorkflowVO>>> {
     match state.dog_workflow_service.get_by_uuid(&params.uuid).await {
         Ok(workflow) => Json(ApiResponse::ok(Some(WorkflowVO::from(workflow)))),
+        Err(_) => Json(ApiResponse::ok(None)),
+    }
+}
+
+pub async fn get_workflow_by_task_handler(
+    State(state): State<AppState>,
+    Path(params): Path<TaskIdParam>,
+) -> Json<ApiResponse<Option<WorkflowVO>>> {
+    match state
+        .dog_workflow_service
+        .get_by_task_id(params.task_id)
+        .await
+    {
+        Ok(workflow) => Json(ApiResponse::ok(workflow.map(WorkflowVO::from))),
         Err(_) => Json(ApiResponse::ok(None)),
     }
 }

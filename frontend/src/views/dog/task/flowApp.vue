@@ -1,7 +1,16 @@
 <script setup lang="ts">
-import { ref, onMounted, nextTick, onBeforeUnmount, provide } from "vue";
+import {
+  ref,
+  reactive,
+  onMounted,
+  nextTick,
+  onBeforeUnmount,
+  provide
+} from "vue";
 import { VueFlow, useVueFlow, MarkerType } from "@vue-flow/core";
 import { useRoute, useRouter } from "vue-router";
+import "vue-json-pretty/lib/styles.css";
+import VueJsonPretty from "vue-json-pretty";
 import { useMultiTagsStoreHook } from "@/store/modules/multiTags";
 import { message } from "@/utils/message";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
@@ -19,6 +28,7 @@ import useDragAndDrop from "./componentsflow/useDnD.js";
 
 import {
   dogWorkflowGetByUuid,
+  dogWorkflowGetByTask,
   dogWorkflowCreate,
   dogWorkflowUpdate
 } from "@/api/dogWorkflow";
@@ -60,6 +70,24 @@ const pathInfo = ref<any[]>([]);
 const isShowCustomPoint = ref(false);
 const dialogFormVisible = ref(false);
 const errorInfoMsg = ref("");
+const dialogJsonVisible = ref(false);
+
+// JSON 查看器配置（与 mgmt_platform 的 vue-json-pretty 用法一致）
+const jsonState = reactive({
+  data: {} as any,
+  showLine: true,
+  showLineNumber: true,
+  showDoubleQuotes: true,
+  showLength: true,
+  showIcon: true,
+  deep: 3
+});
+
+// 当前画布对应的已保存流程（用于再次进入时回显与覆盖保存）
+const workflowRowId = ref<number | null>(null);
+const workflowUuid = ref<string>(
+  workflowId || (taskId ? `task_${taskId}` : "")
+);
 
 // 节点校验注册（与 mgmt_platform 一致）
 const nodeRefs = ref<Record<string, { validate?: () => Promise<boolean> }>>({});
@@ -130,29 +158,41 @@ function handleKeydown(event: KeyboardEvent) {
   }
 }
 
+// 查找已保存的流程：先按 uuid，再按 taskId 兜底
+async function resolveWorkflow(): Promise<any | null> {
+  try {
+    if (workflowUuid.value) {
+      const res = await dogWorkflowGetByUuid(workflowUuid.value);
+      if (res.code === SUCCESS && res.data) return res.data;
+    }
+    if (taskId) {
+      const res = await dogWorkflowGetByTask(Number(taskId));
+      if (res.code === SUCCESS && res.data) return res.data;
+    }
+  } catch (e) {
+    // 查询失败按无流程处理
+  }
+  return null;
+}
+
 // 加载已有流程
 async function loadFlow() {
   if (!taskId) return;
-  try {
-    const res = await dogWorkflowGetByUuid(workflowId);
-    if (res.code === SUCCESS && res.data) {
-      const data = res.data;
-      if (data.nodes) {
-        const nodeData = JSON.parse(data.nodes);
-        setNodes(nodeData);
-        rawNodes.value = JSON.parse(JSON.stringify(nodeData));
-      }
-      if (data.edges) {
-        setEdges(JSON.parse(data.edges));
-      }
-      nextTick(() => {
-        pathInfo.value = nodeRoute();
-      });
-    }
-    // data 为 null 表示 workflow 不存在，使用空白画布
-  } catch (e) {
-    // No existing workflow - start fresh
+  const data = await resolveWorkflow();
+  if (!data) return;
+  if (data.id) workflowRowId.value = data.id;
+  if (data.uuid) workflowUuid.value = data.uuid;
+  if (data.nodes) {
+    const nodeData = JSON.parse(data.nodes);
+    setNodes(nodeData);
+    rawNodes.value = JSON.parse(JSON.stringify(nodeData));
   }
+  if (data.edges) {
+    setEdges(JSON.parse(data.edges));
+  }
+  nextTick(() => {
+    pathInfo.value = nodeRoute();
+  });
 }
 
 // 保存
@@ -177,23 +217,28 @@ async function saveActivity() {
   }
   const params = {
     taskId: Number(taskId),
-    uuid: workflowId,
+    uuid: workflowUuid.value,
     nodes: JSON.stringify(getNodes.value),
     edges: JSON.stringify(getEdges.value)
   };
 
   try {
-    // Try to check if workflow exists
-    const checkRes = await dogWorkflowGetByUuid(workflowId);
-    let res;
-    if (checkRes.code === SUCCESS && checkRes.data && checkRes.data.id) {
-      // Update existing
-      res = await dogWorkflowUpdate(checkRes.data.id, params);
-    } else {
-      // Create new
-      res = await dogWorkflowCreate(params);
+    // 已有流程则覆盖保存，避免同一任务产生多份流程
+    let targetId = workflowRowId.value;
+    if (!targetId) {
+      const existing = await resolveWorkflow();
+      if (existing?.id) {
+        targetId = existing.id;
+        workflowRowId.value = existing.id;
+        if (existing.uuid) workflowUuid.value = existing.uuid;
+      }
     }
+    const res = targetId
+      ? await dogWorkflowUpdate(targetId, params)
+      : await dogWorkflowCreate(params);
     if (res.code === SUCCESS) {
+      if (res.data?.id) workflowRowId.value = res.data.id;
+      if (res.data?.uuid) workflowUuid.value = res.data.uuid;
       message("保存成功", { type: "success" });
     } else {
       message(res.msg || "保存失败", { type: "error" });
@@ -231,13 +276,21 @@ async function goBack() {
   });
 }
 
-// 查看JSON
-function showJsonString() {
-  const data = {
-    nodes: getNodes.value,
-    edges: getEdges.value
-  };
-  alert(JSON.stringify(data, null, 2));
+// 查看JSON：与 mgmt_platform 一致，展示保存流程时生成的指令 JSON
+async function showJsonString() {
+  const data = await resolveWorkflow();
+  const raw = data?.commandJsonString;
+  if (!raw) {
+    message("获取指令集JSON字符串失败", { type: "error" });
+    return;
+  }
+  try {
+    jsonState.data = JSON.parse(raw);
+  } catch (e) {
+    message("指令集JSON字符串解析失败", { type: "error" });
+    return;
+  }
+  dialogJsonVisible.value = true;
 }
 
 onMounted(() => {
@@ -342,6 +395,23 @@ onBeforeUnmount(() => {
       @close="dialogFormVisible = false"
     >
       <div>{{ errorInfoMsg }}</div>
+    </el-dialog>
+
+    <el-dialog
+      v-model="dialogJsonVisible"
+      title="下发命令字符串"
+      width="60%"
+      @close="dialogJsonVisible = false"
+    >
+      <vue-json-pretty
+        v-model:data="jsonState.data"
+        :deep="jsonState.deep"
+        :show-double-quotes="jsonState.showDoubleQuotes"
+        :show-line="jsonState.showLine"
+        :show-length="jsonState.showLength"
+        :show-icon="jsonState.showIcon"
+        :show-line-number="jsonState.showLineNumber"
+      />
     </el-dialog>
   </div>
 </template>

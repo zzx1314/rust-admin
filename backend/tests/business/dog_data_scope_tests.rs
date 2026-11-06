@@ -452,6 +452,8 @@ async fn tasks_are_scoped_to_their_creator() {
         task_status: None,
         device_id: None,
         user_id: None,
+        route_name: None,
+        device_id_string: None,
         begin_time: None,
         end_time: None,
         current: 1,

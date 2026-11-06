@@ -16,6 +16,11 @@ impl SeaOrmDogWorkflowRepository {
     pub fn new(conn: Arc<DatabaseConnection>) -> Self {
         Self { conn }
     }
+
+    /// 供指令 JSON 生成等跨表查询使用。
+    pub fn connection(&self) -> Arc<DatabaseConnection> {
+        self.conn.clone()
+    }
 }
 
 impl BaseRepository for SeaOrmDogWorkflowRepository {
@@ -64,6 +69,34 @@ impl SeaOrmDogWorkflowRepository {
             .order_by(WorkflowColumn::CreateTime, order_desc())
             .all(&*self.conn)
             .await
+    }
+
+    /// 保存工作流时把工作流 id / uuid 回写到所属任务，便于任务执行与再次回显。
+    pub async fn link_task(
+        &self,
+        task_id: i64,
+        workflow_id: i64,
+        workflow_uuid: &str,
+    ) -> Result<(), sea_orm::DbErr> {
+        use crate::business::dog::task::entity::{
+            ActiveModel as TaskActiveModel, Column as TaskColumn, Entity as TaskEntity,
+        };
+
+        let task = TaskEntity::find()
+            .filter(TaskColumn::Id.eq(task_id))
+            .filter(TaskColumn::IsDeleted.eq(0))
+            .one(&*self.conn)
+            .await?;
+        let Some(task) = task else {
+            return Ok(());
+        };
+
+        let mut active_model: TaskActiveModel = task.into();
+        active_model.workflow_id = ActiveValue::set(Some(workflow_id));
+        active_model.workflow_uuid = ActiveValue::set(Some(workflow_uuid.to_string()));
+        active_model.update_time = ActiveValue::set(Some(chrono::Utc::now()));
+        TaskEntity::update(active_model).exec(&*self.conn).await?;
+        Ok(())
     }
 
     pub async fn update(

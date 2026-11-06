@@ -63,6 +63,7 @@ PUT    /api/dogDevice/status/{id}   仅回写设备状态
 PUT    /api/dogTask/status/{id}     仅回写任务状态
 PUT    /api/dogCommand/status/{id}  仅回写指令状态与返回值
 GET    /api/dogWorkflow/uuid/{uuid} 按工作流 UUID 查询
+GET    /api/dogWorkflow/byTask/{taskId} 按任务查询已保存的流程（流程设计回显）
 GET    /api/dogStatistics/{all,allType,deviceTypeNumber}
 
 # 用户设备绑定

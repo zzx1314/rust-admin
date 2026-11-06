@@ -491,6 +491,10 @@ pub fn dog_workflow_routes(state: AppState) -> Router<AppState> {
             "/dogWorkflow/uuid/{uuid}",
             get(dog_workflow_handlers::get_workflow_by_uuid_handler),
         )
+        .route(
+            "/dogWorkflow/byTask/{task_id}",
+            get(dog_workflow_handlers::get_workflow_by_task_handler),
+        )
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 

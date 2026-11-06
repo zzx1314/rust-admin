@@ -198,13 +198,44 @@ Authorization: Bearer <access_token>
 
 ### 4.9 工作流 `/api/dogWorkflow`
 
-| 接口                           | 方法               | 说明                 |
-| ------------------------------ | ------------------ | -------------------- |
-| `/api/dogWorkflow`             | POST               | 新增，`uuid` 必填    |
-| `/api/dogWorkflow/{id}`        | GET / PUT / DELETE | 详情 / 修改 / 软删除 |
-| `/api/dogWorkflow/uuid/{uuid}` | GET                | 按 UUID 查询         |
+| 接口                             | 方法               | 说明                                                  |
+| -------------------------------- | ------------------ | ----------------------------------------------------- |
+| `/api/dogWorkflow`               | POST               | 新增，`uuid` 必填                                     |
+| `/api/dogWorkflow/{id}`          | GET / PUT / DELETE | 详情 / 修改 / 软删除                                  |
+| `/api/dogWorkflow/uuid/{uuid}`   | GET                | 按 UUID 查询                                          |
+| `/api/dogWorkflow/byTask/{taskId}` | GET              | 按任务查询已保存的流程（流程设计页面回显）            |
 
 字段：`uuid`、`nodes`、`edges`、`taskId`、`commandJsonString`、`createTime`、`updateTime`。
+
+新增 / 修改时若带 `taskId`，会同步回写 `dog_task.workflow_id` 与 `dog_task.workflow_uuid`，
+任务启动和再次进入流程设计都依赖该关联。
+
+新增 / 修改时若未显式传 `commandJsonString`，后端会根据 `nodes` / `edges` 重新生成指令 JSON
+（设备、航线、服务参数均会被展开），结构与 mgmt_platform 的 `DronesCommandWebsocket` 一致：
+
+```json
+{
+  "type": "toros",
+  "deviceId": "DOG-001",
+  "route": [{ "wpId": 1, "lat": 0.0, "lon": 0.0, "alt": 0.5 }],
+  "tasks": [
+    {
+      "taskId": "node_x",
+      "fromWp": { "wpId": 1, "lat": 0.0, "lon": 0.0, "alt": 0.5 },
+      "toWp": { "wpId": 2, "lat": 1.0, "lon": 2.0, "alt": 0.5 },
+      "event": "init_x",
+      "actions": [
+        { "actionId": "node_y", "after": "init_x", "type": "TAKEOFF", "params": {} }
+      ]
+    }
+  ],
+  "services": [{ "type": "YOLO", "params": {} }],
+  "onErrorActions": [{ "after": "fail_y", "type": "", "params": { "reason": "超时" } }]
+}
+```
+
+流程设计页的「查看JSON」展示的就是该 `commandJsonString`（未保存或生成失败时提示获取失败）。
+地图航点为世界坐标，`x` 作为 `lon`、`y` 作为 `lat`，`wpId` 从 1 开始递增。
 
 > 管理后台已不再提供工作流页面（菜单已下线），这些接口仅保留给任务 / 设备侧使用；也没有工作流列表（分页）接口。
 
