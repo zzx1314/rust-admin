@@ -74,7 +74,7 @@ async function loadRoutePoints(routeIdValue: number | null): Promise<Option[]> {
     if (!Array.isArray(parsed)) return [];
     return parsed.map((wp: any, index: number) => ({
       label: Array.isArray(wp)
-        ? `航点 ${index + 1} (${Math.round(wp[0])}, ${Math.round(wp[1])})`
+        ? `航点 ${index + 1} (${Number(wp[0]).toFixed(2)}, ${Number(wp[1]).toFixed(2)})`
         : `航点 ${index + 1}`,
       value: index + 1
     }));
@@ -157,7 +157,7 @@ onMounted(async () => {
   const deviceRes = await dogDeviceGetAll();
   if (deviceRes.code === SUCCESS && deviceRes.data) {
     deviceListOptions.value = (deviceRes.data as any[]).map(d => ({
-      label: `${d.deviceId} (${d.model || ""})`,
+      label: d.model ? `${d.deviceId} (${d.model})` : `${d.deviceId}`,
       value: d.id
     }));
   }
