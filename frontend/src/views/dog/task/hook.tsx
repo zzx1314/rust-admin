@@ -36,7 +36,7 @@ export function useDogTask() {
       label: "勾选列"
     },
     { label: "序号", type: "index", fixed: "left", width: 70 },
-    { label: "任务名称", prop: "taskName", minWidth: 150 },
+    { label: "任务名称", prop: "taskName", width: 150 },
     { label: "设备ID", prop: "deviceIdString", width: 180 },
     { label: "航线", prop: "routeName", width: 100 },
     { label: "任务描述", prop: "taskDescription", minWidth: 180 },
