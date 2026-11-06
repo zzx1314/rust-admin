@@ -3,14 +3,13 @@ import { ref } from "vue";
 import type { FormInstance } from "element-plus";
 import { useDogTask } from "./hook";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
-import EditPen from "~icons/ep/edit-pen";
-import Delete from "~icons/ep/delete";
 import AddFill from "~icons/ri/add-circle-line";
 import More from "~icons/ep/more-filled";
 import DropperLine from "~icons/ri/dropper-line";
 import RiRestartFill from "~icons/ri/restart-fill";
 import DropperStatus from "~icons/ri/text-wrap";
 import RiBarChartBoxLine from "~icons/ri/bar-chart-box-line";
+import DogTableActions from "@/components/DogUI/DogTableActions.vue";
 import { PureTableBar } from "@/components/RePureTableBar";
 import { useCollectorTaskForm } from "./form";
 import PureTable from "@pureadmin/table";
@@ -102,90 +101,80 @@ function formatStatusData(data: any) {
           @page-current-change="handleCurrentChange"
         >
           <template #operation="{ row }">
-            <el-button
-              class="reset-margin"
-              link
-              type="primary"
+            <DogTableActions
+              :row="row"
               :size="size"
-              :icon="useRenderIcon(EditPen)"
-              @click="handleUpdate(row, addFormRef)"
+              @edit="handleUpdate(row, addFormRef)"
+              @delete="handleDelete(row)"
             >
-              修改
-            </el-button>
-            <el-popconfirm title="是否确认删除?" @confirm="handleDelete(row)">
-              <template #reference>
-                <el-button
-                  class="reset-margin"
-                  link
-                  type="primary"
-                  :size="size"
-                  :icon="useRenderIcon(Delete)"
+              <template #extra="{ row: r, size: s }">
+                <el-dropdown
+                  class="ml-2"
+                  trigger="click"
+                  :hide-on-click="false"
                 >
-                  删除
-                </el-button>
+                  <el-button
+                    class="ml-4 mt-0.5"
+                    link
+                    type="primary"
+                    :size="s"
+                    :icon="useRenderIcon(More)"
+                  />
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item>
+                        <el-button
+                          :class="buttonClass"
+                          link
+                          type="primary"
+                          :size="s"
+                          :icon="useRenderIcon(DropperLine)"
+                          @click="flowRoute(r)"
+                        >
+                          流程设计
+                        </el-button>
+                      </el-dropdown-item>
+                      <el-dropdown-item>
+                        <el-button
+                          :class="['status-btn', buttonClass]"
+                          link
+                          type="primary"
+                          :size="s"
+                          :icon="useRenderIcon(RiRestartFill)"
+                          @click="startTask(r)"
+                        >
+                          启动流程
+                        </el-button>
+                      </el-dropdown-item>
+                      <el-dropdown-item>
+                        <el-button
+                          :class="buttonClass"
+                          link
+                          type="primary"
+                          :size="s"
+                          :icon="useRenderIcon(DropperStatus)"
+                          @click="flowRouteStatus(r)"
+                        >
+                          执行状态
+                        </el-button>
+                      </el-dropdown-item>
+                      <el-dropdown-item>
+                        <el-button
+                          :class="buttonClass"
+                          link
+                          type="primary"
+                          :size="s"
+                          :icon="useRenderIcon(RiBarChartBoxLine)"
+                          @click="datadashBoard(r)"
+                        >
+                          数据看板
+                        </el-button>
+                      </el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
               </template>
-            </el-popconfirm>
-            <el-dropdown class="ml-2" trigger="click" :hide-on-click="false">
-              <el-button
-                class="ml-4 mt-0.5"
-                link
-                type="primary"
-                :size="size"
-                :icon="useRenderIcon(More)"
-              />
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item>
-                    <el-button
-                      :class="buttonClass"
-                      link
-                      type="primary"
-                      :size="size"
-                      :icon="useRenderIcon(DropperLine)"
-                      @click="flowRoute(row)"
-                    >
-                      流程设计
-                    </el-button>
-                  </el-dropdown-item>
-                  <el-dropdown-item>
-                    <el-button
-                      :class="['status-btn', buttonClass]"
-                      link
-                      type="primary"
-                      :size="size"
-                      :icon="useRenderIcon(RiRestartFill)"
-                      @click="startTask(row)"
-                    >
-                      启动流程
-                    </el-button>
-                  </el-dropdown-item>
-                  <el-dropdown-item>
-                    <el-button
-                      :class="buttonClass"
-                      link
-                      type="primary"
-                      :size="size"
-                      :icon="useRenderIcon(DropperStatus)"
-                      @click="flowRouteStatus(row)"
-                    >
-                      执行状态
-                    </el-button>
-                  </el-dropdown-item>
-                  <el-dropdown-item>
-                    <el-button
-                      :class="buttonClass"
-                      link
-                      type="primary"
-                      :size="size"
-                      :icon="useRenderIcon(RiBarChartBoxLine)"
-                      @click="datadashBoard(row)"
-                    >
-                      数据看板
-                    </el-button>
-                  </el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
+            </DogTableActions>
           </template>
         </pure-table>
       </template>

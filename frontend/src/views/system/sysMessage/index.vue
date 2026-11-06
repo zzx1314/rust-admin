@@ -4,9 +4,9 @@ import { PureTableBar } from "@/components/RePureTableBar";
 import PureTable from "@pureadmin/table";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 import DogSearchForm from "@/components/DogUI/DogSearchForm.vue";
-import Delete from "~icons/ep/delete";
-import EditPen from "~icons/ep/edit-pen";
+import DogTableActions from "@/components/DogUI/DogTableActions.vue";
 import HandlerMessageForm from "@/views/system/sysMessage/HandlerMessageForm.vue";
+import EditPen from "~icons/ep/edit-pen";
 import { ref } from "vue";
 import { useMessageStoreHook } from "@/store/modules/message";
 import { hasAuth } from "@/router/utils";
@@ -81,31 +81,29 @@ const {
           @page-current-change="handleCurrentChange"
         >
           <template #operation="{ row }">
-            <el-button
-              v-if="hasAuth('message_handler')"
-              class="reset-margin"
-              link
-              type="primary"
+            <DogTableActions
+              :row="row"
               :size="size"
-              :icon="useRenderIcon(EditPen)"
-              @click="handlerItem(row)"
+              edit-auth="message_handler"
+              edit-label="处置"
+              delete-auth="message_delete"
+              hide-edit
+              @delete="handleDelete(row)"
             >
-              处置
-            </el-button>
-            <el-popconfirm title="是否确认删除?" @confirm="handleDelete(row)">
-              <template #reference>
+              <template #extra="{ row: r, size: s }">
                 <el-button
-                  v-if="hasAuth('message_delete')"
+                  v-if="hasAuth('message_handler')"
                   class="reset-margin"
                   link
                   type="primary"
-                  :size="size"
-                  :icon="useRenderIcon(Delete)"
+                  :size="s"
+                  :icon="useRenderIcon(EditPen)"
+                  @click="handlerItem(r)"
                 >
-                  删除
+                  处置
                 </el-button>
               </template>
-            </el-popconfirm>
+            </DogTableActions>
           </template>
         </pure-table>
       </template>

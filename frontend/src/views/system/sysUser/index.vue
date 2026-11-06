@@ -9,10 +9,9 @@ import { getSafePolicy, listAllRole } from "@/api/system";
 
 import Password from "~icons/ri/lock-password-line";
 import More from "~icons/ep/more-filled";
-import Delete from "~icons/ep/delete";
-import EditPen from "~icons/ep/edit-pen";
 import AddFill from "~icons/ri/add-circle-line";
 import DogSearchForm from "@/components/DogUI/DogSearchForm.vue";
+import DogTableActions from "@/components/DogUI/DogTableActions.vue";
 import { hasAuth } from "@/router/utils";
 import { SUCCESS } from "@/api/base";
 
@@ -221,59 +220,43 @@ async function getAllRole() {
             @page-current-change="handleCurrentChange"
           >
             <template #operation="{ row }">
-              <el-button
-                v-if="hasAuth('user_update') && row.isEdit"
-                class="reset-margin"
-                link
-                type="primary"
+              <DogTableActions
+                :row="row"
                 :size="size"
-                :icon="useRenderIcon(EditPen)"
-                @click="handleUpdate(row, addFormRef)"
+                edit-auth="user_update"
+                delete-auth="user_del"
+                check-is-edit
+                @edit="handleUpdate(row, addFormRef)"
+                @delete="handleDelete(row)"
               >
-                修改
-              </el-button>
-              <el-popconfirm
-                v-if="hasAuth('user_del') && row.isEdit"
-                title="是否确认删除?"
-                @confirm="handleDelete(row)"
-              >
-                <template #reference>
-                  <el-button
-                    class="reset-margin"
-                    link
-                    type="primary"
-                    :size="size"
-                    :icon="useRenderIcon(Delete)"
-                  >
-                    删除
-                  </el-button>
+                <template #extra="{ row: r, size: s }">
+                  <el-dropdown v-if="hasAuth('re_set_pass')">
+                    <el-button
+                      class="ml-3 mt-[2px]"
+                      link
+                      type="primary"
+                      :size="s"
+                      :icon="useRenderIcon(More)"
+                    />
+                    <template #dropdown>
+                      <el-dropdown-menu>
+                        <el-dropdown-item>
+                          <el-button
+                            :class="buttonClass"
+                            link
+                            type="primary"
+                            :size="s"
+                            :icon="useRenderIcon(Password)"
+                            @click="resetPwd(r)"
+                          >
+                            重置密码
+                          </el-button>
+                        </el-dropdown-item>
+                      </el-dropdown-menu>
+                    </template>
+                  </el-dropdown>
                 </template>
-              </el-popconfirm>
-              <el-dropdown v-if="hasAuth('re_set_pass')">
-                <el-button
-                  class="ml-3 mt-[2px]"
-                  link
-                  type="primary"
-                  :size="size"
-                  :icon="useRenderIcon(More)"
-                />
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <el-dropdown-item>
-                      <el-button
-                        :class="buttonClass"
-                        link
-                        type="primary"
-                        :size="size"
-                        :icon="useRenderIcon(Password)"
-                        @click="resetPwd(row)"
-                      >
-                        重置密码
-                      </el-button>
-                    </el-dropdown-item>
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
+              </DogTableActions>
             </template>
           </pure-table>
         </template>

@@ -5,10 +5,9 @@ import { PureTableBar } from "@/components/RePureTableBar";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 import { FormInstance } from "element-plus";
 
-import Delete from "~icons/ep/delete";
-import EditPen from "~icons/ep/edit-pen";
 import AddFill from "~icons/ri/add-circle-line";
 import DogSearchForm from "@/components/DogUI/DogSearchForm.vue";
+import DogTableActions from "@/components/DogUI/DogTableActions.vue";
 import { hasAuth } from "@/router/utils";
 
 defineOptions({
@@ -84,34 +83,15 @@ const {
           @page-current-change="handleCurrentChange"
         >
           <template #operation="{ row }">
-            <el-button
-              v-if="hasAuth('role_update') && row.isEdit"
-              class="reset-margin"
-              link
-              type="primary"
+            <DogTableActions
+              :row="row"
               :size="size"
-              :icon="useRenderIcon(EditPen)"
-              @click="handleUpdate(row)"
-            >
-              修改
-            </el-button>
-            <el-popconfirm
-              v-if="hasAuth('role_del') && row.isEdit"
-              title="是否确认删除?"
-              @confirm="handleDelete(row)"
-            >
-              <template #reference>
-                <el-button
-                  class="reset-margin"
-                  link
-                  type="primary"
-                  :size="size"
-                  :icon="useRenderIcon(Delete)"
-                >
-                  删除
-                </el-button>
-              </template>
-            </el-popconfirm>
+              edit-auth="role_update"
+              delete-auth="role_del"
+              check-is-edit
+              @edit="handleUpdate(row)"
+              @delete="handleDelete(row)"
+            />
           </template>
         </pure-table>
       </template>

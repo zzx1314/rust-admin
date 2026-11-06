@@ -2,14 +2,11 @@
 import { ref } from "vue";
 import { FormInstance } from "element-plus";
 import { usePSysLogrecord } from "./hook";
-import { useRenderIcon } from "@/components/ReIcon/src/hooks";
-import Delete from "~icons/ep/delete";
 import { PureTableBar } from "@/components/RePureTableBar";
 import { useLogForm } from "./form";
 import PureTable from "@pureadmin/table";
 import { PlusDialogForm } from "plus-pro-components";
 import DogSearchForm from "@/components/DogUI/DogSearchForm.vue";
-
 defineOptions({
   name: "PSysLogrecord"
 });

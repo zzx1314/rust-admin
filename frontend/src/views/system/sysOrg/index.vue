@@ -5,10 +5,9 @@ import { useDept } from "./hook";
 import { PureTableBar } from "@/components/RePureTableBar";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 
-import Delete from "~icons/ep/delete";
-import EditPen from "~icons/ep/edit-pen";
 import AddFill from "~icons/ri/add-circle-line";
 import DogSearchForm from "@/components/DogUI/DogSearchForm.vue";
+import DogTableActions from "@/components/DogUI/DogTableActions.vue";
 import { hasAuth } from "@/router/utils";
 
 defineOptions({
@@ -90,35 +89,14 @@ const {
           @selection-change="handleSelectionChange"
         >
           <template #operation="{ row }">
-            <el-button
-              v-if="hasAuth('org_update')"
-              class="reset-margin"
-              link
-              type="primary"
+            <DogTableActions
+              :row="row"
               :size="size"
-              :icon="useRenderIcon(EditPen)"
-              @click="handleUpdate(row)"
-            >
-              修改
-            </el-button>
-            <el-popconfirm
-              title="是否确认删除?"
-              @confirm="confirmEvent(row)"
-              @cancel="cancelEvent"
-            >
-              <template #reference>
-                <el-button
-                  v-if="hasAuth('org_del')"
-                  class="reset-margin"
-                  link
-                  type="primary"
-                  :size="size"
-                  :icon="useRenderIcon(Delete)"
-                >
-                  删除
-                </el-button>
-              </template>
-            </el-popconfirm>
+              edit-auth="org_update"
+              delete-auth="org_del"
+              @edit="handleUpdate(row)"
+              @delete="confirmEvent(row)"
+            />
           </template>
         </pure-table>
       </template>

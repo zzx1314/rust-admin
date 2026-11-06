@@ -3,9 +3,8 @@ import { ref } from "vue";
 import { FormInstance } from "element-plus";
 import { useChargingDevice } from "./hook";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
-import EditPen from "~icons/ep/edit-pen";
-import Delete from "~icons/ep/delete";
 import { PureTableBar } from "@/components/RePureTableBar";
+import DogTableActions from "@/components/DogUI/DogTableActions.vue";
 import { useCollectorBusDevForm } from "./form";
 import PureTable from "@pureadmin/table";
 import { PlusDialogForm, PlusSearch } from "plus-pro-components";
@@ -86,29 +85,12 @@ const {
           @page-current-change="handleCurrentChange"
         >
           <template #operation="{ row }">
-            <el-button
-              class="reset-margin"
-              link
-              type="primary"
+            <DogTableActions
+              :row="row"
               :size="size"
-              :icon="useRenderIcon(EditPen)"
-              @click="handleUpdate(row, addFormRef)"
-            >
-              修改
-            </el-button>
-            <el-popconfirm title="是否确认删除?" @confirm="handleDelete(row)">
-              <template #reference>
-                <el-button
-                  class="reset-margin"
-                  link
-                  type="primary"
-                  :size="size"
-                  :icon="useRenderIcon(Delete)"
-                >
-                  删除
-                </el-button>
-              </template>
-            </el-popconfirm>
+              @edit="handleUpdate(row, addFormRef)"
+              @delete="handleDelete(row)"
+            />
           </template>
         </pure-table>
       </template>
