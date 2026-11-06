@@ -89,15 +89,25 @@
   min-height: 0;
 }
 
+/* --------------------------------------------------------------------------
+   主视觉：几何机器狗（内联 SVG）+ 动效
+   动效全部是 transform / opacity，不改布局；prefers-reduced-motion 下统一静止。
+   -------------------------------------------------------------------------- */
+.robot-dog-wrap {
+  width: 100%;
+  max-width: 580px;
+  margin: 0 auto;
+  filter: drop-shadow(0 24px 40px rgb(2 6 23 / 55%));
+  animation: rd-enter 0.7s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
 .robot-dog {
   display: block;
   width: 100%;
-  max-width: 460px;
   height: auto;
-  margin: 0 auto;
-  filter: drop-shadow(0 24px 40px rgb(2 6 23 / 55%));
 }
 
+/* 机身结构 */
 .rd-panel {
   fill: #1e2a44;
   stroke: rgb(148 163 184 / 42%);
@@ -116,23 +126,8 @@
   stroke-linecap: round;
 }
 
-.rd-signal {
-  fill: none;
-  stroke: rgb(74 222 128 / 55%);
-  stroke-width: 2;
-  stroke-linecap: round;
-}
-
 .rd-accent {
   fill: #22c55e;
-}
-
-.rd-led {
-  fill: rgb(148 163 184 / 35%);
-}
-
-.rd-lens-core {
-  fill: #f0fff7;
 }
 
 .rd-legs-far path {
@@ -149,6 +144,347 @@
   stroke-width: 12;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+/* 1. 入场 + 持续浮动（6s 一个呼吸周期） */
+@keyframes rd-enter {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 机体随步伐上下起伏：一个循环两步，所以有两处抬升 */
+@keyframes rd-bob {
+  0%,
+  50%,
+  100% {
+    transform: translateY(0);
+  }
+
+  25%,
+  75% {
+    transform: translateY(-2.5px);
+  }
+}
+
+.rd-float {
+  animation: rd-bob 1.1s ease-in-out infinite;
+}
+
+/* 四足交替踏步：大腿绕髋关节摆，小腿绕膝关节收放。
+   对角腿同相位（trot），--phase 控制错峰。 */
+.rd-limb {
+  transform-box: view-box;
+  transform-origin: var(--hip-x) var(--hip-y);
+  animation: rd-step 1.1s linear infinite;
+  animation-delay: var(--phase, 0s);
+}
+
+.rd-limb__shin {
+  transform-box: view-box;
+  transform-origin: var(--knee-x) var(--knee-y);
+  animation: rd-knee 1.1s linear infinite;
+  animation-delay: var(--phase, 0s);
+}
+
+/* rotate() 为顺时针：腿垂在髋点下方时，正角把脚往左（后）带，负角往右（前）带。
+   所以 0% 脚在后、50% 脚在前 = 前半程"抬腿前摆"，后半程"落地后蹬"。 */
+/* 关键帧由两段腿长的逆运动学解算得出（脚本见提交说明）：
+   0%–60% 支撑期：脚贴地由前向后拖；60%–100% 摆动期：收小腿抬脚、由后向前迈。
+   因此每一步都是"空中向前迈 + 贴地向后蹬"，狗头朝右，看起来就是向右前进。 */
+@keyframes rd-step {
+  0% {
+    transform: rotate(-5.3deg);
+  }
+  10% {
+    transform: rotate(-3.4deg);
+  }
+  20% {
+    transform: rotate(-1.6deg);
+  }
+  30% {
+    transform: rotate(0deg);
+  }
+  40% {
+    transform: rotate(1.5deg);
+  }
+  50% {
+    transform: rotate(2.9deg);
+  }
+  60% {
+    transform: rotate(4.1deg);
+  }
+  62% {
+    transform: rotate(6.5deg);
+  }
+  65% {
+    transform: rotate(9.4deg);
+  }
+  68% {
+    transform: rotate(11.5deg);
+  }
+  70% {
+    transform: rotate(12.5deg);
+  }
+  75% {
+    transform: rotate(13.8deg);
+  }
+  80% {
+    transform: rotate(13.2deg);
+  }
+  85% {
+    transform: rotate(10.8deg);
+  }
+  90% {
+    transform: rotate(6.9deg);
+  }
+  95% {
+    transform: rotate(1.6deg);
+  }
+  100% {
+    transform: rotate(-5.3deg);
+  }
+}
+
+@keyframes rd-knee {
+  0% {
+    transform: rotate(-0.8deg);
+  }
+  10% {
+    transform: rotate(-0.8deg);
+  }
+  20% {
+    transform: rotate(-0.5deg);
+  }
+  30% {
+    transform: rotate(0deg);
+  }
+  40% {
+    transform: rotate(0.8deg);
+  }
+  50% {
+    transform: rotate(2.0deg);
+  }
+  60% {
+    transform: rotate(3.4deg);
+  }
+  62% {
+    transform: rotate(-2.9deg);
+  }
+  65% {
+    transform: rotate(-10.9deg);
+  }
+  68% {
+    transform: rotate(-17.5deg);
+  }
+  70% {
+    transform: rotate(-21.0deg);
+  }
+  75% {
+    transform: rotate(-27.2deg);
+  }
+  80% {
+    transform: rotate(-29.6deg);
+  }
+  85% {
+    transform: rotate(-28.0deg);
+  }
+  90% {
+    transform: rotate(-22.6deg);
+  }
+  95% {
+    transform: rotate(-13.5deg);
+  }
+  100% {
+    transform: rotate(-0.8deg);
+  }
+}
+
+/* 2. 地面投影：浮动越高，影子越小越淡 */
+@keyframes rd-shadow {
+  0%,
+  50%,
+  100% {
+    opacity: 0.9;
+    transform: scale(1);
+  }
+
+  25%,
+  75% {
+    opacity: 0.72;
+    transform: scale(0.96);
+  }
+}
+
+.rd-shadow {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: rd-shadow 1.1s ease-in-out infinite;
+}
+
+/* 3. 地面虚线流动，示意数据在跑 */
+/* 偏移量由 0 增大时，虚线整体向路径起点（左）移动：
+   狗头朝右，所以虚线要「从右往左」流，才像在往前走。 */
+@keyframes rd-ground {
+  to {
+    stroke-dashoffset: 22;
+  }
+}
+
+.rd-ground {
+  animation: rd-ground 1.6s linear infinite;
+}
+
+/* 4. 扫描光束：从镜头处向外"呼"一下 */
+@keyframes rd-beam {
+  0%,
+  100% {
+    opacity: 0.5;
+    transform: scaleX(0.9);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scaleX(1.04);
+  }
+}
+
+.rd-beam {
+  transform-box: view-box;
+  transform-origin: 300px 92px;
+  animation: rd-beam 3.2s ease-in-out infinite;
+}
+
+/* 5. 镜头：呼吸光 + 向外扩散的扫描波 */
+.rd-lens {
+  fill: #22c55e;
+  animation: rd-glow 2.8s ease-in-out infinite;
+}
+
+@keyframes rd-glow {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 3px rgb(34 197 94 / 55%));
+  }
+
+  50% {
+    filter: drop-shadow(0 0 10px rgb(34 197 94 / 95%));
+  }
+}
+
+.rd-lens-core {
+  fill: #f0fff7;
+}
+
+@keyframes rd-ping {
+  0% {
+    opacity: 0.85;
+    transform: scale(1);
+  }
+
+  70%,
+  100% {
+    opacity: 0;
+    transform: scale(3.2);
+  }
+}
+
+.rd-lens-ring {
+  fill: none;
+  stroke: #22c55e;
+  stroke-width: 1.5;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: rd-ping 2.8s ease-out infinite;
+}
+
+/* 6. 天线信号弧：一圈接一圈往外闪 */
+@keyframes rd-signal {
+  0%,
+  100% {
+    opacity: 0.16;
+  }
+
+  38% {
+    opacity: 0.95;
+  }
+}
+
+.rd-signal {
+  fill: none;
+  stroke: #22c55e;
+  stroke-width: 2;
+  stroke-linecap: round;
+  animation: rd-signal 2.4s ease-in-out infinite;
+}
+
+.rd-signal--2 {
+  animation-delay: 0.35s;
+}
+
+/* 7. 机身状态灯：依次点亮，像心跳 */
+@keyframes rd-led {
+  0%,
+  62%,
+  100% {
+    opacity: 0.3;
+  }
+
+  18% {
+    opacity: 1;
+  }
+}
+
+.rd-led {
+  fill: #22c55e;
+  opacity: 0.3;
+  animation: rd-led 2.6s ease-in-out infinite;
+}
+
+.rd-led--2 {
+  animation-delay: 0.22s;
+}
+
+.rd-led--3 {
+  animation-delay: 0.44s;
+}
+
+/* 8. 低高度视口：整体缩小，保持首屏不滚动 */
+@media (height <= 780px) {
+  .robot-dog-wrap {
+    max-width: 420px;
+  }
+}
+
+/* 9. 尊重「减少动态效果」：全部静止在可读的终态 */
+@media (prefers-reduced-motion: reduce) {
+  .robot-dog-wrap,
+  .robot-dog * {
+    animation: none !important;
+  }
+
+  .rd-beam {
+    opacity: 0.8;
+    transform: none;
+  }
+
+  .rd-signal {
+    opacity: 0.55;
+  }
+
+  .rd-led {
+    opacity: 0.9;
+  }
+
+  .rd-lens-ring {
+    opacity: 0;
+  }
 }
 
 .login-brand__copy {
@@ -440,10 +776,6 @@ html.dark .login-card {
   .login-brand {
     gap: 16px;
     padding: 28px 40px;
-  }
-
-  .robot-dog {
-    max-width: 340px;
   }
 
   .brand-capabilities {
