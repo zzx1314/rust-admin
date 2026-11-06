@@ -59,41 +59,100 @@ export default function useDragAndDrop() {
     });
     const nodeId = getId();
 
-    const defaultData = {
-      taskId: nodeId,
-      label: "节点",
-      deviceId: null,
-      routeId: null,
-      taskInfo: {
-        fromWp: { wpId: null },
-        toWp: { wpId: null },
-        event: "event_" + Math.random().toString(36).slice(2, 8)
-      },
-      action: {
-        type: "",
-        params: {
-          timeSec: null,
-          targetAlt: null,
-          targetWp: null,
-          num: null,
-          intervalSec: null,
-          type: "",
-          reason: "",
-          event: {
-            onComplete:
-              "complete_" + Math.random().toString(36).slice(2, 10),
-            onFail: "fail_" + Math.random().toString(36).slice(2, 10)
+    let newNode;
+    switch (draggedType.value) {
+      case "start":
+        newNode = {
+          id: nodeId,
+          type: "start",
+          position,
+          data: { label: "开始", nodeType: "start" }
+        };
+        break;
+      case "end":
+        newNode = {
+          id: nodeId,
+          type: "end",
+          position,
+          data: { label: "结束", nodeType: "end" }
+        };
+        break;
+      case "task":
+        newNode = {
+          id: nodeId,
+          type: "task",
+          position,
+          data: {
+            taskId: nodeId,
+            routeId: null,
+            deviceId: null,
+            nodeType: "task",
+            taskInfo: {
+              fromWp: { wpId: null },
+              toWp: { wpId: null },
+              event: `init_${Math.random().toString(36).slice(2, 10)}`
+            },
+            pathString: [],
+            routePointListOptions: []
           }
-        }
-      }
-    };
-
-    const newNode = {
-      id: nodeId,
-      type: draggedType.value,
-      position,
-      data: { ...defaultData, label: draggedType.value + "节点" }
-    };
+        };
+        break;
+      case "action":
+        newNode = {
+          id: nodeId,
+          type: "action",
+          position,
+          data: {
+            nodeType: "action",
+            action: {
+              type: "",
+              timeoutSec: null,
+              params: {
+                timeSec: null,
+                targetAlt: null,
+                targetWpStr: null,
+                targetWp: null,
+                num: null,
+                intervalSec: null,
+                type: "",
+                reason: "",
+                event: {
+                  onComplete: `complete_${Math.random().toString(36).slice(2, 10)}`,
+                  onFail: `fail_${Math.random().toString(36).slice(2, 10)}`
+                }
+              }
+            },
+            xpoint: null,
+            ypoint: null,
+            zpoint: null
+          }
+        };
+        break;
+      case "error":
+        newNode = {
+          id: nodeId,
+          type: "error",
+          position,
+          data: {
+            nodeType: "action",
+            action: {
+              type: "",
+              params: {
+                reason: "",
+                event: { onComplete: "" }
+              }
+            }
+          }
+        };
+        break;
+      default:
+        newNode = {
+          id: nodeId,
+          type: draggedType.value,
+          position,
+          data: { label: "节点" }
+        };
+    }
 
     const { off } = onNodesInitialized(() => {
       updateNode(nodeId, node => ({
