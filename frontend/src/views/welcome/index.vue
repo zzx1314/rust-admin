@@ -161,54 +161,6 @@ const weeklyChart = computed(
       :closable="false"
     />
 
-    <!-- 设备在线率：单行紧凑横条，不额外占用首屏高度；状态同时用文字 + 颜色表达 -->
-    <section class="dog-card dashboard__fleet" aria-labelledby="fleet-title">
-      <h2 id="fleet-title" class="dog-card__title dashboard__fleet-title">
-        在线率
-      </h2>
-      <p class="dashboard__rate dog-num">
-        {{ onlineRate }}<span class="dashboard__rate-unit">%</span>
-      </p>
-      <div
-        class="dashboard__meter"
-        role="progressbar"
-        :aria-valuenow="onlineRate"
-        aria-valuemin="0"
-        aria-valuemax="100"
-        :aria-label="`设备在线率 ${onlineRate}%，共 ${fleet.total} 台设备`"
-      >
-        <span class="dashboard__meter-fill" :style="{ width: `${onlineRate}%` }" />
-      </div>
-      <ul class="dashboard__fleet-legend">
-        <li class="dashboard__legend-item">
-          <DogStatusBadge status="online" live />
-          <b class="dog-num">{{ fleet.online }}</b>
-          台
-        </li>
-        <li class="dashboard__legend-item">
-          <DogStatusBadge status="offline" />
-          <b class="dog-num">{{ fleet.offline }}</b>
-          台
-        </li>
-        <li class="dashboard__legend-item dashboard__legend-total">
-          共
-          <b class="dog-num">{{ fleet.total }}</b>
-          台
-        </li>
-      </ul>
-      <div class="dashboard__meta">
-        <span class="dashboard__updated dog-num">{{ updatedText }}</span>
-        <el-button
-          circle
-          size="small"
-          aria-label="刷新统计数据"
-          :icon="useRenderIcon(Refresh)"
-          :loading="refreshing"
-          @click="refresh"
-        />
-      </div>
-    </section>
-
     <!-- 核心指标 -->
     <section class="dashboard__kpis" aria-label="核心指标">
       <template v-if="loading && !kpis.length">
@@ -256,6 +208,46 @@ const weeklyChart = computed(
             <h2 class="dog-card__title">设备类型分布</h2>
             <p class="dog-card__hint">按型号聚合的在管设备数量</p>
           </div>
+          <div class="dashboard__fleet">
+            <span class="dashboard__legend-item">
+              <DogStatusBadge status="online" live />
+              <b class="dog-num">{{ fleet.online }}</b>
+              台
+            </span>
+            <span class="dashboard__legend-item">
+              <DogStatusBadge status="offline" />
+              <b class="dog-num">{{ fleet.offline }}</b>
+              台
+            </span>
+            <span class="dashboard__rate">
+              <span class="dashboard__rate-label">在线率</span>
+              <b class="dog-num">
+                {{ onlineRate }}<span class="dashboard__rate-unit">%</span>
+              </b>
+            </span>
+            <el-button
+              circle
+              size="small"
+              aria-label="刷新统计数据"
+              :title="`数据更新于 ${updatedText}`"
+              :icon="useRenderIcon(Refresh)"
+              :loading="refreshing"
+              @click="refresh"
+            />
+          </div>
+        </div>
+        <div
+          class="dashboard__meter"
+          role="progressbar"
+          :aria-valuenow="onlineRate"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          :aria-label="`设备在线率 ${onlineRate}%，共 ${fleet.total} 台设备`"
+        >
+          <span
+            class="dashboard__meter-fill"
+            :style="{ width: `${onlineRate}%` }"
+          />
         </div>
         <DocNumBer
           v-if="deviceTypes.xdata.length"
@@ -277,42 +269,54 @@ const weeklyChart = computed(
 .dashboard {
   gap: var(--dog-space-3);
   padding-top: 0;
+  padding-bottom: 0;
 }
 
-/* 在线率横条：单行排布，窄屏自动换行 */
+/* 在线率摘要（并入「设备类型分布」卡头，不额外占行） */
 .dashboard__fleet {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--dog-space-2) var(--dog-space-4);
+  gap: var(--dog-space-2) var(--dog-space-3);
   align-items: center;
-  padding: var(--dog-space-3) var(--dog-space-4);
 }
 
-.dashboard__fleet-title {
-  flex: none;
-  font-size: 14px;
+.dashboard__legend-item {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 13px;
+  color: var(--dog-text-secondary);
+  white-space: nowrap;
 }
 
 .dashboard__rate {
-  flex: none;
+  display: inline-flex;
+  gap: 4px;
+  align-items: baseline;
   margin: 0;
-  font-size: 26px;
+  font-size: 15px;
   font-weight: 700;
-  line-height: 1.1;
+  line-height: 1.2;
   color: var(--dog-text-primary);
+  white-space: nowrap;
+}
+
+.dashboard__rate-label {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--dog-text-muted);
 }
 
 .dashboard__rate-unit {
-  margin-left: 2px;
-  font-size: 14px;
+  margin-left: 1px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--dog-text-muted);
 }
 
 .dashboard__meter {
-  flex: 1 1 160px;
-  min-width: 120px;
-  height: 8px;
+  height: 6px;
+  margin-bottom: var(--dog-space-2);
   overflow: hidden;
   background: var(--dog-surface-muted);
   border-radius: var(--dog-radius-pill);
@@ -331,44 +335,6 @@ const weeklyChart = computed(
   transition: width var(--dog-duration-slow) var(--dog-ease);
 }
 
-.dashboard__fleet-legend {
-  display: flex;
-  flex: none;
-  flex-wrap: wrap;
-  gap: var(--dog-space-3);
-  align-items: center;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.dashboard__legend-item {
-  display: inline-flex;
-  gap: 6px;
-  align-items: center;
-  font-size: 13px;
-  color: var(--dog-text-secondary);
-  white-space: nowrap;
-}
-
-.dashboard__legend-total {
-  color: var(--dog-text-muted);
-}
-
-.dashboard__meta {
-  display: flex;
-  flex: none;
-  gap: var(--dog-space-2);
-  align-items: center;
-  margin-left: auto;
-}
-
-.dashboard__updated {
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--dog-text-muted);
-}
-
 /* 指标卡 */
 .dashboard__kpis {
   display: grid;
@@ -380,21 +346,10 @@ const weeklyChart = computed(
 .dashboard__grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
-  gap: var(--dog-space-4);
+  gap: var(--dog-space-3);
 }
 
 .dashboard :deep(.el-empty) {
   padding: var(--dog-space-5) 0;
-}
-
-@media (width <= 640px) {
-  .dashboard__meter {
-    order: 10;
-    flex-basis: 100%;
-  }
-
-  .dashboard__meta {
-    margin-left: 0;
-  }
 }
 </style>

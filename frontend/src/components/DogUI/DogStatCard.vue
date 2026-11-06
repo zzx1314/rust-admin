@@ -194,7 +194,7 @@ const accentStyle = computed(() =>
   align-items: baseline;
   min-width: 0;
   margin: 0;
-  font-size: 30px;
+  font-size: 26px;
   font-weight: 700;
   line-height: 1.15;
   color: var(--dog-text-primary);

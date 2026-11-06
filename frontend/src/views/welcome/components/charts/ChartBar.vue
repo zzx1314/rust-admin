@@ -132,5 +132,5 @@ watch(
 </script>
 
 <template>
-  <div ref="chartRef" style="width: 100%; height: 365px" />
+  <div ref="chartRef" style="width: 100%; height: 330px" />
 </template>
