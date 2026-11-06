@@ -14,10 +14,11 @@ import {
 import { CREATE_TIME_FIELDS, type DogSearchField } from "../components/search";
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
-import { useRouter } from "vue-router";
+import { useProcess } from "./flowHook";
 
 export function useDogTask() {
-  const router = useRouter();
+  // 隐藏路由（流程设计）的标签页需要手动维护，见 flowHook.ts
+  const { toDetail } = useProcess();
 
   const rules = reactive<FormRules>({
     taskName: [{ required: true, message: "名称必填", trigger: "blur" }],
@@ -195,20 +196,17 @@ export function useDogTask() {
     if (formEl) nextTick(() => formEl.formInstance?.clearValidate());
   }
 
-  // 流程设计 - navigate to flow design page
+  // 流程设计 - 跳转到流程设计页面（先 push 标签页再跳转，否则顶部不会有 tab）
   function flowRoute(row) {
     // 没有 workflowUuid 时用稳定的 task_<id>，避免每次进入生成新 uuid 导致流程找不到
     const workflowUuid = row.workflowUuid || `task_${row.id}`;
-    router.push({
-      name: "dronesFlowDesign",
-      query: {
-        taskId: row.id,
-        deviceId: row.deviceId,
-        taskType: "taskDesign",
-        name: row.taskName,
-        routeId: row.routeId,
-        workflowId: workflowUuid
-      }
+    toDetail({
+      taskId: String(row.id),
+      deviceId: row.deviceId == null ? "" : String(row.deviceId),
+      taskType: "taskDesign",
+      name: row.taskName ?? "",
+      routeId: row.routeId == null ? "" : String(row.routeId),
+      workflowId: workflowUuid
     });
   }
 

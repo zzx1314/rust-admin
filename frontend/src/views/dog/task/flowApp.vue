@@ -8,7 +8,7 @@ import {
   provide
 } from "vue";
 import { VueFlow, useVueFlow, MarkerType } from "@vue-flow/core";
-import { useRoute, useRouter } from "vue-router";
+import { useRouter } from "vue-router";
 import "vue-json-pretty/lib/styles.css";
 import VueJsonPretty from "vue-json-pretty";
 import { useMultiTagsStoreHook } from "@/store/modules/multiTags";
@@ -34,9 +34,12 @@ import {
 } from "@/api/dogWorkflow";
 import { dogTaskGetTaskStatus } from "@/api/dogTask";
 import { SUCCESS } from "@/api/base";
+import { useProcess, FLOW_DESIGN_PATH } from "./flowHook";
 
-const route = useRoute();
 const router = useRouter();
+// 与 mgmt_platform 一致：刷新后地址栏参数还在，用它把标签页重新 push 回来
+const { initToDetail, getParameter } = useProcess();
+initToDetail();
 
 const {
   onConnect,
@@ -52,12 +55,12 @@ const {
 } = useVueFlow();
 const { onDragOver, onDrop, onDragLeave, isDragOver } = useDragAndDrop();
 
-const taskId = route.query.taskId as string;
-const taskType = route.query.taskType as string;
-const workflowId = route.query.workflowId as string;
-const deviceId = route.query.deviceId as string;
-const routeId = route.query.routeId as string;
-const name = route.query.name as string;
+const taskId = getParameter.taskId as string;
+const taskType = getParameter.taskType as string;
+const workflowId = getParameter.workflowId as string;
+const deviceId = getParameter.deviceId as string;
+const routeId = getParameter.routeId as string;
+const name = getParameter.name as string;
 
 const isShowSave = taskType === "taskDesign";
 const isSuccessNodeId = ref<string[]>([]);
@@ -272,7 +275,7 @@ async function goBack() {
   const tagsStore = useMultiTagsStoreHook();
   await router.replace({ path: "/dog/task/index" });
   nextTick(() => {
-    tagsStore.handleTags("splice", "/dog/task/flow");
+    tagsStore.handleTags("splice", FLOW_DESIGN_PATH);
   });
 }
 
