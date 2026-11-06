@@ -10,6 +10,8 @@ import {
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
 import type { FieldValues } from "plus-pro-components";
+import { DATE_RANGE_FIELDS } from "@/components/DogUI/search";
+import type { DogSearchField } from "@/components/DogUI/search";
 
 export function usePSysLogrecord() {
   // ----变量定义-----
@@ -22,7 +24,17 @@ export function usePSysLogrecord() {
     beginTime: "",
     endTime: ""
   });
-  const moreCondition = ref(false);
+  /** 查询栏字段：与设备、指令等列表页共用同一套查询栏组件 */
+  const queryFields: DogSearchField[] = [
+    { label: "IP", prop: "ip" },
+    { label: "模块", prop: "type" },
+    { label: "操作", prop: "subType" },
+    { label: "账号", prop: "operator" }
+  ];
+  const moreQueryFields: DogSearchField[] = [
+    { label: "操作内容", prop: "action" },
+    ...DATE_RANGE_FIELDS
+  ];
   const dataList = ref([]);
   const loading = ref(true);
   const dialogFormVisible = ref(false);
@@ -258,7 +270,8 @@ export function usePSysLogrecord() {
     rules,
     columns,
     buttonClass,
-    moreCondition,
+    queryFields,
+    moreQueryFields,
     onSearch,
     resetForm,
     handleDelete,

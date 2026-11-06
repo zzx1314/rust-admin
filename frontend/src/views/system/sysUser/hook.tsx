@@ -9,15 +9,15 @@ import {
 } from "@/api/system";
 import { ElMessageBox } from "element-plus";
 import type { PaginationProps, AdaptiveConfig } from "@pureadmin/table";
-import { reactive, ref, computed, nextTick } from "vue";
+import { reactive, ref, computed } from "vue";
 import type { FormInstance } from "element-plus";
 import { SUCCESS } from "@/api/base";
+import { DATE_RANGE_FIELDS } from "@/components/DogUI/search";
+import type { DogSearchField } from "@/components/DogUI/search";
 import { hasAuth } from "@/router/utils";
 import aesUtils from "@/utils/aes";
 
 export function useUser() {
-  // 更多查询条件
-  const moreCondition = ref(false);
   // 性别
   const sexArray = ref([
     { text: "男", value: "男" },
@@ -63,6 +63,21 @@ export function useUser() {
   // 角色结果
   const roleArry = ref([]);
   const orgNameVal = ref("");
+  /** 查询栏字段：与设备、指令等列表页共用同一套查询栏组件 */
+  const queryFields = computed<DogSearchField[]>(() => [
+    { label: "账号", prop: "username" },
+    { label: "用户名", prop: "realName" },
+    {
+      label: "角色",
+      prop: "role",
+      type: "select",
+      options: roleArry.value.map(item => ({
+        label: item.text,
+        value: item.value
+      }))
+    }
+  ]);
+  const moreQueryFields: DogSearchField[] = [...DATE_RANGE_FIELDS];
   /** 撑满内容区自适应高度相关配置 */
   const adaptiveConfig: AdaptiveConfig = {
     /** 表格距离页面底部的偏移量，默认值为 `96` */
@@ -460,19 +475,26 @@ export function useUser() {
     if (!formEl) return;
     formEl.clearValidate();
   }
-  const restartForm = formEl => {
-    if (!formEl) return;
-    nextTick(() => {
-      formEl.resetFields();
-    });
-    cancel();
-    onSearch(queryForm.value.orgIds);
-  };
+  /** 查询栏重置：清空查询条件（保留组织树筛选）后重新查询 */
+  function resetQuery() {
+    queryForm.value = {
+      orgIds: queryForm.value.orgIds,
+      username: "",
+      realName: "",
+      lockFlag: null,
+      sex: "",
+      role: null,
+      beginTime: null,
+      endTime: null
+    };
+    onSearch();
+  }
 
   return {
-    moreCondition,
     sexArray,
     queryForm,
+    queryFields,
+    moreQueryFields,
     loading,
     columns,
     dataList,
@@ -502,6 +524,6 @@ export function useUser() {
     handleCurrentChange,
     handleSelectionChange,
     addFormInfo,
-    restartForm
+    resetQuery
   };
 }

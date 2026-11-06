@@ -11,17 +11,15 @@ import Password from "~icons/ri/lock-password-line";
 import More from "~icons/ep/more-filled";
 import Delete from "~icons/ep/delete";
 import EditPen from "~icons/ep/edit-pen";
-import Search from "~icons/ep/search";
-import Refresh from "~icons/ep/refresh";
 import AddFill from "~icons/ri/add-circle-line";
-import Down from "~icons/ep/arrow-down";
-import Up from "~icons/ep/arrow-up";
+import DogSearchForm from "@/components/DogUI/DogSearchForm.vue";
 import { hasAuth } from "@/router/utils";
 import { SUCCESS } from "@/api/base";
 
 const {
-  moreCondition,
   queryForm,
+  queryFields,
+  moreQueryFields,
   loading,
   columns,
   dataList,
@@ -40,13 +38,13 @@ const {
   setTreeData,
   openDia,
   onSearch,
+  resetQuery,
   handleUpdate,
   handleDelete,
   handleSizeChange,
   handleCurrentChange,
   handleSelectionChange,
   resetPwd,
-  restartForm,
   addFormInfo
 } = useUser();
 
@@ -157,7 +155,6 @@ onMounted(() => {
 });
 
 const addFormRef = ref();
-const formRef = ref();
 
 // 获取所有角色列表
 async function getAllRole() {
@@ -182,109 +179,14 @@ async function getAllRole() {
       @setTreeData="setTreeData"
     />
     <div class="float-right w-[81%]">
-      <el-form
-        ref="formRef"
-        :inline="true"
-        :model="queryForm"
-        class="bg-bg_color w-[99/100] pl-8 pt-4"
-      >
-        <el-form-item label="账号" prop="realName">
-          <el-input
-            v-model="queryForm.username"
-            placeholder="请输入账号"
-            clearable
-            class="!w-[150px]"
-          />
-        </el-form-item>
-        <el-form-item label="用户名" prop="realName">
-          <el-input
-            v-model="queryForm.realName"
-            placeholder="请输入用户名"
-            clearable
-            class="!w-[150px]"
-          />
-        </el-form-item>
-
-        <el-form-item label="角色" prop="role">
-          <el-select
-            v-model="queryForm.role"
-            placeholder="请选择角色"
-            style="width: 150px"
-            clearable
-          >
-            <el-option
-              v-for="item in roleArry"
-              :key="item.value"
-              :label="item.text"
-              :value="item.value"
-            />
-          </el-select>
-        </el-form-item>
-
-        <!--        <el-form-item label="性别" prop="sex">
-          <el-select
-            v-model="queryForm.sex"
-            placeholder="请选择性别"
-            style="width: 150px"
-          >
-            <el-option
-              v-for="item in sexArray"
-              :key="item.value"
-              :label="item.text"
-              :value="item.value"
-            />
-          </el-select>
-        </el-form-item>-->
-
-        <el-collapse-transition>
-          <div v-show="moreCondition">
-            <el-form-item label="开始时间：" prop="beginTime">
-              <el-date-picker
-                v-model="queryForm.beginTime"
-                type="date"
-                placeholder="请输入开始时间"
-                class="!w-[180px]"
-                value-format="YYYY-MM-DD"
-                clearable
-              />
-            </el-form-item>
-            <el-form-item label="结束时间：" prop="endTime">
-              <el-date-picker
-                v-model="queryForm.endTime"
-                placeholder="请输入结束时间"
-                type="date"
-                class="!w-[180px]"
-                value-format="YYYY-MM-DD"
-                clearable
-              />
-            </el-form-item>
-          </div>
-        </el-collapse-transition>
-
-        <el-form-item>
-          <el-button
-            type="primary"
-            :icon="useRenderIcon(Search)"
-            :loading="loading"
-            @click="onSearch(addForm.orgId)"
-          >
-            搜索
-          </el-button>
-          <el-button
-            :icon="useRenderIcon(Refresh)"
-            @click="restartForm(formRef)"
-          >
-            重置
-          </el-button>
-
-          <el-button
-            type="primary"
-            :icon="moreCondition ? useRenderIcon(Down) : useRenderIcon(Up)"
-            link
-            @click="moreCondition = !moreCondition"
-          />
-        </el-form-item>
-      </el-form>
+      <DogSearchForm
+        v-model="queryForm"
+        :fields="queryFields"
+        :more-fields="moreQueryFields"
+        :loading="loading"
+        @search="onSearch"
+        @reset="resetQuery"
+      />
       <PureTableBar title="用户管理" :columns="columns" @refresh="onSearch">
         <template #buttons>
           <el-button

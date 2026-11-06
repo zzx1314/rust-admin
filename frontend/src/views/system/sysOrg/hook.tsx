@@ -1,9 +1,11 @@
 import { message } from "@/utils/message";
 import { handleTree } from "@/utils/tree";
-import { reactive, ref, onMounted, nextTick } from "vue";
+import { reactive, ref, onMounted } from "vue";
 import { getDeptList, saveSysOrg, updateById, removeByIds } from "@/api/system";
 import type { FormInstance, FormRules } from "element-plus";
 import { SUCCESS } from "@/api/base";
+import { DATE_RANGE_FIELDS } from "@/components/DogUI/search";
+import type { DogSearchField } from "@/components/DogUI/search";
 
 export function useDept() {
   const addForm = reactive({
@@ -28,7 +30,6 @@ export function useDept() {
   const dialogFormVisible = ref(false);
   const formLabelWidth = "140px";
   const title = ref("");
-  const moreCondition = ref(false);
   const options = [
     {
       type: "top",
@@ -43,6 +44,17 @@ export function useDept() {
       name: "部门"
     }
   ];
+  /** 查询栏字段：与设备、指令等列表页共用同一套查询栏组件 */
+  const queryFields: DogSearchField[] = [
+    { label: "部门名称", prop: "name" },
+    {
+      label: "部门类型",
+      prop: "type",
+      type: "select",
+      options: options.map(item => ({ label: item.name, value: item.type }))
+    }
+  ];
+  const moreQueryFields: DogSearchField[] = [...DATE_RANGE_FIELDS];
   const dataList = ref([]);
   const loading = ref(true);
 
@@ -179,13 +191,14 @@ export function useDept() {
     if (!formEl) return;
     formEl.resetFields();
   }
-  const restartForm = formEl => {
-    if (!formEl) return;
-    nextTick(() => {
-      formEl.resetFields();
-      cancel();
-    });
-  };
+  /** 查询栏重置：清空查询条件后重新查询 */
+  function resetQuery() {
+    searchForm.name = "";
+    searchForm.type = "";
+    searchForm.beginTime = "";
+    searchForm.endTime = "";
+    onSearch();
+  }
 
   function cancel() {
     addForm.value = {
@@ -257,6 +270,8 @@ export function useDept() {
   return {
     addForm,
     searchForm,
+    queryFields,
+    moreQueryFields,
     dialogFormVisible,
     formLabelWidth,
     options,
@@ -265,10 +280,9 @@ export function useDept() {
     dataList,
     rules,
     title,
-    moreCondition,
     changeSelet,
     onSearch,
-    restartForm,
+    resetQuery,
     cancel,
     submitForm,
     openDia,

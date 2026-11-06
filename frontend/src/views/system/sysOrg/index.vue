@@ -7,22 +7,20 @@ import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 
 import Delete from "~icons/ep/delete";
 import EditPen from "~icons/ep/edit-pen";
-import Search from "~icons/ep/search";
-import Refresh from "~icons/ep/refresh";
 import AddFill from "~icons/ri/add-circle-line";
-import Down from "~icons/ep/arrow-down";
-import Up from "~icons/ep/arrow-up";
+import DogSearchForm from "@/components/DogUI/DogSearchForm.vue";
 import { hasAuth } from "@/router/utils";
 
 defineOptions({
   name: "sysOrg"
 });
-const formRef = ref();
 const tableRef = ref();
 const addFormRef = ref();
 const {
   addForm,
   searchForm,
+  queryFields,
+  moreQueryFields,
   dialogFormVisible,
   options,
   loading,
@@ -30,9 +28,8 @@ const {
   dataList,
   rules,
   title,
-  moreCondition,
   onSearch,
-  restartForm,
+  resetQuery,
   cancel,
   submitForm,
   openDia,
@@ -46,79 +43,14 @@ const {
 
 <template>
   <div class="main">
-    <el-form
-      ref="formRef"
-      :inline="true"
-      :model="searchForm"
-      class="bg-bg_color w-[99/100] pl-8 pt-4"
-    >
-      <el-form-item label="部门名称：" prop="name">
-        <el-input
-          v-model="searchForm.name"
-          placeholder="请输入部门名称"
-          clearable
-          class="!w-[200px]"
-        />
-      </el-form-item>
-
-      <el-form-item label="部门类型：" prop="type">
-        <el-select
-          v-model="searchForm.type"
-          placeholder="请选择类型"
-          class="!w-[180px]"
-          clearable
-        >
-          <el-option label="顶部门" value="top" />
-          <el-option label="单位" value="company" />
-          <el-option label="部门" value="common" />
-        </el-select>
-      </el-form-item>
-
-      <el-collapse-transition>
-        <div v-show="moreCondition">
-          <el-form-item label="开始时间：" prop="beginTime">
-            <el-date-picker
-              v-model="searchForm.beginTime"
-              type="date"
-              placeholder="请输入开始时间"
-              clearable
-              class="!w-[200px]"
-              value-format="YYYY-MM-DD"
-            />
-          </el-form-item>
-          <el-form-item label="结束时间：" prop="endTime">
-            <el-date-picker
-              v-model="searchForm.endTime"
-              type="date"
-              placeholder="请输入结束时间"
-              clearable
-              class="!w-[200px]"
-              value-format="YYYY-MM-DD"
-            />
-          </el-form-item>
-        </div>
-      </el-collapse-transition>
-
-      <el-form-item>
-        <el-button
-          type="primary"
-          :icon="useRenderIcon(Search)"
-          :loading="loading"
-          @click="onSearch"
-        >
-          搜索
-        </el-button>
-        <el-button :icon="useRenderIcon(Refresh)" @click="restartForm(formRef)">
-          重置
-        </el-button>
-        <el-button
-          type="primary"
-          :icon="moreCondition ? useRenderIcon(Down) : useRenderIcon(Up)"
-          link
-          @click="moreCondition = !moreCondition"
-        />
-      </el-form-item>
-    </el-form>
+    <DogSearchForm
+      v-model="searchForm"
+      :fields="queryFields"
+      :more-fields="moreQueryFields"
+      :loading="loading"
+      @search="onSearch"
+      @reset="resetQuery"
+    />
 
     <PureTableBar
       title="组织列表"

@@ -33,7 +33,7 @@ const value = defineModel<any>();
     v-model="value"
     type="date"
     :placeholder="field.placeholder ?? `请选择${field.label}`"
-    value-format="YYYY-MM-DD"
+    :value-format="field.valueFormat ?? 'YYYY-MM-DD'"
     clearable
     class="!w-[180px]"
   />

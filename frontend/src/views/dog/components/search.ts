@@ -1,16 +1,11 @@
-/** 机器狗业务页面统一查询栏使用的字段配置。 */
-export interface DogSearchOption {
-  label: string;
-  value: string | number;
-}
+import { DATE_RANGE_FIELDS } from "@/components/DogUI/search";
+import type {
+  DogSearchField,
+  DogSearchOption
+} from "@/components/DogUI/search";
 
-export interface DogSearchField {
-  label: string;
-  prop: string;
-  type?: "input" | "number" | "select" | "date";
-  placeholder?: string;
-  options?: DogSearchOption[];
-}
+/** 查询栏字段配置：类型定义已下沉到共享组件，这里只保留机器狗业务选项。 */
+export type { DogSearchField, DogSearchOption };
 
 /** 设备状态：网关心跳只会在 online / offline 之间切换。 */
 export const DEVICE_STATUS_OPTIONS: DogSearchOption[] = [
@@ -33,7 +28,4 @@ export const MAP_TYPE_OPTIONS: DogSearchOption[] = [
 ];
 
 /** 各页面「更多条件」里统一的创建时间范围。 */
-export const CREATE_TIME_FIELDS: DogSearchField[] = [
-  { label: "开始时间", prop: "beginTime", type: "date" },
-  { label: "结束时间", prop: "endTime", type: "date" }
-];
+export const CREATE_TIME_FIELDS: DogSearchField[] = [...DATE_RANGE_FIELDS];

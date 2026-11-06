@@ -16,7 +16,7 @@ import AddFill from "~icons/ri/add-circle-line";
 import UploadFileIcon from "~icons/ep/upload-filled";
 import { PureTableBar } from "@/components/RePureTableBar";
 import PureTable from "@pureadmin/table";
-import DogSearchForm from "../components/DogSearchForm.vue";
+import DogSearchForm from "@/components/DogUI/DogSearchForm.vue";
 import { MAP_TYPE_OPTIONS } from "../components/search";
 import { message } from "@/utils/message";
 

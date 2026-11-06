@@ -10,7 +10,7 @@ import More from "~icons/ep/more-filled";
 import DropperLine from "~icons/ri/dropper-line";
 import { PureTableBar } from "@/components/RePureTableBar";
 import PureTable from "@pureadmin/table";
-import DogSearchForm from "../components/DogSearchForm.vue";
+import DogSearchForm from "@/components/DogUI/DogSearchForm.vue";
 
 defineOptions({ name: "DogRoute" });
 

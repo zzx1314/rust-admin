@@ -15,7 +15,7 @@ import { PureTableBar } from "@/components/RePureTableBar";
 import { useCollectorTaskForm } from "./form";
 import PureTable from "@pureadmin/table";
 import { PlusDialogForm } from "plus-pro-components";
-import DogSearchForm from "../components/DogSearchForm.vue";
+import DogSearchForm from "@/components/DogUI/DogSearchForm.vue";
 
 defineOptions({ name: "DogTask" });
 

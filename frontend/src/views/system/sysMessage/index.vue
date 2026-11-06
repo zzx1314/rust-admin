@@ -1,10 +1,9 @@
 <script setup lang="ts">
 import { usePSysMessage } from "./hook";
 import { PureTableBar } from "@/components/RePureTableBar";
-import { useSysMessageForm } from "./form";
 import PureTable from "@pureadmin/table";
-import { PlusSearch } from "plus-pro-components";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
+import DogSearchForm from "@/components/DogUI/DogSearchForm.vue";
 import Delete from "~icons/ep/delete";
 import EditPen from "~icons/ep/edit-pen";
 import HandlerMessageForm from "@/views/system/sysMessage/HandlerMessageForm.vue";
@@ -16,7 +15,6 @@ defineOptions({
   name: "PSysMessage"
 });
 
-const { columnsQueryForm } = useSysMessageForm();
 const messageId = ref(null);
 const dialogFormVisible = ref(false);
 
@@ -35,6 +33,8 @@ const handlerItem = item => {
 
 const {
   queryForm,
+  queryFields,
+  moreQueryFields,
   dataList,
   loading,
   pagination,
@@ -49,17 +49,14 @@ const {
 </script>
 <template>
   <div class="main">
-    <el-card>
-      <PlusSearch
-        v-model="queryForm"
-        :columns="columnsQueryForm"
-        :show-number="3"
-        label-width="80"
-        label-position="right"
-        @search="onSearch"
-        @reset="cancel"
-      />
-    </el-card>
+    <DogSearchForm
+      v-model="queryForm"
+      :fields="queryFields"
+      :more-fields="moreQueryFields"
+      :loading="loading"
+      @search="onSearch"
+      @reset="cancel"
+    />
     <PureTableBar title="消息列表" :columns="columns" @refresh="onSearch">
       <template v-slot="{ size, checkList, dynamicColumns }">
         <pure-table

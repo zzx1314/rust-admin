@@ -5,6 +5,8 @@ import { pSysMessagePage, pSysMessageDelete } from "@/api/pSysMessage";
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
 import { useMessageStoreHook } from "@/store/modules/message";
+import { DATE_RANGE_FIELDS } from "@/components/DogUI/search";
+import type { DogSearchField } from "@/components/DogUI/search";
 
 export function usePSysMessage() {
   // ----变量定义-----
@@ -12,11 +14,29 @@ export function usePSysMessage() {
     ip: "",
     businessType: "",
     message: "",
+    handleMessage: "",
     status: "",
     beginTime: "",
     endTime: ""
   });
-  const moreCondition = ref(false);
+  /** 查询栏字段：与设备、指令等列表页共用同一套查询栏组件 */
+  const queryFields: DogSearchField[] = [
+    { label: "业务类型", prop: "businessType" },
+    {
+      label: "状态",
+      prop: "status",
+      type: "select",
+      options: [
+        { label: "已处置", value: "已处置" },
+        { label: "待处置", value: "待处置" }
+      ]
+    },
+    { label: "系统消息", prop: "message" }
+  ];
+  const moreQueryFields: DogSearchField[] = [
+    { label: "处置内容", prop: "handleMessage" },
+    ...DATE_RANGE_FIELDS
+  ];
   const dataList = ref([]);
   const loading = ref(true);
   const dialogFormVisible = ref(false);
@@ -174,6 +194,7 @@ export function usePSysMessage() {
     queryForm.value.ip = "";
     queryForm.value.businessType = "";
     queryForm.value.message = "";
+    queryForm.value.handleMessage = "";
     queryForm.value.status = "";
     queryForm.value.beginTime = "";
     queryForm.value.endTime = "";
@@ -212,7 +233,8 @@ export function usePSysMessage() {
     rules,
     columns,
     buttonClass,
-    moreCondition,
+    queryFields,
+    moreQueryFields,
     onSearch,
     resetForm,
     handleDelete,

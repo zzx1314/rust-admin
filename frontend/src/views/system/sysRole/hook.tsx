@@ -1,9 +1,10 @@
 import { deleteRole, getRoleList, saveRole, updateRole } from "@/api/system";
 import type { PaginationProps } from "@pureadmin/table";
-import { reactive, ref, computed, onMounted, nextTick } from "vue";
+import { reactive, ref, computed, onMounted } from "vue";
 import type { FormRules, FormInstance } from "element-plus";
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
+import type { DogSearchField } from "@/components/DogUI/search";
 
 export function useRole() {
   // ----变量定义-----
@@ -32,6 +33,11 @@ export function useRole() {
       remarks: ""
     }
   });
+  /** 查询栏字段：与设备、指令等列表页共用同一套查询栏组件 */
+  const queryFields: DogSearchField[] = [
+    { label: "名称", prop: "name" },
+    { label: "编码", prop: "code" }
+  ];
   const rules = reactive<FormRules>({
     name: [{ required: true, message: "名称必填", trigger: "blur" }],
     code: [{ required: true, message: "编码必填", trigger: "blur" }]
@@ -146,13 +152,13 @@ export function useRole() {
     if (!formEl) return;
     formEl.clearValidate();
   };
-  const restartForm = formEl => {
-    if (!formEl) return;
-    nextTick(() => {
-      formEl.resetFields();
-      cancel();
-    });
-  };
+  /** 查询栏重置：清空查询条件后重新查询 */
+  function resetQuery() {
+    form.name = "";
+    form.code = "";
+    form.status = "";
+    onSearch();
+  }
   // 取消
   function cancel() {
     addForm.value = {
@@ -211,6 +217,7 @@ export function useRole() {
 
   return {
     form,
+    queryFields,
     loading,
     columns,
     dataList,
@@ -222,7 +229,7 @@ export function useRole() {
     rules,
     onSearch,
     resetForm,
-    restartForm,
+    resetQuery,
     handleUpdate,
     handleDelete,
     handleSizeChange,

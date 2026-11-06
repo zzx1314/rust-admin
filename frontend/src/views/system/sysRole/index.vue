@@ -7,19 +7,18 @@ import { FormInstance } from "element-plus";
 
 import Delete from "~icons/ep/delete";
 import EditPen from "~icons/ep/edit-pen";
-import Search from "~icons/ep/search";
-import Refresh from "~icons/ep/refresh";
 import AddFill from "~icons/ri/add-circle-line";
+import DogSearchForm from "@/components/DogUI/DogSearchForm.vue";
 import { hasAuth } from "@/router/utils";
 
 defineOptions({
   name: "Role"
 });
 
-const formRef = ref();
 const addFormRef = ref<FormInstance>();
 const {
   form,
+  queryFields,
   loading,
   columns,
   dataList,
@@ -32,7 +31,7 @@ const {
   submitForm,
   openDia,
   onSearch,
-  restartForm,
+  resetQuery,
   handleUpdate,
   handleDelete,
   handleSizeChange,
@@ -43,42 +42,13 @@ const {
 
 <template>
   <div class="main">
-    <el-form
-      ref="formRef"
-      :inline="true"
-      :model="form"
-      class="bg-bg_color w-[99/100] pl-8 pt-4"
-    >
-      <el-form-item label="名称：" prop="name">
-        <el-input
-          v-model="form.name"
-          placeholder="请输入名称"
-          clearable
-          class="!w-[180px]"
-        />
-      </el-form-item>
-      <el-form-item label="编码：" prop="code">
-        <el-input
-          v-model="form.code"
-          placeholder="请输入编码"
-          clearable
-          class="!w-[180px]"
-        />
-      </el-form-item>
-      <el-form-item>
-        <el-button
-          type="primary"
-          :icon="useRenderIcon(Search)"
-          :loading="loading"
-          @click="onSearch"
-        >
-          搜索
-        </el-button>
-        <el-button :icon="useRenderIcon(Refresh)" @click="restartForm(formRef)">
-          重置
-        </el-button>
-      </el-form-item>
-    </el-form>
+    <DogSearchForm
+      v-model="form"
+      :fields="queryFields"
+      :loading="loading"
+      @search="onSearch"
+      @reset="resetQuery"
+    />
 
     <PureTableBar title="角色列表" :columns="columns" @refresh="onSearch">
       <template #buttons>

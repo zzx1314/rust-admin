@@ -3,22 +3,24 @@ import { ref } from "vue";
 import { FormInstance } from "element-plus";
 import { usePSysLogrecord } from "./hook";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
-import Search from "~icons/ep/search";
 import Delete from "~icons/ep/delete";
 import { PureTableBar } from "@/components/RePureTableBar";
 import { useLogForm } from "./form";
 import PureTable from "@pureadmin/table";
-import { PlusDialogForm, PlusSearch } from "plus-pro-components";
+import { PlusDialogForm } from "plus-pro-components";
+import DogSearchForm from "@/components/DogUI/DogSearchForm.vue";
 
 defineOptions({
   name: "PSysLogrecord"
 });
 
 const addFormRef = ref<FormInstance>();
-const { columnsForm, columnsQueryForm } = useLogForm();
+const { columnsForm } = useLogForm();
 
 const {
   queryForm,
+  queryFields,
+  moreQueryFields,
   dataList,
   loading,
   dialogFormVisible,
@@ -38,17 +40,14 @@ const {
 </script>
 <template>
   <div class="main">
-    <el-card class="my-card">
-      <PlusSearch
-        v-model="queryForm"
-        :columns="columnsQueryForm"
-        :show-number="4"
-        label-width="50"
-        label-position="right"
-        @search="onSearch"
-        @reset="cancel"
-      />
-    </el-card>
+    <DogSearchForm
+      v-model="queryForm"
+      :fields="queryFields"
+      :more-fields="moreQueryFields"
+      :loading="loading"
+      @search="onSearch"
+      @reset="cancel"
+    />
     <PureTableBar title="日志列表" :columns="columns" @refresh="onSearch">
       <template v-slot="{ size, checkList, dynamicColumns }">
         <pure-table
@@ -93,10 +92,6 @@ const {
 </template>
 
 <style scoped lang="scss">
-.my-card ::v-deep(.el-card__body) {
-  padding: 10px 10px 0;
-}
-
 :deep(.el-dropdown-menu__item i) {
   margin: 0;
 }

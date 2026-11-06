@@ -35,6 +35,7 @@ function setValue(prop: string, value: any) {
     class="dog-card dog-search-form"
     role="search"
     aria-label="查询条件"
+    @submit.prevent="emit('search')"
   >
     <el-form-item
       v-for="field in fields"
@@ -81,6 +82,8 @@ function setValue(prop: string, value: any) {
         type="primary"
         :icon="moreCondition ? useRenderIcon(Down) : useRenderIcon(Up)"
         link
+        :aria-expanded="moreCondition"
+        :aria-label="moreCondition ? '收起更多条件' : '展开更多条件'"
         @click="moreCondition = !moreCondition"
       />
     </el-form-item>

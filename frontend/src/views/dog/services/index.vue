@@ -10,7 +10,7 @@ import { PureTableBar } from "@/components/RePureTableBar";
 import { useCollectorServicesForm } from "./form";
 import PureTable from "@pureadmin/table";
 import { PlusDialogForm } from "plus-pro-components";
-import DogSearchForm from "../components/DogSearchForm.vue";
+import DogSearchForm from "@/components/DogUI/DogSearchForm.vue";
 defineOptions({ name: "DogServices" });
 const addFormRef = ref<FormInstance>();
 const { columnsForm } = useCollectorServicesForm();
