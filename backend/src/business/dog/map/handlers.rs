@@ -20,11 +20,10 @@ pub async fn create_map_handler(
     Extension(user): Extension<RequestUser>,
     Json(req): Json<CreateMapRequest>,
 ) -> Result<Json<ApiResponse<MapVO>>, AppError> {
-    let map = state
-        .dog_map_service
-        .create(req, &user.data_scope())
-        .await?;
-    Ok(Json(ApiResponse::ok(MapVO::from(map))))
+    let scope = user.data_scope();
+    let map = state.dog_map_service.create(req, &scope).await?;
+    let vo = state.dog_map_service.to_vo(map, &scope).await?;
+    Ok(Json(ApiResponse::ok(vo)))
 }
 
 /// `POST /api/dogMap/upload` — stores a `.zip` map package.
@@ -72,6 +71,7 @@ pub async fn upload_map_handler(
     let (file_name, bytes) =
         file.ok_or_else(|| AppError::BadRequest("请上传地图包文件".to_string()))?;
 
+    let scope = user.data_scope();
     let map = state
         .dog_map_service
         .save_upload(
@@ -79,11 +79,12 @@ pub async fn upload_map_handler(
             &file_name,
             &bytes,
             state.dog_gateway.upload_root(),
-            &user.data_scope(),
+            &scope,
         )
         .await?;
+    let vo = state.dog_map_service.to_vo(map, &scope).await?;
 
-    Ok(Json(ApiResponse::ok(MapVO::from(map))))
+    Ok(Json(ApiResponse::ok(vo)))
 }
 
 pub async fn get_map_handler(
@@ -91,11 +92,10 @@ pub async fn get_map_handler(
     Extension(user): Extension<RequestUser>,
     Path(params): Path<IdParam>,
 ) -> Result<Json<ApiResponse<MapVO>>, AppError> {
-    let map = state
-        .dog_map_service
-        .get_by_id(params.id, &user.data_scope())
-        .await?;
-    Ok(Json(ApiResponse::ok(MapVO::from(map))))
+    let scope = user.data_scope();
+    let map = state.dog_map_service.get_by_id(params.id, &scope).await?;
+    let vo = state.dog_map_service.to_vo(map, &scope).await?;
+    Ok(Json(ApiResponse::ok(vo)))
 }
 
 pub async fn list_maps_handler(
@@ -126,11 +126,10 @@ pub async fn update_map_handler(
     Path(params): Path<IdParam>,
     Json(req): Json<UpdateMapRequest>,
 ) -> Result<Json<ApiResponse<MapVO>>, AppError> {
-    let map = state
-        .dog_map_service
-        .update(params.id, req, &user.data_scope())
-        .await?;
-    Ok(Json(ApiResponse::ok(MapVO::from(map))))
+    let scope = user.data_scope();
+    let map = state.dog_map_service.update(params.id, req, &scope).await?;
+    let vo = state.dog_map_service.to_vo(map, &scope).await?;
+    Ok(Json(ApiResponse::ok(vo)))
 }
 
 /// `GET /api/dogMap/{id}/image` — 把地图包里的 `model.pgm` 转成 PNG 返回，

@@ -8,9 +8,14 @@ import {
   dogRouteDelete
 } from "@/api/dogRoute";
 import { dogMapGetAll } from "@/api/dogMap";
+import { dogParkGetAll } from "@/api/dogPark";
 import { useRouter } from "vue-router";
 import { useMultiTagsStoreHook } from "@/store/modules/multiTags";
-import { CREATE_TIME_FIELDS, type DogSearchField } from "../components/search";
+import {
+  CREATE_TIME_FIELDS,
+  type DogSearchField,
+  type DogSearchOption
+} from "../components/search";
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
 
@@ -23,6 +28,8 @@ export function useDogRoute() {
   });
   const switchLoadMap = ref({});
   const mapOptions = ref<Array<{ label: string; value: number }>>([]);
+  /** 园区下拉数据（查询条件 + 新增 / 修改弹窗共用）。 */
+  const parkOptions = ref<DogSearchOption[]>([]);
 
   const columns: TableColumnList = [
     {
@@ -33,6 +40,7 @@ export function useDogRoute() {
       label: "勾选列"
     },
     { label: "序号", type: "index", fixed: "left", width: 70 },
+    { label: "所属园区", prop: "parkName", minWidth: 140 },
     { label: "路线名称", prop: "routeName", minWidth: 150 },
     {
       label: "路线类型",
@@ -79,13 +87,20 @@ export function useDogRoute() {
     { label: "创建时间", prop: "createTime", width: 180 },
     { label: "操作", fixed: "right", width: 220, slot: "operation" }
   ];
-  const queryFields: DogSearchField[] = [
+  const queryFields = computed<DogSearchField[]>(() => [
+    {
+      label: "所属园区",
+      prop: "parkId",
+      type: "select",
+      options: parkOptions.value
+    },
     { label: "路线名称", prop: "routeName" },
     { label: "路线类型", prop: "routeType" },
     { label: "状态", prop: "routeStatus" }
-  ];
+  ]);
   const moreQueryFields: DogSearchField[] = [...CREATE_TIME_FIELDS];
   const queryForm = ref({
+    parkId: "" as number | "",
     routeName: "",
     routeType: "",
     routeStatus: "",
@@ -104,6 +119,7 @@ export function useDogRoute() {
   const title = ref("");
   const addForm = ref({
     id: null,
+    parkId: null,
     routeName: "",
     routeType: "",
     routeStatus: "停用",
@@ -243,6 +259,7 @@ export function useDogRoute() {
   function cancel() {
     addForm.value = {
       id: null,
+      parkId: null,
       routeName: "",
       routeType: "",
       routeStatus: "停用",
@@ -251,6 +268,7 @@ export function useDogRoute() {
       routeData: ""
     };
     queryForm.value = {
+      parkId: "",
       routeName: "",
       routeType: "",
       routeStatus: "",
@@ -309,9 +327,21 @@ export function useDogRoute() {
     });
   }
 
+  function loadParks() {
+    dogParkGetAll().then(res => {
+      if (res.code === SUCCESS && res.data) {
+        parkOptions.value = res.data.map(park => ({
+          label: park.parkName,
+          value: park.id
+        }));
+      }
+    });
+  }
+
   onMounted(() => {
     onSearch();
     loadMapOptions();
+    loadParks();
   });
 
   return {
@@ -328,6 +358,7 @@ export function useDogRoute() {
     moreQueryFields,
     switchLoadMap,
     mapOptions,
+    parkOptions,
     buttonClass,
     onSearch,
     handleUpdate,

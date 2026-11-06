@@ -19,7 +19,8 @@ pub async fn create_route_handler(
     Json(req): Json<CreateRouteRequest>,
 ) -> Result<Json<ApiResponse<RouteVO>>, AppError> {
     let route = state.dog_route_library_service.create(req).await?;
-    Ok(Json(ApiResponse::ok(RouteVO::from(route))))
+    let vo = state.dog_route_library_service.to_vo(route).await?;
+    Ok(Json(ApiResponse::ok(vo)))
 }
 
 pub async fn get_route_handler(
@@ -27,7 +28,8 @@ pub async fn get_route_handler(
     Path(params): Path<IdParam>,
 ) -> Result<Json<ApiResponse<RouteVO>>, AppError> {
     let route = state.dog_route_library_service.get_by_id(params.id).await?;
-    Ok(Json(ApiResponse::ok(RouteVO::from(route))))
+    let vo = state.dog_route_library_service.to_vo(route).await?;
+    Ok(Json(ApiResponse::ok(vo)))
 }
 
 pub async fn list_routes_handler(
@@ -56,7 +58,8 @@ pub async fn update_route_handler(
         .dog_route_library_service
         .update(params.id, req)
         .await?;
-    Ok(Json(ApiResponse::ok(RouteVO::from(route))))
+    let vo = state.dog_route_library_service.to_vo(route).await?;
+    Ok(Json(ApiResponse::ok(vo)))
 }
 
 pub async fn delete_route_handler(

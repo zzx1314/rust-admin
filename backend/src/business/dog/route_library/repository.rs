@@ -5,6 +5,8 @@ use crate::business::dog::route_library::entity::ActiveModel as RouteActiveModel
 use crate::business::dog::route_library::entity::Column as RouteColumn;
 use crate::business::dog::route_library::entity::Entity as RouteEntity;
 use crate::business::dog::route_library::entity::Model as DogRoute;
+use crate::business::dog::park::entity::Column as ParkColumn;
+use crate::business::dog::park::entity::Entity as ParkEntity;
 use crate::common::base::{BaseRepository, order_desc};
 use crate::common::util::parse_beijing_datetime;
 use chrono::{DateTime, Utc};
@@ -12,6 +14,7 @@ use sea_orm::{
     ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -54,6 +57,25 @@ impl SeaOrmDogRouteLibraryRepository {
             .await
     }
 
+    /// 按路线引用的 `park_id` 批量取园区名称，用于展示「所属园区」。
+    pub async fn find_park_names(
+        &self,
+        park_ids: &[i64],
+    ) -> Result<HashMap<i64, String>, sea_orm::DbErr> {
+        if park_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let parks = ParkEntity::find()
+            .filter(ParkColumn::Id.is_in(park_ids.iter().copied()))
+            .filter(ParkColumn::IsDeleted.eq(0))
+            .all(&*self.conn)
+            .await?;
+        Ok(parks
+            .into_iter()
+            .map(|park| (park.id, park.park_name))
+            .collect())
+    }
+
     pub async fn find_all_with_page(
         &self,
         query: &RoutePageQuery,
@@ -68,6 +90,9 @@ impl SeaOrmDogRouteLibraryRepository {
         }
         if let Some(ref status) = query.route_status {
             cond = cond.add(RouteColumn::RouteStatus.eq(status.as_str()));
+        }
+        if let Some(park_id) = query.park_id {
+            cond = cond.add(RouteColumn::ParkId.eq(park_id));
         }
 
         if let Some(ref begin) = query.begin_time
@@ -129,6 +154,9 @@ impl SeaOrmDogRouteLibraryRepository {
         }
         if let Some(desc) = &req.route_description {
             active_model.route_description = ActiveValue::set(Some(desc.clone()));
+        }
+        if let Some(park_id) = req.park_id {
+            active_model.park_id = ActiveValue::set(Some(park_id));
         }
         if let Some(model_id) = req.model_id {
             active_model.model_id = ActiveValue::set(model_id);

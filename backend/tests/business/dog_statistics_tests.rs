@@ -155,6 +155,7 @@ async fn create_route(state: &AppState, name: &str, model_id: i64) {
             route_type: None,
             route_status: None,
             route_description: None,
+            park_id: None,
             model_id,
             route_data: None,
         })

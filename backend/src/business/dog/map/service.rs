@@ -24,9 +24,11 @@ impl DogMapService {
         req: CreateMapRequest,
         scope: &DataScope,
     ) -> Result<DogMap, AppError> {
-        if let Some(park_id) = req.park_id {
-            self.ensure_park_access(park_id, scope).await?;
-        }
+        // 地图必须归属某个园区：新增时园区为必填项。
+        let park_id = req
+            .park_id
+            .ok_or_else(|| AppError::BadRequest("请选择所属园区".to_string()))?;
+        self.ensure_park_access(park_id, scope).await?;
         let id = generate_id();
         self.repo
             .create(&req, id, scope)
@@ -42,6 +44,20 @@ impl DogMapService {
             .ok_or_else(|| AppError::NotFound(format!("Map with id {} not found", id)))
     }
 
+    /// 转成 VO 并补齐「所属园区」名称，供单条详情 / 新增 / 修改接口返回。
+    pub async fn to_vo(&self, map: DogMap, scope: &DataScope) -> Result<MapVO, AppError> {
+        let mut vo = MapVO::from(map);
+        if let Some(park_id) = vo.park_id {
+            let park = self
+                .park_repo
+                .find_by_id(park_id, scope)
+                .await
+                .map_err(AppError::DatabaseErrorSeaOrm)?;
+            vo.park_name = park.map(|p| p.park_name);
+        }
+        Ok(vo)
+    }
+
     pub async fn list_page(
         &self,
         query: MapPageQuery,
@@ -53,8 +69,26 @@ impl DogMapService {
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
+        let mut park_ids: Vec<i64> = records.iter().filter_map(|m| m.park_id).collect();
+        park_ids.sort_unstable();
+        park_ids.dedup();
+        let park_names = self
+            .repo
+            .find_park_names(&park_ids)
+            .await
+            .map_err(AppError::DatabaseErrorSeaOrm)?;
+
+        let vo_list: Vec<MapVO> = records
+            .into_iter()
+            .map(|map| {
+                let mut vo = MapVO::from(map);
+                vo.park_name = vo.park_id.and_then(|id| park_names.get(&id).cloned());
+                vo
+            })
+            .collect();
+
         Ok(PageResponse::new(
-            records.into_iter().map(MapVO::from).collect(),
+            vo_list,
             total,
             query.current.max(1),
             query.size.max(1),
@@ -121,6 +155,15 @@ impl DogMapService {
         }
         if info.map_name.trim().is_empty() {
             return Err(AppError::BadRequest("地图名称不能为空".to_string()));
+        }
+
+        // 上传前先校验园区：新增必须指定园区，且园区要可访问。
+        match info.park_id {
+            Some(park_id) => self.ensure_park_access(park_id, scope).await?,
+            None if info.id.is_none() => {
+                return Err(AppError::BadRequest("请选择所属园区".to_string()));
+            }
+            None => {}
         }
 
         let dir = upload_root.join("maps");

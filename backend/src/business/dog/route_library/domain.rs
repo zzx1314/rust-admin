@@ -13,6 +13,8 @@ pub struct CreateRouteRequest {
     pub route_type: Option<String>,
     pub route_status: Option<String>,
     pub route_description: Option<String>,
+    /// 所属园区（可选，与 `dog_park` 关联）。
+    pub park_id: Option<i64>,
     pub model_id: i64,
     pub route_data: Option<String>,
 }
@@ -24,6 +26,7 @@ pub struct UpdateRouteRequest {
     pub route_type: Option<String>,
     pub route_status: Option<String>,
     pub route_description: Option<String>,
+    pub park_id: Option<i64>,
     pub model_id: Option<i64>,
     pub route_data: Option<String>,
 }
@@ -34,6 +37,7 @@ pub struct RoutePageQuery {
     pub route_name: Option<String>,
     pub route_type: Option<String>,
     pub route_status: Option<String>,
+    pub park_id: Option<i64>,
     pub begin_time: Option<String>,
     pub end_time: Option<String>,
     #[serde(default = "default_current")]
@@ -50,6 +54,9 @@ pub struct RouteVO {
     pub route_type: Option<String>,
     pub route_status: Option<String>,
     pub route_description: Option<String>,
+    pub park_id: Option<i64>,
+    /// 所属园区名称，按 `park_id` 关联 `dog_park` 填充。
+    pub park_name: Option<String>,
     pub model_id: i64,
     pub route_data: Option<String>,
     pub create_time: String,
@@ -64,6 +71,8 @@ impl From<DogRouteLibrary> for RouteVO {
             route_type: r.route_type,
             route_status: r.route_status,
             route_description: r.route_description,
+            park_id: r.park_id,
+            park_name: None,
             model_id: r.model_id,
             route_data: r.route_data,
             create_time: format_datetime(r.create_time),
@@ -80,6 +89,7 @@ impl CreateRouteRequest {
             route_type: ActiveValue::set(self.route_type.clone()),
             route_status: ActiveValue::set(self.route_status.clone()),
             route_description: ActiveValue::set(self.route_description.clone()),
+            park_id: ActiveValue::set(self.park_id),
             model_id: ActiveValue::set(self.model_id),
             route_data: ActiveValue::set(self.route_data.clone()),
             create_time: ActiveValue::set(now),

@@ -17,8 +17,9 @@ use tower::ServiceExt;
 use x_rust::api::AppState;
 use x_rust::app::App;
 use x_rust::business::dog::device::domain::CreateDeviceRequest;
-use x_rust::business::dog::map::domain::{CreateMapRequest, UploadMapRequest};
+use x_rust::business::dog::map::domain::{CreateMapRequest, MapPageQuery, UploadMapRequest};
 use x_rust::business::dog::park::domain::{CreateParkRequest, ParkPageQuery, UpdateParkRequest};
+use x_rust::business::dog::route_library::domain::{CreateRouteRequest, RoutePageQuery};
 use x_rust::business::dog::task::domain::{CreateTaskRequest, TaskPageQuery};
 use x_rust::business::dog::user_device::domain::CreateUserDeviceRequest;
 use x_rust::common::data_scope::DataScope;
@@ -370,9 +371,69 @@ async fn maps_follow_park_ownership() {
 }
 
 #[tokio::test]
+async fn maps_require_a_park_and_report_its_name() {
+    let state = test_state().await;
+    let a = owner_scope(USER_A);
+
+    let err = state
+        .dog_map_service
+        .create(
+            CreateMapRequest {
+                park_id: None,
+                ..create_map("无园区地图", 0)
+            },
+            &a,
+        )
+        .await
+        .expect_err("creating a map without a park must fail");
+    assert!(matches!(err, AppError::BadRequest(_)));
+
+    let park = state
+        .dog_park_service
+        .create(create_park("A 园区"), &a)
+        .await
+        .expect("user A may create a park");
+    state
+        .dog_map_service
+        .create(create_map("A 地图", park.id), &a)
+        .await
+        .expect("user A may add a map to their park");
+
+    let page = state
+        .dog_map_service
+        .list_page(
+            MapPageQuery {
+                map_name: None,
+                file_name: None,
+                park_id: Some(park.id),
+                begin_time: None,
+                end_time: None,
+                current: 1,
+                size: 10,
+            },
+            &a,
+        )
+        .await
+        .expect("map list must load");
+
+    assert_eq!(page.records.len(), 1);
+    assert_eq!(page.records[0].park_id, Some(park.id));
+    assert_eq!(
+        page.records[0].park_name.as_deref(),
+        Some("A 园区"),
+        "map list must resolve the park name"
+    );
+}
+
+#[tokio::test]
 async fn maps_can_be_uploaded_as_zip_packages() {
     let state = test_state().await;
     let a = owner_scope(USER_A);
+    let park = state
+        .dog_park_service
+        .create(create_park("A 园区"), &a)
+        .await
+        .expect("user A may create a park");
     let upload_root = std::env::temp_dir().join(format!(
         "dog_map_upload_{}_{}",
         std::process::id(),
@@ -389,7 +450,7 @@ async fn maps_can_be_uploaded_as_zip_packages() {
                 id: None,
                 map_name: "园区地图".to_string(),
                 map_type: Some("离线地图".to_string()),
-                park_id: None,
+                park_id: Some(park.id),
                 remarks: Some("测试地图包".to_string()),
             },
             "park-map.zip",
@@ -404,15 +465,33 @@ async fn maps_can_be_uploaded_as_zip_packages() {
     assert_eq!(map.file_name.as_deref(), Some("park-map.zip"));
     assert_eq!(map.file_format.as_deref(), Some("zip"));
     assert_eq!(map.file_size, Some(4));
-    assert!(map.park_id.is_none());
+    assert_eq!(map.park_id, Some(park.id));
     let stored = upload_root.join(map.file_path.clone().unwrap());
     assert!(stored.exists(), "uploaded package must be written to disk");
+
+    // 新增地图必须选择园区
+    let err = state
+        .dog_map_service
+        .save_upload(
+            UploadMapRequest {
+                map_name: "缺园区".to_string(),
+                ..Default::default()
+            },
+            "no-park.zip",
+            b"PK\x03\x04",
+            &upload_root,
+            &a,
+        )
+        .await
+        .expect_err("a park must be selected when creating a map");
+    assert!(matches!(err, AppError::BadRequest(_)));
 
     let err = state
         .dog_map_service
         .save_upload(
             UploadMapRequest {
                 map_name: "错误格式".to_string(),
+                park_id: Some(park.id),
                 ..Default::default()
             },
             "map.rar",
@@ -425,6 +504,69 @@ async fn maps_can_be_uploaded_as_zip_packages() {
     assert!(matches!(err, AppError::BadRequest(_)));
 
     std::fs::remove_dir_all(&upload_root).ok();
+}
+
+#[tokio::test]
+async fn routes_can_be_linked_to_a_park() {
+    let state = test_state().await;
+    let a = owner_scope(USER_A);
+    let park = state
+        .dog_park_service
+        .create(create_park("A 园区"), &a)
+        .await
+        .expect("user A may create a park");
+
+    let route = state
+        .dog_route_library_service
+        .create(CreateRouteRequest {
+            route_name: "园区路线".to_string(),
+            route_type: None,
+            route_status: None,
+            route_description: None,
+            park_id: Some(park.id),
+            model_id: 1,
+            route_data: None,
+        })
+        .await
+        .expect("route with park must be created");
+    assert_eq!(route.park_id, Some(park.id));
+
+    let page = state
+        .dog_route_library_service
+        .list_page(RoutePageQuery {
+            route_name: None,
+            route_type: None,
+            route_status: None,
+            park_id: Some(park.id),
+            begin_time: None,
+            end_time: None,
+            current: 1,
+            size: 10,
+        })
+        .await
+        .expect("route list must load");
+    assert_eq!(page.records.len(), 1);
+    assert_eq!(page.records[0].park_id, Some(park.id));
+    assert_eq!(
+        page.records[0].park_name.as_deref(),
+        Some("A 园区"),
+        "route list must resolve the park name"
+    );
+
+    let err = state
+        .dog_route_library_service
+        .create(CreateRouteRequest {
+            route_name: "非法园区路线".to_string(),
+            route_type: None,
+            route_status: None,
+            route_description: None,
+            park_id: Some(999_999),
+            model_id: 1,
+            route_data: None,
+        })
+        .await
+        .expect_err("unknown park must be rejected");
+    assert!(matches!(err, AppError::BadRequest(_)));
 }
 
 #[tokio::test]
@@ -825,10 +967,17 @@ async fn http_map_upload_endpoint_stores_zip_package() {
     let token = token_for(USER_A, "user_a");
     token_store.insert_token(USER_A, &token);
 
+    let park = state
+        .dog_park_service
+        .create(create_park("A 园区"), &owner_scope(USER_A))
+        .await
+        .expect("user A may create a park");
+
     let boundary = "----dog_map_test_boundary";
     let map_info = json!({
         "mapName": "园区地图",
         "mapType": "离线地图",
+        "parkId": park.id,
         "remarks": "测试地图包"
     })
     .to_string();
@@ -864,6 +1013,8 @@ async fn http_map_upload_endpoint_stores_zip_package() {
     assert_eq!(body["data"]["fileName"], "map.zip");
     assert_eq!(body["data"]["fileFormat"], "zip");
     assert_eq!(body["data"]["fileSize"], 4);
+    assert_eq!(body["data"]["parkId"], park.id);
+    assert_eq!(body["data"]["parkName"], "A 园区");
     assert!(
         body["data"]["filePath"]
             .as_str()
@@ -962,6 +1113,11 @@ async fn map_packages_are_rendered_to_png_with_grid_metadata() {
     let state = test_state().await;
     let a = owner_scope(USER_A);
     let upload_root = temp_upload_root("dog_map_image");
+    let park = state
+        .dog_park_service
+        .create(create_park("园区"), &a)
+        .await
+        .unwrap();
 
     let zip_bytes = sample_map_zip();
     let map = state
@@ -971,7 +1127,7 @@ async fn map_packages_are_rendered_to_png_with_grid_metadata() {
                 id: None,
                 map_name: "园区地图".to_string(),
                 map_type: Some("离线地图".to_string()),
-                park_id: None,
+                park_id: Some(park.id),
                 remarks: None,
             },
             "park-map.zip",
@@ -994,11 +1150,6 @@ async fn map_packages_are_rendered_to_png_with_grid_metadata() {
     assert_eq!(image.origin, vec![-8.7, -17.7, 0.0]);
 
     // 未上传地图包的地图要给出明确的错误，而不是空图
-    let park = state
-        .dog_park_service
-        .create(create_park("园区"), &a)
-        .await
-        .unwrap();
     let empty = state
         .dog_map_service
         .create(create_map("无地图包", park.id), &a)
@@ -1031,6 +1182,12 @@ async fn map_image_endpoint_serves_png_for_route_planning() {
     let token = token_for(USER_A, "user_a");
     token_store.insert_token(USER_A, &token);
 
+    let park = state
+        .dog_park_service
+        .create(create_park("A 园区"), &owner_scope(USER_A))
+        .await
+        .expect("user A may create a park");
+
     let map = state
         .dog_map_service
         .save_upload(
@@ -1038,7 +1195,7 @@ async fn map_image_endpoint_serves_png_for_route_planning() {
                 id: None,
                 map_name: "园区地图".to_string(),
                 map_type: Some("离线地图".to_string()),
-                park_id: None,
+                park_id: Some(park.id),
                 remarks: None,
             },
             "park-map.zip",

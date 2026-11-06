@@ -15,6 +15,7 @@ impl DogRouteLibraryService {
     }
 
     pub async fn create(&self, req: CreateRouteRequest) -> Result<DogRouteLibrary, AppError> {
+        self.ensure_park_exists(req.park_id).await?;
         let id = generate_id();
         self.repo
             .create(&req, id)
@@ -30,6 +31,20 @@ impl DogRouteLibraryService {
             .ok_or_else(|| AppError::NotFound(format!("Route with id {} not found", id)))
     }
 
+    /// 转成 VO 并补齐「所属园区」名称，供单条详情 / 新增 / 修改接口返回。
+    pub async fn to_vo(&self, route: DogRouteLibrary) -> Result<RouteVO, AppError> {
+        let mut vo = RouteVO::from(route);
+        if let Some(park_id) = vo.park_id {
+            let park_names = self
+                .repo
+                .find_park_names(&[park_id])
+                .await
+                .map_err(AppError::DatabaseErrorSeaOrm)?;
+            vo.park_name = park_names.get(&park_id).cloned();
+        }
+        Ok(vo)
+    }
+
     pub async fn list_page(
         &self,
         query: RoutePageQuery,
@@ -40,8 +55,26 @@ impl DogRouteLibraryService {
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?;
 
+        let mut park_ids: Vec<i64> = records.iter().filter_map(|r| r.park_id).collect();
+        park_ids.sort_unstable();
+        park_ids.dedup();
+        let park_names = self
+            .repo
+            .find_park_names(&park_ids)
+            .await
+            .map_err(AppError::DatabaseErrorSeaOrm)?;
+
+        let vo_list: Vec<RouteVO> = records
+            .into_iter()
+            .map(|route| {
+                let mut vo = RouteVO::from(route);
+                vo.park_name = vo.park_id.and_then(|id| park_names.get(&id).cloned());
+                vo
+            })
+            .collect();
+
         Ok(PageResponse::new(
-            records.into_iter().map(RouteVO::from).collect(),
+            vo_list,
             total,
             query.current.max(1),
             query.size.max(1),
@@ -60,6 +93,7 @@ impl DogRouteLibraryService {
         id: i64,
         req: UpdateRouteRequest,
     ) -> Result<DogRouteLibrary, AppError> {
+        self.ensure_park_exists(req.park_id).await?;
         self.repo
             .update(id, &req)
             .await
@@ -77,6 +111,25 @@ impl DogRouteLibraryService {
             return Err(AppError::NotFound(format!(
                 "Route with id {} not found",
                 id
+            )));
+        }
+        Ok(())
+    }
+
+    /// 园区是可选关联：指定时必须存在且未删除。
+    async fn ensure_park_exists(&self, park_id: Option<i64>) -> Result<(), AppError> {
+        let Some(park_id) = park_id else {
+            return Ok(());
+        };
+        let park_names = self
+            .repo
+            .find_park_names(&[park_id])
+            .await
+            .map_err(AppError::DatabaseErrorSeaOrm)?;
+        if !park_names.contains_key(&park_id) {
+            return Err(AppError::BadRequest(format!(
+                "Park with id {} not found",
+                park_id
             )));
         }
         Ok(())

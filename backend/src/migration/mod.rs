@@ -367,6 +367,7 @@ mod tests {
                 "reorder_map_menu",
                 "add_map_file_fields",
                 "reorder_menus",
+                "add_route_park",
             ]
         );
         assert_eq!(migrations[0].name(), "p_sys_tables_from_file");
@@ -409,6 +410,12 @@ mod tests {
             "SELECT 1 FROM pragma_table_info('dog_task') WHERE name = 'user_id'",
         );
         assert!(connection.query_one(task_user_id).await.unwrap().is_some());
+
+        let route_park_id = Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT 1 FROM pragma_table_info('dog_route_library') WHERE name = 'park_id'",
+        );
+        assert!(connection.query_one(route_park_id).await.unwrap().is_some());
 
         // The dog / park pages must be first-level menus (no 1200 / 1300
         // directories any more), linked to the admin role, and the dangling

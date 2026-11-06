@@ -15,6 +15,8 @@ pub struct Model {
     pub route_status: Option<String>,
     #[sea_orm(column_name = "route_description", column_type = "Text", nullable)]
     pub route_description: Option<String>,
+    #[sea_orm(column_name = "park_id", column_type = "Integer", nullable)]
+    pub park_id: Option<i64>,
     #[sea_orm(column_name = "model_id", column_type = "Integer")]
     pub model_id: i64,
     #[sea_orm(column_name = "route_data", column_type = "Text", nullable)]

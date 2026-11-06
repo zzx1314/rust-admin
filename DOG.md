@@ -16,7 +16,7 @@
 | 通信端到端测试 | `backend/tests/business/dog_gateway_tests.rs`、`dog_data_scope_tests.rs`（数据权限） |
 | 后端路由 | `backend/src/api/routes.rs`（每个子域一个 `dog_*_routes`，统一挂 `require_auth`） |
 | 服务装配 | `backend/src/app.rs` → `App::build_state_with_token_store` |
-| 数据库迁移 | `backend/migrations/dog/7_create_dog_tables.sql`（建表）、`10_add_park_map_tables.sql`、`11_add_task_user_scope.sql`、`13_create_user_device_bindings.sql`、`backend/migrations/p_sys/9_add_dog_menus.sql` / `12_add_park_map_menus.sql` / `14_add_device_binding_menu.sql`（菜单）、`15_flatten_dog_park_menus.sql`（把机器狗 / 园区菜单提升为一级菜单）、`16_remove_device_binding_menu.sql`（下线「设备绑定」菜单，改在设备列表中绑定）、`17_remove_workflow_menu.sql`（下线「工作流」菜单）、`18_reorder_map_menu.sql`（地图管理排在系统管理之下、设备列表之上）、`19_add_map_file_fields.sql`（地图改为上传 .zip 包，新增文件字段且 `park_id` 可空） |
+| 数据库迁移 | `backend/migrations/dog/7_create_dog_tables.sql`（建表）、`10_add_park_map_tables.sql`、`11_add_task_user_scope.sql`、`13_create_user_device_bindings.sql`、`backend/migrations/p_sys/9_add_dog_menus.sql` / `12_add_park_map_menus.sql` / `14_add_device_binding_menu.sql`（菜单）、`15_flatten_dog_park_menus.sql`（把机器狗 / 园区菜单提升为一级菜单）、`16_remove_device_binding_menu.sql`（下线「设备绑定」菜单，改在设备列表中绑定）、`17_remove_workflow_menu.sql`（下线「工作流」菜单）、`18_reorder_map_menu.sql`（地图管理排在系统管理之下、设备列表之上）、`19_add_map_file_fields.sql`（地图改为上传 .zip 包，新增文件字段且 `park_id` 可空）、`backend/migrations/dog/21_add_route_park.sql`（路线新增「所属园区」`park_id` 字段） |
 | 前端页面 | `frontend/src/views/dog/{park,map,device,task,route,model,media,command,config,services}/` |
 | 前端请求封装 | `frontend/src/api/dog*.ts` |
 | 首页仪表盘 | `frontend/src/views/welcome/index.vue` + `frontend/src/api/dogStatistics.ts` |
@@ -33,9 +33,9 @@
 | `dog_device` | 设备 | `device_id`、`device_type`、`status`(默认 `offline`)、`device_ip`、`model`、`speed`、`height`、`battery`、`course`、`location`、`comm_time` |
 | `dog_user_device` | 用户设备绑定 | `user_id`、`device_id`(指向 `dog_device.id`)，唯一索引 `(user_id, device_id)` |
 | `dog_park` | 园区 | `park_name`、`park_description`、`park_address`、`user_id`(创建者) |
-| `dog_map` | 地图 | `map_name`、`map_type`、`file_name`、`file_path`、`file_format`、`file_size`、`remarks`、`park_id`(可选，旧数据保留)、`user_id`(创建者)；地图以 `.zip` 包上传，文件落盘到 `<upload_dir>/maps/` |
+| `dog_map` | 地图 | `map_name`、`map_type`、`file_name`、`file_path`、`file_format`、`file_size`、`remarks`、`park_id`(所属园区；新增必填，历史数据可为空)、`user_id`(创建者)；地图以 `.zip` 包上传，文件落盘到 `<upload_dir>/maps/` |
 | `dog_task` | 任务 | `task_name`、`task_description`、`task_status`(默认 `pending`)、`workflow_id`、`workflow_uuid`、`device_id`、`route_id`、`user_id`(创建者) |
-| `dog_route_library` | 路线 | `route_name`、`route_type`、`route_status`、`route_description`、`model_id`(NOT NULL)、`route_data` |
+| `dog_route_library` | 路线 | `route_name`、`route_type`、`route_status`、`route_description`、`park_id`(所属园区，可选)、`model_id`(NOT NULL)、`route_data` |
 | `dog_model` | 模型 | `model_name`、`model_type`、`file_name`、`file_path`、`file_format`、`file_size`、`remarks` |
 | `dog_media` | 媒体 | `media_name`、`media_type`、`media_path`、`media_size`、`remarks` |
 | `dog_command` | 指令 | `command_name`、`command_type`、`command_params`、`device_id`、`status`(默认 `pending`)、`return_value`、`task_id` |

@@ -218,6 +218,7 @@ async fn workflow_command_json_matches_flow_design() {
             route_type: None,
             route_status: None,
             route_description: None,
+            park_id: None,
             model_id: 1,
             route_data: Some("[[0,0],[10,5]]".to_string()),
         })

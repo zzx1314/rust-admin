@@ -3,6 +3,8 @@ use crate::business::dog::map::entity::ActiveModel as MapActiveModel;
 use crate::business::dog::map::entity::Column as MapColumn;
 use crate::business::dog::map::entity::Entity as MapEntity;
 use crate::business::dog::map::entity::Model as Map;
+use crate::business::dog::park::entity::Column as ParkColumn;
+use crate::business::dog::park::entity::Entity as ParkEntity;
 use crate::common::base::{BaseRepository, order_desc};
 use crate::common::data_scope::DataScope;
 use crate::common::util::parse_beijing_datetime;
@@ -10,6 +12,7 @@ use sea_orm::{
     ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -35,6 +38,25 @@ impl SeaOrmDogMapRepository {
             .one(&*self.conn)
             .await
             .map(|r| r.unwrap())
+    }
+
+    /// 按地图 / 详情引用的 `park_id` 批量取园区名称，用于列表展示「所属园区」。
+    pub async fn find_park_names(
+        &self,
+        park_ids: &[i64],
+    ) -> Result<HashMap<i64, String>, sea_orm::DbErr> {
+        if park_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let parks = ParkEntity::find()
+            .filter(ParkColumn::Id.is_in(park_ids.iter().copied()))
+            .filter(ParkColumn::IsDeleted.eq(0))
+            .all(&*self.conn)
+            .await?;
+        Ok(parks
+            .into_iter()
+            .map(|park| (park.id, park.park_name))
+            .collect())
     }
 
     pub async fn find_by_id(

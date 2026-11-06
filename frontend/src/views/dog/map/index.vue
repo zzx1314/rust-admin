@@ -36,6 +36,7 @@ const {
   columns,
   queryFields,
   moreQueryFields,
+  parkOptions,
   fileList,
   uploadFileTemp,
   onSearch,
@@ -164,6 +165,21 @@ const submitForm = async (formEl?: FormInstance) => {
         :rules="rules"
         label-width="150px"
       >
+        <el-form-item label="所属园区" prop="parkId" style="width: 100%">
+          <el-select
+            v-model="addForm.parkId"
+            placeholder="请选择所属园区"
+            filterable
+            style="width: 100%"
+          >
+            <el-option
+              v-for="item in parkOptions"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
+        </el-form-item>
         <el-form-item label="地图名称" prop="mapName" style="width: 100%">
           <el-input v-model="addForm.mapName" placeholder="请输入地图名称" />
         </el-form-item>
