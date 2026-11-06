@@ -1,10 +1,8 @@
 <script setup lang="ts">
 import { useI18n } from "vue-i18n";
-import Motion from "./utils/motion";
 import { useRouter } from "vue-router";
 import { message } from "@/utils/message";
 import { loginRules } from "./utils/rule";
-import TypeIt from "@/components/ReTypeit";
 import { debounce } from "@pureadmin/utils";
 import { useNav } from "@/layout/hooks/useNav";
 import { useEventListener } from "@vueuse/core";
@@ -18,9 +16,8 @@ import LoginUpdate from "./components/LoginUpdate.vue";
 import LoginQrCode from "./components/LoginQrCode.vue";
 import { useUserStoreHook } from "@/store/modules/user";
 import { initRouter, getTopMenu } from "@/router/utils";
-import { bg, avatar, illustration } from "./utils/static";
 import { ReImageVerify } from "@/components/ReImageVerify";
-import { ref, toRaw, reactive, watch, computed, nextTick } from "vue";
+import { ref, reactive, watch, computed, nextTick } from "vue";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 import { useTranslationLang } from "@/layout/hooks/useTranslationLang";
 import { useDataThemeChange } from "@/layout/hooks/useDataThemeChange";
@@ -29,6 +26,13 @@ import dayIcon from "@/assets/svg/day.svg?component";
 import darkIcon from "@/assets/svg/dark.svg?component";
 import Lock from "~icons/ri/lock-fill";
 import User from "~icons/ri/user-3-fill";
+import Robot from "~icons/ri/robot-2-line";
+import Signal from "~icons/ri/signal-tower-line";
+import Route from "~icons/ri/route-line";
+import MapIcon from "~icons/ri/map-2-line";
+import Shield from "~icons/ri/shield-check-line";
+import Question from "~icons/ri/question-line";
+import Translate from "~icons/ri/translate-2";
 
 defineOptions({
   name: "Login"
@@ -50,7 +54,7 @@ const { initStorage } = useLayout();
 initStorage();
 const { dataTheme, overallStyle, dataThemeChange } = useDataThemeChange();
 dataThemeChange(overallStyle.value);
-const { title, getDropdownItemStyle, getDropdownItemClass } = useNav();
+const { title } = useNav();
 const { locale, translationCh, translationEn } = useTranslationLang();
 
 const ruleForm = reactive({
@@ -104,9 +108,8 @@ const onLogin = async (formEl: FormInstance | undefined) => {
                 })
                 .finally(() => (disabled.value = false));
             });
-          } else {
-            message(t("login.pureLoginFail"), { type: "error" });
           }
+          message(t("login.pureLoginFail"), { type: "error" });
         })
         .catch(() => {
           // 错误消息已由 HTTP 拦截器统一展示，此处仅阻止未处理的 promise rejection
@@ -140,146 +143,323 @@ watch(checked, bool => {
 watch(loginDay, value => {
   useUserStoreHook().SET_LOGINDAY(value);
 });
+
+/** 品牌区的能力说明：与后端业务域一一对应 */
+const capabilities = [
+  {
+    icon: Signal,
+    title: "设备状态实时可见",
+    desc: "网关心跳驱动的在线率、通信时间与电量"
+  },
+  {
+    icon: Route,
+    title: "任务与流程下发",
+    desc: "拖拽编排任务流程，指令直达设备"
+  },
+  {
+    icon: MapIcon,
+    title: "园区地图与航线",
+    desc: "地图包、航线与模型资源集中管理"
+  }
+];
+
+function onTranslation(lang: string) {
+  if (lang === locale.value) return;
+  lang === "en" ? translationEn() : translationCh();
+}
 </script>
 
 <template>
-  <div class="select-none">
-    <img :src="bg" class="wave" />
-    <div class="flex-c absolute right-5 top-3">
-      <!-- 主题 -->
-      <el-switch
-        v-model="dataTheme"
-        inline-prompt
-        :active-icon="dayIcon"
-        :inactive-icon="darkIcon"
-        @change="dataThemeChange"
-      />
-    </div>
-    <div class="login-container">
-      <div class="img">
-        <component :is="toRaw(illustration)" />
+  <div class="login-page">
+    <!-- 左侧品牌区：小屏隐藏，避免挤占表单空间 -->
+    <section class="login-brand">
+      <div class="login-brand__grid" aria-hidden="true" />
+      <div class="login-brand__glow" aria-hidden="true" />
+
+      <header class="login-brand__head">
+        <span class="brand-mark" aria-hidden="true">
+          <Robot width="22" height="22" />
+        </span>
+        <span class="brand-name">{{ title }}</span>
+      </header>
+
+      <div class="login-brand__hero" aria-hidden="true">
+        <svg
+          class="robot-dog"
+          viewBox="0 0 420 240"
+          role="img"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <defs>
+            <linearGradient id="rdBeam" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#22C55E" stop-opacity=".38" />
+              <stop offset="100%" stop-color="#22C55E" stop-opacity="0" />
+            </linearGradient>
+          </defs>
+
+          <!-- 扫描光束 -->
+          <path d="M300 92 L400 176 L400 206 H286 Z" fill="url(#rdBeam)" />
+
+          <!-- 地面基准线 -->
+          <path
+            class="rd-ground"
+            d="M30 206H390"
+            stroke-dasharray="4 7"
+            stroke="var(--rd-line-soft)"
+            stroke-width="1.5"
+          />
+
+          <!-- 远侧腿（弱化，制造纵深） -->
+          <g class="rd-legs-far">
+            <path d="M148 124 L128 166 L140 202" />
+            <path d="M250 124 L234 166 L248 202" />
+          </g>
+
+          <!-- 机身 -->
+          <rect
+            class="rd-panel"
+            x="96"
+            y="82"
+            width="168"
+            height="50"
+            rx="16"
+          />
+          <!-- 机头 -->
+          <rect
+            class="rd-panel"
+            x="252"
+            y="74"
+            width="54"
+            height="42"
+            rx="13"
+          />
+          <path class="rd-neck" d="M244 96h16" />
+
+          <!-- 传感器桅杆 + 云台 -->
+          <rect class="rd-panel" x="152" y="56" width="12" height="30" rx="5" />
+          <rect class="rd-panel" x="136" y="42" width="44" height="19" rx="8" />
+          <circle class="rd-accent" cx="180" cy="51.5" r="5" />
+
+          <!-- 天线与信号弧 -->
+          <path class="rd-antenna" d="M204 56v-20" />
+          <path class="rd-signal" d="M198 30a10 10 0 0 1 12 0" />
+          <path class="rd-signal" d="M193 24a18 18 0 0 1 22 0" />
+
+          <!-- 机头镜头 -->
+          <circle class="rd-accent" cx="294" cy="95" r="8" />
+          <circle class="rd-lens-core" cx="296" cy="93" r="3" />
+
+          <!-- 近侧腿 -->
+          <g class="rd-legs-near">
+            <path d="M134 126 L112 168 L126 202" />
+            <path d="M234 126 L214 168 L228 202" />
+            <circle class="rd-accent" cx="112" cy="168" r="5" />
+            <circle class="rd-accent" cx="214" cy="168" r="5" />
+          </g>
+
+          <!-- 机身上的状态灯 -->
+          <circle class="rd-accent" cx="118" cy="70" r="3.5" />
+          <circle class="rd-led" cx="130" cy="70" r="3.5" />
+          <circle class="rd-led" cx="142" cy="70" r="3.5" />
+        </svg>
       </div>
-      <div class="login-box">
-        <div class="login-form">
-          <!-- <avatar class="avatar" /> -->
-          <Motion>
-            <h2 class="outline-none">
-              <TypeIt
-                :options="{ strings: [title], cursor: false, speed: 100 }"
-              />
-            </h2>
-          </Motion>
 
-          <el-form
-            v-if="currentPage === 0"
-            ref="ruleFormRef"
-            :model="ruleForm"
-            :rules="loginRules"
-            size="large"
+      <div class="login-brand__copy">
+        <h2 class="brand-title">机器狗统一调度与运维</h2>
+        <p class="brand-subtitle">
+          设备接入、任务下发、地图与航线、数据回传，都在同一个控制台完成。
+        </p>
+        <ul class="brand-capabilities">
+          <li
+            v-for="item in capabilities"
+            :key="item.title"
+            class="brand-capability"
           >
-            <Motion :delay="100">
-              <el-form-item
-                :rules="[
-                  {
-                    required: true,
-                    message: transformI18n($t('login.pureUsernameReg')),
-                    trigger: 'blur'
-                  }
-                ]"
-                prop="username"
-              >
-                <el-input
-                  v-model="ruleForm.username"
-                  clearable
-                  :placeholder="t('login.pureUsername')"
-                  :prefix-icon="useRenderIcon(User)"
-                />
-              </el-form-item>
-            </Motion>
+            <span class="brand-capability__icon" aria-hidden="true">
+              <component :is="item.icon" width="16" height="16" />
+            </span>
+            <span>
+              <b>{{ item.title }}</b>
+              <em>{{ item.desc }}</em>
+            </span>
+          </li>
+        </ul>
+      </div>
 
-            <Motion :delay="150">
-              <el-form-item prop="password">
-                <el-input
-                  v-model="ruleForm.password"
-                  clearable
-                  show-password
-                  :placeholder="t('login.purePassword')"
-                  :prefix-icon="useRenderIcon(Lock)"
-                />
-              </el-form-item>
-            </Motion>
+      <footer class="login-brand__foot">
+        <Shield width="14" height="14" aria-hidden="true" />
+        <span>账号权限决定可见的设备与数据范围</span>
+      </footer>
+    </section>
 
-            <Motion :delay="200">
-              <el-form-item prop="verifyCode">
-                <el-input
-                  v-model="ruleForm.verifyCode"
-                  clearable
-                  :placeholder="t('login.pureVerifyCode')"
-                  :prefix-icon="useRenderIcon('ri:shield-keyhole-line')"
+    <!-- 右侧表单区 -->
+    <section class="login-panel">
+      <div class="login-panel__top">
+        <div class="login-panel__brand">
+          <span class="brand-mark" aria-hidden="true">
+            <Robot width="20" height="20" />
+          </span>
+          <span class="brand-name">{{ title }}</span>
+        </div>
+
+        <div class="login-panel__tools">
+          <el-dropdown trigger="click" @command="onTranslation">
+            <button
+              type="button"
+              class="login-icon-btn"
+              aria-label="切换语言 / Switch language"
+            >
+              <Translate width="16" height="16" />
+            </button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item
+                  command="zh"
+                  :class="{ 'is-current': locale === 'zh' }"
                 >
-                  <template v-slot:append>
-                    <ReImageVerify v-model:code="imgCode" />
-                  </template>
-                </el-input>
-              </el-form-item>
-            </Motion>
-
-            <Motion :delay="250">
-              <el-form-item>
-                <el-button
-                  class="w-full mt-4"
-                  size="default"
-                  type="primary"
-                  :loading="loading"
-                  :disabled="disabled"
-                  @click="onLogin(ruleFormRef)"
+                  简体中文
+                </el-dropdown-item>
+                <el-dropdown-item
+                  command="en"
+                  :class="{ 'is-current': locale === 'en' }"
                 >
-                  {{ t("login.pureLogin") }}
-                </el-button>
-              </el-form-item>
-            </Motion>
-          </el-form>
-          <!-- 手机号登录 -->
-          <LoginPhone v-if="currentPage === 1" />
-          <!-- 二维码登录 -->
-          <LoginQrCode v-if="currentPage === 2" />
-          <!-- 注册 -->
-          <LoginRegist v-if="currentPage === 3" />
-          <!-- 忘记密码 -->
-          <LoginUpdate v-if="currentPage === 4" />
+                  English
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+          <el-switch
+            v-model="dataTheme"
+            inline-prompt
+            aria-label="切换明暗主题"
+            :active-icon="dayIcon"
+            :inactive-icon="darkIcon"
+            @change="dataThemeChange"
+          />
         </div>
       </div>
-    </div>
-    <div
-      class="w-full flex-c absolute bottom-3 text-sm text-[rgba(0,0,0,0.6)] dark:text-[rgba(220,220,242,0.8)]"
-    >
-      Copyright © &nbsp;{{ title }}
-    </div>
+
+      <div class="login-card">
+        <div class="login-card__head">
+          <h1 class="login-title">{{ t("login.pureLogin") }}</h1>
+          <p class="login-subtitle">
+            使用平台账号登录，登录后将自动进入你的工作台
+          </p>
+        </div>
+
+        <el-form
+          v-if="currentPage === 0"
+          ref="ruleFormRef"
+          :model="ruleForm"
+          :rules="loginRules"
+          size="large"
+          label-position="top"
+          class="login-form"
+          @submit.prevent
+        >
+          <el-form-item
+            :label="t('login.pureUsername')"
+            prop="username"
+            :rules="[
+              {
+                required: true,
+                message: transformI18n($t('login.pureUsernameReg')),
+                trigger: 'blur'
+              }
+            ]"
+          >
+            <el-input
+              v-model="ruleForm.username"
+              clearable
+              autocomplete="username"
+              :placeholder="t('login.pureUsername')"
+              :prefix-icon="useRenderIcon(User)"
+            />
+          </el-form-item>
+
+          <el-form-item :label="t('login.purePassword')" prop="password">
+            <el-input
+              v-model="ruleForm.password"
+              clearable
+              show-password
+              autocomplete="current-password"
+              :placeholder="t('login.purePassword')"
+              :prefix-icon="useRenderIcon(Lock)"
+            />
+          </el-form-item>
+
+          <el-form-item :label="t('login.pureVerifyCode')" prop="verifyCode">
+            <el-input
+              v-model="ruleForm.verifyCode"
+              clearable
+              autocomplete="one-time-code"
+              :placeholder="t('login.pureVerifyCode')"
+              :prefix-icon="useRenderIcon('ri:shield-keyhole-line')"
+            >
+              <template #append>
+                <ReImageVerify v-model:code="imgCode" />
+              </template>
+            </el-input>
+          </el-form-item>
+
+          <div class="login-options">
+            <el-checkbox v-model="checked" size="default">
+              {{ loginDay }} {{ t("login.pureRemember") }}
+            </el-checkbox>
+            <el-tooltip
+              :content="t('login.pureRememberInfo')"
+              placement="top"
+              effect="dark"
+            >
+              <button
+                type="button"
+                class="login-icon-btn login-icon-btn--sm"
+                :aria-label="t('login.pureRememberInfo')"
+              >
+                <Question width="15" height="15" />
+              </button>
+            </el-tooltip>
+          </div>
+
+          <el-button
+            class="login-submit"
+            size="large"
+            type="primary"
+            native-type="submit"
+            :loading="loading"
+            :disabled="disabled"
+            @click="onLogin(ruleFormRef)"
+          >
+            {{ t("login.pureLogin") }}
+          </el-button>
+        </el-form>
+
+        <!-- 手机号登录 -->
+        <LoginPhone v-if="currentPage === 1" />
+        <!-- 二维码登录 -->
+        <LoginQrCode v-if="currentPage === 2" />
+        <!-- 注册 -->
+        <LoginRegist v-if="currentPage === 3" />
+        <!-- 忘记密码 -->
+        <LoginUpdate v-if="currentPage === 4" />
+      </div>
+
+      <p class="login-copyright">
+        Copyright © {{ new Date().getFullYear() }} {{ title }}
+      </p>
+    </section>
   </div>
 </template>
 
-<style scoped>
+<style>
+/* 登录页布局样式。
+   需要覆盖 Element Plus 内部元素（label / checkbox 等），因此不使用 scoped。 */
 @import url("@/style/login.css");
 </style>
 
 <style lang="scss" scoped>
 :deep(.el-input-group__append, .el-input-group__prepend) {
   padding: 0;
-}
-
-.translation {
-  ::v-deep(.el-dropdown-menu__item) {
-    padding: 5px 40px;
-  }
-
-  .check-zh {
-    position: absolute;
-    left: 20px;
-  }
-
-  .check-en {
-    position: absolute;
-    left: 20px;
-  }
 }
 </style>
