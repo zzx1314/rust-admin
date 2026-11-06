@@ -17,6 +17,7 @@ import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 import Back from "~icons/ep/back";
 import Position from "~icons/ep/position";
 import Search from "~icons/ep/search";
+import MapLocation from "~icons/ep/map-location";
 import DropzoneBackground from "./componentsflow/DropzoneBackground.vue";
 import Sidebar from "./componentsflow/Sidebar.vue";
 import StartNode from "./componentsflow/StartNode.vue";
@@ -24,6 +25,7 @@ import EndNode from "./componentsflow/EndNode.vue";
 import ActionNode from "./componentsflow/ActionNode.vue";
 import ErrorNode from "./componentsflow/ErrorNode.vue";
 import TaskNode from "./componentsflow/TaskNode.vue";
+import FlowMapPreview from "./componentsflow/FlowMapPreview.vue";
 import useDragAndDrop from "./componentsflow/useDnD.js";
 
 import {
@@ -74,6 +76,10 @@ const isShowCustomPoint = ref(false);
 const dialogFormVisible = ref(false);
 const errorInfoMsg = ref("");
 const dialogJsonVisible = ref(false);
+// 查看地图：把画布快照交给地图预览弹窗
+const mapVisible = ref(false);
+const mapNodes = ref<any[]>([]);
+const mapEdges = ref<any[]>([]);
 
 // JSON 查看器配置（与 mgmt_platform 的 vue-json-pretty 用法一致）
 const jsonState = reactive({
@@ -296,6 +302,17 @@ async function showJsonString() {
   dialogJsonVisible.value = true;
 }
 
+// 查看地图：按任务节点里的航线 / 航线段标记对应动作
+function openMapView() {
+  if (!getNodes.value.some(node => node.type === "task")) {
+    message("请先在画布中添加任务节点并选择航线", { type: "warning" });
+    return;
+  }
+  mapNodes.value = JSON.parse(JSON.stringify(getNodes.value));
+  mapEdges.value = JSON.parse(JSON.stringify(getEdges.value));
+  mapVisible.value = true;
+}
+
 onMounted(() => {
   nextTick(() => {
     window.addEventListener("keydown", handleKeydown);
@@ -333,6 +350,13 @@ onBeforeUnmount(() => {
         size="small"
         @click="showJsonString"
         >查看JSON</el-button
+      >
+      <el-button
+        :icon="useRenderIcon(MapLocation)"
+        type="warning"
+        size="small"
+        @click="openMapView"
+        >查看地图</el-button
       >
     </div>
     <Sidebar v-if="isShowSave" />
@@ -416,6 +440,12 @@ onBeforeUnmount(() => {
         :show-line-number="jsonState.showLineNumber"
       />
     </el-dialog>
+
+    <FlowMapPreview
+      v-model:visible="mapVisible"
+      :nodes="mapNodes"
+      :edges="mapEdges"
+    />
   </div>
 </template>
 <style lang="scss">
