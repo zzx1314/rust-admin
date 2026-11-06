@@ -32,7 +32,9 @@ function setValue(prop: string, value: any) {
   <el-form
     :inline="true"
     :model="model"
-    class="bg-bg_color w-[99/100] pl-8 pt-4"
+    class="dog-card dog-search-form"
+    role="search"
+    aria-label="查询条件"
   >
     <el-form-item
       v-for="field in fields"
@@ -86,8 +88,26 @@ function setValue(prop: string, value: any) {
 </template>
 
 <style scoped lang="scss">
-/* 与「用户管理」查询栏保持同样的行高 */
-:deep(.el-form-item) {
-  margin-bottom: 10px;
+/* 窄屏下逐项占满一行，避免输入框被压缩到无法输入 */
+@media (width <= 768px) {
+  .dog-search-form {
+    :deep(.el-form-item) {
+      width: 100%;
+      margin-right: 0;
+    }
+
+    :deep(.el-form-item__content),
+    :deep(.el-input),
+    :deep(.el-select) {
+      width: 100%;
+    }
+  }
+}
+
+.dog-search-form {
+  /* 与「用户管理」查询栏保持同样的行高 */
+  :deep(.el-form-item) {
+    margin-bottom: 10px;
+  }
 }
 </style>

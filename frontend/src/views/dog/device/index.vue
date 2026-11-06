@@ -9,6 +9,7 @@ import AddFill from "~icons/ri/add-circle-line";
 import UserAddLine from "~icons/ri/user-add-line";
 import LinkUnlink from "~icons/ri/link-unlink";
 import { PureTableBar } from "@/components/RePureTableBar";
+import DogPageHeader from "@/components/DogUI/DogPageHeader.vue";
 import { useCollectorBusDevForm } from "./form";
 import PureTable from "@pureadmin/table";
 import { PlusDialogForm } from "plus-pro-components";
@@ -55,7 +56,20 @@ const {
 } = useDogDevice();
 </script>
 <template>
-  <div class="main">
+  <div class="dog-page">
+    <DogPageHeader
+      eyebrow="设备管理"
+      title="设备列表"
+      description="机器狗设备档案、在线状态与账号绑定关系。普通账号只能看到已绑定给自己的设备。"
+    >
+      <template #meta>
+        <span class="text-[13px] text-gray-500 dark:text-gray-400">
+          共
+          <b class="dog-num">{{ pagination.total }}</b>
+          台设备
+        </span>
+      </template>
+    </DogPageHeader>
     <DogSearchForm
       v-model="queryForm"
       :fields="queryFields"

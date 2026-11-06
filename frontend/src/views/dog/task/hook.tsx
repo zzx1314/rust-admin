@@ -13,6 +13,7 @@ import {
 } from "@/api/dogTask";
 import { CREATE_TIME_FIELDS, type DogSearchField } from "../components/search";
 import { SUCCESS } from "@/api/base";
+import DogStatusBadge from "@/components/DogUI/DogStatusBadge.vue";
 import { message } from "@/utils/message";
 import { useProcess } from "./flowHook";
 
@@ -43,20 +44,12 @@ export function useDogTask() {
       label: "任务状态",
       prop: "taskStatus",
       cellRenderer: ({ row, props }) => (
-        <el-tag
-          size={props.size}
-          type={
-            row.taskStatus === "已完成"
-              ? "success"
-              : row.taskStatus === "失败"
-                ? "danger"
-                : "warning"
-          }
-        >
-          {row.taskStatus}
-        </el-tag>
+        <DogStatusBadge
+          status={row.taskStatus}
+          size={props.size === "small" ? "small" : "default"}
+        />
       ),
-      width: 100
+      width: 112
     },
     { label: "创建时间", prop: "createTime", width: 180 },
     { label: "操作", fixed: "right", minWidth: 180, slot: "operation" }

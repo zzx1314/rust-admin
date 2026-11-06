@@ -14,6 +14,7 @@ import {
   type DogSearchField
 } from "../components/search";
 import { SUCCESS } from "@/api/base";
+import DogStatusBadge from "@/components/DogUI/DogStatusBadge.vue";
 import { message } from "@/utils/message";
 
 export function useDogCommand() {
@@ -32,7 +33,17 @@ export function useDogCommand() {
     { label: "指令名称", prop: "commandName", minWidth: 120 },
     { label: "指令类型", prop: "commandType", width: 100 },
     { label: "目标设备", prop: "deviceId", width: 150 },
-    { label: "状态", prop: "status", width: 80 },
+    {
+      label: "状态",
+      prop: "status",
+      width: 112,
+      cellRenderer: ({ row, props }) => (
+        <DogStatusBadge
+          status={row.status}
+          size={props.size === "small" ? "small" : "default"}
+        />
+      )
+    },
     { label: "任务ID", prop: "taskId", width: 80 },
     { label: "创建时间", prop: "createTime", width: 180 },
     { label: "操作", fixed: "right", width: 180, slot: "operation" }

@@ -1,0 +1,223 @@
+/**
+ * 机器狗管理平台设计令牌（design tokens）
+ *
+ * 设计来源：UI/UX Pro Max 的「Real-Time / Operations + Dark Tech + Status Green」方向，
+ * 落地时以 Element Plus 为主题底座，只新增令牌与少量全局修饰类，不改动组件内部实现。
+ *
+ * 约定：
+ * - 颜色、圆角、间距、动效一律走令牌，页面里不要再写死十六进制色值；
+ * - 深色模式只覆盖「语义差值」，不要重复定义整套变量；
+ * - 状态色同时给出前景色与底色，保证文字对比度 ≥ 4.5:1。
+ */
+
+:root {
+  /* 字体：数据类文本使用等宽字体，避免编号 / 指标跳动（无需联网加载字体） */
+  --dog-font-mono:
+    ui-monospace, "SFMono-Regular", "JetBrains Mono", "Cascadia Code", consolas,
+    monospace;
+
+  /* 圆角与间距 */
+  --dog-radius-sm: 6px;
+  --dog-radius-md: 10px;
+  --dog-radius-lg: 14px;
+  --dog-radius-pill: 999px;
+  --dog-space-1: 4px;
+  --dog-space-2: 8px;
+  --dog-space-3: 12px;
+  --dog-space-4: 16px;
+  --dog-space-5: 24px;
+  --dog-space-6: 32px;
+
+  /* 动效：进入稍慢、退出更快，且统一缓动曲线 */
+  --dog-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --dog-duration-fast: 120ms;
+  --dog-duration-base: 180ms;
+  --dog-duration-slow: 280ms;
+
+  /* 语义化状态色（前景 / 底色成对出现） */
+  --dog-status-online: #15803d;
+  --dog-status-online-bg: #dcfce7;
+  --dog-status-offline: #475569;
+  --dog-status-offline-bg: #e2e8f0;
+  --dog-status-busy: #b45309;
+  --dog-status-busy-bg: #fef3c7;
+  --dog-status-fault: #b91c1c;
+  --dog-status-fault-bg: #fee2e2;
+  --dog-status-pending: #4338ca;
+  --dog-status-pending-bg: #e0e7ff;
+  --dog-status-neutral: #334155;
+  --dog-status-neutral-bg: #f1f5f9;
+
+  /* 表面与层级 */
+  --dog-surface-page: #f4f6fb;
+  --dog-surface-card: #fff;
+  --dog-surface-muted: #f1f5f9;
+  --dog-border: #e2e8f0;
+  --dog-border-strong: #cbd5e1;
+
+  /* 文本 */
+  --dog-text-primary: #0f172a;
+  --dog-text-secondary: #475569;
+  --dog-text-muted: #64748b;
+
+  /* 强调色与焦点环 */
+  --dog-accent: #2563eb;
+  --dog-accent-soft: rgb(37 99 235 / 10%);
+  --dog-focus-ring: 0 0 0 3px rgb(37 99 235 / 35%);
+
+  /* 阴影 */
+  --dog-shadow-sm: 0 1px 2px rgb(15 23 42 / 6%);
+  --dog-shadow-md: 0 12px 24px -18px rgb(15 23 42 / 45%);
+}
+
+html.dark {
+  --dog-status-online: #4ade80;
+  --dog-status-online-bg: rgb(34 197 94 / 16%);
+  --dog-status-offline: #cbd5e1;
+  --dog-status-offline-bg: rgb(148 163 184 / 18%);
+  --dog-status-busy: #fbbf24;
+  --dog-status-busy-bg: rgb(251 191 36 / 16%);
+  --dog-status-fault: #f87171;
+  --dog-status-fault-bg: rgb(248 113 113 / 16%);
+  --dog-status-pending: #a5b4fc;
+  --dog-status-pending-bg: rgb(129 140 248 / 18%);
+  --dog-status-neutral: #e2e8f0;
+  --dog-status-neutral-bg: rgb(148 163 184 / 14%);
+  --dog-surface-page: #0f172a;
+  --dog-surface-card: #1b2336;
+  --dog-surface-muted: #222c42;
+  --dog-border: #2c3852;
+  --dog-border-strong: #3b4a6b;
+  --dog-text-primary: #f8fafc;
+  --dog-text-secondary: #cbd5e1;
+  --dog-text-muted: #94a3b8;
+  --dog-accent: #60a5fa;
+  --dog-accent-soft: rgb(96 165 250 / 16%);
+  --dog-focus-ring: 0 0 0 3px rgb(96 165 250 / 45%);
+  --dog-shadow-sm: 0 1px 2px rgb(2 6 23 / 60%);
+  --dog-shadow-md: 0 18px 32px -24px rgb(2 6 23 / 90%);
+}
+
+/* ---------------------------------------------------------------------------
+ * 页面骨架
+ * ------------------------------------------------------------------------- */
+.dog-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dog-space-4);
+  width: 100%;
+  min-width: 0;
+  padding: var(--dog-space-1) var(--dog-space-1) var(--dog-space-5);
+}
+
+.dog-card {
+  box-sizing: border-box;
+  min-width: 0;
+  padding: var(--dog-space-4);
+  background: var(--dog-surface-card);
+  border: 1px solid var(--dog-border);
+  border-radius: var(--dog-radius-lg);
+  box-shadow: var(--dog-shadow-sm);
+}
+
+.dog-card__head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--dog-space-2);
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--dog-space-4);
+}
+
+.dog-card__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--dog-text-primary);
+}
+
+.dog-card__hint {
+  margin: 2px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--dog-text-muted);
+}
+
+/* 数据 / 编号类文本：等宽 + 等宽数字，列对齐更稳定 */
+.dog-num {
+  font-family: var(--dog-font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* 表格在窄屏下允许横向滚动，而不是把布局撑破 */
+.dog-scroll-x {
+  width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+/* ---------------------------------------------------------------------------
+ * 键盘可达性：统一可见焦点环（保留 Element Plus 自身状态色）
+ * ------------------------------------------------------------------------- */
+:where(a, button, summary, [role="button"], [tabindex]):focus-visible,
+.el-button:focus-visible,
+.el-menu-item:focus-visible,
+.el-sub-menu__title:focus-visible,
+.el-tag.el-tag--has-cursor:focus-visible {
+  outline: 2px solid var(--dog-accent);
+  outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Element Plus 轻量适配：圆角、表头、卡片留白
+ * ------------------------------------------------------------------------- */
+.el-card {
+  border-radius: var(--dog-radius-lg);
+}
+
+.el-table {
+  --el-table-border-color: var(--dog-border);
+  --el-table-header-bg-color: var(--dog-surface-muted);
+  --el-table-row-hover-bg-color: var(--dog-surface-muted);
+
+  border-radius: var(--dog-radius-md);
+}
+
+.el-table th.el-table__cell {
+  font-weight: 600;
+  color: var(--dog-text-secondary);
+}
+
+.el-table .cell {
+  line-height: 1.5;
+}
+
+.el-dialog,
+.el-drawer {
+  border-radius: var(--dog-radius-lg);
+}
+
+.el-pagination {
+  --el-pagination-button-bg-color: transparent;
+}
+
+/* 查询栏在窄屏下逐项换行，避免按钮被挤出屏幕 */
+.dog-search-form .el-form-item {
+  margin-right: var(--dog-space-3);
+}
+
+/* ---------------------------------------------------------------------------
+ * 尊重「减少动态效果」偏好：关闭位移与动画，但保留最终状态
+ * ------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}

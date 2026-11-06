@@ -230,9 +230,18 @@ function formatStatusData(data: any) {
         <div v-if="Object.keys(dialogStatusData.errorInfoMap || {}).length > 0">
           <h4 style="margin-bottom: 8px; color: #f56c6c">错误详情</h4>
           <div v-for="(msg, key) in dialogStatusData.errorInfoMap" :key="key">
-            <el-descriptions :column="1" size="small" border style="margin-bottom: 8px">
-              <el-descriptions-item label="操作ID">{{ key }}</el-descriptions-item>
-              <el-descriptions-item label="错误信息">{{ msg }}</el-descriptions-item>
+            <el-descriptions
+              :column="1"
+              size="small"
+              border
+              style="margin-bottom: 8px"
+            >
+              <el-descriptions-item label="操作ID">{{
+                key
+              }}</el-descriptions-item>
+              <el-descriptions-item label="错误信息">{{
+                msg
+              }}</el-descriptions-item>
             </el-descriptions>
           </div>
         </div>

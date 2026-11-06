@@ -23,6 +23,7 @@ import {
   type DogSearchField
 } from "../components/search";
 import { SUCCESS } from "@/api/base";
+import DogStatusBadge from "@/components/DogUI/DogStatusBadge.vue";
 import { message } from "@/utils/message";
 
 export function useDogDevice() {
@@ -45,14 +46,12 @@ export function useDogDevice() {
     {
       label: "设备状态",
       prop: "status",
-      width: 100,
+      width: 112,
       cellRenderer: ({ row, props }) => (
-        <el-tag
-          size={props.size}
-          type={row.status === "online" ? "success" : "warning"}
-        >
-          {row.status === "online" ? "在线" : row.status}
-        </el-tag>
+        <DogStatusBadge
+          status={row.status}
+          size={props.size === "small" ? "small" : "default"}
+        />
       )
     },
     { label: "IP地址", prop: "deviceIp", width: 150 },
