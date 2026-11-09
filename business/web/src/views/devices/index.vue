@@ -1,0 +1,458 @@
+<script setup lang="ts">
+import { computed, onMounted, reactive, ref, watch } from "vue";
+import { useRoute } from "vue-router";
+import { ElMessage, ElMessageBox } from "element-plus";
+import { deviceApi, parkApi, zoneApi } from "@/api/ops";
+import type { Device, Park, Zone } from "@/api/types";
+import PageHeader from "@/components/PageHeader.vue";
+import AppIcon from "@/components/AppIcon.vue";
+import StatusBadge from "@/components/StatusBadge.vue";
+import ProgressBar from "@/components/ProgressBar.vue";
+import DeviceDrawer from "@/components/DeviceDrawer.vue";
+import { DEVICE_MODELS, DEVICE_STATUSES } from "@/utils/constants";
+import { downloadCsv, timeOnly } from "@/utils/format";
+
+const route = useRoute();
+const devices = ref<Device[]>([]);
+const parks = ref<Park[]>([]);
+const zones = ref<Zone[]>([]);
+const stats = ref<{ total: number; online: number; counts: Record<string, number> }>({
+  total: 0,
+  online: 0,
+  counts: {}
+});
+const search = ref("");
+const parkFilter = ref<number | "">("");
+const statusFilter = ref("全部");
+const drawerOpen = ref(false);
+const activeDevice = ref<Device | null>(null);
+const deviceDialog = ref(false);
+const editingDevice = ref<Device | null>(null);
+const batchDialog = ref(false);
+const batchCommand = ref("开始巡检");
+
+const deviceForm = reactive({
+  deviceId: "",
+  model: "X30-Pro",
+  parkId: 1,
+  zoneId: 1,
+  status: "在线待命",
+  battery: 100,
+  signal: 4,
+  temperature: 32,
+  firmware: "v2.6.1",
+  deviceIp: ""
+});
+
+const statusTabs = [
+  { key: "全部", label: "全部设备", color: "#0284c7" },
+  { key: "在线", label: "在线设备", color: "#10b981" },
+  { key: "执行任务", label: "执行任务", color: "#3b82f6" },
+  { key: "充电中", label: "充电中", color: "#f59e0b" },
+  { key: "离线", label: "离线", color: "#94a3b8" },
+  { key: "故障", label: "故障", color: "#ef4444" }
+];
+
+const filteredDevices = computed(() => {
+  const keyword = search.value.trim().toLowerCase();
+  return devices.value.filter(device => {
+    const matchesKeyword =
+      !keyword ||
+      `${device.deviceId}${device.model}${device.parkName}${device.zoneName}${device.currentTaskName}`
+        .toLowerCase()
+        .includes(keyword);
+    const matchesPark = !parkFilter.value || device.parkId === parkFilter.value;
+    const matchesStatus =
+      statusFilter.value === "全部" ||
+      (statusFilter.value === "在线"
+        ? ["执行任务", "在线待命"].includes(device.status)
+        : device.status === statusFilter.value);
+    return matchesKeyword && matchesPark && matchesStatus;
+  });
+});
+
+const zonesOfPark = computed(() =>
+  zones.value.filter(zone => zone.parkId === deviceForm.parkId)
+);
+
+function countOf(key: string) {
+  if (key === "全部") return stats.value.total;
+  if (key === "在线") return stats.value.online;
+  return stats.value.counts[key] ?? 0;
+}
+
+async function load() {
+  const [deviceList, statsData, parkList, zoneList] = await Promise.all([
+    deviceApi.list(),
+    deviceApi.stats(),
+    parkApi.list(),
+    zoneApi.list()
+  ]);
+  devices.value = deviceList;
+  stats.value = statsData;
+  parks.value = parkList;
+  zones.value = zoneList;
+}
+
+function openDrawer(device: Device) {
+  activeDevice.value = device;
+  drawerOpen.value = true;
+}
+
+async function closeDrawer() {
+  drawerOpen.value = false;
+}
+
+async function sendCommand(command: string) {
+  if (!activeDevice.value) return;
+  await deviceApi.command(activeDevice.value.id, command);
+  ElMessage.success(`已向 ${activeDevice.value.deviceId} 下发指令：${command}`);
+  await load();
+  activeDevice.value = devices.value.find(d => d.id === activeDevice.value?.id) ?? null;
+}
+
+function openCreateDevice() {
+  editingDevice.value = null;
+  Object.assign(deviceForm, {
+    deviceId: `RD-${String(25 + devices.value.length).padStart(3, "0")}`,
+    model: "X30-Pro",
+    parkId: parks.value[0]?.id ?? 1,
+    zoneId: zones.value[0]?.id ?? 1,
+    status: "在线待命",
+    battery: 100,
+    signal: 4,
+    temperature: 32,
+    firmware: "v2.6.1",
+    deviceIp: ""
+  });
+  deviceDialog.value = true;
+}
+
+function openEditDevice(device: Device) {
+  editingDevice.value = device;
+  Object.assign(deviceForm, {
+    deviceId: device.deviceId,
+    model: device.model ?? "X30-Pro",
+    parkId: device.parkId ?? parks.value[0]?.id ?? 1,
+    zoneId: device.zoneId ?? zones.value[0]?.id ?? 1,
+    status: device.status,
+    battery: device.battery,
+    signal: device.signal,
+    temperature: device.temperature,
+    firmware: device.firmware ?? "v2.6.1",
+    deviceIp: device.deviceIp ?? ""
+  });
+  deviceDialog.value = true;
+}
+
+async function saveDevice() {
+  if (!deviceForm.deviceId.trim()) {
+    ElMessage.warning("请填写设备编号");
+    return;
+  }
+  const payload = { ...deviceForm };
+  if (editingDevice.value) {
+    await deviceApi.update(editingDevice.value.id, payload);
+    ElMessage.success("设备信息已更新");
+  } else {
+    await deviceApi.create(payload);
+    ElMessage.success(`设备 ${deviceForm.deviceId} 已添加`);
+  }
+  deviceDialog.value = false;
+  await load();
+}
+
+async function removeDevice(device: Device) {
+  await ElMessageBox.confirm(`确定删除设备「${device.deviceId}」吗？`, "删除设备", {
+    type: "warning"
+  });
+  await deviceApi.remove(device.id);
+  ElMessage.success("设备已删除");
+  await load();
+}
+
+async function refreshStatus() {
+  const count = await deviceApi.refresh();
+  await load();
+  ElMessage.success(`已刷新 ${count} 台设备心跳`);
+}
+
+async function batchDispatch() {
+  const targets = devices.value.filter(device => device.status !== "离线");
+  await Promise.all(targets.map(device => deviceApi.command(device.id, batchCommand.value)));
+  batchDialog.value = false;
+  await load();
+  ElMessage.success(`已向 ${targets.length} 台在线设备下发指令：${batchCommand.value}`);
+}
+
+function exportDevices() {
+  downloadCsv("robodog-devices.csv", [
+    ["设备编号", "型号", "园区", "区域", "状态", "电量", "信号", "当前任务", "最后心跳"],
+    ...filteredDevices.value.map(device => [
+      device.deviceId,
+      device.model,
+      device.parkName,
+      device.zoneName,
+      device.status,
+      device.battery,
+      device.signal,
+      device.currentTaskName,
+      device.lastHeartbeat
+    ])
+  ]);
+  ElMessage.success("设备台账已导出");
+}
+
+function runtimeText(minutes: number) {
+  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
+}
+
+watch(
+  () => route.query.q,
+  value => {
+    if (typeof value === "string") search.value = value;
+  },
+  { immediate: true }
+);
+
+watch(
+  () => deviceForm.parkId,
+  () => {
+    if (!zonesOfPark.value.some(zone => zone.id === deviceForm.zoneId)) {
+      deviceForm.zoneId = zonesOfPark.value[0]?.id ?? 1;
+    }
+  }
+);
+
+onMounted(load);
+</script>
+
+<template>
+  <div>
+    <PageHeader title="设备管理" subtitle="设备档案、实时状态监控与远程控制">
+      <template #actions>
+        <button class="btn" @click="batchDialog = true">
+          <AppIcon name="send" />批量下发
+        </button>
+        <button class="btn primary" @click="openCreateDevice">
+          <AppIcon name="plus" />添加设备
+        </button>
+      </template>
+    </PageHeader>
+
+    <div class="stat-strip">
+      <div
+        v-for="tab in statusTabs"
+        :key="tab.key"
+        class="stat-tab"
+        :class="{ on: statusFilter === tab.key }"
+        @click="statusFilter = tab.key"
+      >
+        <div class="st-label"><i :style="{ background: tab.color }" />{{ tab.label }}</div>
+        <div class="st-val">{{ countOf(tab.key) }} <small>台</small></div>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <div class="search">
+        <AppIcon name="search" />
+        <input v-model="search" class="input" placeholder="搜索设备编号 / 型号 / 区域" />
+      </div>
+      <select v-model="parkFilter" class="select" style="width: 160px">
+        <option value="">全部园区</option>
+        <option v-for="park in parks" :key="park.id" :value="park.id">
+          {{ park.parkName }}
+        </option>
+      </select>
+      <select v-model="statusFilter" class="select" style="width: 140px">
+        <option v-for="status in ['全部', '在线', ...DEVICE_STATUSES]" :key="status">
+          {{ status }}
+        </option>
+      </select>
+      <div class="sep" />
+      <button class="btn" @click="refreshStatus">
+        <AppIcon name="refresh" />刷新状态
+      </button>
+      <button class="btn" @click="exportDevices">
+        <AppIcon name="download" />导出
+      </button>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title">
+          <AppIcon name="dog" />设备列表
+          <span class="card-sub">
+            共 {{ stats.total }} 台设备 · 当前展示 {{ filteredDevices.length }} 台
+          </span>
+        </div>
+        <span class="live-chip"><i />心跳实时同步</span>
+      </div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>设备编号 / 型号</th>
+              <th>所属园区 / 区域</th>
+              <th>运行状态</th>
+              <th>电量</th>
+              <th>当前任务</th>
+              <th>信号</th>
+              <th>最后心跳</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="device in filteredDevices"
+              :key="device.id"
+              class="cursor-pointer"
+              @click="openDrawer(device)"
+            >
+              <td>
+                <div class="row-flex">
+                  <span class="row-icon"><AppIcon name="dog" /></span>
+                  <div>
+                    <div class="cell-main mono">{{ device.deviceId }}</div>
+                    <div class="cell-sub">{{ device.model }}</div>
+                  </div>
+                </div>
+              </td>
+              <td>
+                {{ device.parkName }}
+                <div class="cell-sub">{{ device.zoneName }}</div>
+              </td>
+              <td><StatusBadge :status="device.status" /></td>
+              <td style="min-width: 130px"><ProgressBar :value="device.battery" /></td>
+              <td><div class="cell-main" style="font-weight: 500">{{ device.currentTaskName }}</div></td>
+              <td>
+                <AppIcon name="wifi" />
+                <span class="mono" style="margin-left: 5px">{{ device.signal > 0 ? "强" : "—" }}</span>
+              </td>
+              <td class="mono muted">{{ timeOnly(device.lastHeartbeat) }}</td>
+              <td>
+                <div class="actions" @click.stop>
+                  <button class="btn sm" @click="openDrawer(device)">
+                    <AppIcon name="play" />控制
+                  </button>
+                  <button class="btn sm ghost icon" @click="openEditDevice(device)">
+                    <AppIcon name="edit" />
+                  </button>
+                  <button
+                    class="btn sm ghost icon"
+                    style="color: #dc2626"
+                    @click="removeDevice(device)"
+                  >
+                    <AppIcon name="trash" />
+                  </button>
+                </div>
+              </td>
+            </tr>
+            <tr v-if="!filteredDevices.length">
+              <td colspan="8"><div class="empty-box">没有符合条件的设备</div></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="tfoot">
+        <span>显示 {{ filteredDevices.length }} 条记录</span>
+        <span class="muted">运行时长示例：{{ runtimeText(266) }}</span>
+      </div>
+    </div>
+
+    <DeviceDrawer
+      :device="activeDevice"
+      :open="drawerOpen"
+      @close="closeDrawer"
+      @command="sendCommand"
+    />
+
+    <el-dialog
+      v-model="deviceDialog"
+      :title="editingDevice ? '编辑设备' : '添加设备'"
+      width="620px"
+    >
+      <div class="form-grid">
+        <div class="field">
+          <label>设备编号 <em>*</em></label>
+          <input v-model="deviceForm.deviceId" class="input" placeholder="RD-XXX" />
+        </div>
+        <div class="field">
+          <label>设备型号</label>
+          <select v-model="deviceForm.model" class="select">
+            <option v-for="model in DEVICE_MODELS" :key="model">{{ model }}</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>所属园区</label>
+          <select v-model.number="deviceForm.parkId" class="select">
+            <option v-for="park in parks" :key="park.id" :value="park.id">
+              {{ park.parkName }}
+            </option>
+          </select>
+        </div>
+        <div class="field">
+          <label>所属区域</label>
+          <select v-model.number="deviceForm.zoneId" class="select">
+            <option v-for="zone in zonesOfPark" :key="zone.id" :value="zone.id">
+              {{ zone.zoneName }}
+            </option>
+          </select>
+        </div>
+        <div class="field">
+          <label>初始状态</label>
+          <select v-model="deviceForm.status" class="select">
+            <option v-for="status in DEVICE_STATUSES" :key="status">{{ status }}</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>固件版本</label>
+          <input v-model="deviceForm.firmware" class="input" />
+        </div>
+        <div class="field">
+          <label>电量（%）</label>
+          <input v-model.number="deviceForm.battery" class="input" type="number" min="0" max="100" />
+        </div>
+        <div class="field">
+          <label>信号（0-4）</label>
+          <input v-model.number="deviceForm.signal" class="input" type="number" min="0" max="4" />
+        </div>
+        <div class="field">
+          <label>机身温度（℃）</label>
+          <input v-model.number="deviceForm.temperature" class="input" type="number" step="0.1" />
+        </div>
+        <div class="field">
+          <label>设备 IP</label>
+          <input v-model="deviceForm.deviceIp" class="input" placeholder="选填" />
+        </div>
+      </div>
+      <template #footer>
+        <button class="btn" @click="deviceDialog = false">取消</button>
+        <button class="btn primary" @click="saveDevice">
+          <AppIcon name="check" />保存
+        </button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="batchDialog" title="批量指令下发" width="440px">
+      <div class="field">
+        <label>指令类型</label>
+        <select v-model="batchCommand" class="select">
+          <option>开始巡检</option>
+          <option>暂停任务</option>
+          <option>召回充电</option>
+          <option>远程接管</option>
+        </select>
+      </div>
+      <p class="muted" style="font-size: 12px; line-height: 1.7">
+        将向所有非离线设备（{{ devices.filter(d => d.status !== "离线").length }} 台）下发该指令。
+      </p>
+      <template #footer>
+        <button class="btn" @click="batchDialog = false">取消</button>
+        <button class="btn primary" @click="batchDispatch">
+          <AppIcon name="send" />确认下发
+        </button>
+      </template>
+    </el-dialog>
+  </div>
+</template>

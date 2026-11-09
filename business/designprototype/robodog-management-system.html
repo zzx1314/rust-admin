@@ -1,0 +1,2139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>四足机器人管理平台 · RoboDog OPS</title>
+<style>
+/* ============ 基础与设计令牌 ============ */
+:root{
+  --bg:#f2f5f9; --surface:#ffffff; --line:#e6ebf2; --line-2:#f0f3f8;
+  --text:#0f172a; --text-2:#475569; --muted:#94a3b8;
+  --brand:#0284c7; --brand-2:#06b6d4; --brand-soft:#e3f4fd;
+  --ok:#10b981; --warn:#f59e0b; --danger:#ef4444; --info:#3b82f6; --neutral:#94a3b8;
+  --sidebar-a:#0a1424; --sidebar-b:#10233d;
+  --shadow:0 1px 2px rgba(15,23,42,.03), 0 8px 26px rgba(15,23,42,.055);
+  --shadow-lg:0 20px 60px rgba(15,23,42,.18);
+  --r:14px; --r-sm:9px;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0;padding:0}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  background:var(--bg);color:var(--text);font-size:14px;-webkit-font-smoothing:antialiased;
+}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:8px}
+::-webkit-scrollbar-track{background:transparent}
+button,input,select,textarea{font-family:inherit}
+button{cursor:pointer}
+.ic{width:16px;height:16px;flex:none;display:inline-block;vertical-align:middle}
+.icon-sprite{position:absolute;width:0;height:0;overflow:hidden}
+
+/* ============ 布局骨架 ============ */
+.app{display:flex;min-height:100vh}
+.sidebar{
+  width:238px;flex:none;position:sticky;top:0;height:100vh;z-index:30;
+  background:linear-gradient(170deg,var(--sidebar-a),var(--sidebar-b));
+  color:#b9c8dc;display:flex;flex-direction:column;transition:width .25s ease;
+  border-right:1px solid rgba(255,255,255,.05);
+}
+.sidebar.collapsed{width:74px}
+.sidebar.collapsed .hide-c{display:none}
+.sidebar.collapsed .brand-text,.sidebar.collapsed .nav-group-title,.sidebar.collapsed .sb-status{display:none}
+.sidebar.collapsed .nav-item{justify-content:center;padding:11px 0}
+.sidebar.collapsed .brand{padding:0 0 0 0;justify-content:center}
+.sidebar.collapsed .nav-item .ic{width:20px;height:20px}
+.brand{height:70px;display:flex;align-items:center;gap:11px;padding:0 20px;border-bottom:1px solid rgba(255,255,255,.07);flex:none}
+.brand-logo{
+  width:36px;height:36px;border-radius:11px;flex:none;display:grid;place-items:center;
+  background:linear-gradient(135deg,#0284c7,#22d3ee);color:#fff;box-shadow:0 6px 18px rgba(6,182,212,.35);
+}
+.brand-logo .ic{width:23px;height:23px}
+.brand-text b{display:block;color:#fff;font-size:15px;letter-spacing:.5px;line-height:1.25}
+.brand-text span{display:block;font-size:10.5px;color:#64809e;letter-spacing:1.6px;margin-top:2px}
+.sb-scroll{flex:1;overflow-y:auto;padding:16px 12px}
+.nav-group-title{font-size:10.5px;letter-spacing:1.4px;color:#5c7797;padding:14px 12px 8px;font-weight:600}
+.nav-item{
+  display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:9px;margin-bottom:3px;
+  font-size:13.5px;font-weight:500;color:#a9bdd4;cursor:pointer;position:relative;transition:.18s;
+  border:1px solid transparent;user-select:none;
+}
+.nav-item .ic{opacity:.85}
+.nav-item:hover{background:rgba(255,255,255,.06);color:#fff}
+.nav-item.active{
+  background:linear-gradient(90deg,rgba(6,182,212,.20),rgba(6,182,212,.04));
+  color:#fff;border-color:rgba(34,211,238,.18);
+}
+.nav-item.active::before{content:"";position:absolute;left:-12px;top:9px;bottom:9px;width:3px;border-radius:0 3px 3px 0;background:#22d3ee}
+.nav-item.active .ic{opacity:1;color:#38dcf0}
+.nav-badge{margin-left:auto;background:#ef4444;color:#fff;font-size:10px;min-width:18px;height:18px;border-radius:9px;display:grid;place-items:center;padding:0 5px;font-weight:700}
+.sidebar.collapsed .nav-badge{display:none}
+.sb-status{
+  margin:10px 12px 16px;padding:13px;border-radius:11px;background:rgba(255,255,255,.045);
+  border:1px solid rgba(255,255,255,.07);font-size:11.5px;color:#8ba6c2;
+}
+.sb-status .st-row{display:flex;align-items:center;gap:8px;color:#c8dcf0;font-weight:600;font-size:12px;margin-bottom:7px}
+.breath{width:7px;height:7px;border-radius:50%;background:#34d399;box-shadow:0 0 0 0 rgba(52,211,153,.6);animation:breath 2s infinite}
+@keyframes breath{70%{box-shadow:0 0 0 8px rgba(52,211,153,0)}100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}}
+.sb-status p{margin:3px 0;line-height:1.6}
+
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.topbar{
+  height:64px;flex:none;background:rgba(255,255,255,.92);backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--line);display:flex;align-items:center;gap:16px;
+  padding:0 26px;position:sticky;top:0;z-index:25;
+}
+.tb-toggle{width:32px;height:32px;border-radius:8px;border:1px solid var(--line);background:#fff;display:grid;place-items:center;color:var(--text-2)}
+.tb-toggle:hover{background:#f8fafc}
+.crumb{font-size:13px;color:var(--muted);display:flex;align-items:center;gap:8px;white-space:nowrap}
+.crumb b{color:var(--text);font-weight:600}
+.tb-spacer{flex:1}
+.tb-search{position:relative;width:250px}
+.tb-search .ic{position:absolute;left:11px;top:9px;color:var(--muted);width:15px;height:15px}
+.input,.select{
+  height:34px;border:1px solid var(--line);border-radius:var(--r-sm);padding:0 12px;font-size:13px;
+  color:var(--text);background:#fff;outline:none;transition:.15s;width:100%;
+}
+.input::placeholder{color:#a8b5c5}
+.input:focus,.select:focus,.textarea:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(2,132,199,.11)}
+.tb-search .input{padding-left:34px;background:#f7f9fc}
+.tb-time{font-size:12px;color:var(--text-2);white-space:nowrap;font-variant-numeric:tabular-nums}
+.tb-icon{
+  width:34px;height:34px;border-radius:9px;border:1px solid var(--line);background:#fff;color:var(--text-2);
+  display:grid;place-items:center;position:relative;
+}
+.tb-icon:hover{background:#f8fafc;color:var(--text)}
+.tb-icon .red-dot{position:absolute;top:6px;right:7px;width:7px;height:7px;border-radius:50%;background:#ef4444;border:1.5px solid #fff}
+.tb-user{display:flex;align-items:center;gap:9px;padding-left:14px;border-left:1px solid var(--line);cursor:pointer}
+.avatar{width:32px;height:32px;border-radius:10px;background:linear-gradient(135deg,#0369a1,#06b6d4);color:#fff;display:grid;place-items:center;font-size:12px;font-weight:700}
+.tb-user .u-name{font-size:12.5px;font-weight:600;line-height:1.2}
+.tb-user .u-role{font-size:10.5px;color:var(--muted);line-height:1.4}
+.content{padding:24px 26px 46px;flex:1;min-width:0}
+.view{display:none}
+.view.active{display:block}
+.view.active>*{animation:fadeUp .38s ease both}
+.view.active>*:nth-child(2){animation-delay:.05s}
+.view.active>*:nth-child(3){animation-delay:.1s}
+.view.active>*:nth-child(4){animation-delay:.15s}
+@keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+
+/* ============ 通用组件 ============ */
+.page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:20px;flex-wrap:wrap}
+.page-title{font-size:21px;font-weight:700;letter-spacing:-.3px;display:flex;align-items:center;gap:10px}
+.page-sub{font-size:12.5px;color:var(--muted);margin-top:6px}
+.head-actions{display:flex;align-items:center;gap:9px}
+.live-chip{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;color:#0e7490;background:#e6f8fd;border:1px solid #b9e9f7;padding:6px 11px;border-radius:999px;font-weight:600}
+.live-chip i{width:6px;height:6px;border-radius:50%;background:#06b6d4;animation:breath 2s infinite}
+.btn{
+  height:34px;padding:0 13px;border-radius:var(--r-sm);border:1px solid var(--line);background:#fff;color:var(--text-2);
+  font-size:12.5px;font-weight:600;display:inline-flex;align-items:center;gap:7px;transition:.16s;white-space:nowrap;
+}
+.btn .ic{width:14px;height:14px}
+.btn:hover{border-color:#c5d2e2;background:#f8fafc;color:var(--text)}
+.btn.primary{background:linear-gradient(135deg,#0284c7,#06b6d4);border-color:transparent;color:#fff;box-shadow:0 4px 14px rgba(2,132,199,.22)}
+.btn.primary:hover{filter:brightness(1.07);color:#fff;border-color:transparent}
+.btn.ghost{background:transparent;border-color:transparent}
+.btn.ghost:hover{background:#f1f5f9}
+.btn.sm{height:28px;padding:0 10px;font-size:11.5px;border-radius:7px}
+.btn.icon{width:34px;padding:0;justify-content:center}
+.btn.danger{color:#dc2626;border-color:#fecaca;background:#fff}
+.btn.danger:hover{background:#fef2f2}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow)}
+.card-head{padding:16px 18px;border-bottom:1px solid var(--line-2);display:flex;align-items:center;justify-content:space-between;gap:12px}
+.card-title{font-size:14px;font-weight:700;display:flex;align-items:center;gap:9px}
+.card-title .ic{color:var(--brand);width:16px;height:16px}
+.card-sub{font-size:11.5px;color:var(--muted);font-weight:400;margin-left:2px}
+.card-body{padding:18px}
+.grid{display:grid;gap:18px}
+.kpis{grid-template-columns:repeat(4,minmax(0,1fr))}
+.row-2{grid-template-columns:minmax(0,1.65fr) minmax(0,1fr)}
+.row-2b{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+.g3{grid-template-columns:repeat(3,minmax(0,1fr))}
+.mt18{margin-top:18px}
+.badge{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:600;white-space:nowrap}
+.badge i{width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+.badge.ok{background:#e9fbf3;color:#059669}
+.badge.info{background:#eaf2ff;color:#2563eb}
+.badge.warn{background:#fff5e5;color:#d97706}
+.badge.danger{background:#fdeced;color:#dc2626}
+.badge.neutral{background:#f1f5f9;color:#64748b}
+.badge.brand{background:var(--brand-soft);color:#0369a1}
+.tag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:10.5px;font-weight:600;background:#f1f5f9;color:#64748b}
+.tag.blue{background:#e8f3fd;color:#0369a1}
+.tag.purple{background:#f1ecfe;color:#7c3aed}
+.tag.teal{background:#e2f8f5;color:#0d9488}
+.tag.orange{background:#fff2e3;color:#c2410c}
+.muted{color:var(--muted)}
+.mono{font-variant-numeric:tabular-nums;font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace;font-size:12px}
+.divider{height:1px;background:var(--line-2);margin:14px 0}
+
+/* KPI */
+.kpi{padding:17px 18px;position:relative;overflow:hidden}
+.kpi::after{content:"";position:absolute;right:-30px;top:-30px;width:110px;height:110px;border-radius:50%;background:var(--kpi-soft);opacity:.6}
+.kpi-top{display:flex;align-items:center;justify-content:space-between;position:relative;z-index:1}
+.kpi-icon{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;color:var(--kpi-c);background:var(--kpi-soft)}
+.kpi-icon .ic{width:19px;height:19px}
+.trend{font-size:11px;font-weight:700;padding:3px 7px;border-radius:6px;display:inline-flex;align-items:center;gap:3px}
+.trend.up{background:#e9fbf3;color:#059669}
+.trend.down{background:#fdeced;color:#dc2626}
+.trend .ic{width:11px;height:11px}
+.kpi-label{font-size:12px;color:var(--text-2);margin-top:14px;position:relative;z-index:1}
+.kpi-value{font-size:27px;font-weight:750;letter-spacing:-.6px;margin-top:3px;line-height:1.2;position:relative;z-index:1}
+.kpi-value small{font-size:12px;font-weight:500;color:var(--muted);letter-spacing:0}
+.kpi-foot{font-size:11px;color:var(--muted);margin-top:5px;position:relative;z-index:1}
+.spark{position:absolute;right:14px;bottom:14px;width:74px;height:30px;opacity:.85;z-index:1}
+
+/* 表格 */
+.table-wrap{overflow-x:auto}
+.table{width:100%;border-collapse:collapse;font-size:12.5px;min-width:760px}
+.table th{
+  text-align:left;padding:11px 16px;background:#f8fafc;color:#8b9aad;font-weight:600;font-size:11.5px;
+  letter-spacing:.02em;white-space:nowrap;border-bottom:1px solid var(--line);
+}
+.table td{padding:12px 16px;border-bottom:1px solid var(--line-2);color:var(--text-2);vertical-align:middle;white-space:nowrap}
+.table tbody tr{transition:background .15s;cursor:default}
+.table tbody tr:hover{background:#f7fbff}
+.table tbody tr:last-child td{border-bottom:none}
+.cell-main{color:var(--text);font-weight:600;font-size:12.5px}
+.cell-sub{font-size:11px;color:var(--muted);margin-top:2px}
+.row-icon{width:32px;height:32px;border-radius:9px;background:#eef6fc;color:#0284c7;display:grid;place-items:center;flex:none}
+.row-flex{display:flex;align-items:center;gap:10px}
+.actions{display:flex;gap:5px}
+.tfoot{padding:12px 18px;display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--line-2);font-size:11.5px;color:var(--muted)}
+.pager{display:flex;gap:5px}
+.pager button{width:27px;height:27px;border-radius:7px;border:1px solid var(--line);background:#fff;color:var(--text-2);font-size:11.5px;display:grid;place-items:center}
+.pager button.on{background:var(--brand);border-color:var(--brand);color:#fff}
+.pager button:hover:not(.on){background:#f1f5f9}
+
+/* 进度 / 电量 */
+.bar{height:6px;border-radius:6px;background:#eef2f7;overflow:hidden;min-width:70px}
+.bar>i{display:block;height:100%;border-radius:6px;background:linear-gradient(90deg,#0284c7,#22d3ee);transition:width .6s ease}
+.bar.ok>i{background:linear-gradient(90deg,#10b981,#34d399)}
+.bar.warn>i{background:linear-gradient(90deg,#f59e0b,#fbbf24)}
+.bar.danger>i{background:linear-gradient(90deg,#ef4444,#f87171)}
+.bar-row{display:flex;align-items:center;gap:9px}
+.bar-row .num{font-size:11.5px;font-weight:600;color:var(--text-2);width:32px;text-align:right;font-variant-numeric:tabular-nums}
+
+/* 工具栏 / 筛选 */
+.toolbar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:16px}
+.toolbar .search{position:relative;width:230px}
+.toolbar .search .ic{position:absolute;left:11px;top:9px;color:var(--muted);width:15px;height:15px}
+.toolbar .search .input{padding-left:34px}
+.toolbar .select{width:auto;min-width:130px}
+.toolbar .sep{flex:1}
+.seg{display:inline-flex;background:#eef2f7;padding:3px;border-radius:9px;gap:2px}
+.seg button{border:0;background:transparent;padding:6px 12px;border-radius:7px;font-size:12px;font-weight:600;color:var(--muted);display:flex;align-items:center;gap:6px;transition:.15s}
+.seg button .ic{width:13px;height:13px}
+.seg button.on{background:#fff;color:var(--brand);box-shadow:0 1px 4px rgba(15,23,42,.1)}
+.stat-strip{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}
+.stat-tab{
+  flex:1;min-width:120px;background:#fff;border:1px solid var(--line);border-radius:11px;padding:12px 15px;
+  cursor:pointer;transition:.18s;position:relative;overflow:hidden;box-shadow:var(--shadow);
+}
+.stat-tab:hover{border-color:#b9d8ec;transform:translateY(-1px)}
+.stat-tab.on{border-color:var(--brand);box-shadow:0 0 0 2px rgba(2,132,199,.12)}
+.stat-tab.on::after{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--brand)}
+.stat-tab .st-label{font-size:11.5px;color:var(--muted);display:flex;align-items:center;gap:6px}
+.stat-tab .st-label i{width:7px;height:7px;border-radius:50%}
+.stat-tab .st-val{font-size:21px;font-weight:750;margin-top:6px;letter-spacing:-.4px}
+.stat-tab .st-val small{font-size:11px;font-weight:500;color:var(--muted)}
+
+/* 地图 */
+.map-card .card-body{padding:0}
+.map-stage{position:relative;background:#f7fafc;border-radius:0 0 var(--r) var(--r);overflow:hidden}
+.map-stage > svg{display:block;width:100%;height:auto}
+.map-stage .ic{width:14px;height:14px}
+.map-legend{position:absolute;left:14px;bottom:14px;background:rgba(255,255,255,.9);backdrop-filter:blur(6px);border:1px solid var(--line);border-radius:9px;padding:9px 12px;display:flex;gap:14px;font-size:10.5px;color:var(--text-2);box-shadow:var(--shadow)}
+.map-legend span{display:flex;align-items:center;gap:6px}
+.map-legend i{width:9px;height:9px;border-radius:50%;display:block}
+.map-badge{position:absolute;right:14px;top:14px;background:rgba(255,255,255,.92);border:1px solid var(--line);border-radius:9px;padding:8px 11px;font-size:11px;color:var(--text-2);display:flex;align-items:center;gap:8px;box-shadow:var(--shadow)}
+.map-devices{display:flex;gap:9px;padding:13px 18px;border-top:1px solid var(--line-2);overflow-x:auto;flex-wrap:wrap}
+.map-chip{display:flex;align-items:center;gap:8px;background:#f7fafc;border:1px solid var(--line);border-radius:9px;padding:7px 11px;font-size:11.5px;cursor:pointer;transition:.15s;white-space:nowrap}
+.map-chip:hover{border-color:var(--brand);background:#f0f9ff}
+.map-chip .dot{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(16,185,129,.15)}
+.map-chip b{color:var(--text);font-size:11.5px}
+@keyframes mapflow{to{stroke-dashoffset:-36}}
+@keyframes radar{0%{transform:scale(.45);opacity:.55}100%{transform:scale(2.4);opacity:0}}
+.radar{transform-box:fill-box;transform-origin:center;animation:radar 2.4s ease-out infinite}
+.dog-2 .radar{animation-delay:.6s}.dog-3 .radar{animation-delay:1.2s}.dog-4 .radar{animation-delay:1.8s}
+
+/* 环形图 */
+.donut-wrap{display:flex;align-items:center;gap:22px;padding:6px 2px}
+.donut{width:132px;height:132px;border-radius:50%;position:relative;flex:none;display:grid;place-items:center}
+.donut::after{content:"";position:absolute;inset:20px;background:#fff;border-radius:50%}
+.donut-center{position:relative;z-index:1;text-align:center}
+.donut-center b{display:block;font-size:24px;line-height:1.1;letter-spacing:-.5px}
+.donut-center span{font-size:10.5px;color:var(--muted)}
+.legend{flex:1;display:grid;gap:11px}
+.legend-row{display:flex;align-items:center;gap:8px;font-size:12px}
+.legend-row i{width:9px;height:9px;border-radius:3px;flex:none}
+.legend-row span{flex:1;color:var(--text-2)}
+.legend-row b{color:var(--text);font-size:12.5px}
+
+/* 告警列表 */
+.alert-item{display:flex;gap:11px;padding:11px 0;border-bottom:1px solid var(--line-2)}
+.alert-item:last-child{border-bottom:none;padding-bottom:0}
+.alert-item:first-child{padding-top:0}
+.alert-ico{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;flex:none}
+.alert-ico .ic{width:15px;height:15px}
+.alert-ico.danger{background:#fdeced;color:#dc2626}
+.alert-ico.warn{background:#fff5e5;color:#d97706}
+.alert-ico.info{background:#eaf2ff;color:#2563eb}
+.alert-txt{flex:1;min-width:0}
+.alert-txt b{display:block;font-size:12px;color:var(--text);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.alert-txt span{font-size:10.5px;color:var(--muted);display:block;margin-top:3px}
+.alert-time{font-size:10.5px;color:var(--muted);white-space:nowrap}
+
+/* 趋势图 / 时间线 */
+.chart-svg{width:100%;height:auto;display:block}
+.timeline{padding:2px 0}
+.tl-item{display:flex;gap:12px;position:relative;padding-bottom:16px}
+.tl-item:last-child{padding-bottom:0}
+.tl-item::before{content:"";position:absolute;left:11px;top:22px;bottom:-2px;width:1px;background:var(--line)}
+.tl-item:last-child::before{display:none}
+.tl-dot{width:23px;height:23px;border-radius:50%;background:#eef6fc;border:1px solid #cfe8f8;display:grid;place-items:center;flex:none;z-index:1;color:var(--brand)}
+.tl-dot .ic{width:12px;height:12px}
+.tl-dot.ok{background:#e9fbf3;border-color:#bff0dc;color:#059669}
+.tl-dot.warn{background:#fff5e5;border-color:#fde5b8;color:#d97706}
+.tl-body b{font-size:12px;color:var(--text);font-weight:600}
+.tl-body p{margin:3px 0 0;font-size:11px;color:var(--muted);line-height:1.5}
+.tl-body time{font-size:10.5px;color:#b3c0cf}
+
+/* 园区卡片 */
+.park-card{overflow:hidden;transition:.2s}
+.park-card:hover{transform:translateY(-3px);box-shadow:0 12px 30px rgba(15,23,42,.10);border-color:#c9dfef}
+.park-thumb{height:118px;position:relative;overflow:hidden;background:#eaf3f1}
+.park-thumb svg{width:100%;height:100%;display:block}
+.park-thumb .thumb-tag{position:absolute;left:11px;top:11px;background:rgba(255,255,255,.92);border:1px solid rgba(255,255,255,.8);border-radius:7px;padding:4px 9px;font-size:10.5px;font-weight:600;color:var(--text-2)}
+.park-body{padding:15px 16px}
+.park-name{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.park-name b{font-size:14.5px;font-weight:700}
+.park-meta{font-size:11px;color:var(--muted);margin-top:4px}
+.park-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:14px 0 12px}
+.park-stat{background:#f7f9fc;border-radius:8px;padding:9px 10px}
+.park-stat b{display:block;font-size:15px;font-weight:700;color:var(--text)}
+.park-stat span{font-size:10px;color:var(--muted)}
+.park-prog-label{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:6px}
+.park-prog-label b{color:var(--text-2)}
+.park-foot{display:flex;align-items:center;justify-content:space-between;margin-top:15px;padding-top:12px;border-top:1px solid var(--line-2)}
+.park-owner{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--muted)}
+.park-owner .avatar{width:24px;height:24px;border-radius:8px;font-size:10px}
+
+/* 任务看板 */
+.kanban{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;align-items:start}
+.kcol{background:#eef2f7;border-radius:12px;padding:11px;min-height:220px;transition:background .15s}
+.kcol.dragover{background:#dbeefe;outline:2px dashed var(--brand);outline-offset:-3px}
+.kcol-head{display:flex;align-items:center;justify-content:space-between;padding:2px 4px 11px}
+.kcol-head b{font-size:12.5px;display:flex;align-items:center;gap:7px}
+.kcol-head b i{width:8px;height:8px;border-radius:50%}
+.kcol-count{background:#fff;border-radius:7px;padding:2px 8px;font-size:11px;font-weight:700;color:var(--text-2)}
+.task-card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:13px;margin-bottom:10px;box-shadow:0 1px 3px rgba(15,23,42,.05);cursor:grab;transition:.16s}
+.task-card:hover{box-shadow:0 6px 16px rgba(15,23,42,.09);transform:translateY(-1px)}
+.task-card:active{cursor:grabbing}
+.task-card.dragging{opacity:.4}
+.tc-top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:9px}
+.tc-name{font-size:12.5px;font-weight:700;color:var(--text);line-height:1.4}
+.tc-info{display:grid;gap:5px;font-size:11px;color:var(--muted);margin:10px 0}
+.tc-info span{display:flex;align-items:center;gap:6px}
+.tc-info .ic{width:12px;height:12px;color:#a3b2c4}
+.tc-prog{display:flex;align-items:center;gap:8px;margin-top:10px}
+.tc-prog .bar{flex:1}
+.tc-foot{display:flex;align-items:center;justify-content:space-between;margin-top:11px;padding-top:10px;border-top:1px solid var(--line-2)}
+.tc-foot .time{font-size:10.5px;color:var(--muted)}
+
+/* 设置页 */
+.setting-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:13px 0;border-bottom:1px solid var(--line-2)}
+.setting-row:last-child{border-bottom:none}
+.setting-row b{font-size:12.5px;font-weight:600;display:block}
+.setting-row p{font-size:11px;color:var(--muted);margin:4px 0 0;line-height:1.5}
+.switch{width:38px;height:21px;border-radius:12px;background:#cbd5e1;position:relative;flex:none;cursor:pointer;transition:.2s;border:0;padding:0}
+.switch.on{background:var(--brand)}
+.switch::after{content:"";position:absolute;top:3px;left:3px;width:15px;height:15px;border-radius:50%;background:#fff;transition:.2s;box-shadow:0 1px 3px rgba(0,0,0,.15)}
+.switch.on::after{left:20px}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.field label{display:block;font-size:11.5px;font-weight:600;color:var(--text-2);margin-bottom:6px}
+.field label em{color:var(--danger);font-style:normal}
+.field .input,.field .select,.field .textarea{width:100%}
+.textarea{height:76px;border:1px solid var(--line);border-radius:var(--r-sm);padding:9px 12px;font-size:13px;resize:vertical;outline:none;color:var(--text)}
+
+/* 模态 / 抽屉 / Toast */
+.overlay{position:fixed;inset:0;background:rgba(15,23,42,.42);backdrop-filter:blur(2px);z-index:60;display:flex;align-items:center;justify-content:center;padding:20px;animation:fadeIn .18s ease}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+.modal{width:min(560px,100%);background:#fff;border-radius:16px;box-shadow:var(--shadow-lg);overflow:hidden;animation:popIn .22s ease;max-height:90vh;display:flex;flex-direction:column}
+@keyframes popIn{from{opacity:0;transform:translateY(14px) scale(.98)}to{opacity:1;transform:none}}
+.modal-head{padding:17px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between}
+.modal-head b{font-size:15px}
+.modal-head p{font-size:11.5px;color:var(--muted);margin:4px 0 0}
+.modal-body{padding:20px;overflow-y:auto}
+.modal-foot{padding:14px 20px;border-top:1px solid var(--line);display:flex;justify-content:flex-end;gap:9px;background:#fbfcfe}
+.drawer-overlay{position:fixed;inset:0;background:rgba(15,23,42,.35);z-index:60;animation:fadeIn .18s ease}
+.drawer{position:fixed;right:0;top:0;bottom:0;width:min(440px,100%);background:#fff;z-index:61;box-shadow:-16px 0 50px rgba(15,23,42,.18);display:flex;flex-direction:column;animation:slideIn .26s ease}
+@keyframes slideIn{from{transform:translateX(100%)}to{transform:none}}
+.drawer-head{padding:18px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;flex:none}
+.drawer-body{flex:1;overflow-y:auto;padding:20px}
+.drawer-foot{padding:14px 20px;border-top:1px solid var(--line);display:flex;gap:8px;flex-wrap:wrap;background:#fbfcfe}
+.video-box{height:180px;border-radius:11px;background:radial-gradient(circle at 50% 40%,#1b3247,#0a1420);position:relative;overflow:hidden;display:grid;place-items:center;color:#7d9ab4}
+.video-box::before{content:"";position:absolute;inset:0;background-image:linear-gradient(rgba(255,255,255,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.035) 1px,transparent 1px);background-size:22px 22px}
+.video-box .cam{position:relative;text-align:center;z-index:1}
+.video-box .cam .ic{width:34px;height:34px;opacity:.5}
+.video-box .cam p{font-size:11px;margin:8px 0 0;letter-spacing:.5px}
+.live-tag{position:absolute;left:12px;top:12px;background:rgba(239,68,68,.9);color:#fff;font-size:10px;font-weight:700;padding:3px 8px;border-radius:5px;display:flex;align-items:center;gap:5px;z-index:2}
+.live-tag i{width:5px;height:5px;border-radius:50%;background:#fff;animation:breath 1.6s infinite}
+.cam-ts{position:absolute;right:12px;bottom:11px;font-size:10px;color:#8fb0c9;z-index:2}
+.metric-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin:16px 0}
+.metric{background:#f7f9fc;border:1px solid var(--line-2);border-radius:10px;padding:11px 12px}
+.metric span{font-size:10.5px;color:var(--muted);display:flex;align-items:center;gap:5px}
+.metric b{font-size:16px;display:block;margin-top:5px;letter-spacing:-.3px}
+.metric b small{font-size:10.5px;color:var(--muted);font-weight:500}
+.kv{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px dashed var(--line-2);font-size:12px}
+.kv:last-child{border-bottom:none}
+.kv span{color:var(--muted)}
+.kv b{font-weight:600;color:var(--text-2);text-align:right}
+.toast-stack{position:fixed;right:22px;top:78px;z-index:90;display:flex;flex-direction:column;gap:9px;pointer-events:none}
+.toast{display:flex;align-items:center;gap:9px;background:#fff;border:1px solid var(--line);border-left:3px solid var(--ok);border-radius:10px;padding:11px 15px;box-shadow:0 10px 30px rgba(15,23,42,.14);font-size:12.5px;font-weight:600;color:var(--text);min-width:210px;animation:toastIn .25s ease}
+.toast.err{border-left-color:var(--danger)}
+.toast.info{border-left-color:var(--info)}
+.toast .ic{width:15px;height:15px;color:var(--ok)}
+.toast.err .ic{color:var(--danger)}
+.toast.info .ic{color:var(--info)}
+@keyframes toastIn{from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:none}}
+.popover{position:absolute;right:0;top:44px;width:310px;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow-lg);z-index:40;overflow:hidden}
+.popover-head{padding:12px 15px;border-bottom:1px solid var(--line-2);display:flex;justify-content:space-between;font-size:12.5px;font-weight:700}
+.popover-foot{padding:10px;text-align:center;border-top:1px solid var(--line-2)}
+.empty{padding:40px 0;text-align:center;color:var(--muted);font-size:12.5px}
+.empty .ic{width:28px;height:28px;display:block;margin:0 auto 10px;opacity:.5}
+
+/* ============ 巡检路线规划模块 ============ */
+.route-layout{display:grid;grid-template-columns:246px minmax(0,1fr) 332px;gap:16px;align-items:start}
+.rp{background:#fff;border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden}
+.rp-head{padding:13px 15px;border-bottom:1px solid var(--line-2);display:flex;align-items:center;justify-content:space-between;gap:8px}
+.rp-head b{font-size:12.5px;display:flex;align-items:center;gap:7px}
+.rp-head .ic{width:15px;height:15px;color:var(--brand)}
+.rp-body{padding:13px}
+.rt-search{position:relative;margin-bottom:11px}
+.rt-search .ic{position:absolute;left:10px;top:9px;color:var(--muted);width:14px;height:14px}
+.rt-search .input{padding-left:31px;height:32px;font-size:12px}
+.rt-item{border:1px solid var(--line);border-radius:10px;padding:11px 12px;margin-bottom:9px;cursor:pointer;transition:.16s;position:relative}
+.rt-item:hover{border-color:#bcd9ed;background:#f9fcff}
+.rt-item.on{border-color:var(--brand);background:#f0f9ff;box-shadow:0 0 0 2px rgba(2,132,199,.1)}
+.rt-item.on::before{content:"";position:absolute;left:0;top:10px;bottom:10px;width:3px;border-radius:0 3px 3px 0;background:var(--brand)}
+.rt-item b{font-size:12.5px;display:block;line-height:1.35}
+.rt-item .rt-sub{font-size:10.5px;color:var(--muted);margin-top:4px}
+.rt-item .rt-meta{display:flex;gap:10px;margin-top:9px;font-size:10.5px;color:var(--text-2)}
+.rt-item .rt-meta span{display:flex;align-items:center;gap:4px}
+.rt-item .rt-meta .ic{width:12px;height:12px;color:var(--muted)}
+.rt-new{width:100%;border:1px dashed #b9d4e8;background:#f7fcff;color:var(--brand);border-radius:9px;height:34px;font-size:12px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:6px}
+.rt-new:hover{background:#eaf6ff}
+.rt-toolbar{display:flex;align-items:center;gap:6px;padding:9px 12px;border-bottom:1px solid var(--line-2);flex-wrap:wrap}
+.rt-tool{height:29px;padding:0 10px;border-radius:8px;border:1px solid var(--line);background:#fff;color:var(--text-2);font-size:11.5px;font-weight:600;display:inline-flex;align-items:center;gap:6px;transition:.15s}
+.rt-tool .ic{width:13px;height:13px}
+.rt-tool:hover{background:#f5f9fd;border-color:#cbd5e1}
+.rt-tool.on{background:var(--brand);border-color:var(--brand);color:#fff}
+.rt-tool.on .ic{color:#fff}
+.rt-tool.danger:hover{color:#dc2626;border-color:#fecaca;background:#fef2f2}
+.rt-tool-sep{width:1px;height:20px;background:var(--line);margin:0 3px}
+.rt-toolbar .sep{flex:1}
+.rt-canvas{position:relative;background:#f7fafc;overflow:hidden}
+.rt-canvas > svg{display:block;width:100%;height:auto;touch-action:none;cursor:crosshair}
+.rt-canvas > svg.select-mode{cursor:default}
+.wp-hit{cursor:grab}
+.wp-hit:active{cursor:grabbing}
+.leg-hit{cursor:pointer;stroke:transparent;stroke-width:20;fill:none}
+.leg-hit:hover{stroke:rgba(2,132,199,.09)}
+.rt-canvas-tag{position:absolute;left:12px;top:12px;background:rgba(255,255,255,.93);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:10.5px;color:var(--text-2);box-shadow:var(--shadow)}
+.rt-legend{position:absolute;right:12px;bottom:12px;background:rgba(255,255,255,.93);border:1px solid var(--line);border-radius:8px;padding:8px 11px;display:grid;gap:5px;font-size:10.5px;color:var(--text-2)}
+.rt-legend span{display:flex;align-items:center;gap:6px}
+.rt-legend i{width:9px;height:9px;border-radius:50%}
+.rt-metrics{display:grid;grid-template-columns:repeat(5,1fr);border-top:1px solid var(--line-2);background:#fbfcfe}
+.rt-metric{padding:11px 14px;border-right:1px solid var(--line-2)}
+.rt-metric:last-child{border-right:none}
+.rt-metric span{font-size:10.5px;color:var(--muted)}
+.rt-metric b{display:block;font-size:16px;margin-top:3px;letter-spacing:-.3px}
+.rt-metric b small{font-size:10px;color:var(--muted);font-weight:500}
+.rt-timeline{display:flex;overflow-x:auto;padding:14px 16px 16px}
+.rt-step{flex:1;min-width:112px;position:relative;padding-right:12px}
+.rt-step::after{content:"";position:absolute;right:2px;top:11px;width:14px;height:1.5px;background:#cbd5e1}
+.rt-step:last-child::after{display:none}
+.rt-step .dot{width:22px;height:22px;border-radius:50%;background:#e8f3fb;color:var(--brand);display:grid;place-items:center;font-size:10px;font-weight:700;border:1px solid #c7e4f6}
+.rt-step.active .dot{background:var(--brand);color:#fff;border-color:var(--brand)}
+.rt-step b{display:block;font-size:11px;margin-top:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rt-step span{font-size:10px;color:var(--muted);display:block;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rt-tabs{display:flex;gap:3px;padding:9px 12px 0;border-bottom:1px solid var(--line-2)}
+.rt-tab{flex:1;height:32px;border:0;background:transparent;border-radius:8px 8px 0 0;font-size:12px;font-weight:600;color:var(--muted);border-bottom:2px solid transparent;display:flex;align-items:center;justify-content:center;gap:6px}
+.rt-tab .ic{width:13px;height:13px}
+.rt-tab.on{color:var(--brand);border-bottom-color:var(--brand);background:#f5fbff}
+.rt-prop{padding:14px;max-height:620px;overflow-y:auto}
+.rt-field{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.rt-field label{width:74px;flex:none;font-size:11.5px;color:var(--text-2);font-weight:600}
+.rt-field .input,.rt-field .select{height:31px;font-size:12px;flex:1;min-width:0;padding:0 9px}
+.rt-field .chk{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--text-2);cursor:pointer}
+.rt-sec-title{font-size:11.5px;font-weight:700;color:var(--text);margin:16px 0 10px;padding-top:13px;border-top:1px solid var(--line-2);display:flex;align-items:center;justify-content:space-between}
+.rt-sec-title:first-child{margin-top:0;padding-top:0;border-top:none}
+.rt-sec-title .ic{width:14px;height:14px;color:var(--brand)}
+.act-card{border:1px solid var(--line);border-radius:10px;padding:10px 11px;margin-bottom:8px;background:#fcfdff}
+.act-card:hover{border-color:#c9dfef}
+.act-top{display:flex;align-items:center;gap:8px}
+.act-ico{width:27px;height:27px;border-radius:8px;display:grid;place-items:center;flex:none;background:#e8f3fd;color:#0284c7}
+.act-ico .ic{width:14px;height:14px}
+.act-ico.purple{background:#f1ecfe;color:#7c3aed}
+.act-ico.teal{background:#e2f8f5;color:#0d9488}
+.act-ico.orange{background:#fff2e3;color:#c2410c}
+.act-ico.gray{background:#f1f5f9;color:#64748b}
+.act-top b{font-size:11.5px;flex:1}
+.act-kv{display:grid;gap:3px;margin-top:8px;font-size:10.5px;color:var(--muted)}
+.act-kv b{color:var(--text-2);font-weight:600}
+.act-add{width:100%;height:32px;border:1px dashed #b9d4e8;background:#f8fcff;color:var(--brand);border-radius:9px;font-size:11.5px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:6px}
+.rt-hint{background:#f0f9ff;border:1px solid #d5ebfa;border-radius:9px;padding:10px 11px;font-size:10.5px;color:#0c6f9c;line-height:1.65;margin-top:12px}
+.sim-dog{filter:drop-shadow(0 2px 5px rgba(2,132,199,.45))}
+.rt-val-item{display:flex;align-items:center;gap:8px;padding:9px 0;border-bottom:1px dashed var(--line-2);font-size:11.5px}
+.rt-val-item .ic{width:14px;height:14px}
+
+/* 响应式 */
+@media(max-width:1400px){.route-layout{grid-template-columns:220px minmax(0,1fr) 300px}}
+@media(max-width:1180px){.route-layout{grid-template-columns:220px minmax(0,1fr)}.rt-prop-panel{grid-column:1/-1}.rt-metrics{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:1280px){.kpis{grid-template-columns:repeat(2,1fr)}.row-2,.row-2b{grid-template-columns:1fr}.g3{grid-template-columns:repeat(2,1fr)}.kanban{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:900px){.route-layout{grid-template-columns:1fr}.rt-prop-panel{grid-column:auto}.sidebar{width:74px}.sidebar .hide-c,.sidebar .brand-text,.sidebar .nav-group-title,.sidebar .sb-status{display:none}.sidebar .nav-item{justify-content:center;padding:11px 0}.sidebar .brand{justify-content:center;padding:0}.tb-search{display:none}.tb-time{display:none}.content{padding:18px 16px 36px}.topbar{padding:0 16px}}
+@media(max-width:640px){.kpis,.g3,.kanban,.form-grid{grid-template-columns:1fr}.page-title{font-size:18px}.toolbar .search{width:100%}.tb-user .u-name,.tb-user .u-role{display:none}.metric-grid{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+
+<!-- ============ 图标库 ============ -->
+<svg class="icon-sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+<symbol id="i-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+<symbol id="i-park" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18M5 21V8l7-5 7 5v13"/><path d="M9 21v-5h6v5M9 10h.01M15 10h.01M9 13h.01M15 13h.01"/></symbol>
+<symbol id="i-dog" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="8" width="13" height="7" rx="2"/><path d="M15.5 9.5h2.8l3 2.2v3.3h-5.8"/><path d="M5 15v4M9 15v4M13 15v4M18 15v4"/><circle cx="19.2" cy="11.4" r=".9" fill="currentColor" stroke="none"/><path d="M5 8V5.5"/></symbol>
+<symbol id="i-task" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="17" rx="2"/><path d="M9 4V2.8h6V4M8 11l2 2 4-4M8 17h8"/></symbol>
+<symbol id="i-bell" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 8-3 9h18c0-1-3-2-3-9M10 21h4"/></symbol>
+<symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9v.5a1.7 1.7 0 0 0 1.6 1.5H21a2 2 0 1 1 0 4h-.09A1.7 1.7 0 0 0 19.4 15z"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></symbol>
+<symbol id="i-menu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+<symbol id="i-chevron-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></symbol>
+<symbol id="i-chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></symbol>
+<symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4 4L19 6"/></symbol>
+<symbol id="i-check-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/></symbol>
+<symbol id="i-warn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.7 2.2 18a2 2 0 0 0 1.7 3h16.2a2 2 0 0 0 1.7-3L13.7 3.7a2 2 0 0 0-3.4 0M12 9v4M12 17h.01"/></symbol>
+<symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+<symbol id="i-calendar" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/></symbol>
+<symbol id="i-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 1 1 16 0"/><circle cx="12" cy="10" r="2.6"/></symbol>
+<symbol id="i-battery" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="2" y="7" width="18" height="10" rx="2"/><path d="M22 10v4"/><path d="M6 11h6v2H6z" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-wifi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2 8.5a15 15 0 0 1 20 0M5 12a10 10 0 0 1 14 0M8.5 15.5a5 5 0 0 1 7 0M12 19h.01"/></symbol>
+<symbol id="i-activity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></symbol>
+<symbol id="i-video" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m16 10 6-3v10l-6-3z"/></symbol>
+<symbol id="i-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M7 4.5 19 12 7 19.5z"/></symbol>
+<symbol id="i-pause" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 5v14M16 5v14"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 6.3M20 5v6h-6"/></symbol>
+<symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></symbol>
+<symbol id="i-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"/></symbol>
+<symbol id="i-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-6.5 10-6.5S22 12 22 12s-3.5 6.5-10 6.5S2 12 2 12"/><circle cx="12" cy="12" r="2.8"/></symbol>
+<symbol id="i-layers" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 9 5-9 5-9-5zM3 12l9 5 9-5M3 17l9 5 9-5"/></symbol>
+<symbol id="i-list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></symbol>
+<symbol id="i-board" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M15 3v18"/></symbol>
+<symbol id="i-trend-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 17 6-6 4 4 8-8M15 7h6v6"/></symbol>
+<symbol id="i-trend-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 7 6 6 4-4 8 8M15 17h6v-6"/></symbol>
+<symbol id="i-zone" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z" stroke-dasharray="3 2"/></symbol>
+<symbol id="i-charge" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></symbol>
+<symbol id="i-cpu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 6v6c0 5 3.5 8.5 8 10 4.5-1.5 8-5 8-10V6z"/><path d="m9 12 2 2 4-4"/></symbol>
+<symbol id="i-maximize" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></symbol>
+<symbol id="i-user" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></symbol>
+<symbol id="i-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4zM22 2 11 13"/></symbol>
+<symbol id="i-more" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></symbol>
+<symbol id="i-route" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="18" r="2"/><circle cx="19" cy="6" r="2"/><path d="M7 18h4a4 4 0 0 0 0-8h-1a4 4 0 0 1 0-8h7" stroke-dasharray="3 2"/></symbol>
+<symbol id="i-waypoint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3.5"/><circle cx="12" cy="12" r="8" stroke-dasharray="3 3"/><path d="M12 1v3M12 20v3M1 12h3M20 12h3"/></symbol>
+<symbol id="i-camera" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h4l2-3h6l2 3h4v12H3z"/><circle cx="12" cy="14" r="3.5"/></symbol>
+<symbol id="i-thermo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 14.8V5a2 2 0 1 0-4 0v9.8a4 4 0 1 0 4 0"/><path d="M12 10v7"/></symbol>
+<symbol id="i-scan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3 9V6a3 3 0 0 1 3-3h3M15 3h3a3 3 0 0 1 3 3v3M21 15v3a3 3 0 0 1-3 3h-3M9 21H6a3 3 0 0 1-3-3v-3M3 12h18"/></symbol>
+<symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14M10 11v6M14 11v6"/></symbol>
+<symbol id="i-undo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h10a6 6 0 0 1 0 12H9M4 8l4-4M4 8l4 4"/></symbol>
+<symbol id="i-magnet" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3v9a7 7 0 0 0 14 0V3h-4v9a3 3 0 0 1-6 0V3zM5 8h4M15 8h4"/></symbol>
+<symbol id="i-shuffle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h3l11 12h4M17 3l3 3-3 3M3 18h3l3-3.5M14 8.5 17 6h4M17 15l3 3-3 3"/></symbol>
+<symbol id="i-flag" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4M5 5h13l-3 4 3 4H5"/></symbol>
+<symbol id="i-sound" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9zM17 9a4 4 0 0 1 0 6M19.5 6.5a8 8 0 0 1 0 11"/></symbol>
+</defs></svg>
+
+<div class="app">
+  <!-- ============ 侧边栏 ============ -->
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="brand-logo"><svg class="ic"><use href="#i-dog"></use></svg></div>
+      <div class="brand-text"><b>四足机器人管理平台</b><span>ROBODOG OPS</span></div>
+    </div>
+    <div class="sb-scroll">
+      <div class="nav-group-title">工作台</div>
+      <div class="nav-item active" data-view="dashboard"><svg class="ic"><use href="#i-grid"></use></svg><span class="hide-c">总览驾驶舱</span></div>
+      <div class="nav-group-title">业务管理</div>
+      <div class="nav-item" data-view="parks"><svg class="ic"><use href="#i-park"></use></svg><span class="hide-c">园区管理</span></div>
+      <div class="nav-item" data-view="routes"><svg class="ic"><use href="#i-route"></use></svg><span class="hide-c">巡检路线</span></div>
+      <div class="nav-item" data-view="devices"><svg class="ic"><use href="#i-dog"></use></svg><span class="hide-c">设备管理</span></div>
+      <div class="nav-item" data-view="tasks"><svg class="ic"><use href="#i-task"></use></svg><span class="hide-c">任务管理</span></div>
+      <div class="nav-group-title">监控运维</div>
+      <div class="nav-item" data-view="alerts"><svg class="ic"><use href="#i-bell"></use></svg><span class="hide-c">告警中心</span><span class="nav-badge hide-c" id="navAlertCount">2</span></div>
+      <div class="nav-item" data-view="settings"><svg class="ic"><use href="#i-settings"></use></svg><span class="hide-c">系统设置</span></div>
+    </div>
+    <div class="sb-status">
+      <div class="st-row"><i class="breath"></i>系统运行正常</div>
+      <p>已接入设备 32 台 · 网关在线</p>
+      <p>数据同步于 <span id="syncTime">09:15:32</span></p>
+    </div>
+  </aside>
+
+  <!-- ============ 主区 ============ -->
+  <div class="main">
+    <header class="topbar">
+      <button class="tb-toggle" id="btnToggle" title="收起/展开侧栏"><svg class="ic"><use href="#i-menu"></use></svg></button>
+      <div class="crumb"><span>智慧巡检平台</span><svg class="ic" style="width:13px;height:13px"><use href="#i-chevron-right"></use></svg><b id="crumbNow">总览驾驶舱</b></div>
+      <div class="tb-spacer"></div>
+      <div class="tb-search"><svg class="ic"><use href="#i-search"></use></svg><input class="input" id="globalSearch" placeholder="搜索设备编号 / 园区 / 任务…"></div>
+      <div class="tb-time" id="clock"></div>
+      <button class="tb-icon" id="btnBell" title="告警通知"><svg class="ic"><use href="#i-bell"></use></svg><span class="red-dot" id="bellDot"></span></button>
+      <div class="tb-user"><div class="avatar">管</div><div><div class="u-name">管理员</div><div class="u-role">平台运维组</div></div><svg class="ic" style="width:13px;height:13px;color:#94a3b8"><use href="#i-chevron-down"></use></svg></div>
+      <div class="popover" id="bellPop" hidden></div>
+    </header>
+
+    <div class="content">
+      <section class="view active" id="v-dashboard"></section>
+      <section class="view" id="v-parks"></section>
+      <section class="view" id="v-routes"></section>
+      <section class="view" id="v-devices"></section>
+      <section class="view" id="v-tasks"></section>
+      <section class="view" id="v-alerts"></section>
+      <section class="view" id="v-settings"></section>
+    </div>
+  </div>
+</div>
+
+<!-- 模态框 -->
+<div class="overlay" id="modalOverlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true">
+    <div class="modal-head"><div><b id="modalTitle">标题</b><p id="modalSub">请填写以下信息</p></div><button class="btn ghost icon" data-act="close-modal"><svg class="ic"><use href="#i-close"></use></svg></button></div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-foot"><button class="btn" data-act="close-modal">取消</button><button class="btn primary" id="modalSubmit"><svg class="ic"><use href="#i-check"></use></svg>确认提交</button></div>
+  </div>
+</div>
+
+<!-- 设备详情抽屉 -->
+<div class="drawer-overlay" id="drawerOverlay" hidden data-act="close-drawer"></div>
+<aside class="drawer" id="drawer" hidden></aside>
+
+<div class="toast-stack" id="toastStack"></div>
+
+<script>
+/* =========================================================
+   四足机器人管理平台 · 前端交互原型
+   纯静态数据，无任何外部依赖
+   ========================================================= */
+const $  = (s, r=document) => r.querySelector(s);
+const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
+const ic = (n, cls='') => `<svg class="ic ${cls}"><use href="#i-${n}"></use></svg>`;
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+/* ---------------- 模拟数据 ---------------- */
+const S = {
+  view: 'dashboard',
+  parkView: 'card',
+  taskView: 'board',
+  device: { q:'', park:'', status:'全部' },
+  park:   { q:'', status:'全部' },
+  alertFilter: '全部',
+  parks: [
+    { id:'PK-001', name:'张江智造园区', desc:'总部一期 · 生产制造', area:'12.8', zones:6, devices:14, tasks:12, done:9, owner:'陈志远', status:'运行中', color:'#0284c7' },
+    { id:'PK-002', name:'临港物流基地', desc:'仓储物流 · 二期扩建', area:'18.5', zones:5, devices:11, tasks:8,  done:8, owner:'李文博', status:'运行中', color:'#0d9488' },
+    { id:'PK-003', name:'滨江研发中心', desc:'研发办公 · 试点区域', area:'6.2',  zones:3, devices:7,  tasks:6,  done:4, owner:'周雨欣', status:'部分维护', color:'#7c3aed' }
+  ],
+  zones: [
+    { park:'张江智造园区', name:'A区 · 生产车间', type:'生产区', devices:4, freq:'每 2 小时', status:'正常' },
+    { park:'张江智造园区', name:'B区 · 立体仓库', type:'仓储区', devices:3, freq:'每 4 小时', status:'正常' },
+    { park:'张江智造园区', name:'C区 · 外围周界', type:'周界',   devices:3, freq:'每 1 小时', status:'正常' },
+    { park:'临港物流基地', name:'D区 · 装卸平台', type:'作业区', devices:4, freq:'每 2 小时', status:'正常' },
+    { park:'临港物流基地', name:'E区 · 冷链仓',   type:'仓储区', devices:3, freq:'每 3 小时', status:'告警' },
+    { park:'临港物流基地', name:'F区 · 停车广场', type:'公共区', devices:2, freq:'每 6 小时', status:'正常' },
+    { park:'滨江研发中心', name:'G区 · 研发楼',   type:'办公区', devices:3, freq:'每 4 小时', status:'正常' },
+    { park:'滨江研发中心', name:'H区 · 地下车库', type:'地下',   devices:2, freq:'维护中',   status:'维护中' }
+  ],
+  devices: [
+    { id:'RD-001', model:'X30-Pro', park:'张江智造园区', zone:'A区 · 生产车间', status:'执行任务', battery:86, signal:4, task:'A区上午例行巡检', beat:'09:15:32', temp:38.6, runtime:'4h 26m', odo:'12.4', pos:'31.2014, 121.6023' },
+    { id:'RD-002', model:'X30-Pro', park:'张江智造园区', zone:'B区 · 立体仓库', status:'在线待命', battery:94, signal:4, task:'—', beat:'09:15:30', temp:36.2, runtime:'2h 08m', odo:'6.8', pos:'31.2021, 121.6041' },
+    { id:'RD-003', model:'Lite-S',  park:'张江智造园区', zone:'C区 · 外围周界', status:'执行任务', battery:71, signal:3, task:'周界夜间遗留巡检', beat:'09:15:28', temp:40.1, runtime:'5h 51m', odo:'18.2', pos:'31.1998, 121.6009' },
+    { id:'RD-004', model:'X30-Pro', park:'张江智造园区', zone:'A区 · 生产车间', status:'充电中',   battery:42, signal:4, task:'—', beat:'09:15:21', temp:33.4, runtime:'0h 00m', odo:'9.1', pos:'充电座 P-01' },
+    { id:'RD-007', model:'Lite-S',  park:'临港物流基地', zone:'D区 · 装卸平台', status:'在线待命', battery:88, signal:4, task:'—', beat:'09:15:18', temp:37.0, runtime:'1h 42m', odo:'4.3', pos:'30.8912, 121.9234' },
+    { id:'RD-009', model:'X30-Pro', park:'临港物流基地', zone:'E区 · 冷链仓',   status:'故障',     battery:63, signal:2, task:'—', beat:'08:47:12', temp:56.2, runtime:'3h 12m', odo:'11.7', pos:'30.8934, 121.9261' },
+    { id:'RD-011', model:'X30-Pro', park:'临港物流基地', zone:'F区 · 停车广场', status:'执行任务', battery:79, signal:4, task:'广场车流巡检', beat:'09:15:11', temp:39.3, runtime:'2h 34m', odo:'8.6', pos:'30.8901, 121.9208' },
+    { id:'RD-012', model:'Lite-S',  park:'临港物流基地', zone:'D区 · 装卸平台', status:'充电中',   battery:35, signal:3, task:'—', beat:'09:14:58', temp:34.1, runtime:'0h 00m', odo:'7.2', pos:'充电座 P-04' },
+    { id:'RD-015', model:'X30-Pro', park:'滨江研发中心', zone:'G区 · 研发楼',   status:'在线待命', battery:97, signal:4, task:'—', beat:'09:15:02', temp:35.8, runtime:'0h 46m', odo:'2.1', pos:'31.1788, 121.5102' },
+    { id:'RD-018', model:'Lite-S',  park:'滨江研发中心', zone:'H区 · 地下车库', status:'离线',     battery:18, signal:0, task:'—', beat:'07:22:41', temp:31.2, runtime:'—', odo:'15.9', pos:'信号丢失' },
+    { id:'RD-021', model:'X30-Pro', park:'张江智造园区', zone:'C区 · 外围周界', status:'执行任务', battery:82, signal:4, task:'周界围栏巡检', beat:'09:14:47', temp:38.9, runtime:'3h 05m', odo:'10.5', pos:'31.2003, 121.5996' },
+    { id:'RD-024', model:'Lite-S',  park:'滨江研发中心', zone:'G区 · 研发楼',   status:'在线待命', battery:90, signal:3, task:'—', beat:'09:14:39', temp:36.6, runtime:'1h 12m', odo:'3.7', pos:'31.1792, 121.5116' }
+  ],
+  tasks: [
+    { id:'TK-1109-01', name:'A区上午例行巡检',   type:'定时巡检', device:'RD-001', park:'张江智造园区', zone:'A区 · 生产车间', time:'09:00 - 09:40', status:'执行中', progress:62, mode:'周期任务', level:'常规' },
+    { id:'TK-1109-02', name:'周界围栏异常复核',   type:'应急处置', device:'RD-021', park:'张江智造园区', zone:'C区 · 外围周界', time:'09:05 - 09:30', status:'执行中', progress:38, mode:'临时下发', level:'紧急' },
+    { id:'TK-1109-03', name:'立体仓库红外测温',   type:'定点拍照', device:'RD-002', park:'张江智造园区', zone:'B区 · 立体仓库', time:'09:20 - 09:50', status:'待执行', progress:0,  mode:'周期任务', level:'常规' },
+    { id:'TK-1109-04', name:'冷链仓夜间闭馆巡检', type:'夜巡任务', device:'RD-007', park:'临港物流基地', zone:'E区 · 冷链仓',   time:'22:00 - 22:40', status:'待执行', progress:0,  mode:'周期任务', level:'常规' },
+    { id:'TK-1109-05', name:'装卸平台早班巡查',   type:'定时巡检', device:'RD-011', park:'临港物流基地', zone:'D区 · 装卸平台', time:'08:00 - 08:35', status:'已完成', progress:100, mode:'周期任务', level:'常规' },
+    { id:'TK-1109-06', name:'研发楼消防通道检查', type:'定点拍照', device:'RD-015', park:'滨江研发中心', zone:'G区 · 研发楼',   time:'08:30 - 09:00', status:'已完成', progress:100, mode:'周期任务', level:'常规' },
+    { id:'TK-1109-07', name:'广场车流与人员密度采集', type:'定时巡检', device:'RD-011', park:'临港物流基地', zone:'F区 · 停车广场', time:'09:10 - 09:45', status:'待执行', progress:0, mode:'临时下发', level:'常规' },
+    { id:'TK-1108-12', name:'冷链仓温度传感器校准', type:'设备维护', device:'RD-009', park:'临港物流基地', zone:'E区 · 冷链仓', time:'11-08 15:20', status:'异常', progress:47, mode:'周期任务', level:'重要' },
+    { id:'TK-1108-09', name:'地下车库建图补采',   type:'地图采集', device:'RD-018', park:'滨江研发中心', zone:'H区 · 地下车库', time:'11-08 14:00', status:'异常', progress:23, mode:'临时下发', level:'重要' },
+    { id:'TK-1109-08', name:'一期周界全景建图',   type:'地图采集', device:'RD-003', park:'张江智造园区', zone:'C区 · 外围周界', time:'10:00 - 10:40', status:'待执行', progress:0, mode:'临时下发', level:'常规' }
+  ],
+  alerts: [
+    { id:'AL-001', level:'严重', text:'RD-009 电池温度异常（56.2℃）', device:'RD-009', park:'临港物流基地', time:'09:12:04', status:'未处理' },
+    { id:'AL-002', level:'警告', text:'RD-018 设备离线，信号丢失超 2 小时', device:'RD-018', park:'滨江研发中心', time:'08:47:31', status:'未处理' },
+    { id:'AL-003', level:'警告', text:'E区冷链仓巡检任务超时未开始', device:'RD-007', park:'临港物流基地', time:'08:31:16', status:'处理中' },
+    { id:'AL-004', level:'提示', text:'RD-012 电量低于 40%，已自动回充', device:'RD-012', park:'临港物流基地', time:'08:15:02', status:'已处理' },
+    { id:'AL-005', level:'提示', text:'C区周界红外发现移动目标（已复核为人员）', device:'RD-021', park:'张江智造园区', time:'07:56:44', status:'已处理' }
+  ],
+  trend: { days:['11-03','11-04','11-05','11-06','11-07','11-08','11-09'], plan:[16,18,15,20,19,22,18], done:[15,17,15,19,18,21,17] },
+  timeline: [
+    { icon:'check-circle', tone:'ok',   title:'装卸平台早班巡查 已完成', desc:'RD-011 · 采集照片 24 张，未发现异常', time:'08:35' },
+    { icon:'play',         tone:'',     title:'A区上午例行巡检 开始执行', desc:'RD-001 · 预计 09:40 完成', time:'09:00' },
+    { icon:'warn',         tone:'warn', title:'RD-009 触发温度告警', desc:'已自动暂停任务并通知运维人员', time:'09:12' },
+    { icon:'charge',       tone:'',     title:'RD-012 进入自动回充', desc:'充电座 P-04 · 当前电量 35%', time:'09:15' }
+  ],
+
+  /* ---- 巡检路线：Route → Waypoint / Leg → Action 四层模型 ---- */
+  routeState: { id:'RT-001', mode:'add', tab:'point', selType:'point', selIdx:1, hist:[], sim:false, q:'', snap:true },
+  routes: [
+    { id:'RT-001', name:'A区上午例行巡检', park:'张江智造园区', zone:'A区 · 生产车间', status:'已发布', version:'v2.3', model:'X30-Pro', loop:'闭环', speed:1.2, updated:'11-09 08:40', desc:'覆盖产线 6 个关键点位，含配电柜红外测温与仪表读数识别',
+      points:[
+        { name:'起点 · 充电座 P-01', x:88,  y:342, dwell:0,  radius:0.5, must:true,  heading:0,  onFail:'跳过继续', actions:[{type:'设备自检', param:'全传感器自检', trigger:'到达即执行', threshold:'—', retry:1}] },
+        { name:'配电柜测温点',      x:212, y:294, dwell:15, radius:0.3, must:true,  heading:90, onFail:'重试 2 次', actions:[{type:'红外测温', param:'云台 P90 · ROI 中心区域', trigger:'停留后执行', threshold:'> 65℃ 生成告警', retry:2},{type:'可见光拍照', param:'1080P / 广角 / 单帧', trigger:'到达即执行', threshold:'—', retry:1}] },
+        { name:'产线 A 线巡检点',  x:332, y:204, dwell:8,  radius:0.4, must:true,  heading:45, onFail:'重试 1 次', actions:[{type:'AI 识别', param:'人员 / 烟火 / 安全帽', trigger:'到达即执行', threshold:'置信度 > 0.85', retry:1},{type:'录像采集', param:'1080P / 25fps / 15s', trigger:'停留后执行', threshold:'—', retry:1}] },
+        { name:'仪表读数点位',      x:472, y:148, dwell:12, radius:0.3, must:true,  heading:0,  onFail:'重试 2 次', actions:[{type:'AI 识别', param:'指针仪表 OCR 读数', trigger:'停留后执行', threshold:'读数越限告警', retry:2},{type:'可见光拍照', param:'2K / 长焦 / 特写', trigger:'到达即执行', threshold:'—', retry:1}] },
+        { name:'消防通道检查点',    x:624, y:214, dwell:10, radius:0.5, must:false, heading:135,onFail:'跳过继续', actions:[{type:'AI 识别', param:'通道堵塞 / 杂物堆放', trigger:'到达即执行', threshold:'检测到堵塞告警', retry:1},{type:'二维码扫码', param:'消防器材资产标签', trigger:'停留后执行', threshold:'—', retry:1}] },
+        { name:'终点 · 数据回传',   x:720, y:334, dwell:5,  radius:0.5, must:true,  heading:180,onFail:'中止路线', actions:[{type:'语音播报', param:'巡检完成播报', trigger:'到达即执行', threshold:'—', retry:1}] }
+      ],
+      legs:[
+        { mode:'沿道路', speed:1.2, avoid:'标准', actions:[{type:'全程录像', param:'1080P / 25fps / 连续'}] },
+        { mode:'沿道路', speed:1.0, avoid:'严格', actions:[{type:'周界扫描', param:'侧向 120° 扫描'},{type:'全程录像', param:'1080P / 25fps'}] },
+        { mode:'直线',   speed:1.2, avoid:'标准', actions:[{type:'连续测温', param:'每 2s 采样一次'}] },
+        { mode:'沿道路', speed:1.4, avoid:'标准', actions:[{type:'全程录像', param:'1080P / 25fps'}] },
+        { mode:'沿道路', speed:1.2, avoid:'标准', actions:[{type:'静默通行', param:'关闭语音提示'}] }
+      ],
+      returnLeg:{ mode:'沿道路', speed:1.5, avoid:'标准', actions:[{type:'静默通行', param:'返航不采集'}] }
+    },
+    { id:'RT-002', name:'C区周界围栏夜巡', park:'张江智造园区', zone:'C区 · 外围周界', status:'已发布', version:'v1.8', model:'Lite-S', loop:'闭环', speed:1.5, updated:'11-08 21:15', desc:'夜间周界闭环巡查，重点检测越界与异常热源',
+      points:[
+        { name:'起点 · 西门岗', x:96,  y:356, dwell:0, radius:0.5, must:true, onFail:'跳过继续', heading:0, actions:[{type:'设备自检', param:'夜视 / 补光自检', trigger:'到达即执行', threshold:'—', retry:1}] },
+        { name:'西北角围栏',    x:168, y:118, dwell:10, radius:0.4, must:true, onFail:'重试 2 次', heading:45, actions:[{type:'红外测温', param:'围栏全景热成像', trigger:'停留后执行', threshold:'> 50℃ 生成告警', retry:2}] },
+        { name:'北侧中段',      x:420, y:74,  dwell:8, radius:0.4, must:true, onFail:'重试 1 次', heading:90, actions:[{type:'AI 识别', param:'越界人员 / 攀爬', trigger:'到达即执行', threshold:'检测到即告警', retry:1}] },
+        { name:'东北角围栏',    x:688, y:126, dwell:10, radius:0.4, must:true, onFail:'重试 2 次', heading:135, actions:[{type:'录像采集', param:'红外夜视 / 20s', trigger:'停留后执行', threshold:'—', retry:1}] },
+        { name:'东门岗',        x:730, y:348, dwell:5, radius:0.5, must:true, onFail:'中止路线', heading:180, actions:[{type:'二维码扫码', param:'门禁点位标签', trigger:'到达即执行', threshold:'—', retry:1}] }
+      ],
+      legs:[
+        { mode:'沿道路', speed:1.5, avoid:'标准', actions:[{type:'周界扫描', param:'右侧 180° 连续扫描'}] },
+        { mode:'沿道路', speed:1.5, avoid:'标准', actions:[{type:'全程录像', param:'红外夜视 / 连续'}] },
+        { mode:'沿道路', speed:1.5, avoid:'标准', actions:[{type:'周界扫描', param:'右侧 180° 连续扫描'}] },
+        { mode:'沿道路', speed:1.4, avoid:'严格', actions:[{type:'全程录像', param:'红外夜视 / 连续'}] }
+      ],
+      returnLeg:{ mode:'沿道路', speed:1.6, avoid:'标准', actions:[{type:'静默通行', param:'返航不采集'}] }
+    },
+    { id:'RT-003', name:'冷链仓温度专项', park:'临港物流基地', zone:'E区 · 冷链仓', status:'草稿', version:'v0.9', model:'X30-Pro', loop:'往返', speed:0.8, updated:'11-09 09:02', desc:'低温环境密集测温，需校验电池低温续航',
+      points:[
+        { name:'仓门缓冲区', x:110, y:330, dwell:20, radius:0.3, must:true, onFail:'中止路线', heading:0, actions:[{type:'气体检测', param:'CO / O2 浓度', trigger:'停留后执行', threshold:'CO > 30ppm 告警', retry:2}] },
+        { name:'A 列货架',   x:290, y:232, dwell:15, radius:0.3, must:true, onFail:'重试 1 次', heading:90, actions:[{type:'红外测温', param:'货架上 / 中 / 下三层', trigger:'停留后执行', threshold:'> -18℃ 生成告警', retry:2}] },
+        { name:'B 列货架',   x:490, y:196, dwell:15, radius:0.3, must:true, onFail:'重试 1 次', heading:90, actions:[{type:'红外测温', param:'货架上 / 中 / 下三层', trigger:'停留后执行', threshold:'> -18℃ 生成告警', retry:2}] },
+        { name:'制冷机组',   x:676, y:296, dwell:25, radius:0.3, must:true, onFail:'重试 2 次', heading:135, actions:[{type:'气体检测', param:'冷媒泄漏检测', trigger:'停留后执行', threshold:'泄漏即中止', retry:2},{type:'录像采集', param:'机组运行特写 / 20s', trigger:'到达即执行', threshold:'—', retry:1}] }
+      ],
+      legs:[
+        { mode:'沿道路', speed:0.8, avoid:'严格', actions:[{type:'连续测温', param:'每 1s 采样一次'}] },
+        { mode:'直线',   speed:0.8, avoid:'严格', actions:[{type:'连续测温', param:'每 1s 采样一次'}] },
+        { mode:'沿道路', speed:0.8, avoid:'严格', actions:[{type:'气体巡检', param:'持续采样冷媒浓度'}] }
+      ],
+      returnLeg:null
+    },
+    { id:'RT-004', name:'研发楼消防通道', park:'滨江研发中心', zone:'G区 · 研发楼', status:'草稿', version:'v0.4', model:'Lite-S', loop:'往返', speed:1.0, updated:'11-07 16:28', desc:'室内消防通道占用识别，待补充楼层地图',
+      points:[
+        { name:'一层大厅',   x:132, y:340, dwell:0, radius:0.5, must:true, onFail:'跳过继续', heading:0, actions:[{type:'设备自检', param:'室内定位初始化', trigger:'到达即执行', threshold:'—', retry:1}] },
+        { name:'2F 东侧通道', x:320, y:230, dwell:8, radius:0.4, must:true, onFail:'重试 1 次', heading:45, actions:[{type:'AI 识别', param:'通道堵塞 / 杂物', trigger:'到达即执行', threshold:'检测到即告警', retry:1}] },
+        { name:'3F 西侧通道', x:520, y:150, dwell:8, radius:0.4, must:true, onFail:'重试 1 次', heading:90, actions:[{type:'可见光拍照', param:'1080P / 全景', trigger:'停留后执行', threshold:'—', retry:1}] },
+        { name:'消防器材点',  x:694, y:286, dwell:10, radius:0.4, must:true, onFail:'重试 1 次', heading:135, actions:[{type:'二维码扫码', param:'灭火器资产标签', trigger:'到达即执行', threshold:'—', retry:1}] }
+      ],
+      legs:[
+        { mode:'沿道路', speed:1.0, avoid:'严格', actions:[{type:'全程录像', param:'1080P / 连续'}] },
+        { mode:'沿道路', speed:1.0, avoid:'严格', actions:[{type:'静默通行', param:'楼梯通行不采集'}] },
+        { mode:'沿道路', speed:1.0, avoid:'严格', actions:[{type:'全程录像', param:'1080P / 连续'}] }
+      ],
+      returnLeg:null
+    }
+  ]
+};
+
+/* 动作字典：航点瞬时动作 / 航段持续动作 */
+const ACTION_LIB = {
+  '可见光拍照':{ icon:'camera',   tone:'blue',   param:'1080P / 广角 / 单帧',   trigger:'到达即执行', threshold:'—', kind:'point' },
+  '红外测温':  { icon:'thermo',   tone:'orange', param:'云台 P90 · ROI 中心',   trigger:'停留后执行', threshold:'> 65℃ 生成告警', kind:'point' },
+  'AI 识别':   { icon:'scan',     tone:'purple', param:'烟火 / 人员 / 仪表读数', trigger:'到达即执行', threshold:'置信度 > 0.85', kind:'point' },
+  '二维码扫码':{ icon:'scan',     tone:'teal',   param:'设备资产标签',         trigger:'停留后执行', threshold:'—', kind:'point' },
+  '语音播报':  { icon:'sound',    tone:'gray',   param:'安全提示语音 01',      trigger:'到达即执行', threshold:'—', kind:'point' },
+  '录像采集':  { icon:'video',    tone:'blue',   param:'1080P / 25fps / 15s',  trigger:'到达即执行', threshold:'—', kind:'point' },
+  '气体检测':  { icon:'activity', tone:'teal',   param:'CO / H2S / O2',        trigger:'停留后执行', threshold:'CO > 30ppm 告警', kind:'point' },
+  '设备自检':  { icon:'cpu',      tone:'gray',   param:'全传感器自检',         trigger:'到达即执行', threshold:'—', kind:'point' },
+  '等待':      { icon:'clock',    tone:'gray',   param:'等待 10s',             trigger:'停留后执行', threshold:'—', kind:'point' },
+  '全程录像':  { icon:'video',    tone:'blue',   param:'1080P / 25fps / 连续', kind:'leg' },
+  '连续测温':  { icon:'thermo',   tone:'orange', param:'每 2s 采样一次',       kind:'leg' },
+  '周界扫描':  { icon:'scan',     tone:'purple', param:'侧向 120° 扫描',       kind:'leg' },
+  '气体巡检':  { icon:'activity', tone:'teal',   param:'持续采样浓度',         kind:'leg' },
+  '静默通行':  { icon:'shield',   tone:'gray',   param:'关闭语音提示',         kind:'leg' }
+};
+const TRIGGERS = ['到达即执行','停留后执行','条件触发','定时执行'];
+const FAIL_MODES = ['跳过继续','重试 1 次','重试 2 次','中止路线','人工接管'];
+
+/* 任务 → 路线模板引用：任务下发时展开为航点序列 + 动作指令集 */
+const TASK_ROUTE_MAP = {
+  'TK-1109-01':'RT-001','TK-1109-02':'RT-002','TK-1109-03':'RT-001','TK-1109-04':'RT-003',
+  'TK-1109-05':'RT-001','TK-1109-06':'RT-004','TK-1109-07':'RT-002','TK-1109-08':'RT-002',
+  'TK-1108-12':'RT-003','TK-1108-09':'—'
+};
+S.tasks.forEach(t=>{ t.route = TASK_ROUTE_MAP[t.id] || '—'; });
+const routeLabel = rid => {
+  const r=S.routes.find(x=>x.id===rid);
+  return r ? `${r.id} · ${r.name}` : '未关联（临时路径）';
+};
+
+/* ---------------- 通用小组件 ---------------- */
+const statusTone = s => ({
+  '运行中':'ok','正常':'ok','在线待命':'ok','已完成':'ok','已处理':'ok','执行任务':'info','执行中':'info',
+  '充电中':'warn','处理中':'warn','部分维护':'warn','警告':'warn','维护中':'warn','重要':'warn',
+  '异常':'danger','故障':'danger','未处理':'danger','严重':'danger','告警':'danger',
+  '待执行':'neutral','离线':'neutral','提示':'neutral','常规':'neutral'
+}[s] || 'neutral');
+const badge = s => `<span class="badge ${statusTone(s)}"><i></i>${esc(s)}</span>`;
+const tagTone = t => ({'定时巡检':'blue','应急处置':'orange','定点拍照':'purple','夜巡任务':'purple','设备维护':'orange','地图采集':'teal'}[t] || '');
+const bar = (v, tone='') => {
+  const t = tone || (v >= 80 ? 'ok' : v >= 40 ? '' : v >= 20 ? 'warn' : 'danger');
+  return `<div class="bar-row"><div class="bar ${t}"><i style="width:${v}%"></i></div><span class="num">${v}%</span></div>`;
+};
+function sparkline(data, color){
+  const max = Math.max(...data), min = Math.min(...data);
+  const pts = data.map((v,i)=>`${(i*(70/(data.length-1))+2).toFixed(1)},${(26-((v-min)/((max-min)||1))*20).toFixed(1)}`).join(' ');
+  return `<svg class="spark" viewBox="0 0 74 30"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="72" cy="${(26-((data.at(-1)-min)/((max-min)||1))*20).toFixed(1)}" r="2.6" fill="${color}"/></svg>`;
+}
+const pageHead = (title, sub, actions='') => `<div class="page-head"><div><div class="page-title">${title}</div><div class="page-sub">${sub}</div></div><div class="head-actions">${actions}</div></div>`;
+const cardHead = (title, sub='', right='') => `<div class="card-head"><div class="card-title">${title}${sub?`<span class="card-sub">${sub}</span>`:''}</div>${right}</div>`;
+const emptyRow = (txt) => `<tr><td colspan="12"><div class="empty">${ic('search')}${txt}</div></td></tr>`;
+
+/* ---------------- 园区俯视地图 ---------------- */
+function parkMap(){
+  return `<svg viewBox="0 0 860 430" role="img" aria-label="园区实时态势地图">
+    <defs>
+      <pattern id="grid" width="34" height="34" patternUnits="userSpaceOnUse"><path d="M34 0H0V34" fill="none" stroke="#e8eef5" stroke-width="1"/></pattern>
+      <linearGradient id="grass" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#eaf6ec"/><stop offset="1" stop-color="#dcefe1"/></linearGradient>
+      <linearGradient id="bld" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#dbe4ef"/><stop offset="1" stop-color="#c9d6e6"/></linearGradient>
+      <marker id="arrow" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto"><path d="M1 1 7 4 1 7" fill="none" stroke="#0284c7" stroke-width="1.4"/></marker>
+    </defs>
+    <rect width="860" height="430" fill="#f7fafc"/>
+    <rect width="860" height="430" fill="url(#grid)"/>
+    <rect x="24" y="22" width="812" height="386" rx="14" fill="none" stroke="#cbd5e1" stroke-width="2" stroke-dasharray="9 7"/>
+    <!-- 绿地 -->
+    <rect x="44" y="42" width="210" height="120" rx="12" fill="url(#grass)"/>
+    <rect x="600" y="256" width="216" height="132" rx="12" fill="url(#grass)"/>
+    <path d="M52 330 q70-40 150-10 q60 25 130 5 v60 H52z" fill="url(#grass)" opacity=".75"/>
+    <!-- 水域 -->
+    <path d="M660 52 q70-16 130 6 q20 40-16 62 q-70 18-118-8 q-24-30 4-60z" fill="#dbeafe" stroke="#bfdbfe"/>
+    <text x="722" y="94" font-size="11" fill="#60a5fa" text-anchor="middle">景观水系</text>
+    <!-- 主干道 -->
+    <path d="M40 210 H820" stroke="#e2e8f0" stroke-width="34" stroke-linecap="round"/>
+    <path d="M40 210 H820" stroke="#fff" stroke-width="2" stroke-dasharray="12 12" opacity=".9"/>
+    <path d="M430 32 V398" stroke="#e2e8f0" stroke-width="30" stroke-linecap="round"/>
+    <path d="M430 32 V398" stroke="#fff" stroke-width="2" stroke-dasharray="12 12" opacity=".9"/>
+    <path d="M40 210 q180 0 240 -60 H600" stroke="#e2e8f0" stroke-width="18" fill="none" stroke-linecap="round"/>
+    <!-- 建筑 -->
+    <g fill="url(#bld)" stroke="#b6c6d9" stroke-width="1.4">
+      <rect x="76" y="62" width="150" height="86" rx="6"/>
+      <rect x="268" y="58" width="120" height="96" rx="6"/>
+      <rect x="92" y="262" width="132" height="94" rx="6"/>
+      <rect x="268" y="268" width="122" height="88" rx="6"/>
+      <rect x="478" y="58" width="140" height="92" rx="6"/>
+      <rect x="482" y="262" width="96" height="94" rx="6"/>
+      <rect x="626" y="276" width="120" height="76" rx="6"/>
+    </g>
+    <g font-size="11" fill="#7b8ea6" font-weight="600" text-anchor="middle">
+      <text x="151" y="110">A 生产车间</text><text x="328" y="110">B 立体仓库</text>
+      <text x="158" y="315">D 装卸平台</text><text x="329" y="315">E 冷链仓</text>
+      <text x="548" y="110">G 研发楼</text><text x="530" y="315">F 配电房</text>
+      <text x="686" y="320">充电站</text>
+    </g>
+    <!-- 区域标签 -->
+    <g font-size="11" fill="#94a3b8" font-weight="700" letter-spacing="1">
+      <text x="52" y="186">A 区 · 生产</text><text x="470" y="186">G 区 · 研发</text>
+      <text x="52" y="392">D 区 · 物流</text><text x="470" y="392">H 区 · 停车</text>
+      <text x="640" y="240">C 区 · 周界</text>
+    </g>
+    <!-- 巡检路线 -->
+    <path d="M120 176 H350 V236 H620 V180 H780" fill="none" stroke="#0284c7" stroke-width="2.6" stroke-dasharray="9 9" opacity=".85" style="animation:mapflow 1.3s linear infinite" marker-end="url(#arrow)"/>
+    <path d="M120 244 H330 V370 H700" fill="none" stroke="#06b6d4" stroke-width="2.2" stroke-dasharray="7 8" opacity=".7" style="animation:mapflow 1.8s linear infinite reverse"/>
+    <!-- 充电站 -->
+    <g transform="translate(688,300)"><rect x="-13" y="-13" width="26" height="26" rx="7" fill="#fff" stroke="#0d9488" stroke-width="1.6"/><path d="M2-7-6 2h5l-1 7 8-9h-5z" fill="#0d9488"/></g>
+    <!-- 机器狗位置 -->
+    <g class="dog-1" transform="translate(238,196)">
+      <circle class="radar" r="14" fill="#06b6d4" opacity=".35"/><circle r="11" fill="#fff" stroke="#0284c7" stroke-width="2"/><circle r="5" fill="#0284c7"/>
+      <g transform="translate(-22,-36)"><rect width="46" height="17" rx="5" fill="#0f172a" opacity=".85"/><text x="23" y="12" font-size="9.5" fill="#fff" text-anchor="middle" font-weight="600">RD-001</text></g>
+    </g>
+    <g class="dog-2" transform="translate(596,236)">
+      <circle class="radar" r="14" fill="#06b6d4" opacity=".35"/><circle r="11" fill="#fff" stroke="#0284c7" stroke-width="2"/><circle r="5" fill="#0284c7"/>
+      <g transform="translate(-22,-36)"><rect width="46" height="17" rx="5" fill="#0f172a" opacity=".85"/><text x="23" y="12" font-size="9.5" fill="#fff" text-anchor="middle" font-weight="600">RD-021</text></g>
+    </g>
+    <g class="dog-3" transform="translate(330,352)">
+      <circle class="radar" r="14" fill="#10b981" opacity=".35"/><circle r="11" fill="#fff" stroke="#0d9488" stroke-width="2"/><circle r="5" fill="#0d9488"/>
+      <g transform="translate(-22,-36)"><rect width="46" height="17" rx="5" fill="#0f172a" opacity=".85"/><text x="23" y="12" font-size="9.5" fill="#fff" text-anchor="middle" font-weight="600">RD-011</text></g>
+    </g>
+    <g class="dog-4" transform="translate(548,150)">
+      <circle class="radar" r="14" fill="#ef4444" opacity=".3"/><circle r="11" fill="#fff" stroke="#ef4444" stroke-width="2"/><circle r="5" fill="#ef4444"/>
+      <g transform="translate(-22,-36)"><rect width="46" height="17" rx="5" fill="#dc2626" opacity=".92"/><text x="23" y="12" font-size="9.5" fill="#fff" text-anchor="middle" font-weight="600">RD-009</text></g>
+    </g>
+  </svg>`;
+}
+function miniMap(color){
+  return `<svg viewBox="0 0 300 118" preserveAspectRatio="xMidYMid slice">
+    <rect width="300" height="118" fill="#eef4f3"/>
+    <rect x="8" y="8" width="284" height="102" rx="8" fill="none" stroke="${color}" stroke-width="1.4" stroke-dasharray="6 5" opacity=".55"/>
+    <rect x="20" y="20" width="82" height="44" rx="4" fill="#dbe7e4" stroke="#c3d6d1"/>
+    <rect x="116" y="16" width="66" height="52" rx="4" fill="${color}" opacity=".22" stroke="${color}" stroke-width="1"/>
+    <rect x="196" y="24" width="80" height="38" rx="4" fill="#dbe7e4" stroke="#c3d6d1"/>
+    <rect x="26" y="78" width="70" height="28" rx="4" fill="#dbe7e4" stroke="#c3d6d1"/>
+    <rect x="110" y="80" width="74" height="26" rx="4" fill="${color}" opacity=".16" stroke="${color}" stroke-width="1"/>
+    <rect x="198" y="76" width="76" height="30" rx="4" fill="#dbe7e4" stroke="#c3d6d1"/>
+    <path d="M0 70 H300" stroke="#fff" stroke-width="9"/>
+    <path d="M100 0 V118" stroke="#fff" stroke-width="8"/>
+    <path d="M28 70 H270" stroke="${color}" stroke-width="1.8" stroke-dasharray="6 5" opacity=".8"/>
+    <circle cx="152" cy="66" r="9" fill="#fff" stroke="${color}" stroke-width="2"/><circle cx="152" cy="66" r="4" fill="${color}"/>
+    <circle cx="238" cy="90" r="9" fill="#fff" stroke="${color}" stroke-width="2"/><circle cx="238" cy="90" r="4" fill="${color}"/>
+  </svg>`;
+}
+
+/* ---------------- 视图：总览驾驶舱 ---------------- */
+function renderDashboard(){
+  const online = 24, total = 32;
+  const kpis = [
+    { label:'在线设备', val:online, unit:`/ ${total} 台`, icon:'dog', c:'#0284c7', soft:'#e6f4fd', trend:'+8.2%', up:true, foot:'较昨日新增 2 台接入', spark:[12,15,14,18,17,21,24] },
+    { label:'今日巡检任务', val:18, unit:'项', icon:'task', c:'#7c3aed', soft:'#f1ecfe', trend:'+12.5%', up:true, foot:'已完成 12 项 · 完成率 67%', spark:[9,11,10,14,13,16,18] },
+    { label:'在管园区', val:3, unit:'个 / 14 区域', icon:'park', c:'#0d9488', soft:'#e2f8f5', trend:'持平', up:true, foot:'覆盖面积 37.5 万㎡', spark:[2,2,3,3,3,3,3] },
+    { label:'待处理告警', val:2, unit:'条', icon:'bell', c:'#dc2626', soft:'#fdeced', trend:'-33.3%', up:false, foot:'较昨日减少 1 条', spark:[6,5,5,4,3,3,2] }
+  ];
+  const donutData = [
+    { name:'在线运行', v:24, c:'#10b981' }, { name:'充电中', v:5, c:'#f59e0b' },
+    { name:'离线', v:2, c:'#94a3b8' }, { name:'故障', v:1, c:'#ef4444' }
+  ];
+  let acc = 0;
+  const grad = donutData.map(d=>{ const from=(acc/total*100).toFixed(2); acc+=d.v; return `${d.c} ${from}% ${(acc/total*100).toFixed(2)}%`; }).join(',');
+  const alerts = S.alerts.slice(0,3).map(a=>`
+    <div class="alert-item"><div class="alert-ico ${a.level==='严重'?'danger':a.level==='警告'?'warn':'info'}">${ic(a.level==='严重'?'warn':a.level==='警告'?'warn':'info')}</div>
+      <div class="alert-txt"><b>${esc(a.text)}</b><span>${esc(a.park)} · ${esc(a.device)}</span></div><div class="alert-time">${a.time.slice(0,5)}</div></div>`).join('');
+
+  const maxV = 25, bw = 15, gap = 7, step = 70, x0 = 42;
+  const bars = S.trend.days.map((d,i)=>{
+    const x = x0 + i*step;
+    const hp = S.trend.plan[i]/maxV*130, hd = S.trend.done[i]/maxV*130;
+    return `<g><rect x="${x}" y="${158-hp}" width="${bw}" height="${hp}" rx="3" fill="#dbeafe"/>
+      <rect x="${x+bw+gap}" y="${158-hd}" width="${bw}" height="${hd}" rx="3" fill="url(#bargrad)"/>
+      <text x="${x+bw+gap/2}" y="176" font-size="10" fill="#94a3b8" text-anchor="middle">${d}</text>
+      <text x="${x+bw+gap/2}" y="${150-hd}" font-size="9.5" fill="#0284c7" text-anchor="middle" font-weight="700">${S.trend.done[i]}</text></g>`;
+  }).join('');
+  const gridLines = [0,5,10,15,20,25].map(v=>`<line x1="34" y1="${158-v/maxV*130}" x2="530" y2="${158-v/maxV*130}" stroke="#eef2f7"/><text x="27" y="${162-v/maxV*130}" font-size="9.5" fill="#b3c0cf" text-anchor="end">${v}</text>`).join('');
+
+  $('#v-dashboard').innerHTML = `
+    ${pageHead('总览驾驶舱','实时掌握园区、设备与巡检任务的运行态势',
+      `<span class="live-chip"><i></i>数据实时更新</span><button class="btn" data-act="report">${ic('download')}导出日报</button>`)}
+    <div class="grid kpis">
+      ${kpis.map(k=>`<div class="card kpi" style="--kpi-c:${k.c};--kpi-soft:${k.soft}">
+        <div class="kpi-top"><span class="kpi-icon">${ic(k.icon)}</span><span class="trend ${k.up?'up':'down'}">${ic(k.up?'trend-up':'trend-down')}${k.trend}</span></div>
+        <div class="kpi-label">${k.label}</div><div class="kpi-value">${k.val} <small>${k.unit}</small></div>
+        <div class="kpi-foot">${k.foot}</div>${sparkline(k.spark,k.c)}</div>`).join('')}
+    </div>
+    <div class="grid row-2 mt18">
+      <div class="card map-card">
+        ${cardHead(`${ic('pin')}园区实时态势`,'张江智造园区 · 一期',`<button class="btn sm" data-act="fullscreen">${ic('maximize')}全屏</button>`)}
+        <div class="map-stage">${parkMap()}
+          <div class="map-badge">${ic('activity')}<b>4</b> 台设备在线作业</div>
+          <div class="map-legend"><span><i style="background:#0284c7"></i>巡检中</span><span><i style="background:#0d9488"></i>在线待命</span><span><i style="background:#ef4444"></i>异常设备</span><span><i style="background:#06b6d4"></i>规划路线</span></div>
+        </div>
+        <div class="map-devices">
+          ${S.devices.filter(d=>['执行任务','在线待命','故障'].includes(d.status)).slice(0,5).map(d=>`<div class="map-chip" data-act="device-detail" data-id="${d.id}"><i class="dot" style="background:${d.status==='故障'?'#ef4444':d.status==='执行任务'?'#0284c7':'#10b981'}"></i><b>${d.id}</b><span class="muted">${esc(d.zone)} · ${d.battery}%</span></div>`).join('')}
+        </div>
+      </div>
+      <div>
+        <div class="card">
+          ${cardHead(`${ic('cpu')}设备状态分布`,'共 32 台',`<button class="btn sm ghost" data-act="go" data-view="devices">查看全部 ${ic('chevron-right')}</button>`)}
+          <div class="card-body"><div class="donut-wrap">
+            <div class="donut" style="background:conic-gradient(${grad})"><div class="donut-center"><b>${total}</b><span>设备总数</span></div></div>
+            <div class="legend">${donutData.map(d=>`<div class="legend-row"><i style="background:${d.c}"></i><span>${d.name}</span><b>${d.v} 台</b></div>`).join('')}</div>
+          </div></div>
+        </div>
+        <div class="card mt18">
+          ${cardHead(`${ic('bell')}实时告警`,`${S.alerts.filter(a=>a.status==='未处理').length} 条待处理`,`<button class="btn sm ghost" data-act="go" data-view="alerts">告警中心 ${ic('chevron-right')}</button>`)}
+          <div class="card-body" style="padding-top:12px">${alerts}</div>
+        </div>
+      </div>
+    </div>
+    <div class="grid row-2 mt18">
+      <div class="card">
+        ${cardHead(`${ic('activity')}近 7 日任务趋势`,'计划 vs 完成',`<span class="tag blue">● 计划</span> <span class="tag teal">● 完成</span>`)}
+        <div class="card-body"><svg class="chart-svg" viewBox="0 0 540 190">
+          <defs><linearGradient id="bargrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#22d3ee"/><stop offset="1" stop-color="#0284c7"/></linearGradient></defs>
+          ${gridLines}${bars}<line x1="34" y1="158" x2="530" y2="158" stroke="#e2e8f0"/>
+        </svg></div>
+      </div>
+      <div class="card">
+        ${cardHead(`${ic('clock')}最新动态`,'实时事件流')}
+        <div class="card-body"><div class="timeline">${S.timeline.map(t=>`
+          <div class="tl-item"><div class="tl-dot ${t.tone}">${ic(t.icon)}</div><div class="tl-body"><b>${esc(t.title)}</b><p>${esc(t.desc)}</p><time>${t.time}</time></div></div>`).join('')}</div></div>
+      </div>
+    </div>`;
+}
+
+/* ---------------- 视图：园区管理 ---------------- */
+function filteredParks(){
+  const q = S.park.q.trim().toLowerCase();
+  return S.parks.filter(p => (!q || (p.name+p.id+p.owner).toLowerCase().includes(q)) && (S.park.status==='全部' || p.status===S.park.status));
+}
+function renderParks(){
+  const list = filteredParks();
+  const totalArea = S.parks.reduce((s,p)=>s+parseFloat(p.area),0).toFixed(1);
+  const zoneTotal = S.parks.reduce((s,p)=>s+p.zones,0);
+  const cards = list.map(p=>{
+    const rate = Math.round(p.done/p.tasks*100);
+    return `<div class="card park-card">
+      <div class="park-thumb">${miniMap(p.color)}<span class="thumb-tag">${p.id}</span></div>
+      <div class="park-body">
+        <div class="park-name"><b>${esc(p.name)}</b>${badge(p.status)}</div>
+        <div class="park-meta">${esc(p.desc)} · 面积 ${p.area} 万㎡</div>
+        <div class="park-stats">
+          <div class="park-stat"><b>${p.zones}</b><span>巡检区域</span></div>
+          <div class="park-stat"><b>${p.devices}</b><span>接入设备</span></div>
+          <div class="park-stat"><b>${p.tasks}</b><span>今日任务</span></div>
+        </div>
+        <div class="park-prog-label"><span>今日巡检完成率</span><b>${p.done}/${p.tasks} · ${rate}%</b></div>
+        <div class="bar ${rate===100?'ok':''}"><i style="width:${rate}%"></i></div>
+        <div class="park-foot"><div class="park-owner"><span class="avatar">${esc(p.owner[0])}</span>负责人 ${esc(p.owner)}</div>
+          <div class="actions"><button class="btn sm" data-act="park-zones" data-id="${p.id}">查看区域</button><button class="btn sm ghost icon" data-act="park-edit" data-id="${p.id}" title="编辑">${ic('edit')}</button></div></div>
+      </div></div>`;
+  }).join('');
+  const tableRows = list.map(p=>`<tr>
+    <td><div class="row-flex"><span class="row-icon">${ic('park')}</span><div><div class="cell-main">${esc(p.name)}</div><div class="cell-sub mono">${p.id}</div></div></div></td>
+    <td>${p.area} 万㎡</td><td>${p.zones} 个</td><td>${p.devices} 台</td><td>${p.done}/${p.tasks}</td><td>${esc(p.owner)}</td><td>${badge(p.status)}</td>
+    <td><div class="actions"><button class="btn sm" data-act="park-zones" data-id="${p.id}">区域</button><button class="btn sm ghost icon" data-act="park-edit" data-id="${p.id}">${ic('edit')}</button></div></td></tr>`).join('');
+  const zoneRows = S.zones.map(z=>`<tr>
+    <td><div class="cell-main">${esc(z.name)}</div><div class="cell-sub">${esc(z.park)}</div></td>
+    <td><span class="tag blue">${esc(z.type)}</span></td><td>${z.devices} 台</td><td>${esc(z.freq)}</td><td>${badge(z.status)}</td>
+    <td><div class="actions"><button class="btn sm" data-act="zone-plan" data-name="${esc(z.name)}">巡检计划</button><button class="btn sm ghost icon" data-act="zone-edit" data-name="${esc(z.name)}">${ic('edit')}</button></div></td></tr>`).join('');
+
+  $('#v-parks').innerHTML = `
+    ${pageHead('园区管理','维护园区基础信息、区域划分与巡检范围',`<button class="btn primary" data-act="park-new">${ic('plus')}新增园区</button>`)}
+    <div class="stat-strip">
+      <div class="stat-tab on"><div class="st-label">${ic('park')}在管园区</div><div class="st-val">${S.parks.length} <small>个</small></div></div>
+      <div class="stat-tab"><div class="st-label">${ic('layers')}覆盖面积</div><div class="st-val">${totalArea} <small>万㎡</small></div></div>
+      <div class="stat-tab"><div class="st-label">${ic('zone')}巡检区域</div><div class="st-val">${zoneTotal} <small>个</small></div></div>
+      <div class="stat-tab"><div class="st-label">${ic('dog')}接入设备</div><div class="st-val">32 <small>台</small></div></div>
+      <div class="stat-tab"><div class="st-label">${ic('shield')}今日完成率</div><div class="st-val">81 <small>%</small></div></div>
+    </div>
+    <div class="toolbar">
+      <div class="search">${ic('search')}<input class="input" data-role="park-search" placeholder="搜索园区名称 / 编号 / 负责人" value="${esc(S.park.q)}"></div>
+      <select class="select" data-role="park-status"><option value="全部">全部状态</option><option value="运行中" ${S.park.status==='运行中'?'selected':''}>运行中</option><option value="部分维护" ${S.park.status==='部分维护'?'selected':''}>部分维护</option></select>
+      <div class="sep"></div>
+      <div class="seg"><button class="${S.parkView==='card'?'on':''}" data-act="park-view" data-v="card">${ic('grid')}卡片</button><button class="${S.parkView==='table'?'on':''}" data-act="park-view" data-v="table">${ic('list')}表格</button></div>
+    </div>
+    ${S.parkView==='card'
+      ? `<div class="grid g3">${cards || `<div class="card empty" style="grid-column:1/-1">${ic('search')}未找到匹配的园区</div>`}</div>`
+      : `<div class="card"><div class="table-wrap"><table class="table"><thead><tr><th>园区名称</th><th>面积</th><th>区域数</th><th>设备数</th><th>今日巡检</th><th>负责人</th><th>状态</th><th>操作</th></tr></thead><tbody>${tableRows||emptyRow('未找到匹配的园区')}</tbody></table></div><div class="tfoot"><span>共 ${list.length} 个园区</span></div></div>`}
+    <div class="card mt18" id="zoneCard">
+      ${cardHead(`${ic('zone')}巡检区域清单`,'按园区划分的最小巡检单元',`<button class="btn sm" data-act="zone-new">${ic('plus')}新增区域</button>`)}
+      <div class="table-wrap"><table class="table"><thead><tr><th>区域名称 / 所属园区</th><th>区域类型</th><th>绑定设备</th><th>巡检频次</th><th>状态</th><th>操作</th></tr></thead><tbody>${zoneRows}</tbody></table></div>
+      <div class="tfoot"><span id="zoneFoot">共 ${S.zones.length} 个巡检区域</span><div class="pager"><button>‹</button><button class="on">1</button><button>›</button></div></div>
+    </div>`;
+}
+
+/* ---------------- 视图：设备管理 ---------------- */
+function filteredDevices(){
+  const q = S.device.q.trim().toLowerCase();
+  const st = S.device.status;
+  return S.devices.filter(d => (!q || (d.id+d.model+d.park+d.zone+d.task).toLowerCase().includes(q))
+    && (!S.device.park || d.park===S.device.park)
+    && (st==='全部' || (st==='在线' ? ['执行任务','在线待命'].includes(d.status) : d.status===st)));
+}
+function renderDevices(){
+  const counts = { '全部':32, '在线':24, '执行任务':10, '充电中':5, '离线':2, '故障':1 };
+  const statDefs = [
+    { k:'全部', label:'全部设备', c:'#0284c7' }, { k:'在线', label:'在线设备', c:'#10b981' },
+    { k:'执行任务', label:'执行任务', c:'#3b82f6' }, { k:'充电中', label:'充电中', c:'#f59e0b' },
+    { k:'离线', label:'离线', c:'#94a3b8' }, { k:'故障', label:'故障', c:'#ef4444' }
+  ];
+  const list = filteredDevices();
+  const rows = list.map(d=>`
+    <tr data-act="device-detail" data-id="${d.id}" style="cursor:pointer">
+      <td><div class="row-flex"><span class="row-icon">${ic('dog')}</span><div><div class="cell-main mono">${d.id}</div><div class="cell-sub">${d.model}</div></div></div></td>
+      <td>${esc(d.park)}<div class="cell-sub">${esc(d.zone)}</div></td>
+      <td>${badge(d.status)}</td>
+      <td style="min-width:130px">${bar(d.battery)}</td>
+      <td><div class="cell-main" style="font-weight:500">${esc(d.task)}</div></td>
+      <td>${ic('wifi')}<span class="mono" style="margin-left:5px">${d.signal>0?'强':'—'}</span></td>
+      <td class="mono muted">${d.beat}</td>
+      <td><div class="actions"><button class="btn sm" data-act="device-control" data-id="${d.id}">${ic('play')}控制</button><button class="btn sm ghost icon" data-act="device-detail" data-id="${d.id}">${ic('eye')}</button></div></td>
+    </tr>`).join('');
+  const parkOpts = ['',...new Set(S.devices.map(d=>d.park))].map(p=>`<option value="${esc(p)}" ${S.device.park===p?'selected':''}>${p?esc(p):'全部园区'}</option>`).join('');
+  $('#v-devices').innerHTML = `
+    ${pageHead('设备管理','设备档案、实时状态监控与远程控制',`<button class="btn" data-act="batch">${ic('send')}批量下发</button><button class="btn primary" data-act="device-new">${ic('plus')}添加设备</button>`)}
+    <div class="stat-strip">${statDefs.map(s=>`
+      <div class="stat-tab ${S.device.status===s.k?'on':''}" data-act="device-stat" data-k="${s.k}"><div class="st-label"><i style="background:${s.c}"></i>${s.label}</div><div class="st-val">${counts[s.k]} <small>台</small></div></div>`).join('')}</div>
+    <div class="toolbar">
+      <div class="search">${ic('search')}<input class="input" data-role="device-search" placeholder="搜索设备编号 / 型号 / 区域" value="${esc(S.device.q)}"></div>
+      <select class="select" data-role="device-park">${parkOpts}</select>
+      <select class="select" data-role="device-status">${['全部','在线','执行任务','在线待命','充电中','离线','故障'].map(s=>`<option ${S.device.status===s?'selected':''}>${s}</option>`).join('')}</select>
+      <div class="sep"></div>
+      <button class="btn" data-act="device-refresh">${ic('refresh')}刷新状态</button>
+      <button class="btn" data-act="device-export">${ic('download')}导出</button>
+    </div>
+    <div class="card">
+      ${cardHead(`${ic('dog')}设备列表`,`共 32 台设备 · 当前展示 ${list.length} 台`,`<span class="live-chip"><i></i>心跳实时同步</span>`)}
+      <div class="table-wrap"><table class="table"><thead><tr><th>设备编号 / 型号</th><th>所属园区 / 区域</th><th>运行状态</th><th>电量</th><th>当前任务</th><th>信号</th><th>最后心跳</th><th>操作</th></tr></thead><tbody>${rows||emptyRow('没有符合条件的设备')}</tbody></table></div>
+      <div class="tfoot"><span>显示 ${list.length} 条记录</span><div class="pager"><button>‹</button><button class="on">1</button><button>2</button><button>3</button><button>›</button></div></div>
+    </div>`;
+}
+
+/* ---------------- 视图：任务管理 ---------------- */
+const TASK_COLS = [
+  { k:'待执行', c:'#94a3b8' }, { k:'执行中', c:'#3b82f6' },
+  { k:'已完成', c:'#10b981' }, { k:'异常', c:'#ef4444' }
+];
+function renderTasks(){
+  const counts = {}; TASK_COLS.forEach(c=>counts[c.k]=S.tasks.filter(t=>t.status===c.k).length);
+  const taskCard = t => `<div class="task-card" draggable="true" data-id="${t.id}">
+    <div class="tc-top"><span class="tag ${tagTone(t.type)}">${esc(t.type)}</span>${t.level==='紧急'?`<span class="tag orange">紧急</span>`:t.level==='重要'?`<span class="tag orange" style="background:#fff5e5;color:#d97706">重要</span>`:''}</div>
+    <div class="tc-name">${esc(t.name)}</div>
+    <div class="tc-info">
+      <span>${ic('dog')}${t.device} · ${esc(t.mode)}</span>
+      <span>${ic('pin')}${esc(t.park)} / ${esc(t.zone)}</span>
+      <span>${ic('clock')}${esc(t.time)}</span>
+      <span>${ic('route')}路线 ${esc(t.route)} · ${t.route==='—'?'临时路径':'已编排'}</span>
+    </div>
+    <div class="tc-prog">${bar(t.progress, t.status==='异常'?'danger':t.status==='已完成'?'ok':'')}</div>
+    <div class="tc-foot"><span class="time mono">${t.id}</span><div class="actions">
+      ${t.status==='执行中'?`<button class="btn sm ghost icon" data-act="task-pause" data-id="${t.id}" title="暂停">${ic('pause')}</button>`:''}
+      ${t.status==='待执行'?`<button class="btn sm ghost icon" data-act="task-start" data-id="${t.id}" title="立即执行">${ic('play')}</button>`:''}
+      <button class="btn sm ghost icon" data-act="task-detail" data-id="${t.id}" title="详情">${ic('eye')}</button></div></div>
+  </div>`;
+  const board = TASK_COLS.map(c=>`<div class="kcol" data-status="${c.k}">
+    <div class="kcol-head"><b><i style="background:${c.c}"></i>${c.k}</b><span class="kcol-count">${counts[c.k]}</span></div>
+    ${S.tasks.filter(t=>t.status===c.k).map(taskCard).join('') || `<div class="empty" style="font-size:11px;padding:24px 0">暂无任务</div>`}
+  </div>`).join('');
+  const tableRows = S.tasks.map(t=>`<tr>
+    <td class="mono cell-main">${t.id}</td><td><div class="cell-main">${esc(t.name)}</div><div class="cell-sub">${esc(t.mode)}</div></td>
+    <td><span class="tag ${tagTone(t.type)}">${esc(t.type)}</span></td><td class="mono">${t.device}</td>
+    <td><div class="cell-main mono">${esc(t.route)}</div><div class="cell-sub">${t.route==='—'?'临时路径':esc((S.routes.find(x=>x.id===t.route)||{}).name||'')}</div></td>
+    <td>${esc(t.park)}<div class="cell-sub">${esc(t.zone)}</div></td><td class="mono muted">${esc(t.time)}</td>
+    <td>${badge(t.status)}</td><td style="min-width:120px">${bar(t.progress, t.status==='异常'?'danger':'')}</td>
+    <td><div class="actions"><button class="btn sm ghost icon" data-act="task-detail" data-id="${t.id}">${ic('eye')}</button></div></td></tr>`).join('');
+
+  $('#v-tasks').innerHTML = `
+    ${pageHead('任务管理','巡检任务的创建、下发、执行跟踪与看板协作',`<button class="btn primary" data-act="task-new">${ic('plus')}新建任务</button>`)}
+    <div class="stat-strip">
+      <div class="stat-tab on" data-act="task-list" data-k="全部"><div class="st-label"><i style="background:#0284c7"></i>任务总数</div><div class="st-val">${S.tasks.length} <small>项</small></div></div>
+      ${TASK_COLS.map(c=>`<div class="stat-tab" data-act="task-list" data-k="${c.k}"><div class="st-label"><i style="background:${c.c}"></i>${c.k}</div><div class="st-val">${counts[c.k]} <small>项</small></div></div>`).join('')}
+    </div>
+    <div class="toolbar"><div class="sep"></div>
+      <div class="seg"><button class="${S.taskView==='board'?'on':''}" data-act="task-view" data-v="board">${ic('board')}看板视图</button><button class="${S.taskView==='table'?'on':''}" data-act="task-view" data-v="table">${ic('list')}列表视图</button></div>
+    </div>
+    ${S.taskView==='board'
+      ? `<div class="kanban" id="kanban">${board}</div><div class="card-sub" style="margin-top:12px;display:flex;align-items:center;gap:6px">${ic('info')}提示：拖拽任务卡片可直接变更执行状态</div>`
+      : `<div class="card"><div class="table-wrap"><table class="table"><thead><tr><th>任务编号</th><th>任务名称</th><th>类型</th><th>执行设备</th><th>关联路线</th><th>园区 / 区域</th><th>计划时间</th><th>状态</th><th>进度</th><th>操作</th></tr></thead><tbody>${tableRows}</tbody></table></div><div class="tfoot"><span>共 ${S.tasks.length} 项任务</span></div></div>`}`;
+  bindDrag();
+}
+
+/* ---------------- 视图：告警中心 ---------------- */
+function renderAlerts(){
+  const f = S.alertFilter;
+  const list = S.alerts.filter(a=>f==='全部'||a.status===f);
+  const cnt = k => S.alerts.filter(a=>a.status===k).length;
+  const rows = list.map(a=>`<tr>
+    <td><span class="tag ${a.level==='严重'?'orange':a.level==='警告'?'orange':''}">${esc(a.level)}</span></td>
+    <td><div class="cell-main">${esc(a.text)}</div><div class="cell-sub mono">${a.id}</div></td>
+    <td class="mono">${a.device}</td><td>${esc(a.park)}</td><td class="mono muted">${a.time}</td>
+    <td>${badge(a.status)}</td>
+    <td><div class="actions">${a.status!=='已处理'?`<button class="btn sm" data-act="alert-handle" data-id="${a.id}">${ic('check')}标记处理</button>`:''}<button class="btn sm ghost icon" data-act="alert-detail" data-id="${a.id}">${ic('eye')}</button></div></td></tr>`).join('');
+  $('#v-alerts').innerHTML = `
+    ${pageHead('告警中心','设备异常、任务超时与环境风险的统一处置',`<button class="btn" data-act="alert-all">${ic('check-circle')}全部标记已处理</button>`)}
+    <div class="stat-strip">
+      <div class="stat-tab ${f==='全部'?'on':''}" data-act="alert-filter" data-k="全部"><div class="st-label"><i style="background:#0284c7"></i>告警总数</div><div class="st-val">${S.alerts.length} <small>条</small></div></div>
+      <div class="stat-tab ${f==='未处理'?'on':''}" data-act="alert-filter" data-k="未处理"><div class="st-label"><i style="background:#ef4444"></i>未处理</div><div class="st-val">${cnt('未处理')} <small>条</small></div></div>
+      <div class="stat-tab ${f==='处理中'?'on':''}" data-act="alert-filter" data-k="处理中"><div class="st-label"><i style="background:#f59e0b"></i>处理中</div><div class="st-val">${cnt('处理中')} <small>条</small></div></div>
+      <div class="stat-tab ${f==='已处理'?'on':''}" data-act="alert-filter" data-k="已处理"><div class="st-label"><i style="background:#10b981"></i>已处理</div><div class="st-val">${cnt('已处理')} <small>条</small></div></div>
+    </div>
+    <div class="card">
+      ${cardHead(`${ic('bell')}告警记录`,'按发生时间倒序',`<div class="seg">${['全部','未处理','处理中','已处理'].map(k=>`<button class="${f===k?'on':''}" data-act="alert-filter" data-k="${k}">${k}</button>`).join('')}</div>`)}
+      <div class="table-wrap"><table class="table"><thead><tr><th>级别</th><th>告警内容</th><th>关联设备</th><th>所属园区</th><th>发生时间</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows||emptyRow('暂无告警记录')}</tbody></table></div>
+      <div class="tfoot"><span>共 ${list.length} 条记录</span></div>
+    </div>`;
+  const n = cnt('未处理');
+  $('#navAlertCount').textContent = n;
+  $('#bellDot').hidden = n === 0;
+  $('#navAlertCount').hidden = n === 0;
+}
+
+/* ---------------- 视图：系统设置 ---------------- */
+function renderSettings(){
+  const switches = [
+    { t:'设备异常告警推送', d:'设备触发故障 / 温度异常时推送站内通知', on:true },
+    { t:'任务超时提醒', d:'任务超过计划结束时间 10 分钟未完成时提醒', on:true },
+    { t:'低电量自动回充', d:'电量低于 20% 时自动下发回充任务', on:true },
+    { t:'巡检日报邮件', d:'每日 18:00 发送运行日报至运维组邮箱', on:false },
+    { t:'夜间静音模式', d:'22:00 - 07:00 暂停非紧急告警声音提示', on:false }
+  ];
+  $('#v-settings').innerHTML = `
+    ${pageHead('系统设置','平台参数、告警策略与通知偏好')}
+    <div class="grid row-2b">
+      <div class="card">${cardHead(`${ic('settings')}平台参数`)}
+        <div class="card-body"><div class="form-grid">
+          <div class="field"><label>平台名称</label><input class="input" value="四足机器人管理平台"></div>
+          <div class="field"><label>数据刷新频率</label><select class="select"><option>5 秒</option><option selected>10 秒</option><option>30 秒</option><option>60 秒</option></select></div>
+          <div class="field"><label>默认地图园区</label><select class="select">${S.parks.map(p=>`<option>${esc(p.name)}</option>`).join('')}</select></div>
+          <div class="field"><label>低电量阈值</label><input class="input" value="20 %"></div>
+          <div class="field"><label>任务超时容忍</label><input class="input" value="10 分钟"></div>
+          <div class="field"><label>坐标系统</label><select class="select"><option>WGS-84</option><option>GCJ-02</option></select></div>
+        </div><div class="divider"></div><div style="display:flex;justify-content:flex-end"><button class="btn primary" data-act="settings-save">${ic('check')}保存配置</button></div></div>
+      </div>
+      <div class="card">${cardHead(`${ic('bell')}通知策略`)}
+        <div class="card-body">${switches.map((s,i)=>`<div class="setting-row"><div><b>${s.t}</b><p>${s.d}</p></div><button class="switch ${s.on?'on':''}" data-act="switch" data-i="${i}" aria-label="切换 ${s.t}"></button></div>`).join('')}</div>
+      </div>
+    </div>
+    <div class="card mt18">${cardHead(`${ic('info')}关于平台`)}
+      <div class="card-body"><div class="grid g3">
+        <div class="park-stat"><b>V 2.6.1</b><span>平台版本</span></div>
+        <div class="park-stat"><b>32 台</b><span>接入设备</span></div>
+        <div class="park-stat"><b>99.96 %</b><span>近 30 日可用性</span></div>
+      </div><p class="muted" style="font-size:11.5px;margin:14px 0 0;line-height:1.7">本界面为前端交互原型，展示数据均为模拟数据，用于界面评审与需求确认。实际接入请对接设备网关、园区 GIS 与任务调度服务。</p></div>
+    </div>`;
+}
+
+/* =========================================================
+   视图：巡检路线规划
+   Route → Waypoint（点动作） / Leg（段动作） → Action
+   ========================================================= */
+const curRoute = () => S.routes.find(r=>r.id===routeState.id) || S.routes[0];
+let routeState = S.routeState;
+
+function routeMetrics(r){
+  let px = 0;
+  for(let i=0;i<r.points.length-1;i++) px += Math.hypot(r.points[i+1].x-r.points[i].x, r.points[i+1].y-r.points[i].y);
+  if(r.loop==='闭环' && r.points.length>2){
+    const a=r.points[0], b=r.points[r.points.length-1];
+    px += Math.hypot(a.x-b.x, a.y-b.y);
+  }
+  const meters = px*1.2;
+  const dwell = r.points.reduce((s,p)=>s+Number(p.dwell||0),0);
+  const acts = r.points.reduce((s,p)=>s+p.actions.length,0)
+             + r.legs.reduce((s,l)=>s+l.actions.length,0)
+             + (r.returnLeg ? r.returnLeg.actions.length : 0);
+  const moveSec = meters/Number(r.speed||1.2);
+  return {
+    km:(meters/1000).toFixed(2), mins:Math.ceil((moveSec+dwell+acts*3)/60),
+    acts, points:r.points.length, batt:Math.min(100,Math.round(meters/1000*8+acts*0.4))
+  };
+}
+const legAt = i => {
+  const r=curRoute();
+  if(i<r.legs.length) return r.legs[i];
+  return r.returnLeg || null;
+};
+const legCount = () => curRoute().legs.length + ((curRoute().loop==='闭环' && curRoute().returnLeg)?1:0);
+
+function saveHist(){
+  const r=curRoute();
+  routeState.hist.push(JSON.stringify({points:r.points,legs:r.legs,returnLeg:r.returnLeg,loop:r.loop}));
+  if(routeState.hist.length>20) routeState.hist.shift();
+}
+function stopSim(){
+  routeState.sim=false;
+  if(routeState.raf) cancelAnimationFrame(routeState.raf);
+  (routeState.timers||[]).forEach(clearTimeout);
+  routeState.timers=[]; routeState.raf=null;
+  const btn=$('[data-act="rt-sim"]'); if(btn){ btn.classList.remove('on'); btn.innerHTML = ic('play')+'模拟执行'; }
+}
+
+/* 画布底图：网格 / 道路 / 建筑 / 禁行区 / 充电座 */
+function routeBaseMap(){
+  return `<defs>
+      <pattern id="rtgrid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#e9eff6" stroke-width="1"/></pattern>
+      <pattern id="nozone" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="8" height="8" fill="#fef2f2"/><line x1="0" y1="0" x2="0" y2="8" stroke="#fecaca" stroke-width="3"/></pattern>
+      <marker id="rtarrow" markerWidth="9" markerHeight="9" refX="6" refY="4.5" orient="auto"><path d="M1 1 7 4.5 1 8" fill="none" stroke="#0284c7" stroke-width="1.6"/></marker>
+    </defs>
+    <rect width="800" height="460" fill="#f8fafc"/><rect width="800" height="460" fill="url(#rtgrid)"/>
+    <rect x="18" y="16" width="764" height="428" rx="12" fill="none" stroke="#cbd5e1" stroke-width="2" stroke-dasharray="9 7"/>
+    <rect x="42" y="38" width="150" height="96" rx="8" fill="#eaf5ee"/>
+    <rect x="604" y="300" width="154" height="118" rx="8" fill="#eaf5ee"/>
+    <path d="M20 210 H780" stroke="#e2e8f0" stroke-width="34"/><path d="M20 210 H780" stroke="#fff" stroke-width="2" stroke-dasharray="12 12"/>
+    <path d="M430 16 V444" stroke="#e2e8f0" stroke-width="28"/><path d="M430 16 V444" stroke="#fff" stroke-width="2" stroke-dasharray="12 12"/>
+    <g fill="#dbe4ef" stroke="#bccbdd" stroke-width="1.3">
+      <rect x="62" y="52" width="112" height="70" rx="5"/>
+      <rect x="216" y="46" width="140" height="82" rx="5"/>
+      <rect x="486" y="50" width="128" height="76" rx="5"/>
+      <rect x="62" y="266" width="126" height="96" rx="5"/>
+      <rect x="216" y="270" width="140" height="90" rx="5"/>
+      <rect x="486" y="262" width="96" height="98" rx="5"/>
+      <rect x="636" y="322" width="98" height="66" rx="5"/>
+    </g>
+    <g font-size="11" fill="#8296ad" font-weight="600" text-anchor="middle">
+      <text x="118" y="92">A 生产车间</text><text x="286" y="92">B 立体仓库</text><text x="550" y="92">G 研发楼</text>
+      <text x="125" y="320">D 装卸区</text><text x="286" y="320">E 冷链仓</text><text x="534" y="316">F 配电房</text><text x="685" y="360">充电站</text>
+    </g>
+    <rect x="612" y="52" width="112" height="62" rx="6" fill="url(#nozone)" stroke="#fca5a5" stroke-width="1.2" stroke-dasharray="5 4"/>
+    <text x="668" y="88" font-size="10.5" fill="#dc2626" text-anchor="middle" font-weight="700">禁行区</text>
+    <g transform="translate(88,342)"><rect x="-12" y="-12" width="24" height="24" rx="6" fill="#fff" stroke="#0d9488" stroke-width="1.6"/><path d="M1-7-6 2h5l-1 7 8-9h-5z" fill="#0d9488"/></g>
+    <g font-size="10.5" fill="#a3b2c4" font-weight="700" letter-spacing="1"><text x="34" y="190">A 区</text><text x="470" y="190">C 区</text><text x="34" y="410">D 区</text><text x="470" y="410">H 区</text></g>`;
+}
+
+/* 路径图层：航段（含点击热区）+ 航点 + 模拟机器狗 */
+function routeLayer(r){
+  const pts=r.points;
+  const selLeg = routeState.selType==='leg' ? routeState.selIdx : -1;
+  const selPt  = routeState.selType==='point' ? routeState.selIdx : -1;
+  let out='';
+  // 正向航段
+  for(let i=0;i<r.legs.length;i++){
+    const a=pts[i], b=pts[i+1]; if(!a||!b) continue;
+    const on=selLeg===i, mx=(a.x+b.x)/2, my=(a.y+b.y)/2;
+    out += `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="${on?'#f59e0b':'#0284c7'}" stroke-width="${on?5:3}" stroke-dasharray="9 7" marker-end="url(#rtarrow)" opacity="${on?1:.85}" style="animation:mapflow 1.4s linear infinite"/>`;
+    out += `<line class="leg-hit" data-idx="${i}" x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}"/>`;
+    out += `<g data-leg="${i}" style="cursor:pointer"><rect x="${mx-20}" y="${my-25}" width="40" height="16" rx="5" fill="${on?'#f59e0b':'#fff'}" stroke="${on?'#f59e0b':'#cfe3f2'}"/><text x="${mx}" y="${my-14}" font-size="9.5" fill="${on?'#fff':'#0369a1'}" text-anchor="middle" font-weight="700">${r.legs[i].actions.length} 项</text></g>`;
+  }
+  // 闭环返航段
+  if(r.loop==='闭环' && r.returnLeg && pts.length>2){
+    const a=pts[pts.length-1], b=pts[0], idx=r.legs.length;
+    const on=selLeg===idx, mx=(a.x+b.x)/2, my=(a.y+b.y)/2;
+    out += `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="${on?'#f59e0b':'#94a3b8'}" stroke-width="2.4" stroke-dasharray="4 7" opacity=".85"/>`;
+    out += `<line class="leg-hit" data-idx="${idx}" x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}"/>`;
+    out += `<g data-leg="${idx}" style="cursor:pointer"><rect x="${mx-18}" y="${my-10}" width="36" height="16" rx="5" fill="#fff" stroke="#cbd5e1"/><text x="${mx}" y="${my+1}" font-size="9.5" fill="#64748b" text-anchor="middle" font-weight="700">返航</text></g>`;
+  }
+  // 航点
+  pts.forEach((p,i)=>{
+    const isStart=i===0, isEnd=i===pts.length-1, on=selPt===i;
+    const fill = isStart?'#0d9488' : isEnd?'#0f172a' : '#0284c7';
+    out += `<g class="wp-hit" data-idx="${i}">
+      ${on?`<circle cx="${p.x}" cy="${p.y}" r="21" fill="none" stroke="#f59e0b" stroke-width="2" stroke-dasharray="4 3"/>`:''}
+      <circle cx="${p.x}" cy="${p.y}" r="14" fill="#fff" stroke="${fill}" stroke-width="2.5"/>
+      <circle cx="${p.x}" cy="${p.y}" r="7" fill="${fill}"/>
+      <text x="${p.x}" y="${p.y+3.5}" font-size="9" fill="#fff" text-anchor="middle" font-weight="700">${i+1}</text>
+      <g transform="translate(${p.x-46},${i%2?p.y-38:p.y+18})"><rect width="92" height="18" rx="5" fill="#fff" stroke="${on?'#f59e0b':'#e2e8f0'}"/><text x="46" y="12.5" font-size="9.5" fill="#334155" text-anchor="middle" font-weight="600">${esc(p.name.length>9?p.name.slice(0,9)+'…':p.name)}</text></g>
+    </g>`;
+  });
+  if(!pts.length) out += `<text x="400" y="230" font-size="14" fill="#94a3b8" text-anchor="middle">点击画布添加第一个航点</text>`;
+  return out;
+}
+function simDogSvg(r){
+  const p=r.points[0]||{x:88,y:342};
+  return `<g id="simDog" class="sim-dog" transform="translate(${p.x},${p.y})" hidden>
+    <circle r="15" fill="#06b6d4" opacity=".22"/><circle r="9" fill="#fff" stroke="#0284c7" stroke-width="2.5"/><circle r="4" fill="#0284c7"/></g>`;
+}
+
+/* 左栏：路线模板列表 + 路线基础信息 */
+function routeListHtml(){
+  const q=routeState.q.trim().toLowerCase();
+  const list=S.routes.filter(r=>!q||(r.name+r.id+r.park+r.zone).toLowerCase().includes(q));
+  return `<div class="rp">
+    <div class="rp-head"><b>${ic('route')}路线模板</b><span class="tag blue">${S.routes.length} 条</span></div>
+    <div class="rp-body">
+      <div class="rt-search">${ic('search')}<input class="input" data-role="rt-search" placeholder="搜索路线 / 园区" value="${esc(routeState.q)}"></div>
+      ${list.map(r=>{
+        const m=routeMetrics(r), used=S.tasks.filter(t=>t.route===r.id).length;
+        return `<div class="rt-item ${r.id===routeState.id?'on':''}" data-act="rt-select" data-id="${r.id}">
+          <b>${esc(r.name)}</b>
+          <div class="rt-sub">${esc(r.park)} · ${esc(r.zone)}</div>
+          <div style="display:flex;align-items:center;gap:6px;margin-top:8px">${badge(r.status)}<span class="tag">${r.version}</span></div>
+          <div class="rt-meta"><span>${ic('waypoint')}${m.points} 点</span><span>${ic('route')}${m.km} km</span><span>${ic('clock')}${m.mins} min</span></div>
+          <div class="rt-sub" style="margin-top:7px">${used?`被 ${used} 个任务引用`:'暂无任务引用'} · ${r.updated} 更新</div>
+        </div>`;
+      }).join('') || `<div class="empty" style="padding:24px 0;font-size:11.5px">${ic('search')}未找到路线</div>`}
+      <button class="rt-new" data-act="rt-new">${ic('plus')}新建路线模板</button>
+    </div></div>
+    <div class="rp" style="margin-top:14px">
+      <div class="rp-head"><b>${ic('settings')}路线基础信息</b><button class="btn sm ghost icon" data-act="rt-base" title="编辑">${ic('edit')}</button></div>
+      <div class="rp-body" style="padding:6px 14px 12px">
+        <div class="kv"><span>路线编号</span><b class="mono">${curRoute().id}</b></div>
+        <div class="kv"><span>所属园区</span><b>${esc(curRoute().park)}</b></div>
+        <div class="kv"><span>巡检区域</span><b>${esc(curRoute().zone)}</b></div>
+        <div class="kv"><span>适用机型</span><b>${curRoute().model}</b></div>
+        <div class="kv"><span>闭环方式</span><b>${curRoute().loop}</b></div>
+        <div class="kv"><span>默认速度</span><b>${curRoute().speed} m/s</b></div>
+        <div class="kv"><span>版本 / 状态</span><b>${curRoute().version} · ${curRoute().status}</b></div>
+        <div class="rt-hint" style="margin-top:10px">${esc(curRoute().desc)}</div>
+      </div>
+    </div>`;
+}
+
+/* 中栏：工具栏 + 画布 + 指标 + 执行时序 */
+function routeEditorHtml(){
+  const r=curRoute(), m=routeMetrics(r), st=routeState;
+  return `<div class="rp">
+    <div class="rt-toolbar">
+      <button class="rt-tool ${st.mode==='add'?'on':''}" data-act="rt-mode" data-v="add">${ic('plus')}添加航点</button>
+      <button class="rt-tool ${st.mode==='select'?'on':''}" data-act="rt-mode" data-v="select">${ic('eye')}选择</button>
+      <button class="rt-tool ${st.snap?'on':''}" data-act="rt-snap" title="吸附到园区道路">${ic('magnet')}道路吸附</button>
+      <div class="rt-tool-sep"></div>
+      <button class="rt-tool" data-act="rt-undo">${ic('undo')}撤销</button>
+      <button class="rt-tool" data-act="rt-optimize">${ic('shuffle')}顺序优化</button>
+      <button class="rt-tool danger" data-act="rt-del">${ic('trash')}删除航点</button>
+      <div class="sep"></div>
+      <button class="rt-tool" data-act="rt-sim">${ic('play')}模拟执行</button>
+    </div>
+    <div class="rt-canvas">
+      <svg id="routeSvg" viewBox="0 0 800 460" class="${st.mode==='select'?'select-mode':''}" role="img" aria-label="巡检路线编辑画布">
+        <g id="baseLayer">${routeBaseMap()}</g>
+        <g id="routeLayer">${routeLayer(r)}</g>
+        <g id="simLayer">${simDogSvg(r)}</g>
+      </svg>
+      <div class="rt-canvas-tag">${ic('info')} ${st.mode==='add'?'点击画布新增航点 · 拖拽航点调整位置':'点选航点或航段编辑属性'} · 点击段标签配置行进任务</div>
+      <div class="rt-legend"><span><i style="background:#0d9488"></i>起点</span><span><i style="background:#0284c7"></i>途经航点</span><span><i style="background:#0f172a"></i>终点</span><span><i style="background:#f59e0b"></i>当前选中</span></div>
+    </div>
+    <div class="rt-metrics" id="rtMetrics">
+      <div class="rt-metric"><span>航点数量</span><b>${m.points} <small>个</small></b></div>
+      <div class="rt-metric"><span>预计里程</span><b>${m.km} <small>km</small></b></div>
+      <div class="rt-metric"><span>预计耗时</span><b>${m.mins} <small>min</small></b></div>
+      <div class="rt-metric"><span>动作总数</span><b>${m.acts} <small>项</small></b></div>
+      <div class="rt-metric"><span>预估耗电</span><b>${m.batt} <small>%</small></b></div>
+    </div>
+  </div>
+  <div class="rp" style="margin-top:14px">
+    <div class="rp-head"><b>${ic('activity')}执行时序</b><span class="card-sub">到达航点 → 执行点动作 → 行进段持续任务 → 下一航点</span></div>
+    <div class="rt-timeline" id="rtTimeline">${routeTimelineHtml()}</div>
+  </div>`;
+}
+function routeTimelineHtml(){
+  const r=curRoute();
+  if(!r.points.length) return `<div class="empty" style="padding:18px 0">暂无航点，请在画布上添加</div>`;
+  return r.points.map((p,i)=>`<div class="rt-step ${routeState.selType==='point'&&routeState.selIdx===i?'active':''}" data-act="rt-step" data-i="${i}" style="cursor:pointer">
+    <div class="dot">${i+1}</div><b>${esc(p.name)}</b><span>${p.actions.length} 项点动作 · 停留 ${p.dwell}s</span>
+    ${i<r.points.length-1?`<span style="color:#0284c7">↓ 段 ${i+1}：${r.legs[i]?r.legs[i].actions.length:0} 项行进任务</span>`:(r.loop==='闭环'?`<span style="color:#64748b">↓ 闭环返航</span>`:'')}
+  </div>`).join('');
+}
+
+/* 右栏：航点 / 航段属性面板 */
+function actionCard(a, kind, ai){
+  const lib=ACTION_LIB[a.type]||{icon:'cpu',tone:'gray'};
+  return `<div class="act-card"><div class="act-top">
+      <span class="act-ico ${lib.tone}">${ic(lib.icon)}</span><b>${esc(a.type)}</b>
+      <button class="btn sm ghost icon" data-act="rt-act-del" data-kind="${kind}" data-ai="${ai}" title="删除">${ic('trash')}</button>
+    </div><div class="act-kv">
+      <div>参数：<b>${esc(a.param||'—')}</b></div>
+      ${kind==='point'?`<div>触发：<b>${esc(a.trigger||'到达即执行')}</b> · 阈值：<b>${esc(a.threshold||'—')}</b></div><div>失败：<b>重试 ${a.retry||1} 次</b></div>`:'<div>类型：<b>行进过程中持续执行</b></div>'}
+    </div></div>`;
+}
+function pointProps(){
+  const r=curRoute(), i=routeState.selIdx, p=r.points[i];
+  if(!p) return `<div class="empty">${ic('waypoint')}请在画布中点选一个航点</div>`;
+  return `<div class="rt-sec-title"><span>航点 P${i+1} · 导航参数</span>${ic('waypoint')}</div>
+    <div class="rt-field"><label>航点名称</label><input class="input" data-rf="name" value="${esc(p.name)}"></div>
+    <div class="rt-field"><label>坐标 (x,y)</label><input class="input mono" value="${Math.round(p.x)}, ${Math.round(p.y)}" readonly></div>
+    <div class="rt-field"><label>到达半径</label><input class="input" type="number" step="0.1" min="0.1" data-rf="radius" value="${p.radius}"><span class="muted" style="font-size:11px">m</span></div>
+    <div class="rt-field"><label>停留时长</label><input class="input" type="number" min="0" data-rf="dwell" value="${p.dwell}"><span class="muted" style="font-size:11px">s</span></div>
+    <div class="rt-field"><label>云台朝向</label><input class="input" type="number" min="0" max="360" data-rf="heading" value="${p.heading}"><span class="muted" style="font-size:11px">°</span></div>
+    <div class="rt-field"><label>必经点</label><label class="chk"><input type="checkbox" data-rf="must" ${p.must?'checked':''}> 不可跳过</label></div>
+    <div class="rt-field"><label>异常策略</label><select class="select" data-rf="onFail">${FAIL_MODES.map(x=>`<option ${p.onFail===x?'selected':''}>${x}</option>`).join('')}</select></div>
+    <div class="rt-sec-title"><span>该点执行动作（${p.actions.length}）</span>${ic('task')}</div>
+    ${p.actions.map((a,ai)=>actionCard(a,'point',ai)).join('') || '<div class="empty" style="padding:16px 0;font-size:11.5px">尚未配置动作</div>'}
+    <button class="act-add" data-act="rt-act-add" data-kind="point">${ic('plus')}添加航点动作</button>
+    <div class="rt-hint">点动作在到达该航点后按序执行；阈值超限时自动创建告警并关联本航点编号，便于回溯定位。</div>`;
+}
+function legProps(){
+  const r=curRoute(), i=routeState.selIdx, leg=legAt(i);
+  const a=r.points[i], b=r.points[i+1]||r.points[0];
+  if(!leg||!a||!b) return `<div class="empty">${ic('route')}请在画布中点选一段航段</div>`;
+  const dist=(Math.hypot(b.x-a.x,b.y-a.y)*1.2).toFixed(0);
+  const isReturn=i>=r.legs.length;
+  return `<div class="rt-sec-title"><span>${isReturn?'闭环返航段':`航段 S${i+1} · P${i+1} → P${i+2}`}</span>${ic('route')}</div>
+    <div class="rt-field"><label>段长</label><input class="input mono" value="${dist} m" readonly></div>
+    <div class="rt-field"><label>过渡方式</label><select class="select" data-rf="mode">${['沿道路','直线','曲线平滑','原地转向'].map(x=>`<option ${leg.mode===x?'selected':''}>${x}</option>`).join('')}</select></div>
+    <div class="rt-field"><label>段内速度</label><input class="input" type="number" step="0.1" min="0.2" data-rf="speed" value="${leg.speed}"><span class="muted" style="font-size:11px">m/s</span></div>
+    <div class="rt-field"><label>避障等级</label><select class="select" data-rf="avoid">${['宽松','标准','严格'].map(x=>`<option ${leg.avoid===x?'selected':''}>${x}</option>`).join('')}</select></div>
+    <div class="rt-sec-title"><span>行进中持续任务（${leg.actions.length}）</span>${ic('activity')}</div>
+    ${leg.actions.map((a,ai)=>actionCard(a,'leg',ai)).join('') || '<div class="empty" style="padding:16px 0;font-size:11.5px">该航段静默通行</div>'}
+    <button class="act-add" data-act="rt-act-add" data-kind="leg">${ic('plus')}添加行进任务</button>
+    <div class="rt-hint">段任务在两点之间移动期间持续执行（如全程录像、连续测温、周界扫描），与航点瞬时动作互补，构成完整巡检覆盖。</div>`;
+}
+function routePropsHtml(){
+  const st=routeState, showLeg=st.tab==='leg'||st.selType==='leg';
+  return `<div class="rp rt-prop-panel">
+    <div class="rp-head"><b>${ic('settings')}属性配置</b><span class="tag blue">${curRoute().id}</span></div>
+    <div class="rt-tabs">
+      <button class="rt-tab ${!showLeg?'on':''}" data-act="rt-tab" data-v="point">${ic('waypoint')}航点属性</button>
+      <button class="rt-tab ${showLeg?'on':''}" data-act="rt-tab" data-v="leg">${ic('route')}航段任务</button>
+    </div>
+    <div class="rt-prop" id="rtProp">${showLeg?legProps():pointProps()}</div>
+  </div>`;
+}
+
+function renderRoutes(){
+  const r=curRoute();
+  $('#v-routes').innerHTML = `
+    ${pageHead('巡检路线规划','可视化编排航点、行进航段与每一点/段执行的采集动作',
+      `<button class="btn" data-act="rt-validate">${ic('shield')}校验路线</button><button class="btn" data-act="rt-publish">${ic('send')}发布路线</button><button class="btn primary" data-act="rt-new">${ic('plus')}新建路线</button>`)}
+    <div class="route-layout">
+      <div>${routeListHtml()}</div>
+      <div>${routeEditorHtml()}</div>
+      <div>${routePropsHtml()}</div>
+    </div>`;
+  bindRouteCanvas();
+}
+
+/* 画布交互：点击加点 / 拖拽航点 / 点选航段 */
+function redrawCanvas(){
+  const r=curRoute();
+  const layer=$('#routeLayer'); if(layer) layer.innerHTML=routeLayer(r);
+  const svg=$('#routeSvg'); if(svg) svg.classList.toggle('select-mode',routeState.mode==='select');
+  const met=$('#rtMetrics');
+  if(met){ const m=routeMetrics(r); met.innerHTML=`
+    <div class="rt-metric"><span>航点数量</span><b>${m.points} <small>个</small></b></div>
+    <div class="rt-metric"><span>预计里程</span><b>${m.km} <small>km</small></b></div>
+    <div class="rt-metric"><span>预计耗时</span><b>${m.mins} <small>min</small></b></div>
+    <div class="rt-metric"><span>动作总数</span><b>${m.acts} <small>项</small></b></div>
+    <div class="rt-metric"><span>预估耗电</span><b>${m.batt} <small>%</small></b></div>`; }
+  const tl=$('#rtTimeline'); if(tl) tl.innerHTML=routeTimelineHtml();
+}
+function svgXY(e,svg){
+  const b=svg.getBoundingClientRect();
+  return { x:Math.max(24,Math.min(776,(e.clientX-b.left)/b.width*800)), y:Math.max(22,Math.min(438,(e.clientY-b.top)/b.height*460)) };
+}
+function snapXY(p){
+  if(!routeState.snap) return {x:Math.round(p.x/5)*5,y:Math.round(p.y/5)*5};
+  let {x,y}=p;
+  if(Math.abs(y-210)<30) y=210;
+  if(Math.abs(x-430)<26) x=430;
+  return {x:Math.round(x/5)*5,y:Math.round(y/5)*5};
+}
+function selectPoint(i){ routeState.selType='point'; routeState.selIdx=i; routeState.tab='point'; renderRoutes(); }
+function selectLeg(i){ routeState.selType='leg'; routeState.selIdx=i; routeState.tab='leg'; renderRoutes(); }
+function bindRouteCanvas(){
+  const svg=$('#routeSvg'); if(!svg) return;
+  let drag=null, moved=false, justDragged=false;
+  svg.addEventListener('pointerdown', e=>{
+    const wp=e.target.closest('.wp-hit');
+    if(!wp) return;
+    drag=Number(wp.dataset.idx); moved=false; saveHist();
+    try{ svg.setPointerCapture(e.pointerId); }catch(_){}
+    e.preventDefault();
+  });
+  svg.addEventListener('pointermove', e=>{
+    if(drag===null) return;
+    const p=snapXY(svgXY(e,svg)), r=curRoute();
+    r.points[drag].x=p.x; r.points[drag].y=p.y; moved=true;
+    redrawCanvas();
+  });
+  svg.addEventListener('pointerup', e=>{
+    if(drag===null) return;
+    const idx=drag, wasMoved=moved; drag=null;
+    if(!wasMoved){ routeState.hist.pop(); routeState.selType='point'; routeState.selIdx=idx; routeState.tab='point'; renderRoutes(); }
+    else { justDragged=true; redrawCanvas(); renderRoutePropsOnly(); }
+    moved=false;
+  });
+  svg.addEventListener('click', e=>{
+    if(justDragged){ justDragged=false; return; }
+    const wp=e.target.closest('.wp-hit'); if(wp){ selectPoint(Number(wp.dataset.idx)); return; }
+    const hit=e.target.closest('.leg-hit'); if(hit){ selectLeg(Number(hit.dataset.idx)); return; }
+    const lbl=e.target.closest('[data-leg]'); if(lbl){ selectLeg(Number(lbl.dataset.leg)); return; }
+    if(routeState.mode==='add'){
+      saveHist();
+      const p=snapXY(svgXY(e,svg)), r=curRoute(), n=r.points.length;
+      r.points.push({ name:'新航点 '+(n+1), x:p.x, y:p.y, dwell:5, radius:0.4, must:false, heading:0, onFail:'跳过继续',
+        actions:[{type:'可见光拍照',param:ACTION_LIB['可见光拍照'].param,trigger:'到达即执行',threshold:'—',retry:1}] });
+      r.legs.push({ mode:'沿道路', speed:r.speed, avoid:'标准', actions:[{type:'全程录像',param:'1080P / 25fps / 连续'}] });
+      routeState.selType='point'; routeState.selIdx=n; routeState.tab='point';
+      renderRoutes(); toast(`已添加航点 P${n+1}，并自动生成行进航段`);
+    }
+  });
+}
+function renderRoutePropsOnly(){
+  const box=$('#rtProp'); if(!box) return;
+  const showLeg=routeState.tab==='leg'||routeState.selType==='leg';
+  box.innerHTML=showLeg?legProps():pointProps();
+  $$('.rt-tab').forEach(t=>t.classList.toggle('on',(t.dataset.v==='leg')===showLeg));
+}
+
+/* 结构性操作 */
+function undoRoute(){
+  const snap=routeState.hist.pop();
+  if(!snap){ toast('没有可撤销的操作','info'); return; }
+  Object.assign(curRoute(),JSON.parse(snap));
+  renderRoutes(); toast('已撤销上一步操作');
+}
+function deleteWaypoint(){
+  const r=curRoute();
+  if(routeState.selType!=='point'){ toast('请先点选一个航点','error'); return; }
+  if(r.points.length<=2){ toast('至少需保留 2 个航点','error'); return; }
+  saveHist();
+  const i=routeState.selIdx;
+  r.points.splice(i,1);
+  r.legs.splice(Math.max(0,Math.min(i,r.legs.length-1)),1);
+  if(r.legs.length>r.points.length-1) r.legs.length=r.points.length-1;
+  routeState.selIdx=Math.max(0,i-1); routeState.selType='point';
+  renderRoutes(); toast('航点及关联航段已删除');
+}
+function optimizeRoute(){
+  const r=curRoute();
+  if(r.points.length<3){ toast('航点不足 3 个，无需优化','info'); return; }
+  saveHist();
+  const rest=r.points.slice(1), order=[r.points[0]]; let cur=r.points[0];
+  while(rest.length){
+    let bi=0,bd=Infinity;
+    rest.forEach((p,i)=>{ const d=Math.hypot(p.x-cur.x,p.y-cur.y); if(d<bd){bd=d;bi=i;} });
+    cur=rest.splice(bi,1)[0]; order.push(cur);
+  }
+  r.points=order; renderRoutes(); toast('已按最近邻算法重排航点，缩短总里程');
+}
+function validateRoute(){
+  const r=curRoute(), m=routeMetrics(r);
+  const noAct=r.points.filter(p=>!p.actions.length).length;
+  const noLegAct=r.legs.filter(l=>!l.actions.length).length;
+  const items=[
+    { ok:r.points.length>=2, t:`航点数量 ${r.points.length} 个`, d:r.points.length>=2?'满足最小巡检路径要求':'至少需要 2 个航点' },
+    { ok:noAct===0, t:`航点动作覆盖`, d:noAct?`${noAct} 个航点未配置任何动作`:'全部航点均已配置采集动作' },
+    { ok:true, t:`行进航段 ${legCount()} 段`, d:noLegAct?`${noLegAct} 段为静默通行（已确认）`:'所有航段均配置了持续任务' },
+    { ok:!!r.points.find(p=>p.must), t:'必经点设置', d:r.points.find(p=>p.must)?'已设置必经点，不可跳过':'建议至少设置 1 个必经点' },
+    { ok:m.batt<60, t:'续航可行性', d:`预估耗电 ${m.batt}%，${m.batt<60?'在当前机型续航范围内':'建议拆分路线或插入回充点'}` },
+    { ok:r.loop==='闭环'?!!r.returnLeg:true, t:'闭环返航配置', d:r.loop==='闭环'?(r.returnLeg?'已配置返航段任务':'缺少返航段配置'):'往返路线，无需返航段' },
+    { ok:true, t:'禁行区冲突检测', d:'路径未穿越园区禁行区' }
+  ];
+  const pass=items.filter(x=>x.ok).length;
+  openModal('路线校验结果',`${r.id} · ${r.name} · ${pass}/${items.length} 项通过`,
+    `<div class="rt-val-item" style="border:0;padding-bottom:12px">${ic('info')}<span class="muted">预计里程 ${m.km} km · 预计耗时 ${m.mins} min · 动作 ${m.acts} 项 · 预估耗电 ${m.batt}%</span></div>
+     ${items.map(x=>`<div class="rt-val-item">${ic(x.ok?'check-circle':'warn')}<span style="flex:1;color:${x.ok?'#059669':'#d97706'}">${x.t}</span><span class="muted" style="text-align:right">${x.d}</span></div>`).join('')}
+     <div class="rt-hint">校验通过后即可发布为正式版本；已发布的路线模板可被「任务管理」引用，下发时会自动展开为航点序列与动作指令集。</div>`,()=>{});
+  $('#modalSubmit').hidden=true;
+}
+function publishRoute(){
+  const r=curRoute();
+  if(r.status==='已发布'){ toast(`${r.id} 已是已发布状态`,'info'); return; }
+  if(r.points.length<2){ toast('航点不足，无法发布','error'); return; }
+  const nums=(r.version.match(/\d+/g)||['1','0']).map(Number);
+  let major=nums[0]||0, minor=(nums[1]||0)+1;
+  if(minor>9){ major+=1; minor=0; }
+  r.version='v'+major+'.'+minor;
+  r.status='已发布'; r.updated='11-09 09:47';
+  renderRoutes(); toast(`${r.id} 已发布为 ${r.version}，可被任务引用`);
+}
+function simulateRoute(){
+  if(routeState.sim){ stopSim(); toast('已停止模拟','info'); return; }
+  const r=curRoute();
+  if(r.points.length<2){ toast('至少需要 2 个航点才能模拟','error'); return; }
+  stopSim(); routeState.sim=true; routeState.timers=[];
+  const btn=$('[data-act="rt-sim"]');
+  if(btn){ btn.classList.add('on'); btn.innerHTML=ic('pause')+'停止模拟'; }
+  const dog=$('#simDog'); if(dog) dog.hidden=false;
+  let i=0;
+  const run=()=>{
+    if(!routeState.sim) return;
+    if(i>=r.points.length){
+      toast(`${r.id} 模拟执行完成，共 ${r.points.length} 个航点`,'success'); stopSim(); return;
+    }
+    const p=r.points[i];
+    $$('.rt-step').forEach((s,k)=>s.classList.toggle('active',k===i));
+    toast(`P${i+1} ${p.name} · 执行 ${p.actions.length} 项动作`,'info');
+    const to=r.points[i+1] || (r.loop==='闭环'?r.points[0]:null);
+    if(!to){ toast('路线执行完毕','success'); stopSim(); return; }
+    const from=p, t0=performance.now(), dur=1100;
+    const frame=t=>{
+      if(!routeState.sim) return;
+      const k=Math.min(1,(t-t0)/dur);
+      const d=$('#simDog');
+      if(d) d.setAttribute('transform',`translate(${(from.x+(to.x-from.x)*k).toFixed(1)},${(from.y+(to.y-from.y)*k).toFixed(1)})`);
+      if(k<1) routeState.raf=requestAnimationFrame(frame);
+      else { i++; routeState.timers.push(setTimeout(run,420)); }
+    };
+    routeState.raf=requestAnimationFrame(frame);
+  };
+  run();
+}
+
+/* 表单：新增路线 / 添加动作 / 编辑基础信息 */
+function newRouteForm(){
+  return `<div class="form-grid">
+    <div class="field" style="grid-column:1/-1"><label>路线名称 <em>*</em></label><input class="input" name="name" placeholder="例如：B区立体仓库巡检"></div>
+    <div class="field"><label>所属园区</label><select class="select" name="park">${fOpts(S.parks.map(p=>p.name))}</select></div>
+    <div class="field"><label>巡检区域</label><select class="select" name="zone">${fOpts(S.zones.map(z=>z.name))}</select></div>
+    <div class="field"><label>适用机型</label><select class="select" name="model">${fOpts(['X30-Pro','Lite-S','X30-Standard'])}</select></div>
+    <div class="field"><label>闭环方式</label><select class="select" name="loop">${fOpts(['闭环','往返','单向'])}</select></div>
+    <div class="field"><label>默认速度 (m/s)</label><input class="input" name="speed" value="1.2"></div>
+    <div class="field"><label>初始状态</label><select class="select" name="status">${fOpts(['草稿','已发布'])}</select></div>
+    <div class="field" style="grid-column:1/-1"><label>路线说明</label><textarea class="textarea" name="desc" placeholder="描述覆盖点位与巡检目标"></textarea></div>
+  </div><div class="rt-hint">创建后进入编辑画布：点击地图添加航点，系统自动在相邻航点间生成行进航段，再为每个点/段配置采集动作。</div>`;
+}
+function addActionForm(kind){
+  const names=Object.keys(ACTION_LIB).filter(k=>ACTION_LIB[k].kind===kind);
+  return `<div class="form-grid">
+    <div class="field" style="grid-column:1/-1"><label>动作类型 <em>*</em></label><select class="select" name="type" id="actTypeSel">${fOpts(names)}</select></div>
+    <div class="field" style="grid-column:1/-1"><label>执行参数</label><input class="input" name="param" placeholder="例如：1080P / 广角 / 单帧"></div>
+    ${kind==='point'?`
+    <div class="field"><label>触发时机</label><select class="select" name="trigger">${fOpts(TRIGGERS)}</select></div>
+    <div class="field"><label>告警阈值</label><input class="input" name="threshold" placeholder="例如：> 65℃ 生成告警"></div>
+    <div class="field"><label>失败重试次数</label><input class="input" type="number" min="0" max="5" name="retry" value="1"></div>`:
+    `<div class="field" style="grid-column:1/-1"><label>说明</label><div class="rt-hint" style="margin:0">该动作在两航点之间移动过程中持续执行，不占用停留时长。</div></div>`}
+  </div>`;
+}
+
+/* ---------------- 视图路由 ---------------- */
+const VIEW_META = {
+  dashboard:{ title:'总览驾驶舱', render:renderDashboard },
+  parks:{ title:'园区管理', render:renderParks },
+  routes:{ title:'巡检路线', render:renderRoutes },
+  devices:{ title:'设备管理', render:renderDevices },
+  tasks:{ title:'任务管理', render:renderTasks },
+  alerts:{ title:'告警中心', render:renderAlerts },
+  settings:{ title:'系统设置', render:renderSettings }
+};
+const renderers = { dashboard:renderDashboard, parks:renderParks, routes:renderRoutes, devices:renderDevices, tasks:renderTasks, alerts:renderAlerts, settings:renderSettings };
+function go(view){
+  if(!VIEW_META[view]) return;
+  if(typeof stopSim==='function') stopSim();
+  S.view = view;
+  $$('.nav-item').forEach(n=>n.classList.toggle('active', n.dataset.view===view));
+  $$('.view').forEach(v=>v.classList.remove('active'));
+  $('#v-'+view).classList.add('active');
+  $('#crumbNow').textContent = VIEW_META[view].title;
+  renderers[view]();
+  window.scrollTo({top:0,behavior:'smooth'});
+  $('#bellPop').hidden = true;
+}
+
+/* ---------------- 模态框 / 抽屉 / Toast ---------------- */
+let modalSubmitFn = null;
+function openModal(title, sub, body, onSubmit){
+  $('#modalTitle').textContent = title;
+  $('#modalSub').textContent = sub;
+  $('#modalBody').innerHTML = body;
+  modalSubmitFn = onSubmit;
+  $('#modalSubmit').hidden = false;
+  $('#modalOverlay').hidden = false;
+}
+function closeModal(){ $('#modalOverlay').hidden = true; modalSubmitFn = null; }
+function toast(msg, type='success'){
+  const el = document.createElement('div');
+  el.className = 'toast ' + (type==='error'?'err':type==='info'?'info':'');
+  el.innerHTML = `${ic(type==='error'?'warn':type==='info'?'info':'check-circle')}<span>${esc(msg)}</span>`;
+  $('#toastStack').appendChild(el);
+  setTimeout(()=>{ el.style.transition='.25s'; el.style.opacity='0'; el.style.transform='translateX(24px)'; setTimeout(()=>el.remove(),260); }, 2600);
+}
+function openDrawer(id){
+  const d = S.devices.find(x=>x.id===id);
+  if(!d) return;
+  const evts = [
+    { t:d.beat, txt:'状态心跳上报正常', c:'#10b981' },
+    { t:'09:02', txt:d.task!=='—'?`开始执行「${d.task}」`:'进入待命状态', c:'#0284c7' },
+    { t:'08:40', txt:'完成自检，传感器状态正常', c:'#94a3b8' }
+  ];
+  $('#drawer').innerHTML = `
+    <div class="drawer-head"><div><div style="font-size:15px;font-weight:700;display:flex;align-items:center;gap:9px">${ic('dog')}${d.id} <span class="tag blue">${d.model}</span></div><div class="muted" style="font-size:11px;margin-top:5px">${esc(d.park)} · ${esc(d.zone)}</div></div><button class="btn ghost icon" data-act="close-drawer">${ic('close')}</button></div>
+    <div class="drawer-body">
+      <div class="video-box"><div class="live-tag"><i></i>LIVE</div><div class="cam">${ic('video')}<p>实时画面 · 摄像头 01</p></div><div class="cam-ts mono">${d.beat} · 1080P / 25fps</div></div>
+      <div style="margin-top:16px;display:flex;align-items:center;justify-content:space-between"><div class="card-title" style="font-size:13px">${ic('activity')}运行指标</div>${badge(d.status)}</div>
+      <div class="metric-grid">
+        <div class="metric"><span>${ic('battery')}剩余电量</span><b>${d.battery}<small> %</small></b></div>
+        <div class="metric"><span>${ic('cpu')}机身温度</span><b style="color:${d.temp>50?'#dc2626':'inherit'}">${d.temp}<small> ℃</small></b></div>
+        <div class="metric"><span>${ic('clock')}今日运行时长</span><b>${d.runtime}</b></div>
+        <div class="metric"><span>${ic('pin')}累计里程</span><b>${d.odo}<small> km</small></b></div>
+      </div>
+      <div style="margin-bottom:10px" class="card-title">${ic('list')}设备档案</div>
+      <div class="kv"><span>设备编号</span><b class="mono">${d.id}</b></div>
+      <div class="kv"><span>设备型号</span><b>${d.model}</b></div>
+      <div class="kv"><span>所属园区</span><b>${esc(d.park)}</b></div>
+      <div class="kv"><span>当前区域</span><b>${esc(d.zone)}</b></div>
+      <div class="kv"><span>实时位置</span><b class="mono">${esc(d.pos)}</b></div>
+      <div class="kv"><span>当前任务</span><b>${esc(d.task)}</b></div>
+      <div class="kv"><span>信号强度</span><b>${d.signal>0?'良好（'+d.signal+'/4）':'无信号'}</b></div>
+      <div style="margin:18px 0 10px" class="card-title">${ic('clock')}最近事件</div>
+      <div class="timeline">${evts.map(e=>`<div class="tl-item"><div class="tl-dot" style="background:${e.c}1a;border-color:${e.c}55;color:${e.c}">${ic('check')}</div><div class="tl-body"><b>${esc(e.txt)}</b><time class="mono">${e.t}</time></div></div>`).join('')}</div>
+    </div>
+    <div class="drawer-foot">
+      <button class="btn primary" data-act="device-cmd" data-id="${d.id}" data-cmd="开始巡检">${ic('play')}开始巡检</button>
+      <button class="btn" data-act="device-cmd" data-id="${d.id}" data-cmd="暂停任务">${ic('pause')}暂停</button>
+      <button class="btn" data-act="device-cmd" data-id="${d.id}" data-cmd="召回充电">${ic('charge')}召回充电</button>
+      <button class="btn" data-act="device-cmd" data-id="${d.id}" data-cmd="远程接管">${ic('video')}远程接管</button>
+    </div>`;
+  $('#drawer').hidden = false; $('#drawerOverlay').hidden = false;
+}
+function closeDrawer(){ $('#drawer').hidden = true; $('#drawerOverlay').hidden = true; }
+
+/* ---------------- 表单模板 ---------------- */
+const fOpts = arr => arr.map(x=>`<option>${esc(x)}</option>`).join('');
+function parkForm(p){
+  return `<div class="form-grid">
+    <div class="field"><label>园区名称 <em>*</em></label><input class="input" name="name" value="${p?esc(p.name):''}" placeholder="例如：松江智造园区"></div>
+    <div class="field"><label>园区编号</label><input class="input" name="id" value="${p?p.id:'PK-'+String(S.parks.length+1).padStart(3,'0')}" ${p?'readonly':''}></div>
+    <div class="field"><label>占地面积（万㎡） <em>*</em></label><input class="input" name="area" value="${p?p.area:''}" placeholder="例如：10.5"></div>
+    <div class="field"><label>负责人 <em>*</em></label><input class="input" name="owner" value="${p?esc(p.owner):''}" placeholder="请输入姓名"></div>
+    <div class="field"><label>运行状态</label><select class="select" name="status">${['运行中','部分维护','停用'].map(s=>`<option ${p&&p.status===s?'selected':''}>${s}</option>`).join('')}</select></div>
+    <div class="field"><label>园区类型</label><select class="select" name="desc">${fOpts(['生产制造','仓储物流','研发办公','综合园区'])}</select></div>
+    <div class="field" style="grid-column:1/-1"><label>备注说明</label><textarea class="textarea" name="remark" placeholder="选填，描述园区范围与巡检要求"></textarea></div>
+  </div>`;
+}
+function deviceForm(){
+  return `<div class="form-grid">
+    <div class="field"><label>设备编号 <em>*</em></label><input class="input" name="id" value="RD-${String(25+S.devices.length).padStart(3,'0')}" placeholder="RD-XXX"></div>
+    <div class="field"><label>设备型号 <em>*</em></label><select class="select" name="model">${fOpts(['X30-Pro','Lite-S','X30-Standard'])}</select></div>
+    <div class="field"><label>所属园区 <em>*</em></label><select class="select" name="park">${fOpts(S.parks.map(p=>p.name))}</select></div>
+    <div class="field"><label>初始区域</label><select class="select" name="zone">${fOpts(S.zones.map(z=>z.name))}</select></div>
+    <div class="field"><label>初始状态</label><select class="select" name="status">${fOpts(['在线待命','充电中'])}</select></div>
+    <div class="field"><label>固件版本</label><input class="input" name="fw" value="v2.6.1"></div>
+    <div class="field" style="grid-column:1/-1"><label>备注说明</label><textarea class="textarea" name="remark" placeholder="选填"></textarea></div>
+  </div>`;
+}
+function taskForm(){
+  return `<div class="form-grid">
+    <div class="field" style="grid-column:1/-1"><label>任务名称 <em>*</em></label><input class="input" name="name" placeholder="例如：A区上午例行巡检"></div>
+    <div class="field"><label>任务类型 <em>*</em></label><select class="select" name="type">${fOpts(['定时巡检','定点拍照','夜巡任务','应急处置','设备维护','地图采集'])}</select></div>
+    <div class="field"><label>执行模式 <em>*</em></label><select class="select" name="mode">${fOpts(['周期任务','临时下发','立即执行'])}</select></div>
+    <div class="field"><label>执行园区 <em>*</em></label><select class="select" name="park">${fOpts(S.parks.map(p=>p.name))}</select></div>
+    <div class="field"><label>巡检区域</label><select class="select" name="zone">${fOpts(S.zones.map(z=>z.name))}</select></div>
+    <div class="field"><label>执行设备 <em>*</em></label><select class="select" name="device">${fOpts(S.devices.map(d=>d.id))}</select></div>
+    <div class="field"><label>计划开始时间</label><input class="input" name="time" value="09:30 - 10:10"></div>
+    <div class="field"><label>巡检路线 <em>*</em></label><select class="select" name="route">${fOpts(['— 临时路径'].concat(S.routes.map(r=>r.id+' · '+r.name)))}</select></div>
+    <div class="field"><label>优先级</label><select class="select" name="level">${fOpts(['常规','重要','紧急'])}</select></div>
+    <div class="field"><label>下发策略</label><select class="select" name="policy">${fOpts(['按路线顺序执行','跳过非必经点','仅执行采集动作'])}</select></div>
+    <div class="field" style="grid-column:1/-1"><label>任务说明</label><textarea class="textarea" name="remark" placeholder="选填，描述巡检点位与采集要求"></textarea></div>
+  </div>`;
+}
+function zoneForm(){
+  return `<div class="form-grid">
+    <div class="field"><label>区域名称 <em>*</em></label><input class="input" name="name" placeholder="例如：I区 · 新车间"></div>
+    <div class="field"><label>所属园区</label><select class="select" name="park">${fOpts(S.parks.map(p=>p.name))}</select></div>
+    <div class="field"><label>区域类型</label><select class="select" name="type">${fOpts(['生产区','仓储区','周界','办公区','公共区','地下'])}</select></div>
+    <div class="field"><label>巡检频次</label><select class="select" name="freq">${fOpts(['每 1 小时','每 2 小时','每 4 小时','每 6 小时'])}</select></div>
+  </div>`;
+}
+
+/* ---------------- 任务看板拖拽 ---------------- */
+function bindDrag(){
+  let dragId = null;
+  $$('#kanban .task-card').forEach(card=>{
+    card.addEventListener('dragstart', e=>{ dragId = card.dataset.id; card.classList.add('dragging'); e.dataTransfer.effectAllowed='move'; });
+    card.addEventListener('dragend', ()=>card.classList.remove('dragging'));
+  });
+  $$('#kanban .kcol').forEach(col=>{
+    col.addEventListener('dragover', e=>{ e.preventDefault(); col.classList.add('dragover'); });
+    col.addEventListener('dragleave', ()=>col.classList.remove('dragover'));
+    col.addEventListener('drop', e=>{
+      e.preventDefault(); col.classList.remove('dragover');
+      if(!dragId) return;
+      const t = S.tasks.find(x=>x.id===dragId);
+      const to = col.dataset.status;
+      if(t && t.status!==to){
+        t.status = to;
+        if(to==='已完成') t.progress = 100;
+        if(to==='待执行') t.progress = 0;
+        renderTasks();
+        toast(`${t.id} 已移动至「${to}」`, 'info');
+      }
+      dragId = null;
+    });
+  });
+}
+
+/* ---------------- 事件总线 ---------------- */
+document.addEventListener('click', e=>{
+  const nav = e.target.closest('.nav-item');
+  if(nav){ go(nav.dataset.view); return; }
+  const el = e.target.closest('[data-act]');
+  if(!el) return;
+  const act = el.dataset.act, id = el.dataset.id;
+
+  switch(act){
+    case 'go': go(el.dataset.view); break;
+    case 'close-modal': closeModal(); break;
+    case 'close-drawer': closeDrawer(); break;
+    case 'report': toast('运行日报已生成，正在下载'); break;
+    case 'fullscreen': toast('已进入全屏态势模式（原型演示）','info'); break;
+    case 'device-detail': openDrawer(id); break;
+    case 'device-control': openDrawer(id); toast('已打开远程控制面板','info'); break;
+    case 'device-refresh': renderDevices(); toast('设备状态已刷新'); break;
+    case 'device-export': toast('设备台账已导出'); break;
+    case 'batch': toast('已进入批量指令下发模式','info'); break;
+
+    case 'device-stat': {
+      S.device.status = el.dataset.k;
+      renderDevices();
+      if(el.dataset.k==='在线') toast('已筛选在线设备（执行任务 + 在线待命）','info');
+      break;
+    }
+    case 'device-new':
+      openModal('添加设备','录入新设备并绑定所属园区', deviceForm(), fd=>{
+        if(!fd.get('id')){ toast('请填写设备编号','error'); return false; }
+        S.devices.unshift({ id:fd.get('id'), model:fd.get('model'), park:fd.get('park'), zone:fd.get('zone'), status:fd.get('status'), battery:100, signal:4, task:'—', beat:'09:15:44', temp:32.0, runtime:'0h 00m', odo:'0.0', pos:'待定位' });
+        renderDevices(); toast(`设备 ${fd.get('id')} 已添加`);
+      }); break;
+
+    case 'park-new':
+      openModal('新增园区','创建园区档案并初始化巡检范围', parkForm(), fd=>{
+        if(!fd.get('name') || !fd.get('area')){ toast('请填写园区名称与面积','error'); return false; }
+        S.parks.push({ id:fd.get('id'), name:fd.get('name'), desc:fd.get('desc'), area:fd.get('area'), zones:0, devices:0, tasks:0, done:0, owner:fd.get('owner')||'待分配', status:fd.get('status'), color:'#0284c7' });
+        S.park.status='全部'; S.park.q=''; renderParks(); toast(`园区「${fd.get('name')}」已创建`);
+      }); break;
+    case 'park-edit': {
+      const p = S.parks.find(x=>x.id===id); if(!p) break;
+      openModal('编辑园区',`${p.id} · ${p.name}`, parkForm(p), fd=>{
+        p.name=fd.get('name'); p.area=fd.get('area'); p.owner=fd.get('owner'); p.status=fd.get('status'); p.desc=fd.get('desc');
+        renderParks(); toast('园区信息已更新');
+      }); break;
+    }
+    case 'park-zones': {
+      const p = S.parks.find(x=>x.id===id); if(!p) break;
+      const rows = $$('#zoneCard tbody tr');
+      rows.forEach(r=>r.hidden = !r.textContent.includes(p.name));
+      $('#zoneFoot').textContent = `已筛选「${p.name}」的 ${S.zones.filter(z=>z.park===p.name).length} 个巡检区域`;
+      $('#zoneCard').scrollIntoView({behavior:'smooth',block:'center'});
+      toast(`已定位 ${p.name} 的区域清单`,'info'); break;
+    }
+    case 'park-view': S.parkView=el.dataset.v; renderParks(); break;
+    case 'zone-new':
+      openModal('新增巡检区域','为园区划分新的巡检单元', zoneForm(), fd=>{
+        if(!fd.get('name')){ toast('请填写区域名称','error'); return false; }
+        S.zones.push({ park:fd.get('park'), name:fd.get('name'), type:fd.get('type'), devices:0, freq:fd.get('freq'), status:'正常' });
+        renderParks(); toast('巡检区域已创建');
+      }); break;
+    case 'zone-plan': go('routes'); toast(`已打开「${el.dataset.name}」的巡检路线编排`,'info'); break;
+    case 'zone-edit': toast(`「${el.dataset.name}」进入编辑模式`,'info'); break;
+
+    /* ---- 巡检路线规划 ---- */
+    case 'rt-select': {
+      if(el.dataset.id===routeState.id) break;
+      stopSim(); routeState.id=el.dataset.id; routeState.selType='point'; routeState.selIdx=0;
+      routeState.tab='point'; routeState.hist=[];
+      renderRoutes(); toast(`已切换至「${curRoute().name}」`,'info'); break;
+    }
+    case 'rt-mode': routeState.mode=el.dataset.v; renderRoutes(); break;
+    case 'rt-snap': routeState.snap=!routeState.snap; renderRoutes();
+      toast(routeState.snap?'已开启道路吸附':'已关闭道路吸附','info'); break;
+    case 'rt-undo': undoRoute(); break;
+    case 'rt-optimize': optimizeRoute(); break;
+    case 'rt-del': deleteWaypoint(); break;
+    case 'rt-sim': simulateRoute(); break;
+    case 'rt-validate': validateRoute(); break;
+    case 'rt-publish': publishRoute(); break;
+    case 'rt-step': selectPoint(Number(el.dataset.i)); break;
+    case 'rt-tab': {
+      routeState.tab=el.dataset.v;
+      if(el.dataset.v==='leg' && routeState.selType!=='leg'){ routeState.selType='leg'; routeState.selIdx=0; }
+      if(el.dataset.v==='point' && routeState.selType!=='point'){ routeState.selType='point'; routeState.selIdx=0; }
+      renderRoutes(); break;
+    }
+    case 'rt-new':
+      openModal('新建巡检路线','创建路线模板后在画布上编排航点', newRouteForm(), fd=>{
+        if(!fd.get('name')){ toast('请填写路线名称','error'); return false; }
+        const id='RT-'+String(S.routes.length+1).padStart(3,'0');
+        const loop=fd.get('loop');
+        S.routes.unshift({ id, name:fd.get('name'), park:fd.get('park'), zone:fd.get('zone'), status:fd.get('status'),
+          version:'v0.1', model:fd.get('model'), loop, speed:Number(fd.get('speed'))||1.2, updated:'11-09 09:47',
+          desc:fd.get('desc')||'待补充路线说明', points:[], legs:[],
+          returnLeg:loop==='闭环'?{mode:'沿道路',speed:1.5,avoid:'标准',actions:[]}:null });
+        stopSim(); routeState.id=id; routeState.mode='add'; routeState.selType='none'; routeState.selIdx=0;
+        routeState.tab='point'; routeState.hist=[]; routeState.q='';
+        renderRoutes(); toast(`路线 ${id} 已创建，请点击画布添加航点`);
+      }); break;
+    case 'rt-base': {
+      const r=curRoute();
+      openModal('编辑路线基础信息',`${r.id} · ${r.name}`, newRouteForm(), fd=>{
+        r.name=fd.get('name')||r.name; r.park=fd.get('park'); r.zone=fd.get('zone');
+        r.model=fd.get('model'); r.loop=fd.get('loop'); r.speed=Number(fd.get('speed'))||1.2;
+        r.status=fd.get('status'); r.desc=fd.get('desc')||r.desc;
+        if(r.loop==='闭环'&&!r.returnLeg) r.returnLeg={mode:'沿道路',speed:r.speed,avoid:'标准',actions:[]};
+        if(r.loop!=='闭环') r.returnLeg=null;
+        renderRoutes(); toast('路线基础信息已更新');
+      });
+      const body=$('#modalBody'), set=(n,v)=>{ const x=body.querySelector(`[name="${n}"]`); if(x) x.value=v; };
+      set('name',r.name); set('park',r.park); set('zone',r.zone); set('model',r.model);
+      set('loop',r.loop); set('speed',r.speed); set('status',r.status); set('desc',r.desc);
+      break;
+    }
+    case 'rt-act-add': {
+      const kind=el.dataset.kind, r=curRoute();
+      let target=null;
+      if(kind==='point'){
+        if(routeState.selType!=='point' || !r.points[routeState.selIdx]){ toast('请先点选一个航点','error'); break; }
+        target=r.points[routeState.selIdx].actions;
+      }else{
+        if(routeState.selType!=='leg'){ toast('请先点选一段航段','error'); break; }
+        const l=legAt(routeState.selIdx); if(l) target=l.actions;
+      }
+      if(!target){ toast('请先选择配置对象','error'); break; }
+      openModal(`添加${kind==='point'?'航点动作':'行进任务'}`,'配置动作类型、参数、触发条件与异常处理', addActionForm(kind), fd=>{
+        const type=fd.get('type'), lib=ACTION_LIB[type]||{param:'—'};
+        saveHist();
+        if(kind==='point') target.push({ type, param:fd.get('param')||lib.param, trigger:fd.get('trigger')||'到达即执行', threshold:fd.get('threshold')||'—', retry:Number(fd.get('retry')||1) });
+        else target.push({ type, param:fd.get('param')||lib.param });
+        renderRoutes(); toast(`已添加动作：${type}`);
+      }); break;
+    }
+    case 'rt-act-del': {
+      const kind=el.dataset.kind, ai=Number(el.dataset.ai);
+      const target = kind==='point'
+        ? (curRoute().points[routeState.selIdx]||{}).actions
+        : (legAt(routeState.selIdx)||{}).actions;
+      if(!target){ break; }
+      saveHist(); target.splice(ai,1); renderRoutes(); toast('动作已删除'); break;
+    }
+    case 'rt-goto': {
+      const rid=el.dataset.id;
+      if(!S.routes.some(x=>x.id===rid)){ toast('该任务未关联路线','info'); break; }
+      stopSim(); closeModal();
+      routeState.id=rid; routeState.selType='point'; routeState.selIdx=0; routeState.tab='point';
+      go('routes'); toast('已打开任务关联的巡检路线','info'); break;
+    }
+
+    case 'task-view': S.taskView=el.dataset.v; renderTasks(); break;
+    case 'task-list':
+      S.taskView='table'; renderTasks(); toast(`已切换列表视图（统计项：${el.dataset.k}）`,'info'); break;
+    case 'task-new':
+      openModal('新建巡检任务','配置任务参数并下发至机器狗', taskForm(), fd=>{
+        if(!fd.get('name')){ toast('请填写任务名称','error'); return false; }
+        const rv=fd.get('route')||'—';
+        S.tasks.unshift({ id:'TK-1109-'+String(S.tasks.length+1).padStart(2,'0'), name:fd.get('name'), type:fd.get('type'), device:fd.get('device'), park:fd.get('park'), zone:fd.get('zone'), time:fd.get('time'), status:'待执行', progress:0, mode:fd.get('mode'), level:fd.get('level'),
+          route:rv.startsWith('RT-')?rv.slice(0,6):'—', policy:fd.get('policy') });
+        S.taskView='board'; renderTasks(); toast('任务已创建并加入待执行队列');
+      }); break;
+    case 'task-start': {
+      const t=S.tasks.find(x=>x.id===id); if(t){ t.status='执行中'; t.progress=5; renderTasks(); toast(`${t.name} 已下发执行`); } break;
+    }
+    case 'task-pause': {
+      const t=S.tasks.find(x=>x.id===id); if(t){ t.status='待执行'; renderTasks(); toast(`${t.name} 已暂停`,'info'); } break;
+    }
+    case 'task-detail': {
+      const t=S.tasks.find(x=>x.id===id); if(!t) break;
+      const rr=S.routes.find(x=>x.id===t.route);
+      const seq = rr ? rr.points.map((p,i)=>{
+        const acts=p.actions.map(a=>esc(a.type)).join(' / ')||'无动作';
+        const seg=i<rr.legs.length?(rr.legs[i].actions.map(a=>esc(a.type)).join(' / ')||'静默通行'):'';
+        return `<div><b>P${i+1} ${esc(p.name)}</b> · ${acts}${seg?` <span style="color:#0284c7">→ 行进：${seg}</span>`:''}</div>`;
+      }).join('') : '<div>该任务使用临时路径，未绑定路线模板</div>';
+      openModal('任务详情',`${t.id} · ${t.name}`,
+        `<div class="kv"><span>任务名称</span><b>${esc(t.name)}</b></div><div class="kv"><span>任务类型 / 模式</span><b>${esc(t.type)} / ${esc(t.mode)}</b></div>
+         <div class="kv"><span>执行设备</span><b class="mono">${t.device}</b></div><div class="kv"><span>园区 / 区域</span><b>${esc(t.park)} / ${esc(t.zone)}</b></div>
+         <div class="kv"><span>计划时间</span><b class="mono">${esc(t.time)}</b></div><div class="kv"><span>关联路线</span><b>${esc(routeLabel(t.route))}</b></div>
+         <div class="kv"><span>下发策略</span><b>${esc(t.policy||'按路线顺序执行')}</b></div>
+         <div class="kv"><span>执行状态</span><b>${badge(t.status)}</b></div>
+         <div class="kv"><span>完成进度</span><b>${t.progress}%</b></div><div class="bar" style="margin-top:12px"><i style="width:${t.progress}%"></i></div>
+         <div class="rt-sec-title"><span>下发后的航点执行序列</span>${ic('route')}</div>
+         <div class="act-kv" style="font-size:11px;gap:6px">${seq}</div>
+         <div style="margin-top:14px">${rr?`<button class="btn sm" data-act="rt-goto" data-id="${rr.id}">${ic('route')}打开路线编排</button>`:''}</div>`,
+        ()=>{});
+      $('#modalSubmit').hidden = true;
+      break;
+    }
+    case 'alert-filter': S.alertFilter=el.dataset.k; renderAlerts(); break;
+    case 'alert-handle': {
+      const a=S.alerts.find(x=>x.id===id); if(a){ a.status='已处理'; renderAlerts(); toast(`${a.id} 已标记为处理完成`); } break;
+    }
+    case 'alert-all': S.alerts.forEach(a=>a.status='已处理'); renderAlerts(); toast('全部告警已处理'); break;
+    case 'alert-detail': {
+      const a=S.alerts.find(x=>x.id===id); if(!a) break;
+      openModal('告警详情',a.id,`<div class="kv"><span>告警级别</span><b>${badge(a.level)}</b></div><div class="kv"><span>告警内容</span><b>${esc(a.text)}</b></div><div class="kv"><span>关联设备</span><b class="mono">${a.device}</b></div><div class="kv"><span>所属园区</span><b>${esc(a.park)}</b></div><div class="kv"><span>发生时间</span><b class="mono">${a.time}</b></div><div class="kv"><span>处理状态</span><b>${badge(a.status)}</b></div>`,()=>{});
+      $('#modalSubmit').hidden = true; break;
+    }
+    case 'settings-save': toast('平台配置已保存'); break;
+    case 'switch': el.classList.toggle('on'); toast(el.classList.contains('on')?'已开启该策略':'已关闭该策略','info'); break;
+    case 'device-cmd': toast(`已向 ${id} 下发指令：${el.dataset.cmd}`); break;
+  }
+});
+
+/* 模态提交 */
+$('#modalSubmit').addEventListener('click', ()=>{
+  if(!modalSubmitFn) return;
+  const fd = new FormData($('#modalBody').querySelector('form') || document.createElement('form'));
+  // 表单字段未包裹 form 时，手动收集
+  if(!$('#modalBody').querySelector('form')){
+    $$('#modalBody [name]').forEach(i=>fd.set(i.name, i.value));
+  }
+  const result = modalSubmitFn(fd);
+  if(result !== false){ closeModal(); }
+});
+$('#modalOverlay').addEventListener('click', e=>{ if(e.target===$('#modalOverlay')) closeModal(); });
+
+/* 输入类事件 */
+document.addEventListener('input', e=>{
+  const t=e.target, role=t.dataset.role;
+  if(role==='device-search'){ S.device.q=t.value; renderDeviceTableOnly(); }
+  if(role==='park-search'){ S.park.q=t.value; renderParks(); }
+  if(role==='rt-search'){
+    routeState.q=t.value;
+    const q=t.value.trim().toLowerCase();
+    $$('#v-routes .rt-item').forEach(item=>{
+      const r=S.routes.find(x=>x.id===item.dataset.id);
+      if(r) item.hidden = !!q && !(r.name+r.id+r.park+r.zone).toLowerCase().includes(q);
+    });
+  }
+});
+document.addEventListener('change', e=>{
+  const t=e.target, role=t.dataset.role;
+  if(role==='device-park'){ S.device.park=t.value; renderDeviceTableOnly(); }
+  if(role==='device-status'){ S.device.status=t.value; renderDeviceTableOnly(); }
+  if(role==='park-status'){ S.park.status=t.value; renderParks(); }
+  if(t.id==='actTypeSel'){
+    const lib=ACTION_LIB[t.value];
+    if(lib){
+      const p=$('#modalBody [name="param"]'), tr=$('#modalBody [name="trigger"]'), th=$('#modalBody [name="threshold"]');
+      if(p) p.value=lib.param; if(tr&&lib.trigger) tr.value=lib.trigger; if(th&&lib.threshold) th.value=lib.threshold;
+    }
+  }
+  if(t.dataset.rf){
+    if(routeState.sim) stopSim();
+    const r=curRoute(), key=t.dataset.rf;
+    const val = t.type==='checkbox' ? t.checked : (t.type==='number' ? Number(t.value) : t.value);
+    if(routeState.selType==='point' && r.points[routeState.selIdx]) r.points[routeState.selIdx][key]=val;
+    else if(routeState.selType==='leg'){ const l=legAt(routeState.selIdx); if(l) l[key]=val; }
+    renderRoutes();
+  }
+});
+function renderDeviceTableOnly(){
+  // 局部刷新表格，避免输入焦点丢失
+  const list = filteredDevices();
+  const rows = list.map(d=>`<tr data-act="device-detail" data-id="${d.id}" style="cursor:pointer">
+    <td><div class="row-flex"><span class="row-icon">${ic('dog')}</span><div><div class="cell-main mono">${d.id}</div><div class="cell-sub">${d.model}</div></div></div></td>
+    <td>${esc(d.park)}<div class="cell-sub">${esc(d.zone)}</div></td><td>${badge(d.status)}</td>
+    <td style="min-width:130px">${bar(d.battery)}</td><td><div class="cell-main" style="font-weight:500">${esc(d.task)}</div></td>
+    <td>${ic('wifi')}<span class="mono" style="margin-left:5px">${d.signal>0?'强':'—'}</span></td><td class="mono muted">${d.beat}</td>
+    <td><div class="actions"><button class="btn sm" data-act="device-control" data-id="${d.id}">${ic('play')}控制</button><button class="btn sm ghost icon" data-act="device-detail" data-id="${d.id}">${ic('eye')}</button></div></td></tr>`).join('');
+  const tb = $('#v-devices .table tbody'); if(tb) tb.innerHTML = rows || emptyRow('没有符合条件的设备');
+  const foot = $('#v-devices .tfoot span'); if(foot) foot.textContent = `显示 ${list.length} 条记录`;
+  $$('#v-devices .stat-tab[data-act="device-stat"]').forEach(t=>t.classList.toggle('on', t.dataset.k===S.device.status));
+  const sel = $('[data-role="device-status"]');
+  if(sel && Array.from(sel.options).some(o=>o.value===S.device.status)) sel.value = S.device.status;
+}
+
+/* 顶栏交互 */
+$('#btnToggle').addEventListener('click', ()=>$('#sidebar').classList.toggle('collapsed'));
+$('#globalSearch').addEventListener('keydown', e=>{
+  if(e.key!=='Enter') return;
+  const q=e.target.value.trim(); if(!q) return;
+  S.device.q=q; S.view='devices'; go('devices');
+  toast(`已在设备管理中搜索「${q}」`,'info');
+});
+$('#btnBell').addEventListener('click', e=>{
+  e.stopPropagation();
+  const pop=$('#bellPop');
+  if(!pop.hidden){ pop.hidden=true; return; }
+  pop.innerHTML = `<div class="popover-head"><span>告警通知</span><span class="tag orange">${S.alerts.filter(a=>a.status==='未处理').length} 条未处理</span></div>
+    ${S.alerts.slice(0,4).map(a=>`<div class="alert-item" style="padding:11px 15px;border-bottom:1px solid var(--line-2)"><div class="alert-ico ${a.status==='未处理'?'danger':'info'}">${ic('bell')}</div><div class="alert-txt"><b>${esc(a.text)}</b><span>${esc(a.park)} · ${a.time}</span></div></div>`).join('')}
+    <div class="popover-foot"><button class="btn sm ghost" data-act="go" data-view="alerts">查看全部告警 ${ic('chevron-right')}</button></div>`;
+  pop.hidden=false;
+});
+document.addEventListener('click', e=>{ if(!e.target.closest('#bellPop') && !e.target.closest('#btnBell')) $('#bellPop').hidden=true; });
+document.addEventListener('keydown', e=>{ if(e.key==='Escape'){ closeModal(); closeDrawer(); $('#bellPop').hidden=true; } });
+
+/* 时钟 */
+function tick(){
+  const d=new Date();
+  const wd=['周日','周一','周二','周三','周四','周五','周六'][d.getDay()];
+  const p=n=>String(n).padStart(2,'0');
+  $('#clock').textContent=`${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日 ${wd} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  $('#syncTime').textContent=`${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+tick(); setInterval(tick,1000);
+
+/* 启动：支持通过 ?view=parks / routes / devices / tasks / alerts / settings 直达指定模块 */
+renderDashboard(); renderParks(); renderRoutes(); renderDevices(); renderTasks(); renderAlerts(); renderSettings();
+const initView = new URLSearchParams(location.search).get('view');
+if(initView && VIEW_META[initView]) go(initView);
+</script>
+</body>
+</html>

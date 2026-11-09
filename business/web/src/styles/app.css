@@ -1,0 +1,558 @@
+#app {
+  min-height: 100vh;
+}
+
+/* ---------- 登录 ---------- */
+.login-page {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  background: var(--bg);
+}
+
+.login-visual {
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 20% 20%, rgba(6, 182, 212, 0.32), transparent 45%),
+    radial-gradient(circle at 80% 70%, rgba(2, 132, 199, 0.32), transparent 42%),
+    linear-gradient(150deg, #07111f, #0a2038 70%, #0d2c4a);
+  color: #fff;
+  padding: 54px 58px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.login-visual::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+  background-size: 38px 38px;
+  pointer-events: none;
+}
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  position: relative;
+  z-index: 1;
+}
+
+.login-brand .brand-logo {
+  width: 46px;
+  height: 46px;
+  border-radius: 13px;
+}
+
+.login-brand b {
+  display: block;
+  font-size: 18px;
+  letter-spacing: 0.5px;
+}
+
+.login-brand span {
+  display: block;
+  margin-top: 4px;
+  font-size: 10.5px;
+  letter-spacing: 3px;
+  color: #7ea3c4;
+}
+
+.login-copy {
+  position: relative;
+  z-index: 1;
+  max-width: 520px;
+}
+
+.login-copy h1 {
+  margin: 0;
+  font-size: 38px;
+  line-height: 1.25;
+  letter-spacing: -1px;
+}
+
+.login-copy h1 em {
+  font-style: normal;
+  background: linear-gradient(135deg, #22d3ee, #0284c7);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.login-copy p {
+  margin: 18px 0 0;
+  color: #9db9d4;
+  font-size: 13.5px;
+  line-height: 1.9;
+}
+
+.login-features {
+  display: flex;
+  gap: 26px;
+  margin-top: 34px;
+  position: relative;
+  z-index: 1;
+}
+
+.login-feature {
+  font-size: 12px;
+  color: #b7cde1;
+}
+
+.login-feature b {
+  display: block;
+  font-size: 22px;
+  color: #fff;
+  margin-bottom: 4px;
+}
+
+.login-form-wrap {
+  display: grid;
+  place-items: center;
+  padding: 40px;
+}
+
+.login-card {
+  width: min(400px, 100%);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.12);
+  padding: 36px 34px 30px;
+}
+
+.login-card h2 {
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: -0.4px;
+}
+
+.login-card .login-sub {
+  margin: 8px 0 26px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.login-card .field {
+  margin-bottom: 16px;
+}
+
+.login-card .field > label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-2);
+  margin-bottom: 7px;
+  font-weight: 600;
+}
+
+.login-card .input {
+  height: 40px;
+}
+
+.login-submit {
+  width: 100%;
+  height: 42px;
+  justify-content: center;
+  margin-top: 8px;
+  font-size: 13.5px;
+}
+
+.login-hint {
+  margin-top: 18px;
+  font-size: 11.5px;
+  color: var(--muted);
+  text-align: center;
+}
+
+/* ---------- 顶栏用户菜单 ---------- */
+.user-pop {
+  position: absolute;
+  right: 0;
+  top: 46px;
+  width: 220px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow-lg);
+  z-index: 45;
+  overflow: hidden;
+}
+
+.user-pop-head {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line-2);
+}
+
+.user-pop-head b {
+  display: block;
+  font-size: 13px;
+}
+
+.user-pop-head span {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.user-pop button {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 12px 16px;
+  text-align: left;
+  font-size: 12.5px;
+  color: var(--text-2);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.user-pop button:hover {
+  background: #f8fafc;
+  color: var(--danger);
+}
+
+/* ---------- Element Plus 适配 ---------- */
+.el-dialog {
+  border-radius: 16px;
+  padding: 0;
+  overflow: hidden;
+}
+
+.el-dialog__header {
+  padding: 18px 22px 0;
+  margin: 0;
+}
+
+.el-dialog__title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.el-dialog__body {
+  padding: 18px 22px 8px;
+}
+
+.el-dialog__footer {
+  padding: 10px 22px 18px;
+}
+
+.el-overlay {
+  backdrop-filter: blur(2px);
+}
+
+.el-form-item__label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.el-input__wrapper,
+.el-select__wrapper,
+.el-textarea__inner {
+  border-radius: 9px;
+  box-shadow: 0 0 0 1px var(--line) inset;
+  font-size: 13px;
+}
+
+.el-input__wrapper.is-focus,
+.el-select__wrapper.is-focused {
+  box-shadow: 0 0 0 1px var(--brand) inset, 0 0 0 3px rgba(2, 132, 199, 0.11);
+}
+
+.el-message {
+  border-radius: 10px;
+}
+
+.el-table {
+  --el-table-border-color: var(--line-2);
+  --el-table-header-bg-color: #f8fafc;
+  font-size: 12.5px;
+}
+
+.el-table th.el-table__cell {
+  background: #f8fafc;
+  color: #8b9aad;
+  font-weight: 600;
+  font-size: 11.5px;
+}
+
+.el-pagination {
+  --el-pagination-font-size: 12px;
+}
+
+/* ---------- 通用补充 ---------- */
+.row-flex {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cell-sub {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 3px;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cursor-pointer {
+  cursor: pointer;
+}
+
+.w-full {
+  width: 100%;
+}
+
+.text-danger {
+  color: var(--danger);
+}
+
+.text-ok {
+  color: var(--ok);
+}
+
+.mt18 {
+  margin-top: 18px;
+}
+
+.flex-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.toolbar .search {
+  position: relative;
+  width: 250px;
+}
+
+.toolbar .search .ic {
+  position: absolute;
+  left: 11px;
+  top: 9px;
+  color: var(--muted);
+  width: 15px;
+  height: 15px;
+}
+
+.toolbar .search .input {
+  padding-left: 34px;
+}
+
+.seg {
+  display: inline-flex;
+  padding: 3px;
+  background: #f1f5f9;
+  border-radius: 9px;
+  gap: 3px;
+}
+
+.seg button {
+  border: 0;
+  background: transparent;
+  border-radius: 7px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.seg button.on {
+  background: #fff;
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.1);
+}
+
+.rt-canvas svg {
+  cursor: crosshair;
+}
+
+.rt-canvas svg.select-mode {
+  cursor: default;
+}
+
+.rt-canvas svg.select-mode .wp-hit,
+.rt-canvas svg.select-mode .leg-hit {
+  cursor: pointer;
+}
+
+.leg-hit {
+  stroke: transparent;
+  stroke-width: 18;
+  fill: none;
+}
+
+.rt-tool.on {
+  border-color: var(--brand);
+  color: var(--brand);
+  background: var(--brand-soft);
+}
+
+.rt-tool.danger {
+  color: var(--danger);
+}
+
+.rt-tool.danger:hover {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.rt-step.active {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+
+.sim-dog {
+  pointer-events: none;
+}
+
+.empty-box {
+  padding: 42px 20px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.empty-box .ic {
+  width: 22px;
+  height: 22px;
+  display: block;
+  margin: 0 auto 10px;
+}
+
+.map-card .map-stage svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.map-card .map-stage {
+  position: relative;
+}
+
+.park-card {
+  overflow: hidden;
+}
+
+.park-thumb {
+  position: relative;
+}
+
+.park-thumb svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.thumb-tag {
+  position: absolute;
+  left: 10px;
+  top: 10px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 3px 8px;
+  font-size: 10.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}
+
+.park-body {
+  padding: 16px 18px;
+}
+
+.park-name {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.park-name b {
+  font-size: 14px;
+}
+
+.park-meta {
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-top: 5px;
+}
+
+.park-stats {
+  display: flex;
+  gap: 24px;
+  margin: 14px 0;
+}
+
+.park-stat b {
+  display: block;
+  font-size: 18px;
+  letter-spacing: -0.3px;
+}
+
+.park-stat span {
+  display: block;
+  font-size: 10.5px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.park-prog-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.park-prog-label b {
+  color: var(--text-2);
+}
+
+.park-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 14px;
+  gap: 10px;
+}
+
+.park-owner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+
+.park-owner .avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+  font-size: 10.5px;
+}

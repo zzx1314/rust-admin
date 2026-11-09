@@ -1,0 +1,353 @@
+[
+  {
+    "routeCode": "RT-001",
+    "routeName": "A区上午例行巡检",
+    "parkId": 1,
+    "zoneId": 1,
+    "model": "X30-Pro",
+    "status": "已发布",
+    "version": "v2.3",
+    "loopMode": "闭环",
+    "defaultSpeed": 1.2,
+    "routeDescription": "覆盖产线 6 个关键点位，含配电柜红外测温与仪表读数识别",
+    "routeData": {
+      "schemaVersion": 2,
+      "loop": "闭环",
+      "points": [
+        {
+          "name": "起点 · 充电座 P-01",
+          "x": 88,
+          "y": 342,
+          "dwell": 0,
+          "radius": 0.5,
+          "must": true,
+          "heading": 0,
+          "onFail": "跳过继续",
+          "actions": [
+            { "type": "设备自检", "param": "全传感器自检", "trigger": "到达即执行", "threshold": "—", "retry": 1 }
+          ]
+        },
+        {
+          "name": "配电柜测温点",
+          "x": 212,
+          "y": 294,
+          "dwell": 15,
+          "radius": 0.3,
+          "must": true,
+          "heading": 90,
+          "onFail": "重试 2 次",
+          "actions": [
+            { "type": "红外测温", "param": "云台 P90 · ROI 中心区域", "trigger": "停留后执行", "threshold": "> 65℃ 生成告警", "retry": 2 },
+            { "type": "可见光拍照", "param": "1080P / 广角 / 单帧", "trigger": "到达即执行", "threshold": "—", "retry": 1 }
+          ]
+        },
+        {
+          "name": "产线 A 线巡检点",
+          "x": 332,
+          "y": 204,
+          "dwell": 8,
+          "radius": 0.4,
+          "must": true,
+          "heading": 45,
+          "onFail": "重试 1 次",
+          "actions": [
+            { "type": "AI 识别", "param": "人员 / 烟火 / 安全帽", "trigger": "到达即执行", "threshold": "置信度 > 0.85", "retry": 1 },
+            { "type": "录像采集", "param": "1080P / 25fps / 15s", "trigger": "停留后执行", "threshold": "—", "retry": 1 }
+          ]
+        },
+        {
+          "name": "仪表读数点位",
+          "x": 472,
+          "y": 148,
+          "dwell": 12,
+          "radius": 0.3,
+          "must": true,
+          "heading": 0,
+          "onFail": "重试 2 次",
+          "actions": [
+            { "type": "AI 识别", "param": "指针仪表 OCR 读数", "trigger": "停留后执行", "threshold": "读数越限告警", "retry": 2 },
+            { "type": "可见光拍照", "param": "2K / 长焦 / 特写", "trigger": "到达即执行", "threshold": "—", "retry": 1 }
+          ]
+        },
+        {
+          "name": "消防通道检查点",
+          "x": 624,
+          "y": 214,
+          "dwell": 10,
+          "radius": 0.5,
+          "must": false,
+          "heading": 135,
+          "onFail": "跳过继续",
+          "actions": [
+            { "type": "AI 识别", "param": "通道堵塞 / 杂物堆放", "trigger": "到达即执行", "threshold": "检测到堵塞告警", "retry": 1 },
+            { "type": "二维码扫码", "param": "消防器材资产标签", "trigger": "停留后执行", "threshold": "—", "retry": 1 }
+          ]
+        },
+        {
+          "name": "终点 · 数据回传",
+          "x": 720,
+          "y": 334,
+          "dwell": 5,
+          "radius": 0.5,
+          "must": true,
+          "heading": 180,
+          "onFail": "中止路线",
+          "actions": [
+            { "type": "语音播报", "param": "巡检完成播报", "trigger": "到达即执行", "threshold": "—", "retry": 1 }
+          ]
+        }
+      ],
+      "legs": [
+        { "mode": "沿道路", "speed": 1.2, "avoid": "标准", "actions": [{ "type": "全程录像", "param": "1080P / 25fps / 连续" }] },
+        { "mode": "沿道路", "speed": 1.0, "avoid": "严格", "actions": [{ "type": "周界扫描", "param": "侧向 120° 扫描" }, { "type": "全程录像", "param": "1080P / 25fps" }] },
+        { "mode": "直线", "speed": 1.2, "avoid": "标准", "actions": [{ "type": "连续测温", "param": "每 2s 采样一次" }] },
+        { "mode": "沿道路", "speed": 1.4, "avoid": "标准", "actions": [{ "type": "全程录像", "param": "1080P / 25fps" }] },
+        { "mode": "沿道路", "speed": 1.2, "avoid": "标准", "actions": [{ "type": "静默通行", "param": "关闭语音提示" }] }
+      ],
+      "returnLeg": { "mode": "沿道路", "speed": 1.5, "avoid": "标准", "actions": [{ "type": "静默通行", "param": "返航不采集" }] }
+    }
+  },
+  {
+    "routeCode": "RT-002",
+    "routeName": "C区周界围栏夜巡",
+    "parkId": 1,
+    "zoneId": 3,
+    "model": "Lite-S",
+    "status": "已发布",
+    "version": "v1.8",
+    "loopMode": "闭环",
+    "defaultSpeed": 1.5,
+    "routeDescription": "夜间周界闭环巡查，重点检测越界与异常热源",
+    "routeData": {
+      "schemaVersion": 2,
+      "loop": "闭环",
+      "points": [
+        {
+          "name": "起点 · 西门岗",
+          "x": 96,
+          "y": 356,
+          "dwell": 0,
+          "radius": 0.5,
+          "must": true,
+          "heading": 0,
+          "onFail": "跳过继续",
+          "actions": [
+            { "type": "设备自检", "param": "夜视 / 补光自检", "trigger": "到达即执行", "threshold": "—", "retry": 1 }
+          ]
+        },
+        {
+          "name": "西北角围栏",
+          "x": 168,
+          "y": 118,
+          "dwell": 10,
+          "radius": 0.4,
+          "must": true,
+          "heading": 45,
+          "onFail": "重试 2 次",
+          "actions": [
+            { "type": "红外测温", "param": "围栏全景热成像", "trigger": "停留后执行", "threshold": "> 50℃ 生成告警", "retry": 2 }
+          ]
+        },
+        {
+          "name": "北侧中段",
+          "x": 420,
+          "y": 74,
+          "dwell": 8,
+          "radius": 0.4,
+          "must": true,
+          "heading": 90,
+          "onFail": "重试 1 次",
+          "actions": [
+            { "type": "AI 识别", "param": "越界人员 / 攀爬", "trigger": "到达即执行", "threshold": "检测到即告警", "retry": 1 }
+          ]
+        },
+        {
+          "name": "东北角围栏",
+          "x": 688,
+          "y": 126,
+          "dwell": 10,
+          "radius": 0.4,
+          "must": true,
+          "heading": 135,
+          "onFail": "重试 2 次",
+          "actions": [
+            { "type": "录像采集", "param": "红外夜视 / 20s", "trigger": "停留后执行", "threshold": "—", "retry": 1 }
+          ]
+        },
+        {
+          "name": "东门岗",
+          "x": 730,
+          "y": 348,
+          "dwell": 5,
+          "radius": 0.5,
+          "must": true,
+          "heading": 180,
+          "onFail": "中止路线",
+          "actions": [
+            { "type": "二维码扫码", "param": "门禁点位标签", "trigger": "到达即执行", "threshold": "—", "retry": 1 }
+          ]
+        }
+      ],
+      "legs": [
+        { "mode": "沿道路", "speed": 1.5, "avoid": "标准", "actions": [{ "type": "周界扫描", "param": "右侧 180° 连续扫描" }] },
+        { "mode": "沿道路", "speed": 1.5, "avoid": "标准", "actions": [{ "type": "全程录像", "param": "红外夜视 / 连续" }] },
+        { "mode": "沿道路", "speed": 1.5, "avoid": "标准", "actions": [{ "type": "周界扫描", "param": "右侧 180° 连续扫描" }] },
+        { "mode": "沿道路", "speed": 1.4, "avoid": "严格", "actions": [{ "type": "全程录像", "param": "红外夜视 / 连续" }] }
+      ],
+      "returnLeg": { "mode": "沿道路", "speed": 1.6, "avoid": "标准", "actions": [{ "type": "静默通行", "param": "返航不采集" }] }
+    }
+  },
+  {
+    "routeCode": "RT-003",
+    "routeName": "冷链仓温度专项",
+    "parkId": 2,
+    "zoneId": 5,
+    "model": "X30-Pro",
+    "status": "草稿",
+    "version": "v0.9",
+    "loopMode": "往返",
+    "defaultSpeed": 0.8,
+    "routeDescription": "低温环境密集测温，需校验电池低温续航",
+    "routeData": {
+      "schemaVersion": 2,
+      "loop": "往返",
+      "points": [
+        {
+          "name": "仓门缓冲区",
+          "x": 110,
+          "y": 330,
+          "dwell": 20,
+          "radius": 0.3,
+          "must": true,
+          "heading": 0,
+          "onFail": "中止路线",
+          "actions": [
+            { "type": "气体检测", "param": "CO / O2 浓度", "trigger": "停留后执行", "threshold": "CO > 30ppm 告警", "retry": 2 }
+          ]
+        },
+        {
+          "name": "A 列货架",
+          "x": 290,
+          "y": 232,
+          "dwell": 15,
+          "radius": 0.3,
+          "must": true,
+          "heading": 90,
+          "onFail": "重试 1 次",
+          "actions": [
+            { "type": "红外测温", "param": "货架上 / 中 / 下三层", "trigger": "停留后执行", "threshold": "> -18℃ 生成告警", "retry": 2 }
+          ]
+        },
+        {
+          "name": "B 列货架",
+          "x": 490,
+          "y": 196,
+          "dwell": 15,
+          "radius": 0.3,
+          "must": true,
+          "heading": 90,
+          "onFail": "重试 1 次",
+          "actions": [
+            { "type": "红外测温", "param": "货架上 / 中 / 下三层", "trigger": "停留后执行", "threshold": "> -18℃ 生成告警", "retry": 2 }
+          ]
+        },
+        {
+          "name": "制冷机组",
+          "x": 676,
+          "y": 296,
+          "dwell": 25,
+          "radius": 0.3,
+          "must": true,
+          "heading": 135,
+          "onFail": "重试 2 次",
+          "actions": [
+            { "type": "气体检测", "param": "冷媒泄漏检测", "trigger": "停留后执行", "threshold": "泄漏即中止", "retry": 2 },
+            { "type": "录像采集", "param": "机组运行特写 / 20s", "trigger": "到达即执行", "threshold": "—", "retry": 1 }
+          ]
+        }
+      ],
+      "legs": [
+        { "mode": "沿道路", "speed": 0.8, "avoid": "严格", "actions": [{ "type": "连续测温", "param": "每 1s 采样一次" }] },
+        { "mode": "直线", "speed": 0.8, "avoid": "严格", "actions": [{ "type": "连续测温", "param": "每 1s 采样一次" }] },
+        { "mode": "沿道路", "speed": 0.8, "avoid": "严格", "actions": [{ "type": "气体巡检", "param": "持续采样冷媒浓度" }] }
+      ],
+      "returnLeg": null
+    }
+  },
+  {
+    "routeCode": "RT-004",
+    "routeName": "研发楼消防通道",
+    "parkId": 3,
+    "zoneId": 7,
+    "model": "Lite-S",
+    "status": "草稿",
+    "version": "v0.4",
+    "loopMode": "往返",
+    "defaultSpeed": 1.0,
+    "routeDescription": "室内消防通道占用识别，待补充楼层地图",
+    "routeData": {
+      "schemaVersion": 2,
+      "loop": "往返",
+      "points": [
+        {
+          "name": "一层大厅",
+          "x": 132,
+          "y": 340,
+          "dwell": 0,
+          "radius": 0.5,
+          "must": true,
+          "heading": 0,
+          "onFail": "跳过继续",
+          "actions": [
+            { "type": "设备自检", "param": "室内定位初始化", "trigger": "到达即执行", "threshold": "—", "retry": 1 }
+          ]
+        },
+        {
+          "name": "2F 东侧通道",
+          "x": 320,
+          "y": 230,
+          "dwell": 8,
+          "radius": 0.4,
+          "must": true,
+          "heading": 45,
+          "onFail": "重试 1 次",
+          "actions": [
+            { "type": "AI 识别", "param": "通道堵塞 / 杂物", "trigger": "到达即执行", "threshold": "检测到即告警", "retry": 1 }
+          ]
+        },
+        {
+          "name": "3F 西侧通道",
+          "x": 520,
+          "y": 150,
+          "dwell": 8,
+          "radius": 0.4,
+          "must": true,
+          "heading": 90,
+          "onFail": "重试 1 次",
+          "actions": [
+            { "type": "可见光拍照", "param": "1080P / 全景", "trigger": "停留后执行", "threshold": "—", "retry": 1 }
+          ]
+        },
+        {
+          "name": "消防器材点",
+          "x": 694,
+          "y": 286,
+          "dwell": 10,
+          "radius": 0.4,
+          "must": true,
+          "heading": 135,
+          "onFail": "重试 1 次",
+          "actions": [
+            { "type": "二维码扫码", "param": "灭火器资产标签", "trigger": "到达即执行", "threshold": "—", "retry": 1 }
+          ]
+        }
+      ],
+      "legs": [
+        { "mode": "沿道路", "speed": 1.0, "avoid": "严格", "actions": [{ "type": "全程录像", "param": "1080P / 连续" }] },
+        { "mode": "沿道路", "speed": 1.0, "avoid": "严格", "actions": [{ "type": "静默通行", "param": "楼梯通行不采集" }] },
+        { "mode": "沿道路", "speed": 1.0, "avoid": "严格", "actions": [{ "type": "全程录像", "param": "1080P / 连续" }] }
+      ],
+      "returnLeg": null
+    }
+  }
+]

@@ -1,0 +1,585 @@
+<script setup lang="ts">
+import { computed, onMounted, reactive, ref } from "vue";
+import { useRouter } from "vue-router";
+import { ElMessage, ElMessageBox } from "element-plus";
+import { deviceApi, parkApi, routeApi, taskApi, zoneApi } from "@/api/ops";
+import type { Device, Park, Route, Task, Zone } from "@/api/types";
+import PageHeader from "@/components/PageHeader.vue";
+import AppIcon from "@/components/AppIcon.vue";
+import StatusBadge from "@/components/StatusBadge.vue";
+import ProgressBar from "@/components/ProgressBar.vue";
+import {
+  DISPATCH_POLICIES,
+  EXECUTE_MODES,
+  TASK_LEVELS,
+  TASK_STATUSES,
+  TASK_TYPES
+} from "@/utils/constants";
+import { parseRouteData } from "@/utils/format";
+
+const router = useRouter();
+const tasks = ref<Task[]>([]);
+const devices = ref<Device[]>([]);
+const parks = ref<Park[]>([]);
+const zones = ref<Zone[]>([]);
+const routes = ref<Route[]>([]);
+const stats = ref<{ total: number; counts: Record<string, number>; doneRate: number }>({
+  total: 0,
+  counts: {},
+  doneRate: 0
+});
+const viewMode = ref<"board" | "table">("board");
+const activeStatus = ref("全部");
+const draggedId = ref<number | null>(null);
+const taskDialog = ref(false);
+const taskForm = reactive({
+  taskName: "",
+  taskType: "定时巡检",
+  executeMode: "周期任务",
+  level: "常规",
+  parkId: 1,
+  zoneId: 1,
+  deviceId: 1,
+  routeId: null as number | null,
+  planStart: "09:30",
+  planEnd: "10:10",
+  dispatchPolicy: "按路线顺序执行",
+  description: ""
+});
+const detailVisible = ref(false);
+const detailTask = ref<Task | null>(null);
+
+const columns = [
+  { key: "待执行", color: "#94a3b8" },
+  { key: "执行中", color: "#3b82f6" },
+  { key: "已完成", color: "#10b981" },
+  { key: "异常", color: "#ef4444" }
+];
+
+const filteredTasks = computed(() =>
+  activeStatus.value === "全部"
+    ? tasks.value
+    : tasks.value.filter(task => task.taskStatus === activeStatus.value)
+);
+
+const zonesOfPark = computed(() =>
+  zones.value.filter(zone => zone.parkId === taskForm.parkId)
+);
+
+function countOf(status: string) {
+  return status === "全部" ? stats.value.total : stats.value.counts[status] ?? 0;
+}
+
+function tasksOf(status: string) {
+  return tasks.value.filter(task => task.taskStatus === status);
+}
+
+async function load() {
+  const [taskList, statsData, deviceList, parkList, zoneList, routeList] = await Promise.all([
+    taskApi.list(),
+    taskApi.stats(),
+    deviceApi.list(),
+    parkApi.list(),
+    zoneApi.list(),
+    routeApi.list()
+  ]);
+  tasks.value = taskList;
+  stats.value = statsData;
+  devices.value = deviceList;
+  parks.value = parkList;
+  zones.value = zoneList;
+  routes.value = routeList;
+}
+
+function tagTone(type?: string | null) {
+  const map: Record<string, string> = {
+    定时巡检: "blue",
+    应急处置: "orange",
+    定点拍照: "purple",
+    夜巡任务: "purple",
+    设备维护: "orange",
+    地图采集: "teal"
+  };
+  return map[type || ""] || "";
+}
+
+async function changeStatus(task: Task, status: string) {
+  if (task.taskStatus === status) return;
+  const progress = status === "已完成" ? 100 : status === "待执行" ? 0 : task.progress;
+  await taskApi.updateStatus(task.id, status, progress);
+  await load();
+  ElMessage.info(`${task.taskCode} 已移动至「${status}」`);
+}
+
+function onDragStart(task: Task) {
+  draggedId.value = task.id;
+}
+
+async function onDrop(status: string) {
+  const task = tasks.value.find(item => item.id === draggedId.value);
+  draggedId.value = null;
+  if (task) await changeStatus(task, status);
+}
+
+async function startTask(task: Task) {
+  await taskApi.updateStatus(task.id, "执行中", Math.max(5, task.progress));
+  await load();
+  ElMessage.success(`${task.taskName} 已下发执行`);
+}
+
+async function pauseTask(task: Task) {
+  await taskApi.updateStatus(task.id, "待执行", task.progress);
+  await load();
+  ElMessage.info(`${task.taskName} 已暂停`);
+}
+
+async function removeTask(task: Task) {
+  await ElMessageBox.confirm(`确定删除任务「${task.taskName}」吗？`, "删除任务", {
+    type: "warning"
+  });
+  await taskApi.remove(task.id);
+  ElMessage.success("任务已删除");
+  await load();
+}
+
+function openCreate() {
+  Object.assign(taskForm, {
+    taskName: "",
+    taskType: "定时巡检",
+    executeMode: "周期任务",
+    level: "常规",
+    parkId: parks.value[0]?.id ?? 1,
+    zoneId: zones.value[0]?.id ?? 1,
+    deviceId: devices.value[0]?.id ?? 1,
+    routeId: routes.value[0]?.id ?? null,
+    planStart: "09:30",
+    planEnd: "10:10",
+    dispatchPolicy: "按路线顺序执行",
+    description: ""
+  });
+  taskDialog.value = true;
+}
+
+async function saveTask() {
+  if (!taskForm.taskName.trim()) {
+    ElMessage.warning("请填写任务名称");
+    return;
+  }
+  await taskApi.create({ ...taskForm });
+  taskDialog.value = false;
+  viewMode.value = "board";
+  ElMessage.success("任务已创建并加入待执行队列");
+  await load();
+}
+
+async function openDetail(task: Task) {
+  detailTask.value = task;
+  detailVisible.value = true;
+}
+
+const detailRoute = computed(() => {
+  const routeId = detailTask.value?.routeId;
+  if (!routeId) return null;
+  return routes.value.find(route => route.id === routeId) ?? null;
+});
+
+const detailSequence = computed(() => {
+  const route = detailRoute.value;
+  if (!route) return [];
+  const data = parseRouteData(route.routeData);
+  return data.points.map((point, index) => {
+    const leg = data.legs[index];
+    return {
+      name: `P${index + 1} ${point.name}`,
+      actions: point.actions.map(action => action.type).join(" / ") || "无动作",
+      leg: leg
+        ? leg.actions.map(action => action.type).join(" / ") || "静默通行"
+        : route.loopMode === "闭环"
+          ? "闭环返航"
+          : "—"
+    };
+  });
+});
+
+function openRoutePlanner() {
+  if (!detailRoute.value) return;
+  detailVisible.value = false;
+  router.push({ path: "/routes", query: { routeId: detailRoute.value.id } });
+}
+
+async function sendFromDetail(command: string) {
+  const task = detailTask.value;
+  if (!task) return;
+  if (command === "start") {
+    await taskApi.updateStatus(task.id, "执行中", Math.max(5, task.progress));
+    ElMessage.success("任务已开始执行");
+  } else {
+    await taskApi.updateStatus(task.id, "待执行", task.progress);
+    ElMessage.info("任务已暂停");
+  }
+  detailVisible.value = false;
+  await load();
+}
+
+function clickStat(status: string) {
+  activeStatus.value = status;
+  viewMode.value = "table";
+}
+
+function clickStatusBadge(status: string) {
+  activeStatus.value = status;
+}
+
+onMounted(load);
+</script>
+
+<template>
+  <div>
+    <PageHeader title="任务管理" subtitle="巡检任务的创建、下发、执行跟踪与看板协作">
+      <template #actions>
+        <button class="btn primary" @click="openCreate">
+          <AppIcon name="plus" />新建任务
+        </button>
+      </template>
+    </PageHeader>
+
+    <div class="stat-strip">
+      <div
+        class="stat-tab"
+        :class="{ on: activeStatus === '全部' }"
+        @click="clickStat('全部')"
+      >
+        <div class="st-label"><i style="background: #0284c7" />任务总数</div>
+        <div class="st-val">{{ stats.total }} <small>项</small></div>
+      </div>
+      <div
+        v-for="column in columns"
+        :key="column.key"
+        class="stat-tab"
+        :class="{ on: activeStatus === column.key }"
+        @click="clickStat(column.key)"
+      >
+        <div class="st-label"><i :style="{ background: column.color }" />{{ column.key }}</div>
+        <div class="st-val">{{ countOf(column.key) }} <small>项</small></div>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <span v-if="activeStatus !== '全部'" class="tag blue">
+        当前筛选：{{ activeStatus }}
+        <button
+          style="border: 0; background: transparent; color: inherit; cursor: pointer"
+          @click="activeStatus = '全部'"
+        >
+          ×
+        </button>
+      </span>
+      <div class="sep" />
+      <div class="seg">
+        <button :class="{ on: viewMode === 'board' }" @click="viewMode = 'board'">
+          <AppIcon name="board" />看板视图
+        </button>
+        <button :class="{ on: viewMode === 'table' }" @click="viewMode = 'table'">
+          <AppIcon name="list" />列表视图
+        </button>
+      </div>
+    </div>
+
+    <div v-if="viewMode === 'board'" class="kanban">
+      <div
+        v-for="column in columns"
+        :key="column.key"
+        class="kcol"
+        :data-status="column.key"
+        @dragover.prevent
+        @drop="onDrop(column.key)"
+      >
+        <div class="kcol-head">
+          <b><i :style="{ background: column.color }" />{{ column.key }}</b>
+          <span class="kcol-count">{{ tasksOf(column.key).length }}</span>
+        </div>
+        <div
+          v-for="task in tasksOf(column.key)"
+          :key="task.id"
+          class="task-card"
+          draggable="true"
+          @dragstart="onDragStart(task)"
+        >
+          <div class="tc-top">
+            <span class="tag" :class="tagTone(task.taskType)">{{ task.taskType }}</span>
+            <span
+              v-if="task.level === '紧急' || task.level === '重要'"
+              class="tag orange"
+            >
+              {{ task.level }}
+            </span>
+          </div>
+          <div class="tc-name">{{ task.taskName }}</div>
+          <div class="tc-info">
+            <span><AppIcon name="dog" />{{ task.deviceCode }} · {{ task.executeMode }}</span>
+            <span><AppIcon name="pin" />{{ task.parkName }} / {{ task.zoneName }}</span>
+            <span><AppIcon name="clock" />{{ task.planStart }} - {{ task.planEnd }}</span>
+            <span>
+              <AppIcon name="route" />路线
+              {{ task.routeCode ?? "—" }} · {{ task.routeId ? "已编排" : "临时路径" }}
+            </span>
+          </div>
+          <div class="tc-prog">
+            <ProgressBar
+              :value="task.progress"
+              :tone="task.taskStatus === '异常' ? 'danger' : task.taskStatus === '已完成' ? 'ok' : ''"
+            />
+          </div>
+          <div class="tc-foot">
+            <span class="time mono">{{ task.taskCode }}</span>
+            <div class="actions">
+              <button
+                v-if="task.taskStatus === '待执行'"
+                class="btn sm ghost icon"
+                title="立即执行"
+                @click="startTask(task)"
+              >
+                <AppIcon name="play" />
+              </button>
+              <button
+                v-if="task.taskStatus === '执行中'"
+                class="btn sm ghost icon"
+                title="暂停"
+                @click="pauseTask(task)"
+              >
+                <AppIcon name="pause" />
+              </button>
+              <button class="btn sm ghost icon" title="详情" @click="openDetail(task)">
+                <AppIcon name="eye" />
+              </button>
+              <button
+                class="btn sm ghost icon"
+                title="删除"
+                style="color: #dc2626"
+                @click="removeTask(task)"
+              >
+                <AppIcon name="trash" />
+              </button>
+            </div>
+          </div>
+        </div>
+        <div v-if="!tasksOf(column.key).length" class="empty-box" style="padding: 24px 0">
+          暂无任务
+        </div>
+      </div>
+    </div>
+
+    <div v-else class="card">
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>任务编号</th>
+              <th>任务名称</th>
+              <th>类型</th>
+              <th>执行设备</th>
+              <th>关联路线</th>
+              <th>园区 / 区域</th>
+              <th>计划时间</th>
+              <th>状态</th>
+              <th>进度</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="task in filteredTasks" :key="task.id">
+              <td class="mono cell-main">{{ task.taskCode }}</td>
+              <td>
+                <div class="cell-main">{{ task.taskName }}</div>
+                <div class="cell-sub">{{ task.executeMode }}</div>
+              </td>
+              <td><span class="tag" :class="tagTone(task.taskType)">{{ task.taskType }}</span></td>
+              <td class="mono">{{ task.deviceCode }}</td>
+              <td>
+                <div class="cell-main mono">{{ task.routeCode ?? "—" }}</div>
+                <div class="cell-sub">{{ task.routeName ?? "临时路径" }}</div>
+              </td>
+              <td>
+                {{ task.parkName }}
+                <div class="cell-sub">{{ task.zoneName }}</div>
+              </td>
+              <td class="mono muted">{{ task.planStart }} - {{ task.planEnd }}</td>
+              <td>
+                <StatusBadge :status="task.taskStatus" @click="clickStatusBadge(task.taskStatus)" />
+              </td>
+              <td style="min-width: 120px">
+                <ProgressBar
+                  :value="task.progress"
+                  :tone="task.taskStatus === '异常' ? 'danger' : ''"
+                />
+              </td>
+              <td>
+                <div class="actions">
+                  <button class="btn sm ghost icon" @click="openDetail(task)">
+                    <AppIcon name="eye" />
+                  </button>
+                  <button
+                    class="btn sm ghost icon"
+                    style="color: #dc2626"
+                    @click="removeTask(task)"
+                  >
+                    <AppIcon name="trash" />
+                  </button>
+                </div>
+              </td>
+            </tr>
+            <tr v-if="!filteredTasks.length">
+              <td colspan="10"><div class="empty-box">没有符合条件的任务</div></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="tfoot"><span>共 {{ filteredTasks.length }} 项任务</span></div>
+    </div>
+
+    <el-dialog v-model="taskDialog" title="新建巡检任务" width="680px">
+      <div class="form-grid">
+        <div class="field" style="grid-column: 1 / -1">
+          <label>任务名称 <em>*</em></label>
+          <input v-model="taskForm.taskName" class="input" placeholder="例如：A区上午例行巡检" />
+        </div>
+        <div class="field">
+          <label>任务类型</label>
+          <select v-model="taskForm.taskType" class="select">
+            <option v-for="type in TASK_TYPES" :key="type">{{ type }}</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>执行模式</label>
+          <select v-model="taskForm.executeMode" class="select">
+            <option v-for="mode in EXECUTE_MODES" :key="mode">{{ mode }}</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>执行园区</label>
+          <select v-model.number="taskForm.parkId" class="select">
+            <option v-for="park in parks" :key="park.id" :value="park.id">{{ park.parkName }}</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>巡检区域</label>
+          <select v-model.number="taskForm.zoneId" class="select">
+            <option v-for="zone in zonesOfPark" :key="zone.id" :value="zone.id">
+              {{ zone.zoneName }}
+            </option>
+          </select>
+        </div>
+        <div class="field">
+          <label>执行设备</label>
+          <select v-model.number="taskForm.deviceId" class="select">
+            <option v-for="device in devices" :key="device.id" :value="device.id">
+              {{ device.deviceId }} · {{ device.model }}
+            </option>
+          </select>
+        </div>
+        <div class="field">
+          <label>巡检路线</label>
+          <select v-model="taskForm.routeId" class="select">
+            <option :value="null">— 临时路径</option>
+            <option v-for="route in routes" :key="route.id" :value="route.id">
+              {{ route.routeCode }} · {{ route.routeName }}
+            </option>
+          </select>
+        </div>
+        <div class="field">
+          <label>计划开始时间</label>
+          <input v-model="taskForm.planStart" class="input" placeholder="09:30" />
+        </div>
+        <div class="field">
+          <label>计划结束时间</label>
+          <input v-model="taskForm.planEnd" class="input" placeholder="10:10" />
+        </div>
+        <div class="field">
+          <label>优先级</label>
+          <select v-model="taskForm.level" class="select">
+            <option v-for="level in TASK_LEVELS" :key="level">{{ level }}</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>下发策略</label>
+          <select v-model="taskForm.dispatchPolicy" class="select">
+            <option v-for="policy in DISPATCH_POLICIES" :key="policy">{{ policy }}</option>
+          </select>
+        </div>
+        <div class="field" style="grid-column: 1 / -1">
+          <label>任务说明</label>
+          <textarea v-model="taskForm.description" class="textarea" rows="3" placeholder="选填" />
+        </div>
+      </div>
+      <template #footer>
+        <button class="btn" @click="taskDialog = false">取消</button>
+        <button class="btn primary" @click="saveTask">
+          <AppIcon name="check" />创建任务
+        </button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="detailVisible" title="任务详情" width="720px">
+      <template v-if="detailTask">
+        <div class="kv"><span>任务名称</span><b>{{ detailTask.taskName }}</b></div>
+        <div class="kv">
+          <span>任务类型 / 模式</span><b>{{ detailTask.taskType }} / {{ detailTask.executeMode }}</b>
+        </div>
+        <div class="kv"><span>执行设备</span><b class="mono">{{ detailTask.deviceCode }}</b></div>
+        <div class="kv">
+          <span>园区 / 区域</span><b>{{ detailTask.parkName }} / {{ detailTask.zoneName }}</b>
+        </div>
+        <div class="kv">
+          <span>计划时间</span><b class="mono">{{ detailTask.planStart }} - {{ detailTask.planEnd }}</b>
+        </div>
+        <div class="kv">
+          <span>关联路线</span>
+          <b>{{ detailRoute ? `${detailRoute.routeCode} · ${detailRoute.routeName}` : "未关联（临时路径）" }}</b>
+        </div>
+        <div class="kv"><span>下发策略</span><b>{{ detailTask.dispatchPolicy }}</b></div>
+        <div class="kv"><span>执行状态</span><b><StatusBadge :status="detailTask.taskStatus" /></b></div>
+        <div class="kv"><span>完成进度</span><b>{{ detailTask.progress }}%</b></div>
+        <div class="bar" style="margin-top: 12px">
+          <i :style="{ width: `${detailTask.progress}%` }" />
+        </div>
+
+        <div class="rt-sec-title" style="margin-top: 18px">
+          <span>下发后的航点执行序列</span><AppIcon name="route" />
+        </div>
+        <div v-if="detailSequence.length" class="act-kv" style="font-size: 11.5px; gap: 7px">
+          <div v-for="step in detailSequence" :key="step.name">
+            <b>{{ step.name }}</b> · {{ step.actions }}
+            <span v-if="step.leg" style="color: #0284c7"> → 行进：{{ step.leg }}</span>
+          </div>
+        </div>
+        <div v-else class="empty-box" style="padding: 20px 0">
+          该任务使用临时路径，未绑定路线模板
+        </div>
+
+        <div class="actions" style="margin-top: 16px">
+          <button
+            v-if="detailRoute"
+            class="btn sm"
+            @click="openRoutePlanner"
+          >
+            <AppIcon name="route" />打开路线编排
+          </button>
+          <button
+            v-if="detailTask.taskStatus !== '执行中'"
+            class="btn primary sm"
+            @click="sendFromDetail('start')"
+          >
+            <AppIcon name="play" />开始执行
+          </button>
+          <button
+            v-if="detailTask.taskStatus === '执行中'"
+            class="btn sm"
+            @click="sendFromDetail('pause')"
+          >
+            <AppIcon name="pause" />暂停任务
+          </button>
+        </div>
+      </template>
+    </el-dialog>
+  </div>
+</template>
