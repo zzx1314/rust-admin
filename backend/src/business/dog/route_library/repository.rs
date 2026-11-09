@@ -1,3 +1,5 @@
+use crate::business::dog::park::entity::Column as ParkColumn;
+use crate::business::dog::park::entity::Entity as ParkEntity;
 use crate::business::dog::route_library::domain::{
     CreateRouteRequest, RoutePageQuery, UpdateRouteRequest,
 };
@@ -5,8 +7,6 @@ use crate::business::dog::route_library::entity::ActiveModel as RouteActiveModel
 use crate::business::dog::route_library::entity::Column as RouteColumn;
 use crate::business::dog::route_library::entity::Entity as RouteEntity;
 use crate::business::dog::route_library::entity::Model as DogRoute;
-use crate::business::dog::park::entity::Column as ParkColumn;
-use crate::business::dog::park::entity::Entity as ParkEntity;
 use crate::common::base::{BaseRepository, order_desc};
 use crate::common::util::parse_beijing_datetime;
 use chrono::{DateTime, Utc};
@@ -39,9 +39,11 @@ impl SeaOrmDogRouteLibraryRepository {
         &self,
         req: &CreateRouteRequest,
         id: i64,
+        map_version: Option<String>,
+        map_frame: Option<String>,
     ) -> Result<DogRoute, sea_orm::DbErr> {
         let now = chrono::Utc::now();
-        let active_model = req.to_active_model(id, now);
+        let active_model = req.to_active_model(id, now, map_version, map_frame);
         RouteEntity::insert(active_model).exec(&*self.conn).await?;
         RouteEntity::find_by_id(id)
             .one(&*self.conn)
@@ -130,6 +132,8 @@ impl SeaOrmDogRouteLibraryRepository {
         &self,
         id: i64,
         req: &UpdateRouteRequest,
+        map_version: Option<String>,
+        map_frame: Option<String>,
     ) -> Result<Option<DogRoute>, sea_orm::DbErr> {
         let entity = RouteEntity::find()
             .filter(RouteColumn::Id.eq(id))
@@ -157,6 +161,15 @@ impl SeaOrmDogRouteLibraryRepository {
         }
         if let Some(park_id) = req.park_id {
             active_model.park_id = ActiveValue::set(Some(park_id));
+        }
+        if let Some(map_id) = req.map_id {
+            active_model.map_id = ActiveValue::set(Some(map_id));
+        }
+        if map_version.is_some() {
+            active_model.map_version = ActiveValue::set(map_version);
+        }
+        if map_frame.is_some() {
+            active_model.map_frame = ActiveValue::set(map_frame);
         }
         if let Some(model_id) = req.model_id {
             active_model.model_id = ActiveValue::set(model_id);

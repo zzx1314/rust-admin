@@ -16,7 +16,7 @@
 | 通信端到端测试 | `backend/tests/business/dog_gateway_tests.rs`、`dog_data_scope_tests.rs`（数据权限） |
 | 后端路由 | `backend/src/api/routes.rs`（每个子域一个 `dog_*_routes`，统一挂 `require_auth`） |
 | 服务装配 | `backend/src/app.rs` → `App::build_state_with_token_store` |
-| 数据库迁移 | `backend/migrations/dog/7_create_dog_tables.sql`（建表）、`10_add_park_map_tables.sql`、`11_add_task_user_scope.sql`、`13_create_user_device_bindings.sql`、`backend/migrations/p_sys/9_add_dog_menus.sql` / `12_add_park_map_menus.sql` / `14_add_device_binding_menu.sql`（菜单）、`15_flatten_dog_park_menus.sql`（把机器狗 / 园区菜单提升为一级菜单）、`16_remove_device_binding_menu.sql`（下线「设备绑定」菜单，改在设备列表中绑定）、`17_remove_workflow_menu.sql`（下线「工作流」菜单）、`18_reorder_map_menu.sql`（地图管理排在系统管理之下、设备列表之上）、`19_add_map_file_fields.sql`（地图改为上传 .zip 包，新增文件字段且 `park_id` 可空）、`backend/migrations/dog/21_add_route_park.sql`（路线新增「所属园区」`park_id` 字段） |
+| 数据库迁移 | `backend/migrations/dog/7_create_dog_tables.sql`（建表）、`10_add_park_map_tables.sql`、`11_add_task_user_scope.sql`、`13_create_user_device_bindings.sql`、`backend/migrations/p_sys/9_add_dog_menus.sql` / `12_add_park_map_menus.sql` / `14_add_device_binding_menu.sql`（菜单）、`15_flatten_dog_park_menus.sql`（把机器狗 / 园区菜单提升为一级菜单）、`16_remove_device_binding_menu.sql`（下线「设备绑定」菜单，改在设备列表中绑定）、`17_remove_workflow_menu.sql`（下线「工作流」菜单）、`18_reorder_map_menu.sql`（地图管理排在系统管理之下、设备列表之上）、`19_add_map_file_fields.sql`（地图改为上传 .zip 包，新增文件字段且 `park_id` 可空）、`backend/migrations/dog/21_add_route_park.sql`（路线新增「所属园区」`park_id` 字段）、`22_add_map_baseline_*.sql`（地图基线：`dog_map` 版本/坐标系字段、`dog_park.map_id` 当前基线指针、`dog_route_library.map_id/map_version/map_frame` 冻结引用） |
 | 前端页面 | `frontend/src/views/dog/{park,map,device,task,route,model,media,command,config,services}/` |
 | 前端请求封装 | `frontend/src/api/dog*.ts` |
 | 首页仪表盘 | `frontend/src/views/welcome/index.vue` + `frontend/src/api/dogStatistics.ts` |
@@ -32,10 +32,10 @@
 | --- | --- | --- |
 | `dog_device` | 设备 | `device_id`、`device_type`、`status`(默认 `offline`)、`device_ip`、`model`、`speed`、`height`、`battery`、`course`、`location`、`comm_time` |
 | `dog_user_device` | 用户设备绑定 | `user_id`、`device_id`(指向 `dog_device.id`)，唯一索引 `(user_id, device_id)` |
-| `dog_park` | 园区 | `park_name`、`park_description`、`park_address`、`user_id`(创建者) |
-| `dog_map` | 地图 | `map_name`、`map_type`、`file_name`、`file_path`、`file_format`、`file_size`、`remarks`、`park_id`(所属园区；新增必填，历史数据可为空)、`user_id`(创建者)；地图以 `.zip` 包上传，文件落盘到 `<upload_dir>/maps/` |
+| `dog_park` | 园区 | `park_name`、`park_description`、`park_address`、`user_id`(创建者)、`map_id`(当前生效地图基线)、`map_status`(未绑定/待标定/已标定/部分标定) |
+| `dog_map` | 地图基线版本 | `map_name`、`map_type`、`file_name`、`file_path`、`file_format`、`file_size`、`remarks`、`park_id`(所属园区；新增必填，历史数据可为空)、`user_id`(创建者)、`map_version`、`frame_id`、`crs`、`map_origin`、`resolution`、`floors`、`road_count`、`nogo_count`、`map_status`(草稿/部分标定/已发布/已归档)、`map_hash`(上传时计算的 SHA-256)、`map_width`/`map_height`(栅格像素尺寸)、`publish_time`；地图以 `.zip` 包上传，文件落盘到 `<upload_dir>/maps/`。上传时后端解析 PGM/YAML 并回写 resolution/origin/尺寸/哈希，表单值与包内容冲突会被拒绝。发布后版本不可变，同园区旧版本自动归档 |
 | `dog_task` | 任务 | `task_name`、`task_description`、`task_status`(默认 `pending`)、`workflow_id`、`workflow_uuid`、`device_id`、`route_id`、`user_id`(创建者) |
-| `dog_route_library` | 路线 | `route_name`、`route_type`、`route_status`、`route_description`、`park_id`(所属园区，可选)、`model_id`(NOT NULL)、`route_data` |
+| `dog_route_library` | 路线 | `route_name`、`route_type`、`route_status`、`route_description`、`park_id`(所属园区，可选)、`map_id`(创建时冻结的地图版本)、`map_version`、`map_frame`、`model_id`(NOT NULL)、`route_data` |
 | `dog_model` | 模型 | `model_name`、`model_type`、`file_name`、`file_path`、`file_format`、`file_size`、`remarks` |
 | `dog_media` | 媒体 | `media_name`、`media_type`、`media_path`、`media_size`、`remarks` |
 | `dog_command` | 指令 | `command_name`、`command_type`、`command_params`、`device_id`、`status`(默认 `pending`)、`return_value`、`task_id` |
@@ -59,6 +59,10 @@ GET    /api/<module>/{id}           详情
 PUT    /api/<module>/{id}           修改
 DELETE /api/<module>/{id}           软删除
 POST   /api/dogMap/upload           上传 .zip 地图包（multipart：file + mapInfo）
+GET    /api/dogMap/byPark/{parkId}  园区可用地图基线（默认仅已发布/部分标定）
+POST   /api/dogMap/{id}/publish     发布地图基线（归档同园区旧版本并切换园区指针）
+POST   /api/dogMap/{id}/newVersion  派生并发布下一个不可变版本
+GET    /api/dogMap/{id}/refs        引用该版本的路线 / 任务清单（影响分析）
 PUT    /api/dogDevice/status/{id}   仅回写设备状态
 PUT    /api/dogTask/status/{id}     仅回写任务状态
 PUT    /api/dogCommand/status/{id}  仅回写指令状态与返回值
@@ -77,7 +81,7 @@ GET    /api/dogUserDevice/byUser/{userId} 某用户的全部绑定
 # 设备网关（设备 token 鉴权）
 GET    /api/dogGateway/auth/{deviceId}        下发设备 token（10 分钟有效）
 POST   /api/dogGateway/register               注册/刷新设备（Authorization: <token>）
-WS     /api/notice/{deviceId}/{token}         设备长连接（心跳 / 任务 / 结果 / 文件）
+WS     /api/notice/{deviceId}/{token}         设备长连接（心跳 / 任务 / 结果 / 文件）；引用路线的任务在 params.map 携带冻结的 mapId/mapVersion/mapHash/frameId/分辨率/原点/尺寸，设备执行前校验 mapHash
 
 # 设备网关（用户 JWT 鉴权）
 POST   /api/dogGateway/dispatch               手动向设备推送任意 JSON

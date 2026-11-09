@@ -28,6 +28,13 @@ const {
   queryFields,
   moreQueryFields,
   mapOptions,
+  parkOptions,
+  syncMapOptions,
+  baselineVisible,
+  baselineLoading,
+  baselineInfo,
+  baselineRefs,
+  openBaseline,
   onSearch,
   handleUpdate,
   handleDelete,
@@ -107,6 +114,18 @@ const {
                           type="primary"
                           :size="s"
                           :icon="useRenderIcon(DropperLine)"
+                          @click="openBaseline(r)"
+                        >
+                          地图基线
+                        </el-button>
+                      </el-dropdown-item>
+                      <el-dropdown-item>
+                        <el-button
+                          :class="buttonClass"
+                          link
+                          type="primary"
+                          :size="s"
+                          :icon="useRenderIcon(DropperLine)"
                           @click="designRoute(r)"
                         >
                           设计路线
@@ -164,10 +183,26 @@ const {
             placeholder="请输入路线描述"
           />
         </el-form-item>
-        <el-form-item label="关联地图" prop="modelId">
+        <el-form-item label="所属园区" prop="parkId">
           <el-select
-            v-model="addForm.modelId"
-            placeholder="请选择地图"
+            v-model="addForm.parkId"
+            placeholder="请选择所属园区"
+            clearable
+            style="width: 100%"
+            @change="syncMapOptions"
+          >
+            <el-option
+              v-for="opt in parkOptions"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="地图基线" prop="mapId">
+          <el-select
+            v-model="addForm.mapId"
+            placeholder="请先选择园区，再选择已发布的地图基线"
             clearable
             style="width: 100%"
           >
@@ -178,6 +213,9 @@ const {
               :value="opt.value"
             />
           </el-select>
+          <div class="mt-1 text-xs text-gray-400">
+            创建后冻结版本引用；地图发布新版本不会自动改写本路线坐标。
+          </div>
         </el-form-item>
         <el-form-item label="路线数据" prop="routeData">
           <el-input
@@ -194,6 +232,65 @@ const {
           确定
         </el-button>
       </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="baselineVisible"
+      title="地图基线（路线冻结引用）"
+      width="760px"
+    >
+      <div v-loading="baselineLoading">
+        <el-descriptions :column="2" border>
+          <el-descriptions-item label="地图名称">
+            {{ baselineInfo.mapName || "-" }}
+          </el-descriptions-item>
+          <el-descriptions-item label="版本 / 状态">
+            {{ baselineInfo.mapVersion || "-" }} ·
+            {{ baselineInfo.mapStatus || "-" }}
+          </el-descriptions-item>
+          <el-descriptions-item label="frame_id">
+            {{ baselineInfo.frameId || "-" }}
+          </el-descriptions-item>
+          <el-descriptions-item label="CRS">
+            {{ baselineInfo.crs || "-" }}
+          </el-descriptions-item>
+          <el-descriptions-item label="原点锚点">
+            {{ baselineInfo.mapOrigin || "-" }}
+          </el-descriptions-item>
+          <el-descriptions-item label="分辨率">
+            {{ baselineInfo.resolution || "-" }}
+          </el-descriptions-item>
+          <el-descriptions-item label="覆盖楼层">
+            {{ baselineInfo.floors || "-" }}
+          </el-descriptions-item>
+          <el-descriptions-item label="栅格尺寸">
+            <span v-if="baselineInfo.mapWidth && baselineInfo.mapHeight">
+              {{ baselineInfo.mapWidth }}×{{ baselineInfo.mapHeight }}
+            </span>
+            <span v-else>-</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="发布时间">
+            {{ baselineInfo.publishTime || "-" }}
+          </el-descriptions-item>
+          <el-descriptions-item label="map_hash" :span="2">
+            <span class="font-mono text-xs">
+              {{ baselineInfo.mapHash || "缺失（禁止下发）" }}
+            </span>
+          </el-descriptions-item>
+          <el-descriptions-item label="引用路线">
+            {{ baselineRefs.routes?.length || 0 }} 条
+          </el-descriptions-item>
+          <el-descriptions-item label="关联任务">
+            {{ baselineRefs.taskCount || 0 }} 个
+          </el-descriptions-item>
+        </el-descriptions>
+        <el-alert
+          class="mt-3"
+          type="info"
+          :closable="false"
+          title="版本不可变：地图发布新版本不会自动改写本路线坐标，需要人工确认迁移。"
+        />
+      </div>
     </el-dialog>
   </div>
 </template>

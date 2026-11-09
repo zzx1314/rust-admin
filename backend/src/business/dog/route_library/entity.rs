@@ -19,6 +19,14 @@ pub struct Model {
     pub park_id: Option<i64>,
     #[sea_orm(column_name = "model_id", column_type = "Integer")]
     pub model_id: i64,
+    /// 创建路线时冻结的地图基线版本（`dog_map.id`）。
+    #[sea_orm(column_name = "map_id", column_type = "Integer", nullable)]
+    pub map_id: Option<i64>,
+    /// 冻结时的版本快照，地图发布新版不会自动改写。
+    #[sea_orm(column_name = "map_version", column_type = "Text", nullable)]
+    pub map_version: Option<String>,
+    #[sea_orm(column_name = "map_frame", column_type = "Text", nullable)]
+    pub map_frame: Option<String>,
     #[sea_orm(column_name = "route_data", column_type = "Text", nullable)]
     pub route_data: Option<String>,
     #[sea_orm(column_name = "create_time", column_type = "Timestamp")]

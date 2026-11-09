@@ -4,7 +4,9 @@ use crate::business::dog::device::entity::Model as Device;
 use crate::business::dog::route_library::entity::Column as RouteColumn;
 use crate::business::dog::route_library::entity::Entity as RouteEntity;
 use crate::business::dog::route_library::entity::Model as RouteLibrary;
-use crate::business::dog::task::domain::{CreateTaskRequest, TaskPageQuery, TaskVO, UpdateTaskRequest};
+use crate::business::dog::task::domain::{
+    CreateTaskRequest, TaskPageQuery, TaskVO, UpdateTaskRequest,
+};
 use crate::business::dog::task::entity::ActiveModel as TaskActiveModel;
 use crate::business::dog::task::entity::Column as TaskColumn;
 use crate::business::dog::task::entity::Entity as TaskEntity;
@@ -150,15 +152,15 @@ impl SeaOrmDogTaskRepository {
         let mut records = Vec::with_capacity(raw_records.len());
         for task in raw_records {
             let mut vo = TaskVO::from(task.clone());
-            if let Some(did) = task.device_id {
-                if let Ok(Some(device)) = self.find_device_by_id(did).await {
-                    vo.device_id_string = Some(device.device_id.clone());
-                }
+            if let Some(did) = task.device_id
+                && let Ok(Some(device)) = self.find_device_by_id(did).await
+            {
+                vo.device_id_string = Some(device.device_id.clone());
             }
-            if let Some(rid) = task.route_id {
-                if let Ok(Some(route)) = self.find_route_by_id(rid).await {
-                    vo.route_name = Some(route.route_name.clone());
-                }
+            if let Some(rid) = task.route_id
+                && let Ok(Some(route)) = self.find_route_by_id(rid).await
+            {
+                vo.route_name = Some(route.route_name.clone());
             }
             records.push(vo);
         }

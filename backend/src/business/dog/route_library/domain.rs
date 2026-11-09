@@ -15,6 +15,8 @@ pub struct CreateRouteRequest {
     pub route_description: Option<String>,
     /// 所属园区（可选，与 `dog_park` 关联）。
     pub park_id: Option<i64>,
+    /// 地图基线版本；创建后冻结，不随园区当前基线变化。
+    pub map_id: Option<i64>,
     pub model_id: i64,
     pub route_data: Option<String>,
 }
@@ -27,6 +29,7 @@ pub struct UpdateRouteRequest {
     pub route_status: Option<String>,
     pub route_description: Option<String>,
     pub park_id: Option<i64>,
+    pub map_id: Option<i64>,
     pub model_id: Option<i64>,
     pub route_data: Option<String>,
 }
@@ -57,6 +60,10 @@ pub struct RouteVO {
     pub park_id: Option<i64>,
     /// 所属园区名称，按 `park_id` 关联 `dog_park` 填充。
     pub park_name: Option<String>,
+    pub map_id: Option<i64>,
+    /// 冻结的地图版本快照。
+    pub map_version: Option<String>,
+    pub map_frame: Option<String>,
     pub model_id: i64,
     pub route_data: Option<String>,
     pub create_time: String,
@@ -73,6 +80,9 @@ impl From<DogRouteLibrary> for RouteVO {
             route_description: r.route_description,
             park_id: r.park_id,
             park_name: None,
+            map_id: r.map_id,
+            map_version: r.map_version,
+            map_frame: r.map_frame,
             model_id: r.model_id,
             route_data: r.route_data,
             create_time: format_datetime(r.create_time),
@@ -82,7 +92,13 @@ impl From<DogRouteLibrary> for RouteVO {
 }
 
 impl CreateRouteRequest {
-    pub fn to_active_model(&self, id: i64, now: DateTime<Utc>) -> RouteActiveModel {
+    pub fn to_active_model(
+        &self,
+        id: i64,
+        now: DateTime<Utc>,
+        map_version: Option<String>,
+        map_frame: Option<String>,
+    ) -> RouteActiveModel {
         RouteActiveModel {
             id: ActiveValue::set(id),
             route_name: ActiveValue::set(self.route_name.clone()),
@@ -90,6 +106,9 @@ impl CreateRouteRequest {
             route_status: ActiveValue::set(self.route_status.clone()),
             route_description: ActiveValue::set(self.route_description.clone()),
             park_id: ActiveValue::set(self.park_id),
+            map_id: ActiveValue::set(self.map_id),
+            map_version: ActiveValue::set(map_version),
+            map_frame: ActiveValue::set(map_frame),
             model_id: ActiveValue::set(self.model_id),
             route_data: ActiveValue::set(self.route_data.clone()),
             create_time: ActiveValue::set(now),

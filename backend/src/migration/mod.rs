@@ -368,6 +368,8 @@ mod tests {
                 "add_map_file_fields",
                 "reorder_menus",
                 "add_route_park",
+                "add_map_baseline",
+                "add_map_dimensions",
             ]
         );
         assert_eq!(migrations[0].name(), "p_sys_tables_from_file");
@@ -416,6 +418,27 @@ mod tests {
             "SELECT 1 FROM pragma_table_info('dog_route_library') WHERE name = 'park_id'",
         );
         assert!(connection.query_one(route_park_id).await.unwrap().is_some());
+
+        for (table, column) in [
+            ("dog_map", "map_status"),
+            ("dog_map", "map_width"),
+            ("dog_park", "map_id"),
+            ("dog_route_library", "map_version"),
+        ] {
+            let statement = Statement::from_string(
+                DbBackend::Sqlite,
+                format!(
+                    "SELECT 1 FROM pragma_table_info('{}') WHERE name = '{}'",
+                    table, column
+                ),
+            );
+            assert!(
+                connection.query_one(statement).await.unwrap().is_some(),
+                "{}.{} must be added by the map baseline migration",
+                table,
+                column
+            );
+        }
 
         // The dog / park pages must be first-level menus (no 1200 / 1300
         // directories any more), linked to the admin role, and the dangling
@@ -525,7 +548,13 @@ mod tests {
             DbBackend::Sqlite,
             "SELECT 1 FROM p_sys_menu WHERE id = 1301 AND is_deleted = 0 AND sort = 2",
         );
-        assert!(connection.query_one(park_menu_sort).await.unwrap().is_some());
+        assert!(
+            connection
+                .query_one(park_menu_sort)
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         let map_menu_sort = Statement::from_string(
             DbBackend::Sqlite,
@@ -550,13 +579,25 @@ mod tests {
             DbBackend::Sqlite,
             "SELECT 1 FROM p_sys_menu WHERE id = 1203 AND is_deleted = 0 AND sort = 5",
         );
-        assert!(connection.query_one(route_menu_sort).await.unwrap().is_some());
+        assert!(
+            connection
+                .query_one(route_menu_sort)
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         let task_menu_sort = Statement::from_string(
             DbBackend::Sqlite,
             "SELECT 1 FROM p_sys_menu WHERE id = 1202 AND is_deleted = 0 AND sort = 6",
         );
-        assert!(connection.query_one(task_menu_sort).await.unwrap().is_some());
+        assert!(
+            connection
+                .query_one(task_menu_sort)
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         // The 工作流 page is retired as well (backend endpoints remain).
         let workflow_menu = Statement::from_string(

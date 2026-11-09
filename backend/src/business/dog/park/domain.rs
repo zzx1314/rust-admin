@@ -43,6 +43,10 @@ pub struct ParkVO {
     pub park_description: Option<String>,
     pub park_address: Option<String>,
     pub user_id: i64,
+    /// 当前生效的地图基线版本（`dog_map.id`）。
+    pub map_id: Option<i64>,
+    /// 标定状态：未绑定 / 待标定 / 已标定 / 部分标定。
+    pub map_status: String,
     /// 所属用户的用户名，列表接口按 `user_id` 关联 `p_sys_user` 填充。
     pub user_name: Option<String>,
     pub create_time: String,
@@ -57,6 +61,8 @@ impl From<DogPark> for ParkVO {
             park_description: p.park_description,
             park_address: p.park_address,
             user_id: p.user_id,
+            map_id: p.map_id,
+            map_status: p.map_status,
             user_name: None,
             create_time: format_datetime(p.create_time),
             update_time: p.update_time.map(format_datetime),
@@ -72,6 +78,8 @@ impl CreateParkRequest {
             park_description: ActiveValue::set(self.park_description.clone()),
             park_address: ActiveValue::set(self.park_address.clone()),
             user_id: ActiveValue::set(user_id),
+            map_id: ActiveValue::set(None),
+            map_status: ActiveValue::set("未绑定".to_string()),
             create_time: ActiveValue::set(now),
             update_time: ActiveValue::set(Some(now)),
             is_deleted: ActiveValue::set(0),

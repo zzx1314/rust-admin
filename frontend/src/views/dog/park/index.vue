@@ -36,7 +36,12 @@ const {
   handleSubmitError,
   handleSubmit,
   cancel,
-  openDia
+  openDia,
+  baselineDialogVisible,
+  baselineTitle,
+  baselineList,
+  baselineLoading,
+  openBaselines
 } = useDogPark();
 </script>
 <template>
@@ -49,6 +54,18 @@ const {
       @search="onSearch"
       @reset="cancel"
     />
+    <el-alert
+      class="mb-4"
+      type="info"
+      :closable="false"
+      show-icon
+      title="地图基线约束"
+    >
+      <template #default>
+        园区建档时登记坐标系，地图每次重标定生成不可变版本；路线创建时冻结版本引用。
+        未绑定已发布基线的园区仅作资产台账，<b>禁止编排巡检路线</b>。
+      </template>
+    </el-alert>
     <PureTableBar title="园区列表" :columns="columns" @refresh="onSearch">
       <template #buttons>
         <el-button
@@ -86,7 +103,18 @@ const {
               :size="size"
               @edit="handleUpdate(row, addFormRef)"
               @delete="handleDelete(row)"
-            />
+            >
+              <template #extra="{ size: s }">
+                <el-button
+                  class="reset-margin"
+                  link
+                  type="primary"
+                  :size="s"
+                  @click="openBaselines(row)"
+                  >基线</el-button
+                >
+              </template>
+            </DogTableActions>
           </template>
         </pure-table>
       </template>
@@ -101,5 +129,68 @@ const {
       @confirm-error="handleSubmitError"
       @confirm="handleSubmit"
     />
+
+    <el-dialog
+      v-model="baselineDialogVisible"
+      :title="baselineTitle"
+      width="820px"
+    >
+      <el-alert
+        type="info"
+        :closable="false"
+        title="地图版本不可变：发布新版不会自动改写历史路线坐标，旧版本保留至引用清零。"
+      />
+      <el-table
+        v-loading="baselineLoading"
+        :data="baselineList"
+        border
+        class="mt-3"
+      >
+        <el-table-column prop="mapName" label="地图名称" min-width="140" />
+        <el-table-column prop="mapVersion" label="版本" width="90" />
+        <el-table-column prop="mapStatus" label="状态" width="100">
+          <template #default="{ row }">
+            <el-tag
+              :type="
+                row.mapStatus === '已发布'
+                  ? 'success'
+                  : row.mapStatus === '部分标定'
+                    ? 'warning'
+                    : 'info'
+              "
+            >
+              {{ row.mapStatus }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="frameId" label="frame_id" min-width="130" />
+        <el-table-column prop="floors" label="楼层" width="120" />
+        <el-table-column prop="resolution" label="分辨率" width="110" />
+        <el-table-column label="栅格尺寸" width="120">
+          <template #default="{ row }">
+            <span v-if="row.mapWidth && row.mapHeight">
+              {{ row.mapWidth }}×{{ row.mapHeight }}
+            </span>
+            <span v-else>-</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="map_hash" min-width="160">
+          <template #default="{ row }">
+            <span
+              v-if="row.mapHash"
+              class="font-mono text-xs"
+              :title="row.mapHash"
+            >
+              {{ String(row.mapHash).slice(0, 12) }}…
+            </span>
+            <span v-else class="text-red-400">缺失</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="publishTime" label="发布时间" width="170" />
+        <template #empty
+          >该园区暂无地图版本，请先在地图管理中建图并发布基线</template
+        >
+      </el-table>
+    </el-dialog>
   </div>
 </template>

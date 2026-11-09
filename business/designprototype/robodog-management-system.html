@@ -491,6 +491,24 @@ button{cursor:pointer}
 .rt-val-item{display:flex;align-items:center;gap:8px;padding:9px 0;border-bottom:1px dashed var(--line-2);font-size:11.5px}
 .rt-val-item .ic{width:14px;height:14px}
 
+/* 地图基线 */
+.map-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:7px;font-size:10.5px;font-weight:600;border:1px solid transparent;white-space:nowrap}
+.map-chip .ic{width:12px;height:12px}
+.map-chip.ok{background:#e8f3fd;color:#0369a1;border-color:#cfe4f5}
+.map-chip.warn{background:#fff2e3;color:#c2410c;border-color:#fbd8b4}
+.map-chip.gray{background:#f1f5f9;color:#64748b;border-color:#e2e8f0}
+.map-chip.none{background:#fef2f2;color:#b91c1c;border-color:#fecaca}
+.map-policy-bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 16px;margin-bottom:16px;background:#eef7fd;border:1px solid #cfe4f5;border-radius:var(--r);font-size:12px;color:var(--text-2)}
+.map-policy-bar b{color:var(--text)}
+.map-policy-bar .mp-txt{flex:1;min-width:220px;line-height:1.6}
+.park-mapline{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0 2px;padding-top:10px;border-top:1px dashed var(--line)}
+.policy-flow{display:grid;gap:12px}
+.policy-step{display:flex;gap:12px;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+.policy-n{width:22px;height:22px;border-radius:50%;background:var(--brand-soft);color:var(--brand);display:grid;place-items:center;font-size:11px;font-weight:700;flex:none}
+.policy-step b{font-size:12.5px;color:var(--text)}
+.policy-step p{margin:5px 0 0;font-size:11.5px;line-height:1.65;color:var(--text-2)}
+.map-baseline .kv{margin-top:7px}
+
 /* 响应式 */
 @media(max-width:1400px){.route-layout{grid-template-columns:220px minmax(0,1fr) 300px}}
 @media(max-width:1180px){.route-layout{grid-template-columns:220px minmax(0,1fr)}.rt-prop-panel{grid-column:1/-1}.rt-metrics{grid-template-columns:repeat(3,1fr)}}
@@ -643,9 +661,17 @@ const S = {
   park:   { q:'', status:'全部' },
   alertFilter: '全部',
   parks: [
-    { id:'PK-001', name:'张江智造园区', desc:'总部一期 · 生产制造', area:'12.8', zones:6, devices:14, tasks:12, done:9, owner:'陈志远', status:'运行中', color:'#0284c7' },
-    { id:'PK-002', name:'临港物流基地', desc:'仓储物流 · 二期扩建', area:'18.5', zones:5, devices:11, tasks:8,  done:8, owner:'李文博', status:'运行中', color:'#0d9488' },
-    { id:'PK-003', name:'滨江研发中心', desc:'研发办公 · 试点区域', area:'6.2',  zones:3, devices:7,  tasks:6,  done:4, owner:'周雨欣', status:'部分维护', color:'#7c3aed' }
+    { id:'PK-001', name:'张江智造园区', desc:'总部一期 · 生产制造', area:'12.8', zones:6, devices:14, tasks:12, done:9, owner:'陈志远', status:'运行中', color:'#0284c7', mapId:'MAP-ZJ-01@v2.1', mapStatus:'已标定' },
+    { id:'PK-002', name:'临港物流基地', desc:'仓储物流 · 二期扩建', area:'18.5', zones:5, devices:11, tasks:8,  done:8, owner:'李文博', status:'运行中', color:'#0d9488', mapId:'MAP-LG-01@v1.4', mapStatus:'已标定' },
+    { id:'PK-003', name:'滨江研发中心', desc:'研发办公 · 试点区域', area:'6.2',  zones:3, devices:7,  tasks:6,  done:4, owner:'周雨欣', status:'部分维护', color:'#7c3aed', mapId:'MAP-BJ-01@v0.9', mapStatus:'部分标定' }
+  ],
+
+  /* ---- 地图基线：园区建档时绑定的坐标系定义，版本不可变 ---- */
+  maps: [
+    { id:'MAP-ZJ-01@v2.1', park:'张江智造园区', version:'v2.1', frame:'zj_map / 局部米制', crs:'GCJ-02 锚点 + 局部 ENU', origin:'31.2014, 121.6023', resolution:'0.05 m/px', floors:'1F / 2F / B1', roads:18, noGo:4, status:'已发布', published:'11-06 10:20', note:'一期全园区建图，标定充电座与配电房禁行区；当前生效基线' },
+    { id:'MAP-ZJ-01@v2.0', park:'张江智造园区', version:'v2.0', frame:'zj_map / 局部米制', crs:'GCJ-02 锚点 + 局部 ENU', origin:'31.2014, 121.6023', resolution:'0.05 m/px', floors:'1F / 2F', roads:16, noGo:3, status:'已归档', published:'09-18 14:02', note:'原点偏移修正前的版本，因仍有路线引用而保留，不可删除' },
+    { id:'MAP-LG-01@v1.4', park:'临港物流基地', version:'v1.4', frame:'lg_map / 局部米制', crs:'GCJ-02 锚点 + 局部 ENU', origin:'30.8912, 121.9234', resolution:'0.06 m/px', floors:'1F / B1', roads:12, noGo:2, status:'已发布', published:'10-28 16:45', note:'二期扩建后重标定，冷链仓低温区单独建模' },
+    { id:'MAP-BJ-01@v0.9', park:'滨江研发中心', version:'v0.9', frame:'bj_map / 局部米制', crs:'GCJ-02 锚点 + 局部 ENU', origin:'31.1788, 121.5102', resolution:'0.05 m/px', floors:'1F（B1 待建图）', roads:7, noGo:1, status:'部分标定', published:'11-08 14:30', note:'仅 G 区研发楼可用；H 区地下车库建图补采中，该区域禁止编排航点' }
   ],
   zones: [
     { park:'张江智造园区', name:'A区 · 生产车间', type:'生产区', devices:4, freq:'每 2 小时', status:'正常' },
@@ -701,7 +727,7 @@ const S = {
   /* ---- 巡检路线：Route → Waypoint / Leg → Action 四层模型 ---- */
   routeState: { id:'RT-001', mode:'add', tab:'point', selType:'point', selIdx:1, hist:[], sim:false, q:'', snap:true },
   routes: [
-    { id:'RT-001', name:'A区上午例行巡检', park:'张江智造园区', zone:'A区 · 生产车间', status:'已发布', version:'v2.3', model:'X30-Pro', loop:'闭环', speed:1.2, updated:'11-09 08:40', desc:'覆盖产线 6 个关键点位，含配电柜红外测温与仪表读数识别',
+    { id:'RT-001', name:'A区上午例行巡检', park:'张江智造园区', zone:'A区 · 生产车间', status:'已发布', version:'v2.3', model:'X30-Pro', loop:'闭环', speed:1.2, updated:'11-09 08:40', map:'MAP-ZJ-01@v2.1', desc:'覆盖产线 6 个关键点位，含配电柜红外测温与仪表读数识别',
       points:[
         { name:'起点 · 充电座 P-01', x:88,  y:342, dwell:0,  radius:0.5, must:true,  heading:0,  onFail:'跳过继续', actions:[{type:'设备自检', param:'全传感器自检', trigger:'到达即执行', threshold:'—', retry:1}] },
         { name:'配电柜测温点',      x:212, y:294, dwell:15, radius:0.3, must:true,  heading:90, onFail:'重试 2 次', actions:[{type:'红外测温', param:'云台 P90 · ROI 中心区域', trigger:'停留后执行', threshold:'> 65℃ 生成告警', retry:2},{type:'可见光拍照', param:'1080P / 广角 / 单帧', trigger:'到达即执行', threshold:'—', retry:1}] },
@@ -719,7 +745,7 @@ const S = {
       ],
       returnLeg:{ mode:'沿道路', speed:1.5, avoid:'标准', actions:[{type:'静默通行', param:'返航不采集'}] }
     },
-    { id:'RT-002', name:'C区周界围栏夜巡', park:'张江智造园区', zone:'C区 · 外围周界', status:'已发布', version:'v1.8', model:'Lite-S', loop:'闭环', speed:1.5, updated:'11-08 21:15', desc:'夜间周界闭环巡查，重点检测越界与异常热源',
+    { id:'RT-002', name:'C区周界围栏夜巡', park:'张江智造园区', zone:'C区 · 外围周界', status:'已发布', version:'v1.8', model:'Lite-S', loop:'闭环', speed:1.5, updated:'11-08 21:15', map:'MAP-ZJ-01@v2.0', desc:'夜间周界闭环巡查，重点检测越界与异常热源',
       points:[
         { name:'起点 · 西门岗', x:96,  y:356, dwell:0, radius:0.5, must:true, onFail:'跳过继续', heading:0, actions:[{type:'设备自检', param:'夜视 / 补光自检', trigger:'到达即执行', threshold:'—', retry:1}] },
         { name:'西北角围栏',    x:168, y:118, dwell:10, radius:0.4, must:true, onFail:'重试 2 次', heading:45, actions:[{type:'红外测温', param:'围栏全景热成像', trigger:'停留后执行', threshold:'> 50℃ 生成告警', retry:2}] },
@@ -735,7 +761,7 @@ const S = {
       ],
       returnLeg:{ mode:'沿道路', speed:1.6, avoid:'标准', actions:[{type:'静默通行', param:'返航不采集'}] }
     },
-    { id:'RT-003', name:'冷链仓温度专项', park:'临港物流基地', zone:'E区 · 冷链仓', status:'草稿', version:'v0.9', model:'X30-Pro', loop:'往返', speed:0.8, updated:'11-09 09:02', desc:'低温环境密集测温，需校验电池低温续航',
+    { id:'RT-003', name:'冷链仓温度专项', park:'临港物流基地', zone:'E区 · 冷链仓', status:'草稿', version:'v0.9', model:'X30-Pro', loop:'往返', speed:0.8, updated:'11-09 09:02', map:'MAP-LG-01@v1.4', desc:'低温环境密集测温，需校验电池低温续航',
       points:[
         { name:'仓门缓冲区', x:110, y:330, dwell:20, radius:0.3, must:true, onFail:'中止路线', heading:0, actions:[{type:'气体检测', param:'CO / O2 浓度', trigger:'停留后执行', threshold:'CO > 30ppm 告警', retry:2}] },
         { name:'A 列货架',   x:290, y:232, dwell:15, radius:0.3, must:true, onFail:'重试 1 次', heading:90, actions:[{type:'红外测温', param:'货架上 / 中 / 下三层', trigger:'停留后执行', threshold:'> -18℃ 生成告警', retry:2}] },
@@ -749,7 +775,7 @@ const S = {
       ],
       returnLeg:null
     },
-    { id:'RT-004', name:'研发楼消防通道', park:'滨江研发中心', zone:'G区 · 研发楼', status:'草稿', version:'v0.4', model:'Lite-S', loop:'往返', speed:1.0, updated:'11-07 16:28', desc:'室内消防通道占用识别，待补充楼层地图',
+    { id:'RT-004', name:'研发楼消防通道', park:'滨江研发中心', zone:'G区 · 研发楼', status:'草稿', version:'v0.4', model:'Lite-S', loop:'往返', speed:1.0, updated:'11-07 16:28', map:'MAP-BJ-01@v0.9', desc:'室内消防通道占用识别，待补充楼层地图',
       points:[
         { name:'一层大厅',   x:132, y:340, dwell:0, radius:0.5, must:true, onFail:'跳过继续', heading:0, actions:[{type:'设备自检', param:'室内定位初始化', trigger:'到达即执行', threshold:'—', retry:1}] },
         { name:'2F 东侧通道', x:320, y:230, dwell:8, radius:0.4, must:true, onFail:'重试 1 次', heading:45, actions:[{type:'AI 识别', param:'通道堵塞 / 杂物', trigger:'到达即执行', threshold:'检测到即告警', retry:1}] },
@@ -999,7 +1025,8 @@ function renderParks(){
   const totalArea = S.parks.reduce((s,p)=>s+parseFloat(p.area),0).toFixed(1);
   const zoneTotal = S.parks.reduce((s,p)=>s+p.zones,0);
   const cards = list.map(p=>{
-    const rate = Math.round(p.done/p.tasks*100);
+    const rate = p.tasks ? Math.round(p.done/p.tasks*100) : 0;
+    const m = S.maps.find(x=>x.id===p.mapId);
     return `<div class="card park-card">
       <div class="park-thumb">${miniMap(p.color)}<span class="thumb-tag">${p.id}</span></div>
       <div class="park-body">
@@ -1012,21 +1039,32 @@ function renderParks(){
         </div>
         <div class="park-prog-label"><span>今日巡检完成率</span><b>${p.done}/${p.tasks} · ${rate}%</b></div>
         <div class="bar ${rate===100?'ok':''}"><i style="width:${rate}%"></i></div>
+        <div class="park-mapline">${mapChip(m)}<button class="btn sm ghost" data-act="park-map" data-id="${esc(p.mapId||'')}">${ic('layers')}地图基线</button></div>
         <div class="park-foot"><div class="park-owner"><span class="avatar">${esc(p.owner[0])}</span>负责人 ${esc(p.owner)}</div>
           <div class="actions"><button class="btn sm" data-act="park-zones" data-id="${p.id}">查看区域</button><button class="btn sm ghost icon" data-act="park-edit" data-id="${p.id}" title="编辑">${ic('edit')}</button></div></div>
       </div></div>`;
   }).join('');
-  const tableRows = list.map(p=>`<tr>
+  const tableRows = list.map(p=>{
+    const m = S.maps.find(x=>x.id===p.mapId);
+    return `<tr>
     <td><div class="row-flex"><span class="row-icon">${ic('park')}</span><div><div class="cell-main">${esc(p.name)}</div><div class="cell-sub mono">${p.id}</div></div></div></td>
-    <td>${p.area} 万㎡</td><td>${p.zones} 个</td><td>${p.devices} 台</td><td>${p.done}/${p.tasks}</td><td>${esc(p.owner)}</td><td>${badge(p.status)}</td>
-    <td><div class="actions"><button class="btn sm" data-act="park-zones" data-id="${p.id}">区域</button><button class="btn sm ghost icon" data-act="park-edit" data-id="${p.id}">${ic('edit')}</button></div></td></tr>`).join('');
+    <td>${p.area} 万㎡</td><td>${p.zones} 个</td><td>${p.devices} 台</td><td>${p.done}/${p.tasks}</td><td>${esc(p.owner)}</td><td>${mapChip(m)}</td><td>${badge(p.status)}</td>
+    <td><div class="actions"><button class="btn sm" data-act="park-zones" data-id="${p.id}">区域</button><button class="btn sm ghost icon" data-act="park-edit" data-id="${p.id}">${ic('edit')}</button></div></td></tr>`;
+  }).join('');
   const zoneRows = S.zones.map(z=>`<tr>
     <td><div class="cell-main">${esc(z.name)}</div><div class="cell-sub">${esc(z.park)}</div></td>
     <td><span class="tag blue">${esc(z.type)}</span></td><td>${z.devices} 台</td><td>${esc(z.freq)}</td><td>${badge(z.status)}</td>
     <td><div class="actions"><button class="btn sm" data-act="zone-plan" data-name="${esc(z.name)}">巡检计划</button><button class="btn sm ghost icon" data-act="zone-edit" data-name="${esc(z.name)}">${ic('edit')}</button></div></td></tr>`).join('');
 
+  const boundCnt = S.parks.filter(p=>p.mapId && S.maps.some(m=>m.id===p.mapId)).length;
   $('#v-parks').innerHTML = `
     ${pageHead('园区管理','维护园区基础信息、区域划分与巡检范围',`<button class="btn primary" data-act="park-new">${ic('plus')}新增园区</button>`)}
+    <div class="map-policy-bar">
+      ${ic('layers')}
+      <div class="mp-txt"><b>地图基线约束</b> · 园区建档时绑定坐标系，路线创建时冻结版本引用。当前 ${boundCnt}/${S.parks.length} 个园区已标定，未绑定的园区仅作资产台账，禁止编排巡检路线。</div>
+      <button class="btn sm" data-act="map-lineage">${ic('cpu')}数据来源</button>
+      <button class="btn sm" data-act="map-policy">${ic('info')}绑定时机说明</button>
+    </div>
     <div class="stat-strip">
       <div class="stat-tab on"><div class="st-label">${ic('park')}在管园区</div><div class="st-val">${S.parks.length} <small>个</small></div></div>
       <div class="stat-tab"><div class="st-label">${ic('layers')}覆盖面积</div><div class="st-val">${totalArea} <small>万㎡</small></div></div>
@@ -1042,7 +1080,7 @@ function renderParks(){
     </div>
     ${S.parkView==='card'
       ? `<div class="grid g3">${cards || `<div class="card empty" style="grid-column:1/-1">${ic('search')}未找到匹配的园区</div>`}</div>`
-      : `<div class="card"><div class="table-wrap"><table class="table"><thead><tr><th>园区名称</th><th>面积</th><th>区域数</th><th>设备数</th><th>今日巡检</th><th>负责人</th><th>状态</th><th>操作</th></tr></thead><tbody>${tableRows||emptyRow('未找到匹配的园区')}</tbody></table></div><div class="tfoot"><span>共 ${list.length} 个园区</span></div></div>`}
+      : `<div class="card"><div class="table-wrap"><table class="table"><thead><tr><th>园区名称</th><th>面积</th><th>区域数</th><th>设备数</th><th>今日巡检</th><th>负责人</th><th>地图基线</th><th>状态</th><th>操作</th></tr></thead><tbody>${tableRows||emptyRow('未找到匹配的园区')}</tbody></table></div><div class="tfoot"><span>共 ${list.length} 个园区</span></div></div>`}
     <div class="card mt18" id="zoneCard">
       ${cardHead(`${ic('zone')}巡检区域清单`,'按园区划分的最小巡检单元',`<button class="btn sm" data-act="zone-new">${ic('plus')}新增区域</button>`)}
       <div class="table-wrap"><table class="table"><thead><tr><th>区域名称 / 所属园区</th><th>区域类型</th><th>绑定设备</th><th>巡检频次</th><th>状态</th><th>操作</th></tr></thead><tbody>${zoneRows}</tbody></table></div>
@@ -1361,6 +1399,7 @@ function routeListHtml(){
         <div class="kv"><span>闭环方式</span><b>${curRoute().loop}</b></div>
         <div class="kv"><span>默认速度</span><b>${curRoute().speed} m/s</b></div>
         <div class="kv"><span>版本 / 状态</span><b>${curRoute().version} · ${curRoute().status}</b></div>
+        <div class="kv"><span>地图基线（冻结引用）</span><b>${mapChip(routeMap(curRoute()))}</b></div>
         <div class="rt-hint" style="margin-top:10px">${esc(curRoute().desc)}</div>
       </div>
     </div>`;
@@ -1471,7 +1510,7 @@ function renderRoutes(){
   const r=curRoute();
   $('#v-routes').innerHTML = `
     ${pageHead('巡检路线规划','可视化编排航点、行进航段与每一点/段执行的采集动作',
-      `<button class="btn" data-act="rt-validate">${ic('shield')}校验路线</button><button class="btn" data-act="rt-publish">${ic('send')}发布路线</button><button class="btn primary" data-act="rt-new">${ic('plus')}新建路线</button>`)}
+      `<button class="btn" data-act="rt-baseline">${ic('layers')}地图基线</button><button class="btn" data-act="rt-validate">${ic('shield')}校验路线</button><button class="btn" data-act="rt-publish">${ic('send')}发布路线</button><button class="btn primary" data-act="rt-new">${ic('plus')}新建路线</button>`)}
     <div class="route-layout">
       <div>${routeListHtml()}</div>
       <div>${routeEditorHtml()}</div>
@@ -1649,17 +1688,28 @@ function simulateRoute(){
 }
 
 /* 表单：新增路线 / 添加动作 / 编辑基础信息 */
+function routeMapOptions(parkName){
+  const ms = S.maps.filter(m=>m.park===parkName && m.status!=='已归档');
+  return ms.length
+    ? ms.map(m=>`<option value="${esc(m.id)}">${esc(m.id)} · ${esc(m.status)} · ${esc(m.frame)}</option>`).join('')
+    : `<option value="">该园区无可用基线 · 需先完成建图标定</option>`;
+}
+function syncRouteMapOptions(parkName){
+  const sel = $('[data-role="route-map"]'); if(sel) sel.innerHTML = routeMapOptions(parkName);
+}
 function newRouteForm(){
+  const first = S.parks[0]?.name || '';
   return `<div class="form-grid">
     <div class="field" style="grid-column:1/-1"><label>路线名称 <em>*</em></label><input class="input" name="name" placeholder="例如：B区立体仓库巡检"></div>
-    <div class="field"><label>所属园区</label><select class="select" name="park">${fOpts(S.parks.map(p=>p.name))}</select></div>
+    <div class="field"><label>所属园区 <em>*</em></label><select class="select" name="park" data-role="route-park">${fOpts(S.parks.map(p=>p.name))}</select></div>
     <div class="field"><label>巡检区域</label><select class="select" name="zone">${fOpts(S.zones.map(z=>z.name))}</select></div>
+    <div class="field" style="grid-column:1/-1"><label>地图基线版本 <em>*</em> · 创建后冻结引用</label><select class="select" name="mapId" data-role="route-map">${routeMapOptions(first)}</select></div>
     <div class="field"><label>适用机型</label><select class="select" name="model">${fOpts(['X30-Pro','Lite-S','X30-Standard'])}</select></div>
     <div class="field"><label>闭环方式</label><select class="select" name="loop">${fOpts(['闭环','往返','单向'])}</select></div>
     <div class="field"><label>默认速度 (m/s)</label><input class="input" name="speed" value="1.2"></div>
     <div class="field"><label>初始状态</label><select class="select" name="status">${fOpts(['草稿','已发布'])}</select></div>
     <div class="field" style="grid-column:1/-1"><label>路线说明</label><textarea class="textarea" name="desc" placeholder="描述覆盖点位与巡检目标"></textarea></div>
-  </div><div class="rt-hint">创建后进入编辑画布：点击地图添加航点，系统自动在相邻航点间生成行进航段，再为每个点/段配置采集动作。</div>`;
+  </div><div class="rt-hint">航点坐标以所选地图版本的 frame_id 与分辨率为基准，创建后引用冻结；后续地图发新版不会自动改写本路线坐标。创建后进入画布点击添加航点。</div>`;
 }
 function addActionForm(kind){
   const names=Object.keys(ACTION_LIB).filter(k=>ACTION_LIB[k].kind===kind);
@@ -1672,6 +1722,124 @@ function addActionForm(kind){
     <div class="field"><label>失败重试次数</label><input class="input" type="number" min="0" max="5" name="retry" value="1"></div>`:
     `<div class="field" style="grid-column:1/-1"><label>说明</label><div class="rt-hint" style="margin:0">该动作在两航点之间移动过程中持续执行，不占用停留时长。</div></div>`}
   </div>`;
+}
+
+/* ---------------- 园区 ↔ 地图基线 ----------------
+   设计约定：园区建档时绑定「坐标系定义」；地图每次重标定生成不可变版本；
+   路线创建时冻结一个 mapVersion 引用，之后不随园区当前地图变化。            */
+function activeMap(parkName){
+  return S.maps.find(m=>m.park===parkName && (m.status==='已发布'||m.status==='部分标定'));
+}
+function routeMap(r){
+  if(!r) return null;
+  if(r.map) return S.maps.find(m=>m.id===r.map) || null;  /* 显式引用：绝不随园区当前基线变化 */
+  return activeMap(r.park);                              /* 仅兼容未声明版本的遗留数据 */
+}
+function mapRefs(mapId){
+  const routes = S.routes.filter(r=>{ const m=routeMap(r); return m && m.id===mapId; });
+  const tasks  = S.tasks.filter(t=>routes.some(r=>r.id===t.route));
+  return { routes, tasks };
+}
+function mapChip(m){
+  if(!m) return `<span class="map-chip none">${ic('warn')}未绑定 · 仅台账</span>`;
+  const tone = m.status==='已发布' ? 'ok' : m.status==='部分标定' ? 'warn' : 'gray';
+  return `<span class="map-chip ${tone}">${ic('layers')}${esc(m.id)} · ${esc(m.status)}</span>`;
+}
+function mapPolicyHtml(){
+  return `<div class="policy-flow">
+    <div class="policy-step"><span class="policy-n">1</span><div><b>园区建档时 · 首次绑定（必需）</b><p>绑定坐标系定义：frame_id、原点、分辨率、CRS、楼层、道路与禁行区。此时园区从「资产台账」变成「可规划空间」。未绑定 → 状态为「仅台账」，禁用一切路线与巡检任务入口。</p></div></div>
+    <div class="policy-step"><span class="policy-n">2</span><div><b>地图标定后 · 发布不可变版本</b><p>每次建图／重标定产生新 mapVersion，旧版本不删除、不覆盖。园区只持有一个「当前生效基线」指针，供新建路线使用。</p></div></div>
+    <div class="policy-step"><span class="policy-n">3</span><div><b>创建路线时 · 冻结版本引用（不再绑定）</b><p>路线落库写入 mapVersionId + frame_id + 坐标单位，之后引用冻结。地图发新版不会自动迁移历史路线，必须走影响分析 → 人工确认 → 灰度 → 旧版保留至引用清零。</p></div></div>
+    <div class="policy-step"><span class="policy-n">4</span><div><b>任务下发时 · 校验一致性</b><p>下发包携带路线 + mapVersion + 地图 hash。设备执行前校验自身 SLAM 地图 hash，不一致则拒绝执行并告警，避免「拿 A 版地图跑 B 版路线」。</p></div></div>
+  </div><div class="rt-hint" style="margin-top:12px">为什么不能后绑：航点坐标脱离坐标系只是一串无意义数字；补绑时已无法获知旧坐标的原点与比例尺，坐标迁移不可逆。多楼层、禁行区冲突、续航估算也全部依赖这一层。</div>`;
+}
+function openMapPolicy(){
+  openModal('园区与地图的绑定时机','坐标系是路线的前置依赖，不是路线的附属配置', mapPolicyHtml(), ()=>{});
+  $('#modalSubmit').hidden = true;
+}
+function openMapLineage(){
+  const steps = [
+    ['机器狗建图采集','下发「地图采集」任务，设备走遍园区回传 rosbag / pose graph / 点云。原型中的「一期周界全景建图」「地下车库建图补采」就是这一步','机器人侧'],
+    ['地图服务离线建图与标定','Cartographer / SLAM Toolbox / 厂商 SDK 生成 occupancy grid，标定原点、朝向、比例尺，分配 frame_id，计算 map_hash','地图服务'],
+    ['叠加语义图层','导入 GIS/CAD 总平图，运营人员在地图上框选道路、禁行区、充电座、电梯与楼层连接点，输出 GeoJSON','GIS + 人工'],
+    ['发布不可变 MapVersion','后端版本库落库，置为「已发布」，旧版本保留归档。这一步不属于前端，前端最多发起建图/重标定工单','地图服务'],
+    ['前端只读消费 + 下发校验','前端只取元数据、栅格/瓦片、语义图层三类数据；任务下发时设备比对自身 map_hash，不一致拒绝执行','前端 + 设备']
+  ].map((s,i)=>`<div class="policy-step"><span class="policy-n">${i+1}</span><div style="flex:1"><b>${s[0]}</b><p>${s[1]}</p></div><span class="tag ${['blue','purple','teal','blue','orange'][i]}" style="flex:none;align-self:flex-start;white-space:nowrap">${s[2]}</span></div>`).join('');
+  const apis = [
+    ['GET','/api/parks/{parkId}/maps?status=published','园区页基线徽章、新建路线版本下拉'],
+    ['GET','/api/map-versions/{id}','基线详情：frame_id / CRS / 原点 / 分辨率 / hash'],
+    ['GET','/api/map-versions/{id}/raster · /tiles/{z}/{x}/{y}','画布底图渲染'],
+    ['GET','/api/map-versions/{id}/semantics','道路 / 禁行区 / 区域 GeoJSON 图层'],
+    ['GET','/api/map-versions/{id}/impact','发布新版前的受影响路线 / 任务清单'],
+    ['GET','/api/devices/{id}/map-state','设备当前 map_hash 与定位状态'],
+    ['POST','/api/map-jobs','发起建图或重标定工单（不直接写版本）'],
+    ['POST','/api/map-versions/{id}/publish','地图管理台发布，前端不调用']
+  ].map(a=>`<tr><td><span class="tag ${a[0]==='GET'?'blue':'purple'}">${a[0]}</span></td><td class="mono" style="font-size:11px">${esc(a[1])}</td><td>${esc(a[2])}</td></tr>`).join('');
+  openModal('地图基线的数据来源','前端不生产地图数据，只消费已发布的版本', `
+    <div class="rt-hint" style="margin:0 0 12px">当前原型中这些数据全部是硬编码在 <code>S.maps</code> 里的模拟值。真实链路如下，标定、坐标转换与版本发布都在机器人侧 / 后端地图服务完成。</div>
+    <div class="policy-flow">${steps}</div>
+    ${cardHead(`${ic('cpu')}前端需要对接的接口`,'三类消费数据：元数据 / 栅格瓦片 / 语义图层')}
+    <div class="table-wrap mt18"><table class="table"><thead><tr><th>方法</th><th>接口</th><th>用途</th></tr></thead><tbody>${apis}</tbody></table></div>
+    <div class="rt-hint" style="margin-top:12px"><b>职责边界</b> · frame_id、resolution、origin、map_hash 由建图服务生成，前端只读展示，不应手填；原型里园区表单的 frame_id 输入框与「发布新版本」按钮是为了演示流程而做的简化，正式系统应改为「选择建图任务 / 坐标系模板」与「发起重标定工单」。</div>`, ()=>{});
+  $('#modalSubmit').hidden = true;
+}
+function openMapBaseline(mapId){
+  const m=S.maps.find(x=>x.id===mapId); if(!m) return;
+  const {routes,tasks}=mapRefs(m.id);
+  const srcTag = (txt,tone)=>`<span class="tag ${tone}">${txt}</span>`;
+  const srcRows = [
+    ['所属园区', esc(m.park), '运营台账录入', 'orange'],
+    ['frame_id', `<span class="mono">${esc(m.frame)}</span>`, '建图服务分配', 'purple'],
+    ['CRS', esc(m.crs), '系统配置 + RTK 打点', 'teal'],
+    ['原点锚点', `<span class="mono">${esc(m.origin)}</span>`, 'RTK / 人工标定', 'teal'],
+    ['分辨率', `<span class="mono">${esc(m.resolution)}</span>`, 'SLAM 栅格参数', 'purple'],
+    ['覆盖楼层', esc(m.floors), '楼层元数据', 'blue'],
+    ['语义图层', `${m.roads} 条道路 / ${m.noGo} 个禁行区`, 'GIS/CAD + 人工标注', 'orange'],
+    ['map_hash', '发布时计算（本页不展示）', '地图服务', 'purple'],
+    ['版本 / 状态', `${esc(m.version)} · ${esc(m.status)}`, '版本库', 'blue'],
+    ['发布时间', `<span class="mono">${esc(m.published)}</span>`, '版本库', 'blue'],
+    ['引用情况', `${routes.length} 条路线 · ${tasks.length} 个任务`, '业务库聚合', 'blue']
+  ].map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td>${srcTag(r[2],r[3])}</td></tr>`).join('');
+  const rows = routes.length ? routes.map(r=>`<tr><td class="mono">${r.id}</td><td>${esc(r.name)}</td><td>${badge(r.status)}</td><td class="mono">${r.version}</td></tr>`).join('')
+    : `<tr><td colspan="4"><div class="empty">${ic('info')}暂无路线引用该版本</div></td></tr>`;
+  openModal('地图基线详情', `${m.id} · ${esc(m.park)}`, `
+    <div class="map-baseline">
+      ${mapChip(m)}
+      <div class="rt-hint" style="margin:10px 0 12px">本页为<b>只读</b>，所有值来自后端地图服务已发布的版本。「数据来源」标明每个字段由谁产生，前端不生产地图数据。</div>
+      <div class="table-wrap"><table class="table"><thead><tr><th>字段</th><th>当前值</th><th>数据来源</th></tr></thead><tbody>${srcRows}</tbody></table></div>
+      <div class="rt-hint" style="margin:10px 0 14px">${esc(m.note)}</div>
+      ${cardHead(`${ic('route')}引用该基线的路线`,'版本不可变，发布新版不会自动迁移这些路线')}
+      <div class="table-wrap"><table class="table"><thead><tr><th>路线编号</th><th>路线名称</th><th>状态</th><th>版本</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="actions" style="margin-top:14px">
+        <button class="btn" data-act="map-lineage">${ic('cpu')}数据来源与接口</button>
+        <button class="btn" data-act="map-impact" data-id="${esc(m.id)}">${ic('refresh')}发布新版本 / 查看变更影响</button>
+      </div>
+    </div>`, ()=>{});
+  $('#modalSubmit').hidden = true;
+}
+function openMapImpact(mapId){
+  const m=S.maps.find(x=>x.id===mapId); if(!m) return;
+  const {routes,tasks}=mapRefs(m.id);
+  const rows = routes.length ? routes.map(r=>`<tr><td class="mono">${r.id}</td><td>${esc(r.name)}</td><td>${r.points.length} 个航点</td><td><span class="tag orange">待人工确认迁移</span></td></tr>`).join('')
+    : `<tr><td colspan="4"><div class="empty">${ic('info')}该版本无引用路线，可直接发布</div></td></tr>`;
+  const nums=(m.version.match(/\d+/g)||['1','0']).map(Number);
+  const next='v'+nums[0]+'.'+((nums[1]||0)+1);
+  openModal('地图版本变更 · 影响分析', `${m.id} → ${m.id.replace(/@v[\d.]+$/,'')}@${next}`, `
+    <div class="rt-hint">发布新版本不会改写任何历史路线的坐标。以下引用对象需逐条确认迁移策略，旧版本将保留至引用清零后归档。</div>
+    <div class="table-wrap mt18"><table class="table"><thead><tr><th>路线编号</th><th>路线名称</th><th>航点数</th><th>处理状态</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="form-grid mt18">
+      <div class="field" style="grid-column:1/-1"><label>坐标迁移策略</label><select class="select" name="strategy"><option>仿射变换自动迁移（原点/比例尺变化时）</option><option>保留旧版本继续运行，仅新建路线使用新版</option><option>作废并重绘受影响路线</option></select></div>
+      <div class="field" style="grid-column:1/-1"><label>变更说明</label><input class="input" name="note" value="园区二期改造后重新建图标定"></div>
+    </div>
+    <div class="rt-hint" style="margin-top:12px">影响范围：${routes.length} 条路线 · ${tasks.length} 个关联任务 · ${S.devices.filter(d=>d.park===m.park).length} 台设备需同步地图包。下发前设备会校验地图 hash。</div>`, fd=>{
+    const nm={ id:m.id.replace(/@v[\d.]+$/,'')+'@'+next, park:m.park, version:next, frame:m.frame, crs:m.crs,
+      origin:m.origin, resolution:m.resolution, floors:m.floors, roads:m.roads, noGo:m.noGo,
+      status:'已发布', published:'11-09 13:51', note:fd.get('note')||'重新建图标定' };
+    S.maps.unshift(nm);
+    const p=S.parks.find(x=>x.name===m.park); if(p){ p.mapId=nm.id; p.mapStatus='已标定'; }
+    renderParks(); renderRoutes();
+    toast(`地图 ${nm.id} 已发布；${routes.length} 条历史路线保持旧版引用，需人工确认迁移`);
+  });
 }
 
 /* ---------------- 视图路由 ---------------- */
@@ -1758,7 +1926,16 @@ function closeDrawer(){ $('#drawer').hidden = true; $('#drawerOverlay').hidden =
 
 /* ---------------- 表单模板 ---------------- */
 const fOpts = arr => arr.map(x=>`<option>${esc(x)}</option>`).join('');
+function applyParkMap(p, fd){
+  const v = fd.get('mapId');
+  if(v==='__none__'){ p.mapId=null; p.mapStatus='未绑定'; }
+  else if(v==='__pending__'){ p.mapId=null; p.mapStatus='待标定'; }
+  else { const m=S.maps.find(x=>x.id===v); p.mapId=v; p.mapStatus=(m && m.status==='部分标定')?'部分标定':'已标定'; }
+}
 function parkForm(p){
+  const mapOpts = S.maps.filter(m=>m.status!=='已归档')
+    .map(m=>`<option value="${esc(m.id)}" ${p&&p.mapId===m.id?'selected':''}>${esc(m.id)} · ${esc(m.park)} · ${esc(m.status)}</option>`).join('');
+  const cur = p ? p.mapId : '__pending__';
   return `<div class="form-grid">
     <div class="field"><label>园区名称 <em>*</em></label><input class="input" name="name" value="${p?esc(p.name):''}" placeholder="例如：松江智造园区"></div>
     <div class="field"><label>园区编号</label><input class="input" name="id" value="${p?p.id:'PK-'+String(S.parks.length+1).padStart(3,'0')}" ${p?'readonly':''}></div>
@@ -1766,6 +1943,13 @@ function parkForm(p){
     <div class="field"><label>负责人 <em>*</em></label><input class="input" name="owner" value="${p?esc(p.owner):''}" placeholder="请输入姓名"></div>
     <div class="field"><label>运行状态</label><select class="select" name="status">${['运行中','部分维护','停用'].map(s=>`<option ${p&&p.status===s?'selected':''}>${s}</option>`).join('')}</select></div>
     <div class="field"><label>园区类型</label><select class="select" name="desc">${fOpts(['生产制造','仓储物流','研发办公','综合园区'])}</select></div>
+    <div class="field" style="grid-column:1/-1"><label>坐标系框架 frame_id <em>*</em></label><input class="input" name="frame" value="${p?esc(S.maps.find(m=>m.id===p.mapId)?.frame||''):''}" placeholder="例如：sj_map / 局部米制"></div>
+    <div class="field" style="grid-column:1/-1"><label>地图基线绑定 <em>*</em></label><select class="select" name="mapId">
+      <option value="__pending__" ${cur==='__pending__'?'selected':''}>待标定 · 已登记坐标系，建图采集中（不可编排路线）</option>
+      <option value="__none__" ${cur==='__none__'||cur===null?'selected':''}>暂不绑定 · 仅资产台账（不可编排路线）</option>
+      ${mapOpts}
+    </select></div>
+    <div class="field" style="grid-column:1/-1"><div class="rt-hint" style="margin:0">建档时必须确定坐标系（frame_id / 原点 / 分辨率 / CRS / 楼层），并登记地图基线状态。只有「已发布」的地图版本才允许创建巡检路线；建图完成后再发布不可变版本。</div></div>
     <div class="field" style="grid-column:1/-1"><label>备注说明</label><textarea class="textarea" name="remark" placeholder="选填，描述园区范围与巡检要求"></textarea></div>
   </div>`;
 }
@@ -1867,16 +2051,28 @@ document.addEventListener('click', e=>{
     case 'park-new':
       openModal('新增园区','创建园区档案并初始化巡检范围', parkForm(), fd=>{
         if(!fd.get('name') || !fd.get('area')){ toast('请填写园区名称与面积','error'); return false; }
-        S.parks.push({ id:fd.get('id'), name:fd.get('name'), desc:fd.get('desc'), area:fd.get('area'), zones:0, devices:0, tasks:0, done:0, owner:fd.get('owner')||'待分配', status:fd.get('status'), color:'#0284c7' });
-        S.park.status='全部'; S.park.q=''; renderParks(); toast(`园区「${fd.get('name')}」已创建`);
+        const np = { id:fd.get('id'), name:fd.get('name'), desc:fd.get('desc'), area:fd.get('area'), zones:0, devices:0, tasks:0, done:0, owner:fd.get('owner')||'待分配', status:fd.get('status'), color:'#0284c7' };
+        applyParkMap(np, fd); S.parks.push(np);
+        S.park.status='全部'; S.park.q=''; renderParks();
+        toast(`园区「${np.name}」已创建，地图基线：${np.mapStatus}${np.mapStatus==='已标定'||np.mapStatus==='部分标定'?'':' · 暂不可编排路线'}`, np.mapStatus==='已标定'?'success':'info');
       }); break;
     case 'park-edit': {
       const p = S.parks.find(x=>x.id===id); if(!p) break;
       openModal('编辑园区',`${p.id} · ${p.name}`, parkForm(p), fd=>{
         p.name=fd.get('name'); p.area=fd.get('area'); p.owner=fd.get('owner'); p.status=fd.get('status'); p.desc=fd.get('desc');
-        renderParks(); toast('园区信息已更新');
+        applyParkMap(p, fd);
+        renderParks(); toast(`园区信息已更新，地图基线：${p.mapStatus}`);
       }); break;
     }
+    case 'park-map': {
+      const mid = el.dataset.id;
+      if(mid && S.maps.some(m=>m.id===mid)) openMapBaseline(mid);
+      else { openMapPolicy(); toast('该园区尚无已发布的地图基线，请完成建图标定','info'); }
+      break;
+    }
+    case 'map-policy': openMapPolicy(); break;
+    case 'map-lineage': openMapLineage(); break;
+    case 'map-impact': openMapImpact(el.dataset.id); break;
     case 'park-zones': {
       const p = S.parks.find(x=>x.id===id); if(!p) break;
       const rows = $$('#zoneCard tbody tr');
@@ -1911,6 +2107,7 @@ document.addEventListener('click', e=>{
     case 'rt-sim': simulateRoute(); break;
     case 'rt-validate': validateRoute(); break;
     case 'rt-publish': publishRoute(); break;
+    case 'rt-baseline': { const mm=routeMap(curRoute()); if(mm) openMapBaseline(mm.id); else { openMapPolicy(); toast('当前路线未绑定地图基线','error'); } break; }
     case 'rt-step': selectPoint(Number(el.dataset.i)); break;
     case 'rt-tab': {
       routeState.tab=el.dataset.v;
@@ -1921,15 +2118,20 @@ document.addEventListener('click', e=>{
     case 'rt-new':
       openModal('新建巡检路线','创建路线模板后在画布上编排航点', newRouteForm(), fd=>{
         if(!fd.get('name')){ toast('请填写路线名称','error'); return false; }
+        const m = S.maps.find(x=>x.id===fd.get('mapId'));
+        if(!m || m.status==='已归档' || m.park!==fd.get('park')){
+          toast(`「${fd.get('park')}」尚无已发布地图基线，请先在园区管理完成建图标定`,'error'); return false;
+        }
         const id='RT-'+String(S.routes.length+1).padStart(3,'0');
         const loop=fd.get('loop');
-        S.routes.unshift({ id, name:fd.get('name'), park:fd.get('park'), zone:fd.get('zone'), status:fd.get('status'),
+        S.routes.unshift({ id, name:fd.get('name'), park:fd.get('park'), zone:fd.get('zone'), status:fd.get('status'), map:m.id,
           version:'v0.1', model:fd.get('model'), loop, speed:Number(fd.get('speed'))||1.2, updated:'11-09 09:47',
           desc:fd.get('desc')||'待补充路线说明', points:[], legs:[],
           returnLeg:loop==='闭环'?{mode:'沿道路',speed:1.5,avoid:'标准',actions:[]}:null });
         stopSim(); routeState.id=id; routeState.mode='add'; routeState.selType='none'; routeState.selIdx=0;
         routeState.tab='point'; routeState.hist=[]; routeState.q='';
-        renderRoutes(); toast(`路线 ${id} 已创建，请点击画布添加航点`);
+        renderRoutes(); toast(`路线 ${id} 已创建并冻结基线 ${m.id}，请点击画布添加航点`);
+        if(m.status==='部分标定') toast('该地图仅部分楼层完成标定，未覆盖区域禁止编排航点','info');
       }); break;
     case 'rt-base': {
       const r=curRoute();
@@ -2068,6 +2270,7 @@ document.addEventListener('change', e=>{
   if(role==='device-park'){ S.device.park=t.value; renderDeviceTableOnly(); }
   if(role==='device-status'){ S.device.status=t.value; renderDeviceTableOnly(); }
   if(role==='park-status'){ S.park.status=t.value; renderParks(); }
+  if(role==='route-park'){ syncRouteMapOptions(t.value); }
   if(t.id==='actTypeSel'){
     const lib=ACTION_LIB[t.value];
     if(lib){

@@ -50,6 +50,10 @@
             <p><strong>航点数量：</strong>{{ waypoints.length }}</p>
             <p><strong>分辨率：</strong>{{ resolution }} m/px</p>
             <p><strong>原点：</strong>[{{ origin.join(", ") }}]</p>
+            <p>
+              <strong>原点 yaw：</strong>
+              {{ ((origin[2] ?? 0) as number).toFixed(3) }} rad
+            </p>
           </div>
         </el-card>
         <el-card style="margin-top: 10px">
@@ -177,18 +181,37 @@ function loadMapImage() {
   });
 }
 
+/**
+ * ROS map_server 的 origin 是 [x, y, yaw]：像素坐标先旋转再平移到世界坐标。
+ * 忽略 yaw 会让旋转建图的航点整体偏移，这里显式做正/逆变换。
+ */
+function mapRotation() {
+  const yaw = origin.value[2] ?? 0;
+  return { cos: Math.cos(yaw), sin: Math.sin(yaw) };
+}
+
 function worldToPixel([wx, wy]: [number, number]) {
   const height = imgReady ? img.height : 500 / scale;
+  const dx = wx - origin.value[0];
+  const dy = wy - origin.value[1];
+  const { cos, sin } = mapRotation();
+  // world → map 坐标（逆旋转）
+  const mx = cos * dx + sin * dy;
+  const my = -sin * dx + cos * dy;
   return {
-    x: ((wx - origin.value[0]) / resolution.value) * scale,
-    y: (height - (wy - origin.value[1]) / resolution.value) * scale
+    x: (mx / resolution.value) * scale,
+    y: (height - my / resolution.value) * scale
   };
 }
 
 function pixelToWorld(p: { x: number; y: number }): [number, number] {
   const height = imgReady ? img.height : 500 / scale;
-  const wx = origin.value[0] + (p.x / scale) * resolution.value;
-  const wy = origin.value[1] + (height - p.y / scale) * resolution.value;
+  const mx = (p.x / scale) * resolution.value;
+  const my = (height - p.y / scale) * resolution.value;
+  const { cos, sin } = mapRotation();
+  // map → world 坐标（正旋转）
+  const wx = origin.value[0] + cos * mx - sin * my;
+  const wy = origin.value[1] + sin * mx + cos * my;
   return [Number(wx.toFixed(2)), Number(wy.toFixed(2))];
 }
 
@@ -331,6 +354,7 @@ function savePath() {
   }
   dogRouteUpdate(routeId.value, {
     routeData: JSON.stringify(waypoints.value),
+    mapId: mapId.value,
     modelId: mapId.value
   }).then(res => {
     if (res.code === SUCCESS) {
@@ -376,8 +400,9 @@ async function loadRoute() {
   const record = res.data;
   routeName.value = record.routeName || routeName.value;
   routeType.value = record.routeType || routeType.value;
-  if (record.modelId) {
-    mapId.value = record.modelId;
+  if (record.mapId || record.modelId) {
+    // 优先使用创建时冻结的基线版本；历史路线兼容旧的 modelId。
+    mapId.value = record.mapId || record.modelId;
     loadMapImage();
   }
   if (record.routeData) restoreRoute(record.routeData);

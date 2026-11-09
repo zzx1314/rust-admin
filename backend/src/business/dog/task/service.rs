@@ -7,6 +7,7 @@ use crate::business::dog::command::domain::CreateCommandRequest;
 use crate::business::dog::command::repository::SeaOrmDogCommandRepository;
 use crate::business::dog::device::repository::SeaOrmDogDeviceRepository;
 use crate::business::dog::gateway::DogGateway;
+use crate::business::dog::map::repository::SeaOrmDogMapRepository;
 use crate::business::dog::route_library::repository::SeaOrmDogRouteLibraryRepository;
 use crate::business::dog::task::domain::{
     CreateTaskRequest, DogTask, TaskPageQuery, TaskStatusVO, TaskVO, UpdateTaskRequest,
@@ -23,8 +24,8 @@ pub struct DogTaskService {
     device_repo: SeaOrmDogDeviceRepository,
     workflow_repo: SeaOrmDogWorkflowRepository,
     command_repo: SeaOrmDogCommandRepository,
-    #[allow(dead_code)]
     route_repo: SeaOrmDogRouteLibraryRepository,
+    map_repo: SeaOrmDogMapRepository,
     gateway: Arc<DogGateway>,
 }
 
@@ -35,6 +36,7 @@ impl DogTaskService {
         workflow_repo: SeaOrmDogWorkflowRepository,
         command_repo: SeaOrmDogCommandRepository,
         route_repo: SeaOrmDogRouteLibraryRepository,
+        map_repo: SeaOrmDogMapRepository,
         gateway: Arc<DogGateway>,
     ) -> Self {
         Self {
@@ -43,6 +45,7 @@ impl DogTaskService {
             workflow_repo,
             command_repo,
             route_repo,
+            map_repo,
             gateway,
         }
     }
@@ -164,9 +167,8 @@ impl DogTaskService {
             ));
         };
 
-        let workflow = workflow.ok_or_else(|| {
-            AppError::NotFound("Associated workflow not found".to_string())
-        })?;
+        let workflow = workflow
+            .ok_or_else(|| AppError::NotFound("Associated workflow not found".to_string()))?;
 
         // Get the command JSON from the workflow
         let command_json = workflow.command_json_string.unwrap_or_default();
@@ -175,6 +177,28 @@ impl DogTaskService {
                 "Workflow command_json_string is empty, design the workflow first".to_string(),
             ));
         }
+
+        // 任务引用路线时，下发包必须携带冻结的地图基线快照；设备执行前校验 mapHash。
+        let map_payload = self.resolve_map_payload(task.route_id).await?;
+        let command_json = match map_payload {
+            Some(map) => {
+                let mut params: Value = serde_json::from_str(&command_json).map_err(|error| {
+                    AppError::BadRequest(format!(
+                        "Workflow command_json_string is not valid JSON: {error}"
+                    ))
+                })?;
+                let object = params.as_object_mut().ok_or_else(|| {
+                    AppError::BadRequest(
+                        "Workflow command_json_string must be a JSON object".to_string(),
+                    )
+                })?;
+                object.insert("map".to_string(), map);
+                serde_json::to_string(&params).map_err(|error| {
+                    AppError::InternalError(format!("failed to encode command params: {error}"))
+                })?
+            }
+            None => command_json,
+        };
 
         // Resolve the device code (device_id string) from the task's device_id
         let device_code = match task.device_id {
@@ -192,7 +216,7 @@ impl DogTaskService {
             None => {
                 return Err(AppError::BadRequest(
                     "Task has no associated device".to_string(),
-                ))
+                ));
             }
         };
 
@@ -229,7 +253,43 @@ impl DogTaskService {
             .update_status_unscoped(id, "进行中")
             .await
             .map_err(AppError::DatabaseErrorSeaOrm)?
-            .ok_or_else(|| AppError::NotFound(format!("Task with id {} not found after update", id)))
+            .ok_or_else(|| {
+                AppError::NotFound(format!("Task with id {} not found after update", id))
+            })
+    }
+
+    /// 解析任务路线的冻结地图基线，生成设备校验快照。
+    ///
+    /// 路线已绑定地图时，缺少版本 / 哈希的地图基线一律拒绝下发，避免
+    /// 「拿 A 版地图跑 B 版路线」。
+    async fn resolve_map_payload(&self, route_id: Option<i64>) -> Result<Option<Value>, AppError> {
+        let Some(route_id) = route_id else {
+            return Ok(None);
+        };
+        let route = self
+            .route_repo
+            .find_by_id(route_id)
+            .await
+            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .ok_or_else(|| AppError::BadRequest(format!("Route with id {route_id} not found")))?;
+        let map_id = route
+            .map_id
+            .ok_or_else(|| AppError::BadRequest("路线未绑定地图基线，禁止下发任务".to_string()))?;
+        let map = self
+            .map_repo
+            .find_any_by_id(map_id)
+            .await
+            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .ok_or_else(|| {
+                AppError::BadRequest(format!("Route {route_id} references missing map {map_id}"))
+            })?;
+        let payload = map.dispatch_payload().ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "地图基线 {} 缺少 map_hash，请重新上传地图包并发布后再下发",
+                map.id
+            ))
+        })?;
+        Ok(Some(payload))
     }
 
     /// Get task execution status by querying the command result items.
@@ -296,9 +356,7 @@ impl DogTaskService {
                             }
                             None => {
                                 // Status field directly on the result
-                                let status_str = result_obj
-                                    .get("status")
-                                    .and_then(|v| v.as_str());
+                                let status_str = result_obj.get("status").and_then(|v| v.as_str());
                                 if let Some("success" | "SUCCESS" | "ok" | "OK") = status_str {
                                     let id_str = command.id.to_string();
                                     success_ids.push(id_str);

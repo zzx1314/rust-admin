@@ -298,7 +298,7 @@ WebSocket 报文：
 | 方向          | 报文                                                                                                                                                                                  | 说明                                                                                                                                             |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 设备 → 服务端 | `{"type":"heartbeat","deviceId":"dog-001","status":"success","drones":{"speed":"1.2","height":"0","battery":"88","course":"90","location":"31.23,121.47"}}`                           | 心跳；服务端回 `{"type":"report","status":"online","msg":"success"}`，并更新 `dog_device.status/comm_time` 及遥测字段                            |
-| 服务端 → 设备 | `{"type":"server-command","deviceId":"dog-001","missionId":"<指令ID>","commandId":<指令ID>,"commandName":"巡检","commandType":"task","taskId":null,"params":{...},"timestamp":"..."}` | 新建指令时若设备在线立即推送；`params` 为指令的 `commandParams`（字符串会尝试解析为 JSON）                                                       |
+| 服务端 → 设备 | `{"type":"server-command","deviceId":"dog-001","missionId":"<指令ID>","commandId":<指令ID>,"commandName":"巡检","commandType":"task","taskId":null,"params":{...},"timestamp":"..."}` | 新建指令时若设备在线立即推送；`params` 为指令的 `commandParams`（字符串会尝试解析为 JSON）。任务引用路线时，`params.map` 会附带冻结的地图基线：`{ mapId, mapVersion, mapHash, frameId, resolution, origin, width, height }`；路线未绑定基线或基线缺少 `mapHash` 时拒绝下发 |
 | 设备 → 服务端 | `{"type":"server-command","commandId":<指令ID>,"status":"success","returnValue":"..."}`                                                                                               | 执行结果，写回 `dog_command.status/return_value`（也兼容 `report` 的 `id` 与 `torosReport` 的 `missionId`）                                      |
 | 设备 → 服务端 | `{"type":"file_start","streamId":"stream-1","fileName":"a.jpg","mediaType":"image"}` → 若干二进制帧 → `{"type":"file_end","streamId":"stream-1"}`                                     | 文件上传；服务端回 `{"type":"file_ack","streamId":"stream-1","status":"success","path":"..."}`，文件写入 `[dog] upload_dir` 并登记到 `dog_media` |
 
@@ -334,18 +334,25 @@ WebSocket 报文：
 
 ### 4.13 地图 `/api/dogMap`
 
-| 接口                  | 方法               | 说明                                                                                                                                                                                                           |
-| --------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/api/dogMap/getPage` | GET                | `mapName`（模糊）、`mapType`、`fileName`（模糊）、`parkId`、`beginTime`、`endTime`、`current`、`size`                                                                                                          |
-| `/api/dogMap/getAll`  | GET                | 全量列表（仅当前用户可见范围）                                                                                                                                                                                 |
-| `/api/dogMap`         | POST               | 新增，`mapName`、`parkId` 必填；`mapType`、`remarks` 可选                                                                                                                                                      |
-| `/api/dogMap/upload`  | POST               | 上传 `.zip` 地图包（`multipart/form-data`）：`file` = 地图包，`mapInfo` = JSON 字符串 `{ "parkId": 1, "mapName": "...", "mapType": "离线地图", "remarks": "..." }`；带 `id` 时替换已有地图的包与信息，否则新建 |
-| `/api/dogMap/{id}`    | GET / PUT / DELETE | 详情 / 修改 / 软删除                                                                                                                                                                                           |
+| 接口                          | 方法               | 说明                                                                                                                                                                                    |
+| ----------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/api/dogMap/getPage`         | GET                | `mapName`（模糊）、`mapType`、`mapStatus`、`publishableOnly`、`fileName`（模糊）、`parkId`、`beginTime`、`endTime`、`current`、`size`                                                   |
+| `/api/dogMap/getAll`          | GET                | 全量列表（仅当前用户可见范围）                                                                                                                                                          |
+| `/api/dogMap/byPark/{parkId}` | GET                | 园区可用的地图基线版本；`publishableOnly=true`（默认）时只返回已发布 / 部分标定的版本                                                                                                   |
+| `/api/dogMap`                 | POST               | 新增，`mapName`、`parkId` 必填；`mapType`、`remarks`、`mapVersion`、`frameId`、`crs`、`mapOrigin`、`resolution`、`floors`、`roadCount`、`nogoCount`、`mapStatus`（草稿 / 部分标定）可选 |
+| `/api/dogMap/upload`          | POST               | 上传 `.zip` 地图包（`multipart/form-data`）：`file` = 地图包，`mapInfo` = JSON 字符串，字段同新增；带 `id` 时替换已有地图的包与信息，否则新建                                           |
+| `/api/dogMap/{id}/publish`    | POST               | 发布为园区当前生效基线：同园区旧版本自动归档，`dog_park.map_id` / `map_status` 同步更新                                                                                                 |
+| `/api/dogMap/{id}/newVersion` | POST               | 基于当前版本派生下一个版本号并立即发布；历史路线保持旧版引用，不会被自动迁移                                                                                                            |
+| `/api/dogMap/{id}/refs`       | GET                | 引用该版本的路线 / 任务清单，用于发布新版本前的影响分析                                                                                                                                 |
+| `/api/dogMap/{id}`            | GET / PUT / DELETE | 详情 / 修改 / 软删除；仍被路线引用的版本不可删除                                                                                                                                        |
 
 - 地图包仅支持 `.zip`，保存到 `[dog] upload_dir` 下的 `maps/` 目录；响应中的 `fileName`、`filePath`、`fileFormat`、`fileSize` 由服务端写入。
 - `parkId` 指向园区：新增（含上传新建）必填，必须是当前用户可访问的园区，否则返回 400；修改时可不传（保持不变）。
 - `getPage` 会按 `parkId` 关联 `dog_park` 返回 `parkName`（所属园区名称），前端列表展示该字段；详情 / 新增 / 修改接口同样返回 `parkName`。
-- 响应字段：`id`、`mapName`、`mapType`、`mapData`、`parkId`、`parkName`、`userId`、`fileName`、`filePath`、`fileFormat`、`fileSize`、`remarks`、`createTime`、`updateTime`。
+- 响应字段：`id`、`mapName`、`mapType`、`mapData`、`parkId`、`parkName`、`userId`、`fileName`、`filePath`、`fileFormat`、`fileSize`、`remarks`、`mapVersion`、`frameId`、`crs`、`mapOrigin`、`resolution`、`floors`、`roadCount`、`nogoCount`、`mapStatus`、`mapHash`、`mapWidth`、`mapHeight`、`publishTime`、`createTime`、`updateTime`。
+- **上传即解析**：后端从地图包内 `model.pgm` / `model.yaml` 解析 `resolution`、`origin: [x, y, yaw]`、像素宽高，并计算整个 `.zip` 的 SHA-256 写入 `mapHash`、`mapWidth`、`mapHeight`。前端表单里的 `resolution` / `mapOrigin` 只用于校验：与包内容不一致会返回 400，留空则由服务端解析结果回写。
+- **基线不可变**：版本一旦发布（`已发布` / `部分标定`），`mapVersion`、`frameId`、`mapOrigin`、`resolution` 不再允许修改；需要新坐标系时请上传新包或调用 `newVersion`。
+- **路线冻结引用**：创建路线时必须选择园区可用的地图基线（未绑定基线的园区会被拒绝），服务端把 `mapId` + `mapVersion` + `mapFrame` 快照写入 `dog_route_library`；发布新版本不会自动改写历史路线。
 
 ---
 

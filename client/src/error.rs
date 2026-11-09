@@ -35,6 +35,9 @@ pub enum ClientError {
 
     #[error("device id error: {0}")]
     DeviceId(String),
+
+    #[error("map verification error: {0}")]
+    Map(String),
 }
 
 impl From<tokio_tungstenite::tungstenite::Error> for ClientError {

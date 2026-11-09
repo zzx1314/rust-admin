@@ -41,6 +41,10 @@ OPTIONS:
     --upload <PATH>       Upload this file once after the link is up
     --exec <COMMAND>      Shell command executed for every received task
                           (the task JSON is passed as DOG_COMMAND_JSON)
+    --map-package <PATH>  Local ROS map package (.zip); its SHA-256 is compared
+                          with the mapHash carried by every route task
+    --map-hash <HEX>      Explicit local map SHA-256 (takes precedence over
+                          --map-package)
     --ca <PEM>            CA certificate for wss:// (defaults to system roots)
     --cert <PEM>          Client certificate for mutual TLS
     --key <PEM>           Client private key for mutual TLS
@@ -63,6 +67,8 @@ struct Config {
     heartbeat_timeout_secs: u64,
     upload: Option<PathBuf>,
     exec: Option<String>,
+    map_package: Option<PathBuf>,
+    map_hash: Option<String>,
     ca: Option<PathBuf>,
     cert: Option<PathBuf>,
     key: Option<PathBuf>,
@@ -212,9 +218,21 @@ async fn run(config: Config, identity: DeviceIdentity) -> Result<(), ClientError
         return Ok(());
     }
 
+    let local_map_hash = match (&config.map_hash, &config.map_package) {
+        (Some(hash), _) => Some(hash.trim().to_lowercase()),
+        (None, Some(path)) => Some(dog_device_client::map::sha256_file(path)?),
+        (None, None) => None,
+    };
+    if local_map_hash.is_none() {
+        warn!(
+            "no --map-package / --map-hash configured; route tasks carrying a map baseline will be rejected"
+        );
+    }
+
     let shutdown = spawn_shutdown_signal();
     let handler = ShellHandler {
         exec: config.exec.clone(),
+        map_hash: local_map_hash,
     };
 
     let summary = session::run(session_config, handler, shutdown).await?;
@@ -266,6 +284,49 @@ fn spawn_shutdown_signal() -> tokio::sync::watch::Receiver<bool> {
 /// Executes pushed tasks with `--exec` (or simply acknowledges them).
 struct ShellHandler {
     exec: Option<String>,
+    /// SHA-256 of the locally installed ROS map package.
+    map_hash: Option<String>,
+}
+
+impl ShellHandler {
+    /// Reject a route task when the device cannot prove it holds the same map.
+    fn verify_map_baseline(&self, command: &ServerCommand) -> Option<CommandResult> {
+        let map = command.map_baseline()?;
+        let command_id = command.id().unwrap_or_default();
+        let Some(expected) = map
+            .map_hash
+            .as_deref()
+            .map(str::trim)
+            .filter(|hash| !hash.is_empty())
+        else {
+            return Some(CommandResult::failure(
+                command_id,
+                "task map baseline is missing mapHash",
+            ));
+        };
+        let Some(local) = self.map_hash.as_deref() else {
+            return Some(CommandResult::failure(
+                command_id,
+                "device has no local map hash; start with --map-package or --map-hash",
+            ));
+        };
+        if !dog_device_client::map::hash_matches(expected, local) {
+            return Some(CommandResult::failure(
+                command_id,
+                format!(
+                    "map hash mismatch: expected {expected}, local {local} (mapId={:?}, version={:?})",
+                    map.map_id, map.map_version
+                ),
+            ));
+        }
+        info!(
+            map_id = ?map.map_id,
+            map_version = ?map.map_version,
+            frame_id = ?map.frame_id,
+            "map baseline verified"
+        );
+        None
+    }
 }
 
 impl CommandHandler for ShellHandler {
@@ -283,6 +344,11 @@ impl CommandHandler for ShellHandler {
             params = %command.params_text(),
             "task received"
         );
+
+        if let Some(rejected) = self.verify_map_baseline(&command) {
+            warn!(command_id, reason = ?rejected.return_value, "task rejected: map baseline check failed");
+            return rejected;
+        }
 
         let result = match &self.exec {
             Some(script) => {
@@ -405,6 +471,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Config>, Stri
     let mut heartbeat_timeout_secs = 10u64;
     let mut upload = None;
     let mut exec = None;
+    let mut map_package = None;
+    let mut map_hash = None;
     let mut ca = None;
     let mut cert = None;
     let mut key = None;
@@ -435,6 +503,10 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Config>, Stri
             }
             "--upload" => upload = Some(PathBuf::from(next_value(&mut args, "--upload")?)),
             "--exec" => exec = Some(next_value(&mut args, "--exec")?),
+            "--map-package" => {
+                map_package = Some(PathBuf::from(next_value(&mut args, "--map-package")?));
+            }
+            "--map-hash" => map_hash = Some(next_value(&mut args, "--map-hash")?),
             "--ca" => ca = Some(PathBuf::from(next_value(&mut args, "--ca")?)),
             "--cert" => cert = Some(PathBuf::from(next_value(&mut args, "--cert")?)),
             "--key" => key = Some(PathBuf::from(next_value(&mut args, "--key")?)),
@@ -466,6 +538,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Config>, Stri
         heartbeat_timeout_secs,
         upload,
         exec,
+        map_package,
+        map_hash,
         ca,
         cert,
         key,
@@ -494,4 +568,85 @@ fn parse_u64(
     value
         .parse()
         .map_err(|_| format!("{name} expects a number, got `{value}`"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn command_with_map(map_hash: Option<&str>) -> ServerCommand {
+        let mut map = serde_json::Map::new();
+        map.insert("mapId".to_string(), json!(3));
+        map.insert("mapVersion".to_string(), json!("v1.0"));
+        map.insert("frameId".to_string(), json!("map"));
+        if let Some(hash) = map_hash {
+            map.insert("mapHash".to_string(), json!(hash));
+        }
+        serde_json::from_value(json!({
+            "type": "server-command",
+            "commandId": 7,
+            "params": { "mission": "patrol", "map": map }
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn accepts_task_when_local_map_hash_matches() {
+        let mut handler = ShellHandler {
+            exec: None,
+            map_hash: Some("abc123".to_string()),
+        };
+        let result = handler.handle(command_with_map(Some("ABC123"))).await;
+        assert_eq!(result.status, "success");
+    }
+
+    #[tokio::test]
+    async fn rejects_task_when_local_map_hash_differs() {
+        let mut handler = ShellHandler {
+            exec: None,
+            map_hash: Some("abc123".to_string()),
+        };
+        let result = handler.handle(command_with_map(Some("deadbeef"))).await;
+        assert_eq!(result.status, "error");
+        assert!(result.return_value.unwrap().contains("map hash mismatch"));
+    }
+
+    #[tokio::test]
+    async fn rejects_map_task_without_local_hash() {
+        let mut handler = ShellHandler {
+            exec: None,
+            map_hash: None,
+        };
+        let result = handler.handle(command_with_map(Some("abc123"))).await;
+        assert_eq!(result.status, "error");
+        assert!(result.return_value.unwrap().contains("no local map hash"));
+    }
+
+    #[tokio::test]
+    async fn rejects_map_task_without_server_hash() {
+        let mut handler = ShellHandler {
+            exec: None,
+            map_hash: Some("abc123".to_string()),
+        };
+        let result = handler.handle(command_with_map(None)).await;
+        assert_eq!(result.status, "error");
+        assert!(result.return_value.unwrap().contains("missing mapHash"));
+    }
+
+    #[tokio::test]
+    async fn tasks_without_map_payload_still_run() {
+        let mut handler = ShellHandler {
+            exec: None,
+            map_hash: None,
+        };
+        let command: ServerCommand = serde_json::from_value(json!({
+            "type": "server-command",
+            "commandId": 8,
+            "params": { "mission": "patrol" }
+        }))
+        .unwrap();
+        let result = handler.handle(command).await;
+        assert_eq!(result.status, "success");
+    }
 }

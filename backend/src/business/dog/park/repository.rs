@@ -8,6 +8,7 @@ use crate::common::data_scope::DataScope;
 use crate::common::util::parse_beijing_datetime;
 use crate::system::sys_user::entity::Column as UserColumn;
 use crate::system::sys_user::entity::Entity as UserEntity;
+use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect,
@@ -66,6 +67,15 @@ impl SeaOrmDogParkRepository {
             query = query.filter(ParkColumn::UserId.eq(owner));
         }
         query.one(&*self.conn).await
+    }
+
+    /// 路线侧解析园区当前基线时使用：不按用户过滤。
+    pub async fn find_any_by_id(&self, id: i64) -> Result<Option<Park>, sea_orm::DbErr> {
+        ParkEntity::find()
+            .filter(ParkColumn::Id.eq(id))
+            .filter(ParkColumn::IsDeleted.eq(0))
+            .one(&*self.conn)
+            .await
     }
 
     pub async fn find_all_with_page(
@@ -175,6 +185,37 @@ impl SeaOrmDogParkRepository {
         }
         update.exec(&*self.conn).await?;
         Ok(true)
+    }
+
+    /// 把园区指针指向某个地图版本（由地图发布流程调用）。
+    pub async fn set_baseline(
+        &self,
+        park_id: i64,
+        map_id: Option<i64>,
+        map_status: &str,
+    ) -> Result<(), sea_orm::DbErr> {
+        ParkEntity::update_many()
+            .col_expr(ParkColumn::MapId, Expr::value(map_id))
+            .col_expr(ParkColumn::MapStatus, Expr::value(map_status))
+            .col_expr(ParkColumn::UpdateTime, Expr::value(chrono::Utc::now()))
+            .filter(ParkColumn::Id.eq(park_id))
+            .filter(ParkColumn::IsDeleted.eq(0))
+            .exec(&*self.conn)
+            .await?;
+        Ok(())
+    }
+
+    /// 地图被删除时，清空仍指向它的园区指针。
+    pub async fn clear_baseline_for_map(&self, map_id: i64) -> Result<u64, sea_orm::DbErr> {
+        let result = ParkEntity::update_many()
+            .col_expr(ParkColumn::MapId, Expr::value(Option::<i64>::None))
+            .col_expr(ParkColumn::MapStatus, Expr::value("未绑定"))
+            .col_expr(ParkColumn::UpdateTime, Expr::value(chrono::Utc::now()))
+            .filter(ParkColumn::MapId.eq(map_id))
+            .filter(ParkColumn::IsDeleted.eq(0))
+            .exec(&*self.conn)
+            .await?;
+        Ok(result.rows_affected)
     }
 }
 

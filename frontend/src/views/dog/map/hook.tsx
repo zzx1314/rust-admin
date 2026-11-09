@@ -10,11 +10,16 @@ import {
   dogMapPage,
   dogMapUpload,
   dogMapUpdate,
-  dogMapDelete
+  dogMapDelete,
+  dogMapPublish,
+  dogMapNewVersion,
+  dogMapRefs
 } from "@/api/dogMap";
 import { dogParkGetAll } from "@/api/dogPark";
 import {
   CREATE_TIME_FIELDS,
+  MAP_STATUS_OPTIONS,
+  MAP_STATUS_TAG_TYPE,
   MAP_TYPE_OPTIONS,
   type DogSearchField,
   type DogSearchOption
@@ -57,11 +62,62 @@ export function useDogMap() {
         )
     },
     { label: "文件名称", prop: "fileName", minWidth: 180 },
+    {
+      label: "基线版本",
+      prop: "mapVersion",
+      width: 110,
+      cellRenderer: ({ row }) => (
+        <span class="font-mono">{row.mapVersion || "-"}</span>
+      )
+    },
+    {
+      label: "基线状态",
+      prop: "mapStatus",
+      width: 110,
+      cellRenderer: ({ row, props }) => (
+        <el-tag
+          size={props.size}
+          type={MAP_STATUS_TAG_TYPE[row.mapStatus] || "info"}
+        >
+          {row.mapStatus || "草稿"}
+        </el-tag>
+      )
+    },
+    { label: "坐标系 frame_id", prop: "frameId", minWidth: 150 },
+    { label: "覆盖楼层", prop: "floors", width: 120 },
+    { label: "分辨率", prop: "resolution", width: 110 },
+    {
+      label: "栅格尺寸",
+      prop: "mapWidth",
+      width: 120,
+      cellRenderer: ({ row }) =>
+        row.mapWidth && row.mapHeight ? (
+          <span class="font-mono text-xs">
+            {row.mapWidth}×{row.mapHeight}
+          </span>
+        ) : (
+          <span class="text-xs text-gray-400">-</span>
+        )
+    },
+    {
+      label: "map_hash",
+      prop: "mapHash",
+      minWidth: 170,
+      cellRenderer: ({ row }) =>
+        row.mapHash ? (
+          <span class="font-mono text-xs" title={row.mapHash}>
+            {String(row.mapHash).slice(0, 12)}…
+          </span>
+        ) : (
+          <span class="text-xs text-red-400">缺失</span>
+        )
+    },
+    { label: "发布时间", prop: "publishTime", width: 170 },
     { label: "文件格式", prop: "fileFormat", width: 100 },
     { label: "文件大小（字节）", prop: "fileSize", width: 150 },
     { label: "描述信息", prop: "remarks", minWidth: 180 },
     { label: "创建时间", prop: "createTime", width: 180 },
-    { label: "操作", fixed: "right", width: 180, slot: "operation" }
+    { label: "操作", fixed: "right", width: 260, slot: "operation" }
   ];
 
   /** 园区下拉数据（查询条件 + 新增 / 修改弹窗共用）。 */
@@ -80,6 +136,12 @@ export function useDogMap() {
       type: "select",
       options: MAP_TYPE_OPTIONS
     },
+    {
+      label: "基线状态",
+      prop: "mapStatus",
+      type: "select",
+      options: MAP_STATUS_OPTIONS
+    },
     { label: "文件名称", prop: "fileName" }
   ]);
   const moreQueryFields: DogSearchField[] = [...CREATE_TIME_FIELDS];
@@ -88,6 +150,7 @@ export function useDogMap() {
     parkId: "" as number | "",
     mapName: "",
     mapType: "",
+    mapStatus: "",
     fileName: "",
     beginTime: "",
     endTime: ""
@@ -108,12 +171,30 @@ export function useDogMap() {
     mapName: string;
     mapType: string;
     remarks: string;
+    mapVersion: string;
+    frameId: string;
+    crs: string;
+    mapOrigin: string;
+    resolution: string;
+    floors: string;
+    roadCount: number | null;
+    nogoCount: number | null;
+    mapStatus: string;
   }>({
     id: null,
     parkId: null,
     mapName: "",
     mapType: "离线地图",
-    remarks: ""
+    remarks: "",
+    mapVersion: "v1.0",
+    frameId: "",
+    crs: "GCJ-02 锚点 + 局部 ENU",
+    mapOrigin: "",
+    resolution: "",
+    floors: "",
+    roadCount: null,
+    nogoCount: null,
+    mapStatus: "草稿"
   });
   /** 待上传的地图包（新增 / 修改时选择的新文件）。 */
   const fileList = ref<UploadUserFile[]>([]);
@@ -125,7 +206,16 @@ export function useDogMap() {
       parkId: row.parkId ?? null,
       mapName: row.mapName ?? "",
       mapType: row.mapType ?? "",
-      remarks: row.remarks ?? ""
+      remarks: row.remarks ?? "",
+      mapVersion: row.mapVersion ?? "v1.0",
+      frameId: row.frameId ?? "",
+      crs: row.crs ?? "GCJ-02 锚点 + 局部 ENU",
+      mapOrigin: row.mapOrigin ?? "",
+      resolution: row.resolution ?? "",
+      floors: row.floors ?? "",
+      roadCount: row.roadCount ?? null,
+      nogoCount: row.nogoCount ?? null,
+      mapStatus: row.mapStatus ?? "草稿"
     };
     openDia("修改地图", formEl);
   }
@@ -161,7 +251,8 @@ export function useDogMap() {
         parkId: addForm.value.parkId ?? undefined,
         mapName: addForm.value.mapName,
         mapType: addForm.value.mapType || undefined,
-        remarks: addForm.value.remarks || undefined
+        remarks: addForm.value.remarks || undefined,
+        ...baselinePayload()
       })
     );
     return dogMapUpload(formData)
@@ -190,7 +281,8 @@ export function useDogMap() {
       parkId: addForm.value.parkId ?? undefined,
       mapName: addForm.value.mapName,
       mapType: addForm.value.mapType,
-      remarks: addForm.value.remarks
+      remarks: addForm.value.remarks,
+      ...baselinePayload()
     }).then(res => {
       if (res.code === SUCCESS) {
         message("修改成功！", { type: "success" });
@@ -218,12 +310,22 @@ export function useDogMap() {
       parkId: null,
       mapName: "",
       mapType: "离线地图",
-      remarks: ""
+      remarks: "",
+      mapVersion: "v1.0",
+      frameId: "",
+      crs: "GCJ-02 锚点 + 局部 ENU",
+      mapOrigin: "",
+      resolution: "",
+      floors: "",
+      roadCount: null,
+      nogoCount: null,
+      mapStatus: "草稿"
     };
     queryForm.value = {
       parkId: "",
       mapName: "",
       mapType: "",
+      mapStatus: "",
       fileName: "",
       beginTime: "",
       endTime: ""
@@ -239,6 +341,61 @@ export function useDogMap() {
     dialogFormVisible.value = true;
     title.value = param;
     if (formEl) nextTick(() => formEl.clearValidate?.());
+  }
+
+  /** 已发布版本不可修改坐标系，只提交草稿版本的可变字段。 */
+  function baselinePayload() {
+    const form = addForm.value;
+    if (form.id && form.mapStatus !== "草稿") {
+      return { mapStatus: form.mapStatus };
+    }
+    return {
+      mapVersion: form.mapVersion || undefined,
+      frameId: form.frameId || undefined,
+      crs: form.crs || undefined,
+      mapOrigin: form.mapOrigin || undefined,
+      resolution: form.resolution || undefined,
+      floors: form.floors || undefined,
+      roadCount: form.roadCount ?? undefined,
+      nogoCount: form.nogoCount ?? undefined,
+      mapStatus: form.mapStatus || "草稿"
+    };
+  }
+
+  function publishMap(row) {
+    dogMapPublish(row.id).then(res => {
+      if (res.code === SUCCESS) {
+        message(`已发布 ${row.mapVersion || "地图"}，园区基线指针已切换`, {
+          type: "success"
+        });
+        onSearch();
+      } else {
+        message(res.msg, { type: "error" });
+      }
+    });
+  }
+
+  function newVersionMap(row) {
+    dogMapNewVersion(row.id).then(res => {
+      if (res.code === SUCCESS) {
+        message(
+          `已派生新版本 ${res.data?.mapVersion || ""}；历史路线保持旧版引用`,
+          { type: "success" }
+        );
+        onSearch();
+      } else {
+        message(res.msg, { type: "error" });
+      }
+    });
+  }
+
+  function loadRefs(row) {
+    return dogMapRefs(row.id).then(res => {
+      if (res.code !== SUCCESS) {
+        message(res.msg, { type: "error" });
+      }
+      return res.data;
+    });
   }
 
   /** 加载园区下拉数据：新增 / 修改地图时必须挂在某个园区下。 */
@@ -283,6 +440,9 @@ export function useDogMap() {
     handleSubmit,
     handleSubmitError,
     cancel,
-    openDia
+    openDia,
+    publishMap,
+    newVersionMap,
+    loadRefs
   };
 }

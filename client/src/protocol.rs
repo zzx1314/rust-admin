@@ -127,6 +127,28 @@ impl Heartbeat {
     }
 }
 
+/// Frozen map baseline snapshot embedded in a task command (`params.map`).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapBaseline {
+    #[serde(default)]
+    pub map_id: Option<i64>,
+    #[serde(default)]
+    pub map_version: Option<String>,
+    #[serde(default)]
+    pub map_hash: Option<String>,
+    #[serde(default)]
+    pub frame_id: Option<String>,
+    #[serde(default)]
+    pub resolution: Option<String>,
+    #[serde(default)]
+    pub origin: Option<String>,
+    #[serde(default)]
+    pub width: Option<i64>,
+    #[serde(default)]
+    pub height: Option<i64>,
+}
+
 /// Command (task) dispatched by the server.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -166,6 +188,13 @@ impl ServerCommand {
     /// `params` rendered as a compact JSON string.
     pub fn params_text(&self) -> String {
         serde_json::to_string(&self.params).unwrap_or_else(|_| self.params.to_string())
+    }
+
+    /// Map baseline snapshot carried by a route mission (`params.map`).
+    pub fn map_baseline(&self) -> Option<MapBaseline> {
+        self.params
+            .get("map")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
     }
 }
 
@@ -280,6 +309,31 @@ mod tests {
         assert_eq!(value["commandId"], 42);
         assert_eq!(value["status"], "error");
         assert_eq!(value["returnValue"], "boom");
+    }
+
+    #[test]
+    fn server_command_exposes_map_baseline() {
+        let command: ServerCommand = serde_json::from_str(
+            r#"{"type":"server-command","commandId":7,"params":{"mission":"patrol","map":{"mapId":3,"mapVersion":"v1.0","mapHash":"abc","frameId":"map","width":4,"height":3}}}"#,
+        )
+        .unwrap();
+
+        let map = command.map_baseline().expect("map payload must parse");
+        assert_eq!(map.map_id, Some(3));
+        assert_eq!(map.map_version.as_deref(), Some("v1.0"));
+        assert_eq!(map.map_hash.as_deref(), Some("abc"));
+        assert_eq!(map.frame_id.as_deref(), Some("map"));
+        assert_eq!(map.width, Some(4));
+        assert_eq!(map.height, Some(3));
+    }
+
+    #[test]
+    fn server_command_without_map_has_no_baseline() {
+        let command: ServerCommand = serde_json::from_str(
+            r#"{"type":"server-command","commandId":7,"params":{"mission":"patrol"}}"#,
+        )
+        .unwrap();
+        assert!(command.map_baseline().is_none());
     }
 
     #[test]

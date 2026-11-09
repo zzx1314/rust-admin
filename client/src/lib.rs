@@ -27,6 +27,7 @@ pub mod auth;
 pub mod device_id;
 pub mod error;
 pub mod link;
+pub mod map;
 pub mod protocol;
 pub mod reconnect;
 pub mod session;
@@ -36,8 +37,10 @@ pub use auth::DeviceClient;
 pub use device_id::DeviceIdentity;
 pub use error::ClientError;
 pub use link::DeviceLink;
+pub use map::{hash_matches, sha256_bytes, sha256_file};
 pub use protocol::{
-    CommandResult, DeviceRegistration, DeviceSummary, FileAck, Heartbeat, ServerCommand, Telemetry,
+    CommandResult, DeviceRegistration, DeviceSummary, FileAck, Heartbeat, MapBaseline,
+    ServerCommand, Telemetry,
 };
 pub use reconnect::ReconnectPolicy;
 pub use session::{CommandHandler, SessionConfig, SessionSummary};

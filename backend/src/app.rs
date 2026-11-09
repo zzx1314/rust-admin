@@ -188,6 +188,11 @@ impl App {
             dog_device_repo.clone(),
         ));
 
+        let dog_park_repo = SeaOrmDogParkRepository::new(conn.clone());
+        let dog_park_service = Arc::new(DogParkService::new(dog_park_repo.clone()));
+
+        let dog_map_repo = SeaOrmDogMapRepository::new(conn.clone());
+
         let dog_task_repo = SeaOrmDogTaskRepository::new(conn.clone());
         let dog_workflow_repo = SeaOrmDogWorkflowRepository::new(conn.clone());
         let dog_command_repo = SeaOrmDogCommandRepository::new(conn.clone());
@@ -199,14 +204,14 @@ impl App {
             dog_workflow_repo.clone(),
             dog_command_repo.clone(),
             dog_route_repo.clone(),
+            dog_map_repo.clone(),
             dog_gateway.clone(),
         ));
 
-        let dog_park_repo = SeaOrmDogParkRepository::new(conn.clone());
-        let dog_park_service = Arc::new(DogParkService::new(dog_park_repo.clone()));
-
-        let dog_map_repo = SeaOrmDogMapRepository::new(conn.clone());
-        let dog_map_service = Arc::new(DogMapService::new(dog_map_repo, dog_park_repo));
+        let dog_map_service = Arc::new(DogMapService::new(
+            dog_map_repo.clone(),
+            dog_park_repo.clone(),
+        ));
 
         let dog_media_repo = SeaOrmDogMediaRepository::new(conn.clone());
         let dog_media_service = Arc::new(DogMediaService::new(dog_media_repo.clone()));
@@ -219,8 +224,11 @@ impl App {
 
         let dog_command_service = Arc::new(DogCommandService::new(dog_command_repo.clone()));
 
-        let dog_route_library_service =
-            Arc::new(DogRouteLibraryService::new(dog_route_repo.clone()));
+        let dog_route_library_service = Arc::new(DogRouteLibraryService::new(
+            dog_route_repo.clone(),
+            dog_map_repo.clone(),
+            dog_park_repo.clone(),
+        ));
 
         let dog_workflow_service = Arc::new(DogWorkflowService::new(dog_workflow_repo));
 

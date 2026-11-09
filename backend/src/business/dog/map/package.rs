@@ -7,6 +7,7 @@
 use std::io::Cursor;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use sha2::{Digest, Sha256};
 
 use crate::common::error::AppError;
 
@@ -18,6 +19,8 @@ pub struct ParsedMapPackage {
     pub origin: Vec<f64>,
     pub width: u32,
     pub height: u32,
+    /// 地图包内容的 SHA-256（hex），用于发布基线与设备执行前一致性校验。
+    pub sha256: String,
 }
 
 impl ParsedMapPackage {
@@ -35,6 +38,7 @@ const DEFAULT_ORIGIN: [f64; 3] = [0.0, 0.0, 0.0];
 /// 兼容包内多层目录（例如 `map/model.pgm`），先找 `model.pgm`，找不到时退回
 /// 第一个 `*.pgm`。
 pub fn parse_map_package(bytes: &[u8]) -> Result<ParsedMapPackage, AppError> {
+    let sha256 = sha256_hex(bytes);
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|error| AppError::BadRequest(format!("地图包解析失败: {error}")))?;
 
@@ -71,7 +75,19 @@ pub fn parse_map_package(bytes: &[u8]) -> Result<ParsedMapPackage, AppError> {
         origin,
         width,
         height,
+        sha256,
     })
+}
+
+/// 计算字节内容的 SHA-256（小写 hex）。
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 /// 按 `preferred`（精确文件名）→ `extension`（后缀）顺序查找包内条目。
@@ -138,7 +154,11 @@ fn parse_origin(yaml: &str) -> Option<Vec<f64>> {
         .split(',')
         .filter_map(|part| part.trim().parse::<f64>().ok())
         .collect();
-    if values.is_empty() { None } else { Some(values) }
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
 }
 
 #[cfg(test)]
@@ -170,16 +190,15 @@ mod tests {
     #[test]
     fn parses_pgm_and_yaml_from_flat_package() {
         let yaml = b"image: model.pgm\nresolution: 0.05\norigin: [-8.7, -17.7, 0.0]\nnegate: 0\n";
-        let zip = build_zip(&[
-            ("model.pgm", sample_pgm()),
-            ("model.yaml", yaml.to_vec()),
-        ]);
+        let zip = build_zip(&[("model.pgm", sample_pgm()), ("model.yaml", yaml.to_vec())]);
 
         let parsed = parse_map_package(&zip).unwrap();
         assert_eq!(parsed.width, 4);
         assert_eq!(parsed.height, 3);
         assert!((parsed.resolution - 0.05).abs() < f64::EPSILON);
         assert_eq!(parsed.origin, vec![-8.7, -17.7, 0.0]);
+        assert_eq!(parsed.sha256.len(), 64);
+        assert_eq!(parsed.sha256, sha256_hex(&zip));
         assert!(parsed.png_data_url().starts_with("data:image/png;base64,"));
     }
 
@@ -204,6 +223,14 @@ mod tests {
         // 没有 yaml 时使用默认参数
         assert!((parsed.resolution - DEFAULT_RESOLUTION).abs() < f64::EPSILON);
         assert_eq!(parsed.origin, DEFAULT_ORIGIN.to_vec());
+    }
+
+    #[test]
+    fn sha256_matches_known_vector() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]

@@ -8,6 +8,8 @@ import {
   dogParkUpdate,
   dogParkDelete
 } from "@/api/dogPark";
+import { dogMapGetByPark } from "@/api/dogMap";
+import { MAP_STATUS_TAG_TYPE } from "../components/search";
 import { CREATE_TIME_FIELDS, type DogSearchField } from "../components/search";
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
@@ -28,6 +30,28 @@ export function useDogPark() {
     { label: "园区名称", prop: "parkName", minWidth: 150 },
     { label: "园区描述", prop: "parkDescription", minWidth: 200 },
     { label: "园区地址", prop: "parkAddress", minWidth: 200 },
+    {
+      label: "地图基线",
+      prop: "mapStatus",
+      width: 180,
+      cellRenderer: ({ row }) => (
+        <div class="flex flex-col items-start gap-1">
+          <el-tag
+            size="small"
+            type={
+              row.mapId
+                ? MAP_STATUS_TAG_TYPE[row.mapStatus] || "success"
+                : "danger"
+            }
+          >
+            {row.mapStatus || "未绑定"}
+          </el-tag>
+          <span class="text-xs text-gray-400">
+            {row.mapId ? `基线 ID ${row.mapId}` : "仅资产台账"}
+          </span>
+        </div>
+      )
+    },
     {
       label: "所属用户",
       prop: "userName",
@@ -58,6 +82,10 @@ export function useDogPark() {
   const dialogFormVisible = ref(false);
   const title = ref("");
   const addForm = ref({ id: null });
+  const baselineDialogVisible = ref(false);
+  const baselineTitle = ref("");
+  const baselineList = ref<Array<Record<string, any>>>([]);
+  const baselineLoading = ref(false);
 
   function handleUpdate(row, formEl) {
     addForm.value = JSON.parse(JSON.stringify(row));
@@ -82,6 +110,25 @@ export function useDogPark() {
     onSearch();
   }
   function handleSelectionChange(_val) {}
+
+  /** 查看园区的全部地图版本（含草稿 / 已归档）。 */
+  function openBaselines(row) {
+    baselineTitle.value = `${row.parkName} · 地图基线`;
+    baselineList.value = [];
+    baselineDialogVisible.value = true;
+    baselineLoading.value = true;
+    dogMapGetByPark(row.id, false)
+      .then(res => {
+        if (res.code === SUCCESS) {
+          baselineList.value = res.data ?? [];
+        } else {
+          message(res.msg, { type: "error" });
+        }
+      })
+      .finally(() => {
+        baselineLoading.value = false;
+      });
+  }
   const handleSubmitError = (err: any) => console.log(err);
 
   const handleSubmit = (_values: FieldValues) => {
@@ -152,6 +199,11 @@ export function useDogPark() {
     handleSubmit,
     handleSubmitError,
     cancel,
-    openDia
+    openDia,
+    baselineDialogVisible,
+    baselineTitle,
+    baselineList,
+    baselineLoading,
+    openBaselines
   };
 }

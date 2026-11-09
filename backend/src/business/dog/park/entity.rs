@@ -15,6 +15,12 @@ pub struct Model {
     pub park_address: Option<String>,
     #[sea_orm(column_name = "user_id", column_type = "Integer")]
     pub user_id: i64,
+    /// 当前生效的地图基线（`dog_map.id`）。未绑定时为 NULL。
+    #[sea_orm(column_name = "map_id", column_type = "Integer", nullable)]
+    pub map_id: Option<i64>,
+    /// 标定状态：未绑定 / 待标定 / 已标定 / 部分标定。
+    #[sea_orm(column_name = "map_status", column_type = "Text")]
+    pub map_status: String,
     #[sea_orm(column_name = "create_time", column_type = "Timestamp")]
     pub create_time: DateTime<Utc>,
     #[sea_orm(column_name = "update_time", column_type = "Timestamp", nullable)]

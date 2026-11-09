@@ -193,6 +193,12 @@ cargo build --release
 
 # 建立链路后上传一个文件（落盘并登记到「媒体资源」）
 ./target/release/dog-device-client --upload ./sample.jpg
+
+# 巡检任务：用本地 ROS 地图包校验下发的 mapHash，不一致时拒绝执行
+./target/release/dog-device-client \
+  --server http://127.0.0.1:3000 \
+  --map-package /opt/dog/maps/model.zip \
+  --exec 'ros2 run dog_patrol patrol --mission "$DOG_COMMAND_JSON"'
 ```
 
 参数说明：
@@ -211,10 +217,44 @@ cargo build --release
 | `--reconnect-delay/--reconnect-max-delay/--max-reconnect-attempts/--no-reconnect` | 断线重连退避策略，见第 2 节 |
 | `--upload <PATH>` | 链路建立后上传一次该文件 |
 | `--exec <CMD>` | 收到任务时执行的 shell 命令（`DOG_COMMAND_ID` / `DOG_COMMAND_JSON` 环境变量） |
+| `--map-package <PATH>` | 本地 ROS 地图包（`.zip`），启动时计算 SHA-256；任务携带 `mapHash` 时用于一致性校验 |
+| `--map-hash <HEX>` | 直接指定本地地图 SHA-256（优先于 `--map-package`） |
 | `--ca/--cert/--key <PEM>` | `wss://` 与 mTLS 证书（不传则使用系统根证书） |
 | `--once` | 只做认证、注册、一次心跳验证后退出 |
 
-## 5. TLS / mTLS
+## 5. 地图基线校验
+
+服务器下发引用路线的任务时，会在 `params.map` 中携带创建路线时冻结的地图基线：
+
+```json
+{
+  "type": "server-command",
+  "commandId": 1700000000001,
+  "params": {
+    "mission": "patrol",
+    "map": {
+      "mapId": 1700000000000,
+      "mapVersion": "v1.0",
+      "mapHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "frameId": "map",
+      "resolution": "0.05",
+      "origin": "-8.7, -17.7, 0.0",
+      "width": 1024,
+      "height": 768
+    }
+  }
+}
+```
+
+客户端在 `--exec` 之前会：
+
+1. 读取 `params.map.mapHash`；缺失 → 返回 `error`，不执行任务。
+2. 读取本地地图哈希（`--map-package` 计算 / `--map-hash` 指定）；未配置 → 返回 `error`。
+3. 两者不一致 → 返回 `error`，并在 `returnValue` 中带上期望值与本地值。
+
+`mapHash` 是上传地图包时后端计算的 SHA-256（zip 文件内容），因此设备上的地图包必须是**同一份文件**。没有 `map` 字段的普通指令（如设备自检）不受影响。
+
+## 6. TLS / mTLS
 
 ```bash
 ./target/release/dog-device-client \
@@ -230,7 +270,7 @@ cargo build --release
 > 注意：服务端 `GET /api/dogGateway/auth/{deviceId}` 沿用原网关语义，只按设备号下发 token，
 > 身份校验依赖入口层（mTLS / 内网隔离 / 反向代理）。上生产时请务必启用其中一种。
 
-## 6. 验证能通信
+## 7. 验证能通信
 
 自动化（推荐，随 `cargo test` 一起跑）：
 
@@ -274,7 +314,7 @@ curl -s -X POST http://127.0.0.1:3000/api/dogCommand \
 # 终端 2 的客户端日志会打印 "task received"
 ```
 
-## 7. 目录
+## 8. 目录
 
 ```text
 client/

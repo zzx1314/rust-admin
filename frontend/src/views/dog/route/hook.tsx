@@ -7,7 +7,8 @@ import {
   dogRouteUpdate,
   dogRouteDelete
 } from "@/api/dogRoute";
-import { dogMapGetAll } from "@/api/dogMap";
+import { dogMapGetById, dogMapGetByPark, dogMapRefs } from "@/api/dogMap";
+import { dogParkGetAll } from "@/api/dogPark";
 import { useRouter } from "vue-router";
 import { useMultiTagsStoreHook } from "@/store/modules/multiTags";
 import { CREATE_TIME_FIELDS, type DogSearchField } from "../components/search";
@@ -19,10 +20,20 @@ export function useDogRoute() {
   const router = useRouter();
   const rules = reactive<FormRules>({
     routeName: [{ required: true, message: "名称必填", trigger: "blur" }],
-    routeType: [{ required: true, message: "路线类型必填", trigger: "change" }]
+    routeType: [{ required: true, message: "路线类型必填", trigger: "change" }],
+    parkId: [{ required: true, message: "所属园区必填", trigger: "change" }],
+    mapId: [{ required: true, message: "地图基线版本必填", trigger: "change" }]
   });
   const switchLoadMap = ref({});
   const mapOptions = ref<Array<{ label: string; value: number }>>([]);
+  const parkOptions = ref<Array<{ label: string; value: number }>>([]);
+  const baselineVisible = ref(false);
+  const baselineLoading = ref(false);
+  const baselineInfo = ref<Record<string, any>>({});
+  const baselineRefs = ref<{ routes: any[]; taskCount: number }>({
+    routes: [],
+    taskCount: 0
+  });
 
   const columns: TableColumnList = [
     {
@@ -34,6 +45,7 @@ export function useDogRoute() {
     },
     { label: "序号", type: "index", fixed: "left", width: 70 },
     { label: "路线名称", prop: "routeName", minWidth: 150 },
+    { label: "所属园区", prop: "parkName", minWidth: 140 },
     {
       label: "路线类型",
       prop: "routeType",
@@ -67,13 +79,22 @@ export function useDogRoute() {
     },
     { label: "路线描述", prop: "routeDescription", minWidth: 120 },
     {
-      label: "关联地图",
-      prop: "modelId",
-      width: 100,
-      cellRenderer: ({ row }) => {
-        const map = mapOptions.value.find(m => m.value === row.modelId);
-        return map ? map.label : row.modelId;
-      }
+      label: "地图基线（冻结）",
+      prop: "mapVersion",
+      width: 170,
+      cellRenderer: ({ row }) =>
+        row.mapVersion ? (
+          <div class="flex flex-col items-start gap-1">
+            <el-tag size="small" type="success">
+              {row.mapVersion}
+            </el-tag>
+            <span class="text-xs font-mono text-gray-400">
+              {row.mapFrame || `地图 ${row.mapId}`}
+            </span>
+          </div>
+        ) : (
+          <span class="text-xs text-gray-400">未绑定</span>
+        )
     },
     { label: "路线数据", prop: "routeData", minWidth: 150 },
     { label: "创建时间", prop: "createTime", width: 180 },
@@ -108,6 +129,8 @@ export function useDogRoute() {
     routeType: "",
     routeStatus: "停用",
     routeDescription: "",
+    parkId: null,
+    mapId: null,
     modelId: null,
     routeData: ""
   });
@@ -172,6 +195,10 @@ export function useDogRoute() {
       return;
     }
     addForm.value = JSON.parse(JSON.stringify(row));
+    if (addForm.value.mapId) {
+      addForm.value.modelId = addForm.value.mapId;
+    }
+    syncMapOptions(addForm.value.parkId, addForm.value.mapId);
     openDia("修改路线", formEl);
   }
 
@@ -200,12 +227,77 @@ export function useDogRoute() {
   }
   function handleSelectionChange(_val) {}
 
+  /** 园区切换时重新加载该园区可用的地图基线版本。 */
+  function syncMapOptions(
+    parkId?: number | null,
+    selectedMapId?: number | null
+  ) {
+    mapOptions.value = [];
+    addForm.value.mapId = null;
+    if (!parkId) return;
+    dogMapGetByPark(parkId, true).then(res => {
+      if (res.code === SUCCESS) {
+        mapOptions.value = (res.data ?? []).map(map => ({
+          label: `${map.mapVersion || "未命名"} · ${map.mapStatus} · ${map.frameId || "未配置 frame_id"}`,
+          value: map.id
+        }));
+        // 保留创建时冻结的版本；新建时默认选中园区当前生效基线。
+        addForm.value.mapId =
+          selectedMapId ?? mapOptions.value[0]?.value ?? null;
+      } else {
+        message(res.msg, { type: "error" });
+      }
+    });
+  }
+
+  /** 查看路线冻结的地图基线详情（只读）。 */
+  function openBaseline(row) {
+    if (!row.mapId) {
+      message("该路线尚未绑定地图基线", { type: "warning" });
+      return;
+    }
+    baselineInfo.value = {};
+    baselineRefs.value = { routes: [], taskCount: 0 };
+    baselineVisible.value = true;
+    baselineLoading.value = true;
+    Promise.all([dogMapGetById(row.mapId), dogMapRefs(row.mapId)])
+      .then(([mapRes, refsRes]) => {
+        if (mapRes.code === SUCCESS) {
+          baselineInfo.value = mapRes.data ?? {};
+        } else {
+          message(mapRes.msg, { type: "error" });
+        }
+        if (refsRes.code === SUCCESS) {
+          baselineRefs.value = refsRes.data ?? { routes: [], taskCount: 0 };
+        }
+      })
+      .finally(() => {
+        baselineLoading.value = false;
+      });
+  }
+
+  function loadParks() {
+    dogParkGetAll().then(res => {
+      if (res.code === SUCCESS) {
+        parkOptions.value = (res.data ?? []).map(park => ({
+          label: park.parkName,
+          value: park.id
+        }));
+      }
+    });
+  }
+
   const handleSubmit = async (formEl: FormInstance | undefined) => {
     if (!formEl) return;
     await formEl.validate(valid => {
       if (!valid) return;
+      // 兼容历史 modelId：路线数据 / mock 地图工具仍按 modelId 读取地图。
+      const payload = {
+        ...addForm.value,
+        modelId: addForm.value.mapId ?? addForm.value.modelId
+      };
       if (addForm.value.id) {
-        dogRouteUpdate(addForm.value.id, addForm.value).then(res => {
+        dogRouteUpdate(addForm.value.id, payload).then(res => {
           if (res.code === SUCCESS) {
             message("修改成功！", { type: "success" });
             cancel();
@@ -214,7 +306,7 @@ export function useDogRoute() {
           }
         });
       } else {
-        dogRouteSave(addForm.value).then(res => {
+        dogRouteSave(payload).then(res => {
           if (res.code === SUCCESS) {
             message("保存成功！", { type: "success" });
             cancel();
@@ -247,9 +339,12 @@ export function useDogRoute() {
       routeType: "",
       routeStatus: "停用",
       routeDescription: "",
+      parkId: null,
+      mapId: null,
       modelId: null,
       routeData: ""
     };
+    mapOptions.value = [];
     queryForm.value = {
       routeName: "",
       routeType: "",
@@ -298,20 +393,9 @@ export function useDogRoute() {
     router.push({ path: "/dog/route/planning/index", query });
   }
 
-  function loadMapOptions() {
-    dogMapGetAll().then(res => {
-      if (res.code === SUCCESS && res.data) {
-        mapOptions.value = res.data.map(m => ({
-          label: m.mapName || `地图${m.id}`,
-          value: m.id
-        }));
-      }
-    });
-  }
-
   onMounted(() => {
     onSearch();
-    loadMapOptions();
+    loadParks();
   });
 
   return {
@@ -328,6 +412,13 @@ export function useDogRoute() {
     moreQueryFields,
     switchLoadMap,
     mapOptions,
+    parkOptions,
+    syncMapOptions,
+    baselineVisible,
+    baselineLoading,
+    baselineInfo,
+    baselineRefs,
+    openBaseline,
     buttonClass,
     onSearch,
     handleUpdate,
