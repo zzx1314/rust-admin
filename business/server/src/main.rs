@@ -3,6 +3,8 @@ mod auth;
 mod config;
 mod db;
 mod error;
+mod gateway;
+mod gateway_types;
 mod geo;
 mod handlers;
 mod models;
@@ -30,6 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
         db: pool,
         config: config.clone(),
+        device_connections: gateway::new_device_connections(),
     };
     let router = build_router(state);
 

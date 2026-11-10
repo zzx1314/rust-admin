@@ -1,11 +1,13 @@
 use crate::app::AppState;
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
+use crate::gateway;
 use crate::models::{CommandRequest, Device, DeviceQuery, DeviceRequest};
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use serde_json::{Value, json};
 use sqlx::QueryBuilder;
+use tracing::info;
 
 const DEVICE_SELECT: &str = "SELECT d.id, d.device_id, d.model, d.park_id, p.park_name,
     d.zone_id, z.zone_name, d.status, d.battery, d.signal, d.temperature, d.runtime_minutes,
@@ -232,10 +234,24 @@ pub async fn send_command(
     .execute(&state.db)
     .await?;
 
+    // 如果设备在线，通过 WebSocket 下发指令
+    let cmd_sent = gateway::send_command_to_device(
+        &state.device_connections,
+        &device.device_id,
+        &payload.command,
+        Some(json!({"dispatchedAt": timestamp})),
+    )
+    .await;
+
+    if cmd_sent {
+        info!("command '{}' pushed via WebSocket to device {}", payload.command, device.device_id);
+    }
+
     Ok(ApiResponse::ok(json!({
         "deviceId": device.device_id,
         "command": payload.command,
         "dispatchedAt": timestamp,
+        "wsDelivered": cmd_sent,
     })))
 }
 

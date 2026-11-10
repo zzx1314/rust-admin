@@ -1,6 +1,8 @@
 use crate::auth::{login_handler, me_handler, require_auth};
 use crate::config::Config;
 use crate::error::ApiResponse;
+use crate::gateway;
+use crate::gateway::DeviceConnections;
 use crate::handlers::{alerts, dashboard, devices, maps, parks, routes, settings, tasks, zones};
 use axum::extract::State;
 use axum::http::Method;
@@ -18,6 +20,7 @@ use tower_http::trace::TraceLayer;
 pub struct AppState {
     pub db: SqlitePool,
     pub config: Arc<Config>,
+    pub device_connections: DeviceConnections,
 }
 
 async fn health(State(state): State<AppState>) -> Json<ApiResponse<Value>> {
@@ -114,7 +117,8 @@ pub fn build_router(state: AppState) -> Router {
 
     let public = Router::new()
         .route("/auth/login", post(login_handler))
-        .route("/health", get(health));
+        .route("/health", get(health))
+        .route("/ws/device", get(gateway::ws_handler));
 
     let api = public.merge(protected);
 
