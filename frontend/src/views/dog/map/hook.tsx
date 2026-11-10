@@ -12,24 +12,20 @@ import {
   dogMapUpdate,
   dogMapDelete,
   dogMapPublish,
-  dogMapNewVersion,
-  dogMapRefs
+  dogMapNewVersion
 } from "@/api/dogMap";
-import { dogParkGetAll } from "@/api/dogPark";
 import {
   CREATE_TIME_FIELDS,
   MAP_STATUS_OPTIONS,
   MAP_STATUS_TAG_TYPE,
   MAP_TYPE_OPTIONS,
-  type DogSearchField,
-  type DogSearchOption
+  type DogSearchField
 } from "../components/search";
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
 
 export function useDogMap() {
   const rules = reactive<FormRules>({
-    parkId: [{ required: true, message: "所属园区必填", trigger: "change" }],
     mapName: [{ required: true, message: "地图名称必填", trigger: "blur" }],
     mapType: [{ required: true, message: "地图类型必填", trigger: "change" }],
     remarks: [{ required: true, message: "地图描述必填", trigger: "blur" }]
@@ -43,7 +39,6 @@ export function useDogMap() {
       label: "勾选列"
     },
     { label: "序号", type: "index", fixed: "left", width: 70 },
-    { label: "所属园区", prop: "parkName", minWidth: 140 },
     { label: "地图名称", prop: "mapName", minWidth: 150 },
     {
       label: "地图类型",
@@ -120,15 +115,7 @@ export function useDogMap() {
     { label: "操作", fixed: "right", width: 260, slot: "operation" }
   ];
 
-  /** 园区下拉数据（查询条件 + 新增 / 修改弹窗共用）。 */
-  const parkOptions = ref<DogSearchOption[]>([]);
   const queryFields = computed<DogSearchField[]>(() => [
-    {
-      label: "所属园区",
-      prop: "parkId",
-      type: "select",
-      options: parkOptions.value
-    },
     { label: "地图名称", prop: "mapName" },
     {
       label: "地图类型",
@@ -147,7 +134,6 @@ export function useDogMap() {
   const moreQueryFields: DogSearchField[] = [...CREATE_TIME_FIELDS];
 
   const queryForm = ref({
-    parkId: "" as number | "",
     mapName: "",
     mapType: "",
     mapStatus: "",
@@ -167,7 +153,6 @@ export function useDogMap() {
   const title = ref("");
   const addForm = ref<{
     id: number | null;
-    parkId: number | null;
     mapName: string;
     mapType: string;
     remarks: string;
@@ -182,7 +167,6 @@ export function useDogMap() {
     mapStatus: string;
   }>({
     id: null,
-    parkId: null,
     mapName: "",
     mapType: "离线地图",
     remarks: "",
@@ -203,7 +187,6 @@ export function useDogMap() {
   function handleUpdate(row, formEl) {
     addForm.value = {
       id: row.id,
-      parkId: row.parkId ?? null,
       mapName: row.mapName ?? "",
       mapType: row.mapType ?? "",
       remarks: row.remarks ?? "",
@@ -248,7 +231,6 @@ export function useDogMap() {
       "mapInfo",
       JSON.stringify({
         id: addForm.value.id ?? undefined,
-        parkId: addForm.value.parkId ?? undefined,
         mapName: addForm.value.mapName,
         mapType: addForm.value.mapType || undefined,
         remarks: addForm.value.remarks || undefined,
@@ -273,12 +255,11 @@ export function useDogMap() {
       });
   }
 
-  /** 未更换地图包时，仅更新园区 / 名称 / 类型 / 描述。 */
+  /** 未更换地图包时，仅更新名称 / 类型 / 描述。 */
   const handleSubmit = (_values?: unknown) => {
     const id = addForm.value.id;
     if (!id) return;
     dogMapUpdate(id, {
-      parkId: addForm.value.parkId ?? undefined,
       mapName: addForm.value.mapName,
       mapType: addForm.value.mapType,
       remarks: addForm.value.remarks,
@@ -307,7 +288,6 @@ export function useDogMap() {
   function cancel() {
     addForm.value = {
       id: null,
-      parkId: null,
       mapName: "",
       mapType: "离线地图",
       remarks: "",
@@ -322,7 +302,6 @@ export function useDogMap() {
       mapStatus: "草稿"
     };
     queryForm.value = {
-      parkId: "",
       mapName: "",
       mapType: "",
       mapStatus: "",
@@ -365,9 +344,7 @@ export function useDogMap() {
   function publishMap(row) {
     dogMapPublish(row.id).then(res => {
       if (res.code === SUCCESS) {
-        message(`已发布 ${row.mapVersion || "地图"}，园区基线指针已切换`, {
-          type: "success"
-        });
+        message(`已发布 ${row.mapVersion || "地图"}`, { type: "success" });
         onSearch();
       } else {
         message(res.msg, { type: "error" });
@@ -378,10 +355,9 @@ export function useDogMap() {
   function newVersionMap(row) {
     dogMapNewVersion(row.id).then(res => {
       if (res.code === SUCCESS) {
-        message(
-          `已派生新版本 ${res.data?.mapVersion || ""}；历史路线保持旧版引用`,
-          { type: "success" }
-        );
+        message(`已派生新版本 ${res.data?.mapVersion || ""}`, {
+          type: "success"
+        });
         onSearch();
       } else {
         message(res.msg, { type: "error" });
@@ -389,29 +365,7 @@ export function useDogMap() {
     });
   }
 
-  function loadRefs(row) {
-    return dogMapRefs(row.id).then(res => {
-      if (res.code !== SUCCESS) {
-        message(res.msg, { type: "error" });
-      }
-      return res.data;
-    });
-  }
-
-  /** 加载园区下拉数据：新增 / 修改地图时必须挂在某个园区下。 */
-  function loadParks() {
-    dogParkGetAll().then(res => {
-      if (res.code === SUCCESS) {
-        parkOptions.value = (res.data ?? []).map(park => ({
-          label: park.parkName,
-          value: park.id
-        }));
-      }
-    });
-  }
-
   onMounted(() => {
-    loadParks();
     onSearch();
   });
 
@@ -427,7 +381,6 @@ export function useDogMap() {
     addForm,
     rules,
     columns,
-    parkOptions,
     fileList,
     uploadFileTemp,
     onSearch,
@@ -442,7 +395,6 @@ export function useDogMap() {
     cancel,
     openDia,
     publishMap,
-    newVersionMap,
-    loadRefs
+    newVersionMap
   };
 }

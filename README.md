@@ -12,8 +12,8 @@ A full-stack admin panel built with a **Rust** backend and **Vue 3** frontend. T
 - **Dictionary Management**: System dictionaries and dictionary items with type-based lookups
 - **System Log**: Operation logging with pagination and sensitive data masking
 - **Request Logging Middleware**: Automatic HTTP request tracking with response time measurement
-- **Robot Dog Business Module**: device / task / route / model / media / command / config / services / workflow CRUD plus dashboard statistics (see [DOG.md](DOG.md))
-- **Device Gateway & Client**: device token auth, WebSocket task dispatch, heartbeat/telemetry, command reporting and file upload, with a Rust device client in [`client/`](client/README.md)
+- **Robot Dog Resource Module**: map / model / media / command / config / services CRUD plus dashboard statistics (see [DOG.md](DOG.md))
+- **Standalone Robot-Dog Service**: parks / devices / tasks / routes, live console and backend under [`business/`](business/README.md)
 
 ## 🏗️ Architecture
 
@@ -27,10 +27,12 @@ rust-admin/
 │   │   ├── config/    # Application configuration
 │   │   ├── migration/ # Database migrations
 │   │   ├── system/    # Platform modules (user, role, menu, org, dict, log, auth)
-│   │   └── business/  # Business domain (dog: device, task, route, model, gateway, ...)
+│   │   └── business/  # Business domain (dog: map, model, media, command, config, services)
 │   ├── tests/         # Integration tests (organized by module)
 │   └── config.toml    # Server, Redis, and database configuration
-├── client/            # Rust device client (auth, websocket link, task execution, upload)
+├── business/          # Standalone robot-dog service (Rust server + Vue console)
+│   ├── server/        # axum + sqlx service (parks / devices / tasks / routes)
+│   └── web/           # Vue 3 operations console
 └── frontend/          # Vue 3 admin panel (vue-pure-admin)
     ├── src/
     │   ├── api/       # API service functions
@@ -119,7 +121,6 @@ cd backend
 
 # Secrets must be provided through the environment (see Configuration below)
 export APP_JWT_SECRET="$(openssl rand -hex 32)"
-export APP_DEVICE_AUTH_SECRET="$(openssl rand -hex 32)"
 
 # Non-secret settings live in config/config.toml (SQLite is auto-created,
 # Redis defaults to localhost)
@@ -222,7 +223,6 @@ environment:
 | Environment variable | Required | Purpose |
 |---|---|---|
 | `APP_JWT_SECRET` | yes | JWT signing key, min 32 bytes (`openssl rand -hex 32`) |
-| `APP_DEVICE_AUTH_SECRET` | yes | Shared secret devices use to sign token requests |
 | `APP_REDIS_PASSWORD` | no | Redis password (empty means no auth) |
 | `APP_CONFIG_FILE` | no | Explicit config path, overrides the default lookup |
 | `APP_SERVER__PORT` | no | Any config key can be overridden as `APP_<SECTION>__<KEY>` |
@@ -248,7 +248,6 @@ Local setup:
 ```bash
 cd backend
 export APP_JWT_SECRET="$(openssl rand -hex 32)"
-export APP_DEVICE_AUTH_SECRET="$(openssl rand -hex 32)"
 ```
 
 ### Frontend (`frontend/vite.config.ts`)

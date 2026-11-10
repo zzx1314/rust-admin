@@ -450,7 +450,14 @@ mod tests {
         );
 
         // 保留的页面仍是一级菜单：地图管理 sort 2，模型管理 sort 3。
-        for (id, sort) in [(1302, 2), (1204, 3), (1205, 4), (1206, 5), (1207, 6), (1208, 7)] {
+        for (id, sort) in [
+            (1302, 2),
+            (1204, 3),
+            (1205, 4),
+            (1206, 5),
+            (1207, 6),
+            (1208, 7),
+        ] {
             let statement = Statement::from_string(
                 DbBackend::Sqlite,
                 format!(
@@ -467,7 +474,9 @@ mod tests {
         }
 
         // 园区 / 设备 / 路线 / 任务 / 工作流 / 设备绑定菜单已物理删除。
-        for id in [1200, 1201, 1202, 1203, 1209, 1210, 1211, 1212, 1213, 1219, 1220, 1300, 1301, 1311] {
+        for id in [
+            1200, 1201, 1202, 1203, 1209, 1210, 1211, 1212, 1213, 1219, 1220, 1300, 1301, 1311,
+        ] {
             let statement = Statement::from_string(
                 DbBackend::Sqlite,
                 format!("SELECT 1 FROM p_sys_menu WHERE id = {}", id),
@@ -484,7 +493,11 @@ mod tests {
             "SELECT 1 FROM p_sys_role_menu WHERE menu_id IN (1201, 1301)",
         );
         assert!(
-            connection.query_one(retired_grants).await.unwrap().is_none(),
+            connection
+                .query_one(retired_grants)
+                .await
+                .unwrap()
+                .is_none(),
             "retired menu grants must be removed"
         );
 

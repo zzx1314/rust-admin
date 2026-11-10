@@ -193,7 +193,6 @@ export interface MapVersion {
 export interface BackendMap {
   id: number;
   mapName: string;
-  parkId: number | null;
   fileName: string | null;
   filePath: string | null;
   fileFormat: string | null;

@@ -221,7 +221,7 @@ async fn summary_cards_reflect_stored_rows_and_week_to_date_series() {
         assert_eq!(summary.value, 1, "{} counts the stored row", summary.name);
         // Rows were just created, so exactly one weekday bucket is filled.
         assert!(
-            summary.data.iter().any(|count| *count == 1),
+            summary.data.contains(&1),
             "{} must bucket today's row into the current week",
             summary.name
         );

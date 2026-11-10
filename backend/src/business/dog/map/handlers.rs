@@ -74,13 +74,7 @@ pub async fn upload_map_handler(
     let scope = user.data_scope();
     let map = state
         .dog_map_service
-        .save_upload(
-            info,
-            &file_name,
-            &bytes,
-            &state.upload_dir,
-            &scope,
-        )
+        .save_upload(info, &file_name, &bytes, &state.upload_dir, &scope)
         .await?;
     let vo = state.dog_map_service.to_vo(map);
 
@@ -141,11 +135,7 @@ pub async fn get_map_image_handler(
 ) -> Result<Json<ApiResponse<MapImageVO>>, AppError> {
     let image = state
         .dog_map_service
-        .load_image(
-            params.id,
-            &state.upload_dir,
-            &user.data_scope(),
-        )
+        .load_image(params.id, &state.upload_dir, &user.data_scope())
         .await?;
     Ok(Json(ApiResponse::ok(image)))
 }

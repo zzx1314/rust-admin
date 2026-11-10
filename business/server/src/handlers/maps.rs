@@ -77,7 +77,7 @@ pub async fn list_backend_maps(
         Err(_) => return Ok(ApiResponse::ok(Vec::new())),
     };
     let maps = sqlx::query_as::<_, BackendMap>(
-        "SELECT id, map_name, park_id, file_name, file_path, file_format, file_size,
+        "SELECT id, map_name, file_name, file_path, file_format, file_size,
             remarks, map_version, frame_id, crs, map_origin, resolution, floors,
             road_count, nogo_count, map_status, map_hash, publish_time, map_width,
             map_height, create_time
@@ -101,7 +101,7 @@ pub async fn import_backend_map(
 
     let backend_pool = backend_pool(&state).await?;
     let source = sqlx::query_as::<_, BackendMap>(
-        "SELECT id, map_name, park_id, file_name, file_path, file_format, file_size,
+        "SELECT id, map_name, file_name, file_path, file_format, file_size,
             remarks, map_version, frame_id, crs, map_origin, resolution, floors,
             road_count, nogo_count, map_status, map_hash, publish_time, map_width,
             map_height, create_time

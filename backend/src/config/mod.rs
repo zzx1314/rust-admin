@@ -258,8 +258,8 @@ upload_dir = "/tmp/rust_admin_config_test"
     fn missing_secrets_surface_as_validation_errors() {
         // A file that only carries non-secret values: validation must point at
         // the environment variable instead of silently accepting an empty key.
-        let toml = minimal_toml()
-            .replace("jwt_secret = \"0123456789abcdef0123456789abcdef\"\n", "");
+        let toml =
+            minimal_toml().replace("jwt_secret = \"0123456789abcdef0123456789abcdef\"\n", "");
         let path = write_temp_config(&toml);
 
         let error = AppConfig::load(&path).expect_err("secrets are mandatory");

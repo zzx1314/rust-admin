@@ -245,7 +245,6 @@ impl SeaOrmDogMapRepository {
         update.exec(&*self.conn).await?;
         self.find_by_id(id, scope).await
     }
-
 }
 
 impl BaseRepository for SeaOrmDogMapRepository {

@@ -16,17 +16,16 @@ cargo build --release        # Release 构建 → target/release/x-rust
 ### 运行
 
 ```bash
-./run.sh                     # 运行：自动导出 APP_JWT_SECRET / APP_DEVICE_AUTH_SECRET 后 cargo run
+./run.sh                     # 运行：自动导出 APP_JWT_SECRET 后 cargo run
 ./run.sh --release           # 其余参数透传给 cargo run
 RUST_LOG=debug ./run.sh      # Debug 日志运行
 ```
 
-`cargo run` 直接运行会因缺少 `APP_JWT_SECRET` / `APP_DEVICE_AUTH_SECRET` 报
-`Failed to load config`（`config/config.toml` 不存放密钥）。手动导出即可：
+`cargo run` 直接运行会因缺少 `APP_JWT_SECRET` 报 `Failed to load config`
+（`config/config.toml` 不存放密钥）。手动导出即可：
 
 ```bash
 export APP_JWT_SECRET="$(openssl rand -hex 32)"
-export APP_DEVICE_AUTH_SECRET="local-dev-device-secret-change-me"  # 需与设备端 DOG_AUTH_SECRET 一致
 cargo run
 ```
 
@@ -71,10 +70,9 @@ cargo test --test auth_service_tests  # 运行 auth service tests
 │   └── sys_auth/               # Menu authorization data
 │
 ├── business/                   # Product/business domains
-│   └── dog/                    # Robot dog domain: device, task, media, model, config,
-│                               #   command, route library, workflow, services, statistics
-│       └── gateway/            # Device gateway: token auth, registration, WebSocket,
-│                               #   task dispatch, heartbeat, command results, uploads
+│   └── dog/                    # Robot dog resource domain: map, model, media, command,
+│                               #   config, services, statistics (park/device/task/route
+│                               #   and the device gateway now live in `business/`)
 │
 ├── common/                     # Common/shared code
 │   ├── base.rs                 # BaseRepository, RepoExt traits
@@ -108,7 +106,7 @@ tests/                          # Integration tests grouped by system/business d
 │   ├── sys_dict_item/             # Dictionary item tests
 │   └── sys_log/                   # System log tests
 ├── business/                    # Business domain tests
-│   └── dog_gateway_tests.rs      # Device gateway end-to-end (uses the `dog-device-client` crate)
+│   └── dog_statistics_tests.rs   # Dashboard statistics
 ├── common/                        # Shared utility/value-object tests
 └── logging/                       # HTTP middleware tests
 ```

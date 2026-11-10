@@ -383,11 +383,6 @@ pub fn dog_services_routes(state: AppState) -> Router<AppState> {
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 
-/// Device facing gateway routes: token issuing and registration carry a device
-/// token (not a user JWT), and the WebSocket path authenticates via its URL.
-
-/// Admin facing gateway routes (user JWT required).
-
 pub fn create_router(state: AppState) -> Router {
     let api_router = Router::new()
         .merge(auth_routes())

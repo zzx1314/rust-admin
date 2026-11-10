@@ -1,21 +1,21 @@
 <script setup lang="ts">
+import { type PropType, computed, nextTick, ref, watch } from "vue";
 import { useDark, useECharts } from "@pureadmin/utils";
-import { type PropType, ref, computed, watch, nextTick } from "vue";
 
 const props = defineProps({
-  deviceData: {
-    type: Array as PropType<Array<number>>,
-    default: () => []
-  },
   modelData: {
     type: Array as PropType<Array<number>>,
     default: () => []
   },
-  routeData: {
+  mediaData: {
     type: Array as PropType<Array<number>>,
     default: () => []
   },
-  taskData: {
+  commandData: {
+    type: Array as PropType<Array<number>>,
+    default: () => []
+  },
+  servicesData: {
     type: Array as PropType<Array<number>>,
     default: () => []
   }
@@ -36,7 +36,7 @@ watch(
     await nextTick(); // 确保DOM更新完成后再执行
     setOptions({
       container: ".bar-card",
-      color: ["#41b6ff", "#e86033ce", "#5BECABFF", "#BA53FFFF"],
+      color: ["#26ce83", "#41b6ff", "#e86033ce", "#BA53FFFF"],
       tooltip: {
         trigger: "axis",
         axisPointer: {
@@ -49,7 +49,7 @@ watch(
         right: 0
       },
       legend: {
-        data: ["设备数量", "模型数量", "航线数量", "任务数量"],
+        data: ["模型数量", "媒体数量", "指令数量", "服务数量"],
         textStyle: {
           color: "#606266",
           fontSize: "0.875rem"
@@ -82,44 +82,44 @@ watch(
       ],
       series: [
         {
-          name: "设备数量",
+          name: "模型数量",
+          type: "bar",
+          barWidth: 10,
+          itemStyle: {
+            color: "#26ce83",
+            borderRadius: [10, 10, 0, 0]
+          },
+          data: props.modelData
+        },
+        {
+          name: "媒体数量",
           type: "bar",
           barWidth: 10,
           itemStyle: {
             color: "#41b6ff",
             borderRadius: [10, 10, 0, 0]
           },
-          data: props.deviceData
+          data: props.mediaData
         },
         {
-          name: "模型数量",
+          name: "指令数量",
           type: "bar",
           barWidth: 10,
           itemStyle: {
             color: "#e86033ce",
             borderRadius: [10, 10, 0, 0]
           },
-          data: props.modelData
+          data: props.commandData
         },
         {
-          name: "航线数量",
-          type: "bar",
-          barWidth: 10,
-          itemStyle: {
-            color: "#5BECABFF",
-            borderRadius: [10, 10, 0, 0]
-          },
-          data: props.routeData
-        },
-        {
-          name: "任务数量",
+          name: "服务数量",
           type: "bar",
           barWidth: 10,
           itemStyle: {
             color: "#BA53FFFF",
             borderRadius: [10, 10, 0, 0]
           },
-          data: props.taskData
+          data: props.servicesData
         }
       ]
     });

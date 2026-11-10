@@ -367,7 +367,6 @@ pub struct ImportBackendMapRequest {
 pub struct BackendMap {
     pub id: i64,
     pub map_name: String,
-    pub park_id: Option<i64>,
     pub file_name: Option<String>,
     pub file_path: Option<String>,
     pub file_format: Option<String>,

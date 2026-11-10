@@ -41,7 +41,6 @@ const {
   columns,
   queryFields,
   moreQueryFields,
-  parkOptions,
   fileList,
   uploadFileTemp,
   onSearch,
@@ -55,9 +54,12 @@ const {
   cancel,
   openDia,
   publishMap,
-  newVersionMap,
-  loadRefs
+  newVersionMap
 } = useDogMap();
+
+const statusFormOptions = MAP_STATUS_OPTIONS.filter(
+  item => item.value === "草稿" || item.value === "部分标定"
+);
 
 const handleExceed: UploadProps["onExceed"] = files => {
   uploadRef.value?.clearFiles();
@@ -76,31 +78,9 @@ const beforeUpload = (uploadFile: UploadFile) => {
   }
 };
 
-const refsVisible = ref(false);
-const statusFormOptions = MAP_STATUS_OPTIONS.filter(
-  item => item.value === "草稿" || item.value === "部分标定"
-);
-const refsTitle = ref("");
-const refsMap = ref<Record<string, any>>({});
-const refsData = ref<{ routes: any[]; taskCount: number }>({
-  routes: [],
-  taskCount: 0
-});
-
-const openRefs = async (row, mode: "detail" | "impact") => {
-  refsMap.value = row || {};
-  const data = await loadRefs(row);
-  refsData.value = data || { routes: [], taskCount: 0 };
-  refsTitle.value =
-    mode === "detail"
-      ? `地图基线详情 · ${row.mapVersion || row.mapName}`
-      : `版本变更影响分析 · ${row.mapVersion || row.mapName}`;
-  refsVisible.value = true;
-};
-
 const handlePublish = row => {
   ElMessageBox.confirm(
-    `发布后将归档同园区旧版本，并把园区当前基线指向 ${row.mapVersion || row.mapName}。是否继续？`,
+    `发布后该版本状态将变为已发布，并记录发布时间。是否继续？`,
     "发布地图基线",
     { type: "warning", confirmButtonText: "发布", cancelButtonText: "取消" }
   )
@@ -110,7 +90,7 @@ const handlePublish = row => {
 
 const handleNewVersion = row => {
   ElMessageBox.confirm(
-    `将基于 ${row.mapVersion || row.mapName} 派生下一个版本并立即发布。历史路线仍冻结在旧版本，需要人工确认迁移。是否继续？`,
+    `将基于 ${row.mapVersion || row.mapName} 派生下一个版本并立即发布。是否继续？`,
     "发布新版本",
     { type: "warning", confirmButtonText: "发布", cancelButtonText: "取消" }
   )
@@ -200,14 +180,6 @@ const submitForm = async (formEl?: FormInstance) => {
               link
               type="primary"
               :size="size"
-              @click="openRefs(row, 'detail')"
-              >基线详情</el-button
-            >
-            <el-button
-              class="reset-margin"
-              link
-              type="primary"
-              :size="size"
               :icon="useRenderIcon(EditPen)"
               @click="handleUpdate(row, addFormRef)"
               >修改</el-button
@@ -241,21 +213,6 @@ const submitForm = async (formEl?: FormInstance) => {
         :rules="rules"
         label-width="150px"
       >
-        <el-form-item label="所属园区" prop="parkId" style="width: 100%">
-          <el-select
-            v-model="addForm.parkId"
-            placeholder="请选择所属园区"
-            filterable
-            style="width: 100%"
-          >
-            <el-option
-              v-for="item in parkOptions"
-              :key="item.value"
-              :label="item.label"
-              :value="item.value"
-            />
-          </el-select>
-        </el-form-item>
         <el-form-item label="地图名称" prop="mapName" style="width: 100%">
           <el-input v-model="addForm.mapName" placeholder="请输入地图名称" />
         </el-form-item>
@@ -377,53 +334,6 @@ const submitForm = async (formEl?: FormInstance) => {
           >确认</el-button
         >
       </template>
-    </el-dialog>
-
-    <el-dialog v-model="refsVisible" :title="refsTitle" width="760px">
-      <el-descriptions :column="2" border>
-        <el-descriptions-item label="基线版本">
-          {{ refsMap.mapVersion || "-" }} · {{ refsMap.mapStatus || "-" }}
-        </el-descriptions-item>
-        <el-descriptions-item label="frame_id">
-          {{ refsMap.frameId || "-" }}
-        </el-descriptions-item>
-        <el-descriptions-item label="分辨率 / 原点">
-          {{ refsMap.resolution || "-" }} · {{ refsMap.mapOrigin || "-" }}
-        </el-descriptions-item>
-        <el-descriptions-item label="栅格尺寸">
-          <span v-if="refsMap.mapWidth && refsMap.mapHeight">
-            {{ refsMap.mapWidth }}×{{ refsMap.mapHeight }}
-          </span>
-          <span v-else>-</span>
-        </el-descriptions-item>
-        <el-descriptions-item label="map_hash" :span="2">
-          <span class="font-mono text-xs">{{ refsMap.mapHash || "缺失" }}</span>
-        </el-descriptions-item>
-        <el-descriptions-item label="引用路线">
-          {{ refsData.routes?.length || 0 }} 条
-        </el-descriptions-item>
-        <el-descriptions-item label="关联任务">
-          {{ refsData.taskCount || 0 }} 个
-        </el-descriptions-item>
-      </el-descriptions>
-      <el-alert
-        class="mt-3"
-        type="info"
-        :closable="false"
-        title="版本不可变：发布新版本不会自动迁移历史路线，需人工确认坐标迁移策略。"
-      />
-      <el-table :data="refsData.routes" class="mt-3" border>
-        <el-table-column prop="id" label="路线编号" width="120" />
-        <el-table-column prop="routeName" label="路线名称" min-width="180" />
-        <el-table-column prop="routeStatus" label="状态" width="100" />
-        <el-table-column prop="waypointCount" label="航点数" width="90" />
-        <el-table-column label="处理状态" width="140">
-          <template #default>
-            <el-tag type="warning">待人工确认迁移</el-tag>
-          </template>
-        </el-table-column>
-        <template #empty>该版本暂无路线引用，可直接替换或归档</template>
-      </el-table>
     </el-dialog>
   </div>
 </template>

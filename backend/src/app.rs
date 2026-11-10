@@ -314,9 +314,6 @@ mod tests {
         let app = App::from_connection(conn);
         let state = app.build_state(&config_with(None));
 
-        assert_eq!(
-            state.upload_dir,
-            std::path::Path::new(DEFAULT_UPLOAD_DIR)
-        );
+        assert_eq!(state.upload_dir, std::path::Path::new(DEFAULT_UPLOAD_DIR));
     }
 }
