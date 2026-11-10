@@ -29,7 +29,7 @@ import User from "~icons/ri/user-3-fill";
 import Stack from "~icons/ri/stack-line";
 import Shield from "~icons/ri/shield-check-line";
 import Database from "~icons/ri/database-2-line";
-import Api from "~icons/ri/api-line";
+import ApiIcon from "~icons/ri/code-box-line";
 import MapIcon from "~icons/ri/map-2-line";
 import Cpu from "~icons/ri/cpu-line";
 import ImageIcon from "~icons/ri/image-line";
@@ -165,7 +165,7 @@ const capabilities = [
     desc: "数据字典、操作审计与安全策略一体化"
   },
   {
-    icon: Api,
+    icon: ApiIcon,
     title: "开放接口",
     desc: "为业务平台提供稳定的 REST API 与统一响应约定"
   }
