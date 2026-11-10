@@ -8,6 +8,8 @@ pub struct Config {
     pub jwt_secret: String,
     pub jwt_ttl_hours: i64,
     pub web_dist: PathBuf,
+    /// 根目录 backend 的 SQLite 文件，用于导入 dog_map 中已上传的 ROS 地图。
+    pub backend_db_path: PathBuf,
 }
 
 impl Config {
@@ -19,6 +21,9 @@ impl Config {
         let web_dist = env::var("ROBODOG_WEB_DIST")
             .map(PathBuf::from)
             .unwrap_or_else(|_| manifest_dir.join("../web/dist"));
+        let backend_db_path = env::var("ROBODOG_BACKEND_DB")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| manifest_dir.join("../../backend/data/users.db"));
 
         Self {
             port: env::var("ROBODOG_PORT")
@@ -33,6 +38,7 @@ impl Config {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(24),
             web_dist,
+            backend_db_path,
         }
     }
 

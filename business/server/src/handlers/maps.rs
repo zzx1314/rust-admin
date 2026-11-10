@@ -2,17 +2,25 @@ use crate::app::AppState;
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::models::{
-    MapQuery, MapRefRoute, MapRefTask, MapRefs, MapVersion, MapVersionRequest,
+    BackendMap, ImportBackendMapRequest, MapQuery, MapRaster, MapRefRoute, MapRefTask, MapRefs,
+    MapVersion, MapVersionRequest,
 };
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use sqlx::QueryBuilder;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{QueryBuilder, SqlitePool};
 use std::collections::hash_map::DefaultHasher;
+use std::fs::File;
 use std::hash::{Hash, Hasher};
+use std::io::Read;
+use std::str::FromStr;
 
 const MAP_SELECT: &str = "SELECT m.id, m.park_id, p.park_name, m.map_name, m.version,
     m.frame_id, m.crs, m.origin, m.resolution, m.floors, m.road_count, m.no_go_count,
     m.status, m.map_hash, m.map_width, m.map_height, m.note, m.published_at, m.created_at,
+    m.source, m.source_id, m.file_name, m.file_path, m.file_size,
     (SELECT COUNT(*) FROM routes r WHERE r.map_version_id = m.id) AS route_count,
     (SELECT COUNT(*) FROM tasks t JOIN routes r ON r.id = t.route_id
         WHERE r.map_version_id = m.id) AS task_count
@@ -34,6 +42,12 @@ pub async fn list_maps(
     {
         builder.push(" AND m.status = ").push_bind(status);
     }
+    if let Some(source) = query
+        .source
+        .filter(|value| !value.is_empty() && value != "全部")
+    {
+        builder.push(" AND m.source = ").push_bind(source);
+    }
     builder.push(" ORDER BY m.park_id ASC, m.published_at DESC, m.created_at DESC");
     let maps = builder
         .build_query_as::<MapVersion>()
@@ -54,11 +68,261 @@ pub async fn list_park_maps(
     Ok(ApiResponse::ok(maps))
 }
 
+/// 列出根目录 `backend` 的 `dog_map` 地图库（ROS map_server 包等）。
+pub async fn list_backend_maps(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<Vec<BackendMap>>>, AppError> {
+    let pool = match backend_pool(&state).await {
+        Ok(pool) => pool,
+        Err(_) => return Ok(ApiResponse::ok(Vec::new())),
+    };
+    let maps = sqlx::query_as::<_, BackendMap>(
+        "SELECT id, map_name, park_id, file_name, file_path, file_format, file_size,
+            remarks, map_version, frame_id, crs, map_origin, resolution, floors,
+            road_count, nogo_count, map_status, map_hash, publish_time, map_width,
+            map_height, create_time
+         FROM dog_map WHERE is_deleted = 0 ORDER BY id DESC",
+    )
+    .fetch_all(&pool)
+    .await?;
+    Ok(ApiResponse::ok(maps))
+}
+
+/// 把根 backend 的地图导入当前业务库，并可选地绑定为园区当前基线。
+pub async fn import_backend_map(
+    State(state): State<AppState>,
+    Json(payload): Json<ImportBackendMapRequest>,
+) -> Result<Json<ApiResponse<MapVersion>>, AppError> {
+    let park_name: String = sqlx::query_scalar("SELECT park_name FROM parks WHERE id = ?1")
+        .bind(payload.park_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("园区不存在".to_string()))?;
+
+    let backend_pool = backend_pool(&state).await?;
+    let source = sqlx::query_as::<_, BackendMap>(
+        "SELECT id, map_name, park_id, file_name, file_path, file_format, file_size,
+            remarks, map_version, frame_id, crs, map_origin, resolution, floors,
+            road_count, nogo_count, map_status, map_hash, publish_time, map_width,
+            map_height, create_time
+         FROM dog_map WHERE id = ?1 AND is_deleted = 0",
+    )
+    .bind(payload.backend_map_id)
+    .fetch_optional(&backend_pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound("backend 地图不存在".to_string()))?;
+
+    let version = source
+        .map_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("v1.0")
+        .to_string();
+    let status = if source.map_status.as_deref() == Some("已发布") {
+        "已发布"
+    } else {
+        "部分标定"
+    };
+    let source_id = source.id.to_string();
+    let timestamp = now();
+    let ros_meta = source
+        .file_path
+        .as_deref()
+        .and_then(|path| read_ros_map_meta(&state.config.backend_db_path, path));
+
+    let existing: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM map_versions
+         WHERE source = 'backend' AND source_id = ?1 AND park_id = ?2
+         ORDER BY created_at ASC LIMIT 1",
+    )
+    .bind(&source_id)
+    .bind(payload.park_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let map_id = if let Some((id,)) = existing {
+        id
+    } else {
+        let mut candidate = format!("ROS-MAP-{}@{}", source.id, version);
+        let mut suffix = 1;
+        while sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM map_versions WHERE id = ?1")
+            .bind(&candidate)
+            .fetch_one(&state.db)
+            .await?
+            > 0
+        {
+            candidate = format!("ROS-MAP-{}@{}-{}", source.id, version, suffix);
+            suffix += 1;
+        }
+        candidate
+    };
+
+    let map_name = format!("ROS-MAP-{}", source.id);
+    let frame_id = source
+        .frame_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("ros_map_{} / 局部米制", source.id));
+    let crs = source
+        .crs
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "ROS map_server / 局部 ENU".to_string());
+    let origin = source
+        .map_origin
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| ros_meta.as_ref().and_then(|meta| meta.origin.clone()))
+        .unwrap_or_else(|| "0.0, 0.0, 0.0".to_string());
+    let resolution = source
+        .resolution
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| ros_meta.as_ref().and_then(|meta| meta.resolution.clone()))
+        .unwrap_or_else(|| "0.05 m/px".to_string());
+    let floors = source
+        .floors
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "1F".to_string());
+    let map_hash = source
+        .map_hash
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| demo_hash(&format!("{source_id}:{map_id}"), &timestamp));
+    let file_name = source.file_name.clone();
+    let file_path = source.file_path.clone();
+    let file_size = source.file_size;
+    let note = format!(
+        "从 backend 地图库导入「{}」{} · 园区：{}",
+        source.map_name,
+        file_name
+            .as_deref()
+            .map(|name| format!(" · 文件 {name}"))
+            .unwrap_or_default(),
+        park_name
+    );
+    let published_at = source
+        .publish_time
+        .clone()
+        .unwrap_or_else(|| timestamp.clone());
+
+    if existing_row_exists(&state, &map_id).await? {
+        sqlx::query(
+            "UPDATE map_versions SET map_name = ?1, version = ?2, frame_id = ?3, crs = ?4,
+                origin = ?5, resolution = ?6, floors = ?7, road_count = ?8, no_go_count = ?9,
+                status = ?10, map_hash = ?11, map_width = ?12, map_height = ?13, note = ?14,
+                published_at = ?15, source = 'backend', source_id = ?16, file_name = ?17,
+                file_path = ?18, file_size = ?19 WHERE id = ?20",
+        )
+        .bind(&map_name)
+        .bind(&version)
+        .bind(&frame_id)
+        .bind(&crs)
+        .bind(&origin)
+        .bind(&resolution)
+        .bind(&floors)
+        .bind(source.road_count.unwrap_or(0))
+        .bind(source.nogo_count.unwrap_or(0))
+        .bind(status)
+        .bind(&map_hash)
+        .bind(source.map_width.or_else(|| ros_meta.as_ref().and_then(|meta| meta.width)))
+        .bind(source.map_height.or_else(|| ros_meta.as_ref().and_then(|meta| meta.height)))
+        .bind(&note)
+        .bind(&published_at)
+        .bind(&source_id)
+        .bind(&file_name)
+        .bind(&file_path)
+        .bind(file_size)
+        .bind(&map_id)
+        .execute(&state.db)
+        .await?;
+    } else {
+        sqlx::query(
+            "INSERT INTO map_versions (id, park_id, map_name, version, frame_id, crs, origin,
+                resolution, floors, road_count, no_go_count, status, map_hash, map_width,
+                map_height, note, published_at, created_at, source, source_id, file_name,
+                file_path, file_size)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                ?16, ?17, ?18, 'backend', ?19, ?20, ?21, ?22)",
+        )
+        .bind(&map_id)
+        .bind(payload.park_id)
+        .bind(&map_name)
+        .bind(&version)
+        .bind(&frame_id)
+        .bind(&crs)
+        .bind(&origin)
+        .bind(&resolution)
+        .bind(&floors)
+        .bind(source.road_count.unwrap_or(0))
+        .bind(source.nogo_count.unwrap_or(0))
+        .bind(status)
+        .bind(&map_hash)
+        .bind(source.map_width.or_else(|| ros_meta.as_ref().and_then(|meta| meta.width)))
+        .bind(source.map_height.or_else(|| ros_meta.as_ref().and_then(|meta| meta.height)))
+        .bind(&note)
+        .bind(&published_at)
+        .bind(&timestamp)
+        .bind(&source_id)
+        .bind(&file_name)
+        .bind(&file_path)
+        .bind(file_size)
+        .execute(&state.db)
+        .await?;
+    }
+
+    if payload.bind {
+        let park_status = if status == "部分标定" {
+            "部分标定"
+        } else {
+            "已标定"
+        };
+        sqlx::query(
+            "UPDATE parks SET map_version_id = ?1, map_status = ?2, updated_at = ?3 WHERE id = ?4",
+        )
+        .bind(&map_id)
+        .bind(park_status)
+        .bind(&timestamp)
+        .bind(payload.park_id)
+        .execute(&state.db)
+        .await?;
+    }
+
+    Ok(ApiResponse::ok(fetch_map(&state, &map_id).await?))
+}
+
 pub async fn get_map(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<MapVersion>>, AppError> {
     Ok(ApiResponse::ok(fetch_map(&state, &id).await?))
+}
+
+/// 渲染 backend 上传的 ROS PGM 栅格地图，返回 PNG data URL。
+pub async fn map_raster(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<MapRaster>>, AppError> {
+    let map = fetch_map(&state, &id).await?;
+    let file_path = map
+        .file_path
+        .clone()
+        .ok_or_else(|| AppError::BadRequest("该地图没有关联的 ROS 地图包".to_string()))?;
+    let raster = read_ros_raster(&state.config.backend_db_path, &file_path)
+        .ok_or_else(|| AppError::BadRequest("无法从地图包中解析 model.pgm".to_string()))?;
+    let raster = downscale_raster(raster, 1600);
+    let png = encode_png(raster.width, raster.height, &raster.pixels)
+        .ok_or_else(|| AppError::Internal("PNG 编码失败".to_string()))?;
+    Ok(ApiResponse::ok(MapRaster {
+        map_id: map.id,
+        image: format!("data:image/png;base64,{}", BASE64.encode(png)),
+        resolution: map.resolution,
+        origin: map.origin,
+        width: raster.width,
+        height: raster.height,
+    }))
 }
 
 pub async fn map_refs(
@@ -210,6 +474,280 @@ pub async fn new_map_version(
     transaction.commit().await?;
 
     Ok(ApiResponse::ok(fetch_map(&state, &new_id).await?))
+}
+
+struct RosRaster {
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
+
+/// 从根 backend 上传的 `.zip` 中读取 `model.pgm` 并解码为 8 位灰度像素。
+fn read_ros_raster(backend_db: &std::path::Path, relative: &str) -> Option<RosRaster> {
+    let upload_root = backend_db.parent()?.join("device_uploads");
+    let path = upload_root.join(relative);
+    let file = File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let mut pgm: Option<Vec<u8>> = None;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).ok()?;
+        if entry.name().to_ascii_lowercase().ends_with(".pgm") {
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).ok()?;
+            pgm = Some(data);
+            break;
+        }
+    }
+    decode_pgm(pgm.as_deref()?)
+}
+
+fn decode_pgm(bytes: &[u8]) -> Option<RosRaster> {
+    let (magic, width, height, maxval, data_start) = pgm_header(bytes)?;
+    let count = (width as usize).checked_mul(height as usize)?;
+    let pixels = match magic {
+        "P5" if maxval <= 255 => {
+            let end = data_start.checked_add(count)?;
+            bytes.get(data_start..end)?.to_vec()
+        }
+        "P5" => {
+            let end = data_start.checked_add(count.checked_mul(2)?)?;
+            let data = bytes.get(data_start..end)?;
+            (0..count)
+                .map(|index| ((data[index * 2] as u16) << 8 | data[index * 2 + 1] as u16) >> 8)
+                .map(|value| value as u8)
+                .collect()
+        }
+        "P2" => {
+            let text = std::str::from_utf8(bytes.get(data_start..)?).ok()?;
+            let mut values = Vec::with_capacity(count);
+            for token in text.split_ascii_whitespace() {
+                if values.len() >= count {
+                    break;
+                }
+                let value: u32 = token.parse().ok()?;
+                values.push(if maxval <= 255 {
+                    value as u8
+                } else {
+                    (value >> 8) as u8
+                });
+            }
+            if values.len() < count {
+                return None;
+            }
+            values
+        }
+        _ => return None,
+    };
+    Some(RosRaster {
+        width,
+        height,
+        pixels,
+    })
+}
+
+fn pgm_header(bytes: &[u8]) -> Option<(&str, u32, u32, u32, usize)> {
+    let mut tokens: Vec<(usize, usize)> = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() && tokens.len() < 4 {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            break;
+        }
+        if bytes[index] == b'#' {
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        let start = index;
+        while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        tokens.push((start, index));
+    }
+    if tokens.len() < 4 {
+        return None;
+    }
+    let magic = std::str::from_utf8(&bytes[tokens[0].0..tokens[0].1]).ok()?;
+    let width = std::str::from_utf8(&bytes[tokens[1].0..tokens[1].1])
+        .ok()?
+        .parse()
+        .ok()?;
+    let height = std::str::from_utf8(&bytes[tokens[2].0..tokens[2].1])
+        .ok()?
+        .parse()
+        .ok()?;
+    let maxval = std::str::from_utf8(&bytes[tokens[3].0..tokens[3].1])
+        .ok()?
+        .parse()
+        .ok()?;
+    let mut data_start = tokens[3].1;
+    if data_start < bytes.len() && bytes[data_start] == b'\r' {
+        data_start += 1;
+    }
+    if data_start < bytes.len() && bytes[data_start].is_ascii_whitespace() {
+        data_start += 1;
+    }
+    Some((magic, width, height, maxval, data_start))
+}
+
+fn downscale_raster(raster: RosRaster, max_dimension: u32) -> RosRaster {
+    let longest = raster.width.max(raster.height);
+    if longest <= max_dimension || longest == 0 {
+        return raster;
+    }
+    let scale = max_dimension as f64 / longest as f64;
+    let width = ((raster.width as f64 * scale).round() as u32).max(1);
+    let height = ((raster.height as f64 * scale).round() as u32).max(1);
+    let mut pixels = Vec::with_capacity((width * height) as usize);
+    for y in 0..height {
+        let source_y = (y as f64 / scale) as u32;
+        for x in 0..width {
+            let source_x = (x as f64 / scale) as u32;
+            let source_index = (source_y.min(raster.height - 1) * raster.width
+                + source_x.min(raster.width - 1)) as usize;
+            pixels.push(raster.pixels[source_index]);
+        }
+    }
+    RosRaster {
+        width,
+        height,
+        pixels,
+    }
+}
+
+fn encode_png(width: u32, height: u32, pixels: &[u8]) -> Option<Vec<u8>> {
+    let mut output = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut output, width, height);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().ok()?;
+        writer.write_image_data(pixels).ok()?;
+    }
+    Some(output)
+}
+
+struct RosMapMeta {
+    resolution: Option<String>,
+    origin: Option<String>,
+    width: Option<i64>,
+    height: Option<i64>,
+}
+
+/// 从根 backend 上传的 `.zip` 地图包中读取 ROS map_server 元数据。
+/// 包内约定为 `model.yaml` + `model.pgm`。
+fn read_ros_map_meta(backend_db: &std::path::Path, relative: &str) -> Option<RosMapMeta> {
+    let upload_root = backend_db.parent()?.join("device_uploads");
+    let path = upload_root.join(relative);
+    let file = File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+
+    let mut yaml_text = String::new();
+    let mut pgm_bytes: Option<Vec<u8>> = None;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).ok()?;
+        let name = entry.name().to_ascii_lowercase();
+        if name.ends_with(".yaml") || name.ends_with(".yml") {
+            entry.read_to_string(&mut yaml_text).ok()?;
+        } else if name.ends_with(".pgm") {
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).ok()?;
+            pgm_bytes = Some(data);
+        }
+    }
+
+    let resolution = yaml_text.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        (key.trim() == "resolution")
+            .then(|| value.trim().parse::<f64>().ok())
+            .flatten()
+            .map(|value| format!("{value} m/px"))
+    });
+    let origin = yaml_text.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        if key.trim() != "origin" {
+            return None;
+        }
+        let inner = value.trim().trim_start_matches('[').trim_end_matches(']');
+        let numbers: Vec<String> = inner
+            .split(',')
+            .map(str::trim)
+            .map(str::to_string)
+            .collect();
+        (!numbers.is_empty()).then(|| numbers.join(", "))
+    });
+    let (width, height) = pgm_bytes
+        .as_deref()
+        .and_then(pgm_dimensions)
+        .map(|(w, h)| (Some(w), Some(h)))
+        .unwrap_or((None, None));
+
+    Some(RosMapMeta {
+        resolution,
+        origin,
+        width,
+        height,
+    })
+}
+
+fn pgm_dimensions(bytes: &[u8]) -> Option<(i64, i64)> {
+    let mut tokens: Vec<&[u8]> = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() && tokens.len() < 4 {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            break;
+        }
+        if bytes[index] == b'#' {
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        let start = index;
+        while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        tokens.push(&bytes[start..index]);
+    }
+    if tokens.len() < 3 {
+        return None;
+    }
+    let width = std::str::from_utf8(tokens[1]).ok()?.parse().ok()?;
+    let height = std::str::from_utf8(tokens[2]).ok()?.parse().ok()?;
+    Some((width, height))
+}
+
+async fn backend_pool(state: &AppState) -> Result<SqlitePool, AppError> {
+    let path = &state.config.backend_db_path;
+    if !path.is_file() {
+        return Err(AppError::BadRequest(format!(
+            "未找到根 backend 数据库：{}，请确认 backend 已启动并使用默认数据目录",
+            path.display()
+        )));
+    }
+    let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))
+        .map_err(|error| AppError::Internal(format!("无法连接 backend 数据库: {error}")))?
+        .read_only(true)
+        .create_if_missing(false);
+    SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await
+        .map_err(AppError::from)
+}
+
+async fn existing_row_exists(state: &AppState, id: &str) -> Result<bool, AppError> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM map_versions WHERE id = ?1")
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?;
+    Ok(count > 0)
 }
 
 pub(crate) async fn fetch_map(state: &AppState, id: &str) -> Result<MapVersion, AppError> {

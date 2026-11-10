@@ -1,9 +1,11 @@
 import { del, get, post, put } from "./http";
 import type {
   Alert,
+  BackendMap,
   DashboardSummary,
   Device,
   LoginResponse,
+  MapRaster,
   MapRefs,
   MapVersion,
   Park,
@@ -33,6 +35,8 @@ export const mapApi = {
   list: (params?: object) => get<MapVersion[]>("/map-versions", params),
   byPark: (parkId: number) => get<MapVersion[]>(`/parks/${parkId}/maps`),
   get: (id: string) => get<MapVersion>(`/map-versions/${encodeURIComponent(id)}`),
+  raster: (id: string) =>
+    get<MapRaster>(`/map-versions/${encodeURIComponent(id)}/raster`),
   refs: (id: string) =>
     get<MapRefs>(`/map-versions/${encodeURIComponent(id)}/refs`),
   publish: (id: string) =>
@@ -40,6 +44,13 @@ export const mapApi = {
   newVersion: (id: string, note?: string) =>
     post<MapVersion>(`/map-versions/${encodeURIComponent(id)}/new-version`, {
       note
+    }),
+  backendMaps: () => get<BackendMap[]>("/map-versions/backend"),
+  importBackend: (backendMapId: number, parkId: number, bind = true) =>
+    post<MapVersion>("/map-versions/import-backend", {
+      backendMapId,
+      parkId,
+      bind
     })
 };
 

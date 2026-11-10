@@ -117,6 +117,7 @@ GET    /api/dashboard/summary
 
 GET    /api/map-versions                  GET    /api/parks/{id}/maps
 GET    /api/map-versions/{id}             GET    /api/map-versions/{id}/refs
+GET    /api/map-versions/{id}/raster      GET    /api/map-versions/backend          POST   /api/map-versions/import-backend
 POST   /api/map-versions/{id}/publish     POST   /api/map-versions/{id}/new-version
 ```
 
@@ -127,6 +128,10 @@ POST   /api/map-versions/{id}/publish     POST   /api/map-versions/{id}/new-vers
 `routes.map_version_id` 冻结为当时的版本，之后地图发新版不会改写历史路线坐标。
 
 - `GET /api/map-versions` 支持 `parkId`、`status` 过滤，前端用它渲染基线徽章与版本下拉。
+- `GET /api/map-versions/backend` 读取仓库根目录 `backend` 的 `dog_map` 地图库，列出已上传的 ROS map_server 地图包。
+- `POST /api/map-versions/import-backend` 把 `{ backendMapId, parkId, bind }` 指定的地图导入本业务库；
+  会从 `.zip` 内解析 `model.yaml` 的 `resolution` / `origin` 和 `model.pgm` 的宽高，并可选绑定为园区当前基线。
+- `GET /api/map-versions/{id}/raster` 解析地图包里的 `model.pgm`，转成 PNG data URL，返回分辨率、原点与栅格宽高；路线编辑画布可切换「真实地图」底图。
 - `GET /api/map-versions/{id}/refs` 返回引用该版本的路线、任务与园区设备数，用于影响分析。
 - `POST /api/map-versions/{id}/publish` 发布版本并切换园区基线指针，同园区旧版本归档。
 - `POST /api/map-versions/{id}/new-version` 派生下一版本并发布，历史路线保持旧版引用。
@@ -168,6 +173,7 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 | `ROBODOG_JWT_SECRET` | 开发用默认值 | JWT 密钥，生产必须覆盖 |
 | `ROBODOG_JWT_TTL_HOURS` | `24` | Token 有效期 |
 | `ROBODOG_WEB_DIST` | `../web/dist` | 前端构建产物目录 |
+| `ROBODOG_BACKEND_DB` | `../../backend/data/users.db` | 仓库根目录 backend 的 SQLite 文件，用于导入 `dog_map` 中的 ROS 地图 |
 
 ## 当前边界
 

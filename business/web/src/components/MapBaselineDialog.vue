@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { mapApi } from "@/api/ops";
-import type { MapRefs, MapVersion } from "@/api/types";
+import type { MapRaster, MapRefs, MapVersion } from "@/api/types";
 import AppIcon from "@/components/AppIcon.vue";
 import MapChip from "@/components/MapChip.vue";
 
@@ -18,6 +18,7 @@ const emit = defineEmits<{
 
 const loading = ref(false);
 const refsData = ref<MapRefs | null>(null);
+const raster = ref<MapRaster | null>(null);
 const view = ref<"detail" | "impact">("detail");
 const strategy = ref("保留旧版本继续运行，仅新建路线使用新版");
 const note = ref("园区二期改造后重新建图标定");
@@ -32,6 +33,20 @@ const sourceRows = computed(() => {
   if (!item) return [];
   return [
     ["所属园区", item.parkName ?? "—", "运营台账录入", "orange"],
+    [
+      "地图来源",
+      item.source === "backend" ? "backend 地图库导入" : "本业务库",
+      item.source === "backend" ? "根 backend dog_map" : "业务库",
+      item.source === "backend" ? "teal" : "gray"
+    ],
+    [
+      "地图包",
+      item.fileName
+        ? `${item.fileName}${item.fileSize ? ` · ${(item.fileSize / 1024).toFixed(0)} KB` : ""}`
+        : "—",
+      "backend 上传",
+      "orange"
+    ],
     ["frame_id", item.frameId ?? "—", "建图服务分配", "purple"],
     ["CRS", item.crs ?? "—", "系统配置 + RTK 打点", "teal"],
     ["原点锚点", item.origin ?? "—", "RTK / 人工标定", "teal"],
@@ -58,11 +73,21 @@ const sourceRows = computed(() => {
 async function load() {
   if (!props.mapId) {
     refsData.value = null;
+    raster.value = null;
     return;
   }
   loading.value = true;
+  raster.value = null;
   try {
     refsData.value = await mapApi.refs(props.mapId);
+    const item = refsData.value.map;
+    if (item.source === "backend" && item.filePath) {
+      try {
+        raster.value = await mapApi.raster(item.id);
+      } catch {
+        raster.value = null;
+      }
+    }
   } catch {
     refsData.value = null;
   } finally {
@@ -133,6 +158,17 @@ async function publishNewVersion() {
                 </tr>
               </tbody>
             </table>
+          </div>
+
+          <div v-if="raster" class="map-raster-preview">
+            <div class="map-raster-head">
+              <b><AppIcon name="layers" />ROS 栅格地图</b>
+              <span class="muted mono">
+                {{ raster.width }} × {{ raster.height }} px · {{ raster.resolution }} · origin
+                {{ raster.origin }}
+              </span>
+            </div>
+            <img :src="raster.image" alt="ROS model.pgm 栅格地图" />
           </div>
 
           <div class="card-head" style="margin-top: 16px">

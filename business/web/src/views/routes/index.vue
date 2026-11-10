@@ -4,6 +4,7 @@ import { useRoute } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { parkApi, mapApi, routeApi, zoneApi } from "@/api/ops";
 import type {
+  MapRaster,
   MapVersion,
   Park,
   Route,
@@ -130,6 +131,47 @@ const draftMap = computed(() =>
   maps.value.find(item => item.id === draft.value?.mapVersionId) ?? null
 );
 
+const raster = ref<MapRaster | null>(null);
+const rasterVisible = ref(false);
+const rasterCache = new Map<string, MapRaster>();
+
+const hasRaster = computed(
+  () => draftMap.value?.source === "backend" && Boolean(draftMap.value?.filePath)
+);
+
+const rasterRect = computed(() => {
+  const item = raster.value;
+  if (!item || !item.width || !item.height) return null;
+  const scale = Math.min(800 / item.width, 460 / item.height);
+  const width = item.width * scale;
+  const height = item.height * scale;
+  return {
+    x: (800 - width) / 2,
+    y: (460 - height) / 2,
+    width,
+    height
+  };
+});
+
+async function loadRaster(mapId: string | null) {
+  raster.value = null;
+  if (!mapId) return;
+  const cached = rasterCache.get(mapId);
+  if (cached) {
+    raster.value = cached;
+    return;
+  }
+  const item = maps.value.find(map => map.id === mapId);
+  if (!item || item.source !== "backend" || !item.filePath) return;
+  try {
+    const data = await mapApi.raster(mapId);
+    rasterCache.set(mapId, data);
+    raster.value = data;
+  } catch {
+    raster.value = null;
+  }
+}
+
 function mapsOfPark(parkId: number | null) {
   if (!parkId) return [];
   return maps.value.filter(
@@ -251,6 +293,10 @@ function selectRoute(route: Route, notify = true) {
   selIdx.value = 0;
   activeTab.value = "point";
   history.value = [];
+  rasterVisible.value = Boolean(
+    maps.value.find(item => item.id === route.mapVersionId)?.source === "backend"
+  );
+  void loadRaster(route.mapVersionId);
   if (notify) ElMessage.info(`已切换至「${route.routeName}」`);
 }
 
@@ -802,6 +848,16 @@ onBeforeUnmount(() => window.clearInterval(simTimer));
             <button class="rt-tool" :class="{ on: snap }" title="吸附到园区道路" @click="snap = !snap">
               <AppIcon name="magnet" />道路吸附
             </button>
+            <button
+              v-if="hasRaster"
+              class="rt-tool"
+              :class="{ on: rasterVisible }"
+              :disabled="!raster"
+              title="显示 ROS model.pgm 栅格底图"
+              @click="rasterVisible = !rasterVisible"
+            >
+              <AppIcon name="layers" />真实地图
+            </button>
             <div class="rt-tool-sep" />
             <button class="rt-tool" @click="undo"><AppIcon name="undo" />撤销</button>
             <button class="rt-tool" @click="optimizeRoute"><AppIcon name="shuffle" />顺序优化</button>
@@ -826,6 +882,17 @@ onBeforeUnmount(() => window.clearInterval(simTimer));
               @pointercancel="onCanvasUp"
             >
               <RouteBaseMap />
+              <template v-if="rasterVisible && raster && rasterRect">
+                <rect width="800" height="460" fill="#0b1220" />
+                <image
+                  :href="raster.image"
+                  :x="rasterRect.x"
+                  :y="rasterRect.y"
+                  :width="rasterRect.width"
+                  :height="rasterRect.height"
+                  preserveAspectRatio="none"
+                />
+              </template>
               <g id="routeLayer">
                 <template v-for="(leg, index) in draft.data.legs" :key="`leg-${index}`">
                   <template v-if="draft.data.points[index] && draft.data.points[index + 1]">
@@ -1011,6 +1078,7 @@ onBeforeUnmount(() => window.clearInterval(simTimer));
             <div class="rt-canvas-tag">
               <AppIcon name="info" />
               {{ mode === "add" ? "点击画布新增航点 · 拖拽航点调整位置" : "点选航点或航段编辑属性" }}
+              · {{ rasterVisible && raster ? "ROS 栅格底图" : "示意图底图" }}
               · 点击段标签配置行进任务
             </div>
             <div class="rt-legend">

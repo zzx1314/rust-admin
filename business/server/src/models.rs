@@ -46,6 +46,11 @@ pub struct MapVersion {
     pub note: Option<String>,
     pub published_at: Option<String>,
     pub created_at: String,
+    pub source: String,
+    pub source_id: Option<String>,
+    pub file_name: Option<String>,
+    pub file_path: Option<String>,
+    pub file_size: Option<i64>,
     pub route_count: i64,
     pub task_count: i64,
 }
@@ -78,6 +83,17 @@ pub struct MapRefs {
     pub routes: Vec<MapRefRoute>,
     pub tasks: Vec<MapRefTask>,
     pub device_count: i64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MapRaster {
+    pub map_id: String,
+    pub image: String,
+    pub resolution: Option<String>,
+    pub origin: Option<String>,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Debug, FromRow, Serialize, Clone)]
@@ -339,9 +355,46 @@ pub struct MapVersionRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ImportBackendMapRequest {
+    pub backend_map_id: i64,
+    pub park_id: i64,
+    #[serde(default)]
+    pub bind: bool,
+}
+
+#[derive(Debug, FromRow, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendMap {
+    pub id: i64,
+    pub map_name: String,
+    pub park_id: Option<i64>,
+    pub file_name: Option<String>,
+    pub file_path: Option<String>,
+    pub file_format: Option<String>,
+    pub file_size: Option<i64>,
+    pub remarks: Option<String>,
+    pub map_version: Option<String>,
+    pub frame_id: Option<String>,
+    pub crs: Option<String>,
+    pub map_origin: Option<String>,
+    pub resolution: Option<String>,
+    pub floors: Option<String>,
+    pub road_count: Option<i64>,
+    pub nogo_count: Option<i64>,
+    pub map_status: Option<String>,
+    pub map_hash: Option<String>,
+    pub publish_time: Option<String>,
+    pub map_width: Option<i64>,
+    pub map_height: Option<i64>,
+    pub create_time: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MapQuery {
     pub park_id: Option<i64>,
     pub status: Option<String>,
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

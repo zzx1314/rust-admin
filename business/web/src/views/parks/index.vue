@@ -3,7 +3,7 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { parkApi, mapApi, zoneApi } from "@/api/ops";
-import type { MapVersion, Park, Zone } from "@/api/types";
+import type { BackendMap, MapVersion, Park, Zone } from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import AppIcon from "@/components/AppIcon.vue";
 import MiniMap from "@/components/MiniMap.vue";
@@ -17,6 +17,7 @@ const router = useRouter();
 const parks = ref<Park[]>([]);
 const zones = ref<Zone[]>([]);
 const maps = ref<MapVersion[]>([]);
+const backendMaps = ref<BackendMap[]>([]);
 const search = ref("");
 const parkStatus = ref("全部");
 const viewMode = ref<"card" | "table">("card");
@@ -103,6 +104,21 @@ const activeMapOptions = computed(() => {
 
 const selectedMap = computed(() => mapOf(parkForm.mapVersionId));
 
+const isBackendSelection = computed(() =>
+  parkForm.mapVersionId.startsWith("backend:")
+);
+
+const availableBackendMaps = computed(() => {
+  const parkId = editingPark.value?.id;
+  if (!parkId) return backendMaps.value;
+  const imported = new Set(
+    mapsOfPark(parkId)
+      .map(item => item.sourceId)
+      .filter((value): value is string => Boolean(value))
+  );
+  return backendMaps.value.filter(item => !imported.has(String(item.id)));
+});
+
 const boundParkCount = computed(
   () => parks.value.filter(park => park.mapVersionId).length
 );
@@ -116,6 +132,11 @@ async function load() {
   parks.value = parkList;
   zones.value = zoneList;
   maps.value = mapList;
+  try {
+    backendMaps.value = await mapApi.backendMaps();
+  } catch {
+    backendMaps.value = [];
+  }
   if (!zoneForm.parkId && parkList.length) zoneForm.parkId = parkList[0].id;
 }
 
@@ -173,13 +194,25 @@ async function savePark() {
     ElMessage.warning("请填写园区名称与面积");
     return;
   }
-  const payload = { ...parkForm, area: Number(parkForm.area) };
+  const backendMapId = parkForm.mapVersionId.startsWith("backend:")
+    ? Number(parkForm.mapVersionId.slice("backend:".length))
+    : null;
+  const payload = {
+    ...parkForm,
+    mapVersionId: backendMapId ? "" : parkForm.mapVersionId,
+    area: Number(parkForm.area)
+  };
+  let targetPark: Park;
   if (editingPark.value) {
-    await parkApi.update(editingPark.value.id, payload);
+    targetPark = await parkApi.update(editingPark.value.id, payload);
     ElMessage.success("园区信息已更新");
   } else {
-    await parkApi.create(payload);
+    targetPark = await parkApi.create(payload);
     ElMessage.success(`园区「${parkForm.parkName}」已创建`);
+  }
+  if (backendMapId) {
+    const imported = await mapApi.importBackend(backendMapId, targetPark.id, true);
+    ElMessage.success(`已从 backend 导入地图「${imported.id}」并绑定为园区基线`);
   }
   parkDialog.value = false;
   await load();
@@ -589,20 +622,38 @@ onMounted(load);
             <option v-for="map in activeMapOptions" :key="map.id" :value="map.id">
               {{ map.id }} · {{ map.status }} · {{ map.frameId }}
             </option>
+            <optgroup
+              v-if="availableBackendMaps.length"
+              label="backend 地图库 · ROS / 激光雷达地图"
+            >
+              <option
+                v-for="map in availableBackendMaps"
+                :key="map.id"
+                :value="`backend:${map.id}`"
+              >
+                {{ map.mapName }} · {{ map.mapStatus || "草稿" }}
+                {{ map.fileName ? `· ${map.fileName}` : "" }}
+                {{ map.fileSize ? `· ${(map.fileSize / 1024).toFixed(0)} KB` : "" }}
+              </option>
+            </optgroup>
           </select>
         </div>
         <div class="field" style="grid-column: 1 / -1">
           <label>坐标系框架 frame_id</label>
           <input
             class="input mono"
-            :value="selectedMap?.frameId ?? '—'"
+            :value="
+              selectedMap?.frameId ??
+              (isBackendSelection ? '导入后由 backend 地图服务提供' : '—')
+            "
             readonly
             placeholder="由地图服务分配，前端只读"
           />
         </div>
         <div class="field" style="grid-column: 1 / -1">
           <div class="rt-hint" style="margin: 0">
-            建档时必须确定坐标系（frame_id / 原点 / 分辨率 / CRS / 楼层），并登记地图基线状态。只有「已发布」的地图版本才允许创建巡检路线；建图完成后再发布不可变版本。
+            建档时必须确定坐标系（frame_id / 原点 / 分辨率 / CRS / 楼层），并登记地图基线状态。只有「已发布」的地图版本才允许创建巡检路线；建图完成后再发布不可变版本。<br />
+            选择「backend 地图库」中的 ROS 地图时，会在保存园区时导入到本业务库，并自动绑定为当前基线。
           </div>
         </div>
         <div class="field">

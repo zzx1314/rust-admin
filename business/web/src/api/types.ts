@@ -181,8 +181,38 @@ export interface MapVersion {
   note: string | null;
   publishedAt: string | null;
   createdAt: string;
+  source: string;
+  sourceId: string | null;
+  fileName: string | null;
+  filePath: string | null;
+  fileSize: number | null;
   routeCount: number;
   taskCount: number;
+}
+
+export interface BackendMap {
+  id: number;
+  mapName: string;
+  parkId: number | null;
+  fileName: string | null;
+  filePath: string | null;
+  fileFormat: string | null;
+  fileSize: number | null;
+  remarks: string | null;
+  mapVersion: string | null;
+  frameId: string | null;
+  crs: string | null;
+  mapOrigin: string | null;
+  resolution: string | null;
+  floors: string | null;
+  roadCount: number | null;
+  nogoCount: number | null;
+  mapStatus: string | null;
+  mapHash: string | null;
+  publishTime: string | null;
+  mapWidth: number | null;
+  mapHeight: number | null;
+  createTime: string | null;
 }
 
 export interface MapRefRoute {
@@ -207,6 +237,15 @@ export interface MapRefs {
   routes: MapRefRoute[];
   tasks: MapRefTask[];
   deviceCount: number;
+}
+
+export interface MapRaster {
+  mapId: string;
+  image: string;
+  resolution: string | null;
+  origin: string | null;
+  width: number;
+  height: number;
 }
 
 export interface Alert {
