@@ -27,6 +27,8 @@ export interface Park {
   parkType: string | null;
   status: string;
   color: string;
+  mapVersionId: string | null;
+  mapStatus: string;
   createdAt: string;
   updatedAt: string;
   zoneCount: number;
@@ -152,9 +154,59 @@ export interface Route {
   durationS: number;
   batteryPct: number;
   publishedAt: string | null;
+  mapVersionId: string | null;
+  mapStatus: string | null;
   createdAt: string;
   updatedAt: string;
   usedTaskCount: number;
+}
+
+export interface MapVersion {
+  id: string;
+  parkId: number;
+  parkName: string | null;
+  mapName: string;
+  version: string;
+  frameId: string | null;
+  crs: string | null;
+  origin: string | null;
+  resolution: string | null;
+  floors: string | null;
+  roadCount: number;
+  noGoCount: number;
+  status: string;
+  mapHash: string | null;
+  mapWidth: number | null;
+  mapHeight: number | null;
+  note: string | null;
+  publishedAt: string | null;
+  createdAt: string;
+  routeCount: number;
+  taskCount: number;
+}
+
+export interface MapRefRoute {
+  id: number;
+  routeCode: string;
+  routeName: string;
+  status: string;
+  version: string;
+  pointCount: number;
+}
+
+export interface MapRefTask {
+  id: number;
+  taskCode: string;
+  taskName: string;
+  taskStatus: string;
+  routeId: number | null;
+}
+
+export interface MapRefs {
+  map: MapVersion;
+  routes: MapRefRoute[];
+  tasks: MapRefTask[];
+  deviceCount: number;
 }
 
 export interface Alert {

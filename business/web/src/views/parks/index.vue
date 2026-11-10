@@ -2,17 +2,21 @@
 import { computed, onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { parkApi, zoneApi } from "@/api/ops";
-import type { Park, Zone } from "@/api/types";
+import { parkApi, mapApi, zoneApi } from "@/api/ops";
+import type { MapVersion, Park, Zone } from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import AppIcon from "@/components/AppIcon.vue";
 import MiniMap from "@/components/MiniMap.vue";
+import MapChip from "@/components/MapChip.vue";
+import MapBaselineDialog from "@/components/MapBaselineDialog.vue";
+import MapPolicyDialog from "@/components/MapPolicyDialog.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import { PARK_TYPES, ZONE_TYPES } from "@/utils/constants";
 
 const router = useRouter();
 const parks = ref<Park[]>([]);
 const zones = ref<Zone[]>([]);
+const maps = ref<MapVersion[]>([]);
 const search = ref("");
 const parkStatus = ref("全部");
 const viewMode = ref<"card" | "table">("card");
@@ -30,8 +34,14 @@ const parkForm = reactive({
   ownerName: "",
   parkType: "生产制造",
   status: "运行中",
-  color: "#0284c7"
+  color: "#0284c7",
+  mapVersionId: ""
 });
+
+const baselineDialog = ref(false);
+const baselineMapId = ref<string | null>(null);
+const policyDialog = ref(false);
+const policyMode = ref<"policy" | "lineage">("policy");
 
 const zoneDialog = ref(false);
 const editingZone = ref<Zone | null>(null);
@@ -77,11 +87,51 @@ function rateOf(park: Park) {
   return park.taskCount ? Math.round((park.doneCount / park.taskCount) * 100) : 0;
 }
 
+function mapOf(mapId: string | null | undefined) {
+  return maps.value.find(item => item.id === mapId) ?? null;
+}
+
+function mapsOfPark(parkId: number | null | undefined) {
+  if (!parkId) return [];
+  return maps.value.filter(item => item.parkId === parkId && item.status !== "已归档");
+}
+
+const activeMapOptions = computed(() => {
+  const parkId = editingPark.value?.id;
+  return mapsOfPark(parkId).filter(item => item.status !== "已归档");
+});
+
+const selectedMap = computed(() => mapOf(parkForm.mapVersionId));
+
+const boundParkCount = computed(
+  () => parks.value.filter(park => park.mapVersionId).length
+);
+
 async function load() {
-  const [parkList, zoneList] = await Promise.all([parkApi.list(), zoneApi.list()]);
+  const [parkList, zoneList, mapList] = await Promise.all([
+    parkApi.list(),
+    zoneApi.list(),
+    mapApi.list()
+  ]);
   parks.value = parkList;
   zones.value = zoneList;
+  maps.value = mapList;
   if (!zoneForm.parkId && parkList.length) zoneForm.parkId = parkList[0].id;
+}
+
+function openBaseline(mapId: string | null | undefined) {
+  baselineMapId.value = mapId ?? null;
+  baselineDialog.value = true;
+}
+
+function onBaselineUpdated(map: MapVersion) {
+  baselineMapId.value = map.id;
+  void load();
+}
+
+function openPolicy(mode: "policy" | "lineage") {
+  policyMode.value = mode;
+  policyDialog.value = true;
 }
 
 function openCreatePark() {
@@ -95,7 +145,8 @@ function openCreatePark() {
     ownerName: "",
     parkType: "生产制造",
     status: "运行中",
-    color: "#0284c7"
+    color: "#0284c7",
+    mapVersionId: ""
   });
   parkDialog.value = true;
 }
@@ -111,7 +162,8 @@ function openEditPark(park: Park) {
     ownerName: park.ownerName ?? "",
     parkType: park.parkType ?? "生产制造",
     status: park.status,
-    color: park.color
+    color: park.color,
+    mapVersionId: park.mapVersionId ?? ""
   });
   parkDialog.value = true;
 }
@@ -215,6 +267,19 @@ onMounted(load);
       </template>
     </PageHeader>
 
+    <div class="map-policy-bar">
+      <div class="mp-txt">
+        <b>地图基线约束</b> · 园区建档时绑定坐标系，路线创建时冻结版本引用。当前
+        {{ boundParkCount }}/{{ parks.length }} 个园区已标定，未绑定的园区仅作资产台账，禁止编排巡检路线。
+      </div>
+      <button class="btn sm" @click="openPolicy('lineage')">
+        <AppIcon name="cpu" />数据来源
+      </button>
+      <button class="btn sm" @click="openPolicy('policy')">
+        <AppIcon name="info" />绑定时机说明
+      </button>
+    </div>
+
     <div class="stat-strip">
       <div class="stat-tab on">
         <div class="st-label"><AppIcon name="park" />在管园区</div>
@@ -290,6 +355,20 @@ onMounted(load);
           <div class="bar" :class="rateOf(park) === 100 ? 'ok' : ''">
             <i :style="{ width: `${rateOf(park)}%` }" />
           </div>
+          <div class="park-mapline">
+            <MapChip
+              :map-id="park.mapVersionId"
+              :status="mapOf(park.mapVersionId)?.status"
+              :fallback="park.mapStatus"
+            />
+            <button
+              class="btn sm ghost"
+              :disabled="!park.mapVersionId"
+              @click="openBaseline(park.mapVersionId)"
+            >
+              <AppIcon name="layers" />地图基线
+            </button>
+          </div>
           <div class="park-foot">
             <div class="park-owner">
               <span class="avatar">{{ (park.ownerName || "待").slice(0, 1) }}</span>
@@ -328,6 +407,7 @@ onMounted(load);
               <th>设备数</th>
               <th>今日巡检</th>
               <th>负责人</th>
+              <th>地图基线</th>
               <th>状态</th>
               <th>操作</th>
             </tr>
@@ -348,6 +428,23 @@ onMounted(load);
               <td>{{ park.deviceCount }} 台</td>
               <td>{{ park.doneCount }}/{{ park.taskCount }}</td>
               <td>{{ park.ownerName }}</td>
+              <td>
+                <div class="park-mapline" style="margin: 0; padding-top: 0; border-top: none">
+                  <MapChip
+                    :map-id="park.mapVersionId"
+                    :status="mapOf(park.mapVersionId)?.status"
+                    :fallback="park.mapStatus"
+                  />
+                  <button
+                    class="btn sm ghost icon"
+                    title="地图基线"
+                    :disabled="!park.mapVersionId"
+                    @click="openBaseline(park.mapVersionId)"
+                  >
+                    <AppIcon name="layers" />
+                  </button>
+                </div>
+              </td>
               <td><StatusBadge :status="park.status" /></td>
               <td>
                 <div class="actions">
@@ -484,6 +581,30 @@ onMounted(load);
           <label>主题色</label>
           <input v-model="parkForm.color" class="input" type="color" style="height: 34px; padding: 3px" />
         </div>
+        <div class="field" style="grid-column: 1 / -1">
+          <label>地图基线绑定 <em>*</em></label>
+          <select v-model="parkForm.mapVersionId" class="select">
+            <option value="">待标定 · 已登记坐标系，建图采集中（不可编排路线）</option>
+            <option value="__none__">暂不绑定 · 仅资产台账（不可编排路线）</option>
+            <option v-for="map in activeMapOptions" :key="map.id" :value="map.id">
+              {{ map.id }} · {{ map.status }} · {{ map.frameId }}
+            </option>
+          </select>
+        </div>
+        <div class="field" style="grid-column: 1 / -1">
+          <label>坐标系框架 frame_id</label>
+          <input
+            class="input mono"
+            :value="selectedMap?.frameId ?? '—'"
+            readonly
+            placeholder="由地图服务分配，前端只读"
+          />
+        </div>
+        <div class="field" style="grid-column: 1 / -1">
+          <div class="rt-hint" style="margin: 0">
+            建档时必须确定坐标系（frame_id / 原点 / 分辨率 / CRS / 楼层），并登记地图基线状态。只有「已发布」的地图版本才允许创建巡检路线；建图完成后再发布不可变版本。
+          </div>
+        </div>
         <div class="field">
           <label>园区地址</label>
           <input v-model="parkForm.parkAddress" class="input" placeholder="选填" />
@@ -557,5 +678,13 @@ onMounted(load);
         </button>
       </template>
     </el-dialog>
+
+    <MapBaselineDialog
+      v-model="baselineDialog"
+      :map-id="baselineMapId"
+      @updated="onBaselineUpdated"
+      @data-source="openPolicy('lineage')"
+    />
+    <MapPolicyDialog v-model="policyDialog" :mode="policyMode" />
   </div>
 </template>

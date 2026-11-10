@@ -4,6 +4,8 @@ import type {
   DashboardSummary,
   Device,
   LoginResponse,
+  MapRefs,
+  MapVersion,
   Park,
   Route,
   RouteValidation,
@@ -25,6 +27,20 @@ export const parkApi = {
   create: (data: object) => post<Park>("/parks", data),
   update: (id: number, data: object) => put<Park>(`/parks/${id}`, data),
   remove: (id: number) => del<boolean>(`/parks/${id}`)
+};
+
+export const mapApi = {
+  list: (params?: object) => get<MapVersion[]>("/map-versions", params),
+  byPark: (parkId: number) => get<MapVersion[]>(`/parks/${parkId}/maps`),
+  get: (id: string) => get<MapVersion>(`/map-versions/${encodeURIComponent(id)}`),
+  refs: (id: string) =>
+    get<MapRefs>(`/map-versions/${encodeURIComponent(id)}/refs`),
+  publish: (id: string) =>
+    post<MapVersion>(`/map-versions/${encodeURIComponent(id)}/publish`),
+  newVersion: (id: string, note?: string) =>
+    post<MapVersion>(`/map-versions/${encodeURIComponent(id)}/new-version`, {
+      note
+    })
 };
 
 export const zoneApi = {

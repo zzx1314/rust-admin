@@ -114,7 +114,25 @@ POST   /api/alerts/{id}/handle
 
 GET    /api/settings              PUT    /api/settings
 GET    /api/dashboard/summary
+
+GET    /api/map-versions                  GET    /api/parks/{id}/maps
+GET    /api/map-versions/{id}             GET    /api/map-versions/{id}/refs
+POST   /api/map-versions/{id}/publish     POST   /api/map-versions/{id}/new-version
 ```
+
+## 地图基线
+
+地图版本保存在 `map_versions` 表，`id` 形如 `MAP-ZJ-01@v2.1`，发布后不可变。
+园区通过 `parks.map_version_id` 持有「当前生效基线」指针，路线创建时把
+`routes.map_version_id` 冻结为当时的版本，之后地图发新版不会改写历史路线坐标。
+
+- `GET /api/map-versions` 支持 `parkId`、`status` 过滤，前端用它渲染基线徽章与版本下拉。
+- `GET /api/map-versions/{id}/refs` 返回引用该版本的路线、任务与园区设备数，用于影响分析。
+- `POST /api/map-versions/{id}/publish` 发布版本并切换园区基线指针，同园区旧版本归档。
+- `POST /api/map-versions/{id}/new-version` 派生下一版本并发布，历史路线保持旧版引用。
+
+`server/seed.rs` 会在 `map_versions` 为空且已有园区时自动补齐演示基线，并为
+RT-001 ~ RT-004 写入对应的冻结版本引用。
 
 ## 路线数据模型
 

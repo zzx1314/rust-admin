@@ -61,6 +61,7 @@ pub async fn summary(State(state): State<AppState>) -> Result<Json<ApiResponse<V
     let parks = sqlx::query_as::<_, Park>(
         "SELECT p.id, p.park_code, p.park_name, p.park_description, p.park_address,
             p.area, p.owner_name, p.park_type, p.status, p.color, p.created_at, p.updated_at,
+            p.map_version_id, p.map_status,
             (SELECT COUNT(*) FROM zones z WHERE z.park_id = p.id) AS zone_count,
             (SELECT COUNT(*) FROM devices d WHERE d.park_id = p.id) AS device_count,
             (SELECT COUNT(*) FROM tasks t WHERE t.park_id = p.id) AS task_count,

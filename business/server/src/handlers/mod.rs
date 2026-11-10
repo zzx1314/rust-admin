@@ -1,6 +1,7 @@
 pub mod alerts;
 pub mod dashboard;
 pub mod devices;
+pub mod maps;
 pub mod parks;
 pub mod routes;
 pub mod settings;

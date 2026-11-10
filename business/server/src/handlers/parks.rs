@@ -9,6 +9,7 @@ use sqlx::QueryBuilder;
 const PARK_SELECT: &str =
     "SELECT p.id, p.park_code, p.park_name, p.park_description, p.park_address,
     p.area, p.owner_name, p.park_type, p.status, p.color, p.created_at, p.updated_at,
+    p.map_version_id, p.map_status,
     (SELECT COUNT(*) FROM zones z WHERE z.park_id = p.id) AS zone_count,
     (SELECT COUNT(*) FROM devices d WHERE d.park_id = p.id) AS device_count,
     (SELECT COUNT(*) FROM tasks t WHERE t.park_id = p.id) AS task_count,
@@ -103,10 +104,14 @@ pub async fn update_park(
     Json(payload): Json<ParkRequest>,
 ) -> Result<Json<ApiResponse<Park>>, AppError> {
     let existing = fetch_park(&state, id).await?;
+    let (map_version_id, map_status) = resolve_park_map(&state, id, payload.map_version_id)
+        .await?
+        .unwrap_or((existing.map_version_id, existing.map_status));
     sqlx::query(
         "UPDATE parks SET park_name = ?1, park_description = ?2, park_address = ?3, area = ?4,
-            owner_name = ?5, park_type = ?6, status = ?7, color = ?8, updated_at = ?9
-         WHERE id = ?10",
+            owner_name = ?5, park_type = ?6, status = ?7, color = ?8, map_version_id = ?9,
+            map_status = ?10, updated_at = ?11
+         WHERE id = ?12",
     )
     .bind(if payload.park_name.trim().is_empty() {
         existing.park_name
@@ -120,6 +125,8 @@ pub async fn update_park(
     .bind(payload.park_type.or(existing.park_type))
     .bind(payload.status.unwrap_or(existing.status))
     .bind(payload.color.unwrap_or(existing.color))
+    .bind(map_version_id)
+    .bind(map_status)
     .bind(now())
     .bind(id)
     .execute(&state.db)
@@ -159,4 +166,41 @@ async fn fetch_park(state: &AppState, id: i64) -> Result<Park, AppError> {
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| AppError::NotFound("园区不存在".to_string()))
+}
+
+/// 解析园区表单提交的地图基线绑定。
+/// 返回 `None` 表示请求未携带该字段，保留原值；`Some((None, status))` 表示解绑。
+pub(crate) async fn resolve_park_map(
+    state: &AppState,
+    park_id: i64,
+    requested: Option<String>,
+) -> Result<Option<(Option<String>, String)>, AppError> {
+    let Some(requested) = requested else {
+        return Ok(None);
+    };
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return Ok(Some((None, "待标定".to_string())));
+    }
+    if requested == "__none__" {
+        return Ok(Some((None, "未绑定".to_string())));
+    }
+    let map = sqlx::query_as::<_, (i64, String)>(
+        "SELECT park_id, status FROM map_versions WHERE id = ?1",
+    )
+    .bind(requested)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::BadRequest(format!("地图基线 {requested} 不存在")))?;
+    if map.0 != park_id {
+        return Err(AppError::BadRequest(
+            "地图基线不属于该园区，无法绑定".to_string(),
+        ));
+    }
+    let status = if map.1 == "部分标定" {
+        "部分标定".to_string()
+    } else {
+        "已标定".to_string()
+    };
+    Ok(Some((Some(requested.to_string()), status)))
 }

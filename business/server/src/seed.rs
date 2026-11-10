@@ -15,6 +15,7 @@ pub async fn seed(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     if park_count == 0 {
         seed_business_data(pool).await?;
     }
+    seed_maps(pool).await?;
 
     Ok(())
 }
@@ -877,5 +878,177 @@ async fn seed_routes(pool: &SqlitePool, created: &str) -> Result<(), sqlx::Error
         .execute(pool)
         .await?;
     }
+    Ok(())
+}
+
+/// 地图基线演示数据：只在地图版本库为空时写入，已有业务数据也会自动补齐。
+async fn seed_maps(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let map_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM map_versions")
+        .fetch_one(pool)
+        .await?;
+    if map_count > 0 {
+        return Ok(());
+    }
+    let park_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM parks")
+        .fetch_one(pool)
+        .await?;
+    if park_count == 0 {
+        return Ok(());
+    }
+
+    let created = now();
+    let maps = [
+        (
+            "MAP-ZJ-01@v2.1",
+            1,
+            "MAP-ZJ-01",
+            "v2.1",
+            "zj_map / 局部米制",
+            "GCJ-02 锚点 + 局部 ENU",
+            "31.2014, 121.6023",
+            "0.05 m/px",
+            "1F / 2F / B1",
+            18,
+            4,
+            "已发布",
+            Some("2026-11-06 10:20:00"),
+            "c4f1a7d29b8e5306a1d3f70c2b9e6481d7a03f5c9e2b6a48c1d9f0e7b3a2546c",
+            "一期全园区建图，标定充电座与配电房禁行区；当前生效基线",
+        ),
+        (
+            "MAP-ZJ-01@v2.0",
+            1,
+            "MAP-ZJ-01",
+            "v2.0",
+            "zj_map / 局部米制",
+            "GCJ-02 锚点 + 局部 ENU",
+            "31.2014, 121.6023",
+            "0.05 m/px",
+            "1F / 2F",
+            16,
+            3,
+            "已归档",
+            Some("2026-09-18 14:02:00"),
+            "8b27e0c4d6a1f9352e7c4b80d1a63f9e5c2d7b40a8f16e93c5b2d7a4f0e68139",
+            "原点偏移修正前的版本，因仍有路线引用而保留，不可删除",
+        ),
+        (
+            "MAP-LG-01@v1.4",
+            2,
+            "MAP-LG-01",
+            "v1.4",
+            "lg_map / 局部米制",
+            "GCJ-02 锚点 + 局部 ENU",
+            "30.8912, 121.9234",
+            "0.06 m/px",
+            "1F / B1",
+            12,
+            2,
+            "已发布",
+            Some("2026-10-28 16:45:00"),
+            "3d9f6a1c8e47b2507c4d1e93a6f8b5d2e0c7a4f19b6d3e82c5a0f7b4d1e96823",
+            "二期扩建后重标定，冷链仓低温区单独建模",
+        ),
+        (
+            "MAP-BJ-01@v0.9",
+            3,
+            "MAP-BJ-01",
+            "v0.9",
+            "bj_map / 局部米制",
+            "GCJ-02 锚点 + 局部 ENU",
+            "31.1788, 121.5102",
+            "0.05 m/px",
+            "1F（B1 待建图）",
+            7,
+            1,
+            "部分标定",
+            Some("2026-11-08 14:30:00"),
+            "7e2c9a4f1b6d8035c2e7f4a9d1b6c3e80f5a2d7b4c1e968f30a6d9b2e7c4f1a5",
+            "仅 G 区研发楼可用；H 区地下车库建图补采中，该区域禁止编排航点",
+        ),
+    ];
+
+    for (
+        id,
+        park_id,
+        map_name,
+        version,
+        frame_id,
+        crs,
+        origin,
+        resolution,
+        floors,
+        road_count,
+        no_go_count,
+        status,
+        published_at,
+        map_hash,
+        note,
+    ) in maps
+    {
+        sqlx::query(
+            "INSERT INTO map_versions (id, park_id, map_name, version, frame_id, crs, origin,
+                resolution, floors, road_count, no_go_count, status, map_hash, map_width,
+                map_height, note, published_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1600, 860, ?14, ?15, ?16)",
+        )
+        .bind(id)
+        .bind(park_id)
+        .bind(map_name)
+        .bind(version)
+        .bind(frame_id)
+        .bind(crs)
+        .bind(origin)
+        .bind(resolution)
+        .bind(floors)
+        .bind(road_count)
+        .bind(no_go_count)
+        .bind(status)
+        .bind(map_hash)
+        .bind(note)
+        .bind(published_at)
+        .bind(&created)
+        .execute(pool)
+        .await?;
+    }
+
+    for (park_id, map_id, map_status) in [
+        (1, "MAP-ZJ-01@v2.1", "已标定"),
+        (2, "MAP-LG-01@v1.4", "已标定"),
+        (3, "MAP-BJ-01@v0.9", "部分标定"),
+    ] {
+        sqlx::query("UPDATE parks SET map_version_id = ?1, map_status = ?2 WHERE id = ?3")
+            .bind(map_id)
+            .bind(map_status)
+            .bind(park_id)
+            .execute(pool)
+            .await?;
+    }
+
+    for (route_code, map_id) in [
+        ("RT-001", "MAP-ZJ-01@v2.1"),
+        ("RT-002", "MAP-ZJ-01@v2.0"),
+        ("RT-003", "MAP-LG-01@v1.4"),
+        ("RT-004", "MAP-BJ-01@v0.9"),
+    ] {
+        sqlx::query("UPDATE routes SET map_version_id = ?1 WHERE route_code = ?2")
+            .bind(map_id)
+            .bind(route_code)
+            .execute(pool)
+            .await?;
+    }
+
+    sqlx::query(
+        "UPDATE routes SET map_version_id = (
+            SELECT id FROM map_versions m
+            WHERE m.park_id = routes.park_id AND m.status IN ('已发布', '部分标定')
+            ORDER BY m.published_at DESC, m.created_at DESC LIMIT 1
+         )
+         WHERE map_version_id IS NULL AND park_id IS NOT NULL",
+    )
+    .execute(pool)
+    .await?;
+
+    tracing::info!("seeded demo map baselines");
     Ok(())
 }

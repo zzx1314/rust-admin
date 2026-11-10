@@ -1,7 +1,7 @@
 use crate::auth::{login_handler, me_handler, require_auth};
 use crate::config::Config;
 use crate::error::ApiResponse;
-use crate::handlers::{alerts, dashboard, devices, parks, routes, settings, tasks, zones};
+use crate::handlers::{alerts, dashboard, devices, maps, parks, routes, settings, tasks, zones};
 use axum::extract::State;
 use axum::http::Method;
 use axum::middleware::from_fn_with_state;
@@ -38,6 +38,12 @@ pub fn build_router(state: AppState) -> Router {
                 .put(parks::update_park)
                 .delete(parks::delete_park),
         )
+        .route("/parks/{id}/maps", get(maps::list_park_maps))
+        .route("/map-versions", get(maps::list_maps))
+        .route("/map-versions/{id}", get(maps::get_map))
+        .route("/map-versions/{id}/refs", get(maps::map_refs))
+        .route("/map-versions/{id}/publish", post(maps::publish_map))
+        .route("/map-versions/{id}/new-version", post(maps::new_map_version))
         .route("/zones", get(zones::list_zones).post(zones::create_zone))
         .route(
             "/zones/{id}",

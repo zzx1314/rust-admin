@@ -11,11 +11,12 @@ use sqlx::QueryBuilder;
 const ROUTE_SELECT: &str = "SELECT r.id, r.route_code, r.route_name, r.park_id, p.park_name,
     r.zone_id, z.zone_name, r.model, r.status, r.version, r.loop_mode, r.default_speed,
     r.route_description, r.route_data, r.point_count, r.distance_m, r.duration_s, r.battery_pct,
-    r.published_at, r.created_at, r.updated_at,
+    r.published_at, r.map_version_id, mv.status AS map_status, r.created_at, r.updated_at,
     (SELECT COUNT(*) FROM tasks t WHERE t.route_id = r.id) AS used_task_count
     FROM routes r
     LEFT JOIN parks p ON p.id = r.park_id
-    LEFT JOIN zones z ON z.id = r.zone_id";
+    LEFT JOIN zones z ON z.id = r.zone_id
+    LEFT JOIN map_versions mv ON mv.id = r.map_version_id";
 
 pub async fn list_routes(
     State(state): State<AppState>,
@@ -79,16 +80,22 @@ pub async fn create_route(
         .unwrap_or_else(|| empty_route_data(&loop_mode));
     let metrics = route_metrics(&route_data, speed);
     let timestamp = now();
+    let map = resolve_route_map(
+        &state,
+        payload.park_id,
+        payload.map_version_id.as_deref(),
+    )
+    .await?;
 
     let result = sqlx::query(
         "INSERT INTO routes (route_code, route_name, park_id, zone_id, model, status, version,
             loop_mode, default_speed, route_description, route_data, point_count, distance_m,
-            duration_s, battery_pct, published_at, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, NULL, ?16, ?17)",
+            duration_s, battery_pct, published_at, map_version_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, NULL, ?16, ?17, ?18)",
     )
     .bind(&route_code)
     .bind(payload.route_name.trim())
-    .bind(payload.park_id)
+    .bind(payload.park_id.or_else(|| map.as_ref().map(|item| item.1)))
     .bind(payload.zone_id)
     .bind(payload.model)
     .bind(payload.status.unwrap_or_else(|| "草稿".to_string()))
@@ -101,6 +108,7 @@ pub async fn create_route(
     .bind(metrics.distance_m)
     .bind(metrics.duration_s)
     .bind(metrics.battery_pct)
+    .bind(map.map(|item| item.0))
     .bind(&timestamp)
     .bind(&timestamp)
     .execute(&state.db)
@@ -127,19 +135,34 @@ pub async fn update_route(
         .or_else(|| existing.route_data.as_deref().map(parse_route_data))
         .unwrap_or_else(|| empty_route_data(&loop_mode));
     let metrics = route_metrics(&route_data, speed);
+    let park_id = payload.park_id.or(existing.park_id);
+    let map_version_id = if let Some(requested) = payload.map_version_id.as_deref() {
+        if requested.trim().is_empty() {
+            None
+        } else if Some(requested.trim().to_string()) == existing.map_version_id {
+            existing.map_version_id.clone()
+        } else {
+            resolve_route_map(&state, park_id, Some(requested))
+                .await?
+                .map(|item| item.0)
+        }
+    } else {
+        existing.map_version_id.clone()
+    };
 
     sqlx::query(
         "UPDATE routes SET route_name = ?1, park_id = ?2, zone_id = ?3, model = ?4,
             status = ?5, version = ?6, loop_mode = ?7, default_speed = ?8,
             route_description = ?9, route_data = ?10, point_count = ?11, distance_m = ?12,
-            duration_s = ?13, battery_pct = ?14, updated_at = ?15 WHERE id = ?16",
+            duration_s = ?13, battery_pct = ?14, map_version_id = ?15, updated_at = ?16
+         WHERE id = ?17",
     )
     .bind(if payload.route_name.trim().is_empty() {
         existing.route_name
     } else {
         payload.route_name.trim().to_string()
     })
-    .bind(payload.park_id.or(existing.park_id))
+    .bind(park_id)
     .bind(payload.zone_id.or(existing.zone_id))
     .bind(payload.model.or(existing.model))
     .bind(payload.status.unwrap_or(existing.status))
@@ -152,6 +175,7 @@ pub async fn update_route(
     .bind(metrics.distance_m)
     .bind(metrics.duration_s)
     .bind(metrics.battery_pct)
+    .bind(map_version_id)
     .bind(now())
     .bind(id)
     .execute(&state.db)
@@ -407,6 +431,47 @@ async fn fetch_route(state: &AppState, id: i64) -> Result<Route, AppError> {
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| AppError::NotFound("路线不存在".to_string()))
+}
+
+/// 解析路线创建时冻结的地图基线。未显式指定时自动取园区当前生效基线。
+async fn resolve_route_map(
+    state: &AppState,
+    park_id: Option<i64>,
+    requested: Option<&str>,
+) -> Result<Option<(String, i64)>, AppError> {
+    if let Some(requested) = requested.map(str::trim).filter(|value| !value.is_empty()) {
+        let row = sqlx::query_as::<_, (String, i64, String)>(
+            "SELECT id, park_id, status FROM map_versions WHERE id = ?1",
+        )
+        .bind(requested)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::BadRequest(format!("地图基线 {requested} 不存在")))?;
+        if row.2 == "已归档" {
+            return Err(AppError::BadRequest("已归档的地图基线不能用于新建路线".to_string()));
+        }
+        if let Some(park_id) = park_id
+            && row.1 != park_id
+        {
+            return Err(AppError::BadRequest(
+                "地图基线不属于该园区，无法创建路线".to_string(),
+            ));
+        }
+        return Ok(Some((row.0, row.1)));
+    }
+
+    let Some(park_id) = park_id else {
+        return Ok(None);
+    };
+    let active = sqlx::query_as::<_, (String, i64)>(
+        "SELECT id, park_id FROM map_versions
+         WHERE park_id = ?1 AND status IN ('已发布', '部分标定')
+         ORDER BY published_at DESC, created_at DESC LIMIT 1",
+    )
+    .bind(park_id)
+    .fetch_optional(&state.db)
+    .await?;
+    Ok(active)
 }
 
 #[cfg(test)]

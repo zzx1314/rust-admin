@@ -2,8 +2,9 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { parkApi, routeApi, zoneApi } from "@/api/ops";
+import { parkApi, mapApi, routeApi, zoneApi } from "@/api/ops";
 import type {
+  MapVersion,
   Park,
   Route,
   RouteData,
@@ -16,6 +17,9 @@ import PageHeader from "@/components/PageHeader.vue";
 import AppIcon from "@/components/AppIcon.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import RouteBaseMap from "@/components/RouteBaseMap.vue";
+import MapChip from "@/components/MapChip.vue";
+import MapBaselineDialog from "@/components/MapBaselineDialog.vue";
+import MapPolicyDialog from "@/components/MapPolicyDialog.vue";
 import {
   ACTION_LIB,
   AVOID_LEVELS,
@@ -48,12 +52,15 @@ interface RouteDraft {
   routeDescription: string;
   data: RouteData;
   usedTaskCount: number;
+  mapVersionId: string | null;
+  mapStatus: string | null;
 }
 
 const vueRoute = useRoute();
 const routes = ref<Route[]>([]);
 const parks = ref<Park[]>([]);
 const zones = ref<Zone[]>([]);
+const maps = ref<MapVersion[]>([]);
 const draft = ref<RouteDraft | null>(null);
 const currentId = ref<number | null>(null);
 const routeQuery = ref("");
@@ -72,6 +79,10 @@ let simTimer = 0;
 
 const routeDialog = ref(false);
 const baseDialog = ref(false);
+const baselineDialog = ref(false);
+const baselineMapId = ref<string | null>(null);
+const policyDialog = ref(false);
+const policyMode = ref<"policy" | "lineage">("policy");
 const actionDialog = ref(false);
 const validateVisible = ref(false);
 const validation = ref<RouteValidation | null>(null);
@@ -85,7 +96,8 @@ const routeForm = reactive({
   loopMode: "闭环",
   defaultSpeed: 1.2,
   status: "草稿",
-  routeDescription: ""
+  routeDescription: "",
+  mapVersionId: ""
 });
 
 const actionForm = reactive({
@@ -107,6 +119,38 @@ const filteredRoutes = computed(() => {
 const zonesOfForm = computed(() =>
   zones.value.filter(zone => zone.parkId === routeForm.parkId)
 );
+
+const mapsOfForm = computed(() =>
+  maps.value.filter(
+    item => item.parkId === routeForm.parkId && item.status !== "已归档"
+  )
+);
+
+const draftMap = computed(() =>
+  maps.value.find(item => item.id === draft.value?.mapVersionId) ?? null
+);
+
+function mapsOfPark(parkId: number | null) {
+  if (!parkId) return [];
+  return maps.value.filter(
+    item => item.parkId === parkId && item.status !== "已归档"
+  );
+}
+
+function openBaseline(mapId: string | null | undefined) {
+  baselineMapId.value = mapId ?? null;
+  baselineDialog.value = true;
+}
+
+function openPolicy(mode: "policy" | "lineage") {
+  policyMode.value = mode;
+  policyDialog.value = true;
+}
+
+async function onBaselineUpdated() {
+  maps.value = await mapApi.list();
+  await load();
+}
 
 const metrics = computed(() =>
   draft.value
@@ -165,14 +209,16 @@ function actionOptions(kind: "point" | "leg") {
 }
 
 async function load(selectZoneId?: number) {
-  const [routeList, parkList, zoneList] = await Promise.all([
+  const [routeList, parkList, zoneList, mapList] = await Promise.all([
     routeApi.list(),
     parkApi.list(),
-    zoneApi.list()
+    zoneApi.list(),
+    mapApi.list()
   ]);
   routes.value = routeList;
   parks.value = parkList;
   zones.value = zoneList;
+  maps.value = mapList;
 
   const target =
     (currentId.value ? routeList.find(item => item.id === currentId.value) : null) ??
@@ -197,7 +243,9 @@ function selectRoute(route: Route, notify = true) {
     defaultSpeed: route.defaultSpeed,
     routeDescription: route.routeDescription ?? "",
     data: parseRouteData(route.routeData),
-    usedTaskCount: route.usedTaskCount
+    usedTaskCount: route.usedTaskCount,
+    mapVersionId: route.mapVersionId,
+    mapStatus: route.mapStatus
   };
   selType.value = "point";
   selIdx.value = 0;
@@ -378,7 +426,8 @@ async function persist(silent = true) {
     loopMode: draft.value.data.loop,
     defaultSpeed: draft.value.defaultSpeed,
     routeDescription: draft.value.routeDescription,
-    routeData: cloneRouteData(draft.value.data)
+    routeData: cloneRouteData(draft.value.data),
+    mapVersionId: draft.value.mapVersionId
   });
   draft.value.status = updated.status;
   draft.value.version = updated.version;
@@ -440,7 +489,8 @@ function openNewRoute() {
     loopMode: "闭环",
     defaultSpeed: 1.2,
     status: "草稿",
-    routeDescription: ""
+    routeDescription: "",
+    mapVersionId: mapsOfPark(parks.value[0]?.id ?? 1)[0]?.id ?? ""
   });
   routeDialog.value = true;
 }
@@ -448,6 +498,10 @@ function openNewRoute() {
 async function createRoute() {
   if (!routeForm.routeName.trim()) {
     ElMessage.warning("请填写路线名称");
+    return;
+  }
+  if (!routeForm.mapVersionId) {
+    ElMessage.warning("请选择地图基线版本；未绑定基线的园区不能编排路线");
     return;
   }
   const created = await routeApi.create({
@@ -471,7 +525,8 @@ function openBaseDialog() {
     loopMode: draft.value.data.loop,
     defaultSpeed: draft.value.defaultSpeed,
     status: draft.value.status,
-    routeDescription: draft.value.routeDescription
+    routeDescription: draft.value.routeDescription,
+    mapVersionId: draft.value.mapVersionId ?? ""
   });
   baseDialog.value = true;
 }
@@ -623,6 +678,10 @@ watch(
     if (!zonesOfForm.value.some(zone => zone.id === routeForm.zoneId)) {
       routeForm.zoneId = zonesOfForm.value[0]?.id ?? 1;
     }
+    const options = mapsOfForm.value;
+    if (!options.some(map => map.id === routeForm.mapVersionId)) {
+      routeForm.mapVersionId = options[0]?.id ?? "";
+    }
   }
 );
 
@@ -640,6 +699,9 @@ onBeforeUnmount(() => window.clearInterval(simTimer));
   <div v-if="draft">
     <PageHeader title="巡检路线规划" subtitle="可视化编排航点、行进航段与每一点/段执行的采集动作">
       <template #actions>
+        <button class="btn" :disabled="!draft.mapVersionId" @click="openBaseline(draft.mapVersionId)">
+          <AppIcon name="layers" />地图基线
+        </button>
         <button class="btn" @click="validateRoute"><AppIcon name="shield" />校验路线</button>
         <button class="btn" @click="publishRoute"><AppIcon name="send" />发布路线</button>
         <button class="btn primary" @click="openNewRoute"><AppIcon name="plus" />新建路线</button>
@@ -700,6 +762,24 @@ onBeforeUnmount(() => window.clearInterval(simTimer));
           <div class="rp-body" style="padding: 6px 14px 12px">
             <div class="kv"><span>路线编号</span><b class="mono">{{ draft.routeCode }}</b></div>
             <div class="kv"><span>所属园区</span><b>{{ draftParkName }}</b></div>
+            <div class="kv">
+              <span>地图基线（冻结引用）</span>
+              <b style="display: flex; align-items: center; gap: 8px">
+                <MapChip
+                  :map-id="draft.mapVersionId"
+                  :status="draftMap?.status"
+                  :fallback="draft.mapStatus"
+                />
+                <button
+                  v-if="draft.mapVersionId"
+                  class="btn sm ghost icon"
+                  title="查看基线详情"
+                  @click="openBaseline(draft.mapVersionId)"
+                >
+                  <AppIcon name="layers" />
+                </button>
+              </b>
+            </div>
             <div class="kv"><span>巡检区域</span><b>{{ draftZoneName }}</b></div>
             <div class="kv"><span>适用机型</span><b>{{ draft.model }}</b></div>
             <div class="kv"><span>闭环方式</span><b>{{ draft.data.loop }}</b></div>
@@ -1157,6 +1237,15 @@ onBeforeUnmount(() => window.clearInterval(simTimer));
             <option v-for="zone in zonesOfForm" :key="zone.id" :value="zone.id">{{ zone.zoneName }}</option>
           </select>
         </div>
+        <div class="field" style="grid-column: 1 / -1">
+          <label>地图基线版本 <em>*</em> · 创建后冻结引用</label>
+          <select v-model="routeForm.mapVersionId" class="select">
+            <option value="">该园区无可用基线 · 需先完成建图标定</option>
+            <option v-for="map in mapsOfForm" :key="map.id" :value="map.id">
+              {{ map.id }} · {{ map.status }} · {{ map.frameId }}
+            </option>
+          </select>
+        </div>
         <div class="field">
           <label>适用机型</label>
           <select v-model="routeForm.model" class="select">
@@ -1188,7 +1277,7 @@ onBeforeUnmount(() => window.clearInterval(simTimer));
         </div>
       </div>
       <div class="rt-hint">
-        创建后进入编辑画布：点击地图添加航点，系统自动在相邻航点间生成行进航段，再为每个点/段配置采集动作。
+        航点坐标以所选地图版本的 frame_id 与分辨率为基准，创建后引用冻结；后续地图发新版不会自动改写本路线坐标。创建后进入画布点击添加航点。
       </div>
       <template #footer>
         <button class="btn" @click="routeDialog = false">取消</button>
@@ -1213,6 +1302,19 @@ onBeforeUnmount(() => window.clearInterval(simTimer));
           <select v-model.number="routeForm.zoneId" class="select">
             <option v-for="zone in zonesOfForm" :key="zone.id" :value="zone.id">{{ zone.zoneName }}</option>
           </select>
+        </div>
+        <div class="field" style="grid-column: 1 / -1">
+          <label>地图基线（冻结引用）</label>
+          <div style="display: flex; align-items: center; gap: 10px; min-height: 34px">
+            <MapChip
+              :map-id="draft.mapVersionId"
+              :status="draftMap?.status"
+              :fallback="draft.mapStatus"
+            />
+            <span class="muted" style="font-size: 11px">
+              {{ draftMap?.frameId ?? "创建后引用冻结，不随园区当前基线变化" }}
+            </span>
+          </div>
         </div>
         <div class="field">
           <label>适用机型</label>
@@ -1318,5 +1420,13 @@ onBeforeUnmount(() => window.clearInterval(simTimer));
         <button class="btn primary" @click="validateVisible = false">知道了</button>
       </template>
     </el-dialog>
+
+    <MapBaselineDialog
+      v-model="baselineDialog"
+      :map-id="baselineMapId"
+      @updated="onBaselineUpdated"
+      @data-source="openPolicy('lineage')"
+    />
+    <MapPolicyDialog v-model="policyDialog" :mode="policyMode" />
   </div>
 </template>

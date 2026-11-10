@@ -16,10 +16,68 @@ pub struct Park {
     pub color: String,
     pub created_at: String,
     pub updated_at: String,
+    pub map_version_id: Option<String>,
+    pub map_status: String,
     pub zone_count: i64,
     pub device_count: i64,
     pub task_count: i64,
     pub done_count: i64,
+}
+
+#[derive(Debug, FromRow, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MapVersion {
+    pub id: String,
+    pub park_id: i64,
+    pub park_name: Option<String>,
+    pub map_name: String,
+    pub version: String,
+    pub frame_id: Option<String>,
+    pub crs: Option<String>,
+    pub origin: Option<String>,
+    pub resolution: Option<String>,
+    pub floors: Option<String>,
+    pub road_count: i64,
+    pub no_go_count: i64,
+    pub status: String,
+    pub map_hash: Option<String>,
+    pub map_width: Option<i64>,
+    pub map_height: Option<i64>,
+    pub note: Option<String>,
+    pub published_at: Option<String>,
+    pub created_at: String,
+    pub route_count: i64,
+    pub task_count: i64,
+}
+
+#[derive(Debug, FromRow, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MapRefRoute {
+    pub id: i64,
+    pub route_code: String,
+    pub route_name: String,
+    pub status: String,
+    pub version: String,
+    pub point_count: i64,
+}
+
+#[derive(Debug, FromRow, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MapRefTask {
+    pub id: i64,
+    pub task_code: String,
+    pub task_name: String,
+    pub task_status: String,
+    pub route_id: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MapRefs {
+    pub map: MapVersion,
+    pub routes: Vec<MapRefRoute>,
+    pub tasks: Vec<MapRefTask>,
+    pub device_count: i64,
 }
 
 #[derive(Debug, FromRow, Serialize, Clone)]
@@ -112,6 +170,8 @@ pub struct Route {
     pub duration_s: i64,
     pub battery_pct: i64,
     pub published_at: Option<String>,
+    pub map_version_id: Option<String>,
+    pub map_status: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub used_task_count: i64,
@@ -193,6 +253,7 @@ pub struct ParkRequest {
     pub park_type: Option<String>,
     pub status: Option<String>,
     pub color: Option<String>,
+    pub map_version_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -266,6 +327,21 @@ pub struct RouteRequest {
     pub default_speed: Option<f64>,
     pub route_description: Option<String>,
     pub route_data: Option<serde_json::Value>,
+    pub map_version_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapVersionRequest {
+    pub note: Option<String>,
+    pub map_hash: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapQuery {
+    pub park_id: Option<i64>,
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
