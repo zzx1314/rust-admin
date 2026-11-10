@@ -754,6 +754,40 @@ onBeforeUnmount(() => window.clearInterval(simTimer));
       </template>
     </PageHeader>
 
+    <div class="route-summary">
+      <div class="rs-main">
+        <div class="rs-title">
+          <b>{{ draft.routeName }}</b>
+          <span class="mono muted">{{ draft.routeCode }}</span>
+          <StatusBadge :status="draft.status" />
+          <span class="tag">{{ draft.version }}</span>
+        </div>
+        <div class="rs-meta">
+          <span><AppIcon name="park" />{{ draftParkName }} · {{ draftZoneName }}</span>
+          <span><AppIcon name="cpu" />{{ draft.model }}</span>
+          <span><AppIcon name="route" />{{ draft.data.loop }}</span>
+          <span><AppIcon name="clock" />{{ draft.defaultSpeed }} m/s</span>
+          <span class="rs-map">
+            <MapChip
+              :map-id="draft.mapVersionId"
+              :status="draftMap?.status"
+              :fallback="draft.mapStatus"
+            />
+          </span>
+        </div>
+      </div>
+      <div class="rs-side">
+        <div v-if="metrics" class="rs-metrics">
+          <span><b>{{ metrics.pointCount }}</b> 航点</span>
+          <span><b>{{ (metrics.distanceM / 1000).toFixed(2) }}</b> km</span>
+          <span><b>{{ Math.ceil(metrics.durationS / 60) }}</b> min</span>
+        </div>
+        <button class="btn sm" @click="openBaseDialog">
+          <AppIcon name="edit" />编辑基础信息
+        </button>
+      </div>
+    </div>
+
     <div class="route-layout">
       <div>
         <div class="rp">
@@ -795,43 +829,6 @@ onBeforeUnmount(() => window.clearInterval(simTimer));
             <button class="rt-new" @click="openNewRoute">
               <AppIcon name="plus" />新建路线模板
             </button>
-          </div>
-        </div>
-
-        <div class="rp" style="margin-top: 14px">
-          <div class="rp-head">
-            <b><AppIcon name="settings" />路线基础信息</b>
-            <button class="btn sm ghost icon" title="编辑" @click="openBaseDialog">
-              <AppIcon name="edit" />
-            </button>
-          </div>
-          <div class="rp-body" style="padding: 6px 14px 12px">
-            <div class="kv"><span>路线编号</span><b class="mono">{{ draft.routeCode }}</b></div>
-            <div class="kv"><span>所属园区</span><b>{{ draftParkName }}</b></div>
-            <div class="kv">
-              <span>地图基线（冻结引用）</span>
-              <b style="display: flex; align-items: center; gap: 8px">
-                <MapChip
-                  :map-id="draft.mapVersionId"
-                  :status="draftMap?.status"
-                  :fallback="draft.mapStatus"
-                />
-                <button
-                  v-if="draft.mapVersionId"
-                  class="btn sm ghost icon"
-                  title="查看基线详情"
-                  @click="openBaseline(draft.mapVersionId)"
-                >
-                  <AppIcon name="layers" />
-                </button>
-              </b>
-            </div>
-            <div class="kv"><span>巡检区域</span><b>{{ draftZoneName }}</b></div>
-            <div class="kv"><span>适用机型</span><b>{{ draft.model }}</b></div>
-            <div class="kv"><span>闭环方式</span><b>{{ draft.data.loop }}</b></div>
-            <div class="kv"><span>默认速度</span><b>{{ draft.defaultSpeed }} m/s</b></div>
-            <div class="kv"><span>版本 / 状态</span><b>{{ draft.version }} · {{ draft.status }}</b></div>
-            <div class="rt-hint" style="margin-top: 10px">{{ draft.routeDescription }}</div>
           </div>
         </div>
       </div>

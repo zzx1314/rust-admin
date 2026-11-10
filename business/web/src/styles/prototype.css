@@ -401,6 +401,18 @@ button{cursor:pointer}
 
 /* ============ 巡检路线规划模块 ============ */
 .route-layout{display:grid;grid-template-columns:246px minmax(0,1fr) 332px;gap:16px;align-items:start}
+.route-summary{position:sticky;top:76px;z-index:20;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:10px 16px;margin-bottom:14px;background:rgba(255,255,255,.94);backdrop-filter:blur(10px);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow)}
+.rs-main{min-width:0;flex:1}
+.rs-title{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.rs-title b{font-size:14px;letter-spacing:-.2px}
+.rs-title .mono{font-size:11px}
+.rs-meta{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:6px;font-size:11.5px;color:var(--text-2)}
+.rs-meta span{display:inline-flex;align-items:center;gap:5px}
+.rs-meta .ic{width:13px;height:13px;color:var(--muted)}
+.rs-map{margin-left:2px}
+.rs-side{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.rs-metrics{display:flex;gap:16px;font-size:11px;color:var(--muted)}
+.rs-metrics b{font-size:14px;color:var(--text);margin-right:2px;font-variant-numeric:tabular-nums}
 .rp{background:#fff;border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden}
 .rp-head{padding:13px 15px;border-bottom:1px solid var(--line-2);display:flex;align-items:center;justify-content:space-between;gap:8px}
 .rp-head b{font-size:12.5px;display:flex;align-items:center;gap:7px}
@@ -512,5 +524,5 @@ button{cursor:pointer}
 @media(max-width:1400px){.route-layout{grid-template-columns:220px minmax(0,1fr) 300px}}
 @media(max-width:1180px){.route-layout{grid-template-columns:220px minmax(0,1fr)}.rt-prop-panel{grid-column:1/-1}.rt-metrics{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:1280px){.kpis{grid-template-columns:repeat(2,1fr)}.row-2,.row-2b{grid-template-columns:1fr}.g3{grid-template-columns:repeat(2,1fr)}.kanban{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:900px){.route-layout{grid-template-columns:1fr}.rt-prop-panel{grid-column:auto}.sidebar{width:74px}.sidebar .hide-c,.sidebar .brand-text,.sidebar .nav-group-title,.sidebar .sb-status{display:none}.sidebar .nav-item{justify-content:center;padding:11px 0}.sidebar .brand{justify-content:center;padding:0}.tb-search{display:none}.tb-time{display:none}.content{padding:18px 16px 36px}.topbar{padding:0 16px}}
+@media(max-width:900px){.route-layout{grid-template-columns:1fr}.rt-prop-panel{grid-column:auto}.route-summary{top:64px}.rs-side{width:100%;justify-content:space-between}.sidebar{width:74px}.sidebar .hide-c,.sidebar .brand-text,.sidebar .nav-group-title,.sidebar .sb-status{display:none}.sidebar .nav-item{justify-content:center;padding:11px 0}.sidebar .brand{justify-content:center;padding:0}.tb-search{display:none}.tb-time{display:none}.content{padding:18px 16px 36px}.topbar{padding:0 16px}}
 @media(max-width:640px){.kpis,.g3,.kanban,.form-grid{grid-template-columns:1fr}.page-title{font-size:18px}.toolbar .search{width:100%}.tb-user .u-name,.tb-user .u-role{display:none}.metric-grid{grid-template-columns:1fr 1fr}}
