@@ -370,8 +370,10 @@ mod tests {
                 "add_route_park",
                 "remove_retired_dog_menus",
                 "add_map_baseline",
+                "remove_command_services_menus",
                 "add_map_dimensions",
                 "drop_retired_dog_tables",
+                "drop_command_services_tables",
             ]
         );
         assert_eq!(migrations[0].name(), "p_sys_tables_from_file");
@@ -403,6 +405,8 @@ mod tests {
             "dog_route_library",
             "dog_user_device",
             "dog_workflow",
+            "dog_command",
+            "dog_services",
         ] {
             let statement = Statement::from_string(
                 DbBackend::Sqlite,
@@ -449,15 +453,8 @@ mod tests {
             "dog_map.park_id must be dropped"
         );
 
-        // 保留的页面仍是一级菜单：地图管理 sort 2，模型管理 sort 3。
-        for (id, sort) in [
-            (1302, 2),
-            (1204, 3),
-            (1205, 4),
-            (1206, 5),
-            (1207, 6),
-            (1208, 7),
-        ] {
+        // 保留的页面仍是一级菜单：地图 / 模型 / 媒体 / 参数配置。
+        for (id, sort) in [(1302, 2), (1204, 3), (1205, 4), (1207, 5)] {
             let statement = Statement::from_string(
                 DbBackend::Sqlite,
                 format!(
@@ -490,7 +487,7 @@ mod tests {
 
         let retired_grants = Statement::from_string(
             DbBackend::Sqlite,
-            "SELECT 1 FROM p_sys_role_menu WHERE menu_id IN (1201, 1301)",
+            "SELECT 1 FROM p_sys_role_menu WHERE menu_id IN (1201, 1206, 1208, 1301)",
         );
         assert!(
             connection

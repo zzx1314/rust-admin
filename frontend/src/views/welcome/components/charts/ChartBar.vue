@@ -3,6 +3,10 @@ import { type PropType, computed, nextTick, ref, watch } from "vue";
 import { useDark, useECharts } from "@pureadmin/utils";
 
 const props = defineProps({
+  mapData: {
+    type: Array as PropType<Array<number>>,
+    default: () => []
+  },
   modelData: {
     type: Array as PropType<Array<number>>,
     default: () => []
@@ -11,11 +15,7 @@ const props = defineProps({
     type: Array as PropType<Array<number>>,
     default: () => []
   },
-  commandData: {
-    type: Array as PropType<Array<number>>,
-    default: () => []
-  },
-  servicesData: {
+  configData: {
     type: Array as PropType<Array<number>>,
     default: () => []
   }
@@ -36,7 +36,7 @@ watch(
     await nextTick(); // 确保DOM更新完成后再执行
     setOptions({
       container: ".bar-card",
-      color: ["#26ce83", "#41b6ff", "#e86033ce", "#BA53FFFF"],
+      color: ["#3b82f6", "#26ce83", "#41b6ff", "#BA53FFFF"],
       tooltip: {
         trigger: "axis",
         axisPointer: {
@@ -49,7 +49,7 @@ watch(
         right: 0
       },
       legend: {
-        data: ["模型数量", "媒体数量", "指令数量", "服务数量"],
+        data: ["地图数量", "模型数量", "媒体数量", "参数配置"],
         textStyle: {
           color: "#606266",
           fontSize: "0.875rem"
@@ -82,6 +82,16 @@ watch(
       ],
       series: [
         {
+          name: "地图数量",
+          type: "bar",
+          barWidth: 10,
+          itemStyle: {
+            color: "#3b82f6",
+            borderRadius: [10, 10, 0, 0]
+          },
+          data: props.mapData
+        },
+        {
           name: "模型数量",
           type: "bar",
           barWidth: 10,
@@ -102,24 +112,14 @@ watch(
           data: props.mediaData
         },
         {
-          name: "指令数量",
-          type: "bar",
-          barWidth: 10,
-          itemStyle: {
-            color: "#e86033ce",
-            borderRadius: [10, 10, 0, 0]
-          },
-          data: props.commandData
-        },
-        {
-          name: "服务数量",
+          name: "参数配置",
           type: "bar",
           barWidth: 10,
           itemStyle: {
             color: "#BA53FFFF",
             borderRadius: [10, 10, 0, 0]
           },
-          data: props.servicesData
+          data: props.configData
         }
       ]
     });

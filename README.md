@@ -12,7 +12,7 @@ A full-stack admin panel built with a **Rust** backend and **Vue 3** frontend. T
 - **Dictionary Management**: System dictionaries and dictionary items with type-based lookups
 - **System Log**: Operation logging with pagination and sensitive data masking
 - **Request Logging Middleware**: Automatic HTTP request tracking with response time measurement
-- **Robot Dog Resource Module**: map / model / media / command / config / services CRUD plus dashboard statistics (see [DOG.md](DOG.md))
+- **Middle-Platform Resource Module**: map / model / media / config CRUD plus dashboard statistics (see [DOG.md](DOG.md))
 - **Standalone Robot-Dog Service**: parks / devices / tasks / routes, live console and backend under [`business/`](business/README.md)
 
 ## 🏗️ Architecture
@@ -27,7 +27,7 @@ rust-admin/
 │   │   ├── config/    # Application configuration
 │   │   ├── migration/ # Database migrations
 │   │   ├── system/    # Platform modules (user, role, menu, org, dict, log, auth)
-│   │   └── business/  # Business domain (dog: map, model, media, command, config, services)
+│   │   └── business/  # Business domain (dog: map, model, media, config)
 │   ├── tests/         # Integration tests (organized by module)
 │   └── config.toml    # Server, Redis, and database configuration
 ├── business/          # Standalone robot-dog service (Rust server + Vue console)

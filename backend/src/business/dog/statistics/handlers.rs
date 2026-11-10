@@ -60,10 +60,10 @@ pub async fn statistics_all_type_handler(
         .into_iter()
         .map(|w| {
             serde_json::json!({
+                "mapCount": w.map_count,
                 "modelCount": w.model_count,
                 "mediaCount": w.media_count,
-                "commandCount": w.command_count,
-                "servicesCount": w.services_count,
+                "configCount": w.config_count,
             })
         })
         .collect();

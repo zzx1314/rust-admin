@@ -7,6 +7,7 @@ use crate::business::dog::config::entity::Entity as ConfigEntity;
 use crate::business::dog::config::entity::Model as DogConfig;
 use crate::common::base::{BaseRepository, order_desc};
 use crate::common::util::parse_beijing_datetime;
+use chrono::{DateTime, Utc};
 use sea_orm::{
     ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect,
@@ -130,6 +131,29 @@ impl SeaOrmDogConfigRepository {
         ConfigEntity::find()
             .filter(ConfigColumn::IsDeleted.eq(0))
             .order_by(ConfigColumn::CreateTime, order_desc())
+            .all(&*self.conn)
+            .await
+    }
+
+    pub async fn count(&self) -> Result<i64, sea_orm::DbErr> {
+        ConfigEntity::find()
+            .filter(ConfigColumn::IsDeleted.eq(0))
+            .count(&*self.conn)
+            .await
+            .map(|c| c as i64)
+    }
+
+    /// Creation timestamps at or after `since`, used by dashboard statistics.
+    pub async fn find_create_times_since(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<DateTime<Utc>>, sea_orm::DbErr> {
+        ConfigEntity::find()
+            .filter(ConfigColumn::IsDeleted.eq(0))
+            .filter(ConfigColumn::CreateTime.gte(since))
+            .select_only()
+            .column(ConfigColumn::CreateTime)
+            .into_tuple::<DateTime<Utc>>()
             .all(&*self.conn)
             .await
     }

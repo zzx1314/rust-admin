@@ -15,7 +15,7 @@ Monorepo containing a Rust backend API, a Vue 3 frontend admin panel and the sta
 - `backend/AGENTS.md` — Rust backend patterns, SeaORM conventions, test structure
 - `frontend/AGENTS.md` — Vue/TypeScript frontend patterns, component conventions
 - `business/README.md` — standalone robot-dog service (parks, devices, tasks, routes)
-- `DOG.md` — root backend dog resource module (maps, models, media, commands, config, services)
+- `DOG.md` — middle-platform resource module (maps, models, media, config)
 
 ## Commands
 

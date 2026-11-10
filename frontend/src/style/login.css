@@ -1,11 +1,16 @@
 /* ==========================================================================
-   登录页（机器狗管理平台）
+   登录页（业务中台管理平台）
    左侧品牌区固定深色，右侧表单区跟随明暗主题；窄屏只保留表单区。
    ========================================================================== */
 
 .login-page {
+  --login-brand-bg: #0b1220;
+  --login-brand-bg-2: #111c33;
+  --login-accent: #6366f1;
+  --login-accent-2: #38bdf8;
+
   display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
   min-height: 100vh;
   min-height: 100dvh;
   color: var(--dog-text-primary);
@@ -19,39 +24,46 @@
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 22px;
   justify-content: space-between;
-  padding: 40px 48px;
+  padding: 40px 52px;
   overflow: hidden;
   color: #e2e8f0;
   background:
-    radial-gradient(120% 90% at 10% 0%, #1b2a45 0%, transparent 62%),
-    linear-gradient(160deg, #0f172a 0%, #101c33 48%, #0a1120 100%);
+    radial-gradient(110% 80% at 8% 0%, #1a2a4a 0%, transparent 60%),
+    linear-gradient(158deg, #0b1220 0%, #111c33 52%, #0a0f1d 100%);
 }
 
 .login-brand__grid {
   position: absolute;
   inset: 0;
   background-image:
-    linear-gradient(to right, rgb(148 163 184 / 8%) 1px, transparent 1px),
-    linear-gradient(to bottom, rgb(148 163 184 / 8%) 1px, transparent 1px);
-  background-size: 32px 32px;
-  mask-image: radial-gradient(85% 70% at 28% 18%, #000 20%, transparent 88%);
+    linear-gradient(to right, rgb(148 163 184 / 7%) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(148 163 184 / 7%) 1px, transparent 1px);
+  background-size: 34px 34px;
+  mask-image: radial-gradient(85% 70% at 30% 20%, #000 18%, transparent 88%);
   pointer-events: none;
 }
 
 .login-brand__glow {
   position: absolute;
-  right: -10%;
-  bottom: -18%;
-  width: 62%;
+  width: 60%;
   aspect-ratio: 1;
-  background: radial-gradient(
-    circle,
-    rgb(34 197 94 / 22%) 0%,
-    transparent 68%
-  );
   pointer-events: none;
+  border-radius: 50%;
+  filter: blur(4px);
+}
+
+.login-brand__glow--one {
+  top: -18%;
+  right: -14%;
+  background: radial-gradient(circle, rgb(99 102 241 / 26%) 0%, transparent 68%);
+}
+
+.login-brand__glow--two {
+  bottom: -24%;
+  left: -16%;
+  background: radial-gradient(circle, rgb(56 189 248 / 16%) 0%, transparent 70%);
 }
 
 .login-brand__head {
@@ -68,10 +80,25 @@
   justify-content: center;
   width: 40px;
   height: 40px;
-  color: #4ade80;
-  background: rgb(34 197 94 / 14%);
-  border: 1px solid rgb(34 197 94 / 30%);
+  color: #c7d2fe;
+  background: linear-gradient(
+    140deg,
+    rgb(99 102 241 / 32%),
+    rgb(56 189 248 / 18%)
+  );
+  border: 1px solid rgb(129 140 248 / 34%);
   border-radius: 12px;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 12%);
+}
+
+.brand-mark--light {
+  width: 32px;
+  height: 32px;
+  color: var(--login-accent);
+  background: rgb(99 102 241 / 10%);
+  border-color: rgb(99 102 241 / 22%);
+  border-radius: 10px;
+  box-shadow: none;
 }
 
 .brand-name {
@@ -81,76 +108,171 @@
   color: #f1f5f9;
 }
 
+.brand-name--dark {
+  color: var(--dog-text-primary);
+}
+
 .login-brand__hero {
   position: relative;
   display: flex;
+  flex: 1;
   align-items: center;
   justify-content: center;
   min-height: 0;
+  padding: 8px 0;
 }
 
 /* --------------------------------------------------------------------------
-   主视觉：几何机器狗（内联 SVG）+ 动效
-   动效全部是 transform / opacity，不改布局；prefers-reduced-motion 下统一静止。
+   主视觉：中台中枢 + 环绕资源节点
    -------------------------------------------------------------------------- */
-.robot-dog-wrap {
-  width: 100%;
-  max-width: 580px;
+.hub {
+  position: relative;
+  width: min(360px, 100%);
+  aspect-ratio: 1;
   margin: 0 auto;
-  filter: drop-shadow(0 24px 40px rgb(2 6 23 / 55%));
-  animation: rd-enter 0.7s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+  animation: hub-enter 0.8s cubic-bezier(0.22, 0.61, 0.36, 1) both;
 }
 
-.robot-dog {
-  display: block;
+.hub__rings {
+  position: absolute;
+  inset: 0;
+}
+
+.hub__ring {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  border: 1px dashed rgb(148 163 184 / 22%);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.hub__ring--inner {
+  width: 58%;
+  height: 58%;
+  border-color: rgb(148 163 184 / 16%);
+}
+
+.hub__ring--outer {
   width: 100%;
-  height: auto;
+  height: 100%;
 }
 
-/* 机身结构 */
-.rd-panel {
-  fill: #1e2a44;
-  stroke: rgb(148 163 184 / 42%);
-  stroke-width: 2;
+.hub__orbit {
+  position: absolute;
+  inset: 0;
+  display: block;
+  border-radius: 50%;
+  animation: hub-spin 18s linear infinite;
 }
 
-.rd-neck {
-  stroke: rgb(148 163 184 / 40%);
-  stroke-width: 8;
-  stroke-linecap: round;
+.hub__pulse {
+  position: absolute;
+  top: -4px;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  background: var(--login-accent-2);
+  border-radius: 50%;
+  box-shadow: 0 0 14px 3px rgb(56 189 248 / 55%);
+  transform: translateX(-50%);
 }
 
-.rd-antenna {
-  stroke: rgb(148 163 184 / 45%);
-  stroke-width: 3;
-  stroke-linecap: round;
+.hub__core {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: center;
+  justify-content: center;
+  width: 132px;
+  height: 132px;
+  text-align: center;
+  background: linear-gradient(
+    150deg,
+    rgb(30 41 59 / 92%),
+    rgb(15 23 42 / 92%)
+  );
+  border: 1px solid rgb(129 140 248 / 38%);
+  border-radius: 28px;
+  box-shadow:
+    0 0 0 8px rgb(99 102 241 / 8%),
+    0 24px 60px rgb(2 6 23 / 60%),
+    inset 0 1px 0 rgb(255 255 255 / 10%);
+  transform: translate(-50%, -50%);
 }
 
-.rd-accent {
-  fill: #22c55e;
+.hub__core-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  margin-bottom: 4px;
+  color: #e0e7ff;
+  background: linear-gradient(
+    140deg,
+    rgb(99 102 241 / 55%),
+    rgb(56 189 248 / 35%)
+  );
+  border-radius: 12px;
 }
 
-.rd-legs-far path {
-  fill: none;
-  stroke: #23304d;
-  stroke-width: 11;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+.hub__core b {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: #f8fafc;
 }
 
-.rd-legs-near path {
-  fill: none;
-  stroke: #2b3a5c;
-  stroke-width: 12;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+.hub__core em {
+  font-size: 10px;
+  font-style: normal;
+  letter-spacing: 0.16em;
+  color: rgb(148 163 184 / 78%);
+  text-transform: uppercase;
 }
 
-/* 1. 入场 + 持续浮动（6s 一个呼吸周期） */
-@keyframes rd-enter {
+.hub__node {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: rotate(var(--angle)) translate(140px) rotate(calc(-1 * var(--angle)))
+    translate(-50%, -50%);
+}
+
+.hub__node-inner {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: #cbd5e1;
+  white-space: nowrap;
+  background: rgb(17 28 51 / 88%);
+  border: 1px solid rgb(129 140 248 / 22%);
+  border-radius: 999px;
+  box-shadow: 0 10px 24px rgb(2 6 23 / 40%);
+  backdrop-filter: blur(6px);
+  animation: hub-node-float 6s ease-in-out infinite;
+}
+
+.hub__node:nth-child(2n) .hub__node-inner {
+  animation-delay: -2s;
+}
+
+.hub__node:nth-child(3n) .hub__node-inner {
+  animation-delay: -4s;
+}
+
+/* 入场与动效：全部是 transform / opacity，不改布局 */
+@keyframes hub-enter {
   from {
     opacity: 0;
-    transform: translateY(16px) scale(0.98);
+    transform: translateY(16px) scale(0.97);
   }
 
   to {
@@ -159,361 +281,56 @@
   }
 }
 
-/* 机体随步伐上下起伏：一个循环两步，所以有两处抬升 */
-@keyframes rd-bob {
+@keyframes hub-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes hub-node-float {
   0%,
-  50%,
   100% {
     transform: translateY(0);
   }
 
-  25%,
-  75% {
-    transform: translateY(-2.5px);
-  }
-}
-
-.rd-float {
-  animation: rd-bob 1.1s ease-in-out infinite;
-}
-
-/* 四足交替踏步：大腿绕髋关节摆，小腿绕膝关节收放。
-   对角腿同相位（trot），--phase 控制错峰。 */
-.rd-limb {
-  transform-box: view-box;
-  transform-origin: var(--hip-x) var(--hip-y);
-  animation: rd-step 1.1s linear infinite;
-  animation-delay: var(--phase, 0s);
-}
-
-.rd-limb__shin {
-  transform-box: view-box;
-  transform-origin: var(--knee-x) var(--knee-y);
-  animation: rd-knee 1.1s linear infinite;
-  animation-delay: var(--phase, 0s);
-}
-
-/* rotate() 为顺时针：腿垂在髋点下方时，正角把脚往左（后）带，负角往右（前）带。
-   所以 0% 脚在后、50% 脚在前 = 前半程"抬腿前摆"，后半程"落地后蹬"。 */
-/* 关键帧由两段腿长的逆运动学解算得出（脚本见提交说明）：
-   0%–60% 支撑期：脚贴地由前向后拖；60%–100% 摆动期：收小腿抬脚、由后向前迈。
-   因此每一步都是"空中向前迈 + 贴地向后蹬"，狗头朝右，看起来就是向右前进。 */
-@keyframes rd-step {
-  0% {
-    transform: rotate(-5.3deg);
-  }
-  10% {
-    transform: rotate(-3.4deg);
-  }
-  20% {
-    transform: rotate(-1.6deg);
-  }
-  30% {
-    transform: rotate(0deg);
-  }
-  40% {
-    transform: rotate(1.5deg);
-  }
   50% {
-    transform: rotate(2.9deg);
-  }
-  60% {
-    transform: rotate(4.1deg);
-  }
-  62% {
-    transform: rotate(6.5deg);
-  }
-  65% {
-    transform: rotate(9.4deg);
-  }
-  68% {
-    transform: rotate(11.5deg);
-  }
-  70% {
-    transform: rotate(12.5deg);
-  }
-  75% {
-    transform: rotate(13.8deg);
-  }
-  80% {
-    transform: rotate(13.2deg);
-  }
-  85% {
-    transform: rotate(10.8deg);
-  }
-  90% {
-    transform: rotate(6.9deg);
-  }
-  95% {
-    transform: rotate(1.6deg);
-  }
-  100% {
-    transform: rotate(-5.3deg);
+    transform: translateY(-3px);
   }
 }
 
-@keyframes rd-knee {
-  0% {
-    transform: rotate(-0.8deg);
-  }
-  10% {
-    transform: rotate(-0.8deg);
-  }
-  20% {
-    transform: rotate(-0.5deg);
-  }
-  30% {
-    transform: rotate(0deg);
-  }
-  40% {
-    transform: rotate(0.8deg);
-  }
-  50% {
-    transform: rotate(2.0deg);
-  }
-  60% {
-    transform: rotate(3.4deg);
-  }
-  62% {
-    transform: rotate(-2.9deg);
-  }
-  65% {
-    transform: rotate(-10.9deg);
-  }
-  68% {
-    transform: rotate(-17.5deg);
-  }
-  70% {
-    transform: rotate(-21.0deg);
-  }
-  75% {
-    transform: rotate(-27.2deg);
-  }
-  80% {
-    transform: rotate(-29.6deg);
-  }
-  85% {
-    transform: rotate(-28.0deg);
-  }
-  90% {
-    transform: rotate(-22.6deg);
-  }
-  95% {
-    transform: rotate(-13.5deg);
-  }
-  100% {
-    transform: rotate(-0.8deg);
-  }
-}
-
-/* 2. 地面投影：浮动越高，影子越小越淡 */
-@keyframes rd-shadow {
-  0%,
-  50%,
-  100% {
-    opacity: 0.9;
-    transform: scale(1);
-  }
-
-  25%,
-  75% {
-    opacity: 0.72;
-    transform: scale(0.96);
-  }
-}
-
-.rd-shadow {
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: rd-shadow 1.1s ease-in-out infinite;
-}
-
-/* 3. 地面虚线流动，示意数据在跑 */
-/* 偏移量由 0 增大时，虚线整体向路径起点（左）移动：
-   狗头朝右，所以虚线要「从右往左」流，才像在往前走。 */
-@keyframes rd-ground {
-  to {
-    stroke-dashoffset: 22;
-  }
-}
-
-.rd-ground {
-  animation: rd-ground 1.6s linear infinite;
-}
-
-/* 4. 扫描光束：从镜头处向外"呼"一下 */
-@keyframes rd-beam {
-  0%,
-  100% {
-    opacity: 0.5;
-    transform: scaleX(0.9);
-  }
-
-  50% {
-    opacity: 1;
-    transform: scaleX(1.04);
-  }
-}
-
-.rd-beam {
-  transform-box: view-box;
-  transform-origin: 300px 92px;
-  animation: rd-beam 3.2s ease-in-out infinite;
-}
-
-/* 5. 镜头：呼吸光 + 向外扩散的扫描波 */
-.rd-lens {
-  fill: #22c55e;
-  animation: rd-glow 2.8s ease-in-out infinite;
-}
-
-@keyframes rd-glow {
-  0%,
-  100% {
-    filter: drop-shadow(0 0 3px rgb(34 197 94 / 55%));
-  }
-
-  50% {
-    filter: drop-shadow(0 0 10px rgb(34 197 94 / 95%));
-  }
-}
-
-.rd-lens-core {
-  fill: #f0fff7;
-}
-
-@keyframes rd-ping {
-  0% {
-    opacity: 0.85;
-    transform: scale(1);
-  }
-
-  70%,
-  100% {
-    opacity: 0;
-    transform: scale(3.2);
-  }
-}
-
-.rd-lens-ring {
-  fill: none;
-  stroke: #22c55e;
-  stroke-width: 1.5;
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: rd-ping 2.8s ease-out infinite;
-}
-
-/* 6. 天线信号弧：一圈接一圈往外闪 */
-@keyframes rd-signal {
-  0%,
-  100% {
-    opacity: 0.16;
-  }
-
-  38% {
-    opacity: 0.95;
-  }
-}
-
-.rd-signal {
-  fill: none;
-  stroke: #22c55e;
-  stroke-width: 2;
-  stroke-linecap: round;
-  animation: rd-signal 2.4s ease-in-out infinite;
-}
-
-.rd-signal--2 {
-  animation-delay: 0.35s;
-}
-
-/* 7. 机身状态灯：依次点亮，像心跳 */
-@keyframes rd-led {
-  0%,
-  62%,
-  100% {
-    opacity: 0.3;
-  }
-
-  18% {
-    opacity: 1;
-  }
-}
-
-.rd-led {
-  fill: #22c55e;
-  opacity: 0.3;
-  animation: rd-led 2.6s ease-in-out infinite;
-}
-
-.rd-led--2 {
-  animation-delay: 0.22s;
-}
-
-.rd-led--3 {
-  animation-delay: 0.44s;
-}
-
-/* 8. 低高度视口：整体缩小，保持首屏不滚动 */
-@media (height <= 780px) {
-  .robot-dog-wrap {
-    max-width: 420px;
-  }
-}
-
-/* 9. 尊重「减少动态效果」：全部静止在可读的终态 */
-@media (prefers-reduced-motion: reduce) {
-  .robot-dog-wrap,
-  .robot-dog * {
-    animation: none !important;
-  }
-
-  .rd-beam {
-    opacity: 0.8;
-    transform: none;
-  }
-
-  .rd-signal {
-    opacity: 0.55;
-  }
-
-  .rd-led {
-    opacity: 0.9;
-  }
-
-  .rd-lens-ring {
-    opacity: 0;
-  }
-}
-
+/* --------------------------------------------------------------------------
+   品牌文案
+   -------------------------------------------------------------------------- */
 .login-brand__copy {
   position: relative;
-  max-width: 460px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .brand-title {
   margin: 0;
-  font-size: 24px;
-  font-weight: 700;
-  line-height: 1.35;
+  font-size: 26px;
+  font-weight: 650;
+  line-height: 1.3;
+  letter-spacing: 0.01em;
   color: #f8fafc;
-  text-wrap: balance;
 }
 
 .brand-subtitle {
-  margin: 8px 0 0;
-  font-size: 13px;
+  max-width: 30em;
+  margin: 0;
+  font-size: 13.5px;
   line-height: 1.7;
-  color: #cbd5e1;
-  text-wrap: pretty;
+  color: rgb(203 213 225 / 82%);
 }
 
 .brand-capabilities {
   display: grid;
-  gap: 12px;
-  margin: 20px 0 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 18px;
   padding: 0;
+  margin: 14px 0 0;
   list-style: none;
 }
 
@@ -521,8 +338,10 @@
   display: flex;
   gap: 10px;
   align-items: flex-start;
-  font-size: 13px;
-  line-height: 1.6;
+  padding: 10px 12px;
+  background: rgb(148 163 184 / 6%);
+  border: 1px solid rgb(148 163 184 / 12%);
+  border-radius: 12px;
 }
 
 .brand-capability__icon {
@@ -530,22 +349,27 @@
   flex: none;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
-  color: #4ade80;
-  background: rgb(34 197 94 / 12%);
-  border-radius: 8px;
+  width: 28px;
+  height: 28px;
+  color: #a5b4fc;
+  background: rgb(99 102 241 / 16%);
+  border-radius: 9px;
 }
 
 .brand-capability b {
   display: block;
+  margin-bottom: 2px;
+  font-size: 13px;
   font-weight: 600;
   color: #e2e8f0;
 }
 
 .brand-capability em {
+  display: block;
+  font-size: 12px;
   font-style: normal;
-  color: #94a3b8;
+  line-height: 1.55;
+  color: rgb(148 163 184 / 86%);
 }
 
 .login-brand__foot {
@@ -554,23 +378,32 @@
   gap: 8px;
   align-items: center;
   font-size: 12px;
-  color: #94a3b8;
+  color: rgb(148 163 184 / 76%);
 }
 
 /* --------------------------------------------------------------------------
    表单区
    -------------------------------------------------------------------------- */
 .login-panel {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding: 28px 32px;
-  background: var(--dog-surface-page);
+  gap: 24px;
+  justify-content: center;
+  padding: 76px clamp(24px, 5vw, 72px) 30px;
+  background:
+    radial-gradient(80% 60% at 100% 0%, rgb(99 102 241 / 8%), transparent 62%),
+    radial-gradient(70% 50% at 0% 100%, rgb(56 189 248 / 7%), transparent 60%),
+    var(--dog-surface-page);
 }
 
 .login-panel__top {
+  position: absolute;
+  top: 28px;
+  right: clamp(24px, 5vw, 72px);
+  left: clamp(24px, 5vw, 72px);
   display: flex;
-  gap: 12px;
+  gap: 16px;
   align-items: center;
   justify-content: space-between;
 }
@@ -581,18 +414,9 @@
   align-items: center;
 }
 
-.login-panel__brand .brand-name {
-  color: var(--dog-text-primary);
-}
-
-.login-panel__brand .brand-mark {
-  width: 34px;
-  height: 34px;
-}
-
 .login-panel__tools {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
   margin-left: auto;
 }
@@ -601,189 +425,170 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
-  padding: 0;
+  width: 34px;
+  height: 34px;
   color: var(--dog-text-secondary);
   cursor: pointer;
-  background: transparent;
+  background: var(--dog-surface-card);
   border: 1px solid var(--dog-border);
-  border-radius: 8px;
+  border-radius: 10px;
   transition:
-    color 0.18s ease,
-    background-color 0.18s ease,
-    border-color 0.18s ease;
+    color 0.2s ease,
+    border-color 0.2s ease,
+    background 0.2s ease;
 }
 
 .login-icon-btn:hover {
-  color: var(--dog-text-primary);
-  background: var(--dog-surface-muted);
-  border-color: var(--dog-border-strong);
+  color: var(--login-accent);
+  border-color: var(--login-accent);
 }
 
 .login-icon-btn--sm {
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
+  background: transparent;
   border-color: transparent;
 }
 
 .login-card {
-  box-sizing: border-box;
-  width: 100%;
-  max-width: 380px;
-  margin: auto;
-  padding: 28px 28px 24px;
+  width: min(420px, 100%);
+  padding: 34px 34px 26px;
+  margin: 0 auto;
   background: var(--dog-surface-card);
   border: 1px solid var(--dog-border);
-  border-radius: 16px;
-  box-shadow: var(--dog-shadow-md);
+  border-radius: 20px;
+  box-shadow:
+    0 24px 60px rgb(15 23 42 / 8%),
+    0 1px 0 rgb(255 255 255 / 60%) inset;
+}
+
+html.dark .login-card {
+  box-shadow: 0 24px 60px rgb(2 6 23 / 45%);
 }
 
 .login-card__head {
-  margin-bottom: 20px;
+  margin-bottom: 24px;
+}
+
+.login-card__eyebrow {
+  display: inline-block;
+  margin-bottom: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  color: var(--login-accent);
+  text-transform: uppercase;
 }
 
 .login-title {
-  margin: 0;
-  font-size: 22px;
-  font-weight: 700;
-  line-height: 1.35;
+  margin: 0 0 6px;
+  font-size: 26px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
   color: var(--dog-text-primary);
 }
 
 .login-subtitle {
-  margin: 6px 0 0;
+  margin: 0;
   font-size: 13px;
   line-height: 1.6;
-  color: var(--dog-text-muted);
-}
-
-.login-form {
-  /* 触摸目标 44px（Element Plus large 默认 40px） */
-  --el-component-size-large: 44px;
-}
-
-.login-form .el-form-item {
-  margin-bottom: 16px;
-}
-
-.login-form .el-form-item__label {
-  padding-bottom: 4px;
-  font-size: 13px !important;
-  font-weight: 500 !important;
-  line-height: 1.5;
   color: var(--dog-text-secondary);
 }
 
-.login-form .el-form-item:last-of-type {
-  margin-bottom: 0;
+.login-card__hint {
+  padding-top: 18px;
+  margin: 20px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--dog-text-muted);
+  text-align: center;
+  border-top: 1px dashed var(--dog-border);
+}
+
+/* 表单细节 */
+.login-form :deep(.el-form-item__label) {
+  padding-bottom: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--dog-text-secondary);
+}
+
+.login-form :deep(.el-input__wrapper) {
+  padding: 2px 12px;
+  background: var(--dog-surface-muted);
+  border-radius: 10px;
+  box-shadow: 0 0 0 1px var(--dog-border) inset;
+  transition: box-shadow 0.2s ease;
+}
+
+.login-form :deep(.el-input__wrapper:hover) {
+  box-shadow: 0 0 0 1px var(--dog-border-strong) inset;
+}
+
+.login-form :deep(.el-input__wrapper.is-focus) {
+  box-shadow: 0 0 0 1px var(--login-accent) inset;
+}
+
+.login-form :deep(.el-input-group__append) {
+  overflow: hidden;
+  background: var(--dog-surface-muted);
+  border-radius: 10px;
+  box-shadow: 0 0 0 1px var(--dog-border) inset;
+}
+
+.login-form :deep(.el-form-item) {
+  margin-bottom: 18px;
 }
 
 .login-options {
   display: flex;
-  gap: 8px;
   align-items: center;
   justify-content: space-between;
-  margin: 4px 0 18px;
+  margin: 2px 0 18px;
 }
 
-.login-options .el-checkbox__label {
+.login-options :deep(.el-checkbox__label) {
   font-size: 13px;
   color: var(--dog-text-secondary);
 }
 
 .login-submit {
   width: 100%;
-  height: 44px;
+  height: 46px;
   font-size: 15px;
   font-weight: 600;
+  letter-spacing: 0.04em;
+  background: linear-gradient(120deg, var(--login-accent), #4f46e5);
+  border: none;
   border-radius: 10px;
+  box-shadow: 0 12px 26px rgb(99 102 241 / 28%);
+  transition:
+    transform 0.2s ease,
+    box-shadow 0.2s ease,
+    filter 0.2s ease;
+}
+
+.login-submit:hover:not(.is-disabled) {
+  filter: brightness(1.06);
+  box-shadow: 0 16px 30px rgb(99 102 241 / 34%);
+  transform: translateY(-1px);
+}
+
+.login-submit.is-disabled {
+  box-shadow: none;
 }
 
 .login-copyright {
   margin: 0;
   font-size: 12px;
-  line-height: 1.6;
-  /* 12px 小字需 ≥4.5:1，muted 在页面底色上只有 4.4，故用更深一档 */
-  color: var(--dog-text-secondary);
+  color: var(--dog-text-muted);
   text-align: center;
 }
 
-/* 语言下拉当前项 */
-.is-current {
-  font-weight: 600;
-  color: var(--el-color-primary);
-}
-
 /* --------------------------------------------------------------------------
-   入场动效（reduced-motion 由全局样式统一关闭）
+   响应式：隐藏品牌区，表单区占满
    -------------------------------------------------------------------------- */
-@keyframes login-rise {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-.login-card__head,
-.login-form > *,
-.login-brand__copy {
-  animation: login-rise 0.45s cubic-bezier(0.22, 0.61, 0.36, 1) both;
-}
-
-.login-form > *:nth-child(1) {
-  animation-delay: 60ms;
-}
-
-.login-form > *:nth-child(2) {
-  animation-delay: 110ms;
-}
-
-.login-form > *:nth-child(3) {
-  animation-delay: 160ms;
-}
-
-.login-form > *:nth-child(4) {
-  animation-delay: 210ms;
-}
-
-.login-form > *:nth-child(5) {
-  animation-delay: 260ms;
-}
-
-/* --------------------------------------------------------------------------
-   深色模式：品牌区加深，避免与表单区糊在一起
-   -------------------------------------------------------------------------- */
-html.dark .login-brand {
-  background:
-    radial-gradient(120% 90% at 10% 0%, #16233c 0%, transparent 60%),
-    linear-gradient(160deg, #0b1220 0%, #0d1729 48%, #060b14 100%);
-}
-
-html.dark .login-card {
-  box-shadow: 0 18px 40px -28px rgb(0 0 0 / 90%);
-}
-
-/* --------------------------------------------------------------------------
-   响应式
-   -------------------------------------------------------------------------- */
-@media (height <= 780px) {
-  .login-brand {
-    gap: 16px;
-    padding: 28px 40px;
-  }
-
-  .brand-capabilities {
-    display: none;
-  }
-}
-
-@media (width <= 960px) {
+@media (max-width: 1100px) {
   .login-page {
     grid-template-columns: 1fr;
   }
@@ -792,23 +597,37 @@ html.dark .login-card {
     display: none;
   }
 
+  .login-panel {
+    min-height: 100vh;
+    min-height: 100dvh;
+    padding-top: 96px;
+    padding-bottom: 72px;
+  }
+
   .login-panel__brand {
     display: flex;
   }
 }
 
-@media (width <= 640px) {
+@media (max-width: 560px) {
   .login-panel {
-    padding: 18px 16px;
+    padding: 88px 18px 64px;
   }
 
   .login-card {
-    max-width: 100%;
-    padding: 22px 18px 20px;
-    box-shadow: none;
+    padding: 26px 20px 22px;
+    border-radius: 16px;
   }
 
   .login-title {
-    font-size: 20px;
+    font-size: 22px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hub,
+  .hub__orbit,
+  .hub__node-inner {
+    animation: none;
   }
 }

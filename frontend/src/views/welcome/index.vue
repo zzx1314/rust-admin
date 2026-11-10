@@ -6,10 +6,10 @@ import { ChartBar, ChartLine } from "./components/charts";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 import { statisticsAll, statisticsAllType } from "@/api/dogStatistics";
 import Refresh from "~icons/ep/refresh";
+import RiMap2Line from "~icons/ri/map-2-line";
 import RiBox3Line from "~icons/ri/box-3-line";
 import RiImageLine from "~icons/ri/image-line";
-import RiTerminalWindowLine from "~icons/ri/terminal-window-line";
-import RiServerLine from "~icons/ri/server-line";
+import RiSettings4Line from "~icons/ri/settings-4-line";
 
 defineOptions({
   name: "Welcome"
@@ -25,24 +25,24 @@ interface KpiCard {
 }
 
 interface WeeklyStatistics {
+  mapCount: number[];
   modelCount: number[];
   mediaCount: number[];
-  commandCount: number[];
-  servicesCount: number[];
+  configCount: number[];
 }
 
-/** 与后端 `get_all_statistics` 返回顺序一致：模型 / 媒体 / 指令 / 服务。 */
+/** 与后端 `get_all_statistics` 返回顺序一致：地图 / 模型 / 媒体 / 参数配置。 */
 const KPI_ICONS: Component[] = [
+  RiMap2Line,
   RiBox3Line,
   RiImageLine,
-  RiTerminalWindowLine,
-  RiServerLine
+  RiSettings4Line
 ];
 
 const kpis = ref<KpiCard[]>([]);
 const weekly = ref<WeeklyStatistics[]>([
-  { modelCount: [], mediaCount: [], commandCount: [], servicesCount: [] },
-  { modelCount: [], mediaCount: [], commandCount: [], servicesCount: [] }
+  { mapCount: [], modelCount: [], mediaCount: [], configCount: [] },
+  { mapCount: [], modelCount: [], mediaCount: [], configCount: [] }
 ]);
 const loading = ref(true);
 const refreshing = ref(false);
@@ -149,7 +149,7 @@ const weeklyChart = computed(
       <div class="dog-card__head">
         <div>
           <h2 class="dog-card__title">数量统计</h2>
-          <p class="dog-card__hint">模型、媒体、指令与服务的每日新增数量</p>
+          <p class="dog-card__hint">地图、模型、媒体与参数配置的每日新增数量</p>
         </div>
         <div class="dashboard__actions">
           <Segmented v-model="curWeek" :options="optionsBasis" />
@@ -165,10 +165,10 @@ const weeklyChart = computed(
         </div>
       </div>
       <ChartBar
+        :map-data="weeklyChart.mapCount"
         :model-data="weeklyChart.modelCount"
         :media-data="weeklyChart.mediaCount"
-        :command-data="weeklyChart.commandCount"
-        :services-data="weeklyChart.servicesCount"
+        :config-data="weeklyChart.configCount"
       />
     </section>
   </div>

@@ -2,7 +2,7 @@
 
 本手册面向需要调用管理后台接口的开发者。所有接口均由 Rust 后端（axum + sea-orm + SQLite）提供，管理后台通过 Vite 代理把 `/api` 转发到 `http://127.0.0.1:3000`。
 
-> 园区、设备、任务、路线及设备接入网关已由 `business/` 独立业务服务承载，根后台不再提供这些接口。
+> 园区、设备、任务、路线、指令下发与服务编排已由 `business/` 独立业务平台承载，中台不再提供这些接口。
 
 ## 1. 服务地址与环境
 
@@ -98,11 +98,11 @@ Authorization: Bearer <access_token>
 - 分页参数为 `current`（从 1 开始）与 `size`，默认 `1` / `10`。
 - 主键 `id` 在创建时由服务端生成，客户端无需传入。
 - 地图按创建者做数据隔离：普通用户只能读写 `userId = 当前用户` 的记录（详情 / 修改 / 删除他人数据返回 404）；管理员（角色编码 `110`）不受限制。`userId` 由服务端从 token 写入，请求体传了也会被忽略。
-- 模型、媒体、指令、参数配置、服务为共享资源，不做用户级隔离。
+- 模型、媒体、参数配置为共享资源，不做用户级隔离。
 
 ---
 
-## 4. 机器狗业务接口
+## 4. 中台业务接口
 
 ### 4.1 模型 `/api/dogModel`
 
@@ -126,21 +126,7 @@ Authorization: Bearer <access_token>
 
 字段：`mediaName`、`mediaType`、`mediaPath`、`mediaSize`、`remarks`、`createTime`、`updateTime`。
 
-### 4.3 指令 `/api/dogCommand`
-
-| 接口                          | 方法               | 说明                                                                                                    |
-| ----------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------- |
-| `/api/dogCommand/getPage`     | GET                | `commandName`、`commandType`、`status`、`deviceId`、`taskId`、`beginTime`、`endTime`、`current`、`size` |
-| `/api/dogCommand/getAll`      | GET                | 全量列表                                                                                                |
-| `/api/dogCommand`             | POST               | 新增，`commandName` 必填；`status` 默认 `pending`                                                       |
-| `/api/dogCommand/{id}`        | GET / PUT / DELETE | 详情 / 修改 / 软删除                                                                                    |
-| `/api/dogCommand/status/{id}` | PUT                | 仅回写状态与返回值，请求体 `{ "status": "done", "returnValue": "..." }`                                 |
-
-字段：`commandName`、`commandType`、`commandParams`、`deviceId`、`status`、`returnValue`、`taskId`、`createTime`、`updateTime`。
-
-> 设备下发由 `business/` 业务服务负责，根后台只维护指令档案（新增不会再向设备推送）。
-
-### 4.4 参数配置 `/api/dogConfig`
+### 4.3 参数配置 `/api/dogConfig`
 
 | 接口                     | 方法               | 说明                                                    |
 | ------------------------ | ------------------ | ------------------------------------------------------- |
@@ -151,28 +137,18 @@ Authorization: Bearer <access_token>
 
 字段：`configName`、`configValue`、`description`、`createTime`、`updateTime`。
 
-### 4.5 服务 `/api/dogServices`
-
-| 接口                      | 方法               | 说明                                                       |
-| ------------------------- | ------------------ | ---------------------------------------------------------- |
-| `/api/dogServices/getAll` | GET                | 全量列表（无分页）：`type`（模糊）、`beginTime`、`endTime` |
-| `/api/dogServices`        | POST               | 新增                                                       |
-| `/api/dogServices/{id}`   | GET / PUT / DELETE | 详情 / 修改 / 软删除                                       |
-
-字段：`type`、`params`、`createTime`、`updateTime`。
-
-### 4.6 统计 `/api/dogStatistics`
+### 4.4 统计 `/api/dogStatistics`
 
 | 接口                         | 方法 | 说明                                                       |
 | ---------------------------- | ---- | ---------------------------------------------------------- |
-| `/api/dogStatistics/all`     | GET  | 模型 / 媒体 / 指令 / 服务总量与本周每日新增、周同比百分比  |
-| `/api/dogStatistics/allType` | GET  | 上周 / 本周模型、媒体、指令、服务的新增数量序列（各 7 天） |
+| `/api/dogStatistics/all`     | GET  | 地图 / 模型 / 媒体 / 参数配置总量与本周每日新增、周同比百分比 |
+| `/api/dogStatistics/allType` | GET  | 上周 / 本周四类资源的新增数量序列（各 7 天）                |
 
 `/api/dogStatistics/all` 返回 4 个对象，字段为 `name`、`value`、`percent`、`data`、`bgColor`、`color`、`duration`。
 
-`/api/dogStatistics/allType` 返回 2 个对象（上周、本周），字段为 `modelCount`、`mediaCount`、`commandCount`、`servicesCount`。
+`/api/dogStatistics/allType` 返回 2 个对象（上周、本周），字段为 `mapCount`、`modelCount`、`mediaCount`、`configCount`。
 
-### 4.7 地图 `/api/dogMap`
+### 4.5 地图 `/api/dogMap`
 
 | 接口                          | 方法               | 说明                                                                                                                                                                                    |
 | ----------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

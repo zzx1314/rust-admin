@@ -70,9 +70,9 @@ cargo test --test auth_service_tests  # 运行 auth service tests
 │   └── sys_auth/               # Menu authorization data
 │
 ├── business/                   # Product/business domains
-│   └── dog/                    # Robot dog resource domain: map, model, media, command,
-│                               #   config, services, statistics (park/device/task/route
-│                               #   and the device gateway now live in `business/`)
+│   └── dog/                    # Middle-platform resource domain: map, model, media,
+│                               #   config, statistics (park/device/task/route, commands
+│                               #   and services now live in `business/`)
 │
 ├── common/                     # Common/shared code
 │   ├── base.rs                 # BaseRepository, RepoExt traits

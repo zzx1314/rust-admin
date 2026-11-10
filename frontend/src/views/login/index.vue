@@ -26,11 +26,14 @@ import dayIcon from "@/assets/svg/day.svg?component";
 import darkIcon from "@/assets/svg/dark.svg?component";
 import Lock from "~icons/ri/lock-fill";
 import User from "~icons/ri/user-3-fill";
-import Robot from "~icons/ri/robot-2-line";
-import Signal from "~icons/ri/signal-tower-line";
-import Route from "~icons/ri/route-line";
-import MapIcon from "~icons/ri/map-2-line";
+import Stack from "~icons/ri/stack-line";
 import Shield from "~icons/ri/shield-check-line";
+import Database from "~icons/ri/database-2-line";
+import Api from "~icons/ri/api-line";
+import MapIcon from "~icons/ri/map-2-line";
+import Cpu from "~icons/ri/cpu-line";
+import ImageIcon from "~icons/ri/image-line";
+import Settings from "~icons/ri/settings-4-line";
 import Question from "~icons/ri/question-line";
 import Translate from "~icons/ri/translate-2";
 
@@ -144,23 +147,36 @@ watch(loginDay, value => {
   useUserStoreHook().SET_LOGINDAY(value);
 });
 
-/** 品牌区的能力说明：与后端业务域一一对应 */
+/** 品牌区能力说明：对应中台提供的四类基础能力 */
 const capabilities = [
   {
-    icon: Signal,
-    title: "设备状态实时可见",
-    desc: "网关心跳驱动的在线率、通信时间与电量"
+    icon: Shield,
+    title: "统一认证与授权",
+    desc: "账号、角色、菜单与按钮级权限集中管理"
   },
   {
-    icon: Route,
-    title: "任务与流程下发",
-    desc: "拖拽编排任务流程，指令直达设备"
+    icon: Stack,
+    title: "业务资源管理",
+    desc: "地图、模型、媒体与参数配置的统一台账"
   },
   {
-    icon: MapIcon,
-    title: "园区地图与航线",
-    desc: "地图包、航线与模型资源集中管理"
+    icon: Database,
+    title: "数据与审计",
+    desc: "数据字典、操作审计与安全策略一体化"
+  },
+  {
+    icon: Api,
+    title: "开放接口",
+    desc: "为业务平台提供稳定的 REST API 与统一响应约定"
   }
+];
+
+/** 轨道上的资源节点：环绕中台中枢展示 */
+const hubs = [
+  { label: "地图", angle: -90, icon: MapIcon },
+  { label: "模型", angle: 0, icon: Cpu },
+  { label: "媒体", angle: 90, icon: ImageIcon },
+  { label: "配置", angle: 180, icon: Settings }
 ];
 
 function onTranslation(lang: string) {
@@ -174,199 +190,58 @@ function onTranslation(lang: string) {
     <!-- 左侧品牌区：小屏隐藏，避免挤占表单空间 -->
     <section class="login-brand">
       <div class="login-brand__grid" aria-hidden="true" />
-      <div class="login-brand__glow" aria-hidden="true" />
+      <div
+        class="login-brand__glow login-brand__glow--one"
+        aria-hidden="true"
+      />
+      <div
+        class="login-brand__glow login-brand__glow--two"
+        aria-hidden="true"
+      />
 
       <header class="login-brand__head">
         <span class="brand-mark" aria-hidden="true">
-          <Robot width="22" height="22" />
+          <Stack width="20" height="20" />
         </span>
         <span class="brand-name">{{ title }}</span>
       </header>
 
       <div class="login-brand__hero" aria-hidden="true">
-        <div class="robot-dog-wrap">
-          <svg
-            class="robot-dog"
-            viewBox="0 0 420 240"
-            fill="none"
-            xmlns="http://www.w3.org/2000/svg"
+        <div class="hub">
+          <div class="hub__rings">
+            <span class="hub__ring hub__ring--inner" />
+            <span class="hub__ring hub__ring--outer" />
+            <span class="hub__orbit">
+              <i class="hub__pulse" />
+            </span>
+          </div>
+
+          <div class="hub__core">
+            <span class="hub__core-icon">
+              <Stack width="22" height="22" />
+            </span>
+            <b>业务中台</b>
+            <em>Middle Platform</em>
+          </div>
+
+          <div
+            v-for="hub in hubs"
+            :key="hub.label"
+            class="hub__node"
+            :style="{ '--angle': `${hub.angle}deg` }"
           >
-            <defs>
-              <linearGradient id="rdBeam" x1="0" y1="0" x2="1" y2="1">
-                <stop offset="0%" stop-color="#22C55E" stop-opacity=".38" />
-                <stop offset="100%" stop-color="#22C55E" stop-opacity="0" />
-              </linearGradient>
-              <radialGradient id="rdShadow" cx="50%" cy="50%" r="50%">
-                <stop offset="0%" stop-color="#020617" stop-opacity=".6" />
-                <stop offset="100%" stop-color="#020617" stop-opacity="0" />
-              </radialGradient>
-            </defs>
-
-            <!-- 地面投影（随浮动轻微收缩） -->
-            <ellipse
-              class="rd-shadow"
-              cx="176"
-              cy="207"
-              rx="120"
-              ry="9"
-              fill="url(#rdShadow)"
-            />
-
-            <!-- 地面基准线（虚线缓慢流动） -->
-            <path
-              class="rd-ground"
-              d="M30 206H390"
-              stroke-dasharray="4 7"
-              stroke="rgb(148 163 184 / 22%)"
-              stroke-width="1.5"
-            />
-
-            <!-- 会整体浮动的机身 -->
-            <g class="rd-float">
-              <!-- 扫描光束 -->
-              <path
-                class="rd-beam"
-                d="M300 92 L400 176 L400 206 H286 Z"
-                fill="url(#rdBeam)"
-              />
-
-              <!-- 远侧腿（弱化，制造纵深；与近侧对角腿同相位） -->
-              <g class="rd-legs-far">
-                <g
-                  class="rd-limb"
-                  style="
-                    --hip-x: 148px;
-                    --hip-y: 124px;
-                    --knee-x: 128px;
-                    --knee-y: 166px;
-                    --phase: -0.55s;
-                  "
-                >
-                  <path d="M148 124L128 166" />
-                  <g class="rd-limb__shin">
-                    <path d="M128 166L140 202" />
-                  </g>
-                </g>
-                <g
-                  class="rd-limb"
-                  style="
-                    --hip-x: 250px;
-                    --hip-y: 124px;
-                    --knee-x: 234px;
-                    --knee-y: 166px;
-                    --phase: 0s;
-                  "
-                >
-                  <path d="M250 124L234 166" />
-                  <g class="rd-limb__shin">
-                    <path d="M234 166L248 202" />
-                  </g>
-                </g>
-              </g>
-
-              <!-- 机身与机头 -->
-              <rect
-                class="rd-panel"
-                x="96"
-                y="82"
-                width="168"
-                height="50"
-                rx="16"
-              />
-              <rect
-                class="rd-panel"
-                x="252"
-                y="74"
-                width="54"
-                height="42"
-                rx="13"
-              />
-              <path class="rd-neck" d="M244 96h16" />
-
-              <!-- 传感器桅杆 + 云台 -->
-              <rect
-                class="rd-panel"
-                x="152"
-                y="56"
-                width="12"
-                height="30"
-                rx="5"
-              />
-              <rect
-                class="rd-panel"
-                x="136"
-                y="42"
-                width="44"
-                height="19"
-                rx="8"
-              />
-              <circle class="rd-accent" cx="180" cy="51.5" r="5" />
-
-              <!-- 天线与信号弧 -->
-              <path class="rd-antenna" d="M204 56v-20" />
-              <path
-                class="rd-signal rd-signal--1"
-                d="M198 30a10 10 0 0 1 12 0"
-              />
-              <path
-                class="rd-signal rd-signal--2"
-                d="M193 24a18 18 0 0 1 22 0"
-              />
-
-              <!-- 机头镜头：扩散波 + 呼吸光 -->
-              <circle class="rd-lens-ring" cx="294" cy="95" r="8" />
-              <circle class="rd-lens" cx="294" cy="95" r="8" />
-              <circle class="rd-lens-core" cx="296" cy="93" r="3" />
-
-              <!-- 近侧腿（膝关节圆点跟随小腿一起摆动） -->
-              <g class="rd-legs-near">
-                <g
-                  class="rd-limb"
-                  style="
-                    --hip-x: 134px;
-                    --hip-y: 126px;
-                    --knee-x: 112px;
-                    --knee-y: 168px;
-                    --phase: 0s;
-                  "
-                >
-                  <path d="M134 126L112 168" />
-                  <g class="rd-limb__shin">
-                    <path d="M112 168L126 202" />
-                    <circle class="rd-accent" cx="112" cy="168" r="5" />
-                  </g>
-                </g>
-                <g
-                  class="rd-limb"
-                  style="
-                    --hip-x: 234px;
-                    --hip-y: 126px;
-                    --knee-x: 214px;
-                    --knee-y: 168px;
-                    --phase: -0.55s;
-                  "
-                >
-                  <path d="M234 126L214 168" />
-                  <g class="rd-limb__shin">
-                    <path d="M214 168L228 202" />
-                    <circle class="rd-accent" cx="214" cy="168" r="5" />
-                  </g>
-                </g>
-              </g>
-
-              <!-- 状态灯：依次点亮，像心跳 -->
-              <circle class="rd-led rd-led--1" cx="118" cy="70" r="3.5" />
-              <circle class="rd-led rd-led--2" cx="130" cy="70" r="3.5" />
-              <circle class="rd-led rd-led--3" cx="142" cy="70" r="3.5" />
-            </g>
-          </svg>
+            <span class="hub__node-inner">
+              <component :is="hub.icon" width="14" height="14" />
+              {{ hub.label }}
+            </span>
+          </div>
         </div>
       </div>
 
       <div class="login-brand__copy">
-        <h2 class="brand-title">机器狗统一调度与运维</h2>
+        <h2 class="brand-title">统一业务中台</h2>
         <p class="brand-subtitle">
-          设备接入、任务下发、地图与航线、数据回传，都在同一个控制台完成。
+          把资源、权限与数据治理收敛到一处，为业务平台提供稳定的能力底座。
         </p>
         <ul class="brand-capabilities">
           <li
@@ -387,7 +262,7 @@ function onTranslation(lang: string) {
 
       <footer class="login-brand__foot">
         <Shield width="14" height="14" aria-hidden="true" />
-        <span>账号权限决定可见的设备与数据范围</span>
+        <span>账号权限决定可见的菜单与业务资源</span>
       </footer>
     </section>
 
@@ -395,10 +270,10 @@ function onTranslation(lang: string) {
     <section class="login-panel">
       <div class="login-panel__top">
         <div class="login-panel__brand">
-          <span class="brand-mark" aria-hidden="true">
-            <Robot width="20" height="20" />
+          <span class="brand-mark brand-mark--light" aria-hidden="true">
+            <Stack width="18" height="18" />
           </span>
-          <span class="brand-name">{{ title }}</span>
+          <span class="brand-name brand-name--dark">{{ title }}</span>
         </div>
 
         <div class="login-panel__tools">
@@ -440,9 +315,10 @@ function onTranslation(lang: string) {
 
       <div class="login-card">
         <div class="login-card__head">
+          <span class="login-card__eyebrow">业务中台 · 管理控制台</span>
           <h1 class="login-title">{{ t("login.pureLogin") }}</h1>
           <p class="login-subtitle">
-            使用平台账号登录，登录后将自动进入你的工作台
+            使用中台账号登录，登录后将自动进入你的工作台
           </p>
         </div>
 
@@ -541,6 +417,10 @@ function onTranslation(lang: string) {
         <LoginRegist v-if="currentPage === 3" />
         <!-- 忘记密码 -->
         <LoginUpdate v-if="currentPage === 4" />
+
+        <p class="login-card__hint">
+          账号由中台管理员统一分配，如需开通请联系系统管理员
+        </p>
       </div>
 
       <p class="login-copyright">

@@ -6,8 +6,6 @@ use std::sync::Arc;
 use sea_orm::DatabaseConnection;
 
 use crate::api::{AppState, routes::create_router};
-use crate::business::dog::command::repository::SeaOrmDogCommandRepository;
-use crate::business::dog::command::service::DogCommandService;
 use crate::business::dog::config::repository::SeaOrmDogConfigRepository;
 use crate::business::dog::config::service::DogConfigService;
 use crate::business::dog::map::repository::SeaOrmDogMapRepository;
@@ -16,8 +14,6 @@ use crate::business::dog::media::repository::SeaOrmDogMediaRepository;
 use crate::business::dog::media::service::DogMediaService;
 use crate::business::dog::model::repository::SeaOrmDogModelRepository;
 use crate::business::dog::model::service::DogModelService;
-use crate::business::dog::services::repository::SeaOrmDogServicesRepository;
-use crate::business::dog::services::service::DogServicesService;
 use crate::business::dog::statistics::service::DogStatisticsService;
 use crate::common::error::AppError;
 use crate::common::traits::{
@@ -170,9 +166,7 @@ impl App {
         let sys_log_service = Arc::new(SysLogService::new(sys_log_repo));
 
         let dog_map_repo = SeaOrmDogMapRepository::new(conn.clone());
-        let dog_map_service = Arc::new(DogMapService::new(dog_map_repo));
-
-        let dog_command_repo = SeaOrmDogCommandRepository::new(conn.clone());
+        let dog_map_service = Arc::new(DogMapService::new(dog_map_repo.clone()));
 
         let dog_media_repo = SeaOrmDogMediaRepository::new(conn.clone());
         let dog_media_service = Arc::new(DogMediaService::new(dog_media_repo.clone()));
@@ -181,18 +175,13 @@ impl App {
         let dog_model_service = Arc::new(DogModelService::new(dog_model_repo.clone()));
 
         let dog_config_repo = SeaOrmDogConfigRepository::new(conn.clone());
-        let dog_config_service = Arc::new(DogConfigService::new(dog_config_repo));
-
-        let dog_command_service = Arc::new(DogCommandService::new(dog_command_repo.clone()));
-
-        let dog_services_repo = SeaOrmDogServicesRepository::new(conn.clone());
-        let dog_services_service = Arc::new(DogServicesService::new(dog_services_repo.clone()));
+        let dog_config_service = Arc::new(DogConfigService::new(dog_config_repo.clone()));
 
         let dog_statistics_service = Arc::new(DogStatisticsService::new(
+            dog_map_repo,
             dog_model_repo,
             dog_media_repo,
-            dog_command_repo,
-            dog_services_repo,
+            dog_config_repo,
         ));
 
         AppState {
@@ -209,8 +198,6 @@ impl App {
             dog_media_service,
             dog_model_service,
             dog_config_service,
-            dog_command_service,
-            dog_services_service,
             dog_statistics_service,
             upload_dir,
         }

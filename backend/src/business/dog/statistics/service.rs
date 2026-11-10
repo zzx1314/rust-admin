@@ -1,7 +1,7 @@
-use crate::business::dog::command::repository::SeaOrmDogCommandRepository;
+use crate::business::dog::config::repository::SeaOrmDogConfigRepository;
+use crate::business::dog::map::repository::SeaOrmDogMapRepository;
 use crate::business::dog::media::repository::SeaOrmDogMediaRepository;
 use crate::business::dog::model::repository::SeaOrmDogModelRepository;
-use crate::business::dog::services::repository::SeaOrmDogServicesRepository;
 use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, TimeZone, Utc};
 use serde::Serialize;
 
@@ -18,10 +18,10 @@ pub struct StatisticsSummary {
 
 #[derive(Debug, Serialize)]
 pub struct WeeklyStatistics {
+    pub map_count: Vec<i64>,
     pub model_count: Vec<i64>,
     pub media_count: Vec<i64>,
-    pub command_count: Vec<i64>,
-    pub services_count: Vec<i64>,
+    pub config_count: Vec<i64>,
 }
 
 /// Per-weekday creation counts for the previous and the current week.
@@ -108,24 +108,24 @@ fn growth_percent(current: i64, previous: i64) -> String {
 }
 
 pub struct DogStatisticsService {
+    map_repo: SeaOrmDogMapRepository,
     model_repo: SeaOrmDogModelRepository,
     media_repo: SeaOrmDogMediaRepository,
-    command_repo: SeaOrmDogCommandRepository,
-    services_repo: SeaOrmDogServicesRepository,
+    config_repo: SeaOrmDogConfigRepository,
 }
 
 impl DogStatisticsService {
     pub fn new(
+        map_repo: SeaOrmDogMapRepository,
         model_repo: SeaOrmDogModelRepository,
         media_repo: SeaOrmDogMediaRepository,
-        command_repo: SeaOrmDogCommandRepository,
-        services_repo: SeaOrmDogServicesRepository,
+        config_repo: SeaOrmDogConfigRepository,
     ) -> Self {
         Self {
+            map_repo,
             model_repo,
             media_repo,
-            command_repo,
-            services_repo,
+            config_repo,
         }
     }
 
@@ -158,11 +158,15 @@ impl DogStatisticsService {
         let (current_start, previous_start) = Self::week_anchors();
         let since = start_of_beijing_day(previous_start);
 
+        let map_count = self.map_repo.count().await?;
         let model_count = self.model_repo.count().await?;
         let media_count = self.media_repo.count().await?;
-        let command_count = self.command_repo.count().await?;
-        let services_count = self.services_repo.count().await?;
+        let config_count = self.config_repo.count().await?;
 
+        let maps = DailyCounts::from_times(
+            &self.map_repo.find_create_times_since(since).await?,
+            current_start,
+        );
         let models = DailyCounts::from_times(
             &self.model_repo.find_create_times_since(since).await?,
             current_start,
@@ -171,34 +175,16 @@ impl DogStatisticsService {
             &self.media_repo.find_create_times_since(since).await?,
             current_start,
         );
-        let commands = DailyCounts::from_times(
-            &self.command_repo.find_create_times_since(since).await?,
-            current_start,
-        );
-        let services = DailyCounts::from_times(
-            &self.services_repo.find_create_times_since(since).await?,
+        let configs = DailyCounts::from_times(
+            &self.config_repo.find_create_times_since(since).await?,
             current_start,
         );
 
         Ok(vec![
+            Self::summary("地图数量", map_count, maps, "#eef6ff", "#3b82f6", 2200),
             Self::summary("模型数量", model_count, models, "#eff8f4", "#26ce83", 1500),
             Self::summary("媒体数量", media_count, media, "#effaff", "#41b6ff", 2000),
-            Self::summary(
-                "指令数量",
-                command_count,
-                commands,
-                "#fff5f4",
-                "#e85f33",
-                1600,
-            ),
-            Self::summary(
-                "服务数量",
-                services_count,
-                services,
-                "#f6f4fe",
-                "#7846e5",
-                100,
-            ),
+            Self::summary("参数配置", config_count, configs, "#f6f4fe", "#7846e5", 100),
         ])
     }
 
@@ -207,6 +193,10 @@ impl DogStatisticsService {
         let (current_start, previous_start) = Self::week_anchors();
         let since = start_of_beijing_day(previous_start);
 
+        let maps = DailyCounts::from_times(
+            &self.map_repo.find_create_times_since(since).await?,
+            current_start,
+        );
         let models = DailyCounts::from_times(
             &self.model_repo.find_create_times_since(since).await?,
             current_start,
@@ -215,27 +205,23 @@ impl DogStatisticsService {
             &self.media_repo.find_create_times_since(since).await?,
             current_start,
         );
-        let commands = DailyCounts::from_times(
-            &self.command_repo.find_create_times_since(since).await?,
-            current_start,
-        );
-        let services = DailyCounts::from_times(
-            &self.services_repo.find_create_times_since(since).await?,
+        let configs = DailyCounts::from_times(
+            &self.config_repo.find_create_times_since(since).await?,
             current_start,
         );
 
         Ok(vec![
             WeeklyStatistics {
+                map_count: maps.previous_week(),
                 model_count: models.previous_week(),
                 media_count: media.previous_week(),
-                command_count: commands.previous_week(),
-                services_count: services.previous_week(),
+                config_count: configs.previous_week(),
             },
             WeeklyStatistics {
+                map_count: maps.current_week(),
                 model_count: models.current_week(),
                 media_count: media.current_week(),
-                command_count: commands.current_week(),
-                services_count: services.current_week(),
+                config_count: configs.current_week(),
             },
         ])
     }

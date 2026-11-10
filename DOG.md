@@ -1,10 +1,10 @@
 # 机器狗业务模块（dog）
 
-根后台保留 **地图、模型、媒体、指令、参数配置、服务** 六个资源域的增删改查与首页统计。
+中台保留 **地图、模型、媒体、参数配置** 四个资源域的增删改查与首页统计。
 
-> 园区、设备、任务、路线以及设备接入网关（WebSocket / 设备 token / 上传）已迁移到仓库内的
-> `business/` 独立业务服务（Rust 后端 + Vue 控制台，见 `business/README.md`），根后台不再提供
-> 对应菜单、接口、数据表与设备客户端（原 `client/` 已删除）。`business/server` 会直接读取根后台
+> 园区、设备、任务、路线以及设备接入、指令下发、服务编排均已迁移到仓库内的
+> `business/` 独立业务平台（Rust 后端 + Vue 控制台，见 `business/README.md`），中台不再提供
+> 对应菜单、接口、数据表与设备客户端（原 `client/` 已删除）。`business/server` 会直接读取中台
 > `dog_map` 表导入地图，两边的 SQLite 文件路径可通过 `ROBODOG_BACKEND_DB` 配置。
 
 ---
@@ -13,13 +13,13 @@
 
 | 层 | 位置 |
 | --- | --- |
-| 后端业务代码 | `backend/src/business/dog/{map,media,model,config,command,services,statistics}/` |
+| 后端业务代码 | `backend/src/business/dog/{map,media,model,config,statistics}/` |
 | 后端路由 | `backend/src/api/routes.rs`（每个子域一个 `dog_*_routes`，统一挂 `require_auth`） |
 | 服务装配 | `backend/src/app.rs` → `App::build_state_with_token_store` |
-| 数据库迁移 | `backend/migrations/dog/7_create_dog_tables.sql`（建表）、`.../19_add_map_file_fields.sql`、`.../22_add_map_baseline_*.sql`、`.../23_add_map_dimensions.sql`、`.../24_drop_retired_dog_tables.sql`（删除园区/设备/任务/路线/工作流/绑定表并从 `dog_map` 移除 `park_id`） |
-| 菜单 | `backend/migrations/p_sys/9_add_dog_menus.sql`、`.../21_remove_retired_dog_menus.sql`（物理删除园区/设备/路线/任务/工作流/绑定菜单） |
-| 前端页面 | `frontend/src/views/dog/{map,media,model,command,config,services}/` |
-| 前端请求封装 | `frontend/src/api/dog{Map,Media,Model,Command,Config,Services,Statistics}.ts` |
+| 数据库迁移 | `backend/migrations/dog/7_create_dog_tables.sql`（建表）、`.../19_add_map_file_fields.sql`、`.../22_add_map_baseline_*.sql`、`.../23_add_map_dimensions.sql`、`.../24_drop_retired_dog_tables.sql`（删除园区/设备/任务/路线/工作流/绑定表并从 `dog_map` 移除 `park_id`）、`.../25_drop_command_services_tables.sql` |
+| 菜单 | `backend/migrations/p_sys/9_add_dog_menus.sql`、`.../21_remove_retired_dog_menus.sql`、`.../22_remove_command_services_menus.sql` |
+| 前端页面 | `frontend/src/views/dog/{map,media,model,config}/` |
+| 前端请求封装 | `frontend/src/api/dog{Map,Media,Model,Config,Statistics}.ts` |
 | 首页仪表盘 | `frontend/src/views/welcome/index.vue` + `frontend/src/api/dogStatistics.ts` |
 | 在线手册 | `frontend/src/views/manual/admin.md`（管理员）、`developer.md`（接口对接） |
 
@@ -34,13 +34,11 @@
 | `dog_map` | 地图基线版本 | `map_name`、`map_type`、`file_name`、`file_path`、`file_format`、`file_size`、`remarks`、`user_id`(创建者)、`map_version`、`frame_id`、`crs`、`map_origin`、`resolution`、`floors`、`road_count`、`nogo_count`、`map_status`(草稿/部分标定/已发布/已归档)、`map_hash`(上传时计算的 SHA-256)、`map_width`/`map_height`、`publish_time`；地图以 `.zip` 包上传，文件落盘到 `<upload_dir>/maps/`。上传时后端解析 PGM/YAML 并回写 resolution/origin/尺寸/哈希，表单值与包内容冲突会被拒绝。发布后版本不可变 |
 | `dog_model` | 模型 | `model_name`、`model_type`、`file_name`、`file_path`、`file_format`、`file_size`、`remarks` |
 | `dog_media` | 媒体 | `media_name`、`media_type`、`media_path`、`media_size`、`remarks` |
-| `dog_command` | 指令 | `command_name`、`command_type`、`command_params`、`device_id`(文本)、`status`(默认 `pending`)、`return_value`、`task_id` |
 | `dog_config` | 参数配置 | `config_name`、`config_value`、`description` |
-| `dog_services` | 服务 | `type`、`params` |
 
 所有表都有 `id`（主键，创建时由服务端生成）、`create_time`、`update_time`、`is_deleted`（软删除标记），查询一律带 `is_deleted = 0`。
 
-已删除的表：`dog_park`、`dog_device`、`dog_task`、`dog_route_library`、`dog_user_device`、`dog_workflow`。
+已删除的表：`dog_park`、`dog_device`、`dog_task`、`dog_route_library`、`dog_user_device`、`dog_workflow`、`dog_command`、`dog_services`。
 
 ---
 
@@ -59,18 +57,16 @@ POST   /api/dogMap/upload           上传 .zip 地图包（multipart：file + m
 GET    /api/dogMap/{id}/image       地图栅格 PNG + 分辨率 / 原点
 POST   /api/dogMap/{id}/publish     发布地图版本（记录发布时间）
 POST   /api/dogMap/{id}/newVersion  派生并发布下一个不可变版本
-PUT    /api/dogCommand/status/{id}  仅回写指令状态与返回值
-GET    /api/dogStatistics/all       模型 / 媒体 / 指令 / 服务总量与本周曲线
+GET    /api/dogStatistics/all       地图 / 模型 / 媒体 / 参数配置总量与本周曲线
 GET    /api/dogStatistics/allType   上周 / 本周数量趋势
 ```
 
-- `module` ∈ `dogMap`、`dogMedia`、`dogModel`、`dogConfig`、`dogCommand`、`dogServices`。
-- 除 `/api/dogServices`（只有全量）外，其余模块均提供 `getPage` + `getAll`。
+- `module` ∈ `dogMap`、`dogMedia`、`dogModel`、`dogConfig`，均提供 `getPage` + `getAll`。
 - 统计接口同样需要登录（`require_auth`）。
 
 ### 3.1 数据权限
 
-只有 `dog_map` 带 `user_id`，按“谁创建谁可见”做行级隔离；模型 / 媒体 / 指令 / 参数配置 / 服务为全局共享。
+只有 `dog_map` 带 `user_id`，按“谁创建谁可见”做行级隔离；模型 / 媒体 / 参数配置为全局共享。
 
 | 操作 | 普通用户 | 管理员 |
 | --- | --- | --- |
@@ -93,7 +89,7 @@ GET    /api/dogStatistics/allType   上周 / 本周数量趋势
 - **数据库迁移**：启动时先清理 `seaql_migrations` 中“文件已删除”的历史记录，再执行待应用迁移。删除业务迁移后老库仍可平滑升级。
 - **主键生成**：dog 业务统一使用 `common::util::generate_id()`（毫秒 + 原子递增）。
 - **上传目录**：`backend/config/config.toml` 的 `[dog] upload_dir`（默认 `data/device_uploads`），地图包存放在其 `maps/` 子目录；该目录只由地图上传使用。
-- **菜单**：左侧菜单由数据库驱动（`p_sys_menu` + `p_sys_role_menu`），保留的一级菜单为 地图管理、模型管理、媒体资源、指令管理、参数配置、服务管理。菜单图标使用离线图标，需在 `frontend/src/components/ReIcon/src/offlineIcon.ts` 注册。
+- **菜单**：左侧菜单由数据库驱动（`p_sys_menu` + `p_sys_role_menu`），保留的一级菜单为 地图管理、模型管理、媒体资源、参数配置。菜单图标使用离线图标，需在 `frontend/src/components/ReIcon/src/offlineIcon.ts` 注册。
 
 ---
 
@@ -102,7 +98,7 @@ GET    /api/dogStatistics/allType   上周 / 本周数量趋势
 | 项 | 现状 |
 | --- | --- |
 | 设备接入 | 已迁移到 `business/`；根后台不提供 WebSocket / 设备 token / 文件上传接口 |
-| 设备指令下发 | `POST /api/dogCommand` 仅落库，不再向设备推送；下发由业务服务负责 |
+| 指令下发 | 指令接口与菜单已移除，下发由 `business/` 业务平台负责 |
 | 文件上传 | 仅地图包有上传接口；模型 / 媒体的管理页面仍只填写路径 |
 | 地图发布归档 | 发布只推进状态，不再联动园区基线或自动归档旧版本；版本管理由业务侧人工完成 |
 | 按钮级权限 | 已初始化 `dog_*_find` 权限码并挂到超级管理员角色，但页面暂未使用 `v-auth` 做按钮控制 |

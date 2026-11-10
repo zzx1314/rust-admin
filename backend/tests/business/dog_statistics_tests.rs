@@ -1,20 +1,21 @@
 //! Dashboard statistics tests.
 //!
-//! The welcome page shows four summary cards (models / media / commands /
-//! services) and a weekly bar chart. Everything must be derived from real
-//! rows: totals come from the tables, the weekly series buckets `create_time`
-//! per weekday (Beijing time, Monday first) and the percent badge is the
-//! week-over-week growth.
+//! The welcome page shows four summary cards (maps / models / media / config)
+//! and a weekly bar chart. Everything must be derived from real rows: totals
+//! come from the tables, the weekly series buckets `create_time` per weekday
+//! (Beijing time, Monday first) and the percent badge is the week-over-week
+//! growth.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use x_rust::api::AppState;
 use x_rust::app::App;
-use x_rust::business::dog::command::domain::CreateCommandRequest;
+use x_rust::business::dog::config::domain::CreateConfigRequest;
+use x_rust::business::dog::map::domain::CreateMapRequest;
 use x_rust::business::dog::media::domain::CreateMediaRequest;
 use x_rust::business::dog::model::domain::CreateModelRequest;
-use x_rust::business::dog::services::domain::CreateServicesRequest;
+use x_rust::common::data_scope::DataScope;
 use x_rust::common::error::AppError;
 use x_rust::common::traits::{DynFuture, TokenStore};
 
@@ -101,6 +102,38 @@ async fn test_state() -> AppState {
     app.build_state_with_token_store(Arc::new(FakeTokenStore::new()), JWT_SECRET)
 }
 
+async fn create_map(state: &AppState, name: &str) {
+    state
+        .dog_map_service
+        .create(
+            CreateMapRequest {
+                map_name: name.to_string(),
+                map_type: None,
+                map_data: None,
+                file_name: None,
+                file_path: None,
+                file_format: None,
+                file_size: None,
+                remarks: None,
+                map_version: None,
+                frame_id: None,
+                crs: None,
+                map_origin: None,
+                resolution: None,
+                floors: None,
+                road_count: None,
+                nogo_count: None,
+                map_status: None,
+                map_hash: None,
+                map_width: None,
+                map_height: None,
+            },
+            &DataScope::new(1, true),
+        )
+        .await
+        .expect("map must be created");
+}
+
 async fn create_model(state: &AppState, name: &str) {
     state
         .dog_model_service
@@ -131,31 +164,16 @@ async fn create_media(state: &AppState, name: &str) {
         .expect("media must be created");
 }
 
-async fn create_command(state: &AppState, name: &str) {
+async fn create_config(state: &AppState, name: &str) {
     state
-        .dog_command_service
-        .create(CreateCommandRequest {
-            command_name: name.to_string(),
-            command_type: None,
-            command_params: None,
-            device_id: None,
-            status: None,
-            return_value: None,
-            task_id: None,
+        .dog_config_service
+        .create(CreateConfigRequest {
+            config_name: name.to_string(),
+            config_value: None,
+            description: None,
         })
         .await
-        .expect("command must be created");
-}
-
-async fn create_services(state: &AppState) {
-    state
-        .dog_services_service
-        .create(CreateServicesRequest {
-            r#type: Some("巡检".to_string()),
-            params: None,
-        })
-        .await
-        .expect("services must be created");
+        .expect("config must be created");
 }
 
 #[tokio::test]
@@ -186,18 +204,18 @@ async fn empty_database_reports_zeroes_instead_of_placeholders() {
         .await
         .unwrap();
     assert_eq!(weekly.len(), 2, "previous week + current week");
-    assert!(weekly[0].model_count.iter().all(|count| *count == 0));
-    assert!(weekly[1].command_count.iter().all(|count| *count == 0));
+    assert!(weekly[0].map_count.iter().all(|count| *count == 0));
+    assert!(weekly[1].config_count.iter().all(|count| *count == 0));
 }
 
 #[tokio::test]
 async fn summary_cards_reflect_stored_rows_and_week_to_date_series() {
     let state = test_state().await;
 
+    create_map(&state, "园区地图").await;
     create_model(&state, "第一人称模型").await;
     create_media(&state, "巡检视频").await;
-    create_command(&state, "前进").await;
-    create_services(&state).await;
+    create_config(&state, "心跳间隔").await;
 
     let stats = state
         .dog_statistics_service
@@ -212,10 +230,10 @@ async fn summary_cards_reflect_stored_rows_and_week_to_date_series() {
             .unwrap_or_else(|| panic!("{name} card must exist"))
             .value
     };
+    assert_eq!(value_of("地图数量"), 1);
     assert_eq!(value_of("模型数量"), 1);
     assert_eq!(value_of("媒体数量"), 1);
-    assert_eq!(value_of("指令数量"), 1);
-    assert_eq!(value_of("服务数量"), 1);
+    assert_eq!(value_of("参数配置"), 1);
 
     for summary in &stats {
         assert_eq!(summary.value, 1, "{} counts the stored row", summary.name);
@@ -239,13 +257,13 @@ async fn summary_cards_reflect_stored_rows_and_week_to_date_series() {
         .await
         .unwrap();
     for series in [
+        &weekly[1].map_count,
         &weekly[1].model_count,
         &weekly[1].media_count,
-        &weekly[1].command_count,
-        &weekly[1].services_count,
+        &weekly[1].config_count,
     ] {
         assert_eq!(series.len(), 7);
         assert_eq!(series.iter().sum::<i64>(), 1);
     }
-    assert_eq!(weekly[1].model_count, stats[0].data);
+    assert_eq!(weekly[1].map_count, stats[0].data);
 }

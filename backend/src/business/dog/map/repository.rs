@@ -6,6 +6,7 @@ use crate::business::dog::map::entity::Model as Map;
 use crate::common::base::{BaseRepository, order_desc};
 use crate::common::data_scope::DataScope;
 use crate::common::util::parse_beijing_datetime;
+use chrono::{DateTime, Utc};
 use sea_orm::{
     ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect,
@@ -198,6 +199,30 @@ impl SeaOrmDogMapRepository {
         }
         update.exec(&*self.conn).await?;
         self.find_by_id(id, scope).await
+    }
+
+    /// 全量地图版本数量（首页统计，管理员视角）。
+    pub async fn count(&self) -> Result<i64, sea_orm::DbErr> {
+        MapEntity::find()
+            .filter(MapColumn::IsDeleted.eq(0))
+            .count(&*self.conn)
+            .await
+            .map(|c| c as i64)
+    }
+
+    /// Creation timestamps at or after `since`, used by dashboard statistics.
+    pub async fn find_create_times_since(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<DateTime<Utc>>, sea_orm::DbErr> {
+        MapEntity::find()
+            .filter(MapColumn::IsDeleted.eq(0))
+            .filter(MapColumn::CreateTime.gte(since))
+            .select_only()
+            .column(MapColumn::CreateTime)
+            .into_tuple::<DateTime<Utc>>()
+            .all(&*self.conn)
+            .await
     }
 
     pub async fn delete(&self, id: i64, scope: &DataScope) -> Result<bool, sea_orm::DbErr> {
