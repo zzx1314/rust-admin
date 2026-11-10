@@ -7,6 +7,7 @@ use crate::business::dog::command::entity::Entity as CommandEntity;
 use crate::business::dog::command::entity::Model as DogCommand;
 use crate::common::base::{BaseRepository, order_desc};
 use crate::common::util::parse_beijing_datetime;
+use chrono::{DateTime, Utc};
 use sea_orm::{
     ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect,
@@ -176,6 +177,29 @@ impl SeaOrmDogCommandRepository {
         } else {
             Ok(None)
         }
+    }
+
+    pub async fn count(&self) -> Result<i64, sea_orm::DbErr> {
+        CommandEntity::find()
+            .filter(CommandColumn::IsDeleted.eq(0))
+            .count(&*self.conn)
+            .await
+            .map(|c| c as i64)
+    }
+
+    /// Creation timestamps at or after `since`, used by dashboard statistics.
+    pub async fn find_create_times_since(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<DateTime<Utc>>, sea_orm::DbErr> {
+        CommandEntity::find()
+            .filter(CommandColumn::IsDeleted.eq(0))
+            .filter(CommandColumn::CreateTime.gte(since))
+            .select_only()
+            .column(CommandColumn::CreateTime)
+            .into_tuple::<DateTime<Utc>>()
+            .all(&*self.conn)
+            .await
     }
 
     pub async fn find_by_task_id(&self, task_id: i64) -> Result<Vec<DogCommand>, sea_orm::DbErr> {

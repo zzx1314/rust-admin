@@ -1,11 +1,10 @@
 use crate::business::dog::map::domain::{
     CreateMapRequest, DogMap, MAP_STATUS_ARCHIVED, MAP_STATUS_DRAFT, MAP_STATUS_PARTIAL,
-    MAP_STATUS_PUBLISHED, MapImageVO, MapPageQuery, MapRefsVO, MapRouteRefVO, MapVO,
-    UpdateMapRequest, UploadMapRequest, is_valid_map_status,
+    MAP_STATUS_PUBLISHED, MapImageVO, MapPageQuery, MapVO, UpdateMapRequest, UploadMapRequest,
+    is_valid_map_status,
 };
 use crate::business::dog::map::package::{parse_map_package, sha256_hex};
 use crate::business::dog::map::repository::SeaOrmDogMapRepository;
-use crate::business::dog::park::repository::SeaOrmDogParkRepository;
 use crate::common::data_scope::DataScope;
 use crate::common::error::AppError;
 use crate::common::pagination::PageResponse;
@@ -13,12 +12,11 @@ use crate::common::util::{format_datetime, generate_id};
 
 pub struct DogMapService {
     repo: SeaOrmDogMapRepository,
-    park_repo: SeaOrmDogParkRepository,
 }
 
 impl DogMapService {
-    pub fn new(repo: SeaOrmDogMapRepository, park_repo: SeaOrmDogParkRepository) -> Self {
-        Self { repo, park_repo }
+    pub fn new(repo: SeaOrmDogMapRepository) -> Self {
+        Self { repo }
     }
 
     pub async fn create(
@@ -26,11 +24,6 @@ impl DogMapService {
         req: CreateMapRequest,
         scope: &DataScope,
     ) -> Result<DogMap, AppError> {
-        // 地图必须归属某个园区：新增时园区为必填项。
-        let park_id = req
-            .park_id
-            .ok_or_else(|| AppError::BadRequest("请选择所属园区".to_string()))?;
-        self.ensure_park_access(park_id, scope).await?;
         if let Some(status) = req.map_status.as_deref()
             && !is_valid_map_status(status)
         {
@@ -45,29 +38,10 @@ impl DogMapService {
             ));
         }
         let id = generate_id();
-        let map = self
-            .repo
+        self.repo
             .create(&req, id, scope)
             .await
-            .map_err(AppError::DatabaseError)?;
-
-        // 首次建图时把园区从「仅台账」推进到「待标定」，发布后才成为可用基线。
-        let park = self
-            .park_repo
-            .find_by_id(park_id, scope)
-            .await
-            .map_err(AppError::DatabaseError)?;
-        if let Some(park) = park
-            && park.map_id.is_none()
-            && park.map_status == "未绑定"
-        {
-            self.park_repo
-                .set_baseline(park_id, None, "待标定")
-                .await
-                .map_err(AppError::DatabaseError)?;
-        }
-
-        Ok(map)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_by_id(&self, id: i64, scope: &DataScope) -> Result<DogMap, AppError> {
@@ -78,18 +52,9 @@ impl DogMapService {
             .ok_or_else(|| AppError::NotFound(format!("Map with id {} not found", id)))
     }
 
-    /// 转成 VO 并补齐「所属园区」名称，供单条详情 / 新增 / 修改接口返回。
-    pub async fn to_vo(&self, map: DogMap, scope: &DataScope) -> Result<MapVO, AppError> {
-        let mut vo = MapVO::from(map);
-        if let Some(park_id) = vo.park_id {
-            let park = self
-                .park_repo
-                .find_by_id(park_id, scope)
-                .await
-                .map_err(AppError::DatabaseError)?;
-            vo.park_name = park.map(|p| p.park_name);
-        }
-        Ok(vo)
+    /// 转成 VO，供单条详情 / 新增 / 修改接口返回。
+    pub fn to_vo(&self, map: DogMap) -> MapVO {
+        MapVO::from(map)
     }
 
     pub async fn list_page(
@@ -103,23 +68,7 @@ impl DogMapService {
             .await
             .map_err(AppError::DatabaseError)?;
 
-        let mut park_ids: Vec<i64> = records.iter().filter_map(|m| m.park_id).collect();
-        park_ids.sort_unstable();
-        park_ids.dedup();
-        let park_names = self
-            .repo
-            .find_park_names(&park_ids)
-            .await
-            .map_err(AppError::DatabaseError)?;
-
-        let vo_list: Vec<MapVO> = records
-            .into_iter()
-            .map(|map| {
-                let mut vo = MapVO::from(map);
-                vo.park_name = vo.park_id.and_then(|id| park_names.get(&id).cloned());
-                vo
-            })
-            .collect();
+        let vo_list: Vec<MapVO> = records.into_iter().map(MapVO::from).collect();
 
         Ok(PageResponse::new(
             vo_list,
@@ -136,36 +85,6 @@ impl DogMapService {
             .map_err(AppError::DatabaseError)
     }
 
-    /// 园区可用的地图基线版本。`publishable_only` 为 true 时不含草稿 / 已归档，
-    /// 用于园区徽章与新建路线的版本下拉。
-    pub async fn list_by_park(
-        &self,
-        park_id: i64,
-        publishable_only: bool,
-        scope: &DataScope,
-    ) -> Result<Vec<MapVO>, AppError> {
-        self.ensure_park_access(park_id, scope).await?;
-        let maps = self
-            .repo
-            .find_by_park(park_id, scope, publishable_only)
-            .await
-            .map_err(AppError::DatabaseError)?;
-        let park_name = self
-            .park_repo
-            .find_by_id(park_id, scope)
-            .await
-            .map_err(AppError::DatabaseError)?
-            .map(|p| p.park_name);
-        Ok(maps
-            .into_iter()
-            .map(|map| {
-                let mut vo = MapVO::from(map);
-                vo.park_name = park_name.clone();
-                vo
-            })
-            .collect())
-    }
-
     pub async fn update(
         &self,
         id: i64,
@@ -173,9 +92,6 @@ impl DogMapService {
         scope: &DataScope,
     ) -> Result<DogMap, AppError> {
         let existing = self.get_by_id(id, scope).await?;
-        if let Some(park_id) = req.park_id {
-            self.ensure_park_access(park_id, scope).await?;
-        }
         if let Some(status) = req.map_status.as_deref()
             && !is_valid_map_status(status)
         {
@@ -196,11 +112,10 @@ impl DogMapService {
                 || req.map_origin.is_some()
                 || req.resolution.is_some()
                 || req.file_name.is_some()
-                || req.file_path.is_some()
-                || (req.park_id.is_some() && req.park_id != existing.park_id))
+                || req.file_path.is_some())
         {
             return Err(AppError::BadRequest(
-                "已发布的地图版本不可修改版本号 / frame_id / 原点 / 分辨率 / 地图包 / 所属园区，请重新建图并发布新版本"
+                "已发布的地图版本不可修改版本号 / frame_id / 原点 / 分辨率 / 地图包，请重新建图并发布新版本"
                     .to_string(),
             ));
         }
@@ -212,14 +127,6 @@ impl DogMapService {
     }
 
     pub async fn delete(&self, id: i64, scope: &DataScope) -> Result<(), AppError> {
-        let refs = self.refs(id, scope).await?;
-        if !refs.routes.is_empty() {
-            return Err(AppError::BadRequest(format!(
-                "地图 {} 仍被 {} 条路线引用，需先迁移或删除这些路线",
-                refs.map_id,
-                refs.routes.len()
-            )));
-        }
         let deleted = self
             .repo
             .delete(id, scope)
@@ -228,23 +135,14 @@ impl DogMapService {
         if !deleted {
             return Err(AppError::NotFound(format!("Map with id {} not found", id)));
         }
-        self.park_repo
-            .clear_baseline_for_map(id)
-            .await
-            .map_err(AppError::DatabaseError)?;
         Ok(())
     }
 
-    /// 发布地图版本：归档同园区旧版本，把园区指针切到该版本。
+    /// 发布地图版本：把状态推进到「已发布」/「部分标定」并记录发布时间。
     ///
-    /// 这一步对应原型里的「发布不可变 MapVersion」。正式系统应由地图管理台
-    /// 完成，这里提供受控接口，供建图完成后人工确认发布。
+    /// 已发布版本视为不可变；归档由发布新版本或人工操作完成。
     pub async fn publish(&self, id: i64, scope: &DataScope) -> Result<DogMap, AppError> {
         let map = self.get_by_id(id, scope).await?;
-        let park_id = map
-            .park_id
-            .ok_or_else(|| AppError::BadRequest("地图必须归属园区才能发布基线".to_string()))?;
-        self.ensure_park_access(park_id, scope).await?;
         if map.map_status == MAP_STATUS_ARCHIVED {
             return Err(AppError::BadRequest(
                 "已归档的地图版本不可再次发布，请创建新版本".to_string(),
@@ -257,51 +155,26 @@ impl DogMapService {
             )));
         }
 
-        self.repo
-            .archive_published_in_park(park_id, id)
-            .await
-            .map_err(AppError::DatabaseError)?;
-
         let status = if map.map_status == MAP_STATUS_PARTIAL {
             MAP_STATUS_PARTIAL
         } else {
             MAP_STATUS_PUBLISHED
         };
-        let published = self
-            .repo
+        self.repo
             .update_status(id, status, Some(format_datetime(chrono::Utc::now())), scope)
             .await
             .map_err(AppError::DatabaseError)?
-            .ok_or_else(|| AppError::NotFound(format!("Map with id {} not found", id)))?;
-
-        let park_status = if status == MAP_STATUS_PARTIAL {
-            "部分标定"
-        } else {
-            "已标定"
-        };
-        self.park_repo
-            .set_baseline(park_id, Some(id), park_status)
-            .await
-            .map_err(AppError::DatabaseError)?;
-
-        Ok(published)
+            .ok_or_else(|| AppError::NotFound(format!("Map with id {} not found", id)))
     }
 
     /// 基于当前版本派生下一个不可变版本并立即发布。
-    /// 历史路线仍冻结在旧版本，不会被自动迁移。
     pub async fn new_version(&self, id: i64, scope: &DataScope) -> Result<DogMap, AppError> {
         let map = self.get_by_id(id, scope).await?;
-        let park_id = map
-            .park_id
-            .ok_or_else(|| AppError::BadRequest("地图必须归属园区才能创建新版本".to_string()))?;
-        self.ensure_park_access(park_id, scope).await?;
-
         let next_version = bump_minor_version(map.map_version.as_deref());
         let req = CreateMapRequest {
             map_name: map.map_name.clone(),
             map_type: map.map_type.clone(),
             map_data: map.map_data.clone(),
-            park_id: Some(park_id),
             file_name: map.file_name.clone(),
             file_path: map.file_path.clone(),
             file_format: map.file_format.clone(),
@@ -326,38 +199,6 @@ impl DogMapService {
             .await
             .map_err(AppError::DatabaseError)?;
         self.publish(new_id, scope).await
-    }
-
-    /// 引用该版本的路线 / 任务清单，供「发布新版本」前做影响分析。
-    pub async fn refs(&self, id: i64, scope: &DataScope) -> Result<MapRefsVO, AppError> {
-        self.get_by_id(id, scope).await?;
-        let routes = self
-            .repo
-            .find_routes_by_map(id)
-            .await
-            .map_err(AppError::DatabaseError)?;
-        let route_ids: Vec<i64> = routes.iter().map(|r| r.id).collect();
-        let task_count = self
-            .repo
-            .count_tasks_for_routes(&route_ids)
-            .await
-            .map_err(AppError::DatabaseError)?;
-        let route_refs = routes
-            .into_iter()
-            .map(|route| MapRouteRefVO {
-                id: route.id,
-                route_name: route.route_name,
-                route_status: route.route_status,
-                route_version: None,
-                waypoint_count: count_waypoints(route.route_data.as_deref()),
-                frozen: true,
-            })
-            .collect();
-        Ok(MapRefsVO {
-            map_id: id,
-            routes: route_refs,
-            task_count,
-        })
     }
 
     /// Stores an uploaded `.zip` map package and creates/updates the map row.
@@ -385,15 +226,6 @@ impl DogMapService {
         }
         if info.map_name.trim().is_empty() {
             return Err(AppError::BadRequest("地图名称不能为空".to_string()));
-        }
-
-        // 上传前先校验园区：新增必须指定园区，且园区要可访问。
-        match info.park_id {
-            Some(park_id) => self.ensure_park_access(park_id, scope).await?,
-            None if info.id.is_none() => {
-                return Err(AppError::BadRequest("请选择所属园区".to_string()));
-            }
-            None => {}
         }
 
         // 以地图包内容为准解析坐标系与哈希；前端手填值只用于校验，不覆盖包内数据。
@@ -428,7 +260,6 @@ impl DogMapService {
                     map_name: Some(info.map_name),
                     map_type: info.map_type,
                     map_data: None,
-                    park_id: info.park_id,
                     file_name: Some(file_name),
                     file_path: Some(file_path),
                     file_format: Some(file_format),
@@ -454,7 +285,6 @@ impl DogMapService {
                     map_name: info.map_name,
                     map_type: info.map_type,
                     map_data: None,
-                    park_id: info.park_id,
                     file_name: Some(file_name),
                     file_path: Some(file_path),
                     file_format: Some(file_format),
@@ -479,10 +309,6 @@ impl DogMapService {
     }
 
     /// 读取地图包并转成前端可直接绘制的 PNG（base64），附带栅格分辨率与原点。
-    ///
-    /// 与参考实现的 `/dronesRouteLibrary/getRoute/{modelId}` 对应：
-    /// 解压`model.pgm` → 转 PNG → base64，并解析 `model.yaml` 的
-    /// `resolution` / `origin`。
     pub async fn load_image(
         &self,
         id: i64,
@@ -496,7 +322,7 @@ impl DogMapService {
             .filter(|path| !path.trim().is_empty())
             .ok_or_else(|| {
                 AppError::BadRequest(format!(
-                    "地图 {} 尚未上传地图包，无法用于路线规划",
+                    "地图 {} 尚未上传地图包，无法读取栅格图",
                     map.map_name
                 ))
             })?;
@@ -528,21 +354,6 @@ impl DogMapService {
             width: parsed.width,
             height: parsed.height,
         })
-    }
-
-    async fn ensure_park_access(&self, park_id: i64, scope: &DataScope) -> Result<(), AppError> {
-        let park = self
-            .park_repo
-            .find_by_id(park_id, scope)
-            .await
-            .map_err(AppError::DatabaseError)?;
-        if park.is_none() {
-            return Err(AppError::BadRequest(format!(
-                "Park with id {} not found or not accessible",
-                park_id
-            )));
-        }
-        Ok(())
     }
 }
 
@@ -637,11 +448,4 @@ fn bump_minor_version(current: Option<&str>) -> String {
         minor = 0;
     }
     format!("v{major}.{minor}")
-}
-
-fn count_waypoints(route_data: Option<&str>) -> usize {
-    route_data
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|value| value.as_array().map(Vec::len))
-        .unwrap_or(0)
 }

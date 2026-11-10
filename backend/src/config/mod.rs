@@ -11,7 +11,6 @@ pub const CONFIG_PATH_ENV: &str = "APP_CONFIG_FILE";
 /// environment. See `config/config.toml.example`.
 pub const JWT_SECRET_ENV: &str = "APP_JWT_SECRET";
 pub const REDIS_PASSWORD_ENV: &str = "APP_REDIS_PASSWORD";
-pub const DEVICE_AUTH_SECRET_ENV: &str = "APP_DEVICE_AUTH_SECRET";
 
 /// Minimum accepted length for `jwt_secret` outside of tests.
 const MIN_JWT_SECRET_LEN: usize = 32;
@@ -37,10 +36,6 @@ pub struct DogConfig {
     /// empty string) means "use the `App` default".
     #[serde(default)]
     pub upload_dir: Option<String>,
-    /// Shared secret used to verify `GET /api/dogGateway/auth/{deviceId}`
-    /// requests. Injected from `APP_DEVICE_AUTH_SECRET`.
-    #[serde(default)]
-    pub device_auth_secret: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -53,11 +48,6 @@ pub struct AppConfig {
     /// Optional `[dog]` section; device uploads default to `data/device_uploads`.
     #[serde(default)]
     pub dog: DogConfig,
-    /// Shared secret for device gateway authentication, injected from
-    /// `APP_DEVICE_AUTH_SECRET`. Kept as a top-level field so that deployments
-    /// that only use `config.toml` for non-secret values can still supply it.
-    #[serde(default)]
-    pub device_auth_secret: String,
 }
 
 impl RedisConfig {
@@ -107,11 +97,6 @@ impl AppConfig {
                     "`jwt_secret` is missing. Export `{JWT_SECRET_ENV}` \
                      (for example `export {JWT_SECRET_ENV}=$(openssl rand -hex 32)`)."
                 ))
-            } else if message.contains("device_auth_secret") {
-                ConfigError::Message(format!(
-                    "`device_auth_secret` is missing. Export `{DEVICE_AUTH_SECRET_ENV}` \
-                     (for example `export {DEVICE_AUTH_SECRET_ENV}=$(openssl rand -hex 32)`)."
-                ))
             } else {
                 ConfigError::Message(message)
             }
@@ -153,16 +138,9 @@ impl AppConfig {
             .unwrap_or_else(|| PathBuf::from("config/config.toml")))
     }
 
-    /// Move `APP_DEVICE_AUTH_SECRET` / `APP_REDIS_PASSWORD` into place when the
-    /// environment provides them but the file does not (or the other way
-    /// round for the `[dog] device_auth_secret` alias).
+    /// Move `APP_REDIS_PASSWORD` into place when the environment provides it
+    /// but the file does not.
     fn normalise(&mut self) {
-        if self.device_auth_secret.is_empty()
-            && let Some(secret) = self.dog.device_auth_secret.take()
-        {
-            self.device_auth_secret = secret;
-        }
-
         // `redis.password` is a nested key, so the environment source only
         // maps it from `APP_REDIS__PASSWORD`. Honour the documented flat
         // `APP_REDIS_PASSWORD` name as well, otherwise Redis AUTH is silently
@@ -194,20 +172,7 @@ impl AppConfig {
             )));
         }
 
-        self.device_auth_secret = self.device_auth_secret.trim().to_string();
-        if self.device_auth_secret.is_empty() {
-            return Err(ConfigError::Message(format!(
-                "`device_auth_secret` is empty. Set the `{DEVICE_AUTH_SECRET_ENV}` environment \
-                 variable; it signs `GET /api/dogGateway/auth/{{deviceId}}` requests."
-            )));
-        }
-
         Ok(())
-    }
-
-    /// Shared secret used to authenticate device token requests.
-    pub fn device_auth_secret(&self) -> &str {
-        &self.device_auth_secret
     }
 }
 
@@ -218,7 +183,6 @@ mod tests {
     fn minimal_toml() -> &'static str {
         r#"
 jwt_secret = "0123456789abcdef0123456789abcdef"
-device_auth_secret = "device-secret"
 database_url = "sqlite:data/test.db?mode=rwc"
 
 [server]
@@ -253,7 +217,6 @@ upload_dir = "/tmp/rust_admin_config_test"
             config.dog.upload_dir.as_deref(),
             Some("/tmp/rust_admin_config_test")
         );
-        assert_eq!(config.device_auth_secret(), "device-secret");
 
         std::fs::remove_file(&path).ok();
     }
@@ -281,20 +244,6 @@ upload_dir = "/tmp/rust_admin_config_test"
     }
 
     #[test]
-    fn rejects_a_missing_device_auth_secret() {
-        let toml = minimal_toml().replace("device_auth_secret = \"device-secret\"", "");
-        let path = write_temp_config(&toml);
-
-        let error = AppConfig::load(&path).expect_err("missing device secret must be rejected");
-        assert!(
-            error.to_string().contains(DEVICE_AUTH_SECRET_ENV),
-            "got: {error}"
-        );
-
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
     fn missing_file_is_tolerated_but_validation_still_applies() {
         let path = std::env::temp_dir().join("rust_admin_definitely_missing_config.toml");
         std::fs::remove_file(&path).ok();
@@ -310,8 +259,7 @@ upload_dir = "/tmp/rust_admin_config_test"
         // A file that only carries non-secret values: validation must point at
         // the environment variable instead of silently accepting an empty key.
         let toml = minimal_toml()
-            .replace("jwt_secret = \"0123456789abcdef0123456789abcdef\"\n", "")
-            .replace("device_auth_secret = \"device-secret\"\n", "");
+            .replace("jwt_secret = \"0123456789abcdef0123456789abcdef\"\n", "");
         let path = write_temp_config(&toml);
 
         let error = AppConfig::load(&path).expect_err("secrets are mandatory");

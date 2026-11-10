@@ -41,7 +41,6 @@ image = { version = "0.25", default-features = false, features = ["png", "pnm"] 
 
 [dev-dependencies]
 axum-test = "18"
-dog-device-client = { path = "../client" }
 tower = { version = "0.5", features = ["util"] }
 
 [lib]
@@ -125,18 +124,6 @@ path = "tests/system/sys_log/sys_log_service_tests.rs"
 [[test]]
 name = "logging_middleware_tests"
 path = "tests/logging/logging_middleware_tests.rs"
-
-[[test]]
-name = "dog_gateway_tests"
-path = "tests/business/dog_gateway_tests.rs"
-
-[[test]]
-name = "dog_data_scope_tests"
-path = "tests/business/dog_data_scope_tests.rs"
-
-[[test]]
-name = "dog_workflow_tests"
-path = "tests/business/dog_workflow_tests.rs"
 
 [[test]]
 name = "dog_statistics_tests"

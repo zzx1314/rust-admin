@@ -1,13 +1,9 @@
 use crate::business::dog::command::repository::SeaOrmDogCommandRepository;
-use crate::business::dog::device::repository::SeaOrmDogDeviceRepository;
 use crate::business::dog::media::repository::SeaOrmDogMediaRepository;
 use crate::business::dog::model::repository::SeaOrmDogModelRepository;
-use crate::business::dog::route_library::repository::SeaOrmDogRouteLibraryRepository;
-use crate::business::dog::task::repository::SeaOrmDogTaskRepository;
-use crate::common::data_scope::DataScope;
+use crate::business::dog::services::repository::SeaOrmDogServicesRepository;
 use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, TimeZone, Utc};
 use serde::Serialize;
-use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Clone)]
 pub struct StatisticsSummary {
@@ -22,10 +18,10 @@ pub struct StatisticsSummary {
 
 #[derive(Debug, Serialize)]
 pub struct WeeklyStatistics {
-    pub device_count: Vec<i64>,
     pub model_count: Vec<i64>,
-    pub route_count: Vec<i64>,
-    pub task_count: Vec<i64>,
+    pub media_count: Vec<i64>,
+    pub command_count: Vec<i64>,
+    pub services_count: Vec<i64>,
 }
 
 /// Per-weekday creation counts for the previous and the current week.
@@ -112,31 +108,24 @@ fn growth_percent(current: i64, previous: i64) -> String {
 }
 
 pub struct DogStatisticsService {
-    device_repo: SeaOrmDogDeviceRepository,
-    task_repo: SeaOrmDogTaskRepository,
     model_repo: SeaOrmDogModelRepository,
-    route_repo: SeaOrmDogRouteLibraryRepository,
-    _media_repo: SeaOrmDogMediaRepository,
-    _command_repo: SeaOrmDogCommandRepository,
+    media_repo: SeaOrmDogMediaRepository,
+    command_repo: SeaOrmDogCommandRepository,
+    services_repo: SeaOrmDogServicesRepository,
 }
 
 impl DogStatisticsService {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        device_repo: SeaOrmDogDeviceRepository,
-        task_repo: SeaOrmDogTaskRepository,
         model_repo: SeaOrmDogModelRepository,
-        route_repo: SeaOrmDogRouteLibraryRepository,
         media_repo: SeaOrmDogMediaRepository,
         command_repo: SeaOrmDogCommandRepository,
+        services_repo: SeaOrmDogServicesRepository,
     ) -> Self {
         Self {
-            device_repo,
-            task_repo,
             model_repo,
-            route_repo,
-            _media_repo: media_repo,
-            _command_repo: command_repo,
+            media_repo,
+            command_repo,
+            services_repo,
         }
     }
 
@@ -165,50 +154,51 @@ impl DogStatisticsService {
         }
     }
 
-    pub async fn get_all_statistics(
-        &self,
-        scope: &DataScope,
-    ) -> Result<Vec<StatisticsSummary>, sea_orm::DbErr> {
+    pub async fn get_all_statistics(&self) -> Result<Vec<StatisticsSummary>, sea_orm::DbErr> {
         let (current_start, previous_start) = Self::week_anchors();
         let since = start_of_beijing_day(previous_start);
 
-        let device_count = self.device_repo.count(scope).await?;
-        let task_count = self.task_repo.count(scope).await?;
         let model_count = self.model_repo.count().await?;
-        let route_count = self.route_repo.count().await?;
+        let media_count = self.media_repo.count().await?;
+        let command_count = self.command_repo.count().await?;
+        let services_count = self.services_repo.count().await?;
 
-        let devices = DailyCounts::from_times(
-            &self
-                .device_repo
-                .find_create_times_since(since, scope)
-                .await?,
-            current_start,
-        );
-        let tasks = DailyCounts::from_times(
-            &self.task_repo.find_create_times_since(since, scope).await?,
-            current_start,
-        );
         let models = DailyCounts::from_times(
             &self.model_repo.find_create_times_since(since).await?,
             current_start,
         );
-        let routes = DailyCounts::from_times(
-            &self.route_repo.find_create_times_since(since).await?,
+        let media = DailyCounts::from_times(
+            &self.media_repo.find_create_times_since(since).await?,
+            current_start,
+        );
+        let commands = DailyCounts::from_times(
+            &self.command_repo.find_create_times_since(since).await?,
+            current_start,
+        );
+        let services = DailyCounts::from_times(
+            &self.services_repo.find_create_times_since(since).await?,
             current_start,
         );
 
         Ok(vec![
-            Self::summary(
-                "设备数量",
-                device_count,
-                devices,
-                "#effaff",
-                "#41b6ff",
-                2200,
-            ),
-            Self::summary("任务数量", task_count, tasks, "#fff5f4", "#e85f33", 1600),
             Self::summary("模型数量", model_count, models, "#eff8f4", "#26ce83", 1500),
-            Self::summary("路线数量", route_count, routes, "#f6f4fe", "#7846e5", 100),
+            Self::summary("媒体数量", media_count, media, "#effaff", "#41b6ff", 2000),
+            Self::summary(
+                "指令数量",
+                command_count,
+                commands,
+                "#fff5f4",
+                "#e85f33",
+                1600,
+            ),
+            Self::summary(
+                "服务数量",
+                services_count,
+                services,
+                "#f6f4fe",
+                "#7846e5",
+                100,
+            ),
         ])
     }
 
@@ -216,72 +206,37 @@ impl DogStatisticsService {
     pub async fn get_weekly_statistics(&self) -> Result<Vec<WeeklyStatistics>, sea_orm::DbErr> {
         let (current_start, previous_start) = Self::week_anchors();
         let since = start_of_beijing_day(previous_start);
-        // The weekly chart is a global overview, so no user scope is applied.
-        let global_scope = DataScope::new(0, true);
 
-        let devices = DailyCounts::from_times(
-            &self
-                .device_repo
-                .find_create_times_since(since, &global_scope)
-                .await?,
-            current_start,
-        );
-        let tasks = DailyCounts::from_times(
-            &self
-                .task_repo
-                .find_create_times_since(since, &global_scope)
-                .await?,
-            current_start,
-        );
         let models = DailyCounts::from_times(
             &self.model_repo.find_create_times_since(since).await?,
             current_start,
         );
-        let routes = DailyCounts::from_times(
-            &self.route_repo.find_create_times_since(since).await?,
+        let media = DailyCounts::from_times(
+            &self.media_repo.find_create_times_since(since).await?,
+            current_start,
+        );
+        let commands = DailyCounts::from_times(
+            &self.command_repo.find_create_times_since(since).await?,
+            current_start,
+        );
+        let services = DailyCounts::from_times(
+            &self.services_repo.find_create_times_since(since).await?,
             current_start,
         );
 
         Ok(vec![
             WeeklyStatistics {
-                device_count: devices.previous_week(),
                 model_count: models.previous_week(),
-                route_count: routes.previous_week(),
-                task_count: tasks.previous_week(),
+                media_count: media.previous_week(),
+                command_count: commands.previous_week(),
+                services_count: services.previous_week(),
             },
             WeeklyStatistics {
-                device_count: devices.current_week(),
                 model_count: models.current_week(),
-                route_count: routes.current_week(),
-                task_count: tasks.current_week(),
+                media_count: media.current_week(),
+                command_count: commands.current_week(),
+                services_count: services.current_week(),
             },
         ])
-    }
-
-    /// Device counts grouped by `device_type` (largest group first).
-    pub async fn get_device_type_statistics(
-        &self,
-        scope: &DataScope,
-    ) -> Result<serde_json::Value, sea_orm::DbErr> {
-        let devices = self.device_repo.find_all(scope).await?;
-
-        let mut counts: HashMap<String, i64> = HashMap::new();
-        for device in devices {
-            let device_type = device
-                .device_type
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| "未知".to_string());
-            *counts.entry(device_type).or_insert(0) += 1;
-        }
-
-        let mut grouped: Vec<(String, i64)> = counts.into_iter().collect();
-        grouped.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-
-        let (xdata, ydata): (Vec<String>, Vec<i64>) = grouped.into_iter().unzip();
-
-        Ok(serde_json::json!({
-            "xdata": xdata,
-            "ydata": ydata
-        }))
     }
 }

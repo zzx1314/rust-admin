@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 pub type DogMap = MapModel;
 
 /// 地图版本状态：草稿 → 部分标定 / 已发布 → 已归档。
-/// 只有「已发布」「部分标定」的版本才能被园区引用、被路线冻结。
 pub const MAP_STATUS_DRAFT: &str = "草稿";
 pub const MAP_STATUS_PUBLISHED: &str = "已发布";
 pub const MAP_STATUS_PARTIAL: &str = "部分标定";
@@ -31,7 +30,6 @@ pub struct CreateMapRequest {
     pub map_name: String,
     pub map_type: Option<String>,
     pub map_data: Option<String>,
-    pub park_id: Option<i64>,
     pub file_name: Option<String>,
     pub file_path: Option<String>,
     pub file_format: Option<String>,
@@ -60,7 +58,6 @@ pub struct UploadMapRequest {
     pub id: Option<i64>,
     pub map_name: String,
     pub map_type: Option<String>,
-    pub park_id: Option<i64>,
     pub remarks: Option<String>,
     pub map_version: Option<String>,
     pub frame_id: Option<String>,
@@ -82,7 +79,6 @@ pub struct UpdateMapRequest {
     pub map_name: Option<String>,
     pub map_type: Option<String>,
     pub map_data: Option<String>,
-    pub park_id: Option<i64>,
     pub file_name: Option<String>,
     pub file_path: Option<String>,
     pub file_format: Option<String>,
@@ -107,10 +103,7 @@ pub struct UpdateMapRequest {
 pub struct MapPageQuery {
     pub map_name: Option<String>,
     pub file_name: Option<String>,
-    pub park_id: Option<i64>,
     pub map_status: Option<String>,
-    /// 园区页 / 路线表单使用：只返回可被引用的版本（不含已归档）。
-    pub publishable_only: Option<bool>,
     pub begin_time: Option<String>,
     pub end_time: Option<String>,
     #[serde(default = "default_current")]
@@ -126,9 +119,6 @@ pub struct MapVO {
     pub map_name: String,
     pub map_type: Option<String>,
     pub map_data: Option<String>,
-    pub park_id: Option<i64>,
-    /// 所属园区名称，列表接口按 `park_id` 关联 `dog_park` 填充。
-    pub park_name: Option<String>,
     pub user_id: i64,
     pub file_name: Option<String>,
     pub file_path: Option<String>,
@@ -152,28 +142,7 @@ pub struct MapVO {
     pub update_time: Option<String>,
 }
 
-/// 地图基线的引用情况：哪些路线冻结了该版本、这些路线被多少任务引用。
-#[derive(Debug, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct MapRefsVO {
-    pub map_id: i64,
-    pub routes: Vec<MapRouteRefVO>,
-    pub task_count: i64,
-}
-
-#[derive(Debug, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct MapRouteRefVO {
-    pub id: i64,
-    pub route_name: String,
-    pub route_status: Option<String>,
-    pub route_version: Option<String>,
-    pub waypoint_count: usize,
-    /// 新版本发布后仍冻结在旧版本，需人工确认迁移。
-    pub frozen: bool,
-}
-
-/// 地图包解析结果：用于路线规划页展示栅格地图
+/// 地图包解析结果：用于前端展示栅格地图
 ///
 /// 地图包与参考实现保持一致：`.zip` 内为 ROS map_server 格式的
 /// `model.pgm` + `model.yaml`。这里把 `pgm` 转成 `png` 并返回 base64，
@@ -189,27 +158,6 @@ pub struct MapImageVO {
     pub height: u32,
 }
 
-impl DogMap {
-    /// 下发给设备的地图基线快照；没有 `map_hash` 时返回 `None`（禁止下发）。
-    pub fn dispatch_payload(&self) -> Option<serde_json::Value> {
-        let map_hash = self
-            .map_hash
-            .as_deref()
-            .map(str::trim)
-            .filter(|hash| !hash.is_empty())?;
-        Some(serde_json::json!({
-            "mapId": self.id,
-            "mapVersion": self.map_version,
-            "mapHash": map_hash,
-            "frameId": self.frame_id,
-            "resolution": self.resolution,
-            "origin": self.map_origin,
-            "width": self.map_width,
-            "height": self.map_height,
-        }))
-    }
-}
-
 impl From<DogMap> for MapVO {
     fn from(m: DogMap) -> Self {
         Self {
@@ -217,8 +165,6 @@ impl From<DogMap> for MapVO {
             map_name: m.map_name,
             map_type: m.map_type,
             map_data: m.map_data,
-            park_id: m.park_id,
-            park_name: None,
             user_id: m.user_id,
             file_name: m.file_name,
             file_path: m.file_path,
@@ -251,7 +197,6 @@ impl CreateMapRequest {
             map_name: ActiveValue::set(self.map_name.clone()),
             map_type: ActiveValue::set(self.map_type.clone()),
             map_data: ActiveValue::set(self.map_data.clone()),
-            park_id: ActiveValue::set(self.park_id),
             user_id: ActiveValue::set(user_id),
             create_time: ActiveValue::set(now),
             update_time: ActiveValue::set(Some(now)),

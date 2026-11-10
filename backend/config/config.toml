@@ -1,14 +1,12 @@
 # Local development configuration.
 #
-# This file is checked in and MUST NOT contain secrets. `jwt_secret`,
-# `device_auth_secret` and the Redis password are injected through environment
-# variables (see `config/config.toml.example` and `src/config/mod.rs`).
+# This file is checked in and MUST NOT contain secrets. `jwt_secret` and the
+# Redis password are injected through environment variables (see
+# `config/config.toml.example` and `src/config/mod.rs`).
 #
-# The server refuses to start without APP_JWT_SECRET and
-# APP_DEVICE_AUTH_SECRET. Quick local setup:
+# The server refuses to start without APP_JWT_SECRET. Quick local setup:
 #
 #   export APP_JWT_SECRET="$(openssl rand -hex 32)"
-#   export APP_DEVICE_AUTH_SECRET="$(openssl rand -hex 32)"
 
 database_url = "sqlite:data/users.db?mode=rwc"
 
@@ -21,5 +19,5 @@ host = "localhost"
 port = 6379
 
 [dog]
-# 设备通过 /api/notice WebSocket 上传的文件存放目录
+# 地图包上传目录（<upload_dir>/maps）
 upload_dir = "data/device_uploads"

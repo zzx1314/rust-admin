@@ -368,8 +368,10 @@ mod tests {
                 "add_map_file_fields",
                 "reorder_menus",
                 "add_route_park",
+                "remove_retired_dog_menus",
                 "add_map_baseline",
                 "add_map_dimensions",
+                "drop_retired_dog_tables",
             ]
         );
         assert_eq!(migrations[0].name(), "p_sys_tables_from_file");
@@ -383,14 +385,7 @@ mod tests {
             .await
             .unwrap();
 
-        for table in [
-            "p_sys_user",
-            "p_sys_logrecord",
-            "dog_device",
-            "dog_park",
-            "dog_map",
-            "dog_user_device",
-        ] {
+        for table in ["p_sys_user", "p_sys_logrecord", "dog_map"] {
             let statement = Statement::from_string(
                 DbBackend::Sqlite,
                 format!(
@@ -401,222 +396,103 @@ mod tests {
             assert!(connection.query_one(statement).await.unwrap().is_some());
         }
 
+        for table in [
+            "dog_device",
+            "dog_park",
+            "dog_task",
+            "dog_route_library",
+            "dog_user_device",
+            "dog_workflow",
+        ] {
+            let statement = Statement::from_string(
+                DbBackend::Sqlite,
+                format!(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '{}'",
+                    table
+                ),
+            );
+            assert!(
+                connection.query_one(statement).await.unwrap().is_none(),
+                "{} must be dropped by the cleanup migration",
+                table
+            );
+        }
+
         let is_edit = Statement::from_string(
             DbBackend::Sqlite,
             "SELECT 1 FROM pragma_table_info('p_sys_user') WHERE name = 'is_edit'",
         );
         assert!(connection.query_one(is_edit).await.unwrap().is_some());
 
-        let task_user_id = Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT 1 FROM pragma_table_info('dog_task') WHERE name = 'user_id'",
-        );
-        assert!(connection.query_one(task_user_id).await.unwrap().is_some());
-
-        let route_park_id = Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT 1 FROM pragma_table_info('dog_route_library') WHERE name = 'park_id'",
-        );
-        assert!(connection.query_one(route_park_id).await.unwrap().is_some());
-
-        for (table, column) in [
-            ("dog_map", "map_status"),
-            ("dog_map", "map_width"),
-            ("dog_park", "map_id"),
-            ("dog_route_library", "map_version"),
-        ] {
+        for column in ["map_status", "map_width", "map_height", "map_hash"] {
             let statement = Statement::from_string(
                 DbBackend::Sqlite,
                 format!(
-                    "SELECT 1 FROM pragma_table_info('{}') WHERE name = '{}'",
-                    table, column
+                    "SELECT 1 FROM pragma_table_info('dog_map') WHERE name = '{}'",
+                    column
                 ),
             );
             assert!(
                 connection.query_one(statement).await.unwrap().is_some(),
-                "{}.{} must be added by the map baseline migration",
-                table,
+                "dog_map.{} must exist",
                 column
             );
         }
 
-        // The dog / park pages must be first-level menus (no 1200 / 1300
-        // directories any more), linked to the admin role, and the dangling
-        // Harbor menus must be soft-deleted.
-        let dog_menu = Statement::from_string(
+        // 园区归属已移除：dog_map 不再有 park_id。
+        let map_park_id = Statement::from_string(
             DbBackend::Sqlite,
-            "SELECT 1 FROM p_sys_menu WHERE id = 1201 AND is_deleted = 0 AND parent_id = -1",
-        );
-        assert!(connection.query_one(dog_menu).await.unwrap().is_some());
-
-        let retired_dog_directory = Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT 1 FROM p_sys_menu WHERE id = 1200 AND is_deleted = 1",
+            "SELECT 1 FROM pragma_table_info('dog_map') WHERE name = 'park_id'",
         );
         assert!(
-            connection
-                .query_one(retired_dog_directory)
-                .await
-                .unwrap()
-                .is_some()
+            connection.query_one(map_park_id).await.unwrap().is_none(),
+            "dog_map.park_id must be dropped"
         );
 
-        let dog_menu_role = Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT 1 FROM p_sys_role_menu WHERE role_id = 1 AND menu_id = 1201",
-        );
-        assert!(connection.query_one(dog_menu_role).await.unwrap().is_some());
+        // 保留的页面仍是一级菜单：地图管理 sort 2，模型管理 sort 3。
+        for (id, sort) in [(1302, 2), (1204, 3), (1205, 4), (1206, 5), (1207, 6), (1208, 7)] {
+            let statement = Statement::from_string(
+                DbBackend::Sqlite,
+                format!(
+                    "SELECT 1 FROM p_sys_menu WHERE id = {} AND is_deleted = 0 AND parent_id = -1 AND sort = {}",
+                    id, sort
+                ),
+            );
+            assert!(
+                connection.query_one(statement).await.unwrap().is_some(),
+                "menu {} must stay enabled at sort {}",
+                id,
+                sort
+            );
+        }
 
-        let park_menu = Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT 1 FROM p_sys_menu WHERE id = 1301 AND is_deleted = 0 AND parent_id = -1",
-        );
-        assert!(connection.query_one(park_menu).await.unwrap().is_some());
+        // 园区 / 设备 / 路线 / 任务 / 工作流 / 设备绑定菜单已物理删除。
+        for id in [1200, 1201, 1202, 1203, 1209, 1210, 1211, 1212, 1213, 1219, 1220, 1300, 1301, 1311] {
+            let statement = Statement::from_string(
+                DbBackend::Sqlite,
+                format!("SELECT 1 FROM p_sys_menu WHERE id = {}", id),
+            );
+            assert!(
+                connection.query_one(statement).await.unwrap().is_none(),
+                "menu {} must be hard-deleted",
+                id
+            );
+        }
 
-        let retired_park_directory = Statement::from_string(
+        let retired_grants = Statement::from_string(
             DbBackend::Sqlite,
-            "SELECT 1 FROM p_sys_menu WHERE id = 1300 AND is_deleted = 1",
+            "SELECT 1 FROM p_sys_role_menu WHERE menu_id IN (1201, 1301)",
         );
         assert!(
-            connection
-                .query_one(retired_park_directory)
-                .await
-                .unwrap()
-                .is_some()
+            connection.query_one(retired_grants).await.unwrap().is_none(),
+            "retired menu grants must be removed"
         );
 
-        let park_menu_role = Statement::from_string(
+        let kept_grant = Statement::from_string(
             DbBackend::Sqlite,
             "SELECT 1 FROM p_sys_role_menu WHERE role_id = 1 AND menu_id = 1302",
         );
-        assert!(
-            connection
-                .query_one(park_menu_role)
-                .await
-                .unwrap()
-                .is_some()
-        );
-
-        // 设备绑定 is no longer a standalone page: binding happens on the
-        // device list, so the menu entry and its query button are retired.
-        let binding_menu = Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT 1 FROM p_sys_menu WHERE id = 1210 AND is_deleted = 1",
-        );
-        assert!(connection.query_one(binding_menu).await.unwrap().is_some());
-
-        let binding_permission = Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT 1 FROM p_sys_role_menu WHERE role_id = 1 AND menu_id = 1220",
-        );
-        assert!(
-            connection
-                .query_one(binding_permission)
-                .await
-                .unwrap()
-                .is_none()
-        );
-
-        // Maps are uploaded packages: the file metadata columns must exist and
-        // `park_id` must be nullable.
-        let map_file_column = Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT 1 FROM pragma_table_info('dog_map') WHERE name = 'file_path'",
-        );
-        assert!(
-            connection
-                .query_one(map_file_column)
-                .await
-                .unwrap()
-                .is_some()
-        );
-        let map_park_not_null = Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT 1 FROM pragma_table_info('dog_map') WHERE name = 'park_id' AND \"notnull\" = 0",
-        );
-        assert!(
-            connection
-                .query_one(map_park_not_null)
-                .await
-                .unwrap()
-                .is_some()
-        );
-
-        // 园区列表 sits just below 系统管理 (sort 2), 地图管理 at sort 3,
-        // 设备列表 at sort 4, 路线管理 at sort 5, 任务管理 at sort 6.
-        let park_menu_sort = Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT 1 FROM p_sys_menu WHERE id = 1301 AND is_deleted = 0 AND sort = 2",
-        );
-        assert!(
-            connection
-                .query_one(park_menu_sort)
-                .await
-                .unwrap()
-                .is_some()
-        );
-
-        let map_menu_sort = Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT 1 FROM p_sys_menu WHERE id = 1302 AND is_deleted = 0 AND sort = 3",
-        );
-        assert!(connection.query_one(map_menu_sort).await.unwrap().is_some());
-
-        let device_menu_sort = Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT 1 FROM p_sys_menu WHERE id = 1201 AND is_deleted = 0 AND sort = 4",
-        );
-        assert!(
-            connection
-                .query_one(device_menu_sort)
-                .await
-                .unwrap()
-                .is_some()
-        );
-
-        // 路线管理 at sort 5, 任务管理 at sort 6.
-        let route_menu_sort = Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT 1 FROM p_sys_menu WHERE id = 1203 AND is_deleted = 0 AND sort = 5",
-        );
-        assert!(
-            connection
-                .query_one(route_menu_sort)
-                .await
-                .unwrap()
-                .is_some()
-        );
-
-        let task_menu_sort = Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT 1 FROM p_sys_menu WHERE id = 1202 AND is_deleted = 0 AND sort = 6",
-        );
-        assert!(
-            connection
-                .query_one(task_menu_sort)
-                .await
-                .unwrap()
-                .is_some()
-        );
-
-        // The 工作流 page is retired as well (backend endpoints remain).
-        let workflow_menu = Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT 1 FROM p_sys_menu WHERE id = 1209 AND is_deleted = 1",
-        );
-        assert!(connection.query_one(workflow_menu).await.unwrap().is_some());
-
-        let workflow_permission = Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT 1 FROM p_sys_role_menu WHERE role_id = 1 AND menu_id = 1219",
-        );
-        assert!(
-            connection
-                .query_one(workflow_permission)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(connection.query_one(kept_grant).await.unwrap().is_some());
 
         let harbor_menu = Statement::from_string(
             DbBackend::Sqlite,

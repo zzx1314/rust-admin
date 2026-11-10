@@ -10,28 +10,15 @@ use crate::business::dog::command::repository::SeaOrmDogCommandRepository;
 use crate::business::dog::command::service::DogCommandService;
 use crate::business::dog::config::repository::SeaOrmDogConfigRepository;
 use crate::business::dog::config::service::DogConfigService;
-use crate::business::dog::device::repository::SeaOrmDogDeviceRepository;
-use crate::business::dog::device::service::DogDeviceService;
-use crate::business::dog::gateway::DogGateway;
 use crate::business::dog::map::repository::SeaOrmDogMapRepository;
 use crate::business::dog::map::service::DogMapService;
 use crate::business::dog::media::repository::SeaOrmDogMediaRepository;
 use crate::business::dog::media::service::DogMediaService;
 use crate::business::dog::model::repository::SeaOrmDogModelRepository;
 use crate::business::dog::model::service::DogModelService;
-use crate::business::dog::park::repository::SeaOrmDogParkRepository;
-use crate::business::dog::park::service::DogParkService;
-use crate::business::dog::route_library::repository::SeaOrmDogRouteLibraryRepository;
-use crate::business::dog::route_library::service::DogRouteLibraryService;
 use crate::business::dog::services::repository::SeaOrmDogServicesRepository;
 use crate::business::dog::services::service::DogServicesService;
 use crate::business::dog::statistics::service::DogStatisticsService;
-use crate::business::dog::task::repository::SeaOrmDogTaskRepository;
-use crate::business::dog::task::service::DogTaskService;
-use crate::business::dog::user_device::repository::SeaOrmDogUserDeviceRepository;
-use crate::business::dog::user_device::service::DogUserDeviceService;
-use crate::business::dog::workflow::repository::SeaOrmDogWorkflowRepository;
-use crate::business::dog::workflow::service::DogWorkflowService;
 use crate::common::error::AppError;
 use crate::common::traits::{
     MenuRepository, OrgRepository, RoleRepository, SysDictItemRepository, SysDictRepository,
@@ -120,12 +107,7 @@ impl App {
             Some(configured) if !configured.is_empty() => PathBuf::from(configured),
             _ => self.upload_dir.clone(),
         };
-        self.build_state_full(
-            token_store,
-            &config.jwt_secret,
-            upload_dir,
-            Some(config.device_auth_secret.clone()),
-        )
+        self.build_state_full(token_store, &config.jwt_secret, upload_dir)
     }
 
     /// Build the application state with an explicit token store so that tests
@@ -135,32 +117,7 @@ impl App {
         token_store: Arc<dyn TokenStore>,
         jwt_secret: &str,
     ) -> AppState {
-        self.build_state_with(token_store, jwt_secret, self.upload_dir.clone())
-    }
-
-    /// Same as [`App::build_state_with_token_store`], also pinning the device
-    /// gateway shared secret so tests can sign device requests.
-    pub fn build_state_with_device_auth_secret(
-        &self,
-        token_store: Arc<dyn TokenStore>,
-        jwt_secret: &str,
-        device_auth_secret: impl Into<String>,
-    ) -> AppState {
-        self.build_state_full(
-            token_store,
-            jwt_secret,
-            self.upload_dir.clone(),
-            Some(device_auth_secret.into()),
-        )
-    }
-
-    fn build_state_with(
-        &self,
-        token_store: Arc<dyn TokenStore>,
-        jwt_secret: &str,
-        upload_dir: PathBuf,
-    ) -> AppState {
-        self.build_state_full(token_store, jwt_secret, upload_dir, None)
+        self.build_state_full(token_store, jwt_secret, self.upload_dir.clone())
     }
 
     fn build_state_full(
@@ -168,7 +125,6 @@ impl App {
         token_store: Arc<dyn TokenStore>,
         jwt_secret: &str,
         upload_dir: PathBuf,
-        device_auth_secret: Option<String>,
     ) -> AppState {
         let conn = Arc::new(self.conn.clone());
 
@@ -213,45 +169,10 @@ impl App {
             Arc::new(SeaOrmSysLogRepository::new(conn.clone()));
         let sys_log_service = Arc::new(SysLogService::new(sys_log_repo));
 
-        let dog_device_repo = SeaOrmDogDeviceRepository::new(conn.clone());
-        let dog_device_service = Arc::new(DogDeviceService::new(dog_device_repo.clone()));
-
-        let dog_user_device_repo = SeaOrmDogUserDeviceRepository::new(conn.clone());
-        let dog_user_device_service = Arc::new(DogUserDeviceService::new(
-            dog_user_device_repo,
-            dog_device_repo.clone(),
-        ));
-
-        let dog_park_repo = SeaOrmDogParkRepository::new(conn.clone());
-        let dog_park_service = Arc::new(DogParkService::new(dog_park_repo.clone()));
-
         let dog_map_repo = SeaOrmDogMapRepository::new(conn.clone());
+        let dog_map_service = Arc::new(DogMapService::new(dog_map_repo));
 
-        let dog_task_repo = SeaOrmDogTaskRepository::new(conn.clone());
-        let dog_workflow_repo = SeaOrmDogWorkflowRepository::new(conn.clone());
         let dog_command_repo = SeaOrmDogCommandRepository::new(conn.clone());
-        let dog_route_repo = SeaOrmDogRouteLibraryRepository::new(conn.clone());
-        let device_auth_secret =
-            device_auth_secret.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let dog_gateway = Arc::new(DogGateway::with_device_auth_secret(
-            conn.clone(),
-            upload_dir,
-            device_auth_secret,
-        ));
-        let dog_task_service = Arc::new(DogTaskService::new(
-            dog_task_repo.clone(),
-            dog_device_repo.clone(),
-            dog_workflow_repo.clone(),
-            dog_command_repo.clone(),
-            dog_route_repo.clone(),
-            dog_map_repo.clone(),
-            dog_gateway.clone(),
-        ));
-
-        let dog_map_service = Arc::new(DogMapService::new(
-            dog_map_repo.clone(),
-            dog_park_repo.clone(),
-        ));
 
         let dog_media_repo = SeaOrmDogMediaRepository::new(conn.clone());
         let dog_media_service = Arc::new(DogMediaService::new(dog_media_repo.clone()));
@@ -264,24 +185,14 @@ impl App {
 
         let dog_command_service = Arc::new(DogCommandService::new(dog_command_repo.clone()));
 
-        let dog_route_library_service = Arc::new(DogRouteLibraryService::new(
-            dog_route_repo.clone(),
-            dog_map_repo.clone(),
-            dog_park_repo.clone(),
-        ));
-
-        let dog_workflow_service = Arc::new(DogWorkflowService::new(dog_workflow_repo));
-
         let dog_services_repo = SeaOrmDogServicesRepository::new(conn.clone());
-        let dog_services_service = Arc::new(DogServicesService::new(dog_services_repo));
+        let dog_services_service = Arc::new(DogServicesService::new(dog_services_repo.clone()));
 
         let dog_statistics_service = Arc::new(DogStatisticsService::new(
-            dog_device_repo,
-            dog_task_repo,
             dog_model_repo,
-            dog_route_repo,
             dog_media_repo,
             dog_command_repo,
+            dog_services_repo,
         ));
 
         AppState {
@@ -294,20 +205,14 @@ impl App {
             sys_dict_service,
             sys_dict_item_service,
             sys_log_service,
-            dog_device_service,
-            dog_user_device_service,
-            dog_task_service,
-            dog_park_service,
             dog_map_service,
             dog_media_service,
             dog_model_service,
             dog_config_service,
             dog_command_service,
-            dog_route_library_service,
-            dog_workflow_service,
             dog_services_service,
             dog_statistics_service,
-            dog_gateway,
+            upload_dir,
         }
     }
 
@@ -368,10 +273,8 @@ mod tests {
             },
             jwt_secret: "test-secret".to_string(),
             database_url: "sqlite::memory:".to_string(),
-            device_auth_secret: "test-device-secret".to_string(),
             dog: DogConfig {
                 upload_dir: upload_dir.map(str::to_string),
-                device_auth_secret: None,
             },
         }
     }
@@ -388,7 +291,7 @@ mod tests {
         );
 
         assert_eq!(
-            state.dog_gateway.upload_root(),
+            state.upload_dir,
             std::path::Path::new("/tmp/rust_admin_explicit_uploads")
         );
     }
@@ -400,7 +303,7 @@ mod tests {
         let state = app.build_state(&config_with(Some("/tmp/rust_admin_configured")));
 
         assert_eq!(
-            state.dog_gateway.upload_root(),
+            state.upload_dir,
             std::path::Path::new("/tmp/rust_admin_configured")
         );
     }
@@ -412,7 +315,7 @@ mod tests {
         let state = app.build_state(&config_with(None));
 
         assert_eq!(
-            state.dog_gateway.upload_root(),
+            state.upload_dir,
             std::path::Path::new(DEFAULT_UPLOAD_DIR)
         );
     }

@@ -1,14 +1,7 @@
 pub mod command;
 pub mod config;
-pub mod device;
-pub mod gateway;
 pub mod map;
 pub mod media;
 pub mod model;
-pub mod park;
-pub mod route_library;
 pub mod services;
 pub mod statistics;
-pub mod task;
-pub mod user_device;
-pub mod workflow;

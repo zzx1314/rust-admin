@@ -13,8 +13,6 @@ pub struct Model {
     pub map_type: Option<String>,
     #[sea_orm(column_name = "map_data", column_type = "Text", nullable)]
     pub map_data: Option<String>,
-    #[sea_orm(column_name = "park_id", column_type = "Integer", nullable)]
-    pub park_id: Option<i64>,
     #[sea_orm(column_name = "user_id", column_type = "Integer")]
     pub user_id: i64,
     #[sea_orm(column_name = "create_time", column_type = "Timestamp")]

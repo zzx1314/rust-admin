@@ -1,8 +1,7 @@
 use crate::api::AppState;
 use crate::api::middleware::RequestUser;
 use crate::business::dog::map::domain::{
-    CreateMapRequest, MapImageVO, MapPageQuery, MapRefsVO, MapVO, UpdateMapRequest,
-    UploadMapRequest,
+    CreateMapRequest, MapImageVO, MapPageQuery, MapVO, UpdateMapRequest, UploadMapRequest,
 };
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
@@ -16,17 +15,6 @@ pub struct IdParam {
     pub id: i64,
 }
 
-#[derive(serde::Deserialize)]
-pub struct ParkIdParam {
-    pub park_id: i64,
-}
-
-#[derive(serde::Deserialize)]
-pub struct ParkBaselineQuery {
-    /// 只返回可被引用的版本（不含草稿 / 已归档），路线表单使用。
-    pub publishable_only: Option<bool>,
-}
-
 pub async fn create_map_handler(
     State(state): State<AppState>,
     Extension(user): Extension<RequestUser>,
@@ -34,7 +22,7 @@ pub async fn create_map_handler(
 ) -> Result<Json<ApiResponse<MapVO>>, AppError> {
     let scope = user.data_scope();
     let map = state.dog_map_service.create(req, &scope).await?;
-    let vo = state.dog_map_service.to_vo(map, &scope).await?;
+    let vo = state.dog_map_service.to_vo(map);
     Ok(Json(ApiResponse::ok(vo)))
 }
 
@@ -90,11 +78,11 @@ pub async fn upload_map_handler(
             info,
             &file_name,
             &bytes,
-            state.dog_gateway.upload_root(),
+            &state.upload_dir,
             &scope,
         )
         .await?;
-    let vo = state.dog_map_service.to_vo(map, &scope).await?;
+    let vo = state.dog_map_service.to_vo(map);
 
     Ok(Json(ApiResponse::ok(vo)))
 }
@@ -106,7 +94,7 @@ pub async fn get_map_handler(
 ) -> Result<Json<ApiResponse<MapVO>>, AppError> {
     let scope = user.data_scope();
     let map = state.dog_map_service.get_by_id(params.id, &scope).await?;
-    let vo = state.dog_map_service.to_vo(map, &scope).await?;
+    let vo = state.dog_map_service.to_vo(map);
     Ok(Json(ApiResponse::ok(vo)))
 }
 
@@ -140,7 +128,7 @@ pub async fn update_map_handler(
 ) -> Result<Json<ApiResponse<MapVO>>, AppError> {
     let scope = user.data_scope();
     let map = state.dog_map_service.update(params.id, req, &scope).await?;
-    let vo = state.dog_map_service.to_vo(map, &scope).await?;
+    let vo = state.dog_map_service.to_vo(map);
     Ok(Json(ApiResponse::ok(vo)))
 }
 
@@ -155,7 +143,7 @@ pub async fn get_map_image_handler(
         .dog_map_service
         .load_image(
             params.id,
-            state.dog_gateway.upload_root(),
+            &state.upload_dir,
             &user.data_scope(),
         )
         .await?;
@@ -174,24 +162,6 @@ pub async fn delete_map_handler(
     Ok(Json(ApiResponse::ok(())))
 }
 
-/// `GET /api/dogMap/byPark/{parkId}` — 园区可用的地图基线版本列表。
-pub async fn list_maps_by_park_handler(
-    State(state): State<AppState>,
-    Extension(user): Extension<RequestUser>,
-    Path(params): Path<ParkIdParam>,
-    Query(query): Query<ParkBaselineQuery>,
-) -> Result<Json<ApiResponse<Vec<MapVO>>>, AppError> {
-    let maps = state
-        .dog_map_service
-        .list_by_park(
-            params.park_id,
-            query.publishable_only.unwrap_or(true),
-            &user.data_scope(),
-        )
-        .await?;
-    Ok(Json(ApiResponse::ok(maps)))
-}
-
 /// `POST /api/dogMap/{id}/publish` — 发布为园区当前生效基线，旧版本自动归档。
 pub async fn publish_map_handler(
     State(state): State<AppState>,
@@ -200,7 +170,7 @@ pub async fn publish_map_handler(
 ) -> Result<Json<ApiResponse<MapVO>>, AppError> {
     let scope = user.data_scope();
     let map = state.dog_map_service.publish(params.id, &scope).await?;
-    let vo = state.dog_map_service.to_vo(map, &scope).await?;
+    let vo = state.dog_map_service.to_vo(map);
     Ok(Json(ApiResponse::ok(vo)))
 }
 
@@ -212,19 +182,6 @@ pub async fn new_map_version_handler(
 ) -> Result<Json<ApiResponse<MapVO>>, AppError> {
     let scope = user.data_scope();
     let map = state.dog_map_service.new_version(params.id, &scope).await?;
-    let vo = state.dog_map_service.to_vo(map, &scope).await?;
+    let vo = state.dog_map_service.to_vo(map);
     Ok(Json(ApiResponse::ok(vo)))
-}
-
-/// `GET /api/dogMap/{id}/refs` — 引用该版本的路线 / 任务清单（影响分析）。
-pub async fn map_refs_handler(
-    State(state): State<AppState>,
-    Extension(user): Extension<RequestUser>,
-    Path(params): Path<IdParam>,
-) -> Result<Json<ApiResponse<MapRefsVO>>, AppError> {
-    let refs = state
-        .dog_map_service
-        .refs(params.id, &user.data_scope())
-        .await?;
-    Ok(Json(ApiResponse::ok(refs)))
 }

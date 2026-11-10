@@ -19,22 +19,6 @@ pub async fn create_command_handler(
     Json(req): Json<CreateCommandRequest>,
 ) -> Result<Json<ApiResponse<CommandVO>>, AppError> {
     let command = state.dog_command_service.create(req).await?;
-
-    // Push the command to the target device when it holds an active gateway
-    // connection; the command status becomes `sent` once delivered.
-    let command = match state.dog_gateway.dispatch_command(&command).await {
-        Ok(Some(updated)) => updated,
-        Ok(None) => command,
-        Err(error) => {
-            tracing::warn!(
-                command_id = command.id,
-                %error,
-                "failed to push command to device"
-            );
-            command
-        }
-    };
-
     Ok(Json(ApiResponse::ok(CommandVO::from(command))))
 }
 

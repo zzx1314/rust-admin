@@ -1,26 +1,24 @@
 //! Dashboard statistics tests.
 //!
-//! The welcome page shows four summary cards, a weekly bar chart and a device
-//! type bar chart. Everything must be derived from real rows: totals come from
-//! the tables, the weekly series buckets `create_time` per weekday (Beijing
-//! time, Monday first) and the percent badge is the week-over-week growth.
+//! The welcome page shows four summary cards (models / media / commands /
+//! services) and a weekly bar chart. Everything must be derived from real
+//! rows: totals come from the tables, the weekly series buckets `create_time`
+//! per weekday (Beijing time, Monday first) and the percent badge is the
+//! week-over-week growth.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use x_rust::api::AppState;
 use x_rust::app::App;
-use x_rust::business::dog::device::domain::CreateDeviceRequest;
+use x_rust::business::dog::command::domain::CreateCommandRequest;
+use x_rust::business::dog::media::domain::CreateMediaRequest;
 use x_rust::business::dog::model::domain::CreateModelRequest;
-use x_rust::business::dog::route_library::domain::CreateRouteRequest;
-use x_rust::business::dog::task::domain::CreateTaskRequest;
-use x_rust::common::data_scope::DataScope;
+use x_rust::business::dog::services::domain::CreateServicesRequest;
 use x_rust::common::error::AppError;
 use x_rust::common::traits::{DynFuture, TokenStore};
 
 const JWT_SECRET: &str = "test-secret";
-const USER_A: i64 = 101;
-const USER_B: i64 = 102;
 
 struct FakeTokenStore {
     store: Arc<Mutex<HashMap<String, String>>>,
@@ -103,34 +101,7 @@ async fn test_state() -> AppState {
     app.build_state_with_token_store(Arc::new(FakeTokenStore::new()), JWT_SECRET)
 }
 
-fn admin_scope() -> DataScope {
-    DataScope::new(1, true)
-}
-
-fn owner_scope(user_id: i64) -> DataScope {
-    DataScope::new(user_id, false)
-}
-
-async fn create_device(state: &AppState, code: &str, device_type: Option<&str>) {
-    state
-        .dog_device_service
-        .create(CreateDeviceRequest {
-            device_id: code.to_string(),
-            device_type: device_type.map(str::to_string),
-            status: None,
-            device_ip: None,
-            model: None,
-            speed: None,
-            height: None,
-            battery: None,
-            course: None,
-            location: None,
-        })
-        .await
-        .expect("device must be created");
-}
-
-async fn create_model(state: &AppState, name: &str) -> i64 {
+async fn create_model(state: &AppState, name: &str) {
     state
         .dog_model_service
         .create(CreateModelRequest {
@@ -143,44 +114,48 @@ async fn create_model(state: &AppState, name: &str) -> i64 {
             remarks: None,
         })
         .await
-        .expect("model must be created")
-        .id
+        .expect("model must be created");
 }
 
-async fn create_route(state: &AppState, name: &str, model_id: i64) {
+async fn create_media(state: &AppState, name: &str) {
     state
-        .dog_route_library_service
-        .create(CreateRouteRequest {
-            route_name: name.to_string(),
-            route_type: None,
-            route_status: None,
-            route_description: None,
-            park_id: None,
-            map_id: None,
-            model_id,
-            route_data: None,
+        .dog_media_service
+        .create(CreateMediaRequest {
+            media_name: name.to_string(),
+            media_type: None,
+            media_path: None,
+            media_size: None,
+            remarks: None,
         })
         .await
-        .expect("route must be created");
+        .expect("media must be created");
 }
 
-async fn create_task(state: &AppState, name: &str, scope: &DataScope) {
+async fn create_command(state: &AppState, name: &str) {
     state
-        .dog_task_service
-        .create(
-            CreateTaskRequest {
-                task_name: name.to_string(),
-                task_description: None,
-                task_status: None,
-                workflow_id: None,
-                workflow_uuid: None,
-                device_id: None,
-                route_id: None,
-            },
-            scope,
-        )
+        .dog_command_service
+        .create(CreateCommandRequest {
+            command_name: name.to_string(),
+            command_type: None,
+            command_params: None,
+            device_id: None,
+            status: None,
+            return_value: None,
+            task_id: None,
+        })
         .await
-        .expect("task must be created");
+        .expect("command must be created");
+}
+
+async fn create_services(state: &AppState) {
+    state
+        .dog_services_service
+        .create(CreateServicesRequest {
+            r#type: Some("巡检".to_string()),
+            params: None,
+        })
+        .await
+        .expect("services must be created");
 }
 
 #[tokio::test]
@@ -189,7 +164,7 @@ async fn empty_database_reports_zeroes_instead_of_placeholders() {
 
     let stats = state
         .dog_statistics_service
-        .get_all_statistics(&admin_scope())
+        .get_all_statistics()
         .await
         .unwrap();
 
@@ -211,31 +186,22 @@ async fn empty_database_reports_zeroes_instead_of_placeholders() {
         .await
         .unwrap();
     assert_eq!(weekly.len(), 2, "previous week + current week");
-    assert!(weekly[0].device_count.iter().all(|count| *count == 0));
-    assert!(weekly[1].task_count.iter().all(|count| *count == 0));
-
-    let device_types = state
-        .dog_statistics_service
-        .get_device_type_statistics(&admin_scope())
-        .await
-        .unwrap();
-    assert_eq!(device_types["xdata"], serde_json::json!([]));
-    assert_eq!(device_types["ydata"], serde_json::json!([]));
+    assert!(weekly[0].model_count.iter().all(|count| *count == 0));
+    assert!(weekly[1].command_count.iter().all(|count| *count == 0));
 }
 
 #[tokio::test]
 async fn summary_cards_reflect_stored_rows_and_week_to_date_series() {
     let state = test_state().await;
-    let scope = admin_scope();
 
-    create_device(&state, "C4C6E66E998E", Some("X1")).await;
-    let model_id = create_model(&state, "第一人称模型").await;
-    create_route(&state, "测试路线", model_id).await;
-    create_task(&state, "测试任务", &scope).await;
+    create_model(&state, "第一人称模型").await;
+    create_media(&state, "巡检视频").await;
+    create_command(&state, "前进").await;
+    create_services(&state).await;
 
     let stats = state
         .dog_statistics_service
-        .get_all_statistics(&scope)
+        .get_all_statistics()
         .await
         .unwrap();
 
@@ -246,9 +212,10 @@ async fn summary_cards_reflect_stored_rows_and_week_to_date_series() {
             .unwrap_or_else(|| panic!("{name} card must exist"))
             .value
     };
-    assert_eq!(value_of("设备数量"), 1);
     assert_eq!(value_of("模型数量"), 1);
-    assert_eq!(value_of("路线数量"), 1);
+    assert_eq!(value_of("媒体数量"), 1);
+    assert_eq!(value_of("指令数量"), 1);
+    assert_eq!(value_of("服务数量"), 1);
 
     for summary in &stats {
         assert_eq!(summary.value, 1, "{} counts the stored row", summary.name);
@@ -271,75 +238,14 @@ async fn summary_cards_reflect_stored_rows_and_week_to_date_series() {
         .get_weekly_statistics()
         .await
         .unwrap();
-    assert_eq!(weekly[0].device_count.len(), 7);
-    assert_eq!(weekly[0].device_count.iter().sum::<i64>(), 0);
     for series in [
-        &weekly[1].device_count,
         &weekly[1].model_count,
-        &weekly[1].route_count,
-        &weekly[1].task_count,
+        &weekly[1].media_count,
+        &weekly[1].command_count,
+        &weekly[1].services_count,
     ] {
         assert_eq!(series.len(), 7);
         assert_eq!(series.iter().sum::<i64>(), 1);
     }
-    assert_eq!(weekly[1].device_count, stats[0].data);
-}
-
-#[tokio::test]
-async fn device_type_chart_groups_devices_and_sorts_by_count() {
-    let state = test_state().await;
-
-    create_device(&state, "DEV-1", Some("X1")).await;
-    create_device(&state, "DEV-2", Some("X1")).await;
-    create_device(&state, "DEV-3", Some("X2")).await;
-    create_device(&state, "DEV-4", None).await;
-
-    let data = state
-        .dog_statistics_service
-        .get_device_type_statistics(&admin_scope())
-        .await
-        .unwrap();
-
-    assert_eq!(
-        data["xdata"],
-        serde_json::json!(["X1", "X2", "未知"]),
-        "largest group first, untyped devices grouped as 未知"
-    );
-    assert_eq!(data["ydata"], serde_json::json!([2, 1, 1]));
-}
-
-#[tokio::test]
-async fn task_counts_respect_the_user_data_scope() {
-    let state = test_state().await;
-
-    create_task(&state, "A 的任务", &owner_scope(USER_A)).await;
-    create_task(&state, "B 的任务", &owner_scope(USER_B)).await;
-
-    let task_card = |stats: &[x_rust::business::dog::statistics::service::StatisticsSummary]| {
-        stats
-            .iter()
-            .find(|summary| summary.name == "任务数量")
-            .expect("task card must exist")
-            .clone()
-    };
-
-    let a_stats = state
-        .dog_statistics_service
-        .get_all_statistics(&owner_scope(USER_A))
-        .await
-        .unwrap();
-    let b_stats = state
-        .dog_statistics_service
-        .get_all_statistics(&owner_scope(USER_B))
-        .await
-        .unwrap();
-    let admin_stats = state
-        .dog_statistics_service
-        .get_all_statistics(&admin_scope())
-        .await
-        .unwrap();
-
-    assert_eq!(task_card(&a_stats).value, 1);
-    assert_eq!(task_card(&b_stats).value, 1);
-    assert_eq!(task_card(&admin_stats).value, 2);
+    assert_eq!(weekly[1].model_count, stats[0].data);
 }

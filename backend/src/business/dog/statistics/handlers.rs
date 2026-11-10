@@ -1,7 +1,6 @@
 use crate::api::AppState;
-use crate::api::middleware::RequestUser;
 use crate::common::error::AppError;
-use axum::{Extension, Json, extract::State};
+use axum::{Json, extract::State};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -23,11 +22,10 @@ impl<T: Serialize> StatisticsResponse<T> {
 
 pub async fn statistics_all_handler(
     State(state): State<AppState>,
-    Extension(user): Extension<RequestUser>,
 ) -> Result<Json<StatisticsResponse<Vec<serde_json::Value>>>, AppError> {
     let stats = state
         .dog_statistics_service
-        .get_all_statistics(&user.data_scope())
+        .get_all_statistics()
         .await
         .map_err(AppError::DatabaseError)?;
 
@@ -62,26 +60,13 @@ pub async fn statistics_all_type_handler(
         .into_iter()
         .map(|w| {
             serde_json::json!({
-                "deviceCount": w.device_count,
                 "modelCount": w.model_count,
-                "routeCount": w.route_count,
-                "taskCount": w.task_count,
+                "mediaCount": w.media_count,
+                "commandCount": w.command_count,
+                "servicesCount": w.services_count,
             })
         })
         .collect();
 
     Ok(Json(StatisticsResponse::ok(result)))
-}
-
-pub async fn statistics_device_type_handler(
-    State(state): State<AppState>,
-    Extension(user): Extension<RequestUser>,
-) -> Result<Json<StatisticsResponse<serde_json::Value>>, AppError> {
-    let data = state
-        .dog_statistics_service
-        .get_device_type_statistics(&user.data_scope())
-        .await
-        .map_err(AppError::DatabaseError)?;
-
-    Ok(Json(StatisticsResponse::ok(data)))
 }
