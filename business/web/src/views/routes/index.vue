@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { parkApi, mapApi, routeApi, zoneApi } from "@/api/ops";
@@ -19,8 +19,13 @@ import AppIcon from "@/components/AppIcon.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import RouteBaseMap from "@/components/RouteBaseMap.vue";
 import MapChip from "@/components/MapChip.vue";
-import MapBaselineDialog from "@/components/MapBaselineDialog.vue";
-import MapPolicyDialog from "@/components/MapPolicyDialog.vue";
+
+const MapBaselineDialog = defineAsyncComponent(
+  () => import("@/components/MapBaselineDialog.vue")
+);
+const MapPolicyDialog = defineAsyncComponent(
+  () => import("@/components/MapPolicyDialog.vue")
+);
 import {
   ACTION_LIB,
   AVOID_LEVELS,
@@ -64,6 +69,8 @@ const zones = ref<Zone[]>([]);
 const maps = ref<MapVersion[]>([]);
 const draft = ref<RouteDraft | null>(null);
 const currentId = ref<number | null>(null);
+const showSkeleton = ref(false);
+let skeletonTimer = 0;
 const routeQuery = ref("");
 const mode = ref<"add" | "select">("add");
 const snap = ref(true);
@@ -736,23 +743,44 @@ onMounted(() => {
   if (routeId) currentId.value = routeId;
   const zoneId = Number(vueRoute.query.zoneId);
   load(zoneId || undefined);
+  skeletonTimer = window.setTimeout(() => {
+    if (!draft.value) showSkeleton.value = true;
+  }, 120);
 });
 
-onBeforeUnmount(() => window.clearInterval(simTimer));
+onBeforeUnmount(() => {
+  window.clearInterval(simTimer);
+  window.clearTimeout(skeletonTimer);
+});
 </script>
 
 <template>
-  <div v-if="draft">
+  <div>
     <PageHeader title="巡检路线规划" subtitle="可视化编排航点、行进航段与每一点/段执行的采集动作">
       <template #actions>
-        <button class="btn" :disabled="!draft.mapVersionId" @click="openBaseline(draft.mapVersionId)">
+        <button
+          class="btn"
+          :disabled="!draft?.mapVersionId"
+          @click="draft && openBaseline(draft.mapVersionId)"
+        >
           <AppIcon name="layers" />地图基线
         </button>
-        <button class="btn" @click="validateRoute"><AppIcon name="shield" />校验路线</button>
-        <button class="btn" @click="publishRoute"><AppIcon name="send" />发布路线</button>
+        <button class="btn" :disabled="!draft" @click="validateRoute"><AppIcon name="shield" />校验路线</button>
+        <button class="btn" :disabled="!draft" @click="publishRoute"><AppIcon name="send" />发布路线</button>
         <button class="btn primary" @click="openNewRoute"><AppIcon name="plus" />新建路线</button>
       </template>
     </PageHeader>
+
+    <div v-if="!draft" class="route-skeleton" :class="{ visible: showSkeleton }">
+      <div class="route-skeleton-bar" />
+      <div class="route-skeleton-grid">
+        <div class="route-skeleton-card" style="height: 520px" />
+        <div class="route-skeleton-card" style="height: 640px" />
+        <div class="route-skeleton-card" style="height: 520px" />
+      </div>
+    </div>
+
+    <template v-if="draft">
 
     <div class="route-summary">
       <div class="rs-main">
@@ -1283,6 +1311,7 @@ onBeforeUnmount(() => window.clearInterval(simTimer));
         </div>
       </div>
     </div>
+    </template>
 
     <el-dialog v-model="routeDialog" title="新建巡检路线" width="600px">
       <div class="form-grid">
@@ -1372,9 +1401,9 @@ onBeforeUnmount(() => window.clearInterval(simTimer));
           <label>地图基线（冻结引用）</label>
           <div style="display: flex; align-items: center; gap: 10px; min-height: 34px">
             <MapChip
-              :map-id="draft.mapVersionId"
+              :map-id="draft?.mapVersionId ?? null"
               :status="draftMap?.status"
-              :fallback="draft.mapStatus"
+              :fallback="draft?.mapStatus ?? null"
             />
             <span class="muted" style="font-size: 11px">
               {{ draftMap?.frameId ?? "创建后引用冻结，不随园区当前基线变化" }}
@@ -1487,11 +1516,12 @@ onBeforeUnmount(() => window.clearInterval(simTimer));
     </el-dialog>
 
     <MapBaselineDialog
+      v-if="baselineDialog"
       v-model="baselineDialog"
       :map-id="baselineMapId"
       @updated="onBaselineUpdated"
       @data-source="openPolicy('lineage')"
     />
-    <MapPolicyDialog v-model="policyDialog" :mode="policyMode" />
+    <MapPolicyDialog v-if="policyDialog" v-model="policyDialog" :mode="policyMode" />
   </div>
 </template>

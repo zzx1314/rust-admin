@@ -23,6 +23,7 @@ const deviceTotal = ref(0);
 const onlineDevices = ref(0);
 let clockTimer = 0;
 let pollTimer = 0;
+let warmTimer = 0;
 
 const currentTitle = computed(() => (route.meta.title as string) || "总览驾驶舱");
 const displayName = computed(() => auth.user?.displayName || "管理员");
@@ -75,6 +76,12 @@ function prefetch(path: string) {
         (result as Promise<unknown>).catch(() => undefined);
       }
     }
+  }
+}
+
+function warmNavRoutes() {
+  for (const group of navGroups) {
+    for (const item of group.items) prefetch(item.path);
   }
 }
 
@@ -140,11 +147,13 @@ onMounted(async () => {
   pollTimer = window.setInterval(refreshStatus, 15000);
   document.addEventListener("click", onDocumentClick);
   document.addEventListener("keydown", onKeydown);
+  warmTimer = window.setTimeout(warmNavRoutes, 600);
 });
 
 onBeforeUnmount(() => {
   window.clearInterval(clockTimer);
   window.clearInterval(pollTimer);
+  window.clearTimeout(warmTimer);
   document.removeEventListener("click", onDocumentClick);
   document.removeEventListener("keydown", onKeydown);
 });

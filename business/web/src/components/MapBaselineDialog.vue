@@ -102,7 +102,8 @@ watch(
       view.value = "detail";
       void load();
     }
-  }
+  },
+  { immediate: true }
 );
 
 watch(
