@@ -22,7 +22,8 @@ Monorepo containing a Rust backend API, a Rust device client and a Vue 3 fronten
 ### Backend (Rust)
 ```bash
 cd backend
-cargo run                    # Run API server (port 3000)
+./run.sh                     # Run API server (port 3000); exports the required secrets first
+cargo run                    # Same, but requires APP_JWT_SECRET + APP_DEVICE_AUTH_SECRET to be exported
 cargo test                   # Run all tests
 cargo clippy -- -D warnings # Lint
 ```

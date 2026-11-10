@@ -16,8 +16,18 @@ cargo build --release        # Release 构建 → target/release/x-rust
 ### 运行
 
 ```bash
-cargo run                    # 运行（DATABASE_URL 默认 sqlite:data/users.db）
-RUST_LOG=debug cargo run     # Debug 日志运行
+./run.sh                     # 运行：自动导出 APP_JWT_SECRET / APP_DEVICE_AUTH_SECRET 后 cargo run
+./run.sh --release           # 其余参数透传给 cargo run
+RUST_LOG=debug ./run.sh      # Debug 日志运行
+```
+
+`cargo run` 直接运行会因缺少 `APP_JWT_SECRET` / `APP_DEVICE_AUTH_SECRET` 报
+`Failed to load config`（`config/config.toml` 不存放密钥）。手动导出即可：
+
+```bash
+export APP_JWT_SECRET="$(openssl rand -hex 32)"
+export APP_DEVICE_AUTH_SECRET="local-dev-device-secret-change-me"  # 需与设备端 DOG_AUTH_SECRET 一致
+cargo run
 ```
 
 ### 检查
