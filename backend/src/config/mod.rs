@@ -162,6 +162,17 @@ impl AppConfig {
         {
             self.device_auth_secret = secret;
         }
+
+        // `redis.password` is a nested key, so the environment source only
+        // maps it from `APP_REDIS__PASSWORD`. Honour the documented flat
+        // `APP_REDIS_PASSWORD` name as well, otherwise Redis AUTH is silently
+        // skipped and every login fails with `NOAUTH`.
+        if self.redis.password.is_empty()
+            && let Ok(password) = std::env::var(REDIS_PASSWORD_ENV)
+            && !password.trim().is_empty()
+        {
+            self.redis.password = password;
+        }
     }
 
     fn validate(&mut self) -> Result<(), ConfigError> {
@@ -305,6 +316,21 @@ upload_dir = "/tmp/rust_admin_config_test"
 
         let error = AppConfig::load(&path).expect_err("secrets are mandatory");
         assert!(error.to_string().contains("jwt_secret"), "got: {error}");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn adopts_the_flat_redis_password_env_name() {
+        let path = write_temp_config(minimal_toml());
+
+        // SAFETY: no other test reads this variable.
+        unsafe { std::env::set_var(REDIS_PASSWORD_ENV, "from-env") };
+        let config = AppConfig::load(&path).expect("config must parse");
+        unsafe { std::env::remove_var(REDIS_PASSWORD_ENV) };
+
+        assert_eq!(config.redis.password, "from-env");
+        assert_eq!(config.redis.url(), "redis://:from-env@localhost:6379");
 
         std::fs::remove_file(&path).ok();
     }

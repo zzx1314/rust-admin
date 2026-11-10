@@ -83,6 +83,11 @@ environment variables: `APP_JWT_SECRET` (≥32 bytes) and
 `APP_DEVICE_AUTH_SECRET`. Optional: `APP_REDIS_PASSWORD`, `APP_CONFIG_FILE`.
 Any config key can be overridden with `APP_<SECTION>__<KEY>`.
 
+`backend/run.sh` exports both required secrets (and probes Redis for
+`APP_REDIS_PASSWORD`) before running `cargo run`. Set `APP_REDIS_PASSWORD`
+when Redis enforces `requirepass` (the compose one uses `123456`), otherwise
+login fails with `Redis set failed: NOAUTH: Authentication required`.
+
 ## Important Notes
 
 - **Backend**: SQLite database at `backend/data/users.db`, Redis for session storage

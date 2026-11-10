@@ -30,6 +30,9 @@ export APP_DEVICE_AUTH_SECRET="local-dev-device-secret-change-me"  # 需与设�
 cargo run
 ```
 
+Redis 若启用了 `requirepass`（`docker-compose.yml` 里的是 `123456`），还需 `export APP_REDIS_PASSWORD=123456`，
+否则登录会报 `Redis set failed: NOAUTH: Authentication required`。`./run.sh` 会自动探测并补上。
+
 ### 检查
 
 ```bash
