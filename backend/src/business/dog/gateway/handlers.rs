@@ -11,6 +11,7 @@ use axum::{
 use crate::api::AppState;
 use crate::api::middleware::RequestUser;
 use crate::business::dog::device::domain::DeviceVO;
+use crate::business::dog::gateway::device_auth::DeviceAuthHeaders;
 use crate::business::dog::gateway::domain::{
     AssignDeviceRequest, AssignUserQuery, ConnectionInfo, DEVICE_TOKEN_TTL_SECS,
     DeviceRegistration, DeviceTokenResponse, DisconnectResult, DispatchRequest, DispatchResult,
@@ -22,15 +23,35 @@ use axum::Extension;
 use axum::extract::Query;
 
 /// `GET /api/dogGateway/auth/{deviceId}` — issue a device access token.
+///
+/// The device must prove it holds the shared secret by sending a time-boxed
+/// HMAC signature in `X-Device-Timestamp` / `X-Device-Nonce` /
+/// `X-Device-Signature`. Without valid credentials no token is issued.
 pub async fn device_auth_handler(
     State(state): State<AppState>,
     Path(device_id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<DeviceTokenResponse>>, AppError> {
     if device_id.trim().is_empty() {
         return Err(AppError::BadRequest(
             "deviceId must not be empty".to_string(),
         ));
     }
+
+    let credential = DeviceAuthHeaders::from_headers(&headers).map_err(|error| {
+        tracing::warn!(device_id = %device_id, reason = %error, "device auth credential rejected");
+        AppError::Unauthorized(format!("device credential rejected: {error}"))
+    })?;
+
+    state
+        .dog_gateway
+        .authenticator()
+        .verify(&device_id, &credential)
+        .map_err(|reason| {
+            tracing::warn!(device_id = %device_id, reason = %reason, "device auth denied");
+            AppError::Unauthorized(reason)
+        })?;
+
     let token = state.dog_gateway.issue_token(&device_id).await;
     tracing::info!(device_id = %device_id, "device token issued");
     Ok(Json(ApiResponse::ok(DeviceTokenResponse {

@@ -27,6 +27,10 @@ exponential backoff (configurable, enabled by default).
 
 OPTIONS:
     --server <URL>        Server base url            [env DOG_SERVER, default http://127.0.0.1:3000]
+    --auth-secret <SECRET>
+                          Shared secret used to sign the device token request.
+                          Must match APP_DEVICE_AUTH_SECRET on the server.
+                                                             [env DOG_AUTH_SECRET]
     --device-id <ID>      Override the hardware derived device id [env DOG_DEVICE_ID]
     --device-id-file <PATH>
                           Pin the detected id in this file and reuse it later
@@ -59,6 +63,7 @@ OPTIONS:
 #[derive(Debug, Clone)]
 struct Config {
     server: String,
+    auth_secret: Option<String>,
     device_id: Option<String>,
     device_id_file: Option<PathBuf>,
     device_type: Option<String>,
@@ -122,6 +127,7 @@ impl Config {
     fn session(&self, identity: &DeviceIdentity) -> SessionConfig {
         let mut session = SessionConfig::new(&self.server, self.registration(identity));
         session.tls = self.tls();
+        session.device_auth_secret = self.auth_secret.clone();
         session.heartbeat_interval = Duration::from_secs(self.interval_secs.max(1));
         session.heartbeat_timeout = Duration::from_secs(self.heartbeat_timeout_secs.max(1));
         session.upload = self.upload.clone();
@@ -460,6 +466,10 @@ fn print_device_id_report() {
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Config>, String> {
     let mut server = std::env::var("DOG_SERVER").unwrap_or_else(|_| "http://127.0.0.1:3000".into());
+    let mut auth_secret = std::env::var("DOG_AUTH_SECRET")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let mut device_id_file = None;
     let mut device_id = std::env::var("DOG_DEVICE_ID")
         .ok()
@@ -489,6 +499,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Config>, Stri
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
             "--server" => server = next_value(&mut args, "--server")?,
+            "--auth-secret" => {
+                auth_secret = Some(next_value(&mut args, "--auth-secret")?);
+            }
             "--device-id" => device_id = Some(next_value(&mut args, "--device-id")?),
             "--device-id-file" => {
                 device_id_file = Some(PathBuf::from(next_value(&mut args, "--device-id-file")?));
@@ -530,6 +543,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Config>, Stri
 
     Ok(Some(Config {
         server,
+        auth_secret,
         device_id,
         device_id_file,
         device_type,

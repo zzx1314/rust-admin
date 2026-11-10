@@ -117,8 +117,12 @@ cd rust-admin
 ```bash
 cd backend
 
-# Configure the database and Redis (edit config/config.toml if needed)
-# The default config uses SQLite (auto-created) and localhost Redis
+# Secrets must be provided through the environment (see Configuration below)
+export APP_JWT_SECRET="$(openssl rand -hex 32)"
+export APP_DEVICE_AUTH_SECRET="$(openssl rand -hex 32)"
+
+# Non-secret settings live in config/config.toml (SQLite is auto-created,
+# Redis defaults to localhost)
 
 # Run database migrations and start the server
 cargo run
@@ -211,8 +215,22 @@ pnpm typecheck
 
 ### Backend (`backend/config/config.toml`)
 
+Secrets are **not** stored in the repository. `config.toml` only carries
+non-sensitive values and is committed; everything sensitive comes from the
+environment:
+
+| Environment variable | Required | Purpose |
+|---|---|---|
+| `APP_JWT_SECRET` | yes | JWT signing key, min 32 bytes (`openssl rand -hex 32`) |
+| `APP_DEVICE_AUTH_SECRET` | yes | Shared secret devices use to sign token requests |
+| `APP_REDIS_PASSWORD` | no | Redis password (empty means no auth) |
+| `APP_CONFIG_FILE` | no | Explicit config path, overrides the default lookup |
+| `APP_SERVER__PORT` | no | Any config key can be overridden as `APP_<SECTION>__<KEY>` |
+
+The config file is looked up at `$APP_CONFIG_FILE`, then `./config/config.toml`,
+then `<exe dir>/config/config.toml`. Start from `config/config.toml.example`.
+
 ```toml
-jwt_secret = "your-secret-key"
 database_url = "sqlite:data/users.db?mode=rwc"  # Adjust path to your environment
 
 [server]
@@ -222,7 +240,15 @@ port = 3000
 [redis]
 host = "localhost"
 port = 6379
-password = "123456"
+# password comes from APP_REDIS_PASSWORD
+```
+
+Local setup:
+
+```bash
+cd backend
+export APP_JWT_SECRET="$(openssl rand -hex 32)"
+export APP_DEVICE_AUTH_SECRET="$(openssl rand -hex 32)"
 ```
 
 ### Frontend (`frontend/vite.config.ts`)

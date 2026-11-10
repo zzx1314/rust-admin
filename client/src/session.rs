@@ -22,6 +22,9 @@ pub struct SessionConfig {
     /// Registration payload (carries `device_id` and `device_id_source`).
     pub registration: DeviceRegistration,
     pub tls: Option<TlsOptions>,
+    /// Shared secret used to sign `GET /api/dogGateway/auth/{deviceId}`.
+    /// The server refuses to issue a device token without it.
+    pub device_auth_secret: Option<String>,
     /// How often an idle link sends a heartbeat.
     pub heartbeat_interval: Duration,
     /// How long a heartbeat acknowledgement may take before the link is
@@ -40,6 +43,7 @@ impl SessionConfig {
             server: server.into(),
             registration,
             tls: None,
+            device_auth_secret: None,
             heartbeat_interval: Duration::from_secs(30),
             heartbeat_timeout: Duration::from_secs(10),
             telemetry: Telemetry::default(),
@@ -149,7 +153,12 @@ pub async fn run<H: CommandHandler>(
 ///
 /// Used by `--once` as a deployment smoke test (no retries).
 pub async fn verify_once(config: &SessionConfig) -> Result<DeviceSummary, ClientError> {
-    let mut client = build_client(&config.server, config.device_id(), config.tls.as_ref())?;
+    let mut client = build_client(
+        &config.server,
+        config.device_id(),
+        config.tls.as_ref(),
+        config.device_auth_secret.as_deref(),
+    )?;
     client.authenticate().await?;
     let device = client.register(&config.registration).await?;
 
@@ -172,7 +181,12 @@ async fn run_once(
     upload: &mut Option<PathBuf>,
     connected: &mut bool,
 ) -> Result<(), ClientError> {
-    let mut client = build_client(&config.server, config.device_id(), config.tls.as_ref())?;
+    let mut client = build_client(
+        &config.server,
+        config.device_id(),
+        config.tls.as_ref(),
+        config.device_auth_secret.as_deref(),
+    )?;
 
     // Re-authenticate on every (re)connect: tokens are short lived and the
     // handshake refreshes them, so a reconnect after a long outage just works.
@@ -245,8 +259,12 @@ fn build_client(
     server: &str,
     device_id: &str,
     tls: Option<&TlsOptions>,
+    device_auth_secret: Option<&str>,
 ) -> Result<DeviceClient, ClientError> {
-    let client = DeviceClient::new(server, device_id);
+    let mut client = DeviceClient::new(server, device_id);
+    if let Some(secret) = device_auth_secret {
+        client = client.with_auth_secret(secret);
+    }
     match tls {
         Some(tls) => client.with_tls(tls),
         None => Ok(client),

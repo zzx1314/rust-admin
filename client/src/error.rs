@@ -24,6 +24,12 @@ pub enum ClientError {
     #[error("device token missing, call authenticate() first")]
     MissingToken,
 
+    #[error(
+        "device auth secret missing, call with_auth_secret() before authenticate(); \
+         the server rejects unsigned device token requests"
+    )]
+    MissingAuthSecret,
+
     #[error("unexpected server response: {0}")]
     Protocol(String),
 

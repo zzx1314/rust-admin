@@ -79,7 +79,7 @@ DELETE /api/dogUserDevice/{id}          解绑（软删除）
 GET    /api/dogUserDevice/byUser/{userId} 某用户的全部绑定
 
 # 设备网关（设备 token 鉴权）
-GET    /api/dogGateway/auth/{deviceId}        下发设备 token（10 分钟有效）
+GET    /api/dogGateway/auth/{deviceId}        下发设备 token（10 分钟有效，需 HMAC 签名）
 POST   /api/dogGateway/register               注册/刷新设备（Authorization: <token>）
 WS     /api/notice/{deviceId}/{token}         设备长连接（心跳 / 任务 / 结果 / 文件）；引用路线的任务在 params.map 携带冻结的 mapId/mapVersion/mapHash/frameId/分辨率/原点/尺寸，设备执行前校验 mapHash
 
@@ -133,7 +133,7 @@ DELETE /api/dogGateway/assign/{deviceId}      解除归属（?userId= 仅管理�
 - **设备接入**：设备先取 token（`GET /api/dogGateway/auth/{deviceId}`），再注册（`dog_device` 初始 `offline`），随后连 `WS /api/notice/{deviceId}/{token}`；心跳会把 `status` 置为 `online` 并刷新 `comm_time` 与遥测字段；WebSocket 断开（正常关闭或连接异常）时置回 `offline`。新注册的设备默认未绑定用户，需在「设备列表」页绑定给用户后才能被普通用户看到；管理员通过 `POST /api/dogDevice` 手工创建的设备同样保持未绑定，普通用户手工创建则会自动绑定创建者。注册报文本身不携带用户信息，因此设备归属由独立的 `POST /api/dogGateway/assign`（按硬件 `deviceId`）接口建立，便于后续接入配网/出厂预置流程时直接复用。
 - **任务下发**：管理端 `POST /api/dogCommand` 创建指令后，若目标设备在线则立即通过 WebSocket 推送并把指令状态置为 `sent`；设备回报后写回 `status`/`return_value`。也可用 `POST /api/dogGateway/dispatch` 推送自定义 JSON。
 - **设备上传**：`file_start` → 二进制帧（单流上限 256 MiB）→ `file_end`，文件落盘到 `[dog] upload_dir`（默认 `data/device_uploads`）并写入 `dog_media`。
-- **设备认证信任边界**：`GET /api/dogGateway/auth/{deviceId}` 与旧网关一致，按设备号直接下发 token，不校验证书；生产环境需在入口层做 mTLS / 内网隔离 / 反向代理鉴权，或在该接口前置设备白名单。
+- **设备认证信任边界**：`GET /api/dogGateway/auth/{deviceId}` 要求设备用共享密钥（服务端 `APP_DEVICE_AUTH_SECRET`）对 `"{deviceId}\n{timestamp}\n{nonce}"` 做 HMAC-SHA256 签名，通过 `X-Device-Timestamp` / `X-Device-Nonce` / `X-Device-Signature` 三个头提交。时间戳超出 ±300s 窗口或 nonce 重放一律 401。该密钥通过带外方式预置到设备（如出厂烧录 / OTA 下发），不随请求传输。
 - **断线重连**：客户端默认指数退避无限重连（`--reconnect-*` 可调），每次重连都重新取 token、注册、建链；半开连接靠"心跳带确认"发现（服务端收到心跳必回 `report`）。服务端可用 `DogGateway::disconnect(device_id)` 主动断开某台设备（客户端会自动重连），`DogGateway::accepted_connections()` 可用于观察重连次数。
 - **在线连接表**：内存态（`DeviceRegistry`），因此网关按单实例部署；多实例需引入共享总线（如 Redis pub/sub）。
 - **菜单**：左侧菜单由数据库驱动（`p_sys_menu` + `p_sys_role_menu`），`component` 需能唯一匹配 `frontend/src/views/<component>/index.vue`，因此这里使用 `dog/device` 这类带目录前缀的写法（避免与 `views/charging/device` 冲突）。菜单图标使用离线图标，需在 `frontend/src/components/ReIcon/src/offlineIcon.ts` 注册。机器狗与园区的各个页面都是**一级菜单**（`parent_id = -1`，原先的 `机器狗管理` / `园区管理` 目录已被 `15_flatten_dog_park_menus.sql` 退役），路由地址（如 `/dog/device/index`）保持不变。`设备绑定` 不再单独占菜单（`16_remove_device_binding_menu.sql`），绑定/解绑用户改在「设备列表」页完成；`工作流` 页面已下线（`17_remove_workflow_menu.sql`），后端 `/api/dogWorkflow*` 接口保留。

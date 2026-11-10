@@ -29,6 +29,8 @@ use x_rust::system::sys_user::domain::CreateUserRequest;
 use x_rust::system::sys_user::repository::SeaOrmUserRepository;
 
 const DEVICE_ID: &str = "dog-e2e-0001";
+/// Shared secret both the test server and the device client sign with.
+const DEVICE_AUTH_SECRET: &str = "device-auth-test-secret";
 const USERNAME: &str = "gateway_tester";
 const PASSWORD: &str = "password123";
 
@@ -142,8 +144,11 @@ impl TestServer {
             .expect("failed to migrate test db");
 
         let app = App::from_connection_with_upload_dir(conn.clone(), &upload_dir);
-        let state =
-            app.build_state_with_token_store(Arc::new(FakeTokenStore::new()), "test-secret");
+        let state = app.build_state_with_device_auth_secret(
+            Arc::new(FakeTokenStore::new()),
+            "test-secret",
+            DEVICE_AUTH_SECRET,
+        );
 
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind failed");
         let addr = listener.local_addr().expect("no local addr");
@@ -258,7 +263,8 @@ async fn test_device_gateway_end_to_end() {
     let user_token = server.login().await;
 
     // ---- device side: authenticate + register ------------------------------
-    let mut client = DeviceClient::new(server.base_url.clone(), DEVICE_ID);
+    let mut client =
+        DeviceClient::new(server.base_url.clone(), DEVICE_ID).with_auth_secret(DEVICE_AUTH_SECRET);
     assert!(client.connect().await.is_err(), "connect must need a token");
 
     let token = client.authenticate().await.expect("device auth failed");
@@ -397,7 +403,66 @@ async fn test_device_gateway_rejects_invalid_credentials() {
     let server = TestServer::start().await;
     let http = reqwest::Client::new();
 
-    // register without a token
+    // ---- device token: no credential at all -------------------------------
+    let response = http
+        .get(format!(
+            "{}/api/dogGateway/auth/{DEVICE_ID}",
+            server.base_url
+        ))
+        .send()
+        .await
+        .expect("auth request failed");
+    assert_eq!(
+        response.status(),
+        401,
+        "an unsigned device auth request must not receive a token"
+    );
+
+    // ---- device token: a valid signature for a different secret -----------
+    let forged = dog_device_client::DeviceSignature::sign_now("guessed-secret", DEVICE_ID);
+    let mut request = http.get(format!(
+        "{}/api/dogGateway/auth/{DEVICE_ID}",
+        server.base_url
+    ));
+    for (name, value) in forged.headers() {
+        request = request.header(name, value);
+    }
+    let response = request.send().await.expect("auth request failed");
+    assert_eq!(
+        response.status(),
+        401,
+        "a signature from the wrong secret must be rejected"
+    );
+
+    // ---- device token: replayed nonce -------------------------------------
+    let signature = dog_device_client::DeviceSignature::sign_now(DEVICE_AUTH_SECRET, DEVICE_ID);
+    let mut first = http.get(format!(
+        "{}/api/dogGateway/auth/{DEVICE_ID}",
+        server.base_url
+    ));
+    for (name, value) in signature.headers() {
+        first = first.header(name, value);
+    }
+    assert_eq!(
+        first.send().await.expect("auth request failed").status(),
+        200,
+        "a correctly signed request must be accepted"
+    );
+
+    let mut replay = http.get(format!(
+        "{}/api/dogGateway/auth/{DEVICE_ID}",
+        server.base_url
+    ));
+    for (name, value) in signature.headers() {
+        replay = replay.header(name, value);
+    }
+    assert_eq!(
+        replay.send().await.expect("auth request failed").status(),
+        401,
+        "replaying the same nonce must be rejected"
+    );
+
+    // ---- register: missing token ------------------------------------------
     let response = http
         .post(format!("{}/api/dogGateway/register", server.base_url))
         .json(&serde_json::json!({ "deviceId": DEVICE_ID }))
@@ -406,7 +471,7 @@ async fn test_device_gateway_rejects_invalid_credentials() {
         .expect("register request failed");
     assert_eq!(response.status(), 401);
 
-    // register with an unknown token
+    // ---- register: unknown token ------------------------------------------
     let response = http
         .post(format!("{}/api/dogGateway/register", server.base_url))
         .header("Authorization", "not-a-token")
@@ -416,8 +481,9 @@ async fn test_device_gateway_rejects_invalid_credentials() {
         .expect("register request failed");
     assert_eq!(response.status(), 401);
 
-    // websocket handshake with a token issued for another device
-    let mut client = DeviceClient::new(server.base_url.clone(), DEVICE_ID);
+    // ---- websocket handshake with a token issued for another device -------
+    let mut client =
+        DeviceClient::new(server.base_url.clone(), DEVICE_ID).with_auth_secret(DEVICE_AUTH_SECRET);
     let token = client.authenticate().await.expect("device auth failed");
     let response = http
         .get(format!(
@@ -487,6 +553,7 @@ async fn test_device_gateway_reconnects_after_server_disconnect() {
     );
     session.heartbeat_interval = Duration::from_millis(250);
     session.heartbeat_timeout = Duration::from_secs(1);
+    session.device_auth_secret = Some(DEVICE_AUTH_SECRET.to_string());
     session.reconnect = ReconnectPolicy::default()
         .with_initial_delay(Duration::from_millis(50))
         .with_max_delay(Duration::from_millis(250))

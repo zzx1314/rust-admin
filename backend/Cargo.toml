@@ -13,6 +13,7 @@ cbc = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 config = "0.14"
 futures-util = "0.3"
+hmac = "0.12"
 http-body-util = "0.1"
 jsonwebtoken = "9"
 md-5 = "0.10"
@@ -26,6 +27,7 @@ sea-orm-migration = { version = "1.1", features = ["runtime-tokio-native-tls", "
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 socket2 = "0.6"
 async-trait = "0.1"
+subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }

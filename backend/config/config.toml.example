@@ -1,0 +1,26 @@
+# Example configuration. Copy to `config/config.toml` and fill in the
+# non-secret values. Secrets MUST come from environment variables — they are
+# intentionally absent from this file.
+#
+#   export APP_JWT_SECRET="$(openssl rand -hex 32)"
+#   export APP_DEVICE_AUTH_SECRET="$(openssl rand -hex 32)"
+#   export APP_REDIS_PASSWORD="..."
+#
+# Environment variables always win over this file. See `src/config/mod.rs`.
+
+database_url = "sqlite:data/users.db?mode=rwc"
+
+[server]
+host = "0.0.0.0"
+port = 3000
+
+[redis]
+host = "localhost"
+port = 6379
+# Password is read from APP_REDIS_PASSWORD; leave it out of this file.
+
+[dog]
+# 设备通过 /api/notice WebSocket 上传的文件存放目录。
+# 省略时使用 data/device_uploads。
+upload_dir = "data/device_uploads"
+# 设备网关认证共享密钥由 APP_DEVICE_AUTH_SECRET 提供。

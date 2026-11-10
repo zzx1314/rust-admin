@@ -113,10 +113,18 @@ impl App {
 
     pub fn build_state(&self, config: &AppConfig) -> AppState {
         let token_store: Arc<dyn TokenStore> = Arc::new(RedisTokenStore::new(&config.redis.url()));
-        self.build_state_with(
+        // An explicitly configured `[dog] upload_dir` wins; otherwise fall back
+        // to the directory the `App` was constructed with so that
+        // `from_connection_with_upload_dir` keeps working outside tests.
+        let upload_dir = match config.dog.upload_dir.as_deref().map(str::trim) {
+            Some(configured) if !configured.is_empty() => PathBuf::from(configured),
+            _ => self.upload_dir.clone(),
+        };
+        self.build_state_full(
             token_store,
             &config.jwt_secret,
-            PathBuf::from(&config.dog.upload_dir),
+            upload_dir,
+            Some(config.device_auth_secret.clone()),
         )
     }
 
@@ -130,11 +138,37 @@ impl App {
         self.build_state_with(token_store, jwt_secret, self.upload_dir.clone())
     }
 
+    /// Same as [`App::build_state_with_token_store`], also pinning the device
+    /// gateway shared secret so tests can sign device requests.
+    pub fn build_state_with_device_auth_secret(
+        &self,
+        token_store: Arc<dyn TokenStore>,
+        jwt_secret: &str,
+        device_auth_secret: impl Into<String>,
+    ) -> AppState {
+        self.build_state_full(
+            token_store,
+            jwt_secret,
+            self.upload_dir.clone(),
+            Some(device_auth_secret.into()),
+        )
+    }
+
     fn build_state_with(
         &self,
         token_store: Arc<dyn TokenStore>,
         jwt_secret: &str,
         upload_dir: PathBuf,
+    ) -> AppState {
+        self.build_state_full(token_store, jwt_secret, upload_dir, None)
+    }
+
+    fn build_state_full(
+        &self,
+        token_store: Arc<dyn TokenStore>,
+        jwt_secret: &str,
+        upload_dir: PathBuf,
+        device_auth_secret: Option<String>,
     ) -> AppState {
         let conn = Arc::new(self.conn.clone());
 
@@ -197,7 +231,13 @@ impl App {
         let dog_workflow_repo = SeaOrmDogWorkflowRepository::new(conn.clone());
         let dog_command_repo = SeaOrmDogCommandRepository::new(conn.clone());
         let dog_route_repo = SeaOrmDogRouteLibraryRepository::new(conn.clone());
-        let dog_gateway = Arc::new(DogGateway::new(conn.clone(), upload_dir));
+        let device_auth_secret =
+            device_auth_secret.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let dog_gateway = Arc::new(DogGateway::with_device_auth_secret(
+            conn.clone(),
+            upload_dir,
+            device_auth_secret,
+        ));
         let dog_task_service = Arc::new(DogTaskService::new(
             dog_task_repo.clone(),
             dog_device_repo.clone(),
@@ -308,4 +348,72 @@ impl App {
 
 pub fn database_url() -> String {
     std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:data/users.db".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{DogConfig, RedisConfig, ServerConfig};
+
+    fn config_with(upload_dir: Option<&str>) -> AppConfig {
+        AppConfig {
+            server: ServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+            },
+            redis: RedisConfig {
+                host: "localhost".to_string(),
+                port: 6379,
+                password: String::new(),
+            },
+            jwt_secret: "test-secret".to_string(),
+            database_url: "sqlite::memory:".to_string(),
+            device_auth_secret: "test-device-secret".to_string(),
+            dog: DogConfig {
+                upload_dir: upload_dir.map(str::to_string),
+                device_auth_secret: None,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_upload_dir_survives_build_state() {
+        let conn = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        let app = App::from_connection_with_upload_dir(conn, "/tmp/rust_admin_explicit_uploads");
+        let state = app.build_state_with_token_store(
+            Arc::new(crate::system::auth::repository::RedisTokenStore::new(
+                "redis://127.0.0.1:6379",
+            )),
+            "test-secret",
+        );
+
+        assert_eq!(
+            state.dog_gateway.upload_root(),
+            std::path::Path::new("/tmp/rust_admin_explicit_uploads")
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_upload_dir_overrides_the_default() {
+        let conn = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        let app = App::from_connection(conn);
+        let state = app.build_state(&config_with(Some("/tmp/rust_admin_configured")));
+
+        assert_eq!(
+            state.dog_gateway.upload_root(),
+            std::path::Path::new("/tmp/rust_admin_configured")
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_configured_upload_dir_falls_back_to_app_default() {
+        let conn = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        let app = App::from_connection(conn);
+        let state = app.build_state(&config_with(None));
+
+        assert_eq!(
+            state.dog_gateway.upload_root(),
+            std::path::Path::new(DEFAULT_UPLOAD_DIR)
+        );
+    }
 }

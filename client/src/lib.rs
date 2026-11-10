@@ -24,6 +24,7 @@
 //! ```
 
 pub mod auth;
+pub mod device_auth;
 pub mod device_id;
 pub mod error;
 pub mod link;
@@ -34,6 +35,7 @@ pub mod session;
 pub mod tls;
 
 pub use auth::DeviceClient;
+pub use device_auth::DeviceSignature;
 pub use device_id::DeviceIdentity;
 pub use error::ClientError;
 pub use link::DeviceLink;

@@ -7,6 +7,7 @@ use serde_json::Value;
 use crate::business::dog::command::domain::DogCommand;
 use crate::business::dog::command::repository::SeaOrmDogCommandRepository;
 use crate::business::dog::device::entity::Model as Device;
+use crate::business::dog::gateway::device_auth::DeviceAuthenticator;
 use crate::business::dog::gateway::domain::{
     CommandResultPayload, ConnectionInfo, DeviceRegistration, DispatchResult, HeartbeatPayload,
     MAX_UPLOAD_BYTES, server_command_message,
@@ -25,16 +26,31 @@ pub struct DogGateway {
     command_repo: SeaOrmDogCommandRepository,
     media_repo: SeaOrmDogMediaRepository,
     upload_root: PathBuf,
+    authenticator: DeviceAuthenticator,
 }
 
 impl DogGateway {
     pub fn new(conn: Arc<DatabaseConnection>, upload_root: impl Into<PathBuf>) -> Self {
+        Self::with_device_auth_secret(conn, upload_root, uuid::Uuid::new_v4().to_string())
+    }
+
+    /// Same as [`DogGateway::new`] with the shared secret used to verify
+    /// `GET /api/dogGateway/auth/{deviceId}` requests.
+    ///
+    /// [`DogGateway::new`] falls back to a random per-process secret, which
+    /// keeps unit tests working but makes no device able to authenticate.
+    pub fn with_device_auth_secret(
+        conn: Arc<DatabaseConnection>,
+        upload_root: impl Into<PathBuf>,
+        device_auth_secret: impl Into<String>,
+    ) -> Self {
         Self {
             registry: DeviceRegistry::new(),
             repo: DogGatewayRepository::new(conn.clone()),
             command_repo: SeaOrmDogCommandRepository::new(conn.clone()),
             media_repo: SeaOrmDogMediaRepository::new(conn),
             upload_root: upload_root.into(),
+            authenticator: DeviceAuthenticator::new(device_auth_secret),
         }
     }
 
@@ -46,9 +62,16 @@ impl DogGateway {
         &self.upload_root
     }
 
+    pub fn authenticator(&self) -> &DeviceAuthenticator {
+        &self.authenticator
+    }
+
     // ---------------------------------------------------------------- tokens
 
     /// Issue a device access token (`GET /api/dogGateway/auth/{deviceId}`).
+    ///
+    /// The caller must have verified the device credential first; see
+    /// [`crate::business::dog::gateway::device_auth`].
     pub async fn issue_token(&self, device_id: &str) -> String {
         self.registry.issue_token(device_id).await
     }

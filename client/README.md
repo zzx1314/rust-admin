@@ -16,7 +16,8 @@
 
 ```text
 设备                                    rust-admin 后端
- │  GET /api/dogGateway/auth/{deviceId}          │  下发 10 分钟有效的设备 token
+ │  GET /api/dogGateway/auth/{deviceId}          │  校验 HMAC 签名后下发 10 分钟有效的设备 token
+ │   (X-Device-Timestamp / Nonce / Signature)    │
  │──────────────────────────────────────────────▶│
  │  POST /api/dogGateway/register  (Authorization: <token>) │
  │──────────────────────────────────────────────▶│  创建/更新 dog_device
@@ -206,6 +207,7 @@ cargo build --release
 | 参数 | 说明 |
 | --- | --- |
 | `--server <URL>` | 服务端根地址，`http(s)://host:port`（环境变量 `DOG_SERVER`，默认 `http://127.0.0.1:3000`） |
+| `--auth-secret <SECRET>` | 设备 token 请求签名密钥，需与后端 `APP_DEVICE_AUTH_SECRET` 一致（环境变量 `DOG_AUTH_SECRET`） |
 | `--device-id <ID>` | 覆盖硬件派生 ID（环境变量 `DOG_DEVICE_ID`，可选，优先级最高） |
 | `--device-id-file <PATH>` | 把检测结果钉在该文件并复用（推荐 systemd 场景） |
 | `--print-device-id` | 打印最终设备 ID 后退出 |
@@ -267,8 +269,15 @@ cargo build --release
 
 `--ca` 用于校验服务端证书，`--cert` + `--key` 用于客户端证书认证；两者可单独使用。
 
-> 注意：服务端 `GET /api/dogGateway/auth/{deviceId}` 沿用原网关语义，只按设备号下发 token，
-> 身份校验依赖入口层（mTLS / 内网隔离 / 反向代理）。上生产时请务必启用其中一种。
+> 设备取 token 必须携带 HMAC-SHA256 签名：对 `"{deviceId}\n{timestamp}\n{nonce}"` 用共享密钥
+> （服务端 `APP_DEVICE_AUTH_SECRET`）签名，放入 `X-Device-Timestamp` / `X-Device-Nonce` /
+> `X-Device-Signature`。客户端通过 `--auth-secret` 或环境变量 `DOG_AUTH_SECRET` 配置密钥。
+> 时间戳超出 ±300s 或 nonce 重放会被拒绝，因此设备时钟需要大致正确（NTP 同步）。
+
+```bash
+export DOG_AUTH_SECRET="<与后端 APP_DEVICE_AUTH_SECRET 一致>"
+dog-device-client --server http://127.0.0.1:3000 --once
+```
 
 ## 7. 验证能通信
 

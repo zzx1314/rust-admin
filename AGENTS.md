@@ -68,7 +68,19 @@ UUID / physical MAC, `/etc/machine-id` as last resort; `--device-id` overrides).
 
 Device gateway (not user JWT): `GET /api/dogGateway/auth/{deviceId}` → token,
 `POST /api/dogGateway/register`, then `WS /api/notice/{deviceId}/{token}`.
+The auth call requires an HMAC-SHA256 signature over
+`"{deviceId}\n{timestamp}\n{nonce}"` sent as `X-Device-Timestamp`,
+`X-Device-Nonce` and `X-Device-Signature`, keyed by the server's
+`APP_DEVICE_AUTH_SECRET`. Requests outside a ±300 s window or replaying a
+nonce are rejected with 401.
 End-to-end coverage lives in `backend/tests/business/dog_gateway_tests.rs`.
+
+## Secrets
+
+`backend/config/config.toml` is committed and holds **no** secrets. Required
+environment variables: `APP_JWT_SECRET` (≥32 bytes) and
+`APP_DEVICE_AUTH_SECRET`. Optional: `APP_REDIS_PASSWORD`, `APP_CONFIG_FILE`.
+Any config key can be overridden with `APP_<SECTION>__<KEY>`.
 
 ## Important Notes
 

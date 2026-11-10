@@ -16,6 +16,10 @@ fn default_size() -> i64 {
     10
 }
 
+/// Upper bound applied to [`PageRequest::size`] so that a client cannot ask the
+/// database for the whole table with `size=1000000`.
+pub const MAX_PAGE_SIZE: i64 = 500;
+
 impl Default for PageRequest {
     fn default() -> Self {
         Self {
@@ -31,7 +35,7 @@ impl PageRequest {
     }
 
     pub fn size(&self) -> i64 {
-        self.size.max(1)
+        self.size.clamp(1, MAX_PAGE_SIZE)
     }
 
     pub fn offset(&self) -> i64 {
@@ -55,5 +59,44 @@ impl<T> PageResponse<T> {
             current,
             size,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn size_is_clamped_to_the_upper_bound() {
+        let request = PageRequest {
+            current: 1,
+            size: 1_000_000,
+        };
+        assert_eq!(request.size(), MAX_PAGE_SIZE);
+    }
+
+    #[test]
+    fn size_is_clamped_to_at_least_one() {
+        let request = PageRequest {
+            current: 1,
+            size: 0,
+        };
+        assert_eq!(request.size(), 1);
+
+        let negative = PageRequest {
+            current: 1,
+            size: -20,
+        };
+        assert_eq!(negative.size(), 1);
+    }
+
+    #[test]
+    fn size_within_range_is_preserved() {
+        let request = PageRequest {
+            current: 2,
+            size: 25,
+        };
+        assert_eq!(request.size(), 25);
+        assert_eq!(request.offset(), 25);
     }
 }

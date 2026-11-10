@@ -1,5 +1,6 @@
 use url::Url;
 
+use crate::device_auth::DeviceSignature;
 use crate::error::ClientError;
 use crate::link::DeviceLink;
 use crate::protocol::{ApiEnvelope, DeviceRegistration, DeviceSummary, DeviceTokenData};
@@ -11,11 +12,16 @@ use crate::tls::TlsOptions;
 /// 1. `authenticate()` — `GET /api/dogGateway/auth/{deviceId}` returns a token;
 /// 2. `register()` — `POST /api/dogGateway/register` with the token;
 /// 3. `connect()` — `GET /api/notice/{deviceId}/{token}` upgraded to WebSocket.
+///
+/// Step 1 requires a shared secret configured with
+/// [`DeviceClient::with_auth_secret`]; the client signs `deviceId`, a Unix
+/// timestamp and a fresh nonce (see [`crate::device_auth`]).
 pub struct DeviceClient {
     http: reqwest::Client,
     base_url: String,
     device_id: String,
     token: Option<String>,
+    auth_secret: Option<String>,
 }
 
 impl DeviceClient {
@@ -26,7 +32,17 @@ impl DeviceClient {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             device_id: device_id.into(),
             token: None,
+            auth_secret: None,
         }
+    }
+
+    /// Set the shared secret used to sign [`DeviceClient::authenticate`].
+    ///
+    /// The server rejects authentication without a valid signature, so this
+    /// must match `APP_DEVICE_AUTH_SECRET` on the backend.
+    pub fn with_auth_secret(mut self, secret: impl Into<String>) -> Self {
+        self.auth_secret = Some(secret.into());
+        self
     }
 
     /// Use a custom HTTP client (for example one built by [`TlsOptions::http_client`]).
@@ -61,9 +77,23 @@ impl DeviceClient {
     }
 
     /// Fetch a device access token.
+    ///
+    /// Fails with [`ClientError::MissingAuthSecret`] when no shared secret was
+    /// configured, because the server refuses unsigned requests.
     pub async fn authenticate(&mut self) -> Result<String, ClientError> {
+        let secret = self
+            .auth_secret
+            .as_deref()
+            .ok_or(ClientError::MissingAuthSecret)?;
+        let signature = DeviceSignature::sign_now(secret, &self.device_id);
+
         let url = self.endpoint(&["api", "dogGateway", "auth", &self.device_id])?;
-        let response = self.http.get(url).send().await?;
+        let mut request = self.http.get(url);
+        for (name, value) in signature.headers() {
+            request = request.header(name, value);
+        }
+
+        let response = request.send().await?;
         let envelope: ApiEnvelope<DeviceTokenData> = response.json().await?;
         let data = envelope.into_data()?;
         self.token = Some(data.token.clone());
