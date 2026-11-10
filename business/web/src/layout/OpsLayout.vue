@@ -65,6 +65,19 @@ function go(path: string) {
   if (route.path !== path) router.push(path);
 }
 
+function prefetch(path: string) {
+  if (route.path === path) return;
+  for (const record of router.resolve(path).matched) {
+    for (const component of Object.values(record.components ?? {})) {
+      if (typeof component !== "function") continue;
+      const result = (component as () => unknown)();
+      if (result && typeof (result as Promise<unknown>).catch === "function") {
+        (result as Promise<unknown>).catch(() => undefined);
+      }
+    }
+  }
+}
+
 function globalSearch() {
   const keyword = search.value.trim();
   if (!keyword) return;
@@ -164,6 +177,8 @@ watch(
             class="nav-item"
             :class="{ active: route.path === item.path }"
             @click="go(item.path)"
+            @mouseenter="prefetch(item.path)"
+            @focus="prefetch(item.path)"
           >
             <AppIcon :name="item.icon" />
             <span class="hide-c">{{ item.label }}</span>
@@ -254,7 +269,11 @@ watch(
       </header>
 
       <div class="content">
-        <RouterView />
+        <RouterView v-slot="{ Component, route: currentRoute }">
+          <Transition name="page" mode="out-in">
+            <component :is="Component" :key="currentRoute.path" />
+          </Transition>
+        </RouterView>
       </div>
     </div>
   </div>
