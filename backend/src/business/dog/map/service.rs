@@ -49,14 +49,14 @@ impl DogMapService {
             .repo
             .create(&req, id, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         // 首次建图时把园区从「仅台账」推进到「待标定」，发布后才成为可用基线。
         let park = self
             .park_repo
             .find_by_id(park_id, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         if let Some(park) = park
             && park.map_id.is_none()
             && park.map_status == "未绑定"
@@ -64,7 +64,7 @@ impl DogMapService {
             self.park_repo
                 .set_baseline(park_id, None, "待标定")
                 .await
-                .map_err(AppError::DatabaseErrorSeaOrm)?;
+                .map_err(AppError::DatabaseError)?;
         }
 
         Ok(map)
@@ -74,7 +74,7 @@ impl DogMapService {
         self.repo
             .find_by_id(id, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Map with id {} not found", id)))
     }
 
@@ -86,7 +86,7 @@ impl DogMapService {
                 .park_repo
                 .find_by_id(park_id, scope)
                 .await
-                .map_err(AppError::DatabaseErrorSeaOrm)?;
+                .map_err(AppError::DatabaseError)?;
             vo.park_name = park.map(|p| p.park_name);
         }
         Ok(vo)
@@ -101,7 +101,7 @@ impl DogMapService {
             .repo
             .find_all_with_page(&query, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         let mut park_ids: Vec<i64> = records.iter().filter_map(|m| m.park_id).collect();
         park_ids.sort_unstable();
@@ -110,7 +110,7 @@ impl DogMapService {
             .repo
             .find_park_names(&park_ids)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         let vo_list: Vec<MapVO> = records
             .into_iter()
@@ -133,7 +133,7 @@ impl DogMapService {
         self.repo
             .find_all(scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     /// 园区可用的地图基线版本。`publishable_only` 为 true 时不含草稿 / 已归档，
@@ -149,12 +149,12 @@ impl DogMapService {
             .repo
             .find_by_park(park_id, scope, publishable_only)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         let park_name = self
             .park_repo
             .find_by_id(park_id, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .map(|p| p.park_name);
         Ok(maps
             .into_iter()
@@ -207,7 +207,7 @@ impl DogMapService {
         self.repo
             .update(id, &req, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Map with id {} not found", id)))
     }
 
@@ -224,14 +224,14 @@ impl DogMapService {
             .repo
             .delete(id, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         if !deleted {
             return Err(AppError::NotFound(format!("Map with id {} not found", id)));
         }
         self.park_repo
             .clear_baseline_for_map(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         Ok(())
     }
 
@@ -260,7 +260,7 @@ impl DogMapService {
         self.repo
             .archive_published_in_park(park_id, id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         let status = if map.map_status == MAP_STATUS_PARTIAL {
             MAP_STATUS_PARTIAL
@@ -271,7 +271,7 @@ impl DogMapService {
             .repo
             .update_status(id, status, Some(format_datetime(chrono::Utc::now())), scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Map with id {} not found", id)))?;
 
         let park_status = if status == MAP_STATUS_PARTIAL {
@@ -282,7 +282,7 @@ impl DogMapService {
         self.park_repo
             .set_baseline(park_id, Some(id), park_status)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         Ok(published)
     }
@@ -324,7 +324,7 @@ impl DogMapService {
         self.repo
             .create(&req, new_id, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         self.publish(new_id, scope).await
     }
 
@@ -335,13 +335,13 @@ impl DogMapService {
             .repo
             .find_routes_by_map(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         let route_ids: Vec<i64> = routes.iter().map(|r| r.id).collect();
         let task_count = self
             .repo
             .count_tasks_for_routes(&route_ids)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         let route_refs = routes
             .into_iter()
             .map(|route| MapRouteRefVO {
@@ -535,7 +535,7 @@ impl DogMapService {
             .park_repo
             .find_by_id(park_id, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         if park.is_none() {
             return Err(AppError::BadRequest(format!(
                 "Park with id {} not found or not accessible",

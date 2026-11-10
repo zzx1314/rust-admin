@@ -30,14 +30,14 @@ impl SysAuthService {
             .role_repo
             .find_by_code(role_code)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Role with code {} not found", role_code)))?;
 
         let all_menus = self
             .menu_repo
             .find_all()
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         let all_menu_map: HashMap<i64, Menu> = all_menus.into_iter().map(|m| (m.id, m)).collect();
 
@@ -45,7 +45,7 @@ impl SysAuthService {
             .menu_repo
             .find_menus_by_role_id(&role.id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         let role_menu_ids: HashSet<i64> = role_menus.iter().map(|m| m.id).collect();
 
@@ -133,7 +133,7 @@ impl SysAuthService {
             .role_repo
             .find_by_code(&req.role_code)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| {
                 AppError::NotFound(format!("Role with code {} not found", req.role_code))
             })?;
@@ -142,7 +142,7 @@ impl SysAuthService {
             self.role_repo
                 .set_menus(&role.id, &[])
                 .await
-                .map_err(AppError::DatabaseErrorSeaOrm)?;
+                .map_err(AppError::DatabaseError)?;
             return Ok(());
         }
 
@@ -150,7 +150,7 @@ impl SysAuthService {
             .menu_repo
             .find_all()
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         let menu_map: HashMap<i64, Menu> = all_menus.into_iter().map(|m| (m.id, m)).collect();
 
@@ -168,7 +168,7 @@ impl SysAuthService {
         self.role_repo
             .set_menus(&role.id, &menu_ids)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         Ok(())
     }

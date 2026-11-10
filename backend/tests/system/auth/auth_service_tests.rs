@@ -127,6 +127,11 @@ impl UserRepository for FakeUserRepository {
         let is_show = req.is_show;
         let enable = req.enable;
         let sex = req.sex.clone();
+        let password = req.password.clone();
+        let try_count = req.try_count;
+        let lock_flag = req.lock_flag;
+        let lock_time = req.lock_time;
+        let last_login_time = req.last_login_time;
         Box::pin(async move {
             let mut users_lock = users.lock().unwrap();
             if let Some(user) = users_lock.get_mut(&id) {
@@ -157,6 +162,22 @@ impl UserRepository for FakeUserRepository {
                 }
                 if let Some(v) = sex {
                     user.sex = Some(v);
+                }
+                // Mirror the real repository: `None` means "leave unchanged".
+                if let Some(v) = password {
+                    user.password = Some(v);
+                }
+                if let Some(v) = try_count {
+                    user.try_count = Some(v);
+                }
+                if let Some(v) = lock_flag {
+                    user.lock_flag = Some(v);
+                }
+                if let Some(v) = lock_time {
+                    user.lock_time = Some(v);
+                }
+                if let Some(v) = last_login_time {
+                    user.last_login_time = Some(v);
                 }
                 user.update_time = Utc::now();
                 Ok(Some(user.clone()))
@@ -912,4 +933,232 @@ async fn test_login_with_vo_no_policy_never_expires() {
         .await
         .unwrap();
     assert_eq!(data.password_expired, Some(false));
+}
+
+// ==================== Token type isolation ====================
+
+/// Seed a user with the given hash and return a service wired to fresh fakes.
+async fn seeded_service(
+    password_hash: &str,
+) -> (Arc<FakeUserRepository>, Arc<FakeTokenStore>, AuthService) {
+    let user_repo = Arc::new(FakeUserRepository::new());
+    let token_store = Arc::new(FakeTokenStore::new());
+    let service = create_auth_service(user_repo.clone(), token_store.clone());
+
+    let req = CreateUserRequest {
+        username: "testuser".to_string(),
+        phone: None,
+        email: Some("test@example.com".to_string()),
+        real_name: Some("Test User".to_string()),
+        password: Some(password_hash.to_string()),
+        org_id: 0,
+        remarks: None,
+        card: None,
+        sex: None,
+        role: None,
+    };
+    user_repo.create(&req, &1i64).await.unwrap();
+    (user_repo, token_store, service)
+}
+
+/// Overwrite fields on the seeded user directly (bypassing the service).
+fn patch_user(repo: &FakeUserRepository, patch: impl FnOnce(&mut User)) {
+    let mut users = repo.users.lock().unwrap();
+    let user = users.get_mut(&1).expect("seeded user missing");
+    patch(user);
+}
+
+#[tokio::test]
+async fn test_access_token_is_accepted() {
+    let (_repo, _store, service) = seeded_service(&md5_encrypt("password123")).await;
+    let session = service.login("testuser", "password123").await.unwrap();
+
+    let user_id = service.validate_token(&session.access_token).await.unwrap();
+    assert_eq!(user_id, 1);
+}
+
+#[tokio::test]
+async fn test_refresh_token_cannot_be_used_as_access_token() {
+    let (_repo, _store, service) = seeded_service(&md5_encrypt("password123")).await;
+    let session = service.login("testuser", "password123").await.unwrap();
+
+    // Both tokens share a signing key; the `typ` claim is what keeps them apart.
+    let result = service.validate_token(&session.refresh_token).await;
+    assert!(
+        result.is_err(),
+        "a refresh token must not authorise API calls"
+    );
+}
+
+#[tokio::test]
+async fn test_access_token_cannot_be_used_to_refresh() {
+    let (_repo, _store, service) = seeded_service(&md5_encrypt("password123")).await;
+    let session = service.login("testuser", "password123").await.unwrap();
+
+    let result = service.refresh_token(&session.access_token).await;
+    assert!(
+        result.is_err(),
+        "an access token must not be exchangeable for a new pair"
+    );
+}
+
+#[tokio::test]
+async fn test_refresh_rotates_the_pair() {
+    let (_repo, _store, service) = seeded_service(&md5_encrypt("password123")).await;
+    let session = service.login("testuser", "password123").await.unwrap();
+
+    let refreshed = service.refresh_token(&session.refresh_token).await.unwrap();
+    assert_ne!(
+        refreshed.refresh_token, session.refresh_token,
+        "refresh must rotate the refresh token"
+    );
+    // The new access token works, the old refresh token is now stale.
+    service
+        .validate_token(&refreshed.access_token)
+        .await
+        .unwrap();
+    assert!(
+        service.refresh_token(&session.refresh_token).await.is_err(),
+        "the previous refresh token must stop working after rotation"
+    );
+}
+
+// ==================== Account state re-check on refresh ====================
+
+#[tokio::test]
+async fn test_refresh_rejects_deleted_user() {
+    let (repo, _store, service) = seeded_service(&md5_encrypt("password123")).await;
+    let session = service.login("testuser", "password123").await.unwrap();
+
+    patch_user(&repo, |user| user.is_deleted = 1);
+
+    let result = service.refresh_token(&session.refresh_token).await;
+    assert!(
+        result.is_err(),
+        "a deleted account must not be able to refresh"
+    );
+}
+
+#[tokio::test]
+async fn test_refresh_rejects_disabled_user() {
+    let (repo, _store, service) = seeded_service(&md5_encrypt("password123")).await;
+    let session = service.login("testuser", "password123").await.unwrap();
+
+    patch_user(&repo, |user| user.enable = Some(0));
+
+    let result = service.refresh_token(&session.refresh_token).await;
+    assert!(
+        result.is_err(),
+        "a disabled account must not be able to refresh"
+    );
+}
+
+#[tokio::test]
+async fn test_refresh_rejects_locked_user() {
+    let (repo, _store, service) = seeded_service(&md5_encrypt("password123")).await;
+    let session = service.login("testuser", "password123").await.unwrap();
+
+    patch_user(&repo, |user| {
+        user.lock_flag = Some(0);
+        user.lock_time = Some(Utc::now());
+    });
+
+    let result = service.refresh_token(&session.refresh_token).await;
+    assert!(
+        result.is_err(),
+        "a locked account must not be able to refresh"
+    );
+}
+
+// ==================== Login rejects unusable accounts ====================
+
+#[tokio::test]
+async fn test_login_rejects_disabled_user() {
+    let (repo, _store, service) = seeded_service(&md5_encrypt("password123")).await;
+    patch_user(&repo, |user| user.enable = Some(0));
+
+    let result = service.login("testuser", "password123").await;
+    assert!(result.is_err(), "a disabled account must not log in");
+}
+
+#[tokio::test]
+async fn test_login_rejects_deleted_user() {
+    let (repo, _store, service) = seeded_service(&md5_encrypt("password123")).await;
+    patch_user(&repo, |user| user.is_deleted = 1);
+
+    let result = service.login("testuser", "password123").await;
+    assert!(result.is_err(), "a deleted account must not log in");
+}
+
+// ==================== Password hash migration ====================
+
+#[tokio::test]
+async fn test_login_upgrades_legacy_md5_hash() {
+    let legacy = x_rust::common::util::md5_digest("password123");
+    let (repo, _store, service) = seeded_service(&legacy).await;
+
+    service.login("testuser", "password123").await.unwrap();
+
+    let stored = repo
+        .users
+        .lock()
+        .unwrap()
+        .get(&1)
+        .and_then(|user| user.password.clone())
+        .expect("password hash missing");
+
+    assert!(
+        stored.starts_with("$2"),
+        "legacy MD5 hash should be replaced by bcrypt, got: {stored}"
+    );
+    assert!(!x_rust::common::password::needs_rehash(&stored));
+
+    // The upgraded hash still authenticates.
+    service.login("testuser", "password123").await.unwrap();
+}
+
+#[tokio::test]
+async fn test_login_keeps_bcrypt_hash_unchanged() {
+    let hash = x_rust::common::password::hash("password123").unwrap();
+    let (repo, _store, service) = seeded_service(&hash).await;
+
+    service.login("testuser", "password123").await.unwrap();
+
+    let stored = repo
+        .users
+        .lock()
+        .unwrap()
+        .get(&1)
+        .and_then(|user| user.password.clone())
+        .unwrap();
+    assert_eq!(stored, hash, "an up-to-date hash must not be rewritten");
+}
+
+#[tokio::test]
+async fn test_failed_login_is_counted() {
+    let (repo, _store, service) = seeded_service(&md5_encrypt("password123")).await;
+
+    let _ = service.login("testuser", "wrong-password").await;
+
+    let try_count = repo
+        .users
+        .lock()
+        .unwrap()
+        .get(&1)
+        .and_then(|user| user.try_count)
+        .unwrap_or_default();
+    assert_eq!(try_count, 1, "failed attempts must be persisted");
+}
+
+#[tokio::test]
+async fn test_successful_login_resets_failure_counter() {
+    let (repo, _store, service) = seeded_service(&md5_encrypt("password123")).await;
+
+    let _ = service.login("testuser", "wrong-password").await;
+    service.login("testuser", "password123").await.unwrap();
+
+    let user = repo.users.lock().unwrap().get(&1).cloned().unwrap();
+    assert_eq!(user.try_count, Some(0));
+    assert_eq!(user.lock_flag, Some(1));
+    assert!(user.last_login_time.is_some());
 }

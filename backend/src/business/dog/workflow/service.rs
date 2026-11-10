@@ -29,12 +29,12 @@ impl DogWorkflowService {
             .repo
             .create(&req, id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         if let Some(task_id) = task_id {
             self.repo
                 .link_task(task_id, workflow.id, &workflow.uuid)
                 .await
-                .map_err(AppError::DatabaseErrorSeaOrm)?;
+                .map_err(AppError::DatabaseError)?;
         }
         Ok(workflow)
     }
@@ -43,7 +43,7 @@ impl DogWorkflowService {
         self.repo
             .find_by_id(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Workflow with id {} not found", id)))
     }
 
@@ -51,7 +51,7 @@ impl DogWorkflowService {
         self.repo
             .find_by_uuid(uuid)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Workflow with uuid {} not found", uuid)))
     }
 
@@ -60,7 +60,7 @@ impl DogWorkflowService {
             .repo
             .find_by_task_id(task_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         Ok(workflows.into_iter().next())
     }
 
@@ -84,13 +84,13 @@ impl DogWorkflowService {
             .repo
             .update(id, &req)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Workflow with id {} not found", id)))?;
         if let Some(task_id) = has_task_id {
             self.repo
                 .link_task(task_id, workflow.id, &workflow.uuid)
                 .await
-                .map_err(AppError::DatabaseErrorSeaOrm)?;
+                .map_err(AppError::DatabaseError)?;
         }
         Ok(workflow)
     }
@@ -100,7 +100,7 @@ impl DogWorkflowService {
             .repo
             .delete(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         if !deleted {
             return Err(AppError::NotFound(format!(
                 "Workflow with id {} not found",

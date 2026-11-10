@@ -20,14 +20,14 @@ impl SysLogService {
         self.log_repo
             .create(&req, &id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_log(&self, id: &i64) -> Result<SysLog, AppError> {
         self.log_repo
             .find_by_id(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("SysLog with id {} not found", id)))
     }
 
@@ -35,7 +35,7 @@ impl SysLogService {
         self.log_repo
             .find_all()
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_logs_page(
@@ -46,7 +46,7 @@ impl SysLogService {
             .log_repo
             .find_all_with_page(&query)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         Ok(PageResponse::new(
             records,
             total,
@@ -59,7 +59,7 @@ impl SysLogService {
         self.log_repo
             .update(id, &req)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("SysLog with id {} not found", id)))
     }
 
@@ -68,7 +68,7 @@ impl SysLogService {
             .log_repo
             .delete(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         if !deleted {
             return Err(AppError::NotFound(format!(

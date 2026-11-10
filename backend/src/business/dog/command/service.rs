@@ -19,14 +19,14 @@ impl DogCommandService {
         self.repo
             .create(&req, id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_by_id(&self, id: i64) -> Result<DogCommand, AppError> {
         self.repo
             .find_by_id(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Command with id {} not found", id)))
     }
 
@@ -38,7 +38,7 @@ impl DogCommandService {
             .repo
             .find_all_with_page(&query)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         Ok(PageResponse::new(
             records.into_iter().map(CommandVO::from).collect(),
@@ -49,17 +49,14 @@ impl DogCommandService {
     }
 
     pub async fn list_all(&self) -> Result<Vec<DogCommand>, AppError> {
-        self.repo
-            .find_all()
-            .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+        self.repo.find_all().await.map_err(AppError::DatabaseError)
     }
 
     pub async fn update(&self, id: i64, req: UpdateCommandRequest) -> Result<DogCommand, AppError> {
         self.repo
             .update(id, &req)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Command with id {} not found", id)))
     }
 
@@ -72,7 +69,7 @@ impl DogCommandService {
         self.repo
             .update_status(id, status, return_value)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Command with id {} not found", id)))
     }
 
@@ -81,7 +78,7 @@ impl DogCommandService {
             .repo
             .delete(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         if !deleted {
             return Err(AppError::NotFound(format!(
                 "Command with id {} not found",

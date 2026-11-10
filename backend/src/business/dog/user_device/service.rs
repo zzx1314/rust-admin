@@ -42,7 +42,7 @@ impl DogUserDeviceService {
             .device_repo
             .find_by_id_unscoped(req.device_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| {
                 AppError::BadRequest(format!("Device with id {} not found", req.device_id))
             })?;
@@ -52,7 +52,7 @@ impl DogUserDeviceService {
                 .repo
                 .count_active_by_device(req.device_id)
                 .await
-                .map_err(AppError::DatabaseErrorSeaOrm)?;
+                .map_err(AppError::DatabaseError)?;
             if bound > 0 {
                 return Err(AppError::Conflict(format!(
                     "Device with id {} is already bound to another user",
@@ -65,7 +65,7 @@ impl DogUserDeviceService {
             .repo
             .find_any_by_user_and_device(target_user, req.device_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
         {
             if existing.is_deleted == 0 {
                 return Err(AppError::Conflict(format!(
@@ -76,12 +76,12 @@ impl DogUserDeviceService {
             self.repo
                 .restore(existing.id)
                 .await
-                .map_err(AppError::DatabaseErrorSeaOrm)?;
+                .map_err(AppError::DatabaseError)?;
             let restored = self
                 .repo
                 .find_by_id(existing.id, scope)
                 .await
-                .map_err(AppError::DatabaseErrorSeaOrm)?
+                .map_err(AppError::DatabaseError)?
                 .ok_or_else(|| {
                     AppError::NotFound(format!("Binding with id {} not found", existing.id))
                 })?;
@@ -92,7 +92,7 @@ impl DogUserDeviceService {
             .repo
             .create(&req, target_user, generate_id())
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         Ok(UserDeviceVO::from_model(binding, Some(device.device_id)))
     }
 
@@ -101,7 +101,7 @@ impl DogUserDeviceService {
             .repo
             .find_by_id(id, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Binding with id {} not found", id)))?;
         Ok(self.enrich(vec![binding]).await?.remove(0))
     }
@@ -115,7 +115,7 @@ impl DogUserDeviceService {
             .repo
             .find_all_with_page(&query, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         Ok(PageResponse::new(
             self.enrich(records).await?,
@@ -130,7 +130,7 @@ impl DogUserDeviceService {
             .repo
             .find_all(scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         self.enrich(records).await
     }
 
@@ -143,7 +143,7 @@ impl DogUserDeviceService {
             .repo
             .find_all_by_user(user_id, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         self.enrich(records).await
     }
 
@@ -152,7 +152,7 @@ impl DogUserDeviceService {
             .repo
             .delete(id, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         if !deleted {
             return Err(AppError::NotFound(format!(
                 "Binding with id {} not found",
@@ -192,7 +192,7 @@ impl DogUserDeviceService {
             .repo
             .find_all_by_device(device.id, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         self.enrich(records).await
     }
 
@@ -212,7 +212,7 @@ impl DogUserDeviceService {
             .repo
             .find_active_by_user_and_device(target_user, device.id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| {
                 AppError::NotFound(format!(
                     "Device '{}' is not bound to user {}",
@@ -235,7 +235,7 @@ impl DogUserDeviceService {
         self.device_repo
             .find_by_device_code(code)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| {
                 AppError::BadRequest(format!(
                     "Device '{}' is not registered yet; register it before assigning",
@@ -250,7 +250,7 @@ impl DogUserDeviceService {
             .device_repo
             .find_by_ids(&device_ids)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         let codes: HashMap<i64, String> = devices
             .into_iter()
             .map(|device| (device.id, device.device_id))

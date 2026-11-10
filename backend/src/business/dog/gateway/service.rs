@@ -87,7 +87,7 @@ impl DogGateway {
         self.repo
             .find_device(device_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     /// `POST /api/dogGateway/register`.
@@ -104,7 +104,7 @@ impl DogGateway {
             .repo
             .upsert_registration(&registration)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         tracing::info!(
             device_id = %device.device_id,
             device_type = ?device.device_type,
@@ -124,7 +124,7 @@ impl DogGateway {
             .repo
             .apply_heartbeat(device_id, heartbeat)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         if device.is_none() {
             tracing::warn!(
                 device_id = device_id,
@@ -170,7 +170,7 @@ impl DogGateway {
             .command_repo
             .update_status(command_id, &status, return_value)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         match &updated {
             Some(command) => tracing::info!(
@@ -242,7 +242,7 @@ impl DogGateway {
             .media_repo
             .create(&request, generate_id())
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         tracing::info!(
             device_id = device_id,
@@ -302,7 +302,7 @@ impl DogGateway {
             .command_repo
             .update_status(command.id, next_status, command.return_value.clone())
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         tracing::info!(
             device_id = device_id,

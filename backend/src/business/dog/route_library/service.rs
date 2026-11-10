@@ -40,14 +40,14 @@ impl DogRouteLibraryService {
         self.repo
             .create(&req, id, map_version, map_frame)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_by_id(&self, id: i64) -> Result<DogRouteLibrary, AppError> {
         self.repo
             .find_by_id(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Route with id {} not found", id)))
     }
 
@@ -59,7 +59,7 @@ impl DogRouteLibraryService {
                 .repo
                 .find_park_names(&[park_id])
                 .await
-                .map_err(AppError::DatabaseErrorSeaOrm)?;
+                .map_err(AppError::DatabaseError)?;
             vo.park_name = park_names.get(&park_id).cloned();
         }
         Ok(vo)
@@ -73,7 +73,7 @@ impl DogRouteLibraryService {
             .repo
             .find_all_with_page(&query)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         let mut park_ids: Vec<i64> = records.iter().filter_map(|r| r.park_id).collect();
         park_ids.sort_unstable();
@@ -82,7 +82,7 @@ impl DogRouteLibraryService {
             .repo
             .find_park_names(&park_ids)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         let vo_list: Vec<RouteVO> = records
             .into_iter()
@@ -102,10 +102,7 @@ impl DogRouteLibraryService {
     }
 
     pub async fn list_all(&self) -> Result<Vec<DogRouteLibrary>, AppError> {
-        self.repo
-            .find_all()
-            .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+        self.repo.find_all().await.map_err(AppError::DatabaseError)
     }
 
     pub async fn update(
@@ -150,7 +147,7 @@ impl DogRouteLibraryService {
         self.repo
             .update(id, &req, map_version, map_frame)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Route with id {} not found", id)))
     }
 
@@ -159,7 +156,7 @@ impl DogRouteLibraryService {
             .repo
             .delete(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         if !deleted {
             return Err(AppError::NotFound(format!(
                 "Route with id {} not found",
@@ -200,7 +197,7 @@ impl DogRouteLibraryService {
             .park_repo
             .find_any_by_id(park_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::BadRequest(format!("Park with id {park_id} not found")))?;
 
         let map_id = match map_id {
@@ -232,7 +229,7 @@ impl DogRouteLibraryService {
         self.map_repo
             .find_any_by_id(map_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::BadRequest(format!("Map with id {map_id} not found")))
     }
 
@@ -245,7 +242,7 @@ impl DogRouteLibraryService {
             .park_repo
             .find_any_by_id(park_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         if park.is_none() {
             return Err(AppError::BadRequest(format!(
                 "Park with id {park_id} not found"

@@ -18,14 +18,14 @@ impl DogServicesService {
         self.repo
             .create(&req, id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_by_id(&self, id: i64) -> Result<DogServices, AppError> {
         self.repo
             .find_by_id(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Service with id {} not found", id)))
     }
 
@@ -33,7 +33,7 @@ impl DogServicesService {
         self.repo
             .find_all(query)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn update(
@@ -44,7 +44,7 @@ impl DogServicesService {
         self.repo
             .update(id, &req)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Service with id {} not found", id)))
     }
 
@@ -53,7 +53,7 @@ impl DogServicesService {
             .repo
             .delete(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         if !deleted {
             return Err(AppError::NotFound(format!(
                 "Service with id {} not found",

@@ -20,14 +20,14 @@ impl OrgService {
         self.org_repo
             .create(&req, &id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_org(&self, id: &i64) -> Result<Org, AppError> {
         self.org_repo
             .find_by_id(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Org with id {} not found", id)))
     }
 
@@ -41,7 +41,7 @@ impl OrgService {
                 .org_repo
                 .find_all()
                 .await
-                .map_err(AppError::DatabaseErrorSeaOrm)?;
+                .map_err(AppError::DatabaseError)?;
             return Ok(orgs.into_iter().map(SysOrgVo::from).collect());
         }
 
@@ -49,7 +49,7 @@ impl OrgService {
             .org_repo
             .find_tree_with_filter(&query)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         Ok(orgs.into_iter().map(SysOrgVo::from).collect())
     }
 
@@ -63,7 +63,7 @@ impl OrgService {
                 .org_repo
                 .find_tree()
                 .await
-                .map_err(AppError::DatabaseErrorSeaOrm)?;
+                .map_err(AppError::DatabaseError)?;
             let dtos: Vec<OrgTreeDto> = orgs.into_iter().map(OrgTreeDto::from).collect();
             return Ok(build_org_tree(dtos));
         }
@@ -72,13 +72,13 @@ impl OrgService {
             .org_repo
             .find_tree()
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         let matched = self
             .org_repo
             .find_tree_with_filter(&query)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         let all_id_map: HashMap<i64, &Org> = all_orgs.iter().map(|o| (o.id, o)).collect();
         let mut collected: HashMap<i64, Org> = HashMap::new();
@@ -127,14 +127,14 @@ impl OrgService {
         self.org_repo
             .find_by_parent_id(parent_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn update_org(&self, id: &i64, req: UpdateOrgRequest) -> Result<Org, AppError> {
         self.org_repo
             .update(id, &req)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Org with id {} not found", id)))
     }
 
@@ -143,7 +143,7 @@ impl OrgService {
             .org_repo
             .delete(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         if !deleted {
             return Err(AppError::NotFound(format!("Org with id {} not found", id)));

@@ -117,9 +117,6 @@ pub async fn get_task_status_handler(
     Extension(_user): Extension<RequestUser>,
     Path(params): Path<IdParam>,
 ) -> Result<Json<ApiResponse<TaskStatusVO>>, AppError> {
-    let status = state
-        .dog_task_service
-        .get_task_status(params.id)
-        .await?;
+    let status = state.dog_task_service.get_task_status(params.id).await?;
     Ok(Json(ApiResponse::ok(status)))
 }

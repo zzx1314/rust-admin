@@ -2,6 +2,7 @@ pub mod base;
 pub mod data_scope;
 pub mod error;
 pub mod pagination;
+pub mod password;
 pub mod sqlite;
 pub mod traits;
 pub mod util;

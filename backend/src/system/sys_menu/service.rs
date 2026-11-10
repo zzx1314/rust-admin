@@ -24,14 +24,14 @@ impl MenuService {
         self.menu_repo
             .create(&req, &id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_menu(&self, id: &i64) -> Result<Menu, AppError> {
         self.menu_repo
             .find_by_id(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Menu with id {} not found", id)))
     }
 
@@ -39,28 +39,28 @@ impl MenuService {
         self.menu_repo
             .find_all()
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_menu_tree(&self) -> Result<Vec<Menu>, AppError> {
         self.menu_repo
             .find_tree()
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_menus_by_parent(&self, parent_id: Option<i64>) -> Result<Vec<Menu>, AppError> {
         self.menu_repo
             .find_by_parent_id(parent_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn update_menu(&self, id: &i64, req: UpdateMenuRequest) -> Result<Menu, AppError> {
         self.menu_repo
             .update(id, &req)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Menu with id {} not found", id)))
     }
 
@@ -69,7 +69,7 @@ impl MenuService {
             .menu_repo
             .delete(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         if !deleted {
             return Err(AppError::NotFound(format!("Menu with id {} not found", id)));
@@ -85,7 +85,7 @@ impl MenuService {
             .role_repo
             .find_roles_by_user_id(&user_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         let role_id = roles
             .first()
@@ -95,7 +95,7 @@ impl MenuService {
             .menu_repo
             .find_menus_by_role_id(&role_id.id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         let buttons_by_parent: HashMap<i64, Vec<String>> = menus
             .iter()

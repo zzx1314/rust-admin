@@ -21,14 +21,14 @@ impl RoleService {
         self.role_repo
             .create(&req, &id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_role(&self, id: &i64) -> Result<Role, AppError> {
         self.role_repo
             .find_by_id(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Role with id {} not found", id)))
     }
 
@@ -36,7 +36,7 @@ impl RoleService {
         self.role_repo
             .find_all()
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_roles_page(
@@ -47,7 +47,7 @@ impl RoleService {
             .role_repo
             .find_all_with_page(&req)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         let vo_records: Vec<RoleVO> = records.into_iter().map(RoleVO::from).collect();
         Ok(PageResponse::new(vo_records, total, req.page(), req.size()))
     }
@@ -56,7 +56,7 @@ impl RoleService {
         self.role_repo
             .update(id, &req)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Role with id {} not found", id)))
     }
 
@@ -65,7 +65,7 @@ impl RoleService {
             .role_repo
             .delete(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         if !deleted {
             return Err(AppError::NotFound(format!("Role with id {} not found", id)));
@@ -78,7 +78,7 @@ impl RoleService {
         self.role_repo
             .assign_role_to_user(user_id, role_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn remove_role(&self, user_id: &i64, role_id: &i64) -> Result<(), AppError> {
@@ -86,7 +86,7 @@ impl RoleService {
             .role_repo
             .remove_role_from_user(user_id, role_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         if !removed {
             return Err(AppError::NotFound(format!(
@@ -101,14 +101,14 @@ impl RoleService {
         self.role_repo
             .find_roles_by_user_id(user_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_users_for_role(&self, role_id: &i64) -> Result<Vec<User>, AppError> {
         self.role_repo
             .find_users_by_role_id(role_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     async fn generate_id(&self) -> i64 {

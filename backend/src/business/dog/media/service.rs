@@ -19,14 +19,14 @@ impl DogMediaService {
         self.repo
             .create(&req, id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_by_id(&self, id: i64) -> Result<DogMedia, AppError> {
         self.repo
             .find_by_id(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Media with id {} not found", id)))
     }
 
@@ -38,7 +38,7 @@ impl DogMediaService {
             .repo
             .find_all_with_page(&query)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         Ok(PageResponse::new(
             records.into_iter().map(MediaVO::from).collect(),
@@ -49,17 +49,14 @@ impl DogMediaService {
     }
 
     pub async fn list_all(&self) -> Result<Vec<DogMedia>, AppError> {
-        self.repo
-            .find_all()
-            .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+        self.repo.find_all().await.map_err(AppError::DatabaseError)
     }
 
     pub async fn update(&self, id: i64, req: UpdateMediaRequest) -> Result<DogMedia, AppError> {
         self.repo
             .update(id, &req)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Media with id {} not found", id)))
     }
 
@@ -68,7 +65,7 @@ impl DogMediaService {
             .repo
             .delete(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         if !deleted {
             return Err(AppError::NotFound(format!(
                 "Media with id {} not found",

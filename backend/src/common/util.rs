@@ -3,7 +3,6 @@ use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone, Utc};
 use aes::Aes128;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
-use md5::{Digest, Md5};
 
 type Aes128CbcDec = cbc::Decryptor<Aes128>;
 
@@ -68,19 +67,30 @@ pub fn parse_beijing_datetime(s: &str, is_end: bool) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
-/// MD5 encrypt: returns lowercase hex digest.
+/// Hash a plaintext password for storage.
+///
+/// Delegates to [`crate::common::password::hash`] (bcrypt). The name is kept so
+/// existing call sites stay valid; prefer `password::hash` in new code because
+/// it reports why hashing failed instead of returning an empty string.
 pub fn md5_encrypt(input: &str) -> String {
-    let mut hasher = Md5::new();
-    hasher.update(input.as_bytes());
-    let result = hasher.finalize();
-    result.iter().map(|b| format!("{:02x}", b)).collect()
+    crate::common::password::hash(input).unwrap_or_else(|error| {
+        tracing::error!(%error, "password hashing failed");
+        String::new()
+    })
 }
 
-/// Verify input against a stored MD5 hash.
-/// Supports hashes with or without the "{MD5}" prefix.
+/// Verify a password against a stored hash, accepting both bcrypt and the
+/// legacy unsalted MD5 format (with or without the "{MD5}" prefix).
+///
+/// Delegates to [`crate::common::password::verify`].
 pub fn md5_verify(input: &str, md5_hash: &str) -> bool {
-    let normalized = md5_hash.strip_prefix("{MD5}").unwrap_or(md5_hash);
-    md5_encrypt(input) == normalized
+    crate::common::password::verify(input, md5_hash)
+}
+
+/// Legacy unsalted MD5 digest, retained for seeding pre-migration rows in
+/// tests and for the login-time rehash path.
+pub fn md5_digest(input: &str) -> String {
+    crate::common::password::md5_digest(input)
 }
 
 /// Decrypt AES-128-CBC ZeroPadding encrypted password (base64-encoded).

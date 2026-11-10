@@ -53,14 +53,14 @@ impl UserService {
             .user_repo
             .create(&req, &id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         // Assign role if provided
         if let Some(role_id) = req.role {
             self.role_repo
                 .assign_role_to_user(&id, &role_id)
                 .await
-                .map_err(AppError::DatabaseErrorSeaOrm)?;
+                .map_err(AppError::DatabaseError)?;
         }
 
         Ok(user)
@@ -70,7 +70,7 @@ impl UserService {
         self.user_repo
             .find_by_id(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("User with id {} not found", id)))
     }
 
@@ -78,7 +78,7 @@ impl UserService {
         self.user_repo
             .find_all()
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_users_page(
@@ -89,7 +89,7 @@ impl UserService {
             .user_repo
             .find_all_with_page(&query)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         let org_futures = records.iter().map(|u| self.org_repo.find_by_id(&u.org_id));
         let role_futures = records
@@ -140,7 +140,7 @@ impl UserService {
             .user_repo
             .update(id, &user_req)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("User with id {} not found", id)))?;
 
         if let Some(role_id) = role_id {
@@ -148,20 +148,20 @@ impl UserService {
                 .role_repo
                 .find_roles_by_user_id(id)
                 .await
-                .map_err(AppError::DatabaseErrorSeaOrm)?;
+                .map_err(AppError::DatabaseError)?;
             for role in &current_roles {
                 if role.id != role_id {
                     self.role_repo
                         .remove_role_from_user(id, &role.id)
                         .await
-                        .map_err(AppError::DatabaseErrorSeaOrm)?;
+                        .map_err(AppError::DatabaseError)?;
                 }
             }
             if !current_roles.iter().any(|role| role.id == role_id) {
                 self.role_repo
                     .assign_role_to_user(id, &role_id)
                     .await
-                    .map_err(AppError::DatabaseErrorSeaOrm)?;
+                    .map_err(AppError::DatabaseError)?;
             }
         }
 
@@ -173,7 +173,7 @@ impl UserService {
             .user_repo
             .delete(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         if !deleted {
             return Err(AppError::NotFound(format!("User with id {} not found", id)));
@@ -185,7 +185,7 @@ impl UserService {
         self.user_repo
             .find_by_username(username)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::Unauthorized("用户名或密码错误".to_string()))
     }
 
@@ -199,7 +199,7 @@ impl UserService {
             .user_repo
             .find_by_id(user_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
         if let (Some(old_pwd), Some(password_hash)) = (old_password, &user.password)
@@ -213,28 +213,14 @@ impl UserService {
         let hashed = md5_encrypt(&decrypted);
 
         let req = UpdateUserRequest {
-            username: None,
-            phone: None,
-            email: None,
-            real_name: None,
             password: Some(hashed),
-            org_id: None,
-            remarks: None,
-            card: None,
-            is_show: None,
-            enable: None,
-            sex: None,
-            try_count: None,
-            lock_flag: None,
-            lock_time: None,
-            last_login_time: None,
-            role: None,
+            ..Default::default()
         };
 
         self.user_repo
             .update(user_id, &req)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         Ok(PasswordUpdateResponse {
             success: true,
@@ -246,59 +232,31 @@ impl UserService {
         self.role_repo
             .find_users_by_role_id(role_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn reset_password(&self, user_id: &i64, password: &str) -> Result<(), AppError> {
         let hashed = md5_encrypt(password);
         let req = UpdateUserRequest {
-            username: None,
-            phone: None,
-            email: None,
-            real_name: None,
             password: Some(hashed),
-            org_id: None,
-            remarks: None,
-            card: None,
-            is_show: None,
-            enable: None,
-            sex: None,
-            try_count: None,
-            lock_flag: None,
-            lock_time: None,
-            last_login_time: None,
-            role: None,
+            ..Default::default()
         };
         self.user_repo
             .update(user_id, &req)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         Ok(())
     }
 
     pub async fn toggle_enable(&self, user_id: &i64, enable: i32) -> Result<(), AppError> {
         let req = UpdateUserRequest {
-            username: None,
-            phone: None,
-            email: None,
-            real_name: None,
-            password: None,
-            org_id: None,
-            remarks: None,
-            card: None,
-            is_show: None,
             enable: Some(enable),
-            sex: None,
-            try_count: None,
-            lock_flag: None,
-            lock_time: None,
-            last_login_time: None,
-            role: None,
+            ..Default::default()
         };
         self.user_repo
             .update(user_id, &req)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         Ok(())
     }
 

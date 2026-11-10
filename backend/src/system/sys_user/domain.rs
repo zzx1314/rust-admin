@@ -22,7 +22,12 @@ pub struct CreateUserRequest {
     pub role: Option<i64>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+/// Partial user update.
+///
+/// `None` means "leave this column untouched", so callers that only change one
+/// or two fields should start from [`UpdateUserRequest::default`] instead of
+/// spelling out all 17 fields.
+#[derive(Debug, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateUserRequest {
     pub username: Option<String>,

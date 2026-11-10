@@ -62,14 +62,14 @@ impl DogTaskService {
         self.repo
             .create(&req, id, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_by_id(&self, id: i64, scope: &DataScope) -> Result<DogTask, AppError> {
         self.repo
             .find_by_id(id, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Task with id {} not found", id)))
     }
 
@@ -82,7 +82,7 @@ impl DogTaskService {
             .repo
             .find_all_with_page(&query, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         Ok(PageResponse::new(
             records,
@@ -96,7 +96,7 @@ impl DogTaskService {
         self.repo
             .find_all(scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn update(
@@ -111,7 +111,7 @@ impl DogTaskService {
         self.repo
             .update(id, &req, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Task with id {} not found", id)))
     }
 
@@ -124,7 +124,7 @@ impl DogTaskService {
         self.repo
             .update_status(id, status, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Task with id {} not found", id)))
     }
 
@@ -133,7 +133,7 @@ impl DogTaskService {
             .repo
             .delete(id, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         if !deleted {
             return Err(AppError::NotFound(format!("Task with id {} not found", id)));
         }
@@ -147,7 +147,7 @@ impl DogTaskService {
             .repo
             .find_by_id(id, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Task with id {} not found", id)))?;
 
         // Find workflow by workflow_uuid (or workflow_id)
@@ -155,12 +155,12 @@ impl DogTaskService {
             self.workflow_repo
                 .find_by_uuid(uuid)
                 .await
-                .map_err(AppError::DatabaseErrorSeaOrm)?
+                .map_err(AppError::DatabaseError)?
         } else if let Some(wid) = task.workflow_id {
             self.workflow_repo
                 .find_by_id(wid)
                 .await
-                .map_err(AppError::DatabaseErrorSeaOrm)?
+                .map_err(AppError::DatabaseError)?
         } else {
             return Err(AppError::BadRequest(
                 "Task has no associated workflow".to_string(),
@@ -207,7 +207,7 @@ impl DogTaskService {
                     .device_repo
                     .find_by_id_unscoped(did)
                     .await
-                    .map_err(AppError::DatabaseErrorSeaOrm)?
+                    .map_err(AppError::DatabaseError)?
                     .ok_or_else(|| {
                         AppError::NotFound(format!("Device with id {} not found", did))
                     })?;
@@ -236,7 +236,7 @@ impl DogTaskService {
             .command_repo
             .create(&command_req, command_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         // Dispatch via gateway
         match self.gateway.dispatch_command(&command).await {
@@ -252,7 +252,7 @@ impl DogTaskService {
         self.repo
             .update_status_unscoped(id, "进行中")
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| {
                 AppError::NotFound(format!("Task with id {} not found after update", id))
             })
@@ -270,7 +270,7 @@ impl DogTaskService {
             .route_repo
             .find_by_id(route_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::BadRequest(format!("Route with id {route_id} not found")))?;
         let map_id = route
             .map_id
@@ -279,7 +279,7 @@ impl DogTaskService {
             .map_repo
             .find_any_by_id(map_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| {
                 AppError::BadRequest(format!("Route {route_id} references missing map {map_id}"))
             })?;
@@ -303,7 +303,7 @@ impl DogTaskService {
             .command_repo
             .find_by_task_id(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         for command in commands {
             if let Some(ref return_value) = command.return_value {
@@ -407,7 +407,7 @@ impl DogTaskService {
             .device_repo
             .exists_for_scope(device_id, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         if !accessible {
             return Err(AppError::BadRequest(format!(
                 "Device with id {} not found or not accessible",

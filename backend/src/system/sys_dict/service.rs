@@ -20,14 +20,14 @@ impl SysDictService {
         self.dict_repo
             .create(&req, &id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_dict(&self, id: &i64) -> Result<SysDict, AppError> {
         self.dict_repo
             .find_by_id(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("SysDict with id {} not found", id)))
     }
 
@@ -35,7 +35,7 @@ impl SysDictService {
         self.dict_repo
             .find_all()
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_dicts_page(
@@ -46,7 +46,7 @@ impl SysDictService {
             .dict_repo
             .find_all_with_page(&query)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         Ok(PageResponse::new(
             records,
             total,
@@ -63,7 +63,7 @@ impl SysDictService {
         self.dict_repo
             .update(id, &req)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("SysDict with id {} not found", id)))
     }
 
@@ -72,7 +72,7 @@ impl SysDictService {
             .dict_repo
             .delete(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         if !deleted {
             return Err(AppError::NotFound(format!(

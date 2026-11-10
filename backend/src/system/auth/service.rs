@@ -1,16 +1,24 @@
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::common::util::md5_verify;
+use crate::common::password;
+use chrono::Utc;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 
 use crate::common::error::AppError;
 use crate::common::traits::{RoleRepository, TokenStore, UserRepository};
 use crate::system::sys_dict_item::service::SysDictItemService;
-use crate::system::sys_user::domain::User;
+use crate::system::sys_user::domain::{UpdateUserRequest, User};
 
 const REFRESH_TOKEN_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Distinguishes the two token kinds so that a refresh token can never be
+/// replayed as an access token (and vice versa).
+const TOKEN_TYPE_ACCESS: &str = "access";
+const TOKEN_TYPE_REFRESH: &str = "refresh";
+
+/// `enable` value that marks an account as usable.
+const ENABLED: i32 = 1;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -18,8 +26,18 @@ struct Claims {
     username: String,
     exp: u64,
     iat: u64,
+    /// `"access"` or `"refresh"`; see [`TOKEN_TYPE_ACCESS`].
+    #[serde(default = "default_token_type")]
+    typ: String,
     #[serde(default)]
     jti: Option<String>,
+}
+
+/// Tokens issued before `typ` existed are treated as access tokens, which is
+/// what they effectively were: the stored access token was the only one
+/// `validate_token` would accept.
+fn default_token_type() -> String {
+    TOKEN_TYPE_ACCESS.to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -202,133 +220,76 @@ impl AuthService {
         }
     }
 
-    async fn get_max_try_count(&self) -> i32 {
-        if let Ok(policy) = self.dict_item_service.get_safe_policy().await
-            && let Some(val) = policy.get("sysLoginMaxTryCount")
-            && let Ok(num) = val.trim_end_matches('次').parse::<i32>()
-        {
-            return num;
-        }
-        5
-    }
+    /// Read the security policy once and parse every field we need.
+    ///
+    /// Previously each getter called `get_safe_policy()` separately, so a single
+    /// login issued 4-6 identical dictionary queries.
+    async fn security_policy(&self) -> SecurityPolicy {
+        let Ok(policy) = self.dict_item_service.get_safe_policy().await else {
+            return SecurityPolicy::default();
+        };
 
-    async fn get_max_lock_time_mins(&self) -> i64 {
-        if let Ok(policy) = self.dict_item_service.get_safe_policy().await
-            && let Some(val) = policy.get("sysLoginMaxLockTime")
-            && let Ok(num) = val.trim_end_matches("分钟").parse::<i64>()
-        {
-            return num;
+        SecurityPolicy {
+            max_try_count: policy
+                .get("sysLoginMaxTryCount")
+                .and_then(|value| parse_leading_number(value, "次"))
+                .unwrap_or(5),
+            max_lock_time_mins: policy
+                .get("sysLoginMaxLockTime")
+                .and_then(|value| parse_leading_number(value, "分钟"))
+                .unwrap_or(5),
+            session_timeout_secs: policy
+                .get("sysOvertime")
+                .and_then(|value| parse_timeout_secs(value))
+                .unwrap_or(24 * 60 * 60),
+            pass_change_days: policy
+                .get("sysPassChange")
+                .and_then(|value| parse_leading_number(value, "天"))
+                .filter(|days| *days > 0),
         }
-        5
-    }
-
-    async fn get_session_timeout_secs(&self) -> u64 {
-        if let Ok(policy) = self.dict_item_service.get_safe_policy().await
-            && let Some(val) = policy.get("sysOvertime")
-        {
-            let text = val.trim();
-            if let Ok(num) = text.parse::<u64>()
-                && num > 0
-            {
-                return num;
-            }
-            if let Some(mins) = text
-                .strip_suffix("分钟")
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                && mins > 0
-            {
-                return mins * 60;
-            }
-        }
-        24 * 60 * 60
-    }
-
-    /// Read the password validity period (in days) from the security policy.
-    /// Returns `None` when the policy is missing or not a positive number, in
-    /// which case passwords never expire.
-    async fn get_pass_change_days(&self) -> Option<i64> {
-        if let Ok(policy) = self.dict_item_service.get_safe_policy().await
-            && let Some(val) = policy.get("sysPassChange")
-        {
-            let text = val.trim().trim_end_matches('天').trim();
-            if let Ok(days) = text.parse::<i64>()
-                && days > 0
-            {
-                return Some(days);
-            }
-        }
-        None
     }
 
     /// Determine whether the user's password has expired and, if a validity
     /// period is configured, when it expires.
-    async fn check_password_expired(&self, user: &User) -> (bool, Option<String>) {
-        let Some(days) = self.get_pass_change_days().await else {
+    fn password_expiry(policy: &SecurityPolicy, user: &User) -> (bool, Option<String>) {
+        let Some(days) = policy.pass_change_days else {
             return (false, None);
         };
         let Some(updated) = user.pass_update_time else {
             return (false, None);
         };
         let expire_at = updated + chrono::Duration::days(days);
-        let expired = chrono::Utc::now() >= expire_at;
+        let expired = Utc::now() >= expire_at;
         (
             expired,
             Some(crate::common::util::format_datetime(expire_at)),
         )
     }
 
-    pub async fn login(&self, username: &str, password: &str) -> Result<LoginResponse, AppError> {
+    /// Authenticate a user and issue a token pair.
+    ///
+    /// This is the single implementation behind both
+    /// [`AuthService::login`] and [`AuthService::login_with_vo`]; those only
+    /// reshape the result, so the credential / lockout / token logic lives here
+    /// exactly once.
+    async fn authenticate(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<AuthenticatedSession, AppError> {
         let user = self
             .user_repo
             .find_by_username(username)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
-            .ok_or_else(|| AppError::Unauthorized("用户名或密码错误".to_string()))?;
+            .map_err(AppError::DatabaseError)?
+            .ok_or_else(invalid_credentials)?;
 
-        if user.lock_flag == Some(0) {
-            let max_lock_mins = self.get_max_lock_time_mins().await;
-            if let Some(lock_time) = user.lock_time {
-                let lock_duration = chrono::Utc::now() - lock_time;
-                if lock_duration < chrono::Duration::minutes(max_lock_mins) {
-                    let remaining = max_lock_mins - lock_duration.num_minutes();
-                    return Err(AppError::Unauthorized(format!(
-                        "账户已被锁定，请{}分钟后再试",
-                        remaining.max(1)
-                    )));
-                }
-                let _ = self
-                    .user_repo
-                    .update(
-                        &user.id,
-                        &crate::system::sys_user::domain::UpdateUserRequest {
-                            username: None,
-                            phone: None,
-                            email: None,
-                            real_name: None,
-                            password: None,
-                            org_id: None,
-                            remarks: None,
-                            card: None,
-                            is_show: None,
-                            enable: None,
-                            sex: None,
-                            try_count: Some(0),
-                            lock_flag: Some(1),
-                            lock_time: None,
-                            last_login_time: None,
-                            role: None,
-                        },
-                    )
-                    .await;
-            }
-        }
+        let policy = self.security_policy().await;
 
-        let password_hash = user
-            .password
-            .as_ref()
-            .ok_or_else(|| AppError::Unauthorized("用户名或密码错误".to_string()))?;
+        self.release_expired_lock(&user, &policy).await?;
 
-        let valid = md5_verify(password, password_hash);
+        let password_hash = user.password.as_deref().unwrap_or_default();
+        let valid = password::verify(password, password_hash);
 
         tracing::debug!(
             username = %username,
@@ -340,136 +301,191 @@ impl AuthService {
         );
 
         if !valid {
-            let current_count = user.try_count.unwrap_or(0) + 1;
-            let max_count = self.get_max_try_count().await;
-
-            if current_count >= max_count {
-                let _ = self
-                    .user_repo
-                    .update(
-                        &user.id,
-                        &crate::system::sys_user::domain::UpdateUserRequest {
-                            username: None,
-                            phone: None,
-                            email: None,
-                            real_name: None,
-                            password: None,
-                            org_id: None,
-                            remarks: None,
-                            card: None,
-                            is_show: None,
-                            enable: None,
-                            sex: None,
-                            try_count: Some(current_count),
-                            lock_flag: Some(0),
-                            lock_time: Some(chrono::Utc::now()),
-                            last_login_time: None,
-                            role: None,
-                        },
-                    )
-                    .await;
-                tracing::warn!(
-                    username = %username,
-                    user_id = user.id,
-                    "Account locked after {} failed attempts",
-                    current_count
-                );
-                return Err(AppError::Unauthorized(format!(
-                    "密码错误{}次，账户已被锁定，请{}分钟后再试",
-                    current_count,
-                    self.get_max_lock_time_mins().await
-                )));
-            } else {
-                let _ = self
-                    .user_repo
-                    .update(
-                        &user.id,
-                        &crate::system::sys_user::domain::UpdateUserRequest {
-                            username: None,
-                            phone: None,
-                            email: None,
-                            real_name: None,
-                            password: None,
-                            org_id: None,
-                            remarks: None,
-                            card: None,
-                            is_show: None,
-                            enable: None,
-                            sex: None,
-                            try_count: Some(current_count),
-                            lock_flag: None,
-                            lock_time: None,
-                            last_login_time: None,
-                            role: None,
-                        },
-                    )
-                    .await;
-                return Err(AppError::Unauthorized(format!(
-                    "用户名或密码错误，还可重试{}次",
-                    max_count - current_count
-                )));
-            }
+            return self.record_failed_attempt(&user, &policy).await;
         }
 
-        let _ = self
-            .user_repo
-            .update(
-                &user.id,
-                &crate::system::sys_user::domain::UpdateUserRequest {
-                    username: None,
-                    phone: None,
-                    email: None,
-                    real_name: None,
-                    password: None,
-                    org_id: None,
-                    remarks: None,
-                    card: None,
-                    is_show: None,
-                    enable: None,
-                    sex: None,
-                    try_count: Some(0),
-                    lock_flag: Some(1),
-                    lock_time: None,
-                    last_login_time: Some(chrono::Utc::now()),
-                    role: None,
-                },
-            )
+        // Reject disabled / deleted accounts only after the password check so
+        // that the response does not reveal whether the account exists.
+        if user.is_deleted != 0 {
+            return Err(invalid_credentials());
+        }
+        if user.enable.is_some_and(|enable| enable != ENABLED) {
+            return Err(AppError::AuthError("账户已被禁用".to_string()));
+        }
+
+        self.upgrade_password_hash_if_needed(&user, password, password_hash)
             .await;
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let request = UpdateUserRequest {
+            try_count: Some(0),
+            lock_flag: Some(1),
+            last_login_time: Some(Utc::now()),
+            ..Default::default()
+        };
+        self.user_repo
+            .update(&user.id, &request)
+            .await
+            .map_err(AppError::DatabaseError)?;
 
-        let session_timeout = self.get_session_timeout_secs().await;
+        self.issue_session(user, &policy).await
+    }
+
+    /// Clear the lock when the configured lockout window has elapsed.
+    async fn release_expired_lock(
+        &self,
+        user: &User,
+        policy: &SecurityPolicy,
+    ) -> Result<(), AppError> {
+        // `lock_flag == Some(0)` means "locked"; any other value is unlocked.
+        if user.lock_flag != Some(0) {
+            return Ok(());
+        }
+        let Some(lock_time) = user.lock_time else {
+            return Ok(());
+        };
+
+        let locked_for = Utc::now() - lock_time;
+        if locked_for < chrono::Duration::minutes(policy.max_lock_time_mins) {
+            let remaining = policy.max_lock_time_mins - locked_for.num_minutes();
+            return Err(AppError::Unauthorized(format!(
+                "账户已被锁定，请{}分钟后再试",
+                remaining.max(1)
+            )));
+        }
+
+        let request = UpdateUserRequest {
+            try_count: Some(0),
+            lock_flag: Some(1),
+            ..Default::default()
+        };
+        self.user_repo
+            .update(&user.id, &request)
+            .await
+            .map_err(AppError::DatabaseError)?;
+        Ok(())
+    }
+
+    /// Bump the failure counter and lock the account when the limit is hit.
+    async fn record_failed_attempt(
+        &self,
+        user: &User,
+        policy: &SecurityPolicy,
+    ) -> Result<AuthenticatedSession, AppError> {
+        let current_count = user.try_count.unwrap_or(0) + 1;
+
+        if current_count >= policy.max_try_count {
+            let request = UpdateUserRequest {
+                try_count: Some(current_count),
+                lock_flag: Some(0),
+                lock_time: Some(Utc::now()),
+                ..Default::default()
+            };
+            // A failure to persist the counter must not silently disable the
+            // lockout, so this one is propagated instead of discarded.
+            self.user_repo
+                .update(&user.id, &request)
+                .await
+                .map_err(AppError::DatabaseError)?;
+
+            tracing::warn!(
+                user_id = user.id,
+                attempts = current_count,
+                "Account locked after repeated failed logins"
+            );
+            return Err(AppError::Unauthorized(format!(
+                "密码错误{}次，账户已被锁定，请{}分钟后再试",
+                current_count, policy.max_lock_time_mins
+            )));
+        }
+
+        let request = UpdateUserRequest {
+            try_count: Some(current_count),
+            ..Default::default()
+        };
+        self.user_repo
+            .update(&user.id, &request)
+            .await
+            .map_err(AppError::DatabaseError)?;
+
+        Err(AppError::Unauthorized(format!(
+            "用户名或密码错误，还可重试{}次",
+            policy.max_try_count - current_count
+        )))
+    }
+
+    /// Replace a legacy MD5 hash with bcrypt right after a successful login.
+    ///
+    /// Failures are logged and ignored: the user is already authenticated, and
+    /// a failed upgrade only means the next login retries it.
+    async fn upgrade_password_hash_if_needed(
+        &self,
+        user: &User,
+        password: &str,
+        stored_hash: &str,
+    ) {
+        if !crate::common::password::needs_rehash(stored_hash) {
+            return;
+        }
+        let Ok(hashed) = crate::common::password::hash(password) else {
+            tracing::warn!(user_id = user.id, "failed to rehash password");
+            return;
+        };
+
+        let request = UpdateUserRequest {
+            password: Some(hashed),
+            ..Default::default()
+        };
+        match self.user_repo.update(&user.id, &request).await {
+            Ok(_) => tracing::info!(
+                user_id = user.id,
+                "password hash upgraded from legacy MD5 to bcrypt"
+            ),
+            Err(error) => tracing::warn!(
+                user_id = user.id,
+                %error,
+                "failed to persist upgraded password hash"
+            ),
+        }
+    }
+
+    /// Build the token pair and persist it, then hand back the session.
+    async fn issue_session(
+        &self,
+        user: User,
+        policy: &SecurityPolicy,
+    ) -> Result<AuthenticatedSession, AppError> {
+        let now = Utc::now().timestamp().max(0) as u64;
+        let session_timeout = policy.session_timeout_secs;
         let access_exp = now + session_timeout;
         let refresh_exp = now + REFRESH_TOKEN_TTL_SECS;
 
+        let encoding_key = EncodingKey::from_secret(self.jwt_secret.as_bytes());
         let user_id = user.id;
         let user_id_str = user_id.to_string();
-        let access_claims = Claims {
-            sub: user_id,
-            username: user.username.clone(),
-            exp: access_exp,
-            iat: now,
-            jti: None,
-        };
 
-        let refresh_claims = Claims {
-            sub: user_id,
-            username: user.username.clone(),
-            exp: refresh_exp,
-            iat: now,
-            jti: Some(uuid::Uuid::new_v4().to_string()),
-        };
+        let access_token = self.encode_token(
+            Claims {
+                sub: user_id,
+                username: user.username.clone(),
+                exp: access_exp,
+                iat: now,
+                typ: TOKEN_TYPE_ACCESS.to_string(),
+                jti: None,
+            },
+            &encoding_key,
+        )?;
 
-        let encoding_key = EncodingKey::from_secret(self.jwt_secret.as_bytes());
-
-        let access_token = encode(&Header::default(), &access_claims, &encoding_key)
-            .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
-
-        let refresh_token = encode(&Header::default(), &refresh_claims, &encoding_key)
-            .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
+        let refresh_token = self.encode_token(
+            Claims {
+                sub: user_id,
+                username: user.username.clone(),
+                exp: refresh_exp,
+                iat: now,
+                typ: TOKEN_TYPE_REFRESH.to_string(),
+                jti: Some(uuid::Uuid::new_v4().to_string()),
+            },
+            &encoding_key,
+        )?;
 
         self.token_store
             .set_token(&user_id_str, &access_token, session_timeout)
@@ -478,11 +494,43 @@ impl AuthService {
             .set_refresh_token(&user_id_str, &refresh_token, REFRESH_TOKEN_TTL_SECS)
             .await?;
 
-        Ok(LoginResponse {
+        Ok(AuthenticatedSession {
             access_token,
             refresh_token,
+            access_exp,
+            session_timeout,
+            user,
+            policy: policy.clone(),
+        })
+    }
+
+    fn encode_token(&self, claims: Claims, key: &EncodingKey) -> Result<String, AppError> {
+        encode(&Header::default(), &claims, key)
+            .map_err(|error| AppError::InternalError(format!("token generation failed: {error}")))
+    }
+
+    /// Decode and validate a token of the expected kind.
+    fn decode_token(&self, token: &str, expected_type: &str) -> Result<Claims, AppError> {
+        let data = decode::<Claims>(
+            token,
+            &DecodingKey::from_secret(self.jwt_secret.as_bytes()),
+            &Validation::default(),
+        )
+        .map_err(|_| AppError::Unauthorized("Invalid token".to_string()))?;
+
+        if data.claims.typ != expected_type {
+            return Err(AppError::Unauthorized("Invalid token".to_string()));
+        }
+        Ok(data.claims)
+    }
+
+    pub async fn login(&self, username: &str, password: &str) -> Result<LoginResponse, AppError> {
+        let session = self.authenticate(username, password).await?;
+        Ok(LoginResponse {
+            access_token: session.access_token,
+            refresh_token: session.refresh_token,
             token_type: "Bearer".to_string(),
-            user: user.into(),
+            user: session.user.into(),
         })
     }
 
@@ -491,223 +539,32 @@ impl AuthService {
         username: &str,
         password: &str,
     ) -> Result<UserLoginData, AppError> {
-        let user = self
-            .user_repo
-            .find_by_username(username)
-            .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
-            .ok_or_else(|| AppError::Unauthorized("用户名或密码错误".to_string()))?;
+        let session = self.authenticate(username, password).await?;
+        self.build_login_data(session).await
+    }
 
-        if user.lock_flag == Some(0) {
-            let max_lock_mins = self.get_max_lock_time_mins().await;
-            if let Some(lock_time) = user.lock_time {
-                let lock_duration = chrono::Utc::now() - lock_time;
-                if lock_duration < chrono::Duration::minutes(max_lock_mins) {
-                    let remaining = max_lock_mins - lock_duration.num_minutes();
-                    return Err(AppError::Unauthorized(format!(
-                        "账户已被锁定，请{}分钟后再试",
-                        remaining.max(1)
-                    )));
-                }
-                let _ = self
-                    .user_repo
-                    .update(
-                        &user.id,
-                        &crate::system::sys_user::domain::UpdateUserRequest {
-                            username: None,
-                            phone: None,
-                            email: None,
-                            real_name: None,
-                            password: None,
-                            org_id: None,
-                            remarks: None,
-                            card: None,
-                            is_show: None,
-                            enable: None,
-                            sex: None,
-                            try_count: Some(0),
-                            lock_flag: Some(1),
-                            lock_time: None,
-                            last_login_time: None,
-                            role: None,
-                        },
-                    )
-                    .await;
-            }
-        }
-
-        let password_hash = user
-            .password
-            .as_ref()
-            .ok_or_else(|| AppError::Unauthorized("用户名或密码错误".to_string()))?;
-
-        let valid = md5_verify(password, password_hash);
-
-        tracing::debug!(
-            username = %username,
-            user_id = user.id,
-            enable = ?user.enable,
-            is_deleted = user.is_deleted,
-            password_matches = valid,
-            "Login credential check"
-        );
-
-        if !valid {
-            let current_count = user.try_count.unwrap_or(0) + 1;
-            let max_count = self.get_max_try_count().await;
-
-            if current_count >= max_count {
-                let _ = self
-                    .user_repo
-                    .update(
-                        &user.id,
-                        &crate::system::sys_user::domain::UpdateUserRequest {
-                            username: None,
-                            phone: None,
-                            email: None,
-                            real_name: None,
-                            password: None,
-                            org_id: None,
-                            remarks: None,
-                            card: None,
-                            is_show: None,
-                            enable: None,
-                            sex: None,
-                            try_count: Some(current_count),
-                            lock_flag: Some(0),
-                            lock_time: Some(chrono::Utc::now()),
-                            last_login_time: None,
-                            role: None,
-                        },
-                    )
-                    .await;
-                tracing::warn!(
-                    username = %username,
-                    user_id = user.id,
-                    "Account locked after {} failed attempts",
-                    current_count
-                );
-                return Err(AppError::Unauthorized(format!(
-                    "密码错误{}次，账户已被锁定，请{}分钟后再试",
-                    current_count,
-                    self.get_max_lock_time_mins().await
-                )));
-            } else {
-                let _ = self
-                    .user_repo
-                    .update(
-                        &user.id,
-                        &crate::system::sys_user::domain::UpdateUserRequest {
-                            username: None,
-                            phone: None,
-                            email: None,
-                            real_name: None,
-                            password: None,
-                            org_id: None,
-                            remarks: None,
-                            card: None,
-                            is_show: None,
-                            enable: None,
-                            sex: None,
-                            try_count: Some(current_count),
-                            lock_flag: None,
-                            lock_time: None,
-                            last_login_time: None,
-                            role: None,
-                        },
-                    )
-                    .await;
-                return Err(AppError::Unauthorized(format!(
-                    "用户名或密码错误，还可重试{}次",
-                    max_count - current_count
-                )));
-            }
-        }
-
-        let _ = self
-            .user_repo
-            .update(
-                &user.id,
-                &crate::system::sys_user::domain::UpdateUserRequest {
-                    username: None,
-                    phone: None,
-                    email: None,
-                    real_name: None,
-                    password: None,
-                    org_id: None,
-                    remarks: None,
-                    card: None,
-                    is_show: None,
-                    enable: None,
-                    sex: None,
-                    try_count: Some(0),
-                    lock_flag: Some(1),
-                    lock_time: None,
-                    last_login_time: Some(chrono::Utc::now()),
-                    role: None,
-                },
-            )
-            .await;
-
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        let session_timeout = self.get_session_timeout_secs().await;
-        let access_exp = now + session_timeout;
-        let refresh_exp = now + REFRESH_TOKEN_TTL_SECS;
-
-        let user_id = user.id;
-        let user_id_str = user_id.to_string();
-        let access_claims = Claims {
-            sub: user_id,
-            username: user.username.clone(),
-            exp: access_exp,
-            iat: now,
-            jti: None,
-        };
-
-        let refresh_claims = Claims {
-            sub: user_id,
-            username: user.username.clone(),
-            exp: refresh_exp,
-            iat: now,
-            jti: Some(uuid::Uuid::new_v4().to_string()),
-        };
-
-        let encoding_key = EncodingKey::from_secret(self.jwt_secret.as_bytes());
-
-        let access_token = encode(&Header::default(), &access_claims, &encoding_key)
-            .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
-
-        let refresh_token = encode(&Header::default(), &refresh_claims, &encoding_key)
-            .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
-
-        self.token_store
-            .set_token(&user_id_str, &access_token, session_timeout)
-            .await?;
-        self.token_store
-            .set_refresh_token(&user_id_str, &refresh_token, REFRESH_TOKEN_TTL_SECS)
-            .await?;
-
+    async fn build_login_data(
+        &self,
+        session: AuthenticatedSession,
+    ) -> Result<UserLoginData, AppError> {
+        let user_id = session.user.id;
         let roles = self.get_user_roles(&user_id).await?;
         let permissions = self.get_user_permissions(&user_id).await?;
 
-        let (password_expired, password_expire_date) = self.check_password_expired(&user).await;
-
-        let expires = chrono::DateTime::from_timestamp(access_exp as i64, 0)
-            .map(|dt| dt.format("%Y/%m/%d %H:%M:%S").to_string())
-            .unwrap_or_default();
+        let (password_expired, password_expire_date) =
+            Self::password_expiry(&session.policy, &session.user);
 
         Ok(UserLoginData {
-            access_token,
-            refresh_token,
-            expires,
+            access_token: session.access_token,
+            refresh_token: session.refresh_token,
+            expires: crate::common::util::format_datetime(
+                chrono::DateTime::from_timestamp(session.access_exp as i64, 0)
+                    .unwrap_or_else(Utc::now),
+            ),
             user_id: Some(user_id),
-            username: user.username.clone(),
+            username: session.user.username.clone(),
             avatar: None,
-            nickname: user.real_name.clone(),
+            nickname: session.user.real_name.clone(),
             roles,
             permissions,
             password_expired: Some(password_expired),
@@ -720,7 +577,7 @@ impl AuthService {
             .role_repo
             .find_roles_by_user_id(user_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         Ok(roles.into_iter().map(|r| r.id).collect())
     }
 
@@ -729,11 +586,10 @@ impl AuthService {
             .role_repo
             .find_roles_by_user_id(user_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         let permissions: Vec<String> = roles.iter().filter_map(|r| r.code.clone()).collect();
         Ok(permissions)
     }
-
     pub async fn logout(&self, user_id: i64) -> Result<(), AppError> {
         self.token_store.delete_token(&user_id.to_string()).await?;
         self.token_store
@@ -742,19 +598,14 @@ impl AuthService {
     }
 
     pub async fn validate_token(&self, token: &str) -> Result<i64, AppError> {
-        let token_data = decode::<Claims>(
-            token,
-            &DecodingKey::from_secret(self.jwt_secret.as_bytes()),
-            &Validation::default(),
-        )
-        .map_err(|_| AppError::Unauthorized("Invalid token".to_string()))?;
-
-        let user_id = token_data.claims.sub;
+        // Rejects refresh tokens used as access tokens.
+        let claims = self.decode_token(token, TOKEN_TYPE_ACCESS)?;
+        let user_id = claims.sub;
 
         let stored_token = self.token_store.get_token(&user_id.to_string()).await?;
 
         match stored_token {
-            Some(stored) if stored == token => Ok(user_id),
+            Some(stored) if constant_time_eq(stored.as_bytes(), token.as_bytes()) => Ok(user_id),
             _ => Err(AppError::Unauthorized(
                 "Token expired or revoked".to_string(),
             )),
@@ -762,6 +613,7 @@ impl AuthService {
     }
 
     pub fn extract_username(&self, token: &str) -> Option<String> {
+        // Signature-only decode: the caller already ran `validate_token`.
         decode::<Claims>(
             token,
             &DecodingKey::from_secret(self.jwt_secret.as_bytes()),
@@ -771,89 +623,61 @@ impl AuthService {
         .map(|data| data.claims.username)
     }
 
-    pub async fn refresh_token(&self, refresh_token: &str) -> Result<LoginResponse, AppError> {
-        let token_data = decode::<Claims>(
-            refresh_token,
-            &DecodingKey::from_secret(self.jwt_secret.as_bytes()),
-            &Validation::default(),
-        )
-        .map_err(|_| AppError::Unauthorized("Invalid refresh token".to_string()))?;
-
-        let user_id = token_data.claims.sub;
-        let username = &token_data.claims.username;
+    /// Validate the refresh token, re-check the account state and rotate both
+    /// tokens.
+    ///
+    /// Shared by [`AuthService::refresh_token`] and
+    /// [`AuthService::refresh_token_with_vo`].
+    async fn rotate_session(&self, refresh_token: &str) -> Result<AuthenticatedSession, AppError> {
+        let claims = self.decode_token(refresh_token, TOKEN_TYPE_REFRESH)?;
+        let user_id = claims.sub;
 
         let user = self
             .user_repo
-            .find_by_username(username)
+            .find_by_username(&claims.username)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::Unauthorized("User not found".to_string()))?;
 
         if user.id != user_id {
             return Err(AppError::Unauthorized("User ID mismatch".to_string()));
         }
 
-        let stored_refresh = self
+        // A refresh token outlives the access token by days, so the account
+        // state has to be re-checked here; otherwise a disabled or deleted
+        // user could keep minting access tokens until it expired.
+        if user.is_deleted != 0 {
+            return Err(AppError::Unauthorized("User not found".to_string()));
+        }
+        if user.enable.is_some_and(|enable| enable != ENABLED) {
+            return Err(AppError::AuthError("账户已被禁用".to_string()));
+        }
+        if user.lock_flag == Some(0) {
+            return Err(AppError::Unauthorized("账户已被锁定".to_string()));
+        }
+
+        let stored = self
             .token_store
             .get_refresh_token(&user_id.to_string())
             .await?;
-        match stored_refresh {
-            Some(stored) if stored.as_str() == refresh_token => {}
+        match stored {
+            Some(stored) if constant_time_eq(stored.as_bytes(), refresh_token.as_bytes()) => {}
             _ => {
                 return Err(AppError::Unauthorized("Invalid refresh token".to_string()));
             }
         }
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let policy = self.security_policy().await;
+        self.issue_session(user, &policy).await
+    }
 
-        let session_timeout = self.get_session_timeout_secs().await;
-        let access_exp = now + session_timeout;
-        let refresh_exp = now + REFRESH_TOKEN_TTL_SECS;
-
-        let user_id = user.id;
-        let access_claims = Claims {
-            sub: user_id,
-            username: user.username.clone(),
-            exp: access_exp,
-            iat: now,
-            jti: None,
-        };
-
-        let refresh_claims = Claims {
-            sub: user_id,
-            username: user.username.clone(),
-            exp: refresh_exp,
-            iat: now,
-            jti: Some(uuid::Uuid::new_v4().to_string()),
-        };
-
-        let encoding_key = EncodingKey::from_secret(self.jwt_secret.as_bytes());
-
-        let new_access_token = encode(&Header::default(), &access_claims, &encoding_key)
-            .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
-
-        let new_refresh_token = encode(&Header::default(), &refresh_claims, &encoding_key)
-            .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
-
-        self.token_store
-            .set_token(&user_id.to_string(), &new_access_token, session_timeout)
-            .await?;
-        self.token_store
-            .set_refresh_token(
-                &user_id.to_string(),
-                &new_refresh_token,
-                REFRESH_TOKEN_TTL_SECS,
-            )
-            .await?;
-
+    pub async fn refresh_token(&self, refresh_token: &str) -> Result<LoginResponse, AppError> {
+        let session = self.rotate_session(refresh_token).await?;
         Ok(LoginResponse {
-            access_token: new_access_token,
-            refresh_token: new_refresh_token,
+            access_token: session.access_token,
+            refresh_token: session.refresh_token,
             token_type: "Bearer".to_string(),
-            user: user.into(),
+            user: session.user.into(),
         })
     }
 
@@ -861,87 +685,11 @@ impl AuthService {
         &self,
         refresh_token: &str,
     ) -> Result<TokenRefreshVO, AppError> {
-        let token_data = decode::<Claims>(
-            refresh_token,
-            &DecodingKey::from_secret(self.jwt_secret.as_bytes()),
-            &Validation::default(),
-        )
-        .map_err(|_| AppError::Unauthorized("Invalid refresh token".to_string()))?;
-
-        let user_id = token_data.claims.sub;
-        let username = &token_data.claims.username;
-
-        let user = self
-            .user_repo
-            .find_by_username(username)
-            .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
-            .ok_or_else(|| AppError::Unauthorized("User not found".to_string()))?;
-
-        if user.id != user_id {
-            return Err(AppError::Unauthorized("User ID mismatch".to_string()));
-        }
-
-        let stored_refresh = self
-            .token_store
-            .get_refresh_token(&user_id.to_string())
-            .await?;
-        match stored_refresh {
-            Some(stored) if stored.as_str() == refresh_token => {}
-            _ => {
-                return Err(AppError::Unauthorized("Invalid refresh token".to_string()));
-            }
-        }
-
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        let session_timeout = self.get_session_timeout_secs().await;
-        let access_exp = now + session_timeout;
-        let refresh_exp = now + REFRESH_TOKEN_TTL_SECS;
-
-        let user_id = user.id;
-        let access_claims = Claims {
-            sub: user_id,
-            username: user.username.clone(),
-            exp: access_exp,
-            iat: now,
-            jti: None,
-        };
-
-        let refresh_claims = Claims {
-            sub: user_id,
-            username: user.username.clone(),
-            exp: refresh_exp,
-            iat: now,
-            jti: Some(uuid::Uuid::new_v4().to_string()),
-        };
-
-        let encoding_key = EncodingKey::from_secret(self.jwt_secret.as_bytes());
-
-        let new_access_token = encode(&Header::default(), &access_claims, &encoding_key)
-            .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
-
-        let new_refresh_token = encode(&Header::default(), &refresh_claims, &encoding_key)
-            .map_err(|e| AppError::AuthError(format!("Token generation failed: {}", e)))?;
-
-        self.token_store
-            .set_token(&user_id.to_string(), &new_access_token, session_timeout)
-            .await?;
-        self.token_store
-            .set_refresh_token(
-                &user_id.to_string(),
-                &new_refresh_token,
-                REFRESH_TOKEN_TTL_SECS,
-            )
-            .await?;
-
+        let session = self.rotate_session(refresh_token).await?;
         Ok(TokenRefreshVO {
-            access_token: new_access_token,
-            refresh_token: new_refresh_token,
-            expires_in: session_timeout as i64,
+            access_token: session.access_token,
+            refresh_token: session.refresh_token,
+            expires_in: session.session_timeout as i64,
         })
     }
 
@@ -950,7 +698,7 @@ impl AuthService {
             .user_repo
             .find_by_id(&user_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
         Ok(UserInfoVO::from_user(&user))
     }
@@ -961,7 +709,7 @@ impl AuthService {
             .role_repo
             .find_roles_by_user_id(&user_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         Ok(roles.iter().any(|role| {
             role.code
                 .as_deref()
@@ -973,4 +721,78 @@ impl AuthService {
         let _ = self.validate_token(token).await?;
         Ok(CheckTokenVO::valid())
     }
+}
+
+/// Security policy read from `sys_dict_item`, parsed once per login.
+#[derive(Debug, Clone)]
+struct SecurityPolicy {
+    max_try_count: i32,
+    max_lock_time_mins: i64,
+    session_timeout_secs: u64,
+    /// `None` means passwords never expire.
+    pass_change_days: Option<i64>,
+}
+
+impl Default for SecurityPolicy {
+    fn default() -> Self {
+        Self {
+            max_try_count: 5,
+            max_lock_time_mins: 5,
+            session_timeout_secs: 24 * 60 * 60,
+            pass_change_days: None,
+        }
+    }
+}
+
+/// Result of a successful credential check, before being shaped into a
+/// `LoginResponse` or a `UserLoginData`.
+struct AuthenticatedSession {
+    access_token: String,
+    refresh_token: String,
+    access_exp: u64,
+    session_timeout: u64,
+    user: User,
+    policy: SecurityPolicy,
+}
+
+/// Parse "5", "5次", " 5 次 " into `5`.
+///
+/// Dictionary values are written by operators and frequently carry a unit
+/// suffix or stray whitespace; a strict `parse()` would silently fall back to
+/// the default.
+fn parse_leading_number<T: std::str::FromStr>(value: &str, unit: &str) -> Option<T> {
+    let trimmed = value.trim();
+    let digits = trimmed.strip_suffix(unit).unwrap_or(trimmed).trim();
+    digits.parse().ok()
+}
+
+/// Parse a timeout in seconds.
+///
+/// Accepts `"3600"` / `"3600秒"` as seconds and `"60分钟"` as minutes. Values
+/// that parse to zero or overflow are treated as absent so the caller falls
+/// back to its default.
+fn parse_timeout_secs(value: &str) -> Option<u64> {
+    if value.trim().ends_with("分钟") {
+        return parse_leading_number::<u64>(value, "分钟")
+            .and_then(|mins| mins.checked_mul(60))
+            .filter(|secs| *secs > 0);
+    }
+
+    parse_leading_number::<u64>(value, "秒").filter(|secs| *secs > 0)
+}
+
+fn invalid_credentials() -> AppError {
+    AppError::Unauthorized("用户名或密码错误".to_string())
+}
+
+/// Length-agnostic constant-time comparison, used for token equality so that
+/// the check does not leak a prefix match via timing.
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
 }

@@ -29,7 +29,7 @@ pub async fn statistics_all_handler(
         .dog_statistics_service
         .get_all_statistics(&user.data_scope())
         .await
-        .map_err(AppError::DatabaseErrorSeaOrm)?;
+        .map_err(AppError::DatabaseError)?;
 
     let result: Vec<serde_json::Value> = stats
         .into_iter()
@@ -56,7 +56,7 @@ pub async fn statistics_all_type_handler(
         .dog_statistics_service
         .get_weekly_statistics()
         .await
-        .map_err(AppError::DatabaseErrorSeaOrm)?;
+        .map_err(AppError::DatabaseError)?;
 
     let result: Vec<serde_json::Value> = stats
         .into_iter()
@@ -81,7 +81,7 @@ pub async fn statistics_device_type_handler(
         .dog_statistics_service
         .get_device_type_statistics(&user.data_scope())
         .await
-        .map_err(AppError::DatabaseErrorSeaOrm)?;
+        .map_err(AppError::DatabaseError)?;
 
     Ok(Json(StatisticsResponse::ok(data)))
 }

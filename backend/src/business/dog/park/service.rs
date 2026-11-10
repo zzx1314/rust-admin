@@ -25,14 +25,14 @@ impl DogParkService {
         self.repo
             .create(&req, id, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_by_id(&self, id: i64, scope: &DataScope) -> Result<DogPark, AppError> {
         self.repo
             .find_by_id(id, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Park with id {} not found", id)))
     }
 
@@ -45,7 +45,7 @@ impl DogParkService {
             .repo
             .find_all_with_page(&query, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         let mut user_ids: Vec<i64> = records.iter().map(|p| p.user_id).collect();
         user_ids.sort_unstable();
@@ -54,7 +54,7 @@ impl DogParkService {
             .repo
             .find_user_names(&user_ids)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         let vo_list: Vec<ParkVO> = records
             .into_iter()
@@ -77,7 +77,7 @@ impl DogParkService {
         self.repo
             .find_all(scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn update(
@@ -89,7 +89,7 @@ impl DogParkService {
         self.repo
             .update(id, &req, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Park with id {} not found", id)))
     }
 
@@ -98,7 +98,7 @@ impl DogParkService {
             .repo
             .delete(id, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         if !deleted {
             return Err(AppError::NotFound(format!("Park with id {} not found", id)));
         }

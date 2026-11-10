@@ -81,32 +81,43 @@ fn test_format_datetime_opt_none() {
     assert_eq!(format_datetime_opt(None), None);
 }
 
-// ==================== MD5 Tests ====================
+// ==================== Password hashing ====================
 
 #[test]
-fn test_md5_encrypt_known_value() {
-    // MD5 of "password123" = "482c811da5d5b4bc6d497ffa98491e38"
-    assert_eq!(
-        md5_encrypt("password123"),
-        "482c811da5d5b4bc6d497ffa98491e38"
+fn test_md5_encrypt_now_produces_bcrypt() {
+    // The legacy `md5_encrypt` entry point delegates to bcrypt, so stored
+    // passwords are salted and far more expensive to brute force.
+    let hash = md5_encrypt("password123");
+    assert!(
+        hash.starts_with("$2"),
+        "expected a bcrypt hash, got: {hash}"
     );
+    assert!(md5_verify("password123", &hash));
+    assert!(!md5_verify("password124", &hash));
 }
 
 #[test]
-fn test_md5_encrypt_empty() {
-    // MD5 of "" = "d41d8cd98f00b204e9800998ecf8427e"
-    assert_eq!(md5_encrypt(""), "d41d8cd98f00b204e9800998ecf8427e");
+fn test_md5_encrypt_empty_still_verifies() {
+    let hash = md5_encrypt("");
+    assert!(md5_verify("", &hash));
+    assert!(!md5_verify("not-empty", &hash));
 }
 
 #[test]
-fn test_md5_encrypt_deterministic() {
+fn test_md5_encrypt_is_salted() {
+    // Two hashes of the same password must differ (per-hash salt), yet both
+    // must verify. This is what makes rainbow tables useless.
     let a = md5_encrypt("hello");
     let b = md5_encrypt("hello");
-    assert_eq!(a, b);
+    assert_ne!(a, b, "bcrypt must use a unique salt per hash");
+    assert!(md5_verify("hello", &a));
+    assert!(md5_verify("hello", &b));
 }
 
 #[test]
-fn test_md5_verify_match() {
+fn test_legacy_md5_hash_still_verifies() {
+    // Rows created before the migration still carry unsalted MD5; verification
+    // accepts them so users are not locked out.
     assert!(md5_verify(
         "password123",
         "482c811da5d5b4bc6d497ffa98491e38"

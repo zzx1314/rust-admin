@@ -44,11 +44,10 @@ pub enum AppError {
     #[error("Validation error: {0}")]
     ValidationError(String),
 
+    /// Database failures. The inner error is logged, never returned to the
+    /// client (see [`AppError::client_message`]).
     #[error("Database error: {0}")]
-    DatabaseError(#[from] sqlx::Error),
-
-    #[error("Database error: {0}")]
-    DatabaseErrorSeaOrm(#[from] sea_orm::DbErr),
+    DatabaseError(#[from] sea_orm::DbErr),
 
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
@@ -72,7 +71,6 @@ impl AppError {
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::ValidationError(_) => StatusCode::UNPROCESSABLE_ENTITY,
             AppError::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::DatabaseErrorSeaOrm(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             AppError::AuthError(_) => StatusCode::FORBIDDEN,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
@@ -81,28 +79,39 @@ impl AppError {
         }
     }
 
-    fn error_code(&self) -> u16 {
-        match self {
-            AppError::NotFound(_) => FAIL_CODE,
-            AppError::ValidationError(_) => FAIL_CODE,
-            AppError::DatabaseError(_) => FAIL_CODE,
-            AppError::DatabaseErrorSeaOrm(_) => FAIL_CODE,
-            AppError::Unauthorized(_) => FAIL_CODE,
-            AppError::AuthError(_) => FAIL_CODE,
-            AppError::BadRequest(_) => FAIL_CODE,
-            AppError::Conflict(_) => FAIL_CODE,
-            AppError::InternalError(_) => FAIL_CODE,
+    /// `true` when the detail must not leave the server: the message may expose
+    /// SQL, file paths or other internals.
+    fn is_internal(&self) -> bool {
+        matches!(
+            self,
+            AppError::DatabaseError(_) | AppError::InternalError(_)
+        )
+    }
+
+    /// Message safe to return to the client.
+    ///
+    /// Domain errors (validation, conflict, auth…) carry messages that were
+    /// written for the user and are passed through. Internal errors are
+    /// replaced with a generic message; the detail goes to the log instead.
+    fn client_message(&self) -> String {
+        if self.is_internal() {
+            tracing::error!(error = %self, "internal error");
+            INTERNAL_ERROR_MESSAGE.to_string()
+        } else {
+            self.to_string()
         }
     }
 }
 
+/// Generic body returned for internal failures.
+const INTERNAL_ERROR_MESSAGE: &str = "服务内部错误，请稍后重试";
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = self.status_code();
-        let code = self.error_code();
-        let msg = self.to_string();
+        let msg = self.client_message();
 
-        let body = Json(ApiResponse::error(code, msg));
+        let body = Json(ApiResponse::error(FAIL_CODE, msg));
 
         (status, body).into_response()
     }

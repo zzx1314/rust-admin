@@ -32,14 +32,14 @@ impl SysDictItemService {
         self.dict_item_repo
             .create(&req, &id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_dict_item(&self, id: &i64) -> Result<SysDictItem, AppError> {
         self.dict_item_repo
             .find_by_id(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("SysDictItem with id {} not found", id)))
     }
 
@@ -47,7 +47,7 @@ impl SysDictItemService {
         self.dict_item_repo
             .find_all()
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_dict_items_by_dict_id(
@@ -57,14 +57,14 @@ impl SysDictItemService {
         self.dict_item_repo
             .find_by_dict_id(dict_id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_dict_items_by_type(&self, r#type: &str) -> Result<Vec<SysDictItem>, AppError> {
         self.dict_item_repo
             .find_by_type(r#type)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_dict_items_page(
@@ -75,7 +75,7 @@ impl SysDictItemService {
             .dict_item_repo
             .find_all_with_page(&query)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         Ok(PageResponse::new(
             records,
             total,
@@ -92,7 +92,7 @@ impl SysDictItemService {
         self.dict_item_repo
             .update(id, &req)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("SysDictItem with id {} not found", id)))
     }
 
@@ -101,7 +101,7 @@ impl SysDictItemService {
             .dict_item_repo
             .delete(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         if !deleted {
             return Err(AppError::NotFound(format!(
@@ -117,14 +117,14 @@ impl SysDictItemService {
             .dict_repo
             .find_by_type("sys_security_policy")
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound("sys_security_policy dict not found".to_string()))?;
 
         let items = self
             .dict_item_repo
             .find_by_dict_id(&dict.id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         let mut result = HashMap::new();
         for item in items {
@@ -142,14 +142,14 @@ impl SysDictItemService {
             .dict_repo
             .find_by_type("sys_security_policy")
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound("sys_security_policy dict not found".to_string()))?;
 
         let items = self
             .dict_item_repo
             .find_by_dict_id(&dict.id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         for item in items {
             if let Some(new_value) = policy.get(&item.r#type) {

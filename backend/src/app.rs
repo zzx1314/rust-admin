@@ -71,15 +71,15 @@ impl App {
     pub async fn new(database_url: &str) -> Result<Self, AppError> {
         let conn = sea_orm::Database::connect(database_url)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         crate::migration::prune_stale_migrations(&conn)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         Migrator::up(&conn, None)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         Ok(Self {
             conn,

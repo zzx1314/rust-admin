@@ -21,14 +21,14 @@ impl DogDeviceService {
         self.repo
             .create(&req, id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn get_by_id(&self, id: i64, scope: &DataScope) -> Result<DogDevice, AppError> {
         self.repo
             .find_by_id(id, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Device with id {} not found", id)))
     }
 
@@ -41,7 +41,7 @@ impl DogDeviceService {
             .repo
             .find_all_with_page(&query, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
 
         Ok(PageResponse::new(
             records.into_iter().map(DeviceVO::from).collect(),
@@ -55,7 +55,7 @@ impl DogDeviceService {
         self.repo
             .find_all(scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn update(
@@ -67,7 +67,7 @@ impl DogDeviceService {
         self.repo
             .update(id, &req, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Device with id {} not found", id)))
     }
 
@@ -80,7 +80,7 @@ impl DogDeviceService {
         self.repo
             .update_status(id, status, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Device with id {} not found", id)))
     }
 
@@ -88,7 +88,7 @@ impl DogDeviceService {
         self.repo
             .update_comm_time(id)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?
+            .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Device with id {} not found", id)))
     }
 
@@ -96,7 +96,7 @@ impl DogDeviceService {
         self.repo
             .count(scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)
+            .map_err(AppError::DatabaseError)
     }
 
     pub async fn delete(&self, id: i64, scope: &DataScope) -> Result<(), AppError> {
@@ -104,7 +104,7 @@ impl DogDeviceService {
             .repo
             .delete(id, scope)
             .await
-            .map_err(AppError::DatabaseErrorSeaOrm)?;
+            .map_err(AppError::DatabaseError)?;
         if !deleted {
             return Err(AppError::NotFound(format!(
                 "Device with id {} not found",

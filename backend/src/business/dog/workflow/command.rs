@@ -362,7 +362,7 @@ async fn find_device_code(conn: &DatabaseConnection, device_id: i64) -> Result<S
         .filter(DeviceColumn::IsDeleted.eq(0))
         .one(conn)
         .await
-        .map_err(AppError::DatabaseErrorSeaOrm)?;
+        .map_err(AppError::DatabaseError)?;
     Ok(device
         .map(|d| d.device_id)
         .unwrap_or_else(|| device_id.to_string()))
@@ -378,7 +378,7 @@ async fn find_route_points(
         .filter(RouteColumn::IsDeleted.eq(0))
         .one(conn)
         .await
-        .map_err(AppError::DatabaseErrorSeaOrm)?;
+        .map_err(AppError::DatabaseError)?;
     let Some(route) = route else {
         return Ok(Vec::new());
     };
@@ -433,7 +433,7 @@ async fn find_services(
         .filter(ServiceColumn::IsDeleted.eq(0))
         .all(conn)
         .await
-        .map_err(AppError::DatabaseErrorSeaOrm)?;
+        .map_err(AppError::DatabaseError)?;
 
     Ok(services
         .into_iter()
