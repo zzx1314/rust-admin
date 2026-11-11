@@ -66,9 +66,9 @@ pub async fn login_handler(
         }
     }
 
-    // 2) 中台账号：向中台校验密码，成功后落地/更新本地账号。
-    //    注意这里需要真实账号配置（只有服务令牌时无法代理登录）。
-    if state.config.zentai_account_ready() {
+    // 2) 中台账号：向中台校验用户本人提供的密码，成功后落地/更新本地账号。
+    //    只要配了中台地址即可，不需要（也不能）用服务令牌代替用户登录。
+    if state.config.zentai_login_ready() {
         let http = reqwest::Client::new();
         match zentai::login(&state.config, &http, username, &payload.password).await {
             Ok(session) => {
@@ -245,8 +245,14 @@ pub async fn allowed_device_codes(
     let Some(zentai_user_id) = claims.zentai_user_id else {
         return Ok(None);
     };
-    if claims.is_admin || !state.config.zentai_account_ready() {
+    if claims.is_admin {
         return Ok(None);
+    }
+    // 分配关系只能从中台读：没配令牌/服务账号时宁可报错，也不能悄悄返回全量设备
+    if !state.config.zentai_ready() {
+        return Err(AppError::Internal(
+            "未配置中台共享令牌或服务账号，无法校验设备分配关系".to_string(),
+        ));
     }
     let assignments = zentai::assignment_map(&state.config).await?;
     Ok(Some(

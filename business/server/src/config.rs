@@ -221,10 +221,15 @@ impl Config {
             .is_some_and(|token| !token.trim().is_empty())
     }
 
-    /// 中台账号登录是否可用（业务平台代理登录中台时需要真实账号）。
+    /// 是否允许「用用户自己的中台账号密码」登录业务平台。
     ///
-    /// 只配服务令牌时该值为 `false`：设备台账 / 地图回传仍然工作，
-    /// 但「用中台账号登录业务平台」这条路径关闭。
+    /// 只需要中台地址：密码由用户本人提供，不依赖配置里的中台服务账号；
+    /// 分配关系查询另走服务令牌（`has_service_token`）或服务账号。
+    pub fn zentai_login_ready(&self) -> bool {
+        self.zentai_base_url.is_some()
+    }
+
+    /// 中台服务账号是否可用（老配置：用固定账号访问中台公开接口）。
     pub fn zentai_account_ready(&self) -> bool {
         self.zentai_base_url.is_some()
             && self.zentai_username.is_some()
