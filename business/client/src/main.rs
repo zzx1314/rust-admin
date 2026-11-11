@@ -1543,6 +1543,7 @@ async fn upload_mapping_to_zentai(config: &Config, saved: &MappingSaved) -> Uplo
         api_base: config.resolve_api_base(),
         username: config.api_username.clone(),
         password: config.api_password().to_string(),
+        device_id: config.device_id.clone(),
         park_id: Some(park_id),
         map_name: config.ingest_map_name.clone(),
         bind: true,

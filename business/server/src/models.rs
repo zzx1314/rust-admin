@@ -51,6 +51,9 @@ pub struct MapVersion {
     pub file_name: Option<String>,
     pub file_path: Option<String>,
     pub file_size: Option<i64>,
+    /// 中台地图归属用户（机器狗建图时的 owner）
+    pub owner_user_id: Option<i64>,
+    pub owner_username: Option<String>,
     pub route_count: i64,
     pub task_count: i64,
 }
@@ -261,6 +264,10 @@ pub struct UserInfo {
     pub username: String,
     pub display_name: Option<String>,
     pub role: String,
+    /// 关联的中台账号 id；本地服务账号为空
+    pub zentai_user_id: Option<i64>,
+    pub zentai_username: Option<String>,
+    pub is_admin: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -417,6 +424,9 @@ pub struct BackendMap {
     pub map_width: Option<i64>,
     pub map_height: Option<i64>,
     pub create_time: Option<String>,
+    /// 中台 `dog_map.user_id`，用于按登录用户过滤地图
+    pub user_id: Option<i64>,
+    pub owner_username: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -427,11 +437,13 @@ pub struct MapQuery {
     pub source: Option<String>,
 }
 
-/// 中台地图库筛选：按业务园区编码过滤
+/// 中台地图库筛选：按业务园区编码 / 归属用户过滤
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendMapQuery {
     pub park_code: Option<String>,
+    /// 管理员可按中台用户 id 过滤
+    pub owner_user_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]

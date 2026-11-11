@@ -12,6 +12,7 @@ use crate::app::AppState;
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::ingest::{self, IngestRequest};
+use crate::zentai;
 use axum::Json;
 use axum::extract::{Multipart, State};
 use serde_json::{Value, json};
@@ -93,6 +94,21 @@ pub async fn ingest_map(
     // 先本地解析一次：即使中台不可用，也能拿到尺寸/坐标系用于报错定位
     let local = ingest::parse_local_meta(&package);
 
+    // 地图归属：设备在中台被分配给谁，地图就记在谁名下。
+    // 查询失败只降级为服务账号名下，不阻断回传。
+    let owner_user_id = match request.device_id.as_deref() {
+        Some(device_id) if state.config.zentai_ready() => {
+            match zentai::device_owner(&state.config, device_id).await {
+                Ok(owner) => owner,
+                Err(error) => {
+                    warn!("查询设备 {device_id} 的中台归属失败: {error}");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(180))
         .build()
@@ -106,6 +122,7 @@ pub async fn ingest_map(
         &park_ref,
         &file_name,
         &package,
+        owner_user_id,
     )
     .await
     .inspect_err(|e| {
@@ -136,9 +153,9 @@ pub async fn ingest_map(
         "INSERT INTO map_versions (id, park_id, map_name, version, frame_id, crs, origin,
             resolution, floors, road_count, no_go_count, status, map_hash, map_width,
             map_height, note, published_at, created_at, source, source_id, file_name,
-            file_path, file_size)
+            file_path, file_size, owner_user_id)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, '1F', 0, 0, '部分标定', ?9, ?10, ?11,
-            ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+            ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
          ON CONFLICT(id) DO UPDATE SET
             park_id = excluded.park_id,
             map_name = excluded.map_name,
@@ -149,7 +166,8 @@ pub async fn ingest_map(
             resolution = excluded.resolution,
             note = excluded.note,
             file_name = excluded.file_name,
-            file_size = excluded.file_size",
+            file_size = excluded.file_size,
+            owner_user_id = excluded.owner_user_id",
     )
     .bind(&map_id)
     .bind(park_id)
@@ -170,6 +188,7 @@ pub async fn ingest_map(
     .bind(zentai.file_name.clone().unwrap_or(file_name.clone()))
     .bind(stash_path.display().to_string())
     .bind(package.len() as i64)
+    .bind(owner_user_id)
     .execute(&state.db)
     .await?;
 

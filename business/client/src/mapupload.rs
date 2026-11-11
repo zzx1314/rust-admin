@@ -39,6 +39,8 @@ pub struct IngestConfig {
     pub api_base: String,
     pub username: String,
     pub password: String,
+    /// 本机设备编号，随地图一起上报用于确定中台归属用户
+    pub device_id: String,
     /// 目标园区
     pub park_id: Option<i64>,
     /// 覆盖地图名称
@@ -155,6 +157,7 @@ pub async fn ingest_map(
     let info = json!({
         "mapName": map_name,
         "parkId": cfg.park_id,
+        "deviceId": cfg.device_id,
         "bind": cfg.bind,
         "mapType": "2D栅格",
         "remarks": format!(

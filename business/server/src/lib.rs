@@ -21,3 +21,4 @@ pub mod handlers;
 pub mod ingest;
 pub mod models;
 pub mod seed;
+pub mod zentai;

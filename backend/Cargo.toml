@@ -132,3 +132,7 @@ path = "tests/business/dog_statistics_tests.rs"
 [[test]]
 name = "dog_map_park_tests"
 path = "tests/business/dog_map_park_tests.rs"
+
+[[test]]
+name = "dog_device_tests"
+path = "tests/business/dog_device_tests.rs"

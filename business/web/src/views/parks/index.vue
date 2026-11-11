@@ -642,6 +642,7 @@ onMounted(load);
                 :value="`backend:${map.id}`"
               >
                 {{ map.mapName }} · {{ map.mapStatus || "草稿" }}
+                {{ map.ownerUsername ? `· 归属 ${map.ownerUsername}` : "" }}
                 {{ map.parkName ? `· 园区 ${map.parkName}` : "· 未关联园区" }}
                 {{ map.fileName ? `· ${map.fileName}` : "" }}
                 {{ map.fileSize ? `· ${(map.fileSize / 1024).toFixed(0)} KB` : "" }}

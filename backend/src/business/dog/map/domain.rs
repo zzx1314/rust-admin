@@ -66,6 +66,9 @@ pub struct UploadMapRequest {
     pub park_code: Option<String>,
     /// 归属园区名称（冗余展示）
     pub park_name: Option<String>,
+    /// 地图归属用户。仅管理员可用：业务平台以服务账号回传地图时，
+    /// 通过该字段把地图记到设备所属用户名下（普通用户会被忽略）。
+    pub owner_user_id: Option<i64>,
     pub remarks: Option<String>,
     pub map_version: Option<String>,
     pub frame_id: Option<String>,

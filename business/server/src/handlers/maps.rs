@@ -1,4 +1,5 @@
 use crate::app::AppState;
+use crate::auth::Claims;
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::models::{
@@ -6,7 +7,7 @@ use crate::models::{
     MapRefTask, MapRefs, MapVersion, MapVersionRequest,
 };
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -21,6 +22,7 @@ const MAP_SELECT: &str = "SELECT m.id, m.park_id, p.park_name, m.map_name, m.ver
     m.frame_id, m.crs, m.origin, m.resolution, m.floors, m.road_count, m.no_go_count,
     m.status, m.map_hash, m.map_width, m.map_height, m.note, m.published_at, m.created_at,
     m.source, m.source_id, m.file_name, m.file_path, m.file_size,
+    m.owner_user_id, m.owner_username,
     (SELECT COUNT(*) FROM routes r WHERE r.map_version_id = m.id) AS route_count,
     (SELECT COUNT(*) FROM tasks t JOIN routes r ON r.id = t.route_id
         WHERE r.map_version_id = m.id) AS task_count
@@ -76,9 +78,9 @@ pub async fn list_park_maps(
 /// 退化成 NULL，避免整个地图列表接口因缺少一列而 500。
 fn dog_map_select_columns(has_park: bool) -> &'static str {
     if has_park {
-        "park_code, park_name"
+        "d.park_code, d.park_name, d.user_id, u.username AS owner_username"
     } else {
-        "NULL AS park_code, NULL AS park_name"
+        "NULL AS park_code, NULL AS park_name, d.user_id, u.username AS owner_username"
     }
 }
 
@@ -95,6 +97,7 @@ async fn dog_map_has_park_columns(pool: &SqlitePool) -> Result<bool, AppError> {
 /// 可选 `parkCode`：只返回该业务园区下的地图（设备端建图回传时写入）。
 pub async fn list_backend_maps(
     State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
     Query(query): Query<BackendMapQuery>,
 ) -> Result<Json<ApiResponse<Vec<BackendMap>>>, AppError> {
     let pool = match backend_pool(&state).await {
@@ -103,11 +106,13 @@ pub async fn list_backend_maps(
     };
     let has_park = dog_map_has_park_columns(&pool).await?;
     let mut builder = QueryBuilder::<sqlx::Sqlite>::new(format!(
-        "SELECT id, map_name, {}, file_name, file_path, file_format,
-            file_size, remarks, map_version, frame_id, crs, map_origin, resolution, floors,
-            road_count, nogo_count, map_status, map_hash, publish_time, map_width,
-            map_height, create_time
-         FROM dog_map WHERE is_deleted = 0",
+        "SELECT d.id, d.map_name, {}, d.file_name, d.file_path, d.file_format,
+            d.file_size, d.remarks, d.map_version, d.frame_id, d.crs, d.map_origin, d.resolution,
+            d.floors, d.road_count, d.nogo_count, d.map_status, d.map_hash, d.publish_time,
+            d.map_width, d.map_height, d.create_time
+         FROM dog_map d
+         LEFT JOIN p_sys_user u ON u.id = d.user_id
+         WHERE d.is_deleted = 0",
         dog_map_select_columns(has_park)
     ));
     if let Some(park_code) = query.park_code.filter(|value| !value.trim().is_empty()) {
@@ -116,10 +121,22 @@ pub async fn list_backend_maps(
             return Ok(ApiResponse::ok(Vec::new()));
         }
         builder
-            .push(" AND park_code = ")
+            .push(" AND d.park_code = ")
             .push_bind(park_code.trim().to_string());
     }
-    builder.push(" ORDER BY id DESC");
+    // 业务用户只能看到自己名下机器狗采集的地图；中台管理员可看全部，
+    // 也可用 ownerUserId 指定查看某个用户的地图。
+    let owner_filter = if claims.is_admin {
+        query.owner_user_id
+    } else {
+        claims.zentai_user_id
+    };
+    if let Some(owner) = owner_filter {
+        builder.push(" AND d.user_id = ").push_bind(owner);
+    } else if claims.zentai_user_id.is_some() && !claims.is_admin {
+        return Ok(ApiResponse::ok(Vec::new()));
+    }
+    builder.push(" ORDER BY d.id DESC");
     let maps = builder
         .build_query_as::<BackendMap>()
         .fetch_all(&pool)
@@ -132,16 +149,19 @@ pub async fn list_backend_maps(
 /// `parkId` 缺省时按中台地图携带的 `parkCode` 反查业务园区。
 pub async fn import_backend_map(
     State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
     Json(payload): Json<ImportBackendMapRequest>,
 ) -> Result<Json<ApiResponse<MapVersion>>, AppError> {
     let backend_pool = backend_pool(&state).await?;
     let has_park = dog_map_has_park_columns(&backend_pool).await?;
     let source_sql = format!(
-        "SELECT id, map_name, {}, file_name, file_path, file_format,
-            file_size, remarks, map_version, frame_id, crs, map_origin, resolution, floors,
-            road_count, nogo_count, map_status, map_hash, publish_time, map_width,
-            map_height, create_time
-         FROM dog_map WHERE id = ?1 AND is_deleted = 0",
+        "SELECT d.id, d.map_name, {}, d.file_name, d.file_path, d.file_format,
+            d.file_size, d.remarks, d.map_version, d.frame_id, d.crs, d.map_origin, d.resolution,
+            d.floors, d.road_count, d.nogo_count, d.map_status, d.map_hash, d.publish_time,
+            d.map_width, d.map_height, d.create_time
+         FROM dog_map d
+         LEFT JOIN p_sys_user u ON u.id = d.user_id
+         WHERE d.id = ?1 AND d.is_deleted = 0",
         dog_map_select_columns(has_park)
     );
     let source = sqlx::query_as::<_, BackendMap>(&source_sql)
@@ -149,6 +169,16 @@ pub async fn import_backend_map(
         .fetch_optional(&backend_pool)
         .await?
         .ok_or_else(|| AppError::NotFound("backend 地图不存在".to_string()))?;
+
+    // 非管理员只能导入自己名下的地图。
+    if !claims.is_admin
+        && let Some(zentai_user_id) = claims.zentai_user_id
+        && source.user_id != Some(zentai_user_id)
+    {
+        return Err(AppError::NotFound(
+            "地图不存在或不在你的管辖范围内".to_string(),
+        ));
+    }
 
     // 园区：请求优先；否则按中台地图携带的园区编码反查
     let park_id = match payload.park_id {
@@ -278,7 +308,8 @@ pub async fn import_backend_map(
                 origin = ?5, resolution = ?6, floors = ?7, road_count = ?8, no_go_count = ?9,
                 status = ?10, map_hash = ?11, map_width = ?12, map_height = ?13, note = ?14,
                 published_at = ?15, source = 'backend', source_id = ?16, file_name = ?17,
-                file_path = ?18, file_size = ?19 WHERE id = ?20",
+                file_path = ?18, file_size = ?19, owner_user_id = ?20, owner_username = ?21
+             WHERE id = ?22",
         )
         .bind(&map_name)
         .bind(&version)
@@ -307,6 +338,8 @@ pub async fn import_backend_map(
         .bind(&file_name)
         .bind(&file_path)
         .bind(file_size)
+        .bind(source.user_id)
+        .bind(&source.owner_username)
         .bind(&map_id)
         .execute(&state.db)
         .await?;
@@ -315,9 +348,9 @@ pub async fn import_backend_map(
             "INSERT INTO map_versions (id, park_id, map_name, version, frame_id, crs, origin,
                 resolution, floors, road_count, no_go_count, status, map_hash, map_width,
                 map_height, note, published_at, created_at, source, source_id, file_name,
-                file_path, file_size)
+                file_path, file_size, owner_user_id, owner_username)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                ?16, ?17, ?18, 'backend', ?19, ?20, ?21, ?22)",
+                ?16, ?17, ?18, 'backend', ?19, ?20, ?21, ?22, ?23, ?24)",
         )
         .bind(&map_id)
         .bind(park_id)
@@ -349,6 +382,8 @@ pub async fn import_backend_map(
         .bind(&file_name)
         .bind(&file_path)
         .bind(file_size)
+        .bind(source.user_id)
+        .bind(&source.owner_username)
         .execute(&state.db)
         .await?;
     }
@@ -513,8 +548,8 @@ pub async fn new_map_version(
     sqlx::query(
         "INSERT INTO map_versions (id, park_id, map_name, version, frame_id, crs, origin,
             resolution, floors, road_count, no_go_count, status, map_hash, map_width, map_height,
-            note, published_at, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, '已发布', ?12, ?13, ?14, ?15, ?16, ?17)",
+            note, published_at, created_at, owner_user_id, owner_username)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, '已发布', ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
     )
     .bind(&new_id)
     .bind(map.park_id)
@@ -533,6 +568,8 @@ pub async fn new_map_version(
     .bind(&note)
     .bind(&timestamp)
     .bind(&timestamp)
+    .bind(map.owner_user_id)
+    .bind(&map.owner_username)
     .execute(&mut *transaction)
     .await?;
     sqlx::query(

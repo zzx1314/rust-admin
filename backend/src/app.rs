@@ -8,6 +8,8 @@ use sea_orm::DatabaseConnection;
 use crate::api::{AppState, routes::create_router};
 use crate::business::dog::config::repository::SeaOrmDogConfigRepository;
 use crate::business::dog::config::service::DogConfigService;
+use crate::business::dog::device::repository::SeaOrmDogDeviceRepository;
+use crate::business::dog::device::service::DogDeviceService;
 use crate::business::dog::map::repository::SeaOrmDogMapRepository;
 use crate::business::dog::map::service::DogMapService;
 use crate::business::dog::media::repository::SeaOrmDogMediaRepository;
@@ -177,6 +179,9 @@ impl App {
         let dog_config_repo = SeaOrmDogConfigRepository::new(conn.clone());
         let dog_config_service = Arc::new(DogConfigService::new(dog_config_repo.clone()));
 
+        let dog_device_repo = SeaOrmDogDeviceRepository::new(conn.clone());
+        let dog_device_service = Arc::new(DogDeviceService::new(dog_device_repo));
+
         let dog_statistics_service = Arc::new(DogStatisticsService::new(
             dog_map_repo,
             dog_model_repo,
@@ -198,6 +203,7 @@ impl App {
             dog_media_service,
             dog_model_service,
             dog_config_service,
+            dog_device_service,
             dog_statistics_service,
             upload_dir,
         }

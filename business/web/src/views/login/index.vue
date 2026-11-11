@@ -65,7 +65,9 @@ async function submit() {
     <section class="login-form-wrap">
       <div class="login-card">
         <h2>登录控制台</h2>
-        <p class="login-sub">使用平台账号进入 RoboDog OPS 运营控制台</p>
+        <p class="login-sub">
+          使用中台账号登录；登录后只看到自己管辖的设备与自己名下机器狗采集的地图。
+        </p>
 
         <div class="field">
           <label>用户名</label>

@@ -1,10 +1,12 @@
 use crate::app::AppState;
+use crate::auth::{self, Claims};
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::gateway;
 use crate::models::{BindParkRequest, CommandRequest, Device, DeviceQuery, DeviceRequest};
+use crate::zentai;
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use serde_json::{Value, json};
 use sqlx::{QueryBuilder, SqlitePool};
 use tracing::info;
@@ -110,8 +112,13 @@ async fn validate_park_zone(
 
 pub async fn list_devices(
     State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
     Query(query): Query<DeviceQuery>,
 ) -> Result<Json<ApiResponse<Vec<Device>>>, AppError> {
+    let allowed = auth::allowed_device_codes(&state, &claims).await?;
+    if matches!(&allowed, Some(codes) if codes.is_empty()) {
+        return Ok(ApiResponse::ok(Vec::new()));
+    }
     let mut builder = QueryBuilder::<sqlx::Sqlite>::new(DEVICE_SELECT);
     builder.push(" WHERE 1 = 1");
     if let Some(q) = query.q.filter(|value| !value.trim().is_empty()) {
@@ -142,6 +149,16 @@ pub async fn list_devices(
             builder.push(" AND d.status = ").push_bind(status);
         }
     }
+    if let Some(codes) = &allowed {
+        builder.push(" AND d.device_id IN (");
+        for (index, code) in codes.iter().enumerate() {
+            if index > 0 {
+                builder.push(", ");
+            }
+            builder.push_bind(code.clone());
+        }
+        builder.push(")");
+    }
     builder.push(" ORDER BY d.id ASC");
     let devices = builder
         .build_query_as::<Device>()
@@ -152,13 +169,50 @@ pub async fn list_devices(
 
 pub async fn device_stats(
     State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
-    let rows: Vec<(String, i64)> =
-        sqlx::query_as("SELECT status, COUNT(*) FROM devices GROUP BY status")
-            .fetch_all(&state.db)
-            .await?;
+    let allowed = auth::allowed_device_codes(&state, &claims).await?;
+    if matches!(&allowed, Some(codes) if codes.is_empty()) {
+        return Ok(ApiResponse::ok(json!({
+            "total": 0,
+            "online": 0,
+            "unbound": 0,
+            "counts": {},
+        })));
+    }
+
+    let mut builder =
+        QueryBuilder::<sqlx::Sqlite>::new("SELECT status, COUNT(*) FROM devices WHERE 1 = 1");
+    if let Some(codes) = &allowed {
+        builder.push(" AND device_id IN (");
+        for (index, code) in codes.iter().enumerate() {
+            if index > 0 {
+                builder.push(", ");
+            }
+            builder.push_bind(code.clone());
+        }
+        builder.push(")");
+    }
+    builder.push(" GROUP BY status");
+    let rows: Vec<(String, i64)> = builder
+        .build_query_as::<(String, i64)>()
+        .fetch_all(&state.db)
+        .await?;
     let total: i64 = rows.iter().map(|(_, count)| count).sum();
-    let unbound: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM devices WHERE park_id IS NULL")
+    let mut unbound_builder =
+        QueryBuilder::<sqlx::Sqlite>::new("SELECT COUNT(*) FROM devices WHERE park_id IS NULL");
+    if let Some(codes) = &allowed {
+        unbound_builder.push(" AND device_id IN (");
+        for (index, code) in codes.iter().enumerate() {
+            if index > 0 {
+                unbound_builder.push(", ");
+            }
+            unbound_builder.push_bind(code.clone());
+        }
+        unbound_builder.push(")");
+    }
+    let unbound: i64 = unbound_builder
+        .build_query_scalar()
         .fetch_one(&state.db)
         .await?;
     let mut counts = serde_json::Map::new();
@@ -179,13 +233,17 @@ pub async fn device_stats(
 
 pub async fn get_device(
     State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
     Path(id): Path<i64>,
 ) -> Result<Json<ApiResponse<Device>>, AppError> {
-    Ok(ApiResponse::ok(fetch_device(&state, id).await?))
+    let device = fetch_device(&state, id).await?;
+    auth::ensure_device_access(&state, &claims, &device.device_id).await?;
+    Ok(ApiResponse::ok(device))
 }
 
 pub async fn create_device(
     State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
     Json(payload): Json<DeviceRequest>,
 ) -> Result<Json<ApiResponse<Device>>, AppError> {
     if payload.device_id.trim().is_empty() {
@@ -234,15 +292,18 @@ pub async fn create_device(
     .execute(&state.db)
     .await?;
     let device = fetch_device(&state, result.last_insert_rowid()).await?;
+    sync_device_to_zentai(&state, &device, &claims).await;
     Ok(ApiResponse::ok(device))
 }
 
 pub async fn update_device(
     State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
     Path(id): Path<i64>,
     Json(payload): Json<DeviceRequest>,
 ) -> Result<Json<ApiResponse<Device>>, AppError> {
     let existing = fetch_device(&state, id).await?;
+    auth::ensure_device_access(&state, &claims, &existing.device_id).await?;
     // 园区 / 区域：换了园区且未显式指定区域时自动清空区域，避免跨园区脏数据
     let park_changed = payload.park_id.is_some() && payload.park_id != existing.park_id;
     let park_id = payload.park_id.or(existing.park_id);
@@ -298,16 +359,20 @@ pub async fn update_device(
     .bind(id)
     .execute(&state.db)
     .await?;
-    Ok(ApiResponse::ok(fetch_device(&state, id).await?))
+    let device = fetch_device(&state, id).await?;
+    sync_device_to_zentai(&state, &device, &claims).await;
+    Ok(ApiResponse::ok(device))
 }
 
 /// `POST /api/devices/{id}/bind` — 手动把设备绑定到园区（可同时指定区域）。
 pub async fn bind_device(
     State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
     Path(id): Path<i64>,
     Json(payload): Json<BindParkRequest>,
 ) -> Result<Json<ApiResponse<Device>>, AppError> {
     let device = fetch_device(&state, id).await?;
+    auth::ensure_device_access(&state, &claims, &device.device_id).await?;
     validate_park_zone(&state.db, Some(payload.park_id), payload.zone_id).await?;
     let (park_code, park_name): (String, String) =
         sqlx::query_as("SELECT park_code, park_name FROM parks WHERE id = ?1")
@@ -355,15 +420,19 @@ pub async fn bind_device(
     .await;
     gateway::dispatch_pending_for_device(&state.db, &state.device_connections, &device.device_id)
         .await;
-    Ok(ApiResponse::ok(fetch_device(&state, id).await?))
+    let device = fetch_device(&state, id).await?;
+    sync_device_to_zentai(&state, &device, &claims).await;
+    Ok(ApiResponse::ok(device))
 }
 
 /// `DELETE /api/devices/{id}/bind` — 解除园区绑定，设备回到「待绑定」。
 pub async fn unbind_device(
     State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
     Path(id): Path<i64>,
 ) -> Result<Json<ApiResponse<Device>>, AppError> {
     let device = fetch_device(&state, id).await?;
+    auth::ensure_device_access(&state, &claims, &device.device_id).await?;
     if device.park_id.is_none() {
         return Ok(ApiResponse::ok(device));
     }
@@ -411,13 +480,18 @@ pub async fn unbind_device(
         None,
     )
     .await;
-    Ok(ApiResponse::ok(fetch_device(&state, id).await?))
+    let device = fetch_device(&state, id).await?;
+    sync_device_to_zentai(&state, &device, &claims).await;
+    Ok(ApiResponse::ok(device))
 }
 
 pub async fn delete_device(
     State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
     Path(id): Path<i64>,
 ) -> Result<Json<ApiResponse<bool>>, AppError> {
+    let device = fetch_device(&state, id).await?;
+    auth::ensure_device_access(&state, &claims, &device.device_id).await?;
     sqlx::query("UPDATE tasks SET device_id = NULL WHERE device_id = ?1")
         .bind(id)
         .execute(&state.db)
@@ -426,6 +500,11 @@ pub async fn delete_device(
         .bind(id)
         .execute(&state.db)
         .await?;
+    if state.config.zentai_ready()
+        && let Err(error) = zentai::delete_device(&state.config, &device.device_id).await
+    {
+        tracing::warn!("删除中台设备 {} 失败: {error}", device.device_id);
+    }
     Ok(ApiResponse::ok(result.rows_affected() > 0))
 }
 
@@ -444,10 +523,12 @@ pub async fn refresh_devices(
 
 pub async fn send_command(
     State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
     Path(id): Path<i64>,
     Json(payload): Json<CommandRequest>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     let device = fetch_device(&state, id).await?;
+    auth::ensure_device_access(&state, &claims, &device.device_id).await?;
     // 指令白名单：避免前端拼错或恶意字符串直接透传到客户端
     let command = super::teleop::normalize_command(&payload.command)?;
     // 未绑定园区的设备没有地图与路线归属，不允许启动巡检
@@ -529,6 +610,42 @@ pub async fn send_command(
         "wsDelivered": cmd_sent,
         "teleopHolder": teleop_holder,
     })))
+}
+
+/// 把业务库设备同步到中台台账；失败只记日志，不阻断业务操作。
+async fn sync_device_to_zentai(state: &AppState, device: &Device, claims: &Claims) {
+    if !state.config.zentai_ready() {
+        return;
+    }
+    let park = match device.park_id {
+        Some(park_id) => sqlx::query_as::<_, (String, String)>(
+            "SELECT park_code, park_name FROM parks WHERE id = ?1",
+        )
+        .bind(park_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten(),
+        None => None,
+    };
+    let user_ids = claims
+        .zentai_user_id
+        .filter(|_| !claims.is_admin)
+        .into_iter()
+        .collect();
+    let payload = zentai::DeviceUpsert {
+        device_id: device.device_id.clone(),
+        device_name: None,
+        model: device.model.clone(),
+        status: Some(device.status.clone()),
+        firmware: device.firmware.clone(),
+        device_ip: device.device_ip.clone(),
+        park_code: park.as_ref().map(|(code, _)| code.clone()),
+        park_name: park.as_ref().map(|(_, name)| name.clone()),
+        remarks: None,
+        user_ids,
+    };
+    zentai::try_upsert_device(&state.config, &payload).await;
 }
 
 async fn fetch_device(state: &AppState, id: i64) -> Result<Device, AppError> {

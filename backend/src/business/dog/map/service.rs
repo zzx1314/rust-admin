@@ -231,6 +231,14 @@ impl DogMapService {
             return Err(AppError::BadRequest("地图名称不能为空".to_string()));
         }
 
+        // 业务平台以服务账号回传设备地图时，用 ownerUserId 把地图归属到设备所有人；
+        // 普通用户不能改归属，始终记在自己名下。
+        let owner_scope = info
+            .owner_user_id
+            .filter(|owner| *owner > 0 && scope.is_admin())
+            .map(|owner| DataScope::new(owner, false));
+        let write_scope = owner_scope.as_ref().unwrap_or(scope);
+
         // 以地图包内容为准解析坐标系与哈希；前端手填值只用于校验，不覆盖包内数据。
         let parsed = parse_map_package(bytes)?;
         validate_package_metadata(&info, &parsed)?;
@@ -283,7 +291,7 @@ impl DogMapService {
                     map_width,
                     map_height,
                 };
-                self.update(id, req, scope).await
+                self.update(id, req, write_scope).await
             }
             None => {
                 let req = CreateMapRequest {
@@ -310,7 +318,7 @@ impl DogMapService {
                     map_width,
                     map_height,
                 };
-                self.create(req, scope).await
+                self.create(req, write_scope).await
             }
         }
     }

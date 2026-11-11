@@ -375,6 +375,8 @@ mod tests {
                 "drop_retired_dog_tables",
                 "drop_command_services_tables",
                 "add_map_park",
+                "add_device_management",
+                "add_device_management_menu",
             ]
         );
         assert_eq!(migrations[0].name(), "p_sys_tables_from_file");
@@ -400,11 +402,9 @@ mod tests {
         }
 
         for table in [
-            "dog_device",
             "dog_park",
             "dog_task",
             "dog_route_library",
-            "dog_user_device",
             "dog_workflow",
             "dog_command",
             "dog_services",
@@ -419,6 +419,22 @@ mod tests {
             assert!(
                 connection.query_one(statement).await.unwrap().is_none(),
                 "{} must be dropped by the cleanup migration",
+                table
+            );
+        }
+
+        // 设备台账与用户分配由 add_device_management 重建。
+        for table in ["dog_device", "dog_user_device"] {
+            let statement = Statement::from_string(
+                DbBackend::Sqlite,
+                format!(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '{}'",
+                    table
+                ),
+            );
+            assert!(
+                connection.query_one(statement).await.unwrap().is_some(),
+                "{} must exist after the device management migration",
                 table
             );
         }
@@ -454,8 +470,8 @@ mod tests {
             "dog_map.park_id must be dropped"
         );
 
-        // 保留的页面仍是一级菜单：地图 / 模型 / 媒体 / 参数配置。
-        for (id, sort) in [(1302, 2), (1204, 3), (1205, 4), (1207, 5)] {
+        // 保留的页面仍是一级菜单：设备 / 地图 / 模型 / 媒体 / 参数配置。
+        for (id, sort) in [(1210, 2), (1302, 3), (1204, 4), (1205, 5), (1207, 6)] {
             let statement = Statement::from_string(
                 DbBackend::Sqlite,
                 format!(
@@ -471,9 +487,9 @@ mod tests {
             );
         }
 
-        // 园区 / 设备 / 路线 / 任务 / 工作流 / 设备绑定菜单已物理删除。
+        // 园区 / 路线 / 任务 / 工作流 / 旧设备绑定菜单已物理删除。
         for id in [
-            1200, 1201, 1202, 1203, 1209, 1210, 1211, 1212, 1213, 1219, 1220, 1300, 1301, 1311,
+            1200, 1201, 1202, 1203, 1209, 1211, 1212, 1213, 1219, 1300, 1301, 1311,
         ] {
             let statement = Statement::from_string(
                 DbBackend::Sqlite,

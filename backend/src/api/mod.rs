@@ -1,4 +1,5 @@
 use crate::business::dog::config::service::DogConfigService;
+use crate::business::dog::device::service::DogDeviceService;
 use crate::business::dog::map::service::DogMapService;
 use crate::business::dog::media::service::DogMediaService;
 use crate::business::dog::model::service::DogModelService;
@@ -33,6 +34,7 @@ pub struct AppState {
     pub dog_media_service: Arc<DogMediaService>,
     pub dog_model_service: Arc<DogModelService>,
     pub dog_config_service: Arc<DogConfigService>,
+    pub dog_device_service: Arc<DogDeviceService>,
     pub dog_statistics_service: Arc<DogStatisticsService>,
     /// Directory for uploaded map packages (`<upload_dir>/maps`).
     pub upload_dir: PathBuf,

@@ -4,6 +4,11 @@
 按 `designprototype/robodog-management-system.html` 原型实现，拥有自己的
 Rust 后端、SQLite 数据库与 Vue 3 运营控制台。
 
+设备台账同时同步到中台（根 `backend`）的 `dog_device`：中台管理员在「设备管理」
+页面给设备分配用户，业务平台用同一个中台账号登录后只看到自己管辖的设备；
+机器狗建图回传时，地图归属到采集设备当前被分配的中台用户名下，园区建图时
+只列出该用户名下的地图。
+
 ## 目录结构
 
 ```text
@@ -147,6 +152,30 @@ POST   /api/map-versions/{id}/publish     POST   /api/map-versions/{id}/new-vers
 POST   /api/map-versions/ingest
 ```
 
+## 中台账号与设备分配
+
+业务平台登录同时支持两类账号：
+
+1. **中台账号（推荐）**：先用本地密码校验（兼容设备客户端服务账号），失败后再向
+   `ROBODOG_ZENTAI_URL` 登录；中台校验成功后自动在本地 `users` 表落地
+   `zentai_user_id` / `zentai_username` / `zentai_roles`。
+2. **本地服务账号**：未配置中台或设备客户端使用，继续走本地 bcrypt 校验。
+
+设备可见范围：
+
+- 中台管理员（角色 id = 1）在业务平台拥有全局视角；
+- 普通中台账号只能看到 `dog_user_device` 中分配给自己的设备；
+- 没有中台身份的本地账号不受限制（设备客户端 / 运维用途）。
+
+业务平台的设备新增 / 修改 / 绑定园区 / 网关首次注册都会尽力同步到中台
+`POST /api/dogDevice/upsert`（失败只记日志）；中台侧用「设备管理」页面批量
+分配用户，业务平台在下一次请求时实时读取分配关系。中台侧只维护设备台账与
+分配关系，运行状态、园区绑定仍以业务平台为准。
+
+设备客户端回传地图时，`mapInfo.deviceId` 会用于查询设备在中台的归属用户，
+并把该用户写入中台 `dog_map.user_id`；园区选择地图时，非管理员只能看到
+`user_id = 自己` 的中台地图。
+
 ## 设备与园区绑定
 
 设备首次通过 WebSocket 注册时如果没有建档，服务会自动创建一条「待绑定」设备
@@ -192,7 +221,7 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | `file` | ✅ | 地图 `.zip`（须含 `model.pgm` + `model.yaml`），≤ 256MB |
-| `mapInfo` | ✅ | JSON 字符串：`{ mapName, parkId, bind, mapType, remarks, source, sourceRef }`，`parkId` 必填 |
+| `mapInfo` | ✅ | JSON 字符串：`{ mapName, parkId, deviceId, bind, mapType, remarks, source, sourceRef }`，`parkId` 必填；`deviceId` 用于确定地图归属用户 |
 
 响应：
 
@@ -211,7 +240,8 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 2. stash_package → data/map_ingest/ 留档（中台不可用时凭此路径重放）
 3. parse_local_meta → 本地解析 model.pgm 宽高 / model.yaml resolution+origin
 4. push_to_zentai → 登录中台（AES-128-CBC 加密密码）→ POST /api/dogMap/upload
-   mapInfo 会带上园区 parkCode / parkName，中台 dog_map 记录园区归属
+   mapInfo 会带上园区 parkCode / parkName 与设备归属用户 ownerUserId，
+   中台 dog_map 记录园区归属与地图所有人
 5. 写 map_versions（ON CONFLICT(id) DO UPDATE）
 6. bind=true 时切换园区当前基线
 ```
@@ -261,9 +291,9 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 | `ROBODOG_JWT_TTL_HOURS` | `24` | Token 有效期 |
 | `ROBODOG_WEB_DIST` | `../web/dist` | 前端构建产物目录 |
 | `ROBODOG_BACKEND_DB` | `../../backend/data/users.db` | 仓库根目录 backend 的 SQLite 文件，用于导入 `dog_map` 中的 ROS 地图 |
-| `ROBODOG_ZENTAI_URL` | 空 | 中台地址，如 `http://127.0.0.1:3000`。三项齐全才启用建图回传 |
-| `ROBODOG_ZENTAI_USER` | 空 | 中台登录账号 |
-| `ROBODOG_ZENTAI_PASSWORD` | 空 | 中台登录密码（明文配置，服务端自行 AES 加密后提交） |
+| `ROBODOG_ZENTAI_URL` | 空 | 中台地址，如 `http://127.0.0.1:3000`。三项齐全才启用建图回传 / 中台账号登录 / 设备同步 |
+| `ROBODOG_ZENTAI_USER` | 空 | 中台服务账号（需管理员，用于设备同步、分配查询、地图回传） |
+| `ROBODOG_ZENTAI_PASSWORD` | 空 | 中台服务账号密码（明文配置，服务端自行 AES 加密后提交） |
 | `ROBODOG_INGEST_DIR` | `server/data/map_ingest` | 回传地图包的本地留档目录 |
 
 ## 任务下发与本体对接

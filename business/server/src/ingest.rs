@@ -23,6 +23,8 @@ use tracing::{info, warn};
 pub struct IngestRequest {
     pub map_name: String,
     pub park_id: Option<i64>,
+    /// 采集该地图的设备编号（业务库 `devices.device_id`）
+    pub device_id: Option<String>,
     /// 导入后是否绑定为园区基线
     pub bind: bool,
     pub map_type: Option<String>,
@@ -46,6 +48,12 @@ impl IngestRequest {
         Ok(Self {
             map_name,
             park_id: value.get("parkId").and_then(Value::as_i64),
+            device_id: value
+                .get("deviceId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
             bind: value.get("bind").and_then(Value::as_bool).unwrap_or(false),
             map_type: value
                 .get("mapType")
@@ -90,22 +98,19 @@ pub async fn push_to_zentai(
     park: &ParkRef,
     file_name: &str,
     package: &[u8],
+    owner_user_id: Option<i64>,
 ) -> Result<ZentaiMap, AppError> {
-    let (Some(base), Some(username), Some(password)) = (
-        config.zentai_base_url.as_deref(),
-        config.zentai_username.as_deref(),
-        config.zentai_password.as_deref(),
-    ) else {
-        return Err(AppError::Internal(
-            "未配置中台回传账号（ROBODOG_ZENTAI_URL / USER / PASSWORD）".to_string(),
-        ));
-    };
+    let base = config.zentai_base_url.as_deref().ok_or_else(|| {
+        AppError::Internal("未配置中台回传账号（ROBODOG_ZENTAI_URL / USER / PASSWORD）".to_string())
+    })?;
 
-    let token = zentai_login(http, base, username, password).await?;
+    // 服务账号登录（进程内缓存），响应格式为根 backend 的登录 VO
+    let session = crate::zentai::service_session(config).await?;
+    let token = session.token;
 
     // mapInfo：中台按包内容解析坐标系与哈希，这里只传展示字段
     // parkCode / parkName 让中台地图带上园区归属，业务平台后续可按园区反查地图
-    let info = zentai_map_info(request, park);
+    let info = zentai_map_info(request, park, owner_user_id);
 
     let part = reqwest::multipart::Part::bytes(package.to_vec())
         .file_name(file_name.to_string())
@@ -163,7 +168,11 @@ pub async fn push_to_zentai(
 ///
 /// 园区是业务库自己的台账，中台不建园区表，只落 `parkCode` / `parkName`，
 /// 业务平台拉取中台地图时凭 `parkCode` 反查本园区。
-pub fn zentai_map_info(request: &IngestRequest, park: &ParkRef) -> Value {
+pub fn zentai_map_info(
+    request: &IngestRequest,
+    park: &ParkRef,
+    owner_user_id: Option<i64>,
+) -> Value {
     json!({
         "mapName": request.map_name,
         "mapType": request.map_type.clone().unwrap_or_else(|| "2D栅格".to_string()),
@@ -171,64 +180,8 @@ pub fn zentai_map_info(request: &IngestRequest, park: &ParkRef) -> Value {
         "mapStatus": "部分标定",
         "parkCode": park.code.clone(),
         "parkName": park.name.clone(),
+        "ownerUserId": owner_user_id,
     })
-}
-
-/// 登录中台拿 Bearer token
-///
-/// 中台密码走 AES-128-CBC（ZeroPadding，key=iv=`Welcome Superred`）加密后
-/// 以表单提交，与前端 `utils/aes.ts` 保持一致。
-async fn zentai_login(
-    http: &reqwest::Client,
-    base: &str,
-    username: &str,
-    password: &str,
-) -> Result<String, AppError> {
-    use aes::Aes128;
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-    use cbc::cipher::{BlockEncryptMut, KeyIvInit, block_padding::NoPadding};
-
-    type Aes128CbcEnc = cbc::Encryptor<Aes128>;
-    const KEY: &[u8; 16] = b"Welcome Superred";
-
-    let plain = password.as_bytes();
-    let padded_len = plain.len().div_ceil(16).max(1) * 16;
-    let mut buf = vec![0u8; padded_len];
-    buf[..plain.len()].copy_from_slice(plain);
-    let cipher = Aes128CbcEnc::new(KEY.into(), KEY.into())
-        .encrypt_padded_mut::<NoPadding>(&mut buf, padded_len)
-        .map_err(|e| AppError::Internal(format!("密码加密失败: {e}")))?;
-    let encrypted = BASE64.encode(cipher);
-
-    let url = format!("{base}/api/token");
-    let resp = http
-        .post(&url)
-        .form(&[
-            ("username", username),
-            ("password", encrypted.as_str()),
-            ("grant_type", "password"),
-            ("scope", "server"),
-        ])
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("登录中台失败: {e}")))?;
-
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(AppError::Internal(format!(
-            "登录中台失败 HTTP {status}: {text}"
-        )));
-    }
-    let value: Value = serde_json::from_str(&text)
-        .map_err(|e| AppError::Internal(format!("中台登录响应不是 JSON: {e}")))?;
-    value
-        .get("access_token")
-        .or_else(|| value.get("accessToken"))
-        .or_else(|| value.get("data").and_then(|d| d.get("access_token")))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| AppError::Internal(format!("中台登录响应缺少 access_token: {text}")))
 }
 
 /// 把上传的地图包落盘暂存（便于排障与重放）
@@ -405,6 +358,7 @@ mod tests {
         IngestRequest {
             map_name: "B区-20261110".to_string(),
             park_id,
+            device_id: Some("RD-001".to_string()),
             bind: true,
             map_type: None,
             remarks: None,
@@ -420,18 +374,20 @@ mod tests {
             code: "PK-003".to_string(),
             name: "B区园区".to_string(),
         };
-        let info = zentai_map_info(&request, &park);
+        let info = zentai_map_info(&request, &park, Some(7));
         assert_eq!(info["parkCode"], "PK-003");
         assert_eq!(info["parkName"], "B区园区");
         assert_eq!(info["mapName"], "B区-20261110");
         assert_eq!(info["mapStatus"], "部分标定");
+        assert_eq!(info["ownerUserId"], 7);
     }
 
     #[test]
-    fn ingest_request_reads_park_id_from_json() {
-        let value = json!({"mapName": "B区图", "parkId": 3});
+    fn ingest_request_reads_park_id_and_device_id_from_json() {
+        let value = json!({"mapName": "B区图", "parkId": 3, "deviceId": "RD-001"});
         let request = IngestRequest::from_json(&value).expect("mapInfo must parse");
         assert_eq!(request.park_id, Some(3));
+        assert_eq!(request.device_id.as_deref(), Some("RD-001"));
 
         let value = json!({"mapName": "未绑定设备图"});
         let request = IngestRequest::from_json(&value).expect("mapInfo must parse");

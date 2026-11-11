@@ -9,6 +9,7 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use crate::api::AppState;
 use crate::api::middleware::{audit_log_middleware, require_auth};
 use crate::business::dog::config::handlers as dog_config_handlers;
+use crate::business::dog::device::handlers as dog_device_handlers;
 use crate::business::dog::map::handlers as dog_map_handlers;
 use crate::business::dog::media::handlers as dog_media_handlers;
 use crate::business::dog::model::handlers as dog_model_handlers;
@@ -225,6 +226,49 @@ pub fn sys_log_routes(state: AppState) -> Router<AppState> {
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 
+pub fn dog_device_routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route(
+            "/dogDevice/getPage",
+            get(dog_device_handlers::list_devices_handler),
+        )
+        .route(
+            "/dogDevice/getAll",
+            get(dog_device_handlers::list_all_devices_handler),
+        )
+        .route(
+            "/dogDevice/users",
+            get(dog_device_handlers::list_assignable_users_handler),
+        )
+        .route(
+            "/dogDevice/assignUsers",
+            post(dog_device_handlers::assign_users_handler),
+        )
+        .route(
+            "/dogDevice/unassignUsers",
+            post(dog_device_handlers::unassign_users_handler),
+        )
+        .route(
+            "/dogDevice/upsert",
+            post(dog_device_handlers::upsert_device_handler),
+        )
+        .route(
+            "/dogDevice/byCode/{device_code}",
+            get(dog_device_handlers::get_device_by_code_handler),
+        )
+        .route(
+            "/dogDevice",
+            post(dog_device_handlers::create_device_handler),
+        )
+        .route(
+            "/dogDevice/{id}",
+            get(dog_device_handlers::get_device_handler)
+                .put(dog_device_handlers::update_device_handler)
+                .delete(dog_device_handlers::delete_device_handler),
+        )
+        .layer(from_fn_with_state(state.clone(), require_auth))
+}
+
 pub fn dog_map_routes(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/dogMap/getPage", get(dog_map_handlers::list_maps_handler))
@@ -348,6 +392,7 @@ pub fn create_router(state: AppState) -> Router {
         .merge(sys_dict_item_routes(state.clone()))
         .merge(sys_log_routes(state.clone()))
         .merge(dog_map_routes(state.clone()))
+        .merge(dog_device_routes(state.clone()))
         .merge(dog_media_routes(state.clone()))
         .merge(dog_model_routes(state.clone()))
         .merge(dog_config_routes(state.clone()))

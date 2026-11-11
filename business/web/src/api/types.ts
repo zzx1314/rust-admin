@@ -9,6 +9,10 @@ export interface UserInfo {
   username: string;
   displayName: string | null;
   role: string;
+  /** 关联的中台账号；本地服务账号为空 */
+  zentaiUserId: number | null;
+  zentaiUsername: string | null;
+  isAdmin: boolean;
 }
 
 export interface LoginResponse {
@@ -215,6 +219,8 @@ export interface MapVersion {
   fileName: string | null;
   filePath: string | null;
   fileSize: number | null;
+  ownerUserId: number | null;
+  ownerUsername: string | null;
   routeCount: number;
   taskCount: number;
 }
@@ -245,6 +251,9 @@ export interface BackendMap {
   mapWidth: number | null;
   mapHeight: number | null;
   createTime: string | null;
+  /** 中台 dog_map.user_id（地图归属用户） */
+  userId: number | null;
+  ownerUsername: string | null;
 }
 
 export interface MapRefRoute {

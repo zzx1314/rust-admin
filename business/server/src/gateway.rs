@@ -105,6 +105,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 };
                                 match handle_register(&db, &payload).await {
                                     Ok(device) => {
+                                        // 设备接入后同步到中台台账，便于在中台分配用户
+                                        sync_registered_device(&state.config, &db, &device).await;
                                         let did = payload.device_id.clone();
                                         let old_device_id = device_id.replace(did.clone());
 
@@ -323,6 +325,37 @@ async fn handle_register(db: &SqlitePool, payload: &RegisterPayload) -> Result<D
     .await?;
 
     fetch_device_by_code(db, device_id).await
+}
+
+/// 设备注册后同步到中台台账（失败只记日志）。
+async fn sync_registered_device(config: &crate::config::Config, db: &SqlitePool, device: &Device) {
+    if !config.zentai_ready() {
+        return;
+    }
+    let park = match device.park_id {
+        Some(park_id) => sqlx::query_as::<_, (String, String)>(
+            "SELECT park_code, park_name FROM parks WHERE id = ?1",
+        )
+        .bind(park_id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten(),
+        None => None,
+    };
+    let payload = crate::zentai::DeviceUpsert {
+        device_id: device.device_id.clone(),
+        device_name: None,
+        model: device.model.clone(),
+        status: Some(device.status.clone()),
+        firmware: device.firmware.clone(),
+        device_ip: device.device_ip.clone(),
+        park_code: park.as_ref().map(|(code, _)| code.clone()),
+        park_name: park.as_ref().map(|(_, name)| name.clone()),
+        remarks: None,
+        user_ids: Vec::new(),
+    };
+    crate::zentai::try_upsert_device(config, &payload).await;
 }
 
 /// 查询园区编码（用于 register_ack 下发与地图回传归属）
