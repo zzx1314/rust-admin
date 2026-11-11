@@ -1,8 +1,8 @@
+use crate::business::dog::device::audit::{self, CommandAudit, NewCommandAudit};
 use crate::business::dog::device::domain::{
     AssignUsersRequest, AssignableUserVO, CreateDeviceRequest, DeviceFilter, DevicePageQuery,
     DeviceVO, DogDevice, UnassignUsersRequest, UpdateDeviceRequest,
 };
-use crate::business::dog::device::audit::{self, CommandAudit, NewCommandAudit};
 use crate::business::dog::device::repository::SeaOrmDogDeviceRepository;
 use crate::common::data_scope::DataScope;
 use crate::common::error::AppError;
@@ -320,8 +320,8 @@ impl DogDeviceService {
         message: Option<&str>,
         latency_ms: i64,
     ) {
-        if let Err(error) = audit::finish(self.repo.conn(), id, status, result, message, latency_ms)
-            .await
+        if let Err(error) =
+            audit::finish(self.repo.conn(), id, status, result, message, latency_ms).await
         {
             tracing::error!(audit_id = id, %error, "回填指令审计失败");
         }

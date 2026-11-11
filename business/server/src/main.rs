@@ -1,6 +1,6 @@
 use robodog_ops_server::app::{AppState, build_router};
 use robodog_ops_server::config::Config;
-use robodog_ops_server::{db, gateway, seed};
+use robodog_ops_server::{control_plane, db, gateway, seed};
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
@@ -23,6 +23,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config: config.clone(),
         device_connections: gateway::new_device_connections(),
     };
+    // 反向控制信道：配置了中台 WS 地址时主动拨出，内网部署靠它接收中台指令
+    control_plane::spawn(state.clone());
     let router = build_router(state);
 
     let address = format!("0.0.0.0:{}", config.port);

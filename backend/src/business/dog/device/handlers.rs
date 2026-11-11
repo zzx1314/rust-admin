@@ -2,6 +2,7 @@ use crate::api::AppState;
 use crate::api::middleware::RequestUser;
 use crate::business::dog::device::audit::{self, NewCommandAudit};
 use crate::business::dog::device::business_client;
+use crate::business::dog::device::control_channel::{ChannelError, DEFAULT_TIMEOUT};
 use crate::business::dog::device::domain::{
     AssignUsersRequest, AssignableUserVO, CreateDeviceRequest, DeviceCommandRequest, DeviceFilter,
     DevicePageQuery, DeviceVO, DispatchTaskRequest, UnassignUsersRequest, UpdateDeviceRequest,
@@ -196,12 +197,13 @@ pub async fn sync_device_maps_handler(
         .dog_device_service
         .get(params.id, &user.data_scope())
         .await?;
-    let path = business_client::device_path(&device.device_id, "sync-maps");
-    let data = business_client::post(
+    let data = deliver(
         &state,
-        &path,
+        &user,
+        &device.device_id,
+        "sync-maps",
+        "同步地图",
         "",
-        user.user_id,
         json!({ "mode": "manual" }),
     )
     .await?;
@@ -217,7 +219,12 @@ fn resolve_request_id(value: Option<String>) -> String {
 }
 
 /// 幂等命中时把上次的结果原样回放。
-fn replay(device_code: &str, action: &str, request_id: &str, previous: &audit::CommandAudit) -> Value {
+fn replay(
+    device_code: &str,
+    action: &str,
+    request_id: &str,
+    previous: &audit::CommandAudit,
+) -> Value {
     json!({
         "deviceId": device_code,
         "action": action,
@@ -232,6 +239,75 @@ fn replay(device_code: &str, action: &str, request_id: &str, previous: &audit::C
     })
 }
 
+/// 把一次控制请求送到业务平台。
+///
+/// 优先走业务平台主动拨入的反向信道（内网部署、无入站端口时唯一可用通路）；
+/// 信道不在线时回退到直连 HTTP（中台与业务平台同网 / 已打通入站的老部署）。
+async fn deliver(
+    state: &AppState,
+    user: &RequestUser,
+    device_code: &str,
+    suffix: &str,
+    action: &str,
+    request_id: &str,
+    body: Value,
+) -> Result<Value, AppError> {
+    let kind = match suffix {
+        "tasks" => "task",
+        "runtime" => "runtime",
+        "sync-maps" => "sync-maps",
+        _ => "command",
+    };
+    // 运行态是只读查询，没有调用方提供的幂等键，这里补一个仅用于关联回执
+    let request_id = if request_id.trim().is_empty() {
+        format!("rt-{}", generate_id())
+    } else {
+        request_id.trim().to_string()
+    };
+
+    if state.control_channel.online().await {
+        let payload = json!({
+            "requestId": request_id,
+            "kind": kind,
+            "deviceCode": device_code,
+            "action": action,
+            "operatorId": user.user_id,
+            "operatorAdmin": user.is_admin,
+            "body": body,
+        });
+        match state
+            .control_channel
+            .request(&request_id, "request", payload, DEFAULT_TIMEOUT)
+            .await
+        {
+            // 与 HTTP 直连模式返回同样形状的业务数据：调用方不需要知道链路
+            Ok(data) => return Ok(data),
+            // 业务平台的拒绝消息本身就是给运维看的（设备离线 / 未绑园区 / 指令非法）
+            Err(ChannelError::Rejected(message)) => return Err(AppError::BadRequest(message)),
+            Err(ChannelError::Timeout) => {
+                return Err(AppError::BadRequest(format!(
+                    "业务平台未在 {} 秒内回执，请检查业务平台与控制信道状态",
+                    DEFAULT_TIMEOUT.as_secs()
+                )));
+            }
+            Err(ChannelError::Disconnected) => {
+                return Err(AppError::InternalError(
+                    "控制信道在等待回执时断开".to_string(),
+                ));
+            }
+            // 刚好断开：继续尝试 HTTP，避免因为一次重连把指令丢掉
+            Err(ChannelError::Offline) => {}
+        }
+    }
+
+    let path = business_client::device_path(device_code, suffix);
+    let body = if kind == "runtime" { Value::Null } else { body };
+    match kind {
+        "runtime" => business_client::get(state, &path).await,
+        _ => business_client::post(state, &path, &request_id, user.user_id, body).await,
+    }
+}
+
 /// 一次控制面下发：查幂等键 → 落 pending 审计 → 调业务平台 → 回填审计。
 ///
 /// 中台只做控制与审计，真正的载荷组装与 WebSocket 下发在业务平台。
@@ -244,38 +320,44 @@ async fn forward(
     request_id: &str,
     body: Value,
 ) -> Result<Value, AppError> {
-    // 幂等：同一次操作重试直接回放上次结果，不会向设备重复下发
-    if let Some(previous) = state.dog_device_service.find_command(request_id).await? {
-        return Ok(replay(device_code, action, request_id, &previous));
-    }
-
-    let audit_id = state
-        .dog_device_service
-        .begin_command(NewCommandAudit {
-            user_id: user.user_id,
-            username: &user.username,
-            device_code,
-            action,
-            request_id,
-            params: Some(body.to_string()),
-        })
-        .await?;
+    let audit_id = match state.dog_device_service.find_command(request_id).await? {
+        // 已经有结论：回放上次结果，不再向设备重复下发
+        Some(previous) if previous.status != audit::STATUS_PENDING => {
+            return Ok(replay(device_code, action, request_id, &previous));
+        }
+        // 上一次没拿到回执（超时/断线）：复用同一条审计继续，而不是插新行
+        Some(previous) => previous.id,
+        None => {
+            state
+                .dog_device_service
+                .begin_command(NewCommandAudit {
+                    user_id: user.user_id,
+                    username: &user.username,
+                    device_code,
+                    action,
+                    request_id,
+                    params: Some(body.to_string()),
+                })
+                .await?
+        }
+    };
 
     let started = std::time::Instant::now();
-    let path = business_client::device_path(device_code, suffix);
-    let outcome = business_client::post(state, &path, request_id, user.user_id, body).await;
+    let outcome = deliver(state, user, device_code, suffix, action, request_id, body).await;
     let latency_ms = started.elapsed().as_millis() as i64;
 
     match outcome {
         Ok(data) => {
-            state.dog_device_service.finish_command(
-                audit_id,
-                audit::STATUS_SUCCEEDED,
-                Some(&data.to_string()),
-                None,
-                latency_ms,
-            )
-            .await;
+            state
+                .dog_device_service
+                .finish_command(
+                    audit_id,
+                    audit::STATUS_SUCCEEDED,
+                    Some(&data.to_string()),
+                    None,
+                    latency_ms,
+                )
+                .await;
             Ok(json!({
                 "deviceId": device_code,
                 "action": action,
@@ -287,14 +369,16 @@ async fn forward(
             }))
         }
         Err(error) => {
-            state.dog_device_service.finish_command(
-                audit_id,
-                audit::STATUS_FAILED,
-                None,
-                Some(&error.to_string()),
-                latency_ms,
-            )
-            .await;
+            state
+                .dog_device_service
+                .finish_command(
+                    audit_id,
+                    audit::STATUS_FAILED,
+                    None,
+                    Some(&error.to_string()),
+                    latency_ms,
+                )
+                .await;
             Err(error)
         }
     }
@@ -394,7 +478,15 @@ pub async fn device_runtime_handler(
         .dog_device_service
         .get(params.id, &user.data_scope())
         .await?;
-    let path = business_client::device_path(&device.device_id, "runtime");
-    let data = business_client::get(&state, &path).await?;
+    let data = deliver(
+        &state,
+        &user,
+        &device.device_id,
+        "runtime",
+        "运行态查询",
+        "",
+        Value::Null,
+    )
+    .await?;
     Ok(Json(ApiResponse::ok(data)))
 }

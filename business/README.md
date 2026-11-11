@@ -167,6 +167,12 @@ GET    /api/map-versions/{id}/raster      GET    /api/map-versions/backend      
 GET    /api/map-versions/synced-sources   # 已同步的机器人地图路径（按 parkId）
 POST   /api/map-versions/{id}/publish     POST   /api/map-versions/{id}/new-version
 POST   /api/map-versions/ingest          # 自动回传 / 手动同步共用入口
+
+# 中台内部接口（共享服务令牌 x-service-token，不使用业务 JWT）
+POST   /api/zentai/devices/{deviceId}/sync-maps   # 中台「同步地图」
+POST   /api/zentai/devices/{deviceId}/command     # 中台下发指令
+POST   /api/zentai/devices/{deviceId}/tasks       # 中台给设备下发任务
+GET    /api/zentai/devices/{deviceId}/runtime     # 中台读取设备运行态（只读）
 ```
 
 ## 中台账号与设备分配
@@ -220,6 +226,47 @@ POST   /api/map-versions/ingest          # 自动回传 / 手动同步共用入�
    `GET /api/map-versions/synced-sources?parkId=...`，只下载尚未同步的地图。
 
 因此自动回传与手动同步交叉执行也不会重复上传/入库。
+
+## 中台控制面：指令 / 任务 / 运行态
+
+中台不持有设备连接，它只有控制面入口；**所有指令与任务最终都由本服务的设备
+WebSocket 下发**。请求有两条链路，执行逻辑完全一致：
+
+```text
+① 反向信道（推荐，内网部署 / 无入站端口）
+   本服务 ──dial(出站)──▶ 中台 GET /api/dogDevice/control-plane/ws
+        ◀── request 帧（command / task / runtime / sync-maps）
+        ──── result 帧（ok / error）────▶
+
+② 直连 HTTP（同网部署）
+   中台 ──▶ POST /api/zentai/devices/{deviceId}/command（或 /tasks / runtime）
+```
+
+反向信道由 `ROBODOG_ZENTAI_WS_URL` + `ROBODOG_SERVICE_TOKEN` 两个环境变量开启，
+任一为空则不建立（继续用 HTTP 直连模式）。握手请求头带 `x-service-token`，
+连接断开后按 1s→30s 指数退避重连；中台每 30s 发一次 `ping`，本服务回 `pong`。
+
+```bash
+# 内网部署（业务平台只能出站）
+export ROBODOG_SERVICE_TOKEN=dev-service-token
+export ROBODOG_ZENTAI_WS_URL=ws://192.168.41.10:3000
+```
+
+HTTP 链路（②）的三个约定：
+
+| 请求头 / 帧字段 | 作用 |
+| --- | --- |
+| `x-service-token` | 共享令牌，与中台 `APP_DOG__BUSINESS_API_TOKEN` 一致 |
+| `x-request-id` | 幂等键，重试原样带回；命中 `zentai_requests` 直接回放上次响应 |
+| `x-operator-id` / `x-operator-admin` | 中台账号身份：二次校验设备分配关系，并写进 `task_events` 留痕 |
+
+- **指令**：走 `devices::push_command`（与网页端同一实现），白名单
+  `teleop::BUSINESS_COMMANDS`，未绑定园区的设备拒绝「开始巡检 / 继续任务」。
+- **任务**：走 `tasks::create_task_core`（与网页端同一实现）；中台只给路线 ID 与
+  计划时间，航点/航段/动作、地图绑定、限速与结束动作由 `dispatch.rs` 组装。
+- **未送达即失败**：设备不在线时返回 4xx（`指令未送达`），中台会把审计记成
+  `failed`，不会显示成「已下发」。
+- **运行态**：只读聚合（在线、状态、电量、当前任务与进度、接管人），不写库。
 
 ## 地图基线
 

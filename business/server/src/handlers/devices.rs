@@ -529,8 +529,14 @@ pub async fn send_command(
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     let device = fetch_device(&state, id).await?;
     auth::ensure_device_access(&state, &claims, &device.device_id).await?;
-    let result =
-        push_command(&state, &device, &payload.command, None, Some(&claims.username)).await?;
+    let result = push_command(
+        &state,
+        &device,
+        &payload.command,
+        None,
+        Some(&claims.username),
+    )
+    .await?;
     Ok(ApiResponse::ok(result))
 }
 
@@ -694,10 +700,7 @@ pub(crate) async fn fetch_device_by_code(
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| {
-            AppError::NotFound(format!(
-                "设备 {} 不在业务平台台账中",
-                device_code.trim()
-            ))
+            AppError::NotFound(format!("设备 {} 不在业务平台台账中", device_code.trim()))
         })
 }
 

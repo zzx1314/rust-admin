@@ -39,6 +39,7 @@
 | `dog_config` | 参数配置 | `config_name`、`config_value`、`description` |
 | `dog_device` | 设备台账（业务平台同步） | `device_id`(业务设备编号)、`device_name`、`model`、`status`、`firmware`、`device_ip`、`park_code`/`park_name`、`user_id`(创建者) |
 | `dog_user_device` | 设备-用户分配（多对多） | `user_id`、`device_id`(dog_device.id)、`is_deleted` |
+| `dog_command_audit` | 设备指令审计（中台控制面留痕） | `user_id`/`username`(操作人)、`device_code`、`action`、`request_id`(幂等键，唯一)、`params`、`status`(pending/succeeded/failed)、`result`、`message`、`latency_ms` |
 
 所有表都有 `id`（主键，创建时由服务端生成）、`create_time`、`update_time`、`is_deleted`（软删除标记），查询一律带 `is_deleted = 0`。
 
@@ -75,6 +76,9 @@ DELETE /api/dogDevice/{id}          软删除设备
 GET    /api/dogDevice/users         可分配用户下拉
 GET    /api/dogDevice/byCode/{code} 按设备编号查询（业务平台内部使用）
 POST   /api/dogDevice/{id}/syncMaps  中台手动触发设备同步地图
+POST   /api/dogDevice/{id}/command  中台向设备下发指令（经业务平台转发）
+POST   /api/dogDevice/{id}/tasks    中台给设备下发一条巡检任务（选路线 + 计划时间）
+GET    /api/dogDevice/{id}/runtime  设备运行态只读视图（在线/任务/进度/电量）
 POST   /api/dogDevice/assignUsers   批量分配 { deviceIds, userIds, mode: append|replace }
 POST   /api/dogDevice/unassignUsers 批量解除分配 { deviceIds, userIds }
 ```
@@ -108,7 +112,57 @@ POST   /api/dogDevice/unassignUsers 批量解除分配 { deviceIds, userIds }
 
 业务平台需配置 `ROBODOG_SERVICE_TOKEN`，值与中台 `APP_DOG__BUSINESS_API_TOKEN` 一致。
 
-### 3.2 数据权限
+### 3.2 设备控制面（指令 / 任务 / 运行态）
+
+中台**不持有设备 WebSocket 连接**，设备注册与连接都在 `business/` 的 `/ws/device`。
+中台承担的是控制面：授权、审计、统一入口；真正的载荷组装与下发在业务平台。
+
+中台提供两种传输，**调用方无感知**（返回形状完全一致），按部署形态自动选择：
+
+```text
+① 反向信道（内网部署，业务平台只能出站）
+业务平台 ──dial(出站)──▶ 中台 GET /api/dogDevice/control-plane/ws
+        ◀── request 帧（command / task / runtime / sync-maps）──
+        ──── result 帧（ok / error）──────────────▶
+
+② 直连 HTTP（同网部署 / 已打通的入站）
+中台 → POST /api/zentai/devices/{device_code}/command（或 /tasks）
+
+两条链路都落到业务平台的同一实现：
+   services::apply_command / apply_task / runtime_snapshot
+   → dispatch.rs 组装航点/航段/地图绑定 → 已有 WS 连接下发
+```
+
+- **信道优先**：中台只要检测到有业务平台拨入（`control_channel.online()`）就走信道，
+  断线瞬间自动回退到 HTTP；两条都不可用时返回明确错误，不会静默丢弃。
+  「同步地图」（`syncMaps`）同样走这条信道，内网部署时不会失效。
+- **中台零配置**：信道是业务平台主动拨入，中台不需要知道业务平台地址。
+  业务平台侧配 `ROBODOG_ZENTAI_WS_URL`（如 `ws://10.0.0.8:3000`）+ `ROBODOG_SERVICE_TOKEN`。
+  两个值任一为空 → 不建信道，继续用 HTTP 直连模式。
+- **鉴权**：握手请求头带 `x-service-token`，与中台 `APP_DOG__BUSINESS_API_TOKEN` 一致；
+  不一致直接 401，连升级都不会发生。
+- **回执超时 8s**（`control_channel::DEFAULT_TIMEOUT`）：超时报错并把审计记为
+  `failed`，不会显示成「已下发」。业务平台的重连退避 1s→30s 指数增长。
+- **授权**：管理员可操作全部设备，普通用户只能操作 `dog_user_device` 里分配给他的设备；
+  业务平台会用中台分配关系再做一次校验。
+- **审计**：每次下发在 `dog_command_audit` 留痕（操作人、设备、指令、参数、结果、耗时）。
+  业务平台的 `task_events` 里也会记操作人，两侧可对账。
+- **幂等**：前端/调用方为一次操作生成 `requestId`，重试时原样回传。中台命中
+  `dog_command_audit.request_id` 直接回放上次结果，业务平台命中 `zentai_requests`
+  同样回放——设备不会收到两条相同指令。
+- **未送达必须报错**：设备不在线时业务平台返回 4xx，中台把审计记为 `failed`，
+  不会把「未送达」显示成「已下发」。
+- **指令白名单**：`开始巡检`/`暂停任务`/`继续任务`/`召回充电`/`远程接管`/`释放接管`，
+  与业务平台 `teleop::BUSINESS_COMMANDS` 对齐；`同步地图` 仍走独立接口。
+- 运行态接口只读，不做幂等与审计。
+
+> 反向（中台 → 设备）只有这一条路。不要把设备的 `/ws/device` 迁到中台：载荷依赖业务库
+> `routes.route_data`，迁过去会引入 SQLite 双写与急停/遥控的额外一跳延迟。
+> 反向控制信道（`/api/dogDevice/control-plane/ws`）只跑控制面消息，不转发设备帧。
+>
+> 急停 / 遥控不走中台：那是秒级安全动作，必须留在业务平台本地控制台的直连路径上。
+
+### 3.3 数据权限
 
 `dog_map` 与 `dog_device` 都带 `user_id`：地图按“谁创建谁可见”做行级隔离；
 设备按 `dog_user_device` 分配关系隔离（一个设备可分配给多个用户）。模型 / 媒体 / 参数配置为全局共享。
@@ -146,7 +200,7 @@ POST   /api/dogDevice/unassignUsers 批量解除分配 { deviceIds, userIds }
 | --- | --- |
 | 设备接入 | 已迁移到 `business/`；根后台不提供 WebSocket / 设备 token / 文件上传接口 |
 | 设备台账 | 业务平台通过 `/api/dogDevice/upsert` 单向同步到中台；中台侧只维护分配关系，不反向覆盖业务运行状态 |
-| 指令下发 | 指令接口与菜单已移除，下发由 `business/` 业务平台负责 |
+| 指令下发 | 中台有控制面入口（`/api/dogDevice/{id}/command` 与 `/tasks`，带审计与幂等），实际下发由 `business/` 业务平台完成；中台不持有设备连接 |
 | 文件上传 | 仅地图包有上传接口；模型 / 媒体的管理页面仍只填写路径 |
 | 地图发布归档 | 发布只推进状态，不再联动园区基线或自动归档旧版本；版本管理由业务侧人工完成 |
 | 按钮级权限 | 已初始化 `dog_*_find` 权限码并挂到超级管理员角色，但页面暂未使用 `v-auth` 做按钮控制 |

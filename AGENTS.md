@@ -61,9 +61,14 @@ the resource domains listed in `DOG.md`.
 `backend/config/config.toml` is committed and holds **no** secrets. Required
 environment variable: `APP_JWT_SECRET` (≥32 bytes). Optional:
 `APP_REDIS_PASSWORD`, `APP_CONFIG_FILE`, `APP_DOG__BUSINESS_API_TOKEN`
-（中台设备页「同步地图」调用业务平台内部接口的共享令牌，需与业务平台
+（中台设备页「同步地图 / 指令 / 任务」调用业务平台内部接口的共享令牌，需与业务平台
 `ROBODOG_SERVICE_TOKEN` 一致）。
 Any config key can be overridden with `APP_<SECTION>__<KEY>`.
+
+业务平台部署在没有入站端口的内网时，中台无法主动连它，改由业务平台拨入中台
+的反向控制信道（`GET /api/dogDevice/control-plane/ws`）。此时业务平台需额外配置
+`ROBODOG_ZENTAI_WS_URL`（如 `ws://10.0.0.8:3000`）；不配置则沿用「中台直连
+HTTP」模式。两者共用同一个服务令牌，见 `business/README.md`。
 
 `backend/run.sh` exports the required secret (and probes Redis for
 `APP_REDIS_PASSWORD`) before running `cargo run`. Set `APP_REDIS_PASSWORD`

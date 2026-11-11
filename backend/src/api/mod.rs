@@ -1,4 +1,5 @@
 use crate::business::dog::config::service::DogConfigService;
+use crate::business::dog::device::control_channel::ControlChannel;
 use crate::business::dog::device::service::DogDeviceService;
 use crate::business::dog::map::service::DogMapService;
 use crate::business::dog::media::service::DogMediaService;
@@ -44,4 +45,6 @@ pub struct AppState {
     pub business_api_token: Option<String>,
     /// 中台 → 业务平台内部接口的 HTTP 客户端（已设置超时、复用连接）。
     pub business_http: reqwest::Client,
+    /// 业务平台主动拨入的反向控制信道（内网部署时的唯一通路）。
+    pub control_channel: ControlChannel,
 }

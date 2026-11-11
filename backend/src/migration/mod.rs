@@ -377,6 +377,7 @@ mod tests {
                 "add_map_park",
                 "add_device_management",
                 "add_device_management_menu",
+                "add_dog_command_audit",
             ]
         );
         assert_eq!(migrations[0].name(), "p_sys_tables_from_file");

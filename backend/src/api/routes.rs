@@ -9,6 +9,7 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use crate::api::AppState;
 use crate::api::middleware::{audit_log_middleware, require_auth};
 use crate::business::dog::config::handlers as dog_config_handlers;
+use crate::business::dog::device::control_ws;
 use crate::business::dog::device::handlers as dog_device_handlers;
 use crate::business::dog::map::handlers as dog_map_handlers;
 use crate::business::dog::media::handlers as dog_media_handlers;
@@ -396,6 +397,16 @@ pub fn dog_statistics_routes(state: AppState) -> Router<AppState> {
         .layer(from_fn_with_state(state.clone(), require_auth))
 }
 
+/// 业务平台拨入的反向控制信道：只校验共享服务令牌，不经过 JWT 中间件。
+///
+/// 内网部署的业务平台没有入站端口，中台只能靠这条出站长连接下发指令。
+pub fn dog_control_routes() -> Router<AppState> {
+    Router::new().route(
+        "/dogDevice/control-plane/ws",
+        get(control_ws::control_plane_ws),
+    )
+}
+
 pub fn create_router(state: AppState) -> Router {
     let api_router = Router::new()
         .merge(auth_routes())
@@ -410,6 +421,7 @@ pub fn create_router(state: AppState) -> Router {
         .merge(sys_log_routes(state.clone()))
         .merge(dog_map_routes(state.clone()))
         .merge(dog_device_routes(state.clone()))
+        .merge(dog_control_routes())
         .merge(dog_media_routes(state.clone()))
         .merge(dog_model_routes(state.clone()))
         .merge(dog_config_routes(state.clone()))

@@ -55,7 +55,18 @@ pub async fn sync_device_maps(
     let mode = payload
         .and_then(|Json(request)| request.mode)
         .unwrap_or_else(|| "manual".to_string());
+    let data = apply_sync_maps(&state, &device_id, &mode).await?;
+    Ok(ApiResponse::ok(data))
+}
 
+/// 地图同步的实际实现：HTTP 链路与反向控制信道共用。
+pub async fn apply_sync_maps(
+    state: &AppState,
+    device_id: &str,
+    mode: &str,
+) -> Result<Value, AppError> {
+    let device_id = device_id.trim();
+    let mode = mode.trim();
     let device: Option<(i64, Option<i64>, String)> =
         sqlx::query_as("SELECT id, park_id, status FROM devices WHERE device_id = ?1 LIMIT 1")
             .bind(device_id.trim())
@@ -64,7 +75,7 @@ pub async fn sync_device_maps(
     let Some((device_pk, park_id, status)) = device else {
         return Err(AppError::NotFound(format!(
             "设备 {} 不在业务平台台账中",
-            device_id.trim()
+            device_id
         )));
     };
     let Some(park_id) = park_id else {
@@ -76,7 +87,7 @@ pub async fn sync_device_maps(
     let timestamp = now();
     let dispatched = gateway::send_command_to_device(
         &state.device_connections,
-        device_id.trim(),
+        device_id,
         "同步地图",
         Some(json!({
             "mode": mode,
@@ -98,28 +109,32 @@ pub async fn sync_device_maps(
         "INSERT INTO task_events (event_type, title, description, device_id, task_id, created_at)
          VALUES ('map_sync', ?1, ?2, ?3, NULL, ?4)",
     )
-    .bind(format!("中台触发地图同步：{}", device_id.trim()))
+    .bind(format!("中台触发地图同步：{device_id}"))
     .bind(format!("模式：{mode}；园区：{park_id}；只同步缺失地图"))
     .bind(device_pk)
     .bind(&timestamp)
     .execute(&state.db)
     .await?;
 
-    Ok(ApiResponse::ok(json!({
-        "deviceId": device_id.trim(),
+    Ok(json!({
+        "deviceId": device_id,
         "parkId": park_id,
         "mode": mode,
         "dispatched": true,
         "requestedAt": timestamp,
-    })))
+    }))
 }
 
 // ─── 中台控制面：指令 / 任务 / 运行态 ──────────────────────────────
 //
 // 中台可以有「设备页下发指令」「给设备下任务」的按钮，但它不持有设备 WebSocket：
-// 一律调用这里，由业务平台在既有连接上下发。三条约定：
-//   1. `x-request-id` 是幂等键，重试时原样带回，命中则回放上次响应；
-//   2. `x-operator-id` / `x-operator-admin` 是中台账号身份，用于二次鉴权与留痕；
+// 请求经两条链路之一到达这里，执行逻辑完全一致：
+//   - HTTP：中台直连本服务（同网部署），`Authorization` 换成共享服务令牌；
+//   - WS  ：业务平台主动拨入中台的反向信道（内网部署），帧里带同样的字段。
+//
+// 三条约定：
+//   1. `requestId` 是幂等键，命中 `zentai_requests` 直接回放上次响应；
+//   2. 操作人（中台账号 id + 是否管理员）用于二次鉴权与事件留痕；
 //   3. 设备离线时显式报错，不把「未送达」记成成功。
 
 use super::{devices, tasks};
@@ -160,6 +175,34 @@ pub struct TaskDispatchRequest {
     pub request_id: Option<String>,
 }
 
+/// 设备当前任务（运行态只读）的投影，避免在 handler 里出现六元组。
+#[derive(Debug, sqlx::FromRow)]
+struct CurrentTaskRow {
+    task_code: String,
+    task_name: String,
+    task_status: String,
+    progress: i64,
+    plan_start: Option<String>,
+    plan_end: Option<String>,
+}
+
+/// 一次控制请求的调用方身份：HTTP 头与 WS 帧归一化后都变成它。
+pub struct ControlMeta {
+    pub request_id: String,
+    pub operator: Option<i64>,
+    pub operator_admin: bool,
+}
+
+impl ControlMeta {
+    fn from_headers(headers: &HeaderMap, body_request_id: Option<String>) -> Self {
+        Self {
+            request_id: request_id_of(headers, body_request_id),
+            operator: operator_of(headers),
+            operator_admin: operator_is_admin(headers),
+        }
+    }
+}
+
 fn header_of(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get(name)
@@ -174,17 +217,25 @@ fn operator_of(headers: &HeaderMap) -> Option<i64> {
 }
 
 fn operator_is_admin(headers: &HeaderMap) -> bool {
-    matches!(header_of(headers, OPERATOR_ADMIN_HEADER).as_deref(), Some("1") | Some("true"))
+    matches!(
+        header_of(headers, OPERATOR_ADMIN_HEADER).as_deref(),
+        Some("1") | Some("true")
+    )
 }
 
-/// 幂等键：优先用请求头，其次请求体；都没有就生成一个（中台没有走幂等的老客户端）。
+/// 幂等键：优先用请求头，其次请求体；都没有就生成一个（老客户端没走幂等）。
 fn request_id_of(headers: &HeaderMap, body: Option<String>) -> String {
     header_of(headers, REQUEST_ID_HEADER)
-        .or_else(|| body.map(|value| value.trim().to_string()).filter(|value| !value.is_empty()))
+        .or_else(|| {
+            body.map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
         .unwrap_or_else(|| {
             format!(
                 "zt-{}",
-                chrono::Local::now().timestamp_nanos_opt().unwrap_or_default()
+                chrono::Local::now()
+                    .timestamp_nanos_opt()
+                    .unwrap_or_default()
             )
         })
 }
@@ -224,11 +275,12 @@ async fn begin_request(
 }
 
 async fn finish_request(state: &AppState, request_id: &str, response: &Value) {
-    if let Err(error) = sqlx::query("UPDATE zentai_requests SET response = ?2 WHERE request_id = ?1")
-        .bind(request_id)
-        .bind(response.to_string())
-        .execute(&state.db)
-        .await
+    if let Err(error) =
+        sqlx::query("UPDATE zentai_requests SET response = ?2 WHERE request_id = ?1")
+            .bind(request_id)
+            .bind(response.to_string())
+            .execute(&state.db)
+            .await
     {
         warn!("记录中台请求响应失败（{request_id}）: {error}");
     }
@@ -240,19 +292,14 @@ async fn finish_request(state: &AppState, request_id: &str, response: &Value) {
 /// 避免中台偶发抖动导致指令链路整条不可用。
 async fn ensure_operator_access(
     state: &AppState,
-    headers: &HeaderMap,
+    operator: Option<i64>,
+    is_admin: bool,
     device_code: &str,
 ) -> Result<(), AppError> {
-    let Some(operator) = operator_of(headers) else {
+    let Some(operator) = operator else {
         return Ok(());
     };
-    match zentai::user_can_access_device(
-        &state.config,
-        Some(operator),
-        operator_is_admin(headers),
-        device_code,
-    )
-    .await
+    match zentai::user_can_access_device(&state.config, Some(operator), is_admin, device_code).await
     {
         Ok(true) => Ok(()),
         Ok(false) => Err(AppError::Unauthorized(format!(
@@ -265,37 +312,30 @@ async fn ensure_operator_access(
     }
 }
 
-/// `POST /api/zentai/devices/{device_id}/command`
-///
-/// 中台设备页的指令按钮 → 这里做白名单/园区校验 → 业务平台 WS 下发。
-pub async fn device_command(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(device_code): Path<String>,
-    Json(payload): Json<CommandRequest>,
-) -> Result<Json<ApiResponse<Value>>, AppError> {
-    authorize(&state, &headers)?;
-    let device_code = device_code.trim().to_string();
-    let request_id = request_id_of(&headers, payload.request_id.clone());
-
-    if let Some(previous) = replay_request(&state, &request_id).await? {
-        return Ok(ApiResponse::ok(json!({
+/// 执行一条指令（幂等 + WS 下发）。HTTP 与反向信道共用。
+pub async fn apply_command(
+    state: &AppState,
+    meta: &ControlMeta,
+    device_code: &str,
+    payload: &CommandRequest,
+) -> Result<Value, AppError> {
+    let device_code = device_code.trim();
+    if let Some(previous) = replay_request(state, &meta.request_id).await? {
+        return Ok(json!({
             "duplicated": true,
-            "requestId": request_id,
+            "requestId": meta.request_id,
             "result": previous,
-        })));
+        }));
     }
 
-    ensure_operator_access(&state, &headers, &device_code).await?;
-    let device = devices::fetch_device_by_code(&state, &device_code).await?;
-    let operator = header_of(&headers, OPERATOR_HEADER);
-
-    begin_request(&state, &request_id, "command", &device_code).await?;
+    let device = devices::fetch_device_by_code(state, device_code).await?;
+    let operator = meta.operator.map(|id| id.to_string());
+    begin_request(state, &meta.request_id, "command", device_code).await?;
     let view = devices::push_command(
-        &state,
+        state,
         &device,
         &payload.command,
-        payload.params,
+        payload.params.clone(),
         operator.as_deref(),
     )
     .await?;
@@ -303,71 +343,71 @@ pub async fn device_command(
     // 未送达要显式失败：中台据此把审计记成 failed，而不是「已下发」
     if view.get("wsDelivered").and_then(Value::as_bool) == Some(false) {
         return Err(AppError::BadRequest(format!(
-            "设备 {} 当前未连接（状态：{}），指令未送达",
-            device_code, device.status
+            "设备 {device_code} 当前未连接（状态：{}），指令未送达",
+            device.status
         )));
     }
 
-    finish_request(&state, &request_id, &view).await;
-    Ok(ApiResponse::ok(json!({
+    finish_request(state, &meta.request_id, &view).await;
+    Ok(json!({
         "duplicated": false,
-        "requestId": request_id,
+        "requestId": meta.request_id,
         "result": view,
-    })))
+    }))
 }
 
-/// `POST /api/zentai/devices/{device_id}/tasks`
+/// 给设备下发一条任务（幂等）。HTTP 与反向信道共用。
 ///
-/// 中台只选路线与计划时间；航点/航段/动作、地图绑定、限速与结束动作
-/// 全部由业务平台按 `routes.route_data` 组装后下发。
-pub async fn dispatch_task(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(device_code): Path<String>,
-    Json(payload): Json<TaskDispatchRequest>,
-) -> Result<Json<ApiResponse<Value>>, AppError> {
-    authorize(&state, &headers)?;
-    let device_code = device_code.trim().to_string();
-    let request_id = request_id_of(&headers, payload.request_id.clone());
-
-    if let Some(previous) = replay_request(&state, &request_id).await? {
-        return Ok(ApiResponse::ok(json!({
+/// 中台只给路线 ID 与计划时间；航点/航段/动作、地图绑定、限速与结束动作
+/// 由业务平台按 `routes.route_data` 组装。
+pub async fn apply_task(
+    state: &AppState,
+    meta: &ControlMeta,
+    device_code: &str,
+    payload: &TaskDispatchRequest,
+) -> Result<Value, AppError> {
+    let device_code = device_code.trim();
+    if let Some(previous) = replay_request(state, &meta.request_id).await? {
+        return Ok(json!({
             "duplicated": true,
-            "requestId": request_id,
+            "requestId": meta.request_id,
             "result": previous,
-        })));
+        }));
     }
 
     if payload.task_name.trim().is_empty() {
         return Err(AppError::BadRequest("任务名称不能为空".to_string()));
     }
-    ensure_operator_access(&state, &headers, &device_code).await?;
-    let device = devices::fetch_device_by_code(&state, &device_code).await?;
+    if payload.route_id <= 0 {
+        return Err(AppError::BadRequest("请选择要执行的路线".to_string()));
+    }
+
+    let device = devices::fetch_device_by_code(state, device_code).await?;
     let park_id = device.park_id.ok_or_else(|| {
         AppError::BadRequest(format!(
             "设备 {device_code} 尚未绑定园区，无法下发任务；请先在业务平台绑定园区"
         ))
     })?;
 
-    begin_request(&state, &request_id, "task", &device_code).await?;
+    begin_request(state, &meta.request_id, "task", device_code).await?;
     let task = tasks::create_task_core(
-        &state,
+        state,
         TaskRequest {
             task_code: None,
             task_name: payload.task_name.trim().to_string(),
             task_type: None,
-            execute_mode: payload.execute_mode,
-            level: payload.level,
+            execute_mode: payload.execute_mode.clone(),
+            level: payload.level.clone(),
             device_id: Some(device.id),
             park_id: Some(park_id),
             zone_id: device.zone_id,
             route_id: Some(payload.route_id),
-            plan_start: payload.plan_start,
-            plan_end: payload.plan_end,
+            plan_start: payload.plan_start.clone(),
+            plan_end: payload.plan_end.clone(),
             task_status: Some("待执行".to_string()),
             progress: None,
             dispatch_policy: None,
-            description: payload.description,
+            description: payload.description.clone(),
         },
     )
     .await?;
@@ -380,41 +420,33 @@ pub async fn dispatch_task(
         "deviceId": device_code,
         "routeId": payload.route_id,
     });
-    finish_request(&state, &request_id, &view).await;
-    Ok(ApiResponse::ok(json!({
+    finish_request(state, &meta.request_id, &view).await;
+    Ok(json!({
         "duplicated": false,
-        "requestId": request_id,
+        "requestId": meta.request_id,
         "result": view,
-    })))
+    }))
 }
 
-/// `GET /api/zentai/devices/{device_id}/runtime`
-///
-/// 只读运行态：中台设备页/看板展示用，不改变任何状态，因此不做幂等。
-pub async fn device_runtime(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(device_code): Path<String>,
-) -> Result<Json<ApiResponse<Value>>, AppError> {
-    authorize(&state, &headers)?;
-    let device_code = device_code.trim().to_string();
-    let device = devices::fetch_device_by_code(&state, &device_code).await?;
+/// 设备运行态快照（只读）：在线、状态、电量、当前任务与进度、接管人。
+pub async fn runtime_snapshot(state: &AppState, device_code: &str) -> Result<Value, AppError> {
+    let device_code = device_code.trim();
+    let device = devices::fetch_device_by_code(state, device_code).await?;
     let online = state
         .device_connections
         .read()
         .await
-        .contains_key(&device_code);
+        .contains_key(device_code);
 
-    let current: Option<(String, String, String, i64, Option<String>, Option<String>)> =
-        sqlx::query_as(
-            "SELECT task_code, task_name, task_status, progress, plan_start, plan_end \
-             FROM tasks WHERE device_id = ?1 ORDER BY id DESC LIMIT 1",
-        )
-        .bind(device.id)
-        .fetch_optional(&state.db)
-        .await?;
+    let current: Option<CurrentTaskRow> = sqlx::query_as(
+        "SELECT task_code, task_name, task_status, progress, plan_start, plan_end \
+         FROM tasks WHERE device_id = ?1 ORDER BY id DESC LIMIT 1",
+    )
+    .bind(device.id)
+    .fetch_optional(&state.db)
+    .await?;
 
-    Ok(ApiResponse::ok(json!({
+    Ok(json!({
         "deviceId": device.device_id,
         "online": online,
         "status": device.status,
@@ -429,14 +461,65 @@ pub async fn device_runtime(
         "teleopHolder": device.teleop_holder,
         "videoUrl": device.video_url,
         "videoType": device.video_type,
-        "currentTask": current.map(|(task_code, task_name, task_status, progress, plan_start, plan_end)| json!({
-            "taskCode": task_code,
-            "taskName": task_name,
-            "taskStatus": task_status,
-            "progress": progress,
-            "planStart": plan_start,
-            "planEnd": plan_end,
+        "currentTask": current.map(|task| json!({
+            "taskCode": task.task_code,
+            "taskName": task.task_name,
+            "taskStatus": task.task_status,
+            "progress": task.progress,
+            "planStart": task.plan_start,
+            "planEnd": task.plan_end,
         })),
         "serverTs": now(),
-    })))
+    }))
+}
+
+/// `POST /api/zentai/devices/{device_id}/command` — HTTP 链路（同网部署）。
+pub async fn device_command(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(device_code): Path<String>,
+    Json(payload): Json<CommandRequest>,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    authorize(&state, &headers)?;
+    let meta = ControlMeta::from_headers(&headers, payload.request_id.clone());
+    ensure_operator_access(
+        &state,
+        meta.operator,
+        meta.operator_admin,
+        device_code.trim(),
+    )
+    .await?;
+    let data = apply_command(&state, &meta, &device_code, &payload).await?;
+    Ok(ApiResponse::ok(data))
+}
+
+/// `POST /api/zentai/devices/{device_id}/tasks` — HTTP 链路（同网部署）。
+pub async fn dispatch_task(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(device_code): Path<String>,
+    Json(payload): Json<TaskDispatchRequest>,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    authorize(&state, &headers)?;
+    let meta = ControlMeta::from_headers(&headers, payload.request_id.clone());
+    ensure_operator_access(
+        &state,
+        meta.operator,
+        meta.operator_admin,
+        device_code.trim(),
+    )
+    .await?;
+    let data = apply_task(&state, &meta, &device_code, &payload).await?;
+    Ok(ApiResponse::ok(data))
+}
+
+/// `GET /api/zentai/devices/{device_id}/runtime` — HTTP 链路（同网部署）。
+pub async fn device_runtime(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(device_code): Path<String>,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    authorize(&state, &headers)?;
+    let data = runtime_snapshot(&state, &device_code).await?;
+    Ok(ApiResponse::ok(data))
 }

@@ -20,6 +20,11 @@ pub struct Config {
     pub ingest_dir: PathBuf,
     /// 中台调用业务平台内部接口的服务令牌；为空时内部触发接口拒绝请求。
     pub service_token: Option<String>,
+    /// 反向控制信道的中台地址（`ws://` / `wss://`）。
+    ///
+    /// 业务平台部署在内网、只能出站访问互联网时必须配置：中台无法主动连入，
+    /// 改由本进程主动拨入中台的长连接接收指令。为空时保持「中台直连 HTTP」模式。
+    pub zentai_ws_url: Option<String>,
 }
 
 impl Config {
@@ -72,6 +77,10 @@ impl Config {
             service_token: env::var("ROBODOG_SERVICE_TOKEN")
                 .ok()
                 .and_then(blank_to_none),
+            zentai_ws_url: env::var("ROBODOG_ZENTAI_WS_URL")
+                .ok()
+                .and_then(blank_to_none)
+                .map(|url| url.trim_end_matches('/').to_string()),
         }
     }
 

@@ -665,7 +665,10 @@ onMounted(() => {
           </span>
         </el-form-item>
         <el-form-item label="任务名称" required>
-          <el-input v-model="dispatchForm.taskName" placeholder="例如：A 区夜间巡检" />
+          <el-input
+            v-model="dispatchForm.taskName"
+            placeholder="例如：A 区夜间巡检"
+          />
         </el-form-item>
         <el-form-item label="路线 ID" required>
           <el-input-number
@@ -694,7 +697,11 @@ onMounted(() => {
           />
         </el-form-item>
         <el-form-item label="备注">
-          <el-input v-model="dispatchForm.description" type="textarea" :rows="2" />
+          <el-input
+            v-model="dispatchForm.description"
+            type="textarea"
+            :rows="2"
+          />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -717,7 +724,10 @@ onMounted(() => {
       <div v-loading="runtimeLoading">
         <el-descriptions v-if="runtimeData" :column="1" border>
           <el-descriptions-item label="在线">
-            <el-tag :type="runtimeData.online ? 'success' : 'info'" size="small">
+            <el-tag
+              :type="runtimeData.online ? 'success' : 'info'"
+              size="small"
+            >
               {{ runtimeData.online ? "已连接" : "未连接" }}
             </el-tag>
           </el-descriptions-item>

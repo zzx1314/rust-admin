@@ -224,6 +224,7 @@ impl App {
             business_api_url: None,
             business_api_token: None,
             business_http: business_http_client(),
+            control_channel: crate::business::dog::device::control_channel::ControlChannel::new(),
         }
     }
 
