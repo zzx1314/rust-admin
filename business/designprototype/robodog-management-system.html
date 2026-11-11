@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>机器狗巡检综合业务平台 · RoboDog OPS</title>
+<title>机器狗巡检业务平台 · RoboDog OPS</title>
 <style>
 /* ============ 基础与设计令牌 ============ */
 :root{
@@ -581,7 +581,7 @@ button{cursor:pointer}
   <aside class="sidebar" id="sidebar">
     <div class="brand">
       <div class="brand-logo"><svg class="ic"><use href="#i-dog"></use></svg></div>
-      <div class="brand-text"><b>机器狗巡检综合业务平台</b><span>ROBODOG OPS</span></div>
+      <div class="brand-text"><b>机器狗巡检业务平台</b><span>ROBODOG OPS</span></div>
     </div>
     <div class="sb-scroll">
       <div class="nav-group-title">工作台</div>
@@ -644,7 +644,7 @@ button{cursor:pointer}
 
 <script>
 /* =========================================================
-   机器狗巡检综合业务平台 · 前端交互原型
+   机器狗巡检业务平台 · 前端交互原型
    纯静态数据，无任何外部依赖
    ========================================================= */
 const $  = (s, r=document) => r.querySelector(s);
@@ -1228,7 +1228,7 @@ function renderSettings(){
     <div class="grid row-2b">
       <div class="card">${cardHead(`${ic('settings')}平台参数`)}
         <div class="card-body"><div class="form-grid">
-          <div class="field"><label>平台名称</label><input class="input" value="机器狗巡检综合业务平台"></div>
+          <div class="field"><label>平台名称</label><input class="input" value="机器狗巡检业务平台"></div>
           <div class="field"><label>数据刷新频率</label><select class="select"><option>5 秒</option><option selected>10 秒</option><option>30 秒</option><option>60 秒</option></select></div>
           <div class="field"><label>默认地图园区</label><select class="select">${S.parks.map(p=>`<option>${esc(p.name)}</option>`).join('')}</select></div>
           <div class="field"><label>低电量阈值</label><input class="input" value="20 %"></div>

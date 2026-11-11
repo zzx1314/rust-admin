@@ -110,19 +110,14 @@ pub async fn summary(State(state): State<AppState>) -> Result<Json<ApiResponse<V
     .fetch_all(&state.db)
     .await?;
 
-    let map_devices = sqlx::query_as::<_, Device>(
-        "SELECT d.id, d.device_id, d.model, d.park_id, p.park_name, d.zone_id, z.zone_name,
-            d.status, d.battery, d.signal, d.temperature, d.runtime_minutes, d.odometer,
-            d.position, d.current_task_name, d.last_heartbeat, d.firmware, d.device_ip,
-            d.created_at, d.updated_at
-         FROM devices d
-         LEFT JOIN parks p ON p.id = d.park_id
-         LEFT JOIN zones z ON z.id = d.zone_id
-         WHERE d.status IN ('执行任务', '在线待命', '故障')
-         ORDER BY d.id ASC LIMIT 6",
-    )
-    .fetch_all(&state.db)
-    .await?;
+    // 列清单复用 DEVICE_SELECT，避免新增设备字段（如 video_url）后此查询漏选导致解码失败
+    let map_device_sql = format!(
+        "{} WHERE d.status IN ('执行任务', '在线待命', '故障') ORDER BY d.id ASC LIMIT 6",
+        super::devices::DEVICE_SELECT
+    );
+    let map_devices = sqlx::query_as::<_, Device>(&map_device_sql)
+        .fetch_all(&state.db)
+        .await?;
 
     Ok(ApiResponse::ok(json!({
         "kpis": {

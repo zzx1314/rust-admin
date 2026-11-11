@@ -39,7 +39,7 @@ async function submit() {
       <div class="login-brand">
         <div class="brand-logo"><AppIcon name="dog" :size="26" /></div>
         <div>
-          <b>机器狗巡检综合业务平台</b>
+          <b>机器狗巡检业务平台</b>
           <span>ROBODOG OPS</span>
         </div>
       </div>

@@ -78,7 +78,7 @@ router.beforeEach(to => {
 });
 
 router.afterEach(to => {
-  document.title = `${to.meta.title || "RoboDog OPS"} · 机器狗巡检综合业务平台`;
+  document.title = `${to.meta.title || "RoboDog OPS"} · 机器狗巡检业务平台`;
 });
 
 export default router;

@@ -1,4 +1,5 @@
 -- @migration-name: add_map_park
+-- @if-not-exists: column dog_map.park_code
 
 -- 地图归属园区（可选）。
 --

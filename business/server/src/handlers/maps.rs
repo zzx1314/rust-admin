@@ -70,6 +70,26 @@ pub async fn list_park_maps(
     Ok(ApiResponse::ok(maps))
 }
 
+/// 中台 `dog_map` 的列清单
+///
+/// `park_code` / `park_name` 由根 backend 迁移 26 添加。若根库还是旧结构（迁移未跑），
+/// 退化成 NULL，避免整个地图列表接口因缺少一列而 500。
+fn dog_map_select_columns(has_park: bool) -> &'static str {
+    if has_park {
+        "park_code, park_name"
+    } else {
+        "NULL AS park_code, NULL AS park_name"
+    }
+}
+
+/// 判断根库 `dog_map` 是否已经具备园区列
+async fn dog_map_has_park_columns(pool: &SqlitePool) -> Result<bool, AppError> {
+    let columns: Vec<(String,)> = sqlx::query_as("SELECT name FROM pragma_table_info('dog_map')")
+        .fetch_all(pool)
+        .await?;
+    Ok(columns.iter().any(|(name,)| name == "park_code"))
+}
+
 /// 列出根目录 `backend` 的 `dog_map` 地图库（ROS map_server 包等）。
 ///
 /// 可选 `parkCode`：只返回该业务园区下的地图（设备端建图回传时写入）。
@@ -81,14 +101,20 @@ pub async fn list_backend_maps(
         Ok(pool) => pool,
         Err(_) => return Ok(ApiResponse::ok(Vec::new())),
     };
-    let mut builder = QueryBuilder::<sqlx::Sqlite>::new(
-        "SELECT id, map_name, park_code, park_name, file_name, file_path, file_format,
+    let has_park = dog_map_has_park_columns(&pool).await?;
+    let mut builder = QueryBuilder::<sqlx::Sqlite>::new(format!(
+        "SELECT id, map_name, {}, file_name, file_path, file_format,
             file_size, remarks, map_version, frame_id, crs, map_origin, resolution, floors,
             road_count, nogo_count, map_status, map_hash, publish_time, map_width,
             map_height, create_time
          FROM dog_map WHERE is_deleted = 0",
-    );
+        dog_map_select_columns(has_park)
+    ));
     if let Some(park_code) = query.park_code.filter(|value| !value.trim().is_empty()) {
+        if !has_park {
+            // 旧结构无法按园区过滤，直接返回空集合而不是把所有地图混进来
+            return Ok(ApiResponse::ok(Vec::new()));
+        }
         builder
             .push(" AND park_code = ")
             .push_bind(park_code.trim().to_string());
@@ -109,17 +135,20 @@ pub async fn import_backend_map(
     Json(payload): Json<ImportBackendMapRequest>,
 ) -> Result<Json<ApiResponse<MapVersion>>, AppError> {
     let backend_pool = backend_pool(&state).await?;
-    let source = sqlx::query_as::<_, BackendMap>(
-        "SELECT id, map_name, park_code, park_name, file_name, file_path, file_format,
+    let has_park = dog_map_has_park_columns(&backend_pool).await?;
+    let source_sql = format!(
+        "SELECT id, map_name, {}, file_name, file_path, file_format,
             file_size, remarks, map_version, frame_id, crs, map_origin, resolution, floors,
             road_count, nogo_count, map_status, map_hash, publish_time, map_width,
             map_height, create_time
          FROM dog_map WHERE id = ?1 AND is_deleted = 0",
-    )
-    .bind(payload.backend_map_id)
-    .fetch_optional(&backend_pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound("backend 地图不存在".to_string()))?;
+        dog_map_select_columns(has_park)
+    );
+    let source = sqlx::query_as::<_, BackendMap>(&source_sql)
+        .bind(payload.backend_map_id)
+        .fetch_optional(&backend_pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("backend 地图不存在".to_string()))?;
 
     // 园区：请求优先；否则按中台地图携带的园区编码反查
     let park_id = match payload.park_id {
