@@ -32,6 +32,7 @@
 
 mod dispatch;
 mod mapupload;
+mod video;
 mod zhpro;
 
 use chrono::Local;
@@ -50,6 +51,7 @@ use tokio::time::interval;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
+use video::VideoRelay;
 use zhpro::client::ZhProClient;
 use zhpro::mapping::{MapManager, MappingSaved, MappingSession};
 use zhpro::protocol::*;
@@ -557,6 +559,9 @@ async fn run_client(
     let (mut write, mut read) = ws_stream.split();
     let (out_tx, mut out_rx) = mpsc::channel::<WsMessage>(128);
 
+    // 实时视频回传：按需拉流（业务平台有人观看时才 video_start），与主链路互不阻塞
+    let video = VideoRelay::spawn(Arc::new(config.clone()));
+
     // 单写循环：所有发送集中在一处，避免并发写锁
     let writer = tokio::spawn(async move {
         while let Some(msg) = out_rx.recv().await {
@@ -649,6 +654,7 @@ async fn run_client(
                             &local_runner,
                             &local_mapping,
                             &teleop,
+                            &video,
                         ).await;
                     }
                     Some(Ok(Message::Ping(data))) => {
@@ -1181,6 +1187,7 @@ async fn handle_server_message(
     local_runner: &Shared<Option<Arc<RouteRunner>>>,
     local_mapping: &Shared<Option<Arc<MappingSession>>>,
     teleop: &SharedTeleop,
+    video: &VideoRelay,
 ) {
     match msg.msg_type.as_str() {
         "register_ack" => {
@@ -1204,6 +1211,26 @@ async fn handle_server_message(
         }
 
         "heartbeat_ack" => {}
+
+        // 实时视频：控制台有人看监控时下发，这里起 ffmpeg 把 RTSP 转 FLV 回传
+        "video_start" => {
+            let url = msg.payload["url"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if url.is_empty() {
+                warn!("收到 video_start 但没有拉流地址（设备管理里未填 video_url）");
+            } else {
+                info!("收到实时视频请求: {}", video::redact_url(&url));
+                video.start(url).await;
+            }
+        }
+
+        // 最后一个观看者离开：停掉 ffmpeg，不再占本体带宽
+        "video_stop" => {
+            video.stop().await;
+        }
 
         // 事件回执：客户端发的 event 由服务端落库后回 ack，不需要额外处理
         "event_ack" => {}

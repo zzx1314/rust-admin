@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { tokenStorage } from "@/api/http";
 import AppIcon from "./AppIcon.vue";
 
 /**
@@ -11,7 +12,7 @@ import AppIcon from "./AppIcon.vue";
  * - `flv`   → `*.flv`，走 flv.js（MSE）
  * - `mp4`   → 原生 `<video>`，也兼容 webm
  * - `webrtc`→ `whep://` 或 `webrtc://`，需要额外信令网关，这里只做提示
- * - `rtsp`  → 浏览器无法直接播放，需服务端转 HLS/WebRTC，只做提示
+ * - `rtsp`  → 浏览器不能直连：由设备客户端拉流转 FLV、经业务平台中继（见 server/src/video.rs）
  * - `none`  → 未配置，显示占位
  */
 const props = defineProps<{
@@ -19,6 +20,8 @@ const props = defineProps<{
   type: string;
   /** 设备是否在线，离线时即使配了地址也不拉流 */
   online: boolean;
+  /** 设备主键：RTSP 走 `/api/devices/{id}/video/ws` 中继，必须传 */
+  deviceId?: number | null;
 }>();
 
 const videoRef = ref<HTMLVideoElement | null>(null);
@@ -36,18 +39,44 @@ let hls: HlsInstance | null = null;
 let flv: FlvPlayer | null = null;
 /** 每次 attach 自增，异步加载回来时据此判断是否已被新请求取代 */
 let attachSeq = 0;
+/**
+ * RTSP 中继的重连计时器与次数。
+ *
+ * 设备客户端的推流重连会丢弃旧房间（新流有新的 FLV 头/时间戳），浏览器这条 WS
+ * 会被关掉；这里自动重连拿干净的新流，避免用户手动点「重连」。
+ */
+let retryTimer: ReturnType<typeof setTimeout> | null = null;
+let retryCount = 0;
+const MAX_RETRY = 10;
+const RETRY_DELAY = 3000;
 
 const kind = computed(() => (props.type || "none").toLowerCase());
 
-const playable = computed(
-  () => props.online && !!props.url && ["hls", "flv", "mp4"].includes(kind.value)
-);
+/**
+ * RTSP 中继地址：业务平台把设备客户端回传的 FLV 通过 WS 转给浏览器。
+ * 浏览器 WS 握手不能带 Authorization 头，令牌只能放查询串（服务端 require_auth 支持）。
+ */
+const relayUrl = computed(() => {
+  if (!props.deviceId) return "";
+  const token = tokenStorage.get() || "";
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  return `${scheme}://${location.host}/api/devices/${props.deviceId}/video/ws?token=${encodeURIComponent(token)}`;
+});
+
+const isRelay = computed(() => kind.value === "rtsp" && !!props.deviceId);
+
+const playable = computed(() => {
+  if (!props.online || !props.url) return false;
+  // RTSP 浏览器不能直连，只有拿到中继地址才谈得上播放
+  if (kind.value === "rtsp") return isRelay.value;
+  return ["hls", "flv", "mp4"].includes(kind.value);
+});
 
 const hint = computed(() => {
   if (!props.online) return "设备离线，无实时画面";
   if (!props.url) return "未配置视频地址，请在设备档案中填写";
-  if (kind.value === "rtsp")
-    return "RTSP 流浏览器无法直接播放，需服务端转成 HLS / WebRTC";
+  if (kind.value === "rtsp" && !props.deviceId)
+    return "RTSP 需要经设备客户端回传播放，缺少设备标识";
   if (kind.value === "webrtc") return "WebRTC 需要信令网关，当前未接入";
   if (kind.value === "none") return "视频协议未识别，请在设备档案中选择类型";
   if (status.value === "error") return errorText.value || "视频加载失败";
@@ -66,6 +95,28 @@ const badgeTone = computed(() => {
   if (status.value === "playing") return "live";
   return "wait";
 });
+
+function clearRetry() {
+  if (retryTimer) {
+    clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+}
+
+/** 中继断流后退避重连（只对 RTSP 中继生效） */
+function scheduleRetry() {
+  if (kind.value !== "rtsp" || !playable.value) return;
+  clearRetry();
+  if (retryCount >= MAX_RETRY) {
+    fail("实时视频多次重连失败：确认设备客户端在线且能访问 RTSP 地址");
+    return;
+  }
+  retryCount += 1;
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    void attach();
+  }, RETRY_DELAY);
+}
 
 function destroy() {
   if (hls) {
@@ -124,6 +175,31 @@ async function attach() {
     return;
   }
 
+  if (kind.value === "rtsp") {
+    // 客户端 ffmpeg 已把 RTSP 转成 FLV，flv.js 的 WebSocketLoader 直接消费二进制帧
+    const { default: flvjs } = await import("flv.js");
+    if (seq !== attachSeq) return;
+    if (!flvjs.isSupported() || !relayUrl.value) {
+      fail("当前浏览器不支持实时视频播放");
+      return;
+    }
+    flv = flvjs.createPlayer({
+      type: "flv",
+      url: relayUrl.value,
+      isLive: true,
+      // 客户端只回传视频轨（-an），声明没有音轨避免解析告警
+      hasAudio: false
+    });
+    flv.attachMediaElement(el);
+    flv.load();
+    flv.play()?.catch(() => fail("自动播放被浏览器拦截，请点击播放"));
+    flv.on(flvjs.Events.ERROR, () => {
+      fail("实时视频连接失败：确认设备客户端在线且能访问 RTSP 地址");
+      scheduleRetry();
+    });
+    return;
+  }
+
   if (kind.value === "flv") {
     const { default: flvjs } = await import("flv.js");
     if (seq !== attachSeq) return;
@@ -160,8 +236,11 @@ async function enterFullscreen() {
 }
 
 watch(
-  () => [props.url, props.type, props.online],
+  () => [props.url, props.type, props.online, props.deviceId],
   () => {
+    // 设备 / 地址变化视为全新播放：清掉重连状态
+    clearRetry();
+    retryCount = 0;
     // 等 DOM 更新完再挂载播放器
     requestAnimationFrame(() => {
       void attach();
@@ -170,7 +249,10 @@ watch(
   { immediate: true }
 );
 
-onBeforeUnmount(destroy);
+onBeforeUnmount(() => {
+  clearRetry();
+  destroy();
+});
 </script>
 
 <template>

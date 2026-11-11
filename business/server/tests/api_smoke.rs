@@ -81,6 +81,7 @@ async fn test_state_with_token(service_token: Option<&str>) -> (AppState, TempDb
         db: pool,
         config,
         device_connections: gateway::new_device_connections(),
+        video_hub: Default::default(),
     };
     (state, db_dir)
 }
@@ -477,6 +478,7 @@ mod control_plane_channel {
             db: state.db,
             config: Arc::new(config),
             device_connections: state.device_connections,
+            video_hub: state.video_hub,
         };
         (state, db_dir)
     }

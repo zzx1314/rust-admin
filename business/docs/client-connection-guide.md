@@ -352,6 +352,12 @@ cargo run -- --print-config      # 查看脱敏后的生效配置
 | `mapping.park_id` | `ROBODOG_PARK_ID` | `--park-id` | 空（用控制台绑定的园区） |
 | `mapping.ingest_name` | — | `--ingest-map-name` | 空（用本体目录名） |
 | `mapping.once` | — | `--map-only` | `false` |
+| `video.enabled` | — | — | `true`（是否响应业务平台的 `video_start`） |
+| `video.ffmpeg` | — | — | `ffmpeg`（可执行文件路径） |
+| `video.transport` | — | — | `tcp`（仅 `tcp` / `udp`，非 `rtsp://` 地址不传） |
+| `video.fps` | — | — | `15`（关键帧间隔取 `2×fps`） |
+| `video.bitrate` | — | — | `1200k` |
+| `video.width` | — | — | `0`（保持原始分辨率，等比缩放） |
 | `simulation.battery` / `position` / `firmware` | — | `--battery` / `--position` / `--firmware` | `86` / `0.0, 0.0` / `Hermes_M_v0.3.2` |
 | `log.filter` | `RUST_LOG`（优先） | — | `robodog_device_client=info` |
 
@@ -370,6 +376,7 @@ bulkdata 绑定超时 `10s`、遥控看门狗 `1s`。
 - 配置错误会在启动时直接失败（不静默降级）：
   - 非 `ws://` / `wss://` 的 `server.url`；
   - `mapping.kind` 不是 `outdoor` / `indoor`；
+  - `video.transport` 不是 `tcp` / `udp`；
   - `park_id` 非正整数；
   - 配置文件拼写了未知字段（`deny_unknown_fields`，避免 `secrect` 这类错误被忽略）；
 - `robot.host` 有值但连不上时仍按原策略降级为模拟模式并打印错误日志。

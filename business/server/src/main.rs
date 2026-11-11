@@ -23,11 +23,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db: pool,
         config: config.clone(),
         device_connections: gateway::new_device_connections(),
+        video_hub: Default::default(),
     };
     // 反向控制信道：配置了中台 WS 地址时主动拨出，内网部署靠它接收中台指令
     control_plane::spawn(state.clone());
     // 心跳看门狗：静默掉线（收不到 Close 帧）的设备超时后置为离线
     gateway::spawn_heartbeat_watchdog(state.clone());
+    // 视频看门狗：没人观看却还在推流时让客户端停掉 ffmpeg
+    robodog_ops_server::video::spawn_watchdog(state.clone());
     let router = build_router(state);
 
     let address = format!("0.0.0.0:{}", config.port);

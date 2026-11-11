@@ -75,7 +75,7 @@ const VIDEO_TYPES = [
   { value: "flv", label: "HTTP-FLV（.flv）" },
   { value: "mp4", label: "MP4 / WebM" },
   { value: "webrtc", label: "WebRTC（需信令网关）" },
-  { value: "rtsp", label: "RTSP（需服务端转码）" }
+  { value: "rtsp", label: "RTSP（经客户端回传，可播放）" }
 ];
 
 const statusTabs = [
@@ -572,10 +572,11 @@ onMounted(load);
           <input
             v-model="deviceForm.videoUrl"
             class="input mono"
-            placeholder="rtsp://192.168.10.21:554/stream1 或 http://.../live.m3u8"
+            placeholder="rtsp://user:密码@192.168.234.1:8554/test 或 http://.../live.m3u8"
           />
           <small class="muted" style="font-size: 11px">
-            留空则设备详情显示「未配置」。选「未接入」时会按地址后缀自动识别协议。
+            留空则设备详情显示「未配置」。选「未接入」时会按地址后缀自动识别协议；
+            RTSP 由设备客户端拉流转 FLV 回传（浏览器不直连）。
           </small>
         </div>
       </div>

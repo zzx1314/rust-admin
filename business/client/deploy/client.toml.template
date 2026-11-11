@@ -31,6 +31,17 @@ map_root = "/ota/alg_data/map"
 # 设备型号：本体 1201 `type` 为空时用它上报中台台账（取不到就留空，中台显示空）
 # model = "ZSL-2-Ultra"
 
+[video]
+# 实时视频回传（RTSP → FLV → 业务平台）。enabled 为 false 时忽略 video_start。
+enabled = true
+# 现场机器狗是 aarch64：需要自带 ffmpeg（`apt install ffmpeg` 或放静态二进制后写全路径）
+ffmpeg = "ffmpeg"
+transport = "tcp"
+fps = 15
+bitrate = "1200k"
+# 0 = 原始分辨率
+width = 0
+
 [mapping]
 kind = "outdoor"
 name = ""

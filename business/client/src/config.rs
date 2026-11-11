@@ -46,6 +46,12 @@ pub const DEFAULT_BATTERY: i64 = 86;
 pub const DEFAULT_POSITION: &str = "0.0, 0.0";
 pub const DEFAULT_API_USERNAME: &str = "admin";
 pub const DEFAULT_API_PASSWORD: &str = "admin123";
+/// 实时视频：ffmpeg 可执行文件（现场 aarch64 需自带，见 client/README.md）
+pub const DEFAULT_FFMPEG: &str = "ffmpeg";
+/// 实时视频：H.264 目标码率
+pub const DEFAULT_VIDEO_BITRATE: &str = "1200k";
+/// 实时视频：输出帧率
+pub const DEFAULT_VIDEO_FPS: u32 = 15;
 
 /// 显式关闭本体连接（纯模拟模式）的取值：`--robot sim` / `robot.host = "sim"`。
 ///
@@ -130,6 +136,7 @@ pub struct FileConfig {
     pub robot: RobotSection,
     pub mapping: MappingSection,
     pub simulation: SimulationSection,
+    pub video: VideoSection,
     pub log: LogSection,
 }
 
@@ -194,6 +201,27 @@ pub struct SimulationSection {
     pub battery: Option<i64>,
     pub position: Option<String>,
     pub firmware: Option<String>,
+}
+
+/// `[video]` 实时视频回传（RTSP → FLV → 业务平台）
+///
+/// 拉流地址不在这里配：业务平台在有人观看时下发 `video_start`，
+/// 携带的就是设备管理里填的 `video_url`，一处维护即可。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VideoSection {
+    /// 是否允许业务平台按需拉流（false = 完全不响应 video_start）
+    pub enabled: Option<bool>,
+    /// ffmpeg 可执行文件路径
+    pub ffmpeg: Option<String>,
+    /// RTSP 传输方式：tcp / udp
+    pub transport: Option<String>,
+    /// 输出帧率
+    pub fps: Option<u32>,
+    /// 目标码率，如 `1200k` / `2M`
+    pub bitrate: Option<String>,
+    /// 输出宽度（0 = 保持原始分辨率，等比缩放）
+    pub width: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -443,6 +471,18 @@ pub struct Config {
     /// 业务服务登录账号
     pub api_username: String,
     api_password: String,
+    /// 实时视频：是否允许业务平台按需拉流
+    pub video_enabled: bool,
+    /// 实时视频：ffmpeg 可执行文件
+    pub video_ffmpeg: String,
+    /// 实时视频：RTSP 传输方式（tcp / udp）
+    pub video_transport: String,
+    /// 实时视频：输出帧率
+    pub video_fps: u32,
+    /// 实时视频：目标码率
+    pub video_bitrate: String,
+    /// 实时视频：输出宽度（0 = 原始分辨率）
+    pub video_width: u32,
     /// tracing 过滤器（RUST_LOG 优先）
     pub log_filter: Option<String>,
 }
@@ -631,6 +671,26 @@ impl Config {
             .or_else(|| file.api.password.clone())
             .unwrap_or_else(|| DEFAULT_API_PASSWORD.to_string());
 
+        let video_enabled = file.video.enabled.unwrap_or(true);
+        let video_ffmpeg = pick_string([file.video.ffmpeg.as_deref()])
+            .unwrap_or(DEFAULT_FFMPEG)
+            .to_string();
+        let video_transport = pick_string([file.video.transport.as_deref()])
+            .unwrap_or("tcp")
+            .to_lowercase();
+        if video_transport != "tcp" && video_transport != "udp" {
+            return Err(ConfigError::Invalid(format!(
+                "video.transport 只支持 tcp / udp，收到 {video_transport:?}"
+            )));
+        }
+        let video_fps = pick_number([file.video.fps])
+            .unwrap_or(DEFAULT_VIDEO_FPS)
+            .clamp(1, 60);
+        let video_bitrate = pick_string([file.video.bitrate.as_deref()])
+            .unwrap_or(DEFAULT_VIDEO_BITRATE)
+            .to_string();
+        let video_width = pick_number([file.video.width]).unwrap_or(0);
+
         Ok(Self {
             server_url,
             device_id,
@@ -654,6 +714,12 @@ impl Config {
             api_base,
             api_username,
             api_password,
+            video_enabled,
+            video_ffmpeg,
+            video_transport,
+            video_fps,
+            video_bitrate,
+            video_width,
             log_filter: file.log.filter.clone(),
         })
     }
@@ -708,6 +774,12 @@ mapping.once            = {map_only}
 simulation.battery      = {battery}
 simulation.position     = {position}
 simulation.firmware     = {firmware}
+video.enabled           = {video_enabled}
+video.ffmpeg            = {video_ffmpeg}
+video.transport         = {video_transport}
+video.fps               = {video_fps}
+video.bitrate           = {video_bitrate}
+video.width             = {video_width}
 log.filter              = {log_filter}",
             server_url = self.server_url,
             device_id = self.device_id,
@@ -742,6 +814,16 @@ log.filter              = {log_filter}",
             battery = self.battery,
             position = self.position,
             firmware = self.firmware,
+            video_enabled = self.video_enabled,
+            video_ffmpeg = self.video_ffmpeg,
+            video_transport = self.video_transport,
+            video_fps = self.video_fps,
+            video_bitrate = self.video_bitrate,
+            video_width = if self.video_width == 0 {
+                "（原始分辨率）".to_string()
+            } else {
+                self.video_width.to_string()
+            },
             log_filter = self.log_filter.as_deref().unwrap_or("（默认）"),
         )
     }

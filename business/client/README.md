@@ -155,6 +155,8 @@ journalctl -u robodog-device-client -f
 | `--map-name` | 时间戳 | `--map-only` 时的地图名 |
 | `--map-kind` | `outdoor` | 建图类型：`outdoor` / `indoor` |
 
+实时视频没有命令行开关：参数在 `client.toml` 的 `[video]` 段，拉流地址由业务平台下发。
+
 ### 建图回传中台（A 方案）
 
 | 参数 | 默认值 | 说明 |
@@ -177,6 +179,44 @@ journalctl -u robodog-device-client -f
 
 园区归属优先级：`--park-id` > 服务端注册回执 / `park_binding` 推送（控制台设备管理里绑定）
 > 两者都没有则跳过回传。控制台绑定 / 解绑会实时推送给在线设备，不需要重启客户端。
+
+## 实时视频回传（RTSP → FLV）
+
+本体只对外提供 RTSP（现场 `rtsp://user:***@192.168.234.1:8554/test`），浏览器不能直连；
+能访问本体网段的是本客户端，所以视频由客户端拉流回传：
+
+```
+本体 RTSP ──ffmpeg──► 本客户端（src/video.rs） ──ws://平台/ws/device/video──► 业务平台 ──ws──► 浏览器
+                     H.264 / FLV / 低延迟              二进制帧中继                 flv.js（MSE）
+```
+
+**按需拉流**：控制台打开设备「实时监控」时才收到 `video_start`，携带的就是设备管理里
+填的 `video_url`；最后一个观看者离开立刻 `video_stop`。没人看时本进程不起 ffmpeg。
+
+- 地址不落配置：`video_url` 属于设备档案，运营在「设备管理 → 编辑 → 视频地址」改一次即可。
+- 断流自动重连：ffmpeg 退出或中继连接断开后 3 秒重试，连续重试直到收到 `video_stop`。
+- 编码参数在 `client.toml` 的 `[video]` 段（见 `client.toml.example`）：
+
+| 键 | 默认值 | 说明 |
+|----|--------|------|
+| `enabled` | `true` | 是否响应 `video_start` |
+| `ffmpeg` | `ffmpeg` | ffmpeg 可执行文件路径 |
+| `transport` | `tcp` | RTSP 传输方式（非 `rtsp://` 地址不传该选项） |
+| `fps` | `15` | 输出帧率，同时决定关键帧间隔（`2×fps`） |
+| `bitrate` | `1200k` | 目标码率，一路流约等于这个值 |
+| `width` | `0` | 输出宽度，`0` = 保持原始分辨率（等比缩放） |
+
+现场检查：
+
+```bash
+which ffmpeg && ffmpeg -version | head -1        # 没有就 apt install ffmpeg
+ffprobe -rtsp_transport tcp <RTSP地址>           # 确认能拉到流（会打印编码/分辨率）
+journalctl -u robodog-device-client -f | grep 视频
+```
+
+排障顺序：客户端日志出现「开始实时视频回传」→ 业务平台日志出现
+`video publisher attached` → 浏览器出画面。只出现前者说明推流通道没连上；
+都没有说明 `video_start` 没下发（检查设备是否「离线」、`video_url` 是否为空）。
 
 ## 支持的任务类型
 

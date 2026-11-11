@@ -220,7 +220,12 @@ async function emergencyStop() {
     <div class="drawer-body">
       <!-- ── 实时监控 ─────────────────────────────── -->
       <template v-if="tab === 'monitor'">
-        <VideoPlayer :url="device.videoUrl" :type="device.videoType" :online="online" />
+        <VideoPlayer
+          :url="device.videoUrl"
+          :type="device.videoType"
+          :online="online"
+          :device-id="device.id"
+        />
 
         <div class="drawer-section-head">
           <div class="card-title"><AppIcon name="activity" />运行指标</div>

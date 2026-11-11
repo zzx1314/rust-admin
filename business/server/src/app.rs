@@ -7,6 +7,7 @@ use crate::handlers::{
     alerts, dashboard, devices, ingest, maps, parks, routes, service, settings, tasks, teleop,
     zones,
 };
+use crate::video::{self, VideoHub};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::Method;
 use axum::middleware::from_fn_with_state;
@@ -30,6 +31,8 @@ pub struct AppState {
     pub db: SqlitePool,
     pub config: Arc<Config>,
     pub device_connections: DeviceConnections,
+    /// 实时视频中继房间（设备 → 浏览器）
+    pub video_hub: VideoHub,
 }
 
 async fn health(State(state): State<AppState>) -> Json<ApiResponse<Value>> {
@@ -109,6 +112,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/devices/{id}/teleop/take", post(teleop::take_over))
         .route("/devices/{id}/teleop/release", post(teleop::release))
         .route("/devices/{id}/teleop/ping", post(teleop::keepalive))
+        // 实时视频：浏览器订阅设备回传的 FLV 流（?token= 鉴权，见 video.rs）
+        .route("/devices/{id}/video/ws", get(video::viewer_ws))
         .route("/tasks", get(tasks::list_tasks).post(tasks::create_task))
         .route("/tasks/stats", get(tasks::task_stats))
         .route(
@@ -183,6 +188,8 @@ pub fn build_router(state: AppState) -> Router {
     let mut router = Router::new()
         // 设备 WebSocket 网关：客户端与文档约定为 `/ws/device`
         .route("/ws/device", get(gateway::ws_handler))
+        // 设备端视频推流通道：客户端拉 RTSP 转 FLV 后从这里回传
+        .route("/ws/device/video", get(video::publisher_ws))
         .nest("/api", api)
         .with_state(state.clone())
         .layer(

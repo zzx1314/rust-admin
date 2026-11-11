@@ -1098,6 +1098,40 @@ pub async fn send_command_to_device(
     }
 }
 
+/// 向指定设备发送实时视频开关指令
+///
+/// `video_start` 带拉流地址（就是设备档案里的 `video_url`），客户端据此起 ffmpeg；
+/// `video_stop` 不带载荷，客户端收到就杀掉拉流进程。两者都是独立 msgType，
+/// 不走 `command`，避免和业务指令（开始巡检 / 召回充电）混在一起。
+pub async fn send_video_control(
+    connections: &DeviceConnections,
+    device_id: &str,
+    url: Option<&str>,
+) -> bool {
+    let map = connections.read().await;
+    let Some(tx) = map.get(device_id) else {
+        warn!("device {device_id} not connected, cannot send video control");
+        return false;
+    };
+    let (cmd_type, payload) = match url {
+        Some(url) => (
+            "video_start",
+            json!({ "url": url, "format": "flv" }),
+        ),
+        None => ("video_stop", json!({})),
+    };
+    match tx.send(PendingCommand {
+        cmd_type: cmd_type.to_string(),
+        payload,
+    }) {
+        Ok(_) => true,
+        Err(_) => {
+            warn!("failed to send {cmd_type} to device {device_id} (no receivers)");
+            false
+        }
+    }
+}
+
 /// 向指定设备发送遥控摇杆
 ///
 /// 摇杆走高频通道，载荷按 `{msgType:"teleop"}` 下发，客户端转成智航 1304。

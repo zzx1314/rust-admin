@@ -215,24 +215,41 @@ pub async fn require_auth(
     mut request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    let header = request
+    // 浏览器的 WebSocket 握手不能自定义请求头，实时视频这类 WS 端点只能把
+    // 令牌放在查询串里（`?token=`）；普通 HTTP 接口仍走 Authorization。
+    let header_token = request
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| AppError::Unauthorized("请先登录".to_string()))?;
-    let token = header
-        .strip_prefix("Bearer ")
-        .or_else(|| header.strip_prefix("bearer "))
-        .ok_or_else(|| AppError::Unauthorized("登录凭证格式错误".to_string()))?;
+        .map(str::to_string);
+    let token = match header_token {
+        Some(raw) => raw
+            .strip_prefix("Bearer ")
+            .or_else(|| raw.strip_prefix("bearer "))
+            .ok_or_else(|| AppError::Unauthorized("登录凭证格式错误".to_string()))?
+            .to_string(),
+        None => token_from_query(request.uri().query())
+            .ok_or_else(|| AppError::Unauthorized("请先登录".to_string()))?,
+    };
 
     let decoded = decode::<Claims>(
-        token,
+        &token,
         &DecodingKey::from_secret(state.config.jwt_secret.as_bytes()),
         &Validation::default(),
     )?;
 
     request.extensions_mut().insert(decoded.claims);
     Ok(next.run(request).await)
+}
+
+/// 从 `?token=…` 取令牌（仅 WebSocket 端点使用，允许 URL 编码）
+fn token_from_query(query: Option<&str>) -> Option<String> {
+    query?
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == "token")
+        .map(|(_, value)| urlencoding::decode(value).map(|v| v.into_owned()).unwrap_or_else(|_| value.to_string()))
+        .filter(|token| !token.is_empty())
 }
 
 /// 当前业务账号在中台可见的设备编号。
