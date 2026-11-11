@@ -80,6 +80,9 @@ struct HeartbeatPayload {
     runtime_minutes: i64,
     current_task: Option<String>,
     firmware: String,
+    /// 本体型号（智航 1201 `type`），未知时不报
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
     /// 定位状态（智航 loc_state.status）
     #[serde(skip_serializing_if = "Option::is_none")]
     loc_status: Option<i64>,
@@ -132,6 +135,8 @@ struct RobotState {
     odometer: f64,
     current_task: Option<String>,
     firmware: String,
+    /// 本体型号（智航 1201 `type`），未知时为空
+    model: Option<String>,
     loc_status: i64,
     loc_fresh: bool,
     active_map: Option<String>,
@@ -150,6 +155,7 @@ impl RobotState {
             odometer: 0.0,
             current_task: None,
             firmware: config.firmware.clone(),
+            model: None,
             loc_status: 255,
             loc_fresh: false,
             active_map: None,
@@ -220,6 +226,7 @@ impl RobotState {
             runtime_minutes: self.runtime_minutes,
             current_task: self.current_task.clone(),
             firmware: self.firmware.clone(),
+            model: self.model.clone(),
             loc_status: Some(self.loc_status),
             map_id: self.active_map.clone(),
         }
@@ -440,15 +447,32 @@ async fn run_client(
         }
     });
 
-    // 1) 注册
+    // 1) 注册：一并上报本体型号与固件版本，服务端落库后同步中台台账
+    //    型号：本体 1201 `type` 优先，取不到用 `robot.model` / `--model` 兜底
+    let body_model = match zhpro.as_ref() {
+        Some(client) => client.session().await.device_type.trim().to_string(),
+        None => String::new(),
+    };
+    let model = (!body_model.is_empty())
+        .then_some(body_model)
+        .or_else(|| config.model.clone());
     send(
         &out_tx,
         "register",
-        json!({ "deviceId": config.device_id, "secret": config.device_secret }),
+        json!({
+            "deviceId": config.device_id,
+            "secret": config.device_secret,
+            "model": &model,
+            "firmware": config.firmware,
+        }),
     )
     .await;
 
-    let state = Arc::new(Mutex::new(RobotState::new(config)));
+    let state = {
+        let mut initial = RobotState::new(config);
+        initial.model = model;
+        Arc::new(Mutex::new(initial))
+    };
     let active: Shared<Option<ActiveTask>> = Arc::new(Mutex::new(None));
     let monitor = Arc::new(Mutex::new(TaskMonitor::default()));
     let local_mapping: Shared<Option<Arc<MappingSession>>> = Arc::new(Mutex::new(None));

@@ -28,6 +28,8 @@ host = "192.168.234.234"
 file_port = 12000
 file_base = ""
 map_root = "/ota/alg_data/map"
+# 设备型号：本体 1201 `type` 为空时用它上报中台台账（取不到就留空，中台显示空）
+# model = "ZSL-2-Ultra"
 
 [mapping]
 kind = "outdoor"

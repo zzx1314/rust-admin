@@ -21,6 +21,10 @@ pub struct RegisterPayload {
     /// 可选设备密钥（后续可扩展）
     #[allow(dead_code)] // 协议预留字段，当前服务端不校验
     pub secret: Option<String>,
+    /// 设备型号：客户端取本体 1201 的 `type`（如 `ZSL-2-Ultra`），取不到则不报
+    pub model: Option<String>,
+    /// 固件版本：客户端本地配置 / 本体上报，用于中台台账展示
+    pub firmware: Option<String>,
 }
 
 /// 服务端 → 客户端：注册确认
@@ -53,6 +57,8 @@ pub struct HeartbeatPayload {
     pub runtime_minutes: Option<i64>,
     pub current_task: Option<String>,
     pub firmware: Option<String>,
+    /// 设备型号（本体 1201 `type`）：首次报到后变化才触发中台台账重同步
+    pub model: Option<String>,
 }
 
 /// 服务端 → 客户端：心跳确认

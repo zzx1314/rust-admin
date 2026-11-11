@@ -150,7 +150,7 @@ export function useDogDevice() {
     { label: "设备 IP", prop: "deviceIp", width: 140 },
     { label: "固件", prop: "firmware", width: 120 },
     { label: "创建时间", prop: "createTime", width: 180 },
-    { label: "操作", fixed: "right", width: 470, slot: "operation" }
+    { label: "操作", fixed: "right", width: 180, slot: "operation" }
   ];
 
   const queryForm = ref({
@@ -486,6 +486,32 @@ export function useDogDevice() {
     }
   }
 
+  /**
+   * 操作列「更多」菜单分发。
+   * `cmd:` 前缀为设备指令（与 `DEVICE_COMMANDS` 同名，加前缀避免和页面操作撞车），
+   * 其余值为页面操作，直接复用弹窗 / 抽屉的 open 函数。
+   */
+  function handleRowCommand(row: DogDevice, command: string) {
+    if (command.startsWith("cmd:")) {
+      sendCommand(row, command.slice(4));
+      return;
+    }
+    switch (command) {
+      case "assign":
+        openAssign([row]);
+        break;
+      case "dispatch":
+        openDispatch(row);
+        break;
+      case "sync":
+        syncMaps(row);
+        break;
+      case "runtime":
+        openRuntime(row);
+        break;
+    }
+  }
+
   /** 重置查询条件并回到第一页（查询栏「重置」与弹窗取消共用）。 */
   function cancel() {
     addForm.value = emptyForm();
@@ -546,6 +572,7 @@ export function useDogDevice() {
     openAssign,
     submitAssign,
     submitUnassign,
+    handleRowCommand,
     syncMaps,
     sendCommand,
     openDispatch,

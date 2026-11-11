@@ -345,6 +345,7 @@ cargo run -- --print-config      # 查看脱敏后的生效配置
 | `robot.file_port` | `ROBODOG_ROBOT_FILE_PORT` | `--robot-file-port` | `12000` |
 | `robot.file_base` | `ROBODOG_ROBOT_FILE_BASE` | `--robot-file-base` | 按 host + port 推导 |
 | `robot.map_root` | `ROBODOG_MAP_ROOT` | `--map-root` | `/ota/alg_data/map` |
+| `robot.model` | — | `--model` | 空（用本体 `1201.type`；本体不报型号时用它兜底） |
 | `mapping.kind` | — | `--map-kind` | `outdoor`（仅 `outdoor` / `indoor`） |
 | `mapping.name` | — | `--map-name` | `map-<时间戳>` |
 | `mapping.upload` | — | `--no-upload-map` | `true` |

@@ -150,6 +150,7 @@ journalctl -u robodog-device-client -f
 | `--firmware` | `Hermes_M_v0.3.2` | 固件版本 |
 | `--robot` | `192.168.234.234` | **智航 Pro 本体地址**；填 `sim`/`none`/`off` = 纯模拟模式 |
 | `--map-root` | `/ota/alg_data/map` | 本体地图根目录 |
+| `--model` | 空 | 设备型号：本体 `1201.type` 为空时用它（注册/心跳上报，中台台账展示） |
 | `--map-only` | false | 只执行一次建图后退出 |
 | `--map-name` | 时间戳 | `--map-only` 时的地图名 |
 | `--map-kind` | `outdoor` | 建图类型：`outdoor` / `indoor` |
@@ -406,11 +407,26 @@ M1 文件根 `/ota/alg_data`；文档 §2.2.4.1「4013 地图列表」明确单�
 
 | msgType | 说明 |
 |---------|------|
-| `register` | 设备注册 |
+| `register` | 设备注册（带上型号 / 固件版本，供中台台账同步） |
 | `heartbeat` | 心跳（10s） |
 | `task_progress` | 任务进度（5s） |
 | `event` | 设备事件 / 告警 |
 | `pong` | 心跳响应 |
+
+注册 / 心跳里上报的台账字段（服务端落 `devices` 后同步中台 `dog_device`）：
+
+```json
+// register
+{ "deviceId": "0202222672400230", "secret": null,
+  "model": "ZSL-2-Ultra", "firmware": "Hermes_M_v0.3.2" }
+
+// heartbeat（model 仅在取到本体 1201 的 type 时才带）
+{ "battery": 86, "signal": 4, "firmware": "Hermes_M_v0.3.2", "model": "ZSL-2-Ultra" }
+```
+
+- `model` 取本体 `1201` 的 `type`；本体没在 `device_json_path` 配型号时用 `robot.model` / `--model` 兜底，两者都空则不报该字段。
+- `device_ip` 不需要客户端上报：业务服务取 WebSocket 对端 IP。
+- 型号 / 固件 / 状态只在变化时触发中台重同步，心跳频率不影响中台接口压力。
 
 ### 服务端 → 设备
 

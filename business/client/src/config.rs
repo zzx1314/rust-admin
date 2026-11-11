@@ -168,6 +168,8 @@ pub struct RobotSection {
     pub file_base: Option<String>,
     /// 本体地图根目录（4013 未返回时使用）
     pub map_root: Option<String>,
+    /// 设备型号override：本体 `1201.type` 为空时用它（如 `ZSL-2-Ultra`）
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -280,6 +282,7 @@ pub struct CliArgs {
     pub secret: Option<String>,
     pub robot: Option<String>,
     pub map_root: Option<String>,
+    pub model: Option<String>,
     pub heartbeat: Option<u64>,
     pub battery: Option<i64>,
     pub signal: Option<i64>,
@@ -321,6 +324,7 @@ impl CliArgs {
             secret: opt(&mut args, "--secret")?,
             robot: opt(&mut args, "--robot")?,
             map_root: opt(&mut args, "--map-root")?,
+            model: opt(&mut args, "--model")?,
             heartbeat: opt(&mut args, "--heartbeat")?,
             battery: opt(&mut args, "--battery")?,
             signal: opt(&mut args, "--signal")?,
@@ -381,6 +385,7 @@ pub fn print_help() {
                          (默认: {DEFAULT_ROBOT_HOST})；填 sim/none/off 关闭本体连接，
                          退化为纯模拟模式：只回传任务进度，不驱动真实机器人
   --map-root <PATH>      地图数据根目录 (默认: {DEFAULT_MAP_ROOT})
+  --model <型号>         设备型号：本体 1201 `type` 为空时用它（留空则不报）
   --heartbeat <秒>       心跳间隔 (默认: {DEFAULT_HEARTBEAT_SECS})
   --battery <0-100>      初始电量 (默认: {DEFAULT_BATTERY})
   --signal <0-5>         初始信号强度 (默认: {DEFAULT_SIGNAL})
@@ -414,6 +419,8 @@ pub struct Config {
     pub robot: Option<String>,
     /// 地图数据根目录（4013 未返回时使用）
     pub map_root: String,
+    /// 设备型号：优先用本体 1201 `type`（运行时取），这里只是配置兵底
+    pub model: Option<String>,
     pub heartbeat_interval: u64,
     pub battery: i64,
     pub signal: i64,
@@ -531,6 +538,9 @@ impl Config {
         .unwrap_or(DEFAULT_MAP_ROOT)
         .to_string();
 
+        let model =
+            pick_string([cli.model.as_deref(), file.robot.model.as_deref()]).map(str::to_string);
+
         let heartbeat_interval = pick_number([
             cli.heartbeat,
             env.get_parsed(ENV_HEARTBEAT)?,
@@ -637,6 +647,7 @@ impl Config {
             device_secret,
             robot,
             map_root,
+            model,
             heartbeat_interval,
             battery,
             signal,
@@ -695,6 +706,7 @@ robot.host              = {robot}
 robot.file_base         = {file_base}
 robot.file_port         = {file_port}
 robot.map_root          = {map_root}
+robot.model             = {model}
 api.base                = {api_base}
 api.username            = {api_username}
 api.password            = {api_password}
@@ -720,6 +732,10 @@ log.filter              = {log_filter}",
                 .unwrap_or("（按 host 推导）"),
             file_port = self.robot_file_port,
             map_root = self.map_root,
+            model = self
+                .model
+                .as_deref()
+                .unwrap_or("（未配置，用本体 1201 type）"),
             api_base = self.api_base.as_deref().unwrap_or("（按 server.url 推导）"),
             api_username = self.api_username,
             api_password = mask(&self.api_password),

@@ -7,13 +7,14 @@ use crate::gateway_types::{
     TaskProgressPayload, WsMessage,
 };
 use crate::models::{Device, Task};
-use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, State};
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
 use tracing::{error, info, warn};
@@ -27,12 +28,18 @@ pub fn new_device_connections() -> DeviceConnections {
 }
 
 /// WebSocket 升级端点：GET /ws/device
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    // 对端地址即设备接入 IP，直接落到 `devices.device_ip` 同步给中台
+    let peer_ip = peer.ip().to_string();
+    ws.on_upgrade(move |socket| handle_socket(socket, state, Some(peer_ip)))
 }
 
 /// 处理单个设备 WebSocket 连接
-async fn handle_socket(socket: WebSocket, state: AppState) {
+async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<String>) {
     let (mut sender, mut receiver) = socket.split();
     let db = state.db.clone();
     let connections = state.device_connections.clone();
@@ -103,10 +110,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         continue;
                                     }
                                 };
-                                match handle_register(&db, &payload).await {
+                                match handle_register(&db, &payload, peer_ip.as_deref()).await {
                                     Ok(device) => {
                                         // 设备接入后同步到中台台账，便于在中台分配用户
-                                        sync_registered_device(&state.config, &db, &device).await;
+                                        sync_device_to_zentai(&state.config, &db, &device).await;
                                         let did = payload.device_id.clone();
                                         let old_device_id = device_id.replace(did.clone());
 
@@ -166,8 +173,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             runtime_minutes: None,
                                             current_task: None,
                                             firmware: None,
+                                            model: None,
                                         });
-                                    handle_heartbeat(&db, did, &payload).await;
+                                    handle_heartbeat(&db, &state.config, did, &payload).await;
                                     send_msg(&tx, "heartbeat_ack", json!(HeartbeatAckPayload {
                                         server_ts: now(),
                                         pending_commands: vec![],
@@ -278,13 +286,32 @@ async fn send_msg(tx: &broadcast::Sender<PendingCommand>, msg_type: &str, payloa
 ///
 /// 新设备首次注册时自动建档（无园区，状态「待绑定」）：园区由运营在设备管理里
 /// 手动绑定，绑定后心跳状态与待执行任务才会正常推进。
-async fn handle_register(db: &SqlitePool, payload: &RegisterPayload) -> Result<Device, AppError> {
+///
+/// 客户端能上报的台账字段全部在此落库：`model`（本体 1201 `type`）、
+/// `firmware`（客户端配置）、`device_ip`（本次接入的对端 IP）。
+async fn handle_register(
+    db: &SqlitePool,
+    payload: &RegisterPayload,
+    peer_ip: Option<&str>,
+) -> Result<Device, AppError> {
     let device_id = payload.device_id.trim();
     if device_id.is_empty() {
         return Err(AppError::BadRequest("设备编号不能为空".to_string()));
     }
 
     let timestamp = now();
+    // 空白字符串视同未上报，避免把库里的旧值刷成 ""
+    let model = payload
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let firmware = payload
+        .firmware
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+
     let existing = match fetch_device_by_code(db, device_id).await {
         Ok(device) => Some(device),
         Err(AppError::NotFound(_)) => None,
@@ -297,11 +324,14 @@ async fn handle_register(db: &SqlitePool, payload: &RegisterPayload) -> Result<D
             "INSERT INTO devices (device_id, model, park_id, zone_id, status, battery, signal,
                 temperature, runtime_minutes, odometer, position, current_task_name,
                 last_heartbeat, firmware, device_ip, created_at, updated_at)
-             VALUES (?1, NULL, NULL, NULL, '待绑定', 100, 4, 32.0, 0, 0, NULL, '—',
-                ?2, NULL, NULL, ?2, ?2)",
+             VALUES (?1, ?2, NULL, NULL, '待绑定', 100, 4, 32.0, 0, 0, NULL, '—',
+                ?3, ?4, ?5, ?3, ?3)",
         )
         .bind(device_id)
+        .bind(model)
         .bind(&timestamp)
+        .bind(firmware)
+        .bind(peer_ip)
         .execute(db)
         .await?;
         info!(
@@ -311,24 +341,31 @@ async fn handle_register(db: &SqlitePool, payload: &RegisterPayload) -> Result<D
         return fetch_device_by_code(db, device_id).await;
     };
 
-    // 已建档设备：未绑定园区时保持「待绑定」，其余状态转为在线待命
+    // 已建档设备：未绑定园区时保持「待绑定」，其余状态转为在线待命；
+    // 台账字段用 COALESCE，客户端没报的保持原值（园区 / 人工改的型号不被抹掉）
     sqlx::query(
         "UPDATE devices SET status = CASE
                 WHEN park_id IS NULL THEN '待绑定'
                 WHEN status = '充电中' THEN '充电中'
                 ELSE '在线待命' END,
+            model = COALESCE(?3, model),
+            firmware = COALESCE(?4, firmware),
+            device_ip = COALESCE(?5, device_ip),
             last_heartbeat = ?1, updated_at = ?1 WHERE id = ?2",
     )
     .bind(&timestamp)
     .bind(existing.id)
+    .bind(model)
+    .bind(firmware)
+    .bind(peer_ip)
     .execute(db)
     .await?;
 
     fetch_device_by_code(db, device_id).await
 }
 
-/// 设备注册后同步到中台台账（失败只记日志）。
-async fn sync_registered_device(config: &crate::config::Config, db: &SqlitePool, device: &Device) {
+/// 把业务平台的设备行同步到中台台账（失败只记日志）。
+async fn sync_device_to_zentai(config: &crate::config::Config, db: &SqlitePool, device: &Device) {
     if !config.zentai_ready() {
         return;
     }
@@ -429,8 +466,17 @@ pub async fn notify_park_binding(
 }
 
 /// 心跳处理
-async fn handle_heartbeat(db: &SqlitePool, device_id: &str, payload: &HeartbeatPayload) {
+///
+/// 运行态（电量/信号/温度/里程/任务）每次覆写；台账类字段（型号/固件/状态）
+/// 变化时标记 `ledger_changed`，心跳末尾统一再同步一次中台，避免 10s 一次打接口。
+async fn handle_heartbeat(
+    db: &SqlitePool,
+    config: &crate::config::Config,
+    device_id: &str,
+    payload: &HeartbeatPayload,
+) {
     let timestamp = now();
+    let mut ledger_changed = false;
 
     let status = match payload.battery {
         Some(b) if b <= 10 => Some("充电中"),
@@ -514,31 +560,74 @@ async fn handle_heartbeat(db: &SqlitePool, device_id: &str, payload: &HeartbeatP
         .execute(db)
         .await;
     }
-    if let Some(fw) = &payload.firmware {
-        let _ =
-            sqlx::query("UPDATE devices SET firmware = ?1, updated_at = ?2 WHERE device_id = ?3")
-                .bind(fw)
-                .bind(&timestamp_clone)
-                .bind(&device_id_clone)
-                .execute(db)
-                .await;
+    if let Some(fw) = payload
+        .firmware
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        // 只有真的变了才返回 rows_affected = 1，用于决定是否重同步中台
+        ledger_changed |= sqlx::query(
+            "UPDATE devices SET firmware = ?1, updated_at = ?2
+             WHERE device_id = ?3 AND COALESCE(firmware, '') <> ?1",
+        )
+        .bind(fw)
+        .bind(&timestamp_clone)
+        .bind(&device_id_clone)
+        .execute(db)
+        .await
+        .map(|result| result.rows_affected() > 0)
+        .unwrap_or(false);
+    }
+    if let Some(model) = payload
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        ledger_changed |= sqlx::query(
+            "UPDATE devices SET model = ?1, updated_at = ?2
+             WHERE device_id = ?3 AND COALESCE(model, '') <> ?1",
+        )
+        .bind(model)
+        .bind(&timestamp_clone)
+        .bind(&device_id_clone)
+        .execute(db)
+        .await
+        .map(|result| result.rows_affected() > 0)
+        .unwrap_or(false);
     }
     if let Some(s) = status {
-        let _ = sqlx::query("UPDATE devices SET status = ?1, updated_at = ?2 WHERE device_id = ?3")
-            .bind(s)
-            .bind(&timestamp_clone)
-            .bind(&device_id_clone)
-            .execute(db)
-            .await;
+        ledger_changed |= sqlx::query(
+            "UPDATE devices SET status = ?1, updated_at = ?2
+             WHERE device_id = ?3 AND status <> ?1",
+        )
+        .bind(s)
+        .bind(&timestamp_clone)
+        .bind(&device_id_clone)
+        .execute(db)
+        .await
+        .map(|result| result.rows_affected() > 0)
+        .unwrap_or(false);
     } else {
-        let _ = sqlx::query(
-            "UPDATE devices SET status = CASE WHEN status = '离线' THEN '在线待命' ELSE status END,
-             updated_at = ?1 WHERE device_id = ?2",
+        ledger_changed |= sqlx::query(
+            "UPDATE devices SET status = '在线待命', updated_at = ?1
+             WHERE device_id = ?2 AND status = '离线'",
         )
         .bind(&timestamp_clone)
         .bind(&device_id_clone)
         .execute(db)
-        .await;
+        .await
+        .map(|result| result.rows_affected() > 0)
+        .unwrap_or(false);
+    }
+
+    // 台账字段变了（首登拿到型号 / 固件升级 / 状态迁移）才推中台
+    if ledger_changed
+        && config.zentai_ready()
+        && let Ok(device) = fetch_device_by_code(db, device_id).await
+    {
+        sync_device_to_zentai(config, db, &device).await;
     }
 }
 

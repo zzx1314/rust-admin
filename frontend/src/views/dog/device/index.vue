@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
-import AddFill from "~icons/ri/add-circle-line";
+import More from "~icons/ep/more-filled";
 import { PureTableBar } from "@/components/RePureTableBar";
 import PureTable from "@pureadmin/table";
 import DogSearchForm from "@/components/DogUI/DogSearchForm.vue";
@@ -42,18 +42,14 @@ const {
   handleSizeChange,
   handleCurrentChange,
   handleSelectionChange,
-  openDia,
   handleUpdate,
   handleSubmit,
   handleDelete,
   openAssign,
   submitAssign,
   submitUnassign,
-  syncMaps,
-  sendCommand,
-  openDispatch,
+  handleRowCommand,
   submitDispatch,
-  openRuntime,
   cancel
 } = useDogDevice();
 </script>
@@ -70,12 +66,7 @@ const {
     />
     <PureTableBar title="设备列表" :columns="columns" @refresh="onSearch">
       <template #buttons>
-        <el-button
-          type="primary"
-          :icon="useRenderIcon(AddFill)"
-          @click="openDia('新增设备')"
-          >新增</el-button
-        >
+        <!-- 设备台账由业务平台同步，中台不再手工新增 -->
         <el-button
           type="success"
           plain
@@ -107,70 +98,61 @@ const {
           @page-size-change="handleSizeChange"
           @page-current-change="handleCurrentChange"
         >
+          <!-- 操作列：只留「修改 / 删除」+ 一个「更多」菜单（与用户管理一致） -->
           <template #operation="{ row }">
-            <el-button
-              class="reset-margin"
-              link
-              type="primary"
-              :size="size"
-              @click="openAssign([row])"
-              >分配用户</el-button
-            >
-            <el-dropdown
-              trigger="click"
-              @command="(command: string) => sendCommand(row, command)"
-            >
-              <el-button
-                class="reset-margin"
-                link
-                type="warning"
-                :size="size"
-                :loading="sendingId === row.id"
-                >下发指令</el-button
-              >
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item
-                    v-for="command in DEVICE_COMMANDS"
-                    :key="command"
-                    :command="command"
-                  >
-                    {{ command }}
-                  </el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
-            <el-button
-              class="reset-margin"
-              link
-              type="primary"
-              :size="size"
-              @click="openDispatch(row)"
-              >下发任务</el-button
-            >
-            <el-button
-              class="reset-margin"
-              link
-              type="info"
-              :size="size"
-              @click="openRuntime(row)"
-              >运行态</el-button
-            >
-            <el-button
-              class="reset-margin"
-              link
-              type="success"
-              :size="size"
-              :loading="syncingId === row.id"
-              @click="syncMaps(row)"
-              >同步地图</el-button
-            >
             <DogTableActions
               :row="row"
               :size="size"
               @edit="handleUpdate(row)"
               @delete="handleDelete(row)"
-            />
+            >
+              <template #extra="{ row: current, size: currentSize }">
+                <el-dropdown
+                  trigger="click"
+                  @command="
+                    (command: string) => handleRowCommand(current, command)
+                  "
+                >
+                  <el-button
+                    class="reset-margin"
+                    link
+                    type="primary"
+                    :size="currentSize"
+                    :icon="useRenderIcon(More)"
+                    :loading="
+                      sendingId === current.id || syncingId === current.id
+                    "
+                  />
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item command="assign"
+                        >分配用户</el-dropdown-item
+                      >
+                      <el-dropdown-item command="dispatch"
+                        >下发任务</el-dropdown-item
+                      >
+                      <el-dropdown-item command="sync"
+                        >同步地图</el-dropdown-item
+                      >
+                      <el-dropdown-item command="runtime"
+                        >运行态</el-dropdown-item
+                      >
+                      <el-dropdown-item divided disabled class="menu-group">
+                        下发指令
+                      </el-dropdown-item>
+                      <el-dropdown-item
+                        v-for="command in DEVICE_COMMANDS"
+                        :key="command"
+                        :command="`cmd:${command}`"
+                        :disabled="sendingId === current.id"
+                      >
+                        {{ command }}
+                      </el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+              </template>
+            </DogTableActions>
           </template>
         </pure-table>
       </template>
@@ -393,5 +375,11 @@ const {
 .assign-summary {
   margin-bottom: 12px;
   color: var(--el-text-color-regular);
+}
+
+/* 「更多」菜单里的分组标题（不可点击） */
+.menu-group {
+  font-size: 12px;
+  color: var(--el-text-color-placeholder);
 }
 </style>

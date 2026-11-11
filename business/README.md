@@ -195,6 +195,24 @@ GET    /api/zentai/devices/{deviceId}/runtime     # 中台读取设备运行态�
 分配用户，业务平台在下一次请求时实时读取分配关系。中台侧只维护设备台账与
 分配关系，运行状态、园区绑定仍以业务平台为准。
 
+### 台账字段从哪来
+
+中台「设备管理」的列全部由业务平台同步，**中台不再手工新增设备**；能自动填上的
+字段就是设备实际能上报的那些：
+
+| 中台 `dog_device` | 来源 | 何时写入 |
+| --- | --- | --- |
+| `device_id` | 客户端读本体 SN 分区（`/dev/mmcblk0p5`） | 注册 |
+| `model` | 客户端注册/心跳里的 `model`（本体 `1201.type`，取不到则不报） | 注册、心跳变化时 |
+| `firmware` | 客户端心跳里的 `firmware`（`--firmware` / `client.toml`） | 注册、心跳变化时 |
+| `status` | 业务库 `devices.status`（待绑定 / 在线待命 / 执行任务 / 充电中 / 离线） | 注册、心跳变化时 |
+| `device_ip` | 设备 WebSocket 接入的对端 IP（服务端 `ConnectInfo`） | 注册、心跳变化时 |
+| `park_code` / `park_name` | 业务库园区（控制台绑定后） | 注册 / 绑定 / 解绑 |
+| `device_name` / `remarks` | **设备侧无此数据**，只能在中台「修改」里人工填 | 人工维护（同步不会覆盖） |
+
+心跳里的型号 / 固件 / 状态只在**变化时**才触发一次中台重同步，避免 10s 一次打接口；
+运行态（电量、信号、温度、里程、当前任务）只留在业务库，不进中台台账。
+
 设备客户端回传地图时，`mapInfo.deviceId` 会用于查询设备在中台的归属用户，
 并把该用户写入中台 `dog_map.user_id`；园区选择地图时，非管理员只能看到
 `user_id = 自己` 的中台地图。
@@ -202,8 +220,8 @@ GET    /api/zentai/devices/{deviceId}/runtime     # 中台读取设备运行态�
 ## 设备与园区绑定
 
 设备首次通过 WebSocket 注册时如果没有建档，服务会自动创建一条「待绑定」设备
-（`devices.park_id IS NULL`、`status = '待绑定'`）；也可以预先在控制台新增设备，
-新增表单默认不选园区。绑定规则：
+（`devices.park_id IS NULL`、`status = '待绑定'`）；也可以在控制台先行建档
+（表单默认不选园区）。绑定规则：
 
 - `POST /api/devices/{id}/bind`（`{ parkId, zoneId? }`）手动绑定园区；`zoneId` 必须属于该园区。
 - `DELETE /api/devices/{id}/bind` 解绑，设备回到「待绑定」，其待执行任务会被清空分配。

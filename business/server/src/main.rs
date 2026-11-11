@@ -32,6 +32,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(&address).await?;
     tracing::info!(address = %address, database = %config.database_path.display(), "robodog ops server started");
     tracing::info!("default account: admin / admin123");
-    axum::serve(listener, router).await?;
+    // ws_handler 需要 ConnectInfo 取设备接入 IP（落 devices.device_ip）
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
