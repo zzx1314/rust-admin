@@ -81,11 +81,16 @@ Logical Client (client_id = N)
 ```bash
 root@ubuntu-arm64:~# hexdump -C /dev/mmcblk0p5 2>/dev/null \
   | sed -n '3s/.*|\(.*\)|.*/\1/p' | tr -d ' '
-0202222111111111
+0202222672400230
 ```
 
-该值已作为 `DEFAULT_DEVICE_ID` 写进 `client/src/config.rs`，即客户端默认身份；
-换机器狗时改这一处（或现场用 `client.toml` / `--device-id` 覆盖）。
+**客户端不再把这个值写进配置或常量**：`client/src/device_sn.rs` 在启动时直接读
+`/dev/mmcblk0p5` 现算（需要 root，systemd 单元就是 root 运行），换机器狗不用改任何
+文件；读不到时报错并提示用 `--device-id` / `ROBODOG_DEVICE_ID` 覆盖。
+
+实现要点：`hexdump -C` 会把开头连续全 0 的行折叠成 `*`，所以命令里的「第 3 行」
+在现场分区上其实是偏移 `0x200`；客户端按 16 字节行扫描前 4KB，优先取 16 位十六
+进制的行，不依赖行号（读块设备时长度取 4KB，满足 512/4096 逻辑块大小）。
 
 当前现场部署：
 
@@ -93,7 +98,7 @@ root@ubuntu-arm64:~# hexdump -C /dev/mmcblk0p5 2>/dev/null \
 |------|------|
 | 客户端所在服务器 | `192.168.41.246` |
 | 业务服务（同机） | `ws://192.168.41.246:3100`（REST：`http://192.168.41.246:3100`） |
-| 设备编号（= 机器狗 SN） | `0202222111111111` |
+| 设备编号（= 机器狗 SN，客户端自动读取） | `0202222672400230`（实测） |
 | 机器狗本体 | `192.168.234.234:10010`（文件服务 `:12000`） |
 
 ## 3. 标准建链时序（必须按序执行）
@@ -224,6 +229,33 @@ root@ubuntu-arm64:~# hexdump -C /dev/mmcblk0p5 2>/dev/null \
 - L2 根路径 `/userdata/alg_data`，M1 根路径 `/ota/alg_data`；
 - 例：`curl -fL -o map.zip "http://192.168.168.100:12000/userdata/alg_data/xxx.zip"`。
 
+### 7.1 现场固件：`robot_http_server` 没有 zip 端点
+
+`192.168.234.234:12000` 上跑的是本体自带的 `robot_http_server`：
+
+```bash
+$ curl -s http://192.168.234.234:12000/
+{"service":"http-fileserver","version":"3.0.0","root_name":"alg_data", ...}
+```
+
+**它不提供任何 zip 打包端点**，地图目录只能按单文件下载：
+
+| 用途 | 请求 | 说明 |
+|------|------|------|
+| 列目录 | `GET {base}/api/list?path=/map/history_map/<dir>` | JSON：`entries[].{name,type,size,path}` |
+| 下载文件 | `GET {base}/files/<entries[].path>` | 二进制原文件 |
+| 浏览目录 | `GET {base}/files/<dir>/` | 与列目录同样的 JSON |
+| 上传 | `POST {base}/upload` | 本体侧重装地图用，客户端不用 |
+
+`{base}` 的根**已经是 `alg_data`**，路径里不能再带 `/ota/alg_data`。
+
+客户端 `mapupload` 因此是两段式：先按 6 种 zip URL 探测（老固件）；
+全失败再走「文件服务打包」——列目录 → 递归收集（深度 ≤3）→ 逐文件下载 → 本机打 zip。
+打包会跳过 `map.static/`（建图逐帧点云，实测单张地图 1700+ 个 pcd、几百 MB）、
+单文件 >64MB（`model_map.bin` 222MB、`map.bin` 121MB）与总量 >200MB，最多 64 个文件。
+实测一张地图：16 个文件、原始 32.7MB → zip 11.7MB，含 `map.yaml` / `map.pgm` /
+`map.geojson` / `map.txt` / `map.pcd` / `map_edit/` / `nav_paths/`。
+
 ## 8. 断线重连策略
 
 ```text
@@ -303,7 +335,7 @@ cargo run -- --print-config      # 查看脱敏后的生效配置
 | 配置文件 | 环境变量 | 命令行 | 默认值 |
 |------|------|------|------|
 | `server.url` | `ROBODOG_SERVER_URL` | `--server` | `ws://192.168.41.246:3100` |
-| `server.device_id` | `ROBODOG_DEVICE_ID` | `--device-id` | `0202222111111111`（机器狗 SN） |
+| ~~`server.device_id`~~ | `ROBODOG_DEVICE_ID` | `--device-id` | **不在配置文件里**：默认自动读 `/dev/mmcblk0p5`（`ROBODOG_SN_PATH` 可改路径），写进 `client.toml` 会按未知字段报错 |
 | `server.secret` / `server.secret_env` | `ROBODOG_DEVICE_SECRET` | `--secret` | 空（可选） |
 | `server.heartbeat_secs` | `ROBODOG_HEARTBEAT` | `--heartbeat` | `10`（最小 1） |
 | `api.base` | `ROBODOG_API_BASE` | `--api-base` | 由 `server.url` 推导 |
@@ -346,8 +378,8 @@ bulkdata 绑定超时 `10s`、遥控看门狗 `1s`。
 现成脚本：`client/deploy/install.sh`（编译 release → 装到 `/opt/robodog/client` →
 装 `/etc/systemd/system/robodog-device-client.service` → 启动），配置模板
 `client/deploy/client.toml.template`、密钥模板 `client/deploy/client.env.example`。
-内置默认值已经是现场值（`192.168.41.246` / `0202222111111111` / `192.168.234.234`），
-所以装完即可直接连。
+内置默认值已经是现场值（`192.168.41.246` / `192.168.234.234`），设备编号启动时从
+`/dev/mmcblk0p5` 自动读取，所以装完即可直接连。
 
 ```bash
 cd business/client

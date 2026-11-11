@@ -11,11 +11,10 @@
 # 业务服务 WebSocket 地址；REST 地址默认由它推导（ws→http / wss→https）
 # 现场：业务服务部署在 192.168.41.246
 url = "ws://192.168.41.246:3100"
-# 设备编号，必须与业务库 devices.device_id 一致
-# 现场值 = 机器狗本体 SN：
+# 设备编号（= 机器狗 SN）**不要写在这里**：客户端启动时自动读本体分区
 #   hexdump -C /dev/mmcblk0p5 | sed -n '3s/.*|\(.*\)|.*/\1/p' | tr -d ' '
-# 内置默认值已写成该 SN，通常不需要在这里重复配置
-device_id = "0202222111111111"
+# 本文件里写 device_id 会被当成未知字段直接报错。
+# 只有本地调试 / 一台机器跑多个模拟实例时才用 --device-id 或 ROBODOG_DEVICE_ID 覆盖。
 # 设备密钥：推荐用环境变量，不要写明文
 secret_env = "ROBODOG_DEVICE_SECRET"
 # secret = "不推荐：明文写在这里"

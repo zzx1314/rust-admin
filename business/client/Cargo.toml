@@ -19,4 +19,6 @@ tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# 本体文件服务（robot_http_server）没有 zip 端点，需要在本机打包后回传
+zip = { version = "2", default-features = false, features = ["deflate"] }
 url = "2"

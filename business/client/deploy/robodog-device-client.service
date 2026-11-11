@@ -7,8 +7,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/robodog/client
-# 业务服务 / 设备编号 / 本体地址由二进制内置默认值提供（现场值）：
-#   ws://192.168.41.246:3100 · 0202222111111111 · 192.168.234.234:10010
+# 业务服务 / 本体地址由二进制内置默认值提供（现场值）：
+#   ws://192.168.41.246:3100 · 192.168.234.234:10010
+# 设备编号不需要配置：启动时自动读本体 SN 分区 /dev/mmcblk0p5（故以 root 运行）
 # 覆盖项写在 /etc/robodog/client.toml（模板：deploy/client.toml.template）
 # 密钥只放环境变量文件，权限 600
 EnvironmentFile=-/etc/robodog/client.env

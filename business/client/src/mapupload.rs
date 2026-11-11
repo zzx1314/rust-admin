@@ -15,9 +15,13 @@
 
 use crate::zhpro::mapping::{MappingSaved, RobotMap};
 use reqwest::multipart::{Form, Part};
+use serde::Deserialize;
 use serde_json::{Value, json};
+use std::io::{Cursor, Write};
 use std::time::Duration;
 use tracing::{info, warn};
+use zip::write::SimpleFileOptions;
+use zip::{CompressionMethod, ZipWriter};
 
 /// 回传结果
 #[derive(Debug, Clone)]
@@ -64,6 +68,31 @@ pub async fn fetch_map_package(
     http: &reqwest::Client,
     file_base: &str,
     map_dir_name: &str,
+    robot_map_path: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    // 部分固件把地图目录直接打成 zip 暴露，先按老约定探测
+    match fetch_zip_package(http, file_base, map_dir_name).await {
+        Ok(bytes) => Ok(bytes),
+        Err(zip_error) => {
+            // 现场 M1 的 robot_http_server（http-fileserver 3.0.0）没有 zip 端点：
+            // 只有 `/api/list?path=` 列目录 + `/files/<path>` 单文件下载，
+            // 所以按目录递归取文件、在客户端现场打包。
+            match fetch_package_via_fileserver(http, file_base, map_dir_name, robot_map_path).await
+            {
+                Ok(bytes) => Ok(bytes),
+                Err(file_error) => Err(format!(
+                    "无法从本体获取地图包（zip 探测: {zip_error}；文件服务打包: {file_error}）"
+                )),
+            }
+        }
+    }
+}
+
+/// 老约定：地图目录被文件服务打成 zip
+async fn fetch_zip_package(
+    http: &reqwest::Client,
+    file_base: &str,
+    map_dir_name: &str,
 ) -> Result<Vec<u8>, String> {
     let base = file_base.trim_end_matches('/');
     // 文档 §4「文件服务」：HTTP 端口 12000，L2 根 /userdata/alg_data、M1 根 /ota/alg_data；
@@ -103,7 +132,239 @@ pub async fn fetch_map_package(
             }
         }
     }
-    Err(format!("无法从本体获取地图包（{last_error}）"))
+    Err(last_error)
+}
+
+/// 单文件打包上限：地图目录里 `model_map.bin` 200MB+、`map.bin` 127MB，回传没有意义
+const MAX_PACK_FILE_BYTES: u64 = 64 * 1024 * 1024;
+/// 单次打包总字节上限
+const MAX_PACK_TOTAL_BYTES: u64 = 200 * 1024 * 1024;
+/// 单次打包文件数上限（防异常目录把回传拖死）
+const MAX_PACK_FILES: usize = 64;
+/// 目录黑名单：`map.static` 是建图过程的逐帧点云（实测单个地图目录 1700+ 个 pcd、
+/// 几百 MB），回传用不到，必须跳过。
+const SKIP_DIR_PREFIXES: [&str; 2] = ["map.static", "map_edit.bak"];
+/// 目录递归深度上限（`<地图目录>/{map.static,map_edit,nav_paths}/…`）
+const MAX_PACK_DEPTH: usize = 3;
+
+/// 文件服务（robot_http_server）的目录项
+#[derive(Debug, Clone, Deserialize)]
+struct FileEntry {
+    #[serde(default)]
+    name: String,
+    #[serde(rename = "type", default)]
+    kind: String,
+    #[serde(default)]
+    size: u64,
+    /// 相对文件服务根目录（`/ota/alg_data`）的路径
+    #[serde(default)]
+    path: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ListResponse {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    entries: Vec<FileEntry>,
+}
+
+/// 一个待打包的文件
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PackedFile {
+    /// zip 内的相对路径（相对地图目录）
+    rel: String,
+    /// 下载用的相对文件服务根目录路径
+    path: String,
+}
+
+/// 文件服务没有 zip 端点时：列目录 → 递归收集 → 下载 → 本机打 zip
+async fn fetch_package_via_fileserver(
+    http: &reqwest::Client,
+    file_base: &str,
+    map_dir_name: &str,
+    robot_map_path: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    let base = file_base.trim_end_matches('/').to_string();
+    let mut api_paths: Vec<String> = Vec::new();
+    if let Some(path) = robot_map_path {
+        let stripped = strip_alg_root(path);
+        if !stripped.is_empty() {
+            api_paths.push(stripped);
+        }
+    }
+    // 4013 的 map_dir_prefix 固定为 `<root>/map`，兜底用文档约定
+    let fallback = format!("/map/history_map/{map_dir_name}");
+    if !api_paths.iter().any(|path| path == &fallback) {
+        api_paths.push(fallback);
+    }
+
+    let mut last_error = String::from("未知错误");
+    for api_path in api_paths {
+        match collect_pack_files(http, &base, &api_path).await {
+            Ok(files) if !files.is_empty() => {
+                info!(
+                    "文件服务目录 {api_path} 收集到 {} 个文件，开始下载打包",
+                    files.len()
+                );
+                return pack_files(http, &base, &files).await;
+            }
+            Ok(_) => last_error = format!("{api_path} 下没有可打包的文件"),
+            Err(error) => last_error = format!("{api_path}: {error}"),
+        }
+    }
+    Err(last_error)
+}
+
+/// 去掉本体绝对路径里的 `alg_data` 根前缀，得到文件服务的相对路径
+fn strip_alg_root(path: &str) -> String {
+    let trimmed = path.trim().trim_end_matches('/');
+    for root in ["/ota/alg_data", "/userdata/alg_data"] {
+        if let Some(rest) = trimmed.strip_prefix(root) {
+            return rest.to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+/// `GET {base}/api/list?path=<相对根目录路径>`
+async fn list_dir(
+    http: &reqwest::Client,
+    base: &str,
+    api_path: &str,
+) -> Result<Vec<FileEntry>, String> {
+    let url = format!("{base}/api/list?path={api_path}");
+    let resp = http
+        .get(&url)
+        .send()
+        .await
+        .map_err(|error| format!("{url} 请求失败: {error}"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("{url} → HTTP {status}: {}", text.trim()));
+    }
+    let list: ListResponse = serde_json::from_str(&text)
+        .map_err(|error| format!("{url} 返回的不是目录列表 JSON: {error}"))?;
+    if !list.ok {
+        return Err(format!("{url} 返回 ok=false"));
+    }
+    Ok(list.entries)
+}
+
+/// 广度收集地图目录下的文件（深度受限，超大文件跳过）
+async fn collect_pack_files(
+    http: &reqwest::Client,
+    base: &str,
+    api_path: &str,
+) -> Result<Vec<PackedFile>, String> {
+    let mut collected: Vec<PackedFile> = Vec::new();
+    let mut total_bytes: u64 = 0;
+    let mut queue: Vec<(String, String, usize)> = vec![(api_path.to_string(), String::new(), 0)];
+
+    'walk: while let Some((dir_api, rel_prefix, depth)) = queue.pop() {
+        for entry in list_dir(http, base, &dir_api).await? {
+            if entry.name.is_empty() {
+                continue;
+            }
+            let rel = format!("{rel_prefix}{}", entry.name);
+            if entry.kind == "dir" {
+                if SKIP_DIR_PREFIXES
+                    .iter()
+                    .any(|prefix| entry.name.starts_with(prefix))
+                {
+                    info!("跳过目录 {rel}（逐帧点云等回传不需要的数据）");
+                    continue;
+                }
+                if depth >= MAX_PACK_DEPTH {
+                    warn!("目录层级超过 {MAX_PACK_DEPTH}，跳过 {rel}");
+                    continue;
+                }
+                let child = if entry.path.is_empty() {
+                    format!("{}/{}", dir_api.trim_end_matches('/'), entry.name)
+                } else {
+                    format!("/{}", entry.path.trim_start_matches('/'))
+                };
+                queue.push((child, format!("{rel}/"), depth + 1));
+                continue;
+            }
+            if entry.size > MAX_PACK_FILE_BYTES {
+                info!(
+                    "跳过超大文件 {rel}（{} MB > 上限 {} MB）",
+                    entry.size / 1024 / 1024,
+                    MAX_PACK_FILE_BYTES / 1024 / 1024
+                );
+                continue;
+            }
+            if collected.len() >= MAX_PACK_FILES {
+                warn!("打包文件数达到上限 {MAX_PACK_FILES}，其余忽略");
+                break 'walk;
+            }
+            if total_bytes + entry.size > MAX_PACK_TOTAL_BYTES {
+                warn!(
+                    "打包总量超过上限 {} MB，其余忽略",
+                    MAX_PACK_TOTAL_BYTES / 1024 / 1024
+                );
+                break 'walk;
+            }
+            total_bytes += entry.size;
+            collected.push(PackedFile {
+                rel,
+                path: entry.path.clone(),
+            });
+        }
+    }
+
+    collected.sort_by(|a, b| a.rel.cmp(&b.rel));
+    Ok(collected)
+}
+
+/// 逐个下载并写入内存 zip
+async fn pack_files(
+    http: &reqwest::Client,
+    base: &str,
+    files: &[PackedFile],
+) -> Result<Vec<u8>, String> {
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    let mut raw_bytes = 0usize;
+
+    for file in files {
+        let url = format!("{base}/files/{}", file.path.trim_start_matches('/'));
+        let resp = http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|error| format!("{url} 请求失败: {error}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!("{url} → HTTP {status}"));
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|error| format!("{url} 下载失败: {error}"))?;
+        raw_bytes += bytes.len();
+        writer
+            .start_file(file.rel.clone(), options)
+            .map_err(|error| format!("写入 zip（{}）失败: {error}", file.rel))?;
+        writer
+            .write_all(&bytes)
+            .map_err(|error| format!("写入 zip（{}）失败: {error}", file.rel))?;
+        info!("打包 {}（{} 字节）", file.rel, bytes.len());
+    }
+
+    let cursor = writer
+        .finish()
+        .map_err(|error| format!("收尾 zip 失败: {error}"))?;
+    let package = cursor.into_inner();
+    info!(
+        "本机打包完成：{} 个文件，原始 {} 字节 → zip {} 字节",
+        files.len(),
+        raw_bytes,
+        package.len()
+    );
+    Ok(package)
 }
 
 fn is_zip(bytes: &[u8]) -> bool {
@@ -331,7 +592,7 @@ pub async fn sync_robot_maps(
             info!("地图 {} 已同步过，跳过", map.path);
             continue;
         }
-        let package = match fetch_map_package(http, file_base, &map.map_id).await {
+        let package = match fetch_map_package(http, file_base, &map.map_id, Some(&map.path)).await {
             Ok(package) => package,
             Err(error) => {
                 report.failed += 1;
@@ -402,6 +663,20 @@ mod tests {
             resolve_file_base("192.168.1.9", Some("http://files.local/maps/"), 8080),
             "http://files.local/maps"
         );
+    }
+
+    #[test]
+    fn strips_alg_data_root_for_fileserver_paths() {
+        assert_eq!(
+            strip_alg_root("/ota/alg_data/map/history_map/2026_11_10_19_37_25"),
+            "/map/history_map/2026_11_10_19_37_25"
+        );
+        assert_eq!(
+            strip_alg_root("/userdata/alg_data/map/history_map/m1/"),
+            "/map/history_map/m1"
+        );
+        // 已经是相对路径时原样返回
+        assert_eq!(strip_alg_root("map/history_map/m1"), "map/history_map/m1");
     }
 
     #[test]

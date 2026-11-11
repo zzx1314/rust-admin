@@ -7,7 +7,7 @@ use crate::handlers::{
     alerts, dashboard, devices, ingest, maps, parks, routes, service, settings, tasks, teleop,
     zones,
 };
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::Method;
 use axum::middleware::from_fn_with_state;
 use axum::routing::{get, post};
@@ -18,6 +18,12 @@ use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
+
+/// 地图包上传上限。
+///
+/// 本体地图目录打包后常见 10~50MB（`map.pcd` 27MB、`map.pgm` 1MB、`map.txt`…），
+/// axum 默认 2MB 会让真实设备回传直接 400（`Error parsing multipart/form-data`）。
+const MAP_UPLOAD_LIMIT: usize = 256 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -61,7 +67,10 @@ pub fn build_router(state: AppState) -> Router {
             "/map-versions/import-backend",
             post(maps::import_backend_map),
         )
-        .route("/map-versions/ingest", post(ingest::ingest_map))
+        .route(
+            "/map-versions/ingest",
+            post(ingest::ingest_map).layer(DefaultBodyLimit::max(MAP_UPLOAD_LIMIT)),
+        )
         .route("/map-versions/{id}", get(maps::get_map))
         .route("/map-versions/{id}/raster", get(maps::map_raster))
         .route("/map-versions/{id}/refs", get(maps::map_refs))

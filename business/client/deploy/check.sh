@@ -22,7 +22,8 @@ SERVER_URL="${SERVER_URL:-ws://192.168.41.246:3100}"
 ROBOT_HOST="${ROBOT_HOST:-192.168.234.234}"
 ROBOT_PORT="${ROBOT_PORT:-10010}"
 FILE_PORT="${FILE_PORT:-12000}"
-DEVICE_ID="${DEVICE_ID:-0202222111111111}"
+# 设备编号：默认按客户端同样的方式从本体 SN 分区算；也可用 DEVICE_ID 覆盖
+DEVICE_ID="${DEVICE_ID:-}"
 PROBE=1
 
 for arg in "$@"; do
@@ -59,9 +60,13 @@ tcp_check() { # host port label
   fi
 }
 
+if [[ -z "$DEVICE_ID" && -r /dev/mmcblk0p5 ]]; then
+  DEVICE_ID="$(hexdump -C /dev/mmcblk0p5 2>/dev/null | sed -n '3s/.*|\(.*\)|.*/\1/p' | tr -d ' ')"
+fi
+
 echo "== 现场连接自检 =="
 echo "业务服务: $SERVER_URL"
-echo "设备编号: $DEVICE_ID"
+echo "设备编号: ${DEVICE_ID:-（自动读取本体 SN 分区 /dev/mmcblk0p5）}"
 echo "机器狗  : $ROBOT_HOST (control/bulkdata $ROBOT_PORT, 文件服务 $FILE_PORT)"
 echo
 
@@ -105,9 +110,12 @@ if [[ $PROBE -eq 1 ]]; then
   if [[ -z "$BIN" ]]; then
     info "未找到客户端二进制，跳过（先 cargo build --release）"
   else
-    OUT="$(timeout 10 "$BIN" --server "$SERVER_URL" --device-id "$DEVICE_ID" --robot sim 2>&1 || true)"
+    PROBE_ARGS=(--server "$SERVER_URL" --robot sim)
+    # 没算出来就让客户端自己探测（与正式启动同一条路径）
+    [[ -n "$DEVICE_ID" ]] && PROBE_ARGS+=(--device-id "$DEVICE_ID")
+    OUT="$(timeout 10 "$BIN" "${PROBE_ARGS[@]}" 2>&1 || true)"
     if printf '%s' "$OUT" | grep -q "设备注册成功"; then
-      pass "注册成功：$DEVICE_ID（业务服务已接受注册）"
+      pass "注册成功：${DEVICE_ID:-（客户端自动读取的 SN）}（业务服务已接受注册）"
       if printf '%s' "$OUT" | grep -q "尚未绑定园区"; then
         info "该设备还没绑定园区：控制台「设备管理」→ 绑定园区，否则建图不会回传"
       fi

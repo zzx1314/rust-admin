@@ -10,6 +10,9 @@
 //! 环境变量 `ROBODOG_CLIENT_CONFIG` 指定。**显式指定**的文件不存在会报错，
 //! 默认路径不存在则视为「全部使用默认值」，保持开箱可用。
 //!
+//! **设备编号不写配置**：默认在启动时从本体 SN 分区 `/dev/mmcblk0p5` 读出
+//! （见 [`crate::device_sn`]），命令行 / 环境变量只用于本地调试时覆盖。
+//!
 //! 密钥（设备密钥 / 业务服务密码）支持两种写法，推荐环境变量：
 //!
 //! ```toml
@@ -31,20 +34,6 @@ use tokio::sync::Mutex;
 
 /// 现场业务服务（192.168.41.246）的 WebSocket 地址。
 pub const DEFAULT_SERVER_URL: &str = "ws://192.168.41.246:3100";
-
-/// 现场机器狗设备编号（资产级 SN，硬编码进客户端）。
-///
-/// 智航 Pro v1.0.3 协议里没有设备 ID / SN 字段可回读（见
-/// `docs/client-connection-guide.md` §2.1），只能在机器狗本体上读分区：
-///
-/// ```text
-/// root@ubuntu-arm64:~# hexdump -C /dev/mmcblk0p5 2>/dev/null \
-///   | sed -n '3s/.*|\(.*\)|.*/\1/p' | tr -d ' '
-/// 0202222111111111
-/// ```
-///
-/// 该值必须与业务库 `devices.device_id` 一致；服务端首次注册会自动建档。
-pub const DEFAULT_DEVICE_ID: &str = "0202222111111111";
 
 /// 现场机器狗本体地址（智航 Pro 网关，control/bulkdata 均为 10010）。
 pub const DEFAULT_ROBOT_HOST: &str = "192.168.234.234";
@@ -72,7 +61,10 @@ pub const CONFIG_PATH_ENV: &str = "ROBODOG_CLIENT_CONFIG";
 
 // 环境变量名：与配置文件字段一一对应
 pub const ENV_SERVER_URL: &str = "ROBODOG_SERVER_URL";
+/// 覆盖自动探测的设备编号（本地调试 / 多实例模拟用）
 pub const ENV_DEVICE_ID: &str = "ROBODOG_DEVICE_ID";
+/// 覆盖 SN 分区路径（默认 `/dev/mmcblk0p5`，测试与不同分区布局的机型用）
+pub const ENV_SN_PATH: &str = "ROBODOG_SN_PATH";
 pub const ENV_DEVICE_SECRET: &str = "ROBODOG_DEVICE_SECRET";
 pub const ENV_ROBOT: &str = "ROBODOG_ROBOT";
 pub const ENV_ROBOT_FILE_BASE: &str = "ROBODOG_ROBOT_FILE_BASE";
@@ -102,6 +94,8 @@ pub enum ConfigError {
     },
     /// 配置取值不合法
     Invalid(String),
+    /// 设备编号缺失：SN 分区读不到，且没有显式覆盖
+    MissingDeviceId,
 }
 
 impl fmt::Display for ConfigError {
@@ -115,6 +109,12 @@ impl fmt::Display for ConfigError {
                 write!(f, "解析配置文件 {} 失败: {source}", path.display())
             }
             Self::Invalid(message) => write!(f, "配置不合法: {message}"),
+            Self::MissingDeviceId => write!(
+                f,
+                "配置不合法: 未能自动读取设备编号（{} 不可读）：请确认以 root 运行、分区存在，\
+                 或用 --device-id / {ENV_DEVICE_ID} 显式指定",
+                crate::device_sn::DEFAULT_SN_PATH
+            ),
         }
     }
 }
@@ -138,7 +138,6 @@ pub struct FileConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ServerSection {
     pub url: Option<String>,
-    pub device_id: Option<String>,
     /// 设备密钥明文；不推荐，优先用 `secret_env`
     pub secret: Option<String>,
     /// 保存设备密钥的环境变量名，优先级高于 `secret`
@@ -237,6 +236,15 @@ impl EnvConfig {
                 .filter(|(_, value)| !value.trim().is_empty())
                 .collect(),
         }
+    }
+
+    /// 追加或覆盖一个键（测试用：注入 `ROBODOG_SN_PATH` 等）
+    pub fn with(mut self, key: &str, value: impl Into<String>) -> Self {
+        let value = value.into();
+        if !value.trim().is_empty() {
+            self.vars.insert(key.to_string(), value);
+        }
+        self
     }
 
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -367,7 +375,7 @@ pub fn print_help() {
   --config <PATH>        配置文件路径 (默认: ./client.toml)
   --print-config         打印脱敏后的生效配置后退出
   --server <URL>         业务服务 WebSocket 地址 (默认: {DEFAULT_SERVER_URL})
-  --device-id <ID>       设备编号 (默认: {DEFAULT_DEVICE_ID}，本体 SN)
+  --device-id <ID>       设备编号（默认自动读取本体 SN 分区 /dev/mmcblk0p5）
   --secret <SECRET>      设备密钥 (可选，推荐 ROBODOG_DEVICE_SECRET)
   --robot <HOST>         智航本体地址，如 192.168.234.234 或 ws://ip:10010
                          (默认: {DEFAULT_ROBOT_HOST})；填 sim/none/off 关闭本体连接，
@@ -451,11 +459,32 @@ impl Config {
             None => load_optional_file(Path::new(DEFAULT_CONFIG_FILE))?,
         };
 
-        Self::resolve(&file, &env, &cli)
+        // 设备编号：默认取本体 SN 分区（`hexdump -C /dev/mmcblk0p5` 第 3 行）
+        let sn_path = env
+            .get(ENV_SN_PATH)
+            .unwrap_or(crate::device_sn::DEFAULT_SN_PATH);
+        let detected = crate::device_sn::detect(Path::new(sn_path));
+        let detected_sn = detected.as_ref().ok().map(String::as_str);
+
+        Self::resolve(&file, &env, &cli, detected_sn).map_err(|error| match (error, &detected) {
+            // 把「读不到 SN 的具体原因」带进错误信息，现场排障不用再跑命令
+            (ConfigError::MissingDeviceId, Err(sn_error)) => ConfigError::Invalid(format!(
+                "{sn_error}；可用 --device-id 或 {ENV_DEVICE_ID} 显式指定"
+            )),
+            (error, _) => error,
+        })
     }
 
-    /// 纯函数式合并：不读环境、不读文件（便于测试）
-    pub fn resolve(file: &FileConfig, env: &EnvConfig, cli: &CliArgs) -> Result<Self, ConfigError> {
+    /// 纯函数式合并：不读环境、不读文件（便于测试）。
+    ///
+    /// `detected_sn` 是 [`crate::device_sn::detect`] 的结果，由 [`Config::load`] 传入；
+    /// `None` 表示没读到本体 SN，此时必须用 `--device-id` / `ROBODOG_DEVICE_ID` 覆盖。
+    pub fn resolve(
+        file: &FileConfig,
+        env: &EnvConfig,
+        cli: &CliArgs,
+        detected_sn: Option<&str>,
+    ) -> Result<Self, ConfigError> {
         let server_url = normalize_server_url(
             pick_string([
                 cli.server.as_deref(),
@@ -465,13 +494,12 @@ impl Config {
             .unwrap_or(DEFAULT_SERVER_URL),
         )?;
 
-        let device_id = pick_string([
-            cli.device_id.as_deref(),
-            env.get(ENV_DEVICE_ID),
-            file.server.device_id.as_deref(),
-        ])
-        .unwrap_or(DEFAULT_DEVICE_ID)
-        .to_string();
+        // 设备编号：命令行 / 环境变量显式覆盖 > 本体 SN 分区自动探测。
+        // 配置文件里不支持写死——一台机器狗一个 SN，抄错会注册出幽灵设备。
+        let device_id = pick_string([cli.device_id.as_deref(), env.get(ENV_DEVICE_ID)])
+            .or(detected_sn)
+            .ok_or(ConfigError::MissingDeviceId)?
+            .to_string();
 
         // 密钥：命令行 > 环境变量 > 文件里的 env 引用 > 文件明文
         let device_secret = pick_string([cli.secret.as_deref(), env.get(ENV_DEVICE_SECRET)])

@@ -53,7 +53,7 @@ cd business/client
 
 # 0) 现场默认值已内置，直接跑即可
 #    业务服务 ws://192.168.41.246:3100
-#    设备编号 0202222111111111（机器狗 SN）
+#    设备编号启动时自动读本体 SN 分区（/dev/mmcblk0p5）
 #    本体     192.168.234.234:10010
 cargo run --
 
@@ -90,17 +90,23 @@ cargo run -- --print-config          # 打印脱敏后的生效配置
 | 项 | 值 | 来源 |
 |----|----|------|
 | 业务服务（本机） | `ws://192.168.41.246:3100` | 内置默认值 `DEFAULT_SERVER_URL` |
-| 设备编号 | `0202222111111111` | 机器狗本体 SN，内置默认值 `DEFAULT_DEVICE_ID` |
+| 设备编号 | 启动时自动读本体 SN（现场实测 `0202222672400230`） | `device_sn` 模块读 `/dev/mmcblk0p5` |
 | 机器狗本体 | `192.168.234.234:10010` | 内置默认值 `DEFAULT_ROBOT_HOST` |
 | 设备地图/文件服务 | `http://192.168.234.234:12000` | 由本体地址 + `robot.file_port` 推导 |
 
-设备编号是资产级 SN，协议不回读，只能在机器狗本体上读分区：
+设备编号是资产级 SN，协议里没有字段可回读，所以客户端**在代码里现算**：启动时读
+本体 eMMC 的 `mmcblk0p5` 分区（`src/device_sn.rs`，等价下面这条命令），不需要写进
+配置文件；读不到就报错并要求 `--device-id` 显式指定，避免注册出错误/幽灵设备。
 
 ```bash
 root@ubuntu-arm64:~# hexdump -C /dev/mmcblk0p5 2>/dev/null \
   | sed -n '3s/.*|\(.*\)|.*/\1/p' | tr -d ' '
-0202222111111111
+0202222672400230
 ```
+
+> 注意 `hexdump -C` 会把开头全 0 的行折叠成 `*`，所以这条命令里的「第 3 行」在
+> 现场分区上其实位于偏移 `0x200`；客户端不依赖行号，而是扫描前 4KB 里
+> `hexdump -C` 的每条 16 字节行，优先取 16 位十六进制的行。
 
 一项式安装（编译 release、装 systemd 单元，默认值即上表）：
 
@@ -135,7 +141,7 @@ journalctl -u robodog-device-client -f
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--server` | `ws://192.168.41.246:3100` | 业务服务地址 |
-| `--device-id` | `0202222111111111` | 设备编号 = 机器狗 SN（须与 `devices.device_id` 一致） |
+| `--device-id` | 自动读本体 SN 分区 | 仅用于本地调试 / 多实例覆盖；默认取 `/dev/mmcblk0p5` |
 | `--secret` | 无 | 设备密钥（推荐 `ROBODOG_DEVICE_SECRET`） |
 | `--heartbeat` | `10` | 心跳间隔（秒） |
 | `--battery` | `86` | 初始电量 |
@@ -338,6 +344,19 @@ M1 文件根 `/ota/alg_data`；文档 §2.2.4.1「4013 地图列表」明确单�
 `{base}` 由 `--robot-file-base` 显式给出，否则从 `--robot` 推导成
 `http://<host>:12000`。探测失败时错误信息会带上最后一次尝试的 URL 与失败原因
 （HTTP 状态码 / 非 zip 内容），便于对着本体路由排查。
+
+**现场固件（`robot_http_server` / `http-fileserver 3.0.0`）没有任何 zip 端点**，
+只提供 `GET /api/list?path=<相对 alg_data 的路径>` 列目录和 `GET /files/<path>`
+单文件下载。这种情况下 6 种 zip 探测全部 404，客户端会退到「本机打包」：
+
+1. `GET {base}/api/list?path=/map/history_map/<目录名>` 递归列目录（深度 ≤3）；
+2. `GET {base}/files/<entries[].path>` 逐文件下载；
+3. 在本机打成 zip 后再走 `POST /api/map-versions/ingest`。
+
+打包会跳过 `map.static/`（建图逐帧点云，实测单张地图 1700+ 个 pcd）、单文件
+>64MB（`model_map.bin` 222MB、`map.bin` 121MB）、总量 >200MB，最多 64 个文件。
+实测一张地图：16 个文件、原始 32.7MB → zip 11.7MB（含 `map.yaml`、`map.pgm`、
+`map.geojson`、`map.txt`、`map.pcd`、`map_edit/`、`nav_paths/`）。
 
 > **注意：地图路径来源尚未与文档对齐**
 > 文档 §2.2.1.1 的 4001 **只返回 `data.code` 和 `data.msg`，不含地图路径**。

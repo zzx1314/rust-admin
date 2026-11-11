@@ -1,19 +1,16 @@
 # 现场配置：/etc/robodog/client.toml（chmod 600）
 #
 # 只有需要覆盖内置默认值时才写这里。内置默认值已经是现场值：
-#   server.url     = ws://192.168.41.246:3100
-#   server.device_id = 0202222111111111   （机器狗 SN，读自 /dev/mmcblk0p5）
-#   robot.host     = 192.168.234.234
+#   server.url   = ws://192.168.41.246:3100
+#   robot.host   = 192.168.234.234
+# 设备编号不在这里配：客户端启动时自动读本体 SN 分区（/dev/mmcblk0p5），
+# 本文件里出现 device_id 会按未知字段报错。
 #
 # 优先级（高 → 低）：命令行 > 环境变量 > 本文件 > 内置默认值。
 # 生效结果核对：robodog-device-client --config /etc/robodog/client.toml --print-config
 
 [server]
 url = "ws://192.168.41.246:3100"
-# 机器狗 SN（资产级唯一身份，必须与业务库 devices.device_id 一致）
-# 读取方式：
-#   hexdump -C /dev/mmcblk0p5 | sed -n '3s/.*|\(.*\)|.*/\1/p' | tr -d ' '
-device_id = "0202222111111111"
 # 密钥走环境变量（/etc/robodog/client.env）
 secret_env = "ROBODOG_DEVICE_SECRET"
 heartbeat_secs = 10

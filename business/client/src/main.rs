@@ -15,8 +15,9 @@
 //!
 //! # 运行
 //!
-//! 内置默认值就是现场值：业务服务 `ws://192.168.41.246:3100`、设备编号
-//! `0202222111111111`（本体 SN，读自 `/dev/mmcblk0p5`）、本体 `192.168.234.234:10010`。
+//! 内置默认值就是现场值：业务服务 `ws://192.168.41.246:3100`、本体 `192.168.234.234:10010`。
+//! **设备编号不用配**：启动时自动读本体 SN 分区 `/dev/mmcblk0p5`
+//! （等价 `hexdump -C /dev/mmcblk0p5 | sed -n '3s/.*|\(.*\)|.*/\1/p' | tr -d ' '`）。
 //!
 //! ```bash
 //! # 现场：连业务服务 + 机器狗本体
@@ -1566,14 +1567,17 @@ async fn upload_mapping_to_zentai(config: &Config, saved: &MappingSaved) -> Uplo
     let http = mapupload::build_http_client();
 
     info!("开始回传地图 {map_dir}，从 {file_base} 取包");
-    let package = match mapupload::fetch_map_package(&http, &file_base, &map_dir).await {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return UploadOutcome::Failed {
-                reason: format!("{e}；本体若未开放文件服务，请用 --robot-file-base 指定"),
-            };
-        }
-    };
+    let package =
+        match mapupload::fetch_map_package(&http, &file_base, &map_dir, saved.map_path.as_deref())
+            .await
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return UploadOutcome::Failed {
+                    reason: format!("{e}；本体若未开放文件服务，请用 --robot-file-base 指定"),
+                };
+            }
+        };
 
     let ingest = IngestConfig {
         api_base: config.resolve_api_base(),
