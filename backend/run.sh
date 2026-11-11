@@ -21,6 +21,16 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# 本地 secrets（不入库，.gitignore 忽略）：
+#   APP_DOG__BUSINESS_API_TOKEN —— 业务平台内部接口 + 反向控制信道的共享令牌
+# 存在即自动加载，不存在的机器照旧靠手工 export。
+if [[ -f .env.local ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env.local
+  set +a
+fi
+
 DEV_REDIS_PASSWORD="123456"
 
 random_hex() {

@@ -551,3 +551,194 @@ mod control_plane_channel {
         );
     }
 }
+
+/// 出站到中台：配置了共享服务令牌后走 `/api/dogInternal/*`，不再登录换 JWT。
+///
+/// 这里用一个假的「中台内部接口」服务验证三件事：
+///   1. 请求必须带 `x-service-token`，且路径是内部接口；
+///   2. 全程不碰 `/api/token`（说明没有账号登录、没有会话过期问题）；
+///   3. 台账 / 分配关系 / 地图回传的解析逻辑与老路径一致。
+mod zentai_service_token {
+    use super::*;
+    use axum::Router;
+    use axum::extract::Multipart;
+    use axum::http::HeaderMap;
+    use axum::routing::{get, post};
+    use robodog_ops_server::config::Config;
+    use robodog_ops_server::ingest::{self, IngestRequest, ParkRef};
+    use robodog_ops_server::zentai::{self, DeviceUpsert};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const TOKEN: &str = "test-service-token";
+
+    fn service_config(base: String) -> Config {
+        Config {
+            port: 0,
+            database_path: std::env::temp_dir().join("robodog-zentai-test.db"),
+            jwt_secret: "test-secret-at-least-32-bytes-long!!".to_string(),
+            jwt_ttl_hours: 1,
+            web_dist: std::env::temp_dir().join("web-dist"),
+            backend_db_path: std::env::temp_dir().join("backend.db"),
+            zentai_base_url: Some(base),
+            zentai_username: None,
+            zentai_password: None,
+            ingest_dir: std::env::temp_dir().join("map_ingest"),
+            service_token: Some(TOKEN.to_string()),
+            zentai_ws_url: None,
+        }
+    }
+
+    /// 启动假中台；`token_calls` 记录是否有账号登录发生。
+    async fn spawn_fake_zentai() -> (String, Arc<AtomicUsize>) {
+        let token_calls = Arc::new(AtomicUsize::new(0));
+        let login_hits = token_calls.clone();
+
+        let app = Router::new()
+            .route(
+                "/api/token",
+                post(move || {
+                    let login_hits = login_hits.clone();
+                    async move {
+                        login_hits.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(serde_json::json!({"code": 10401, "msg": "不应被调用"}))
+                    }
+                }),
+            )
+            .route(
+                "/api/dogInternal/devices/assignments",
+                get(|headers: HeaderMap| async move {
+                    assert_eq!(
+                        headers.get("x-service-token").and_then(|v| v.to_str().ok()),
+                        Some(TOKEN)
+                    );
+                    axum::Json(serde_json::json!({
+                        "code": 10200,
+                        "msg": "success",
+                        "data": [{
+                            "deviceId": "RD-001",
+                            "users": [{"id": 7, "username": "u7", "userIds": [7]}],
+                            "userIds": [7],
+                        }],
+                    }))
+                }),
+            )
+            .route(
+                "/api/dogInternal/devices/upsert",
+                post(|headers: HeaderMap, body: axum::Json<Value>| async move {
+                    assert_eq!(
+                        headers.get("x-service-token").and_then(|v| v.to_str().ok()),
+                        Some(TOKEN)
+                    );
+                    assert_eq!(body["deviceId"], "RD-300");
+                    axum::Json(serde_json::json!({
+                        "code": 10200,
+                        "msg": "success",
+                        "data": {"deviceId": "RD-300"},
+                    }))
+                }),
+            )
+            .route(
+                "/api/dogInternal/maps/upload",
+                post(|headers: HeaderMap, mut multipart: Multipart| async move {
+                    assert_eq!(
+                        headers.get("x-service-token").and_then(|v| v.to_str().ok()),
+                        Some(TOKEN)
+                    );
+                    let mut saw_file = false;
+                    let mut map_name = String::new();
+                    while let Some(field) = multipart.next_field().await.unwrap() {
+                        match field.name() {
+                            Some("file") => {
+                                let _ = field.bytes().await.unwrap();
+                                saw_file = true;
+                            }
+                            Some("mapInfo") => {
+                                let text = field.text().await.unwrap();
+                                let info: Value = serde_json::from_str(&text).unwrap();
+                                map_name = info["mapName"].as_str().unwrap_or_default().to_string();
+                                assert_eq!(info["ownerUserId"], 7);
+                            }
+                            _ => {}
+                        }
+                    }
+                    assert!(saw_file, "必须收到地图包");
+                    axum::Json(serde_json::json!({
+                        "code": 10200,
+                        "msg": "success",
+                        "data": {"id": 42, "mapName": map_name, "fileName": "map.zip"},
+                    }))
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake zentai");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), token_calls)
+    }
+
+    #[tokio::test]
+    async fn service_token_replaces_account_login() {
+        let (base, token_calls) = spawn_fake_zentai().await;
+        let config = service_config(base);
+
+        // 只配令牌也算「与中台通信就绪」，但中台账号登录路径关闭
+        assert!(config.zentai_ready());
+        assert!(config.has_service_token());
+        assert!(!config.zentai_account_ready());
+        assert_eq!(config.zentai_auth_mode(), "service-token");
+
+        let devices = zentai::device_assignments(&config)
+            .await
+            .expect("分配关系应可读取");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device_id, "RD-001");
+        assert_eq!(devices[0].user_ids, vec![7]);
+
+        zentai::upsert_device(
+            &config,
+            &DeviceUpsert {
+                device_id: "RD-300".to_string(),
+                device_name: Some("测试狗".to_string()),
+                model: None,
+                status: Some("在线待命".to_string()),
+                firmware: None,
+                device_ip: None,
+                park_code: None,
+                park_name: None,
+                remarks: None,
+                user_ids: vec![7],
+            },
+        )
+        .await
+        .expect("设备台账应可同步");
+
+        let http = reqwest::Client::new();
+        let request = IngestRequest {
+            map_name: "A 区机器人建图".to_string(),
+            park_id: Some(1),
+            device_id: Some("RD-001".to_string()),
+            bind: false,
+            map_type: None,
+            remarks: None,
+            source: None,
+            source_ref: None,
+        };
+        let park = ParkRef {
+            code: "P01".to_string(),
+            name: "A 区".to_string(),
+        };
+        let map = ingest::push_to_zentai(&config, &http, &request, &park, "map.zip", b"PK\x03\x04", Some(7))
+            .await
+            .expect("地图应可回传");
+        assert_eq!(map.id, 42);
+        assert_eq!(map.map_name, "A 区机器人建图");
+
+        // 全程没有登录换 JWT
+        assert_eq!(token_calls.load(Ordering::SeqCst), 0, "不应调用 /api/token");
+    }
+}

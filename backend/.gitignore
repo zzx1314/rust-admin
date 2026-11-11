@@ -1,3 +1,5 @@
 /target
 /data/*
 .sisyphus
+# 本地 secrets（run.sh 自动 source）
+.env.local

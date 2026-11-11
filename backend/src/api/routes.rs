@@ -11,6 +11,7 @@ use crate::api::middleware::{audit_log_middleware, require_auth};
 use crate::business::dog::config::handlers as dog_config_handlers;
 use crate::business::dog::device::control_ws;
 use crate::business::dog::device::handlers as dog_device_handlers;
+use crate::business::dog::internal as dog_internal;
 use crate::business::dog::map::handlers as dog_map_handlers;
 use crate::business::dog::media::handlers as dog_media_handlers;
 use crate::business::dog::model::handlers as dog_model_handlers;
@@ -422,6 +423,7 @@ pub fn create_router(state: AppState) -> Router {
         .merge(dog_map_routes(state.clone()))
         .merge(dog_device_routes(state.clone()))
         .merge(dog_control_routes())
+        .merge(dog_internal::internal_routes())
         .merge(dog_media_routes(state.clone()))
         .merge(dog_model_routes(state.clone()))
         .merge(dog_config_routes(state.clone()))

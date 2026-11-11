@@ -1,8 +1,13 @@
-//! 中台（仓库根目录 `backend`）对接：账号登录、设备台账同步、设备分配查询。
+//! 中台（仓库根目录 `backend`）对接：设备台账同步、分配查询、设备删除。
 //!
-//! 中台账号只保存在业务服务端（`ROBODOG_ZENTAI_*`），设备客户端不持有中台凭证。
-//! 业务用户登录时用其本人中台账号校验；服务端内部调用（同步设备、查询分配、
-//! 回传地图）使用配置里的服务账号。
+//! 出站调用有两种鉴权方式，**优先共享服务令牌**：
+//!
+//! 1. `ROBODOG_SERVICE_TOKEN` → 中台内部接口 `/api/dogInternal/*`（推荐）：
+//!    不需要中台账号，也没有会话过期问题，凭证只有一条共享令牌；
+//! 2. 退化为 `ROBODOG_ZENTAI_USER` / `_PASSWORD` → 服务账号登录换 JWT，
+//!    调用中台公开接口（兼容老部署）。
+//!
+//! 中台账号/令牌都只保存在业务服务端，设备客户端不持有任何中台凭证。
 
 use crate::config::Config;
 use crate::error::AppError;
@@ -58,6 +63,52 @@ fn http_client() -> Result<reqwest::Client, AppError> {
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|error| AppError::Internal(format!("构造 HTTP 客户端失败: {error}")))
+}
+
+/// 出站调用的鉴权方式（建图回传等其它模块复用）。
+pub(crate) enum Auth {
+    /// 共享服务令牌（中台内部接口 `/api/dogInternal/*`）
+    Service(String),
+    /// 服务账号登录换来的 Bearer（中台公开接口）
+    Bearer(String),
+}
+
+impl Auth {
+    /// 优先共享服务令牌；未配置时退回账号登录。
+    pub(crate) async fn resolve(config: &Config) -> Result<Self, AppError> {
+        if let Some(token) = config
+            .service_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+        {
+            return Ok(Self::Service(token.to_string()));
+        }
+        let session = service_session(config).await?;
+        Ok(Self::Bearer(session.token))
+    }
+
+    pub(crate) fn is_service(&self) -> bool {
+        matches!(self, Self::Service(_))
+    }
+
+    pub(crate) fn apply(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self {
+            Self::Service(token) => request.header("x-service-token", token),
+            Self::Bearer(token) => request.bearer_auth(token),
+        }
+    }
+}
+
+/// 中台基地址（去掉尾部 `/`）。
+pub(crate) fn zentai_base(config: &Config) -> Result<String, AppError> {
+    config
+        .zentai_base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|base| !base.is_empty())
+        .map(|base| base.trim_end_matches('/').to_string())
+        .ok_or_else(|| AppError::Internal("未配置中台地址（ROBODOG_ZENTAI_URL）".to_string()))
 }
 
 /// 用指定账号登录中台。
@@ -196,18 +247,21 @@ pub async fn login_at(
     })
 }
 
-/// 用服务账号读取中台设备台账与分配关系。
+/// 读取中台设备台账与分配关系。
+///
+/// 内部接口 `/api/dogInternal/devices/assignments` 与公开的
+/// `/api/dogDevice/getAll` 返回同一结构（`DeviceVO` 数组），解析逻辑共用一份。
 pub async fn device_assignments(config: &Config) -> Result<Vec<ZentaiDevice>, AppError> {
-    let session = service_session(config).await?;
-    let base = config
-        .zentai_base_url
-        .as_deref()
-        .ok_or_else(|| AppError::Internal("未配置中台地址".to_string()))?;
+    let base = zentai_base(config)?;
+    let auth = Auth::resolve(config).await?;
     let http = http_client()?;
-    let url = format!("{}/api/dogDevice/getAll", base.trim_end_matches('/'));
-    let resp = http
-        .get(&url)
-        .bearer_auth(&session.token)
+    let url = if auth.is_service() {
+        format!("{base}/api/dogInternal/devices/assignments")
+    } else {
+        format!("{base}/api/dogDevice/getAll")
+    };
+    let resp = auth
+        .apply(http.get(&url))
         .send()
         .await
         .map_err(|error| AppError::Internal(format!("请求中台设备台账失败: {error}")))?;
@@ -268,13 +322,14 @@ pub async fn device_owner(config: &Config, device_id: &str) -> Result<Option<i64
 
 /// 把业务平台设备台账同步到中台（幂等 upsert）。
 pub async fn upsert_device(config: &Config, device: &DeviceUpsert) -> Result<(), AppError> {
-    let session = service_session(config).await?;
-    let base = config
-        .zentai_base_url
-        .as_deref()
-        .ok_or_else(|| AppError::Internal("未配置中台地址".to_string()))?;
+    let base = zentai_base(config)?;
+    let auth = Auth::resolve(config).await?;
     let http = http_client()?;
-    let url = format!("{}/api/dogDevice/upsert", base.trim_end_matches('/'));
+    let url = if auth.is_service() {
+        format!("{base}/api/dogInternal/devices/upsert")
+    } else {
+        format!("{base}/api/dogDevice/upsert")
+    };
     let payload = json!({
         "deviceId": device.device_id,
         "deviceName": device.device_name,
@@ -287,10 +342,8 @@ pub async fn upsert_device(config: &Config, device: &DeviceUpsert) -> Result<(),
         "remarks": device.remarks,
         "userIds": device.user_ids,
     });
-    let resp = http
-        .post(&url)
-        .bearer_auth(&session.token)
-        .json(&payload)
+    let resp = auth
+        .apply(http.post(&url).json(&payload))
         .send()
         .await
         .map_err(|error| AppError::Internal(format!("同步设备到中台失败: {error}")))?;
@@ -331,18 +384,31 @@ pub async fn try_upsert_device(config: &Config, device: &DeviceUpsert) {
     }
 }
 
-/// 删除中台设备台账：先按编号拿到 id，再软删除。
+/// 删除中台设备台账（内部接口按编号直接删；兼容模式先查 id 再删）。
 pub async fn delete_device(config: &Config, device_id: &str) -> Result<(), AppError> {
-    let session = service_session(config).await?;
-    let base = config
-        .zentai_base_url
-        .as_deref()
-        .ok_or_else(|| AppError::Internal("未配置中台地址".to_string()))?;
+    let base = zentai_base(config)?;
+    let auth = Auth::resolve(config).await?;
     let http = http_client()?;
-    let base = base.trim_end_matches('/');
-    let resp = http
-        .get(format!("{base}/api/dogDevice/byCode/{device_id}"))
-        .bearer_auth(&session.token)
+
+    if auth.is_service() {
+        let url = format!(
+            "{base}/api/dogInternal/devices/{}",
+            urlencoding::encode(device_id.trim())
+        );
+        let resp = auth
+            .apply(http.delete(&url))
+            .send()
+            .await
+            .map_err(|error| AppError::Internal(format!("删除中台设备失败: {error}")))?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(AppError::Internal(format!("删除中台设备失败: {text}")));
+        }
+        return Ok(());
+    }
+
+    let resp = auth
+        .apply(http.get(format!("{base}/api/dogDevice/byCode/{device_id}")))
         .send()
         .await
         .map_err(|error| AppError::Internal(format!("查询中台设备失败: {error}")))?;
@@ -355,9 +421,8 @@ pub async fn delete_device(config: &Config, device_id: &str) -> Result<(), AppEr
     else {
         return Ok(());
     };
-    let resp = http
-        .delete(format!("{base}/api/dogDevice/{id}"))
-        .bearer_auth(&session.token)
+    let resp = auth
+        .apply(http.delete(format!("{base}/api/dogDevice/{id}")))
         .send()
         .await
         .map_err(|error| AppError::Internal(format!("删除中台设备失败: {error}")))?;

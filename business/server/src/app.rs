@@ -40,6 +40,7 @@ async fn health(State(state): State<AppState>) -> Json<ApiResponse<Value>> {
         // 建图回传中台是否就绪；未配置时机器人建图无法自动入库
         "mapIngest": {
             "ready": state.config.zentai_ready(),
+            "authMode": state.config.zentai_auth_mode(),
             "zentaiUrl": state.config.zentai_base_url,
             "ingestDir": state.config.ingest_dir.display().to_string(),
         },

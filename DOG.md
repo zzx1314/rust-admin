@@ -81,6 +81,13 @@ POST   /api/dogDevice/{id}/tasks    中台给设备下发一条巡检任务（�
 GET    /api/dogDevice/{id}/runtime  设备运行态只读视图（在线/任务/进度/电量）
 POST   /api/dogDevice/assignUsers   批量分配 { deviceIds, userIds, mode: append|replace }
 POST   /api/dogDevice/unassignUsers 批量解除分配 { deviceIds, userIds }
+
+# 业务平台专用（共享服务令牌 x-service-token，不走 JWT）
+GET    /api/dogInternal/devices/assignments  设备台账 + 分配关系（批量）
+POST   /api/dogInternal/devices/upsert       设备台账幂等同步
+DELETE /api/dogInternal/devices/{deviceCode} 删除设备台账（幂等）
+POST   /api/dogInternal/maps/upload          地图包回传（multipart：file + mapInfo）
+GET    /api/dogDevice/control-plane/ws       反向控制信道（WebSocket，业务平台拨入）
 ```
 
 - `module` ∈ `dogMap`、`dogMedia`、`dogModel`、`dogConfig`，均提供 `getPage` + `getAll`。
@@ -102,6 +109,8 @@ POST   /api/dogDevice/unassignUsers 批量解除分配 { deviceIds, userIds }
 
 中台设备列表的「同步地图」按钮调用 `POST /api/dogDevice/{id}/syncMaps`：
 
+0. 反向（业务平台 → 中台）走 `/api/dogInternal/maps/upload`，用共享服务令牌鉴权，
+   **不需要中台账号**：业务平台不再持有任何中台口令，也没有会话过期问题；
 1. 中台用 `[dog] business_api_url` + `APP_DOG__BUSINESS_API_TOKEN` 调用业务平台
    内部接口 `POST /api/zentai/devices/{deviceId}/sync-maps`；
 2. 业务平台向在线设备下发 `同步地图` 指令；

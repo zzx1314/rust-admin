@@ -100,13 +100,9 @@ pub async fn push_to_zentai(
     package: &[u8],
     owner_user_id: Option<i64>,
 ) -> Result<ZentaiMap, AppError> {
-    let base = config.zentai_base_url.as_deref().ok_or_else(|| {
-        AppError::Internal("未配置中台回传账号（ROBODOG_ZENTAI_URL / USER / PASSWORD）".to_string())
-    })?;
-
-    // 服务账号登录（进程内缓存），响应格式为根 backend 的登录 VO
-    let session = crate::zentai::service_session(config).await?;
-    let token = session.token;
+    let base = crate::zentai::zentai_base(config)?;
+    // 优先共享服务令牌（中台内部接口），否则退回服务账号登录
+    let auth = crate::zentai::Auth::resolve(config).await?;
 
     // mapInfo：中台按包内容解析坐标系与哈希，这里只传展示字段
     // parkCode / parkName 让中台地图带上园区归属，业务平台后续可按园区反查地图
@@ -120,11 +116,13 @@ pub async fn push_to_zentai(
         .part("file", part)
         .text("mapInfo", info.to_string());
 
-    let url = format!("{base}/api/dogMap/upload");
-    let resp = http
-        .post(&url)
-        .bearer_auth(&token)
-        .multipart(form)
+    let url = if auth.is_service() {
+        format!("{base}/api/dogInternal/maps/upload")
+    } else {
+        format!("{base}/api/dogMap/upload")
+    };
+    let resp = auth
+        .apply(http.post(&url).multipart(form))
         .send()
         .await
         .map_err(|e| AppError::Internal(format!("请求中台上传接口失败: {e}")))?;

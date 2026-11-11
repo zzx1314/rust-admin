@@ -262,6 +262,10 @@ service_token = "dev-service-token"
 握手请求头带 `x-service-token`，连接断开后按 1s→30s 指数退避重连；
 中台每 30s 发一次 `ping`，本服务回 `pong`。
 
+另外，业务平台 → 中台的出站调用（设备台账同步、分配关系查询、地图回传）
+全部走内部接口 `/api/dogInternal/*`，同样只用共享服务令牌，**不需要中台账号**。
+`[zentai] username/password` 仅在没配令牌的兼容模式下才需要。
+
 HTTP 链路（②）的三个约定：
 
 | 请求头 / 帧字段 | 作用 |
@@ -328,7 +332,7 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 1. 校验 zip 魔数 PK、大小、parkId 存在
 2. stash_package → data/map_ingest/ 留档（中台不可用时凭此路径重放）
 3. parse_local_meta → 本地解析 model.pgm 宽高 / model.yaml resolution+origin
-4. push_to_zentai → 登录中台（AES-128-CBC 加密密码）→ POST /api/dogMap/upload
+4. push_to_zentai → 共享令牌 POST /api/dogInternal/maps/upload（无令牌时退回账号登录 + /api/dogMap/upload）
    mapInfo 会带上园区 parkCode / parkName 与设备归属用户 ownerUserId，
    中台 dog_map 记录园区归属与地图所有人
 5. 写 map_versions（ON CONFLICT(id) DO UPDATE）
@@ -390,13 +394,12 @@ export ROBODOG_SERVER_CONFIG=/etc/robodog/server.toml   # 可选：显式指定�
 port = 3100
 
 [zentai]
-ws_url        = "ws://192.168.41.10:3000"   # 反向控制信道（内网部署必需）
-# service_token = "change-me"               # 更推荐用环境变量 ROBODOG_SERVICE_TOKEN
-
-# 建图回传 / 账号登录（同网部署时用；与反向信道互不影响）
-# base_url = "http://192.168.41.10:3000"
-# username = "sysadmin"
-# password = "change-me"
+# 中台地址：建图回传、设备台账同步用
+base_url      = "http://192.168.41.10:3000"
+# 反向控制信道（业务平台主动拨出）
+ws_url        = "ws://192.168.41.10:3000"
+# 共享服务令牌：上面两条链路都用它，不需要中台账号
+service_token = "change-me"
 ```
 
 - 文件里的相对路径按**配置文件所在目录**解析，与启动时的工作目录无关。
@@ -415,11 +418,11 @@ ws_url        = "ws://192.168.41.10:3000"   # 反向控制信道（内网部署�
 | `ROBODOG_JWT_TTL_HOURS` | `24` | Token 有效期 |
 | `ROBODOG_WEB_DIST` | `../web/dist` | 前端构建产物目录 |
 | `ROBODOG_BACKEND_DB` | `../../backend/data/users.db` | 仓库根目录 backend 的 SQLite 文件，用于导入 `dog_map` 中的 ROS 地图 |
-| `ROBODOG_ZENTAI_URL` | 空 | 中台地址，如 `http://127.0.0.1:3000`。三项齐全才启用建图回传 / 中台账号登录 / 设备同步 |
-| `ROBODOG_ZENTAI_USER` | 空 | 中台服务账号（需管理员，用于设备同步、分配查询、地图回传） |
-| `ROBODOG_ZENTAI_PASSWORD` | 空 | 中台服务账号密码（明文配置，服务端自行 AES 加密后提交） |
+| `ROBODOG_ZENTAI_URL` | 空 | 中台地址，如 `http://127.0.0.1:3000`。配合共享令牌（或兼容模式的账号）即启用建图回传 / 设备台账同步 |
+| `ROBODOG_ZENTAI_USER` | 空 | **兼容模式**用：没有共享令牌时才需要中台账号（登录换 JWT）。只配令牌时可删 |
+| `ROBODOG_ZENTAI_PASSWORD` | 空 | 兼容模式用的中台账号密码（明文，服务端 AES 加密后提交；建议改用共享令牌） |
 | `ROBODOG_INGEST_DIR` | `server/data/map_ingest` | 回传地图包的本地留档目录 |
-| `ROBODOG_SERVICE_TOKEN` | 空 | 与中台之间的共享服务令牌（中台调内部接口 + 反向控制信道握手）；需与中台 `APP_DOG__BUSINESS_API_TOKEN` 一致 |
+| `ROBODOG_SERVICE_TOKEN` | 空 | 与中台之间的共享服务令牌：调中台内部接口 `/api/dogInternal/*`、反向控制信道握手。需与中台 `APP_DOG__BUSINESS_API_TOKEN` 一致 |
 | `ROBODOG_ZENTAI_WS_URL` | 空 | 反向控制信道的中台地址，如 `ws://10.0.0.8:3000`。与 `ROBODOG_SERVICE_TOKEN` 同时具备才建立信道；为空时走「中台直连 HTTP」 |
 | `ROBODOG_SERVER_CONFIG` | 空 | 指定配置文件路径；不设置时读取当前目录的 `server.toml`（不存在则只用环境变量） |
 

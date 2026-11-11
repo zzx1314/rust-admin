@@ -67,7 +67,8 @@ pub async fn login_handler(
     }
 
     // 2) 中台账号：向中台校验密码，成功后落地/更新本地账号。
-    if state.config.zentai_ready() {
+    //    注意这里需要真实账号配置（只有服务令牌时无法代理登录）。
+    if state.config.zentai_account_ready() {
         let http = reqwest::Client::new();
         match zentai::login(&state.config, &http, username, &payload.password).await {
             Ok(session) => {
@@ -244,7 +245,7 @@ pub async fn allowed_device_codes(
     let Some(zentai_user_id) = claims.zentai_user_id else {
         return Ok(None);
     };
-    if claims.is_admin || !state.config.zentai_ready() {
+    if claims.is_admin || !state.config.zentai_account_ready() {
         return Ok(None);
     }
     let assignments = zentai::assignment_map(&state.config).await?;

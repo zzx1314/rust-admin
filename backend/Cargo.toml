@@ -24,7 +24,7 @@ sha2 = "0.10"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "chrono", "uuid", "macros"] }
 sea-orm = { version = "1.1", features = ["runtime-tokio-native-tls", "macros", "sqlx-sqlite"] }
 sea-orm-migration = { version = "1.1", features = ["runtime-tokio-native-tls", "sqlx-sqlite"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "multipart"] }
 socket2 = "0.6"
 async-trait = "0.1"
 subtle = "2"
@@ -142,3 +142,7 @@ path = "tests/business/dog_device_tests.rs"
 [[test]]
 name = "dog_command_control_tests"
 path = "tests/business/dog_command_control_tests.rs"
+
+[[test]]
+name = "dog_internal_tests"
+path = "tests/business/dog_internal_tests.rs"

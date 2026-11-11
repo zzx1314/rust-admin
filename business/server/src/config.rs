@@ -194,11 +194,43 @@ impl Config {
         format!("sqlite://{}", self.database_path.display())
     }
 
-    /// 中台回传是否就绪（地址 + 账号齐全）
+    /// 与中台通信是否就绪：地址 + （共享服务令牌 或 服务账号）。
+    ///
+    /// 只要有令牌就走内部接口 `/api/dogInternal/*`，不需要中台账号。
     pub fn zentai_ready(&self) -> bool {
+        self.zentai_base_url.is_some()
+            && (self.has_service_token()
+                || (self.zentai_username.is_some() && self.zentai_password.is_some()))
+    }
+
+    /// 是否配置了共享服务令牌（决定走内部接口还是账号登录）。
+    pub fn has_service_token(&self) -> bool {
+        self.service_token
+            .as_deref()
+            .is_some_and(|token| !token.trim().is_empty())
+    }
+
+    /// 中台账号登录是否可用（业务平台代理登录中台时需要真实账号）。
+    ///
+    /// 只配服务令牌时该值为 `false`：设备台账 / 地图回传仍然工作，
+    /// 但「用中台账号登录业务平台」这条路径关闭。
+    pub fn zentai_account_ready(&self) -> bool {
         self.zentai_base_url.is_some()
             && self.zentai_username.is_some()
             && self.zentai_password.is_some()
+    }
+
+    /// 与中台通信的鉴权方式，用于健康检查与日志。
+    pub fn zentai_auth_mode(&self) -> &'static str {
+        if self.zentai_base_url.is_none() {
+            "none"
+        } else if self.has_service_token() {
+            "service-token"
+        } else if self.zentai_username.is_some() && self.zentai_password.is_some() {
+            "account"
+        } else {
+            "incomplete"
+        }
     }
 
     /// 反向控制信道是否可用（地址 + 共享令牌齐全）
@@ -378,6 +410,46 @@ mod tests {
     fn unknown_keys_are_rejected() {
         assert!(toml::from_str::<ServerFile>("prot = 3100").is_err());
         assert!(toml::from_str::<ServerFile>("[zentai]\nwss_url = \"x\"").is_err());
+    }
+
+    #[test]
+    fn service_token_alone_is_enough_to_talk_to_zentai() {
+        let env = |name: &str| match name {
+            "ROBODOG_ZENTAI_URL" => Some("http://10.0.0.8:3000".to_string()),
+            "ROBODOG_SERVICE_TOKEN" => Some("token-only".to_string()),
+            _ => None,
+        };
+        let config = Config::merge(None, None, env);
+        assert!(config.zentai_ready(), "令牌足以完成台账同步与地图回传");
+        assert_eq!(config.zentai_auth_mode(), "service-token");
+        // 中台账号登录路径关闭（没有账号可代理登录）
+        assert!(!config.zentai_account_ready());
+    }
+
+    #[test]
+    fn account_mode_still_works_without_service_token() {
+        let env = |name: &str| match name {
+            "ROBODOG_ZENTAI_URL" => Some("http://10.0.0.8:3000".to_string()),
+            "ROBODOG_ZENTAI_USER" => Some("sysadmin".to_string()),
+            "ROBODOG_ZENTAI_PASSWORD" => Some("secret".to_string()),
+            _ => None,
+        };
+        let config = Config::merge(None, None, env);
+        assert!(config.zentai_ready());
+        assert!(!config.has_service_token());
+        assert!(config.zentai_account_ready());
+        assert_eq!(config.zentai_auth_mode(), "account");
+    }
+
+    #[test]
+    fn address_only_reports_incomplete() {
+        let env = |name: &str| match name {
+            "ROBODOG_ZENTAI_URL" => Some("http://10.0.0.8:3000".to_string()),
+            _ => None,
+        };
+        let config = Config::merge(None, None, env);
+        assert!(!config.zentai_ready(), "没有令牌也没有账号，视为未就绪");
+        assert_eq!(config.zentai_auth_mode(), "incomplete");
     }
 
     #[test]
