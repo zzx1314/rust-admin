@@ -1,0 +1,52 @@
+# 现场配置：/etc/robodog/client.toml（chmod 600）
+#
+# 只有需要覆盖内置默认值时才写这里。内置默认值已经是现场值：
+#   server.url     = ws://192.168.41.246:3100
+#   server.device_id = 0202222111111111   （机器狗 SN，读自 /dev/mmcblk0p5）
+#   robot.host     = 192.168.234.234
+#
+# 优先级（高 → 低）：命令行 > 环境变量 > 本文件 > 内置默认值。
+# 生效结果核对：robodog-device-client --config /etc/robodog/client.toml --print-config
+
+[server]
+url = "ws://192.168.41.246:3100"
+# 机器狗 SN（资产级唯一身份，必须与业务库 devices.device_id 一致）
+# 读取方式：
+#   hexdump -C /dev/mmcblk0p5 | sed -n '3s/.*|\(.*\)|.*/\1/p' | tr -d ' '
+device_id = "0202222111111111"
+# 密钥走环境变量（/etc/robodog/client.env）
+secret_env = "ROBODOG_DEVICE_SECRET"
+heartbeat_secs = 10
+
+[api]
+# 留空由 server.url 推导 → http://192.168.41.246:3100
+base = ""
+username = "admin"
+password_env = "ROBODOG_API_PASSWORD"
+
+[robot]
+# 机器狗本体（智航 Pro 网关）；填 sim / none / off = 模拟模式
+host = "192.168.234.234"
+# 本体地图文件服务（地图回传时拉包）
+file_port = 12000
+file_base = ""
+map_root = "/ota/alg_data/map"
+
+[mapping]
+kind = "outdoor"
+name = ""
+# 建图完成后是否回传中台；园区归属默认用控制台绑定的园区
+upload = true
+# 留空则用控制台绑定的园区（推荐）；写这里会强制覆盖
+# park_id = 3
+ingest_name = ""
+once = false
+
+[simulation]
+battery = 86
+signal = 4
+position = "0.0, 0.0"
+firmware = "Hermes_M_v0.3.2"
+
+[log]
+filter = "robodog_device_client=info"

@@ -29,8 +29,26 @@ use tokio::sync::Mutex;
 
 // ─── 默认值 ────────────────────────────────────────────────────
 
-pub const DEFAULT_SERVER_URL: &str = "ws://127.0.0.1:3100";
-pub const DEFAULT_DEVICE_ID: &str = "RD-001";
+/// 现场业务服务（192.168.41.246）的 WebSocket 地址。
+pub const DEFAULT_SERVER_URL: &str = "ws://192.168.41.246:3100";
+
+/// 现场机器狗设备编号（资产级 SN，硬编码进客户端）。
+///
+/// 智航 Pro v1.0.3 协议里没有设备 ID / SN 字段可回读（见
+/// `docs/client-connection-guide.md` §2.1），只能在机器狗本体上读分区：
+///
+/// ```text
+/// root@ubuntu-arm64:~# hexdump -C /dev/mmcblk0p5 2>/dev/null \
+///   | sed -n '3s/.*|\(.*\)|.*/\1/p' | tr -d ' '
+/// 0202222111111111
+/// ```
+///
+/// 该值必须与业务库 `devices.device_id` 一致；服务端首次注册会自动建档。
+pub const DEFAULT_DEVICE_ID: &str = "0202222111111111";
+
+/// 现场机器狗本体地址（智航 Pro 网关，control/bulkdata 均为 10010）。
+pub const DEFAULT_ROBOT_HOST: &str = "192.168.234.234";
+
 pub const DEFAULT_MAP_ROOT: &str = "/ota/alg_data/map";
 pub const DEFAULT_FIRMWARE: &str = "Hermes_M_v0.3.2";
 pub const DEFAULT_HEARTBEAT_SECS: u64 = 10;
@@ -40,6 +58,12 @@ pub const DEFAULT_SIGNAL: i64 = 4;
 pub const DEFAULT_POSITION: &str = "0.0, 0.0";
 pub const DEFAULT_API_USERNAME: &str = "admin";
 pub const DEFAULT_API_PASSWORD: &str = "admin123";
+
+/// 显式关闭本体连接（纯模拟模式）的取值：`--robot sim` / `robot.host = "sim"`。
+///
+/// 内置默认值已指向现场本体，所以「不接本体」必须显式声明，
+/// 不能再靠留空表达（留空 = 用默认本体地址）。
+pub const SIMULATION_ALIASES: [&str; 5] = ["sim", "simulation", "none", "off", "无"];
 
 /// 默认配置文件（相对工作目录）
 pub const DEFAULT_CONFIG_FILE: &str = "client.toml";
@@ -343,10 +367,11 @@ pub fn print_help() {
   --config <PATH>        配置文件路径 (默认: ./client.toml)
   --print-config         打印脱敏后的生效配置后退出
   --server <URL>         业务服务 WebSocket 地址 (默认: {DEFAULT_SERVER_URL})
-  --device-id <ID>       设备编号 (默认: {DEFAULT_DEVICE_ID})
+  --device-id <ID>       设备编号 (默认: {DEFAULT_DEVICE_ID}，本体 SN)
   --secret <SECRET>      设备密钥 (可选，推荐 ROBODOG_DEVICE_SECRET)
-  --robot <HOST>         智航本体地址，如 192.168.168.100 或 ws://ip:10010
-                         不填则为模拟模式：只回传任务进度，不驱动真实机器人
+  --robot <HOST>         智航本体地址，如 192.168.234.234 或 ws://ip:10010
+                         (默认: {DEFAULT_ROBOT_HOST})；填 sim/none/off 关闭本体连接，
+                         退化为纯模拟模式：只回传任务进度，不驱动真实机器人
   --map-root <PATH>      地图数据根目录 (默认: {DEFAULT_MAP_ROOT})
   --heartbeat <秒>       心跳间隔 (默认: {DEFAULT_HEARTBEAT_SECS})
   --battery <0-100>      初始电量 (默认: {DEFAULT_BATTERY})
@@ -459,12 +484,16 @@ impl Config {
             })
             .or_else(|| file.server.secret.clone());
 
-        let robot = pick_string([
+        // 本体地址：显式 sim/none/off 关闭连接；未配置时用现场默认本体
+        let robot = match pick_string([
             cli.robot.as_deref(),
             env.get(ENV_ROBOT),
             file.robot.host.as_deref(),
-        ])
-        .map(str::to_string);
+        ]) {
+            Some(raw) if is_simulation_alias(raw) => None,
+            Some(raw) => Some(raw.to_string()),
+            None => Some(DEFAULT_ROBOT_HOST.to_string()),
+        };
 
         let map_root = pick_string([
             cli.map_root.as_deref(),
@@ -721,6 +750,13 @@ fn pick_string<const N: usize>(candidates: [Option<&str>; N]) -> Option<&str> {
 /// 取第一个有值的数字
 fn pick_number<T: Copy, const N: usize>(candidates: [Option<T>; N]) -> Option<T> {
     candidates.into_iter().flatten().next()
+}
+
+/// 是否显式声明「不接本体」
+fn is_simulation_alias(raw: &str) -> bool {
+    SIMULATION_ALIASES
+        .iter()
+        .any(|alias| raw.eq_ignore_ascii_case(alias))
 }
 
 fn normalize_server_url(raw: &str) -> Result<String, ConfigError> {

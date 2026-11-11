@@ -7,7 +7,7 @@
 
 use robodog_device_client::config::{
     CliArgs, Config, ConfigError, DEFAULT_API_PASSWORD, DEFAULT_DEVICE_ID, DEFAULT_MAP_ROOT,
-    DEFAULT_SERVER_URL, EnvConfig, FileConfig,
+    DEFAULT_ROBOT_HOST, DEFAULT_SERVER_URL, EnvConfig, FileConfig,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -119,6 +119,8 @@ heartbeat_secs = 30
     assert_eq!(config.server_url, "ws://cli:3100");
     assert_eq!(config.device_id, "FROM-ENV");
     assert_eq!(config.heartbeat_interval, 5);
+    // 未指定本体时用现场默认本体
+    assert_eq!(config.robot.as_deref(), Some(DEFAULT_ROBOT_HOST));
 }
 
 #[test]
@@ -298,9 +300,39 @@ fn defaults_apply_when_file_is_empty() {
     assert_eq!(config.device_id, DEFAULT_DEVICE_ID);
     assert_eq!(config.map_root, DEFAULT_MAP_ROOT);
     assert_eq!(config.api_password(), DEFAULT_API_PASSWORD);
-    assert!(config.robot.is_none(), "未配置本体时应为模拟模式");
+    assert_eq!(
+        config.robot.as_deref(),
+        Some(DEFAULT_ROBOT_HOST),
+        "未配置本体时应指向现场本体，而不是模拟模式"
+    );
     assert!(config.upload_map);
     assert!(!config.map_only);
+}
+
+#[test]
+fn simulation_alias_disables_robot() {
+    // 内置默认值已指向现场本体，所以「不接本体」必须显式声明
+    for alias in ["sim", "none", "off", "NONE"] {
+        let config = Config::resolve(
+            &FileConfig::default(),
+            &EnvConfig::default(),
+            &CliArgs {
+                robot: Some(alias.to_string()),
+                ..CliArgs::default()
+            },
+        )
+        .expect("配置应能解析");
+        assert!(config.robot.is_none(), "--robot {alias} 应关闭本体连接");
+    }
+
+    let path = write_config(
+        r#"
+[robot]
+host = "sim"
+"#,
+    );
+    let config = load_file(&path, EnvConfig::default(), CliArgs::default());
+    assert!(config.robot.is_none(), "robot.host = sim 应关闭本体连接");
 }
 
 #[test]

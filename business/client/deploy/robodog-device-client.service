@@ -1,0 +1,26 @@
+[Unit]
+Description=RoboDog device client (OPS bridge ⇄ 智航 Pro body)
+Documentation=file:/opt/robodog/client/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/robodog/client
+# 业务服务 / 设备编号 / 本体地址由二进制内置默认值提供（现场值）：
+#   ws://192.168.41.246:3100 · 0202222111111111 · 192.168.234.234:10010
+# 覆盖项写在 /etc/robodog/client.toml（模板：deploy/client.toml.template）
+# 密钥只放环境变量文件，权限 600
+EnvironmentFile=-/etc/robodog/client.env
+ExecStart=/opt/robodog/client/robodog-device-client --config /etc/robodog/client.toml
+Restart=always
+RestartSec=5
+# 建图收尾 / 任务取消需要时间落地，给足优雅退出窗口
+TimeoutStopSec=30
+KillSignal=SIGINT
+# 日志走 journald：journalctl -u robodog-device-client -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -9,9 +9,13 @@
 
 [server]
 # 业务服务 WebSocket 地址；REST 地址默认由它推导（ws→http / wss→https）
-url = "ws://127.0.0.1:3100"
+# 现场：业务服务部署在 192.168.41.246
+url = "ws://192.168.41.246:3100"
 # 设备编号，必须与业务库 devices.device_id 一致
-device_id = "RD-001"
+# 现场值 = 机器狗本体 SN：
+#   hexdump -C /dev/mmcblk0p5 | sed -n '3s/.*|\(.*\)|.*/\1/p' | tr -d ' '
+# 内置默认值已写成该 SN，通常不需要在这里重复配置
+device_id = "0202222111111111"
 # 设备密钥：推荐用环境变量，不要写明文
 secret_env = "ROBODOG_DEVICE_SECRET"
 # secret = "不推荐：明文写在这里"
@@ -27,8 +31,9 @@ password_env = "ROBODOG_API_PASSWORD"
 # password = "不推荐：明文写在这里"
 
 [robot]
-# 智航 Pro 本体地址；留空 = 模拟模式（只回传进度，不驱动机器人）
-host = "192.168.168.100"
+# 智航 Pro 本体地址；填 sim / none / off = 模拟模式（只回传进度，不驱动机器人）
+# 留空 = 使用内置默认本体 192.168.234.234
+host = "192.168.234.234"
 # 本体地图文件服务端口（协议文档 §4，HTTP 12000）
 file_port = 12000
 # 本体地图文件服务基地址；留空按 host + file_port 推导

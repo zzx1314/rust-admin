@@ -51,10 +51,16 @@ OPS 业务服务 ──task_dispatch──► 本客户端 ──智航 Pro WS�
 ```bash
 cd business/client
 
-# 1) 纯模拟模式（不接本体，只跑业务协议）
-cargo run -- --device-id RD-001
+# 0) 现场默认值已内置，直接跑即可
+#    业务服务 ws://192.168.41.246:3100
+#    设备编号 0202222111111111（机器狗 SN）
+#    本体     192.168.234.234:10010
+cargo run --
 
-# 2) 接真实本体：驱动智航 Pro
+# 1) 纯模拟模式（不接本体，只跑业务协议）
+cargo run -- --robot sim
+
+# 2) 接其它本体：驱动智航 Pro
 cargo run -- --device-id RD-001 --robot 192.168.10.21
 
 # 3) 指定地图根目录与建图类型
@@ -73,11 +79,44 @@ cargo run -- --device-id RD-001 --robot 192.168.10.21 \
 # 查看全部参数
 cargo run -- --help
 
-# 6) 现场部署：用配置文件固定参数（推荐）
+# 6) 现场部署：用配置文件固定参数（推荐，见 deploy/）
 cp client.toml.example client.toml   # client.toml 已被 .gitignore 忽略
 cargo run -- --config client.toml
 cargo run -- --print-config          # 打印脱敏后的生效配置
 ```
+
+## 现场部署（192.168.41.246 + 机器狗 192.168.234.234）
+
+| 项 | 值 | 来源 |
+|----|----|------|
+| 业务服务（本机） | `ws://192.168.41.246:3100` | 内置默认值 `DEFAULT_SERVER_URL` |
+| 设备编号 | `0202222111111111` | 机器狗本体 SN，内置默认值 `DEFAULT_DEVICE_ID` |
+| 机器狗本体 | `192.168.234.234:10010` | 内置默认值 `DEFAULT_ROBOT_HOST` |
+| 设备地图/文件服务 | `http://192.168.234.234:12000` | 由本体地址 + `robot.file_port` 推导 |
+
+设备编号是资产级 SN，协议不回读，只能在机器狗本体上读分区：
+
+```bash
+root@ubuntu-arm64:~# hexdump -C /dev/mmcblk0p5 2>/dev/null \
+  | sed -n '3s/.*|\(.*\)|.*/\1/p' | tr -d ' '
+0202222111111111
+```
+
+一项式安装（编译 release、装 systemd 单元，默认值即上表）：
+
+```bash
+sudo ./deploy/install.sh                    # 已按现场值装好，无需额外参数
+sudo ./deploy/check.sh                      # 连接自检（服务端口 / health / 本体 10010+12000 / 注册探针）
+sudo systemctl status robodog-device-client
+journalctl -u robodog-device-client -f
+```
+
+`deploy/check.sh` 只读不写设备配置，会跑一次短时注册探针（业务服务会自动建档 / 刷心跳）；
+`--no-probe` 时只查端口。临时换地址自检：
+`SERVER_URL=ws://10.0.0.5:3100 ROBOT_HOST=192.168.1.10 ./deploy/check.sh`。
+
+> 首次注册会在业务库自动建档为「待绑定」，还需要在控制台设备管理里把该设备绑定到园区，
+> 否则心跳/任务不推进、建图也不会回传中台。
 
 ## 配置文件
 
@@ -95,15 +134,15 @@ cargo run -- --print-config          # 打印脱敏后的生效配置
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--server` | `ws://127.0.0.1:3100` | 业务服务地址 |
-| `--device-id` | `RD-001` | 设备编号（须与 `devices.device_id` 一致） |
+| `--server` | `ws://192.168.41.246:3100` | 业务服务地址 |
+| `--device-id` | `0202222111111111` | 设备编号 = 机器狗 SN（须与 `devices.device_id` 一致） |
 | `--secret` | 无 | 设备密钥（推荐 `ROBODOG_DEVICE_SECRET`） |
 | `--heartbeat` | `10` | 心跳间隔（秒） |
 | `--battery` | `86` | 初始电量 |
 | `--signal` | `4` | 信号强度 |
 | `--position` | `0.0, 0.0` | 初始地图坐标 |
 | `--firmware` | `Hermes_M_v0.3.2` | 固件版本 |
-| `--robot` | 空 | **智航 Pro 本体地址**。空 = 纯模拟模式 |
+| `--robot` | `192.168.234.234` | **智航 Pro 本体地址**；填 `sim`/`none`/`off` = 纯模拟模式 |
 | `--map-root` | `/ota/alg_data/map` | 本体地图根目录 |
 | `--map-only` | false | 只执行一次建图后退出 |
 | `--map-name` | 时间戳 | `--map-only` 时的地图名 |
@@ -113,12 +152,12 @@ cargo run -- --print-config          # 打印脱敏后的生效配置
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--robot-file-base` | 由 `--robot` 推导 | 本体文件服务基地址，如 `http://192.168.10.21:12000` |
+| `--robot-file-base` | 由 `--robot` 推导 | 本体文件服务基地址，如 `http://192.168.234.234:12000` |
 | `--robot-file-port` | `12000` | 推导基地址时使用的端口（文档 §4 文件服务端口；`--robot-file-base` 显式给出时忽略） |
 | `--no-upload-map` | false | 关闭建图后自动回传，只在本体落盘 |
 | `--park-id` | 控制台绑定园区 | 地图归属园区：不填则用注册回执里下发的绑定园区；两者都没有时跳过回传。手动指定时优先生效 |
 | `--ingest-map-name` | 用 4001 返回的目录名 | 入库到中台的地图名 |
-| `--api-base` | 由 `--server` 推导 | OPS 业务服务 HTTP 地址，如 `http://127.0.0.1:3100` |
+| `--api-base` | 由 `--server` 推导 | OPS 业务服务 HTTP 地址，如 `http://192.168.41.246:3100` |
 | `--api-username` | `admin` | 业务服务登录用户名 |
 | `--api-password` | `admin123` | 业务服务登录密码 |
 

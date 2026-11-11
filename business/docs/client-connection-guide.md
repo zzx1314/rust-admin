@@ -74,6 +74,28 @@ Logical Client (client_id = N)
 5. `1201.type` 可以用于**机型自检**（例如配置文件写 `robot.model = "ZSL-2-Ultra"`，
    握手后比对，不一致就告警），但不能作为身份校验。
 
+### 2.1.1 现场 SN 的读取方式（已内置进客户端）
+
+机器狗 SN 存在本体 eMMC 的 `mmcblk0p5` 分区，SSH 进本体读取第三行删除分隔符即可：
+
+```bash
+root@ubuntu-arm64:~# hexdump -C /dev/mmcblk0p5 2>/dev/null \
+  | sed -n '3s/.*|\(.*\)|.*/\1/p' | tr -d ' '
+0202222111111111
+```
+
+该值已作为 `DEFAULT_DEVICE_ID` 写进 `client/src/config.rs`，即客户端默认身份；
+换机器狗时改这一处（或现场用 `client.toml` / `--device-id` 覆盖）。
+
+当前现场部署：
+
+| 项 | 值 |
+|------|------|
+| 客户端所在服务器 | `192.168.41.246` |
+| 业务服务（同机） | `ws://192.168.41.246:3100`（REST：`http://192.168.41.246:3100`） |
+| 设备编号（= 机器狗 SN） | `0202222111111111` |
+| 机器狗本体 | `192.168.234.234:10010`（文件服务 `:12000`） |
+
 ## 3. 标准建链时序（必须按序执行）
 
 ```text
@@ -280,14 +302,14 @@ cargo run -- --print-config      # 查看脱敏后的生效配置
 
 | 配置文件 | 环境变量 | 命令行 | 默认值 |
 |------|------|------|------|
-| `server.url` | `ROBODOG_SERVER_URL` | `--server` | `ws://127.0.0.1:3100` |
-| `server.device_id` | `ROBODOG_DEVICE_ID` | `--device-id` | `RD-001` |
+| `server.url` | `ROBODOG_SERVER_URL` | `--server` | `ws://192.168.41.246:3100` |
+| `server.device_id` | `ROBODOG_DEVICE_ID` | `--device-id` | `0202222111111111`（机器狗 SN） |
 | `server.secret` / `server.secret_env` | `ROBODOG_DEVICE_SECRET` | `--secret` | 空（可选） |
 | `server.heartbeat_secs` | `ROBODOG_HEARTBEAT` | `--heartbeat` | `10`（最小 1） |
 | `api.base` | `ROBODOG_API_BASE` | `--api-base` | 由 `server.url` 推导 |
 | `api.username` | `ROBODOG_API_USERNAME` | `--api-username` | `admin` |
 | `api.password` / `api.password_env` | `ROBODOG_API_PASSWORD` | `--api-password` | `admin123`（**线上必须覆盖**） |
-| `robot.host` | `ROBODOG_ROBOT` | `--robot` | 空（模拟模式） |
+| `robot.host` | `ROBODOG_ROBOT` | `--robot` | `192.168.234.234`（填 `sim`/`none`/`off` = 模拟模式） |
 | `robot.file_port` | `ROBODOG_ROBOT_FILE_PORT` | `--robot-file-port` | `12000` |
 | `robot.file_base` | `ROBODOG_ROBOT_FILE_BASE` | `--robot-file-base` | 按 host + port 推导 |
 | `robot.map_root` | `ROBODOG_MAP_ROOT` | `--map-root` | `/ota/alg_data/map` |
@@ -318,7 +340,22 @@ cargo run -- --print-config      # 查看脱敏后的生效配置
   - 配置文件拼写了未知字段（`deny_unknown_fields`，避免 `secrect` 这类错误被忽略）；
 - `robot.host` 有值但连不上时仍按原策略降级为模拟模式并打印错误日志。
 
-### 11.5 现场部署（systemd 示例）
+### 11.5 现场部署（systemd）
+
+现成脚本：`client/deploy/install.sh`（编译 release → 装到 `/opt/robodog/client` →
+装 `/etc/systemd/system/robodog-device-client.service` → 启动），配置模板
+`client/deploy/client.toml.template`、密钥模板 `client/deploy/client.env.example`。
+内置默认值已经是现场值（`192.168.41.246` / `0202222111111111` / `192.168.234.234`），
+所以装完即可直接连。
+
+```bash
+cd business/client
+sudo ./deploy/install.sh              # 一条命令装完并启动
+sudo ./deploy/check.sh                # 连接自检（端口 / health / 10010 / 12000 / 注册）
+journalctl -u robodog-device-client -f
+```
+
+等价的 unit 内容（脚本装的就是它）：
 
 ```ini
 [Unit]
@@ -327,8 +364,7 @@ After=network-online.target
 
 [Service]
 WorkingDirectory=/opt/robodog/client
-Environment=ROBODOG_DEVICE_SECRET=***
-Environment=ROBODOG_API_PASSWORD=***
+EnvironmentFile=-/etc/robodog/client.env
 ExecStart=/opt/robodog/client/robodog-device-client --config /etc/robodog/client.toml
 Restart=always
 RestartSec=5

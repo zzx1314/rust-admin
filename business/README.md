@@ -85,16 +85,22 @@ cd ../server && cargo run
 
 后端检测到 `business/web/dist` 后会直接托管前端，访问 <http://127.0.0.1:3100>。
 
-### 4. 启动设备客户端（可选）
+### 4. 启动设备客户端（部署在 192.168.41.246）
+
+内置默认值就是现场值：业务服务 `ws://192.168.41.246:3100`、设备编号
+`0202222111111111`（机器狗本体 SN）、本体 `192.168.234.234:10010`。
 
 ```bash
 cd business/client
 
-# 纯模拟模式：不接本体，只跑业务协议（前端联调用）
-cargo run -- --device-id RD-001
+# 现场：连业务服务 + 机器狗本体（无需参数）
+cargo run --
 
-# 接真实智航 Pro 本体
-cargo run -- --device-id RD-001 --robot 192.168.10.21
+# 纯模拟模式：不接本体，只跑业务协议（前端联调用）
+cargo run -- --robot sim
+
+# 装成 systemd 服务（开机自启 + 自动重拉）
+sudo ./deploy/install.sh
 ```
 
 详见 [`client/README.md`](client/README.md)。
@@ -464,7 +470,7 @@ cd business/server && cargo run
 | 包 | 单测 | 集成测试 |
 |------|------|------|
 | `server` | 26（`dispatch` / `geo` / `ingest` / `teleop` / `routes` / `devices`） | 3（`tests/api_smoke.rs`：健康检查、鉴权、驾驶舱设备字段） |
-| `client` | 33（`dispatch` / `protocol` / `client` / `mapping` / `route` / `status` / `teleop` / `mapupload`） | 14（`tests/config_tests.rs`：配置优先级、密钥引用、校验与脱敏） |
+| `client` | 33（`dispatch` / `protocol` / `client` / `mapping` / `route` / `status` / `teleop` / `mapupload`） | 15（`tests/config_tests.rs`：配置优先级、密钥引用、sn/现场默认值、校验与脱敏） |
 
 ## 检查命令
 
