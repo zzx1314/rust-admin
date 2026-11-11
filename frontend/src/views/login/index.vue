@@ -352,7 +352,7 @@ function onTranslation(lang: string) {
             />
           </el-form-item>
 
-          <el-form-item :label="t('login.purePassword')" prop="password">
+          <el-form-item :label="t('login.purePassword')" prop="password" required>
             <el-input
               v-model="ruleForm.password"
               clearable
@@ -363,7 +363,7 @@ function onTranslation(lang: string) {
             />
           </el-form-item>
 
-          <el-form-item :label="t('login.pureVerifyCode')" prop="verifyCode">
+          <el-form-item :label="t('login.pureVerifyCode')" prop="verifyCode" required>
             <el-input
               v-model="ruleForm.verifyCode"
               clearable
