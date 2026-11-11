@@ -52,6 +52,8 @@ pub const DEFAULT_FFMPEG: &str = "ffmpeg";
 pub const DEFAULT_VIDEO_BITRATE: &str = "1200k";
 /// 实时视频：输出帧率
 pub const DEFAULT_VIDEO_FPS: u32 = 15;
+/// 实时视频：编码器（`auto` = 按可用性挑硬件编码器，见 `video::detect_encoder`）
+pub const DEFAULT_VIDEO_ENCODER: &str = "auto";
 
 /// 显式关闭本体连接（纯模拟模式）的取值：`--robot sim` / `robot.host = "sim"`。
 ///
@@ -216,6 +218,8 @@ pub struct VideoSection {
     pub ffmpeg: Option<String>,
     /// RTSP 传输方式：tcp / udp
     pub transport: Option<String>,
+    /// 编码器：`auto`（默认）/ `libx264` / `h264_rkmpp` / `h264_v4l2m2m` / 其它 ffmpeg 编码器名
+    pub encoder: Option<String>,
     /// 输出帧率
     pub fps: Option<u32>,
     /// 目标码率，如 `1200k` / `2M`
@@ -477,6 +481,8 @@ pub struct Config {
     pub video_ffmpeg: String,
     /// 实时视频：RTSP 传输方式（tcp / udp）
     pub video_transport: String,
+    /// 实时视频：编码器名；`auto` 表示运行时探测
+    pub video_encoder: String,
     /// 实时视频：输出帧率
     pub video_fps: u32,
     /// 实时视频：目标码率
@@ -683,6 +689,9 @@ impl Config {
                 "video.transport 只支持 tcp / udp，收到 {video_transport:?}"
             )));
         }
+        let video_encoder = pick_string([file.video.encoder.as_deref()])
+            .unwrap_or(DEFAULT_VIDEO_ENCODER)
+            .to_lowercase();
         let video_fps = pick_number([file.video.fps])
             .unwrap_or(DEFAULT_VIDEO_FPS)
             .clamp(1, 60);
@@ -717,6 +726,7 @@ impl Config {
             video_enabled,
             video_ffmpeg,
             video_transport,
+            video_encoder,
             video_fps,
             video_bitrate,
             video_width,
@@ -777,6 +787,7 @@ simulation.firmware     = {firmware}
 video.enabled           = {video_enabled}
 video.ffmpeg            = {video_ffmpeg}
 video.transport         = {video_transport}
+video.encoder           = {video_encoder}
 video.fps               = {video_fps}
 video.bitrate           = {video_bitrate}
 video.width             = {video_width}
@@ -817,6 +828,7 @@ log.filter              = {log_filter}",
             video_enabled = self.video_enabled,
             video_ffmpeg = self.video_ffmpeg,
             video_transport = self.video_transport,
+            video_encoder = self.video_encoder,
             video_fps = self.video_fps,
             video_bitrate = self.video_bitrate,
             video_width = if self.video_width == 0 {

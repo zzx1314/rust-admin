@@ -37,6 +37,8 @@ enabled = true
 # 现场机器狗是 aarch64：需要自带 ffmpeg（`apt install ffmpeg` 或放静态二进制后写全路径）
 ffmpeg = "ffmpeg"
 transport = "tcp"
+# auto = 探测硬件编码器（机器狗上通常是 h264_rkmpp，没有 libx264）
+encoder = "auto"
 fps = 15
 bitrate = "1200k"
 # 0 = 原始分辨率

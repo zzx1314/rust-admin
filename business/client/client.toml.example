@@ -49,6 +49,9 @@ enabled = true
 ffmpeg = "ffmpeg"
 # RTSP 传输方式：tcp（推荐，UDP 丢包会花屏）/ udp
 transport = "tcp"
+# 编码器：auto（默认，按可用性挑 libx264 → h264_rkmpp → h264_v4l2m2m）
+# 现场机器狗（瑞芯微）的 ffmpeg 没有 libx264，auto 会选中硬件编码器 h264_rkmpp
+encoder = "auto"
 # 输出帧率与目标码率：按现场带宽调，一路流约等于这里的码率
 fps = 15
 bitrate = "1200k"

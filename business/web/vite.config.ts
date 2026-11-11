@@ -15,7 +15,10 @@ export default defineConfig({
     proxy: {
       "/api": {
         target: "http://127.0.0.1:3100",
-        changeOrigin: true
+        changeOrigin: true,
+        // 实时视频走 WebSocket（/api/devices/{id}/video/ws），
+        // 不加 ws:true 时代理只转发 HTTP，播放器会一直连不上（页面无画面、后端无日志）
+        ws: true
       }
     }
   },

@@ -202,9 +202,21 @@ journalctl -u robodog-device-client -f
 | `enabled` | `true` | 是否响应 `video_start` |
 | `ffmpeg` | `ffmpeg` | ffmpeg 可执行文件路径 |
 | `transport` | `tcp` | RTSP 传输方式（非 `rtsp://` 地址不传该选项） |
+| `encoder` | `auto` | 编码器：按 `libx264` → `h264_rkmpp` → `h264_v4l2m2m` 探测，也可写死 |
 | `fps` | `15` | 输出帧率，同时决定关键帧间隔（`2×fps`） |
 | `bitrate` | `1200k` | 目标码率，一路流约等于这个值 |
 | `width` | `0` | 输出宽度，`0` = 保持原始分辨率（等比缩放） |
+
+编码器说明（现场踩过）：机器狗（瑞芯微 RK 系列）自带的是定制 ffmpeg，`--enable-rkmpp`
+但**没有 `--enable-libx264`**，带 `-preset` 会直接
+`Unrecognized option 'preset'` 启动失败。所以 `encoder = "auto"` 会探测并选中
+`h264_rkmpp`（硬件编码，实测 1080p60→1280x720/15fps 约 1 个核），
+硬件编码器分支不会传 `-preset/-tune/-profile/-sc_threshold` 这些 x264 专属参数。
+
+> 现场那条 RTSP（`/test`）实测只按 **约 0.43x 实时** 出流（不解码、仅解封装也是
+> 0.43x），即相机侧本身只给到约 26fps 的 60fps 时间轴数据，因此画面会比实时略慢；
+> 这是相机/链路侧的限制，与服务端中继、客户端编码无关。想更流畅请在相机上切到
+> 低帧率或子码流 profile。
 
 现场检查：
 

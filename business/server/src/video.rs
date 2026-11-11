@@ -30,7 +30,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// 单个观看者的积压帧上限：网络慢时丢帧保实时，不把服务端内存拖爆
 const VIEWER_BUFFER_FRAMES: usize = 128;
@@ -50,12 +50,16 @@ static PUBLISHER_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 #[derive(Clone, Default)]
 pub struct VideoHub {
     rooms: Arc<RwLock<HashMap<String, Room>>>,
+    /// 观看者计数，**独立于房间**存在
+    ///
+    /// 房间会随推流端断连被丢弃（ffmpeg 抖动时很常见），如果计数跟着房间走，
+    /// 最后一个观看者离开时就数不到人，`video_stop` 永远发不出去 —— 客户端会
+    /// 一直重连推流、白白编码。
+    viewers: Arc<RwLock<HashMap<String, usize>>>,
 }
 
 struct Room {
     tx: broadcast::Sender<Arc<[u8]>>,
-    /// 当前观看者数量：0 → 1 时要求客户端开始推流，回到 0 时要求停止
-    viewers: usize,
     /// 可补发给「中途加入」的观看者的流头：FLV header + AVC 序列头 + 首个关键帧
     ///
     /// 推流是持续的，后打开页面的浏览器只能收到中途的字节；没有这个头，
@@ -67,39 +71,63 @@ struct Room {
     publisher: Option<u64>,
 }
 
+fn new_room(session: u64) -> Room {
+    Room {
+        tx: broadcast::channel(VIEWER_BUFFER_FRAMES).0,
+        init: None,
+        pending: Vec::new(),
+        publisher: Some(session),
+    }
+}
+
 impl VideoHub {
     /// 观看者加入：返回订阅端、是否「第一个观看者」、以及可补发的流头
     pub async fn viewer_join(
         &self,
         device_id: &str,
     ) -> (broadcast::Receiver<Arc<[u8]>>, bool, Option<Arc<[u8]>>) {
+        let mut viewers = self.viewers.write().await;
+        let count = viewers.entry(device_id.to_string()).or_insert(0);
+        *count += 1;
+        let first = *count == 1;
+        drop(viewers);
+
         let mut rooms = self.rooms.write().await;
         let room = rooms
             .entry(device_id.to_string())
             .or_insert_with(|| Room {
                 tx: broadcast::channel(VIEWER_BUFFER_FRAMES).0,
-                viewers: 0,
                 init: None,
                 pending: Vec::new(),
                 publisher: None,
             });
-        room.viewers += 1;
         let init = room.init.clone();
-        (room.tx.subscribe(), room.viewers == 1, init)
+        (room.tx.subscribe(), first, init)
     }
 
-    /// 观看者离开：返回是否是「最后一个观看者」（此时房间已被移除）
+    /// 观看者离开：返回是否是「最后一个观看者」
+    ///
+    /// 计数为 0 时把房间也清掉，推流端随后会被要求 `video_stop`。
     pub async fn viewer_leave(&self, device_id: &str) -> bool {
-        let mut rooms = self.rooms.write().await;
-        let Some(room) = rooms.get_mut(device_id) else {
-            return false;
+        let last = {
+            let mut viewers = self.viewers.write().await;
+            match viewers.get_mut(device_id) {
+                Some(count) => {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        viewers.remove(device_id);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                None => false,
+            }
         };
-        room.viewers = room.viewers.saturating_sub(1);
-        if room.viewers == 0 {
-            rooms.remove(device_id);
-            return true;
+        if last {
+            self.rooms.write().await.remove(device_id);
         }
-        false
+        last
     }
 
     /// 客户端推来的 FLV 分片：没有观看者就丢掉（没人看不必占内存）
@@ -146,25 +174,36 @@ impl VideoHub {
     /// 丢掉房间 → 观看端 `recv` 返回 `Closed` → 前端断开后自动重连，拿到干净的流。
     pub async fn publisher_attach(&self, device_id: &str, session: u64) {
         let mut rooms = self.rooms.write().await;
-        rooms.insert(
-            device_id.to_string(),
-            Room {
-                tx: broadcast::channel(VIEWER_BUFFER_FRAMES).0,
-                viewers: 0,
-                init: None,
-                pending: Vec::new(),
-                publisher: Some(session),
-            },
-        );
+        match rooms.get(device_id).map(|room| room.publisher.is_some()) {
+            // 老推流端还挂着（ffmpeg 重连）：新旧两条流的 FLV 头/时间戳不能混在
+            // 同一批观看者上，整个房间换掉，让浏览器重连拿干净的新流。
+            Some(true) => {
+                info!("device {device_id} video publisher reconnected, restarting room");
+                rooms.insert(device_id.to_string(), new_room(session));
+            }
+            // 正常首帧流程：观看者先到（video_start 就是它触发的），推流端后到。
+            // 这里**不能**换房间，否则刚进来的观看者立刻被踢掉，画面永远出不来。
+            Some(false) => {
+                if let Some(room) = rooms.get_mut(device_id) {
+                    room.publisher = Some(session);
+                    room.init = None;
+                    room.pending = Vec::new();
+                }
+            }
+            None => {
+                rooms.insert(device_id.to_string(), new_room(session));
+            }
+        }
     }
 
     /// 「有人在推、但没人看」的设备：看门狗据此让客户端停掉 ffmpeg
     pub async fn idle_publishers(&self) -> Vec<String> {
-        self.rooms
-            .read()
-            .await
+        let rooms = self.rooms.read().await;
+        let viewers = self.viewers.read().await;
+        rooms
             .iter()
-            .filter(|(_, room)| room.publisher.is_some() && room.viewers == 0)
+            .filter(|(_, room)| room.publisher.is_some())
+            .filter(|(device_id, _)| viewers.get(*device_id).copied().unwrap_or(0) == 0)
             .map(|(device_id, _)| device_id.clone())
             .collect()
     }
@@ -186,13 +225,13 @@ impl VideoHub {
         }
     }
 
-    /// 当前是否有观看者（日志 / 排障用）
+    /// 当前观看者数量（日志 / 排障用）
     pub async fn viewers(&self, device_id: &str) -> usize {
-        self.rooms
+        self.viewers
             .read()
             .await
             .get(device_id)
-            .map(|room| room.viewers)
+            .copied()
             .unwrap_or(0)
     }
 }
@@ -403,6 +442,7 @@ async fn handle_viewer(
         }
     }
 
+    debug!("viewer of {device_code} attached (first={first})");
     loop {
         tokio::select! {
             frame = rx.recv() => match frame {
@@ -415,11 +455,20 @@ async fn handle_viewer(
                     // 浏览器侧追不上：丢帧保实时
                     warn!("viewer of {device_code} lagged, dropped {skipped} frames");
                 }
-                Err(broadcast::error::RecvError::Closed) => break,
+                Err(broadcast::error::RecvError::Closed) => {
+                    debug!("viewer of {device_code}: room closed");
+                    break;
+                }
             },
             incoming = stream.next() => match incoming {
-                Some(Ok(Message::Close(_))) | None => break,
-                Some(Err(_)) => break,
+                Some(Ok(Message::Close(_))) | None => {
+                    debug!("viewer of {device_code}: browser closed the socket");
+                    break;
+                }
+                Some(Err(error)) => {
+                    debug!("viewer of {device_code}: socket error {error}");
+                    break;
+                }
                 // 浏览器不该发数据，忽略
                 _ => {}
             },
@@ -529,12 +578,29 @@ mod tests {
         assert!(hub.idle_publishers().await.is_empty(), "有观看者时不算空转");
     }
 
+    /// 现场真实流程：观看者先进（它的加入才触发 video_start），推流端后到 ——
+    /// 推流端接入时绝不能把等待中的观看者踢掉。
+    #[tokio::test]
+    async fn publisher_attach_keeps_viewers_that_joined_first() {
+        let hub = VideoHub::default();
+        let (mut rx, first, _) = hub.viewer_join("RD-001").await;
+        assert!(first);
+        hub.publisher_attach("RD-001", 1).await;
+        assert_eq!(hub.viewers("RD-001").await, 1, "观看者不该被清掉");
+
+        let stream = flv_stream();
+        hub.publish("RD-001", Arc::from(stream.clone())).await;
+        let head = rx.recv().await.expect("推流后观看者应收到字节");
+        assert_eq!(head.as_ref(), &stream[..INIT_LEN]);
+    }
+
     #[tokio::test]
     async fn publisher_reconnect_closes_old_viewers() {
         let hub = VideoHub::default();
         let (mut rx, _, _) = hub.viewer_join("RD-001").await;
-        // 推流端重连 → 旧房间被丢弃，观看端收到 Closed（前端据此自动重连）
         hub.publisher_attach("RD-001", 1).await;
+        // 推流端重连 → 旧房间被丢弃，观看端收到 Closed（前端据此自动重连）
+        hub.publisher_attach("RD-001", 2).await;
         assert!(matches!(
             rx.recv().await,
             Err(tokio::sync::broadcast::error::RecvError::Closed)
@@ -553,6 +619,18 @@ mod tests {
 
         hub.publisher_gone("RD-001", 2).await;
         assert!(hub.idle_publishers().await.is_empty(), "会话匹配时应清掉房间");
+    }
+
+    /// 推流端抖动（房间被丢弃）时，最后一个观看者离开仍必须触发 `video_stop`，
+    /// 否则客户端会一直重连推流 —— 现场真机上踩过：相机断一下，狗就一直编码。
+    #[tokio::test]
+    async fn last_viewer_still_reported_after_room_was_dropped() {
+        let hub = VideoHub::default();
+        let (_rx, _, _) = hub.viewer_join("RD-001").await;
+        hub.publisher_attach("RD-001", 1).await;
+        hub.publisher_gone("RD-001", 1).await; // 房间没了，但观看者还连着
+        assert!(hub.viewer_leave("RD-001").await, "应判定为最后一个观看者");
+        assert_eq!(hub.viewers("RD-001").await, 0);
     }
 
     #[tokio::test]

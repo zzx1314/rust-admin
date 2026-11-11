@@ -33,6 +33,8 @@ const CHUNK_BYTES: usize = 8 * 1024;
 const RETRY_DELAY: Duration = Duration::from_secs(3);
 /// 停止时等 ffmpeg 退出的上限
 const STOP_GRACE: Duration = Duration::from_secs(5);
+/// 连续多少次「一个字节都没推出去」就停止重试
+const MAX_CONSECUTIVE_FAILURES: u32 = 8;
 
 /// 推流句柄：可跨任务 clone，内部只有一个监管任务
 #[derive(Clone)]
@@ -112,13 +114,28 @@ async fn run_stream(config: Arc<Config>, url: String, mut stop: oneshot::Receive
     let endpoint = format!("{}/ws/device/video", config.server_url.trim_end_matches('/'));
     info!("开始实时视频回传: {} → {endpoint}", redact_url(&url));
 
+    // 连续失败熔断：一次字节都没推出去说明 ffmpeg / 相机侧有问题，
+    // 无脑重试只会反复抢占 RTSP 会话（相机通常只允许 1~2 路），什么也修不好。
+    let mut failures = 0_u32;
+
     loop {
-        tokio::select! {
+        let pushed = tokio::select! {
             _ = &mut stop => {
                 info!("实时视频已停止");
                 return;
             }
-            _ = pump_once(&config, &endpoint, &url) => {}
+            pushed = pump_once(&config, &endpoint, &url) => pushed,
+        };
+        if pushed {
+            failures = 0;
+        } else {
+            failures += 1;
+            if failures >= MAX_CONSECUTIVE_FAILURES {
+                error!(
+                    "实时视频连续 {failures} 次没有推出任何数据，停止重试（检查 ffmpeg 与相机 RTSP）"
+                );
+                return;
+            }
         }
 
         tokio::select! {
@@ -131,13 +148,13 @@ async fn run_stream(config: Arc<Config>, url: String, mut stop: oneshot::Receive
     }
 }
 
-/// 一次完整的推流会话；返回即代表这次断了（上层决定是否重连）
-async fn pump_once(config: &Config, endpoint: &str, url: &str) {
+/// 一次完整的推流会话；返回本次是否真的推过字节（上层据此判断是否熔断）
+async fn pump_once(config: &Config, endpoint: &str, url: &str) -> bool {
     let (socket, _) = match connect_async(endpoint).await {
         Ok(pair) => pair,
         Err(error) => {
             warn!("连接视频中继通道失败: {error}");
-            return;
+            return false;
         }
     };
     let (mut sink, mut stream) = socket.split();
@@ -150,23 +167,26 @@ async fn pump_once(config: &Config, endpoint: &str, url: &str) {
     });
     if sink.send(Message::Text(hello.to_string())).await.is_err() {
         warn!("视频中继通道握手失败");
-        return;
+        return false;
     }
 
-    let mut child = match spawn_ffmpeg(config, url) {
+    let Some(encoder) = detect_encoder(config).await else {
+        return false;
+    };
+    let mut child = match spawn_ffmpeg(config, url, &encoder) {
         Ok(child) => child,
         Err(error) => {
             error!(
                 "启动 ffmpeg 失败（{}）: {error}；请确认已安装 ffmpeg 或配置 [video].ffmpeg",
                 config.video_ffmpeg
             );
-            return;
+            return false;
         }
     };
     let Some(mut stdout) = child.stdout.take() else {
         error!("ffmpeg stdout 未接管");
         let _ = child.kill().await;
-        return;
+        return false;
     };
 
     info!("ffmpeg 已启动，开始回传 FLV");
@@ -210,13 +230,14 @@ async fn pump_once(config: &Config, endpoint: &str, url: &str) {
     // 无论如何都收回 ffmpeg，避免留下孤儿进程
     let _ = child.kill().await;
     let _ = child.wait().await;
+    sent > 0
 }
 
 /// 组装 ffmpeg 参数（纯函数，便于单测校验「参数顺序」这类踩坑点）
 ///
 /// 顺序要求：所有输入参数（`-rtsp_transport`）在 `-i` 之前；
 /// 所有输出参数（含 `-vf`）在输出 URL `pipe:1` 之前 —— ffmpeg 的参数是按位置归属的。
-fn ffmpeg_args(config: &Config, url: &str) -> Vec<String> {
+fn ffmpeg_args(config: &Config, url: &str, encoder: &str) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-hide_banner".into(),
         "-loglevel".into(),
@@ -232,32 +253,30 @@ fn ffmpeg_args(config: &Config, url: &str) -> Vec<String> {
     args.push("-i".into());
     args.push(url.to_string());
 
-    for value in [
-        "-an",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-tune",
-        "zerolatency",
-        // baseline profile + yuv420p：浏览器 MSE 兼容性最好
-        "-profile:v",
-        "baseline",
-        "-pix_fmt",
-        "yuv420p",
-        "-g",
-    ] {
-        args.push(value.to_string());
+    args.push("-an".into());
+    args.push("-c:v".into());
+    args.push(encoder.to_string());
+
+    // 编码器专属参数：软件 x264 有 preset/tune/profile，硬件编码器没有这些选项，
+    // 带上会直接「Unrecognized option 'preset'」启动失败（瑞芯微 ffmpeg 就是这样）。
+    if encoder == "libx264" {
+        for value in [
+            "-preset", "ultrafast", "-tune", "zerolatency", "-profile:v", "baseline",
+        ] {
+            args.push(value.to_string());
+        }
     }
+    // yuv420p + 固定 GOP：浏览器 MSE 兼容性最好，GOP 决定起播与丢帧恢复
+    args.push("-pix_fmt".into());
+    args.push("yuv420p".into());
+    args.push("-g".into());
     // 2 秒一个关键帧：决定起播与丢帧恢复的最长等待
     args.push((config.video_fps * 2).to_string());
-    for value in [
-        "-sc_threshold",
-        "0",
-        "-r",
-    ] {
-        args.push(value.to_string());
+    if encoder == "libx264" {
+        args.push("-sc_threshold".into());
+        args.push("0".into());
     }
+    args.push("-r".into());
     args.push(config.video_fps.to_string());
     for value in ["-b:v", "-maxrate"] {
         args.push(value.to_string());
@@ -277,13 +296,77 @@ fn ffmpeg_args(config: &Config, url: &str) -> Vec<String> {
     args
 }
 
+/// 依次尝试的编码器（`[video].encoder = "auto"` 时）
+///
+/// 现场机器狗（瑞芯微 RK 系列）的 ffmpeg 是定制版：**没有 libx264**，
+/// 只有 `h264_rkmpp`（硬件）/ `h264_v4l2m2m`（V4L2 硬件）两个 H.264 编码器。
+const AUTO_ENCODERS: [&str; 3] = ["libx264", "h264_rkmpp", "h264_v4l2m2m"];
+
+/// 解析 `ffmpeg -encoders` 输出，挑出可用的 H.264 编码器
+fn pick_encoder(configured: &str, available: &str) -> Option<String> {
+    if configured != "auto" {
+        return Some(configured.to_string());
+    }
+    AUTO_ENCODERS
+        .iter()
+        .find(|name| available.lines().any(|line| line.split_whitespace().any(|word| word == **name)))
+        .map(|name| name.to_string())
+}
+
+/// 探测本机 ffmpeg 支持的编码器（结果缓存，进程内只跑一次）
+async fn detect_encoder(config: &Config) -> Option<String> {
+    if config.video_encoder != "auto" {
+        return Some(config.video_encoder.clone());
+    }
+    static CACHE: tokio::sync::OnceCell<Option<String>> = tokio::sync::OnceCell::const_new();
+    CACHE
+        .get_or_init(|| async {
+            let output = Command::new(&config.video_ffmpeg)
+                .arg("-hide_banner")
+                .arg("-encoders")
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output()
+                .await;
+            match output {
+                Ok(output) => {
+                    let listing = String::from_utf8_lossy(&output.stdout).to_string();
+                    match pick_encoder("auto", &listing) {
+                        Some(encoder) => {
+                            info!("实时视频编码器: {encoder}");
+                            Some(encoder)
+                        }
+                        None => {
+                            error!(
+                                "本机 ffmpeg 没有可用的 H.264 编码器（试过 {}），无法回传视频；\
+                                 请安装带 libx264 的 ffmpeg，或在 [video].encoder 指定编码器",
+                                AUTO_ENCODERS.join(" / ")
+                            );
+                            None
+                        }
+                    }
+                }
+                Err(error) => {
+                    error!("执行 {} -encoders 失败: {error}", config.video_ffmpeg);
+                    None
+                }
+            }
+        })
+        .await
+        .clone()
+}
+
 /// 启动 ffmpeg：RTSP 输入 → H.264 + FLV 输出到 stdout
 ///
 /// 参数取向是**低延迟优先**：`ultrafast` + `zerolatency` + 2 秒一个关键帧，
 /// 关键帧间隔决定了播放器起播与丢帧恢复的最长等待。
-fn spawn_ffmpeg(config: &Config, url: &str) -> std::io::Result<tokio::process::Child> {
+fn spawn_ffmpeg(
+    config: &Config,
+    url: &str,
+    encoder: &str,
+) -> std::io::Result<tokio::process::Child> {
     let mut command = Command::new(&config.video_ffmpeg);
-    command.args(ffmpeg_args(config, url));
+    command.args(ffmpeg_args(config, url, encoder));
     // -an 已去掉音轨；stdin 关闭、stdout 走管道给 WS、stderr 单独消费
     command
         .stdin(std::process::Stdio::null())
@@ -322,7 +405,7 @@ pub fn redact_url(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ffmpeg_args, redact_url};
+    use super::{ffmpeg_args, pick_encoder, redact_url};
     use robodog_device_client::config::{CliArgs, Config, EnvConfig, FileConfig};
 
     fn test_config(with_scale: bool) -> Config {
@@ -337,7 +420,11 @@ mod tests {
 
     #[test]
     fn ffmpeg_output_options_come_before_the_pipe() {
-        let args = ffmpeg_args(&test_config(false), "rtsp://user:pw@192.168.234.1:8554/test");
+        let args = ffmpeg_args(
+            &test_config(false),
+            "rtsp://user:pw@192.168.234.1:8554/test",
+            "libx264",
+        );
         // 输入参数必须在 -i 之前
         let transport = args.iter().position(|arg| arg == "-rtsp_transport").unwrap();
         let input = args.iter().position(|arg| arg == "-i").unwrap();
@@ -349,7 +436,7 @@ mod tests {
 
     #[test]
     fn scale_is_inserted_before_output_url() {
-        let args = ffmpeg_args(&test_config(true), "rtsp://192.168.234.1:8554/test");
+        let args = ffmpeg_args(&test_config(true), "rtsp://192.168.234.1:8554/test", "libx264");
         let scale = args.iter().position(|arg| arg == "-vf").unwrap();
         let format = args.iter().position(|arg| arg == "-f").unwrap();
         assert!(scale < format, "缩放参数放在输出 URL 之后会被 ffmpeg 忽略");
@@ -358,10 +445,48 @@ mod tests {
 
     #[test]
     fn non_rtsp_source_has_no_rtsp_option() {
-        let args = ffmpeg_args(&test_config(false), "http://192.168.41.9/live.m3u8");
+        let args = ffmpeg_args(&test_config(false), "http://192.168.41.9/live.m3u8", "libx264");
         assert!(
             !args.contains(&"-rtsp_transport".to_string()),
             "非 RTSP 地址带 -rtsp_transport 会让 ffmpeg 报错"
+        );
+    }
+
+    /// 现场机器狗的 ffmpeg 是瑞芯微定制版：识别 `preset` 这类 x264 专属参数会直接
+    /// 启动失败（"Unrecognized option 'preset'"），硬件编码器分支必须干净。
+    #[test]
+    fn hardware_encoder_args_drop_x264_only_options() {
+        let args = ffmpeg_args(
+            &test_config(true),
+            "rtsp://192.168.234.1:8554/test",
+            "h264_rkmpp",
+        );
+        for forbidden in ["-preset", "-tune", "-profile:v", "-sc_threshold"] {
+            assert!(
+                !args.contains(&forbidden.to_string()),
+                "硬件编码器不该带 {forbidden}"
+            );
+        }
+        assert!(args.contains(&"h264_rkmpp".to_string()));
+        // 码率 / GOP / 像素格式这些通用参数仍然要有
+        for expected in ["-b:v", "-g", "yuv420p", "scale=1280:-2", "flv"] {
+            assert!(args.contains(&expected.to_string()), "缺少 {expected}");
+        }
+    }
+
+    #[test]
+    fn auto_encoder_prefers_hardware_when_x264_missing() {
+        let rkmpp = " V..... h264_rkmpp  Rockchip MPP H264 encoder (codec h264)\n";
+        assert_eq!(pick_encoder("auto", rkmpp).as_deref(), Some("h264_rkmpp"));
+
+        let both = " V..... libx264  libx264 H.264 (codec h264)\n V..... h264_rkmpp\n";
+        assert_eq!(pick_encoder("auto", both).as_deref(), Some("libx264"));
+
+        assert_eq!(pick_encoder("auto", " V..... mpeg4  MPEG-4\n"), None);
+        // 显式配置时不做探测，照用
+        assert_eq!(
+            pick_encoder("h264_v4l2m2m", "").as_deref(),
+            Some("h264_v4l2m2m")
         );
     }
 

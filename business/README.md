@@ -76,6 +76,10 @@ pnpm dev
 浏览器打开 <http://127.0.0.1:5273>，使用 `admin / admin123` 登录。
 Vite 已将 `/api` 代理到 `http://127.0.0.1:3100`。
 
+> 代理里配了 `ws: true`：实时监控走 WebSocket（`/api/devices/{id}/video/ws`），
+> 不加这项时代理只转发普通 HTTP，视频一路连不上——**页面没画面、后端日志里
+> 也一条请求都没有**，很容易误判成后端问题。改完 `vite.config.ts` 需要重启 `pnpm dev`。
+
 ### 3. 生产模式（单端口）
 
 ```bash
@@ -590,6 +594,7 @@ rtsp://user:Abcd%232027%21@192.168.234.1:8554/test
 | --- | --- |
 | 客户端所在机器 | 能访问本体 RTSP 地址（现场就是机器狗自身 / 同网段） |
 | `ffmpeg` | 客户端机器上必须可执行，默认取 `PATH` 里的 `ffmpeg`，可用 `[video].ffmpeg` 指定 |
+| 编码器 | 默认 `[video].encoder = "auto"`：现场机器狗的 ffmpeg 没有 libx264，会选中瑞芯微硬件编码器 `h264_rkmpp` |
 | 客户端配置 | `[video].enabled = true`（默认开）；`fps` / `bitrate` / `width` 按带宽调 |
 | 平台 | 无需额外媒体服务器；`/ws/device/video` 与 `/api/devices/{id}/video/ws` 已内置 |
 

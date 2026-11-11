@@ -355,6 +355,7 @@ cargo run -- --print-config      # 查看脱敏后的生效配置
 | `video.enabled` | — | — | `true`（是否响应业务平台的 `video_start`） |
 | `video.ffmpeg` | — | — | `ffmpeg`（可执行文件路径） |
 | `video.transport` | — | — | `tcp`（仅 `tcp` / `udp`，非 `rtsp://` 地址不传） |
+| `video.encoder` | — | — | `auto`（按 `libx264` → `h264_rkmpp` → `h264_v4l2m2m` 顺序探测；机器狗上是 `h264_rkmpp`） |
 | `video.fps` | — | — | `15`（关键帧间隔取 `2×fps`） |
 | `video.bitrate` | — | — | `1200k` |
 | `video.width` | — | — | `0`（保持原始分辨率，等比缩放） |
