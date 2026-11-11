@@ -38,8 +38,10 @@ pub struct AppState {
     pub dog_statistics_service: Arc<DogStatisticsService>,
     /// Directory for uploaded map packages (`<upload_dir>/maps`).
     pub upload_dir: PathBuf,
-    /// 业务平台地址，用于中台设备页向设备下发「同步地图」指令。
+    /// 业务平台地址，用于中台设备页向设备下发「同步地图」/指令/任务。
     pub business_api_url: Option<String>,
     /// 调用业务平台内部接口的服务令牌。
     pub business_api_token: Option<String>,
+    /// 中台 → 业务平台内部接口的 HTTP 客户端（已设置超时、复用连接）。
+    pub business_http: reqwest::Client,
 }

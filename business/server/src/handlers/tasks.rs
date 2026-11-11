@@ -117,6 +117,17 @@ pub async fn create_task(
     State(state): State<AppState>,
     Json(payload): Json<TaskRequest>,
 ) -> Result<Json<ApiResponse<Task>>, AppError> {
+    let task = create_task_core(&state, payload).await?;
+    Ok(ApiResponse::ok(task))
+}
+
+/// 建任务并尝试立即下发（设备已绑定且在线时）。
+///
+/// 网页端与中台内部接口共用，避免「网页建任务」与「中台下发任务」两套语义。
+pub(crate) async fn create_task_core(
+    state: &AppState,
+    payload: TaskRequest,
+) -> Result<Task, AppError> {
     if payload.task_name.trim().is_empty() {
         return Err(AppError::BadRequest("任务名称不能为空".to_string()));
     }
@@ -156,7 +167,7 @@ pub async fn create_task(
     .await?;
     let id = result.last_insert_rowid();
     record_event(
-        &state,
+        state,
         "created",
         format!("创建任务：{}", payload.task_name.trim()),
         "任务已加入待执行队列".to_string(),
@@ -176,7 +187,7 @@ pub async fn create_task(
                 .flatten();
 
         if let Some(ref dcode) = device_code {
-            let task = fetch_task(&state, id).await?;
+            let task = fetch_task(state, id).await?;
             let dispatch = crate::dispatch::build_dispatch_payload(&state.db, &task).await?;
 
             let pushed =
@@ -198,7 +209,7 @@ pub async fn create_task(
         }
     }
 
-    Ok(ApiResponse::ok(fetch_task(&state, id).await?))
+    fetch_task(state, id).await
 }
 
 pub async fn update_task(

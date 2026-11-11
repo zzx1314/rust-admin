@@ -260,6 +260,19 @@ pub fn dog_device_routes(state: AppState) -> Router<AppState> {
             "/dogDevice/{id}/syncMaps",
             post(dog_device_handlers::sync_device_maps_handler),
         )
+        // 控制面：中台发起，业务平台落地（载荷组装与 WebSocket 下发都在业务侧）
+        .route(
+            "/dogDevice/{id}/command",
+            post(dog_device_handlers::send_device_command_handler),
+        )
+        .route(
+            "/dogDevice/{id}/tasks",
+            post(dog_device_handlers::dispatch_device_task_handler),
+        )
+        .route(
+            "/dogDevice/{id}/runtime",
+            get(dog_device_handlers::device_runtime_handler),
+        )
         .route(
             "/dogDevice",
             post(dog_device_handlers::create_device_handler),

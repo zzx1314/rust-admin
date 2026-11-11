@@ -38,6 +38,11 @@ impl SeaOrmDogDeviceRepository {
         Self { conn }
     }
 
+    /// 指令审计台账直接用 SQL 访问连接（不是设备实体的 ORM 查询）。
+    pub fn conn(&self) -> &Arc<DatabaseConnection> {
+        &self.conn
+    }
+
     pub async fn create(
         &self,
         req: &CreateDeviceRequest,

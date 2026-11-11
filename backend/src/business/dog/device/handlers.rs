@@ -1,15 +1,30 @@
 use crate::api::AppState;
 use crate::api::middleware::RequestUser;
+use crate::business::dog::device::audit::{self, NewCommandAudit};
+use crate::business::dog::device::business_client;
 use crate::business::dog::device::domain::{
-    AssignUsersRequest, AssignableUserVO, CreateDeviceRequest, DeviceFilter, DevicePageQuery,
-    DeviceVO, UnassignUsersRequest, UpdateDeviceRequest,
+    AssignUsersRequest, AssignableUserVO, CreateDeviceRequest, DeviceCommandRequest, DeviceFilter,
+    DevicePageQuery, DeviceVO, DispatchTaskRequest, UnassignUsersRequest, UpdateDeviceRequest,
 };
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
+use crate::common::util::generate_id;
 use axum::{
     Extension, Json,
     extract::{Path, Query, State},
 };
+use serde_json::{Value, json};
+
+/// 允许从中台发起的设备指令白名单（与业务平台 `teleop::BUSINESS_COMMANDS` 对齐）。
+/// 「同步地图」有独立入口 `syncMaps`，这里不重复暴露。
+const ALLOWED_COMMANDS: [&str; 6] = [
+    "开始巡检",
+    "暂停任务",
+    "继续任务",
+    "召回充电",
+    "远程接管",
+    "释放接管",
+];
 
 #[derive(serde::Deserialize)]
 pub struct IdParam {
@@ -171,7 +186,7 @@ pub async fn sync_device_maps_handler(
     State(state): State<AppState>,
     Extension(user): Extension<RequestUser>,
     Path(params): Path<IdParam>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<Value>>, AppError> {
     if !user.is_admin {
         return Err(AppError::AuthError(
             "仅管理员可以触发设备地图同步".to_string(),
@@ -181,50 +196,205 @@ pub async fn sync_device_maps_handler(
         .dog_device_service
         .get(params.id, &user.data_scope())
         .await?;
-    let base = state.business_api_url.as_deref().ok_or_else(|| {
-        AppError::BadRequest(
-            "未配置业务平台地址（[dog] business_api_url 或 APP_DOG__BUSINESS_API_URL）".to_string(),
-        )
-    })?;
-    let token = state.business_api_token.as_deref().ok_or_else(|| {
-        AppError::BadRequest("未配置业务平台服务令牌（APP_DOG__BUSINESS_API_TOKEN）".to_string())
-    })?;
+    let path = business_client::device_path(&device.device_id, "sync-maps");
+    let data = business_client::post(
+        &state,
+        &path,
+        "",
+        user.user_id,
+        json!({ "mode": "manual" }),
+    )
+    .await?;
+    Ok(Json(ApiResponse::ok(data)))
+}
 
-    let url = format!(
-        "{}/api/zentai/devices/{}/sync-maps",
-        base.trim_end_matches('/'),
-        urlencoding::encode(&device.device_id)
-    );
-    let http = reqwest::Client::new();
-    let resp = http
-        .post(&url)
-        .header("x-service-token", token)
-        .json(&serde_json::json!({ "mode": "manual" }))
-        .send()
-        .await
-        .map_err(|error| AppError::InternalError(format!("请求业务平台失败（{url}）: {error}")))?;
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        let message = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("msg")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            })
-            .unwrap_or(text);
-        return Err(AppError::BadRequest(format!(
-            "业务平台拒绝同步请求（HTTP {status}）：{message}"
-        )));
+/// 幂等键：调用方未指定时由中台生成一个，重试需原样回传。
+fn resolve_request_id(value: Option<String>) -> String {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("cmd-{}", generate_id()))
+}
+
+/// 幂等命中时把上次的结果原样回放。
+fn replay(device_code: &str, action: &str, request_id: &str, previous: &audit::CommandAudit) -> Value {
+    json!({
+        "deviceId": device_code,
+        "action": action,
+        "requestId": request_id,
+        "duplicated": true,
+        "status": previous.status,
+        "result": previous
+            .result
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<Value>(text).ok()),
+        "message": previous.message,
+    })
+}
+
+/// 一次控制面下发：查幂等键 → 落 pending 审计 → 调业务平台 → 回填审计。
+///
+/// 中台只做控制与审计，真正的载荷组装与 WebSocket 下发在业务平台。
+async fn forward(
+    state: &AppState,
+    user: &RequestUser,
+    device_code: &str,
+    action: &str,
+    suffix: &str,
+    request_id: &str,
+    body: Value,
+) -> Result<Value, AppError> {
+    // 幂等：同一次操作重试直接回放上次结果，不会向设备重复下发
+    if let Some(previous) = state.dog_device_service.find_command(request_id).await? {
+        return Ok(replay(device_code, action, request_id, &previous));
     }
-    let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|error| AppError::InternalError(format!("业务平台响应不是 JSON: {error}")))?;
-    Ok(Json(ApiResponse::ok(
-        value
-            .get("data")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null),
-    )))
+
+    let audit_id = state
+        .dog_device_service
+        .begin_command(NewCommandAudit {
+            user_id: user.user_id,
+            username: &user.username,
+            device_code,
+            action,
+            request_id,
+            params: Some(body.to_string()),
+        })
+        .await?;
+
+    let started = std::time::Instant::now();
+    let path = business_client::device_path(device_code, suffix);
+    let outcome = business_client::post(state, &path, request_id, user.user_id, body).await;
+    let latency_ms = started.elapsed().as_millis() as i64;
+
+    match outcome {
+        Ok(data) => {
+            state.dog_device_service.finish_command(
+                audit_id,
+                audit::STATUS_SUCCEEDED,
+                Some(&data.to_string()),
+                None,
+                latency_ms,
+            )
+            .await;
+            Ok(json!({
+                "deviceId": device_code,
+                "action": action,
+                "requestId": request_id,
+                "duplicated": false,
+                "status": audit::STATUS_SUCCEEDED,
+                "latencyMs": latency_ms,
+                "result": data,
+            }))
+        }
+        Err(error) => {
+            state.dog_device_service.finish_command(
+                audit_id,
+                audit::STATUS_FAILED,
+                None,
+                Some(&error.to_string()),
+                latency_ms,
+            )
+            .await;
+            Err(error)
+        }
+    }
+}
+
+/// `POST /api/dogDevice/{id}/command` — 中台向设备下发一条指令。
+///
+/// 授权：管理员可操作全部设备，普通用户只能操作分配给自己的设备（`dog_user_device`）。
+pub async fn send_device_command_handler(
+    State(state): State<AppState>,
+    Extension(user): Extension<RequestUser>,
+    Path(params): Path<IdParam>,
+    Json(req): Json<DeviceCommandRequest>,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let device = state
+        .dog_device_service
+        .get(params.id, &user.data_scope())
+        .await?;
+    let command = req.command.trim().to_string();
+    if command.is_empty() {
+        return Err(AppError::BadRequest("指令不能为空".to_string()));
+    }
+    if !ALLOWED_COMMANDS.contains(&command.as_str()) {
+        return Err(AppError::BadRequest(format!("不支持的指令：{command}")));
+    }
+    let request_id = resolve_request_id(req.request_id);
+    let body = json!({
+        "command": command,
+        "params": req.params,
+        "requestId": request_id,
+    });
+    let data = forward(
+        &state,
+        &user,
+        &device.device_id,
+        &command,
+        "command",
+        &request_id,
+        body,
+    )
+    .await?;
+    Ok(Json(ApiResponse::ok(data)))
+}
+
+/// `POST /api/dogDevice/{id}/tasks` — 中台给指定设备下发一条巡检任务。
+///
+/// 路线（含航点/航段/动作）由业务平台持有，中台只选择路线与计划时间。
+pub async fn dispatch_device_task_handler(
+    State(state): State<AppState>,
+    Extension(user): Extension<RequestUser>,
+    Path(params): Path<IdParam>,
+    Json(req): Json<DispatchTaskRequest>,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let device = state
+        .dog_device_service
+        .get(params.id, &user.data_scope())
+        .await?;
+    if req.task_name.trim().is_empty() {
+        return Err(AppError::BadRequest("任务名称不能为空".to_string()));
+    }
+    if req.route_id <= 0 {
+        return Err(AppError::BadRequest("请选择要执行的路线".to_string()));
+    }
+    let request_id = resolve_request_id(req.request_id);
+    let body = json!({
+        "taskName": req.task_name.trim(),
+        "routeId": req.route_id,
+        "planStart": req.plan_start,
+        "planEnd": req.plan_end,
+        "executeMode": req.execute_mode,
+        "level": req.level,
+        "description": req.description,
+        "requestId": request_id,
+    });
+    let data = forward(
+        &state,
+        &user,
+        &device.device_id,
+        "下发任务",
+        "tasks",
+        &request_id,
+        body,
+    )
+    .await?;
+    Ok(Json(ApiResponse::ok(data)))
+}
+
+/// `GET /api/dogDevice/{id}/runtime` — 只读设备运行态（在线/任务/进度/电量）。
+///
+/// 不转发审计：这是查询，不是控制动作。
+pub async fn device_runtime_handler(
+    State(state): State<AppState>,
+    Extension(user): Extension<RequestUser>,
+    Path(params): Path<IdParam>,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let device = state
+        .dog_device_service
+        .get(params.id, &user.data_scope())
+        .await?;
+    let path = business_client::device_path(&device.device_id, "runtime");
+    let data = business_client::get(&state, &path).await?;
+    Ok(Json(ApiResponse::ok(data)))
 }

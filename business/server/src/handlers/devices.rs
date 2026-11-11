@@ -529,14 +529,33 @@ pub async fn send_command(
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     let device = fetch_device(&state, id).await?;
     auth::ensure_device_access(&state, &claims, &device.device_id).await?;
+    let result =
+        push_command(&state, &device, &payload.command, None, Some(&claims.username)).await?;
+    Ok(ApiResponse::ok(result))
+}
+
+/// 指令下发的唯一实现。
+///
+/// 网页端（`send_command`）与中台内部接口（`handlers::service`）都走这里，
+/// 保证白名单、园区校验、状态流转、事件留痕、WS 下发只有一套语义。
+///
+/// `operator` 是中台账号名，仅用于事件描述，便于与中台 `dog_command_audit` 对账。
+pub(crate) async fn push_command(
+    state: &AppState,
+    device: &Device,
+    command: &str,
+    extra_params: Option<Value>,
+    operator: Option<&str>,
+) -> Result<Value, AppError> {
     // 指令白名单：避免前端拼错或恶意字符串直接透传到客户端
-    let command = super::teleop::normalize_command(&payload.command)?;
+    let command = super::teleop::normalize_command(command)?;
     // 未绑定园区的设备没有地图与路线归属，不允许启动巡检
     if device.park_id.is_none() && matches!(command, "开始巡检" | "继续任务") {
         return Err(AppError::BadRequest(
             "设备尚未绑定园区，无法执行任务指令".to_string(),
         ));
     }
+    let id = device.id;
     let next_status = match command {
         "开始巡检" => Some("执行任务"),
         "暂停任务" | "释放接管" => Some("在线待命"),
@@ -553,12 +572,16 @@ pub async fn send_command(
             .execute(&state.db)
             .await?;
     }
+    let description = match operator {
+        Some(operator) => format!("当前设备状态：{}；操作人：{operator}", device.status),
+        None => format!("当前设备状态：{}", device.status),
+    };
     sqlx::query(
         "INSERT INTO task_events (event_type, title, description, device_id, task_id, created_at)
          VALUES ('command', ?1, ?2, ?3, NULL, ?4)",
     )
     .bind(format!("已向 {} 下发指令：{}", device.device_id, command))
-    .bind(format!("当前设备状态：{}", device.status))
+    .bind(description)
     .bind(id)
     .bind(&timestamp)
     .execute(&state.db)
@@ -569,7 +592,10 @@ pub async fn send_command(
         &state.device_connections,
         &device.device_id,
         command,
-        Some(json!({"dispatchedAt": timestamp})),
+        Some(extra_params.map_or_else(
+            || json!({"dispatchedAt": timestamp, "operator": operator}),
+            |extra| json!({"dispatchedAt": timestamp, "operator": operator, "params": extra}),
+        )),
     )
     .await;
 
@@ -584,7 +610,7 @@ pub async fn send_command(
     // holder 必须与 `/teleop/take` 使用同一标识，否则遥控会被判成「他人接管」
     let teleop_holder = match command {
         "远程接管" => {
-            let holder = super::teleop::operator_id(&device);
+            let holder = super::teleop::operator_id(device);
             sqlx::query("UPDATE devices SET teleop_holder = ?1, teleop_at = ?2 WHERE id = ?3")
                 .bind(&holder)
                 .bind(&timestamp)
@@ -603,13 +629,13 @@ pub async fn send_command(
         _ => device.teleop_holder.clone(),
     };
 
-    Ok(ApiResponse::ok(json!({
+    Ok(json!({
         "deviceId": device.device_id,
         "command": command,
         "dispatchedAt": timestamp,
         "wsDelivered": cmd_sent,
         "teleopHolder": teleop_holder,
-    })))
+    }))
 }
 
 /// 把业务库设备同步到中台台账；失败只记日志，不阻断业务操作。
@@ -655,6 +681,24 @@ async fn fetch_device(state: &AppState, id: i64) -> Result<Device, AppError> {
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| AppError::NotFound("设备不存在".to_string()))
+}
+
+/// 按设备编号（本体 SN）取设备，供中台内部接口使用。
+pub(crate) async fn fetch_device_by_code(
+    state: &AppState,
+    device_code: &str,
+) -> Result<Device, AppError> {
+    let sql = format!("{DEVICE_SELECT} WHERE d.device_id = ?1");
+    sqlx::query_as::<_, Device>(&sql)
+        .bind(device_code.trim())
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "设备 {} 不在业务平台台账中",
+                device_code.trim()
+            ))
+        })
 }
 
 #[cfg(test)]

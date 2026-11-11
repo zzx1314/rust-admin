@@ -2,6 +2,7 @@ use crate::business::dog::device::domain::{
     AssignUsersRequest, AssignableUserVO, CreateDeviceRequest, DeviceFilter, DevicePageQuery,
     DeviceVO, DogDevice, UnassignUsersRequest, UpdateDeviceRequest,
 };
+use crate::business::dog::device::audit::{self, CommandAudit, NewCommandAudit};
 use crate::business::dog::device::repository::SeaOrmDogDeviceRepository;
 use crate::common::data_scope::DataScope;
 use crate::common::error::AppError;
@@ -293,5 +294,36 @@ impl DogDeviceService {
             .assignable_users()
             .await
             .map_err(AppError::DatabaseError)
+    }
+
+    /// 按幂等键查已下发的指令；命中说明这是一次重试。
+    pub async fn find_command(&self, request_id: &str) -> Result<Option<CommandAudit>, AppError> {
+        audit::find_by_request(self.repo.conn(), request_id)
+            .await
+            .map_err(AppError::DatabaseError)
+    }
+
+    /// 下发前落一条 pending 审计，返回审计主键。
+    pub async fn begin_command(&self, entry: NewCommandAudit<'_>) -> Result<i64, AppError> {
+        audit::insert_pending(self.repo.conn(), &entry)
+            .await
+            .map_err(AppError::DatabaseError)
+    }
+
+    /// 回填下发结果。审计写失败不应该让已经成功的指令变成失败，
+    /// 因此这里只记日志不向上抛错。
+    pub async fn finish_command(
+        &self,
+        id: i64,
+        status: &str,
+        result: Option<&str>,
+        message: Option<&str>,
+        latency_ms: i64,
+    ) {
+        if let Err(error) = audit::finish(self.repo.conn(), id, status, result, message, latency_ms)
+            .await
+        {
+            tracing::error!(audit_id = id, %error, "回填指令审计失败");
+        }
     }
 }

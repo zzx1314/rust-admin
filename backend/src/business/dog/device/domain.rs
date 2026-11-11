@@ -156,6 +156,43 @@ impl CreateDeviceRequest {
     }
 }
 
+/// 中台向设备下发一条指令（控制面入口）。
+///
+/// 中台不直连设备：`command` 会转发给业务平台，由业务平台的设备网关落地。
+/// `requestId` 是为幂等准备的 —— 重试时带上同一个值，设备不会收到两条指令。
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceCommandRequest {
+    pub command: String,
+    #[serde(default)]
+    pub params: Option<serde_json::Value>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+}
+
+/// 中台给指定设备下发一条巡检任务。
+///
+/// 路线与航点由业务平台持有（`routes.route_data`），中台只选择路线与计划时间，
+/// 载荷组装、地图绑定、园区校验全部由业务平台完成。
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DispatchTaskRequest {
+    pub task_name: String,
+    pub route_id: i64,
+    #[serde(default)]
+    pub plan_start: Option<String>,
+    #[serde(default)]
+    pub plan_end: Option<String>,
+    #[serde(default)]
+    pub execute_mode: Option<String>,
+    #[serde(default)]
+    pub level: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+}
+
 /// 可分配用户下拉项
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]

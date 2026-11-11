@@ -161,6 +161,19 @@ pub fn build_router(state: AppState) -> Router {
             "/zentai/devices/{device_id}/sync-maps",
             post(service::sync_device_maps),
         )
+        // 控制面：中台发起，业务平台在既有设备连接上下发
+        .route(
+            "/zentai/devices/{device_id}/command",
+            post(service::device_command),
+        )
+        .route(
+            "/zentai/devices/{device_id}/tasks",
+            post(service::dispatch_task),
+        )
+        .route(
+            "/zentai/devices/{device_id}/runtime",
+            get(service::device_runtime),
+        )
         // 兼容历史上挂在 /api 下的设备网关路径（实际对外路径见下方 top-level 路由）
         .route("/ws/device", get(gateway::ws_handler));
 

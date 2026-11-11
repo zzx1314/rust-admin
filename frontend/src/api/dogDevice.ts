@@ -87,3 +87,44 @@ export const dogDeviceUnassign = (deviceIds: number[], userIds: number[]) =>
 /** 中台手动触发设备同步地图（经业务平台下发 `同步地图` 指令） */
 export const dogDeviceSyncMaps = (id: string | number) =>
   http.axiosPostRequest<Result>(`/api/dogDevice/${id}/syncMaps`, {});
+
+/**
+ * 中台向设备下发一条指令。
+ *
+ * 中台不直连设备：指令会转发给业务平台，由业务平台的设备网关落地。
+ * `requestId` 是幂等键，重试时要原样回传，设备便不会收到重复指令。
+ */
+export const dogDeviceCommand = (
+  id: string | number,
+  command: string,
+  requestId?: string,
+  params?: Record<string, any>
+) =>
+  http.axiosPostRequest<Result>(`/api/dogDevice/${id}/command`, {
+    command,
+    requestId,
+    params
+  });
+
+/**
+ * 中台给指定设备下发一条巡检任务。
+ *
+ * 航点/航段/动作由业务平台的巡检路线维护，中台只选择路线与计划时间。
+ */
+export const dogDeviceDispatchTask = (
+  id: string | number,
+  param: {
+    taskName: string;
+    routeId: number;
+    planStart?: string | null;
+    planEnd?: string | null;
+    executeMode?: string | null;
+    level?: string | null;
+    description?: string | null;
+    requestId?: string;
+  }
+) => http.axiosPostRequest<Result>(`/api/dogDevice/${id}/tasks`, param);
+
+/** 设备运行态（在线/任务/进度/电量），只读 */
+export const dogDeviceRuntime = (id: string | number) =>
+  http.axiosGetRequest<Result>(`/api/dogDevice/${id}/runtime`, {});

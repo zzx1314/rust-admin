@@ -223,6 +223,7 @@ impl App {
             upload_dir,
             business_api_url: None,
             business_api_token: None,
+            business_http: business_http_client(),
         }
     }
 
@@ -259,6 +260,17 @@ impl App {
 
         Ok(())
     }
+}
+
+/// 中台调用业务平台的 HTTP 客户端。
+///
+/// 超时必须显式设置：`reqwest` 默认无总超时，业务平台 hang 住时会把中台请求
+/// 一起挂住；连接复用则避免每次操作重新握手。
+fn business_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_default()
 }
 
 pub fn database_url() -> String {

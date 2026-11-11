@@ -3,8 +3,11 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
   dogDeviceAssign,
+  dogDeviceCommand,
   dogDeviceDelete,
+  dogDeviceDispatchTask,
   dogDevicePage,
+  dogDeviceRuntime,
   dogDeviceSave,
   dogDeviceSyncMaps,
   dogDeviceUnassign,
@@ -58,6 +61,45 @@ const selectedIds = computed(() => selection.value.map(item => item.id));
 
 const users = ref<DogDeviceUser[]>([]);
 const syncingId = ref<number | null>(null);
+const sendingId = ref<number | null>(null);
+const dispatchingId = ref<number | null>(null);
+
+/** 允许从中台发起的指令，与后端白名单、业务平台 `BUSINESS_COMMANDS` 对齐 */
+const DEVICE_COMMANDS = [
+  "开始巡检",
+  "暂停任务",
+  "继续任务",
+  "召回充电",
+  "远程接管",
+  "释放接管"
+];
+
+/**
+ * 幂等键：一次用户操作一个值，失败重试时复用同一个值，
+ * 中台与业务平台都不会把同一条指令下发给设备两次。
+ */
+function newRequestId(deviceId: string) {
+  const random =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return `ui-${deviceId}-${random}`;
+}
+
+const dispatchVisible = ref(false);
+const dispatchDevice = ref<DogDevice | null>(null);
+const dispatchForm = reactive({
+  taskName: "",
+  routeId: undefined as number | undefined,
+  planStart: "",
+  planEnd: "",
+  description: ""
+});
+
+const runtimeVisible = ref(false);
+const runtimeLoading = ref(false);
+const runtimeDevice = ref<DogDevice | null>(null);
+const runtimeData = ref<any>(null);
 
 const formVisible = ref(false);
 const formTitle = ref("新增设备");
@@ -268,6 +310,98 @@ async function syncMaps(row: DogDevice) {
   }
 }
 
+async function sendCommand(row: DogDevice, command: string) {
+  try {
+    await ElMessageBox.confirm(
+      `将向设备「${row.deviceName || row.deviceId}」下发指令：${command}。是否继续？`,
+      "下发指令",
+      {
+        type: "warning",
+        confirmButtonText: "下发",
+        cancelButtonText: "取消"
+      }
+    );
+  } catch {
+    return;
+  }
+  sendingId.value = row.id;
+  try {
+    const res = await dogDeviceCommand(
+      row.id,
+      command,
+      newRequestId(row.deviceId)
+    );
+    if (res.code === SUCCESS) {
+      message(`指令「${command}」已下发`, { type: "success" });
+      void load();
+    } else {
+      message(res.msg || "下发失败", { type: "error" });
+    }
+  } finally {
+    sendingId.value = null;
+  }
+}
+
+function openDispatch(row: DogDevice) {
+  dispatchDevice.value = row;
+  dispatchForm.taskName = `${row.deviceName || row.deviceId} 巡检`;
+  dispatchForm.routeId = undefined;
+  dispatchForm.planStart = "";
+  dispatchForm.planEnd = "";
+  dispatchForm.description = "";
+  dispatchVisible.value = true;
+}
+
+async function submitDispatch() {
+  const device = dispatchDevice.value;
+  if (!device) return;
+  if (!dispatchForm.taskName.trim()) {
+    message("任务名称必填", { type: "error" });
+    return;
+  }
+  if (!dispatchForm.routeId) {
+    message("请填写业务平台的路线 ID", { type: "error" });
+    return;
+  }
+  dispatchingId.value = device.id;
+  try {
+    const res = await dogDeviceDispatchTask(device.id, {
+      taskName: dispatchForm.taskName.trim(),
+      routeId: dispatchForm.routeId,
+      planStart: dispatchForm.planStart || null,
+      planEnd: dispatchForm.planEnd || null,
+      description: dispatchForm.description || null,
+      requestId: newRequestId(device.deviceId)
+    });
+    if (res.code === SUCCESS) {
+      message("任务已下发，设备上线后自动执行", { type: "success" });
+      dispatchVisible.value = false;
+      void load();
+    } else {
+      message(res.msg || "下发失败", { type: "error" });
+    }
+  } finally {
+    dispatchingId.value = null;
+  }
+}
+
+async function openRuntime(row: DogDevice) {
+  runtimeDevice.value = row;
+  runtimeData.value = null;
+  runtimeVisible.value = true;
+  runtimeLoading.value = true;
+  try {
+    const res = await dogDeviceRuntime(row.id);
+    if (res.code === SUCCESS) {
+      runtimeData.value = res.data ?? null;
+    } else {
+      message(res.msg || "读取运行态失败", { type: "error" });
+    }
+  } finally {
+    runtimeLoading.value = false;
+  }
+}
+
 function handleSelectionChange(rows: DogDevice[]) {
   selection.value = rows;
 }
@@ -368,10 +502,35 @@ onMounted(() => {
         <el-table-column label="设备 IP" prop="deviceIp" width="140" />
         <el-table-column label="固件" prop="firmware" width="120" />
         <el-table-column label="创建时间" prop="createTime" width="180" />
-        <el-table-column label="操作" fixed="right" width="300">
+        <el-table-column label="操作" fixed="right" width="420">
           <template #default="{ row }">
             <el-button link type="primary" @click="openAssign([row])">
               分配用户
+            </el-button>
+            <el-dropdown
+              trigger="click"
+              @command="(command: string) => sendCommand(row, command)"
+            >
+              <el-button link type="warning" :loading="sendingId === row.id">
+                下发指令
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item
+                    v-for="command in DEVICE_COMMANDS"
+                    :key="command"
+                    :command="command"
+                  >
+                    {{ command }}
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+            <el-button link type="primary" @click="openDispatch(row)">
+              下发任务
+            </el-button>
+            <el-button link type="info" @click="openRuntime(row)">
+              运行态
             </el-button>
             <el-button
               link
@@ -490,6 +649,111 @@ onMounted(() => {
         <el-button type="primary" @click="submitAssign">确认分配</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="dispatchVisible" title="下发巡检任务" width="560px">
+      <el-alert
+        type="info"
+        :closable="false"
+        show-icon
+        title="路线（含航点 / 航段 / 动作）由业务平台巡检路线维护，这里填写其路线 ID"
+      />
+      <el-form label-width="100px" style="margin-top: 16px">
+        <el-form-item label="设备">
+          <span>
+            {{ dispatchDevice?.deviceName || dispatchDevice?.deviceId }}
+            <span class="text-muted">（{{ dispatchDevice?.deviceId }}）</span>
+          </span>
+        </el-form-item>
+        <el-form-item label="任务名称" required>
+          <el-input v-model="dispatchForm.taskName" placeholder="例如：A 区夜间巡检" />
+        </el-form-item>
+        <el-form-item label="路线 ID" required>
+          <el-input-number
+            v-model="dispatchForm.routeId"
+            :min="1"
+            :controls="false"
+            style="width: 160px"
+          />
+        </el-form-item>
+        <el-form-item label="计划开始">
+          <el-date-picker
+            v-model="dispatchForm.planStart"
+            type="datetime"
+            value-format="YYYY-MM-DD HH:mm:ss"
+            placeholder="留空表示立即"
+            style="width: 100%"
+          />
+        </el-form-item>
+        <el-form-item label="计划结束">
+          <el-date-picker
+            v-model="dispatchForm.planEnd"
+            type="datetime"
+            value-format="YYYY-MM-DD HH:mm:ss"
+            placeholder="可选"
+            style="width: 100%"
+          />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="dispatchForm.description" type="textarea" :rows="2" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="dispatchVisible = false">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="dispatchingId === dispatchDevice?.id"
+          @click="submitDispatch"
+        >
+          下发任务
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-drawer
+      v-model="runtimeVisible"
+      size="480px"
+      :title="`设备运行态 · ${runtimeDevice?.deviceName || runtimeDevice?.deviceId || ''}`"
+    >
+      <div v-loading="runtimeLoading">
+        <el-descriptions v-if="runtimeData" :column="1" border>
+          <el-descriptions-item label="在线">
+            <el-tag :type="runtimeData.online ? 'success' : 'info'" size="small">
+              {{ runtimeData.online ? "已连接" : "未连接" }}
+            </el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="设备状态">
+            {{ runtimeData.status }}
+          </el-descriptions-item>
+          <el-descriptions-item label="电量">
+            {{ runtimeData.battery }}%
+          </el-descriptions-item>
+          <el-descriptions-item label="信号">
+            {{ runtimeData.signal }}
+          </el-descriptions-item>
+          <el-descriptions-item label="园区">
+            {{ runtimeData.parkName || "未绑定" }}
+          </el-descriptions-item>
+          <el-descriptions-item label="最近心跳">
+            {{ runtimeData.lastHeartbeat || "-" }}
+          </el-descriptions-item>
+          <el-descriptions-item label="当前任务">
+            {{ runtimeData.currentTaskName || "-" }}
+          </el-descriptions-item>
+          <el-descriptions-item label="任务进度">
+            <template v-if="runtimeData.currentTask">
+              {{ runtimeData.currentTask.taskName }} ·
+              {{ runtimeData.currentTask.taskStatus }} ·
+              {{ runtimeData.currentTask.progress }}%
+            </template>
+            <span v-else class="text-muted">无任务</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="接管人">
+            {{ runtimeData.teleopHolder || "-" }}
+          </el-descriptions-item>
+        </el-descriptions>
+        <el-empty v-else-if="!runtimeLoading" description="暂无运行数据" />
+      </div>
+    </el-drawer>
   </div>
 </template>
 
