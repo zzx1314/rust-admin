@@ -244,9 +244,17 @@ fn ffmpeg_args(config: &Config, url: &str, encoder: &str) -> Vec<String> {
         "warning".into(),
         "-nostdin".into(),
     ];
-    // RTSP 才需要传输方式：现场走 TCP 更稳（UDP 丢包会花屏）；
-    // 填 http/m3u8 之类地址时不能带这个私有选项，否则 ffmpeg 直接报错。
     if url.starts_with("rtsp://") {
+        // 用**到达时间**当 PTS，而不是相机给的时间戳。
+        //
+        // 现场相机的 SDP 标 60fps、PTS 也按 1/60 递增，但实际只投递 ~25 帧/秒：
+        // 直接沿用它的时间轴，媒体时间只走 0.42x 实时，浏览器 MSE 会反复饿死
+        // （播放器在「连接中 / LIVE」之间来回跳、画面变慢放）。
+        // 改成墙钟时间戳后时间轴与真实时间 1:1，播放才稳。
+        args.push("-use_wallclock_as_timestamps".into());
+        args.push("1".into());
+        // 拉流侧：现场 RTSP 走 TCP 更稳（UDP 丢包会花屏）。
+        // 非 RTSP 地址不能带这些私有选项，否则 ffmpeg 直接报错。
         args.push("-rtsp_transport".into());
         args.push(config.video_transport.clone());
     }
@@ -427,8 +435,14 @@ mod tests {
         );
         // 输入参数必须在 -i 之前
         let transport = args.iter().position(|arg| arg == "-rtsp_transport").unwrap();
+        let wallclock = args
+            .iter()
+            .position(|arg| arg == "-use_wallclock_as_timestamps")
+            .expect("RTSP 输入必须用到达时间当 PTS");
         let input = args.iter().position(|arg| arg == "-i").unwrap();
         assert!(transport < input, "RTSP 传输方式要放在 -i 之前");
+        assert_eq!(args[wallclock + 1], "1");
+        assert!(wallclock < input, "墙钟时间戳要放在 -i 之前");
         // 输出参数必须在输出 URL 之前，且输出固定是 FLV → pipe:1
         assert_eq!(&args[args.len() - 3..], ["-f", "flv", "pipe:1"]);
         assert!(!args.contains(&"-vf".to_string()), "未配置宽度时不该缩放");
@@ -449,6 +463,10 @@ mod tests {
         assert!(
             !args.contains(&"-rtsp_transport".to_string()),
             "非 RTSP 地址带 -rtsp_transport 会让 ffmpeg 报错"
+        );
+        assert!(
+            !args.contains(&"-use_wallclock_as_timestamps".to_string()),
+            "非 RTSP 地址不需要墙钟时间戳"
         );
     }
 
