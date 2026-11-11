@@ -732,9 +732,17 @@ mod zentai_service_token {
             code: "P01".to_string(),
             name: "A 区".to_string(),
         };
-        let map = ingest::push_to_zentai(&config, &http, &request, &park, "map.zip", b"PK\x03\x04", Some(7))
-            .await
-            .expect("地图应可回传");
+        let map = ingest::push_to_zentai(
+            &config,
+            &http,
+            &request,
+            &park,
+            "map.zip",
+            b"PK\x03\x04",
+            Some(7),
+        )
+        .await
+        .expect("地图应可回传");
         assert_eq!(map.id, 42);
         assert_eq!(map.map_name, "A 区机器人建图");
 

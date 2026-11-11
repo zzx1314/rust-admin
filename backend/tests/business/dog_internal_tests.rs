@@ -137,9 +137,8 @@ async fn internal_endpoints_require_service_token() {
     let base = spawn_zentai(test_state(Some(TOKEN)).await).await;
 
     for header in [None, Some("wrong-token")] {
-        let mut request = reqwest::Client::new().get(format!(
-            "{base}/api/dogInternal/devices/assignments"
-        ));
+        let mut request =
+            reqwest::Client::new().get(format!("{base}/api/dogInternal/devices/assignments"));
         if let Some(token) = header {
             request = request.header("x-service-token", token);
         }
@@ -199,7 +198,12 @@ async fn upsert_then_list_assignments() {
     assert_eq!(json(created).await["data"]["deviceId"], "RD-200");
 
     // 再 upsert 一次：幂等，不会产生第二条台账
-    let again = upsert_device(&base, TOKEN, json!({"deviceId": "RD-200", "status": "执行任务"})).await;
+    let again = upsert_device(
+        &base,
+        TOKEN,
+        json!({"deviceId": "RD-200", "status": "执行任务"}),
+    )
+    .await;
     assert_eq!(again.status(), 200);
 
     let response = reqwest::Client::new()

@@ -16,11 +16,11 @@
 //! 与公开接口的关系：复用同一批 service，只是身份从「JWT 用户 + 行级权限」
 //! 换成「管理员范围 + 显式 `ownerUserId` / `creatorUserId`」。公开接口一行没改。
 
+use axum::Json;
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Multipart, Path, State};
 use axum::http::HeaderMap;
 use axum::routing::{delete, get, post};
-use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -49,8 +49,7 @@ fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), AppError> {
         .filter(|token| !token.is_empty())
         .ok_or_else(|| {
             AppError::BadRequest(
-                "未配置业务平台服务令牌（APP_DOG__BUSINESS_API_TOKEN），内部接口不可用"
-                    .to_string(),
+                "未配置业务平台服务令牌（APP_DOG__BUSINESS_API_TOKEN），内部接口不可用".to_string(),
             )
         })?;
     let provided = headers
@@ -94,7 +93,9 @@ pub async fn list_assignments_handler(
         .dog_device_service
         .list_all(DeviceFilter::default(), &internal_scope(None))
         .await?;
-    Ok(Json(ApiResponse::ok(serde_json::to_value(devices).unwrap_or_default())))
+    Ok(Json(ApiResponse::ok(
+        serde_json::to_value(devices).unwrap_or_default(),
+    )))
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,7 +119,9 @@ pub async fn upsert_device_handler(
         .dog_device_service
         .upsert(req.device, &internal_scope(req.creator_user_id))
         .await?;
-    Ok(Json(ApiResponse::ok(serde_json::to_value(device).unwrap_or_default())))
+    Ok(Json(ApiResponse::ok(
+        serde_json::to_value(device).unwrap_or_default(),
+    )))
 }
 
 /// `DELETE /api/dogInternal/devices/{device_code}` — 删除台账（幂等）。
@@ -175,9 +178,10 @@ pub async fn upload_map_handler(
                     .text()
                     .await
                     .map_err(|error| AppError::BadRequest(format!("读取地图信息失败: {error}")))?;
-                info = Some(serde_json::from_str(&text).map_err(|error| {
-                    AppError::BadRequest(format!("地图信息格式错误: {error}"))
-                })?);
+                info =
+                    Some(serde_json::from_str(&text).map_err(|error| {
+                        AppError::BadRequest(format!("地图信息格式错误: {error}"))
+                    })?);
             }
             _ => {}
         }
@@ -198,7 +202,9 @@ pub async fn upload_map_handler(
         )
         .await?;
     let vo = state.dog_map_service.to_vo(map);
-    Ok(Json(ApiResponse::ok(serde_json::to_value(vo).unwrap_or_default())))
+    Ok(Json(ApiResponse::ok(
+        serde_json::to_value(vo).unwrap_or_default(),
+    )))
 }
 
 #[cfg(test)]
