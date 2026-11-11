@@ -46,6 +46,34 @@ Logical Client (client_id = N)
 - `bulkdata` 必须绑定到与 `control` 相同的 `session_id`；
 - 未完成 `1203` 前，`bulkdata` 上不允许发送任何业务数据。
 
+## 2.1 设备身份：协议里没有设备 ID
+
+先说结论：**智航 Pro v1.0.3 没有机器狗自身的设备 ID / SN 字段**，因此
+`client.toml` 里的 `server.device_id` 仍然是唯一身份来源，不能从协议回读。
+
+依据（全文检索 `device_id` / `deviceId` / `设备ID` / `序列号` 均无机器人侧定义）：
+
+| 位置 | 字段 | 能否当设备 ID | 原因 |
+|------|------|------|------|
+| `1201` | `client_id` | ❌ | 网关**分配**的逻辑客户端 ID，重连即变 |
+| `1201` | `type` | ❌ | 设备**型号**（如 `ZSL-2-Ultra`），来自网关 `device_json_path`，同型号多台相同 |
+| `1311` | `sn` | ❌ | 是**充电桩**序列号（`CP-001`），不是机器狗 |
+| `1315` / `1317` / `1319` | — | ❌ | 状态/故障/诊断报文里没有身份字段 |
+| `1501` / `1503` / `1521` | `client_id` / `client_type` | ❌ | 会话维度，非资产维度 |
+| `5011` / `5020` | `task.uuid` | ❌ | 任务标识，不是设备 |
+| §1.1 Wi-Fi | SSID 以 SN 后三位结尾 | ⚠️ | 只有 3 位，会撞号，且需要人工读取 |
+
+工程结论：
+
+1. **`server.device_id` 必须由配置提供**，且与业务库 `devices.device_id` 一致
+   （客户端 `register` 上报的就是它，注册回执再下发园区绑定）；
+2. `robot.host` 只是**网络地址**（DHCP / 换网会变），不要拿它当设备编号；
+3. `client_id` 只能在会话内用于日志与控制权判断，**不得落库**；
+4. 如果要资产级 SN（例如与 MES/资产台账对账），只能人工录入（机身标签、SSID 或 SSH 读取），
+   协议无法回读校验。建议加一个只读字段 `robot.serial` 仅用于展示与排障，不参与任何路由；
+5. `1201.type` 可以用于**机型自检**（例如配置文件写 `robot.model = "ZSL-2-Ultra"`，
+   握手后比对，不一致就告警），但不能作为身份校验。
+
 ## 3. 标准建链时序（必须按序执行）
 
 ```text
@@ -271,6 +299,9 @@ cargo run -- --print-config      # 查看脱敏后的生效配置
 | `mapping.once` | — | `--map-only` | `false` |
 | `simulation.battery` / `signal` / `position` / `firmware` | — | `--battery` / `--signal` / `--position` / `--firmware` | `86` / `4` / `0.0, 0.0` / `Hermes_M_v0.3.2` |
 | `log.filter` | `RUST_LOG`（优先） | — | `robodog_device_client=info` |
+
+> `server.device_id` 是**唯一设备身份**（必须与业务库 `devices.device_id` 一致）；
+> 协议里没有设备 ID / SN 可回读，`client_id` 与 `robot.host` 都不能替代它，详见 §2.1。
 
 不在配置文件里的项是协议常量，不应按现场随意改：`control`/`bulkdata` 端口 `10010`、
 网关心跳 `20s`、请求超时 `8s`、bulkdata 绑定超时 `10s`、遥控看门狗 `1s`。
