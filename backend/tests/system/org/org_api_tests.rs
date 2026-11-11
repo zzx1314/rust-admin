@@ -500,7 +500,7 @@ async fn test_org_crud_flow() {
             &token,
             Request::builder()
                 .method("GET")
-                .uri(&format!("/api/sysOrg/{}", org_id))
+                .uri(format!("/api/sysOrg/{}", org_id))
                 .body(Body::empty())
                 .unwrap(),
         ))
@@ -518,7 +518,7 @@ async fn test_org_crud_flow() {
             &token,
             Request::builder()
                 .method("PUT")
-                .uri(&format!("/api/sysOrg/{}", org_id))
+                .uri(format!("/api/sysOrg/{}", org_id))
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"name":"Updated Org","sort":10}"#))
                 .unwrap(),
@@ -540,7 +540,7 @@ async fn test_org_crud_flow() {
             &token,
             Request::builder()
                 .method("DELETE")
-                .uri(&format!("/api/sysOrg/{}", org_id))
+                .uri(format!("/api/sysOrg/{}", org_id))
                 .body(Body::empty())
                 .unwrap(),
         ))
@@ -553,7 +553,7 @@ async fn test_org_crud_flow() {
             &token,
             Request::builder()
                 .method("GET")
-                .uri(&format!("/api/sysOrg/{}", org_id))
+                .uri(format!("/api/sysOrg/{}", org_id))
                 .body(Body::empty())
                 .unwrap(),
         ))
@@ -629,7 +629,7 @@ async fn test_get_orgs_by_parent() {
             &token,
             Request::builder()
                 .method("GET")
-                .uri(&format!("/api/sysOrg/parent?parentId={}", parent_id))
+                .uri(format!("/api/sysOrg/parent?parentId={}", parent_id))
                 .body(Body::empty())
                 .unwrap(),
         ))

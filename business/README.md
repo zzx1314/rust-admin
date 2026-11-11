@@ -15,11 +15,18 @@ business/
 │   │   ├── db.rs                  # 连接池、SQL 迁移
 │   │   ├── seed.rs                # 默认管理员与演示数据
 │   │   ├── geo.rs                 # 路线里程/耗时/耗电计算、顺序优化
+│   │   ├── gateway.rs             # 设备 WebSocket 网关（注册/心跳/下发/控制）
+│   │   ├── gateway_types.rs       # 网关消息协议类型
+│   │   ├── dispatch.rs            # 任务下发载荷组装（地图绑定/速度/结束动作）
 │   │   ├── handlers/              # 园区、区域、设备、任务、路线、告警、设置、驾驶舱
 │   │   └── app.rs                 # 路由装配、CORS、静态资源
-│   ├── migrations/001_schema.sql  # 建表
+│   ├── migrations/                # 001 建表 / 002 地图基线 / 003 地图来源 / 004 本体回执
 │   ├── seed/routes.json           # 演示路线（航点/航段/动作）
 │   └── data/robodog.db            # 运行时生成，删除后自动重建并重新播种
+├── client/                        # 设备客户端：业务协议 + 智航 Pro 本体驱动
+│   ├── src/main.rs                # 双后端连接、任务分派、状态上报
+│   ├── src/dispatch.rs            # 业务载荷 → FlightPlan
+│   └── src/zhpro/                 # 智航 Pro 协议层、建图、地图管理、航线执行
 └── web/                           # 独立 Vue 3 控制台
     ├── src/api/                   # 请求封装与类型
     ├── src/components/            # 图表、状态徽标、设备抽屉、园区态势图等
@@ -63,6 +70,20 @@ cd ../server && cargo run
 
 后端检测到 `business/web/dist` 后会直接托管前端，访问 <http://127.0.0.1:3100>。
 
+### 4. 启动设备客户端（可选）
+
+```bash
+cd business/client
+
+# 纯模拟模式：不接本体，只跑业务协议（前端联调用）
+cargo run -- --device-id RD-001
+
+# 接真实智航 Pro 本体
+cargo run -- --device-id RD-001 --robot 192.168.10.21
+```
+
+详见 [`client/README.md`](client/README.md)。
+
 ## 页面与功能
 
 | 页面 | 功能 |
@@ -70,7 +91,7 @@ cd ../server && cargo run
 | 总览驾驶舱 | KPI、园区态势 SVG、设备状态环图、实时告警、7 日趋势、事件流、导出日报、全屏 |
 | 园区管理 | 园区卡片/表格、完成率、巡检区域清单、园区与区域增删改、跳转巡检计划 |
 | 巡检路线 | 三栏编辑器：路线模板、SVG 画布拖拽加点/选段、航点属性、航段任务、动作库、撤销、顺序优化、校验、发布、模拟执行 |
-| 设备管理 | 状态统计、筛选、电量/信号/心跳、设备详情抽屉、远程指令、批量下发、CSV 导出 |
+| 设备管理 | 状态统计、筛选、电量/信号/心跳、手动绑定园区、设备详情抽屉（实时视频 + 手动遥控）、远程指令、批量下发、CSV 导出 |
 | 任务管理 | 看板拖拽改状态、列表视图、任务创建/详情、航点执行序列、开始/暂停 |
 | 告警中心 | 级别/状态筛选、单条/全部处理、告警详情 |
 | 系统设置 | 平台参数、通知开关、关于平台 |
@@ -93,7 +114,11 @@ GET    /api/devices               POST   /api/devices
 GET    /api/devices/stats
 POST   /api/devices/refresh
 GET    /api/devices/{id}          PUT    /api/devices/{id}    DELETE /api/devices/{id}
+POST   /api/devices/{id}/bind     DELETE /api/devices/{id}/bind
 POST   /api/devices/{id}/command
+POST   /api/devices/{id}/action
+POST   /api/devices/{id}/teleop              POST   /api/devices/{id}/teleop/take
+POST   /api/devices/{id}/teleop/release      POST   /api/devices/{id}/teleop/ping
 
 GET    /api/tasks                 POST   /api/tasks
 GET    /api/tasks/stats
@@ -119,7 +144,21 @@ GET    /api/map-versions                  GET    /api/parks/{id}/maps
 GET    /api/map-versions/{id}             GET    /api/map-versions/{id}/refs
 GET    /api/map-versions/{id}/raster      GET    /api/map-versions/backend          POST   /api/map-versions/import-backend
 POST   /api/map-versions/{id}/publish     POST   /api/map-versions/{id}/new-version
+POST   /api/map-versions/ingest
 ```
+
+## 设备与园区绑定
+
+设备首次通过 WebSocket 注册时如果没有建档，服务会自动创建一条「待绑定」设备
+（`devices.park_id IS NULL`、`status = '待绑定'`）；也可以预先在控制台新增设备，
+新增表单默认不选园区。绑定规则：
+
+- `POST /api/devices/{id}/bind`（`{ parkId, zoneId? }`）手动绑定园区；`zoneId` 必须属于该园区。
+- `DELETE /api/devices/{id}/bind` 解绑，设备回到「待绑定」，其待执行任务会被清空分配。
+- 未绑定园区的设备**不参与任务下发**：`POST /api/tasks` / `PUT /api/tasks/{id}` 会拒绝
+  未绑定设备，派发时会跳过 `task.park_id` 与设备园区不一致的任务。
+- 注册回执 `register_ack` 会带上 `parkId / parkCode / parkName`，设备客户端据此确定建图回传的归属园区。
+- 绑定园区后若设备在线，服务会立即补发该园区的待执行任务。
 
 ## 地图基线
 
@@ -128,16 +167,64 @@ POST   /api/map-versions/{id}/publish     POST   /api/map-versions/{id}/new-vers
 `routes.map_version_id` 冻结为当时的版本，之后地图发新版不会改写历史路线坐标。
 
 - `GET /api/map-versions` 支持 `parkId`、`status` 过滤，前端用它渲染基线徽章与版本下拉。
-- `GET /api/map-versions/backend` 读取仓库根目录 `backend` 的 `dog_map` 地图库，列出已上传的 ROS map_server 地图包。
-- `POST /api/map-versions/import-backend` 把 `{ backendMapId, parkId, bind }` 指定的地图导入本业务库；
-  会从 `.zip` 内解析 `model.yaml` 的 `resolution` / `origin` 和 `model.pgm` 的宽高，并可选绑定为园区当前基线。
+- `GET /api/map-versions/backend` 读取仓库根目录 `backend` 的 `dog_map` 地图库，列出已上传的 ROS map_server 地图包；
+  支持 `parkCode` 过滤，业务平台可据此只查看某园区的地图。
+- `POST /api/map-versions/import-backend` 把 `{ backendMapId, parkId?, bind }` 指定的地图导入本业务库；
+  `parkId` 缺省时按中台地图携带的 `parkCode` 反查业务园区，园区编码未登记会报错。
+  导入时会从 `.zip` 内解析 `model.yaml` 的 `resolution` / `origin` 和 `model.pgm` 的宽高，并可选绑定为园区当前基线。
 - `GET /api/map-versions/{id}/raster` 解析地图包里的 `model.pgm`，转成 PNG data URL，返回分辨率、原点与栅格宽高；路线编辑画布可切换「真实地图」底图。
 - `GET /api/map-versions/{id}/refs` 返回引用该版本的路线、任务与园区设备数，用于影响分析。
 - `POST /api/map-versions/{id}/publish` 发布版本并切换园区基线指针，同园区旧版本归档。
 - `POST /api/map-versions/{id}/new-version` 派生下一版本并发布，历史路线保持旧版引用。
+- `POST /api/map-versions/ingest` 一次性完成「推中台 + 写业务库」，是设备客户端建图回传的入口（见下节）。
 
 `server/seed.rs` 会在 `map_versions` 为空且已有园区时自动补齐演示基线，并为
 RT-001 ~ RT-004 写入对应的冻结版本引用。
+
+## 建图回传：`POST /api/map-versions/ingest`
+
+设备客户端在本体建图完成后，把 `.zip` 地图包直接 POST 到这个接口，一次完成两件事：
+**写中台 `dog_map`** + **写业务库 `map_versions`**。区别于 `import-backend`
+（那是从根 backend 的 SQLite 反向读取，要求地图已经在中台里）。
+
+请求：`multipart/form-data`
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `file` | ✅ | 地图 `.zip`（须含 `model.pgm` + `model.yaml`），≤ 256MB |
+| `mapInfo` | ✅ | JSON 字符串：`{ mapName, parkId, bind, mapType, remarks, source, sourceRef }`，`parkId` 必填 |
+
+响应：
+
+```json
+{ "code": 10200, "msg": "ok", "data": {
+    "mapId": "ROS-MAP-3@v1.0", "mapName": "B区-20261110", "parkId": 3,
+    "zentaiMapId": 12, "bound": true,
+    "stashPath": "data/map_ingest/B区-20261110_20261110153000.zip",
+    "map": { } } }
+```
+
+处理流程：
+
+```
+1. 校验 zip 魔数 PK、大小、parkId 存在
+2. stash_package → data/map_ingest/ 留档（中台不可用时凭此路径重放）
+3. parse_local_meta → 本地解析 model.pgm 宽高 / model.yaml resolution+origin
+4. push_to_zentai → 登录中台（AES-128-CBC 加密密码）→ POST /api/dogMap/upload
+   mapInfo 会带上园区 parkCode / parkName，中台 dog_map 记录园区归属
+5. 写 map_versions（ON CONFLICT(id) DO UPDATE）
+6. bind=true 时切换园区当前基线
+```
+
+中台地图带上园区后，业务平台从中台拉取地图时（`/api/map-versions/backend`）
+可以按 `parkCode` 过滤或直接导入，`import-backend` 未显式指定园区时会自动按园区编码回填。
+
+> 园区归属用 `parks.park_code` 做跨服务关联，请尽量不要修改已绑定地图的园区编码；
+> 确有变更时，中台历史地图仍指向旧编码，需重新导入或手工修正 `dog_map.park_code`。
+
+中台账号只配在**服务端**（`ROBODOG_ZENTAI_*`），不随设备客户端分发。
+中台凭证未配置时接口返回内部错误，`GET /api/health` 的 `mapIngest.ready` 会暴露该状态，
+可用于上线前自检。
 
 ## 路线数据模型
 
@@ -174,14 +261,119 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 | `ROBODOG_JWT_TTL_HOURS` | `24` | Token 有效期 |
 | `ROBODOG_WEB_DIST` | `../web/dist` | 前端构建产物目录 |
 | `ROBODOG_BACKEND_DB` | `../../backend/data/users.db` | 仓库根目录 backend 的 SQLite 文件，用于导入 `dog_map` 中的 ROS 地图 |
+| `ROBODOG_ZENTAI_URL` | 空 | 中台地址，如 `http://127.0.0.1:3000`。三项齐全才启用建图回传 |
+| `ROBODOG_ZENTAI_USER` | 空 | 中台登录账号 |
+| `ROBODOG_ZENTAI_PASSWORD` | 空 | 中台登录密码（明文配置，服务端自行 AES 加密后提交） |
+| `ROBODOG_INGEST_DIR` | `server/data/map_ingest` | 回传地图包的本地留档目录 |
+
+## 任务下发与本体对接
+
+任务通过 `devices.device_id` 关联设备，设备上线后由
+`server/src/gateway.rs::dispatch_pending_tasks` 补发所有 `待执行` 任务；
+`POST /api/tasks`（带 `deviceId`）会立即推送。
+
+下发载荷由 `server/src/dispatch.rs::build_dispatch_payload` 统一组装：
+
+| 字段 | 来源 | 说明 |
+| --- | --- | --- |
+| `routeData` | `routes.route_data` | 前端三栏编辑器的 `points/legs/returnLeg` |
+| `map.mapId` | `routes.map_version_id` → 回退 `parks.map_version_id` | 冻结版本优先 |
+| `map.mapPath` | 由 `mapId` 派生（`@` → `_`） | 本体侧目录名 |
+| `map.mapType` | 固定 `1`（2D 栅格） | `3` 预留给 Route 路网 |
+| `speedLimit` | `routes.default_speed` | m/s |
+| `avoidLevel` | 固定 `40`（全避障） | 10 关闭 / 20 仅急停 / 30 感知 / 40 全避障 |
+| `endTask` | 由 `executeMode` 推断 | `return_to_charge` / `return_to_start` / `none` |
+
+客户端（`client/`）把载荷翻译成智航 Pro 指令驱动机器狗本体，详见
+[`client/README.md`](client/README.md)。
+
+### 进度与阶段回传
+
+`task_progress` 携带 `stage`（智航 5009 阶段串）与 `robotTaskId`（5001 返回的本体任务 ID），
+落库到 `tasks.robot_stage` / `tasks.robot_task_id` / `tasks.robot_updated_at`（迁移
+`004_robot_task_binding.sql`），前端任务列表可直接展示执行阶段。
+
+### 任务控制
+
+`PUT /api/tasks/{id}/status` 映射到客户端的 `task_control`：
+
+| task_status | action | 客户端行为 |
+| --- | --- | --- |
+| `已暂停` | `pause` | 5004 暂停本体任务 |
+| `执行中` | `resume` | 5006 恢复 |
+| `已完成` / `异常` | `cancel` | 5002 取消；建图任务会等 4001 保存结果 |
+
+`reason` 字段会透传给客户端，便于在机器人日志中定位中断原因。
+
+## 实时视频与手动遥控
+
+### 视频：协议里没有，只能外挂
+
+协议原文已归档在 `business/docs/zhihang-pro-api-v1.0.3.pdf`（84 页），
+同目录 `.txt` 是便于检索的纯文本版。
+
+智航 Pro v1.0.3 接口文档全文（84 页）**没有视频传输相关描述**：`视频` / `码流` /
+`摄像头` / `图传` / `RTSP` / `HLS` / `WebRTC` / `video` / `camera` 均 0 次出现，
+API Type 总表 60 个消息里也没有图像或流媒体类型。`bulkdata` 通道的大负载是
+1401/1403/1405/1407 的位姿与路径数据，不是视频帧。
+
+文档里与「影像」沾边的只有两处，都**不是视频流**：
+
+- 巡检点动作 `tasks=1 拍照`，调用上装 `/capture_image`，单张静态图；
+  任务记录里用 `data.items[].phase[].image_path` 返回图片落盘路径。
+- §4「文件服务」HTTP 端口 `12000`，L2 根 `/userdata/alg_data`、M1 根
+  `/ota/alg_data`，用于下载地图包 / 图片等文件。
+
+因此视频由**本体自带的流服务**提供，本服务只保存地址：设备编辑弹窗可填
+`videoUrl` + `videoType`（`none`/`hls`/`flv`/`mp4`/`webrtc`/`rtsp`）。
+未显式选类型时按地址后缀自动推断。前端 `VideoPlayer.vue` 里 hls.js / flv.js
+按需动态导入，只有真正要播放时才加载。
+
+| 类型 | 播放方式 |
+| --- | --- |
+| `hls` | hls.js；Safari 走原生 `canPlayType` |
+| `flv` | flv.js（MSE） |
+| `mp4` | 原生 `<video>` |
+| `rtsp` / `webrtc` | 浏览器无法直连，需另部署转流 / 信令网关，前端只给提示 |
+| `none` / 无地址 | 显示占位说明，不拉流 |
+
+### 遥控：1302 本体命令 + 1304 摇杆
+
+文档 §3 把 `1302`（本体命令）、`1304`（遥控摇杆）、`1310`（充电桩）归为控制类请求，
+响应看 `1303` / `1311` 的 `status_code`。之前只定义了常量没有接通，现在全链路打通：
+
+```
+前端 DeviceDrawer → POST /api/devices/{id}/teleop/take  → 落库接管态
+                  → POST /api/devices/{id}/teleop        → WS msgType=teleop
+                  → 客户端 zhpro/teleop.rs → 智航 1304
+```
+
+安全约束：
+
+- **接管态闸门**：`devices.teleop_holder` / `teleop_at` 落库，未接管时摇杆和动作
+  一律拒绝（前端按钮置灰）；同一台设备同一时刻只允许一个接管者。
+- **急停常驻**：`/action` 里的 `emergency_stop` 不受接管态约束，任何状态都能发。
+- **两级看门狗**：前端松手立即发全 0 帧；客户端 1 秒无新摇杆帧自动补停车；
+  服务端接管 120s 空闲自动失效（前端每 45s 发一次 `/teleop/ping` 保活）。
+- 摇杆三轴 `forward`/`strafe`/`turn` ∈ [-1, 1]，按 1.0 m/s / 0.6 m/s / 1.2 rad/s
+  折算成本体线速度与角速度；`speed` 档位 0.1~1.0 二次缩放。
+- 所有接管、释放、动作都写 `task_events`（`event_type='teleop'`）留审计。
+
+可用动作：`stand_up` 站立、`lie_down` 卧倒、`emergency_stop` 急停、
+`light_on` / `light_off` 灯光、`reset_pose` 位姿复位。危险动作前端二次确认。
 
 ## 当前边界
 
 - 设备状态、电量、心跳来自本服务数据库；演示数据由启动播种生成。
-- 设备控制（开始巡检 / 暂停 / 召回充电 / 远程接管）会更新设备状态并写入事件流，
-  但**尚未接入真实 WebSocket 设备网关**；后续可在 `server/src` 下新增 gateway 模块，
-  复用原型中的设备 token、注册、心跳与任务下发协议。
-- 视频画面为占位区域，未接入 RTSP/WebRTC。
+- 设备网关（`server/src/gateway.rs`）已接入：注册、心跳、任务下发、任务控制、
+  远程指令、进度与事件回传。客户端在 `client/`，接入真实本体需传 `--robot`。
+- 智航 v1.0.3 的 `kind=4`（原生巡检）尚未开放，巡检采用
+  「逐点导航任务 + 客户端侧点位动作」实现，见 `client/README.md`。
+- 视频只做「设备档案填地址 + 浏览器直连播放」：`hls`(m3u8) / `flv` / `mp4` 可直接播；
+  `rtsp` / `webrtc` 没有服务端转封装与信令网关，前端只给提示，需要另外部署转流服务。
+- 手动遥控（接管 / 摇杆 / 本体动作 / 急停）前后端与客户端全链路已打通，接管态落库并按
+  120s 空闲超时自动失效；但 holder 目前是设备维度标识（中间件没有把用户名透传到 handler），
+  多个账号同时操作同一台设备时仍是「谁先接管谁控制」，不是按登录人隔离。
 - 告警目前以数据库记录与手动处置为主，自动规则（温度/离线/低电量）预留后续扩展。
 
 ## 重置演示数据
@@ -196,6 +388,11 @@ cd business/server && cargo run
 ## 检查命令
 
 ```bash
-cd business/server && cargo clippy -- -D warnings
+cd business/server && cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt -- --check
+cd business/client && cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt -- --check
 cd business/web && pnpm typecheck && pnpm build
 ```
+
+> Server 与 client 均已做到零告警，可用 `-D warnings`；新增代码请保持零新增告警。
+> 协议预留字段（`register.secret`、`TaskProgressPayload.task_id`、`DeviceEventPayload.data`、
+> `DeviceSession`、`get_online_devices`、`is_device_online`）以 `#[allow(dead_code)]` 显式标注。

@@ -75,7 +75,9 @@ export function useDogConfig() {
     onSearch();
   }
   function handleSelectionChange(_val) {}
-  const handleSubmitError = (err: any) => console.log(err);
+  const handleSubmitError = (err: any) => {
+    console.log(err);
+  };
   const handleSubmit = (_values: FieldValues) => {
     if (addForm.value.id) {
       dogConfigUpdate(addForm.value.id, addForm.value).then(res => {

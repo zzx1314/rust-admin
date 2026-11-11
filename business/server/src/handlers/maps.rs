@@ -2,8 +2,8 @@ use crate::app::AppState;
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::models::{
-    BackendMap, ImportBackendMapRequest, MapQuery, MapRaster, MapRefRoute, MapRefTask, MapRefs,
-    MapVersion, MapVersionRequest,
+    BackendMap, BackendMapQuery, ImportBackendMapRequest, MapQuery, MapRaster, MapRefRoute,
+    MapRefTask, MapRefs, MapVersion, MapVersionRequest,
 };
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -60,7 +60,9 @@ pub async fn list_park_maps(
     State(state): State<AppState>,
     Path(park_id): Path<i64>,
 ) -> Result<Json<ApiResponse<Vec<MapVersion>>>, AppError> {
-    let sql = format!("{MAP_SELECT} WHERE m.park_id = ?1 ORDER BY m.published_at DESC, m.created_at DESC");
+    let sql = format!(
+        "{MAP_SELECT} WHERE m.park_id = ?1 ORDER BY m.published_at DESC, m.created_at DESC"
+    );
     let maps = sqlx::query_as::<_, MapVersion>(&sql)
         .bind(park_id)
         .fetch_all(&state.db)
@@ -69,40 +71,47 @@ pub async fn list_park_maps(
 }
 
 /// 列出根目录 `backend` 的 `dog_map` 地图库（ROS map_server 包等）。
+///
+/// 可选 `parkCode`：只返回该业务园区下的地图（设备端建图回传时写入）。
 pub async fn list_backend_maps(
     State(state): State<AppState>,
+    Query(query): Query<BackendMapQuery>,
 ) -> Result<Json<ApiResponse<Vec<BackendMap>>>, AppError> {
     let pool = match backend_pool(&state).await {
         Ok(pool) => pool,
         Err(_) => return Ok(ApiResponse::ok(Vec::new())),
     };
-    let maps = sqlx::query_as::<_, BackendMap>(
-        "SELECT id, map_name, file_name, file_path, file_format, file_size,
-            remarks, map_version, frame_id, crs, map_origin, resolution, floors,
+    let mut builder = QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT id, map_name, park_code, park_name, file_name, file_path, file_format,
+            file_size, remarks, map_version, frame_id, crs, map_origin, resolution, floors,
             road_count, nogo_count, map_status, map_hash, publish_time, map_width,
             map_height, create_time
-         FROM dog_map WHERE is_deleted = 0 ORDER BY id DESC",
-    )
-    .fetch_all(&pool)
-    .await?;
+         FROM dog_map WHERE is_deleted = 0",
+    );
+    if let Some(park_code) = query.park_code.filter(|value| !value.trim().is_empty()) {
+        builder
+            .push(" AND park_code = ")
+            .push_bind(park_code.trim().to_string());
+    }
+    builder.push(" ORDER BY id DESC");
+    let maps = builder
+        .build_query_as::<BackendMap>()
+        .fetch_all(&pool)
+        .await?;
     Ok(ApiResponse::ok(maps))
 }
 
 /// 把根 backend 的地图导入当前业务库，并可选地绑定为园区当前基线。
+///
+/// `parkId` 缺省时按中台地图携带的 `parkCode` 反查业务园区。
 pub async fn import_backend_map(
     State(state): State<AppState>,
     Json(payload): Json<ImportBackendMapRequest>,
 ) -> Result<Json<ApiResponse<MapVersion>>, AppError> {
-    let park_name: String = sqlx::query_scalar("SELECT park_name FROM parks WHERE id = ?1")
-        .bind(payload.park_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| AppError::NotFound("园区不存在".to_string()))?;
-
     let backend_pool = backend_pool(&state).await?;
     let source = sqlx::query_as::<_, BackendMap>(
-        "SELECT id, map_name, file_name, file_path, file_format, file_size,
-            remarks, map_version, frame_id, crs, map_origin, resolution, floors,
+        "SELECT id, map_name, park_code, park_name, file_name, file_path, file_format,
+            file_size, remarks, map_version, frame_id, crs, map_origin, resolution, floors,
             road_count, nogo_count, map_status, map_hash, publish_time, map_width,
             map_height, create_time
          FROM dog_map WHERE id = ?1 AND is_deleted = 0",
@@ -111,6 +120,32 @@ pub async fn import_backend_map(
     .fetch_optional(&backend_pool)
     .await?
     .ok_or_else(|| AppError::NotFound("backend 地图不存在".to_string()))?;
+
+    // 园区：请求优先；否则按中台地图携带的园区编码反查
+    let park_id = match payload.park_id {
+        Some(park_id) => park_id,
+        None => {
+            let code = source
+                .park_code
+                .as_deref()
+                .map(str::trim)
+                .filter(|code| !code.is_empty())
+                .ok_or_else(|| {
+                    AppError::BadRequest("该中台地图未关联园区，请在导入时指定园区".to_string())
+                })?;
+            sqlx::query_scalar::<_, i64>("SELECT id FROM parks WHERE park_code = ?1")
+                .bind(code)
+                .fetch_optional(&state.db)
+                .await?
+                .ok_or_else(|| AppError::NotFound(format!("园区编码 {code} 未在业务库中登记")))?
+        }
+    };
+
+    let park_name: String = sqlx::query_scalar("SELECT park_name FROM parks WHERE id = ?1")
+        .bind(park_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("园区不存在".to_string()))?;
 
     let version = source
         .map_version
@@ -137,7 +172,7 @@ pub async fn import_backend_map(
          ORDER BY created_at ASC LIMIT 1",
     )
     .bind(&source_id)
-    .bind(payload.park_id)
+    .bind(park_id)
     .fetch_optional(&state.db)
     .await?;
 
@@ -227,8 +262,16 @@ pub async fn import_backend_map(
         .bind(source.nogo_count.unwrap_or(0))
         .bind(status)
         .bind(&map_hash)
-        .bind(source.map_width.or_else(|| ros_meta.as_ref().and_then(|meta| meta.width)))
-        .bind(source.map_height.or_else(|| ros_meta.as_ref().and_then(|meta| meta.height)))
+        .bind(
+            source
+                .map_width
+                .or_else(|| ros_meta.as_ref().and_then(|meta| meta.width)),
+        )
+        .bind(
+            source
+                .map_height
+                .or_else(|| ros_meta.as_ref().and_then(|meta| meta.height)),
+        )
         .bind(&note)
         .bind(&published_at)
         .bind(&source_id)
@@ -248,7 +291,7 @@ pub async fn import_backend_map(
                 ?16, ?17, ?18, 'backend', ?19, ?20, ?21, ?22)",
         )
         .bind(&map_id)
-        .bind(payload.park_id)
+        .bind(park_id)
         .bind(&map_name)
         .bind(&version)
         .bind(&frame_id)
@@ -260,8 +303,16 @@ pub async fn import_backend_map(
         .bind(source.nogo_count.unwrap_or(0))
         .bind(status)
         .bind(&map_hash)
-        .bind(source.map_width.or_else(|| ros_meta.as_ref().and_then(|meta| meta.width)))
-        .bind(source.map_height.or_else(|| ros_meta.as_ref().and_then(|meta| meta.height)))
+        .bind(
+            source
+                .map_width
+                .or_else(|| ros_meta.as_ref().and_then(|meta| meta.width)),
+        )
+        .bind(
+            source
+                .map_height
+                .or_else(|| ros_meta.as_ref().and_then(|meta| meta.height)),
+        )
         .bind(&note)
         .bind(&published_at)
         .bind(&timestamp)
@@ -285,7 +336,7 @@ pub async fn import_backend_map(
         .bind(&map_id)
         .bind(park_status)
         .bind(&timestamp)
-        .bind(payload.park_id)
+        .bind(park_id)
         .execute(&state.db)
         .await?;
     }
@@ -363,7 +414,9 @@ pub async fn publish_map(
 ) -> Result<Json<ApiResponse<MapVersion>>, AppError> {
     let map = fetch_map(&state, &id).await?;
     if map.status == "已归档" {
-        return Err(AppError::BadRequest("已归档的地图基线不能重新发布".to_string()));
+        return Err(AppError::BadRequest(
+            "已归档的地图基线不能重新发布".to_string(),
+        ));
     }
     let timestamp = now();
     let mut transaction = state.db.begin().await?;
@@ -385,13 +438,15 @@ pub async fn publish_map(
     } else {
         "已标定"
     };
-    sqlx::query("UPDATE parks SET map_version_id = ?1, map_status = ?2, updated_at = ?3 WHERE id = ?4")
-        .bind(&id)
-        .bind(park_status)
-        .bind(&timestamp)
-        .bind(map.park_id)
-        .execute(&mut *transaction)
-        .await?;
+    sqlx::query(
+        "UPDATE parks SET map_version_id = ?1, map_status = ?2, updated_at = ?3 WHERE id = ?4",
+    )
+    .bind(&id)
+    .bind(park_status)
+    .bind(&timestamp)
+    .bind(map.park_id)
+    .execute(&mut *transaction)
+    .await?;
     transaction.commit().await?;
     Ok(ApiResponse::ok(fetch_map(&state, &id).await?))
 }
@@ -464,13 +519,15 @@ pub async fn new_map_version(
     } else {
         "已标定"
     };
-    sqlx::query("UPDATE parks SET map_version_id = ?1, map_status = ?2, updated_at = ?3 WHERE id = ?4")
-        .bind(&new_id)
-        .bind(park_status)
-        .bind(&timestamp)
-        .bind(map.park_id)
-        .execute(&mut *transaction)
-        .await?;
+    sqlx::query(
+        "UPDATE parks SET map_version_id = ?1, map_status = ?2, updated_at = ?3 WHERE id = ?4",
+    )
+    .bind(&new_id)
+    .bind(park_status)
+    .bind(&timestamp)
+    .bind(map.park_id)
+    .execute(&mut *transaction)
+    .await?;
     transaction.commit().await?;
 
     Ok(ApiResponse::ok(fetch_map(&state, &new_id).await?))
@@ -774,5 +831,9 @@ fn demo_hash(id: &str, timestamp: &str) -> String {
     let mut hasher = DefaultHasher::new();
     id.hash(&mut hasher);
     timestamp.hash(&mut hasher);
-    format!("{:016x}{:016x}", hasher.finish(), hasher.finish().rotate_left(17))
+    format!(
+        "{:016x}{:016x}",
+        hasher.finish(),
+        hasher.finish().rotate_left(17)
+    )
 }

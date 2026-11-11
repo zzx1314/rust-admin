@@ -16,7 +16,7 @@
 | 后端业务代码 | `backend/src/business/dog/{map,media,model,config,statistics}/` |
 | 后端路由 | `backend/src/api/routes.rs`（每个子域一个 `dog_*_routes`，统一挂 `require_auth`） |
 | 服务装配 | `backend/src/app.rs` → `App::build_state_with_token_store` |
-| 数据库迁移 | `backend/migrations/dog/7_create_dog_tables.sql`（建表）、`.../19_add_map_file_fields.sql`、`.../22_add_map_baseline_*.sql`、`.../23_add_map_dimensions.sql`、`.../24_drop_retired_dog_tables.sql`（删除园区/设备/任务/路线/工作流/绑定表并从 `dog_map` 移除 `park_id`）、`.../25_drop_command_services_tables.sql` |
+| 数据库迁移 | `backend/migrations/dog/7_create_dog_tables.sql`（建表）、`.../19_add_map_file_fields.sql`、`.../22_add_map_baseline_*.sql`、`.../23_add_map_dimensions.sql`、`.../24_drop_retired_dog_tables.sql`（删除园区/设备/任务/路线/工作流/绑定表并从 `dog_map` 移除 `park_id`）、`.../25_drop_command_services_tables.sql`、`.../26_add_map_park.sql`（`dog_map` 新增业务园区编码/名称，供按园区检索地图） |
 | 菜单 | `backend/migrations/p_sys/9_add_dog_menus.sql`、`.../21_remove_retired_dog_menus.sql`、`.../22_remove_command_services_menus.sql` |
 | 前端页面 | `frontend/src/views/dog/{map,media,model,config}/` |
 | 前端请求封装 | `frontend/src/api/dog{Map,Media,Model,Config,Statistics}.ts` |
@@ -31,7 +31,7 @@
 
 | 表 | 说明 | 关键字段 |
 | --- | --- | --- |
-| `dog_map` | 地图基线版本 | `map_name`、`map_type`、`file_name`、`file_path`、`file_format`、`file_size`、`remarks`、`user_id`(创建者)、`map_version`、`frame_id`、`crs`、`map_origin`、`resolution`、`floors`、`road_count`、`nogo_count`、`map_status`(草稿/部分标定/已发布/已归档)、`map_hash`(上传时计算的 SHA-256)、`map_width`/`map_height`、`publish_time`；地图以 `.zip` 包上传，文件落盘到 `<upload_dir>/maps/`。上传时后端解析 PGM/YAML 并回写 resolution/origin/尺寸/哈希，表单值与包内容冲突会被拒绝。发布后版本不可变 |
+| `dog_map` | 地图基线版本 | `map_name`、`map_type`、`file_name`、`file_path`、`file_format`、`file_size`、`remarks`、`user_id`(创建者)、`map_version`、`frame_id`、`crs`、`map_origin`、`resolution`、`floors`、`road_count`、`nogo_count`、`map_status`(草稿/部分标定/已发布/已归档)、`map_hash`(上传时计算的 SHA-256)、`map_width`/`map_height`、`publish_time`、`park_code`/`park_name`(业务园区归属，可选)；地图以 `.zip` 包上传，文件落盘到 `<upload_dir>/maps/`。上传时后端解析 PGM/YAML 并回写 resolution/origin/尺寸/哈希，表单值与包内容冲突会被拒绝。发布后版本不可变 |
 | `dog_model` | 模型 | `model_name`、`model_type`、`file_name`、`file_path`、`file_format`、`file_size`、`remarks` |
 | `dog_media` | 媒体 | `media_name`、`media_type`、`media_path`、`media_size`、`remarks` |
 | `dog_config` | 参数配置 | `config_name`、`config_value`、`description` |
@@ -63,6 +63,18 @@ GET    /api/dogStatistics/allType   上周 / 本周数量趋势
 
 - `module` ∈ `dogMap`、`dogMedia`、`dogModel`、`dogConfig`，均提供 `getPage` + `getAll`。
 - 统计接口同样需要登录（`require_auth`）。
+
+### 3.0 地图归属园区
+
+园区台账在 `business/` 业务平台（`parks` 表），中台不建园区表、不做外键约束，
+`dog_map` 只保存业务侧的 `park_code` / `park_name`（均可空）：
+
+- 设备端建图回传时，业务平台会把设备绑定的园区随 `mapInfo` 写入
+  （`parkCode` / `parkName`），因此每张机器人地图都自带园区归属。
+- `GET /api/dogMap/getPage` 支持 `parkCode` 精确过滤；`GET /api/dogMap/getAll` 同样返回这两个字段。
+- 业务平台拉取地图（`business/server` 的 `/api/map-versions/backend`）时可按 `parkCode` 过滤，
+  导入业务库时未指定园区也能按 `parkCode` 自动回填。
+- 历史地图没有园区信息，落为 `NULL`，不影响现有查询。
 
 ### 3.1 数据权限
 

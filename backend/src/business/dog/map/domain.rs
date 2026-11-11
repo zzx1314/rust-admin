@@ -29,6 +29,10 @@ pub fn is_valid_map_status(status: &str) -> bool {
 pub struct CreateMapRequest {
     pub map_name: String,
     pub map_type: Option<String>,
+    /// 归属园区编码（业务库 `parks.park_code`）
+    pub park_code: Option<String>,
+    /// 归属园区名称（冗余展示）
+    pub park_name: Option<String>,
     pub map_data: Option<String>,
     pub file_name: Option<String>,
     pub file_path: Option<String>,
@@ -58,6 +62,10 @@ pub struct UploadMapRequest {
     pub id: Option<i64>,
     pub map_name: String,
     pub map_type: Option<String>,
+    /// 归属园区编码（业务库 `parks.park_code`）
+    pub park_code: Option<String>,
+    /// 归属园区名称（冗余展示）
+    pub park_name: Option<String>,
     pub remarks: Option<String>,
     pub map_version: Option<String>,
     pub frame_id: Option<String>,
@@ -78,6 +86,8 @@ pub struct UploadMapRequest {
 pub struct UpdateMapRequest {
     pub map_name: Option<String>,
     pub map_type: Option<String>,
+    pub park_code: Option<String>,
+    pub park_name: Option<String>,
     pub map_data: Option<String>,
     pub file_name: Option<String>,
     pub file_path: Option<String>,
@@ -104,6 +114,8 @@ pub struct MapPageQuery {
     pub map_name: Option<String>,
     pub file_name: Option<String>,
     pub map_status: Option<String>,
+    /// 按业务园区编码筛选
+    pub park_code: Option<String>,
     pub begin_time: Option<String>,
     pub end_time: Option<String>,
     #[serde(default = "default_current")]
@@ -118,6 +130,8 @@ pub struct MapVO {
     pub id: i64,
     pub map_name: String,
     pub map_type: Option<String>,
+    pub park_code: Option<String>,
+    pub park_name: Option<String>,
     pub map_data: Option<String>,
     pub user_id: i64,
     pub file_name: Option<String>,
@@ -164,6 +178,8 @@ impl From<DogMap> for MapVO {
             id: m.id,
             map_name: m.map_name,
             map_type: m.map_type,
+            park_code: m.park_code,
+            park_name: m.park_name,
             map_data: m.map_data,
             user_id: m.user_id,
             file_name: m.file_name,
@@ -196,6 +212,8 @@ impl CreateMapRequest {
             id: ActiveValue::set(id),
             map_name: ActiveValue::set(self.map_name.clone()),
             map_type: ActiveValue::set(self.map_type.clone()),
+            park_code: ActiveValue::set(normalize_text(self.park_code.clone())),
+            park_name: ActiveValue::set(normalize_text(self.park_name.clone())),
             map_data: ActiveValue::set(self.map_data.clone()),
             user_id: ActiveValue::set(user_id),
             create_time: ActiveValue::set(now),
@@ -227,6 +245,12 @@ impl CreateMapRequest {
             map_height: ActiveValue::set(self.map_height),
         }
     }
+}
+
+fn normalize_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
 }
 
 fn default_current() -> i64 {

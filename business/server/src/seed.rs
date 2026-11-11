@@ -458,6 +458,18 @@ async fn seed_business_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .await?;
     }
 
+    // 演示「刚接入、尚未绑定园区」的设备：注册后需在设备管理里手动绑定园区
+    sqlx::query(
+        "INSERT INTO devices (device_id, model, park_id, zone_id, status, battery, signal,
+            temperature, runtime_minutes, odometer, position, current_task_name, last_heartbeat,
+            firmware, device_ip, created_at, updated_at)
+         VALUES ('RD-013', 'X30-Pro', NULL, NULL, '待绑定', 100, 4, 32.0, 0, 0, NULL, '—',
+            NULL, 'v2.6.1', NULL, ?1, ?1)",
+    )
+    .bind(&created)
+    .execute(pool)
+    .await?;
+
     seed_routes(pool, &created).await?;
 
     let tasks = [

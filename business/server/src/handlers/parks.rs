@@ -143,10 +143,14 @@ pub async fn delete_park(
         .bind(id)
         .execute(&mut *transaction)
         .await?;
-    sqlx::query("UPDATE devices SET park_id = NULL, zone_id = NULL WHERE park_id = ?1")
-        .bind(id)
-        .execute(&mut *transaction)
-        .await?;
+    sqlx::query(
+        "UPDATE devices SET park_id = NULL, zone_id = NULL,
+            status = CASE WHEN status = '离线' THEN '离线' ELSE '待绑定' END
+         WHERE park_id = ?1",
+    )
+    .bind(id)
+    .execute(&mut *transaction)
+    .await?;
     sqlx::query("UPDATE tasks SET park_id = NULL, zone_id = NULL WHERE park_id = ?1")
         .bind(id)
         .execute(&mut *transaction)

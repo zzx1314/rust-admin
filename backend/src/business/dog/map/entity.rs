@@ -11,6 +11,12 @@ pub struct Model {
     pub map_name: String,
     #[sea_orm(column_name = "map_type", column_type = "Text", nullable)]
     pub map_type: Option<String>,
+    /// 归属园区编码（业务库 `parks.park_code`，中台不建园区表）
+    #[sea_orm(column_name = "park_code", column_type = "Text", nullable)]
+    pub park_code: Option<String>,
+    /// 归属园区名称，冗余存储便于中台列表展示
+    #[sea_orm(column_name = "park_name", column_type = "Text", nullable)]
+    pub park_name: Option<String>,
     #[sea_orm(column_name = "map_data", column_type = "Text", nullable)]
     pub map_data: Option<String>,
     #[sea_orm(column_name = "user_id", column_type = "Integer")]

@@ -2,11 +2,13 @@ mod app;
 mod auth;
 mod config;
 mod db;
+mod dispatch;
 mod error;
 mod gateway;
 mod gateway_types;
 mod geo;
 mod handlers;
+mod ingest;
 mod models;
 mod seed;
 

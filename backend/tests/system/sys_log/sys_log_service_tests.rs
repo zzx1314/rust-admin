@@ -53,10 +53,10 @@ impl SysLogRepository for FakeSysLogRepository {
         let id = *id;
         Box::pin(async move {
             let log = logs.lock().unwrap().get(&id).cloned();
-            if let Some(ref l) = log {
-                if l.is_deleted == 0 {
-                    return Ok(log);
-                }
+            if let Some(ref l) = log
+                && l.is_deleted == 0
+            {
+                return Ok(log);
             }
             Ok(None)
         })
@@ -88,48 +88,40 @@ impl SysLogRepository for FakeSysLogRepository {
                 .values()
                 .filter(|l| l.is_deleted == 0)
                 .filter(|l| {
-                    if let Some(ref v) = query.tenant {
-                        if !l.tenant.as_ref().map_or(false, |t| t.contains(v.as_str())) {
-                            return false;
-                        }
+                    if let Some(ref v) = query.tenant
+                        && !l.tenant.as_ref().is_some_and(|t| t.contains(v.as_str()))
+                    {
+                        return false;
                     }
-                    if let Some(ref v) = query.type_ {
-                        if !l.type_.as_ref().map_or(false, |t| t.contains(v.as_str())) {
-                            return false;
-                        }
+                    if let Some(ref v) = query.type_
+                        && !l.type_.as_ref().is_some_and(|t| t.contains(v.as_str()))
+                    {
+                        return false;
                     }
-                    if let Some(ref v) = query.sub_type {
-                        if !l
-                            .sub_type
-                            .as_ref()
-                            .map_or(false, |t| t.contains(v.as_str()))
-                        {
-                            return false;
-                        }
+                    if let Some(ref v) = query.sub_type
+                        && !l.sub_type.as_ref().is_some_and(|t| t.contains(v.as_str()))
+                    {
+                        return false;
                     }
-                    if let Some(ref v) = query.biz_no {
-                        if !l.biz_no.as_ref().map_or(false, |t| t.contains(v.as_str())) {
-                            return false;
-                        }
+                    if let Some(ref v) = query.biz_no
+                        && !l.biz_no.as_ref().is_some_and(|t| t.contains(v.as_str()))
+                    {
+                        return false;
                     }
-                    if let Some(ref v) = query.operator {
-                        if !l
-                            .operator
-                            .as_ref()
-                            .map_or(false, |t| t.contains(v.as_str()))
-                        {
-                            return false;
-                        }
+                    if let Some(ref v) = query.operator
+                        && !l.operator.as_ref().is_some_and(|t| t.contains(v.as_str()))
+                    {
+                        return false;
                     }
-                    if let Some(ref v) = query.action {
-                        if !l.action.as_ref().map_or(false, |t| t.contains(v.as_str())) {
-                            return false;
-                        }
+                    if let Some(ref v) = query.action
+                        && !l.action.as_ref().is_some_and(|t| t.contains(v.as_str()))
+                    {
+                        return false;
                     }
-                    if let Some(ref v) = query.ip {
-                        if !l.ip.as_ref().map_or(false, |t| t.contains(v.as_str())) {
-                            return false;
-                        }
+                    if let Some(ref v) = query.ip
+                        && !l.ip.as_ref().is_some_and(|t| t.contains(v.as_str()))
+                    {
+                        return false;
                     }
                     true
                 })
@@ -151,7 +143,7 @@ impl SysLogRepository for FakeSysLogRepository {
                     is_deleted: l.is_deleted,
                 })
                 .collect();
-            vec.sort_by(|a, b| b.id.cmp(&a.id));
+            vec.sort_by_key(|b| std::cmp::Reverse(b.id));
             let total = vec.len() as i64;
             let offset = (query.page() - 1) * query.size();
             let records: Vec<SysLogVO> = vec
@@ -179,7 +171,7 @@ impl SysLogRepository for FakeSysLogRepository {
         let ip = req.ip.clone();
         Box::pin(async move {
             let mut logs_lock = logs.lock().unwrap();
-            if logs_lock.get(&id).map_or(true, |l| l.is_deleted != 0) {
+            if logs_lock.get(&id).is_none_or(|l| l.is_deleted != 0) {
                 return Ok(None);
             }
             if let Some(log) = logs_lock.get_mut(&id) {
@@ -260,7 +252,7 @@ async fn test_create_log_success() {
     let log = result.unwrap();
     assert_eq!(log.type_, Some("login".to_string()));
     assert_eq!(log.operator, Some("admin".to_string()));
-    assert_eq!(log.fail, false);
+    assert!(!log.fail);
     assert_eq!(log.is_deleted, 0);
 }
 
@@ -369,7 +361,7 @@ async fn test_update_log_success() {
     let result = service.update_log(&1i64, update_req).await.unwrap();
     assert_eq!(result.type_, Some("error".to_string()));
     assert_eq!(result.action, Some("登录失败".to_string()));
-    assert_eq!(result.fail, true);
+    assert!(result.fail);
     // Unchanged fields remain the same
     assert_eq!(result.operator, Some("admin".to_string()));
     assert_eq!(result.ip, Some("127.0.0.1".to_string()));
@@ -640,7 +632,7 @@ async fn test_create_log_with_fail_status() {
     };
 
     let result = service.create_log(req).await.unwrap();
-    assert_eq!(result.fail, true);
+    assert!(result.fail);
     assert_eq!(result.type_, Some("error".to_string()));
     assert_eq!(result.sub_type, Some("runtime".to_string()));
     assert_eq!(result.extra, Some("connection timeout".to_string()));

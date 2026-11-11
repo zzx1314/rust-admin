@@ -69,9 +69,33 @@ export interface Device {
   lastHeartbeat: string | null;
   firmware: string | null;
   deviceIp: string | null;
+  /** 实时视频地址（RTSP / HLS / FLV / WebRTC） */
+  videoUrl: string | null;
+  /** 视频协议类型：none / hls / flv / webrtc / rtsp / mp4 */
+  videoType: string;
+  /** 当前远程接管人；为空表示无人接管 */
+  teleopHolder: string | null;
+  teleopAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
+
+/** 遥控摇杆三轴，取值 -1 ~ 1 */
+export interface TeleopAxes {
+  forward: number;
+  strafe: number;
+  turn: number;
+  speed?: number;
+}
+
+/** 本体动作机器码 */
+export type DeviceAction =
+  | "stand_up"
+  | "lie_down"
+  | "emergency_stop"
+  | "light_on"
+  | "light_off"
+  | "reset_pose";
 
 export interface Task {
   id: number;
@@ -95,6 +119,11 @@ export interface Task {
   progress: number;
   dispatchPolicy: string | null;
   description: string | null;
+  /** 智航 Pro 本体侧任务标识 */
+  robotTaskId: string | null;
+  /** 智航 Pro 执行阶段（mapping.* / navigation.* / patrol.* / recharge.* …） */
+  robotStage: string | null;
+  robotUpdatedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -193,6 +222,10 @@ export interface MapVersion {
 export interface BackendMap {
   id: number;
   mapName: string;
+  /** 归属园区编码（业务库 parks.park_code，中台只存不校验） */
+  parkCode: string | null;
+  /** 归属园区名称 */
+  parkName: string | null;
   fileName: string | null;
   filePath: string | null;
   fileFormat: string | null;

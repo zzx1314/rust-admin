@@ -52,7 +52,7 @@ impl MenuRepository for FakeMenuRepository {
         let permission = req.permission.clone();
         let path_url = req.path_url.clone();
         let icon = req.icon.clone();
-        let parent_id = req.parent_id.clone();
+        let parent_id = req.parent_id;
         let component = req.component.clone();
         let sort = req.sort;
         let keep_alive = req.keep_alive;
@@ -61,7 +61,7 @@ impl MenuRepository for FakeMenuRepository {
         let leaf = req.leaf;
         let role_code = req.role_code.clone();
         let disabled = req.disabled;
-        let find_auth_id = req.find_auth_id.clone();
+        let find_auth_id = req.find_auth_id;
         Box::pin(async move {
             let menu = Menu {
                 id,
@@ -118,7 +118,7 @@ impl MenuRepository for FakeMenuRepository {
                 .filter(|m| {
                     m.is_deleted == 0
                         && match parent_id {
-                            Some(pid) => m.parent_id.map_or(false, |id| id == pid),
+                            Some(pid) => m.parent_id == Some(pid),
                             None => m.parent_id.is_none(),
                         }
                 })
@@ -152,7 +152,7 @@ impl MenuRepository for FakeMenuRepository {
                     m.is_deleted == 0
                         && m.role_code
                             .as_ref()
-                            .map_or(false, |c| c == &role_id.to_string())
+                            .is_some_and(|c| c == &role_id.to_string())
                 })
                 .cloned()
                 .collect())
@@ -167,7 +167,7 @@ impl MenuRepository for FakeMenuRepository {
         let permission = req.permission.clone();
         let path_url = req.path_url.clone();
         let icon = req.icon.clone();
-        let parent_id = req.parent_id.clone();
+        let parent_id = req.parent_id;
         let component = req.component.clone();
         let sort = req.sort;
         let keep_alive = req.keep_alive;
@@ -176,7 +176,7 @@ impl MenuRepository for FakeMenuRepository {
         let leaf = req.leaf;
         let role_code = req.role_code.clone();
         let disabled = req.disabled;
-        let find_auth_id = req.find_auth_id.clone();
+        let find_auth_id = req.find_auth_id;
         Box::pin(async move {
             let mut menus_lock = menus.lock().unwrap();
             if let Some(menu) = menus_lock.get_mut(&id) {

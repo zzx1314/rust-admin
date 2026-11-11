@@ -374,6 +374,7 @@ mod tests {
                 "add_map_dimensions",
                 "drop_retired_dog_tables",
                 "drop_command_services_tables",
+                "add_map_park",
             ]
         );
         assert_eq!(migrations[0].name(), "p_sys_tables_from_file");

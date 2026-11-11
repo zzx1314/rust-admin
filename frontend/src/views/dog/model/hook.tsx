@@ -79,7 +79,9 @@ export function useDogModel() {
     onSearch();
   }
   function handleSelectionChange(_val) {}
-  const handleSubmitError = (err: any) => console.log(err);
+  const handleSubmitError = (err: any) => {
+    console.log(err);
+  };
   const handleSubmit = (_values: FieldValues) => {
     if (addForm.value.id) {
       dogModelUpdate(addForm.value.id, addForm.value).then(res => {

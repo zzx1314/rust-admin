@@ -226,6 +226,18 @@ const submitForm = async (formEl?: FormInstance) => {
             />
           </el-select>
         </el-form-item>
+        <el-form-item label="园区编码" prop="parkCode" style="width: 100%">
+          <el-input
+            v-model="addForm.parkCode"
+            placeholder="业务平台园区编码，如 PK-001（机器人回传时自动填写）"
+          />
+        </el-form-item>
+        <el-form-item label="园区名称" prop="parkName" style="width: 100%">
+          <el-input
+            v-model="addForm.parkName"
+            placeholder="业务平台园区名称（冗余展示）"
+          />
+        </el-form-item>
         <el-form-item label="基线版本" prop="mapVersion" style="width: 100%">
           <el-input v-model="addForm.mapVersion" placeholder="例如：v1.0" />
         </el-form-item>

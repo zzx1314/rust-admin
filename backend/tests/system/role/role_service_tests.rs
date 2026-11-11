@@ -37,7 +37,7 @@ impl RoleRepository for FakeRoleRepository {
         let ds_scope = req.ds_scope.clone();
         Box::pin(async move {
             let role = Role {
-                id: id,
+                id,
                 name: name.clone(),
                 code,
                 description: description.clone(),
@@ -85,10 +85,10 @@ impl RoleRepository for FakeRoleRepository {
                 vec.retain(|r| r.name.to_lowercase().contains(&pattern));
             }
             if let Some(ref v) = query.code {
-                vec.retain(|r| r.code.as_ref().map_or(false, |c| c == v));
+                vec.retain(|r| r.code.as_ref() == Some(v));
             }
 
-            vec.sort_by(|a, b| b.id.cmp(&a.id));
+            vec.sort_by_key(|b| std::cmp::Reverse(b.id));
             let total = vec.len() as i64;
             let offset = (query.page() - 1) * query.size();
             let records: Vec<Role> = vec
@@ -188,10 +188,8 @@ impl RoleRepository for FakeRoleRepository {
                 })
                 .unwrap_or(false);
 
-            if removed_from_user {
-                if let Some(users) = role_users.lock().unwrap().get_mut(&role_id) {
-                    users.retain(|u| u != &user_id);
-                }
+            if removed_from_user && let Some(users) = role_users.lock().unwrap().get_mut(&role_id) {
+                users.retain(|u| u != &user_id);
             }
             Ok(removed_from_user)
         })
@@ -229,8 +227,7 @@ impl RoleRepository for FakeRoleRepository {
                 .unwrap_or_default();
             Ok(users
                 .into_iter()
-                .enumerate()
-                .map(|(_i, uid)| User {
+                .map(|uid| User {
                     id: uid,
                     username: format!("User {}", uid),
                     phone: None,

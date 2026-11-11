@@ -1,7 +1,6 @@
 use axum::body::to_bytes;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use serde_json;
 use x_rust::common::error::{AppError, FAIL_CODE};
 
 #[tokio::test]

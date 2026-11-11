@@ -61,10 +61,10 @@ impl SysDictRepository for FakeSysDictRepository {
         let id = *id;
         Box::pin(async move {
             let dict = dicts.lock().unwrap().get(&id).cloned();
-            if let Some(ref d) = dict {
-                if d.is_deleted == 0 {
-                    return Ok(dict);
-                }
+            if let Some(ref d) = dict
+                && d.is_deleted == 0
+            {
+                return Ok(dict);
             }
             Ok(None)
         })
@@ -78,9 +78,8 @@ impl SysDictRepository for FakeSysDictRepository {
                 .lock()
                 .unwrap()
                 .values()
-                .filter(|d| d.is_deleted == 0 && d.r#type == r#type)
-                .cloned()
-                .next();
+                .find(|d| d.is_deleted == 0 && d.r#type == r#type)
+                .cloned();
             Ok(dict)
         })
     }
@@ -111,19 +110,18 @@ impl SysDictRepository for FakeSysDictRepository {
                 .values()
                 .filter(|d| d.is_deleted == 0)
                 .filter(|d| {
-                    if let Some(ref v) = query.r#type {
-                        if !d.r#type.contains(v.as_str()) {
-                            return false;
-                        }
+                    if let Some(ref v) = query.r#type
+                        && !d.r#type.contains(v.as_str())
+                    {
+                        return false;
                     }
-                    if let Some(ref v) = query.description {
-                        if !d
+                    if let Some(ref v) = query.description
+                        && !d
                             .description
                             .as_ref()
-                            .map_or(false, |desc| desc.contains(v.as_str()))
-                        {
-                            return false;
-                        }
+                            .is_some_and(|desc| desc.contains(v.as_str()))
+                    {
+                        return false;
                     }
                     true
                 })
@@ -257,10 +255,10 @@ impl SysDictItemRepository for FakeSysDictItemRepository {
         let id = *id;
         Box::pin(async move {
             let item = items.lock().unwrap().get(&id).cloned();
-            if let Some(ref i) = item {
-                if i.is_deleted == 0 {
-                    return Ok(item);
-                }
+            if let Some(ref i) = item
+                && i.is_deleted == 0
+            {
+                return Ok(item);
             }
             Ok(None)
         })
@@ -320,20 +318,20 @@ impl SysDictItemRepository for FakeSysDictItemRepository {
                 .values()
                 .filter(|i| i.is_deleted == 0)
                 .filter(|i| {
-                    if let Some(v) = query.dict_id {
-                        if i.dict_id != Some(v) {
-                            return false;
-                        }
+                    if let Some(v) = query.dict_id
+                        && i.dict_id != Some(v)
+                    {
+                        return false;
                     }
-                    if let Some(ref v) = query.r#type {
-                        if !i.r#type.contains(v.as_str()) {
-                            return false;
-                        }
+                    if let Some(ref v) = query.r#type
+                        && !i.r#type.contains(v.as_str())
+                    {
+                        return false;
                     }
-                    if let Some(ref v) = query.label {
-                        if !i.label.as_ref().map_or(false, |l| l.contains(v.as_str())) {
-                            return false;
-                        }
+                    if let Some(ref v) = query.label
+                        && !i.label.as_ref().is_some_and(|l| l.contains(v.as_str()))
+                    {
+                        return false;
                     }
                     true
                 })
@@ -356,7 +354,7 @@ impl SysDictItemRepository for FakeSysDictItemRepository {
                     allow_deletion: i.allow_deletion,
                 })
                 .collect();
-            vec.sort_by(|a, b| a.sort.cmp(&b.sort));
+            vec.sort_by_key(|a| a.sort);
             let total = vec.len() as i64;
             let offset = (query.page() - 1) * query.size();
             let records: Vec<SysDictItemVO> = vec

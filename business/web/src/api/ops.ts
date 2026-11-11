@@ -9,6 +9,7 @@ import type {
   MapRefs,
   MapVersion,
   Park,
+  TeleopAxes,
   Route,
   RouteValidation,
   Setting,
@@ -45,8 +46,9 @@ export const mapApi = {
     post<MapVersion>(`/map-versions/${encodeURIComponent(id)}/new-version`, {
       note
     }),
-  backendMaps: () => get<BackendMap[]>("/map-versions/backend"),
-  importBackend: (backendMapId: number, parkId: number, bind = true) =>
+  backendMaps: (params?: object) =>
+    get<BackendMap[]>("/map-versions/backend", params),
+  importBackend: (backendMapId: number, parkId?: number, bind = true) =>
     post<MapVersion>("/map-versions/import-backend", {
       backendMapId,
       parkId,
@@ -64,18 +66,53 @@ export const zoneApi = {
 export const deviceApi = {
   list: (params?: object) => get<Device[]>("/devices", params),
   stats: () =>
-    get<{ total: number; online: number; counts: Record<string, number> }>(
-      "/devices/stats"
-    ),
+    get<{
+      total: number;
+      online: number;
+      unbound: number;
+      counts: Record<string, number>;
+    }>("/devices/stats"),
   get: (id: number) => get<Device>(`/devices/${id}`),
   create: (data: object) => post<Device>("/devices", data),
   update: (id: number, data: object) => put<Device>(`/devices/${id}`, data),
   remove: (id: number) => del<boolean>(`/devices/${id}`),
+  /** 手动把设备绑定到园区（可同时指定区域） */
+  bind: (id: number, parkId: number, zoneId?: number | null) =>
+    post<Device>(`/devices/${id}/bind`, { parkId, zoneId }),
+  /** 解除园区绑定，设备回到「待绑定」 */
+  unbind: (id: number) => del<Device>(`/devices/${id}/bind`),
   refresh: () => post<number>("/devices/refresh"),
   command: (id: number, command: string) =>
-    post<{ deviceId: string; command: string; dispatchedAt: string }>(
-      `/devices/${id}/command`,
-      { command }
+    post<{
+      deviceId: string;
+      command: string;
+      dispatchedAt: string;
+      wsDelivered: boolean;
+      teleopHolder: string | null;
+    }>(`/devices/${id}/command`, { command }),
+
+  // ── 远程接管 ────────────────────────────────────────────
+  /** 必须接管后才能下发摇杆与动作 */
+  takeOver: (id: number) =>
+    post<{ deviceId: string; holder: string; expiresInSec: number; wsDelivered: boolean }>(
+      `/devices/${id}/teleop/take`
+    ),
+  release: (id: number) =>
+    post<{ deviceId: string; released: boolean; wsDelivered: boolean }>(
+      `/devices/${id}/teleop/release`
+    ),
+  /** 保活，刷新接管超时 */
+  ping: (id: number) =>
+    post<{ deviceId: string; expiresInSec: number }>(`/devices/${id}/teleop/ping`),
+  teleop: (id: number, axes: TeleopAxes) =>
+    post<{ deviceId: string; stopped: boolean; wsDelivered: boolean }>(
+      `/devices/${id}/teleop`,
+      axes
+    ),
+  action: (id: number, action: string) =>
+    post<{ deviceId: string; action: string; label: string; wsDelivered: boolean }>(
+      `/devices/${id}/action`,
+      { action }
     )
 };
 

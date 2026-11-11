@@ -30,25 +30,45 @@ const deviceDialog = ref(false);
 const editingDevice = ref<Device | null>(null);
 const batchDialog = ref(false);
 const batchCommand = ref("开始巡检");
+/** 绑定园区弹窗 */
+const bindDialog = ref(false);
+const bindTarget = ref<Device | null>(null);
+const bindForm = reactive({
+  parkId: null as number | null,
+  zoneId: null as number | null
+});
 
 const deviceForm = reactive({
   deviceId: "",
   model: "X30-Pro",
-  parkId: 1,
-  zoneId: 1,
-  status: "在线待命",
+  parkId: null as number | null,
+  zoneId: null as number | null,
+  status: "待绑定",
   battery: 100,
   signal: 4,
   temperature: 32,
   firmware: "v2.6.1",
-  deviceIp: ""
+  deviceIp: "",
+  videoUrl: "",
+  videoType: "none"
 });
+
+/** 视频协议选项，none 表示未接入 */
+const VIDEO_TYPES = [
+  { value: "none", label: "未接入" },
+  { value: "hls", label: "HLS（.m3u8）" },
+  { value: "flv", label: "HTTP-FLV（.flv）" },
+  { value: "mp4", label: "MP4 / WebM" },
+  { value: "webrtc", label: "WebRTC（需信令网关）" },
+  { value: "rtsp", label: "RTSP（需服务端转码）" }
+];
 
 const statusTabs = [
   { key: "全部", label: "全部设备", color: "#0284c7" },
   { key: "在线", label: "在线设备", color: "#10b981" },
   { key: "执行任务", label: "执行任务", color: "#3b82f6" },
   { key: "充电中", label: "充电中", color: "#f59e0b" },
+  { key: "待绑定", label: "待绑定", color: "#a855f7" },
   { key: "离线", label: "离线", color: "#94a3b8" },
   { key: "故障", label: "故障", color: "#ef4444" }
 ];
@@ -73,6 +93,10 @@ const filteredDevices = computed(() => {
 
 const zonesOfPark = computed(() =>
   zones.value.filter(zone => zone.parkId === deviceForm.parkId)
+);
+
+const zonesOfBindPark = computed(() =>
+  zones.value.filter(zone => zone.parkId === bindForm.parkId)
 );
 
 function countOf(key: string) {
@@ -103,6 +127,13 @@ async function closeDrawer() {
   drawerOpen.value = false;
 }
 
+/** 接管/释放后刷新当前设备与列表，保持抽屉数据同步 */
+async function refreshActive() {
+  await load();
+  const id = activeDevice.value?.id;
+  activeDevice.value = id ? (devices.value.find(d => d.id === id) ?? null) : null;
+}
+
 async function sendCommand(command: string) {
   if (!activeDevice.value) return;
   await deviceApi.command(activeDevice.value.id, command);
@@ -116,14 +147,17 @@ function openCreateDevice() {
   Object.assign(deviceForm, {
     deviceId: `RD-${String(25 + devices.value.length).padStart(3, "0")}`,
     model: "X30-Pro",
-    parkId: parks.value[0]?.id ?? 1,
-    zoneId: zones.value[0]?.id ?? 1,
-    status: "在线待命",
+    // 新设备默认不绑定园区，由人工在设备管理里绑定
+    parkId: null,
+    zoneId: null,
+    status: "待绑定",
     battery: 100,
     signal: 4,
     temperature: 32,
     firmware: "v2.6.1",
-    deviceIp: ""
+    deviceIp: "",
+    videoUrl: "",
+    videoType: "none"
   });
   deviceDialog.value = true;
 }
@@ -133,14 +167,16 @@ function openEditDevice(device: Device) {
   Object.assign(deviceForm, {
     deviceId: device.deviceId,
     model: device.model ?? "X30-Pro",
-    parkId: device.parkId ?? parks.value[0]?.id ?? 1,
-    zoneId: device.zoneId ?? zones.value[0]?.id ?? 1,
+    parkId: device.parkId,
+    zoneId: device.zoneId,
     status: device.status,
     battery: device.battery,
     signal: device.signal,
     temperature: device.temperature,
     firmware: device.firmware ?? "v2.6.1",
-    deviceIp: device.deviceIp ?? ""
+    deviceIp: device.deviceIp ?? "",
+    videoUrl: device.videoUrl ?? "",
+    videoType: device.videoType ?? "none"
   });
   deviceDialog.value = true;
 }
@@ -191,8 +227,8 @@ function exportDevices() {
     ...filteredDevices.value.map(device => [
       device.deviceId,
       device.model,
-      device.parkName,
-      device.zoneName,
+      device.parkName ?? "未绑定",
+      device.zoneName ?? "",
       device.status,
       device.battery,
       device.signal,
@@ -218,11 +254,58 @@ watch(
 watch(
   () => deviceForm.parkId,
   () => {
+    if (deviceForm.parkId === null) {
+      deviceForm.zoneId = null;
+      if (deviceForm.status === "在线待命") deviceForm.status = "待绑定";
+      return;
+    }
     if (!zonesOfPark.value.some(zone => zone.id === deviceForm.zoneId)) {
-      deviceForm.zoneId = zonesOfPark.value[0]?.id ?? 1;
+      deviceForm.zoneId = zonesOfPark.value[0]?.id ?? null;
+    }
+    if (deviceForm.status === "待绑定") deviceForm.status = "在线待命";
+  }
+);
+
+watch(
+  () => bindForm.parkId,
+  () => {
+    if (!zonesOfBindPark.value.some(zone => zone.id === bindForm.zoneId)) {
+      bindForm.zoneId = null;
     }
   }
 );
+
+/** 手动绑定园区 */
+function openBind(device: Device) {
+  bindTarget.value = device;
+  bindForm.parkId = device.parkId ?? parks.value[0]?.id ?? null;
+  bindForm.zoneId = device.zoneId ?? null;
+  bindDialog.value = true;
+}
+
+async function submitBind() {
+  if (!bindTarget.value || !bindForm.parkId) {
+    ElMessage.warning("请选择园区");
+    return;
+  }
+  const parkId = bindForm.parkId;
+  await deviceApi.bind(bindTarget.value.id, parkId, bindForm.zoneId);
+  bindDialog.value = false;
+  await load();
+  ElMessage.success(`设备 ${bindTarget.value.deviceId} 已绑定园区`);
+}
+
+async function unbind(device: Device) {
+  await ElMessageBox.confirm(
+    `解除后设备「${device.deviceId}」将进入待绑定状态，且无法下发任务。是否继续？`,
+    "解除园区绑定",
+    { type: "warning" }
+  );
+  await deviceApi.unbind(device.id);
+  bindDialog.value = false;
+  await load();
+  ElMessage.success("已解除园区绑定");
+}
 
 onMounted(load);
 </script>
@@ -319,8 +402,8 @@ onMounted(load);
                 </div>
               </td>
               <td>
-                {{ device.parkName }}
-                <div class="cell-sub">{{ device.zoneName }}</div>
+                {{ device.parkName || "未绑定" }}
+                <div class="cell-sub">{{ device.zoneName || (device.parkName ? "未指定区域" : "待手动绑定园区") }}</div>
               </td>
               <td><StatusBadge :status="device.status" /></td>
               <td style="min-width: 130px"><ProgressBar :value="device.battery" /></td>
@@ -334,6 +417,14 @@ onMounted(load);
                 <div class="actions" @click.stop>
                   <button class="btn sm" @click="openDrawer(device)">
                     <AppIcon name="play" />控制
+                  </button>
+                  <button
+                    v-if="!device.parkId"
+                    class="btn sm"
+                    style="color: #7c3aed"
+                    @click="openBind(device)"
+                  >
+                    <AppIcon name="park" />绑定园区
                   </button>
                   <button class="btn sm ghost icon" @click="openEditDevice(device)">
                     <AppIcon name="edit" />
@@ -365,6 +456,7 @@ onMounted(load);
       :open="drawerOpen"
       @close="closeDrawer"
       @command="sendCommand"
+      @changed="refreshActive"
     />
 
     <el-dialog
@@ -386,6 +478,7 @@ onMounted(load);
         <div class="field">
           <label>所属园区</label>
           <select v-model.number="deviceForm.parkId" class="select">
+            <option :value="null">未绑定（稍后手动绑定）</option>
             <option v-for="park in parks" :key="park.id" :value="park.id">
               {{ park.parkName }}
             </option>
@@ -393,7 +486,12 @@ onMounted(load);
         </div>
         <div class="field">
           <label>所属区域</label>
-          <select v-model.number="deviceForm.zoneId" class="select">
+          <select
+            v-model.number="deviceForm.zoneId"
+            class="select"
+            :disabled="!deviceForm.parkId"
+          >
+            <option :value="null">未指定</option>
             <option v-for="zone in zonesOfPark" :key="zone.id" :value="zone.id">
               {{ zone.zoneName }}
             </option>
@@ -425,11 +523,73 @@ onMounted(load);
           <label>设备 IP</label>
           <input v-model="deviceForm.deviceIp" class="input" placeholder="选填" />
         </div>
+        <div class="field">
+          <label>视频协议</label>
+          <select v-model="deviceForm.videoType" class="select">
+            <option v-for="item in VIDEO_TYPES" :key="item.value" :value="item.value">
+              {{ item.label }}
+            </option>
+          </select>
+        </div>
+        <div class="field" style="grid-column: 1 / -1">
+          <label>视频地址</label>
+          <input
+            v-model="deviceForm.videoUrl"
+            class="input mono"
+            placeholder="rtsp://192.168.10.21:554/stream1 或 http://.../live.m3u8"
+          />
+          <small class="muted" style="font-size: 11px">
+            留空则设备详情显示「未配置」。选「未接入」时会按地址后缀自动识别协议。
+          </small>
+        </div>
       </div>
       <template #footer>
         <button class="btn" @click="deviceDialog = false">取消</button>
         <button class="btn primary" @click="saveDevice">
           <AppIcon name="check" />保存
+        </button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="bindDialog" title="绑定园区" width="460px">
+      <p class="muted" style="font-size: 12px; line-height: 1.7">
+        设备编号：<b class="mono">{{ bindTarget?.deviceId }}</b>。绑定园区后设备才能接收任务，
+        建图回传也会带上该园区，便于业务平台按园区从中台检索地图。
+      </p>
+      <div class="field">
+        <label>目标园区 <em>*</em></label>
+        <select v-model.number="bindForm.parkId" class="select">
+          <option :value="null">请选择园区</option>
+          <option v-for="park in parks" :key="park.id" :value="park.id">
+            {{ park.parkName }}
+          </option>
+        </select>
+      </div>
+      <div class="field">
+        <label>所属区域</label>
+        <select
+          v-model.number="bindForm.zoneId"
+          class="select"
+          :disabled="!bindForm.parkId"
+        >
+          <option :value="null">不指定区域</option>
+          <option v-for="zone in zonesOfBindPark" :key="zone.id" :value="zone.id">
+            {{ zone.zoneName }}
+          </option>
+        </select>
+      </div>
+      <template #footer>
+        <button
+          v-if="bindTarget?.parkId"
+          class="btn"
+          style="color: #dc2626"
+          @click="unbind(bindTarget)"
+        >
+          解除绑定
+        </button>
+        <button class="btn" @click="bindDialog = false">取消</button>
+        <button class="btn primary" @click="submitBind">
+          <AppIcon name="check" />确认绑定
         </button>
       </template>
     </el-dialog>

@@ -109,6 +109,8 @@ async fn create_map(state: &AppState, name: &str) {
             CreateMapRequest {
                 map_name: name.to_string(),
                 map_type: None,
+                park_code: None,
+                park_name: None,
                 map_data: None,
                 file_name: None,
                 file_path: None,

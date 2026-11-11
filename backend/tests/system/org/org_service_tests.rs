@@ -85,7 +85,6 @@ impl OrgRepository for FakeOrgRepository {
 
     fn find_by_parent_id(&self, parent_id: Option<i64>) -> DynFuture<SeaOrmResult<Vec<Org>>> {
         let data = self.data.clone();
-        let parent_id = parent_id;
         Box::pin(async move {
             Ok(data
                 .lock()

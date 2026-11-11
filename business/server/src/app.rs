@@ -3,7 +3,9 @@ use crate::config::Config;
 use crate::error::ApiResponse;
 use crate::gateway;
 use crate::gateway::DeviceConnections;
-use crate::handlers::{alerts, dashboard, devices, maps, parks, routes, settings, tasks, zones};
+use crate::handlers::{
+    alerts, dashboard, devices, ingest, maps, parks, routes, settings, tasks, teleop, zones,
+};
 use axum::extract::State;
 use axum::http::Method;
 use axum::middleware::from_fn_with_state;
@@ -28,6 +30,12 @@ async fn health(State(state): State<AppState>) -> Json<ApiResponse<Value>> {
         "status": "ok",
         "service": "robodog-ops-server",
         "database": state.config.database_path.display().to_string(),
+        // 建图回传中台是否就绪；未配置时机器人建图无法自动入库
+        "mapIngest": {
+            "ready": state.config.zentai_ready(),
+            "zentaiUrl": state.config.zentai_base_url,
+            "ingestDir": state.config.ingest_dir.display().to_string(),
+        },
     }))
 }
 
@@ -44,12 +52,19 @@ pub fn build_router(state: AppState) -> Router {
         .route("/parks/{id}/maps", get(maps::list_park_maps))
         .route("/map-versions", get(maps::list_maps))
         .route("/map-versions/backend", get(maps::list_backend_maps))
-        .route("/map-versions/import-backend", post(maps::import_backend_map))
+        .route(
+            "/map-versions/import-backend",
+            post(maps::import_backend_map),
+        )
+        .route("/map-versions/ingest", post(ingest::ingest_map))
         .route("/map-versions/{id}", get(maps::get_map))
         .route("/map-versions/{id}/raster", get(maps::map_raster))
         .route("/map-versions/{id}/refs", get(maps::map_refs))
         .route("/map-versions/{id}/publish", post(maps::publish_map))
-        .route("/map-versions/{id}/new-version", post(maps::new_map_version))
+        .route(
+            "/map-versions/{id}/new-version",
+            post(maps::new_map_version),
+        )
         .route("/zones", get(zones::list_zones).post(zones::create_zone))
         .route(
             "/zones/{id}",
@@ -70,6 +85,15 @@ pub fn build_router(state: AppState) -> Router {
                 .delete(devices::delete_device),
         )
         .route("/devices/{id}/command", post(devices::send_command))
+        .route(
+            "/devices/{id}/bind",
+            post(devices::bind_device).delete(devices::unbind_device),
+        )
+        .route("/devices/{id}/action", post(teleop::send_action))
+        .route("/devices/{id}/teleop", post(teleop::send_teleop))
+        .route("/devices/{id}/teleop/take", post(teleop::take_over))
+        .route("/devices/{id}/teleop/release", post(teleop::release))
+        .route("/devices/{id}/teleop/ping", post(teleop::keepalive))
         .route("/tasks", get(tasks::list_tasks).post(tasks::create_task))
         .route("/tasks/stats", get(tasks::task_stats))
         .route(
@@ -118,11 +142,14 @@ pub fn build_router(state: AppState) -> Router {
     let public = Router::new()
         .route("/auth/login", post(login_handler))
         .route("/health", get(health))
+        // 兼容历史上挂在 /api 下的设备网关路径（实际对外路径见下方 top-level 路由）
         .route("/ws/device", get(gateway::ws_handler));
 
     let api = public.merge(protected);
 
     let mut router = Router::new()
+        // 设备 WebSocket 网关：客户端与文档约定为 `/ws/device`
+        .route("/ws/device", get(gateway::ws_handler))
         .nest("/api", api)
         .with_state(state.clone())
         .layer(

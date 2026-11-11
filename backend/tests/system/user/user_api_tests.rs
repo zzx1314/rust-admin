@@ -416,7 +416,7 @@ async fn test_user_crud_flow() {
             &token,
             Request::builder()
                 .method("GET")
-                .uri(&format!("/api/sysUser/{}", user_id))
+                .uri(format!("/api/sysUser/{}", user_id))
                 .body(Body::empty())
                 .unwrap(),
         ))
@@ -430,7 +430,7 @@ async fn test_user_crud_flow() {
             &token,
             Request::builder()
                 .method("PUT")
-                .uri(&format!("/api/sysUser/{}", user_id))
+                .uri(format!("/api/sysUser/{}", user_id))
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"username":"updated","email":"updated@example.com","orgId":1}"#,
@@ -453,7 +453,7 @@ async fn test_user_crud_flow() {
             &token,
             Request::builder()
                 .method("DELETE")
-                .uri(&format!("/api/sysUser/{}", user_id))
+                .uri(format!("/api/sysUser/{}", user_id))
                 .body(Body::empty())
                 .unwrap(),
         ))
@@ -466,7 +466,7 @@ async fn test_user_crud_flow() {
             &token,
             Request::builder()
                 .method("GET")
-                .uri(&format!("/api/sysUser/{}", user_id))
+                .uri(format!("/api/sysUser/{}", user_id))
                 .body(Body::empty())
                 .unwrap(),
         ))

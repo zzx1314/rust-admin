@@ -2,23 +2,52 @@ use crate::app::AppState;
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::gateway;
-use crate::gateway_types::TaskDispatchPayload;
+use crate::gateway_types::TaskControlPayload;
 use crate::models::{Task, TaskQuery, TaskRequest, TaskStatusRequest};
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use serde_json::{Value, json};
-use sqlx::QueryBuilder;
-use tracing::info;
+use sqlx::{QueryBuilder, SqlitePool};
+use tracing::{info, warn};
 
 const TASK_SELECT: &str = "SELECT t.id, t.task_code, t.task_name, t.task_type, t.execute_mode,
     t.level, t.device_id, d.device_id AS device_code, t.park_id, p.park_name, t.zone_id,
     z.zone_name, t.route_id, r.route_code, r.route_name, t.plan_start, t.plan_end,
-    t.task_status, t.progress, t.dispatch_policy, t.description, t.created_at, t.updated_at
+    t.task_status, t.progress, t.dispatch_policy, t.description, t.robot_task_id,
+    t.robot_stage, t.robot_updated_at, t.created_at, t.updated_at
     FROM tasks t
     LEFT JOIN devices d ON d.id = t.device_id
     LEFT JOIN parks p ON p.id = t.park_id
     LEFT JOIN zones z ON z.id = t.zone_id
     LEFT JOIN routes r ON r.id = t.route_id";
+
+/// 任务只能下发给已绑定园区的设备，且任务园区必须与设备园区一致。
+async fn validate_device_park(
+    db: &SqlitePool,
+    device_id: Option<i64>,
+    park_id: Option<i64>,
+) -> Result<(), AppError> {
+    let Some(device_id) = device_id else {
+        return Ok(());
+    };
+    let device_park: Option<Option<i64>> =
+        sqlx::query_scalar("SELECT park_id FROM devices WHERE id = ?1")
+            .bind(device_id)
+            .fetch_optional(db)
+            .await?;
+    match device_park {
+        None => Err(AppError::NotFound(format!("设备 {device_id} 不存在"))),
+        Some(None) => Err(AppError::BadRequest(
+            "设备尚未绑定园区，无法下发任务".to_string(),
+        )),
+        Some(Some(bound_park)) => match park_id {
+            Some(park_id) if park_id != bound_park => Err(AppError::BadRequest(
+                "任务园区与设备绑定的园区不一致".to_string(),
+            )),
+            _ => Ok(()),
+        },
+    }
+}
 
 pub async fn list_tasks(
     State(state): State<AppState>,
@@ -91,6 +120,7 @@ pub async fn create_task(
     if payload.task_name.trim().is_empty() {
         return Err(AppError::BadRequest("任务名称不能为空".to_string()));
     }
+    validate_device_park(&state.db, payload.device_id, payload.park_id).await?;
     let next_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM tasks")
         .fetch_one(&state.db)
         .await?;
@@ -147,45 +177,23 @@ pub async fn create_task(
 
         if let Some(ref dcode) = device_code {
             let task = fetch_task(&state, id).await?;
-            let route_data: Option<Value> = if let Some(rid) = task.route_id {
-                let row: Option<String> = sqlx::query_scalar("SELECT route_data FROM routes WHERE id = ?1")
-                    .bind(rid)
-                    .fetch_optional(&state.db)
-                    .await
-                    .ok()
-                    .flatten();
-                row.and_then(|s| serde_json::from_str(&s).ok())
-            } else {
-                None
-            };
+            let dispatch = crate::dispatch::build_dispatch_payload(&state.db, &task).await?;
 
-            let dispatch = TaskDispatchPayload {
-                task_id: task.id,
-                task_code: task.task_code.clone(),
-                task_name: task.task_name.clone(),
-                task_type: task.task_type.clone(),
-                execute_mode: task.execute_mode.clone(),
-                route: route_data.clone().map(|_| json!({
-                    "routeId": task.route_id,
-                    "routeCode": task.route_code,
-                    "routeName": task.route_name,
-                })),
-                route_data,
-                plan_start: task.plan_start,
-                plan_end: task.plan_end,
-                dispatch_policy: task.dispatch_policy,
-                description: task.description,
-            };
-
-            let pushed = gateway::dispatch_task_to_device(&state.device_connections, dcode, &dispatch).await;
+            let pushed =
+                gateway::dispatch_task_to_device(&state.device_connections, dcode, &dispatch).await;
             if pushed {
                 // 更新任务状态为执行中
-                sqlx::query("UPDATE tasks SET task_status = '执行中', updated_at = ?1 WHERE id = ?2")
-                    .bind(now())
-                    .bind(id)
-                    .execute(&state.db)
-                    .await?;
-                info!("task {} pushed via WebSocket to device {}", task.task_code, dcode);
+                sqlx::query(
+                    "UPDATE tasks SET task_status = '执行中', updated_at = ?1 WHERE id = ?2",
+                )
+                .bind(now())
+                .bind(id)
+                .execute(&state.db)
+                .await?;
+                info!(
+                    "task {} pushed via WebSocket to device {}",
+                    task.task_code, dcode
+                );
             }
         }
     }
@@ -201,6 +209,9 @@ pub async fn update_task(
     let existing = fetch_task(&state, id).await?;
     let status = payload.task_status.unwrap_or(existing.task_status);
     let progress = payload.progress.unwrap_or(existing.progress);
+    let device_id = payload.device_id.or(existing.device_id);
+    let park_id = payload.park_id.or(existing.park_id);
+    validate_device_park(&state.db, device_id, park_id).await?;
     sqlx::query(
         "UPDATE tasks SET task_name = ?1, task_type = ?2, execute_mode = ?3, level = ?4,
             device_id = ?5, park_id = ?6, zone_id = ?7, route_id = ?8, plan_start = ?9,
@@ -215,8 +226,8 @@ pub async fn update_task(
     .bind(payload.task_type.or(existing.task_type))
     .bind(payload.execute_mode.or(existing.execute_mode))
     .bind(payload.level.or(existing.level))
-    .bind(payload.device_id.or(existing.device_id))
-    .bind(payload.park_id.or(existing.park_id))
+    .bind(device_id)
+    .bind(park_id)
     .bind(payload.zone_id.or(existing.zone_id))
     .bind(payload.route_id.or(existing.route_id))
     .bind(payload.plan_start.or(existing.plan_start))
@@ -256,6 +267,12 @@ pub async fn update_task_status(
         .bind(id)
         .execute(&state.db)
         .await?;
+
+    // 暂停 / 恢复 / 取消需要真正通知客户端去驱动本体
+    if let Some(action) = control_action(&payload.task_status) {
+        push_task_control(&state, &existing, action, payload.reason.as_deref()).await;
+    }
+
     record_event(
         &state,
         "status",
@@ -269,6 +286,52 @@ pub async fn update_task_status(
     )
     .await?;
     Ok(ApiResponse::ok(fetch_task(&state, id).await?))
+}
+
+/// 任务状态 → 客户端控制指令
+fn control_action(task_status: &str) -> Option<&'static str> {
+    match task_status {
+        "已暂停" => Some("pause"),
+        "执行中" => Some("resume"),
+        "已完成" | "异常" => Some("cancel"),
+        _ => None,
+    }
+}
+
+/// 通过 WebSocket 把控制指令推给设备；失败只记日志，不阻塞状态变更
+async fn push_task_control(state: &AppState, task: &Task, action: &str, reason: Option<&str>) {
+    let Some(device_pk) = task.device_id else {
+        return;
+    };
+    let Ok(Some(device_code)) =
+        sqlx::query_scalar::<_, String>("SELECT device_id FROM devices WHERE id = ?1")
+            .bind(device_pk)
+            .fetch_optional(&state.db)
+            .await
+    else {
+        return;
+    };
+
+    let control = TaskControlPayload {
+        task_id: task.id,
+        task_code: task.task_code.clone(),
+        action: action.to_string(),
+        reason: reason.map(str::to_string),
+    };
+    let sent =
+        gateway::send_task_control_to_device(&state.device_connections, &device_code, &control)
+            .await;
+    if sent {
+        info!(
+            "task control '{}' pushed to device {} for task {}",
+            action, device_code, task.task_code
+        );
+    } else {
+        warn!(
+            "device {} offline, task control '{}' for {} not delivered",
+            device_code, action, task.task_code
+        );
+    }
 }
 
 pub async fn delete_task(

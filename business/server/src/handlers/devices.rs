@@ -2,20 +2,111 @@ use crate::app::AppState;
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::gateway;
-use crate::models::{CommandRequest, Device, DeviceQuery, DeviceRequest};
+use crate::models::{BindParkRequest, CommandRequest, Device, DeviceQuery, DeviceRequest};
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use serde_json::{Value, json};
-use sqlx::QueryBuilder;
+use sqlx::{QueryBuilder, SqlitePool};
 use tracing::info;
 
-const DEVICE_SELECT: &str = "SELECT d.id, d.device_id, d.model, d.park_id, p.park_name,
+/// 视频地址归一化：去空白，空串视为未配置
+fn normalize_video_url(raw: Option<String>) -> Option<String> {
+    raw.map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
+}
+
+/// 视频类型归一化：未显式给出时按地址后缀推断
+///
+/// - 用户明确选了类型 → 用用户的选择（非法值回落 `none`）
+/// - 用户没选（`None` 或 `none`）但填了地址 → 按后缀推断
+fn normalize_video_type(raw: Option<String>, url: Option<&str>) -> String {
+    let explicit = raw
+        .map(|kind| kind.trim().to_ascii_lowercase())
+        .filter(|kind| !kind.is_empty() && kind != "none");
+    match explicit {
+        Some(kind) if VIDEO_KINDS.contains(&kind.as_str()) => kind,
+        Some(_) => "none".to_string(),
+        None => url.map(infer_video_type).unwrap_or("none").to_string(),
+    }
+}
+
+const VIDEO_KINDS: [&str; 6] = ["hls", "flv", "webrtc", "rtsp", "mp4", "none"];
+
+/// 从地址推断视频协议，供前端在用户只填了地址时自动选择播放器
+fn infer_video_type(url: &str) -> &'static str {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let lower = path.to_ascii_lowercase();
+    if lower.starts_with("rtsp://") {
+        "rtsp"
+    } else if lower.ends_with(".m3u8") {
+        "hls"
+    } else if lower.ends_with(".flv") {
+        "flv"
+    } else if lower.ends_with(".mp4") || lower.ends_with(".webm") {
+        "mp4"
+    } else if lower.starts_with("webrtc://") || lower.starts_with("whep://") {
+        "webrtc"
+    } else {
+        "none"
+    }
+}
+
+pub(crate) const DEVICE_SELECT: &str = "SELECT d.id, d.device_id, d.model, d.park_id, p.park_name,
     d.zone_id, z.zone_name, d.status, d.battery, d.signal, d.temperature, d.runtime_minutes,
     d.odometer, d.position, d.current_task_name, d.last_heartbeat, d.firmware, d.device_ip,
+    d.video_url, COALESCE(d.video_type, 'none') AS video_type,
+    d.teleop_holder, d.teleop_at,
     d.created_at, d.updated_at
     FROM devices d
     LEFT JOIN parks p ON p.id = d.park_id
     LEFT JOIN zones z ON z.id = d.zone_id";
+
+/// 未绑定园区的设备状态：新注册 / 解绑后的默认状态，不参与任务下发。
+pub const DEVICE_STATUS_UNBOUND: &str = "待绑定";
+
+/// 新建设备时的默认状态：有园区视为在线待命，无园区则为待绑定。
+fn default_status(park_id: Option<i64>) -> String {
+    if park_id.is_some() {
+        "在线待命".to_string()
+    } else {
+        DEVICE_STATUS_UNBOUND.to_string()
+    }
+}
+
+/// 校验园区存在，且（可选）区域属于该园区。
+async fn validate_park_zone(
+    db: &SqlitePool,
+    park_id: Option<i64>,
+    zone_id: Option<i64>,
+) -> Result<(), AppError> {
+    let Some(park_id) = park_id else {
+        if zone_id.is_some() {
+            return Err(AppError::BadRequest("绑定区域前请先选择园区".to_string()));
+        }
+        return Ok(());
+    };
+    let park_name: Option<String> = sqlx::query_scalar("SELECT park_name FROM parks WHERE id = ?1")
+        .bind(park_id)
+        .fetch_optional(db)
+        .await?;
+    if park_name.is_none() {
+        return Err(AppError::NotFound(format!("园区 {park_id} 不存在")));
+    }
+    if let Some(zone_id) = zone_id {
+        let belongs: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM zones WHERE id = ?1 AND park_id = ?2")
+                .bind(zone_id)
+                .bind(park_id)
+                .fetch_optional(db)
+                .await?;
+        if belongs.is_none() {
+            return Err(AppError::BadRequest(format!(
+                "区域 {zone_id} 不属于园区 {park_id}"
+            )));
+        }
+    }
+    Ok(())
+}
 
 pub async fn list_devices(
     State(state): State<AppState>,
@@ -67,6 +158,9 @@ pub async fn device_stats(
             .fetch_all(&state.db)
             .await?;
     let total: i64 = rows.iter().map(|(_, count)| count).sum();
+    let unbound: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM devices WHERE park_id IS NULL")
+        .fetch_one(&state.db)
+        .await?;
     let mut counts = serde_json::Map::new();
     let mut online = 0;
     for (status, count) in rows {
@@ -78,6 +172,7 @@ pub async fn device_stats(
     Ok(ApiResponse::ok(json!({
         "total": total,
         "online": online,
+        "unbound": unbound,
         "counts": counts,
     })))
 }
@@ -104,17 +199,24 @@ pub async fn create_device(
         return Err(AppError::BadRequest("设备编号已存在".to_string()));
     }
     let timestamp = now();
+    let park_id = payload.park_id;
+    let zone_id = payload.zone_id;
+    validate_park_zone(&state.db, park_id, zone_id).await?;
+    let status = payload.status.unwrap_or_else(|| default_status(park_id));
+    let video_url = normalize_video_url(payload.video_url);
+    let video_type = normalize_video_type(payload.video_type, video_url.as_deref());
     let result = sqlx::query(
         "INSERT INTO devices (device_id, model, park_id, zone_id, status, battery, signal,
             temperature, runtime_minutes, odometer, position, current_task_name, last_heartbeat,
-            firmware, device_ip, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            firmware, device_ip, video_url, video_type, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+            ?18, ?19)",
     )
     .bind(payload.device_id.trim())
     .bind(payload.model)
-    .bind(payload.park_id)
-    .bind(payload.zone_id)
-    .bind(payload.status.unwrap_or_else(|| "在线待命".to_string()))
+    .bind(park_id)
+    .bind(zone_id)
+    .bind(status)
     .bind(payload.battery.unwrap_or(100))
     .bind(payload.signal.unwrap_or(4))
     .bind(payload.temperature.unwrap_or(32.0))
@@ -125,6 +227,8 @@ pub async fn create_device(
     .bind(payload.last_heartbeat.unwrap_or_else(now))
     .bind(payload.firmware.unwrap_or_else(|| "v2.6.1".to_string()))
     .bind(payload.device_ip)
+    .bind(video_url)
+    .bind(video_type)
     .bind(&timestamp)
     .bind(&timestamp)
     .execute(&state.db)
@@ -139,11 +243,35 @@ pub async fn update_device(
     Json(payload): Json<DeviceRequest>,
 ) -> Result<Json<ApiResponse<Device>>, AppError> {
     let existing = fetch_device(&state, id).await?;
+    // 园区 / 区域：换了园区且未显式指定区域时自动清空区域，避免跨园区脏数据
+    let park_changed = payload.park_id.is_some() && payload.park_id != existing.park_id;
+    let park_id = payload.park_id.or(existing.park_id);
+    let zone_id = match payload.zone_id {
+        Some(zone_id) => Some(zone_id),
+        None if park_changed => None,
+        None => existing.zone_id,
+    };
+    validate_park_zone(&state.db, park_id, zone_id).await?;
+    // 视频配置：请求里没带就沿用旧值；带了空串表示清空
+    let video_url = match payload.video_url {
+        Some(url) => normalize_video_url(Some(url)),
+        None => existing.video_url.clone(),
+    };
+    let video_type = normalize_video_type(payload.video_type, video_url.as_deref());
+    // 已绑定园区但仍是待绑定的设备，保存后恢复正常在线待命
+    let status = payload.status.unwrap_or_else(|| {
+        if park_id.is_some() && existing.status == DEVICE_STATUS_UNBOUND {
+            "在线待命".to_string()
+        } else {
+            existing.status.clone()
+        }
+    });
     sqlx::query(
         "UPDATE devices SET device_id = ?1, model = ?2, park_id = ?3, zone_id = ?4,
             status = ?5, battery = ?6, signal = ?7, temperature = ?8, runtime_minutes = ?9,
             odometer = ?10, position = ?11, current_task_name = ?12, last_heartbeat = ?13,
-            firmware = ?14, device_ip = ?15, updated_at = ?16 WHERE id = ?17",
+            firmware = ?14, device_ip = ?15, video_url = ?16, video_type = ?17, updated_at = ?18
+         WHERE id = ?19",
     )
     .bind(if payload.device_id.trim().is_empty() {
         existing.device_id
@@ -151,9 +279,9 @@ pub async fn update_device(
         payload.device_id.trim().to_string()
     })
     .bind(payload.model.or(existing.model))
-    .bind(payload.park_id.or(existing.park_id))
-    .bind(payload.zone_id.or(existing.zone_id))
-    .bind(payload.status.unwrap_or(existing.status))
+    .bind(park_id)
+    .bind(zone_id)
+    .bind(status)
     .bind(payload.battery.unwrap_or(existing.battery))
     .bind(payload.signal.unwrap_or(existing.signal))
     .bind(payload.temperature.unwrap_or(existing.temperature))
@@ -164,10 +292,125 @@ pub async fn update_device(
     .bind(payload.last_heartbeat.or(existing.last_heartbeat))
     .bind(payload.firmware.or(existing.firmware))
     .bind(payload.device_ip.or(existing.device_ip))
+    .bind(&video_url)
+    .bind(&video_type)
     .bind(now())
     .bind(id)
     .execute(&state.db)
     .await?;
+    Ok(ApiResponse::ok(fetch_device(&state, id).await?))
+}
+
+/// `POST /api/devices/{id}/bind` — 手动把设备绑定到园区（可同时指定区域）。
+pub async fn bind_device(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(payload): Json<BindParkRequest>,
+) -> Result<Json<ApiResponse<Device>>, AppError> {
+    let device = fetch_device(&state, id).await?;
+    validate_park_zone(&state.db, Some(payload.park_id), payload.zone_id).await?;
+    let (park_code, park_name): (String, String) =
+        sqlx::query_as("SELECT park_code, park_name FROM parks WHERE id = ?1")
+            .bind(payload.park_id)
+            .fetch_one(&state.db)
+            .await?;
+    let timestamp = now();
+    // 只把「待绑定」推进为在线待命，已在线 / 充电 / 执行中的状态保持不变
+    let status = if device.status == DEVICE_STATUS_UNBOUND {
+        "在线待命".to_string()
+    } else {
+        device.status.clone()
+    };
+    sqlx::query(
+        "UPDATE devices SET park_id = ?1, zone_id = ?2, status = ?3, updated_at = ?4 WHERE id = ?5",
+    )
+    .bind(payload.park_id)
+    .bind(payload.zone_id)
+    .bind(&status)
+    .bind(&timestamp)
+    .bind(id)
+    .execute(&state.db)
+    .await?;
+    sqlx::query(
+        "INSERT INTO task_events (event_type, title, description, device_id, task_id, created_at)
+         VALUES ('binding', ?1, ?2, ?3, NULL, ?4)",
+    )
+    .bind(format!(
+        "设备 {} 已绑定园区：{}",
+        device.device_id, park_name
+    ))
+    .bind(format!("绑定前状态：{}；绑定后：{}", device.status, status))
+    .bind(id)
+    .bind(&timestamp)
+    .execute(&state.db)
+    .await?;
+    // 绑定后通知在线设备（建图回传归属），并补发该园区的待执行任务
+    gateway::notify_park_binding(
+        &state.device_connections,
+        &device.device_id,
+        Some(payload.park_id),
+        Some(&park_code),
+        Some(&park_name),
+    )
+    .await;
+    gateway::dispatch_pending_for_device(&state.db, &state.device_connections, &device.device_id)
+        .await;
+    Ok(ApiResponse::ok(fetch_device(&state, id).await?))
+}
+
+/// `DELETE /api/devices/{id}/bind` — 解除园区绑定，设备回到「待绑定」。
+pub async fn unbind_device(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<ApiResponse<Device>>, AppError> {
+    let device = fetch_device(&state, id).await?;
+    if device.park_id.is_none() {
+        return Ok(ApiResponse::ok(device));
+    }
+    let timestamp = now();
+    let status = if device.status == "离线" {
+        "离线".to_string()
+    } else {
+        DEVICE_STATUS_UNBOUND.to_string()
+    };
+    sqlx::query(
+        "UPDATE devices SET park_id = NULL, zone_id = NULL, status = ?1, updated_at = ?2
+         WHERE id = ?3",
+    )
+    .bind(&status)
+    .bind(&timestamp)
+    .bind(id)
+    .execute(&state.db)
+    .await?;
+    // 未开始执行的任务不能再留在未绑定设备上
+    sqlx::query(
+        "UPDATE tasks SET device_id = NULL WHERE device_id = ?1 AND task_status = '待执行'",
+    )
+    .bind(id)
+    .execute(&state.db)
+    .await?;
+    sqlx::query(
+        "INSERT INTO task_events (event_type, title, description, device_id, task_id, created_at)
+         VALUES ('binding', ?1, ?2, ?3, NULL, ?4)",
+    )
+    .bind(format!("设备 {} 已解除园区绑定", device.device_id))
+    .bind(format!(
+        "原园区：{}",
+        device.park_name.unwrap_or_else(|| "—".to_string())
+    ))
+    .bind(id)
+    .bind(&timestamp)
+    .execute(&state.db)
+    .await?;
+    // 通知在线设备：已解绑，建图不再自动回传
+    gateway::notify_park_binding(
+        &state.device_connections,
+        &device.device_id,
+        None,
+        None,
+        None,
+    )
+    .await;
     Ok(ApiResponse::ok(fetch_device(&state, id).await?))
 }
 
@@ -205,9 +448,18 @@ pub async fn send_command(
     Json(payload): Json<CommandRequest>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     let device = fetch_device(&state, id).await?;
-    let next_status = match payload.command.as_str() {
+    // 指令白名单：避免前端拼错或恶意字符串直接透传到客户端
+    let command = super::teleop::normalize_command(&payload.command)?;
+    // 未绑定园区的设备没有地图与路线归属，不允许启动巡检
+    if device.park_id.is_none() && matches!(command, "开始巡检" | "继续任务") {
+        return Err(AppError::BadRequest(
+            "设备尚未绑定园区，无法执行任务指令".to_string(),
+        ));
+    }
+    let next_status = match command {
         "开始巡检" => Some("执行任务"),
-        "暂停任务" => Some("在线待命"),
+        "暂停任务" | "释放接管" => Some("在线待命"),
+        "继续任务" => Some("执行任务"),
         "召回充电" => Some("充电中"),
         _ => None,
     };
@@ -224,10 +476,7 @@ pub async fn send_command(
         "INSERT INTO task_events (event_type, title, description, device_id, task_id, created_at)
          VALUES ('command', ?1, ?2, ?3, NULL, ?4)",
     )
-    .bind(format!(
-        "已向 {} 下发指令：{}",
-        device.device_id, payload.command
-    ))
+    .bind(format!("已向 {} 下发指令：{}", device.device_id, command))
     .bind(format!("当前设备状态：{}", device.status))
     .bind(id)
     .bind(&timestamp)
@@ -238,20 +487,47 @@ pub async fn send_command(
     let cmd_sent = gateway::send_command_to_device(
         &state.device_connections,
         &device.device_id,
-        &payload.command,
+        command,
         Some(json!({"dispatchedAt": timestamp})),
     )
     .await;
 
     if cmd_sent {
-        info!("command '{}' pushed via WebSocket to device {}", payload.command, device.device_id);
+        info!(
+            "command '{}' pushed via WebSocket to device {}",
+            command, device.device_id
+        );
     }
+
+    // 接管/释放同时维护接管态，避免前端还要多调一次接口
+    // holder 必须与 `/teleop/take` 使用同一标识，否则遥控会被判成「他人接管」
+    let teleop_holder = match command {
+        "远程接管" => {
+            let holder = super::teleop::operator_id(&device);
+            sqlx::query("UPDATE devices SET teleop_holder = ?1, teleop_at = ?2 WHERE id = ?3")
+                .bind(&holder)
+                .bind(&timestamp)
+                .bind(id)
+                .execute(&state.db)
+                .await?;
+            Some(holder)
+        }
+        "释放接管" => {
+            sqlx::query("UPDATE devices SET teleop_holder = NULL, teleop_at = NULL WHERE id = ?1")
+                .bind(id)
+                .execute(&state.db)
+                .await?;
+            None
+        }
+        _ => device.teleop_holder.clone(),
+    };
 
     Ok(ApiResponse::ok(json!({
         "deviceId": device.device_id,
-        "command": payload.command,
+        "command": command,
         "dispatchedAt": timestamp,
         "wsDelivered": cmd_sent,
+        "teleopHolder": teleop_holder,
     })))
 }
 
@@ -262,4 +538,15 @@ async fn fetch_device(state: &AppState, id: i64) -> Result<Device, AppError> {
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| AppError::NotFound("设备不存在".to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unbound_devices_default_to_pending_status() {
+        assert_eq!(default_status(None), DEVICE_STATUS_UNBOUND);
+        assert_eq!(default_status(Some(3)), "在线待命");
+    }
 }

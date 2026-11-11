@@ -18,5 +18,19 @@ export default defineConfig({
         changeOrigin: true
       }
     }
+  },
+  build: {
+    // element-plus / echarts 单个体积就超过默认 500 kB 阈值，
+    // 拆到独立 vendor chunk 以便长期缓存，并按实际体积调整告警阈值
+    chunkSizeWarningLimit: 1200,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          "vendor-vue": ["vue", "vue-router", "pinia"],
+          "vendor-element-plus": ["element-plus"],
+          "vendor-echarts": ["echarts"]
+        }
+      }
+    }
   }
 });

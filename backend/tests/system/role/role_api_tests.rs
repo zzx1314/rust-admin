@@ -424,7 +424,7 @@ async fn test_role_crud_flow() {
             &token,
             Request::builder()
                 .method("GET")
-                .uri(&format!("/api/sysRole/{}", role_id))
+                .uri(format!("/api/sysRole/{}", role_id))
                 .body(Body::empty())
                 .unwrap(),
         ))
@@ -438,7 +438,7 @@ async fn test_role_crud_flow() {
             &token,
             Request::builder()
                 .method("PUT")
-                .uri(&format!("/api/sysRole/{}", role_id))
+                .uri(format!("/api/sysRole/{}", role_id))
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"name":"Senior Editor"}"#))
                 .unwrap(),
@@ -459,7 +459,7 @@ async fn test_role_crud_flow() {
             &token,
             Request::builder()
                 .method("DELETE")
-                .uri(&format!("/api/sysRole/{}", role_id))
+                .uri(format!("/api/sysRole/{}", role_id))
                 .body(Body::empty())
                 .unwrap(),
         ))
@@ -472,7 +472,7 @@ async fn test_role_crud_flow() {
             &token,
             Request::builder()
                 .method("GET")
-                .uri(&format!("/api/sysRole/{}", role_id))
+                .uri(format!("/api/sysRole/{}", role_id))
                 .body(Body::empty())
                 .unwrap(),
         ))
@@ -539,7 +539,7 @@ async fn test_assign_role_to_user() {
             &token,
             Request::builder()
                 .method("POST")
-                .uri(&format!("/api/sysUser/{}/roles/{}", user_id, role_id))
+                .uri(format!("/api/sysUser/{}/roles/{}", user_id, role_id))
                 .body(Body::empty())
                 .unwrap(),
         ))
@@ -606,7 +606,7 @@ async fn test_get_user_roles() {
             &token,
             Request::builder()
                 .method("POST")
-                .uri(&format!("/api/sysUser/{}/roles/{}", user_id, role_id))
+                .uri(format!("/api/sysUser/{}/roles/{}", user_id, role_id))
                 .body(Body::empty())
                 .unwrap(),
         ))
@@ -618,7 +618,7 @@ async fn test_get_user_roles() {
             &token,
             Request::builder()
                 .method("GET")
-                .uri(&format!("/api/sysUser/{}/roles", user_id))
+                .uri(format!("/api/sysUser/{}/roles", user_id))
                 .body(Body::empty())
                 .unwrap(),
         ))

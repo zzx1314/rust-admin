@@ -56,6 +56,17 @@ export function useDogMap() {
           <span>-</span>
         )
     },
+    {
+      label: "归属园区",
+      prop: "parkName",
+      width: 150,
+      cellRenderer: ({ row }) =>
+        row.parkName || row.parkCode ? (
+          <span>{row.parkName || row.parkCode}</span>
+        ) : (
+          <span class="text-xs text-gray-400">未关联</span>
+        )
+    },
     { label: "文件名称", prop: "fileName", minWidth: 180 },
     {
       label: "基线版本",
@@ -129,7 +140,8 @@ export function useDogMap() {
       type: "select",
       options: MAP_STATUS_OPTIONS
     },
-    { label: "文件名称", prop: "fileName" }
+    { label: "文件名称", prop: "fileName" },
+    { label: "园区编码", prop: "parkCode" }
   ]);
   const moreQueryFields: DogSearchField[] = [...CREATE_TIME_FIELDS];
 
@@ -138,6 +150,7 @@ export function useDogMap() {
     mapType: "",
     mapStatus: "",
     fileName: "",
+    parkCode: "",
     beginTime: "",
     endTime: ""
   });
@@ -155,6 +168,10 @@ export function useDogMap() {
     id: number | null;
     mapName: string;
     mapType: string;
+    /** 归属园区编码（业务库 parks.park_code） */
+    parkCode: string;
+    /** 归属园区名称（展示冗余） */
+    parkName: string;
     remarks: string;
     mapVersion: string;
     frameId: string;
@@ -169,6 +186,8 @@ export function useDogMap() {
     id: null,
     mapName: "",
     mapType: "离线地图",
+    parkCode: "",
+    parkName: "",
     remarks: "",
     mapVersion: "v1.0",
     frameId: "",
@@ -189,6 +208,8 @@ export function useDogMap() {
       id: row.id,
       mapName: row.mapName ?? "",
       mapType: row.mapType ?? "",
+      parkCode: row.parkCode ?? "",
+      parkName: row.parkName ?? "",
       remarks: row.remarks ?? "",
       mapVersion: row.mapVersion ?? "v1.0",
       frameId: row.frameId ?? "",
@@ -221,7 +242,9 @@ export function useDogMap() {
     onSearch();
   }
   function handleSelectionChange(_val) {}
-  const handleSubmitError = (err: any) => console.log(err);
+  const handleSubmitError = (err: any) => {
+    console.log(err);
+  };
 
   /** 上传地图包并保存 / 更新地图记录。 */
   function onUpload(options: UploadRequestOptions) {
@@ -290,6 +313,8 @@ export function useDogMap() {
       id: null,
       mapName: "",
       mapType: "离线地图",
+      parkCode: "",
+      parkName: "",
       remarks: "",
       mapVersion: "v1.0",
       frameId: "",
@@ -306,6 +331,7 @@ export function useDogMap() {
       mapType: "",
       mapStatus: "",
       fileName: "",
+      parkCode: "",
       beginTime: "",
       endTime: ""
     };
@@ -325,10 +351,16 @@ export function useDogMap() {
   /** 已发布版本不可修改坐标系，只提交草稿版本的可变字段。 */
   function baselinePayload() {
     const form = addForm.value;
+    // 园区归属属于元数据，任何状态下都允许调整（由业务平台写入）
+    const park = {
+      parkCode: form.parkCode.trim() || undefined,
+      parkName: form.parkName.trim() || undefined
+    };
     if (form.id && form.mapStatus !== "草稿") {
-      return { mapStatus: form.mapStatus };
+      return { ...park, mapStatus: form.mapStatus };
     }
     return {
+      ...park,
       mapVersion: form.mapVersion || undefined,
       frameId: form.frameId || undefined,
       crs: form.crs || undefined,

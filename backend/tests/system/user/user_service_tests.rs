@@ -34,7 +34,7 @@ impl UserRepository for FakeUserRepository {
         let id = *id;
         Box::pin(async move {
             let user = User {
-                id: id,
+                id,
                 username: req.username.clone(),
                 phone: req.phone.clone(),
                 email: req.email.clone(),
@@ -170,29 +170,25 @@ impl UserRepository for FakeUserRepository {
                 .values()
                 .filter(|u| u.is_deleted == 0)
                 .filter(|u| {
-                    if let Some(ref v) = query.username {
-                        if !u.username.contains(v.as_str()) {
-                            return false;
-                        }
+                    if let Some(ref v) = query.username
+                        && !u.username.contains(v.as_str())
+                    {
+                        return false;
                     }
-                    if let Some(ref v) = query.real_name {
-                        if !u
-                            .real_name
-                            .as_ref()
-                            .map_or(false, |n| n.contains(v.as_str()))
-                        {
-                            return false;
-                        }
+                    if let Some(ref v) = query.real_name
+                        && !u.real_name.as_ref().is_some_and(|n| n.contains(v.as_str()))
+                    {
+                        return false;
                     }
-                    if let Some(ref v) = query.phone {
-                        if !u.phone.as_ref().map_or(false, |p| p.contains(v.as_str())) {
-                            return false;
-                        }
+                    if let Some(ref v) = query.phone
+                        && !u.phone.as_ref().is_some_and(|p| p.contains(v.as_str()))
+                    {
+                        return false;
                     }
-                    if let Some(ref v) = query.email {
-                        if !u.email.as_ref().map_or(false, |e| e.contains(v.as_str())) {
-                            return false;
-                        }
+                    if let Some(ref v) = query.email
+                        && !u.email.as_ref().is_some_and(|e| e.contains(v.as_str()))
+                    {
+                        return false;
                     }
                     if let Some(ref v) = query.org_id {
                         let query_org_id: i64 = v.parse().unwrap_or(0);
@@ -209,15 +205,15 @@ impl UserRepository for FakeUserRepository {
                             return false;
                         }
                     }
-                    if let Some(v) = query.enable {
-                        if u.enable != Some(v) {
-                            return false;
-                        }
+                    if let Some(v) = query.enable
+                        && u.enable != Some(v)
+                    {
+                        return false;
                     }
                     true
                 })
                 .map(|u| UserVO {
-                    id: u.id.clone(),
+                    id: u.id,
                     username: u.username.clone(),
                     phone: u.phone.clone(),
                     email: u.email.clone(),
@@ -242,7 +238,7 @@ impl UserRepository for FakeUserRepository {
                     is_edit: None,
                 })
                 .collect();
-            vec.sort_by(|a, b| b.id.cmp(&a.id));
+            vec.sort_by_key(|b| std::cmp::Reverse(b.id));
             let total = vec.len() as i64;
             let offset = (query.page() - 1) * query.size();
             let records: Vec<UserVO> = vec

@@ -20,6 +20,7 @@ export const STATUS_TONES: Record<string, string> = {
   严重: "danger",
   告警: "danger",
   待执行: "neutral",
+  待绑定: "warn",
   离线: "neutral",
   提示: "neutral",
   常规: "neutral",

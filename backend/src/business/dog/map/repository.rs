@@ -69,6 +69,11 @@ impl SeaOrmDogMapRepository {
         if let Some(ref file_name) = query.file_name {
             cond = cond.add(MapColumn::FileName.contains(file_name.as_str()));
         }
+        if let Some(ref park_code) = query.park_code
+            && !park_code.trim().is_empty()
+        {
+            cond = cond.add(MapColumn::ParkCode.eq(park_code.trim()));
+        }
         if let Some(ref status) = query.map_status
             && !status.trim().is_empty()
         {
@@ -136,6 +141,16 @@ impl SeaOrmDogMapRepository {
         }
         if let Some(map_type) = &req.map_type {
             active_model.map_type = ActiveValue::set(Some(map_type.clone()));
+        }
+        if let Some(park_code) = &req.park_code {
+            let trimmed = park_code.trim();
+            active_model.park_code =
+                ActiveValue::set((!trimmed.is_empty()).then(|| trimmed.to_string()));
+        }
+        if let Some(park_name) = &req.park_name {
+            let trimmed = park_name.trim();
+            active_model.park_name =
+                ActiveValue::set((!trimmed.is_empty()).then(|| trimmed.to_string()));
         }
         if let Some(map_data) = &req.map_data {
             active_model.map_data = ActiveValue::set(Some(map_data.clone()));

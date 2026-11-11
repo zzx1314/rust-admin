@@ -80,12 +80,7 @@ pub async fn create_route(
         .unwrap_or_else(|| empty_route_data(&loop_mode));
     let metrics = route_metrics(&route_data, speed);
     let timestamp = now();
-    let map = resolve_route_map(
-        &state,
-        payload.park_id,
-        payload.map_version_id.as_deref(),
-    )
-    .await?;
+    let map = resolve_route_map(&state, payload.park_id, payload.map_version_id.as_deref()).await?;
 
     let result = sqlx::query(
         "INSERT INTO routes (route_code, route_name, park_id, zone_id, model, status, version,
@@ -448,7 +443,9 @@ async fn resolve_route_map(
         .await?
         .ok_or_else(|| AppError::BadRequest(format!("地图基线 {requested} 不存在")))?;
         if row.2 == "已归档" {
-            return Err(AppError::BadRequest("已归档的地图基线不能用于新建路线".to_string()));
+            return Err(AppError::BadRequest(
+                "已归档的地图基线不能用于新建路线".to_string(),
+            ));
         }
         if let Some(park_id) = park_id
             && row.1 != park_id

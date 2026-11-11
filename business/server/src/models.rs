@@ -132,6 +132,14 @@ pub struct Device {
     pub last_heartbeat: Option<String>,
     pub firmware: Option<String>,
     pub device_ip: Option<String>,
+    /// 实时视频地址（RTSP / HLS / FLV / WebRTC），由本体自带服务提供
+    pub video_url: Option<String>,
+    /// 视频协议类型：none / hls / flv / webrtc / rtsp / mp4
+    pub video_type: String,
+    /// 当前远程接管人；为空表示无人接管，遥控指令一律拒绝
+    pub teleop_holder: Option<String>,
+    /// 接管时间，用于超时自动释放
+    pub teleop_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -160,6 +168,11 @@ pub struct Task {
     pub progress: i64,
     pub dispatch_policy: Option<String>,
     pub description: Option<String>,
+    /// 智航 Pro 本体侧任务标识
+    pub robot_task_id: Option<String>,
+    /// 智航 Pro 执行阶段（mapping.* / navigation.* / patrol.* / recharge.* …）
+    pub robot_stage: Option<String>,
+    pub robot_updated_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -300,6 +313,16 @@ pub struct DeviceRequest {
     pub last_heartbeat: Option<String>,
     pub firmware: Option<String>,
     pub device_ip: Option<String>,
+    pub video_url: Option<String>,
+    pub video_type: Option<String>,
+}
+
+/// 手动把设备绑定到园区（可同时指定园区下的区域）。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BindParkRequest {
+    pub park_id: i64,
+    pub zone_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -327,6 +350,9 @@ pub struct TaskRequest {
 pub struct TaskStatusRequest {
     pub task_status: String,
     pub progress: Option<i64>,
+    /// 暂停 / 取消的原因，会透传给客户端
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -357,7 +383,8 @@ pub struct MapVersionRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ImportBackendMapRequest {
     pub backend_map_id: i64,
-    pub park_id: i64,
+    /// 目标园区；缺省时按中台地图的 parkCode 反查业务园区
+    pub park_id: Option<i64>,
     #[serde(default)]
     pub bind: bool,
 }
@@ -367,6 +394,10 @@ pub struct ImportBackendMapRequest {
 pub struct BackendMap {
     pub id: i64,
     pub map_name: String,
+    /// 归属园区编码（业务库 `parks.park_code`，中台只存不校验）
+    pub park_code: Option<String>,
+    /// 归属园区名称（中台冗列存储）
+    pub park_name: Option<String>,
     pub file_name: Option<String>,
     pub file_path: Option<String>,
     pub file_format: Option<String>,
@@ -396,6 +427,13 @@ pub struct MapQuery {
     pub source: Option<String>,
 }
 
+/// 中台地图库筛选：按业务园区编码过滤
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendMapQuery {
+    pub park_code: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlertRequest {
@@ -419,6 +457,42 @@ pub struct SettingItem {
 #[serde(rename_all = "camelCase")]
 pub struct CommandRequest {
     pub command: String,
+}
+
+/// 遥控摇杆下发
+///
+/// `forward` / `strafe` / `turn` 取值 -1.0 ~ 1.0，全 0 表示停止。
+/// `speed` 为 0.1 ~ 1.0 的档位系数，缺省按 1.0。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeleopRequest {
+    #[serde(default)]
+    pub forward: f64,
+    #[serde(default)]
+    pub strafe: f64,
+    #[serde(default)]
+    pub turn: f64,
+    pub speed: Option<f64>,
+}
+
+impl TeleopRequest {
+    pub fn speed_ratio(&self) -> f64 {
+        self.speed.unwrap_or(1.0).clamp(0.1, 1.0)
+    }
+
+    /// 三轴全 0 即为停车指令
+    pub fn is_stop(&self) -> bool {
+        self.forward == 0.0 && self.strafe == 0.0 && self.turn == 0.0
+    }
+
+    pub fn clamped(&self) -> Self {
+        Self {
+            forward: self.forward.clamp(-1.0, 1.0),
+            strafe: self.strafe.clamp(-1.0, 1.0),
+            turn: self.turn.clamp(-1.0, 1.0),
+            speed: self.speed,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -110,13 +110,23 @@ const isBackendSelection = computed(() =>
 
 const availableBackendMaps = computed(() => {
   const parkId = editingPark.value?.id;
-  if (!parkId) return backendMaps.value;
+  const parkCode = editingPark.value?.parkCode ?? parkForm.parkCode;
   const imported = new Set(
-    mapsOfPark(parkId)
+    (parkId ? mapsOfPark(parkId) : [])
       .map(item => item.sourceId)
       .filter((value): value is string => Boolean(value))
   );
-  return backendMaps.value.filter(item => !imported.has(String(item.id)));
+  return backendMaps.value
+    .filter(item => {
+      if (imported.has(String(item.id))) return false;
+      // 中台地图若已带上园区编码，只展示本园区的，避免导错
+      return !item.parkCode || !parkCode || item.parkCode === parkCode;
+    })
+    .sort((a, b) => {
+      const matchA = a.parkCode && a.parkCode === parkCode ? 0 : 1;
+      const matchB = b.parkCode && b.parkCode === parkCode ? 0 : 1;
+      return matchA - matchB;
+    });
 });
 
 const boundParkCount = computed(
@@ -632,6 +642,7 @@ onMounted(load);
                 :value="`backend:${map.id}`"
               >
                 {{ map.mapName }} · {{ map.mapStatus || "草稿" }}
+                {{ map.parkName ? `· 园区 ${map.parkName}` : "· 未关联园区" }}
                 {{ map.fileName ? `· ${map.fileName}` : "" }}
                 {{ map.fileSize ? `· ${(map.fileSize / 1024).toFixed(0)} KB` : "" }}
               </option>

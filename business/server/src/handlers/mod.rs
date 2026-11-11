@@ -1,9 +1,11 @@
 pub mod alerts;
 pub mod dashboard;
 pub mod devices;
+pub mod ingest;
 pub mod maps;
 pub mod parks;
 pub mod routes;
 pub mod settings;
 pub mod tasks;
+pub mod teleop;
 pub mod zones;
