@@ -73,7 +73,6 @@ struct WsMessage {
 #[serde(rename_all = "camelCase")]
 struct HeartbeatPayload {
     battery: i64,
-    signal: i64,
     temperature: f64,
     position: String,
     odometer: f64,
@@ -90,6 +89,9 @@ struct HeartbeatPayload {
     /// 充电状态：本体 1315 `charging_pile_connect` / 电池 `power_supply_status`
     #[serde(skip_serializing_if = "Option::is_none")]
     charging: Option<bool>,
+    /// 本体工作模式（1315 `mode` / MachineStatus，如 `remote`、`auto`）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    robot_mode: Option<String>,
     /// 定位状态（智航 loc_state.status）
     #[serde(skip_serializing_if = "Option::is_none")]
     loc_status: Option<i64>,
@@ -135,7 +137,6 @@ struct DeviceEventPayload {
 /// 设备运行时状态：数值优先取本体 1315 上报，否则按任务推演
 struct RobotState {
     battery: i64,
-    signal: i64,
     temperature: f64,
     position: String,
     runtime_minutes: i64,
@@ -153,6 +154,8 @@ struct RobotState {
     mode: &'static str,
     /// 充电状态：来自 1315（充电桩接入 / 电池电源状态），模拟模式恒 false
     charging: bool,
+    /// 本体工作模式：1315 `mode`（协议里的 MachineStatus），如 remote / auto
+    robot_mode: Option<String>,
 }
 
 /// 本体状态新鲜窗口：1315 是 1Hz，30s 收不到就认为本体链路已不可信
@@ -162,7 +165,6 @@ impl RobotState {
     fn new(config: &Config) -> Self {
         Self {
             battery: config.battery,
-            signal: config.signal,
             temperature: 32.0,
             position: config.position.clone(),
             runtime_minutes: 0,
@@ -176,6 +178,7 @@ impl RobotState {
             body_status_at: None,
             mode: "sim",
             charging: false,
+            robot_mode: None,
         }
     }
 
@@ -240,6 +243,28 @@ impl RobotState {
             }
         }
 
+        // 本体工作模式：协议里叫 MachineStatus，网关以字符串 `mode` 下发
+        // （现场实测 `remote`）；个别固件给数值枚举，原样保留成字符串由前端展示
+        if let Some(mode) = data
+            .get("mode")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                data.get("machine_status")
+                    .or_else(|| data.get("machineStatus"))
+                    .and_then(|value| {
+                        value
+                            .as_str()
+                            .map(str::to_string)
+                            .or_else(|| value.as_i64().map(|code| code.to_string()))
+                    })
+            })
+        {
+            self.robot_mode = Some(mode);
+        }
+
         if let Some(mile) = data.get("mile_data").and_then(Value::as_f64) {
             self.odometer = mile;
         }
@@ -277,7 +302,6 @@ impl RobotState {
     fn heartbeat(&self) -> HeartbeatPayload {
         HeartbeatPayload {
             battery: self.battery,
-            signal: self.signal,
             temperature: f64::trunc(self.temperature * 10.0) / 10.0,
             position: self.position.clone(),
             odometer: f64::trunc(self.odometer * 10.0) / 10.0,
@@ -288,6 +312,7 @@ impl RobotState {
             body_online: self.body_status_fresh(),
             mode: self.mode.to_string(),
             charging: self.body_status_fresh().then_some(self.charging),
+            robot_mode: self.robot_mode.clone(),
             loc_status: Some(self.loc_status),
             map_id: self.active_map.clone(),
         }

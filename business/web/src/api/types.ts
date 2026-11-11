@@ -64,7 +64,6 @@ export interface Device {
   zoneName: string | null;
   status: string;
   battery: number;
-  signal: number;
   temperature: number;
   runtimeMinutes: number;
   odometer: number;
@@ -86,6 +85,8 @@ export interface Device {
   runMode: "robot" | "sim" | null;
   /** 充电状态：本体 1315 上报（不是按电量猜的） */
   charging: boolean;
+  /** 本体工作模式：1315 `mode`（协议里的 MachineStatus），如 remote / auto */
+  robotMode: string | null;
   createdAt: string;
   updatedAt: string;
 }

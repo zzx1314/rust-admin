@@ -352,7 +352,7 @@ cargo run -- --print-config      # 查看脱敏后的生效配置
 | `mapping.park_id` | `ROBODOG_PARK_ID` | `--park-id` | 空（用控制台绑定的园区） |
 | `mapping.ingest_name` | — | `--ingest-map-name` | 空（用本体目录名） |
 | `mapping.once` | — | `--map-only` | `false` |
-| `simulation.battery` / `signal` / `position` / `firmware` | — | `--battery` / `--signal` / `--position` / `--firmware` | `86` / `4` / `0.0, 0.0` / `Hermes_M_v0.3.2` |
+| `simulation.battery` / `position` / `firmware` | — | `--battery` / `--position` / `--firmware` | `86` / `0.0, 0.0` / `Hermes_M_v0.3.2` |
 | `log.filter` | `RUST_LOG`（优先） | — | `robodog_device_client=info` |
 
 > `server.device_id` 是**唯一设备身份**（必须与业务库 `devices.device_id` 一致）；

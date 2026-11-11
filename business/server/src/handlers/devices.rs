@@ -54,12 +54,12 @@ fn infer_video_type(url: &str) -> &'static str {
 }
 
 pub(crate) const DEVICE_SELECT: &str = "SELECT d.id, d.device_id, d.model, d.park_id, p.park_name,
-    d.zone_id, z.zone_name, d.status, d.battery, d.signal, d.temperature, d.runtime_minutes,
+    d.zone_id, z.zone_name, d.status, d.battery, d.temperature, d.runtime_minutes,
     d.odometer, d.position, d.current_task_name, d.last_heartbeat, d.firmware, d.device_ip,
     d.video_url, COALESCE(d.video_type, 'none') AS video_type,
     d.teleop_holder, d.teleop_at,
     COALESCE(d.body_online, 0) AS body_online, d.run_mode,
-    COALESCE(d.charging, 0) AS charging,
+    COALESCE(d.charging, 0) AS charging, d.robot_mode,
     d.created_at, d.updated_at
     FROM devices d
     LEFT JOIN parks p ON p.id = d.park_id
@@ -266,11 +266,11 @@ pub async fn create_device(
     let video_url = normalize_video_url(payload.video_url);
     let video_type = normalize_video_type(payload.video_type, video_url.as_deref());
     let result = sqlx::query(
-        "INSERT INTO devices (device_id, model, park_id, zone_id, status, battery, signal,
+        "INSERT INTO devices (device_id, model, park_id, zone_id, status, battery,
             temperature, runtime_minutes, odometer, position, current_task_name, last_heartbeat,
             firmware, device_ip, video_url, video_type, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-            ?18, ?19)",
+            ?18)",
     )
     .bind(payload.device_id.trim())
     .bind(payload.model)
@@ -278,7 +278,6 @@ pub async fn create_device(
     .bind(zone_id)
     .bind(status)
     .bind(payload.battery.unwrap_or(100))
-    .bind(payload.signal.unwrap_or(4))
     .bind(payload.temperature.unwrap_or(32.0))
     .bind(payload.runtime_minutes.unwrap_or(0))
     .bind(payload.odometer.unwrap_or(0.0))
@@ -331,10 +330,10 @@ pub async fn update_device(
     });
     sqlx::query(
         "UPDATE devices SET device_id = ?1, model = ?2, park_id = ?3, zone_id = ?4,
-            status = ?5, battery = ?6, signal = ?7, temperature = ?8, runtime_minutes = ?9,
-            odometer = ?10, position = ?11, current_task_name = ?12, last_heartbeat = ?13,
-            firmware = ?14, device_ip = ?15, video_url = ?16, video_type = ?17, updated_at = ?18
-         WHERE id = ?19",
+            status = ?5, battery = ?6, temperature = ?7, runtime_minutes = ?8,
+            odometer = ?9, position = ?10, current_task_name = ?11, last_heartbeat = ?12,
+            firmware = ?13, device_ip = ?14, video_url = ?15, video_type = ?16, updated_at = ?17
+         WHERE id = ?18",
     )
     .bind(if payload.device_id.trim().is_empty() {
         existing.device_id
@@ -346,7 +345,6 @@ pub async fn update_device(
     .bind(zone_id)
     .bind(status)
     .bind(payload.battery.unwrap_or(existing.battery))
-    .bind(payload.signal.unwrap_or(existing.signal))
     .bind(payload.temperature.unwrap_or(existing.temperature))
     .bind(payload.runtime_minutes.unwrap_or(existing.runtime_minutes))
     .bind(payload.odometer.unwrap_or(existing.odometer))

@@ -45,13 +45,28 @@ const deviceForm = reactive({
   zoneId: null as number | null,
   status: "待绑定",
   battery: 100,
-  signal: 4,
   temperature: 32,
   firmware: "v2.6.1",
   deviceIp: "",
   videoUrl: "",
   videoType: "none"
 });
+
+/** 本体工作模式（1315 mode / MachineStatus）→ 中文；未知值原样展示 */
+const ROBOT_MODE_LABELS: Record<string, string> = {
+  remote: "遥控",
+  auto: "自动",
+  manual: "手动",
+  idle: "待机",
+  standby: "待机",
+  mapping: "建图",
+  charging: "充电",
+  estop: "急停"
+};
+
+function robotModeLabel(mode: string) {
+  return ROBOT_MODE_LABELS[mode.toLowerCase()] ?? mode;
+}
 
 /** 视频协议选项，none 表示未接入 */
 const VIDEO_TYPES = [
@@ -152,7 +167,6 @@ function openCreateDevice() {
     zoneId: null,
     status: "待绑定",
     battery: 100,
-    signal: 4,
     temperature: 32,
     firmware: "v2.6.1",
     deviceIp: "",
@@ -171,7 +185,6 @@ function openEditDevice(device: Device) {
     zoneId: device.zoneId,
     status: device.status,
     battery: device.battery,
-    signal: device.signal,
     temperature: device.temperature,
     firmware: device.firmware ?? "v2.6.1",
     deviceIp: device.deviceIp ?? "",
@@ -224,16 +237,16 @@ async function batchDispatch() {
 
 function exportDevices() {
   downloadCsv("robodog-devices.csv", [
-    ["设备编号", "型号", "园区", "区域", "状态", "本体在线", "电量", "信号", "当前任务", "最后心跳"],
+    ["设备编号", "型号", "园区", "区域", "状态", "工作模式", "本体在线", "电量", "当前任务", "最后心跳"],
     ...filteredDevices.value.map(device => [
       device.deviceId,
       device.model,
       device.parkName ?? "未绑定",
       device.zoneName ?? "",
       device.status,
+      device.robotMode ? robotModeLabel(device.robotMode) : "—",
       device.bodyOnline ? "是" : "否",
       device.bodyOnline ? device.battery : "—",
-      "—",
       device.currentTaskName,
       device.lastHeartbeat
     ])
@@ -382,7 +395,7 @@ onMounted(load);
               <th>运行状态</th>
               <th>电量</th>
               <th>当前任务</th>
-              <th>信号</th>
+              <th>工作模式</th>
               <th>最后心跳</th>
               <th>操作</th>
             </tr>
@@ -430,8 +443,14 @@ onMounted(load);
               </td>
               <td><div class="cell-main" style="font-weight: 500">{{ device.currentTaskName }}</div></td>
               <td>
-                <AppIcon name="wifi" />
-                <span class="mono muted" style="margin-left: 5px" title="智航协议没有信号指标，本站不伪造">—</span>
+                <span
+                  v-if="device.robotMode"
+                  class="cell-main"
+                  :title="`本体 1315 mode = ${device.robotMode}`"
+                >
+                  {{ robotModeLabel(device.robotMode) }}
+                </span>
+                <span v-else class="mono muted" title="本体未上报工作模式">—</span>
               </td>
               <td class="mono muted">{{ timeOnly(device.lastHeartbeat) }}</td>
               <td>
@@ -531,10 +550,6 @@ onMounted(load);
         <div class="field">
           <label>电量（%，模拟/初始值）</label>
           <input v-model.number="deviceForm.battery" class="input" type="number" min="0" max="100" />
-        </div>
-        <div class="field">
-          <label>信号（0-4，协议无此指标）</label>
-          <input v-model.number="deviceForm.signal" class="input" type="number" min="0" max="4" />
         </div>
         <div class="field">
           <label>机身温度（℃）</label>

@@ -43,7 +43,6 @@ pub const DEFAULT_FIRMWARE: &str = "Hermes_M_v0.3.2";
 pub const DEFAULT_HEARTBEAT_SECS: u64 = 10;
 pub const DEFAULT_ROBOT_FILE_PORT: u16 = 12000;
 pub const DEFAULT_BATTERY: i64 = 86;
-pub const DEFAULT_SIGNAL: i64 = 4;
 pub const DEFAULT_POSITION: &str = "0.0, 0.0";
 pub const DEFAULT_API_USERNAME: &str = "admin";
 pub const DEFAULT_API_PASSWORD: &str = "admin123";
@@ -193,7 +192,6 @@ pub struct MappingSection {
 #[serde(default, deny_unknown_fields)]
 pub struct SimulationSection {
     pub battery: Option<i64>,
-    pub signal: Option<i64>,
     pub position: Option<String>,
     pub firmware: Option<String>,
 }
@@ -285,7 +283,6 @@ pub struct CliArgs {
     pub model: Option<String>,
     pub heartbeat: Option<u64>,
     pub battery: Option<i64>,
-    pub signal: Option<i64>,
     pub position: Option<String>,
     pub firmware: Option<String>,
     pub map_only: bool,
@@ -327,7 +324,6 @@ impl CliArgs {
             model: opt(&mut args, "--model")?,
             heartbeat: opt(&mut args, "--heartbeat")?,
             battery: opt(&mut args, "--battery")?,
-            signal: opt(&mut args, "--signal")?,
             position: opt(&mut args, "--position")?,
             firmware: opt(&mut args, "--firmware")?,
             map_only: args.contains("--map-only"),
@@ -388,7 +384,6 @@ pub fn print_help() {
   --model <型号>         设备型号：本体 1201 `type` 为空时用它（留空则不报）
   --heartbeat <秒>       心跳间隔 (默认: {DEFAULT_HEARTBEAT_SECS})
   --battery <0-100>      初始电量 (默认: {DEFAULT_BATTERY})
-  --signal <0-5>         初始信号强度 (默认: {DEFAULT_SIGNAL})
   --position <x,y>       初始地图坐标 (默认: {DEFAULT_POSITION})
   --firmware <版本>      固件版本 (默认: {DEFAULT_FIRMWARE})
   --map-only             只执行一次建图（需要 --robot）后退出
@@ -423,7 +418,6 @@ pub struct Config {
     pub model: Option<String>,
     pub heartbeat_interval: u64,
     pub battery: i64,
-    pub signal: i64,
     pub position: String,
     pub firmware: String,
     /// 只做一次建图后退出
@@ -553,10 +547,6 @@ impl Config {
             .unwrap_or(DEFAULT_BATTERY)
             .clamp(0, 100);
 
-        let signal = pick_number([cli.signal, file.simulation.signal])
-            .unwrap_or(DEFAULT_SIGNAL)
-            .clamp(0, 5);
-
         let position = pick_string([cli.position.as_deref(), file.simulation.position.as_deref()])
             .unwrap_or(DEFAULT_POSITION)
             .to_string();
@@ -650,7 +640,6 @@ impl Config {
             model,
             heartbeat_interval,
             battery,
-            signal,
             position,
             firmware,
             map_only,
@@ -717,7 +706,6 @@ mapping.park_id         = {park_id}
 mapping.ingest_name     = {ingest_name}
 mapping.once            = {map_only}
 simulation.battery      = {battery}
-simulation.signal       = {signal}
 simulation.position     = {position}
 simulation.firmware     = {firmware}
 log.filter              = {log_filter}",
@@ -752,7 +740,6 @@ log.filter              = {log_filter}",
                 .unwrap_or("（用本体目录名）"),
             map_only = self.map_only,
             battery = self.battery,
-            signal = self.signal,
             position = self.position,
             firmware = self.firmware,
             log_filter = self.log_filter.as_deref().unwrap_or("（默认）"),

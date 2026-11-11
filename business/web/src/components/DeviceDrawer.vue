@@ -253,7 +253,7 @@ async function emergencyStop() {
         <div class="kv"><span>当前区域</span><b>{{ device.zoneName || "—" }}</b></div>
         <div class="kv"><span>实时位置</span><b class="mono">{{ device.position }}</b></div>
         <div class="kv"><span>当前任务</span><b>{{ device.currentTaskName }}</b></div>
-        <div class="kv"><span>信号强度</span><b>{{ device.signal > 0 ? `良好（${device.signal}/4）` : "无信号" }}</b></div>
+        <div class="kv"><span>工作模式</span><b>{{ device.robotMode || "—" }}</b></div>
         <div class="kv"><span>固件版本</span><b class="mono">{{ device.firmware }}</b></div>
         <div class="kv"><span>视频源</span><b class="mono">{{ device.videoUrl || "未配置" }}</b></div>
         <div class="kv"><span>运行状态</span><b>{{ statusText }}</b></div>

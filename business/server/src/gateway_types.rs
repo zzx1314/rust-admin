@@ -50,7 +50,6 @@ pub struct RegisterAckPayload {
 #[serde(rename_all = "camelCase")]
 pub struct HeartbeatPayload {
     pub battery: Option<i64>,
-    pub signal: Option<i64>,
     pub temperature: Option<f64>,
     pub position: Option<String>,
     pub odometer: Option<f64>,
@@ -65,6 +64,8 @@ pub struct HeartbeatPayload {
     pub mode: Option<String>,
     /// 充电状态：本体 1315 上报（充电桩接入 / 电池电源状态为充电或充满）
     pub charging: Option<bool>,
+    /// 本体工作模式：1315 `mode`（协议里的 MachineStatus），如 `remote`
+    pub robot_mode: Option<String>,
 }
 
 /// 服务端 → 客户端：心跳确认

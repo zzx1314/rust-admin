@@ -166,7 +166,6 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                     let payload: HeartbeatPayload = serde_json::from_value(ws_msg.payload)
                                         .unwrap_or(HeartbeatPayload {
                                             battery: None,
-                                            signal: None,
                                             temperature: None,
                                             position: None,
                                             odometer: None,
@@ -177,6 +176,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                             body_online: None,
                                             mode: None,
                                             charging: None,
+                                            robot_mode: None,
                                         });
                                     handle_heartbeat(&db, &state.config, did, &payload).await;
                                     send_msg(&tx, "heartbeat_ack", json!(HeartbeatAckPayload {
@@ -616,14 +616,6 @@ async fn handle_heartbeat(
                 .execute(db)
                 .await;
     }
-    if let Some(s) = payload.signal {
-        let _ = sqlx::query("UPDATE devices SET signal = ?1, updated_at = ?2 WHERE device_id = ?3")
-            .bind(s)
-            .bind(&timestamp_clone)
-            .bind(&device_id_clone)
-            .execute(db)
-            .await;
-    }
     if let Some(t) = payload.temperature {
         let _ = sqlx::query(
             "UPDATE devices SET temperature = ?1, updated_at = ?2 WHERE device_id = ?3",
@@ -764,6 +756,21 @@ async fn handle_heartbeat(
         .bind(&device_id_clone)
         .execute(db)
         .await;
+    }
+    if let Some(robot_mode) = payload
+        .robot_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        // 本体工作模式（1315 mode / MachineStatus）：每次心跳覆写即可，前端只做展示
+        let _ =
+            sqlx::query("UPDATE devices SET robot_mode = ?1, updated_at = ?2 WHERE device_id = ?3")
+                .bind(robot_mode)
+                .bind(&timestamp_clone)
+                .bind(&device_id_clone)
+                .execute(db)
+                .await;
     }
     if let Some(mode) = payload
         .mode

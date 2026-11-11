@@ -43,7 +43,6 @@ once = false
 
 [simulation]
 battery = 86
-signal = 4
 position = "0.0, 0.0"
 firmware = "Hermes_M_v0.3.2"
 

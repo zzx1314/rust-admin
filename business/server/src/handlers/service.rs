@@ -451,7 +451,8 @@ pub async fn runtime_snapshot(state: &AppState, device_code: &str) -> Result<Val
         "online": online,
         "status": device.status,
         "battery": device.battery,
-        "signal": device.signal,
+        // 本体工作模式（1315 mode / MachineStatus）
+        "robotMode": device.robot_mode,
         "temperature": device.temperature,
         "position": device.position,
         "lastHeartbeat": device.last_heartbeat,

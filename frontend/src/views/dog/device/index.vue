@@ -357,6 +357,9 @@ const {
           <el-descriptions-item label="电量">
             {{ runtimeData.bodyOnline ? `${runtimeData.battery}%` : "—" }}
           </el-descriptions-item>
+          <el-descriptions-item label="工作模式">
+            {{ runtimeData.robotMode || "—" }}
+          </el-descriptions-item>
           <el-descriptions-item label="充电状态">
             {{
               runtimeData.bodyOnline

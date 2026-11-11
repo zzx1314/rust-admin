@@ -421,7 +421,8 @@ M1 文件根 `/ota/alg_data`；文档 §2.2.4.1「4013 地图列表」明确单�
   "model": "ZSL-2-Ultra", "firmware": "Hermes_M_v0.3.2" }
 
 // heartbeat（model 仅在取到本体 1201 的 type 时才带）
-{ "battery": 86, "signal": 4, "firmware": "Hermes_M_v0.3.2", "model": "ZSL-2-Ultra" }
+{ "battery": 86, "firmware": "Hermes_M_v0.3.2", "model": "ZSL-2-Ultra",
+  "bodyOnline": true, "mode": "robot", "charging": false, "robotMode": "remote" }
 ```
 
 - `model` 取本体 `1201` 的 `type`；本体没在 `device_json_path` 配型号时用 `robot.model` / `--model` 兜底，两者都空则不报该字段。
@@ -430,7 +431,13 @@ M1 文件根 `/ota/alg_data`；文档 §2.2.4.1「4013 地图列表」明确单�
 - `bodyOnline` / `mode`：本体 `1315` 30s 内没上报 → `bodyOnline=false`（本体掉线或模拟模式），
   `mode` 为 `robot` / `sim`。业务平台据此不再展示假电量。**本体连不上时客户端直接退出**，
   由 systemd `Restart=always` 带退避重启，不会带着模拟数据冒充真机。
-- `signal` 只是回传配置值：智航协议没有信号强度指标，业务平台侧固定显示 `—`。
+- `robotMode`：取本体 `1315` 的 `mode`（协议里的 MachineStatus，实测 `remote`），
+  业务平台「工作模式」列直接展示；`1235/machine_status` 若存在也兼容。
+- `signal` **已移除**：智航协议没有信号强度指标（`1315` 全字段核对过），
+  不再上报也不再提供 `--signal` / `[simulation] signal` 配置。
+  > 升级注意：配置解析是 `deny_unknown_fields`，老机器的 `/etc/robodog/client.toml`
+  > 里如果还有 `[simulation] signal = 4`，新客户端会启动失败并提示
+  > `unknown field 'signal'`。升级前先删掉这一行（或整段 `[simulation]`）。
 - `charging`：取本体 `1315 kRobotStatus` 的 `charging_pile_connect` 或电池
   `power_supply_status1/2`（1=充电中、2=充满）；电量取 `battery.power1/power2`，
   温度取 `temp`（为 0 退回 `battery.temperature1`），里程取 `mile_data`。

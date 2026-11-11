@@ -375,7 +375,6 @@ mod tests {
             zone_name: None,
             status: "在线待命".to_string(),
             battery: 80,
-            signal: 4,
             temperature: 30.0,
             runtime_minutes: 0,
             odometer: 0.0,
@@ -391,6 +390,7 @@ mod tests {
             body_online: false,
             run_mode: None,
             charging: false,
+            robot_mode: None,
             created_at: String::new(),
             updated_at: String::new(),
         }

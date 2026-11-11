@@ -83,7 +83,6 @@ ingest_name = "A区-入库"
 
 [simulation]
 battery = 55
-signal = 2
 position = "1.0, 2.0"
 firmware = "Hermes_M_v9"
 
@@ -107,7 +106,6 @@ filter = "robodog_device_client=debug"
     assert_eq!(config.park_id, Some(7));
     assert_eq!(config.ingest_map_name.as_deref(), Some("A区-入库"));
     assert_eq!(config.battery, 55);
-    assert_eq!(config.signal, 2);
     assert_eq!(config.position, "1.0, 2.0");
     assert_eq!(config.firmware, "Hermes_M_v9");
     assert_eq!(
@@ -368,7 +366,6 @@ fn heartbeat_and_simulation_are_clamped() {
 heartbeat_secs = 0
 [simulation]
 battery = 120
-signal = 9
 "#,
     );
 
@@ -376,7 +373,6 @@ signal = 9
 
     assert_eq!(config.heartbeat_interval, 1);
     assert_eq!(config.battery, 100);
-    assert_eq!(config.signal, 5);
 }
 
 #[test]

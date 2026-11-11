@@ -128,7 +128,6 @@ pub struct Device {
     pub zone_name: Option<String>,
     pub status: String,
     pub battery: i64,
-    pub signal: i64,
     pub temperature: f64,
     pub runtime_minutes: i64,
     pub odometer: f64,
@@ -151,6 +150,8 @@ pub struct Device {
     pub run_mode: Option<String>,
     /// 充电状态：本体 1315 上报（充电桩接入 / 电池电源状态），不是按电量猜的
     pub charging: bool,
+    /// 本体工作模式：1315 `mode`（协议里的 MachineStatus），如 `remote`
+    pub robot_mode: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -319,7 +320,6 @@ pub struct DeviceRequest {
     pub zone_id: Option<i64>,
     pub status: Option<String>,
     pub battery: Option<i64>,
-    pub signal: Option<i64>,
     pub temperature: Option<f64>,
     pub runtime_minutes: Option<i64>,
     pub odometer: Option<f64>,
