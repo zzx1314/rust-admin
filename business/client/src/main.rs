@@ -83,6 +83,13 @@ struct HeartbeatPayload {
     /// 本体型号（智航 1201 `type`），未知时不报
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
+    /// 本体链路是否在线：false 时电量/温度等数值不可信（本服务据此不再当真实数据展示）
+    body_online: bool,
+    /// 客户端工作模式：robot（接本体）/ sim（纯模拟）
+    mode: String,
+    /// 充电状态：本体 1315 `charging_pile_connect` / 电池 `power_supply_status`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    charging: Option<bool>,
     /// 定位状态（智航 loc_state.status）
     #[serde(skip_serializing_if = "Option::is_none")]
     loc_status: Option<i64>,
@@ -140,9 +147,16 @@ struct RobotState {
     loc_status: i64,
     loc_fresh: bool,
     active_map: Option<String>,
-    /// 本体在线（未接本体时为 false）
-    body_online: bool,
+    /// 最近一次收到本体 1315 的时刻：超过 `BODY_STATUS_FRESH` 视为本体掉线
+    body_status_at: Option<Instant>,
+    /// 工作模式：robot（接本体）/ sim（纯模拟）
+    mode: &'static str,
+    /// 充电状态：来自 1315（充电桩接入 / 电池电源状态），模拟模式恒 false
+    charging: bool,
 }
+
+/// 本体状态新鲜窗口：1315 是 1Hz，30s 收不到就认为本体链路已不可信
+const BODY_STATUS_FRESH: Duration = Duration::from_secs(30);
 
 impl RobotState {
     fn new(config: &Config) -> Self {
@@ -159,13 +173,28 @@ impl RobotState {
             loc_status: 255,
             loc_fresh: false,
             active_map: None,
-            body_online: false,
+            body_status_at: None,
+            mode: "sim",
+            charging: false,
         }
     }
 
-    /// 处理 1315 本体状态上报
+    /// 本体链路是否在线：以 1315 心跳新鲜度为准（TCP 还连着但本体不出数也算掉线）
+    fn body_status_fresh(&self) -> bool {
+        self.body_status_at
+            .map(|at| at.elapsed() < BODY_STATUS_FRESH)
+            .unwrap_or(false)
+    }
+
+    /// 处理 1315 `kRobotStatus` 本体状态上报。
+    ///
+    /// 现场实测字段（`data`）：`battery{power1,power2,present1,present2,temperature1,
+    /// temperature2,voltage1,current1,power_supply_status1...}`、`temp`、`mile_data`、
+    /// `charging_pile_connect`、`mode`、`motion_status`、`speed{}`、`estop{}` 等。
+    /// 电量 / 温度 / 里程 / 充电状态全部只从这里取，不做任何推断或随机漂移。
     fn apply_robot_status(&mut self, data: &Value) {
-        self.body_online = true;
+        self.body_status_at = Some(Instant::now());
+
         if let Some(battery) = data.get("battery") {
             // 双电池取较高的那一节作为展示电量
             let p1 = battery.get("power1").and_then(Value::as_f64).unwrap_or(0.0);
@@ -176,12 +205,41 @@ impl RobotState {
                 .unwrap_or(false);
             let power = if present2 { p1.max(p2) } else { p1 };
             self.battery = power.round() as i64;
-            let t1 = battery
-                .get("temperature1")
-                .and_then(Value::as_f64)
-                .unwrap_or(self.temperature);
-            self.temperature = t1;
+
+            // 充电判定：充电桩接入，或电池电源状态为 charging(1) / full(4)。
+            // power_supply_status 用的是标准枚举：0=unknown 1=charging 2=discharging
+            // 3=not_charging 4=full（现场实测放电时是 2），所以只认 1 和 4。
+            let pile = data
+                .get("charging_pile_connect")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let supply = [1_i64, 4].iter().any(|status| {
+                [
+                    battery.get("power_supply_status1"),
+                    battery.get("power_supply_status2"),
+                ]
+                .iter()
+                .any(|value| value.and_then(Value::as_i64) == Some(*status))
+            });
+            self.charging = pile || supply;
+
+            // 温度优先取机体 `temp`，缺省（0）时退回电池温度
+            let body_temp = data.get("temp").and_then(Value::as_f64).unwrap_or(0.0);
+            let battery_temp = ["temperature1", "temperature2"]
+                .iter()
+                .filter_map(|key| battery.get(*key).and_then(Value::as_f64))
+                .find(|value| *value > 0.0)
+                .unwrap_or(0.0);
+            let temperature = if body_temp > 0.0 {
+                body_temp
+            } else {
+                battery_temp
+            };
+            if temperature > 0.0 {
+                self.temperature = temperature;
+            }
         }
+
         if let Some(mile) = data.get("mile_data").and_then(Value::as_f64) {
             self.odometer = mile;
         }
@@ -211,7 +269,7 @@ impl RobotState {
         let mut rng = rand::thread_rng();
         let drain = if running { 1 } else { 0 };
         self.battery = (self.battery - drain).clamp(0, 100);
-        self.signal = (self.signal + rng.gen_range(-1..=1)).clamp(0, 5);
+        // 信号强度没有真实数据源：保持配置值，不再随机漂移（否则页面显示的是假数据）
         self.temperature = (self.temperature + rng.gen_range(-0.1..0.3)).clamp(20.0, 65.0);
         self.runtime_minutes += 1;
     }
@@ -227,6 +285,9 @@ impl RobotState {
             current_task: self.current_task.clone(),
             firmware: self.firmware.clone(),
             model: self.model.clone(),
+            body_online: self.body_status_fresh(),
+            mode: self.mode.to_string(),
+            charging: self.body_status_fresh().then_some(self.charging),
             loc_status: Some(self.loc_status),
             map_id: self.active_map.clone(),
         }
@@ -292,27 +353,15 @@ async fn main() {
     );
     debug!("生效配置（脱敏）:\n{}", config.redacted_report());
 
-    // 先连本体：本体不可用时业务侧仍可联调（模拟执行）
-    let zhpro = match &config.robot {
-        Some(host) => match ZhProClient::connect(host).await {
-            Ok(client) => {
-                let session = client.session().await;
-                info!(
-                    "本体连接就绪: client_id={}, 型号={}",
-                    session.client_id, session.device_type
-                );
-                Some(Arc::new(client))
-            }
-            Err(e) => {
-                error!("连接智航本体失败: {e}；转为模拟模式");
-                None
-            }
-        },
-        None => {
-            warn!(
-                "未接入本体（robot.host 为空或为 sim），以模拟模式运行（任务只回传进度，不驱动本体）"
-            );
-            None
+    // 先连本体：配了本体就必须连上，连不上直接退出交给 systemd 重启
+    // （以前一次失败就永久降级为模拟模式，页面还在报电量，属于假在线）
+    let zhpro = match connect_body(&config).await {
+        Ok(zhpro) => zhpro,
+        Err(error) => {
+            // 退出而不是降级成模拟模式：systemd `Restart=always` 会带退避重启，
+            // 避免用假电量/假信号冒充真机往业务平台上报
+            error!("{error}；进程退出，等待 systemd 重启重试");
+            std::process::exit(1);
         }
     };
 
@@ -340,6 +389,52 @@ async fn main() {
             }
         }
     }
+}
+
+/// 连接智航本体。
+///
+/// - `robot.host` 为空（`--robot sim`）：显式模拟模式，返回 `None`；
+/// - 配了本体：最多重试 `BODY_ATTEMPTS` 次（现场开机竞态：客户端比本体网络先起来），
+///   仍失败则返回错误让进程退出 —— systemd `Restart=always` 会带退避重启，
+///   绝不带着「模拟数据」冒充真机上报。
+async fn connect_body(
+    config: &Config,
+) -> Result<Option<Arc<ZhProClient>>, Box<dyn std::error::Error + Send + Sync>> {
+    const BODY_ATTEMPTS: u32 = 12;
+    const BODY_RETRY_SECS: u64 = 5;
+
+    let Some(host) = config.robot.as_deref() else {
+        warn!(
+            "未接入本体（robot.host 为空或为 sim），以模拟模式运行（任务只回传进度，不驱动本体）"
+        );
+        return Ok(None);
+    };
+
+    for attempt in 1..=BODY_ATTEMPTS {
+        match ZhProClient::connect(host).await {
+            Ok(client) => {
+                let session = client.session().await;
+                info!(
+                    "本体连接就绪: client_id={}, 型号={}",
+                    session.client_id, session.device_type
+                );
+                return Ok(Some(Arc::new(client)));
+            }
+            Err(error) if attempt == BODY_ATTEMPTS => {
+                return Err(format!(
+                    "连接智航本体 {host} 失败（已重试 {BODY_ATTEMPTS} 次，每次间隔 {BODY_RETRY_SECS}s）: {error}"
+                )
+                .into());
+            }
+            Err(error) => {
+                warn!(
+                    "连接智航本体失败（第 {attempt}/{BODY_ATTEMPTS} 次）: {error}，{BODY_RETRY_SECS}s 后重试"
+                );
+                tokio::time::sleep(Duration::from_secs(BODY_RETRY_SECS)).await;
+            }
+        }
+    }
+    unreachable!("循环必然在最后一次尝试时返回")
 }
 
 /// 只跑一次建图（无需业务服务），用于地图标定与联调
@@ -471,6 +566,7 @@ async fn run_client(
     let state = {
         let mut initial = RobotState::new(config);
         initial.model = model;
+        initial.mode = if zhpro.is_some() { "robot" } else { "sim" };
         Arc::new(Mutex::new(initial))
     };
     let active: Shared<Option<ActiveTask>> = Arc::new(Mutex::new(None));
@@ -553,7 +649,8 @@ async fn run_client(
             _ = heartbeat_timer.tick() => {
                 let running = active.lock().await.is_some();
                 let mut guard = state.lock().await;
-                if !guard.body_online {
+                // 本体没在报状态（模拟模式 / 本体掉线）才走模拟推演
+                if !guard.body_status_fresh() {
                     guard.tick(running);
                 }
                 let hb = guard.heartbeat();
@@ -598,7 +695,7 @@ async fn run_client(
 
             _ = event_timer.tick() => {
                 let guard = state.lock().await;
-                if guard.body_online && rand::thread_rng().gen_bool(0.3) {
+                if guard.body_status_fresh() && rand::thread_rng().gen_bool(0.3) {
                     let event = DeviceEventPayload {
                         event_type: "info".to_string(),
                         message: format!("机体温度 {:.1}℃", guard.temperature),

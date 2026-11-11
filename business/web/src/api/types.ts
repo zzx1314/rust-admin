@@ -80,6 +80,12 @@ export interface Device {
   /** 当前远程接管人；为空表示无人接管 */
   teleopHolder: string | null;
   teleopAt: string | null;
+  /** 本体链路是否在线；false 时电量/温度等是模拟值，不可当真实数据展示 */
+  bodyOnline: boolean;
+  /** 客户端工作模式：robot（接本体）/ sim（纯模拟）/ null（未上报） */
+  runMode: "robot" | "sim" | null;
+  /** 充电状态：本体 1315 上报（不是按电量猜的） */
+  charging: boolean;
   createdAt: string;
   updatedAt: string;
 }

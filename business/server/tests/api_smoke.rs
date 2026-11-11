@@ -70,6 +70,7 @@ async fn test_state_with_token(service_token: Option<&str>) -> (AppState, TempDb
         ingest_dir: dir.join("map_ingest"),
         service_token: service_token.map(str::to_string),
         zentai_ws_url: None,
+        device_timeout_secs: 90,
     });
 
     let pool = db::connect(&config).await.expect("连接测试库失败");
@@ -586,6 +587,7 @@ mod zentai_service_token {
             ingest_dir: std::env::temp_dir().join("map_ingest"),
             service_token: Some(TOKEN.to_string()),
             zentai_ws_url: None,
+            device_timeout_secs: 90,
         }
     }
 
@@ -749,4 +751,78 @@ mod zentai_service_token {
         // 全程没有登录换 JWT
         assert_eq!(token_calls.load(Ordering::SeqCst), 0, "不应调用 /api/token");
     }
+}
+
+#[tokio::test]
+async fn refresh_probes_connections_and_marks_offline() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    // 播种数据里有 11 台「在线」设备，但没有任何 WebSocket 连接
+    let online_before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM devices WHERE status <> '离线'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(online_before > 0, "演示数据应包含在线设备");
+
+    let app = build_router(state);
+    let token = login(&app).await;
+    let response = app
+        .oneshot(
+            Request::post("/api/devices/refresh")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    // 没有活跃连接 → 探活结果为 0 台在线（不再伪造 last_heartbeat）
+    assert_eq!(body["data"], 0);
+
+    let offline: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM devices WHERE status = '离线'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(offline, online_before + 1, "未连接的设备应全部置为离线");
+}
+
+#[tokio::test]
+async fn watchdog_marks_stale_real_device_offline() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    // 一台「真机」：完整时间戳且已超时；演示设备的相对时间不参与判定
+    sqlx::query(
+        "UPDATE devices SET status = '在线待命', last_heartbeat = '2020-01-01 00:00:00' \
+         WHERE device_id = 'RD-002'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let affected = gateway::sweep_stale_devices(&state).await.unwrap();
+    assert_eq!(affected, 1, "只有带完整时间戳的超时设备会被判定");
+
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM devices WHERE device_id = 'RD-002'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "离线");
+
+    let alerts: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM alerts WHERE alert_code LIKE 'AL-HB-%' AND content LIKE '%心跳超时%'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(alerts, 1, "掉线应写一条心跳超时告警");
+
+    // 演示设备的相对时间不受影响
+    let demo: String = sqlx::query_scalar("SELECT status FROM devices WHERE device_id = 'RD-001'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_ne!(demo, "离线", "演示数据的相对时间不应被看门狗误判");
 }

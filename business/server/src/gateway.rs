@@ -174,6 +174,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                             current_task: None,
                                             firmware: None,
                                             model: None,
+                                            body_online: None,
+                                            mode: None,
+                                            charging: None,
                                         });
                                     handle_heartbeat(&db, &state.config, did, &payload).await;
                                     send_msg(&tx, "heartbeat_ack", json!(HeartbeatAckPayload {
@@ -255,8 +258,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
         connections.write().await.remove(did);
         // 标记设备离线，同时清掉接管态：断连即释放，避免留下「幽灵接管」
         sqlx::query(
-            "UPDATE devices SET status = '离线', teleop_holder = NULL, teleop_at = NULL,
-                updated_at = ?1 WHERE device_id = ?2",
+            "UPDATE devices SET status = '离线', body_online = 0,
+                teleop_holder = NULL, teleop_at = NULL, updated_at = ?1 WHERE device_id = ?2",
         )
         .bind(now())
         .bind(did)
@@ -395,6 +398,120 @@ async fn sync_device_to_zentai(config: &crate::config::Config, db: &SqlitePool, 
     crate::zentai::try_upsert_device(config, &payload).await;
 }
 
+/// 心跳推导设备状态。
+///
+/// - 未绑定园区：保持「待绑定」，设备必须先人工绑园区才会进入任务调度
+/// - 「执行任务」：任务进度自己推进状态，心跳不改
+/// - 充电：优先用本体 1315 上报的 `charging`（充电桩接入 / 电池电源状态），
+///   老客户端没有该字段时才退回「电量 ≤ 10%」的兼容猜测
+/// - 停止充电 / 重新上线：从「离线」「充电中」回到「在线待命」，
+///   其余状态（故障 / 维护中）不动
+fn derive_device_status(
+    current: &str,
+    park_bound: bool,
+    charging: Option<bool>,
+    battery: Option<i64>,
+) -> Option<&'static str> {
+    use crate::handlers::devices::DEVICE_STATUS_UNBOUND;
+
+    if !park_bound {
+        return (current != DEVICE_STATUS_UNBOUND).then_some(DEVICE_STATUS_UNBOUND);
+    }
+    if current == "执行任务" {
+        return None;
+    }
+    match charging {
+        Some(true) => (current != "充电中").then_some("充电中"),
+        Some(false) => matches!(current, "离线" | "充电中").then_some("在线待命"),
+        None => {
+            if matches!(battery, Some(value) if value <= 10) {
+                (current != "充电中").then_some("充电中")
+            } else {
+                (current == "离线").then_some("在线待命")
+            }
+        }
+    }
+}
+
+/// 心跳看门狗：超过 `device_timeout_secs` 没心跳的「在线」设备标记为离线。
+///
+/// WebSocket 静默断开（拉闸、掉 Wi-Fi、拔网线）时服务端收不到 Close 帧，
+/// 只靠断连回调会一直停在「在线待命 / 充电中」，任务下发与接管判断都会跟错；
+/// 因此在线状态除了断连回调，还必须有心跳超时兵底。
+///
+/// 每 15s 扫一次，只在「在线 → 离线」那一刻写一次告警，不会刷屏。
+pub fn spawn_heartbeat_watchdog(state: AppState) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(15));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            match sweep_stale_devices(&state).await {
+                Ok(0) => {}
+                Ok(count) => info!("心跳看门狗：{count} 台设备心跳超时，已标记离线"),
+                Err(error) => warn!("心跳看门狗执行失败: {error}"),
+            }
+        }
+    });
+}
+
+/// 扫描并处理心跳超时设备，返回本次置为离线的台数。
+///
+/// 只判定「完整时间戳」的行（`YYYY-MM-DD HH:MM:SS`）：`seed.rs` 的演示设备写的是
+/// 相对时间（如 `09:15:02`），它们不代表真机接入，不能被看门狗误判成掉线。
+pub async fn sweep_stale_devices(state: &AppState) -> Result<u64, AppError> {
+    let timeout = state.config.device_timeout_secs;
+    let cutoff = (chrono::Local::now() - chrono::Duration::seconds(timeout))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+
+    let stale: Vec<(i64, String, Option<i64>)> = sqlx::query_as(
+        "SELECT id, device_id, park_id FROM devices
+         WHERE status <> '离线'
+           AND last_heartbeat LIKE '____-__-__ __:__:__'
+           AND last_heartbeat < ?1",
+    )
+    .bind(&cutoff)
+    .fetch_all(&state.db)
+    .await?;
+
+    if stale.is_empty() {
+        return Ok(0);
+    }
+
+    let timestamp = now();
+    let mut affected = 0_u64;
+    for (id, code, park_id) in &stale {
+        let result = sqlx::query(
+            "UPDATE devices SET status = '离线', body_online = 0,
+                teleop_holder = NULL, teleop_at = NULL, updated_at = ?1 WHERE id = ?2",
+        )
+        .bind(&timestamp)
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+        affected += result.rows_affected();
+
+        // 一条告警一次：alert_code 带上时间戳，重试时冲突就忽略
+        let alert_code = format!("AL-HB-{}-{id}", timestamp.replace(['-', ' ', ':'], ""));
+        let content = format!("设备 {code} 心跳超时（>{timeout}s 无上报），已标记离线");
+        let _ = sqlx::query(
+            "INSERT INTO alerts (alert_code, level, content, device_id, park_id, status,
+                occurred_at, created_at)
+             VALUES (?1, '警告', ?2, ?3, ?4, '未处理', ?5, ?5)",
+        )
+        .bind(&alert_code)
+        .bind(&content)
+        .bind(id)
+        .bind(park_id)
+        .bind(&timestamp)
+        .execute(&state.db)
+        .await;
+    }
+
+    Ok(affected)
+}
+
 /// 查询园区编码（用于 register_ack 下发与地图回传归属）
 async fn park_code_of(db: &SqlitePool, park_id: Option<i64>) -> Option<String> {
     let park_id = park_id?;
@@ -477,11 +594,6 @@ async fn handle_heartbeat(
 ) {
     let timestamp = now();
     let mut ledger_changed = false;
-
-    let status = match payload.battery {
-        Some(b) if b <= 10 => Some("充电中"),
-        _ => None,
-    };
 
     // 使用带有参数绑定的 SQL 更新
     let timestamp_clone = timestamp.clone();
@@ -597,29 +709,75 @@ async fn handle_heartbeat(
         .map(|result| result.rows_affected() > 0)
         .unwrap_or(false);
     }
-    if let Some(s) = status {
+    if let Some(charging) = payload.charging {
+        // 充电状态只信本体 1315 上报（充电桩接入 / 电池电源状态）
+        ledger_changed |= sqlx::query(
+            "UPDATE devices SET charging = ?1, updated_at = ?2
+             WHERE device_id = ?3 AND COALESCE(charging, 0) <> ?1",
+        )
+        .bind(i64::from(charging))
+        .bind(&timestamp_clone)
+        .bind(&device_id_clone)
+        .execute(db)
+        .await
+        .map(|result| result.rows_affected() > 0)
+        .unwrap_or(false);
+    }
+
+    // 状态推导：未绑定 → 待绑定；执行中保持；充电以本体上报为准
+    let current = sqlx::query_as::<_, (String, Option<i64>)>(
+        "SELECT status, park_id FROM devices WHERE device_id = ?1",
+    )
+    .bind(&device_id_clone)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+    if let Some((current_status, park_id)) = current
+        && let Some(target) = derive_device_status(
+            &current_status,
+            park_id.is_some(),
+            payload.charging,
+            payload.battery,
+        )
+    {
         ledger_changed |= sqlx::query(
             "UPDATE devices SET status = ?1, updated_at = ?2
              WHERE device_id = ?3 AND status <> ?1",
         )
-        .bind(s)
+        .bind(target)
         .bind(&timestamp_clone)
         .bind(&device_id_clone)
         .execute(db)
         .await
         .map(|result| result.rows_affected() > 0)
         .unwrap_or(false);
-    } else {
-        ledger_changed |= sqlx::query(
-            "UPDATE devices SET status = '在线待命', updated_at = ?1
-             WHERE device_id = ?2 AND status = '离线'",
+    }
+
+    if let Some(online) = payload.body_online {
+        // 本体链路状态：模拟模式 / 本体掉线时置 0，前端据此不再展示电量等假数据
+        let _ = sqlx::query(
+            "UPDATE devices SET body_online = ?1, updated_at = ?2 WHERE device_id = ?3",
         )
+        .bind(i64::from(online))
         .bind(&timestamp_clone)
         .bind(&device_id_clone)
         .execute(db)
-        .await
-        .map(|result| result.rows_affected() > 0)
-        .unwrap_or(false);
+        .await;
+    }
+    if let Some(mode) = payload
+        .mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        let _ =
+            sqlx::query("UPDATE devices SET run_mode = ?1, updated_at = ?2 WHERE device_id = ?3")
+                .bind(mode)
+                .bind(&timestamp_clone)
+                .bind(&device_id_clone)
+                .execute(db)
+                .await;
     }
 
     // 台账字段变了（首登拿到型号 / 固件升级 / 状态迁移）才推中台
@@ -978,4 +1136,64 @@ pub async fn get_online_devices(connections: &DeviceConnections) -> Vec<String> 
 pub async fn is_device_online(connections: &DeviceConnections, device_id: &str) -> bool {
     let map = connections.read().await;
     map.contains_key(device_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derive_device_status;
+
+    #[test]
+    fn unbound_device_stays_pending() {
+        // 未绑园区：不管充不充电，都必须保持「待绑定」，否则会被任务调度选中
+        assert_eq!(
+            derive_device_status("待绑定", false, Some(true), Some(80)),
+            None
+        );
+        assert_eq!(
+            derive_device_status("充电中", false, Some(true), Some(80)),
+            Some("待绑定")
+        );
+    }
+
+    #[test]
+    fn charging_comes_from_body_report() {
+        assert_eq!(
+            derive_device_status("在线待命", true, Some(true), Some(88)),
+            Some("充电中")
+        );
+        assert_eq!(
+            derive_device_status("充电中", true, Some(false), Some(88)),
+            Some("在线待命")
+        );
+        // 电量低但本体说没在充电：不再瞎猜成「充电中」
+        assert_eq!(
+            derive_device_status("在线待命", true, Some(false), Some(5)),
+            None
+        );
+        // 电量低且老客户端没上报充电状态：兼容兜底
+        assert_eq!(
+            derive_device_status("在线待命", true, None, Some(5)),
+            Some("充电中")
+        );
+    }
+
+    #[test]
+    fn running_task_and_manual_statuses_are_kept() {
+        assert_eq!(
+            derive_device_status("执行任务", true, Some(false), Some(60)),
+            None
+        );
+        assert_eq!(
+            derive_device_status("执行任务", true, Some(true), Some(60)),
+            None
+        );
+        assert_eq!(
+            derive_device_status("故障", true, Some(false), Some(60)),
+            None
+        );
+        assert_eq!(
+            derive_device_status("离线", true, Some(false), Some(60)),
+            Some("在线待命")
+        );
+    }
 }

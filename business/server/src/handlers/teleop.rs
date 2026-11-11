@@ -388,6 +388,9 @@ mod tests {
             video_type: "none".to_string(),
             teleop_holder: holder.map(str::to_string),
             teleop_at: at.map(str::to_string),
+            body_online: false,
+            run_mode: None,
+            charging: false,
             created_at: String::new(),
             updated_at: String::new(),
         }

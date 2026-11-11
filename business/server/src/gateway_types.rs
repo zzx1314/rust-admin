@@ -59,6 +59,12 @@ pub struct HeartbeatPayload {
     pub firmware: Option<String>,
     /// 设备型号（本体 1201 `type`）：首次报到后变化才触发中台台账重同步
     pub model: Option<String>,
+    /// 本体链路是否在线（false = 客户端处于模拟模式 / 本体掉线）
+    pub body_online: Option<bool>,
+    /// 客户端工作模式：robot / sim
+    pub mode: Option<String>,
+    /// 充电状态：本体 1315 上报（充电桩接入 / 电池电源状态为充电或充满）
+    pub charging: Option<bool>,
 }
 
 /// 服务端 → 客户端：心跳确认

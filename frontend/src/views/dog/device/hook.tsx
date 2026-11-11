@@ -136,7 +136,7 @@ export function useDogDevice() {
       minWidth: 200,
       cellRenderer: ({ row, props }) =>
         row.users?.length ? (
-          <div class="flex flex-wrap gap-1">
+          <div class="flex flex-wrap justify-center gap-1">
             {row.users.map((user: DogDeviceUser) => (
               <el-tag key={user.id} size={props.size} type="info">
                 {user.realName || user.username}

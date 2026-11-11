@@ -427,6 +427,14 @@ M1 文件根 `/ota/alg_data`；文档 §2.2.4.1「4013 地图列表」明确单�
 - `model` 取本体 `1201` 的 `type`；本体没在 `device_json_path` 配型号时用 `robot.model` / `--model` 兜底，两者都空则不报该字段。
 - `device_ip` 不需要客户端上报：业务服务取 WebSocket 对端 IP。
 - 型号 / 固件 / 状态只在变化时触发中台重同步，心跳频率不影响中台接口压力。
+- `bodyOnline` / `mode`：本体 `1315` 30s 内没上报 → `bodyOnline=false`（本体掉线或模拟模式），
+  `mode` 为 `robot` / `sim`。业务平台据此不再展示假电量。**本体连不上时客户端直接退出**，
+  由 systemd `Restart=always` 带退避重启，不会带着模拟数据冒充真机。
+- `signal` 只是回传配置值：智航协议没有信号强度指标，业务平台侧固定显示 `—`。
+- `charging`：取本体 `1315 kRobotStatus` 的 `charging_pile_connect` 或电池
+  `power_supply_status1/2`（1=充电中、2=充满）；电量取 `battery.power1/power2`，
+  温度取 `temp`（为 0 退回 `battery.temperature1`），里程取 `mile_data`。
+  这些数值**只来自 1315**，没收到就报 `bodyOnline=false`，不做推断。
 
 ### 服务端 → 设备
 

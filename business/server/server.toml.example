@@ -26,6 +26,11 @@ port = 3100
 # Token 有效期（小时，默认 24）
 # jwt_ttl_hours = 24
 
+# 设备心跳超时（秒，默认 90，最小 20）：超时无心跳的在线设备会被看门狗置为离线。
+# 客户端默认 10s 一次心跳，这里留 9 倍窗口；调整客户端心跳间隔时同步调大。
+# 环境变量：ROBODOG_DEVICE_TIMEOUT_SECS
+# device_timeout_secs = 90
+
 [zentai]
 # 反向控制信道：业务平台部署在内网、中台无法连入时必需。
 # 配好后本服务会主动拨入 中台的 /api/dogDevice/control-plane/ws，

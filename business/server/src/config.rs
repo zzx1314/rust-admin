@@ -45,6 +45,11 @@ pub struct Config {
     /// 业务平台部署在内网、只能出站访问互联网时必须配置：中台无法主动连入，
     /// 改由本进程主动拨入中台的长连接接收指令。为空时保持「中台直连 HTTP」模式。
     pub zentai_ws_url: Option<String>,
+    /// 设备心跳超时秒数：超过这个时长没心跳就把设备置为「离线」（看门狗）。
+    ///
+    /// 客户端默认 10s 一次心跳，取 9 倍留出网络重连窗口；WS 静默断开（拉闸、掉线）
+    /// 收不到 Close 帧，没有看门狗会一直显示「在线」。
+    pub device_timeout_secs: i64,
 }
 
 /// 配置文件读取 / 解析失败。
@@ -77,6 +82,7 @@ struct ServerFile {
     web_dist: Option<String>,
     backend_db: Option<String>,
     ingest_dir: Option<String>,
+    device_timeout_secs: Option<i64>,
     zentai: ZentaiFile,
 }
 
@@ -164,6 +170,11 @@ impl Config {
                 .and_then(|value| value.parse().ok())
                 .or(file.jwt_ttl_hours)
                 .unwrap_or(24),
+            device_timeout_secs: env_text(&env, "ROBODOG_DEVICE_TIMEOUT_SECS")
+                .and_then(|value| value.parse().ok())
+                .or(file.device_timeout_secs)
+                .unwrap_or(90)
+                .max(20),
             web_dist: path(
                 "ROBODOG_WEB_DIST",
                 file.web_dist,

@@ -208,9 +208,10 @@ async function removeDevice(device: Device) {
 }
 
 async function refreshStatus() {
+  // 接口已改成真探活（查活跃 WebSocket），不再伪造 last_heartbeat
   const count = await deviceApi.refresh();
   await load();
-  ElMessage.success(`已刷新 ${count} 台设备心跳`);
+  ElMessage.success(`已探活：${count} 台在线，其余置为离线`);
 }
 
 async function batchDispatch() {
@@ -223,15 +224,16 @@ async function batchDispatch() {
 
 function exportDevices() {
   downloadCsv("robodog-devices.csv", [
-    ["设备编号", "型号", "园区", "区域", "状态", "电量", "信号", "当前任务", "最后心跳"],
+    ["设备编号", "型号", "园区", "区域", "状态", "本体在线", "电量", "信号", "当前任务", "最后心跳"],
     ...filteredDevices.value.map(device => [
       device.deviceId,
       device.model,
       device.parkName ?? "未绑定",
       device.zoneName ?? "",
       device.status,
-      device.battery,
-      device.signal,
+      device.bodyOnline ? "是" : "否",
+      device.bodyOnline ? device.battery : "—",
+      "—",
       device.currentTaskName,
       device.lastHeartbeat
     ])
@@ -405,12 +407,31 @@ onMounted(load);
                 {{ device.parkName || "未绑定" }}
                 <div class="cell-sub">{{ device.zoneName || (device.parkName ? "未指定区域" : "待手动绑定园区") }}</div>
               </td>
-              <td><StatusBadge :status="device.status" /></td>
-              <td style="min-width: 130px"><ProgressBar :value="device.battery" /></td>
+              <td>
+                <StatusBadge :status="device.status" />
+                <div
+                  v-if="device.status !== '离线' && !device.bodyOnline"
+                  class="cell-sub"
+                  :title="
+                    device.runMode === 'sim'
+                      ? '客户端未连本体（模拟模式），电量等数值不是本体上报'
+                      : '本体链路已断，电量等数值已停止更新'
+                  "
+                >
+                  {{ device.runMode === "sim" ? "模拟模式" : "本体离线" }}
+                </div>
+              </td>
+              <td style="min-width: 130px">
+                <template v-if="device.bodyOnline">
+                  <ProgressBar :value="device.battery" />
+                  <div v-if="device.charging" class="cell-sub" style="color: #0d9488">充电中</div>
+                </template>
+                <span v-else class="mono muted" title="本体未上报，不展示模拟值">—</span>
+              </td>
               <td><div class="cell-main" style="font-weight: 500">{{ device.currentTaskName }}</div></td>
               <td>
                 <AppIcon name="wifi" />
-                <span class="mono" style="margin-left: 5px">{{ device.signal > 0 ? "强" : "—" }}</span>
+                <span class="mono muted" style="margin-left: 5px" title="智航协议没有信号指标，本站不伪造">—</span>
               </td>
               <td class="mono muted">{{ timeOnly(device.lastHeartbeat) }}</td>
               <td>
@@ -508,11 +529,11 @@ onMounted(load);
           <input v-model="deviceForm.firmware" class="input" />
         </div>
         <div class="field">
-          <label>电量（%）</label>
+          <label>电量（%，模拟/初始值）</label>
           <input v-model.number="deviceForm.battery" class="input" type="number" min="0" max="100" />
         </div>
         <div class="field">
-          <label>信号（0-4）</label>
+          <label>信号（0-4，协议无此指标）</label>
           <input v-model.number="deviceForm.signal" class="input" type="number" min="0" max="4" />
         </div>
         <div class="field">

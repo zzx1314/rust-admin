@@ -455,6 +455,11 @@ pub async fn runtime_snapshot(state: &AppState, device_code: &str) -> Result<Val
         "temperature": device.temperature,
         "position": device.position,
         "lastHeartbeat": device.last_heartbeat,
+        // 本体链路与客户端模式：false 时电量/温度等数值不可信（模拟模式 / 本体掉线）
+        "bodyOnline": device.body_online,
+        "runMode": device.run_mode,
+        // 充电状态来自本体 1315，不是按电量猜的
+        "charging": device.charging,
         "currentTaskName": device.current_task_name,
         "parkId": device.park_id,
         "parkName": device.park_name,

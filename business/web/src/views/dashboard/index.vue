@@ -251,7 +251,7 @@ onBeforeUnmount(() => window.clearInterval(timer));
               }"
             />
             <b>{{ device.deviceId }}</b>
-            <span class="muted">{{ device.zoneName }} · {{ device.battery }}%</span>
+            <span class="muted">{{ device.zoneName }} · {{ device.bodyOnline ? `${device.battery}%` : "—" }}</span>
           </div>
         </div>
       </div>

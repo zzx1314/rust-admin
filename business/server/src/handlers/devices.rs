@@ -58,6 +58,8 @@ pub(crate) const DEVICE_SELECT: &str = "SELECT d.id, d.device_id, d.model, d.par
     d.odometer, d.position, d.current_task_name, d.last_heartbeat, d.firmware, d.device_ip,
     d.video_url, COALESCE(d.video_type, 'none') AS video_type,
     d.teleop_holder, d.teleop_at,
+    COALESCE(d.body_online, 0) AS body_online, d.run_mode,
+    COALESCE(d.charging, 0) AS charging,
     d.created_at, d.updated_at
     FROM devices d
     LEFT JOIN parks p ON p.id = d.park_id
@@ -508,17 +510,44 @@ pub async fn delete_device(
     Ok(ApiResponse::ok(result.rows_affected() > 0))
 }
 
+/// 设备「刷新状态」：探活，而不是伪造心跳。
+///
+/// 以前这个接口把所有非离线设备的 `last_heartbeat` 直接刷成当前时间，
+/// 页面一看全是「刚刚上报」，和设备是否真的在连毫无关系。
+/// 现在改成查连接池：有活跃 WebSocket 的保持不动并计数，没有的直接置离线。
 pub async fn refresh_devices(
     State(state): State<AppState>,
 ) -> Result<Json<ApiResponse<i64>>, AppError> {
     let timestamp = now();
-    let result = sqlx::query(
-        "UPDATE devices SET last_heartbeat = ?1, updated_at = ?1 WHERE status <> '离线'",
-    )
-    .bind(&timestamp)
-    .execute(&state.db)
-    .await?;
-    Ok(ApiResponse::ok(result.rows_affected() as i64))
+    let connected: Vec<String> = state
+        .device_connections
+        .read()
+        .await
+        .keys()
+        .cloned()
+        .collect();
+    let rows: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, device_id FROM devices WHERE status <> '离线'")
+            .fetch_all(&state.db)
+            .await?;
+
+    let mut alive = 0_i64;
+    for (id, code) in rows {
+        if connected.iter().any(|item| item == &code) {
+            alive += 1;
+            continue;
+        }
+        sqlx::query(
+            "UPDATE devices SET status = '离线', body_online = 0,
+                teleop_holder = NULL, teleop_at = NULL, updated_at = ?1 WHERE id = ?2",
+        )
+        .bind(&timestamp)
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+    }
+
+    Ok(ApiResponse::ok(alive))
 }
 
 pub async fn send_command(

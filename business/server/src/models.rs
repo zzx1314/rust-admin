@@ -145,6 +145,12 @@ pub struct Device {
     pub teleop_holder: Option<String>,
     /// 接管时间，用于超时自动释放
     pub teleop_at: Option<String>,
+    /// 本体链路是否在线：0 表示客户端处于模拟模式 / 本体掉线，电量等数值不可信
+    pub body_online: bool,
+    /// 客户端工作模式：robot（接本体）/ sim（纯模拟）/ NULL（未上报）
+    pub run_mode: Option<String>,
+    /// 充电状态：本体 1315 上报（充电桩接入 / 电池电源状态），不是按电量猜的
+    pub charging: bool,
     pub created_at: String,
     pub updated_at: String,
 }

@@ -334,8 +334,37 @@ const {
           <el-descriptions-item label="设备状态">
             {{ runtimeData.status }}
           </el-descriptions-item>
+          <el-descriptions-item label="本体链路">
+            <el-tag
+              :type="
+                runtimeData.bodyOnline
+                  ? 'success'
+                  : runtimeData.runMode === 'sim'
+                    ? 'info'
+                    : 'warning'
+              "
+              size="small"
+            >
+              {{
+                runtimeData.bodyOnline
+                  ? "在线"
+                  : runtimeData.runMode === "sim"
+                    ? "模拟模式"
+                    : "本体离线"
+              }}
+            </el-tag>
+          </el-descriptions-item>
           <el-descriptions-item label="电量">
-            {{ runtimeData.battery }}%
+            {{ runtimeData.bodyOnline ? `${runtimeData.battery}%` : "—" }}
+          </el-descriptions-item>
+          <el-descriptions-item label="充电状态">
+            {{
+              runtimeData.bodyOnline
+                ? runtimeData.charging
+                  ? "充电中"
+                  : "未充电"
+                : "—"
+            }}
           </el-descriptions-item>
           <el-descriptions-item label="信号">
             {{ runtimeData.signal }}
