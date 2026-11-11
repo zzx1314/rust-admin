@@ -39,7 +39,7 @@ async function submit() {
       <div class="login-brand">
         <div class="brand-logo"><AppIcon name="dog" :size="26" /></div>
         <div>
-          <b>四足机器人管理平台</b>
+          <b>机器狗巡检综合业务平台</b>
           <span>ROBODOG OPS</span>
         </div>
       </div>
@@ -58,7 +58,7 @@ async function submit() {
       </div>
 
       <div class="login-feature" style="position: relative; z-index: 1">
-        RoboDog OPS · 独立业务服务
+        RoboDog OPS · 北京华致技术
       </div>
     </section>
 

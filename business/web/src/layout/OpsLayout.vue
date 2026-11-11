@@ -173,7 +173,7 @@ watch(
       <div class="brand">
         <div class="brand-logo"><AppIcon name="dog" :size="23" /></div>
         <div class="brand-text">
-          <b>四足机器人管理平台</b>
+          <b>机器狗巡检综合业务平台</b>
           <span>ROBODOG OPS</span>
         </div>
       </div>

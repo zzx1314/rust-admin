@@ -1,4 +1,4 @@
-# RoboDog OPS · 独立业务服务
+# RoboDog OPS · 北京华致技术
 
 `business/` 是独立于仓库根目录 `backend/`、`frontend/`、`client/` 的业务服务，
 按 `designprototype/robodog-management-system.html` 原型实现，拥有自己的

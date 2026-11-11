@@ -46,7 +46,7 @@ async fn ensure_settings(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         (
             "platform",
             "platform_name",
-            "四足机器人管理平台",
+            "机器狗巡检综合业务平台",
             "string",
             "平台名称",
         ),
