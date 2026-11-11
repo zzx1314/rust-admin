@@ -75,9 +75,22 @@ pub async fn login_handler(
                 let user = upsert_zentai_user(&state, &session).await?;
                 return issue_token(&state, user);
             }
-            Err(error @ AppError::Unauthorized(_)) => {
-                // 本地密码已失败、中台也拒绝，统一返回账号或密码错误
-                return Err(error);
+            Err(AppError::Unauthorized(_)) => {
+                // 本地密码已失败、中台也拒绝：统一口径，不暴露「这个账号在中台存在」
+                return Err(AppError::Unauthorized(if local.is_some() {
+                    "账号或密码错误（本地与中台均校验失败）".to_string()
+                } else {
+                    "中台账号或密码错误".to_string()
+                }));
+            }
+            Err(AppError::Upstream(message)) => {
+                // 中台连不上属于部署 / 网络问题，不能报成 500「服务器错误」，
+                // 也不能直接说「密码错」——本地账号密码错时用户容易误解。
+                return Err(AppError::Upstream(if local.is_some() {
+                    format!("{message}；本地账号密码不正确，中台离线时只能用本地账号登录")
+                } else {
+                    format!("{message}；该账号不在本机，需中台在线才能登录")
+                }));
             }
             Err(error) => return Err(error),
         }

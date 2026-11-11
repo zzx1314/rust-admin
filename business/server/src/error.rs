@@ -12,6 +12,12 @@ pub enum AppError {
     Unauthorized(String),
     #[error("{0}")]
     NotFound(String),
+    /// 上游不可用（中台连不上 / 返回了无法理解的内容）
+    ///
+    /// 与 `Internal` 分开是为了**登录**这类场景：账号密码错是中台给出的 401，
+    /// 中台本身连不上不该报成 500「服务器错误」，否则现场会以为业务平台崩了。
+    #[error("{0}")]
+    Upstream(String),
     #[error("{0}")]
     Internal(String),
 }
@@ -43,11 +49,15 @@ impl IntoResponse for AppError {
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, 10400),
             Self::Unauthorized(_) => (StatusCode::UNAUTHORIZED, 10401),
             Self::NotFound(_) => (StatusCode::NOT_FOUND, 10404),
+            Self::Upstream(_) => (StatusCode::SERVICE_UNAVAILABLE, 10503),
             Self::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, 10500),
         };
         let message = self.to_string();
-        if status == StatusCode::INTERNAL_SERVER_ERROR {
-            tracing::error!(error = %message, "request failed");
+        match status {
+            StatusCode::INTERNAL_SERVER_ERROR => tracing::error!(error = %message, "request failed"),
+            // 上游不可用是部署/网络问题，按 warn 记，别刷成 error 噪音
+            StatusCode::SERVICE_UNAVAILABLE => tracing::warn!(error = %message, "upstream unavailable"),
+            _ => {}
         }
         (
             status,

@@ -44,8 +44,19 @@ service.interceptors.response.use(
         window.location.href = "/login";
       }
     }
+    // 5xx 且响应体不是我们的 JSON（没有 msg）时，基本都是「后端没起来 / 端口不通」：
+    // 用 vite 代理时上游连不上会退化成 500，axios 只能给出
+    // "Request failed with status code 500"，看不出是哪个组件挂了。
+    const body = error.response?.data;
+    const serverMsg =
+      body && typeof body === "object" ? (body as { msg?: string }).msg : undefined;
     const message =
-      error.response?.data?.msg || error.message || "网络异常，请稍后重试";
+      serverMsg ||
+      (error.response?.status >= 500
+        ? "业务服务不可用：请确认后端已启动并能访问（默认 127.0.0.1:3100）"
+        : "") ||
+      error.message ||
+      "网络异常，请稍后重试";
     ElMessage.error(message);
     return Promise.reject(error);
   }

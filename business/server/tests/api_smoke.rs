@@ -107,6 +107,40 @@ async fn login(app: &axum::Router) -> String {
         .to_string()
 }
 
+/// 中台连不上时，登录必须报 503 + 可读原因，而不是 500「服务器错误」
+///
+/// 现场踩过：本地密码输错 → 回落到中台校验 → 中台没起 → 500，
+/// 页面上只看到「Request failed with status code 500」，完全看不出是哪个组件挂了。
+#[tokio::test]
+async fn login_reports_upstream_unavailable_instead_of_500() {
+    let (state, _db) = test_state().await;
+    let mut config = (*state.config).clone();
+    // 1 号端口必然拒绝连接：等价于「中台没启动」
+    config.zentai_base_url = Some("http://127.0.0.1:1".to_string());
+    let state = AppState {
+        config: Arc::new(config),
+        ..state
+    };
+    let app = build_router(state);
+
+    let request = Request::post("/api/auth/login")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"username":"admin","password":"definitely-wrong"}"#,
+        ))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "中台不可用应是 503，不是 500"
+    );
+    let body = json_body(response).await;
+    assert_eq!(body["code"], 10503);
+    let msg = body["msg"].as_str().unwrap_or_default();
+    assert!(msg.contains("中台不可达"), "提示应说明中台连不上: {msg}");
+}
+
 #[tokio::test]
 async fn health_reports_ok() {
     let (state, _db) = test_state().await;

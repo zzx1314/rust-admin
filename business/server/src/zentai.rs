@@ -195,7 +195,10 @@ pub async fn login_at(
         ])
         .send()
         .await
-        .map_err(|error| AppError::Internal(format!("登录中台失败: {error}")))?;
+        .map_err(|error| {
+            // 连不上中台 ≠ 账号密码错，必须区分开：前者是部署/网络问题（503）
+            AppError::Upstream(format!("中台不可达（{base}），无法校验中台账号: {error}"))
+        })?;
 
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
@@ -204,25 +207,25 @@ pub async fn login_at(
         {
             return Err(AppError::Unauthorized("中台账号或密码错误".to_string()));
         }
-        return Err(AppError::Internal(format!(
-            "登录中台失败 HTTP {status}: {text}"
+        return Err(AppError::Upstream(format!(
+            "中台登录接口异常 HTTP {status}: {text}"
         )));
     }
 
     let value: Value = serde_json::from_str(&text)
-        .map_err(|error| AppError::Internal(format!("中台登录响应不是 JSON: {error}")))?;
+        .map_err(|error| AppError::Upstream(format!("中台登录响应不是 JSON: {error}")))?;
     let data = value.get("data").unwrap_or(&value);
     let token = data
         .get("accessToken")
         .or_else(|| data.get("access_token"))
         .and_then(Value::as_str)
         .map(str::to_string)
-        .ok_or_else(|| AppError::Internal(format!("中台登录响应缺少 accessToken: {text}")))?;
+        .ok_or_else(|| AppError::Upstream(format!("中台登录响应缺少 accessToken: {text}")))?;
     let user_id = data
         .get("userId")
         .or_else(|| data.get("user_id"))
         .and_then(Value::as_i64)
-        .ok_or_else(|| AppError::Internal(format!("中台登录响应缺少 userId: {text}")))?;
+        .ok_or_else(|| AppError::Upstream(format!("中台登录响应缺少 userId: {text}")))?;
     let username = data
         .get("username")
         .and_then(Value::as_str)
