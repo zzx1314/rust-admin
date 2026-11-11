@@ -1,0 +1,43 @@
+# 业务平台配置样例：复制为 server.toml 后按需修改。
+#
+# 优先级：环境变量 > 本文件 > 内置默认值。
+# 路径可以是绝对路径；相对路径按**本文件所在目录**解析，与启动时的工作目录无关。
+# 密钥建议仍放环境变量（ROBODOG_JWT_SECRET / ROBODOG_SERVICE_TOKEN /
+# ROBODOG_ZENTAI_PASSWORD），本文件只放地址类配置。
+#
+# 指定配置文件路径：ROBODOG_SERVER_CONFIG=/etc/robodog/server.toml
+# 不指定时使用当前工作目录下的 server.toml；该文件不存在则只用环境变量。
+
+# 服务端口（默认 3100）
+port = 3100
+
+# SQLite 文件（默认 data/robodog.db）
+# database = "data/robodog.db"
+
+# 前端构建产物目录（默认 ../web/dist）
+# web_dist = "../web/dist"
+
+# 仓库根目录 backend 的 SQLite，用于导入 dog_map 中的 ROS 地图
+# backend_db = "../../backend/data/users.db"
+
+# 建图回传的本地留档目录（默认 data/map_ingest）
+# ingest_dir = "data/map_ingest"
+
+# Token 有效期（小时，默认 24）
+# jwt_ttl_hours = 24
+
+[zentai]
+# 反向控制信道：业务平台部署在内网、中台无法连入时必需。
+# 配好后本服务会主动拨入 中台的 /api/dogDevice/control-plane/ws，
+# 由中台在这条连接上下发指令 / 任务 / 运行态查询。
+ws_url = "ws://192.168.41.10:3000"
+
+# 共享服务令牌，需与中台 APP_DOG__BUSINESS_API_TOKEN 完全一致。
+# 更推荐用环境变量 ROBODOG_SERVICE_TOKEN 提供，避免密钥落到仓库里。
+# service_token = "change-me"
+
+# ---- 以下三项用于「建图自动回传 / 中台账号登录 / 设备台账同步」----
+# 仅在同网或已打通入站时使用；与反向控制信道互不影响，可只配 ws_url。
+# base_url = "http://192.168.41.10:3000"
+# username = "sysadmin"
+# password = "change-me"

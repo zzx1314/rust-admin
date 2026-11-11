@@ -242,15 +242,25 @@ WebSocket 下发**。请求有两条链路，执行逻辑完全一致：
    中台 ──▶ POST /api/zentai/devices/{deviceId}/command（或 /tasks / runtime）
 ```
 
-反向信道由 `ROBODOG_ZENTAI_WS_URL` + `ROBODOG_SERVICE_TOKEN` 两个环境变量开启，
-任一为空则不建立（继续用 HTTP 直连模式）。握手请求头带 `x-service-token`，
-连接断开后按 1s→30s 指数退避重连；中台每 30s 发一次 `ping`，本服务回 `pong`。
+反向信道由「中台 WS 地址」+「共享服务令牌」两项开启，任一为空则不建立
+（继续用 HTTP 直连模式）。两项既可以走环境变量，也可以写进 `server.toml`
+（见[配置文件](#配置文件-servertoml)）：
 
 ```bash
-# 内网部署（业务平台只能出站）
+# 内网部署（业务平台只能出站）：环境变量方式
 export ROBODOG_SERVICE_TOKEN=dev-service-token
 export ROBODOG_ZENTAI_WS_URL=ws://192.168.41.10:3000
 ```
+
+```toml
+# server.toml 方式（环境变量仍优先）
+[zentai]
+ws_url        = "ws://192.168.41.10:3000"
+service_token = "dev-service-token"
+```
+
+握手请求头带 `x-service-token`，连接断开后按 1s→30s 指数退避重连；
+中台每 30s 发一次 `ping`，本服务回 `pong`。
 
 HTTP 链路（②）的三个约定：
 
@@ -367,6 +377,36 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 
 ## 配置项
 
+### 配置文件 `server.toml`
+
+除了环境变量，也可以用配置文件；优先级 **环境变量 > `server.toml` > 内置默认值**。
+
+```bash
+cp server.toml.example server.toml            # 或放到 /etc/robodog/server.toml
+export ROBODOG_SERVER_CONFIG=/etc/robodog/server.toml   # 可选：显式指定路径
+```
+
+```toml
+port = 3100
+
+[zentai]
+ws_url        = "ws://192.168.41.10:3000"   # 反向控制信道（内网部署必需）
+# service_token = "change-me"               # 更推荐用环境变量 ROBODOG_SERVICE_TOKEN
+
+# 建图回传 / 账号登录（同网部署时用；与反向信道互不影响）
+# base_url = "http://192.168.41.10:3000"
+# username = "sysadmin"
+# password = "change-me"
+```
+
+- 文件里的相对路径按**配置文件所在目录**解析，与启动时的工作目录无关。
+- 未知字段直接报错（拼错的键不会静默失效）。
+- 显式用 `ROBODOG_SERVER_CONFIG` 指定但文件不存在 → 启动失败；默认路径不存在 → 静默跳过。
+- 密钥类（`jwt_secret` / `zentai.password` / `service_token`）建议只走环境变量，
+  文件里放地址类配置。
+
+### 环境变量
+
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `ROBODOG_PORT` | `3100` | 后端端口 |
@@ -379,7 +419,9 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 | `ROBODOG_ZENTAI_USER` | 空 | 中台服务账号（需管理员，用于设备同步、分配查询、地图回传） |
 | `ROBODOG_ZENTAI_PASSWORD` | 空 | 中台服务账号密码（明文配置，服务端自行 AES 加密后提交） |
 | `ROBODOG_INGEST_DIR` | `server/data/map_ingest` | 回传地图包的本地留档目录 |
-| `ROBODOG_SERVICE_TOKEN` | 空 | 中台调用内部接口（触发设备同步地图）的共享令牌；需与中台 `APP_DOG__BUSINESS_API_TOKEN` 一致 |
+| `ROBODOG_SERVICE_TOKEN` | 空 | 与中台之间的共享服务令牌（中台调内部接口 + 反向控制信道握手）；需与中台 `APP_DOG__BUSINESS_API_TOKEN` 一致 |
+| `ROBODOG_ZENTAI_WS_URL` | 空 | 反向控制信道的中台地址，如 `ws://10.0.0.8:3000`。与 `ROBODOG_SERVICE_TOKEN` 同时具备才建立信道；为空时走「中台直连 HTTP」 |
+| `ROBODOG_SERVER_CONFIG` | 空 | 指定配置文件路径；不设置时读取当前目录的 `server.toml`（不存在则只用环境变量） |
 
 ## 任务下发与本体对接
 

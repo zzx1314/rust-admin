@@ -137,8 +137,10 @@ POST   /api/dogDevice/unassignUsers 批量解除分配 { deviceIds, userIds }
   断线瞬间自动回退到 HTTP；两条都不可用时返回明确错误，不会静默丢弃。
   「同步地图」（`syncMaps`）同样走这条信道，内网部署时不会失效。
 - **中台零配置**：信道是业务平台主动拨入，中台不需要知道业务平台地址。
-  业务平台侧配 `ROBODOG_ZENTAI_WS_URL`（如 `ws://10.0.0.8:3000`）+ `ROBODOG_SERVICE_TOKEN`。
-  两个值任一为空 → 不建信道，继续用 HTTP 直连模式。
+  业务平台侧配 WS 地址 + 共享令牌，两项任一为空 → 不建信道，继续用 HTTP 直连模式。
+  这两项可以走环境变量（`ROBODOG_ZENTAI_WS_URL` + `ROBODOG_SERVICE_TOKEN`），
+  也可以写进 `business/server/server.toml` 的 `[zentai] ws_url` / `service_token`
+  （优先级：环境变量 > 文件 > 默认值）。
 - **鉴权**：握手请求头带 `x-service-token`，与中台 `APP_DOG__BUSINESS_API_TOKEN` 一致；
   不一致直接 401，连升级都不会发生。
 - **回执超时 8s**（`control_channel::DEFAULT_TIMEOUT`）：超时报错并把审计记为

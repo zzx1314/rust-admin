@@ -13,7 +13,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let config = Arc::new(Config::from_env());
+    // 环境变量 > server.toml > 默认值；显式指定的配置文件缺失会直接报错
+    let config = Arc::new(Config::load()?);
     let pool = db::connect(&config).await?;
     db::migrate(&pool).await?;
     seed::seed(&pool).await?;

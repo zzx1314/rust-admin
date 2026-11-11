@@ -56,12 +56,14 @@ impl Frame {
 /// 启动反向控制信道。未配置 `ROBODOG_ZENTAI_WS_URL` 时静默跳过（同网部署
 /// 继续用中台直连 HTTP 的方式）。
 pub fn spawn(state: AppState) {
-    let Some(base) = state.config.zentai_ws_url.clone() else {
-        info!("未配置 ROBODOG_ZENTAI_WS_URL，跳过反向控制信道");
-        return;
-    };
-    let Some(token) = state.config.service_token.clone() else {
-        warn!("未配置 ROBODOG_SERVICE_TOKEN，反向控制信道不会建立");
+    let (Some(base), Some(token)) = (
+        state.config.zentai_ws_url.clone(),
+        state.config.service_token.clone(),
+    ) else {
+        info!(
+            "未配置中台 WS 地址或服务令牌（ROBODOG_ZENTAI_WS_URL / ROBODOG_SERVICE_TOKEN，\
+             或 server.toml 的 [zentai] ws_url + service_token），跳过反向控制信道"
+        );
         return;
     };
 
