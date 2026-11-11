@@ -30,7 +30,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 /// bulkdata 绑定应答超时（网关默认 bind_timeout_ms = 30000，这里取一半复核）
 const BIND_TIMEOUT: Duration = Duration::from_secs(10);
 /// 网关心跳间隔（1300/1301）
-const GATEWAY_HEARTBEAT: Duration = Duration::from_secs(20);
+///
+/// 实测：`192.168.234.234` 的网关 control 会话 **10s** 内收不到 `1300` 就主动断开
+/// （关闭帧 reason = `heartbeat timeout`，约 +10.5s 触发）。协议文档写 20s，但固件实际
+/// 更严，拉到 20s 会在 11s 左右被踢，这取 5s 留足抖动余量。
+const GATEWAY_HEARTBEAT: Duration = Duration::from_secs(5);
 
 type ReplySender = oneshot::Sender<Envelope>;
 

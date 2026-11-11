@@ -14,7 +14,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+# 本体链路是明文 ws://，TLS 仅为了 wss:// 兼容；用 rustls 避免 cross 编译时的 openssl
+# 依赖（部署目标 192.168.41.246 是 aarch64，从 x86\_64 交叉编译）。
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"

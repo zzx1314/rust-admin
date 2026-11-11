@@ -12,7 +12,7 @@
 | 几条连接？ | **两条**：`/control` + `/bulkdata`，同端口 10010，同属一个逻辑客户端 |
 | 谁分配身份？ | 网关在 `1201` 应答里分配 `client_id` / `session_id` / `bulkdata_bind_token` |
 | 建链顺序能换吗？ | 不能。先 `control` 拿会话，再 `bulkdata` 用 `1202` 绑定，收到 `1203` 才算通 |
-| 心跳？ | 客户端每 20s 发 `1300`，网关回 `1301`；网关每秒广播 `1207` 模块可用性 |
+| 心跳？ | 客户端每 5s 发 `1300`，网关回 `1301`（实测 control 会话 10s 无心跳即被踢）；网关每秒广播 `1207` 模块可用性 |
 | 数据怎么分流？ | 控制/状态/任务走 `control`；`1401/1403/1405/1407` 高频推送走 `bulkdata` |
 | 需要配置文件吗？ | **需要且已支持**：`client.toml` + 环境变量 + 命令行覆盖，优先级见 §11 |
 
@@ -202,7 +202,7 @@ root@ubuntu-arm64:~# hexdump -C /dev/mmcblk0p5 2>/dev/null \
 
 | 机制 | 类型 | 说明 |
 |------|------|------|
-| 网关心跳 | `1300` → `1301` | 客户端每 20s 发一次 `1300` 刷新 control 会话；网关收到立即回 `1301` |
+| 网关心跳 | `1300` → `1301` | 客户端每 5s 发一次 `1300` 刷新 control 会话；网关收到立即回 `1301`。**实测本网关 10s 收不到 1300 就断**（关闭帧 reason=`heartbeat timeout`，协议文档写 20s 但固件更严） |
 | 模块可用性 | `1207`（网关→客户端，约每秒） | `data.modules[].available`，`sdk_node=false` 表示 SDK 未连接/正在重连 |
 | SDK 心跳 | `1525`（SDK→网关） | 网关连续约 3s 收不到即把 `sdk_node.available` 置 false |
 | 本体状态 | `1315`（1Hz，control） | 电量/温度/里程等，客户端用于回传业务服务心跳 |
@@ -257,7 +257,7 @@ robodog-ops-server (ws://server:3100/ws/device)     智航 Pro (ws://192.168.168
 |------|----------|
 | 双通道建链 / 1201 / 1202 / 1203 | `business/client/src/zhpro/client.rs` |
 | 协议常量与信封 | `business/client/src/zhpro/protocol.rs` |
-| 网关心跳 20s、请求超时 8s、绑定超时 10s | `business/client/src/zhpro/client.rs`（`GATEWAY_HEARTBEAT` / `REQUEST_TIMEOUT` / `BIND_TIMEOUT`） |
+| 网关心跳 5s、请求超时 8s、绑定超时 10s | `business/client/src/zhpro/client.rs`（`GATEWAY_HEARTBEAT` / `REQUEST_TIMEOUT` / `BIND_TIMEOUT`） |
 | 端地址推导（裸 IP / `ws://ip:10010` / 带 path 均可） | `client.rs::endpoint_urls` / `host_base` |
 | 遥控看门狗（1s 无新帧自动停车） | `business/client/src/zhpro/teleop.rs` |
 | 业务服务注册 / 心跳 / 任务编排 | `business/client/src/main.rs` |
@@ -326,7 +326,8 @@ cargo run -- --print-config      # 查看脱敏后的生效配置
 > 协议里没有设备 ID / SN 可回读，`client_id` 与 `robot.host` 都不能替代它，详见 §2.1。
 
 不在配置文件里的项是协议常量，不应按现场随意改：`control`/`bulkdata` 端口 `10010`、
-网关心跳 `20s`、请求超时 `8s`、bulkdata 绑定超时 `10s`、遥控看门狗 `1s`。
+网关心跳 `5s`（网关实测 10s 无 1300 即断，不能按文档写 20s）、请求超时 `8s`、
+bulkdata 绑定超时 `10s`、遥控看门狗 `1s`。
 
 ### 11.4 密钥与校验
 

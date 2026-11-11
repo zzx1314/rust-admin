@@ -1,0 +1,10 @@
+# 交叉编译到现场服务器（192.168.41.246，aarch64 / Ubuntu 22.04）
+#
+#   rustup target add aarch64-unknown-linux-gnu
+#   sudo apt install gcc-aarch64-linux-gnu
+#   cargo build --release --target aarch64-unknown-linux-gnu
+#   ./deploy/build-aarch64.sh          # 一条命令：编译 + 校验 glibc 上限
+#
+# 目标机 glibc 2.35（Ubuntu 22.04），二进制最高只要求 GLIBC_2.34，可直接运行。
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"

@@ -41,8 +41,9 @@ use rand::Rng;
 use robodog_device_client::config::{CliArgs, Config, EnvConfig, print_help};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::interval;
 use tokio_tungstenite::connect_async;
@@ -596,6 +597,46 @@ fn progress_pct(done: usize, total: usize) -> i64 {
     ((done * 100) / total) as i64
 }
 
+/// 本体故障 / 诊断 / 充电结果都是**周期性推送**（实测 4021 每 5s 一条、1317 每秒一条），
+/// 内容不变时只上报一次，否则会在服务端刷出成百上千条 task_events / alerts。
+#[derive(Default)]
+struct EventDedup {
+    seen: HashMap<String, Instant>,
+}
+
+impl EventDedup {
+    /// 窗口期内出现过同样的 `event_type + message` 就丢弃
+    fn accept(&mut self, event_type: &str, message: &str) -> bool {
+        const WINDOW: Duration = Duration::from_secs(300);
+        let now = Instant::now();
+        self.seen.retain(|_, at| now.duration_since(*at) < WINDOW);
+        let key = format!("{event_type}|{message}");
+        if self.seen.contains_key(&key) {
+            return false;
+        }
+        self.seen.insert(key, now);
+        true
+    }
+}
+
+/// 去重后上报一条设备事件
+async fn send_deduped_event(
+    out_tx: &mpsc::Sender<WsMessage>,
+    dedup: &Arc<Mutex<EventDedup>>,
+    event: DeviceEventPayload,
+) {
+    if !dedup.lock().await.accept(&event.event_type, &event.message) {
+        debug!("跳过重复事件: {} / {}", event.event_type, event.message);
+        return;
+    }
+    send(
+        out_tx,
+        "event",
+        serde_json::to_value(event).unwrap_or_default(),
+    )
+    .await;
+}
+
 /// 本体推送处理：5009 状态、1315 本体状态、1401 位姿、4001 建图收尾、4021 故障
 fn spawn_zhpro_pump(
     client: Arc<ZhProClient>,
@@ -608,6 +649,7 @@ fn spawn_zhpro_pump(
 ) {
     tokio::spawn(async move {
         let mut rx = client.subscribe();
+        let dedup = Arc::new(Mutex::new(EventDedup::default()));
         while let Ok(env) = rx.recv().await {
             match env.head.msg_type {
                 T_TASK_STATUS => {
@@ -750,12 +792,7 @@ fn spawn_zhpro_pump(
                                 message: desc.to_string(),
                                 data: Some(item.clone()),
                             };
-                            send(
-                                &out_tx,
-                                "event",
-                                serde_json::to_value(event).unwrap_or_default(),
-                            )
-                            .await;
+                            send_deduped_event(&out_tx, &dedup, event).await;
                         }
                     }
                 }
@@ -788,12 +825,7 @@ fn spawn_zhpro_pump(
                             ),
                             data: Some(worst.clone()),
                         };
-                        send(
-                            &out_tx,
-                            "event",
-                            serde_json::to_value(event).unwrap_or_default(),
-                        )
-                        .await;
+                        send_deduped_event(&out_tx, &dedup, event).await;
                     }
                 }
                 T_CHARGE_RESULT => {
@@ -809,12 +841,7 @@ fn spawn_zhpro_pump(
                         message: format!("{label}: {}", env.message()),
                         data: Some(env.data.clone()),
                     };
-                    send(
-                        &out_tx,
-                        "event",
-                        serde_json::to_value(event).unwrap_or_default(),
-                    )
-                    .await;
+                    send_deduped_event(&out_tx, &dedup, event).await;
                 }
                 _ => {}
             }
@@ -1030,6 +1057,9 @@ async fn handle_server_message(
         }
 
         "heartbeat_ack" => {}
+
+        // 事件回执：客户端发的 event 由服务端落库后回 ack，不需要额外处理
+        "event_ack" => {}
 
         "park_binding" => {
             // 控制台绑定 / 解绑园区后实时下发，无需重连
@@ -1624,5 +1654,22 @@ async fn sync_maps_from_robot(
         Err(summary)
     } else {
         Ok(summary)
+    }
+}
+
+#[cfg(test)]
+mod event_dedup_tests {
+    use super::EventDedup;
+
+    #[test]
+    fn repeated_fault_is_reported_once() {
+        let mut dedup = EventDedup::default();
+        assert!(dedup.accept("fault", "感知障碍物检测延迟"));
+        // 本体 4021 周期性重推同一条故障：不再上报
+        assert!(!dedup.accept("fault", "感知障碍物检测延迟"));
+        // 换一条故障照常上报
+        assert!(dedup.accept("fault", "电池通信异常"));
+        // 事件类型不同不互相压制
+        assert!(dedup.accept("info", "感知障碍物检测延迟"));
     }
 }
