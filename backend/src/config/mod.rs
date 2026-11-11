@@ -36,6 +36,14 @@ pub struct DogConfig {
     /// empty string) means "use the `App` default".
     #[serde(default)]
     pub upload_dir: Option<String>,
+    /// 业务平台（`business/server`）地址；中台设备页「同步地图」通过它向设备下发指令。
+    /// 为空时该按钮返回未配置错误。
+    #[serde(default)]
+    pub business_api_url: Option<String>,
+    /// 调用业务平台内部接口的服务令牌，必须与业务平台 `ROBODOG_SERVICE_TOKEN` 一致。
+    /// 建议通过 `APP_DOG__BUSINESS_API_TOKEN` 环境变量注入，不写入配置文件。
+    #[serde(default)]
+    pub business_api_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

@@ -74,6 +74,7 @@ PUT    /api/dogDevice/{id}          修改设备
 DELETE /api/dogDevice/{id}          软删除设备
 GET    /api/dogDevice/users         可分配用户下拉
 GET    /api/dogDevice/byCode/{code} 按设备编号查询（业务平台内部使用）
+POST   /api/dogDevice/{id}/syncMaps  中台手动触发设备同步地图
 POST   /api/dogDevice/assignUsers   批量分配 { deviceIds, userIds, mode: append|replace }
 POST   /api/dogDevice/unassignUsers 批量解除分配 { deviceIds, userIds }
 ```
@@ -93,7 +94,21 @@ POST   /api/dogDevice/unassignUsers 批量解除分配 { deviceIds, userIds }
   导入业务库时未指定园区也能按 `parkCode` 自动回填。
 - 历史地图没有园区信息，落为 `NULL`，不影响现有查询。
 
-### 3.1 数据权限
+### 3.1 设备地图同步
+
+中台设备列表的「同步地图」按钮调用 `POST /api/dogDevice/{id}/syncMaps`：
+
+1. 中台用 `[dog] business_api_url` + `APP_DOG__BUSINESS_API_TOKEN` 调用业务平台
+   内部接口 `POST /api/zentai/devices/{deviceId}/sync-maps`；
+2. 业务平台向在线设备下发 `同步地图` 指令；
+3. 客户端用 4012 拉取本体地图列表，先查询业务库已同步的 `source_ref`，
+   只从文件服务下载缺失地图并回传；
+4. 自动回传（4001）与手动同步共用 ingest，服务端按 `parkId + sourceRef`
+   二次判重，重复请求返回 `{ skipped: true }`。
+
+业务平台需配置 `ROBODOG_SERVICE_TOKEN`，值与中台 `APP_DOG__BUSINESS_API_TOKEN` 一致。
+
+### 3.2 数据权限
 
 `dog_map` 与 `dog_device` 都带 `user_id`：地图按“谁创建谁可见”做行级隔离；
 设备按 `dog_user_device` 分配关系隔离（一个设备可分配给多个用户）。模型 / 媒体 / 参数配置为全局共享。

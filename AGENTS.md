@@ -60,7 +60,9 @@ the resource domains listed in `DOG.md`.
 
 `backend/config/config.toml` is committed and holds **no** secrets. Required
 environment variable: `APP_JWT_SECRET` (≥32 bytes). Optional:
-`APP_REDIS_PASSWORD`, `APP_CONFIG_FILE`.
+`APP_REDIS_PASSWORD`, `APP_CONFIG_FILE`, `APP_DOG__BUSINESS_API_TOKEN`
+（中台设备页「同步地图」调用业务平台内部接口的共享令牌，需与业务平台
+`ROBODOG_SERVICE_TOKEN` 一致）。
 Any config key can be overridden with `APP_<SECTION>__<KEY>`.
 
 `backend/run.sh` exports the required secret (and probes Redis for

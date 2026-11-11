@@ -257,6 +257,10 @@ pub fn dog_device_routes(state: AppState) -> Router<AppState> {
             get(dog_device_handlers::get_device_by_code_handler),
         )
         .route(
+            "/dogDevice/{id}/syncMaps",
+            post(dog_device_handlers::sync_device_maps_handler),
+        )
+        .route(
             "/dogDevice",
             post(dog_device_handlers::create_device_handler),
         )

@@ -105,7 +105,22 @@ impl App {
             Some(configured) if !configured.is_empty() => PathBuf::from(configured),
             _ => self.upload_dir.clone(),
         };
-        self.build_state_full(token_store, &config.jwt_secret, upload_dir)
+        let mut state = self.build_state_full(token_store, &config.jwt_secret, upload_dir);
+        state.business_api_url = config
+            .dog
+            .business_api_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(str::to_string);
+        state.business_api_token = config
+            .dog
+            .business_api_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string);
+        state
     }
 
     /// Build the application state with an explicit token store so that tests
@@ -206,6 +221,8 @@ impl App {
             dog_device_service,
             dog_statistics_service,
             upload_dir,
+            business_api_url: None,
+            business_api_token: None,
         }
     }
 
@@ -268,6 +285,8 @@ mod tests {
             database_url: "sqlite::memory:".to_string(),
             dog: DogConfig {
                 upload_dir: upload_dir.map(str::to_string),
+                business_api_url: None,
+                business_api_token: None,
             },
         }
     }

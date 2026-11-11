@@ -63,6 +63,7 @@ async fn test_state() -> (AppState, TempDb) {
         zentai_username: None,
         zentai_password: None,
         ingest_dir: dir.join("map_ingest"),
+        service_token: None,
     });
 
     let pool = db::connect(&config).await.expect("连接测试库失败");
@@ -129,6 +130,55 @@ async fn protected_route_requires_token() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let body = json_body(response).await;
     assert_eq!(body["code"], 10401);
+}
+
+#[tokio::test]
+async fn synced_sources_lists_source_refs_for_park() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let (park_id, map_id): (i64, String) =
+        sqlx::query_as("SELECT park_id, id FROM map_versions LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .expect("演示数据应包含地图基线");
+    sqlx::query("UPDATE map_versions SET source_ref = ?1 WHERE id = ?2")
+        .bind("/ota/alg_data/map/history_map/demo")
+        .bind(&map_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let app = build_router(state);
+    let token = login(&app).await;
+    let response = app
+        .oneshot(
+            Request::get(format!("/api/map-versions/synced-sources?parkId={park_id}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["data"][0], "/ota/alg_data/map/history_map/demo");
+}
+
+#[tokio::test]
+async fn internal_sync_endpoint_requires_service_token() {
+    let (state, _db) = test_state().await;
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/api/zentai/devices/RD-001/sync-maps")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 #[tokio::test]

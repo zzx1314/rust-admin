@@ -38,4 +38,8 @@ pub struct AppState {
     pub dog_statistics_service: Arc<DogStatisticsService>,
     /// Directory for uploaded map packages (`<upload_dir>/maps`).
     pub upload_dir: PathBuf,
+    /// 业务平台地址，用于中台设备页向设备下发「同步地图」指令。
+    pub business_api_url: Option<String>,
+    /// 调用业务平台内部接口的服务令牌。
+    pub business_api_token: Option<String>,
 }

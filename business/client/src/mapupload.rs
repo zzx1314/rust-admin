@@ -13,7 +13,7 @@
 //! 客户端只负责「取包 + 交给业务服务」，中台的账号与导流逻辑留在服务端，
 //! 避免把中台凭证分发到每台机器狗上。
 
-use crate::zhpro::mapping::MappingSaved;
+use crate::zhpro::mapping::{MappingSaved, RobotMap};
 use reqwest::multipart::{Form, Part};
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -213,6 +213,14 @@ pub async fn ingest_map(
 
     match serde_json::from_str::<Value>(&text) {
         Ok(value) => {
+            let skipped = value
+                .get("data")
+                .and_then(|d| d.get("skipped"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if skipped {
+                return UploadOutcome::Skipped("sourceRef 已存在，跳过重复同步".to_string());
+            }
             let map_id = value
                 .get("data")
                 .and_then(|d| d.get("mapId"))
@@ -234,6 +242,128 @@ pub async fn ingest_map(
             map_id: text.chars().take(80).collect(),
         },
     }
+}
+
+/// 手动同步结果（中台设备页触发）
+#[derive(Debug, Default, Clone)]
+pub struct SyncReport {
+    pub total: usize,
+    pub uploaded: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub errors: Vec<String>,
+}
+
+impl SyncReport {
+    pub fn summary(&self) -> String {
+        let mut summary = format!(
+            "地图同步完成：共 {} 张，新增 {}，跳过 {}，失败 {}",
+            self.total, self.uploaded, self.skipped, self.failed
+        );
+        if !self.errors.is_empty() {
+            summary.push_str(&format!("；失败原因：{}", self.errors.join("；")));
+        }
+        summary
+    }
+}
+
+/// 查询业务库中该园区已经同步过的机器人地图路径（`source_ref`）。
+pub async fn synced_sources(
+    http: &reqwest::Client,
+    cfg: &IngestConfig,
+    park_id: i64,
+) -> Result<Vec<String>, String> {
+    let token = login(http, cfg).await?;
+    let url = format!(
+        "{}/api/map-versions/synced-sources?parkId={park_id}",
+        cfg.api_base.trim_end_matches('/')
+    );
+    let resp = http
+        .get(&url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .map_err(|e| format!("查询已同步地图列表失败: {e}"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("查询已同步地图列表失败 HTTP {status}: {text}"));
+    }
+    let value: Value =
+        serde_json::from_str(&text).map_err(|e| format!("已同步地图列表响应不是 JSON: {e}"))?;
+    Ok(value
+        .get("data")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// 手动同步：按 4012 返回的地图列表逐张检查，只下载并上传业务库中缺失的地图。
+pub async fn sync_robot_maps(
+    http: &reqwest::Client,
+    cfg: &IngestConfig,
+    file_base: &str,
+    park_id: i64,
+    maps: &[RobotMap],
+) -> SyncReport {
+    let mut report = SyncReport {
+        total: maps.len(),
+        ..Default::default()
+    };
+    let synced = match synced_sources(http, cfg, park_id).await {
+        Ok(synced) => synced,
+        Err(error) => {
+            report.failed = maps.len();
+            report.errors.push(error);
+            return report;
+        }
+    };
+
+    for map in maps {
+        if synced.iter().any(|source| source == &map.path) {
+            report.skipped += 1;
+            info!("地图 {} 已同步过，跳过", map.path);
+            continue;
+        }
+        let package = match fetch_map_package(http, file_base, &map.map_id).await {
+            Ok(package) => package,
+            Err(error) => {
+                report.failed += 1;
+                report.errors.push(format!("{}: {error}", map.map_id));
+                continue;
+            }
+        };
+        let saved = MappingSaved {
+            success: true,
+            code: 0,
+            message: "中台手动同步".to_string(),
+            map_path: Some(map.path.clone()),
+            map_name: Some(map.map_id.clone()),
+            raw: json!({ "source": "manual-sync" }),
+        };
+        // 手动同步不改写园区当前基线，也不使用全局覆盖名
+        let mut map_cfg = cfg.clone();
+        map_cfg.map_name = None;
+        map_cfg.bind = false;
+        match ingest_map(http, &map_cfg, &saved, &package).await {
+            UploadOutcome::Uploaded { .. } => report.uploaded += 1,
+            UploadOutcome::Skipped(reason) => {
+                report.skipped += 1;
+                info!("地图 {} 服务端判定重复: {reason}", map.map_id);
+            }
+            UploadOutcome::Failed { reason } => {
+                report.failed += 1;
+                report.errors.push(format!("{}: {reason}", map.map_id));
+            }
+        }
+    }
+    report
 }
 
 /// 构造一个适合长时间传输地图的 HTTP 客户端

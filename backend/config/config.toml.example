@@ -22,3 +22,8 @@ port = 6379
 # 地图包上传目录（<upload_dir>/maps）。
 # 省略时使用 data/device_uploads。
 upload_dir = "data/device_uploads"
+# 业务平台地址：中台设备页「同步地图」按钮通过它向设备下发指令。
+# 服务令牌不写入本文件，用环境变量注入：
+#   export APP_DOG__BUSINESS_API_TOKEN="..."
+# 业务平台侧对应 ROBODOG_SERVICE_TOKEN，两边必须一致。
+business_api_url = "http://127.0.0.1:3100"

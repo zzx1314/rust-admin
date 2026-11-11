@@ -5,6 +5,7 @@ pub mod ingest;
 pub mod maps;
 pub mod parks;
 pub mod routes;
+pub mod service;
 pub mod settings;
 pub mod tasks;
 pub mod teleop;

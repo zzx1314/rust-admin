@@ -54,6 +54,8 @@ pub struct MapVersion {
     /// 中台地图归属用户（机器狗建图时的 owner）
     pub owner_user_id: Option<i64>,
     pub owner_username: Option<String>,
+    /// 机器人本体地图路径，用于自动 / 手动同步去重
+    pub source_ref: Option<String>,
     pub route_count: i64,
     pub task_count: i64,
 }

@@ -4,7 +4,8 @@ use crate::error::ApiResponse;
 use crate::gateway;
 use crate::gateway::DeviceConnections;
 use crate::handlers::{
-    alerts, dashboard, devices, ingest, maps, parks, routes, settings, tasks, teleop, zones,
+    alerts, dashboard, devices, ingest, maps, parks, routes, service, settings, tasks, teleop,
+    zones,
 };
 use axum::extract::State;
 use axum::http::Method;
@@ -51,6 +52,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/parks/{id}/maps", get(maps::list_park_maps))
         .route("/map-versions", get(maps::list_maps))
+        .route(
+            "/map-versions/synced-sources",
+            get(maps::list_synced_sources),
+        )
         .route("/map-versions/backend", get(maps::list_backend_maps))
         .route(
             "/map-versions/import-backend",
@@ -142,6 +147,11 @@ pub fn build_router(state: AppState) -> Router {
     let public = Router::new()
         .route("/auth/login", post(login_handler))
         .route("/health", get(health))
+        // 中台内部接口：由共享服务令牌鉴权，不使用业务 JWT
+        .route(
+            "/zentai/devices/{device_id}/sync-maps",
+            post(service::sync_device_maps),
+        )
         // 兼容历史上挂在 /api 下的设备网关路径（实际对外路径见下方 top-level 路由）
         .route("/ws/device", get(gateway::ws_handler));
 

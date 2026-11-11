@@ -22,7 +22,7 @@ const MAP_SELECT: &str = "SELECT m.id, m.park_id, p.park_name, m.map_name, m.ver
     m.frame_id, m.crs, m.origin, m.resolution, m.floors, m.road_count, m.no_go_count,
     m.status, m.map_hash, m.map_width, m.map_height, m.note, m.published_at, m.created_at,
     m.source, m.source_id, m.file_name, m.file_path, m.file_size,
-    m.owner_user_id, m.owner_username,
+    m.owner_user_id, m.owner_username, m.source_ref,
     (SELECT COUNT(*) FROM routes r WHERE r.map_version_id = m.id) AS route_count,
     (SELECT COUNT(*) FROM tasks t JOIN routes r ON r.id = t.route_id
         WHERE r.map_version_id = m.id) AS task_count
@@ -70,6 +70,34 @@ pub async fn list_park_maps(
         .fetch_all(&state.db)
         .await?;
     Ok(ApiResponse::ok(maps))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncedSourcesQuery {
+    pub park_id: Option<i64>,
+}
+
+/// `GET /api/map-versions/synced-sources?parkId=...`
+///
+/// 返回该园区已经入库的机器人地图路径（`source_ref`）。设备客户端手动同步前
+/// 先拉这个列表，跳过已同步地图，避免重复下载大文件。
+pub async fn list_synced_sources(
+    State(state): State<AppState>,
+    Query(query): Query<SyncedSourcesQuery>,
+) -> Result<Json<ApiResponse<Vec<String>>>, AppError> {
+    let park_id = query
+        .park_id
+        .ok_or_else(|| AppError::BadRequest("缺少 parkId".to_string()))?;
+    let sources: Vec<String> = sqlx::query_scalar(
+        "SELECT source_ref FROM map_versions
+         WHERE park_id = ?1 AND source_ref IS NOT NULL AND source_ref <> ''
+         ORDER BY created_at ASC",
+    )
+    .bind(park_id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(ApiResponse::ok(sources))
 }
 
 /// 中台 `dog_map` 的列清单

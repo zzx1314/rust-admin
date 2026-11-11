@@ -221,6 +221,7 @@ export interface MapVersion {
   fileSize: number | null;
   ownerUserId: number | null;
   ownerUsername: string | null;
+  sourceRef: string | null;
   routeCount: number;
   taskCount: number;
 }

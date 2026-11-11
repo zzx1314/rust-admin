@@ -55,6 +55,16 @@ cargo run
 2. 创建默认管理员 `admin / admin123`；
 3. 写入 3 个园区、8 个巡检区域、12 台设备、4 条路线、10 个任务、5 条告警等演示数据。
 
+需要在中台设备页触发「同步地图」时，两个服务端要配置一致的共享令牌：
+
+```bash
+# business/server
+export ROBODOG_SERVICE_TOKEN=dev-service-token
+
+# backend（根目录）
+export APP_DOG__BUSINESS_API_TOKEN=dev-service-token
+```
+
 ### 2. 启动前端开发服务器（端口 5273）
 
 ```bash
@@ -148,8 +158,9 @@ GET    /api/dashboard/summary
 GET    /api/map-versions                  GET    /api/parks/{id}/maps
 GET    /api/map-versions/{id}             GET    /api/map-versions/{id}/refs
 GET    /api/map-versions/{id}/raster      GET    /api/map-versions/backend          POST   /api/map-versions/import-backend
+GET    /api/map-versions/synced-sources   # 已同步的机器人地图路径（按 parkId）
 POST   /api/map-versions/{id}/publish     POST   /api/map-versions/{id}/new-version
-POST   /api/map-versions/ingest
+POST   /api/map-versions/ingest          # 自动回传 / 手动同步共用入口
 ```
 
 ## 中台账号与设备分配
@@ -188,6 +199,21 @@ POST   /api/map-versions/ingest
   未绑定设备，派发时会跳过 `task.park_id` 与设备园区不一致的任务。
 - 注册回执 `register_ack` 会带上 `parkId / parkCode / parkName`，设备客户端据此确定建图回传的归属园区。
 - 绑定园区后若设备在线，服务会立即补发该园区的待执行任务。
+
+## 地图同步：自动与手动
+
+同一张机器人地图只入库一次：业务库 `map_versions.source_ref` 保存机器人本体
+地图绝对路径，ingest 写库前按 `parkId + sourceRef` 判重，重复请求直接返回
+`{ skipped: true }`。
+
+1. **自动触发**：建图收到 4001 保存结果 → 客户端从文件服务下载地图包 →
+   `POST /api/map-versions/ingest`（`sourceRef` = 4001 的 `map_path`）。
+2. **手动触发**：中台「设备管理」列表点「同步地图」→ 中台调用本服务内部接口
+   `POST /api/zentai/devices/{deviceId}/sync-maps`（共享服务令牌）→ 服务通过
+   设备 WebSocket 下发 `同步地图` 指令 → 客户端用 4012 拉地图列表，先查
+   `GET /api/map-versions/synced-sources?parkId=...`，只下载尚未同步的地图。
+
+因此自动回传与手动同步交叉执行也不会重复上传/入库。
 
 ## 地图基线
 
@@ -295,6 +321,7 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 | `ROBODOG_ZENTAI_USER` | 空 | 中台服务账号（需管理员，用于设备同步、分配查询、地图回传） |
 | `ROBODOG_ZENTAI_PASSWORD` | 空 | 中台服务账号密码（明文配置，服务端自行 AES 加密后提交） |
 | `ROBODOG_INGEST_DIR` | `server/data/map_ingest` | 回传地图包的本地留档目录 |
+| `ROBODOG_SERVICE_TOKEN` | 空 | 中台调用内部接口（触发设备同步地图）的共享令牌；需与中台 `APP_DOG__BUSINESS_API_TOKEN` 一致 |
 
 ## 任务下发与本体对接
 

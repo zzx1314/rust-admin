@@ -21,3 +21,6 @@ port = 6379
 [dog]
 # 地图包上传目录（<upload_dir>/maps）
 upload_dir = "data/device_uploads"
+# 业务平台地址：中台设备页「同步地图」按钮通过它向设备下发指令。
+# 服务令牌不写入本文件，用环境变量 APP_DOG__BUSINESS_API_TOKEN 注入。
+business_api_url = "http://127.0.0.1:3100"

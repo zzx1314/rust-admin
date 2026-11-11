@@ -82,6 +82,38 @@ pub async fn ingest_map(
         name: park_name,
     };
 
+    // 去重：同一园区下同一机器人地图路径只入库一次。
+    // 自动回传（4001）与中台手动同步（4012 + 文件服务）共用这个判断。
+    if let Some(source_ref) = request
+        .source_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM map_versions WHERE park_id = ?1 AND source_ref = ?2 LIMIT 1",
+        )
+        .bind(park_id)
+        .bind(source_ref)
+        .fetch_optional(&state.db)
+        .await?;
+        if let Some(map_id) = existing {
+            let map = crate::handlers::maps::fetch_map(&state, &map_id).await?;
+            info!("地图 {source_ref} 已同步过，跳过重复入库（{map_id}）");
+            return Ok(ApiResponse::ok(json!({
+                "mapId": map.id,
+                "mapName": map.map_name,
+                "parkId": map.park_id,
+                "zentaiMapId": Value::Null,
+                "bound": false,
+                "skipped": true,
+                "reason": "sourceRef 已存在，跳过重复同步",
+                "stashPath": Value::Null,
+                "map": map,
+            })));
+        }
+    }
+
     // 本地留档：中台失败时可直接重放，不必再回机器人取包
     let stash_path = ingest::stash_package(&state.config.ingest_dir, &file_name, &package).await?;
     info!(
@@ -153,9 +185,9 @@ pub async fn ingest_map(
         "INSERT INTO map_versions (id, park_id, map_name, version, frame_id, crs, origin,
             resolution, floors, road_count, no_go_count, status, map_hash, map_width,
             map_height, note, published_at, created_at, source, source_id, file_name,
-            file_path, file_size, owner_user_id)
+            file_path, file_size, owner_user_id, source_ref)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, '1F', 0, 0, '部分标定', ?9, ?10, ?11,
-            ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+            ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
          ON CONFLICT(id) DO UPDATE SET
             park_id = excluded.park_id,
             map_name = excluded.map_name,
@@ -167,7 +199,8 @@ pub async fn ingest_map(
             note = excluded.note,
             file_name = excluded.file_name,
             file_size = excluded.file_size,
-            owner_user_id = excluded.owner_user_id",
+            owner_user_id = excluded.owner_user_id,
+            source_ref = excluded.source_ref",
     )
     .bind(&map_id)
     .bind(park_id)
@@ -189,6 +222,13 @@ pub async fn ingest_map(
     .bind(stash_path.display().to_string())
     .bind(package.len() as i64)
     .bind(owner_user_id)
+    .bind(
+        request
+            .source_ref
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+    )
     .execute(&state.db)
     .await?;
 
@@ -213,6 +253,7 @@ pub async fn ingest_map(
         "parkId": map.park_id,
         "zentaiMapId": zentai.id,
         "bound": request.bind,
+        "skipped": false,
         "stashPath": stash_path.display().to_string(),
         "map": map,
     })))

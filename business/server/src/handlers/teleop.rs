@@ -39,11 +39,12 @@ const BODY_ACTIONS: [(&str, &str); 6] = [
 ];
 
 /// 允许通过 `/command` 下发的业务指令
-const BUSINESS_COMMANDS: [&str; 6] = [
+const BUSINESS_COMMANDS: [&str; 7] = [
     "开始巡检",
     "暂停任务",
     "继续任务",
     "召回充电",
+    "同步地图",
     "远程接管",
     "释放接管",
 ];

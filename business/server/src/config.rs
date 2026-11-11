@@ -18,6 +18,8 @@ pub struct Config {
     pub zentai_password: Option<String>,
     /// 自动上传的地图包本地暂存目录
     pub ingest_dir: PathBuf,
+    /// 中台调用业务平台内部接口的服务令牌；为空时内部触发接口拒绝请求。
+    pub service_token: Option<String>,
 }
 
 impl Config {
@@ -67,6 +69,9 @@ impl Config {
                 .ok()
                 .and_then(blank_to_none),
             ingest_dir,
+            service_token: env::var("ROBODOG_SERVICE_TOKEN")
+                .ok()
+                .and_then(blank_to_none),
         }
     }
 

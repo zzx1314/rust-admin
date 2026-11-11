@@ -6,6 +6,7 @@ import {
   dogDeviceDelete,
   dogDevicePage,
   dogDeviceSave,
+  dogDeviceSyncMaps,
   dogDeviceUnassign,
   dogDeviceUpdate,
   dogDeviceUsers,
@@ -56,6 +57,7 @@ const selection = ref<DogDevice[]>([]);
 const selectedIds = computed(() => selection.value.map(item => item.id));
 
 const users = ref<DogDeviceUser[]>([]);
+const syncingId = ref<number | null>(null);
 
 const formVisible = ref(false);
 const formTitle = ref("新增设备");
@@ -238,6 +240,34 @@ async function submitUnassign() {
   }
 }
 
+async function syncMaps(row: DogDevice) {
+  try {
+    await ElMessageBox.confirm(
+      `将通知设备「${row.deviceName || row.deviceId}」用 4012 获取地图列表，` +
+        `并把缺失地图同步到中台。是否继续？`,
+      "同步设备地图",
+      {
+        type: "warning",
+        confirmButtonText: "开始同步",
+        cancelButtonText: "取消"
+      }
+    );
+  } catch {
+    return;
+  }
+  syncingId.value = row.id;
+  try {
+    const res = await dogDeviceSyncMaps(row.id);
+    if (res.code === SUCCESS) {
+      message("同步指令已下发，设备会上报同步结果", { type: "success" });
+    } else {
+      message(res.msg || "下发失败", { type: "error" });
+    }
+  } finally {
+    syncingId.value = null;
+  }
+}
+
 function handleSelectionChange(rows: DogDevice[]) {
   selection.value = rows;
 }
@@ -338,10 +368,18 @@ onMounted(() => {
         <el-table-column label="设备 IP" prop="deviceIp" width="140" />
         <el-table-column label="固件" prop="firmware" width="120" />
         <el-table-column label="创建时间" prop="createTime" width="180" />
-        <el-table-column label="操作" fixed="right" width="240">
+        <el-table-column label="操作" fixed="right" width="300">
           <template #default="{ row }">
             <el-button link type="primary" @click="openAssign([row])">
               分配用户
+            </el-button>
+            <el-button
+              link
+              type="success"
+              :loading="syncingId === row.id"
+              @click="syncMaps(row)"
+            >
+              同步地图
             </el-button>
             <DogTableActions
               :row="row"

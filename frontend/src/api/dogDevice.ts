@@ -83,3 +83,7 @@ export const dogDeviceUnassign = (deviceIds: number[], userIds: number[]) =>
     deviceIds,
     userIds
   });
+
+/** 中台手动触发设备同步地图（经业务平台下发 `同步地图` 指令） */
+export const dogDeviceSyncMaps = (id: string | number) =>
+  http.axiosPostRequest<Result>(`/api/dogDevice/${id}/syncMaps`, {});

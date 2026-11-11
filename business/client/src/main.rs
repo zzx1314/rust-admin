@@ -1385,6 +1385,7 @@ async fn handle_server_message(
                             .await
                             .map(|_| "已请求返回充电点".to_string())
                     }
+                    "同步地图" => sync_maps_from_robot(config, &client, out_tx).await,
                     other => Err(format!("未知指令 {other}")),
                 },
             };
@@ -1548,5 +1549,75 @@ async fn upload_mapping_to_zentai(config: &Config, saved: &MappingSaved) -> Uplo
         map_name: config.ingest_map_name.clone(),
         bind: true,
     };
-    mapupload::ingest_map(&http, &ingest, saved, &package).await
+    // 4001 偶尔只给目录名不给绝对路径；补一个与 4012 一致的文件服务路径，
+    // 保证自动回传与手动同步使用同一个 sourceRef 去重。
+    let mut saved = saved.clone();
+    if saved.map_path.is_none() {
+        saved.map_path = Some(format!(
+            "{}/history_map/{}",
+            config.map_root.trim_end_matches('/'),
+            map_dir
+        ));
+    }
+    mapupload::ingest_map(&http, &ingest, &saved, &package).await
+}
+
+/// 中台设备页「同步地图」：4012 拉取地图列表，只下载业务库缺失的地图并回传。
+async fn sync_maps_from_robot(
+    config: &Config,
+    client: &Arc<ZhProClient>,
+    out_tx: &mpsc::Sender<WsMessage>,
+) -> Result<String, String> {
+    let park_id = match config.park_id {
+        Some(park_id) => park_id,
+        None => (*config.bound_park_id.lock().await).ok_or_else(|| {
+            "设备尚未绑定园区，无法确定地图归属；请先在控制台绑定园区".to_string()
+        })?,
+    };
+    let robot_host = config.robot.clone().unwrap_or_default();
+    let file_base = mapupload::resolve_file_base(
+        &robot_host,
+        config.robot_file_base.as_deref(),
+        config.robot_file_port,
+    );
+    let http = mapupload::build_http_client();
+    let maps = zhpro::mapping::MapManager::new(client.clone())
+        .list()
+        .await
+        .map_err(|e| format!("4012 获取地图列表失败: {e}"))?;
+    info!("中台触发手动同步：本体共有 {} 张地图", maps.len());
+
+    let ingest = IngestConfig {
+        api_base: config.resolve_api_base(),
+        username: config.api_username.clone(),
+        password: config.api_password().to_string(),
+        device_id: config.device_id.clone(),
+        park_id: Some(park_id),
+        map_name: None,
+        bind: false,
+    };
+    let report = mapupload::sync_robot_maps(&http, &ingest, &file_base, park_id, &maps).await;
+    let summary = report.summary();
+    let event = DeviceEventPayload {
+        event_type: if report.failed > 0 { "error" } else { "info" }.to_string(),
+        message: summary.clone(),
+        data: Some(json!({
+            "total": report.total,
+            "uploaded": report.uploaded,
+            "skipped": report.skipped,
+            "failed": report.failed,
+            "mode": "manual",
+        })),
+    };
+    send(
+        out_tx,
+        "event",
+        serde_json::to_value(event).unwrap_or_default(),
+    )
+    .await;
+    if report.failed > 0 {
+        Err(summary)
+    } else {
+        Ok(summary)
+    }
 }
