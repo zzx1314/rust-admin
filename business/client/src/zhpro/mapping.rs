@@ -405,7 +405,8 @@ impl MapManager {
 
 /// 默认地图根目录（L2 为 `/userdata/alg_data/map`，M1 为 `/ota/alg_data/map`）：
 /// 4013 未返回 `map_dir_prefix` 时的兜底值。
-pub const DEFAULT_MAP_ROOT: &str = "/ota/alg_data/map";
+/// 默认地图根目录统一定义在 `config` 模块，避免与命令行默认值漂移
+pub use robodog_device_client::config::DEFAULT_MAP_ROOT;
 
 /// 地图名（目录名）与业务侧地图版本的映射约定
 ///

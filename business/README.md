@@ -310,7 +310,8 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 ### 视频：协议里没有，只能外挂
 
 协议原文已归档在 `business/docs/zhihang-pro-api-v1.0.3.pdf`（84 页），
-同目录 `.txt` 是便于检索的纯文本版。
+同目录 `.txt` 是便于检索的纯文本版；设备客户端与机器狗本体的连接方式（双通道建链、
+心跳、重连、配置项）见 [`docs/client-connection-guide.md`](docs/client-connection-guide.md)。
 
 智航 Pro v1.0.3 接口文档全文（84 页）**没有视频传输相关描述**：`视频` / `码流` /
 `摄像头` / `图传` / `RTSP` / `HLS` / `WebRTC` / `video` / `camera` 均 0 次出现，
@@ -384,6 +385,29 @@ API Type 总表 60 个消息里也没有图像或流媒体类型。`bulkdata` �
 rm -f business/server/data/robodog.db*
 cd business/server && cargo run
 ```
+
+## 测试约定
+
+测试分两层，避免「集成测试写进业务代码」：
+
+| 层级 | 位置 | 内容 |
+|------|------|------|
+| 单元测试 | `src/**/mod.rs` 末尾 `#[cfg(test)] mod tests` | 纯函数、解析、状态机。`cfg(test)` 在 release 构建中整体剔除，不进入产物 |
+| 集成测试 | `tests/*.rs` | 走真实路由 / 真实迁移 / 真实临时库的黑盒用例 |
+
+- `server` 与 `client` 都提供 `src/lib.rs` 作为库入口，二进制 `src/main.rs` 只做进程装配，
+  这样集成测试可以像外部调用方一样使用 `robodog_ops_server::*` / `robodog_device_client::*`；
+- 需要数据库、HTTP 路由、文件 IO 的用例一律放 `tests/`，不要塞进 `src/`；
+- 新增业务逻辑尽量先抽成纯函数，顺带补内联单测；临时资源（数据库、配置文件）用
+  `std::env::temp_dir()` + 进程号 + 原子计数命名，并用 `Drop` 清理，保证并行安全；
+- 线上事故修复要补回归用例，例如驾驶舱 `video_url` 缺列 → `server/tests/api_smoke.rs`。
+
+当前覆盖：
+
+| 包 | 单测 | 集成测试 |
+|------|------|------|
+| `server` | 26（`dispatch` / `geo` / `ingest` / `teleop` / `routes` / `devices`） | 3（`tests/api_smoke.rs`：健康检查、鉴权、驾驶舱设备字段） |
+| `client` | 33（`dispatch` / `protocol` / `client` / `mapping` / `route` / `status` / `teleop` / `mapupload`） | 14（`tests/config_tests.rs`：配置优先级、密钥引用、校验与脱敏） |
 
 ## 检查命令
 

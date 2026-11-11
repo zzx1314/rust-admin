@@ -25,6 +25,9 @@ OPS 业务服务 ──task_dispatch──► 本客户端 ──智航 Pro WS�
 
 `--robot` 为空时退化为纯模拟模式（只回心跳，不驱动机器人），便于前端联调。
 
+本体建链细节（`control` / `bulkdata` 双通道、`1201/1202/1203` 时序、心跳与重连）
+见 [`../docs/client-connection-guide.md`](../docs/client-connection-guide.md)。
+
 ## 架构
 
 ```
@@ -69,7 +72,24 @@ cargo run -- --device-id RD-001 --robot 192.168.10.21 \
 
 # 查看全部参数
 cargo run -- --help
+
+# 6) 现场部署：用配置文件固定参数（推荐）
+cp client.toml.example client.toml   # client.toml 已被 .gitignore 忽略
+cargo run -- --config client.toml
+cargo run -- --print-config          # 打印脱敏后的生效配置
 ```
+
+## 配置文件
+
+优先级：**命令行 > 环境变量 > `client.toml` > 内置默认值**。
+
+- 默认读取工作目录下的 `client.toml`；可用 `--config <path>` 或 `ROBODOG_CLIENT_CONFIG` 指定。
+- 默认路径不存在时静默使用默认值；**显式指定**的路径不存在则启动失败。
+- 密钥推荐走环境变量：`server.secret_env` / `api.password_env` 填写变量名，不要写明文。
+- 未知字段会直接报错（防止 `secrect` 这类拼写错误被忽略），`--print-config` 可核对生效值与来源。
+
+完整字段、默认值与 systemd 示例见
+[`../docs/client-connection-guide.md`](../docs/client-connection-guide.md) §11。
 
 ## 命令行参数
 
@@ -77,12 +97,12 @@ cargo run -- --help
 |------|--------|------|
 | `--server` | `ws://127.0.0.1:3100` | 业务服务地址 |
 | `--device-id` | `RD-001` | 设备编号（须与 `devices.device_id` 一致） |
-| `--secret` | 无 | 设备密钥（预留） |
+| `--secret` | 无 | 设备密钥（推荐 `ROBODOG_DEVICE_SECRET`） |
 | `--heartbeat` | `10` | 心跳间隔（秒） |
 | `--battery` | `86` | 初始电量 |
 | `--signal` | `4` | 信号强度 |
-| `--position` | `31.2014, 121.6023` | GPS 坐标 |
-| `--firmware` | `v2.6.1` | 固件版本 |
+| `--position` | `0.0, 0.0` | 初始地图坐标 |
+| `--firmware` | `Hermes_M_v0.3.2` | 固件版本 |
 | `--robot` | 空 | **智航 Pro 本体地址**。空 = 纯模拟模式 |
 | `--map-root` | `/ota/alg_data/map` | 本体地图根目录 |
 | `--map-only` | false | 只执行一次建图后退出 |

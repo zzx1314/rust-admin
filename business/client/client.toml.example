@@ -1,0 +1,62 @@
+# 机器狗设备客户端配置模板
+#
+# 复制为 client.toml 后按现场修改（client.toml 已被 .gitignore 忽略，避免密钥入库）：
+#   cp client.toml.example client.toml
+#   chmod 600 client.toml
+#
+# 优先级（高 → 低）：命令行 > 环境变量 > 本文件 > 内置默认值
+# 生效结果用 `cargo run -- --print-config` 查看（敏感字段自动脱敏）。
+
+[server]
+# 业务服务 WebSocket 地址；REST 地址默认由它推导（ws→http / wss→https）
+url = "ws://127.0.0.1:3100"
+# 设备编号，必须与业务库 devices.device_id 一致
+device_id = "RD-001"
+# 设备密钥：推荐用环境变量，不要写明文
+secret_env = "ROBODOG_DEVICE_SECRET"
+# secret = "不推荐：明文写在这里"
+# 心跳间隔（秒，最小 1）
+heartbeat_secs = 10
+
+[api]
+# 业务服务 REST 基地址；留空由 server.url 推导
+base = ""
+username = "admin"
+# 登录密码：推荐用环境变量
+password_env = "ROBODOG_API_PASSWORD"
+# password = "不推荐：明文写在这里"
+
+[robot]
+# 智航 Pro 本体地址；留空 = 模拟模式（只回传进度，不驱动机器人）
+host = "192.168.168.100"
+# 本体地图文件服务端口（协议文档 §4，HTTP 12000）
+file_port = 12000
+# 本体地图文件服务基地址；留空按 host + file_port 推导
+file_base = ""
+# 本体地图根目录（4013 未返回时使用）
+map_root = "/ota/alg_data/map"
+
+[mapping]
+# 建图类型：outdoor / indoor
+kind = "outdoor"
+# 地图名；留空用 map-<时间戳>
+name = ""
+# 建图完成后是否回传中台
+upload = true
+# 地图归属园区（业务库 parks.id）；留空则用控制台绑定的园区
+park_id = 3
+# 回传地图名；留空用本体返回的目录名
+ingest_name = ""
+# 只执行一次建图后退出（等价 --map-only）
+once = false
+
+[simulation]
+# 未接本体（或本体指标缺失）时的模拟值
+battery = 86
+signal = 4
+position = "0.0, 0.0"
+firmware = "Hermes_M_v0.3.2"
+
+[log]
+# 等价 RUST_LOG；RUST_LOG 设置后优先生效
+filter = "robodog_device_client=info"

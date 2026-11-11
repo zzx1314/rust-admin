@@ -35,6 +35,7 @@ use dispatch::{TaskMode, parse_flight_plan, parse_map_binding};
 use futures_util::{SinkExt, StreamExt};
 use mapupload::{IngestConfig, UploadOutcome};
 use rand::Rng;
+use robodog_device_client::config::{CliArgs, Config, EnvConfig, print_help};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -45,7 +46,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 use zhpro::client::ZhProClient;
-use zhpro::mapping::{DEFAULT_MAP_ROOT, MapManager, MappingSaved, MappingSession};
+use zhpro::mapping::{MapManager, MappingSaved, MappingSession};
 use zhpro::protocol::*;
 use zhpro::route::{Control, RouteRunner};
 use zhpro::status::{StatusFrame, TaskMonitor, TaskSnapshot};
@@ -112,155 +113,6 @@ struct DeviceEventPayload {
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<Value>,
-}
-
-// ─── 命令行参数 ────────────────────────────────────────────────
-
-#[derive(Clone)]
-struct Config {
-    server_url: String,
-    device_id: String,
-    device_secret: Option<String>,
-    /// 智航本体地址；为空则以模拟模式运行
-    robot: Option<String>,
-    /// 地图数据根目录（4013 未返回时使用）
-    map_root: String,
-    heartbeat_interval: u64,
-    battery: i64,
-    signal: i64,
-    position: String,
-    firmware: String,
-    /// 只做一次建图后退出
-    map_only: bool,
-    map_name: String,
-    /// 建图类型：indoor / outdoor
-    map_kind: String,
-    /// 本体地图文件服务基地址（A 方案：从本体 HTTP 拉取地图包）
-    /// 为空时按 `--robot` 推导为 `http://<host>:<file-port>`
-    robot_file_base: Option<String>,
-    /// 本体地图文件服务端口（文档 §4：HTTP 12000）
-    robot_file_port: u16,
-    /// 建图完成后是否自动回传中台地图库
-    upload_map: bool,
-    /// 回传目标园区 ID（业务库 parks.id），显式指定时优先于服务端下发的绑定园区
-    park_id: Option<i64>,
-    /// 注册回执下发的绑定园区（控制台未绑定则为 None），建图回传时带上给中台
-    bound_park_id: Shared<Option<i64>>,
-    /// 回传使用的地图名称；为空则用本体返回的目录名
-    ingest_map_name: Option<String>,
-    /// 业务服务 REST 基地址（默认由 --server 推导）
-    api_base: Option<String>,
-    /// 业务服务登录账号
-    api_username: String,
-    api_password: String,
-}
-
-impl Config {
-    fn from_args() -> Result<Self, pico_args::Error> {
-        let mut args = pico_args::Arguments::from_env();
-
-        if args.contains(["-h", "--help"]) {
-            print_help();
-            std::process::exit(0);
-        }
-
-        let config = Config {
-            server_url: args
-                .opt_value_from_str("--server")?
-                .unwrap_or_else(|| "ws://127.0.0.1:3100".to_string()),
-            device_id: args
-                .opt_value_from_str("--device-id")?
-                .unwrap_or_else(|| "RD-001".to_string()),
-            device_secret: args.opt_value_from_str("--secret")?,
-            robot: args.opt_value_from_str("--robot")?,
-            map_root: args
-                .opt_value_from_str("--map-root")?
-                .unwrap_or_else(|| DEFAULT_MAP_ROOT.to_string()),
-            heartbeat_interval: args.opt_value_from_str("--heartbeat")?.unwrap_or(10),
-            battery: args.opt_value_from_str("--battery")?.unwrap_or(86),
-            signal: args.opt_value_from_str("--signal")?.unwrap_or(4),
-            position: args
-                .opt_value_from_str("--position")?
-                .unwrap_or_else(|| "0.0, 0.0".to_string()),
-            firmware: args
-                .opt_value_from_str("--firmware")?
-                .unwrap_or_else(|| "Hermes_M_v0.3.2".to_string()),
-            map_only: args.contains("--map-only"),
-            map_name: args
-                .opt_value_from_str("--map-name")?
-                .unwrap_or_else(|| format!("map-{}", Local::now().format("%Y%m%d_%H%M%S"))),
-            map_kind: args
-                .opt_value_from_str("--map-kind")?
-                .unwrap_or_else(|| "outdoor".to_string()),
-            robot_file_base: args.opt_value_from_str("--robot-file-base")?,
-            robot_file_port: args
-                .opt_value_from_str("--robot-file-port")?
-                .unwrap_or(12000),
-            upload_map: !args.contains("--no-upload-map"),
-            park_id: args.opt_value_from_str("--park-id")?,
-            bound_park_id: Arc::new(Mutex::new(None)),
-            ingest_map_name: args.opt_value_from_str("--ingest-map-name")?,
-            api_base: args.opt_value_from_str("--api-base")?,
-            api_username: args
-                .opt_value_from_str("--api-username")?
-                .unwrap_or_else(|| "admin".to_string()),
-            api_password: args
-                .opt_value_from_str("--api-password")?
-                .unwrap_or_else(|| "admin123".to_string()),
-        };
-
-        Ok(config)
-    }
-
-    /// 业务服务 REST 基地址：显式配置优先，否则由 WS 地址推导
-    fn resolve_api_base(&self) -> String {
-        if let Some(base) = &self.api_base {
-            return base.trim_end_matches('/').to_string();
-        }
-        // ws://127.0.0.1:3100 → http://127.0.0.1:3100
-        let rest = self
-            .server_url
-            .trim_start_matches("ws://")
-            .trim_start_matches("wss://");
-        let host_port = rest.split('/').next().unwrap_or(rest);
-        format!("http://{host_port}")
-    }
-}
-
-fn print_help() {
-    eprintln!(
-        "\
-机器人设备客户端（业务服务 ⇄ 智航 Pro 本体桥接）
-
-用法: robodog-device-client [选项]
-
-选项:
-  --server <URL>         业务服务 WebSocket 地址 (默认: ws://127.0.0.1:3100)
-  --device-id <ID>       设备编号 (默认: RD-001)
-  --secret <SECRET>      设备密钥 (可选)
-  --robot <HOST>         智航本体地址，如 192.168.168.100 或 ws://ip:10010
-                         不填则为模拟模式：只回传任务进度，不驱动真实机器人
-  --map-root <PATH>      地图数据根目录 (默认: {DEFAULT_MAP_ROOT})
-  --heartbeat <秒>       心跳间隔 (默认: 10)
-  --battery <0-100>      初始电量 (默认: 86)
-  --signal <0-5>         初始信号强度 (默认: 4)
-  --position <x,y>       初始地图坐标 (默认: 0.0, 0.0)
-  --firmware <版本>      固件版本
-  --map-only             只执行一次建图（需要 --robot）后退出
-  --map-name <名称>      建图任务名称 (默认: map-<时间戳>)
-  --map-kind <类型>      outdoor / indoor (默认: outdoor)
-
-建图回传中台（A 方案）:
-  --park-id <ID>         地图归属园区（业务库 parks.id），不填则回传时跳过
-  --robot-file-base <URL> 本体文件服务地址，如 http://192.168.168.100:12000
-  --robot-file-port <端口> 本体文件服务端口 (默认: 12000，文档 §4)
-  --ingest-map-name <名称> 入库地图名 (默认用本体返回的目录名)
-  --no-upload-map        关闭建图完成后自动回传
-  --api-base <URL>       业务服务 REST 地址 (默认由 --server 推导)
-  --api-username <账号>  业务服务登录账号 (默认: admin)
-  --api-password <密码>  业务服务登录密码 (默认: admin123)
-  -h, --help             显示帮助"
-    );
 }
 
 // ─── 机器人运行时状态 ──────────────────────────────────────────
@@ -380,23 +232,45 @@ struct ActiveTask {
 
 type Shared<T> = Arc<Mutex<T>>;
 
-#[tokio::main]
-async fn main() {
+/// 日志初始化：RUST_LOG > client.toml `[log].filter` > 默认
+fn init_tracing(file_filter: Option<&str>) {
+    let fallback = file_filter
+        .map(str::to_string)
+        .unwrap_or_else(|| "robodog_device_client=info".to_string());
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "robodog_device_client=info".into()),
+                .unwrap_or_else(|_| fallback.into()),
         )
         .init();
+}
 
-    let config = match Config::from_args() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("参数错误: {e}");
+#[tokio::main]
+async fn main() {
+    // 1) 命令行 → 配置文件 → 环境变量三层合并，先于日志初始化拿到 [log].filter
+    let cli = match CliArgs::from_env() {
+        Ok(cli) => cli,
+        Err(error) => {
+            eprintln!("{error}");
             print_help();
             std::process::exit(1);
         }
     };
+    let print_config = cli.print_config;
+    let config = match Config::load(cli, EnvConfig::from_env()) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    };
+
+    init_tracing(config.log_filter.as_deref());
+
+    if print_config {
+        println!("{}", config.redacted_report());
+        return;
+    }
 
     info!(
         "启动设备客户端: device_id={}, 业务服务={}, 本体={}",
@@ -404,6 +278,7 @@ async fn main() {
         config.server_url,
         config.robot.as_deref().unwrap_or("模拟模式")
     );
+    debug!("生效配置（脱敏）:\n{}", config.redacted_report());
 
     // 先连本体：本体不可用时业务侧仍可联调（模拟执行）
     let zhpro = match &config.robot {
@@ -1667,7 +1542,7 @@ async fn upload_mapping_to_zentai(config: &Config, saved: &MappingSaved) -> Uplo
     let ingest = IngestConfig {
         api_base: config.resolve_api_base(),
         username: config.api_username.clone(),
-        password: config.api_password.clone(),
+        password: config.api_password().to_string(),
         park_id: Some(park_id),
         map_name: config.ingest_map_name.clone(),
         bind: true,

@@ -1,1 +1,4 @@
 target/
+
+# 现场配置不入库（含设备编号 / 园区 / 密钥引用），模板见 client.toml.example
+client.toml
