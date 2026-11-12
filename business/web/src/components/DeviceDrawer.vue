@@ -198,7 +198,7 @@ async function emergencyStop() {
 
 <template>
   <div v-if="open" class="drawer-overlay" @click="emit('close')" />
-  <aside v-if="open && device" class="drawer">
+  <aside v-if="open && device" class="drawer" :class="{ 'drawer-wide': tab === 'teleop' }">
     <div class="drawer-head">
       <div>
         <div class="drawer-title">
@@ -291,74 +291,97 @@ async function emergencyStop() {
         </div>
       </template>
 
-      <!-- ── 手动遥控 ─────────────────────────────── -->
+      <!-- ── 手动遥控：左实时画面 / 右遥控，一屏操作 ── -->
       <template v-else>
-        <div class="take-bar" :class="{ on: holding }">
-          <div class="take-info">
-            <b>{{ holding ? "已接管控制权" : "未接管" }}</b>
-            <span v-if="holding" class="muted">
-              遥控与动作指令已解锁，闲置 2 分钟自动释放
-            </span>
-            <span v-else class="muted">
-              必须先接管才能遥控，避免多人同时操作
-            </span>
+        <div class="teleop-layout">
+          <div class="teleop-visual">
+            <VideoPlayer
+              :url="device.videoUrl"
+              :type="device.videoType"
+              :online="online"
+              :device-id="device.id"
+            />
+            <div class="visual-strip">
+              <span class="chip"><AppIcon name="battery" />{{ device.battery }}%</span>
+              <span class="chip"><AppIcon name="activity" />{{ device.robotMode || "—" }}</span>
+              <span class="chip"><AppIcon name="pin" />{{ device.position }}</span>
+              <span class="chip" :class="{ warn: !holding }">
+                <AppIcon name="shield" />{{ holding ? "已接管" : "未接管" }}
+              </span>
+            </div>
+            <p v-if="lastAck" class="ack-line">
+              <AppIcon name="check-circle" />{{ lastAck }}
+            </p>
+            <ul class="teleop-notes">
+              <li>摇杆推住即连续下发，松手立即停车，无需手动停止。</li>
+              <li>网络中断时设备侧 1 秒看门狗会自动停车。</li>
+              <li>电池低于 15% 时本体可能拒绝大速度指令。</li>
+              <li>急停不释放接管，恢复后需手动点「站立」。</li>
+            </ul>
           </div>
-          <button v-if="!holding" class="btn primary sm" :disabled="!online || busy" @click="takeOver">
-            <AppIcon name="shield" />接管
-          </button>
-          <button v-else class="btn sm" :disabled="busy" @click="release">
-            <AppIcon name="undo" />释放
-          </button>
-        </div>
 
-        <div class="teleop-panel" :class="{ locked: !canControl }">
-          <TeleopJoystick :disabled="!canControl" :speed="speed" @control="sendAxes" />
-
-          <div class="speed-box">
-            <span class="speed-label">速度档位</span>
-            <div class="speed-presets">
+          <div class="teleop-controls">
+            <div class="take-bar" :class="{ on: holding }">
+              <div class="take-info">
+                <b>{{ holding ? "已接管控制权" : "未接管" }}</b>
+                <span v-if="holding" class="muted">
+                  遥控与动作指令已解锁，闲置 2 分钟自动释放
+                </span>
+                <span v-else class="muted">
+                  必须先接管才能遥控，避免多人同时操作
+                </span>
+              </div>
               <button
-                v-for="preset in speedPresets"
-                :key="preset.value"
-                class="speed-btn"
-                :class="{ on: speed === preset.value }"
-                @click="speed = preset.value"
+                v-if="!holding"
+                class="btn primary sm"
+                :disabled="!online || busy"
+                @click="takeOver"
               >
-                {{ preset.label }}
+                <AppIcon name="shield" />接管
+              </button>
+              <button v-else class="btn sm" :disabled="busy" @click="release">
+                <AppIcon name="undo" />释放
               </button>
             </div>
-            <small class="muted">{{ Math.round(speed * 100) }}% 上限</small>
+
+            <div class="teleop-panel" :class="{ locked: !canControl }">
+              <TeleopJoystick :disabled="!canControl" :speed="speed" @control="sendAxes" />
+
+              <div class="speed-box">
+                <span class="speed-label">速度档位</span>
+                <div class="speed-presets">
+                  <button
+                    v-for="preset in speedPresets"
+                    :key="preset.value"
+                    class="speed-btn"
+                    :class="{ on: speed === preset.value }"
+                    @click="speed = preset.value"
+                  >
+                    {{ preset.label }}
+                  </button>
+                </div>
+                <small class="muted">{{ Math.round(speed * 100) }}% 上限</small>
+              </div>
+            </div>
+
+            <div class="action-grid">
+              <button
+                v-for="action in actions"
+                :key="action.code"
+                class="action-btn"
+                :disabled="!canControl"
+                @click="sendAction(action.code, action.label, action.danger)"
+              >
+                <AppIcon :name="action.icon" />{{ action.label }}
+              </button>
+            </div>
+
+            <button class="stop-btn" :disabled="!online" @click="emergencyStop">
+              <AppIcon name="warn" />急停
+              <small>任何状态下可用</small>
+            </button>
           </div>
         </div>
-
-        <div class="action-grid">
-          <button
-            v-for="action in actions"
-            :key="action.code"
-            class="action-btn"
-            :disabled="!canControl"
-            @click="sendAction(action.code, action.label, action.danger)"
-          >
-            <AppIcon :name="action.icon" />{{ action.label }}
-          </button>
-        </div>
-
-        <button class="stop-btn" :disabled="!online" @click="emergencyStop">
-          <AppIcon name="warn" />急停
-          <small>任何状态下可用</small>
-        </button>
-
-        <p v-if="lastAck" class="ack-line">
-          <AppIcon name="check-circle" />{{ lastAck }}
-        </p>
-
-        <div class="card-title" style="margin: 16px 0 8px"><AppIcon name="info" />操作须知</div>
-        <ul class="teleop-notes">
-          <li>摇杆推住即连续下发，松手立即停车，无需手动停止。</li>
-          <li>网络中断时设备侧 1 秒看门狗会自动停车。</li>
-          <li>电池低于 15% 时本体可能拒绝大速度指令。</li>
-          <li>急停不释放接管，恢复后需手动点「站立」。</li>
-        </ul>
       </template>
     </div>
 
@@ -380,6 +403,67 @@ async function emergencyStop() {
 </template>
 
 <style scoped>
+/* 遥控页要看画面，440px 太窄：接管后把抽屉拉宽做双栏 */
+.drawer.drawer-wide {
+  width: min(780px, 100%);
+}
+
+.teleop-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.teleop-visual {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  position: sticky;
+  top: 0;
+}
+
+.visual-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel, #f8fafc);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.chip.warn {
+  border-color: #f59e0b;
+  background: #fffbeb;
+  color: #b45309;
+}
+
+.teleop-controls {
+  display: flex;
+  flex-direction: column;
+}
+
+@media (max-width: 860px) {
+  .teleop-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .teleop-visual {
+    position: static;
+  }
+}
+
 .drawer-title {
   font-size: 15px;
   font-weight: 700;
@@ -508,7 +592,7 @@ async function emergencyStop() {
 
 .action-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 8px;
   margin-top: 14px;
 }
