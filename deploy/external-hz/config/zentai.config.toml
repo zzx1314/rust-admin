@@ -13,7 +13,9 @@ token_store = "memory"
 
 [server]
 host = "0.0.0.0"
-port = 3000
+# 3000 已被本机 frps 占用；3005 空闲。
+# 注意：需要在阿里云安全组放通 3005（见 deploy/external-hz/README.md）。
+port = 3005
 # 前端构建产物：本服务自己托管，因此 80/443 上不需要 nginx。
 # 相对路径按进程工作目录（= /opt/hz/rust-admin/zentai）解析。
 static_dir = "web"

@@ -1,5 +1,5 @@
 [Unit]
-Description=Rust Admin 中台 API + 管理前端 (x-rust :3000)
+Description=Rust Admin 中台 API + 管理前端 (x-rust :3005)
 After=network-online.target
 Wants=network-online.target
 
@@ -12,19 +12,21 @@ EnvironmentFile=/opt/hz/rust-admin/zentai.env
 ExecStart=/opt/hz/rust-admin/zentai/x-rust
 Restart=always
 RestartSec=3
-# 会话存进程内存（token_store = "memory"），重启会让所有人重新登录，
-# 这里给足重试次数，避免偶发崩溃被 systemd 放弃。
-StartLimitIntervalSec=0
+# 崩溃后无限重试。systemd 219（CentOS 7）的 StartLimit* 在 [Service] 段
+# （229 之后才挪到 [Unit]，写成 StartLimitIntervalSec）
+StartLimitInterval=0
+StartLimitBurst=0
 # 机器只有 3.6G 内存且还跑着别的服务，尽量别被 OOM killer 先挑中
 OOMScoreAdjust=-500
 LimitNOFILE=65535
 
-# 收紧权限：进程只需要写自己的数据目录
+# 收紧权限：ProtectSystem=full 只把 /usr /boot /etc 设成只读，
+# /opt/hz/rust-admin 下的数据目录仍然可写
+# （systemd 219 没有 ReadWritePaths，写了会报 Unknown lvalue）
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/opt/hz/rust-admin/zentai
 
 [Install]
 WantedBy=multi-user.target

@@ -102,10 +102,10 @@ for unit in rust-admin-zentai rust-admin-robodog; do
 done
 
 info "本机自检"
-for port in 3000 3100; do
+for port in 3005 3100; do
   code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$port/" || true)"
   printf '  :%s / → HTTP %s\n' "$port" "${code:-无响应}"
 done
 curl -s --max-time 5 http://127.0.0.1:3100/api/health || true
 echo
-info "完成。中台 http://<本机IP>:3000 ，业务平台/设备网关 :3100"
+info "完成。中台 http://<本机IP>:3005 ，业务平台/设备网关 :3100"
