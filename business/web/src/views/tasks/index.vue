@@ -32,6 +32,8 @@ const viewMode = ref<"board" | "table">("board");
 const activeStatus = ref("全部");
 const draggedId = ref<number | null>(null);
 const taskDialog = ref(false);
+const editingTaskId = ref<number | null>(null);
+const isEditing = computed(() => editingTaskId.value !== null);
 const taskForm = reactive({
   taskName: "",
   taskType: "定时巡检",
@@ -143,6 +145,7 @@ async function removeTask(task: Task) {
 }
 
 function openCreate() {
+  editingTaskId.value = null;
   Object.assign(taskForm, {
     taskName: "",
     taskType: "定时巡检",
@@ -160,9 +163,42 @@ function openCreate() {
   taskDialog.value = true;
 }
 
+/// 仅「待执行」的任务允许修改，其余状态需先在看板中回到待执行
+function openEdit(task: Task) {
+  if (task.taskStatus !== "待执行") {
+    ElMessage.warning("仅「待执行」的任务可以修改");
+    return;
+  }
+  editingTaskId.value = task.id;
+  Object.assign(taskForm, {
+    taskName: task.taskName ?? "",
+    taskType: task.taskType ?? "定时巡检",
+    executeMode: task.executeMode ?? "周期任务",
+    level: task.level ?? "常规",
+    parkId: task.parkId ?? parks.value[0]?.id ?? 1,
+    zoneId: task.zoneId ?? zones.value[0]?.id ?? 1,
+    deviceId: task.deviceId ?? devices.value[0]?.id ?? 1,
+    routeId: task.routeId ?? null,
+    planStart: task.planStart ?? "09:30",
+    planEnd: task.planEnd ?? "10:10",
+    dispatchPolicy: task.dispatchPolicy ?? "按路线顺序执行",
+    description: task.description ?? ""
+  });
+  taskDialog.value = true;
+}
+
 async function saveTask() {
   if (!taskForm.taskName.trim()) {
     ElMessage.warning("请填写任务名称");
+    return;
+  }
+  const editingId = editingTaskId.value;
+  if (editingId !== null) {
+    await taskApi.update(editingId, { ...taskForm });
+    taskDialog.value = false;
+    editingTaskId.value = null;
+    ElMessage.success("任务已更新");
+    await load();
     return;
   }
   await taskApi.create({ ...taskForm });
@@ -175,6 +211,13 @@ async function saveTask() {
 async function openDetail(task: Task) {
   detailTask.value = task;
   detailVisible.value = true;
+}
+
+function editFromDetail() {
+  const task = detailTask.value;
+  if (!task) return;
+  detailVisible.value = false;
+  openEdit(task);
 }
 
 const detailRoute = computed(() => {
@@ -342,6 +385,14 @@ onMounted(load);
                 <AppIcon name="play" />
               </button>
               <button
+                v-if="task.taskStatus === '待执行'"
+                class="btn sm ghost icon"
+                title="编辑"
+                @click="openEdit(task)"
+              >
+                <AppIcon name="edit" />
+              </button>
+              <button
                 v-if="task.taskStatus === '执行中'"
                 class="btn sm ghost icon"
                 title="暂停"
@@ -415,7 +466,15 @@ onMounted(load);
               </td>
               <td>
                 <div class="actions">
-                  <button class="btn sm ghost icon" @click="openDetail(task)">
+                  <button
+                    v-if="task.taskStatus === '待执行'"
+                    class="btn sm ghost icon"
+                    title="编辑"
+                    @click="openEdit(task)"
+                  >
+                    <AppIcon name="edit" />
+                  </button>
+                  <button class="btn sm ghost icon" title="详情" @click="openDetail(task)">
                     <AppIcon name="eye" />
                   </button>
                   <button
@@ -437,7 +496,11 @@ onMounted(load);
       <div class="tfoot"><span>共 {{ filteredTasks.length }} 项任务</span></div>
     </div>
 
-    <el-dialog v-model="taskDialog" title="新建巡检任务" width="680px">
+    <el-dialog
+      v-model="taskDialog"
+      :title="isEditing ? '编辑巡检任务' : '新建巡检任务'"
+      width="680px"
+    >
       <div class="form-grid">
         <div class="field" style="grid-column: 1 / -1">
           <label>任务名称 <em>*</em></label>
@@ -514,7 +577,7 @@ onMounted(load);
       <template #footer>
         <button class="btn" @click="taskDialog = false"><AppIcon name="close" />取消</button>
         <button class="btn primary" @click="saveTask">
-          <AppIcon name="check" />创建任务
+          <AppIcon name="check" />{{ isEditing ? "保存修改" : "创建任务" }}
         </button>
       </template>
     </el-dialog>
@@ -557,6 +620,13 @@ onMounted(load);
         </div>
 
         <div class="actions" style="margin-top: 16px">
+          <button
+            v-if="detailTask.taskStatus === '待执行'"
+            class="btn sm"
+            @click="editFromDetail"
+          >
+            <AppIcon name="edit" />编辑任务
+          </button>
           <button
             v-if="detailRoute"
             class="btn sm"

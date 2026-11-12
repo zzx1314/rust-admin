@@ -1,5 +1,15 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sqlx::FromRow;
+
+/// 区分「字段缺失」(None) 与「显式传 null」(Some(None))。
+/// 更新接口用它识别「把路线清空为临时路径」这类操作。
+pub fn double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
 
 #[derive(Debug, FromRow, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -355,7 +365,9 @@ pub struct TaskRequest {
     pub device_id: Option<i64>,
     pub park_id: Option<i64>,
     pub zone_id: Option<i64>,
-    pub route_id: Option<i64>,
+    /// 更新时显式传 null 表示解除路线关联（临时路径）
+    #[serde(default, deserialize_with = "double_option")]
+    pub route_id: Option<Option<i64>>,
     pub plan_start: Option<String>,
     pub plan_end: Option<String>,
     pub task_status: Option<String>,

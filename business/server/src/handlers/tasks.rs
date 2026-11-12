@@ -172,7 +172,7 @@ pub(crate) async fn create_task_core(
     .bind(payload.device_id)
     .bind(payload.park_id)
     .bind(payload.zone_id)
-    .bind(payload.route_id)
+    .bind(payload.route_id.flatten())
     .bind(payload.plan_start)
     .bind(payload.plan_end)
     .bind(payload.task_status.unwrap_or_else(|| "待执行".to_string()))
@@ -239,10 +239,31 @@ pub async fn update_task(
 ) -> Result<Json<ApiResponse<Task>>, AppError> {
     let existing = fetch_task(&state, id).await?;
     super::parks::ensure_owner(&existing, &claims)?;
+    // 只有尚未下发的任务允许编辑，避免执行中的任务被改到一半
+    if existing.task_status != "待执行" {
+        return Err(AppError::BadRequest(format!(
+            "任务 {} 当前状态为「{}」，仅「待执行」的任务可以修改",
+            existing.task_code, existing.task_status
+        )));
+    }
     let status = payload.task_status.unwrap_or(existing.task_status);
     let progress = payload.progress.unwrap_or(existing.progress);
     let device_id = payload.device_id.or(existing.device_id);
     let park_id = payload.park_id.or(existing.park_id);
+    let route_id = payload.route_id.unwrap_or(existing.route_id);
+    let task_name = if payload.task_name.trim().is_empty() {
+        existing.task_name.clone()
+    } else {
+        payload.task_name.trim().to_string()
+    };
+    let plan_start = payload
+        .plan_start
+        .clone()
+        .or(existing.plan_start.clone());
+    let plan_end = payload
+        .plan_end
+        .clone()
+        .or(existing.plan_end.clone());
     validate_device_park(&state.db, device_id, park_id).await?;
     sqlx::query(
         "UPDATE tasks SET task_name = ?1, task_type = ?2, execute_mode = ?3, level = ?4,
@@ -250,20 +271,16 @@ pub async fn update_task(
             plan_end = ?10, task_status = ?11, progress = ?12, dispatch_policy = ?13,
             description = ?14, updated_at = ?15 WHERE id = ?16",
     )
-    .bind(if payload.task_name.trim().is_empty() {
-        existing.task_name
-    } else {
-        payload.task_name.trim().to_string()
-    })
+    .bind(&task_name)
     .bind(payload.task_type.or(existing.task_type))
     .bind(payload.execute_mode.or(existing.execute_mode))
     .bind(payload.level.or(existing.level))
     .bind(device_id)
     .bind(park_id)
     .bind(payload.zone_id.or(existing.zone_id))
-    .bind(payload.route_id.or(existing.route_id))
-    .bind(payload.plan_start.or(existing.plan_start))
-    .bind(payload.plan_end.or(existing.plan_end))
+    .bind(route_id)
+    .bind(plan_start)
+    .bind(plan_end)
     .bind(status)
     .bind(progress)
     .bind(payload.dispatch_policy.or(existing.dispatch_policy))
@@ -271,6 +288,27 @@ pub async fn update_task(
     .bind(now())
     .bind(id)
     .execute(&state.db)
+    .await?;
+    record_event(
+        &state,
+        "updated",
+        format!("更新任务：{task_name}"),
+        format!(
+            "计划 {} - {}",
+            payload
+                .plan_start
+                .as_deref()
+                .or(existing.plan_start.as_deref())
+                .unwrap_or("—"),
+            payload
+                .plan_end
+                .as_deref()
+                .or(existing.plan_end.as_deref())
+                .unwrap_or("—")
+        ),
+        device_id,
+        Some(id),
+    )
     .await?;
     Ok(ApiResponse::ok(fetch_task(&state, id).await?))
 }

@@ -509,6 +509,10 @@ service_token = "change-me"
 `server/src/gateway.rs::dispatch_pending_tasks` 补发所有 `待执行` 任务；
 `POST /api/tasks`（带 `deviceId`）会立即推送。
 
+`PUT /api/tasks/{id}`（控制台「编辑」）只允许修改 `待执行` 的任务，执行中 / 已完成 /
+异常的任务需先在看板里拖回 `待执行`；字段缺省表示保持原值，`routeId: null` 表示显式
+解除路线关联（改为临时路径）。修改会写入 `task_events`（`event_type = 'updated'`）。
+
 下发载荷由 `server/src/dispatch.rs::build_dispatch_payload` 统一组装：
 
 | 字段 | 来源 | 说明 |

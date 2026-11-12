@@ -401,7 +401,7 @@ pub async fn apply_task(
             device_id: Some(device.id),
             park_id: Some(park_id),
             zone_id: device.zone_id,
-            route_id: Some(payload.route_id),
+            route_id: Some(Some(payload.route_id)),
             plan_start: payload.plan_start.clone(),
             plan_end: payload.plan_end.clone(),
             task_status: Some("待执行".to_string()),
