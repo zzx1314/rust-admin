@@ -8,6 +8,7 @@ export const STATUS_TONES: Record<string, string> = {
   已处理: "ok",
   执行任务: "info",
   执行中: "info",
+  已暂停: "warn",
   充电中: "warn",
   处理中: "warn",
   部分维护: "warn",

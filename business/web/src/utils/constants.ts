@@ -123,6 +123,6 @@ export const TASK_TYPES = ["定时巡检", "定点拍照", "夜巡任务", "应�
 export const EXECUTE_MODES = ["周期任务", "临时下发", "立即执行"];
 export const TASK_LEVELS = ["常规", "重要", "紧急"];
 export const DISPATCH_POLICIES = ["按路线顺序执行", "跳过非必经点", "仅执行采集动作"];
-export const TASK_STATUSES = ["待执行", "执行中", "已完成", "异常"];
+export const TASK_STATUSES = ["待执行", "执行中", "已暂停", "已完成", "异常"];
 export const DEVICE_STATUSES = ["在线待命", "执行任务", "充电中", "待绑定", "离线", "故障"];
 export const COORDINATE_SYSTEMS = ["WGS-84", "GCJ-02"];

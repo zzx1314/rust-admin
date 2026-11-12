@@ -53,12 +53,28 @@ const detailTask = ref<Task | null>(null);
 /** 任务事件流：定位未就绪、下发失败等可读原因都在这里 */
 const detailEvents = ref<TaskEvent[]>([]);
 
-const columns = [
+/**
+ * 看板列（顺序即执行生命周期）。
+ *
+ * 后端合法状态是「待执行 / 执行中 / 已暂停 / 已完成 / 异常」；少一个列就会让该状态的
+ * 任务在看板上凭空消失（列表视图却能看到）。额外再加一层兜底：库里出现未登记的状态
+ * （历史数据 / 后续新增枚举）也会自动生成一列，不再静默丢数据。
+ */
+const BASE_COLUMNS = [
   { key: "待执行", color: "#94a3b8" },
   { key: "执行中", color: "#3b82f6" },
+  { key: "已暂停", color: "#f59e0b" },
   { key: "已完成", color: "#10b981" },
   { key: "异常", color: "#ef4444" }
 ];
+
+const columns = computed(() => {
+  const known = new Set(BASE_COLUMNS.map(column => column.key));
+  const extra = Array.from(new Set(tasks.value.map(task => task.taskStatus)))
+    .filter(status => status && !known.has(status))
+    .sort();
+  return [...BASE_COLUMNS, ...extra.map(key => ({ key, color: "#a855f7" }))];
+});
 
 const filteredTasks = computed(() =>
   activeStatus.value === "全部"
@@ -75,7 +91,8 @@ function countOf(status: string) {
 }
 
 function tasksOf(status: string) {
-  return tasks.value.filter(task => task.taskStatus === status);
+  // 与状态筛选保持一致：看板也服从顶部筛选（全部时就是所有任务）
+  return filteredTasks.value.filter(task => task.taskStatus === status);
 }
 
 async function load() {
@@ -135,6 +152,16 @@ async function startTask(task: Task) {
   await taskApi.dispatch(task.id);
   await load();
   ElMessage.success(`${task.taskName} 已下发执行`);
+}
+
+/**
+ * 恢复已暂停的任务：走 `PUT /tasks/{id}/status`，由服务端判断
+ * 「本体已受理过（有 robot_task_id）→ 5006 恢复」还是「没真正下发过 → 重新下发」。
+ */
+async function resumeTask(task: Task) {
+  await taskApi.updateStatus(task.id, "执行中");
+  await load();
+  ElMessage.success(`${task.taskName} 已恢复执行`);
 }
 
 async function pauseTask(task: Task) {
@@ -270,6 +297,9 @@ async function sendFromDetail(command: string) {
   if (command === "start") {
     await taskApi.dispatch(task.id);
     ElMessage.success("任务已下发执行");
+  } else if (command === "resume") {
+    await taskApi.updateStatus(task.id, "执行中");
+    ElMessage.success("任务已恢复执行");
   } else {
     await taskApi.updateStatus(task.id, "已暂停", task.progress);
     ElMessage.info("任务已暂停");
@@ -395,6 +425,14 @@ onMounted(load);
                 class="btn sm ghost icon"
                 title="立即执行"
                 @click="startTask(task)"
+              >
+                <AppIcon name="play" />
+              </button>
+              <button
+                v-if="task.taskStatus === '已暂停'"
+                class="btn sm ghost icon"
+                title="恢复执行"
+                @click="resumeTask(task)"
               >
                 <AppIcon name="play" />
               </button>
@@ -662,11 +700,19 @@ onMounted(load);
             <AppIcon name="route" />打开路线编排
           </button>
           <button
-            v-if="detailTask.taskStatus !== '执行中'"
+            v-if="detailTask.taskStatus !== '执行中' && detailTask.taskStatus !== '已暂停'"
             class="btn primary sm"
             @click="sendFromDetail('start')"
           >
             <AppIcon name="play" />开始执行
+          </button>
+          <button
+            v-if="detailTask.taskStatus === '已暂停'"
+            class="btn primary sm"
+            title="本体已受理的任务走 5006 恢复，否则重新下发"
+            @click="sendFromDetail('resume')"
+          >
+            <AppIcon name="play" />恢复执行
           </button>
           <button
             v-if="detailTask.taskStatus === '执行中'"
