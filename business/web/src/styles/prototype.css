@@ -548,3 +548,7 @@ button{cursor:pointer}
 @media(max-width:1280px){.kpis{grid-template-columns:repeat(2,1fr)}.row-2,.row-2b{grid-template-columns:1fr}.g3{grid-template-columns:repeat(2,1fr)}.kanban{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:900px){.route-layout{grid-template-columns:1fr}.route-skeleton-grid{grid-template-columns:1fr}.route-skeleton-card{height:220px!important}.route-skeleton-card:nth-child(2){display:none}.rt-prop-panel{grid-column:auto}.route-summary{top:64px}.rs-side{width:100%;justify-content:space-between}.sidebar{width:74px}.sidebar .hide-c,.sidebar .brand-text,.sidebar .nav-group-title,.sidebar .sb-status{display:none}.sidebar .nav-item{justify-content:center;padding:11px 0}.sidebar .brand{justify-content:center;padding:0}.tb-search{display:none}.tb-time{display:none}.content{padding:18px 16px 36px}.topbar{padding:0 16px}}
 @media(max-width:640px){.kpis,.g3,.kanban,.form-grid{grid-template-columns:1fr}.page-title{font-size:18px}.toolbar .search{width:100%}.tb-user .u-name,.tb-user .u-role{display:none}.metric-grid{grid-template-columns:1fr 1fr}}
+/* 实时刷新提示（任务看板 / 详情弹窗）：任务进度由设备 5s 上报，页面同步轮询 */
+.live-hint{display:inline-flex;align-items:center;gap:6px;font-size:11px}
+.live-dot{width:6px;height:6px;border-radius:50%;background:#10b981;box-shadow:0 0 0 3px rgba(16,185,129,.16);animation:liveDot 2s ease-in-out infinite;flex:none}
+@keyframes liveDot{0%,100%{opacity:1}50%{opacity:.35}}

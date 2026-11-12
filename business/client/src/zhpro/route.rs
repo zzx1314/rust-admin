@@ -305,6 +305,11 @@ impl RouteRunner {
         self.cancelled.load(Ordering::SeqCst)
     }
 
+    /// 是否处于暂停中（对外同步任务状态用：暂停时不能继续报「执行中」）
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
+    }
+
     /// 当前导航任务 ID（对外同步 5009 状态用）
     pub async fn current_nav_task(&self) -> Option<String> {
         self.nav_task_id.lock().await.clone()

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { deviceApi, parkApi, routeApi, taskApi, zoneApi } from "@/api/ops";
@@ -247,8 +247,13 @@ async function openDetail(task: Task) {
   detailTask.value = task;
   detailEvents.value = [];
   detailVisible.value = true;
+  await refreshDetail(task.id);
+}
+
+/** 拉取详情（任务行 + 事件流）；任务已被删除时关掉弹窗 */
+async function refreshDetail(taskId: number) {
   try {
-    detailEvents.value = await taskApi.events(task.id);
+    detailEvents.value = await taskApi.events(taskId);
   } catch {
     // 事件流取不到不影响详情主体（例如旧任务没有事件记录）
   }
@@ -317,8 +322,58 @@ function clickStatusBadge(status: string) {
   activeStatus.value = status;
 }
 
-onMounted(load);
-</script>
+/** 自动刷新周期（毫秒）：任务进度由设备 5s 上报一次，页面同步即可 */
+const REFRESH_MS = 5000;
+const lastRefreshed = ref("");
+const liveRefreshing = ref(false);
+let refreshTimer = 0;
+
+function stampNow() {
+  lastRefreshed.value = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+}
+
+/**
+ * 轮询任务数据（看板 / 列表 / 详情共用）。
+ *
+ * 只拉 `tasks` + `stats`：设备/园区/路线只在建任务时用，没必要每 5s 重拉一遍。
+ * 详情弹窗打开时顺手刷新它的任务行与事件流，这样进度、状态、失败原因都是实时的。
+ */
+async function refreshLive() {
+  // 页面在后台 / 编辑弹窗打开时先不抢刷新，避免把用户正在改的上下文顶掉
+  if (document.hidden || taskDialog.value || liveRefreshing.value) return;
+  liveRefreshing.value = true;
+  try {
+    const [taskList, statsData] = await Promise.all([taskApi.list(), taskApi.stats()]);
+    tasks.value = taskList;
+    stats.value = statsData;
+    stampNow();
+    if (detailVisible.value && detailTask.value) {
+      const fresh = taskList.find(item => item.id === detailTask.value?.id);
+      if (!fresh) {
+        // 任务被删了（或不在当前账号可见范围）：关掉弹窗
+        detailVisible.value = false;
+        detailTask.value = null;
+        return;
+      }
+      detailTask.value = fresh;
+      await refreshDetail(fresh.id);
+    }
+  } catch {
+    // 自动刷新失败不弹错（避免网络抖动时刷屏），下次轮询会自己恢复
+  } finally {
+    liveRefreshing.value = false;
+  }
+}
+
+onMounted(async () => {
+  await load();
+  stampNow();
+  refreshTimer = window.setInterval(() => void refreshLive(), REFRESH_MS);
+});
+
+onBeforeUnmount(() => {
+  window.clearInterval(refreshTimer);
+});</script>
 
 <template>
   <div>
@@ -370,6 +425,10 @@ onMounted(load);
           <AppIcon name="list" />列表视图
         </button>
       </div>
+      <span class="muted live-hint" title="任务进度由设备每 5s 上报，页面同步轮询">
+        <i class="live-dot" />实时 {{ REFRESH_MS / 1000 }}s
+        <template v-if="lastRefreshed"> · 上次 {{ lastRefreshed }}</template>
+      </span>
     </div>
 
     <div v-if="viewMode === 'board'" class="kanban">
@@ -636,6 +695,10 @@ onMounted(load);
 
     <el-dialog v-model="detailVisible" title="任务详情" width="720px">
       <template v-if="detailTask">
+        <div class="live-hint" style="margin-bottom: 10px">
+          <i class="live-dot" />详情实时更新（每 {{ REFRESH_MS / 1000 }}s）
+          <template v-if="lastRefreshed"> · 上次 {{ lastRefreshed }}</template>
+        </div>
         <div class="kv"><span>任务名称</span><b>{{ detailTask.taskName }}</b></div>
         <div class="kv">
           <span>任务类型 / 模式</span><b>{{ detailTask.taskType }} / {{ detailTask.executeMode }}</b>

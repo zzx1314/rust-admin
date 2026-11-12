@@ -406,6 +406,16 @@ struct ActiveTask {
 
 type Shared<T> = Arc<Mutex<T>>;
 
+/// 复位本地任务上下文。
+///
+/// 任务没真正跑起来（航点缺失 / 地图不在本体 / 定位未就绪）时必须调这个：
+/// 否则 5s 进度定时器会继续拿这条已失败的任务上报「已暂停 / 等待本体连接」，
+/// 把刚发出去的「异常」覆盖掉，平台事件流也会被刷屏。
+async fn clear_active_task(active: &Shared<Option<ActiveTask>>, state: &Shared<RobotState>) {
+    *active.lock().await = None;
+    state.lock().await.current_task = None;
+}
+
 /// 日志初始化：RUST_LOG > client.toml `[log].filter` > 默认
 fn init_tracing(file_filter: Option<&str>) {
     let fallback = file_filter
@@ -771,30 +781,45 @@ async fn run_client(
             // 执行中定期回传进度（5009 推送是 500ms，这里合流成业务侧 5s 一次）
             _ = progress_timer.tick() => {
                 let snapshot = active.lock().await.clone();
-                if let Some(task) = snapshot {
-                    let mut payload = TaskProgressPayload {
-                        task_code: task.task_code.clone(),
-                        status: "执行中".to_string(),
-                        progress: 0,
-                        point_index: None,
-                        message: None,
-                        stage: task.stage.clone(),
-                        robot_task_id: task.nav_task_id.clone(),
-                        total_points: None,
-                    };
-                    // 智航导航进度按航点折算；模拟模式按时间推演
-                    if let Some(runner) = local_runner.lock().await.clone() {
-                        let (done, total) = runner.progress().await;
-                        payload.progress = progress_pct(done, total);
-                        payload.point_index = Some(done as i64);
-                        payload.total_points = Some(total as i64);
-                        payload.message = Some(format!("已完成 {done}/{total} 个航点"));
-                    } else {
-                        payload.status = "已暂停".to_string();
-                        payload.message = Some("等待本体连接".to_string());
+                let Some(task) = snapshot else { continue };
+                let runner = local_runner.lock().await.clone();
+                let mapping = local_mapping.lock().await.clone();
+                if runner.is_none() && mapping.is_none() {
+                    // 返充 / 出桩这类本体任务没有本地 runner：进度由 5009 快照驱动，
+                    // 这里不重复上报，更不能拿「已暂停」去覆盖真实阶段。
+                    if task.nav_task_id.is_some() {
+                        continue;
                     }
-                    send(&out_tx, "task_progress", serde_json::to_value(payload).unwrap_or_default()).await;
+                    // 既没有 runner 也没有本体任务 = 根本没有执行上下文（下发失败 / 客户端重启过），
+                    // 继续上报只会每 5s 刷一条假「已暂停」，直接清掉本地占位。
+                    warn!("任务 {} 本地没有执行上下文，停止进度上报", task.task_code);
+                    clear_active_task(&active, &state).await;
+                    continue;
                 }
+                let mut payload = TaskProgressPayload {
+                    task_code: task.task_code.clone(),
+                    status: "执行中".to_string(),
+                    progress: 0,
+                    point_index: None,
+                    message: None,
+                    stage: task.stage.clone(),
+                    robot_task_id: task.nav_task_id.clone(),
+                    total_points: None,
+                };
+                // 智航导航进度按航点折算；模拟模式按时间推演
+                if let Some(runner) = runner {
+                    let (done, total) = runner.progress().await;
+                    payload.progress = progress_pct(done, total);
+                    payload.point_index = Some(done as i64);
+                    payload.total_points = Some(total as i64);
+                    payload.message = Some(format!("已完成 {done}/{total} 个航点"));
+                    // 暂停时不能还报「执行中」，否则平台上的「已暂停」会被刷回去
+                    if runner.is_paused() {
+                        payload.status = "已暂停".to_string();
+                        payload.message = Some("任务已暂停".to_string());
+                    }
+                }
+                send(&out_tx, "task_progress", serde_json::to_value(payload).unwrap_or_default()).await;
             }
 
             _ = teleop_timer.tick() => {
@@ -1327,6 +1352,10 @@ async fn handle_server_message(
         // 事件回执：客户端发的 event 由服务端落库后回 ack，不需要额外处理
         "event_ack" => {}
 
+        // 进度上报的逐条回执：客户端已经在本地合流上报，不需要逐条处理，
+        // 也不能当「未处理的消息类型」打 WARN（任务执行时每 5s 一条会刷爆日志）
+        "task_progress_ack" => {}
+
         "park_binding" => {
             // 控制台绑定 / 解绑园区后实时下发，无需重连
             let park_id = msg.payload["parkId"].as_i64();
@@ -1409,6 +1438,9 @@ async fn handle_server_message(
                                 None,
                             )
                             .await;
+                            // 建图没起来：别留着「正在建图」的占位，否则进度定时器会拿它刷假状态
+                            *local_mapping.lock().await = None;
+                            clear_active_task(active, state).await;
                         }
                     }
                 }
@@ -1435,6 +1467,7 @@ async fn handle_server_message(
                                 None,
                             )
                             .await;
+                            clear_active_task(active, state).await;
                             return;
                         }
                     };
@@ -1544,6 +1577,7 @@ async fn handle_server_message(
                             None,
                         )
                         .await;
+                        clear_active_task(active, state).await;
                         return;
                     };
                     info!(
@@ -1573,8 +1607,7 @@ async fn handle_server_message(
                                 None,
                             )
                             .await;
-                            *active.lock().await = None;
-                            state.lock().await.current_task = None;
+                            clear_active_task(active, state).await;
                             return;
                         }
                     };
@@ -1615,6 +1648,7 @@ async fn handle_server_message(
                                 None,
                             )
                             .await;
+                            clear_active_task(active, state).await;
                             return;
                         }
                     }
