@@ -299,12 +299,16 @@ pub(crate) fn navigation_task_payload(
     point: &Waypoint,
     need_locate: bool,
 ) -> Value {
+    // 导航协议只支持 1（2D 栅格）和 3（Route 路网）；0 是 SDK 的
+    // kGrid，2 是 3D 预留（当前固件不支持）。业务载荷偶尔会透传 0，
+    // 这里统一归一化，避免把非法值发给本体。
+    let map_type = if plan.map_type == 3 { 3 } else { 1 };
     let mut params = json!({
         "map_path": plan.resolve_map_path(super::mapping::DEFAULT_MAP_ROOT),
         // 同一条航线内复用已加载定位，避免每点重载地图
         "need_locate": need_locate,
-        "map_type": plan.map_type,
-        "goal_type": plan.map_type,
+        "map_type": map_type,
+        "goal_type": map_type,
         "goals": [ point.pose() ],
         "speed_limit": { "vx": speed_vx(plan), "vy": 0.0, "vz": YAW_LIMIT },
         "goal_tolerance": {
@@ -918,6 +922,7 @@ mod tests {
             params.get("fence_path").is_none(),
             "没配围栏时不应下发空串 fence_path"
         );
+        assert_eq!(params["map_type"], 1.0);
         assert_eq!(params["goal_tolerance"]["x"], 0.25);
         assert_eq!(params["goal_tolerance"]["theta"], 0.2);
         let vz = params["speed_limit"]["vz"].as_f64().unwrap_or_default();
@@ -943,5 +948,17 @@ mod tests {
         p.fence_path = Some("   ".to_string());
         let data = navigation_task_payload(&p, &p.waypoints[0], false);
         assert!(data["params"].get("fence_path").is_none());
+    }
+
+    #[test]
+    fn navigation_payload_normalizes_invalid_map_type() {
+        // SDK 的 0=kGrid 和 3D 的 2 都不能直接进导航协议；统一回退 2D 栅格。
+        let mut p = plan("往返");
+        for invalid in [0_u32, 2_u32] {
+            p.map_type = invalid;
+            let data = navigation_task_payload(&p, &p.waypoints[0], false);
+            assert_eq!(data["params"]["map_type"], 1.0, "invalid={invalid}");
+            assert_eq!(data["params"]["goal_type"], 1.0, "invalid={invalid}");
+        }
     }
 }

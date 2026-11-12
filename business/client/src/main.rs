@@ -1899,17 +1899,27 @@ async fn handle_server_message(
                     // 用本体上报的真实目录路径（L2/M1 地图根不同，不能靠平台拼）
                     plan.map_path = robot_map.path.clone();
 
-                    // 对齐官方 cruise_mode：航段“沿道路”且本体地图有 map.geojson
-                    // 时用路网（map_type=3）；否则回退 2D 栅格。以前服务端硬编码
-                    // map_type=1，导致有路网的地图也被当成自由导航。
-                    if plan.road_network && robot_map.route_exist {
-                        if plan.map_type != 3 {
-                            info!("航段为「沿道路」且地图有路网，切换 5000 为路网导航（map_type=3）");
-                            plan.map_type = 3;
-                        }
-                    } else if plan.map_type == 3 && !robot_map.route_exist {
+                    // 对齐官方 cruise_mode：只有整条路线都走「沿道路」且本体地图
+                    // 有 map.geojson 时才用路网（map_type=3）；否则一律 2D 栅格。
+                    // 不能只看服务端 mapType：服务端可能按 road_count 给了 3，
+                    // 但这条路线实际是自由导航。
+                    let target_map_type = if plan.road_network && robot_map.route_exist {
+                        3
+                    } else {
+                        1
+                    };
+                    if plan.road_network && !robot_map.route_exist && plan.map_type == 3 {
                         warn!("航线请求路网导航，但本体地图没有 map.geojson，回退 2D 栅格");
-                        plan.map_type = 1;
+                    }
+                    if plan.map_type != target_map_type {
+                        info!(
+                            "5000 地图类型: {} → {}（road_network={}, route_exist={}）",
+                            plan.map_type,
+                            target_map_type,
+                            plan.road_network,
+                            robot_map.route_exist
+                        );
+                        plan.map_type = target_map_type;
                     }
 
                     // 起步前定位守卫：不在地图上 / 定位丢失时不发 5000，直接报可读异常

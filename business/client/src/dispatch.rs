@@ -196,13 +196,17 @@ pub fn parse_flight_plan(payload: &Value, map_root: &str) -> Option<FlightPlan> 
         avoid_level,
         goal_tolerance: 0.25,
         end_task: end_task.as_str().to_string(),
-        // 官方 App 的 cruise_mode：航段写“沿道路”即走路网，其余走自由导航
+        // 官方 App 的 cruise_mode 是整条任务级开关：只有所有航段都写
+        // “沿道路”才走路网；任意一段是直线/曲线平滑/原地转向就按自由导航，
+        // 避免混合路线被整体强推到路网。
         road_network: route_data
             .get("legs")
             .and_then(Value::as_array)
             .map(|legs| {
-                legs.iter()
-                    .any(|leg| leg.get("mode").and_then(Value::as_str) == Some("沿道路"))
+                !legs.is_empty()
+                    && legs
+                        .iter()
+                        .all(|leg| leg.get("mode").and_then(Value::as_str) == Some("沿道路"))
             })
             .unwrap_or(false),
         fence_path: payload

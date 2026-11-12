@@ -1429,7 +1429,7 @@ map_type​         说明​
   14              "record": false,​
   15              "params": {​
   16                   "map_path": "xxxxx",​
- 17                   "need_locate": true,​
+  17                   "need_locate": true,​
  18                   "map_type": 1,​
  19                   "goal_type": 1,​
  20                   "fence_path": "xxxxx",​
