@@ -72,6 +72,14 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         Err(error) => tracing::warn!("路线坐标迁移失败: {error}"),
     }
 
+    // 本体地图目录名（`source_ref`）回填：中台导入的重复包靠「同名 zip」认回原目录，
+    // 否则下发时只能拿业务 ID 合成一个本体上不存在的目录名。
+    match crate::mapdir::backfill_source_refs(pool).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(count, "地图本体目录名回填完成（source_ref）"),
+        Err(error) => tracing::warn!("地图本体目录名回填失败: {error}"),
+    }
+
     Ok(())
 }
 

@@ -607,11 +607,13 @@ pub async fn locate_device(
         ));
     };
 
+    // 本体目录名必须与业务 ID 区分：目录名由建图会话决定，客户端会用 4013 核对
+    let map_dir = crate::mapdir::map_dir(&state.db, &map_id).await?;
     let result = push_command(
         &state,
         &device,
         "重新定位",
-        Some(json!({ "mapId": map_id, "pose": pose })),
+        Some(json!({ "mapId": map_id, "mapDir": map_dir, "pose": pose })),
         Some(&claims.username),
     )
     .await?;

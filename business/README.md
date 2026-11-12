@@ -379,6 +379,29 @@ HTTP 链路（②）的三个约定：
 - `POST /api/map-versions/{id}/new-version` 派生下一版本并发布，历史路线保持旧版引用。
 - `POST /api/map-versions/ingest` 一次性完成「推中台 + 写业务库」，是设备客户端建图回传的入口（见下节）。
 
+### 本体地图目录名：`mapId` ≠ 目录名
+
+智航只认**本体上的目录名**（4013 `map_path_list[].path` 的最后一段，如
+`2026_11_10_16_15_06`，由建图会话决定）。业务的 `map_versions.id`
+（`ROS-MAP-1794446794789@v1.0`）是平台自造的，把 `@` 换成 `_` 得到的目录名本体上
+并不存在：5000/4030 会指到空目录，本体只回
+`13898 map not found or invalid (missing map.yaml)`——从字面很难看出是「目录名对不上」。
+
+- 目录名的唯一可靠来源是 `map_versions.source_ref`：设备「同步地图」回传时写入
+  `/ota/alg_data/map/history_map/<目录名>`。
+- `import-backend` 从中台重新导入同一份包时，会按「同名 zip」认回已登记的目录名
+  （`mapdir::source_ref_for_file_name`）；历史行由启动时的
+  `mapdir::backfill_source_refs` 幂等补齐。
+- 下发（`dispatch.rs`）把真实目录名同时放进 `map.mapDir` 与 `map.mapPath`；没有
+  `source_ref` 时退回合成名，由客户端再用 4013 列表核对。
+- 客户端（`MapManager::resolve`）按 `mapDir` → `mapPath` → 合成名在 4013 列表里匹配，
+  命中就用本体上报的绝对 `path`（L2/M1 地图根不同，不能靠平台拼）；全都不命中就
+  **拒绝下发**，任务事件里直接列出本体现有目录。「重新定位」（4030）与返充
+  （5014 的 `map_id` 也是目录名）走同一套解析。
+- 注意：这里只解决「目录名」。本体目录里必须是 `map.yaml` / `map.pgm` /
+  `map.geojson` / `map.pcd` 这套智航命名，ROS map_server 的 `model.*` 包即使目录名
+  对了也载不进去——需要推图到本体时得先把 `model.*` 改名成 `map.*`。
+
 ### 路线坐标：地图米制（不是画布像素）
 
 智航 Pro `5000 kind=2` 的 `goals[].position` 是**地图坐标系下的米**（协议

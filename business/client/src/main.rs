@@ -1415,8 +1415,31 @@ async fn handle_server_message(
 
                 TaskMode::ReturnToCharge => {
                     let binding = parse_map_binding(&msg.payload);
+                    // 5014 的 `map_id` 是本体目录名（4013 `path` 最后一段），不是业务 ID
+                    let manager = MapManager::new(client.clone());
+                    let robot_map = match manager
+                        .resolve(&[&binding.map_dir, &binding.map_path, &binding.map_id])
+                        .await
+                    {
+                        Ok(map) => map,
+                        Err(e) => {
+                            warn!("任务 {task_code} 的地图不在本体上，拒绝返充: {e}");
+                            report_progress(
+                                out_tx,
+                                &task_code,
+                                "异常",
+                                0,
+                                Some(e),
+                                None,
+                                None,
+                                None,
+                            )
+                            .await;
+                            return;
+                        }
+                    };
                     match client
-                        .call(T_RETURN_TO_CHARGE, json!({ "map_id": binding.map_id }))
+                        .call(T_RETURN_TO_CHARGE, json!({ "map_id": robot_map.map_id }))
                         .await
                     {
                         Ok(data) => {
@@ -1508,7 +1531,7 @@ async fn handle_server_message(
                 }
 
                 TaskMode::Route => {
-                    let Some(plan) = parse_flight_plan(&msg.payload, &config.map_root) else {
+                    let Some(mut plan) = parse_flight_plan(&msg.payload, &config.map_root) else {
                         warn!("任务 {task_code} 缺少可执行的航点数据");
                         report_progress(
                             out_tx,
@@ -1532,25 +1555,43 @@ async fn handle_server_message(
                     );
                     state.lock().await.active_map = Some(plan.map_id.clone());
 
-                    // 前置校验：地图必须存在于本体、且已设回充点（返充任务依赖）
-                    let map_dir = zhpro::mapping::to_map_dir_name(&plan.map_id);
-                    match MapManager::new(client.clone()).find(&map_dir).await {
-                        Ok(Some(map)) => {
-                            info!(
-                                "机器人地图就绪: {} 路网={} 回充点={}",
-                                map.map_id, map.route_exist, map.charge_point_exist
-                            );
-                            if plan.end_task() == zhpro::route::EndTask::ReturnToCharge
-                                && !map.charge_point_exist
-                            {
-                                warn!("该地图未设置回充点，返充将以 0x3672 被拒；建议先下发 4018");
-                            }
+                    // 前置校验：业务 `mapId` 不是本体目录名，必须用 4013 列表解析出真实目录。
+                    // 对不上就不发 5000——否则本体只会回 13898 missing map.yaml。
+                    let manager = MapManager::new(client.clone());
+                    let robot_map = match manager.resolve(&[&plan.map_path, &plan.map_id]).await {
+                        Ok(map) => map,
+                        Err(e) => {
+                            warn!("任务 {task_code} 的地图不在本体上，拒绝下发: {e}");
+                            report_progress(
+                                out_tx,
+                                &task_code,
+                                "异常",
+                                0,
+                                Some(e),
+                                None,
+                                None,
+                                None,
+                            )
+                            .await;
+                            *active.lock().await = None;
+                            state.lock().await.current_task = None;
+                            return;
                         }
-                        Ok(None) => warn!(
-                            "机器人上没有地图 {map_dir}，导航任务可能因载图失败而终止；请先执行建图并同步地图"
-                        ),
-                        Err(e) => warn!("获取机器人地图列表失败: {e}"),
+                    };
+                    info!(
+                        "机器人地图就绪: {} 目录={} 路网={} 回充点={}",
+                        plan.map_id,
+                        robot_map.map_id,
+                        robot_map.route_exist,
+                        robot_map.charge_point_exist
+                    );
+                    if plan.end_task() == zhpro::route::EndTask::ReturnToCharge
+                        && !robot_map.charge_point_exist
+                    {
+                        warn!("该地图未设置回充点，返充将以 0x3672 被拒；建议先下发 4018");
                     }
+                    // 用本体上报的真实目录路径（L2/M1 地图根不同，不能靠平台拼）
+                    plan.map_path = robot_map.path.clone();
 
                     // 起步前定位守卫：不在地图上 / 定位丢失时不发 5000，直接报可读异常
                     let map_path = plan.resolve_map_path(&config.map_root);
@@ -1756,25 +1797,44 @@ async fn handle_server_message(
                                     .to_string(),
                             ),
                             Some(map_id) => {
-                                let map_path =
-                                    zhpro::mapping::default_map_path(&config.map_root, &map_id);
-                                info!(
-                                    "重新定位：map={map_id} 路径={map_path} 初始位姿={}",
-                                    if pose.is_some() { "平台指定" } else { "用上次位姿文件" }
-                                );
-                                match zhpro::mapping::relocalize(
-                                    &client,
-                                    &map_path,
-                                    pose,
-                                    LOCATE_TIMEOUT,
-                                )
-                                .await
-                                {
-                                    Ok(status) => {
-                                        state.lock().await.active_map = Some(map_id.clone());
-                                        Ok(format!("重定位完成：{map_id}（status={status}）"))
-                                    }
+                                let map_dir_hint = params
+                                    .and_then(|p| p.get("mapDir"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string();
+                                // 4030 的 map_path 必须是本体上真实存在的目录
+                                let manager = MapManager::new(client.clone());
+                                match manager.resolve(&[&map_dir_hint, &map_id]).await {
                                     Err(e) => Err(format!("重定位失败：{e}")),
+                                    Ok(robot_map) => {
+                                        let map_path = robot_map.path.clone();
+                                        info!(
+                                            "重新定位：map={map_id} 目录={} 路径={map_path} 初始位姿={}",
+                                            robot_map.map_id,
+                                            if pose.is_some() {
+                                                "平台指定"
+                                            } else {
+                                                "用上次位姿文件"
+                                            }
+                                        );
+                                        match zhpro::mapping::relocalize(
+                                            &client,
+                                            &map_path,
+                                            pose,
+                                            LOCATE_TIMEOUT,
+                                        )
+                                        .await
+                                        {
+                                            Ok(status) => {
+                                                state.lock().await.active_map =
+                                                    Some(map_id.clone());
+                                                Ok(format!(
+                                                    "重定位完成：{map_id}（status={status}）"
+                                                ))
+                                            }
+                                            Err(e) => Err(format!("重定位失败：{e}")),
+                                        }
+                                    }
                                 }
                             }
                         }

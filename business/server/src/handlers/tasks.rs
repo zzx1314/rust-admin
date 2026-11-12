@@ -248,6 +248,13 @@ async fn push_task_dispatch(state: &AppState, task: &Task) -> Result<Option<Stri
     };
 
     let dispatch = crate::dispatch::build_dispatch_payload(&state.db, task).await?;
+    if let Some(map) = dispatch.map.as_ref() {
+        // 现场排障关键信息：业务地图 ID 与本体目录名是两回事
+        info!(
+            "任务 {} 绑定地图 {} → 本体目录 {}",
+            task.task_code, map.map_id, map.map_dir
+        );
+    }
     if !gateway::dispatch_task_to_device(&state.device_connections, &device_code, &dispatch).await {
         return Ok(None);
     }

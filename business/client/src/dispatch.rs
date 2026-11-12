@@ -17,7 +17,10 @@ use serde_json::Value;
 #[derive(Debug, Clone, Default)]
 pub struct MapBinding {
     pub map_id: String,
+    /// 服务端给出的本体目录名 / 路径（可能缺失，客户端会再用 4013 列表核对）
     pub map_path: String,
+    /// 本体地图目录名（4013 `path` 最后一段）；`mapPath` 是路径时用它
+    pub map_dir: String,
     /// 1 = 2D 栅格, 3 = Route 路网
     pub map_type: u32,
 }
@@ -37,6 +40,12 @@ pub fn parse_map_binding(payload: &Value) -> MapBinding {
             .or_else(|| payload.get("mapPath").and_then(Value::as_str))
             .unwrap_or_default()
             .to_string(),
+        map_dir: map
+            .and_then(|m| m.get("mapDir"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| map.and_then(|m| m.get("mapPath")).and_then(Value::as_str).map(str::to_string))
+            .unwrap_or_default(),
         map_type: map
             .and_then(|m| m.get("mapType"))
             .and_then(Value::as_u64)

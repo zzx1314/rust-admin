@@ -277,7 +277,8 @@ journalctl -u robodog-device-client -f | grep 视频
   },
   "map": {
     "mapId": "ROS-MAP-3@v1.0",
-    "mapPath": "ROS-MAP-3_v1.0",
+    "mapDir": "2026_11_10_16_15_06",
+    "mapPath": "2026_11_10_16_15_06",
     "mapType": 1,
     "parkId": 1,
     "mapName": "ROS-MAP-3",
@@ -295,8 +296,13 @@ journalctl -u robodog-device-client -f | grep 视频
   与 `5000 goals[].position` 同一坐标系（`map_path` 那张图的 `frame_id`）；
   `heading` 是度（客户端转弧度四元数）。服务端会拒发像素坐标 / 示意坐标 / 越界航点，
   客户端不需要也不会做任何比例换算。
-- `mapPath` 是本体侧目录名（`@` → `_`）。客户端会再按 `--map-root` 拼成
-  `/ota/alg_data/map/history_map/<mapPath>`。
+- `mapDir` / `mapPath` 是**本体侧目录名**（4013 `path` 的最后一段，由建图会话决定），
+  不是业务 `mapId`。服务端优先用 `map_versions.source_ref` 的真实目录名，缺失才退回
+  `mapId` 的合成名（`@` → `_`）。**客户端不会直接信任它**：先拿 4012/4013 列表核对
+  `mapDir` → `mapPath` → 合成名，命中就用本体上报的绝对 `path`（L2/M1 根目录不同，
+  不能靠平台拼）；全都不命中就**拒绝下发**并在任务事件里列出本体现有目录，
+  不再让 5000 指向空目录（那只会得到 `13898 map not found or invalid (missing map.yaml)`）。
+  「重新定位」（4030）与返充（5014 的 `map_id` 也是目录名）走同一套解析。
 - `endTask`：`return_to_charge` / `return_to_start` / `none`。
   缺省时客户端退化为按 `executeMode` 文案推断。
 - `avoidLevel`：10 关闭 / 20 仅急停 / 30 感知 / 40 全避障。任务级生效，

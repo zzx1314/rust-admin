@@ -21,6 +21,7 @@ pub mod gateway_types;
 pub mod geo;
 pub mod handlers;
 pub mod ingest;
+pub mod mapdir;
 pub mod models;
 pub mod seed;
 pub mod video;

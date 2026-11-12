@@ -31,6 +31,12 @@ const tasks = computed(() => refsData.value?.tasks ?? []);
 const sourceRows = computed(() => {
   const item = map.value;
   if (!item) return [];
+  /** 本体地图目录名：`/ota/.../history_map/<目录名>` → `<目录名>`（下发时用它） */
+  const robotDir = (sourceRef: string | null) => {
+    const trimmed = (sourceRef ?? "").trim().replace(/\/+$/, "");
+    const name = trimmed.split("/").pop() ?? "";
+    return name || "未登记";
+  };
   return [
     ["所属园区", item.parkName ?? "—", "运营台账录入", "orange"],
     [
@@ -48,6 +54,12 @@ const sourceRows = computed(() => {
       "orange"
     ],
     ["frame_id", item.frameId ?? "—", "建图服务分配", "purple"],
+    [
+      "本体目录名",
+      robotDir(item.sourceRef),
+      item.sourceRef ? "4013 回传" : "未登记（下发前会用 4013 核对）",
+      item.sourceRef ? "teal" : "orange"
+    ],
     ["CRS", item.crs ?? "—", "系统配置 + RTK 打点", "teal"],
     ["原点锚点", item.origin ?? "—", "RTK / 人工标定", "teal"],
     ["分辨率", item.resolution ?? "—", "SLAM 栅格参数", "purple"],

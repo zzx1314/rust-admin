@@ -156,8 +156,10 @@ pub struct TaskDispatchPayload {
 pub struct DispatchMap {
     /// 业务侧地图版本 ID，如 `ROS-MAP-3@v1.0`
     pub map_id: String,
-    /// 本体地图目录名（`/ota/alg_data/map/history_map/<mapPath>`）
+    /// 本体地图目录名/路径（相对本体 map_root，客户端会用 4013 列表核对）
     pub map_path: String,
+    /// 本体地图目录名（4013 `path` 的最后一段）
+    pub map_dir: String,
     /// 1 = 2D 栅格, 3 = Route 路网
     pub map_type: u32,
     pub park_id: i64,

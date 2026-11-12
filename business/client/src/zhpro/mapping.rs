@@ -358,6 +358,46 @@ impl MapManager {
             .find(|map| map.map_id == map_id))
     }
 
+    /// 按候选目录名/路径解析出本体上真实存在的地图。
+    ///
+    /// 业务侧的 `mapId`（`ROS-MAP-…@v1.0`）**不是**本体目录名：目录名由建图会话决定，
+    /// 平台只能从设备回传的 `source_ref` 里拿到真实目录。这里按「服务端给的目录名 →
+    /// 服务端给的路径 → 业务 ID 合成名」的顺序在 4013 列表里匹配，
+    /// 全部对不上就报错——调用方必须拒绝下发，否则 5000 会指向一个空目录，
+    /// 本体只会回 `13898 map not found or invalid (missing map.yaml)`。
+    pub async fn resolve(&self, candidates: &[&str]) -> Result<RobotMap, String> {
+        let maps = self.list().await?;
+        let mut tried: Vec<String> = Vec::new();
+        for candidate in candidates {
+            let Some(name) = candidate_dir_name(candidate) else {
+                continue;
+            };
+            if tried.contains(&name) {
+                continue;
+            }
+            if let Some(map) = maps.iter().find(|map| map.map_id == name) {
+                return Ok(map.clone());
+            }
+            tried.push(name);
+        }
+
+        let mut available: Vec<String> = maps.iter().map(|map| map.map_id.clone()).collect();
+        available.sort();
+        let shown = if available.is_empty() {
+            "（本体上一张地图都没有）".to_string()
+        } else if available.len() > 8 {
+            format!("{}, …共 {} 张", available[..8].join(", "), available.len())
+        } else {
+            available.join(", ")
+        };
+        Err(format!(
+            "本体上没有该地图目录（尝试过：{}）；本体现有目录：{}。\
+             请先在平台「设备管理 → 同步地图」把该地图回传（或确认地图基线里登记的本体目录名），再重试",
+            tried.join(" / "),
+            shown
+        ))
+    }
+
     /// 4014/4015 修改地图目录名
     pub async fn rename(&self, from: &str, to: &str) -> Result<(), String> {
         self.client
@@ -472,6 +512,20 @@ pub async fn load_map(
         )
         .await
         .map(|_| ())
+}
+
+/// 候选目录名/路径 → 目录名（4013 `path` 的最后一段）
+///
+/// 服务端可能给 `mapDir`（目录名）也可能给 `mapPath`（绝对路径），两者都归一成目录名。
+pub fn candidate_dir_name(candidate: &str) -> Option<String> {
+    let name = candidate
+        .trim()
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 /// 地图目录：`<map_root>/history_map/<map_dir>`
@@ -590,6 +644,20 @@ mod tests {
             default_map_path("/ota/alg_data/map/", "A@1"),
             "/ota/alg_data/map/history_map/A_1"
         );
+    }
+
+    #[test]
+    fn candidate_dir_name_normalizes_dirs_and_paths() {
+        // 服务端可能给目录名（source_ref basename）也可能给绝对路径，都要归一成目录名
+        assert_eq!(
+            candidate_dir_name("2026_11_10_16_15_06").as_deref(),
+            Some("2026_11_10_16_15_06")
+        );
+        assert_eq!(
+            candidate_dir_name("/ota/alg_data/map/history_map/2026_11_10_16_15_06/").as_deref(),
+            Some("2026_11_10_16_15_06")
+        );
+        assert_eq!(candidate_dir_name("  "), None);
     }
 
     #[test]

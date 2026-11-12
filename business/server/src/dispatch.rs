@@ -19,7 +19,7 @@ use sqlx::SqlitePool;
 /// 业务侧地图版本 ID 形如 `ROS-MAP-3@v1.0`，`@` 在本体侧文件系统里不安全，
 /// 统一替换为 `_`。与客户端 `zhpro::mapping::to_map_dir_name` 保持一致。
 pub fn to_map_dir_name(map_version_id: &str) -> String {
-    map_version_id.replace('@', "_")
+    crate::mapdir::synthetic_dir(map_version_id)
 }
 
 /// 行程结束动作。
@@ -37,12 +37,18 @@ pub fn resolve_end_task(execute_mode: Option<&str>) -> &'static str {
     }
 }
 
+/// `resolve_map` 读取的地图行：(id, park, map_name, version, file_path, source_ref)
+type MapRow = (String, i64, String, String, Option<String>, Option<String>);
+
 /// 解析任务应绑定的地图
 async fn resolve_map(db: &SqlitePool, task: &Task) -> Result<Option<DispatchMap>, AppError> {
     // 1) 路线冻结的地图版本
     // 2) 任务所属园区的当前基线
-    let row: Option<(String, i64, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT mv.id, mv.park_id, mv.map_name, mv.version, mv.file_path
+    // 本体目录名：`source_ref`（建图回传写入）优先，缺失才退回业务 ID 合成名。
+    // 合成名在本体上可能根本不存在（目录名是建图会话名），客户端会用 4013
+    // 列表核对，对不上就不发 5000。
+    let row: Option<MapRow> = sqlx::query_as(
+        "SELECT mv.id, mv.park_id, mv.map_name, mv.version, mv.file_path, mv.source_ref
          FROM map_versions mv
          WHERE mv.id = COALESCE(
              (SELECT map_version_id FROM routes WHERE id = ?1),
@@ -54,12 +60,17 @@ async fn resolve_map(db: &SqlitePool, task: &Task) -> Result<Option<DispatchMap>
     .fetch_optional(db)
     .await?;
 
-    let Some((map_id, park_id, map_name, version, _file_path)) = row else {
+    let Some((map_id, park_id, map_name, version, _file_path, source_ref)) = row else {
         return Ok(None);
     };
+    let map_dir = source_ref
+        .as_deref()
+        .and_then(crate::mapdir::dir_from_source_ref)
+        .unwrap_or_else(|| crate::mapdir::synthetic_dir(&map_id));
 
     Ok(Some(DispatchMap {
-        map_path: to_map_dir_name(&map_id),
+        map_path: map_dir.clone(),
+        map_dir,
         map_id,
         map_type: 1,
         park_id,

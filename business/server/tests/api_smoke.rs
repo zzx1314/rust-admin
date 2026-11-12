@@ -1521,3 +1521,162 @@ async fn legacy_route_coordinates_are_migrated_once() {
         .unwrap();
     assert_eq!(again, 0, "迁移必须幂等");
 }
+
+/// 取一条任务（与 `handlers::tasks::TASK_SELECT` 同列），用于组装下发载荷。
+async fn fetch_task_row(pool: &sqlx::SqlitePool, id: i64) -> robodog_ops_server::models::Task {
+    sqlx::query_as(
+        "SELECT t.id, t.task_code, t.task_name, t.task_type, t.execute_mode, t.level,
+            t.device_id, d.device_id AS device_code, t.park_id, p.park_name, t.zone_id,
+            z.zone_name, t.route_id, r.route_code, r.route_name, t.plan_start, t.plan_end,
+            t.task_status, t.progress, t.dispatch_policy, t.description, t.robot_task_id,
+            t.robot_stage, t.robot_updated_at, t.created_at, t.updated_at, t.created_by
+         FROM tasks t
+         LEFT JOIN devices d ON d.id = t.device_id
+         LEFT JOIN parks p ON p.id = t.park_id
+         LEFT JOIN zones z ON z.id = t.zone_id
+         LEFT JOIN routes r ON r.id = t.route_id
+         WHERE t.id = ?1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// 下发载荷必须带本体真实目录名（`source_ref`），而不是业务 ID 的合成名。
+///
+/// 现场事故：`map_path` 用了 `ROS-MAP-…_v1.0`，本体上并不存在这个目录，
+/// 5000 只回 `13898 map not found or invalid (missing map.yaml)`。
+#[tokio::test]
+async fn dispatch_payload_prefers_robot_map_dir() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let map_id = insert_real_map(&pool).await;
+    sqlx::query(
+        "UPDATE map_versions SET source_ref = '/ota/alg_data/map/history_map/2026_11_10_16_15_06',
+            file_name = '2026_11_10_16_15_06.zip' WHERE id = ?1",
+    )
+    .bind(&map_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let route_id = insert_dispatchable_route(&pool, &map_id).await;
+    let device_pk = bound_device_pk(&pool).await;
+    let task_id: i64 = sqlx::query_scalar(
+        "INSERT INTO tasks (task_code, task_name, device_id, park_id, route_id, task_status,
+            progress, created_at, updated_at, created_by)
+         VALUES ('TK-MAPDIR-1', '地图目录任务', ?1, 1, ?2, '待执行', 0,
+            '2026-11-12 00:00:00', '2026-11-12 00:00:00', 1)
+         RETURNING id",
+    )
+    .bind(device_pk)
+    .bind(route_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let task = fetch_task_row(&pool, task_id).await;
+    let payload = robodog_ops_server::dispatch::build_dispatch_payload(&pool, &task)
+        .await
+        .expect("坐标合法时应能组装载荷");
+    let map = payload.map.expect("应带地图绑定");
+    assert_eq!(map.map_dir, "2026_11_10_16_15_06");
+    assert_eq!(map.map_path, "2026_11_10_16_15_06", "map_path 也要用真实目录名");
+    assert_eq!(map.map_id, map_id);
+}
+
+/// 没有 `source_ref` 时退回业务 ID 合成名（客户端会再用 4013 列表核对）。
+#[tokio::test]
+async fn dispatch_payload_falls_back_to_synthetic_map_dir() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let map_id = insert_real_map(&pool).await;
+    let route_id = insert_dispatchable_route(&pool, &map_id).await;
+    let device_pk = bound_device_pk(&pool).await;
+    let task_id: i64 = sqlx::query_scalar(
+        "INSERT INTO tasks (task_code, task_name, device_id, park_id, route_id, task_status,
+            progress, created_at, updated_at, created_by)
+         VALUES ('TK-MAPDIR-2', '无目录名任务', ?1, 1, ?2, '待执行', 0,
+            '2026-11-12 00:00:00', '2026-11-12 00:00:00', 1)
+         RETURNING id",
+    )
+    .bind(device_pk)
+    .bind(route_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let task = fetch_task_row(&pool, task_id).await;
+    let payload = robodog_ops_server::dispatch::build_dispatch_payload(&pool, &task)
+        .await
+        .unwrap();
+    let map = payload.map.unwrap();
+    assert_eq!(map.map_dir, robodog_ops_server::mapdir::synthetic_dir(&map_id));
+}
+
+/// 中台重复导入的包按「同名 zip」认回本体目录名，且可重复执行。
+#[tokio::test]
+async fn map_source_ref_backfills_from_same_package_name() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+
+    // 设备回传过的那份：有 source_ref
+    let robot_map = insert_real_map(&pool).await;
+    sqlx::query(
+        "UPDATE map_versions SET id = 'ROBOT-MAP-1', source = 'robot-mapping',
+            source_ref = '/ota/alg_data/map/history_map/2026_11_10_16_15_06',
+            file_name = '2026_11_10_16_15_06.zip' WHERE id = ?1",
+    )
+    .bind(&robot_map)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // 中台导入的同一个包：只有 file_name
+    sqlx::query(
+        "INSERT INTO map_versions (id, park_id, map_name, version, origin, resolution,
+            status, map_width, map_height, source, file_name, created_at)
+         VALUES ('ROS-MAP-DUP@v1.0', 1, 'ROS-MAP-DUP', 'v1.0', '-1.0, -1.0, 0.0', '0.05 m/px',
+            '已发布', 1088, 940, 'backend', '2026_11_10_16_15_06.zip', '2026-11-12 00:00:00')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // ROS map_server 的 model.zip 不能当成目录名
+    sqlx::query(
+        "INSERT INTO map_versions (id, park_id, map_name, version, origin, resolution,
+            status, map_width, map_height, source, file_name, created_at)
+         VALUES ('ROS-MAP-MODEL@v1.0', 1, 'ROS-MAP-MODEL', 'v1.0', '-1.0, -1.0, 0.0', '0.05 m/px',
+            '已发布', 1088, 940, 'backend', 'model.zip', '2026-11-12 00:00:00')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let filled = robodog_ops_server::mapdir::backfill_source_refs(&pool)
+        .await
+        .unwrap();
+    assert_eq!(filled, 1, "只应回填同名 zip 的那条");
+
+    let source_ref: Option<String> =
+        sqlx::query_scalar("SELECT source_ref FROM map_versions WHERE id = 'ROS-MAP-DUP@v1.0'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        source_ref.as_deref(),
+        Some("/ota/alg_data/map/history_map/2026_11_10_16_15_06")
+    );
+
+    let model_ref: Option<String> =
+        sqlx::query_scalar("SELECT source_ref FROM map_versions WHERE id = 'ROS-MAP-MODEL@v1.0'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(model_ref, None, "model.zip 不是本体目录名");
+
+    // 幂等
+    let again = robodog_ops_server::mapdir::backfill_source_refs(&pool)
+        .await
+        .unwrap();
+    assert_eq!(again, 0);
+}

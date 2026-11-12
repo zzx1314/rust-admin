@@ -354,6 +354,9 @@ pub async fn import_backend_map(
     let file_name = source.file_name.clone();
     let file_path = source.file_path.clone();
     let file_size = source.file_size;
+    // 本体目录名：同名包已经登记过（设备回传过）就沿用，避免导入出一张本体上找不到的重复地图
+    let source_ref = crate::mapdir::source_ref_for_file_name(&state.db, file_name.as_deref())
+        .await?;
     let note = format!(
         "从 backend 地图库导入「{}」{} · 园区：{}",
         source.map_name,
@@ -374,7 +377,8 @@ pub async fn import_backend_map(
                 origin = ?5, resolution = ?6, floors = ?7, road_count = ?8, no_go_count = ?9,
                 status = ?10, map_hash = ?11, map_width = ?12, map_height = ?13, note = ?14,
                 published_at = ?15, source = 'backend', source_id = ?16, file_name = ?17,
-                file_path = ?18, file_size = ?19, owner_user_id = ?20, owner_username = ?21
+                file_path = ?18, file_size = ?19, owner_user_id = ?20, owner_username = ?21,
+                source_ref = COALESCE(?23, source_ref)
              WHERE id = ?22",
         )
         .bind(&map_name)
@@ -407,6 +411,7 @@ pub async fn import_backend_map(
         .bind(source.user_id)
         .bind(&source.owner_username)
         .bind(&map_id)
+        .bind(&source_ref)
         .execute(&state.db)
         .await?;
     } else {
@@ -414,9 +419,9 @@ pub async fn import_backend_map(
             "INSERT INTO map_versions (id, park_id, map_name, version, frame_id, crs, origin,
                 resolution, floors, road_count, no_go_count, status, map_hash, map_width,
                 map_height, note, published_at, created_at, source, source_id, file_name,
-                file_path, file_size, owner_user_id, owner_username)
+                file_path, file_size, owner_user_id, owner_username, source_ref)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                ?16, ?17, ?18, 'backend', ?19, ?20, ?21, ?22, ?23, ?24)",
+                ?16, ?17, ?18, 'backend', ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
         )
         .bind(&map_id)
         .bind(park_id)
@@ -450,6 +455,7 @@ pub async fn import_backend_map(
         .bind(file_size)
         .bind(source.user_id)
         .bind(&source.owner_username)
+        .bind(&source_ref)
         .execute(&state.db)
         .await?;
     }
