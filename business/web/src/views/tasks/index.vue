@@ -512,7 +512,7 @@ onMounted(load);
         </div>
       </div>
       <template #footer>
-        <button class="btn" @click="taskDialog = false">取消</button>
+        <button class="btn" @click="taskDialog = false"><AppIcon name="close" />取消</button>
         <button class="btn primary" @click="saveTask">
           <AppIcon name="check" />创建任务
         </button>

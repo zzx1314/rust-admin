@@ -1374,7 +1374,7 @@ onBeforeUnmount(() => {
         航点坐标以所选地图版本的 frame_id 与分辨率为基准，创建后引用冻结；后续地图发新版不会自动改写本路线坐标。创建后进入画布点击添加航点。
       </div>
       <template #footer>
-        <button class="btn" @click="routeDialog = false">取消</button>
+        <button class="btn" @click="routeDialog = false"><AppIcon name="close" />取消</button>
         <button class="btn primary" @click="createRoute"><AppIcon name="check" />创建路线</button>
       </template>
     </el-dialog>
@@ -1441,7 +1441,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <template #footer>
-        <button class="btn" @click="baseDialog = false">取消</button>
+        <button class="btn" @click="baseDialog = false"><AppIcon name="close" />取消</button>
         <button class="btn primary" @click="saveBaseInfo"><AppIcon name="check" />保存</button>
       </template>
     </el-dialog>
@@ -1483,7 +1483,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <template #footer>
-        <button class="btn" @click="actionDialog = false">取消</button>
+        <button class="btn" @click="actionDialog = false"><AppIcon name="close" />取消</button>
         <button class="btn primary" @click="saveAction"><AppIcon name="check" />添加</button>
       </template>
     </el-dialog>

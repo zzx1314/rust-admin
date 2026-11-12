@@ -683,7 +683,7 @@ onMounted(load);
         </div>
       </div>
       <template #footer>
-        <button class="btn" @click="parkDialog = false">取消</button>
+        <button class="btn" @click="parkDialog = false"><AppIcon name="close" />取消</button>
         <button class="btn primary" @click="savePark">
           <AppIcon name="check" />保存
         </button>
@@ -735,7 +735,7 @@ onMounted(load);
         </div>
       </div>
       <template #footer>
-        <button class="btn" @click="zoneDialog = false">取消</button>
+        <button class="btn" @click="zoneDialog = false"><AppIcon name="close" />取消</button>
         <button class="btn primary" @click="saveZone">
           <AppIcon name="check" />保存
         </button>

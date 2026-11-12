@@ -241,6 +241,15 @@
 
 .el-dialog__footer {
   padding: 10px 22px 18px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+/* 弹窗底部按钮（取消 / 保存等）统一尺寸，避免文案与图标差异导致宽度不一致 */
+.el-dialog__footer > .btn {
+  min-width: 96px;
+  justify-content: center;
 }
 
 .el-overlay {
