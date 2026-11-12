@@ -24,7 +24,7 @@ random_hex() { od -An -tx1 -N32 /dev/urandom | tr -d ' \n'; }
 
 # ---------------------------------------------------------------- 目录与用户
 info "准备目录 $BASE"
-mkdir -p "$ZENTAI"/{config,migrations,web,data/device_uploads} "$ROBODOG"/{web,data/map_ingest}
+mkdir -p "$ZENTAI"/{config,migrations,web,data/device_uploads} "$ROBODOG"/{migrations,web,data/map_ingest}
 
 # ---------------------------------------------------------------- 停旧服务
 for unit in rust-admin-zentai rust-admin-robodog; do
@@ -43,6 +43,7 @@ info "同步前端产物与 migrations"
 rsync -a --delete "$HERE/zentai/web/" "$ZENTAI/web/"
 rsync -a --delete "$HERE/robodog/web/" "$ROBODOG/web/"
 rsync -a "$HERE/zentai/migrations/" "$ZENTAI/migrations/"
+rsync -a "$HERE/robodog/migrations/" "$ROBODOG/migrations/"
 
 # ---------------------------------------------------------------- 配置
 for target in "$ZENTAI/config/config.toml" "$ROBODOG/server.toml"; do

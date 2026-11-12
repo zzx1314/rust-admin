@@ -139,7 +139,10 @@ impl Config {
         F: Fn(&str) -> Option<String>,
     {
         let file = file.unwrap_or_default();
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        // 内置默认值按**当前工作目录**解析（部署时 = 安装目录）。
+        // 以前这里用 `env!("CARGO_MANIFEST_DIR")`，会把编译机路径烧进二进制，
+        // 拷到别的机器后默认路径全部失效。
+        let base_dir_default = PathBuf::new();
 
         let text = |name: &str, from_file: Option<String>, default: String| -> String {
             env_text(&env, name)
@@ -166,7 +169,7 @@ impl Config {
             database_path: path(
                 "ROBODOG_DB",
                 file.database,
-                manifest_dir.join("data/robodog.db"),
+                base_dir_default.join("data/robodog.db"),
             ),
             jwt_secret: text(
                 "ROBODOG_JWT_SECRET",
@@ -190,12 +193,12 @@ impl Config {
             web_dist: path(
                 "ROBODOG_WEB_DIST",
                 file.web_dist,
-                manifest_dir.join("../web/dist"),
+                base_dir_default.join("../web/dist"),
             ),
             backend_db_path: path(
                 "ROBODOG_BACKEND_DB",
                 file.backend_db,
-                manifest_dir.join("../../backend/data/users.db"),
+                base_dir_default.join("../../backend/data/users.db"),
             ),
             zentai_base_url: url("ROBODOG_ZENTAI_URL", file.zentai.base_url),
             zentai_username: env_text(&env, "ROBODOG_ZENTAI_USER")
@@ -205,7 +208,7 @@ impl Config {
             ingest_dir: path(
                 "ROBODOG_INGEST_DIR",
                 file.ingest_dir,
-                manifest_dir.join("data/map_ingest"),
+                base_dir_default.join("data/map_ingest"),
             ),
             service_token: env_text(&env, "ROBODOG_SERVICE_TOKEN")
                 .or_else(|| file.zentai.service_token.and_then(clean)),

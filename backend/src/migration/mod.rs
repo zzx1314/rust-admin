@@ -4,7 +4,11 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// 迁移 SQL 目录名。**运行期**按工作目录 / 可执行文件所在目录解析（见
+/// [`resolve_migrations_root`]），不能把编译机的绝对路径烧进二进制。
 const MIGRATIONS_DIR: &str = "migrations";
+/// 显式指定迁移目录：部署时如果 `migrations/` 不在工作目录下才需要。
+pub const MIGRATIONS_DIR_ENV: &str = "APP_MIGRATIONS_DIR";
 const MIGRATION_NAME_DIRECTIVE: &str = "-- @migration-name:";
 const IF_NOT_EXISTS_DIRECTIVE: &str = "-- @if-not-exists:";
 
@@ -148,8 +152,59 @@ impl MigratorTrait for Migrator {
     }
 }
 
+/// 定位迁移目录。
+///
+/// 以前这里用的是 `env!("CARGO_MANIFEST_DIR")`，那是**编译机**的绝对路径，
+/// 一旦把二进制拷到别的机器就变成 `Failed to discover SQL migrations`。
+/// 现在改成运行期顺序查找：
+///
+/// 1. `APP_MIGRATIONS_DIR`（显式指定，最高优先级）；
+/// 2. 当前工作目录下的 `migrations/`（`cargo run` 与 systemd 的
+///    `WorkingDirectory` 都靠这一条）；
+/// 3. 可执行文件旁边的 `migrations/`（二进制单独拷贝部署时用）。
+fn migrations_root() -> Result<PathBuf, String> {
+    resolve_migrations_root(std::env::var(MIGRATIONS_DIR_ENV).ok().as_deref())
+}
+
+fn resolve_migrations_root(explicit: Option<&str>) -> Result<PathBuf, String> {
+    if let Some(dir) = explicit.map(str::trim).filter(|dir| !dir.is_empty()) {
+        let path = PathBuf::from(dir);
+        return if path.is_dir() {
+            Ok(path)
+        } else {
+            Err(format!(
+                "{MIGRATIONS_DIR_ENV}={} 不是已存在的目录",
+                path.display()
+            ))
+        };
+    }
+
+    let mut candidates = vec![PathBuf::from(MIGRATIONS_DIR)];
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        candidates.push(dir.join(MIGRATIONS_DIR));
+    }
+
+    candidates
+        .iter()
+        .find(|candidate| candidate.is_dir())
+        .cloned()
+        .ok_or_else(|| {
+            let tried = candidates
+                .iter()
+                .map(|candidate| candidate.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "找不到 {MIGRATIONS_DIR}/ 目录（已尝试: {tried}）。\
+                 请把它放到工作目录或可执行文件旁，或用 {MIGRATIONS_DIR_ENV} 指定绝对路径"
+            )
+        })
+}
+
 fn discover_migrations() -> Result<Vec<SqlFileMigration>, String> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(MIGRATIONS_DIR);
+    let root = migrations_root()?;
     let mut paths = Vec::new();
     collect_sql_files(&root, &mut paths)
         .map_err(|error| format!("failed to scan {}: {}", root.display(), error))?;
@@ -338,6 +393,52 @@ fn escape_sql_literal(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migrations_root_prefers_the_working_directory() {
+        // `cargo test` 的工作目录就是 crate 根，目录里必须有 migrations/。
+        let root = resolve_migrations_root(None).expect("应能在工作目录找到 migrations/");
+        assert!(root.is_dir(), "{} 不是目录", root.display());
+        assert!(
+            root.join("README.md").is_file() || fs::read_dir(&root).unwrap().count() > 0,
+            "{} 看起来是空目录",
+            root.display()
+        );
+    }
+
+    #[test]
+    fn migrations_root_honours_an_explicit_override() {
+        // 显式指定时按原样使用（部署时二进制旁边没有 migrations/ 的情况）。
+        let dir = std::env::temp_dir().join(format!("rust_admin_mig_{}", uuid::Uuid::new_v4().simple()));
+        fs::create_dir_all(&dir).expect("create temp migrations dir");
+
+        let resolved = resolve_migrations_root(Some(&dir.display().to_string())).expect("显式路径必须生效");
+        assert_eq!(resolved, dir);
+
+        // 空字符串视为未指定，回落到工作目录。
+        assert!(resolve_migrations_root(Some("  ")).is_ok());
+        // 指向不存在的目录要报错，而不是悄悄用别的目录。
+        let missing = dir.join("nope");
+        let error = resolve_migrations_root(Some(&missing.display().to_string()))
+            .expect_err("不存在的目录必须报错");
+        assert!(error.contains(MIGRATIONS_DIR_ENV), "got: {error}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn discovered_migration_files_are_readable_at_runtime() {
+        // 回归：迁移 SQL 是运行期从磁盘读的，路径必须来自这次运行的环境。
+        let root = migrations_root().expect("migrations root");
+        let mut paths = Vec::new();
+        collect_sql_files(&root, &mut paths).expect("扫描迁移目录");
+
+        assert!(!paths.is_empty(), "{} 里没有 .sql", root.display());
+        for path in &paths {
+            assert!(path.is_file(), "{} 不可读", path.display());
+            fs::read_to_string(path).expect("迁移文件必须可读");
+        }
+    }
 
     #[test]
     fn discovers_existing_files_in_version_order_and_preserves_names() {

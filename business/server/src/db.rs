@@ -2,7 +2,7 @@ use crate::config::Config;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Executor, SqlitePool};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 pub async fn connect(config: &Config) -> Result<SqlitePool, sqlx::Error> {
@@ -21,6 +21,37 @@ pub async fn connect(config: &Config) -> Result<SqlitePool, sqlx::Error> {
         .await
 }
 
+/// 迁移目录名与显式覆盖环境变量。
+const MIGRATIONS_DIR: &str = "migrations";
+const MIGRATIONS_DIR_ENV: &str = "ROBODOG_MIGRATIONS_DIR";
+
+/// 定位迁移目录：**运行期**解析，不能把编译机的绝对路径烧进二进制。
+/// 顺序：`ROBODOG_MIGRATIONS_DIR` → 工作目录下的 `migrations/` →
+/// 可执行文件旁的 `migrations/`。都没命中时返回工作目录下的相对路径，
+/// 由 `read_dir` 报出原始错误。
+fn migrations_directory() -> PathBuf {
+    if let Ok(dir) = std::env::var(MIGRATIONS_DIR_ENV) {
+        let dir = dir.trim();
+        if !dir.is_empty() && Path::new(dir).is_dir() {
+            return PathBuf::from(dir);
+        }
+    }
+
+    let relative = PathBuf::from(MIGRATIONS_DIR);
+    if relative.is_dir() {
+        return relative;
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let beside_exe = dir.join(MIGRATIONS_DIR);
+        if beside_exe.is_dir() {
+            return beside_exe;
+        }
+    }
+    relative
+}
+
 pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     pool.execute(
         "CREATE TABLE IF NOT EXISTS _migrations (
@@ -30,7 +61,7 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .await?;
 
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let directory = migrations_directory();
     let mut files: Vec<_> = fs::read_dir(&directory)
         .map_err(sqlx::Error::Io)?
         .filter_map(Result::ok)
