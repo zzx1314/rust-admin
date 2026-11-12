@@ -111,6 +111,7 @@ async fn create_map(state: &AppState, name: &str) {
                 map_type: None,
                 park_code: None,
                 park_name: None,
+                device_code: None,
                 map_data: None,
                 file_name: None,
                 file_path: None,

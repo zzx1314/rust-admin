@@ -1,8 +1,9 @@
-//! 地图归属园区：`dog_map.park_code` / `park_name` 落库、按园区编码过滤、
-//! 派生新版本时继承园区。
+//! 地图归属元数据：园区（`dog_map.park_code` / `park_name`）与上报设备
+//! （`dog_map.device_code`）的落库、筛选与派生版本继承。
 //!
 //! 园区台账在 `business/` 业务平台，中台只保存业务侧的园区编码与名称，
-//! 供业务平台按园区反查地图（见 `DOG.md` §3.0）。
+//! 供业务平台按园区反查地图（见 `DOG.md` §3.0）。上报设备编号同理，
+//! 由业务平台随 `mapInfo.deviceCode` 回传，中台只做冗余存储。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -98,6 +99,7 @@ fn map_request(name: &str, park_code: Option<&str>, park_name: Option<&str>) -> 
         map_type: None,
         park_code: park_code.map(str::to_string),
         park_name: park_name.map(str::to_string),
+        device_code: None,
         map_data: None,
         file_name: None,
         file_path: None,
@@ -125,11 +127,24 @@ fn page_query(park_code: Option<&str>) -> MapPageQuery {
         file_name: None,
         map_status: None,
         park_code: park_code.map(str::to_string),
+        device_code: None,
         begin_time: None,
         end_time: None,
         current: 1,
         size: 10,
     }
+}
+
+fn map_request_with_device(name: &str, device_code: Option<&str>) -> CreateMapRequest {
+    let mut request = map_request(name, None, None);
+    request.device_code = device_code.map(str::to_string);
+    request
+}
+
+fn device_page_query(device_code: Option<&str>) -> MapPageQuery {
+    let mut query = page_query(None);
+    query.device_code = device_code.map(str::to_string);
+    query
 }
 
 #[tokio::test]
@@ -224,4 +239,78 @@ async fn new_version_inherits_park() {
         .expect("new version must be created");
     assert_eq!(derived.park_code.as_deref(), Some("PK-001"));
     assert_eq!(derived.park_name.as_deref(), Some("园区A"));
+}
+
+#[tokio::test]
+async fn device_code_round_trip_and_filter() {
+    let state = test_state().await;
+    let scope = DataScope::new(1, true);
+
+    let reported = state
+        .dog_map_service
+        .create(map_request_with_device("RD-201 建图", Some("RD-201")), &scope)
+        .await
+        .expect("map must be created");
+    state
+        .dog_map_service
+        .create(map_request_with_device("手工上传", None), &scope)
+        .await
+        .expect("map must be created");
+
+    assert_eq!(reported.device_code.as_deref(), Some("RD-201"));
+
+    // 设备编号按模糊匹配，输入片段也能命中
+    let filtered = state
+        .dog_map_service
+        .list_page(device_page_query(Some("RD-2")), &scope)
+        .await
+        .expect("page query must succeed");
+    assert_eq!(filtered.total, 1);
+    assert_eq!(filtered.records[0].device_code.as_deref(), Some("RD-201"));
+
+    let all = state
+        .dog_map_service
+        .list_page(device_page_query(None), &scope)
+        .await
+        .expect("page query must succeed");
+    assert_eq!(all.total, 2);
+}
+
+#[tokio::test]
+async fn device_code_is_trimmed_and_blank_becomes_null() {
+    let state = test_state().await;
+    let scope = DataScope::new(1, true);
+
+    let map = state
+        .dog_map_service
+        .create(map_request_with_device("空白设备", Some("   ")), &scope)
+        .await
+        .expect("map must be created");
+    assert_eq!(map.device_code, None);
+
+    let map = state
+        .dog_map_service
+        .create(map_request_with_device("带空格设备", Some("  RD-007 ")), &scope)
+        .await
+        .expect("map must be created");
+    assert_eq!(map.device_code.as_deref(), Some("RD-007"));
+}
+
+#[tokio::test]
+async fn new_version_inherits_device_code() {
+    let state = test_state().await;
+    let scope = DataScope::new(1, true);
+
+    let original = state
+        .dog_map_service
+        .create(map_request_with_device("RD-201 建图", Some("RD-201")), &scope)
+        .await
+        .expect("map must be created");
+
+    let derived = state
+        .dog_map_service
+        .new_version(original.id, &scope)
+        .await
+        .expect("new version must be created");
+    assert_eq!(derived.device_code.as_deref(), Some("RD-201"));
 }

@@ -4,3 +4,4 @@ data/*.db-shm
 data/*.db-wal
 # 本地配置（含服务令牌），只提交 server.toml.example
 server.toml
+data/

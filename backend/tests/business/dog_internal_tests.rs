@@ -264,8 +264,11 @@ async fn map_upload_lands_in_dog_map_with_owner() {
         "mapType": "2D栅格",
         "parkCode": "P01",
         "parkName": "A 区",
+        "deviceCode": "RD-201",
         "ownerUserId": owner,
         "remarks": "业务平台回传",
+        "frameId": "ros_map_42 / 局部米制",
+        "floors": "1F / B1",
     });
     let form = reqwest::multipart::Form::new()
         .part(
@@ -294,6 +297,18 @@ async fn map_upload_lands_in_dog_map_with_owner() {
         "地图应归属 ownerUserId"
     );
     assert_eq!(body["data"]["parkCode"], "P01");
+    assert_eq!(
+        body["data"]["deviceCode"], "RD-201",
+        "地图应记录上报设备编号"
+    );
+    assert_eq!(
+        body["data"]["frameId"], "ros_map_42 / 局部米制",
+        "frame_id 应原样落库"
+    );
+    assert_eq!(
+        body["data"]["floors"], "1F / B1",
+        "覆盖楼层应原样落库"
+    );
     assert!(body["data"]["filePath"].as_str().is_some());
 }
 

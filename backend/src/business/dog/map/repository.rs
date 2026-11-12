@@ -74,6 +74,11 @@ impl SeaOrmDogMapRepository {
         {
             cond = cond.add(MapColumn::ParkCode.eq(park_code.trim()));
         }
+        if let Some(ref device_code) = query.device_code
+            && !device_code.trim().is_empty()
+        {
+            cond = cond.add(MapColumn::DeviceCode.contains(device_code.trim()));
+        }
         if let Some(ref status) = query.map_status
             && !status.trim().is_empty()
         {
@@ -150,6 +155,11 @@ impl SeaOrmDogMapRepository {
         if let Some(park_name) = &req.park_name {
             let trimmed = park_name.trim();
             active_model.park_name =
+                ActiveValue::set((!trimmed.is_empty()).then(|| trimmed.to_string()));
+        }
+        if let Some(device_code) = &req.device_code {
+            let trimmed = device_code.trim();
+            active_model.device_code =
                 ActiveValue::set((!trimmed.is_empty()).then(|| trimmed.to_string()));
         }
         if let Some(map_data) = &req.map_data {

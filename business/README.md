@@ -258,7 +258,8 @@ GET    /api/zentai/devices/{deviceId}/runtime     # 中台读取设备运行态�
   列表在状态下方标「模拟模式 / 本体离线」，电量和信号都显示 `—`。
 
 设备客户端回传地图时，`mapInfo.deviceId` 会用于查询设备在中台的归属用户，
-并把该用户写入中台 `dog_map.user_id`；园区选择地图时，非管理员只能看到
+并把该用户写入中台 `dog_map.user_id`（同时把设备编号写入 `dog_map.device_code`，
+中台地图列表可看出是哪儿台设备采的图）；园区选择地图时，非管理员只能看到
 `user_id = 自己` 的中台地图。
 
 ## 设备与园区绑定
@@ -376,7 +377,7 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | `file` | ✅ | 地图 `.zip`（须含 `model.pgm` + `model.yaml`），≤ 256MB |
-| `mapInfo` | ✅ | JSON 字符串：`{ mapName, parkId, deviceId, bind, mapType, remarks, source, sourceRef }`，`parkId` 必填；`deviceId` 用于确定地图归属用户 |
+| `mapInfo` | ✅ | JSON 字符串：`{ mapName, parkId, deviceId, bind, mapType, remarks, source, sourceRef }`，`parkId` 必填；`deviceId` 用于确定地图归属用户并作为中台 `dog_map.device_code` 上报设备编号 |
 
 响应：
 
@@ -395,8 +396,8 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 2. stash_package → data/map_ingest/ 留档（中台不可用时凭此路径重放）
 3. parse_local_meta → 本地解析 model.pgm 宽高 / model.yaml resolution+origin
 4. push_to_zentai → 共享令牌 POST /api/dogInternal/maps/upload（无令牌时退回账号登录 + /api/dogMap/upload）
-   mapInfo 会带上园区 parkCode / parkName 与设备归属用户 ownerUserId，
-   中台 dog_map 记录园区归属与地图所有人
+   mapInfo 会带上园区 parkCode / parkName、上报设备 deviceCode 与设备归属用户 ownerUserId，
+   中台 dog_map 记录地图来源设备、园区归属与地图所有人
 5. 写 map_versions（ON CONFLICT(id) DO UPDATE）
 6. bind=true 时切换园区当前基线
 ```

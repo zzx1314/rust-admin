@@ -150,20 +150,21 @@ Authorization: Bearer <access_token>
 
 ### 4.5 地图 `/api/dogMap`
 
-| 接口                          | 方法               | 说明                                                                                                                                                                                                  |
-| ----------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/api/dogMap/getPage`         | GET                | `mapName`（模糊）、`mapType`、`mapStatus`、`fileName`（模糊）、`parkCode`（精确）、`beginTime`、`endTime`、`current`、`size`                                                                          |
-| `/api/dogMap/getAll`          | GET                | 全量列表（仅当前用户可见范围）                                                                                                                                                                        |
-| `/api/dogMap`                 | POST               | 新增，`mapName` 必填；`mapType`、`parkCode`、`parkName`、`remarks`、`mapVersion`、`frameId`、`crs`、`mapOrigin`、`resolution`、`floors`、`roadCount`、`nogoCount`、`mapStatus`（草稿 / 部分标定）可选 |
-| `/api/dogMap/upload`          | POST               | 上传 `.zip` 地图包（`multipart/form-data`）：`file` = 地图包，`mapInfo` = JSON 字符串，字段同新增；带 `id` 时替换已有地图的包与信息，否则新建                                                         |
-| `/api/dogMap/{id}/image`      | GET                | 返回地图包栅格图（PNG base64）与 `resolution` / `origin` / 宽高                                                                                                                                       |
-| `/api/dogMap/{id}/publish`    | POST               | 发布版本：状态推进为「已发布」（部分标定保持「部分标定」）并记录发布时间                                                                                                                              |
-| `/api/dogMap/{id}/newVersion` | POST               | 基于当前版本派生下一个版本号并立即发布                                                                                                                                                                |
-| `/api/dogMap/{id}`            | GET / PUT / DELETE | 详情 / 修改 / 软删除                                                                                                                                                                                  |
+| 接口                          | 方法               | 说明                                                                                                                                                                                                                |
+| ----------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/api/dogMap/getPage`         | GET                | `mapName`（模糊）、`mapType`、`mapStatus`、`fileName`（模糊）、`deviceCode`（模糊）、`parkCode`（精确）、`beginTime`、`endTime`、`current`、`size`                                                                  |
+| `/api/dogMap/getAll`          | GET                | 全量列表（仅当前用户可见范围）                                                                                                                                                                                      |
+| `/api/dogMap`                 | POST               | 新增，`mapName` 必填；`mapType`、`parkCode`、`parkName`、`deviceCode`、`remarks`、`mapVersion`、`frameId`、`crs`、`mapOrigin`、`resolution`、`floors`、`roadCount`、`nogoCount`、`mapStatus`（草稿 / 部分标定）可选 |
+| `/api/dogMap/upload`          | POST               | 上传 `.zip` 地图包（`multipart/form-data`）：`file` = 地图包，`mapInfo` = JSON 字符串，字段同新增；带 `id` 时替换已有地图的包与信息，否则新建                                                                       |
+| `/api/dogMap/{id}/image`      | GET                | 返回地图包栅格图（PNG base64）与 `resolution` / `origin` / 宽高                                                                                                                                                     |
+| `/api/dogMap/{id}/publish`    | POST               | 发布版本：状态推进为「已发布」（部分标定保持「部分标定」）并记录发布时间                                                                                                                                            |
+| `/api/dogMap/{id}/newVersion` | POST               | 基于当前版本派生下一个版本号并立即发布                                                                                                                                                                              |
+| `/api/dogMap/{id}`            | GET / PUT / DELETE | 详情 / 修改 / 软删除                                                                                                                                                                                                |
 
 - 地图包仅支持 `.zip`，保存到 `[dog] upload_dir` 下的 `maps/` 目录；响应中的 `fileName`、`filePath`、`fileFormat`、`fileSize` 由服务端写入。
 - **园区归属**：`parkCode` / `parkName` 来自 `business/` 业务平台的园区台账（`parks.park_code` / `parks.park_name`），中台不建园区表、不做外键约束。设备端建图回传时由业务平台随 `mapInfo` 写入，业务平台可用 `parkCode` 反查某个园区下的地图；历史地图为空。
-- 响应字段：`id`、`mapName`、`mapType`、`parkCode`、`parkName`、`mapData`、`userId`、`fileName`、`filePath`、`fileFormat`、`fileSize`、`remarks`、`mapVersion`、`frameId`、`crs`、`mapOrigin`、`resolution`、`floors`、`roadCount`、`nogoCount`、`mapStatus`、`mapHash`、`mapWidth`、`mapHeight`、`publishTime`、`createTime`、`updateTime`。
+- **上报设备**：`deviceCode` 是采集这张地图的设备编号（业务平台 `devices.device_id`），同样由业务平台随 `mapInfo` 写入，中台只做冗余存储、不建外键。手工上传的地图可以留空；派生新版本时自动继承。
+- 响应字段：`id`、`mapName`、`mapType`、`parkCode`、`parkName`、`deviceCode`、`mapData`、`userId`、`fileName`、`filePath`、`fileFormat`、`fileSize`、`remarks`、`mapVersion`、`frameId`、`crs`、`mapOrigin`、`resolution`、`floors`、`roadCount`、`nogoCount`、`mapStatus`、`mapHash`、`mapWidth`、`mapHeight`、`publishTime`、`createTime`、`updateTime`。
 - **上传即解析**：后端从地图包内 `model.pgm` / `model.yaml` 解析 `resolution`、`origin: [x, y, yaw]`、像素宽高，并计算整个 `.zip` 的 SHA-256 写入 `mapHash`、`mapWidth`、`mapHeight`。前端表单里的 `resolution` / `mapOrigin` 只用于校验：与包内容不一致会返回 400，留空则由服务端解析结果回写。
 - **版本不可变**：版本一旦发布（`已发布` / `部分标定`），`mapVersion`、`frameId`、`mapOrigin`、`resolution`、地图包不再允许修改；需要新坐标系时请上传新包或调用 `newVersion`。
 

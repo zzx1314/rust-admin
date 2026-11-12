@@ -174,9 +174,10 @@ impl DogMapService {
         let req = CreateMapRequest {
             map_name: map.map_name.clone(),
             map_type: map.map_type.clone(),
-            // 派生新版本时保留园区归属
+            // 派生新版本时保留园区归属与上报设备
             park_code: map.park_code.clone(),
             park_name: map.park_name.clone(),
+            device_code: map.device_code.clone(),
             map_data: map.map_data.clone(),
             file_name: map.file_name.clone(),
             file_path: map.file_path.clone(),
@@ -272,6 +273,7 @@ impl DogMapService {
                     map_type: info.map_type,
                     park_code: info.park_code,
                     park_name: info.park_name,
+                    device_code: info.device_code,
                     map_data: None,
                     file_name: Some(file_name),
                     file_path: Some(file_path),
@@ -299,6 +301,7 @@ impl DogMapService {
                     map_type: info.map_type,
                     park_code: info.park_code,
                     park_name: info.park_name,
+                    device_code: info.device_code,
                     map_data: None,
                     file_name: Some(file_name),
                     file_path: Some(file_path),

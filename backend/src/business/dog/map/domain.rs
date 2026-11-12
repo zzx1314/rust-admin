@@ -33,6 +33,8 @@ pub struct CreateMapRequest {
     pub park_code: Option<String>,
     /// 归属园区名称（冗余展示）
     pub park_name: Option<String>,
+    /// 上报该地图的设备编号（业务平台 `devices.device_id`）
+    pub device_code: Option<String>,
     pub map_data: Option<String>,
     pub file_name: Option<String>,
     pub file_path: Option<String>,
@@ -66,6 +68,8 @@ pub struct UploadMapRequest {
     pub park_code: Option<String>,
     /// 归属园区名称（冗余展示）
     pub park_name: Option<String>,
+    /// 上报该地图的设备编号（业务平台 `devices.device_id`）
+    pub device_code: Option<String>,
     /// 地图归属用户。仅管理员可用：业务平台以服务账号回传地图时，
     /// 通过该字段把地图记到设备所属用户名下（普通用户会被忽略）。
     pub owner_user_id: Option<i64>,
@@ -91,6 +95,8 @@ pub struct UpdateMapRequest {
     pub map_type: Option<String>,
     pub park_code: Option<String>,
     pub park_name: Option<String>,
+    /// 上报该地图的设备编号（业务平台 `devices.device_id`）
+    pub device_code: Option<String>,
     pub map_data: Option<String>,
     pub file_name: Option<String>,
     pub file_path: Option<String>,
@@ -119,6 +125,8 @@ pub struct MapPageQuery {
     pub map_status: Option<String>,
     /// 按业务园区编码筛选
     pub park_code: Option<String>,
+    /// 按上报该地图的设备编号模糊筛选
+    pub device_code: Option<String>,
     pub begin_time: Option<String>,
     pub end_time: Option<String>,
     #[serde(default = "default_current")]
@@ -135,6 +143,8 @@ pub struct MapVO {
     pub map_type: Option<String>,
     pub park_code: Option<String>,
     pub park_name: Option<String>,
+    /// 上报该地图的设备编号（手工上传的地图为空）
+    pub device_code: Option<String>,
     pub map_data: Option<String>,
     pub user_id: i64,
     pub file_name: Option<String>,
@@ -183,6 +193,7 @@ impl From<DogMap> for MapVO {
             map_type: m.map_type,
             park_code: m.park_code,
             park_name: m.park_name,
+            device_code: m.device_code,
             map_data: m.map_data,
             user_id: m.user_id,
             file_name: m.file_name,
@@ -217,6 +228,7 @@ impl CreateMapRequest {
             map_type: ActiveValue::set(self.map_type.clone()),
             park_code: ActiveValue::set(normalize_text(self.park_code.clone())),
             park_name: ActiveValue::set(normalize_text(self.park_name.clone())),
+            device_code: ActiveValue::set(normalize_text(self.device_code.clone())),
             map_data: ActiveValue::set(self.map_data.clone()),
             user_id: ActiveValue::set(user_id),
             create_time: ActiveValue::set(now),

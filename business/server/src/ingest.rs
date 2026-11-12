@@ -162,10 +162,11 @@ pub async fn push_to_zentai(
     })
 }
 
-/// 组装上传中台的 `mapInfo`：地图展示字段 + 园区归属。
+/// 组装上传中台的 `mapInfo`：地图展示字段 + 园区归属 + 上报设备。
 ///
 /// 园区是业务库自己的台账，中台不建园区表，只落 `parkCode` / `parkName`，
 /// 业务平台拉取中台地图时凭 `parkCode` 反查本园区。
+/// `deviceCode` 记录采集这张地图的设备编号，中台地图列表据此显示来源设备。
 pub fn zentai_map_info(
     request: &IngestRequest,
     park: &ParkRef,
@@ -178,6 +179,7 @@ pub fn zentai_map_info(
         "mapStatus": "部分标定",
         "parkCode": park.code.clone(),
         "parkName": park.name.clone(),
+        "deviceCode": request.device_id.clone(),
         "ownerUserId": owner_user_id,
     })
 }
@@ -375,6 +377,7 @@ mod tests {
         let info = zentai_map_info(&request, &park, Some(7));
         assert_eq!(info["parkCode"], "PK-003");
         assert_eq!(info["parkName"], "B区园区");
+        assert_eq!(info["deviceCode"], "RD-001");
         assert_eq!(info["mapName"], "B区-20261110");
         assert_eq!(info["mapStatus"], "部分标定");
         assert_eq!(info["ownerUserId"], 7);

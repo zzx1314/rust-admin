@@ -11,13 +11,13 @@ import {
 } from "element-plus";
 import { useDogMap } from "./hook";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
-import EditPen from "~icons/ep/edit-pen";
-import Delete from "~icons/ep/delete";
 import AddFill from "~icons/ri/add-circle-line";
+import More from "~icons/ep/more-filled";
 import UploadFileIcon from "~icons/ep/upload-filled";
 import { PureTableBar } from "@/components/RePureTableBar";
 import PureTable from "@pureadmin/table";
 import DogSearchForm from "@/components/DogUI/DogSearchForm.vue";
+import DogTableActions from "@/components/DogUI/DogTableActions.vue";
 import {
   MAP_STATUS_OPTIONS,
   MAP_STATUS_TAG_TYPE,
@@ -98,6 +98,15 @@ const handleNewVersion = row => {
     .catch(() => {});
 };
 
+/** 操作列「更多」菜单分发：发布 / 新版本。 */
+const handleRowCommand = (row, command: string) => {
+  if (command === "publish") {
+    handlePublish(row);
+  } else if (command === "newVersion") {
+    handleNewVersion(row);
+  }
+};
+
 const submitForm = async (formEl?: FormInstance) => {
   if (!formEl) return;
   await formEl.validate(valid => {
@@ -156,46 +165,48 @@ const submitForm = async (formEl?: FormInstance) => {
           @page-size-change="handleSizeChange"
           @page-current-change="handleCurrentChange"
         >
+          <!-- 操作列：只留「修改 / 删除」+ 一个「更多」菜单（发布 / 新版本） -->
           <template #operation="{ row }">
-            <el-button
-              v-if="row.mapStatus === '草稿' || row.mapStatus === '部分标定'"
-              class="reset-margin"
-              link
-              type="primary"
+            <DogTableActions
+              :row="row"
               :size="size"
-              @click="handlePublish(row)"
-              >发布</el-button
+              @edit="handleUpdate(row, addFormRef)"
+              @delete="handleDelete(row)"
             >
-            <el-button
-              v-if="row.mapStatus !== '草稿'"
-              class="reset-margin"
-              link
-              type="primary"
-              :size="size"
-              @click="handleNewVersion(row)"
-              >新版本</el-button
-            >
-            <el-button
-              class="reset-margin"
-              link
-              type="primary"
-              :size="size"
-              :icon="useRenderIcon(EditPen)"
-              @click="handleUpdate(row, addFormRef)"
-              >修改</el-button
-            >
-            <el-popconfirm title="是否确认删除?" @confirm="handleDelete(row)">
-              <template #reference>
-                <el-button
-                  class="reset-margin"
-                  link
-                  type="primary"
-                  :size="size"
-                  :icon="useRenderIcon(Delete)"
-                  >删除</el-button
+              <template #extra="{ row: current, size: currentSize }">
+                <el-dropdown
+                  trigger="click"
+                  @command="
+                    (command: string) => handleRowCommand(current, command)
+                  "
                 >
+                  <el-button
+                    class="reset-margin"
+                    link
+                    type="primary"
+                    :size="currentSize"
+                    :icon="useRenderIcon(More)"
+                  />
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item
+                        v-if="
+                          current.mapStatus === '草稿' ||
+                          current.mapStatus === '部分标定'
+                        "
+                        command="publish"
+                        >发布</el-dropdown-item
+                      >
+                      <el-dropdown-item
+                        v-if="current.mapStatus !== '草稿'"
+                        command="newVersion"
+                        >新版本</el-dropdown-item
+                      >
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
               </template>
-            </el-popconfirm>
+            </DogTableActions>
           </template>
         </pure-table>
       </template>
@@ -238,18 +249,14 @@ const submitForm = async (formEl?: FormInstance) => {
             placeholder="业务平台园区名称（冗余展示）"
           />
         </el-form-item>
+        <el-form-item label="设备编号" prop="deviceCode" style="width: 100%">
+          <el-input
+            v-model="addForm.deviceCode"
+            placeholder="上报该地图的设备编号，如 RD-201（机器人回传时自动填写）"
+          />
+        </el-form-item>
         <el-form-item label="基线版本" prop="mapVersion" style="width: 100%">
           <el-input v-model="addForm.mapVersion" placeholder="例如：v1.0" />
-        </el-form-item>
-        <el-form-item
-          label="坐标系 frame_id"
-          prop="frameId"
-          style="width: 100%"
-        >
-          <el-input
-            v-model="addForm.frameId"
-            placeholder="例如：zj_map / 局部米制"
-          />
         </el-form-item>
         <el-form-item label="CRS" prop="crs" style="width: 100%">
           <el-input
@@ -276,9 +283,6 @@ const submitForm = async (formEl?: FormInstance) => {
             v-model="addForm.resolution"
             placeholder="例如：0.05 m/px"
           />
-        </el-form-item>
-        <el-form-item label="覆盖楼层" prop="floors" style="width: 100%">
-          <el-input v-model="addForm.floors" placeholder="例如：1F / 2F / B1" />
         </el-form-item>
         <el-form-item label="语义图层" style="width: 100%">
           <el-input-number

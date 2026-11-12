@@ -67,6 +67,17 @@ export function useDogMap() {
           <span class="text-xs text-gray-400">未关联</span>
         )
     },
+    {
+      label: "设备编号",
+      prop: "deviceCode",
+      width: 140,
+      cellRenderer: ({ row }) =>
+        row.deviceCode ? (
+          <span class="font-mono">{row.deviceCode}</span>
+        ) : (
+          <span class="text-xs text-gray-400">手工上传</span>
+        )
+    },
     { label: "文件名称", prop: "fileName", minWidth: 180 },
     {
       label: "基线版本",
@@ -89,8 +100,6 @@ export function useDogMap() {
         </el-tag>
       )
     },
-    { label: "坐标系 frame_id", prop: "frameId", minWidth: 150 },
-    { label: "覆盖楼层", prop: "floors", width: 120 },
     { label: "分辨率", prop: "resolution", width: 110 },
     {
       label: "栅格尺寸",
@@ -123,7 +132,7 @@ export function useDogMap() {
     { label: "文件大小（字节）", prop: "fileSize", width: 150 },
     { label: "描述信息", prop: "remarks", minWidth: 180 },
     { label: "创建时间", prop: "createTime", width: 180 },
-    { label: "操作", fixed: "right", width: 260, slot: "operation" }
+    { label: "操作", fixed: "right", width: 180, slot: "operation" }
   ];
 
   const queryFields = computed<DogSearchField[]>(() => [
@@ -141,7 +150,7 @@ export function useDogMap() {
       options: MAP_STATUS_OPTIONS
     },
     { label: "文件名称", prop: "fileName" },
-    { label: "园区编码", prop: "parkCode" }
+    { label: "设备编号", prop: "deviceCode" }
   ]);
   const moreQueryFields: DogSearchField[] = [...CREATE_TIME_FIELDS];
 
@@ -150,7 +159,7 @@ export function useDogMap() {
     mapType: "",
     mapStatus: "",
     fileName: "",
-    parkCode: "",
+    deviceCode: "",
     beginTime: "",
     endTime: ""
   });
@@ -172,13 +181,13 @@ export function useDogMap() {
     parkCode: string;
     /** 归属园区名称（展示冗余） */
     parkName: string;
+    /** 上报该地图的设备编号（业务库 devices.device_id） */
+    deviceCode: string;
     remarks: string;
     mapVersion: string;
-    frameId: string;
     crs: string;
     mapOrigin: string;
     resolution: string;
-    floors: string;
     roadCount: number | null;
     nogoCount: number | null;
     mapStatus: string;
@@ -188,13 +197,12 @@ export function useDogMap() {
     mapType: "离线地图",
     parkCode: "",
     parkName: "",
+    deviceCode: "",
     remarks: "",
     mapVersion: "v1.0",
-    frameId: "",
     crs: "GCJ-02 锚点 + 局部 ENU",
     mapOrigin: "",
     resolution: "",
-    floors: "",
     roadCount: null,
     nogoCount: null,
     mapStatus: "草稿"
@@ -210,13 +218,12 @@ export function useDogMap() {
       mapType: row.mapType ?? "",
       parkCode: row.parkCode ?? "",
       parkName: row.parkName ?? "",
+      deviceCode: row.deviceCode ?? "",
       remarks: row.remarks ?? "",
       mapVersion: row.mapVersion ?? "v1.0",
-      frameId: row.frameId ?? "",
       crs: row.crs ?? "GCJ-02 锚点 + 局部 ENU",
       mapOrigin: row.mapOrigin ?? "",
       resolution: row.resolution ?? "",
-      floors: row.floors ?? "",
       roadCount: row.roadCount ?? null,
       nogoCount: row.nogoCount ?? null,
       mapStatus: row.mapStatus ?? "草稿"
@@ -315,13 +322,12 @@ export function useDogMap() {
       mapType: "离线地图",
       parkCode: "",
       parkName: "",
+      deviceCode: "",
       remarks: "",
       mapVersion: "v1.0",
-      frameId: "",
       crs: "GCJ-02 锚点 + 局部 ENU",
       mapOrigin: "",
       resolution: "",
-      floors: "",
       roadCount: null,
       nogoCount: null,
       mapStatus: "草稿"
@@ -331,7 +337,7 @@ export function useDogMap() {
       mapType: "",
       mapStatus: "",
       fileName: "",
-      parkCode: "",
+      deviceCode: "",
       beginTime: "",
       endTime: ""
     };
@@ -351,10 +357,11 @@ export function useDogMap() {
   /** 已发布版本不可修改坐标系，只提交草稿版本的可变字段。 */
   function baselinePayload() {
     const form = addForm.value;
-    // 园区归属属于元数据，任何状态下都允许调整（由业务平台写入）
+    // 园区归属 / 上报设备属于元数据，任何状态下都允许调整（由业务平台写入）
     const park = {
       parkCode: form.parkCode.trim() || undefined,
-      parkName: form.parkName.trim() || undefined
+      parkName: form.parkName.trim() || undefined,
+      deviceCode: form.deviceCode.trim() || undefined
     };
     if (form.id && form.mapStatus !== "草稿") {
       return { ...park, mapStatus: form.mapStatus };
@@ -362,11 +369,9 @@ export function useDogMap() {
     return {
       ...park,
       mapVersion: form.mapVersion || undefined,
-      frameId: form.frameId || undefined,
       crs: form.crs || undefined,
       mapOrigin: form.mapOrigin || undefined,
       resolution: form.resolution || undefined,
-      floors: form.floors || undefined,
       roadCount: form.roadCount ?? undefined,
       nogoCount: form.nogoCount ?? undefined,
       mapStatus: form.mapStatus || "草稿"
