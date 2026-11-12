@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { deviceApi, parkApi, routeApi, taskApi, zoneApi } from "@/api/ops";
@@ -29,6 +29,8 @@ const stats = ref<{ total: number; counts: Record<string, number>; doneRate: num
   doneRate: 0
 });
 const viewMode = ref<"board" | "table">("board");
+/** 首屏加载中：没有任务时要区分「还没拉完」和「真的没有」 */
+const loading = ref(true);
 const activeStatus = ref("全部");
 const draggedId = ref<number | null>(null);
 const taskDialog = ref(false);
@@ -40,7 +42,7 @@ const taskForm = reactive({
   executeMode: "周期任务",
   level: "常规",
   parkId: 1,
-  zoneId: 1,
+  zoneId: null as number | null,
   deviceId: 1,
   routeId: null as number | null,
   planStart: "09:30",
@@ -86,6 +88,34 @@ const zonesOfPark = computed(() =>
   zones.value.filter(zone => zone.parkId === taskForm.parkId)
 );
 
+/**
+ * 巡检路线按园区过滤：后端会校验「路线园区 = 任务园区」，
+ * 下拉里列出其他园区的路线只会让人选了之后才报错。
+ */
+const routesOfForm = computed(() =>
+  routes.value.filter(route => route.parkId === taskForm.parkId)
+);
+
+/** 还没有任何巡检路线时，任务只能按临时路径下发 */
+const routesEmpty = computed(() => routes.value.length === 0);
+
+function goRoutes() {
+  router.push("/routes");
+}
+
+// 切园区后，原来选中的路线属于别的园区就清掉（回到「临时路径」）
+watch(
+  () => taskForm.parkId,
+  () => {
+    if (!zonesOfPark.value.some(zone => zone.id === taskForm.zoneId)) {
+      taskForm.zoneId = zonesOfPark.value[0]?.id ?? null;
+    }
+    if (taskForm.routeId !== null && !routesOfForm.value.some(route => route.id === taskForm.routeId)) {
+      taskForm.routeId = routesOfForm.value[0]?.id ?? null;
+    }
+  }
+);
+
 function countOf(status: string) {
   return status === "全部" ? stats.value.total : stats.value.counts[status] ?? 0;
 }
@@ -96,20 +126,30 @@ function tasksOf(status: string) {
 }
 
 async function load() {
-  const [taskList, statsData, deviceList, parkList, zoneList, routeList] = await Promise.all([
-    taskApi.list(),
-    taskApi.stats(),
-    deviceApi.list(),
-    parkApi.list(),
-    zoneApi.list(),
-    routeApi.list()
-  ]);
-  tasks.value = taskList;
-  stats.value = statsData;
-  devices.value = deviceList;
-  parks.value = parkList;
-  zones.value = zoneList;
-  routes.value = routeList;
+  loading.value = true;
+  try {
+    const [taskList, statsData, deviceList, parkList, zoneList, routeList] =
+      await Promise.all([
+        taskApi.list(),
+        taskApi.stats(),
+        deviceApi.list(),
+        parkApi.list(),
+        zoneApi.list(),
+        routeApi.list()
+      ]);
+    tasks.value = taskList;
+    stats.value = statsData;
+    devices.value = deviceList;
+    parks.value = parkList;
+    zones.value = zoneList;
+    routes.value = routeList;
+  } catch (error) {
+    // 接口失败时也要把页面渲染出来（空数据 + 空状态），不能只剩一片空白
+    console.error(error);
+    ElMessage.error("任务数据加载失败，请稍后重试");
+  } finally {
+    loading.value = false;
+  }
 }
 
 function tagTone(type?: string | null) {
@@ -181,15 +221,16 @@ async function removeTask(task: Task) {
 
 function openCreate() {
   editingTaskId.value = null;
+  const parkId = parks.value[0]?.id ?? 1;
   Object.assign(taskForm, {
     taskName: "",
     taskType: "定时巡检",
     executeMode: "周期任务",
     level: "常规",
-    parkId: parks.value[0]?.id ?? 1,
-    zoneId: zones.value[0]?.id ?? 1,
+    parkId,
+    zoneId: zones.value.find(zone => zone.parkId === parkId)?.id ?? null,
     deviceId: devices.value[0]?.id ?? 1,
-    routeId: routes.value[0]?.id ?? null,
+    routeId: routes.value.find(route => route.parkId === parkId)?.id ?? null,
     planStart: "09:30",
     planEnd: "10:10",
     dispatchPolicy: "按路线顺序执行",
@@ -211,7 +252,7 @@ function openEdit(task: Task) {
     executeMode: task.executeMode ?? "周期任务",
     level: task.level ?? "常规",
     parkId: task.parkId ?? parks.value[0]?.id ?? 1,
-    zoneId: task.zoneId ?? zones.value[0]?.id ?? 1,
+    zoneId: task.zoneId ?? null,
     deviceId: task.deviceId ?? devices.value[0]?.id ?? 1,
     routeId: task.routeId ?? null,
     planStart: task.planStart ?? "09:30",
@@ -431,7 +472,28 @@ onBeforeUnmount(() => {
       </span>
     </div>
 
-    <div v-if="viewMode === 'board'" class="kanban">
+    <div v-if="!tasks.length && !loading" class="card tasks-empty">
+      <div class="tasks-empty-icon"><AppIcon name="task" /></div>
+      <b>还没有巡检任务</b>
+      <p>
+        任务把巡检路线（或临时航点）下发给指定设备，按计划时间执行；<br />
+        在下方看板里可以直接新建、下发和跟踪进度。
+      </p>
+      <p v-if="routesEmpty" class="rt-hint" style="margin: 0 0 4px">
+        当前还没有巡检路线：可以先到「巡检路线」编排一条，或直接新建任务用
+        “临时路径”下发。
+      </p>
+      <div class="actions" style="justify-content: center; margin-top: 10px">
+        <button class="btn primary" @click="openCreate">
+          <AppIcon name="plus" />新建任务
+        </button>
+        <button class="btn" @click="goRoutes">
+          <AppIcon name="route" />去编排路线
+        </button>
+      </div>
+    </div>
+
+    <div v-else-if="viewMode === 'board'" class="kanban">
       <div
         v-for="column in columns"
         :key="column.key"
@@ -637,11 +699,15 @@ onBeforeUnmount(() => {
         </div>
         <div class="field">
           <label>巡检区域</label>
-          <select v-model.number="taskForm.zoneId" class="select">
+          <select v-model="taskForm.zoneId" class="select">
+            <option :value="null">— 不指定区域</option>
             <option v-for="zone in zonesOfPark" :key="zone.id" :value="zone.id">
               {{ zone.zoneName }}
             </option>
           </select>
+          <div v-if="!zonesOfPark.length" class="rt-hint" style="margin: 4px 0 0">
+            该园区还未划分巡检区域，可直接下发
+          </div>
         </div>
         <div class="field">
           <label>执行设备</label>
@@ -654,11 +720,30 @@ onBeforeUnmount(() => {
         <div class="field">
           <label>巡检路线</label>
           <select v-model="taskForm.routeId" class="select">
-            <option :value="null">— 临时路径</option>
-            <option v-for="route in routes" :key="route.id" :value="route.id">
-              {{ route.routeCode }} · {{ route.routeName }}
+            <option :value="null">— 临时路径（不引用路线模板）</option>
+            <option v-for="route in routesOfForm" :key="route.id" :value="route.id">
+              {{ route.routeCode }} · {{ route.routeName }} · {{ route.status }}
             </option>
           </select>
+          <div v-if="routesEmpty" class="rt-hint" style="margin: 4px 0 0">
+            还没有任何巡检路线：任务会按临时路径下发；
+            <button
+              style="border: 0; background: transparent; color: var(--primary); cursor: pointer; padding: 0"
+              @click="taskDialog = false; goRoutes()"
+            >
+              先去编排路线
+            </button>
+          </div>
+          <div v-else-if="!routesOfForm.length" class="rt-hint" style="margin: 4px 0 0">
+            该园区还没有巡检路线（共 {{ routes.length }} 条在其它园区）；任务可以走临时路径，
+            或
+            <button
+              style="border: 0; background: transparent; color: var(--primary); cursor: pointer; padding: 0"
+              @click="taskDialog = false; goRoutes()"
+            >
+              去编排
+            </button>
+          </div>
         </div>
         <div class="field">
           <label>计划开始时间</label>

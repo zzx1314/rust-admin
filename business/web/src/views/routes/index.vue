@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { parkApi, mapApi, routeApi, zoneApi } from "@/api/ops";
 import type {
@@ -64,6 +64,7 @@ interface RouteDraft {
 }
 
 const vueRoute = useRoute();
+const router = useRouter();
 const routes = ref<Route[]>([]);
 const parks = ref<Park[]>([]);
 const zones = ref<Zone[]>([]);
@@ -71,6 +72,8 @@ const maps = ref<MapVersion[]>([]);
 const draft = ref<RouteDraft | null>(null);
 const currentId = ref<number | null>(null);
 const showSkeleton = ref(false);
+/** 首屏加载中：加载完且没有任何路线时要显式给空状态，不能一直躺在骨架屏里 */
+const loading = ref(true);
 let skeletonTimer = 0;
 const routeQuery = ref("");
 const mode = ref<"add" | "select">("add");
@@ -100,7 +103,7 @@ const actionKind = ref<"point" | "leg">("point");
 const routeForm = reactive({
   routeName: "",
   parkId: 1,
-  zoneId: 1,
+  zoneId: null as number | null,
   model: "X30-Pro",
   loopMode: "闭环",
   defaultSpeed: 1.2,
@@ -214,6 +217,20 @@ function mapsOfPark(parkId: number | null) {
   );
 }
 
+/** 有可用地图基线（且至少有一张未归档地图）的园区，空状态下用来给出可行引导 */
+const parksWithBaseline = computed(() =>
+  parks.value.filter(park => park.mapVersionId && mapsOfPark(park.id).length > 0)
+);
+
+/** 新建路线时优先选一个「真的有地图基线」的园区，否则下拉里全是空的 */
+function preferredPark() {
+  return parksWithBaseline.value[0] ?? parks.value[0] ?? null;
+}
+
+function goParks() {
+  router.push("/parks");
+}
+
 function openBaseline(mapId: string | null | undefined) {
   baselineMapId.value = mapId ?? null;
   baselineDialog.value = true;
@@ -289,22 +306,28 @@ function actionOptions(kind: "point" | "leg") {
 }
 
 async function load(selectZoneId?: number) {
-  const [routeList, parkList, zoneList, mapList] = await Promise.all([
-    routeApi.list(),
-    parkApi.list(),
-    zoneApi.list(),
-    mapApi.list()
-  ]);
-  routes.value = routeList;
-  parks.value = parkList;
-  zones.value = zoneList;
-  maps.value = mapList;
+  loading.value = true;
+  try {
+    const [routeList, parkList, zoneList, mapList] = await Promise.all([
+      routeApi.list(),
+      parkApi.list(),
+      zoneApi.list(),
+      mapApi.list()
+    ]);
+    routes.value = routeList;
+    parks.value = parkList;
+    zones.value = zoneList;
+    maps.value = mapList;
 
-  const target =
-    (currentId.value ? routeList.find(item => item.id === currentId.value) : null) ??
-    (selectZoneId ? routeList.find(item => item.zoneId === selectZoneId) : null) ??
-    routeList[0];
-  if (target) selectRoute(target, false);
+    const target =
+      (currentId.value ? routeList.find(item => item.id === currentId.value) : null) ??
+      (selectZoneId ? routeList.find(item => item.zoneId === selectZoneId) : null) ??
+      routeList[0];
+    if (target) selectRoute(target, false);
+  } finally {
+    loading.value = false;
+    showSkeleton.value = false;
+  }
 }
 
 function selectRoute(route: Route, notify = true) {
@@ -574,16 +597,19 @@ async function publishRoute() {
 }
 
 function openNewRoute() {
+  const park = preferredPark();
+  const parkId = park?.id ?? 1;
   Object.assign(routeForm, {
     routeName: "",
-    parkId: parks.value[0]?.id ?? 1,
-    zoneId: zones.value[0]?.id ?? 1,
+    parkId,
+    // 区域必须属于所选园区，否则选中的是别的园区的区域
+    zoneId: zones.value.find(zone => zone.parkId === parkId)?.id ?? null,
     model: "X30-Pro",
     loopMode: "闭环",
     defaultSpeed: 1.2,
     status: "草稿",
     routeDescription: "",
-    mapVersionId: mapsOfPark(parks.value[0]?.id ?? 1)[0]?.id ?? ""
+    mapVersionId: mapsOfPark(parkId)[0]?.id ?? ""
   });
   routeDialog.value = true;
 }
@@ -769,7 +795,7 @@ watch(
   () => routeForm.parkId,
   () => {
     if (!zonesOfForm.value.some(zone => zone.id === routeForm.zoneId)) {
-      routeForm.zoneId = zonesOfForm.value[0]?.id ?? 1;
+      routeForm.zoneId = zonesOfForm.value[0]?.id ?? null;
     }
     const options = mapsOfForm.value;
     if (!options.some(map => map.id === routeForm.mapVersionId)) {
@@ -811,12 +837,40 @@ onBeforeUnmount(() => {
       </template>
     </PageHeader>
 
-    <div v-if="!draft" class="route-skeleton" :class="{ visible: showSkeleton }">
+    <div v-if="!draft && loading" class="route-skeleton" :class="{ visible: showSkeleton }">
       <div class="route-skeleton-bar" />
       <div class="route-skeleton-grid">
         <div class="route-skeleton-card" style="height: 520px" />
         <div class="route-skeleton-card" style="height: 640px" />
         <div class="route-skeleton-card" style="height: 520px" />
+      </div>
+    </div>
+
+    <!-- 加载完但一条路线都没有：不能只留空白/无限骨架屏，要给空状态 + 下一步 -->
+    <div v-else-if="!draft" class="card route-empty">
+      <div class="route-empty-icon"><AppIcon name="route" /></div>
+      <b>还没有巡检路线</b>
+      <p>
+        巡检路线把航点、航段与每点/段执行的采集动作编排成可下发的任务模板；<br />
+        任务下发时必须引用一条已发布路线（或走“临时路径”）。
+      </p>
+      <p v-if="!parksWithBaseline.length" class="rt-hint" style="margin: 0 0 4px">
+        当前没有可用地图基线的园区，无法编排路线：请先到「园区管理」新增园区并绑定地图
+        （设备建图回传 / 中台同步后即可在园区表单里选到）。
+      </p>
+      <p v-else class="rt-hint" style="margin: 0 0 4px">
+        可编排园区：
+        <span v-for="park in parksWithBaseline" :key="park.id" class="tag" style="margin-left: 4px">
+          {{ park.parkName }}
+        </span>
+      </p>
+      <div class="actions" style="justify-content: center; margin-top: 10px">
+        <button class="btn primary" @click="openNewRoute">
+          <AppIcon name="plus" />新建路线
+        </button>
+        <button class="btn" @click="goParks">
+          <AppIcon name="park" />去园区管理
+        </button>
       </div>
     </div>
 
@@ -1377,9 +1431,13 @@ onBeforeUnmount(() => {
         </div>
         <div class="field">
           <label>巡检区域</label>
-          <select v-model.number="routeForm.zoneId" class="select">
+          <select v-model="routeForm.zoneId" class="select">
+            <option :value="null">— 不指定区域</option>
             <option v-for="zone in zonesOfForm" :key="zone.id" :value="zone.id">{{ zone.zoneName }}</option>
           </select>
+          <div v-if="!zonesOfForm.length" class="rt-hint" style="margin: 4px 0 0">
+            该园区还未划分巡检区域，可直接编排路线
+          </div>
         </div>
         <div class="field" style="grid-column: 1 / -1">
           <label>地图基线版本 <em>*</em> · 创建后冻结引用</label>
@@ -1390,6 +1448,9 @@ onBeforeUnmount(() => {
               {{ map.sourceId ? ` · 中台 #${map.sourceId}` : "" }}
             </option>
           </select>
+          <div v-if="!mapsOfForm.length" class="rt-hint" style="margin: 6px 0 0">
+            该园区还没有地图基线，创建后无法编排路线：请到「园区管理」给园区绑定地图后再来。
+          </div>
         </div>
         <div class="field">
           <label>适用机型</label>
@@ -1444,9 +1505,13 @@ onBeforeUnmount(() => {
         </div>
         <div class="field">
           <label>巡检区域</label>
-          <select v-model.number="routeForm.zoneId" class="select">
+          <select v-model="routeForm.zoneId" class="select">
+            <option :value="null">— 不指定区域</option>
             <option v-for="zone in zonesOfForm" :key="zone.id" :value="zone.id">{{ zone.zoneName }}</option>
           </select>
+          <div v-if="!zonesOfForm.length" class="rt-hint" style="margin: 4px 0 0">
+            该园区还未划分巡检区域，可直接编排路线
+          </div>
         </div>
         <div class="field" style="grid-column: 1 / -1">
           <label>地图基线（冻结引用）</label>
