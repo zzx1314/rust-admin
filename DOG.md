@@ -86,6 +86,7 @@ POST   /api/dogDevice/unassignUsers 批量解除分配 { deviceIds, userIds }
 GET    /api/dogInternal/devices/assignments  设备台账 + 分配关系（批量）
 POST   /api/dogInternal/devices/upsert       设备台账幂等同步
 DELETE /api/dogInternal/devices/{deviceCode} 删除设备台账（幂等）
+POST   /api/dogInternal/maps/exists          地图 id 是否仍存在（业务平台判重）
 POST   /api/dogInternal/maps/upload          地图包回传（multipart：file + mapInfo）
 GET    /api/dogDevice/control-plane/ws       反向控制信道（WebSocket，业务平台拨入）
 ```
@@ -122,6 +123,14 @@ GET    /api/dogDevice/control-plane/ws       反向控制信道（WebSocket，�
    只从文件服务下载缺失地图并回传；
 4. 自动回传（4001）与手动同步共用 ingest，服务端按 `parkId + sourceRef`
    二次判重，重复请求返回 `{ skipped: true }`。
+
+判重不能只看业务库：中台才是地图主库，某张图在中台被删掉（`dog_map.is_deleted = 1`）后，
+业务库里的历史行不能算「已同步」，否则设备端永远跳过、中台列表里也永远看不到这张图。
+因此业务平台在返回 `synced-sources` 前会调 `POST /api/dogInternal/maps/exists` 复核
+（只传 `map_versions.source_id`，中台只回 id），中台已删除的路径重新交给设备上传；
+ingest 侧同样先复核：中台已删就走正常上传并把业务行指向新的 `dog_map.id`，
+**业务地图 id 保持不变**（路线 / 任务通过 `map_version_id` 引用它）。
+中台不可达时退回旧行为（按业务库记录判定已同步），不把网络抖动放大成整机重传。
 
 业务平台需配置 `ROBODOG_SERVICE_TOKEN`，值与中台 `APP_DOG__BUSINESS_API_TOKEN` 一致。
 

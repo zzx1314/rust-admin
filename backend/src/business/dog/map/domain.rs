@@ -13,6 +13,13 @@ pub const MAP_STATUS_PUBLISHED: &str = "已发布";
 pub const MAP_STATUS_PARTIAL: &str = "部分标定";
 pub const MAP_STATUS_ARCHIVED: &str = "已归档";
 
+/// 未指定基线版本时的默认值（机器人回传 / 手工上传都不传版本）。
+///
+/// 以前这里的处理是「空就存 NULL」，结果地图列表的「基线版本」列一直是空的，
+/// 而编辑弹窗又把 NULL 显示成 `v1.0`，看起来像数据丢了。版本是基线的一部分，
+/// 落库时就该有值，派生新版本（v1.0 → v1.1）也才有起点。
+pub const DEFAULT_MAP_VERSION: &str = "v1.0";
+
 pub fn is_publishable_map_status(status: &str) -> bool {
     matches!(status, MAP_STATUS_PUBLISHED | MAP_STATUS_PARTIAL)
 }
@@ -240,7 +247,11 @@ impl CreateMapRequest {
             file_size: ActiveValue::set(self.file_size),
             remarks: ActiveValue::set(self.remarks.clone()),
             map_version: ActiveValue::set(
-                self.map_version.clone().filter(|v| !v.trim().is_empty()),
+                self.map_version
+                    .clone()
+                    .map(|version| version.trim().to_string())
+                    .filter(|version| !version.is_empty())
+                    .or_else(|| Some(DEFAULT_MAP_VERSION.to_string())),
             ),
             frame_id: ActiveValue::set(self.frame_id.clone()),
             crs: ActiveValue::set(self.crs.clone()),

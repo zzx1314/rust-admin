@@ -12,7 +12,7 @@
 use crate::config::Config;
 use crate::error::AppError;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -321,6 +321,56 @@ pub async fn device_owner(config: &Config, device_id: &str) -> Result<Option<i64
         .into_iter()
         .find(|device| device.device_id == device_id.trim())
         .and_then(|device| device.user_ids.into_iter().min()))
+}
+
+/// 这些中台地图 id 中还有哪些「活着」（未被软删除）。
+///
+/// 中台是地图主库：业务库里导入过的地图被中台删掉后不能再算「已同步」，
+/// 否则设备端不会重传，中台列表里也永远看不到这张图。
+///
+/// 只走共享服务令牌内部接口；未配置令牌或中台不可达时返回 `Err`，
+/// 由调用方退回旧行为（把业务库记录都当作已同步），避免把中台抖动
+/// 放大成「每台设备都重新下载几十兆地图」。
+pub async fn alive_map_ids(config: &Config, ids: &[i64]) -> Result<HashSet<i64>, AppError> {
+    if ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let base = zentai_base(config)?;
+    let token = config
+        .service_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| {
+            AppError::Internal(
+                "未配置中台服务令牌（ROBODOG_SERVICE_TOKEN），无法校验中台地图是否仍存在"
+                    .to_string(),
+            )
+        })?;
+    let http = http_client()?;
+    let url = format!("{base}/api/dogInternal/maps/exists");
+    let resp = http
+        .post(&url)
+        .header("x-service-token", token)
+        .json(&json!({ "ids": ids }))
+        .send()
+        .await
+        .map_err(|error| AppError::Internal(format!("请求中台地图存在性接口失败: {error}")))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(AppError::Internal(format!(
+            "中台地图存在性接口返回 HTTP {status}: {text}"
+        )));
+    }
+    let value: Value = serde_json::from_str(&text)
+        .map_err(|error| AppError::Internal(format!("中台地图存在性响应不是 JSON: {error}")))?;
+    Ok(value
+        .get("data")
+        .and_then(|data| data.get("existing"))
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_i64).collect())
+        .unwrap_or_default())
 }
 
 /// 把业务平台设备台账同步到中台（幂等 upsert）。

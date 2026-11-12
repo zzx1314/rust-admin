@@ -312,6 +312,70 @@ async fn map_upload_lands_in_dog_map_with_owner() {
     assert!(body["data"]["filePath"].as_str().is_some());
 }
 
+/// `POST /api/dogInternal/maps/exists`：只认未软删除的地图。
+///
+/// 业务平台据此判断「业务库已导入、中台又删了」的地图：这类地图不能算已同步，
+/// 否则设备端永远不会重传。
+#[tokio::test]
+async fn map_exists_ignores_soft_deleted_maps() {
+    let state = test_state(Some(TOKEN)).await;
+    let service = state.dog_map_service.clone();
+    let base = spawn_zentai(state).await;
+
+    let info = json!({
+        "mapName": "B 区机器人建图",
+        "mapType": "2D栅格",
+        "parkCode": "P02",
+        "parkName": "B 区",
+    });
+    let form = reqwest::multipart::Form::new()
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(sample_package())
+                .file_name("map.zip")
+                .mime_str("application/zip")
+                .expect("mime"),
+        )
+        .text("mapInfo", info.to_string());
+    let response = reqwest::Client::new()
+        .post(format!("{base}/api/dogInternal/maps/upload"))
+        .header("x-service-token", TOKEN)
+        .multipart(form)
+        .send()
+        .await
+        .expect("upload request");
+    assert_eq!(response.status(), 200);
+    let map_id = json(response).await["data"]["id"]
+        .as_i64()
+        .expect("地图 id");
+
+    async fn exists(base: &str, ids: Vec<i64>) -> Value {
+        let response = reqwest::Client::new()
+            .post(format!("{base}/api/dogInternal/maps/exists"))
+            .header("x-service-token", TOKEN)
+            .json(&json!({ "ids": ids }))
+            .send()
+            .await
+            .expect("exists request");
+        assert_eq!(response.status(), 200);
+        json(response).await
+    }
+
+    let body = exists(&base, vec![map_id, 999_999_999]).await;
+    assert_eq!(body["data"]["existing"], json!([map_id]));
+
+    service
+        .delete(map_id, &x_rust::common::data_scope::DataScope::new(0, true))
+        .await
+        .expect("删除地图");
+    let body = exists(&base, vec![map_id]).await;
+    assert_eq!(
+        body["data"]["existing"],
+        json!([]),
+        "软删除的地图不能再算存在"
+    );
+}
+
 /// 一个最小可解析的地图包：`model.pgm` + `model.yaml`。
 fn sample_package() -> Vec<u8> {
     // 2x2 灰度 PGM

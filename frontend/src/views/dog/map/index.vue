@@ -284,20 +284,6 @@ const submitForm = async (formEl?: FormInstance) => {
             placeholder="例如：0.05 m/px"
           />
         </el-form-item>
-        <el-form-item label="语义图层" style="width: 100%">
-          <el-input-number
-            v-model="addForm.roadCount"
-            :min="0"
-            placeholder="道路数"
-            style="width: 180px"
-          />
-          <el-input-number
-            v-model="addForm.nogoCount"
-            :min="0"
-            placeholder="禁行区数"
-            style="width: 180px; margin-left: 12px"
-          />
-        </el-form-item>
         <el-form-item label="基线状态" prop="mapStatus" style="width: 100%">
           <el-select v-model="addForm.mapStatus" placeholder="请选择基线状态">
             <el-option

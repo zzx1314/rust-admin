@@ -250,6 +250,24 @@ impl SeaOrmDogMapRepository {
             .await
     }
 
+    /// 给定 id 中仍存在（未被软删除）的地图 id。
+    ///
+    /// 业务平台用它判断「业务库里已导入、但中台被删掉」的地图：这类地图不能算
+    /// 已同步，否则设备端不会再上传，中台列表里也永远看不到这张图。
+    pub async fn find_alive_ids(&self, ids: &[i64]) -> Result<Vec<i64>, sea_orm::DbErr> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        MapEntity::find()
+            .filter(MapColumn::Id.is_in(ids.iter().copied()))
+            .filter(MapColumn::IsDeleted.eq(0))
+            .select_only()
+            .column(MapColumn::Id)
+            .into_tuple::<i64>()
+            .all(&*self.conn)
+            .await
+    }
+
     pub async fn delete(&self, id: i64, scope: &DataScope) -> Result<bool, sea_orm::DbErr> {
         let map = self.find_by_id(id, scope).await?;
         let map = match map {

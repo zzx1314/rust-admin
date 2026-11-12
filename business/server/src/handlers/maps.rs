@@ -82,6 +82,10 @@ pub struct SyncedSourcesQuery {
 ///
 /// 返回该园区已经入库的机器人地图路径（`source_ref`）。设备客户端手动同步前
 /// 先拉这个列表，跳过已同步地图，避免重复下载大文件。
+///
+/// 「已同步」还要求中台那张地图仍然存在：中台是地图主库，某张图在中台被删掉后，
+/// 业务库里的历史行不能算已同步，否则设备端永远跳过、中台列表里也永远看不到。
+/// 中台不可达时退回旧行为（按业务库记录判定），不把网络抖动放大成整机重传。
 pub async fn list_synced_sources(
     State(state): State<AppState>,
     Query(query): Query<SyncedSourcesQuery>,
@@ -89,15 +93,49 @@ pub async fn list_synced_sources(
     let park_id = query
         .park_id
         .ok_or_else(|| AppError::BadRequest("缺少 parkId".to_string()))?;
-    let sources: Vec<String> = sqlx::query_scalar(
-        "SELECT source_ref FROM map_versions
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT source_ref, source_id FROM map_versions
          WHERE park_id = ?1 AND source_ref IS NOT NULL AND source_ref <> ''
          ORDER BY created_at ASC",
     )
     .bind(park_id)
     .fetch_all(&state.db)
     .await?;
+
+    let zentai_ids: Vec<i64> = rows
+        .iter()
+        .filter_map(|(_, source_id)| zentai_id(source_id.as_deref()))
+        .collect();
+    let alive = match crate::zentai::alive_map_ids(&state.config, &zentai_ids).await {
+        Ok(alive) => Some(alive),
+        Err(error) => {
+            tracing::warn!("校验中台地图是否仍存在失败，按业务库记录判定已同步（{error}）");
+            None
+        }
+    };
+
+    let sources = rows
+        .into_iter()
+        .filter(|(_, source_id)| match &alive {
+            // 中台不可用：保持旧行为，避免整机重传
+            None => true,
+            Some(alive) => match zentai_id(source_id.as_deref()) {
+                // 没有中台 id 的历史行无法校验，按已同步处理
+                None => true,
+                Some(id) => alive.contains(&id),
+            },
+        })
+        .map(|(source_ref, _)| source_ref)
+        .collect();
     Ok(ApiResponse::ok(sources))
+}
+
+/// 业务库 `map_versions.source_id` → 中台 `dog_map.id`。
+fn zentai_id(source_id: Option<&str>) -> Option<i64> {
+    source_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<i64>().ok())
 }
 
 /// 中台 `dog_map` 的列清单

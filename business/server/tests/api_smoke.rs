@@ -207,6 +207,79 @@ async fn synced_sources_lists_source_refs_for_park() {
 }
 
 #[tokio::test]
+async fn synced_sources_drops_maps_deleted_in_zentai() {
+    // 假中台：只认 dog_map.id = 1 仍存在（另一张已被软删除）
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake zentai");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let router = axum::Router::new().route(
+            "/api/dogInternal/maps/exists",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "code": 10200,
+                    "data": { "existing": [1] }
+                }))
+            }),
+        );
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let (state, _db) = test_state_with_token(Some("svc-token")).await;
+    let mut config = (*state.config).clone();
+    config.zentai_base_url = Some(format!("http://{addr}"));
+    let state = AppState {
+        config: Arc::new(config),
+        ..state
+    };
+    let pool = state.db.clone();
+    let (park_id,): (i64,) = sqlx::query_as("SELECT park_id FROM map_versions LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .expect("演示数据应包含地图基线");
+    // source_id = 中台 dog_map.id：1 还活着，2 已被中台删除
+    for (id, source_id) in [("robot-map-alive", "1"), ("robot-map-stale", "2")] {
+        sqlx::query(
+            "INSERT INTO map_versions
+                (id, park_id, map_name, version, status, created_at, source, source_id, source_ref)
+             VALUES (?1, ?2, ?3, 'v1.0', '部分标定', '2026-01-01 00:00:00', 'robot-mapping', ?4, ?5)",
+        )
+        .bind(id)
+        .bind(park_id)
+        .bind(format!("map-{source_id}"))
+        .bind(source_id)
+        .bind(format!("/ota/alg_data/map/history_map/{source_id}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let app = build_router(state);
+    let token = login(&app).await;
+    let response = app
+        .oneshot(
+            Request::get(format!("/api/map-versions/synced-sources?parkId={park_id}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    let sources = body["data"].as_array().cloned().unwrap_or_default();
+    assert!(
+        sources.contains(&serde_json::json!("/ota/alg_data/map/history_map/1")),
+        "中台仍存在的地图应算已同步: {body}"
+    );
+    assert!(
+        !sources.contains(&serde_json::json!("/ota/alg_data/map/history_map/2")),
+        "中台已删除的地图不能算已同步，否则设备端永远不会重传: {body}"
+    );
+}
+
+#[tokio::test]
 async fn internal_sync_endpoint_requires_service_token() {
     let (state, _db) = test_state().await;
     let app = build_router(state);
@@ -677,6 +750,21 @@ mod zentai_service_token {
                 }),
             )
             .route(
+                "/api/dogInternal/maps/exists",
+                post(|headers: HeaderMap, body: axum::Json<Value>| async move {
+                    assert_eq!(
+                        headers.get("x-service-token").and_then(|v| v.to_str().ok()),
+                        Some(TOKEN)
+                    );
+                    assert_eq!(body["ids"], serde_json::json!([42, 43]));
+                    axum::Json(serde_json::json!({
+                        "code": 10200,
+                        "msg": "success",
+                        "data": {"existing": [42]},
+                    }))
+                }),
+            )
+            .route(
                 "/api/dogInternal/maps/upload",
                 post(|headers: HeaderMap, mut multipart: Multipart| async move {
                     assert_eq!(
@@ -786,6 +874,18 @@ mod zentai_service_token {
 
         // 全程没有登录换 JWT
         assert_eq!(token_calls.load(Ordering::SeqCst), 0, "不应调用 /api/token");
+    }
+
+    /// 中台已删除的地图不能算「已同步」，否则设备端永远不会重传。
+    #[tokio::test]
+    async fn alive_map_ids_filters_deleted_maps() {
+        let (base, _token_calls) = spawn_fake_zentai().await;
+        let config = service_config(base);
+        let alive = zentai::alive_map_ids(&config, &[42, 43])
+            .await
+            .expect("应能查询中台地图存在性");
+        assert!(alive.contains(&42), "中台仍存在的地图应返回");
+        assert!(!alive.contains(&43), "中台已删除的地图不应返回");
     }
 }
 

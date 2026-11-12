@@ -188,8 +188,6 @@ export function useDogMap() {
     crs: string;
     mapOrigin: string;
     resolution: string;
-    roadCount: number | null;
-    nogoCount: number | null;
     mapStatus: string;
   }>({
     id: null,
@@ -203,8 +201,6 @@ export function useDogMap() {
     crs: "GCJ-02 锚点 + 局部 ENU",
     mapOrigin: "",
     resolution: "",
-    roadCount: null,
-    nogoCount: null,
     mapStatus: "草稿"
   });
   /** 待上传的地图包（新增 / 修改时选择的新文件）。 */
@@ -220,12 +216,11 @@ export function useDogMap() {
       parkName: row.parkName ?? "",
       deviceCode: row.deviceCode ?? "",
       remarks: row.remarks ?? "",
-      mapVersion: row.mapVersion ?? "v1.0",
+      // 库里没有版本就显示空，不要谎报 v1.0：列表与编辑弹窗必须一致
+      mapVersion: row.mapVersion ?? "",
       crs: row.crs ?? "GCJ-02 锚点 + 局部 ENU",
       mapOrigin: row.mapOrigin ?? "",
       resolution: row.resolution ?? "",
-      roadCount: row.roadCount ?? null,
-      nogoCount: row.nogoCount ?? null,
       mapStatus: row.mapStatus ?? "草稿"
     };
     openDia("修改地图", formEl);
@@ -328,8 +323,6 @@ export function useDogMap() {
       crs: "GCJ-02 锚点 + 局部 ENU",
       mapOrigin: "",
       resolution: "",
-      roadCount: null,
-      nogoCount: null,
       mapStatus: "草稿"
     };
     queryForm.value = {
@@ -372,8 +365,6 @@ export function useDogMap() {
       crs: form.crs || undefined,
       mapOrigin: form.mapOrigin || undefined,
       resolution: form.resolution || undefined,
-      roadCount: form.roadCount ?? undefined,
-      nogoCount: form.nogoCount ?? undefined,
       mapStatus: form.mapStatus || "草稿"
     };
   }

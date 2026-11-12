@@ -10,6 +10,7 @@
 //! GET    /api/dogInternal/devices/assignments   设备台账 + 分配关系（批量）
 //! POST   /api/dogInternal/devices/upsert        设备台账幂等同步
 //! DELETE /api/dogInternal/devices/{device_code} 删除设备台账
+//! POST   /api/dogInternal/maps/exists           查询地图是否仍存在（业务平台判重）
 //! POST   /api/dogInternal/maps/upload           地图包回传（multipart）
 //! ```
 //!
@@ -74,6 +75,7 @@ pub fn internal_routes() -> Router<AppState> {
             "/dogInternal/devices/{device_code}",
             delete(delete_device_handler),
         )
+        .route("/dogInternal/maps/exists", post(map_exists_handler))
         .route(
             "/dogInternal/maps/upload",
             post(upload_map_handler).layer(DefaultBodyLimit::max(MAP_UPLOAD_LIMIT)),
@@ -144,6 +146,27 @@ pub async fn delete_device_handler(
         .delete(device.id, &internal_scope(None))
         .await?;
     Ok(Json(ApiResponse::ok(json!({"deleted": true}))))
+}
+
+/// `POST /api/dogInternal/maps/exists` — 中台哪些地图记录还活着。
+///
+/// 业务平台用它修正「业务库已导入、中台已删除」的判定：这类地图不能算已同步，
+/// 否则设备端永远不会重传，中台列表里也看不到。只返回 id，不泄漏地图字段。
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MapExistsRequest {
+    #[serde(default)]
+    pub ids: Vec<i64>,
+}
+
+pub async fn map_exists_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<MapExistsRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    authorize(&state, &headers)?;
+    let existing = state.dog_map_service.alive_ids(&req.ids).await?;
+    Ok(Json(ApiResponse::ok(json!({ "existing": existing }))))
 }
 
 /// `POST /api/dogInternal/maps/upload` — 地图包回传（multipart：file + mapInfo）。

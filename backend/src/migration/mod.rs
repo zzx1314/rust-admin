@@ -379,6 +379,7 @@ mod tests {
                 "add_device_management_menu",
                 "add_dog_command_audit",
                 "add_map_device_code",
+                "backfill_map_version",
             ]
         );
         assert_eq!(migrations[0].name(), "p_sys_tables_from_file");

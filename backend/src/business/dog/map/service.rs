@@ -138,6 +138,17 @@ impl DogMapService {
         Ok(())
     }
 
+    /// 返回给定 id 中仍然存在（未被软删除）的地图 id。
+    ///
+    /// 服务令牌身份调用，不做数据范围过滤：调用方（业务平台）只需要
+    /// 「中台还认不认这张图」，看不到任何地图字段。
+    pub async fn alive_ids(&self, ids: &[i64]) -> Result<Vec<i64>, AppError> {
+        self.repo
+            .find_alive_ids(ids)
+            .await
+            .map_err(AppError::DatabaseError)
+    }
+
     /// 发布地图版本：把状态推进到「已发布」/「部分标定」并记录发布时间。
     ///
     /// 已发布版本视为不可变；归档由发布新版本或人工操作完成。

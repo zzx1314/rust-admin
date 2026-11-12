@@ -84,33 +84,64 @@ pub async fn ingest_map(
 
     // 去重：同一园区下同一机器人地图路径只入库一次。
     // 自动回传（4001）与中台手动同步（4012 + 文件服务）共用这个判断。
+    //
+    // 「已同步」还要求中台那张地图仍存在：中台是地图主库，图被中台删掉（软删）后
+    // 业务库里的历史行不能算已同步，否则这张图在中台永远回不来。
+    // 这种场景不换业务地图 id：路线 / 任务通过 `map_version_id` 引用它。
+    let mut reuse_map_id: Option<String> = None;
     if let Some(source_ref) = request
         .source_ref
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let existing: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM map_versions WHERE park_id = ?1 AND source_ref = ?2 LIMIT 1",
+        let existing: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT id, source_id FROM map_versions WHERE park_id = ?1 AND source_ref = ?2 LIMIT 1",
         )
         .bind(park_id)
         .bind(source_ref)
         .fetch_optional(&state.db)
         .await?;
-        if let Some(map_id) = existing {
-            let map = crate::handlers::maps::fetch_map(&state, &map_id).await?;
-            info!("地图 {source_ref} 已同步过，跳过重复入库（{map_id}）");
-            return Ok(ApiResponse::ok(json!({
-                "mapId": map.id,
-                "mapName": map.map_name,
-                "parkId": map.park_id,
-                "zentaiMapId": Value::Null,
-                "bound": false,
-                "skipped": true,
-                "reason": "sourceRef 已存在，跳过重复同步",
-                "stashPath": Value::Null,
-                "map": map,
-            })));
+        if let Some((map_id, source_id)) = existing {
+            let stale_zentai_id = source_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .and_then(|value| value.parse::<i64>().ok());
+            let alive = match stale_zentai_id {
+                Some(zentai_id) => {
+                    match zentai::alive_map_ids(&state.config, &[zentai_id]).await {
+                        Ok(alive) => Some(alive.contains(&zentai_id)),
+                        Err(error) => {
+                            // 中台不可达：按已同步处理，宁可漏传也不重复下载大文件
+                            warn!("校验中台地图 {zentai_id} 是否仍存在失败，按已同步跳过: {error}");
+                            None
+                        }
+                    }
+                }
+                // 没有中台 id 的历史行（如手工导入）无法校验，仍按已同步处理
+                None => None,
+            };
+            if alive != Some(false) {
+                let map = crate::handlers::maps::fetch_map(&state, &map_id).await?;
+                info!("地图 {source_ref} 已同步过，跳过重复入库（{map_id}）");
+                return Ok(ApiResponse::ok(json!({
+                    "mapId": map.id,
+                    "mapName": map.map_name,
+                    "parkId": map.park_id,
+                    "zentaiMapId": Value::Null,
+                    "bound": false,
+                    "skipped": true,
+                    "reason": "sourceRef 已存在，跳过重复同步",
+                    "stashPath": Value::Null,
+                    "map": map,
+                })));
+            }
+            info!(
+                "中台地图 {} 已被删除，重新上传并复用业务地图 {map_id}",
+                stale_zentai_id.unwrap_or_default()
+            );
+            reuse_map_id = Some(map_id);
         }
     }
 
@@ -166,9 +197,12 @@ pub async fn ingest_map(
 
     // 第二跳：写入业务库 map_versions
     let source_id = zentai.id.to_string();
-    let version = "v1.0".to_string();
+    let version = ingest::ROBOT_MAP_VERSION.to_string();
     let timestamp = now();
-    let map_id = format!("ROS-MAP-{source_id}@{version}");
+    // 中台删掉后重传时沿用原业务地图 id（路线/任务引用它），否则按中台新 id 生成
+    let map_id = reuse_map_id
+        .clone()
+        .unwrap_or_else(|| format!("ROS-MAP-{source_id}@{version}"));
     let note = request.remarks.clone().unwrap_or_else(|| {
         format!(
             "机器人建图自动回传 · 中台 dog_map #{}{}",
@@ -198,8 +232,10 @@ pub async fn ingest_map(
             resolution = excluded.resolution,
             note = excluded.note,
             file_name = excluded.file_name,
+            file_path = excluded.file_path,
             file_size = excluded.file_size,
             owner_user_id = excluded.owner_user_id,
+            source_id = excluded.source_id,
             source_ref = excluded.source_ref",
     )
     .bind(&map_id)
