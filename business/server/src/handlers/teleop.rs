@@ -34,10 +34,13 @@ const TELEOP_IDLE_TIMEOUT_SECS: i64 = 120;
 ///
 /// 协议 1302 的枚举里没有「位姿复位」，所以不再对外暴露这个动作
 /// （以前下发的字符串 `reset_pose` 本体根本不认）。
-const BODY_ACTIONS: [(&str, &str); 8] = [
+const BODY_ACTIONS: [(&str, &str); 11] = [
     ("stand_up", "站立"),
     ("lie_down", "卧倒"),
     ("emergency_stop", "急停"),
+    // 1302 cmd=1：清 `estop.software`。软件急停没解除时，本体会把运动/导航指令全部拒掉，
+    // 而现场（X30-Pro）没有物理急停按钮，只能靠这条命令解除。
+    ("clear_emergency_stop", "解除急停"),
     ("light_on", "开灯"),
     ("light_off", "关灯"),
     // 模式切换（1302 cmd 60/61/62）：1304 摇杆的 lx/ly 只在通用模式下生效，
@@ -45,6 +48,10 @@ const BODY_ACTIONS: [(&str, &str); 8] = [
     ("generic_mode", "通用模式"),
     ("in_place_mode", "原地模式"),
     ("navigation_mode", "导航模式"),
+    // 1302 cmd=110/111：避障开关。感知降级（12608 相机无图 / 13382 检测延迟）时，
+    // 规划器会一直报「无有效绕障轨迹，终点附近有障碍物，等待中（13380）」
+    ("avoid_on", "避障开启"),
+    ("avoid_off", "避障关闭"),
 ];
 
 /// 允许通过 `/command` 下发的业务指令
@@ -344,8 +351,14 @@ pub async fn send_action(
         .copied()
         .ok_or_else(|| invalid(format!("不支持的动作 {action}")))?;
 
-    // 急停不受接管态约束：任何人在任何状态下都该能停车
-    if code != "emergency_stop" {
+    // 恢复类动作不受接管态约束：
+    // - 急停：任何人在任何状态下都该能停车；
+    // - 解除急停 / 避障开关：接管会把本体切到 1302 cmd=60 通用（手动）模式，
+    //   而手动模式下 `5000` 会被回 13897，所以这几个按钮必须能在非接管态点。
+    if !matches!(
+        code,
+        "emergency_stop" | "clear_emergency_stop" | "avoid_on" | "avoid_off"
+    ) {
         let operator = current_operator(&state, &device).await;
         ensure_holding(&device, &operator)?;
     }

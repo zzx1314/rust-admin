@@ -69,11 +69,16 @@ const statusText = computed(() => {
 const actions = [
   { code: "stand_up", label: "站立", icon: "trend-up", danger: false },
   { code: "lie_down", label: "卧倒", icon: "trend-down", danger: true },
+  // 1302 cmd=1：现场 X30-Pro 没有物理急停按钮，`estop.software=true` 时只能靠它解锁
+  { code: "clear_emergency_stop", label: "解除急停", icon: "shield", danger: false },
   { code: "light_on", label: "开灯", icon: "scan", danger: false },
   { code: "light_off", label: "关灯", icon: "shield", danger: false },
   // 1302 模式切换：摇杆走不动时先确认本体在「通用模式」（运动模式）
   { code: "generic_mode", label: "通用模式", icon: "activity", danger: false },
-  { code: "navigation_mode", label: "导航模式", icon: "route", danger: false }
+  { code: "navigation_mode", label: "导航模式", icon: "route", danger: false },
+  // 1302 cmd=110/111：感知降级（相机无图/检测延迟）时规划器会报「终点附近有障碍物，等待中」
+  { code: "avoid_off", label: "避障关闭", icon: "warn", danger: true },
+  { code: "avoid_on", label: "避障开启", icon: "check", danger: false }
 ] as const;
 
 const speedPresets = [

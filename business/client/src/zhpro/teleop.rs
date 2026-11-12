@@ -66,6 +66,14 @@ pub enum BodyCommand {
     InPlaceMode,
     /// 导航模式
     NavigationMode,
+    /// 避障开启（0x6E）
+    AvoidOn,
+    /// 避障关闭（0x6F）
+    ///
+    /// 感知降级（`12608` 相机无图 / `13382` 障碍物检测延迟）时，规划器会一直报
+    /// 「无有效绕障轨迹，终点附近有障碍物，等待中（13380）」；现场的手段是临时关掉
+    /// 绕障（仍保留碰撞停止）先把任务跑通。
+    AvoidOff,
 }
 
 impl BodyCommand {
@@ -81,6 +89,8 @@ impl BodyCommand {
             Self::GenericMode => 60,
             Self::InPlaceMode => 61,
             Self::NavigationMode => 62,
+            Self::AvoidOn => 110,
+            Self::AvoidOff => 111,
         }
     }
 
@@ -96,6 +106,8 @@ impl BodyCommand {
             Self::GenericMode => "generic_mode",
             Self::InPlaceMode => "in_place_mode",
             Self::NavigationMode => "navigation_mode",
+            Self::AvoidOn => "avoid_on",
+            Self::AvoidOff => "avoid_off",
         }
     }
 
@@ -111,6 +123,8 @@ impl BodyCommand {
             Self::GenericMode => "通用模式",
             Self::InPlaceMode => "原地模式",
             Self::NavigationMode => "导航模式",
+            Self::AvoidOn => "避障开启",
+            Self::AvoidOff => "避障关闭",
         }
     }
 
@@ -126,6 +140,8 @@ impl BodyCommand {
             Self::GenericMode,
             Self::InPlaceMode,
             Self::NavigationMode,
+            Self::AvoidOn,
+            Self::AvoidOff,
         ]
         .into_iter()
         .find(|cmd| cmd.action() == code_or_label || cmd.label() == code_or_label)
@@ -332,6 +348,21 @@ async fn emergency_stop(client: &ZhProClient, teleop: &SharedTeleop) -> Result<S
     Ok("急停已下发".to_string())
 }
 
+/// 不需要接管就能下发的本体动作
+///
+/// 接管会把本体切到 `1302 cmd=60` 通用（手动）模式，而手动模式下导航能力会被占住
+/// （`5000` 回 13897）。所以「解除急停 / 避障开关」这类**恢复类**动作必须能在非接管态
+/// 下发，否则会陷入「要按按钮就得接管 → 接管后又跑不了导航」的死循环。
+fn allowed_without_takeover(cmd: BodyCommand) -> bool {
+    matches!(
+        cmd,
+        BodyCommand::EmergencyStop
+            | BodyCommand::ClearEmergencyStop
+            | BodyCommand::AvoidOn
+            | BodyCommand::AvoidOff
+    )
+}
+
 /// 下发本体动作（1302）
 async fn send_body_command(
     client: &ZhProClient,
@@ -339,7 +370,7 @@ async fn send_body_command(
     cmd: BodyCommand,
     label: &str,
 ) -> Result<String, String> {
-    if !teleop.lock().await.engaged {
+    if !allowed_without_takeover(cmd) && !teleop.lock().await.engaged {
         return Err(format!("{label} 需要先接管"));
     }
     send_cmd(client, cmd).await?;
@@ -431,6 +462,11 @@ mod tests {
         assert_eq!(BodyCommand::GenericMode.code(), 60);
         assert_eq!(BodyCommand::InPlaceMode.code(), 61);
         assert_eq!(BodyCommand::NavigationMode.code(), 62);
+        // 避障开关（0x6E / 0x6F）：感知降级时临时关掉绕障用
+        assert_eq!(BodyCommand::AvoidOn.code(), 110);
+        assert_eq!(BodyCommand::AvoidOff.code(), 111);
+        assert_eq!(BodyCommand::parse("avoid_off"), Some(BodyCommand::AvoidOff));
+        assert_eq!(BodyCommand::parse("避障关闭"), Some(BodyCommand::AvoidOff));
         assert_eq!(BodyCommand::parse("通用模式"), Some(BodyCommand::GenericMode));
         assert_eq!(
             BodyCommand::parse("generic_mode"),

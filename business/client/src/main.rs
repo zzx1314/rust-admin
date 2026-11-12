@@ -1810,9 +1810,30 @@ async fn handle_server_message(
                         }
                     }
 
+                    // 软件急停未解除时本体一律拒运动指令：直接报原因，不要自等 600s
+                    if state.lock().await.estop_software == Some(true) {
+                        warn!("任务 {task_code} 拒绝下发：本体处于软件急停");
+                        report_progress(
+                            out_tx,
+                            &task_code,
+                            "异常",
+                            0,
+                            Some(
+                                "本体处于软件急停（estop.software=true），运动指令会被拒。\
+                                 请在设备页点「解除急停」（1302 cmd=1）或确认急停按钮已释放后重试"
+                                    .to_string(),
+                            ),
+                            None,
+                            None,
+                            None,
+                        )
+                        .await;
+                        clear_active_task(active, state).await;
+                        return;
+                    }
+
                     let runner = Arc::new(RouteRunner::new(client.clone()));
-                    let total_points = plan.waypoints.len() as i64;
-                    // 预检已把定位锁好：首航点不必再让本体重载地图
+                    let total_points = plan.waypoints.len() as i64;                    // 预检已把定位锁好：首航点不必再让本体重载地图
                     runner.mark_pre_located();
                     runner.prepare(plan).await;
                     *local_runner.lock().await = Some(runner.clone());

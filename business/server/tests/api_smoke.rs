@@ -753,6 +753,11 @@ async fn body_actions_include_gait_modes() {
         ("generic_mode", "通用模式"),
         ("in_place_mode", "原地模式"),
         ("navigation_mode", "导航模式"),
+        // 现场没有物理急停按钮，`estop.software=true` 只能靠 1302 cmd=1 解锁
+        ("clear_emergency_stop", "解除急停"),
+        // 感知降级时规划器会误判「终点附近有障碍物」，需要能临时关/开绕障
+        ("avoid_off", "避障关闭"),
+        ("avoid_on", "避障开启"),
     ] {
         let response = app
             .clone()

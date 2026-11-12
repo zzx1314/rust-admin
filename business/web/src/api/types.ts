@@ -112,6 +112,8 @@ export type DeviceAction =
   | "stand_up"
   | "lie_down"
   | "emergency_stop"
+  /** 1302 cmd=1：清 estop.software（现场 X30-Pro 无物理急停按钮，只能靠它解锁） */
+  | "clear_emergency_stop"
   | "light_on"
   | "light_off"
   /** 1302 cmd=60：通用模式（1304 摇杆的 lx/ly 只有在这个模式下生效） */
@@ -119,7 +121,10 @@ export type DeviceAction =
   /** 1302 cmd=61：原地模式 */
   | "in_place_mode"
   /** 1302 cmd=62：导航模式 */
-  | "navigation_mode";
+  | "navigation_mode"
+  /** 1302 cmd=110 / 111：避障开关（感知降级时规划器会误判终点附近有障碍） */
+  | "avoid_on"
+  | "avoid_off";
 
 export interface Task {
   id: number;
