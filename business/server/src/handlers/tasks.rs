@@ -150,6 +150,13 @@ pub(crate) async fn create_task_core(
         return Err(AppError::BadRequest("任务名称不能为空".to_string()));
     }
     validate_device_park(&state.db, payload.device_id, payload.park_id).await?;
+    // 坐标预检放在插入之前：路线航点不能下发时直接 400，避免留下一条「建好了但发不出去」的任务
+    crate::dispatch::ensure_route_dispatchable(
+        &state.db,
+        payload.route_id.flatten(),
+        payload.park_id,
+    )
+    .await?;
     let next_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM tasks")
         .fetch_one(&state.db)
         .await?;

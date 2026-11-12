@@ -87,6 +87,80 @@ async fn test_state_with_token(service_token: Option<&str>) -> (AppState, TempDb
     (state, db_dir)
 }
 
+/// 插入一张「真实 ROS 地图」基线（带 file_path + 米制原点），返回地图 ID。
+///
+/// 演示基线（`seed.rs`）没有地图包，坐标只能按示意坐标系处理、不允许下发；
+/// 需要验证「能下发」的用例自己造一张真图。
+async fn insert_real_map(pool: &sqlx::SqlitePool) -> String {
+    let map_id = "TEST-MAP@v1.0";
+    sqlx::query(
+        "INSERT INTO map_versions (id, park_id, map_name, version, frame_id, crs, origin,
+            resolution, status, map_width, map_height, file_path, source, created_at)
+         VALUES (?1, 1, 'TEST-MAP', 'v1.0', 'test_map', 'ROS map_server', '-14.85, -13.45, 0.0',
+            '0.05 m/px', '已发布', 1088, 940, 'maps/test-model.zip', 'backend', '2026-11-01 00:00:00')",
+    )
+    .bind(map_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    map_id.to_string()
+}
+
+/// 插入一条路线（坐标语义由 `data` 自己决定：米制 / 画布像素）。
+async fn insert_route(
+    pool: &sqlx::SqlitePool,
+    code: &str,
+    map_id: &str,
+    data: serde_json::Value,
+) -> i64 {
+    sqlx::query(
+        "INSERT INTO routes (route_code, route_name, park_id, status, version, loop_mode,
+            default_speed, route_data, point_count, distance_m, duration_s, battery_pct,
+            map_version_id, created_at, updated_at, created_by)
+         VALUES (?1, ?2, 1, '已发布', 'v1.0', '往返', 1.2, ?3, 2, 14.1,
+            12, 0, ?4, '2026-11-01 00:00:00', '2026-11-01 00:00:00', 1)",
+    )
+    .bind(code)
+    .bind(format!("{code} 冒烟路线"))
+    .bind(data.to_string())
+    .bind(map_id)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid()
+}
+
+/// 插入一条坐标已是地图米制、且全部落在图内的可下发路线（园区 1）。
+async fn insert_dispatchable_route(pool: &sqlx::SqlitePool, map_id: &str) -> i64 {
+    insert_route(
+        pool,
+        "RT-TEST-1",
+        map_id,
+        serde_json::json!({
+            "schemaVersion": 3,
+            "coordFrame": "map",
+            "loop": "往返",
+            "points": [
+                {"name": "P1", "x": -10.0, "y": -10.0, "dwell": 0, "radius": 0.3, "must": true,
+                 "heading": 0, "onFail": "跳过继续", "actions": []},
+                {"name": "P2", "x": 0.0, "y": 0.0, "dwell": 5, "radius": 0.3, "must": true,
+                 "heading": 90, "onFail": "跳过继续", "actions": []}
+            ],
+            "legs": [{"mode": "沿道路", "speed": 1.2, "avoid": "标准", "actions": []}],
+            "returnLeg": null
+        }),
+    )
+    .await
+}
+
+/// 取一台已绑定园区的演示设备主键
+async fn bound_device_pk(pool: &sqlx::SqlitePool) -> i64 {
+    sqlx::query_scalar("SELECT id FROM devices WHERE park_id = 1 LIMIT 1")
+        .fetch_one(pool)
+        .await
+        .expect("演示数据应包含已绑定园区的设备")
+}
+
 async fn json_body(response: axum::response::Response) -> Value {
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
@@ -600,6 +674,9 @@ mod zentai_control {
         let (state, _db) = test_state_with_token(Some(TOKEN)).await;
         let (device_pk, code) = bound_device(&state.db).await;
         let pool = state.db.clone();
+        // 演示路线绑的是没有地图包的示意基线，不允许下发；这里造一条真图路线
+        let map_id = insert_real_map(&pool).await;
+        let route_id = insert_dispatchable_route(&pool, &map_id).await;
         let app = build_router(state);
 
         let count = || {
@@ -616,7 +693,9 @@ mod zentai_control {
         };
         let before = count().await;
 
-        let payload = r#"{"taskName":"冒烟巡检","routeId":1,"requestId":"smoke-task-1"}"#;
+        let payload = format!(
+            r#"{{"taskName":"冒烟巡检","routeId":{route_id},"requestId":"smoke-task-1"}}"#
+        );
         let mut statuses = Vec::new();
         for _ in 0..2 {
             let response = app
@@ -629,7 +708,7 @@ mod zentai_control {
                         )
                         .header("x-service-token", TOKEN)
                         .header("x-request-id", "smoke-task-1")
-                        .body(Body::from(payload))
+                        .body(Body::from(payload.clone()))
                         .unwrap(),
                 )
                 .await
@@ -1221,9 +1300,19 @@ async fn starting_task_on_offline_device_is_rejected() {
     let app = build_router(state.clone());
     let token = login(&app).await;
 
+    // 演示路线绑的是示意基线；这里用一条真图路线，确保走到「设备未连接」而不是坐标守卫
+    let map_id = insert_real_map(&pool).await;
+    let route_id = insert_dispatchable_route(&pool, &map_id).await;
+    let device_pk = bound_device_pk(&pool).await;
     let (task_id, task_code): (i64, String) = sqlx::query_as(
-        "SELECT id, task_code FROM tasks WHERE task_status = '待执行' ORDER BY id LIMIT 1",
+        "INSERT INTO tasks (task_code, task_name, device_id, park_id, route_id, task_status,
+            progress, created_at, updated_at, created_by)
+         VALUES ('TK-OFFLINE-1', '离线设备任务', ?1, 1, ?2, '待执行', 0,
+            '2026-11-12 00:00:00', '2026-11-12 00:00:00', 1)
+         RETURNING id, task_code",
     )
+    .bind(device_pk)
+    .bind(route_id)
     .fetch_one(&pool)
     .await
     .unwrap();
@@ -1268,4 +1357,167 @@ async fn starting_task_on_offline_device_is_rejected() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+/// 未换算的路线（画布像素）在建任务时就被拒绝，且不会留下半截任务。
+#[tokio::test]
+async fn canvas_pixel_route_is_rejected_before_task_creation() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let map_id = insert_real_map(&pool).await;
+    let route_id = insert_route(
+        &pool,
+        "RT-LEGACY-1",
+        &map_id,
+        serde_json::json!({
+            "schemaVersion": 2,
+            "loop": "往返",
+            "points": [
+                {"name": "P1", "x": 335, "y": 120},
+                {"name": "P2", "x": 555, "y": 145}
+            ],
+            "legs": [],
+            "returnLeg": null
+        }),
+    )
+    .await;
+    let device_pk = bound_device_pk(&pool).await;
+
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+    let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let body = format!(
+        r#"{{"taskName":"像素路线任务","deviceId":{device_pk},"parkId":1,"routeId":{route_id}}}"#
+    );
+    let response = app
+        .oneshot(
+            Request::post("/api/tasks")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    let message = body["msg"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("像素"),
+        "错误信息应说明航点还是画布像素，实际: {message}"
+    );
+
+    let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(after, before, "坐标校验失败时不应插入任务");
+}
+
+/// 米制但超出地图范围的航点同样拒绝下发（不能等到本体报 13898）。
+#[tokio::test]
+async fn out_of_bounds_route_is_rejected_before_task_creation() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let map_id = insert_real_map(&pool).await;
+    let route_id = insert_route(
+        &pool,
+        "RT-OOB-1",
+        &map_id,
+        serde_json::json!({
+            "schemaVersion": 3,
+            "coordFrame": "map",
+            "loop": "往返",
+            "points": [
+                {"name": "P1", "x": 335.0, "y": 120.0},
+                {"name": "P2", "x": 555.0, "y": 145.0}
+            ],
+            "legs": [],
+            "returnLeg": null
+        }),
+    )
+    .await;
+    let device_pk = bound_device_pk(&pool).await;
+
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+    let body = format!(
+        r#"{{"taskName":"越界路线任务","deviceId":{device_pk},"parkId":1,"routeId":{route_id}}}"#
+    );
+    let response = app
+        .oneshot(
+            Request::post("/api/tasks")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    let message = body["msg"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("超出地图范围"),
+        "错误信息应指出越界，实际: {message}"
+    );
+}
+
+/// 历史路线的画布像素坐标：启动迁移一次性换算成地图米，且可重复执行。
+#[tokio::test]
+async fn legacy_route_coordinates_are_migrated_once() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let map_id = insert_real_map(&pool).await;
+    let route_id = insert_route(
+        &pool,
+        "RT-MIGRATE-1",
+        &map_id,
+        serde_json::json!({
+            "schemaVersion": 2,
+            "loop": "往返",
+            "points": [
+                {"name": "P1", "x": 335, "y": 120},
+                {"name": "P2", "x": 555, "y": 145}
+            ],
+            "legs": [],
+            "returnLeg": null
+        }),
+    )
+    .await;
+
+    let converted = robodog_ops_server::coords::migrate_route_coordinates(&pool)
+        .await
+        .unwrap();
+    assert!(converted >= 1, "至少应迁移本条路线");
+
+    let raw: String = sqlx::query_scalar("SELECT route_data FROM routes WHERE id = ?1")
+        .bind(route_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let data: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(data["coordFrame"], "map");
+    assert_eq!(data["schemaVersion"], 3);
+    let x = data["points"][0]["x"].as_f64().unwrap();
+    let y = data["points"][0]["y"].as_f64().unwrap();
+    assert!((x - 5.71).abs() < 0.05, "x 应换算为地图米，实际 {x}");
+    assert!((y - 21.29).abs() < 0.05, "y 应换算为地图米（含 y 翻转），实际 {y}");
+    // 里程按米重算：旧口径是「像素 × 1.2」
+    let distance: f64 = sqlx::query_scalar("SELECT distance_m FROM routes WHERE id = ?1")
+        .bind(route_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(distance < 30.0, "里程应按米重算，实际 {distance}");
+
+    // 幂等：已带 coordFrame=map 的路线不再换算
+    let again = robodog_ops_server::coords::migrate_route_coordinates(&pool)
+        .await
+        .unwrap();
+    assert_eq!(again, 0, "迁移必须幂等");
 }

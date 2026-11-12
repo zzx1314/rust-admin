@@ -29,19 +29,21 @@ pub fn route_metrics(data: &Value, default_speed: f64) -> RouteMetrics {
         .unwrap_or_default();
     let loop_mode = data.get("loop").and_then(Value::as_str).unwrap_or("闭环");
 
-    let mut pixels = 0.0_f64;
+    // `points[].x/y` 是地图坐标系下的米（见 `crate::coords`），直接做平面求和，
+    // 不再乘任何「像素→米」的经验系数：旧口径的 `× 1.2` 与地图分辨率无关，
+    // 会让里程和续航估算跟着画布缩放走。
+    let mut meters = 0.0_f64;
     for pair in points.windows(2) {
-        pixels += (number(&pair[1], "x") - number(&pair[0], "x"))
+        meters += (number(&pair[1], "x") - number(&pair[0], "x"))
             .hypot(number(&pair[1], "y") - number(&pair[0], "y"));
     }
     if loop_mode == "闭环" && points.len() > 2 {
         let first = &points[0];
         let last = &points[points.len() - 1];
-        pixels +=
+        meters +=
             (number(last, "x") - number(first, "x")).hypot(number(last, "y") - number(first, "y"));
     }
 
-    let meters = pixels * 1.2;
     let dwell_s: i64 = points
         .iter()
         .map(|point| number(point, "dwell") as i64)
@@ -156,10 +158,10 @@ mod tests {
         });
         let metrics = route_metrics(&data, 1.2);
         assert_eq!(metrics.point_count, 2);
-        assert_eq!(metrics.distance_m, 120.0);
+        assert_eq!(metrics.distance_m, 100.0, "航点已是米制，不应再乘系数");
         assert_eq!(metrics.dwell_s, 15);
         assert_eq!(metrics.action_count, 3);
-        assert_eq!(metrics.duration_s, 100 + 15 + 9);
+        assert_eq!(metrics.duration_s, 84 + 15 + 9);
         assert_eq!(metrics.battery_pct, 2);
     }
 
@@ -176,7 +178,7 @@ mod tests {
             "returnLeg": null
         });
         let metrics = route_metrics(&data, 1.0);
-        assert!((metrics.distance_m - 409.7).abs() < 0.2);
+        assert!((metrics.distance_m - 341.4).abs() < 0.2);
     }
 
     #[test]

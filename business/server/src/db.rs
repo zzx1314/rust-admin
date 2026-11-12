@@ -64,6 +64,14 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         tracing::info!(migration = %name, "applied database migration");
     }
 
+    // SQL 迁移只能改结构，坐标换算是纯数据变换（需要解析 JSON + 地图几何），
+    // 放在 Rust 里做：历史路线「画布像素 → 地图米」一次性换算，幂等。
+    match crate::coords::migrate_route_coordinates(pool).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(count, "路线坐标迁移完成（画布像素 → 地图米）"),
+        Err(error) => tracing::warn!("路线坐标迁移失败: {error}"),
+    }
+
     Ok(())
 }
 

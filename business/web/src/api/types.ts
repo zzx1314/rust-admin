@@ -181,6 +181,11 @@ export interface RouteLeg {
 
 export interface RouteData {
   schemaVersion: number;
+  /**
+   * 坐标语义：`map` = 航点 x/y 是地图坐标系下的米（schema v3）。
+   * 缺失说明是历史数据（800×460 画布像素），服务端拒绝下发。
+   */
+  coordFrame?: "map";
   loop: string;
   points: RoutePoint[];
   legs: RouteLeg[];

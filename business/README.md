@@ -379,6 +379,36 @@ HTTP 链路（②）的三个约定：
 - `POST /api/map-versions/{id}/new-version` 派生下一版本并发布，历史路线保持旧版引用。
 - `POST /api/map-versions/ingest` 一次性完成「推中台 + 写业务库」，是设备客户端建图回传的入口（见下节）。
 
+### 路线坐标：地图米制（不是画布像素）
+
+智航 Pro `5000 kind=2` 的 `goals[].position` 是**地图坐标系下的米**（协议
+§2.5.1.4，坐标系由 `map_path` 那张图的 `frame_id` 决定）。业务平台的约定：
+
+- `routes.route_data.points[].x/y` **一律存地图米**，并带 `"coordFrame": "map"`
+  （`schemaVersion: 3`）；`legs`/`returnLeg` 只有速度与动作，不含坐标。
+- 编辑器画布是 800×460 的 viewBox，点击/拖拽只在画布与米制之间换算，
+  换算公式集中在 `server/src/coords.rs` 与 `web/src/utils/coords.ts`（两份必须一致）：
+
+```text
+scale = min(800 / width, 460 / height)      // 底图等比铺进画布
+rectX = (800 - width * scale) / 2,  rectY = (460 - height * scale) / 2
+
+画布 → 地图：x = ox + (cx - rectX) / (width  * scale) * width  * res
+             y = oy + (1 - (cy - rectY) / (height * scale)) * height * res   // y 轴翻转
+地图 → 画布：cx = rectX + (x - ox) / (width  * res) * width  * scale
+             cy = rectY + (1 - (y - oy) / (height * res)) * height * scale
+```
+
+- `resolution` / `origin` / `map_width` / `map_height` 全部来自冻结的地图版本；
+  没有真实 ROS 地图包（演示基线、未绑定基线）时退回**示意坐标系**
+  （0.1 m/px、原点 (0,0)、画布自身 800×460），公式仍可逆。
+- 里程/耗时/耗电按米直接计算（`geo.rs`），不再乘任何「像素→米」经验系数。
+- **示意坐标系与未迁移的像素路线一律拒绝下发**：
+  `POST /api/tasks` 与 `POST /api/tasks/{id}/dispatch` 会返回 400 并说明原因；
+  发布路线、路线校验也会给出同样的检查项。
+- 历史路线在启动时由 `coords::migrate_route_coordinates` 一次性换算
+  （`coordFrame == "map"` 即跳过，可重复执行），并重算里程/耗时/耗电。
+
 `server/seed.rs` 会在 `map_versions` 为空且已有园区时自动补齐演示基线，并为
 RT-001 ~ RT-004 写入对应的冻结版本引用。
 
@@ -519,7 +549,7 @@ service_token = "change-me"
 
 | 字段 | 来源 | 说明 |
 | --- | --- | --- |
-| `routeData` | `routes.route_data` | 前端三栏编辑器的 `points/legs/returnLeg` |
+| `routeData` | `routes.route_data` | 前端三栏编辑器的 `points/legs/returnLeg`；`points[].x/y` 是地图米制（`coordFrame: "map"`） |
 | `map.mapId` | `routes.map_version_id` → 回退 `parks.map_version_id` | 冻结版本优先 |
 | `map.mapPath` | 由 `mapId` 派生（`@` → `_`） | 本体侧目录名 |
 | `map.mapType` | 固定 `1`（2D 栅格） | `3` 预留给 Route 路网 |

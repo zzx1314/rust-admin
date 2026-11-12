@@ -258,6 +258,34 @@ pub async fn validate_route(
         .map(|value| !value.is_null())
         .unwrap_or(false);
 
+    // 坐标语义与地图范围：智航 5000 的 goals 是地图米制，画布像素 / 示意坐标不能下发
+    let frame = crate::coords::frame_for_map(&state.db, route.map_version_id.as_deref()).await?;
+    let map_frame_ok = crate::coords::is_map_frame(&data) && !frame.schematic;
+    let outside = crate::coords::points_outside(&data, &frame);
+    let bounds_ok = map_frame_ok && outside.is_empty();
+    let bounds_description = if !crate::coords::is_map_frame(&data) {
+        "航点仍是画布像素坐标（缺 coordFrame=map），请在编辑器里重新保存一次".to_string()
+    } else if frame.schematic {
+        format!(
+            "绑定的地图没有真实 ROS 地图包，按 {:.1} m/px 的示意坐标系估算，不能下发",
+            crate::coords::SCHEMATIC_RESOLUTION
+        )
+    } else if outside.is_empty() {
+        let (min_x, min_y, max_x, max_y) = frame.extents();
+        format!("全部航点在地图范围内 x[{min_x:.1}, {max_x:.1}] y[{min_y:.1}, {max_y:.1}]")
+    } else {
+        let preview: Vec<String> = outside
+            .iter()
+            .take(3)
+            .map(|(index, x, y)| format!("P{index}({x:.1}, {y:.1})"))
+            .collect();
+        format!(
+            "{} 个航点超出地图范围：{}（米制坐标才能下发）",
+            outside.len(),
+            preview.join("、")
+        )
+    };
+
     let items = vec![
         validation_item(
             points.len() >= 2,
@@ -322,9 +350,20 @@ pub async fn validate_route(
             },
         ),
         validation_item(
-            true,
-            "禁行区冲突检测".to_string(),
-            "路径未穿越园区禁行区".to_string(),
+            bounds_ok,
+            "地图范围与坐标系".to_string(),
+            bounds_description,
+        ),
+        validation_item(
+            route.map_version_id.is_some(),
+            "地图基线引用".to_string(),
+            match route.map_version_id.as_deref() {
+                Some(map_id) if frame.schematic => {
+                    format!("{map_id}（演示基线，无真实地图包）")
+                }
+                Some(map_id) => format!("{map_id}（坐标随该版本冻结）"),
+                None => "未绑定地图基线，无法下发".to_string(),
+            },
         ),
     ];
     let passed = items.iter().filter(|item| item["ok"] == true).count();
@@ -349,6 +388,31 @@ pub async fn publish_route(
     super::parks::ensure_owner(&route, &claims)?;
     if route.point_count < 2 {
         return Err(AppError::BadRequest("航点不足，无法发布".to_string()));
+    }
+    // 发布即意味着可被任务引用；坐标不能下发时宁可让运维当场知道，
+    // 也不要发布一条「永远跑不起来」的路线。
+    let data = route
+        .route_data
+        .as_deref()
+        .map(parse_route_data)
+        .unwrap_or_else(|| empty_route_data(&route.loop_mode));
+    let frame = crate::coords::frame_for_map(&state.db, route.map_version_id.as_deref()).await?;
+    if !crate::coords::is_map_frame(&data) {
+        return Err(AppError::BadRequest(
+            "航点还是画布像素坐标（缺 coordFrame=map），不能发布；请在编辑器里重新保存一次完成米制换算"
+                .to_string(),
+        ));
+    }
+    if frame.schematic {
+        return Err(AppError::BadRequest(
+            "绑定的地图没有真实 ROS 地图包（示意坐标系），不能发布；请先发布真实地图再编排路线"
+                .to_string(),
+        ));
+    }
+    if let Some((index, x, y)) = crate::coords::points_outside(&data, &frame).first() {
+        return Err(AppError::BadRequest(format!(
+            "第 {index} 个航点 ({x:.2}, {y:.2}) 超出地图范围，不能发布"
+        )));
     }
     let version = bump_version(&route.version);
     let timestamp = now();

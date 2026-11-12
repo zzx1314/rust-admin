@@ -139,19 +139,34 @@ export function formatDuration(seconds: number): string {
 
 export function parseRouteData(raw?: string | null): RouteData {
   if (!raw) {
-    return { schemaVersion: 2, loop: "闭环", points: [], legs: [], returnLeg: null };
+    return {
+      schemaVersion: 3,
+      coordFrame: "map",
+      loop: "闭环",
+      points: [],
+      legs: [],
+      returnLeg: null
+    };
   }
   try {
     const parsed = JSON.parse(raw) as RouteData;
     return {
       schemaVersion: parsed.schemaVersion ?? 2,
+      coordFrame: parsed.coordFrame,
       loop: parsed.loop ?? "闭环",
       points: Array.isArray(parsed.points) ? parsed.points : [],
       legs: Array.isArray(parsed.legs) ? parsed.legs : [],
       returnLeg: parsed.returnLeg ?? null
     };
   } catch {
-    return { schemaVersion: 2, loop: "闭环", points: [], legs: [], returnLeg: null };
+    return {
+      schemaVersion: 3,
+      coordFrame: "map",
+      loop: "闭环",
+      points: [],
+      legs: [],
+      returnLeg: null
+    };
   }
 }
 
@@ -168,18 +183,19 @@ export interface RouteMetrics {
 }
 
 export function computeRouteMetrics(data: RouteData, speed: number): RouteMetrics {
-  let pixels = 0;
+  // 航点已是地图坐标系下的米（见 utils/coords.ts），直接平面求和；
+  // 旧口径的「像素 × 1.2」与地图分辨率无关，会让里程跟着画布缩放走。
+  let meters = 0;
   for (let index = 0; index < data.points.length - 1; index += 1) {
     const current = data.points[index];
     const next = data.points[index + 1];
-    pixels += Math.hypot(next.x - current.x, next.y - current.y);
+    meters += Math.hypot(next.x - current.x, next.y - current.y);
   }
   if (data.loop === "闭环" && data.points.length > 2) {
     const first = data.points[0];
     const last = data.points[data.points.length - 1];
-    pixels += Math.hypot(last.x - first.x, last.y - first.y);
+    meters += Math.hypot(last.x - first.x, last.y - first.y);
   }
-  const meters = pixels * 1.2;
   const dwell = data.points.reduce((sum, point) => sum + Number(point.dwell || 0), 0);
   let actions = data.points.reduce(
     (sum, point) => sum + (point.actions?.length || 0),
@@ -199,7 +215,8 @@ export function computeRouteMetrics(data: RouteData, speed: number): RouteMetric
 
 export function newRouteData(loop = "闭环"): RouteData {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
+    coordFrame: "map",
     loop,
     points: [],
     legs: [],

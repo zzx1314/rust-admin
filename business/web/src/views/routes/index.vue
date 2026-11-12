@@ -43,6 +43,7 @@ import {
   newRouteData,
   parseRouteData
 } from "@/utils/format";
+import { canvasToMap, frameOf, mapToCanvas, type MapFrame } from "@/utils/coords";
 
 interface RouteDraft {
   id: number;
@@ -142,6 +143,27 @@ const raster = ref<MapRaster | null>(null);
 const rasterVisible = ref(false);
 const rasterCache = new Map<string, MapRaster>();
 
+/**
+ * 当前草稿的坐标几何（地图版本 → 米/像素 + 原点）。
+ *
+ * 航点在 `draft.data.points` 里存的是**地图米**，画布上看到的是换算后的坐标：
+ * 两者只在这里转换，模板/拖拽一律不碰原始米制数值。
+ */
+const mapFrame = computed<MapFrame>(() => frameOf(draftMap.value));
+
+/** 画布坐标（显示用）：由米制航点反算出来 */
+const canvasPoints = computed(() =>
+  (draft.value?.data.points ?? []).map(point => {
+    const { x, y } = mapToCanvas(mapFrame.value, point.x, point.y);
+    return { cx: x, cy: y };
+  })
+);
+
+/** 编辑器里的坐标是否可下发（示意坐标 / 未迁移的历史数据都不行） */
+const coordReady = computed(
+  () => !mapFrame.value.schematic && draft.value?.data.coordFrame === "map"
+);
+
 const hasRaster = computed(
   () => draftMap.value?.source === "backend" && Boolean(draftMap.value?.filePath)
 );
@@ -229,7 +251,10 @@ const legActions = computed(() => selectedLeg.value?.actions ?? []);
 
 const simDog = computed(() => {
   const points = draft.value?.data.points ?? [];
-  return points[Math.min(simIndex.value, points.length - 1)] ?? null;
+  const point = points[Math.min(simIndex.value, points.length - 1)];
+  if (!point) return null;
+  const { x, y } = mapToCanvas(mapFrame.value, point.x, point.y);
+  return { x, y };
 });
 
 const draftParkName = computed(
@@ -348,8 +373,10 @@ function onCanvasClick(event: MouseEvent) {
   if (mode.value !== "add" || !draft.value) return;
   snapshot();
   const position = snapPoint(svgCoords(event));
+  // 画布像素 → 地图米：落库的始终是米制坐标
+  const target = canvasToMap(mapFrame.value, position.x, position.y);
   const newIndex = draft.value.data.points.length + 1;
-  draft.value.data.points.push(newPoint(newIndex, position.x, position.y));
+  draft.value.data.points.push(newPoint(newIndex, round3(target.x), round3(target.y)));
   if (draft.value.data.points.length > 1) {
     draft.value.data.legs.push(newLeg(draft.value.defaultSpeed));
   }
@@ -374,8 +401,10 @@ function onCanvasMove(event: PointerEvent) {
   const position = snapPoint(svgCoords(event));
   const point = draft.value.data.points[dragIndex.value];
   if (!point) return;
-  point.x = position.x;
-  point.y = position.y;
+  // 拖拽也走「画布像素 → 地图米」，避免把像素写回米制字段
+  const target = canvasToMap(mapFrame.value, position.x, position.y);
+  point.x = round3(target.x);
+  point.y = round3(target.y);
   justDragged.value = true;
 }
 
@@ -436,13 +465,18 @@ function deletePoint() {
   ElMessage.success("航点及关联航段已删除");
 }
 
+function round3(value: number) {
+  return Math.round(value * 1000) / 1000;
+}
+
 function legDistance(index: number) {
   const data = draft.value?.data;
   if (!data) return 0;
   const a = data.points[index];
   const b = data.points[index + 1] ?? (data.loop === "闭环" ? data.points[0] : null);
   if (!a || !b) return 0;
-  return Math.round(Math.hypot(b.x - a.x, b.y - a.y) * 1.2);
+  // 航点已是米制：直接求平面距离
+  return Math.round(Math.hypot(b.x - a.x, b.y - a.y));
 }
 
 function timelineSteps() {
@@ -922,10 +956,10 @@ onBeforeUnmount(() => {
                 <template v-for="(leg, index) in draft.data.legs" :key="`leg-${index}`">
                   <template v-if="draft.data.points[index] && draft.data.points[index + 1]">
                     <line
-                      :x1="draft.data.points[index].x"
-                      :y1="draft.data.points[index].y"
-                      :x2="draft.data.points[index + 1].x"
-                      :y2="draft.data.points[index + 1].y"
+                      :x1="canvasPoints[index].cx"
+                      :y1="canvasPoints[index].cy"
+                      :x2="canvasPoints[index + 1].cx"
+                      :y2="canvasPoints[index + 1].cy"
                       :stroke="selType === 'leg' && selIdx === index ? '#f59e0b' : '#0284c7'"
                       :stroke-width="selType === 'leg' && selIdx === index ? 5 : 3"
                       stroke-dasharray="9 7"
@@ -934,10 +968,10 @@ onBeforeUnmount(() => {
                     />
                     <line
                       class="leg-hit"
-                      :x1="draft.data.points[index].x"
-                      :y1="draft.data.points[index].y"
-                      :x2="draft.data.points[index + 1].x"
-                      :y2="draft.data.points[index + 1].y"
+                      :x1="canvasPoints[index].cx"
+                      :y1="canvasPoints[index].cy"
+                      :x2="canvasPoints[index + 1].cx"
+                      :y2="canvasPoints[index + 1].cy"
                       @click.stop="selectLeg(index)"
                     />
                     <g
@@ -945,8 +979,8 @@ onBeforeUnmount(() => {
                       @click.stop="selectLeg(index)"
                     >
                       <rect
-                        :x="(draft.data.points[index].x + draft.data.points[index + 1].x) / 2 - 20"
-                        :y="(draft.data.points[index].y + draft.data.points[index + 1].y) / 2 - 25"
+                        :x="(canvasPoints[index].cx + canvasPoints[index + 1].cx) / 2 - 20"
+                        :y="(canvasPoints[index].cy + canvasPoints[index + 1].cy) / 2 - 25"
                         width="40"
                         height="16"
                         rx="5"
@@ -954,8 +988,8 @@ onBeforeUnmount(() => {
                         :stroke="selType === 'leg' && selIdx === index ? '#f59e0b' : '#cfe3f2'"
                       />
                       <text
-                        :x="(draft.data.points[index].x + draft.data.points[index + 1].x) / 2"
-                        :y="(draft.data.points[index].y + draft.data.points[index + 1].y) / 2 - 14"
+                        :x="(canvasPoints[index].cx + canvasPoints[index + 1].cx) / 2"
+                        :y="(canvasPoints[index].cy + canvasPoints[index + 1].cy) / 2 - 14"
                         font-size="9.5"
                         :fill="selType === 'leg' && selIdx === index ? '#fff' : '#0369a1'"
                         text-anchor="middle"
@@ -975,10 +1009,10 @@ onBeforeUnmount(() => {
                   "
                 >
                   <line
-                    :x1="draft.data.points[draft.data.points.length - 1].x"
-                    :y1="draft.data.points[draft.data.points.length - 1].y"
-                    :x2="draft.data.points[0].x"
-                    :y2="draft.data.points[0].y"
+                    :x1="canvasPoints[draft.data.points.length - 1].cx"
+                    :y1="canvasPoints[draft.data.points.length - 1].cy"
+                    :x2="canvasPoints[0].cx"
+                    :y2="canvasPoints[0].cy"
                     :stroke="selType === 'leg' && isReturnLeg ? '#f59e0b' : '#94a3b8'"
                     stroke-width="2.4"
                     stroke-dasharray="4 7"
@@ -986,16 +1020,16 @@ onBeforeUnmount(() => {
                   />
                   <line
                     class="leg-hit"
-                    :x1="draft.data.points[draft.data.points.length - 1].x"
-                    :y1="draft.data.points[draft.data.points.length - 1].y"
-                    :x2="draft.data.points[0].x"
-                    :y2="draft.data.points[0].y"
+                    :x1="canvasPoints[draft.data.points.length - 1].cx"
+                    :y1="canvasPoints[draft.data.points.length - 1].cy"
+                    :x2="canvasPoints[0].cx"
+                    :y2="canvasPoints[0].cy"
                     @click.stop="selectLeg(draft.data.legs.length)"
                   />
                   <g style="cursor: pointer" @click.stop="selectLeg(draft.data.legs.length)">
                     <rect
-                      :x="(draft.data.points[draft.data.points.length - 1].x + draft.data.points[0].x) / 2 - 18"
-                      :y="(draft.data.points[draft.data.points.length - 1].y + draft.data.points[0].y) / 2 - 10"
+                      :x="(canvasPoints[draft.data.points.length - 1].cx + canvasPoints[0].cx) / 2 - 18"
+                      :y="(canvasPoints[draft.data.points.length - 1].cy + canvasPoints[0].cy) / 2 - 10"
                       width="36"
                       height="16"
                       rx="5"
@@ -1003,8 +1037,8 @@ onBeforeUnmount(() => {
                       stroke="#cbd5e1"
                     />
                     <text
-                      :x="(draft.data.points[draft.data.points.length - 1].x + draft.data.points[0].x) / 2"
-                      :y="(draft.data.points[draft.data.points.length - 1].y + draft.data.points[0].y) / 2 + 1"
+                      :x="(canvasPoints[draft.data.points.length - 1].cx + canvasPoints[0].cx) / 2"
+                      :y="(canvasPoints[draft.data.points.length - 1].cy + canvasPoints[0].cy) / 2 + 1"
                       font-size="9.5"
                       fill="#64748b"
                       text-anchor="middle"
@@ -1025,8 +1059,8 @@ onBeforeUnmount(() => {
                 >
                   <circle
                     v-if="selType === 'point' && selIdx === index"
-                    :cx="point.x"
-                    :cy="point.y"
+                    :cx="canvasPoints[index].cx"
+                    :cy="canvasPoints[index].cy"
                     r="21"
                     fill="none"
                     stroke="#f59e0b"
@@ -1034,8 +1068,8 @@ onBeforeUnmount(() => {
                     stroke-dasharray="4 3"
                   />
                   <circle
-                    :cx="point.x"
-                    :cy="point.y"
+                    :cx="canvasPoints[index].cx"
+                    :cy="canvasPoints[index].cy"
                     r="14"
                     fill="#fff"
                     :stroke="
@@ -1044,16 +1078,16 @@ onBeforeUnmount(() => {
                     stroke-width="2.5"
                   />
                   <circle
-                    :cx="point.x"
-                    :cy="point.y"
+                    :cx="canvasPoints[index].cx"
+                    :cy="canvasPoints[index].cy"
                     r="7"
                     :fill="
                       index === 0 ? '#0d9488' : index === draft.data.points.length - 1 ? '#0f172a' : '#0284c7'
                     "
                   />
                   <text
-                    :x="point.x"
-                    :y="point.y + 3.5"
+                    :x="canvasPoints[index].cx"
+                    :y="canvasPoints[index].cy + 3.5"
                     font-size="9"
                     fill="#fff"
                     text-anchor="middle"
@@ -1061,7 +1095,7 @@ onBeforeUnmount(() => {
                   >
                     {{ index + 1 }}
                   </text>
-                  <g :transform="`translate(${point.x - 46},${index % 2 ? point.y - 38 : point.y + 18})`">
+                  <g :transform="`translate(${canvasPoints[index].cx - 46},${index % 2 ? canvasPoints[index].cy - 38 : canvasPoints[index].cy + 18})`">
                     <rect
                       width="92"
                       height="18"
@@ -1104,7 +1138,11 @@ onBeforeUnmount(() => {
               <AppIcon name="info" />
               {{ mode === "add" ? "点击画布新增航点 · 拖拽航点调整位置" : "点选航点或航段编辑属性" }}
               · {{ rasterVisible && raster ? "ROS 栅格底图" : "示意图底图" }}
-              · 点击段标签配置行进任务
+              · 航点存地图米制坐标
+            </div>
+            <div v-if="draft && !coordReady" class="rt-canvas-warn">
+              <AppIcon name="warn" />
+              示意坐标系（该地图没有真实 ROS 地图包）：可编排但不能下发，请先发布真实地图基线
             </div>
             <div class="rt-legend">
               <span><i style="background: #0d9488" />起点</span>
@@ -1182,12 +1220,15 @@ onBeforeUnmount(() => {
                   <input v-model="selectedPoint.name" class="input" />
                 </div>
                 <div class="rt-field">
-                  <label>坐标 (x,y)</label>
-                  <input
-                    class="input mono"
-                    :value="`${Math.round(selectedPoint.x)}, ${Math.round(selectedPoint.y)}`"
-                    readonly
-                  />
+                  <label>航点坐标（地图米）</label>
+                  <input v-model.number="selectedPoint.x" class="input mono" type="number" step="0.1" />
+                  <input v-model.number="selectedPoint.y" class="input mono" type="number" step="0.1" />
+                </div>
+                <div class="rt-field">
+                  <label>坐标系</label>
+                  <span class="muted" style="font-size: 11px">
+                    {{ mapFrame.schematic ? "示意坐标（无真实地图包，不可下发）" : `地图米 · ${mapFrame.resolution} m/px` }}
+                  </span>
                 </div>
                 <div class="rt-field">
                   <label>到达半径</label>
@@ -1371,7 +1412,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <div class="rt-hint">
-        航点坐标以所选地图版本的 frame_id 与分辨率为基准，创建后引用冻结；后续地图发新版不会自动改写本路线坐标。创建后进入画布点击添加航点。
+        航点坐标以所选地图版本的 frame_id、原点和分辨率为基准（存地图米制，1 位小数，画布只是显示换算）；创建后引用冻结，后续地图发新版不会自动改写本路线坐标。没有真实 ROS 地图包的示意基线只能编排、不能下发任务。创建后进入画布点击添加航点。
       </div>
       <template #footer>
         <button class="btn" @click="routeDialog = false"><AppIcon name="close" />取消</button>

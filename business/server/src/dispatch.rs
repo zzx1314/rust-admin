@@ -88,6 +88,13 @@ pub async fn build_dispatch_payload(
 
     let map = resolve_map(db, task).await?;
 
+    // 坐标守卫：航点必须是地图米制且在所选地图范围内（详见 [`check_route_data`]）。
+    if let Some(data) = route_data.as_ref() {
+        let frame = crate::coords::frame_for_map(db, map.as_ref().map(|item| item.map_id.as_str()))
+            .await?;
+        check_route_data(task.route_code.as_deref().unwrap_or("—"), data, &frame)?;
+    }
+
     Ok(TaskDispatchPayload {
         task_id: task.id,
         task_code: task.task_code.clone(),
@@ -111,6 +118,78 @@ pub async fn build_dispatch_payload(
         avoid_level: Some(40),
         end_task: Some(resolve_end_task(task.execute_mode.as_deref()).to_string()),
     })
+}
+
+/// 航点坐标能否下发：米制标记 + 非示意坐标系 + 全部落在图内。
+///
+/// 智航 5000 kind=2 的 `goals[].position` 是地图坐标系下的米（协议 §2.5.1.4），
+/// 而路线编辑器用的是 800×460 画布像素：没有这道检查，`x=335` 会被当成 335 米
+/// 发给本体，整条航线落到图外，现场只能看到一句 `invalid request parameters`。
+pub fn check_route_data(
+    route_code: &str,
+    data: &Value,
+    frame: &crate::coords::MapFrame,
+) -> Result<(), AppError> {
+    if !crate::coords::is_map_frame(data) {
+        return Err(AppError::BadRequest(format!(
+            "路线 {route_code} 的航点还是画布像素坐标（缺 `coordFrame=map` 标记），不能下发；\
+             请在路线编辑器里重新保存一次完成米制换算"
+        )));
+    }
+    if frame.schematic {
+        return Err(AppError::BadRequest(format!(
+            "路线 {route_code} 绑定的地图没有真实 ROS 地图包（示意坐标系，1 画布像素按 {:.1} m 估算），\
+             无法下发；请先在地图基线里发布真实地图再重新编排路线",
+            crate::coords::SCHEMATIC_RESOLUTION
+        )));
+    }
+    if let Some((index, x, y)) = crate::coords::points_outside(data, frame).first() {
+        let (min_x, min_y, max_x, max_y) = frame.extents();
+        return Err(AppError::BadRequest(format!(
+            "路线 {route_code} 的第 {index} 个航点 ({x:.2}, {y:.2}) 超出地图范围\
+             x[{min_x:.1}, {max_x:.1}] y[{min_y:.1}, {max_y:.1}]，已拒绝下发"
+        )));
+    }
+    Ok(())
+}
+
+/// 建任务前的坐标预检：避免「任务插入成功但下发报错」的半截状态。
+///
+/// 地图解析顺序与 [`resolve_map`] 保持一致：路线冻结版本 → 园区当前基线。
+pub async fn ensure_route_dispatchable(
+    db: &SqlitePool,
+    route_id: Option<i64>,
+    park_id: Option<i64>,
+) -> Result<(), AppError> {
+    let Some(route_id) = route_id else {
+        return Ok(());
+    };
+    let row: Option<(Option<String>, String)> =
+        sqlx::query_as("SELECT route_data, route_code FROM routes WHERE id = ?1")
+            .bind(route_id)
+            .fetch_optional(db)
+            .await?;
+    let Some((route_data, route_code)) = row else {
+        return Ok(());
+    };
+    let Some(raw) = route_data else {
+        return Ok(());
+    };
+    let Ok(data) = serde_json::from_str::<Value>(&raw) else {
+        return Ok(());
+    };
+    // 与 resolve_map 相同的 COALESCE：路线冻结版本优先，否则园区基线
+    let map_id: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM map_versions WHERE id = COALESCE(
+            (SELECT map_version_id FROM routes WHERE id = ?1),
+            (SELECT map_version_id FROM parks WHERE id = ?2))",
+    )
+    .bind(route_id)
+    .bind(park_id)
+    .fetch_optional(db)
+    .await?;
+    let frame = crate::coords::frame_for_map(db, map_id.as_deref()).await?;
+    check_route_data(&route_code, &data, &frame)
 }
 
 #[cfg(test)]

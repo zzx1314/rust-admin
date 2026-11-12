@@ -262,7 +262,8 @@ journalctl -u robodog-device-client -f | grep 视频
   "executeMode": "返航充电",
   "route": { "routeId": 3, "routeCode": "RT-003", "routeName": "A区产线" },
   "routeData": {
-    "schemaVersion": 2,
+    "schemaVersion": 3,
+    "coordFrame": "map",
     "loop": "闭环",
     "points": [
       { "name": "起点", "x": 0.0, "y": 0.0, "dwell": 0, "heading": 0,
@@ -290,6 +291,10 @@ journalctl -u robodog-device-client -f | grep 视频
 
 - `map` 由服务端组装：优先用路线冻结的 `routes.map_version_id`，回退到园区当前基线
   `parks.map_version_id`。都没有则不下发，客户端会拒绝执行并上报异常。
+- `routeData.points[].x/y` 是**地图坐标系下的米**（`coordFrame: "map"`，`schemaVersion: 3`），
+  与 `5000 goals[].position` 同一坐标系（`map_path` 那张图的 `frame_id`）；
+  `heading` 是度（客户端转弧度四元数）。服务端会拒发像素坐标 / 示意坐标 / 越界航点，
+  客户端不需要也不会做任何比例换算。
 - `mapPath` 是本体侧目录名（`@` → `_`）。客户端会再按 `--map-root` 拼成
   `/ota/alg_data/map/history_map/<mapPath>`。
 - `endTask`：`return_to_charge` / `return_to_start` / `none`。

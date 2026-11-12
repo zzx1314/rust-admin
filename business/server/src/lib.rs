@@ -12,6 +12,7 @@ pub mod app;
 pub mod auth;
 pub mod config;
 pub mod control_plane;
+pub mod coords;
 pub mod db;
 pub mod dispatch;
 pub mod error;
