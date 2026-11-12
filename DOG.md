@@ -101,6 +101,8 @@ GET    /api/dogDevice/control-plane/ws       反向控制信道（WebSocket，�
 
 - 设备端建图回传时，业务平台会把设备绑定的园区随 `mapInfo` 写入
   （`parkCode` / `parkName`），因此每张机器人地图都自带园区归属。
+  **设备尚未绑定园区时不传这两个字段**（`NULL`）：地图先按「设备地图」入库，
+  设备绑定人之后在业务控制台创建园区时再把这张图认领给园区，中台地图跟着改。
 - `GET /api/dogMap/getPage` 支持 `parkCode` 精确过滤；`GET /api/dogMap/getAll` 同样返回这两个字段。
 - 上报设备：`dog_map.device_code` 保存采集这张地图的设备编号（业务平台
   `devices.device_id`），同样由业务平台随 `mapInfo.deviceCode` 写入，中台不建外键、
@@ -119,9 +121,10 @@ GET    /api/dogDevice/control-plane/ws       反向控制信道（WebSocket，�
 1. 中台用 `[dog] business_api_url` + `APP_DOG__BUSINESS_API_TOKEN` 调用业务平台
    内部接口 `POST /api/zentai/devices/{deviceId}/sync-maps`；
 2. 业务平台向在线设备下发 `同步地图` 指令；
-3. 客户端用 4012 拉取本体地图列表，先查询业务库已同步的 `source_ref`，
-   只从文件服务下载缺失地图并回传；
-4. 自动回传（4001）与手动同步共用 ingest，服务端按 `parkId + sourceRef`
+3. 客户端用 4012 拉取本体地图列表，先查询业务库已同步的 `source_ref`
+   （`GET /api/map-versions/synced-sources?deviceId=...`），
+   只从文件服务下载缺失地图并回传；**不要求设备已绑定园区**；
+4. 自动回传（4001）与手动同步共用 ingest，服务端按 `deviceCode + sourceRef`
    二次判重，重复请求返回 `{ skipped: true }`。
 
 判重不能只看业务库：中台才是地图主库，某张图在中台被删掉（`dog_map.is_deleted = 1`）后，
