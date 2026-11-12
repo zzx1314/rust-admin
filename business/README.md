@@ -141,6 +141,7 @@ POST   /api/devices/refresh
 GET    /api/devices/{id}          PUT    /api/devices/{id}    DELETE /api/devices/{id}
 POST   /api/devices/{id}/bind     DELETE /api/devices/{id}/bind
 POST   /api/devices/{id}/command
+POST   /api/devices/{id}/locate              # 载图 + 重定位（4030）
 POST   /api/devices/{id}/action
 POST   /api/devices/{id}/teleop              POST   /api/devices/{id}/teleop/take
 POST   /api/devices/{id}/teleop/release      POST   /api/devices/{id}/teleop/ping
@@ -148,6 +149,7 @@ POST   /api/devices/{id}/teleop/release      POST   /api/devices/{id}/teleop/pin
 GET    /api/tasks                 POST   /api/tasks
 GET    /api/tasks/stats
 GET    /api/tasks/{id}            PUT    /api/tasks/{id}       DELETE /api/tasks/{id}
+GET    /api/tasks/{id}/events      # 任务事件流（进度 / 定位异常 / 指令留痕）
 PUT    /api/tasks/{id}/status
 
 GET    /api/routes                POST   /api/routes
@@ -527,6 +529,44 @@ service_token = "change-me"
 
 客户端（`client/`）把载荷翻译成智航 Pro 指令驱动机器狗本体，详见
 [`client/README.md`](client/README.md)。
+
+### 定位与「机器狗不在图上」
+
+任务能不能跑，取决于机器人**在地图坐标系里知不知道自己在哪**。链路是：
+
+1. `POST /api/tasks` / 重连补发 → 客户端发 `5000 kind=2`，首航点带
+   `params.map_path` + `need_locate: true`（协议 §2.5.1：载图并等定位收敛，安全默认）；
+2. 初始位姿由 SLAM 读「上一份位姿文件」做完整重定位（协议 §2.4.1：`initial_pose`
+   为零四元数时的行为）；
+3. 客户端在发 5000 **之前**加了定位守卫：`loc_state.status` 已是 100 直接起步，否则先
+   下发 `4030 op=1` 载图重定位并等收敛（上限 60s）；收敛后首航点用 `need_locate=false`
+   复用这份定位，不再重载一次地图。60s 内不收敛（或 `203/210`）就**不派发**，任务直接
+   置「异常」，进度消息写明下一步该做什么；任务详情弹窗的「任务事件」能直接看到这条原因。
+
+恢复手段（按代价从低到高）：
+
+| 场景 | 动作 |
+| --- | --- |
+| 只是没载图 / 刚上电 | 什么都不用做，守卫会自动 4030 重定位 |
+| 人把设备挪了位置，仍在地图内 | `POST /api/devices/{id}/locate` + `{ "x":.., "y":.., "heading":90 }` 指定初始位姿 |
+| 定位丢失（`122`）/ 被搬到地图外 | 先「远程接管」把设备开回地图覆盖范围，再重定位；实在开不回来只能现场搬回 |
+| 老任务已被判异常 | 看板把任务拖回「待执行」→ 重新下发（待执行任务在设备重连时会自动补发） |
+
+接口：
+
+```bash
+# 全量重定位（地图与位姿都走默认：机器人当前地图 / 上次位姿文件）
+curl -X POST /api/devices/12/locate -H 'Content-Type: application/json' -d '{}'
+
+# 换地图 / 指定初始位姿（heading 为度）
+curl -X POST /api/devices/12/locate -H 'Content-Type: application/json' \
+  -d '{"mapId":"ROS-MAP-3@v1.0","x":1.5,"y":-2.0,"heading":90}'
+```
+
+地图解析顺序：请求 `mapId` → 设备上报的 `activeMapId` → 园区 `map_version_id` 基线；
+都解析不到直接 400，避免按错的图重定位。设备离线返回 400「未送达」，不会记成已下发。
+定位状态（`locStatus`）与当前地图（`activeMapId`）由设备心跳上报并落库，控制台设备列表
+与详情抽屉可见。
 
 ### 进度与阶段回传
 

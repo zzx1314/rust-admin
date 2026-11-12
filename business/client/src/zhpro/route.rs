@@ -237,6 +237,14 @@ pub enum Control {
     Cancel,
 }
 
+/// 首航点是否需要「载图并等定位收敛」。
+///
+/// 同一条航线内复用已加载的定位，只有第一个点需要定位；而如果起步前的定位守卫
+/// 已经把定位收敛好了，首点也不必再重载一次地图（省 10~30s，且不重置位姿）。
+pub fn need_locate_for(index: usize, pre_located: bool) -> bool {
+    index <= 1 && !pre_located
+}
+
 /// 航点执行状态机
 pub struct RouteRunner {
     client: Arc<ZhProClient>,
@@ -249,6 +257,8 @@ pub struct RouteRunner {
     cancelled: AtomicBool,
     /// 暂停标记（客户端侧作业暂停）
     paused: AtomicBool,
+    /// 起步前预检已经锁好定位：首航点不必再让本体重载地图
+    pre_located: AtomicBool,
     total: Mutex<usize>,
     completed: Mutex<usize>,
     skipped: Mutex<usize>,
@@ -263,10 +273,17 @@ impl RouteRunner {
             queue: Mutex::new(VecDeque::new()),
             cancelled: AtomicBool::new(false),
             paused: AtomicBool::new(false),
+            pre_located: AtomicBool::new(false),
             total: Mutex::new(0),
             completed: Mutex::new(0),
             skipped: Mutex::new(0),
         }
+    }
+
+    /// 标记「定位已由起步预检完成」：首航点改用 `need_locate=false` 复用当前定位，
+    /// 避免刚重定位完又让本体载一次图（多花 10~30s，且会重置位姿）。
+    pub fn mark_pre_located(&self) {
+        self.pre_located.store(true, Ordering::SeqCst);
     }
 
     pub async fn prepare(&self, plan: FlightPlan) {
@@ -466,6 +483,8 @@ impl RouteRunner {
     ) -> Result<(), String> {
         let map_path = plan.resolve_map_path(super::mapping::DEFAULT_MAP_ROOT);
         let pose = point.pose();
+        // 预检已锁定定位时首点不再重载地图；重试时标志已被取走，会重新载图定位
+        let need_locate = need_locate_for(index, self.pre_located.swap(false, Ordering::SeqCst));
         let data = json!({
             "kind": TaskKind::Navigation.code(),
             "name": format!("{} · 前往 {}", plan.task_name, point.name),
@@ -476,7 +495,7 @@ impl RouteRunner {
             "params": {
                 "map_path": map_path,
                 // 同一条航线内复用已加载定位，避免每点重载地图
-                "need_locate": index <= 1,
+                "need_locate": need_locate,
                 "map_type": plan.map_type,
                 "goal_type": plan.map_type,
                 "fence_path": "",
@@ -637,6 +656,16 @@ mod tests {
             goal_tolerance: 0.25,
             end_task: "返回充电".to_string(),
         }
+    }
+
+    #[test]
+    fn need_locate_only_for_first_point_unless_pre_located() {
+        // 没有预检：首点载图定位，其余点复用
+        assert!(need_locate_for(1, false));
+        assert!(!need_locate_for(2, false));
+        // 预检已收敛：首点也不重载
+        assert!(!need_locate_for(1, true));
+        assert!(!need_locate_for(2, true));
     }
 
     #[test]

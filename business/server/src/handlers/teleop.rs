@@ -43,12 +43,13 @@ const BODY_ACTIONS: [(&str, &str); 5] = [
 ];
 
 /// 允许通过 `/command` 下发的业务指令
-const BUSINESS_COMMANDS: [&str; 7] = [
+const BUSINESS_COMMANDS: [&str; 8] = [
     "开始巡检",
     "暂停任务",
     "继续任务",
     "召回充电",
     "同步地图",
+    "重新定位",
     "远程接管",
     "释放接管",
 ];
@@ -395,6 +396,8 @@ mod tests {
             run_mode: None,
             charging: false,
             robot_mode: None,
+            loc_status: 255,
+            active_map_id: None,
             created_at: String::new(),
             updated_at: String::new(),
         }

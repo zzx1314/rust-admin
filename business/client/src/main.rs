@@ -1161,28 +1161,41 @@ async fn handle_status_frame(
     }
 }
 
-/// 航线下发前的定位就绪检查：读取最近一帧 5009 的 loc_state
-async fn current_localization(zhpro: &Option<Arc<ZhProClient>>) -> Option<String> {
-    let client = zhpro.as_ref()?;
-    let mut rx = client.subscribe();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    while tokio::time::Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let Ok(Ok(env)) = tokio::time::timeout(remaining, rx.recv()).await else {
-            break;
-        };
-        if env.head.msg_type == T_TASK_STATUS
-            && let Some(frame) = StatusFrame::parse(&env.data)
-        {
-            return Some(format!(
-                "{}（status={}, fresh={}）",
-                zhpro::mapping::describe_loc_status(frame.loc_status),
-                frame.loc_status,
-                frame.loc_fresh
-            ));
-        }
+/// 定位收敛等待上限：设备被搬运后重定位通常 10~30s，超过就该判失败而不是干等
+const LOCATE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 平台下发的初始位姿：`initialPose: { x, y, heading }`（heading 单位度，与路线航点一致）
+///
+/// 缺字段或未下发时返回 `None`，交给 SLAM 读取上一份位姿文件做完整重定位。
+fn parse_initial_pose(value: Option<&Value>) -> Option<Pose> {
+    let pose = value?;
+    let x = pose.get("x").and_then(Value::as_f64)?;
+    let y = pose.get("y").and_then(Value::as_f64)?;
+    let heading = pose
+        .get("heading")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    Some(Pose::new(x, y, heading.to_radians()))
+}
+
+/// 巡检起步前的定位守卫。
+///
+/// 已经定位好（`100`）直接放行，不动地图、不打断位姿；否则用 `4030 op=1`
+/// 载图并重定位，等收敛后再交给本体导航，避免 `need_locate` 起步守卫静默失败。
+async fn ensure_localized(
+    client: &ZhProClient,
+    map_path: &str,
+    initial_pose: Option<Pose>,
+) -> Result<i64, String> {
+    match zhpro::mapping::latest_loc_status(client, Duration::from_secs(2)).await {
+        Some(status) if zhpro::mapping::loc_status_ready(status) => return Ok(status),
+        Some(status) => info!(
+            "定位未就绪（{}，status={status}），载图重定位 map={map_path}",
+            zhpro::mapping::describe_loc_status(status)
+        ),
+        None => warn!("2s 内未收到 5009 定位状态，直接尝试载图重定位 map={map_path}"),
     }
-    None
+    zhpro::mapping::relocalize(client, map_path, initial_pose, LOCATE_TIMEOUT).await
 }
 
 /// 5009 `stage` → 业务任务状态
@@ -1513,12 +1526,36 @@ async fn handle_server_message(
                         Err(e) => warn!("获取机器人地图列表失败: {e}"),
                     }
 
-                    if let Some(loc) = current_localization(zhpro).await {
-                        info!("机器人定位状态: {}", loc);
+                    // 起步前定位守卫：不在地图上 / 定位丢失时不发 5000，直接报可读异常
+                    let map_path = plan.resolve_map_path(&config.map_root);
+                    let initial_pose = parse_initial_pose(msg.payload.get("initialPose"));
+                    match ensure_localized(&client, &map_path, initial_pose).await {
+                        Ok(status) => {
+                            info!("定位已就绪（status={status}），开始执行航线")
+                        }
+                        Err(e) => {
+                            warn!("任务 {task_code} 定位未就绪，拒绝下发: {e}");
+                            report_progress(
+                                out_tx,
+                                &task_code,
+                                "异常",
+                                0,
+                                Some(format!(
+                                    "定位未就绪：{e}。请远程接管把设备移回地图覆盖范围，或下发「重新定位」后重试"
+                                )),
+                                None,
+                                None,
+                                None,
+                            )
+                            .await;
+                            return;
+                        }
                     }
 
                     let runner = Arc::new(RouteRunner::new(client.clone()));
                     let total_points = plan.waypoints.len() as i64;
+                    // 预检已把定位锁好：首航点不必再让本体重载地图
+                    runner.mark_pre_located();
                     runner.prepare(plan).await;
                     *local_runner.lock().await = Some(runner.clone());
 
@@ -1648,6 +1685,46 @@ async fn handle_server_message(
                             .map(|_| "已请求返回充电点".to_string())
                     }
                     "同步地图" => sync_maps_from_robot(config, &client, out_tx).await,
+                    "重新定位" => {
+                        // 服务端把指令附加参数包在 `params.params`（见 server 的 push_command），
+                        // 这里兼容直接平铺在 `params` 上的写法
+                        let outer = msg.payload.get("params");
+                        let params = outer.and_then(|p| p.get("params")).or(outer);
+                        let map_id = params
+                            .and_then(|p| p.get("mapId"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .or(state.lock().await.active_map.clone());
+                        let pose = parse_initial_pose(params.and_then(|p| p.get("pose")));
+                        match map_id {
+                            None => Err(
+                                "未指定 mapId，且机器人当前没有已载入地图；请在设备上指定地图后重试"
+                                    .to_string(),
+                            ),
+                            Some(map_id) => {
+                                let map_path =
+                                    zhpro::mapping::default_map_path(&config.map_root, &map_id);
+                                info!(
+                                    "重新定位：map={map_id} 路径={map_path} 初始位姿={}",
+                                    if pose.is_some() { "平台指定" } else { "用上次位姿文件" }
+                                );
+                                match zhpro::mapping::relocalize(
+                                    &client,
+                                    &map_path,
+                                    pose,
+                                    LOCATE_TIMEOUT,
+                                )
+                                .await
+                                {
+                                    Ok(status) => {
+                                        state.lock().await.active_map = Some(map_id.clone());
+                                        Ok(format!("重定位完成：{map_id}（status={status}）"))
+                                    }
+                                    Err(e) => Err(format!("重定位失败：{e}")),
+                                }
+                            }
+                        }
+                    }
                     other => Err(format!("未知指令 {other}")),
                 },
             };

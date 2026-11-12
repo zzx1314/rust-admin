@@ -7,7 +7,7 @@ import AppIcon from "./AppIcon.vue";
 import StatusBadge from "./StatusBadge.vue";
 import VideoPlayer from "./VideoPlayer.vue";
 import TeleopJoystick from "./TeleopJoystick.vue";
-import { formatDuration, timeOnly } from "@/utils/format";
+import { formatDuration, isLocReady, locStatusMeta, timeOnly } from "@/utils/format";
 
 const props = defineProps<{ device: Device | null; open: boolean }>();
 const emit = defineEmits<{
@@ -30,6 +30,10 @@ const online = computed(() => !!props.device && props.device.status !== "离线"
 const holding = computed(() => !!props.device?.teleopHolder);
 /** 已接管且在线才允许遥控 */
 const canControl = computed(() => holding.value && online.value);
+
+/** 定位状态：100 才算可以接任务，其余需要重定位或人工介入 */
+const locMeta = computed(() => locStatusMeta(props.device?.locStatus));
+const locReady = computed(() => isLocReady(props.device?.locStatus));
 
 const statusText = computed(() => {
   if (!props.device) return "";
@@ -183,6 +187,33 @@ async function sendAction(code: string, label: string, danger: boolean) {
   }
 }
 
+async function relocalize() {
+  if (!props.device || busy.value) return;
+  const device = props.device;
+  try {
+    await ElMessageBox.confirm(
+      `对 ${device.deviceId} 下发重新定位（地图：${device.activeMapId || "园区基线"}）。\n` +
+        "设备没被搬动时约 10~30 秒即可收敛；若已被搬到地图外，请先远程接管移回原位。",
+      "重新定位",
+      { type: "warning", confirmButtonText: "下发", cancelButtonText: "取消" }
+    );
+  } catch {
+    return;
+  }
+  busy.value = true;
+  try {
+    const res = await deviceApi.locate(device.id, { mapId: device.activeMapId });
+    ElMessage.success(
+      res.wsDelivered ? "已下发重新定位，等待定位收敛" : "设备未连接，指令未送达"
+    );
+    emit("changed");
+  } catch (error) {
+    ElMessage.error((error as Error).message || "重新定位下发失败");
+  } finally {
+    busy.value = false;
+  }
+}
+
 /** 急停：不受接管态限制，任何状态都能停 */
 async function emergencyStop() {
   if (!props.device) return;
@@ -258,6 +289,18 @@ async function emergencyStop() {
           </div>
         </div>
 
+        <div v-if="device.bodyOnline && !locReady" class="loc-alert">
+          <AppIcon name="warn" />
+          <span>
+            定位状态：<b>{{ locMeta.label }}</b>，机器狗可能不在地图上（当前地图：
+            {{ device.activeMapId || "未载图" }}），任务会被拒绝下发。请先远程接管把设备
+            移回地图覆盖范围，或下发「重新定位」。
+          </span>
+          <button class="btn sm" :disabled="busy" @click="relocalize">
+            <AppIcon name="waypoint" />重新定位
+          </button>
+        </div>
+
         <div class="card-title" style="margin-bottom: 10px"><AppIcon name="list" />设备档案</div>
         <div class="kv"><span>设备编号</span><b class="mono">{{ device.deviceId }}</b></div>
         <div class="kv"><span>设备型号</span><b>{{ device.model }}</b></div>
@@ -266,6 +309,18 @@ async function emergencyStop() {
         <div class="kv"><span>实时位置</span><b class="mono">{{ device.position }}</b></div>
         <div class="kv"><span>当前任务</span><b>{{ device.currentTaskName }}</b></div>
         <div class="kv"><span>工作模式</span><b>{{ device.robotMode || "—" }}</b></div>
+        <div class="kv">
+          <span>定位状态</span>
+          <b>
+            <span class="badge" :class="locMeta.tone"><i />{{ locMeta.label }}</span>
+            <span v-if="!locReady" class="muted" style="margin-left: 6px; font-weight: 400">
+              需要重定位后任务才能起步
+            </span>
+          </b>
+        </div>
+        <div class="kv">
+          <span>当前地图</span><b class="mono">{{ device.activeMapId || "未载图" }}</b>
+        </div>
         <div class="kv"><span>固件版本</span><b class="mono">{{ device.firmware }}</b></div>
         <div class="kv"><span>视频源</span><b class="mono">{{ device.videoUrl || "未配置" }}</b></div>
         <div class="kv"><span>运行状态</span><b>{{ statusText }}</b></div>

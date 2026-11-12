@@ -474,9 +474,134 @@ pub async fn load_map(
         .map(|_| ())
 }
 
+/// 地图目录：`<map_root>/history_map/<map_dir>`
+///
+/// 与 `route::FlightPlan::resolve_map_path` 的推导一致，供「重新定位」这类
+/// 只有 mapId、没有路线载荷的场景复用。
+pub fn default_map_path(map_root: &str, map_id: &str) -> String {
+    format!(
+        "{}/history_map/{}",
+        map_root.trim_end_matches('/'),
+        to_map_dir_name(map_id)
+    )
+}
+
+/// 定位已收敛：可以直接起步
+pub fn loc_status_ready(status: i64) -> bool {
+    status == 100
+}
+
+/// SLAM 已明确放弃本次定位（继续等待没有意义，需要人工介入）
+pub fn loc_status_fatal(status: i64) -> bool {
+    matches!(status, 203 | 210)
+}
+
+/// 读最近一帧 5009 的定位状态，最多等 `wait`
+///
+/// 用于起步前预检：先确认是否已经定位好，避免无谓地重载地图。
+pub async fn latest_loc_status(client: &ZhProClient, wait: Duration) -> Option<i64> {
+    let mut rx = client.subscribe();
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        let Ok(Ok(env)) = tokio::time::timeout(remaining, rx.recv()).await else {
+            return None;
+        };
+        if env.head.msg_type == T_TASK_STATUS
+            && let Some(frame) = super::status::StatusFrame::parse(&env.data)
+        {
+            return Some(frame.loc_status);
+        }
+    }
+}
+
+/// 等定位收敛到 `100 Locating`。
+///
+/// - 超时 → 返回超时错误（附最后一次状态的可读描述）
+/// - SLAM 明确失败（`203 Error` / `210 Fail`）→ 立即返回，不再干等
+pub async fn wait_localized(client: &ZhProClient, timeout: Duration) -> Result<i64, String> {
+    let mut rx = client.subscribe();
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut last = 255_i64;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(format!(
+                "等待定位收敛超时（{}s），当前状态：{}（status={last}）",
+                timeout.as_secs(),
+                describe_loc_status(last)
+            ));
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(env)) => {
+                if env.head.msg_type != T_TASK_STATUS {
+                    continue;
+                }
+                let Some(frame) = super::status::StatusFrame::parse(&env.data) else {
+                    continue;
+                };
+                last = frame.loc_status;
+                if loc_status_ready(last) {
+                    return Ok(last);
+                }
+                if loc_status_fatal(last) {
+                    return Err(format!(
+                        "SLAM 定位失败：{}（status={last}）",
+                        describe_loc_status(last)
+                    ));
+                }
+            }
+            Ok(Err(_)) => return Err("推送通道关闭，无法确认定位状态".to_string()),
+            // 本帧间隔内没有新状态：回循环顶部检查 deadline
+            Err(_) => continue,
+        }
+    }
+}
+
+/// 载图 + 定位（4030），并等定位收敛。
+///
+/// `initial_pose` 为 `None` 时下发零四元数，由 SLAM 读取上一份位姿文件做完整重定位，
+/// 适合「设备还在原位、只是没载图」；设备被搬动过时由平台显式给初始位姿。
+pub async fn relocalize(
+    client: &ZhProClient,
+    map_path: &str,
+    initial_pose: Option<Pose>,
+    timeout: Duration,
+) -> Result<i64, String> {
+    load_map(client, map_path, initial_pose).await?;
+    wait_localized(client, timeout).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_map_path_matches_flight_plan() {
+        assert_eq!(
+            default_map_path("/ota/alg_data/map", "MAP-ZJ-01@v2.1"),
+            "/ota/alg_data/map/history_map/MAP-ZJ-01_v2.1"
+        );
+        // 尾部斜杠不应产生双斜杠
+        assert_eq!(
+            default_map_path("/ota/alg_data/map/", "A@1"),
+            "/ota/alg_data/map/history_map/A_1"
+        );
+    }
+
+    #[test]
+    fn loc_status_gate_classification() {
+        assert!(loc_status_ready(100));
+        assert!(!loc_status_ready(121));
+        assert!(loc_status_fatal(203));
+        assert!(loc_status_fatal(210));
+        // 122 定位丢失还有救，不应当终止等待
+        assert!(!loc_status_fatal(122));
+        assert_eq!(describe_loc_status(122), "定位丢失");
+    }
 
     #[test]
     fn map_dir_name_is_safe() {

@@ -406,6 +406,31 @@ async fn push_task_control(state: &AppState, task: &Task, action: &str, reason: 
     }
 }
 
+/// 任务事件流（进度 / 定位异常 / 指令留痕）。
+///
+/// 定位守卫拒发任务时，可读原因就落在这里；前端任务详情据此告诉运维下一步做什么。
+pub async fn list_task_events(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
+) -> Result<Json<ApiResponse<Vec<crate::models::TaskEvent>>>, AppError> {
+    let task = fetch_task(&state, id).await?;
+    super::parks::ensure_owner(&task, &claims)?;
+    let events = sqlx::query_as::<_, crate::models::TaskEvent>(
+        "SELECT e.id, e.event_type, e.title, e.description, d.device_id AS device_code,
+            t.task_code, e.created_at
+         FROM task_events e
+         LEFT JOIN devices d ON d.id = e.device_id
+         LEFT JOIN tasks t ON t.id = e.task_id
+         WHERE e.task_id = ?1
+         ORDER BY e.created_at DESC, e.id DESC LIMIT 20",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(ApiResponse::ok(events))
+}
+
 pub async fn delete_task(
     State(state): State<AppState>,
     Path(id): Path<i64>,

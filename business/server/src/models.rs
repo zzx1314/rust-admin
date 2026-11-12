@@ -1,4 +1,5 @@
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 use sqlx::FromRow;
 
 /// 区分「字段缺失」(None) 与「显式传 null」(Some(None))。
@@ -164,6 +165,10 @@ pub struct Device {
     pub charging: bool,
     /// 本体工作模式：1315 `mode`（协议里的 MachineStatus），如 `remote`
     pub robot_mode: Option<String>,
+    /// 定位状态：智航 5009 `loc_state.status`（100 正常 / 122 丢失 / 210 失败）
+    pub loc_status: i64,
+    /// 机器人当前生效地图（业务侧 mapId）；为空表示未上报或未载图
+    pub active_map_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -493,6 +498,36 @@ pub struct SettingItem {
 #[serde(rename_all = "camelCase")]
 pub struct CommandRequest {
     pub command: String,
+}
+
+/// 重新定位（载图 + 可选的初始位姿）。
+///
+/// - 全部字段缺省：用机器人当前已载入的地图，下零位姿（SLAM 读上一份位姿文件完整重定位）
+/// - 指定 `map_id`：先载这张图再定位（设备被换园区、刚重开机的场景）
+/// - 指定 `x` / `y` / `heading`：以该位姿为初值定位（设备被搬动后的快速纠偏）；
+///   `heading` 单位为度，与路线航点一致
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocateRequest {
+    pub map_id: Option<String>,
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    pub heading: Option<f64>,
+}
+
+impl LocateRequest {
+    /// 组装下发给客户端 `params.pose`；未给坐标时为 `None`（完整重定位）
+    pub fn pose(&self) -> Result<Option<Value>, String> {
+        match (self.x, self.y) {
+            (None, None) => Ok(None),
+            (Some(x), Some(y)) => Ok(Some(serde_json::json!({
+                "x": x,
+                "y": y,
+                "heading": self.heading.unwrap_or(0.0),
+            }))),
+            _ => Err("设置初始位姿需要同时提供 x 与 y".to_string()),
+        }
+    }
 }
 
 /// 遥控摇杆下发

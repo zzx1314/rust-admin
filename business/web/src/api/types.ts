@@ -87,6 +87,10 @@ export interface Device {
   charging: boolean;
   /** 本体工作模式：1315 `mode`（协议里的 MachineStatus），如 remote / auto */
   robotMode: string | null;
+  /** 定位状态：100 正常 / 121 重定位中 / 122 定位丢失 / 210 定位失败 / 255 未上报 */
+  locStatus: number;
+  /** 机器人当前生效地图（业务侧 mapId）；为空表示未上报或未载图 */
+  activeMapId: string | null;
   createdAt: string;
   updatedAt: string;
 }

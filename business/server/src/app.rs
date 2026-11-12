@@ -103,6 +103,8 @@ pub fn build_router(state: AppState) -> Router {
                 .delete(devices::delete_device),
         )
         .route("/devices/{id}/command", post(devices::send_command))
+        // 重新定位：载图 + 可选初始位姿（4030），设备不在地图上时的恢复入口
+        .route("/devices/{id}/locate", post(devices::locate_device))
         .route(
             "/devices/{id}/bind",
             post(devices::bind_device).delete(devices::unbind_device),
@@ -126,6 +128,7 @@ pub fn build_router(state: AppState) -> Router {
             "/tasks/{id}/status",
             axum::routing::put(tasks::update_task_status),
         )
+        .route("/tasks/{id}/events", get(tasks::list_task_events))
         .route(
             "/routes",
             get(routes::list_routes).post(routes::create_route),

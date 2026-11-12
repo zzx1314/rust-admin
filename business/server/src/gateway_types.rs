@@ -66,6 +66,10 @@ pub struct HeartbeatPayload {
     pub charging: Option<bool>,
     /// 本体工作模式：1315 `mode`（协议里的 MachineStatus），如 `remote`
     pub robot_mode: Option<String>,
+    /// 定位状态（智航 5009 `loc_state.status`）：100 已收敛 / 122 定位丢失 / 210 定位失败
+    pub loc_status: Option<i64>,
+    /// 机器人当前生效地图（业务侧 mapId，如 `ROS-MAP-3@v1.0`）
+    pub map_id: Option<String>,
 }
 
 /// 服务端 → 客户端：心跳确认

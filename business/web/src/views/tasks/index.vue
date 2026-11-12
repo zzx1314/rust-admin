@@ -3,7 +3,7 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { deviceApi, parkApi, routeApi, taskApi, zoneApi } from "@/api/ops";
-import type { Device, Park, Route, Task, Zone } from "@/api/types";
+import type { Device, Park, Route, Task, TaskEvent, Zone } from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import AppIcon from "@/components/AppIcon.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
@@ -50,6 +50,8 @@ const taskForm = reactive({
 });
 const detailVisible = ref(false);
 const detailTask = ref<Task | null>(null);
+/** 任务事件流：定位未就绪、下发失败等可读原因都在这里 */
+const detailEvents = ref<TaskEvent[]>([]);
 
 const columns = [
   { key: "待执行", color: "#94a3b8" },
@@ -210,7 +212,13 @@ async function saveTask() {
 
 async function openDetail(task: Task) {
   detailTask.value = task;
+  detailEvents.value = [];
   detailVisible.value = true;
+  try {
+    detailEvents.value = await taskApi.events(task.id);
+  } catch {
+    // 事件流取不到不影响详情主体（例如旧任务没有事件记录）
+  }
 }
 
 function editFromDetail() {
@@ -618,6 +626,19 @@ onMounted(load);
         <div v-else class="empty-box" style="padding: 20px 0">
           该任务使用临时路径，未绑定路线模板
         </div>
+
+        <div class="rt-sec-title" style="margin-top: 18px">
+          <span>任务事件</span><AppIcon name="clock" />
+        </div>
+        <div v-if="detailEvents.length" class="act-kv" style="font-size: 11.5px; gap: 7px">
+          <div v-for="event in detailEvents" :key="event.id">
+            <b class="mono muted">{{ event.createdAt.slice(5, 16) }}</b> · {{ event.title }}
+            <div v-if="event.description" style="margin-top: 2px; line-height: 1.6">
+              {{ event.description }}
+            </div>
+          </div>
+        </div>
+        <div v-else class="empty-box" style="padding: 16px 0">暂无事件记录</div>
 
         <div class="actions" style="margin-top: 16px">
           <button

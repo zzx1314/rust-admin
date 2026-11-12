@@ -346,6 +346,123 @@ async fn parks_and_dashboard_work_after_login() {
     }
 }
 
+/// 「重新定位」：机器狗不在地图上时的人工恢复入口。
+///
+/// 三个必须成立的契约：
+/// 1. 解析不出地图 → 400 并提示显式指定 `mapId`（绝不能静默按错的图重定位）；
+/// 2. 设备离线 → 400「未送达」，不能记成已下发；
+/// 3. 设备在线 → WS 下发 `重新定位`，payload 带 `mapId` 与初始位姿。
+#[tokio::test]
+async fn locate_device_dispatches_relocalize_with_pose() {
+    let (state, _db) = test_state().await;
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+    let (id, code): (i64, String) = sqlx::query_as("SELECT id, device_id FROM devices LIMIT 1")
+        .fetch_one(&state.db)
+        .await
+        .expect("演示数据应包含设备");
+
+    // 1) 既没有已载地图、也没有园区基线 → 要求显式 mapId
+    sqlx::query("UPDATE devices SET park_id = NULL, active_map_id = NULL WHERE id = ?1")
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/devices/{id}/locate"))
+                .header(header::CONTENT_TYPE, header::HeaderValue::from_static("application/json"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert!(
+        body["msg"].as_str().unwrap_or_default().contains("mapId"),
+        "应提示显式指定 mapId，实际：{}",
+        body["msg"]
+    );
+
+    // 2) 指定地图但设备不在线 → 未送达必须显式失败
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/devices/{id}/locate"))
+                .header(header::CONTENT_TYPE, header::HeaderValue::from_static("application/json"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(r#"{"mapId":"ROS-MAP-1@v1.0"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert!(
+        body["msg"].as_str().unwrap_or_default().contains("未送达"),
+        "离线设备必须报未送达，实际：{}",
+        body["msg"]
+    );
+
+    // 3) 设备在线 → 指令带地图与位姿下发到设备
+    let (tx, mut rx) = tokio::sync::broadcast::channel(4);
+    state.device_connections.write().await.insert(code.clone(), tx);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/devices/{id}/locate"))
+                .header(header::CONTENT_TYPE, header::HeaderValue::from_static("application/json"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(r#"{"mapId":"ROS-MAP-1@v1.0","x":1.5,"y":-2.0,"heading":90}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "在线设备应下发成功");
+    let frame = rx.recv().await.expect("应收到下发的指令帧");
+    assert_eq!(frame.cmd_type, "remote_command");
+    assert_eq!(frame.payload["command"], "重新定位");
+    // 线协议形态：{ command, params: { dispatchedAt, operator, params: <附加参数> } }
+    assert_eq!(frame.payload["params"]["params"]["mapId"], "ROS-MAP-1@v1.0");
+    assert_eq!(frame.payload["params"]["params"]["pose"]["x"], 1.5);
+    assert_eq!(frame.payload["params"]["params"]["pose"]["heading"], 90.0);
+}
+
+/// 重新定位的入参校验：坐标必须成对出现，heading 缺省按 0 度
+#[test]
+fn locate_request_requires_paired_coordinates() {
+    use robodog_ops_server::models::LocateRequest;
+
+    let full = LocateRequest {
+        map_id: None,
+        x: Some(1.0),
+        y: Some(2.0),
+        heading: None,
+    };
+    let pose = full.pose().expect("成对坐标应合法").expect("应生成 pose");
+    assert_eq!(pose["x"], 1.0);
+    assert_eq!(pose["heading"], 0.0);
+
+    let partial = LocateRequest {
+        map_id: None,
+        x: Some(1.0),
+        y: None,
+        heading: None,
+    };
+    assert!(partial.pose().is_err(), "缺 y 必须拒绝");
+
+    let none = LocateRequest {
+        map_id: None,
+        x: None,
+        y: None,
+        heading: None,
+    };
+    assert!(none.pose().expect("缺省坐标合法").is_none());
+}
+
 /// 中台内部接口：控制面契约（指令 / 任务 / 运行态）。
 mod zentai_control {
     use super::*;

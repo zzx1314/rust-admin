@@ -10,7 +10,7 @@ import StatusBadge from "@/components/StatusBadge.vue";
 import ProgressBar from "@/components/ProgressBar.vue";
 import DeviceDrawer from "@/components/DeviceDrawer.vue";
 import { DEVICE_MODELS, DEVICE_STATUSES } from "@/utils/constants";
-import { downloadCsv, timeOnly } from "@/utils/format";
+import { downloadCsv, isLocReady, locStatusMeta, timeOnly } from "@/utils/format";
 
 const route = useRoute();
 const devices = ref<Device[]>([]);
@@ -155,6 +155,30 @@ async function sendCommand(command: string) {
   ElMessage.success(`已向 ${activeDevice.value.deviceId} 下发指令：${command}`);
   await load();
   activeDevice.value = devices.value.find(d => d.id === activeDevice.value?.id) ?? null;
+}
+
+/** 重新定位：机器狗不在图上 / 定位丢失时的恢复入口 */
+async function relocalize(device: Device) {
+  try {
+    await ElMessageBox.confirm(
+      `对 ${device.deviceId} 下发重新定位（地图：${device.activeMapId || "园区地图基线"}）。\n` +
+        "设备没被搬动时约 10~30 秒收敛；若已被搬到地图外，请先远程接管移回原位。",
+      "重新定位",
+      { type: "warning", confirmButtonText: "下发", cancelButtonText: "取消" }
+    );
+  } catch {
+    return;
+  }
+  try {
+    const res = await deviceApi.locate(device.id, { mapId: device.activeMapId });
+    ElMessage.success(
+      res.wsDelivered ? "已下发重新定位，等待定位收敛" : "设备未连接，指令未送达"
+    );
+  } catch {
+    // 拦截器已弹出可读错误（例如「设备未在线」「未指定 mapId」）
+  }
+  await load();
+  activeDevice.value = devices.value.find(d => d.id === device.id) ?? null;
 }
 
 function openCreateDevice() {
@@ -423,6 +447,16 @@ onMounted(load);
               <td>
                 <StatusBadge :status="device.status" />
                 <div
+                  v-if="device.status !== '离线' && device.bodyOnline"
+                  class="cell-sub"
+                  style="display: flex; align-items: center; gap: 6px; margin-top: 4px"
+                  :title="`地图：${device.activeMapId || '未载图'}`"
+                >
+                  <span class="badge" :class="locStatusMeta(device.locStatus).tone">
+                    <i />{{ locStatusMeta(device.locStatus).label }}
+                  </span>
+                </div>
+                <div
                   v-if="device.status !== '离线' && !device.bodyOnline"
                   class="cell-sub"
                   :title="
@@ -457,6 +491,15 @@ onMounted(load);
                 <div class="actions" @click.stop>
                   <button class="btn sm" @click="openDrawer(device)">
                     <AppIcon name="play" />控制
+                  </button>
+                  <button
+                    v-if="device.bodyOnline && !isLocReady(device.locStatus)"
+                    class="btn sm"
+                    style="color: #b45309"
+                    title="机器人不在地图上 / 定位丢失时使用"
+                    @click="relocalize(device)"
+                  >
+                    <AppIcon name="waypoint" />重新定位
                   </button>
                   <button
                     v-if="!device.parkId"

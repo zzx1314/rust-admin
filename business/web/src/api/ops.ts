@@ -14,6 +14,7 @@ import type {
   RouteValidation,
   Setting,
   Task,
+  TaskEvent,
   UserInfo,
   Zone
 } from "./types";
@@ -91,6 +92,24 @@ export const deviceApi = {
       teleopHolder: string | null;
     }>(`/devices/${id}/command`, { command }),
 
+  /**
+   * 重新定位（载图 + 定位，4030）。
+   *
+   * 不传位姿 = 用上次位姿文件做完整重定位（设备没被搬动时的常规恢复）；
+   * 传 `x/y/heading`（度）= 以该位姿为初值，设备被搬动后用它纠偏。
+   * 不传 `mapId` 时依次回退：设备上报的当前地图 → 园区地图基线。
+   */
+  locate: (
+    id: number,
+    payload: { mapId?: string | null; x?: number; y?: number; heading?: number } = {}
+  ) =>
+    post<{
+      deviceId: string;
+      command: string;
+      dispatchedAt: string;
+      wsDelivered: boolean;
+    }>(`/devices/${id}/locate`, payload),
+
   // ── 远程接管 ────────────────────────────────────────────
   /** 必须接管后才能下发摇杆与动作 */
   takeOver: (id: number) =>
@@ -123,6 +142,7 @@ export const taskApi = {
       "/tasks/stats"
     ),
   get: (id: number) => get<Task>(`/tasks/${id}`),
+  events: (id: number) => get<TaskEvent[]>(`/tasks/${id}/events`),
   create: (data: object) => post<Task>("/tasks", data),
   update: (id: number, data: object) => put<Task>(`/tasks/${id}`, data),
   remove: (id: number) => del<boolean>(`/tasks/${id}`),

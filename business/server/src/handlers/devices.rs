@@ -3,7 +3,7 @@ use crate::auth::{self, Claims};
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::gateway;
-use crate::models::{BindParkRequest, CommandRequest, Device, DeviceQuery, DeviceRequest};
+use crate::models::{BindParkRequest, CommandRequest, Device, DeviceQuery, DeviceRequest, LocateRequest};
 use crate::zentai;
 use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
@@ -60,6 +60,7 @@ pub(crate) const DEVICE_SELECT: &str = "SELECT d.id, d.device_id, d.model, d.par
     d.teleop_holder, d.teleop_at,
     COALESCE(d.body_online, 0) AS body_online, d.run_mode,
     COALESCE(d.charging, 0) AS charging, d.robot_mode,
+    COALESCE(d.loc_status, 255) AS loc_status, d.active_map_id,
     d.created_at, d.updated_at
     FROM devices d
     LEFT JOIN parks p ON p.id = d.park_id
@@ -567,8 +568,63 @@ pub async fn send_command(
     Ok(ApiResponse::ok(result))
 }
 
-/// 指令下发的唯一实现。
+/// 重新定位：载图并重定位（`4030 op=1`），用于「机器狗不在图上」的恢复。
 ///
+/// 地图解析顺序：请求 `mapId` → 设备上报的当前地图 → 园区地图基线。
+/// 位姿缺省时下零四元数，由 SLAM 读上一份位姿文件做完整重定位。
+pub async fn locate_device(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path(id): Path<i64>,
+    Json(payload): Json<LocateRequest>,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let device = fetch_device(&state, id).await?;
+    auth::ensure_device_access(&state, &claims, &device.device_id).await?;
+    let pose = payload.pose().map_err(AppError::BadRequest)?;
+
+    let requested = payload
+        .map_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let map_id = match (requested, device.active_map_id.clone(), device.park_id) {
+        (Some(map_id), _, _) => Some(map_id),
+        (None, Some(active), _) => Some(active),
+        (None, None, Some(park_id)) => sqlx::query_scalar::<_, Option<String>>(
+            "SELECT map_version_id FROM parks WHERE id = ?1",
+        )
+        .bind(park_id)
+        .fetch_optional(&state.db)
+        .await?
+        .flatten(),
+        _ => None,
+    };
+    let Some(map_id) = map_id else {
+        return Err(AppError::BadRequest(
+            "设备尚未上报当前地图，且所属园区没有地图基线；请显式指定 mapId".to_string(),
+        ));
+    };
+
+    let result = push_command(
+        &state,
+        &device,
+        "重新定位",
+        Some(json!({ "mapId": map_id, "pose": pose })),
+        Some(&claims.username),
+    )
+    .await?;
+    // 设备离线时显式报错：重定位必须在机器人本身上执行，不能记成「已下发」
+    if result.get("wsDelivered").and_then(Value::as_bool) == Some(false) {
+        return Err(AppError::BadRequest(format!(
+            "设备 {} 未在线，重新定位指令未送达",
+            device.device_id
+        )));
+    }
+    Ok(ApiResponse::ok(result))
+}
+
+/// 指令下发的唯一实现。
 /// 网页端（`send_command`）与中台内部接口（`handlers::service`）都走这里，
 /// 保证白名单、园区校验、状态流转、事件留痕、WS 下发只有一套语义。
 ///

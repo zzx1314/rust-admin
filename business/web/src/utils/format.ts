@@ -39,6 +39,40 @@ export function batteryTone(value: number): string {
   return "danger";
 }
 
+/**
+ * 定位状态（智航 5009 `loc_state.status`）→ 展示文案与色标。
+ *
+ * 100 已收敛，可以直接接任务；120/121 正在载图/重定位（等待即可）；
+ * 122/203/210 不在地图上，需要人工接管或下发「重新定位」。
+ */
+export function locStatusMeta(status?: number | null): { label: string; tone: string } {
+  switch (status ?? 255) {
+    case 100:
+      return { label: "定位正常", tone: "ok" };
+    case 1:
+      return { label: "就绪", tone: "info" };
+    case 0:
+      return { label: "未载图", tone: "neutral" };
+    case 120:
+      return { label: "载图中", tone: "warn" };
+    case 121:
+      return { label: "重定位中", tone: "warn" };
+    case 122:
+      return { label: "定位丢失", tone: "danger" };
+    case 203:
+      return { label: "定位异常", tone: "danger" };
+    case 210:
+      return { label: "定位失败", tone: "danger" };
+    default:
+      return { label: "未上报", tone: "neutral" };
+  }
+}
+
+/** 定位是否健康（可以接任务）；无法起步时页面给出重定位入口 */
+export function isLocReady(status?: number | null): boolean {
+  return status === 100;
+}
+
 export function timeOnly(value?: string | null): string {
   if (!value) return "—";
   return value.length >= 16 ? value.slice(11, 16) : value;

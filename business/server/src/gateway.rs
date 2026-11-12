@@ -177,6 +177,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                             mode: None,
                                             charging: None,
                                             robot_mode: None,
+                                            loc_status: None,
+                                            map_id: None,
                                         });
                                     handle_heartbeat(&db, &state.config, did, &payload).await;
                                     send_msg(&tx, "heartbeat_ack", json!(HeartbeatAckPayload {
@@ -659,6 +661,32 @@ async fn handle_heartbeat(
             "UPDATE devices SET current_task_name = ?1, updated_at = ?2 WHERE device_id = ?3",
         )
         .bind(task)
+        .bind(&timestamp_clone)
+        .bind(&device_id_clone)
+        .execute(db)
+        .await;
+    }
+    // 定位状态与当前生效地图：设备详情页据此判断「狗在不在地图上」
+    if let Some(loc) = payload.loc_status {
+        let _ = sqlx::query(
+            "UPDATE devices SET loc_status = ?1, updated_at = ?2 WHERE device_id = ?3",
+        )
+        .bind(loc)
+        .bind(&timestamp_clone)
+        .bind(&device_id_clone)
+        .execute(db)
+        .await;
+    }
+    if let Some(map) = payload
+        .map_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let _ = sqlx::query(
+            "UPDATE devices SET active_map_id = ?1, updated_at = ?2 WHERE device_id = ?3",
+        )
+        .bind(map)
         .bind(&timestamp_clone)
         .bind(&device_id_clone)
         .execute(db)
