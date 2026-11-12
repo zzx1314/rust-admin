@@ -356,6 +356,17 @@ impl ZhProClient {
 
     /// 发送请求并等待同 msg_id 的响应
     pub async fn request(&self, msg_type: u32, data: Value) -> Result<Envelope, String> {
+        self.request_with_timeout(msg_type, data, self.request_timeout)
+            .await
+    }
+
+    /// 同 [`Self::request`]，但可指定等待应答的时长
+    pub async fn request_with_timeout(
+        &self,
+        msg_type: u32,
+        data: Value,
+        wait: Duration,
+    ) -> Result<Envelope, String> {
         let msg_id = self.next_msg_id();
         let env = Envelope::request(msg_type, msg_id, data);
         let (tx, rx) = oneshot::channel();
@@ -371,13 +382,37 @@ impl ZhProClient {
             return Err("control 通道已关闭".to_string());
         }
 
-        match tokio::time::timeout(self.request_timeout, rx).await {
+        match tokio::time::timeout(wait, rx).await {
             Ok(Ok(reply)) => Ok(reply),
             Ok(Err(_)) => Err("响应通道被丢弃".to_string()),
             Err(_) => {
                 self.pending.lock().await.remove(&msg_id);
                 Err(format!("等待 {} 响应超时", msg_type + 1))
             }
+        }
+    }
+
+    /// 发送请求，应答「可有可无」：等不到应答返回 `Ok(None)`，本体明确拒绝才返回 `Err`
+    ///
+    /// 用于 `4030` 这类**长耗时操作**：现场固件的 `4031` 常常比 `REQUEST_TIMEOUT` 慢，
+    /// 或者干脆只靠 `5009 loc_state` 反馈进度。把它当普通请求等 8s 会把「本体正在载图」
+    /// 误判成「定位未就绪」，所以这里只取「有没有被明确拒绝」这一个信息。
+    pub async fn call_ack_optional(
+        &self,
+        msg_type: u32,
+        data: Value,
+        ack_wait: Duration,
+    ) -> Result<Option<Value>, String> {
+        match self.request_with_timeout(msg_type, data, ack_wait).await {
+            Ok(reply) if reply.is_ok() => Ok(Some(reply.data)),
+            Ok(reply) => Err(format!(
+                "{msg_type} 失败: code={} {}",
+                reply.code(),
+                reply.message()
+            )),
+            // 超时 = 本体没回执，不代表被拒：交给 5009 状态流判断
+            Err(e) if e.contains("响应超时") => Ok(None),
+            Err(e) => Err(e),
         }
     }
 
@@ -466,6 +501,16 @@ impl ZhProClient {
             .send(Message::Text(env.to_text()))
             .await
             .map_err(|_| "bulkdata 通道已关闭".to_string())
+    }
+
+    /// 确保持有 RoamerX 控制权（`1204`），已持有时直接返回
+    ///
+    /// 协议 §「4000 ~ 5999 自由数据透传区间」：gateway 的默认 owner 为 UINT32_MAX 时
+    /// **不转发任何非白名单 4000~5999 消息**（白名单只有 4012/4022/5010）；owner 存在时
+    /// 仅 owner 的消息会被处理。所以 `4030`（载图定位）、`4044`、`5000`（建任务）这些
+    /// 都必须先拿到控制权，否则会被网关静默丢弃（表现为等应答超时）。
+    pub async fn ensure_control(&self) -> Result<(), String> {
+        self.take_control().await
     }
 
     /// 获取 RoamerX 控制权（1204），发送 4000~5999 前调用

@@ -218,7 +218,11 @@ pub async fn handle_command(
         .or_else(|| BodyCommand::parse(command));
 
     match command {
-        "远程接管" | "开始巡检" => Some(engage(client, teleop).await),
+        // 「远程接管」是手动遥控入口：控制权 + 通用模式（1304 摇杆才生效）
+        "远程接管" => Some(engage(client, teleop).await),
+        // 「开始巡检」是自动任务入口：**不能切通用模式**，否则本体把导航能力判给手动控制，
+        // 随后每个航点的 5000 都会被回 13897 resource conflict (capability busy)。
+        "开始巡检" => Some(enter_navigation_mode(client).await),
         "释放接管" => Some(disengage(client, teleop).await),
         other => match body {
             Some(BodyCommand::EmergencyStop) => Some(emergency_stop(client, teleop).await),
@@ -291,9 +295,25 @@ async fn disengage(client: &ZhProClient, teleop: &SharedTeleop) -> Result<String
     guard.moving = false;
     guard.active_axes = None;
     guard.last_frame = None;
-    // 1304 没有「释放」语义，交还靠 1204 的释放或超时；这里只清本地标志
-    info!("已释放本体控制权");
+    // 1304 没有「释放」语义，交还靠 1204 的释放或超时；这里只清本地标志。
+    // 但**必须把手动模式切回导航模式**：停在通用模式下，后面的 5000 会被本体
+    // 判定「导航能力被手动控制占用」，回 13897 capability busy。
+    if let Err(e) = send_cmd(client, BodyCommand::NavigationMode).await {
+        warn!("切回导航模式失败: {e}");
+    }
+    info!("已释放本体控制权（并切回导航模式）");
     Ok("已释放接管".to_string())
+}
+
+/// 自动任务入口：取得 RoamerX 控制权 + 切导航模式（`1302 cmd=62`）
+///
+/// `4030` / `4044` / `5000` 都在 4000~5999 非白名单区间，必须先拿控制权，
+/// 否则网关不转发；而停在通用（手动）模式下导航任务会被回 13897 capability busy。
+pub async fn enter_navigation_mode(client: &ZhProClient) -> Result<String, String> {
+    client.ensure_control().await?;
+    send_cmd(client, BodyCommand::NavigationMode).await?;
+    info!("已切导航模式（控制权已持有，1302 cmd=62）");
+    Ok("已取得控制权并切导航模式".to_string())
 }
 
 /// 急停：不要求接管态，直接发停车 + 急停命令

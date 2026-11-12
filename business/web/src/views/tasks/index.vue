@@ -210,6 +210,24 @@ async function pauseTask(task: Task) {
   ElMessage.info(`${task.taskName} 已暂停`);
 }
 
+/**
+ * 取消任务：把本体上挂着的任务真正收尾（服务端下发 `task_control cancel`）。
+ *
+ * 为什么需要：暂停只是 `5004`，本体上的导航任务会一直挂着占住导航能力，
+ * 之后重新下发会被回 13897 capability busy。取消走「异常」终态，
+ * 服务端 `control_action` 会把它翻译成 `cancel`（客户端用真实 task_id 发 5002）。
+ */
+async function cancelTask(task: Task) {
+  await ElMessageBox.confirm(
+    `确定取消「${task.taskName}」吗？会立即终止本体上正在执行/暂停的任务。`,
+    "取消任务",
+    { type: "warning", confirmButtonText: "取消任务", cancelButtonText: "返回" }
+  );
+  await taskApi.updateStatus(task.id, "异常", task.progress);
+  await load();
+  ElMessage.success(`${task.taskName} 已取消`);
+}
+
 async function removeTask(task: Task) {
   await ElMessageBox.confirm(`确定删除任务「${task.taskName}」吗？`, "删除任务", {
     type: "warning"
@@ -572,6 +590,14 @@ onBeforeUnmount(() => {
                 @click="pauseTask(task)"
               >
                 <AppIcon name="pause" />
+              </button>
+              <button
+                v-if="task.taskStatus === '执行中' || task.taskStatus === '已暂停'"
+                class="btn sm ghost icon"
+                title="取消任务（终止本体上的任务）"
+                @click="cancelTask(task)"
+              >
+                <AppIcon name="close" />
               </button>
               <button class="btn sm ghost icon" title="详情" @click="openDetail(task)">
                 <AppIcon name="eye" />

@@ -98,6 +98,19 @@ fn ensure_holding(device: &Device, operator: &str) -> Result<(), AppError> {
 }
 
 /// 判断接管是否已超时（`teleop_at` 距今超过阈值）
+///
+/// 外部（如任务下发）也要判断接管态，不能让「接管中」的设备去跑自动任务。
+pub(crate) fn teleop_expired(at: Option<&str>) -> bool {
+    let Some(at) = at else {
+        return true;
+    };
+    match parse_time(at) {
+        Some(at_secs) => now_secs() - at_secs > TELEOP_IDLE_TIMEOUT_SECS,
+        // 时间解析不了就当作已超时，宁可让用户重新接管也不放开控制
+        None => true,
+    }
+}
+
 fn is_teleop_expired(device: &Device) -> bool {
     let Some(at) = device.teleop_at.as_deref() else {
         return true;

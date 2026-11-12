@@ -719,6 +719,11 @@ async fn run_client(
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
 
+    // 进度去重：内容没变就降到 [`PROGRESS_DEDUP_WINDOW`] 一次（服务端还会按「标题 + 描述」
+    // 去重落事件）。**不能彻底停发**：服务端任务看门狗按 `tasks.updated_at` 判超时
+    // （默认 120s），超时会直接把跑着的任务翻成「异常」。
+    let mut last_progress: Option<(String, Instant)> = None;
+
     loop {
         tokio::select! {
             _ = &mut ctrl_c => {
@@ -819,6 +824,26 @@ async fn run_client(
                         payload.message = Some("任务已暂停".to_string());
                     }
                 }
+                // 内容未变时降频，不再往事件流里刷重复进度（以前 5s 一条，暂停一小时几千条）
+                let key = format!(
+                    "{}|{}|{}|{:?}|{:?}|{:?}",
+                    payload.task_code,
+                    payload.status,
+                    payload.progress,
+                    payload.point_index,
+                    payload.message,
+                    payload.stage
+                );
+                let should_send = match last_progress.as_ref() {
+                    Some((previous, at)) => {
+                        previous != &key || at.elapsed() >= PROGRESS_DEDUP_WINDOW
+                    }
+                    None => true,
+                };
+                if !should_send {
+                    continue;
+                }
+                last_progress = Some((key, Instant::now()));
                 send(&out_tx, "task_progress", serde_json::to_value(payload).unwrap_or_default()).await;
             }
 
@@ -935,7 +960,57 @@ fn spawn_zhpro_pump(
                     handle_status_frame(&frame, &out_tx, &state, &active, &monitor).await;
                 }
                 T_ROBOT_STATUS => {
-                    state.lock().await.apply_robot_status(&env.data);
+                    // 1315 里的运动状态 / 机器模式 / 控制源变化要留痕：
+                    // 现场争议最多的两个问题是「它什么时候自己趴下的」和
+                    // 「谁把控制权拿走了」，以前只能靠 journalctl 猜。
+                    let mut notices: Vec<(String, Value)> = Vec::new();
+                    {
+                        let mut guard = state.lock().await;
+                        let before_motion = guard.motion_status.clone();
+                        let before_mode = guard.robot_mode.clone();
+                        let before_ctrl = guard.ctrl_source;
+                        guard.apply_robot_status(&env.data);
+                        if before_motion != guard.motion_status {
+                            let from = before_motion.unwrap_or_else(|| "未知".to_string());
+                            let to = guard.motion_status.clone().unwrap_or_default();
+                            notices.push((
+                                format!("本体运动状态变更: {from} → {to}"),
+                                json!({ "from": from, "to": to }),
+                            ));
+                        }
+                        if before_mode != guard.robot_mode {
+                            let from = before_mode.unwrap_or_else(|| "未知".to_string());
+                            let to = guard.robot_mode.clone().unwrap_or_default();
+                            notices.push((
+                                format!("本体机器模式变更: {from} → {to}"),
+                                json!({ "from": from, "to": to }),
+                            ));
+                        }
+                        if before_ctrl != guard.ctrl_source
+                            && let Some(source) = guard.ctrl_source
+                        {
+                            notices.push((
+                                format!(
+                                    "本体控制源变更: ctrl_source={source}\
+                                     （0 未知 / 1 APP / 2 SDK / 3 遥控器）"
+                                ),
+                                json!({ "ctrlSource": source }),
+                            ));
+                        }
+                    }
+                    for (message, data) in notices {
+                        let event = DeviceEventPayload {
+                            event_type: "info".to_string(),
+                            message,
+                            data: Some(data),
+                        };
+                        send(
+                            &out_tx,
+                            "event",
+                            serde_json::to_value(event).unwrap_or_default(),
+                        )
+                        .await;
+                    }
                 }
                 T_CURRENT_POSE => {
                     state.lock().await.apply_pose(&env.data);
@@ -1043,10 +1118,16 @@ fn spawn_zhpro_pump(
                                 .unwrap_or("未知故障");
                             let severity =
                                 item.get("severity").and_then(Value::as_i64).unwrap_or(0);
+                            // 码值必须落到事件文案里：平台 task_events 只存 description，
+                            // 没有 code/severity 时没法对着本体文档 / 厂家排查。
+                            let message = match item.get("code").and_then(Value::as_i64) {
+                                Some(code) => format!("{desc}（code={code}, 级别={severity}）"),
+                                None => desc.to_string(),
+                            };
                             let event = DeviceEventPayload {
                                 event_type: if severity >= 1 { "fault" } else { "info" }
                                     .to_string(),
-                                message: desc.to_string(),
+                                message,
                                 data: Some(item.clone()),
                             };
                             send_deduped_event(&out_tx, &dedup, event).await;
@@ -1215,6 +1296,12 @@ async fn handle_status_frame(
 /// 定位收敛等待上限：设备被搬运后重定位通常 10~30s，超过就该判失败而不是干等
 const LOCATE_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// 进度内容没变时的上报窗口
+///
+/// 必须明显小于服务端 `task_timeout_secs`（默认 120s）：看门狗靠 `tasks.updated_at`
+/// 判「执行中但不上报」，彻底停发会把正在跑的任务翻成异常。
+const PROGRESS_DEDUP_WINDOW: Duration = Duration::from_secs(30);
+
 /// 平台下发的初始位姿：`initialPose: { x, y, heading }`（heading 单位度，与路线航点一致）
 ///
 /// 缺字段或未下发时返回 `None`，交给 SLAM 读取上一份位姿文件做完整重定位。
@@ -1238,6 +1325,10 @@ async fn ensure_localized(
     map_path: &str,
     initial_pose: Option<Pose>,
 ) -> Result<i64, String> {
+    // 4030 在 4000~5999 非白名单区间，必须先拿到 RoamerX 控制权，否则网关静默丢弃
+    if let Err(e) = client.ensure_control().await {
+        warn!("取 RoamerX 控制权失败（4030 可能被网关丢弃）: {e}");
+    }
     match zhpro::mapping::latest_loc_status(client, Duration::from_secs(2)).await {
         Some(status) if zhpro::mapping::loc_status_ready(status) => return Ok(status),
         Some(status) => info!(
@@ -1589,6 +1680,24 @@ async fn handle_server_message(
                     );
                     state.lock().await.active_map = Some(plan.map_id.clone());
 
+                    // 上一轮遗留的本体任务必须先收尾：本体对「已有一个未结束任务」回
+                    // 13897 resource conflict (capability busy)，而任务被暂停（5004）后
+                    // 不会自动结束——平台直接重新下发时第一个 5000 必然被拒。
+                    if let Some(previous) = local_runner.lock().await.take() {
+                        let had_robot_task = previous.current_nav_task().await.is_some();
+                        match previous.control(Control::Cancel).await {
+                            Ok(()) => {
+                                if had_robot_task {
+                                    info!(
+                                        "任务 {task_code}：已 5002 取消上一轮本体导航任务，等本体释放导航能力"
+                                    );
+                                    tokio::time::sleep(Duration::from_secs(2)).await;
+                                }
+                            }
+                            Err(e) => warn!("取消上一轮本体导航任务失败: {e}"),
+                        }
+                    }
+
                     // 前置校验：业务 `mapId` 不是本体目录名，必须用 4013 列表解析出真实目录。
                     // 对不上就不发 5000——否则本体只会回 13898 missing map.yaml。
                     let manager = MapManager::new(client.clone());
@@ -1798,16 +1907,35 @@ async fn handle_server_message(
             let result: Result<String, String> = match teleop_result {
                 Some(result) => result,
                 None => match command {
-                    "暂停任务" => client
-                        .call(T_TASK_PAUSE, json!({ "task_id": "current" }))
-                        .await
-                        .map(|_| "已请求暂停".to_string()),
-                    "继续任务" => client
-                        .call(T_TASK_RESUME, json!({ "task_id": "current" }))
-                        .await
-                        .map(|_| "已请求继续".to_string()),
+                    // 暂停 / 继续必须用**真实的**本体任务 ID：固件不认 `task_id: "current"`，
+                    // 会回 13896 task not found（之前这两个按钮实际上什么都没做）。
+                    "暂停任务" | "继续任务" => {
+                        let control = if command == "暂停任务" {
+                            Control::Pause
+                        } else {
+                            Control::Resume
+                        };
+                        let runner = local_runner.lock().await.clone();
+                        match runner {
+                            None => Err("本地没有正在执行的航线任务（可能未下发或客户端已重启）；\
+                                 请在控制台重新下发任务"
+                                .to_string()),
+                            Some(runner) => match runner.control(control).await {
+                                Ok(()) => Ok(if command == "暂停任务" {
+                                    "已请求暂停".to_string()
+                                } else {
+                                    "已请求继续".to_string()
+                                }),
+                                Err(e) => Err(e),
+                            },
+                        }
+                    }
                     "召回充电" => {
                         let map_id = state.lock().await.active_map.clone().unwrap_or_default();
+                        // 5014 同样在非白名单区间，没控制权会被网关丢弃
+                        if let Err(e) = client.ensure_control().await {
+                            warn!("取 RoamerX 控制权失败（5014 可能被网关丢弃）: {e}");
+                        }
                         client
                             .call(T_RETURN_TO_CHARGE, json!({ "map_id": map_id }))
                             .await
@@ -1871,6 +1999,14 @@ async fn handle_server_message(
                                             Ok(status) => {
                                                 state.lock().await.active_map =
                                                     Some(map_id.clone());
+                                                // 重定位完就切导航模式：否则后续 5000 会被回
+                                                // 13897 capability busy（本体仍在手动模式）。
+                                                if let Err(e) =
+                                                    zhpro::teleop::enter_navigation_mode(&client)
+                                                        .await
+                                                {
+                                                    warn!("重定位后切导航模式失败: {e}");
+                                                }
                                                 Ok(format!(
                                                     "重定位完成：{map_id}（status={status}）"
                                                 ))

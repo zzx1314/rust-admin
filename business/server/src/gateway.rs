@@ -1066,19 +1066,40 @@ async fn handle_task_progress(db: &SqlitePool, device_id: &str, payload: &TaskPr
                 ),
                 _ => format!("任务 {} 进度更新: {}%", payload.task_code, payload.progress),
             };
-            sqlx::query(
-                "INSERT INTO task_events (event_type, title, description, device_id, task_id, created_at)
-                 VALUES ('progress', ?1, ?2, (SELECT id FROM devices WHERE device_id = ?3),
-                         (SELECT id FROM tasks WHERE task_code = ?4), ?5)",
+            // 进度事件去重：客户端 5s 一报，内容没变就不重复落事件。
+            // 以前暂停/卡住时一小时能刷出上千条同样的「任务已暂停」，把
+            // 「导航指令非法」「无有效绕障轨迹」这些真正要看的故障全冲掉了。
+            let last_progress: Option<(String, String)> = sqlx::query_as(
+                "SELECT title, description FROM task_events
+                  WHERE event_type = 'progress'
+                    AND task_id = (SELECT id FROM tasks WHERE task_code = ?1)
+                  ORDER BY id DESC LIMIT 1",
             )
-            .bind(title)
-            .bind(message)
-            .bind(device_id)
             .bind(&payload.task_code)
-            .bind(&timestamp)
-            .execute(db)
+            .fetch_optional(db)
             .await
-            .ok();
+            .ok()
+            .flatten();
+            let unchanged = last_progress
+                .as_ref()
+                .is_some_and(|(prev_title, prev_desc)| {
+                    prev_title == &title && prev_desc.as_str() == message
+                });
+            if !unchanged {
+                sqlx::query(
+                    "INSERT INTO task_events (event_type, title, description, device_id, task_id, created_at)
+                     VALUES ('progress', ?1, ?2, (SELECT id FROM devices WHERE device_id = ?3),
+                             (SELECT id FROM tasks WHERE task_code = ?4), ?5)",
+                )
+                .bind(title)
+                .bind(message)
+                .bind(device_id)
+                .bind(&payload.task_code)
+                .bind(&timestamp)
+                .execute(db)
+                .await
+                .ok();
+            }
         }
 
         // 任务完成时，更新设备当前任务

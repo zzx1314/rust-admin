@@ -772,8 +772,102 @@ async fn body_actions_include_gait_modes() {
     }
 }
 
-/// 「重新定位」：机器狗不在地图上时的人工恢复入口。
+/// 远程接管期间下发任务必须被拒。
 ///
+/// 现场教训：接管时客户端会把本体切到 `1302 cmd=60` 通用（手动）模式，导航能力被判给
+/// 手动控制，随后每个航点的 `5000` 都回 `13897 resource conflict (capability busy)`，
+/// 平台上只能看到「航点执行失败」。在服务端就拦住，比让本体拒五次更早、更可读。
+#[tokio::test]
+async fn task_dispatch_is_rejected_while_teleop_held() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let device_pk = bound_device_pk(&pool).await;
+    let park_id: Option<i64> = sqlx::query_scalar("SELECT park_id FROM devices WHERE id = ?1")
+        .bind(device_pk)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    // 接管要求设备在线
+    sqlx::query("UPDATE devices SET status = '在线待命' WHERE id = ?1")
+        .bind(device_pk)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let task_id: i64 = sqlx::query_scalar(
+        "INSERT INTO tasks (task_code, task_name, device_id, park_id, task_status, progress,
+            created_at, updated_at, created_by)
+         VALUES ('TK-TELEOP-1', '接管中下发', ?1, ?2, '待执行', 0,
+            '2026-11-12 00:00:00', '2026-11-12 00:00:00', 1)
+         RETURNING id",
+    )
+    .bind(device_pk)
+    .bind(park_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+    let taken = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/devices/{device_pk}/teleop/take"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(taken.status(), StatusCode::OK, "应先能接管");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/tasks/{task_id}/dispatch"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "接管期间不应下发任务"
+    );
+    let body = json_body(response).await;
+    let msg = body["msg"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("接管"),
+        "错误信息应说明接管中，实际: {msg}"
+    );
+
+    // 释放接管后校验通过（此时才会因为设备未连接而报另一个错）
+    sqlx::query("UPDATE devices SET teleop_holder = NULL, teleop_at = NULL WHERE id = ?1")
+        .bind(device_pk)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let response = app
+        .oneshot(
+            Request::post(format!("/api/tasks/{task_id}/dispatch"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = json_body(response).await;
+    let msg = body["msg"].as_str().unwrap_or_default();
+    assert!(
+        !msg.contains("接管"),
+        "释放接管后不应再因为接管被拒，实际: {msg}"
+    );
+}
+
+/// 「重新定位」：机器狗不在地图上时的人工恢复入口。///
 /// 三个必须成立的契约：
 /// 1. 解析不出地图 → 400 并提示显式指定 `mapId`（绝不能静默按错的图重定位）；
 /// 2. 设备离线 → 400「未送达」，不能记成已下发；

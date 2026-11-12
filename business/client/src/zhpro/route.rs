@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// 航点动作（业务侧 `actions[]`）
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -245,6 +245,88 @@ pub fn need_locate_for(index: usize, pre_located: bool) -> bool {
     index <= 1 && !pre_located
 }
 
+/// 本体「能力忙」错误码：`13897 resource conflict (capability busy)`
+///
+/// 现场含义：本体上还有一个没结束的任务（典型是被 `5004` 暂停后一直挂着的导航任务），
+/// 新的 `5000` 会被直接拒。属于**可重试**的忙。
+pub const CODE_CAPABILITY_BUSY: &str = "13897";
+
+/// 本体「任务不存在」错误码：`13896 task not found`
+///
+/// 拿它当「代理任务已不在本体上」的判据（例如固件不认 `task_id: "current"`）。
+pub const CODE_TASK_NOT_FOUND: &str = "13896";
+
+/// 能力忙的重试次数与间隔（合计约 30s，等本体把上一个任务收尾）
+pub const BUSY_RETRIES: u32 = 6;
+pub const BUSY_BACKOFF: Duration = Duration::from_secs(5);
+
+/// 5000 `params.speed_limit` 缺省线速度（航线没配速度时用）
+const DEFAULT_SPEED_LIMIT: f64 = 1.2;
+
+/// 5000 `params.speed_limit.vz`：**角速度上限**，单位 rad/s
+///
+/// 取协议文档示例的 1.5。以前写死 0.0，等于告诉本体「不允许转向」，
+/// 需要拐弯的航点会被规划器判为「无有效绕障轨迹，搜索失败」。
+const YAW_LIMIT: f64 = 1.5;
+
+/// 错误串里是否为「能力忙」（13897）
+pub fn is_capability_busy(error: &str) -> bool {
+    error.contains(CODE_CAPABILITY_BUSY)
+}
+
+/// 错误串里是否为「任务不存在」（13896）
+pub fn is_task_not_found(error: &str) -> bool {
+    error.contains(CODE_TASK_NOT_FOUND)
+}
+
+/// 单点导航的 5000 `kind=2` 载荷。
+///
+/// 字段名与协议 §2.5.1.4「导航任务」严格对齐；下面几个取值都是踩过坑的：
+///
+/// - `speed_limit.vz` 是**角速度上限**，填 0 等于「不允许转向」，需要拐弯的航点会被规划器
+///   判为「无有效绕障轨迹，搜索失败，等待中」；文档示例是 1.5。
+/// - 没有电子围栏时**不下发** `fence_path`：以前发空串 `""`，固件可能拿它当路径打开，
+///   失败就回「导航指令非法」。业务侧还没建模围栏，将来接入时再补这个键。
+/// - `goal_type` 必须与 `map_type` 一致（1 = 2D 栅格 / 3 = 路网）。
+pub(crate) fn navigation_task_payload(
+    plan: &FlightPlan,
+    point: &Waypoint,
+    need_locate: bool,
+) -> Value {
+    let params = json!({
+        "map_path": plan.resolve_map_path(super::mapping::DEFAULT_MAP_ROOT),
+        // 同一条航线内复用已加载定位，避免每点重载地图
+        "need_locate": need_locate,
+        "map_type": plan.map_type,
+        "goal_type": plan.map_type,
+        "goals": [ point.pose() ],
+        "speed_limit": { "vx": speed_vx(plan), "vy": 0.0, "vz": YAW_LIMIT },
+        "goal_tolerance": {
+            "x": plan.goal_tolerance,
+            "y": plan.goal_tolerance,
+            "theta": 0.2
+        }
+    });
+    json!({
+        "kind": TaskKind::Navigation.code(),
+        "name": format!("{} · 前往 {}", plan.task_name, point.name),
+        "schedule": 0,
+        "execute_at": now_ms().to_string(),
+        "priority": 0,
+        "record": false,
+        "params": params
+    })
+}
+
+/// 航线没配速度时给一个可跑的值（0 会让本体拒任务）
+fn speed_vx(plan: &FlightPlan) -> f64 {
+    if plan.speed_limit > 0.0 {
+        plan.speed_limit
+    } else {
+        DEFAULT_SPEED_LIMIT
+    }
+}
+
 /// 航点执行状态机
 pub struct RouteRunner {
     client: Arc<ZhProClient>,
@@ -321,10 +403,20 @@ impl RouteRunner {
             Control::Cancel => {
                 self.cancelled.store(true, Ordering::SeqCst);
                 if let Some(task_id) = self.current_nav_task().await {
-                    // 5002 只保证受理，终态以 5009 为准
-                    self.client
+                    // 5002 只保证受理，终态以 5009 为准。
+                    // 本体上已经没有这个任务（已终态 / 固件不认这个 id）时目的已达到，不报错。
+                    match self
+                        .client
                         .call(T_TASK_CANCEL, json!({ "task_id": task_id }))
-                        .await?;
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(e) if is_task_not_found(&e) => {
+                            warn!("取消任务时本体报 task not found，视为已收尾: {e}");
+                        }
+                        Err(e) => return Err(e),
+                    }
+                    *self.nav_task_id.lock().await = None;
                 }
                 self.queue.lock().await.clear();
                 Ok(())
@@ -359,6 +451,13 @@ impl RouteRunner {
             .clone()
             .ok_or_else(|| "未准备执行计划".to_string())?;
         let total = *self.total.lock().await;
+
+        // 0) 取 RoamerX 控制权 + 切导航模式：
+        //    - 4044/5000 都在 4000~5999 非白名单区间，没控制权网关直接不转发；
+        //    - 停在通用（手动）模式下本体把导航能力判给手动控制，5000 回 13897。
+        if let Err(e) = super::teleop::enter_navigation_mode(&self.client).await {
+            warn!("切导航模式失败（继续尝试下发，但本体可能拒任务）: {e}");
+        }
 
         // 1) 避障等级：任务启动后必须重设，导航每次回到 STANDBY 会恢复为 40
         self.apply_avoid_level(plan.avoid_level).await;
@@ -453,7 +552,10 @@ impl RouteRunner {
         }
     }
 
-    /// 下发单点导航任务并等待 5009 进入终态（带重试）
+    /// 下发单点导航任务并等待 5009 进入终态（带重试）。
+    ///
+    /// 13897（本体能力忙）**不消耗航点的重试次数**：它的成因是本体上还有任务没结束，
+    /// 退避等待后重试才有意义；直接跳过会把整条航线静默跑成「0/N」。
     async fn goto_point(
         &self,
         plan: &FlightPlan,
@@ -462,21 +564,42 @@ impl RouteRunner {
         total: usize,
     ) -> Result<(), String> {
         let retries = point.retry_limit();
-        let mut last_error = String::new();
-        for attempt in 0..=retries {
-            if attempt > 0 {
-                warn!("航点 {} 第 {attempt} 次重试（共 {retries} 次）", point.name);
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-            match self.navigate_once(plan, point, index, total).await {
+        let mut attempt = 0_u32;
+        let mut busy_waits = 0_u32;
+        loop {
+            let error = match self.navigate_once(plan, point, index, total).await {
                 Ok(()) => return Ok(()),
-                Err(e) => last_error = e,
-            }
+                Err(e) => e,
+            };
             if self.is_cancelled() {
                 return Err("任务已取消".to_string());
             }
+            if is_capability_busy(&error) {
+                busy_waits += 1;
+                if busy_waits > BUSY_RETRIES {
+                    return Err(format!(
+                        "{error}；本体上仍有未结束的任务（可能在远程接管/暂停态），\
+                         请先在本体 APP 取消该任务或重启本体算法服务"
+                    ));
+                }
+                warn!(
+                    "航点 {} 本体能力忙（13897），{}s 后重试 {busy_waits}/{BUSY_RETRIES}",
+                    point.name,
+                    BUSY_BACKOFF.as_secs()
+                );
+                tokio::time::sleep(BUSY_BACKOFF).await;
+                continue;
+            }
+            if attempt >= retries {
+                return Err(error);
+            }
+            attempt += 1;
+            warn!(
+                "航点 {} 第 {attempt} 次重试（共 {retries} 次）: {error}",
+                point.name
+            );
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        Err(last_error)
     }
 
     async fn navigate_once(
@@ -487,29 +610,29 @@ impl RouteRunner {
         total: usize,
     ) -> Result<(), String> {
         let map_path = plan.resolve_map_path(super::mapping::DEFAULT_MAP_ROOT);
-        let pose = point.pose();
         // 预检已锁定定位时首点不再重载地图；重试时标志已被取走，会重新载图定位
         let need_locate = need_locate_for(index, self.pre_located.swap(false, Ordering::SeqCst));
-        let data = json!({
-            "kind": TaskKind::Navigation.code(),
-            "name": format!("{} · 前往 {}", plan.task_name, point.name),
-            "schedule": 0,
-            "execute_at": now_ms().to_string(),
-            "priority": 0,
-            "record": false,
-            "params": {
-                "map_path": map_path,
-                // 同一条航线内复用已加载定位，避免每点重载地图
-                "need_locate": need_locate,
-                "map_type": plan.map_type,
-                "goal_type": plan.map_type,
-                "fence_path": "",
-                "goals": [ pose ],
-                "speed_limit": { "vx": plan.speed_limit, "vy": 0.0, "vz": 0.0 },
-                "goal_tolerance": { "x": plan.goal_tolerance, "y": plan.goal_tolerance, "theta": 0.2 }
+        let data = navigation_task_payload(plan, point, need_locate);
+        // 现场排障最有用的一行：把真实下发的载荷整份打出来（`RUST_LOG=...=debug`）
+        debug!("5000 载荷（第 {index}/{total} 点 {}）: {data}", point.name);
+        let reply = match self.client.call(T_TASK_CREATE, data).await {
+            Ok(reply) => {
+                debug!("5001 应答（第 {index}/{total} 点 {}）: {reply}", point.name);
+                reply
             }
-        });
-        let reply = self.client.call(T_TASK_CREATE, data).await?;
+            Err(e) => {
+                // 失败时把关键入参带进错误消息：「参数非法」还是「本体能力忙」靠这些字段区分
+                return Err(format!(
+                    "{e}（第 {index}/{total} 点 {} goal=({:.2},{:.2}) heading={:.0}° \
+                     need_locate={need_locate} vx={:.2} vz={YAW_LIMIT:.2} map={map_path}）",
+                    point.name,
+                    point.x,
+                    point.y,
+                    point.heading,
+                    speed_vx(plan)
+                ));
+            }
+        };
         let nav_task_id = reply
             .get("task_id")
             .and_then(Value::as_str)
@@ -740,5 +863,53 @@ mod tests {
             ..Default::default()
         });
         assert!(p.wants_photo());
+    }
+
+    #[test]
+    fn classifies_body_error_codes() {
+        // 现场真实报文：5000 失败: code=13897 resource conflict (capability busy)
+        let busy = "5000 失败: code=13897 resource conflict (capability busy)";
+        assert!(is_capability_busy(busy));
+        assert!(!is_task_not_found(busy));
+
+        let missing = "5004 失败: code=13896 task not found";
+        assert!(is_task_not_found(missing));
+        assert!(!is_capability_busy(missing));
+
+        // 普通失败不能误判成忙，否则会白等 30s
+        assert!(!is_capability_busy(
+            "5000 失败: code=13898 map not found or invalid"
+        ));
+    }
+
+    /// 5000 载荷必须与协议 §2.5.1.4 对齐：字段名、枚举值、不能为 0 的角速度上限。
+    ///
+    /// 这三个现场踩过的坑都锁在这里：`vz: 0`（禁止转向 → 规划失败）、
+    /// 空串 `fence_path`（→ 导航指令非法）、`goal_type` 与 `map_type` 不一致。
+    #[test]
+    fn navigation_payload_matches_protocol() {
+        let p = plan("往返");
+        let data = navigation_task_payload(&p, &p.waypoints[0], false);
+        assert_eq!(data["kind"], 2, "kind=2 是单点/多点导航");
+        assert_eq!(data["schedule"], 0);
+        assert!(
+            data["execute_at"].is_string(),
+            "execute_at 是毫秒时间戳字符串"
+        );
+
+        let params = &data["params"];
+        assert_eq!(params["map_type"], 1.0);
+        assert_eq!(params["goal_type"], 1.0, "goal_type 必须与 map_type 一致");
+        assert_eq!(params["need_locate"], false);
+        assert_eq!(params["goals"].as_array().map(Vec::len), Some(1));
+        assert!(
+            params.get("fence_path").is_none(),
+            "没配围栏时不应下发空串 fence_path"
+        );
+        assert_eq!(params["goal_tolerance"]["x"], 0.25);
+        assert_eq!(params["goal_tolerance"]["theta"], 0.2);
+        let vz = params["speed_limit"]["vz"].as_f64().unwrap_or_default();
+        assert!(vz > 0.0, "speed_limit.vz 是角速度上限，0 会禁止转向: {vz}");
+        assert!(params["speed_limit"]["vx"].as_f64().unwrap_or_default() > 0.0);
     }
 }

@@ -313,6 +313,21 @@ async fn dispatch_task_or_error(state: &AppState, task: &Task) -> Result<(), App
             "设备 {device_code} 尚未绑定园区，无法下发任务"
         )));
     }
+    // 远程接管中不下发：本体停在通用（手动）模式，导航能力被判给手动控制，
+    // 每个航点的 5000 都会被回 13897 resource conflict (capability busy)。
+    let teleop: Option<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT teleop_holder, teleop_at FROM devices WHERE id = ?1")
+            .bind(device_pk)
+            .fetch_optional(&state.db)
+            .await?;
+    if let Some((Some(holder), at)) = teleop
+        && !super::teleop::teleop_expired(at.as_deref())
+    {
+        return Err(AppError::BadRequest(format!(
+            "设备 {device_code} 正在被 {holder} 远程接管（本体处于手动模式），\
+             请先释放接管再下发任务，否则本体回 13897 capability busy"
+        )));
+    }
 
     match push_task_dispatch(state, task).await? {
         Some(code) => {

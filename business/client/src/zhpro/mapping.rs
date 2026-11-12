@@ -492,26 +492,35 @@ pub async fn robot_time_offset_ms(client: &ZhProClient) -> Result<i64, String> {
     Ok(robot_ms - sent_at)
 }
 
+/// `4031` 回执等待上限
+///
+/// 现场固件的 `4031` 经常比这更慢（甚至只靠 `5009 loc_state` 表达进度），所以这个
+/// 窗口只用来区分「被明确拒绝」和「还在处理」，**不能拿来判失败**。
+pub const LOCATE_ACK_WAIT: Duration = Duration::from_secs(3);
+
 /// 4030/4031 载图并定位。
 ///
 /// `initial_pose` 为 None 时等价于下发零四元数，由 SLAM 读取上一份位姿文件做完整重定位。
+///
+/// 返回 `Ok(None)` 表示本体没在 [`LOCATE_ACK_WAIT`] 内回 `4031`（继续等 5009 即可），
+/// `Ok(Some(data))` 表示 `4031` 已明确受理。
 pub async fn load_map(
     client: &ZhProClient,
     map_path: &str,
     initial_pose: Option<Pose>,
-) -> Result<(), String> {
+) -> Result<Option<serde_json::Value>, String> {
     let pose = initial_pose.unwrap_or_default();
     client
-        .call(
+        .call_ack_optional(
             T_LOCATE,
             serde_json::json!({
                 "op": 1,
                 "map_path": map_path,
                 "initial_pose": pose
             }),
+            LOCATE_ACK_WAIT,
         )
         .await
-        .map(|_| ())
 }
 
 /// 候选目录名/路径 → 目录名（4013 `path` 的最后一段）
@@ -619,13 +628,26 @@ pub async fn wait_localized(client: &ZhProClient, timeout: Duration) -> Result<i
 ///
 /// `initial_pose` 为 `None` 时下发零四元数，由 SLAM 读取上一份位姿文件做完整重定位，
 /// 适合「设备还在原位、只是没载图」；设备被搬动过时由平台显式给初始位姿。
+///
+/// 两个约束（都踩过）：
+/// 1. `4030` 在 4000~5999 非白名单区间内，**必须先拿 RoamerX 控制权**，否则 gateway
+///    直接不转发（以前表现为「等待 4031 响应超时」，本体那边却什么都没做）；
+/// 2. `4031` 只是受理回执，真正的判据是 `5009 loc_state` 收敛到 100，因此回执慢/丢
+///    不得判失败。
 pub async fn relocalize(
     client: &ZhProClient,
     map_path: &str,
     initial_pose: Option<Pose>,
     timeout: Duration,
 ) -> Result<i64, String> {
-    load_map(client, map_path, initial_pose).await?;
+    client.ensure_control().await?;
+    match load_map(client, map_path, initial_pose).await? {
+        Some(_) => info!("4030 已受理（4031 回执），等待定位收敛 map={map_path}"),
+        None => warn!(
+            "4030 未在 {}s 内收到 4031 回执，继续等 5009 定位状态 map={map_path}",
+            LOCATE_ACK_WAIT.as_secs()
+        ),
+    }
     wait_localized(client, timeout).await
 }
 
