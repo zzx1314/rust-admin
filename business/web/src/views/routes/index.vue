@@ -164,9 +164,15 @@ const coordReady = computed(
   () => !mapFrame.value.schematic && draft.value?.data.coordFrame === "map"
 );
 
-const hasRaster = computed(
-  () => draftMap.value?.source === "backend" && Boolean(draftMap.value?.filePath)
-);
+/**
+ * 画布能否铺真实栅格底图。
+ *
+ * 只要地图版本有地图包（`filePath`）就试一下：`source === "backend"` 是早期只有
+ * 「中台地图导入」才有包时的判断，机器人建图回传（`source = robot-mapping`）
+ * 同样带包，也被服务端 `GET /api/map-versions/{id}/raster` 支持。
+ * 只按来源判断会让真机地图退回「示意图底图」，画出来跟本体上的图对不上。
+ */
+const hasRaster = computed(() => Boolean(draftMap.value?.filePath));
 
 const rasterRect = computed(() => {
   const item = raster.value;
@@ -191,7 +197,7 @@ async function loadRaster(mapId: string | null) {
     return;
   }
   const item = maps.value.find(map => map.id === mapId);
-  if (!item || item.source !== "backend" || !item.filePath) return;
+  if (!item || !item.filePath) return;
   try {
     const data = await mapApi.raster(mapId);
     rasterCache.set(mapId, data);
@@ -326,7 +332,7 @@ function selectRoute(route: Route, notify = true) {
   activeTab.value = "point";
   history.value = [];
   rasterVisible.value = Boolean(
-    maps.value.find(item => item.id === route.mapVersionId)?.source === "backend"
+    maps.value.find(item => item.id === route.mapVersionId)?.filePath
   );
   void loadRaster(route.mapVersionId);
   if (notify) ElMessage.info(`已切换至「${route.routeName}」`);

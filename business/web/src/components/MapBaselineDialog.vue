@@ -99,7 +99,8 @@ async function load() {
   try {
     refsData.value = await mapApi.refs(props.mapId);
     const item = refsData.value.map;
-    if (item.source === "backend" && item.filePath) {
+    // 只要有地图包就渲染栅格：机器人建图回传的地图（robot-mapping）也有包
+    if (item.filePath) {
       try {
         raster.value = await mapApi.raster(item.id);
       } catch {

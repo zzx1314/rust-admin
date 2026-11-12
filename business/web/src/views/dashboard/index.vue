@@ -203,7 +203,9 @@ const eventTone = (type: string) => {
 
 async function loadRaster(map: MapVersion | null) {
   const token = ++rasterToken;
-  if (!map || map.source !== "backend" || !map.filePath) {
+  // 机器人建图回传的地图（robot-mapping）也有地图包，同样能渲染栅格底图；
+  // 只看 source 会让真机地图的态势图退回示意底图。
+  if (!map || !map.filePath) {
     raster.value = null;
     return;
   }
