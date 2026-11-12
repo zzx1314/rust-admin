@@ -1022,6 +1022,8 @@ fn spawn_zhpro_pump(
     tokio::spawn(async move {
         let mut rx = client.subscribe();
         let dedup = Arc::new(Mutex::new(EventDedup::default()));
+        // 只在任务快照的 lifecycle/stage/error 变化时打一条，避免 5009 500ms 心跳刷屏
+        let mut last_task_log: Option<String> = None;
         while let Ok(env) = rx.recv().await {
             match env.head.msg_type {
                 T_TASK_STATUS => {
@@ -1045,6 +1047,45 @@ fn spawn_zhpro_pump(
                             accepted.robot_task_state,
                             accepted.loc_status
                         );
+                    }
+                    // 把 current/pending/最近终态的关键字段留痕：5001 code=0 但任务
+                    // 不执行时，只有 stage/error/stop_reason 能说明卡在哪一步。
+                    let snapshot = accepted
+                        .current
+                        .as_ref()
+                        .map(|task| (task, "current"))
+                        .or_else(|| accepted.pending.as_ref().map(|task| (task, "pending")))
+                        .or_else(|| accepted.terminals.first().map(|task| (task, "terminal")));
+                    if let Some((task, source)) = snapshot {
+                        let key = format!(
+                            "{}|{}|{}|{}|{:?}|{:?}",
+                            task.task_id,
+                            task.lifecycle,
+                            task.stage,
+                            task.task_type,
+                            task.error_message,
+                            task.stop_reason
+                        );
+                        if last_task_log.as_deref() != Some(key.as_str()) {
+                            debug!(
+                                "5009 任务({source}): id={} name={} type={} lifecycle={} stage={}                                  progress={:?} point={:?}/{:?} error={:?} stop={:?}                                  task_state={} loc={}",
+                                task.task_id,
+                                task.name,
+                                task.task_type,
+                                task.lifecycle,
+                                task.stage,
+                                task.progress,
+                                task.detail_index,
+                                task.detail_total,
+                                task.error_message,
+                                task.stop_reason,
+                                accepted.robot_task_state,
+                                accepted.loc_status
+                            );
+                            last_task_log = Some(key);
+                        }
+                    } else {
+                        last_task_log = None;
                     }
                     let frame = accepted.clone();
                     handle_status_frame(&frame, &out_tx, &state, &active, &monitor).await;

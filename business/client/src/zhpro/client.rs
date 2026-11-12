@@ -434,7 +434,8 @@ impl ZhProClient {
         match self.request_with_timeout(msg_type, data, ack_wait).await {
             Ok(reply) if reply.is_ok() => Ok(Some(reply.data)),
             Ok(reply) => Err(format!(
-                "{msg_type} 失败: code={} {}",
+                "{} 响应失败: code={} {}",
+                msg_type + 1,
                 reply.code(),
                 reply.message()
             )),
@@ -448,11 +449,23 @@ impl ZhProClient {
     pub async fn call(&self, msg_type: u32, data: Value) -> Result<Value, String> {
         let reply = self.request(msg_type, data).await?;
         if reply.is_ok() {
+            // 任务类请求的 5001/5015/5003/5005/5007 响应里带 task_id/code，
+            // DEBUG 打出来，便于和 5009 对账；4012 这类大列表不在这里打。
+            if matches!(
+                msg_type,
+                T_TASK_CREATE | T_TASK_CANCEL | T_TASK_PAUSE | T_TASK_RESUME | T_RETURN_TO_CHARGE
+            ) {
+                debug!(
+                    response = msg_type + 1,
+                    data = %reply.data,
+                    "← 智航响应"
+                );
+            }
             Ok(reply.data)
         } else {
             Err(format!(
-                "{} 失败: code={} {}",
-                msg_type,
+                "{} 响应失败: code={} {}",
+                msg_type + 1,
                 reply.code(),
                 reply.message()
             ))
@@ -509,8 +522,8 @@ impl ZhProClient {
                     Ok(reply)
                 } else {
                     Err(format!(
-                        "{} 失败: status_code={} {}",
-                        msg_type,
+                        "{} 响应失败: status_code={} {}",
+                        reply_type,
                         reply.code(),
                         reply.message()
                     ))

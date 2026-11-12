@@ -360,7 +360,11 @@ journalctl -u robodog-device-client -f | grep 视频
 
 ### 出站报文日志
 
-- `5000` 任务载荷：DEBUG，`zhpro::route: 5000 载荷（第 x/y 点 …）: {…}`；`5001` 应答也是 DEBUG；
+- `5000` 任务载荷：DEBUG，`zhpro::route: 5000 载荷（第 x/y 点 …）: {…}`；
+- `5001/5015/5003/5005/5007` 任务类响应：DEBUG，`← 智航响应 response=5001 data={…}`；
+- `5001 code!=0` 的错误文案现在是 `5001 响应失败: code=...`，不再误写成 `5000 失败`；
+- `5009` 任务快照：DEBUG，`5009 任务(current/pending/terminal): id=… lifecycle=… stage=… error=… stop=…`，
+  只在 lifecycle/stage/error 变化时打印，不跟 500ms 心跳刷屏；
 - 所有 `request` / `send`：TRACE，打印完整出站 JSON（含 `5000/4030/4012/1302/1204`）；
 - `1304` 摇杆是 50Hz，只有 TRACE 才打印，默认不会刷日志；
 - 现场默认 `RUST_LOG=robodog_device_client=debug`：

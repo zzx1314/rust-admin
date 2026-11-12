@@ -883,18 +883,18 @@ mod tests {
 
     #[test]
     fn classifies_body_error_codes() {
-        // 现场真实报文：5000 失败: code=13897 resource conflict (capability busy)
-        let busy = "5000 失败: code=13897 resource conflict (capability busy)";
+        // 现场真实报文：5001 响应失败: code=13897 resource conflict (capability busy)
+        let busy = "5001 响应失败: code=13897 resource conflict (capability busy)";
         assert!(is_capability_busy(busy));
         assert!(!is_task_not_found(busy));
 
-        let missing = "5004 失败: code=13896 task not found";
+        let missing = "5005 响应失败: code=13896 task not found";
         assert!(is_task_not_found(missing));
         assert!(!is_capability_busy(missing));
 
         // 普通失败不能误判成忙，否则会白等 30s
         assert!(!is_capability_busy(
-            "5000 失败: code=13898 map not found or invalid"
+            "5001 响应失败: code=13898 map not found or invalid"
         ));
     }
 
