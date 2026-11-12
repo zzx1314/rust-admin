@@ -54,6 +54,8 @@ for target in "$ZENTAI/config/config.toml" "$ROBODOG/server.toml"; do
 done
 install -m 0644 "$HERE/config/zentai.config.toml" "$ZENTAI/config/config.toml"
 install -m 0644 "$HERE/config/robodog.server.toml" "$ROBODOG/server.toml"
+# 现场机器人要用的客户端配置片段（外网地址已填好）
+install -m 0644 "$HERE/config/client.toml.example" "$BASE/client.toml.example"
 
 # ---------------------------------------------------------------- 密钥
 # 服务令牌两边必须一致；已存在就沿用，避免升级后两边不匹配。

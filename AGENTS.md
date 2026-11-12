@@ -89,6 +89,19 @@ cd frontend && pnpm build
 cd ../backend && APP_SERVER__STATIC_DIR=../frontend/dist ./run.sh
 ```
 
+## Deployment
+
+外网正式环境：`root@39.107.55.13`，安装目录 `/opt/hz/rust-admin`，
+中台 <http://39.107.55.13:3005>（3000 被本机 frps 占用）、业务平台/设备网关
+<http://39.107.55.13:3100>。一键发布：
+
+```bash
+./deploy/external-hz/push.sh          # 打包 + 上传 + 安装重启
+```
+
+注意事项与目标机约束（CentOS 7 / glibc 2.17 / systemd 219、musl 静态构建、
+systemd unit 写法、安全组端口）见 `deploy/external-hz/README.md`。
+
 ## Important Notes
 
 - **Backend**: SQLite database at `backend/data/users.db`; session storage is

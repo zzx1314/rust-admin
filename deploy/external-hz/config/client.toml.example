@@ -1,0 +1,24 @@
+# 机器狗设备客户端配置（外网正式环境）
+#
+# 复制到现场机器人的 business/client/client.toml：
+#   cp client.toml.example client.toml && chmod 600 client.toml
+# 生效结果用 `cargo run -- --print-config` 查看（敏感字段自动脱敏）。
+
+[server]
+# 业务平台部署在 39.107.55.13，设备网关 ws://39.107.55.13:3100/ws/device
+url = "ws://39.107.55.13:3100"
+# 设备编号（= 机器狗 SN）不要写在这里：客户端启动时自动读本体 /dev/mmcblk0p5
+secret_env = "ROBODOG_DEVICE_SECRET"
+heartbeat_secs = 10
+
+[api]
+# REST 地址留空时由 server.url 推导（ws→http），即 http://39.107.55.13:3100
+base = ""
+username = "admin"
+password_env = "ROBODOG_API_PASSWORD"
+
+[robot]
+# 机器狗本体内网地址（现场默认值）
+host = "192.168.234.234"
+file_port = 12000
+map_root = "/ota/alg_data/map"

@@ -409,10 +409,12 @@ mod tests {
     #[test]
     fn migrations_root_honours_an_explicit_override() {
         // 显式指定时按原样使用（部署时二进制旁边没有 migrations/ 的情况）。
-        let dir = std::env::temp_dir().join(format!("rust_admin_mig_{}", uuid::Uuid::new_v4().simple()));
+        let dir =
+            std::env::temp_dir().join(format!("rust_admin_mig_{}", uuid::Uuid::new_v4().simple()));
         fs::create_dir_all(&dir).expect("create temp migrations dir");
 
-        let resolved = resolve_migrations_root(Some(&dir.display().to_string())).expect("显式路径必须生效");
+        let resolved =
+            resolve_migrations_root(Some(&dir.display().to_string())).expect("显式路径必须生效");
         assert_eq!(resolved, dir);
 
         // 空字符串视为未指定，回落到工作目录。
