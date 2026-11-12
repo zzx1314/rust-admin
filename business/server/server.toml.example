@@ -31,6 +31,13 @@ port = 3100
 # 环境变量：ROBODOG_DEVICE_TIMEOUT_SECS
 # device_timeout_secs = 90
 
+# 任务执行超时（秒，默认 120，最小 30）：`执行中` 的任务超过这个时长没有任何
+# 进度上报，看门狗会把它置为「异常」并记一条事件。
+# 客户端跑任务时每 5s 上报一次进度，所以这个值只影响「客户端已经不报了」的场景
+# （重启、掉线、或平台没真正下发任务），避免任务永久卡在执行中。
+# 环境变量：ROBODOG_TASK_TIMEOUT_SECS
+# task_timeout_secs = 120
+
 [zentai]
 # 反向控制信道：业务平台部署在内网、中台无法连入时必需。
 # 配好后本服务会主动拨入 中台的 /api/dogDevice/control-plane/ws，

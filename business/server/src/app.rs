@@ -128,6 +128,8 @@ pub fn build_router(state: AppState) -> Router {
             "/tasks/{id}/status",
             axum::routing::put(tasks::update_task_status),
         )
+        // 真正下发任务（发 task_dispatch）：前端「开始执行 / 重新下发」走这里
+        .route("/tasks/{id}/dispatch", post(tasks::dispatch_task))
         .route("/tasks/{id}/events", get(tasks::list_task_events))
         .route(
             "/routes",

@@ -29,6 +29,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     control_plane::spawn(state.clone());
     // 心跳看门狗：静默掉线（收不到 Close 帧）的设备超时后置为离线
     gateway::spawn_heartbeat_watchdog(state.clone());
+    // 任务看门狗：`执行中` 但长时间没有进度上报的任务置为异常
+    gateway::spawn_task_watchdog(state.clone());
     // 视频看门狗：没人观看却还在推流时让客户端停掉 ffmpeg
     robodog_ops_server::video::spawn_watchdog(state.clone());
     let router = build_router(state);

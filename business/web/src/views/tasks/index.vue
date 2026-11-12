@@ -109,6 +109,11 @@ function tagTone(type?: string | null) {
 
 async function changeStatus(task: Task, status: string) {
   if (task.taskStatus === status) return;
+  // 「执行中」不是纯状态改动：必须走 dispatch 把航点 / 地图真正推给设备
+  if (status === "执行中") {
+    await startTask(task);
+    return;
+  }
   const progress = status === "已完成" ? 100 : status === "待执行" ? 0 : task.progress;
   await taskApi.updateStatus(task.id, status, progress);
   await load();
@@ -126,13 +131,14 @@ async function onDrop(status: string) {
 }
 
 async function startTask(task: Task) {
-  await taskApi.updateStatus(task.id, "执行中", Math.max(5, task.progress));
+  // dispatch 会真正下发 task_dispatch；设备离线时接口报错，状态不会被改成假「执行中」
+  await taskApi.dispatch(task.id);
   await load();
   ElMessage.success(`${task.taskName} 已下发执行`);
 }
 
 async function pauseTask(task: Task) {
-  await taskApi.updateStatus(task.id, "待执行", task.progress);
+  await taskApi.updateStatus(task.id, "已暂停", task.progress);
   await load();
   ElMessage.info(`${task.taskName} 已暂停`);
 }
@@ -262,10 +268,10 @@ async function sendFromDetail(command: string) {
   const task = detailTask.value;
   if (!task) return;
   if (command === "start") {
-    await taskApi.updateStatus(task.id, "执行中", Math.max(5, task.progress));
-    ElMessage.success("任务已开始执行");
+    await taskApi.dispatch(task.id);
+    ElMessage.success("任务已下发执行");
   } else {
-    await taskApi.updateStatus(task.id, "待执行", task.progress);
+    await taskApi.updateStatus(task.id, "已暂停", task.progress);
     ElMessage.info("任务已暂停");
   }
   detailVisible.value = false;
@@ -668,6 +674,14 @@ onMounted(load);
             @click="sendFromDetail('pause')"
           >
             <AppIcon name="pause" />暂停任务
+          </button>
+          <button
+            v-if="detailTask.taskStatus === '执行中'"
+            class="btn sm ghost"
+            title="向设备重新下发一次任务（卡在执行中或需要重跑时使用）"
+            @click="sendFromDetail('start')"
+          >
+            <AppIcon name="play" />重新下发
           </button>
         </div>
       </template>

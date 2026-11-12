@@ -1642,6 +1642,34 @@ async fn handle_server_message(
                 warn!("未知控制指令: {action}");
                 return;
             };
+            // resume 只对「本地正在跑的任务」有意义：平台用「执行中」触发 resume 时，
+            // 如果本地没有对应任务的执行上下文（客户端重启过 / 平台只发了 resume
+            // 没发 task_dispatch），回一条假的「执行中」会让平台任务永久卡住。
+            if action == "resume" {
+                let has_context = active
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map(|task| task.task_code == task_code)
+                    .unwrap_or(false)
+                    || local_runner.lock().await.is_some()
+                    || local_mapping.lock().await.is_some();
+                if !has_context {
+                    warn!("任务 {task_code} 本地没有执行上下文，拒绝 resume");
+                    report_progress(
+                        out_tx,
+                        task_code,
+                        "异常",
+                        0,
+                        Some("本地没有该任务的执行上下文（任务未下发或客户端已重启），请从控制台重新下发".to_string()),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                    return;
+                }
+            }
             if let Some(runner) = local_runner.lock().await.clone()
                 && let Err(e) = runner.control(control).await
             {

@@ -516,6 +516,108 @@ pub async fn sweep_stale_devices(state: &AppState) -> Result<u64, AppError> {
     Ok(affected)
 }
 
+/// 任务看门狗：`执行中` 但长时间没有进度上报的任务判定为中断，置「异常」。
+///
+/// 客户端只在本地持有任务上下文时每 5s 上报一次进度；遇到下面几种情况平台侧就
+/// 再也收不到任何上报，任务会永久停在「执行中」：
+/// - 客户端重启 / 掉线（WebSocket 断了，本地 runner 也没了）；
+/// - 平台只发了 `task_control`（resume）没发 `task_dispatch`，客户端压根没有任务可跑；
+/// - 客户端回了终态但上报丢失。
+///
+/// 与心跳看门狗一样每 15s 扫一次。心跳看门狗先把设备置为离线，这里再用
+/// `task_timeout_secs` 给任务上一道时间兜底。
+pub fn spawn_task_watchdog(state: AppState) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(15));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            match sweep_stuck_tasks(&state).await {
+                Ok(0) => {}
+                Ok(count) => info!("任务看门狗：{count} 条任务超时未上报进度，已置为异常"),
+                Err(error) => warn!("任务看门狗执行失败: {error}"),
+            }
+        }
+    });
+}
+
+/// 扫描并处理「执行中但不再上报」的任务，返回本次置为异常的条数。
+///
+/// 只判定真机设备（`last_heartbeat` 是完整时间戳）：`seed.rs` 的演示任务写的是
+/// 相对时间，不会被看门狗翻成异常。
+pub async fn sweep_stuck_tasks(state: &AppState) -> Result<u64, AppError> {
+    let timeout = state.config.task_timeout_secs;
+    let cutoff = (chrono::Local::now() - chrono::Duration::seconds(timeout))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+
+    let stale: Vec<(i64, String, String, i64, String, String)> = sqlx::query_as(
+        "SELECT t.id, t.task_code, t.task_name, d.id, d.device_id, d.status
+         FROM tasks t
+         JOIN devices d ON d.id = t.device_id
+         WHERE t.task_status = '执行中'
+           AND d.last_heartbeat LIKE '____-__-__ __:__:__'
+           AND t.updated_at < ?1",
+    )
+    .bind(&cutoff)
+    .fetch_all(&state.db)
+    .await?;
+
+    if stale.is_empty() {
+        return Ok(0);
+    }
+
+    let timestamp = now();
+    let mut affected = 0_u64;
+    for (task_pk, task_code, task_name, device_pk, device_code, device_status) in &stale {
+        // 带上 task_status 条件：扫描期间客户端刚好补报终态时不要覆盖真实结果
+        let result = sqlx::query(
+            "UPDATE tasks SET task_status = '异常', updated_at = ?1
+             WHERE id = ?2 AND task_status = '执行中'",
+        )
+        .bind(&timestamp)
+        .bind(task_pk)
+        .execute(&state.db)
+        .await?;
+        if result.rows_affected() == 0 {
+            continue;
+        }
+        affected += result.rows_affected();
+
+        sqlx::query(
+            "INSERT INTO task_events (event_type, title, description, device_id, task_id, created_at)
+             VALUES ('status', ?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(format!("任务 {task_code} 执行中断"))
+        .bind(format!(
+            "超过 {timeout}s 未收到进度上报（设备 {device_code} {device_status}），已判定为异常；\
+             设备恢复后请重新下发任务"
+        ))
+        .bind(device_pk)
+        .bind(task_pk)
+        .bind(&timestamp)
+        .execute(&state.db)
+        .await
+        .ok();
+
+        // 设备端任务占用一并释放，避免设备页一直显示「执行任务 / 旧任务名」
+        sqlx::query(
+            "UPDATE devices SET current_task_name = '—',
+                status = CASE WHEN status = '执行任务' THEN '在线待命' ELSE status END,
+                updated_at = ?1
+             WHERE id = ?2 AND current_task_name = ?3",
+        )
+        .bind(&timestamp)
+        .bind(device_pk)
+        .bind(task_name)
+        .execute(&state.db)
+        .await
+        .ok();
+    }
+
+    Ok(affected)
+}
+
 /// 查询园区编码（用于 register_ack 下发与地图回传归属）
 async fn park_code_of(db: &SqlitePool, park_id: Option<i64>) -> Option<String> {
     let park_id = park_id?;

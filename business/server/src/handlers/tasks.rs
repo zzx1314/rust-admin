@@ -196,39 +196,142 @@ pub(crate) async fn create_task_core(
     .await?;
 
     // 如果任务已分配到设备，尝试通过 WebSocket 推送
-    if let Some(device_id) = payload.device_id {
-        let device_code: Option<String> =
-            sqlx::query_scalar("SELECT device_id FROM devices WHERE id = ?1")
-                .bind(device_id)
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten();
-
-        if let Some(ref dcode) = device_code {
-            let task = fetch_task(state, id).await?;
-            let dispatch = crate::dispatch::build_dispatch_payload(&state.db, &task).await?;
-
-            let pushed =
-                gateway::dispatch_task_to_device(&state.device_connections, dcode, &dispatch).await;
-            if pushed {
-                // 更新任务状态为执行中
-                sqlx::query(
-                    "UPDATE tasks SET task_status = '执行中', updated_at = ?1 WHERE id = ?2",
-                )
-                .bind(now())
-                .bind(id)
-                .execute(&state.db)
-                .await?;
-                info!(
-                    "task {} pushed via WebSocket to device {}",
-                    task.task_code, dcode
-                );
-            }
+    if payload.device_id.is_some() {
+        let task = fetch_task(state, id).await?;
+        match push_task_dispatch(state, &task).await? {
+            Some(device_code) => info!(
+                "task {} pushed via WebSocket to device {}",
+                task.task_code, device_code
+            ),
+            None => warn!(
+                "task {} 未下发：设备未连接 WebSocket，等设备上线补发",
+                task.task_code
+            ),
         }
     }
 
     fetch_task(state, id).await
+}
+
+/// 任务是否已经在本体侧跑起来（只有这类任务能靠 pause / resume 控制）。
+///
+/// `robot_task_id` 由客户端从智航 5009 快照回传；为空说明本体从未受理过这条任务，
+/// 此时发 `task_control resume` 毫无意义（客户端没有执行上下文，只会回一条
+/// 「执行中 / 0%」然后彻底静默）。
+fn resumable(task: &Task) -> bool {
+    task.robot_task_id.is_some() && matches!(task.task_status.as_str(), "执行中" | "已暂停")
+}
+
+/// 组装载荷并真正下发给设备，成功后把任务 / 设备切到执行态。
+///
+/// 返回设备编号：`Some(code)` 已下发，`None` 设备未连接（由调用方决定是否报错）。
+/// 这是唯一会给客户端发 `task_dispatch`（含航点 / 地图的完整载荷）的 REST 入口。
+async fn push_task_dispatch(state: &AppState, task: &Task) -> Result<Option<String>, AppError> {
+    let Some(device_pk) = task.device_id else {
+        return Ok(None);
+    };
+    let device_code: Option<String> =
+        sqlx::query_scalar("SELECT device_id FROM devices WHERE id = ?1")
+            .bind(device_pk)
+            .fetch_optional(&state.db)
+            .await?
+            .flatten();
+    let Some(device_code) = device_code else {
+        return Ok(None);
+    };
+
+    let dispatch = crate::dispatch::build_dispatch_payload(&state.db, task).await?;
+    if !gateway::dispatch_task_to_device(&state.device_connections, &device_code, &dispatch).await {
+        return Ok(None);
+    }
+
+    // 重新下发等于换一条本体任务：旧的 robot_task_id / stage 必须清掉，
+    // 否则下一次「执行中」会被误判成可 resume 的老任务
+    let timestamp = now();
+    sqlx::query(
+        "UPDATE tasks SET task_status = '执行中', progress = 0, robot_task_id = NULL,
+            robot_stage = NULL, robot_updated_at = NULL, updated_at = ?1 WHERE id = ?2",
+    )
+    .bind(&timestamp)
+    .bind(task.id)
+    .execute(&state.db)
+    .await?;
+    sqlx::query(
+        "UPDATE devices SET status = '执行任务', current_task_name = ?1, updated_at = ?2
+         WHERE id = ?3",
+    )
+    .bind(&task.task_name)
+    .bind(&timestamp)
+    .bind(device_pk)
+    .execute(&state.db)
+    .await?;
+
+    // updated_at 已刷新，任务看门狗从这里开始计时
+    Ok(Some(device_code))
+}
+
+/// 下发任务；设备不在线时返回可读错误，绝不把状态单独改成「执行中」。
+async fn dispatch_task_or_error(state: &AppState, task: &Task) -> Result<(), AppError> {
+    if task.task_status == "已完成" {
+        return Err(AppError::BadRequest(format!(
+            "任务 {} 已完成，如需重跑请新建任务",
+            task.task_code
+        )));
+    }
+    let Some(device_pk) = task.device_id else {
+        return Err(AppError::BadRequest(format!(
+            "任务 {} 尚未分配设备，无法下发",
+            task.task_code
+        )));
+    };
+    // 任务园区必须与设备绑定的园区一致，否则会载错地图
+    validate_device_park(&state.db, task.device_id, task.park_id).await?;
+    let device: Option<(String, Option<i64>)> =
+        sqlx::query_as("SELECT device_id, park_id FROM devices WHERE id = ?1")
+            .bind(device_pk)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some((device_code, park_id)) = device else {
+        return Err(AppError::NotFound(format!("设备 {device_pk} 不存在")));
+    };
+    if park_id.is_none() {
+        return Err(AppError::BadRequest(format!(
+            "设备 {device_code} 尚未绑定园区，无法下发任务"
+        )));
+    }
+
+    match push_task_dispatch(state, task).await? {
+        Some(code) => {
+            record_event(
+                state,
+                "dispatch",
+                format!("任务 {} 已下发", task.task_code),
+                format!("已下发到设备 {code}"),
+                task.device_id,
+                Some(task.id),
+            )
+            .await?;
+            Ok(())
+        }
+        None => Err(AppError::BadRequest(format!(
+            "设备 {device_code} 未连接（离线或未与业务平台建立 WebSocket），任务未下发"
+        ))),
+    }
+}
+
+/// `POST /tasks/{id}/dispatch` — 真正把任务推给设备（前端「开始执行 / 重新下发」）。
+///
+/// 与 `PUT /tasks/{id}/status` 的区别：这里会发 `task_dispatch`（带航点 / 地图），
+/// 设备离线时直接报错，不会留下一个假的「执行中」。
+pub async fn dispatch_task(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
+) -> Result<Json<ApiResponse<Task>>, AppError> {
+    let task = fetch_task(&state, id).await?;
+    super::parks::ensure_owner(&task, &claims)?;
+    dispatch_task_or_error(&state, &task).await?;
+    Ok(ApiResponse::ok(fetch_task(&state, id).await?))
 }
 
 pub async fn update_task(
@@ -325,6 +428,14 @@ pub async fn update_task_status(
     if !valid.contains(&payload.task_status.as_str()) {
         return Err(AppError::BadRequest("无效的任务状态".to_string()));
     }
+
+    // 「执行中」= 现在就跑：本体从未受理过这条任务时必须走真正的 task_dispatch。
+    // 只改状态 + 发 resume 会让客户端在没有执行上下文时假报「执行中」，任务永久卡住。
+    if payload.task_status == "执行中" && !resumable(&existing) {
+        dispatch_task_or_error(&state, &existing).await?;
+        return Ok(ApiResponse::ok(fetch_task(&state, id).await?));
+    }
+
     let progress = payload
         .progress
         .unwrap_or(match payload.task_status.as_str() {

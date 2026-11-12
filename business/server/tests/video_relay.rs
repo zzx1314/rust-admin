@@ -68,6 +68,7 @@ async fn test_state() -> (AppState, TempDb) {
         service_token: None,
         zentai_ws_url: None,
         device_timeout_secs: 90,
+        task_timeout_secs: 120,
     });
 
     let pool = db::connect(&config).await.expect("连接测试库失败");

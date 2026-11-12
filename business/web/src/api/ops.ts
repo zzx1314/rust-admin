@@ -147,7 +147,9 @@ export const taskApi = {
   update: (id: number, data: object) => put<Task>(`/tasks/${id}`, data),
   remove: (id: number) => del<boolean>(`/tasks/${id}`),
   updateStatus: (id: number, taskStatus: string, progress?: number) =>
-    put<Task>(`/tasks/${id}/status`, { taskStatus, progress })
+    put<Task>(`/tasks/${id}/status`, { taskStatus, progress }),
+  /** 真正下发任务（含航点 / 地图）；设备离线时接口直接报错 */
+  dispatch: (id: number) => post<Task>(`/tasks/${id}/dispatch`)
 };
 
 export const routeApi = {

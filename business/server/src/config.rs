@@ -50,6 +50,12 @@ pub struct Config {
     /// 客户端默认 10s 一次心跳，取 9 倍留出网络重连窗口；WS 静默断开（拉闸、掉线）
     /// 收不到 Close 帧，没有看门狗会一直显示「在线」。
     pub device_timeout_secs: i64,
+    /// 任务执行超时秒数：`执行中` 的任务超过这个时长没有进度上报，看门狗判定为「异常」。
+    ///
+    /// 客户端在跑任务时每 5s 上报一次进度；客户端重启 / 断连 / 平台只发了
+    /// `task_control` 没发 `task_dispatch` 时，平台侧收不到任何后续上报，
+    /// 任务会永久停在「执行中」——必须有一条时间兜底。
+    pub task_timeout_secs: i64,
 }
 
 /// 配置文件读取 / 解析失败。
@@ -83,6 +89,7 @@ struct ServerFile {
     backend_db: Option<String>,
     ingest_dir: Option<String>,
     device_timeout_secs: Option<i64>,
+    task_timeout_secs: Option<i64>,
     zentai: ZentaiFile,
 }
 
@@ -175,6 +182,11 @@ impl Config {
                 .or(file.device_timeout_secs)
                 .unwrap_or(90)
                 .max(20),
+            task_timeout_secs: env_text(&env, "ROBODOG_TASK_TIMEOUT_SECS")
+                .and_then(|value| value.parse().ok())
+                .or(file.task_timeout_secs)
+                .unwrap_or(120)
+                .max(30),
             web_dist: path(
                 "ROBODOG_WEB_DIST",
                 file.web_dist,

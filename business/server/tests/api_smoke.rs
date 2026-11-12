@@ -71,6 +71,7 @@ async fn test_state_with_token(service_token: Option<&str>) -> (AppState, TempDb
         service_token: service_token.map(str::to_string),
         zentai_ws_url: None,
         device_timeout_secs: 90,
+        task_timeout_secs: 120,
     });
 
     let pool = db::connect(&config).await.expect("连接测试库失败");
@@ -876,6 +877,7 @@ mod zentai_service_token {
             service_token: Some(TOKEN.to_string()),
             zentai_ws_url: None,
             device_timeout_secs: 90,
+        task_timeout_secs: 120,
         }
     }
 
@@ -1140,4 +1142,130 @@ async fn watchdog_marks_stale_real_device_offline() {
         .await
         .unwrap();
     assert_ne!(demo, "离线", "演示数据的相对时间不应被看门狗误判");
+}
+
+/// 卡在「执行中」的任务：设备长时间不报进度 → 看门狗掰到异常，并留一条可读事件。
+///
+/// 现场踩过：网页点「开始执行」只改了库里的状态（没真正下发），客户端回一条
+/// 「执行中 / 0%」后彻底静默，任务永久停在执行中。
+#[tokio::test]
+async fn task_watchdog_marks_stuck_task_abnormal() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    // 真机设备（完整时间戳）+ 一条停留在「执行中」、很久没更新的任务
+    sqlx::query(
+        "UPDATE devices SET status = '执行任务', current_task_name = '卡住的任务',
+            last_heartbeat = '2020-01-01 00:00:00' WHERE device_id = 'RD-002'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let device_pk: i64 = sqlx::query_scalar("SELECT id FROM devices WHERE device_id = 'RD-002'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let task_id: i64 = sqlx::query_scalar(
+        "INSERT INTO tasks (task_code, task_name, device_id, task_status, progress,
+            created_at, updated_at)
+         VALUES ('TK-STUCK-1', '卡住的任务', ?1, '执行中', 5,
+            '2020-01-01 00:00:00', '2020-01-01 00:00:00')
+         RETURNING id",
+    )
+    .bind(device_pk)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let affected = gateway::sweep_stuck_tasks(&state).await.unwrap();
+    assert_eq!(affected, 1, "只有超时未上报的执行中任务会被判定");
+
+    let status: String = sqlx::query_scalar("SELECT task_status FROM tasks WHERE id = ?1")
+        .bind(task_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "异常");
+
+    let events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM task_events WHERE task_id = ?1 AND title LIKE '%执行中断%'",
+    )
+    .bind(task_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(events, 1, "判定异常应留一条事件");
+
+    let (device_status, current_task): (String, String) =
+        sqlx::query_as("SELECT status, current_task_name FROM devices WHERE id = ?1")
+            .bind(device_pk)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(device_status, "在线待命", "设备任务占用应释放");
+    assert_eq!(current_task, "—");
+
+    // 演示任务的设备用的是相对时间，不能被误判
+    let demo: String =
+        sqlx::query_scalar("SELECT task_status FROM tasks WHERE task_code = 'TK-1109-01'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(demo, "执行中", "演示数据不受任务看门狗影响");
+}
+
+/// 「执行中」不能只改状态：设备离线时接口直接报错，任务保持原状态。
+#[tokio::test]
+async fn starting_task_on_offline_device_is_rejected() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+
+    let (task_id, task_code): (i64, String) = sqlx::query_as(
+        "SELECT id, task_code FROM tasks WHERE task_status = '待执行' ORDER BY id LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::put(format!("/api/tasks/{task_id}/status"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(r#"{"taskStatus":"执行中"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "设备未连接时不应假装下发成功"
+    );
+    let body = json_body(response).await;
+    assert!(
+        body["msg"].as_str().unwrap_or_default().contains("未连接"),
+        "错误信息应说明设备未连接，实际: {body}"
+    );
+
+    let status: String = sqlx::query_scalar("SELECT task_status FROM tasks WHERE id = ?1")
+        .bind(task_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "待执行", "任务 {task_code} 不应被改成执行中");
+
+    // 显式下发接口同理：设备离线 → 400，状态不变
+    let response = app
+        .oneshot(
+            Request::post(format!("/api/tasks/{task_id}/dispatch"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
