@@ -1,0 +1,30 @@
+[Unit]
+Description=Rust Admin 中台 API + 管理前端 (x-rust :3000)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 工作目录必须是安装目录：config/config.toml 与 migrations/ 都按它解析
+WorkingDirectory=/opt/hz/rust-admin/zentai
+# APP_JWT_SECRET / APP_DOG__BUSINESS_API_TOKEN / APP_CONFIG_FILE / RUST_LOG
+EnvironmentFile=/opt/hz/rust-admin/zentai.env
+ExecStart=/opt/hz/rust-admin/zentai/x-rust
+Restart=always
+RestartSec=3
+# 会话存进程内存（token_store = "memory"），重启会让所有人重新登录，
+# 这里给足重试次数，避免偶发崩溃被 systemd 放弃。
+StartLimitIntervalSec=0
+# 机器只有 3.6G 内存且还跑着别的服务，尽量别被 OOM killer 先挑中
+OOMScoreAdjust=-500
+LimitNOFILE=65535
+
+# 收紧权限：进程只需要写自己的数据目录
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/hz/rust-admin/zentai
+
+[Install]
+WantedBy=multi-user.target

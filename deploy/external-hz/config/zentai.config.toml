@@ -1,0 +1,25 @@
+# 中台（根 backend）正式环境配置：/opt/hz/rust-admin/zentai/config/config.toml
+#
+# 密钥不在本文件里，由 systemd 的 EnvironmentFile=/opt/hz/rust-admin/zentai.env 注入：
+#   APP_JWT_SECRET              登录令牌签名密钥
+#   APP_DOG__BUSINESS_API_TOKEN 调业务平台内部接口的共享令牌（= 业务平台 ROBODOG_SERVICE_TOKEN）
+
+database_url = "sqlite:data/users.db?mode=rwc"
+
+# 会话令牌存进程内存：这台机器不装 Redis。
+# 代价：服务重启后所有人需要重新登录；且只能单实例（本机就是一个实例）。
+# 想换回 Redis：删掉这行，并补上 [redis] 段 + APP_REDIS_PASSWORD。
+token_store = "memory"
+
+[server]
+host = "0.0.0.0"
+port = 3000
+# 前端构建产物：本服务自己托管，因此 80/443 上不需要 nginx。
+# 相对路径按进程工作目录（= /opt/hz/rust-admin/zentai）解析。
+static_dir = "web"
+
+[dog]
+# 地图包上传目录（<upload_dir>/maps）
+upload_dir = "data/device_uploads"
+# 业务平台与本服务同机部署，「同步地图」按钮走本机回环即可。
+business_api_url = "http://127.0.0.1:3100"

@@ -1,0 +1,25 @@
+# 业务平台正式环境配置：/opt/hz/rust-admin/robodog/server.toml
+#
+# 密钥由 systemd 的 EnvironmentFile=/opt/hz/rust-admin/robodog.env 注入：
+#   ROBODOG_JWT_SECRET     控制台登录令牌签名密钥
+#   ROBODOG_SERVICE_TOKEN  与中台互通内部接口的共享令牌（= 中台 APP_DOG__BUSINESS_API_TOKEN）
+#
+# 相对路径按本文件所在目录（/opt/hz/rust-admin/robodog）解析。
+
+port = 3100
+database = "data/robodog.db"
+web_dist = "web"
+ingest_dir = "data/map_ingest"
+
+# 中台 SQLite：建图回传要写 dog_map，同时读取已上传的 ROS 地图
+backend_db = "/opt/hz/rust-admin/zentai/data/users.db"
+
+# 设备心跳超时（秒）：客户端 10s 一次心跳，留 9 倍窗口
+device_timeout_secs = 90
+# 任务执行超时（秒）：客户端跑任务时每 5s 上报一次进度
+task_timeout_secs = 120
+
+[zentai]
+# 同机部署：反向控制信道与内部接口都走本机回环
+ws_url = "ws://127.0.0.1:3000"
+base_url = "http://127.0.0.1:3000"

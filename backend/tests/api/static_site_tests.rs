@@ -174,6 +174,16 @@ async fn api_paths_still_404_instead_of_returning_index_html() {
         "未命中的 /api 必须是 JSON 而不是 HTML"
     );
 
+    // 消息里要带完整的 `/api/...` 路径（嵌套路由会剥掉前缀，必须用 OriginalUri）
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        body.contains("/api/definitely-not-a-route"),
+        "404 消息应包含完整路径，实际：{body}"
+    );
+
     std::fs::remove_dir_all(&dist).ok();
 }
 

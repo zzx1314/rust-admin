@@ -1,0 +1,30 @@
+[Unit]
+Description=RoboDog OPS 业务平台 + 设备网关 (:3100)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# server.toml 里的相对路径（data/、web）按配置文件所在目录解析
+WorkingDirectory=/opt/hz/rust-admin/robodog
+# ROBODOG_JWT_SECRET / ROBODOG_SERVICE_TOKEN / ROBODOG_SERVER_CONFIG / RUST_LOG
+EnvironmentFile=/opt/hz/rust-admin/robodog.env
+ExecStart=/opt/hz/rust-admin/robodog/robodog-ops-server
+Restart=always
+RestartSec=3
+StartLimitIntervalSec=0
+OOMScoreAdjust=-500
+LimitNOFILE=65535
+
+# 设备 WebSocket 网关是主要入口，保留较高的连接数上限
+TasksMax=4096
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+# 需要写自己的 data/；另外要**读**中台的 users.db（dog_map 导入）
+ReadWritePaths=/opt/hz/rust-admin/robodog
+
+[Install]
+WantedBy=multi-user.target

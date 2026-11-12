@@ -410,8 +410,9 @@ pub fn dog_control_routes() -> Router<AppState> {
 }
 
 /// `/api/*` 未命中时的处理：返回与其它接口一致的 `{ code, msg, data }` 404。
-async fn api_not_found(method: axum::http::Method, uri: axum::http::Uri) -> AppError {
-    AppError::NotFound(format!("{method} {}", uri.path()))
+async fn api_not_found(method: axum::http::Method, uri: axum::extract::OriginalUri) -> AppError {
+    // 用 `OriginalUri`：`Uri` 在嵌套路由里已经被剥掉了 `/api` 前缀。
+    AppError::NotFound(format!("{method} {}", uri.0.path()))
 }
 
 pub fn create_router(state: AppState) -> Router {
