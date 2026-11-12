@@ -20,6 +20,26 @@ use serde_json::{Value, json};
 use sqlx::{QueryBuilder, Sqlite};
 use std::collections::{HashMap, HashSet};
 
+/// 告警动态行：(id, level, content, device_code, park_name, status, occurred_at)
+type AlertActivityRow = (
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+);
+
+/// 任务计划日期。
+///
+/// 历史任务的 `plan_start` 只存 `HH:MM`，不能直接 `date()`：SQLite 会把
+/// `'09:30'` 解析成 `2000-01-01`。只有 `YYYY-MM-DD` 开头时才用 `plan_start`，
+/// 否则退回 `created_at`。
+const TASK_PLAN_DAY: &str = "CASE WHEN t.plan_start GLOB \
+    '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' \
+    THEN date(t.plan_start) ELSE date(t.created_at) END";
+
 /// 把可见设备编号拼进 SQL（`allowed` 为 `None` 表示不限制）。
 ///
 /// 调用方需要保证 `column` 前已有 `WHERE` / `AND` 条件，函数自带 `AND`。
@@ -62,8 +82,12 @@ fn push_id_list<'q>(builder: &mut QueryBuilder<'q, Sqlite>, table: &str, ids: &[
     builder.push(")");
 }
 
-/// 近 7 日任务趋势：只统计当前登录人创建的任务。
-async fn user_trend(
+/// 近 7 日任务趋势：直接按任务表聚合，不再读取预置的 `daily_stats`。
+///
+/// 计划日期优先取 `plan_start`（能解析出真实日期时），历史数据里只存
+/// `HH:MM` 的记录退回 `created_at`；完成日期用 `updated_at` 近似（任务表没有
+/// 单独的完成时间列）。非管理员只统计自己创建的任务。
+async fn task_trend(
     state: &AppState,
     claims: &Claims,
 ) -> Result<(Vec<String>, Vec<i64>, Vec<i64>), AppError> {
@@ -77,24 +101,40 @@ async fn user_trend(
         .collect();
     let start = days.first().cloned().unwrap_or_default();
 
-    let plan_rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT date(created_at), COUNT(*) FROM tasks
-         WHERE created_by = ?1 AND date(created_at) >= ?2
-         GROUP BY date(created_at)",
-    )
-    .bind(claims.sub)
-    .bind(&start)
-    .fetch_all(&state.db)
-    .await?;
-    let done_rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT date(updated_at), COUNT(*) FROM tasks
-         WHERE created_by = ?1 AND task_status = '已完成' AND date(updated_at) >= ?2
-         GROUP BY date(updated_at)",
-    )
-    .bind(claims.sub)
-    .bind(&start)
-    .fetch_all(&state.db)
-    .await?;
+    let mut plan_builder = QueryBuilder::<Sqlite>::new(format!(
+        "SELECT {TASK_PLAN_DAY} AS day, COUNT(*) FROM tasks t WHERE 1 = 1"
+    ));
+    if !claims.is_admin {
+        plan_builder
+            .push(" AND t.created_by = ")
+            .push_bind(claims.sub);
+    }
+    plan_builder
+        .push(format!(" AND {TASK_PLAN_DAY} >= "))
+        .push_bind(start.clone())
+        .push(" GROUP BY day");
+    let plan_rows: Vec<(String, i64)> = plan_builder
+        .build_query_as::<(String, i64)>()
+        .fetch_all(&state.db)
+        .await?;
+
+    let mut done_builder = QueryBuilder::<Sqlite>::new(
+        "SELECT date(t.updated_at) AS day, COUNT(*) FROM tasks t
+         WHERE t.task_status = '已完成'",
+    );
+    if !claims.is_admin {
+        done_builder
+            .push(" AND t.created_by = ")
+            .push_bind(claims.sub);
+    }
+    done_builder
+        .push(" AND date(t.updated_at) >= ")
+        .push_bind(start)
+        .push(" GROUP BY day");
+    let done_rows: Vec<(String, i64)> = done_builder
+        .build_query_as::<(String, i64)>()
+        .fetch_all(&state.db)
+        .await?;
 
     let plan_map: HashMap<String, i64> = plan_rows.into_iter().collect();
     let done_map: HashMap<String, i64> = done_rows.into_iter().collect();
@@ -127,19 +167,23 @@ pub async fn summary(
         .await?;
 
     let device_total = devices.len() as i64;
-    let mut running = 0_i64;
+    let mut executing = 0_i64;
+    let mut standby = 0_i64;
     let mut charging = 0_i64;
     let mut offline = 0_i64;
     let mut fault = 0_i64;
+    let mut unbound = 0_i64;
     for device in &devices {
         match device.status.as_str() {
-            "执行任务" | "在线待命" => running += 1,
+            "执行任务" => executing += 1,
+            "在线待命" => standby += 1,
             "充电中" => charging += 1,
             "故障" => fault += 1,
+            "待绑定" => unbound += 1,
             _ => offline += 1,
         }
     }
-    let online = running;
+    let online = executing + standby;
 
     // ── 任务统计（只统计当前人创建的任务） ──────────────────────
     let mut task_builder =
@@ -155,15 +199,34 @@ pub async fn summary(
         .fetch_all(&state.db)
         .await?;
     let task_total: i64 = task_rows.iter().map(|(_, count)| count).sum();
-    let task_done = task_rows
+
+    // 「今日巡检任务」：按计划日期（无日期时按创建日期）落在今天的任务统计，
+    // 不再拿任务总数冒充今日任务。
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let mut today_builder = QueryBuilder::<Sqlite>::new(format!(
+        "SELECT task_status, COUNT(*) FROM tasks t WHERE {TASK_PLAN_DAY} = "
+    ));
+    today_builder.push_bind(today);
+    if !claims.is_admin {
+        today_builder
+            .push(" AND t.created_by = ")
+            .push_bind(claims.sub);
+    }
+    today_builder.push(" GROUP BY task_status");
+    let today_rows: Vec<(String, i64)> = today_builder
+        .build_query_as::<(String, i64)>()
+        .fetch_all(&state.db)
+        .await?;
+    let today_total: i64 = today_rows.iter().map(|(_, count)| count).sum();
+    let today_done = today_rows
         .iter()
         .find(|(status, _)| status == "已完成")
         .map(|(_, count)| *count)
         .unwrap_or(0);
-    let task_rate = if task_total == 0 {
+    let today_rate = if today_total == 0 {
         0
     } else {
-        task_done * 100 / task_total
+        today_done * 100 / today_total
     };
 
     // ── 园区（自己创建的 + 自己管辖设备所在的） ────────────────
@@ -305,28 +368,10 @@ pub async fn summary(
         .fetch_one(&state.db)
         .await?;
 
-    // ── 任务趋势 ─────────────────────────────────────────────
-    let (days, plan, done) = if claims.is_admin {
-        let trend_rows: Vec<(String, i64, i64)> = sqlx::query_as(
-            "SELECT stat_date, plan_count, done_count FROM (
-                SELECT stat_date, plan_count, done_count FROM daily_stats
-                ORDER BY stat_date DESC LIMIT 7
-             ) ORDER BY stat_date ASC",
-        )
-        .fetch_all(&state.db)
-        .await?;
-        let days: Vec<String> = trend_rows
-            .iter()
-            .map(|(date, _, _)| date.get(5..).unwrap_or(date).to_string())
-            .collect();
-        let plan = trend_rows.iter().map(|(_, plan, _)| *plan).collect();
-        let done = trend_rows.iter().map(|(_, _, done)| *done).collect();
-        (days, plan, done)
-    } else {
-        user_trend(&state, &claims).await?
-    };
+    // ── 任务趋势（按真实任务表聚合） ────────────────────────
+    let (days, plan, done) = task_trend(&state, &claims).await?;
 
-    // ── 最新动态：当前人的任务事件 + 当前人设备事件 ────────────
+    // ── 最新动态：当前人的任务事件 + 当前人设备事件 + 告警 ──────
     let mut timeline_builder = QueryBuilder::<Sqlite>::new(
         "SELECT e.id, e.event_type, e.title, e.description, d.device_id AS device_code,
             t.task_code, e.created_at
@@ -353,11 +398,49 @@ pub async fn summary(
         }
         timeline_builder.push(")");
     }
-    timeline_builder.push(" ORDER BY e.created_at DESC, e.id DESC LIMIT 6");
-    let timeline = timeline_builder
+    timeline_builder.push(" ORDER BY e.created_at DESC, e.id DESC LIMIT 12");
+    let mut timeline = timeline_builder
         .build_query_as::<TaskEvent>()
         .fetch_all(&state.db)
         .await?;
+
+    // 告警也是真实动态的一部分（心跳超时、本体故障等未必会写 task_events）
+    let mut alert_timeline_builder = QueryBuilder::<Sqlite>::new(
+        "SELECT a.id, a.level, a.content, d.device_id AS device_code, p.park_name,
+            a.status, a.occurred_at
+         FROM alerts a
+         LEFT JOIN devices d ON d.id = a.device_id
+         LEFT JOIN parks p ON p.id = a.park_id
+         WHERE 1 = 1",
+    );
+    alert_scope(&mut alert_timeline_builder);
+    alert_timeline_builder.push(" ORDER BY a.occurred_at DESC, a.id DESC LIMIT 12");
+    let alert_events: Vec<AlertActivityRow> = alert_timeline_builder
+        .build_query_as::<AlertActivityRow>()
+        .fetch_all(&state.db)
+        .await?;
+    timeline.extend(alert_events.into_iter().map(
+        |(id, level, content, device_code, park_name, status, occurred_at)| TaskEvent {
+            // 告警 id 与任务事件 id 来自不同表，加偏移避免前端 key 冲突
+            id: 1_000_000 + id,
+            event_type: "alert".to_string(),
+            title: format!("{level}告警：{content}"),
+            description: Some(format!(
+                "{} · {status}",
+                park_name.unwrap_or_else(|| "未归属园区".to_string())
+            )),
+            device_code,
+            task_code: None,
+            created_at: occurred_at,
+        },
+    ));
+    timeline.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    timeline.truncate(6);
 
     // ── 态势图设备：当前人可见设备，前端按园区分组渲染 ─────────
     // 不再截断：园区态势要展示该园区下所有可见设备，点位由 `position` 换算。
@@ -371,10 +454,10 @@ pub async fn summary(
                 "foot": format!("在线率 {}%", if device_total == 0 { 0 } else { online * 100 / device_total }),
             },
             "todayTasks": {
-                "value": task_total,
-                "completed": task_done,
-                "rate": task_rate,
-                "foot": format!("已完成 {} 项 · 完成率 {}%", task_done, task_rate),
+                "value": today_total,
+                "completed": today_done,
+                "rate": today_rate,
+                "foot": format!("已完成 {} 项 · 完成率 {}%", today_done, today_rate),
             },
             "parks": {
                 "value": park_count,
@@ -389,10 +472,12 @@ pub async fn summary(
             }
         },
         "deviceStatus": [
-            {"name": "在线运行", "value": running, "color": "#10b981"},
+            {"name": "执行任务", "value": executing, "color": "#0284c7"},
+            {"name": "在线待命", "value": standby, "color": "#10b981"},
             {"name": "充电中", "value": charging, "color": "#f59e0b"},
-            {"name": "离线", "value": offline, "color": "#94a3b8"},
-            {"name": "故障", "value": fault, "color": "#ef4444"}
+            {"name": "故障", "value": fault, "color": "#ef4444"},
+            {"name": "待绑定", "value": unbound, "color": "#a78bfa"},
+            {"name": "离线", "value": offline, "color": "#94a3b8"}
         ],
         "alerts": alerts,
         "trend": {"days": days, "plan": plan, "done": done},

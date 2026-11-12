@@ -475,6 +475,78 @@ async fn dashboard_is_scoped_to_current_user() {
     assert!(data["timeline"].as_array().unwrap().is_empty());
 }
 
+/// 驾驶舱趋势 / 最新动态必须来自真实业务表，而不是预置统计或演示数组。
+#[tokio::test]
+async fn dashboard_trend_and_timeline_use_live_data() {
+    let (state, _db) = test_state().await;
+
+    // 预置统计改成不可能的值：如果驾驶舱还读 daily_stats，这里会露馅
+    sqlx::query("UPDATE daily_stats SET plan_count = 999, done_count = 999")
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    sqlx::query(
+        "INSERT INTO tasks (task_code, task_name, task_status, plan_start,
+            created_at, updated_at, created_by)
+         VALUES ('TK-TREND-01', '趋势回归任务', '已完成', ?1, ?2, ?2, 1)",
+    )
+    .bind(format!("{today} 08:00"))
+    .bind(format!("{today} 08:00:00"))
+    .execute(&state.db)
+    .await
+    .unwrap();
+    // 用一条未来时间的告警保证它一定排在最新动态首位
+    sqlx::query(
+        "INSERT INTO alerts (alert_code, level, content, status, occurred_at, created_at)
+         VALUES ('AL-TREND-01', '警告', '趋势回归告警', '未处理', '2099-01-01 00:00:00', ?1)",
+    )
+    .bind(robodog_ops_server::db::now())
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+    let dashboard = app
+        .oneshot(
+            Request::get("/api/dashboard/summary")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(dashboard.status(), StatusCode::OK);
+    let body = json_body(dashboard).await;
+    let data = &body["data"];
+
+    for value in data["trend"]["plan"].as_array().unwrap() {
+        assert_ne!(value.as_i64(), Some(999), "趋势不能读预置的 daily_stats");
+    }
+    assert!(
+        data["kpis"]["todayTasks"]["value"]
+            .as_i64()
+            .unwrap_or(0)
+            >= 1,
+        "今日任务应按计划日期/创建日期统计"
+    );
+    assert!(
+        data["trend"]["done"]
+            .as_array()
+            .and_then(|rows| rows.last())
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            >= 1,
+        "应统计到真实完成的任务"
+    );
+    assert_eq!(
+        data["timeline"][0]["eventType"], "alert",
+        "最新动态应包含真实告警"
+    );
+}
+
 async fn login_as(app: &axum::Router, username: &str, password: &str) -> String {
     let request = Request::post("/api/auth/login")
         .header(header::CONTENT_TYPE, "application/json")

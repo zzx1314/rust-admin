@@ -66,7 +66,8 @@ const parkSubtitle = computed(() => {
 
 const donutGradient = computed(() => {
   const data = summary.value?.deviceStatus ?? [];
-  const total = data.reduce((sum, item) => sum + item.value, 0) || 1;
+  const total = data.reduce((sum, item) => sum + item.value, 0);
+  if (!total) return "#e2e8f0 0% 100%";
   let accumulated = 0;
   return data
     .map(item => {
@@ -181,18 +182,22 @@ const kpis = computed(() => {
 
 const eventIcon = (type: string) => {
   if (type === "success") return "check-circle";
-  if (type === "warning") return "warn";
+  if (type === "warning" || type === "status") return "warn";
   if (type === "running") return "play";
+  if (type === "progress") return "activity";
   if (type === "charging") return "charge";
-  if (type === "command") return "send";
+  if (type === "command" || type === "teleop") return "send";
   if (type === "alert") return "bell";
   if (type === "route") return "route";
+  if (type === "binding") return "pin";
+  if (type === "device_event") return "cpu";
+  if (type === "created") return "plus";
   return "task";
 };
 
 const eventTone = (type: string) => {
   if (type === "success") return "ok";
-  if (type === "warning") return "warn";
+  if (type === "warning" || type === "status" || type === "alert") return "warn";
   return "";
 };
 
