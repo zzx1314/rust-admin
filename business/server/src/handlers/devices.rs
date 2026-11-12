@@ -62,6 +62,7 @@ pub(crate) const DEVICE_SELECT: &str = "SELECT d.id, d.device_id, d.model, d.par
     COALESCE(d.charging, 0) AS charging, d.robot_mode,
     COALESCE(d.loc_status, 255) AS loc_status, d.active_map_id,
     COALESCE(d.ctrl_source, 0) AS ctrl_source, d.motion_status,
+    d.estop_software, d.sdk_node_available,
     d.created_at, d.updated_at
     FROM devices d
     LEFT JOIN parks p ON p.id = d.park_id
@@ -646,6 +647,27 @@ pub(crate) async fn push_command(
         return Err(AppError::BadRequest(
             "设备尚未绑定园区，无法执行任务指令".to_string(),
         ));
+    }
+    // 任务/运动类指令先过本体健康门禁；远程接管/释放/同步地图不涉及运动，放行。
+    // 设备根本没有 WS 连接时保留原「未送达」语义，避免把“没连上”误报成“本体不健康”。
+    let connected = gateway::is_device_connected(&state.device_connections, &device.device_id).await;
+    if connected
+        && matches!(
+            command,
+            "开始巡检" | "暂停任务" | "继续任务" | "召回充电" | "重新定位"
+        )
+    {
+        super::teleop::ensure_ready(device)?;
+    }
+    // 接管中不启动/继续任务：本体在手动模式，5000 会回 13897 capability busy。
+    if matches!(command, "开始巡检" | "继续任务")
+        && device.teleop_holder.is_some()
+        && !super::teleop::teleop_expired(device.teleop_at.as_deref())
+    {
+        return Err(AppError::BadRequest(format!(
+            "设备 {} 正在远程接管中，请先释放接管再下发任务",
+            device.device_id
+        )));
     }
     let id = device.id;
     let next_status = match command {

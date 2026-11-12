@@ -36,8 +36,31 @@ const lastAck = ref("");
 
 const online = computed(() => !!props.device && props.device.status !== "离线");
 const holding = computed(() => !!props.device?.teleopHolder);
-/** 已接管且在线才允许遥控 */
-const canControl = computed(() => holding.value && online.value);
+
+/** 本体健康门禁：与客户端/服务端保持一致。
+ *
+ * 官方 App 在 sdk_node 未就绪时显示“设备初始化中”，在 ctrl_source 被外部
+ * 抢占时暂停遥控，在急停未解除时不允许运动；这里同样给出可读原因并禁用操作。
+ */
+const healthIssue = computed(() => {
+  const device = props.device;
+  if (!device) return "";
+  if (!device.bodyOnline) return "本体 1315 状态超时（body_online=false）";
+  if (device.sdkNodeAvailable === false) return "本体 SDK 节点未就绪（sdk_node=false）";
+  if (device.estopSoftware === true) return "本体软件急停已触发";
+  if (device.ctrlSource === 3) return "控制权被其他遥控器/外部程序抢占";
+  return "";
+});
+/** 已接管、在线且本体健康才允许遥控 */
+const canControl = computed(() => holding.value && online.value && !healthIssue.value);
+/** 本体离线 / SDK 节点未就绪时不建议接管；急停允许先接管再解除 */
+const takeoverAllowed = computed(
+  () =>
+    online.value &&
+    props.device?.sdkNodeAvailable !== false &&
+    props.device?.estopSoftware !== true &&
+    !!props.device?.bodyOnline
+);
 
 /** 控制源与运动状态：判断「是否真的完全接管」的两个硬指标 */
 const ctrlMeta = computed(() => ctrlSourceMeta(props.device?.ctrlSource));
@@ -45,8 +68,15 @@ const ctrlByOther = computed(() => props.device?.ctrlSource === 3);
 const gaitReady = computed(() => canGait(props.device?.motionStatus));
 /** 接管了但本体/别的客户端还在拦着，摇杆按下去不会走 */
 const takeoverBlocked = computed(
-  () => holding.value && (ctrlByOther.value || !gaitReady.value)
+  () => holding.value && (!!healthIssue.value || ctrlByOther.value || !gaitReady.value)
 );
+
+/** 恢复类动作不要求接管、也不受急停/控制权门禁限制（与后端一致） */
+const RECOVERY_ACTIONS = ["clear_emergency_stop", "avoid_on", "avoid_off"];
+function actionDisabled(code: string) {
+  if (RECOVERY_ACTIONS.includes(code)) return !online.value;
+  return !canControl.value;
+}
 
 /** 定位状态：100 才算可以接任务，其余需要重定位或人工介入 */
 const locMeta = computed(() => locStatusMeta(props.device?.locStatus));
@@ -261,6 +291,8 @@ async function emergencyStop() {
           <AppIcon name="dog" />{{ device.deviceId }}
           <span class="tag blue">{{ device.model }}</span>
           <span v-if="holding" class="tag amber"><i class="dot" />已接管</span>
+          <span v-if="device.estopSoftware" class="tag orange">软件急停</span>
+          <span v-else-if="device.sdkNodeAvailable === false" class="tag orange">SDK未就绪</span>
         </div>
         <div class="muted" style="font-size: 11px; margin-top: 5px">
           {{ device.parkName || "未绑定园区" }}{{ device.zoneName ? ` · ${device.zoneName}` : "" }}
@@ -312,6 +344,14 @@ async function emergencyStop() {
             <span><AppIcon name="pin" />累计里程</span>
             <b>{{ device.odometer.toFixed(1) }}<small> km</small></b>
           </div>
+        </div>
+
+        <div v-if="healthIssue" class="loc-alert">
+          <AppIcon name="warn" />
+          <span>
+            本体健康检查未通过：<b>{{ healthIssue }}</b>，遥控与任务下发已暂停。
+            请先等待 SDK 节点就绪 / 解除急停 / 断开外部遥控器。
+          </span>
         </div>
 
         <div v-if="device.bodyOnline && !locReady" class="loc-alert">
@@ -436,7 +476,7 @@ async function emergencyStop() {
               <button
                 v-if="!holding"
                 class="btn primary sm"
-                :disabled="!online || busy"
+                :disabled="!takeoverAllowed || busy"
                 @click="takeOver"
               >
                 <AppIcon name="shield" />接管
@@ -455,7 +495,11 @@ async function emergencyStop() {
                 <span>机器模式</span>
                 <b>{{ device.robotMode || "—" }}</b>
               </div>
-              <p v-if="ctrlByOther" class="diag-tip">
+              <p v-if="healthIssue" class="diag-tip">
+                <AppIcon name="warn" />
+                本体健康检查未通过：{{ healthIssue }}。遥控/任务已暂停，请先处理本体状态。
+              </p>
+              <p v-else-if="ctrlByOther" class="diag-tip">
                 <AppIcon name="warn" />
                 硬件遥控器（或其他 SDK）仍持有控制权，本体不会执行平台摇杆。请关闭遥控器电源
                 / 按遥控器的「释放控制」键，然后点「释放」再重新接管。
@@ -500,7 +544,7 @@ async function emergencyStop() {
                 v-for="action in actions"
                 :key="action.code"
                 class="action-btn"
-                :disabled="!canControl"
+                :disabled="actionDisabled(action.code)"
                 @click="sendAction(action.code, action.label, action.danger)"
               >
                 <AppIcon :name="action.icon" />{{ action.label }}
@@ -517,13 +561,17 @@ async function emergencyStop() {
     </div>
 
     <div class="drawer-foot">
-      <button class="btn primary" :disabled="!online" @click="emit('command', '开始巡检')">
+      <button
+        class="btn primary"
+        :disabled="!online || !!healthIssue"
+        @click="emit('command', '开始巡检')"
+      >
         <AppIcon name="play" />开始巡检
       </button>
-      <button class="btn" :disabled="!online" @click="emit('command', '暂停任务')">
+      <button class="btn" :disabled="!online || !!healthIssue" @click="emit('command', '暂停任务')">
         <AppIcon name="pause" />暂停
       </button>
-      <button class="btn" :disabled="!online" @click="emit('command', '召回充电')">
+      <button class="btn" :disabled="!online || !!healthIssue" @click="emit('command', '召回充电')">
         <AppIcon name="charge" />召回充电
       </button>
       <button class="btn" @click="tab = 'teleop'">

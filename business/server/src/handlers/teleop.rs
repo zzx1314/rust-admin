@@ -88,10 +88,39 @@ async fn current_operator(state: &AppState, device: &Device) -> String {
 }
 
 /// 校验接管态，返回 Err 表示不允许下发遥控
-fn ensure_holding(device: &Device, operator: &str) -> Result<(), AppError> {
+/// 本体健康门禁：与客户端 `RobotState::motion_block_reason` 对齐。
+///
+/// 纯模拟设备没有本体，跳过这层校验（前端联调用）。
+pub(crate) fn ensure_ready(device: &Device) -> Result<(), AppError> {
     if device.status == "离线" {
         return Err(invalid("设备离线，无法远程控制"));
     }
+    if device.run_mode.as_deref() == Some("sim") {
+        return Ok(());
+    }
+    if !device.body_online {
+        return Err(invalid(
+            "本体未连接（body_online=false，1315 状态超时），无法远程控制",
+        ));
+    }
+    if device.sdk_node_available == Some(false) {
+        return Err(invalid(
+            "本体 SDK 节点未就绪（sdk_node=false），请等待初始化或重启本体算法节点",
+        ));
+    }
+    if device.estop_software == Some(true) {
+        return Err(invalid("本体软件急停已触发，请先点「解除急停」"));
+    }
+    if device.ctrl_source == 3 {
+        return Err(invalid(
+            "本体控制权被其他遥控器/外部程序抢占，请断开外部遥控后重试",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_holding(device: &Device, operator: &str) -> Result<(), AppError> {
+    ensure_ready(device)?;
     let Some(holder) = device.teleop_holder.as_deref() else {
         return Err(invalid("尚未接管，请先点击「远程接管」"));
     };
@@ -187,9 +216,9 @@ pub async fn take_over(
     Path(id): Path<i64>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     let device = load_device(&state, id).await?;
-    if device.status == "离线" {
-        return Err(invalid("设备离线，无法接管"));
-    }
+    // 接管同样要求本体健康：sdk_node 未就绪时拿到 1204 也动不了，
+    // 提前给出可读原因，避免页面上“已接管但摇杆没反应”。
+    ensure_ready(&device)?;
     let operator = current_operator(&state, &device).await;
 
     if let Some(holder) = device.teleop_holder.as_deref()
@@ -423,7 +452,7 @@ mod tests {
             video_type: "none".to_string(),
             teleop_holder: holder.map(str::to_string),
             teleop_at: at.map(str::to_string),
-            body_online: false,
+            body_online: true,
             run_mode: None,
             charging: false,
             robot_mode: None,
@@ -431,6 +460,8 @@ mod tests {
             active_map_id: None,
             ctrl_source: 0,
             motion_status: None,
+            estop_software: None,
+            sdk_node_available: None,
             created_at: String::new(),
             updated_at: String::new(),
         }
@@ -459,6 +490,34 @@ mod tests {
     fn accepts_fresh_holder() {
         let device = device_with(Some("operator@RD-001"), Some(&now()));
         assert!(ensure_holding(&device, "operator@RD-001").is_ok());
+    }
+
+    #[test]
+    fn rejects_when_body_offline() {
+        let mut device = device_with(Some("operator@RD-001"), Some(&now()));
+        device.body_online = false;
+        assert!(ensure_holding(&device, "operator@RD-001").is_err());
+    }
+
+    #[test]
+    fn rejects_when_sdk_node_not_ready() {
+        let mut device = device_with(Some("operator@RD-001"), Some(&now()));
+        device.sdk_node_available = Some(false);
+        assert!(ensure_holding(&device, "operator@RD-001").is_err());
+    }
+
+    #[test]
+    fn rejects_when_software_estop_active() {
+        let mut device = device_with(Some("operator@RD-001"), Some(&now()));
+        device.estop_software = Some(true);
+        assert!(ensure_holding(&device, "operator@RD-001").is_err());
+    }
+
+    #[test]
+    fn rejects_when_control_seized_by_remote() {
+        let mut device = device_with(Some("operator@RD-001"), Some(&now()));
+        device.ctrl_source = 3;
+        assert!(ensure_holding(&device, "operator@RD-001").is_err());
     }
 
     #[test]

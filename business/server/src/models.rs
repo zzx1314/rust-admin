@@ -176,6 +176,10 @@ pub struct Device {
     pub ctrl_source: i64,
     /// 运动状态：1315 `motion_status`（卧倒时摇杆不走）
     pub motion_status: Option<String>,
+    /// 1315 `estop.software`：软件急停是否按下；true 时禁止遥控/任务
+    pub estop_software: Option<bool>,
+    /// 1207 `modules[]` 的 `sdk_node`：本体算法节点是否就绪
+    pub sdk_node_available: Option<bool>,
     pub created_at: String,
     pub updated_at: String,
 }

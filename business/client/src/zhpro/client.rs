@@ -339,6 +339,9 @@ impl ZhProClient {
                                     .unwrap_or(0)
                             );
                         } else {
+                            // 1205 明确失败：本地标记必须失效，否则后续
+                            // take_control() 会误以为还持有控制权。
+                            *control_owned.lock().await = false;
                             warn!(
                                 "获取 RoamerX 控制权失败: {}",
                                 str_field(&env.data, "message")
@@ -524,6 +527,19 @@ impl ZhProClient {
             .map_err(|_| "bulkdata 通道已关闭".to_string())
     }
 
+    /// 让本地的“已持有 RoamerX”标记失效。
+    ///
+    /// 1205 失败、`ctrl_source` 变成 0/3、本体链路重建后都必须调用；否则
+    /// `take_control()` 会直接返回 Ok，后续 1304/4030/5000 会在没有 owner
+    /// 的情况下被网关丢弃，表面看却是“已下发成功”。
+    pub async fn invalidate_control(&self) {
+        let mut owned = self.control_owned.lock().await;
+        if *owned {
+            warn!("本地 RoamerX 控制权标记失效，下次操作会重新发 1204");
+        }
+        *owned = false;
+    }
+
     /// 确保持有 RoamerX 控制权（`1204`），已持有时直接返回
     ///
     /// 协议 §「4000 ~ 5999 自由数据透传区间」：gateway 的默认 owner 为 UINT32_MAX 时
@@ -552,6 +568,7 @@ impl ZhProClient {
                 return Ok(());
             }
         }
+        *self.control_owned.lock().await = false;
         Err("获取 RoamerX 控制权超时".to_string())
     }
 }

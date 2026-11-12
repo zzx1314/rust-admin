@@ -12,6 +12,18 @@ use serde_json::{Value, json};
 use sqlx::{QueryBuilder, SqlitePool};
 use tracing::{info, warn};
 
+/// 任务下发前的设备健康快照：
+/// (device_id, park_id, body_online, estop_software, sdk_node_available, ctrl_source, run_mode)
+type DeviceGateRow = (
+    String,
+    Option<i64>,
+    i64,
+    Option<i64>,
+    Option<i64>,
+    i64,
+    Option<String>,
+);
+
 const TASK_SELECT: &str = "SELECT t.id, t.task_code, t.task_name, t.task_type, t.execute_mode,
     t.level, t.device_id, d.device_id AS device_code, t.park_id, p.park_name, t.zone_id,
     z.zone_name, t.route_id, r.route_code, r.route_name, t.plan_start, t.plan_end,
@@ -300,18 +312,55 @@ async fn dispatch_task_or_error(state: &AppState, task: &Task) -> Result<(), App
     };
     // 任务园区必须与设备绑定的园区一致，否则会载错地图
     validate_device_park(&state.db, task.device_id, task.park_id).await?;
-    let device: Option<(String, Option<i64>)> =
-        sqlx::query_as("SELECT device_id, park_id FROM devices WHERE id = ?1")
-            .bind(device_pk)
-            .fetch_optional(&state.db)
-            .await?;
-    let Some((device_code, park_id)) = device else {
+    let device: Option<DeviceGateRow> = sqlx::query_as(
+        "SELECT device_id, park_id, COALESCE(body_online, 0), estop_software,
+                sdk_node_available, COALESCE(ctrl_source, 0), run_mode
+         FROM devices WHERE id = ?1",
+    )
+    .bind(device_pk)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((
+        device_code,
+        park_id,
+        body_online,
+        estop_software,
+        sdk_node_available,
+        ctrl_source,
+        run_mode,
+    )) = device
+    else {
         return Err(AppError::NotFound(format!("设备 {device_pk} 不存在")));
     };
     if park_id.is_none() {
         return Err(AppError::BadRequest(format!(
             "设备 {device_code} 尚未绑定园区，无法下发任务"
         )));
+    }
+    // 对齐官方 App 的 ready 门禁：本体节点/急停/控制权任一不满足都不创建任务，
+    // 否则 5000 可能被受理但一直不执行，最后拖到任务看门狗判异常。
+    // 纯模拟设备没有本体，不做这层校验（前端联调用）。
+    if run_mode.as_deref() != Some("sim") {
+        if body_online == 0 {
+            return Err(AppError::BadRequest(format!(
+                "设备 {device_code} 本体未连接（body_online=false，1315 状态超时），无法下发任务"
+            )));
+        }
+        if sdk_node_available == Some(0) {
+            return Err(AppError::BadRequest(format!(
+                "设备 {device_code} 本体 SDK 节点未就绪（sdk_node=false），请等待初始化或重启本体算法节点后再下发"
+            )));
+        }
+        if estop_software == Some(1) {
+            return Err(AppError::BadRequest(format!(
+                "设备 {device_code} 处于软件急停（estop.software=true），请先解除急停再下发任务"
+            )));
+        }
+        if ctrl_source == 3 {
+            return Err(AppError::BadRequest(format!(
+                "设备 {device_code} 的控制权被其他遥控器/外部程序抢占，请断开外部遥控后再下发任务"
+            )));
+        }
     }
     // 远程接管中不下发：本体停在通用（手动）模式，导航能力被判给手动控制，
     // 每个航点的 5000 都会被回 13897 resource conflict (capability busy)。

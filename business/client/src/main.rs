@@ -108,6 +108,12 @@ struct HeartbeatPayload {
     /// 1315 `motion_status`（stand_up / lie_down / walk …）：卧倒时摇杆走不动
     #[serde(skip_serializing_if = "Option::is_none")]
     motion_status: Option<String>,
+    /// 1315 `estop.software`：软件急停是否按下；平台据此禁止遥控/任务
+    #[serde(skip_serializing_if = "Option::is_none")]
+    estop_software: Option<bool>,
+    /// 1207 模块可用性：本体 SDK 节点是否就绪；false 时所有运动/导航指令都会被拒
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sdk_node_available: Option<bool>,
 }
 
 /// 任务进度上报
@@ -174,6 +180,8 @@ struct RobotState {
     motion_status: Option<String>,
     /// 软件急停是否处于按下态：1315 `estop.software`
     estop_software: Option<bool>,
+    /// 1207 `modules[]` 里的 `sdk_node` 是否可用；false 时本体不会执行运动/导航
+    sdk_node_available: Option<bool>,
     /// 前补光灯开关：1315 `fill_light.front`
     fill_light_front: Option<bool>,
 }
@@ -202,6 +210,7 @@ impl RobotState {
             robot_mode: None,
             motion_status: None,
             estop_software: None,
+            sdk_node_available: None,
             fill_light_front: None,
         }
     }
@@ -211,6 +220,37 @@ impl RobotState {
         self.body_status_at
             .map(|at| at.elapsed() < BODY_STATUS_FRESH)
             .unwrap_or(false)
+    }
+
+    /// 运动/任务前置条件（对齐官方 App 的 ready 门禁）。
+    ///
+    /// 官方 App 在 `sdk_node` 未就绪时显示“设备初始化中”，在 `ctrl_source`
+    /// 被外部程序/遥控器抢占时暂停遥控，在急停未解除时不允许运动；这里把
+    /// 同样的判断收敛到客户端，避免“平台显示已下发、本体实际拒收”。
+    fn motion_block_reason(&self, require_posture: bool) -> Option<String> {
+        if !self.body_status_fresh() {
+            return Some(
+                "本体 1315 状态超过 30s 未更新（本体离线或算法节点未启动）".to_string(),
+            );
+        }
+        if self.sdk_node_available == Some(false) {
+            return Some(
+                "本体 SDK 节点未就绪（sdk_node=false），请等待初始化或重启本体算法节点"
+                    .to_string(),
+            );
+        }
+        if self.estop_software == Some(true) {
+            return Some("本体软件急停已触发，请先点「解除急停」".to_string());
+        }
+        if self.ctrl_source == Some(3) {
+            return Some(
+                "本体控制权被其他遥控器/外部程序抢占，请断开外部遥控后重试".to_string(),
+            );
+        }
+        if require_posture && matches!(self.motion_status.as_deref(), Some("lie_down")) {
+            return Some("本体当前为卧倒姿态，请先点「站立」再执行".to_string());
+        }
+        None
     }
 
     /// 处理 1315 `kRobotStatus` 本体状态上报。
@@ -391,6 +431,8 @@ impl RobotState {
             map_id: self.active_map.clone(),
             ctrl_source: self.ctrl_source,
             motion_status: self.motion_status.clone(),
+            estop_software: self.estop_software,
+            sdk_node_available: self.sdk_node_available,
         }
     }
 }
@@ -1012,6 +1054,7 @@ fn spawn_zhpro_pump(
                     // 现场争议最多的两个问题是「它什么时候自己趴下的」和
                     // 「谁把控制权拿走了」，以前只能靠 journalctl 猜。
                     let mut notices: Vec<(String, Value)> = Vec::new();
+                    let mut invalidate_control = false;
                     {
                         let mut guard = state.lock().await;
                         let before_motion = guard.motion_status.clone();
@@ -1037,6 +1080,10 @@ fn spawn_zhpro_pump(
                         if before_ctrl != guard.ctrl_source
                             && let Some(source) = guard.ctrl_source
                         {
+                            // 控制权被外部遥控器/未知来源拿走时，本地的 1204
+                            // 标记必须失效；否则下一次“远程接管”会误以为还持有
+                            // RoamerX，跳过 1204，摇杆帧被网关静默丢弃。
+                            invalidate_control = matches!(source, 0 | 3);
                             notices.push((
                                 format!(
                                     "本体控制源变更: ctrl_source={source}\
@@ -1045,6 +1092,9 @@ fn spawn_zhpro_pump(
                                 json!({ "ctrlSource": source }),
                             ));
                         }
+                    }
+                    if invalidate_control {
+                        client.invalidate_control().await;
                     }
                     for (message, data) in notices {
                         let event = DeviceEventPayload {
@@ -1058,6 +1108,32 @@ fn spawn_zhpro_pump(
                             serde_json::to_value(event).unwrap_or_default(),
                         )
                         .await;
+                    }
+                }
+                T_MODULE_NOTIFY => {
+                    // 1207 modules[]：官方 App 用 sdk_node 是否可用决定是否让
+                    // 用户进入控制/任务；我们以前只打 DEBUG，导致 sdk_node=false
+                    // 时仍然照发 1302/1304/5000。
+                    if let Some(modules) = env.data.get("modules").and_then(Value::as_array) {
+                        let mut available = None;
+                        for module in modules {
+                            if module.get("name").and_then(Value::as_str) == Some("sdk_node") {
+                                available = module.get("available").and_then(Value::as_bool);
+                            }
+                        }
+                        if let Some(available) = available {
+                            let mut guard = state.lock().await;
+                            if guard.sdk_node_available != Some(available) {
+                                if available {
+                                    info!("本体 SDK 节点已就绪（sdk_node=true）");
+                                } else {
+                                    warn!(
+                                        "本体 SDK 节点未就绪（sdk_node=false）：运动/导航指令会被拒"
+                                    );
+                                }
+                                guard.sdk_node_available = Some(available);
+                            }
+                        }
                     }
                 }
                 T_CURRENT_POSE => {
@@ -1542,6 +1618,27 @@ async fn handle_server_message(
                 return;
             };
 
+            // 官方 App 在 sdk_node 未就绪 / 急停未解除 / 控制权被外部抢占 /
+            // 未站立时不会创建任务；这里在发 5000 之前统一拦掉，避免
+            // “5000 受理但本体不执行，最后等 600s 超时”。
+            let task_block = state.lock().await.motion_block_reason(true);
+            if let Some(reason) = task_block {
+                warn!("任务 {task_code} 拒绝下发: {reason}");
+                report_progress(
+                    out_tx,
+                    &task_code,
+                    "异常",
+                    0,
+                    Some(reason),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+                clear_active_task(active, state).await;
+                return;
+            }
+
             match mode {
                 TaskMode::Mapping => {
                     let session = Arc::new(MappingSession::new(client.clone()));
@@ -1778,10 +1875,42 @@ async fn handle_server_message(
                     if plan.end_task() == zhpro::route::EndTask::ReturnToCharge
                         && !robot_map.charge_point_exist
                     {
-                        warn!("该地图未设置回充点，返充将以 0x3672 被拒；建议先下发 4018");
+                        // 官方 App 在 charge_point_exist=false 时直接置灰返充入口；
+                        // 这里提前失败，避免跑完整条航线才在 5014 收到 0x3672。
+                        warn!("任务 {task_code} 拒绝下发：地图未设置回充点");
+                        report_progress(
+                            out_tx,
+                            &task_code,
+                            "异常",
+                            0,
+                            Some(
+                                "该地图未设置回充点（charge_point_exist=false），无法返航充电；\
+                                 请先在本体设置回充点（4018）或把结束动作改为「原地」"
+                                    .to_string(),
+                            ),
+                            None,
+                            None,
+                            None,
+                        )
+                        .await;
+                        clear_active_task(active, state).await;
+                        return;
                     }
                     // 用本体上报的真实目录路径（L2/M1 地图根不同，不能靠平台拼）
                     plan.map_path = robot_map.path.clone();
+
+                    // 对齐官方 cruise_mode：航段“沿道路”且本体地图有 map.geojson
+                    // 时用路网（map_type=3）；否则回退 2D 栅格。以前服务端硬编码
+                    // map_type=1，导致有路网的地图也被当成自由导航。
+                    if plan.road_network && robot_map.route_exist {
+                        if plan.map_type != 3 {
+                            info!("航段为「沿道路」且地图有路网，切换 5000 为路网导航（map_type=3）");
+                            plan.map_type = 3;
+                        }
+                    } else if plan.map_type == 3 && !robot_map.route_exist {
+                        warn!("航线请求路网导航，但本体地图没有 map.geojson，回退 2D 栅格");
+                        plan.map_type = 1;
+                    }
 
                     // 起步前定位守卫：不在地图上 / 定位丢失时不发 5000，直接报可读异常
                     let map_path = plan.resolve_map_path(&config.map_root);
@@ -1964,6 +2093,52 @@ async fn handle_server_message(
         "command" => {
             let command = msg.payload["command"].as_str().unwrap_or("unknown");
             info!("收到远程指令: {command}");
+
+            // 对齐官方 App 的 ready 门禁：恢复类动作（急停/解除急停/避障）
+            // 永远放行；运动/任务类动作必须先过 sdk_node、急停、控制权、
+            // 姿态检查，避免“平台显示已下发、本体直接拒收”。
+            let action = msg.payload["params"]["action"]
+                .as_str()
+                .or_else(|| msg.payload["action"].as_str())
+                .unwrap_or("");
+            let recovery = matches!(command, "急停" | "解除急停" | "避障开启" | "避障关闭")
+                || matches!(
+                    action,
+                    "emergency_stop" | "clear_emergency_stop" | "avoid_on" | "avoid_off"
+                );
+            let motion_command = matches!(
+                command,
+                "站立" | "卧倒" | "通用模式" | "原地模式" | "导航模式" | "开始巡检"
+                    | "暂停任务" | "继续任务" | "召回充电" | "重新定位"
+            ) || matches!(
+                action,
+                "stand_up" | "lie_down" | "generic_mode" | "in_place_mode"
+                    | "navigation_mode"
+            );
+            if !recovery && motion_command {
+                let require_posture = matches!(
+                    command,
+                    "通用模式" | "原地模式" | "导航模式" | "开始巡检" | "暂停任务"
+                        | "继续任务" | "召回充电"
+                ) || matches!(action, "generic_mode" | "in_place_mode" | "navigation_mode");
+                let command_block = state.lock().await.motion_block_reason(require_posture);
+                if let Some(reason) = command_block {
+                    warn!("指令 {command} 被拒绝: {reason}");
+                    let event = DeviceEventPayload {
+                        event_type: "error".to_string(),
+                        message: format!("指令 {command} 被拒绝: {reason}"),
+                        data: None,
+                    };
+                    send(
+                        out_tx,
+                        "event",
+                        serde_json::to_value(event).unwrap_or_default(),
+                    )
+                    .await;
+                    return;
+                }
+            }
+
             let Some(client) = zhpro.clone() else {
                 warn!("未连接本体，忽略远程指令");
                 return;
@@ -2113,6 +2288,14 @@ async fn handle_server_message(
             let Some(client) = zhpro.clone() else {
                 return;
             };
+            // 官方 App 的 JoystickOutboundGate：只有 ready + RoamerX 才放 1304。
+            // 不满足时先补一帧停车，避免最后一帧非零摇杆继续生效。
+            let teleop_block = state.lock().await.motion_block_reason(true);
+            if let Some(reason) = teleop_block {
+                debug!("摇杆被拒绝: {reason}");
+                zhpro::teleop::send_stop(&client).await;
+                return;
+            }
             if let Err(e) = zhpro::teleop::handle_teleop(&client, teleop, &msg.payload).await {
                 warn!("遥控摇杆处理失败: {e}");
             }

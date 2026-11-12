@@ -732,7 +732,10 @@ async fn body_actions_include_gait_modes() {
         .await
         .expect("演示数据应包含设备");
     // 模式切换和其它本体动作一样要求接管态：先把设备置为在线并接管
-    sqlx::query("UPDATE devices SET status = '在线待命' WHERE id = ?1")
+    sqlx::query(
+        "UPDATE devices SET status = '在线待命', body_online = 1,
+            sdk_node_available = 1, estop_software = 0 WHERE id = ?1",
+    )
         .bind(id)
         .execute(&state.db)
         .await
@@ -794,7 +797,10 @@ async fn task_dispatch_is_rejected_while_teleop_held() {
         .unwrap();
 
     // 接管要求设备在线
-    sqlx::query("UPDATE devices SET status = '在线待命' WHERE id = ?1")
+    sqlx::query(
+        "UPDATE devices SET status = '在线待命', body_online = 1,
+            sdk_node_available = 1, estop_software = 0 WHERE id = ?1",
+    )
         .bind(device_pk)
         .execute(&pool)
         .await
@@ -933,6 +939,14 @@ async fn locate_device_dispatches_relocalize_with_pose() {
     );
 
     // 3) 设备在线 → 指令带地图与位姿下发到设备
+    sqlx::query(
+        "UPDATE devices SET body_online = 1, sdk_node_available = 1,
+            estop_software = 0 WHERE id = ?1",
+    )
+    .bind(id)
+    .execute(&state.db)
+    .await
+    .unwrap();
     let (tx, mut rx) = tokio::sync::broadcast::channel(4);
     state.device_connections.write().await.insert(code.clone(), tx);
     let response = app

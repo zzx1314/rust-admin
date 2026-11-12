@@ -196,6 +196,23 @@ pub fn parse_flight_plan(payload: &Value, map_root: &str) -> Option<FlightPlan> 
         avoid_level,
         goal_tolerance: 0.25,
         end_task: end_task.as_str().to_string(),
+        // 官方 App 的 cruise_mode：航段写“沿道路”即走路网，其余走自由导航
+        road_network: route_data
+            .get("legs")
+            .and_then(Value::as_array)
+            .map(|legs| {
+                legs.iter()
+                    .any(|leg| leg.get("mode").and_then(Value::as_str) == Some("沿道路"))
+            })
+            .unwrap_or(false),
+        fence_path: payload
+            .get("fencePath")
+            .and_then(Value::as_str)
+            .or_else(|| route_data.get("fencePath").and_then(Value::as_str))
+            .or_else(|| route_data.get("fence_path").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
     };
     // mapPath 为空时按 map_root 推导一次，便于日志核对
     plan.map_path = plan.resolve_map_path(map_root);

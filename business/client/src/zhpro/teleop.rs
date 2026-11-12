@@ -332,6 +332,13 @@ pub async fn enter_navigation_mode(client: &ZhProClient) -> Result<String, Strin
     Ok("已取得控制权并切导航模式".to_string())
 }
 
+/// 立即补一帧全零摇杆，用于门禁拒绝/看门狗之外的兜底停车。
+pub async fn send_stop(client: &ZhProClient) {
+    let _ = client
+        .send(T_REMOTE_CONTROL, TeleopAxes::default().to_payload())
+        .await;
+}
+
 /// 急停：不要求接管态，直接发停车 + 急停命令
 async fn emergency_stop(client: &ZhProClient, teleop: &SharedTeleop) -> Result<String, String> {
     // 停车帧先到，再发急停命令，避免命令先到而车还在动

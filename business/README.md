@@ -636,13 +636,34 @@ service_token = "change-me"
 | `routeData` | `routes.route_data` | 前端三栏编辑器的 `points/legs/returnLeg`；`points[].x/y` 是地图米制（`coordFrame: "map"`） |
 | `map.mapId` | `routes.map_version_id` → 回退 `parks.map_version_id` | 冻结版本优先 |
 | `map.mapPath` | 由 `mapId` 派生（`@` → `_`） | 本体侧目录名 |
-| `map.mapType` | 固定 `1`（2D 栅格） | `3` 预留给 Route 路网 |
+| `map.mapType` | `map_versions.road_count > 0 ? 3 : 1` | 有路网段用 `3`（Route），否则 `1`（2D 栅格）；客户端还会用 `4013 map_route_exist` 再核对一次 |
 | `speedLimit` | `routes.default_speed` | m/s |
 | `avoidLevel` | 固定 `40`（全避障） | 10 关闭 / 20 仅急停 / 30 感知 / 40 全避障 |
 | `endTask` | 由 `executeMode` 推断 | `return_to_charge` / `return_to_start` / `none` |
 
 客户端（`client/`）把载荷翻译成智航 Pro 指令驱动机器狗本体，详见
 [`client/README.md`](client/README.md)。
+
+### 本体健康门禁（对齐官方 App）
+
+官方 App 在 `sdk_node` 未就绪时显示“设备初始化中”，在急停未解除 / 控制权被外部
+遥控器抢占 / 本体 1315 超时时不允许运动。客户端和服务端现在使用同一套门禁：
+
+| 字段 | 来源 | false / true 时的行为 |
+| --- | --- | --- |
+| `body_online` | 客户端心跳（1315 新鲜度） | false：设备状态落「故障」，任务下发 / 遥控 / 接管一律拒绝 |
+| `sdk_node_available` | 1207 `modules[]` 的 `sdk_node` | false：拒绝任务、遥控、站立/模式切换；提示重启本体算法节点 |
+| `estop_software` | 1315 `estop.software` | true：拒绝运动/任务；「解除急停」（1302 cmd=1）不受接管态限制 |
+| `ctrl_source` | 1315 `ctrl_source` | 3（硬件遥控器/外部程序）：拒绝遥控/任务，并让本地 1204 标记失效 |
+
+客户端在 `RobotState` 里保存这些状态，任务下发前、`command`/`teleop` 入口统一检查；
+服务端把同样的原因返回给控制台，不再出现“接口 200、本体实际拒收”。1205 失败、
+`ctrl_source` 变成 0/3 时客户端会清掉本地控制权标记，下一次接管会重新发 1204。
+
+航段写「沿道路」且本体地图存在 `map.geojson`（`4013 map_route_exist=true`）时，
+5000 使用路网导航（`map_type=3`）；否则回退 2D 栅格。`routeData.fencePath`
+（或 `payload.fencePath`）存在时，客户端会在 5000 `params.fence_path` 里带上围栏路径；
+空串/空白不会下发，避免固件回「导航指令非法」。
 
 ### 定位与「机器狗不在图上」
 
@@ -731,6 +752,8 @@ curl -X POST /api/devices/12/locate -H 'Content-Type: application/json' \
 | 硬件遥控器抢控制权 | `1315 ctrl_source = 3`（other），平台发 1204 也拿不回来 | 协议里没有禁用遥控器的消息：关掉遥控器电源 / 按它的「释放控制」键，再释放并重新接管 |
 | 摇杆帧太稀 | 浏览器 ~10Hz 的离散帧，本体侧看着像点动 | 客户端按协议建议 50Hz 重发（`teleop::spawn_republisher`），松手立即停车 |
 | 本体卧倒 / 锁定 | `1315 motion_status = lie_down / locked` | 先点「站立」，等 `motion_status` 变成 `stand_up` 再遥控 |
+| SDK 节点未就绪 | `1207 sdk_node=false` | 等待本体算法节点启动/重启后再接管；此时 1302/1304/5000 都不会执行 |
+| 软件急停未解除 | `1315 estop.software=true` | 先点「解除急停」（1302 cmd=1）；急停不受接管态限制，任何状态都能点 |
 
 因此「接管」的完整语义是：`1204` 拿到控制权 → `1302 cmd=60` 切通用模式 → 摇杆按 50Hz
 持续下发 → 用 `1315 ctrl_source / motion_status` 自证「真的接管到位」。设备抽屉的遥控页

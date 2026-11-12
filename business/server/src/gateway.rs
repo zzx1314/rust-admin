@@ -227,6 +227,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                             map_id: None,
                                             ctrl_source: None,
                                             motion_status: None,
+                                            estop_software: None,
+                                            sdk_node_available: None,
                                         });
                                     handle_heartbeat(&db, &state.config, did, &payload).await;
                                     send_msg(&tx, "heartbeat_ack", json!(HeartbeatAckPayload {
@@ -477,6 +479,7 @@ fn derive_device_status(
     park_bound: bool,
     charging: Option<bool>,
     battery: Option<i64>,
+    body_online: Option<bool>,
 ) -> Option<&'static str> {
     use crate::handlers::devices::DEVICE_STATUS_UNBOUND;
 
@@ -485,6 +488,14 @@ fn derive_device_status(
     }
     if current == "执行任务" {
         return None;
+    }
+    // 本体链路断开但客户端 WS 还在：以前仍显示「在线待命」，运维会以为能遥控。
+    // 对齐官方 App 的“设备初始化中/未连接”，这里落到「故障」，本体恢复后回待命。
+    if body_online == Some(false) {
+        return (current != "故障").then_some("故障");
+    }
+    if body_online == Some(true) && current == "故障" {
+        return Some("在线待命");
     }
     match charging {
         Some(true) => (current != "充电中").then_some("充电中"),
@@ -848,6 +859,27 @@ async fn handle_heartbeat(
         .execute(db)
         .await;
     }
+    // 软件急停 / SDK 节点：任务下发与遥控的硬门禁，NULL 表示老客户端未上报
+    if let Some(estop) = payload.estop_software {
+        let _ = sqlx::query(
+            "UPDATE devices SET estop_software = ?1, updated_at = ?2 WHERE device_id = ?3",
+        )
+        .bind(i64::from(estop))
+        .bind(&timestamp_clone)
+        .bind(&device_id_clone)
+        .execute(db)
+        .await;
+    }
+    if let Some(available) = payload.sdk_node_available {
+        let _ = sqlx::query(
+            "UPDATE devices SET sdk_node_available = ?1, updated_at = ?2 WHERE device_id = ?3",
+        )
+        .bind(i64::from(available))
+        .bind(&timestamp_clone)
+        .bind(&device_id_clone)
+        .execute(db)
+        .await;
+    }
     if let Some(task) = &payload.current_task {
         let _ = sqlx::query(
             "UPDATE devices SET current_task_name = ?1, updated_at = ?2 WHERE device_id = ?3",
@@ -951,6 +983,9 @@ async fn handle_heartbeat(
             park_id.is_some(),
             payload.charging,
             payload.battery,
+            payload
+                .body_online
+                .filter(|_| payload.mode.as_deref() != Some("sim")),
         )
     {
         ledger_changed |= sqlx::query(
@@ -1127,6 +1162,30 @@ async fn handle_task_progress(db: &SqlitePool, device_id: &str, payload: &TaskPr
     }
 }
 
+/// 设备事件 → 告警级别。
+///
+/// 以前所有 `fault` 都写成「警告」，4021 的 `severity=3`（如 13504 内部节点异常）
+/// 也被淹没；这里优先读事件 data 里的 `severity` / `level`，>=2 视为严重。
+fn event_alert_level(payload: &DeviceEventPayload) -> &'static str {
+    if payload.event_type == "error" {
+        return "严重";
+    }
+    let severity = payload
+        .data
+        .as_ref()
+        .and_then(|data| {
+            data.get("severity")
+                .or_else(|| data.get("level"))
+                .and_then(Value::as_i64)
+        })
+        .unwrap_or(0);
+    if payload.event_type == "fault" && severity >= 2 {
+        "严重"
+    } else {
+        "警告"
+    }
+}
+
 /// 设备事件处理
 async fn handle_device_event(db: &SqlitePool, device_id: &str, payload: &DeviceEventPayload) {
     let timestamp = now();
@@ -1150,7 +1209,7 @@ async fn handle_device_event(db: &SqlitePool, device_id: &str, payload: &DeviceE
                      '未处理', ?5, ?5)",
             )
             .bind(&alert_code)
-            .bind(if payload.event_type == "error" { "严重" } else { "警告" })
+            .bind(event_alert_level(payload))
             .bind(&payload.message)
             .bind(device_id)
             .bind(&timestamp)
@@ -1335,6 +1394,14 @@ pub async fn mark_offline_if_online(db: &SqlitePool, device_code: &str) -> bool 
 }
 
 /// 向指定设备发送远程指令
+/// 设备是否还有活跃的业务 WebSocket 连接。
+///
+/// 用于区分「设备离线，指令未送达」和「设备在线但本体不健康」两种错误：
+/// 前者保留原有 `wsDelivered=false` 语义，后者直接返回可读的健康门禁原因。
+pub async fn is_device_connected(connections: &DeviceConnections, device_id: &str) -> bool {
+    connections.read().await.contains_key(device_id)
+}
+
 pub async fn send_command_to_device(
     connections: &DeviceConnections,
     device_id: &str,
@@ -1448,7 +1515,10 @@ pub async fn is_device_online(connections: &DeviceConnections, device_id: &str) 
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_device_status, is_current_connection, release_connection};
+    use super::{
+        DeviceEventPayload, derive_device_status, event_alert_level, is_current_connection,
+        release_connection,
+    };
     use crate::gateway_types::PendingCommand;
     use std::collections::HashMap;
     use tokio::sync::broadcast;
@@ -1503,11 +1573,11 @@ mod tests {
     fn unbound_device_stays_pending() {
         // 未绑园区：不管充不充电，都必须保持「待绑定」，否则会被任务调度选中
         assert_eq!(
-            derive_device_status("待绑定", false, Some(true), Some(80)),
+            derive_device_status("待绑定", false, Some(true), Some(80), None),
             None
         );
         assert_eq!(
-            derive_device_status("充电中", false, Some(true), Some(80)),
+            derive_device_status("充电中", false, Some(true), Some(80), None),
             Some("待绑定")
         );
     }
@@ -1515,21 +1585,21 @@ mod tests {
     #[test]
     fn charging_comes_from_body_report() {
         assert_eq!(
-            derive_device_status("在线待命", true, Some(true), Some(88)),
+            derive_device_status("在线待命", true, Some(true), Some(88), None),
             Some("充电中")
         );
         assert_eq!(
-            derive_device_status("充电中", true, Some(false), Some(88)),
+            derive_device_status("充电中", true, Some(false), Some(88), None),
             Some("在线待命")
         );
         // 电量低但本体说没在充电：不再瞎猜成「充电中」
         assert_eq!(
-            derive_device_status("在线待命", true, Some(false), Some(5)),
+            derive_device_status("在线待命", true, Some(false), Some(5), None),
             None
         );
         // 电量低且老客户端没上报充电状态：兼容兜底
         assert_eq!(
-            derive_device_status("在线待命", true, None, Some(5)),
+            derive_device_status("在线待命", true, None, Some(5), None),
             Some("充电中")
         );
     }
@@ -1537,19 +1607,63 @@ mod tests {
     #[test]
     fn running_task_and_manual_statuses_are_kept() {
         assert_eq!(
-            derive_device_status("执行任务", true, Some(false), Some(60)),
+            derive_device_status("执行任务", true, Some(false), Some(60), None),
             None
         );
         assert_eq!(
-            derive_device_status("执行任务", true, Some(true), Some(60)),
+            derive_device_status("执行任务", true, Some(true), Some(60), None),
             None
         );
         assert_eq!(
-            derive_device_status("故障", true, Some(false), Some(60)),
+            derive_device_status("故障", true, Some(false), Some(60), None),
             None
         );
         assert_eq!(
-            derive_device_status("离线", true, Some(false), Some(60)),
+            derive_device_status("离线", true, Some(false), Some(60), None),
+            Some("在线待命")
+        );
+    }
+
+    #[test]
+    fn fault_severity_maps_to_alert_level() {
+        let event = |event_type: &str, data: Option<serde_json::Value>| DeviceEventPayload {
+            event_type: event_type.to_string(),
+            message: "内部节点异常".to_string(),
+            data,
+        };
+        // 13504 level=3 必须落「严重」，不能被普通 fault 淹没
+        assert_eq!(
+            event_alert_level(&event(
+                "fault",
+                Some(serde_json::json!({ "severity": 3 }))
+            )),
+            "严重"
+        );
+        assert_eq!(
+            event_alert_level(&event(
+                "fault",
+                Some(serde_json::json!({ "severity": 1 }))
+            )),
+            "警告"
+        );
+        assert_eq!(event_alert_level(&event("fault", None)), "警告");
+        assert_eq!(event_alert_level(&event("error", None)), "严重");
+    }
+
+    #[test]
+    fn body_offline_is_fault_and_recovers() {
+        // WS 还连着但本体 1315 超时：不能继续显示“在线待命”
+        assert_eq!(
+            derive_device_status("在线待命", true, Some(false), Some(80), Some(false)),
+            Some("故障")
+        );
+        assert_eq!(
+            derive_device_status("充电中", true, Some(true), Some(80), Some(false)),
+            Some("故障")
+        );
+        // 本体恢复后自动回到待命
+        assert_eq!(
+            derive_device_status("故障", true, Some(false), Some(80), Some(true)),
             Some("在线待命")
         );
     }

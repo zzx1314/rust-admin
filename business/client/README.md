@@ -311,6 +311,27 @@ journalctl -u robodog-device-client -f | grep 视频
   缺省时客户端退化为按 `executeMode` 文案推断。
 - `avoidLevel`：10 关闭 / 20 仅急停 / 30 感知 / 40 全避障。任务级生效，
   进入 STANDBY 后本体自动恢复 40。
+- `routeData.legs[].mode`：航段写「沿道路」且本体地图 `4013 map_route_exist=true`
+  时，5000 用路网导航（`map_type=3` / `goal_type=3`）；否则回退 `1`（2D 栅格）。
+  客户端不再直接信任服务端的 `mapType`，以本体地图实际能力为准。
+- `routeData.fencePath` / `payload.fencePath`：非空时作为 5000 `params.fence_path`
+  下发；空串/空白不下发，避免固件把它当非法路径（现场会回“导航指令非法”）。
+
+### 本体健康门禁
+
+任务下发、`command`、`teleop` 入口统一检查（对应官方 App 的 ready 门禁）：
+
+| 状态 | 判据 | 拒绝时提示 |
+| --- | --- | --- |
+| 本体 1315 超时 | `body_online=false` | 本体离线或算法节点未启动 |
+| SDK 节点未就绪 | `1207 sdk_node=false` | 等待初始化 / 重启本体算法节点 |
+| 软件急停 | `1315 estop.software=true` | 先点「解除急停」（1302 cmd=1） |
+| 控制权被抢占 | `1315 ctrl_source=3` | 断开外部遥控器后重试 |
+| 卧倒姿态 | `1315 motion_status=lie_down` | 先点「站立」再执行任务/导航模式 |
+
+急停/解除急停/避障开关属于恢复类动作，不受接管态和上述门禁限制。
+1205 失败、`ctrl_source` 变成 0/3 时客户端会清掉本地 `control_owned` 标记，
+下一次接管/定位/任务会重新发 1204，不会再“误以为还持有控制权”。
 
 ## 上报载荷
 

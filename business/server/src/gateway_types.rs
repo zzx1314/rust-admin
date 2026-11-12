@@ -74,6 +74,10 @@ pub struct HeartbeatPayload {
     pub ctrl_source: Option<i64>,
     /// 1315 `motion_status`：stand_up / lie_down / walk …（卧倒时走不动）
     pub motion_status: Option<String>,
+    /// 1315 `estop.software`：软件急停是否按下
+    pub estop_software: Option<bool>,
+    /// 1207 `modules[]` 的 `sdk_node`：本体算法节点是否就绪
+    pub sdk_node_available: Option<bool>,
 }
 
 /// 服务端 → 客户端：心跳确认

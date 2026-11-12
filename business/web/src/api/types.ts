@@ -95,6 +95,10 @@ export interface Device {
   ctrlSource: number;
   /** 运动状态：1315 `motion_status`（卧倒时摇杆走不动） */
   motionStatus: string | null;
+  /** 1315 `estop.software`：软件急停是否按下 */
+  estopSoftware: boolean | null;
+  /** 1207 `sdk_node`：本体算法节点是否就绪 */
+  sdkNodeAvailable: boolean | null;
   createdAt: string;
   updatedAt: string;
 }

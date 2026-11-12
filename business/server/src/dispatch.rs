@@ -37,8 +37,16 @@ pub fn resolve_end_task(execute_mode: Option<&str>) -> &'static str {
     }
 }
 
-/// `resolve_map` 读取的地图行：(id, park, map_name, version, file_path, source_ref)
-type MapRow = (String, i64, String, String, Option<String>, Option<String>);
+/// `resolve_map` 读取的地图行：(id, park, map_name, version, file_path, source_ref, road_count)
+type MapRow = (
+    String,
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    i64,
+);
 
 /// 解析任务应绑定的地图
 async fn resolve_map(db: &SqlitePool, task: &Task) -> Result<Option<DispatchMap>, AppError> {
@@ -48,7 +56,8 @@ async fn resolve_map(db: &SqlitePool, task: &Task) -> Result<Option<DispatchMap>
     // 合成名在本体上可能根本不存在（目录名是建图会话名），客户端会用 4013
     // 列表核对，对不上就不发 5000。
     let row: Option<MapRow> = sqlx::query_as(
-        "SELECT mv.id, mv.park_id, mv.map_name, mv.version, mv.file_path, mv.source_ref
+        "SELECT mv.id, mv.park_id, mv.map_name, mv.version, mv.file_path, mv.source_ref,
+                COALESCE(mv.road_count, 0)
          FROM map_versions mv
          WHERE mv.id = COALESCE(
              (SELECT map_version_id FROM routes WHERE id = ?1),
@@ -60,7 +69,7 @@ async fn resolve_map(db: &SqlitePool, task: &Task) -> Result<Option<DispatchMap>
     .fetch_optional(db)
     .await?;
 
-    let Some((map_id, park_id, map_name, version, _file_path, source_ref)) = row else {
+    let Some((map_id, park_id, map_name, version, _file_path, source_ref, road_count)) = row else {
         return Ok(None);
     };
     let map_dir = source_ref
@@ -72,7 +81,9 @@ async fn resolve_map(db: &SqlitePool, task: &Task) -> Result<Option<DispatchMap>
         map_path: map_dir.clone(),
         map_dir,
         map_id,
-        map_type: 1,
+        // 有路网段的地图按 3（Route）下发；客户端还会用 4013 的
+        // map_route_exist 再核对一次，缺失时回退 1（2D 栅格）。
+        map_type: if road_count > 0 { 3 } else { 1 },
         park_id,
         map_name,
         version,

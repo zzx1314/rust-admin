@@ -171,6 +171,12 @@ pub struct FlightPlan {
     /// 结束后动作
     #[serde(default)]
     pub end_task: String,
+    /// 航段是否为「沿道路」：决定 5000 用 2D 栅格还是路网地图
+    #[serde(default)]
+    pub road_network: bool,
+    /// 电子围栏文件路径；空表示不带围栏
+    #[serde(default)]
+    pub fence_path: Option<String>,
 }
 
 fn default_map_type() -> u32 {
@@ -293,7 +299,7 @@ pub(crate) fn navigation_task_payload(
     point: &Waypoint,
     need_locate: bool,
 ) -> Value {
-    let params = json!({
+    let mut params = json!({
         "map_path": plan.resolve_map_path(super::mapping::DEFAULT_MAP_ROOT),
         // 同一条航线内复用已加载定位，避免每点重载地图
         "need_locate": need_locate,
@@ -307,6 +313,10 @@ pub(crate) fn navigation_task_payload(
             "theta": 0.2
         }
     });
+    // 有围栏才带 fence_path：空串会被固件当成非法路径（实测回“导航指令非法”）
+    if let Some(fence) = plan.fence_path.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        params["fence_path"] = json!(fence);
+    }
     json!({
         "kind": TaskKind::Navigation.code(),
         "name": format!("{} · 前往 {}", plan.task_name, point.name),
@@ -783,6 +793,8 @@ mod tests {
             avoid_level: 40,
             goal_tolerance: 0.25,
             end_task: "返回充电".to_string(),
+            road_network: false,
+            fence_path: None,
         }
     }
 
@@ -911,5 +923,25 @@ mod tests {
         let vz = params["speed_limit"]["vz"].as_f64().unwrap_or_default();
         assert!(vz > 0.0, "speed_limit.vz 是角速度上限，0 会禁止转向: {vz}");
         assert!(params["speed_limit"]["vx"].as_f64().unwrap_or_default() > 0.0);
+    }
+
+    #[test]
+    fn navigation_payload_carries_road_network_and_fence() {
+        let mut p = plan("往返");
+        p.map_type = 3;
+        p.fence_path = Some("/ota/alg_data/map/history_map/fence.geojson".to_string());
+        let data = navigation_task_payload(&p, &p.waypoints[0], false);
+        let params = &data["params"];
+        assert_eq!(params["map_type"], 3.0);
+        assert_eq!(params["goal_type"], 3.0, "路网导航 goal_type 必须同步为 3");
+        assert_eq!(
+            params["fence_path"],
+            "/ota/alg_data/map/history_map/fence.geojson"
+        );
+
+        // 空串/空白不能下发，否则固件会回“导航指令非法”
+        p.fence_path = Some("   ".to_string());
+        let data = navigation_task_payload(&p, &p.waypoints[0], false);
+        assert!(data["params"].get("fence_path").is_none());
     }
 }
