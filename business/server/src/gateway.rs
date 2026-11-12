@@ -957,7 +957,7 @@ async fn dispatch_pending_tasks(
             t.device_id, d.device_id AS device_code, t.park_id, p.park_name, t.zone_id,
             z.zone_name, t.route_id, r.route_code, r.route_name, t.plan_start, t.plan_end,
             t.task_status, t.progress, t.dispatch_policy, t.description, t.robot_task_id,
-            t.robot_stage, t.robot_updated_at, t.created_at, t.updated_at
+            t.robot_stage, t.robot_updated_at, t.created_at, t.updated_at, t.created_by
          FROM tasks t
          LEFT JOIN devices d ON d.id = t.device_id
          LEFT JOIN parks p ON p.id = t.park_id
