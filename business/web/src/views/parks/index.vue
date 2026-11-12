@@ -102,6 +102,14 @@ const activeMapOptions = computed(() => {
   return mapsOfPark(parkId).filter(item => item.status !== "已归档");
 });
 
+/**
+ * 设备地图：机器人回传的地图先只跟设备挂钩（`parkId` 为空），
+ * 设备绑定人登录后在这里挑一张绑为本园区基线（选中即认领到本园区）。
+ */
+const deviceMapOptions = computed(() =>
+  maps.value.filter(item => !item.parkId && item.status !== "已归档")
+);
+
 const selectedMap = computed(() => mapOf(parkForm.mapVersionId));
 
 const isBackendSelection = computed(() =>
@@ -633,6 +641,17 @@ onMounted(load);
               {{ map.id }} · {{ map.status }} · {{ map.frameId }}
             </option>
             <optgroup
+              v-if="deviceMapOptions.length"
+              label="我的设备地图 · 未归属园区（选中即绑定到本园区）"
+            >
+              <option v-for="map in deviceMapOptions" :key="map.id" :value="map.id">
+                {{ map.id }} · {{ map.status }} ·
+                {{ map.deviceCode ? `设备 ${map.deviceCode}` : "设备未知" }} ·
+                {{ map.ownerUsername ? `归属 ${map.ownerUsername}` : "归属未知" }} ·
+                {{ map.sourceRef || "未登记本体路径" }}
+              </option>
+            </optgroup>
+            <optgroup
               v-if="availableBackendMaps.length"
               label="backend 地图库 · ROS / 激光雷达地图"
             >
@@ -665,7 +684,7 @@ onMounted(load);
         <div class="field" style="grid-column: 1 / -1">
           <div class="rt-hint" style="margin: 0">
             建档时必须确定坐标系（frame_id / 原点 / 分辨率 / CRS / 楼层），并登记地图基线状态。只有「已发布」的地图版本才允许创建巡检路线；建图完成后再发布不可变版本。<br />
-            选择「backend 地图库」中的 ROS 地图时，会在保存园区时导入到本业务库，并自动绑定为当前基线。
+            地图只跟设备有关系：机器人建图回传的地图先入库为「设备地图」（未归属园区），设备绑定人在这里挑一张即绑定为本园区基线；也可以选「backend 地图库」中的 ROS 地图，保存园区时会导入到本业务库。
           </div>
         </div>
         <div class="field">

@@ -106,6 +106,22 @@ pub async fn create_park(
         .bind(&park_code)
         .fetch_one(&state.db)
         .await?;
+    // 建档时选的地图基线：地图跟着设备走，设备地图默认 `park_id IS NULL`，
+    // 这里把它认领到新园区，园区才会真正拿到「当前生效基线」。
+    if let Some((map_version_id, map_status)) =
+        resolve_park_map(&state, id, payload.map_version_id).await?
+        && map_version_id.is_some()
+    {
+        sqlx::query(
+            "UPDATE parks SET map_version_id = ?1, map_status = ?2, updated_at = ?3 WHERE id = ?4",
+        )
+        .bind(&map_version_id)
+        .bind(&map_status)
+        .bind(&timestamp)
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+    }
     Ok(ApiResponse::ok(fetch_park(&state, id).await?))
 }
 
@@ -217,6 +233,9 @@ async fn fetch_park(state: &AppState, id: i64) -> Result<Park, AppError> {
 
 /// 解析园区表单提交的地图基线绑定。
 /// 返回 `None` 表示请求未携带该字段，保留原值；`Some((None, status))` 表示解绑。
+///
+/// 地图先跟设备、再跟园区：设备刚回传的地图 `park_id IS NULL`，建档时被选中的那张
+/// 在这里被「认领」到本园区；已经属于其他园区的地图仍然拒绝，避免两个园区抢同一张图。
 pub(crate) async fn resolve_park_map(
     state: &AppState,
     park_id: i64,
@@ -232,17 +251,29 @@ pub(crate) async fn resolve_park_map(
     if requested == "__none__" {
         return Ok(Some((None, "未绑定".to_string())));
     }
-    let map = sqlx::query_as::<_, (i64, String)>(
+    let map = sqlx::query_as::<_, (Option<i64>, String)>(
         "SELECT park_id, status FROM map_versions WHERE id = ?1",
     )
     .bind(requested)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::BadRequest(format!("地图基线 {requested} 不存在")))?;
-    if map.0 != park_id {
-        return Err(AppError::BadRequest(
-            "地图基线不属于该园区，无法绑定".to_string(),
-        ));
+    match map.0 {
+        Some(owner) if owner != park_id => {
+            return Err(AppError::BadRequest(
+                "地图基线不属于该园区，无法绑定".to_string(),
+            ));
+        }
+        // 设备地图还没归属园区：绑定动作就是认领
+        None => {
+            sqlx::query("UPDATE map_versions SET park_id = ?1 WHERE id = ?2")
+                .bind(park_id)
+                .bind(requested)
+                .execute(&state.db)
+                .await?;
+            tracing::info!("设备地图 {requested} 已归属园区 {park_id}");
+        }
+        Some(_) => {}
     }
     let status = if map.1 == "部分标定" {
         "部分标定".to_string()

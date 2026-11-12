@@ -1309,13 +1309,13 @@ async fn handle_server_message(
     match msg.msg_type.as_str() {
         "register_ack" => {
             if msg.payload["success"].as_bool().unwrap_or(false) {
-                // 服务端在注册回执里下发设备绑定的园区，建图回传时用它作为归属
+                // 服务端在注册回执里下发设备绑定的园区；没绑也能用，只是地图会先不归属园区
                 let park_id = msg.payload["parkId"].as_i64();
                 *config.bound_park_id.lock().await = park_id;
                 match park_id {
                     Some(park_id) => info!("设备注册成功: {}（园区 {park_id}）", config.device_id),
-                    None => warn!(
-                        "设备注册成功: {}，但尚未绑定园区：请在控制台绑定，否则建图不会被回传",
+                    None => info!(
+                        "设备注册成功: {}（未绑定园区：地图会先入库为设备地图，创建园区时再挑图绑定）",
                         config.device_id
                     ),
                 }
@@ -1365,7 +1365,7 @@ async fn handle_server_message(
                     "园区绑定已更新: parkId={park_id} {}",
                     msg.payload["parkName"].as_str().unwrap_or("")
                 ),
-                None => warn!("园区绑定已解除，建图将不再自动回传"),
+                None => warn!("园区绑定已解除，地图会先入库为设备地图，创建园区时再挑图绑定"),
             }
         }
 
@@ -1813,7 +1813,16 @@ async fn handle_server_message(
                             .await
                             .map(|_| "已请求返回充电点".to_string())
                     }
-                    "同步地图" => sync_maps_from_robot(config, &client, out_tx).await,
+                    "同步地图" => {
+                        // 服务端在指令里带上了台账当前园区归属（`params.params.parkId`），
+                        // 显式 null 表示设备确实没绑园区，不能拿本地缓存的旧值充数
+                        let outer = msg.payload.get("params");
+                        let params = outer.and_then(|p| p.get("params")).or(outer);
+                        let park_hint = params
+                            .and_then(|p| p.get("parkId"))
+                            .map(|value| value.as_i64());
+                        sync_maps_from_robot(config, &client, out_tx, park_hint).await
+                    }
                     "重新定位" => {
                         // 服务端把指令附加参数包在 `params.params`（见 server 的 push_command），
                         // 这里兼容直接平铺在 `params` 上的写法
@@ -1993,15 +2002,12 @@ async fn upload_mapping_to_zentai(config: &Config, saved: &MappingSaved) -> Uplo
     if !config.upload_map {
         return UploadOutcome::Skipped("已用 --no-upload-map 关闭".to_string());
     }
+    // 园区是可选的：地图只跟设备有关系，设备没绑园区也照样回传，
+    // 设备绑定人之后创建园区时再从自己的设备地图里挑一张绑定。
     let park_id = match config.park_id {
         Some(park_id) => Some(park_id),
         // 未显式指定时，使用注册回执里的园区绑定
         None => *config.bound_park_id.lock().await,
-    };
-    let Some(park_id) = park_id else {
-        return UploadOutcome::Skipped(
-            "设备尚未绑定园区（请在控制台设备管理里绑定，或使用 --park-id）".to_string(),
-        );
     };
     let Some(map_dir) = saved.dir_name() else {
         return UploadOutcome::Failed {
@@ -2035,9 +2041,9 @@ async fn upload_mapping_to_zentai(config: &Config, saved: &MappingSaved) -> Uplo
         username: config.api_username.clone(),
         password: config.api_password().to_string(),
         device_id: config.device_id.clone(),
-        park_id: Some(park_id),
+        park_id,
         map_name: config.ingest_map_name.clone(),
-        bind: true,
+        bind: park_id.is_some(),
     };
     // 4001 偶尔只给目录名不给绝对路径；补一个与 4012 一致的文件服务路径，
     // 保证自动回传与手动同步使用同一个 sourceRef 去重。
@@ -2053,16 +2059,21 @@ async fn upload_mapping_to_zentai(config: &Config, saved: &MappingSaved) -> Uplo
 }
 
 /// 中台设备页「同步地图」：4012 拉取地图列表，只下载业务库缺失的地图并回传。
+///
+/// 不要求设备绑定园区：地图跟着设备走，园区在控制台创建时再挑图。
 async fn sync_maps_from_robot(
     config: &Config,
     client: &Arc<ZhProClient>,
     out_tx: &mpsc::Sender<WsMessage>,
+    park_hint: Option<Option<i64>>,
 ) -> Result<String, String> {
-    let park_id = match config.park_id {
+    // 服务端下发的园区优先；没有就用本地配置 / 注册回执里的绑定
+    let park_id = match park_hint {
         Some(park_id) => park_id,
-        None => (*config.bound_park_id.lock().await).ok_or_else(|| {
-            "设备尚未绑定园区，无法确定地图归属；请先在控制台绑定园区".to_string()
-        })?,
+        None => match config.park_id {
+            Some(park_id) => Some(park_id),
+            None => *config.bound_park_id.lock().await,
+        },
     };
     let robot_host = config.robot.clone().unwrap_or_default();
     let file_base = mapupload::resolve_file_base(
@@ -2082,11 +2093,11 @@ async fn sync_maps_from_robot(
         username: config.api_username.clone(),
         password: config.api_password().to_string(),
         device_id: config.device_id.clone(),
-        park_id: Some(park_id),
+        park_id,
         map_name: None,
         bind: false,
     };
-    let report = mapupload::sync_robot_maps(&http, &ingest, &file_base, park_id, &maps).await;
+    let report = mapupload::sync_robot_maps(&http, &ingest, &file_base, &maps).await;
     let summary = report.summary();
     let event = DeviceEventPayload {
         event_type: if report.failed > 0 { "error" } else { "info" }.to_string(),

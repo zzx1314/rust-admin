@@ -40,8 +40,11 @@ pub struct Park {
 #[serde(rename_all = "camelCase")]
 pub struct MapVersion {
     pub id: String,
-    pub park_id: i64,
+    /// 归属园区；`None` 表示这张设备地图还没绑定园区（创建园区时挑选后才写入）
+    pub park_id: Option<i64>,
     pub park_name: Option<String>,
+    /// 采集这张地图的设备编号（`devices.device_id`），地图只跟设备有关系
+    pub device_code: Option<String>,
     pub map_name: String,
     pub version: String,
     pub frame_id: Option<String>,
@@ -468,6 +471,12 @@ pub struct MapQuery {
     pub park_id: Option<i64>,
     pub status: Option<String>,
     pub source: Option<String>,
+    /// 只看某台设备采的地图
+    pub device_code: Option<String>,
+    /// 只看尚未归属园区的设备地图（创建园区挑图用）
+    pub unbound: Option<bool>,
+    /// 按中台用户过滤（管理员可指定他人）；非管理员强制看自己
+    pub owner_user_id: Option<i64>,
 }
 
 /// 中台地图库筛选：按业务园区编码 / 归属用户过滤

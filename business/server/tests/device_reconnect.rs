@@ -254,6 +254,30 @@ async fn offline_device_reports_actionable_error() {
 }
 
 #[tokio::test]
+async fn unbound_device_can_still_sync_maps() {
+    // 地图只跟设备有关系：设备没绑园区，中台「同步地图」也必须能下发。
+    let (state, _temp) = test_state().await;
+    sqlx::query("UPDATE devices SET park_id = NULL, zone_id = NULL WHERE device_id = ?1")
+        .bind(DEVICE_CODE)
+        .execute(&state.db)
+        .await
+        .expect("解绑设备失败");
+    let port = spawn_server(state.clone()).await;
+    let mut ws = register_device(port, DEVICE_CODE).await;
+
+    let (status, body) = sync_maps(&state, DEVICE_CODE).await;
+    assert_eq!(status, StatusCode::OK, "未绑定园区的设备也能同步地图: {body}");
+    assert_eq!(body["data"]["dispatched"], true);
+    assert_eq!(body["data"]["parkId"], Value::Null);
+
+    let command = next_msg(&mut ws, "command").await;
+    assert_eq!(command["payload"]["command"], "同步地图");
+    assert_eq!(command["payload"]["params"]["parkId"], Value::Null);
+    assert_eq!(command["payload"]["params"]["deviceId"], DEVICE_CODE);
+    close(ws).await;
+}
+
+#[tokio::test]
 async fn stale_online_ledger_state_is_healed() {
     // 历史脏数据：进程重启 / 旧清理竞态留下的「在线待命」但连接池为空
     let (state, _temp) = test_state().await;

@@ -221,8 +221,11 @@ export interface Route {
 
 export interface MapVersion {
   id: string;
-  parkId: number;
+  /** 归属园区；`null` 表示还没绑定园区的设备地图 */
+  parkId: number | null;
   parkName: string | null;
+  /** 采集这张地图的设备编号 */
+  deviceCode: string | null;
   mapName: string;
   version: string;
   frameId: string | null;

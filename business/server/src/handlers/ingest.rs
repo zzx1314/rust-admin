@@ -64,26 +64,36 @@ pub async fn ingest_map(
     if package.len() > 256 * 1024 * 1024 {
         return Err(AppError::BadRequest("地图包超过 256MB 上限".to_string()));
     }
-    let Some(park_id) = request.park_id else {
-        return Err(AppError::BadRequest(
-            "缺少 parkId，无法确定地图归属园区（请先为设备绑定园区）".to_string(),
-        ));
+    // 园区是可选的：地图只跟设备有关系。设备还没绑定园区时先按「设备地图」入库
+    // （`park_id IS NULL`），设备绑定人登录后创建园区时再从自己的设备地图里挑一张绑定。
+    let park_ref = match request.park_id {
+        Some(park_id) => {
+            let park: Option<(String, String)> =
+                sqlx::query_as("SELECT park_code, park_name FROM parks WHERE id = ?1")
+                    .bind(park_id)
+                    .fetch_optional(&state.db)
+                    .await?;
+            let Some((park_code, park_name)) = park else {
+                return Err(AppError::NotFound(format!("园区 {park_id} 不存在")));
+            };
+            Some(ingest::ParkRef {
+                code: park_code,
+                name: park_name,
+            })
+        }
+        None => None,
     };
-    let park: Option<(String, String)> =
-        sqlx::query_as("SELECT park_code, park_name FROM parks WHERE id = ?1")
-            .bind(park_id)
-            .fetch_optional(&state.db)
-            .await?;
-    let Some((park_code, park_name)) = park else {
-        return Err(AppError::NotFound(format!("园区 {park_id} 不存在")));
-    };
-    let park_ref = ingest::ParkRef {
-        code: park_code,
-        name: park_name,
-    };
+    let device_code = request
+        .device_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
 
-    // 去重：同一园区下同一机器人地图路径只入库一次。
-    // 自动回传（4001）与中台手动同步（4012 + 文件服务）共用这个判断。
+    // 去重：同一台设备上同一机器人地图路径只入库一次。
+    // 自动回传（4001）与中台手动同步（4012 + 文件服务）共用这个判断；
+    // 设备未必绑定园区，所以按 `device_code` 而不按园区判重，
+    // 升级前入库的历史行没有 device_code，一并算已同步（宁可漏传不重传）。
     //
     // 「已同步」还要求中台那张地图仍存在：中台是地图主库，图被中台删掉（软删）后
     // 业务库里的历史行不能算已同步，否则这张图在中台永远回不来。
@@ -95,13 +105,25 @@ pub async fn ingest_map(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let existing: Option<(String, Option<String>)> = sqlx::query_as(
-            "SELECT id, source_id FROM map_versions WHERE park_id = ?1 AND source_ref = ?2 LIMIT 1",
-        )
-        .bind(park_id)
-        .bind(source_ref)
-        .fetch_optional(&state.db)
-        .await?;
+        let existing: Option<(String, Option<String>)> = match device_code.as_deref() {
+            Some(code) => {
+                sqlx::query_as(
+                    "SELECT id, source_id FROM map_versions
+                     WHERE (device_code = ?1 OR device_code IS NULL) AND source_ref = ?2
+                     ORDER BY CASE WHEN device_code = ?1 THEN 0 ELSE 1 END LIMIT 1",
+                )
+                .bind(code)
+                .bind(source_ref)
+                .fetch_optional(&state.db)
+                .await?
+            }
+            None => {
+                sqlx::query_as("SELECT id, source_id FROM map_versions WHERE source_ref = ?1 LIMIT 1")
+                    .bind(source_ref)
+                    .fetch_optional(&state.db)
+                    .await?
+            }
+        };
         if let Some((map_id, source_id)) = existing {
             let stale_zentai_id = source_id
                 .as_deref()
@@ -182,7 +204,7 @@ pub async fn ingest_map(
         &state.config,
         &http,
         &request,
-        &park_ref,
+        park_ref.as_ref(),
         &file_name,
         &package,
         owner_user_id,
@@ -216,14 +238,16 @@ pub async fn ingest_map(
     });
 
     sqlx::query(
-        "INSERT INTO map_versions (id, park_id, map_name, version, frame_id, crs, origin,
-            resolution, floors, road_count, no_go_count, status, map_hash, map_width,
+        "INSERT INTO map_versions (id, park_id, device_code, map_name, version, frame_id, crs,
+            origin, resolution, floors, road_count, no_go_count, status, map_hash, map_width,
             map_height, note, published_at, created_at, source, source_id, file_name,
             file_path, file_size, owner_user_id, source_ref)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, '1F', 0, 0, '部分标定', ?9, ?10, ?11,
-            ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, '1F', 0, 0, '部分标定', ?10, ?11, ?12,
+            ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
          ON CONFLICT(id) DO UPDATE SET
-            park_id = excluded.park_id,
+            -- 设备地图首次回传时园区为空，但重新同步不应把已有园区归属冲掉
+            park_id = COALESCE(excluded.park_id, map_versions.park_id),
+            device_code = COALESCE(excluded.device_code, map_versions.device_code),
             map_name = excluded.map_name,
             map_hash = excluded.map_hash,
             map_width = excluded.map_width,
@@ -234,12 +258,13 @@ pub async fn ingest_map(
             file_name = excluded.file_name,
             file_path = excluded.file_path,
             file_size = excluded.file_size,
-            owner_user_id = excluded.owner_user_id,
+            owner_user_id = COALESCE(excluded.owner_user_id, map_versions.owner_user_id),
             source_id = excluded.source_id,
             source_ref = excluded.source_ref",
     )
     .bind(&map_id)
-    .bind(park_id)
+    .bind(request.park_id)
+    .bind(&device_code)
     .bind(&zentai.map_name)
     .bind(&version)
     .bind(format!("ros_map_{} / 局部米制", zentai.id))
@@ -268,18 +293,23 @@ pub async fn ingest_map(
     .execute(&state.db)
     .await?;
 
-    // 可选：绑定为园区当前基线
+    // 可选：绑定为园区当前基线（设备未绑定园区时没有可绑的对象，忽略）
     if request.bind {
-        sqlx::query(
-            "UPDATE parks SET map_version_id = ?1, map_status = '部分标定', updated_at = ?2
-             WHERE id = ?3",
-        )
-        .bind(&map_id)
-        .bind(&timestamp)
-        .bind(park_id)
-        .execute(&state.db)
-        .await?;
-        info!("地图 {map_id} 已绑定为园区 {park_id} 的当前基线");
+        match request.park_id {
+            Some(park_id) => {
+                sqlx::query(
+                    "UPDATE parks SET map_version_id = ?1, map_status = '部分标定', updated_at = ?2
+                     WHERE id = ?3",
+                )
+                .bind(&map_id)
+                .bind(&timestamp)
+                .bind(park_id)
+                .execute(&state.db)
+                .await?;
+                info!("地图 {map_id} 已绑定为园区 {park_id} 的当前基线");
+            }
+            None => info!("地图 {map_id} 暂未归属园区（设备未绑定园区），跳过基线绑定"),
+        }
     }
 
     let map = crate::handlers::maps::fetch_map(&state, &map_id).await?;

@@ -528,7 +528,7 @@ async fn resolve_route_map(
     requested: Option<&str>,
 ) -> Result<Option<(String, i64)>, AppError> {
     if let Some(requested) = requested.map(str::trim).filter(|value| !value.is_empty()) {
-        let row = sqlx::query_as::<_, (String, i64, String)>(
+        let row = sqlx::query_as::<_, (String, Option<i64>, String)>(
             "SELECT id, park_id, status FROM map_versions WHERE id = ?1",
         )
         .bind(requested)
@@ -540,14 +540,36 @@ async fn resolve_route_map(
                 "已归档的地图基线不能用于新建路线".to_string(),
             ));
         }
-        if let Some(park_id) = park_id
-            && row.1 != park_id
-        {
-            return Err(AppError::BadRequest(
-                "地图基线不属于该园区，无法创建路线".to_string(),
-            ));
+        match (park_id, row.1) {
+            // 设备地图还没归属园区：路线指定它就是把这张图认领给本园区
+            (Some(park_id), None) => {
+                sqlx::query("UPDATE map_versions SET park_id = ?1 WHERE id = ?2")
+                    .bind(park_id)
+                    .bind(&row.0)
+                    .execute(&state.db)
+                    .await?;
+                tracing::info!("设备地图 {} 已归属园区 {park_id}（路线引用）", row.0);
+            }
+            (Some(park_id), Some(owner)) if owner != park_id => {
+                return Err(AppError::BadRequest(
+                    "地图基线不属于该园区，无法创建路线".to_string(),
+                ));
+            }
+            (None, None) => {
+                return Err(AppError::BadRequest(
+                    "该地图尚未归属园区，请先创建园区并绑定地图".to_string(),
+                ));
+            }
+            _ => {}
         }
-        return Ok(Some((row.0, row.1)));
+        // 路线需要一个确定的园区：园区未知时用地图自己的归属反推
+        let park_id = park_id.or(row.1);
+        let Some(park_id) = park_id else {
+            return Err(AppError::BadRequest(
+                "该地图尚未归属园区，请先创建园区并绑定地图".to_string(),
+            ));
+        };
+        return Ok(Some((row.0, park_id)));
     }
 
     let Some(park_id) = park_id else {

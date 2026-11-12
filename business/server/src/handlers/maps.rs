@@ -18,7 +18,7 @@ use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::str::FromStr;
 
-const MAP_SELECT: &str = "SELECT m.id, m.park_id, p.park_name, m.map_name, m.version,
+const MAP_SELECT: &str = "SELECT m.id, m.park_id, p.park_name, m.device_code, m.map_name, m.version,
     m.frame_id, m.crs, m.origin, m.resolution, m.floors, m.road_count, m.no_go_count,
     m.status, m.map_hash, m.map_width, m.map_height, m.note, m.published_at, m.created_at,
     m.source, m.source_id, m.file_name, m.file_path, m.file_size,
@@ -32,11 +32,25 @@ const MAP_SELECT: &str = "SELECT m.id, m.park_id, p.park_name, m.map_name, m.ver
 pub async fn list_maps(
     State(state): State<AppState>,
     Query(query): Query<MapQuery>,
+    claims: Option<Extension<Claims>>,
 ) -> Result<Json<ApiResponse<Vec<MapVersion>>>, AppError> {
     let mut builder = QueryBuilder::<sqlx::Sqlite>::new(MAP_SELECT);
     builder.push(" WHERE 1 = 1");
     if let Some(park_id) = query.park_id {
         builder.push(" AND m.park_id = ").push_bind(park_id);
+    }
+    if let Some(device_code) = query
+        .device_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        builder
+            .push(" AND m.device_code = ")
+            .push_bind(device_code.to_string());
+    }
+    if query.unbound.unwrap_or(false) {
+        builder.push(" AND m.park_id IS NULL");
     }
     if let Some(status) = query
         .status
@@ -49,6 +63,22 @@ pub async fn list_maps(
         .filter(|value| !value.is_empty() && value != "全部")
     {
         builder.push(" AND m.source = ").push_bind(source);
+    }
+    // 地图跟着设备走：设备在中台分配给谁，谁就能看到这张图。
+    // 管理员可看全部，也可用 ownerUserId 指定某个用户；其他人只看自己（含归属未知的历史行）。
+    if let Some(Extension(claims)) = claims {
+        if claims.is_admin {
+            if let Some(owner) = query.owner_user_id {
+                builder.push(" AND m.owner_user_id = ").push_bind(owner);
+            }
+        } else if let Some(zentai_user_id) = claims.zentai_user_id {
+            builder
+                .push(" AND (m.owner_user_id = ")
+                .push_bind(zentai_user_id)
+                .push(" OR m.owner_user_id IS NULL)");
+        } else {
+            builder.push(" AND m.owner_user_id IS NULL");
+        }
     }
     builder.push(" ORDER BY m.park_id ASC, m.published_at DESC, m.created_at DESC");
     let maps = builder
@@ -76,12 +106,17 @@ pub async fn list_park_maps(
 #[serde(rename_all = "camelCase")]
 pub struct SyncedSourcesQuery {
     pub park_id: Option<i64>,
+    /// 设备编号：地图跟着设备走，手动同步按设备判重（首选）
+    pub device_id: Option<String>,
 }
 
-/// `GET /api/map-versions/synced-sources?parkId=...`
+/// `GET /api/map-versions/synced-sources?deviceId=...`（兼容 `?parkId=...`）
 ///
-/// 返回该园区已经入库的机器人地图路径（`source_ref`）。设备客户端手动同步前
-/// 先拉这个列表，跳过已同步地图，避免重复下载大文件。
+/// 返回已入库的机器人地图路径（`source_ref`）。设备客户端手动同步前先拉这个列表，
+/// 跳过已同步地图，避免重复下载大文件。
+///
+/// 地图归属先看设备再看园区：同一台设备（或未登记设备的历史行）的本体路径只回传一次，
+/// 设备没绑定园区也能正常判重。
 ///
 /// 「已同步」还要求中台那张地图仍然存在：中台是地图主库，某张图在中台被删掉后，
 /// 业务库里的历史行不能算已同步，否则设备端永远跳过、中台列表里也永远看不到。
@@ -90,17 +125,34 @@ pub async fn list_synced_sources(
     State(state): State<AppState>,
     Query(query): Query<SyncedSourcesQuery>,
 ) -> Result<Json<ApiResponse<Vec<String>>>, AppError> {
-    let park_id = query
-        .park_id
-        .ok_or_else(|| AppError::BadRequest("缺少 parkId".to_string()))?;
-    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+    let device_id = query
+        .device_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if device_id.is_none() && query.park_id.is_none() {
+        return Err(AppError::BadRequest(
+            "缺少 deviceId（或 parkId），无法判定哪些地图已同步".to_string(),
+        ));
+    }
+    let sql = if device_id.is_some() {
+        // 升级前入库的行没有 device_code：按其本体路径算已同步，宁可漏传不重传
+        "SELECT source_ref, source_id FROM map_versions
+         WHERE (device_code = ?1 OR device_code IS NULL)
+           AND source_ref IS NOT NULL AND source_ref <> ''
+         ORDER BY created_at ASC"
+    } else {
         "SELECT source_ref, source_id FROM map_versions
          WHERE park_id = ?1 AND source_ref IS NOT NULL AND source_ref <> ''
-         ORDER BY created_at ASC",
-    )
-    .bind(park_id)
-    .fetch_all(&state.db)
-    .await?;
+         ORDER BY created_at ASC"
+    };
+    let mut statement = sqlx::query_as::<_, (String, Option<String>)>(sql);
+    statement = match device_id.as_deref() {
+        Some(device_id) => statement.bind(device_id),
+        None => statement.bind(query.park_id),
+    };
+    let rows = statement.fetch_all(&state.db).await?;
 
     let zentai_ids: Vec<i64> = rows
         .iter()
@@ -532,10 +584,24 @@ pub async fn map_refs(
     .bind(&id)
     .fetch_all(&state.db)
     .await?;
-    let device_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM devices WHERE park_id = ?1")
-        .bind(map.park_id)
-        .fetch_one(&state.db)
-        .await?;
+    let device_count: i64 = match map.park_id {
+        Some(park_id) => {
+            sqlx::query_scalar("SELECT COUNT(*) FROM devices WHERE park_id = ?1")
+                .bind(park_id)
+                .fetch_one(&state.db)
+                .await?
+        }
+        // 还没绑定园区的设备地图：只算采集这张图的那台设备
+        None => match map.device_code.as_deref() {
+            Some(device_code) => {
+                sqlx::query_scalar("SELECT COUNT(*) FROM devices WHERE device_id = ?1")
+                    .bind(device_code)
+                    .fetch_one(&state.db)
+                    .await?
+            }
+            None => 0,
+        },
+    };
     Ok(ApiResponse::ok(MapRefs {
         map,
         routes,
@@ -569,20 +635,22 @@ pub async fn publish_map(
         .bind(&id)
         .execute(&mut *transaction)
         .await?;
-    let park_status = if map.status == "部分标定" {
-        "部分标定"
-    } else {
-        "已标定"
-    };
-    sqlx::query(
-        "UPDATE parks SET map_version_id = ?1, map_status = ?2, updated_at = ?3 WHERE id = ?4",
-    )
-    .bind(&id)
-    .bind(park_status)
-    .bind(&timestamp)
-    .bind(map.park_id)
-    .execute(&mut *transaction)
-    .await?;
+    if let Some(park_id) = map.park_id {
+        let park_status = if map.status == "部分标定" {
+            "部分标定"
+        } else {
+            "已标定"
+        };
+        sqlx::query(
+            "UPDATE parks SET map_version_id = ?1, map_status = ?2, updated_at = ?3 WHERE id = ?4",
+        )
+        .bind(&id)
+        .bind(park_status)
+        .bind(&timestamp)
+        .bind(park_id)
+        .execute(&mut *transaction)
+        .await?;
+    }
     transaction.commit().await?;
     Ok(ApiResponse::ok(fetch_map(&state, &id).await?))
 }
@@ -618,13 +686,14 @@ pub async fn new_map_version(
 
     let mut transaction = state.db.begin().await?;
     sqlx::query(
-        "INSERT INTO map_versions (id, park_id, map_name, version, frame_id, crs, origin,
-            resolution, floors, road_count, no_go_count, status, map_hash, map_width, map_height,
-            note, published_at, created_at, owner_user_id, owner_username)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, '已发布', ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+        "INSERT INTO map_versions (id, park_id, device_code, map_name, version, frame_id, crs,
+            origin, resolution, floors, road_count, no_go_count, status, map_hash, map_width,
+            map_height, note, published_at, created_at, owner_user_id, owner_username, source_ref)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, '已发布', ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
     )
     .bind(&new_id)
     .bind(map.park_id)
+    .bind(&map.device_code)
     .bind(&map.map_name)
     .bind(&version)
     .bind(&map.frame_id)
@@ -642,30 +711,33 @@ pub async fn new_map_version(
     .bind(&timestamp)
     .bind(map.owner_user_id)
     .bind(&map.owner_username)
+    .bind(&map.source_ref)
     .execute(&mut *transaction)
     .await?;
-    sqlx::query(
-        "UPDATE map_versions SET status = '已归档'
-         WHERE park_id = ?1 AND id <> ?2 AND status = '已发布'",
-    )
-    .bind(map.park_id)
-    .bind(&new_id)
-    .execute(&mut *transaction)
-    .await?;
-    let park_status = if map.status == "部分标定" {
-        "部分标定"
-    } else {
-        "已标定"
-    };
-    sqlx::query(
-        "UPDATE parks SET map_version_id = ?1, map_status = ?2, updated_at = ?3 WHERE id = ?4",
-    )
-    .bind(&new_id)
-    .bind(park_status)
-    .bind(&timestamp)
-    .bind(map.park_id)
-    .execute(&mut *transaction)
-    .await?;
+    if let Some(park_id) = map.park_id {
+        sqlx::query(
+            "UPDATE map_versions SET status = '已归档'
+             WHERE park_id = ?1 AND id <> ?2 AND status = '已发布'",
+        )
+        .bind(park_id)
+        .bind(&new_id)
+        .execute(&mut *transaction)
+        .await?;
+        let park_status = if map.status == "部分标定" {
+            "部分标定"
+        } else {
+            "已标定"
+        };
+        sqlx::query(
+            "UPDATE parks SET map_version_id = ?1, map_status = ?2, updated_at = ?3 WHERE id = ?4",
+        )
+        .bind(&new_id)
+        .bind(park_status)
+        .bind(&timestamp)
+        .bind(park_id)
+        .execute(&mut *transaction)
+        .await?;
+    }
     transaction.commit().await?;
 
     Ok(ApiResponse::ok(fetch_map(&state, &new_id).await?))

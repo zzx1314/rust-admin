@@ -38,7 +38,13 @@ const sourceRows = computed(() => {
     return name || "未登记";
   };
   return [
-    ["所属园区", item.parkName ?? "—", "运营台账录入", "orange"],
+    ["所属园区", item.parkName ?? "未归属园区", "园区建档时认领", "orange"],
+    [
+      "采集设备",
+      item.deviceCode ?? "未登记",
+      "设备回传时写入",
+      item.deviceCode ? "teal" : "orange"
+    ],
     [
       "地图来源",
       item.source === "backend" ? "backend 地图库导入" : "本业务库",
@@ -151,7 +157,7 @@ async function publishNewVersion() {
       <template v-if="map">
         <div class="map-baseline-head">
           <MapChip :map-id="map.id" :status="map.status" />
-          <span class="muted">{{ map.parkName }} · {{ map.note }}</span>
+          <span class="muted">{{ map.parkName || "未归属园区" }} · {{ map.note }}</span>
         </div>
 
         <template v-if="view === 'detail'">

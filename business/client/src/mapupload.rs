@@ -528,16 +528,18 @@ impl SyncReport {
     }
 }
 
-/// 查询业务库中该园区已经同步过的机器人地图路径（`source_ref`）。
+/// 查询业务库中这台设备已经同步过的机器人地图路径（`source_ref`）。
+///
+/// 地图先跟设备、再跟园区：设备没绑定园区也能判重，避免重复下载大文件。
 pub async fn synced_sources(
     http: &reqwest::Client,
     cfg: &IngestConfig,
-    park_id: i64,
 ) -> Result<Vec<String>, String> {
     let token = login(http, cfg).await?;
     let url = format!(
-        "{}/api/map-versions/synced-sources?parkId={park_id}",
-        cfg.api_base.trim_end_matches('/')
+        "{}/api/map-versions/synced-sources?deviceId={}",
+        cfg.api_base.trim_end_matches('/'),
+        cfg.device_id
     );
     let resp = http
         .get(&url)
@@ -566,18 +568,20 @@ pub async fn synced_sources(
 }
 
 /// 手动同步：按 4012 返回的地图列表逐张检查，只下载并上传业务库中缺失的地图。
+///
+/// 园区不是必需的：设备没绑定园区时地图先按「设备地图」入库（`parkId` 为空），
+/// 设备绑定人之后在控制台创建园区时再把自己的设备地图挑一张绑成基线。
 pub async fn sync_robot_maps(
     http: &reqwest::Client,
     cfg: &IngestConfig,
     file_base: &str,
-    park_id: i64,
     maps: &[RobotMap],
 ) -> SyncReport {
     let mut report = SyncReport {
         total: maps.len(),
         ..Default::default()
     };
-    let synced = match synced_sources(http, cfg, park_id).await {
+    let synced = match synced_sources(http, cfg).await {
         Ok(synced) => synced,
         Err(error) => {
             report.failed = maps.len();

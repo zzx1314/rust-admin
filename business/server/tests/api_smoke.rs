@@ -355,6 +355,103 @@ async fn synced_sources_drops_maps_deleted_in_zentai() {
 }
 
 #[tokio::test]
+async fn synced_sources_scopes_by_device() {
+    // 地图跟着设备走：设备没绑园区也能判重，且不会把别的设备的图算成已同步
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    for (id, device, source) in [
+        ("dev-map-a", "RD-001", "/ota/alg_data/map/history_map/a"),
+        ("dev-map-b", "RD-002", "/ota/alg_data/map/history_map/b"),
+    ] {
+        sqlx::query(
+            "INSERT INTO map_versions
+                (id, park_id, device_code, map_name, version, status, created_at, source, source_ref)
+             VALUES (?1, NULL, ?2, ?3, 'v1.0', '部分标定', '2026-01-01 00:00:00',
+                'robot-mapping', ?4)",
+        )
+        .bind(id)
+        .bind(device)
+        .bind(format!("map-{device}"))
+        .bind(source)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let app = build_router(state);
+    let token = login(&app).await;
+    let response = app
+        .oneshot(
+            Request::get("/api/map-versions/synced-sources?deviceId=RD-001")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    let sources = body["data"].as_array().cloned().unwrap_or_default();
+    assert!(
+        sources.contains(&serde_json::json!("/ota/alg_data/map/history_map/a")),
+        "本设备已回传的地图应算已同步: {body}"
+    );
+    assert!(
+        !sources.contains(&serde_json::json!("/ota/alg_data/map/history_map/b")),
+        "别的设备的地图不应影响本设备判重: {body}"
+    );
+}
+
+#[tokio::test]
+async fn creating_park_adopts_unbound_device_map() {
+    // 「设备建图 → 人创建园区时挑一张自己的设备地图绑为基线」
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    sqlx::query(
+        "INSERT INTO map_versions
+            (id, park_id, device_code, map_name, version, status, created_at, source, source_ref)
+         VALUES ('RD-002@history-0715', NULL, 'RD-002', 'RD-002@history-0715', 'v1.0',
+            '部分标定', '2026-01-01 00:00:00', 'robot-mapping',
+            '/ota/alg_data/map/history_map/0715')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = build_router(state);
+    let token = login(&app).await;
+    let response = app
+        .oneshot(
+            Request::post("/api/parks")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"parkName":"设备地图园区","area":1.2,"mapVersionId":"RD-002@history-0715"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(
+        body["data"]["mapVersionId"], "RD-002@history-0715",
+        "创建园区时应识别选中的设备地图: {body}"
+    );
+    let park_id = body["data"]["id"].as_i64().expect("园区应有 id");
+    let owner: Option<i64> = sqlx::query_scalar("SELECT park_id FROM map_versions WHERE id = ?1")
+        .bind("RD-002@history-0715")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        owner,
+        Some(park_id),
+        "被选中的设备地图应认领到新园区"
+    );
+}
+
+#[tokio::test]
 async fn internal_sync_endpoint_requires_service_token() {
     let (state, _db) = test_state().await;
     let app = build_router(state);
@@ -1260,7 +1357,7 @@ mod zentai_service_token {
             &config,
             &http,
             &request,
-            &park,
+            Some(&park),
             "map.zip",
             b"PK\x03\x04",
             Some(7),

@@ -183,7 +183,7 @@ GET    /api/dashboard/summary
 GET    /api/map-versions                  GET    /api/parks/{id}/maps
 GET    /api/map-versions/{id}             GET    /api/map-versions/{id}/refs
 GET    /api/map-versions/{id}/raster      GET    /api/map-versions/backend          POST   /api/map-versions/import-backend
-GET    /api/map-versions/synced-sources   # 已同步的机器人地图路径（按 parkId）
+GET    /api/map-versions/synced-sources   # 已同步的机器人地图路径（deviceId，兼容 parkId）
 POST   /api/map-versions/{id}/publish     POST   /api/map-versions/{id}/new-version
 POST   /api/map-versions/ingest          # 自动回传 / 手动同步共用入口
 
@@ -289,19 +289,36 @@ GET    /api/zentai/devices/{deviceId}/runtime     # 中台读取设备运行态�
   未绑定设备，派发时会跳过 `task.park_id` 与设备园区不一致的任务。
 - 注册回执 `register_ack` 会带上 `parkId / parkCode / parkName`，设备客户端据此确定建图回传的归属园区。
 - 绑定园区后若设备在线，服务会立即补发该园区的待执行任务。
+- 地图同步 / 建图回传**不要求绑园区**：地图先跟设备走，见下一节。
+
+## 地图归属：先设备，再园区
+
+地图只与设备有关系（`map_versions.device_code`、`map_versions.park_id` 可空）：
+
+1. 机器人建图回传 / 中台「同步地图」→ 地图入库为**设备地图**（`park_id IS NULL`，
+   `owner_user_id` 取中台里这台设备的绑定人）。设备没绑园区也照常入库、中台 `dog_map`
+   的 `parkCode` / `parkName` 留空；
+2. 设备绑定人登录业务控制台 →「新增园区」→ 地图基线下拉里选中自己的设备地图，
+   保存时该地图被认领到新园区（`map_versions.park_id` 写入园区、园区拿到当前基线）；
+3. 已被其他园区认领的地图不能再绑到第二个园区；没绑园区的地图也能建路线——
+   新建路线时选中它同样会认领到该路线的园区。
+
+`GET /api/map-versions` 对非管理员按「中台设备绑定人」过滤（`owner_user_id`），
+所以每个人只会看到自己设备采的图；支持 `deviceCode` / `unbound=true` / `ownerUserId` 过滤。
 
 ## 地图同步：自动与手动
 
 同一张机器人地图只入库一次：业务库 `map_versions.source_ref` 保存机器人本体
-地图绝对路径，ingest 写库前按 `parkId + sourceRef` 判重，重复请求直接返回
-`{ skipped: true }`。
+地图绝对路径，ingest 写库前按 `deviceCode + sourceRef` 判重（升级前入库的历史行
+没有 `device_code`，一并算已同步），重复请求直接返回 `{ skipped: true }`。
+**地图同步不要求设备绑定园区。**
 
 1. **自动触发**：建图收到 4001 保存结果 → 客户端从文件服务下载地图包 →
    `POST /api/map-versions/ingest`（`sourceRef` = 4001 的 `map_path`）。
 2. **手动触发**：中台「设备管理」列表点「同步地图」→ 中台调用本服务内部接口
    `POST /api/zentai/devices/{deviceId}/sync-maps`（共享服务令牌）→ 服务通过
    设备 WebSocket 下发 `同步地图` 指令 → 客户端用 4012 拉地图列表，先查
-   `GET /api/map-versions/synced-sources?parkId=...`，只下载尚未同步的地图。
+   `GET /api/map-versions/synced-sources?deviceId=...`，只下载尚未同步的地图。
 
 因此自动回传与手动同步交叉执行也不会重复上传/入库。
 
@@ -399,7 +416,8 @@ HTTP 链路（②）的三个约定：
 园区通过 `parks.map_version_id` 持有「当前生效基线」指针，路线创建时把
 `routes.map_version_id` 冻结为当时的版本，之后地图发新版不会改写历史路线坐标。
 
-- `GET /api/map-versions` 支持 `parkId`、`status` 过滤，前端用它渲染基线徽章与版本下拉。
+- `GET /api/map-versions` 支持 `parkId`、`deviceCode`、`unbound`、`status` 过滤，前端用它渲染基线徽章与版本下拉；
+  非管理员只返回自己设备采的地图（`owner_user_id`，管理员可看全部 / 用 `ownerUserId` 指定他人）。
 - `GET /api/map-versions/backend` 读取仓库根目录 `backend` 的 `dog_map` 地图库，列出已上传的 ROS map_server 地图包；
   支持 `parkCode` 过滤，业务平台可据此只查看某园区的地图。
 - `POST /api/map-versions/import-backend` 把 `{ backendMapId, parkId?, bind }` 指定的地图导入本业务库；
@@ -478,14 +496,14 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | `file` | ✅ | 地图 `.zip`（须含 `model.pgm` + `model.yaml`），≤ 256MB |
-| `mapInfo` | ✅ | JSON 字符串：`{ mapName, parkId, deviceId, bind, mapType, remarks, source, sourceRef }`，`parkId` 必填；`deviceId` 用于确定地图归属用户并作为中台 `dog_map.device_code` 上报设备编号 |
+| `mapInfo` | ✅ | JSON 字符串：`{ mapName, parkId, deviceId, bind, mapType, remarks, source, sourceRef }`；`parkId` 可省略（设备未绑定园区时地图先入库为设备地图）；`deviceId` 用于确定地图归属用户、作为中台 `dog_map.device_code`，也是同步判重的主键 |
 
 响应：
 
 ```json
 { "code": 10200, "msg": "ok", "data": {
-    "mapId": "ROS-MAP-3@v1.0", "mapName": "B区-20261110", "parkId": 3,
-    "zentaiMapId": 12, "bound": true,
+    "mapId": "ROS-MAP-3@v1.0", "mapName": "B区-20261110", "parkId": null,
+    "zentaiMapId": 12, "bound": false,
     "stashPath": "data/map_ingest/B区-20261110_20261110153000.zip",
     "map": { } } }
 ```
@@ -493,14 +511,13 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 处理流程：
 
 ```
-1. 校验 zip 魔数 PK、大小、parkId 存在
+1. 校验 zip 魔数 PK、大小；parkId 存在时校验园区存在（缺省则入库为设备地图）
 2. stash_package → data/map_ingest/ 留档（中台不可用时凭此路径重放）
 3. parse_local_meta → 本地解析 model.pgm 宽高 / model.yaml resolution+origin
 4. push_to_zentai → 共享令牌 POST /api/dogInternal/maps/upload（无令牌时退回账号登录 + /api/dogMap/upload）
-   mapInfo 会带上园区 parkCode / parkName、上报设备 deviceCode 与设备归属用户 ownerUserId，
-   中台 dog_map 记录地图来源设备、园区归属与地图所有人
-5. 写 map_versions（ON CONFLICT(id) DO UPDATE）
-6. bind=true 时切换园区当前基线
+   mapInfo 会带上上报设备 deviceCode、设备归属用户 ownerUserId 与（有则带）园区 parkCode / parkName
+5. 写 map_versions（ON CONFLICT(id) DO UPDATE；重传不会冲掉已有园区归属）
+6. bind=true 且设备已绑园区时切换园区当前基线
 ```
 
 中台地图带上园区后，业务平台从中台拉取地图时（`/api/map-versions/backend`）

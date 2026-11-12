@@ -91,11 +91,14 @@ pub struct ParkRef {
 }
 
 /// 把地图包推入中台 `dog_map`
+///
+/// `park` 可以为空：地图先跟设备走，设备未绑定园区时中台的 `parkCode` /
+/// `parkName` 留空，园区在中台地图管理里后续补登。
 pub async fn push_to_zentai(
     config: &crate::config::Config,
     http: &reqwest::Client,
     request: &IngestRequest,
-    park: &ParkRef,
+    park: Option<&ParkRef>,
     file_name: &str,
     package: &[u8],
     owner_user_id: Option<i64>,
@@ -171,13 +174,14 @@ pub const ROBOT_MAP_VERSION: &str = "v1.0";
 /// 组装上传中台的 `mapInfo`：地图展示字段 + 园区归属 + 上报设备。
 ///
 /// 园区是业务库自己的台账，中台不建园区表，只落 `parkCode` / `parkName`，
-/// 业务平台拉取中台地图时凭 `parkCode` 反查本园区。
+/// 业务平台拉取中台地图时凭 `parkCode` 反查本园区。设备还没绑定园区时这两个
+/// 字段为 `null`，中台地图就停在「未关联园区」，不阻断地图回传。
 /// `deviceCode` 记录采集这张地图的设备编号，中台地图列表据此显示来源设备。
 /// `mapVersion` 必须显式带上：不带时中台旧版本会落成 NULL，地图列表的「基线版本」
 /// 列就是空的。
 pub fn zentai_map_info(
     request: &IngestRequest,
-    park: &ParkRef,
+    park: Option<&ParkRef>,
     owner_user_id: Option<i64>,
 ) -> Value {
     json!({
@@ -186,8 +190,8 @@ pub fn zentai_map_info(
         "remarks": request.remarks.clone().unwrap_or_else(|| "机器人建图自动回传".to_string()),
         "mapStatus": "部分标定",
         "mapVersion": ROBOT_MAP_VERSION,
-        "parkCode": park.code.clone(),
-        "parkName": park.name.clone(),
+        "parkCode": park.map(|park| park.code.clone()),
+        "parkName": park.map(|park| park.name.clone()),
         "deviceCode": request.device_id.clone(),
         "ownerUserId": owner_user_id,
     })
@@ -383,7 +387,7 @@ mod tests {
             code: "PK-003".to_string(),
             name: "B区园区".to_string(),
         };
-        let info = zentai_map_info(&request, &park, Some(7));
+        let info = zentai_map_info(&request, Some(&park), Some(7));
         assert_eq!(info["parkCode"], "PK-003");
         assert_eq!(info["parkName"], "B区园区");
         assert_eq!(info["mapVersion"], ROBOT_MAP_VERSION);
@@ -391,6 +395,16 @@ mod tests {
         assert_eq!(info["mapName"], "B区-20261110");
         assert_eq!(info["mapStatus"], "部分标定");
         assert_eq!(info["ownerUserId"], 7);
+    }
+
+    #[test]
+    fn map_info_without_park_leaves_park_fields_null() {
+        // 设备未绑定园区也允许回传：中台 dog_map 停在「未关联园区」
+        let request = sample_request(None);
+        let info = zentai_map_info(&request, None, None);
+        assert_eq!(info["parkCode"], Value::Null);
+        assert_eq!(info["parkName"], Value::Null);
+        assert_eq!(info["deviceCode"], "RD-001");
     }
 
     #[test]

@@ -78,11 +78,11 @@ pub async fn apply_sync_maps(
             device_id
         )));
     };
-    let Some(park_id) = park_id else {
-        return Err(AppError::BadRequest(
-            "设备尚未绑定园区，无法确定地图归属；请先在业务平台绑定园区".to_string(),
-        ));
-    };
+    // 地图只跟设备有关系：设备没绑定园区也能同步。
+    // 园区只用来给园区地图带个归属，客户端拿到 null 就只按设备判重 / 入库。
+    let park_label = park_id
+        .map(|park_id| park_id.to_string())
+        .unwrap_or_else(|| "未绑定".to_string());
 
     let timestamp = now();
     let dispatched = gateway::send_command_to_device(
@@ -93,6 +93,7 @@ pub async fn apply_sync_maps(
             "mode": mode,
             "onlyMissing": true,
             "parkId": park_id,
+            "deviceId": device_id.trim(),
             "requestedAt": timestamp,
         })),
     )
@@ -118,7 +119,7 @@ pub async fn apply_sync_maps(
          VALUES ('map_sync', ?1, ?2, ?3, NULL, ?4)",
     )
     .bind(format!("中台触发地图同步：{device_id}"))
-    .bind(format!("模式：{mode}；园区：{park_id}；只同步缺失地图"))
+    .bind(format!("模式：{mode}；园区：{park_label}；只同步缺失地图"))
     .bind(device_pk)
     .bind(&timestamp)
     .execute(&state.db)
@@ -130,8 +131,7 @@ pub async fn apply_sync_maps(
         "mode": mode,
         "dispatched": true,
         "requestedAt": timestamp,
-    }))
-}
+    }))}
 
 // ─── 中台控制面：指令 / 任务 / 运行态 ──────────────────────────────
 //
