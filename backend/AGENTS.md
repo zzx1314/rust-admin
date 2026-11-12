@@ -32,6 +32,18 @@ cargo run
 Redis 若启用了 `requirepass`（`docker-compose.yml` 里的是 `123456`），还需 `export APP_REDIS_PASSWORD=123456`，
 否则登录会报 `Redis set failed: NOAUTH: Authentication required`。`./run.sh` 会自动探测并补上。
 
+**不想装 Redis**：`APP_TOKEN_STORE=memory ./run.sh` 会把登录会话存到进程内存
+（`src/system/auth/memory_store.rs`），`[redis]` 段可整段删掉。代价是进程重启后
+所有人需要重新登录，且不能多实例共享会话。默认仍是 `redis`，选了 `redis` 却漏配
+`[redis]` 时启动即报错，而不是等用户登录才失败。
+
+### 前端静态托管
+
+`[server] static_dir`（`APP_SERVER__STATIC_DIR`）指向前端构建产物目录后，
+`/api` 之外的请求由本服务直接托管（SPA 回落到 `index.html`、`/static/*` 长缓存、
+gzip），生产环境不再需要 nginx。本地开发仍建议 `pnpm dev`（Vite 代理 `/api`），
+所以 `config.toml` 里默认注释掉这一项。
+
 ### 检查
 
 ```bash

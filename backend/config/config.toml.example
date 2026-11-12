@@ -9,13 +9,27 @@
 
 database_url = "sqlite:data/users.db?mode=rwc"
 
+# 登录会话（access / refresh 令牌）的存储后端：
+#   redis（默认）—— 需要 redis-server，进程重启不掉线，可多实例共享
+#   memory        —— 存进程内存，不需要 Redis（重启即全体重新登录，仅单实例）
+# 环境变量：APP_TOKEN_STORE=memory
+# token_store = "memory"
+
 [server]
 host = "0.0.0.0"
 port = 3000
+# 前端构建产物目录（`cd frontend && pnpm build` 产出的 dist）。
+#
+# 配好后访问 http://<host>:3000 就能直接打开前端页面，`/api` 仍由本服务提供，
+# 因此生产环境可以不放 nginx。相对路径按进程工作目录解析；
+# 省略或留空 = 纯 API 模式（本地开发配合 `pnpm dev`）。
+# 环境变量：APP_SERVER__STATIC_DIR
+static_dir = "../frontend/dist"
 
 [redis]
 host = "localhost"
 port = 6379
+# `token_store = "memory"` 时可以整段删掉。
 # Password is read from APP_REDIS_PASSWORD; leave it out of this file.
 
 [dog]

@@ -75,9 +75,24 @@ HTTP」模式。两者共用同一个服务令牌，见 `business/README.md`。
 when Redis enforces `requirepass` (the compose one uses `123456`), otherwise
 login fails with `Redis set failed: NOAUTH: Authentication required`.
 
+没有 Redis 的机器可以用内存令牌存储：`APP_TOKEN_STORE=memory ./run.sh`
+（`[redis]` 段可删；进程重启后需重新登录，仅单实例可用）。默认仍是 Redis。
+
+### 单端口部署（不再需要 nginx）
+
+`[server] static_dir` / `APP_SERVER__STATIC_DIR` 指向前端构建产物后，后端会自己
+托管前端：SPA 路由回落 `index.html`、`/static/*` 长缓存 + gzip，`/api/*` 保持
+JSON 404。生产环境只需要跑一个后端进程：
+
+```bash
+cd frontend && pnpm build
+cd ../backend && APP_SERVER__STATIC_DIR=../frontend/dist ./run.sh
+```
+
 ## Important Notes
 
-- **Backend**: SQLite database at `backend/data/users.db`, Redis for session storage
+- **Backend**: SQLite database at `backend/data/users.db`; session storage is
+  Redis by default, or process memory with `APP_TOKEN_STORE=memory`
 - **Frontend**: Requires Node 18+/pnpm 9+, 4GB RAM for dev, 8GB for build
 - Both projects have pre-commit hooks — run lint before committing
 - Backend tests use UUID-based temporary database files

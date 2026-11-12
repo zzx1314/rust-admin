@@ -14,6 +14,9 @@
 # `Redis set failed: NOAUTH`. When unset, the local Redis at localhost:6379 is
 # probed and the dev password is used only if it asks for one.
 #
+# 不想装 Redis？`APP_TOKEN_STORE=memory ./run.sh` 改用进程内存存会话
+# （重启后需重新登录），此时不会再连 Redis。
+#
 # Usage:
 #   ./run.sh                 # debug build
 #   ./run.sh --release       # any extra args are forwarded to `cargo run`
@@ -64,6 +67,26 @@ redis_requires_auth() {
 }
 
 export APP_JWT_SECRET="${APP_JWT_SECRET:-$(random_hex)}"
+
+# `APP_TOKEN_STORE=memory`（或 config.toml 里 `token_store = "memory"`）时不需要
+# Redis，上面的 AUTH 探测也跟着跳过，本机没装 redis-server 也能起服务。
+token_store_kind() {
+  local value=""
+  if [[ -f config/config.toml ]]; then
+    value="$(awk '
+      /^\[/ { section = $0; next }
+      section != "[redis]" && $1 == "token_store" { gsub(/[" ]/, "", $3); print $3 }
+    ' config/config.toml | tail -1)"
+  fi
+  echo "${APP_TOKEN_STORE:-${value:-redis}}"
+}
+
+if [[ "$(token_store_kind)" == "memory" ]]; then
+  echo "APP_TOKEN_STORE=memory（会话存进程内存，本次不连 Redis）"
+  echo "APP_JWT_SECRET=${APP_JWT_SECRET:0:8}… (exported value or generated for this run)"
+  echo
+  exec cargo run "$@"
+fi
 
 redis_password_source="exported"
 if [[ -z "${APP_REDIS_PASSWORD:-}" ]]; then

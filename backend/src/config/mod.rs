@@ -28,6 +28,13 @@ pub struct RedisConfig {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    /// 前端构建产物目录（`frontend/dist`）。
+    ///
+    /// 配好后本服务会在 `/api` 之外直接托管前端，SPA 路由回落到 `index.html`，
+    /// 因此生产环境不再需要 nginx。省略或留空表示纯 API 模式（配合
+    /// `pnpm dev` 使用）。环境变量：`APP_SERVER__STATIC_DIR`。
+    #[serde(default)]
+    pub static_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -49,13 +56,32 @@ pub struct DogConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     pub server: ServerConfig,
-    pub redis: RedisConfig,
+    /// Redis 配置。`token_store = "memory"` 时可以整段省掉。
+    #[serde(default)]
+    pub redis: Option<RedisConfig>,
+    /// 登录会话（access / refresh 令牌）存在哪里。
+    ///
+    /// 默认 Redis；设 `APP_TOKEN_STORE=memory` 后改用进程内存，不再需要
+    /// redis-server（代价：重启后所有人重新登录，也无法多实例共享会话）。
+    #[serde(default)]
+    pub token_store: TokenStoreKind,
     /// Injected from `APP_JWT_SECRET`; never present in `config.toml`.
     pub jwt_secret: String,
     pub database_url: String,
     /// Optional `[dog]` section; device uploads default to `data/device_uploads`.
     #[serde(default)]
     pub dog: DogConfig,
+}
+
+/// 会话令牌的存储后端。
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TokenStoreKind {
+    /// 默认：Redis。进程重启不掉线，支持多实例共享会话。
+    #[default]
+    Redis,
+    /// 进程内内存。不需要 Redis，适合单实例部署；重启即全体重新登录。
+    Memory,
 }
 
 impl RedisConfig {
@@ -149,16 +175,40 @@ impl AppConfig {
     /// Move `APP_REDIS_PASSWORD` into place when the environment provides it
     /// but the file does not.
     fn normalise(&mut self) {
-        // `redis.password` is a nested key, so the environment source only
-        // maps it from `APP_REDIS__PASSWORD`. Honour the documented flat
-        // `APP_REDIS_PASSWORD` name as well, otherwise Redis AUTH is silently
-        // skipped and every login fails with `NOAUTH`.
-        if self.redis.password.is_empty()
+        // `redis.password` 是嵌套键，环境变量源只会从 `APP_REDIS__PASSWORD`
+        // 读取。这里额外尊重文档里的扁平写法 `APP_REDIS_PASSWORD`，否则会
+        // 静默跳过 AUTH，导致每次登录都报 `NOAUTH`。
+        if let Some(redis) = self.redis.as_mut()
+            && redis.password.is_empty()
             && let Ok(password) = std::env::var(REDIS_PASSWORD_ENV)
             && !password.trim().is_empty()
         {
-            self.redis.password = password;
+            redis.password = password;
         }
+
+        // `static_dir = ""`（或 `APP_SERVER__STATIC_DIR=`）等价于「不托管前端」，
+        // 免得把当前目录当成站点根目录整盘暴露出去。
+        self.server.static_dir = self
+            .server
+            .static_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|dir| !dir.is_empty())
+            .map(str::to_string);
+    }
+
+    /// 前端静态目录。为空表示不托管前端（纯 API 模式）。
+    pub fn static_dir(&self) -> Option<PathBuf> {
+        self.server.static_dir.as_deref().map(PathBuf::from)
+    }
+
+    /// Redis 连接串。只有 `token_store = "redis"` 时才会用到；
+    /// 缺 `[redis]` 段时回落到 `localhost:6379`（`validate` 已提前报错）。
+    pub fn redis_url(&self) -> String {
+        self.redis
+            .as_ref()
+            .map(RedisConfig::url)
+            .unwrap_or_else(|| "redis://localhost:6379".to_string())
     }
 
     fn validate(&mut self) -> Result<(), ConfigError> {
@@ -177,6 +227,16 @@ impl AppConfig {
             return Err(ConfigError::Message(format!(
                 "`jwt_secret` is shorter than {MIN_JWT_SECRET_LEN} bytes. Generate one with \
                  `openssl rand -hex 32` and set `{JWT_SECRET_ENV}`."
+            )));
+        }
+
+        // `token_store = "memory"` 只能用单实例；Redis 模式必须真的配了 Redis，
+        // 否则服务能启动但每次登录都失败，错误信息会很难定位。
+        if self.token_store == TokenStoreKind::Redis && self.redis.is_none() {
+            return Err(ConfigError::Message(format!(
+                "`[redis]` 段缺失：`token_store = \"redis\"`（默认值）需要 Redis 连接信息。\
+                 \n  · 单机部署没有 Redis？设 `APP_TOKEN_STORE=memory` 改用进程内存存储；\
+                 \n  · 或者补上 `[redis]` 的 host / port（密码用 {REDIS_PASSWORD_ENV} 注入）。"
             )));
         }
 
@@ -225,6 +285,39 @@ upload_dir = "/tmp/rust_admin_config_test"
             config.dog.upload_dir.as_deref(),
             Some("/tmp/rust_admin_config_test")
         );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn static_dir_defaults_to_none_and_blank_means_disabled() {
+        // 没写 static_dir：纯 API 模式，不托管任何静态文件。
+        let path = write_temp_config(minimal_toml());
+        let config = AppConfig::load(&path).expect("config must parse");
+        assert!(config.server.static_dir.is_none());
+        assert!(config.static_dir().is_none());
+        std::fs::remove_file(&path).ok();
+
+        // 空字符串（含 `APP_SERVER__STATIC_DIR=` 的写法）同样视为未配置，
+        // 否则会把当前工作目录当成站点根目录。
+        let toml = minimal_toml().replace("[server]", "[server]\nstatic_dir = \"  \"");
+        let path = write_temp_config(&toml);
+        let config = AppConfig::load(&path).expect("config must parse");
+        assert!(
+            config.server.static_dir.is_none(),
+            "空字符串必须被规整成 None"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn static_dir_is_read_from_the_server_section() {
+        let toml = minimal_toml().replace("[server]", "[server]\nstatic_dir = \"web\"");
+        let path = write_temp_config(&toml);
+        let config = AppConfig::load(&path).expect("config must parse");
+
+        assert_eq!(config.server.static_dir.as_deref(), Some("web"));
+        assert_eq!(config.static_dir(), Some(PathBuf::from("web")));
 
         std::fs::remove_file(&path).ok();
     }
@@ -285,8 +378,42 @@ upload_dir = "/tmp/rust_admin_config_test"
         let config = AppConfig::load(&path).expect("config must parse");
         unsafe { std::env::remove_var(REDIS_PASSWORD_ENV) };
 
-        assert_eq!(config.redis.password, "from-env");
-        assert_eq!(config.redis.url(), "redis://:from-env@localhost:6379");
+        assert_eq!(
+            config.redis.as_ref().map(|redis| redis.password.as_str()),
+            Some("from-env")
+        );
+        assert_eq!(config.redis_url(), "redis://:from-env@localhost:6379");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn memory_token_store_needs_no_redis_section() {
+        // 单机部署：不写 [redis]，只要把存储换到内存就能启动。
+        // `token_store` 是根级键，必须放在 `[server]` 之前。
+        let toml = format!(
+            "token_store = \"memory\"\n{}",
+            minimal_toml().replace("[redis]\nhost = \"localhost\"\nport = 6379\n", "")
+        );
+        let path = write_temp_config(&toml);
+        let config = AppConfig::load(&path).expect("memory 模式不要求 [redis]");
+
+        assert_eq!(config.token_store, TokenStoreKind::Memory);
+        assert!(config.redis.is_none());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn token_store_defaults_to_redis_and_requires_a_redis_section() {
+        // 默认仍是 Redis；漏配 [redis] 时必须报错讲清楚怎么处理，
+        // 而不是让服务启动后每次登录都失败。
+        let toml = minimal_toml().replace("[redis]\nhost = \"localhost\"\nport = 6379\n", "");
+        let path = write_temp_config(&toml);
+
+        let error = AppConfig::load(&path).expect_err("Redis 模式缺少 [redis] 必须报错");
+        let message = error.to_string();
+        assert!(message.contains("APP_TOKEN_STORE=memory"), "got: {message}");
 
         std::fs::remove_file(&path).ok();
     }

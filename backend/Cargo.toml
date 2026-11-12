@@ -22,15 +22,20 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "chrono", "uuid", "macros"] }
-sea-orm = { version = "1.1", features = ["runtime-tokio-native-tls", "macros", "sqlx-sqlite"] }
-sea-orm-migration = { version = "1.1", features = ["runtime-tokio-native-tls", "sqlx-sqlite"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "multipart"] }
+# `*-rustls` 与 `reqwest` 的 rustls 组合：整个服务不依赖 OpenSSL，
+# 这样就能编出 x86_64-unknown-linux-musl 静态二进制，部署到 glibc 2.17
+# 的老系统（CentOS 7）时不用担心目标机 glibc / libssl 版本。
+sea-orm = { version = "1.1", features = ["runtime-tokio-rustls", "macros", "sqlx-sqlite"] }
+sea-orm-migration = { version = "1.1", features = ["runtime-tokio-rustls", "sqlx-sqlite"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "charset", "http2"] }
 socket2 = "0.6"
 async-trait = "0.1"
 subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+# `fs` + `compression-gzip`：把前端构建产物直接由本服务托管（见 src/api/static_site.rs）。
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["compression-gzip", "cors", "fs", "set-header", "trace"] }
 tracing = "0.1"
 urlencoding = "2.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -41,7 +46,6 @@ image = { version = "0.25", default-features = false, features = ["png", "pnm"] 
 
 [dev-dependencies]
 axum-test = "18"
-tower = { version = "0.5", features = ["util"] }
 # 测试里扮演「拨入中台的业务平台」，验证反向控制信道
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 
@@ -146,3 +150,11 @@ path = "tests/business/dog_command_control_tests.rs"
 [[test]]
 name = "dog_internal_tests"
 path = "tests/business/dog_internal_tests.rs"
+
+[[test]]
+name = "static_site_tests"
+path = "tests/api/static_site_tests.rs"
+
+[[test]]
+name = "memory_token_store_tests"
+path = "tests/system/auth/memory_token_store_tests.rs"

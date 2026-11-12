@@ -248,7 +248,10 @@ async fn device_code_round_trip_and_filter() {
 
     let reported = state
         .dog_map_service
-        .create(map_request_with_device("RD-201 建图", Some("RD-201")), &scope)
+        .create(
+            map_request_with_device("RD-201 建图", Some("RD-201")),
+            &scope,
+        )
         .await
         .expect("map must be created");
     state
@@ -290,7 +293,10 @@ async fn device_code_is_trimmed_and_blank_becomes_null() {
 
     let map = state
         .dog_map_service
-        .create(map_request_with_device("带空格设备", Some("  RD-007 ")), &scope)
+        .create(
+            map_request_with_device("带空格设备", Some("  RD-007 ")),
+            &scope,
+        )
         .await
         .expect("map must be created");
     assert_eq!(map.device_code.as_deref(), Some("RD-007"));
@@ -303,7 +309,10 @@ async fn new_version_inherits_device_code() {
 
     let original = state
         .dog_map_service
-        .create(map_request_with_device("RD-201 建图", Some("RD-201")), &scope)
+        .create(
+            map_request_with_device("RD-201 建图", Some("RD-201")),
+            &scope,
+        )
         .await
         .expect("map must be created");
 

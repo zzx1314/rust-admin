@@ -16,6 +16,7 @@ use crate::business::dog::map::handlers as dog_map_handlers;
 use crate::business::dog::media::handlers as dog_media_handlers;
 use crate::business::dog::model::handlers as dog_model_handlers;
 use crate::business::dog::statistics::handlers as dog_statistics_handlers;
+use crate::common::error::AppError;
 use crate::system::auth::handlers::{
     check_token_handler, login_handler, logout_handler, me_handler, refresh_handler,
 };
@@ -408,6 +409,11 @@ pub fn dog_control_routes() -> Router<AppState> {
     )
 }
 
+/// `/api/*` 未命中时的处理：返回与其它接口一致的 `{ code, msg, data }` 404。
+async fn api_not_found(method: axum::http::Method, uri: axum::http::Uri) -> AppError {
+    AppError::NotFound(format!("{method} {}", uri.path()))
+}
+
 pub fn create_router(state: AppState) -> Router {
     let api_router = Router::new()
         .merge(auth_routes())
@@ -430,7 +436,9 @@ pub fn create_router(state: AppState) -> Router {
         .merge(dog_statistics_routes(state.clone()));
 
     Router::new()
-        .nest("/api", api_router)
+        // `/api` 内部的未命中必须是 404 JSON。不挂这个 fallback 的话，
+        // 请求会落到外层的前端静态托管，拿到 200 的 index.html。
+        .nest("/api", api_router.fallback(api_not_found))
         .layer(TraceLayer::new_for_http())
         .layer(from_fn_with_state(state.clone(), audit_log_middleware))
         .layer(

@@ -22,8 +22,9 @@ use crate::common::traits::{
     MenuRepository, OrgRepository, RoleRepository, SysDictItemRepository, SysDictRepository,
     SysLogRepository, TokenStore, UserRepository,
 };
-use crate::config::AppConfig;
+use crate::config::{AppConfig, TokenStoreKind};
 use crate::migration::Migrator;
+use crate::system::auth::memory_store::InMemoryTokenStore;
 use crate::system::auth::repository::RedisTokenStore;
 use crate::system::auth::service::AuthService;
 use crate::system::sys_auth::service::SysAuthService;
@@ -97,7 +98,20 @@ impl App {
     }
 
     pub fn build_state(&self, config: &AppConfig) -> AppState {
-        let token_store: Arc<dyn TokenStore> = Arc::new(RedisTokenStore::new(&config.redis.url()));
+        let token_store: Arc<dyn TokenStore> = match config.token_store {
+            TokenStoreKind::Redis => {
+                let url = config.redis_url();
+                tracing::info!("会话令牌存储：Redis");
+                Arc::new(RedisTokenStore::new(&url))
+            }
+            TokenStoreKind::Memory => {
+                tracing::warn!(
+                    "会话令牌存储：进程内存（未使用 Redis）。重启服务会让所有登录失效，\
+                     且不能多实例共享会话。"
+                );
+                Arc::new(InMemoryTokenStore::new())
+            }
+        };
         // An explicitly configured `[dog] upload_dir` wins; otherwise fall back
         // to the directory the `App` was constructed with so that
         // `from_connection_with_upload_dir` keeps working outside tests.
@@ -230,7 +244,8 @@ impl App {
 
     pub async fn run(self, config: &AppConfig, addr: SocketAddr) -> Result<(), AppError> {
         let state = self.build_state(config);
-        let router = create_router(state);
+        let router =
+            crate::api::static_site::attach(create_router(state), config.static_dir().as_deref());
 
         let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
             .expect("Failed to create socket");
@@ -281,19 +296,21 @@ pub fn database_url() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{DogConfig, RedisConfig, ServerConfig};
+    use crate::config::{DogConfig, RedisConfig, ServerConfig, TokenStoreKind};
 
     fn config_with(upload_dir: Option<&str>) -> AppConfig {
         AppConfig {
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
                 port: 0,
+                static_dir: None,
             },
-            redis: RedisConfig {
+            redis: Some(RedisConfig {
                 host: "localhost".to_string(),
                 port: 6379,
                 password: String::new(),
-            },
+            }),
+            token_store: TokenStoreKind::Memory,
             jwt_secret: "test-secret".to_string(),
             database_url: "sqlite::memory:".to_string(),
             dog: DogConfig {

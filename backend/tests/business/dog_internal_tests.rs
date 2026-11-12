@@ -305,10 +305,7 @@ async fn map_upload_lands_in_dog_map_with_owner() {
         body["data"]["frameId"], "ros_map_42 / 局部米制",
         "frame_id 应原样落库"
     );
-    assert_eq!(
-        body["data"]["floors"], "1F / B1",
-        "覆盖楼层应原样落库"
-    );
+    assert_eq!(body["data"]["floors"], "1F / B1", "覆盖楼层应原样落库");
     assert!(body["data"]["filePath"].as_str().is_some());
 }
 
