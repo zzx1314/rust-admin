@@ -36,7 +36,13 @@ const BIND_TIMEOUT: Duration = Duration::from_secs(10);
 /// 更严，拉到 20s 会在 11s 左右被踢，这取 5s 留足抖动余量。
 const GATEWAY_HEARTBEAT: Duration = Duration::from_secs(5);
 
+/// 待应答请求：`msg_id → 回复发送端`
 type ReplySender = oneshot::Sender<Envelope>;
+/// 待应答请求：`预期响应类型 → 回复发送端`
+///
+/// 网关控制类响应（`1303` / `1311`）不带 `msg_id`（文档示例 head 只有
+/// `type` / `time` / `src`），只能按「响应类型 = 请求类型 + 1」关联。
+type TypeReplySender = oneshot::Sender<Envelope>;
 
 /// 算法侧推送（非请求-响应）投递通道
 pub type PushReceiver = broadcast::Receiver<Envelope>;
@@ -83,6 +89,8 @@ pub struct ZhProClient {
     control_tx: mpsc::Sender<Message>,
     bulkdata_tx: mpsc::Sender<Message>,
     pending: Arc<Mutex<HashMap<u32, ReplySender>>>,
+    /// 按「响应类型」等待的请求（控制类 1302 / 1310 用）
+    pending_types: Arc<Mutex<HashMap<u32, TypeReplySender>>>,
     msg_seq: AtomicU32,
     pushes: broadcast::Sender<Envelope>,
     session: Arc<Mutex<SessionInfo>>,
@@ -128,6 +136,8 @@ impl ZhProClient {
         *session.lock().await = info.clone();
 
         let pending: Arc<Mutex<HashMap<u32, ReplySender>>> = Arc::new(Mutex::new(HashMap::new()));
+        let pending_types: Arc<Mutex<HashMap<u32, TypeReplySender>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let pushes = broadcast::channel::<Envelope>(256).0;
         let (control_tx, mut control_rx) = mpsc::channel::<Message>(64);
 
@@ -143,6 +153,7 @@ impl ZhProClient {
         // control 读循环：响应派发 + 推送广播
         {
             let pending = pending.clone();
+            let pending_types = pending_types.clone();
             let pushes = pushes.clone();
             let session = session.clone();
             tokio::spawn(async move {
@@ -155,7 +166,7 @@ impl ZhProClient {
                         warn!("control 收到无法解析的消息: {text}");
                         continue;
                     };
-                    handle_incoming(&env, &pending, &pushes, &session).await;
+                    handle_incoming(&env, &pending, &pending_types, &pushes, &session).await;
                 }
                 warn!("control 通道已断开");
             });
@@ -213,6 +224,7 @@ impl ZhProClient {
         {
             let pushes = pushes.clone();
             let pending = pending.clone();
+            let pending_types = pending_types.clone();
             let session = session.clone();
             tokio::spawn(async move {
                 while let Some(frame) = bulk_read.next().await {
@@ -223,7 +235,7 @@ impl ZhProClient {
                     let Ok(env) = serde_json::from_str::<Envelope>(text) else {
                         continue;
                     };
-                    handle_incoming(&env, &pending, &pushes, &session).await;
+                    handle_incoming(&env, &pending, &pending_types, &pushes, &session).await;
                 }
                 warn!("bulkdata 通道已断开");
             });
@@ -233,6 +245,7 @@ impl ZhProClient {
             control_tx,
             bulkdata_tx,
             pending,
+            pending_types,
             msg_seq: AtomicU32::new(1),
             pushes,
             session,
@@ -368,7 +381,7 @@ impl ZhProClient {
         }
     }
 
-    /// 发送请求并要求 `code == 0`，返回 data 本体
+    /// 发送请求并要求 `code` / `status_code` 为 0，返回 data 本体
     pub async fn call(&self, msg_type: u32, data: Value) -> Result<Value, String> {
         let reply = self.request(msg_type, data).await?;
         if reply.is_ok() {
@@ -380,6 +393,61 @@ impl ZhProClient {
                 reply.code(),
                 reply.message()
             ))
+        }
+    }
+
+    /// 发送单向消息（不等响应）
+    ///
+    /// 用于文档里没有响应类型的控制帧，典型是 `1304` 摇杆：没有 `1305`，
+    /// 用 [`Self::call`] 发只能等满 8s 超时，还会在 `pending` 里留一个永远
+    /// 等不到应答的 oneshot。
+    pub async fn send(&self, msg_type: u32, data: Value) -> Result<(), String> {
+        let env = Envelope::notify(msg_type, data);
+        self.control_tx
+            .send(Message::Text(env.to_text()))
+            .await
+            .map_err(|_| "control 通道已关闭".to_string())
+    }
+
+    /// 发送控制类请求（`1302` / `1310`），按「响应类型 = 请求类型 + 1」等回复
+    ///
+    /// 网关的 `1303` / `1311` 不回 `msg_id`，只能用类型关联；成功与否看
+    /// `data.status_code`（见 [`Envelope::code`]）。
+    pub async fn call_control(&self, msg_type: u32, data: Value) -> Result<Envelope, String> {
+        let reply_type = msg_type + 1;
+        let (tx, rx) = oneshot::channel();
+        self.pending_types.lock().await.insert(reply_type, tx);
+
+        let msg_id = self.next_msg_id();
+        let env = Envelope::request(msg_type, msg_id, data);
+        if self
+            .control_tx
+            .send(Message::Text(env.to_text()))
+            .await
+            .is_err()
+        {
+            self.pending_types.lock().await.remove(&reply_type);
+            return Err("control 通道已关闭".to_string());
+        }
+
+        match tokio::time::timeout(self.request_timeout, rx).await {
+            Ok(Ok(reply)) => {
+                if reply.is_ok() {
+                    Ok(reply)
+                } else {
+                    Err(format!(
+                        "{} 失败: status_code={} {}",
+                        msg_type,
+                        reply.code(),
+                        reply.message()
+                    ))
+                }
+            }
+            Ok(Err(_)) => Err("响应通道被丢弃".to_string()),
+            Err(_) => {
+                self.pending_types.lock().await.remove(&reply_type);
+                Err(format!("等待 {} 响应超时", reply_type))
+            }
         }
     }
 
@@ -420,6 +488,7 @@ impl ZhProClient {
 async fn handle_incoming(
     env: &Envelope,
     pending: &Arc<Mutex<HashMap<u32, ReplySender>>>,
+    pending_types: &Arc<Mutex<HashMap<u32, TypeReplySender>>>,
     pushes: &broadcast::Sender<Envelope>,
     session: &Arc<Mutex<SessionInfo>>,
 ) {
@@ -427,6 +496,12 @@ async fn handle_incoming(
     if let Some(msg_id) = env.head.msg_id
         && let Some(tx) = pending.lock().await.remove(&msg_id)
     {
+        let _ = tx.send(env.clone());
+        return;
+    }
+    // 控制类响应（1303/1311）不带 msg_id，按响应类型派发
+    // （`pending_types` 里只有登记过的控制类响应类型，不会抢走推送）
+    if let Some(tx) = pending_types.lock().await.remove(&env.head.msg_type) {
         let _ = tx.send(env.clone());
         return;
     }

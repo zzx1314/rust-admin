@@ -629,7 +629,19 @@ rtsp://user:Abcd%232027%21@192.168.234.1:8554/test
 前端 DeviceDrawer → POST /api/devices/{id}/teleop/take  → 落库接管态
                   → POST /api/devices/{id}/teleop        → WS msgType=teleop
                   → 客户端 zhpro/teleop.rs → 智航 1304
+                  → POST /api/devices/{id}/action        → WS msgType=command
+                  → 客户端 zhpro/teleop.rs → 智航 1302
 ```
+
+协议对齐（v1.0.3 原文）：
+
+| 项 | 文档要求 | 客户端实现 |
+| --- | --- | --- |
+| `1302 data.cmd` | **uint32 枚举**：`0` 紧急停止、`1` 解除急停、`10` 站立、`11` 匍匐、`12` 卧倒、`100~105` 补光灯… | `BodyCommand::code()` 按码值下发（以前发的是字符串 `stand_up`，本体不认） |
+| `1303` 受理结果 | `data.status_code` + `data.message` | `Envelope::code()` / `message()` 兼容 `status_code` 与算法侧的 `code`/`msg` |
+| `1303` 关联 | 文档示例 head 不带 `msg_id` | `call_control()` 按「响应类型 = 请求类型 + 1」关联 |
+| `1304 data` | `lx / ly / rx / ry / turn / high_low`，全部 `[-1, 1]` | 按此字段名下发；`lx` 正数左移、`rx` 正数左旋，业务侧轴值取反后发送 |
+| `1304` 响应 | 协议里不存在 `1305` | 摇杆走单向下发（`send()`），不等应答 |
 
 安全约束：
 
@@ -638,12 +650,19 @@ rtsp://user:Abcd%232027%21@192.168.234.1:8554/test
 - **急停常驻**：`/action` 里的 `emergency_stop` 不受接管态约束，任何状态都能发。
 - **两级看门狗**：前端松手立即发全 0 帧；客户端 1 秒无新摇杆帧自动补停车；
   服务端接管 120s 空闲自动失效（前端每 45s 发一次 `/teleop/ping` 保活）。
-- 摇杆三轴 `forward`/`strafe`/`turn` ∈ [-1, 1]，按 1.0 m/s / 0.6 m/s / 1.2 rad/s
-  折算成本体线速度与角速度；`speed` 档位 0.1~1.0 二次缩放。
+- 摇杆三轴 `forward`/`strafe`/`turn` ∈ [-1, 1] 直接映射到本体的归一化摇杆值
+  （本体侧自行换算速度），`speed` 档位 0.1~1.0 在客户端二次缩放。
 - 所有接管、释放、动作都写 `task_events`（`event_type='teleop'`）留审计。
 
-可用动作：`stand_up` 站立、`lie_down` 卧倒、`emergency_stop` 急停、
-`light_on` / `light_off` 灯光、`reset_pose` 位姿复位。危险动作前端二次确认。
+可用动作：`stand_up` 站立（`cmd=10`）、`lie_down` 卧倒（`12`）、
+`emergency_stop` 急停（`0`）、`light_on` / `light_off` 前补光灯（`102` / `104`）。
+危险动作前端二次确认。**「位姿复位」已下线**：协议 1302 的枚举里没有对应码值，
+以前下发的字符串本体根本不认。
+
+> `1302` 不在 `4000~5999` 区间，不受 RoamerX 控制权约束，但本平台仍要求先
+> 「远程接管」才能发动作（与业务侧闸门保持一致）；接管失败会在客户端日志里
+> 留下 `xyz 需要先接管`。动作受理失败会以 `event:error` 回传，落成一条**严重告警**
+> ——控制台提示「已下发」只代表指令进了设备连接，本体是否受理看告警中心。
 
 ## 当前边界
 

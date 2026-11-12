@@ -366,19 +366,45 @@ impl Envelope {
         }
     }
 
-    /// 响应是否成功（`data.code == 0`）
-    pub fn is_ok(&self) -> bool {
-        self.data.get("code").and_then(Value::as_i64) == Some(0)
+    /// 构造外部端（src=1）单向消息（不需要响应的控制帧，如 1304）
+    ///
+    /// 文档里 1304 没有对应的响应类型，发 `msg_id` 会让调用方白白等一个
+    /// 永远不来的应答，所以这类消息不带 `msg_id`。
+    pub fn notify(msg_type: u32, data: Value) -> Self {
+        Self {
+            head: Head {
+                msg_type,
+                time: now_ms(),
+                src: SRC_APP,
+                msg_id: None,
+            },
+            data,
+        }
     }
 
+    /// 响应是否成功（`code` / `status_code` 为 0）
+    pub fn is_ok(&self) -> bool {
+        self.code() == 0
+    }
+
+    /// 响应码
+    ///
+    /// 协议里有两套约定，这里统一成一个取值：
+    /// - 控制类（`1303` / `1311` / `1205`）：`data.status_code`
+    /// - 算法侧（`4001` / `4013` / `5001` …）：`data.code`
     pub fn code(&self) -> i64 {
+        if let Some(status) = self.data.get("status_code").and_then(Value::as_i64) {
+            return status;
+        }
         self.data.get("code").and_then(Value::as_i64).unwrap_or(-1)
     }
 
+    /// 响应说明：控制类字段名是 `message`，算法侧是 `msg`
     pub fn message(&self) -> String {
         self.data
-            .get("msg")
+            .get("message")
             .and_then(Value::as_str)
+            .or_else(|| self.data.get("msg").and_then(Value::as_str))
             .unwrap_or_default()
             .to_string()
     }
@@ -413,6 +439,46 @@ mod tests {
             let got = Quaternion::from_yaw(yaw).yaw();
             assert!((got - yaw).abs() < 1e-6, "deg={deg} got={got}");
         }
+    }
+
+    #[test]
+    fn control_reply_uses_status_code() {
+        let env: Envelope = serde_json::from_str(
+            r#"{"head":{"type":1303,"time":1,"src":4},
+                "data":{"status_code":0,"message":"ok","cmd":10}}"#,
+        )
+        .unwrap();
+        assert!(env.is_ok());
+        assert_eq!(env.message(), "ok");
+
+        let failed: Envelope = serde_json::from_str(
+            r#"{"head":{"type":1303,"time":1,"src":4},
+                "data":{"status_code":5,"message":"busy","cmd":10}}"#,
+        )
+        .unwrap();
+        assert!(!failed.is_ok());
+        assert_eq!(failed.code(), 5);
+        assert_eq!(failed.message(), "busy");
+    }
+
+    #[test]
+    fn alg_reply_uses_code_and_msg() {
+        let env: Envelope = serde_json::from_str(
+            r#"{"head":{"type":4001,"time":1,"src":2,"msg_id":3},
+                "data":{"code":13980,"msg":"mapping: save map timed out"}}"#,
+        )
+        .unwrap();
+        assert!(!env.is_ok());
+        assert_eq!(env.code(), 13980);
+        assert_eq!(env.message(), "mapping: save map timed out");
+    }
+
+    #[test]
+    fn notify_omits_msg_id() {
+        let env = Envelope::notify(T_REMOTE_CONTROL, json!({ "lx": 0.0 }));
+        assert!(env.head.msg_id.is_none());
+        let text = env.to_text();
+        assert!(!text.contains("msg_id"), "{text}");
     }
 
     #[test]

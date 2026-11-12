@@ -40,13 +40,16 @@ const statusText = computed(() => {
   return "在线待命，等待任务下发";
 });
 
-/** 本体动作按钮：码值 + 文案 + 是否危险 */
+/** 本体动作按钮：码值 + 文案 + 是否危险
+ *
+ * 只列协议 1302 里真实存在的动作（码值在设备客户端按文档映射）。
+ * 「位姿复位」在 1302 枚举里没有对应值，已下线。
+ */
 const actions = [
   { code: "stand_up", label: "站立", icon: "trend-up", danger: false },
   { code: "lie_down", label: "卧倒", icon: "trend-down", danger: true },
   { code: "light_on", label: "开灯", icon: "scan", danger: false },
-  { code: "light_off", label: "关灯", icon: "shield", danger: false },
-  { code: "reset_pose", label: "位姿复位", icon: "undo", danger: false }
+  { code: "light_off", label: "关灯", icon: "shield", danger: false }
 ] as const;
 
 const speedPresets = [
@@ -169,8 +172,12 @@ async function sendAction(code: string, label: string, danger: boolean) {
   }
   try {
     const res = await deviceApi.action(props.device.id, code);
+    // 服务端只保证「指令送进了设备连接」，本体是否受理要看设备侧回执
+    // （受理失败会以 error 事件落到告警中心）。
     lastAck.value = `${res.label}已下发`;
-    ElMessage.success(`${res.label} 已下发${res.wsDelivered ? "" : "（设备未连接）"}`);
+    ElMessage.success(
+      `${res.label} 已下发至设备${res.wsDelivered ? "，等待本体受理" : "（设备未连接）"}`
+    );
   } catch (error) {
     ElMessage.error((error as Error).message || `${label} 下发失败`);
   }

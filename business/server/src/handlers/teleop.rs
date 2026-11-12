@@ -28,14 +28,18 @@ const TELEOP_IDLE_TIMEOUT_SECS: i64 = 120;
 
 /// 本体动作指令（走智航 1302）
 ///
-/// `id` 是下发给本体的动作码，`label` 用于审计日志。
-const BODY_ACTIONS: [(&str, &str); 6] = [
+/// `id` 是下发给本体的动作机码（不是 1302 的 `cmd` 码值，码值在设备客户端
+/// `client/src/zhpro/teleop.rs::BodyCommand` 里按协议文档映射），`label` 用于审计
+/// 日志与前端提示。
+///
+/// 协议 1302 的枚举里没有「位姿复位」，所以不再对外暴露这个动作
+/// （以前下发的字符串 `reset_pose` 本体根本不认）。
+const BODY_ACTIONS: [(&str, &str); 5] = [
     ("stand_up", "站立"),
     ("lie_down", "卧倒"),
     ("emergency_stop", "急停"),
     ("light_on", "开灯"),
     ("light_off", "关灯"),
-    ("reset_pose", "位姿复位"),
 ];
 
 /// 允许通过 `/command` 下发的业务指令
@@ -480,5 +484,12 @@ mod tests {
     fn rejects_unknown_business_command() {
         assert!(normalize_command("起飞").is_err());
         assert_eq!(normalize_command("开始巡检").unwrap(), "开始巡检");
+    }
+
+    /// 协议 1302 里没有「位姿复位」，这个动作不应该再被受理
+    #[test]
+    fn drops_unsupported_body_action() {
+        assert!(!BODY_ACTIONS.iter().any(|(code, _)| *code == "reset_pose"));
+        assert!(BODY_ACTIONS.iter().any(|(code, _)| *code == "stand_up"));
     }
 }

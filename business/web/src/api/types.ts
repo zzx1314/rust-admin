@@ -99,14 +99,13 @@ export interface TeleopAxes {
   speed?: number;
 }
 
-/** 本体动作机器码 */
+/** 本体动作机器码（协议 1302 有对应 cmd 码值的动作） */
 export type DeviceAction =
   | "stand_up"
   | "lie_down"
   | "emergency_stop"
   | "light_on"
-  | "light_off"
-  | "reset_pose";
+  | "light_off";
 
 export interface Task {
   id: number;
