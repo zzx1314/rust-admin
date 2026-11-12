@@ -358,6 +358,21 @@ journalctl -u robodog-device-client -f | grep 视频
 - 航线任务 → `RouteRunner::control`，暂停时同步给本体 5004，恢复 5006，取消 5002；
 - 建图任务 → `cancel` 会触发 5002 并等待 4001 保存结果。
 
+### 出站报文日志
+
+- `5000` 任务载荷：DEBUG，`zhpro::route: 5000 载荷（第 x/y 点 …）: {…}`；`5001` 应答也是 DEBUG；
+- 所有 `request` / `send`：TRACE，打印完整出站 JSON（含 `5000/4030/4012/1302/1204`）；
+- `1304` 摇杆是 50Hz，只有 TRACE 才打印，默认不会刷日志；
+- 现场默认 `RUST_LOG=robodog_device_client=debug`：
+
+```bash
+# 看 5000/5001，和本文档字段逐项对账
+journalctl -u robodog-device-client -f | grep -E "5000 载荷|5001 应答"
+
+# 临时看所有出站报文（含 1302/1304/4030），注意 1304 会很多
+RUST_LOG=robodog_device_client::zhpro::client=trace   /opt/robodog/client/robodog-device-client --config /etc/robodog/client.toml
+```
+
 ## 目标字段使用说明
 
 `goals[]` 逐点下发（`MapManager` 前置校验通过后）：

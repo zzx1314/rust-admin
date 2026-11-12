@@ -23,7 +23,7 @@ use std::time::Duration;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 /// 请求等待响应的默认超时
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
@@ -393,12 +393,16 @@ impl ZhProClient {
     ) -> Result<Envelope, String> {
         let msg_id = self.next_msg_id();
         let env = Envelope::request(msg_type, msg_id, data);
+        let text = env.to_text();
+        // trace 级别打印完整出站请求，便于和协议文档逐字段对账；
+        // 现场默认 RUST_LOG=...=debug，不会刷 5000/4030 这些包。
+        trace!(msg_type, msg_id, packet = %text, "→ 智航请求");
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(msg_id, tx);
 
         if self
             .control_tx
-            .send(Message::Text(env.to_text()))
+            .send(Message::Text(text))
             .await
             .is_err()
         {
@@ -462,8 +466,11 @@ impl ZhProClient {
     /// 等不到应答的 oneshot。
     pub async fn send(&self, msg_type: u32, data: Value) -> Result<(), String> {
         let env = Envelope::notify(msg_type, data);
+        let text = env.to_text();
+        // 1304 摇杆是 50Hz，只有 trace 级别才打印；1302/1304 出问题时可临时打开。
+        trace!(msg_type, packet = %text, "→ 智航通知");
         self.control_tx
-            .send(Message::Text(env.to_text()))
+            .send(Message::Text(text))
             .await
             .map_err(|_| "control 通道已关闭".to_string())
     }
@@ -484,9 +491,11 @@ impl ZhProClient {
 
         let msg_id = self.next_msg_id();
         let env = Envelope::request(msg_type, msg_id, data);
+        let text = env.to_text();
+        trace!(msg_type, msg_id, packet = %text, "→ 智航请求");
         if self
             .control_tx
-            .send(Message::Text(env.to_text()))
+            .send(Message::Text(text))
             .await
             .is_err()
         {
@@ -557,8 +566,10 @@ impl ZhProClient {
         }
         let msg_id = self.next_msg_id();
         let env = Envelope::request(T_TAKE_CONTROL, msg_id, empty());
+        let text = env.to_text();
+        trace!(msg_type = T_TAKE_CONTROL, msg_id, packet = %text, "→ 智航请求");
         self.control_tx
-            .send(Message::Text(env.to_text()))
+            .send(Message::Text(text))
             .await
             .map_err(|_| "control 通道已关闭".to_string())?;
         // 1205 为通知，不走 msg_id 关联，等待状态标志由 status_watch 更新
