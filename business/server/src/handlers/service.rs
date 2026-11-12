@@ -409,6 +409,7 @@ pub async fn apply_task(
             dispatch_policy: None,
             description: payload.description.clone(),
         },
+        None, // 中台控制面下发，不记录业务创建人
     )
     .await?;
 

@@ -178,8 +178,8 @@ async fn seed_business_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     for (id, code, name, desc, address, area, owner, park_type, status, color) in parks {
         sqlx::query(
             "INSERT INTO parks (id, park_code, park_name, park_description, park_address, area,
-                owner_name, park_type, status, color, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                owner_name, park_type, status, color, created_at, updated_at, created_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1)",
         )
         .bind(id)
         .bind(code)
@@ -209,8 +209,8 @@ async fn seed_business_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     ];
     for (id, park_id, name, zone_type, frequency, status) in zones {
         sqlx::query(
-            "INSERT INTO zones (id, park_id, zone_name, zone_type, frequency, status, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO zones (id, park_id, zone_name, zone_type, frequency, status, created_at, updated_at, created_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)",
         )
         .bind(id)
         .bind(park_id)
@@ -658,8 +658,8 @@ async fn seed_business_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         sqlx::query(
             "INSERT INTO tasks (id, task_code, task_name, task_type, execute_mode, level, device_id,
                 park_id, zone_id, route_id, plan_start, plan_end, task_status, progress,
-                dispatch_policy, description, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                dispatch_policy, description, created_at, updated_at, created_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, 1)",
         )
         .bind(task.0)
         .bind(task.1)
@@ -866,8 +866,8 @@ async fn seed_routes(pool: &SqlitePool, created: &str) -> Result<(), sqlx::Error
         sqlx::query(
             "INSERT INTO routes (route_code, route_name, park_id, zone_id, model, status, version,
                 loop_mode, default_speed, route_description, route_data, point_count, distance_m,
-                duration_s, battery_pct, published_at, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                duration_s, battery_pct, published_at, created_at, updated_at, created_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, 1)",
         )
         .bind(route_code)
         .bind(route_name)

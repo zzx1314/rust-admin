@@ -22,6 +22,7 @@ pub struct Park {
     pub device_count: i64,
     pub task_count: i64,
     pub done_count: i64,
+    pub created_by: Option<i64>,
 }
 
 #[derive(Debug, FromRow, Serialize, Clone)]
@@ -114,6 +115,7 @@ pub struct Zone {
     pub device_count: i64,
     pub created_at: String,
     pub updated_at: String,
+    pub created_by: Option<i64>,
 }
 
 #[derive(Debug, FromRow, Serialize, Clone)]
@@ -187,6 +189,7 @@ pub struct Task {
     pub robot_updated_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub created_by: Option<i64>,
 }
 
 #[derive(Debug, FromRow, Serialize, Clone)]
@@ -216,6 +219,7 @@ pub struct Route {
     pub created_at: String,
     pub updated_at: String,
     pub used_task_count: i64,
+    pub created_by: Option<i64>,
 }
 
 #[derive(Debug, FromRow, Serialize, Clone)]

@@ -1,11 +1,29 @@
 use crate::app::AppState;
+use crate::auth::Claims;
 use crate::error::{ApiResponse, AppError};
 use crate::models::{Alert, Device, Park, TaskEvent};
 use axum::Json;
 use axum::extract::State;
+use axum::Extension;
 use serde_json::{Value, json};
 
-pub async fn summary(State(state): State<AppState>) -> Result<Json<ApiResponse<Value>>, AppError> {
+/// 根据当前登录人构造 SQL 过滤子句（非管理员只能看到自己创建的数据）。
+fn owner_filter(claims: &Claims, alias: &str) -> String {
+    if claims.is_admin {
+        String::new()
+    } else {
+        format!(" AND {alias}.created_by = {}", claims.sub)
+    }
+}
+
+pub async fn summary(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let filter_p = owner_filter(&claims, "p");
+    let filter_t = owner_filter(&claims, "t");
+
+    // 设备统计（设备本身不按创建人过滤，保持全局视图）
     let device_rows: Vec<(String, i64)> =
         sqlx::query_as("SELECT status, COUNT(*) FROM devices GROUP BY status")
             .fetch_all(&state.db)
@@ -25,10 +43,13 @@ pub async fn summary(State(state): State<AppState>) -> Result<Json<ApiResponse<V
     }
     let online = running;
 
-    let task_rows: Vec<(String, i64)> =
-        sqlx::query_as("SELECT task_status, COUNT(*) FROM tasks GROUP BY task_status")
-            .fetch_all(&state.db)
-            .await?;
+    // 任务统计：非管理员只能看到自己的任务
+    let task_sql = format!(
+        "SELECT task_status, COUNT(*) FROM tasks t WHERE 1=1{filter_t} GROUP BY task_status"
+    );
+    let task_rows: Vec<(String, i64)> = sqlx::query_as(&task_sql)
+        .fetch_all(&state.db)
+        .await?;
     let task_total: i64 = task_rows.iter().map(|(_, count)| count).sum();
     let task_done = task_rows
         .iter()
@@ -41,15 +62,20 @@ pub async fn summary(State(state): State<AppState>) -> Result<Json<ApiResponse<V
         task_done * 100 / task_total
     };
 
-    let park_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM parks")
+    // 园区/区域统计：非管理员只能看到自己的园区
+    let park_count_sql = format!("SELECT COUNT(*) FROM parks p WHERE 1=1{filter_p}");
+    let park_count: i64 = sqlx::query_scalar(&park_count_sql)
         .fetch_one(&state.db)
         .await?;
     let zone_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM zones")
         .fetch_one(&state.db)
         .await?;
-    let area: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(area), 0) FROM parks")
+    let area_sql = format!("SELECT COALESCE(SUM(area), 0) FROM parks p WHERE 1=1{filter_p}");
+    let area: f64 = sqlx::query_scalar(&area_sql)
         .fetch_one(&state.db)
         .await?;
+
+    // 告警统计（全局，不按创建人过滤）
     let pending_alerts: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM alerts WHERE status = '未处理'")
             .fetch_one(&state.db)
@@ -58,18 +84,20 @@ pub async fn summary(State(state): State<AppState>) -> Result<Json<ApiResponse<V
         .fetch_one(&state.db)
         .await?;
 
-    let parks = sqlx::query_as::<_, Park>(
+    // 园区列表（态势图）：非管理员只能看到自己的园区
+    let parks_sql = format!(
         "SELECT p.id, p.park_code, p.park_name, p.park_description, p.park_address,
             p.area, p.owner_name, p.park_type, p.status, p.color, p.created_at, p.updated_at,
-            p.map_version_id, p.map_status,
+            p.map_version_id, p.map_status, p.created_by,
             (SELECT COUNT(*) FROM zones z WHERE z.park_id = p.id) AS zone_count,
             (SELECT COUNT(*) FROM devices d WHERE d.park_id = p.id) AS device_count,
             (SELECT COUNT(*) FROM tasks t WHERE t.park_id = p.id) AS task_count,
             (SELECT COUNT(*) FROM tasks t WHERE t.park_id = p.id AND t.task_status = '已完成') AS done_count
-         FROM parks p ORDER BY p.id ASC",
-    )
-    .fetch_all(&state.db)
-    .await?;
+         FROM parks p WHERE 1=1{filter_p} ORDER BY p.id ASC"
+    );
+    let parks = sqlx::query_as::<_, Park>(&parks_sql)
+        .fetch_all(&state.db)
+        .await?;
 
     let alerts = sqlx::query_as::<_, Alert>(
         "SELECT a.id, a.alert_code, a.level, a.content, a.device_id, d.device_id AS device_code,
@@ -110,7 +138,7 @@ pub async fn summary(State(state): State<AppState>) -> Result<Json<ApiResponse<V
     .fetch_all(&state.db)
     .await?;
 
-    // 列清单复用 DEVICE_SELECT，避免新增设备字段（如 video_url）后此查询漏选导致解码失败
+    // 地图设备列表（全局，不按创建人过滤）
     let map_device_sql = format!(
         "{} WHERE d.status IN ('执行任务', '在线待命', '故障') ORDER BY d.id ASC LIMIT 6",
         super::devices::DEVICE_SELECT

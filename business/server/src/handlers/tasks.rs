@@ -1,4 +1,5 @@
 use crate::app::AppState;
+use crate::auth::Claims;
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::gateway;
@@ -6,6 +7,7 @@ use crate::gateway_types::TaskControlPayload;
 use crate::models::{Task, TaskQuery, TaskRequest, TaskStatusRequest};
 use axum::Json;
 use axum::extract::{Path, Query, State};
+use axum::Extension;
 use serde_json::{Value, json};
 use sqlx::{QueryBuilder, SqlitePool};
 use tracing::{info, warn};
@@ -14,7 +16,7 @@ const TASK_SELECT: &str = "SELECT t.id, t.task_code, t.task_name, t.task_type, t
     t.level, t.device_id, d.device_id AS device_code, t.park_id, p.park_name, t.zone_id,
     z.zone_name, t.route_id, r.route_code, r.route_name, t.plan_start, t.plan_end,
     t.task_status, t.progress, t.dispatch_policy, t.description, t.robot_task_id,
-    t.robot_stage, t.robot_updated_at, t.created_at, t.updated_at
+    t.robot_stage, t.robot_updated_at, t.created_at, t.updated_at, t.created_by
     FROM tasks t
     LEFT JOIN devices d ON d.id = t.device_id
     LEFT JOIN parks p ON p.id = t.park_id
@@ -52,6 +54,7 @@ async fn validate_device_park(
 pub async fn list_tasks(
     State(state): State<AppState>,
     Query(query): Query<TaskQuery>,
+    Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<Vec<Task>>>, AppError> {
     let mut builder = QueryBuilder::<sqlx::Sqlite>::new(TASK_SELECT);
     builder.push(" WHERE 1 = 1");
@@ -70,6 +73,9 @@ pub async fn list_tasks(
     if let Some(route_id) = query.route_id {
         builder.push(" AND t.route_id = ").push_bind(route_id);
     }
+    if !claims.is_admin {
+        builder.push(" AND t.created_by = ").push_bind(claims.sub);
+    }
     builder.push(" ORDER BY t.created_at DESC, t.id DESC");
     let tasks = builder
         .build_query_as::<Task>()
@@ -80,9 +86,16 @@ pub async fn list_tasks(
 
 pub async fn task_stats(
     State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let filter_clause = if claims.is_admin {
+        String::new()
+    } else {
+        format!(" WHERE created_by = {}", claims.sub)
+    };
+    let sql = format!("SELECT task_status, COUNT(*) FROM tasks{filter_clause} GROUP BY task_status");
     let rows: Vec<(String, i64)> =
-        sqlx::query_as("SELECT task_status, COUNT(*) FROM tasks GROUP BY task_status")
+        sqlx::query_as(&sql)
             .fetch_all(&state.db)
             .await?;
     let total: i64 = rows.iter().map(|(_, count)| count).sum();
@@ -109,15 +122,19 @@ pub async fn task_stats(
 pub async fn get_task(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<Task>>, AppError> {
-    Ok(ApiResponse::ok(fetch_task(&state, id).await?))
+    let task = fetch_task(&state, id).await?;
+    super::parks::ensure_owner(&task, &claims)?;
+    Ok(ApiResponse::ok(task))
 }
 
 pub async fn create_task(
     State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
     Json(payload): Json<TaskRequest>,
 ) -> Result<Json<ApiResponse<Task>>, AppError> {
-    let task = create_task_core(&state, payload).await?;
+    let task = create_task_core(&state, payload, Some(claims.sub)).await?;
     Ok(ApiResponse::ok(task))
 }
 
@@ -127,6 +144,7 @@ pub async fn create_task(
 pub(crate) async fn create_task_core(
     state: &AppState,
     payload: TaskRequest,
+    created_by: Option<i64>,
 ) -> Result<Task, AppError> {
     if payload.task_name.trim().is_empty() {
         return Err(AppError::BadRequest("任务名称不能为空".to_string()));
@@ -143,8 +161,8 @@ pub(crate) async fn create_task_core(
     let result = sqlx::query(
         "INSERT INTO tasks (task_code, task_name, task_type, execute_mode, level, device_id,
             park_id, zone_id, route_id, plan_start, plan_end, task_status, progress,
-            dispatch_policy, description, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            dispatch_policy, description, created_at, updated_at, created_by)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
     )
     .bind(&task_code)
     .bind(payload.task_name.trim())
@@ -163,6 +181,7 @@ pub(crate) async fn create_task_core(
     .bind(payload.description)
     .bind(&timestamp)
     .bind(&timestamp)
+    .bind(created_by)
     .execute(&state.db)
     .await?;
     let id = result.last_insert_rowid();
@@ -215,9 +234,11 @@ pub(crate) async fn create_task_core(
 pub async fn update_task(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
     Json(payload): Json<TaskRequest>,
 ) -> Result<Json<ApiResponse<Task>>, AppError> {
     let existing = fetch_task(&state, id).await?;
+    super::parks::ensure_owner(&existing, &claims)?;
     let status = payload.task_status.unwrap_or(existing.task_status);
     let progress = payload.progress.unwrap_or(existing.progress);
     let device_id = payload.device_id.or(existing.device_id);
@@ -257,9 +278,11 @@ pub async fn update_task(
 pub async fn update_task_status(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
     Json(payload): Json<TaskStatusRequest>,
 ) -> Result<Json<ApiResponse<Task>>, AppError> {
     let existing = fetch_task(&state, id).await?;
+    super::parks::ensure_owner(&existing, &claims)?;
     let valid = ["待执行", "执行中", "已完成", "异常", "已暂停"];
     if !valid.contains(&payload.task_status.as_str()) {
         return Err(AppError::BadRequest("无效的任务状态".to_string()));
@@ -348,7 +371,10 @@ async fn push_task_control(state: &AppState, task: &Task, action: &str, reason: 
 pub async fn delete_task(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<bool>>, AppError> {
+    let task = fetch_task(&state, id).await?;
+    super::parks::ensure_owner(&task, &claims)?;
     sqlx::query("DELETE FROM task_events WHERE task_id = ?1")
         .bind(id)
         .execute(&state.db)
@@ -358,6 +384,12 @@ pub async fn delete_task(
         .execute(&state.db)
         .await?;
     Ok(ApiResponse::ok(result.rows_affected() > 0))
+}
+
+impl super::parks::OwnerCheck for Task {
+    fn creator_id(&self) -> Option<i64> {
+        self.created_by
+    }
 }
 
 async fn fetch_task(state: &AppState, id: i64) -> Result<Task, AppError> {

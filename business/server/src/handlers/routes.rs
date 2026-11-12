@@ -1,10 +1,12 @@
 use crate::app::AppState;
+use crate::auth::Claims;
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::geo::{nearest_neighbor_order, route_metrics};
 use crate::models::{Route, RouteQuery, RouteRequest};
 use axum::Json;
 use axum::extract::{Path, Query, State};
+use axum::Extension;
 use serde_json::{Value, json};
 use sqlx::QueryBuilder;
 
@@ -12,6 +14,7 @@ const ROUTE_SELECT: &str = "SELECT r.id, r.route_code, r.route_name, r.park_id, 
     r.zone_id, z.zone_name, r.model, r.status, r.version, r.loop_mode, r.default_speed,
     r.route_description, r.route_data, r.point_count, r.distance_m, r.duration_s, r.battery_pct,
     r.published_at, r.map_version_id, mv.status AS map_status, r.created_at, r.updated_at,
+    r.created_by,
     (SELECT COUNT(*) FROM tasks t WHERE t.route_id = r.id) AS used_task_count
     FROM routes r
     LEFT JOIN parks p ON p.id = r.park_id
@@ -21,6 +24,7 @@ const ROUTE_SELECT: &str = "SELECT r.id, r.route_code, r.route_name, r.park_id, 
 pub async fn list_routes(
     State(state): State<AppState>,
     Query(query): Query<RouteQuery>,
+    Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<Vec<Route>>>, AppError> {
     let mut builder = QueryBuilder::<sqlx::Sqlite>::new(ROUTE_SELECT);
     builder.push(" WHERE 1 = 1");
@@ -44,6 +48,9 @@ pub async fn list_routes(
     {
         builder.push(" AND r.status = ").push_bind(status);
     }
+    if !claims.is_admin {
+        builder.push(" AND r.created_by = ").push_bind(claims.sub);
+    }
     builder.push(" ORDER BY r.id ASC");
     let routes = builder
         .build_query_as::<Route>()
@@ -55,12 +62,16 @@ pub async fn list_routes(
 pub async fn get_route(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<Route>>, AppError> {
-    Ok(ApiResponse::ok(fetch_route(&state, id).await?))
+    let route = fetch_route(&state, id).await?;
+    super::parks::ensure_owner(&route, &claims)?;
+    Ok(ApiResponse::ok(route))
 }
 
 pub async fn create_route(
     State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
     Json(payload): Json<RouteRequest>,
 ) -> Result<Json<ApiResponse<Route>>, AppError> {
     if payload.route_name.trim().is_empty() {
@@ -85,8 +96,8 @@ pub async fn create_route(
     let result = sqlx::query(
         "INSERT INTO routes (route_code, route_name, park_id, zone_id, model, status, version,
             loop_mode, default_speed, route_description, route_data, point_count, distance_m,
-            duration_s, battery_pct, published_at, map_version_id, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, NULL, ?16, ?17, ?18)",
+            duration_s, battery_pct, published_at, map_version_id, created_at, updated_at, created_by)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, NULL, ?16, ?17, ?18, ?19)",
     )
     .bind(&route_code)
     .bind(payload.route_name.trim())
@@ -106,6 +117,7 @@ pub async fn create_route(
     .bind(map.map(|item| item.0))
     .bind(&timestamp)
     .bind(&timestamp)
+    .bind(claims.sub)
     .execute(&state.db)
     .await?;
     Ok(ApiResponse::ok(
@@ -116,9 +128,11 @@ pub async fn create_route(
 pub async fn update_route(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
     Json(payload): Json<RouteRequest>,
 ) -> Result<Json<ApiResponse<Route>>, AppError> {
     let existing = fetch_route(&state, id).await?;
+    super::parks::ensure_owner(&existing, &claims)?;
     let loop_mode = payload
         .loop_mode
         .clone()
@@ -181,7 +195,10 @@ pub async fn update_route(
 pub async fn delete_route(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<bool>>, AppError> {
+    let route = fetch_route(&state, id).await?;
+    super::parks::ensure_owner(&route, &claims)?;
     sqlx::query("UPDATE tasks SET route_id = NULL WHERE route_id = ?1")
         .bind(id)
         .execute(&state.db)
@@ -196,8 +213,10 @@ pub async fn delete_route(
 pub async fn validate_route(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     let route = fetch_route(&state, id).await?;
+    super::parks::ensure_owner(&route, &claims)?;
     let data = route
         .route_data
         .as_deref()
@@ -324,8 +343,10 @@ pub async fn validate_route(
 pub async fn publish_route(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<Route>>, AppError> {
     let route = fetch_route(&state, id).await?;
+    super::parks::ensure_owner(&route, &claims)?;
     if route.point_count < 2 {
         return Err(AppError::BadRequest("航点不足，无法发布".to_string()));
     }
@@ -356,8 +377,10 @@ pub async fn publish_route(
 pub async fn optimize_route(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<Route>>, AppError> {
     let route = fetch_route(&state, id).await?;
+    super::parks::ensure_owner(&route, &claims)?;
     let data = route
         .route_data
         .as_deref()
@@ -417,6 +440,12 @@ fn bump_version(version: &str) -> String {
         minor = 0;
     }
     format!("v{major}.{minor}")
+}
+
+impl super::parks::OwnerCheck for Route {
+    fn creator_id(&self) -> Option<i64> {
+        self.created_by
+    }
 }
 
 async fn fetch_route(state: &AppState, id: i64) -> Result<Route, AppError> {

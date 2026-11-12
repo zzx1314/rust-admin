@@ -1,15 +1,17 @@
 use crate::app::AppState;
+use crate::auth::Claims;
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::models::{Park, ParkQuery, ParkRequest};
 use axum::Json;
 use axum::extract::{Path, Query, State};
+use axum::Extension;
 use sqlx::QueryBuilder;
 
 const PARK_SELECT: &str =
     "SELECT p.id, p.park_code, p.park_name, p.park_description, p.park_address,
     p.area, p.owner_name, p.park_type, p.status, p.color, p.created_at, p.updated_at,
-    p.map_version_id, p.map_status,
+    p.map_version_id, p.map_status, p.created_by,
     (SELECT COUNT(*) FROM zones z WHERE z.park_id = p.id) AS zone_count,
     (SELECT COUNT(*) FROM devices d WHERE d.park_id = p.id) AS device_count,
     (SELECT COUNT(*) FROM tasks t WHERE t.park_id = p.id) AS task_count,
@@ -19,6 +21,7 @@ const PARK_SELECT: &str =
 pub async fn list_parks(
     State(state): State<AppState>,
     Query(query): Query<ParkQuery>,
+    Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<Vec<Park>>>, AppError> {
     let mut builder = QueryBuilder::<sqlx::Sqlite>::new(PARK_SELECT);
     builder.push(" WHERE 1 = 1");
@@ -39,6 +42,10 @@ pub async fn list_parks(
     {
         builder.push(" AND p.status = ").push_bind(status);
     }
+    // 非管理员只能看到自己创建的园区
+    if !claims.is_admin {
+        builder.push(" AND p.created_by = ").push_bind(claims.sub);
+    }
     builder.push(" ORDER BY p.id ASC");
 
     let parks = builder
@@ -51,13 +58,16 @@ pub async fn list_parks(
 pub async fn get_park(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<Park>>, AppError> {
     let park = fetch_park(&state, id).await?;
+    ensure_owner(&park, &claims)?;
     Ok(ApiResponse::ok(park))
 }
 
 pub async fn create_park(
     State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
     Json(payload): Json<ParkRequest>,
 ) -> Result<Json<ApiResponse<Park>>, AppError> {
     if payload.park_name.trim().is_empty() {
@@ -74,8 +84,8 @@ pub async fn create_park(
 
     sqlx::query(
         "INSERT INTO parks (park_code, park_name, park_description, park_address, area, owner_name,
-            park_type, status, color, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            park_type, status, color, created_at, updated_at, created_by)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
     )
     .bind(&park_code)
     .bind(payload.park_name.trim())
@@ -88,6 +98,7 @@ pub async fn create_park(
     .bind(payload.color.unwrap_or_else(|| "#0284c7".to_string()))
     .bind(&timestamp)
     .bind(&timestamp)
+    .bind(claims.sub)
     .execute(&state.db)
     .await?;
 
@@ -101,9 +112,13 @@ pub async fn create_park(
 pub async fn update_park(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
     Json(payload): Json<ParkRequest>,
 ) -> Result<Json<ApiResponse<Park>>, AppError> {
     let existing = fetch_park(&state, id).await?;
+    if !claims.is_admin && existing.created_by.map(|uid| uid != claims.sub).unwrap_or(true) {
+        return Err(AppError::NotFound("园区不存在".to_string()));
+    }
     let (map_version_id, map_status) = resolve_park_map(&state, id, payload.map_version_id)
         .await?
         .unwrap_or((existing.map_version_id, existing.map_status));
@@ -137,7 +152,12 @@ pub async fn update_park(
 pub async fn delete_park(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<bool>>, AppError> {
+    let park = fetch_park(&state, id).await?;
+    if !claims.is_admin && park.created_by.map(|uid| uid != claims.sub).unwrap_or(true) {
+        return Err(AppError::NotFound("园区不存在".to_string()));
+    }
     let mut transaction = state.db.begin().await?;
     sqlx::query("DELETE FROM zones WHERE park_id = ?1")
         .bind(id)
@@ -161,6 +181,29 @@ pub async fn delete_park(
         .await?;
     transaction.commit().await?;
     Ok(ApiResponse::ok(result.rows_affected() > 0))
+}
+
+/// 非管理员只能操作自己创建的资源。返回 `NotFound` 而非 `Forbidden`，
+/// 避免暴露「该记录由他人创建」的信息。
+pub(crate) fn ensure_owner<T: OwnerCheck>(resource: &T, claims: &Claims) -> Result<(), AppError> {
+    if claims.is_admin {
+        return Ok(());
+    }
+    match resource.creator_id() {
+        Some(uid) if uid == claims.sub => Ok(()),
+        _ => Err(AppError::NotFound("记录不存在".to_string())),
+    }
+}
+
+/// 让多种资源类型可以共用 `ensure_owner`
+pub(crate) trait OwnerCheck {
+    fn creator_id(&self) -> Option<i64>;
+}
+
+impl OwnerCheck for Park {
+    fn creator_id(&self) -> Option<i64> {
+        self.created_by
+    }
 }
 
 async fn fetch_park(state: &AppState, id: i64) -> Result<Park, AppError> {
