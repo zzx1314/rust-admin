@@ -242,6 +242,9 @@ pub async fn handle_command(
         "释放接管" => Some(disengage(client, teleop).await),
         other => match body {
             Some(BodyCommand::EmergencyStop) => Some(emergency_stop(client, teleop).await),
+            Some(BodyCommand::ClearEmergencyStop) => {
+                Some(clear_emergency_stop(client, teleop).await)
+            }
             Some(cmd) => Some(send_body_command(client, teleop, cmd, other).await),
             None => None,
         },
@@ -337,6 +340,33 @@ pub async fn send_stop(client: &ZhProClient) {
     let _ = client
         .send(T_REMOTE_CONTROL, TeleopAxes::default().to_payload())
         .await;
+}
+
+/// 解除软件急停：先补零摇杆、清本地摇杆状态，再发 cmd=1，最后再补一帧零。
+///
+/// 现场风险：清除急停的瞬间，如果本体还保留着急停前的最后一帧非零 1304，
+/// 固件可能直接恢复那个速度。本站的 `emergency_stop` 会补零，但
+/// `clear_emergency_stop` 以前只发 1302 cmd=1，没有清摇杆状态；这里补齐。
+async fn clear_emergency_stop(
+    client: &ZhProClient,
+    teleop: &SharedTeleop,
+) -> Result<String, String> {
+    let _ = client
+        .send(T_REMOTE_CONTROL, TeleopAxes::default().to_payload())
+        .await;
+    {
+        let mut guard = teleop.lock().await;
+        guard.moving = false;
+        guard.active_axes = None;
+        guard.last_frame = None;
+    }
+    send_cmd(client, BodyCommand::ClearEmergencyStop).await?;
+    // 固件在清急停瞬间可能恢复上一帧速度，再补一帧零兜底
+    let _ = client
+        .send(T_REMOTE_CONTROL, TeleopAxes::default().to_payload())
+        .await;
+    info!("已下发解除急停，并补零摇杆防止恢复急停前运动");
+    Ok("解除急停已下发（已清零摇杆）".to_string())
 }
 
 /// 急停：不要求接管态，直接发停车 + 急停命令

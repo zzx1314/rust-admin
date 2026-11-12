@@ -215,6 +215,14 @@ async function sendAxes(axes: TeleopAxes) {
   }
 }
 
+/** 动作下发后刷新设备：本体状态变化经心跳回传有延迟，先立即刷一次，再补几次 */
+function scheduleDeviceRefresh() {
+  emit("changed");
+  for (const ms of [1200, 3000, 6000, 12000]) {
+    window.setTimeout(() => emit("changed"), ms);
+  }
+}
+
 async function sendAction(code: string, label: string, danger: boolean) {
   if (!props.device) return;
   // 危险动作二次确认，防误触
@@ -237,6 +245,9 @@ async function sendAction(code: string, label: string, danger: boolean) {
     ElMessage.success(
       `${res.label} 已下发至设备${res.wsDelivered ? "，等待本体受理" : "（设备未连接）"}`
     );
+    // 解除急停/站立等动作会改变 1315 状态；设备心跳有间隔，补几次刷新，
+    // 否则抽屉会一直停在动作前的 estopSoftware=true，看起来像“没生效”。
+    scheduleDeviceRefresh();
   } catch (error) {
     ElMessage.error((error as Error).message || `${label} 下发失败`);
   }
@@ -276,6 +287,7 @@ async function emergencyStop() {
     await deviceApi.action(props.device.id, "emergency_stop");
     ElMessage.warning("急停已下发");
     lastAck.value = "急停";
+    scheduleDeviceRefresh();
   } catch (error) {
     ElMessage.error((error as Error).message || "急停下发失败");
   }

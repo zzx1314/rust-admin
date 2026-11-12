@@ -228,6 +228,9 @@ impl RobotState {
     /// 被外部程序/遥控器抢占时暂停遥控，在急停未解除时不允许运动；这里把
     /// 同样的判断收敛到客户端，避免“平台显示已下发、本体实际拒收”。
     fn motion_block_reason(&self, require_posture: bool) -> Option<String> {
+        if self.body_status_at.is_none() {
+            return Some("尚未收到本体 1315 状态（设备初始化中），请稍后重试".to_string());
+        }
         if !self.body_status_fresh() {
             return Some(
                 "本体 1315 状态超过 30s 未更新（本体离线或算法节点未启动）".to_string(),
@@ -1662,6 +1665,17 @@ async fn handle_server_message(
             // 官方 App 在 sdk_node 未就绪 / 急停未解除 / 控制权被外部抢占 /
             // 未站立时不会创建任务；这里在发 5000 之前统一拦掉，避免
             // “5000 受理但本体不执行，最后等 600s 超时”。
+            //
+            // 客户端刚启动/刚重连时，平台会立刻补发 pending 任务，而第一条
+            // 1315 可能还没到；先等最多 3s，避免把“初始化中”误判成“离线”。
+            if !state.lock().await.body_status_fresh() {
+                for _ in 0..15 {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    if state.lock().await.body_status_fresh() {
+                        break;
+                    }
+                }
+            }
             let task_block = state.lock().await.motion_block_reason(true);
             if let Some(reason) = task_block {
                 warn!("任务 {task_code} 拒绝下发: {reason}");
