@@ -179,6 +179,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                             robot_mode: None,
                                             loc_status: None,
                                             map_id: None,
+                                            ctrl_source: None,
+                                            motion_status: None,
                                         });
                                     handle_heartbeat(&db, &state.config, did, &payload).await;
                                     send_msg(&tx, "heartbeat_ack", json!(HeartbeatAckPayload {
@@ -651,6 +653,32 @@ async fn handle_heartbeat(
             "UPDATE devices SET runtime_minutes = ?1, updated_at = ?2 WHERE device_id = ?3",
         )
         .bind(r)
+        .bind(&timestamp_clone)
+        .bind(&device_id_clone)
+        .execute(db)
+        .await;
+    }
+    // 控制源 / 运动状态：判断「是否已完全接管」的两个硬指标
+    if let Some(source) = payload.ctrl_source {
+        let _ = sqlx::query(
+            "UPDATE devices SET ctrl_source = ?1, updated_at = ?2 WHERE device_id = ?3",
+        )
+        .bind(source)
+        .bind(&timestamp_clone)
+        .bind(&device_id_clone)
+        .execute(db)
+        .await;
+    }
+    if let Some(motion) = payload
+        .motion_status
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let _ = sqlx::query(
+            "UPDATE devices SET motion_status = ?1, updated_at = ?2 WHERE device_id = ?3",
+        )
+        .bind(motion)
         .bind(&timestamp_clone)
         .bind(&device_id_clone)
         .execute(db)

@@ -34,12 +34,17 @@ const TELEOP_IDLE_TIMEOUT_SECS: i64 = 120;
 ///
 /// 协议 1302 的枚举里没有「位姿复位」，所以不再对外暴露这个动作
 /// （以前下发的字符串 `reset_pose` 本体根本不认）。
-const BODY_ACTIONS: [(&str, &str); 5] = [
+const BODY_ACTIONS: [(&str, &str); 8] = [
     ("stand_up", "站立"),
     ("lie_down", "卧倒"),
     ("emergency_stop", "急停"),
     ("light_on", "开灯"),
     ("light_off", "关灯"),
+    // 模式切换（1302 cmd 60/61/62）：1304 摇杆的 lx/ly 只在通用模式下生效，
+    // 设备卡在原地模式时用它们手动纠正；接管时客户端也会自动切通用模式。
+    ("generic_mode", "通用模式"),
+    ("in_place_mode", "原地模式"),
+    ("navigation_mode", "导航模式"),
 ];
 
 /// 允许通过 `/command` 下发的业务指令
@@ -398,6 +403,8 @@ mod tests {
             robot_mode: None,
             loc_status: 255,
             active_map_id: None,
+            ctrl_source: 0,
+            motion_status: None,
             created_at: String::new(),
             updated_at: String::new(),
         }

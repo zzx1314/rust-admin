@@ -586,6 +586,26 @@ curl -X POST /api/devices/12/locate -H 'Content-Type: application/json' \
 
 `reason` 字段会透传给客户端，便于在机器人日志中定位中断原因。
 
+## 完全接管：摇杆「走不动」的三种原因
+
+现场常见现象：平台点「接管」后能下发站立/卧倒，但摇杆前进后退没反应，而物理遥控器
+照样能开。原因只有三类，平台现在都能看见并处理：
+
+| 原因 | 判据 | 处理 |
+| --- | --- | --- |
+| 只拿了控制权，本体不在运动模式 | 1304 `lx/ly` 在**原地模式**下按协议「无作用」 | 客户端接管时自动补一条 `1302 cmd=60`（通用模式）；也可在设备抽屉手动切「通用模式」 |
+| 硬件遥控器抢控制权 | `1315 ctrl_source = 3`（other），平台发 1204 也拿不回来 | 协议里没有禁用遥控器的消息：关掉遥控器电源 / 按它的「释放控制」键，再释放并重新接管 |
+| 摇杆帧太稀 | 浏览器 ~10Hz 的离散帧，本体侧看着像点动 | 客户端按协议建议 50Hz 重发（`teleop::spawn_republisher`），松手立即停车 |
+| 本体卧倒 / 锁定 | `1315 motion_status = lie_down / locked` | 先点「站立」，等 `motion_status` 变成 `stand_up` 再遥控 |
+
+因此「接管」的完整语义是：`1204` 拿到控制权 → `1302 cmd=60` 切通用模式 → 摇杆按 50Hz
+持续下发 → 用 `1315 ctrl_source / motion_status` 自证「真的接管到位」。设备抽屉的遥控页
+有一条诊断条直接显示这三项，接不通时会写明该做什么。
+
+本体动作白名单（`POST /api/devices/{id}/action`）与之配套：
+`stand_up` / `lie_down` / `emergency_stop` / `light_on` / `light_off` /
+`generic_mode` / `in_place_mode` / `navigation_mode`；除急停外都要求先接管。
+
 ## 实时视频与手动遥控
 
 ### 视频：协议里没有，只能外挂

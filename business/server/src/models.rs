@@ -169,6 +169,10 @@ pub struct Device {
     pub loc_status: i64,
     /// 机器人当前生效地图（业务侧 mapId）；为空表示未上报或未载图
     pub active_map_id: Option<String>,
+    /// 控制源：0 未知 / 1 APP / 2 SDK / 3 其他（含硬件遥控器）
+    pub ctrl_source: i64,
+    /// 运动状态：1315 `motion_status`（卧倒时摇杆不走）
+    pub motion_status: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

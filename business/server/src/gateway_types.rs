@@ -70,6 +70,10 @@ pub struct HeartbeatPayload {
     pub loc_status: Option<i64>,
     /// 机器人当前生效地图（业务侧 mapId，如 `ROS-MAP-3@v1.0`）
     pub map_id: Option<String>,
+    /// 1315 `ctrl_source`：0 未知 / 1 APP / 2 SDK / 3 其他（含硬件遥控器）
+    pub ctrl_source: Option<i64>,
+    /// 1315 `motion_status`：stand_up / lie_down / walk …（卧倒时走不动）
+    pub motion_status: Option<String>,
 }
 
 /// 服务端 → 客户端：心跳确认

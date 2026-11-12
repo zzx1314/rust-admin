@@ -343,6 +343,68 @@ async fn parks_and_dashboard_work_after_login() {
             device.get("teleopHolder").is_some(),
             "设备缺少 teleopHolder"
         );
+        // 定位与「谁在控制」：缺了就看不出「接管了但摇杆不走」
+        assert!(device.get("locStatus").is_some(), "设备缺少 locStatus");
+        assert!(device.get("activeMapId").is_some(), "设备缺少 activeMapId");
+        assert!(device.get("ctrlSource").is_some(), "设备缺少 ctrlSource");
+        assert!(
+            device.get("motionStatus").is_some(),
+            "设备缺少 motionStatus"
+        );
+    }
+}
+
+/// 本体动作白名单包含 1302 的三种模式（通用/原地/导航）。
+///
+/// 「能站立但摇杆不走」的现场根因之一是本体停在原地模式：1304 的 lx/ly 在
+/// 原地模式下按协议「无作用」。平台必须能手动切回通用模式。
+#[tokio::test]
+async fn body_actions_include_gait_modes() {
+    let (state, _db) = test_state().await;
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+    let id: i64 = sqlx::query_scalar("SELECT id FROM devices LIMIT 1")
+        .fetch_one(&state.db)
+        .await
+        .expect("演示数据应包含设备");
+    // 模式切换和其它本体动作一样要求接管态：先把设备置为在线并接管
+    sqlx::query("UPDATE devices SET status = '在线待命' WHERE id = ?1")
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let taken = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/devices/{id}/teleop/take"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(taken.status(), StatusCode::OK, "应先能接管");
+
+    for (action, label) in [
+        ("generic_mode", "通用模式"),
+        ("in_place_mode", "原地模式"),
+        ("navigation_mode", "导航模式"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/api/devices/{id}/action"))
+                    .header(header::CONTENT_TYPE, header::HeaderValue::from_static("application/json"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(format!(r#"{{"action":"{action}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{action} 应被接受");
+        let body = json_body(response).await;
+        assert_eq!(body["data"]["label"], label);
+        assert_eq!(body["data"]["action"], action);
     }
 }
 

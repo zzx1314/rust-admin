@@ -7,7 +7,15 @@ import AppIcon from "./AppIcon.vue";
 import StatusBadge from "./StatusBadge.vue";
 import VideoPlayer from "./VideoPlayer.vue";
 import TeleopJoystick from "./TeleopJoystick.vue";
-import { formatDuration, isLocReady, locStatusMeta, timeOnly } from "@/utils/format";
+import {
+  canGait,
+  ctrlSourceMeta,
+  formatDuration,
+  isLocReady,
+  locStatusMeta,
+  motionStatusLabel,
+  timeOnly
+} from "@/utils/format";
 
 const props = defineProps<{ device: Device | null; open: boolean }>();
 const emit = defineEmits<{
@@ -31,6 +39,15 @@ const holding = computed(() => !!props.device?.teleopHolder);
 /** 已接管且在线才允许遥控 */
 const canControl = computed(() => holding.value && online.value);
 
+/** 控制源与运动状态：判断「是否真的完全接管」的两个硬指标 */
+const ctrlMeta = computed(() => ctrlSourceMeta(props.device?.ctrlSource));
+const ctrlByOther = computed(() => props.device?.ctrlSource === 3);
+const gaitReady = computed(() => canGait(props.device?.motionStatus));
+/** 接管了但本体/别的客户端还在拦着，摇杆按下去不会走 */
+const takeoverBlocked = computed(
+  () => holding.value && (ctrlByOther.value || !gaitReady.value)
+);
+
 /** 定位状态：100 才算可以接任务，其余需要重定位或人工介入 */
 const locMeta = computed(() => locStatusMeta(props.device?.locStatus));
 const locReady = computed(() => isLocReady(props.device?.locStatus));
@@ -53,7 +70,10 @@ const actions = [
   { code: "stand_up", label: "站立", icon: "trend-up", danger: false },
   { code: "lie_down", label: "卧倒", icon: "trend-down", danger: true },
   { code: "light_on", label: "开灯", icon: "scan", danger: false },
-  { code: "light_off", label: "关灯", icon: "shield", danger: false }
+  { code: "light_off", label: "关灯", icon: "shield", danger: false },
+  // 1302 模式切换：摇杆走不动时先确认本体在「通用模式」（运动模式）
+  { code: "generic_mode", label: "通用模式", icon: "activity", danger: false },
+  { code: "navigation_mode", label: "导航模式", icon: "route", danger: false }
 ] as const;
 
 const speedPresets = [
@@ -321,6 +341,28 @@ async function emergencyStop() {
         <div class="kv">
           <span>当前地图</span><b class="mono">{{ device.activeMapId || "未载图" }}</b>
         </div>
+        <div class="kv">
+          <span>控制源</span>
+          <b>
+            <span class="badge" :class="ctrlMeta.tone"><i />{{ ctrlMeta.label }}</span>
+            <span
+              v-if="holding && ctrlByOther"
+              class="muted"
+              style="margin-left: 6px; font-weight: 400"
+            >
+              遥控器仍持权，平台摇杆不会生效
+            </span>
+          </b>
+        </div>
+        <div class="kv">
+          <span>运动状态</span>
+          <b>
+            {{ motionStatusLabel(device.motionStatus) }}
+            <span v-if="!gaitReady" class="muted" style="margin-left: 6px; font-weight: 400">
+              卧倒 / 锁定状态无法迈步
+            </span>
+          </b>
+        </div>
         <div class="kv"><span>固件版本</span><b class="mono">{{ device.firmware }}</b></div>
         <div class="kv"><span>视频源</span><b class="mono">{{ device.videoUrl || "未配置" }}</b></div>
         <div class="kv"><span>运行状态</span><b>{{ statusText }}</b></div>
@@ -399,8 +441,37 @@ async function emergencyStop() {
               </button>
             </div>
 
+            <div class="takeover-diag" :class="{ bad: takeoverBlocked }">
+              <div class="diag-row">
+                <span>控制源</span>
+                <b><span class="badge" :class="ctrlMeta.tone"><i />{{ ctrlMeta.label }}</span></b>
+                <span>运动状态</span>
+                <b>{{ motionStatusLabel(device.motionStatus) }}</b>
+                <span>机器模式</span>
+                <b>{{ device.robotMode || "—" }}</b>
+              </div>
+              <p v-if="ctrlByOther" class="diag-tip">
+                <AppIcon name="warn" />
+                硬件遥控器（或其他 SDK）仍持有控制权，本体不会执行平台摇杆。请关闭遥控器电源
+                / 按遥控器的「释放控制」键，然后点「释放」再重新接管。
+              </p>
+              <p v-else-if="holding && !gaitReady" class="diag-tip">
+                <AppIcon name="warn" />
+                本体当前是「{{ motionStatusLabel(device.motionStatus) }}」，摇杆不会动。请先点
+                「站立」，等运动状态变成站立中再遥控。
+              </p>
+              <p v-else-if="holding && !ctrlByOther && gaitReady" class="diag-tip ok">
+                <AppIcon name="check-circle" />
+                已完全接管：控制权在平台、本体可迈步，摇杆按 50Hz 持续下发。
+              </p>
+            </div>
+
             <div class="teleop-panel" :class="{ locked: !canControl }">
-              <TeleopJoystick :disabled="!canControl" :speed="speed" @control="sendAxes" />
+              <TeleopJoystick
+                :disabled="!canControl || takeoverBlocked"
+                :speed="speed"
+                @control="sendAxes"
+              />
 
               <div class="speed-box">
                 <span class="speed-label">速度档位</span>
@@ -595,6 +666,63 @@ async function emergencyStop() {
 
 .take-info b {
   font-size: 13px;
+}
+
+/* 完全接管诊断条：控制源 / 运动状态 / 机器模式一眼可见 */
+.takeover-diag {
+  padding: 10px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: #f8fafc;
+  margin-bottom: 12px;
+  font-size: 11.5px;
+}
+
+.takeover-diag.bad {
+  border-color: #fde3b0;
+  background: #fffaf0;
+}
+
+.diag-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  color: var(--muted);
+}
+
+.diag-row b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.diag-row span:not(:first-child) {
+  margin-left: 6px;
+}
+
+.diag-tip {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 8px 0 0;
+  line-height: 1.6;
+  color: #92400e;
+}
+
+.diag-tip .ic {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  margin-top: 2px;
+  color: #d97706;
+}
+
+.diag-tip.ok {
+  color: #0f766e;
+}
+
+.diag-tip.ok .ic {
+  color: #0d9488;
 }
 
 .teleop-panel {

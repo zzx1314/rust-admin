@@ -68,6 +68,54 @@ export function locStatusMeta(status?: number | null): { label: string; tone: st
   }
 }
 
+/**
+ * 控制源（智航 1315 `ctrl_source`）→ 展示文案与色标。
+ *
+ * 0 未知 / 1 APP / 2 SDK / 3 其他（硬件遥控器走这条）。
+ * 平台接管后若仍是 3，说明遥控器或别的 SDK 压着控制权，摇杆不会生效。
+ */
+export function ctrlSourceMeta(source?: number | null): { label: string; tone: string } {
+  switch (source ?? 0) {
+    case 1:
+      return { label: "APP 控制", tone: "info" };
+    case 2:
+      return { label: "SDK 控制", tone: "ok" };
+    case 3:
+      return { label: "其他 / 遥控器", tone: "danger" };
+    default:
+      return { label: "未知", tone: "neutral" };
+  }
+}
+
+/** 运动状态（1315 `motion_status`）→ 中文；卧倒时摇杆前后左右都不会动 */
+const MOTION_LABELS: Record<string, string> = {
+  unknown: "未知",
+  stand_up: "站立中",
+  balance_stand: "平衡站立",
+  walk: "行走",
+  crawl: "匍匐",
+  crawl_walk: "匍匐行走",
+  lie_down: "卧倒",
+  locked: "锁定",
+  climb: "爬高台",
+  stair: "登阶",
+  slim: "侧身",
+  gait: "步态",
+  dsb: "DSB",
+  pos_control: "位控姿态",
+  sk_walk: "同膝行走"
+};
+
+export function motionStatusLabel(status?: string | null): string {
+  if (!status) return "未上报";
+  return MOTION_LABELS[status] ?? status;
+}
+
+/** 卧倒/锁定状态下摇杆无效，需要先站立或解除锁定 */
+export function canGait(status?: string | null): boolean {
+  return status !== "lie_down" && status !== "locked";
+}
+
 /** 定位是否健康（可以接任务）；无法起步时页面给出重定位入口 */
 export function isLocReady(status?: number | null): boolean {
   return status === 100;

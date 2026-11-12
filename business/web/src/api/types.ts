@@ -91,6 +91,10 @@ export interface Device {
   locStatus: number;
   /** 机器人当前生效地图（业务侧 mapId）；为空表示未上报或未载图 */
   activeMapId: string | null;
+  /** 控制源：0 未知 / 1 APP / 2 SDK / 3 其他（含硬件遥控器） */
+  ctrlSource: number;
+  /** 运动状态：1315 `motion_status`（卧倒时摇杆走不动） */
+  motionStatus: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -109,7 +113,13 @@ export type DeviceAction =
   | "lie_down"
   | "emergency_stop"
   | "light_on"
-  | "light_off";
+  | "light_off"
+  /** 1302 cmd=60：通用模式（1304 摇杆的 lx/ly 只有在这个模式下生效） */
+  | "generic_mode"
+  /** 1302 cmd=61：原地模式 */
+  | "in_place_mode"
+  /** 1302 cmd=62：导航模式 */
+  | "navigation_mode";
 
 export interface Task {
   id: number;

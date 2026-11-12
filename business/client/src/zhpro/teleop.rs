@@ -15,6 +15,16 @@
 //! - `1304 data` 字段名是 `lx / ly / rx / ry / turn / high_low`，值域 `[-1, 1]`，
 //!   而且**没有对应响应类型**（文档里不存在 1305），只能单向发送。
 //!
+//! 「完全接管」的三步（缺一步就会出现「能站立、但摇杆走不动」）：
+//!
+//! 1. `1204` 取得 RoamerX 控制权（`1205.status_code = 0`）；
+//! 2. `1302 cmd=60` 切到通用模式——协议 §1304 明说 `lx/ly` 在**原地模式下无作用**，
+//!    所以只拿控制权、不切模式时前后左右必然不动；
+//! 3. 摇杆按协议建议的频率持续下发（非零 50Hz / 全零 5Hz），避免离散帧被当成点动。
+//!
+//! 现场还有第三种「抢控制权」：物理遥控器（硬件通道，`1315.ctrl_source = 3 other`）。
+//! 协议里没有禁用遥控器的消息，平台侧只能读 `ctrl_source` 判断并提示运维关掉遥控器。
+//!
 //! 安全约束（与业务侧 `handlers/teleop.rs` 对齐）：
 //!
 //! 1. 摇杆和动作都必须先接管（拿到 RoamerX 控制权），只有急停放行。
@@ -50,6 +60,12 @@ pub enum BodyCommand {
     LightOn,
     /// 前补光灯关
     LightOff,
+    /// 通用模式（= 运动模式：1304 的 lx/ly 才生效）
+    GenericMode,
+    /// 原地模式（lx/ly 无效，只能原地转头）
+    InPlaceMode,
+    /// 导航模式
+    NavigationMode,
 }
 
 impl BodyCommand {
@@ -62,6 +78,9 @@ impl BodyCommand {
             Self::LieDown => 12,
             Self::LightOn => 102,
             Self::LightOff => 104,
+            Self::GenericMode => 60,
+            Self::InPlaceMode => 61,
+            Self::NavigationMode => 62,
         }
     }
 
@@ -74,6 +93,9 @@ impl BodyCommand {
             Self::LieDown => "lie_down",
             Self::LightOn => "light_on",
             Self::LightOff => "light_off",
+            Self::GenericMode => "generic_mode",
+            Self::InPlaceMode => "in_place_mode",
+            Self::NavigationMode => "navigation_mode",
         }
     }
 
@@ -86,6 +108,9 @@ impl BodyCommand {
             Self::LieDown => "卧倒",
             Self::LightOn => "开灯",
             Self::LightOff => "关灯",
+            Self::GenericMode => "通用模式",
+            Self::InPlaceMode => "原地模式",
+            Self::NavigationMode => "导航模式",
         }
     }
 
@@ -98,6 +123,9 @@ impl BodyCommand {
             Self::LieDown,
             Self::LightOn,
             Self::LightOff,
+            Self::GenericMode,
+            Self::InPlaceMode,
+            Self::NavigationMode,
         ]
         .into_iter()
         .find(|cmd| cmd.action() == code_or_label || cmd.label() == code_or_label)
@@ -163,6 +191,8 @@ pub struct TeleopState {
     last_frame: Option<Instant>,
     /// 已下发过的非零摇杆，看门狗只在有运动时补停车
     moving: bool,
+    /// 最近一帧非零摇杆，重发任务据此按 50Hz 复投（浏览器侧只有 ~10Hz）
+    active_axes: Option<TeleopAxes>,
 }
 
 pub type SharedTeleop = Arc<Mutex<TeleopState>>;
@@ -207,11 +237,11 @@ pub async fn handle_teleop(
     let axes = TeleopAxes::from_payload(payload);
     let mut guard = teleop.lock().await;
 
-    // 停止指令始终放行，运动指令必须已接管
+    // 停止指令始终放行，运动指令必须已（完全）接管
     if !axes.is_stop() && !guard.engaged {
-        client.take_control().await?;
+        full_takeover(client).await?;
         guard.engaged = true;
-        info!("摇杆首帧自动接管 RoamerX 控制权");
+        info!("摇杆首帧自动完全接管 RoamerX");
     }
 
     client
@@ -221,6 +251,18 @@ pub async fn handle_teleop(
 
     guard.last_frame = Some(Instant::now());
     guard.moving = !axes.is_stop();
+    guard.active_axes = (!axes.is_stop()).then_some(axes);
+    Ok(())
+}
+
+/// 完全接管：`1204` 拿控制权 + `1302 cmd=60` 切通用模式。
+///
+/// 只做 1204 是不够的：本体若停在原地模式（`cmd=61`），1304 的 `lx/ly` 按协议
+/// 「无作用」，表现就是「能站立/卧倒，但摇杆不走」。通用模式才是 1304 的运动模式。
+async fn full_takeover(client: &ZhProClient) -> Result<(), String> {
+    client.take_control().await?;
+    send_cmd(client, BodyCommand::GenericMode).await?;
+    info!("已完全接管：控制权 + 通用模式（1304 lx/ly 生效）");
     Ok(())
 }
 
@@ -230,10 +272,9 @@ async fn engage(client: &ZhProClient, teleop: &SharedTeleop) -> Result<String, S
     if guard.engaged {
         return Ok("已处于接管态".to_string());
     }
-    client.take_control().await?;
+    full_takeover(client).await?;
     guard.engaged = true;
-    info!("已接管本体控制权");
-    Ok("已接管本体控制权".to_string())
+    Ok("已完全接管（控制权 + 通用模式）".to_string())
 }
 
 /// 释放控制权：先补一帧停车，再交还
@@ -248,6 +289,7 @@ async fn disengage(client: &ZhProClient, teleop: &SharedTeleop) -> Result<String
         .await;
     guard.engaged = false;
     guard.moving = false;
+    guard.active_axes = None;
     guard.last_frame = None;
     // 1304 没有「释放」语义，交还靠 1204 的释放或超时；这里只清本地标志
     info!("已释放本体控制权");
@@ -303,6 +345,32 @@ async fn send_cmd(client: &ZhProClient, cmd: BodyCommand) -> Result<(), String> 
     Ok(())
 }
 
+/// 摇杆重发：协议建议非零值按 50Hz 下发，而浏览器 ~10Hz 的离散帧在本体侧
+/// 会被当成「点动」（走一下停一下，看着像没反应）。这里把最近一帧非零摇杆
+/// 按 20ms 复投，直到摇杆回零或释放接管。
+pub fn spawn_republisher(client: Arc<ZhProClient>, teleop: SharedTeleop) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_millis(20));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            let axes = {
+                let guard = teleop.lock().await;
+                if !guard.engaged || !guard.moving {
+                    None
+                } else {
+                    guard.active_axes
+                }
+            };
+            if let Some(axes) = axes
+                && let Err(e) = client.send(T_REMOTE_CONTROL, axes.to_payload()).await
+            {
+                warn!("摇杆重发失败: {e}");
+            }
+        }
+    })
+}
+
 /// 摇杆看门狗：由主循环定时调用，超过 [`TELEOP_WATCHDOG`] 无新帧则补停车
 pub async fn tick_watchdog(client: &ZhProClient, teleop: &SharedTeleop) {
     let mut guard = teleop.lock().await;
@@ -317,6 +385,7 @@ pub async fn tick_watchdog(client: &ZhProClient, teleop: &SharedTeleop) {
         return;
     }
     guard.moving = false;
+    guard.active_axes = None;
     guard.last_frame = None;
     drop(guard);
     warn!(
@@ -334,6 +403,20 @@ pub async fn tick_watchdog(client: &ZhProClient, teleop: &SharedTeleop) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mode_commands_use_protocol_codes() {
+        // 1302 枚举：60 通用 / 61 原地 / 62 导航。1304 的 lx/ly 只在通用模式下生效，
+        // 「完全接管」必须发 60，否则就是现场那种「能站立但摇杆不走」。
+        assert_eq!(BodyCommand::GenericMode.code(), 60);
+        assert_eq!(BodyCommand::InPlaceMode.code(), 61);
+        assert_eq!(BodyCommand::NavigationMode.code(), 62);
+        assert_eq!(BodyCommand::parse("通用模式"), Some(BodyCommand::GenericMode));
+        assert_eq!(
+            BodyCommand::parse("generic_mode"),
+            Some(BodyCommand::GenericMode)
+        );
+    }
 
     #[test]
     fn clamps_axes_from_payload() {

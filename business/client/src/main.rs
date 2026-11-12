@@ -100,6 +100,14 @@ struct HeartbeatPayload {
     /// 机器人当前生效地图
     #[serde(skip_serializing_if = "Option::is_none")]
     map_id: Option<String>,
+    /// 1315 `ctrl_source`：0 未知 / 1 APP / 2 SDK / 3 其他（含硬件遥控器）
+    ///
+    /// 平台据此判断「到底谁在控制」：拿到 1204 但 `ctrl_source=3` 说明遥控器还压着。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ctrl_source: Option<i64>,
+    /// 1315 `motion_status`（stand_up / lie_down / walk …）：卧倒时摇杆走不动
+    #[serde(skip_serializing_if = "Option::is_none")]
+    motion_status: Option<String>,
 }
 
 /// 任务进度上报
@@ -149,6 +157,8 @@ struct RobotState {
     model: Option<String>,
     loc_status: i64,
     loc_fresh: bool,
+    /// 1315 `ctrl_source`：谁在控制本体（遥控器 / APP / SDK）
+    ctrl_source: Option<i64>,
     active_map: Option<String>,
     /// 最近一次收到本体 1315 的时刻：超过 `BODY_STATUS_FRESH` 视为本体掉线
     body_status_at: Option<Instant>,
@@ -184,6 +194,7 @@ impl RobotState {
             model: None,
             loc_status: 255,
             loc_fresh: false,
+            ctrl_source: None,
             active_map: None,
             body_status_at: None,
             mode: "sim",
@@ -278,6 +289,14 @@ impl RobotState {
             self.robot_mode = Some(mode);
         }
 
+        // 控制源：0 未知 / 1 APP / 2 SDK / 3 其他（硬件遥控器走这条）
+        if let Some(source) = data.get("ctrl_source").and_then(Value::as_i64)
+            && self.ctrl_source != Some(source)
+        {
+            info!("本体控制源变化: ctrl_source={source}");
+            self.ctrl_source = Some(source);
+        }
+
         if let Some(mile) = data.get("mile_data").and_then(Value::as_f64) {
             self.odometer = mile;
         }
@@ -370,6 +389,8 @@ impl RobotState {
             robot_mode: self.robot_mode.clone(),
             loc_status: Some(self.loc_status),
             map_id: self.active_map.clone(),
+            ctrl_source: self.ctrl_source,
+            motion_status: self.motion_status.clone(),
         }
     }
 }
@@ -668,6 +689,11 @@ async fn run_client(
             local_mapping.clone(),
             Arc::new(config.clone()),
         );
+    }
+
+    // 摇杆重发（50Hz）：浏览器 ~10Hz 的离散帧需要在本体侧连续化，否则看着像点动
+    if let Some(ref client) = zhpro {
+        teleop::spawn_republisher(client.clone(), teleop.clone());
     }
 
     // 3) 定时器

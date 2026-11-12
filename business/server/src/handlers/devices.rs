@@ -61,6 +61,7 @@ pub(crate) const DEVICE_SELECT: &str = "SELECT d.id, d.device_id, d.model, d.par
     COALESCE(d.body_online, 0) AS body_online, d.run_mode,
     COALESCE(d.charging, 0) AS charging, d.robot_mode,
     COALESCE(d.loc_status, 255) AS loc_status, d.active_map_id,
+    COALESCE(d.ctrl_source, 0) AS ctrl_source, d.motion_status,
     d.created_at, d.updated_at
     FROM devices d
     LEFT JOIN parks p ON p.id = d.park_id
