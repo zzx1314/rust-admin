@@ -158,6 +158,14 @@ struct RobotState {
     charging: bool,
     /// 本体工作模式：1315 `mode`（协议里的 MachineStatus），如 remote / auto
     robot_mode: Option<String>,
+    /// 运动状态：1315 `motion_status`（stand_up / balance_stand / lie_down …）
+    ///
+    /// 固件不回 `1303`，所以站立 / 卧倒是否生效只能看这个字段的变化
+    motion_status: Option<String>,
+    /// 软件急停是否处于按下态：1315 `estop.software`
+    estop_software: Option<bool>,
+    /// 前补光灯开关：1315 `fill_light.front`
+    fill_light_front: Option<bool>,
 }
 
 /// 本体状态新鲜窗口：1315 是 1Hz，30s 收不到就认为本体链路已不可信
@@ -181,6 +189,9 @@ impl RobotState {
             mode: "sim",
             charging: false,
             robot_mode: None,
+            motion_status: None,
+            estop_software: None,
+            fill_light_front: None,
         }
     }
 
@@ -270,6 +281,48 @@ impl RobotState {
         if let Some(mile) = data.get("mile_data").and_then(Value::as_f64) {
             self.odometer = mile;
         }
+
+        // 运动状态 / 急停 / 补光灯：
+        //
+        // 固件不回 1303（实测），下发 1302 后只能靠这三个字段确认是否真的生效，
+        // 所以变化时打一条 info，运维在 journalctl 里就能看到「站立命令到底动没动」。
+        if let Some(status) = data
+            .get("motion_status")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+        {
+            if self.motion_status.as_deref() != Some(status.as_str()) {
+                info!("本体运动状态: {status}");
+            }
+            self.motion_status = Some(status);
+        }
+        if let Some(estop) = data
+            .get("estop")
+            .and_then(|value| value.get("software"))
+            .and_then(Value::as_bool)
+        {
+            if self.estop_software != Some(estop) {
+                if estop {
+                    warn!("本体软件急停按下中（estop.software=true）：运动指令会被拒");
+                } else {
+                    info!("本体软件急停已解除");
+                }
+            }
+            self.estop_software = Some(estop);
+        }
+        if let Some(front) = data
+            .get("fill_light")
+            .and_then(|value| value.get("front"))
+            .and_then(Value::as_bool)
+        {
+            if self.fill_light_front != Some(front) {
+                info!("前补光灯: {}", if front { "开" } else { "关" });
+            }
+            self.fill_light_front = Some(front);
+        }
+
         self.runtime_minutes += 1;
     }
 

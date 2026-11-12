@@ -623,7 +623,7 @@ rtsp://user:Abcd%232027%21@192.168.234.1:8554/test
 ### 遥控：1302 本体命令 + 1304 摇杆
 
 文档 §3 把 `1302`（本体命令）、`1304`（遥控摇杆）、`1310`（充电桩）归为控制类请求，
-响应看 `1303` / `1311` 的 `status_code`。之前只定义了常量没有接通，现在全链路打通：
+响应看 `1303` / `1311` 的 `status_code`（现场固件只对 `1310` 回 `1311`）。
 
 ```
 前端 DeviceDrawer → POST /api/devices/{id}/teleop/take  → 落库接管态
@@ -638,8 +638,8 @@ rtsp://user:Abcd%232027%21@192.168.234.1:8554/test
 | 项 | 文档要求 | 客户端实现 |
 | --- | --- | --- |
 | `1302 data.cmd` | **uint32 枚举**：`0` 紧急停止、`1` 解除急停、`10` 站立、`11` 匍匐、`12` 卧倒、`100~105` 补光灯… | `BodyCommand::code()` 按码值下发（以前发的是字符串 `stand_up`，本体不认） |
-| `1303` 受理结果 | `data.status_code` + `data.message` | `Envelope::code()` / `message()` 兼容 `status_code` 与算法侧的 `code`/`msg` |
-| `1303` 关联 | 文档示例 head 不带 `msg_id` | `call_control()` 按「响应类型 = 请求类型 + 1」关联 |
+| `1303` 受理结果 | 文档写 `data.status_code` + `data.message` | **现场固件实测不发 `1303`**（合法 `cmd=102` 与非法 `cmd=999` 都无应答），因此 `1302` 与 `1304` 一样单向下发；执行效果以 `1315` 的 `motion_status` / `fill_light` / `estop` 变化为准（客户端会把这些变化打成日志） |
+| `1303` 关联 | 文档示例 head 不带 `msg_id` | `call_control()` 按「响应类型 = 请求类型 + 1」关联（留给真有应答的 `1310`/`1311`） |
 | `1304 data` | `lx / ly / rx / ry / turn / high_low`，全部 `[-1, 1]` | 按此字段名下发；`lx` 正数左移、`rx` 正数左旋，业务侧轴值取反后发送 |
 | `1304` 响应 | 协议里不存在 `1305` | 摇杆走单向下发（`send()`），不等应答 |
 
@@ -661,8 +661,13 @@ rtsp://user:Abcd%232027%21@192.168.234.1:8554/test
 
 > `1302` 不在 `4000~5999` 区间，不受 RoamerX 控制权约束，但本平台仍要求先
 > 「远程接管」才能发动作（与业务侧闸门保持一致）；接管失败会在客户端日志里
-> 留下 `xyz 需要先接管`。动作受理失败会以 `event:error` 回传，落成一条**严重告警**
-> ——控制台提示「已下发」只代表指令进了设备连接，本体是否受理看告警中心。
+> 留下 `xyz 需要先接管`。动作本身没有受理回执（固件不回 `1303`），真正执行与否
+> 看 `1315`：`motion_status`（`stand_up` / `balance_stand` / `lie_down`）、
+> `fill_light.front`、`estop.software`。
+>
+> **急停闸**：`1315 estop.software = true` 时本体运动层会拒掉动作（`mode` /
+> `motion_status` 会一直是 `unknown`），此时先解除急停（`1302 cmd=1` 或现场
+> 急停按钮复位）再下发站立。客户端检测到这个状态会打一条 WARN。
 
 ## 当前边界
 
@@ -722,3 +727,25 @@ cd business/web && pnpm typecheck && pnpm build
 > Server 与 client 均已做到零告警，可用 `-D warnings`；新增代码请保持零新增告警。
 > 协议预留字段（`register.secret`、`TaskProgressPayload.task_id`、`DeviceEventPayload.data`、
 > `DeviceSession`、`get_online_devices`、`is_device_online`）以 `#[allow(dead_code)]` 显式标注。
+
+## 重新部署（业务服务 + Web + 客户端）
+
+现场拓扑：业务服务跑在 **192.168.41.227**（开发机，`./target/debug/robodog-ops-server`
+`setsid nohup` 启动，日志 `/tmp/robodog-server.log`，端口 3100）；设备客户端跑在
+**192.168.41.246**（aarch64 Ubuntu 22.04，无 Rust 工具链、无外网，`ws://192.168.41.227:3100`）。
+
+| 改动了什么 | 产物 | 怎么上线 |
+| --- | --- | --- |
+| `business/server` | `target/debug/robodog-ops-server`（x86_64） | `cargo build` → 重启进程（`kill <pid>` 后 `setsid nohup ./target/debug/robodog-ops-server >> /tmp/robodog-server.log 2>&1`）→ `curl /api/health` 核对 |
+| `business/web` | `web/dist` | 本机 `pnpm build` 即可；后端用 `ServeDir` 读盘托管 `../web/dist`，**不用重启服务**，浏览器强刷即可 |
+| `business/client` | `robodog-device-client`（aarch64） | `./deploy/build-aarch64.sh` → `scp` 到 `/opt/robodog/client/` → `systemctl restart robodog-device-client` → `journalctl` 看「设备注册成功」 |
+
+注意两点：
+
+1. 本机 glibc 比目标机新时，普通交叉编译会要求 `GLIBC_2.39`（目标机只有 2.35）；
+   `deploy/build-aarch64.sh` 已优先用 `cargo zigbuild --target aarch64-unknown-linux-gnu.2.35`，
+   并在结尾校验符号上限。若业务服务也要上 aarch64 机器：
+   `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc cargo build --release --target aarch64-unknown-linux-gnu`
+   （同样要用 zigbuild 才能压在 2.35 以内）。
+2. 客户端替换前先留一份现场二进制（`cp -a ... .bak-$(date +%Y%m%d-%H%M%S)`），
+   出问题 30 秒内能回滚。

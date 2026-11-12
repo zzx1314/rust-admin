@@ -10,8 +10,8 @@
 //! 协议对齐（智航 Pro v1.0.3，见 `business/docs/zhihang-pro-api-v1.0.3.txt`）：
 //!
 //! - `1302 data.cmd` 是 **uint32 枚举**（站立 10 / 卧倒 12 / 紧急停止 0 …），
-//!   不是字符串；
-//! - `1303` 用 `status_code` + `message` 判受理，不是 `code` / `msg`；
+//!   不是字符串；现场固件**不回 `1303`**，只能单向下发，执行效果看 1315；
+//! - `1303` / `1311` 用 `status_code` + `message` 判受理，不是 `code` / `msg`；
 //! - `1304 data` 字段名是 `lx / ly / rx / ry / turn / high_low`，值域 `[-1, 1]`，
 //!   而且**没有对应响应类型**（文档里不存在 1305），只能单向发送。
 //!
@@ -285,17 +285,20 @@ async fn send_body_command(
     Ok(format!("{label} 已下发"))
 }
 
-/// 1302 单条命令，成功与否看 1303 的 `status_code`
+/// 1302 单条命令
+///
+/// **现场固件不回 `1303`**（实测：合法 `cmd=102` 与非法 `cmd=999` 都没应答，只有 1315 状态流），
+/// 所以只能单向下发。能不能执行看 1315 的 `motion_status` / `fill_light` /
+/// `estop` 变化，在控制台日志里可以直接看到。
 async fn send_cmd(client: &ZhProClient, cmd: BodyCommand) -> Result<(), String> {
-    let reply = client
-        .call_control(T_COMMAND, json!({ "cmd": cmd.code() }))
+    client
+        .send(T_COMMAND, json!({ "cmd": cmd.code() }))
         .await
         .map_err(|e| format!("{} 下发失败: {e}", cmd.label()))?;
     info!(
-        "1303 受理 {}（cmd={}）: {}",
+        "已下发 1302 {}（cmd={}），本固件不回 1303，效果以 1315 状态为准",
         cmd.label(),
-        cmd.code(),
-        reply.message()
+        cmd.code()
     );
     Ok(())
 }

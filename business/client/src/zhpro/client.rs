@@ -413,6 +413,11 @@ impl ZhProClient {
     ///
     /// 网关的 `1303` / `1311` 不回 `msg_id`，只能用类型关联；成功与否看
     /// `data.status_code`（见 [`Envelope::code`]）。
+    ///
+    /// 注：现场固件的 `1302` 实测**不回 `1303`**（连非法 cmd 都不回），遥控与
+    /// 本体动作走 [`Self::send`]；这里留着给 `1310`（充电桩，有 `1311` 应答）这类
+    /// 真正会回包的控制请求用。
+    #[allow(dead_code)]
     pub async fn call_control(&self, msg_type: u32, data: Value) -> Result<Envelope, String> {
         let reply_type = msg_type + 1;
         let (tx, rx) = oneshot::channel();
