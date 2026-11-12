@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
-use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
@@ -31,10 +31,14 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const BIND_TIMEOUT: Duration = Duration::from_secs(10);
 /// 网关心跳间隔（1300/1301）
 ///
-/// 实测：`192.168.234.234` 的网关 control 会话 **10s** 内收不到 `1300` 就主动断开
-/// （关闭帧 reason = `heartbeat timeout`，约 +10.5s 触发）。协议文档写 20s，但固件实际
-/// 更严，拉到 20s 会在 11s 左右被踢，这取 5s 留足抖动余量。
-const GATEWAY_HEARTBEAT: Duration = Duration::from_secs(5);
+/// 协议文档写 20s，但现场固件比文档严得多，而且**不同状态下不一样**：
+///
+/// - 2026-11-12 白天：`192.168.234.234` 约 **10s** 收不到 `1300` 就断开（原因串 `heartbeat timeout`）；
+/// - 同一台本体**重启后**：约 **3s** 就踢（18:57:00 建链、18:57:02.88 就被断开）。
+///
+/// 所以不能按「文档 20s」也不够按「实测 10s」留余量，直接 1s 心跳：一条空 JSON，
+/// 开销可忽略，却能让任何一版固件的超时窗口都吃得下。
+const GATEWAY_HEARTBEAT: Duration = Duration::from_secs(1);
 
 /// 待应答请求：`msg_id → 回复发送端`
 type ReplySender = oneshot::Sender<Envelope>;
@@ -99,6 +103,8 @@ pub struct ZhProClient {
     /// RoamerX 控制权是否持有（4000~5999 白名单外的消息需要）
     control_owned: Arc<Mutex<bool>>,
     request_timeout: Duration,
+    /// 本体链路是否已断（control / bulkdata 任一读循环结束即置 true）
+    link_down: watch::Receiver<bool>,
 }
 
 impl ZhProClient {
@@ -151,11 +157,13 @@ impl ZhProClient {
         });
 
         // control 读循环：响应派发 + 推送广播
+        let (link_tx, link_rx) = watch::channel(false);
         {
             let pending = pending.clone();
             let pending_types = pending_types.clone();
             let pushes = pushes.clone();
             let session = session.clone();
+            let link_tx = link_tx.clone();
             tokio::spawn(async move {
                 while let Some(frame) = control_read.next().await {
                     let Ok(frame) = frame else { break };
@@ -169,6 +177,7 @@ impl ZhProClient {
                     handle_incoming(&env, &pending, &pending_types, &pushes, &session).await;
                 }
                 warn!("control 通道已断开");
+                let _ = link_tx.send(true);
             });
         }
 
@@ -226,6 +235,7 @@ impl ZhProClient {
             let pending = pending.clone();
             let pending_types = pending_types.clone();
             let session = session.clone();
+            let link_tx = link_tx.clone();
             tokio::spawn(async move {
                 while let Some(frame) = bulk_read.next().await {
                     let Ok(frame) = frame else { break };
@@ -238,6 +248,7 @@ impl ZhProClient {
                     handle_incoming(&env, &pending, &pending_types, &pushes, &session).await;
                 }
                 warn!("bulkdata 通道已断开");
+                let _ = link_tx.send(true);
             });
         }
 
@@ -252,11 +263,21 @@ impl ZhProClient {
             bulk_bound,
             control_owned: Arc::new(Mutex::new(false)),
             request_timeout: REQUEST_TIMEOUT,
+            link_down: link_rx,
         };
 
         client.spawn_gateway_heartbeat();
         client.spawn_status_watch();
         Ok(client)
+    }
+
+    /// 订阅本体链路状态：任一通道（control / bulkdata）断开后置 `true`
+    ///
+    /// 客户端**不会**自己重连本体：链路一断，后续所有 4000~5999 请求都只会回
+    /// 「control 通道已关闭」（本体重启、网线抖动、网关踢会话都会这样）。调用方
+    /// 应该据此重启进程（systemd `Restart=always`）而不是带着一条死链继续跑。
+    pub fn body_link(&self) -> watch::Receiver<bool> {
+        self.link_down.clone()
     }
 
     /// 网关 1300 心跳，保持 control 会话保活

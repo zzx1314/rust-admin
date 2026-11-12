@@ -723,9 +723,35 @@ async fn run_client(
     // 去重落事件）。**不能彻底停发**：服务端任务看门狗按 `tasks.updated_at` 判超时
     // （默认 120s），超时会直接把跑着的任务翻成「异常」。
     let mut last_progress: Option<(String, Instant)> = None;
+    // 本体链路监视：客户端不重连本体，断了只能重启进程（systemd Restart=always）
+    let mut body_link = zhpro.as_ref().map(|client| client.body_link());
 
     loop {
         tokio::select! {
+            _ = wait_body_down(&mut body_link) => {
+                // 带着一条死链继续跑只会把每个指令都变成「control 通道已关闭」，
+                // 而在平台看来设备一直「在线」——必须退出让 systemd 拉起来重连。
+                error!("本体 control/bulkdata 通道已断开，退出进程交给 systemd 重启（Restart=always）");
+                if let Some(task) = active.lock().await.clone() {
+                    report_progress(
+                        &out_tx,
+                        &task.task_code,
+                        "异常",
+                        0,
+                        Some(
+                            "本体连接已断开（control/bulkdata 通道关闭）——客户端会自动重启并重连本体，"
+                                .to_string()
+                                + "请稍后重新下发任务",
+                        ),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                }
+                break;
+            }
+
             _ = &mut ctrl_c => {
                 info!("收到中断信号，退出");
                 break;
@@ -870,6 +896,28 @@ async fn run_client(
 
     writer.abort();
     Ok(())
+}
+
+/// 等本体链路断开（永不返回 = 没有本体连接 / 尚未断开）
+///
+/// `watch::Receiver::changed()` 是取消安全的，可以反复放进 `select!` 里轮询。
+async fn wait_body_down(link: &mut Option<tokio::sync::watch::Receiver<bool>>) {
+    let Some(rx) = link.as_mut() else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    if *rx.borrow_and_update() {
+        return;
+    }
+    loop {
+        if rx.changed().await.is_err() {
+            // 发送端被丢弃：视为链路已不可用
+            return;
+        }
+        if *rx.borrow_and_update() {
+            return;
+        }
+    }
 }
 
 fn progress_pct(done: usize, total: usize) -> i64 {
