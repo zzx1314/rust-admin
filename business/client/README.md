@@ -52,7 +52,7 @@ OPS 业务服务 ──task_dispatch──► 本客户端 ──智航 Pro WS�
 cd business/client
 
 # 0) 现场默认值已内置，直接跑即可
-#    业务服务 ws://192.168.41.246:3100
+#    业务服务 ws://39.107.55.13:3100（正式环境外网）
 #    设备编号启动时自动读本体 SN 分区（/dev/mmcblk0p5）
 #    本体     192.168.234.234:10010
 cargo run --
@@ -89,7 +89,7 @@ cargo run -- --print-config          # 打印脱敏后的生效配置
 
 | 项 | 值 | 来源 |
 |----|----|------|
-| 业务服务（本机） | `ws://192.168.41.246:3100` | 内置默认值 `DEFAULT_SERVER_URL` |
+| 业务服务（外网） | `ws://39.107.55.13:3100` | 内置默认值 `DEFAULT_SERVER_URL` |
 | 设备编号 | 启动时自动读本体 SN（现场实测 `0202222672400230`） | `device_sn` 模块读 `/dev/mmcblk0p5` |
 | 机器狗本体 | `192.168.234.234:10010` | 内置默认值 `DEFAULT_ROBOT_HOST` |
 | 设备地图/文件服务 | `http://192.168.234.234:12000` | 由本体地址 + `robot.file_port` 推导 |
@@ -140,7 +140,7 @@ journalctl -u robodog-device-client -f
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--server` | `ws://192.168.41.246:3100` | 业务服务地址 |
+| `--server` | `ws://39.107.55.13:3100` | 业务服务地址 |
 | `--device-id` | 自动读本体 SN 分区 | 仅用于本地调试 / 多实例覆盖；默认取 `/dev/mmcblk0p5` |
 | `--secret` | 无 | 设备密钥（推荐 `ROBODOG_DEVICE_SECRET`） |
 | `--heartbeat` | `10` | 心跳间隔（秒） |
@@ -166,7 +166,7 @@ journalctl -u robodog-device-client -f
 | `--no-upload-map` | false | 关闭建图后自动回传，只在本体落盘 |
 | `--park-id` | 控制台绑定园区 | 地图归属园区：不填则用注册回执里下发的绑定园区；两者都没有时跳过回传。手动指定时优先生效 |
 | `--ingest-map-name` | 用 4001 返回的目录名 | 入库到中台的地图名 |
-| `--api-base` | 由 `--server` 推导 | OPS 业务服务 HTTP 地址，如 `http://192.168.41.246:3100` |
+| `--api-base` | 由 `--server` 推导 | OPS 业务服务 HTTP 地址，如 `http://39.107.55.13:3100` |
 | `--api-username` | `admin` | 业务服务登录用户名 |
 | `--api-password` | `admin123` | 业务服务登录密码 |
 

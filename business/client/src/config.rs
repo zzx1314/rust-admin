@@ -32,8 +32,11 @@ use tokio::sync::Mutex;
 
 // ─── 默认值 ────────────────────────────────────────────────────
 
-/// 现场业务服务（192.168.41.246）的 WebSocket 地址。
-pub const DEFAULT_SERVER_URL: &str = "ws://192.168.41.246:3100";
+/// 正式环境业务平台（外网）的 WebSocket 地址。
+///
+/// 现场机器人 / 客户端机默认连这台；内网临时联调用 `--server`、
+/// `ROBODOG_SERVER_URL` 或 `/etc/robodog/client.toml` 覆盖。
+pub const DEFAULT_SERVER_URL: &str = "ws://39.107.55.13:3100";
 
 /// 现场机器狗本体地址（智航 Pro 网关，control/bulkdata 均为 10010）。
 pub const DEFAULT_ROBOT_HOST: &str = "192.168.234.234";

@@ -1,7 +1,7 @@
 # 现场配置：/etc/robodog/client.toml（chmod 600）
 #
 # 只有需要覆盖内置默认值时才写这里。内置默认值已经是现场值：
-#   server.url   = ws://192.168.41.246:3100
+#   server.url   = ws://39.107.55.13:3100（正式环境外网业务平台）
 #   robot.host   = 192.168.234.234
 # 设备编号不在这里配：客户端启动时自动读本体 SN 分区（/dev/mmcblk0p5），
 # 本文件里出现 device_id 会按未知字段报错。
@@ -10,13 +10,13 @@
 # 生效结果核对：robodog-device-client --config /etc/robodog/client.toml --print-config
 
 [server]
-url = "ws://192.168.41.246:3100"
+url = "ws://39.107.55.13:3100"
 # 密钥走环境变量（/etc/robodog/client.env）
 secret_env = "ROBODOG_DEVICE_SECRET"
 heartbeat_secs = 10
 
 [api]
-# 留空由 server.url 推导 → http://192.168.41.246:3100
+# 留空由 server.url 推导 → http://39.107.55.13:3100
 base = ""
 username = "admin"
 password_env = "ROBODOG_API_PASSWORD"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 连接自检：在部署客户端的那台机器上跑（现场是 192.168.41.246）。
+# 连接自检：在部署客户端的那台机器上跑（现场是 192.168.41.246，aarch64）。
 #
 # 依次检查：
 #   1) 业务服务 TCP 端口是否可连
@@ -18,7 +18,7 @@
 set -uo pipefail
 
 # 与 src/config.rs 的内置默认值保持一致
-SERVER_URL="${SERVER_URL:-ws://192.168.41.246:3100}"
+SERVER_URL="${SERVER_URL:-ws://39.107.55.13:3100}"
 ROBOT_HOST="${ROBOT_HOST:-192.168.234.234}"
 ROBOT_PORT="${ROBOT_PORT:-10010}"
 FILE_PORT="${FILE_PORT:-12000}"
