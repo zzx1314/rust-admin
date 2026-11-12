@@ -8,13 +8,14 @@
 # 拷过去就能运行。
 #
 # 用法：
-#   ./build.sh              # 全量构建到 out/
+#   ./build.sh              # 全量构建到 /tmp/rust-admin-out（OUT_DIR 可改）
 #   ./build.sh --skip-web   # 跳过前端构建（dist 已是最新时）
 set -Eeuo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
-OUT="$HERE/out"
+# 产物放仓库外：避免几MB二进制被提交进 git
+OUT="${OUT_DIR:-/tmp/rust-admin-out}"
 
 SKIP_WEB=false
 [[ "${1:-}" == "--skip-web" ]] && SKIP_WEB=true
@@ -34,11 +35,11 @@ fi
 #
 # 用 named volume 缓存 target，重复构建不用从头编译依赖。
 build_musl() {
-  local src_dir="$1" crate_dir="$2" bin="$3" dest="$4"
+  local src_dir="$1" crate_dir="$2" bin="$3" dest="$4" cache_volume="$5"
   info "编译 $crate_dir/$bin（静态 musl）"
   docker run --rm \
     -v "$ROOT/$src_dir":/src \
-    -v "rustadmin_musl_cache_$(basename "$crate_dir")":/cache \
+    -v "$cache_volume":/cache \
     -v "$dest":/out \
     -w "/src/$crate_dir" \
     -e CARGO_TARGET_DIR=/cache/target \
@@ -49,8 +50,8 @@ build_musl() {
 rm -rf "$OUT"
 mkdir -p "$OUT"/{zentai/migrations,zentai/web,robodog/web,systemd,config}
 
-build_musl . backend x-rust "$OUT/zentai"
-build_musl business server robodog-ops-server "$OUT/robodog"
+build_musl . backend x-rust "$OUT/zentai" rustadmin_musl_cache
+build_musl business server robodog-ops-server "$OUT/robodog" rustadmin_musl_cache_server
 
 # ---------------------------------------------------------------- 装配产物
 info "拷贝前端与运行期必需文件"
