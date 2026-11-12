@@ -27,6 +27,35 @@ pub fn new_device_connections() -> DeviceConnections {
     Arc::new(RwLock::new(HashMap::new()))
 }
 
+// ─── 连接池登记 ──────────────────────────────────────────
+
+/// 池里该设备登记的是不是本条连接。
+fn is_current_connection(
+    map: &HashMap<String, broadcast::Sender<PendingCommand>>,
+    device_id: &str,
+    tx: &broadcast::Sender<PendingCommand>,
+) -> bool {
+    map.get(device_id)
+        .is_some_and(|current| current.same_channel(tx))
+}
+
+/// 摘除本条连接的登记，返回「是否真的摘掉」（即本连接仍是该设备的当前连接）。
+///
+/// 客户端重连时旧 TCP 可能还没死透，新连接已经把池里的 sender 换掉；
+/// 旧连接退出的清理必须比对身份，否则会把仍活着的新连接摘走。
+fn release_connection(
+    map: &mut HashMap<String, broadcast::Sender<PendingCommand>>,
+    device_id: &str,
+    tx: &broadcast::Sender<PendingCommand>,
+) -> bool {
+    if is_current_connection(map, device_id, tx) {
+        map.remove(device_id);
+        true
+    } else {
+        false
+    }
+}
+
 /// WebSocket 升级端点：GET /ws/device
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -117,11 +146,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                         let did = payload.device_id.clone();
                                         let old_device_id = device_id.replace(did.clone());
 
-                                        // 如果该设备已有旧连接，将旧 sender 移除
-                                        if let Some(ref old) = old_device_id {
-                                            connections.write().await.remove(old);
+                                        {
+                                            let mut map = connections.write().await;
+                                            // 换设备号时只摘掉自己上一次的登记，别碰别的连接；
+                                            // 同一设备换连接直接覆盖（旧连接退出时靠通道身份判断，
+                                            // 不会误删新登记）
+                                            if let Some(ref old) = old_device_id {
+                                                release_connection(&mut map, old, &tx);
+                                            }
+                                            map.insert(did.clone(), tx.clone());
                                         }
-                                        connections.write().await.insert(did.clone(), tx.clone());
 
                                         info!("device registered: {} / {} (park={:?})", did, device.device_id, device.park_id);
                                         let park_code = park_code_of(&db, device.park_id).await;
@@ -163,6 +197,18 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                             }
                             "heartbeat" => {
                                 if let Some(ref did) = device_id {
+                                    // 心跳自愈：连接池里登记的不是本连接（历史版本的
+                                    // 清理竞态、进程重启）就补登记，否则台账显示在线、
+                                    // 中台下发指令却永远报「设备未连接」。
+                                    {
+                                        let mut map = connections.write().await;
+                                        if !is_current_connection(&map, did, &tx) {
+                                            warn!(
+                                                "device {did} heartbeat without pool entry, re-registering connection"
+                                            );
+                                            map.insert(did.clone(), tx.clone());
+                                        }
+                                    }
                                     let payload: HeartbeatPayload = serde_json::from_value(ws_msg.payload)
                                         .unwrap_or(HeartbeatPayload {
                                             battery: None,
@@ -257,20 +303,36 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
         }
     }
 
-    // 清理：移除设备连接
+    // 清理：只摘掉本连接自己的登记项
+    //
+    // 客户端重连时旧 TCP 往往还没死透（拔网线 / 4G 掉线 / 进程被 kill 都收不到
+    // Close 帧），新连接注册后会把连接池里的 sender 换成新的；等旧连接终于超时
+    // 退出，如果无条件 `remove(did)` 摘掉的就是新连接 —— 台账还在「在线待命」，
+    // 中台下发指令（同步地图等）却报「设备未连接」，而且要等设备重连才恢复。
+    // 所以这里必须比对通道身份。
     if let Some(ref did) = device_id {
-        connections.write().await.remove(did);
-        // 标记设备离线，同时清掉接管态：断连即释放，避免留下「幽灵接管」
-        sqlx::query(
-            "UPDATE devices SET status = '离线', body_online = 0,
-                teleop_holder = NULL, teleop_at = NULL, updated_at = ?1 WHERE device_id = ?2",
-        )
-        .bind(now())
-        .bind(did)
-        .execute(&db)
-        .await
-        .ok();
-        info!("device {} disconnected, marked offline", did);
+        let still_owner = {
+            let mut map = connections.write().await;
+            release_connection(&mut map, did, &tx)
+        };
+        if still_owner {
+            // 标记设备离线，同时清掉接管态：断连即释放，避免留下「幽灵接管」
+            sqlx::query(
+                "UPDATE devices SET status = '离线', body_online = 0,
+                    teleop_holder = NULL, teleop_at = NULL, updated_at = ?1 WHERE device_id = ?2",
+            )
+            .bind(now())
+            .bind(did)
+            .execute(&db)
+            .await
+            .ok();
+            info!("device {} disconnected, marked offline", did);
+        } else {
+            info!(
+                "device {} stale connection closed, current registration kept",
+                did
+            );
+        }
     }
 
     forward_task.abort();
@@ -1225,6 +1287,32 @@ pub async fn send_task_control_to_device(
     }
 }
 
+/// 台账状态自愈：连接池里没有该设备时，把「在线」状态纠正为「离线」。
+///
+/// `devices.status` 是给业务控制台和中台看的展示态，连接池才是设备在线的唯一真相。
+/// 进程重启、旧连接残留或历史版本的清理竞态都会让台账停在「在线待命 / 充电中」，
+/// 运维在中台看到在线却收到「设备未连接」，所以下发失败时顺手把状态纠正过来。
+///
+/// 返回是否真的改了状态（没改说明本来就是离线 / 待绑定 / 故障）。
+pub async fn mark_offline_if_online(db: &SqlitePool, device_code: &str) -> bool {
+    match sqlx::query(
+        "UPDATE devices SET status = '离线', body_online = 0,
+            teleop_holder = NULL, teleop_at = NULL, updated_at = ?1
+         WHERE device_id = ?2 AND status IN ('在线待命', '充电中', '执行任务')",
+    )
+    .bind(now())
+    .bind(device_code)
+    .execute(db)
+    .await
+    {
+        Ok(result) => result.rows_affected() > 0,
+        Err(error) => {
+            warn!("mark device {device_code} offline failed: {error}");
+            false
+        }
+    }
+}
+
 /// 向指定设备发送远程指令
 pub async fn send_command_to_device(
     connections: &DeviceConnections,
@@ -1339,7 +1427,56 @@ pub async fn is_device_online(connections: &DeviceConnections, device_id: &str) 
 
 #[cfg(test)]
 mod tests {
-    use super::derive_device_status;
+    use super::{derive_device_status, is_current_connection, release_connection};
+    use crate::gateway_types::PendingCommand;
+    use std::collections::HashMap;
+    use tokio::sync::broadcast;
+
+    type Pool = HashMap<String, broadcast::Sender<PendingCommand>>;
+
+    fn channel() -> broadcast::Sender<PendingCommand> {
+        // 保留 receiver 否则通道无接收者（本用例只关心 sender 身份）
+        let (tx, _rx) = broadcast::channel(8);
+        tx
+    }
+
+    #[test]
+    fn stale_connection_cannot_unregister_the_new_one() {
+        // 现场故障复现：客户端重连，旧 TCP 还没死透。
+        // 旧连接退出时如果无条件 remove，就会把新连接摘走，台账仍是「在线待命」，
+        // 中台「同步地图」却报「设备未连接」。
+        let device = "0202222672400230";
+        let stale = channel();
+        let fresh = channel();
+        let mut pool: Pool = HashMap::new();
+
+        // 旧连接注册 → 新连接注册（顶替）
+        pool.insert(device.to_string(), stale.clone());
+        pool.insert(device.to_string(), fresh.clone());
+        assert!(is_current_connection(&pool, device, &fresh));
+
+        // 旧连接退出：不得摘掉新登记
+        assert!(!release_connection(&mut pool, device, &stale));
+        assert!(
+            is_current_connection(&pool, device, &fresh),
+            "新连接必须还在连接池里"
+        );
+
+        // 新连接自己退出才真的摘掉
+        assert!(release_connection(&mut pool, device, &fresh));
+        assert!(!pool.contains_key(device));
+    }
+
+    #[test]
+    fn heartbeat_can_re_register_connection() {
+        // 心跳自愈：池里没登记本连接时就补登记（进程重启 / 历史残留状态）
+        let device = "RD-001";
+        let tx = channel();
+        let mut pool: Pool = HashMap::new();
+        assert!(!is_current_connection(&pool, device, &tx));
+        pool.insert(device.to_string(), tx.clone());
+        assert!(is_current_connection(&pool, device, &tx));
+    }
 
     #[test]
     fn unbound_device_stays_pending() {

@@ -98,10 +98,18 @@ pub async fn apply_sync_maps(
     )
     .await;
     if !dispatched {
+        // 连接池没有这台设备：台账里的「在线待命 / 充电中」只是残留状态，
+        // 顺手纠正，免得运维在中台看到在线、点「同步地图」却一直报未连接。
+        let healed = gateway::mark_offline_if_online(&state.db, device_id.trim()).await;
         return Err(AppError::BadRequest(format!(
-            "设备 {} 当前未连接（状态：{}），无法下发同步指令",
+            "设备 {} 未连接（未接入业务平台或连接已失效：台账状态 {}，连接池无该设备连接），无法下发同步指令{}；请确认设备客户端已启动且能连上业务平台",
             device_id.trim(),
-            status
+            status,
+            if healed {
+                "，已将其标记为离线"
+            } else {
+                ""
+            },
         )));
     }
 
@@ -342,9 +350,16 @@ pub async fn apply_command(
 
     // 未送达要显式失败：中台据此把审计记成 failed，而不是「已下发」
     if view.get("wsDelivered").and_then(Value::as_bool) == Some(false) {
+        // 台账状态可能因为进程重启 / 旧连接残留停在「在线待命」，顺手纠正
+        let healed = gateway::mark_offline_if_online(&state.db, device_code).await;
         return Err(AppError::BadRequest(format!(
-            "设备 {device_code} 当前未连接（状态：{}），指令未送达",
-            device.status
+            "设备 {device_code} 未连接（未接入业务平台或连接已失效：台账状态 {}，连接池无该设备连接），指令未送达{}；请确认设备客户端已启动且能连上业务平台",
+            device.status,
+            if healed {
+                "，已将其标记为离线"
+            } else {
+                ""
+            },
         )));
     }
 
