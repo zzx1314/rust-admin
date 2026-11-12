@@ -1,53 +1,157 @@
+//! 总览驾驶舱。
+//!
+//! 驾驶舱上的每一项数据都必须能回答「这是谁的」：
+//!
+//! - 设备：业务平台不存归属关系，按中台设备分配关系（`allowed_device_codes`）过滤；
+//! - 园区 / 任务 / 路线：按 `created_by` 过滤；
+//! - 园区实时态势：只放当前人可见设备所在的园区，点位来自设备真实上报坐标；
+//! - 告警：既按可见园区、也按可见设备收敛，避免非管理员看到别人园区的告警。
+//!
+//! 管理员 / 本地服务账号（没有中台归属）保持全局视角。
+
 use crate::app::AppState;
-use crate::auth::Claims;
+use crate::auth::{self, Claims};
 use crate::error::{ApiResponse, AppError};
 use crate::models::{Alert, Device, Park, TaskEvent};
+use axum::Extension;
 use axum::Json;
 use axum::extract::State;
-use axum::Extension;
 use serde_json::{Value, json};
+use sqlx::{QueryBuilder, Sqlite};
+use std::collections::{HashMap, HashSet};
 
-/// 根据当前登录人构造 SQL 过滤子句（非管理员只能看到自己创建的数据）。
-fn owner_filter(claims: &Claims, alias: &str) -> String {
-    if claims.is_admin {
-        String::new()
-    } else {
-        format!(" AND {alias}.created_by = {}", claims.sub)
+/// 把可见设备编号拼进 SQL（`allowed` 为 `None` 表示不限制）。
+///
+/// 调用方需要保证 `column` 前已有 `WHERE` / `AND` 条件，函数自带 `AND`。
+fn push_device_codes<'q>(
+    builder: &mut QueryBuilder<'q, Sqlite>,
+    column: &str,
+    allowed: Option<&HashSet<String>>,
+) {
+    let Some(codes) = allowed else {
+        return;
+    };
+    if codes.is_empty() {
+        // 没有任何分配设备：直接让条件不成立，不要退化成「不过滤」
+        builder.push(" AND 1 = 0");
+        return;
     }
+    builder.push(format!(" AND {column} IN ("));
+    for (index, code) in codes.iter().enumerate() {
+        if index > 0 {
+            builder.push(", ");
+        }
+        builder.push_bind(code.clone());
+    }
+    builder.push(")");
+}
+
+/// 拼一段 `IN (...)` 列表（已带前导 `AND`）。
+fn push_id_list<'q>(builder: &mut QueryBuilder<'q, Sqlite>, table: &str, ids: &[i64]) {
+    if ids.is_empty() {
+        builder.push(" AND 1 = 0");
+        return;
+    }
+    builder.push(format!(" AND {table} IN ("));
+    for (index, id) in ids.iter().enumerate() {
+        if index > 0 {
+            builder.push(", ");
+        }
+        builder.push_bind(*id);
+    }
+    builder.push(")");
+}
+
+/// 近 7 日任务趋势：只统计当前登录人创建的任务。
+async fn user_trend(
+    state: &AppState,
+    claims: &Claims,
+) -> Result<(Vec<String>, Vec<i64>, Vec<i64>), AppError> {
+    let today = chrono::Local::now().date_naive();
+    let days: Vec<String> = (0..7)
+        .map(|offset| {
+            (today - chrono::Duration::days(6 - offset))
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+        .collect();
+    let start = days.first().cloned().unwrap_or_default();
+
+    let plan_rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT date(created_at), COUNT(*) FROM tasks
+         WHERE created_by = ?1 AND date(created_at) >= ?2
+         GROUP BY date(created_at)",
+    )
+    .bind(claims.sub)
+    .bind(&start)
+    .fetch_all(&state.db)
+    .await?;
+    let done_rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT date(updated_at), COUNT(*) FROM tasks
+         WHERE created_by = ?1 AND task_status = '已完成' AND date(updated_at) >= ?2
+         GROUP BY date(updated_at)",
+    )
+    .bind(claims.sub)
+    .bind(&start)
+    .fetch_all(&state.db)
+    .await?;
+
+    let plan_map: HashMap<String, i64> = plan_rows.into_iter().collect();
+    let done_map: HashMap<String, i64> = done_rows.into_iter().collect();
+    let plan = days
+        .iter()
+        .map(|day| plan_map.get(day).copied().unwrap_or(0))
+        .collect();
+    let done = days
+        .iter()
+        .map(|day| done_map.get(day).copied().unwrap_or(0))
+        .collect();
+    Ok((days, plan, done))
 }
 
 pub async fn summary(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
-    let filter_p = owner_filter(&claims, "p");
-    let filter_t = owner_filter(&claims, "t");
+    // 当前登录人的设备可见范围：None = 全部（管理员 / 本地账号）
+    let allowed = auth::allowed_device_codes(&state, &claims).await?;
 
-    // 设备统计（设备本身不按创建人过滤，保持全局视图）
-    let device_rows: Vec<(String, i64)> =
-        sqlx::query_as("SELECT status, COUNT(*) FROM devices GROUP BY status")
-            .fetch_all(&state.db)
-            .await?;
-    let device_total: i64 = device_rows.iter().map(|(_, count)| count).sum();
+    // ── 设备统计（按中台分配关系过滤） ────────────────────────
+    let mut device_builder = QueryBuilder::<Sqlite>::new(super::devices::DEVICE_SELECT);
+    device_builder.push(" WHERE 1 = 1");
+    push_device_codes(&mut device_builder, "d.device_id", allowed.as_ref());
+    device_builder.push(" ORDER BY d.id ASC");
+    let devices = device_builder
+        .build_query_as::<Device>()
+        .fetch_all(&state.db)
+        .await?;
+
+    let device_total = devices.len() as i64;
     let mut running = 0_i64;
     let mut charging = 0_i64;
     let mut offline = 0_i64;
     let mut fault = 0_i64;
-    for (status, count) in &device_rows {
-        match status.as_str() {
-            "执行任务" | "在线待命" => running += count,
-            "充电中" => charging += count,
-            "故障" => fault += count,
-            _ => offline += count,
+    for device in &devices {
+        match device.status.as_str() {
+            "执行任务" | "在线待命" => running += 1,
+            "充电中" => charging += 1,
+            "故障" => fault += 1,
+            _ => offline += 1,
         }
     }
     let online = running;
 
-    // 任务统计：非管理员只能看到自己的任务
-    let task_sql = format!(
-        "SELECT task_status, COUNT(*) FROM tasks t WHERE 1=1{filter_t} GROUP BY task_status"
-    );
-    let task_rows: Vec<(String, i64)> = sqlx::query_as(&task_sql)
+    // ── 任务统计（只统计当前人创建的任务） ──────────────────────
+    let mut task_builder =
+        QueryBuilder::<Sqlite>::new("SELECT task_status, COUNT(*) FROM tasks t WHERE 1 = 1");
+    if !claims.is_admin {
+        task_builder
+            .push(" AND t.created_by = ")
+            .push_bind(claims.sub);
+    }
+    task_builder.push(" GROUP BY task_status");
+    let task_rows: Vec<(String, i64)> = task_builder
+        .build_query_as::<(String, i64)>()
         .fetch_all(&state.db)
         .await?;
     let task_total: i64 = task_rows.iter().map(|(_, count)| count).sum();
@@ -62,90 +166,202 @@ pub async fn summary(
         task_done * 100 / task_total
     };
 
-    // 园区/区域统计：非管理员只能看到自己的园区
-    let park_count_sql = format!("SELECT COUNT(*) FROM parks p WHERE 1=1{filter_p}");
-    let park_count: i64 = sqlx::query_scalar(&park_count_sql)
-        .fetch_one(&state.db)
-        .await?;
-    let zone_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM zones")
-        .fetch_one(&state.db)
-        .await?;
-    let area_sql = format!("SELECT COALESCE(SUM(area), 0) FROM parks p WHERE 1=1{filter_p}");
-    let area: f64 = sqlx::query_scalar(&area_sql)
-        .fetch_one(&state.db)
-        .await?;
-
-    // 告警统计（全局，不按创建人过滤）
-    let pending_alerts: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM alerts WHERE status = '未处理'")
-            .fetch_one(&state.db)
-            .await?;
-    let agent_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM alerts")
-        .fetch_one(&state.db)
-        .await?;
-
-    // 园区列表（态势图）：非管理员只能看到自己的园区
-    let parks_sql = format!(
+    // ── 园区（自己创建的 + 自己管辖设备所在的） ────────────────
+    let mut parks_builder = QueryBuilder::<Sqlite>::new(
         "SELECT p.id, p.park_code, p.park_name, p.park_description, p.park_address,
             p.area, p.owner_name, p.park_type, p.status, p.color, p.created_at, p.updated_at,
             p.map_version_id, p.map_status, p.created_by,
             (SELECT COUNT(*) FROM zones z WHERE z.park_id = p.id) AS zone_count,
-            (SELECT COUNT(*) FROM devices d WHERE d.park_id = p.id) AS device_count,
-            (SELECT COUNT(*) FROM tasks t WHERE t.park_id = p.id) AS task_count,
-            (SELECT COUNT(*) FROM tasks t WHERE t.park_id = p.id AND t.task_status = '已完成') AS done_count
-         FROM parks p WHERE 1=1{filter_p} ORDER BY p.id ASC"
+            (SELECT COUNT(*) FROM devices d2 WHERE d2.park_id = p.id",
     );
-    let parks = sqlx::query_as::<_, Park>(&parks_sql)
+    // 设备数量同样只统计当前人管辖的设备
+    push_device_codes(&mut parks_builder, "d2.device_id", allowed.as_ref());
+    parks_builder.push(") AS device_count, (SELECT COUNT(*) FROM tasks t2 WHERE t2.park_id = p.id");
+    if !claims.is_admin {
+        parks_builder
+            .push(" AND t2.created_by = ")
+            .push_bind(claims.sub);
+    }
+    parks_builder.push(
+        ") AS task_count, (SELECT COUNT(*) FROM tasks t3 WHERE t3.park_id = p.id AND t3.task_status = '已完成'",
+    );
+    if !claims.is_admin {
+        parks_builder
+            .push(" AND t3.created_by = ")
+            .push_bind(claims.sub);
+    }
+    parks_builder.push(") AS done_count FROM parks p WHERE 1 = 1");
+    if !claims.is_admin {
+        parks_builder
+            .push(" AND (p.created_by = ")
+            .push_bind(claims.sub);
+        if let Some(codes) = allowed.as_ref()
+            && !codes.is_empty()
+        {
+            parks_builder.push(
+                " OR p.id IN (SELECT d0.park_id FROM devices d0
+                        WHERE d0.park_id IS NOT NULL AND d0.device_id IN (",
+            );
+            for (index, code) in codes.iter().enumerate() {
+                if index > 0 {
+                    parks_builder.push(", ");
+                }
+                parks_builder.push_bind(code.clone());
+            }
+            parks_builder.push("))");
+        }
+        parks_builder.push(")");
+    }
+    parks_builder.push(" ORDER BY p.id ASC");
+    let parks = parks_builder
+        .build_query_as::<Park>()
         .fetch_all(&state.db)
         .await?;
 
-    let alerts = sqlx::query_as::<_, Alert>(
+    let park_ids: Vec<i64> = parks.iter().map(|park| park.id).collect();
+    let area: f64 = parks.iter().map(|park| park.area).sum();
+    let park_count = parks.len() as i64;
+
+    // ── 区域数：只统计可见园区下的区域 ────────────────────────
+    let mut zone_builder = QueryBuilder::<Sqlite>::new("SELECT COUNT(*) FROM zones z WHERE 1 = 1");
+    push_id_list(&mut zone_builder, "z.park_id", &park_ids);
+    let zone_count: i64 = zone_builder
+        .build_query_scalar()
+        .fetch_one(&state.db)
+        .await?;
+
+    // ── 告警：可见园区 or 可见设备 ────────────────────────────
+    let alert_scope = |builder: &mut QueryBuilder<'_, Sqlite>| {
+        if claims.is_admin {
+            return;
+        }
+        builder.push(" AND (");
+        let mut has_scope = false;
+        if !park_ids.is_empty() {
+            builder.push("a.park_id IN (");
+            for (index, id) in park_ids.iter().enumerate() {
+                if index > 0 {
+                    builder.push(", ");
+                }
+                builder.push_bind(*id);
+            }
+            builder.push(")");
+            has_scope = true;
+        }
+        if let Some(codes) = allowed.as_ref()
+            && !codes.is_empty()
+        {
+            if has_scope {
+                builder.push(" OR ");
+            }
+            builder.push("a.device_id IN (SELECT ad.id FROM devices ad WHERE ad.device_id IN (");
+            for (index, code) in codes.iter().enumerate() {
+                if index > 0 {
+                    builder.push(", ");
+                }
+                builder.push_bind(code.clone());
+            }
+            builder.push("))");
+            has_scope = true;
+        }
+        if !has_scope {
+            // 没有园区也没有设备：一条告警都不该看到
+            builder.push("1 = 0");
+        }
+        builder.push(")");
+    };
+
+    let mut alert_list_builder = QueryBuilder::<Sqlite>::new(
         "SELECT a.id, a.alert_code, a.level, a.content, a.device_id, d.device_id AS device_code,
             a.park_id, p.park_name, a.status, a.occurred_at, a.handled_at, a.created_at
          FROM alerts a
          LEFT JOIN devices d ON d.id = a.device_id
          LEFT JOIN parks p ON p.id = a.park_id
-         ORDER BY CASE a.status WHEN '未处理' THEN 0 WHEN '处理中' THEN 1 ELSE 2 END,
-                  a.occurred_at DESC
-         LIMIT 3",
-    )
-    .fetch_all(&state.db)
-    .await?;
+         WHERE 1 = 1",
+    );
+    alert_scope(&mut alert_list_builder);
+    alert_list_builder.push(
+        " ORDER BY CASE a.status WHEN '未处理' THEN 0 WHEN '处理中' THEN 1 ELSE 2 END,
+                  a.occurred_at DESC LIMIT 3",
+    );
+    let alerts = alert_list_builder
+        .build_query_as::<Alert>()
+        .fetch_all(&state.db)
+        .await?;
 
-    let trend_rows: Vec<(String, i64, i64)> = sqlx::query_as(
-        "SELECT stat_date, plan_count, done_count FROM (
-            SELECT stat_date, plan_count, done_count FROM daily_stats
-            ORDER BY stat_date DESC LIMIT 7
-         ) ORDER BY stat_date ASC",
-    )
-    .fetch_all(&state.db)
-    .await?;
-    let days: Vec<String> = trend_rows
-        .iter()
-        .map(|(date, _, _)| date.get(5..).unwrap_or(date).to_string())
-        .collect();
-    let plan: Vec<i64> = trend_rows.iter().map(|(_, plan, _)| *plan).collect();
-    let done: Vec<i64> = trend_rows.iter().map(|(_, _, done)| *done).collect();
+    let mut pending_builder =
+        QueryBuilder::<Sqlite>::new("SELECT COUNT(*) FROM alerts a WHERE a.status = '未处理'");
+    alert_scope(&mut pending_builder);
+    let pending_alerts: i64 = pending_builder
+        .build_query_scalar()
+        .fetch_one(&state.db)
+        .await?;
 
-    let timeline = sqlx::query_as::<_, TaskEvent>(
+    let mut alert_total_builder =
+        QueryBuilder::<Sqlite>::new("SELECT COUNT(*) FROM alerts a WHERE 1 = 1");
+    alert_scope(&mut alert_total_builder);
+    let alert_total: i64 = alert_total_builder
+        .build_query_scalar()
+        .fetch_one(&state.db)
+        .await?;
+
+    // ── 任务趋势 ─────────────────────────────────────────────
+    let (days, plan, done) = if claims.is_admin {
+        let trend_rows: Vec<(String, i64, i64)> = sqlx::query_as(
+            "SELECT stat_date, plan_count, done_count FROM (
+                SELECT stat_date, plan_count, done_count FROM daily_stats
+                ORDER BY stat_date DESC LIMIT 7
+             ) ORDER BY stat_date ASC",
+        )
+        .fetch_all(&state.db)
+        .await?;
+        let days: Vec<String> = trend_rows
+            .iter()
+            .map(|(date, _, _)| date.get(5..).unwrap_or(date).to_string())
+            .collect();
+        let plan = trend_rows.iter().map(|(_, plan, _)| *plan).collect();
+        let done = trend_rows.iter().map(|(_, _, done)| *done).collect();
+        (days, plan, done)
+    } else {
+        user_trend(&state, &claims).await?
+    };
+
+    // ── 最新动态：当前人的任务事件 + 当前人设备事件 ────────────
+    let mut timeline_builder = QueryBuilder::<Sqlite>::new(
         "SELECT e.id, e.event_type, e.title, e.description, d.device_id AS device_code,
             t.task_code, e.created_at
          FROM task_events e
          LEFT JOIN devices d ON d.id = e.device_id
          LEFT JOIN tasks t ON t.id = e.task_id
-         ORDER BY e.created_at DESC, e.id DESC LIMIT 6",
-    )
-    .fetch_all(&state.db)
-    .await?;
-
-    // 地图设备列表（全局，不按创建人过滤）
-    let map_device_sql = format!(
-        "{} WHERE d.status IN ('执行任务', '在线待命', '故障') ORDER BY d.id ASC LIMIT 6",
-        super::devices::DEVICE_SELECT
+         WHERE 1 = 1",
     );
-    let map_devices = sqlx::query_as::<_, Device>(&map_device_sql)
+    if !claims.is_admin {
+        timeline_builder
+            .push(" AND (t.created_by = ")
+            .push_bind(claims.sub);
+        if let Some(codes) = allowed.as_ref()
+            && !codes.is_empty()
+        {
+            timeline_builder.push(" OR d.device_id IN (");
+            for (index, code) in codes.iter().enumerate() {
+                if index > 0 {
+                    timeline_builder.push(", ");
+                }
+                timeline_builder.push_bind(code.clone());
+            }
+            timeline_builder.push(")");
+        }
+        timeline_builder.push(")");
+    }
+    timeline_builder.push(" ORDER BY e.created_at DESC, e.id DESC LIMIT 6");
+    let timeline = timeline_builder
+        .build_query_as::<TaskEvent>()
         .fetch_all(&state.db)
         .await?;
+
+    // ── 态势图设备：当前人可见设备，前端按园区分组渲染 ─────────
+    // 不再截断：园区态势要展示该园区下所有可见设备，点位由 `position` 换算。
+    let map_devices = devices;
 
     Ok(ApiResponse::ok(json!({
         "kpis": {
@@ -168,8 +384,8 @@ pub async fn summary(
             },
             "pendingAlerts": {
                 "value": pending_alerts,
-                "total": agent_total,
-                "foot": format!("共 {} 条告警记录", agent_total),
+                "total": alert_total,
+                "foot": format!("共 {} 条告警记录", alert_total),
             }
         },
         "deviceStatus": [
@@ -187,7 +403,7 @@ pub async fn summary(
             "devices": device_total,
             "zones": zone_count,
             "tasks": task_total,
-            "alerts": agent_total
+            "alerts": alert_total
         }
     })))
 }

@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import type { EChartsOption } from "echarts";
 import { ElMessage } from "element-plus";
-import { dashboardApi } from "@/api/ops";
-import type { DashboardSummary } from "@/api/types";
+import { dashboardApi, mapApi } from "@/api/ops";
+import type { DashboardSummary, MapRaster, MapVersion } from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import KpiCard from "@/components/KpiCard.vue";
 import EChart from "@/components/EChart.vue";
@@ -15,7 +15,54 @@ import { downloadCsv, timeOnly } from "@/utils/format";
 const router = useRouter();
 const summary = ref<DashboardSummary | null>(null);
 const mapCard = ref<HTMLDivElement>();
+const maps = ref<MapVersion[]>([]);
+const raster = ref<MapRaster | null>(null);
+const selectedParkId = ref<number | null>(null);
+const rasterCache = new Map<string, MapRaster>();
+let rasterToken = 0;
 let timer = 0;
+
+/** 态势图园区下拉：后端已按登录人收敛（自己创建 + 自己设备所在园区） */
+const parkOptions = computed(() => summary.value?.parks ?? []);
+
+const selectedPark = computed(
+  () => parkOptions.value.find(park => park.id === selectedParkId.value) ?? null
+);
+
+/** 当前园区下、当前登录人管辖的设备 */
+const selectedDevices = computed(() => {
+  if (selectedParkId.value === null) return [];
+  return (summary.value?.mapDevices ?? []).filter(
+    device => device.parkId === selectedParkId.value
+  );
+});
+
+const selectedMap = computed(() => {
+  const park = selectedPark.value;
+  if (!park) return null;
+  return (
+    maps.value.find(item => item.id === park.mapVersionId) ??
+    maps.value.find(item => item.parkId === park.id && item.status !== "已归档") ??
+    null
+  );
+});
+
+const onlineInPark = computed(
+  () =>
+    selectedDevices.value.filter(
+      device => device.status === "执行任务" || device.status === "在线待命"
+    ).length
+);
+
+const parkSubtitle = computed(() => {
+  const park = selectedPark.value;
+  if (!park) return "暂无园区";
+  const parts: string[] = [];
+  if (park.zoneCount) parts.push(`${park.zoneCount} 个区域`);
+  if (park.deviceCount) parts.push(`${park.deviceCount} 台设备`);
+  if (park.parkAddress) parts.push(park.parkAddress);
+  return parts.length ? parts.join(" · ") : park.status;
+});
 
 const donutGradient = computed(() => {
   const data = summary.value?.deviceStatus ?? [];
@@ -149,8 +196,43 @@ const eventTone = (type: string) => {
   return "";
 };
 
+async function loadRaster(map: MapVersion | null) {
+  const token = ++rasterToken;
+  if (!map || map.source !== "backend" || !map.filePath) {
+    raster.value = null;
+    return;
+  }
+  const cached = rasterCache.get(map.id);
+  if (cached) {
+    raster.value = cached;
+    return;
+  }
+  try {
+    const data = await mapApi.raster(map.id);
+    rasterCache.set(map.id, data);
+    if (token === rasterToken) raster.value = data;
+  } catch {
+    // 地图包损坏 / 文件丢失时退回示意底图，不能让整张态势图报错
+    if (token === rasterToken) raster.value = null;
+  }
+}
+
+watch(selectedMap, map => {
+  void loadRaster(map);
+});
+
 async function load() {
   summary.value = await dashboardApi.summary();
+  try {
+    maps.value = await mapApi.list();
+  } catch {
+    // 地图列表只是态势图底图，失败时保留上一次结果，不影响驾驶舱主数据
+  }
+  // 保持用户当前的园区选择；园区被删除 / 取消分配后自动回落到第一个
+  const stillExists = parkOptions.value.some(park => park.id === selectedParkId.value);
+  if (!stillExists) {
+    selectedParkId.value = parkOptions.value[0]?.id ?? null;
+  }
 }
 
 function go(path: string) {
@@ -213,28 +295,44 @@ onBeforeUnmount(() => window.clearInterval(timer));
         <div class="card-head">
           <div class="card-title">
             <AppIcon name="pin" />园区实时态势
-            <span class="card-sub">张江智造园区 · 一期</span>
+            <select
+              v-if="parkOptions.length"
+              v-model.number="selectedParkId"
+              class="select park-select"
+              aria-label="选择园区"
+            >
+              <option v-for="park in parkOptions" :key="park.id" :value="park.id">
+                {{ park.parkName }}
+              </option>
+            </select>
+            <span class="card-sub">{{ parkSubtitle }}</span>
           </div>
           <button class="btn sm" @click="fullscreen">
             <AppIcon name="maximize" />全屏
           </button>
         </div>
         <div class="map-stage">
-          <ParkSituationMap :devices="summary.mapDevices" />
+          <ParkSituationMap
+            :devices="selectedDevices"
+            :map="selectedMap"
+            :raster="raster"
+            @select="go('/devices')"
+          />
           <div class="map-badge">
-            <AppIcon name="activity" /><b>{{ summary.kpis.onlineDevices.value }}</b>
+            <AppIcon name="activity" /><b>{{ onlineInPark }}</b>
             台设备在线作业
           </div>
           <div class="map-legend">
             <span><i style="background: #0284c7" />巡检中</span>
-            <span><i style="background: #0d9488" />在线待命</span>
-            <span><i style="background: #ef4444" />异常设备</span>
-            <span><i style="background: #06b6d4" />规划路线</span>
+            <span><i style="background: #10b981" />在线待命</span>
+            <span><i style="background: #f59e0b" />充电中</span>
+            <span><i style="background: #ef4444" />故障</span>
+            <span><i style="background: #94a3b8" />离线</span>
           </div>
         </div>
         <div class="map-devices">
           <div
-            v-for="device in summary.mapDevices.slice(0, 5)"
+            v-for="device in selectedDevices.slice(0, 8)"
             :key="device.id"
             class="map-chip"
             @click="go('/devices')"
@@ -247,11 +345,24 @@ onBeforeUnmount(() => window.clearInterval(timer));
                     ? '#ef4444'
                     : device.status === '执行任务'
                       ? '#0284c7'
-                      : '#10b981'
+                      : device.status === '充电中'
+                        ? '#f59e0b'
+                        : device.status === '在线待命'
+                          ? '#10b981'
+                          : '#94a3b8'
               }"
             />
             <b>{{ device.deviceId }}</b>
-            <span class="muted">{{ device.zoneName }} · {{ device.bodyOnline ? `${device.battery}%` : "—" }}</span>
+            <span class="muted">
+              {{ device.zoneName || "未分配区域" }} ·
+              {{ device.bodyOnline ? `${device.battery}%` : "—" }}
+            </span>
+          </div>
+          <div v-if="selectedDevices.length > 8" class="map-chip" @click="go('/devices')">
+            <span class="muted">还有 {{ selectedDevices.length - 8 }} 台设备</span>
+          </div>
+          <div v-if="!selectedDevices.length" class="muted" style="font-size: 12px">
+            当前园区暂无归你管辖的设备
           </div>
         </div>
       </div>
@@ -362,3 +473,15 @@ onBeforeUnmount(() => window.clearInterval(timer));
 
   <div v-else class="empty-box">正在加载驾驶舱数据…</div>
 </template>
+
+<style scoped>
+.park-select {
+  height: 28px;
+  width: auto;
+  min-width: 0;
+  padding: 0 8px;
+  font-size: 11.5px;
+  border-radius: 7px;
+  margin-left: 2px;
+}
+</style>

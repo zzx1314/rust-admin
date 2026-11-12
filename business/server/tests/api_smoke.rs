@@ -429,6 +429,72 @@ async fn parks_and_dashboard_work_after_login() {
     }
 }
 
+/// 非管理员驾驶舱只能看到「归属于自己」的数据。
+///
+/// 设备归属走中台分配关系，本地运营账号没有中台 id 时不会退回全量；
+/// 园区 / 任务 / 告警全部按创建人或可见园区收敛。
+#[tokio::test]
+async fn dashboard_is_scoped_to_current_user() {
+    let (state, _db) = test_state().await;
+    let password_hash = bcrypt::hash("operator123", bcrypt::DEFAULT_COST).unwrap();
+    sqlx::query(
+        "INSERT INTO users (username, password_hash, display_name, role, created_at)
+         VALUES ('operator', ?1, '运营', 'operator', ?2)",
+    )
+    .bind(password_hash)
+    .bind(robodog_ops_server::db::now())
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let app = build_router(state.clone());
+    let token = login_as(&app, "operator", "operator123").await;
+    let dashboard = app
+        .oneshot(
+            Request::get("/api/dashboard/summary")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(dashboard.status(), StatusCode::OK);
+    let body = json_body(dashboard).await;
+    let data = &body["data"];
+
+    // 演示数据全部由 admin 创建，新运营账号一个都不该看到
+    assert_eq!(data["kpis"]["parks"]["value"], 0, "不应看到别人的园区");
+    assert_eq!(data["kpis"]["parks"]["zones"], 0, "区域数应跟随可见园区");
+    assert_eq!(data["kpis"]["todayTasks"]["value"], 0, "不应看到别人的任务");
+    assert_eq!(
+        data["kpis"]["pendingAlerts"]["value"], 0,
+        "不应看到别人的告警"
+    );
+    assert!(data["parks"].as_array().unwrap().is_empty());
+    assert!(data["alerts"].as_array().unwrap().is_empty());
+    assert!(data["timeline"].as_array().unwrap().is_empty());
+}
+
+async fn login_as(app: &axum::Router, username: &str, password: &str) -> String {
+    let request = Request::post("/api/auth/login")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(format!(
+            r#"{{"username":"{username}","password":"{password}"}}"#
+        )))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "账号 {username} 应能登录"
+    );
+    let body = json_body(response).await;
+    body["data"]["token"]
+        .as_str()
+        .expect("登录响应缺少 token")
+        .to_string()
+}
+
 /// 本体动作白名单包含 1302 的三种模式（通用/原地/导航）。
 ///
 /// 「能站立但摇杆不走」的现场根因之一是本体停在原地模式：1304 的 lx/ly 在
