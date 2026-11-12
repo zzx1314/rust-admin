@@ -452,6 +452,60 @@ async fn creating_park_adopts_unbound_device_map() {
 }
 
 #[tokio::test]
+async fn legacy_robot_maps_get_device_code_from_zentai() {
+    // 迁移 015 之前入库的机器人地图没有 device_code，启动时按中台 dog_map 回填，
+    // 否则页面上永远显示「设备未登记」，没法对上中台那张图。
+    let (state, _db) = test_state().await;
+    sqlx::query(
+        "INSERT INTO map_versions
+            (id, park_id, map_name, version, status, created_at, source, source_id, source_ref)
+         VALUES ('ROS-MAP-77@v1.0', 1, 'legacy-map', 'v1.0', '部分标定',
+            '2026-01-01 00:00:00', 'robot-mapping', '77', '/ota/alg_data/map/history_map/legacy')",
+    )
+    .execute(&state.db)
+    .await
+    .expect("插入历史地图失败");
+
+    let zentai_path = state.config.backend_db_path.clone();
+    let zentai = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&zentai_path)
+                .create_if_missing(true),
+        )
+        .await
+        .expect("创建假中台库失败");
+    sqlx::query("CREATE TABLE dog_map (id INTEGER PRIMARY KEY, device_code TEXT)")
+        .execute(&zentai)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO dog_map (id, device_code) VALUES (77, 'RD-0202222672400230')")
+        .execute(&zentai)
+        .await
+        .unwrap();
+    zentai.close().await;
+
+    let updated = robodog_ops_server::db::backfill_map_device_codes(&state.db, &zentai_path)
+        .await
+        .expect("回填不应失败");
+    assert_eq!(updated, 1, "应回填 1 行历史地图");
+
+    let device_code: Option<String> =
+        sqlx::query_scalar("SELECT device_code FROM map_versions WHERE id = 'ROS-MAP-77@v1.0'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(device_code.as_deref(), Some("RD-0202222672400230"));
+
+    // 幂等：第二次跑不会再改任何行
+    let again = robodog_ops_server::db::backfill_map_device_codes(&state.db, &zentai_path)
+        .await
+        .unwrap();
+    assert_eq!(again, 0);
+}
+
+#[tokio::test]
 async fn internal_sync_endpoint_requires_service_token() {
     let (state, _db) = test_state().await;
     let app = build_router(state);

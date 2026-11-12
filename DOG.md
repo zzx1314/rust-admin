@@ -110,6 +110,10 @@ GET    /api/dogDevice/control-plane/ws       反向控制信道（WebSocket，�
   手工上传的地图为空（列表显示「手工上传」），派生新版本时自动继承。
 - 业务平台拉取地图（`business/server` 的 `/api/map-versions/backend`）时可按 `parkCode` 过滤，
   导入业务库时未指定园区也能按 `parkCode` 自动回填。
+- 编号对照：业务库 `map_versions.id` 是 `ROS-MAP-<首次入库时的 dog_map.id>@版本`，
+  地图在中台删掉后重传时业务编号不变、中台新 id 写回 `map_versions.source_id`。
+  因此**两边对图看 `source_id` / 地图名称 / 设备编号**，不看业务编号里的数字；
+  中台地图列表已增加「地图编号」列，业务控制台地图基线详情里也有直达链接。
 - 历史地图没有园区信息，落为 `NULL`，不影响现有查询。
 
 ### 3.1 设备地图同步

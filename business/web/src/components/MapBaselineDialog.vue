@@ -5,6 +5,7 @@ import { mapApi } from "@/api/ops";
 import type { MapRaster, MapRefs, MapVersion } from "@/api/types";
 import AppIcon from "@/components/AppIcon.vue";
 import MapChip from "@/components/MapChip.vue";
+import { zentaiMapConsoleLink, zentaiMapId } from "@/utils/zentai";
 
 const props = withDefaults(
   defineProps<{ modelValue: boolean; mapId?: string | null }>(),
@@ -28,6 +29,27 @@ const map = computed(() => refsData.value?.map ?? null);
 const routes = computed(() => refsData.value?.routes ?? []);
 const tasks = computed(() => refsData.value?.tasks ?? []);
 
+/** 中台地图编号：业务库 `source_id` → 中台 `dog_map.id` */
+const zentaiMapNumber = computed(() => zentaiMapId(map.value?.sourceId));
+
+/** 中台「地图管理」直达链接（按地图名称 / 设备编号预填筛选） */
+const zentaiLink = computed(() => zentaiMapConsoleLink(map.value));
+
+/** 业务编号里的数字是首次入库时的中台 id，跟中台当前编号可能不一致 */
+const idHint = computed(() => {
+  const item = map.value;
+  if (!item) return "";
+  const zid = zentaiMapNumber.value;
+  if (!zid) {
+    return "这张地图没有中台记录（本地 / 演示基线），只存在于业务库。";
+  }
+  const embedded = item.id.match(/^ROS-MAP-(\d+)@/)?.[1] ?? null;
+  if (embedded && embedded !== zid) {
+    return `业务编号里的 ${embedded} 是首次入库时的中台 id（中台删图重传后业务编号保持不变），中台当前编号是 ${zid}；两边用「中台地图编号 / 地图名称」对照。`;
+  }
+  return `中台地图管理里按地图名称「${item.mapName}」或编号 ${zid} 即可找到同一张图。`;
+});
+
 const sourceRows = computed(() => {
   const item = map.value;
   if (!item) return [];
@@ -37,6 +59,7 @@ const sourceRows = computed(() => {
     const name = trimmed.split("/").pop() ?? "";
     return name || "未登记";
   };
+  const zentaiMap = zentaiMapId(item.sourceId);
   return [
     ["所属园区", item.parkName ?? "未归属园区", "园区建档时认领", "orange"],
     [
@@ -44,6 +67,13 @@ const sourceRows = computed(() => {
       item.deviceCode ?? "未登记",
       "设备回传时写入",
       item.deviceCode ? "teal" : "orange"
+    ],
+    ["地图名称", item.mapName, "中台 dog_map.map_name 同名", "blue"],
+    [
+      "中台地图编号",
+      zentaiMap ?? "无（本地 / 演示地图）",
+      "map_versions.source_id → dog_map.id",
+      zentaiMap ? "teal" : "orange"
     ],
     [
       "地图来源",
@@ -191,6 +221,10 @@ async function publishNewVersion() {
             <img :src="raster.image" alt="ROS model.pgm 栅格地图" />
           </div>
 
+          <div v-if="idHint" class="rt-hint" style="margin-top: 12px">
+            <b>中台对照：</b>{{ idHint }}
+          </div>
+
           <div class="card-head" style="margin-top: 16px">
             <div class="card-title">
               <AppIcon name="route" />引用该基线的路线
@@ -218,6 +252,15 @@ async function publishNewVersion() {
           </div>
 
           <div class="actions" style="margin-top: 14px">
+            <a
+              v-if="zentaiLink"
+              class="btn"
+              :href="zentaiLink"
+              target="_blank"
+              rel="noreferrer"
+            >
+              <AppIcon name="layers" />在中台地图管理查看
+            </a>
             <button class="btn" @click="emit('data-source')">
               <AppIcon name="cpu" />数据来源与接口
             </button>

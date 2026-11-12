@@ -638,14 +638,16 @@ onMounted(load);
             <option value="">待标定 · 已登记坐标系，建图采集中（不可编排路线）</option>
             <option value="__none__">暂不绑定 · 仅资产台账（不可编排路线）</option>
             <option v-for="map in activeMapOptions" :key="map.id" :value="map.id">
-              {{ map.id }} · {{ map.status }} · {{ map.frameId }}
+              {{ map.mapName }} · {{ map.id }} · {{ map.status }} ·
+              {{ map.sourceId ? `中台 #${map.sourceId}` : "无中台记录" }}
             </option>
             <optgroup
               v-if="deviceMapOptions.length"
               label="我的设备地图 · 未归属园区（选中即绑定到本园区）"
             >
               <option v-for="map in deviceMapOptions" :key="map.id" :value="map.id">
-                {{ map.id }} · {{ map.status }} ·
+                {{ map.mapName }} · {{ map.id }} · {{ map.status }} ·
+                {{ map.sourceId ? `中台 #${map.sourceId}` : "无中台记录" }} ·
                 {{ map.deviceCode ? `设备 ${map.deviceCode}` : "设备未知" }} ·
                 {{ map.ownerUsername ? `归属 ${map.ownerUsername}` : "归属未知" }} ·
                 {{ map.sourceRef || "未登记本体路径" }}

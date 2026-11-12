@@ -17,6 +17,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Arc::new(Config::load()?);
     let pool = db::connect(&config).await?;
     db::migrate(&pool).await?;
+    // 历史机器人地图没有设备编号（迁移 015 前入库），按中台 dog_map 回填一次
+    match db::backfill_map_device_codes(&pool, &config.backend_db_path).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(count, "地图设备编号回填完成（device_code）"),
+        Err(error) => tracing::warn!("地图设备编号回填失败: {error}"),
+    }
     seed::seed(&pool).await?;
 
     let state = AppState {

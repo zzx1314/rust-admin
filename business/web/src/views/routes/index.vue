@@ -842,6 +842,9 @@ onBeforeUnmount(() => {
               :fallback="draft.mapStatus"
             />
           </span>
+          <span v-if="draftMap" class="mono muted" style="font-size: 11px">
+            {{ draftMap.mapName }}{{ draftMap.sourceId ? ` · 中台 #${draftMap.sourceId}` : "" }}
+          </span>
         </div>
       </div>
       <div class="rs-side">
@@ -1383,7 +1386,8 @@ onBeforeUnmount(() => {
           <select v-model="routeForm.mapVersionId" class="select">
             <option value="">该园区无可用基线 · 需先完成建图标定</option>
             <option v-for="map in mapsOfForm" :key="map.id" :value="map.id">
-              {{ map.id }} · {{ map.status }} · {{ map.frameId }}
+              {{ map.mapName }} · {{ map.id }} · {{ map.status }}
+              {{ map.sourceId ? ` · 中台 #${map.sourceId}` : "" }}
             </option>
           </select>
         </div>

@@ -412,6 +412,18 @@ HTTP 链路（②）的三个约定：
 
 ## 地图基线
 
+### 业务地图编号 vs 中台地图编号
+
+- 业务库 `map_versions.id` 形如 `ROS-MAP-<首次入库时的中台 dog_map.id>@<版本>`，
+  创建后不可变（路线/任务用 `map_version_id` 引用）。中台把某张图删掉后重新上传时会
+  **复用业务编号**，中台侧却换成了新的 `dog_map.id` —— 所以编号里的数字可能跟中台当前编号对不上。
+- 业务库 `map_versions.source_id` 是**当前**中台 `dog_map.id`，两库关联以它为准。
+- 控制台「地图基线详情」直接列出「中台地图编号 / 地图名称 / 采集设备」，并提供
+  「在中台地图管理查看」直达链接（`/dogPark/map/index?mapName=…&deviceCode=…`）；
+  中台地图列表也有「地图编号」列，两边按编号或名称对照即可。
+- 迁移 015 之前入库的历史地图没有 `device_code`，服务启动时按
+  `source_id = dog_map.id` 从只读中台库回填一次（幂等）。
+
 地图版本保存在 `map_versions` 表，`id` 形如 `MAP-ZJ-01@v2.1`，发布后不可变。
 园区通过 `parks.map_version_id` 持有「当前生效基线」指针，路线创建时把
 `routes.map_version_id` 冻结为当时的版本，之后地图发新版不会改写历史路线坐标。

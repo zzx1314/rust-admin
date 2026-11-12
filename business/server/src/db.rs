@@ -114,6 +114,62 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+/// 历史机器人地图回填设备编号。
+///
+/// `map_versions.device_code` 是迁移 015 才加的列，迁移前入库的行没有设备信息，
+/// 页面上就只能显示「设备未登记」，也没法按设备去中台对图。中台 `dog_map.device_code`
+/// 一直有，按 `map_versions.source_id = dog_map.id` 回填即可。
+///
+/// 中台库只读、允许缺失（没部署中台 / 旧结构没有这一列）：拿不到就跳过，
+/// 不影响启动。返回本次回填的行数。
+pub async fn backfill_map_device_codes(
+    pool: &SqlitePool,
+    backend_db: &Path,
+) -> Result<u64, sqlx::Error> {
+    if !backend_db.is_file() {
+        return Ok(0);
+    }
+    let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", backend_db.display()))?
+        .read_only(true)
+        .create_if_missing(false);
+    let zentai = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await?;
+
+    let has_column: Option<(String,)> = sqlx::query_as(
+        "SELECT name FROM pragma_table_info('dog_map') WHERE name = 'device_code'",
+    )
+    .fetch_optional(&zentai)
+    .await?;
+    if has_column.is_none() {
+        zentai.close().await;
+        return Ok(0);
+    }
+
+    let rows: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT id, device_code FROM dog_map
+         WHERE device_code IS NOT NULL AND device_code <> ''",
+    )
+    .fetch_all(&zentai)
+    .await?;
+    zentai.close().await;
+
+    let mut updated = 0;
+    for (id, device_code) in rows {
+        updated += sqlx::query(
+            "UPDATE map_versions SET device_code = ?1
+             WHERE source_id = ?2 AND (device_code IS NULL OR device_code = '')",
+        )
+        .bind(&device_code)
+        .bind(id.to_string())
+        .execute(pool)
+        .await?
+        .rows_affected();
+    }
+    Ok(updated)
+}
+
 pub fn now() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }

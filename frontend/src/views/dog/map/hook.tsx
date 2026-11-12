@@ -1,4 +1,5 @@
 import { computed, nextTick, onMounted, reactive, ref } from "vue";
+import { useRoute } from "vue-router";
 import type { PaginationProps } from "@pureadmin/table";
 import type {
   FormRules,
@@ -25,6 +26,8 @@ import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
 
 export function useDogMap() {
+  // 只在 setup 阶段取一次路由（inject 必须在 setup 内调用）
+  const route = useRoute();
   const rules = reactive<FormRules>({
     mapName: [{ required: true, message: "地图名称必填", trigger: "blur" }],
     mapType: [{ required: true, message: "地图类型必填", trigger: "change" }],
@@ -39,6 +42,14 @@ export function useDogMap() {
       label: "勾选列"
     },
     { label: "序号", type: "index", fixed: "left", width: 70 },
+    {
+      // 业务库 map_versions.source_id 指向它，两边对照用这个编号（不是业务地图 id）
+      label: "地图编号",
+      prop: "id",
+      fixed: "left",
+      width: 150,
+      cellRenderer: ({ row }) => <span class="font-mono text-xs">{row.id}</span>
+    },
     { label: "地图名称", prop: "mapName", minWidth: 150 },
     {
       label: "地图类型",
@@ -394,6 +405,20 @@ export function useDogMap() {
   }
 
   onMounted(() => {
+    // 业务控制台「在中台地图管理查看」会带 ?mapName= / ?deviceCode= / ?fileName= 跳过来，
+    // 预填筛选条件，避免用户拿业务地图编号在中台列表里找不到对应图。
+    const queryValue = (key: string) => {
+      const value = route.query[key];
+      const first = Array.isArray(value) ? value[0] : value;
+      return (first ?? "").toString().trim();
+    };
+    const mapName = queryValue("mapName");
+    const deviceCode = queryValue("deviceCode");
+    const fileName = queryValue("fileName");
+    if (mapName) queryForm.value.mapName = mapName;
+    if (deviceCode) queryForm.value.deviceCode = deviceCode;
+    if (fileName) queryForm.value.fileName = fileName;
+    pagination.currentPage = 1;
     onSearch();
   });
 
