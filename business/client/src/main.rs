@@ -1832,24 +1832,34 @@ fn parse_initial_pose(value: Option<&Value>) -> Option<Pose> {
 ///
 /// 已经定位好（`100`）直接放行，不动地图、不打断位姿；否则用 `4030 op=1`
 /// 载图并重定位，等收敛后再交给本体导航，避免 `need_locate` 起步守卫静默失败。
+/// 起步前的定位守卫。
+///
+/// 返回 `(定位状态, 本次是否真的载图定位过)`：
+///
+/// - `false`：5009 已经是 `100 Locating`，**没动过地图**。此时不能假定本体载的就是这条路线
+///   绑的那张图（可能是上一单留下的另一张图），所以首个航点仍然 `need_locate=true`，
+///   让本体按文档默认值重新载图定位；
+/// - `true`：本次刚下发 `4030` 载的就是这张图，首点用 `need_locate=false` 复用即可，
+///   省一次 10~30s 的载图和位姿重置。
 async fn ensure_localized(
     client: &ZhProClient,
     map_path: &str,
     initial_pose: Option<Pose>,
-) -> Result<i64, String> {
+) -> Result<(i64, bool), String> {
     // 4030 在 4000~5999 非白名单区间，必须先拿到 RoamerX 控制权，否则网关静默丢弃
     if let Err(e) = client.ensure_control().await {
         warn!("取 RoamerX 控制权失败（4030 可能被网关丢弃）: {e}");
     }
     match zhpro::mapping::latest_loc_status(client, Duration::from_secs(2)).await {
-        Some(status) if zhpro::mapping::loc_status_ready(status) => return Ok(status),
+        Some(status) if zhpro::mapping::loc_status_ready(status) => return Ok((status, false)),
         Some(status) => info!(
             "定位未就绪（{}，status={status}），载图重定位 map={map_path}",
             zhpro::mapping::describe_loc_status(status)
         ),
         None => warn!("2s 内未收到 5009 定位状态，直接尝试载图重定位 map={map_path}"),
     }
-    zhpro::mapping::relocalize(client, map_path, initial_pose, LOCATE_TIMEOUT).await
+    let status = zhpro::mapping::relocalize(client, map_path, initial_pose, LOCATE_TIMEOUT).await?;
+    Ok((status, true))
 }
 
 /// 5009 `stage` → 业务任务状态
@@ -2343,9 +2353,16 @@ async fn handle_server_message(
                     // 起步前定位守卫：不在地图上 / 定位丢失时不发 5000，直接报可读异常
                     let map_path = plan.resolve_map_path(&config.map_root);
                     let initial_pose = parse_initial_pose(msg.payload.get("initialPose"));
-                    match ensure_localized(&client, &map_path, initial_pose).await {
-                        Ok(status) => {
-                            info!("定位已就绪（status={status}），开始执行航线")
+                    // `loaded`=true 表示本次真的用 4030 载过这张图，才能让首个航点
+                    // `need_locate=false` 复用定位；否则按协议默认值 true 重新载图定位。
+                    let pre_located = match ensure_localized(&client, &map_path, initial_pose).await
+                    {
+                        Ok((status, loaded)) => {
+                            info!(
+                                "定位已就绪（status={status}），开始执行航线；首航点 need_locate={}",
+                                !loaded
+                            );
+                            loaded
                         }
                         Err(e) => {
                             warn!("任务 {task_code} 定位未就绪，拒绝下发: {e}");
@@ -2365,7 +2382,7 @@ async fn handle_server_message(
                             clear_active_task(active, state).await;
                             return;
                         }
-                    }
+                    };
 
                     // 软件急停未解除时本体一律拒运动指令：直接报原因，不要自等 600s
                     if state.lock().await.estop_software == Some(true) {
@@ -2390,8 +2407,11 @@ async fn handle_server_message(
                     }
 
                     let runner = Arc::new(RouteRunner::new(client.clone()));
-                    let total_points = plan.waypoints.len() as i64;                    // 预检已把定位锁好：首航点不必再让本体重载地图
-                    runner.mark_pre_located();
+                    let total_points = plan.waypoints.len() as i64;
+                    // 只有预检真的载了这张图，首航点才用 need_locate=false 复用定位
+                    if pre_located {
+                        runner.mark_pre_located();
+                    }
                     runner.prepare(plan).await;
                     *local_runner.lock().await = Some(runner.clone());
 

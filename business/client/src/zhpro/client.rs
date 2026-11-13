@@ -384,6 +384,20 @@ impl ZhProClient {
         // trace 级别打印完整出站请求，便于和协议文档逐字段对账；
         // 现场默认 RUST_LOG=...=debug，不会刷 5000/4030 这些包。
         trace!(msg_type, msg_id, packet = %text, "→ 智航请求");
+        // 任务类报文在 debug 级别也把**完整帧（head + data）**打出来：
+        // 只打 data 时看不出 msg_id / src / time，和协议文档 §2.5.1.4 的示例对不上账。
+        if matches!(
+            msg_type,
+            T_TASK_CREATE
+                | T_TASK_CANCEL
+                | T_TASK_PAUSE
+                | T_TASK_RESUME
+                | T_RETURN_TO_CHARGE
+                | T_LOCATE
+                | T_SET_AVOID_LEVEL
+        ) {
+            debug!(msg_type, msg_id, packet = %text, "→ 智航完整帧（含 head）");
+        }
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(msg_id, tx);
 

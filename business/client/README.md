@@ -188,6 +188,28 @@ RUST_LOG=robodog_device_client=debug \
 不用现场默认地图时，用业务库里任一路线的 `map_versions.source_ref` 末段来填 `ROBODOG_MOCK_DIRS`，
 否则客户端会因为「地图目录对不上」拒绝下发（那是真实行为，不是模拟器的 bug）。
 
+### 报文对账：完整帧（head + data）
+
+两侧都能看到**完整帧**，不需要真机：
+
+```text
+# 假本体侧（收到什么就打什么，与真机网关拿到的字节一致）
+假本体: ← 5000 {"head":{"type":5000,"time":1794537199977,"src":1,"msg_id":5},
+               "data":{"kind":2,"name":"… · 前往 新航点 1","params":{…}}}
+
+# 客户端侧（DEBUG，任务类请求都会打）
+→ 智航完整帧（含 head） msg_type=5000 msg_id=5 packet={"head":{…},"data":{…}}
+```
+
+与协议 §2.5.1.4 示例逐字段对照时，**唯一有意缺失的字段是 `params.fence_path`**：
+业务侧还没建模电子围栏，而发空串 `""` 会让现场固件回「导航指令非法」，所以没围栏时
+整个键都不出现（`zhpro/route.rs::navigation_task_payload`）。其余字段一个不少：
+`kind/name/schedule/execute_at/priority/record` + `map_path/need_locate/map_type/goal_type/`
+`goals[{position{x,y,z}, orientation{x,y,z,w}}]/speed_limit{vx,vy,vz}/goal_tolerance{x,y,theta}`。
+
+> `goal_tolerance.y` 用的是航点 `radius`（不是示例里的 0）：到达判定是圆形半径，
+> x/y 必须一致，否则只在一个方向上算到点。
+
 ### 边界
 
 - **建图回传**仍然走 HTTP 文件服务（`--robot-file-base`），假本体不提供，所以联调建图任务时
@@ -438,7 +460,9 @@ journalctl -u robodog-device-client -f | grep 视频
 
 ### 出站报文日志
 
-- `5000` 任务载荷：DEBUG，`zhpro::route: 5000 载荷（第 x/y 点 …）: {…}`；
+- `5000` 任务载荷：DEBUG，`zhpro::route: 5000 载荷（第 x/y 点 …）: {…}`（只有 `data`，便于看目标点）；
+- 任务类请求的**完整帧**：DEBUG，`client: → 智航完整帧（含 head） msg_type=5000 msg_id=5 packet={"head":{…},"data":{…}}`，
+  与协议文档 §2.5.1.4 的示例逐字段对账就用这行（`4044/4030/5000/5002/5004/5006/5014` 都会打）；
 - `5001/5015/5003/5005/5007` 任务类响应：DEBUG，`← 智航响应 response=5001 data={…}`；
 - `5001 code!=0` 的错误文案现在是 `5001 响应失败: code=...`，不再误写成 `5000 失败`；
 - `5009` 任务快照：DEBUG，`5009 任务(current/pending/terminal): id=… lifecycle=… stage=… error=… stop=…`，
@@ -771,7 +795,10 @@ M1 文件根 `/ota/alg_data`；文档 §2.2.4.1「4013 地图列表」明确单�
    判据是 5009 `loc_state` 收敛到 100（现场固件的回执经常更慢）；
 3. 仍未收敛或 SLAM 明确失败（`203` / `210`）→ **不发 5000**，直接把任务置为「异常」，
    进度消息写明「定位未就绪：... 请远程接管把设备移回地图覆盖范围，或下发「重新定位」后重试」；
-4. 预检成功后首航点用 `need_locate=false` 复用这份定位，避免刚重定位完又载一次图；
+4. 预检过程**真的裁过这张图**（走了 4030）时，首航点用 `need_locate=false` 复用这份定位，
+   避免刚重定位完又载一次图；若 5009 上来就是 100（预检没动过地图），首航点仍发
+   `need_locate=true`（协议默认）让本体重新载图定位——「已经定位」不等于「载的是这条路线
+   绑的那张图」，可能还是上一单留下的另一张图；
 5. 真正发 5000 前再补一次 `1302 cmd=62` 导航模式，并 `5002` 取消上一轮残留的本体任务。
 
 这样「机器狗不在地图上」就不会再以一条含义不明的 5000 失败收场。

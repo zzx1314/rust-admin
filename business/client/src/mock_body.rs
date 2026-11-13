@@ -482,7 +482,7 @@ async fn run_control<S>(
                 continue;
             }
             _ => {
-                info!("假本体: ← {req_type} {}", env.data);
+                info!("假本体: ← {req_type} {text}");
             }
         }
 
