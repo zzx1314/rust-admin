@@ -865,14 +865,7 @@ async fn handle_heartbeat(
     }
     // 控制源 / 运动状态：判断「是否已完全接管」的两个硬指标
     if let Some(source) = payload.ctrl_source {
-        let _ = sqlx::query(
-            "UPDATE devices SET ctrl_source = ?1, updated_at = ?2 WHERE device_id = ?3",
-        )
-        .bind(source)
-        .bind(&timestamp_clone)
-        .bind(&device_id_clone)
-        .execute(db)
-        .await;
+        record_control_source_change(db, device_id, source, &timestamp).await;
     }
     if let Some(motion) = payload
         .motion_status
@@ -1079,6 +1072,129 @@ async fn handle_heartbeat(
     {
         sync_device_to_zentai(config, db, &device).await;
     }
+}
+
+/// 控制源（1315 `ctrl_source`）：写库 + **只在变化时**留痕。
+///
+/// 心跳是 1Hz，每帧都写告警会把告警中心刷爆，所以先比旧值。
+/// `ctrl_source = 3`（硬件遥控器 / 外部程序）是现场最需要立刻知道的一条：
+/// 它一出现，平台摇杆、接管、任务下发全部失效，而设备看上去还是「在线待命」。
+/// 落库的这条告警会被业务控制台轮询到并弹窗提示（`web/src/layout/OpsLayout.vue`）。
+async fn record_control_source_change(
+    db: &SqlitePool,
+    device_id: &str,
+    source: i64,
+    timestamp: &str,
+) {
+    let previous: Option<i64> =
+        sqlx::query_scalar("SELECT ctrl_source FROM devices WHERE device_id = ?1")
+            .bind(device_id)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
+
+    let _ = sqlx::query("UPDATE devices SET ctrl_source = ?1, updated_at = ?2 WHERE device_id = ?3")
+        .bind(source)
+        .bind(timestamp)
+        .bind(device_id)
+        .execute(db)
+        .await;
+
+    if previous == Some(source) {
+        return;
+    }
+
+    let from = previous.map_or_else(|| "未上报".to_string(), |value| value.to_string());
+    info!("设备 {device_id} 控制源变化: ctrl_source {from} → {source}");
+
+    // 只留痕「与遥控器有关」的跳变（进 3 或出 3）：
+    // 设备刚上线时 0 → 1 也是变化，但那一帧没有任何可行动信息。
+    if source != 3 && previous != Some(3) {
+        return;
+    }
+
+    // 事件流：运维在日志/设备事件里能看到「什么时候被谁拿走」
+    let _ = sqlx::query(
+        "INSERT INTO task_events (event_type, title, description, device_id, task_id, created_at)
+         VALUES ('device_event', ?1, ?2, (SELECT id FROM devices WHERE device_id = ?3), NULL, ?4)",
+    )
+    .bind(if source == 3 {
+        "控制权被遥控器抢占"
+    } else {
+        "控制权已收回"
+    })
+    .bind(format!(
+        "1315 ctrl_source: {from} → {source}（0 未知 / 1 APP / 2 SDK / 3 遥控器）"
+    ))
+    .bind(device_id)
+    .bind(timestamp)
+    .execute(db)
+    .await;
+
+    if source == 3 {
+        open_control_preempt_alert(db, device_id, timestamp).await;
+    } else {
+        resolve_control_preempt_alert(db, device_id, timestamp).await;
+    }
+}
+
+/// 控制权被遥控器抢占 → 一条「未处理」告警。
+///
+/// 同一台设备已经有一条未处理的抢占告警时不重复插入：遥控器时断时续（`3 → 1 → 3`）
+/// 在现场很常见，刷屏反而会盖住真正的故障。
+async fn open_control_preempt_alert(db: &SqlitePool, device_id: &str, timestamp: &str) {
+    let pending: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM alerts
+          WHERE status = '未处理' AND alert_code LIKE 'AL-CTRL-%'
+            AND device_id = (SELECT id FROM devices WHERE device_id = ?1)
+          LIMIT 1",
+    )
+    .bind(device_id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+    if pending.is_some() {
+        return;
+    }
+
+    // alert_code 唯一：带上设备号 + 毫秒时间戳，避免同一秒内二次抢占互相覆盖
+    let alert_code = format!(
+        "AL-CTRL-{}-{}",
+        device_id,
+        chrono::Local::now().format("%Y%m%d%H%M%S%3f")
+    );
+    let _ = sqlx::query(
+        "INSERT INTO alerts (alert_code, level, content, device_id, park_id, status,
+            occurred_at, created_at)
+         VALUES (?1, '警告', ?2,
+            (SELECT id FROM devices WHERE device_id = ?3),
+            (SELECT park_id FROM devices WHERE device_id = ?3),
+            '未处理', ?4, ?4)",
+    )
+    .bind(&alert_code)
+    .bind(format!(
+        "设备 {device_id} 被硬件遥控器 / 外部程序接管（1315 ctrl_source=3）：\
+         平台摇杆与任务下发已暂停，请关闭遥控器电源或按「释放控制」后重新接管"
+    ))
+    .bind(device_id)
+    .bind(timestamp)
+    .execute(db)
+    .await;
+}
+
+/// 控制权回到 APP / SDK：自动把抢占告警结掉，避免告警中心长期挂着已恢复的条目。
+async fn resolve_control_preempt_alert(db: &SqlitePool, device_id: &str, timestamp: &str) {
+    let _ = sqlx::query(
+        "UPDATE alerts SET status = '已处理', handled_at = ?1
+          WHERE status = '未处理' AND alert_code LIKE 'AL-CTRL-%'
+            AND device_id = (SELECT id FROM devices WHERE device_id = ?2)",
+    )
+    .bind(timestamp)
+    .bind(device_id)
+    .execute(db)
+    .await;
 }
 
 /// 任务进度上报

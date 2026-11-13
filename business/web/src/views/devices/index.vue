@@ -447,6 +447,14 @@ onMounted(load);
               <td>
                 <StatusBadge :status="device.status" />
                 <div
+                  v-if="device.status !== '离线' && device.ctrlSource === 3"
+                  class="cell-sub"
+                  style="margin-top: 4px"
+                  title="1315 ctrl_source=3：硬件遥控器 / 外部程序持着控制权，平台摇杆与任务下发会失效"
+                >
+                  <span class="badge danger"><i />遥控器占用</span>
+                </div>
+                <div
                   v-if="device.status !== '离线' && device.bodyOnline"
                   class="cell-sub"
                   style="display: flex; align-items: center; gap: 6px; margin-top: 4px"

@@ -383,6 +383,13 @@ async function emergencyStop() {
           <span v-if="holding" class="tag amber"><i class="dot" />已接管</span>
           <span v-if="device.estopSoftware" class="tag orange">软件急停</span>
           <span v-else-if="device.sdkNodeAvailable === false" class="tag orange">SDK未就绪</span>
+          <span
+            v-if="ctrlByOther"
+            class="tag orange"
+            :title="`1315 ctrl_source=3：硬件遥控器 / 外部程序持着控制权，平台摇杆与任务下发会失效${forceHeld ? '（当前为强制接管）' : ''}`"
+          >
+            遥控器占用{{ forceHeld ? "（强制接管）" : "" }}
+          </span>
         </div>
         <div class="muted" style="font-size: 11px; margin-top: 5px">
           {{ device.parkName || "未绑定园区" }}{{ device.zoneName ? ` · ${device.zoneName}` : "" }}

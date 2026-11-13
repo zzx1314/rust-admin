@@ -5,6 +5,7 @@ import { useAuthStore } from "@/stores/auth";
 import { useAppStore } from "@/stores/app";
 import { alertApi, deviceApi } from "@/api/ops";
 import type { Alert } from "@/api/types";
+import { ElNotification, type NotificationHandle } from "element-plus";
 import AppIcon from "@/components/AppIcon.vue";
 import { initials, timeOnly } from "@/utils/format";
 
@@ -24,6 +25,7 @@ const onlineDevices = ref(0);
 let clockTimer = 0;
 let pollTimer = 0;
 let warmTimer = 0;
+let controlTimer = 0;
 
 const currentTitle = computed(() => (route.meta.title as string) || "总览驾驶舱");
 const displayName = computed(() => auth.user?.displayName || "管理员");
@@ -122,6 +124,57 @@ function logout() {
   router.push("/login");
 }
 
+/** 控制权监控：本体被硬件遥控器（1315 `ctrl_source=3`）抢走时全局弹提示。
+ *
+ * 现场最难受的一种状态：控制台显示「在线待命、电量正常」，摇杆推不动、任务也下发不了，
+ * 但看不出是遥控器把控制权拿走了。服务端在 `ctrl_source` 变成 3 时落一条
+ * `AL-CTRL-*` 告警（见 `business/server/src/gateway.rs`），这里轮询设备列表做两件事：
+ * - 某台设备从非 3 变成 3 → 弹一条常驻警告（点一下跳到设备列表）；
+ * - 它又回到 1/2 → 自动关掉那条警告，避免运维以为遥控器还占着。
+ * 首轮轮询也会提示「当前正处于 3」的设备：新开控制台就该知道谁占着控制权；
+ * 之后只在跳变时提示，不会每 10s 刷一遍。
+ */
+const ctrlSourceOf = new Map<number, number>();
+const ctrlNotices = new Map<number, NotificationHandle>();
+
+async function watchControlSource() {
+  try {
+    const devices = await deviceApi.list();
+    for (const device of devices) {
+      const previous = ctrlSourceOf.get(device.id);
+      ctrlSourceOf.set(device.id, device.ctrlSource);
+      if (previous !== undefined && previous === device.ctrlSource) continue;
+
+      if (device.ctrlSource === 3) {
+        ctrlNotices.get(device.id)?.close();
+        ctrlNotices.set(
+          device.id,
+          ElNotification({
+            title: "控制权被遥控器抢占",
+            message:
+              `设备 ${device.deviceId} 已被硬件遥控器 / 外部程序接管（ctrl_source=3）：` +
+              "平台摇杆与任务下发会失效。请关闭遥控器电源或按「释放控制」后重新接管；" +
+              "遥控器已断电可直接「强制接管」。点此查看设备。",
+            type: "warning",
+            // 常驻：控制权收回时自动关闭，防止一闪而过被忽略
+            duration: 0,
+            position: "top-right",
+            onClick: () => {
+              ctrlNotices.get(device.id)?.close();
+              router.push({ path: "/devices", query: { q: device.deviceId } });
+            }
+          })
+        );
+      } else if (ctrlNotices.has(device.id)) {
+        ctrlNotices.get(device.id)?.close();
+        ctrlNotices.delete(device.id);
+      }
+    }
+  } catch {
+    /* 轮询失败忽略：一次网络抖动不该弹提示 */
+  }
+}
+
 function onDocumentClick(event: MouseEvent) {
   const target = event.target as HTMLElement;
   if (!target.closest("#bellPop") && !target.closest("#btnBell")) {
@@ -145,6 +198,9 @@ onMounted(async () => {
   await auth.loadMe();
   await refreshStatus();
   pollTimer = window.setInterval(refreshStatus, 15000);
+  // 控制权抢占随时会发生：10s 一轮够及时，也不会给后端添压力
+  await watchControlSource();
+  controlTimer = window.setInterval(watchControlSource, 10000);
   document.addEventListener("click", onDocumentClick);
   document.addEventListener("keydown", onKeydown);
   warmTimer = window.setTimeout(warmNavRoutes, 600);
@@ -153,7 +209,10 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.clearInterval(clockTimer);
   window.clearInterval(pollTimer);
+  window.clearInterval(controlTimer);
   window.clearTimeout(warmTimer);
+  for (const notice of ctrlNotices.values()) notice.close();
+  ctrlNotices.clear();
   document.removeEventListener("click", onDocumentClick);
   document.removeEventListener("keydown", onKeydown);
 });
