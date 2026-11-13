@@ -110,12 +110,6 @@ const deviceMapOptions = computed(() =>
   maps.value.filter(item => !item.parkId && item.status !== "已归档")
 );
 
-const selectedMap = computed(() => mapOf(parkForm.mapVersionId));
-
-const isBackendSelection = computed(() =>
-  parkForm.mapVersionId.startsWith("backend:")
-);
-
 const availableBackendMaps = computed(() => {
   const parkId = editingPark.value?.id;
   const parkCode = editingPark.value?.parkCode ?? parkForm.parkCode;
@@ -672,20 +666,8 @@ onMounted(load);
           </select>
         </div>
         <div class="field" style="grid-column: 1 / -1">
-          <label>坐标系框架 frame_id</label>
-          <input
-            class="input mono"
-            :value="
-              selectedMap?.frameId ??
-              (isBackendSelection ? '导入后由 backend 地图服务提供' : '—')
-            "
-            readonly
-            placeholder="由地图服务分配，前端只读"
-          />
-        </div>
-        <div class="field" style="grid-column: 1 / -1">
           <div class="rt-hint" style="margin: 0">
-            建档时必须确定坐标系（frame_id / 原点 / 分辨率 / CRS / 楼层），并登记地图基线状态。只有「已发布」的地图版本才允许创建巡检路线；建图完成后再发布不可变版本。<br />
+            建档时必须确定坐标系（原点 / 分辨率 / CRS / 楼层），并登记地图基线状态。只有「已发布」的地图版本才允许创建巡检路线；建图完成后再发布不可变版本。<br />
             地图只跟设备有关系：机器人建图回传的地图先入库为「设备地图」（未归属园区），设备绑定人在这里挑一张即绑定为本园区基线；也可以选「backend 地图库」中的 ROS 地图，保存园区时会导入到本业务库。
           </div>
         </div>

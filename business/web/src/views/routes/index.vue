@@ -1483,7 +1483,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <div class="rt-hint">
-        航点坐标以所选地图版本的 frame_id、原点和分辨率为基准（存地图米制，1 位小数，画布只是显示换算）；创建后引用冻结，后续地图发新版不会自动改写本路线坐标。没有真实 ROS 地图包的示意基线只能编排、不能下发任务。创建后进入画布点击添加航点。
+        航点坐标以所选地图版本的原点与分辨率为基准（存地图米制，1 位小数，画布只是显示换算）；创建后引用冻结，后续地图发新版不会自动改写本路线坐标。没有真实 ROS 地图包的示意基线只能编排、不能下发任务。创建后进入画布点击添加航点。
       </div>
       <template #footer>
         <button class="btn" @click="routeDialog = false"><AppIcon name="close" />取消</button>
@@ -1522,7 +1522,7 @@ onBeforeUnmount(() => {
               :fallback="draft?.mapStatus ?? null"
             />
             <span class="muted" style="font-size: 11px">
-              {{ draftMap?.frameId ?? "创建后引用冻结，不随园区当前基线变化" }}
+              创建后引用冻结，不随园区当前基线变化
             </span>
           </div>
         </div>

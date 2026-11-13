@@ -89,7 +89,6 @@ const sourceRows = computed(() => {
       "backend 上传",
       "orange"
     ],
-    ["frame_id", item.frameId ?? "—", "建图服务分配", "purple"],
     [
       "本体目录名",
       robotDir(item.sourceRef),

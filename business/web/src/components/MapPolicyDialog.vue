@@ -9,7 +9,7 @@ const emit = defineEmits<{ "update:modelValue": [value: boolean] }>();
 
 const apis = [
   ["GET", "/api/parks/{parkId}/maps?status=published", "园区页基线徽章、新建路线版本下拉"],
-  ["GET", "/api/map-versions/{id}", "基线详情：frame_id / CRS / 原点 / 分辨率 / hash"],
+  ["GET", "/api/map-versions/{id}", "基线详情：CRS / 原点 / 分辨率 / map_hash"],
   ["GET", "/api/map-versions/{id}/raster · /tiles/{z}/{x}/{y}", "画布底图渲染"],
   ["GET", "/api/map-versions/{id}/semantics", "道路 / 禁行区 / 区域 GeoJSON 图层"],
   ["GET", "/api/map-versions/{id}/impact", "发布新版前的受影响路线 / 任务清单"],
@@ -69,7 +69,7 @@ const lineageSteps = [
           <div>
             <b>园区建档时 · 首次绑定（必需）</b>
             <p>
-              绑定坐标系定义：frame_id、原点、分辨率、CRS、楼层、道路与禁行区。此时园区从「资产台账」变成「可规划空间」。未绑定
+              绑定坐标系定义：原点、分辨率、CRS、楼层、道路与禁行区。此时园区从「资产台账」变成「可规划空间」。未绑定
               → 状态为「仅台账」，禁用一切路线与巡检任务入口。
             </p>
           </div>
@@ -88,7 +88,7 @@ const lineageSteps = [
           <div>
             <b>创建路线时 · 冻结版本引用（不再绑定）</b>
             <p>
-              路线落库写入 mapVersionId + frame_id + 坐标单位，之后引用冻结。地图发新版不会自动迁移历史路线，必须走影响分析
+              路线落库写入 mapVersionId + 坐标单位（地图米制），之后引用冻结。地图发新版不会自动迁移历史路线，必须走影响分析
               → 人工确认 → 灰度 → 旧版保留至引用清零。
             </p>
           </div>
@@ -152,7 +152,7 @@ const lineageSteps = [
         </table>
       </div>
       <div class="rt-hint">
-        <b>职责边界</b> · frame_id、resolution、origin、map_hash 由建图服务生成，前端只读展示，不应手填。
+        <b>职责边界</b> · resolution、origin、map_hash 由建图服务生成，前端只读展示，不应手填。
       </div>
     </template>
 
