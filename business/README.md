@@ -693,8 +693,10 @@ POST /api/devices/{id}/teleop/take
   客户端收到后还会再自检一次（任务 / 建图 / 接管）才执行；
 - 客户端执行前会补一帧零摇杆、清接管态，然后上报一条 `warn` 事件再退出。
 
-航段写「沿道路」且本体地图存在 `map.geojson`（`4013 map_route_exist=true`）时，
-5000 使用路网导航（`map_type=3`）；否则回退 2D 栅格。`routeData.fencePath`
+`5000` 的 `params.map_type` / `goal_type` 由客户端按 `--road-network` 决定：
+默认 **`1`（2D 栅格）**，与协议文档的导航任务示例一致；`auto` 时航段写「沿道路」且本体
+地图存在 `map.geojson`（`4013 map_route_exist=true`）才用 `3`（路网）；`on` 强制 `3`。
+`routeData.fencePath`
 （或 `payload.fencePath`）存在时，客户端会在 5000 `params.fence_path` 里带上围栏路径；
 空串/空白不会下发，避免固件回「导航指令非法」。
 

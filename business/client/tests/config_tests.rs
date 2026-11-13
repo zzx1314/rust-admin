@@ -7,7 +7,7 @@
 
 use robodog_device_client::config::{
     CliArgs, Config, ConfigError, DEFAULT_API_PASSWORD, DEFAULT_MAP_ROOT, DEFAULT_ROBOT_HOST,
-    DEFAULT_SERVER_URL, ENV_SN_PATH, EnvConfig, FileConfig,
+    DEFAULT_SERVER_URL, ENV_ROAD_NETWORK, ENV_SN_PATH, EnvConfig, FileConfig,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -478,4 +478,84 @@ device_id = "RD-042"
     .expect_err("设备编号不应再写在配置文件里");
 
     assert!(matches!(err, ConfigError::Toml { .. }), "实际 {err:?}");
+}
+
+#[test]
+fn road_network_defaults_to_off_and_accepts_overrides() {
+    use robodog_device_client::config::RoadNetworkMode;
+
+    // 未配置 → off（强制 2D 栅格，和协议文档示例一致）
+    let config = Config::load(
+        CliArgs {
+            device_id: Some("RD-1".to_string()),
+            ..CliArgs::default()
+        },
+        EnvConfig::default(),
+    )
+    .expect("默认配置应可解析");
+    assert_eq!(config.road_network, RoadNetworkMode::Off);
+
+    // 显式 auto 才按航段 + 本体地图能力判定
+    let config = Config::load(
+        CliArgs {
+            device_id: Some("RD-1".to_string()),
+            ..CliArgs::default()
+        },
+        EnvConfig::default().with(ENV_ROAD_NETWORK, "auto"),
+    )
+    .expect("ROBODOG_ROAD_NETWORK=auto 应可解析");
+    assert_eq!(config.road_network, RoadNetworkMode::Auto);
+
+    // 环境变量
+    let config = Config::load(
+        CliArgs {
+            device_id: Some("RD-1".to_string()),
+            ..CliArgs::default()
+        },
+        EnvConfig::default().with(ENV_ROAD_NETWORK, "off"),
+    )
+    .expect("ROBODOG_ROAD_NETWORK=off 应可解析");
+    assert_eq!(config.road_network, RoadNetworkMode::Off);
+
+    // 命令行优先于环境变量
+    let config = Config::load(
+        CliArgs {
+            device_id: Some("RD-1".to_string()),
+            road_network: Some(RoadNetworkMode::On),
+            ..CliArgs::default()
+        },
+        EnvConfig::default().with(ENV_ROAD_NETWORK, "off"),
+    )
+    .expect("命令行优先");
+    assert_eq!(config.road_network, RoadNetworkMode::On);
+}
+
+#[test]
+fn road_network_invalid_value_is_rejected() {
+    let err = Config::load(
+        CliArgs {
+            device_id: Some("RD-1".to_string()),
+            ..CliArgs::default()
+        },
+        EnvConfig::default().with(ENV_ROAD_NETWORK, "maybe"),
+    )
+    .expect_err("非法取值应报错");
+    assert!(
+        err.to_string().contains("road_network")
+            || err.to_string().contains("ROBODOG_ROAD_NETWORK"),
+        "实际 {err}"
+    );
+}
+
+#[test]
+fn road_network_mode_maps_to_protocol_values() {
+    use robodog_device_client::config::RoadNetworkMode;
+
+    // auto：航段全沿道路 + 本体有 map.geojson 才走路网
+    assert_eq!(RoadNetworkMode::Auto.map_type(true, true), 3);
+    assert_eq!(RoadNetworkMode::Auto.map_type(true, false), 1);
+    assert_eq!(RoadNetworkMode::Auto.map_type(false, true), 1);
+    // 强制开关
+    assert_eq!(RoadNetworkMode::On.map_type(false, false), 3);
+    assert_eq!(RoadNetworkMode::Off.map_type(true, true), 1);
 }

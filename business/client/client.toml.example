@@ -39,6 +39,9 @@ file_port = 12000
 file_base = ""
 # 本体地图根目录（4013 未返回时使用）
 map_root = "/ota/alg_data/map"
+# 5000 的 map_type/goal_type：off（默认，强制 1 = 2D 栅格，与协议文档示例一致）/
+# auto（航段全「沿道路」且本体地图有 map.geojson 时用 3 路网）/ on（强制 3）
+# road_network = "off"
 
 [video]
 # 实时视频回传：控制台有人看「实时监控」时，业务平台下发 video_start，

@@ -80,6 +80,8 @@ pub const ENV_ROBOT: &str = "ROBODOG_ROBOT";
 pub const ENV_ROBOT_FILE_BASE: &str = "ROBODOG_ROBOT_FILE_BASE";
 pub const ENV_ROBOT_FILE_PORT: &str = "ROBODOG_ROBOT_FILE_PORT";
 pub const ENV_MAP_ROOT: &str = "ROBODOG_MAP_ROOT";
+/// 5000 的 `map_type` / `goal_type`：`auto`（默认）/ `on`（强制路网 3）/ `off`（强制 2D 栅格 1）
+pub const ENV_ROAD_NETWORK: &str = "ROBODOG_ROAD_NETWORK";
 pub const ENV_HEARTBEAT: &str = "ROBODOG_HEARTBEAT";
 pub const ENV_API_BASE: &str = "ROBODOG_API_BASE";
 pub const ENV_API_USERNAME: &str = "ROBODOG_API_USERNAME";
@@ -131,6 +133,63 @@ impl fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+// ─── 路网导航开关 ──────────────────────────────────────────────
+
+/// `5000 params.map_type` / `goal_type` 的取值策略。
+///
+/// 协议 §2.5.1.4：`1` = 2D 栅格、`3` = Route 路网（`2` 是 3D 预留，暂不支持），
+/// `goal_type` 必须与 `map_type` 一致，否则导航不会启动。
+///
+/// - [`Off`](RoadNetworkMode::Off)：强制 `1`（2D 栅格）。**默认值**：协议文档的导航任务
+///   示例就是 `1`，且 2D 栅格不依赖本体上真的建好路网，现场最稳；
+/// - [`Auto`](RoadNetworkMode::Auto)：航段全是「沿道路」且本体地图 `map_route_exist=true`
+///   时用 `3`，否则 `1`；
+/// - [`On`](RoadNetworkMode::On)：强制 `3`；本体没有 `map.geojson` 时会被固件拒，
+///   只用于验证路网能力。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RoadNetworkMode {
+    /// 强制 2D 栅格（默认）
+    #[default]
+    Off,
+    Auto,
+    On,
+}
+
+impl RoadNetworkMode {
+    /// 协议里的 `map_type` / `goal_type` 数值（两者必须相同）
+    pub fn map_type(self, route_is_road_network: bool, body_has_route: bool) -> u32 {
+        match self {
+            Self::On => 3,
+            Self::Off => 1,
+            Self::Auto if route_is_road_network && body_has_route => 3,
+            Self::Auto => 1,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
+impl std::str::FromStr for RoadNetworkMode {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            // 空值 / default 走默认策略（off），不写显式值时行为一致
+            "" | "default" => Ok(Self::default()),
+            "on" | "1" | "true" | "route" | "路网" => Ok(Self::On),
+            "off" | "0" | "false" | "grid" | "2d" | "栅格" => Ok(Self::Off),
+            other => Err(format!("路网导航开关只接受 auto/on/off（收到 {other:?}）")),
+        }
+    }
+}
+
 // ─── 配置文件结构（client.toml） ───────────────────────────────
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -181,6 +240,8 @@ pub struct RobotSection {
     pub map_root: Option<String>,
     /// 设备型号override：本体 `1201.type` 为空时用它（如 `ZSL-2-Ultra`）
     pub model: Option<String>,
+    /// 5000 的 `map_type`/`goal_type`：`auto`（默认）/ `on`（强制路网 3）/ `off`（强制 2D 栅格 1）
+    pub road_network: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -316,6 +377,8 @@ pub struct CliArgs {
     pub robot: Option<String>,
     pub map_root: Option<String>,
     pub model: Option<String>,
+    /// `--road-network auto|on|off`
+    pub road_network: Option<RoadNetworkMode>,
     pub heartbeat: Option<u64>,
     pub battery: Option<i64>,
     pub position: Option<String>,
@@ -357,6 +420,7 @@ impl CliArgs {
             robot: opt(&mut args, "--robot")?,
             map_root: opt(&mut args, "--map-root")?,
             model: opt(&mut args, "--model")?,
+            road_network: opt(&mut args, "--road-network")?,
             heartbeat: opt(&mut args, "--heartbeat")?,
             battery: opt(&mut args, "--battery")?,
             position: opt(&mut args, "--position")?,
@@ -418,6 +482,9 @@ pub fn print_help() {
                          填 mock = 进程内起一个假本体（联调用，能看到真实的
                          1201/1315/5009/5000 报文，详见 README）
   --map-root <PATH>      地图数据根目录 (默认: {DEFAULT_MAP_ROOT})
+  --road-network <MODE>  5000 的 map_type/goal_type: off|auto|on
+                         off(默认)=强制 1(2D 栅格)；on=强制 3(路网)；
+                         auto=航段全「沿道路」且本体地图有 map.geojson 时才用 3
   --model <型号>         设备型号：本体 1201 `type` 为空时用它（留空则不报）
   --heartbeat <秒>       心跳间隔 (默认: {DEFAULT_HEARTBEAT_SECS})
   --battery <0-100>      初始电量 (默认: {DEFAULT_BATTERY})
@@ -453,6 +520,8 @@ pub struct Config {
     pub map_root: String,
     /// 设备型号：优先用本体 1201 `type`（运行时取），这里只是配置兵底
     pub model: Option<String>,
+    /// 5000 的 `map_type`/`goal_type` 策略（见 [`RoadNetworkMode`]）
+    pub road_network: RoadNetworkMode,
     pub heartbeat_interval: u64,
     pub battery: i64,
     pub position: String,
@@ -586,6 +655,22 @@ impl Config {
         let model =
             pick_string([cli.model.as_deref(), file.robot.model.as_deref()]).map(str::to_string);
 
+        // 5000 的 map_type/goal_type：显式配置优先，缺省 auto（按航段与本体地图能力判定）
+        let road_network = match (
+            cli.road_network,
+            env.get(ENV_ROAD_NETWORK),
+            file.robot.road_network.as_deref(),
+        ) {
+            (Some(value), _, _) => value,
+            (None, Some(raw), _) => raw.parse::<RoadNetworkMode>().map_err(|error| {
+                ConfigError::Invalid(format!("环境变量 {ENV_ROAD_NETWORK} 不合法: {error}"))
+            })?,
+            (None, None, Some(raw)) => raw.parse::<RoadNetworkMode>().map_err(|error| {
+                ConfigError::Invalid(format!("配置项 robot.road_network 不合法: {error}"))
+            })?,
+            (None, None, None) => RoadNetworkMode::default(),
+        };
+
         let heartbeat_interval = pick_number([
             cli.heartbeat,
             env.get_parsed(ENV_HEARTBEAT)?,
@@ -712,6 +797,7 @@ impl Config {
             robot,
             map_root,
             model,
+            road_network,
             heartbeat_interval,
             battery,
             position,
@@ -777,6 +863,7 @@ robot.file_base         = {file_base}
 robot.file_port         = {file_port}
 robot.map_root          = {map_root}
 robot.model             = {model}
+route.road_network      = {road_network}
 api.base                = {api_base}
 api.username            = {api_username}
 api.password            = {api_password}
@@ -812,6 +899,7 @@ log.filter              = {log_filter}",
                 .model
                 .as_deref()
                 .unwrap_or("（未配置，用本体 1201 type）"),
+            road_network = self.road_network.as_str(),
             api_base = self.api_base.as_deref().unwrap_or("（按 server.url 推导）"),
             api_username = self.api_username,
             api_password = mask(&self.api_password),

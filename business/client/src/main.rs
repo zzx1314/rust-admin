@@ -42,7 +42,7 @@ use dispatch::{TaskMode, parse_flight_plan, parse_map_binding};
 use futures_util::{SinkExt, StreamExt};
 use mapupload::{IngestConfig, UploadOutcome};
 use rand::Rng;
-use robodog_device_client::config::{CliArgs, Config, EnvConfig, print_help};
+use robodog_device_client::config::{CliArgs, Config, EnvConfig, RoadNetworkMode, print_help};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -2328,24 +2328,30 @@ async fn handle_server_message(
                     plan.map_path = robot_map.path.clone();
 
                     // 对齐官方 cruise_mode：只有整条路线都走「沿道路」且本体地图
-                    // 有 map.geojson 时才用路网（map_type=3）；否则一律 2D 栅格。
+                    // 有 map.geojson 时才用路网（map_type=3）；否则一律 2D 栅格（1）。
                     // 不能只看服务端 mapType：服务端可能按 road_count 给了 3，
-                    // 但这条路线实际是自由导航。
-                    let target_map_type = if plan.road_network && robot_map.route_exist {
-                        3
-                    } else {
-                        1
-                    };
-                    if plan.road_network && !robot_map.route_exist && plan.map_type == 3 {
+                    // 但这条路线实际是自由导航。`--road-network on/off` 可强制。
+                    let target_map_type = config
+                        .road_network
+                        .map_type(plan.road_network, robot_map.route_exist);
+                    info!(
+                        "5000 地图类型 map_type/goal_type = {target_map_type}（road_network 策略={}，\
+                         航线全沿道路={}，本体 map.geojson={}）",
+                        config.road_network.as_str(),
+                        plan.road_network,
+                        robot_map.route_exist
+                    );
+                    if config.road_network == RoadNetworkMode::Auto
+                        && plan.road_network
+                        && !robot_map.route_exist
+                        && target_map_type == 1
+                    {
                         warn!("航线请求路网导航，但本体地图没有 map.geojson，回退 2D 栅格");
                     }
                     if plan.map_type != target_map_type {
                         info!(
-                            "5000 地图类型: {} → {}（road_network={}, route_exist={}）",
-                            plan.map_type,
-                            target_map_type,
-                            plan.road_network,
-                            robot_map.route_exist
+                            "5000 地图类型: 服务端下发 {} → 实际按本体能力用 {target_map_type}",
+                            plan.map_type
                         );
                         plan.map_type = target_map_type;
                     }

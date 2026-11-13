@@ -17,8 +17,9 @@ use super::protocol::*;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 use tokio_tungstenite::connect_async;
@@ -42,6 +43,96 @@ const GATEWAY_HEARTBEAT: Duration = Duration::from_secs(1);
 
 /// 待应答请求：`msg_id → 回复发送端`
 type ReplySender = oneshot::Sender<Envelope>;
+/// 值得在 DEBUG 级别看到的类型：**请求应答** + 会话 / 地图 / 控制权通知。
+///
+/// 其余一律 TRACE。真机实测：`1317`（故障）/`1327`（速度）约 300ms 一条、`1325`（运控）
+/// 更快、`1315` 1Hz、`5009` 500ms —— 放 DEBUG 会把现场 journald 刷爆（`.246` 上实测
+/// 1317+1327 每秒约 6 条）。用白名单而不是黑名单：将来固件多一种周期推送也不会漏。
+const DEBUG_FRAME_TYPES: &[u32] = &[
+    // 会话 / 控制
+    T_HANDSHAKE_ACK,
+    T_BIND_BULKDATA_ACK,
+    T_TAKE_CONTROL_NOTIFY,
+    T_GATEWAY_ERROR,
+    T_COMMAND_ACK,
+    T_CHARGING_PILE_ACK,
+    T_ROAMER_CONTROL_NOTIFY,
+    // 地图 / 定位
+    T_MAP_SAVED,
+    T_MAP_LIST_ACK,
+    T_MAP_RENAME_ACK,
+    T_MAP_DELETE_ACK,
+    T_SET_CHARGE_POINT_ACK,
+    T_PATH_QUERY_ACK,
+    T_LOCATE_ACK,
+    // 任务
+    T_SET_AVOID_LEVEL_ACK,
+    T_TASK_CREATE_ACK,
+    T_TASK_CANCEL_ACK,
+    T_TASK_PAUSE_ACK,
+    T_TASK_RESUME_ACK,
+    T_RETURN_TO_CHARGE_ACK,
+    T_CHARGE_RESULT,
+];
+
+/// 帧落盘（可选）：`ROBODOG_FRAME_DUMP=/path/frames.jsonl` 时把每一帧原始 JSON 追加进去，
+/// 一行一帧 `{"ts":<ms>,"dir":"send|recv","frame":{...原始 head+data...}}`。
+static FRAME_DUMP: OnceLock<Option<StdMutex<std::fs::File>>> = OnceLock::new();
+
+fn frame_dump() -> &'static Option<StdMutex<std::fs::File>> {
+    FRAME_DUMP.get_or_init(|| {
+        let path = std::env::var("ROBODOG_FRAME_DUMP").ok()?;
+        let path = path.trim();
+        if path.is_empty() {
+            return None;
+        }
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            Ok(file) => {
+                info!(path, "帧报文落盘已开启（一行一帧，含 head + data）");
+                Some(StdMutex::new(file))
+            }
+            Err(e) => {
+                warn!(path, "帧报文落盘开启失败: {e}");
+                None
+            }
+        }
+    })
+}
+
+/// 写一行原始帧。`text` 已经是一帧完整的 JSON，直接内嵌，不做二次解析。
+fn dump_frame(dir: &str, text: &str) {
+    let Some(file) = frame_dump() else { return };
+    if let Ok(mut file) = file.lock() {
+        let _ = writeln!(
+            file,
+            "{{\"ts\":{},\"dir\":\"{dir}\",\"frame\":{text}}}",
+            now_ms()
+        );
+    }
+}
+
+/// 收到一帧时打日志 + 可选落盘
+fn log_incoming(env: &Envelope) {
+    let text = env.to_text();
+    dump_frame("recv", &text);
+    if DEBUG_FRAME_TYPES.contains(&env.head.msg_type) {
+        debug!(packet = %text, "← 智航完整帧（含 head）");
+    } else {
+        // 周期推送（1315/1317/1325/1327/1401/1403/1405/1407/5009/4035…）
+        trace!(type = env.head.msg_type, packet = %text, "← 智航推送帧（含 head）");
+    }
+}
+
+/// 待应答请求：`msg_id → (预期响应类型, 回复发送端)`
+///
+/// 协议 §2.1 要求「先校验 head.type 和 msg_id，再解析 data」：只按 msg_id 派发时，
+/// 任何回显了同一个 msg_id 的非期望消息（历史上心跳就用过同一个号段）都可能被
+/// 当成 `5001` 交付，`5000` 于是报出「导航任务未返回 task_id」这种莫名其妙的错误。
+type PendingReply = (u32, ReplySender);
 /// 待应答请求：`预期响应类型 → 回复发送端`
 ///
 /// 网关控制类响应（`1303` / `1311`）不带 `msg_id`（文档示例 head 只有
@@ -92,7 +183,7 @@ impl SessionInfo {
 pub struct ZhProClient {
     control_tx: mpsc::Sender<Message>,
     bulkdata_tx: mpsc::Sender<Message>,
-    pending: Arc<Mutex<HashMap<u32, ReplySender>>>,
+    pending: Arc<Mutex<HashMap<u32, PendingReply>>>,
     /// 按「响应类型」等待的请求（控制类 1302 / 1310 用）
     pending_types: Arc<Mutex<HashMap<u32, TypeReplySender>>>,
     msg_seq: AtomicU32,
@@ -141,7 +232,7 @@ impl ZhProClient {
         );
         *session.lock().await = info.clone();
 
-        let pending: Arc<Mutex<HashMap<u32, ReplySender>>> = Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<Mutex<HashMap<u32, PendingReply>>> = Arc::new(Mutex::new(HashMap::new()));
         let pending_types: Arc<Mutex<HashMap<u32, TypeReplySender>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let pushes = broadcast::channel::<Envelope>(256).0;
@@ -285,14 +376,14 @@ impl ZhProClient {
     /// 网关 1300 心跳，保持 control 会话保活
     fn spawn_gateway_heartbeat(&self) {
         let tx = self.control_tx.clone();
-        let seq = self.next_msg_id();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(GATEWAY_HEARTBEAT);
-            let mut msg_id = seq;
             loop {
                 ticker.tick().await;
-                msg_id = msg_id.wrapping_add(1);
-                let msg = Envelope::request(T_HEARTBEAT, msg_id, empty());
+                // 文档 §2.3「1300 kHeartbeat」的示例只有 type/time/src，**没有 msg_id**；
+                // 以前借用了请求的 msg_id 号段，秒级心跳和 5000/4030 撞号后会把
+                // `1301` 误投给正在等 `5001` 的调用方，所以按文档发不带 msg_id 的通知。
+                let msg = Envelope::notify(T_HEARTBEAT, empty());
                 if tx.send(Message::Text(msg.to_text())).await.is_err() {
                     break;
                 }
@@ -306,9 +397,11 @@ impl ZhProClient {
         let control_owned = self.control_owned.clone();
         let session = self.session.clone();
         tokio::spawn(async move {
+            let mut last_modules: Option<String> = None;
             while let Ok(env) = rx.recv().await {
                 match env.head.msg_type {
                     T_MODULE_NOTIFY => {
+                        // 固件 1Hz 广播一次，只在可用性**变化**时打，避免刷屏
                         if let Some(modules) = env.data.get("modules").and_then(Value::as_array) {
                             let desc: Vec<String> = modules
                                 .iter()
@@ -322,7 +415,11 @@ impl ZhProClient {
                                     )
                                 })
                                 .collect();
-                            debug!("模块可用性: {}", desc.join(", "));
+                            let line = desc.join(", ");
+                            if last_modules.as_deref() != Some(line.as_str()) {
+                                debug!("模块可用性: {line}");
+                                last_modules = Some(line);
+                            }
                         }
                     }
                     T_TAKE_CONTROL_NOTIFY => {
@@ -398,8 +495,10 @@ impl ZhProClient {
         ) {
             debug!(msg_type, msg_id, packet = %text, "→ 智航完整帧（含 head）");
         }
+        dump_frame("send", &text);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(msg_id, tx);
+        // 响应类型固定是请求 type + 1（协议 §2.2.2），双击校验用
+        self.pending.lock().await.insert(msg_id, (msg_type + 1, tx));
 
         if self
             .control_tx
@@ -483,6 +582,7 @@ impl ZhProClient {
         let text = env.to_text();
         // 1304 摇杆是 50Hz，只有 trace 级别才打印；1302/1304 出问题时可临时打开。
         trace!(msg_type, packet = %text, "→ 智航通知");
+        dump_frame("send", &text);
         self.control_tx
             .send(Message::Text(text))
             .await
@@ -661,17 +761,39 @@ async fn apply_control_owner(
 
 async fn handle_incoming(
     env: &Envelope,
-    pending: &Arc<Mutex<HashMap<u32, ReplySender>>>,
+    pending: &Arc<Mutex<HashMap<u32, PendingReply>>>,
     pending_types: &Arc<Mutex<HashMap<u32, TypeReplySender>>>,
     pushes: &broadcast::Sender<Envelope>,
     session: &Arc<Mutex<SessionInfo>>,
 ) {
-    // 响应优先按 msg_id 派发；通知/推送走广播
-    if let Some(msg_id) = env.head.msg_id
-        && let Some(tx) = pending.lock().await.remove(&msg_id)
-    {
-        let _ = tx.send(env.clone());
-        return;
+    // 先原样打一整帧（head + data），再走派发
+    log_incoming(env);
+    // 响应优先按 msg_id 派发，但必须同时校验 `head.type`（协议 §2.1：
+    // 「客户端应先校验 head.type 和 msg_id，再解析 data」）。
+    // 只比对 msg_id 时，任何回显了同一个号的通知都会抢走待应答请求。
+    if let Some(msg_id) = env.head.msg_id {
+        let expected = pending
+            .lock()
+            .await
+            .get(&msg_id)
+            .map(|(expected, _)| *expected);
+        if let Some(expected) = expected {
+            if env.head.msg_type == expected {
+                let tx = pending.lock().await.remove(&msg_id).map(|(_, tx)| tx);
+                if let Some(tx) = tx {
+                    let _ = tx.send(env.clone());
+                    return;
+                }
+            } else {
+                // 号对上了但类型不对：不消费待应答请求，当作普通推送处理
+                debug!(
+                    msg_id,
+                    got = env.head.msg_type,
+                    expected,
+                    "响应的 msg_id 命中但 head.type 不符，按推送处理"
+                );
+            }
+        }
     }
     // 控制类响应（1303/1311）不带 msg_id，按响应类型派发
     // （`pending_types` 里只有登记过的控制类响应类型，不会抢走推送）
@@ -736,6 +858,49 @@ pub fn endpoint_urls(host: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 协议 §2.1：「客户端应先校验 head.type 和 msg_id」。
+    ///
+    /// 这里模拟「心跳回显了正在等 5001 的 msg_id」这个真实风险：
+    /// 类型不对就不能交给调用方，否则 5000 会报「导航任务未返回 task_id」。
+    #[tokio::test]
+    async fn reply_with_wrong_type_is_not_delivered() {
+        let pending: Arc<Mutex<HashMap<u32, PendingReply>>> = Arc::new(Mutex::new(HashMap::new()));
+        let pending_types: Arc<Mutex<HashMap<u32, TypeReplySender>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let pushes = broadcast::channel(8).0;
+        let session = Arc::new(Mutex::new(SessionInfo::default()));
+
+        let (tx, mut rx) = oneshot::channel();
+        pending.lock().await.insert(5, (T_TASK_CREATE_ACK, tx));
+
+        let heartbeat: Envelope =
+            serde_json::from_str(r#"{"head":{"type":1301,"time":1,"src":5,"msg_id":5},"data":{}}"#)
+                .unwrap();
+        handle_incoming(&heartbeat, &pending, &pending_types, &pushes, &session).await;
+        assert!(rx.try_recv().is_err(), "1301 不该被当成 5001 交给等待方");
+        assert!(
+            pending.lock().await.contains_key(&5),
+            "待应答请求不能被消费"
+        );
+
+        let reply: Envelope = serde_json::from_str(
+            r#"{"head":{"type":5001,"time":2,"src":2,"msg_id":5},"data":{"code":0,"task_id":"t-1"}}"#,
+        )
+        .unwrap();
+        handle_incoming(&reply, &pending, &pending_types, &pushes, &session).await;
+        let delivered = rx.try_recv().expect("5001 应交付给等待方");
+        assert_eq!(delivered.head.msg_type, T_TASK_CREATE_ACK);
+        assert!(!pending.lock().await.contains_key(&5));
+    }
+
+    /// 1300 按文档示例不带 msg_id：借用请求号段会和 5000/4030 撞号。
+    #[test]
+    fn heartbeat_carries_no_msg_id() {
+        let env = Envelope::notify(T_HEARTBEAT, empty());
+        assert!(env.head.msg_id.is_none());
+        assert!(!env.to_text().contains("msg_id"));
+    }
 
     #[test]
     fn builds_endpoints_from_bare_ip() {

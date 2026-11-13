@@ -390,9 +390,20 @@ async fn run_control<S>(
     }
     info!("假本体: control 已建立 client_id={client_id}（{peer}）");
 
-    // 写循环
+    // 写循环。发出的帧同样打出来（与客户端侧 `← 智航完整帧` 是同一条报文的两端），
+    // 1Hz 的 1315 和 500ms 的 5009 太吵，只在 TRACE 打。
     let writer = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
+            if let Message::Text(text) = &msg {
+                let high_freq = ["\"type\":1315", "\"type\":5009"]
+                    .iter()
+                    .any(|needle| text.contains(needle));
+                if high_freq {
+                    tracing::trace!("假本体: → {text}");
+                } else {
+                    debug!("假本体: → {text}");
+                }
+            }
             if sink.send(msg).await.is_err() {
                 break;
             }
@@ -471,7 +482,11 @@ async fn run_control<S>(
                 if heartbeats % 30 == 1 {
                     debug!("假本体: ← 1300 心跳（第 {heartbeats} 帧）");
                 }
-                let _ = tx.send(ok_ack(T_HEARTBEAT, msg_id)).await;
+                // 1301 按文档只带 type/time/src，**不回显 msg_id**：回显会撞上
+                // 客户端正在等 5001 的号段，把 1301 误投给任务调用方。
+                let _ = tx
+                    .send(notify(T_HEARTBEAT_ACK, SRC_GATEWAY, json!({})))
+                    .await;
                 continue;
             }
             T_REMOTE_CONTROL => {
@@ -523,11 +538,19 @@ async fn run_control<S>(
                     .await;
             }
             T_COMMAND => {
-                // 1302：固件不回 1303，只是切模式（60 通用 / 62 导航）
-                if env.data.get("cmd").and_then(Value::as_u64) == Some(62) {
+                // 1302：固件实测不回 1303，这里按文档回一条不带 msg_id 的受理通知
+                // （客户端的 1302 走 send，不等人，所以这条只是日志价值）
+                let cmd = env.data.get("cmd").and_then(Value::as_u64).unwrap_or(0);
+                if cmd == 62 {
                     guard.mode = "remote".to_string();
                 }
-                let _ = tx.send(ok_ack(T_COMMAND, msg_id)).await;
+                let _ = tx
+                    .send(notify(
+                        T_COMMAND_ACK,
+                        SRC_MACHINE,
+                        json!({ "status_code": 0, "message": "ok", "cmd": cmd }),
+                    ))
+                    .await;
             }
             T_MAP_LIST => {
                 let list = guard.map_list();

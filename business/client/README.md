@@ -197,8 +197,22 @@ RUST_LOG=robodog_device_client=debug \
 假本体: ← 5000 {"head":{"type":5000,"time":1794537199977,"src":1,"msg_id":5},
                "data":{"kind":2,"name":"… · 前往 新航点 1","params":{…}}}
 
-# 客户端侧（DEBUG，任务类请求都会打）
+# 假本体侧（发出去的帧，DEBUG；1315/5009 走 TRACE）
+假本体: → {"head":{"type":5001,"time":…,"src":2,"msg_id":5},"data":{"code":0,"msg":"ok","task_id":"mock-1"}}
+
+# 客户端侧（DEBUG）
 → 智航完整帧（含 head） msg_type=5000 msg_id=5 packet={"head":{…},"data":{…}}
+← 智航完整帧（含 head） packet={"head":{"type":5001,…},"data":{"code":0,"msg":"ok","task_id":"mock-1"}}
+```
+
+想留档对账就加 `ROBODOG_FRAME_DUMP=/tmp/frames.jsonl`，双向逐帧落盘：
+
+```bash
+ROBODOG_FRAME_DUMP=/tmp/frames.jsonl RUST_LOG=robodog_device_client=debug \
+  ./target/debug/robodog-device-client --server ws://127.0.0.1:3100 --device-id RD-001 --robot mock
+
+jq -c 'select(.frame.head.type==5001)' /tmp/frames.jsonl     # 只看 5001 应答
+jq -c 'select(.dir=="recv" and .frame.head.type==4013)' /tmp/frames.jsonl
 ```
 
 与协议 §2.5.1.4 示例逐字段对照时，**唯一有意缺失的字段是 `params.fence_path`**：
@@ -243,6 +257,7 @@ RUST_LOG=robodog_device_client=debug \
 | `--firmware` | `Hermes_M_v0.3.2` | 固件版本 |
 | `--robot` | `192.168.234.234` | **智航 Pro 本体地址**；填 `sim`/`none`/`off` = 纯模拟模式（不生成任何本体报文），填 `mock` = 进程内假本体（离线联调，见上文） |
 | `--map-root` | `/ota/alg_data/map` | 本体地图根目录 |
+| `--road-network` | `off` | `5000` 的 `map_type`/`goal_type`：`off`=强制 `1`（2D 栅格，默认，与协议文档示例一致）、`auto`=按航段与本体地图能力判定、`on`=强制 `3`（路网）；也可用 `ROBODOG_ROAD_NETWORK` 或 `client.toml` 的 `[robot] road_network` |
 | `--model` | 空 | 设备型号：本体 `1201.type` 为空时用它（注册/心跳上报，中台台账展示） |
 | `--map-only` | false | 只执行一次建图后退出 |
 | `--map-name` | 时间戳 | `--map-only` 时的地图名 |
@@ -403,9 +418,20 @@ journalctl -u robodog-device-client -f | grep 视频
   缺省时客户端退化为按 `executeMode` 文案推断。
 - `avoidLevel`：10 关闭 / 20 仅急停 / 30 感知 / 40 全避障。任务级生效，
   进入 STANDBY 后本体自动恢复 40。
-- `routeData.legs[].mode`：航段写「沿道路」且本体地图 `4013 map_route_exist=true`
-  时，5000 用路网导航（`map_type=3` / `goal_type=3`）；否则回退 `1`（2D 栅格）。
-  客户端不再直接信任服务端的 `mapType`，以本体地图实际能力为准。
+- `routeData.legs[].mode` / `map_type`：**默认一律下发 `1`（2D 栅格）**，与协议文档的
+  导航任务示例完全一致；`goal_type` 与 `map_type` 相同（协议只允许 `1` 和 `3`，`2` 是 3D
+  预留、下发了会被拒，两者不一致导航不会启动）。客户端不信任服务端的 `mapType`，按
+  `--road-network` 策略自己定：
+  - `off`（默认）：恒 `1`；
+  - `auto`：航段写「沿道路」且本体地图 `4013 map_route_exist=true`（目录下有
+    `map.geojson`）时用 `3`；
+  - `on`：恒 `3`（验证本体路网能力用，本体没路网会被固件拒）。
+
+  每次派发都会打一行判定原因：
+
+  ```text
+  INFO 5000 地图类型 map_type/goal_type = 1（road_network 策略=off，航线全沿道路=true，本体 map.geojson=true）
+  ```
 - `routeData.fencePath` / `payload.fencePath`：非空时作为 5000 `params.fence_path`
   下发；空串/空白不下发，避免固件把它当非法路径（现场会回“导航指令非法”）。
 
@@ -458,8 +484,13 @@ journalctl -u robodog-device-client -f | grep 视频
 - 航线任务 → `RouteRunner::control`，暂停时同步给本体 5004，恢复 5006，取消 5002；
 - 建图任务 → `cancel` 会触发 5002 并等待 4001 保存结果。
 
-### 出站报文日志
+### 报文日志（双向，含 head）
 
+- **收到的每一帧**：DEBUG，`client: ← 智航完整帧（含 head） packet={"head":{…},"data":{…}}`，
+  覆盖 `1207 / 1301 / 4013 / 4045 / 5001 / 1205 / 1523 / 1303 / 4001` 等；
+  高频推送（`1401/1403/1405/1407`、`1315`、`5009`）降到 TRACE，避免把响应刷没；
+- **落盘成 JSON 文件**：`ROBODOG_FRAME_DUMP=/tmp/frames.jsonl` → 一行一帧
+  `{"ts":<毫秒>,"dir":"send|recv","frame":{…原始 head+data…}}`，双向都记，可直接 `jq` 过滤；
 - `5000` 任务载荷：DEBUG，`zhpro::route: 5000 载荷（第 x/y 点 …）: {…}`（只有 `data`，便于看目标点）；
 - 任务类请求的**完整帧**：DEBUG，`client: → 智航完整帧（含 head） msg_type=5000 msg_id=5 packet={"head":{…},"data":{…}}`，
   与协议文档 §2.5.1.4 的示例逐字段对账就用这行（`4044/4030/5000/5002/5004/5006/5014` 都会打）；
@@ -513,6 +544,28 @@ RUST_LOG=robodog_device_client::zhpro::client=trace   /opt/robodog/client/robodo
 4. 1299 网关传输层错误、1300/1301 网关心跳（**间隔 1s**，见下）
 5. 4000~5999 自由数据区间需先 1204 取得 RoamerX 控制权
 ```
+
+### 请求/响应如何关联（msg_id）
+
+协议 §2.1 的约定是「用 `msg_id` 关联同一请求的响应，客户端应先校验 `head.type` **和**
+`msg_id`，再解析 `data`」，实现分三层：
+
+| 类别 | 归类方式 | 覆盖的报文 |
+| --- | --- | --- |
+| 请求-响应 | `pending: msg_id → (预期响应类型, 一次性通道)`；要求 `head.type == 请求 type + 1` 才交付 | `4012→4013`、`4030→4031`、`4044→4045`、`5000→5001`、`5002→5003`、`5004→5005`、`5006→5007`、`5014→5015` |
+| 控制类应答（不带 `msg_id`） | `pending_types: 响应类型 → 一次性通道`，只接受登记过的类型 | `1303`（1302 的应答）、`1311`（1310 的应答） |
+| 通知 / 状态 / 推送 | 不走 pending，直接广播给订阅者，各模块**按 `head.type` 分发** | `5009`、`1315`、`1205`/`1523`、`1207`、`4001`、`4035`、`1401` |
+
+`msg_id` 是客户端自己的计数器（`msg_seq: AtomicU32` 从 1 递增，进程内全局、跨重连继续，
+`wrapping_add` 回绕），与 `time` / `src=1` 一起写进 `head`；本体只需原样回显。
+
+两处细节都是踩过坑才加上的：
+
+- **心跳不再借用请求号段**：`1300` 按文档示例不带 `msg_id`（发成 notify）。以前借了请求的
+  `msg_id` 并从 1Hz 本地递增，和 `5000/4030` 撞号后，回显了同号的 `1301` 会被当成
+  `5001` 交给调用方，`5000` 于是报「导航任务未返回 `task_id`」——现场很难复现、也难定位。
+- **交付前校验 `head.type`**：`msg_id` 命中但响应类型不符时**不消费**待应答请求，只打一条
+  DEBUG（`响应的 msg_id 命中但 head.type 不符，按推送处理`）并继续等真正的应答。
 
 ### 网关心跳与「control 通道已关闭」
 
