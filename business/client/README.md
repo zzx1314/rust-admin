@@ -478,7 +478,19 @@ journalctl -u robodog-device-client -f | grep 视频
 
 - `stage` 直接透传智航 5009 快照里的阶段串，服务端落到 `tasks.robot_stage`。
 - `robotTaskId` 是 5001 返回的本体任务 ID，落 `tasks.robot_task_id`，用于对账机器人日志。
-- 上报节奏：5009 推送是 500ms，客户端合流成 **5s 一次**，避免刷爆业务库。
+- 上报节奏：5009 推送是 500ms，客户端合流成 **5s 一次**；内容没变时按 **30s** 窗口重发，
+  避免刷爆业务库（同时保证服务端 `tasks.updated_at` 不超过 120s 的看门狗阈值）。
+- **每条真正发出去的进度都会打印整份载荷**（`info`，默认 `journalctl` 就能看到）：
+
+```text
+→ 上报 task_progress(定时): {"taskCode":"TK-1110-01","status":"执行中","progress":60,...}
+→ 上报 task_progress(5009): {"taskCode":"TK-1110-01","status":"执行中","stage":"patrol.point_arrived",...}
+→ 上报 task_progress(事件): {"taskCode":"TK-1110-01","status":"已完成","progress":100,...}
+```
+
+  括号里是来源：`定时`（5s 进度定时器）/ `5009`（本体快照驱动，返充出桩等无 runner 的任务也走这里）/
+  `事件`（终态、定位未就绪、执行失败等一次性上报）。内容未变而跳过的那部分降到 `debug`。
+  排查时把这一行和上面 `5009 任务(...)` 的快照行对着看，就能直接判断「本体给了什么 → 上报了什么」。
 
 `task_control` 支持 `pause` / `resume` / `cancel`，客户端收到后：
 - 航线任务 → `RouteRunner::control`，暂停时同步给本体 5004，恢复 5006，取消 5002；

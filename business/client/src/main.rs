@@ -1081,12 +1081,12 @@ async fn run_client(
     let (relink_tx, mut relink_rx) = mpsc::channel::<Result<Arc<ZhProClient>, String>>(1);
     let mut relinking = false;
 
-    // 进度去重：内容没变就降到 [`PROGRESS_DEDUP_WINDOW`] 一次（服务端还会按「标题 + 描述」
+    // 进度上报：内容没变就降到 [`PROGRESS_DEDUP_WINDOW`] 一次（服务端还会按「标题 + 描述」
     // 去重落事件）。**不能彻底停发**：服务端任务看门狗按 `tasks.updated_at` 判超时
     // （默认 120s），超时会直接把跑着的任务翻成「异常」。反过来，进度一直不动也会
     // 被「进度停滞」判据（`task_stuck_secs`）判异常，所以卡住时上报真实原因比刷
     // 「执行中」更有用。
-    let mut last_progress: Option<(String, Instant)> = None;
+    let mut progress_reporter = ProgressReporter::default();
 
     loop {
         // 每次迭代拷一份链路监视器：`wait_body_down` 只借用这个临时副本，
@@ -1239,27 +1239,9 @@ async fn run_client(
                         payload.message = Some("任务已暂停".to_string());
                     }
                 }
-                // 内容未变时降频，不再往事件流里刷重复进度（以前 5s 一条，暂停一小时几千条）
-                let key = format!(
-                    "{}|{}|{}|{:?}|{:?}|{:?}",
-                    payload.task_code,
-                    payload.status,
-                    payload.progress,
-                    payload.point_index,
-                    payload.message,
-                    payload.stage
-                );
-                let should_send = match last_progress.as_ref() {
-                    Some((previous, at)) => {
-                        previous != &key || at.elapsed() >= PROGRESS_DEDUP_WINDOW
-                    }
-                    None => true,
-                };
-                if !should_send {
-                    continue;
-                }
-                last_progress = Some((key, Instant::now()));
-                send(&out_tx, "task_progress", serde_json::to_value(payload).unwrap_or_default()).await;
+                // 内容未变时降频，不再往事件流里刷重复进度（以前 5s 一条，暂停一小时几千条）；
+                // 每次真正发出去都会把整份 payload 打到日志，方便对着平台上的读数排查
+                progress_reporter.report(&out_tx, &payload, "定时").await;
             }
 
             _ = teleop_timer.tick() => {
@@ -1376,6 +1358,9 @@ fn spawn_zhpro_pump(
         let dedup = Arc::new(Mutex::new(EventDedup::default()));
         // 只在任务快照的 lifecycle/stage/error 变化时打一条，避免 5009 500ms 心跳刷屏
         let mut last_task_log: Option<String> = None;
+        // 5009 驱动的任务进度（本体任务 / 返充出桩）：自己一套去重窗口，
+        // 不能真按 500ms 原样上报，也不能傻到一帧不漏地刷日志
+        let mut progress_reporter = ProgressReporter::default();
         while let Ok(env) = rx.recv().await {
             match env.head.msg_type {
                 T_TASK_STATUS => {
@@ -1468,7 +1453,15 @@ fn spawn_zhpro_pump(
                         last_task_log = None;
                     }
                     let frame = accepted.frame.clone();
-                    handle_status_frame(&frame, &out_tx, &state, &active, &monitor).await;
+                    handle_status_frame(
+                        &frame,
+                        &out_tx,
+                        &state,
+                        &active,
+                        &monitor,
+                        &mut progress_reporter,
+                    )
+                    .await;
                 }
                 T_ROBOT_STATUS => {
                     // 1315 里的运动状态 / 机器模式 / 控制源变化要留痕：
@@ -1743,6 +1736,7 @@ async fn handle_status_frame(
     state: &Shared<RobotState>,
     active: &Shared<Option<ActiveTask>>,
     monitor: &Arc<Mutex<TaskMonitor>>,
+    reporter: &mut ProgressReporter,
 ) {
     // 文档 §2.6.10 第 5 条：即时终态可能已经在 `current_task` 里被回收，只留在
     // `recent_terminal_tasks` 里（最多 3 条 / 约 30s）。两处都要识别，否则
@@ -1823,12 +1817,9 @@ async fn handle_status_frame(
         robot_task_id: Some(task.task_id.clone()),
         total_points: None,
     };
-    send(
-        out_tx,
-        "task_progress",
-        serde_json::to_value(payload).unwrap_or_default(),
-    )
-    .await;
+    // 每次真正发出去的 payload 都打到日志：现场排查「平台显示的状态与本体不一致」时，
+    // 先看这里上报了什么，再去对上面那条 5009 快照行，比猜更直接
+    reporter.report(out_tx, &payload, "5009").await;
 
     // 离散事件（去重后只报一次）
     if monitor.lock().await.take_event(&task) {
@@ -1876,6 +1867,41 @@ const LOCATE_TIMEOUT: Duration = Duration::from_secs(60);
 /// 必须明显小于服务端 `task_timeout_secs`（默认 120s）：看门狗靠 `tasks.updated_at`
 /// 判「执行中但不上报」，彻底停发会把正在跑的任务翻成异常。
 const PROGRESS_DEDUP_WINDOW: Duration = Duration::from_secs(30);
+
+/// `task_progress` 上报器：去重 + 打印整份载荷。
+///
+/// 两个消费路径（5s 定时器、5009 快照）内容不变时都会重复产生同一份 payload：
+/// - 不能原样刷：暂停一小时能刷出几千条一样的进度，服务端事件流也会被冲掉；
+/// - 也不能彻底不发：服务端看门狗按 `tasks.updated_at` 判 120s 超时。
+///
+/// 所以按「整份 JSON 不变就 [`PROGRESS_DEDUP_WINDOW`] 一次」处理，
+/// 并且只要真的发出去就把载荷打到 `info`，不用开 debug 就能对账。
+#[derive(Default)]
+struct ProgressReporter {
+    last: Option<(String, Instant)>,
+}
+
+impl ProgressReporter {
+    async fn report(
+        &mut self,
+        out_tx: &mpsc::Sender<WsMessage>,
+        payload: &TaskProgressPayload,
+        source: &str,
+    ) {
+        let value = serde_json::to_value(payload).unwrap_or_default();
+        let key = value.to_string();
+        if let Some((previous, at)) = self.last.as_ref()
+            && previous == &key
+            && at.elapsed() < PROGRESS_DEDUP_WINDOW
+        {
+            debug!("task_progress({source}) 内容未变，不上报: {key}");
+            return;
+        }
+        info!("→ 上报 task_progress({source}): {key}");
+        self.last = Some((key, Instant::now()));
+        send(out_tx, "task_progress", value).await;
+    }
+}
 
 /// 平台下发的初始位姿：`initialPose: { x, y, heading }`（heading 单位度，与路线航点一致）
 ///
@@ -2955,12 +2981,10 @@ async fn report_progress(
         robot_task_id,
         total_points,
     };
-    send(
-        out_tx,
-        "task_progress",
-        serde_json::to_value(payload).unwrap_or_default(),
-    )
-    .await;
+    // 一次性上报（定位未就绪 / 执行失败 / 航点跑完）：没有历史可比，直接发并打日志
+    ProgressReporter::default()
+        .report(out_tx, &payload, "事件")
+        .await;
 }
 
 /// 摇杆未放行（门禁拒绝 / 接管失败）：按「原因变化或 30s」限频上报一条 `warn` 事件
@@ -3235,5 +3259,64 @@ mod event_dedup_tests {
         assert!(dedup.accept("fault", "电池通信异常"));
         // 事件类型不同不互相压制
         assert!(dedup.accept("info", "感知障碍物检测延迟"));
+    }
+}
+
+#[cfg(test)]
+mod progress_reporter_tests {
+    use super::{ProgressReporter, TaskProgressPayload};
+
+    fn payload(status: &str, stage: &str) -> TaskProgressPayload {
+        TaskProgressPayload {
+            task_code: "TK-1".to_string(),
+            status: status.to_string(),
+            progress: 40,
+            point_index: Some(2),
+            message: Some("已完成 2/5 个航点".to_string()),
+            stage: Some(stage.to_string()),
+            robot_task_id: Some("nav-1".to_string()),
+            total_points: Some(5),
+        }
+    }
+
+    /// 5009 是 500ms 一帧，同一份内容不能每次都往业务库推
+    #[tokio::test]
+    async fn identical_payload_is_suppressed() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let mut reporter = ProgressReporter::default();
+        reporter
+            .report(&tx, &payload("执行中", "navigation.navigating"), "测试")
+            .await;
+        reporter
+            .report(&tx, &payload("执行中", "navigation.navigating"), "测试")
+            .await;
+
+        let first = rx.try_recv().expect("首次必须上报");
+        assert_eq!(first.msg_type, "task_progress");
+        assert!(rx.try_recv().is_err(), "内容完全相同的重复帧不该再上报");
+    }
+
+    /// 阶段一变（或终态）必须立刻下发，不能被 30s 窗口压住
+    #[tokio::test]
+    async fn changed_payload_is_sent_immediately() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let mut reporter = ProgressReporter::default();
+        reporter
+            .report(&tx, &payload("执行中", "navigation.navigating"), "测试")
+            .await;
+        reporter
+            .report(&tx, &payload("已完成", "navigation.succeeded"), "测试")
+            .await;
+        reporter
+            .report(&tx, &payload("执行中", "navigation.navigating"), "测试")
+            .await;
+
+        assert!(rx.try_recv().is_ok());
+        let terminal = rx.try_recv().expect("终态必须立刻上报");
+        assert_eq!(terminal.payload["status"], "已完成");
+        // 窗口只比对「紧邻的上一份」：内容换回去也得发，不能把某个状态永久封死
+        let back = rx.try_recv().expect("内容变化必须立刻上报");
+        assert_eq!(back.payload["status"], "执行中");
+        assert!(rx.try_recv().is_err());
     }
 }
