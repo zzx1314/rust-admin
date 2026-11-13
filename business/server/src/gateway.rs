@@ -231,6 +231,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                             sdk_node_available: None,
                                         });
                                     handle_heartbeat(&db, &state.config, did, &payload).await;
+                                    // 本体就绪后才补发待执行任务：注册时通常还没连上本体，
+                                    // 早发只会得到一条「未连接机器人本体」并留下假执行中。
+                                    if payload.body_online == Some(true)
+                                        && let Err(e) = dispatch_pending_tasks(&db, &tx, did).await
+                                    {
+                                        warn!("dispatch pending tasks for {did}: {e}");
+                                    }
                                     // 强制接管标记随心跳下发：客户端重启后本地的
                                     // `teleop_force` 会丢，不补的话摇杆又会被
                                     // `ctrl_source = 3` 门禁拦下。
@@ -619,13 +626,18 @@ pub async fn sweep_stale_devices(state: &AppState) -> Result<u64, AppError> {
     Ok(affected)
 }
 
-/// 任务看门狗：`执行中` 但长时间没有进度上报的任务判定为中断，置「异常」。
+/// 任务看门狗：`执行中` 但长时间没有进度上报、或者进度长时间不推进的任务判定为中断，
+/// 置「异常」。
 ///
 /// 客户端只在本地持有任务上下文时每 5s 上报一次进度；遇到下面几种情况平台侧就
 /// 再也收不到任何上报，任务会永久停在「执行中」：
 /// - 客户端重启 / 掉线（WebSocket 断了，本地 runner 也没了）；
 /// - 平台只发了 `task_control`（resume）没发 `task_dispatch`，客户端压根没有任务可跑；
 /// - 客户端回了终态但上报丢失。
+///
+/// 还有一种更容易看错的情况：客户端还在周期性上报「执行中」，但进度一直是 0%——
+/// 上报没断，`updated_at` 一直新鲜，只靠「有没有上报」永远判不出来。所以同时看
+/// `progress_updated_at`（只在 progress 数值变化时刷新）。
 ///
 /// 与心跳看门狗一样每 15s 扫一次。心跳看门狗先把设备置为离线，这里再用
 /// `task_timeout_secs` 给任务上一道时间兜底。
@@ -644,25 +656,40 @@ pub fn spawn_task_watchdog(state: AppState) {
     });
 }
 
+/// 看门狗扫描结果：
+/// (task_pk, task_code, task_name, progress, device_pk, device_code, device_status, kind)，
+/// `kind` 为 `silent`（没有上报）或 `stalled`（有上报但进度不动）。
+type StuckTask = (i64, String, String, i64, i64, String, String, String);
+
 /// 扫描并处理「执行中但不再上报」的任务，返回本次置为异常的条数。
 ///
 /// 只判定真机设备（`last_heartbeat` 是完整时间戳）：`seed.rs` 的演示任务写的是
 /// 相对时间，不会被看门狗翻成异常。
 pub async fn sweep_stuck_tasks(state: &AppState) -> Result<u64, AppError> {
     let timeout = state.config.task_timeout_secs;
-    let cutoff = (chrono::Local::now() - chrono::Duration::seconds(timeout))
+    let stuck = state.config.task_stuck_secs;
+    let silent_cutoff = (chrono::Local::now() - chrono::Duration::seconds(timeout))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    let stalled_cutoff = (chrono::Local::now() - chrono::Duration::seconds(stuck))
         .format("%Y-%m-%d %H:%M:%S")
         .to_string();
 
-    let stale: Vec<(i64, String, String, i64, String, String)> = sqlx::query_as(
-        "SELECT t.id, t.task_code, t.task_name, d.id, d.device_id, d.status
+    // 两种「卡住」都要判：
+    // - silent：超时没有任何上报（掉线 / 客户端重启）；
+    // - stalled：还在报，但进度数值长时间不动（客户端没有执行上下文还在周期性
+    //   上报「执行中」）。只看 `updated_at` 时，后一种会让任务永远停在执行中。
+    let stale: Vec<StuckTask> = sqlx::query_as(
+        "SELECT t.id, t.task_code, t.task_name, t.progress, d.id, d.device_id, d.status,
+                CASE WHEN t.updated_at < ?1 THEN 'silent' ELSE 'stalled' END
          FROM tasks t
          JOIN devices d ON d.id = t.device_id
          WHERE t.task_status = '执行中'
            AND d.last_heartbeat LIKE '____-__-__ __:__:__'
-           AND t.updated_at < ?1",
+           AND (t.updated_at < ?1 OR COALESCE(t.progress_updated_at, t.updated_at) < ?2)",
     )
-    .bind(&cutoff)
+    .bind(&silent_cutoff)
+    .bind(&stalled_cutoff)
     .fetch_all(&state.db)
     .await?;
 
@@ -672,7 +699,9 @@ pub async fn sweep_stuck_tasks(state: &AppState) -> Result<u64, AppError> {
 
     let timestamp = now();
     let mut affected = 0_u64;
-    for (task_pk, task_code, task_name, device_pk, device_code, device_status) in &stale {
+    for (task_pk, task_code, task_name, progress, device_pk, device_code, device_status, kind) in
+        &stale
+    {
         // 带上 task_status 条件：扫描期间客户端刚好补报终态时不要覆盖真实结果
         let result = sqlx::query(
             "UPDATE tasks SET task_status = '异常', updated_at = ?1
@@ -692,10 +721,17 @@ pub async fn sweep_stuck_tasks(state: &AppState) -> Result<u64, AppError> {
              VALUES ('status', ?1, ?2, ?3, ?4, ?5)",
         )
         .bind(format!("任务 {task_code} 执行中断"))
-        .bind(format!(
-            "超过 {timeout}s 未收到进度上报（设备 {device_code} {device_status}），已判定为异常；\
-             设备恢复后请重新下发任务"
-        ))
+        .bind(if kind == "silent" {
+            format!(
+                "超过 {timeout}s 未收到进度上报（设备 {device_code} {device_status}），已判定为异常；\
+                 设备恢复后请重新下发任务"
+            )
+        } else {
+            format!(
+                "进度停在 {progress}% 超过 {stuck}s 没有任何推进（设备 {device_code} {device_status}），\
+                 已判定为异常；请检查本体定位/导航状态后重新下发任务"
+            )
+        })
         .bind(device_pk)
         .bind(task_pk)
         .bind(&timestamp)
@@ -1198,89 +1234,101 @@ async fn resolve_control_preempt_alert(db: &SqlitePool, device_id: &str, timesta
 }
 
 /// 任务进度上报
+///
+/// 三条约束（都是现场卡单后补的）：
+/// 1. **终态不可回退**：已完成 / 异常的任务不再被「执行中」的周期上报拉回去。
+///    客户端没有执行上下文时仍会周期性上报，旧逻辑会把刚判定的异常刷回执行中，
+///    看门狗又因为 `updated_at` 新鲜不触发，任务就永远停在「执行中」。
+/// 2. **进度时间戳只随数值变化**：`progress_updated_at` 供看门狗判「进度停滞」；
+///    `updated_at` 保持「最后一次收到上报」的含义。
+/// 3. **状态没更新就不动设备台账**：避免一条过期上报把设备从「在线待命」改回
+///    「执行任务」。
 async fn handle_task_progress(db: &SqlitePool, device_id: &str, payload: &TaskProgressPayload) {
     let timestamp = now();
+    if payload.task_code.is_empty() {
+        return;
+    }
 
-    // 更新任务状态
-    if !payload.task_code.is_empty() {
-        let valid_statuses = ["待执行", "执行中", "已完成", "异常", "已暂停"];
-        let status = if valid_statuses.contains(&payload.status.as_str()) {
-            &payload.status
-        } else {
-            "执行中"
+    let valid_statuses = ["待执行", "执行中", "已完成", "异常", "已暂停"];
+    let status = if valid_statuses.contains(&payload.status.as_str()) {
+        &payload.status
+    } else {
+        "执行中"
+    };
+
+    let result = sqlx::query(
+        "UPDATE tasks SET task_status = ?1, progress = ?2, updated_at = ?3,
+            progress_updated_at = CASE WHEN progress <> ?2 OR progress_updated_at IS NULL
+                                       THEN ?3 ELSE progress_updated_at END,
+            robot_task_id = COALESCE(?5, robot_task_id),
+            robot_stage = COALESCE(?6, robot_stage),
+            robot_updated_at = CASE WHEN ?5 IS NOT NULL OR ?6 IS NOT NULL THEN ?3
+                                    ELSE robot_updated_at END
+         WHERE task_code = ?4
+           AND (task_status NOT IN ('已完成', '异常') OR ?1 IN ('已完成', '异常'))",
+    )
+    .bind(status)
+    .bind(payload.progress)
+    .bind(&timestamp)
+    .bind(&payload.task_code)
+    .bind(payload.robot_task_id.as_deref())
+    .bind(payload.stage.as_deref())
+    .execute(db)
+    .await;
+
+    if let Ok(r) = result
+        && r.rows_affected() > 0
+    {
+        // 记录事件：优先用客户端给的中文描述，没有则用阶段名
+        let message = payload
+            .message
+            .as_deref()
+            .filter(|m| !m.is_empty())
+            .or(payload.stage.as_deref())
+            .unwrap_or("进度更新");
+        let title = match payload.total_points {
+            Some(total) if total > 0 => format!(
+                "任务 {} 进度 {}/{}（{}%）",
+                payload.task_code,
+                payload.point_index.unwrap_or(0),
+                total,
+                payload.progress
+            ),
+            _ => format!("任务 {} 进度更新: {}%", payload.task_code, payload.progress),
         };
-
-        let result = sqlx::query(
-            "UPDATE tasks SET task_status = ?1, progress = ?2, updated_at = ?3,
-                robot_task_id = COALESCE(?5, robot_task_id),
-                robot_stage = COALESCE(?6, robot_stage),
-                robot_updated_at = CASE WHEN ?5 IS NOT NULL OR ?6 IS NOT NULL THEN ?3
-                                        ELSE robot_updated_at END
-             WHERE task_code = ?4",
+        // 进度事件去重：客户端 5s 一报，内容没变就不重复落事件。
+        // 以前暂停/卡住时一小时能刷出上千条同样的「任务已暂停」，把
+        // 「导航指令非法」「无有效绕障轨迹」这些真正要看的故障全冲掉了。
+        let last_progress: Option<(String, String)> = sqlx::query_as(
+            "SELECT title, description FROM task_events
+              WHERE event_type = 'progress'
+                AND task_id = (SELECT id FROM tasks WHERE task_code = ?1)
+              ORDER BY id DESC LIMIT 1",
         )
-        .bind(status)
-        .bind(payload.progress)
-        .bind(&timestamp)
         .bind(&payload.task_code)
-        .bind(payload.robot_task_id.as_deref())
-        .bind(payload.stage.as_deref())
-        .execute(db)
-        .await;
-
-        if let Ok(r) = result
-            && r.rows_affected() > 0
-        {
-            // 记录事件：优先用客户端给的中文描述，没有则用阶段名
-            let message = payload
-                .message
-                .as_deref()
-                .filter(|m| !m.is_empty())
-                .or(payload.stage.as_deref())
-                .unwrap_or("进度更新");
-            let title = match payload.total_points {
-                Some(total) if total > 0 => format!(
-                    "任务 {} 进度 {}/{}（{}%）",
-                    payload.task_code,
-                    payload.point_index.unwrap_or(0),
-                    total,
-                    payload.progress
-                ),
-                _ => format!("任务 {} 进度更新: {}%", payload.task_code, payload.progress),
-            };
-            // 进度事件去重：客户端 5s 一报，内容没变就不重复落事件。
-            // 以前暂停/卡住时一小时能刷出上千条同样的「任务已暂停」，把
-            // 「导航指令非法」「无有效绕障轨迹」这些真正要看的故障全冲掉了。
-            let last_progress: Option<(String, String)> = sqlx::query_as(
-                "SELECT title, description FROM task_events
-                  WHERE event_type = 'progress'
-                    AND task_id = (SELECT id FROM tasks WHERE task_code = ?1)
-                  ORDER BY id DESC LIMIT 1",
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+        let unchanged = last_progress
+            .as_ref()
+            .is_some_and(|(prev_title, prev_desc)| {
+                prev_title == &title && prev_desc.as_str() == message
+            });
+        if !unchanged {
+            sqlx::query(
+                "INSERT INTO task_events (event_type, title, description, device_id, task_id, created_at)
+                 VALUES ('progress', ?1, ?2, (SELECT id FROM devices WHERE device_id = ?3),
+                         (SELECT id FROM tasks WHERE task_code = ?4), ?5)",
             )
+            .bind(title)
+            .bind(message)
+            .bind(device_id)
             .bind(&payload.task_code)
-            .fetch_optional(db)
+            .bind(&timestamp)
+            .execute(db)
             .await
-            .ok()
-            .flatten();
-            let unchanged = last_progress
-                .as_ref()
-                .is_some_and(|(prev_title, prev_desc)| {
-                    prev_title == &title && prev_desc.as_str() == message
-                });
-            if !unchanged {
-                sqlx::query(
-                    "INSERT INTO task_events (event_type, title, description, device_id, task_id, created_at)
-                     VALUES ('progress', ?1, ?2, (SELECT id FROM devices WHERE device_id = ?3),
-                             (SELECT id FROM tasks WHERE task_code = ?4), ?5)",
-                )
-                .bind(title)
-                .bind(message)
-                .bind(device_id)
-                .bind(&payload.task_code)
-                .bind(&timestamp)
-                .execute(db)
-                .await
-                .ok();
-            }
+            .ok();
         }
 
         // 任务完成时，更新设备当前任务
@@ -1429,25 +1477,50 @@ async fn handle_teleop_state(db: &SqlitePool, device_id: &str, payload: &TeleopS
     }
 }
 
-/// 下发待执行任务
+/// 下发待执行任务（设备注册 / 绑定园区 / 心跳确认本体就绪时调用）。
+///
+/// 三条规则：
+/// - 设备未就绪（未绑园区 / 本体未连接 / 急停 / 控制权被抢 / 远程接管）时一条都不发：
+///   注册时本体往往还没连上，早发只会得到一条「未连接机器人本体」，任务在平台上
+///   看起来就是「已下发但不动」；
+/// - 设备已有执行中 / 已暂停的任务时不补发：客户端只有一个执行上下文，后发的一条
+///   会顶掉前一条，但平台侧两条都显示执行中；
+/// - 一次只补发一条（优先级高、创建早的先跑），其余等这条上报终态后再补。
 async fn dispatch_pending_tasks(
     db: &SqlitePool,
     tx: &broadcast::Sender<PendingCommand>,
     device_id: &str,
 ) -> Result<(), AppError> {
-    // 未绑定园区的设备不接收任务：地图与路线都按园区归属，绑定后才会补发
-    let bound_park: Option<i64> =
-        sqlx::query_scalar("SELECT park_id FROM devices WHERE device_id = ?1")
+    let device: Option<(i64, Option<i64>)> =
+        sqlx::query_as("SELECT id, park_id FROM devices WHERE device_id = ?1")
             .bind(device_id)
             .fetch_optional(db)
-            .await?
-            .flatten();
-    let Some(park_id) = bound_park else {
+            .await?;
+    let Some((device_pk, park_id)) = device else {
         return Ok(());
     };
+    // 未绑定园区的设备不接收任务：地图与路线都按园区归属，绑定后才会补发
+    let Some(park_id) = park_id else {
+        return Ok(());
+    };
+    if let Some(reason) = crate::dispatch::device_block_reason(db, device_pk).await? {
+        debug!("device {device_id} 暂不补发任务：{reason}");
+        return Ok(());
+    }
 
-    // 查找该设备所有"待执行"状态的任务（且任务园区与设备园区一致）
-    let tasks = sqlx::query_as::<_, Task>(
+    let occupied: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM tasks WHERE device_id = ?1
+           AND task_status IN ('执行中', '已暂停') LIMIT 1",
+    )
+    .bind(device_pk)
+    .fetch_optional(db)
+    .await?;
+    if occupied.is_some() {
+        return Ok(());
+    }
+
+    // 只取一条：优先级高、创建早的先跑
+    let task = sqlx::query_as::<_, Task>(
         "SELECT t.id, t.task_code, t.task_name, t.task_type, t.execute_mode, t.level,
             t.device_id, d.device_id AS device_code, t.park_id, p.park_name, t.zone_id,
             z.zone_name, t.route_id, r.route_code, r.route_name, t.plan_start, t.plan_end,
@@ -1460,50 +1533,74 @@ async fn dispatch_pending_tasks(
          LEFT JOIN routes r ON r.id = t.route_id
          WHERE d.device_id = ?1 AND t.task_status = '待执行'
             AND (t.park_id IS NULL OR t.park_id = ?2)
-         ORDER BY t.level DESC, t.created_at ASC",
+         ORDER BY t.level DESC, t.created_at ASC, t.id ASC LIMIT 1",
     )
     .bind(device_id)
     .bind(park_id)
-    .fetch_all(db)
+    .fetch_optional(db)
+    .await?;
+    let Some(task) = task else {
+        return Ok(());
+    };
+
+    let dispatch = match crate::dispatch::build_dispatch_payload(db, &task).await {
+        Ok(payload) => payload,
+        Err(e) => {
+            warn!("build dispatch payload for task {}: {e}", task.task_code);
+            return Ok(());
+        }
+    };
+    let payload = serde_json::to_value(&dispatch).unwrap_or_default();
+
+    // 先置态再发：与 `push_task_dispatch` 保持一致，客户端拒单的上报不会被覆盖。
+    // 重新下发等于换一条本体任务，旧的 robot_task_id / stage 必须清掉。
+    let timestamp = now();
+    sqlx::query(
+        "UPDATE tasks SET task_status = '执行中', progress = 0, progress_updated_at = ?1,
+            robot_task_id = NULL, robot_stage = NULL, robot_updated_at = NULL, updated_at = ?1
+         WHERE id = ?2",
+    )
+    .bind(&timestamp)
+    .bind(task.id)
+    .execute(db)
     .await?;
 
-    for task in tasks {
-        let dispatch = match crate::dispatch::build_dispatch_payload(db, &task).await {
-            Ok(payload) => payload,
-            Err(e) => {
-                warn!("build dispatch payload for task {}: {e}", task.task_code);
-                continue;
-            }
-        };
-
-        let payload = serde_json::to_value(&dispatch).unwrap_or_default();
-        let _ = tx.send(PendingCommand {
+    if tx
+        .send(PendingCommand {
             cmd_type: "task_dispatch".to_string(),
             payload,
-        });
-
-        // 将任务标记为"执行中"
-        sqlx::query("UPDATE tasks SET task_status = '执行中', updated_at = ?1 WHERE id = ?2")
-            .bind(now())
-            .bind(task.id)
-            .execute(db)
-            .await
-            .ok();
-
-        // 更新设备状态
+        })
+        .is_err()
+    {
+        // 连接已经没了：回滚成待执行，别留下一条假的「执行中」
         sqlx::query(
-            "UPDATE devices SET status = '执行任务', current_task_name = ?1, updated_at = ?2 WHERE device_id = ?3",
+            "UPDATE tasks SET task_status = '待执行', progress = 0, updated_at = ?1
+             WHERE id = ?2 AND task_status = '执行中' AND robot_task_id IS NULL",
         )
-        .bind(&task.task_name)
         .bind(now())
-        .bind(device_id)
+        .bind(task.id)
         .execute(db)
         .await
         .ok();
-
-        info!("dispatched task {} to device {}", task.task_code, device_id);
+        warn!(
+            "device {device_id} 补发任务 {} 失败：连接已断开",
+            task.task_code
+        );
+        return Ok(());
     }
 
+    // 更新设备状态
+    sqlx::query(
+        "UPDATE devices SET status = '执行任务', current_task_name = ?1, updated_at = ?2 WHERE device_id = ?3",
+    )
+    .bind(&task.task_name)
+    .bind(now())
+    .bind(device_id)
+    .execute(db)
+    .await
+    .ok();
+
+    info!("dispatched task {} to device {}", task.task_code, device_id);
     Ok(())
 }
 

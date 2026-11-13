@@ -56,6 +56,12 @@ pub struct Config {
     /// `task_control` 没发 `task_dispatch` 时，平台侧收不到任何后续上报，
     /// 任务会永久停在「执行中」——必须有一条时间兜底。
     pub task_timeout_secs: i64,
+    /// 任务进度停滞秒数：`执行中` 的任务进度数值超过这个时长没有变化，判定为「异常」。
+    ///
+    /// 只靠 `task_timeout_secs` 不够：客户端没有执行上下文时仍会周期性上报
+    /// 「执行中 / 进度不变」，`updated_at` 一直是新鲜的，看门狗永远不触发。
+    /// 取 10 分钟——正常航段/作业很少连续这么久没有一点进度推进。
+    pub task_stuck_secs: i64,
 }
 
 /// 配置文件读取 / 解析失败。
@@ -90,6 +96,7 @@ struct ServerFile {
     ingest_dir: Option<String>,
     device_timeout_secs: Option<i64>,
     task_timeout_secs: Option<i64>,
+    task_stuck_secs: Option<i64>,
     zentai: ZentaiFile,
 }
 
@@ -190,6 +197,11 @@ impl Config {
                 .or(file.task_timeout_secs)
                 .unwrap_or(120)
                 .max(30),
+            task_stuck_secs: env_text(&env, "ROBODOG_TASK_STUCK_SECS")
+                .and_then(|value| value.parse().ok())
+                .or(file.task_stuck_secs)
+                .unwrap_or(600)
+                .max(120),
             web_dist: path(
                 "ROBODOG_WEB_DIST",
                 file.web_dist,
@@ -344,6 +356,8 @@ mod tests {
         let config = Config::merge(None, None, no_env);
         assert_eq!(config.port, 3100);
         assert_eq!(config.jwt_ttl_hours, 24);
+        assert_eq!(config.task_timeout_secs, 120);
+        assert_eq!(config.task_stuck_secs, 600);
         assert!(config.zentai_ws_url.is_none());
         assert!(config.service_token.is_none());
         assert!(!config.control_channel_ready());

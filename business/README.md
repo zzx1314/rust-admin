@@ -269,6 +269,11 @@ GET    /api/zentai/devices/{deviceId}/runtime     # 中台读取设备运行态�
 - **心跳看门狗**：`device_timeout_secs`（默认 90s，`ROBODOG_DEVICE_TIMEOUT_SECS`）内没有
   心跳的在线设备会被置为「离线」，清空接管态并写一条「心跳超时」告警。
   WebSocket 静默断开收不到 Close 帧，没有看门狗会一直显示「在线」。
+- **任务看门狗**：`执行中` 的任务两种情况下会被置为「异常」并记一条事件：
+  `task_timeout_secs`（默认 120s，`ROBODOG_TASK_TIMEOUT_SECS`）内没有任何进度上报；
+  或者进度数值在 `task_stuck_secs`（默认 600s，`ROBODOG_TASK_STUCK_SECS`）内没有推进
+  （客户端还在周期性上报「执行中 / 0%」，只靠「有没有上报」判不出来）。
+  另外，进度上报有状态机保护：已完成 / 异常的任务不会被后续「执行中」的上报拉回去。
 - **模拟模式标出来**：客户端没连上本体时 `bodyOnline = false`、`mode = sim`，
   列表在状态下方标「模拟模式 / 本体离线」，电量和信号都显示 `—`。
 

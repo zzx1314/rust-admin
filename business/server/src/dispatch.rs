@@ -142,6 +142,94 @@ pub async fn build_dispatch_payload(
     })
 }
 
+/// 下发前的设备就绪快照。
+#[derive(sqlx::FromRow)]
+struct DeviceGate {
+    device_code: String,
+    park_id: Option<i64>,
+    body_online: i64,
+    estop_software: Option<i64>,
+    sdk_node_available: Option<i64>,
+    ctrl_source: i64,
+    run_mode: Option<String>,
+    teleop_holder: Option<String>,
+    teleop_at: Option<String>,
+}
+
+/// 设备当前是否满足下发条件：`None` 可下发，`Some(原因)` 不可下发。
+///
+/// 网页端「开始执行」、建任务即下发、设备上线补发三条路径必须共用这套门禁：
+/// 只在一处检查时，另外两条会把任务推给本体还没起来的设备，客户端只能回一条
+/// 「未连接机器人本体」，任务停在「执行中」等看门狗收。
+pub async fn device_block_reason(
+    db: &SqlitePool,
+    device_pk: i64,
+) -> Result<Option<String>, AppError> {
+    let gate: Option<DeviceGate> = sqlx::query_as(
+        "SELECT device_id AS device_code, park_id, COALESCE(body_online, 0) AS body_online,
+                estop_software, sdk_node_available, COALESCE(ctrl_source, 0) AS ctrl_source,
+                run_mode, teleop_holder, teleop_at
+         FROM devices WHERE id = ?1",
+    )
+    .bind(device_pk)
+    .fetch_optional(db)
+    .await?;
+    let Some(gate) = gate else {
+        return Ok(Some(format!("设备 {device_pk} 不存在")));
+    };
+
+    if gate.park_id.is_none() {
+        return Ok(Some(format!(
+            "设备 {} 尚未绑定园区，无法下发任务",
+            gate.device_code
+        )));
+    }
+
+    // 对齐官方 App 的 ready 门禁：本体节点/急停/控制权任一不满足都不下发，
+    // 否则 5000 可能被受理但一直不执行，最后拖到任务看门狗判异常。
+    // 纯模拟设备没有本体，不做这层校验（前端联调用）。
+    if gate.run_mode.as_deref() != Some("sim") {
+        if gate.body_online == 0 {
+            return Ok(Some(format!(
+                "设备 {} 本体未连接（body_online=false，1315 状态超时），无法下发任务",
+                gate.device_code
+            )));
+        }
+        if gate.sdk_node_available == Some(0) {
+            return Ok(Some(format!(
+                "设备 {} 本体 SDK 节点未就绪（sdk_node=false），请等待初始化或重启本体算法节点后再下发",
+                gate.device_code
+            )));
+        }
+        if gate.estop_software == Some(1) {
+            return Ok(Some(format!(
+                "设备 {} 处于软件急停（estop.software=true），请先解除急停再下发任务",
+                gate.device_code
+            )));
+        }
+        if gate.ctrl_source == 3 {
+            return Ok(Some(format!(
+                "设备 {} 的控制权被其他遥控器/外部程序抢占，请断开外部遥控后再下发任务",
+                gate.device_code
+            )));
+        }
+    }
+
+    // 远程接管中不下发：本体停在通用（手动）模式，导航能力被判给手动控制，
+    // 每个航点的 5000 都会被回 13897 resource conflict (capability busy)。
+    if let Some(holder) = gate.teleop_holder.as_deref()
+        && !crate::handlers::teleop::teleop_expired(gate.teleop_at.as_deref())
+    {
+        return Ok(Some(format!(
+            "设备 {} 正在被 {holder} 远程接管（本体处于手动模式），\
+             请先释放接管再下发任务，否则本体回 13897 capability busy",
+            gate.device_code
+        )));
+    }
+
+    Ok(None)
+}
+
 /// 航点坐标能否下发：米制标记 + 非示意坐标系 + 全部落在图内。
 ///
 /// 智航 5000 kind=2 的 `goals[].position` 是地图坐标系下的米（协议 §2.5.1.4），

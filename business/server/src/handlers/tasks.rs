@@ -12,18 +12,6 @@ use serde_json::{Value, json};
 use sqlx::{QueryBuilder, SqlitePool};
 use tracing::{debug, info, warn};
 
-/// 任务下发前的设备健康快照：
-/// (device_id, park_id, body_online, estop_software, sdk_node_available, ctrl_source, run_mode)
-type DeviceGateRow = (
-    String,
-    Option<i64>,
-    i64,
-    Option<i64>,
-    Option<i64>,
-    i64,
-    Option<String>,
-);
-
 const TASK_SELECT: &str = "SELECT t.id, t.task_code, t.task_name, t.task_type, t.execute_mode,
     t.level, t.device_id, d.device_id AS device_code, t.park_id, p.park_name, t.zone_id,
     z.zone_name, t.route_id, r.route_code, r.route_name, t.plan_start, t.plan_end,
@@ -180,8 +168,10 @@ pub(crate) async fn create_task_core(
     let result = sqlx::query(
         "INSERT INTO tasks (task_code, task_name, task_type, execute_mode, level, device_id,
             park_id, zone_id, route_id, plan_start, plan_end, task_status, progress,
-            dispatch_policy, description, created_at, updated_at, created_by)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            dispatch_policy, description, created_at, updated_at, created_by,
+            progress_updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+            ?18, ?16)",
     )
     .bind(&task_code)
     .bind(payload.task_name.trim())
@@ -214,18 +204,33 @@ pub(crate) async fn create_task_core(
     )
     .await?;
 
-    // 如果任务已分配到设备，尝试通过 WebSocket 推送
+    // 如果任务已分配到设备，尝试通过 WebSocket 推送。
+    //
+    // 先过 ready 门禁：设备刚注册、本体还没连上时就把任务推出去，客户端只能回
+    // 「未连接机器人本体」，任务在平台上看起来就是「已下发但不动」。此时保持
+    // 待执行，等心跳确认本体就绪后由补发逻辑自动下发。
     if payload.device_id.is_some() {
         let task = fetch_task(state, id).await?;
-        match push_task_dispatch(state, &task).await? {
-            Some(device_code) => info!(
-                "task {} pushed via WebSocket to device {}",
-                task.task_code, device_code
-            ),
-            None => warn!(
-                "task {} 未下发：设备未连接 WebSocket，等设备上线补发",
+        let blocked = match task.device_id {
+            Some(device_pk) => crate::dispatch::device_block_reason(&state.db, device_pk).await?,
+            None => None,
+        };
+        if let Some(reason) = blocked {
+            warn!(
+                "task {} 暂不下发（保持待执行，设备就绪后补发）：{reason}",
                 task.task_code
-            ),
+            );
+        } else {
+            match push_task_dispatch(state, &task).await? {
+                Some(device_code) => info!(
+                    "task {} pushed via WebSocket to device {}",
+                    task.task_code, device_code
+                ),
+                None => warn!(
+                    "task {} 未下发：设备未连接 WebSocket，等设备上线补发",
+                    task.task_code
+                ),
+            }
         }
     }
 
@@ -274,21 +279,41 @@ async fn push_task_dispatch(state: &AppState, task: &Task) -> Result<Option<Stri
             task.task_code, map.map_id, map.map_dir
         );
     }
-    if !gateway::dispatch_task_to_device(&state.device_connections, &device_code, &dispatch).await {
-        return Ok(None);
-    }
 
+    // **先置执行态再下发**：客户端拒单（未连接本体 / 地图不在本体 / 定位未就绪）
+    // 往往在几毫秒内就回报。以前是发完再 UPDATE，异常会被这条 UPDATE 盖回
+    // 「执行中」，而 updated_at 又刚刷新，看门狗要再等满超时才会判异常。
     // 重新下发等于换一条本体任务：旧的 robot_task_id / stage 必须清掉，
-    // 否则下一次「执行中」会被误判成可 resume 的老任务
+    // 否则下一次「执行中」会被误判成可 resume 的老任务。
+    let previous_status = task.task_status.clone();
+    let previous_progress = task.progress;
     let timestamp = now();
     sqlx::query(
-        "UPDATE tasks SET task_status = '执行中', progress = 0, robot_task_id = NULL,
-            robot_stage = NULL, robot_updated_at = NULL, updated_at = ?1 WHERE id = ?2",
+        "UPDATE tasks SET task_status = '执行中', progress = 0, progress_updated_at = ?1,
+            robot_task_id = NULL, robot_stage = NULL, robot_updated_at = NULL, updated_at = ?1
+         WHERE id = ?2",
     )
     .bind(&timestamp)
     .bind(task.id)
     .execute(&state.db)
     .await?;
+
+    if !gateway::dispatch_task_to_device(&state.device_connections, &device_code, &dispatch).await {
+        // 没发出去：回滚成下发前的状态。带上「仍是执行中且进度为 0」的条件，
+        // 客户端如果已经回报了异常/已完成，就不要覆盖真实结果。
+        sqlx::query(
+            "UPDATE tasks SET task_status = ?1, progress = ?2, updated_at = ?3
+             WHERE id = ?4 AND task_status = '执行中' AND progress = 0",
+        )
+        .bind(&previous_status)
+        .bind(previous_progress)
+        .bind(now())
+        .bind(task.id)
+        .execute(&state.db)
+        .await?;
+        return Ok(None);
+    }
+
     sqlx::query(
         "UPDATE devices SET status = '执行任务', current_task_name = ?1, updated_at = ?2
          WHERE id = ?3",
@@ -319,70 +344,19 @@ async fn dispatch_task_or_error(state: &AppState, task: &Task) -> Result<(), App
     };
     // 任务园区必须与设备绑定的园区一致，否则会载错地图
     validate_device_park(&state.db, task.device_id, task.park_id).await?;
-    let device: Option<DeviceGateRow> = sqlx::query_as(
-        "SELECT device_id, park_id, COALESCE(body_online, 0), estop_software,
-                sdk_node_available, COALESCE(ctrl_source, 0), run_mode
-         FROM devices WHERE id = ?1",
-    )
-    .bind(device_pk)
-    .fetch_optional(&state.db)
-    .await?;
-    let Some((
-        device_code,
-        park_id,
-        body_online,
-        estop_software,
-        sdk_node_available,
-        ctrl_source,
-        run_mode,
-    )) = device
-    else {
-        return Err(AppError::NotFound(format!("设备 {device_pk} 不存在")));
-    };
-    if park_id.is_none() {
-        return Err(AppError::BadRequest(format!(
-            "设备 {device_code} 尚未绑定园区，无法下发任务"
-        )));
-    }
-    // 对齐官方 App 的 ready 门禁：本体节点/急停/控制权任一不满足都不创建任务，
-    // 否则 5000 可能被受理但一直不执行，最后拖到任务看门狗判异常。
-    // 纯模拟设备没有本体，不做这层校验（前端联调用）。
-    if run_mode.as_deref() != Some("sim") {
-        if body_online == 0 {
-            return Err(AppError::BadRequest(format!(
-                "设备 {device_code} 本体未连接（body_online=false，1315 状态超时），无法下发任务"
-            )));
-        }
-        if sdk_node_available == Some(0) {
-            return Err(AppError::BadRequest(format!(
-                "设备 {device_code} 本体 SDK 节点未就绪（sdk_node=false），请等待初始化或重启本体算法节点后再下发"
-            )));
-        }
-        if estop_software == Some(1) {
-            return Err(AppError::BadRequest(format!(
-                "设备 {device_code} 处于软件急停（estop.software=true），请先解除急停再下发任务"
-            )));
-        }
-        if ctrl_source == 3 {
-            return Err(AppError::BadRequest(format!(
-                "设备 {device_code} 的控制权被其他遥控器/外部程序抢占，请断开外部遥控后再下发任务"
-            )));
-        }
-    }
-    // 远程接管中不下发：本体停在通用（手动）模式，导航能力被判给手动控制，
-    // 每个航点的 5000 都会被回 13897 resource conflict (capability busy)。
-    let teleop: Option<(Option<String>, Option<String>)> =
-        sqlx::query_as("SELECT teleop_holder, teleop_at FROM devices WHERE id = ?1")
+    let device_code: Option<String> =
+        sqlx::query_scalar("SELECT device_id FROM devices WHERE id = ?1")
             .bind(device_pk)
             .fetch_optional(&state.db)
-            .await?;
-    if let Some((Some(holder), at)) = teleop
-        && !super::teleop::teleop_expired(at.as_deref())
-    {
-        return Err(AppError::BadRequest(format!(
-            "设备 {device_code} 正在被 {holder} 远程接管（本体处于手动模式），\
-             请先释放接管再下发任务，否则本体回 13897 capability busy"
-        )));
+            .await?
+            .flatten();
+    let Some(device_code) = device_code else {
+        return Err(AppError::NotFound(format!("设备 {device_pk} 不存在")));
+    };
+    // 本体节点 / 急停 / 控制权 / 远程接管：与补发路径共用同一套门禁
+    // （`dispatch::device_block_reason`），避免两处判据漂移。
+    if let Some(reason) = crate::dispatch::device_block_reason(&state.db, device_pk).await? {
+        return Err(AppError::BadRequest(reason));
     }
 
     match push_task_dispatch(state, task).await? {

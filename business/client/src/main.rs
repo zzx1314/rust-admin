@@ -1083,7 +1083,9 @@ async fn run_client(
 
     // 进度去重：内容没变就降到 [`PROGRESS_DEDUP_WINDOW`] 一次（服务端还会按「标题 + 描述」
     // 去重落事件）。**不能彻底停发**：服务端任务看门狗按 `tasks.updated_at` 判超时
-    // （默认 120s），超时会直接把跑着的任务翻成「异常」。
+    // （默认 120s），超时会直接把跑着的任务翻成「异常」。反过来，进度一直不动也会
+    // 被「进度停滞」判据（`task_stuck_secs`）判异常，所以卡住时上报真实原因比刷
+    // 「执行中」更有用。
     let mut last_progress: Option<(String, Instant)> = None;
 
     loop {
@@ -1207,6 +1209,13 @@ async fn run_client(
                     clear_active_task(&active, &state).await;
                     continue;
                 }
+                // 航线任务的导航任务 ID 只在 RouteRunner 里，必须从这里取：
+                // 服务端靠 `robot_task_id` 判断「暂停后能不能 resume」，缺了会被
+                // 当成从未下发的任务重跑整条航线。
+                let runner_nav_task = match &runner {
+                    Some(runner) => runner.current_nav_task().await,
+                    None => None,
+                };
                 let mut payload = TaskProgressPayload {
                     task_code: task.task_code.clone(),
                     status: "执行中".to_string(),
@@ -1214,7 +1223,7 @@ async fn run_client(
                     point_index: None,
                     message: None,
                     stage: task.stage.clone(),
-                    robot_task_id: task.nav_task_id.clone(),
+                    robot_task_id: runner_nav_task.or_else(|| task.nav_task_id.clone()),
                     total_points: None,
                 };
                 // 智航导航进度按航点折算；模拟模式按时间推演
@@ -2414,7 +2423,9 @@ async fn handle_server_message(
                     // `motion_block_reason(true)` 统一拦过，这里不再重复检查
 
                     let runner = Arc::new(RouteRunner::new(client.clone()));
-                    let total_points = plan.waypoints.len() as i64;
+                    // 闭环会补回首点：总数要取执行顺序的长度，否则事件流里会出现
+                    // 「进度 0/4（100%）」这种自相矛盾的读数
+                    let total_points = plan.execution_order().len() as i64;
                     // 只有预检真的载了这张图，首航点才用 need_locate=false 复用定位
                     //（记录绑地图 + 时刻，换图或超窗时 locate_for 会重新载图定位）
                     if pre_located {

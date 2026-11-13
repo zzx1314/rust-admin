@@ -215,6 +215,21 @@ impl FlightPlan {
         points
     }
 
+    /// 本体地图目录名（4013 `path` 的最后一段）。
+    ///
+    /// 5014 返充、4030 重定位这类接口要的都是**目录名**，不是业务地图 ID
+    /// （`ROS-MAP-3@v1.0` 在本体上并不存在）。下发前 `map_path` 已被替换成本体
+    /// 上报的绝对路径，取最后一段即可；没有路径时退回业务 ID 合成名。
+    pub fn robot_map_dir(&self) -> String {
+        let trimmed = self.map_path.trim().trim_end_matches('/');
+        let last = trimmed.rsplit('/').next().unwrap_or_default();
+        if last.is_empty() {
+            super::mapping::to_map_dir_name(&self.map_id)
+        } else {
+            last.to_string()
+        }
+    }
+
     /// 地图路径推导：优先使用显式 mapPath，否则用 `map_root/history_map/<目录名>`
     pub fn resolve_map_path(&self, map_root: &str) -> String {
         if !self.map_path.trim().is_empty() {
@@ -609,9 +624,11 @@ impl RouteRunner {
         match plan.end_task() {
             EndTask::ReturnToCharge => {
                 info!("巡检结束，返回充电点");
+                // 5014 的 `map_id` 是本体目录名，不是业务地图 ID；用业务 ID 会被
+                // 回 13898 map not found，导致「航线跑完了但没回充」。
                 if let Err(e) = self
                     .client
-                    .call(T_RETURN_TO_CHARGE, json!({ "map_id": plan.map_id }))
+                    .call(T_RETURN_TO_CHARGE, json!({ "map_id": plan.robot_map_dir() }))
                     .await
                 {
                     warn!("返回充电点失败: {e}");
@@ -727,6 +744,9 @@ impl RouteRunner {
         let data = navigation_task_payload(plan, point, need_locate);
         // 现场排障最有用的一行：把真实下发的载荷整份打出来（`RUST_LOG=...=debug`）
         debug!("5000 载荷（第 {index}/{total} 点 {}）: {data}", point.name);
+        // 先订阅再下发：任务被本体秒拒（参数非法 / 能力忙）时，终态可能在上面的
+        // `call` 返回后、订阅之前就推过来，漏掉就只能干等到超时。
+        let mut rx = self.client.subscribe();
         let reply = match self.client.call(T_TASK_CREATE, data).await {
             Ok(reply) => {
                 debug!("5001 应答（第 {index}/{total} 点 {}）: {reply}", point.name);
@@ -760,7 +780,6 @@ impl RouteRunner {
         );
 
         // 等待该任务终态
-        let mut rx = self.client.subscribe();
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs(600_u64.max(total as u64 * 120));
         loop {
