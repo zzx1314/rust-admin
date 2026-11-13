@@ -127,8 +127,11 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 ssh root@192.168.41.246 "cp -a /opt/robodog/client/robodog-device-client \
   /opt/robodog/client/robodog-device-client.bak-$STAMP"
 
-scp "$BIN" root@192.168.41.246:/opt/robodog/client/robodog-device-client
-ssh root@192.168.41.246 'chmod 755 /opt/robodog/client/robodog-device-client &&
+# 注意：直接 scp 覆盖**正在运行**的二进制会 ETXTBSY（dest open: Failure），
+# 必须先传成 .new 再 mv（mv 换目录项，运行中的进程仍持有旧 inode）
+scp "$BIN" root@192.168.41.246:/opt/robodog/client/robodog-device-client.new
+ssh root@192.168.41.246 'chmod 755 /opt/robodog/client/robodog-device-client.new &&
+  mv -f /opt/robodog/client/robodog-device-client.new /opt/robodog/client/robodog-device-client &&
   systemctl restart robodog-device-client'
 ```
 
@@ -184,7 +187,83 @@ ssh root@192.168.41.246 'cd /opt/robodog/client &&
 
 ---
 
-## 三、正式环境与设备客户端的联动检查
+## 三、`.246` 的出网路由（踩过）
+
+这台机器有两个网卡，两条默认路由，**机器人那条会赢**：
+
+```bash
+root@ubuntu-arm64:~# ip route show default
+default via 192.168.234.1 dev eth0 proto static          # ← netplan 写的，无 metric，优先
+default via 192.168.40.254 dev wlp4s0 proto dhcp metric 600
+```
+
+结果：`ip route get 39.107.55.13` 走 `eth0`（机器人网关），SYN 被吞，客户端日志停在
+「正在连接业务服务: ws://39.107.55.13:3100/ws/device」，平台侧一直「离线」，
+而且**不会报错**（TCP 连接一直挂着）。
+
+修复：给机器人网卡的默认路由加 metric，让 wifi 的 DHCP 路由（600）胜出。
+`/etc/netplan/01-eth0.yaml`：
+
+```yaml
+      routes:
+        - to: default
+          via: 192.168.234.1
+          metric: 1000          # ← 加这一行；不写时 metric=0，优先级高于 wifi
+```
+
+```bash
+chmod 600 /etc/netplan/01-eth0.yaml    # netplan 会告警权限过宽
+netplan apply
+ip route get 39.107.55.13              # 应显示 via 192.168.40.254 dev wlp4s0
+systemctl restart robodog-device-client
+```
+
+机器人网段（`192.168.234.0/24`）走的是链路路由，不受影响；本体 `192.168.234.234` 仍然直连。
+
+### 元凶：`4g-connect.service`（2026-11-13 实测）
+
+只加 netplan metric **还不够**：这台机器上厂商的 4G 兜底脚本每 30~60 秒跑一轮，
+失败后 cleanup 会执行
+
+```bash
+ip route add default via "$ETH0_GW" dev eth0      # 没有 metric → metric 0
+```
+
+于是机器人网卡又被抬成最高优先级默认路由，wifi 出网被冲掉。现象是**周期性掉线**：
+客户端心跳能刷一阵，然后整机连不上 `39.107.55.13`，看门狗（90s）把设备标「离线」。
+
+修 `/usr/local/bin/4g-connect.sh` 的 cleanup 分支：
+
+```bash
+# 原来
+ip route add default via "$ETH0_GW" dev eth0 2>/dev/null
+# 改成（机器人网卡只做兜底，让 wifi 的 600 赢）
+ip route replace default via "$ETH0_GW" dev eth0 metric 1000 2>/dev/null
+```
+
+```bash
+cp -a /usr/local/bin/4g-connect.sh{,.bak-$(date +%Y%m%d-%H%M%S)}
+systemctl restart 4g-connect.service      # 让新进程读补丁版
+ip route del default via 192.168.234.1 dev eth0   # 清掉当前这条 metric 0
+```
+
+> 注意：`systemctl restart` 时**旧进程**的 SIGTERM cleanup 还会用老代码加一次
+> metric 0 路由，所以要「先重启服务、再删那条路由」，或者删完再看一眼。
+
+排查命令（现场直接抄）：
+
+```bash
+ip route show default                     # 有没有不带 metric 的 eth0 默认路由
+ip route get 39.107.55.13                 # 走 eth0 就是错的
+journalctl -t 4g-connect --since today    # "Restored eth0 as default route"
+ip monitor route                          # 抓到路由被谁改的时刻，再对照 journal
+```
+
+`4g-connect.service` 本身还会重写 `/etc/resolv.conf`；4G 模块一直注册不上
+（`AT+COPS: 0` / `Failed to get IP ... after 30s`）时它就是在空转，确不需要 4G 兜底可以
+`systemctl disable --now 4g-connect.service`。
+
+## 四、正式环境与设备客户端的联动检查
 
 发布会话结束后，按这条链路验证一遍（不改数据，只看状态）：
 
@@ -207,7 +286,7 @@ ssh root@39.107.55.13 'sqlite3 /opt/hz/rust-admin/zentai/data/users.db \
 
 ---
 
-## 四、常见问题
+## 五、常见问题
 
 | 现象 | 原因 / 处置 |
 | --- | --- |
@@ -218,11 +297,14 @@ ssh root@39.107.55.13 'sqlite3 /opt/hz/rust-admin/zentai/data/users.db \
 | 客户端起来了但平台看不到 | 检查 `[server] url` 是否 `ws://39.107.55.13:3100`；`journalctl` 里找「设备注册成功」 |
 | 任务下发后立刻「异常」 | 设备未绑园区 / 本体离线（`body_online=false`）/ 定位未就绪，原因在任务事件里 |
 | 想在没有真机时验证全链路 | 本机 `--robot mock`（见 `business/client/README.md`），能看到真实 5000/5001/5009 报文 |
+| 现场 journald 里看不到报文了 | 新版客户端把周期推送（`1315/1317/1325/1327/5009`）降到 TRACE，只保留应答类报文；看全量加 `RUST_LOG=robodog_device_client=debug,robodog_device_client::zhpro::client=trace`，或 `ROBODOG_FRAME_DUMP=/var/log/robodog-frames.jsonl` |
 | 改了前端没生效（正式） | 正式环境前端由 Rust 进程托管，必须 `push.sh` 重新打包；`--skip-web` 不会更新前端 |
+| 客户端「正在连接业务服务」之后没有任何日志、平台一直显示离线 | **`.246` 双默认路由**：机器人网卡 `eth0`（netplan，`via 192.168.234.1`，无 metric）抢了 wifi 的 DHCP 默认路由，出网流量被丢进机器人网关。排查 `ip route get 39.107.55.13`，修复见下节 |
+| `scp` 报 `dest open ... Failure` | 目标二进制**正在运行**（ETXTBSY），传成 `.new` 再 `mv` |
 
 ---
 
-## 五、发布检查清单
+## 六、发布检查清单
 
 - [ ] `cargo test` / `cargo clippy --all-targets -- -D warnings`（backend、business/server、business/client）
 - [ ] `cd frontend && pnpm lint`、`cd business/web && pnpm typecheck`
