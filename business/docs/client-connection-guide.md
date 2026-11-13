@@ -484,6 +484,6 @@ WantedBy=multi-user.target
 | `bulkdata` 绑定失败 | 首帧是否 `1202`、`session_id`/`token` 是否最新、是否超过 `bind_timeout_ms` |
 | 收到 `1299` | 看 `data.message`：path 不支持 / 缺 token / token 校验失败 / 会话失效 |
 | 控制指令无响应 | 是否持有 RoamerX 控制权（`1204`→`1205` `status_code=0`） |
-| 状态不刷新 | `1207` 里 `sdk_node.available` 是否为 true（`1525` 3s 超时会被置 false） |
+| 状态不刷新 | `1207` 里 `sdk_node.available` 是否为 true（`1525` 3s 超时会被置 false）；一直 false 时按 [`../../deploy/robodog-body.md`](../../deploy/robodog-body.md) §4 查本体侧（`.234 robot_sdk_node` ↔ `.1 dog_task`） |
 | 任务下发后无进展 | 看 `5009` 的 `task.stage` / `lifecycle`，`5001` 只代表受理 |
 | 地图拉不到 | 文件服务 `http://host:12000` 是否可达、根路径是否为 `/ota/alg_data`（M1）或 `/userdata/alg_data`（L2） |

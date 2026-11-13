@@ -102,6 +102,11 @@ cd ../backend && APP_SERVER__STATIC_DIR=../frontend/dist ./run.sh
 注意事项与目标机约束（CentOS 7 / glibc 2.17 / systemd 219、musl 静态构建、
 systemd unit 写法、安全组端口）见 `deploy/external-hz/README.md`。
 
+现场机器人本体（背包 `.246` → Orin NX `192.168.234.234` + RK3588 `192.168.234.1`）的
+服务树、日志路径、`sdk_node=false` / `13897 capability busy` / `ctrl_source=3` 的排查
+顺序与 2026-11-13 事故复盘见 `deploy/robodog-body.md`。部署与现场发布流程见
+`deploy/README.md`。
+
 ## Important Notes
 
 - **Backend**: SQLite database at `backend/data/users.db`; session storage is
