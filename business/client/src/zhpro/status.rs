@@ -237,9 +237,17 @@ pub struct GateResult {
 
 impl SeqGate {
     pub fn accept(&mut self, frame: &StatusFrame) -> GateResult {
-        let boot_changed = frame.boot_id != self.boot_id;
-        if boot_changed {
-            // 算法进程重启：新 boot_id 下的 seq 重新计数，游标必须重置
+        // 只有「见过一个非空 boot_id，且这次换成另一个非空 boot_id」才算算法进程重启。
+        //
+        // 以前写成 `frame.boot_id != self.boot_id`，初值是空串 → **第一帧必然被判成
+        // boot 变化**。一次性等待（等某个航点终态）拿这个结论当「算法节点重启、本体任务
+        // 已失效」，于是任务刚受理 300ms 就被自己判死：
+        //   `航点 X 执行失败: 算法节点重启（boot_id 变化），本体任务已失效`
+        let boot_changed = !self.boot_id.is_empty()
+            && !frame.boot_id.is_empty()
+            && frame.boot_id != self.boot_id;
+        if !frame.boot_id.is_empty() && frame.boot_id != self.boot_id {
+            // 算法进程重启（或首次拿到 boot_id）：新 boot_id 下 seq 重新计数，游标重置
             self.boot_id.clone_from(&frame.boot_id);
             self.last_seq = -1;
         }
@@ -373,6 +381,34 @@ mod tests {
         assert!(f.current.is_none());
     }
 
+    /// 第一帧不能算 boot 变化：否则「等航点终态」会立刻报
+    /// 「算法节点重启（boot_id 变化），本体任务已失效」，任务永远起不来。
+    #[test]
+    fn first_frame_is_not_boot_change() {
+        let mut gate = SeqGate::default();
+        let first = gate.accept(&frame(5));
+        assert!(first.accepted);
+        assert!(!first.boot_changed, "第一帧只是拿到 boot_id，不是重启");
+
+        // 同一 boot_id 内继续
+        let same = gate.accept(&frame(7));
+        assert!(same.accepted);
+        assert!(!same.boot_changed);
+
+        // 真的换了 boot_id 才算重启
+        let mut other = frame(1);
+        other.boot_id = "boot-b".to_string();
+        let changed = gate.accept(&other);
+        assert!(changed.accepted);
+        assert!(changed.boot_changed);
+
+        // 没带 boot_id 的帧不能误判成重启（固件个别帧可能缺字段）
+        let mut blank = frame(2);
+        blank.boot_id = String::new();
+        let blank_result = gate.accept(&blank);
+        assert!(!blank_result.boot_changed, "缺 boot_id 不等于重启");
+    }
+
     #[test]
     fn drops_older_frames_and_resets_on_boot_change() {
         let mut monitor = TaskMonitor::default();
@@ -415,7 +451,8 @@ mod tests {
         let mut gate = SeqGate::default();
         let first = frame(0);
         let r = gate.accept(&first);
-        assert!(r.accepted && r.boot_changed, "首个帧必须被采用");
+        assert!(r.accepted, "首个帧必须被采用");
+        assert!(!r.boot_changed, "首个帧只是拿到 boot_id，不算重启");
         assert!(!gate.accept(&frame(0)).accepted, "seq 相同视为重复帧");
         assert!(!gate.accept(&frame(0)).boot_changed);
 
@@ -453,6 +490,8 @@ mod tests {
         }))
         .unwrap();
         assert!(monitor.take_terminal(&task));
+        // 先让 monitor 见过 boot-a，再换 boot-b 才算「算法进程重启」
+        assert!(monitor.accept(&frame(1)).is_some());
 
         let mut restarted = frame(1);
         restarted.boot_id = "boot-b".to_string();
