@@ -415,6 +415,8 @@ pub fn print_help() {
   --robot <HOST>         智航本体地址，如 192.168.234.234 或 ws://ip:10010
                          (默认: {DEFAULT_ROBOT_HOST})；填 sim/none/off 关闭本体连接，
                          退化为纯模拟模式：只回传任务进度，不驱动真实机器人
+                         填 mock = 进程内起一个假本体（联调用，能看到真实的
+                         1201/1315/5009/5000 报文，详见 README）
   --map-root <PATH>      地图数据根目录 (默认: {DEFAULT_MAP_ROOT})
   --model <型号>         设备型号：本体 1201 `type` 为空时用它（留空则不报）
   --heartbeat <秒>       心跳间隔 (默认: {DEFAULT_HEARTBEAT_SECS})

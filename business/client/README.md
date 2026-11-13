@@ -60,6 +60,10 @@ cargo run --
 # 1) 纯模拟模式（不接本体，只跑业务协议）
 cargo run -- --robot sim
 
+# 1.5) 假本体（离线联调）：进程内起一个智航 Pro 网关模拟器，
+#      任务能真正跑完，能看到发给本体的真实 5000/5014 报文
+cargo run -- --device-id RD-MOCK-01 --robot mock
+
 # 2) 接其它本体：驱动智航 Pro
 cargo run -- --device-id RD-001 --robot 192.168.10.21
 
@@ -125,6 +129,72 @@ journalctl -u robodog-device-client -f
 > 首次注册会在业务库自动建档为「待绑定」，还需要在控制台设备管理里把该设备绑定到园区，
 > 否则心跳/任务不推进、建图也不会回传中台。
 
+## 离线联调：假本体（`--robot mock`）
+
+`--robot sim` 只回心跳，拿到 `client` 那一步就 return 了，**5000 之类的报文一条都不会生成**。
+`--robot mock` 补上这段：客户端在自己进程里起一个本地 WS 服务（默认随机端口），实现真机
+必经的那几条链路，然后按真机的方式连它——所以日志里的 `5000 载荷`、`5001 应答`
+和接真机时逐字段一致，唯一区别是对端是模拟器，不需要现场那台狗。
+
+```bash
+# 终端 1：业务服务（配好 server.toml 的 [zentai]）
+cd business/server && cargo run
+
+# 终端 2：客户端 + 假本体，把报文全打出来
+cd business/client
+RUST_LOG=robodog_device_client=debug \
+  cargo run -- --server ws://127.0.0.1:3100 --device-id RD-MOCK-01 --robot mock
+```
+
+首次注册仍是「待绑定」，要在控制台把 `RD-MOCK-01` 绑到园区才能下发任务。
+
+### 模拟器实现了什么
+
+| 链路 | 行为 |
+| --- | --- |
+| `1201` / `1202` / `1203` | control + bulkdata 双通道建链，`client_id` / `session_id` / bind token 全走真协议 |
+| `1300` / `1301` | 网关心跳每秒应答 |
+| `1315` | 1Hz 本体状态（电量 / 温度 / 里程 / `mode` / `ctrl_source=1` / `motion_status=stand` / 急停未触发） |
+| `1207` | `sdk_node` / `slam` / `planner` 全部 available（否则客户端会以「SDK 节点未就绪」拒任务） |
+| `1204` → `1205` | 广播 `status_code=0, client_id=本端`，客户端据此认为已拿到 RoamerX 控制权 |
+| `4012` → `4013` | 上报 `map_path_list`（`map_route_exist` / `charge_point_exist` 可配） |
+| `4030` → `4031` | 载图定位，随后 `5009` 的 `loc_state.status` 恒为 100 |
+| `4044` → `4045` | 避障等级回显 `effective_level` |
+| `5000 kind=2` → `5001` | 返回 `task_id`，`5009` 先 `running` 再 `success`，每个航点约 1.5s 走完 |
+| `5000 kind=1` → `5002` → `4001` | 建图：取消后补一条保存结果（带 `map_path`） |
+| `5000 kind=3/5`、`5014` → `5015` | 回充 / 出桩 / 返航充电，同样 1.5s 后 `success` |
+| `5004` / `5006` / `5002` | 暂停 / 恢复 / 取消，生命周期同步进 `5009` |
+
+一条巡检任务跑完，终端里能看到这样的序列（`-` 是客户端发的，`+` 是假本体回的）：
+
+```text
++ 假本体已监听 ws://127.0.0.1:43995/control（联调模式，非真机）
+- 连接智航 control 通道 / bulkdata 通道
++ 假本体: ← 4012 null            → 机器人地图就绪: ROS-MAP-… 目录=2026_11_10_16_15_06
++ 假本体: ← 4044 {"level":40}    → 导航避障等级已设置: 40
++ 假本体: ← 5000 {"kind":2,…}    → 5001 应答: {"code":0,"msg":"ok","task_id":"mock-1"}
++ 假本体: ← 5014 {"map_id":…}     → 巡检结束，返回充电点
+```
+
+### 可调项（环境变量）
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `ROBODOG_MOCK_PORT` | 0（随机空闲端口） | 固定端口，便于用别的工具连它看报文 |
+| `ROBODOG_MOCK_STEP_MS` | 1500 | 单个航点「走完」耗时 |
+| `ROBODOG_MOCK_DIRS` | `2026_11_10_16_15_06` | `4013` 里「本体现有地图目录」，逗号分隔 |
+| `ROBODOG_MOCK_NO_ROUTE` | 空 | 设 1 时 `map_route_exist=false`，强制客户端回退 2D 栅格 |
+
+不用现场默认地图时，用业务库里任一路线的 `map_versions.source_ref` 末段来填 `ROBODOG_MOCK_DIRS`，
+否则客户端会因为「地图目录对不上」拒绝下发（那是真实行为，不是模拟器的 bug）。
+
+### 边界
+
+- **建图回传**仍然走 HTTP 文件服务（`--robot-file-base`），假本体不提供，所以联调建图任务时
+  要么加 `--no-upload-map`，要么接受任务终态记「异常」（地图已保存但未入库）。
+- 假本体只模拟协议时序，不做物理仿真：没有避障、坡道、定位跳变，因此**不能**当验收依据；
+  真机联调前请至少跑一遍现场参数（速度、航点、回充点）。
+
 ## 配置文件
 
 优先级：**命令行 > 环境变量 > `client.toml` > 内置默认值**。
@@ -149,7 +219,7 @@ journalctl -u robodog-device-client -f
 | `--signal` | `4` | 信号强度 |
 | `--position` | `0.0, 0.0` | 初始地图坐标 |
 | `--firmware` | `Hermes_M_v0.3.2` | 固件版本 |
-| `--robot` | `192.168.234.234` | **智航 Pro 本体地址**；填 `sim`/`none`/`off` = 纯模拟模式 |
+| `--robot` | `192.168.234.234` | **智航 Pro 本体地址**；填 `sim`/`none`/`off` = 纯模拟模式（不生成任何本体报文），填 `mock` = 进程内假本体（离线联调，见上文） |
 | `--map-root` | `/ota/alg_data/map` | 本体地图根目录 |
 | `--model` | 空 | 设备型号：本体 `1201.type` 为空时用它（注册/心跳上报，中台台账展示） |
 | `--map-only` | false | 只执行一次建图后退出 |

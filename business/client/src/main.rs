@@ -32,6 +32,8 @@
 
 mod dispatch;
 mod mapupload;
+/// 联调用「假本体」：`--robot mock` 时在进程内起一个智航 Pro 网关模拟器
+mod mock_body;
 mod video;
 mod zhpro;
 
@@ -603,12 +605,27 @@ async fn connect_body(
     const BODY_ATTEMPTS: u32 = 12;
     const BODY_RETRY_SECS: u64 = 5;
 
-    let Some(host) = config.robot.as_deref() else {
+    let Some(raw_host) = config.robot.as_deref() else {
         warn!(
             "未接入本体（robot.host 为空或为 sim），以模拟模式运行（任务只回传进度，不驱动本体）"
         );
         return Ok(None);
     };
+
+    // 联调用假本体：进程内起一个 mock 网关，再把地址换成它。
+    // 后面走的仍是真机的双通道协议，所以 5000/5001/5009 全部是真实报文。
+    let host = if mock_body::is_mock_alias(raw_host) {
+        match mock_body::start_from_env().await {
+            Ok(addr) => {
+                info!("已启动模拟本体（mock）：{addr}（联调模式，非真机）");
+                addr
+            }
+            Err(e) => return Err(format!("启动模拟本体失败: {e}").into()),
+        }
+    } else {
+        raw_host.to_string()
+    };
+    let host = host.as_str();
 
     for attempt in 1..=BODY_ATTEMPTS {
         match ZhProClient::connect(host).await {
@@ -1979,6 +1996,10 @@ async fn handle_server_message(
             let task_type = msg.payload["taskType"].as_str().unwrap_or("巡检");
             let mode = TaskMode::parse(task_type);
             info!("收到任务: [{task_code}] {task_name} 类型={task_type} 模式={mode:?}");
+            // 排障最有用的一行：把业务侧下发的整份任务载荷原样打出来
+            // （`RUST_LOG=robodog_device_client=debug` 才可见，模拟模式下同样会打，
+            //   用来核对 map / routeData.points 是否与平台一致）
+            debug!("task_dispatch 载荷: {}", msg.payload);
 
             *active.lock().await = Some(ActiveTask {
                 task_code: task_code.clone(),
