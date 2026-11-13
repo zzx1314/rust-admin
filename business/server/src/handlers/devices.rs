@@ -629,6 +629,33 @@ pub async fn locate_device(
     Ok(ApiResponse::ok(result))
 }
 
+/// 设备事件流（最近 N 条）。
+///
+/// 客户端把「指令被本地门禁拒绝」这类事写成 `event_type=error` 的事件，而
+/// `POST /devices/{id}/action` 仍然返回 200 + `wsDelivered=true`（命令确实送进了
+/// 设备连接）。没有这个接口，控制台只能看到「点了没反应」，只能翻日志才知道原因。
+pub async fn list_device_events(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path(id): Path<i64>,
+) -> Result<Json<ApiResponse<Vec<crate::models::TaskEvent>>>, AppError> {
+    let device = fetch_device(&state, id).await?;
+    auth::ensure_device_access(&state, &claims, &device.device_id).await?;
+    let events = sqlx::query_as::<_, crate::models::TaskEvent>(
+        "SELECT e.id, e.event_type, e.title, e.description, d.device_id AS device_code,
+            t.task_code, e.created_at
+         FROM task_events e
+         LEFT JOIN devices d ON d.id = e.device_id
+         LEFT JOIN tasks t ON t.id = e.task_id
+         WHERE e.device_id = ?1
+         ORDER BY e.created_at DESC, e.id DESC LIMIT 30",
+    )
+    .bind(device.id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(ApiResponse::ok(events))
+}
+
 /// 指令下发的唯一实现。
 /// 网页端（`send_command`）与中台内部接口（`handlers::service`）都走这里，
 /// 保证白名单、园区校验、状态流转、事件留痕、WS 下发只有一套语义。

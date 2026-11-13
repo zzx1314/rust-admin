@@ -1,0 +1,7 @@
+[Unit]
+Description=RoboDog /dev/shm guardian (zenoh shm pool leak)
+After=robot-launch.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/robodog-shm-guard.sh

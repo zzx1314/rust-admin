@@ -6,8 +6,10 @@
 //! 关键设计：
 //! - 智航 Pro 的巡检（`kind=4`）暂不对外开放，因此巡检引擎自己拆成「导航 + 作业」：
 //!   导航任务由本体执行（依次到达 goals），到点作业由客户端执行（等待 / 拍照）。
-//! - 每个航点一条导航任务，是因为 action 取值闭集只有 {0 等待, 1 拍照}，业务侧的
-//!   红外测温、AI 识别等动作必须由客户端侧完成。
+//! - **一段连续航点只下发一条导航任务**（`5000 kind=2` 的 `params.goals` 是有序数组）：
+//!   本体同一时刻只允许一个导航任务，逐点下发时上一个点还没结束就会把下一个点拒成
+//!   `13897 capability busy`（现场：第 1 个点建任务成功，后面每点全 13897）。
+//!   分段规则见 [`plan_segments`]：只在需要停点作业（停留/拍照/动作）的航点处断开。
 //! - 暂停 = 5004 暂停当前导航任务；恢复 = 5006；取消 = 5002 + 停止剩余航点。
 //! - 结束后按 `endTask` 走返航到起点 / 返回充电点（5014）/ 原地待命。
 
@@ -16,7 +18,6 @@ use super::protocol::*;
 use super::status::TaskSnapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -107,6 +108,40 @@ impl Waypoint {
     pub fn skippable(&self) -> bool {
         !self.must && !self.on_fail.contains("终止")
     }
+
+    /// 这个点是否需要**停下来做作业**（停留 / 拍照 / 其它动作）。
+    ///
+    /// 只有这种点才必须独占一条导航任务的尾巴：本体跑到目标点即结束该任务，
+    /// 客户端做完作业再发下一段。纯导航点全部并进同一条任务（见 [`plan_segments`]）。
+    pub fn has_on_point_work(&self) -> bool {
+        self.dwell > 0 || self.wants_photo() || !self.actions.is_empty()
+    }
+}
+
+/// 把执行顺序切成若干「导航任务段」，一段对应一条 `5000 kind=2`。
+///
+/// 为什么要分段：本体同一时刻**只允许一个导航任务**，第二个 `5000` 会被回
+/// `13897 resource conflict (capability busy)`。逐点下发（每点一条任务、点间不释放能力）
+/// 会让第 2 个点起全部失败——现场 5 点航线的后 4 点就是这样全撞 13897 的。
+///
+/// 分段规则：
+/// - 段尾是最后一个「需要停点作业」的航点（`dwell>0` / 拍照 / 其它动作）；
+/// - 连续纯导航航点合并成同一段，`params.goals` 按顺序一次发给本体；
+/// - 常见纯巡检航线（5 点、都不拍照）→ **1 段 = 1 个任务**，与官方 App 的下发方式一致。
+pub(crate) fn plan_segments(points: &[Waypoint]) -> Vec<std::ops::Range<usize>> {
+    let mut segments = Vec::new();
+    let mut start = 0_usize;
+    for (index, point) in points.iter().enumerate() {
+        let last = index + 1 == points.len();
+        if point.has_on_point_work() || last {
+            segments.push(start..index + 1);
+            start = index + 1;
+        }
+    }
+    if start < points.len() {
+        segments.push(start..points.len());
+    }
+    segments
 }
 /// 任务结束后的去向
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -322,6 +357,12 @@ pub const CODE_TASK_NOT_FOUND: &str = "13896";
 pub const BUSY_RETRIES: u32 = 6;
 pub const BUSY_BACKOFF: Duration = Duration::from_secs(5);
 
+/// 建任务前 / 5002 取消后，等本体 `5009 robot.task_state` 回到 `idle` 的最长时间。
+///
+/// 本体同一时刻只允许一个导航任务，t 从"终态"到"能力真的释放"有几百毫秒延迟，
+/// 不等就会拿到 13897。
+pub const IDLE_WAIT: Duration = Duration::from_secs(15);
+
 /// 5000 `params.speed_limit` 缺省线速度（航线没配速度时用）
 const DEFAULT_SPEED_LIMIT: f64 = 1.2;
 
@@ -359,9 +400,12 @@ pub fn is_locate_error(error: &str) -> bool {
     .any(|needle| error.contains(needle))
 }
 
-/// 单点导航的 5000 `kind=2` 载荷。
+/// 一段导航任务的 5000 `kind=2` 载荷。
 ///
-/// 字段名与协议 §2.5.1.4「导航任务」严格对齐；下面几个取值都是踩过坑的：
+/// `points` 是该段全部航点（协议 §2.5.1.4：`params.goals` 是**有序目标点数组**，
+/// 至少一个；本体按数组顺序执行，到点发 `navigation.goal_arrived`）。
+///
+/// 字段名与协议严格对齐；下面几个取值都是踩过坑的：
 ///
 /// - `speed_limit.vz` 是**角速度上限**，填 0 等于「不允许转向」，需要拐弯的航点会被规划器
 ///   判为「无有效绕障轨迹，搜索失败，等待中」；文档示例是 1.5。
@@ -370,20 +414,32 @@ pub fn is_locate_error(error: &str) -> bool {
 /// - `goal_type` 必须与 `map_type` 一致（1 = 2D 栅格 / 3 = 路网）。
 pub(crate) fn navigation_task_payload(
     plan: &FlightPlan,
-    point: &Waypoint,
+    points: &[Waypoint],
     need_locate: bool,
 ) -> Value {
     // 导航协议只支持 1（2D 栅格）和 3（Route 路网）；0 是 SDK 的
     // kGrid，2 是 3D 预留（当前固件不支持）。业务载荷偶尔会透传 0，
     // 这里统一归一化，避免把非法值发给本体。
     let map_type = if plan.map_type == 3 { 3 } else { 1 };
+    let goals: Vec<Pose> = points.iter().map(Waypoint::pose).collect();
+    let name = match points {
+        [] => plan.task_name.clone(),
+        [only] => format!("{} · 前往 {}", plan.task_name, only.name),
+        [first, .., last] => format!(
+            "{} · {} 个航点（{} → {}）",
+            plan.task_name,
+            points.len(),
+            first.name,
+            last.name
+        ),
+    };
     let mut params = json!({
         "map_path": plan.resolve_map_path(super::mapping::DEFAULT_MAP_ROOT),
-        // 同一条航线内复用已加载定位，避免每点重载地图
+        // 同一条航线内复用已加载定位，避免每段重载地图
         "need_locate": need_locate,
         "map_type": map_type,
         "goal_type": map_type,
-        "goals": [ point.pose() ],
+        "goals": goals,
         "speed_limit": { "vx": speed_vx(plan), "vy": 0.0, "vz": YAW_LIMIT },
         "goal_tolerance": {
             "x": plan.goal_tolerance,
@@ -397,7 +453,7 @@ pub(crate) fn navigation_task_payload(
     }
     json!({
         "kind": TaskKind::Navigation.code(),
-        "name": format!("{} · 前往 {}", plan.task_name, point.name),
+        "name": name,
         "schedule": 0,
         "execute_at": now_ms().to_string(),
         "priority": 0,
@@ -421,8 +477,6 @@ pub struct RouteRunner {
     plan: Mutex<Option<FlightPlan>>,
     /// 当前正在执行的智航导航任务 ID
     nav_task_id: Mutex<Option<String>>,
-    /// 待执行的航点队列
-    queue: Mutex<VecDeque<Waypoint>>,
     /// 取消标记
     cancelled: AtomicBool,
     /// 暂停标记（客户端侧作业暂停）
@@ -440,7 +494,6 @@ impl RouteRunner {
             client,
             plan: Mutex::new(None),
             nav_task_id: Mutex::new(None),
-            queue: Mutex::new(VecDeque::new()),
             cancelled: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             pre_located: Mutex::new(None),
@@ -482,7 +535,6 @@ impl RouteRunner {
         *self.total.lock().await = order.len();
         *self.completed.lock().await = 0;
         *self.skipped.lock().await = 0;
-        *self.queue.lock().await = order.into();
         *self.plan.lock().await = Some(plan);
         self.cancelled.store(false, Ordering::SeqCst);
         self.paused.store(false, Ordering::SeqCst);
@@ -527,7 +579,6 @@ impl RouteRunner {
                     }
                     *self.nav_task_id.lock().await = None;
                 }
-                self.queue.lock().await.clear();
                 Ok(())
             }
             Control::Pause => {
@@ -560,6 +611,13 @@ impl RouteRunner {
             .clone()
             .ok_or_else(|| "未准备执行计划".to_string())?;
         let total = *self.total.lock().await;
+        let points = plan.execution_order();
+        let segments = plan_segments(&points);
+        info!(
+            "航线执行计划: {} 个航点 → {} 段导航任务（本体同一时刻只允许一个导航任务）",
+            points.len(),
+            segments.len()
+        );
 
         // 0) 取 RoamerX 控制权 + 切导航模式：
         //    - 4044/5000 都在 4000~5999 非白名单区间，没控制权网关直接不转发；
@@ -571,46 +629,70 @@ impl RouteRunner {
         // 1) 避障等级：任务启动后必须重设，导航每次回到 STANDBY 会恢复为 40
         self.apply_avoid_level(plan.avoid_level).await;
 
-        // 2) 逐点执行
-        let mut index = 0_usize;
-        loop {
+        // 2) 按段执行：一段 = 一条 5000，段内多个 goals
+        let mut offset = 0_usize;
+        for (seg_index, range) in segments.iter().enumerate() {
             if self.is_cancelled() {
                 return Ok(self.outcome(false, "任务已取消".to_string(), total).await);
             }
-            let next = self.queue.lock().await.pop_front();
-            let Some(point) = next else { break };
-            index += 1;
-
-            // 暂停期间阻塞
             self.wait_while_paused().await;
             if self.is_cancelled() {
                 return Ok(self.outcome(false, "任务已取消".to_string(), total).await);
             }
 
+            let seg_points = &points[range.clone()];
+            let len = seg_points.len();
+            // 只有首段可能重新载图定位；后续段（含「返回起点」）一律复用已加载的定位
+            let locate = if seg_index == 0 {
+                self.locate_for(&plan, true).await
+            } else {
+                Locate::Reuse
+            };
             info!(
-                "执行航点 {index}/{total}: {} ({:.2}, {:.2})",
-                point.name, point.x, point.y
+                "执行航段 {}/{}: 第 {}-{} 点（{} 个航点，need_locate={}）",
+                seg_index + 1,
+                segments.len(),
+                range.start + 1,
+                range.end,
+                len,
+                locate.need_locate()
             );
-            // 只有首点可能重新载图定位；后续点（含「返回起点」）一律复用已加载的定位
-            let locate = self.locate_for(&plan, index == 1).await;
-            match self.goto_point(&plan, &point, index, total, locate).await {
+            match self
+                .run_segment(&plan, seg_points, locate, offset, total)
+                .await
+            {
                 Ok(()) => {
-                    self.perform_actions(&point).await;
-                    *self.completed.lock().await += 1;
+                    // 段尾那个点如果有停留/拍照，才在这里做作业
+                    if let Some(last) = seg_points.last() {
+                        self.perform_actions(last).await;
+                    }
+                    *self.completed.lock().await = offset + len;
+                    offset += len;
                 }
                 Err(e) => {
                     if self.is_cancelled() {
                         return Ok(self.outcome(false, "任务已取消".to_string(), total).await);
                     }
-                    // 定位/地图类错误不按航点跳过：后面每个点都会同样秒失败，
-                    // 跳过只会把航线静默跑成 0/N。直接中止并回传真实原因。
-                    if point.skippable() && !is_locate_error(&e) {
-                        warn!("航点 {} 失败，跳过: {e}", point.name);
-                        *self.skipped.lock().await += 1;
+                    // 段失败：先把本体上那条任务真正收尾（5002 + 等 idle），
+                    // 否则下一段的 5000 会继续被回 13897。
+                    self.abort_task().await;
+                    let failed = seg_points.last();
+                    let failed_name = failed.map(|p| p.name.clone()).unwrap_or_default();
+                    // 定位/地图类错误不可跳过：后面每段都会秒失败，
+                    // 跳过只会把航线静默跑成 0/N。
+                    if failed.map(Waypoint::skippable).unwrap_or(false) && !is_locate_error(&e) {
+                        warn!(
+                            "航段 第 {}-{} 点 失败，跳过（段尾 {}）: {e}",
+                            range.start + 1,
+                            range.end,
+                            failed_name
+                        );
+                        *self.skipped.lock().await += len;
+                        offset += len;
                         continue;
                     }
                     return Ok(self
-                        .outcome(false, format!("航点 {} 执行失败: {e}", point.name), total)
+                        .outcome(false, format!("航点 {failed_name} 执行失败: {e}"), total)
                         .await);
                 }
             }
@@ -638,12 +720,18 @@ impl RouteRunner {
                 }
             }
             EndTask::ReturnToStart => {
-                info!("巡检结束，返回起点");
-                // 复用定位：此刻地图肯定还加载在本体上，不需要再载一次
-                if let Some(first) = plan.waypoints.first()
-                    && let Err(e) = self.goto_point(&plan, first, 0, total, Locate::Reuse).await
+                // 闭环模式 `execution_order()` 已经把首点补在末尾，不再额外跑一次
+                if plan.loop_mode != "闭环"
+                    && let Some(first) = points.first()
                 {
-                    warn!("返回起点失败: {e}");
+                    info!("巡检结束，返回起点");
+                    // 复用定位：此刻地图肯定还加载在本体上，不需要再载一次
+                    let tail = std::slice::from_ref(first);
+                    if let Err(e) = self.run_segment(&plan, tail, Locate::Reuse, offset, total).await
+                    {
+                        warn!("返回起点失败: {e}");
+                        self.abort_task().await;
+                    }
                 }
             }
             EndTask::None => {
@@ -671,42 +759,52 @@ impl RouteRunner {
         }
     }
 
-    /// 下发单点导航任务并等待 5009 进入终态（带重试）。
+    /// 下发一段导航任务（`5000 kind=2` + 该段多个 goals）并跟到终态。
     ///
-    /// 13897（本体能力忙）**不消耗航点的重试次数**：它的成因是本体上还有任务没结束，
-    /// 退避等待后重试才有意义；直接跳过会把整条航线静默跑成「0/N」。
-    async fn goto_point(
+    /// 段内只申请一次本体导航能力，所以不会再出现「上一个点还没结束就被拒」的 13897。
+    /// 失败时统一走 [`Self::abort_task`]（5002 + 等 idle）再决定重试 / 上报，
+    /// 避免本体上留着任务把下一段也挡住。
+    async fn run_segment(
         &self,
         plan: &FlightPlan,
-        point: &Waypoint,
-        index: usize,
-        total: usize,
+        points: &[Waypoint],
         locate: Locate,
+        offset: usize,
+        total: usize,
     ) -> Result<(), String> {
-        let retries = point.retry_limit();
+        let need_locate = locate.need_locate();
+        let map_path = plan.resolve_map_path(super::mapping::DEFAULT_MAP_ROOT);
+        let retries = points.iter().map(Waypoint::retry_limit).max().unwrap_or(0);
         let mut attempt = 0_u32;
         let mut busy_waits = 0_u32;
-        let mut locate = locate;
         loop {
-            let error = match self.navigate_once(plan, point, index, total, locate).await {
+            // 建任务前先确认本体没有别的任务占着能力：残留任务 / 上一段刚结束都算
+            self.wait_body_idle(IDLE_WAIT).await;
+            let data = navigation_task_payload(plan, points, need_locate);
+            // 现场排障最有用的一行：把真实下发的载荷整份打出来（`RUST_LOG=...=debug`）
+            debug!(
+                "5000 载荷（第 {}-{} 点，{} 个航点，need_locate={need_locate}）: {data}",
+                offset + 1,
+                offset + points.len(),
+                points.len()
+            );
+
+            let error = match self
+                .create_segment_task(&data, points.len(), offset, total)
+                .await
+            {
                 Ok(()) => return Ok(()),
                 Err(e) => e,
             };
             if self.is_cancelled() {
                 return Err("任务已取消".to_string());
             }
-            // 本点带的是「复用定位」但本体说定位/地图不对（中途换图、算法节点重启、
-            // 定位丢失）：先升回「载图定位」重来一次，这是唯一能自救的机会。
-            // 只有一次：升上来之后再失败就走下面的正常重试/终止。
-            if is_locate_error(&error) && locate == Locate::Reuse {
-                warn!(
-                    "航点 {} 复用定位失败（{error}），改为载图定位后重试",
-                    point.name
-                );
-                locate = Locate::Reload;
-                continue;
-            }
+
+            // 失败：先把本体上那条任务收尾，让导航能力回到 idle
+            self.abort_task().await;
+
             if is_capability_busy(&error) {
+                // 13897：本体上还有别的任务占着能力，退避等待后重试，不消耗航段重试次数
                 busy_waits += 1;
                 if busy_waits > BUSY_RETRIES {
                     return Err(format!(
@@ -715,59 +813,50 @@ impl RouteRunner {
                     ));
                 }
                 warn!(
-                    "航点 {} 本体能力忙（13897），{}s 后重试 {busy_waits}/{BUSY_RETRIES}",
-                    point.name,
+                    "本体能力忙（13897），{}s 后重试 {busy_waits}/{BUSY_RETRIES}",
                     BUSY_BACKOFF.as_secs()
                 );
                 tokio::time::sleep(BUSY_BACKOFF).await;
                 continue;
             }
-            if attempt >= retries {
-                return Err(error);
+            // 定位/地图类错误重试没有意义（每次都会秒失败）
+            if attempt < retries && !is_locate_error(&error) {
+                attempt += 1;
+                warn!(
+                    "航段 第 {}-{} 点 第 {attempt} 次重试（共 {retries} 次）: {error}",
+                    offset + 1,
+                    offset + points.len()
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
             }
-            attempt += 1;
-            warn!(
-                "航点 {} 第 {attempt} 次重试（共 {retries} 次）: {error}",
-                point.name
-            );
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            return Err(format!(
+                "{error}（第 {}/{total} 点起 {} 个航点 need_locate={need_locate} \
+                 vx={:.2} vz={YAW_LIMIT:.2} map={map_path}）",
+                offset + 1,
+                points.len(),
+                speed_vx(plan)
+            ));
         }
     }
 
-    async fn navigate_once(
+    /// 下发一次 `5000` 并跟到终态（不含重试逻辑，重试在 [`Self::run_segment`]）。
+    async fn create_segment_task(
         &self,
-        plan: &FlightPlan,
-        point: &Waypoint,
-        index: usize,
+        data: &Value,
+        point_count: usize,
+        offset: usize,
         total: usize,
-        locate: Locate,
     ) -> Result<(), String> {
-        let map_path = plan.resolve_map_path(super::mapping::DEFAULT_MAP_ROOT);
-        let need_locate = locate.need_locate();
-        let data = navigation_task_payload(plan, point, need_locate);
-        // 现场排障最有用的一行：把真实下发的载荷整份打出来（`RUST_LOG=...=debug`）
-        debug!("5000 载荷（第 {index}/{total} 点 {}）: {data}", point.name);
         // 先订阅再下发：任务被本体秒拒（参数非法 / 能力忙）时，终态可能在上面的
         // `call` 返回后、订阅之前就推过来，漏掉就只能干等到超时。
         let mut rx = self.client.subscribe();
-        let reply = match self.client.call(T_TASK_CREATE, data).await {
-            Ok(reply) => {
-                debug!("5001 应答（第 {index}/{total} 点 {}）: {reply}", point.name);
-                reply
-            }
-            Err(e) => {
-                // 失败时把关键入参带进错误消息：「参数非法」还是「本体能力忙」靠这些字段区分
-                return Err(format!(
-                    "{e}（第 {index}/{total} 点 {} goal=({:.2},{:.2}) heading={:.0}° \
-                     need_locate={need_locate} vx={:.2} vz={YAW_LIMIT:.2} map={map_path}）",
-                    point.name,
-                    point.x,
-                    point.y,
-                    point.heading,
-                    speed_vx(plan)
-                ));
-            }
-        };
+        let reply = self.client.call(T_TASK_CREATE, data.clone()).await?;
+        debug!(
+            "5001 应答（第 {}-{} 点）: {reply}",
+            offset + 1,
+            offset + point_count
+        );
         let nav_task_id = reply
             .get("task_id")
             .and_then(Value::as_str)
@@ -778,13 +867,15 @@ impl RouteRunner {
         }
         *self.nav_task_id.lock().await = Some(nav_task_id.clone());
         info!(
-            "航点 {index}/{total} 导航任务已受理: {} → {}",
-            nav_task_id, point.name
+            "航段任务已受理: {nav_task_id} → 第 {}-{} 点（{point_count} 个航点）",
+            offset + 1,
+            offset + point_count
         );
 
         // 等待该任务终态
-        let deadline =
-            tokio::time::Instant::now() + Duration::from_secs(600_u64.max(total as u64 * 120));
+        let per_point = 180_u64;
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_secs(per_point * point_count.max(1) as u64);
         // 同一 boot_id 内按 snapshot_seq 丢弃重复 / 更旧快照（文档 §2.6.10 第 2 条）：
         // 这条等待路径不经过 TaskMonitor，自己带一个单帧丢帧器。
         let mut gate = super::status::SeqGate::default();
@@ -794,12 +885,22 @@ impl RouteRunner {
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                return Err(format!("航点 {} 导航超时", point.name));
+                return Err(format!(
+                    "第 {}-{} 点导航超时",
+                    offset + 1,
+                    offset + point_count
+                ));
             }
             let env = match tokio::time::timeout(remaining, rx.recv()).await {
                 Ok(Ok(env)) => env,
                 Ok(Err(_)) => return Err("推送通道关闭".to_string()),
-                Err(_) => return Err(format!("航点 {} 导航超时", point.name)),
+                Err(_) => {
+                    return Err(format!(
+                        "第 {}-{} 点导航超时",
+                        offset + 1,
+                        offset + point_count
+                    ));
+                }
             };
             if env.head.msg_type != T_TASK_STATUS {
                 continue;
@@ -812,21 +913,79 @@ impl RouteRunner {
                 continue;
             }
             if gate_result.boot_changed {
-                // 算法节点重启：本体上的导航任务已经不存在，等下去只能等到 600s 超时。
-                // 按航点失败上报，交给上层重试 / 终止。
-                *self.nav_task_id.lock().await = None;
-                return Err(format!(
-                    "航点 {} 导航失败: 算法节点重启（boot_id 变化），本体任务已失效",
-                    point.name
-                ));
+                // 算法节点重启：本体上的导航任务已经不存在，等下去只能等到超时。
+                return Err("算法节点重启（boot_id 变化），本体任务已失效".to_string());
             }
-            if let Some(task) = frame.task_for(&nav_task_id)
-                && task.is_terminal()
-            {
-                *self.nav_task_id.lock().await = None;
-                return terminal_result(task);
+            let Some(task) = frame.task_for(&nav_task_id) else {
+                continue;
+            };
+            // 到点进度：5009 `detail.last_arrived_goal.index` 是段内 1-based 序号
+            if let Some(index) = task.detail_index.filter(|index| *index > 0) {
+                let done = (offset + index as usize).min(total);
+                let mut completed = self.completed.lock().await;
+                if done > *completed {
+                    *completed = done;
+                }
+            }
+            if task.is_terminal() {
+                let result = terminal_result(task);
+                // 成功 → 清掉任务 ID；失败保留，让上层 abort_task 统一收尾
+                if result.is_ok() {
+                    *self.nav_task_id.lock().await = None;
+                }
+                return result;
             }
         }
+    }
+
+    /// 等本体的导航能力回到 idle（`5009 robot.task_state`），最多 `max_wait`。
+    ///
+    /// 只发 5002 不够：固件受理后还要几百毫秒才把 `task_state` 改回 `idle`，
+    /// 这期间发下一条 `5000` 依旧被回 13897——这就是「逐点下发从第 2 个点开始全 busy」
+    /// 的直接原因。
+    async fn wait_body_idle(&self, max_wait: Duration) {
+        let mut rx = self.client.subscribe();
+        let deadline = tokio::time::Instant::now() + max_wait;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                warn!("等待本体释放导航能力超时（{}s）", max_wait.as_secs());
+                return;
+            }
+            let env = match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Ok(env)) => env,
+                _ => return,
+            };
+            if env.head.msg_type != T_TASK_STATUS {
+                continue;
+            }
+            let Some(frame) = super::status::StatusFrame::parse(&env.data) else {
+                continue;
+            };
+            if frame.robot_task_state == "idle" && frame.current.is_none() {
+                return;
+            }
+        }
+    }
+
+    /// 失败 / 取消后把当前导航任务收尾，并**等本体真的释放导航能力**再继续。
+    async fn abort_task(&self) {
+        let task_id = self.nav_task_id.lock().await.take();
+        let Some(task_id) = task_id else {
+            return;
+        };
+        match self
+            .client
+            .call(T_TASK_CANCEL, json!({ "task_id": task_id }))
+            .await
+        {
+            Ok(_) => info!("已 5002 取消导航任务 {task_id}，等本体释放导航能力"),
+            Err(e) if is_task_not_found(&e) => {
+                debug!("取消导航任务时本体报 task not found，视为已收尾: {e}");
+            }
+            Err(e) => warn!("取消导航任务失败: {e}"),
+        }
+        self.wait_body_idle(IDLE_WAIT).await;
     }
 
     /// 到点作业：等待 + 拍照
@@ -1096,10 +1255,60 @@ mod tests {
     ///
     /// 这三个现场踩过的坑都锁在这里：`vz: 0`（禁止转向 → 规划失败）、
     /// 空串 `fence_path`（→ 导航指令非法）、`goal_type` 与 `map_type` 不一致。
+    /// 分段规则：纯导航点合并成一段（= 一条 5000），只有需要停点作业的点才切段。
+    ///
+    /// 现场教训：逐点下发时本体同一时刻只允许一个导航任务，第 2 个点起全部
+    /// 13897 capability busy。合并成一段后只申请一次能力，和官方 App 一致。
+    #[test]
+    fn segments_merge_pure_navigation_points() {
+        let p = plan("往返");
+        // 3 个纯导航点 → 1 段
+        assert_eq!(plan_segments(&p.waypoints), vec![0..3]);
+
+        // 中间点要停留 → 在它之后切段
+        let mut dwell_plan = plan("往返");
+        dwell_plan.waypoints[1].dwell = 10;
+        assert_eq!(plan_segments(&dwell_plan.waypoints), vec![0..2, 2..3]);
+
+        // 末点有作业 → 仍然只切在末尾（整条航线还是 1 段）
+        let mut photo_plan = plan("往返");
+        photo_plan.waypoints[2].actions.push(WaypointAction {
+            action_type: "可见光拍照".to_string(),
+            ..Default::default()
+        });
+        assert_eq!(plan_segments(&photo_plan.waypoints), vec![0..3]);
+
+        // 每个点都要作业 → 每点一段（退化成原来的逐点模式，但段间会 5002 收尾）
+        let mut all_work = plan("往返");
+        for w in &mut all_work.waypoints {
+            w.dwell = 5;
+        }
+        assert_eq!(plan_segments(&all_work.waypoints), vec![0..1, 1..2, 2..3]);
+
+        // 空航线
+        assert!(plan_segments(&[]).is_empty());
+    }
+
+    /// 一段 5000 的 `params.goals` 必须按顺序带全部航点（协议 §2.5.1.4）。
+    #[test]
+    fn navigation_payload_carries_all_goals_of_a_segment() {
+        let p = plan("往返");
+        let data = navigation_task_payload(&p, &p.waypoints, false);
+        let goals = data["params"]["goals"].as_array().cloned().unwrap_or_default();
+        assert_eq!(goals.len(), 3, "整段航点必须一次下发: {data}");
+        assert_eq!(goals[0]["position"]["x"], 0.0);
+        assert_eq!(goals[1]["position"]["x"], 1.0);
+        assert_eq!(goals[2]["position"]["x"], 2.0);
+        assert!(
+            data["name"].as_str().unwrap_or_default().contains("3 个航点"),
+            "任务名要能看出这是一整段: {data}"
+        );
+    }
+
     #[test]
     fn navigation_payload_matches_protocol() {
         let p = plan("往返");
-        let data = navigation_task_payload(&p, &p.waypoints[0], false);
+        let data = navigation_task_payload(&p, &p.waypoints[..1], false);
         assert_eq!(data["kind"], 2, "kind=2 是单点/多点导航");
         assert_eq!(data["schedule"], 0);
         assert!(
@@ -1129,7 +1338,7 @@ mod tests {
         let mut p = plan("往返");
         p.map_type = 3;
         p.fence_path = Some("/ota/alg_data/map/history_map/fence.geojson".to_string());
-        let data = navigation_task_payload(&p, &p.waypoints[0], false);
+        let data = navigation_task_payload(&p, &p.waypoints[..1], false);
         let params = &data["params"];
         assert_eq!(params["map_type"], 3.0);
         assert_eq!(params["goal_type"], 3.0, "路网导航 goal_type 必须同步为 3");
@@ -1140,7 +1349,7 @@ mod tests {
 
         // 空串/空白不能下发，否则固件会回“导航指令非法”
         p.fence_path = Some("   ".to_string());
-        let data = navigation_task_payload(&p, &p.waypoints[0], false);
+        let data = navigation_task_payload(&p, &p.waypoints[..1], false);
         assert!(data["params"].get("fence_path").is_none());
     }
 
@@ -1150,7 +1359,7 @@ mod tests {
         let mut p = plan("往返");
         for invalid in [0_u32, 2_u32] {
             p.map_type = invalid;
-            let data = navigation_task_payload(&p, &p.waypoints[0], false);
+            let data = navigation_task_payload(&p, &p.waypoints[..1], false);
             assert_eq!(data["params"]["map_type"], 1.0, "invalid={invalid}");
             assert_eq!(data["params"]["goal_type"], 1.0, "invalid={invalid}");
         }

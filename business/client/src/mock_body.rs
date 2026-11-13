@@ -154,6 +154,9 @@ struct MockTask {
     event_seq: i64,
     /// None = 不会自己结束（建图等外部取消）
     ends_at: Option<tokio::time::Instant>,
+    started_at: tokio::time::Instant,
+    /// 每个目标点耗时（一段任务可能有多个 goals，真机逐个 goal_arrived）
+    goal_step: Duration,
 }
 
 impl MockTask {
@@ -232,10 +235,19 @@ impl MockState {
             return;
         };
         let now = tokio::time::Instant::now();
+        // 逐目标推进：每个 goal_step 到点一次，发 navigation.goal_arrived（index/total）
+        let goals = task.total.max(1);
+        let elapsed = now.saturating_duration_since(task.started_at);
+        let done = (elapsed.as_secs_f64() / task.goal_step.as_secs_f64()).floor() as i64;
+        let done = done.clamp(0, goals);
+        if done > task.index {
+            task.index = done;
+            task.event_seq += 1;
+            task.stage = "navigation.goal_arrived".to_string();
+        }
         if now < ends_at {
-            let total = ends_at.saturating_duration_since(now);
-            let elapsed = self.step.saturating_sub(total);
-            task.progress = (elapsed.as_secs_f64() / self.step.as_secs_f64() * 100.0).min(99.0);
+            task.progress =
+                (task.index as f64 / goals as f64 * 100.0).min(99.0);
             return;
         }
         task.lifecycle = "success".to_string();
@@ -596,10 +608,22 @@ async fn run_control<S>(
                         .and_then(Value::as_str)
                         .unwrap_or("mock task")
                         .to_string();
+                    // 真机一段任务可以带多个 goals（`params.goals` 有序数组），
+                    // 逐点到点发 `navigation.goal_arrived`；假本体要照着模拟，
+                    // 否则本地联调看不到多航点进度。
+                    let total = env
+                        .data
+                        .get("params")
+                        .and_then(|p| p.get("goals"))
+                        .and_then(Value::as_array)
+                        .map(|goals| goals.len().max(1))
+                        .unwrap_or(1) as i64;
+                    let goal_step = guard.step;
+                    let started_at = tokio::time::Instant::now();
                     let ends_at = if kind == 1 {
                         None
                     } else {
-                        Some(tokio::time::Instant::now() + guard.step)
+                        Some(started_at + goal_step * total as u32)
                     };
                     guard.current = Some(MockTask {
                         id: id.clone(),
@@ -610,9 +634,11 @@ async fn run_control<S>(
                         stage: stage.to_string(),
                         progress: 0.0,
                         index: 0,
-                        total: 1,
+                        total,
                         event_seq: 1,
                         ends_at,
+                        started_at,
+                        goal_step,
                     });
                     let _ = tx
                         .send(response(
@@ -689,6 +715,8 @@ async fn run_control<S>(
                     total: 1,
                     event_seq: 1,
                     ends_at: Some(tokio::time::Instant::now() + guard.step),
+                    started_at: tokio::time::Instant::now(),
+                    goal_step: guard.step,
                 });
                 let _ = tx
                     .send(response(
@@ -809,11 +837,40 @@ mod tests {
             total: 1,
             event_seq: 1,
             ends_at: Some(tokio::time::Instant::now()),
+            started_at: tokio::time::Instant::now(),
+            goal_step: Duration::from_millis(0),
         });
         st.tick();
         assert!(st.current.is_none());
         assert_eq!(st.terminals[0].lifecycle, "success");
         assert_eq!(st.terminals[0].stage, "navigation.completed");
+    }
+
+    /// 一段任务带多个 goals 时，假本体要逐个到点（真机发 `navigation.goal_arrived`）。
+    #[test]
+    fn multi_goal_task_advances_goal_by_goal() {
+        let mut st = state();
+        st.current = Some(MockTask {
+            id: "mock-5".to_string(),
+            name: "5 个航点".to_string(),
+            task_type: "navigation",
+            kind: 2,
+            lifecycle: "running".to_string(),
+            stage: "navigation.navigating".to_string(),
+            progress: 0.0,
+            index: 0,
+            total: 5,
+            event_seq: 1,
+            ends_at: Some(tokio::time::Instant::now() + Duration::from_secs(10)),
+            started_at: tokio::time::Instant::now() - Duration::from_secs(2),
+            goal_step: Duration::from_secs(1),
+        });
+        st.tick();
+        let task = st.current.as_ref().expect("任务还在跑");
+        assert_eq!(task.index, 2, "2s / 每点 1s → 已到第 2 点");
+        assert_eq!(task.stage, "navigation.goal_arrived");
+        assert!((task.progress - 40.0).abs() < 0.01, "2/5 = 40%: {}", task.progress);
+        assert!(task.is_running());
     }
 
     #[test]

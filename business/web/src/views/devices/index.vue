@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { deviceApi, parkApi, zoneApi } from "@/api/ops";
+import { verifyCommandAccepted } from "@/utils/commandFeedback";
 import type { Device, Park, Zone } from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import AppIcon from "@/components/AppIcon.vue";
@@ -151,8 +152,11 @@ async function refreshActive() {
 
 async function sendCommand(command: string) {
   if (!activeDevice.value) return;
-  await deviceApi.command(activeDevice.value.id, command);
-  ElMessage.success(`已向 ${activeDevice.value.deviceId} 下发指令：${command}`);
+  const { id, deviceId } = activeDevice.value;
+  await deviceApi.command(id, command);
+  ElMessage.success(`已向 ${deviceId} 下发指令：${command}`);
+  // 指令送达 ≠ 本体受理：客户端健康门禁拒绝时只会回一条 error 事件
+  void verifyCommandAccepted(id, command);
   await load();
   activeDevice.value = devices.value.find(d => d.id === activeDevice.value?.id) ?? null;
 }

@@ -269,19 +269,23 @@ journalctl -u robodog-device-client --since "-5 min" | grep -E 'sdk_node|急停|
 | 任务回 `13897 capability busy` | `.1` `dog_task` / `robot-launch list` | 本体内是否还有未结束任务 | 官方 App 取消任务；或重启本体栈（§4.5，会清掉所有本体任务） |
 | 一直报 `12608 相机无图 / 13382 障碍物检测延迟` | `.234` `robot-launch list` | `perception` egg 是 `stopped`（`perception-seg` 在跑） | 需要视觉避障时再 `robot-launch start perception`，先确认模型路径 |
 | `13504 内部节点异常` | 先修 `sdk_node` 链路 | 常为上下游连带 | 链路恢复后观察是否消失 |
+| 任务从**第 2 个点**起全是 `13897 capability busy` | 客户端版本 | `journalctl -u robodog-device-client \| grep 13897`；日志里每个点是独立的 `5000` | 旧版客户端逐点下发且不释放能力。换 ≥2026-11-13 的客户端（分段下发 + 建任务前等 `5009 task_state=idle`），见 §7 |
+| `/dev/shm` 反复 100%，清完十几分钟又满 | `.1` `df -h /dev/shm` + `sudo lsof +L1` | 大量 48MB `*.zenoh`（被 `rmw_zenohd`/各节点持有） | zenoh 池 48MB→8MB + 装 `/dev/shm` 守护，见 §7 |
 
 ---
 
 ## 6. 防复发
 
-1. **`/dev/shm` 定容 + 落 fstab**（`.1` 目前是默认「50% 内存」、无 fstab 项）：
+1. **zenoh 池子降容 + `/dev/shm` 守护**（已脚本化，见 §7.3）：
+   `sudo bash /tmp/robodog-body/install-body-guard.sh`。池子 48MB → 8MB 是根因修复，
+   守护是兜底（`/dev/shm` >85% 或 `dog_task` 崩溃循环时自动清一次）。
+2. **`/dev/shm` 定容 + 落 fstab**（现在是默认「50% 内存」3.9G、无 fstab 项）：
+   不建议为了"扛泄漏"而调大，泄漏本身要治；需要固定值时：
 
    ```bash
-   # /etc/fstab 追加（大小按机型内存调，建议 2G 足够）
+   # /etc/fstab 追加（大小按机型内存调）
    tmpfs  /dev/shm  tmpfs  defaults,size=2G  0 0
    ```
-2. **启动前清理无主 shm 段**：在 `.1` 的 `robot-launch` 启动脚本前加一段保护，
-   只删没有被 `lsof` 持有的 `/dev/shm/*.zenoh` 与 `ecal_shutdown_process_*`。
 3. **监控这两个信号**（比等平台报 `sdk_node=false` 更早）：
    - `.1` `df -h /dev/shm` 使用率 > 70%；
    - `.1` `robot-launch list` 里任一 egg 的 `retry_count` 在增长。
@@ -290,7 +294,81 @@ journalctl -u robodog-device-client --since "-5 min" | grep -E 'sdk_node|急停|
 
 ---
 
-## 7. 命令速查
+## 7. 第二起：`/dev/shm` 被 zenoh 池吃满（2026-11-13 晚）
+
+### 7.1 现象
+
+- 平台 `sdk_node=false` 与 `true` 每 5~15 秒翻一次，`estop.software` 跟着抖（刚解除又被置上）；
+- 客户端日志：`指令 站立 被拒绝: 本体 SDK 节点未就绪（sdk_node=false）`、`摇杆未放行…`；
+- 下发任务：**第 1 个点能建任务，第 2 个点起全是 `13897 capability busy`**；
+- `.1` 上 `dog_task` 每 6 秒崩一次（`std::bad_alloc` / `OS error 12`），`retry_count` 一直涨。
+
+### 7.2 根因（两层）
+
+1. **zenoh 池把 `/dev/shm` 吃满**：`rmw_zenoh_cpp` 默认
+   `transport.shared_memory.transport_optimization.pool_size = 48MB`（见
+   `DEFAULT_RMW_ZENOH_ROUTER_CONFIG.json5:776`），**每个 session 一份**。`.1` 上有 7 个 ROS
+   节点 + 视频编码，实测 39~78 个 48MB 段 ≈ 2.5~3.9G，把 3.9G 的 tmpfs 吃满；
+   满 `du` 只有 52MB 而 `df` 100%，说明很多是"已删除但仍被映射"的段
+   （`sudo lsof +L1` 能看到 `rmw_zenoh` 持有几十个 48MB）。
+2. **本体没有释放导航能力**：`dog_task` 一崩/一重启，`5009` 的 `task_state` 与导航能力就
+   对不上；旧版客户端又是**逐点下发**（每点一条 `5000`、点间不 `5002` 收尾），
+   于是第 2 个点必然 `13897`。**这一条是我们这边的问题**，已改成分段下发（见 §7.4）。
+
+### 7.3 修机器（`.1`，1 分钟停机，可一键回滚）
+
+仓库里已备好：`deploy/robodog-body/`
+
+```bash
+# 在开发机/背包机上传
+scp -r deploy/robodog-body firefly@192.168.234.1:/tmp/
+# 在 .1 上安装（zenoh 池 48→8MB、注入 setup.bash、装 /dev/shm 守护、重启机器人栈）
+ssh firefly@192.168.234.1 'sudo bash /tmp/robodog-body/install-body-guard.sh'
+```
+
+装了什么：
+
+| 文件 | 作用 |
+| --- | --- |
+| `/opt/app_launch/zenoh_shm_8m.json5` | 覆盖 zenoh 默认配置：`transport_optimization.pool_size` 48MB → 8MB |
+| `/opt/ros/humble/setup.bash`（追加两行） | `ZENOH_SESSION_CONFIG_URI` / `ZENOH_ROUTER_CONFIG_URI` 指向上面的覆盖文件（已备份 `.bak-<时间戳>`） |
+| `/usr/local/bin/robodog-shm-guard.sh` + `.timer`（60s） | `/dev/shm` >85% 或 `dog_task` 在崩溃循环 → 自动 `stop → 清 shm → start`，10 分钟最多一次 |
+
+回滚：
+
+```bash
+sudo cp -a /opt/ros/humble/setup.bash.bak-<时间戳> /opt/ros/humble/setup.bash
+sudo systemctl disable --now robodog-shm-guard.timer
+sudo systemctl restart robot-launch
+```
+
+验证（10 分钟）：`/dev/shm` 稳定在几百 MB、`/dev/shm` 里不再出现 48MB 文件、
+`robot-launch list | grep dog_task` 的 pid 不再变。
+
+### 7.4 修客户端（分段下发，根治 `13897`）
+
+旧模型：**每个航点一条 `5000`**，点与点之间不释放本体导航能力 → 第 2 个点起全 busy。
+新模型（`business/client/src/zhpro/route.rs`）：
+
+- `plan_segments()` 把执行顺序切成若干段：**只在需要停点作业（`dwell>0` / 拍照 / 动作）
+  的航点处断开**，纯导航点全部合并；
+- 一段 = 一条 `5000 kind=2`，`params.goals` 按顺序放该段全部航点（协议 §2.5.1.4 本来就支持），
+  常见 5 点纯巡检航线 = **1 个任务**，与官方 App 完全一致；
+- 建任务前等 `5009 robot.task_state=idle`；失败/取消先 `5002` 再等 idle，然后才决定重试或跳过；
+- 进度改用 `5009 detail.last_arrived_goal.index`（段内 1-based）驱动。
+
+为什么官方 App 一直能跑：它就是"一条任务带全部 goals"，不存在点位之间的能力交接。
+
+### 7.5 复盘要点
+
+1. `sdk_node=false` 与"任务下发被拒"可能是**同一个根因**（shm 满 → `dog_task` 崩 → SDK 通道断）；
+2. 本体**同一时刻只允许一个导航任务**——这是选型约束，写代码时必须按段下发；
+3. `ctrl_source=3` 是任务被本体接手后的正常上报（App 也一样），别再当成"遥控器抢权"；
+4. 我们自己的重试策略（逐点 + 5s×6）会把一次能力占用放大成整条航线失败。
+
+---
+
+## 8. 命令速查
 
 ```bash
 # 从开发机 / 背包机穿透到本体（.246 是跳板）

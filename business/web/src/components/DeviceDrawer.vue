@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import type { Device, TeleopAxes } from "@/api/types";
+import type { Device, TaskEvent, TeleopAxes } from "@/api/types";
 import { deviceApi } from "@/api/ops";
+import { verifyCommandAccepted } from "@/utils/commandFeedback";
 import AppIcon from "./AppIcon.vue";
 import StatusBadge from "./StatusBadge.vue";
 import VideoPlayer from "./VideoPlayer.vue";
@@ -139,30 +140,41 @@ const speedPresets = [
   { value: 1, label: "快" }
 ];
 
-const events = computed(() => {
+/** 设备事件流：来自后端 `GET /devices/{id}/events`（以前这里是写死的假数据） */
+const deviceEvents = ref<TaskEvent[]>([]);
+
+async function loadEvents() {
   const device = props.device;
-  if (!device) return [];
-  return [
-    {
-      time: timeOnly(device.lastHeartbeat),
-      text: "状态心跳上报正常",
-      color: "#10b981"
-    },
-    {
-      time: device.status === "执行任务" ? "09:02" : "08:58",
-      text:
-        device.currentTaskName && device.currentTaskName !== "—"
-          ? `开始执行「${device.currentTaskName}」`
-          : "进入待命状态",
-      color: "#0284c7"
-    },
-    {
-      time: "08:40",
-      text: "完成自检，传感器状态正常",
-      color: "#94a3b8"
-    }
-  ];
-});
+  if (!device) return;
+  try {
+    deviceEvents.value = await deviceApi.events(device.id);
+  } catch {
+    /* 事件流拉取失败不影响主面板 */
+  }
+}
+
+const events = computed(() =>
+  deviceEvents.value.slice(0, 12).map(event => ({
+    time: timeOnly(event.createdAt),
+    text: `${event.title}${event.description ? ` · ${event.description}` : ""}`,
+    color:
+      event.eventType === "error"
+        ? "#dc2626"
+        : event.eventType === "fault"
+          ? "#f59e0b"
+          : event.eventType === "teleop" || event.eventType === "command"
+            ? "#0284c7"
+            : "#10b981"
+  }))
+);
+
+watch(
+  () => [props.open, props.device?.id, props.device?.updatedAt],
+  () => {
+    if (props.open) void loadEvents();
+  },
+  { immediate: true }
+);
 
 // ── 接管保活 ────────────────────────────────────────────
 // 服务端接管 120s 超时，这里 45s 续一次，页面关掉自然失效
@@ -341,6 +353,8 @@ async function sendAction(code: string, label: string, danger: boolean) {
     // 解除急停/站立等动作会改变 1315 状态；设备心跳有间隔，补几次刷新，
     // 否则抽屉会一直停在动作前的 estopSoftware=true，看起来像“没生效”。
     scheduleDeviceRefresh();
+    // 客户端门禁拒绝只回一条 error 事件，不主动看就是「点了没反应」
+    void verifyCommandAccepted(props.device.id, label);
   } catch (error) {
     ElMessage.error((error as Error).message || `${label} 下发失败`);
   }
@@ -385,6 +399,7 @@ async function emergencyStop() {
     );
     lastAck.value = "急停";
     scheduleDeviceRefresh();
+    void verifyCommandAccepted(props.device.id, "急停");
   } catch (error) {
     ElMessage.error((error as Error).message || "急停下发失败");
   }

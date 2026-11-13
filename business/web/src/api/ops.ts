@@ -133,6 +133,8 @@ export const deviceApi = {
       `/devices/${id}/teleop`,
       axes
     ),
+  /** 设备事件流（最近 30 条）：客户端门禁拒绝只在这里能看到 */
+  events: (id: number) => get<TaskEvent[]>(`/devices/${id}/events`),
   action: (id: number, action: string) =>
     post<{
       deviceId: string;

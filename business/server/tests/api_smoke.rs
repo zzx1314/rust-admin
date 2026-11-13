@@ -787,6 +787,52 @@ async fn body_actions_include_gait_modes() {
     }
 }
 
+/// 设备事件流接口：客户端门禁拒绝（`event_type=error`）必须能在控制台查到。
+///
+/// 现场：点「站立」HTTP 回 200 + wsDelivered=true，本体其实没受理，
+/// 只在事件流里留一条「指令 站立 被拒绝: 本体 SDK 节点未就绪」。没有这个接口，
+/// 页面就是「点了没反应」。
+#[tokio::test]
+async fn device_events_expose_client_side_rejection() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let device_pk = bound_device_pk(&pool).await;
+    sqlx::query(
+        "INSERT INTO task_events (event_type, title, description, device_id, task_id, created_at)
+         VALUES ('error', '指令 站立 被拒绝: 本体 SDK 节点未就绪（sdk_node=false）',
+                 'wsDelivered=true', ?1, NULL, ?2)",
+    )
+    .bind(device_pk)
+    .bind(robodog_ops_server::db::now())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+    let response = app
+        .oneshot(
+            Request::get(format!("/api/devices/{device_pk}/events"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    let events = body["data"].as_array().cloned().unwrap_or_default();
+    assert!(!events.is_empty(), "应返回设备事件: {body}");
+    assert_eq!(events[0]["eventType"], "error");
+    assert!(
+        events[0]["title"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("被拒绝"),
+        "最近一条应是被拒绝事件: {body}"
+    );
+}
+
 /// `ctrl_source = 3` 的门禁文案必须区分「真遥控器」与「本体自己占着导航能力」。
 ///
 /// 现场事故：遥控器明明关着，每次下发都提示「遥控器被接管」，运维只能去关一个

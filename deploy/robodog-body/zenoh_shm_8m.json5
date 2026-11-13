@@ -1,0 +1,14 @@
+// 覆盖 rmw_zenoh 默认配置（48MB/session 的 transport_optimization 池会把 /dev/shm 吃满）
+// 现场：39 个 session × 48MB ≈ 2.5G，加上其它 → 3.9G tmpfs 满 → dog_task bad_alloc 崩溃循环
+{
+  transport: {
+    shared_memory: {
+      enabled: true,
+      // 大消息仍走 SHM，但池子从 48MB 降到 8MB，够放点云/路径，又不会一崩就吃满
+      transport_optimization: {
+        enabled: true,
+        pool_size: 8388608,
+      },
+    },
+  },
+}
