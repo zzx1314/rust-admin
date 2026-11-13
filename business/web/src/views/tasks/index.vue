@@ -436,10 +436,10 @@ onBeforeUnmount(() => {
 
 <template>
   <div>
-    <PageHeader title="任务管理" subtitle="巡检任务的创建、下发、执行跟踪与看板协作">
+    <PageHeader title="计划管理" subtitle="巡检计划的创建、下发、执行跟踪与看板协作">
       <template #actions>
         <button class="btn primary" @click="openCreate">
-          <AppIcon name="plus" />新建任务
+          <AppIcon name="plus" />新建计划
         </button>
       </template>
     </PageHeader>
@@ -450,7 +450,7 @@ onBeforeUnmount(() => {
         :class="{ on: activeStatus === '全部' }"
         @click="clickStat('全部')"
       >
-        <div class="st-label"><i style="background: #0284c7" />任务总数</div>
+        <div class="st-label"><i style="background: #0284c7" />计划总数</div>
         <div class="st-val">{{ stats.total }} <small>项</small></div>
       </div>
       <div
@@ -498,12 +498,12 @@ onBeforeUnmount(() => {
         在下方看板里可以直接新建、下发和跟踪进度。
       </p>
       <p v-if="routesEmpty" class="rt-hint" style="margin: 0 0 4px">
-        当前还没有巡检路线：可以先到「巡检路线」编排一条，或直接新建任务用
+        当前还没有巡检路线：可以先到「巡检任务」编排一条，或直接新建计划用
         “临时路径”下发。
       </p>
       <div class="actions" style="justify-content: center; margin-top: 10px">
         <button class="btn primary" @click="openCreate">
-          <AppIcon name="plus" />新建任务
+          <AppIcon name="plus" />新建计划
         </button>
         <button class="btn" @click="goRoutes">
           <AppIcon name="route" />去编排路线
@@ -624,8 +624,8 @@ onBeforeUnmount(() => {
         <table class="table">
           <thead>
             <tr>
-              <th>任务编号</th>
-              <th>任务名称</th>
+              <th>计划编号</th>
+              <th>计划名称</th>
               <th>类型</th>
               <th>执行设备</th>
               <th>关联路线</th>
@@ -702,11 +702,11 @@ onBeforeUnmount(() => {
     >
       <div class="form-grid">
         <div class="field" style="grid-column: 1 / -1">
-          <label>任务名称 <em>*</em></label>
+          <label>计划名称 <em>*</em></label>
           <input v-model="taskForm.taskName" class="input" placeholder="例如：A区上午例行巡检" />
         </div>
         <div class="field">
-          <label>任务类型</label>
+          <label>计划类型</label>
           <select v-model="taskForm.taskType" class="select">
             <option v-for="type in TASK_TYPES" :key="type">{{ type }}</option>
           </select>

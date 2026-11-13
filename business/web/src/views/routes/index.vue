@@ -822,7 +822,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div>
-    <PageHeader title="巡检路线规划" subtitle="可视化编排航点、行进航段与每一点/段执行的采集动作">
+    <PageHeader title="巡检任务规划" subtitle="可视化编排航点、行进航段与每一点/段执行的采集动作">
       <template #actions>
         <button
           class="btn"
@@ -1623,7 +1623,7 @@ onBeforeUnmount(() => {
           <span class="muted" style="text-align: right">{{ item.description }}</span>
         </div>
         <div class="rt-hint">
-          校验通过后即可发布为正式版本；已发布的路线模板可被「任务管理」引用，下发时会自动展开为航点序列与动作指令集。
+          校验通过后即可发布为正式版本；已发布的路线模板可被「计划管理」引用，下发时会自动展开为航点序列与动作指令集。
         </div>
       </template>
       <template #footer>

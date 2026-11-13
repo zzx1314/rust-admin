@@ -34,7 +34,7 @@ const router = createRouter({
           path: "routes",
           name: "routes",
           component: () => import("@/views/routes/index.vue"),
-          meta: { title: "巡检路线" }
+          meta: { title: "巡检任务" }
         },
         {
           path: "devices",
@@ -46,7 +46,7 @@ const router = createRouter({
           path: "tasks",
           name: "tasks",
           component: () => import("@/views/tasks/index.vue"),
-          meta: { title: "任务管理" }
+          meta: { title: "计划管理" }
         },
         {
           path: "alerts",

@@ -1,6 +1,10 @@
 import axios from "axios";
 import type { App } from "vue";
-import { routerArrays, storageSession } from "@/store/utils";
+// 直接从定义处取：以前写的是 `from "@/store/utils"`，而 `store/utils` 又 re-export 了
+// 本文件的 `getConfig` / `responsiveStorageNameSpace`，两者互相依赖会被 Rollup 拆到
+// 不同 chunk，产生「circular dependency between chunks」警告（执行顺序可能被破坏）。
+import { storageSession } from "@pureadmin/utils";
+import { routerArrays } from "@/layout/types";
 
 let config: object = {};
 const { VITE_PUBLIC_PATH } = import.meta.env;

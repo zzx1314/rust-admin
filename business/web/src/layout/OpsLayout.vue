@@ -42,9 +42,9 @@ const navGroups = [
     title: "业务管理",
     items: [
       { path: "/parks", label: "园区管理", icon: "park" },
-      { path: "/routes", label: "巡检路线", icon: "route" },
+      { path: "/routes", label: "巡检任务", icon: "route" },
       { path: "/devices", label: "设备管理", icon: "dog" },
-      { path: "/tasks", label: "任务管理", icon: "task" }
+      { path: "/tasks", label: "计划管理", icon: "task" }
     ]
   },
   {
