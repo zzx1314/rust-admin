@@ -208,8 +208,13 @@ pub async fn device_block_reason(
             )));
         }
         if gate.ctrl_source == 3 {
+            // `3` 是「其他控制源」，不一定是物理遥控器：也可能是本体内残留任务把导航
+            // 能力占住了（这种一定伴随 13897 / 13440），文案要给对方向，否则运维会
+            // 一直去关一个本来就关着的遥控器。
+            let reason = crate::gateway::ctrl_preempt_reason(db, &gate.device_code).await;
             return Ok(Some(format!(
-                "设备 {} 的控制权被其他遥控器/外部程序抢占，请断开外部遥控后再下发任务",
+                "设备 {} 的控制权不在平台（1315 ctrl_source=3）：{reason}。\
+                 请先在本体取消残留任务 / 重启本体算法服务，或关闭遥控器电源后再下发任务",
                 gate.device_code
             )));
         }

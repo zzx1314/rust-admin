@@ -134,10 +134,14 @@ export const deviceApi = {
       axes
     ),
   action: (id: number, action: string) =>
-    post<{ deviceId: string; action: string; label: string; wsDelivered: boolean }>(
-      `/devices/${id}/action`,
-      { action }
-    )
+    post<{
+      deviceId: string;
+      action: string;
+      label: string;
+      wsDelivered: boolean;
+      /** 急停 / 解除急停：服务端会把 1315 `estop.software` 回读结果校验一遍 */
+      verify?: { field: string; expect: boolean; timeoutSec: number };
+    }>(`/devices/${id}/action`, { action })
 };
 
 export const taskApi = {

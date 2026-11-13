@@ -293,7 +293,9 @@ impl RobotState {
         }
         if self.ctrl_source == Some(3) && !allow_ctrl_preempt {
             return Some(
-                "本体控制权被其他遥控器/外部程序抢占，请断开外部遥控后重试".to_string(),
+                "本体控制权不在平台（ctrl_source=3）：可能是物理遥控器 / 第三方 App，\
+                 也可能是本体内部残留任务占着导航能力；请先结束外部控制或重启本体算法服务"
+                    .to_string(),
             );
         }
         if require_posture && matches!(self.motion_status.as_deref(), Some("lie_down")) {

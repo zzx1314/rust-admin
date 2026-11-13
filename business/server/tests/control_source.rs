@@ -144,18 +144,27 @@ async fn register_device(port: u16, device_id: &str) -> DeviceWs {
 
 /// 上报一帧心跳（`ctrlSource` 为 1315 `ctrl_source`）
 async fn heartbeat(ws: &mut DeviceWs, ctrl_source: i64) {
+    heartbeat_with_payload(
+        ws,
+        json!({
+            "battery": 80,
+            "bodyOnline": true,
+            "mode": "robot",
+            "ctrlSource": ctrl_source,
+            "robotMode": "remote",
+            "motionStatus": "stand",
+        }),
+    )
+    .await;
+}
+
+/// 上报一帧自定义载荷的心跳（测试健康字段 / 本体掉线用）
+async fn heartbeat_with_payload(ws: &mut DeviceWs, payload: Value) {
     ws.send(Message::Text(
         json!({
             "msgType": "heartbeat",
             "ts": "2026-01-01 00:00:00",
-            "payload": {
-                "battery": 80,
-                "bodyOnline": true,
-                "mode": "robot",
-                "ctrlSource": ctrl_source,
-                "robotMode": "remote",
-                "motionStatus": "stand",
-            },
+            "payload": payload,
         })
         .to_string(),
     ))
@@ -196,7 +205,8 @@ async fn preempt_alerts(state: &AppState) -> (i64, i64) {
 
 async fn control_events(state: &AppState) -> i64 {
     sqlx::query_scalar(
-        "SELECT COUNT(*) FROM task_events WHERE title IN ('控制权被遥控器抢占', '控制权已收回')
+        "SELECT COUNT(*) FROM task_events
+           WHERE title IN ('控制权被其他控制源接管', '控制权已收回')
            AND device_id = (SELECT id FROM devices WHERE device_id = ?1)",
     )
     .bind(DEVICE_CODE)
@@ -275,4 +285,88 @@ async fn flapping_remote_takeover_records_each_transition() {
     heartbeat(&mut ws, 3).await;
     assert_eq!(preempt_alerts(&state).await, (2, 1), "每次抢占各自一条，只有最新未处理");
     assert_eq!(control_events(&state).await, 3, "三次变化都进事件流");
+}
+
+/// 本体近期回过 `13897 capability busy` 时，告警必须指向「本体自己占着导航能力」，
+/// 而不是让运维去关一个本来就关着的遥控器。
+#[tokio::test]
+async fn capability_busy_refines_preempt_alert() {
+    let (state, _db) = test_state().await;
+    let port = spawn_server(state.clone()).await;
+    let mut ws = register_device(port, DEVICE_CODE).await;
+
+    // 上一次下发失败的航点事件（就是现场那条 13897 capability busy）
+    sqlx::query(
+        "INSERT INTO task_events (event_type, title, description, device_id, task_id, created_at)
+         VALUES ('progress', '航点 新航点 2 执行失败',
+                 '5001 响应失败: code=13897 resource conflict (capability busy)',
+                 (SELECT id FROM devices WHERE device_id = ?1), NULL, ?2)",
+    )
+    .bind(DEVICE_CODE)
+    .bind(db::now())
+    .execute(&state.db)
+    .await
+    .expect("插入航点失败事件");
+
+    heartbeat(&mut ws, 3).await;
+
+    let content: String = sqlx::query_scalar(
+        "SELECT content FROM alerts WHERE alert_code LIKE 'AL-CTRL-%'",
+    )
+    .fetch_one(&state.db)
+    .await
+    .expect("应有抢占告警");
+    assert!(
+        content.contains("13897") && content.contains("残留任务"),
+        "有 capability busy 证据时要点明是本体内残留任务: {content}"
+    );
+    assert!(!content.contains("被硬件遥控器"), "不能断言就是遥控器: {content}");
+}
+
+/// 本体掉线（`bodyOnline=false`）时，1315 派生的健康字段必须置空，
+/// 否则客户端重连后页面还拿着上一次的 `sdk_node=0` / `estop=1` 拦遥控与任务。
+#[tokio::test]
+async fn body_offline_clears_stale_health_fields() {
+    let (state, _db) = test_state().await;
+    let port = spawn_server(state.clone()).await;
+    let mut ws = register_device(port, DEVICE_CODE).await;
+
+    heartbeat_with_payload(
+        &mut ws,
+        json!({
+            "battery": 80,
+            "bodyOnline": true,
+            "mode": "robot",
+            "ctrlSource": 3,
+            "robotMode": "remote",
+            "motionStatus": "lie_down",
+            "estopSoftware": true,
+            "sdkNodeAvailable": false,
+        }),
+    )
+    .await;
+
+    // 链路断了：客户端把健康字段清空，平台不能继续沿用旧值
+    heartbeat_with_payload(
+        &mut ws,
+        json!({
+            "battery": 80,
+            "bodyOnline": false,
+            "mode": "robot",
+            "robotMode": "remote",
+        }),
+    )
+    .await;
+
+    let (sdk, estop, motion): (Option<i64>, Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT sdk_node_available, estop_software, motion_status FROM devices WHERE device_id = ?1",
+    )
+    .bind(DEVICE_CODE)
+    .fetch_one(&state.db)
+    .await
+    .expect("设备应在台账里");
+    assert_eq!(sdk, None, "本体掉线后 sdk_node 应回到未知");
+    assert_eq!(estop, None, "本体掉线后 estop 应回到未知");
+    assert_eq!(motion, None, "本体掉线后运动状态应回到未知");
+    assert_eq!(ctrl_source_of(&state).await, 0, "本体掉线后控制源回到未知");
 }

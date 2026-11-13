@@ -123,8 +123,9 @@ fn ensure_ready_with(device: &Device, allow_ctrl_preempt: bool) -> Result<(), Ap
     }
     if device.ctrl_source == 3 && !allow_ctrl_preempt {
         return Err(invalid(
-            "本体控制权被其他遥控器/外部程序抢占，请断开外部遥控后重试\
-             （确认遥控器已断电？可用「强制接管」）",
+            "本体控制权不在平台（1315 ctrl_source=3）：可能是物理遥控器 / 第三方 App，\
+             也可能是本体内部残留任务占着导航能力。确认遥控器已断电后可用「强制接管」\
+             只放行摇杆；任务/导航类指令请先在本体取消残留任务或重启本体算法服务",
         ));
     }
     Ok(())
@@ -402,6 +403,103 @@ pub async fn send_teleop(
     })))
 }
 
+/// 1302 的「急停 / 解除急停」在固件上**没有 1303 回执**，只能靠 1315 的
+/// `estop.software` 回读确认。
+///
+/// 现场踩过：点「解除急停」平台回 `wsDelivered=true`（命令确实进了设备连接），
+/// 本体却一直报 `estop.software=true`，页面继续拦遥控与任务，看起来像按钮没反应。
+/// 所以下发后开一个后台校验：窗口内回读到的值不是期望值，就落一条告警 + 事件。
+const ESTOP_VERIFY_TIMEOUT_SECS: u64 = 20;
+
+/// 急停回读校验：每秒看一眼 `devices.estop_software`，直到到期望值或超时。
+///
+/// `expect_engaged = true` 对应「急停」，`false` 对应「解除急停」。
+/// 用后台任务而不是同步等待：设备心跳是 10s 一次，同步等 20s 会把 HTTP 请求拖死。
+fn spawn_estop_readback_check(
+    db: sqlx::SqlitePool,
+    device_pk: i64,
+    device_code: String,
+    expect_engaged: bool,
+) {
+    tokio::spawn(async move {
+        let label = if expect_engaged { "急停" } else { "解除急停" };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(ESTOP_VERIFY_TIMEOUT_SECS);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let current: Option<Option<i64>> =
+                sqlx::query_scalar("SELECT estop_software FROM devices WHERE id = ?1")
+                    .bind(device_pk)
+                    .fetch_optional(&db)
+                    .await
+                    .ok()
+                    .flatten();
+            // 设备被删 / 库已关闭：没有可校验的对象，安静退出
+            let Some(current) = current else { return };
+            if let Some(value) = current
+                && (value != 0) == expect_engaged
+            {
+                info!(
+                    "设备 {device_code}「{label}」回读确认: estop.software={}",
+                    value != 0
+                );
+                return;
+            }
+            if std::time::Instant::now() < deadline {
+                continue;
+            }
+
+            let expect = if expect_engaged { "true" } else { "false" };
+            match current {
+                // 客户端还没上报这个字段（老客户端）：没法校验，只留日志
+                None => info!(
+                    "设备 {device_code}「{label}」回读超时：客户端未上报 estop_software，无法校验"
+                ),
+                Some(value) => {
+                    warn!(
+                        "设备 {device_code}「{label}」已下发，但 {ESTOP_VERIFY_TIMEOUT_SECS}s 内\
+                         本体回读仍是 estop.software={}（期望 {expect}）：1302 可能没被执行",
+                        value != 0
+                    );
+                    let timestamp = now();
+                    let content = format!(
+                        "设备 {device_code}「{label}」已送达设备连接，但 {ESTOP_VERIFY_TIMEOUT_SECS} 秒内\
+                         本体回读没有变成 estop.software={expect}（仍为 {}）：1302 没有被执行。\
+                         请重启本体算法服务或整机重启后再试",
+                        value != 0
+                    );
+                    let _ = sqlx::query(
+                        "INSERT INTO alerts (alert_code, level, content, device_id, park_id,
+                            status, occurred_at, created_at)
+                         VALUES (?1, '警告', ?2, ?3,
+                            (SELECT park_id FROM devices WHERE id = ?3), '未处理', ?4, ?4)",
+                    )
+                    .bind(format!(
+                        "AL-ESTOP-{}-{}",
+                        device_code,
+                        chrono::Local::now().format("%Y%m%d%H%M%S")
+                    ))
+                    .bind(&content)
+                    .bind(device_pk)
+                    .bind(&timestamp)
+                    .execute(&db)
+                    .await;
+                    let _ = sqlx::query(
+                        "INSERT INTO task_events (event_type, title, description, device_id,
+                            task_id, created_at)
+                         VALUES ('device_event', '本体动作未生效', ?1, ?2, NULL, ?3)",
+                    )
+                    .bind(&content)
+                    .bind(device_pk)
+                    .bind(&timestamp)
+                    .execute(&db)
+                    .await;
+                    return;
+                }
+            }
+        }
+    });
+}
+
 /// POST /api/devices/{id}/action —— 本体动作（站立/卧倒/急停/灯光/复位）
 ///
 /// 急停是唯一不要求接管态的动作。
@@ -451,12 +549,40 @@ pub async fn send_action(
     )
     .await?;
 
-    Ok(ApiResponse::ok(json!({
+    // 急停 / 解除急停没有 1303 回执，下发完开一个回读校验，把「平台说成功、本体没动」
+    // 这种情况变成一条告警，而不是让运维自己盯控制源 / 急停字段猜。
+    if delivered {
+        let expect_engaged = match code {
+            "emergency_stop" => Some(true),
+            "clear_emergency_stop" => Some(false),
+            _ => None,
+        };
+        if let Some(expect_engaged) = expect_engaged {
+            spawn_estop_readback_check(
+                state.db.clone(),
+                id,
+                device.device_id.clone(),
+                expect_engaged,
+            );
+        }
+    }
+
+    let mut body = json!({
         "deviceId": device.device_id,
         "action": code,
         "label": label,
         "wsDelivered": delivered,
-    })))
+    });
+    if matches!(code, "emergency_stop" | "clear_emergency_stop") {
+        // 前端据此提示「已下发，20 秒内自动校验本体回读」，而不是直接报成功
+        body["verify"] = json!({
+            "field": "estopSoftware",
+            "expect": code == "emergency_stop",
+            "timeoutSec": ESTOP_VERIFY_TIMEOUT_SECS,
+        });
+    }
+
+    Ok(ApiResponse::ok(body))
 }
 
 /// 校验并规整业务指令名，供 `/command` 复用

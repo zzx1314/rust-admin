@@ -124,15 +124,18 @@ function logout() {
   router.push("/login");
 }
 
-/** 控制权监控：本体被硬件遥控器（1315 `ctrl_source=3`）抢走时全局弹提示。
+/** 控制源监控：本体控制权跑出平台（1315 `ctrl_source=3`）时全局弹提示。
  *
- * 现场最难受的一种状态：控制台显示「在线待命、电量正常」，摇杆推不动、任务也下发不了，
- * 但看不出是遥控器把控制权拿走了。服务端在 `ctrl_source` 变成 3 时落一条
- * `AL-CTRL-*` 告警（见 `business/server/src/gateway.rs`），这里轮询设备列表做两件事：
+ * 现场最难受的一种状态：控制台显示「在线待命、电量正常」，摇杆推不动、任务也下发不了。
+ * 服务端在 `ctrl_source` 变成 3 时落一条 `AL-CTRL-*` 告警（见
+ * `business/server/src/gateway.rs`），这里轮询设备列表做两件事：
  * - 某台设备从非 3 变成 3 → 弹一条常驻警告（点一下跳到设备列表）；
- * - 它又回到 1/2 → 自动关掉那条警告，避免运维以为遥控器还占着。
+ * - 它又回到 1/2 → 自动关掉那条警告，避免运维以为还被占着。
  * 首轮轮询也会提示「当前正处于 3」的设备：新开控制台就该知道谁占着控制权；
  * 之后只在跳变时提示，不会每 10s 刷一遍。
+ *
+ * 文案不写死「遥控器」：`3` 是「其他控制源」，本体内部残留任务占着导航能力时
+ * 固件同样报 3（现场更常见，伴随 13897 capability busy）。
  */
 const ctrlSourceOf = new Map<number, number>();
 const ctrlNotices = new Map<number, NotificationHandle>();
@@ -150,11 +153,12 @@ async function watchControlSource() {
         ctrlNotices.set(
           device.id,
           ElNotification({
-            title: "控制权被遥控器抢占",
+            title: "控制权不在平台（ctrl_source=3）",
             message:
-              `设备 ${device.deviceId} 已被硬件遥控器 / 外部程序接管（ctrl_source=3）：` +
-              "平台摇杆与任务下发会失效。请关闭遥控器电源或按「释放控制」后重新接管；" +
-              "遥控器已断电可直接「强制接管」。点此查看设备。",
+              `设备 ${device.deviceId} 上报 ctrl_source=3：可能是物理遥控器 / 第三方 App，` +
+              "也可能是本体内残留任务占着导航能力（本体常回 13897 capability busy）。" +
+              "摇杆与任务下发已暂停：请关闭遥控器电源，并在本体取消残留任务或重启本体算法服务；" +
+              "确认遥控器已断电可直接「强制接管」。点此查看设备。",
             type: "warning",
             // 常驻：控制权收回时自动关闭，防止一闪而过被忽略
             duration: 0,

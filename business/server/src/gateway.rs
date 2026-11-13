@@ -928,6 +928,20 @@ async fn handle_heartbeat(
         .bind(&device_id_clone)
         .execute(db)
         .await;
+
+        // 「解除急停下发后没回读生效」落的 `AL-ESTOP-*` 告警，在急停真的解除后
+        // 自动结案，避免告警中心长期挂着已经恢复的条目。
+        if !estop {
+            let _ = sqlx::query(
+                "UPDATE alerts SET status = '已处理', handled_at = ?1
+                  WHERE status = '未处理' AND alert_code LIKE 'AL-ESTOP-%'
+                    AND device_id = (SELECT id FROM devices WHERE device_id = ?2)",
+            )
+            .bind(&timestamp_clone)
+            .bind(&device_id_clone)
+            .execute(db)
+            .await;
+        }
     }
     if let Some(available) = payload.sdk_node_available {
         let _ = sqlx::query(
@@ -1070,6 +1084,23 @@ async fn handle_heartbeat(
         .bind(&device_id_clone)
         .execute(db)
         .await;
+
+        // 本体状态不可信（掉线 / 客户端刚重建到本体的链路）时，1315 派生的健康字段
+        // 一律置空表示「未知」：以前保留旧值，客户端重连后要等下一帧 1315 / 1207 才
+        // 刷新，页面就拿着上一次的 `sdk_node=0` / `estop=1` 继续拦遥控与任务，
+        // 现场表现是「本体明明恢复了，页面还说本体 SDK 节点未就绪」。
+        // 模拟设备没有本体，不做这层清理（否则联调页面全是未知）。
+        if !online && payload.mode.as_deref() != Some("sim") {
+            let _ = sqlx::query(
+                "UPDATE devices SET sdk_node_available = NULL, estop_software = NULL,
+                        motion_status = NULL, ctrl_source = 0, updated_at = ?1
+                  WHERE device_id = ?2",
+            )
+            .bind(&timestamp_clone)
+            .bind(&device_id_clone)
+            .execute(db)
+            .await;
+        }
     }
     if let Some(robot_mode) = payload
         .robot_mode
@@ -1110,12 +1141,70 @@ async fn handle_heartbeat(
     }
 }
 
+/// 「导航能力被占用」的判据窗口（秒）
+///
+/// `ctrl_source = 3` 之后本体要开始报 13897 / 13440 才会留下事件，留 5 分钟足够覆盖
+/// 一次下发尝试的完整过程，又不至于把半小时前的旧故障算进来。
+const CAPABILITY_BUSY_WINDOW_SECS: i64 = 300;
+
+/// 本体近 5 分钟是否回报过「导航能力被占用」的迹象（`13897 capability busy` / `13440`）。
+///
+/// `ctrl_source = 3` 在协议里是「其他控制源」，现场其实有两种完全不同的原因，
+/// 平台文案必须能区分，否则每次下发任务都会误报成「遥控器被接管」：
+///
+/// 1. 真有物理遥控器 / 第三方 App 压着控制权；
+/// 2. 本体里残留了没结束的任务（或算法节点卡住），导航能力被判 busy——
+///    固件这时同样把控制源算成「其他」。
+///
+/// 第 2 种一定伴随 13897 / 13440 的航点失败事件，所以拿它们当判据。
+async fn recent_capability_busy(db: &SqlitePool, device_id: &str) -> bool {
+    let since = (chrono::Local::now() - chrono::Duration::seconds(CAPABILITY_BUSY_WINDOW_SECS))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    let busy: Option<i64> = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM (
+             SELECT 1 FROM task_events
+              WHERE device_id = (SELECT id FROM devices WHERE device_id = ?1)
+                AND created_at >= ?2
+                AND (description LIKE '%13897%'
+                     OR description LIKE '%capability busy%'
+                     OR description LIKE '%13440%')
+              ORDER BY id DESC
+              LIMIT 20
+         )",
+    )
+    .bind(device_id)
+    .bind(&since)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+    busy.unwrap_or(0) > 0
+}
+
+/// `ctrl_source = 3` 的解释句（不含各入口自己的下一步建议）。
+///
+/// 告警、任务下发门禁、遥控门禁共用这一句，保证三处口径一致：
+/// 既不武断地喊「遥控器被接管」，也不把真遥控器说成本体自己的问题。
+pub(crate) async fn ctrl_preempt_reason(db: &SqlitePool, device_id: &str) -> String {
+    if recent_capability_busy(db, device_id).await {
+        format!(
+            "本体近 {} 分钟回报过 13897 capability busy / 13440 导航指令非法，\
+             更可能是本体内残留任务或算法节点占用了导航能力（而不是物理遥控器）",
+            CAPABILITY_BUSY_WINDOW_SECS / 60
+        )
+    } else {
+        "可能是物理遥控器、第三方 App 或本体内部任务占着控制权".to_string()
+    }
+}
+
 /// 控制源（1315 `ctrl_source`）：写库 + **只在变化时**留痕。
 ///
 /// 心跳是 1Hz，每帧都写告警会把告警中心刷爆，所以先比旧值。
-/// `ctrl_source = 3`（硬件遥控器 / 外部程序）是现场最需要立刻知道的一条：
-/// 它一出现，平台摇杆、接管、任务下发全部失效，而设备看上去还是「在线待命」。
-/// 落库的这条告警会被业务控制台轮询到并弹窗提示（`web/src/layout/OpsLayout.vue`）。
+/// `ctrl_source = 3`（其他控制源：遥控器 / 第三方 App / 本体内部任务）是现场最需要
+/// 立刻知道的一条：它一出现，平台摇杆、接管、任务下发全部失效，而设备看上去还是
+/// 「在线待命」。落库的这条告警会被业务控制台轮询到并弹窗提示
+/// （`web/src/layout/OpsLayout.vue`）。
 async fn record_control_source_change(
     db: &SqlitePool,
     device_id: &str,
@@ -1156,12 +1245,13 @@ async fn record_control_source_change(
          VALUES ('device_event', ?1, ?2, (SELECT id FROM devices WHERE device_id = ?3), NULL, ?4)",
     )
     .bind(if source == 3 {
-        "控制权被遥控器抢占"
+        "控制权被其他控制源接管"
     } else {
         "控制权已收回"
     })
     .bind(format!(
-        "1315 ctrl_source: {from} → {source}（0 未知 / 1 APP / 2 SDK / 3 遥控器）"
+        "1315 ctrl_source: {from} → {source}\
+         （0 未知 / 1 APP / 2 SDK / 3 其他：遥控器、第三方 App 或本体内部任务）"
     ))
     .bind(device_id)
     .bind(timestamp)
@@ -1175,7 +1265,7 @@ async fn record_control_source_change(
     }
 }
 
-/// 控制权被遥控器抢占 → 一条「未处理」告警。
+/// 控制权被其他控制源接管（`ctrl_source = 3`）→ 一条「未处理」告警。
 ///
 /// 同一台设备已经有一条未处理的抢占告警时不重复插入：遥控器时断时续（`3 → 1 → 3`）
 /// 在现场很常见，刷屏反而会盖住真正的故障。
@@ -1201,6 +1291,7 @@ async fn open_control_preempt_alert(db: &SqlitePool, device_id: &str, timestamp:
         device_id,
         chrono::Local::now().format("%Y%m%d%H%M%S%3f")
     );
+    let reason = ctrl_preempt_reason(db, device_id).await;
     let _ = sqlx::query(
         "INSERT INTO alerts (alert_code, level, content, device_id, park_id, status,
             occurred_at, created_at)
@@ -1211,8 +1302,9 @@ async fn open_control_preempt_alert(db: &SqlitePool, device_id: &str, timestamp:
     )
     .bind(&alert_code)
     .bind(format!(
-        "设备 {device_id} 被硬件遥控器 / 外部程序接管（1315 ctrl_source=3）：\
-         平台摇杆与任务下发已暂停，请关闭遥控器电源或按「释放控制」后重新接管"
+        "设备 {device_id} 上报 1315 ctrl_source=3（控制权不在平台）：{reason}。\
+         平台摇杆与任务下发已暂停：请关闭遥控器电源 / 退出第三方程序，\
+         并在本体上取消残留任务或重启本体算法服务；确认遥控器已断电后可「强制接管」"
     ))
     .bind(device_id)
     .bind(timestamp)

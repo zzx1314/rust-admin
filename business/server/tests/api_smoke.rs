@@ -778,7 +778,104 @@ async fn body_actions_include_gait_modes() {
         let body = json_body(response).await;
         assert_eq!(body["data"]["label"], label);
         assert_eq!(body["data"]["action"], action);
+        // 急停 / 解除急停固件没有 1303 回执，响应必须带上回读校验窗口，
+        // 前端据此提示「N 秒内自动校验」，而不是直报成功。
+        if matches!(action, "emergency_stop" | "clear_emergency_stop") {
+            assert!(body["data"]["verify"].is_object(), "{action} 应带 verify: {body}");
+            assert_eq!(body["data"]["verify"]["field"], "estopSoftware");
+        }
     }
+}
+
+/// `ctrl_source = 3` 的门禁文案必须区分「真遥控器」与「本体自己占着导航能力」。
+///
+/// 现场事故：遥控器明明关着，每次下发都提示「遥控器被接管」，运维只能去关一个
+/// 本来就关着的遥控器 —— 真因是本体内残留任务把导航能力占住了（航点回 13897）。
+#[tokio::test]
+async fn dispatch_gate_explains_capability_busy_instead_of_blaming_remote() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let device_pk = bound_device_pk(&pool).await;
+    let park_id: Option<i64> = sqlx::query_scalar("SELECT park_id FROM devices WHERE id = ?1")
+        .bind(device_pk)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "UPDATE devices SET status = '在线待命', body_online = 1, sdk_node_available = 1,
+            estop_software = 0, ctrl_source = 3 WHERE id = ?1",
+    )
+    .bind(device_pk)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let task_id: i64 = sqlx::query_scalar(
+        "INSERT INTO tasks (task_code, task_name, device_id, park_id, task_status, progress,
+            created_at, updated_at, created_by)
+         VALUES ('TK-CTRL-3', '控制源门禁', ?1, ?2, '待执行', 0,
+            '2026-11-12 00:00:00', '2026-11-12 00:00:00', 1)
+         RETURNING id",
+    )
+    .bind(device_pk)
+    .bind(park_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+
+    // 1) 没有 capability busy 证据：只能含糊地说「可能是遥控器 / 第三方 App」
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/tasks/{task_id}/dispatch"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    let msg = body["msg"].as_str().unwrap_or_default().to_string();
+    assert!(
+        msg.contains("ctrl_source=3") && msg.contains("物理遥控器"),
+        "门禁应说清是控制源问题: {msg}"
+    );
+    assert!(!msg.contains("13897"), "没有证据时不能提 capability busy: {msg}");
+
+    // 2) 本体近期回过 13897：文案要指向本体内残留任务 / 算法节点
+    sqlx::query(
+        "INSERT INTO task_events (event_type, title, description, device_id, task_id, created_at)
+         VALUES ('progress', '航点 新航点 2 执行失败',
+                 '5001 响应失败: code=13897 resource conflict (capability busy)',
+                 ?1, NULL, ?2)",
+    )
+    .bind(device_pk)
+    .bind(robodog_ops_server::db::now())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::post(format!("/api/tasks/{task_id}/dispatch"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    let msg = body["msg"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("13897") && msg.contains("残留任务"),
+        "有 capability busy 证据时应指向本体内残留任务: {msg}"
+    );
 }
 
 /// 远程接管期间下发任务必须被拒。

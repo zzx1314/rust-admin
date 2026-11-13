@@ -42,7 +42,7 @@ const holding = computed(() => !!props.device?.teleopHolder);
  * 官方 App 在 sdk_node 未就绪时显示“设备初始化中”，在 ctrl_source 被外部
  * 抢占时暂停遥控，在急停未解除时不允许运动；这里同样给出可读原因并禁用操作。
  *
- * 注意：**不包含 ctrl_source**。控制权被抢占单列在 `controlIssue`，因为它可以被
+ * 注意：**不包含 ctrl_source**。控制权跑出平台单列在 `controlIssue`，因为它可以被
  * 「强制接管」越过（遥控器关了但本体还在报 ctrl_source=3 就是这种情况）。
  */
 const healthIssue = computed(() => {
@@ -58,9 +58,11 @@ const ctrlMeta = computed(() => ctrlSourceMeta(props.device?.ctrlSource));
 const ctrlByOther = computed(() => props.device?.ctrlSource === 3);
 /** 平台强制接管中（跳过了 ctrl_source 门禁） */
 const forceHeld = computed(() => !!props.device?.teleopForce);
-/** 控制权在别人手里且没有强制接管时才拦遥控 */
+/** 控制权不在平台且没有强制接管时才拦遥控 */
 const controlIssue = computed(() =>
-  ctrlByOther.value && !forceHeld.value ? "控制权被其他遥控器/外部程序抢占" : ""
+  ctrlByOther.value && !forceHeld.value
+    ? "控制权不在平台（ctrl_source=3：遥控器 / 第三方 App / 本体内部残留任务）"
+    : ""
 );
 /** 已接管、在线、本体健康且控制权可用才允许遥控 */
 const canControl = computed(
@@ -201,9 +203,10 @@ async function takeOver() {
   if (force) {
     try {
       await ElMessageBox.confirm(
-        "本体当前仍报告控制权在遥控器/外部程序上（ctrl_source=3）。" +
+        "本体当前仍报告控制权不在平台（ctrl_source=3）：可能是物理遥控器 / 第三方 App，" +
+          "也可能是本体内残留任务占着导航能力。" +
           "如果遥控器已经断电或按下了「释放控制」键，可以强制接管：平台只跳过这一条门禁，" +
-          "急停/离线/SDK 节点/姿态等其余健康检查照旧。遥控器还在使用中请勿继续，否则两边会互相抢控制。",
+          "急停/离线/SDK 节点/姿态等其余健康检查照旧。外部控制还在使用中请勿继续，否则两边会互相抢控制。",
         "强制接管",
         {
           type: "warning",
@@ -221,7 +224,7 @@ async function takeOver() {
     if (res.forced) {
       ElMessage.warning(
         res.wsDelivered
-          ? "已强制接管（本体仍报 ctrl_source=3）：摇杆无效说明遥控器还在控制，请确认已断电"
+          ? "已强制接管（本体仍报 ctrl_source=3）：摇杆无效说明外部控制还在，请确认遥控器已断电"
           : "已强制接管，但设备未连接（指令无法下发）"
       );
     } else {
@@ -293,10 +296,14 @@ async function sendAxes(axes: TeleopAxes) {
   }
 }
 
-/** 动作下发后刷新设备：本体状态变化经心跳回传有延迟，先立即刷一次，再补几次 */
+/** 动作下发后刷新设备：本体状态变化经心跳回传有延迟，先立即刷一次，再补几次。
+ *
+ * 加了 20s 那一档，是因为「急停 / 解除急停」的回读校验（服务端 20s 窗口）
+ * 刚好在 12s 之后才有结论，不补一次页面会停在旧值上。
+ */
 function scheduleDeviceRefresh() {
   emit("changed");
-  for (const ms of [1200, 3000, 6000, 12000]) {
+  for (const ms of [1200, 3000, 6000, 12000, 20000]) {
     window.setTimeout(() => emit("changed"), ms);
   }
 }
@@ -320,9 +327,17 @@ async function sendAction(code: string, label: string, danger: boolean) {
     // 服务端只保证「指令送进了设备连接」，本体是否受理要看设备侧回执
     // （受理失败会以 error 事件落到告警中心）。
     lastAck.value = `${res.label}已下发`;
-    ElMessage.success(
-      `${res.label} 已下发至设备${res.wsDelivered ? "，等待本体受理" : "（设备未连接）"}`
-    );
+    if (!res.wsDelivered) {
+      ElMessage.warning(`${res.label} 未送达：设备客户端不在线`);
+    } else if (res.verify) {
+      // 1302 没有 1303 回执：服务端会在 verify.timeoutSec 内回读 estop.software，
+      // 没变成期望值就落一条「本体动作未生效」告警。
+      ElMessage.success(
+        `${res.label} 已下发，${res.verify.timeoutSec} 秒内自动校验本体回读（未生效会进告警中心）`
+      );
+    } else {
+      ElMessage.success(`${res.label} 已下发至设备，等待本体受理`);
+    }
     // 解除急停/站立等动作会改变 1315 状态；设备心跳有间隔，补几次刷新，
     // 否则抽屉会一直停在动作前的 estopSoftware=true，看起来像“没生效”。
     scheduleDeviceRefresh();
@@ -362,8 +377,12 @@ async function relocalize() {
 async function emergencyStop() {
   if (!props.device) return;
   try {
-    await deviceApi.action(props.device.id, "emergency_stop");
-    ElMessage.warning("急停已下发");
+    const res = await deviceApi.action(props.device.id, "emergency_stop");
+    ElMessage.warning(
+      res.verify
+        ? `急停已下发，${res.verify.timeoutSec} 秒内自动校验本体回读（未生效会进告警中心）`
+        : "急停已下发"
+    );
     lastAck.value = "急停";
     scheduleDeviceRefresh();
   } catch (error) {
@@ -386,9 +405,9 @@ async function emergencyStop() {
           <span
             v-if="ctrlByOther"
             class="tag orange"
-            :title="`1315 ctrl_source=3：硬件遥控器 / 外部程序持着控制权，平台摇杆与任务下发会失效${forceHeld ? '（当前为强制接管）' : ''}`"
+            :title="`1315 ctrl_source=3：控制权不在平台（遥控器 / 第三方 App / 本体内部残留任务），平台摇杆与任务下发会失效${forceHeld ? '（当前为强制接管）' : ''}`"
           >
-            遥控器占用{{ forceHeld ? "（强制接管）" : "" }}
+            控制权被占用{{ forceHeld ? "（强制接管）" : "" }}
           </span>
         </div>
         <div class="muted" style="font-size: 11px; margin-top: 5px">
@@ -447,7 +466,8 @@ async function emergencyStop() {
           <AppIcon name="warn" />
           <span>
             本体健康检查未通过：<b>{{ healthIssue || controlIssue }}</b>，遥控与任务下发已暂停。
-            请先等待 SDK 节点就绪 / 解除急停 / 断开外部遥控器。
+            请先等待 SDK 节点就绪 / 解除急停；控制源为 3 时先确认遥控器已断电，
+            并在本体取消残留任务或重启本体算法服务。
           </span>
         </div>
 
@@ -492,14 +512,14 @@ async function emergencyStop() {
               class="muted"
               style="margin-left: 6px; font-weight: 400"
             >
-              遥控器仍持权，平台摇杆不会生效
+              控制权不在平台，摇杆不会生效
             </span>
             <span
               v-else-if="holding && forceHeld"
               class="muted"
               style="margin-left: 6px; font-weight: 400"
             >
-              已强制接管（本体仍报占用，摇杆无效说明遥控器未断开）
+              已强制接管（本体仍报占用，摇杆无效说明外部控制未断开）
             </span>
           </b>
         </div>
@@ -605,13 +625,16 @@ async function emergencyStop() {
               </p>
               <p v-else-if="forceHeld && ctrlByOther" class="diag-tip">
                 <AppIcon name="warn" />
-                已强制接管，但本体仍报控制权在遥控器上：平台已跳过这条门禁，摇杆照常下发。
-                若摇杆无效，说明遥控器仍在控制，请关闭遥控器电源后重新点「接管」（或先「释放」）。
+                已强制接管，但本体仍报控制权不在平台：平台已跳过这条门禁，摇杆照常下发。
+                若摇杆无效，说明外部控制（遥控器 / 第三方 App）仍在，请断开后重新点「接管」
+                （或先「释放」）。
               </p>
               <p v-else-if="ctrlByOther" class="diag-tip">
                 <AppIcon name="warn" />
-                硬件遥控器（或其他 SDK）仍持有控制权，本体不会执行平台摇杆。请关闭遥控器电源 /
-                按遥控器的「释放控制」键；若遥控器已断电而状态还没刷新，可直接点「强制接管」。
+                本体控制权不在平台（ctrl_source=3）：可能是物理遥控器 / 第三方 App，
+                也可能是本体内残留任务占着导航能力（本体常回 13897 capability busy）。
+                请关遥控器电源、在本体取消残留任务或重启算法服务；确认遥控器已断电而状态还没
+                刷新时，可直接点「强制接管」。
               </p>
               <p v-else-if="holding && !gaitReady" class="diag-tip">
                 <AppIcon name="warn" />

@@ -450,9 +450,9 @@ onMounted(load);
                   v-if="device.status !== '离线' && device.ctrlSource === 3"
                   class="cell-sub"
                   style="margin-top: 4px"
-                  title="1315 ctrl_source=3：硬件遥控器 / 外部程序持着控制权，平台摇杆与任务下发会失效"
+                  title="1315 ctrl_source=3：控制权不在平台（遥控器 / 第三方 App / 本体内部残留任务），平台摇杆与任务下发会失效"
                 >
-                  <span class="badge danger"><i />遥控器占用</span>
+                  <span class="badge danger"><i />控制权被占用</span>
                 </div>
                 <div
                   v-if="device.status !== '离线' && device.bodyOnline"

@@ -72,8 +72,10 @@ export function locStatusMeta(status?: number | null): { label: string; tone: st
 /**
  * 控制源（智航 1315 `ctrl_source`）→ 展示文案与色标。
  *
- * 0 未知 / 1 APP / 2 SDK / 3 其他（硬件遥控器走这条）。
- * 平台接管后若仍是 3，说明遥控器或别的 SDK 压着控制权，摇杆不会生效。
+ * 0 未知 / 1 APP / 2 SDK / 3 其他。
+ * `3` 的语义是「其他控制源」：物理遥控器、第三方 App，以及**本体内部残留任务**
+ * 占住导航能力时固件也会报 3（现场后者更常见，通常伴随 13897 capability busy）。
+ * 所以文案不写死「遥控器」，避免运维去关一个本来就关着的遥控器。
  */
 export function ctrlSourceMeta(source?: number | null): { label: string; tone: string } {
   switch (source ?? 0) {
@@ -82,7 +84,7 @@ export function ctrlSourceMeta(source?: number | null): { label: string; tone: s
     case 2:
       return { label: "SDK 控制", tone: "ok" };
     case 3:
-      return { label: "其他 / 遥控器", tone: "danger" };
+      return { label: "其他控制源", tone: "danger" };
     default:
       return { label: "未知", tone: "neutral" };
   }
