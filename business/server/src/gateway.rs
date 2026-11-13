@@ -1245,7 +1245,7 @@ async fn record_control_source_change(
          VALUES ('device_event', ?1, ?2, (SELECT id FROM devices WHERE device_id = ?3), NULL, ?4)",
     )
     .bind(if source == 3 {
-        "控制权被其他控制源接管"
+        "控制权被本体内部任务占用"
     } else {
         "控制权已收回"
     })
@@ -1259,10 +1259,34 @@ async fn record_control_source_change(
     .await;
 
     if source == 3 {
-        open_control_preempt_alert(db, device_id, timestamp).await;
+        // 我们自己下发的任务在跑：本体报 3 是"导航能力在本体手里"，属正常，
+        // 不落抢占告警（否则每次下发任务都弹一次「控制权不在平台」）。
+        if has_running_task(db, device_id).await {
+            debug!("设备 {device_id} ctrl_source=3 出现在任务执行期间，按正常情况处理");
+        } else {
+            open_control_preempt_alert(db, device_id, timestamp).await;
+        }
     } else {
         resolve_control_preempt_alert(db, device_id, timestamp).await;
     }
+}
+
+/// 该设备是否有**我们自己下发**的、正在执行的任务。
+///
+/// 本体在跑导航任务时会把自己报成 `ctrl_source = 3`（控制权在本体自己手里）。
+/// 这是正常现象，不是遥控器抢占——拿它去告警/弹窗只会让运维每次跑任务都被吓一次。
+async fn has_running_task(db: &SqlitePool, device_id: &str) -> bool {
+    let running: Option<i64> = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tasks t
+           JOIN devices d ON d.id = t.device_id
+          WHERE d.device_id = ?1 AND t.task_status = '执行中'",
+    )
+    .bind(device_id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+    running.unwrap_or(0) > 0
 }
 
 /// 控制权被其他控制源接管（`ctrl_source = 3`）→ 一条「未处理」告警。

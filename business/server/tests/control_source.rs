@@ -206,7 +206,7 @@ async fn preempt_alerts(state: &AppState) -> (i64, i64) {
 async fn control_events(state: &AppState) -> i64 {
     sqlx::query_scalar(
         "SELECT COUNT(*) FROM task_events
-           WHERE title IN ('控制权被其他控制源接管', '控制权已收回')
+           WHERE title IN ('控制权被本体内部任务占用', '控制权已收回')
            AND device_id = (SELECT id FROM devices WHERE device_id = ?1)",
     )
     .bind(DEVICE_CODE)
@@ -285,6 +285,46 @@ async fn flapping_remote_takeover_records_each_transition() {
     heartbeat(&mut ws, 3).await;
     assert_eq!(preempt_alerts(&state).await, (2, 1), "每次抢占各自一条，只有最新未处理");
     assert_eq!(control_events(&state).await, 3, "三次变化都进事件流");
+}
+
+/// 我们自己的任务在跑时，本体报 `ctrl_source = 3` 是正常现象（导航能力在本体手里），
+/// 不能弹「控制权不在平台」告警——否则每下发一次任务就吓运维一次。
+#[tokio::test]
+async fn running_task_suppresses_preempt_alert() {
+    let (state, _db) = test_state().await;
+    let port = spawn_server(state.clone()).await;
+    let mut ws = register_device(port, DEVICE_CODE).await;
+    let pk: i64 = sqlx::query_scalar("SELECT id FROM devices WHERE device_id = ?1")
+        .bind(DEVICE_CODE)
+        .fetch_one(&state.db)
+        .await
+        .expect("设备应在台账里");
+    sqlx::query(
+        "INSERT INTO tasks (task_code, task_name, device_id, task_status, progress,
+            created_at, updated_at)
+         VALUES ('TK-RUN-1', '任务执行中', ?1, '执行中', 10, '2026-11-13 00:00:00',
+            '2026-11-13 00:00:00')",
+    )
+    .bind(pk)
+    .execute(&state.db)
+    .await
+    .expect("插入执行中任务");
+
+    heartbeat(&mut ws, 3).await;
+    assert_eq!(
+        preempt_alerts(&state).await,
+        (0, 0),
+        "任务执行期间的 ctrl_source=3 不应落告警"
+    );
+
+    // 任务收尾后本体还报 3：那才是真抢占，要告警
+    sqlx::query("UPDATE tasks SET task_status = '异常' WHERE task_code = 'TK-RUN-1'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    heartbeat(&mut ws, 1).await;
+    heartbeat(&mut ws, 3).await;
+    assert_eq!(preempt_alerts(&state).await, (1, 1), "任务结束后的 3 仍要告警");
 }
 
 /// 本体近期回过 `13897 capability busy` 时，告警必须指向「本体自己占着导航能力」，

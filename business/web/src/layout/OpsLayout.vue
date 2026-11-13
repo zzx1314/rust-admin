@@ -148,6 +148,14 @@ async function watchControlSource() {
       ctrlSourceOf.set(device.id, device.ctrlSource);
       if (previous !== undefined && previous === device.ctrlSource) continue;
 
+      // 本体在跑我们下发的任务时也会报 ctrl_source=3（导航能力在本体手里），
+      // 这不算抢占：任务执行中不弹提示，避免每次下发任务都被吓一次。
+      if (device.status === "执行任务") {
+        ctrlNotices.get(device.id)?.close();
+        ctrlNotices.delete(device.id);
+        continue;
+      }
+
       if (device.ctrlSource === 3) {
         ctrlNotices.get(device.id)?.close();
         ctrlNotices.set(
