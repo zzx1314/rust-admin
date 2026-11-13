@@ -1410,7 +1410,10 @@ fn spawn_zhpro_pump(
                             task.stop_reason
                         );
                         if last_task_log.as_deref() != Some(key.as_str()) {
-                            debug!(
+                            // 本体的 5009 响应：只在 lifecycle/stage/error 变化时打一条，
+                            // 所以放在 info —— 默认 `journalctl` 就能看到「本体回什么」。
+                            // （原始帧本身是 500ms 一条，只在 debug/trace 或帧落盘里出现）
+                            info!(
                                 "5009 任务({source}): id={} name={} type={} lifecycle={} stage={}                                  progress={:?} point={:?}/{:?} error={:?} stop={:?}                                  task_state={} loc={}",
                                 task.task_id,
                                 task.name,
@@ -2006,10 +2009,11 @@ async fn handle_server_message(
             let task_type = msg.payload["taskType"].as_str().unwrap_or("巡检");
             let mode = TaskMode::parse(task_type);
             info!("收到任务: [{task_code}] {task_name} 类型={task_type} 模式={mode:?}");
-            // 排障最有用的一行：把业务侧下发的整份任务载荷原样打出来
-            // （`RUST_LOG=robodog_device_client=debug` 才可见，模拟模式下同样会打，
-            //   用来核对 map / routeData.points 是否与平台一致）
-            debug!("task_dispatch 载荷: {}", msg.payload);
+            // 排障最有用的一行：把业务侧下发的整份任务载荷原样打出来（含 routeData.points /
+            // map / initialPose）。整条链路的信息默认可见：服务端 `task_dispatch 下发载荷`
+            // → 客户端这行 → 客户端的 `5000` 完整帧 → 本体的 `5001` / `5009`。
+            // （模拟模式下同样会打，用来核对 map / routeData 是否与平台一致）
+            info!("task_dispatch 载荷: {}", msg.payload);
 
             *active.lock().await = Some(ActiveTask {
                 task_code: task_code.clone(),

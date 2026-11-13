@@ -786,6 +786,23 @@ curl -X POST /api/devices/12/locate -H 'Content-Type: application/json' \
 2 SDK / 3 遥控器）。「它什么时候自己趴下的」「谁把控制权拿走了」直接看事件流即可。
 `4021` 故障事件的文案里带上了原始 `code` 与 `severity`，便于对着本体文档排查。
 
+### 日志：怎么看「下发了什么 / 本体回了什么」
+
+默认 `info` 级别就能看到完整报文，不用改任何配置：
+
+| 行 | 含什么 |
+| --- | --- |
+| 服务端 `task_dispatch 下发载荷` | 业务拼好的整份 JSON（`routeData.points` / `map` / `speedLimit` / `initialPose`） |
+| 客户端 `task_dispatch 载荷: …` | 客户端实际收到的业务载荷（核对是否被中继修改） |
+| 客户端 `→ 智航完整帧（含 head）` | 发给本体的 `5000/5002/5004/5006/5014/4030/4044` 原始帧（`goals/map_path/map_type/need_locate/fence_path`） |
+| 客户端 `← 智航完整帧（含 head）` | 本体应答 `5001/5003/5005/5007/5015/4031/4045` 原始帧（`task_id` / `code` / `message`） |
+| 客户端 `5009 任务(...)` | 本体状态机变化（`lifecycle` / `stage` / `error` / `stop_reason` / `task_state` / `loc`），按快照去重，不刷屏 |
+
+要看**每一帧**（含 `1315/1317/5009` 周期推送）或要长期取证，开帧落盘：
+`ROBODOG_FRAME_DUMP=/var/log/robodog/frames.jsonl`（写在 systemd 的
+`/etc/robodog/client.env`，一行一帧 `{"ts","dir","frame"}`，与日志级别无关）。
+细节与命令见 `docs/client-connection-guide.md` §11.5。
+
 ### 任务控制
 
 `PUT /api/tasks/{id}/status` 映射到客户端的 `task_control`：

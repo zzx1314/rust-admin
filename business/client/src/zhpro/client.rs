@@ -43,6 +43,33 @@ const GATEWAY_HEARTBEAT: Duration = Duration::from_secs(1);
 
 /// 待应答请求：`msg_id → 回复发送端`
 type ReplySender = oneshot::Sender<Envelope>;
+/// 任务 / 地图动作类帧的**完整帧**（含 head）默认就在 `info` 级别打印。
+///
+/// 这些帧一次任务只出现个位数（每个航点一对 `5000`/`5001`），不像 `1315`/`1317`/`5009`
+/// 那样刷屏，所以不藏在 debug 后面：现场 `journalctl -u robodog-device-client`
+/// 不用改任何配置，就能直接看到「我们下发了什么、本体回了什么」。
+///
+/// 需要连周期推送的原文一起看时再加 `RUST_LOG=robodog_device_client=debug|trace`，
+/// 或干脆开 [`frame_dump`] 落盘的 `ROBODOG_FRAME_DUMP`。
+const ALWAYS_LOG_FRAME_TYPES: &[u32] = &[
+    // 下发：任务 / 定位 / 避障等级
+    T_TASK_CREATE,
+    T_TASK_CANCEL,
+    T_TASK_PAUSE,
+    T_TASK_RESUME,
+    T_RETURN_TO_CHARGE,
+    T_LOCATE,
+    T_SET_AVOID_LEVEL,
+    // 对应应答：5001/5003/5005/5007/5015/4031/4045
+    T_TASK_CREATE_ACK,
+    T_TASK_CANCEL_ACK,
+    T_TASK_PAUSE_ACK,
+    T_TASK_RESUME_ACK,
+    T_RETURN_TO_CHARGE_ACK,
+    T_LOCATE_ACK,
+    T_SET_AVOID_LEVEL_ACK,
+];
+
 /// 值得在 DEBUG 级别看到的类型：**请求应答** + 会话 / 地图 / 控制权通知。
 ///
 /// 其余一律 TRACE。真机实测：`1317`（故障）/`1327`（速度）约 300ms 一条、`1325`（运控）
@@ -119,7 +146,10 @@ fn dump_frame(dir: &str, text: &str) {
 fn log_incoming(env: &Envelope) {
     let text = env.to_text();
     dump_frame("recv", &text);
-    if DEBUG_FRAME_TYPES.contains(&env.head.msg_type) {
+    if ALWAYS_LOG_FRAME_TYPES.contains(&env.head.msg_type) {
+        // 任务类应答（5001/5003/…/4031/4045）：默认可见
+        info!(packet = %text, "← 智航完整帧（含 head）");
+    } else if DEBUG_FRAME_TYPES.contains(&env.head.msg_type) {
         debug!(packet = %text, "← 智航完整帧（含 head）");
     } else {
         // 周期推送（1315/1317/1325/1327/1401/1403/1405/1407/5009/4035…）
@@ -478,22 +508,12 @@ impl ZhProClient {
         let msg_id = self.next_msg_id();
         let env = Envelope::request(msg_type, msg_id, data);
         let text = env.to_text();
-        // trace 级别打印完整出站请求，便于和协议文档逐字段对账；
-        // 现场默认 RUST_LOG=...=debug，不会刷 5000/4030 这些包。
+        // 逐帧对账用 trace（含 4012 这类大列表）：只在短时排障时开。
         trace!(msg_type, msg_id, packet = %text, "→ 智航请求");
-        // 任务类报文在 debug 级别也把**完整帧（head + data）**打出来：
+        // 任务类报文默认在 info 级别就把**完整帧（head + data）**打出来：
         // 只打 data 时看不出 msg_id / src / time，和协议文档 §2.5.1.4 的示例对不上账。
-        if matches!(
-            msg_type,
-            T_TASK_CREATE
-                | T_TASK_CANCEL
-                | T_TASK_PAUSE
-                | T_TASK_RESUME
-                | T_RETURN_TO_CHARGE
-                | T_LOCATE
-                | T_SET_AVOID_LEVEL
-        ) {
-            debug!(msg_type, msg_id, packet = %text, "→ 智航完整帧（含 head）");
+        if ALWAYS_LOG_FRAME_TYPES.contains(&msg_type) {
+            info!(msg_type, msg_id, packet = %text, "→ 智航完整帧（含 head）");
         }
         dump_frame("send", &text);
         let (tx, rx) = oneshot::channel();

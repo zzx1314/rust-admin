@@ -392,6 +392,7 @@ cargo run -- --print-config      # 查看脱敏后的生效配置
 | `video.width` | — | — | `0`（保持原始分辨率，等比缩放） |
 | `simulation.battery` / `position` / `firmware` | — | `--battery` / `--position` / `--firmware` | `86` / `0.0, 0.0` / `Hermes_M_v0.3.2` |
 | `log.filter` | `RUST_LOG`（优先） | — | `robodog_device_client=info` |
+| 帧落盘（不在 toml 里） | `ROBODOG_FRAME_DUMP` | — | 空（不落盘）；设成文件路径时每帧一行 JSONL |
 
 > `server.device_id` 是**唯一设备身份**（必须与业务库 `devices.device_id` 一致）；
 > 协议里没有设备 ID / SN 可回读，`client_id` 与 `robot.host` 都不能替代它，详见 §2.1。
@@ -413,7 +414,33 @@ bulkdata 绑定超时 `10s`、遥控看门狗 `1s`。
   - 配置文件拼写了未知字段（`deny_unknown_fields`，避免 `secrect` 这类错误被忽略）；
 - `robot.host` 有值但连不上时仍按原策略降级为模拟模式并打印错误日志。
 
-### 11.5 现场部署（systemd）
+### 11.5 看「下发给本体什么、本体回什么」
+
+三层可见性，按需选：
+
+| 级别 / 开关 | 默认可见？ | 内容 |
+| --- | --- | --- |
+| 默认 `info` | ✅ | 业务下发的 `task_dispatch 载荷`（整份 JSON）、每个航点的 `→ 智航完整帧（含 head）`（`5000/5002/5004/5006/5014/4030/4044`）、本体应答 `← 智航完整帧（含 head）`（`5001/5003/5005/5007/5015/4031/4045`）、`5009` 任务状态**变化**（`id/lifecycle/stage/error/stop_reason/task_state/loc`） |
+| `RUST_LOG=robodog_device_client=debug` | ❌ | 额外的会话 / 地图 / 控制权通知帧（`1201/1205/1303/1311/1523/4013`、`5009` 帧摘要等） |
+| `RUST_LOG=robodog_device_client=trace` | ❌ | 全量原始帧，含 `1315/1317/1325/1327/5009` 这些周期推送（**会刷爆 journald**，只适合短时开） |
+| `ROBODOG_FRAME_DUMP=/var/log/robodog/frames.jsonl` | ❌ | **每一帧**（`send` + `recv`，含完整 `head + data`）一行 JSONL，与日志级别无关、不占 journald |
+
+```bash
+# 临时开 debug（写进 systemd 的 EnvironmentFile，改完必须重启）
+echo 'RUST_LOG=robodog_device_client=debug' | sudo tee -a /etc/robodog/client.env
+sudo systemctl restart robodog-device-client
+journalctl -u robodog-device-client -f -o cat | grep -E '智航完整帧|5009 任务|task_dispatch'
+
+# 长期取证：整帧落盘（文件不轮转，记得配 logrotate 或排障完注释掉）
+echo 'ROBODOG_FRAME_DUMP=/var/log/robodog/frames.jsonl' | sudo tee -a /etc/robodog/client.env
+sudo systemctl restart robodog-device-client
+tail -n 20 /var/log/robodog/frames.jsonl   # {"ts":..,"dir":"send|recv","frame":{head,data}}
+```
+
+链路上下游还有两处对账点：业务平台（`robodog_ops_server`，默认过滤器已到 `debug`）的
+`task_dispatch 下发载荷`，以及任务详情里的「任务事件」——三处 JSON 应逐字段一致。
+
+### 11.6 现场部署（systemd）
 
 现成脚本：`client/deploy/install.sh`（编译 release → 装到 `/opt/robodog/client` →
 装 `/etc/systemd/system/robodog-device-client.service` → 启动），配置模板

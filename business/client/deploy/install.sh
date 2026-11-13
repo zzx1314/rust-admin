@@ -64,6 +64,8 @@ install -Dm644 README.md "$PREFIX/README.md"
 
 echo "==> 准备配置 $CONF_DIR"
 install -d -m 750 "$CONF_DIR"
+# 帧落盘（ROBODOG_FRAME_DUMP）默认指向这里；客户端以 root 运行，无需额外改权限
+install -d -m 750 /var/log/robodog
 if [[ -f "$CONF_FILE" ]]; then
   echo "    已有 $CONF_FILE，保留不覆盖"
 else

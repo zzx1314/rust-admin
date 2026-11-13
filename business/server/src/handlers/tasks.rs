@@ -10,7 +10,7 @@ use axum::extract::{Path, Query, State};
 use axum::Extension;
 use serde_json::{Value, json};
 use sqlx::{QueryBuilder, SqlitePool};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// 任务下发前的设备健康快照：
 /// (device_id, park_id, body_online, estop_software, sdk_node_available, ctrl_source, run_mode)
@@ -260,6 +260,13 @@ async fn push_task_dispatch(state: &AppState, task: &Task) -> Result<Option<Stri
     };
 
     let dispatch = crate::dispatch::build_dispatch_payload(&state.db, task).await?;
+    // 排障：把发往设备的整份 `task_dispatch` 载荷留痕（含 routeData / map / speedLimit）。
+    // 服务端默认过滤器是 `robodog_ops_server=debug`，不用额外配就能看到。
+    // 想核对「本体实际收到的 5000 长什么样」时，再去客户端看 `→ 智航完整帧`。
+    debug!(
+        payload = %serde_json::to_string(&dispatch).unwrap_or_default(),
+        "task_dispatch 下发载荷"
+    );
     if let Some(map) = dispatch.map.as_ref() {
         // 现场排障关键信息：业务地图 ID 与本体目录名是两回事
         info!(
