@@ -5,6 +5,10 @@
 #   1) zenoh 大消息池 48MB → 8MB（`/dev/shm` 被每个 session 吃满的根因）
 #   2) `/dev/shm` 守护 timer（快满 / dog_task 已在崩溃循环 → 自动 停栈→清 shm→起栈）
 #
+# ⚠️ 2026-11-13 22:20 现场已回滚：zenoh pool_size 覆盖实测不改变段大小（无效），
+#    且当天发现两台机器每 5~40 分钟一起硬复位（电源问题），为降变量把脚本撤了。
+#    保留此脚本仅供"/dev/shm 被吃满"这一种场景复用。
+#
 # 用法（在 `.1` 上执行，需要 sudo）：
 #   scp -r deploy/robodog-body firefly@192.168.234.1:/tmp/
 #   ssh firefly@192.168.234.1 'sudo bash /tmp/robodog-body/install-body-guard.sh'
