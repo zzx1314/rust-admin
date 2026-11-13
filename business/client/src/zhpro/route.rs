@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
@@ -243,12 +243,53 @@ pub enum Control {
     Cancel,
 }
 
-/// 首航点是否需要「载图并等定位收敛」。
+/// 航点起步时是否「载图并等定位收敛」（5000 `params.need_locate`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Locate {
+    /// `need_locate=false`：复用当前已加载地图的定位（免重载、保住位姿）
+    Reuse,
+    /// `need_locate=true`：载图并等定位收敛（协议安全默认）
+    Reload,
+}
+
+impl Locate {
+    pub fn need_locate(self) -> bool {
+        matches!(self, Locate::Reload)
+    }
+}
+
+/// 起步预检（4030）的可复用窗口。
 ///
-/// 同一条航线内复用已加载的定位，只有第一个点需要定位；而如果起步前的定位守卫
-/// 已经把定位收敛好了，首点也不必再重载一次地图（省 10~30s，且不重置位姿）。
-pub fn need_locate_for(index: usize, pre_located: bool) -> bool {
-    index <= 1 && !pre_located
+/// 预检到首个 `5000` 之间还夹着取控制权、`1302 cmd=62` 切导航模式、`5002` 收尾旧任务，
+/// 期间地图可能被换掉（本体 App 抢权、算法节点重启），所以「刚载过图」只在短时间内可信。
+pub const PRE_LOCATE_REUSE_WINDOW: Duration = Duration::from_secs(60);
+
+/// 起步预检记录：绑地图 + 时刻，避免只留一个裸 bool——久等或换图之后它就不再可信了。
+#[derive(Debug, Clone)]
+struct PreLocated {
+    map_path: String,
+    at: Instant,
+}
+
+/// 判定某个航点的起步定位方式。
+///
+/// 只有「首点 且 预检不可信」才重新载图；同一条航线内其余点一律复用定位。
+/// 结束动作「返回起点」也走复用：那时地图肯定还加载在本体上，再载一次只是白花
+/// 10~30s，还会把位姿重置回「上一份位姿文件」。
+pub fn locate_decision(
+    is_first: bool,
+    pre_located: Option<(&str, Duration)>,
+    map_path: &str,
+) -> Locate {
+    if !is_first {
+        return Locate::Reuse;
+    }
+    match pre_located {
+        Some((path, elapsed)) if path == map_path && elapsed <= PRE_LOCATE_REUSE_WINDOW => {
+            Locate::Reuse
+        }
+        _ => Locate::Reload,
+    }
 }
 
 /// 本体「能力忙」错误码：`13897 resource conflict (capability busy)`
@@ -283,6 +324,24 @@ pub fn is_capability_busy(error: &str) -> bool {
 /// 错误串里是否为「任务不存在」（13896）
 pub fn is_task_not_found(error: &str) -> bool {
     error.contains(CODE_TASK_NOT_FOUND)
+}
+
+/// 错误串是否属于「定位 / 地图未就绪」。
+///
+/// 这类错误**不能按航点跳过**：本体不知道自己在地图哪 / 图没加载时，后面每个航点
+/// 若还带着 `need_locate=false` 就会继续秒失败，最后把整条航线静默跑成 0/N
+/// 却回报「巡检完成」（全部航点可跳过时尤其如此）。
+pub fn is_locate_error(error: &str) -> bool {
+    [
+        "定位",          // 定位未就绪 / SLAM 定位失败 / 重新定位失败
+        "need_locate",   // 本体起步守卫：位未就绪
+        "map not found", // 13898 map not found or invalid
+        "missing map",   // 13898 missing map.yaml
+        "map.yaml",
+        "未加载地图",
+    ]
+    .iter()
+    .any(|needle| error.contains(needle))
 }
 
 /// 单点导航的 5000 `kind=2` 载荷。
@@ -353,8 +412,8 @@ pub struct RouteRunner {
     cancelled: AtomicBool,
     /// 暂停标记（客户端侧作业暂停）
     paused: AtomicBool,
-    /// 起步前预检已经锁好定位：首航点不必再让本体重载地图
-    pre_located: AtomicBool,
+    /// 起步前预检已经锁好定位：首航点不必再让本体重载地图（带地图与时刻，见 [`PreLocated`]）
+    pre_located: Mutex<Option<PreLocated>>,
     total: Mutex<usize>,
     completed: Mutex<usize>,
     skipped: Mutex<usize>,
@@ -369,7 +428,7 @@ impl RouteRunner {
             queue: Mutex::new(VecDeque::new()),
             cancelled: AtomicBool::new(false),
             paused: AtomicBool::new(false),
-            pre_located: AtomicBool::new(false),
+            pre_located: Mutex::new(None),
             total: Mutex::new(0),
             completed: Mutex::new(0),
             skipped: Mutex::new(0),
@@ -378,8 +437,29 @@ impl RouteRunner {
 
     /// 标记「定位已由起步预检完成」：首航点改用 `need_locate=false` 复用当前定位，
     /// 避免刚重定位完又让本体载一次图（多花 10~30s，且会重置位姿）。
-    pub fn mark_pre_located(&self) {
-        self.pre_located.store(true, Ordering::SeqCst);
+    ///
+    /// 记录地图路径与时刻：换图或隔得太久（[`PRE_LOCATE_REUSE_WINDOW`]）就不认这条记录。
+    pub async fn mark_pre_located(&self, map_path: &str) {
+        *self.pre_located.lock().await = Some(PreLocated {
+            map_path: map_path.to_string(),
+            at: Instant::now(),
+        });
+    }
+
+    /// 本点的起步定位方式：首点读取（并消费）预检记录，其余点一律复用。
+    async fn locate_for(&self, plan: &FlightPlan, is_first: bool) -> Locate {
+        if !is_first {
+            return Locate::Reuse;
+        }
+        let map_path = plan.resolve_map_path(super::mapping::DEFAULT_MAP_ROOT);
+        let pre = self.pre_located.lock().await.take();
+        let pre = pre.map(|item| (item.map_path, item.at.elapsed()));
+        locate_decision(
+            true,
+            pre.as_ref()
+                .map(|(path, elapsed)| (path.as_str(), *elapsed)),
+            &map_path,
+        )
     }
 
     pub async fn prepare(&self, plan: FlightPlan) {
@@ -496,7 +576,9 @@ impl RouteRunner {
                 "执行航点 {index}/{total}: {} ({:.2}, {:.2})",
                 point.name, point.x, point.y
             );
-            match self.goto_point(&plan, &point, index, total).await {
+            // 只有首点可能重新载图定位；后续点（含「返回起点」）一律复用已加载的定位
+            let locate = self.locate_for(&plan, index == 1).await;
+            match self.goto_point(&plan, &point, index, total, locate).await {
                 Ok(()) => {
                     self.perform_actions(&point).await;
                     *self.completed.lock().await += 1;
@@ -505,7 +587,9 @@ impl RouteRunner {
                     if self.is_cancelled() {
                         return Ok(self.outcome(false, "任务已取消".to_string(), total).await);
                     }
-                    if point.skippable() {
+                    // 定位/地图类错误不按航点跳过：后面每个点都会同样秒失败，
+                    // 跳过只会把航线静默跑成 0/N。直接中止并回传真实原因。
+                    if point.skippable() && !is_locate_error(&e) {
                         warn!("航点 {} 失败，跳过: {e}", point.name);
                         *self.skipped.lock().await += 1;
                         continue;
@@ -535,8 +619,9 @@ impl RouteRunner {
             }
             EndTask::ReturnToStart => {
                 info!("巡检结束，返回起点");
+                // 复用定位：此刻地图肯定还加载在本体上，不需要再载一次
                 if let Some(first) = plan.waypoints.first()
-                    && let Err(e) = self.goto_point(&plan, first, 0, total).await
+                    && let Err(e) = self.goto_point(&plan, first, 0, total, Locate::Reuse).await
                 {
                     warn!("返回起点失败: {e}");
                 }
@@ -576,17 +661,30 @@ impl RouteRunner {
         point: &Waypoint,
         index: usize,
         total: usize,
+        locate: Locate,
     ) -> Result<(), String> {
         let retries = point.retry_limit();
         let mut attempt = 0_u32;
         let mut busy_waits = 0_u32;
+        let mut locate = locate;
         loop {
-            let error = match self.navigate_once(plan, point, index, total).await {
+            let error = match self.navigate_once(plan, point, index, total, locate).await {
                 Ok(()) => return Ok(()),
                 Err(e) => e,
             };
             if self.is_cancelled() {
                 return Err("任务已取消".to_string());
+            }
+            // 本点带的是「复用定位」但本体说定位/地图不对（中途换图、算法节点重启、
+            // 定位丢失）：先升回「载图定位」重来一次，这是唯一能自救的机会。
+            // 只有一次：升上来之后再失败就走下面的正常重试/终止。
+            if is_locate_error(&error) && locate == Locate::Reuse {
+                warn!(
+                    "航点 {} 复用定位失败（{error}），改为载图定位后重试",
+                    point.name
+                );
+                locate = Locate::Reload;
+                continue;
             }
             if is_capability_busy(&error) {
                 busy_waits += 1;
@@ -622,10 +720,10 @@ impl RouteRunner {
         point: &Waypoint,
         index: usize,
         total: usize,
+        locate: Locate,
     ) -> Result<(), String> {
         let map_path = plan.resolve_map_path(super::mapping::DEFAULT_MAP_ROOT);
-        // 预检已锁定定位时首点不再重载地图；重试时标志已被取走，会重新载图定位
-        let need_locate = need_locate_for(index, self.pre_located.swap(false, Ordering::SeqCst));
+        let need_locate = locate.need_locate();
         let data = navigation_task_payload(plan, point, need_locate);
         // 现场排障最有用的一行：把真实下发的载荷整份打出来（`RUST_LOG=...=debug`）
         debug!("5000 载荷（第 {index}/{total} 点 {}）: {data}", point.name);
@@ -803,13 +901,71 @@ mod tests {
     }
 
     #[test]
-    fn need_locate_only_for_first_point_unless_pre_located() {
+    fn locate_only_reloads_on_first_point() {
+        let map = "/ota/alg_data/map/history_map/M";
         // 没有预检：首点载图定位，其余点复用
-        assert!(need_locate_for(1, false));
-        assert!(!need_locate_for(2, false));
-        // 预检已收敛：首点也不重载
-        assert!(!need_locate_for(1, true));
-        assert!(!need_locate_for(2, true));
+        assert_eq!(locate_decision(true, None, map), Locate::Reload);
+        assert_eq!(locate_decision(false, None, map), Locate::Reuse);
+        // 预检刚落完这张图：首点也不重载
+        assert_eq!(
+            locate_decision(true, Some((map, Duration::ZERO)), map),
+            Locate::Reuse
+        );
+        // 后续点：不管有没有预检记录都复用
+        assert_eq!(
+            locate_decision(false, Some((map, Duration::ZERO)), map),
+            Locate::Reuse
+        );
+    }
+
+    #[test]
+    fn locate_ignores_stale_or_other_map_pre_locate() {
+        let map = "/ota/alg_data/map/history_map/M";
+        // 预检记录过期（预检到首个 5000 之间夹了太多步骤）：不再可信
+        assert_eq!(
+            locate_decision(
+                true,
+                Some((map, PRE_LOCATE_REUSE_WINDOW + Duration::from_secs(1))),
+                map
+            ),
+            Locate::Reload
+        );
+        // 预检载的是另一张图（中途被换图）：不再可信
+        assert_eq!(
+            locate_decision(
+                true,
+                Some(("/ota/alg_data/map/history_map/OTHER", Duration::ZERO)),
+                map
+            ),
+            Locate::Reload
+        );
+        // 结束动作「返回起点」传 is_first=false → 永远复用，不会多载一次图
+        assert_eq!(
+            locate_decision(
+                false,
+                Some(("/ota/alg_data/map/history_map/OTHER", Duration::ZERO)),
+                map
+            ),
+            Locate::Reuse
+        );
+    }
+
+    #[test]
+    fn locate_error_is_fatal_not_skippable() {
+        assert!(Locate::Reload.need_locate());
+        assert!(!Locate::Reuse.need_locate());
+
+        // 定位/地图类错误：不能当成「可跳过的航点失败」
+        assert!(is_locate_error(
+            "5000 响应失败: code=13898 map not found or invalid"
+        ));
+        assert!(is_locate_error("起步守卫：位未就绪（定位未就绪）"));
+        assert!(is_locate_error("SLAM 定位失败：定位丢失（status=122）"));
+        // 其它错误照旧按航点策略处理
+        assert!(!is_locate_error(
+            "5001 响应失败: code=13897 resource conflict (capability busy)"
+        ));
+        assert!(!is_locate_error("航点 X 导航超时"));
     }
 
     #[test]

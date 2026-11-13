@@ -2356,6 +2356,15 @@ async fn handle_server_message(
                         plan.map_type = target_map_type;
                     }
 
+                    // 官方链路是「1204 取控制权 → 1302 cmd=62 切导航模式 → 选图/定位 → 建任务」。
+                    // 这里先把模式切好，再去做 4030 载图定位：否则 pre_located 的信任链
+                    // 会跨越一次模式切换（若切模式使算法节点重置地图/定位上下文，
+                    // 首点还带 need_locate=false 就会踩空）。`run()` 里仍会再切一次，
+                    // 那次只是兜底（take_control 有缓存，1302 重复下发无副作用）。
+                    if let Err(e) = zhpro::teleop::enter_navigation_mode(&client).await {
+                        warn!("任务 {task_code} 切导航模式失败（继续尝试，但本体可能拒任务）: {e}");
+                    }
+
                     // 起步前定位守卫：不在地图上 / 定位丢失时不发 5000，直接报可读异常
                     let map_path = plan.resolve_map_path(&config.map_root);
                     let initial_pose = parse_initial_pose(msg.payload.get("initialPose"));
@@ -2364,9 +2373,16 @@ async fn handle_server_message(
                     let pre_located = match ensure_localized(&client, &map_path, initial_pose).await
                     {
                         Ok((status, loaded)) => {
+                            // 首点取值与 route.rs 的 `locate_decision` 保持一致，
+                            // 避免这里用 `!loaded` 反推、将来判据一改就漂移
+                            let first_locate = zhpro::route::locate_decision(
+                                true,
+                                loaded.then_some((map_path.as_str(), Duration::ZERO)),
+                                &map_path,
+                            );
                             info!(
                                 "定位已就绪（status={status}），开始执行航线；首航点 need_locate={}",
-                                !loaded
+                                first_locate.need_locate()
                             );
                             loaded
                         }
@@ -2390,33 +2406,15 @@ async fn handle_server_message(
                         }
                     };
 
-                    // 软件急停未解除时本体一律拒运动指令：直接报原因，不要自等 600s
-                    if state.lock().await.estop_software == Some(true) {
-                        warn!("任务 {task_code} 拒绝下发：本体处于软件急停");
-                        report_progress(
-                            out_tx,
-                            &task_code,
-                            "异常",
-                            0,
-                            Some(
-                                "本体处于软件急停（estop.software=true），运动指令会被拒。\
-                                 请在设备页点「解除急停」（1302 cmd=1）或确认急停按钮已释放后重试"
-                                    .to_string(),
-                            ),
-                            None,
-                            None,
-                            None,
-                        )
-                        .await;
-                        clear_active_task(active, state).await;
-                        return;
-                    }
+                    // 软件急停 / sdk_node / ctrl_source / 卧倒姿态已由上面的
+                    // `motion_block_reason(true)` 统一拦过，这里不再重复检查
 
                     let runner = Arc::new(RouteRunner::new(client.clone()));
                     let total_points = plan.waypoints.len() as i64;
                     // 只有预检真的载了这张图，首航点才用 need_locate=false 复用定位
+                    //（记录绑地图 + 时刻，换图或超窗时 locate_for 会重新载图定位）
                     if pre_located {
-                        runner.mark_pre_located();
+                        runner.mark_pre_located(&map_path).await;
                     }
                     runner.prepare(plan).await;
                     *local_runner.lock().await = Some(runner.clone());
