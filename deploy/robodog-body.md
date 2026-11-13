@@ -269,6 +269,8 @@ journalctl -u robodog-device-client --since "-5 min" | grep -E 'sdk_node|急停|
 | 任务回 `13897 capability busy` | `.1` `dog_task` / `robot-launch list` | 本体内是否还有未结束任务 | 官方 App 取消任务；或重启本体栈（§4.5，会清掉所有本体任务） |
 | 一直报 `12608 相机无图 / 13382 障碍物检测延迟` | `.234` `robot-launch list` | `perception` egg 是 `stopped`（`perception-seg` 在跑） | 需要视觉避障时再 `robot-launch start perception`，先确认模型路径 |
 | `13504 内部节点异常` | 先修 `sdk_node` 链路 | 常为上下游连带 | 链路恢复后观察是否消失 |
+| 平台定位徽标「未就绪」、`position=0.0, 0.0` | `.234` `robot-alg-manager.stderr` | 一直在刷 `still waiting for topic /robot_type` | 按 §8.4 有序重启 `.234`（先确认 `.1` 稳定） |
+| 点「重新定位」报 `等待 4013 响应超时` | 同上 | alg-manager 未初始化，地图服务没起 | 同上（§8） |
 | 任务从**第 2 个点**起全是 `13897 capability busy` | 客户端版本 | `journalctl -u robodog-device-client \| grep 13897`；日志里每个点是独立的 `5000` | 旧版客户端逐点下发且不释放能力。换 ≥2026-11-13 的客户端（分段下发 + 建任务前等 `5009 task_state=idle`），见 §7 |
 | `/dev/shm` 反复 100%，清完十几分钟又满 | `.1` `df -h /dev/shm` + `sudo lsof +L1` | 大量 48MB `*.zenoh`（被 `rmw_zenohd`/各节点持有） | zenoh 池 48MB→8MB + 装 `/dev/shm` 守护，见 §7 |
 
@@ -383,7 +385,112 @@ sudo systemctl restart robot-launch
 
 ---
 
-## 8. 命令速查
+## 8. 地图 / 定位加载不出来（`4013` 超时、`loc_status=0`、位置 0,0）
+
+> 2026-11-13 现场实录。表现是"机器狗拿不到位置"，平台设备抽屉里定位徽标一直是
+> 「未就绪」，点「重新定位」直接报错，任务因为定位没收敛而跑不动。
+> **记住：这条链的根因在 `.234`，不在平台、也不在 `.1` 的运动控制。**
+
+> **⏱ 30 秒结论**：地图/定位起不来时，99% 是 `.234` 的 `robot-alg-manager` 卡在
+> `still waiting for topic /robot_type`（它要等 `.1` 报机型，两台同时重启就会错过）。
+> 处置只有一条：**先确认 `.1` 健康且没在反复重启 → `ssh robot@192.168.234.234 'sudo systemctl restart robot-launch'`
+> → 等 40 秒 → 平台点「重新定位」**。
+
+### 8.1 三个层次的症状（从上往下）
+
+| 层 | 表现 | 关键日志 |
+| --- | --- | --- |
+| 平台 | `loc_status=0`（或 255）、`position=0.0, 0.0`、定位徽标「未就绪」 | 设备台账 `devices.loc_status` |
+| 客户端 `.246` | 点「重新定位」后立刻失败 | `重定位失败：等待 4013 响应超时` |
+| 算法机 `.234` | 地图服务没起来 | `robot-alg-manager.stderr` 一直刷 `still waiting for topic /robot_type ...` |
+
+### 8.2 根因（启动时序竞态）
+
+```text
+.234 的 robot-alg-manager 启动脚本 alg-manager.sh
+  └─ 先跑 get_robot_type.py，等 .1 发来的 /robot_type（合法值只有 XG / XGW / XGWHSPD）
+       └─ 拿不到就一直等（脚本里没有超时/重试）
+            └─ alg-manager 初始化不完成
+                 └─ 地图列表 4013 无人应答 → 客户端「重定位：等待 4013 响应超时」
+                      └─ localization 停在 IDLE（loc=0）→ 平台拿不到位置
+```
+
+**什么时候会触发**：`.1`（RK3588）和 `.234`（Orin NX）**同时掉电重启**时。`.234` 比 `.1`
+先就绪，`get_robot_type.py` 抓不到值就永远卡住——之后哪怕 `.1` 恢复正常也不会补。
+所以「断电重启一次」经常没用，甚至越重越糟。
+
+> 同源现象：`.234` 的 `forward` 一直刷 `All odom data buffer are empty!`、
+> `localization` 输出 `localization_state: IDLE, odom_time: 0.000s, lidar_time: 0.000s`
+> —— 都是 alg 栈没初始化完的下游表现。
+
+### 8.3 三步判定（5 分钟内确认是不是这个问题）
+
+```bash
+# ① .234：alg-manager 是不是卡在等 /robot_type（关键判据）
+ssh robot@192.168.234.234 'tail -c 300 /home/robot/.robot_launch_logs/robot-alg-manager.stderr'
+#   卡住 → 反复出现 "still waiting for topic /robot_type ..."
+
+# ② .234：nav2 节点是否缺失（缺了说明 alg 栈没起来）
+ssh robot@192.168.234.234 '
+  source /opt/ros/humble/setup.bash; export RMW_IMPLEMENTATION=rmw_zenoh_cpp ROS_DOMAIN_ID=24
+  ros2 node list | grep -E "/bt_navigator|/controller_server|/global_costmap"'   # 空 = 没起来
+
+# ③ .234：/robot_type 有没有发布者
+#    Publisher count: 0 且 Subscriber count: 2 → 确诊
+ros2 topic info /robot_type
+```
+
+### 8.4 解法（顺序很重要）
+
+```bash
+# 0) 先确认 .1 是健康的、而且没在反复重启（否则修好了也会再坏）
+ssh firefly@192.168.234.1 'uptime -p; journalctl --list-boots --no-pager | tail -3'
+ssh firefly@192.168.234.1 'robot-launch list | grep -E "dog_task|ecal2ros|motion_control"'
+
+# 1) 重启 .234 的算法栈（不动 .1、不动运控；狗不会动）
+ssh robot@192.168.234.234 'sudo systemctl restart robot-launch'
+
+# 2) 等 40 秒后校验三件事
+ssh robot@192.168.234.234 '
+  df -h /dev/shm | tail -1
+  tail -c 300 /home/robot/.robot_launch_logs/robot-alg-manager.stderr   # 应停止增长
+  source /opt/ros/humble/setup.bash; export RMW_IMPLEMENTATION=rmw_zenoh_cpp ROS_DOMAIN_ID=24
+  ros2 node list | grep -cE "/bt_navigator|/controller_server|/collision_monitor"'
+
+# 3) 平台设备抽屉点「重新定位」，等 loc_status=100
+```
+
+**校验通过的样子**：`robot-alg-manager.stderr` 大小不再增长（`stat -c %s` 隔 5 秒比一次）、
+`ros2 node list` 里能看到 `/bt_navigator` `/controller_server` `/collision_monitor`
+`/global_costmap/global_costmap`、平台 `loc_status=100` 且 `position` 出现真实坐标。
+
+### 8.5 如果按 8.4 还不行
+
+| 现象 | 下一步 |
+| --- | --- |
+| `restart` 后 alg-manager 仍在等 `/robot_type` | 说明 `.1` 侧没在发。查 `.1`：`robot-launch list | grep -E "ecal2ros|dog_task"`、`tail /home/firefly/.robot_launch_logs/ecal2ros.stdout`（有 `eCAL Pub/Sub description mismatch` / `Scouting delay elapsed` 就是跨机 zenoh/eCAL 链路问题）→ 先修 `.1` 的栈 |
+| 4013 不超时了，但 `loc_status` 一直不是 100 | 地图目录不对或文件缺：`ls /ota/alg_data/map/history_map/<目录>`（必须含 `map.yaml`/`map.pcd`/`map.pgm`）；航线的 `map_path` 与本体目录名必须一致 |
+| 想临时手工补一次机型 | 在 `.234` 上 `ros2 topic pub --once /robot_type std_msgs/msg/String "{data: XGWHSPD}"`。⚠️ 注意：从 `.234` 起临时 `ros2` 客户端可能报 `Unable to connect to a Zenoh router` / `publisher's context is invalid`，这时手工补发不生效，别在这上面死磕——回到 8.4 |
+
+### 8.6 不要做的事
+
+1. **别直接重启 `.1`**：会掉运控使能（狗会软腿），而且不解决 `.234` 的等待问题；
+2. **别反复点「重新定位」**：alg 栈没起来时每次都会 4013 超时，纯等待；
+3. **别把定位问题当成"地图文件丢了"**：先看 8.3 第 ① 步，90% 是 alg-manager 卡在 `/robot_type`；
+4. 别用"断电重启"当常用手段——两台同时掉电正是触发这个竞态的原因。
+
+### 8.7 预防（软件侧待做）
+
+1. **客户端兜底**：启动/重连后若 `loc_status != 100` 且设备档案有地图，自动载图定位一次
+   （带退避，失败只记事件不刷屏）——把"每次重启要人工点重新定位"变成自动恢复；
+2. **平台提示**：4013 超时时把「地图服务未就绪（alg-manager 未初始化）」直接显示在设备抽屉，
+   而不是只报"超时"；
+3. **报厂商**：`get_robot_type.py` 应该用 `transient_local`（latched）订阅或带超时重试；
+   `.1` 的 `/robot_type` 最好周期发布，别只发一次。
+
+---
+
+## 9. 命令速查
 
 ```bash
 # 从开发机 / 背包机穿透到本体（.246 是跳板）
