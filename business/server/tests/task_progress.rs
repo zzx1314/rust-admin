@@ -231,21 +231,17 @@ async fn stalled_progress_is_marked_abnormal() {
     let task_id = insert_task(&state, "TK-STALL-1", "执行中", 5).await;
 
     // 最后一次上报是刚才（updated_at 新鲜），但进度从很早以前就没动过
-    let fresh = chrono::Local::now()
-        .format("%Y-%m-%d %H:%M:%S")
-        .to_string();
+    let fresh = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let stale = (chrono::Local::now() - chrono::Duration::seconds(3600))
         .format("%Y-%m-%d %H:%M:%S")
         .to_string();
-    sqlx::query(
-        "UPDATE tasks SET updated_at = ?1, progress_updated_at = ?2 WHERE id = ?3",
-    )
-    .bind(&fresh)
-    .bind(&stale)
-    .bind(task_id)
-    .execute(&state.db)
-    .await
-    .unwrap();
+    sqlx::query("UPDATE tasks SET updated_at = ?1, progress_updated_at = ?2 WHERE id = ?3")
+        .bind(&fresh)
+        .bind(&stale)
+        .bind(task_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
     sqlx::query("UPDATE devices SET last_heartbeat = ?1, status = '执行任务' WHERE device_id = ?2")
         .bind(&fresh)
         .bind(DEVICE_CODE)

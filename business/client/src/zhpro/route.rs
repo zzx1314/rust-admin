@@ -628,7 +628,10 @@ impl RouteRunner {
                 // 回 13898 map not found，导致「航线跑完了但没回充」。
                 if let Err(e) = self
                     .client
-                    .call(T_RETURN_TO_CHARGE, json!({ "map_id": plan.robot_map_dir() }))
+                    .call(
+                        T_RETURN_TO_CHARGE,
+                        json!({ "map_id": plan.robot_map_dir() }),
+                    )
                     .await
                 {
                     warn!("返回充电点失败: {e}");
