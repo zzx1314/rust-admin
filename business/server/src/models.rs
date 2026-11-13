@@ -160,6 +160,11 @@ pub struct Device {
     pub teleop_holder: Option<String>,
     /// 接管时间，用于超时自动释放
     pub teleop_at: Option<String>,
+    /// 强制接管标记：1 = 跳过 `ctrl_source = 3`（遥控器抢占）这一条健康门禁
+    ///
+    /// 遥控器关了但本体还在报 `ctrl_source = 3` 时，运维可二次确认后强制接管；
+    /// 其余门禁（离线 / `sdk_node` / 急停 / 卧倒）照旧生效。释放接管或掉线时清零。
+    pub teleop_force: bool,
     /// 本体链路是否在线：0 表示客户端处于模拟模式 / 本体掉线，电量等数值不可信
     pub body_online: bool,
     /// 客户端工作模式：robot（接本体）/ sim（纯模拟）/ NULL（未上报）

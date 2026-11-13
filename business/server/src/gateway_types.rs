@@ -87,6 +87,10 @@ pub struct HeartbeatAckPayload {
     pub server_ts: String,
     /// 待执行命令队列（可选）
     pub pending_commands: Vec<PendingCommand>,
+    /// 是否处于「强制接管」（跳过了 `ctrl_source = 3` 门禁）
+    ///
+    /// 客户端重启后本地标记会丢，靠心跳每轮同步：平台强制接管期间摇杆才能继续下发。
+    pub teleop_force: bool,
 }
 
 /// 客户端 → 服务端：任务进度上报
@@ -109,6 +113,24 @@ pub struct TaskProgressPayload {
     /// 航点总数，便于前端展示 `已完成/总数`
     #[serde(default)]
     pub total_points: Option<i64>,
+}
+
+/// 客户端 → 服务端：本地接管态变化
+///
+/// 设备客户端做**进程内重连**时，与业务平台的 WebSocket 不会断开，服务端也就
+/// 收不到「断连即清 `teleop_holder`」那条清理路径。而客户端在重建 control 通道后
+/// 必然丢掉 RoamerX 控制权（`1204` 是会话级的），所以必须由它显式上报「holder 已
+/// 不在本端」，否则平台会一直以为还握着控制权，摇杆被网关静默丢弃。
+///
+/// 只用于**释放**方向：holder 的建立仍由平台指令（「远程接管」）写入，客户端上报
+/// `holder: true` 会被忽略，避免两个来源互相覆盖。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeleopStatePayload {
+    /// 本地是否仍持有控制权（当前只有 `false` 生效）
+    pub holder: bool,
+    /// 上报原因，落到事件流便于运维追溯（如 `body-link-lost`）
+    pub reason: Option<String>,
 }
 
 /// 客户端 → 服务端：设备事件

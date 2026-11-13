@@ -46,6 +46,9 @@ pub const T_ROBOT_STATUS: u32 = 1315;
 /// 本体故障上报
 pub const T_FAULT_STATUS: u32 = 1317;
 
+/// RoamerX 控制权变更通知（网关广播，`client_id` 为当前 owner，无 owner 时UINT32_MAX）
+pub const T_ROAMER_CONTROL_NOTIFY: u32 = 1523;
+
 /// 建图保存结果通知
 pub const T_MAP_SAVED: u32 = 4001;
 /// 获取地图列表

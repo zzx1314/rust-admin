@@ -273,9 +273,11 @@ impl ZhProClient {
 
     /// 订阅本体链路状态：任一通道（control / bulkdata）断开后置 `true`
     ///
-    /// 客户端**不会**自己重连本体：链路一断，后续所有 4000~5999 请求都只会回
-    /// 「control 通道已关闭」（本体重启、网线抖动、网关踢会话都会这样）。调用方
-    /// 应该据此重启进程（systemd `Restart=always`）而不是带着一条死链继续跑。
+    /// 链路一断，后续所有 4000~5999 请求都只会回「control 通道已关闭」（本体重启、
+    /// 网线抖动、网关踢会话都会这样），所以调用方不能带着死链继续跑。设备客户端
+    /// （`main.rs` 的 `BodyLink`）拿到信号后做**进程内重连**：重建 control/bulkdata、
+    /// 重置接管态、业务 WebSocket 保持不断；只有在重连窗口内始终连不上时才退出
+    /// 进程交给 systemd（`Restart=always`）兜底。
     pub fn body_link(&self) -> watch::Receiver<bool> {
         self.link_down.clone()
     }
@@ -324,29 +326,14 @@ impl ZhProClient {
                         }
                     }
                     T_TAKE_CONTROL_NOTIFY => {
-                        let status = env
-                            .data
-                            .get("status_code")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(1);
-                        if status == 0 {
-                            *control_owned.lock().await = true;
-                            info!(
-                                "已取得 RoamerX 控制权: client_id={}",
-                                env.data
-                                    .get("client_id")
-                                    .and_then(serde_json::Value::as_u64)
-                                    .unwrap_or(0)
-                            );
-                        } else {
-                            // 1205 明确失败：本地标记必须失效，否则后续
-                            // take_control() 会误以为还持有控制权。
-                            *control_owned.lock().await = false;
-                            warn!(
-                                "获取 RoamerX 控制权失败: {}",
-                                str_field(&env.data, "message")
-                            );
-                        }
+                        // 1205 在「成功切换 owner」时是**广播**给所有 control 通道客户端的，
+                        // 广播里的 client_id 是新的 owner。不比对 client_id 就会把别人的接管
+                        // 当成本端拿到控制权，后续 1304/4030/5000 全都没有 owner 被网关丢弃。
+                        apply_control_owner(&env.data, 1, &session, &control_owned).await;
+                    }
+                    T_ROAMER_CONTROL_NOTIFY => {
+                        // 1523 是控制权变更推送（无 status_code），同样只看 client_id
+                        apply_control_owner(&env.data, 0, &session, &control_owned).await;
                     }
                     T_GATEWAY_ERROR => {
                         error!("网关传输层错误: {}", str_field(&env.data, "message"));
@@ -562,6 +549,16 @@ impl ZhProClient {
         *owned = false;
     }
 
+    /// 当前是否**真的**持有 RoamerX 控制权。
+    ///
+    /// `teleop` 模块的 `engaged` 只是本地缓存，摇杆前必须以这里为准：遥控器
+    /// 抢权（`ctrl_source = 3`）或 `1205` 失败时标记会被清掉，而缓存不会自己
+    /// 跟着变。只信缓存会跳过 `1204`，随后 `1304` 在没有 owner 的情况下被网关
+    /// 静默丢弃——现场表现就是「平台显示已接管、摇杆按下不动」。
+    pub async fn holds_control(&self) -> bool {
+        *self.control_owned.lock().await
+    }
+
     /// 确保持有 RoamerX 控制权（`1204`），已持有时直接返回
     ///
     /// 协议 §「4000 ~ 5999 自由数据透传区间」：gateway 的默认 owner 为 UINT32_MAX 时
@@ -594,6 +591,57 @@ impl ZhProClient {
         }
         *self.control_owned.lock().await = false;
         Err("获取 RoamerX 控制权超时".to_string())
+    }
+}
+
+/// 根据控制权类通知（`1205` / `1523`）更新本地「是否持有 RoamerX 控制权」
+///
+/// 两个消息都是**广播**，`client_id` 是当前 owner。原来只看 `status_code` 不看
+/// `client_id`，别的客户端/APP 把控制权拿走时会被误判为「本端刚拿到」，接着
+/// 1304/4030/5000 全都没有 owner 被网关丢弃——现场就是「接管成功但不动」。
+///
+/// `default_status` 用于没有 `status_code` 字段的消息（`1523` 按成功处理）。
+async fn apply_control_owner(
+    data: &Value,
+    default_status: u64,
+    session: &Arc<Mutex<SessionInfo>>,
+    control_owned: &Arc<Mutex<bool>>,
+) {
+    let status = data
+        .get("status_code")
+        .and_then(Value::as_u64)
+        .unwrap_or(default_status);
+    if status != 0 {
+        *control_owned.lock().await = false;
+        warn!("获取 RoamerX 控制权失败: {}", str_field(data, "message"));
+        return;
+    }
+
+    let owner = data
+        .get("client_id")
+        .and_then(Value::as_u64)
+        .map(|value| value as u32);
+    let me = session.lock().await.client_id;
+    match owner {
+        // 缺字段（老固件）：保持原语义，按「申请者拿到了」处理
+        None => {
+            *control_owned.lock().await = true;
+            info!("收到控制权通知但无 client_id，按本端取得处理");
+        }
+        Some(owner) if owner == u32::MAX => {
+            *control_owned.lock().await = false;
+            warn!("RoamerX 控制权已释放（无 owner），下次操作会重新发 1204");
+        }
+        // 握手还没落地（client_id 未知）时不误判：宁可当成本端，
+        // 否则首次接管会被自己的通知清掉标记而空等 3s
+        Some(owner) if me == 0 || owner == me => {
+            *control_owned.lock().await = true;
+            info!("已取得 RoamerX 控制权: client_id={owner}（本端 {me}）");
+        }
+        Some(owner) => {
+            *control_owned.lock().await = false;
+            warn!("RoamerX 控制权已切换到其他客户端: client_id={owner}（本端 {me}）");
+        }
     }
 }
 
@@ -694,5 +742,53 @@ mod tests {
         let (c, b) = endpoint_urls("ws://10.0.0.5:10010/control");
         assert_eq!(c, "ws://10.0.0.5:10010/control");
         assert_eq!(b, "ws://10.0.0.5:10010/bulkdata");
+    }
+
+    fn session_of(client_id: u32) -> Arc<Mutex<SessionInfo>> {
+        Arc::new(Mutex::new(SessionInfo {
+            client_id,
+            session_id: String::new(),
+            bulkdata_bind_token: String::new(),
+            control_path: String::new(),
+            bulkdata_path: String::new(),
+            bind_timeout_ms: 0,
+            device_type: String::new(),
+        }))
+    }
+
+    /// 1205 是广播：只有 `client_id` 等于本端时才能认为拿到了控制权
+    #[tokio::test]
+    async fn control_notify_only_trusts_own_client_id() {
+        let session = session_of(17);
+        let owned = Arc::new(Mutex::new(false));
+
+        let own = json!({ "status_code": 0, "client_id": 17 });
+        apply_control_owner(&own, 1, &session, &owned).await;
+        assert!(*owned.lock().await);
+
+        // 别的客户端（官方 APP / 另一个平台）把控制权抢走
+        let other = json!({ "status_code": 0, "client_id": 18 });
+        apply_control_owner(&other, 1, &session, &owned).await;
+        assert!(!*owned.lock().await);
+
+        // 1205 明确失败
+        let failed = json!({ "status_code": 3, "client_id": 17 });
+        apply_control_owner(&failed, 1, &session, &owned).await;
+        assert!(!*owned.lock().await);
+    }
+
+    /// 1523 没有 status_code，owner 为 UINT32_MAX 表示无人持权（按释放处理）
+    #[tokio::test]
+    async fn control_change_notify_handles_release() {
+        let session = session_of(17);
+        let owned = Arc::new(Mutex::new(true));
+
+        let own = json!({ "client_id": 17 });
+        apply_control_owner(&own, 0, &session, &owned).await;
+        assert!(*owned.lock().await);
+
+        let released = json!({ "client_id": u32::MAX });
+        apply_control_owner(&released, 0, &session, &owned).await;
+        assert!(!*owned.lock().await);
     }
 }

@@ -93,6 +93,8 @@ export interface Device {
   activeMapId: string | null;
   /** 控制源：0 未知 / 1 APP / 2 SDK / 3 其他（含硬件遥控器） */
   ctrlSource: number;
+  /** 强制接管中：遥控器断电但本体仍报 ctrlSource=3，二次确认后跳过了这条门禁 */
+  teleopForce: boolean;
   /** 运动状态：1315 `motion_status`（卧倒时摇杆走不动） */
   motionStatus: string | null;
   /** 1315 `estop.software`：软件急停是否按下 */

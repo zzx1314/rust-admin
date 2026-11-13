@@ -330,8 +330,16 @@ journalctl -u robodog-device-client -f | grep 视频
 | 卧倒姿态 | `1315 motion_status=lie_down` | 先点「站立」再执行任务/导航模式 |
 
 急停/解除急停/避障开关属于恢复类动作，不受接管态和上述门禁限制。
-1205 失败、`ctrl_source` 变成 0/3 时客户端会清掉本地 `control_owned` 标记，
-下一次接管/定位/任务会重新发 1204，不会再“误以为还持有控制权”。
+1205 失败、`ctrl_source` 变成 0/3 时客户端会清掉本地 `control_owned` 标记，**并且同步清掉
+`TeleopState` 的接管态与摇杆缓存**（`teleop::reset_after_control_lost`，顺带补一帧零摇杆），
+下一次接管/摇杆/定位/任务会重新发 1204，不会再“误以为还持有控制权”。
+
+> 为什么必须清两处：`engaged` 只是本地缓存，1204 是否真的持权以 `ZhProClient::control_owned` 为准。
+> 遥控器抢权后只清后者时，下一次推摇杆会因为 `engaged == true` 跳过 1204，1304 在没有 owner
+> 的情况下被网关静默丢弃——现场表现就是「平台显示已接管、摇杆按下不动，且没有任何报错」。
+
+摇杆被门禁拒绝时（`ctrl_source=3`、卧倒、急停等），客户端会按「原因变化或 30s」限频上报一条
+`warn` 事件（`摇杆被拒绝: <原因>`），落在设备事件流里，不再只是 `debug` 日志。
 
 ## 上报载荷
 
@@ -419,10 +427,18 @@ RUST_LOG=robodog_device_client::zhpro::client=trace   /opt/robodog/client/robodo
 `heartbeat timeout`）。所以 `GATEWAY_HEARTBEAT` 取 **1s**：一条空 JSON 的开销可忽略，
 但能吃得下任何一版固件的超时窗口。
 
-客户端**不会自己重连本体**。链路一断（本体重启 / 网线抖动 / 网关踢会话），后续所有
+客户端**会自己重连本体**。链路一断（本体重启 / 网线抖动 / 网关踢会话），后续所有
 `4000~5999` 请求都只会回「control 通道已关闭」，而在平台看来设备仍然「在线」——这是
-最坑的一种状态。现在 `ZhProClient::body_link()` 会把断开事件抛给主循环：进程主动退出、
-把正在跑的任务标为异常，由 systemd `Restart=always` 在 5s 后拉起重连。
+最坑的一种状态。`ZhProClient::body_link()` 把断开事件抛给主循环后，客户端会：
+
+1. 停掉旧推送任务、把正在跑的任务标为异常、废弃建图会话；
+2. 补一帧停车清接管态，并上行 `teleop_state{holder:false}`（业务 WebSocket 没断，
+   服务端等不到断连回调，不清就会留下「幽灵接管」）；
+3. 带退避（1s→10s）重连 `control`/`bulkdata`，成功后重新挂推送任务。
+
+**业务 WebSocket 全程不断**，设备不会因为一次抖动就从平台上掉线重登记，恢复窗口从
+「systemd 重启 + 重新握手」的 5~15s 缩到 1~3s。只有 `BODY_RECONNECT_WINDOW`（120s）内
+仍连不上（例如本体根本没起来）才退出进程，交给 systemd `Restart=always` 兜底。
 
 实现文件：
 
@@ -602,6 +618,7 @@ M1 文件根 `/ota/alg_data`；文档 §2.2.4.1「4013 地图列表」明确单�
 | `召回充电` | 5014 返回回充点 |
 | `同步地图` | 4012 拉地图列表并回传中台 |
 | `重新定位` | 4030 载图 + 定位，等 `loc_state` 收敛到 100 |
+| `本体重连` | 原地重建 control/bulkdata（**不退出进程**，平台连接保持），接管、任务、建图进行中会拒绝；120s 内仍连不上才退出交给 systemd |
 
 本体动作（`payload.params.action`）除站立/卧倒/急停/灯光外，新增 1302 的三种模式：
 `generic_mode`(60 通用，1304 的 lx/ly 才生效) / `in_place_mode`(61) / `navigation_mode`(62)。
@@ -622,6 +639,44 @@ M1 文件根 `/ota/alg_data`；文档 §2.2.4.1「4013 地图列表」明确单�
 
 - `1315 ctrl_source = 3`：硬件遥控器仍持权（协议没有禁用它的消息，只能关遥控器电源）；
 - `1315 motion_status = lie_down`：卧倒状态下不会迈步，先站立。
+
+接管态失效与恢复（防「接管了却走不动」）：
+
+| 触发 | 客户端动作 |
+| --- | --- |
+| `1205.status_code != 0` | 清 `control_owned`，报「获取 RoamerX 控制权超时」 |
+| `ctrl_source` 变成 0/3（遥控器抢权） | 清 `control_owned` + 清 `TeleopState`（含摇杆缓存），补一帧零摇杆 |
+| 摇杆首帧、或重新点「远程接管」 | 只要 `control_owned` 或 `engaged` 任一为 false，就**重发** `1204` + `1302 cmd=60` |
+| 摇杆被门禁拒绝 | 补停车帧 + 限频上报 `warn` 事件 |
+
+### 接管后「对方」能看到什么
+
+| 对方 | 能否收到「控制权被拿走」的通知 |
+| --- | --- |
+| 另一个平台 / 官方 APP（gateway `control` 通道的客户端） | **能**。`1205` 在 owner 切换成功时**广播**给所有 `control` 通道客户端，`client_id` 是新的 owner；`1523 kRoamerXControlNotify` 也会推送当前 owner。客户端只认 `client_id == 本端` 的成功通知，否则丢弃本地 `control_owned`。 |
+| 物理遥控器（2.4G 硬件通道，`ctrl_source = 3`） | **不能**。协议里没有任何发往遥控器的下行消息，也没有禁用它的命令；而且方向是遥控器单向优先——官方 APP 的做法也只是暂停摇杆并提示「当前狗的控制权被其他遥控器抢断」。 |
+
+所以「遥控器先控、平台再点接管」这个顺序**拿不到遥控器的手柄**：
+
+- 服务端 `ensure_ready` 在 `ctrl_source == 3` 时直接 400「请断开外部遥控后重试」，连接管都点不成；
+- 即使 `ctrl_source` 尚未刷新到 3，`1204` 在网关侧可能“成功”（owner 变成我们），但本体仍按遥控器给的指令走，
+  平台摇杆会被客户端门禁拦下（现已上报 `warn` 事件，不再静默）；
+- 唯一可靠的交接方式是**物理层**：关遥控器电源 / 切回软件控制，等 `1315 ctrl_source` 不再为 3 后再接管。
+
+### 强制接管（遥控器已断电，本体还在报 `ctrl_source = 3`）
+
+遥控器关电源后，本体未必马上把 `ctrl_source` 刷回 1/2（有的固件会一直停在 3）。
+这时运维可以在控制台点「强制接管」，链路如下：
+
+| 环节 | 行为 |
+| --- | --- |
+| 控制台 | 按钮变成「强制接管」，二次确认「遥控器已关闭」后 `POST /teleop/take {"force": true}` |
+| 服务端 | 落库 `devices.teleop_force = 1`，只跳过 `ctrl_source` 这一条门禁；下发 `command: 远程接管` 时带 `payload.force = true` |
+| 客户端 | 收到 `force` 后置 `RobotState.teleop_force`，`motion_block_reason_with` 只放行 `ctrl_source`，其余门禁（离线 / `sdk_node` / 急停 / 卧倒）照旧 |
+| 心跳 | `heartbeat_ack.teleopForce` 每轮同步，客户端重启后不会再被自己拦下 |
+| 释放 / 超时 / 掉线 | 标记清零，恢复遥控器抢占检测 |
+
+默认（不带 `force`）行为不变：`ctrl_source = 3` 一律拒绝，避免遥控器还在使用时两边抢控制。
 
 `重新定位` 的附加参数在 `payload.params.params`：
 

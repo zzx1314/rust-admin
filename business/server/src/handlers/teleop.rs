@@ -55,7 +55,7 @@ const BODY_ACTIONS: [(&str, &str); 11] = [
 ];
 
 /// 允许通过 `/command` 下发的业务指令
-const BUSINESS_COMMANDS: [&str; 8] = [
+const BUSINESS_COMMANDS: [&str; 9] = [
     "开始巡检",
     "暂停任务",
     "继续任务",
@@ -64,6 +64,9 @@ const BUSINESS_COMMANDS: [&str; 8] = [
     "重新定位",
     "远程接管",
     "释放接管",
+    // 「本体重连」：让设备客户端退出并由 systemd 重建到本体的连接。
+    // 它是运维手段（链路/会话半死时用），不改本体任何状态。
+    "本体重连",
 ];
 
 fn invalid(message: impl Into<String>) -> AppError {
@@ -87,11 +90,18 @@ async fn current_operator(state: &AppState, device: &Device) -> String {
     operator_id(device)
 }
 
-/// 校验接管态，返回 Err 表示不允许下发遥控
 /// 本体健康门禁：与客户端 `RobotState::motion_block_reason` 对齐。
 ///
 /// 纯模拟设备没有本体，跳过这层校验（前端联调用）。
+///
+/// `allow_ctrl_preempt` 专门对应「遥控器关了但本体还在报 `ctrl_source = 3`」：
+/// 运维确认遥控器已断电后可强制接管（`teleop_force`），这里放行这一条门禁，
+/// 其余（离线 / `sdk_node` / 急停）一条不少。
 pub(crate) fn ensure_ready(device: &Device) -> Result<(), AppError> {
+    ensure_ready_with(device, device.teleop_force)
+}
+
+fn ensure_ready_with(device: &Device, allow_ctrl_preempt: bool) -> Result<(), AppError> {
     if device.status == "离线" {
         return Err(invalid("设备离线，无法远程控制"));
     }
@@ -111,9 +121,10 @@ pub(crate) fn ensure_ready(device: &Device) -> Result<(), AppError> {
     if device.estop_software == Some(true) {
         return Err(invalid("本体软件急停已触发，请先点「解除急停」"));
     }
-    if device.ctrl_source == 3 {
+    if device.ctrl_source == 3 && !allow_ctrl_preempt {
         return Err(invalid(
-            "本体控制权被其他遥控器/外部程序抢占，请断开外部遥控后重试",
+            "本体控制权被其他遥控器/外部程序抢占，请断开外部遥控后重试\
+             （确认遥控器已断电？可用「强制接管」）",
         ));
     }
     Ok(())
@@ -180,14 +191,22 @@ async fn load_device(state: &AppState, id: i64) -> Result<Device, AppError> {
         .ok_or_else(|| AppError::NotFound("设备不存在".to_string()))
 }
 
-async fn write_teleop(state: &AppState, id: i64, holder: Option<&str>) -> Result<(), AppError> {
+async fn write_teleop(
+    state: &AppState,
+    id: i64,
+    holder: Option<&str>,
+    force: bool,
+) -> Result<(), AppError> {
     let stamp = now();
-    sqlx::query("UPDATE devices SET teleop_holder = ?1, teleop_at = ?2 WHERE id = ?3")
-        .bind(holder)
-        .bind(holder.map(|_| stamp.clone()))
-        .bind(id)
-        .execute(&state.db)
-        .await?;
+    sqlx::query(
+        "UPDATE devices SET teleop_holder = ?1, teleop_at = ?2, teleop_force = ?3 WHERE id = ?4",
+    )
+    .bind(holder)
+    .bind(holder.map(|_| stamp.clone()))
+    .bind(if holder.is_some() && force { 1 } else { 0 })
+    .bind(id)
+    .execute(&state.db)
+    .await?;
     Ok(())
 }
 
@@ -211,14 +230,24 @@ async fn log_event(
 }
 
 /// POST /api/devices/{id}/teleop/take —— 接管
+///
+/// 可选 body `{"force": true}`：遥控器断电后本体仍报 `ctrl_source = 3` 时，
+/// 运维二次确认后可强制接管（落库 `teleop_force`，并告知客户端跳过这条门禁）。
 pub async fn take_over(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    body: Option<Json<serde_json::Value>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     let device = load_device(&state, id).await?;
+    let force = body
+        .as_ref()
+        .and_then(|Json(value)| value.get("force"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
     // 接管同样要求本体健康：sdk_node 未就绪时拿到 1204 也动不了，
     // 提前给出可读原因，避免页面上“已接管但摇杆没反应”。
-    ensure_ready(&device)?;
+    ensure_ready_with(&device, device.teleop_force || force)?;
     let operator = current_operator(&state, &device).await;
 
     if let Some(holder) = device.teleop_holder.as_deref()
@@ -228,26 +257,37 @@ pub async fn take_over(
         return Err(invalid(format!("设备已被 {holder} 接管")));
     }
 
-    write_teleop(&state, id, Some(&operator)).await?;
+    // 只在真的越过了 `ctrl_source = 3` 时才保留强制标记；常规路径必须清零，
+    // 否则一次强制接管会让这台设备以后永久免疫遥控器抢占检测。
+    let force = force && device.ctrl_source == 3;
+    write_teleop(&state, id, Some(&operator), force).await?;
     log_event(
         &state,
         &device,
         format!("{} 接管 {}", operator, device.device_id),
-        "远程接管已建立，可下发摇杆与动作指令".to_string(),
+        if force {
+            format!(
+                "远程接管已建立（强制接管：本体仍报 ctrl_source={}，已跳过遥控器抢占门禁）",
+                device.ctrl_source
+            )
+        } else {
+            "远程接管已建立，可下发摇杆与动作指令".to_string()
+        },
     )
     .await?;
 
-    // 通知客户端让本体交出控制权
+    // 通知客户端让本体交出控制权；`force` 让客户端也跳过 ctrl_source 门禁，
+    // 否则 1304 摇杆会被客户端的门禁拦下（服务端放行也没用）。
     let delivered = gateway::send_command_to_device(
         &state.device_connections,
         &device.device_id,
         "远程接管",
-        Some(json!({ "operator": operator })),
+        Some(json!({ "operator": operator, "force": force })),
     )
     .await;
 
     info!(
-        "device {} teleop taken over by {}",
+        "device {} teleop taken over by {} (force={force})",
         device.device_id, operator
     );
     Ok(ApiResponse::ok(json!({
@@ -255,6 +295,8 @@ pub async fn take_over(
         "holder": operator,
         "expiresInSec": TELEOP_IDLE_TIMEOUT_SECS,
         "wsDelivered": delivered,
+        "forced": force,
+        "ctrlSource": device.ctrl_source,
     })))
 }
 
@@ -273,7 +315,7 @@ pub async fn release(
         })));
     }
 
-    write_teleop(&state, id, None).await?;
+    write_teleop(&state, id, None, false).await?;
     log_event(
         &state,
         &device,
@@ -321,7 +363,8 @@ pub async fn keepalive(
     let device = load_device(&state, id).await?;
     let operator = current_operator(&state, &device).await;
     ensure_holding(&device, &operator)?;
-    write_teleop(&state, id, Some(&operator)).await?;
+    // 保活只刷新时间，保留原有的强制接管标记（否则强制接管会在 2 分钟后自动失效）
+    write_teleop(&state, id, Some(&operator), device.teleop_force).await?;
     Ok(ApiResponse::ok(json!({
         "deviceId": device.device_id,
         "expiresInSec": TELEOP_IDLE_TIMEOUT_SECS,
@@ -339,7 +382,7 @@ pub async fn send_teleop(
     ensure_holding(&device, &operator)?;
 
     let axes = payload.clamped();
-    write_teleop(&state, id, Some(&operator)).await?;
+    write_teleop(&state, id, Some(&operator), device.teleop_force).await?;
 
     let delivered =
         gateway::send_teleop_to_device(&state.device_connections, &device.device_id, &axes).await;
@@ -452,6 +495,7 @@ mod tests {
             video_type: "none".to_string(),
             teleop_holder: holder.map(str::to_string),
             teleop_at: at.map(str::to_string),
+            teleop_force: false,
             body_online: true,
             run_mode: None,
             charging: false,
@@ -518,6 +562,35 @@ mod tests {
         let mut device = device_with(Some("operator@RD-001"), Some(&now()));
         device.ctrl_source = 3;
         assert!(ensure_holding(&device, "operator@RD-001").is_err());
+    }
+
+    /// 遥控器断电、本体还报 `ctrl_source = 3` 时，强制接管必须能放行摇杆
+    #[test]
+    fn force_takeover_bypasses_remote_preempt() {
+        let mut device = device_with(Some("operator@RD-001"), Some(&now()));
+        device.ctrl_source = 3;
+        device.teleop_force = true;
+        assert!(ensure_holding(&device, "operator@RD-001").is_ok());
+    }
+
+    /// 强制接管只能跳过 ctrl_source，其余健康门禁必须照旧生效
+    #[test]
+    fn force_takeover_still_checks_other_gates() {
+        let mut device = device_with(Some("operator@RD-001"), Some(&now()));
+        device.ctrl_source = 3;
+        device.teleop_force = true;
+
+        let mut estop = device.clone();
+        estop.estop_software = Some(true);
+        assert!(ensure_holding(&estop, "operator@RD-001").is_err());
+
+        let mut offline = device.clone();
+        offline.body_online = false;
+        assert!(ensure_holding(&offline, "operator@RD-001").is_err());
+
+        let mut no_sdk = device.clone();
+        no_sdk.sdk_node_available = Some(false);
+        assert!(ensure_holding(&no_sdk, "operator@RD-001").is_err());
     }
 
     #[test]

@@ -41,6 +41,9 @@ const holding = computed(() => !!props.device?.teleopHolder);
  *
  * 官方 App 在 sdk_node 未就绪时显示“设备初始化中”，在 ctrl_source 被外部
  * 抢占时暂停遥控，在急停未解除时不允许运动；这里同样给出可读原因并禁用操作。
+ *
+ * 注意：**不包含 ctrl_source**。控制权被抢占单列在 `controlIssue`，因为它可以被
+ * 「强制接管」越过（遥控器关了但本体还在报 ctrl_source=3 就是这种情况）。
  */
 const healthIssue = computed(() => {
   const device = props.device;
@@ -48,11 +51,21 @@ const healthIssue = computed(() => {
   if (!device.bodyOnline) return "本体 1315 状态超时（body_online=false）";
   if (device.sdkNodeAvailable === false) return "本体 SDK 节点未就绪（sdk_node=false）";
   if (device.estopSoftware === true) return "本体软件急停已触发";
-  if (device.ctrlSource === 3) return "控制权被其他遥控器/外部程序抢占";
   return "";
 });
-/** 已接管、在线且本体健康才允许遥控 */
-const canControl = computed(() => holding.value && online.value && !healthIssue.value);
+/** 控制源与运动状态：判断「是否真的完全接管」的两个硬指标 */
+const ctrlMeta = computed(() => ctrlSourceMeta(props.device?.ctrlSource));
+const ctrlByOther = computed(() => props.device?.ctrlSource === 3);
+/** 平台强制接管中（跳过了 ctrl_source 门禁） */
+const forceHeld = computed(() => !!props.device?.teleopForce);
+/** 控制权在别人手里且没有强制接管时才拦遥控 */
+const controlIssue = computed(() =>
+  ctrlByOther.value && !forceHeld.value ? "控制权被其他遥控器/外部程序抢占" : ""
+);
+/** 已接管、在线、本体健康且控制权可用才允许遥控 */
+const canControl = computed(
+  () => holding.value && online.value && !healthIssue.value && !controlIssue.value
+);
 /** 本体离线 / SDK 节点未就绪时不建议接管；急停允许先接管再解除 */
 const takeoverAllowed = computed(
   () =>
@@ -62,13 +75,20 @@ const takeoverAllowed = computed(
     !!props.device?.bodyOnline
 );
 
-/** 控制源与运动状态：判断「是否真的完全接管」的两个硬指标 */
-const ctrlMeta = computed(() => ctrlSourceMeta(props.device?.ctrlSource));
-const ctrlByOther = computed(() => props.device?.ctrlSource === 3);
 const gaitReady = computed(() => canGait(props.device?.motionStatus));
 /** 接管了但本体/别的客户端还在拦着，摇杆按下去不会走 */
 const takeoverBlocked = computed(
-  () => holding.value && (!!healthIssue.value || ctrlByOther.value || !gaitReady.value)
+  () =>
+    holding.value && (!!healthIssue.value || !!controlIssue.value || !gaitReady.value)
+);
+
+/** 重连本体链路：只在空闲时允许（任务/建图/接管中重连会丢运行态，服务端也会拒） */
+const canReconnect = computed(
+  () =>
+    online.value &&
+    !holding.value &&
+    props.device?.status !== "执行任务" &&
+    props.device?.runMode !== "sim"
 );
 
 /** 恢复类动作不要求接管、也不受急停/控制权门禁限制（与后端一致） */
@@ -176,15 +196,73 @@ onBeforeUnmount(stopKeepalive);
 // ── 操作 ────────────────────────────────────────────────
 async function takeOver() {
   if (!props.device || busy.value) return;
+  // 遥控器还占着控制权时，普通接管会被服务端 400 拒掉；这里引导运维二次确认后强制接管
+  const force = ctrlByOther.value;
+  if (force) {
+    try {
+      await ElMessageBox.confirm(
+        "本体当前仍报告控制权在遥控器/外部程序上（ctrl_source=3）。" +
+          "如果遥控器已经断电或按下了「释放控制」键，可以强制接管：平台只跳过这一条门禁，" +
+          "急停/离线/SDK 节点/姿态等其余健康检查照旧。遥控器还在使用中请勿继续，否则两边会互相抢控制。",
+        "强制接管",
+        {
+          type: "warning",
+          confirmButtonText: "确认遥控器已关闭，强制接管",
+          cancelButtonText: "取消"
+        }
+      );
+    } catch {
+      return;
+    }
+  }
   busy.value = true;
   try {
-    const res = await deviceApi.takeOver(props.device.id);
-    ElMessage.success(
-      res.wsDelivered ? "已接管，可以遥控了" : "已接管，但设备未连接（指令无法下发）"
-    );
+    const res = await deviceApi.takeOver(props.device.id, force);
+    if (res.forced) {
+      ElMessage.warning(
+        res.wsDelivered
+          ? "已强制接管（本体仍报 ctrl_source=3）：摇杆无效说明遥控器还在控制，请确认已断电"
+          : "已强制接管，但设备未连接（指令无法下发）"
+      );
+    } else {
+      ElMessage.success(
+        res.wsDelivered ? "已接管，可以遥控了" : "已接管，但设备未连接（指令无法下发）"
+      );
+    }
     emit("changed");
   } catch (error) {
     ElMessage.error((error as Error).message || "接管失败");
+  } finally {
+    busy.value = false;
+  }
+}
+
+/** 重连本体链路：设备客户端原地重建它与本体的 WS（不退出进程、平台连接保持） */
+async function reconnectBody() {
+  if (!props.device || busy.value) return;
+  try {
+    await ElMessageBox.confirm(
+      "将重建设备客户端与本体的 WebSocket 连接（约 5~15 秒）。" +
+        "客户端不会重启、平台连接保持，本体、任务与遥控器都不受影响；" +
+        "期间设备会短暂显示「设备初始化中」，接管态会失效需要重新接管。" +
+        "请确认当前没有正在执行的任务或建图。",
+      "重连本体链路",
+      { type: "warning", confirmButtonText: "重连", cancelButtonText: "取消" }
+    );
+  } catch {
+    return;
+  }
+  busy.value = true;
+  try {
+    const res = await deviceApi.command(props.device.id, "本体重连");
+    if (res.wsDelivered) {
+      ElMessage.success("已下发重连指令：客户端正在原地重建到本体的连接");
+    } else {
+      ElMessage.warning("重连指令未送达（设备客户端不在线）");
+    }
+    emit("changed");
+  } catch (error) {
+    ElMessage.error((error as Error).message || "重连失败");
   } finally {
     busy.value = false;
   }
@@ -358,10 +436,10 @@ async function emergencyStop() {
           </div>
         </div>
 
-        <div v-if="healthIssue" class="loc-alert">
+        <div v-if="healthIssue || controlIssue" class="loc-alert">
           <AppIcon name="warn" />
           <span>
-            本体健康检查未通过：<b>{{ healthIssue }}</b>，遥控与任务下发已暂停。
+            本体健康检查未通过：<b>{{ healthIssue || controlIssue }}</b>，遥控与任务下发已暂停。
             请先等待 SDK 节点就绪 / 解除急停 / 断开外部遥控器。
           </span>
         </div>
@@ -403,11 +481,18 @@ async function emergencyStop() {
           <b>
             <span class="badge" :class="ctrlMeta.tone"><i />{{ ctrlMeta.label }}</span>
             <span
-              v-if="holding && ctrlByOther"
+              v-if="holding && ctrlByOther && !forceHeld"
               class="muted"
               style="margin-left: 6px; font-weight: 400"
             >
               遥控器仍持权，平台摇杆不会生效
+            </span>
+            <span
+              v-else-if="holding && forceHeld"
+              class="muted"
+              style="margin-left: 6px; font-weight: 400"
+            >
+              已强制接管（本体仍报占用，摇杆无效说明遥控器未断开）
             </span>
           </b>
         </div>
@@ -491,7 +576,7 @@ async function emergencyStop() {
                 :disabled="!takeoverAllowed || busy"
                 @click="takeOver"
               >
-                <AppIcon name="shield" />接管
+                <AppIcon name="shield" />{{ ctrlByOther ? "强制接管" : "接管" }}
               </button>
               <button v-else class="btn sm" :disabled="busy" @click="release">
                 <AppIcon name="undo" />释放
@@ -511,20 +596,34 @@ async function emergencyStop() {
                 <AppIcon name="warn" />
                 本体健康检查未通过：{{ healthIssue }}。遥控/任务已暂停，请先处理本体状态。
               </p>
+              <p v-else-if="forceHeld && ctrlByOther" class="diag-tip">
+                <AppIcon name="warn" />
+                已强制接管，但本体仍报控制权在遥控器上：平台已跳过这条门禁，摇杆照常下发。
+                若摇杆无效，说明遥控器仍在控制，请关闭遥控器电源后重新点「接管」（或先「释放」）。
+              </p>
               <p v-else-if="ctrlByOther" class="diag-tip">
                 <AppIcon name="warn" />
-                硬件遥控器（或其他 SDK）仍持有控制权，本体不会执行平台摇杆。请关闭遥控器电源
-                / 按遥控器的「释放控制」键，然后点「释放」再重新接管。
+                硬件遥控器（或其他 SDK）仍持有控制权，本体不会执行平台摇杆。请关闭遥控器电源 /
+                按遥控器的「释放控制」键；若遥控器已断电而状态还没刷新，可直接点「强制接管」。
               </p>
               <p v-else-if="holding && !gaitReady" class="diag-tip">
                 <AppIcon name="warn" />
                 本体当前是「{{ motionStatusLabel(device.motionStatus) }}」，摇杆不会动。请先点
                 「站立」，等运动状态变成站立中再遥控。
               </p>
-              <p v-else-if="holding && !ctrlByOther && gaitReady" class="diag-tip ok">
+              <p v-else-if="holding && (!ctrlByOther || forceHeld) && gaitReady" class="diag-tip ok">
                 <AppIcon name="check-circle" />
                 已完全接管：控制权在平台、本体可迈步，摇杆按 50Hz 持续下发。
               </p>
+            </div>
+
+            <div class="link-tools">
+              <span class="muted">
+                本体连不上、状态迟迟不刷新时可重建客户端到本体的连接；不会改动本体、任务或遥控器。
+              </span>
+              <button class="btn sm" :disabled="!canReconnect || busy" @click="reconnectBody">
+                <AppIcon name="refresh" />重连本体链路
+              </button>
             </div>
 
             <div class="teleop-panel" :class="{ locked: !canControl }">
@@ -746,6 +845,24 @@ async function emergencyStop() {
 .takeover-diag.bad {
   border-color: #fde3b0;
   background: #fffaf0;
+}
+
+/* 运维入口：重连本体链路（只重建客户端到本体的连接） */
+.link-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  border-radius: 9px;
+  border: 1px dashed var(--line);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.link-tools .muted {
+  flex: 1;
 }
 
 .diag-row {

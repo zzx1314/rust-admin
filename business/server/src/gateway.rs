@@ -4,7 +4,7 @@ use crate::error::AppError;
 use crate::gateway_types::{
     CommandPayload, DeviceEventPayload, HeartbeatAckPayload, HeartbeatPayload, PendingCommand,
     RegisterAckPayload, RegisterPayload, TaskControlPayload, TaskDispatchPayload,
-    TaskProgressPayload, WsMessage,
+    TaskProgressPayload, TeleopStatePayload, WsMessage,
 };
 use crate::models::{Device, Task};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// 共享的设备连接池：device_id → sender
 pub type DeviceConnections = Arc<RwLock<HashMap<String, broadcast::Sender<PendingCommand>>>>;
@@ -231,9 +231,24 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                             sdk_node_available: None,
                                         });
                                     handle_heartbeat(&db, &state.config, did, &payload).await;
+                                    // 强制接管标记随心跳下发：客户端重启后本地的
+                                    // `teleop_force` 会丢，不补的话摇杆又会被
+                                    // `ctrl_source = 3` 门禁拦下。
+                                    let teleop_force: bool = sqlx::query_scalar(
+                                        "SELECT COALESCE(teleop_force, 0) FROM devices
+                                         WHERE device_id = ?1",
+                                    )
+                                    .bind(did)
+                                    .fetch_optional(&db)
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or(0)
+                                        != 0;
                                     send_msg(&tx, "heartbeat_ack", json!(HeartbeatAckPayload {
                                         server_ts: now(),
                                         pending_commands: vec![],
+                                        teleop_force,
                                     })).await;
                                 } else {
                                     send_msg(&tx, "error", json!({"message": "请先注册设备"})).await;
@@ -271,6 +286,19 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                             }
                             "pong" => {
                                 // 响应服务端 ping，不做处理
+                            }
+                            // 客户端进程内重连本体后，业务 WS 没断，服务端收不到断连回调；
+                            // 必须靠这条消息把「平台以为还握着 RoamerX」的幽灵接管清掉。
+                            "teleop_state" => {
+                                if let Some(ref did) = device_id {
+                                    let payload: TeleopStatePayload = serde_json::from_value(ws_msg.payload)
+                                        .unwrap_or(TeleopStatePayload {
+                                            holder: false,
+                                            reason: None,
+                                        });
+                                    handle_teleop_state(&db, did, &payload).await;
+                                    send_msg(&tx, "teleop_state_ack", json!({"received": true})).await;
+                                }
                             }
                             _ => {
                                 warn!("unknown message type: {}", ws_msg.msg_type);
@@ -321,7 +349,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
             // 标记设备离线，同时清掉接管态：断连即释放，避免留下「幽灵接管」
             sqlx::query(
                 "UPDATE devices SET status = '离线', body_online = 0,
-                    teleop_holder = NULL, teleop_at = NULL, updated_at = ?1 WHERE device_id = ?2",
+                    teleop_holder = NULL, teleop_at = NULL, teleop_force = 0,
+                    updated_at = ?1 WHERE device_id = ?2",
             )
             .bind(now())
             .bind(did)
@@ -561,7 +590,8 @@ pub async fn sweep_stale_devices(state: &AppState) -> Result<u64, AppError> {
     for (id, code, park_id) in &stale {
         let result = sqlx::query(
             "UPDATE devices SET status = '离线', body_online = 0,
-                teleop_holder = NULL, teleop_at = NULL, updated_at = ?1 WHERE id = ?2",
+                teleop_holder = NULL, teleop_at = NULL, teleop_force = 0,
+                updated_at = ?1 WHERE id = ?2",
         )
         .bind(&timestamp)
         .bind(id)
@@ -1234,6 +1264,55 @@ async fn handle_device_event(db: &SqlitePool, device_id: &str, payload: &DeviceE
     .ok();
 }
 
+/// 客户端上报「本地已不持有控制权」
+///
+/// 进程内重连本体会重建 control 通道，`1204` 控制权随之丢失，但设备与业务平台的
+/// WebSocket 一直活着，服务端「断连即清 `teleop_holder`」那条清理永远不触发。
+/// 不清就会留下幽灵接管：设备页显示「接管中」、任务下发被「正在远程接管中」拦下、
+/// 摇杆又被客户端门禁拒绝，运维只能重启平台才能恢复。
+///
+/// `holder: true` 一律忽略：接管态由平台指令（「远程接管」）写入，不能让设备客户端
+/// 自己宣布持有，否则两个来源会互相覆盖。
+async fn handle_teleop_state(db: &SqlitePool, device_id: &str, payload: &TeleopStatePayload) {
+    if payload.holder {
+        debug!("device {device_id} reported holder=true, ignored (holder is platform-owned)");
+        return;
+    }
+
+    let timestamp = now();
+    match sqlx::query(
+        "UPDATE devices SET teleop_holder = NULL, teleop_at = NULL, teleop_force = 0,
+            updated_at = ?1 WHERE device_id = ?2 AND teleop_holder IS NOT NULL",
+    )
+    .bind(&timestamp)
+    .bind(device_id)
+    .execute(db)
+    .await
+    {
+        Ok(result) if result.rows_affected() > 0 => {
+            let reason = payload.reason.as_deref().unwrap_or("unreported");
+            info!("device {device_id} released teleop holder (reason={reason})");
+            // 留痕：接管态被谁清掉、为什么清，是现场争议最多的一件事
+            sqlx::query(
+                "INSERT INTO task_events (event_type, title, description, device_id, task_id, created_at)
+                 VALUES ('device_event', ?1, ?2,
+                     (SELECT id FROM devices WHERE device_id = ?3), NULL, ?4)",
+            )
+            .bind(format!("设备 {device_id} 接管态已释放"))
+            .bind(format!(
+                "客户端上报本地已不持有控制权（{reason}）：本体链路重建后 RoamerX 控制权失效"
+            ))
+            .bind(device_id)
+            .bind(&timestamp)
+            .execute(db)
+            .await
+            .ok();
+        }
+        Ok(_) => {}
+        Err(error) => warn!("device {device_id} teleop_state update failed: {error}"),
+    }
+}
+
 /// 下发待执行任务
 async fn dispatch_pending_tasks(
     db: &SqlitePool,
@@ -1377,7 +1456,7 @@ pub async fn send_task_control_to_device(
 pub async fn mark_offline_if_online(db: &SqlitePool, device_code: &str) -> bool {
     match sqlx::query(
         "UPDATE devices SET status = '离线', body_online = 0,
-            teleop_holder = NULL, teleop_at = NULL, updated_at = ?1
+            teleop_holder = NULL, teleop_at = NULL, teleop_force = 0, updated_at = ?1
          WHERE device_id = ?2 AND status IN ('在线待命', '充电中', '执行任务')",
     )
     .bind(now())

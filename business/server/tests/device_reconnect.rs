@@ -183,6 +183,97 @@ async fn close(ws: DeviceWs) {
     tokio::time::sleep(Duration::from_millis(400)).await;
 }
 
+/// 客户端上行一帧「本地已不持有控制权」
+async fn report_teleop_released(ws: &mut DeviceWs, reason: &str) {
+    let frame = json!({
+        "msgType": "teleop_state",
+        "ts": "2026-01-01 00:00:00",
+        "payload": { "holder": false, "reason": reason },
+    });
+    ws.send(Message::Text(frame.to_string()))
+        .await
+        .expect("发送 teleop_state 失败");
+    next_msg(ws, "teleop_state_ack").await;
+}
+
+async fn teleop_holder(state: &AppState, device_code: &str) -> Option<String> {
+    sqlx::query_scalar("SELECT teleop_holder FROM devices WHERE device_id = ?1")
+        .bind(device_code)
+        .fetch_one(&state.db)
+        .await
+        .expect("设备应在台账里")
+}
+
+/// 进程内重连本体后，业务 WS 不断 ⇒ 服务端收不到断连回调，
+/// `teleop_holder` 必须靠客户端上行 `teleop_state` 清掉。
+#[tokio::test]
+async fn client_reported_teleop_release_clears_holder() {
+    let (state, _temp) = test_state().await;
+    let port = spawn_server(state.clone()).await;
+    let mut ws = register_device(port, DEVICE_CODE).await;
+
+    // 模拟平台已接管（正常由「远程接管」指令写入）
+    sqlx::query(
+        "UPDATE devices SET teleop_holder = 'platform', teleop_force = 1,
+            teleop_at = '2026-01-01 00:00:00' WHERE device_id = ?1",
+    )
+    .bind(DEVICE_CODE)
+    .execute(&state.db)
+    .await
+    .expect("造接管态失败");
+
+    report_teleop_released(&mut ws, "body-link-lost").await;
+
+    assert_eq!(
+        teleop_holder(&state, DEVICE_CODE).await,
+        None,
+        "客户端上报释放后不得留下幽灵接管"
+    );
+    let force: i64 = sqlx::query_scalar("SELECT teleop_force FROM devices WHERE device_id = ?1")
+        .bind(DEVICE_CODE)
+        .fetch_one(&state.db)
+        .await
+        .expect("取 teleop_force 失败");
+    assert_eq!(force, 0, "强制接管标记必须一并清掉");
+
+    // 事件流留痕，便于运维追溯接管态为什么没了
+    let events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM task_events WHERE event_type = 'device_event'",
+    )
+    .fetch_one(&state.db)
+    .await
+    .expect("统计事件失败");
+    assert_eq!(events, 1, "释放接管应写入一条事件");
+
+    close(ws).await;
+}
+
+/// 设备客户端不能自己宣布「持有控制权」：holder 由平台指令写入
+#[tokio::test]
+async fn client_cannot_claim_teleop_holder() {
+    let (state, _temp) = test_state().await;
+    let port = spawn_server(state.clone()).await;
+    let mut ws = register_device(port, DEVICE_CODE).await;
+
+    let frame = json!({
+        "msgType": "teleop_state",
+        "ts": "2026-01-01 00:00:00",
+        "payload": { "holder": true, "reason": "self-claimed" },
+    });
+    ws.send(Message::Text(frame.to_string()))
+        .await
+        .expect("发送 teleop_state 失败");
+    next_msg(&mut ws, "teleop_state_ack").await;
+
+    assert_eq!(
+        teleop_holder(&state, DEVICE_CODE).await,
+        None,
+        "客户端的 holder=true 必须被忽略"
+    );
+
+    close(ws).await;
+}
+
 #[tokio::test]
 async fn stale_connection_does_not_kick_the_new_registration() {
     let (state, _temp) = test_state().await;

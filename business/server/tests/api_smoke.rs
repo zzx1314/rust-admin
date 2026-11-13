@@ -2082,3 +2082,160 @@ async fn map_source_ref_backfills_from_same_package_name() {
         .unwrap();
     assert_eq!(again, 0);
 }
+
+/// 遥控器断电后本体仍报 `ctrl_source = 3`：普通接管被拒，强制接管能建立并放行摇杆。
+///
+/// 现场流程：遥控器先用过 → 直接关电源 → 本体状态还有延迟（甚至一直报 3）。
+/// 如果只按 `ctrl_source` 硬拒，运维只能干等；带 `force` 的接管可以让运维二次确认后
+/// 立刻接手，并且这个标记会落库（`devices.teleop_force`），释放接管时清零。
+#[tokio::test]
+async fn force_takeover_bypasses_remote_preempt() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let id: i64 = sqlx::query_scalar("SELECT id FROM devices LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .expect("演示数据应包含设备");
+    sqlx::query(
+        "UPDATE devices SET status = '在线待命', body_online = 1, sdk_node_available = 1,
+            estop_software = 0, ctrl_source = 3, teleop_holder = NULL, teleop_at = NULL,
+            teleop_force = 0 WHERE id = ?1",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+
+    // 1) 常规接管：遥控器还占着控制权，必须被拒
+    let denied = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/devices/{id}/teleop/take"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        denied.status(),
+        StatusCode::BAD_REQUEST,
+        "遥控器占权时应拒绝常规接管"
+    );
+
+    // 2) 强制接管（运维二次确认遥控器已断电）
+    let forced = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/devices/{id}/teleop/take"))
+                .header(
+                    header::CONTENT_TYPE,
+                    header::HeaderValue::from_static("application/json"),
+                )
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(r#"{"force":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forced.status(), StatusCode::OK, "强制接管应成功");
+    let body = json_body(forced).await;
+    assert_eq!(body["data"]["forced"], true);
+    let flag: i64 = sqlx::query_scalar("SELECT teleop_force FROM devices WHERE id = ?1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(flag, 1, "强制接管标记应落库");
+
+    // 3) 强制接管期间摇杆不再被 ctrl_source=3 拦掉
+    let axes = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/devices/{id}/teleop"))
+                .header(
+                    header::CONTENT_TYPE,
+                    header::HeaderValue::from_static("application/json"),
+                )
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(
+                    r#"{"forward":0.5,"strafe":0.0,"turn":0.0,"speed":0.5}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(axes.status(), StatusCode::OK, "强制接管后摇杆应被接受");
+
+    // 4) 释放接管必须把强制标记清掉，否则这台设备以后永久免疫遥控器抢占检测
+    let released = app
+        .oneshot(
+            Request::post(format!("/api/devices/{id}/teleop/release"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(released.status(), StatusCode::OK);
+    let flag: i64 = sqlx::query_scalar("SELECT teleop_force FROM devices WHERE id = ?1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(flag, 0, "释放接管后强制标记应清零");
+}
+
+/// 「本体重连」是运维指令：客户端不在线时必须直接 400，不能静默成功。
+///
+/// 它让设备客户端进程退出并由 systemd 重建本体链路，属于"链路半死"时的兜底手段；
+/// 真正下发时客户端还会再自检任务/建图/接管态。
+#[tokio::test]
+async fn body_reconnect_requires_online_client() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let id: i64 = sqlx::query_scalar("SELECT id FROM devices LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .expect("演示数据应包含设备");
+    sqlx::query(
+        "UPDATE devices SET status = '在线待命', body_online = 1, run_mode = 'robot',
+            teleop_holder = NULL, teleop_at = NULL WHERE id = ?1",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+    let response = app
+        .oneshot(
+            Request::post(format!("/api/devices/{id}/command"))
+                .header(
+                    header::CONTENT_TYPE,
+                    header::HeaderValue::from_static("application/json"),
+                )
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(r#"{"command":"本体重连"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "客户端不在线时应拒绝重连"
+    );
+    let body = json_body(response).await;
+    let msg = body["msg"].as_str().unwrap_or_default();
+    // 白名单要认这条指令（否则会是「不支持的指令」），拒绝原因是"未连接"
+    assert!(
+        !msg.contains("不支持的指令"),
+        "本体重连应在白名单内: {msg}"
+    );
+    assert!(msg.contains("未连接"), "拒绝原因应说明客户端未连接: {msg}");
+}

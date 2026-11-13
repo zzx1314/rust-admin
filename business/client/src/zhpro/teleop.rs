@@ -31,6 +31,9 @@
 //! 2. 摇杆有看门狗：超过 [`TELEOP_WATCHDOG`] 没收到新帧就自动补一帧停车，
 //!    防止网络中断后机器狗按最后的摇杆值一直走。
 //! 3. 停止指令（三轴全 0）不要求接管态，任何时候都要能停。
+//! 4. `engaged` 只是缓存，**每次发摇杆前都要校验 `ZhProClient::holds_control()`**：
+//!    遥控器抢权会清掉 1204 的本地标记，但不会清 `engaged`，只信缓存会跳过 1204，
+//!    1304 在没有 owner 时被网关静默丢弃（现场就是「接管了却走不动、还不报错」）。
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -213,6 +216,59 @@ pub struct TeleopState {
 
 pub type SharedTeleop = Arc<Mutex<TeleopState>>;
 
+impl TeleopState {
+    /// 清掉接管态与摇杆缓存，返回此前是否处于接管/运动状态
+    fn reset_engagement(&mut self) -> bool {
+        let was_active = self.engaged || self.moving;
+        self.engaged = false;
+        self.moving = false;
+        self.active_axes = None;
+        self.last_frame = None;
+        was_active
+    }
+}
+
+/// 是否需要重走「完全接管」（`1204` + `1302 cmd=60`）
+///
+/// `engaged` 只是本地缓存，**必须**同时校验 `ZhProClient::holds_control()`。
+/// 只认缓存会出现这个现场故障：遥控器抢权 → `control_owned` 被清、`engaged`
+/// 没清 → 下次推摇杆跳过 `1204` → `1304` 没有 owner 被网关丢弃 → 不走且无报错。
+fn needs_full_takeover(engaged: bool, holds_control: bool) -> bool {
+    !engaged || !holds_control
+}
+
+/// 控制权丢失（`1205` 失败 / `ctrl_source` 变成 0 或 3 / 本体链路重建）时的本地复位
+///
+/// 除了清缓存，还要补一帧零摇杆：控制权在别人手里时这帧可能被丢，但比留着
+/// 上一帧非零安全（遥控器松手瞬间固件有可能恢复上一帧速度）。
+pub async fn reset_after_control_lost(client: &ZhProClient, teleop: &SharedTeleop) {
+    let was_active = teleop.lock().await.reset_engagement();
+    let _ = client
+        .send(T_REMOTE_CONTROL, TeleopAxes::default().to_payload())
+        .await;
+    if was_active {
+        warn!("控制权已丢失，本地接管态与摇杆缓存已清（下次摇杆会重发 1204）");
+    }
+}
+
+/// 只清本地接管态与摇杆缓存（不给本体补停车帧）
+///
+/// 用于链路已经断开、连停车帧都发不出去的场景（本体重连时 `ZhProClient` 已摘掉）。
+pub async fn reset_local_only(teleop: &SharedTeleop) {
+    let was_active = teleop.lock().await.reset_engagement();
+    if was_active {
+        warn!("本体重建前本地接管态已清（旧链路已不可用，停车帧无法下发）");
+    }
+}
+
+/// 当前是否处于（本地）接管态
+///
+/// 只用于「能不能做某个运维动作」这类门禁判断，真正的运动下发仍以
+/// `ZhProClient::holds_control()` 为准（见 [`needs_full_takeover`]）。
+pub async fn is_engaged(teleop: &SharedTeleop) -> bool {
+    teleop.lock().await.engaged
+}
+
 /// 处理业务侧 `command` 消息里的遥控相关指令
 ///
 /// 返回 `Ok(Some(note))` 表示已处理，`Ok(None)` 表示不是遥控指令（交给上层原有逻辑）。
@@ -260,8 +316,11 @@ pub async fn handle_teleop(
     let axes = TeleopAxes::from_payload(payload);
     let mut guard = teleop.lock().await;
 
-    // 停止指令始终放行，运动指令必须已（完全）接管
-    if !axes.is_stop() && !guard.engaged {
+    // 停止指令始终放行，运动指令必须已（完全）接管。
+    //
+    // 判据不能只看 `engaged`：遥控器抢权后 `control_owned` 会被清，而 `engaged`
+    // 不会自动跟着变，此时跳过 `full_takeover()` 就会发出没有 owner 的 1304。
+    if !axes.is_stop() && needs_full_takeover(guard.engaged, client.holds_control().await) {
         full_takeover(client).await?;
         guard.engaged = true;
         info!("摇杆首帧自动完全接管 RoamerX");
@@ -292,7 +351,9 @@ async fn full_takeover(client: &ZhProClient) -> Result<(), String> {
 /// 取得控制权
 async fn engage(client: &ZhProClient, teleop: &SharedTeleop) -> Result<String, String> {
     let mut guard = teleop.lock().await;
-    if guard.engaged {
+    // 遥控器抢权后再点「远程接管」时 `engaged` 可能还是 true，但控制权已经没了；
+    // 这时直接回「已处于接管态」等于把用户晾在「接管了却走不动」的状态里。
+    if !needs_full_takeover(guard.engaged, client.holds_control().await) {
         return Ok("已处于接管态".to_string());
     }
     full_takeover(client).await?;
@@ -303,7 +364,8 @@ async fn engage(client: &ZhProClient, teleop: &SharedTeleop) -> Result<String, S
 /// 释放控制权：先补一帧停车，再交还
 async fn disengage(client: &ZhProClient, teleop: &SharedTeleop) -> Result<String, String> {
     let mut guard = teleop.lock().await;
-    if !guard.engaged {
+    // 本地缓存可能已被清（遥控器抢权）但 1204 还挂着，这时也必须补停车 + 切回导航模式
+    if !guard.engaged && !client.holds_control().await {
         return Ok("当前未接管".to_string());
     }
     // 先停车，避免摇杆还压着就交还控制权
@@ -444,7 +506,7 @@ pub fn spawn_republisher(client: Arc<ZhProClient>, teleop: SharedTeleop) -> toki
             tick.tick().await;
             let axes = {
                 let guard = teleop.lock().await;
-                if !guard.engaged || !guard.moving {
+                if !guard.engaged || !guard.moving || !client.holds_control().await {
                     None
                 } else {
                     guard.active_axes
@@ -609,5 +671,39 @@ mod tests {
         // 协议里没有「位姿复位」，不能静默映射成别的动作
         assert_eq!(BodyCommand::parse("reset_pose"), None);
         assert_eq!(BodyCommand::parse("位姿复位"), None);
+    }
+
+    /// 遥控器抢权后的回归用例：`engaged` 还在但 1204 已失效时必须重新完全接管。
+    #[test]
+    fn reengages_when_control_was_preempted() {
+        // 正常持有：不重复发 1204
+        assert!(!needs_full_takeover(true, true));
+        // 还没接管
+        assert!(needs_full_takeover(false, false));
+        // 遥控器/外部程序抢权：control_owned 被清，但本地 engaged 仍是 true
+        assert!(needs_full_takeover(true, false));
+        // 标记比缓存更“新”（例如 1204 刚成功但 engaged 没来得及置位）
+        assert!(needs_full_takeover(false, true));
+    }
+
+    /// 失权复位必须把接管态和摇杆缓存一起清掉，否则重发任务会继续投非零帧
+    #[test]
+    fn reset_engagement_clears_takeover_and_axes() {
+        let mut state = TeleopState {
+            engaged: true,
+            moving: true,
+            active_axes: Some(TeleopAxes {
+                forward: 1.0,
+                ..Default::default()
+            }),
+            last_frame: Some(Instant::now()),
+        };
+        assert!(state.reset_engagement());
+        assert!(!state.engaged);
+        assert!(!state.moving);
+        assert!(state.active_axes.is_none());
+        assert!(state.last_frame.is_none());
+        // 空闲状态下复位不应误报
+        assert!(!state.reset_engagement());
     }
 }

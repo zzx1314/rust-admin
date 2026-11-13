@@ -184,10 +184,40 @@ struct RobotState {
     sdk_node_available: Option<bool>,
     /// 前补光灯开关：1315 `fill_light.front`
     fill_light_front: Option<bool>,
+    /// 最近一次「摇杆被门禁拒绝」的原因与上报时刻，用于限频（否则 10Hz 摇杆会刷爆事件流）
+    teleop_block_notice: Option<(String, Instant)>,
+    /// 强制接管标记：平台二次确认后忽略 `ctrl_source = 3`（遥控器占用）这一条门禁
+    ///
+    /// 现场：遥控器关了但本体还在报 `ctrl_source = 3`，常规门禁会把摇杆全部拦掉。
+    /// 这个开关只放行 ctrl_source 一条，其余（离线 / sdk_node / 急停 / 卧倒）照旧。
+    teleop_force: bool,
 }
 
 /// 本体状态新鲜窗口：1315 是 1Hz，30s 收不到就认为本体链路已不可信
 const BODY_STATUS_FRESH: Duration = Duration::from_secs(30);
+
+/// 「摇杆被门禁拒绝」上报平台的限频窗口（原因相同则最多这么久一条）
+const TELEOP_BLOCK_NOTICE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// 本体断连后的**进程内**重连参数
+///
+/// 现场「本体重启」要 40~60s 才重新监听 10010，所以窗口给到 2 分钟；超过窗口
+/// 就不再自己试，退出进程交给 systemd（`Restart=always`）作最后兜底。
+const BODY_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const BODY_RECONNECT_WINDOW: Duration = Duration::from_secs(120);
+const BODY_RECONNECT_MIN_BACKOFF: Duration = Duration::from_secs(1);
+const BODY_RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(10);
+
+/// 链路「刚挂上就被踢」的抖动保护窗口
+///
+/// 重连成功但与本体只活了不到这个时间（网关还留着旧会话、重复 client 竞争）时，
+/// 下一轮重连先等够窗口再动手，避免无间隔连打网关。
+const BODY_RECONNECT_SETTLE: Duration = Duration::from_secs(5);
+
+/// 下一次重连退避：翻倍并封顶（1s → 2s → 4s → 8s → 10s…）
+fn next_body_backoff(current: Duration) -> Duration {
+    (current * 2).min(BODY_RECONNECT_MAX_BACKOFF)
+}
 
 impl RobotState {
     fn new(config: &Config) -> Self {
@@ -212,6 +242,8 @@ impl RobotState {
             estop_software: None,
             sdk_node_available: None,
             fill_light_front: None,
+            teleop_block_notice: None,
+            teleop_force: false,
         }
     }
 
@@ -228,6 +260,18 @@ impl RobotState {
     /// 被外部程序/遥控器抢占时暂停遥控，在急停未解除时不允许运动；这里把
     /// 同样的判断收敛到客户端，避免“平台显示已下发、本体实际拒收”。
     fn motion_block_reason(&self, require_posture: bool) -> Option<String> {
+        self.motion_block_reason_with(require_posture, false)
+    }
+
+    /// 同上，但可选择忽略 `ctrl_source = 3` 这一条
+    ///
+    /// `allow_ctrl_preempt` 只给强制接管后的手动动作与摇杆用：遥控器断电后本体
+    /// 仍可能报 `ctrl_source = 3`，不放行就永远接不回来。任务/导航类指令不进这个开关。
+    fn motion_block_reason_with(
+        &self,
+        require_posture: bool,
+        allow_ctrl_preempt: bool,
+    ) -> Option<String> {
         if self.body_status_at.is_none() {
             return Some("尚未收到本体 1315 状态（设备初始化中），请稍后重试".to_string());
         }
@@ -245,7 +289,7 @@ impl RobotState {
         if self.estop_software == Some(true) {
             return Some("本体软件急停已触发，请先点「解除急停」".to_string());
         }
-        if self.ctrl_source == Some(3) {
+        if self.ctrl_source == Some(3) && !allow_ctrl_preempt {
             return Some(
                 "本体控制权被其他遥控器/外部程序抢占，请断开外部遥控后重试".to_string(),
             );
@@ -678,6 +722,256 @@ async fn run_mapping_once(config: &Config, zhpro: Arc<ZhProClient>) {
     }
 }
 
+/// 本体链路重建时需要重新挂到新任务上的共享句柄（都可 `Clone`）
+struct BodyContext {
+    config: Arc<Config>,
+    out_tx: mpsc::Sender<WsMessage>,
+    state: Shared<RobotState>,
+    active: Shared<Option<ActiveTask>>,
+    monitor: Arc<Mutex<TaskMonitor>>,
+    local_runner: Shared<Option<Arc<RouteRunner>>>,
+    local_mapping: Shared<Option<Arc<MappingSession>>>,
+    teleop: SharedTeleop,
+}
+
+/// 本体链路的运行期句柄。
+///
+/// `control` / `bulkdata` 断开后**不退出进程**：在这里原地重建连接，而业务
+/// WebSocket（注册、心跳、任务、事件）全程不断 —— 设备不会因为一次网线抖动
+/// 就从平台上掉线重登记，恢复窗口从「systemd 重启 + 重新握手」的 5~15s 缩到 1~3s。
+struct BodyLink {
+    client: Option<Arc<ZhProClient>>,
+    pump: Option<tokio::task::JoinHandle<()>>,
+    republisher: Option<tokio::task::JoinHandle<()>>,
+    /// 链路断开信号（任一通道读到 EOF 或写失败即置 `true`）
+    down: Option<tokio::sync::watch::Receiver<bool>>,
+    /// 本次链路挂上的时刻，用于识别「刚挂上就被踢」的抖动
+    attached_at: Option<Instant>,
+}
+
+impl BodyLink {
+    fn new(client: Option<Arc<ZhProClient>>) -> Self {
+        Self {
+            client,
+            pump: None,
+            republisher: None,
+            down: None,
+            attached_at: None,
+        }
+    }
+
+    /// 挂上推送任务与链路监视（首次连接与每次重连各调一次）
+    fn attach(&mut self, ctx: &BodyContext, client: Arc<ZhProClient>) {
+        self.down = Some(client.body_link());
+        self.pump = Some(spawn_zhpro_pump(
+            client.clone(),
+            ctx.out_tx.clone(),
+            ctx.state.clone(),
+            ctx.active.clone(),
+            ctx.monitor.clone(),
+            ctx.local_mapping.clone(),
+            ctx.teleop.clone(),
+            ctx.config.clone(),
+        ));
+        // 摇杆重发（50Hz）：浏览器 ~10Hz 的离散帧需要在本体侧连续化，否则看着像点动
+        self.republisher = Some(teleop::spawn_republisher(
+            client.clone(),
+            ctx.teleop.clone(),
+        ));
+        self.attached_at = Some(Instant::now());
+        self.client = Some(client);
+    }
+
+    /// 摘掉当前链路，返回被摘下的 client（模拟模式 / 已摘下时为 `None`）
+    ///
+    /// 两个后台任务必须显式 `abort`：它们各自持有旧 `Arc<ZhProClient>`，只换字段
+    /// 不杀任务会留下继续往 `out_tx` 塞过期帧的僵尸读循环。
+    fn detach(&mut self) -> Option<Arc<ZhProClient>> {
+        if let Some(handle) = self.pump.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.republisher.take() {
+            handle.abort();
+        }
+        self.down = None;
+        self.attached_at = None;
+        self.client.take()
+    }
+}
+
+/// 重连前的一次性清理，返回「抖动保护」需要先等的时长
+///
+/// 必须**快**：它跑在主 select 的关键路径上，期间心跳会暂停 —— 所以耗时的
+/// 「建链 + 退避等待」全部交给后台任务 [`connect_body_with_backoff`]，
+/// 由主循环在 select 里等结果。这样重连 2 分钟也不会把设备心跳打断
+/// （否则服务端 `device_timeout_secs` 会先把设备判离线）。
+async fn prepare_body_reconnect(ctx: &BodyContext, body: &mut BodyLink, trigger: &str) -> Duration {
+    // 上一轮链路刚挂上就被踢（网关还留着旧会话 / 重复 client 竞争）：先等够窗口
+    let settle = body
+        .attached_at
+        .map(|at| BODY_RECONNECT_SETTLE.saturating_sub(at.elapsed()))
+        .unwrap_or_default();
+    if !settle.is_zero() {
+        warn!("本体链路刚建立就断开，{settle:?} 后再重连（抖动保护）");
+    }
+
+    let previous = body.detach();
+
+    // 1) 接管态必然失效：`1204` 是会话级的，重建 control 通道就没了
+    //    先补一帧停车，避免最后一帧非零摇杆留在本体侧
+    let was_engaged = teleop::is_engaged(&ctx.teleop).await;
+    match previous.as_ref() {
+        Some(client) => teleop::reset_after_control_lost(client, &ctx.teleop).await,
+        None => teleop::reset_local_only(&ctx.teleop).await,
+    }
+    // 2) 业务 WS 没断，服务端收不到断连回调：必须自己上报 holder 已清空，
+    //    否则留下幽灵接管（页面显示接管中、摇杆被客户端门禁拒绝）。
+    //    服务端只在 holder 非空时才动手，所以这里无条件发一帧是安全的。
+    send(
+        &ctx.out_tx,
+        "teleop_state",
+        json!({
+            "holder": false,
+            "reason": trigger,
+            "wasEngaged": was_engaged,
+        }),
+    )
+    .await;
+
+    // 3) 运行态清理
+    if let Some(task) = ctx.active.lock().await.clone() {
+        report_progress(
+            &ctx.out_tx,
+            &task.task_code,
+            "异常",
+            0,
+            Some(format!(
+                "本体连接已断开（{trigger}）——客户端正在原地重连本体（不退出进程），请稍后重新下发任务"
+            )),
+            None,
+            None,
+            None,
+        )
+        .await;
+    }
+    *ctx.active.lock().await = None;
+    *ctx.local_runner.lock().await = None;
+    if ctx.local_mapping.lock().await.take().is_some() {
+        warn!("建图会话随本体断连一起废弃（4001 保存结果不会再来）");
+    }
+    {
+        let mut guard = ctx.state.lock().await;
+        guard.current_task = None;
+        // 门禁立刻回到「设备初始化中」：断连前的 1315 值不可再用于放行运动指令
+        guard.body_status_at = None;
+        guard.ctrl_source = None;
+        guard.sdk_node_available = None;
+        guard.estop_software = None;
+        guard.motion_status = None;
+    }
+
+    settle
+}
+
+/// 后台退避重连：连上就返回新 client，窗口内连不上返回 `Err`
+///
+/// 与主循环解耦，所以期间心跳、业务指令、事件上报都照常走。
+async fn connect_body_with_backoff(
+    host: String,
+    settle: Duration,
+) -> Result<Arc<ZhProClient>, String> {
+    if !settle.is_zero() {
+        tokio::time::sleep(settle).await;
+    }
+    let started = Instant::now();
+    let mut backoff = BODY_RECONNECT_MIN_BACKOFF;
+    let mut attempt = 0_u32;
+    let mut last_error = String::new();
+
+    while started.elapsed() < BODY_RECONNECT_WINDOW {
+        attempt += 1;
+        match tokio::time::timeout(BODY_CONNECT_TIMEOUT, ZhProClient::connect(&host)).await {
+            Ok(Ok(client)) => {
+                info!(
+                    "本体链路已重建（第 {attempt} 次尝试，耗时 {:?}）",
+                    started.elapsed()
+                );
+                return Ok(Arc::new(client));
+            }
+            Ok(Err(error)) => last_error = error.to_string(),
+            Err(_) => {
+                last_error = format!("连接超时（>{}s）", BODY_CONNECT_TIMEOUT.as_secs());
+            }
+        }
+        warn!(
+            "本体重连失败（第 {attempt} 次）: {last_error}，{}s 后重试",
+            backoff.as_secs()
+        );
+        tokio::time::sleep(backoff).await;
+        backoff = next_body_backoff(backoff);
+    }
+
+    Err(format!(
+        "本体在 {}s 内重连失败（{attempt} 次尝试）：{last_error}",
+        BODY_RECONNECT_WINDOW.as_secs()
+    ))
+}
+
+/// 启动后台重连：先摘链路 + 清运行态（快），再把耗时的建链丢给后台任务
+async fn start_relink(
+    ctx: &BodyContext,
+    body: &mut BodyLink,
+    relinking: &mut bool,
+    relink_tx: &mpsc::Sender<Result<Arc<ZhProClient>, String>>,
+    trigger: &str,
+) {
+    let settle = prepare_body_reconnect(ctx, body, trigger).await;
+    let Some(host) = ctx.config.robot.clone() else {
+        // 没有本体配置却收到断连信号（理论上不可达）：只能退回「退出交给 systemd」
+        error!("未接入本体（robot.host 为空），无法原地重连");
+        std::process::exit(1);
+    };
+    *relinking = true;
+    let tx = relink_tx.clone();
+    tokio::spawn(async move {
+        let result = connect_body_with_backoff(host, settle).await;
+        // 接收端已关闭（进程正在退出）时忽略
+        let _ = tx.send(result).await;
+    });
+}
+
+/// 重连成功：挂上推送任务，并把新会话的型号 / 工作模式同步给平台
+async fn finish_relink(ctx: &BodyContext, body: &mut BodyLink, client: Arc<ZhProClient>) {
+    let session = client.session().await;
+    {
+        // 新会话可能报回不同型号（换本体 / 刷固件）：心跳会把变化同步给中台台账
+        let mut guard = ctx.state.lock().await;
+        if !session.device_type.trim().is_empty() {
+            guard.model = Some(session.device_type.clone());
+        }
+        guard.mode = "robot";
+    }
+    body.attach(ctx, client);
+    info!(
+        "本体链路已重建：client_id={}，型号={}（业务连接未中断）",
+        session.client_id, session.device_type
+    );
+    let event = DeviceEventPayload {
+        event_type: "info".to_string(),
+        message: format!(
+            "本体链路已重建（client_id={}），设备在线状态未受影响，需要重新「远程接管」才能遥控",
+            session.client_id
+        ),
+        data: None,
+    };
+    send(
+        &ctx.out_tx,
+        "event",
+        serde_json::to_value(event).unwrap_or_default(),
+    )
+    .await;
+}
+
 async fn run_client(
     config: &Config,
     zhpro: Option<Arc<ZhProClient>>,
@@ -733,23 +1027,8 @@ async fn run_client(
     let local_mapping: Shared<Option<Arc<MappingSession>>> = Arc::new(Mutex::new(None));
     let teleop: SharedTeleop = Arc::new(Mutex::new(TeleopState::default()));
 
-    // 2) 若接入了本体，启动 5009/1315/4001 等推送处理
-    if let Some(ref client) = zhpro {
-        spawn_zhpro_pump(
-            client.clone(),
-            out_tx.clone(),
-            state.clone(),
-            active.clone(),
-            monitor.clone(),
-            local_mapping.clone(),
-            Arc::new(config.clone()),
-        );
-    }
-
-    // 摇杆重发（50Hz）：浏览器 ~10Hz 的离散帧需要在本体侧连续化，否则看着像点动
-    if let Some(ref client) = zhpro {
-        teleop::spawn_republisher(client.clone(), teleop.clone());
-    }
+    // 2) 本体推送任务（5009/1315/4001 等）与摇杆重发在 [`BodyLink::attach`] 里挂上，
+    //    重连时用同一套句柄重新挂 —— 所以这里不再直接 spawn。
 
     // 3) 定时器
     let mut heartbeat_timer = interval(Duration::from_secs(config.heartbeat_interval.max(1)));
@@ -764,37 +1043,75 @@ async fn run_client(
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
 
+    // 本体链路（可变）：断连后原地重建，业务 WebSocket 不受影响
+    let body_ctx = BodyContext {
+        config: Arc::new(config.clone()),
+        out_tx: out_tx.clone(),
+        state: state.clone(),
+        active: active.clone(),
+        monitor: monitor.clone(),
+        local_runner: local_runner.clone(),
+        local_mapping: local_mapping.clone(),
+        teleop: teleop.clone(),
+    };
+    let mut body = BodyLink::new(zhpro);
+    if let Some(client) = body.client.clone() {
+        body.attach(&body_ctx, client);
+    }
+    // 手动「本体重连」指令 → 主循环（与自动重连同一条路径）
+    let (body_reconnect_tx, mut body_reconnect_rx) = mpsc::channel::<()>(1);
+    // 后台重连的结果回传：连上（新 client）或窗口内失败
+    let (relink_tx, mut relink_rx) = mpsc::channel::<Result<Arc<ZhProClient>, String>>(1);
+    let mut relinking = false;
+
     // 进度去重：内容没变就降到 [`PROGRESS_DEDUP_WINDOW`] 一次（服务端还会按「标题 + 描述」
     // 去重落事件）。**不能彻底停发**：服务端任务看门狗按 `tasks.updated_at` 判超时
     // （默认 120s），超时会直接把跑着的任务翻成「异常」。
     let mut last_progress: Option<(String, Instant)> = None;
-    // 本体链路监视：客户端不重连本体，断了只能重启进程（systemd Restart=always）
-    let mut body_link = zhpro.as_ref().map(|client| client.body_link());
 
     loop {
+        // 每次迭代拷一份链路监视器：`wait_body_down` 只借用这个临时副本，
+        // 分支体里才能安全地重建 `body`
+        let mut probe = body.down.clone();
         tokio::select! {
-            _ = wait_body_down(&mut body_link) => {
-                // 带着一条死链继续跑只会把每个指令都变成「control 通道已关闭」，
-                // 而在平台看来设备一直「在线」——必须退出让 systemd 拉起来重连。
-                error!("本体 control/bulkdata 通道已断开，退出进程交给 systemd 重启（Restart=always）");
-                if let Some(task) = active.lock().await.clone() {
-                    report_progress(
-                        &out_tx,
-                        &task.task_code,
-                        "异常",
-                        0,
-                        Some(
-                            "本体连接已断开（control/bulkdata 通道关闭）——客户端会自动重启并重连本体，"
-                                .to_string()
-                                + "请稍后重新下发任务",
-                        ),
-                        None,
-                        None,
-                        None,
-                    )
-                    .await;
+            // 本体 control/bulkdata 断了：原地重连，不退出进程
+            _ = wait_body_down(&mut probe) => {
+                if relinking {
+                    // 已在重连：结果由 `relink_rx` 分支处理，这里不能空转
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    continue;
                 }
-                break;
+                warn!("本体 control/bulkdata 通道已断开，开始原地重连（不退出进程）");
+                start_relink(
+                    &body_ctx,
+                    &mut body,
+                    &mut relinking,
+                    &relink_tx,
+                    "body-link-lost",
+                )
+                .await;
+            }
+
+            // 控制台「本体重连」：同一条重建路径，也不退出进程
+            _ = body_reconnect_rx.recv() => {
+                if relinking {
+                    warn!("已在重连中，忽略重复的「本体重连」");
+                    continue;
+                }
+                warn!("收到「本体重连」，开始原地重建本体链路");
+                start_relink(&body_ctx, &mut body, &mut relinking, &relink_tx, "manual").await;
+            }
+
+            // 后台重连有结果了（心跳/指令这段时间一直照常跑）
+            Some(result) = relink_rx.recv() => {
+                relinking = false;
+                match result {
+                    Ok(client) => finish_relink(&body_ctx, &mut body, client).await,
+                    Err(error) => {
+                        error!("{error}；进程退出，等待 systemd 重启重建本体链路");
+                        std::process::exit(1);
+                    }
+                }
             }
 
             _ = &mut ctrl_c => {
@@ -815,11 +1132,12 @@ async fn run_client(
                             &out_tx,
                             &state,
                             &active,
-                            &zhpro,
+                            &body.client,
                             &local_runner,
                             &local_mapping,
                             &teleop,
                             &video,
+                            &body_reconnect_tx,
                         ).await;
                     }
                     Some(Ok(Message::Ping(data))) => {
@@ -919,7 +1237,7 @@ async fn run_client(
             }
 
             _ = teleop_timer.tick() => {
-                if let Some(ref client) = zhpro {
+                if let Some(ref client) = body.client {
                     teleop::tick_watchdog(client, &teleop).await;
                 }
             }
@@ -1013,6 +1331,10 @@ async fn send_deduped_event(
 }
 
 /// 本体推送处理：5009 状态、1315 本体状态、1401 位姿、4001 建图收尾、4021 故障
+///
+/// 参数都是运行期共享句柄（含 `teleop`：控制权丢失时要在同一处复位接管态），
+/// 拆成结构体只会多一层搬运，故保留平铺签名。
+#[allow(clippy::too_many_arguments)]
 fn spawn_zhpro_pump(
     client: Arc<ZhProClient>,
     out_tx: mpsc::Sender<WsMessage>,
@@ -1020,8 +1342,9 @@ fn spawn_zhpro_pump(
     active: Shared<Option<ActiveTask>>,
     monitor: Arc<Mutex<TaskMonitor>>,
     local_mapping: Shared<Option<Arc<MappingSession>>>,
+    teleop: SharedTeleop,
     config: Arc<Config>,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut rx = client.subscribe();
         let dedup = Arc::new(Mutex::new(EventDedup::default()));
@@ -1139,6 +1462,10 @@ fn spawn_zhpro_pump(
                     }
                     if invalidate_control {
                         client.invalidate_control().await;
+                        // 1204 的本地标记失效时，`teleop` 的接管态与摇杆缓存必须一起清：
+                        // 只清一半会让摇杆首帧跳过 1204，1304 在没有 owner 的情况下被网关
+                        // 丢掉，现场表现就是「平台显示已接管、狗子不动且没有任何报错」。
+                        teleop::reset_after_control_lost(&client, &teleop).await;
                     }
                     for (message, data) in notices {
                         let event = DeviceEventPayload {
@@ -1352,7 +1679,7 @@ fn spawn_zhpro_pump(
                 _ => {}
             }
         }
-    });
+    })
 }
 
 /// 把 5009 快照翻译成业务侧进度
@@ -1564,6 +1891,7 @@ async fn handle_server_message(
     local_mapping: &Shared<Option<Arc<MappingSession>>>,
     teleop: &SharedTeleop,
     video: &VideoRelay,
+    body_reconnect: &mpsc::Sender<()>,
 ) {
     match msg.msg_type.as_str() {
         "register_ack" => {
@@ -1586,7 +1914,21 @@ async fn handle_server_message(
             }
         }
 
-        "heartbeat_ack" => {}
+        // 心跳回执：服务端在这里同步「强制接管」标记（客户端重启后本地标记会丢，
+        // 不同步的话摇杆又会被 `ctrl_source = 3` 门禁拦下）
+        "heartbeat_ack" => {
+            if let Some(force) = msg.payload["teleopForce"].as_bool() {
+                let mut guard = state.lock().await;
+                if guard.teleop_force != force {
+                    guard.teleop_force = force;
+                    if force {
+                        warn!("平台处于强制接管态：暂时忽略 ctrl_source 抢占门禁");
+                    } else {
+                        info!("平台已退出强制接管态：恢复遥控器抢占检测");
+                    }
+                }
+            }
+        }
 
         // 实时视频：控制台有人看监控时下发，这里起 ffmpeg 把 RTSP 转 FLV 回传
         "video_start" => {
@@ -2159,6 +2501,66 @@ async fn handle_server_message(
             let command = msg.payload["command"].as_str().unwrap_or("unknown");
             info!("收到远程指令: {command}");
 
+            // 「本体重连」：进程内重建 control/bulkdata，不退出进程、业务 WebSocket 不断。
+            // 放在所有门禁之前：本体已经断链时（`zhpro` 为空）也要能触发重连。
+            // 只在空闲时执行：带任务/建图/接管重建会丢运行态。
+            if command == "本体重连" {
+                let refused = {
+                    let engaged = zhpro::teleop::is_engaged(teleop).await;
+                    let busy_task = active.lock().await.is_some();
+                    let busy_mapping = local_mapping.lock().await.is_some();
+                    if engaged {
+                        Some("当前处于远程接管中，请先「释放接管」")
+                    } else if busy_task {
+                        Some("有任务在执行，请先暂停/取消任务")
+                    } else if busy_mapping {
+                        Some("建图会话进行中，请先结束建图")
+                    } else {
+                        None
+                    }
+                };
+                if let Some(reason) = refused {
+                    warn!("「本体重连」被拒绝: {reason}");
+                    let event = DeviceEventPayload {
+                        event_type: "error".to_string(),
+                        message: format!("重连本体被拒绝: {reason}"),
+                        data: None,
+                    };
+                    send(
+                        out_tx,
+                        "event",
+                        serde_json::to_value(event).unwrap_or_default(),
+                    )
+                    .await;
+                    return;
+                }
+
+                // 先补一帧停车并清接管态/摇杆缓存，避免带着非零摇杆重建
+                // （旧链已断时 `prepare_body_reconnect` 里还会再做一次，都是幂等的）
+                if let Some(client) = zhpro.as_ref() {
+                    zhpro::teleop::reset_after_control_lost(client, teleop).await;
+                }
+                let event = DeviceEventPayload {
+                    event_type: "warn".to_string(),
+                    message: "收到「本体重连」：正在原地重建到本体的连接（约 5~15 秒）。\
+                              客户端不退出、平台连接保持，期间设备会短暂显示「设备初始化中」"
+                        .to_string(),
+                    data: None,
+                };
+                send(
+                    out_tx,
+                    "event",
+                    serde_json::to_value(event).unwrap_or_default(),
+                )
+                .await;
+                // 交给主循环：与「链路意外断开」走同一条重建路径（退避、接管态清理、
+                // 任务置异常、窗口内失败后交 systemd 兜底）
+                if body_reconnect.try_send(()).is_err() {
+                    warn!("本体重连请求未入队（已有一次重连在进行中）");
+                }
+                return;
+            }
+
             // 对齐官方 App 的 ready 门禁：恢复类动作（急停/解除急停/避障）
             // 永远放行；运动/任务类动作必须先过 sdk_node、急停、控制权、
             // 姿态检查，避免“平台显示已下发、本体直接拒收”。
@@ -2180,13 +2582,43 @@ async fn handle_server_message(
                 "stand_up" | "lie_down" | "generic_mode" | "in_place_mode"
                     | "navigation_mode"
             );
+            // 强制接管标记：遥控器关了但本体仍报 `ctrl_source = 3` 时，平台会带
+            // `force=true` 下发「远程接管」。客户端据此只放行 ctrl_source 这一条
+            // 门禁（见 [`RobotState::motion_block_reason_with`]），其余门禁不变。
+            let force = msg.payload["force"]
+                .as_bool()
+                .or_else(|| msg.payload["params"]["force"].as_bool())
+                .unwrap_or(false);
+            match command {
+                "远程接管" => {
+                    state.lock().await.teleop_force = force;
+                    if force {
+                        warn!("平台强制接管：暂时忽略 ctrl_source 抢占门禁（请确认遥控器已断电）");
+                    }
+                }
+                "释放接管" => state.lock().await.teleop_force = false,
+                _ => {}
+            }
             if !recovery && motion_command {
                 let require_posture = matches!(
                     command,
                     "通用模式" | "原地模式" | "导航模式" | "开始巡检" | "暂停任务"
                         | "继续任务" | "召回充电"
                 ) || matches!(action, "generic_mode" | "in_place_mode" | "navigation_mode");
-                let command_block = state.lock().await.motion_block_reason(require_posture);
+                // 强制接管只放行手动动作（站立/卧倒/模式切换），任务与导航类指令
+                // 仍然要按 `ctrl_source = 3` 拒绝：本体在遥控器手里时导航能力不可用。
+                let manual_action = matches!(
+                    command,
+                    "站立" | "卧倒" | "通用模式" | "原地模式" | "导航模式"
+                ) || matches!(
+                    action,
+                    "stand_up" | "lie_down" | "generic_mode" | "in_place_mode" | "navigation_mode"
+                );
+                let command_block = {
+                    let guard = state.lock().await;
+                    let allow_preempt = guard.teleop_force && manual_action;
+                    guard.motion_block_reason_with(require_posture, allow_preempt)
+                };
                 if let Some(reason) = command_block {
                     warn!("指令 {command} 被拒绝: {reason}");
                     let event = DeviceEventPayload {
@@ -2349,20 +2781,31 @@ async fn handle_server_message(
             }
         }
 
+        // 本体链路断开前客户端会上报一帧 `teleop_state`（holder=false），服务端回这个 ack；
+        // 只是确认收到，不需要处理
+        "teleop_state_ack" => {}
+
         "teleop" => {
             let Some(client) = zhpro.clone() else {
                 return;
             };
             // 官方 App 的 JoystickOutboundGate：只有 ready + RoamerX 才放 1304。
             // 不满足时先补一帧停车，避免最后一帧非零摇杆继续生效。
-            let teleop_block = state.lock().await.motion_block_reason(true);
+            let teleop_block = {
+                let guard = state.lock().await;
+                let allow_preempt = guard.teleop_force;
+                guard.motion_block_reason_with(true, allow_preempt)
+            };
             if let Some(reason) = teleop_block {
-                debug!("摇杆被拒绝: {reason}");
                 zhpro::teleop::send_stop(&client).await;
+                notify_teleop_blocked(state, out_tx, &reason).await;
                 return;
             }
+            // 门禁通过：清掉上次拒绝原因，下一次拒绝立刻重新上报
+            clear_teleop_blocked(state).await;
             if let Err(e) = zhpro::teleop::handle_teleop(&client, teleop, &msg.payload).await {
                 warn!("遥控摇杆处理失败: {e}");
+                notify_teleop_blocked(state, out_tx, &format!("接管失败：{e}")).await;
             }
         }
 
@@ -2407,6 +2850,50 @@ async fn report_progress(
         serde_json::to_value(payload).unwrap_or_default(),
     )
     .await;
+}
+
+/// 摇杆未放行（门禁拒绝 / 接管失败）：按「原因变化或 30s」限频上报一条 `warn` 事件
+///
+/// 以前只打 `debug!`，平台侧完全看不到原因，现场只能看到「页面显示已接管、狗子不动」。
+/// 用 `warn` 而不是 `error`：门禁拒绝不是本体故障，服务端不应因此生成告警工单。
+async fn notify_teleop_blocked(
+    state: &Shared<RobotState>,
+    out_tx: &mpsc::Sender<WsMessage>,
+    reason: &str,
+) {
+    let changed = {
+        let mut guard = state.lock().await;
+        let changed = guard
+            .teleop_block_notice
+            .as_ref()
+            .map(|(last, at)| last != reason || at.elapsed() > TELEOP_BLOCK_NOTICE_INTERVAL)
+            .unwrap_or(true);
+        if changed {
+            guard.teleop_block_notice = Some((reason.to_string(), Instant::now()));
+        }
+        changed
+    };
+    if !changed {
+        debug!("摇杆未放行（同原因已在窗口内上报）: {reason}");
+        return;
+    }
+    warn!("摇杆未放行: {reason}");
+    let event = DeviceEventPayload {
+        event_type: "warn".to_string(),
+        message: format!("摇杆被拒绝: {reason}"),
+        data: Some(json!({ "blocked": true })),
+    };
+    send(
+        out_tx,
+        "event",
+        serde_json::to_value(event).unwrap_or_default(),
+    )
+    .await;
+}
+
+/// 摇杆重新放行：清掉上次的拒绝原因
+async fn clear_teleop_blocked(state: &Shared<RobotState>) {
+    state.lock().await.teleop_block_notice = None;
 }
 
 async fn send(tx: &mpsc::Sender<WsMessage>, msg_type: &str, payload: Value) {
@@ -2573,6 +3060,53 @@ async fn sync_maps_from_robot(
         Err(summary)
     } else {
         Ok(summary)
+    }
+}
+
+#[cfg(test)]
+mod body_reconnect_tests {
+    use super::*;
+
+    /// 退避序列必须是「翻倍 + 封顶」，否则重连会退化成忙等
+    #[test]
+    fn backoff_doubles_then_caps() {
+        let mut backoff = BODY_RECONNECT_MIN_BACKOFF;
+        let mut seen = vec![backoff];
+        for _ in 0..6 {
+            backoff = next_body_backoff(backoff);
+            seen.push(backoff);
+        }
+        assert_eq!(
+            seen,
+            vec![
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(4),
+                Duration::from_secs(8),
+                BODY_RECONNECT_MAX_BACKOFF,
+                BODY_RECONNECT_MAX_BACKOFF,
+                BODY_RECONNECT_MAX_BACKOFF,
+            ]
+        );
+    }
+
+    /// 120s 窗口按「已等退避 + 单次连接超时」估算能试几次：
+    /// 至少要留出 3 次机会，否则本体重启（40~60s 不可用）撐不过来
+    #[test]
+    fn window_allows_at_least_three_attempts() {
+        let mut elapsed = Duration::ZERO;
+        let mut backoff = BODY_RECONNECT_MIN_BACKOFF;
+        let mut attempts = 0;
+        while elapsed < BODY_RECONNECT_WINDOW {
+            attempts += 1;
+            elapsed += BODY_CONNECT_TIMEOUT.min(Duration::from_secs(5));
+            if elapsed >= BODY_RECONNECT_WINDOW {
+                break;
+            }
+            elapsed += backoff;
+            backoff = next_body_backoff(backoff);
+        }
+        assert!(attempts >= 3, "窗口内只够 {attempts} 次尝试");
     }
 }
 

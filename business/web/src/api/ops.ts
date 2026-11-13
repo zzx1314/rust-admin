@@ -111,11 +111,16 @@ export const deviceApi = {
     }>(`/devices/${id}/locate`, payload),
 
   // ── 远程接管 ────────────────────────────────────────────
-  /** 必须接管后才能下发摇杆与动作 */
-  takeOver: (id: number) =>
-    post<{ deviceId: string; holder: string; expiresInSec: number; wsDelivered: boolean }>(
-      `/devices/${id}/teleop/take`
-    ),
+  /** 必须接管后才能下发摇杆与动作；`force` 用于遥控器断电但本体仍报 ctrl_source=3 */
+  takeOver: (id: number, force = false) =>
+    post<{
+      deviceId: string;
+      holder: string;
+      expiresInSec: number;
+      wsDelivered: boolean;
+      forced: boolean;
+      ctrlSource: number;
+    }>(`/devices/${id}/teleop/take`, { force }),
   release: (id: number) =>
     post<{ deviceId: string; released: boolean; wsDelivered: boolean }>(
       `/devices/${id}/teleop/release`

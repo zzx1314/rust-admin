@@ -57,7 +57,7 @@ pub(crate) const DEVICE_SELECT: &str = "SELECT d.id, d.device_id, d.model, d.par
     d.zone_id, z.zone_name, d.status, d.battery, d.temperature, d.runtime_minutes,
     d.odometer, d.position, d.current_task_name, d.last_heartbeat, d.firmware, d.device_ip,
     d.video_url, COALESCE(d.video_type, 'none') AS video_type,
-    d.teleop_holder, d.teleop_at,
+    d.teleop_holder, d.teleop_at, COALESCE(d.teleop_force, 0) AS teleop_force,
     COALESCE(d.body_online, 0) AS body_online, d.run_mode,
     COALESCE(d.charging, 0) AS charging, d.robot_mode,
     COALESCE(d.loc_status, 255) AS loc_status, d.active_map_id,
@@ -540,7 +540,8 @@ pub async fn refresh_devices(
         }
         sqlx::query(
             "UPDATE devices SET status = '离线', body_online = 0,
-                teleop_holder = NULL, teleop_at = NULL, updated_at = ?1 WHERE id = ?2",
+                teleop_holder = NULL, teleop_at = NULL, teleop_force = 0,
+                updated_at = ?1 WHERE id = ?2",
         )
         .bind(&timestamp)
         .bind(id)
@@ -669,6 +670,33 @@ pub(crate) async fn push_command(
             device.device_id
         )));
     }
+    // 「本体重连」是运维手段（本体链路/会话半死时重建），会重启设备客户端进程：
+    // 带任务 / 接管 / 建图 / 模拟模式时一律拒，避免丢运行态。
+    if command == "本体重连" {
+        if !connected {
+            return Err(AppError::BadRequest(
+                "设备客户端未连接（不在线），无法下发重连指令".to_string(),
+            ));
+        }
+        if device.run_mode.as_deref() == Some("sim") {
+            return Err(AppError::BadRequest(
+                "设备客户端处于模拟模式（未接本体），无需重连".to_string(),
+            ));
+        }
+        if device.status == "执行任务" {
+            return Err(AppError::BadRequest(format!(
+                "设备 {} 正在执行任务，请先暂停/取消任务再重连",
+                device.device_id
+            )));
+        }
+        if device.teleop_holder.is_some() && !super::teleop::teleop_expired(device.teleop_at.as_deref())
+        {
+            return Err(AppError::BadRequest(format!(
+                "设备 {} 正在远程接管中，请先释放接管再重连（重连会丢掉接管态）",
+                device.device_id
+            )));
+        }
+    }
     let id = device.id;
     let next_status = match command {
         "开始巡检" => Some("执行任务"),
@@ -701,15 +729,25 @@ pub(crate) async fn push_command(
     .execute(&state.db)
     .await?;
 
-    // 如果设备在线，通过 WebSocket 下发指令
+    // 如果设备在线，通过 WebSocket 下发指令；`force` 只在「遥控器仍报 ctrl_source=3」
+    // 且本次是接管时才有意义：客户端需要它才能跳过自己的 ctrl_source 门禁发 1304。
+    let force = command == "远程接管"
+        && device.ctrl_source == 3
+        && extra_params
+            .as_ref()
+            .and_then(|extra| extra.get("force"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    let mut payload = extra_params.map_or_else(
+        || json!({"dispatchedAt": timestamp, "operator": operator}),
+        |extra| json!({"dispatchedAt": timestamp, "operator": operator, "params": extra}),
+    );
+    payload["force"] = json!(force);
     let cmd_sent = gateway::send_command_to_device(
         &state.device_connections,
         &device.device_id,
         command,
-        Some(extra_params.map_or_else(
-            || json!({"dispatchedAt": timestamp, "operator": operator}),
-            |extra| json!({"dispatchedAt": timestamp, "operator": operator, "params": extra}),
-        )),
+        Some(payload),
     )
     .await;
 
@@ -725,19 +763,26 @@ pub(crate) async fn push_command(
     let teleop_holder = match command {
         "远程接管" => {
             let holder = super::teleop::operator_id(device);
-            sqlx::query("UPDATE devices SET teleop_holder = ?1, teleop_at = ?2 WHERE id = ?3")
-                .bind(&holder)
-                .bind(&timestamp)
-                .bind(id)
-                .execute(&state.db)
-                .await?;
+            sqlx::query(
+                "UPDATE devices SET teleop_holder = ?1, teleop_at = ?2, teleop_force = ?3 \
+                 WHERE id = ?4",
+            )
+            .bind(&holder)
+            .bind(&timestamp)
+            .bind(if force { 1 } else { 0 })
+            .bind(id)
+            .execute(&state.db)
+            .await?;
             Some(holder)
         }
         "释放接管" => {
-            sqlx::query("UPDATE devices SET teleop_holder = NULL, teleop_at = NULL WHERE id = ?1")
-                .bind(id)
-                .execute(&state.db)
-                .await?;
+            sqlx::query(
+                "UPDATE devices SET teleop_holder = NULL, teleop_at = NULL, teleop_force = 0 \
+                 WHERE id = ?1",
+            )
+            .bind(id)
+            .execute(&state.db)
+            .await?;
             None
         }
         _ => device.teleop_holder.clone(),
@@ -749,6 +794,7 @@ pub(crate) async fn push_command(
         "dispatchedAt": timestamp,
         "wsDelivered": cmd_sent,
         "teleopHolder": teleop_holder,
+        "forced": force,
     }))
 }
 
