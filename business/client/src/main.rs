@@ -1391,23 +1391,48 @@ fn spawn_zhpro_pump(
                     let Some(accepted) = monitor.lock().await.accept(&frame) else {
                         continue;
                     };
-                    if accepted.reason != "heartbeat" {
+                    if accepted.boot_changed {
+                        // 算法节点重启（boot_id 变了）：上一轮的 5009 快照全部作废，
+                        // 本地任务视图也要清空，否则界面/台账会拿着不存在的任务继续跑。
+                        // 业务任务上下文（active / runner）不在这里清：终态由 runner 自己
+                        // 的上报或看门狗收尾，清了反而永远报不上去。
+                        warn!(
+                            "5009 boot_id 变化（算法节点重启，boot={}），清空本地任务快照",
+                            accepted.frame.boot_id
+                        );
+                        state.lock().await.current_task = None;
+                        last_task_log = None;
+                    }
+                    if accepted.frame.reason != "heartbeat" {
                         debug!(
                             "5009 帧: reason={} revision={} task_state={} loc={}",
-                            accepted.reason,
-                            accepted.revision,
-                            accepted.robot_task_state,
-                            accepted.loc_status
+                            accepted.frame.reason,
+                            accepted.frame.revision,
+                            accepted.frame.robot_task_state,
+                            accepted.frame.loc_status
                         );
                     }
                     // 把 current/pending/最近终态的关键字段留痕：5001 code=0 但任务
                     // 不执行时，只有 stage/error/stop_reason 能说明卡在哪一步。
                     let snapshot = accepted
+                        .frame
                         .current
                         .as_ref()
                         .map(|task| (task, "current"))
-                        .or_else(|| accepted.pending.as_ref().map(|task| (task, "pending")))
-                        .or_else(|| accepted.terminals.first().map(|task| (task, "terminal")));
+                        .or_else(|| {
+                            accepted
+                                .frame
+                                .pending
+                                .as_ref()
+                                .map(|task| (task, "pending"))
+                        })
+                        .or_else(|| {
+                            accepted
+                                .frame
+                                .terminals
+                                .first()
+                                .map(|task| (task, "terminal"))
+                        });
                     if let Some((task, source)) = snapshot {
                         let key = format!(
                             "{}|{}|{}|{}|{:?}|{:?}",
@@ -1434,15 +1459,15 @@ fn spawn_zhpro_pump(
                                 task.detail_total,
                                 task.error_message,
                                 task.stop_reason,
-                                accepted.robot_task_state,
-                                accepted.loc_status
+                                accepted.frame.robot_task_state,
+                                accepted.frame.loc_status
                             );
                             last_task_log = Some(key);
                         }
                     } else {
                         last_task_log = None;
                     }
-                    let frame = accepted.clone();
+                    let frame = accepted.frame.clone();
                     handle_status_frame(&frame, &out_tx, &state, &active, &monitor).await;
                 }
                 T_ROBOT_STATUS => {
@@ -1719,8 +1744,27 @@ async fn handle_status_frame(
     active: &Shared<Option<ActiveTask>>,
     monitor: &Arc<Mutex<TaskMonitor>>,
 ) {
-    let Some(task) = frame.current.clone() else {
-        return;
+    // 文档 §2.6.10 第 5 条：即时终态可能已经在 `current_task` 里被回收，只留在
+    // `recent_terminal_tasks` 里（最多 3 条 / 约 30s）。两处都要识别，否则
+    // 「已建链但终态帧丢了/断开重连期间到终态」时业务侧永远收不到终态，
+    // 只能等看门狗把一条成功的任务判成「异常」。
+    let bound_id = {
+        let guard = active.lock().await;
+        guard.as_ref().and_then(|a| a.nav_task_id.clone())
+    };
+    let task = match frame.current.as_ref() {
+        Some(task) => task.clone(),
+        None => {
+            // 没有 current_task 时只认「本端已绑定的那个 nav_task_id」的终态，
+            // 别人的历史终态一律忽略。
+            let Some(id) = bound_id.as_deref() else {
+                return;
+            };
+            let Some(task) = frame.terminals.iter().find(|t| t.task_id == id) else {
+                return;
+            };
+            task.clone()
+        }
     };
 
     // 只跟随我们下发的那个任务
@@ -1736,6 +1780,13 @@ async fn handle_status_frame(
         }
     };
     if !bound {
+        return;
+    }
+
+    // 终态上报幂等：同一条任务同一个 lifecycle 只报一次。
+    // 后面每一帧心跳都会带同一个终态（current_task 一次 + recent_terminal_tasks 多次），
+    // 不去重就是每 500ms 往业务库推一条「已完成」。
+    if task.is_terminal() && !monitor.lock().await.take_terminal(&task) {
         return;
     }
 

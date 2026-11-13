@@ -785,6 +785,9 @@ impl RouteRunner {
         // 等待该任务终态
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs(600_u64.max(total as u64 * 120));
+        // 同一 boot_id 内按 snapshot_seq 丢弃重复 / 更旧快照（文档 §2.6.10 第 2 条）：
+        // 这条等待路径不经过 TaskMonitor，自己带一个单帧丢帧器。
+        let mut gate = super::status::SeqGate::default();
         loop {
             if self.is_cancelled() {
                 return Err("任务已取消".to_string());
@@ -804,6 +807,19 @@ impl RouteRunner {
             let Some(frame) = super::status::StatusFrame::parse(&env.data) else {
                 continue;
             };
+            let gate_result = gate.accept(&frame);
+            if !gate_result.accepted {
+                continue;
+            }
+            if gate_result.boot_changed {
+                // 算法节点重启：本体上的导航任务已经不存在，等下去只能等到 600s 超时。
+                // 按航点失败上报，交给上层重试 / 终止。
+                *self.nav_task_id.lock().await = None;
+                return Err(format!(
+                    "航点 {} 导航失败: 算法节点重启（boot_id 变化），本体任务已失效",
+                    point.name
+                ));
+            }
             if let Some(task) = frame.task_for(&nav_task_id)
                 && task.is_terminal()
             {

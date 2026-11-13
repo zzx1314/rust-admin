@@ -207,42 +207,122 @@ impl StatusFrame {
     }
 }
 
-/// 本地维护的机器人任务视图，负责丢帧与事件去重
-pub struct TaskMonitor {
+/// 单帧丢帧器：同一 `boot_id` 内按 `snapshot_seq` 丢弃重复 / 更旧的快照。
+///
+/// `TaskMonitor` 持有跨帧状态（事件游标、终态幂等），只适合长期存活的消费循环；
+/// 「等某个航点 / 等定位收敛」这类一次性等待没有地方存跨调用状态，用这个轻量版。
+#[derive(Debug, Clone)]
+pub struct SeqGate {
     boot_id: String,
     last_seq: i64,
+}
+
+impl Default for SeqGate {
+    fn default() -> Self {
+        Self {
+            boot_id: String::new(),
+            last_seq: -1,
+        }
+    }
+}
+
+/// `SeqGate::accept` 的结果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GateResult {
+    /// 是否采用这一帧（重复 / 更旧帧为 false）
+    pub accepted: bool,
+    /// `boot_id` 是否变化（算法进程重启，调用方应作废旧任务视图）
+    pub boot_changed: bool,
+}
+
+impl SeqGate {
+    pub fn accept(&mut self, frame: &StatusFrame) -> GateResult {
+        let boot_changed = frame.boot_id != self.boot_id;
+        if boot_changed {
+            // 算法进程重启：新 boot_id 下的 seq 重新计数，游标必须重置
+            self.boot_id.clone_from(&frame.boot_id);
+            self.last_seq = -1;
+        }
+        if frame.snapshot_seq <= self.last_seq {
+            return GateResult {
+                accepted: false,
+                boot_changed,
+            };
+        }
+        self.last_seq = frame.snapshot_seq;
+        GateResult {
+            accepted: true,
+            boot_changed,
+        }
+    }
+}
+
+/// `TaskMonitor::accept` 通过校验的帧
+#[derive(Debug, Clone, Copy)]
+pub struct Accepted<'a> {
+    pub frame: &'a StatusFrame,
+    /// `boot_id` 变了：调用方要清空本地任务快照（文档 §2.6.10 第 2 条）
+    pub boot_changed: bool,
+}
+
+/// 本地维护的机器人任务视图，负责丢帧与事件去重
+pub struct TaskMonitor {
+    gate: SeqGate,
     last_revision: i64,
     /// (task_id, event_seq) 已消费的离散事件
     seen_events: Vec<(String, i64)>,
+    /// (task_id, lifecycle) 已上报过的终态
+    ///
+    /// 同一条终态可能先出现在 `current_task`，回收后再出现在
+    /// `recent_terminal_tasks`，两处都要识别、但不能重复上报。
+    reported_terminals: Vec<(String, String)>,
 }
 
 impl Default for TaskMonitor {
     fn default() -> Self {
         Self {
-            boot_id: String::new(),
-            last_seq: -1,
+            gate: SeqGate::default(),
             last_revision: -1,
             seen_events: Vec::new(),
+            reported_terminals: Vec::new(),
         }
     }
 }
 
 impl TaskMonitor {
     /// 接受一帧，返回需要处理的帧；重复或更旧的帧返回 None
-    pub fn accept<'a>(&mut self, frame: &'a StatusFrame) -> Option<&'a StatusFrame> {
-        if frame.boot_id != self.boot_id {
-            // 算法进程重启：清空游标
-            self.boot_id.clone_from(&frame.boot_id);
-            self.last_seq = -1;
+    pub fn accept<'a>(&mut self, frame: &'a StatusFrame) -> Option<Accepted<'a>> {
+        let gate = self.gate.accept(frame);
+        if gate.boot_changed {
+            // 算法进程重启：事件游标、终态去重全部作废
             self.last_revision = -1;
             self.seen_events.clear();
+            self.reported_terminals.clear();
         }
-        if frame.snapshot_seq <= self.last_seq {
+        if !gate.accepted {
             return None;
         }
-        self.last_seq = frame.snapshot_seq;
         self.last_revision = frame.revision;
-        Some(frame)
+        Some(Accepted {
+            frame,
+            boot_changed: gate.boot_changed,
+        })
+    }
+
+    /// 终态上报幂等：同一任务的同一 lifecycle 只放行一次。
+    ///
+    /// `current_task` 与 `recent_terminal_tasks` 会给出同一条终态，必须按
+    /// `task_id + lifecycle` 去重（文档 §2.6.10 第 5 条）。
+    pub fn take_terminal(&mut self, task: &TaskSnapshot) -> bool {
+        let key = (task.task_id.clone(), task.lifecycle.clone());
+        if self.reported_terminals.contains(&key) {
+            return false;
+        }
+        self.reported_terminals.push(key);
+        if self.reported_terminals.len() > 64 {
+            self.reported_terminals.drain(0..32);
+        }
+        true
     }
 
     /// 判断该离散事件是否首次出现（用于触发业务动作）
@@ -328,6 +408,60 @@ mod tests {
         assert_eq!(task.detail_index, Some(1));
         assert_eq!(task.detail_total, Some(5));
         assert!(!task.is_terminal());
+    }
+
+    #[test]
+    fn seq_gate_resets_on_boot_change() {
+        let mut gate = SeqGate::default();
+        let first = frame(0);
+        let r = gate.accept(&first);
+        assert!(r.accepted && r.boot_changed, "首个帧必须被采用");
+        assert!(!gate.accept(&frame(0)).accepted, "seq 相同视为重复帧");
+        assert!(!gate.accept(&frame(0)).boot_changed);
+
+        let mut other = frame(1);
+        other.boot_id = "boot-b".to_string();
+        let r = gate.accept(&other);
+        assert!(r.accepted && r.boot_changed);
+    }
+
+    #[test]
+    fn terminal_report_is_idempotent_per_lifecycle() {
+        let mut monitor = TaskMonitor::default();
+        let task = TaskSnapshot::from_value(&json!({
+            "task_id": "t-1", "type": "navigation", "lifecycle": "success",
+            "stage": "navigation.succeeded", "progress": 100.0
+        }))
+        .unwrap();
+        assert!(monitor.take_terminal(&task));
+        assert!(
+            !monitor.take_terminal(&task),
+            "current_task 与 recent_terminal_tasks 会给出同一条终态"
+        );
+
+        // 换了 lifecycle（例如 cancelled 后被重跑成 success）仍算新终态
+        let mut again = task.clone();
+        again.lifecycle = "cancelled".to_string();
+        assert!(monitor.take_terminal(&again));
+    }
+
+    #[test]
+    fn boot_change_clears_terminal_dedup() {
+        let mut monitor = TaskMonitor::default();
+        let task = TaskSnapshot::from_value(&json!({
+            "task_id": "t-1", "type": "navigation", "lifecycle": "success"
+        }))
+        .unwrap();
+        assert!(monitor.take_terminal(&task));
+
+        let mut restarted = frame(1);
+        restarted.boot_id = "boot-b".to_string();
+        let accepted = monitor.accept(&restarted).expect("boot 变化后必须采用");
+        assert!(accepted.boot_changed);
+        assert!(
+            monitor.take_terminal(&task),
+            "算法进程重启后旧终态去重键应作废"
+        );
     }
 
     #[test]

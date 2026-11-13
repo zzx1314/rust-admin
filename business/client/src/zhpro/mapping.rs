@@ -565,6 +565,8 @@ pub fn loc_status_fatal(status: i64) -> bool {
 pub async fn latest_loc_status(client: &ZhProClient, wait: Duration) -> Option<i64> {
     let mut rx = client.subscribe();
     let deadline = tokio::time::Instant::now() + wait;
+    // 同 boot_id 内丢弃重复 / 更旧快照（文档 §2.6.10 第 2 条）
+    let mut gate = super::status::SeqGate::default();
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
@@ -573,11 +575,16 @@ pub async fn latest_loc_status(client: &ZhProClient, wait: Duration) -> Option<i
         let Ok(Ok(env)) = tokio::time::timeout(remaining, rx.recv()).await else {
             return None;
         };
-        if env.head.msg_type == T_TASK_STATUS
-            && let Some(frame) = super::status::StatusFrame::parse(&env.data)
-        {
-            return Some(frame.loc_status);
+        if env.head.msg_type != T_TASK_STATUS {
+            continue;
         }
+        let Some(frame) = super::status::StatusFrame::parse(&env.data) else {
+            continue;
+        };
+        if !gate.accept(&frame).accepted {
+            continue;
+        }
+        return Some(frame.loc_status);
     }
 }
 
@@ -589,6 +596,8 @@ pub async fn wait_localized(client: &ZhProClient, timeout: Duration) -> Result<i
     let mut rx = client.subscribe();
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last = 255_i64;
+    // 同 boot_id 内丢弃重复 / 更旧快照（文档 §2.6.10 第 2 条）
+    let mut gate = super::status::SeqGate::default();
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
@@ -606,6 +615,9 @@ pub async fn wait_localized(client: &ZhProClient, timeout: Duration) -> Result<i
                 let Some(frame) = super::status::StatusFrame::parse(&env.data) else {
                     continue;
                 };
+                if !gate.accept(&frame).accepted {
+                    continue;
+                }
                 last = frame.loc_status;
                 if loc_status_ready(last) {
                     return Ok(last);

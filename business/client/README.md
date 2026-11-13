@@ -484,6 +484,23 @@ journalctl -u robodog-device-client -f | grep 视频
 - 航线任务 → `RouteRunner::control`，暂停时同步给本体 5004，恢复 5006，取消 5002；
 - 建图任务 → `cancel` 会触发 5002 并等待 4001 保存结果。
 
+## 5009 快照消费规则（协议 §2.6.10）
+
+| 规则 | 实现 |
+| --- | --- |
+| 每帧整体替换，不跨帧拼接 | `StatusFrame::parse` 每帧重建结构体，不保存累加状态 |
+| 同 `boot_id` 内按 `snapshot_seq` 丢弃重复 / 更旧帧 | 长期消费循环用 `TaskMonitor`（内部 `SeqGate`）；一次性等待（等航点终态、等定位收敛）各自带一个 `SeqGate` |
+| `boot_id` 变化 = 算法进程重启 | 清空事件游标与终态去重键，并清 `RobotState.current_task`；正在等的航点直接判失败（本体任务已不存在，继续等只能等 600s 超时） |
+| `lifecycle` 判运行 / 暂停 / 终态，`stage` 判业务阶段 | `classify_stage` 只看这两个字段 |
+| `robot.task_state` 只表示任务占用 | 只出现在 `5009 任务(...)` 日志行，**不**用来判底盘运动 / 充电 / 定位；定位看 `robot.loc_state` |
+| `pending_task` 也可取消 | `nav_task_id` 取自 5001 应答，`cancel` 直接 5002 该 id，不区分是否已驱动底盘 |
+| 终态可能在 `current_task`，回收后留在 `recent_terminal_tasks` | `StatusFrame::task_for` 三处都查；业务上报考 `current_task` 缺失时按已绑定的 `nav_task_id` 回落最近终态 |
+| 终态幂等（`task_id + lifecycle`） | `TaskMonitor::take_terminal`，同一条终态只上报一次（否则 500ms 心跳会重复推「已完成」） |
+| `5017` / `5019` 不能被 `last_event` 替代 | `5019` 独立分支处理；`5017` 本版协议文档未给出报文（只被 §2.5.6.1 引用），暂未实现 |
+
+> `1501` 是「网关 → 外部端」的上线通知，客户端不用发；ALG 收到后会**立即**补一帧完整
+> `5009`，所以建链后读定位（`latest_loc_status` 的 2s 窗口）不必等周期心跳。
+
 ### 报文日志（双向，含 head）
 
 - **收到的每一帧**：DEBUG，`client: ← 智航完整帧（含 head） packet={"head":{…},"data":{…}}`，
