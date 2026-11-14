@@ -177,7 +177,12 @@ impl MockTask {
                 "type": self.stage,
                 "data": { "index": self.index, "total": self.total }
             },
-            "detail": { "last_arrived_goal": { "index": self.index, "total": self.total } }
+            "detail": if self.kind == 4 {
+                json!({ "last_arrived_point": { "index": self.index, "total": self.total,
+                                                 "kind": 1, "name": self.index.to_string() } })
+            } else {
+                json!({ "last_arrived_goal": { "index": self.index, "total": self.total } })
+            }
         })
     }
 }
@@ -193,6 +198,8 @@ struct MockState {
     ctrl_source: i64,
     owner: Option<u32>,
     map_dirs: Vec<String>,
+    /// 巡检路径：path_id → 点数（4024/4028 写入，5000 kind=4 用它算 total）
+    paths: std::collections::HashMap<String, usize>,
     route_exist: bool,
     step: Duration,
     battery: f64,
@@ -213,6 +220,7 @@ impl MockState {
             ctrl_source: 2,
             owner: None,
             map_dirs,
+            paths: std::collections::HashMap::new(),
             route_exist,
             step,
             battery: 86.0,
@@ -243,7 +251,12 @@ impl MockState {
         if done > task.index {
             task.index = done;
             task.event_seq += 1;
-            task.stage = "navigation.goal_arrived".to_string();
+            task.stage = if task.kind == 4 {
+                // 巡检：0-based 的 last_arrived_point.index，阶段名也不同
+                "patrol.point_arrived".to_string()
+            } else {
+                "navigation.goal_arrived".to_string()
+            };
         }
         if now < ends_at {
             task.progress =
@@ -582,6 +595,41 @@ async fn run_control<S>(
                     ))
                     .await;
             }
+            T_PATH_ADD | T_PATH_MODIFY => {
+                // 4024 add_nav_path = [map_id, path_id, points, fences]
+                // 4028 modify_nav_path = [map_id, old, new, points, fences]
+                let tuple_name = if env.head.msg_type == T_PATH_ADD {
+                    "add_nav_path"
+                } else {
+                    "modify_nav_path"
+                };
+                let tuple = env
+                    .data
+                    .get(tuple_name)
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let path_index = if env.head.msg_type == T_PATH_ADD { 1 } else { 2 };
+                let points_index = if env.head.msg_type == T_PATH_ADD { 2 } else { 3 };
+                let path_id = tuple
+                    .get(path_index)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let count = tuple
+                    .get(points_index)
+                    .and_then(Value::as_array)
+                    .map(Vec::len)
+                    .unwrap_or(0);
+                if !path_id.is_empty() {
+                    guard.paths.insert(path_id.clone(), count);
+                }
+                debug!("假本体: ← {} path_id={path_id} points={count}", env.head.msg_type);
+                let ack = env.head.msg_type + 1;
+                let _ = tx
+                    .send(response(ack, msg_id, json!({ "code": 0, "msg": "ok" })))
+                    .await;
+            }
             T_TASK_CREATE => {
                 let kind = env.data.get("kind").and_then(Value::as_u64).unwrap_or(0) as u32;
                 // 真机上一条任务没结束就再下发会回 13897（capability busy）
@@ -598,6 +646,7 @@ async fn run_control<S>(
                     let (task_type, stage) = match kind {
                         1 => ("mapping", "mapping.running"),
                         3 => ("recharge", "recharge.charging"),
+                        4 => ("patrol", "patrol.navigating"),
                         5 => ("undock", "undock.driving"),
                         _ => ("navigation", "navigation.navigating"),
                     };
@@ -611,13 +660,23 @@ async fn run_control<S>(
                     // 真机一段任务可以带多个 goals（`params.goals` 有序数组），
                     // 逐点到点发 `navigation.goal_arrived`；假本体要照着模拟，
                     // 否则本地联调看不到多航点进度。
-                    let total = env
-                        .data
-                        .get("params")
-                        .and_then(|p| p.get("goals"))
-                        .and_then(Value::as_array)
-                        .map(|goals| goals.len().max(1))
-                        .unwrap_or(1) as i64;
+                    let total = if kind == 4 {
+                        // 巡检的航点在 4024 写入的路径里，5000 只带 path_id
+                        let path_id = env
+                            .data
+                            .get("params")
+                            .and_then(|p| p.get("path_id"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        guard.paths.get(path_id).copied().unwrap_or(1).max(1) as i64
+                    } else {
+                        env.data
+                            .get("params")
+                            .and_then(|p| p.get("goals"))
+                            .and_then(Value::as_array)
+                            .map(|goals| goals.len().max(1))
+                            .unwrap_or(1) as i64
+                    };
                     let goal_step = guard.step;
                     let started_at = tokio::time::Instant::now();
                     let ends_at = if kind == 1 {
@@ -819,6 +878,44 @@ mod tests {
         assert_eq!(frame["schema_version"], json!(2));
         assert_eq!(frame["robot"]["loc_state"]["status"], json!(100));
         assert_eq!(frame["current_task"], Value::Null);
+    }
+
+    #[test]
+    fn patrol_task_uses_point_detail_and_stage() {
+        let mut st = state();
+        st.paths.insert("平台-TK-1".to_string(), 3);
+        st.current = Some(MockTask {
+            id: "mock-4".to_string(),
+            name: "巡检".to_string(),
+            task_type: "patrol",
+            kind: 4,
+            lifecycle: "running".to_string(),
+            stage: "patrol.navigating".to_string(),
+            progress: 0.0,
+            index: 0,
+            total: 3,
+            event_seq: 1,
+            ends_at: Some(tokio::time::Instant::now() + Duration::from_secs(60)),
+            // 让 tick 判定「已经过了一个点」：起点回拨 50 ms、每点 1 ms
+            started_at: tokio::time::Instant::now() - Duration::from_millis(50),
+            goal_step: Duration::from_millis(1),
+        });
+        st.tick();
+        let task = st.current.as_ref().expect("patrol task still running");
+        // 巡检到点用 last_arrived_point + patrol.point_arrived（客户端按 0-based +1 推进度）
+        assert_eq!(task.stage, "patrol.point_arrived");
+        let value = task.to_value();
+        assert_eq!(value["detail"]["last_arrived_point"]["index"], json!(3));
+        assert_eq!(value["detail"]["last_arrived_point"]["total"], json!(3));
+        assert!(value["detail"].get("last_arrived_goal").is_none());
+    }
+
+    #[test]
+    fn patrol_paths_are_tracked_by_4024() {
+        let mut st = state();
+        assert!(st.paths.is_empty());
+        st.paths.insert("平台-TK-9".to_string(), 4);
+        assert_eq!(st.paths.get("平台-TK-9"), Some(&4));
     }
 
     #[test]

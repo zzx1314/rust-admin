@@ -42,7 +42,9 @@ use dispatch::{TaskMode, parse_flight_plan, parse_map_binding};
 use futures_util::{SinkExt, StreamExt};
 use mapupload::{IngestConfig, UploadOutcome};
 use rand::Rng;
-use robodog_device_client::config::{CliArgs, Config, EnvConfig, RoadNetworkMode, print_help};
+use robodog_device_client::config::{
+    CliArgs, Config, EnvConfig, RoadNetworkMode, DispatchMode, print_help,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -2473,7 +2475,8 @@ async fn handle_server_message(
                                 &map_path,
                             );
                             info!(
-                                "定位已就绪（status={status}），开始执行航线；首航点 need_locate={}",
+                                "定位已就绪（status={status}），开始执行航线；                                 任务形态={}（巡检 kind=4 时由本体自己载图，首航点 need_locate={}）",
+                                config.task_mode.as_str(),
                                 first_locate.need_locate()
                             );
                             loaded
@@ -2502,9 +2505,24 @@ async fn handle_server_message(
                     // `motion_block_reason(true)` 统一拦过，这里不再重复检查
 
                     let runner = Arc::new(RouteRunner::new(client.clone()));
+                    runner.set_mode(config.task_mode).await;
+                    if config.task_mode == DispatchMode::Patrol {
+                        runner
+                            .set_patrol_options(
+                                &config.patrol_path_prefix,
+                                config.min_recharge_battery,
+                            )
+                            .await;
+                    }
                     // 闭环会补回首点：总数要取执行顺序的长度，否则事件流里会出现
                     // 「进度 0/4（100%）」这种自相矛盾的读数
-                    let total_points = plan.execution_order().len() as i64;
+                    // 巡检（kind=4）的总点数 = 路径点数（本体按 nav_paths 里的点算）；
+                    // 导航（kind=2）的总点数 = 执行顺序长度（闭环会补回首点）
+                    let total_points = if config.task_mode == DispatchMode::Patrol {
+                        plan.waypoints.len() as i64
+                    } else {
+                        plan.execution_order().len() as i64
+                    };
                     // 只有预检真的载了这张图，首航点才用 need_locate=false 复用定位
                     //（记录绑地图 + 时刻，换图或超窗时 locate_for 会重新载图定位）
                     if pre_located {

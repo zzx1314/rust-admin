@@ -1,11 +1,17 @@
 //! 航线任务（巡检）执行引擎。
 //!
-//! 职责：把业务服务下发的任务（路线航点 + 动作 + 地图）翻译成智航 Pro 的
-//! `5000 kind=2` 导航任务，并按 5009 状态机推进、把进度回传业务服务。
+//! 职责：把业务服务下发的任务（路线航点 + 动作 + 地图）翻译成智航 Pro 的任务，
+//! 并按 5009 状态机推进、把进度回传业务服务。
 //!
-//! 关键设计：
-//! - 智航 Pro 的巡检（`kind=4`）暂不对外开放，因此巡检引擎自己拆成「导航 + 作业」：
+//! 两种下发形态（见 [`DispatchMode`]）：
+//!
+//! - **默认 `patrol`（`5000 kind=4`，与官方 App 一致）**：先把路线写成本体
+//!   `nav_paths/<path_id>`（`4024` 添加 / `4028` 覆盖），再下发一条巡检任务；
+//!   航点、到点动作、返程全部由本体 ALG 执行，客户端只跟 `5009 patrol.*`。
+//!   字段依据 2026-11-14 抓到官方 App 的真实报文（见 [`patrol_task_payload`]）。
+//! - **回退 `navigation`（`5000 kind=2`）**：旧实现，把航线拆成「导航 + 作业」：
 //!   导航任务由本体执行（依次到达 goals），到点作业由客户端执行（等待 / 拍照）。
+//!   注意：`.1` 的 `dog_task` 与 `.234` 的 `robots_dog_msgs` 版本不一致时这条路会崩。
 //! - **一段连续航点只下发一条导航任务**（`5000 kind=2` 的 `params.goals` 是有序数组）：
 //!   本体同一时刻只允许一个导航任务，逐点下发时上一个点还没结束就会把下一个点拒成
 //!   `13897 capability busy`（现场：第 1 个点建任务成功，后面每点全 13897）。
@@ -16,6 +22,7 @@
 use super::client::ZhProClient;
 use super::protocol::*;
 use super::status::TaskSnapshot;
+use robodog_device_client::config::DispatchMode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -462,6 +469,135 @@ pub(crate) fn navigation_task_payload(
     })
 }
 
+/// 巡检任务（`5000 kind=4`）载荷。
+///
+/// 字段以 2026-11-14 抓到的官方 App 原文为准（手机 → 网关 `192.168.234.8`）：
+///
+/// ```json
+/// {"kind":4,"name":"2026_11_14_13_35_50","schedule":0,
+///  "execute_at":"2026-11-14 13:36:29","priority":0,"record":true,
+///  "params":{"map_id":"2026_11_10_16_15_06","map_type":0,"end_task":1,
+///            "min_recharge_battery":25.0,
+///            "speed_limit":{"vx":0.5,"vy":0.0,"vz":1.5},
+///            "path_id":"自定义路径1"}}
+/// ```
+///
+/// 与 `kind=2` 的关键差别：**请求里不带任何坐标**，航点/到点动作全部来自本体
+/// `nav_paths/<path_id>` 文件（见 [`add_nav_path_payload`]）；`map_id` 是本体**目录名**；
+/// `map_type` 走巡检自己的枚举（`0`=2D 栅格 / `1`=路网）；`end_task` 是数字；
+/// `execute_at` 是**本地时间字符串**（不是毫秒）。
+pub(crate) fn patrol_task_payload(
+    plan: &FlightPlan,
+    map_id: &str,
+    path_id: &str,
+    min_recharge_battery: f64,
+) -> Value {
+    json!({
+        "kind": TaskKind::Patrol.code(),
+        "name": plan.task_name,
+        "schedule": 0,
+        "execute_at": local_timestamp(),
+        "priority": 0,
+        // 与官方一致：巡检要落 5010/5011 记录
+        "record": true,
+        "params": {
+            "map_id": map_id,
+            // 巡检枚举：0 = 2D 栅格、1 = 路网（不是 kind=2 的 1/3！）
+            "map_type": patrol_map_type(plan),
+            "end_task": patrol_end_task(plan),
+            "min_recharge_battery": min_recharge_battery,
+            "speed_limit": { "vx": speed_vx(plan), "vy": 0.0, "vz": YAW_LIMIT },
+            "path_id": path_id
+        }
+    })
+}
+
+/// `4024 add_nav_path` 载荷：`data.add_nav_path = [map_id, path_id, points, forbidden_zones]`
+///
+/// `points` 是 `[点名, {position, orientation, properties:{type, tasks}}]`，
+/// `properties.type` = `0` 途径点 / `1` 作业点，`tasks` = `[0 等待(固定 2 s) / 1 拍照]`。
+pub(crate) fn add_nav_path_payload(map_id: &str, path_id: &str, points: &[Waypoint]) -> Value {
+    json!({
+        "add_nav_path": [map_id, path_id, nav_path_points(points), []]
+    })
+}
+
+/// `4028 modify_nav_path` 载荷：`[map_id, old_path, new_path, points, forbidden_zones]`
+pub(crate) fn modify_nav_path_payload(
+    map_id: &str,
+    old_path: &str,
+    new_path: &str,
+    points: &[Waypoint],
+) -> Value {
+    json!({
+        "modify_nav_path": [map_id, old_path, new_path, nav_path_points(points), []]
+    })
+}
+
+fn nav_path_points(points: &[Waypoint]) -> Vec<Value> {
+    points
+        .iter()
+        .map(|point| {
+            let pose = point.pose();
+            let (kind, tasks) = point_path_tasks(point);
+            json!([
+                point.name,
+                {
+                    "position": { "x": pose.position.x, "y": pose.position.y, "z": 0.0 },
+                    "orientation": {
+                        "x": pose.orientation.x,
+                        "y": pose.orientation.y,
+                        "z": pose.orientation.z,
+                        "w": pose.orientation.w
+                    },
+                    "properties": { "type": kind, "tasks": tasks }
+                }
+            ])
+        })
+        .collect()
+}
+
+/// 航点 → 本体路径点的 `(properties.type, properties.tasks)`。
+///
+/// - `type`：有停留/拍照/其它动作 → `1`（作业点），否则 `0`（途径点）；
+/// - `tasks`：协议只认 `0`（等待，**固定 2 s**）/ `1`（拍照），可重复；
+///   途径点即使写了 `tasks` 也会被忽略，所以这里对 `type=0` 直接给空数组。
+fn point_path_tasks(point: &Waypoint) -> (u8, Vec<u8>) {
+    if !point.has_on_point_work() {
+        return (0, Vec::new());
+    }
+    let mut tasks = Vec::new();
+    if point.dwell > 0 {
+        tasks.push(0); // 等待（本体固定 2 s，秒数不可配）
+    }
+    if point.wants_photo() {
+        tasks.push(1); // 拍照（调 /capture_image）
+    }
+    (1, tasks)
+}
+
+/// 巡检的 `map_type` 枚举：`0` = 2D 栅格、`1` = 路网（`plan.map_type` 里 `3` 才是路网）
+fn patrol_map_type(plan: &FlightPlan) -> u32 {
+    if plan.map_type == 3 { 1 } else { 0 }
+}
+
+/// 巡检的 `end_task` 数字枚举：`0` = 原地 / `1` = 返回起点 / `2` = 返回充电点
+///
+/// 闭环航线且没显式指定结束动作时，按「返回起点」下发（与旧 `kind=2` 的闭环语义一致）。
+fn patrol_end_task(plan: &FlightPlan) -> u32 {
+    match plan.end_task() {
+        EndTask::ReturnToStart => 1,
+        EndTask::ReturnToCharge => 2,
+        EndTask::None if plan.loop_mode == "闭环" => 1,
+        EndTask::None => 0,
+    }
+}
+
+/// 官方 `execute_at` 用的是**本地时间字符串**（`YYYY-MM-DD HH:MM:SS`），不是毫秒时间戳
+fn local_timestamp() -> String {
+    chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
 /// 航线没配速度时给一个可跑的值（0 会让本体拒任务）
 fn speed_vx(plan: &FlightPlan) -> f64 {
     if plan.speed_limit > 0.0 {
@@ -486,6 +622,12 @@ pub struct RouteRunner {
     total: Mutex<usize>,
     completed: Mutex<usize>,
     skipped: Mutex<usize>,
+    /// 下发形态：巡检 `kind=4`（默认）/ 导航 `kind=2`
+    mode: Mutex<DispatchMode>,
+    /// 巡检路径名前缀（本体 `nav_paths/<前缀>-<task_code>`）
+    patrol_path_prefix: Mutex<String>,
+    /// 巡检任务返充电量阈值
+    min_recharge_battery: Mutex<f64>,
 }
 
 impl RouteRunner {
@@ -500,7 +642,21 @@ impl RouteRunner {
             total: Mutex::new(0),
             completed: Mutex::new(0),
             skipped: Mutex::new(0),
+            mode: Mutex::new(DispatchMode::default()),
+            patrol_path_prefix: Mutex::new("平台".to_string()),
+            min_recharge_battery: Mutex::new(25.0),
         }
+    }
+
+    /// 设置下发形态（巡检 `kind=4` / 导航 `kind=2`）
+    pub async fn set_mode(&self, mode: DispatchMode) {
+        *self.mode.lock().await = mode;
+    }
+
+    /// 巡检相关参数：本体路径名前缀、返充电量阈值
+    pub async fn set_patrol_options(&self, prefix: &str, min_recharge_battery: f64) {
+        *self.patrol_path_prefix.lock().await = prefix.trim().to_string();
+        *self.min_recharge_battery.lock().await = min_recharge_battery.clamp(0.0, 100.0);
     }
 
     /// 标记「定位已由起步预检完成」：首航点改用 `need_locate=false` 复用当前定位，
@@ -611,6 +767,9 @@ impl RouteRunner {
             .clone()
             .ok_or_else(|| "未准备执行计划".to_string())?;
         let total = *self.total.lock().await;
+        if *self.mode.lock().await == DispatchMode::Patrol {
+            return self.run_patrol(&plan, total).await;
+        }
         let points = plan.execution_order();
         let segments = plan_segments(&points);
         info!(
@@ -751,6 +910,184 @@ impl RouteRunner {
 
         *self.nav_task_id.lock().await = None;
         Ok(self.outcome(true, "巡检完成".to_string(), total).await)
+    }
+
+    /// 巡检模式（`5000 kind=4`，与官方 App 一致）执行整条航线。
+    ///
+    /// 流程：切导航模式 → 设避障等级 → **把路线写成本体路径**（`4024`，已存在则 `4028`）
+    /// → 下发一条巡检任务 → 跟 `5009 patrol.*` 到终态。
+    /// 到点动作（停留/拍照）与返程都由本体 ALG 执行，客户端不再逐点作业。
+    async fn run_patrol(
+        &self,
+        plan: &FlightPlan,
+        total: usize,
+    ) -> Result<ExecutionOutcome, String> {
+        // 巡检只用原始航点：闭环/返程由 `end_task` 让本体处理，不再补回首点
+        let points = plan.waypoints.clone();
+        if points.is_empty() {
+            return Ok(self.outcome(false, "航线没有航点".to_string(), total).await);
+        }
+        let map_id = plan.robot_map_dir();
+        let path_id = format!(
+            "{}-{}",
+            self.patrol_path_prefix.lock().await.as_str(),
+            plan.task_code
+        );
+        let min_battery = *self.min_recharge_battery.lock().await;
+
+        // 0) 控制权 + 导航模式：4044/5000 都在 4000~5999 非白名单区间，没控制权网关不转发
+        if let Err(e) = super::teleop::enter_navigation_mode(&self.client).await {
+            warn!("切导航模式失败（继续尝试下发，但本体可能拒任务）: {e}");
+        }
+        // 1) 避障等级：导航每次回到 STANDBY 会恢复为 40，任务启动后必须重设
+        self.apply_avoid_level(plan.avoid_level).await;
+
+        // 2) 把航线写成本体路径（巡检任务的航点/动作全在路径文件里）
+        self.ensure_nav_path(&map_id, &path_id, &points).await?;
+
+        // 3) 下发巡检任务并跟到终态（能力忙按 §13897 退避重试）
+        let data = patrol_task_payload(plan, &map_id, &path_id, min_battery);
+        debug!("5000 kind=4 载荷（{total} 个航点）: {data}");
+        let mut busy_waits = 0_u32;
+        loop {
+            if self.is_cancelled() {
+                return Ok(self.outcome(false, "任务已取消".to_string(), total).await);
+            }
+            self.wait_body_idle(IDLE_WAIT).await;
+            let error = match self.create_patrol_task(&data, total).await {
+                Ok(()) => {
+                    info!("巡检任务完成: {path_id}（{total} 个航点）");
+                    return Ok(self.outcome(true, "巡检完成".to_string(), total).await);
+                }
+                Err(e) => e,
+            };
+            if self.is_cancelled() {
+                return Ok(self.outcome(false, "任务已取消".to_string(), total).await);
+            }
+            self.abort_task().await;
+            if is_capability_busy(&error) {
+                busy_waits += 1;
+                if busy_waits > BUSY_RETRIES {
+                    return Ok(self
+                        .outcome(
+                            false,
+                            format!("巡检任务失败: {error}（本体上仍有未结束的任务，请先取消或重启本体）"),
+                            total,
+                        )
+                        .await);
+                }
+                warn!(
+                    "本体能力忙（13897），{}s 后重试 {busy_waits}/{BUSY_RETRIES}",
+                    BUSY_BACKOFF.as_secs()
+                );
+                tokio::time::sleep(BUSY_BACKOFF).await;
+                continue;
+            }
+            return Ok(self
+                .outcome(
+                    false,
+                    format!("巡检任务失败: {error}（path={path_id} map={map_id}）"),
+                    total,
+                )
+                .await);
+        }
+    }
+
+    /// 确保本体上存在这条巡检路径：先 `4024` 添加，失败（多半是已存在）再 `4028` 覆盖。
+    async fn ensure_nav_path(
+        &self,
+        map_id: &str,
+        path_id: &str,
+        points: &[Waypoint],
+    ) -> Result<(), String> {
+        let add = add_nav_path_payload(map_id, path_id, points);
+        match self.client.call(T_PATH_ADD, add).await {
+            Ok(_) => {
+                info!("已写入本体巡检路径: {path_id}（{} 个点）", points.len());
+                Ok(())
+            }
+            Err(first) => {
+                debug!("4024 添加路径失败（{first}），改用 4028 覆盖");
+                let modify = modify_nav_path_payload(map_id, path_id, path_id, points);
+                match self.client.call(T_PATH_MODIFY, modify).await {
+                    Ok(_) => {
+                        info!("已覆盖本体巡检路径: {path_id}（{} 个点）", points.len());
+                        Ok(())
+                    }
+                    Err(second) => Err(format!("写本体路径失败（4024: {first}；4028: {second}）")),
+                }
+            }
+        }
+    }
+
+    /// 下发一次 `5000 kind=4` 并跟到终态。
+    ///
+    /// 进度取 `5009 detail.last_arrived_point.index`（巡检是**0-based**，到点即 `index+1`）；
+    /// 其余（终态、boot_id 变化、取消）与导航模式一致。
+    async fn create_patrol_task(&self, data: &Value, total: usize) -> Result<(), String> {
+        let mut rx = self.client.subscribe();
+        let reply = self.client.call(T_TASK_CREATE, data.clone()).await?;
+        debug!("5001 应答（巡检）: {reply}");
+        let task_id = reply
+            .get("task_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if task_id.is_empty() {
+            return Err("巡检任务未返回 task_id".to_string());
+        }
+        *self.nav_task_id.lock().await = Some(task_id.clone());
+        info!("巡检任务已受理: {task_id}（{total} 个航点，path 见 5000 载荷）");
+
+        // 官方实测约 80 s/点（vx≈0.5），这里按 180 s/点 给足余量
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(180 * total.max(1) as u64);
+        let mut gate = super::status::SeqGate::default();
+        loop {
+            if self.is_cancelled() {
+                return Err("任务已取消".to_string());
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(format!("巡检任务超时（{total} 个航点）"));
+            }
+            let env = match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Ok(env)) => env,
+                Ok(Err(_)) => return Err("推送通道关闭".to_string()),
+                Err(_) => return Err(format!("巡检任务超时（{total} 个航点）")),
+            };
+            if env.head.msg_type != T_TASK_STATUS {
+                continue;
+            }
+            let Some(frame) = super::status::StatusFrame::parse(&env.data) else {
+                continue;
+            };
+            let gate_result = gate.accept(&frame);
+            if !gate_result.accepted {
+                continue;
+            }
+            if gate_result.boot_changed {
+                return Err("算法节点重启（boot_id 变化），本体任务已失效".to_string());
+            }
+            let Some(task) = frame.task_for(&task_id) else {
+                continue;
+            };
+            // 巡检 `last_arrived_point.index` 从 0 开始；`point_completed` 时才算本点作业做完，
+            // 这里用它推进度（至少到点就记 1，避免拍照失败时进度卡住）
+            if let Some(index) = task.detail_index.filter(|index| *index >= 0) {
+                let done = (index + 1) as usize;
+                let mut completed = self.completed.lock().await;
+                if done > *completed && done <= total {
+                    *completed = done;
+                }
+            }
+            if task.is_terminal() {
+                let result = terminal_result(task);
+                if result.is_ok() {
+                    *self.nav_task_id.lock().await = None;
+                }
+                return result;
+            }
+        }
     }
 
     async fn outcome(&self, success: bool, message: String, total: usize) -> ExecutionOutcome {
@@ -1150,6 +1487,109 @@ mod tests {
             ),
             Locate::Reuse
         );
+    }
+
+    #[test]
+    fn patrol_payload_matches_official_shape() {
+        let mut p = plan("闭环");
+        p.end_task = String::new(); // 未指定 → 闭环按「返回起点」
+        let data = patrol_task_payload(&p, "2026_11_10_16_15_06", "平台-TK-1", 25.0);
+
+        assert_eq!(data["kind"], 4, "巡检 = kind 4");
+        assert_eq!(data["schedule"], 0);
+        assert_eq!(data["priority"], 0);
+        assert_eq!(data["record"], true, "巡检要落 5010/5011 记录");
+        assert_eq!(data["params"]["map_id"], "2026_11_10_16_15_06");
+        assert_eq!(data["params"]["map_type"], 0, "巡检枚举 0 = 2D 栅格");
+        assert_eq!(data["params"]["path_id"], "平台-TK-1");
+        assert_eq!(
+            data["params"]["end_task"], 1,
+            "闭环且未指定结束动作 → 返回起点"
+        );
+        assert_eq!(data["params"]["min_recharge_battery"], 25.0);
+        assert_eq!(data["params"]["speed_limit"]["vx"], 1.2);
+        assert!(
+            data["params"].get("goals").is_none(),
+            "巡检请求不带坐标，航点在本体路径文件里"
+        );
+        // 官方 execute_at 是本地时间字符串，不是毫秒
+        let ts = data["execute_at"].as_str().unwrap_or_default();
+        assert_eq!(ts.len(), 19, "YYYY-MM-DD HH:MM:SS，实际 {ts:?}");
+        assert!(ts.contains('-') && ts.contains(':') && ts.contains(' '));
+    }
+
+    #[test]
+    fn patrol_enums_follow_patrol_vocabulary() {
+        // kind=2 的路网用 3，巡检用 1；end_task 用数字枚举
+        let mut p = plan("往返");
+        p.map_type = 3;
+        p.end_task = "返回充电".to_string();
+        let data = patrol_task_payload(&p, "m", "p", 20.0);
+        assert_eq!(data["params"]["map_type"], 1, "巡检路网 = 1（不是 3）");
+        assert_eq!(data["params"]["end_task"], 2, "返回充电");
+
+        p.end_task = "原地".to_string();
+        let data = patrol_task_payload(&p, "m", "p", 20.0);
+        assert_eq!(data["params"]["end_task"], 0, "原地待命");
+
+        p.end_task = "返回起点".to_string();
+        let data = patrol_task_payload(&p, "m", "p", 20.0);
+        assert_eq!(data["params"]["end_task"], 1, "返回起点");
+
+        p.map_type = 1;
+        let data = patrol_task_payload(&p, "m", "p", 20.0);
+        assert_eq!(data["params"]["map_type"], 0, "2D 栅格 = 0");
+    }
+
+    #[test]
+    fn nav_path_points_carry_type_and_tasks() {
+        let mut p = plan("往返");
+        p.waypoints[0].dwell = 3;
+        p.waypoints[0].actions = vec![WaypointAction {
+            action_type: "可见光拍照".to_string(),
+            ..Default::default()
+        }];
+        let data = add_nav_path_payload("m", "pid", &p.waypoints);
+        let tuple = data["add_nav_path"].as_array().cloned().unwrap_or_default();
+        assert_eq!(
+            tuple.len(),
+            4,
+            "add_nav_path = [map_id, path_id, points, fences]"
+        );
+        assert_eq!(tuple[0], json!("m"));
+        assert_eq!(tuple[1], json!("pid"));
+        assert_eq!(tuple[3], json!([]), "无禁区时传空数组");
+
+        let points = tuple[2].as_array().cloned().unwrap_or_default();
+        assert_eq!(points.len(), 3);
+        assert_eq!(points[0][0], json!("A"));
+        // 有停留 + 拍照 → 作业点，tasks = [0 等待, 1 拍照]
+        assert_eq!(points[0][1]["properties"]["type"], 1);
+        assert_eq!(points[0][1]["properties"]["tasks"], json!([0, 1]));
+        // 纯导航点 → 途径点，tasks 为空
+        assert_eq!(points[1][1]["properties"]["type"], 0);
+        assert_eq!(points[1][1]["properties"]["tasks"], json!([]));
+        // 位姿来自统一的 pose()
+        assert_eq!(points[0][1]["position"]["x"], 0.0);
+        assert!(points[0][1]["orientation"]["w"].as_f64().is_some());
+    }
+
+    #[test]
+    fn modify_nav_path_reuses_point_builder() {
+        let p = plan("往返");
+        let data = modify_nav_path_payload("m", "old", "new", &p.waypoints);
+        let tuple = data["modify_nav_path"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            tuple.len(),
+            5,
+            "modify_nav_path = [map_id, old, new, points, fences]"
+        );
+        assert_eq!(tuple[1], json!("old"));
+        assert_eq!(tuple[2], json!("new"));
+        assert_eq!(tuple[3].as_array().map(|v| v.len()), Some(3));
     }
 
     #[test]

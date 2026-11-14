@@ -715,7 +715,47 @@ M1 文件根 `/ota/alg_data`；文档 §2.2.4.1「4013 地图列表」明确单�
 
 ## 航线执行流程
 
+有两种下发形态（`--task-mode`，**默认 `patrol`**）：
+
+### A. `patrol`（默认）：`5000 kind=4`，与官方 App 一致
+
+字段与调用顺序全部按 2026-11-14 抓到的官方报文实现（见
+[`../docs/official-app-parity.md`](../docs/official-app-parity.md) §三.1）。
+
+```text
+1. 解析 routeData → FlightPlan
+2. 1204 取控制权 + 1302 cmd=62 切导航模式（失败只 warn）
+3. 4044 设置任务级避障等级（导航每次回 STANDBY 会恢复成 40）
+4. 把航线写成本体路径（4024 add_nav_path）：
+     data.add_nav_path = [map_id(本体目录名), "<前缀>-<task_code>", points, []]
+     points = [[点名, {position, orientation, properties:{type, tasks}}], …]
+       type  = 1（有停留/拍照/其它动作）否则 0（途径点）
+       tasks = [0 等待] + [1 拍照]；途径点给空数组（本体忽略途径点的 tasks）
+       —— 注意「等待」本体固定 2 s，秒数不可配
+     4024 失败（路径已存在等）→ 4028 modify_nav_path 覆盖
+5. 等 5009 robot.task_state=idle，下发一条 5000 kind=4：
+     {"kind":4,"name":<任务名>,"schedule":0,
+      "execute_at":"YYYY-MM-DD HH:MM:SS",      ← 本地时间字符串，不是毫秒
+      "priority":0,"record":true,              ← 巡检要落 5010/5011 记录
+      "params":{"map_id":<本体目录名>,
+                "map_type":0|1,                 ← 巡检枚举：0=2D 栅格、1=路网
+                "end_task":0|1|2,               ← 0 原地 / 1 返回起点 / 2 返回充电
+                "min_recharge_battery":25.0,
+                "speed_limit":{"vx":…,"vy":0.0,"vz":1.5},
+                "path_id":"<前缀>-<task_code>"}}
+6. 跟 5009 到终态，进度用 detail.last_arrived_point.index（0-based，到点即 +1）：
+     patrol.preparing → capturing_origin → navigating → point_arrived
+     → photographing → point_completed → completed → returning
+7. 到点停留/拍照、返程全部由本体 ALG 执行，客户端不再逐点作业
+   （拍照失败码 14005 会落在巡检记录里，不影响导航与整体成功）
 ```
+
+可调项：`--task-mode`（默认 `patrol`）、`--patrol-path-prefix`（默认 `平台`，
+本体路径名 = `<前缀>-<task_code>`）、`--min-recharge-battery`（默认 25）。
+
+### B. `navigation`（`--task-mode navigation`）：`5000 kind=2`（旧实现，保留回退）
+
+```text
 1. 解析 routeData → FlightPlan
 2. 前置校验：4013 地图列表里必须存在该 map_dir
 3. 若 endTask=return_to_charge，校验 map_route_exist / charge_point_exist
@@ -734,6 +774,10 @@ M1 文件根 `/ota/alg_data`；文档 §2.2.4.1「4013 地图列表」明确单�
      return_to_start  → 再下发一次首点导航（闭环模式已在 goals 末尾带回首点）
      none             → 原地待命
 ```
+
+> ⚠️ 回退到 `navigation` 之前先确认 `.1` 的 `dog_task` 与 `.234` 的 `robots_dog_msgs`
+> 版本一致（现网 0.9.0 vs 0.9.8，一开导航 `dog_task` 会反复 `bad_alloc` 崩溃），
+> 见 [`../../deploy/robodog-issues-2026-11-14.md`](../../deploy/robodog-issues-2026-11-14.md) §3。
 
 ## 业务协议速查
 

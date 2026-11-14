@@ -22,3 +22,10 @@ password_env = "ROBODOG_API_PASSWORD"
 host = "192.168.234.234"
 file_port = 12000
 map_root = "/ota/alg_data/map"
+# 任务下发形态：patrol = 5000 kind=4 巡检（默认，与官方 App 一致：先 4024 把路线写成
+# 本体 nav_paths/<前缀>-<任务号>，再下发一条巡检任务）；navigation = 5000 kind=2 逐段导航（旧实现）
+task_mode = "patrol"
+# 巡检路径名前缀，落在本体 nav_paths/<前缀>-<task_code>
+patrol_path_prefix = "平台"
+# 巡检任务返充电量阈值（end_task=2 时的 min_recharge_battery）
+min_recharge_battery = 25.0
