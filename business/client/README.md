@@ -782,6 +782,42 @@ M1 文件根 `/ota/alg_data`；文档 §2.2.4.1「4013 地图列表」明确单�
 等厂商给出与 `0.9.8` 匹配的 `.1` 包（或 `.234` 的兼容回退包）后，再谈是否恢复逐点导航。
 完整证据链见 [`../../deploy/robodog-issues-2026-11-14.md`](../../deploy/robodog-issues-2026-11-14.md) §3。
 
+#### 以后要恢复逐点导航：回退一条提交即可，不用改代码
+
+导航实现（`5000 kind=2` 的载荷、分段下发、到点作业、定位复用等）整块都在
+「**移除 kind=2 导航模式**」那次提交之前，恢复它**不需要写代码**：
+
+```bash
+# 就是这次提交：58538330「Remove navstate_bridge …client has removed the `kind=2` navigation mode」
+git log --oneline -- business/client/src/zhpro/route.rs | head -5
+# 58538330 Remove navstate_bridge: …client has removed the `kind=2` navigation mode…
+
+# 整体回退（一条命令还原全部：客户端导航实现 + --task-mode 配置 + 相关测试）
+git revert 58538330
+# 想先看再决定：git revert --no-commit 58538330 && git diff
+
+# 重新构建 + 部署（aarch64）
+cd business/client && ./deploy/build-aarch64.sh
+scp target/aarch64-unknown-linux-gnu/release/robodog-device-client \
+    root@192.168.41.246:/tmp/rdc.new
+ssh root@192.168.41.246 'mv /tmp/rdc.new /opt/robodog/client/robodog-device-client && \
+  systemctl restart robodog-device-client'
+```
+
+回退后 `--task-mode navigation` / `ROBODOG_TASK_MODE` / `[robot] task_mode` 会一起回来，
+把配置切成 `navigation` 即可继续用逐点导航。
+
+**恢复前必须确认（缺一不可）**：
+
+1. 两台机器的消息定义已经一致：
+   `md5sum /opt/ros/humble/share/robots_dog_msgs/msg/NavigationState.msg`（`.234` 与 `.1` 各跑一次，值必须相同）；
+2. 用 `5000 kind=2` 跑一次短任务，`.1` 的 `dog_task.stdout` 不再出现
+   `could not deserialize ROS message ... /navigation_state`，`robot-launch list` 里 `retry` 不涨（`/dev/shm` 不暴涨）；
+3. 只在确认 ①② 之后再把配置切到 `navigation`——否则会立刻回到「任务首点就失败 + `sdk_node`/`estop` 抖动」的老状态。
+
+> 那条 `/navigation_state` 裁剪桥（`deploy/navstate-bridge/`）已经删掉了：厂商修好版本后它就没用了；
+> 真要再拿它应急，从 git 历史里取（同一个删除提交里）。
+
 ## 业务协议速查
 
 统一信封：`{ msgType, ts, payload }`
