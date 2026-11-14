@@ -676,23 +676,34 @@ impl RouteRunner {
                     // 段失败：先把本体上那条任务真正收尾（5002 + 等 idle），
                     // 否则下一段的 5000 会继续被回 13897。
                     self.abort_task().await;
+                    // 排障用的诊断尾巴只在这里拼，**不要**拼进 `run_segment` 返回的
+                    // `Err`：`is_locate_error` 只该看本体原话，而尾巴里有
+                    // `need_locate=…` 这个针，拼进去会让**任何**航段失败都被判成
+                    // 「定位错误」——可跳过的航点不再跳过，整条航线直接终止。
+                    let detail = format!(
+                        "第 {}/{total} 点起 {len} 个航点 need_locate={} vx={:.2} \
+                         vz={YAW_LIMIT:.2} map={}",
+                        range.start + 1,
+                        locate.need_locate(),
+                        speed_vx(&plan),
+                        plan.resolve_map_path(super::mapping::DEFAULT_MAP_ROOT)
+                    );
                     let failed = seg_points.last();
                     let failed_name = failed.map(|p| p.name.clone()).unwrap_or_default();
                     // 定位/地图类错误不可跳过：后面每段都会秒失败，
                     // 跳过只会把航线静默跑成 0/N。
                     if failed.map(Waypoint::skippable).unwrap_or(false) && !is_locate_error(&e) {
-                        warn!(
-                            "航段 第 {}-{} 点 失败，跳过（段尾 {}）: {e}",
-                            range.start + 1,
-                            range.end,
-                            failed_name
-                        );
+                        warn!("航段 {detail} 失败，跳过（段尾 {failed_name}）: {e}");
                         *self.skipped.lock().await += len;
                         offset += len;
                         continue;
                     }
                     return Ok(self
-                        .outcome(false, format!("航点 {failed_name} 执行失败: {e}"), total)
+                        .outcome(
+                            false,
+                            format!("航点 {failed_name} 执行失败: {e}（{detail}）"),
+                            total,
+                        )
                         .await);
                 }
             }
@@ -727,8 +738,7 @@ impl RouteRunner {
                     info!("巡检结束，返回起点");
                     // 复用定位：此刻地图肯定还加载在本体上，不需要再载一次
                     let tail = std::slice::from_ref(first);
-                    if let Err(e) = self.run_segment(&plan, tail, Locate::Reuse, offset, total).await
-                    {
+                    if let Err(e) = self.run_segment(&plan, tail, Locate::Reuse, offset, total).await {
                         warn!("返回起点失败: {e}");
                         self.abort_task().await;
                     }
@@ -773,7 +783,6 @@ impl RouteRunner {
         total: usize,
     ) -> Result<(), String> {
         let need_locate = locate.need_locate();
-        let map_path = plan.resolve_map_path(super::mapping::DEFAULT_MAP_ROOT);
         let retries = points.iter().map(Waypoint::retry_limit).max().unwrap_or(0);
         let mut attempt = 0_u32;
         let mut busy_waits = 0_u32;
@@ -830,13 +839,9 @@ impl RouteRunner {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
-            return Err(format!(
-                "{error}（第 {}/{total} 点起 {} 个航点 need_locate={need_locate} \
-                 vx={:.2} vz={YAW_LIMIT:.2} map={map_path}）",
-                offset + 1,
-                points.len(),
-                speed_vx(plan)
-            ));
+            // 只回本体原话：诊断信息（点位 / need_locate / 速度 / 地图）由 `run()` 拼，
+            // 免得 `is_locate_error` 把尾巴里的 `need_locate=` 当成定位错误。
+            return Err(error);
         }
     }
 
@@ -1158,6 +1163,12 @@ mod tests {
         ));
         assert!(is_locate_error("起步守卫：位未就绪（定位未就绪）"));
         assert!(is_locate_error("SLAM 定位失败：定位丢失（status=122）"));
+        // 本体导航状态机报的失败（``[step AwaitArrival] … robot reported Failed``）
+        // 不是定位问题：曾因为诊断尾巴里带 `need_locate=` 被误判成定位错误，
+        // 可跳过的航点直接把整条航线终止（skipped=0）。
+        assert!(!is_locate_error(
+            "导航失败: [step AwaitArrival] navigation aborted: robot reported Failed"
+        ));
         // 其它错误照旧按航点策略处理
         assert!(!is_locate_error(
             "5001 响应失败: code=13897 resource conflict (capability busy)"

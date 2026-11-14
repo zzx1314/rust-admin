@@ -103,8 +103,10 @@ cd ../backend && APP_SERVER__STATIC_DIR=../frontend/dist ./run.sh
 systemd unit 写法、安全组端口）见 `deploy/external-hz/README.md`。
 
 现场机器人本体（背包 `.246` → Orin NX `192.168.234.234` + RK3588 `192.168.234.1`）的
-服务树、日志路径、`sdk_node=false` / `13897 capability busy` / `ctrl_source=3` 的排查
-顺序与 2026-11-13 事故复盘见 `deploy/robodog-body.md`。部署与现场发布流程见
+服务树、日志路径、`sdk_node=false` / `13897 capability busy` / `ctrl_source=3` / 急停卡死
+（`estop.software` 恒 true、点「解除急停」无效）/ 「任务第 1 点秒失败」的排查顺序与
+2026-11-13 / 11-14 事故复盘见 `deploy/robodog-body.md`（急停卡死见 §10，
+结论是重启 `.1` 的 `dog_task`，不是重启 `.234`）。部署与现场发布流程见
 `deploy/README.md`。
 
 ## Important Notes

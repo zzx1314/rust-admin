@@ -725,6 +725,10 @@ M1 文件根 `/ota/alg_data`；文档 §2.2.4.1「4013 地图列表」明确单�
      建任务前先等本体 5009 robot.task_state=idle（上一段/残留任务必须已经释放能力）
      等 5009 生命周期终态；进度用 detail.last_arrived_goal.index 驱动
      失败：5002 取消 + 等 idle → 按 on_fail 重试 / 跳过（must=true 不跳过）
+       错误分类只看**本体原话**（`is_locate_error` 认「定位」「need_locate」「map not found」等）；
+       点位 / `need_locate` / 速度 / 地图这些**诊断尾巴由 run() 拼在消息末尾**，
+       不能拼进要分类的 Err——否则每条航段失败都带 `need_locate=`，会被误判成定位错误，
+       可跳过航点直接变成终止整条航线（2026-11-14 踩过，skipped 恒为 0）
 6. 结束后按 endTask：
      return_to_charge → 5014
      return_to_start  → 再下发一次首点导航（闭环模式已在 goals 末尾带回首点）

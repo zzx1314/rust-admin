@@ -37,23 +37,55 @@
         └──────────────────────────────────────────────────┘
 ```
 
-| 机器 | 登录 | 作用 | 备注 |
-| --- | --- | --- | --- |
-| `192.168.41.246` | `ssh root@192.168.41.246`（本机已免密） | 背包机，跑 `robodog-device-client` | 从这里能同时连到 `.234` 和 `.1` |
-| `192.168.234.234` | `ssh robot@192.168.234.234` | Orin NX 16G，**算法机** | 初始密码 `1`（厂商文档 §1.1）；在 `sudo` 组 |
-| `192.168.234.1` | `ssh firefly@192.168.234.1` | RK3588，**本体运控机**（"狗在这里"） | 出厂默认密码，实测 `sudo` 免密 |
+### 1.1 地址与账号（现场三台机器）
 
-`.234` / `.1` 只开了密码登录（`Permission denied (publickey,password)`），脚本里要免交互
-登录时用 `SSH_ASKPASS`：
+| 机器 | 地址 | 用户名 | 密码 | sudo | 作用 |
+| --- | --- | --- | --- | --- | --- |
+| 背包机 | `192.168.41.246`（也接 `192.168.234.200/24`） | `root` | 开发机已授权 key（密码请向运维要） | 无需（直接用 root） | 跑 `robodog-device-client`，**跳板机** |
+| Orin NX（算法机） | `192.168.234.234` | `robot` | `1` | 同一密码（`echo 1 \| sudo -S …`） | `robot-launch` + `robot_sdk_node` + 网关 + 21 个 egg |
+| RK3588（运控机） | `192.168.234.1` | `firefly` | `firefly` | 实测免密 | `robot-launch` + `dog_task` / `motion_control` / `power_daemon` 等 28 个 egg |
+
+- 开发机 / 平台所在的机器**连不到 `192.168.234.x`**（现场内网，没有反向隧道），
+  一律先从 `.246` 跳：开发机 → `.246` → `.234` / `.1`；
+- `.234` / `.1` **只开密码登录**（`Permission denied (publickey,password)`），所以需要
+  `SSH_ASKPASS`（见 §1.2）；
+- 两台机器各有一个同名的 `robot-launch` 服务，**重启前先确认在哪台**（见 §2）。
+
+### 1.2 怎么连（从开发机一把梭）
 
 ```bash
-printf '#!/bin/sh\nprintf "%%s\\n" "<密码>"\n' > /tmp/.ap.sh && chmod 700 /tmp/.ap.sh
-SSH_ASKPASS=/tmp/.ap.sh SSH_ASKPASS_REQUIRE=force \
-  setsid -w ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-  robot@192.168.234.234 'hostname'
+# ① 背包机：开发机已授权 key，直接进
+ssh root@192.168.41.246
+
+# ② 在背包机上生成两个免交互密码文件（一次即可，用完删）
+printf '#!/bin/sh\nprintf "%%s\\n" "1"\n'        > /tmp/.ap234.sh && chmod 700 /tmp/.ap234.sh
+printf '#!/bin/sh\nprintf "%%s\\n" "firefly"\n'  > /tmp/.ap1.sh   && chmod 700 /tmp/.ap1.sh
+
+# ③ 算法机 .234（robot / 1）
+SSH_ASKPASS=/tmp/.ap234.sh SSH_ASKPASS_REQUIRE=force setsid -w ssh -q \
+  -o StrictHostKeyChecking=no -o PreferredAuthentications=password \
+  -o PubkeyAuthentication=no robot@192.168.234.234 'hostname; robot-launch list'
+
+# ④ 运控机 .1（firefly / firefly）
+SSH_ASKPASS=/tmp/.ap1.sh SSH_ASKPASS_REQUIRE=force setsid -w ssh -q \
+  -o StrictHostKeyChecking=no -o PreferredAuthentications=password \
+  -o PubkeyAuthentication=no firefly@192.168.234.1 'hostname; robot-launch list'
+
+# ⑤ 在 .234 上要 sudo 时（.234 的 sudo 也要密码）；把第 ③ 步的 ssh 命令原样接上即可
+SSH_ASKPASS=/tmp/.ap234.sh SSH_ASKPASS_REQUIRE=force setsid -w ssh -q \
+  -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+  robot@192.168.234.234 'echo 1 | sudo -S systemctl restart robot-launch'
+# ⑥ 在 .1 上 sudo 免密：firefly@192.168.234.1 'sudo systemctl restart robot-launch'
 ```
 
-> 临时密码文件用完记得 `rm /tmp/.ap.sh`。
+其他要点：
+
+- `.246` 上的客户端日志：`journalctl -u robodog-device-client -f`（现场已开 DEBUG），
+  `本体软件急停按下中 / 已解除`、`指令 X 被拒绝`、`fault / …` 都在这里；
+- 临时密码文件用完删：`rm -f /tmp/.ap234.sh /tmp/.ap1.sh`；
+- ⚠️ **不要把 `.234` / `.1` 的 22 端口通过 frp / 公网映射出去**（本次排查动过这个念头，最后
+  用 `.246` 跳板解决）：这两台是密码登录，暴露到公网等于开门；
+- 地图 / 定位 / 任务类问题先把平台台账与 `.246` 日志看完再上机器，见 §3、§8、§10。
 
 ---
 
@@ -264,7 +296,9 @@ journalctl -u robodog-device-client --since "-5 min" | grep -E 'sdk_node|急停|
 | 同上 | `.1` `robot-launch list` + `dog_task.stdout` | `retry_count` 涨 / `bad_alloc` | 停栈 → 清 `/dev/shm` → 起栈（§4.5） |
 | 同上 | `.234` `ps -ef \| grep robot_sdk_node` | 进程真的没了 | `sudo systemctl restart robot-launch`（**在 `.234`**） |
 | `body_online=false`（1315 超时） | `.234` `robot_gateway.stdout` | 网关是否在跑、`.1` 是否可达 | `nc -z 192.168.234.1 22`、看网关日志 |
-| `estop_software` 一直是 true，点「解除急停」也无效 | `.234` `robot_sdk_node` 链路 | 链路断了 1302 根本发不到本体 | 先按本节第 1~2 行修链路 |
+| `estop_software` 一直是 true，点「解除急停」也无效 | 先看 `sdk_node` / `body_online` | 有一个是 false → 1302 根本发不到本体 | 按本节第 1~2 行修链路 |
+| 同上，但 `sdk_node=1` / `body_online=1`，`robot_mode`/`motion_status` 都是 `unknown` | `.1` `dog_task.stdout` | 当天有过 `bad_alloc` / `could not deserialize ROS message on /navigation_state` → `exit code -6` | `.1` `robot-launch restart dog_task`（不动运控，腿不掉力）；无效再按 §4.5 停栈清 `/dev/shm`。详见 §10 |
+| 任务第 1 个点秒失败，报 `navigation aborted: robot reported Failed` | `task_events` 里同一秒的 `设备事件: fault` | `13446 全局规划失败，起点被障碍物占据` / `13377 无有效绕障轨迹` / `13120` `13136` 定位 | **先查起点净空与定位，不是航点**，判读与算法见 §10.8 |
 | `ctrl_source=3` | 平台告警文案 | 伴随 13897/13440 → 本体残留任务；否则 → 遥控器/第三方 App | 前者：官方 App 取消任务 / 重启算法服务；后者：关遥控器电源，必要时「强制接管」 |
 | 任务回 `13897 capability busy` | `.1` `dog_task` / `robot-launch list` | 本体内是否还有未结束任务 | 官方 App 取消任务；或重启本体栈（§4.5，会清掉所有本体任务） |
 | 一直报 `12608 相机无图 / 13382 障碍物检测延迟` | `.234` `robot-launch list` | `perception` egg 是 `stopped`（`perception-seg` 在跑） | 需要视觉避障时再 `robot-launch start perception`，先确认模型路径 |
@@ -511,4 +545,171 @@ ssh firefly@192.168.234.1
   tail -f /home/firefly/.robot_launch_logs/dog_task.stdout
   df -h /dev/shm
   ss -ltn | grep -E ':8554|:1935|:58787'      # RTSP / RTMP / 启动器 API
+
+# .234 / .1 只开密码登录：在背包机上用 SSH_ASKPASS 免交互（账号/密码/完整命令见 §1.1、§1.2）
+#   printf '#!/bin/sh\nprintf "%%s\\n" "<密码>"\n' > /tmp/.ap.sh && chmod 700 /tmp/.ap.sh
+#   SSH_ASKPASS=/tmp/.ap.sh SSH_ASKPASS_REQUIRE=force setsid -w ssh -q \
+#     -o PreferredAuthentications=password -o PubkeyAuthentication=no robot@192.168.234.234 'hostname'
+#   用完 rm /tmp/.ap.sh
 ```
+
+---
+
+## 10. 第三起：急停卡死，点「解除急停」20 秒后回读仍是 `true`（2026-11-14）
+
+> **⏱ 30 秒结论**：平台确实下发了、客户端也确实发了 `1302 cmd=1`、链路健康
+> （`sdk_node=1` / `body_online=1`），但 `estop.software` 一直是 `true`、
+> `robot_mode` / `motion_status` 全是 `unknown` —— **急停位锁在 `.1` 的 `dog_task` 进程里**
+> （它当天崩过好几次）。处置：`.1` 上 `robot-launch restart dog_task`（不动 `motion_control`，
+> 腿不会掉力）；复发就按 §4.5 停栈清 `/dev/shm` 再起。
+
+### 10.1 症状
+
+| 层 | 表现 |
+| --- | --- |
+| 平台 | 设备抽屉「本体健康检查未通过：本体软件急停已触发。遥控/任务已暂停」；台账 `estop_software=1`、`robot_mode=unknown`、`motion_status=unknown`、`ctrl_source=1`、`sdk_node_available=1`、`body_online=1`、`loc_status=100`（定位是好的） |
+| 告警 | `AL-ESTOP-<设备号>-<时间戳>`（警告，未处理）：已送达设备连接，但 20 秒内本体回读没变成 `estop.software=false` |
+| 事件 | 「本体动作未生效 … `1302` 没有被执行」→ 之后「摇杆被拒绝: 本体软件急停已触发」 |
+| 客户端 `.246` | 先打印过「本体软件急停已解除」，卧倒后又打「本体软件急停按下中（estop.software=true）」；`1302 cmd=1` 发送成功但状态不变 |
+
+**别被「本体健康检查未通过」误导**：平台只是照实回显 `1315 estop.software=true`，
+禁用遥控/下发按钮（`web/src/components/DeviceDrawer.vue` 的 `healthIssue`），
+服务端没有停任何东西。
+
+### 10.2 先排除平台侧（3 条证据，1 分钟）
+
+1. 服务端日志 `sent command '解除急停'` + 事件里 `wsDelivered=true` → 命令进了设备连接；
+2. 客户端日志「已下发解除急停，并补零摇杆防止恢复急停前运动」→ `1302` 真的发出去了；
+3. **同一条命令 20 分钟前成功过**（10:45:26 下发 → 10:45:27 回读 `estop.software=false`）
+   → 链路、权限、门禁都没问题，是这次**本体不执行**。
+
+### 10.3 排查路径（含走过的弯路）
+
+| 步骤 | 结果 |
+| --- | --- |
+| `.234` `robot-launch list` | 17 个 egg 全 `running`、`retry=0`；`robot_sdk_node.stdout` 每 200ms 刷 `Battery error: error=0x0000020F bits_8_15=0x02` + `[FAULT] 2 fault(s)` |
+| `.234` `sudo systemctl restart robot-launch` | 算法侧故障刷屏停了，**急停仍是 `true`** → 锁不在算法机 |
+| `.1` `robot-launch list` / `df -h /dev/shm` | `dog_task` / `motion_control` / `power_daemon` 都 `running`、`retry=0`；`/dev/shm` 6% |
+| `.1` `dog_task.stdout` | 当天多次崩溃：`what(): std::bad_alloc`、`could not deserialize ROS message on /navigation_state` → `exit code -6`（10:03 / 10:27 / 10:33 / 10:40 各起一次） |
+| `.1` 各节点 `stderr` | `eCAL Pub/Sub description mismatch for topic hal_fault`（`dog_task`、`power_daemon` 都在刷）；`motion_control` 历史 472 条 `rknn_init error! ret = -6` |
+
+### 10.4 根因
+
+`dog_task` 是 `.1` 上**对外提供 zsibot SDK（8080/8081）**的进程，`1315` 的 `estop` /
+`mode` / `motion_status` 都由它从运控汇总上报。它当天多次 SIGABRT 之后，内部急停位 /
+状态机留在坏状态：进程还在、SDK 通道还在轮询（所以 `sdk_node=1`、1315 也不断），
+但 `1302 cmd=1` 落不到状态机上 → 回读永远是 `true`，`robot_mode` / `motion_status`
+一起变 `unknown`。
+
+> **判读要点**：`sdk_node=true` 只说明 `.234` 的 `robot_sdk_node` 在心跳，
+> **不代表 `.1` 的 `dog_task` 状态机健康**。§4 的结论（`sdk_node=false` → 链路断）
+> 解释不了这一类，别再去反复重启 `.234`。
+
+### 10.5 解法（从轻到重）
+
+```bash
+# ① 轻：只重启 dog_task（不动 motion_control，腿不会掉力；狗站着也能做）
+ssh firefly@192.168.234.1 'robot-launch restart dog_task'
+#   10~20 秒后平台应看到 estop_software=0、robot_mode=remote
+#   现场实测：11:02:01 下发 → 11:02:02 客户端打「本体软件急停已解除」
+
+# ② 重：dog_task 反复崩（bad_alloc / OS error 12）时按 §4.5
+ssh firefly@192.168.234.1 '
+  sudo systemctl stop robot-launch
+  sudo find /dev/shm -mindepth 1 -delete     # 只清内容，别删目录
+  sudo systemctl start robot-launch'
+```
+
+排查顺序记牢：**`.234` 重启只能清算法侧的故障刷屏，清不了这个急停**；
+`dog_task` 才是第一个该动的。
+
+### 10.6 验证判据
+
+```text
+平台：estop_software=0 / robot_mode=remote / sdk_node=1 / ctrl_source=1
+客户端：INFO 本体软件急停已解除
+```
+
+注意 `.234` 重启过之后 `loc_status` 会掉到 `0`（地图没载），这时上报的 `position`
+是无效值（本次实测 `(-0.21, -1.40)` 正好落在障碍格里）。所以还要：
+
+1. 点「站立」→ `motion_status` 变 `stand_up/walk`；
+2. 点「重新定位」→ 等 `loc_status=100`；
+3. 用平台上的坐标核对**起点净空 ≥0.5 m**（算法见 §10.8），达标再下发任务。
+
+### 10.7 复发预防（待厂商 / 待改）
+
+1. `dog_task` 崩溃的两个根：`/navigation_state` 消息反序列化失败（跨机 ROS 消息定义不一致）
+   与 `/dev/shm` 残留（`bad_alloc`）。前者要厂商统一镜像/消息定义，后者靠 §4.5 + §7 的守护。
+2. `eCAL Pub/Sub description mismatch for topic hal_fault`：跨机故障话题结构不一致，
+   fault 明细解不出来，平台只能看到 `2 fault(s)` 这种笼统数字。
+3. `Battery error=0x0000020F`（bit0~3 + bit9）**换电池后依然常驻**，需厂商给出位定义；
+   它有可能就是急停被反复置上的来源。
+4. 平台文案可以更准：`AL-ESTOP-*` / 「本体动作未生效」现在只说「重启本体算法服务或整机重启」，
+   建议改成「先在 `.1` 执行 `robot-launch restart dog_task`，无效再停栈清 `/dev/shm` 或整机重启」。
+
+### 10.8 附：为什么「任务第 1 个点秒失败」多半不是航点问题
+
+同一天还查了一起：任务在第一个航点秒失败，报
+
+```text
+航点 新航点 1 执行失败: 导航失败: [step AwaitArrival] navigation aborted: robot reported Failed
+（第 1/5 点起 1 个航点 need_locate=true vx=1.20 vz=1.50 map=/ota/alg_data/map/history_map/…）
+```
+
+这句是**本体 ALG 转述**，不含原因。真正的原因在 `task_events` 里**同一秒**的
+`设备事件: fault`：
+
+| code | 文案 | 含义 |
+| --- | --- | --- |
+| `13446` | 全局规划失败，起点被障碍物占据（级别2） | **狗自己站的位置**在代价地图里被判成占据 → 规划器直接拒绝出轨迹 |
+| `13440` | 导航指令非法（级别2） | 与 `13446` 常成对出现 |
+| `13377` | 无有效绕障轨迹，搜索失败，等待中 | 规划失败的另一形态（也见于 `speed_limit.vz=0` 的历史 bug） |
+| `13120` / `13136` / `13381` | 定位精度差（传感器频率下降）/ 定位丢数据 / 定位延迟 | 传感器链路降级，定位不可信 |
+| `12672` / `12608` / `13382` / `13504` | 传感器无数据(无法运行) / RS 与 lidar 时间不同步 / 感知延迟 / 内部节点异常 | 上游传感器/节点问题 |
+| `13897` | capability busy | 本体上还有没结束的任务（见 §5、§7.4） |
+
+本次两次失败（11-13 21:32:35、11-14 10:02:35）后面都紧跟 `13446` + `13440`，
+而航点经校验是合格的：在 free 栅格上、离最近障碍 0.50 m、距本体建图轨迹 0.39 m、
+与起点连通（净空 ≥0.5 m 仍可达）。真正的触发是「狗停在离墙 0.6 m 处 + 定位精度差」，
+被规划器判成起点占据。
+
+**起点净空怎么算**（拿业务库 `data/map_ingest/*.zip` 里的地图包就够，不用连本体）：
+
+```python
+# 依赖：pip install numpy pillow
+import numpy as np
+from PIL import Image
+from collections import deque
+
+img = np.array(Image.open("map.pgm"))          # 0=障碍 128=未知 254/255=free
+origin_x, origin_y, res = -14.85, -13.45, 0.05  # 取 map.yaml 的 origin / resolution
+occ = img < 100                                 # 障碍
+h, w = img.shape
+
+# 从所有障碍格出发做多源 BFS，得到每格到最近障碍的距离（格）
+dist = np.full((h, w), 1 << 30, np.int32)
+dq = deque()
+for r, c in zip(*np.nonzero(occ)):
+    dist[r, c] = 0
+    dq.append((r, c))
+while dq:
+    r, c = dq.popleft()
+    for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        rr, cc = r + dr, c + dc
+        if 0 <= rr < h and 0 <= cc < w and dist[rr, cc] > dist[r, c] + 1:
+            dist[rr, cc] = dist[r, c] + 1
+            dq.append((rr, cc))
+
+def clearance(x, y):
+    c = round((x - origin_x) / res)
+    r = round(h - 1 - (y - origin_y) / res)    # 图像 y 向下、地图 y 向上
+    return dist[r, c] * res                    # 米
+
+# 判据：≥0.5 m 才算安全起点（本次把 (7, 0) 调到 (7, -0.4)，净空 0.50 → 0.75 m，
+#       RT-005 因此从 v0.3 升到 v0.4）
+```
+
+> 注意 trinary 语义：`map.yaml` 是 `free_thresh 0.2 / occupied_thresh 0.5`，
+> 只有 `p > 204` 才算 free，`p≈128` 是**未知**。所以「在白色区」和「在灰色区」完全是两件事，
+> 后者在 `track_unknown_space: true` 的代价地图上规划不出来。

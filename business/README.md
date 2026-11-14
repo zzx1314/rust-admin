@@ -732,6 +732,16 @@ POST /api/devices/{id}/teleop/take
    文案直接给结论：`1302` 没被执行，请重启本体算法服务或整机重启；
 3. 急停真的解除（下一次心跳 `estop.software=false`）时，未处理的 `AL-ESTOP-*` 自动结案。
 
+**回读没生效时先分清是哪一侧**（2026-11-14 现场）：
+
+| 现场特征 | 结论 | 去处 |
+| --- | --- | --- |
+| `sdk_node=false` 或 `body_online=false` | 1302 根本没到本体（链路断） | 本体运维手册 §4 |
+| `sdk_node=1`、1315 一直刷，但 `estop_software` 恒为 true、`robot_mode`/`motion_status` 都是 `unknown` | 急停位锁在 `.1` 的 `dog_task` 状态机里（当日多次 `bad_alloc` / `/navigation_state` 反序列化崩溃） | `.1` `robot-launch restart dog_task`，详见本体运维手册 §10 |
+
+两种都是**本体侧**问题，平台只需按告警/事件如实报导；“重启算法服务”并不总是正解
+（重启 `.234` 清不了 `dog_task` 里锁住的急停位）。
+
 #### 重连本体链路（运维手段）
 
 `POST /api/devices/{id}/command` 的 `{"command": "本体重连"}`：让**设备客户端进程重启**，
