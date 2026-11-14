@@ -2,12 +2,13 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { deviceApi, parkApi, routeApi, taskApi, zoneApi } from "@/api/ops";
-import type { Device, Park, Route, Task, TaskEvent, Zone } from "@/api/types";
+import { deviceApi, mapApi, parkApi, routeApi, taskApi, zoneApi } from "@/api/ops";
+import type { Device, MapVersion, Park, Route, Task, TaskEvent, Zone } from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import AppIcon from "@/components/AppIcon.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import ProgressBar from "@/components/ProgressBar.vue";
+import TaskLiveMonitor from "@/components/TaskLiveMonitor.vue";
 import {
   DISPATCH_POLICIES,
   EXECUTE_MODES,
@@ -23,6 +24,8 @@ const devices = ref<Device[]>([]);
 const parks = ref<Park[]>([]);
 const zones = ref<Zone[]>([]);
 const routes = ref<Route[]>([]);
+/** 地图版本：任务执行监控要把设备位置画到「路线所用的那张地图」上 */
+const maps = ref<MapVersion[]>([]);
 const stats = ref<{ total: number; counts: Record<string, number>; doneRate: number }>({
   total: 0,
   counts: {},
@@ -54,6 +57,9 @@ const detailVisible = ref(false);
 const detailTask = ref<Task | null>(null);
 /** 任务事件流：定位未就绪、下发失败等可读原因都在这里 */
 const detailEvents = ref<TaskEvent[]>([]);
+/** 实时监控弹窗（只看视频 + 地图，不打开整个详情） */
+const monitorVisible = ref(false);
+const monitorTaskId = ref<number | null>(null);
 
 /**
  * 看板列（顺序即执行生命周期）。
@@ -128,14 +134,15 @@ function tasksOf(status: string) {
 async function load() {
   loading.value = true;
   try {
-    const [taskList, statsData, deviceList, parkList, zoneList, routeList] =
+    const [taskList, statsData, deviceList, parkList, zoneList, routeList, mapList] =
       await Promise.all([
         taskApi.list(),
         taskApi.stats(),
         deviceApi.list(),
         parkApi.list(),
         zoneApi.list(),
-        routeApi.list()
+        routeApi.list(),
+        mapApi.list()
       ]);
     tasks.value = taskList;
     stats.value = statsData;
@@ -143,6 +150,7 @@ async function load() {
     parks.value = parkList;
     zones.value = zoneList;
     routes.value = routeList;
+    maps.value = mapList;
   } catch (error) {
     // 接口失败时也要把页面渲染出来（空数据 + 空状态），不能只剩一片空白
     console.error(error);
@@ -192,6 +200,8 @@ async function startTask(task: Task) {
   await taskApi.dispatch(task.id);
   await load();
   ElMessage.success(`${task.taskName} 已下发执行`);
+  // 下发成功顺手打开实时监控：执行中要看的就是画面和地图位置
+  openMonitor(task);
 }
 
 /**
@@ -331,6 +341,53 @@ const detailRoute = computed(() => {
   return routes.value.find(route => route.id === routeId) ?? null;
 });
 
+/** 任务对应的执行设备（含实时位置 / 视频地址），来自设备列表轮询 */
+function deviceOf(task: Task | null): Device | null {
+  if (!task?.deviceId) return null;
+  return devices.value.find(device => device.id === task.deviceId) ?? null;
+}
+
+function routeOf(task: Task | null): Route | null {
+  if (!task?.routeId) return null;
+  return routes.value.find(route => route.id === task.routeId) ?? null;
+}
+
+/**
+ * 任务执行要看的图：路线冻结的地图 → 本体当前载图 → 园区地图基线。
+ *
+ * 优先路线地图：下发到本体的航点坐标就是按这张图换算的，拿别的图会把点位画歪。
+ */
+function mapOf(task: Task | null): MapVersion | null {
+  if (!task) return null;
+  const park = parks.value.find(item => item.id === task.parkId);
+  const candidates = [
+    routeOf(task)?.mapVersionId,
+    deviceOf(task)?.activeMapId,
+    park?.mapVersionId
+  ];
+  for (const id of candidates) {
+    if (!id) continue;
+    const found = maps.value.find(map => map.id === id);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** 监控弹窗里的任务：始终从轮询结果取最新一行，进度 / 阶段才是实时的 */
+const monitorTask = computed(
+  () => tasks.value.find(task => task.id === monitorTaskId.value) ?? null
+);
+
+function openMonitor(task: Task) {
+  monitorTaskId.value = task.id;
+  monitorVisible.value = true;
+}
+
+/** 执行中的任务：视频 + 地图位置都在轮询里实时刷新 */
+function isRunning(task: Task) {
+  return task.taskStatus === "执行中" || task.taskStatus === "已暂停";
+}
+
 const detailSequence = computed(() => {
   const route = detailRoute.value;
   if (!route) return [];
@@ -370,6 +427,8 @@ async function sendFromDetail(command: string) {
   }
   detailVisible.value = false;
   await load();
+  // 「开始执行 / 重新下发」后直接进监控：和看板上的执行按钮保持一致
+  if (command === "start") openMonitor(task);
 }
 
 function clickStat(status: string) {
@@ -392,20 +451,33 @@ function stampNow() {
 }
 
 /**
- * 轮询任务数据（看板 / 列表 / 详情共用）。
+ * 轮询任务数据（看板 / 列表 / 详情 / 监控共用）。
  *
- * 只拉 `tasks` + `stats`：设备/园区/路线只在建任务时用，没必要每 5s 重拉一遍。
- * 详情弹窗打开时顺手刷新它的任务行与事件流，这样进度、状态、失败原因都是实时的。
+ * 除了 `tasks` + `stats`，每轮也拉一次 `devices`：任务执行时的实时视频地址和
+ * 地图位置都在设备行上（`position` 由心跳 10s 上报），这样才能在任务页看到
+ * 机器狗走到哪了。设备/园区/路线/地图这类台账只在建任务时用，不重复拉。
  */
 async function refreshLive() {
   // 页面在后台 / 编辑弹窗打开时先不抢刷新，避免把用户正在改的上下文顶掉
   if (document.hidden || taskDialog.value || liveRefreshing.value) return;
   liveRefreshing.value = true;
   try {
-    const [taskList, statsData] = await Promise.all([taskApi.list(), taskApi.stats()]);
+    const [taskList, statsData, deviceList] = await Promise.all([
+      taskApi.list(),
+      taskApi.stats(),
+      deviceApi.list()
+    ]);
     tasks.value = taskList;
     stats.value = statsData;
+    devices.value = deviceList;
     stampNow();
+    // 监控弹窗里的任务被删了就直接关掉，避免停在一份过期数据上
+    if (monitorVisible.value && monitorTaskId.value !== null) {
+      if (!taskList.some(item => item.id === monitorTaskId.value)) {
+        monitorVisible.value = false;
+        monitorTaskId.value = null;
+      }
+    }
     if (detailVisible.value && detailTask.value) {
       const fresh = taskList.find(item => item.id === detailTask.value?.id);
       if (!fresh) {
@@ -549,6 +621,9 @@ onBeforeUnmount(() => {
               <AppIcon name="route" />路线
               {{ task.routeCode ?? "—" }} · {{ task.routeId ? "已编排" : "临时路径" }}
             </span>
+            <span v-if="isRunning(task)" :title="`实时位置（地图米）：${deviceOf(task)?.position || '未上报'}`">
+              <AppIcon name="waypoint" />{{ deviceOf(task)?.position || "位置未上报" }}
+            </span>
           </div>
           <div class="tc-prog">
             <ProgressBar
@@ -582,6 +657,14 @@ onBeforeUnmount(() => {
                 @click="openEdit(task)"
               >
                 <AppIcon name="edit" />
+              </button>
+              <button
+                v-if="isRunning(task)"
+                class="btn sm ghost icon"
+                title="实时监控（视频 + 地图位置）"
+                @click="openMonitor(task)"
+              >
+                <AppIcon name="video" />
               </button>
               <button
                 v-if="task.taskStatus === '执行中'"
@@ -665,6 +748,14 @@ onBeforeUnmount(() => {
               </td>
               <td>
                 <div class="actions">
+                  <button
+                    v-if="isRunning(task)"
+                    class="btn sm ghost icon"
+                    title="实时监控（视频 + 地图位置）"
+                    @click="openMonitor(task)"
+                  >
+                    <AppIcon name="video" />
+                  </button>
                   <button
                     v-if="task.taskStatus === '待执行'"
                     class="btn sm ghost icon"
@@ -804,11 +895,33 @@ onBeforeUnmount(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="detailVisible" title="任务详情" width="720px">
+    <el-dialog
+      v-model="detailVisible"
+      class="task-live-dialog"
+      title="任务详情"
+      width="min(1080px, 94vw)"
+      top="5vh"
+      destroy-on-close
+    >
       <template v-if="detailTask">
         <div class="live-hint" style="margin-bottom: 10px">
           <i class="live-dot" />详情实时更新（每 {{ REFRESH_MS / 1000 }}s）
           <template v-if="lastRefreshed"> · 上次 {{ lastRefreshed }}</template>
+        </div>
+
+        <div class="rt-sec-title">
+          <span>实时视频 / 地图位置</span><AppIcon name="video" />
+        </div>
+        <TaskLiveMonitor
+          :task="detailTask"
+          :device="deviceOf(detailTask)"
+          :route="detailRoute"
+          :map="mapOf(detailTask)"
+          :refreshed-at="lastRefreshed"
+        />
+
+        <div class="rt-sec-title" style="margin-top: 16px">
+          <span>任务信息</span><AppIcon name="task" />
         </div>
         <div class="kv"><span>任务名称</span><b>{{ detailTask.taskName }}</b></div>
         <div class="kv">
@@ -906,5 +1019,43 @@ onBeforeUnmount(() => {
         </div>
       </template>
     </el-dialog>
+    <el-dialog
+      v-model="monitorVisible"
+      class="task-live-dialog"
+      title="任务实时监控"
+      width="min(1180px, 96vw)"
+      top="4vh"
+      destroy-on-close
+    >
+      <template v-if="monitorTask">
+        <div class="live-hint" style="margin-bottom: 10px">
+          <i class="live-dot" />{{ monitorTask.taskCode }} · {{ monitorTask.taskName }}
+          <span class="muted">
+            {{ isRunning(monitorTask) ? "执行中" : monitorTask.taskStatus }} · 每
+            {{ REFRESH_MS / 1000 }}s 刷新
+          </span>
+          <template v-if="lastRefreshed">
+            <span class="muted"> · 上次 {{ lastRefreshed }}</span>
+          </template>
+        </div>
+        <TaskLiveMonitor
+          :task="monitorTask"
+          :device="deviceOf(monitorTask)"
+          :route="routeOf(monitorTask)"
+          :map="mapOf(monitorTask)"
+          :refreshed-at="lastRefreshed"
+        />
+      </template>
+      <div v-else class="empty-box" style="padding: 24px 0">任务已不存在</div>
+    </el-dialog>
   </div>
 </template>
+
+<style scoped>
+/* 详情 / 监控内容较长（视频 + 地图 + 事件流）：弹窗主体自己滚动，
+   标题栏固定，避免整页跟着滚、关闭按钮被顶出屏幕 */
+.task-live-dialog :deep(.el-dialog__body) {
+  max-height: 76vh;
+  overflow: auto;
+}
+</style>

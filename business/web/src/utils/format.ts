@@ -124,6 +124,37 @@ export function isLocReady(status?: number | null): boolean {
   return status === 100;
 }
 
+/**
+ * 智航 Pro 执行阶段（`tasks.robot_stage`）→ 中文。
+ *
+ * 文案与设备客户端 `task_progress` 的 message 保持一致（见 client/src/main.rs），
+ * 这样执行中页面显示的阶段和事件流里的描述对得上；未知阶段原样返回。
+ */
+const STAGE_LABELS: Record<string, string> = {
+  "mapping.preparing": "建图准备中",
+  "mapping.running": "建图中",
+  "mapping.saving": "地图保存中",
+  "mapping.saved": "地图已保存",
+  "navigation.localizing": "定位中",
+  "navigation.navigating": "前往航点",
+  "patrol.navigating": "前往航点",
+  "patrol.point_arrived": "已到达航点",
+  "patrol.waiting": "航点停留",
+  "patrol.photographing": "拍照采集",
+  "patrol.point_completed": "航点作业完成",
+  "patrol.returning": "返航中",
+  "patrol.returning_to_charge": "返回充电点",
+  "return_to_charge.navigating": "返回充电点",
+  "patrol.recharging": "充电中",
+  "return_to_charge.recharging": "充电中",
+  "recharge.charging": "充电中"
+};
+
+export function robotStageLabel(stage?: string | null): string {
+  if (!stage) return "—";
+  return STAGE_LABELS[stage] ?? stage;
+}
+
 export function timeOnly(value?: string | null): string {
   if (!value) return "—";
   return value.length >= 16 ? value.slice(11, 16) : value;

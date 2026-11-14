@@ -150,6 +150,21 @@ export function frameContains(frame: MapFrame, x: number, y: number): boolean {
   return x >= minX - margin && x <= maxX + margin && y >= minY - margin && y <= maxY + margin;
 }
 
+/**
+ * 解析设备上报的位置（`devices.position`，格式 `"x, y"`，单位米）。
+ *
+ * 客户端从本体 1401 位姿里取 x/y 拼成这个字符串，坐标系与路线航点一致
+ * （地图米制），因此可以和服务端发给本体的 `goals[].position` 直接比对。
+ */
+export function parseMapPosition(raw?: string | null): { x: number; y: number } | null {
+  if (!raw) return null;
+  const numbers = raw.match(/-?\d+(?:\.\d+)?/g);
+  if (!numbers || numbers.length < 2) return null;
+  const x = Number.parseFloat(numbers[0]);
+  const y = Number.parseFloat(numbers[1]);
+  return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+}
+
 /** 路线数据是否已是地图米制 */
 export function isMapFrameData(data?: { coordFrame?: string } | null): boolean {
   return data?.coordFrame === COORD_FRAME_MAP;
