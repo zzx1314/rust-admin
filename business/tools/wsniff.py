@@ -360,6 +360,8 @@ def emit(ts: float, direction: str, obj: object, out, full: bool,
 
 SO_ATTACH_FILTER = 26
 BPF_LD_B, BPF_LD_H = 0x30, 0x28
+BPF_LD_H_IND = 0x48     # ldh [x + k]：间接寻址（TCP 头偏移随 IP 头长度变）
+BPF_LDX_MSH = 0xB1      # ldx 4*([k]&0xf)：X = IP 头长度
 BPF_JMP_JEQ, BPF_JMP_JA = 0x15, 0x05
 BPF_RET_K = 0x06
 
@@ -367,32 +369,126 @@ BPF_RET_K = 0x06
 def _bpf_program(ports: Iterable[int]):
     """生成 `ip and tcp and (port P1 or port P2 ...)` 的经典 BPF 程序。
 
-    ⚠️ 只认不带 VLAN 的以太网帧（现场机器人内网没有 VLAN）。若链路带 802.1Q 标签，
-    用 `--no-bpf` 退回全部收包 + 用户态过滤。
+    指令布局（N = 7 + 4*端口数）：
+        0: ldh [12]              A = ethertype
+        1: jeq #0x0800 ? 2 : DROP
+        2: ldb [23]              A = ip.proto
+        3: jeq #6 ? 4 : DROP
+        4: ldx 4*([14]&0xf)      X = IP 头长度（20/60 字节都要对）
+        5+4i+0: ldh [x+14]       A = sport
+        5+4i+1: jeq #Pi ? ACCEPT : 下一条
+        5+4i+2: ldh [x+16]       A = dport
+        5+4i+3: jeq #Pi ? ACCEPT : 下一条
+        N-2: ret #0              DROP
+        N-1: ret #0x40000        ACCEPT
+
+    ⚠️ 两个坑，2026-11-14 都踩过：
+    1. BPF 跳转是「从下一条指令算起」的 8 位偏移，第一版少算 2 跳 → 把自己要的包全丢了；
+    2. TCP 头不在固定偏移 14，要先按 IHL 算（`ldx 4*([14]&0xf)` + 间接 `ldh [x+…]`）。
+    挂载前会跑 ::func:`bpf_selftest` 自检，不通过就退回用户态过滤，不会再“静默全丢”。
     """
     ports = list(ports)
+    n = 7 + 4 * len(ports)
+    drop, accept = n - 2, n - 1
     insns: List[Tuple[int, int, int, int]] = [
-        (BPF_LD_H, 0, 0, 12),          # 0: ldh [12]      ethertype
-        (BPF_JMP_JEQ, 0, 1, 0x0800),   # 1: jeq #0x0800 ? next : drop
-        (BPF_LD_B, 0, 0, 23),          # 2: ldb [23]      ip.proto
-        (BPF_JMP_JEQ, 0, 1, 6),        # 3: jeq #6 (TCP) ? next : drop
+        (BPF_LD_H, 0, 0, 12),
+        (BPF_JMP_JEQ, 0, drop - 2, 0x0800),
+        (BPF_LD_B, 0, 0, 23),
+        (BPF_JMP_JEQ, 0, drop - 4, 6),
+        (BPF_LDX_MSH, 0, 0, 14),
     ]
-    # 每端口两条：sport / dport；命中就跳到末尾的 ACCEPT，否则落到下一条
-    for port in ports:
-        n = len(insns)
-        # 需要跳到 ACCEPT 的指令数：本组剩余 + 之后每组 2 条 + DROP
-        jump_to_accept = 2 * (len(ports) - ports.index(port)) - 1
-        insns.append((BPF_LD_H, 0, 0, 14))                      # ldh [14] sport
-        insns.append((BPF_JMP_JEQ, jump_to_accept, 0, port))    # jeq port
-        insns.append((BPF_LD_H, 0, 0, 16))                      # ldh [16] dport
-        insns.append((BPF_JMP_JEQ, jump_to_accept - 1, 0, port))
-    insns.append((BPF_RET_K, 0, 0, 0))          # DROP
-    insns.append((BPF_RET_K, 0, 0, 0x40000))    # ACCEPT (最大长度)
+    for index, port in enumerate(ports):
+        base = 5 + 4 * index
+        insns.append((BPF_LD_H_IND, 0, 0, 14))
+        insns.append((BPF_JMP_JEQ, accept - base - 2, 0, port))
+        insns.append((BPF_LD_H_IND, 0, 0, 16))
+        insns.append((BPF_JMP_JEQ, accept - base - 4, 0, port))
+    insns.append((BPF_RET_K, 0, 0, 0))
+    insns.append((BPF_RET_K, 0, 0, 0x40000))
     raw = b"".join(struct.pack("HBBI", *item) for item in insns)
     return raw, len(insns)
 
 
+def _bpf_run(program: List[Tuple[int, int, int, int]], frame: bytes) -> int:
+    """极简 BPF 解释器（只覆盖本模块用到的指令），给自检用。"""
+    acc = 0
+    xreg = 0
+    pc = 0
+    for _ in range(10000):
+        if pc >= len(program):
+            return 0
+        code, jt, jf, k = program[pc]
+        if code == BPF_LD_H:
+            if k + 2 > len(frame):
+                return 0
+            acc = (frame[k] << 8) | frame[k + 1]
+            pc += 1
+        elif code == BPF_LD_B:
+            if k + 1 > len(frame):
+                return 0
+            acc = frame[k]
+            pc += 1
+        elif code == BPF_LDX_MSH:
+            if k + 1 > len(frame):
+                return 0
+            xreg = 4 * (frame[k] & 0x0F)
+            pc += 1
+        elif code == BPF_LD_H_IND:
+            at = xreg + k
+            if at + 2 > len(frame):
+                return 0
+            acc = (frame[at] << 8) | frame[at + 1]
+            pc += 1
+        elif code == BPF_JMP_JEQ:
+            pc += 1 + (jt if acc == k else jf)
+        elif code == BPF_RET_K:
+            return k
+        else:
+            return 0
+    return 0
+
+
+def bpf_selftest(ports: Iterable[int]) -> Tuple[bool, str]:
+    """用合成报文验证 BPF 程序真的会放行/丢弃，避免“过滤器把包全丢了”。"""
+    ports = list(ports)
+    program = [
+        struct.unpack("HBBI", raw)
+        for raw in (struct.pack("HBBI", *item) for item in _bpf_instructions(ports))
+    ]
+
+    def frame(ethertype: int, proto: int, sport: int, dport: int) -> bytes:
+        eth = b"\x02" * 6 + b"\x04" * 6 + struct.pack("!H", ethertype)
+        ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 40, 0, 0, 64, proto, 0,
+                         b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02")
+        tcp = struct.pack("!HHIIBBHHH", sport, dport, 0, 0, 0x50, 0x18, 65535, 0, 0)
+        return eth + ip + tcp
+
+    port = ports[0]
+    decoy = next(p for p in (port + 1, port + 2, port + 3) if p not in ports)
+    cases = [
+        ("目标端口命中", frame(0x0800, 6, 40000, port), True),
+        ("源端口命中", frame(0x0800, 6, port, 40000), True),
+        ("其它端口", frame(0x0800, 6, 40000, decoy), False),
+        ("UDP", frame(0x0800, 17, 40000, port), False),
+        ("ARP", frame(0x0806, 0, 0, 0), False),
+    ]
+    for name, data, expect in cases:
+        got = _bpf_run(program, data) != 0
+        if got != expect:
+            return False, f"{name}: 期望 {'放行' if expect else '丢弃'}，实际 {'放行' if got else '丢弃'}"
+    return True, "5 条合成报文全部符合预期"
+
+
+def _bpf_instructions(ports: Iterable[int]) -> List[Tuple[int, int, int, int]]:
+    """返回指令列表（与 ::func:`_bpf_program` 同源，供自检使用）。"""
+    raw, count = _bpf_program(ports)
+    return [struct.unpack("HBBI", raw[i * 8:(i + 1) * 8]) for i in range(count)]
+
+
 def attach_bpf(sock, ports: Iterable[int]) -> None:
+    ok, detail = bpf_selftest(ports)
+    if not ok:
+        raise OSError(f"BPF 自检未通过（{detail}），已放弃挂载以免丢包")
     raw, count = _bpf_program(ports)
     buf = ctypes.create_string_buffer(raw, len(raw))
     fprog = struct.pack("HL", count, ctypes.addressof(buf))

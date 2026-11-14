@@ -280,9 +280,114 @@ Subscription count: 2 → Node name: dog_task
 要平台彻底对上官方链路，就得实现 `5000 kind=4` 并把路线坐标先「写成本体上的路径」
 （`4012` 之外还需要导航路径写接口），这不是改几个字段的事。
 
+#### 官方巡检的请求形态（2026-11-14 13:25 从 ALG 日志实证）
+
+抓包当时因 BPF 过滤器 bug 空转（见 §11.6），改从 `.234` 的
+`/home/robot/.robot_launch_logs/robot-alg-manager.stdout` 拿到了 ALG 收到的任务摘要：
+
+```text
+[REQ ▶] CreateTask type=5000 msg_id=96 source=APP(1) kind=4 name=2026_11_14_13_25_15
+╭─ Patrol Mission  2026-11-14 13:25:48.590
+│  map_id   : 2026_11_10_16_15_06
+│  path_id  : 自定义路径1  (自定义路径1)
+│  end_task : 0 (none)
+│  points   : 1
+├─ waypoints
+│  [1] 1     @(x=7.95, y=-0.25)  workpoint  actions: photo(1)
+╰─
+[patrol] startup undock disabled by config; continuing patrol
+[patrol] navigation group arrived through point: 1
+[patrol] take photo at point: 1 → photo failed (14005 capture_image service not ready)
+```
+
+由此确认（不需要再猜）：
+
+1. `5000 kind=4` 是**路径驱动**：只给 `map_id` + `path_id`，**航点/动作来自本体上的路径文件**，
+   请求里不需要逐点坐标；
+2. `end_task` 是**数字枚举**：`0 = none（原地待命）`，`2 = 返回充电点`（文档 §2.5.5），`1` 推测为返回起点；
+3. 路径文件格式（本体 `nav_paths/自定义路径1`）与文档 §2.2.3.7 完全一致：
+   `[点名, {position, orientation, properties:{type, tasks}}]`，其中 `type=1` 作业点 / `0` 途径点，
+   `tasks` = `[0 等待(2 s) / 1 拍照]`；ALG 会把它翻成 `workpoint actions: photo(1)`；
+4. 到点作业失败码 `14005` 来自 payload 服务：`capture_image(/capture_image): service not ready`
+   （`perception` egg 处于 stopped，与 §7 的「相机无图」一致）；
+5. 巡检任务跑完会落 `/ota/alg_data/patrol_record/<task_id>.json`（`task` + `properties` + `phase[]`），
+   与 5010/5011 同源。
+
+**2026-11-14 13:36 已抓到 `5000 kind=4` 原始报文**（抓包工具修好后重跑一次）：
+
+```json
+{"kind":4,"name":"2026_11_14_13_35_50","schedule":0,
+ "execute_at":"2026-11-14 13:36:29","priority":0,"record":true,
+ "params":{"map_id":"2026_11_10_16_15_06","map_type":0,"end_task":1,
+           "min_recharge_battery":25.0,
+           "speed_limit":{"vx":0.5,"vy":0.0,"vz":1.5},
+           "path_id":"自定义路径1"}}
+```
+
+要点（详细字段表见 [`../business/docs/official-app-parity.md`](../business/docs/official-app-parity.md) §三.1）：
+
+- **请求不带任何坐标**，只有 `map_id` + `path_id`；航点/动作全在本体 `nav_paths/<path_id>` 文件里；
+- `end_task` 数字枚举实测：`0`=none、`1`=return_to_start（本次记录 `properties.end_task="return_to_start"`）；
+- `execute_at` 是**本地时间字符串** `"YYYY-MM-DD HH:MM:SS"`，不是毫秒；
+- `record=true`、`min_recharge_battery=25.0`、`speed_limit.vx=0.5`（我们一直发 `record:false` / 无电量阈值 / `vx=1.2`）；
+- `map_type=0` = 2D 栅格（patrol 枚举）；
+- `5009` 进度序列：`patrol.preparing → capturing_origin → navigating → point_arrived → photographing → point_completed → completed → returning`，
+  `last_event.data={"index":0,"total":1,"kind":1,"name":"1"}`（`index` 从 0 开始）；
+- 本次任务 `success`、116.4 s（导航 79.5 s @vx0.5 + 返起点 31.9 s），拍照仍 `14005 service not ready`。
+
+#### `map_type` 的 0 到底是什么意思（三套枚举别混）
+
+协议里 `map_type` 有**三套互不相通的枚举**，同一个数字含义完全不同：
+
+| 任务 | 字段位置 | 枚举 |
+| --- | --- | --- |
+| 建图 `5000 kind=1` | `params.map_type` | **0 = 室外建图 / 2 = 室内建图** |
+| 导航 `5000 kind=2` | `params.map_type` + `params.goal_type` | **1 = 2D 栅格 / 2 = 3D（预留）/ 3 = Route 路网**；`goal_type` 应与 `map_type` 一致 |
+| 巡检 `5000 kind=4`（APP/记录层） | 5011 `properties.map_type` | **0 = 2D 栅格 / 1 = 路网**（SDK 的 `MapType::kGrid=0` / `kRoadNetwork=1`） |
+
+所以官方那次 patrol 的 `map_type=0` **就是 2D 栅格**，和我们 `kind=2` 里发 `1` 语义相同，
+只是处在不同的枚举层。文档原文（§2.5.1.4 末尾）：
+
+> SDK 公共接口继续使用 `MapType::kGrid=0`、`MapType::kRoadNetwork=1`；SDK 在协议编码时
+> 分别转换为本节导航协议的 `1` 和 `3`。SDK 请求中的 `goalType=0` 表示跟随地图类型，
+> 编码后会自动得到匹配的 `goal_type`。当前导航实现仅支持 `1`（2D 栅格）和 `3`（Route 路网）。
+
+推论（对我们代码的约束）：
+
+1. `kind=2` 继续发 `map_type=goal_type=1` 是对的；**不能把 0 透传到 kind=2**——kind=2 里 0 未定义
+   （客户端现在把 `0` 归一化成 `1`，正是为此，别去掉这段）；
+2. 将来实现 `kind=4` 时必须发 **`map_type=0`（2D 栅格）**；若误发 `1`，那是**路网**，
+   会切到 road-network 规划器——而这张图的 `map.geojson` 只有 2 个孤立节点、0 条边，必然失败；
+3. `kind=4` 是否也带 `goal_type`：目前抓到的 `properties` 里没有该字段，**待 P0 抓包确认**
+   （SDK 层 `goalType=0` 的语义是「跟随地图类型」，编码时会自动补齐）；
+4. 建图 `kind=1` 的 `map_type` 是第三个枚举（0=室外、2=室内），别和上面两个混用。
+
 > 仍未拿到的：官方 `5000 kind=4` 的**完整 params 字段表**（`dwell_sec` / `patrolSpeedVx` /
 > `minimum_battery` / `record` / `repeat` / `nav_begin_time` / `record_time` …）。
 > 第一次抓包把这帧漏了（原因与修法见 §11.2），工具已修，再跑一次官方任务即可补齐。
+
+#### 对齐官方链路：还缺什么（复盘中查到的资料边界）
+
+把 `business/docs/zhihang-pro-api-v1.0.3.txt` 又翻了一遍，结论是**大部分信息其实已经在文档里**：
+
+| 需要的东西 | 现状 | 出处 |
+| --- | --- | --- |
+| 路径**读** | ✅ 有 | `4022` 请求 `{map_id}` → `4023` 响应 `{code,msg,map_id,path_names[],paths{名: [[点名,{position,orientation,properties?}]]}}`（§2.3.3） |
+| 路径**写** | ✅ 有（标注「暂不对外」） | `4024` 添加 / `4026` 删除 / `4028` 修改，响应 `4025/4027/4029` |
+| 路径点语义 | ✅ 有 | §2.2.3.7：`properties.type` = 0 途径点 / 1 作业点；`tasks` = `[0 等待(固定 2 s) / 1 拍照]`，可重复（如 `[0,1,0]`） |
+| 巡检进度 5009 | ✅ 有完整示例 | §2.6：`stage=patrol.point_arrived`、`last_event.data{index,total,name,kind}`、`detail.last_arrived_point{…,arrived_at_ms}`、`current_task.params{map_id,path_id,map_type,end_task}` |
+| patrol 阶段名单 | ✅ 有 | §2.6.6：preparing/undocking/localizing/capturing_origin/navigating/retrying/point_arrived/waiting/photographing/point_completed/stopping/stopped/returning/returning_to_charge/recharging/completed |
+| 巡检记录 5010/5011 | ✅ 有 | §2.7（含 `properties` 与 `phase[].error{code,domain,message}`） |
+| 任务控制 | ✅ 有 | `5002/5004/5006` 取消/暂停/恢复 → `5003/5005/5007`；`5012/5013` 巡检返回起点 |
+| `end_task` 语义 | ⚠️ 部分 | 文档只明确 `end_task=2` = 跑完返充；`0/1` 的数值枚举在 kind=4 章节里 |
+| **`5000 kind=4` 的 params 字段表** | ❌ **缺** | 正文只写「kind=4 patrol（暂不对外开放）」，没有字段表 |
+
+关键线索：§2.2.3.7 里写着「与 `5000` 巡检任务内联点位（**§4.1.7** 的 `goals[].actions[].type`）
+取值口径一致」——**但我们手上的 txt 里没有 §4.1.7**。说明这份协议文档是**删节版/旧版**，
+厂商侧存在描述 kind=4 内联点位的章节。所以补齐顺序是：
+
+1. **向厂商要完整版协议文档**（含 §4.1.7 与 `kind=4` 字段表）——最省事；
+2. 要不到，再抓一次包（3~5 分钟，工具已就绪）：`5000 kind=4` 那一帧 + `--show-heartbeat` 的 5009。
 
 ### 5.4 平台侧要真接上，需要做的（下一步）
 
@@ -540,3 +645,61 @@ journalctl -u wsniff -f                        # 摘要（含「新连接 …」
 4. 抓包会短暂占用 `/dev/shm`? 不会——但 `dog_task` 崩溃循环时 `dog_task.stdout` 会狂涨，
    记得顺手看一眼 `df -h /dev/shm`；
 5. 抓完记得 `pkill`，别让它在现场一直跑。
+
+---
+
+## 12. 方案 3：继续用 `kind=2` 导航模式的现场兜底（`/navigation_state` 裁剪桥）
+
+> 完整操作手册（含编译、remap、systemd、验证、回滚、常见问题）见
+> [`navstate-bridge/README.md`](navstate-bridge/README.md)，代码在 `deploy/navstate-bridge/`。
+
+**思路**：`.234` 的 `waypoint_follower` 发的是 0.9.8 编码（末尾多 `uint8 current_floor`），
+`.1` 的 `dog_task` 按 0.9.0 解析。那就把这条消息**末尾多出来的字节截掉**再喂给它：
+
+```text
+/waypoint_follower ──/navigation_state(0.9.8)──▶ navstate_bridge(截 1 字节)
+                                                   └─▶ /navigation_state_v090(0.9.0)
+                                                          └─▶ dog_task（remap 到该话题）
+```
+
+要点：
+
+1. **不动 `.234`**，只改 `.1`：装 bridge + 给 `dog_task` 加一条 remap
+   （`-r navigation_state:=navigation_state_v090`），然后 `robot-launch restart dog_task`；
+2. bridge 用 `rclcpp` 的 generic sub/pub（`SerializedMessage`），**只认类型字符串**，
+   不需要在 `.1` 上装 0.9.8 的消息包，也不需要重编任何厂商二进制；
+3. **上线前必须 dry-run 验长度**（`-p publish:=false`）：同一状态下来回抖动应很小、
+   且 `in - out == 1`；若长度乱跳说明差异不止末尾字段，本方案不适用；
+4. **环境变量必须和 `dog_task` 一致**（`RMW_IMPLEMENTATION=rmw_zenoh_cpp`、`ROS_DOMAIN_ID`
+   等，见 `dog_task` 的 `/proc/<pid>/environ`）——这是最常见的翻车点；
+5. **属于现场补丁**：`robot-launch`/alg 镜像升级会覆盖 remap 与 bridge，要写进发布流程；
+   厂商给出匹配版本后应撤掉。
+
+对比另外几条路（详见 §8 待办）：
+
+| 方案 | 成本 | 效果 | 结论 |
+| --- | --- | --- | --- |
+| 厂商给 `.1` 匹配版本（`dog_task` 用 0.9.8 重编） | 等厂商 | 根治 | **首选** |
+| 让 `.234` 停发/改发 `/navigation_state`（若 alg 有开关） | 10 分钟勘察 | 可能一劳永逸 | 值得先试（`.246` 断开时未验证） |
+| **本方案：裁剪桥 + remap** | ~1 小时 | 立刻能用 `kind=2` | 现场兜底 |
+| 平台侧自愈（识别 `boot_id` 变化/`sdk_node` 抖动后重试航段） | 半天 | 降低停机 | 建议一起做 |
+| 合并 `goals` 多点下发等「改报文内容」 | 几分钟 | 靠概率 | 只能当试验 |
+
+### 11.6 抓包工具的两次踩坑（都修好了）
+
+| 版本 | 问题 | 现象 | 修法 |
+| --- | --- | --- | --- |
+| v1 | 只存 `INTERESTING` 类型的 payload | 5003/5005/5007/5013 的明细丢了（后来查文档：它们只是取消/暂停/恢复/返起点的 ack，不含参数，损失可接受） | 现在所有非心跳报文都落 payload（`--max-payload` 截断保护） |
+| v2 | **BPF 过滤器跳转偏移少算 2 跳** + **TCP 头偏移没按 IHL 计算** | 过滤器把自己要的包全丢了 → **抓包空转**（文件一直没有新记录，日志只有启动那几行） | 重写 `_bpf_program`（先 `ldx 4*([14]&0xf)` 算 IP 头长度，再用 `ldh [x+14]` 间接寻址），并加 **`bpf_selftest`**：挂载前用 5 条合成报文（命中端口 / 源端口 / 其它端口 / UDP / ARP）验证放行与丢弃，自检不过就退回用户态过滤而不是静默全丢 |
+
+修好后实测：8 秒抓到 312 条（`.200` 客户端 + `.8` 手机两条连接），`5009` 里能看到
+`robot.nav_state.current_floor`（正是 `.1` 那版 `NavigationState.msg` 没有的字段，反向印证 §3 的版本差异）。
+
+挂载日志应当长这样（有 `bpf_selftest` 通过才挂）：
+
+```text
+已挂内核 BPF 过滤器（tcp 端口 [10010, 12000]）      ← 自检 5 条合成报文全部通过才会打印
+接收缓冲 SO_RCVBUF = 128.0 MB
+抓包中（端口 [10010, 12000]），Ctrl-C 结束…
+13:32:37.147 S→C type=1315  # 本体状态               ← 有心跳输出说明真的在抓
+```

@@ -71,14 +71,68 @@ SmartSdk connect
 
 ## 三、尚未对齐（需要下一步）
 
-1. **巡检任务模型（5000 kind=4）**
-   官方 App 用 `PatrolTaskWriteRequest` 创建整条巡检任务，字段至少包括
-   `task_name`、`task_type`、`map_id`、`path_id`、`points`、`dwell_sec`、
-   `patrolSpeedVx`、`end_task`、`minimum_battery`、`schedule_type`、`repeat`、
-   `execute_at`、`record`、`timestamp_ms`、`nav_begin_time`、`record_time`。
-   协议文档把 `kind=4 patrol` 标为“暂不对外开放”，AOT 字符串也无法还原完整
-   `params` 编码。**需要一次官方 App 的 WS 抓包**（手机连狗的热点，PC 做代理/
-   热点镜像）才能安全实现；在拿到真实报文前不建议盲发 kind=4。
+1. ~~**巡检任务模型（5000 kind=4）**~~ —— **已抓到真实报文（2026-11-14 13:36）**
+
+   官方 App（0.8 手机 `192.168.234.8`）下发的完整请求（`wsniff.py` 抓包原文）：
+
+   ```json
+   {
+     "kind": 4,
+     "name": "2026_11_14_13_35_50",
+     "schedule": 0,
+     "execute_at": "2026-11-14 13:36:29",
+     "priority": 0,
+     "record": true,
+     "params": {
+       "map_id": "2026_11_10_16_15_06",
+       "map_type": 0,
+       "end_task": 1,
+       "min_recharge_battery": 25.0,
+       "speed_limit": { "vx": 0.5, "vy": 0.0, "vz": 1.5 },
+       "path_id": "自定义路径1"
+     }
+   }
+   ```
+
+   → `5001 {"code":0,"msg":"ok","task_id":"68bd7394-0a3d-4f79-a4c1-047fe33fcd02"}`
+
+   **与 APK 里的 AOT 字符串对应关系（重要：线上字段名和内部模型名不一样）**
+
+   | 内部模型（APK 字符串） | 线上字段 | 说明 |
+   | --- | --- | --- |
+   | `task_name` | `name` | 官方用时间戳命名：`2026_11_14_13_35_50` |
+   | `task_type` | `kind = 4` | patrol |
+   | `map_id` | `params.map_id` | 本体**地图目录名**（不是业务地图编号） |
+   | `path_id` | `params.path_id` | 本体上 `nav_paths/<名字>`；**航点与动作都在路径文件里，请求不带坐标** |
+   | `dwell_sec` / `points` | —（不在请求里） | 停留/作业由路径点 `properties.tasks` 决定：`0`=等待（固定 2 s）、`1`=拍照 |
+   | `patrolSpeedVx` | `params.speed_limit.vx` | 实测 `0.5`（我们一直发 `1.2`） |
+   | `minimum_battery` | `params.min_recharge_battery` | 浮点，实测 `25.0` |
+   | `end_task` | `params.end_task` | **数字枚举**：`0`=none / `1`=return_to_start / `2`=return_to_charge（与记录里 `properties.end_task` 的字符串一一对应，已实测 0 和 1） |
+   | `schedule_type` | `schedule` + `execute_at` | `schedule=0`（立即）；**`execute_at` 是本地时间字符串 `"YYYY-MM-DD HH:MM:SS"`，不是毫秒时间戳** |
+   | `repeat` / `periodic` | 预约任务的字段 | 立即执行时不下发（记录里 `periodic=false`） |
+   | `record` | `record` | **`true`**（写 5010/5011 巡检记录；我们目前发 `false`） |
+   | `map_type` | `params.map_type` | **`0` = 2D 栅格 / `1` = 路网**（patrol 枚举，别和 kind=2 的 1/3 混，见下） |
+
+   **`map_type` 三套枚举（别混）**：建图 kind=1 是 `0=室外/2=室内`；导航 kind=2 是
+   `1=2D 栅格/2=3D(预留)/3=Route 路网`；**巡检 kind=4 是 `0=2D 栅格/1=路网`**
+   （SDK 的 `MapType::kGrid=0 / kRoadNetwork=1`）。
+
+   **服务端调用序列（ALG 日志实测）**：`1204` 取控制权 → `1302 cmd=1` 解除急停 →
+   `4012/4013` 取地图列表 → `4022/4023` 按地图取路径 → `5000 kind=4` → `5001` →
+   `5009` 心跳（`patrol.*`）→（可选）`5004/5006` 暂停/恢复 → `5012/5013` 返起点 →
+   结束帧 `1302 cmd=0`（App 退出时补一帧急停）。
+
+   **`5009` 的 patrol 进度序列（实测，1 个作业点）**：
+
+   ```text
+   patrol.preparing(running,0 命中) → patrol.capturing_origin → patrol.navigating
+   → patrol.point_arrived  last_event.data = {"index":0,"total":1,"kind":1,"name":"1"}
+   → patrol.photographing → patrol.point_completed → patrol.completed
+   → patrol.returning（end_task=1 时）→ 终态 success / progress=100
+   ```
+
+   `index` 从 **0** 开始（与导航的 `last_arrived_goal.index` 从 0 开始的约定一致），
+   `kind` 是该点的 `properties.type`（1=作业点）。
 
 2. **机器人侧路径管理（4022 / 4024 / 4026 / 4028）**
    官方 App 的 patrol 任务引用 `path_id`，路径由 4024 写入本体，并携带
