@@ -157,6 +157,9 @@ struct DeviceEventPayload {
 /// 设备运行时状态：数值优先取本体 1315 上报，否则按任务推演
 struct RobotState {
     battery: i64,
+    /// 双电池里**较低**的那一节（`power1/power2` 取 min）——平台展示用 max，
+    /// 但低电保护/巡检阈值必须按较低的那节算（ALG 就是按这个值判低电的）
+    battery_min: i64,
     temperature: f64,
     position: String,
     runtime_minutes: i64,
@@ -243,6 +246,7 @@ impl RobotState {
             charging: false,
             robot_mode: None,
             motion_status: None,
+            battery_min: 100,
             estop_software: None,
             sdk_node_available: None,
             fill_light_front: None,
@@ -324,7 +328,18 @@ impl RobotState {
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             let power = if present2 { p1.max(p2) } else { p1 };
+            let power_min = if present2 { p1.min(p2) } else { p1 };
             self.battery = power.round() as i64;
+            self.battery_min = power_min.round() as i64;
+            if present2 && (p1 - p2).abs() >= 5.0 {
+                // 平台上展示的是较高那节，本体 ALG 用的是可用电量（较低那节），差值大时
+                // 会出现「平台 52%、ALG 23%」这种误判，巡检查电量阈值时要用 battery_min
+                warn!(
+                    "两节电池差异较大：power1={p1:.0}% power2={p2:.0}%，平台展示取较高值 {}%，\
+                     按可用电量 {}% 判断低电保护",
+                    self.battery, self.battery_min
+                );
+            }
 
             // 充电判定：充电桩接入，或电池电源状态为 charging(1) / full(4)。
             // power_supply_status 用的是标准枚举：0=unknown 1=charging 2=discharging
@@ -2506,6 +2521,10 @@ async fn handle_server_message(
 
                     let runner = Arc::new(RouteRunner::new(client.clone()));
                     runner.set_mode(config.task_mode).await;
+                    // 巡检下发前用它和 min_recharge_battery 做低电守卫（双电池取较低那节）；
+                    // 先取出来再 await，避免把 state 的锁带过 await 点
+                    let battery_percent = state.lock().await.battery_min;
+                    runner.set_battery_percent(battery_percent).await;
                     if config.task_mode == DispatchMode::Patrol {
                         runner
                             .set_patrol_options(

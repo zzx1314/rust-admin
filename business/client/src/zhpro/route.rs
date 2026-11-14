@@ -628,6 +628,8 @@ pub struct RouteRunner {
     patrol_path_prefix: Mutex<String>,
     /// 巡检任务返充电量阈值
     min_recharge_battery: Mutex<f64>,
+    /// 本体可用电量（双电池取较低那节，%）：巡检下发前做低电守卫
+    battery_percent: Mutex<i64>,
 }
 
 impl RouteRunner {
@@ -645,12 +647,21 @@ impl RouteRunner {
             mode: Mutex::new(DispatchMode::default()),
             patrol_path_prefix: Mutex::new("平台".to_string()),
             min_recharge_battery: Mutex::new(25.0),
+            battery_percent: Mutex::new(100),
         }
     }
 
     /// 设置下发形态（巡检 `kind=4` / 导航 `kind=2`）
     pub async fn set_mode(&self, mode: DispatchMode) {
         *self.mode.lock().await = mode;
+    }
+
+    /// 本体可用电量（双电池取较低那节）。巡检下发前用它和 `min_recharge_battery` 比：
+    /// 低于阈值时本体 ALG 会在起步阶段中断巡检，报的却是
+    /// `origin pose unavailable for return-to-start`（因为起点位姿还没采），
+    /// 现场完全看不出是电量问题，所以这里提前拦掉。
+    pub async fn set_battery_percent(&self, percent: i64) {
+        *self.battery_percent.lock().await = percent;
     }
 
     /// 巡检相关参数：本体路径名前缀、返充电量阈值
@@ -935,7 +946,24 @@ impl RouteRunner {
         );
         let min_battery = *self.min_recharge_battery.lock().await;
 
-        // 0) 控制权 + 导航模式：4044/5000 都在 4000~5999 非白名单区间，没控制权网关不转发
+        // 0) 低电守卫：本体 ALG 的 `min_recharge_battery` 语义是「低于阈值就中断巡检回起点」，
+        //    如果**起步时**就已经不高于阈值，它会先中断、再因为还没采到起点位姿而报
+        //    `origin pose unavailable for return-to-start`——现场完全看不出是电量问题。
+        //    这里提前拦掉，给一句人能看懂的话。
+        let threshold = *self.min_recharge_battery.lock().await;
+        let battery = *self.battery_percent.lock().await;
+        if threshold > 0.0 && (battery as f64) <= threshold {
+            let message = format!(
+                "本体可用电量 {battery}% 不高于巡检阈值 {threshold:.0}%（min_recharge_battery）：\
+                 本体低电保护会在起步阶段中断巡检，并报成 “origin pose unavailable for \
+                 return-to-start”。请先充电到 {:.0}% 以上，或调低 --min-recharge-battery",
+                threshold + 10.0
+            );
+            warn!("巡检任务拒绝下发: {message}");
+            return Ok(self.outcome(false, message, total).await);
+        }
+
+        // 1) 控制权 + 导航模式：4044/5000 都在 4000~5999 非白名单区间，没控制权网关不转发
         if let Err(e) = super::teleop::enter_navigation_mode(&self.client).await {
             warn!("切导航模式失败（继续尝试下发，但本体可能拒任务）: {e}");
         }
@@ -1081,7 +1109,10 @@ impl RouteRunner {
                 }
             }
             if task.is_terminal() {
-                let result = terminal_result(task);
+                let threshold = *self.min_recharge_battery.lock().await;
+                let battery = *self.battery_percent.lock().await;
+                let result =
+                    terminal_result(task).map_err(|e| explain_patrol_error(&e, threshold, battery));
                 if result.is_ok() {
                     *self.nav_task_id.lock().await = None;
                 }
@@ -1386,6 +1417,31 @@ impl RouteRunner {
     }
 }
 
+/// 把巡检任务终态里的「本体原话」翻成能操作的提示。
+///
+/// 现场踩过的两条：
+/// - `origin pose unavailable for return-to-start`：**绝大多数是低电保护**在起步阶段中断巡检
+///   （`min_recharge_battery` ≥ 当前电量），因为起点位姿是任务第 2 步才采的，还没采就中断；
+///   其次才是定位没收敛/地图没载好。
+/// - `capture_image(/capture_image): service not ready`（14005）：上装拍照服务没起，
+///   拍照会失败但巡检本身还能继续。
+fn explain_patrol_error(raw: &str, threshold: f64, battery: i64) -> String {
+    if raw.contains("origin pose unavailable") {
+        return format!(
+            "本体拒绝返回起点（origin pose 缺失）：最常见原因是**低电保护**在起步阶段中断巡检——\
+             本体读到的电量 {battery}% 不高于巡检阈值 {threshold:.0}%（min_recharge_battery）；\
+             其次可能是定位未收敛或地图未载好。请先充电或调低 --min-recharge-battery。本体原话: {raw}"
+        );
+    }
+    if raw.contains("service not ready") && raw.contains("capture_image") {
+        return format!(
+            "上装拍照服务未就绪（payload /capture_image）：到点拍照会记为失败，但不影响导航与\
+             整体成功；需要拍照时先在本体启动上装/感知服务。本体原话: {raw}"
+        );
+    }
+    raw.to_string()
+}
+
 fn terminal_result(task: &TaskSnapshot) -> Result<(), String> {
     match task.lifecycle.as_str() {
         "success" => Ok(()),
@@ -1487,6 +1543,30 @@ mod tests {
             ),
             Locate::Reuse
         );
+    }
+
+    #[test]
+    fn patrol_error_explains_origin_pose_as_low_battery() {
+        let raw = "导航失败: patrol step failed: origin pose unavailable for return-to-start";
+        let text = explain_patrol_error(raw, 25.0, 23);
+        assert!(text.contains("低电保护"), "要说清是低电: {text}");
+        assert!(text.contains("23%") && text.contains("25%"), "要带上实测电量和阈值: {text}");
+        assert!(text.contains("min_recharge_battery"), "要给出可操作的配置项: {text}");
+        assert!(text.contains(raw), "还要保留本体原话方便对日志: {text}");
+    }
+
+    #[test]
+    fn patrol_error_explains_capture_image_service() {
+        let raw = "payload capture image failed: capture_image(/capture_image): service not ready";
+        let text = explain_patrol_error(raw, 25.0, 80);
+        assert!(text.contains("/capture_image"), "{text}");
+        assert!(text.contains("不影响导航"), "要说清「不影响整体」: {text}");
+    }
+
+    #[test]
+    fn patrol_error_passes_through_unknown_messages() {
+        let raw = "5001 响应失败: code=13897 resource conflict (capability busy)";
+        assert_eq!(explain_patrol_error(raw, 25.0, 80), raw);
     }
 
     #[test]

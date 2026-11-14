@@ -703,3 +703,42 @@ journalctl -u wsniff -f                        # 摘要（含「新连接 …」
 抓包中（端口 [10010, 12000]），Ctrl-C 结束…
 13:32:37.147 S→C type=1315  # 本体状态               ← 有心跳输出说明真的在抓
 ```
+
+---
+
+## 13. 巡检 `min_recharge_battery`：低电会报成「origin pose unavailable」（2026-11-14 14:17）
+
+**现象**（用新客户端的第一次真机巡检）：
+
+```text
+巡检任务失败: 导航失败: patrol step failed: origin pose unavailable for return-to-start
+（path=平台-TK-1112-11 map=2026_11_10_16_15_06）
+```
+
+任务 14:17:21.294 受理，**同一毫秒**就终态失败，看着像"参数不对"，实际是电量。
+ALG 日志（`.234` `robot-alg-manager.stdout`）写得很清楚：
+
+```text
+[task 7f75dce2… patrol] -> Running
+[patrol] low battery — interrupting patrol to return to patrol origin (battery=25.000000%, threshold=25.000000%)
+[patrol] task failed: [capability:14000] patrol step failed: origin pose unavailable for return-to-start
+```
+
+**因果链**：`min_recharge_battery = 25` 是「**巡检进行中**电量 ≤ 阈值就中断回起点」；
+起步时电量已经 25% → 立刻中断 → 但「起点位姿」是任务第 2 步 `capture_origin_pose` 才采的，
+还没采就中断 → 回起点拿不到位姿 → 报 `origin pose unavailable`。
+
+**电量口径的坑**：同一时刻平台显示 **52%**，ALG 读到 **23~26%**（在掉）。
+原因是客户端心跳里的 `battery` 取**两节电池里较高的一节**（展示用），而 ALG 按可用电量判断。
+双电池差异大时平台读数会严重高估。
+
+**客户端已改**（`business/client`）：
+
+1. `RobotState` 增加 `battery_min`（`power1/power2` 取 min），两节差异 ≥5% 打 WARN；
+2. 巡检下发前守卫：`battery_min ≤ min_recharge_battery` → **直接拒发**并给可操作文案
+   （「请先充电到 N% 以上，或调低 --min-recharge-battery」）；
+3. 终态错误翻译：`origin pose unavailable` → 自动补「最常见原因是低电保护（电量 X% ≤ 阈值 Y%），
+   其次才是定位未收敛/地图未载好」；`capture_image ... service not ready` → 补「拍照失败但不影响整体」。
+
+**现场处置**：要么充电到阈值以上（推荐 ≥ 阈值 + 10%），要么临时
+`--min-recharge-battery 10`（短航线够跑）。别在 20% 出头跑巡检。

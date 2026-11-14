@@ -753,6 +753,28 @@ M1 文件根 `/ota/alg_data`；文档 §2.2.4.1「4013 地图列表」明确单�
 可调项：`--task-mode`（默认 `patrol`）、`--patrol-path-prefix`（默认 `平台`，
 本体路径名 = `<前缀>-<task_code>`）、`--min-recharge-battery`（默认 25）。
 
+**低电守卫（2026-11-14 现场踩过）**：`min_recharge_battery` 在本体侧的语义是
+「**巡检进行中**电量不高于阈值 → 中断巡检、回巡检起点」，**不是**「低于阈值不许开始」。
+所以如果**起步时**就已经不高于阈值，本体会先中断、再因为起点位姿还没采（`capture_origin_pose`
+是任务第 2 步）而报一个完全看不出原因的错：
+
+```text
+导航失败: patrol step failed: origin pose unavailable for return-to-start
+```
+
+客户端现在做了两件事（都不需要现场改本体）：
+
+1. **下发前守卫**：`本体可用电量（双电池取较低那节） ≤ min_recharge_battery` 时**直接拒发**，并给出：
+   `本体可用电量 23% 不高于巡检阈值 25%（min_recharge_battery）：本体低电保护会在起步阶段中断巡检…请先充电到 35% 以上，或调低 --min-recharge-battery`；
+2. **终态错误翻译**：万一还是收到本体那句 `origin pose unavailable`，消息里会补上
+   「最常见原因是低电保护（电量 X% ≤ 阈值 Y%），其次才是定位未收敛/地图未载好」；
+   `capture_image(/capture_image): service not ready`（14005）也会翻成
+   「到点拍照会失败，但不影响导航与整体成功」。
+
+> 电量口径：平台/心跳上报的 `battery` 取**两节里较高的一节**（展示用）；低电判断用的是
+> `battery_min`（较低那节）。两节差异 ≥5% 时会打 WARN——现场出现过「平台显示 52%、本体 ALG 读 23%」
+> 的误判，就是因为平台取的是较高那节。
+
 ### B. `navigation`（`--task-mode navigation`）：`5000 kind=2`（旧实现，保留回退）
 
 ```text
