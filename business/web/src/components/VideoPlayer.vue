@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { tokenStorage } from "@/api/http";
+import { wsOrigin } from "@/utils/runtime";
 import AppIcon from "./AppIcon.vue";
 
 /**
@@ -59,8 +60,8 @@ const kind = computed(() => (props.type || "none").toLowerCase());
 const relayUrl = computed(() => {
   if (!props.deviceId) return "";
   const token = tokenStorage.get() || "";
-  const scheme = location.protocol === "https:" ? "wss" : "ws";
-  return `${scheme}://${location.host}/api/devices/${props.deviceId}/video/ws?token=${encodeURIComponent(token)}`;
+  // 页面可能由现场入口托管（内网静态服务），中继仍在云端：用运行时基址
+  return `${wsOrigin()}/api/devices/${props.deviceId}/video/ws?token=${encodeURIComponent(token)}`;
 });
 
 const isRelay = computed(() => kind.value === "rtsp" && !!props.deviceId);

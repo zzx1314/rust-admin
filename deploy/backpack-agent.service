@@ -1,0 +1,39 @@
+[Unit]
+# 数据采集背包板端 Agent（FastAPI :8000）
+#
+# 安装位置（现场板子 192.168.41.246 / 背包内网 192.168.234.200）：
+#   /root/261113/backpack_dashboard/backend/agent.py
+#
+# 安装：
+#   sudo cp deploy/backpack-agent.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now backpack-agent
+#
+# 为什么需要它：Demo 原来靠人 ssh 上去 `bash start.sh`，终端一断 Agent 就没了，
+# 四路推流 / AI / 遥测全停，平台侧只看到「背包不可达」。做成服务后开机自启、
+# 崩溃自动拉起，且摄像头与 mediamtx 就绪后才启动。
+Description=Backpack data-collection agent (FastAPI :8000, 6 streams + RKNN AI)
+After=network-online.target camera-init.service snap.mediamtx.mediamtx.service
+Wants=network-online.target camera-init.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/261113/backpack_dashboard/backend
+
+# 摄像头软链由 camera-init.service 建立；mediamtx 由 snap 管理（本服务只推流过去）
+Environment=AGENT_PORT=8000
+# 页面在业务平台域名下，跨源调用本 Agent 需要 CORS 白名单（板端无鉴权，别写 *）
+Environment=AGENT_CORS_ORIGINS=http://39.107.55.13:3100,http://127.0.0.1:5273,http://localhost:5273
+# 自带 RKNN runtime（与本目录下 start.sh 的做法一致）
+Environment=LD_LIBRARY_PATH=/root/261113/backpack_dashboard/rknn
+Environment=PYTHONUNBUFFERED=1
+# 板端 OSD 纯 Python 渲染，实测写入跟不上 8fps 时会反压主视频（表现为 AI 那路慢几秒）
+Environment=OSD_FIFO_FPS=4
+
+ExecStartPre=/bin/sh -c 'systemctl restart camera-init.service || true'
+ExecStart=/usr/bin/python3 agent.py
+Restart=always
+RestartSec=5
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

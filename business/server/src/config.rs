@@ -62,6 +62,24 @@ pub struct Config {
     /// 「执行中 / 进度不变」，`updated_at` 一直是新鲜的，看门狗永远不触发。
     /// 取 10 分钟——正常航段/作业很少连续这么久没有一点进度推进。
     pub task_stuck_secs: i64,
+    /// 数据采集背包板端 Agent 地址（`http://<板IP>:8000`）。
+    ///
+    /// 为空表示本部署未接入背包：`/api/backpack/*` 统一返回 503 并说明配置方法，
+    /// 前端页面给出「未接入」占位，而不是转圈等超时。
+    pub backpack_base_url: Option<String>,
+    /// 浏览器直连 mediamtx 的 WebRTC 信令地址（`http://<板IP>:8889`）。
+    ///
+    /// WHEP 协商与媒体**都由浏览器直连板端**，不经业务平台中继：
+    /// 浏览器本来就要在背包所在局域网才能看画面，多一跳只会增加延时。
+    /// 未配置时由 `backpack_base_url` / `backpack_browser_url` 推导（同主机、端口 8889）。
+    pub backpack_webrtc_url: Option<String>,
+    /// **浏览器**可访问的 Agent 地址（`http://<板IP>:8000`），用于「直连模式」。
+    ///
+    /// 平台在公网、背包在现场内网时（本项目的正式环境），业务服务连不上 Agent，
+    /// 但操作员的浏览器与背包同网段。此时由后端只下发这个地址，页面自己去调
+    /// REST/SSE（Agent 已开 CORS），视频仍然是浏览器 ⇄ mediamtx 直连。
+    /// 配置了本项即进入直连模式，`backpack_base_url` 不再参与。
+    pub backpack_browser_url: Option<String>,
 }
 
 /// 配置文件读取 / 解析失败。
@@ -98,6 +116,19 @@ struct ServerFile {
     task_timeout_secs: Option<i64>,
     task_stuck_secs: Option<i64>,
     zentai: ZentaiFile,
+    backpack: BackpackFile,
+}
+
+/// 数据采集背包（板端 Agent）接入配置。
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct BackpackFile {
+    /// 平台 → 背包 Agent（REST/SSE 代理目标）
+    base_url: Option<String>,
+    /// 浏览器 → mediamtx（WHEP 信令 + 媒体）
+    webrtc_url: Option<String>,
+    /// 浏览器 → 板端 Agent（直连模式；正式环境用这个）
+    browser_url: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -225,6 +256,37 @@ impl Config {
             service_token: env_text(&env, "ROBODOG_SERVICE_TOKEN")
                 .or_else(|| file.zentai.service_token.and_then(clean)),
             zentai_ws_url: url("ROBODOG_ZENTAI_WS_URL", file.zentai.ws_url),
+            backpack_base_url: url("ROBODOG_BACKPACK_URL", file.backpack.base_url),
+            // 不在这里兜底推导端口：`url()` 会去掉结尾斜杠，推导需要原始 host，
+            // 统一放在 `backpack.rs::webrtc_base` 里做，配置项保持「原样或空」。
+            backpack_webrtc_url: env_text(&env, "ROBODOG_BACKPACK_WEBRTC_URL")
+                .or_else(|| file.backpack.webrtc_url.and_then(clean))
+                .map(|value| value.trim_end_matches('/').to_string()),
+            backpack_browser_url: url("ROBODOG_BACKPACK_BROWSER_URL", file.backpack.browser_url),
+        }
+    }
+
+    /// 浏览器侧 WHEP 基址：显式配置优先，否则由浏览器可达的 Agent 地址推导（同主机 :8889）。
+    ///
+    /// 直连模式看 `browser_url`（浏览器真正访问的地址），代理模式看 `base_url`。
+    pub fn backpack_webrtc_base(&self) -> Option<String> {
+        self.backpack_webrtc_url.clone().or_else(|| {
+            self.backpack_browser_url
+                .as_deref()
+                .and_then(derive_webrtc_base)
+                .or_else(|| self.backpack_base_url.as_deref().and_then(derive_webrtc_base))
+        })
+    }
+
+    /// 背包接法：`direct`（浏览器直连 Agent）优先，其次 `proxy`（业务服务代理），
+    /// 都没配就是 `None`（页面展示配置指引）。
+    pub fn backpack_mode(&self) -> Option<&'static str> {
+        if self.backpack_browser_url.is_some() {
+            Some("direct")
+        } else if self.backpack_base_url.is_some() {
+            Some("proxy")
+        } else {
+            None
         }
     }
 
@@ -280,6 +342,23 @@ impl Config {
     pub fn control_channel_ready(&self) -> bool {
         self.zentai_ws_url.is_some() && self.service_token.is_some()
     }
+}
+
+/// 由 Agent 地址推导浏览器侧 WHEP 基址：同主机、端口换成 mediamtx 的 8889。
+///
+/// Agent 在 `:8000`、mediamtx 在 `:8889` 是背包 Demo 的固定布局，现场只需要
+/// 告诉平台「板子在哪」，不必再填第二个地址；端口不同时用
+/// `ROBODOG_BACKPACK_WEBRTC_URL` 显式覆盖。
+fn derive_webrtc_base(base: &str) -> Option<String> {
+    let rest = base.split_once("://").map(|(_, rest)| rest).unwrap_or(base);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    // 去掉 `user:pass@`
+    let host = host.rsplit_once('@').map(|(_, host)| host).unwrap_or(host);
+    let host = match host.rsplit_once(':') {
+        Some((name, port)) if port.chars().all(|c| c.is_ascii_digit()) => name,
+        _ => host,
+    };
+    (!host.is_empty()).then(|| format!("http://{host}:8889"))
 }
 
 /// 定位配置文件：显式指定的必须存在，默认路径缺失视为「不读文件」。
@@ -514,6 +593,58 @@ mod tests {
         let error = config_file_path(Some("/nonexistent/server.toml".to_string()))
             .expect_err("显式指定的文件不存在必须报错");
         assert!(matches!(error, ConfigError::Missing { .. }));
+    }
+
+    #[test]
+    fn webrtc_base_is_derived_from_agent_host() {
+        // 现场固定布局：Agent :8000、mediamtx :8889 同主机
+        assert_eq!(
+            derive_webrtc_base("http://192.168.234.200:8000").as_deref(),
+            Some("http://192.168.234.200:8889")
+        );
+        assert_eq!(
+            derive_webrtc_base("http://192.168.234.200:8000/").as_deref(),
+            Some("http://192.168.234.200:8889")
+        );
+        // 没有端口、带账号、带路径也要能取到主机
+        assert_eq!(
+            derive_webrtc_base("https://user:pass@board.local").as_deref(),
+            Some("http://board.local:8889")
+        );
+        assert_eq!(
+            derive_webrtc_base("http://10.0.0.8:8000/base/path").as_deref(),
+            Some("http://10.0.0.8:8889")
+        );
+    }
+
+    #[test]
+    fn webrtc_base_prefers_browser_url_and_mode_is_direct() {
+        let mut config = Config::from_env();
+        config.backpack_base_url = None;
+        config.backpack_webrtc_url = None;
+        config.backpack_browser_url = Some("http://192.168.41.246:8000".to_string());
+        assert_eq!(config.backpack_mode(), Some("direct"));
+        assert_eq!(
+            config.backpack_webrtc_base().as_deref(),
+            Some("http://192.168.41.246:8889")
+        );
+
+        // 显式配置的 webrtc 地址优先于推导
+        config.backpack_webrtc_url = Some("http://10.0.0.9:18889".to_string());
+        assert_eq!(
+            config.backpack_webrtc_base().as_deref(),
+            Some("http://10.0.0.9:18889")
+        );
+
+        // 只有 base_url（平台能反代到 Agent）时是代理模式
+        config.backpack_browser_url = None;
+        config.backpack_webrtc_url = None;
+        config.backpack_base_url = Some("http://192.168.41.246:8000".to_string());
+        assert_eq!(config.backpack_mode(), Some("proxy"));
+
+        // 全空 = 未接入
+        config.backpack_base_url = None;
+        assert_eq!(config.backpack_mode(), None);
     }
 
     #[test]

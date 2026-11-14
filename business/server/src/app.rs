@@ -1,4 +1,5 @@
 use crate::auth::{login_handler, me_handler, require_auth};
+use crate::backpack;
 use crate::config::Config;
 use crate::error::ApiResponse;
 use crate::gateway;
@@ -163,6 +164,12 @@ pub fn build_router(state: AppState) -> Router {
             get(settings::list_settings).put(settings::update_settings),
         )
         .route("/dashboard/summary", get(dashboard::summary))
+        // 数据采集背包（板端 Agent）同源代理：REST 聚合 + SSE 透传 + AI 启停
+        .route("/backpack/status", get(backpack::status))
+        .route("/backpack/events", get(backpack::events))
+        .route("/backpack/detect/start", post(backpack::detect_start))
+        .route("/backpack/detect/stop", post(backpack::detect_stop))
+        .route("/backpack/detect/config", post(backpack::detect_config))
         .layer(from_fn_with_state(state.clone(), require_auth));
 
     let public = Router::new()

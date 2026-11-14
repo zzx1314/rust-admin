@@ -1,0 +1,32 @@
+[Unit]
+# 现场入口：把控制台静态产物托管在内网机器上（默认装在背包板子 .246）
+#
+# 为什么不在云端直接看视频：Chrome 的 Local Network Access 禁止公网页面访问内网
+# 地址（corsError=InsecureLocalNetwork），云端页面无法直连背包的 :8000 / :8889。
+# 页面 itself 放到内网就都通了，后端 API 仍在云端。
+#
+# 安装：
+#   sudo mkdir -p /opt/site-console
+#   sudo cp deploy/site-console/serve.py /opt/site-console/
+#   sudo cp -r business/web/dist/. /opt/site-console/web/
+#   sudo cp deploy/site-console/site-console.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now site-console
+#
+# 访问：http://<内网机IP>:8080  （与云端同一个后台，多了实时视频与 AI）
+Description=Site console front door (serves RoboDog console on the site LAN)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/site-console
+Environment=CONSOLE_DIR=/opt/site-console/web
+# 业务平台（云端）；页面据此拼 REST/SSE 与设备视频 WS 地址
+Environment=CONSOLE_API_BASE=http://39.107.55.13:3100/api
+Environment=CONSOLE_PORT=8080
+ExecStart=/usr/bin/python3 /opt/site-console/serve.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

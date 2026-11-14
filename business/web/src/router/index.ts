@@ -49,6 +49,12 @@ const router = createRouter({
           meta: { title: "计划管理" }
         },
         {
+          path: "monitor",
+          name: "monitor",
+          component: () => import("@/views/monitor/index.vue"),
+          meta: { title: "实时视频" }
+        },
+        {
           path: "alerts",
           name: "alerts",
           component: () => import("@/views/alerts/index.vue"),

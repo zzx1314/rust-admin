@@ -50,6 +50,7 @@ const navGroups = [
   {
     title: "监控运维",
     items: [
+      { path: "/monitor", label: "实时视频", icon: "video" },
       { path: "/alerts", label: "告警中心", icon: "bell" },
       { path: "/settings", label: "系统设置", icon: "settings" }
     ]

@@ -894,6 +894,35 @@ curl -X POST /api/devices/12/locate -H 'Content-Type: application/json' \
 
 ## 实时视频与手动遥控
 
+### 数据采集背包：单路视频 + AI 识别（`/monitor`）
+
+背包（`~/IdeaProjects/backpack_dashboard`）自带 4 路 USB 相机 + 机器狗前置 RTSP + 红外，
+并在板端用 RKNN 做单路 AI 识别。控制台「实时视频」页只展示**一路**，可随时切换六路源；
+AI 可对除红外外的五路开启，画框方式二选一：
+
+| 画框方式 | 链路 | 特点 |
+| --- | --- | --- |
+| 浏览器叠加 | 干净流 + SSE 识别坐标 → 前端 SVG | 延时最低，切源即生效 |
+| 背包烧录 | 板端把框烧进视频，推 `preview` 流 | 抓拍 / 录屏 / 转发自带中文标签 |
+
+```text
+浏览器 ──/api/backpack/*（REST+SSE）──▶ 业务平台（backpack.rs 代理）──▶ 背包 Agent :8000
+浏览器 ──WHEP（信令 + 媒体）──────────────────────────────────────▶ 板端 mediamtx :8889
+```
+
+- **必须从现场入口打开**：<http://192.168.41.246:8080>（内网托管同一份控制台）。
+  云端 `http://39.107.55.13:3100` 打不开视频/AI —— Chrome 的 Local Network Access
+  禁止公网页面访问内网地址（`corsError=InsecureLocalNetwork`），实测确认；公网/跨网段
+  需要按文档 P1 做平台中继。
+- 现场入口的实现是 `deploy/site-console/`（标准库静态服务 + `/runtime-config.js`），
+  部署与校验步骤见 [`deploy/README.md`](../deploy/README.md)「数据采集背包」。
+- 配置：`ROBODOG_BACKPACK_BROWSER_URL`（浏览器可达的 Agent 地址，直连模式；正式环境用它）
+  或 `ROBODOG_BACKPACK_URL`（平台能代理到 Agent 时用代理模式）；`ROBODOG_BACKPACK_WEBRTC_URL`
+  默认由 Agent 地址推导为同主机 `:8889`。未配置时页面给出配置指引。
+- AI 启停 / 换源 / 改阈值都转发到板端 Agent，NPU 单路独占（红外不参与）。
+- 分析与后续路线（遥测、SOS 告警、中继、录像）见
+  [`docs/backpack-video-integration.md`](docs/backpack-video-integration.md)。
+
 ### 视频：协议里没有，只能外挂
 
 协议原文已归档在 `business/docs/zhihang-pro-api-v1.0.3.pdf`（84 页），

@@ -62,3 +62,24 @@ base_url = "http://192.168.41.10:3000"
 # 只配服务令牌时这两项可以完全删掉。
 # username = "sysadmin"
 # password = "change-me"
+
+# 数据采集背包（板端 Agent）接入
+#
+# 板端 Agent 是 FastAPI（无 CORS），页面只跟业务平台同源的 /api/backpack/* 打交道，
+# 由服务端转发；视频仍是**浏览器直连板端 mediamtx**（低延时），不经平台中继。
+# 详见 docs/backpack-video-integration.md
+[backpack]
+# 平台 → 背包 Agent，例如 http://192.168.234.200:8000
+# 环境变量：ROBODOG_BACKPACK_URL
+# base_url = "http://192.168.234.200:8000"
+
+# 浏览器 → mediamtx 的 WHEP 基址，例如 http://192.168.234.200:8889
+# 不填时由 base_url / browser_url 推导（同主机、端口 8889），端口不是 8889 才需要显式配置。
+# 环境变量：ROBODOG_BACKPACK_WEBRTC_URL
+# webrtc_url = "http://192.168.234.200:8889"
+
+# 浏览器 → 板端 Agent 的地址（**直连模式**）：平台在公网、背包在现场内网时用这个。
+# 配了就优先于 base_url：业务服务不再代理，只把该地址下发给页面，
+# 由浏览器直连 Agent（板端需开 CORS：AGENT_CORS_ORIGINS）。
+# 环境变量：ROBODOG_BACKPACK_BROWSER_URL
+# browser_url = "http://192.168.41.246:8000"

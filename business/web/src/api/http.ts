@@ -1,5 +1,6 @@
 import axios from "axios";
 import { ElMessage } from "element-plus";
+import { apiBaseUrl } from "@/utils/runtime";
 
 const TOKEN_KEY = "robodog_token";
 
@@ -13,7 +14,8 @@ export const tokenStorage = {
 };
 
 const service = axios.create({
-  baseURL: "/api",
+  // 默认同源 /api；「现场入口」模式下由 /runtime-config.js 覆盖成云端地址
+  baseURL: apiBaseUrl(),
   timeout: 20000
 });
 
@@ -66,8 +68,10 @@ export function get<T>(url: string, params?: object) {
   return service.get<unknown, T>(url, { params });
 }
 
-export function post<T>(url: string, data?: object) {
-  return service.post<unknown, T>(url, data);
+export function post<T>(url: string, data?: object, timeoutMs?: number) {
+  // `timeoutMs` 只给少数慢接口用（如背包 AI 启动：板端加载模型 + 画框自检，
+  // 默认 20s 会被 axios 提前掐断，页面显示成「请求失败」）
+  return service.post<unknown, T>(url, data, timeoutMs ? { timeout: timeoutMs } : undefined);
 }
 
 export function put<T>(url: string, data?: object) {

@@ -24,3 +24,22 @@ task_timeout_secs = 120
 # 端口必须与中台 [server] port 一致（3000 被本机 frps 占用，中台用 3005）
 ws_url = "ws://127.0.0.1:3005"
 base_url = "http://127.0.0.1:3005"
+
+# ---- 数据采集背包（板端 Agent，控制台「实时视频」页）----
+#
+# 正式环境是「平台在公网、背包在现场内网」：业务服务连不上板端，但操作员浏览器
+# 与背包同网段。所以这里配 **浏览器可达的地址**（直连模式），由后端下发给页面，
+# REST/SSE 由浏览器直接调板端 Agent（板端已开 CORS），视频仍是浏览器 ⇄ mediamtx。
+#
+# 现场板子（.246）两个 IP：wifi 192.168.41.246、背包内网 eth0 192.168.234.200。
+# 取操作员所在网段能访问的那个：
+#   ROBODOG_BACKPACK_BROWSER_URL=http://192.168.41.246:8000
+# webrtc 基址默认按同主机 :8889 推导，端口不同才需要
+#   ROBODOG_BACKPACK_WEBRTC_URL=http://192.168.41.246:8889
+#
+# 若哪天把平台也部署到现场内网（业务服务能直接访问板端），改用代理模式即可：
+#   [backpack]
+#   base_url = "http://192.168.41.246:8000"
+# 详细链路与取舍见 business/docs/backpack-video-integration.md
+[backpack]
+# browser_url = "http://192.168.41.246:8000"

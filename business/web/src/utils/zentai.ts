@@ -8,14 +8,25 @@
  * 「中台地图编号 + 地图名称 + 设备编号」，别指望从业务编号反推。
  *
  * 中台控制台地址：外网部署与业务平台同机（中台 :3005 / 业务平台 :3100），
- * 默认按当前 host 推 :3005；本地开发中台在 :3000，用 VITE_ZENTAI_CONSOLE_URL 覆盖。
+ * 默认按**业务 API 的 host** 推 :3005（「现场入口」模式下页面在内网、后端在云端，
+ * 不能用页面自身的 host）；本地开发中台在 :3000，用 VITE_ZENTAI_CONSOLE_URL 覆盖。
  */
+import { apiBaseUrl } from "@/utils/runtime";
+
 const CONSOLE_BASE = (() => {
   const configured = (
     import.meta.env.VITE_ZENTAI_CONSOLE_URL as string | undefined
   )?.trim();
   if (configured) return configured.replace(/\/+$/, "");
   if (typeof window === "undefined") return "";
+  const apiBase = apiBaseUrl();
+  if (/^https?:\/\//.test(apiBase)) {
+    try {
+      return `${new URL(apiBase).origin.replace(/:\d+$/, "")}:3005`;
+    } catch {
+      /* 回落到页面 host */
+    }
+  }
   return `${window.location.protocol}//${window.location.hostname}:3005`;
 })();
 

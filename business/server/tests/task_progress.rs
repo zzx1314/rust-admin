@@ -61,6 +61,9 @@ async fn test_state() -> (AppState, TempDb) {
         device_timeout_secs: 90,
         task_timeout_secs: 120,
         task_stuck_secs: 600,
+        backpack_base_url: None,
+        backpack_webrtc_url: None,
+        backpack_browser_url: None,
     });
 
     let pool = db::connect(&config).await.expect("连接测试库失败");

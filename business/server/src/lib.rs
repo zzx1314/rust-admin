@@ -10,6 +10,7 @@
 
 pub mod app;
 pub mod auth;
+pub mod backpack;
 pub mod config;
 pub mod control_plane;
 pub mod coords;

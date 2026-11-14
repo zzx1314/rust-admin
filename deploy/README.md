@@ -193,6 +193,100 @@ ssh root@192.168.41.246 'cd /opt/robodog/client &&
 
 ---
 
+## 二·补充、数据采集背包：实时视频 + AI（2026-11-14 上线）
+
+背包（`.246`，`/root/261113/backpack_dashboard`）自带 4 路 USB + 机器狗前置 RTSP + 红外，
+板端 RKNN 单路识别。控制台新增「监控运维 → 实时视频」，但要分**三个组件**看：
+
+| 组件 | 跑在哪 | 作用 |
+| --- | --- | --- |
+| `backpack-agent.service` | 板子 `.246` | 板端 Agent（`:8000`）：六路推流、AI 识别、板端画框、遥测/控制 |
+| `site-console.service` | 板子 `.246`（可换任意内网机） | 内网托管同一份控制台 `dist`（`:8080`），见下方「为什么需要现场入口」 |
+| `rust-admin-robodog` | 云端 `39.107.55.13:3100` | 业务平台；背包接入方式由 `ROBODOG_BACKPACK_BROWSER_URL` 决定（直连模式） |
+
+### 为什么需要「现场入口」
+
+Chrome 的 **Local Network Access** 禁止**公网页面**访问**内网地址**（实测
+`corsError=InsecureLocalNetwork`）：
+
+```text
+页面 http://39.107.55.13:3100  ──fetch──▶  http://192.168.41.246:8000   ✗ 被浏览器拦掉
+页面 http://192.168.41.246:8080 ──fetch──▶  http://192.168.41.246:8000   ✓ 同为内网
+```
+
+视频更是浏览器直连板端 mediamtx（`:8889` WHEP，媒体走 UDP）。所以：
+
+- **常规后台**：<http://39.107.55.13:3100> —— 设备/任务/地图/告警，一切照旧；
+- **现场入口**：<http://192.168.41.246:8080> —— **同一套后台**，额外能看到实时视频与 AI。
+
+两个入口共用同一份 `business/web/dist`；现场入口通过 `/runtime-config.js`
+（运行时注入，不用重新构建）把 API 指回云端。
+
+### 部署步骤（幂等，可重复执行）
+
+```bash
+# 1) 云端：前端 + 两个二进制（含背包代理与直连模式）
+./deploy/external-hz/push.sh
+
+# 2) 云端：告诉业务服务「浏览器该往哪调背包 Agent」（写一次即可，install 会保留）
+ssh root@39.107.55.13 'printf "%s\n"   ROBODOG_BACKPACK_BROWSER_URL=http://192.168.41.246:8000 >> /opt/hz/rust-admin/robodog.env &&
+  systemctl restart rust-admin-robodog'
+
+# 3) 板端：Agent 做成服务（开机自启 + 崩溃重启），并修掉 CORS 白名单
+scp /root/261113/backpack_dashboard/backend/agent.py root@192.168.41.246:/root/261113/backpack_dashboard/backend/
+scp deploy/backpack-agent.service root@192.168.41.246:/etc/systemd/system/
+ssh root@192.168.41.246 'systemctl daemon-reload && systemctl enable --now backpack-agent'
+
+# 4) 板端：现场入口静态服务
+ssh root@192.168.41.246 'mkdir -p /opt/site-console/web'
+scp deploy/site-console/serve.py root@192.168.41.246:/opt/site-console/serve.py
+scp -r business/web/dist/. root@192.168.41.246:/opt/site-console/web/
+scp deploy/site-console/site-console.service root@192.168.41.246:/etc/systemd/system/
+ssh root@192.168.41.246 'systemctl daemon-reload && systemctl enable --now site-console'
+```
+
+### 校验
+
+```bash
+# 板端：六路都在推（都要有分辨率输出）
+ssh root@192.168.41.246 'for p in cam0 cam1 cam2 cam3 dogcam dog-ipcam; do   printf "%s: " $p; ffprobe -v error -rtsp_transport tcp -select_streams v:0   -show_entries stream=width,height -of csv=p=0 rtsp://127.0.0.1:8554/$p; done'
+
+# 板端：CORS 放行现场入口来源
+ssh root@192.168.41.246 'curl -s -o /dev/null -D - http://127.0.0.1:8000/api/cameras   -H "Origin: http://192.168.41.246:8080" | grep -i access-control-allow-origin'
+
+# 云端：直连模式下发给页面的两个地址
+TOKEN=$(curl -s -X POST http://39.107.55.13:3100/api/auth/login -H 'Content-Type: application/json'   -d '{"username":"admin","password":"admin123"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["token"])')
+curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/status   | python3 -c 'import sys,json;d=json.load(sys.stdin)["data"];print(d["mode"], d.get("direct"))'
+# 期望：direct {'apiBase': 'http://192.168.41.246:8000', 'webrtcBase': 'http://192.168.41.246:8889'}'
+
+# 现场入口
+curl -s http://192.168.41.246:8080/healthz   # ok
+curl -s http://192.168.41.246:8080/runtime-config.js
+```
+
+浏览器验收（必须在 **192.168.41.x/22** 网段的机器上）：
+
+1. 打开 <http://192.168.41.246:8080/monitor>，默认「机器狗前置」出图；
+2. 依次点六路源都能出图（红外是 256×192、无 AI）；
+3. 点「AI 识别」开关 → 状态变「识别中」；
+4. 画框方式切「背包烧录」→ 底部说明变「preview 流自带中文标签」，画面不中断；
+5. 停 AI → 画面回到干净流、框清空。
+
+### 运维注意
+
+- **Agent 没有鉴权**：`AGENT_CORS_ORIGINS` 只放行云端控制台，内网来源用
+  `AGENT_CORS_ORIGIN_REGEX` 放行（现场入口可能架在任意内网 IP/端口）。不要把 `:8000`
+  映射到公网。
+- **板子 IP 是 DHCP**：`ROBODOG_BACKPACK_BROWSER_URL` 写的是 `192.168.41.246`，
+  换 IP 后要改这一行并 `systemctl restart rust-admin-robodog`（建议在路由器上做静态租约）。
+- **OSD_FIFO_FPS=4**：板端纯 Python 渲染实测 ~200ms/帧、写入 3.7fps，按 8fps 会反压主视频
+  （表现为 AI 那路慢几秒）。已在 unit 里降为 4；想更快只能减少类别数或换掉 Python 画框。
+- 板端改代码后要 `systemctl restart backpack-agent`（别再用手工 `bash start.sh`，
+  终端一断四路推流就没了）。
+- AI 只在开启时占 NPU；关掉后 `preview` 流随之消失，页面自动回干净流。
+
+---
+
 ## 三、`.246` 的出网路由（踩过）
 
 这台机器有两个网卡，两条默认路由，**机器人那条会赢**：
