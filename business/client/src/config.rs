@@ -82,8 +82,6 @@ pub const ENV_ROBOT_FILE_PORT: &str = "ROBODOG_ROBOT_FILE_PORT";
 pub const ENV_MAP_ROOT: &str = "ROBODOG_MAP_ROOT";
 /// 5000 的 `map_type` / `goal_type`：`auto`（默认）/ `on`（强制路网 3）/ `off`（强制 2D 栅格 1）
 pub const ENV_ROAD_NETWORK: &str = "ROBODOG_ROAD_NETWORK";
-/// 任务下发形态：`patrol`（默认，`5000 kind=4`）/ `navigation`（`5000 kind=2`）
-pub const ENV_TASK_MODE: &str = "ROBODOG_TASK_MODE";
 /// 巡检路径名前缀（写进本体 `nav_paths/<前缀>-<task_code>`）
 pub const ENV_PATROL_PATH_PREFIX: &str = "ROBODOG_PATROL_PATH_PREFIX";
 /// 巡检任务的返充电量阈值（`min_recharge_battery`）
@@ -181,41 +179,6 @@ impl RoadNetworkMode {
     }
 }
 
-/// 任务下发形态：巡检（`5000 kind=4`，与官方 App 一致）或导航（`5000 kind=2`，旧路径）。
-///
-/// 2026-11-14 现场实测：官方 App 只发 `kind=4` + `path_id`，航点/动作来自本体
-/// `nav_paths/<path_id>` 文件；`kind=2` 会踩 `/navigation_state` 的版本不一致崩溃。
-/// 所以默认改成 patrol，`navigation` 只作为回退开关保留。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DispatchMode {
-    /// 巡检任务：`5000 kind=4`（默认）
-    #[default]
-    Patrol,
-    /// 导航任务：`5000 kind=2`（旧实现，仅在需要逐点 goals 时使用）
-    Navigation,
-}
-
-impl DispatchMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Patrol => "patrol",
-            Self::Navigation => "navigation",
-        }
-    }
-}
-
-impl std::str::FromStr for DispatchMode {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "patrol" | "inspection" | "巡检" => Ok(Self::Patrol),
-            "navigation" | "nav" | "导航" => Ok(Self::Navigation),
-            other => Err(format!("只支持 patrol / navigation，收到 {other:?}")),
-        }
-    }
-}
-
 impl std::str::FromStr for RoadNetworkMode {
     type Err = String;
 
@@ -283,8 +246,6 @@ pub struct RobotSection {
     pub model: Option<String>,
     /// 5000 的 `map_type`/`goal_type`：`auto`（默认）/ `on`（强制路网 3）/ `off`（强制 2D 栅格 1）
     pub road_network: Option<String>,
-    /// 任务形态：`patrol`（默认，`5000 kind=4`）/ `navigation`（`5000 kind=2`）
-    pub task_mode: Option<String>,
     /// 巡检路径名前缀：写进本体 `nav_paths/<前缀>-<task_code>`，默认 `平台`
     pub patrol_path_prefix: Option<String>,
     /// 巡检任务返充电量阈值（`min_recharge_battery`），默认 25.0
@@ -426,8 +387,6 @@ pub struct CliArgs {
     pub model: Option<String>,
     /// `--road-network auto|on|off`
     pub road_network: Option<RoadNetworkMode>,
-    /// `--task-mode patrol|navigation`
-    pub task_mode: Option<DispatchMode>,
     /// `--patrol-path-prefix`
     pub patrol_path_prefix: Option<String>,
     /// `--min-recharge-battery`
@@ -474,7 +433,6 @@ impl CliArgs {
             map_root: opt(&mut args, "--map-root")?,
             model: opt(&mut args, "--model")?,
             road_network: opt(&mut args, "--road-network")?,
-            task_mode: opt(&mut args, "--task-mode")?,
             patrol_path_prefix: opt(&mut args, "--patrol-path-prefix")?,
             min_recharge_battery: opt(&mut args, "--min-recharge-battery")?,
             heartbeat: opt(&mut args, "--heartbeat")?,
@@ -538,11 +496,10 @@ pub fn print_help() {
                          填 mock = 进程内起一个假本体（联调用，能看到真实的
                          1201/1315/5009/5000 报文，详见 README）
   --map-root <PATH>      地图数据根目录 (默认: {DEFAULT_MAP_ROOT})
-  --task-mode <MODE>     任务形态: patrol|navigation（默认 patrol）
-                         patrol = 5000 kind=4 巡检（与官方 App 一致：先 4024 把路线
-                         写成本体 nav_paths/<前缀>-<任务号>，请求只带 map_id+path_id，
-                         航点/到点动作/返程都由本体执行）
-                         navigation = 5000 kind=2 逐段导航（旧实现，保留回退）
+  任务形态固定为「巡检」= 5000 kind=4（与官方 App 一致）：先 4024 把路线写成本体
+  nav_paths/<前缀>-<任务号>，请求只带 map_id+path_id，航点/到点动作/返程都由本体执行。
+  旧的 5000 kind=2 导航模式已移除（`.1` 的 dog_task 与 `.234` 的 robots_dog_msgs
+  版本不一致会崩，等厂商修复），详见 business/client/README.md。
   --patrol-path-prefix <P> 巡检路径名前缀 (默认: 平台)，落在本体 nav_paths/<前缀>-<任务号>
   --min-recharge-battery <N> 巡检返充电量阈值 min_recharge_battery (默认: 25)
   --road-network <MODE>  5000 的 map_type/goal_type: off|auto|on
@@ -586,8 +543,6 @@ pub struct Config {
     pub model: Option<String>,
     /// 5000 的 `map_type`/`goal_type` 策略（见 [`RoadNetworkMode`]）
     pub road_network: RoadNetworkMode,
-    /// 任务形态（见 [`DispatchMode`]）：默认巡检 `kind=4`
-    pub task_mode: DispatchMode,
     /// 巡检路径名前缀（本体 `nav_paths/<前缀>-<task_code>`）
     pub patrol_path_prefix: String,
     /// 巡检任务返充电量阈值
@@ -741,20 +696,6 @@ impl Config {
             (None, None, None) => RoadNetworkMode::default(),
         };
 
-        let task_mode = match (
-            cli.task_mode,
-            env.get(ENV_TASK_MODE),
-            file.robot.task_mode.as_deref(),
-        ) {
-            (Some(value), _, _) => value,
-            (None, Some(raw), _) => raw.parse::<DispatchMode>().map_err(|error| {
-                ConfigError::Invalid(format!("环境变量 {ENV_TASK_MODE} 不合法: {error}"))
-            })?,
-            (None, None, Some(raw)) => raw.parse::<DispatchMode>().map_err(|error| {
-                ConfigError::Invalid(format!("配置项 robot.task_mode 不合法: {error}"))
-            })?,
-            (None, None, None) => DispatchMode::default(),
-        };
         let patrol_path_prefix = pick_string([
             cli.patrol_path_prefix.as_deref(),
             env.get(ENV_PATROL_PATH_PREFIX),
@@ -898,7 +839,6 @@ impl Config {
             map_root,
             model,
             road_network,
-            task_mode,
             patrol_path_prefix,
             min_recharge_battery,
             heartbeat_interval,
@@ -967,7 +907,6 @@ robot.file_port         = {file_port}
 robot.map_root          = {map_root}
 robot.model             = {model}
 route.road_network      = {road_network}
-task.mode               = {task_mode}
 task.patrol_path_prefix = {patrol_path_prefix}
 task.min_recharge_batt  = {min_recharge_battery}
 api.base                = {api_base}
@@ -1006,7 +945,6 @@ log.filter              = {log_filter}",
                 .as_deref()
                 .unwrap_or("（未配置，用本体 1201 type）"),
             road_network = self.road_network.as_str(),
-            task_mode = self.task_mode.as_str(),
             patrol_path_prefix = self.patrol_path_prefix,
             min_recharge_battery = self.min_recharge_battery,
             api_base = self.api_base.as_deref().unwrap_or("（按 server.url 推导）"),

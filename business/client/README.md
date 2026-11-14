@@ -160,7 +160,7 @@ RUST_LOG=robodog_device_client=debug \
 | `4012` → `4013` | 上报 `map_path_list`（`map_route_exist` / `charge_point_exist` 可配） |
 | `4030` → `4031` | 载图定位，随后 `5009` 的 `loc_state.status` 恒为 100 |
 | `4044` → `4045` | 避障等级回显 `effective_level` |
-| `5000 kind=2` → `5001` | 返回 `task_id`，`5009` 先 `running` 再 `success`，每个航点约 1.5s 走完 |
+| `5000 kind=4`（巡检，也兼容 `kind=2`）→ `5001` | 返回 `task_id`，`5009` 先 `running` 再 `success`；巡检按 `4024` 写入的路径点数逐个 `patrol.point_arrived`，每点约 1.5s |
 | `5000 kind=1` → `5002` → `4001` | 建图：取消后补一条保存结果（带 `map_path`） |
 | `5000 kind=3/5`、`5014` → `5015` | 回充 / 出桩 / 返航充电，同样 1.5s 后 `success` |
 | `5004` / `5006` / `5002` | 暂停 / 恢复 / 取消，生命周期同步进 `5009` |
@@ -215,11 +215,8 @@ jq -c 'select(.frame.head.type==5001)' /tmp/frames.jsonl     # 只看 5001 应�
 jq -c 'select(.dir=="recv" and .frame.head.type==4013)' /tmp/frames.jsonl
 ```
 
-与协议 §2.5.1.4 示例逐字段对照时，**唯一有意缺失的字段是 `params.fence_path`**：
-业务侧还没建模电子围栏，而发空串 `""` 会让现场固件回「导航指令非法」，所以没围栏时
-整个键都不出现（`zhpro/route.rs::navigation_task_payload`）。其余字段一个不少：
-`kind/name/schedule/execute_at/priority/record` + `map_path/need_locate/map_type/goal_type/`
-`goals[{position{x,y,z}, orientation{x,y,z,w}}]/speed_limit{vx,vy,vz}/goal_tolerance{x,y,theta}`。
+巡检（`5000 kind=4`）的字段对照见本文「航线执行流程」；旧的 `kind=2` 导航载荷
+（`map_path/need_locate/goals/goal_tolerance` 那套）随导航模式一起移除了。
 
 > `goal_tolerance.y` 用的是航点 `radius`（不是示例里的 0）：到达判定是圆形半径，
 > x/y 必须一致，否则只在一个方向上算到点。
@@ -351,7 +348,7 @@ journalctl -u robodog-device-client -f | grep 视频
 | taskType | 智航动作 | 说明 |
 |----------|----------|------|
 | `建图` / `地图构建` | 5000 `kind=1` | 建图任务，结束触发 4001 保存 |
-| `巡检` / 其它 | 航线执行引擎 | 逐航点下发 5000 `kind=2`，客户端侧执行点位动作 |
+| `巡检` / 其它 | 航线执行引擎 | 先 `4024` 把路线写成本体 `nav_paths/<前缀>-<任务号>`，再下发 `5000 kind=4` 巡检任务（航点与到点动作由本体执行） |
 | `返航` / `返回充电` | 5014 | 返回已标定的回充点 |
 | `回充` / `充电` | 5000 `kind=3` | 对桩充电 |
 | `出桩` | 5000 `kind=5` | 从充电桩驶出 |
@@ -715,9 +712,8 @@ M1 文件根 `/ota/alg_data`；文档 §2.2.4.1「4013 地图列表」明确单�
 
 ## 航线执行流程
 
-有两种下发形态（`--task-mode`，**默认 `patrol`**）：
-
-### A. `patrol`（默认）：`5000 kind=4`，与官方 App 一致
+下发形态只有一种：**巡检 `5000 kind=4`**（与官方 App 一致）。
+（旧的 `5000 kind=2` 导航模式已移除，原因见本文件末尾「导航模式为什么去掉」。）
 
 字段与调用顺序全部按 2026-11-14 抓到的官方报文实现（见
 [`../docs/official-app-parity.md`](../docs/official-app-parity.md) §三.1）。
@@ -750,8 +746,8 @@ M1 文件根 `/ota/alg_data`；文档 §2.2.4.1「4013 地图列表」明确单�
    （拍照失败码 14005 会落在巡检记录里，不影响导航与整体成功）
 ```
 
-可调项：`--task-mode`（默认 `patrol`）、`--patrol-path-prefix`（默认 `平台`，
-本体路径名 = `<前缀>-<task_code>`）、`--min-recharge-battery`（默认 25）。
+可调项：`--patrol-path-prefix`（默认 `平台`，本体路径名 = `<前缀>-<task_code>`）、
+`--min-recharge-battery`（默认 25）。
 
 **低电守卫（2026-11-14 现场踩过）**：`min_recharge_battery` 在本体侧的语义是
 「**巡检进行中**电量不高于阈值 → 中断巡检、回巡检起点」，**不是**「低于阈值不许开始」。
@@ -775,31 +771,16 @@ M1 文件根 `/ota/alg_data`；文档 §2.2.4.1「4013 地图列表」明确单�
 > `battery_min`（较低那节）。两节差异 ≥5% 时会打 WARN——现场出现过「平台显示 52%、本体 ALG 读 23%」
 > 的误判，就是因为平台取的是较高那节。
 
-### B. `navigation`（`--task-mode navigation`）：`5000 kind=2`（旧实现，保留回退）
+### 导航模式为什么去掉
 
-```text
-1. 解析 routeData → FlightPlan
-2. 前置校验：4013 地图列表里必须存在该 map_dir
-3. 若 endTask=return_to_charge，校验 map_route_exist / charge_point_exist
-4. 4044 设置任务级避障等级
-5. 按段下发 5000 kind=2（一段 = 一段连续航点，见 plan_segments）：
-     need_locate 只在第 1 段 true（避免每段重载地图）
-     建任务前先等本体 5009 robot.task_state=idle（上一段/残留任务必须已经释放能力）
-     等 5009 生命周期终态；进度用 detail.last_arrived_goal.index 驱动
-     失败：5002 取消 + 等 idle → 按 on_fail 重试 / 跳过（must=true 不跳过）
-       错误分类只看**本体原话**（`is_locate_error` 认「定位」「need_locate」「map not found」等）；
-       点位 / `need_locate` / 速度 / 地图这些**诊断尾巴由 run() 拼在消息末尾**，
-       不能拼进要分类的 Err——否则每条航段失败都带 `need_locate=`，会被误判成定位错误，
-       可跳过航点直接变成终止整条航线（2026-11-14 踩过，skipped 恒为 0）
-6. 结束后按 endTask：
-     return_to_charge → 5014
-     return_to_start  → 再下发一次首点导航（闭环模式已在 goals 末尾带回首点）
-     none             → 原地待命
-```
+`.1`（运控机）的 `dog_task` 是按 `robots_dog_msgs 0.9.0` 编的，而 `.234`（算法机）的
+`waypoint_follower` 用 `0.9.8` 发 `/navigation_state`，两份 `NavigationState.msg` 差一个末尾字段
+`uint8 current_floor` → CDR 错位 → 偶发 `bad_alloc` 让 `dog_task` SIGABRT（表现为任务首点就失败、
+`sdk_node`/`estop` 每 5~15 秒抖）。巡检链路（`kind=4`）走本体自己的状态机，同样收这个话题
+但只记 ERROR 不崩，所以现在只保留巡检。
 
-> ⚠️ 回退到 `navigation` 之前先确认 `.1` 的 `dog_task` 与 `.234` 的 `robots_dog_msgs`
-> 版本一致（现网 0.9.0 vs 0.9.8，一开导航 `dog_task` 会反复 `bad_alloc` 崩溃），
-> 见 [`../../deploy/robodog-issues-2026-11-14.md`](../../deploy/robodog-issues-2026-11-14.md) §3。
+等厂商给出与 `0.9.8` 匹配的 `.1` 包（或 `.234` 的兼容回退包）后，再谈是否恢复逐点导航。
+完整证据链见 [`../../deploy/robodog-issues-2026-11-14.md`](../../deploy/robodog-issues-2026-11-14.md) §3。
 
 ## 业务协议速查
 
@@ -942,8 +923,9 @@ M1 文件根 `/ota/alg_data`；文档 §2.2.4.1「4013 地图列表」明确单�
 
 ### 巡检起步前的定位守卫
 
-航线下发（`task_dispatch` 且 `routeData.points` 非空）后，客户端在发第一条
-`5000 kind=2` 之前会做一次定位预检：
+航线下发（`task_dispatch` 且 `routeData.points` 非空）后，客户端在发 `5000 kind=4`
+之前会做一次定位预检（巡检的载图与起点位姿采集由本体 `load_localization_map` /
+`capture_origin_pose` 负责，这里只保证「图存在 + 定位能收敛」，避免下发后秒失败）：
 
 0. 先 `1204` 取 RoamerX 控制权——`4030` / `4044` / `5000` 全在 4000~5999 非白名单区间，
    没控制权时网关**直接丢弃**，表现为「等 4031 超时」而本体那边什么都没做；
@@ -953,11 +935,8 @@ M1 文件根 `/ota/alg_data`；文档 §2.2.4.1「4013 地图列表」明确单�
    判据是 5009 `loc_state` 收敛到 100（现场固件的回执经常更慢）；
 3. 仍未收敛或 SLAM 明确失败（`203` / `210`）→ **不发 5000**，直接把任务置为「异常」，
    进度消息写明「定位未就绪：... 请远程接管把设备移回地图覆盖范围，或下发「重新定位」后重试」；
-4. 预检过程**真的裁过这张图**（走了 4030）时，首航点用 `need_locate=false` 复用这份定位，
-   避免刚重定位完又载一次图；若 5009 上来就是 100（预检没动过地图），首航点仍发
-   `need_locate=true`（协议默认）让本体重新载图定位——「已经定位」不等于「载的是这条路线
-   绑的那张图」，可能还是上一单留下的另一张图；
-5. 真正发 5000 前再补一次 `1302 cmd=62` 导航模式，并 `5002` 取消上一轮残留的本体任务。
+4. 巡检任务里不再传 `need_locate`（那是 `kind=2` 的字段）：本体自己载图并按路径执行；
+5. 真正发 `5000 kind=4` 前再补一次 `1302 cmd=62` 导航模式，并 `5002` 取消上一轮残留的本体任务。
 
 这样「机器狗不在地图上」就不会再以一条含义不明的 5000 失败收场。
 

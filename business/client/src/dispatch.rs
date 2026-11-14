@@ -287,7 +287,7 @@ mod tests {
             "/ota/alg_data/map/history_map/MAP-ZJ-01_v2.1"
         );
         // 闭环仅在航点数 > 2 时补回首点；本例 2 个点保持原样
-        assert_eq!(plan.execution_order().len(), 2);
+        assert_eq!(plan.waypoints.len(), 2);
     }
 
     #[test]

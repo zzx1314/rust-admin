@@ -648,10 +648,11 @@ journalctl -u wsniff -f                        # 摘要（含「新连接 …」
 
 ---
 
-## 12. 方案 3：继续用 `kind=2` 导航模式的现场兜底（`/navigation_state` 裁剪桥）
+## 12. 方案 3（**已撤除**）：`kind=2` 导航模式的 `/navigation_state` 裁剪桥
 
-> 完整操作手册（含编译、remap、systemd、验证、回滚、常见问题）见
-> [`navstate-bridge/README.md`](navstate-bridge/README.md)，代码在 `deploy/navstate-bridge/`。
+> ⚠️ 2026-11-14 决定：**客户端已删除 `kind=2` 导航模式**（`business/client` 只保留巡检
+> `kind=4`），这里的裁剪桥代码也一并删除（需要时可从 git 历史取回），等厂商提供与
+> `robots_dog_msgs 0.9.8` 匹配的 `.1` 包后再说。下面保留设计记录，仅供以后参考。
 
 **思路**：`.234` 的 `waypoint_follower` 发的是 0.9.8 编码（末尾多 `uint8 current_floor`），
 `.1` 的 `dog_task` 按 0.9.0 解析。那就把这条消息**末尾多出来的字节截掉**再喂给它：

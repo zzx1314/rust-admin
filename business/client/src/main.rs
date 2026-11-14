@@ -42,9 +42,7 @@ use dispatch::{TaskMode, parse_flight_plan, parse_map_binding};
 use futures_util::{SinkExt, StreamExt};
 use mapupload::{IngestConfig, UploadOutcome};
 use rand::Rng;
-use robodog_device_client::config::{
-    CliArgs, Config, EnvConfig, RoadNetworkMode, DispatchMode, print_help,
-};
+use robodog_device_client::config::{CliArgs, Config, EnvConfig, RoadNetworkMode, print_help};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -1939,16 +1937,11 @@ fn parse_initial_pose(value: Option<&Value>) -> Option<Pose> {
 /// 巡检起步前的定位守卫。
 ///
 /// 已经定位好（`100`）直接放行，不动地图、不打断位姿；否则用 `4030 op=1`
-/// 载图并重定位，等收敛后再交给本体导航，避免 `need_locate` 起步守卫静默失败。
-/// 起步前的定位守卫。
+/// 载图并重定位，等收敛后再下发巡检任务——本体侧的 `load_localization_map` /
+/// `capture_origin_pose` 要做的事我们就提前确保一遍，避免下发后秒失败。
 ///
-/// 返回 `(定位状态, 本次是否真的载图定位过)`：
-///
-/// - `false`：5009 已经是 `100 Locating`，**没动过地图**。此时不能假定本体载的就是这条路线
-///   绑的那张图（可能是上一单留下的另一张图），所以首个航点仍然 `need_locate=true`，
-///   让本体按文档默认值重新载图定位；
-/// - `true`：本次刚下发 `4030` 载的就是这张图，首点用 `need_locate=false` 复用即可，
-///   省一次 10~30s 的载图和位姿重置。
+/// 返回 `(定位状态, 本次是否真的载图定位过)`。巡检任务不用 `need_locate`（那是
+/// `kind=2` 的字段），第二个返回值现在只用于日志/排障。
 async fn ensure_localized(
     client: &ZhProClient,
     map_path: &str,
@@ -2444,8 +2437,10 @@ async fn handle_server_message(
                         .road_network
                         .map_type(plan.road_network, robot_map.route_exist);
                     info!(
-                        "5000 地图类型 map_type/goal_type = {target_map_type}（road_network 策略={}，\
+                        "地图类型：本体能力 map_type={target_map_type}（导航枚举 1/3）→ 巡检 \
+                         5000 kind=4 会发 {}（0=2D 栅格 / 1=路网）（road_network 策略={}，\
                          航线全沿道路={}，本体 map.geojson={}）",
+                        if target_map_type == 3 { 1 } else { 0 },
                         config.road_network.as_str(),
                         plan.road_network,
                         robot_map.route_exist
@@ -2466,36 +2461,18 @@ async fn handle_server_message(
                     }
 
                     // 官方链路是「1204 取控制权 → 1302 cmd=62 切导航模式 → 选图/定位 → 建任务」。
-                    // 这里先把模式切好，再去做 4030 载图定位：否则 pre_located 的信任链
-                    // 会跨越一次模式切换（若切模式使算法节点重置地图/定位上下文，
-                    // 首点还带 need_locate=false 就会踩空）。`run()` 里仍会再切一次，
-                    // 那次只是兜底（take_control 有缓存，1302 重复下发无副作用）。
+                    // 巡检（kind=4）由本体自己走 `load_localization_map` + `capture_origin_pose`，
+                    // 这里只保留一次起步前定位守卫：地图不在本体上 / 定位丢失时提前给出可读异常。
                     if let Err(e) = zhpro::teleop::enter_navigation_mode(&client).await {
                         warn!("任务 {task_code} 切导航模式失败（继续尝试，但本体可能拒任务）: {e}");
                     }
-
-                    // 起步前定位守卫：不在地图上 / 定位丢失时不发 5000，直接报可读异常
                     let map_path = plan.resolve_map_path(&config.map_root);
                     let initial_pose = parse_initial_pose(msg.payload.get("initialPose"));
-                    // `loaded`=true 表示本次真的用 4030 载过这张图，才能让首个航点
-                    // `need_locate=false` 复用定位；否则按协议默认值 true 重新载图定位。
-                    let pre_located = match ensure_localized(&client, &map_path, initial_pose).await
-                    {
-                        Ok((status, loaded)) => {
-                            // 首点取值与 route.rs 的 `locate_decision` 保持一致，
-                            // 避免这里用 `!loaded` 反推、将来判据一改就漂移
-                            let first_locate = zhpro::route::locate_decision(
-                                true,
-                                loaded.then_some((map_path.as_str(), Duration::ZERO)),
-                                &map_path,
-                            );
-                            info!(
-                                "定位已就绪（status={status}），开始执行航线；                                 任务形态={}（巡检 kind=4 时由本体自己载图，首航点 need_locate={}）",
-                                config.task_mode.as_str(),
-                                first_locate.need_locate()
-                            );
-                            loaded
-                        }
+                    match ensure_localized(&client, &map_path, initial_pose).await {
+                        Ok((status, _loaded)) => info!(
+                            "定位已就绪（status={status}），开始下发巡检任务（5000 kind=4：\
+                             航点与到点动作由本体 nav_paths 里的路径执行）"
+                        ),
                         Err(e) => {
                             warn!("任务 {task_code} 定位未就绪，拒绝下发: {e}");
                             report_progress(
@@ -2514,39 +2491,23 @@ async fn handle_server_message(
                             clear_active_task(active, state).await;
                             return;
                         }
-                    };
+                    }
 
                     // 软件急停 / sdk_node / ctrl_source / 卧倒姿态已由上面的
                     // `motion_block_reason(true)` 统一拦过，这里不再重复检查
-
                     let runner = Arc::new(RouteRunner::new(client.clone()));
-                    runner.set_mode(config.task_mode).await;
                     // 巡检下发前用它和 min_recharge_battery 做低电守卫（双电池取较低那节）；
                     // 先取出来再 await，避免把 state 的锁带过 await 点
                     let battery_percent = state.lock().await.battery_min;
                     runner.set_battery_percent(battery_percent).await;
-                    if config.task_mode == DispatchMode::Patrol {
-                        runner
-                            .set_patrol_options(
-                                &config.patrol_path_prefix,
-                                config.min_recharge_battery,
-                            )
-                            .await;
-                    }
-                    // 闭环会补回首点：总数要取执行顺序的长度，否则事件流里会出现
-                    // 「进度 0/4（100%）」这种自相矛盾的读数
-                    // 巡检（kind=4）的总点数 = 路径点数（本体按 nav_paths 里的点算）；
-                    // 导航（kind=2）的总点数 = 执行顺序长度（闭环会补回首点）
-                    let total_points = if config.task_mode == DispatchMode::Patrol {
-                        plan.waypoints.len() as i64
-                    } else {
-                        plan.execution_order().len() as i64
-                    };
-                    // 只有预检真的载了这张图，首航点才用 need_locate=false 复用定位
-                    //（记录绑地图 + 时刻，换图或超窗时 locate_for 会重新载图定位）
-                    if pre_located {
-                        runner.mark_pre_located(&map_path).await;
-                    }
+                    runner
+                        .set_patrol_options(
+                            &config.patrol_path_prefix,
+                            config.min_recharge_battery,
+                        )
+                        .await;
+                    // 巡检的总点数 = 路径点数（本体按 nav_paths 里的点算，不做「闭环补点」）
+                    let total_points = plan.waypoints.len() as i64;
                     runner.prepare(plan).await;
                     *local_runner.lock().await = Some(runner.clone());
 
