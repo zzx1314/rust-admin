@@ -106,8 +106,10 @@ systemd unit 写法、安全组端口）见 `deploy/external-hz/README.md`。
 服务树、日志路径、`sdk_node=false` / `13897 capability busy` / `ctrl_source=3` / 急停卡死
 （`estop.software` 恒 true、点「解除急停」无效）/ 「任务第 1 点秒失败」的排查顺序与
 2026-11-13 / 11-14 事故复盘见 `deploy/robodog-body.md`（急停卡死见 §10，
-结论是重启 `.1` 的 `dog_task`，不是重启 `.234`）。部署与现场发布流程见
-`deploy/README.md`。
+结论是重启 `.1` 的 `dog_task`，不是重启 `.234`）。2026-11-14 那批问题的完整复盘
+（含 `.234`/`.1` 的 `robots_dog_msgs` 版本不一致导致 `dog_task` 崩溃、
+以及**用官方 APK 可以正常执行任务的临时方案**）见 `deploy/robodog-issues-2026-11-14.md`。
+部署与现场发布流程见 `deploy/README.md`。
 
 ## Important Notes
 

@@ -557,6 +557,10 @@ ssh firefly@192.168.234.1
 
 ## 10. 第三起：急停卡死，点「解除急停」20 秒后回读仍是 `true`（2026-11-14）
 
+> 完整证据链、四个并发问题（急停卡死 / `dog_task` 崩溃 / 首点秒失败 / 客户端分类 bug）
+> 与**「用官方 APK 可以正常执行任务」的可用方案**见
+> [`robodog-issues-2026-11-14.md`](robodog-issues-2026-11-14.md)，本节只留处置步骤。
+
 > **⏱ 30 秒结论**：平台确实下发了、客户端也确实发了 `1302 cmd=1`、链路健康
 > （`sdk_node=1` / `body_online=1`），但 `estop.software` 一直是 `true`、
 > `robot_mode` / `motion_status` 全是 `unknown` —— **急停位锁在 `.1` 的 `dog_task` 进程里**
@@ -641,6 +645,9 @@ ssh firefly@192.168.234.1 '
 
 1. `dog_task` 崩溃的两个根：`/navigation_state` 消息反序列化失败（跨机 ROS 消息定义不一致）
    与 `/dev/shm` 残留（`bad_alloc`）。前者要厂商统一镜像/消息定义，后者靠 §4.5 + §7 的守护。
+   **消息不一致已查实**：`.234` `robots_dog_msgs 0.9.8`（`NavigationState.msg` 含 `uint8 current_floor`）
+   vs `.1` `0.9.0`（无该字段），一开导航必崩；证据见
+   [`robodog-issues-2026-11-14.md`](robodog-issues-2026-11-14.md) §3。
 2. `eCAL Pub/Sub description mismatch for topic hal_fault`：跨机故障话题结构不一致，
    fault 明细解不出来，平台只能看到 `2 fault(s)` 这种笼统数字。
 3. `Battery error=0x0000020F`（bit0~3 + bit9）**换电池后依然常驻**，需厂商给出位定义；

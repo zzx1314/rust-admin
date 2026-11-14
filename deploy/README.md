@@ -33,6 +33,9 @@
 
 > 本体侧（背包 `.246` 之外的 Orin NX `.234` + RK3588 `.1`）的服务树、日志路径和排障顺序见
 > [`robodog-body.md`](robodog-body.md)——`sdk_node=false` / 任务被拒 / 本体状态抖动先查那一份。
+> 2026-11-14 现场那批问题（急停卡死、`dog_task` 崩溃、任务首点秒失败、**用官方 APK 可正常跑任务**）
+> 的完整证据链、结论和给厂商的问题单见
+> [`robodog-issues-2026-11-14.md`](robodog-issues-2026-11-14.md)。
 
 ---
 
@@ -307,6 +310,7 @@ ssh root@39.107.55.13 'sqlite3 /opt/hz/rust-admin/zentai/data/users.db \
 | 平台提示「本体 SDK 节点未就绪（sdk_node=false）」 | 本体侧问题，不要先重启算法服务：先看 `.234` 的 `robot_sdk_node.stdout`（是否刷 `Model/transport not ready`）再看 `.1` 的 `dog_task` 与 `df -h /dev/shm`，完整链路与修法见 [`robodog-body.md`](robodog-body.md) §4 |
 | 平台定位「未就绪」/「重新定位」报 4013 超时 / 位置 0,0 | 算法机（`.234`）的 `robot-alg-manager` 卡在等 `/robot_type`（`.1` 的机型上报）。先确认 `.1` 稳定，再 `ssh robot@192.168.234.234 'sudo systemctl restart robot-launch'`，然后点「重新定位」；完整判定与兜底见 [`robodog-body.md`](robodog-body.md) §8 |
 | 任务全部回 `13897 capability busy` | 本体上还有未结束的任务（或本体栈崩了）。先按 [`robodog-body.md`](robodog-body.md) 看 `dog_task` 是否在崩溃循环，再考虑在官方 App 取消任务 / 重启本体栈 |
+| 一下发导航任务，`sdk_node` 与 `estop` 每 5~15 秒抖一次、进度卡在 0/N | `.1` `dog_task.stdout` 里的 `Fast CDR ... NavigationState_. Not enough memory in the buffer stream` | 两机 `robots_dog_msgs` 版本不一致（`.234` 0.9.8 / `.1` 0.9.0），只能厂商升级；**期间用官方 APK 执行巡检任务**。证据与问题单见 [`robodog-issues-2026-11-14.md`](robodog-issues-2026-11-14.md) §3、§5 |
 
 ---
 
