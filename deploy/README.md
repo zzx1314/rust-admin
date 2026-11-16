@@ -247,6 +247,8 @@ ssh root@39.107.55.13 'journalctl -u rust-admin-robodog -f | grep -E "backpack s
 | 有画面但卡住/黑屏 | 板端 `ffmpeg:` 警告 | `Timestamps are unset` → 必须带 `-use_wallclock_as_timestamps 1`（脚本已带） |
 | 只有第一次能看 | 平台日志 `video stream reset` | 常驻连接复用了旧流头，服务端靠 `video_reset` 清 `init` |
 | 帧率偏低/断流 | 现场上行带宽 | 单路 2Mbps，六路同时看就是 12Mbps |
+| 切了通道自己跳回「机器狗前置」 | 页面轮询 | 已修（2026-11-16）：直连模式后端不下发 `sources`，刷新时别拿它比对 |
+| 想看房间/观看者状态 | `GET /api/backpack/video/state` | 返回每路的 `publisher/initBytes/viewers/streaming`，黑屏先看这张表 |
 
 ### 为什么需要「现场入口」
 

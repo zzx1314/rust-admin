@@ -361,10 +361,25 @@ POST /api/backpack/detect/config
   板端 relay 的常驻连接不会被误杀；
 - 单路 2Mbps：六路同时看 = 12Mbps 上行，现场带宽要先确认。
 
+### 6.4.1 排障：`GET /api/backpack/video/state`
+
+返回每个房间的 `publisher / initBytes / pendingBytes / viewers / streaming / control`。
+「这一路黑屏」九成能从这张表看出来：`publisher=false` → 板端 relay 没连上；
+`initBytes=0` 且 `viewers>0` → 推流端起流失败或还没出关键帧；`viewers` 不掉 → 有僵尸观看者。
+
+```bash
+TOKEN=<控制台登录拿到的 token>
+curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/video/state | python3 -m json.tool
+```
+
 ### 6.5 已知限制
 
 - 延时 1~2s（WHEP 直连 ~200ms）；延迟敏感场景仍建议现场入口。
+- **首次看某一路要 3~7s**（ffmpeg 启动 + 等下一个关键帧）；同一个通道 30s 内再切回来是
+  秒开 —— 最后一个观看者离开时不立刻停流，交给看门狗在 15~30s 内停（见 `VideoSource::stop`）。
 - 中继模式下**没有 AI 叠加**：板端在本机内网，公网页面拿不到 SSE `detect` 事件；
   AI 仍要现场入口。
+- 板端 relay 的推流连接是常驻的，**每次起流换一条新 FLV**，所以服务端必须靠 `video_reset`
+  清 `init`，观看端也必须「第一个观看者不补旧流头」—— 这两条少一条就是黑屏。
 - `dog-ipcam` 源若为 H.265，`-c:v copy` 无法封装成 FLV，需 `RELAY_TRANSCODE=1`
   （重编码，板端 CPU 开销大，优先改摄像头出 H.264）。

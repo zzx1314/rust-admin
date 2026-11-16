@@ -27,7 +27,7 @@
 
 use crate::app::AppState;
 use crate::auth::{self, Claims};
-use crate::error::AppError;
+use crate::error::{ApiResponse, AppError};
 use crate::gateway;
 use crate::gateway_types::WsMessage;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -653,8 +653,8 @@ pub async fn backpack_viewer_ws(
 pub async fn viewer_state(
     State(state): State<AppState>,
     Extension(_claims): Extension<Claims>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    Ok(Json(state.video_hub.debug_state().await))
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    Ok(ApiResponse::ok(state.video_hub.debug_state().await))
 }
 
 /// 观看者的拉流方式（两者的房间与观看者逻辑一样，只是控制消息的通道不同）
@@ -716,20 +716,20 @@ impl VideoSource {
     }
 
     /// 没人看了：让推流端停掉拉流 / 编码
+    ///
+    /// 板端中继**不立刻停**：现场会来回切六路，每切一次都重启 ffmpeg 要等 5~14s
+    /// （首次出图 = 进程启动 + 首个关键帧）。保留 `streaming` 标记，交给看门狗在
+    /// 无人观看后 ~15~30s 内停——既让切源几乎无感，也不会一直空转编码。
     async fn stop(&self, state: &AppState) -> bool {
-        state.video_hub.mark_streaming(self.room(), false).await;
         match self {
             VideoSource::DeviceClient { code, .. } => {
+                state.video_hub.mark_streaming(self.room(), false).await;
                 gateway::send_video_control(&state.device_connections, code, None).await
             }
-            VideoSource::BoardPusher { room, .. } => {
-                state
-                    .video_hub
-                    .send_control(
-                        room,
-                        json!({"msgType": "video_stop", "payload": {}}).to_string(),
-                    )
-                    .await
+            VideoSource::BoardPusher { .. } => {
+                // 保持 streaming=true，让看门狗（每 15s）在真的没人看时下发 video_stop
+                state.video_hub.mark_streaming(self.room(), true).await;
+                true
             }
         }
     }
@@ -796,7 +796,8 @@ async fn handle_viewer(socket: WebSocket, state: AppState, source: VideoSource) 
     }
 
     if state.video_hub.viewer_leave(&room).await {
-        info!("last viewer of {room} left, asking publisher to stop stream");
+        // 板端中继不立刻停（切源无感），交给看门狗；设备客户端当场停
+        info!("last viewer of {room} left");
         source.stop(&state).await;
     }
 }
