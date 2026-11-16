@@ -201,8 +201,52 @@ ssh root@192.168.41.246 'cd /opt/robodog/client &&
 | 组件 | 跑在哪 | 作用 |
 | --- | --- | --- |
 | `backpack-agent.service` | 板子 `.246` | 板端 Agent（`:8000`）：六路推流、AI 识别、板端画框、遥测/控制 |
+| `backpack-relay.service` | 板子 `.246` | **板端推流中继**：按需把本地 RTSP 转 FLV 推到平台 `:3100`，公网入口也能看（见下方「推流中继」） |
 | `site-console.service` | 板子 `.246`（可换任意内网机） | 内网托管同一份控制台 `dist`（`:8080`），见下方「为什么需要现场入口」 |
 | `rust-admin-robodog` | 云端 `39.107.55.13:3100` | 业务平台；背包接入方式由 `ROBODOG_BACKPACK_BROWSER_URL` 决定（直连模式） |
+
+### 推流中继（2026-11-16 上线，公网入口可看视频）
+
+「现场入口」这条路有两个绕不过去的前提：**操作员电脑与背包同网段**、**浏览器放行本地
+网络访问（LNA）**。实测：换一个 WiFi、出差远程、换台电脑或清一次浏览器数据，画面就黑
+——这不是配置问题，是浏览器策略（Chrome 141+ 灰度强制，157 上确认拦截）。
+
+所以把方向反过来：**由板子出公网推流**，浏览器只跟平台同源通信。
+
+```text
+本地 mediamtx :8554 ──ffmpeg -c:v copy -f flv──► backpack-relay ──ws──► 平台 VideoHub
+   房间名 bp:<stream>                                                      │
+                                  浏览器 ◄── ws /api/backpack/video/ws ──┘（flv.js）
+```
+
+- 延时 1~2s（WHEP 是 ~200ms），代价换「任何网络、任何浏览器都能看」；
+- **按需**：常驻 6 条 WS 连接（每条约 1KB），第一个观看者进来才起 ffmpeg，最后
+  一个离开立刻杀（平台看门狗也会兜住空转）；
+- 前端 `/monitor` 页顶部有「现场直连 / 平台中继」切换，**直连失败会自动切中继**；
+- 中继模式下没有 AI 叠加（板端不可达时 SSE 也拿不到），要 AI 仍用现场入口。
+
+部署（幂等）：
+
+```bash
+ssh root@192.168.41.246 'mkdir -p /opt/backpack-relay'
+scp deploy/backpack-relay/relay_push.py root@192.168.41.246:/opt/backpack-relay/
+scp deploy/backpack-relay/backpack-relay.service root@192.168.41.246:/etc/systemd/system/
+ssh root@192.168.41.246 'systemctl daemon-reload && systemctl enable --now backpack-relay'
+
+# 验收：六条连接都在（journal 里应有 6 行「已连接平台，房间 bp:xxx」）
+ssh root@192.168.41.246 'systemctl status backpack-relay --no-pager -n 10'
+# 云端侧：来了观看者才会下发 video_start
+ssh root@39.107.55.13 'journalctl -u rust-admin-robodog -f | grep -E "backpack stream|video stream reset|last viewer of bp"'
+```
+
+排障对照：
+
+| 现象 | 看哪里 | 说明 |
+| --- | --- | --- |
+| `板端推流服务未连接` | 板端 `backpack-relay` 是否 active | 房间名 `bp:` 由服务端 `BACKPACK_ROOM_PREFIX` 定义，两边必须一致 |
+| 有画面但卡住/黑屏 | 板端 `ffmpeg:` 警告 | `Timestamps are unset` → 必须带 `-use_wallclock_as_timestamps 1`（脚本已带） |
+| 只有第一次能看 | 平台日志 `video stream reset` | 常驻连接复用了旧流头，服务端靠 `video_reset` 清 `init` |
+| 帧率偏低/断流 | 现场上行带宽 | 单路 2Mbps，六路同时看就是 12Mbps |
 
 ### 为什么需要「现场入口」
 

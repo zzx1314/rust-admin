@@ -124,8 +124,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/devices/{id}/teleop/release", post(teleop::release))
         .route("/devices/{id}/teleop/ping", post(teleop::keepalive))
         // 实时视频：浏览器订阅设备回传的 FLV 流（?token= 鉴权，见 video.rs）
-        .route("/devices/{id}/video/ws", get(video::viewer_ws))
-        .route("/tasks", get(tasks::list_tasks).post(tasks::create_task))
+        .route("/devices/{id}/video/ws", get(video::viewer_ws))        .route("/tasks", get(tasks::list_tasks).post(tasks::create_task))
         .route("/tasks/stats", get(tasks::task_stats))
         .route(
             "/tasks/{id}",
@@ -181,6 +180,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/backpack/detect/start", post(backpack::detect_start))
         .route("/backpack/detect/stop", post(backpack::detect_stop))
         .route("/backpack/detect/config", post(backpack::detect_config))
+        // 背包实时视频：板端 relay 主动推流到平台，浏览器同源播放（不依赖内网可达）
+        .route("/backpack/video/ws", get(video::backpack_viewer_ws))
         .layer(from_fn_with_state(state.clone(), require_auth));
 
     let public = Router::new()

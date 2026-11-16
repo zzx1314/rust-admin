@@ -14,6 +14,7 @@ import AppIcon from "./AppIcon.vue";
  * - `mp4`   → 原生 `<video>`，也兼容 webm
  * - `webrtc`→ `whep://` 或 `webrtc://`，需要额外信令网关，这里只做提示
  * - `rtsp`  → 浏览器不能直连：由设备客户端拉流转 FLV、经业务平台中继（见 server/src/video.rs）
+ * - `relay` → 背包中继：板端推流服务把 RTSP 转成 FLV 推到平台，这里同源播放
  * - `none`  → 未配置，显示占位
  */
 const props = defineProps<{
@@ -23,6 +24,12 @@ const props = defineProps<{
   online: boolean;
   /** 设备主键：RTSP 走 `/api/devices/{id}/video/ws` 中继，必须传 */
   deviceId?: number | null;
+  /**
+   * 背包通道（`cam0`…`dogcam`）：`type="relay"` 时走 `/api/backpack/video/ws`。
+   *
+   * 这条通路不经过浏览器直连板端，因此不受「换 WiFi / 换浏览器 / LNA 许可」影响。
+   */
+  stream?: string | null;
 }>();
 
 const videoRef = ref<HTMLVideoElement | null>(null);
@@ -54,20 +61,33 @@ const RETRY_DELAY = 3000;
 const kind = computed(() => (props.type || "none").toLowerCase());
 
 /**
- * RTSP 中继地址：业务平台把设备客户端回传的 FLV 通过 WS 转给浏览器。
+ * 中继地址：业务平台把推流端回传的 FLV 通过 WS 转给浏览器。
+ *
+ * - `rtsp`：设备客户端拉 `devices.video_url`，房间名是设备编号；
+ * - `relay`：背包板端 relay 拉本地流，房间名是 `bp:<stream>`（服务端前缀固定）。
+ *
  * 浏览器 WS 握手不能带 Authorization 头，令牌只能放查询串（服务端 require_auth 支持）。
  */
 const relayUrl = computed(() => {
-  if (!props.deviceId) return "";
   const token = tokenStorage.get() || "";
-  // 页面可能由现场入口托管（内网静态服务），中继仍在云端：用运行时基址
+  if (kind.value === "relay") {
+    if (!props.stream) return "";
+    // 页面可能由现场入口托管（内网静态服务），中继仍在云端：用运行时基址
+    return `${wsOrigin()}/api/backpack/video/ws?stream=${encodeURIComponent(props.stream)}&token=${encodeURIComponent(token)}`;
+  }
+  if (!props.deviceId) return "";
   return `${wsOrigin()}/api/devices/${props.deviceId}/video/ws?token=${encodeURIComponent(token)}`;
 });
 
-const isRelay = computed(() => kind.value === "rtsp" && !!props.deviceId);
+const isRelay = computed(
+  () => (kind.value === "rtsp" && !!props.deviceId) || (kind.value === "relay" && !!props.stream)
+);
 
 const playable = computed(() => {
-  if (!props.online || !props.url) return false;
+  if (!props.online) return false;
+  // 背包中继没有「视频地址」这个概念：板端推什么就看什么
+  if (kind.value === "relay") return !!relayUrl.value;
+  if (!props.url) return false;
   // RTSP 浏览器不能直连，只有拿到中继地址才谈得上播放
   if (kind.value === "rtsp") return isRelay.value;
   return ["hls", "flv", "mp4"].includes(kind.value);
@@ -75,6 +95,12 @@ const playable = computed(() => {
 
 const hint = computed(() => {
   if (!props.online) return "设备离线，无实时画面";
+  if (kind.value === "relay") {
+    if (!props.stream) return "未选择背包通道";
+    if (status.value === "error")
+      return errorText.value || "中继拉流失败：确认背包上 backpack-relay 服务在线";
+    return status.value === "idle" ? "" : "正在连接平台中继…";
+  }
   if (!props.url) return "未配置视频地址，请在设备档案中填写";
   if (kind.value === "rtsp" && !props.deviceId)
     return "RTSP 需要经设备客户端回传播放，缺少设备标识";
@@ -104,9 +130,9 @@ function clearRetry() {
   }
 }
 
-/** 中继断流后退避重连（只对 RTSP 中继生效） */
+/** 中继断流后退避重连（设备 RTSP 与背包中继都适用） */
 function scheduleRetry() {
-  if (kind.value !== "rtsp" || !playable.value) return;
+  if (!isRelay.value || !playable.value) return;
   clearRetry();
   if (retryCount >= MAX_RETRY) {
     fail("实时视频多次重连失败：确认设备客户端在线且能访问 RTSP 地址");
@@ -146,8 +172,8 @@ function fail(message: string) {
 async function attach() {
   destroy();
   const el = videoRef.value;
-  if (!el || !playable.value || !props.url) return;
-  const src = props.url;
+  if (!el || !playable.value) return;
+  const src = props.url ?? "";
   const seq = ++attachSeq;
   status.value = "loading";
 
@@ -176,8 +202,8 @@ async function attach() {
     return;
   }
 
-  if (kind.value === "rtsp") {
-    // 客户端 ffmpeg 已把 RTSP 转成 FLV，flv.js 的 WebSocketLoader 直接消费二进制帧
+  if (kind.value === "rtsp" || kind.value === "relay") {
+    // 推流端已把源转成 FLV，flv.js 的 WebSocketLoader 直接消费二进制帧
     const { default: flvjs } = await import("flv.js");
     if (seq !== attachSeq) return;
     if (!flvjs.isSupported() || !relayUrl.value) {
@@ -188,14 +214,18 @@ async function attach() {
       type: "flv",
       url: relayUrl.value,
       isLive: true,
-      // 客户端只回传视频轨（-an），声明没有音轨避免解析告警
+      // 推流端只回传视频轨（-an），声明没有音轨避免解析告警
       hasAudio: false
     });
     flv.attachMediaElement(el);
     flv.load();
     flv.play()?.catch(() => fail("自动播放被浏览器拦截，请点击播放"));
     flv.on(flvjs.Events.ERROR, () => {
-      fail("实时视频连接失败：确认设备客户端在线且能访问 RTSP 地址");
+      fail(
+        kind.value === "relay"
+          ? "中继拉流失败：确认背包上 backpack-relay 服务在线"
+          : "实时视频连接失败：确认设备客户端在线且能访问 RTSP 地址"
+      );
       scheduleRetry();
     });
     return;
@@ -237,7 +267,7 @@ async function enterFullscreen() {
 }
 
 watch(
-  () => [props.url, props.type, props.online, props.deviceId],
+  () => [props.url, props.type, props.online, props.deviceId, props.stream],
   () => {
     // 设备 / 地址变化视为全新播放：清掉重连状态
     clearRetry();

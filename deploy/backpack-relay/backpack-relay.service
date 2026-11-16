@@ -1,0 +1,23 @@
+[Unit]
+Description=Backpack relay: push RTSP->FLV to RoboDog OPS platform (:3100)
+Documentation=file:///opt/backpack-relay/relay_push.py
+# 只要求"网络就绪"：板子出公网即可，不需要平台能反向访问它（这正是本服务存在的理由）
+After=network-online.target mediamtx.service snap.mediamtx.mediamtx.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=RELAY_PLATFORM=http://39.107.55.13:3100
+Environment=RELAY_STREAMS=cam0,cam1,cam2,cam3,dogcam,dog-ipcam
+Environment=RELAY_RTSP_BASE=rtsp://127.0.0.1:8554
+# 源不是 H.264 时才置 1（重编码，很吃 CPU）
+Environment=RELAY_TRANSCODE=0
+ExecStart=/usr/bin/python3 /opt/backpack-relay/relay_push.py
+Restart=always
+RestartSec=5
+# python 已经是 exec 的直接子进程，杀掉整组避免残留 ffmpeg
+KillMode=control-group
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

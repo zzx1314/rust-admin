@@ -16,6 +16,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue"
 import { ElMessage } from "element-plus";
 import PageHeader from "@/components/PageHeader.vue";
 import AppIcon from "@/components/AppIcon.vue";
+import VideoPlayer from "@/components/VideoPlayer.vue";
 import VideoStage from "@/components/backpack/VideoStage.vue";
 import SourceRail from "@/components/backpack/SourceRail.vue";
 import AiPanel from "@/components/backpack/AiPanel.vue";
@@ -50,6 +51,30 @@ const form = reactive({
 });
 
 const boxes = ref<BackpackBox[]>([]);
+/**
+ * 观看方式：`direct` = 浏览器直连板端（WHEP，延时最低，要求同内网 + 浏览器许可）；
+ * `relay` = 板端推流到平台（任何网络都能看，延时 1~2s，无 AI 叠加）。
+ * 板端不可达时自动切中继，现场也可以手动切。
+ */
+const watchMode = ref<"direct" | "relay">("direct");
+
+/** 中继模式下板端不可达，页面拿不到 cameras：用固定的六路清单顶上 */
+const RELAY_SOURCES: BackpackSource[] = [
+  { key: "dogcam", label: "机器狗前置", stream: "dogcam", kind: "relay", ai: true, available: true, hint: "" },
+  { key: "cam0", label: "左前", stream: "cam0", kind: "usb", ai: true, available: true, hint: "" },
+  { key: "cam1", label: "右前", stream: "cam1", kind: "usb", ai: true, available: true, hint: "" },
+  { key: "cam2", label: "右后", stream: "cam2", kind: "usb", ai: true, available: true, hint: "" },
+  { key: "cam3", label: "左后", stream: "cam3", kind: "usb", ai: true, available: true, hint: "" },
+  {
+    key: "dog-ipcam",
+    label: "红外",
+    stream: "dog-ipcam",
+    kind: "infrared",
+    ai: false,
+    available: true,
+    hint: "红外通道不参与 AI 识别（热成像不具备可见光模型特征）"
+  }
+];
 const frame = reactive({ w: 1280, h: 720 });
 const counts = ref<{ name: string; zh: string; color: string; value: number }[]>([]);
 const feed = ref<{ ts: number; text: string; color: string }[]>([]);
@@ -70,7 +95,12 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 /** 代理/直连两种接法由这一层吸收，页面其余逻辑不区分 */
 const client = computed(() => clientFor(status.value));
-const sources = computed<BackpackSource[]>(() => status.value?.sources ?? []);
+const sources = computed<BackpackSource[]>(() => {
+  const list = status.value?.sources ?? [];
+  if (list.length) return list;
+  // 直连模式的后端只下发地址、不下发 sources；拿不到 cameras 时用固定清单
+  return watchMode.value === "relay" ? RELAY_SOURCES : list;
+});
 const activeSource = computed<BackpackSource | null>(
   () => sources.value.find(item => item.key === activeKey.value) ?? null
 );
@@ -104,12 +134,17 @@ const aiBadge = computed(() => {
 
 const stageHint = computed(() => {
   if (!status.value) return loadError.value;
+  if (watchMode.value === "relay") {
+    // 中继模式的失败由 VideoPlayer 自己在画面里报（板端 relay 未连接 / 断流）
+    if (!activeSource.value) return "没有可用的视频源";
+    return "";
+  }
   if (!status.value.agent.reachable) {
     const reason = status.value.agent.error || `连不上背包 Agent（${status.value.agent.base}）`;
     // 云端页面直连内网地址会被 Chrome 的 Local Network Access 拦掉，
     // 这种失败和「板子没开」长得一样，必须直接告诉现场该换哪个入口。
     if (!isPrivateOrigin()) {
-      return `${reason}。当前页面由公网地址打开，Chrome 不允许公网页面访问内网地址，请改用现场入口 http://<背包IP>:8080 打开控制台`;
+      return `${reason}。当前页面由公网地址打开，Chrome 不允许公网页面访问内网地址：可点上方「平台中继」，或用现场入口 http://<背包IP>:8080 打开控制台`;
     }
     return reason;
   }
@@ -124,6 +159,8 @@ const stageHint = computed(() => {
 
 const detailText = computed(() => {
   if (!activeSource.value) return "";
+  if (watchMode.value === "relay")
+    return "平台中继 · H264 720p30 · 延时 1~2s（AI 叠加需现场直连）";
   if (!aiRunning.value) return "干净流 · H264 720p30 · 无 AI";
   if (osdActive.value) return `背包烧录 · ${previewStream.value} 流自带中文标签`;
   if (overlay.value === "osd") return "背包烧录未就绪 · 已回退浏览器叠加";
@@ -151,6 +188,19 @@ const relayText = computed(() => {
   if (!relay.enabled) return "未配置源";
   return relay.running ? "推流中" : `已配置 · 未推流（重启 ${relay.restarts} 次）`;
 });
+
+/** 观看方式切换：清掉当前叠加层，并把通道对齐到该模式下真实可用的那一路 */
+function switchWatchMode(mode: "direct" | "relay") {
+  if (watchMode.value === mode) return;
+  watchMode.value = mode;
+  boxes.value = [];
+  if (mode === "relay") {
+    activeKey.value = pickSource(RELAY_SOURCES, activeKey.value || "dogcam");
+    return;
+  }
+  const list = status.value?.sources ?? [];
+  if (list.length) activeKey.value = pickSource(list, activeKey.value);
+}
 
 /* ---------------- 拉取状态 ---------------- */
 
@@ -194,6 +244,14 @@ async function refreshStatus(quiet = false) {
 
     if (!activeKey.value || !data.sources.some(item => item.key === activeKey.value)) {
       activeKey.value = pickSource(data.sources, activeKey.value);
+    }
+    // 板端不可达（换了 WiFi / 公网页面 / 浏览器拦了内网访问）：自动走平台中继，
+    // 免得现场只看到一句「连不上背包 Agent」就卡住
+    if (!data.agent.reachable && watchMode.value === "direct") {
+      watchMode.value = "relay";
+    }
+    if (watchMode.value === "relay" && !activeKey.value) {
+      activeKey.value = pickSource(RELAY_SOURCES, "dogcam");
     }
     // 只在首次 / 场景变化时回填表单，避免覆盖用户正在调整的取值
     if (!previous || previous.detect.status?.task !== data.detect.status?.task) {
@@ -444,8 +502,36 @@ defineExpose({ refreshStatus });
       subtitle="数据采集背包 · 单路视频 + AI 识别（另可切换为背包烧录画框）"
     >
       <template #actions>
+        <div class="seg">
+          <button
+            type="button"
+            class="btn"
+            :class="{ primary: watchMode === 'direct' }"
+            title="浏览器直连板端（WHEP）：延时最低，要求与背包同网段且浏览器放行本地网络访问"
+            @click="switchWatchMode('direct')"
+          >
+            现场直连
+          </button>
+          <button
+            type="button"
+            class="btn"
+            :class="{ primary: watchMode === 'relay' }"
+            title="板端推流到平台：任何网络都能看，延时 1~2s，AI 叠加需现场直连"
+            @click="switchWatchMode('relay')"
+          >
+            平台中继
+          </button>
+        </div>
         <span class="conn-tag" :class="{ ok: status?.agent.reachable, bad: !!status && !status.agent.reachable }">
-          <i />{{ status ? (status.agent.reachable ? "背包已连接" : "背包不可达") : "连接中" }}
+          <i />{{
+            watchMode === "relay"
+              ? "平台中继"
+              : status
+                ? status.agent.reachable
+                  ? "背包已连接"
+                  : "背包不可达"
+                : "连接中"
+          }}
         </span>
         <button type="button" class="btn" :disabled="refreshing" @click="refreshStatus()">
           <AppIcon name="refresh" :size="13" />{{ refreshing ? "刷新中…" : "刷新" }}
@@ -486,7 +572,16 @@ defineExpose({ refreshStatus });
           <AppIcon name="info" :size="13" />{{ activeSource.hint }}
         </p>
 
+        <VideoPlayer
+          v-if="watchMode === 'relay'"
+          type="relay"
+          :url="''"
+          :stream="activeSource?.stream || 'dogcam'"
+          :online="true"
+        />
+
         <VideoStage
+          v-else
           :whep-base="status?.webrtc.base ?? null"
           :stream="playStream"
           :title="activeSource?.label || '—'"
@@ -631,6 +726,32 @@ defineExpose({ refreshStatus });
 </template>
 
 <style scoped>
+/* 观看方式二选一（现场直连 WHEP / 平台中继 FLV） */
+.seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+
+.seg .btn {
+  height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-2);
+}
+
+.seg .btn.primary {
+  background: var(--brand-soft, #e6f2fb);
+  color: var(--brand, #0284c7);
+  font-weight: 600;
+}
+
 .conn-tag {
   display: inline-flex;
   align-items: center;

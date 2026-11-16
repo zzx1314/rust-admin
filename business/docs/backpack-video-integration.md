@@ -301,3 +301,70 @@ POST /api/backpack/detect/config
 - [ ] 停止识别后 3s 内恢复干净流并清空框
 - [ ] 背包不可达时页面给出明确提示，不出现无限 loading
 - [ ] 键盘可达：源 chip 可 Tab 聚焦、`aria-pressed` 正确；`prefers-reduced-motion` 下无动画
+
+---
+
+## 6. 推流中继（2026-11-16 上线）：让公网入口也能看
+
+### 6.1 为什么必须做
+
+§3.5 的两个入口方案有个绕不过去的副作用：**「实时视频」能不能看，取决于操作员那台
+电脑**，而不是平台。现场实测到的三种翻车方式：
+
+| 变化 | 结果 |
+| --- | --- |
+| 换一个 WiFi（`192.168.41.x` → `192.168.43.x`，同一条 `/22`） | REST/SSE 全通、WHEP 信令通，但媒体 ICE 一直 `deadline exceeded` → 黑屏 |
+| 用公网地址 `39.107.55.13:3100` 打开 | Chrome LNA 拦掉页面 → `Failed to fetch`，除非本机手动「允许本地网络访问」 |
+| 清浏览器数据 / 换台电脑 | 上面那条许可没了，又黑 |
+
+浏览器那侧的原理（两闸门，缺一不可）：
+
+1. **Local Network Access**：公网 origin 访问私有地址要许可（Chrome 141+ 灰度、157 实测强制）。
+   按站点记忆，会因清数据/升级失效；无头浏览器默认拒绝。
+2. **媒体通道**：WebRTC 走 UDP `8189`。同网段正常；跨 VLAN/代理/部分 AP 会被拦，
+   症状是 mediamtx 日志 `deadline exceeded while waiting connection`。已在板端
+   `mediamtx.yml` 打开 `webrtcLocalTCPAddress: ':8189'` 作为 ICE-TCP 回退（延时略高）。
+
+这两条都不是我们能在服务端修的，所以换方向：**板子主动出公网推流**。
+
+### 6.2 链路
+
+```text
+本地 mediamtx :8554/<stream>
+  └─ ffmpeg -rtsp_transport tcp -use_wallclock_as_timestamps 1 -c:v copy -f flv -
+       └─ ws://<平台>/ws/device/video       video_register(deviceId="bp:<stream>") + 二进制 FLV
+            └─ 平台 VideoHub 房间 bp:<stream>  ──ws──► 浏览器 flv.js
+                 GET /api/backpack/video/ws?stream=<stream>&token=…
+```
+
+- 服务端：`business/server/src/video.rs`（`BACKPACK_ROOM_PREFIX = "bp:"`、`backpack_viewer_ws`）
+  + `app.rs` 路由 `/api/backpack/video/ws`（在 `require_auth` 层内，`?token=` 鉴权）。
+- 板端：`deploy/backpack-relay/relay_push.py` + `backpack-relay.service`。
+- 前端：`business/web/src/views/monitor/index.vue`（顶部「现场直连 / 平台中继」切换，
+  直连不可达时自动切中继）；播放器复用 `VideoPlayer.vue` 的 `type="relay"` 分支。
+
+### 6.3 三条协议约定（改这块必须同时看）
+
+1. **房间名**：`bp:<stream>`。带这个前缀的推流连接才会被挂上**控制通道**，
+   观看者的 `video_start`/`video_stop` 直接写进它自己那条推流连接（不走设备网关）。
+2. **`video_reset`**：板端每次起 ffmpeg 前先发一条，服务端据此清掉该房间的
+   `init`/`pending`。常驻连接如果不清旧流头，后加入的观看者会拿到「上一轮的关键帧 +
+   这一轮的中段字节」，flv.js 解析错位后卡 `readyState=0`（黑屏）。
+3. **第一个观看者不补流头**：它的加入才触发新流；补上一轮的 `init` 等于把播放器
+   初始化成旧时间轴。
+
+### 6.4 按需与配额
+
+- 常驻 6 条 WS（`cam0..cam3`、`dogcam`、`dog-ipcam`），空闲时每条 ~1KB；
+- 第一个观看者 → `video_start` → 板端起 ffmpeg；最后一个离开 → `video_stop` → 杀进程；
+- 看门狗每 15s 兜一次「起过流但没人看」（`VideoHub::mark_streaming` 才会被盯），
+  板端 relay 的常驻连接不会被误杀；
+- 单路 2Mbps：六路同时看 = 12Mbps 上行，现场带宽要先确认。
+
+### 6.5 已知限制
+
+- 延时 1~2s（WHEP 直连 ~200ms）；延迟敏感场景仍建议现场入口。
+- 中继模式下**没有 AI 叠加**：板端在本机内网，公网页面拿不到 SSE `detect` 事件；
+  AI 仍要现场入口。
+- `dog-ipcam` 源若为 H.265，`-c:v copy` 无法封装成 FLV，需 `RELAY_TRANSCODE=1`
+  （重编码，板端 CPU 开销大，优先改摄像头出 H.264）。

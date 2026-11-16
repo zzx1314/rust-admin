@@ -7,7 +7,8 @@ use serde_json::Value;
 pub struct WsMessage {
     /// 消息类型标识
     pub msg_type: String,
-    /// 时间戳
+    /// 时间戳（仅用于日志排查；板端推流这类简化客户端可以不带）
+    #[serde(default)]
     pub ts: String,
     /// 业务载荷
     pub payload: Value,
