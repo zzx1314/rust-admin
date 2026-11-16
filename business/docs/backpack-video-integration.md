@@ -212,6 +212,9 @@ Chromium 的 **Local Network Access**（PNA 继任者）实测拦截，`Network.
     检出的目标写进 `alerts` + `task_events`（`server/src/ai_patrol.rs`，
     状态见 `GET /api/backpack/ai-window`，决策与边界见
     [`official-app-parity.md`](official-app-parity.md) §5.5）；
+  - ✅ 路线编辑器的「AI 识别」动作**复用本页的模型目录**（`/api/backpack/status` 的
+    `detect.tasks`）：场景 + 识别类别直接勾选，存成动作的 `scene` + `labels`，
+    到点开窗口时原样下发，不再靠中文关键词猜场景；
   - 遥测 / SOS / 其它事件的入库仍未接。
 - **P3**：多背包、设备-用户分配、录像与回放。
 

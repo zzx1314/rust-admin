@@ -12,6 +12,10 @@
 //! 触发条件：`task_progress` 的 `stage` 命中 `patrol.point_arrived` / `patrol.waiting`，
 //! 且该航点的 `actions[]` 里有类型含 `AI` / `识别` 的动作。
 //!
+//! 动作怎么配：路线编辑器「执行参数」直接取**「实时视频 → AI 识别」的模型目录**，
+//! 写成动作的 `scene`（模型包 id）+ `labels`（勾选的类别 `name`）+ `threshold`（置信度）；
+//! 没有这两个字段的历史数据仍按 `param` 里的中文关键词猜场景（兼容老路线）。
+//!
 //! 窗口时长 = `dwell.max(4) + 8` 秒，夹在 10~30 s：Agent 加载模型要 1~3 s，
 //! 太短会「还没开始识别狗就走了」，太长会在离开航点后继续把别的画面当目标。
 //!
@@ -58,6 +62,8 @@ struct Window {
     point_index: i64,
     point_name: String,
     scene: String,
+    /// 实际下发的识别类别（空 = 该场景全部类别），排查「勾了类别还是报了别的目标」用
+    labels: Vec<String>,
     threshold: f64,
     cam: String,
     started_at: String,
@@ -111,6 +117,7 @@ impl AiPatrol {
                     "pointIndex": window.point_index,
                     "pointName": window.point_name,
                     "scene": window.scene,
+                    "labels": window.labels,
                     "threshold": window.threshold,
                     "cam": window.cam,
                     "startedAt": window.started_at,
@@ -212,6 +219,7 @@ impl AiPatrol {
                 point_index,
                 point_name: point.name.clone(),
                 scene: action.hint.clone(),
+                labels: Vec::new(),
                 threshold,
                 cam: String::new(),
                 started_at: now(),
@@ -228,6 +236,8 @@ impl AiPatrol {
             point_index,
             point_name: point.name.clone(),
             hint: action.hint.clone(),
+            scene: action.scene.clone(),
+            labels: action.labels.clone(),
             threshold_text: action.threshold.clone(),
             secs: window_secs,
         };
@@ -248,6 +258,10 @@ struct WindowConfig {
     point_name: String,
     /// 动作 `param` 里的场景提示，如「烟火 / 人员 / 仪表读数」
     hint: String,
+    /// 动作 `scene`：编辑器从实时视频模型目录里选的模型包（优先于 `hint` 猜词）
+    scene: Option<String>,
+    /// 动作 `labels`：勾选的识别类别（英文 `name`，空 = 该场景全部类别）
+    labels: Vec<String>,
     /// 动作 `threshold` 原文，如「置信度 > 0.85」
     threshold_text: String,
     secs: u64,
@@ -290,11 +304,16 @@ async fn run_window(
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    let scene = resolve_scene(tasks_json.as_ref(), &config.hint);
+    let scene = resolve_scene(tasks_json.as_ref(), &config.hint, config.scene.as_deref());
     let threshold = parse_conf(&config.threshold_text)
         .or_else(|| scene.as_ref().map(|item| item.conf))
         .unwrap_or(0.5)
         .clamp(0.05, 0.95);
+    // 勾选的类别只保留该场景真实存在的，全部失效时退回「全部类别」（`labels: null`）
+    let labels = scene
+        .as_ref()
+        .map(|item| scene_labels(tasks_json.as_ref(), &item.task, &config.labels))
+        .unwrap_or_default();
     let cam = status
         .as_ref()
         .and_then(|value| value.get("default_cam"))
@@ -306,12 +325,16 @@ async fn run_window(
         .map(|item| item.task.clone())
         .unwrap_or_else(|| config.hint.clone());
 
-    update_resolved(&stop, &task_name, threshold, &cam).await;
+    update_resolved(&stop, &task_name, &labels, threshold, &cam).await;
 
     // 2) 启动（已在跑就热更新，避免「识别已在运行」被拒）
     let body = json!({
         "task": task_name,
-        "labels": Value::Null,
+        "labels": if labels.is_empty() {
+            Value::Null
+        } else {
+            json!(labels)
+        },
         "conf": threshold,
         "cams": [cam],
         "fps": DETECT_FPS,
@@ -325,8 +348,16 @@ async fn run_window(
         return;
     }
     info!(
-        "航点 AI 识别开始：任务 {} 航点 {}「{}」场景={task_name} 阈值={threshold:.2} 相机={cam} 窗口={}s",
-        config.task_code, config.point_index, config.point_name, config.secs
+        "航点 AI 识别开始：任务 {} 航点 {}「{}」场景={task_name} 类别={} 阈值={threshold:.2} 相机={cam} 窗口={}s",
+        config.task_code,
+        config.point_index,
+        config.point_name,
+        if labels.is_empty() {
+            "全部".to_string()
+        } else {
+            labels.join("/")
+        },
+        config.secs
     );
 
     // 3) 收事件（到期或被打断就收尾）
@@ -459,13 +490,20 @@ async fn record_hit(
 }
 
 /// 把解析出来的场景/阈值/相机回填到窗口记录（`GET /api/backpack/ai-window` 看得到）
-async fn update_resolved(stop: &Arc<Notify>, scene: &str, threshold: f64, cam: &str) {
+async fn update_resolved(
+    stop: &Arc<Notify>,
+    scene: &str,
+    labels: &[String],
+    threshold: f64,
+    cam: &str,
+) {
     let ai = global();
     let mut guard = ai.active.lock().await;
     if let Some(window) = guard.as_mut()
         && Arc::ptr_eq(&window.stop, stop)
     {
         window.scene = scene.to_string();
+        window.labels = labels.to_vec();
         window.threshold = threshold;
         window.cam = cam.to_string();
     }
@@ -500,10 +538,14 @@ struct PointRow {
 }
 
 struct AiAction {
-    /// 动作 `param`：场景提示
+    /// 动作 `param`：场景提示（老数据 / 手填关键词）
     hint: String,
     /// 动作 `threshold`：置信度原文
     threshold: String,
+    /// 动作 `scene`：路线编辑器从实时视频模型目录里选的模型包（精确命中，不猜词）
+    scene: Option<String>,
+    /// 动作 `labels`：勾选的识别类别（Agent 的 label `name`，空 = 该场景全部类别）
+    labels: Vec<String>,
 }
 
 impl PointRow {
@@ -524,6 +566,25 @@ impl PointRow {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string(),
+                scene: action
+                    .get("scene")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string),
+                labels: action
+                    .get("labels")
+                    .and_then(Value::as_array)
+                    .map(|labels| {
+                        labels
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             })
         })
     }
@@ -733,12 +794,47 @@ struct Scene {
     conf: f64,
 }
 
-/// 把动作 `param` 里的中文提示（「烟火 / 人员 / 仪表读数」）对到 Agent 的模型场景上。
+/// 把动作参数对到 Agent 的模型场景上。
 ///
-/// 匹配范围：`task` / `name` / `desc` / 每个类别的 `name`、`zh`。命中最多者胜；
-/// 一个都不命中时退回第一个可用场景（并打 WARN），总比「什么都不跑」好排查。
-fn resolve_scene(tasks: Option<&Value>, hint: &str) -> Option<Scene> {
+/// 两个来源，优先级从高到低：
+///
+/// 1. `scene`：路线编辑器从「实时视频 → AI 识别」模型目录里选的模型包 id（如 `fire`），
+///    精确匹配 `task`，不做猜词——现场选什么就跑什么；
+/// 2. `hint`（动作 `param`）：历史数据 / 手填的中文提示（「烟火 / 人员 / 仪表读数」）。
+///    按 `/ 、 , 空格` 切词，匹配 `task` / `name` / `desc` 与每个类别的 `name`、`zh`，
+///    命中最多者胜；一个都不命中时退回第一个可用场景（并打 WARN），总比「什么都不跑」好排查。
+fn resolve_scene(tasks: Option<&Value>, hint: &str, scene: Option<&str>) -> Option<Scene> {
     let list = tasks?.get("tasks")?.as_array()?;
+    let wanted = scene.map(str::trim).filter(|value| !value.is_empty());
+
+    if let Some(wanted) = wanted
+        && let Some(found) = list.iter().find(|item| {
+            item.get("task")
+                .and_then(Value::as_str)
+                .is_some_and(|task| task.eq_ignore_ascii_case(wanted))
+        })
+    {
+        let scene = Scene {
+            task: found
+                .get("task")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            conf: found.get("conf").and_then(Value::as_f64).unwrap_or(0.5),
+        };
+        debug!(
+            "AI 识别场景：按路线编辑器选的模型包直接命中 → {}",
+            scene.task
+        );
+        return Some(scene);
+    }
+    if let Some(wanted) = wanted {
+        warn!(
+            "AI 识别：路线里指定的场景「{wanted}」不在板端模型列表里（模型包可能已更新），\
+             退回关键词匹配，建议到路线编辑里重选场景"
+        );
+    }
+
     let tokens: Vec<String> = hint
         .split(['/', '、', ',', '，', ' '])
         .map(str::trim)
@@ -809,6 +905,56 @@ fn resolve_scene(tasks: Option<&Value>, hint: &str) -> Option<Scene> {
         return Some(scene);
     }
     None
+}
+
+/// 把动作里勾选的识别类别对到解析出的场景上。
+///
+/// 只保留该场景真实存在（且未被板端标记 `ignored`）的类别名——英文 `name`，
+/// 与「实时视频」下发的 `labels` 是同一套。全部失效时返回空，调用方传
+/// `labels: null` 让 Agent 用该场景的全部类别（比「一个都不识别」安全）。
+fn scene_labels(tasks: Option<&Value>, scene: &str, wanted: &[String]) -> Vec<String> {
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    let Some(item) = tasks
+        .and_then(|value| value.get("tasks"))
+        .and_then(Value::as_array)
+        .and_then(|list| {
+            list.iter()
+                .find(|item| item.get("task").and_then(Value::as_str) == Some(scene))
+        })
+    else {
+        return Vec::new();
+    };
+    let known: Vec<&str> = item
+        .get("labels")
+        .and_then(Value::as_array)
+        .map(|labels| {
+            labels
+                .iter()
+                .filter(|label| {
+                    !label
+                        .get("ignored")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                })
+                .filter_map(|label| label.get("name").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    let keep: Vec<String> = wanted
+        .iter()
+        .filter(|name| known.contains(&name.as_str()))
+        .cloned()
+        .collect();
+    if keep.len() != wanted.len() {
+        warn!(
+            "AI 识别：场景 {scene} 上不存在的类别已忽略（勾了 {} 个，保留 {} 个）：{wanted:?}",
+            wanted.len(),
+            keep.len()
+        );
+    }
+    keep
 }
 
 /* ------------------------------- 启停 ------------------------------- */
@@ -945,13 +1091,56 @@ mod tests {
                  "labels": [{"name": "gauge", "zh": "仪表"}]}
             ]
         });
-        let scene = resolve_scene(Some(&tasks), "仪表读数").expect("scene");
+        let scene = resolve_scene(Some(&tasks), "仪表读数", None).expect("scene");
         assert_eq!(scene.task, "meter");
         assert_eq!(scene.conf, 0.6);
         // 完全不匹配 → 退回第一个可用场景，而不是什么都不跑
-        let scene = resolve_scene(Some(&tasks), "不存在的目标").expect("fallback");
+        let scene = resolve_scene(Some(&tasks), "不存在的目标", None).expect("fallback");
         assert_eq!(scene.task, "fire");
-        assert!(resolve_scene(None, "烟火").is_none());
+        assert!(resolve_scene(None, "烟火", None).is_none());
+    }
+
+    #[test]
+    fn editor_scene_wins_over_keyword_matching() {
+        let tasks = json!({
+            "tasks": [
+                {"task": "fire", "name": "烟火检测", "conf": 0.4, "ok": true,
+                 "labels": [{"name": "smoke", "zh": "烟雾"}, {"name": "flame", "zh": "火焰"}]},
+                {"task": "meter", "name": "仪表读数", "conf": 0.6, "ok": true,
+                 "labels": [{"name": "gauge", "zh": "仪表"}]}
+            ]
+        });
+        // 编辑器选的模型包优先，即使关键词能命中别的场景
+        let scene = resolve_scene(Some(&tasks), "仪表", Some("fire")).expect("scene");
+        assert_eq!(scene.task, "fire");
+        // 选错了（模型包已下线）→ 退回关键词匹配，不让窗口直接不跑
+        let scene = resolve_scene(Some(&tasks), "仪表", Some("gone")).expect("fallback");
+        assert_eq!(scene.task, "meter");
+    }
+
+    #[test]
+    fn labels_are_filtered_to_the_resolved_scene() {
+        let tasks = json!({
+            "tasks": [{
+                "task": "fire", "name": "烟火检测", "ok": true,
+                "labels": [
+                    {"name": "smoke", "zh": "烟雾"},
+                    {"name": "flame", "zh": "火焰"},
+                    {"name": "person", "zh": "人员", "ignored": true}
+                ]
+            }]
+        });
+        // 不存在的 / 被板端标记 ignored 的类别都丢掉
+        let labels = scene_labels(
+            Some(&tasks),
+            "fire",
+            &["flame".to_string(), "person".to_string(), "ghost".to_string()],
+        );
+        assert_eq!(labels, vec!["flame".to_string()]);
+        // 一个都没勾 / 全部无效 → 空，调用方传 `labels: null`（该场景全部类别）
+        assert!(scene_labels(Some(&tasks), "fire", &[]).is_empty());
+        assert!(scene_labels(Some(&tasks), "fire", &["ghost".to_string()]).is_empty());
+        assert!(scene_labels(Some(&tasks), "meter", &["flame".to_string()]).is_empty());
     }
 
     #[test]
@@ -967,6 +1156,25 @@ mod tests {
         let action = point.find_ai_action().expect("ai action");
         assert_eq!(action.hint, "烟火 / 人员");
         assert_eq!(parse_conf(&action.threshold), Some(0.8));
+        assert!(action.scene.is_none());
+        assert!(action.labels.is_empty());
+
+        // 路线编辑器新写法：模型目录里选的场景 + 类别
+        let structured = PointRow {
+            name: "配电柜".to_string(),
+            dwell: 6,
+            actions: vec![json!({
+                "type": "AI 识别",
+                "param": "烟火检测 · 火焰 / 烟雾",
+                "threshold": "置信度 ≥ 0.40",
+                "scene": " fire ",
+                "labels": ["flame", "smoke"]
+            })],
+        };
+        let action = structured.find_ai_action().expect("ai action");
+        assert_eq!(action.scene.as_deref(), Some("fire"));
+        assert_eq!(action.labels, vec!["flame".to_string(), "smoke".to_string()]);
+        assert_eq!(parse_conf(&action.threshold), Some(0.4));
 
         let plain = PointRow {
             name: "过道".to_string(),

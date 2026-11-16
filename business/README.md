@@ -1064,6 +1064,11 @@ AI 可对除红外外的五路开启，画框方式二选一：
   或 `ROBODOG_BACKPACK_URL`（平台能代理到 Agent 时用代理模式）；`ROBODOG_BACKPACK_WEBRTC_URL`
   默认由 Agent 地址推导为同主机 `:8889`。未配置时页面给出配置指引。
 - AI 启停 / 换源 / 改阈值都转发到板端 Agent，NPU 单路独占（红外不参与）。
+- **航点动作复用这份模型目录**：路线编辑器里动作类型选「AI 识别」时，识别场景 / 识别类别
+  直接勾选实时视频页的那一套（`GET /api/backpack/status` → `detect.tasks`），写进动作的
+  `scene` + `labels`，到点开窗口时原样下发给板端，不用再手填关键词（老数据仍兼容关键词匹配）。
+  链路与排查见 [`docs/official-app-parity.md`](docs/official-app-parity.md) §5.6、
+  [`docs/backpack-video-integration.md`](docs/backpack-video-integration.md)。
 - 分析与后续路线（遥测、SOS 告警、中继、录像）见
   [`docs/backpack-video-integration.md`](docs/backpack-video-integration.md)。
 

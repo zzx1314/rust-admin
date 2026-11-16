@@ -169,6 +169,16 @@ export interface RoutePointAction {
   trigger?: string;
   threshold?: string;
   retry?: number;
+  /**
+   * 「AI 识别」专用：背包模型场景（Agent 的 `task`，如 `fire`）。
+   * 来自「实时视频 → AI 识别」的模型目录；为空时服务端按 `param` 里的中文关键词匹配。
+   */
+  scene?: string;
+  /**
+   * 「AI 识别」专用：勾选的识别类别（Agent 的 label `name`，与实时视频下发一致）。
+   * 为空表示该场景的全部类别。
+   */
+  labels?: string[];
 }
 
 export interface RoutePoint {

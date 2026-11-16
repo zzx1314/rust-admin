@@ -19,6 +19,7 @@ import AppIcon from "@/components/AppIcon.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import RouteBaseMap from "@/components/RouteBaseMap.vue";
 import MapChip from "@/components/MapChip.vue";
+import AiActionPicker from "@/components/backpack/AiActionPicker.vue";
 
 const MapBaselineDialog = defineAsyncComponent(
   () => import("@/components/MapBaselineDialog.vue")
@@ -44,6 +45,7 @@ import {
   parseRouteData
 } from "@/utils/format";
 import { canvasToMap, frameOf, mapToCanvas, type MapFrame } from "@/utils/coords";
+import { useAiCatalog } from "@/composables/useAiCatalog";
 
 interface RouteDraft {
   id: number;
@@ -117,8 +119,22 @@ const actionForm = reactive({
   param: "",
   trigger: "到达即执行",
   threshold: "—",
-  retry: 1
+  retry: 1,
+  /** AI 识别：从「实时视频」同一份模型目录里选的模型包 / 类别 / 置信度 */
+  scene: "",
+  labels: [] as string[],
+  aiConf: 0.35
 });
+
+/** 背包 AI 模型目录（场景 + 类别）：仅在配「AI 识别」动作时按需加载 */
+const aiCatalog = useAiCatalog();
+const isAiAction = computed(
+  () => actionForm.type === "AI 识别" && actionKind.value === "point"
+);
+/** 目录里选中了场景时，执行参数由场景 + 类别自动生成，不用手填 */
+const aiParamAuto = computed(
+  () => isAiAction.value && !!aiCatalog.taskOf(actionForm.scene)
+);
 
 const filteredRoutes = computed(() => {
   const keyword = routeQuery.value.trim().toLowerCase();
@@ -694,7 +710,10 @@ function openActionDialog(kind: "point" | "leg") {
     param: meta.param,
     trigger: meta.trigger ?? "到达即执行",
     threshold: meta.threshold ?? "—",
-    retry: 1
+    retry: 1,
+    scene: "",
+    labels: [],
+    aiConf: 0.35
   });
   actionDialog.value = true;
 }
@@ -704,23 +723,62 @@ function syncActionDefaults() {
   actionForm.param = meta.param;
   actionForm.trigger = meta.trigger ?? "到达即执行";
   actionForm.threshold = meta.threshold ?? "—";
+  actionForm.scene = "";
+  actionForm.labels = [];
+  actionForm.aiConf = 0.35;
+  if (actionForm.type === "AI 识别") void aiCatalog.load();
 }
+
+/** 场景 + 类别 → 可读的执行参数（后端仍按 `param` 展示 / 关键词兜底） */
+function composeAiParam() {
+  const task = aiCatalog.taskOf(actionForm.scene);
+  if (!task) return actionForm.param;
+  const picked = aiCatalog
+    .labelsOf(actionForm.scene)
+    .filter(label => actionForm.labels.includes(label.name))
+    .map(label => label.zh);
+  return `${task.name} · ${picked.length ? picked.join(" / ") : "全部类别"}`;
+}
+
+// 选了模型包 / 改了类别或阈值：执行参数自动跟着变（目录不可用时保留手填的关键词）
+watch(
+  [() => actionForm.scene, () => actionForm.labels, () => actionForm.aiConf],
+  () => {
+    if (!isAiAction.value || !aiCatalog.taskOf(actionForm.scene)) return;
+    actionForm.param = composeAiParam();
+  },
+  { deep: true }
+);
+
+// 打开对话框默认是「可见光拍照」：用户切到 AI 识别时才去读模型目录，不拖慢首屏
+watch(
+  () => actionForm.type,
+  type => {
+    if (type === "AI 识别" && actionKind.value === "point") void aiCatalog.load();
+  }
+);
 
 function saveAction() {
   const target =
     actionKind.value === "point" ? selectedPoint.value?.actions : selectedLeg.value?.actions;
   if (!target) return;
   snapshot();
+  // AI 识别：场景 / 类别来自实时视频模型目录，阈值走滑杆（后端按 `threshold` 解析置信度）
+  const ai = isAiAction.value;
   target.push({
     type: actionForm.type,
-    param: actionForm.param,
+    param: ai && aiParamAuto.value ? composeAiParam() : actionForm.param,
     ...(actionKind.value === "point"
       ? {
           trigger: actionForm.trigger,
-          threshold: actionForm.threshold,
+          threshold: ai
+            ? `置信度 ≥ ${(Number(actionForm.aiConf) || 0.35).toFixed(2)}`
+            : actionForm.threshold,
           retry: Number(actionForm.retry) || 1
         }
-      : {})
+      : {}),
+    ...(ai && actionForm.scene ? { scene: actionForm.scene } : {}),
+    ...(ai && actionForm.labels.length ? { labels: [...actionForm.labels] } : {})
   });
   actionDialog.value = false;
   ElMessage.success(`已添加动作：${actionForm.type}`);
@@ -1591,9 +1649,33 @@ onBeforeUnmount(() => {
             <option v-for="type in actionOptions(actionKind)" :key="type">{{ type }}</option>
           </select>
         </div>
+
+        <!-- AI 识别：场景 + 类别 + 阈值直接复用「实时视频」的 AI 模型目录 -->
+        <div v-if="isAiAction" class="field" style="grid-column: 1 / -1">
+          <AiActionPicker
+            v-model:scene="actionForm.scene"
+            v-model:labels="actionForm.labels"
+            v-model:conf="actionForm.aiConf"
+            :tasks="aiCatalog.tasks.value"
+            :loading="aiCatalog.loading.value"
+            :error="aiCatalog.error.value"
+            :live="aiCatalog.live.value"
+            @retry="aiCatalog.load(true)"
+          />
+        </div>
+
         <div class="field" style="grid-column: 1 / -1">
-          <label>执行参数</label>
-          <input v-model="actionForm.param" class="input" />
+          <label>
+            执行参数
+            <span v-if="aiParamAuto" class="muted">（由所选场景与类别自动生成）</span>
+            <span v-else-if="isAiAction" class="muted">（可填模型场景关键词，如「烟火 / 人员」）</span>
+          </label>
+          <input
+            v-model="actionForm.param"
+            class="input"
+            :readonly="aiParamAuto"
+            :placeholder="isAiAction ? '烟火检测 · 火焰 / 烟雾' : ''"
+          />
         </div>
         <template v-if="actionKind === 'point'">
           <div class="field">
@@ -1602,22 +1684,27 @@ onBeforeUnmount(() => {
               <option v-for="trigger in TRIGGERS" :key="trigger">{{ trigger }}</option>
             </select>
           </div>
-          <div class="field">
+          <div v-if="!isAiAction" class="field">
             <label>告警阈值</label>
             <input v-model="actionForm.threshold" class="input" />
+          </div>
+          <div v-else class="field">
+            <label>告警阈值</label>
+            <input
+              class="input mono"
+              :value="`置信度 ≥ ${(Number(actionForm.aiConf) || 0.35).toFixed(2)}`"
+              readonly
+              title="由上方「置信度阈值」滑杆决定"
+            />
           </div>
           <div class="field">
             <label>失败重试次数</label>
             <input v-model.number="actionForm.retry" class="input" type="number" min="0" max="5" />
           </div>
-          <div
-            v-if="actionForm.type === 'AI 识别'"
-            class="rt-hint"
-            style="margin: 0; grid-column: 1 / -1"
-          >
-            执行参数填<b>模型场景关键词</b>（如「烟火 / 人员」，平台按关键词匹配背包上的模型包，都不命中时用第一个可用模型）；
-            告警阈值填<b>置信度</b>（<code>0.85</code> 或 <code>85%</code>，填温度阈值不会被采纳）。
-            到点后由平台自动开启识别，检出目标写入「告警中心」，不占用停留时长。
+          <div v-if="isAiAction" class="rt-hint" style="margin: 0; grid-column: 1 / -1">
+            到点后平台用<b>与实时视频同一套 AI 模型</b>开识别窗口：场景 = 模型包，类别 = 勾选的标签，
+            阈值 = 置信度下限；检出目标写入「告警中心」。窗口时长按停留时间自动算（10~30s），
+            不占用停留时长。模型目录读不到时可以手填场景关键词，后端仍有关键词兜底。
           </div>
         </template>
         <div v-else class="field" style="grid-column: 1 / -1">
