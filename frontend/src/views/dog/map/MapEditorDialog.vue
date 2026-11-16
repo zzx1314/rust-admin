@@ -21,7 +21,7 @@ import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 import EraserIcon from "~icons/ri/eraser-line";
-import HandIcon from "~icons/ri/hand-2-line";
+import HandIcon from "~icons/ri/hand";
 import ZoomIn from "~icons/ri/zoom-in-line";
 import ZoomOut from "~icons/ri/zoom-out-line";
 import Fullscreen from "~icons/ri/fullscreen-line";
