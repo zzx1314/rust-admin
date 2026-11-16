@@ -243,9 +243,8 @@ impl SeqGate {
         // boot 变化**。一次性等待（等某个航点终态）拿这个结论当「算法节点重启、本体任务
         // 已失效」，于是任务刚受理 300ms 就被自己判死：
         //   `航点 X 执行失败: 算法节点重启（boot_id 变化），本体任务已失效`
-        let boot_changed = !self.boot_id.is_empty()
-            && !frame.boot_id.is_empty()
-            && frame.boot_id != self.boot_id;
+        let boot_changed =
+            !self.boot_id.is_empty() && !frame.boot_id.is_empty() && frame.boot_id != self.boot_id;
         if !frame.boot_id.is_empty() && frame.boot_id != self.boot_id {
             // 算法进程重启（或首次拿到 boot_id）：新 boot_id 下 seq 重新计数，游标重置
             self.boot_id.clone_from(&frame.boot_id);

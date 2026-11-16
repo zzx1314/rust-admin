@@ -498,7 +498,10 @@ async fn send_cmd(client: &ZhProClient, cmd: BodyCommand) -> Result<(), String> 
 /// 摇杆重发：协议建议非零值按 50Hz 下发，而浏览器 ~10Hz 的离散帧在本体侧
 /// 会被当成「点动」（走一下停一下，看着像没反应）。这里把最近一帧非零摇杆
 /// 按 20ms 复投，直到摇杆回零或释放接管。
-pub fn spawn_republisher(client: Arc<ZhProClient>, teleop: SharedTeleop) -> tokio::task::JoinHandle<()> {
+pub fn spawn_republisher(
+    client: Arc<ZhProClient>,
+    teleop: SharedTeleop,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_millis(20));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -566,7 +569,10 @@ mod tests {
         assert_eq!(BodyCommand::AvoidOff.code(), 111);
         assert_eq!(BodyCommand::parse("avoid_off"), Some(BodyCommand::AvoidOff));
         assert_eq!(BodyCommand::parse("避障关闭"), Some(BodyCommand::AvoidOff));
-        assert_eq!(BodyCommand::parse("通用模式"), Some(BodyCommand::GenericMode));
+        assert_eq!(
+            BodyCommand::parse("通用模式"),
+            Some(BodyCommand::GenericMode)
+        );
         assert_eq!(
             BodyCommand::parse("generic_mode"),
             Some(BodyCommand::GenericMode)

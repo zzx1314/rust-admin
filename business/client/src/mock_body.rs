@@ -259,8 +259,7 @@ impl MockState {
             };
         }
         if now < ends_at {
-            task.progress =
-                (task.index as f64 / goals as f64 * 100.0).min(99.0);
+            task.progress = (task.index as f64 / goals as f64 * 100.0).min(99.0);
             return;
         }
         task.lifecycle = "success".to_string();
@@ -609,8 +608,16 @@ async fn run_control<S>(
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
-                let path_index = if env.head.msg_type == T_PATH_ADD { 1 } else { 2 };
-                let points_index = if env.head.msg_type == T_PATH_ADD { 2 } else { 3 };
+                let path_index = if env.head.msg_type == T_PATH_ADD {
+                    1
+                } else {
+                    2
+                };
+                let points_index = if env.head.msg_type == T_PATH_ADD {
+                    2
+                } else {
+                    3
+                };
                 let path_id = tuple
                     .get(path_index)
                     .and_then(Value::as_str)
@@ -624,7 +631,10 @@ async fn run_control<S>(
                 if !path_id.is_empty() {
                     guard.paths.insert(path_id.clone(), count);
                 }
-                debug!("假本体: ← {} path_id={path_id} points={count}", env.head.msg_type);
+                debug!(
+                    "假本体: ← {} path_id={path_id} points={count}",
+                    env.head.msg_type
+                );
                 let ack = env.head.msg_type + 1;
                 let _ = tx
                     .send(response(ack, msg_id, json!({ "code": 0, "msg": "ok" })))
@@ -966,7 +976,11 @@ mod tests {
         let task = st.current.as_ref().expect("任务还在跑");
         assert_eq!(task.index, 2, "2s / 每点 1s → 已到第 2 点");
         assert_eq!(task.stage, "navigation.goal_arrived");
-        assert!((task.progress - 40.0).abs() < 0.01, "2/5 = 40%: {}", task.progress);
+        assert!(
+            (task.progress - 40.0).abs() < 0.01,
+            "2/5 = 40%: {}",
+            task.progress
+        );
         assert!(task.is_running());
     }
 

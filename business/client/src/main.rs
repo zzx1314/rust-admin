@@ -3400,7 +3400,11 @@ async fn sync_maps_from_robot(
         .map_err(|e| format!("4012 获取地图列表失败: {e}"))?;
     info!(
         "{}同步地图：本体共有 {} 张地图",
-        if refresh { "中台触发全量刷新" } else { "定时增量" },
+        if refresh {
+            "中台触发全量刷新"
+        } else {
+            "定时增量"
+        },
         maps.len()
     );
 

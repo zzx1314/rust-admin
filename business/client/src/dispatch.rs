@@ -44,7 +44,11 @@ pub fn parse_map_binding(payload: &Value) -> MapBinding {
             .and_then(|m| m.get("mapDir"))
             .and_then(Value::as_str)
             .map(str::to_string)
-            .or_else(|| map.and_then(|m| m.get("mapPath")).and_then(Value::as_str).map(str::to_string))
+            .or_else(|| {
+                map.and_then(|m| m.get("mapPath"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
             .unwrap_or_default(),
         map_type: map
             .and_then(|m| m.get("mapType"))

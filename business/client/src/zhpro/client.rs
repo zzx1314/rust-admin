@@ -520,12 +520,7 @@ impl ZhProClient {
         // 响应类型固定是请求 type + 1（协议 §2.2.2），双击校验用
         self.pending.lock().await.insert(msg_id, (msg_type + 1, tx));
 
-        if self
-            .control_tx
-            .send(Message::Text(text))
-            .await
-            .is_err()
-        {
+        if self.control_tx.send(Message::Text(text)).await.is_err() {
             self.pending.lock().await.remove(&msg_id);
             return Err("control 通道已关闭".to_string());
         }
@@ -627,12 +622,7 @@ impl ZhProClient {
         let env = Envelope::request(msg_type, msg_id, data);
         let text = env.to_text();
         trace!(msg_type, msg_id, packet = %text, "→ 智航请求");
-        if self
-            .control_tx
-            .send(Message::Text(text))
-            .await
-            .is_err()
-        {
+        if self.control_tx.send(Message::Text(text)).await.is_err() {
             self.pending_types.lock().await.remove(&reply_type);
             return Err("control 通道已关闭".to_string());
         }

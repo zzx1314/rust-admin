@@ -15,8 +15,8 @@
 //! 编码参数在 `client.toml` 的 `[video]` 段（`ffmpeg` / `fps` / `bitrate` / `width`）。
 //! 拉流地址不落配置：它属于设备档案，运营在设备管理里改一次即可。
 
-use robodog_device_client::config::Config;
 use futures_util::{SinkExt, StreamExt};
+use robodog_device_client::config::Config;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
@@ -111,7 +111,10 @@ async fn shutdown(active: &mut Option<(tokio::task::JoinHandle<()>, oneshot::Sen
 
 /// 推流主循环：连平台 → 起 ffmpeg → 把 stdout 分片发出去；断了就退避重连
 async fn run_stream(config: Arc<Config>, url: String, mut stop: oneshot::Receiver<()>) {
-    let endpoint = format!("{}/ws/device/video", config.server_url.trim_end_matches('/'));
+    let endpoint = format!(
+        "{}/ws/device/video",
+        config.server_url.trim_end_matches('/')
+    );
     info!("开始实时视频回传: {} → {endpoint}", redact_url(&url));
 
     // 连续失败熔断：一次字节都没推出去说明 ffmpeg / 相机侧有问题，
@@ -269,7 +272,12 @@ fn ffmpeg_args(config: &Config, url: &str, encoder: &str) -> Vec<String> {
     // 带上会直接「Unrecognized option 'preset'」启动失败（瑞芯微 ffmpeg 就是这样）。
     if encoder == "libx264" {
         for value in [
-            "-preset", "ultrafast", "-tune", "zerolatency", "-profile:v", "baseline",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-profile:v",
+            "baseline",
         ] {
             args.push(value.to_string());
         }
@@ -317,7 +325,11 @@ fn pick_encoder(configured: &str, available: &str) -> Option<String> {
     }
     AUTO_ENCODERS
         .iter()
-        .find(|name| available.lines().any(|line| line.split_whitespace().any(|word| word == **name)))
+        .find(|name| {
+            available
+                .lines()
+                .any(|line| line.split_whitespace().any(|word| word == **name))
+        })
         .map(|name| name.to_string())
 }
 
@@ -422,8 +434,13 @@ mod tests {
         if with_scale {
             file.video.width = Some(1280);
         }
-        Config::resolve(&file, &EnvConfig::default(), &CliArgs::default(), Some("TEST-SN"))
-            .expect("默认配置应可解析")
+        Config::resolve(
+            &file,
+            &EnvConfig::default(),
+            &CliArgs::default(),
+            Some("TEST-SN"),
+        )
+        .expect("默认配置应可解析")
     }
 
     #[test]
@@ -434,7 +451,10 @@ mod tests {
             "libx264",
         );
         // 输入参数必须在 -i 之前
-        let transport = args.iter().position(|arg| arg == "-rtsp_transport").unwrap();
+        let transport = args
+            .iter()
+            .position(|arg| arg == "-rtsp_transport")
+            .unwrap();
         let wallclock = args
             .iter()
             .position(|arg| arg == "-use_wallclock_as_timestamps")
@@ -450,7 +470,11 @@ mod tests {
 
     #[test]
     fn scale_is_inserted_before_output_url() {
-        let args = ffmpeg_args(&test_config(true), "rtsp://192.168.234.1:8554/test", "libx264");
+        let args = ffmpeg_args(
+            &test_config(true),
+            "rtsp://192.168.234.1:8554/test",
+            "libx264",
+        );
         let scale = args.iter().position(|arg| arg == "-vf").unwrap();
         let format = args.iter().position(|arg| arg == "-f").unwrap();
         assert!(scale < format, "缩放参数放在输出 URL 之后会被 ffmpeg 忽略");
@@ -459,7 +483,11 @@ mod tests {
 
     #[test]
     fn non_rtsp_source_has_no_rtsp_option() {
-        let args = ffmpeg_args(&test_config(false), "http://192.168.41.9/live.m3u8", "libx264");
+        let args = ffmpeg_args(
+            &test_config(false),
+            "http://192.168.41.9/live.m3u8",
+            "libx264",
+        );
         assert!(
             !args.contains(&"-rtsp_transport".to_string()),
             "非 RTSP 地址带 -rtsp_transport 会让 ffmpeg 报错"

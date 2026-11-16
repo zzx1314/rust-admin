@@ -948,8 +948,14 @@ mod tests {
         let raw = "导航失败: patrol step failed: origin pose unavailable for return-to-start";
         let text = explain_patrol_error(raw, 25.0, 23);
         assert!(text.contains("低电保护"), "要说清是低电: {text}");
-        assert!(text.contains("23%") && text.contains("25%"), "要带上实测电量和阈值: {text}");
-        assert!(text.contains("min_recharge_battery"), "要给出可操作的配置项: {text}");
+        assert!(
+            text.contains("23%") && text.contains("25%"),
+            "要带上实测电量和阈值: {text}"
+        );
+        assert!(
+            text.contains("min_recharge_battery"),
+            "要给出可操作的配置项: {text}"
+        );
         assert!(text.contains(raw), "还要保留本体原话方便对日志: {text}");
     }
 
@@ -1075,7 +1081,10 @@ mod tests {
             ..Default::default()
         }];
         let data = add_nav_path_payload("m", "pid", &p.waypoints);
-        let points = data["add_nav_path"][2].as_array().cloned().unwrap_or_default();
+        let points = data["add_nav_path"][2]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         // dwell=6s + 拍照 → 3 个等待 + 拍照
         assert_eq!(points[0][1]["properties"]["tasks"], json!([0, 0, 0, 1]));
         // 没配停留、只拍照 → 不等待，到点拍完就走

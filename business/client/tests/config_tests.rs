@@ -566,9 +566,7 @@ fn road_network_mode_maps_to_protocol_values() {
 /// `--no-map-sync` / `sync_interval_secs = 0` 必须是真的关掉（不发 4012）。
 #[test]
 fn map_sync_interval_defaults_and_overrides() {
-    use robodog_device_client::config::{
-        DEFAULT_MAP_SYNC_INTERVAL_SECS, ENV_MAP_SYNC_INTERVAL,
-    };
+    use robodog_device_client::config::{DEFAULT_MAP_SYNC_INTERVAL_SECS, ENV_MAP_SYNC_INTERVAL};
 
     // 默认值
     let config = Config::resolve(
@@ -578,7 +576,10 @@ fn map_sync_interval_defaults_and_overrides() {
         Some(SN_FROM_PARTITION),
     )
     .expect("默认配置应可解析");
-    assert_eq!(config.map_sync_interval_secs, DEFAULT_MAP_SYNC_INTERVAL_SECS);
+    assert_eq!(
+        config.map_sync_interval_secs,
+        DEFAULT_MAP_SYNC_INTERVAL_SECS
+    );
 
     // 命令行
     let config = Config::resolve(
