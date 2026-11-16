@@ -2,9 +2,9 @@ use crate::app::AppState;
 use crate::db::now;
 use crate::error::AppError;
 use crate::gateway_types::{
-    CommandPayload, DeviceEventPayload, HeartbeatAckPayload, HeartbeatPayload, PendingCommand,
-    RegisterAckPayload, RegisterPayload, TaskControlPayload, TaskDispatchPayload,
-    TaskProgressPayload, TeleopStatePayload, WsMessage,
+    AiDetectPayload, AiEndPayload, AiPointPayload, CommandPayload, DeviceEventPayload,
+    HeartbeatAckPayload, HeartbeatPayload, PendingCommand, RegisterAckPayload, RegisterPayload,
+    TaskControlPayload, TaskDispatchPayload, TaskProgressPayload, TeleopStatePayload, WsMessage,
 };
 use crate::models::{Device, Task};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -351,6 +351,36 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                         });
                                     handle_task_progress(&state, did, &payload).await;
                                     send_msg(&tx, "task_progress_ack", json!({"received": true})).await;
+                                }
+                            }
+                            // ── 航点 AI 识别（客户端代调板端 Agent）──────────────
+                            // 正式环境业务平台在公网、背包 Agent 只在内网，服务端连不上；
+                            // 客户端与 Agent 同机，由它探测/启停并把检出回传。
+                            "ai_point" => {
+                                if let Some(ref did) = device_id {
+                                    let payload: AiPointPayload = serde_json::from_value(ws_msg.payload)
+                                        .unwrap_or_default();
+                                    crate::ai_patrol::global()
+                                        .on_client_point(&state, did, &payload)
+                                        .await;
+                                }
+                            }
+                            "ai_detect" => {
+                                if let Some(ref did) = device_id {
+                                    let payload: AiDetectPayload = serde_json::from_value(ws_msg.payload)
+                                        .unwrap_or_default();
+                                    crate::ai_patrol::global()
+                                        .on_client_detect(&state, did, &payload)
+                                        .await;
+                                }
+                            }
+                            "ai_end" => {
+                                if let Some(ref did) = device_id {
+                                    let payload: AiEndPayload = serde_json::from_value(ws_msg.payload)
+                                        .unwrap_or_default();
+                                    crate::ai_patrol::global()
+                                        .on_client_end(&state, did, &payload)
+                                        .await;
                                 }
                             }
                             "command_result" => {
@@ -1907,6 +1937,35 @@ pub async fn dispatch_task_to_device(
     } else {
         warn!("device {device_id} not connected");
         false
+    }
+}
+
+/// 向指定设备发送任意业务消息（航点 AI 的 `ai_start` / `ai_stop` 用它）。
+///
+/// 与 `dispatch_task_to_device` 同一条广播通道，返回「是否真的送进了设备连接」——
+/// 设备不在线时调用方必须能感知（否则会误以为窗口已经开了）。
+pub async fn send_message_to_device(
+    connections: &DeviceConnections,
+    device_id: &str,
+    msg_type: &str,
+    payload: Value,
+) -> bool {
+    let map = connections.read().await;
+    let Some(tx) = map.get(device_id) else {
+        return false;
+    };
+    match tx.send(PendingCommand {
+        cmd_type: msg_type.to_string(),
+        payload,
+    }) {
+        Ok(_) => {
+            debug!("sent {msg_type} to device {device_id}");
+            true
+        }
+        Err(_) => {
+            warn!("failed to send {msg_type} to device {device_id} (no receivers)");
+            false
+        }
     }
 }
 

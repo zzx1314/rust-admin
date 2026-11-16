@@ -30,6 +30,7 @@
 //! cargo run -- --robot 192.168.234.234 --map-only --map-name A区新图
 //! ```
 
+mod ai_patrol;
 mod dispatch;
 mod mapupload;
 /// 联调用「假本体」：`--robot mock` 时在进程内起一个智航 Pro 网关模拟器
@@ -37,6 +38,9 @@ mod mock_body;
 mod video;
 mod zhpro;
 
+use ai_patrol::{
+    AiPatrol, AiPoint, AiStart, ai_point_at, is_arrival_stage, is_point_stage, parse_ai_points,
+};
 use chrono::Local;
 use dispatch::{TaskMode, parse_flight_plan, parse_map_binding};
 use futures_util::{SinkExt, StreamExt};
@@ -507,6 +511,8 @@ struct ActiveTask {
     task_name: String,
     nav_task_id: Option<String>,
     stage: Option<String>,
+    /// 本条路线里带「AI 识别」动作的航点（到点时按 `detail_index` 查）
+    ai_points: Vec<AiPoint>,
 }
 
 type Shared<T> = Arc<Mutex<T>>;
@@ -756,6 +762,7 @@ async fn run_mapping_once(config: &Config, zhpro: Arc<ZhProClient>) {
 /// 本体链路重建时需要重新挂到新任务上的共享句柄（都可 `Clone`）
 struct BodyContext {
     config: Arc<Config>,
+    ai: Arc<AiPatrol>,
     out_tx: mpsc::Sender<WsMessage>,
     state: Shared<RobotState>,
     active: Shared<Option<ActiveTask>>,
@@ -803,6 +810,7 @@ impl BodyLink {
             ctx.local_mapping.clone(),
             ctx.teleop.clone(),
             ctx.config.clone(),
+            ctx.ai.clone(),
         ));
         // 摇杆重发（50Hz）：浏览器 ~10Hz 的离散帧需要在本体侧连续化，否则看着像点动
         self.republisher = Some(teleop::spawn_republisher(
@@ -1085,9 +1093,25 @@ async fn run_client(
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
 
+    // 航点 AI 识别：板端 Agent 与客户端同机（127.0.0.1 一定通），
+    // 业务平台在公网够不到板端，所以由客户端本地代调 Agent（见 `ai_patrol` 模块）
+    let ai = Arc::new(AiPatrol::new(
+        config.ai_agent_url.clone(),
+        config.ai_enabled,
+    ));
+    if config.ai_enabled {
+        info!(
+            "航点 AI 识别已启用：板端 Agent = {}（到点且有「AI 识别」动作时本地开识别）",
+            ai.agent()
+        );
+    } else {
+        info!("航点 AI 识别已关闭（--no-ai / ROBODOG_AI_ENABLED=0）");
+    }
+
     // 本体链路（可变）：断连后原地重建，业务 WebSocket 不受影响
     let body_ctx = BodyContext {
         config: Arc::new(config.clone()),
+        ai: ai.clone(),
         out_tx: out_tx.clone(),
         state: state.clone(),
         active: active.clone(),
@@ -1182,6 +1206,7 @@ async fn run_client(
                             &teleop,
                             &video,
                             &body_reconnect_tx,
+                            &ai,
                         ).await;
                     }
                     Some(Ok(Message::Ping(data))) => {
@@ -1441,6 +1466,7 @@ fn spawn_zhpro_pump(
     local_mapping: Shared<Option<Arc<MappingSession>>>,
     teleop: SharedTeleop,
     config: Arc<Config>,
+    ai: Arc<AiPatrol>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut rx = client.subscribe();
@@ -1549,6 +1575,7 @@ fn spawn_zhpro_pump(
                         &active,
                         &monitor,
                         &mut progress_reporter,
+                        &ai,
                     )
                     .await;
                 }
@@ -1826,6 +1853,7 @@ async fn handle_status_frame(
     active: &Shared<Option<ActiveTask>>,
     monitor: &Arc<Mutex<TaskMonitor>>,
     reporter: &mut ProgressReporter,
+    ai: &Arc<AiPatrol>,
 ) {
     // 文档 §2.6.10 第 5 条：即时终态可能已经在 `current_task` 里被回收，只留在
     // `recent_terminal_tasks` 里（最多 3 条 / 约 30s）。两处都要识别，否则
@@ -1909,6 +1937,30 @@ async fn handle_status_frame(
     // 每次真正发出去的 payload 都打到日志：现场排查「平台显示的状态与本体不一致」时，
     // 先看这里上报了什么，再去对上面那条 5009 快照行，比猜更直接
     reporter.report(out_tx, &payload, "5009").await;
+
+    // 航点 AI 识别：走到带「AI 识别」动作的航点就本地开识别窗口，终态时关窗。
+    // 与服务端版本同一条规则（`patrol.point_arrived` / `patrol.waiting` + 该点有 AI 动作），
+    // 只是把「谁去调 Agent」从公网平台换成了同机的客户端。
+    // 识别失败只打日志，绝不影响巡检本身。
+    if task.is_terminal() {
+        ai.stop("任务终态").await;
+    } else if is_arrival_stage(&task.stage) {
+        let current = active.lock().await.clone();
+        if let (Some(current), Some(index)) = (current, index) {
+            match ai_point_at(&current.ai_points, index) {
+                Some(point) => {
+                    ai.point_arrived(out_tx, &current.task_code.clone(), point)
+                        .await
+                }
+                // 这个点没有 AI 动作：上一个点的窗口别继续跑（画面已经变了）
+                None => ai.stop("到达无 AI 动作的航点").await,
+            }
+        }
+    } else if !is_point_stage(&task.stage) {
+        // 狗已经离开航点（前往下一点 / 返航 / 别的任务阶段）：窗口时长跟着停留时间走，
+        // 收口交给这里，别让相机把路过的东西当成这个点的目标
+        ai.stop("已离开航点").await;
+    }
 
     // 离散事件（去重后只报一次）
     if monitor.lock().await.take_event(&task) {
@@ -2089,6 +2141,7 @@ async fn handle_server_message(
     teleop: &SharedTeleop,
     video: &VideoRelay,
     body_reconnect: &mpsc::Sender<()>,
+    ai: &Arc<AiPatrol>,
 ) {
     match msg.msg_type.as_str() {
         "register_ack" => {
@@ -2147,6 +2200,19 @@ async fn handle_server_message(
             video.stop().await;
         }
 
+        // 航点 AI 识别：平台已经按路线里的动作算好场景/类别/阈值/窗口秒数，
+        // 这里只管在本机启停板端 Agent 并回传检出（服务端够不到板端 Agent）
+        "ai_start" => match AiStart::from_value(&msg.payload) {
+            Some(start) => ai.start(out_tx, start).await,
+            None => warn!("ai_start 载荷缺少 windowId，忽略: {}", msg.payload),
+        },
+
+        // 平台关窗（任务终态 / 暂停 / 取消）：窗口任务自己停 Agent 并回报 ai_end
+        "ai_stop" => {
+            let reason = msg.payload["reason"].as_str().unwrap_or("平台关闭窗口");
+            ai.stop(reason).await;
+        }
+
         // 事件回执：客户端发的 event 由服务端落库后回 ack，不需要额外处理
         "event_ack" => {}
 
@@ -2185,11 +2251,24 @@ async fn handle_server_message(
             // （模拟模式下同样会打，用来核对 map / routeData 是否与平台一致）
             info!("task_dispatch 载荷: {}", msg.payload);
 
+            // 本条路线里带「AI 识别」动作的航点：到点由 5009 的 detail_index 查表触发
+            let ai_points = parse_ai_points(&msg.payload["routeData"]);
+            if !ai_points.is_empty() {
+                info!(
+                    "任务 {task_code} 含 {} 个 AI 识别航点: {:?}",
+                    ai_points.len(),
+                    ai_points
+                        .iter()
+                        .map(|point| (point.index, point.name.as_str()))
+                        .collect::<Vec<_>>()
+                );
+            }
             *active.lock().await = Some(ActiveTask {
                 task_code: task_code.clone(),
                 task_name: task_name.clone(),
                 nav_task_id: None,
                 stage: None,
+                ai_points,
             });
             state.lock().await.current_task = Some(task_name.clone());
 
@@ -2682,6 +2761,8 @@ async fn handle_server_message(
                         None => warn!("建图停止，未收到 4001"),
                     }
                 }
+                // 任务取消：识别窗口没有继续的意义（Agent 单路，别占着）
+                ai.stop("任务已取消").await;
                 *active.lock().await = None;
                 state.lock().await.current_task = None;
             }

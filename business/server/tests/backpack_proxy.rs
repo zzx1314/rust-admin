@@ -73,6 +73,8 @@ fn config_with(
         backpack_base_url,
         backpack_webrtc_url: None,
         backpack_browser_url,
+        point_ai: "auto".to_string(),
+        ai_window_max_secs: 300,
         public_url: None,
         wecom_enabled: false,
         wecom_webhook: None,

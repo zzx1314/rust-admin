@@ -204,6 +204,47 @@ ssh root@192.168.41.246 'cd /opt/robodog/client &&
 | `backpack-relay.service` | 板子 `.246` | **板端推流中继**：按需把本地 RTSP 转 FLV 推到平台 `:3100`，公网入口也能看（见下方「推流中继」） |
 | `site-console.service` | 板子 `.246`（可换任意内网机） | 内网托管同一份控制台 `dist`（`:8080`），见下方「为什么需要现场入口」 |
 | `rust-admin-robodog` | 云端 `39.107.55.13:3100` | 业务平台；背包接入方式由 `ROBODOG_BACKPACK_BROWSER_URL` 决定（直连模式） |
+| `robodog-device-client` | 板子 `.246` | 设备客户端。2026-11-16 起**兼任航点 AI 的本地代理**：到点自己调 `127.0.0.1:8000`，因为云端平台连不到内网 Agent |
+
+### 航点 AI 识别：由客户端代调（2026-11-16）
+
+现场表现：路线里首点配了「AI 识别」，任务跑完平台一条 AI 告警都没有。原因是业务平台在
+公网、Agent 只在内网（`39.107.55.13 → 192.168.41.246:8000` 实测超时），服务端直连逻辑
+只能跳过（日志 `AI 识别：本部署的服务端访问不到背包 Agent，跳过航点…`）。
+
+现在由同机的设备客户端代调，**服务端不用开任何到板端的入站通道**：
+
+```text
+客户端到点(5009) ──ai_point(带板端模型目录)──► 平台：算场景/类别/阈值/窗口
+     ▲                                            │
+     └──── ai_start ───────────────────────────────┘
+     │  POST 127.0.0.1:8000/api/detect/start|config，读 /api/events
+     └──── ai_detect / ai_end ────────────────────► 平台：alerts + task_events + 企微
+任务终态/取消 ◄── ai_stop ──────────────────────── 平台
+```
+
+- 服务端配置：`[backpack] point_ai` / `ROBODOG_POINT_AI`（默认 `auto`）——`auto` 时
+  **没配** `ROBODOG_BACKPACK_URL` 就走客户端代调，配了就走老的直连模式，两者不会重复开窗；
+- 客户端配置：`/etc/robodog/client.toml` 的 `[ai] agent_url = "http://127.0.0.1:8000"`
+  （默认值就是它，一般不用写），`--no-ai` 可关闭；
+- **必须升级客户端二进制**才生效（旧客户端不会上报 `ai_point`，平台会一直按直连模式跳过）。
+  发布方式同上「二、现场设备客户端发布」。
+
+验收：
+
+```bash
+# 客户端日志（到点时应出现这三行）
+ssh root@192.168.41.246 'journalctl -u robodog-device-client -f | grep -E "航点 AI 识别"'
+#  航点 AI 识别：请求开窗 任务 TK-… 航点 0「…」场景=Some("firextinguisher") …
+#  航点 AI 识别开始：场景=firextinguisher 类别=extinguisher 阈值=0.35 相机=dogcam 窗口=30s
+#  航点 AI 识别结束：场景=firextinguisher 窗口到期（30s），上报 1 类目标
+
+# 平台侧：窗口态（source 应为 client）
+curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/ai-window
+# 平台侧：告警与任务时间线
+sqlite3 /opt/hz/rust-admin/robodog/data/robodog.db \
+  "SELECT alert_code,content,occurred_at FROM alerts WHERE content LIKE 'AI 识别%' ORDER BY id DESC LIMIT 5;"
+```
 
 ### 推流中继（2026-11-16 上线，公网入口可看视频）
 

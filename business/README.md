@@ -24,7 +24,7 @@ business/
 │   │   ├── gateway.rs             # 设备 WebSocket 网关（注册/心跳/下发/控制）
 │   │   ├── gateway_types.rs       # 网关消息协议类型
 │   │   ├── dispatch.rs            # 任务下发载荷组装（地图绑定/速度/结束动作）
-│   │   ├── ai_patrol.rs           # 航点到点 AI 识别（开窗口 → 收 SSE → 写告警）
+│   │   ├── ai_patrol.rs           # 航点到点 AI 识别（算场景/阈值 → 直连或经客户端调 Agent → 写告警）
 │   │   ├── notify.rs              # 企业微信告警推送（去重/限流/截断/重试）
 │   │   ├── handlers/              # 园区、区域、设备、任务、路线、告警、设置、驾驶舱
 │   │   └── app.rs                 # 路由装配、CORS、静态资源
@@ -33,6 +33,7 @@ business/
 │   └── data/robodog.db            # 运行时生成，删除后自动重建并重新播种
 ├── client/                        # 设备客户端：业务协议 + 智航 Pro 本体驱动
 │   ├── src/main.rs                # 双后端连接、任务分派、状态上报
+│   ├── src/ai_patrol.rs           # 航点 AI 识别：本地调板端 Agent、回传检出
 │   ├── src/dispatch.rs            # 业务载荷 → FlightPlan
 │   └── src/zhpro/                 # 智航 Pro 协议层、建图、地图管理、航线执行
 └── web/                           # 独立 Vue 3 控制台
@@ -1067,8 +1068,25 @@ AI 可对除红外外的五路开启，画框方式二选一：
 - **航点动作复用这份模型目录**：路线编辑器里动作类型选「AI 识别」时，识别场景 / 识别类别
   直接勾选实时视频页的那一套（`GET /api/backpack/status` → `detect.tasks`），写进动作的
   `scene` + `labels`，到点开窗口时原样下发给板端，不用再手填关键词（老数据仍兼容关键词匹配）。
+  窗口时长跟着该点的「停留时长」走（停留 + 8 s，最短 10 s、上限 `ai_window_max_secs`
+  默认 300 s），**离开航点立即结束**——所以 `dwell=100` 的点会识别满整段停留，不再只覆盖前 30 s。
   链路与排查见 [`docs/official-app-parity.md`](docs/official-app-parity.md) §5.6、
   [`docs/backpack-video-integration.md`](docs/backpack-video-integration.md)。
+- **正式环境的航点 AI 由设备客户端代调**（`[backpack] point_ai` / `ROBODOG_POINT_AI`）：
+  业务平台在公网、Agent 只在现场内网，服务端直连必然超时——现场表现就是「路线里配了
+  AI 识别，跑完却一条告警都没有」。客户端与 Agent 同机（`127.0.0.1:8000`），所以：
+
+  ```text
+  客户端到点(5009) → GET tasks/status(本机) → ai_point（含模型目录）→ 服务端算场景/类别/阈值/窗口
+                → ai_start → POST /api/detect/start|config → 读 SSE → ai_detect（按阈值+类别去重）
+                → ai_end → 服务端写 alerts + task_events + 企微推送
+  任务终态/取消 → 服务端下发 ai_stop → 客户端 POST /api/detect/stop
+  ```
+
+  `auto`（默认）按部署形态选：配了 `ROBODOG_BACKPACK_URL`（服务端与板端同网段）就走服务端
+  直连，否则交给客户端。决策逻辑（场景匹配、阈值解析、窗口时长）只有 `ai_patrol.rs` 一份，
+  客户端只负责搬运，两边不会各说一套。客户端配置看 `client.toml` 的 `[ai]` 段
+  （`agent_url` 默认 `http://127.0.0.1:8000`，`--no-ai` 可关闭）。
 - 分析与后续路线（遥测、SOS 告警、中继、录像）见
   [`docs/backpack-video-integration.md`](docs/backpack-video-integration.md)。
 

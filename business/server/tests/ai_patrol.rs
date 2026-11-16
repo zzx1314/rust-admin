@@ -72,6 +72,8 @@ fn config_with(dir: &std::path::Path, backpack_base_url: Option<String>) -> Conf
         backpack_base_url,
         backpack_webrtc_url: None,
         backpack_browser_url: None,
+        point_ai: "auto".to_string(),
+        ai_window_max_secs: 300,
         public_url: None,
         wecom_enabled: false,
         wecom_webhook: None,
@@ -187,7 +189,14 @@ async fn spawn_fake_agent(calls: Arc<AgentCalls>) -> String {
 }
 
 async fn state_with(agent: Option<String>, dir: PathBuf) -> AppState {
-    let config = Arc::new(config_with(&dir, agent));
+    state_with_point_ai(agent, "auto", dir).await
+}
+
+/// 指定 `point_ai` 的部署形态（`server` = 服务端直连 Agent）
+async fn state_with_point_ai(agent: Option<String>, point_ai: &str, dir: PathBuf) -> AppState {
+    let mut raw = config_with(&dir, agent);
+    raw.point_ai = point_ai.to_string();
+    let config = Arc::new(raw);
     let pool = db::connect(&config).await.expect("连接测试库失败");
     db::migrate(&pool).await.expect("迁移失败");
     seed::seed(&pool).await.expect("播种失败");
@@ -375,6 +384,59 @@ async fn ai_action_at_waypoint_starts_detect_and_records_alert() {
     drop(temp);
 }
 
+/// 长停留窗口不再按 30 s 截断，离开航点（`stage` 变成 `patrol.navigating`）时
+/// 必须立刻停识别——这是取代「截断时长」的防误报机制。
+#[tokio::test]
+async fn leaving_the_point_stops_detect_in_server_mode() {
+    let _serial = TEST_LOCK.lock().await;
+    ai_patrol::global().stop("测试初始化").await;
+    let calls = Arc::new(AgentCalls::default());
+    let agent = spawn_fake_agent(calls.clone()).await;
+    let dir = temp_dir();
+    let temp = TempDb { dir: dir.clone() };
+    let state = state_with_point_ai(Some(agent), "server", dir).await;
+    let task_code = seed_ai_route(&state, true).await;
+
+    ai_patrol::global()
+        .on_progress(
+            &state,
+            "RD-TEST",
+            &arrival(&task_code, "patrol.point_arrived"),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let status = ai_patrol::global().status().await;
+    assert_eq!(status["active"], json!(true), "到点应开窗: {status}");
+    // dwell=6 → 14s 窗口（不再是 30s 上限，也不该被别的规则改回去）
+    assert_eq!(status["windowSecs"], json!(14), "{status}");
+
+    let leaving: TaskProgressPayload = serde_json::from_value(json!({
+        "taskCode": task_code,
+        "status": "执行中",
+        "progress": 50,
+        "pointIndex": 0,
+        "stage": "patrol.navigating",
+        "totalPoints": 1,
+    }))
+    .expect("构造导航阶段载荷失败");
+    ai_patrol::global()
+        .on_progress(&state, "RD-TEST", &leaving)
+        .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    assert_eq!(
+        ai_patrol::global().status().await["active"],
+        json!(false),
+        "离开航点后窗口必须关闭"
+    );
+    let log = calls.log.lock().unwrap().clone();
+    assert!(
+        log.contains(&"start".to_string()) && log.contains(&"stop".to_string()),
+        "开过窗就一定要停: {log:?}"
+    );
+    drop(temp);
+}
+
 #[tokio::test]
 async fn point_without_ai_action_never_starts_detect() {
     let _serial = TEST_LOCK.lock().await;
@@ -405,15 +467,18 @@ async fn point_without_ai_action_never_starts_detect() {
     drop(temp);
 }
 
-/// 没接背包（`ROBODOG_BACKPACK_URL` 未配置）时不能把窗口留在状态里：
-/// 否则 `/api/backpack/ai-window` 会一直说「正在识别」，现场会误判。
+/// 服务端直连模式（`point_ai=server`）却没配 `ROBODOG_BACKPACK_URL` 时，
+/// 不能把窗口留在状态里：否则 `/api/backpack/ai-window` 会一直说「正在识别」，现场会误判。
+///
+/// 注意 `auto` 形态下这种部署已经改走客户端代调（见 `tests/ai_client_mode.rs`），
+/// 这条只覆盖「显式配成 server 但漏了地址」的错配。
 #[tokio::test]
 async fn missing_agent_does_not_leave_stale_window() {
     let _serial = TEST_LOCK.lock().await;
     ai_patrol::global().stop("测试初始化").await;
     let dir = temp_dir();
     let temp = TempDb { dir: dir.clone() };
-    let state = state_with(None, dir).await;
+    let state = state_with_point_ai(None, "server", dir).await;
     let task_code = seed_ai_route(&state, true).await;
 
     ai_patrol::global()

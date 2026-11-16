@@ -16,8 +16,23 @@
 //! 写成动作的 `scene`（模型包 id）+ `labels`（勾选的类别 `name`）+ `threshold`（置信度）；
 //! 没有这两个字段的历史数据仍按 `param` 里的中文关键词猜场景（兼容老路线）。
 //!
-//! 窗口时长 = `dwell.max(4) + 8` 秒，夹在 10~30 s：Agent 加载模型要 1~3 s，
-//! 太短会「还没开始识别狗就走了」，太长会在离开航点后继续把别的画面当目标。
+//! 窗口时长 = `dwell.max(4) + 8` 秒，下限 10 s（Agent 加载模型要 1~3 s，太短会
+//! 「还没开始识别狗就走了」），上限 `[backpack] ai_window_max_secs`（默认 300 s，与
+//! 路线停留上限一致）——**停多久就识别多久**，不再把长停留截断成 30 s。
+//!
+//! 防「离开航点后继续把别的画面当目标」不靠截断时长，而靠阶段收口：`stage` 一旦不再是
+//! `patrol.point_*` / `patrol.waiting`（即狗开始走向下一个点），窗口立刻关闭。
+//!
+//! 两种调用方（`[backpack] point_ai` / `ROBODOG_POINT_AI`，默认 `auto`）：
+//!
+//! - `server`：本模块直连 Agent（要求服务端能 HTTP 到板端，即配了 `ROBODOG_BACKPACK_URL`）；
+//! - `client`：**设备客户端代调**。正式环境的业务平台在公网、Agent 只在现场内网，
+//!   服务端直连必然超时（现场表现就是「配了 AI 识别从来没告警」）。客户端与 Agent
+//!   同机（`127.0.0.1:8000`），到点把「动作参数 + 板端模型目录」上报（`ai_point`），
+//!   本模块用**同一套** `resolve_scene` / `scene_labels` / `parse_conf` / `window_secs`
+//!   算好参数下发 `ai_start`，客户端启停 Agent 并把检出回传（`ai_detect` / `ai_end`）。
+//!   决策逻辑只有这一份，两边不会各说一套。
+//! - `auto`：配了 `backpack_base_url` 走 `server`，否则走 `client`。
 //!
 //! 已知边界（写在这里以免下次重新踩）：
 //!
@@ -32,7 +47,7 @@
 use crate::app::AppState;
 use crate::backpack;
 use crate::db::now;
-use crate::gateway_types::TaskProgressPayload;
+use crate::gateway_types::{AiDetectPayload, AiEndPayload, AiPointPayload, TaskProgressPayload};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock};
@@ -42,11 +57,16 @@ use tracing::{debug, info, warn};
 
 /// 到点后识别窗口的基础时长（秒）：`dwell.max(4) + 8`，再夹到 `[10, 30]`。
 const WINDOW_MIN_SECS: u64 = 10;
-const WINDOW_MAX_SECS: u64 = 30;
+/// 窗口时长默认上限（秒）：与路线「停留时长」的单点上限一致（300 s = 150 个 2 s 等待）。
+/// 要收紧用 `[backpack] ai_window_max_secs` / `ROBODOG_AI_WINDOW_MAX_SECS`。
+pub const DEFAULT_WINDOW_MAX_SECS: u64 = 300;
 /// 推理帧率：巡检到点停留才几秒，3 fps 足够抓目标，又不会占满板端算力。
 const DETECT_FPS: u32 = 3;
 /// 单条 SSE 缓冲上限：Agent 事件每条几十字节，超过说明流里没有 `\n\n`，直接丢弃重来。
 const SSE_BUF_LIMIT: usize = 64 * 1024;
+/// 客户端代调模式的窗口序号：同一个航点可能被开多次（长停留 / 重试），
+/// 必须让每次的 `windowId` 唯一，客户端才能靠它判断「我是不是已经被顶替」。
+static WINDOW_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// 到点 AI 识别的进程级状态（Agent 单路推理 → 窗口也只能有一个）。
 static GLOBAL: LazyLock<AiPatrol> = LazyLock::new(AiPatrol::new);
@@ -57,6 +77,8 @@ pub fn global() -> &'static AiPatrol {
 
 /// 已经在跑的一个识别窗口
 struct Window {
+    /// 客户端代调模式下的窗口 ID（服务端直连模式为空串）
+    window_id: String,
     device_code: String,
     task_code: String,
     point_index: i64,
@@ -71,6 +93,36 @@ struct Window {
     stop: Arc<Notify>,
     /// 本窗口已上报的类别（同一类别只报一次，避免 3 fps 刷屏）
     hits: Arc<Mutex<Vec<Hit>>>,
+    /// 告警 / 任务事件需要的上下文（任务名、园区、航点名等）
+    cfg: WindowConfig,
+}
+
+/// 航点 AI 到底谁去调 Agent。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointAiSource {
+    Client,
+    Server,
+}
+
+/// 按配置解析调用方：`auto` 看有没有配服务端可达的 Agent 地址。
+pub fn source_for(config: &crate::config::Config) -> PointAiSource {
+    resolve_source(&config.point_ai, config.backpack_base_url.is_some())
+}
+
+/// [`source_for`] 的纯函数版本（配置解析 + 单测都走这里，规则只写一份）
+fn resolve_source(point_ai: &str, has_base_url: bool) -> PointAiSource {
+    match point_ai {
+        "client" => PointAiSource::Client,
+        "server" => PointAiSource::Server,
+        // `auto`（含非法值兜底）：服务端能直连板端就自己干，否则交给设备客户端
+        _ => {
+            if has_base_url {
+                PointAiSource::Server
+            } else {
+                PointAiSource::Client
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -112,6 +164,12 @@ impl AiPatrol {
                 let hits = window.hits.lock().await.clone();
                 json!({
                     "active": true,
+                    "windowId": if window.window_id.is_empty() {
+                        Value::Null
+                    } else {
+                        json!(window.window_id)
+                    },
+                    "source": if window.window_id.is_empty() { "server" } else { "client" },
                     "deviceCode": window.device_code,
                     "taskCode": window.task_code,
                     "pointIndex": window.point_index,
@@ -121,6 +179,7 @@ impl AiPatrol {
                     "threshold": window.threshold,
                     "cam": window.cam,
                     "startedAt": window.started_at,
+                    "windowSecs": window.cfg.secs,
                     "hits": hits.iter().map(|h| json!({
                         "at": h.at, "label": h.label, "conf": h.conf
                     })).collect::<Vec<_>>(),
@@ -155,10 +214,15 @@ impl AiPatrol {
             return;
         }
         if is_terminal_status(&payload.status) {
-            self.stop("任务终态").await;
+            self.close(state, device_code, "任务终态").await;
             return;
         }
         let stage = payload.stage.as_deref().unwrap_or_default();
+        if !is_point_stage(stage) {
+            // 已经离开航点（前往下一点 / 返航 / 别的任务阶段）：窗口没有继续的意义
+            self.close(state, device_code, "已离开航点").await;
+            return;
+        }
         if !is_arrival_stage(stage) {
             return;
         }
@@ -198,12 +262,16 @@ impl AiPatrol {
         };
         let Some(action) = point.find_ai_action() else {
             // 这个点没有 AI 动作：如果上一个点的窗口还开着（例如上一轮没有 AI 的点），关掉
-            self.stop("到达无 AI 动作的航点").await;
+            self.close(state, device_code, "到达无 AI 动作的航点").await;
             return;
         };
+        if source_for(&state.config) == PointAiSource::Client {
+            // 客户端代调：由它到点探测板端目录后上报 `ai_point`，服务端不直连 Agent
+            return;
+        }
 
         let threshold = parse_conf(&action.threshold).unwrap_or(0.0);
-        let window_secs = window_secs(point.dwell);
+        let window_secs = window_secs(point.dwell, state.config.ai_window_max_secs);
         let stop = Arc::new(Notify::new());
         let hits = Arc::new(Mutex::new(Vec::new()));
 
@@ -214,6 +282,7 @@ impl AiPatrol {
                 previous.stop.notify_one();
             }
             *guard = Some(Window {
+                window_id: String::new(),
                 device_code: device_code.to_string(),
                 task_code: payload.task_code.clone(),
                 point_index,
@@ -225,6 +294,19 @@ impl AiPatrol {
                 started_at: now(),
                 stop: stop.clone(),
                 hits: hits.clone(),
+                cfg: WindowConfig {
+                    device_id: task.device_id,
+                    park_id: task.park_id,
+                    task_code: payload.task_code.clone(),
+                    task_name: task.name.clone(),
+                    point_index,
+                    point_name: point.name.clone(),
+                    hint: action.hint.clone(),
+                    scene: action.scene.clone(),
+                    labels: action.labels.clone(),
+                    threshold_text: action.threshold.clone(),
+                    secs: window_secs,
+                },
             });
         }
 
@@ -246,9 +328,308 @@ impl AiPatrol {
             run_window(state, config, stop, hits).await;
         });
     }
+
+    /// 关窗并（客户端代调模式下）通知设备：任务终态 / 暂停 / 走到没有 AI 动作的航点。
+    ///
+    /// 服务端直连模式由窗口任务自己收尾（它知道我停的是不是别人的识别）；
+    /// 客户端模式必须显式下发 `ai_stop`，否则板端 Agent 会一直跑下去占着 NPU。
+    async fn close(&self, state: &AppState, device_code: &str, reason: &str) {
+        // 窗口是进程级单例：别的设备的终态/进度不应该把当前设备的窗口关掉
+        let had_window = {
+            let guard = self.active.lock().await;
+            guard
+                .as_ref()
+                .map(|window| window.device_code == device_code)
+                .unwrap_or(false)
+        };
+        if !had_window {
+            return;
+        }
+        self.stop(reason).await;
+        if source_for(&state.config) != PointAiSource::Client {
+            return;
+        }
+        let _ = crate::gateway::send_message_to_device(
+            &state.device_connections,
+            device_code,
+            "ai_stop",
+            json!({ "reason": reason }),
+        )
+        .await;
+    }
+
+    /// 客户端到点后的开窗请求（`ai_point`）。
+    ///
+    /// 场景解析、类别过滤、阈值、窗口时长全部复用直连模式的函数；客户端只提供
+    /// 「板端有什么模型、当前在不在跑」这两件服务端看不到的事实。
+    pub async fn on_client_point(
+        &self,
+        state: &AppState,
+        device_code: &str,
+        payload: &AiPointPayload,
+    ) {
+        if payload.task_code.is_empty() {
+            return;
+        }
+        if source_for(&state.config) != PointAiSource::Client {
+            debug!(
+                "航点 AI 识别：point_ai={} 由服务端直连，忽略设备 {device_code} 的开窗请求",
+                state.config.point_ai
+            );
+            return;
+        }
+        let task = match load_task(&state.db, &payload.task_code).await {
+            Ok(Some(task)) => task,
+            Ok(None) => {
+                warn!(
+                    "航点 AI 识别：任务 {} 不存在，忽略设备 {device_code} 的开窗请求",
+                    payload.task_code
+                );
+                return;
+            }
+            Err(error) => {
+                warn!("航点 AI 识别：查任务 {} 失败: {error}", payload.task_code);
+                return;
+            }
+        };
+
+        let tasks = payload.tasks.as_ref();
+        let scene = resolve_scene(tasks, &payload.hint, payload.scene.as_deref());
+        let threshold = parse_conf(&payload.threshold)
+            .or_else(|| scene.as_ref().map(|item| item.conf))
+            .unwrap_or(0.5)
+            .clamp(0.05, 0.95);
+        let labels = scene
+            .as_ref()
+            .map(|item| scene_labels(tasks, &item.task, &payload.labels))
+            .unwrap_or_default();
+        let task_name = scene
+            .as_ref()
+            .map(|item| item.task.clone())
+            .unwrap_or_else(|| payload.hint.clone());
+        let cam = payload
+            .agent_cam
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("dogcam")
+            .to_string();
+        let secs = window_secs(payload.dwell.unwrap_or(0), state.config.ai_window_max_secs);
+        let was_running = payload.agent_running.unwrap_or(false);
+        let point_name = payload
+            .point_name
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "航点".to_string());
+        let seq = WINDOW_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let window_id = format!(
+            "AIW-{device_code}-{}-{}-{seq}",
+            payload.task_code, payload.point_index
+        );
+
+        let cfg = WindowConfig {
+            device_id: task.device_id,
+            park_id: task.park_id,
+            task_code: payload.task_code.clone(),
+            task_name: task.name.clone(),
+            point_index: payload.point_index,
+            point_name: point_name.clone(),
+            hint: payload.hint.clone(),
+            scene: payload.scene.clone(),
+            labels: payload.labels.clone(),
+            threshold_text: payload.threshold.clone(),
+            secs,
+        };
+        let stop = Arc::new(Notify::new());
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        {
+            let mut guard = self.active.lock().await;
+            if let Some(previous) = guard.take() {
+                previous.stop.notify_one();
+            }
+            *guard = Some(Window {
+                window_id: window_id.clone(),
+                device_code: device_code.to_string(),
+                task_code: payload.task_code.clone(),
+                point_index: payload.point_index,
+                point_name: point_name.clone(),
+                scene: task_name.clone(),
+                labels: labels.clone(),
+                threshold,
+                cam: cam.clone(),
+                started_at: now(),
+                stop: stop.clone(),
+                hits,
+                cfg: cfg.clone(),
+            });
+        }
+
+        let scene_name = task_name.clone();
+        let body = json!({
+            "windowId": window_id,
+            "action": if was_running { "config" } else { "start" },
+            "task": task_name,
+            "taskCode": payload.task_code,
+            "pointIndex": payload.point_index,
+            "pointName": point_name,
+            "labels": labels,
+            "conf": threshold,
+            "cam": cam,
+            "fps": DETECT_FPS,
+            "secs": secs,
+            "wasRunning": was_running,
+        });
+        if !crate::gateway::send_message_to_device(
+            &state.device_connections,
+            device_code,
+            "ai_start",
+            body,
+        )
+        .await
+        {
+            warn!(
+                "航点 AI 识别：设备 {device_code} 不在线，航点 {}「{point_name}」跳过",
+                payload.point_index
+            );
+            stop_if_current(&stop).await;
+            return;
+        }
+        info!(
+            "航点 AI 识别（客户端代调）开始：任务 {} 航点 {}「{point_name}」场景={} 类别={} 阈值={threshold:.2} 相机={cam} 窗口={secs}s 模式={}",
+            payload.task_code,
+            payload.point_index,
+            scene_name,
+            if labels.is_empty() {
+                "全部".to_string()
+            } else {
+                labels.join("/")
+            },
+            if was_running { "config（复用已开的识别）" } else { "start" }
+        );
+        spawn_client_window_timeout(state.clone(), window_id, stop, secs);
+    }
+
+    /// 客户端回传的检出（`ai_detect`）：写告警 + 任务事件 + 企业微信推送。
+    ///
+    /// 客户端已按阈值过滤、并按类别去重过一次；这里再做一次双保险（窗口可能已被
+    /// 新航点顶替，迟到的事件必须丢掉）。
+    pub async fn on_client_detect(
+        &self,
+        state: &AppState,
+        device_code: &str,
+        payload: &AiDetectPayload,
+    ) {
+        let (cfg, threshold, hits) = {
+            let guard = self.active.lock().await;
+            let Some(window) = guard.as_ref() else {
+                debug!("航点 AI 识别：没有活动窗口，丢弃检出 {}", payload.label);
+                return;
+            };
+            if window.device_code != device_code
+                || (!window.window_id.is_empty() && window.window_id != payload.window_id)
+            {
+                debug!(
+                    "航点 AI 识别：窗口 {} 已失效，丢弃检出 {}",
+                    payload.window_id, payload.label
+                );
+                return;
+            }
+            (window.cfg.clone(), window.threshold, window.hits.clone())
+        };
+        if payload.conf + 1e-9 < threshold {
+            debug!(
+                "航点 AI 识别：类别 {} 置信度 {:.2} 低于阈值 {threshold:.2}，忽略",
+                payload.label, payload.conf
+            );
+            return;
+        }
+        if hits.lock().await.iter().any(|hit| hit.label == payload.label) {
+            return;
+        }
+        record_hit(state, &cfg, &payload.label, payload.conf, &hits).await;
+    }
+
+    /// 客户端回报窗口结束（`ai_end`）：收尾 + 记一条任务事件。
+    pub async fn on_client_end(&self, state: &AppState, device_code: &str, payload: &AiEndPayload) {
+        let taken = {
+            let mut guard = self.active.lock().await;
+            let matches = guard
+                .as_ref()
+                .map(|window| {
+                    window.device_code == device_code
+                        && (window.window_id.is_empty()
+                            || window.window_id == payload.window_id)
+                })
+                .unwrap_or(false);
+            if !matches {
+                return;
+            }
+            guard.take()
+        };
+        let Some(window) = taken else {
+            return;
+        };
+        let hits = window.hits.lock().await.len();
+        let at = now();
+        info!(
+            "航点 AI 识别结束（客户端回报）：任务 {} 航点 {}「{}」{}，上报 {hits} 类目标",
+            window.task_code, window.point_index, window.point_name, payload.reason
+        );
+        let content = format!(
+            "AI 识别窗口结束：{}（上报 {hits} 类目标，客户端回报 {}）",
+            if payload.reason.trim().is_empty() {
+                "无原因"
+            } else {
+                payload.reason.as_str()
+            },
+            payload.hits
+        );
+        if let Err(error) = insert_task_event(&state.db, &window.cfg, &at, &content).await {
+            warn!("AI 识别：写任务事件失败: {error}");
+        }
+    }
 }
 
-/// 一个窗口的启动参数（`on_progress` 里算好，窗口任务只负责执行）
+/// 客户端窗口的超时看门狗。
+///
+/// 客户端进程崩了 / 业务 WS 断了，「窗口结束」就永远不来；不清窗口态的话
+/// `GET /api/backpack/ai-window` 会一直显示「在识别」，下次到点还会被判成
+/// 「这个点已经在识别」而跳过。窗口秒数 + 10s 兜底。
+fn spawn_client_window_timeout(
+    state: AppState,
+    window_id: String,
+    stop: Arc<Notify>,
+    secs: u64,
+) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(secs.saturating_add(10))).await;
+        let ai = global();
+        let (cfg, hits) = {
+            let mut guard = ai.active.lock().await;
+            let Some(window) = guard.as_ref() else {
+                return;
+            };
+            if !Arc::ptr_eq(&window.stop, &stop) {
+                return;
+            }
+            let hits = window.hits.lock().await.len();
+            let cfg = window.cfg.clone();
+            guard.take();
+            (cfg, hits)
+        };
+        warn!(
+            "航点 AI 识别：客户端窗口 {window_id} 超过 {}s 未回报结束，服务端清掉窗口态",
+            secs.saturating_add(10)
+        );
+        let content = format!("AI 识别窗口超时未收到客户端结束回报（已上报 {hits} 类目标）");
+        if let Err(error) = insert_task_event(&state.db, &cfg, &now(), &content).await {
+            warn!("AI 识别：写任务事件失败: {error}");
+        }
+    });
+}
+
+/// 一个窗口的启动参数（算好后窗口任务只负责执行）
+#[derive(Clone)]
 struct WindowConfig {
     device_id: Option<i64>,
     park_id: Option<i64>,
@@ -713,9 +1094,25 @@ fn is_ai_action(kind: &str) -> bool {
     kind.to_ascii_uppercase().contains("AI") || kind.contains("识别")
 }
 
-fn window_secs(dwell: i64) -> u64 {
+/// 窗口秒数：跟着停留时长走（`dwell + 8`），下限 10 s，上限由配置给（默认 300 s）。
+///
+/// 这里**不再**把长停留截断成 30 s：截断会让 `dwell=100` 的点只覆盖前 30 s，后面 70 s
+/// 狗还站在那儿却不识别。离开航点由阶段收口（见 `is_point_stage`），不靠时长兜。
+fn window_secs(dwell: i64, max_secs: u64) -> u64 {
     let base = dwell.max(4) + 8;
-    (base as u64).clamp(WINDOW_MIN_SECS, WINDOW_MAX_SECS)
+    let max = max_secs.max(WINDOW_MIN_SECS);
+    (base as u64).clamp(WINDOW_MIN_SECS, max)
+}
+
+/// 「还在航点上」的阶段：这些阶段窗口可以继续识别。
+///
+/// 其余阶段（`patrol.navigating` 前往下一点、`patrol.returning*` 返航、建图/导航任务的
+/// 阶段）说明狗已经离开，窗口必须立刻关掉——否则相机会把路过的东西当成这个点的目标。
+fn is_point_stage(stage: &str) -> bool {
+    matches!(
+        stage,
+        "patrol.point_arrived" | "patrol.waiting" | "patrol.photographing" | "patrol.point_completed"
+    )
 }
 
 /// 置信度：`0.85` / `> 0.85` / `85%` 都认；`65℃` 这种温度阈值不算（>1 又会误判成 65 → 0.65）。
@@ -1010,6 +1407,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn point_ai_source_follows_config_and_deployment() {
+        // 显式配置优先于部署形态
+        assert_eq!(resolve_source("client", true), PointAiSource::Client);
+        assert_eq!(resolve_source("server", false), PointAiSource::Server);
+        // auto：服务端能直连板端（配了 ROBODOG_BACKPACK_URL）就自己调
+        assert_eq!(resolve_source("auto", true), PointAiSource::Server);
+        // auto + 正式环境（云上，连不到板端）→ 客户端代调
+        assert_eq!(resolve_source("auto", false), PointAiSource::Client);
+        // 未知值走 auto，不能悄悄变成 server（否则航点 AI 又会「配了却没告警」）
+        assert_eq!(resolve_source("", false), PointAiSource::Client);
+        assert_eq!(resolve_source("garbage", true), PointAiSource::Server);
+    }
+
+    #[test]
     fn ai_action_is_recognized_and_others_are_not() {
         assert!(is_ai_action("AI 识别"));
         assert!(is_ai_action("ai detect"));
@@ -1036,13 +1447,42 @@ mod tests {
     }
 
     #[test]
-    fn window_follows_dwell_but_stays_bounded() {
-        // dwell 0 → max(4)+8 = 12，夹到 [10,30]
-        assert_eq!(window_secs(0), 12);
-        assert_eq!(window_secs(6), 14);
+    fn window_follows_dwell_up_to_configured_max() {
+        let max = DEFAULT_WINDOW_MAX_SECS;
+        // dwell 0 → max(4)+8 = 12
+        assert_eq!(window_secs(0, max), 12);
+        assert_eq!(window_secs(6, max), 14);
         // 下限 4 s 的 dwell 已经给出 12 s，所以 2 s 的点也是 12 s（模型加载要 1~3 s）
-        assert_eq!(window_secs(2), 12);
-        assert_eq!(window_secs(120), WINDOW_MAX_SECS);
+        assert_eq!(window_secs(2, max), 12);
+        // 长停留不再被截断：停 100 s 就识别 108 s（以前是 30 s）
+        assert_eq!(window_secs(100, max), 108);
+        // 停留顶格 300 s（路线单点上限）时，+8 s 的余量被配置上限吃掉，正好 300 s
+        assert_eq!(window_secs(300, max), 300);
+        // 上限可收紧（运维怕误报就压小），且不会低于下限
+        assert_eq!(window_secs(100, 30), 30);
+        assert_eq!(window_secs(100, 1), WINDOW_MIN_SECS);
+    }
+
+    #[test]
+    fn point_stages_keep_window_others_do_not() {
+        for stage in [
+            "patrol.point_arrived",
+            "patrol.waiting",
+            "patrol.photographing",
+            "patrol.point_completed",
+        ] {
+            assert!(is_point_stage(stage), "{stage} 是在航点上");
+        }
+        for stage in [
+            "patrol.navigating",
+            "patrol.returning",
+            "patrol.returning_to_charge",
+            "navigation.navigating",
+            "mapping.running",
+            "",
+        ] {
+            assert!(!is_point_stage(stage), "{stage} 已经离开航点");
+        }
     }
 
     #[test]

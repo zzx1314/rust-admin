@@ -69,6 +69,16 @@ pub struct Config {
     /// 为空表示本部署未接入背包：`/api/backpack/*` 统一返回 503 并说明配置方法，
     /// 前端页面给出「未接入」占位，而不是转圈等超时。
     pub backpack_base_url: Option<String>,
+    /// 航点 AI 识别的调用方（`auto` / `client` / `server`）。
+    ///
+    /// 正式环境的业务平台在公网、背包 Agent 只在现场内网，服务端直连必然超时；
+    /// 设备客户端跑在同一块板子上（`127.0.0.1:8000`），由它代调才通。
+    /// `auto`（默认）按「有没有配 `backpack_base_url`」自动选：
+    /// - 配了（服务端与板端同网段）→ `server`，沿用原来的直连逻辑；
+    /// - 没配（正式环境）→ `client`，平台下发 `ai_start`，客户端本地启停 Agent 并回传检出。
+    pub point_ai: String,
+    /// 识别窗口时长上限（秒）。默认 300；窗口本身在「离开航点」时立即结束。
+    pub ai_window_max_secs: u64,
     /// 浏览器直连 mediamtx 的 WebRTC 信令地址（`http://<板IP>:8889`）。
     ///
     /// WHEP 协商与媒体**都由浏览器直连板端**，不经业务平台中继：
@@ -161,6 +171,12 @@ struct WecomFile {
 struct BackpackFile {
     /// 平台 → 背包 Agent（REST/SSE 代理目标）
     base_url: Option<String>,
+    /// 航点 AI 识别的调用方：`auto`（默认，有 base_url 就服务端直连，否则交给设备客户端）
+    /// / `client` / `server`
+    point_ai: Option<String>,
+    /// 识别窗口时长上限（秒）：窗口按「停留时长 + 8」算，用它兜底（默认 300 = 停留上限）。
+    /// 运维担心误报（长停留期间镜头抖动把别的东西认成目标）时压小即可。
+    ai_window_max_secs: Option<u64>,
     /// 浏览器 → mediamtx（WHEP 信令 + 媒体）
     webrtc_url: Option<String>,
     /// 浏览器 → 板端 Agent（直连模式；正式环境用这个）
@@ -305,6 +321,15 @@ impl Config {
                 .or_else(|| file.backpack.webrtc_url.and_then(clean))
                 .map(|value| value.trim_end_matches('/').to_string()),
             backpack_browser_url: url("ROBODOG_BACKPACK_BROWSER_URL", file.backpack.browser_url),
+            point_ai: point_ai_source(
+                env_text(&env, "ROBODOG_POINT_AI").or_else(|| file.backpack.point_ai.and_then(clean)),
+            ),
+            // 窗口上限：默认等于路线停留上限（300 s）。低于 10 s 没有意义，按 10 处理。
+            ai_window_max_secs: env_text(&env, "ROBODOG_AI_WINDOW_MAX_SECS")
+                .and_then(|raw| raw.trim().parse::<u64>().ok())
+                .or(file.backpack.ai_window_max_secs)
+                .unwrap_or(crate::ai_patrol::DEFAULT_WINDOW_MAX_SECS)
+                .max(10),
             public_url: url("ROBODOG_PUBLIC_URL", file.public_url),
             wecom_enabled: env_flag(&env, "ROBODOG_WECOM_ENABLED")
                 .or(file.wecom.enabled)
@@ -453,6 +478,24 @@ fn config_file_path(explicit: Option<String>) -> Result<Option<PathBuf>, ConfigE
         None => {
             let default = PathBuf::from(DEFAULT_CONFIG_FILE);
             Ok(default.is_file().then_some(default))
+        }
+    }
+}
+
+/// 航点 AI 调用方：只认 `auto` / `client` / `server`，其他值退回 `auto` 并告警。
+///
+/// 配置写错时**不能悄悄变成 server**：正式环境那样会让航点 AI 一直连不上板端，
+/// 现场只看得到「没告警」。所以非法值一律回到 `auto`，由 `auto` 按部署形态判断。
+fn point_ai_source(raw: Option<String>) -> String {
+    match raw.as_deref() {
+        Some("client") => "client".to_string(),
+        Some("server") => "server".to_string(),
+        Some("auto") | None => "auto".to_string(),
+        Some(other) => {
+            tracing::warn!(
+                "point_ai={other:?} 不合法（只支持 auto / client / server），按 auto 处理"
+            );
+            "auto".to_string()
         }
     }
 }

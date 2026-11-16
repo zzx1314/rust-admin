@@ -116,6 +116,66 @@ pub struct TaskProgressPayload {
     pub total_points: Option<i64>,
 }
 
+/// 客户端 → 服务端：航点 AI 识别请求
+///
+/// 正式环境的业务平台在公网，连不到现场内网的背包 Agent；设备客户端与 Agent
+/// 同机（`127.0.0.1:8000`），所以由它把「动作参数 + 板端模型目录」一起报上来，
+/// 服务端用与直连模式**完全同一套**规则（场景解析 / 类别过滤 / 阈值 / 窗口时长）
+/// 算好参数，再用 `ai_start` 下发。
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPointPayload {
+    pub task_code: String,
+    pub point_index: i64,
+    #[serde(default)]
+    pub point_name: Option<String>,
+    #[serde(default)]
+    pub dwell: Option<i64>,
+    /// 动作 `param`：历史数据的关键词提示
+    #[serde(default)]
+    pub hint: String,
+    /// 动作 `scene`：编辑器选的模型包 id
+    #[serde(default)]
+    pub scene: Option<String>,
+    /// 动作 `labels`：勾选的识别类别
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// 动作 `threshold` 原文（「置信度 ≥ 0.35」）
+    #[serde(default)]
+    pub threshold: String,
+    /// 板端 `GET /api/detect/tasks` 原样
+    #[serde(default)]
+    pub tasks: Option<Value>,
+    /// 板端当前是否已在识别（操作员手动开的）：决定 `start` 还是 `config`
+    #[serde(default)]
+    pub agent_running: Option<bool>,
+    /// 板端默认相机（`default_cam`）
+    #[serde(default)]
+    pub agent_cam: Option<String>,
+}
+
+/// 客户端 → 服务端：识别窗口内的检出（客户端已按阈值过滤 + 同类别去重）
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AiDetectPayload {
+    pub window_id: String,
+    #[serde(default)]
+    pub task: String,
+    pub label: String,
+    pub conf: f64,
+}
+
+/// 客户端 → 服务端：识别窗口结束
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AiEndPayload {
+    pub window_id: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub hits: i64,
+}
+
 /// 客户端 → 服务端：本地接管态变化
 ///
 /// 设备客户端做**进程内重连**时，与业务平台的 WebSocket 不会断开，服务端也就

@@ -61,6 +61,16 @@ bitrate = "1200k"
 # 输出宽度（0 = 保持原始分辨率，等比缩放）
 width = 0
 
+[ai]
+# 航点 AI 识别：路线里某个航点配了「AI 识别」动作时，客户端到点会调本机板端 Agent
+# （背包 FastAPI，默认 127.0.0.1:8000），把检出回传业务平台写告警。
+# 为什么在客户端做：业务平台在公网、Agent 只在内网，服务端连不到板端；
+# 客户端与 Agent 同机，127.0.0.1 一定通。
+agent_url = "http://127.0.0.1:8000"
+# 没接背包的机器可以关掉（等价 --no-ai / ROBODOG_AI_ENABLED=0）；
+# 开着也只在「到点且有 AI 动作」时才探测一次 Agent，连不上只打一条 WARN
+enabled = true
+
 [mapping]
 # 建图类型：outdoor / indoor
 kind = "outdoor"

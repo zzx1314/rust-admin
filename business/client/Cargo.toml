@@ -22,3 +22,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # 本体文件服务（robot_http_server）没有 zip 端点，需要在本机打包后回传
 zip = { version = "2", default-features = false, features = ["deflate"] }
 url = "2"
+
+[dev-dependencies]
+# 单元测试里起一个假板端 Agent（HTTP + SSE），验证「客户端代调」整条链路
+axum = { version = "0.8", features = ["json"] }

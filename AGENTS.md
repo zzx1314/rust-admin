@@ -70,6 +70,12 @@ Any config key can be overridden with `APP_<SECTION>__<KEY>`.
 `ROBODOG_ZENTAI_WS_URL`（如 `ws://10.0.0.8:3000`）；不配置则沿用「中台直连
 HTTP」模式。两者共用同一个服务令牌，见 `business/README.md`。
 
+航点 AI 识别的「谁去调板端 Agent」由 `ROBODOG_POINT_AI`（`[backpack] point_ai`，默认
+`auto`）决定：配了 `ROBODOG_BACKPACK_URL` 就服务端直连，否则由现场设备客户端代调
+（客户端与背包 Agent 同在 `.246`，走 `127.0.0.1:8000`；消息为 `ai_point` / `ai_start` /
+`ai_detect` / `ai_end` / `ai_stop`）。正式环境的云端平台连不到内网 Agent，`auto` 走的
+就是客户端这条路；改这块先读 `business/docs/official-app-parity.md` §5.6。
+
 企业微信告警推送：群机器人 webhook 只走环境变量 `ROBODOG_WECOM_WEBHOOK`
 （地址即凭据，不要写进 `server.toml`）；另可选 `ROBODOG_PUBLIC_URL` 拼消息里的
 「查看详情」链接。用法见 `business/README.md`「企业微信告警推送」，**设计与扩展点见

@@ -253,11 +253,13 @@ fn wait_task_count(dwell: i64) -> usize // ceil(dwell / 2)，dwell<=0 → 0
   **没有「传一张图返回检测结果」的入口**。所以到点 AI 目前用「开识别窗口」实现（见 5.6），
   单图推理接口一旦有了，5.6 的窗口可以直接换成「拍一张 → 推一张」。
 
-### 5.6 航点到点 AI 识别（已落地，2026-11-15）
+### 5.6 航点到点 AI 识别（已落地，2026-11-15；2026-11-16 加客户端代调）
 
-实现在 `business/server/src/ai_patrol.rs`，**全在服务端**，客户端零改动。
+决策逻辑在 `business/server/src/ai_patrol.rs`，**调用方有两种**（`[backpack] point_ai`
+/ `ROBODOG_POINT_AI` = `auto`(默认) / `client` / `server`）：
 
 ```text
+A. server（服务端与板端同网段，配了 ROBODOG_BACKPACK_URL）
 客户端 task_progress（stage = patrol.point_arrived / patrol.waiting，带 pointIndex）
   → 服务端按 taskCode 找到任务 → 路线 route_data.points[index].actions[]
   → 命中「AI 识别」动作（动作名含 `AI` 或 `识别`）
@@ -265,7 +267,21 @@ fn wait_task_count(dwell: i64) -> usize // ceil(dwell / 2)，dwell<=0 → 0
   → 读 {agent}/api/events 的 SSE，只取 type=detect 的 boxes
   → 框的 conf ≥ 阈值 → 写 alerts + task_events（同类目标窗口内只报一次）
   → 窗口到期 / 任务终态 / 被下一个点顶替 → POST /api/detect/stop
+
+B. client（正式环境：平台在公网、Agent 只在内网，服务端连不到板端）
+客户端到点 → GET 127.0.0.1:8000/api/detect/{tasks,status}
+  → 上报 ai_point（动作参数 + 板端模型目录）→ 服务端用**同一套**规则算场景/类别/阈值/窗口
+  → 下发 ai_start → 客户端 POST /api/detect/start|config → 读本机 SSE
+  → 按阈值 + 类别去重回传 ai_detect → 服务端写 alerts + task_events + 企微
+  → 客户端收尾 ai_end；任务终态/取消时服务端下发 ai_stop
 ```
+
+> 为什么要有 B：正式环境的业务平台在 `39.107.55.13`（公网），背包 Agent 在
+> `192.168.41.246:8000`（现场内网），`curl` 实测超时。2026-11-16 线上计划
+> `TK-1112-11` 首点配了 AI 识别，日志里 5 条
+> `AI 识别：本部署的服务端访问不到背包 Agent，跳过航点…`，告警表 0 条。
+> 设备客户端本来就跑在同一块板子上（`.246`，见 `deploy/README.md`），由它代调即可。
+> `auto` 会按「有没有配 `ROBODOG_BACKPACK_URL`」自动选，配错也不会两条链路各写一条告警。
 
 **动作参数怎么填**（路线编辑器「该点执行动作」→ `AI 识别`）：
 
@@ -281,8 +297,15 @@ fn wait_task_count(dwell: i64) -> usize // ceil(dwell / 2)，dwell<=0 → 0
 `detect.tasks`），服务端不需要再猜。目录读不到（规划时不在园区内网）时可手填关键词，
 后端仍有关键词兜底。
 
-**窗口时长**：`max(dwell, 4) + 8` 秒，夹在 10~30 s（Agent 加载模型 1~3 s，太短狗就走了；
-太长会在离开航点后把别的画面当目标）。
+**窗口时长**：`max(dwell, 4) + 8` 秒，下限 10 s、上限 `[backpack] ai_window_max_secs`
+（默认 300 s，与路线停留上限一致）。**停多久就识别多久**——`dwell=100` 的点会识别 108 s，
+不再被截断成 30 s（2026-11-16 改：以前 30 s 上限让长停留只剩前 30 s 在识别）。
+
+防误报不靠截断时长，靠**阶段收口**：`stage` 一旦不再是 `patrol.point_arrived` /
+`patrol.waiting` / `patrol.photographing` / `patrol.point_completed`（狗开始走向下一个点、
+返航或进入别的任务阶段），窗口立刻关闭（客户端代调模式由客户端停 Agent，服务端模式由
+服务端停；两边同一判据 `is_point_stage`）。窗口秒数在
+`GET /api/backpack/ai-window` 的 `windowSecs` 里能直接看到。
 
 **与操作员手动识别的关系**：Agent 是单路单任务。
 
@@ -290,8 +313,13 @@ fn wait_task_count(dwell: i64) -> usize // ceil(dwell / 2)，dwell<=0 → 0
   **窗口结束不会把操作员的识别停掉**；
 - 巡检窗口开着时操作员再点「开始识别」会被 Agent 拒绝（「识别已在运行」），属预期。
 
-**排查入口**：`GET /api/backpack/ai-window` 返回当前窗口（是否在跑、任务/航点、解析到的场景
-`scene`、实际下发的类别 `labels`、阈值、相机、窗口内已上报类别）或 `{"active": false}`。现场「配了 AI 识别但没告警」按这个顺序看：
+**排查入口**：`GET /api/backpack/ai-window` 返回当前窗口（是否在跑、`source` = `server`/`client`、
+任务/航点、解析到的场景 `scene`、实际下发的类别 `labels`、阈值、相机、窗口内已上报类别）或
+`{"active": false}`。现场「配了 AI 识别但没告警」按这个顺序看：
+
+0. `source` 与部署对不对得上 → `point_ai=auto` 但 `ROBODOG_BACKPACK_URL` 没配时是按 `client`
+   跑的，此时服务端**不该**出现「访问不到背包 Agent」的 WARN；客户端日志里要能看到
+   `航点 AI 识别：请求开窗 …` 与 `航点 AI 识别开始：…`；
 
 1. 窗口有没有开 → 没开说明 `stage`/`pointIndex` 没上报，或动作类型不含 `AI`/`识别`；
 2. 场景对不对 → `scene` 是否解析到了期望的模型（不对就回路线编辑器重选场景，或改动作 `param`）；

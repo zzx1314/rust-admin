@@ -63,6 +63,12 @@ pub const DEFAULT_VIDEO_FPS: u32 = 15;
 /// 实时视频：编码器（`auto` = 按可用性挑硬件编码器，见 `video::detect_encoder`）
 pub const DEFAULT_VIDEO_ENCODER: &str = "auto";
 
+/// 航点 AI 识别：板端 Agent 地址。
+///
+/// 默认 `127.0.0.1:8000` —— 背包 Agent 与设备客户端跑在同一块板子（现场 `.246`）上，
+/// 只有本机能通；业务平台在公网够不到它，所以要由客户端本地代调（见 `ai_patrol`）。
+pub const DEFAULT_AI_AGENT_URL: &str = "http://127.0.0.1:8000";
+
 /// 显式关闭本体连接（纯模拟模式）的取值：`--robot sim` / `robot.host = "sim"`。
 ///
 /// 内置默认值已指向现场本体，所以「不接本体」必须显式声明，
@@ -98,6 +104,10 @@ pub const ENV_API_PASSWORD: &str = "ROBODOG_API_PASSWORD";
 pub const ENV_PARK_ID: &str = "ROBODOG_PARK_ID";
 /// 地图定时增量同步间隔（秒）
 pub const ENV_MAP_SYNC_INTERVAL: &str = "ROBODOG_MAP_SYNC_INTERVAL";
+/// 航点 AI 识别：板端 Agent 地址（客户端本地代调）
+pub const ENV_AI_AGENT_URL: &str = "ROBODOG_AI_AGENT_URL";
+/// 航点 AI 识别总开关（`0` / `false` 关闭）
+pub const ENV_AI_ENABLED: &str = "ROBODOG_AI_ENABLED";
 
 // ─── 错误类型 ──────────────────────────────────────────────────
 
@@ -212,7 +222,18 @@ pub struct FileConfig {
     pub mapping: MappingSection,
     pub simulation: SimulationSection,
     pub video: VideoSection,
+    pub ai: AiSection,
     pub log: LogSection,
+}
+
+/// 航点 AI 识别（板端 Agent）
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct AiSection {
+    /// 板端 Agent 基地址，默认 `http://127.0.0.1:8000`
+    pub agent_url: Option<String>,
+    /// 总开关，默认开启；没接背包的机器上会在到点时打一条 WARN 后跳过
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -416,6 +437,9 @@ pub struct CliArgs {
     pub park_id: Option<i64>,
     pub ingest_map_name: Option<String>,
     pub api_base: Option<String>,
+    pub ai_agent_url: Option<String>,
+    /// `--no-ai` → `Some(false)`
+    pub ai_enabled: Option<bool>,
     pub api_username: Option<String>,
     pub api_password: Option<String>,
     /// 打印脱敏后的生效配置后退出
@@ -464,6 +488,8 @@ impl CliArgs {
             park_id: opt(&mut args, "--park-id")?,
             ingest_map_name: opt(&mut args, "--ingest-map-name")?,
             api_base: opt(&mut args, "--api-base")?,
+            ai_agent_url: opt(&mut args, "--ai-agent-url")?,
+            ai_enabled: args.contains("--no-ai").then_some(false),
             api_username: opt(&mut args, "--api-username")?,
             api_password: opt(&mut args, "--api-password")?,
             print_config: args.contains("--print-config"),
@@ -539,6 +565,9 @@ pub fn print_help() {
   --no-upload-map        关闭建图完成后自动回传
   --map-sync-interval <秒> 地图定时增量同步间隔 (默认: {DEFAULT_MAP_SYNC_INTERVAL_SECS}；只补平台没有的图)
   --no-map-sync          关闭地图定时增量同步（中台「同步地图」仍可用）
+  --ai-agent-url <URL>   板端 AI Agent 地址 (默认: {DEFAULT_AI_AGENT_URL})
+                         背包 Agent 与客户端同机，航点 AI 识别由客户端本地调用
+  --no-ai                关闭航点 AI 识别（到点不再本地开识别）
   --api-base <URL>       业务服务 REST 地址 (默认由 --server 推导)
   --api-username <账号>  业务服务登录账号 (默认: {DEFAULT_API_USERNAME})
   --api-password <密码>  业务服务登录密码 (默认: {DEFAULT_API_PASSWORD}，线上必须覆盖)
@@ -589,6 +618,10 @@ pub struct Config {
     pub bound_park_id: Arc<Mutex<Option<i64>>>,
     /// 回传使用的地图名称；为空则用本体返回的目录名
     pub ingest_map_name: Option<String>,
+    /// 航点 AI 识别：板端 Agent 基地址（客户端本地代调，服务端够不到板端）
+    pub ai_agent_url: String,
+    /// 航点 AI 识别总开关
+    pub ai_enabled: bool,
     /// 业务服务 REST 基地址（默认由 server_url 推导）
     pub api_base: Option<String>,
     /// 业务服务登录账号
@@ -815,6 +848,20 @@ impl Config {
         ])
         .map(str::to_string);
 
+        let ai_agent_url = pick_string([
+            cli.ai_agent_url.as_deref(),
+            env.get(ENV_AI_AGENT_URL),
+            file.ai.agent_url.as_deref(),
+        ])
+        .unwrap_or(DEFAULT_AI_AGENT_URL)
+        .trim_end_matches('/')
+        .to_string();
+        let ai_enabled = cli
+            .ai_enabled
+            .or_else(|| env.get(ENV_AI_ENABLED).map(parse_bool))
+            .or(file.ai.enabled)
+            .unwrap_or(true);
+
         let api_base = pick_string([
             cli.api_base.as_deref(),
             env.get(ENV_API_BASE),
@@ -888,6 +935,8 @@ impl Config {
             park_id,
             bound_park_id: Arc::new(Mutex::new(None)),
             ingest_map_name,
+            ai_agent_url,
+            ai_enabled,
             api_base,
             api_username,
             api_password,
@@ -943,6 +992,8 @@ robot.model             = {model}
 route.road_network      = {road_network}
 task.patrol_path_prefix = {patrol_path_prefix}
 task.min_recharge_batt  = {min_recharge_battery}
+ai.agent_url            = {ai_agent_url}
+ai.enabled              = {ai_enabled}
 api.base                = {api_base}
 api.username            = {api_username}
 api.password            = {api_password}
@@ -982,6 +1033,8 @@ log.filter              = {log_filter}",
             road_network = self.road_network.as_str(),
             patrol_path_prefix = self.patrol_path_prefix,
             min_recharge_battery = self.min_recharge_battery,
+            ai_agent_url = self.ai_agent_url,
+            ai_enabled = self.ai_enabled,
             api_base = self.api_base.as_deref().unwrap_or("（按 server.url 推导）"),
             api_username = self.api_username,
             api_password = mask(&self.api_password),
@@ -1055,6 +1108,14 @@ fn pick_string<const N: usize>(candidates: [Option<&str>; N]) -> Option<&str> {
 /// 取第一个有值的数字
 fn pick_number<T: Copy, const N: usize>(candidates: [Option<T>; N]) -> Option<T> {
     candidates.into_iter().flatten().next()
+}
+
+/// 解析布尔开关：`1/0` / `true/false` / `on/off` / `yes/no`
+fn parse_bool(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "on" | "yes" | "y"
+    )
 }
 
 /// 是否显式声明「不接本体」
