@@ -76,6 +76,13 @@ const RELAY_SOURCES: BackpackSource[] = [
   }
 ];
 const frame = reactive({ w: 1280, h: 720 });
+/**
+ * 播放器报上来的真实解码分辨率。
+ *
+ * 之前这里写死「H264 720p30」：板端 relay 把机器狗前置统一归一化到 1280x720@30，
+ * 现在那一路走 DOGCAM_*（默认 1920x1080），写死的规格会立即变成假信息。
+ */
+const videoMeta = ref<{ w: number; h: number } | null>(null);
 const counts = ref<{ name: string; zh: string; color: string; value: number }[]>([]);
 const feed = ref<{ ts: number; text: string; color: string }[]>([]);
 const lastDetectAt = ref(0);
@@ -159,9 +166,10 @@ const stageHint = computed(() => {
 
 const detailText = computed(() => {
   if (!activeSource.value) return "";
+  const size = videoMeta.value ? `${videoMeta.value.w}×${videoMeta.value.h}` : "分辨率待测";
   if (watchMode.value === "relay")
-    return "平台中继 · H264 720p30 · 延时 1~2s（AI 叠加需现场直连）";
-  if (!aiRunning.value) return "干净流 · H264 720p30 · 无 AI";
+    return `平台中继 · H264 ${size} · 延时 1~2s（AI 叠加需现场直连）`;
+  if (!aiRunning.value) return `干净流 · H264 ${size} · 无 AI`;
   if (osdActive.value) return `背包烧录 · ${previewStream.value} 流自带中文标签`;
   if (overlay.value === "osd") return "背包烧录未就绪 · 已回退浏览器叠加";
   return "浏览器叠加 · 平台按识别坐标画框（延时最低）";
@@ -432,6 +440,14 @@ function onPhase(value: { phase: WhepPhase; message: string }) {
   phase.value = value;
 }
 
+/** 换了通道 / 换了观看方式，上一路的尺寸不能挂在新的画面上 */
+function onVideoMeta(size: { w: number; h: number }) {
+  videoMeta.value = size;
+}
+watch([activeKey, watchMode, playStream], () => {
+  videoMeta.value = null;
+});
+
 function connectEvents() {
   const url = client.value.eventsUrl;
   if (eventSource && url === eventUrl) return;
@@ -583,6 +599,7 @@ defineExpose({ refreshStatus });
           :url="''"
           :stream="activeSource?.stream || 'dogcam'"
           :online="true"
+          @meta="onVideoMeta"
         />
 
         <VideoStage
@@ -599,6 +616,7 @@ defineExpose({ refreshStatus });
           :hint="stageHint"
           :detail="detailText"
           @phase="onPhase"
+          @meta="onVideoMeta"
         />
 
         <div class="facts">

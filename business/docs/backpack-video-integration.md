@@ -67,8 +67,16 @@ GET  /api/events             SSE：telemetry / button / lingsi / detect / detect
 
 ### 2.2 视频链路参数（平台侧必须保持一致）
 
-- 采集/编码：`1280x720@30`、`H264 High`、`2Mbps`、`GOP30`、无 B 帧、无音轨
-- dogcam 归一化：源 1080p60 HL4.0 full-range → 同一套参数（`relay.py`）
+- 采集/编码（四路 USB）：`1280x720@30`、`H264 High`、`2Mbps`、`GOP30`、无 B 帧、无音轨
+- dogcam 归一化（`relay.py`，源 1080p60 HL4.0 full-range）：默认 `1920x1080@30`、`4Mbps`，
+  由板端环境变量 `DOGCAM_WIDTH/HEIGHT/FPS/BITRATE/GOP` 控制；**故意不复用 `CAPTURE_*`**
+  （那组同时管 v4l2 采集尺寸，改了会连带影响四路 USB）。带宽吃紧时回退：
+  `DOGCAM_WIDTH=1280 DOGCAM_HEIGHT=720 DOGCAM_BITRATE=2000k`。
+- 平台中继（`deploy/backpack-relay/relay_push.py`）是 `-c:v copy` 只换容器，
+  浏览器看到的分辨率就是 dogcam path 的分辨率；页面上的「1920×1080」由播放器
+  实测上报（`VideoPlayer` / `VideoStage` 的 `meta` 事件），不再写死规格。
+- 背包烧录（`preview`）仍按 `CAPTURE_*` 缩放：`DOGCAM_*` 调到 1080p 时，
+  带框那一路仍是 720p30（OSD 画布 `OSD_W/H` 是 640x360 放大），属预期。
 - 红外：`dog-ipcam`，由现场已有 mediamtx 承载，**不参与 AI**
 - 播放：mediamtx WHEP（`:8889`），agent 在 `/api/whep/*` 再包一层同源代理规避 CORS
 

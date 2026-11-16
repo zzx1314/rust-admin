@@ -37,6 +37,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (event: "phase", payload: { phase: WhepPhase; message: string }): void;
+  (event: "meta", size: { w: number; h: number }): void;
 }>();
 
 interface MappedBox {
@@ -100,8 +101,16 @@ function restart() {
       phase.value = detail.phase;
       phaseMessage.value = detail.message;
       emit("phase", { phase: detail.phase, message: detail.message });
+      if (detail.phase === "live") publishSize();
     }
   });
+}
+
+/** 把真实解码分辨率报给页面（换通道 / 改推流参数都会变） */
+function publishSize() {
+  const element = videoEl.value;
+  if (element?.videoWidth && element.videoHeight)
+    emit("meta", { w: element.videoWidth, h: element.videoHeight });
 }
 
 watch(() => [props.whepBase, props.stream], restart);

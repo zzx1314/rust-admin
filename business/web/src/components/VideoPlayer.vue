@@ -43,6 +43,11 @@ const props = defineProps<{
   stream?: string | null;
 }>();
 
+/** 实际解码分辨率：页面用它显示「1920×1080」而不是写死一个规格 */
+const emit = defineEmits<{
+  (event: "meta", size: { w: number; h: number }): void;
+}>();
+
 type Status = "idle" | "loading" | "playing" | "retrying" | "error";
 
 const videoRef = ref<HTMLVideoElement | null>(null);
@@ -342,6 +347,9 @@ function onPlaying() {
   errorText.value = "";
   retryAttempt.value = 0;
   poster.value = "";
+  // 流里真正解出来的尺寸：推流端改了分辨率，这里会跟着变
+  const el = videoRef.value;
+  if (el?.videoWidth && el.videoHeight) emit("meta", { w: el.videoWidth, h: el.videoHeight });
   lastTime = videoRef.value?.currentTime ?? 0;
   lastProgressAt = performance.now();
 }
