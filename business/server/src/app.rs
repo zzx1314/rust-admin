@@ -182,6 +182,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/backpack/detect/config", post(backpack::detect_config))
         // 背包实时视频：板端 relay 主动推流到平台，浏览器同源播放（不依赖内网可达）
         .route("/backpack/video/ws", get(video::backpack_viewer_ws))
+        // 排障：每个视频房间的推流 / 观看 / 起流状态（只读）
+        .route("/backpack/video/state", get(video::viewer_state))
         .layer(from_fn_with_state(state.clone(), require_auth));
 
     let public = Router::new()

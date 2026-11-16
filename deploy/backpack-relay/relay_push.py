@@ -58,6 +58,8 @@ RTSP_BASE = os.environ.get("RELAY_RTSP_BASE", "rtsp://127.0.0.1:8554").rstrip("/
 ROOM_PREFIX = os.environ.get("RELAY_ROOM_PREFIX", "bp:")
 FFMPEG = os.environ.get("RELAY_FFMPEG", "ffmpeg")
 TRANSCODE = os.environ.get("RELAY_TRANSCODE", "0") == "1"
+# 排障开关：把分片大小、ffmpeg 退出码、完整 stderr 都打出来（生产默认关）
+DEBUG = os.environ.get("RELAY_DEBUG", "0") == "1"
 
 # 分片大小：一个 FLV tag 常见几 KB，8KB 兼顾低延时与帧数开销
 CHUNK_BYTES = 8 * 1024
@@ -128,6 +130,7 @@ class StreamSession:
         self.pump: asyncio.Task | None = None
         self.stderr: asyncio.Task | None = None
         self.bytes_sent = 0
+        self.chunks = 0
 
     @property
     def running(self) -> bool:
@@ -137,12 +140,16 @@ class StreamSession:
         if self.running:
             return
         self.bytes_sent = 0
+        self.chunks = 0
         log(f"[{self.stream}] 平台有观看者，开始拉流")
+        args = ffmpeg_args(self.stream)
+        if DEBUG:
+            log(f"[{self.stream}] ffmpeg: {' '.join(args)}")
         # 告诉平台「这是一条新流」：常驻连接里每次起流都换新的 FLV 头与新时间戳，
         # 平台必须先丢掉上一轮的流头，否则后加入的观看者会拿到错位的字节（黑屏）
         await ws.send(json.dumps({"msgType": "video_reset", "payload": {"stream": self.stream}}))
         self.proc = await asyncio.create_subprocess_exec(
-            *ffmpeg_args(self.stream),
+            *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -185,13 +192,24 @@ class StreamSession:
                         )
                 await ws.send(chunk)
                 self.bytes_sent += len(chunk)
+                self.chunks += 1
+                if DEBUG and self.chunks <= 5:
+                    log(
+                        f"[{self.stream}] chunk#{self.chunks} {len(chunk)}B "
+                        f"累计 {self.bytes_sent}B"
+                    )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - 连接断了交给外层重连
             log(f"[{self.stream}] 推流中断：{exc!r}")
         finally:
-            # ffmpeg 自己退出（拉不到流 / 源断了）：告诉平台侧没人推了
-            if self.proc and self.proc.returncode is not None and self.bytes_sent == 0:
+            # ffmpeg 自己退出（拉不到流 / 源断了）：把退出码打出来，日志里能直接定位
+            code = self.proc.returncode if self.proc else None
+            log(
+                f"[{self.stream}] 推流结束：{self.chunks} 个分片 / {self.bytes_sent}B，"
+                f"ffmpeg 退出码 {code}"
+            )
+            if code not in (None, 0) and self.bytes_sent == 0:
                 log(
                     f"[{self.stream}] ffmpeg 退出且没推出任何数据："
                     f"检查 {RTSP_BASE}/{self.stream} 是否在推流"

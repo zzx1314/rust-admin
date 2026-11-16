@@ -242,16 +242,21 @@ async function refreshStatus(quiet = false) {
     loadError.value = "";
     updatedAt.value = new Date().toLocaleTimeString("zh-CN", { hour12: false });
 
-    if (!activeKey.value || !data.sources.some(item => item.key === activeKey.value)) {
-      activeKey.value = pickSource(data.sources, activeKey.value);
-    }
     // 板端不可达（换了 WiFi / 公网页面 / 浏览器拦了内网访问）：自动走平台中继，
     // 免得现场只看到一句「连不上背包 Agent」就卡住
     if (!data.agent.reachable && watchMode.value === "direct") {
       watchMode.value = "relay";
     }
-    if (watchMode.value === "relay" && !activeKey.value) {
-      activeKey.value = pickSource(RELAY_SOURCES, "dogcam");
+
+    // 可选源：直连模式的后端只下发地址、**不下发 sources**，这时用固定六路清单顶上。
+    // 注意不能直接拿 `data.sources` 比对 —— 它恒为空，会把现场选好的通道重置回 dogcam。
+    const list = data.sources.length
+      ? data.sources
+      : watchMode.value === "relay"
+        ? RELAY_SOURCES
+        : [];
+    if (!activeKey.value || !list.some(item => item.key === activeKey.value)) {
+      activeKey.value = pickSource(list, activeKey.value || "dogcam");
     }
     // 只在首次 / 场景变化时回填表单，避免覆盖用户正在调整的取值
     if (!previous || previous.detect.status?.task !== data.detect.status?.task) {

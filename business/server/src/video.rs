@@ -32,7 +32,7 @@ use crate::gateway;
 use crate::gateway_types::WsMessage;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Extension, Path, Query, State};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Json};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -334,6 +334,32 @@ impl VideoHub {
         }
     }
 
+    /// 诊断快照：每个房间的推流 / 观看 / 起流状态（`GET /api/backpack/video/state`）
+    ///
+    /// 现场排障靠这个："为什么这一路黑屏"常常是观看者计数没清、或者流头被清了。
+    pub async fn debug_state(&self) -> serde_json::Value {
+        let rooms = self.rooms.read().await;
+        let viewers = self.viewers.read().await;
+        let streaming = self.streaming.read().await;
+        let controls = self.controls.read().await;
+        let mut list: Vec<serde_json::Value> = rooms
+            .iter()
+            .map(|(key, room)| {
+                json!({
+                    "room": key,
+                    "publisher": room.publisher.is_some(),
+                    "initBytes": room.init.as_ref().map(|init| init.len()).unwrap_or(0),
+                    "pendingBytes": room.pending.len(),
+                    "viewers": viewers.get(key).copied().unwrap_or(0),
+                    "streaming": streaming.contains(key),
+                    "control": controls.contains_key(key),
+                })
+            })
+            .collect();
+        list.sort_by_key(|item| item["room"].as_str().unwrap_or_default().to_string());
+        json!({ "rooms": list })
+    }
+
     /// 当前观看者数量（日志 / 排障用）
     pub async fn viewers(&self, device_id: &str) -> usize {
         self.viewers
@@ -621,6 +647,14 @@ pub async fn backpack_viewer_ws(
     Ok(ws.on_upgrade(move |socket| {
         handle_viewer(socket, state, VideoSource::BoardPusher { stream, room })
     }))
+}
+
+/// 诊断：`GET /api/backpack/video/state` —— 每个视频房间的推流 / 观看 / 起流状态
+pub async fn viewer_state(
+    State(state): State<AppState>,
+    Extension(_claims): Extension<Claims>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    Ok(Json(state.video_hub.debug_state().await))
 }
 
 /// 观看者的拉流方式（两者的房间与观看者逻辑一样，只是控制消息的通道不同）
