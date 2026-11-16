@@ -16,7 +16,7 @@ use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{Mutex, RwLock, broadcast, oneshot};
 use tracing::{debug, error, info, warn};
 
 /// 共享的设备连接池：device_id → sender
@@ -25,6 +25,80 @@ pub type DeviceConnections = Arc<RwLock<HashMap<String, broadcast::Sender<Pendin
 /// 创建共享的设备连接池
 pub fn new_device_connections() -> DeviceConnections {
     Arc::new(RwLock::new(HashMap::new()))
+}
+
+/// 设备执行一条指令后的真实结果（由客户端 `command_result` 消息回报）。
+#[derive(Debug, Clone)]
+pub struct CommandResult {
+    pub ok: bool,
+    pub message: String,
+    pub data: Option<Value>,
+}
+
+/// 等待设备回执的请求表：平台 `requestId` → 结果通道。
+///
+/// 指令下发成功（`wsDelivered=true`）只代表帧进了设备连接，不代表设备执行成功。
+/// 需要「真正结果」的调用方（目前是「下发地图」）先登记一个通道，客户端执行完
+/// 通过 `command_result` 回报，再由这里唤醒等待方。
+pub type CommandResultWaiters = Arc<Mutex<HashMap<String, oneshot::Sender<CommandResult>>>>;
+pub type CommandResultReceiver = oneshot::Receiver<CommandResult>;
+
+pub fn new_command_result_waiters() -> CommandResultWaiters {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// 在发送指令前登记等待；必须早于 `send_command_to_device`，否则客户端回执
+/// 可能比登记更早到达而被丢弃。
+pub async fn expect_command_result(
+    waiters: &CommandResultWaiters,
+    request_id: &str,
+) -> CommandResultReceiver {
+    let (tx, rx) = oneshot::channel();
+    waiters.lock().await.insert(request_id.to_string(), tx);
+    rx
+}
+
+/// 指令没有发出去（设备离线 / 广播通道关闭）时撤销等待，避免残留。
+pub async fn cancel_command_result(waiters: &CommandResultWaiters, request_id: &str) {
+    waiters.lock().await.remove(request_id);
+}
+
+/// 客户端回执到达：唤醒等待方；迟到（已超时）的回执只记日志。
+pub async fn complete_command_result(
+    waiters: &CommandResultWaiters,
+    request_id: &str,
+    result: CommandResult,
+) {
+    let sender = waiters.lock().await.remove(request_id);
+    match sender {
+        Some(sender) => {
+            let _ = sender.send(result);
+        }
+        None => debug!(
+            request_id,
+            "收到没有等待方的指令回执（可能已超时或调用方未要求等待）"
+        ),
+    }
+}
+
+/// 等待客户端执行结果；超时会清掉等待表，避免后续回执命中旧请求。
+pub async fn wait_command_result(
+    waiters: &CommandResultWaiters,
+    request_id: &str,
+    receiver: CommandResultReceiver,
+    timeout: std::time::Duration,
+) -> Result<CommandResult, String> {
+    match tokio::time::timeout(timeout, receiver).await {
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(_)) => Err("设备回执通道已关闭".to_string()),
+        Err(_) => {
+            waiters.lock().await.remove(request_id);
+            Err(format!(
+                "设备已收到指令，但 {} 秒内未回报执行结果",
+                timeout.as_secs()
+            ))
+        }
+    }
 }
 
 // ─── 连接池登记 ──────────────────────────────────────────
@@ -277,6 +351,27 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                         });
                                     handle_task_progress(&state, did, &payload).await;
                                     send_msg(&tx, "task_progress_ack", json!({"received": true})).await;
+                                }
+                            }
+                            "command_result" => {
+                                if let Some(ref did) = device_id {
+                                    let payload: crate::gateway_types::CommandResultPayload =
+                                        serde_json::from_value(ws_msg.payload).unwrap_or_default();
+                                    if payload.request_id.trim().is_empty() {
+                                        warn!("设备 {did} 的 command_result 缺少 requestId");
+                                    } else {
+                                        complete_command_result(
+                                            &state.command_results,
+                                            payload.request_id.trim(),
+                                            CommandResult {
+                                                ok: payload.ok,
+                                                message: payload.message,
+                                                data: payload.data,
+                                            },
+                                        )
+                                        .await;
+                                    }
+                                    send_msg(&tx, "command_result_ack", json!({"received": true})).await;
                                 }
                             }
                             "event" => {
@@ -2130,5 +2225,48 @@ mod tests {
             derive_device_status("故障", true, Some(false), Some(80), Some(true)),
             Some("在线待命")
         );
+    }
+
+    #[tokio::test]
+    async fn command_result_wakes_waiter_by_request_id() {
+        let waiters = super::new_command_result_waiters();
+        let rx = super::expect_command_result(&waiters, "req-map-push").await;
+        super::complete_command_result(
+            &waiters,
+            "req-map-push",
+            super::CommandResult {
+                ok: true,
+                message: "本体地图已更新".to_string(),
+                data: None,
+            },
+        )
+        .await;
+        let result = super::wait_command_result(
+            &waiters,
+            "req-map-push",
+            rx,
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .expect("result must arrive");
+        assert!(result.ok);
+        assert_eq!(result.message, "本体地图已更新");
+    }
+
+    #[tokio::test]
+    async fn command_result_times_out_and_is_cleaned_up() {
+        let waiters = super::new_command_result_waiters();
+        let rx = super::expect_command_result(&waiters, "req-timeout").await;
+        let error = super::wait_command_result(
+            &waiters,
+            "req-timeout",
+            rx,
+            std::time::Duration::from_millis(20),
+        )
+        .await
+        .expect_err("must time out");
+        assert!(error.contains("未回报执行结果"));
+        // 超时后等待表要清空，迟到回执不能命中下一条请求
+        assert!(waiters.lock().await.is_empty());
     }
 }

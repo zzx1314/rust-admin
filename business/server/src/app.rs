@@ -33,6 +33,8 @@ pub struct AppState {
     pub db: SqlitePool,
     pub config: Arc<Config>,
     pub device_connections: DeviceConnections,
+    /// 「指令真正执行结果」的等待表：客户端 `command_result` 按 requestId 唤醒
+    pub command_results: gateway::CommandResultWaiters,
     /// 实时视频中继房间（设备 → 浏览器）
     pub video_hub: VideoHub,
     /// 企业微信推送句柄（未配置 webhook 时是个静默丢弃的空句柄）

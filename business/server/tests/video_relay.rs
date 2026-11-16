@@ -89,6 +89,7 @@ async fn test_state() -> (AppState, TempDb) {
         notifier: robodog_ops_server::notify::Notifier::disabled(),
         config,
         device_connections: gateway::new_device_connections(),
+        command_results: gateway::new_command_result_waiters(),
         video_hub: Default::default(),
     };
     (state, temp)

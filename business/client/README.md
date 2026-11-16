@@ -288,6 +288,11 @@ jq -c 'select(.dir=="recv" and .frame.head.type==4013)' /tmp/frames.jsonl
 「`POST /upload`（multipart）→ `PUT /files/<rel>` → `POST /files/<rel>`」三种形状
 探测，并且**只以读回内容一致为准**，失败会回滚已写文件。
 
+执行完（成功或失败）客户端都会发 `command_result`（`requestId` / `command` /
+`ok` / `message`）给业务平台。业务平台据此等待「下发地图」的真实结果最长 60s，
+不再把「帧已送达」当成「地图下发成功」；急停、任务占用、写文件失败、4030
+载图失败都会原样回报到平台。
+
 除了建图完成后的自动回传（4001），还有两条「把本体上的图补到平台」的路径：
 
 | 触发 | 模式 | 行为 |

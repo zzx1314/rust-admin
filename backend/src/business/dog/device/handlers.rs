@@ -15,6 +15,11 @@ use axum::{
     extract::{Path, Query, State},
 };
 use serde_json::{Value, json};
+use std::time::Duration;
+
+/// 「下发地图」是同步等待设备真实回执的操作（写本体 + 重新载图），
+/// 比普通指令慢得多；其余控制请求仍用 8s 的默认回执超时。
+const PUSH_MAP_TIMEOUT: Duration = Duration::from_secs(65);
 
 /// 允许从中台发起的设备指令白名单（与业务平台 `teleop::BUSINESS_COMMANDS` 对齐）。
 /// 「同步地图」有独立入口 `syncMaps`，这里不重复暴露。
@@ -276,9 +281,14 @@ async fn deliver(
             "operatorAdmin": user.is_admin,
             "body": body,
         });
+        let timeout = if kind == "push-map" {
+            PUSH_MAP_TIMEOUT
+        } else {
+            DEFAULT_TIMEOUT
+        };
         match state
             .control_channel
-            .request(&request_id, "request", payload, DEFAULT_TIMEOUT)
+            .request(&request_id, "request", payload, timeout)
             .await
         {
             // 与 HTTP 直连模式返回同样形状的业务数据：调用方不需要知道链路
@@ -288,7 +298,7 @@ async fn deliver(
             Err(ChannelError::Timeout) => {
                 return Err(AppError::BadRequest(format!(
                     "业务平台未在 {} 秒内回执，请检查业务平台与控制信道状态",
-                    DEFAULT_TIMEOUT.as_secs()
+                    timeout.as_secs()
                 )));
             }
             Err(ChannelError::Disconnected) => {
@@ -305,6 +315,17 @@ async fn deliver(
     let body = if kind == "runtime" { Value::Null } else { body };
     match kind {
         "runtime" => business_client::get(state, &path).await,
+        "push-map" => {
+            business_client::post_with_timeout(
+                state,
+                &path,
+                &request_id,
+                user.user_id,
+                body,
+                PUSH_MAP_TIMEOUT,
+            )
+            .await
+        }
         _ => business_client::post(state, &path, &request_id, user.user_id, body).await,
     }
 }

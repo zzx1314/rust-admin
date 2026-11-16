@@ -430,16 +430,18 @@ async function pushToDog() {
       message(msg || "下发失败", { type: "error" });
       return;
     }
-    // 业务平台返回的 result 里带设备侧执行结果（写文件 + 重新载图）
+    // 业务平台会等设备真正写回本体并重新载图后才返回，message 是设备侧结果
     const detail =
-      data?.result?.result?.result ?? data?.result?.message ?? data?.result;
+      data?.result?.message ?? data?.result?.deviceResult?.message ?? "";
     message(
-      typeof detail === "string" && detail
+      detail
         ? `已下发到 ${row.deviceCode}：${detail}`
-        : `已向 ${row.deviceCode} 下发地图，设备将写回本体并重新载图`,
-      { type: "success", duration: 8000 }
+        : `已下发到 ${row.deviceCode}，设备已确认执行`,
+      { type: "success", duration: 10000 }
     );
     emit("pushed", row);
+  } catch {
+    // 失败原因（急停 / 任务占用 / 设备未回执）已由请求拦截器提示
   } finally {
     pushing.value = false;
   }

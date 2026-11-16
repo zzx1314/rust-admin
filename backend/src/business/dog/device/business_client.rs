@@ -70,6 +70,31 @@ pub async fn post(
     send(request, &url).await
 }
 
+/// 与 [`post`] 相同，但覆盖本次请求的总超时。
+///
+/// 「下发地图」要等设备写本体并重新载图，不能沿用全局 5s 超时；只对这一次
+/// 请求放宽，其他控制面请求仍保持快速失败。
+pub async fn post_with_timeout(
+    state: &AppState,
+    path: &str,
+    request_id: &str,
+    operator_id: i64,
+    body: Value,
+    timeout: std::time::Duration,
+) -> Result<Value, AppError> {
+    let (base, token) = endpoint(state)?;
+    let url = format!("{}{}", base.trim_end_matches('/'), path);
+    let request = state
+        .business_http
+        .post(&url)
+        .timeout(timeout)
+        .header(SERVICE_TOKEN_HEADER, token)
+        .header(REQUEST_ID_HEADER, request_id)
+        .header(OPERATOR_HEADER, operator_id.to_string())
+        .json(&body);
+    send(request, &url).await
+}
+
 /// `GET` 业务平台内部接口，返回响应里的 `data`。
 pub async fn get(state: &AppState, path: &str) -> Result<Value, AppError> {
     let (base, token) = endpoint(state)?;

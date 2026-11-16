@@ -226,6 +226,11 @@ GET    /api/zentai/devices/{deviceId}/runtime     # 中台读取设备运行态�
 `map_edit/` 的老固件才退回根目录。`map.pcd` / `map.geojson` / `nav_paths`
 始终原样保留；客户端在任务执行 / 建图进行中会拒绝下发。
 
+「下发地图」不是「帧送进设备连接」就算成功：业务平台会先登记 `requestId`
+等待客户端执行完的 `command_result`（写本体 + 4030 重新载图），最长 60s。
+成功返回设备侧 message；急停 / 任务占用 / 写文件失败 / 超时都会返回 400，
+中台审计记 `failed`，前端直接显示原因。
+
 ## 中台账号与设备分配
 
 业务平台登录同时支持两类账号：

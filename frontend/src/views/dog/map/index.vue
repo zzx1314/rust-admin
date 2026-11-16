@@ -117,10 +117,16 @@ const handlePush = row => {
     .then(() => dogMapPushToDevice(row.id, row.deviceCode))
     .then(res => {
       if (res.code === SUCCESS) {
-        message(`已向 ${row.deviceCode} 下发地图，设备将写回本体并重新载图`, {
-          type: "success",
-          duration: 8000
-        });
+        const detail =
+          res.data?.result?.message ??
+          res.data?.result?.deviceResult?.message ??
+          "";
+        message(
+          detail
+            ? `已下发到 ${row.deviceCode}：${detail}`
+            : `已下发到 ${row.deviceCode}，设备已确认执行`,
+          { type: "success", duration: 10000 }
+        );
         onSearch();
       } else {
         message(res.msg, { type: "error" });

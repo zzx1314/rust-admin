@@ -116,17 +116,24 @@ ROS `model.pgm` 包）时才退回 `model.pgm` / `map.pgm`。编辑只改写编�
      → 业务平台 apply_push_map
         ① 按 source_id 找到业务库 map_versions（未导入过就直接报错）
         ② 读中台最新包，暂存到业务 ingest 目录并刷新 file_path / map_hash / 尺寸
-        ③ 下发「下发地图」指令（带 mapId / mapDir / packagePath / mapHash）
+        ③ 下发「下发地图」指令（带 mapId / mapDir / packagePath / mapHash / requestId）
             → 设备客户端 GET /api/map-versions/{id}/package
             → 本体有 map_edit/ 就写 map_edit/map.pgm + map_edit/map.yaml，
               没有才写根目录 map.pgm + map.yaml（读回校验）
             → 4030 重新载图
+            → 客户端回 command_result（requestId + ok + message）
+        ④ 业务平台等设备真实回执（最长 60s）后才返回：
+           成功 → 中台审计 succeeded，接口返回设备侧 message；
+           失败 / 超时 → 返回 400，中台审计 failed，不再把「已送达」显示成「已下发」
 ```
 
 设备必须在业务平台在线、本体上没有同名目录以外的猜测路径、且当前没有执行任务 /
 建图，否则直接报错而不是「静默下发」。有 `map_edit/` 时只覆盖编辑版，
 根目录的原始 `map.pgm` / `map.yaml` 保持不变；`map.pcd` / `map.geojson` /
 `nav_paths` 始终原样保留，不影响已有路线。
+
+> 「下发地图」现在会等设备真正写回并重新载图后才返回；如果本体急停、任务占用、
+> 写文件失败或 60s 内没回执，中台会显示具体失败原因，而不是只提示「已下发」。
 
 - `module` ∈ `dogMap`、`dogMedia`、`dogModel`、`dogConfig`，均提供 `getPage` + `getAll`。
 - 统计接口同样需要登录（`require_auth`）。

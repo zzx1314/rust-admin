@@ -84,7 +84,8 @@ export const dogMapErase = (
  *
  * 链路：中台 → 业务平台 → 设备客户端 → 本体文件服务（有 map_edit/ 时写
  * map_edit/map.pgm + map_edit/map.yaml，否则写根目录 map.pgm / map.yaml）
- * → 重新载图。设备未连接、正在执行任务、或本体上没有该地图目录时会报错。
+ * → 重新载图 → 设备回 `commandResult`。中台会等设备真实执行结果（最长 60s）
+ * 后才返回：急停、任务占用、写文件失败、未回执都会返回错误并带设备侧原因。
  */
 export const dogMapPushToDevice = (id: string | number, deviceCode?: string) =>
   http.axiosPostRequest<Result>(`${dogMapUrls.edit}${id}/push`, {

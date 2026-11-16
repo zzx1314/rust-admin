@@ -745,8 +745,18 @@ pub async fn apply_push_map(
     }
 
     // 4) 下发指令：客户端拉包 → 写本体文件服务 → 重新载图
+    //
+    // 中台/浏览器要的「是否成功」不是 `wsDelivered`：帧送进设备连接只代表送达，
+    // 不代表客户端真的把文件写进本体。带 requestId 的调用先登记等待，客户端执行完
+    // 用 `command_result` 回报，下面再按真实结果返回成功 / 失败。
     let package_path = format!("/api/map-versions/{map_id}/package");
     let request_id = payload.request_id.clone().unwrap_or_default();
+    let wait_request_id = request_id.trim().to_string();
+    let result_rx = if wait_request_id.is_empty() {
+        None
+    } else {
+        Some(gateway::expect_command_result(&state.command_results, &wait_request_id).await)
+    };
     let dispatched = gateway::send_command_to_device(
         &state.device_connections,
         device_code,
@@ -765,6 +775,9 @@ pub async fn apply_push_map(
     )
     .await;
     if !dispatched {
+        if !wait_request_id.is_empty() {
+            gateway::cancel_command_result(&state.command_results, &wait_request_id).await;
+        }
         let healed = gateway::mark_offline_if_online(&state.db, device_code).await;
         return Err(AppError::BadRequest(format!(
             "设备 {device_code} 未连接（台账状态 {}，连接池无该设备连接），地图未下发{}；请确认设备客户端已启动且能连上业务平台",
@@ -777,22 +790,74 @@ pub async fn apply_push_map(
         )));
     }
 
-    sqlx::query(
-        "INSERT INTO task_events (event_type, title, description, device_id, task_id, created_at)
-         VALUES ('map_push', ?1, ?2, ?3, NULL, ?4)",
+    let execution = match result_rx {
+        Some(rx) => match gateway::wait_command_result(
+            &state.command_results,
+            &wait_request_id,
+            rx,
+            PUSH_MAP_RESULT_TIMEOUT,
+        )
+        .await
+        {
+            Ok(result) => Some(result),
+            Err(message) => {
+                record_map_push_event(
+                    state,
+                    MapPushEvent {
+                        device_pk: device.id,
+                        device_code,
+                        map_name: &source.map_name,
+                        map_id: payload.map_id,
+                        map_dir: &map_dir,
+                        package_hash: &package_hash,
+                        ok: false,
+                        message: &format!("等待设备回执失败：{message}"),
+                    },
+                )
+                .await?;
+                return Err(AppError::BadRequest(format!(
+                    "地图已送达设备，但未能确认执行结果：{message}。请在设备客户端日志中查看「下发地图」结果"
+                )));
+            }
+        },
+        None => None,
+    };
+
+    let (ok, message) = match &execution {
+        Some(result) if !result.ok => (
+            false,
+            if result.message.trim().is_empty() {
+                "设备执行下发地图失败（客户端未返回原因）".to_string()
+            } else {
+                result.message.clone()
+            },
+        ),
+        Some(result) => (true, result.message.clone()),
+        None => (
+            true,
+            "设备已收到下发指令（调用方未提供 requestId，无法确认执行结果）".to_string(),
+        ),
+    };
+    record_map_push_event(
+        state,
+        MapPushEvent {
+            device_pk: device.id,
+            device_code,
+            map_name: &source.map_name,
+            map_id: payload.map_id,
+            map_dir: &map_dir,
+            package_hash: &package_hash,
+            ok,
+            message: &message,
+        },
     )
-    .bind(format!(
-        "已向 {} 下发地图：{}",
-        device_code, source.map_name
-    ))
-    .bind(format!(
-        "中台 dog_map #{} · 本体目录 {} · map_hash {}",
-        payload.map_id, map_dir, package_hash
-    ))
-    .bind(device.id)
-    .bind(&timestamp)
-    .execute(&state.db)
     .await?;
+
+    if !ok {
+        return Err(AppError::BadRequest(format!(
+            "设备 {device_code} 执行下发地图失败：{message}"
+        )));
+    }
 
     Ok(json!({
         "deviceId": device_code,
@@ -804,9 +869,57 @@ pub async fn apply_push_map(
         "packagePath": package_path,
         "mapCount": rows.len(),
         "wsDelivered": true,
+        "awaited": execution.is_some(),
+        "ok": true,
+        "message": message,
+        "deviceResult": execution.map(|result| json!({
+            "ok": result.ok,
+            "message": result.message,
+            "data": result.data,
+        })),
         "requestId": request_id,
         "dispatchedAt": timestamp,
     }))
+}
+
+/// 「下发地图」等待设备真实回执的最长时间。
+///
+/// 地图包几 MB + 写文件 + 4030 重新载图，现场通常 5~20s；60s 能覆盖慢链路，
+/// 超时按「结果未知」返回，而不是假装成功。
+const PUSH_MAP_RESULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+struct MapPushEvent<'a> {
+    device_pk: i64,
+    device_code: &'a str,
+    map_name: &'a str,
+    map_id: i64,
+    map_dir: &'a str,
+    package_hash: &'a str,
+    ok: bool,
+    message: &'a str,
+}
+
+async fn record_map_push_event(state: &AppState, event: MapPushEvent<'_>) -> Result<(), AppError> {
+    let title = if event.ok {
+        format!("地图下发成功：{}", event.map_name)
+    } else {
+        format!("地图下发失败：{}", event.map_name)
+    };
+    let description = format!(
+        "设备 {} · 中台 dog_map #{} · 本体目录 {} · map_hash {} · 设备回执：{}",
+        event.device_code, event.map_id, event.map_dir, event.package_hash, event.message
+    );
+    sqlx::query(
+        "INSERT INTO task_events (event_type, title, description, device_id, task_id, created_at)
+         VALUES ('map_push', ?1, ?2, ?3, NULL, ?4)",
+    )
+    .bind(title)
+    .bind(description)
+    .bind(event.device_pk)
+    .bind(now())
+    .execute(&state.db)
+    .await?;
+    Ok(())
 }
 
 pub async fn get_map(

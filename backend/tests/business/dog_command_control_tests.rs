@@ -26,6 +26,8 @@ use x_rust::business::dog::device::handlers::{
     IdParam, device_runtime_handler, dispatch_device_task_handler, send_device_command_handler,
     sync_device_maps_handler,
 };
+use x_rust::business::dog::map::domain::{CreateMapRequest, PushMapRequest};
+use x_rust::business::dog::map::handlers::{IdParam as MapIdParam, push_map_handler};
 use x_rust::common::data_scope::DataScope;
 use x_rust::common::error::AppError;
 use x_rust::common::traits::{DynFuture, TokenStore};
@@ -234,6 +236,42 @@ async fn create_device(state: &AppState, code: &str) -> i64 {
         )
         .await
         .expect("device must be created")
+        .id
+}
+
+async fn create_map(state: &AppState, device_code: &str) -> i64 {
+    state
+        .dog_map_service
+        .create(
+            CreateMapRequest {
+                map_name: "测试地图".to_string(),
+                map_type: Some("2D栅格".to_string()),
+                park_code: None,
+                park_name: None,
+                device_code: Some(device_code.to_string()),
+                map_data: None,
+                file_name: Some("test.zip".to_string()),
+                file_path: Some("maps/test.zip".to_string()),
+                file_format: Some("zip".to_string()),
+                file_size: None,
+                remarks: Some("测试".to_string()),
+                map_version: Some("v1.0".to_string()),
+                frame_id: None,
+                crs: None,
+                map_origin: Some("0, 0, 0".to_string()),
+                resolution: Some("0.05".to_string()),
+                floors: None,
+                road_count: None,
+                nogo_count: None,
+                map_status: Some("草稿".to_string()),
+                map_hash: None,
+                map_width: Some(100),
+                map_height: Some(100),
+            },
+            &DataScope::new(1, true),
+        )
+        .await
+        .expect("map must be created")
         .id
 }
 
@@ -743,6 +781,163 @@ mod control_channel_transport {
 
         business.await.expect("business side must finish");
         assert_eq!(data["dispatched"], true);
+    }
+
+    /// 中台下发的「下发地图」必须把设备真实结果带回中台：
+    /// 业务平台不再回 `wsDelivered=true`，而是回客户端写本体 + 重新载图后的 message。
+    #[tokio::test]
+    async fn push_map_returns_device_result_to_zentai() {
+        let state = state_without_http().await;
+        create_device(&state, "RD-100").await;
+        let map_id = create_map(&state, "RD-100").await;
+        let url = spawn_zentai(state.clone()).await;
+        let mut socket = dial(&url, TOKEN).await;
+        wait_online(&state).await;
+
+        let business = tokio::spawn(async move {
+            while let Some(message) = socket.next().await {
+                let Ok(Message::Text(text)) = message else {
+                    continue;
+                };
+                let frame: Value = serde_json::from_str(&text).expect("frame is json");
+                if frame["type"] != "request" {
+                    continue;
+                }
+                assert_eq!(frame["payload"]["kind"], "push-map");
+                assert_eq!(frame["payload"]["deviceCode"], "RD-100");
+                assert_eq!(frame["payload"]["body"]["mapId"], map_id);
+                let request_id = frame["payload"]["requestId"].as_str().unwrap().to_string();
+                let reply = json!({
+                    "type": "result",
+                    "payload": {
+                        "requestId": request_id,
+                        "ok": true,
+                        "data": {
+                            "deviceId": "RD-100",
+                            "mapId": map_id,
+                            "ok": true,
+                            "awaited": true,
+                            "message": "本体地图 2026_11_14_15_27_08/map_edit 已更新并重新载图（status=100）",
+                            "deviceResult": {
+                                "ok": true,
+                                "message": "本体地图 2026_11_14_15_27_08/map_edit 已更新并重新载图（status=100）"
+                            }
+                        }
+                    },
+                });
+                socket
+                    .send(Message::Text(reply.to_string()))
+                    .await
+                    .expect("send result");
+                return;
+            }
+            panic!("没有收到下发地图请求");
+        });
+
+        let response = push_map_handler(
+            axum::extract::State(state.clone()),
+            axum::Extension(admin()),
+            AxumPath(MapIdParam { id: map_id }),
+            Some(Json(PushMapRequest {
+                request_id: Some("req-push-ok".to_string()),
+                device_code: Some("RD-100".to_string()),
+            })),
+        )
+        .await
+        .expect("push-map over channel must succeed")
+        .0
+        .data;
+
+        business.await.expect("business side must finish");
+        // 中台拿到的是设备真实结果，不是「已送达」占位
+        assert_eq!(
+            response["result"]["message"],
+            "本体地图 2026_11_14_15_27_08/map_edit 已更新并重新载图（status=100）"
+        );
+        assert_eq!(response["status"], audit::STATUS_SUCCEEDED);
+
+        let audit = state
+            .dog_device_service
+            .find_command("req-push-ok")
+            .await
+            .expect("audit lookup")
+            .expect("audit row");
+        assert_eq!(audit.status, audit::STATUS_SUCCEEDED);
+        assert!(
+            audit
+                .result
+                .unwrap_or_default()
+                .contains("2026_11_14_15_27_08/map_edit 已更新")
+        );
+    }
+
+    /// 设备拒绝（急停 / 未回执）时中台必须收到失败 + 原因，审计记 failed。
+    #[tokio::test]
+    async fn push_map_device_rejection_reaches_zentai_audit() {
+        let state = state_without_http().await;
+        create_device(&state, "RD-100").await;
+        let map_id = create_map(&state, "RD-100").await;
+        let url = spawn_zentai(state.clone()).await;
+        let mut socket = dial(&url, TOKEN).await;
+        wait_online(&state).await;
+
+        let business = tokio::spawn(async move {
+            while let Some(message) = socket.next().await {
+                let Ok(Message::Text(text)) = message else {
+                    continue;
+                };
+                let frame: Value = serde_json::from_str(&text).expect("frame is json");
+                if frame["type"] != "request" {
+                    continue;
+                }
+                let request_id = frame["payload"]["requestId"].as_str().unwrap().to_string();
+                let reply = json!({
+                    "type": "result",
+                    "payload": {
+                        "requestId": request_id,
+                        "ok": false,
+                        "error": "设备 RD-100 执行下发地图失败：本体软件急停已触发，请先点「解除急停」",
+                    },
+                });
+                socket
+                    .send(Message::Text(reply.to_string()))
+                    .await
+                    .expect("send result");
+                return;
+            }
+            panic!("没有收到下发地图请求");
+        });
+
+        let error = push_map_handler(
+            axum::extract::State(state.clone()),
+            axum::Extension(admin()),
+            AxumPath(MapIdParam { id: map_id }),
+            Some(Json(PushMapRequest {
+                request_id: Some("req-push-estop".to_string()),
+                device_code: Some("RD-100".to_string()),
+            })),
+        )
+        .await
+        .expect_err("device rejection must fail the request");
+
+        business.await.expect("business side must finish");
+        assert!(
+            matches!(error, AppError::BadRequest(ref message) if message.contains("本体软件急停已触发"))
+        );
+
+        let audit = state
+            .dog_device_service
+            .find_command("req-push-estop")
+            .await
+            .expect("audit lookup")
+            .expect("audit row");
+        assert_eq!(audit.status, audit::STATUS_FAILED);
+        assert!(
+            audit
+                .message
+                .unwrap_or_default()
+                .contains("本体软件急停已触发")
+        );
     }
 
     #[tokio::test]

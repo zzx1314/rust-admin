@@ -133,6 +133,26 @@ pub struct TeleopStatePayload {
     pub reason: Option<String>,
 }
 
+/// 客户端 → 服务端：远程指令执行结果
+///
+/// 业务平台下发「下发地图」等指令后，只有 `wsDelivered` 不能说明设备真的执行成功。
+/// 客户端执行完（成功或失败）用这条消息按 `requestId` 回报，业务平台据此把
+/// 「已送达」和「执行成功」区分开。
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandResultPayload {
+    /// 与平台下发指令时的 `requestId` 对应
+    pub request_id: String,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub data: Option<Value>,
+}
+
 /// 客户端 → 服务端：设备事件
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

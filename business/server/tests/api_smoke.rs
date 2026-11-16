@@ -92,6 +92,7 @@ async fn test_state_with_token(service_token: Option<&str>) -> (AppState, TempDb
         notifier: robodog_ops_server::notify::Notifier::disabled(),
         config,
         device_connections: gateway::new_device_connections(),
+        command_results: gateway::new_command_result_waiters(),
         video_hub: Default::default(),
     };
     (state, db_dir)
@@ -1412,6 +1413,7 @@ mod control_plane_channel {
             db: state.db,
             config: Arc::new(config),
             device_connections: state.device_connections,
+            command_results: state.command_results,
             video_hub: state.video_hub,
             notifier: robodog_ops_server::notify::Notifier::disabled(),
         };
@@ -2579,6 +2581,7 @@ async fn ingest_refresh_overwrites_existing_map_only_when_content_changes() {
         notifier: robodog_ops_server::notify::Notifier::disabled(),
         config: Arc::new(config),
         device_connections: state.device_connections,
+        command_results: state.command_results,
         video_hub: Default::default(),
     };
     let app = build_router(state.clone());

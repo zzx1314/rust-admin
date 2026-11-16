@@ -49,6 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db: pool,
         config: config.clone(),
         device_connections: gateway::new_device_connections(),
+        command_results: gateway::new_command_result_waiters(),
         video_hub: Default::default(),
         notifier,
     };

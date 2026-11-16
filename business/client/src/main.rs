@@ -2150,6 +2150,9 @@ async fn handle_server_message(
         // 事件回执：客户端发的 event 由服务端落库后回 ack，不需要额外处理
         "event_ack" => {}
 
+        // 指令结果回执：业务平台确认收到 `command_result`，不需要额外处理
+        "command_result_ack" => {}
+
         // 进度上报的逐条回执：客户端已经在本地合流上报，不需要逐条处理，
         // 也不能当「未处理的消息类型」打 WARN（任务执行时每 5s 一条会刷爆日志）
         "task_progress_ack" => {}
@@ -2838,6 +2841,8 @@ async fn handle_server_message(
                 };
                 if let Some(reason) = command_block {
                     warn!("指令 {command} 被拒绝: {reason}");
+                    // 门禁拒绝也必须回执，否则平台只能等到超时才知道没执行
+                    send_command_result(out_tx, &msg, command, &Err(reason.clone())).await;
                     let event = DeviceEventPayload {
                         event_type: "error".to_string(),
                         message: format!("指令 {command} 被拒绝: {reason}"),
@@ -2855,6 +2860,13 @@ async fn handle_server_message(
 
             let Some(client) = zhpro.clone() else {
                 warn!("未连接本体，忽略远程指令");
+                send_command_result(
+                    out_tx,
+                    &msg,
+                    command,
+                    &Err("本体未连接（客户端正在重连或本体离线），指令未执行".to_string()),
+                )
+                .await;
                 return;
             };
             // 遥控类指令（接管 / 释放 / 急停 / 本体动作）由 teleop 模块处理，
@@ -3022,6 +3034,8 @@ async fn handle_server_message(
                     other => Err(format!("未知指令 {other}")),
                 },
             };
+            // 先把真实结果回报给业务平台（按 requestId 关联），再落本地日志/事件。
+            send_command_result(out_tx, &msg, command, &result).await;
             match result {
                 Ok(note) => info!("指令 {command} 执行: {note}"),
                 Err(e) => {
@@ -3161,6 +3175,48 @@ async fn send(tx: &mpsc::Sender<WsMessage>, msg_type: &str, payload: Value) {
         payload,
     };
     let _ = tx.send(msg).await;
+}
+
+/// 从平台下发指令里取 `requestId`（业务平台把它放在 `params.requestId`）。
+fn command_request_id(msg: &WsMessage) -> Option<String> {
+    msg.payload
+        .get("params")
+        .and_then(|params| params.get("requestId"))
+        .or_else(|| msg.payload.get("requestId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+/// 回报远程指令的**真实执行结果**。
+///
+/// 平台只看 `wsDelivered` 无法区分「指令进了设备连接」和「设备真的执行成功」；
+/// 业务平台按 `requestId` 等待这条回执，用它决定地图下发成功还是失败。
+async fn send_command_result(
+    out_tx: &mpsc::Sender<WsMessage>,
+    msg: &WsMessage,
+    command: &str,
+    result: &Result<String, String>,
+) {
+    let Some(request_id) = command_request_id(msg) else {
+        return;
+    };
+    let (ok, message) = match result {
+        Ok(note) => (true, note.clone()),
+        Err(error) => (false, error.clone()),
+    };
+    send(
+        out_tx,
+        "command_result",
+        json!({
+            "requestId": request_id,
+            "command": command,
+            "ok": ok,
+            "message": message,
+        }),
+    )
+    .await;
 }
 
 /// 上报一条「地图保存」事件（信息流留痕，与任务终态分开）
@@ -3569,5 +3625,37 @@ mod progress_reporter_tests {
         let back = rx.try_recv().expect("内容变化必须立刻上报");
         assert_eq!(back.payload["status"], "执行中");
         assert!(rx.try_recv().is_err());
+    }
+}
+
+#[cfg(test)]
+mod command_result_tests {
+    use super::{WsMessage, command_request_id};
+    use serde_json::json;
+
+    fn message(payload: serde_json::Value) -> WsMessage {
+        WsMessage {
+            msg_type: "command".to_string(),
+            ts: "2026-11-16 10:00:00".to_string(),
+            payload,
+        }
+    }
+
+    #[test]
+    fn reads_request_id_from_nested_command_params() {
+        let msg = message(json!({
+            "command": "下发地图",
+            "params": { "mapId": "ROS-MAP-1@v1.0", "requestId": "req-push-1" }
+        }));
+        assert_eq!(command_request_id(&msg).as_deref(), Some("req-push-1"));
+    }
+
+    #[test]
+    fn falls_back_to_top_level_request_id_and_rejects_blank() {
+        let msg = message(json!({ "requestId": "req-2" }));
+        assert_eq!(command_request_id(&msg).as_deref(), Some("req-2"));
+
+        let blank = message(json!({ "params": { "requestId": "   " } }));
+        assert!(command_request_id(&blank).is_none());
     }
 }
