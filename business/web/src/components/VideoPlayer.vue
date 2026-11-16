@@ -84,8 +84,15 @@ const RETRY_MAX = 3000;
 const HARD_ERROR_AFTER = 5;
 /** 画面停住多久判定「假死」并重连（弱网下 MSE 会卡在 readyState=2 不再前进） */
 const STALL_MS = 3000;
-/** 一次连接尝试多久没画面算超时（现场首次冷启动 ffmpeg 要 3~7s，留足余量） */
-const CONNECT_TIMEOUT_MS = 10_000;
+/**
+ * 一次连接尝试多久没画面算超时。
+ *
+ * 现场路径：浏览器连上中继 → 平台下发 video_start → 设备客户端起 ffmpeg（3~7s）
+ * → 等首个关键帧（GOP 2s）→ 才有画面。看门狗刚把推流停掉时这串要重新走一遍，
+ * 10s 太紧：一旦超时就断连，服务端数到「没人看」又把流停掉，下一轮更慢 ——
+ * 现场看到的就是「一直在重连」。给到 20s，宁可多等一会也不要打死再重来。
+ */
+const CONNECT_TIMEOUT_MS = 20_000;
 let stallTimer: ReturnType<typeof setInterval> | null = null;
 let lastTime = 0;
 let lastProgressAt = 0;
@@ -218,6 +225,10 @@ function scheduleRetry(reason: string) {
   } else {
     status.value = "retrying";
   }
+  // 后台标签页不重连：浏览器会冻结 muted 视频的解码，时间轴本来就不走，
+  // 那时候重连毫无意义——而且每重连一次推流端就要起一遍 ffmpeg，
+  // 现场表现就是「页面切走就开始反复重连」。回前台时由 onVisibility 补连。
+  if (document.visibilityState === "hidden") return;
   retryTimer = setTimeout(() => {
     retryTimer = null;
     void attach();
@@ -368,6 +379,9 @@ function onMediaError() {
 
 /** MSE 「假死」看门狗：playing 却连续 3s 时间轴不前进就自己重连；一直连不上也算超时 */
 function tickStall() {
+  // 后台标签页：浏览器不渲染也不解码，时间轴停住是正常现象。这里若继续判
+  // 「超时 / 假死」就是后台无限重连，还会反复拉起推流端 ffmpeg。
+  if (document.visibilityState === "hidden") return;
   const el = videoRef.value;
   if (!el || !playable.value) {
     lastProgressAt = performance.now();
@@ -396,7 +410,17 @@ function tickStall() {
 
 /** 切回标签页时视频可能已被浏览器冻结：立刻检查一次，别等 3s 看门狗 */
 function onVisibility() {
-  if (document.visibilityState === "visible") tickStall();
+  if (document.visibilityState !== "visible") return;
+  // 后台被冻结的那段不能算进「没画面 / 假死」的计时，回前台重新起算
+  lastProgressAt = performance.now();
+  attachStartedAt = performance.now();
+  // 上次重连被后台状态拦下了（见 scheduleRetry），回前台补一次
+  if (!retryTimer && (status.value === "retrying" || status.value === "error")) {
+    retryAttempt.value = 0;
+    void attach();
+    return;
+  }
+  tickStall();
 }
 
 function toggleMute() {

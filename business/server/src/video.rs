@@ -41,7 +41,14 @@ use tokio::sync::{RwLock, broadcast, mpsc};
 use tracing::{debug, info, warn};
 
 /// 单个观看者的积压帧上限：网络慢时丢帧保实时，不把服务端内存拖爆
-const VIEWER_BUFFER_FRAMES: usize = 128;
+///
+/// 注意这里是**分片**数（推流端每次读 ffmpeg stdout 8KB，一个分片就 8KB），
+/// 所以 128 片只有 1MB：1080p/4Mbps 下就是 2 秒。实测现场浏览器只要卡 2 秒
+/// （切标签页、Wi-Fi 抖一下、MSE 追加慢一拍）就会触发 `Lagged` → 断开重连，
+/// 而重连要等推流端重新起 ffmpeg（3~7s），于是变成「一直重连」的死循环。
+/// 512 片 = 4MB，1080p 2.5Mbps 约 13 秒、720p 2Mbps 约 16 秒的余量，
+/// 偶发卡顿扛得住，真断网才会走重连。
+const VIEWER_BUFFER_FRAMES: usize = 512;
 
 /// 流头（FLV header + AVC 序列头 + 首个关键帧）解析的上限
 ///
