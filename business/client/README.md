@@ -278,11 +278,13 @@ jq -c 'select(.dir=="recv" and .frame.head.type==4013)' /tmp/frames.jsonl
 | `--api-password` | `admin123` | 业务服务登录密码 |
 
 中台地图页擦除噪点后，会通过业务平台下发 `下发地图` 指令：客户端
-`GET /api/map-versions/{id}/package` 拉最新包，把它转成本体命名的
-`map.pgm` / `map.yaml`（yaml 的 `image:` 改写成 `map.pgm`），写进本体文件服务的
-`map/history_map/<目录>/`，读回逐字节校验后再发 4030 重新载图。只覆盖这两个文件，
-`map.pcd` / `map.geojson` / `nav_paths` 不动；任务 / 建图进行中、或本体上没有该
-地图目录时直接报错。现场固件的上传接口没有正式文档，客户端按
+`GET /api/map-versions/{id}/package` 拉最新包，优先取包内 `map_edit/` 下的栅格
+（遥控器编辑后的地图），把它转成本体命名的 `map.pgm` / `map.yaml`（yaml 的
+`image:` 改写成 `map.pgm`）。本体上存在 `map_edit/` 时写进
+`map/history_map/<目录>/map_edit/`，根目录的原始建图 `map.pgm` / `map.yaml`
+保持不动；没有 `map_edit/` 的老固件才退回根目录。写完读回逐字节校验后再发 4030
+重新载图。`map.pcd` / `map.geojson` / `nav_paths` 不动；任务 / 建图进行中、
+或本体上没有该地图目录时直接报错。现场固件的上传接口没有正式文档，客户端按
 「`POST /upload`（multipart）→ `PUT /files/<rel>` → `POST /files/<rel>`」三种形状
 探测，并且**只以读回内容一致为准**，失败会回滚已写文件。
 

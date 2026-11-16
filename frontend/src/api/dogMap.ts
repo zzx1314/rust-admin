@@ -63,7 +63,8 @@ export type MapEditStroke = {
 };
 
 /**
- * 保存橡皮擦编辑：后端改写地图包内 `model.pgm` 并重算 `map_hash`。
+ * 保存橡皮擦编辑：后端改写包内编辑版栅格（优先 `map_edit/map.pgm`，没有时才用
+ * `model.pgm` / `map.pgm`）并重算 `map_hash`，根目录原始地图不动。
  *
  * `eraseValue`：254 = 可通行（默认，擦掉噪点），205 = 未知。
  * 只有草稿 / 部分标定版本可编辑，已发布版本需先派生新版本。
@@ -81,7 +82,8 @@ export const dogMapErase = (
 /**
  * 把编辑后的地图下发到狗体（本体）。
  *
- * 链路：中台 → 业务平台 → 设备客户端 → 本体文件服务（写回 map.pgm / map.yaml）
+ * 链路：中台 → 业务平台 → 设备客户端 → 本体文件服务（有 map_edit/ 时写
+ * map_edit/map.pgm + map_edit/map.yaml，否则写根目录 map.pgm / map.yaml）
  * → 重新载图。设备未连接、正在执行任务、或本体上没有该地图目录时会报错。
  */
 export const dogMapPushToDevice = (id: string | number, deviceCode?: string) =>
@@ -89,7 +91,7 @@ export const dogMapPushToDevice = (id: string | number, deviceCode?: string) =>
     deviceCode: deviceCode || undefined
   });
 
-/** 获取地图图片（后端把包内 model.pgm 转成 PNG） */
+/** 获取地图图片（后端优先把包内 map_edit/map.pgm 转成 PNG） */
 export const dogMapGetImage = (id: string | number) =>
   http.axiosGetRequest<MapImageResult>(dogMapUrls.image + id + "/image", {});
 export const dogMapDelete = (id: string | number) =>

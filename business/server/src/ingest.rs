@@ -355,6 +355,43 @@ pub async fn stash_package(
     Ok(path)
 }
 
+/// 地图包条目是否位于 `map_edit/` 目录（遥控器编辑后的地图）。
+///
+/// 机器人本体同时保留两份栅格：根目录 `map.pgm`（建图原始地图）与
+/// `map_edit/map.pgm`（遥控器编辑后的地图）。平台一律以 `map_edit/` 为准，
+/// 否则预览、尺寸、下发都会拿回原始地图。
+pub fn is_map_edit_path(name: &str) -> bool {
+    name.split('/')
+        .any(|segment| segment.eq_ignore_ascii_case("map_edit"))
+}
+
+/// 从 zip 条目名里选择地图文件：`map_edit/` 下的同扩展名条目优先，其次其他目录。
+///
+/// 只按扩展名判断，`map.yaml` / `model.yaml` / `*.yml` 都适用；返回的字符串
+/// 借用自入参，调用方可以直接拿去 `ZipArchive::by_name`。
+pub fn preferred_map_entry<'a, I>(names: I, extensions: &[&str]) -> Option<&'a str>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut fallback: Option<&'a str> = None;
+    for name in names {
+        let lower = name.to_ascii_lowercase();
+        if !extensions
+            .iter()
+            .any(|extension| lower.ends_with(extension))
+        {
+            continue;
+        }
+        if is_map_edit_path(&lower) {
+            return Some(name);
+        }
+        if fallback.is_none() {
+            fallback = Some(name);
+        }
+    }
+    fallback
+}
+
 /// 从地图包里解析坐标系信息，作为中台返回值的兜底
 #[derive(Debug, Clone)]
 pub struct LocalMeta {
@@ -365,7 +402,9 @@ pub struct LocalMeta {
     pub resolution: String,
 }
 
-/// 解析 zip 内的 `model.pgm`（取尺寸）与 `model.yaml`（取分辨率/原点）
+/// 解析 zip 内的栅格（取尺寸）与 yaml（取分辨率/原点）
+///
+/// 优先使用 `map_edit/` 下的编辑版；没有编辑版时才退回 `model.pgm` / `map.pgm`。
 pub fn parse_local_meta(package: &[u8]) -> LocalMeta {
     use std::io::{Cursor, Read};
 
@@ -381,59 +420,56 @@ pub fn parse_local_meta(package: &[u8]) -> LocalMeta {
         return meta;
     };
 
-    // 先找 yaml，再找 pgm（两者可能不在同一层目录）
+    let mut names: Vec<String> = Vec::new();
     for index in 0..archive.len() {
-        let Ok(mut entry) = archive.by_index(index) else {
+        let Ok(entry) = archive.by_index(index) else {
             continue;
         };
-        let name = entry.name().to_lowercase();
-        if !(name.ends_with(".yaml") || name.ends_with(".yml")) {
-            continue;
+        if !entry.is_dir() {
+            names.push(entry.name().to_string());
         }
+    }
+
+    // 先找 yaml，再找 pgm（两者可能不在同一层目录）
+    if let Some(name) = preferred_map_entry(names.iter().map(String::as_str), &[".yaml", ".yml"]) {
         let mut text = String::new();
-        if Read::read_to_string(&mut entry, &mut text).is_err() {
-            continue;
-        }
-        for line in text.lines() {
-            let line = line.trim();
-            if let Some(rest) = line.strip_prefix("resolution:") {
-                let value = rest.trim();
-                if !value.is_empty() {
-                    meta.resolution = value.to_string();
-                }
-            } else if let Some(rest) = line.strip_prefix("origin:") {
-                let cleaned = rest.trim().trim_start_matches('[').trim_end_matches(']');
-                if !cleaned.is_empty() {
-                    meta.origin = cleaned.to_string();
+        if let Ok(mut entry) = archive.by_name(name)
+            && Read::read_to_string(&mut entry, &mut text).is_ok()
+        {
+            for line in text.lines() {
+                let line = line.trim();
+                if let Some(rest) = line.strip_prefix("resolution:") {
+                    let value = rest.trim();
+                    if !value.is_empty() {
+                        meta.resolution = value.to_string();
+                    }
+                } else if let Some(rest) = line.strip_prefix("origin:") {
+                    let cleaned = rest.trim().trim_start_matches('[').trim_end_matches(']');
+                    if !cleaned.is_empty() {
+                        meta.origin = cleaned.to_string();
+                    }
                 }
             }
         }
-        break;
     }
 
-    for index in 0..archive.len() {
-        let Ok(mut entry) = archive.by_index(index) else {
-            continue;
-        };
-        let name = entry.name().to_lowercase();
-        if !name.ends_with(".pgm") {
-            continue;
-        }
+    if let Some(name) = preferred_map_entry(names.iter().map(String::as_str), &[".pgm"]) {
         let mut header = Vec::new();
         let mut chunk = [0u8; 256];
         // PGM header 只需要前若干字节
-        while header.len() < 256 {
-            match entry.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => header.extend_from_slice(&chunk[..n]),
-                Err(_) => break,
+        if let Ok(mut entry) = archive.by_name(name) {
+            while header.len() < 256 {
+                match entry.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => header.extend_from_slice(&chunk[..n]),
+                    Err(_) => break,
+                }
             }
         }
         if let Some((w, h)) = parse_pgm_size(&header) {
             meta.width = w;
             meta.height = h;
         }
-        break;
     }
 
     meta
@@ -604,5 +640,65 @@ mod tests {
         let mut changed = early.clone();
         changed.extend_from_slice(b"trailing");
         assert_eq!(package_fingerprint(&early), package_fingerprint(&changed));
+    }
+
+    #[test]
+    fn prefers_map_edit_entries_and_ignores_backup_dirs() {
+        let names = [
+            "map.pgm",
+            "map.yaml",
+            "map_edit/map.pgm",
+            "map_edit/map.yaml",
+            "map_edit.bak/map.pgm",
+        ];
+        assert_eq!(
+            preferred_map_entry(names.iter().copied(), &[".pgm"]),
+            Some("map_edit/map.pgm")
+        );
+        assert_eq!(
+            preferred_map_entry(names.iter().copied(), &[".yaml", ".yml"]),
+            Some("map_edit/map.yaml")
+        );
+        assert!(is_map_edit_path("map_edit/map.pgm"));
+        assert!(!is_map_edit_path("map_edit.bak/map.pgm"));
+
+        // 没有编辑版时退回第一个匹配项，保持旧行为
+        let flat = ["model.pgm", "model.yaml"];
+        assert_eq!(
+            preferred_map_entry(flat.iter().copied(), &[".pgm"]),
+            Some("model.pgm")
+        );
+    }
+
+    #[test]
+    fn local_meta_prefers_map_edit() {
+        use std::io::Write;
+
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut buffer);
+            let options = zip::write::SimpleFileOptions::default();
+            writer.start_file("map.pgm", options).unwrap();
+            writer
+                .write_all(b"P5\n4 3\n255\n\0\0\0\0\0\0\0\0\0\0\0\0")
+                .unwrap();
+            writer.start_file("map.yaml", options).unwrap();
+            writer
+                .write_all(b"resolution: 0.05\norigin: [-8.7, -17.7, 0.0]\n")
+                .unwrap();
+            writer.start_file("map_edit/map.pgm", options).unwrap();
+            writer.write_all(b"P5\n2 1\n255\n\0\xfe").unwrap();
+            writer.start_file("map_edit/map.yaml", options).unwrap();
+            writer
+                .write_all(b"resolution: 0.1\norigin: [1, 2, 0]\n")
+                .unwrap();
+            writer.finish().unwrap();
+        }
+
+        let meta = parse_local_meta(&buffer.into_inner());
+        assert_eq!(meta.width, 2);
+        assert_eq!(meta.height, 1);
+        assert_eq!(meta.resolution, "0.1");
+        assert_eq!(meta.origin, "1, 2, 0");
     }
 }

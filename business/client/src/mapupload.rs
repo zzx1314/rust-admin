@@ -741,41 +741,74 @@ pub async fn download_map_package(
     Ok(bytes.to_vec())
 }
 
+/// 条目是否位于 `map_edit/` 目录（遥控器编辑后的地图）。
+fn is_map_edit_path(name: &str) -> bool {
+    name.split('/')
+        .any(|segment| segment.eq_ignore_ascii_case("map_edit"))
+}
+
 /// 从地图包里取出本体需要的两个文件：`map.pgm` 与 `map.yaml`。
 ///
 /// 中台/ROS 包常见是 `model.pgm` + `model.yaml`，本体只认 `map.pgm` + `map.yaml`，
 /// 因此这里重命名，并把 yaml 的 `image:` 改写成 `map.pgm`（否则载图会找不到栅格）。
+///
+/// 机器人本体回传的包会同时带根目录 `map.pgm`（原始地图）与 `map_edit/map.pgm`
+/// （遥控器编辑后的地图）。这里必须取 `map_edit/` 那一份——平台编辑与下发都只
+/// 针对编辑版，根目录的原始图应该保留。
 pub fn extract_robot_map_files(package: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
     use std::io::Read;
 
     let mut archive = zip::ZipArchive::new(Cursor::new(package))
         .map_err(|error| format!("地图包解析失败: {error}"))?;
-    let mut pgm: Option<Vec<u8>> = None;
-    let mut yaml: Option<String> = None;
+    let mut pgm_edit: Option<String> = None;
+    let mut pgm_fallback: Option<String> = None;
+    let mut yaml_edit: Option<String> = None;
+    let mut yaml_fallback: Option<String> = None;
     for index in 0..archive.len() {
-        let Ok(mut entry) = archive.by_index(index) else {
+        let Ok(entry) = archive.by_index(index) else {
             continue;
         };
         if entry.is_dir() {
             continue;
         }
-        let name = entry.name().to_ascii_lowercase();
-        if pgm.is_none() && name.ends_with(".pgm") {
-            let mut data = Vec::new();
-            entry
-                .read_to_end(&mut data)
-                .map_err(|error| format!("读取地图包内 PGM 失败: {error}"))?;
-            pgm = Some(data);
-        } else if yaml.is_none() && (name.ends_with(".yaml") || name.ends_with(".yml")) {
-            let mut text = String::new();
-            if entry.read_to_string(&mut text).is_ok() {
-                yaml = Some(text);
+        let name = entry.name().to_string();
+        let lower = name.to_ascii_lowercase();
+        let edited = is_map_edit_path(&lower);
+        if lower.ends_with(".pgm") {
+            if edited {
+                pgm_edit.get_or_insert(name);
+            } else {
+                pgm_fallback.get_or_insert(name);
+            }
+        } else if lower.ends_with(".yaml") || lower.ends_with(".yml") {
+            if edited {
+                yaml_edit.get_or_insert(name);
+            } else {
+                yaml_fallback.get_or_insert(name);
             }
         }
     }
 
-    let pgm = pgm.ok_or_else(|| "地图包内没有 .pgm，无法写回本体".to_string())?;
-    let yaml = yaml.ok_or_else(|| "地图包内没有 .yaml，无法写回本体".to_string())?;
+    let pgm_name = pgm_edit
+        .or(pgm_fallback)
+        .ok_or_else(|| "地图包内没有 .pgm，无法写回本体".to_string())?;
+    let yaml_name = yaml_edit
+        .or(yaml_fallback)
+        .ok_or_else(|| "地图包内没有 .yaml，无法写回本体".to_string())?;
+
+    let mut pgm = Vec::new();
+    archive
+        .by_name(&pgm_name)
+        .map_err(|error| format!("读取地图包内 {pgm_name} 失败: {error}"))?
+        .read_to_end(&mut pgm)
+        .map_err(|error| format!("读取地图包内 PGM 失败: {error}"))?;
+    let mut yaml = String::new();
+    archive
+        .by_name(&yaml_name)
+        .map_err(|error| format!("读取地图包内 {yaml_name} 失败: {error}"))?
+        .read_to_string(&mut yaml)
+        .map_err(|error| format!("读取地图包内 YAML 失败: {error}"))?;
+
     let files = vec![
         ("map.pgm".to_string(), pgm),
         (
@@ -931,8 +964,10 @@ async fn upload_robot_file(
 
 /// 把地图包里的 PGM / YAML 写回本体地图目录，并读回校验。
 ///
-/// 只覆盖 `map.pgm` + `map.yaml`：`map.pcd` / `map.geojson` / `nav_paths` 这些
-/// 定位与路网数据与栅格噪点无关，保持原样，避免破坏已有路线。
+/// 目标目录：本体上存在 `map_edit/` 时写 `map_edit/map.pgm` + `map_edit/map.yaml`
+/// （遥控器编辑后的地图），根目录的原始 `map.pgm` / `map.yaml` 保持不动；
+/// 没有 `map_edit/` 的老固件才退回根目录。`map.pcd` / `map.geojson` / `nav_paths`
+/// 这些定位与路网数据与栅格噪点无关，始终原样保留，避免破坏已有路线。
 pub async fn push_map_to_robot(
     http: &reqwest::Client,
     file_base: &str,
@@ -946,11 +981,26 @@ pub async fn push_map_to_robot(
         .await
         .map_err(|error| format!("本体上没有地图目录 {dir}（{error}），无法写回"))?;
 
+    // 本体有 map_edit/ 时只改编辑版，绝不覆盖根目录的建图原始地图
+    let has_map_edit = list_dir(http, file_base, &format!("{api_path}/map_edit"))
+        .await
+        .is_ok();
+    let target_dir = if has_map_edit {
+        format!("map/history_map/{dir}/map_edit")
+    } else {
+        format!("map/history_map/{dir}")
+    };
+    let target_label = if has_map_edit {
+        format!("{dir}/map_edit")
+    } else {
+        dir.clone()
+    };
+
     let files = extract_robot_map_files(package)?;
     let mut written: Vec<String> = Vec::new();
     let mut originals: Vec<(String, Option<Vec<u8>>)> = Vec::new();
     for (name, bytes) in &files {
-        let rel = format!("map/history_map/{dir}/{name}");
+        let rel = format!("{target_dir}/{name}");
         let original = get_robot_file(http, file_base, &rel).await;
         originals.push((rel.clone(), original.clone()));
         if original.as_deref() == Some(bytes.as_slice()) {
@@ -972,9 +1022,12 @@ pub async fn push_map_to_robot(
     }
 
     if written.is_empty() {
-        Ok(format!("本体地图 {dir} 已是最新，无需写入"))
+        Ok(format!("本体地图 {target_label} 已是最新，无需写入"))
     } else {
-        Ok(format!("本体地图 {dir} 已更新：{}", written.join("、")))
+        Ok(format!(
+            "本体地图 {target_label} 已更新：{}",
+            written.join("、")
+        ))
     }
 }
 
@@ -1056,6 +1109,47 @@ mod tests {
         assert!(!yaml.contains("model.pgm"));
         // 其余字段原样保留
         assert!(yaml.contains("resolution: 0.05"));
+    }
+
+    #[test]
+    fn extract_prefers_map_edit_over_original() {
+        use std::io::Write;
+
+        let mut buffer = Cursor::new(Vec::new());
+        {
+            let mut writer = ZipWriter::new(&mut buffer);
+            let options =
+                SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+            writer.start_file("map.pgm", options).unwrap();
+            writer.write_all(b"P5\n2 2\n255\n\xff\xff\xff\xff").unwrap();
+            writer.start_file("map.yaml", options).unwrap();
+            writer
+                .write_all(b"image: map.pgm\nresolution: 0.05\narc: []\n")
+                .unwrap();
+            writer.start_file("map_edit/map.pgm", options).unwrap();
+            writer.write_all(b"P5\n2 2\n255\n\x00\xfe\xfe\xfe").unwrap();
+            writer.start_file("map_edit/map.yaml", options).unwrap();
+            writer
+                .write_all(b"image: map.pgm\nresolution: 0.05\n")
+                .unwrap();
+            writer.finish().unwrap();
+        }
+
+        let files = extract_robot_map_files(&buffer.into_inner()).expect("package must parse");
+        assert_eq!(files[0].0, "map.pgm");
+        assert_eq!(files[0].1, b"P5\n2 2\n255\n\x00\xfe\xfe\xfe");
+        // yaml 也取编辑版：根目录的 arc 字段不应被带进编辑版
+        let yaml = String::from_utf8(files[1].1.clone()).unwrap();
+        assert!(yaml.contains("image: map.pgm"));
+        assert!(!yaml.contains("arc:"));
+    }
+
+    #[test]
+    fn map_edit_detection_ignores_backup_dirs() {
+        assert!(is_map_edit_path("map_edit/map.pgm"));
+        assert!(is_map_edit_path("foo/MAP_EDIT/map.yaml"));
+        assert!(!is_map_edit_path("map_edit.bak/map.pgm"));
+        assert!(!is_map_edit_path("map.pgm"));
     }
 
     #[test]

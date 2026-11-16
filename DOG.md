@@ -97,9 +97,15 @@ GET    /api/dogDevice/control-plane/ws       反向控制信道（WebSocket，�
 
 中台地图页的「地图」按钮打开预览 / 橡皮擦弹窗（`dogMap/{id}/image` +
 `dogMap/{id}/edit`）：坐标是栅格像素坐标，擦除值 `254` = 可通行（默认）、
-`205` = 未知；后端只改写包内 `model.pgm`（或本体命名的 `map.pgm`），
-`model.yaml` 与其余条目原样保留，`map_hash` 按新包重算，旧包留在磁盘上。
-只有 `草稿` / `部分标定` 版本可编辑，已发布 / 已归档请先派生新版本。
+`205` = 未知。
+
+本体回传的地图包通常同时有两份栅格：根目录 `map.pgm`（建图**原始地图**）和
+`map_edit/map.pgm`（遥控器**编辑后的地图**）。平台预览、尺寸/分辨率解析、
+橡皮擦与下发一律以 `map_edit/` 为准；包内没有 `map_edit/`（例如手工上传的
+ROS `model.pgm` 包）时才退回 `model.pgm` / `map.pgm`。编辑只改写编辑版，
+根目录原始 `map.pgm` 一个字节都不动；`yaml` 与其余条目原样保留，`map_hash`
+按新包重算，旧包留在磁盘上。只有 `草稿` / `部分标定` 版本可编辑，
+已发布 / 已归档请先派生新版本。
 
 编辑完点「下发到狗体」（`POST /api/dogMap/{id}/push`，也可在地图列表「更多」里触发）
 才会真正写回机器人，链路：
@@ -112,13 +118,15 @@ GET    /api/dogDevice/control-plane/ws       反向控制信道（WebSocket，�
         ② 读中台最新包，暂存到业务 ingest 目录并刷新 file_path / map_hash / 尺寸
         ③ 下发「下发地图」指令（带 mapId / mapDir / packagePath / mapHash）
             → 设备客户端 GET /api/map-versions/{id}/package
-            → 写本体文件服务 map.pgm + map.yaml（读回校验）
+            → 本体有 map_edit/ 就写 map_edit/map.pgm + map_edit/map.yaml，
+              没有才写根目录 map.pgm + map.yaml（读回校验）
             → 4030 重新载图
 ```
 
 设备必须在业务平台在线、本体上没有同名目录以外的猜测路径、且当前没有执行任务 /
-建图，否则直接报错而不是「静默下发」。只有 `map.pgm` / `map.yaml` 会被覆盖，
-`map.pcd` / `map.geojson` / `nav_paths` 保持原样，不影响已有路线。
+建图，否则直接报错而不是「静默下发」。有 `map_edit/` 时只覆盖编辑版，
+根目录的原始 `map.pgm` / `map.yaml` 保持不变；`map.pcd` / `map.geojson` /
+`nav_paths` 始终原样保留，不影响已有路线。
 
 - `module` ∈ `dogMap`、`dogMedia`、`dogModel`、`dogConfig`，均提供 `getPage` + `getAll`。
 - 统计接口同样需要登录（`require_auth`）。

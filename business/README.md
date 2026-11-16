@@ -201,8 +201,8 @@ GET    /api/zentai/devices/{deviceId}/runtime     # 中台读取设备运行态�
 
 ## 地图写回狗体（中台编辑 → 本体）
 
-中台地图页的橡皮擦只改中台的地图包，机器人本体上的 `map.pgm` / `map.yaml`
-不会自己更新（保存后前端会询问「是否立即下发」，点「稍后」就不下发）。要让任务用上新地图，中台调用
+中台地图页的橡皮擦只改中台的地图包，机器人本体上的地图文件不会自己更新
+（保存后前端会询问「是否立即下发」，点「稍后」就不下发）。要让任务用上新地图，中台调用
 `POST /api/dogMap/{id}/push`（反向信道 `push-map` 或 HTTP 直连
 `/api/zentai/devices/{deviceId}/push-map`），本服务负责：
 
@@ -219,8 +219,12 @@ GET    /api/zentai/devices/{deviceId}/runtime     # 中台读取设备运行态�
 写入）；`ROBODOG_SERVICE_TOKEN` 与中台一致。设备离线时返回 400 并把台账标记离线，
 与「同步地图 / 指令」的语义保持一致。
 
-设备侧只覆盖 `map.pgm` / `map.yaml` 并读回校验，`map.pcd` / `map.geojson` /
-`nav_paths` 原样保留；客户端在任务执行 / 建图进行中会拒绝下发。
+本体回传的包同时带根目录 `map.pgm`（建图原始地图）与 `map_edit/map.pgm`
+（遥控器编辑后的地图）。平台展示、尺寸解析与下发都以 `map_edit/` 为准；
+设备侧检测到本体存在 `map_edit/` 时只覆盖 `map_edit/map.pgm` 与
+`map_edit/map.yaml` 并读回校验，**根目录的原始地图保持不动**；没有
+`map_edit/` 的老固件才退回根目录。`map.pcd` / `map.geojson` / `nav_paths`
+始终原样保留；客户端在任务执行 / 建图进行中会拒绝下发。
 
 ## 中台账号与设备分配
 

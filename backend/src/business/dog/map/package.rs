@@ -3,6 +3,11 @@
 //! 与参考实现（`DronesRouteLibraryServiceImp#getRoute`）保持一致：
 //! 地图包解压后包含 ROS map_server 格式的 `model.pgm` 与 `model.yaml`，
 //! `yaml` 里的 `resolution` 与 `origin` 用于前端把世界坐标换算成像素坐标。
+//!
+//! 机器人本体回传的包通常同时带两份栅格：根目录的 `map.pgm`（建图原始地图）
+//! 和 `map_edit/map.pgm`（遥控器编辑后的地图）。平台展示、编辑、下发一律以
+//! `map_edit/` 为准，原始地图只作为回退——绝不能把平台编辑写到根目录的
+//! `map.pgm` 上，否则下次同步会覆盖掉本体上的原始建图。
 
 use std::io::{Cursor, Write};
 
@@ -40,18 +45,20 @@ pub const MAX_ERASE_RADIUS: f64 = 500.0;
 pub const MAX_EDIT_STROKES: usize = 2_000;
 pub const MAX_EDIT_POINTS: usize = 200_000;
 
-/// 解析地图包 zip：找出 `*.pgm` 与 `*.yaml`，把栅格地图转成 PNG。
+/// 解析地图包 zip：找出栅格 PGM 与 YAML，把栅格地图转成 PNG。
 ///
-/// 兼容包内多层目录（例如 `map/model.pgm`），先找 `model.pgm`，找不到时退回
-/// 第一个 `*.pgm`。
+/// 选择顺序：`map_edit/` 下的条目 → `model.pgm` → 第一个 `*.pgm`。
+/// `map_edit/` 是遥控器编辑后的地图，平台必须优先用它；只有包内没有编辑版时
+/// 才退回原始的建图栅格。兼容包内多层目录（例如 `map/model.pgm`）。
 pub fn parse_map_package(bytes: &[u8]) -> Result<ParsedMapPackage, AppError> {
     let sha256 = sha256_hex(bytes);
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|error| AppError::BadRequest(format!("地图包解析失败: {error}")))?;
 
-    let pgm_name = find_entry(&mut archive, "model.pgm", ".pgm");
-    let pgm_name = pgm_name.ok_or_else(|| {
-        AppError::BadRequest("地图包内未找到 model.pgm，请检查地图包内容".to_string())
+    let pgm_name = find_entry(&mut archive, "model.pgm", ".pgm").ok_or_else(|| {
+        AppError::BadRequest(
+            "地图包内未找到可用的 .pgm（map_edit/map.pgm、model.pgm 或 map.pgm）".to_string(),
+        )
     })?;
     let pgm = read_entry(&mut archive, &pgm_name)?;
 
@@ -212,10 +219,12 @@ pub fn parse_pgm_raster(bytes: &[u8]) -> Result<PgmRaster, AppError> {
     })
 }
 
-/// 在地图包基础上重写 `*.pgm`（橡皮擦），返回新的 `.zip` 字节与改写的像素数。
+/// 在地图包基础上重写栅格 PGM（橡皮擦），返回新的 `.zip` 字节与改写的像素数。
 ///
-/// 除被编辑的 PGM 外，其余条目（`model.yaml`、自定义标注等）按原顺序原样复制，
-/// 因此分辨率 / 原点 / negate 等元数据保持不变。
+/// 目标与 [`parse_map_package`] 一致：有 `map_edit/` 就改编辑版，否则才改
+/// `model.pgm` / `map.pgm`。根目录的原始地图条目原样保留，平台编辑不会污染
+/// 本体上的建图原始数据。除被编辑的 PGM 外，其余条目（yaml、自定义标注等）
+/// 按原顺序原样复制，因此分辨率 / 原点 / negate 等元数据保持不变。
 pub fn rewrite_map_package(
     bytes: &[u8],
     strokes: &[MapEditStroke],
@@ -224,7 +233,9 @@ pub fn rewrite_map_package(
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|error| AppError::BadRequest(format!("地图包解析失败: {error}")))?;
     let pgm_name = find_entry(&mut archive, "model.pgm", ".pgm").ok_or_else(|| {
-        AppError::BadRequest("地图包内未找到 model.pgm，请检查地图包内容".to_string())
+        AppError::BadRequest(
+            "地图包内未找到可用的 .pgm（map_edit/map.pgm、model.pgm 或 map.pgm）".to_string(),
+        )
     })?;
     let pgm = read_entry(&mut archive, &pgm_name)?;
     let mut raster = parse_pgm_raster(&pgm)?;
@@ -444,12 +455,28 @@ impl<'a> HeaderCursor<'a> {
     }
 }
 
-/// 按 `preferred`（精确文件名）→ `extension`（后缀）顺序查找包内条目。
+/// 条目是否位于 `map_edit/` 目录（遥控器编辑后的地图）。
+///
+/// 只认完整路径段，避免把 `map_edit.bak` / `map_edited/` 误当成编辑版。
+fn is_map_edit_entry(name: &str) -> bool {
+    name.split('/')
+        .any(|segment| segment.eq_ignore_ascii_case("map_edit"))
+}
+
+/// 查找地图包内的栅格 / 元数据条目，优先 `map_edit/`。
+///
+/// 返回顺序：编辑目录内的精确文件名 → 编辑目录内的同扩展名文件 →
+/// 其他目录的精确文件名 → 其他目录的同扩展名文件。这样即使 `map_edit/`
+/// 里是 `map.pgm` 而不是 `model.pgm`，也会优先命中编辑版。
 fn find_entry<R: std::io::Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     preferred: &str,
     extension: &str,
 ) -> Option<String> {
+    let preferred = preferred.to_lowercase();
+    let extension = extension.to_lowercase();
+    let mut edit_fallback: Option<String> = None;
+    let mut preferred_match: Option<String> = None;
     let mut fallback: Option<String> = None;
     for index in 0..archive.len() {
         let Ok(entry) = archive.by_index(index) else {
@@ -460,14 +487,26 @@ fn find_entry<R: std::io::Read + std::io::Seek>(
         }
         let name = entry.name().to_string();
         let lower = name.to_lowercase();
-        if lower.ends_with(&format!("/{preferred}")) || lower == preferred {
-            return Some(name);
+        let matches_preferred = lower == preferred || lower.ends_with(&format!("/{preferred}"));
+        let matches_extension =
+            lower.ends_with(&extension) || (extension == ".yaml" && lower.ends_with(".yml"));
+        if is_map_edit_entry(&lower) {
+            if matches_preferred {
+                return Some(name);
+            }
+            if edit_fallback.is_none() && matches_extension {
+                edit_fallback = Some(name);
+            }
+            continue;
         }
-        if fallback.is_none() && lower.ends_with(extension) {
+        if preferred_match.is_none() && matches_preferred {
+            preferred_match = Some(name.clone());
+        }
+        if fallback.is_none() && matches_extension {
             fallback = Some(name);
         }
     }
-    fallback
+    edit_fallback.or(preferred_match).or(fallback)
 }
 
 fn read_entry<R: std::io::Read + std::io::Seek>(
@@ -577,6 +616,65 @@ mod tests {
         // 没有 yaml 时使用默认参数
         assert!((parsed.resolution - DEFAULT_RESOLUTION).abs() < f64::EPSILON);
         assert_eq!(parsed.origin, DEFAULT_ORIGIN.to_vec());
+    }
+
+    #[test]
+    fn prefers_map_edit_over_original_raster() {
+        // 根目录：4x3 的原始建图栅格（free=255）；map_edit：2x1 的编辑版（free=254）
+        let original_yaml = b"resolution: 0.05\norigin: [-8.7, -17.7, 0.0]\n";
+        let edited_yaml = b"resolution: 0.1\norigin: [1, 2, 0]\n";
+        let edited_pgm = b"P5\n2 1\n255\n\x00\xfe".to_vec();
+        let zip = build_zip(&[
+            ("map.pgm", sample_pgm()),
+            ("map.yaml", original_yaml.to_vec()),
+            ("map_edit/map.pgm", edited_pgm),
+            ("map_edit/map.yaml", edited_yaml.to_vec()),
+        ]);
+
+        let parsed = parse_map_package(&zip).unwrap();
+        // 尺寸 / 元数据都应来自 map_edit，而不是根目录的原始地图
+        assert_eq!(parsed.width, 2);
+        assert_eq!(parsed.height, 1);
+        assert!((parsed.resolution - 0.1).abs() < f64::EPSILON);
+        assert_eq!(parsed.origin, vec![1.0, 2.0, 0.0]);
+
+        let image = image::load_from_memory(&parsed.png).unwrap().to_luma8();
+        assert_eq!(image.dimensions(), (2, 1));
+        assert_eq!(image.get_pixel(0, 0)[0], 0);
+        assert_eq!(image.get_pixel(1, 0)[0], 254);
+    }
+
+    #[test]
+    fn erase_rewrites_map_edit_and_keeps_original() {
+        let original_pixels = vec![255u8; 16];
+        let original_pgm = [b"P5\n4 4\n255\n".to_vec(), original_pixels.clone()].concat();
+        let mut edited_pixels = vec![255u8; 16];
+        edited_pixels[0] = 0;
+        let edited_pgm = [b"P5\n4 4\n255\n".to_vec(), edited_pixels].concat();
+        let zip = build_zip(&[
+            ("map.pgm", original_pgm.clone()),
+            ("map.yaml", b"image: map.pgm\nresolution: 0.05\n".to_vec()),
+            ("map_edit/map.pgm", edited_pgm),
+            (
+                "map_edit/map.yaml",
+                b"image: map.pgm\nresolution: 0.05\n".to_vec(),
+            ),
+        ]);
+
+        let strokes = vec![MapEditStroke {
+            points: vec![MapEditPoint { x: 0.5, y: 0.5 }],
+            radius: Some(0.6),
+        }];
+        let (edited, changed) = rewrite_map_package(&zip, &strokes, 254).unwrap();
+        assert_eq!(changed, 1);
+
+        let mut archive = zip::ZipArchive::new(Cursor::new(&edited)).unwrap();
+        // 根目录的原始地图一个字节都不能变
+        assert_eq!(read_entry(&mut archive, "map.pgm").unwrap(), original_pgm);
+        // 编辑只落在 map_edit/map.pgm
+        let raster =
+            parse_pgm_raster(&read_entry(&mut archive, "map_edit/map.pgm").unwrap()).unwrap();
+        assert_eq!(raster.pixels[0], 254);
     }
 
     #[test]

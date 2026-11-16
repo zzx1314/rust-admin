@@ -2,11 +2,13 @@
 /**
  * MapEditorDialog - 地图预览 / 橡皮擦编辑
  *
- * 预览：后端 `GET /api/dogMap/{id}/image` 把包内 model.pgm 转成 PNG，
+ * 预览：后端 `GET /api/dogMap/{id}/image` 优先把包内 map_edit/map.pgm（遥控器
+ * 编辑后的地图）转成 PNG，没有编辑版时才用 model.pgm / map.pgm，
  * 这里按栅格原始像素尺寸画到 canvas 上，支持缩放、拖动浏览。
  *
  * 编辑：橡皮擦按栅格像素坐标记录笔画，提交 `POST /api/dogMap/{id}/edit`，
- * 后端把这些像素改写为 254（可通行，默认）或 205（未知）并重算 map_hash。
+ * 后端把编辑版栅格的这些像素改写为 254（可通行，默认）或 205（未知）并重算
+ * map_hash；根目录的建图原始 map.pgm 不会被改。
  * 已发布 / 已归档版本不可编辑，需要先派生新版本。
  */
 import { computed, nextTick, ref } from "vue";
@@ -447,7 +449,7 @@ async function pushToDog() {
 function confirmPushAfterSave() {
   if (!canPush.value) return;
   ElMessageBox.confirm(
-    "地图已保存。是否立即下发到狗体并重新载图？下发会覆盖本体上的 map.pgm / map.yaml，设备需处于空闲状态。",
+    "地图已保存。是否立即下发到狗体并重新载图？下发会覆盖本体上的地图栅格（有 map_edit/ 时只改编辑版，原始地图保持不动），设备需处于空闲状态。",
     "下发到狗体",
     { type: "warning", confirmButtonText: "立即下发", cancelButtonText: "稍后" }
   )
@@ -575,7 +577,7 @@ defineExpose({ open });
         type="info"
         show-icon
         :closable="false"
-        title="橡皮擦会直接改写地图包内的 model.pgm 并重算 map_hash。"
+        title="橡皮擦只改写编辑版栅格（优先 map_edit/map.pgm），不会改根目录的建图原始地图。"
         description="保存后已下载过该图的设备需要重新同步地图；分辨率、原点与版本号保持不变。"
       />
 

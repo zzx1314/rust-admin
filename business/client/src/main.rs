@@ -3266,7 +3266,8 @@ async fn upload_mapping_to_zentai(config: &Config, saved: &MappingSaved) -> Uplo
 /// 本体上没有「上传地图」协议，只能通过文件服务写文件；写之前先确认：
 /// 1. 设备当前没有执行任务 / 建图（避免改图与导航互相打架）；
 /// 2. 本体上确实存在该地图目录（不能凭名字造目录）；
-/// 3. 写完 `map.pgm` / `map.yaml` 后读回校验，内容一致才算成功；
+/// 3. 写完 `map_edit/map.pgm` / `map_edit/map.yaml`（有编辑目录时）或根目录
+///    `map.pgm` / `map.yaml`（老固件）后读回校验，内容一致才算成功；
 /// 4. 最后 4030 重新载图，让导航立刻用上新栅格。
 async fn push_map_to_body(
     config: &Config,

@@ -387,7 +387,9 @@ impl DogMapService {
     /// 橡皮擦：擦除栅格噪点并落盘为新的地图包。
     ///
     /// - 只允许「草稿 / 部分标定」版本编辑，已发布 / 已归档版本必须派生新版本；
-    /// - 其余条目（`model.yaml` 等）原样保留，`map_hash` 按新包重算；
+    /// - 优先改写 `map_edit/map.pgm`（遥控器编辑版），根目录原始 `map.pgm` 原样保留；
+    ///   包里没有 `map_edit/` 时才退回旧的 `model.pgm` / `map.pgm`；
+    /// - 其余条目（yaml 等）原样保留，`map_hash` 按新包重算；
     /// - 新包写新文件，旧包留在磁盘上便于回溯（与 `upload` 覆盖旧包的行为一致）。
     pub async fn erase(
         &self,

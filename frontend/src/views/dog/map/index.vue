@@ -368,9 +368,9 @@ const submitForm = async (formEl?: FormInstance) => {
             </template>
             <template #tip>
               <div class="el-upload__tip">
-                仅支持 .zip 地图包（ROS model.pgm +
-                model.yaml）。上传后由后端解析 resolution / origin /
-                栅格尺寸，并计算 SHA-256 写入 map_hash。
+                仅支持 .zip 地图包（ROS model.pgm + model.yaml，或本体回传的
+                map_edit/ 编辑版）。上传后由后端优先解析编辑版栅格， 回写
+                resolution / origin / 栅格尺寸，并计算 SHA-256 写入 map_hash。
               </div>
             </template>
           </el-upload>

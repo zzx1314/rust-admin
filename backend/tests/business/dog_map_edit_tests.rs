@@ -54,6 +54,40 @@ fn sample_package(with_noise: bool) -> Vec<u8> {
     buffer.into_inner()
 }
 
+/// 带「遥控器编辑版」的地图包：根目录 `map.pgm` 是原始地图，`map_edit/map.pgm`
+/// 是编辑后的地图。平台编辑必须只改 `map_edit/`，根目录一个字节都不能动。
+fn package_with_map_edit() -> Vec<u8> {
+    let mut original_pixels = vec![255u8; (WIDTH * HEIGHT) as usize];
+    original_pixels[NOISE_INDEX] = 0;
+    let mut original_pgm = format!("P5\n{WIDTH} {HEIGHT}\n255\n").into_bytes();
+    original_pgm.extend_from_slice(&original_pixels);
+
+    let mut edited_pixels = vec![254u8; (WIDTH * HEIGHT) as usize];
+    edited_pixels[NOISE_INDEX] = 0;
+    let mut edited_pgm = format!("P5\n{WIDTH} {HEIGHT}\n255\n").into_bytes();
+    edited_pgm.extend_from_slice(&edited_pixels);
+
+    let mut buffer = Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut buffer);
+        let options: zip::write::SimpleFileOptions = Default::default();
+        writer.start_file("map.pgm", options).unwrap();
+        writer.write_all(&original_pgm).unwrap();
+        writer.start_file("map.yaml", options).unwrap();
+        writer
+            .write_all(b"image: map.pgm\nresolution: 0.05\norigin: [-1.0, -2.0, 0.0]\n")
+            .unwrap();
+        writer.start_file("map_edit/map.pgm", options).unwrap();
+        writer.write_all(&edited_pgm).unwrap();
+        writer.start_file("map_edit/map.yaml", options).unwrap();
+        writer
+            .write_all(b"image: map.pgm\nresolution: 0.05\norigin: [-1.0, -2.0, 0.0]\n")
+            .unwrap();
+        writer.finish().unwrap();
+    }
+    buffer.into_inner()
+}
+
 fn create_request(status: &str) -> CreateMapRequest {
     CreateMapRequest {
         map_name: format!("橡皮擦测试 {status}"),
@@ -83,12 +117,15 @@ fn create_request(status: &str) -> CreateMapRequest {
 }
 
 async fn fixture(status: &str) -> Fixture {
+    fixture_with_package(status, sample_package(true)).await
+}
+
+async fn fixture_with_package(status: &str, original: Vec<u8>) -> Fixture {
     let dir = std::env::temp_dir().join(format!(
         "rust_admin_map_edit_{}",
         uuid::Uuid::new_v4().simple()
     ));
     std::fs::create_dir_all(dir.join("maps")).unwrap();
-    let original = sample_package(true);
     std::fs::write(dir.join("maps/original.zip"), &original).unwrap();
 
     let app = App::new("sqlite::memory:")
@@ -193,6 +230,56 @@ async fn erase_rewrites_pgm_and_updates_hash() {
 
     // 旧包保留在磁盘上（和 upload 覆盖旧包的行为一致）
     assert!(stored_path.exists());
+}
+
+#[tokio::test]
+async fn erase_targets_map_edit_and_preserves_original_map() {
+    let fixture = fixture_with_package("草稿", package_with_map_edit()).await;
+    let scope = DataScope::new(1, true);
+
+    let image = fixture
+        .state
+        .dog_map_service
+        .erase(
+            fixture.map_id,
+            center_stroke(0.6),
+            &fixture.state.upload_dir,
+            &scope,
+        )
+        .await
+        .expect("erase must succeed");
+    assert_eq!(image.erased_pixels, Some(1));
+    assert_eq!(image.width, WIDTH);
+    assert_eq!(image.height, HEIGHT);
+
+    let map = fixture
+        .state
+        .dog_map_service
+        .get_by_id(fixture.map_id, &scope)
+        .await
+        .unwrap();
+    let bytes = std::fs::read(fixture.state.upload_dir.join(map.file_path.unwrap())).unwrap();
+    let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+
+    let mut original = Vec::new();
+    std::io::Read::read_to_end(&mut archive.by_name("map.pgm").unwrap(), &mut original).unwrap();
+    let original_raster = parse_pgm_raster(&original).unwrap();
+    assert_eq!(
+        original_raster.pixels[NOISE_INDEX], 0,
+        "根目录原始地图不能被平台编辑修改"
+    );
+
+    let mut edited = Vec::new();
+    std::io::Read::read_to_end(
+        &mut archive.by_name("map_edit/map.pgm").unwrap(),
+        &mut edited,
+    )
+    .unwrap();
+    let edited_raster = parse_pgm_raster(&edited).unwrap();
+    assert_eq!(
+        edited_raster.pixels[NOISE_INDEX], 254,
+        "编辑必须落在 map_edit/map.pgm"
+    );
 }
 
 #[tokio::test]

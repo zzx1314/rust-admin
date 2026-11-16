@@ -826,8 +826,9 @@ pub async fn map_raster(
         .file_path
         .clone()
         .ok_or_else(|| AppError::BadRequest("该地图没有关联的 ROS 地图包".to_string()))?;
-    let raster = read_ros_raster(&state.config.backend_db_path, &file_path)
-        .ok_or_else(|| AppError::BadRequest("无法从地图包中解析 model.pgm".to_string()))?;
+    let raster = read_ros_raster(&state.config.backend_db_path, &file_path).ok_or_else(|| {
+        AppError::BadRequest("无法从地图包中解析栅格（map_edit/map.pgm 或 map.pgm）".to_string())
+    })?;
     let raster = downscale_raster(raster, 1600);
     let png = encode_png(raster.width, raster.height, &raster.pixels)
         .ok_or_else(|| AppError::Internal("PNG 编码失败".to_string()))?;
@@ -1026,23 +1027,29 @@ struct RosRaster {
     pixels: Vec<u8>,
 }
 
-/// 从根 backend 上传的 `.zip` 中读取 `model.pgm` 并解码为 8 位灰度像素。
+/// 从根 backend 上传的 `.zip` 中读取栅格 PGM 并解码为 8 位灰度像素。
+///
+/// 优先 `map_edit/map.pgm`（遥控器编辑后的地图），没有编辑版时才用根目录
+/// `model.pgm` / `map.pgm`（建图原始地图）。
 fn read_ros_raster(backend_db: &std::path::Path, relative: &str) -> Option<RosRaster> {
     let upload_root = backend_db.parent()?.join("device_uploads");
     let path = upload_root.join(relative);
     let file = File::open(path).ok()?;
     let mut archive = zip::ZipArchive::new(file).ok()?;
-    let mut pgm: Option<Vec<u8>> = None;
+    let mut names: Vec<String> = Vec::new();
     for index in 0..archive.len() {
-        let mut entry = archive.by_index(index).ok()?;
-        if entry.name().to_ascii_lowercase().ends_with(".pgm") {
-            let mut data = Vec::new();
-            entry.read_to_end(&mut data).ok()?;
-            pgm = Some(data);
-            break;
+        let Ok(entry) = archive.by_index(index) else {
+            continue;
+        };
+        if !entry.is_dir() {
+            names.push(entry.name().to_string());
         }
     }
-    decode_pgm(pgm.as_deref()?)
+    let name = ingest::preferred_map_entry(names.iter().map(String::as_str), &[".pgm"])?;
+    let mut entry = archive.by_name(name).ok()?;
+    let mut data = Vec::new();
+    entry.read_to_end(&mut data).ok()?;
+    decode_pgm(&data)
 }
 
 fn decode_pgm(bytes: &[u8]) -> Option<RosRaster> {
@@ -1182,26 +1189,37 @@ struct RosMapMeta {
 }
 
 /// 从根 backend 上传的 `.zip` 地图包中读取 ROS map_server 元数据。
-/// 包内约定为 `model.yaml` + `model.pgm`。
+/// 优先 `map_edit/`（遥控器编辑版），没有编辑版时才用 `model.yaml` + `model.pgm`。
 fn read_ros_map_meta(backend_db: &std::path::Path, relative: &str) -> Option<RosMapMeta> {
     let upload_root = backend_db.parent()?.join("device_uploads");
     let path = upload_root.join(relative);
     let file = File::open(path).ok()?;
     let mut archive = zip::ZipArchive::new(file).ok()?;
 
-    let mut yaml_text = String::new();
-    let mut pgm_bytes: Option<Vec<u8>> = None;
+    let mut names: Vec<String> = Vec::new();
     for index in 0..archive.len() {
-        let mut entry = archive.by_index(index).ok()?;
-        let name = entry.name().to_ascii_lowercase();
-        if name.ends_with(".yaml") || name.ends_with(".yml") {
-            entry.read_to_string(&mut yaml_text).ok()?;
-        } else if name.ends_with(".pgm") {
-            let mut data = Vec::new();
-            entry.read_to_end(&mut data).ok()?;
-            pgm_bytes = Some(data);
+        let Ok(entry) = archive.by_index(index) else {
+            continue;
+        };
+        if !entry.is_dir() {
+            names.push(entry.name().to_string());
         }
     }
+
+    let mut yaml_text = String::new();
+    if let Some(name) =
+        ingest::preferred_map_entry(names.iter().map(String::as_str), &[".yaml", ".yml"])
+    {
+        let mut entry = archive.by_name(name).ok()?;
+        entry.read_to_string(&mut yaml_text).ok()?;
+    }
+    let pgm_bytes = ingest::preferred_map_entry(names.iter().map(String::as_str), &[".pgm"])
+        .and_then(|name| {
+            let mut entry = archive.by_name(name).ok()?;
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).ok()?;
+            Some(data)
+        });
 
     let resolution = yaml_text.lines().find_map(|line| {
         let (key, value) = line.split_once(':')?;

@@ -127,7 +127,8 @@ pub async fn update_map_handler(
     Ok(Json(ApiResponse::ok(vo)))
 }
 
-/// `GET /api/dogMap/{id}/image` — 把地图包里的 `model.pgm` 转成 PNG 返回，
+/// `GET /api/dogMap/{id}/image` — 把地图包里的栅格 PGM 转成 PNG 返回，
+/// 优先 `map_edit/map.pgm`（遥控器编辑版），没有时才用原始 `model.pgm` / `map.pgm`；
 /// 同时带回 `resolution` / `origin`，供路线规划页做像素↔世界坐标换算。
 pub async fn get_map_image_handler(
     State(state): State<AppState>,
@@ -141,8 +142,10 @@ pub async fn get_map_image_handler(
     Ok(Json(ApiResponse::ok(image)))
 }
 
-/// `POST /api/dogMap/{id}/edit` — 橡皮擦：按笔画改写 `model.pgm` 中的噪点。
+/// `POST /api/dogMap/{id}/edit` — 橡皮擦：按笔画改写编辑版的栅格噪点。
 ///
+/// 包内有 `map_edit/` 时改写 `map_edit/map.pgm`（遥控器编辑后的地图），根目录
+/// 的原始 `map.pgm` 不动；没有编辑目录时才回退到 `model.pgm` / `map.pgm`。
 /// 请求体：`{ strokes: [{ points: [{x,y}], radius }], eraseValue: 254 }`，
 /// 坐标是栅格像素坐标；返回改写后的 PNG 与新的 `mapHash`。
 pub async fn edit_map_handler(

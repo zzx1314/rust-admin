@@ -281,15 +281,18 @@ $ curl -s http://192.168.234.234:12000/
   → 业务平台 POST /api/zentai/devices/{code}/push-map（或反向信道 push-map）
     → 下发「下发地图」指令（mapId / mapDir / sourceRef / mapHash / packagePath）
       → 客户端 GET /api/map-versions/{id}/package 拉最新 zip
-      → 解包取 *.pgm / *.yaml，重命名为 map.pgm / map.yaml（yaml 的 image: 改成 map.pgm）
-      → 写本体文件服务 map/history_map/<目录>/，读回逐字节校验
+      → 解包优先取 map_edit/*.pgm / *.yaml，没有才取 *.pgm / *.yaml，
+        重命名为 map.pgm / map.yaml（yaml 的 image: 改成 map.pgm）
+      → 本体有 map_edit/ 时写 map/history_map/<目录>/map_edit/，
+        否则写 map/history_map/<目录>/，读回逐字节校验
       → 4030 重新载图（等 loc_state 收敛）
 ```
 
 要点：
 
-1. **只覆盖 `map.pgm` / `map.yaml`**：`map.pcd`（定位）、`map.geojson` / `nav_paths`
-   （路网）与栅格噪点无关，动了会破坏已有路线；
+1. **只覆盖栅格 `map.pgm` + `map.yaml`**：本体有 `map_edit/` 时写编辑版，
+   根目录的原始建图 `map.pgm` / `map.yaml` 保持不动；`map.pcd`（定位）、
+   `map.geojson` / `nav_paths`（路网）与栅格噪点无关，动了会破坏已有路线；
 2. **写前校验目录存在**：先 `GET /api/list?path=/map/history_map/<目录>`，目录不存在
    直接报错，绝不凭平台给的目录名造目录；
 3. **读回校验 + 回滚**：现场固件上传接口没有正式文档，客户端按

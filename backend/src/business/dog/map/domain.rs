@@ -195,12 +195,14 @@ pub struct MapVO {
 /// 地图包解析结果：用于前端展示栅格地图
 ///
 /// 地图包与参考实现保持一致：`.zip` 内为 ROS map_server 格式的
-/// `model.pgm` + `model.yaml`。这里把 `pgm` 转成 `png` 并返回 base64，
+/// `model.pgm` + `model.yaml`；机器人本体回传的包还会带 `map_edit/`（遥控器
+/// 编辑后的地图），平台优先展示这一份。这里把 `pgm` 转成 `png` 并返回 base64，
 /// 同时带回 `resolution` / `origin`，前端据此做像素↔世界坐标换算。
 /// 地图擦除（橡皮擦）请求。
 ///
-/// 前端在预览画布上按栅格像素坐标记录笔画，提交后由服务端把 `model.pgm`
-/// 里对应区域改写为 `eraseValue`（默认 254 = 自由空间，用来擦掉孤立噪点）。
+/// 前端在预览画布上按栅格像素坐标记录笔画，提交后由服务端把编辑版栅格
+/// （`map_edit/map.pgm`，没有时才用 `model.pgm`）里对应区域改写为 `eraseValue`
+/// （默认 254 = 自由空间，用来擦掉孤立噪点）。
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MapEditRequest {
