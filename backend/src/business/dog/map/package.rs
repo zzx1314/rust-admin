@@ -4,11 +4,12 @@
 //! 地图包解压后包含 ROS map_server 格式的 `model.pgm` 与 `model.yaml`，
 //! `yaml` 里的 `resolution` 与 `origin` 用于前端把世界坐标换算成像素坐标。
 
-use std::io::Cursor;
+use std::io::{Cursor, Write};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use sha2::{Digest, Sha256};
 
+use crate::business::dog::map::domain::{MapEditPoint, MapEditStroke};
 use crate::common::error::AppError;
 
 /// 地图包解析结果（未编码的中间结构）
@@ -32,6 +33,12 @@ impl ParsedMapPackage {
 
 const DEFAULT_RESOLUTION: f64 = 0.05;
 const DEFAULT_ORIGIN: [f64; 3] = [0.0, 0.0, 0.0];
+
+/// 单笔擦除的最大半径（像素）。避免一次请求把整张图刷成同一种值。
+pub const MAX_ERASE_RADIUS: f64 = 500.0;
+/// 单次编辑允许的最大笔画数 / 采样点总数（防止前端异常或恶意请求）。
+pub const MAX_EDIT_STROKES: usize = 2_000;
+pub const MAX_EDIT_POINTS: usize = 200_000;
 
 /// 解析地图包 zip：找出 `*.pgm` 与 `*.yaml`，把栅格地图转成 PNG。
 ///
@@ -88,6 +95,353 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         let _ = write!(out, "{byte:02x}");
     }
     out
+}
+
+/// 可编辑的栅格：统一归一化成 8 位灰度（0 = 占据，205 = 未知，254 = 自由）。
+///
+/// ROS `map_saver` 产出的是 8 位 `P5`，这里额外兼容 `P2`（ASCII）与 16 位
+/// `P5`：16 位在首次编辑时按比例缩放到 8 位（`occupied_thresh` 是比例阈值，
+/// 缩放不改变语义）。
+#[derive(Debug, Clone)]
+pub struct PgmRaster {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
+impl PgmRaster {
+    /// 编码成 ROS 通用的 8 位二进制 PGM（`P5` + `maxval 255`）。
+    pub fn to_p5(&self) -> Vec<u8> {
+        let mut out = format!("P5\n{} {}\n255\n", self.width, self.height).into_bytes();
+        out.extend_from_slice(&self.pixels);
+        out
+    }
+}
+
+/// 解析 PGM（`P2` / `P5`）栅格，返回 8 位灰度像素。
+///
+/// 与 `parse_map_package` 里的 `image` 解码不同，这里保留原始像素值本身，
+/// 编辑后再原样写回，避免 254（自由空间）被色彩空间转换改写成 255。
+pub fn parse_pgm_raster(bytes: &[u8]) -> Result<PgmRaster, AppError> {
+    let mut cursor = HeaderCursor::new(bytes);
+    let magic = cursor
+        .next_token()
+        .ok_or_else(|| AppError::BadRequest("地图文件不是有效的 PGM：缺少文件头".to_string()))?;
+    let binary = match magic {
+        b"P5" => true,
+        b"P2" => false,
+        other => {
+            return Err(AppError::BadRequest(format!(
+                "地图文件不是有效的 PGM：不支持的魔数 {}",
+                String::from_utf8_lossy(other)
+            )));
+        }
+    };
+
+    let width = parse_header_number(cursor.next_token(), "宽度")?;
+    let height = parse_header_number(cursor.next_token(), "高度")?;
+    let maxval = parse_header_number(cursor.next_token(), "最大灰度值")?;
+    if width == 0 || height == 0 {
+        return Err(AppError::BadRequest(
+            "地图栅格尺寸为 0，无法解析".to_string(),
+        ));
+    }
+    if maxval == 0 || maxval > 65_535 {
+        return Err(AppError::BadRequest(format!(
+            "地图最大灰度值 {maxval} 不受支持"
+        )));
+    }
+
+    let count = usize::try_from(u64::from(width) * u64::from(height))
+        .map_err(|_| AppError::BadRequest("地图栅格过大".to_string()))?;
+
+    let scale = |value: u32| -> u8 {
+        if maxval == 255 {
+            value as u8
+        } else {
+            // 四舍五入到 0..=255
+            (((value as u64) * 255 + (maxval as u64) / 2) / maxval as u64) as u8
+        }
+    };
+
+    let mut pixels = Vec::with_capacity(count);
+    if binary {
+        // `maxval` 之后必须紧跟一个空白字符，其后即为像素数据。
+        cursor.skip_one_whitespace();
+        let data = cursor.remaining();
+        if maxval < 256 {
+            let data = data
+                .get(..count)
+                .ok_or_else(|| AppError::BadRequest("地图像素数据不完整".to_string()))?;
+            if maxval == 255 {
+                pixels.extend_from_slice(data);
+            } else {
+                pixels.extend(data.iter().map(|value| scale(u32::from(*value))));
+            }
+        } else {
+            let data = data
+                .get(..count * 2)
+                .ok_or_else(|| AppError::BadRequest("地图像素数据不完整".to_string()))?;
+            pixels.extend(
+                data.chunks_exact(2)
+                    .map(|pair| scale(u32::from(u16::from_be_bytes([pair[0], pair[1]])))),
+            );
+        }
+    } else {
+        for _ in 0..count {
+            let token = cursor
+                .next_token()
+                .ok_or_else(|| AppError::BadRequest("地图像素数据不完整".to_string()))?;
+            let value = std::str::from_utf8(token)
+                .ok()
+                .and_then(|text| text.parse::<u32>().ok())
+                .ok_or_else(|| AppError::BadRequest("地图像素数据不是数字".to_string()))?;
+            if value > maxval {
+                return Err(AppError::BadRequest(format!(
+                    "地图像素值 {value} 超过最大灰度值 {maxval}"
+                )));
+            }
+            pixels.push(scale(value));
+        }
+    }
+
+    Ok(PgmRaster {
+        width,
+        height,
+        pixels,
+    })
+}
+
+/// 在地图包基础上重写 `*.pgm`（橡皮擦），返回新的 `.zip` 字节与改写的像素数。
+///
+/// 除被编辑的 PGM 外，其余条目（`model.yaml`、自定义标注等）按原顺序原样复制，
+/// 因此分辨率 / 原点 / negate 等元数据保持不变。
+pub fn rewrite_map_package(
+    bytes: &[u8],
+    strokes: &[MapEditStroke],
+    erase_value: u8,
+) -> Result<(Vec<u8>, usize), AppError> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
+        .map_err(|error| AppError::BadRequest(format!("地图包解析失败: {error}")))?;
+    let pgm_name = find_entry(&mut archive, "model.pgm", ".pgm").ok_or_else(|| {
+        AppError::BadRequest("地图包内未找到 model.pgm，请检查地图包内容".to_string())
+    })?;
+    let pgm = read_entry(&mut archive, &pgm_name)?;
+    let mut raster = parse_pgm_raster(&pgm)?;
+    let erased_pixels = apply_erase_strokes(
+        &mut raster.pixels,
+        raster.width,
+        raster.height,
+        strokes,
+        erase_value,
+    )?;
+    let edited = raster.to_p5();
+
+    let mut buffer = Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut buffer);
+        let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for index in 0..archive.len() {
+            let mut entry = archive
+                .by_index(index)
+                .map_err(|error| AppError::BadRequest(format!("读取地图包失败: {error}")))?;
+            let name = entry.name().to_string();
+            if entry.is_dir() {
+                writer
+                    .add_directory(name, options)
+                    .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+                continue;
+            }
+            writer
+                .start_file(name.clone(), options)
+                .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+            if name == pgm_name {
+                writer
+                    .write_all(&edited)
+                    .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+            } else {
+                std::io::copy(&mut entry, &mut writer)
+                    .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+            }
+        }
+        writer
+            .finish()
+            .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+    }
+
+    Ok((buffer.into_inner(), erased_pixels))
+}
+
+/// 把橡皮擦笔画刷进像素缓冲区，返回实际被改写的像素数。
+pub fn apply_erase_strokes(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    strokes: &[MapEditStroke],
+    erase_value: u8,
+) -> Result<usize, AppError> {
+    if pixels.len() != width as usize * height as usize {
+        return Err(AppError::InternalError(
+            "栅格像素数量与尺寸不一致".to_string(),
+        ));
+    }
+    let mut changed = 0usize;
+    for stroke in strokes {
+        if stroke.points.is_empty() {
+            continue;
+        }
+        let radius = stroke.radius.unwrap_or(4.0).clamp(0.5, MAX_ERASE_RADIUS);
+        if !radius.is_finite() {
+            return Err(AppError::BadRequest("笔刷半径无效".to_string()));
+        }
+        for point in &stroke.points {
+            if !point.x.is_finite() || !point.y.is_finite() {
+                return Err(AppError::BadRequest("笔画坐标无效".to_string()));
+            }
+        }
+
+        changed += stamp(
+            pixels,
+            width,
+            height,
+            &stroke.points[0],
+            radius,
+            erase_value,
+        );
+        for pair in stroke.points.windows(2) {
+            changed += stamp_segment(
+                pixels,
+                width,
+                height,
+                &pair[0],
+                &pair[1],
+                radius,
+                erase_value,
+            );
+        }
+    }
+    Ok(changed)
+}
+
+/// 沿两点连线按 `radius / 2` 的步长补点，避免快速拖动出现断点。
+fn stamp_segment(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    from: &MapEditPoint,
+    to: &MapEditPoint,
+    radius: f64,
+    value: u8,
+) -> usize {
+    let (dx, dy) = (to.x - from.x, to.y - from.y);
+    let distance = (dx * dx + dy * dy).sqrt();
+    let step = (radius / 2.0).max(0.5);
+    let steps = (distance / step).ceil() as usize;
+    let mut changed = 0usize;
+    for index in 1..=steps {
+        let ratio = index as f64 / steps as f64;
+        let point = MapEditPoint {
+            x: from.x + dx * ratio,
+            y: from.y + dy * ratio,
+        };
+        changed += stamp(pixels, width, height, &point, radius, value);
+    }
+    changed
+}
+
+/// 以 `(point.x, point.y)` 为圆心绘制实心圆，只统计真正被改写的像素。
+fn stamp(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    point: &MapEditPoint,
+    radius: f64,
+    value: u8,
+) -> usize {
+    let radius_squared = radius * radius;
+    let max_x = width as f64 - 1.0;
+    let max_y = height as f64 - 1.0;
+    let start_x = (point.x - radius).floor().clamp(0.0, max_x) as u32;
+    let end_x = (point.x + radius).ceil().clamp(0.0, max_x) as u32;
+    let start_y = (point.y - radius).floor().clamp(0.0, max_y) as u32;
+    let end_y = (point.y + radius).ceil().clamp(0.0, max_y) as u32;
+
+    let mut changed = 0usize;
+    for y in start_y..=end_y {
+        let dy = y as f64 + 0.5 - point.y;
+        for x in start_x..=end_x {
+            let dx = x as f64 + 0.5 - point.x;
+            if dx * dx + dy * dy > radius_squared {
+                continue;
+            }
+            let index = y as usize * width as usize + x as usize;
+            if pixels[index] != value {
+                pixels[index] = value;
+                changed += 1;
+            }
+        }
+    }
+    changed
+}
+
+fn parse_header_number(token: Option<&[u8]>, label: &str) -> Result<u32, AppError> {
+    let token = token.ok_or_else(|| AppError::BadRequest(format!("PGM 文件头缺少{label}")))?;
+    std::str::from_utf8(token)
+        .ok()
+        .and_then(|text| text.parse::<u32>().ok())
+        .ok_or_else(|| AppError::BadRequest(format!("PGM 文件头的{label}不是有效数字")))
+}
+
+/// PGM 文件头的逐 token 读取器（跳过空白与 `#` 注释）。
+struct HeaderCursor<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> HeaderCursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0 }
+    }
+
+    fn remaining(&self) -> &'a [u8] {
+        &self.bytes[self.pos.min(self.bytes.len())..]
+    }
+
+    fn skip_blank(&mut self) {
+        loop {
+            while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_whitespace() {
+                self.pos += 1;
+            }
+            if self.pos < self.bytes.len() && self.bytes[self.pos] == b'#' {
+                while self.pos < self.bytes.len() && self.bytes[self.pos] != b'\n' {
+                    self.pos += 1;
+                }
+                continue;
+            }
+            break;
+        }
+    }
+
+    fn next_token(&mut self) -> Option<&'a [u8]> {
+        self.skip_blank();
+        let start = self.pos;
+        while self.pos < self.bytes.len() && !self.bytes[self.pos].is_ascii_whitespace() {
+            self.pos += 1;
+        }
+        (self.pos > start).then(|| &self.bytes[start..self.pos])
+    }
+
+    /// `maxval` 之后只消费一个换行/空白；像素数据里的 0x20 / 0x0A 不能被吞掉。
+    fn skip_one_whitespace(&mut self) {
+        if self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_whitespace() {
+            let carriage_return = self.bytes[self.pos] == b'\r';
+            self.pos += 1;
+            if carriage_return && self.pos < self.bytes.len() && self.bytes[self.pos] == b'\n' {
+                self.pos += 1;
+            }
+        }
+    }
 }
 
 /// 按 `preferred`（精确文件名）→ `extension`（后缀）顺序查找包内条目。
@@ -237,5 +591,92 @@ mod tests {
     fn rejects_package_without_pgm() {
         let zip = build_zip(&[("readme.txt", b"nothing here".to_vec())]);
         assert!(parse_map_package(&zip).is_err());
+    }
+
+    #[test]
+    fn parses_ascii_pgm_with_comments() {
+        let pgm = b"P2\n# CREATOR: map_saver\n3 2\n255\n0 205 254\n254 254 0\n";
+        let raster = parse_pgm_raster(pgm).unwrap();
+        assert_eq!(raster.width, 3);
+        assert_eq!(raster.height, 2);
+        assert_eq!(raster.pixels, vec![0, 205, 254, 254, 254, 0]);
+    }
+
+    #[test]
+    fn erases_noise_and_keeps_other_entries() {
+        // 8x8 全白（254）地图，中心 (4, 4) 与右上角 (7, 0) 各有一个噪点黑像素
+        let mut pixels = vec![254u8; 64];
+        pixels[4 * 8 + 4] = 0;
+        pixels[7] = 0;
+        let pgm = [b"P5\n8 8\n255\n".to_vec(), pixels].concat();
+        let yaml = b"image: model.pgm\nresolution: 0.05\norigin: [-1, -2, 0]\n";
+        let zip = build_zip(&[("map/model.pgm", pgm), ("map/model.yaml", yaml.to_vec())]);
+
+        let strokes = vec![
+            // 中心噪点
+            MapEditStroke {
+                points: vec![MapEditPoint { x: 4.5, y: 4.5 }],
+                radius: Some(0.6),
+            },
+            // 右上角噪点：半径放大到 2 验证边界裁剪（不能越界 panic）
+            MapEditStroke {
+                points: vec![MapEditPoint { x: 7.5, y: 0.5 }],
+                radius: Some(2.0),
+            },
+        ];
+        let (edited, changed) = rewrite_map_package(&zip, &strokes, 254).unwrap();
+        assert!(
+            changed >= 2,
+            "expected two noise pixels erased, got {changed}"
+        );
+
+        // 新包仍能被正常解析（PNG / 分辨率 / 原点不变）
+        let parsed = parse_map_package(&edited).unwrap();
+        assert_eq!(parsed.width, 8);
+        assert_eq!(parsed.height, 8);
+        assert!((parsed.resolution - 0.05).abs() < f64::EPSILON);
+        assert_eq!(parsed.origin, vec![-1.0, -2.0, 0.0]);
+        assert_eq!(parsed.sha256, sha256_hex(&edited));
+
+        // model.yaml 原样保留，PGM 里的噪点被抹掉
+        let mut archive = zip::ZipArchive::new(Cursor::new(&edited)).unwrap();
+        assert!(archive.by_name("map/model.yaml").is_ok());
+        let raster = parse_pgm_raster(&read_entry(&mut archive, "map/model.pgm").unwrap()).unwrap();
+        assert_eq!(raster.pixels[4 * 8 + 4], 254);
+        assert_eq!(raster.pixels[7], 254);
+    }
+
+    #[test]
+    fn erases_along_segment_between_samples() {
+        let mut pixels = vec![0u8; 20 * 10];
+        let strokes = vec![MapEditStroke {
+            points: vec![
+                MapEditPoint { x: 2.0, y: 5.0 },
+                MapEditPoint { x: 18.0, y: 5.0 },
+            ],
+            radius: Some(1.0),
+        }];
+        apply_erase_strokes(&mut pixels, 20, 10, &strokes, 205).unwrap();
+        // 中间没有采样点的像素也必须被插值补上
+        for x in 2..=18 {
+            assert_eq!(pixels[5 * 20 + x], 205, "x={x} 未被擦除");
+        }
+        assert_eq!(pixels[0], 0);
+    }
+
+    #[test]
+    fn normalizes_16bit_pgm_on_edit() {
+        // 2x1 的 16 位 P5：0 与 65535 → 0 与 255
+        let mut pgm = b"P5\n2 1\n65535\n".to_vec();
+        pgm.extend_from_slice(&[0, 0, 0xff, 0xff]);
+        let raster = parse_pgm_raster(&pgm).unwrap();
+        assert_eq!(raster.pixels, vec![0, 255]);
+    }
+
+    #[test]
+    fn rejects_malformed_pgm_header() {
+        assert!(parse_pgm_raster(b"P5\n3\n").is_err());
+        assert!(parse_pgm_raster(b"P3\n1 1\n255\n0 0 0\n").is_err());
+        assert!(parse_pgm_raster(b"P5\n2 2\n255\n\x00").is_err());
     }
 }

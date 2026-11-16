@@ -72,6 +72,11 @@ async fn test_state() -> (AppState, TempDb) {
         backpack_base_url: None,
         backpack_webrtc_url: None,
         backpack_browser_url: None,
+        public_url: None,
+        wecom_enabled: false,
+        wecom_webhook: None,
+        wecom_min_level: "警告".to_string(),
+        wecom_mention_all: false,
     });
 
     let pool = db::connect(&config).await.expect("连接测试库失败");
@@ -80,6 +85,7 @@ async fn test_state() -> (AppState, TempDb) {
 
     let state = AppState {
         db: pool,
+        notifier: robodog_ops_server::notify::Notifier::disabled(),
         config,
         device_connections: gateway::new_device_connections(),
         video_hub: Default::default(),

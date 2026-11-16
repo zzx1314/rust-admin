@@ -70,6 +70,12 @@ Any config key can be overridden with `APP_<SECTION>__<KEY>`.
 `ROBODOG_ZENTAI_WS_URL`（如 `ws://10.0.0.8:3000`）；不配置则沿用「中台直连
 HTTP」模式。两者共用同一个服务令牌，见 `business/README.md`。
 
+企业微信告警推送：群机器人 webhook 只走环境变量 `ROBODOG_WECOM_WEBHOOK`
+（地址即凭据，不要写进 `server.toml`）；另可选 `ROBODOG_PUBLIC_URL` 拼消息里的
+「查看详情」链接。用法见 `business/README.md`「企业微信告警推送」，**设计与扩展点见
+`business/docs/wecom-alert-push.md`（改这块之前必读）**：架构、代码地图、三层开关、
+去重/限流参数、触发点清单、新增告警源的做法、踩坑记录。
+
 `backend/run.sh` exports the required secret (and probes Redis for
 `APP_REDIS_PASSWORD`) before running `cargo run`. Set `APP_REDIS_PASSWORD`
 when Redis enforces `requirepass` (the compose one uses `123456`), otherwise

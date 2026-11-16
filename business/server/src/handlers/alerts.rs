@@ -105,6 +105,8 @@ pub async fn create_alert(
     .bind(now())
     .execute(&state.db)
     .await?;
+    // 页面上手动新建的告警同样进群：现场常用来"通知大家我发现了 X"
+    crate::notify::alert_created(&state, &alert_code).await;
     Ok(ApiResponse::ok(
         fetch_alert(&state, result.last_insert_rowid()).await?,
     ))

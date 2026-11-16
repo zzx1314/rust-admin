@@ -7,7 +7,8 @@ Wants=network-online.target
 Type=simple
 # server.toml 里的相对路径（data/、web、migrations）按配置文件所在目录解析
 WorkingDirectory=/opt/hz/rust-admin/robodog
-# ROBODOG_JWT_SECRET / ROBODOG_SERVICE_TOKEN / ROBODOG_SERVER_CONFIG / RUST_LOG
+# ROBODOG_JWT_SECRET / ROBODOG_SERVICE_TOKEN / ROBODOG_SERVER_CONFIG /
+# ROBODOG_WECOM_WEBHOOK（企业微信告警推送）/ RUST_LOG
 EnvironmentFile=/opt/hz/rust-admin/robodog.env
 ExecStart=/opt/hz/rust-admin/robodog/robodog-ops-server
 Restart=always

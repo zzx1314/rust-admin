@@ -1244,7 +1244,10 @@ onBeforeUnmount(() => {
             >
               <div class="dot">{{ step.index + 1 }}</div>
               <b>{{ step.point.name }}</b>
-              <span>{{ step.point.actions.length }} 项点动作 · 停留 {{ step.point.dwell }}s</span>
+              <span
+                >{{ step.point.actions.length }} 项点动作 · 停留 {{ step.point.dwell }}s · 机身
+                {{ step.point.heading }}°</span
+              >
               <span v-if="!step.isLast" style="color: #0284c7">
                 ↓ 段 {{ step.index + 1 }}：{{ step.legActions }} 项行进任务
               </span>
@@ -1300,13 +1303,27 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="rt-field">
                   <label>停留时长</label>
-                  <input v-model.number="selectedPoint.dwell" class="input" type="number" min="0" />
-                  <span class="muted" style="font-size: 11px">s</span>
+                  <input
+                    v-model.number="selectedPoint.dwell"
+                    class="input"
+                    type="number"
+                    min="0"
+                    step="2"
+                    title="到点停留秒数。本体「等待」动作固定 2 s，平台按 2 s 粒度重复下发（6 s → 3 次等待），单点上限 300 s"
+                  />
+                  <span class="muted" style="font-size: 11px">s（2 s 粒度）</span>
                 </div>
                 <div class="rt-field">
-                  <label>云台朝向</label>
-                  <input v-model.number="selectedPoint.heading" class="input" type="number" min="0" max="360" />
-                  <span class="muted" style="font-size: 11px">°</span>
+                  <label>机身偏航角</label>
+                  <input
+                    v-model.number="selectedPoint.heading"
+                    class="input"
+                    type="number"
+                    min="0"
+                    max="360"
+                    title="到点后机身转头对准的偏航角（度），0° = 地图 +X 方向；下发为本体路径点的 orientation 四元数"
+                  />
+                  <span class="muted" style="font-size: 11px">° 到点转头</span>
                 </div>
                 <div class="rt-field">
                   <label>必经点</label>
@@ -1592,6 +1609,15 @@ onBeforeUnmount(() => {
           <div class="field">
             <label>失败重试次数</label>
             <input v-model.number="actionForm.retry" class="input" type="number" min="0" max="5" />
+          </div>
+          <div
+            v-if="actionForm.type === 'AI 识别'"
+            class="rt-hint"
+            style="margin: 0; grid-column: 1 / -1"
+          >
+            执行参数填<b>模型场景关键词</b>（如「烟火 / 人员」，平台按关键词匹配背包上的模型包，都不命中时用第一个可用模型）；
+            告警阈值填<b>置信度</b>（<code>0.85</code> 或 <code>85%</code>，填温度阈值不会被采纳）。
+            到点后由平台自动开启识别，检出目标写入「告警中心」，不占用停留时长。
           </div>
         </template>
         <div v-else class="field" style="grid-column: 1 / -1">

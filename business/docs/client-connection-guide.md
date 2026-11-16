@@ -261,7 +261,7 @@ $ curl -s http://192.168.234.234:12000/
 | 列目录 | `GET {base}/api/list?path=/map/history_map/<dir>` | JSON：`entries[].{name,type,size,path}` |
 | 下载文件 | `GET {base}/files/<entries[].path>` | 二进制原文件 |
 | 浏览目录 | `GET {base}/files/<dir>/` | 与列目录同样的 JSON |
-| 上传 | `POST {base}/upload` | 本体侧重装地图用，客户端不用 |
+| 上传 | `POST {base}/upload` | 本体侧重装地图用（中台编辑后的地图写回，字段名见 §7.2） |
 
 `{base}` 的根**已经是 `alg_data`**，路径里不能再带 `/ota/alg_data`。
 
@@ -271,6 +271,34 @@ $ curl -s http://192.168.234.234:12000/
 单文件 >64MB（`model_map.bin` 222MB、`map.bin` 121MB）与总量 >200MB，最多 64 个文件。
 实测一张地图：16 个文件、原始 32.7MB → zip 11.7MB，含 `map.yaml` / `map.pgm` /
 `map.geojson` / `map.txt` / `map.pcd` / `map_edit/` / `nav_paths/`。
+
+### 7.2 中台编辑地图后写回本体（`下发地图`）
+
+中台橡皮擦改的是中台的地图包，本体上的 `map.pgm` / `map.yaml` 需要重新写：
+
+```text
+中台 POST /api/dogMap/{id}/push
+  → 业务平台 POST /api/zentai/devices/{code}/push-map（或反向信道 push-map）
+    → 下发「下发地图」指令（mapId / mapDir / sourceRef / mapHash / packagePath）
+      → 客户端 GET /api/map-versions/{id}/package 拉最新 zip
+      → 解包取 *.pgm / *.yaml，重命名为 map.pgm / map.yaml（yaml 的 image: 改成 map.pgm）
+      → 写本体文件服务 map/history_map/<目录>/，读回逐字节校验
+      → 4030 重新载图（等 loc_state 收敛）
+```
+
+要点：
+
+1. **只覆盖 `map.pgm` / `map.yaml`**：`map.pcd`（定位）、`map.geojson` / `nav_paths`
+   （路网）与栅格噪点无关，动了会破坏已有路线；
+2. **写前校验目录存在**：先 `GET /api/list?path=/map/history_map/<目录>`，目录不存在
+   直接报错，绝不凭平台给的目录名造目录；
+3. **读回校验 + 回滚**：现场固件上传接口没有正式文档，客户端按
+   `POST {base}/upload`（multipart，带 `path`/`dir`/`name`/`filename` 与 `file`）→
+   `PUT {base}/files/<rel>` → `POST {base}/files/<rel>` 三种形状探测；每次写完都用
+   `GET {base}/files/<rel>` 比对内容，不一致就换下一种；两个文件都没能写入一致时
+   会把已写文件回滚成原内容；
+4. **任务 / 建图进行中拒绝下发**：改图与导航同时进行会让本体用上半新半旧的栅格；
+5. **必须重新载图**：4030 载图后本体才会读新的 `map.pgm`，随后切回导航模式。
 
 ## 8. 断线重连策略
 
@@ -383,6 +411,7 @@ cargo run -- --print-config      # 查看脱敏后的生效配置
 | `mapping.park_id` | `ROBODOG_PARK_ID` | `--park-id` | 空（用控制台绑定的园区） |
 | `mapping.ingest_name` | — | `--ingest-map-name` | 空（用本体目录名） |
 | `mapping.once` | — | `--map-only` | `false` |
+| `mapping.sync_interval_secs` | `ROBODOG_MAP_SYNC_INTERVAL` | `--map-sync-interval` / `--no-map-sync` | `600`（地图定时**增量**同步：只补平台没有的图；`0` = 关闭；`mapping.upload = false` 时强制关闭） |
 | `video.enabled` | — | — | `true`（是否响应业务平台的 `video_start`） |
 | `video.ffmpeg` | — | — | `ffmpeg`（可执行文件路径） |
 | `video.transport` | — | — | `tcp`（仅 `tcp` / `udp`，非 `rtsp://` 地址不传） |

@@ -6,6 +6,8 @@ import type {
   Device,
   LoginResponse,
   MapRaster,
+  NotificationRecord,
+  NotifyTestResult,
   MapRefs,
   MapVersion,
   Park,
@@ -192,6 +194,13 @@ export const settingApi = {
   list: () => get<Setting[]>("/settings"),
   save: (items: Array<{ settingKey: string; settingValue: string | null }>) =>
     put<Setting[]>("/settings", items)
+};
+
+export const notifyApi = {
+  /** 推送记录：现场排查「告警到底推没推出去」 */
+  records: (params?: object) => get<NotificationRecord[]>("/notifications", params),
+  /** 同步发一条测试消息，返回企业微信的 errcode/errmsg 原文 */
+  test: () => post<NotifyTestResult>("/notifications/test")
 };
 
 export const dashboardApi = {

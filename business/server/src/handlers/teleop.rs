@@ -55,7 +55,7 @@ const BODY_ACTIONS: [(&str, &str); 11] = [
 ];
 
 /// 允许通过 `/command` 下发的业务指令
-const BUSINESS_COMMANDS: [&str; 9] = [
+const BUSINESS_COMMANDS: [&str; 10] = [
     "开始巡检",
     "暂停任务",
     "继续任务",
@@ -64,6 +64,8 @@ const BUSINESS_COMMANDS: [&str; 9] = [
     "重新定位",
     "远程接管",
     "释放接管",
+    // 「下发地图」：把中台编辑后的地图包写回本体并重新载图（见 handlers::maps::apply_push_map）
+    "下发地图",
     // 「本体重连」：让设备客户端退出并由 systemd 重建到本体的连接。
     // 它是运维手段（链路/会话半死时用），不改本体任何状态。
     "本体重连",
@@ -422,8 +424,13 @@ fn spawn_estop_readback_check(
     expect_engaged: bool,
 ) {
     tokio::spawn(async move {
-        let label = if expect_engaged { "急停" } else { "解除急停" };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(ESTOP_VERIFY_TIMEOUT_SECS);
+        let label = if expect_engaged {
+            "急停"
+        } else {
+            "解除急停"
+        };
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(ESTOP_VERIFY_TIMEOUT_SECS);
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             let current: Option<Option<i64>> =

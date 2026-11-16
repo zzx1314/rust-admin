@@ -58,7 +58,8 @@ pub struct Waypoint {
     /// 到位停留秒数
     #[serde(default)]
     pub dwell: i64,
-    /// 偏航角（度）
+    /// 到点后机身转过头对准的偏航角（度）：写成本体路径点 `orientation` 的 yaw。
+    /// 本体协议没有云台/PTZ 指令，这里转的是整只狗（roll/pitch 恒 0）。
     #[serde(default)]
     pub heading: f64,
     /// 到点容差（米）
@@ -94,7 +95,7 @@ impl Waypoint {
     /// 这个点是否需要**停下来做作业**（停留 / 拍照 / 其它动作）。
     ///
     /// 巡检里它决定路径点的 `properties.type`：有作业就是 `1`（作业点），否则 `0`
-    /// （途径点）；路径点的 `tasks` 由停留/拍照翻成 `[0 等待] / [1 拍照]`
+    /// （途径点）；路径点的 `tasks` 由停留/拍照翻成 `[0 等待…] / [1 拍照]`
     /// （见 [`point_path_tasks`]）。
     pub fn has_on_point_work(&self) -> bool {
         self.dwell > 0 || self.wants_photo() || !self.actions.is_empty()
@@ -257,6 +258,37 @@ pub const IDLE_WAIT: Duration = Duration::from_secs(15);
 /// 5000 `params.speed_limit` 缺省线速度（航线没配速度时用）
 const DEFAULT_SPEED_LIMIT: f64 = 1.2;
 
+/// 路径点「等待」动作在本体侧的实现时长：**固定 2 s，协议没有秒数参数**（文档 §2.2.3.7）。
+///
+/// 要停更久只能重复同一个动作（`[0,0,0]` = 3 次等待），见 [`wait_task_count`]。
+pub const WAIT_TASK_SECONDS: i64 = 2;
+
+/// 单个点最多展开多少个「等待」（300 s）。
+///
+/// `dwell` 是平台侧可填的秒数，手滑填成 3600 会把路径撑成 1800 个动作，
+/// 本体大概率直接拒载；这里封顶并告警，而不是静默发出去。
+pub const MAX_WAIT_TASKS: i64 = 150;
+
+/// 停留秒数 → 需要重复几个「等待」动作（向上取整，因为粒度是 2 s）。
+///
+/// `0` 表示不停留；`1~2` → 1 个（实际 2 s）；`5~6` → 3 个（实际 6 s）。
+fn wait_task_count(dwell: i64) -> usize {
+    if dwell <= 0 {
+        return 0;
+    }
+    // 向上取整；`saturating_add` 防止 dwell 被填成 i64::MAX 时溢出
+    let raw = dwell.saturating_add(WAIT_TASK_SECONDS - 1) / WAIT_TASK_SECONDS;
+    let capped = raw.min(MAX_WAIT_TASKS);
+    if raw > capped {
+        warn!(
+            "航点停留 {dwell}s 超过单点上限 {}s，按 {}s 下发",
+            MAX_WAIT_TASKS * WAIT_TASK_SECONDS,
+            MAX_WAIT_TASKS * WAIT_TASK_SECONDS
+        );
+    }
+    capped as usize
+}
+
 /// 5000 `params.speed_limit.vz`：**角速度上限**，单位 rad/s
 ///
 /// 取协议文档示例的 1.5。以前写死 0.0，等于告诉本体「不允许转向」，
@@ -366,13 +398,15 @@ fn nav_path_points(points: &[Waypoint]) -> Vec<Value> {
 /// - `type`：有停留/拍照/其它动作 → `1`（作业点），否则 `0`（途径点）；
 /// - `tasks`：协议只认 `0`（等待，**固定 2 s**）/ `1`（拍照），可重复；
 ///   途径点即使写了 `tasks` 也会被忽略，所以这里对 `type=0` 直接给空数组。
+/// - 平台配的 `dwell`（秒）靠**重复 `0`** 表达：`dwell=6 → [0,0,0]`，粒度 2 s。
 fn point_path_tasks(point: &Waypoint) -> (u8, Vec<u8>) {
     if !point.has_on_point_work() {
         return (0, Vec::new());
     }
     let mut tasks = Vec::new();
-    if point.dwell > 0 {
-        tasks.push(0); // 等待（本体固定 2 s，秒数不可配）
+    let waits = wait_task_count(point.dwell);
+    if waits > 0 {
+        tasks.extend(std::iter::repeat_n(0, waits)); // 等待（本体每次固定 2 s）
     }
     if point.wants_photo() {
         tasks.push(1); // 拍照（调 /capture_image）
@@ -1007,15 +1041,45 @@ mod tests {
         let points = tuple[2].as_array().cloned().unwrap_or_default();
         assert_eq!(points.len(), 3);
         assert_eq!(points[0][0], json!("A"));
-        // 有停留 + 拍照 → 作业点，tasks = [0 等待, 1 拍照]
+        // 有停留 + 拍照 → 作业点；dwell=3s 按 2 s 粒度展开成 2 个等待（实际 4 s）
         assert_eq!(points[0][1]["properties"]["type"], 1);
-        assert_eq!(points[0][1]["properties"]["tasks"], json!([0, 1]));
+        assert_eq!(points[0][1]["properties"]["tasks"], json!([0, 0, 1]));
         // 纯导航点 → 途径点，tasks 为空
         assert_eq!(points[1][1]["properties"]["type"], 0);
         assert_eq!(points[1][1]["properties"]["tasks"], json!([]));
         // 位姿来自统一的 pose()
         assert_eq!(points[0][1]["position"]["x"], 0.0);
         assert!(points[0][1]["orientation"]["w"].as_f64().is_some());
+    }
+
+    #[test]
+    fn dwell_seconds_expand_to_repeated_waits() {
+        // 粒度 2 s：1~2 → 1 个，5~6 → 3 个
+        assert_eq!(wait_task_count(0), 0);
+        assert_eq!(wait_task_count(1), 1);
+        assert_eq!(wait_task_count(2), 1);
+        assert_eq!(wait_task_count(3), 2);
+        assert_eq!(wait_task_count(6), 3);
+        // 上限 300 s，超了封顶而不是把路径撑爆
+        assert_eq!(wait_task_count(3600), MAX_WAIT_TASKS as usize);
+
+        let mut p = plan("往返");
+        p.waypoints[0].dwell = 6;
+        p.waypoints[0].actions = vec![WaypointAction {
+            action_type: "可见光拍照".to_string(),
+            ..Default::default()
+        }];
+        p.waypoints[1].dwell = 0;
+        p.waypoints[1].actions = vec![WaypointAction {
+            action_type: "可见光拍照".to_string(),
+            ..Default::default()
+        }];
+        let data = add_nav_path_payload("m", "pid", &p.waypoints);
+        let points = data["add_nav_path"][2].as_array().cloned().unwrap_or_default();
+        // dwell=6s + 拍照 → 3 个等待 + 拍照
+        assert_eq!(points[0][1]["properties"]["tasks"], json!([0, 0, 0, 1]));
+        // 没配停留、只拍照 → 不等待，到点拍完就走
+        assert_eq!(points[1][1]["properties"]["tasks"], json!([1]));
     }
 
     #[test]

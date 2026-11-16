@@ -14,6 +14,7 @@ Rust 后端、SQLite 数据库与 Vue 3 运营控制台。
 ```text
 business/
 ├── designprototype/                # 原始 HTML 交互原型（只读参考）
+├── docs/                          # 接入与设计文档（背包视频、客户端协议、企微告警）
 ├── server/                        # 独立 Rust 服务（axum + sqlx + SQLite）
 │   ├── src/
 │   │   ├── auth.rs                # JWT 登录、鉴权中间件
@@ -23,9 +24,11 @@ business/
 │   │   ├── gateway.rs             # 设备 WebSocket 网关（注册/心跳/下发/控制）
 │   │   ├── gateway_types.rs       # 网关消息协议类型
 │   │   ├── dispatch.rs            # 任务下发载荷组装（地图绑定/速度/结束动作）
+│   │   ├── ai_patrol.rs           # 航点到点 AI 识别（开窗口 → 收 SSE → 写告警）
+│   │   ├── notify.rs              # 企业微信告警推送（去重/限流/截断/重试）
 │   │   ├── handlers/              # 园区、区域、设备、任务、路线、告警、设置、驾驶舱
 │   │   └── app.rs                 # 路由装配、CORS、静态资源
-│   ├── migrations/                # 001 建表 / 002 地图基线 / 003 地图来源 / 004 本体回执
+│   ├── migrations/                # 001 建表 / 002 地图基线 / … / 019 推送记录
 │   ├── seed/routes.json           # 演示路线（航点/航段/动作）
 │   └── data/robodog.db            # 运行时生成，删除后自动重建并重新播种
 ├── client/                        # 设备客户端：业务协议 + 智航 Pro 本体驱动
@@ -183,6 +186,7 @@ GET    /api/dashboard/summary
 GET    /api/map-versions                  GET    /api/parks/{id}/maps
 GET    /api/map-versions/{id}             GET    /api/map-versions/{id}/refs
 GET    /api/map-versions/{id}/raster      GET    /api/map-versions/backend          POST   /api/map-versions/import-backend
+GET    /api/map-versions/{id}/package     # 地图包原文（设备「下发地图」拉最新包）
 GET    /api/map-versions/synced-sources   # 已同步的机器人地图路径（deviceId，兼容 parkId）
 POST   /api/map-versions/{id}/publish     POST   /api/map-versions/{id}/new-version
 POST   /api/map-versions/ingest          # 自动回传 / 手动同步共用入口
@@ -191,8 +195,32 @@ POST   /api/map-versions/ingest          # 自动回传 / 手动同步共用入�
 POST   /api/zentai/devices/{deviceId}/sync-maps   # 中台「同步地图」
 POST   /api/zentai/devices/{deviceId}/command     # 中台下发指令
 POST   /api/zentai/devices/{deviceId}/tasks       # 中台给设备下发任务
+POST   /api/zentai/devices/{deviceId}/push-map    # 中台编辑地图后写回狗体
 GET    /api/zentai/devices/{deviceId}/runtime     # 中台读取设备运行态（只读）
 ```
+
+## 地图写回狗体（中台编辑 → 本体）
+
+中台地图页的橡皮擦只改中台的地图包，机器人本体上的 `map.pgm` / `map.yaml`
+不会自己更新（保存后前端会询问「是否立即下发」，点「稍后」就不下发）。要让任务用上新地图，中台调用
+`POST /api/dogMap/{id}/push`（反向信道 `push-map` 或 HTTP 直连
+`/api/zentai/devices/{deviceId}/push-map`），本服务负责：
+
+1. 按 `dog_map.id` 读中台 `dog_map`（中台是地图主库），拿到最新包；
+2. 业务库按 `map_versions.source_id = dog_map.id` 找到对应行（可能有多条园区副本，
+   优先设备所属园区那条）——**没导入过业务库就直接 400**，不会凭空造地图；
+3. 把最新包暂存到 `[ingest] dir`，刷新这些行的 `file_path` / `file_name` /
+   `file_size` / `map_hash` / 宽高 / 原点 / 分辨率，`/api/map-versions/{id}/raster`
+   与设备拉包因此都拿到新内容；
+4. 向设备下发 `下发地图` 指令（`mapId` / `mapDir` / `sourceRef` / `mapHash` /
+   `packagePath`），由设备客户端拉包、写本体文件服务并重新载图（4030）。
+
+前置条件：设备在业务平台在线；地图行上有本体目录名 `source_ref`（设备回传地图时
+写入）；`ROBODOG_SERVICE_TOKEN` 与中台一致。设备离线时返回 400 并把台账标记离线，
+与「同步地图 / 指令」的语义保持一致。
+
+设备侧只覆盖 `map.pgm` / `map.yaml` 并读回校验，`map.pcd` / `map.geojson` /
+`nav_paths` 原样保留；客户端在任务执行 / 建图进行中会拒绝下发。
 
 ## 中台账号与设备分配
 
@@ -311,21 +339,36 @@ GET    /api/zentai/devices/{deviceId}/runtime     # 中台读取设备运行态�
 `GET /api/map-versions` 对非管理员按「中台设备绑定人」过滤（`owner_user_id`），
 所以每个人只会看到自己设备采的图；支持 `deviceCode` / `unbound=true` / `ownerUserId` 过滤。
 
-## 地图同步：自动与手动
+## 地图同步：自动、手动与定时轮询
 
-同一张机器人地图只入库一次：业务库 `map_versions.source_ref` 保存机器人本体
-地图绝对路径，ingest 写库前按 `deviceCode + sourceRef` 判重（升级前入库的历史行
-没有 `device_code`，一并算已同步），重复请求直接返回 `{ skipped: true }`。
+业务库 `map_versions.source_ref` 保存机器人本体地图绝对路径，ingest 写库前按
+`deviceCode + sourceRef` 判重（升级前入库的历史行没有 `device_code`，一并算已同步）。
 **地图同步不要求设备绑定园区。**
 
-1. **自动触发**：建图收到 4001 保存结果 → 客户端从文件服务下载地图包 →
-   `POST /api/map-versions/ingest`（`sourceRef` = 4001 的 `map_path`）。
-2. **手动触发**：中台「设备管理」列表点「同步地图」→ 中台调用本服务内部接口
-   `POST /api/zentai/devices/{deviceId}/sync-maps`（共享服务令牌）→ 服务通过
-   设备 WebSocket 下发 `同步地图` 指令 → 客户端用 4012 拉地图列表，先查
-   `GET /api/map-versions/synced-sources?deviceId=...`，只下载尚未同步的地图。
+| 触发 | `mapInfo.mode` | 语义 |
+|------|----------------|------|
+| 建图 4001 自动回传 | `incremental` | 命中 `sourceRef` 就 `{ skipped: true }`，只新增 |
+| 设备空闲时定时轮询（客户端 `--map-sync-interval`，默认 600s） | `incremental` | 先查 `/synced-sources`，只补平台**没有**的地图，绝不覆盖 |
+| 中台「设备管理」点「同步地图」 | `refresh` | 全量比对：内容一致跳过，变了就**原地覆盖中台同一条 `dog_map`** |
 
-因此自动回传与手动同步交叉执行也不会重复上传/入库。
+三条路径都走 `POST /api/map-versions/ingest`；手动同步经内部接口
+`POST /api/zentai/devices/{deviceId}/sync-maps`（共享服务令牌）→ 设备 WebSocket
+下发 `同步地图` 指令 → 客户端 4012 拉列表后再回传。
+
+### `mode=refresh` 的细节
+
+- **不新建副本**：`mapInfo.id` 带中台 `dog_map.id`，中台按 id 覆盖地图包并重算
+  `map_hash` / 宽高，地图列表里不会出现同名多份；
+- **内容判据是包内文件指纹**，不是整包哈希：客户端现场重新打包时 zip 时间戳每次都不同，
+  用整包哈希会把「没变」误判成「变了」。指纹只看条目名 + 内容，重打包多少次都一样；
+- **不可变版本不覆盖**：中台状态为「已发布 / 部分标定 / 已归档」的地图会拒绝覆盖
+  （机器人回传的图默认是「部分标定」），同步报告里记为失败并带上中台原话，
+  需要先在中台派生新版本再同步；
+- **业务地图 id 不变**：刷新复用业务库原 `map_versions.id`，路线 / 任务通过
+  `map_version_id` 引用它不会断；
+- 中台那张图已被删（`is_deleted = 1`）时不传 `mapId`，按新建恢复，与增量路径一致。
+
+因此自动回传、定时轮询与手动同步交叉执行也不会重复上传/入库。
 
 判重不能只看业务库：中台才是地图主库。某张图在中台被删掉后，业务库里的历史行
 不能算「已同步」，否则设备端永远跳过、中台列表里也永远看不到这张图。所以：
@@ -368,11 +411,11 @@ WebSocket 下发**。请求有两条链路，执行逻辑完全一致：
 ```text
 ① 反向信道（推荐，内网部署 / 无入站端口）
    本服务 ──dial(出站)──▶ 中台 GET /api/dogDevice/control-plane/ws
-        ◀── request 帧（command / task / runtime / sync-maps）
+        ◀── request 帧（command / task / runtime / sync-maps / push-map）
         ──── result 帧（ok / error）────▶
 
 ② 直连 HTTP（同网部署）
-   中台 ──▶ POST /api/zentai/devices/{deviceId}/command（或 /tasks / runtime）
+   中台 ──▶ POST /api/zentai/devices/{deviceId}/command（或 /tasks / runtime / push-map）
 ```
 
 反向信道由「中台 WS 地址」+「共享服务令牌」两项开启，任一为空则不建立
@@ -513,17 +556,20 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | `file` | ✅ | 地图 `.zip`（须含 `model.pgm` + `model.yaml`），≤ 256MB |
-| `mapInfo` | ✅ | JSON 字符串：`{ mapName, parkId, deviceId, bind, mapType, remarks, source, sourceRef }`；`parkId` 可省略（设备未绑定园区时地图先入库为设备地图）；`deviceId` 用于确定地图归属用户、作为中台 `dog_map.device_code`，也是同步判重的主键 |
+| `mapInfo` | ✅ | JSON 字符串：`{ mapName, parkId, deviceId, bind, mapType, remarks, source, sourceRef, mode }`；`parkId` 可省略（设备未绑定园区时地图先入库为设备地图）；`deviceId` 用于确定地图归属用户、作为中台 `dog_map.device_code`，也是同步判重的主键；`mode` = `incremental`（默认，命中 `sourceRef` 跳过）/ `refresh`（内容有变化才原地覆盖中台同一条 `dog_map`） |
 
 响应：
 
 ```json
 { "code": 10200, "msg": "ok", "data": {
     "mapId": "ROS-MAP-3@v1.0", "mapName": "B区-20261110", "parkId": null,
-    "zentaiMapId": 12, "bound": false,
+    "zentaiMapId": 12, "bound": false, "mode": "incremental", "replaced": false,
     "stashPath": "data/map_ingest/B区-20261110_20261110153000.zip",
     "map": { } } }
 ```
+
+`mode=refresh` 且包内容与平台副本一致时返回 `{ "skipped": true,
+"reason": "地图包内容未变化，平台副本已是最新" }`，不会落盘也不会推中台。
 
 处理流程：
 
@@ -531,7 +577,7 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 1. 校验 zip 魔数 PK、大小；parkId 存在时校验园区存在（缺省则入库为设备地图）
 2. stash_package → data/map_ingest/ 留档（中台不可用时凭此路径重放）
 3. parse_local_meta → 本地解析 model.pgm 宽高 / model.yaml resolution+origin
-4. push_to_zentai → 共享令牌 POST /api/dogInternal/maps/upload（无令牌时退回账号登录 + /api/dogMap/upload）
+4. push_to_zentai → 共享令牌 POST /api/dogInternal/maps/upload（`mode=refresh` 时 mapInfo 带 `id`，中台原地覆盖；无令牌时退回账号登录 + /api/dogMap/upload）
    mapInfo 会带上上报设备 deviceCode、设备归属用户 ownerUserId 与（有则带）园区 parkCode / parkName
 5. 写 map_versions（ON CONFLICT(id) DO UPDATE；重传不会冲掉已有园区归属）
 6. bind=true 且设备已绑园区时切换园区当前基线
@@ -576,6 +622,90 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 
 后端在保存时重新计算 `point_count`、`distance_m`、`duration_s`、`battery_pct`，
 校验与发布接口直接读取该 JSON。
+
+## 企业微信告警推送
+
+设备故障 / 掉线 / 急停 / 控制权被抢，以及任务被判「异常」时，把消息推到企业微信群
+机器人。实现见 `server/src/notify.rs`，记录落 `notifications` 表。
+
+> **本节是使用手册。改这个功能之前先读
+> [`docs/wecom-alert-push.md`](docs/wecom-alert-push.md)** —— 那里有架构图、
+> 代码地图、去重/限流参数、触发点清单、扩展点（多群路由 / 恢复通知 / 中台代发）、
+> 踩坑记录与部署清单。
+
+### 配置
+
+webhook 在企业微信**客户端**里创建（官方没有建机器人的 API）：
+
+> 群聊 → 右上角「···」→ 添加群机器人 → 新建 → 复制 Webhook 地址
+
+拿到的地址形如 `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx`。
+**这个地址就是全部凭据**（没有签名校验，谁拿到谁能往群里发消息），所以：
+
+```bash
+# 只放环境变量，不要写进 server.toml（文件会进 git）
+export ROBODOG_WECOM_WEBHOOK='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx'
+export ROBODOG_PUBLIC_URL='http://39.107.55.13:3100'   # 可选：消息里的链接
+cargo run
+```
+
+配好后在控制台「系统设置 → 企业微信群机器人」点**发送测试消息**：消息同步发出，
+失败时页面直接显示企业微信的 `errcode`（如 `93000 invalid webhook url`）。
+不点按钮也可以先 `curl` 验证：
+
+```bash
+curl -sS "$ROBODOG_WECOM_WEBHOOK" -H 'Content-Type: application/json' \
+  -d '{"msgtype":"text","text":{"content":"测试"}}'
+```
+
+### 三个层级都得放行
+
+| 层 | 位置 | 作用 |
+| --- | --- | --- |
+| 部署 | `wecom.enabled` + `ROBODOG_WECOM_WEBHOOK` | 这套部署有没有企业微信通道 |
+| 运营 | 设置页 `alert_push` / `task_timeout_notice` | 站内提示总开关 |
+| 渠道 | 设置页 `wecom_alert_push` / `wecom_task_abnormal` | 这一类事件推不推企业微信 |
+
+三层都要为真才发。改设置页上的开关立即生效（每次入队都会读库），不用重启。
+
+### 会推什么
+
+| 触发 | 级别 |
+| --- | --- |
+| 设备上报 `error` / `fault` / `obstacle`（`handle_device_event`） | `error` → 严重；其余看 `severity` |
+| 心跳超时被看门狗置离线（`sweep_stale_devices`） | 警告 |
+| `1315 ctrl_source=3` 控制权被抢（`open_control_preempt_alert`） | 警告 |
+| AI 识别检出（`ai_patrol`） | 警告 |
+| 页面上手动新建告警 | 按填写的级别 |
+| 客户端上报任务 `异常` | 警告 |
+| 任务看门狗判异常（`sweep_stuck_tasks`） | 设备离线时**严重**，否则警告 |
+
+急停解除、控制权收回这类「状态反转」**不发**消息（避免刷屏），只在告警中心自动结案。
+
+### 企业微信的硬约束（代码已处理）
+
+| 约束 | 处理 |
+| --- | --- |
+| 20 条/分钟/机器人 | 本地令牌桶限流 18 条/分钟，多余的排队（不丢） |
+| markdown 正文 ≤ 4096 **字节**（中文 3 字节/字） | 按字节截断并补「…（已截断）」，不切半个汉字 |
+| markdown 不支持 @提及 | `mention_all` 时**另发一条 text** 带 `mentioned_list: ["@all"]` |
+| 只能发不能收 | 消息里带「查看详情」链接，处理动作仍在控制台 |
+| 同一件事会被反复"发现"（看门狗 15s 一轮、客户端 5s 一报） | 5 分钟去重窗口，键为 `alert_code` / `task_code` |
+| 外网 HTTP 可能超时 10s | 入队是同步的 `try_send`，**绝不在 WS handler / 看门狗里 await 外网** |
+| 队列积压 | 60s 汇总一条「另有 N 条未逐条推送」，不静默丢 |
+
+### 排查
+
+```sql
+-- 最近推送：失败行 last_error 带企业微信的 errcode + errmsg
+SELECT created_at, status, level, ref_type, ref_id, attempts, last_error
+  FROM notifications ORDER BY id DESC LIMIT 20;
+```
+
+控制台接口：`GET /api/notifications?limit=20&status=failed`、`POST /api/notifications/test`。
+
+常见错误码：`93000` key/地址无效（机器人被删或复制不全）、`45009` 超频、
+`40058` 内容超长（理论上已被截断兜住）、`connection refused / timeout` 服务器出不了公网。
 
 ## 配置项
 
@@ -623,6 +753,11 @@ service_token = "change-me"
 | `ROBODOG_SERVICE_TOKEN` | 空 | 与中台之间的共享服务令牌：调中台内部接口 `/api/dogInternal/*`、反向控制信道握手。需与中台 `APP_DOG__BUSINESS_API_TOKEN` 一致 |
 | `ROBODOG_ZENTAI_WS_URL` | 空 | 反向控制信道的中台地址，如 `ws://10.0.0.8:3000`。与 `ROBODOG_SERVICE_TOKEN` 同时具备才建立信道；为空时走「中台直连 HTTP」 |
 | `ROBODOG_SERVER_CONFIG` | 空 | 指定配置文件路径；不设置时读取当前目录的 `server.toml`（不存在则只用环境变量） |
+| `ROBODOG_WECOM_WEBHOOK` | 空 | 企业微信群机器人地址，见上文「企业微信告警推送」。**地址即凭据**，只放环境变量 |
+| `ROBODOG_WECOM_ENABLED` | `true` | 企业微信推送的部署级总开关 |
+| `ROBODOG_WECOM_MIN_LEVEL` | `警告` | 推送级别下限（`严重` / `警告` / `提示`） |
+| `ROBODOG_WECOM_MENTION_ALL` | `false` | 严重级别是否额外 @所有人（会占双倍限流额度） |
+| `ROBODOG_PUBLIC_URL` | 空 | 控制台对外地址，如 `http://39.107.55.13:3100`，用于告警消息里的「查看详情」链接 |
 
 ## 任务下发与本体对接
 

@@ -51,7 +51,8 @@ ssh root@39.107.55.13 'rm -rf /tmp/ra-deploy && mkdir /tmp/ra-deploy &&
 ```text
 /opt/hz/rust-admin/
 ├── zentai.env                     # APP_JWT_SECRET / APP_DOG__BUSINESS_API_TOKEN（600）
-├── robodog.env                    # ROBODOG_JWT_SECRET / ROBODOG_SERVICE_TOKEN（600）
+├── robodog.env                    # ROBODOG_JWT_SECRET / ROBODOG_SERVICE_TOKEN /
+│                                  # ROBODOG_WECOM_WEBHOOK（企业微信告警，600）
 ├── client.toml.example            # 机器狗客户端要用的配置片段
 ├── zentai/
 │   ├── x-rust                     # 中台二进制（静态）

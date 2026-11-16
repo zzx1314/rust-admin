@@ -143,7 +143,7 @@ export function useDogMap() {
     { label: "文件大小（字节）", prop: "fileSize", width: 150 },
     { label: "描述信息", prop: "remarks", minWidth: 180 },
     { label: "创建时间", prop: "createTime", width: 180 },
-    { label: "操作", fixed: "right", width: 180, slot: "operation" }
+    { label: "操作", fixed: "right", width: 230, slot: "operation" }
   ];
 
   const queryFields = computed<DogSearchField[]>(() => [

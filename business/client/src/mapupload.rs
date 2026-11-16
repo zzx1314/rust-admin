@@ -51,6 +51,12 @@ pub struct IngestConfig {
     pub map_name: Option<String>,
     /// 是否导入后顺手绑定为园区基线
     pub bind: bool,
+    /// 刷新模式：中台/控制台显式点「同步地图」时为 `true`。
+    ///
+    /// - `false`（默认）：`sourceRef` 已入库的图直接跳过，**只补平台没有的图**；
+    /// - `true`：不预检已同步列表，每张图都交给服务端判「内容变没变」，
+    ///   内容有变化则覆盖中台同一条 `dog_map`（已发布/部分标定的版本会被拒绝）。
+    pub refresh: bool,
 }
 
 /// 从本体拉取地图包。
@@ -420,6 +426,8 @@ pub async fn ingest_map(
         "parkId": cfg.park_id,
         "deviceId": cfg.device_id,
         "bind": cfg.bind,
+        // 服务端据这个字段决定「命中就跳过」还是「覆盖中台同一条记录」
+        "mode": if cfg.refresh { "refresh" } else { "incremental" },
         "mapType": "2D栅格",
         "remarks": format!(
             "机器人建图自动回传 · 本体路径 {} · {}",
@@ -505,26 +513,45 @@ pub async fn ingest_map(
     }
 }
 
-/// 手动同步结果（中台设备页触发）
+/// 地图同步结果（中台设备页手动触发 / 设备定时轮询共用）
 #[derive(Debug, Default, Clone)]
 pub struct SyncReport {
     pub total: usize,
+    /// 新增或已覆盖的图
     pub uploaded: usize,
     pub skipped: usize,
+    /// 刷新模式下「本体与平台内容一致」的张数（包含在 `skipped` 里）
+    pub unchanged: usize,
     pub failed: usize,
     pub errors: Vec<String>,
+    pub refresh: bool,
+    /// 预检就失败了（业务服务 / 中台不可达），一张图都没处理：
+    /// 定时轮询不为它刷事件，免得后台每次重试都在事件流里留一条红字。
+    pub aborted: bool,
 }
 
 impl SyncReport {
     pub fn summary(&self) -> String {
-        let mut summary = format!(
-            "地图同步完成：共 {} 张，新增 {}，跳过 {}，失败 {}",
-            self.total, self.uploaded, self.skipped, self.failed
-        );
+        let mut summary = if self.refresh {
+            format!(
+                "地图刷新完成：共 {} 张，新增/更新 {}，无需更新 {}，失败 {}",
+                self.total, self.uploaded, self.unchanged, self.failed
+            )
+        } else {
+            format!(
+                "地图同步完成：共 {} 张，新增 {}，跳过 {}，失败 {}",
+                self.total, self.uploaded, self.skipped, self.failed
+            )
+        };
         if !self.errors.is_empty() {
             summary.push_str(&format!("；失败原因：{}", self.errors.join("；")));
         }
         summary
+    }
+
+    /// 是否有实际动作（轮询时用它决定要不要往事件流里发消息，避免每 10 分钟刷一条）
+    pub fn has_changes(&self) -> bool {
+        self.uploaded > 0 || (self.failed > 0 && !self.aborted)
     }
 }
 
@@ -567,7 +594,13 @@ pub async fn synced_sources(
         .unwrap_or_default())
 }
 
-/// 手动同步：按 4012 返回的地图列表逐张检查，只下载并上传业务库中缺失的地图。
+/// 同步地图：按 4012 返回的地图列表逐张处理。
+///
+/// - 增量（`cfg.refresh == false`，设备定时轮询用）：只补业务库没有的图，
+///   先拉 `/synced-sources` 判重，已同步的直接跳过，**绝不覆盖已有记录**；
+/// - 刷新（`cfg.refresh == true`，中台/控制台点「同步地图」用）：不预检已同步列表，
+///   每张图都交给服务端比「内容指纹」——内容变了才覆盖中台同一条 `dog_map`，
+///   没变仍计入「未变化」而不浪费一次中台上传。
 ///
 /// 园区不是必需的：设备没绑定园区时地图先按「设备地图」入库（`parkId` 为空），
 /// 设备绑定人之后在控制台创建园区时再把自己的设备地图挑一张绑成基线。
@@ -579,14 +612,22 @@ pub async fn sync_robot_maps(
 ) -> SyncReport {
     let mut report = SyncReport {
         total: maps.len(),
+        refresh: cfg.refresh,
         ..Default::default()
     };
-    let synced = match synced_sources(http, cfg).await {
-        Ok(synced) => synced,
-        Err(error) => {
-            report.failed = maps.len();
-            report.errors.push(error);
-            return report;
+    // 刷新模式不预检：已同步列表只能告诉「平台有没有这张图」，
+    // 回答不了「本体上的图变没变」，还是要逐张比对内容指纹。
+    let synced = if cfg.refresh {
+        Vec::new()
+    } else {
+        match synced_sources(http, cfg).await {
+            Ok(synced) => synced,
+            Err(error) => {
+                report.failed = maps.len();
+                report.aborted = true;
+                report.errors.push(error);
+                return report;
+            }
         }
     };
 
@@ -607,7 +648,12 @@ pub async fn sync_robot_maps(
         let saved = MappingSaved {
             success: true,
             code: 0,
-            message: "中台手动同步".to_string(),
+            message: if cfg.refresh {
+                "中台手动同步（全量刷新）"
+            } else {
+                "中台手动同步"
+            }
+            .to_string(),
             map_path: Some(map.path.clone()),
             map_name: Some(map.map_id.clone()),
             raw: json!({ "source": "manual-sync" }),
@@ -620,7 +666,10 @@ pub async fn sync_robot_maps(
             UploadOutcome::Uploaded { .. } => report.uploaded += 1,
             UploadOutcome::Skipped(reason) => {
                 report.skipped += 1;
-                info!("地图 {} 服务端判定重复: {reason}", map.map_id);
+                info!("地图 {} 无需上传: {reason}", map.map_id);
+                if cfg.refresh {
+                    report.unchanged += 1;
+                }
             }
             UploadOutcome::Failed { reason } => {
                 report.failed += 1;
@@ -655,6 +704,278 @@ pub fn resolve_file_base(robot: &str, explicit: Option<&str>, port: u16) -> Stri
         .next()
         .unwrap_or(robot);
     format!("http://{host}:{port}")
+}
+
+/// 从业务平台下载最新地图包（`GET /api/map-versions/{id}/package`）。
+///
+/// 中台编辑地图后，业务平台会先把最新包刷新到自己的副本里，再由这里拉取。
+pub async fn download_map_package(
+    http: &reqwest::Client,
+    cfg: &IngestConfig,
+    map_id: &str,
+) -> Result<Vec<u8>, String> {
+    let token = login(http, cfg).await?;
+    let url = format!(
+        "{}/api/map-versions/{}/package",
+        cfg.api_base.trim_end_matches('/'),
+        map_id
+    );
+    let resp = http
+        .get(&url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .map_err(|error| format!("{url} 请求失败: {error}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("下载地图包失败 HTTP {status}: {}", text.trim()));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|error| format!("下载地图包失败: {error}"))?;
+    if !is_zip(&bytes) {
+        return Err(format!("下载到的地图包不是 zip（{} 字节）", bytes.len()));
+    }
+    Ok(bytes.to_vec())
+}
+
+/// 从地图包里取出本体需要的两个文件：`map.pgm` 与 `map.yaml`。
+///
+/// 中台/ROS 包常见是 `model.pgm` + `model.yaml`，本体只认 `map.pgm` + `map.yaml`，
+/// 因此这里重命名，并把 yaml 的 `image:` 改写成 `map.pgm`（否则载图会找不到栅格）。
+pub fn extract_robot_map_files(package: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
+    use std::io::Read;
+
+    let mut archive = zip::ZipArchive::new(Cursor::new(package))
+        .map_err(|error| format!("地图包解析失败: {error}"))?;
+    let mut pgm: Option<Vec<u8>> = None;
+    let mut yaml: Option<String> = None;
+    for index in 0..archive.len() {
+        let Ok(mut entry) = archive.by_index(index) else {
+            continue;
+        };
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().to_ascii_lowercase();
+        if pgm.is_none() && name.ends_with(".pgm") {
+            let mut data = Vec::new();
+            entry
+                .read_to_end(&mut data)
+                .map_err(|error| format!("读取地图包内 PGM 失败: {error}"))?;
+            pgm = Some(data);
+        } else if yaml.is_none() && (name.ends_with(".yaml") || name.ends_with(".yml")) {
+            let mut text = String::new();
+            if entry.read_to_string(&mut text).is_ok() {
+                yaml = Some(text);
+            }
+        }
+    }
+
+    let pgm = pgm.ok_or_else(|| "地图包内没有 .pgm，无法写回本体".to_string())?;
+    let yaml = yaml.ok_or_else(|| "地图包内没有 .yaml，无法写回本体".to_string())?;
+    let files = vec![
+        ("map.pgm".to_string(), pgm),
+        (
+            "map.yaml".to_string(),
+            rewrite_yaml_image(&yaml).into_bytes(),
+        ),
+    ];
+    Ok(files)
+}
+
+/// 把 ROS yaml 的 `image:` 指到本体的 `map.pgm`（其余字段原样保留）。
+fn rewrite_yaml_image(yaml: &str) -> String {
+    let mut out = String::new();
+    let mut found = false;
+    for line in yaml.lines() {
+        if line.trim_start().starts_with("image:") {
+            out.push_str("image: map.pgm");
+            found = true;
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    if !found {
+        out = format!("image: map.pgm\n{out}");
+    }
+    out
+}
+
+/// 本体地图目录名合法性：只允许单段目录名，避免写到 `history_map` 之外。
+fn sanitize_map_dir(map_dir: &str) -> Result<String, String> {
+    let dir = map_dir
+        .trim()
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .trim();
+    if dir.is_empty() || dir == "." || dir == ".." || dir.contains('\0') {
+        return Err(format!("本体地图目录名无效：{map_dir}"));
+    }
+    if dir.contains('\\') || dir.contains("..") {
+        return Err(format!("本体地图目录名不安全：{map_dir}"));
+    }
+    Ok(dir.to_string())
+}
+
+fn files_url(base: &str, rel: &str) -> String {
+    format!(
+        "{}/files/{}",
+        base.trim_end_matches('/'),
+        rel.trim_start_matches('/')
+    )
+}
+
+/// 读本体文件服务上的单个文件；不存在/失败返回 None。
+async fn get_robot_file(http: &reqwest::Client, base: &str, rel: &str) -> Option<Vec<u8>> {
+    let resp = http.get(files_url(base, rel)).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.bytes().await.ok().map(|bytes| bytes.to_vec())
+}
+
+/// 写本体文件服务并按读回内容校验。
+///
+/// 现场固件的上传接口没有正式文档，这里按「多形状探测 + 读回校验」处理：
+/// 任一形状写成功后，都会用 `GET /files/<rel>` 读回比对，只有内容一致才算成功；
+/// 不一致继续换下一种形状。返回的 `Err` 里带每种形状的失败原因，便于现场排障。
+async fn upload_robot_file(
+    http: &reqwest::Client,
+    base: &str,
+    rel: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let rel = rel.trim_start_matches('/');
+    let file_name = rel.rsplit('/').next().unwrap_or("map.pgm");
+    let dir = rel.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+    let url_files = files_url(base, rel);
+    let url_upload = format!("{}/upload", base.trim_end_matches('/'));
+    let mut errors: Vec<String> = Vec::new();
+
+    // ① 文档约定的 POST /upload（multipart）：字段名现场固件未公开，多带几个别名
+    let mut form = reqwest::multipart::Form::new()
+        .text("path", rel.to_string())
+        .text("dir", format!("/{dir}"))
+        .text("name", file_name.to_string())
+        .text("filename", file_name.to_string());
+    if let Ok(part) = reqwest::multipart::Part::bytes(bytes.to_vec())
+        .file_name(file_name.to_string())
+        .mime_str("application/octet-stream")
+    {
+        form = form.part("file", part);
+    }
+    match http.post(&url_upload).multipart(form).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            if status.is_success()
+                && get_robot_file(http, base, rel).await.as_deref() == Some(bytes)
+            {
+                info!("地图文件已写入本体（POST /upload）: {rel}");
+                return Ok(());
+            }
+            errors.push(format!("POST /upload → HTTP {status} {}", text.trim()));
+        }
+        Err(error) => errors.push(format!("POST /upload 请求失败: {error}")),
+    }
+
+    // ② PUT /files/<rel>（静态文件服务常见写法）
+    match http
+        .put(&url_files)
+        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+        .body(bytes.to_vec())
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = resp.status();
+            let _ = resp.text().await;
+            if status.is_success()
+                && get_robot_file(http, base, rel).await.as_deref() == Some(bytes)
+            {
+                info!("地图文件已写入本体（PUT /files）: {rel}");
+                return Ok(());
+            }
+            errors.push(format!("PUT /files → HTTP {status}"));
+        }
+        Err(error) => errors.push(format!("PUT /files 请求失败: {error}")),
+    }
+
+    // ③ POST /files/<rel>（部分实现只开放 POST）
+    match http.post(&url_files).body(bytes.to_vec()).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let _ = resp.text().await;
+            if status.is_success()
+                && get_robot_file(http, base, rel).await.as_deref() == Some(bytes)
+            {
+                info!("地图文件已写入本体（POST /files）: {rel}");
+                return Ok(());
+            }
+            errors.push(format!("POST /files → HTTP {status}"));
+        }
+        Err(error) => errors.push(format!("POST /files 请求失败: {error}")),
+    }
+
+    Err(format!(
+        "写本体文件 {rel} 失败（已尝试 3 种上传形状：{}）",
+        errors.join("；")
+    ))
+}
+
+/// 把地图包里的 PGM / YAML 写回本体地图目录，并读回校验。
+///
+/// 只覆盖 `map.pgm` + `map.yaml`：`map.pcd` / `map.geojson` / `nav_paths` 这些
+/// 定位与路网数据与栅格噪点无关，保持原样，避免破坏已有路线。
+pub async fn push_map_to_robot(
+    http: &reqwest::Client,
+    file_base: &str,
+    map_dir: &str,
+    package: &[u8],
+) -> Result<String, String> {
+    let dir = sanitize_map_dir(map_dir)?;
+    // 目录必须已经存在于本体：宁可报错，也不能凭猜测往 history_map 里造目录
+    let api_path = format!("/map/history_map/{dir}");
+    list_dir(http, file_base, &api_path)
+        .await
+        .map_err(|error| format!("本体上没有地图目录 {dir}（{error}），无法写回"))?;
+
+    let files = extract_robot_map_files(package)?;
+    let mut written: Vec<String> = Vec::new();
+    let mut originals: Vec<(String, Option<Vec<u8>>)> = Vec::new();
+    for (name, bytes) in &files {
+        let rel = format!("map/history_map/{dir}/{name}");
+        let original = get_robot_file(http, file_base, &rel).await;
+        originals.push((rel.clone(), original.clone()));
+        if original.as_deref() == Some(bytes.as_slice()) {
+            info!("本体地图文件已是最新，跳过: {rel}");
+            continue;
+        }
+        if let Err(error) = upload_robot_file(http, file_base, &rel, bytes).await {
+            // 回滚已经写过的文件，避免本体上 PGM / YAML 版本不一致
+            for (rel, original) in originals.iter().rev() {
+                if let Some(original) = original
+                    && let Err(rollback) = upload_robot_file(http, file_base, rel, original).await
+                {
+                    warn!("回滚 {rel} 失败: {rollback}");
+                }
+            }
+            return Err(error);
+        }
+        written.push(format!("{name}({} 字节)", bytes.len()));
+    }
+
+    if written.is_empty() {
+        Ok(format!("本体地图 {dir} 已是最新，无需写入"))
+    } else {
+        Ok(format!("本体地图 {dir} 已更新：{}", written.join("、")))
+    }
 }
 
 #[cfg(test)]
@@ -705,5 +1026,63 @@ mod tests {
             resolve_file_base("192.168.1.9:10010", None, 9000),
             "http://192.168.1.9:9000"
         );
+    }
+
+    /// ROS 包里的 model.* 必须重命名成本体认的 map.*，且 yaml 的 image 跟着改
+    #[test]
+    fn extract_renames_ros_files_to_body_names() {
+        use std::io::Write;
+
+        let mut buffer = Cursor::new(Vec::new());
+        {
+            let mut writer = ZipWriter::new(&mut buffer);
+            let options =
+                SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+            writer.start_file("model.pgm", options).unwrap();
+            writer.write_all(b"P5\n2 2\n255\n\x00\xfe\xfe\xfe").unwrap();
+            writer.start_file("model.yaml", options).unwrap();
+            writer
+                .write_all(b"image: model.pgm\nresolution: 0.05\nnegate: 0\n")
+                .unwrap();
+            writer.finish().unwrap();
+        }
+
+        let files = extract_robot_map_files(&buffer.into_inner()).expect("package must parse");
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].0, "map.pgm");
+        assert_eq!(files[1].0, "map.yaml");
+        let yaml = String::from_utf8(files[1].1.clone()).unwrap();
+        assert!(yaml.contains("image: map.pgm"));
+        assert!(!yaml.contains("model.pgm"));
+        // 其余字段原样保留
+        assert!(yaml.contains("resolution: 0.05"));
+    }
+
+    #[test]
+    fn rejects_package_without_pgm() {
+        use std::io::Write;
+
+        let mut buffer = Cursor::new(Vec::new());
+        {
+            let mut writer = ZipWriter::new(&mut buffer);
+            let options = SimpleFileOptions::default();
+            writer.start_file("model.yaml", options).unwrap();
+            writer.write_all(b"image: model.pgm\n").unwrap();
+            writer.finish().unwrap();
+        }
+        assert!(extract_robot_map_files(&buffer.into_inner()).is_err());
+    }
+
+    #[test]
+    fn sanitizes_map_dir_to_single_segment() {
+        assert_eq!(
+            sanitize_map_dir("/ota/alg_data/map/history_map/2026_11_10_16_15_06/").unwrap(),
+            "2026_11_10_16_15_06"
+        );
+        assert!(sanitize_map_dir("").is_err());
+        assert!(sanitize_map_dir("..").is_err());
+        assert!(sanitize_map_dir("../..").is_err());
+        // 多层路径只取最后一段，不能借此写穿 history_map
+        assert_eq!(sanitize_map_dir("a/../b").unwrap(), "b");
     }
 }

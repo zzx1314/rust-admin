@@ -76,6 +76,11 @@ async fn test_state_with_token(service_token: Option<&str>) -> (AppState, TempDb
         backpack_base_url: None,
         backpack_webrtc_url: None,
         backpack_browser_url: None,
+        public_url: None,
+        wecom_enabled: false,
+        wecom_webhook: None,
+        wecom_min_level: "警告".to_string(),
+        wecom_mention_all: false,
     });
 
     let pool = db::connect(&config).await.expect("连接测试库失败");
@@ -84,6 +89,7 @@ async fn test_state_with_token(service_token: Option<&str>) -> (AppState, TempDb
 
     let state = AppState {
         db: pool,
+        notifier: robodog_ops_server::notify::Notifier::disabled(),
         config,
         device_connections: gateway::new_device_connections(),
         video_hub: Default::default(),
@@ -1394,6 +1400,7 @@ mod control_plane_channel {
             config: Arc::new(config),
             device_connections: state.device_connections,
             video_hub: state.video_hub,
+            notifier: robodog_ops_server::notify::Notifier::disabled(),
         };
         (state, db_dir)
     }
@@ -1483,7 +1490,7 @@ mod zentai_service_token {
     use axum::http::HeaderMap;
     use axum::routing::{get, post};
     use robodog_ops_server::config::Config;
-    use robodog_ops_server::ingest::{self, IngestRequest, ParkRef};
+    use robodog_ops_server::ingest::{self, IngestMode, IngestRequest, ParkRef};
     use robodog_ops_server::zentai::{self, DeviceUpsert};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1510,6 +1517,11 @@ mod zentai_service_token {
         backpack_base_url: None,
         backpack_webrtc_url: None,
         backpack_browser_url: None,
+        public_url: None,
+        wecom_enabled: false,
+        wecom_webhook: None,
+        wecom_min_level: "警告".to_string(),
+        wecom_mention_all: false,
         }
     }
 
@@ -1659,6 +1671,7 @@ mod zentai_service_token {
         let http = reqwest::Client::new();
         let request = IngestRequest {
             map_name: "A 区机器人建图".to_string(),
+            mode: IngestMode::Incremental,
             park_id: Some(1),
             device_id: Some("RD-001".to_string()),
             bind: false,
@@ -1679,6 +1692,7 @@ mod zentai_service_token {
             "map.zip",
             b"PK\x03\x04",
             Some(7),
+            None,
         )
         .await
         .expect("地图应可回传");
@@ -2389,4 +2403,238 @@ async fn body_reconnect_requires_online_client() {
         "本体重连应在白名单内: {msg}"
     );
     assert!(msg.contains("未连接"), "拒绝原因应说明客户端未连接: {msg}");
+}
+
+// ─── 建图回传：增量 vs 刷新 ─────────────────────────────────────────
+
+/// 造一个最小的机器人地图包（`model.pgm` + `model.yaml`）。
+fn robot_map_zip(pgm: &[u8], mtime: (u16, u8, u8, u8, u8, u8)) -> Vec<u8> {
+    use std::io::Write;
+
+    let (year, month, day, hour, minute, second) = mtime;
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    let mut writer = zip::ZipWriter::new(&mut buffer);
+    let options = zip::write::SimpleFileOptions::default()
+        .last_modified_time(zip::DateTime::from_date_and_time(year, month, day, hour, minute, second).unwrap());
+    writer.start_file("model.yaml", options).unwrap();
+    writer
+        .write_all(b"image: model.pgm\nresolution: 0.05\norigin: [-1.0, -2.0, 0.0]\nnegate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.196\n")
+        .unwrap();
+    writer.start_file("model.pgm", options).unwrap();
+    writer.write_all(pgm).unwrap();
+    writer.finish().unwrap();
+    buffer.into_inner()
+}
+
+/// 构造 multipart 请求体（`file` + `mapInfo`）。
+fn multipart_map_body(boundary: &str, package: &[u8], info: &Value) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"mapInfo\"\r\n\r\n{}\r\n",
+            info
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"map.zip\"\r\nContent-Type: application/zip\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(package);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    body
+}
+
+async fn post_ingest(app: &axum::Router, token: &str, package: &[u8], info: Value) -> Value {
+    const BOUNDARY: &str = "robodog-test-boundary";
+    let body = multipart_map_body(BOUNDARY, package, &info);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/map-versions/ingest")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={BOUNDARY}"),
+                )
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json_body(response).await;
+    assert!(
+        status.is_success(),
+        "回传接口应成功（{status}）：{body}"
+    );
+    body
+}
+
+/// `mode=incremental` 命中 `sourceRef` 就跳过，`mode=refresh` 内容有变化才覆盖。
+#[tokio::test]
+async fn ingest_refresh_overwrites_existing_map_only_when_content_changes() {
+    use axum::extract::Multipart;
+    use axum::http::HeaderMap;
+    use axum::routing::{get, post};
+    use robodog_ops_server::ingest::sha256_hex;
+    use std::sync::Mutex as StdMutex;
+
+    const TOKEN: &str = "test-service-token";
+    const SOURCE_REF: &str = "/ota/alg_data/map/history_map/map_20261110_2312";
+    const ZENTAI_ID: i64 = 42;
+
+    // 中台假实现：记录收到的 mapInfo，回 fixed id
+    let uploads: Arc<StdMutex<Vec<Value>>> = Arc::new(StdMutex::new(Vec::new()));
+    let recorded = uploads.clone();
+    let zentai = axum::Router::new()
+        .route(
+            "/api/dogInternal/maps/exists",
+            post(|headers: HeaderMap, _body: axum::Json<Value>| async move {
+                assert_eq!(
+                    headers.get("x-service-token").and_then(|v| v.to_str().ok()),
+                    Some(TOKEN)
+                );
+                axum::Json(serde_json::json!({
+                    "code": 10200,
+                    "msg": "success",
+                    "data": {"existing": [ZENTAI_ID]},
+                }))
+            }),
+        )
+        .route(
+            "/api/dogInternal/devices/assignments",
+            get(|_headers: HeaderMap| async move {
+                axum::Json(serde_json::json!({
+                    "code": 10200,
+                    "msg": "success",
+                    "data": [],
+                }))
+            }),
+        )
+        .route(
+            "/api/dogInternal/maps/upload",
+            post(move |headers: HeaderMap, mut multipart: Multipart| {
+                let recorded = recorded.clone();
+                async move {
+                    assert_eq!(
+                        headers.get("x-service-token").and_then(|v| v.to_str().ok()),
+                        Some(TOKEN)
+                    );
+                    let mut map_name = String::new();
+                    while let Some(field) = multipart.next_field().await.unwrap() {
+                        match field.name() {
+                            Some("file") => {
+                                let _ = field.bytes().await.unwrap();
+                            }
+                            Some("mapInfo") => {
+                                let text = field.text().await.unwrap();
+                                let info: Value = serde_json::from_str(&text).unwrap();
+                                map_name = info["mapName"].as_str().unwrap_or_default().to_string();
+                                recorded.lock().unwrap().push(info);
+                            }
+                            _ => {}
+                        }
+                    }
+                    axum::Json(serde_json::json!({
+                        "code": 10200,
+                        "msg": "success",
+                        "data": {"id": ZENTAI_ID, "mapName": map_name, "fileName": "map.zip"},
+                    }))
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake zentai");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, zentai).await;
+    });
+
+    let (state, db_dir) = test_state_with_token(Some(TOKEN)).await;
+    let mut config = (*state.config).clone();
+    config.zentai_base_url = Some(format!("http://{addr}"));
+    let state = AppState {
+        db: state.db,
+        notifier: robodog_ops_server::notify::Notifier::disabled(),
+        config: Arc::new(config),
+        device_connections: state.device_connections,
+        video_hub: Default::default(),
+    };
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+
+    // 业务库里已经有一行：设备回传过的同一张图 + 本地包副本
+    let original = robot_map_zip(b"P5\n4 4\n255\n\x01\x02\x03\x04", (2026, 11, 10, 23, 12, 0));
+    let stored = db_dir.dir.join("stored-map.zip");
+    std::fs::write(&stored, &original).expect("写入本地副本失败");
+    sqlx::query(
+        "INSERT INTO map_versions (id, park_id, device_code, map_name, version, status,
+            file_name, file_path, file_size, source, source_id, source_ref, created_at)
+         VALUES (?1, NULL, 'RD-001', '地图A', 'v1.0', '部分标定', 'map.zip', ?2, ?3,
+            'robot-mapping', ?4, ?5, '2026-11-10 23:12:00')",
+    )
+    .bind("ROS-MAP-42@v1.0")
+    .bind(stored.display().to_string())
+    .bind(original.len() as i64)
+    .bind(ZENTAI_ID.to_string())
+    .bind(SOURCE_REF)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let info = |mode: &str| {
+        serde_json::json!({
+            "mapName": "地图A",
+            "deviceId": "RD-001",
+            "sourceRef": SOURCE_REF,
+            "mode": mode,
+        })
+    };
+
+    // 1) 增量模式：命中 sourceRef 直接跳过，不碰中台
+    let body = post_ingest(&app, &token, &original, info("incremental")).await;
+    assert_eq!(body["data"]["skipped"], true, "增量模式应跳过: {body}");
+    assert!(uploads.lock().unwrap().is_empty(), "增量模式不应上传中台");
+
+    // 2) 刷新模式 + 完全相同的内容（只是重新打包的时间戳不同）：跳过
+    let repacked = robot_map_zip(b"P5\n4 4\n255\n\x01\x02\x03\x04", (2027, 1, 2, 3, 4, 5));
+    assert_ne!(repacked, original, "时间戳不同，整包字节必然不同");
+    let body = post_ingest(&app, &token, &repacked, info("refresh")).await;
+    assert_eq!(body["data"]["skipped"], true, "内容未变化应跳过: {body}");
+    assert!(
+        body["data"]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("内容未变化"),
+        "跳过原因应说明内容未变化: {body}"
+    );
+    assert!(uploads.lock().unwrap().is_empty(), "内容未变化不应上传中台");
+
+    // 3) 刷新模式 + 改过栅格：覆盖中台同一条记录，业务行沿用原 id
+    let changed = robot_map_zip(b"P5\n4 4\n255\n\x09\x08\x07\x06", (2027, 1, 2, 3, 4, 5));
+    let body = post_ingest(&app, &token, &changed, info("refresh")).await;
+    assert_eq!(body["data"]["skipped"], false, "内容变化应刷新: {body}");
+    assert_eq!(
+        body["data"]["mapId"].as_str(),
+        Some("ROS-MAP-42@v1.0"),
+        "刷新应沿用业务地图 id（路线/任务引用它）: {body}"
+    );
+    assert_eq!(body["data"]["replaced"], true, "应标记为原地覆盖");
+    let sent = uploads.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "变化后应上传一次中台: {sent:?}");
+    assert_eq!(
+        sent[0]["id"].as_i64(),
+        Some(ZENTAI_ID),
+        "刷新必须带中台 id 原地覆盖，不能新建副本: {:?}",
+        sent[0]
+    );
+
+    // 本地副本与业务行都被刷新成新内容
+    let refreshed =
+        std::fs::read(body["data"]["stashPath"].as_str().unwrap()).expect("读取暂存包");
+    assert_eq!(sha256_hex(&refreshed), sha256_hex(&changed));
 }

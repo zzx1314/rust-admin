@@ -35,7 +35,7 @@ const API_TIMEOUT: Duration = Duration::from_secs(4);
 /// 自己的同源路径，平台不再包一层，所以这里只需要知道 path 形态即可。
 const AI_KEYS: [&str; 5] = ["dogcam", "cam0", "cam1", "cam2", "cam3"];
 
-fn api_client() -> Result<reqwest::Client, AppError> {
+pub(crate) fn api_client() -> Result<reqwest::Client, AppError> {
     reqwest::Client::builder()
         .timeout(API_TIMEOUT)
         .build()
@@ -51,7 +51,7 @@ fn action_client() -> Result<reqwest::Client, AppError> {
         .map_err(|error| AppError::Internal(format!("构建 HTTP 客户端失败: {error}")))
 }
 
-fn stream_client() -> Result<reqwest::Client, AppError> {
+pub(crate) fn stream_client() -> Result<reqwest::Client, AppError> {
     // SSE 是长连接：**不能设总超时**，只限制建连时间，否则 4s 后事件流被切断，
     // 页面看起来像「识别框不刷新」。
     reqwest::Client::builder()
@@ -61,7 +61,7 @@ fn stream_client() -> Result<reqwest::Client, AppError> {
 }
 
 /// 未配置时的统一提示：说清配哪里，而不是抛 500。
-fn agent_base(config: &Config) -> Result<&str, AppError> {
+pub(crate) fn agent_base(config: &Config) -> Result<&str, AppError> {
     config.backpack_base_url.as_deref().ok_or_else(|| {
         AppError::Upstream(
             "本部署未接入数据采集背包：请设置 ROBODOG_BACKPACK_URL（板端 Agent 地址，如 \
@@ -71,7 +71,7 @@ fn agent_base(config: &Config) -> Result<&str, AppError> {
     })
 }
 
-async fn fetch_json(client: &reqwest::Client, url: &str) -> Result<Value, String> {
+pub(crate) async fn fetch_json(client: &reqwest::Client, url: &str) -> Result<Value, String> {
     let response = client
         .get(url)
         .send()
@@ -315,6 +315,17 @@ pub async fn status(
             .cloned()
             .unwrap_or(Value::Null),
     })))
+}
+
+/// `GET /api/backpack/ai-window` —— 巡检到点自动打开的识别窗口
+///
+/// 排查「航点配了 AI 识别但没出告警」时先看这里：窗口有没有开、配到了哪个场景、
+/// 阈值多少、窗口内上报了哪几类目标。逻辑见 [`crate::ai_patrol`]。
+pub async fn ai_window(
+    State(_state): State<AppState>,
+    Extension(_claims): Extension<Claims>,
+) -> Json<ApiResponse<Value>> {
+    ApiResponse::ok(crate::ai_patrol::global().status().await)
 }
 
 /// `GET /api/backpack/events` —— Agent SSE 原样透传

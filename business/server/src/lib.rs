@@ -8,6 +8,7 @@
 //!
 //! 目前 `tests/api_smoke.rs` 覆盖健康检查、鉴权与驾驶舱接口的冒烟路径。
 
+pub mod ai_patrol;
 pub mod app;
 pub mod auth;
 pub mod backpack;
@@ -24,6 +25,7 @@ pub mod handlers;
 pub mod ingest;
 pub mod mapdir;
 pub mod models;
+pub mod notify;
 pub mod seed;
 pub mod video;
 pub mod zentai;

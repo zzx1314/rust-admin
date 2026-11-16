@@ -207,6 +207,12 @@ async fn handle_request(state: &AppState, payload: &Value) -> Result<Value, AppE
                 .map_err(|error| AppError::BadRequest(format!("指令载荷无效: {error}")))?;
             service::apply_command(state, &meta, device_code, &body).await
         }
+        "push-map" => {
+            let body: crate::handlers::maps::PushMapRequest =
+                serde_json::from_value(payload["body"].clone())
+                    .map_err(|error| AppError::BadRequest(format!("地图下发载荷无效: {error}")))?;
+            crate::handlers::maps::apply_push_map(state, device_code, &body).await
+        }
         other => Err(AppError::BadRequest(format!("不支持的控制类型: {other}"))),
     }
 }

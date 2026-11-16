@@ -74,6 +74,9 @@ park_id = 3
 ingest_name = ""
 # 只执行一次建图后退出（等价 --map-only）
 once = false
+# 地图定时增量同步间隔（秒）：只补平台没有的图，不覆盖已有记录；0 = 关闭
+# （等价 --map-sync-interval / --no-map-sync；upload = false 时强制为 0）
+sync_interval_secs = 600
 
 [simulation]
 # 未接本体（或本体指标缺失）时的模拟值

@@ -68,6 +68,10 @@ pub struct CreateMapRequest {
 #[serde(rename_all = "camelCase")]
 pub struct UploadMapRequest {
     /// When present the existing map record is updated with the new package.
+    ///
+    /// 业务平台「同步地图」刷新时带上中台 `dog_map.id`（两种写法都认），
+    /// 让本体上变了的图**原地覆盖**同一条记录，而不是在地图列表里多出一份副本。
+    #[serde(alias = "mapId")]
     pub id: Option<i64>,
     pub map_name: String,
     pub map_type: Option<String>,
@@ -122,6 +126,18 @@ pub struct UpdateMapRequest {
     pub map_hash: Option<String>,
     pub map_width: Option<i32>,
     pub map_height: Option<i32>,
+}
+
+/// 把编辑后的地图下发到狗体（本体）的请求。
+///
+/// 中台只负责控制面：真正取包、写本体文件服务、重新载图由业务平台的设备客户端完成。
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PushMapRequest {
+    /// 目标设备编号（业务平台 `devices.device_id`）；缺省用地图上的 `deviceCode`
+    pub device_code: Option<String>,
+    /// 幂等键：重试时原样回传，避免重复下发
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -181,6 +197,34 @@ pub struct MapVO {
 /// 地图包与参考实现保持一致：`.zip` 内为 ROS map_server 格式的
 /// `model.pgm` + `model.yaml`。这里把 `pgm` 转成 `png` 并返回 base64，
 /// 同时带回 `resolution` / `origin`，前端据此做像素↔世界坐标换算。
+/// 地图擦除（橡皮擦）请求。
+///
+/// 前端在预览画布上按栅格像素坐标记录笔画，提交后由服务端把 `model.pgm`
+/// 里对应区域改写为 `eraseValue`（默认 254 = 自由空间，用来擦掉孤立噪点）。
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MapEditRequest {
+    pub strokes: Vec<MapEditStroke>,
+    /// 擦除后写入的灰度值：`254` = 可通行（默认）、`205` = 未知。
+    pub erase_value: Option<u8>,
+}
+
+/// 一笔连续擦除（画笔半径单位：栅格像素）。
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MapEditStroke {
+    pub points: Vec<MapEditPoint>,
+    pub radius: Option<f64>,
+}
+
+/// 栅格像素坐标（左上角为原点，`x` 向右、`y` 向下）。
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub struct MapEditPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MapImageVO {
@@ -190,6 +234,12 @@ pub struct MapImageVO {
     pub origin: Vec<f64>,
     pub width: u32,
     pub height: u32,
+    /// 编辑接口返回：改写后的地图包 SHA-256（只读接口不返回）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub map_hash: Option<String>,
+    /// 编辑接口返回：本次实际改写的像素数。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub erased_pixels: Option<usize>,
 }
 
 impl From<DogMap> for MapVO {

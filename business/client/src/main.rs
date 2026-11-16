@@ -282,14 +282,11 @@ impl RobotState {
             return Some("尚未收到本体 1315 状态（设备初始化中），请稍后重试".to_string());
         }
         if !self.body_status_fresh() {
-            return Some(
-                "本体 1315 状态超过 30s 未更新（本体离线或算法节点未启动）".to_string(),
-            );
+            return Some("本体 1315 状态超过 30s 未更新（本体离线或算法节点未启动）".to_string());
         }
         if self.sdk_node_available == Some(false) {
             return Some(
-                "本体 SDK 节点未就绪（sdk_node=false），请等待初始化或重启本体算法节点"
-                    .to_string(),
+                "本体 SDK 节点未就绪（sdk_node=false），请等待初始化或重启本体算法节点".to_string(),
             );
         }
         if self.estop_software == Some(true) {
@@ -1073,6 +1070,17 @@ async fn run_client(
     let mut teleop_timer = interval(Duration::from_millis(250));
     event_timer.tick().await;
 
+    // 地图定时增量同步：只补平台没有的图，不覆盖已有记录。
+    // 0 = 关闭（也可用 --no-map-sync 显式关）。
+    let mut map_sync_timer = (config.map_sync_interval_secs > 0)
+        .then(|| interval(Duration::from_secs(config.map_sync_interval_secs)));
+    if let Some(timer) = map_sync_timer.as_mut() {
+        // interval 的第一次 tick 立即就绪：先吃掉，让第一次同步在间隔之后
+        timer.tick().await;
+    }
+    // 同一时间只跑一次：同步要拉几十兆地图包，并发会把本体文件服务压死
+    let map_sync_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     let local_runner: Shared<Option<Arc<RouteRunner>>> = Arc::new(Mutex::new(None));
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
@@ -1267,6 +1275,61 @@ async fn run_client(
                 }
             }
 
+            // 地图定时增量同步：只在完全空闲时跑（无任务 / 无建图 / 非重连中 /
+            // 本体状态新鲜），并且抛到后台任务 —— 下载整包动辄几十秒，
+            // 卡在主循环里会让心跳与 1315 处理停摆，反而把设备刷成离线。
+            _ = async {
+                match map_sync_timer.as_mut() {
+                    Some(timer) => {
+                        timer.tick().await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                if relinking {
+                    debug!("本体重连中，跳过本轮地图增量同步");
+                    continue;
+                }
+                let Some(client) = body.client.clone() else {
+                    continue;
+                };
+                if active.lock().await.is_some() || local_mapping.lock().await.is_some() {
+                    debug!("设备正在执行任务/建图，跳过本轮地图增量同步");
+                    continue;
+                }
+                if !state.lock().await.body_status_fresh() {
+                    debug!("本体状态不新鲜，跳过本轮地图增量同步");
+                    continue;
+                }
+                let running = map_sync_running.clone();
+                if running.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    debug!("上一轮地图同步还没结束，跳过本轮");
+                    continue;
+                }
+                // 本轮结束（含 panic）一定复位，否则一次意外就永久停掉轮询
+                let guard = MapSyncRunning(running.clone());
+                let cfg = body_ctx.config.clone();
+                let out = out_tx.clone();
+                tokio::spawn(async move {
+                    let _guard = guard;
+                    let result = sync_maps_from_robot(
+                        &cfg,
+                        &client,
+                        &out,
+                        None,
+                        // 轮询永远只补缺，绝不覆盖平台已有地图
+                        false,
+                        // 没变化就不发事件，有新增/失败才发
+                        false,
+                    )
+                    .await;
+                    match result {
+                        Ok(summary) => info!("定时地图同步结束: {summary}"),
+                        Err(error) => warn!("定时地图同步有失败项: {error}"),
+                    }
+                });
+            }
+
             _ = event_timer.tick() => {
                 let guard = state.lock().await;
                 if guard.body_status_fresh() && rand::thread_rng().gen_bool(0.3) {
@@ -1313,6 +1376,15 @@ fn progress_pct(done: usize, total: usize) -> i64 {
         return 0;
     }
     ((done * 100) / total) as i64
+}
+
+/// 地图同步运行标记的释放器：任务结束或 panic 时都会把「正在同步」复位。
+struct MapSyncRunning(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for MapSyncRunning {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// 本体故障 / 诊断 / 充电结果都是**周期性推送**（实测 4021 每 5s 一条、1317 每秒一条），
@@ -1927,10 +1999,7 @@ fn parse_initial_pose(value: Option<&Value>) -> Option<Pose> {
     let pose = value?;
     let x = pose.get("x").and_then(Value::as_f64)?;
     let y = pose.get("y").and_then(Value::as_f64)?;
-    let heading = pose
-        .get("heading")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0);
+    let heading = pose.get("heading").and_then(Value::as_f64).unwrap_or(0.0);
     Some(Pose::new(x, y, heading.to_radians()))
 }
 
@@ -2501,10 +2570,7 @@ async fn handle_server_message(
                     let battery_percent = state.lock().await.battery_min;
                     runner.set_battery_percent(battery_percent).await;
                     runner
-                        .set_patrol_options(
-                            &config.patrol_path_prefix,
-                            config.min_recharge_battery,
-                        )
+                        .set_patrol_options(&config.patrol_path_prefix, config.min_recharge_battery)
                         .await;
                     // 巡检的总点数 = 路径点数（本体按 nav_paths 里的点算，不做「闭环补点」）
                     let total_points = plan.waypoints.len() as i64;
@@ -2712,12 +2778,20 @@ async fn handle_server_message(
                 );
             let motion_command = matches!(
                 command,
-                "站立" | "卧倒" | "通用模式" | "原地模式" | "导航模式" | "开始巡检"
-                    | "暂停任务" | "继续任务" | "召回充电" | "重新定位"
+                "站立"
+                    | "卧倒"
+                    | "通用模式"
+                    | "原地模式"
+                    | "导航模式"
+                    | "开始巡检"
+                    | "暂停任务"
+                    | "继续任务"
+                    | "召回充电"
+                    | "重新定位"
+                    | "下发地图"
             ) || matches!(
                 action,
-                "stand_up" | "lie_down" | "generic_mode" | "in_place_mode"
-                    | "navigation_mode"
+                "stand_up" | "lie_down" | "generic_mode" | "in_place_mode" | "navigation_mode"
             );
             // 强制接管标记：遥控器关了但本体仍报 `ctrl_source = 3` 时，平台会带
             // `force=true` 下发「远程接管」。客户端据此只放行 ctrl_source 这一条
@@ -2737,11 +2811,17 @@ async fn handle_server_message(
                 _ => {}
             }
             if !recovery && motion_command {
-                let require_posture = matches!(
-                    command,
-                    "通用模式" | "原地模式" | "导航模式" | "开始巡检" | "暂停任务"
-                        | "继续任务" | "召回充电"
-                ) || matches!(action, "generic_mode" | "in_place_mode" | "navigation_mode");
+                let require_posture =
+                    matches!(
+                        command,
+                        "通用模式"
+                            | "原地模式"
+                            | "导航模式"
+                            | "开始巡检"
+                            | "暂停任务"
+                            | "继续任务"
+                            | "召回充电"
+                    ) || matches!(action, "generic_mode" | "in_place_mode" | "navigation_mode");
                 // 强制接管只放行手动动作（站立/卧倒/模式切换），任务与导航类指令
                 // 仍然要按 `ctrl_source = 3` 拒绝：本体在遥控器手里时导航能力不可用。
                 let manual_action = matches!(
@@ -2827,7 +2907,50 @@ async fn handle_server_message(
                         let park_hint = params
                             .and_then(|p| p.get("parkId"))
                             .map(|value| value.as_i64());
-                        sync_maps_from_robot(config, &client, out_tx, park_hint).await
+                        // 刷新语义由服务端 `mode` / `refresh` / `onlyMissing` 共同决定：
+                        // 中台按钮（manual）要求全量刷新，auto / onlyMissing 只补缺。
+                        let mode = params
+                            .and_then(|p| p.get("mode"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("manual");
+                        let refresh = params
+                            .and_then(|p| p.get("refresh"))
+                            .and_then(Value::as_bool)
+                            .unwrap_or_else(|| {
+                                let only_missing = params
+                                    .and_then(|p| p.get("onlyMissing"))
+                                    .and_then(Value::as_bool);
+                                only_missing.map(|only| !only).unwrap_or(mode != "auto")
+                            });
+                        sync_maps_from_robot(config, &client, out_tx, park_hint, refresh, true)
+                            .await
+                    }
+                    "下发地图" => {
+                        let result = push_map_to_body(
+                            config,
+                            &client,
+                            state,
+                            local_runner,
+                            local_mapping,
+                            &msg,
+                        )
+                        .await;
+                        // 成功也要留一条设备事件：中台审计只知道「已下发」，
+                        // 真正写本体 + 重新载图的结果要看这里。
+                        if let Ok(note) = &result {
+                            let event = DeviceEventPayload {
+                                event_type: "info".to_string(),
+                                message: note.clone(),
+                                data: None,
+                            };
+                            send(
+                                out_tx,
+                                "event",
+                                serde_json::to_value(event).unwrap_or_default(),
+                            )
+                            .await;
+                        }
+                        result
                     }
                     "重新定位" => {
                         // 服务端把指令附加参数包在 `params.params`（见 server 的 push_command），
@@ -3119,6 +3242,8 @@ async fn upload_mapping_to_zentai(config: &Config, saved: &MappingSaved) -> Uplo
         park_id,
         map_name: config.ingest_map_name.clone(),
         bind: park_id.is_some(),
+        // 4001 自动回传只新增，永远不覆盖已经入库的地图
+        refresh: false,
     };
     // 4001 偶尔只给目录名不给绝对路径；补一个与 4012 一致的文件服务路径，
     // 保证自动回传与手动同步使用同一个 sourceRef 去重。
@@ -3136,11 +3261,122 @@ async fn upload_mapping_to_zentai(config: &Config, saved: &MappingSaved) -> Uplo
 /// 中台设备页「同步地图」：4012 拉取地图列表，只下载业务库缺失的地图并回传。
 ///
 /// 不要求设备绑定园区：地图跟着设备走，园区在控制台创建时再挑图。
+/// 中台编辑地图后的「下发地图」：拉业务平台最新包 → 写本体文件服务 → 重新载图。
+///
+/// 本体上没有「上传地图」协议，只能通过文件服务写文件；写之前先确认：
+/// 1. 设备当前没有执行任务 / 建图（避免改图与导航互相打架）；
+/// 2. 本体上确实存在该地图目录（不能凭名字造目录）；
+/// 3. 写完 `map.pgm` / `map.yaml` 后读回校验，内容一致才算成功；
+/// 4. 最后 4030 重新载图，让导航立刻用上新栅格。
+async fn push_map_to_body(
+    config: &Config,
+    client: &Arc<ZhProClient>,
+    state: &Shared<RobotState>,
+    local_runner: &Shared<Option<Arc<RouteRunner>>>,
+    local_mapping: &Shared<Option<Arc<MappingSession>>>,
+    msg: &WsMessage,
+) -> Result<String, String> {
+    if local_runner.lock().await.is_some() {
+        return Err("设备正在执行任务，请先暂停/结束任务后再下发地图".to_string());
+    }
+    if local_mapping.lock().await.is_some() {
+        return Err("设备正在建图，请先结束建图后再下发地图".to_string());
+    }
+
+    let outer = msg.payload.get("params");
+    let params = outer.and_then(|p| p.get("params")).or(outer);
+    let map_id = params
+        .and_then(|p| p.get("mapId"))
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| value.as_i64().map(|id| id.to_string()))
+        })
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "下发地图缺少 mapId".to_string())?;
+    let map_dir_hint = params
+        .and_then(|p| p.get("mapDir"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let source_ref_hint = params
+        .and_then(|p| p.get("sourceRef"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let dir_hint = if map_dir_hint.trim().is_empty() {
+        source_ref_hint
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        map_dir_hint
+    };
+
+    let http = mapupload::build_http_client();
+    let ingest = IngestConfig {
+        api_base: config.resolve_api_base(),
+        username: config.api_username.clone(),
+        password: config.api_password().to_string(),
+        device_id: config.device_id.clone(),
+        park_id: None,
+        map_name: None,
+        bind: false,
+        // 写本体不经过 ingest，字段只为满足结构体
+        refresh: false,
+    };
+    let package = mapupload::download_map_package(&http, &ingest, &map_id).await?;
+    info!(
+        "已下载业务平台最新地图包: map={map_id} {} 字节",
+        package.len()
+    );
+
+    // 本体目录名以 4013 列表为准（平台给的目录名只作候选）
+    let manager = MapManager::new(client.clone());
+    let robot_map = manager
+        .resolve(&[&dir_hint, &map_id])
+        .await
+        .map_err(|error| {
+            format!("本体上没有对应地图目录（候选 {dir_hint} / {map_id}）：{error}")
+        })?;
+
+    let file_base = mapupload::resolve_file_base(
+        config.robot.as_deref().unwrap_or_default(),
+        config.robot_file_base.as_deref(),
+        config.robot_file_port,
+    );
+    let summary =
+        mapupload::push_map_to_robot(&http, &file_base, &robot_map.map_id, &package).await?;
+
+    // 重新载图，让本体导航立刻使用新栅格
+    let status = zhpro::mapping::relocalize(client, &robot_map.path, None, LOCATE_TIMEOUT)
+        .await
+        .map_err(|error| format!("{summary}；但重新载图失败：{error}"))?;
+    state.lock().await.active_map = Some(map_id.clone());
+    if let Err(error) = zhpro::teleop::enter_navigation_mode(client).await {
+        warn!("下发地图后切导航模式失败: {error}");
+    }
+    Ok(format!(
+        "{summary}；已重新载图加载最新地图（{map_id}，status={status}）"
+    ))
+}
+
+/// 同步本体地图到平台。
+///
+/// - `refresh`：`true` = 中台/控制台显式「同步地图」，要求把本体最新图全部刷上去（内容未变的仍会跳过）；
+///   `false` = 设备定时轮询，只补平台没有的图，**绝不覆盖已有记录**。
+/// - `announce`：为 `false` 时不往事件流里发「无事可做」汇总，避免轮询每十分钟刷一条；
+///   新增/更新/失败仍然会发，运维能看到实际动作。
 async fn sync_maps_from_robot(
     config: &Config,
     client: &Arc<ZhProClient>,
     out_tx: &mpsc::Sender<WsMessage>,
     park_hint: Option<Option<i64>>,
+    refresh: bool,
+    announce: bool,
 ) -> Result<String, String> {
     // 服务端下发的园区优先；没有就用本地配置 / 注册回执里的绑定
     let park_id = match park_hint {
@@ -3161,7 +3397,11 @@ async fn sync_maps_from_robot(
         .list()
         .await
         .map_err(|e| format!("4012 获取地图列表失败: {e}"))?;
-    info!("中台触发手动同步：本体共有 {} 张地图", maps.len());
+    info!(
+        "{}同步地图：本体共有 {} 张地图",
+        if refresh { "中台触发全量刷新" } else { "定时增量" },
+        maps.len()
+    );
 
     let ingest = IngestConfig {
         api_base: config.resolve_api_base(),
@@ -3171,26 +3411,32 @@ async fn sync_maps_from_robot(
         park_id,
         map_name: None,
         bind: false,
+        refresh,
     };
     let report = mapupload::sync_robot_maps(&http, &ingest, &file_base, &maps).await;
     let summary = report.summary();
-    let event = DeviceEventPayload {
-        event_type: if report.failed > 0 { "error" } else { "info" }.to_string(),
-        message: summary.clone(),
-        data: Some(json!({
-            "total": report.total,
-            "uploaded": report.uploaded,
-            "skipped": report.skipped,
-            "failed": report.failed,
-            "mode": "manual",
-        })),
-    };
-    send(
-        out_tx,
-        "event",
-        serde_json::to_value(event).unwrap_or_default(),
-    )
-    .await;
+    if announce || report.has_changes() {
+        let event = DeviceEventPayload {
+            event_type: if report.failed > 0 { "error" } else { "info" }.to_string(),
+            message: summary.clone(),
+            data: Some(json!({
+                "total": report.total,
+                "uploaded": report.uploaded,
+                "skipped": report.skipped,
+                "unchanged": report.unchanged,
+                "failed": report.failed,
+                "mode": if refresh { "refresh" } else { "incremental" },
+            })),
+        };
+        send(
+            out_tx,
+            "event",
+            serde_json::to_value(event).unwrap_or_default(),
+        )
+        .await;
+    } else {
+        debug!("定时同步无变化: {summary}");
+    }
     if report.failed > 0 {
         Err(summary)
     } else {

@@ -178,6 +178,13 @@ export interface RoutePoint {
   dwell: number;
   radius: number;
   must: boolean;
+  /**
+   * 到点后机身转过头对准的偏航角（度），0° = 地图 +X 方向。
+   *
+   * 下发链路：`heading` →(`Pose::new(x, y, heading.to_radians())`) → 本体路径点的
+   * `orientation` 四元数（只有 yaw，roll/pitch 恒 0）。**不是云台角度**——
+   * 本体协议没有云台/PTZ 指令，这里转的是整只狗。
+   */
   heading: number;
   onFail: string;
   actions: RoutePointAction[];
@@ -342,6 +349,29 @@ export interface Alert {
   occurredAt: string;
   handledAt: string | null;
   createdAt: string;
+}
+
+/** 企业微信推送记录（`notifications` 表） */
+export interface NotificationRecord {
+  id: number;
+  channel: string;
+  refType: string;
+  refId: number | null;
+  level: string;
+  dedupeKey: string | null;
+  payload: string;
+  status: string;
+  attempts: number;
+  lastError: string | null;
+  createdAt: string;
+  sentAt: string | null;
+}
+
+/** 测试消息的同步结果：成功/失败都带企业微信原文 */
+export interface NotifyTestResult {
+  sent: boolean;
+  message: string;
+  webhook: string | null;
 }
 
 export interface Setting {

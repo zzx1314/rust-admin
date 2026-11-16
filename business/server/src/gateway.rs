@@ -1,5 +1,5 @@
 use crate::app::AppState;
-use crate::db::{now, today};
+use crate::db::now;
 use crate::error::AppError;
 use crate::gateway_types::{
     CommandPayload, DeviceEventPayload, HeartbeatAckPayload, HeartbeatPayload, PendingCommand,
@@ -230,7 +230,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                             estop_software: None,
                                             sdk_node_available: None,
                                         });
-                                    handle_heartbeat(&db, &state.config, did, &payload).await;
+                                    handle_heartbeat(&state, did, &payload).await;
                                     // 本体就绪后才补发待执行任务：注册时通常还没连上本体，
                                     // 早发只会得到一条「未连接机器人本体」并留下假执行中。
                                     if payload.body_online == Some(true)
@@ -275,7 +275,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                             stage: None,
                                             total_points: None,
                                         });
-                                    handle_task_progress(&db, did, &payload).await;
+                                    handle_task_progress(&state, did, &payload).await;
                                     send_msg(&tx, "task_progress_ack", json!({"received": true})).await;
                                 }
                             }
@@ -287,7 +287,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                             message: String::new(),
                                             data: None,
                                         });
-                                    handle_device_event(&db, did, &payload).await;
+                                    handle_device_event(&state, did, &payload).await;
                                     send_msg(&tx, "event_ack", json!({"received": true})).await;
                                 }
                             }
@@ -621,6 +621,8 @@ pub async fn sweep_stale_devices(state: &AppState) -> Result<u64, AppError> {
         .bind(&timestamp)
         .execute(&state.db)
         .await;
+        // 设备掉线是任务失败的头号原因，运维群里必须第一时间看到
+        crate::notify::alert_created(state, &alert_code).await;
     }
 
     Ok(affected)
@@ -739,6 +741,26 @@ pub async fn sweep_stuck_tasks(state: &AppState) -> Result<u64, AppError> {
         .await
         .ok();
 
+        // 设备离线导致的卡单按「严重」推：不是任务本身的问题，重启任务也没用
+        let reason = if kind == "silent" {
+            format!("超过 {timeout}s 未收到进度上报（设备 {device_code} {device_status}），已判定为异常")
+        } else {
+            format!(
+                "进度停在 {progress}% 超过 {stuck}s 没有任何推进（设备 {device_code} {device_status}），已判定为异常"
+            )
+        };
+        crate::notify::task_abnormal(
+            state,
+            task_code,
+            if device_status == "离线" {
+                crate::notify::Level::Critical
+            } else {
+                crate::notify::Level::Warning
+            },
+            &reason,
+        )
+        .await;
+
         // 设备端任务占用一并释放，避免设备页一直显示「执行任务 / 旧任务名」
         sqlx::query(
             "UPDATE devices SET current_task_name = '—',
@@ -831,12 +853,9 @@ pub async fn notify_park_binding(
 ///
 /// 运行态（电量/信号/温度/里程/任务）每次覆写；台账类字段（型号/固件/状态）
 /// 变化时标记 `ledger_changed`，心跳末尾统一再同步一次中台，避免 10s 一次打接口。
-async fn handle_heartbeat(
-    db: &SqlitePool,
-    config: &crate::config::Config,
-    device_id: &str,
-    payload: &HeartbeatPayload,
-) {
+async fn handle_heartbeat(state: &crate::app::AppState, device_id: &str, payload: &HeartbeatPayload) {
+    let db = &state.db;
+    let config = &state.config;
     let timestamp = now();
     let mut ledger_changed = false;
 
@@ -901,7 +920,7 @@ async fn handle_heartbeat(
     }
     // 控制源 / 运动状态：判断「是否已完全接管」的两个硬指标
     if let Some(source) = payload.ctrl_source {
-        record_control_source_change(db, device_id, source, &timestamp).await;
+        record_control_source_change(state, device_id, source, &timestamp).await;
     }
     if let Some(motion) = payload
         .motion_status
@@ -1206,11 +1225,12 @@ pub(crate) async fn ctrl_preempt_reason(db: &SqlitePool, device_id: &str) -> Str
 /// 「在线待命」。落库的这条告警会被业务控制台轮询到并弹窗提示
 /// （`web/src/layout/OpsLayout.vue`）。
 async fn record_control_source_change(
-    db: &SqlitePool,
+    state: &crate::app::AppState,
     device_id: &str,
     source: i64,
     timestamp: &str,
 ) {
+    let db = &state.db;
     let previous: Option<i64> =
         sqlx::query_scalar("SELECT ctrl_source FROM devices WHERE device_id = ?1")
             .bind(device_id)
@@ -1264,7 +1284,7 @@ async fn record_control_source_change(
         if has_running_task(db, device_id).await {
             debug!("设备 {device_id} ctrl_source=3 出现在任务执行期间，按正常情况处理");
         } else {
-            open_control_preempt_alert(db, device_id, timestamp).await;
+            open_control_preempt_alert(state, device_id, timestamp).await;
         }
     } else {
         resolve_control_preempt_alert(db, device_id, timestamp).await;
@@ -1293,7 +1313,12 @@ async fn has_running_task(db: &SqlitePool, device_id: &str) -> bool {
 ///
 /// 同一台设备已经有一条未处理的抢占告警时不重复插入：遥控器时断时续（`3 → 1 → 3`）
 /// 在现场很常见，刷屏反而会盖住真正的故障。
-async fn open_control_preempt_alert(db: &SqlitePool, device_id: &str, timestamp: &str) {
+async fn open_control_preempt_alert(
+    state: &crate::app::AppState,
+    device_id: &str,
+    timestamp: &str,
+) {
+    let db = &state.db;
     let pending: Option<i64> = sqlx::query_scalar(
         "SELECT id FROM alerts
           WHERE status = '未处理' AND alert_code LIKE 'AL-CTRL-%'
@@ -1334,6 +1359,8 @@ async fn open_control_preempt_alert(db: &SqlitePool, device_id: &str, timestamp:
     .bind(timestamp)
     .execute(db)
     .await;
+    // 控制权被抢是最需要"人马上知道"的一类：平台看起来一切正常，摇杆和任务却全失效
+    crate::notify::alert_created(state, &alert_code).await;
 }
 
 /// 控制权回到 APP / SDK：自动把抢占告警结掉，避免告警中心长期挂着已恢复的条目。
@@ -1359,7 +1386,12 @@ async fn resolve_control_preempt_alert(db: &SqlitePool, device_id: &str, timesta
 ///    `updated_at` 保持「最后一次收到上报」的含义。
 /// 3. **状态没更新就不动设备台账**：避免一条过期上报把设备从「在线待命」改回
 ///    「执行任务」。
-async fn handle_task_progress(db: &SqlitePool, device_id: &str, payload: &TaskProgressPayload) {
+async fn handle_task_progress(
+    state: &crate::app::AppState,
+    device_id: &str,
+    payload: &TaskProgressPayload,
+) {
+    let db = &state.db;
     let timestamp = now();
     if payload.task_code.is_empty() {
         return;
@@ -1371,6 +1403,12 @@ async fn handle_task_progress(db: &SqlitePool, device_id: &str, payload: &TaskPr
     } else {
         "执行中"
     };
+
+    // 航点到点 AI 识别：走到带「AI 识别」动作的航点时开识别窗口，终态时关窗口。
+    // 与任务状态更新解耦——识别失败只打日志，不影响任务本身（见 ai_patrol 模块头）。
+    crate::ai_patrol::global()
+        .on_progress(state, device_id, payload)
+        .await;
 
     let result = sqlx::query(
         "UPDATE tasks SET task_status = ?1, progress = ?2, updated_at = ?3,
@@ -1447,6 +1485,19 @@ async fn handle_task_progress(db: &SqlitePool, device_id: &str, payload: &TaskPr
             .ok();
         }
 
+        // 客户端自己报「异常」：把本体的失败原因原样带进群。
+        // 看门狗也会判异常并推送，两处靠 `task:{task_code}` 去重合并，
+        // 先到的是客户端原因（更有信息量），看门狗那条会被静默窗口吃掉。
+        if status == "异常" {
+            crate::notify::task_abnormal(
+                state,
+                &payload.task_code,
+                crate::notify::Level::Warning,
+                &format!("客户端上报任务异常：{message}"),
+            )
+            .await;
+        }
+
         // 任务完成时，更新设备当前任务
         if status == "已完成" || status == "异常" || status == "已暂停" {
             sqlx::query(
@@ -1497,18 +1548,25 @@ fn event_alert_level(payload: &DeviceEventPayload) -> &'static str {
 }
 
 /// 设备事件处理
-async fn handle_device_event(db: &SqlitePool, device_id: &str, payload: &DeviceEventPayload) {
+async fn handle_device_event(
+    state: &crate::app::AppState,
+    device_id: &str,
+    payload: &DeviceEventPayload,
+) {
+    let db = &state.db;
     let timestamp = now();
 
     // 根据事件类型处理
     match payload.event_type.as_str() {
         "error" | "fault" | "obstacle" => {
-            // 创建告警
-            let date_prefix = today();
+            // alert_code 带设备号 + 秒级时间戳。
+            // 以前是 `AL-WS-{日期}-{小时}`：`alert_code` 有 UNIQUE 约束，
+            // 同一小时内的第二条故障事件插入直接失败（静默 `.ok()` 吞掉），
+            // 告警中心一小时内只留得下**全局第一条**故障，其余全丢。
             let alert_code = format!(
                 "AL-WS-{}-{}",
-                date_prefix.replace("-", ""),
-                &timestamp[11..13]
+                device_id,
+                timestamp.replace(['-', ' ', ':'], "")
             );
 
             sqlx::query(
@@ -1526,6 +1584,7 @@ async fn handle_device_event(db: &SqlitePool, device_id: &str, payload: &DeviceE
             .execute(db)
             .await
             .ok();
+            crate::notify::alert_created(state, &alert_code).await;
         }
         _ => {}
     }

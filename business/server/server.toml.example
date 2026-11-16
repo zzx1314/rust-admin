@@ -83,3 +83,34 @@ base_url = "http://192.168.41.10:3000"
 # 由浏览器直连 Agent（板端需开 CORS：AGENT_CORS_ORIGINS）。
 # 环境变量：ROBODOG_BACKPACK_BROWSER_URL
 # browser_url = "http://192.168.41.246:8000"
+
+# 企业微信群机器人告警推送
+#
+# 群里「添加群机器人」后拿到 webhook（https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx），
+# 执行任务异常 / 设备故障时把告警推到群里。企业微信的硬约束（代码已处理）：
+#   - 每个机器人 20 条/分钟           → 本地限流 18 条，超出排队
+#   - markdown 正文 ≤ 4096 **字节**   → 自动按字节截断（中文 3 字节/字）
+#   - markdown 不支持 @               → @所有人另发一条 text
+#   - 只能发不能收                    → 消息里带平台链接，处理仍在控制台
+#
+# ⚠ webhook 地址本身就是凭据（无签名校验，谁拿到谁能往群里发消息）。
+# 推荐**只**用环境变量 ROBODOG_WECOM_WEBHOOK 提供：写进本文件意味着密钥进 git，
+# 启动时会打一条警告。
+[wecom]
+# 配置级总开关。与库里 notification 组的 wecom_alert_push / wecom_task_abnormal
+# 是「与」关系：这边是"这套部署有没有这个通道"，那边是"这个班次推不推"。
+# 环境变量：ROBODOG_WECOM_ENABLED
+enabled = true
+
+# 推送级别下限：严重 / 警告（默认）/ 提示
+# 环境变量：ROBODOG_WECOM_MIN_LEVEL
+# min_level = "警告"
+
+# 严重级别是否额外 @所有人（会占双倍限流额度：一条 text + 一条 markdown）
+# 环境变量：ROBODOG_WECOM_MENTION_ALL
+# mention_all = false
+
+# 控制台对外地址：拼告警消息里的「查看详情」链接，例如 http://39.107.55.13:3100
+# 不填时消息不带链接（猜一个地址比不给更容易误导人）。
+# 环境变量：ROBODOG_PUBLIC_URL
+# （这一项是本文件的顶层键，不是 [wecom] 里的）

@@ -14,6 +14,7 @@ const dogMapUrls = {
   upload: "/api/dogMap/upload",
   update: "/api/dogMap/",
   image: "/api/dogMap/",
+  edit: "/api/dogMap/",
   publish: "/api/dogMap/",
   newVersion: "/api/dogMap/",
   delete: `/api/dogMap/`
@@ -48,8 +49,45 @@ export type MapImageResult = {
     origin: number[];
     width: number;
     height: number;
+    /** 编辑接口返回：改写后的地图包 SHA-256 */
+    mapHash?: string;
+    /** 编辑接口返回：本次实际改写的像素数 */
+    erasedPixels?: number;
   };
 };
+
+/** 橡皮擦笔画：坐标是栅格像素坐标（左上角原点，x 向右、y 向下）。 */
+export type MapEditStroke = {
+  points: Array<{ x: number; y: number }>;
+  radius?: number;
+};
+
+/**
+ * 保存橡皮擦编辑：后端改写地图包内 `model.pgm` 并重算 `map_hash`。
+ *
+ * `eraseValue`：254 = 可通行（默认，擦掉噪点），205 = 未知。
+ * 只有草稿 / 部分标定版本可编辑，已发布版本需先派生新版本。
+ */
+export const dogMapErase = (
+  id: string | number,
+  strokes: MapEditStroke[],
+  eraseValue = 254
+) =>
+  http.axiosPostRequest<MapImageResult>(`${dogMapUrls.edit}${id}/edit`, {
+    strokes,
+    eraseValue
+  });
+
+/**
+ * 把编辑后的地图下发到狗体（本体）。
+ *
+ * 链路：中台 → 业务平台 → 设备客户端 → 本体文件服务（写回 map.pgm / map.yaml）
+ * → 重新载图。设备未连接、正在执行任务、或本体上没有该地图目录时会报错。
+ */
+export const dogMapPushToDevice = (id: string | number, deviceCode?: string) =>
+  http.axiosPostRequest<Result>(`${dogMapUrls.edit}${id}/push`, {
+    deviceCode: deviceCode || undefined
+  });
 
 /** 获取地图图片（后端把包内 model.pgm 转成 PNG） */
 export const dogMapGetImage = (id: string | number) =>

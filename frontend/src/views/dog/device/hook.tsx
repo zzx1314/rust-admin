@@ -370,7 +370,8 @@ export function useDogDevice() {
     try {
       await ElMessageBox.confirm(
         `将通知设备「${row.deviceName || row.deviceId}」用 4012 获取地图列表，` +
-          `并把缺失地图同步到中台。是否继续？`,
+          `把中台缺失的地图补进来、本体上已变化的图刷新到原记录（已发布版本不会被覆盖）。` +
+          `设备需在线且空闲。是否继续？`,
         "同步设备地图",
         {
           type: "warning",

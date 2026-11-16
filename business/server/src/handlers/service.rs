@@ -8,6 +8,7 @@ use crate::app::AppState;
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::gateway;
+use crate::handlers::maps;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
@@ -20,7 +21,9 @@ const SERVICE_TOKEN_HEADER: &str = "x-service-token";
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncMapsRequest {
-    /// 保留字段：manual（中台手动触发）/ auto（设备自动回传）
+    /// `manual`（默认，中台手动触发：刷新全部地图）/ `auto`（只补平台没有的图）
+    ///
+    /// 这个值会原样透传给设备客户端，客户端再用它决定 ingest 的 `mode`。
     #[serde(default)]
     pub mode: Option<String>,
 }
@@ -44,7 +47,10 @@ fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), AppError> {
 /// `POST /api/zentai/devices/{device_id}/sync-maps`
 ///
 /// 中台设备列表点击「同步地图」→ 这里向设备下发 `同步地图` 指令 →
-/// 客户端用 4012 拉地图列表、从文件服务下载缺失地图并回传。
+/// 客户端用 4012 拉地图列表、从文件服务下载缺失/有变化的地图并回传。
+///
+/// `mode=manual`（缺省）要求全量刷新（内容未变的图仍会跳过），
+/// `mode=auto` 只补平台没有的图。
 pub async fn sync_device_maps(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -85,13 +91,18 @@ pub async fn apply_sync_maps(
         .unwrap_or_else(|| "未绑定".to_string());
 
     let timestamp = now();
+    // 中台点「同步地图」= 显式要求「全部更新到本体最新」，只补缺的语义不够用，
+    // 所以 manual 模式要求客户端做刷新（`onlyMissing = false`），
+    // 客户端还会把同一个 mode 透传给 `/api/map-versions/ingest`。
+    let refresh = mode != "auto";
     let dispatched = gateway::send_command_to_device(
         &state.device_connections,
         device_id,
         "同步地图",
         Some(json!({
             "mode": mode,
-            "onlyMissing": true,
+            "refresh": refresh,
+            "onlyMissing": !refresh,
             "parkId": park_id,
             "deviceId": device_id.trim(),
             "requestedAt": timestamp,
@@ -119,7 +130,14 @@ pub async fn apply_sync_maps(
          VALUES ('map_sync', ?1, ?2, ?3, NULL, ?4)",
     )
     .bind(format!("中台触发地图同步：{device_id}"))
-    .bind(format!("模式：{mode}；园区：{park_label}；只同步缺失地图"))
+    .bind(format!(
+        "模式：{mode}（{}）；园区：{park_label}",
+        if refresh {
+            "刷新全部地图"
+        } else {
+            "只补缺失地图"
+        }
+    ))
     .bind(device_pk)
     .bind(&timestamp)
     .execute(&state.db)
@@ -131,7 +149,8 @@ pub async fn apply_sync_maps(
         "mode": mode,
         "dispatched": true,
         "requestedAt": timestamp,
-    }))}
+    }))
+}
 
 // ─── 中台控制面：指令 / 任务 / 运行态 ──────────────────────────────
 //
@@ -493,6 +512,28 @@ pub async fn runtime_snapshot(state: &AppState, device_code: &str) -> Result<Val
         })),
         "serverTs": now(),
     }))
+}
+
+/// `POST /api/zentai/devices/{device_id}/push-map` — HTTP 链路（同网部署）。
+///
+/// 中台地图编辑（橡皮擦）后调用：刷新业务库副本 + 让设备客户端把最新包写回本体。
+pub async fn push_map(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(device_code): Path<String>,
+    Json(payload): Json<maps::PushMapRequest>,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    authorize(&state, &headers)?;
+    let meta = ControlMeta::from_headers(&headers, payload.request_id.clone());
+    ensure_operator_access(
+        &state,
+        meta.operator,
+        meta.operator_admin,
+        device_code.trim(),
+    )
+    .await?;
+    let data = maps::apply_push_map(&state, &device_code, &payload).await?;
+    Ok(ApiResponse::ok(data))
 }
 
 /// `POST /api/zentai/devices/{device_id}/command` — HTTP 链路（同网部署）。

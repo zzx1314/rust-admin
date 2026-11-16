@@ -51,6 +51,11 @@ pub const DEFAULT_API_USERNAME: &str = "admin";
 pub const DEFAULT_API_PASSWORD: &str = "admin123";
 /// 实时视频：ffmpeg 可执行文件（现场 aarch64 需自带，见 client/README.md）
 pub const DEFAULT_FFMPEG: &str = "ffmpeg";
+/// 地图定时增量同步间隔（秒）：只补平台没有的图，`0` = 关闭。
+///
+/// 遥控器/官方 App 建的图不会走 4001 自动回传，靠这个轮询把本体上「平台还没有」
+/// 的地图补上去；中台点「同步地图」仍然走全量刷新。
+pub const DEFAULT_MAP_SYNC_INTERVAL_SECS: u64 = 600;
 /// 实时视频：H.264 目标码率
 pub const DEFAULT_VIDEO_BITRATE: &str = "1200k";
 /// 实时视频：输出帧率
@@ -91,6 +96,8 @@ pub const ENV_API_BASE: &str = "ROBODOG_API_BASE";
 pub const ENV_API_USERNAME: &str = "ROBODOG_API_USERNAME";
 pub const ENV_API_PASSWORD: &str = "ROBODOG_API_PASSWORD";
 pub const ENV_PARK_ID: &str = "ROBODOG_PARK_ID";
+/// 地图定时增量同步间隔（秒）
+pub const ENV_MAP_SYNC_INTERVAL: &str = "ROBODOG_MAP_SYNC_INTERVAL";
 
 // ─── 错误类型 ──────────────────────────────────────────────────
 
@@ -267,6 +274,8 @@ pub struct MappingSection {
     pub ingest_name: Option<String>,
     /// 只执行一次建图后退出
     pub once: Option<bool>,
+    /// 地图定时增量同步间隔（秒），0 = 关闭
+    pub sync_interval_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -402,6 +411,8 @@ pub struct CliArgs {
     pub robot_file_port: Option<u16>,
     /// `--no-upload-map` → `Some(false)`
     pub upload_map: Option<bool>,
+    /// `--map-sync-interval <秒>`；`Some(0)` = 关闭定时同步
+    pub map_sync_interval: Option<u64>,
     pub park_id: Option<i64>,
     pub ingest_map_name: Option<String>,
     pub api_base: Option<String>,
@@ -445,6 +456,11 @@ impl CliArgs {
             robot_file_base: opt(&mut args, "--robot-file-base")?,
             robot_file_port: opt(&mut args, "--robot-file-port")?,
             upload_map: args.contains("--no-upload-map").then_some(false),
+            map_sync_interval: if args.contains("--no-map-sync") {
+                Some(0)
+            } else {
+                opt(&mut args, "--map-sync-interval")?
+            },
             park_id: opt(&mut args, "--park-id")?,
             ingest_map_name: opt(&mut args, "--ingest-map-name")?,
             api_base: opt(&mut args, "--api-base")?,
@@ -521,6 +537,8 @@ pub fn print_help() {
   --robot-file-port <端口> 本体文件服务端口 (默认: {DEFAULT_ROBOT_FILE_PORT}，文档 §4)
   --ingest-map-name <名称> 入库地图名 (默认用本体返回的目录名)
   --no-upload-map        关闭建图完成后自动回传
+  --map-sync-interval <秒> 地图定时增量同步间隔 (默认: {DEFAULT_MAP_SYNC_INTERVAL_SECS}；只补平台没有的图)
+  --no-map-sync          关闭地图定时增量同步（中台「同步地图」仍可用）
   --api-base <URL>       业务服务 REST 地址 (默认由 --server 推导)
   --api-username <账号>  业务服务登录账号 (默认: {DEFAULT_API_USERNAME})
   --api-password <密码>  业务服务登录密码 (默认: {DEFAULT_API_PASSWORD}，线上必须覆盖)
@@ -563,6 +581,8 @@ pub struct Config {
     pub robot_file_port: u16,
     /// 建图完成后是否自动回传中台地图库
     pub upload_map: bool,
+    /// 地图定时增量同步间隔（秒），0 = 关闭
+    pub map_sync_interval_secs: u64,
     /// 回传目标园区 ID（业务库 parks.id），显式指定时优先于服务端下发的绑定园区
     pub park_id: Option<i64>,
     /// 注册回执下发的绑定园区（控制台未绑定则为 None），建图回传时带上给中台
@@ -763,6 +783,19 @@ impl Config {
 
         let upload_map = cli.upload_map.or(file.mapping.upload).unwrap_or(true);
 
+        // 定时增量同步：关闭自动回传时一并关掉，否则「关着回传却偷偷上传地图」很反直觉
+        let map_sync_interval_secs = pick_number([
+            cli.map_sync_interval,
+            env.get_parsed(ENV_MAP_SYNC_INTERVAL)?,
+            file.mapping.sync_interval_secs,
+        ])
+        .unwrap_or(DEFAULT_MAP_SYNC_INTERVAL_SECS);
+        let map_sync_interval_secs = if upload_map {
+            map_sync_interval_secs
+        } else {
+            0
+        };
+
         let park_id = match pick_number([
             cli.park_id,
             env.get_parsed(ENV_PARK_ID)?,
@@ -851,6 +884,7 @@ impl Config {
             robot_file_base,
             robot_file_port,
             upload_map,
+            map_sync_interval_secs,
             park_id,
             bound_park_id: Arc::new(Mutex::new(None)),
             ingest_map_name,
@@ -918,6 +952,7 @@ mapping.upload          = {upload_map}
 mapping.park_id         = {park_id}
 mapping.ingest_name     = {ingest_name}
 mapping.once            = {map_only}
+mapping.sync_interval_s = {map_sync}
 simulation.battery      = {battery}
 simulation.position     = {position}
 simulation.firmware     = {firmware}
@@ -962,6 +997,11 @@ log.filter              = {log_filter}",
                 .as_deref()
                 .unwrap_or("（用本体目录名）"),
             map_only = self.map_only,
+            map_sync = if self.map_sync_interval_secs == 0 {
+                "（已关闭）".to_string()
+            } else {
+                format!("{}s", self.map_sync_interval_secs)
+            },
             battery = self.battery,
             position = self.position,
             firmware = self.firmware,

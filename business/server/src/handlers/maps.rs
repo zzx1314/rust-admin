@@ -2,14 +2,20 @@ use crate::app::AppState;
 use crate::auth::Claims;
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
+use crate::gateway;
+use crate::ingest;
 use crate::models::{
     BackendMap, BackendMapQuery, ImportBackendMapRequest, MapQuery, MapRaster, MapRefRoute,
     MapRefTask, MapRefs, MapVersion, MapVersionRequest,
 };
 use axum::Json;
+use axum::body::Body;
 use axum::extract::{Extension, Path, Query, State};
+use axum::http::{StatusCode, header};
+use axum::response::Response;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use serde_json::{Value, json};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{QueryBuilder, SqlitePool};
 use std::collections::hash_map::DefaultHasher;
@@ -18,7 +24,8 @@ use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::str::FromStr;
 
-const MAP_SELECT: &str = "SELECT m.id, m.park_id, p.park_name, m.device_code, m.map_name, m.version,
+const MAP_SELECT: &str =
+    "SELECT m.id, m.park_id, p.park_name, m.device_code, m.map_name, m.version,
     m.frame_id, m.crs, m.origin, m.resolution, m.floors, m.road_count, m.no_go_count,
     m.status, m.map_hash, m.map_width, m.map_height, m.note, m.published_at, m.created_at,
     m.source, m.source_id, m.file_name, m.file_path, m.file_size,
@@ -407,8 +414,8 @@ pub async fn import_backend_map(
     let file_path = source.file_path.clone();
     let file_size = source.file_size;
     // 本体目录名：同名包已经登记过（设备回传过）就沿用，避免导入出一张本体上找不到的重复地图
-    let source_ref = crate::mapdir::source_ref_for_file_name(&state.db, file_name.as_deref())
-        .await?;
+    let source_ref =
+        crate::mapdir::source_ref_for_file_name(&state.db, file_name.as_deref()).await?;
     let note = format!(
         "从 backend 地图库导入「{}」{} · 园区：{}",
         source.map_name,
@@ -530,6 +537,276 @@ pub async fn import_backend_map(
     }
 
     Ok(ApiResponse::ok(fetch_map(&state, &map_id).await?))
+}
+
+/// 地图包文件的绝对路径。
+///
+/// 业务库 `map_versions.file_path` 有两种形态：
+/// - 从 `backend` 导入：相对路径（`maps/xxx.zip`），落在 `<backend_db>/device_uploads/`；
+/// - 设备回传 / 下发刷新：绝对路径（本服务 `ingest_dir` 下的暂存包）。
+pub(crate) fn resolve_package_path(
+    backend_db: &std::path::Path,
+    file_path: &str,
+) -> Option<std::path::PathBuf> {
+    let trimmed = file_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = std::path::Path::new(trimmed);
+    if path.is_absolute() {
+        return path.is_file().then(|| path.to_path_buf());
+    }
+    let upload_root = backend_db.parent()?.join("device_uploads");
+    let candidate = upload_root.join(path);
+    candidate.is_file().then_some(candidate)
+}
+
+/// `GET /api/map-versions/{id}/package` — 原样返回地图包（zip）。
+///
+/// 设备客户端「下发地图」用它拉最新包；中台编辑后业务库会先被刷新
+/// （见 [`apply_push_map`]），所以这里拿到的永远是最新内容。
+pub async fn map_package(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let row: Option<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT file_path, file_name FROM map_versions WHERE id = ?1")
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some((file_path, file_name)) = row else {
+        return Err(AppError::NotFound(format!("地图基线 {id} 不存在")));
+    };
+    let file_path = file_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::BadRequest("该地图没有关联的地图包".to_string()))?;
+    let path = resolve_package_path(&state.config.backend_db_path, file_path).ok_or_else(|| {
+        AppError::NotFound(format!(
+            "地图包文件不存在（{file_path}），请重新从设备同步或从中台导入"
+        ))
+    })?;
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|error| AppError::Internal(format!("读取地图包失败: {error}")))?;
+    let download_name = file_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>()
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "map.zip".to_string());
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/zip")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{download_name}\""),
+        )
+        .header(header::CONTENT_LENGTH, bytes.len().to_string())
+        .body(Body::from(bytes))
+        .map_err(|error| AppError::Internal(format!("构造地图包响应失败: {error}")))
+}
+
+/// 「下发地图」请求（中台 → 业务平台）。
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PushMapRequest {
+    /// 中台 `dog_map.id`
+    pub map_id: i64,
+    /// 幂等键（中台审计用，业务侧只回显）
+    #[serde(default)]
+    pub request_id: Option<String>,
+}
+
+/// 把中台最新地图包写回狗体：刷新业务库副本 → 下发 `下发地图` 指令。
+///
+/// 前置条件：这张中台地图已经导入业务库（有 `source_id` 对应行），且行上有本体
+/// 目录名 `source_ref`——否则不知道写到本体哪个目录，宁可直接报错。
+pub async fn apply_push_map(
+    state: &AppState,
+    device_code: &str,
+    payload: &PushMapRequest,
+) -> Result<Value, AppError> {
+    let device_code = device_code.trim();
+    if payload.map_id <= 0 {
+        return Err(AppError::BadRequest("缺少 mapId".to_string()));
+    }
+    let device = crate::handlers::devices::fetch_device_by_code(state, device_code).await?;
+
+    // 1) 读中台 dog_map（中台才是地图主库）
+    let backend = backend_pool(state).await?;
+    let has_park = dog_map_has_park_columns(&backend).await?;
+    let source_sql = format!(
+        "SELECT d.id, d.map_name, {}, d.file_name, d.file_path, d.file_format,
+            d.file_size, d.remarks, d.map_version, d.frame_id, d.crs, d.map_origin, d.resolution,
+            d.floors, d.road_count, d.nogo_count, d.map_status, d.map_hash, d.publish_time,
+            d.map_width, d.map_height, d.create_time
+         FROM dog_map d
+         LEFT JOIN p_sys_user u ON u.id = d.user_id
+         WHERE d.id = ?1 AND d.is_deleted = 0",
+        dog_map_select_columns(has_park)
+    );
+    let source = sqlx::query_as::<_, BackendMap>(&source_sql)
+        .bind(payload.map_id)
+        .fetch_optional(&backend)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!("中台地图 #{} 不存在（可能已删除）", payload.map_id))
+        })?;
+    let relative = source
+        .file_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::BadRequest("中台地图尚未上传地图包，无法下发".to_string()))?;
+    let package_path = resolve_package_path(&state.config.backend_db_path, relative)
+        .ok_or_else(|| AppError::BadRequest(format!("中台地图包文件不存在：{relative}")))?;
+    let package = tokio::fs::read(&package_path)
+        .await
+        .map_err(|error| AppError::Internal(format!("读取中台地图包失败: {error}")))?;
+    let package_hash = ingest::sha256_hex(&package);
+
+    // 2) 业务库里对应的地图行（同一张中台地图可能被导入到多个园区）
+    let rows: Vec<(String, Option<String>, Option<i64>)> = sqlx::query_as(
+        "SELECT id, source_ref, park_id FROM map_versions
+         WHERE source_id = ?1 ORDER BY created_at DESC",
+    )
+    .bind(payload.map_id.to_string())
+    .fetch_all(&state.db)
+    .await?;
+    if rows.is_empty() {
+        return Err(AppError::BadRequest(format!(
+            "中台地图 #{} 还没有导入业务平台（园区地图基线里看不到），无法下发到本体",
+            payload.map_id
+        )));
+    }
+    let main = rows
+        .iter()
+        .find(|(_, _, park_id)| device.park_id.is_some() && *park_id == device.park_id)
+        .or_else(|| rows.first())
+        .expect("rows is not empty");
+    let map_id = main.0.clone();
+    let source_ref = main
+        .1
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::BadRequest(
+                "该地图没有记录本体目录名（source_ref），无法确定写回本体哪个目录；请先在设备上同步这张图"
+                    .to_string(),
+            )
+        })?;
+    let map_dir = crate::mapdir::dir_from_source_ref(source_ref)
+        .ok_or_else(|| AppError::BadRequest(format!("本体目录名无法解析：{source_ref}")))?;
+
+    // 3) 刷新业务库副本：把中台最新包暂存到 ingest 目录，业务预览 / 下发都用它
+    let file_name = source
+        .file_name
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("{map_dir}.zip"));
+    let stash_name = format!("push-{map_id}-{file_name}");
+    let stash = ingest::stash_package(&state.config.ingest_dir, &stash_name, &package).await?;
+    let file_path = stash.display().to_string();
+    let timestamp = now();
+    for (row_id, _, _) in &rows {
+        sqlx::query(
+            "UPDATE map_versions SET file_path = ?1, file_name = ?2, file_size = ?3,
+                map_hash = ?4, map_width = ?5, map_height = ?6,
+                origin = COALESCE(?7, origin), resolution = COALESCE(?8, resolution)
+             WHERE id = ?9",
+        )
+        .bind(&file_path)
+        .bind(&file_name)
+        .bind(package.len() as i64)
+        .bind(&package_hash)
+        .bind(source.map_width)
+        .bind(source.map_height)
+        .bind(source.map_origin.clone())
+        .bind(source.resolution.clone())
+        .bind(row_id)
+        .execute(&state.db)
+        .await?;
+    }
+
+    // 4) 下发指令：客户端拉包 → 写本体文件服务 → 重新载图
+    let package_path = format!("/api/map-versions/{map_id}/package");
+    let request_id = payload.request_id.clone().unwrap_or_default();
+    let dispatched = gateway::send_command_to_device(
+        &state.device_connections,
+        device_code,
+        "下发地图",
+        Some(json!({
+            "mapId": map_id,
+            "mapName": source.map_name,
+            "mapVersion": source.map_version,
+            "mapHash": package_hash,
+            "sourceRef": source_ref,
+            "mapDir": map_dir,
+            "packagePath": package_path,
+            "requestId": request_id,
+            "requestedAt": timestamp,
+        })),
+    )
+    .await;
+    if !dispatched {
+        let healed = gateway::mark_offline_if_online(&state.db, device_code).await;
+        return Err(AppError::BadRequest(format!(
+            "设备 {device_code} 未连接（台账状态 {}，连接池无该设备连接），地图未下发{}；请确认设备客户端已启动且能连上业务平台",
+            device.status,
+            if healed {
+                "，已将其标记为离线"
+            } else {
+                ""
+            },
+        )));
+    }
+
+    sqlx::query(
+        "INSERT INTO task_events (event_type, title, description, device_id, task_id, created_at)
+         VALUES ('map_push', ?1, ?2, ?3, NULL, ?4)",
+    )
+    .bind(format!(
+        "已向 {} 下发地图：{}",
+        device_code, source.map_name
+    ))
+    .bind(format!(
+        "中台 dog_map #{} · 本体目录 {} · map_hash {}",
+        payload.map_id, map_dir, package_hash
+    ))
+    .bind(device.id)
+    .bind(&timestamp)
+    .execute(&state.db)
+    .await?;
+
+    Ok(json!({
+        "deviceId": device_code,
+        "mapId": map_id,
+        "mapName": source.map_name,
+        "mapDir": map_dir,
+        "sourceRef": source_ref,
+        "mapHash": package_hash,
+        "packagePath": package_path,
+        "mapCount": rows.len(),
+        "wsDelivered": true,
+        "requestId": request_id,
+        "dispatchedAt": timestamp,
+    }))
 }
 
 pub async fn get_map(
@@ -1046,4 +1323,61 @@ fn demo_hash(id: &str, timestamp: &str) -> String {
         hasher.finish(),
         hasher.finish().rotate_left(17)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("robodog-map-test-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 中台导入的地图：相对路径落在 `<backend_db>/device_uploads/` 下
+    #[test]
+    fn resolves_relative_package_under_device_uploads() {
+        let dir = temp_dir("relative");
+        let maps = dir.join("device_uploads/maps");
+        std::fs::create_dir_all(&maps).unwrap();
+        let package = maps.join("m.zip");
+        std::fs::write(&package, b"PK").unwrap();
+
+        let resolved = resolve_package_path(&dir.join("users.db"), "maps/m.zip")
+            .expect("relative package must resolve");
+        assert_eq!(resolved, package);
+    }
+
+    /// 设备回传 / 下发刷新后的地图：业务库存的是 ingest 目录里的绝对路径
+    #[test]
+    fn resolves_absolute_package_path() {
+        let dir = temp_dir("absolute");
+        let package = dir.join("stashed.zip");
+        std::fs::write(&package, b"PK").unwrap();
+
+        let resolved = resolve_package_path(&dir.join("users.db"), package.to_str().unwrap())
+            .expect("absolute package must resolve");
+        assert_eq!(resolved, package);
+    }
+
+    #[test]
+    fn missing_package_resolves_to_none() {
+        let dir = temp_dir("missing");
+        assert!(resolve_package_path(&dir.join("users.db"), "maps/absent.zip").is_none());
+        assert!(resolve_package_path(&dir.join("users.db"), "   ").is_none());
+    }
+
+    #[test]
+    fn push_request_reads_map_id_and_request_id() {
+        let payload: PushMapRequest = serde_json::from_str(r#"{"mapId":12,"requestId":"r-1"}"#)
+            .expect("push payload must parse");
+        assert_eq!(payload.map_id, 12);
+        assert_eq!(payload.request_id.as_deref(), Some("r-1"));
+
+        let payload: PushMapRequest = serde_json::from_str(r#"{"mapId":7}"#).unwrap();
+        assert_eq!(payload.map_id, 7);
+        assert!(payload.request_id.is_none());
+    }
 }

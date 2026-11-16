@@ -5,9 +5,10 @@ use crate::error::ApiResponse;
 use crate::gateway;
 use crate::gateway::DeviceConnections;
 use crate::handlers::{
-    alerts, dashboard, devices, ingest, maps, parks, routes, service, settings, tasks, teleop,
-    zones,
+    alerts, dashboard, devices, ingest, maps, notifications, parks, routes, service, settings,
+    tasks, teleop, zones,
 };
+use crate::notify::Notifier;
 use crate::video::{self, VideoHub};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::Method;
@@ -34,6 +35,8 @@ pub struct AppState {
     pub device_connections: DeviceConnections,
     /// 实时视频中继房间（设备 → 浏览器）
     pub video_hub: VideoHub,
+    /// 企业微信推送句柄（未配置 webhook 时是个静默丢弃的空句柄）
+    pub notifier: Notifier,
 }
 
 async fn health(State(state): State<AppState>) -> Json<ApiResponse<Value>> {
@@ -79,6 +82,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/map-versions/{id}", get(maps::get_map))
         .route("/map-versions/{id}/raster", get(maps::map_raster))
         .route("/map-versions/{id}/refs", get(maps::map_refs))
+        // 地图包原文（设备客户端「下发地图」拉最新包）
+        .route("/map-versions/{id}/package", get(maps::map_package))
         .route("/map-versions/{id}/publish", post(maps::publish_map))
         .route(
             "/map-versions/{id}/new-version",
@@ -163,10 +168,14 @@ pub fn build_router(state: AppState) -> Router {
             "/settings",
             get(settings::list_settings).put(settings::update_settings),
         )
+        // 企业微信推送：记录查询 + 手动发一条测试消息（配好 webhook 先点这里验证）
+        .route("/notifications", get(notifications::list_notifications))
+        .route("/notifications/test", post(notifications::send_test))
         .route("/dashboard/summary", get(dashboard::summary))
         // 数据采集背包（板端 Agent）同源代理：REST 聚合 + SSE 透传 + AI 启停
         .route("/backpack/status", get(backpack::status))
         .route("/backpack/events", get(backpack::events))
+        .route("/backpack/ai-window", get(backpack::ai_window))
         .route("/backpack/detect/start", post(backpack::detect_start))
         .route("/backpack/detect/stop", post(backpack::detect_stop))
         .route("/backpack/detect/config", post(backpack::detect_config))
@@ -184,6 +193,11 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/zentai/devices/{device_id}/command",
             post(service::device_command),
+        )
+        // 中台编辑地图后把最新包写回狗体（HTTP 直连链路）
+        .route(
+            "/zentai/devices/{device_id}/push-map",
+            post(service::push_map),
         )
         .route(
             "/zentai/devices/{device_id}/tasks",

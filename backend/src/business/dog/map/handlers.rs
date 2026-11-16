@@ -1,7 +1,8 @@
 use crate::api::AppState;
 use crate::api::middleware::RequestUser;
 use crate::business::dog::map::domain::{
-    CreateMapRequest, MapImageVO, MapPageQuery, MapVO, UpdateMapRequest, UploadMapRequest,
+    CreateMapRequest, MapEditRequest, MapImageVO, MapPageQuery, MapVO, PushMapRequest,
+    UpdateMapRequest, UploadMapRequest,
 };
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
@@ -138,6 +139,94 @@ pub async fn get_map_image_handler(
         .load_image(params.id, &state.upload_dir, &user.data_scope())
         .await?;
     Ok(Json(ApiResponse::ok(image)))
+}
+
+/// `POST /api/dogMap/{id}/edit` — 橡皮擦：按笔画改写 `model.pgm` 中的噪点。
+///
+/// 请求体：`{ strokes: [{ points: [{x,y}], radius }], eraseValue: 254 }`，
+/// 坐标是栅格像素坐标；返回改写后的 PNG 与新的 `mapHash`。
+pub async fn edit_map_handler(
+    State(state): State<AppState>,
+    Extension(user): Extension<RequestUser>,
+    Path(params): Path<IdParam>,
+    Json(req): Json<MapEditRequest>,
+) -> Result<Json<ApiResponse<MapImageVO>>, AppError> {
+    let image = state
+        .dog_map_service
+        .erase(params.id, req, &state.upload_dir, &user.data_scope())
+        .await?;
+    Ok(Json(ApiResponse::ok(image)))
+}
+
+/// `POST /api/dogMap/{id}/push` — 把中台编辑后的地图下发到狗体（本体）。
+///
+/// 链路：中台 → 业务平台（反向控制信道 / 直连 HTTP）→ 设备客户端 → 本体文件服务，
+/// 由业务平台把最新包写进本体地图目录并重新载图。中台只做授权与审计。
+pub async fn push_map_handler(
+    State(state): State<AppState>,
+    Extension(user): Extension<RequestUser>,
+    Path(params): Path<IdParam>,
+    req: Option<Json<PushMapRequest>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    let req = req.map(|Json(req)| req).unwrap_or_default();
+    let map = state
+        .dog_map_service
+        .get_by_id(params.id, &user.data_scope())
+        .await?;
+    let device_code = req
+        .device_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|code| !code.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            map.device_code
+                .as_deref()
+                .map(str::trim)
+                .filter(|code| !code.is_empty())
+                .map(str::to_string)
+        })
+        .ok_or_else(|| {
+            AppError::BadRequest("该地图没有关联上报设备，请指定 deviceCode 后再下发".to_string())
+        })?;
+    if map
+        .file_path
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        return Err(AppError::BadRequest(
+            "该地图尚未上传地图包，无法下发到狗体".to_string(),
+        ));
+    }
+    // 授权：普通用户只能下发到自己被分配的设备
+    state
+        .dog_device_service
+        .get_by_code(&device_code, &user.data_scope())
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("设备 {device_code} 不存在或未分配给你")))?;
+
+    let request_id = crate::business::dog::device::handlers::resolve_request_id(req.request_id);
+    let body = serde_json::json!({
+        "mapId": map.id,
+        "mapName": map.map_name,
+        "mapVersion": map.map_version,
+        "mapHash": map.map_hash,
+        "deviceCode": device_code,
+        "requestId": request_id,
+    });
+    let data = crate::business::dog::device::handlers::forward(
+        &state,
+        &user,
+        &device_code,
+        "下发地图",
+        "push-map",
+        &request_id,
+        body,
+    )
+    .await?;
+    Ok(Json(ApiResponse::ok(data)))
 }
 
 pub async fn delete_map_handler(

@@ -49,10 +49,6 @@ fn temp_dir() -> PathBuf {
     dir
 }
 
-fn config_of(dir: &Path, backpack_base_url: Option<String>) -> Config {
-    config_with(dir, backpack_base_url, None)
-}
-
 fn config_with(
     dir: &Path,
     backpack_base_url: Option<String>,
@@ -77,6 +73,11 @@ fn config_with(
         backpack_base_url,
         backpack_webrtc_url: None,
         backpack_browser_url,
+        public_url: None,
+        wecom_enabled: false,
+        wecom_webhook: None,
+        wecom_min_level: "警告".to_string(),
+        wecom_mention_all: false,
     }
 }
 
@@ -95,6 +96,7 @@ async fn state_with_browser(
     seed::seed(&pool).await.expect("播种失败");
     AppState {
         db: pool,
+        notifier: robodog_ops_server::notify::Notifier::disabled(),
         config,
         device_connections: gateway::new_device_connections(),
         video_hub: Default::default(),

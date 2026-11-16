@@ -87,6 +87,9 @@ write_env "$BASE/robodog.env" \
   "ROBODOG_JWT_SECRET=$(random_hex)" \
   "ROBODOG_SERVICE_TOKEN=$TOKEN" \
   "ROBODOG_SERVER_CONFIG=$ROBODOG/server.toml" \
+  "# 企业微信群机器人告警推送：取消注释并填 webhook 地址后重启本服务" \
+  "# （地址即凭据，只放这里，不要写进 server.toml）" \
+  "# ROBODOG_WECOM_WEBHOOK=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx" \
   "RUST_LOG=info,robodog_ops_server=info,tower_http=warn"
 
 # ---------------------------------------------------------------- systemd

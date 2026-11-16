@@ -10,10 +10,14 @@ import {
   type UploadRawFile
 } from "element-plus";
 import { useDogMap } from "./hook";
+import MapEditorDialog from "./MapEditorDialog.vue";
+import { dogMapPushToDevice } from "@/api/dogMap";
+import { SUCCESS } from "@/api/base";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 import AddFill from "~icons/ri/add-circle-line";
 import More from "~icons/ep/more-filled";
 import UploadFileIcon from "~icons/ep/upload-filled";
+import ViewIcon from "~icons/ep/view";
 import { PureTableBar } from "@/components/RePureTableBar";
 import PureTable from "@pureadmin/table";
 import DogSearchForm from "@/components/DogUI/DogSearchForm.vue";
@@ -29,6 +33,7 @@ defineOptions({ name: "DogMap" });
 
 const addFormRef = ref<FormInstance>();
 const uploadRef = ref<UploadInstance>();
+const mapEditorRef = ref<InstanceType<typeof MapEditorDialog>>();
 const {
   queryForm,
   dataList,
@@ -98,12 +103,40 @@ const handleNewVersion = row => {
     .catch(() => {});
 };
 
-/** 操作列「更多」菜单分发：发布 / 新版本。 */
+/** 把地图包下发到狗体（本体）并重新载图。 */
+const handlePush = row => {
+  if (!row.deviceCode) {
+    message("该地图没有关联上报设备，无法下发到狗体", { type: "warning" });
+    return;
+  }
+  ElMessageBox.confirm(
+    `将把「${row.mapName}」当前地图包下发到狗体 ${row.deviceCode}，写回本体后重新载图。设备需处于空闲状态。是否继续？`,
+    "下发到狗体",
+    { type: "warning", confirmButtonText: "下发", cancelButtonText: "取消" }
+  )
+    .then(() => dogMapPushToDevice(row.id, row.deviceCode))
+    .then(res => {
+      if (res.code === SUCCESS) {
+        message(`已向 ${row.deviceCode} 下发地图，设备将写回本体并重新载图`, {
+          type: "success",
+          duration: 8000
+        });
+        onSearch();
+      } else {
+        message(res.msg, { type: "error" });
+      }
+    })
+    .catch(() => {});
+};
+
+/** 操作列「更多」菜单分发：发布 / 新版本 / 下发到狗体。 */
 const handleRowCommand = (row, command: string) => {
   if (command === "publish") {
     handlePublish(row);
   } else if (command === "newVersion") {
     handleNewVersion(row);
+  } else if (command === "push") {
+    handlePush(row);
   }
 };
 
@@ -174,6 +207,16 @@ const submitForm = async (formEl?: FormInstance) => {
               @delete="handleDelete(row)"
             >
               <template #extra="{ row: current, size: currentSize }">
+                <el-button
+                  class="reset-margin"
+                  link
+                  type="primary"
+                  :size="currentSize"
+                  :icon="useRenderIcon(ViewIcon)"
+                  @click="mapEditorRef?.open(current)"
+                >
+                  地图
+                </el-button>
                 <el-dropdown
                   trigger="click"
                   @command="
@@ -201,6 +244,9 @@ const submitForm = async (formEl?: FormInstance) => {
                         v-if="current.mapStatus !== '草稿'"
                         command="newVersion"
                         >新版本</el-dropdown-item
+                      >
+                      <el-dropdown-item v-if="current.deviceCode" command="push"
+                        >下发到狗体</el-dropdown-item
                       >
                     </el-dropdown-menu>
                   </template>
@@ -337,5 +383,6 @@ const submitForm = async (formEl?: FormInstance) => {
         >
       </template>
     </el-dialog>
+    <MapEditorDialog ref="mapEditorRef" @saved="onSearch" @pushed="onSearch" />
   </div>
 </template>

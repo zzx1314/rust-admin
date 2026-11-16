@@ -211,7 +211,7 @@ pub async fn sync_device_maps_handler(
 }
 
 /// 幂等键：调用方未指定时由中台生成一个，重试需原样回传。
-fn resolve_request_id(value: Option<String>) -> String {
+pub(crate) fn resolve_request_id(value: Option<String>) -> String {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -256,6 +256,7 @@ async fn deliver(
         "tasks" => "task",
         "runtime" => "runtime",
         "sync-maps" => "sync-maps",
+        "push-map" => "push-map",
         _ => "command",
     };
     // 运行态是只读查询，没有调用方提供的幂等键，这里补一个仅用于关联回执
@@ -311,7 +312,7 @@ async fn deliver(
 /// 一次控制面下发：查幂等键 → 落 pending 审计 → 调业务平台 → 回填审计。
 ///
 /// 中台只做控制与审计，真正的载荷组装与 WebSocket 下发在业务平台。
-async fn forward(
+pub(crate) async fn forward(
     state: &AppState,
     user: &RequestUser,
     device_code: &str,

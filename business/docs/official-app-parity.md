@@ -105,7 +105,7 @@ SmartSdk connect
    | `task_type` | `kind = 4` | patrol |
    | `map_id` | `params.map_id` | 本体**地图目录名**（不是业务地图编号） |
    | `path_id` | `params.path_id` | 本体上 `nav_paths/<名字>`；**航点与动作都在路径文件里，请求不带坐标** |
-   | `dwell_sec` / `points` | —（不在请求里） | 停留/作业由路径点 `properties.tasks` 决定：`0`=等待（固定 2 s）、`1`=拍照 |
+   | `dwell_sec` / `points` | —（不在请求里） | 停留/作业由路径点 `properties.tasks` 决定：`0`=等待（固定 2 s）、`1`=拍照。**平台侧 `dwell` 秒数用重复 `0` 表达（`ceil(dwell/2)` 个），粒度 2 s，单点封顶 300 s**（`business/client/src/zhpro/route.rs` 的 `wait_task_count`） |
    | `patrolSpeedVx` | `params.speed_limit.vx` | 实测 `0.5`（我们一直发 `1.2`） |
    | `minimum_battery` | `params.min_recharge_battery` | 浮点，实测 `25.0` |
    | `end_task` | `params.end_task` | **数字枚举**：`0`=none / `1`=return_to_start / `2`=return_to_charge（与记录里 `properties.end_task` 的字符串一一对应，已实测 0 和 1） |
@@ -163,3 +163,142 @@ SmartSdk connect
 3. 确认 `patrol.point_arrived`、`end_task`、`record`、`minimum_battery` 行为后，
    再把 `TaskMode::Route` 切到 patrol；
 4. 最后补围栏编辑器 / 路径同步（4024 + forbidden_zones）。
+
+## 五、航点停留时长（dwell）与「用暂停当停留」的取舍（2026-11-15）
+
+### 5.1 协议事实：停留时长不可配，只有「固定 2 s 的等待」原子动作
+
+| 出处 | 原文 / 结论 |
+| --- | --- |
+| §2.2.3.7 路径点结构（行 864） | `tasks` = `0` → **等待** → 「在该点**停留一段固定时长（当前实现 2 秒）**」 |
+| 同上（行 874） | 「同一动作可重复出现（如 `[0, 1, 0]` = 等待→拍照→等待）」 |
+| 同上（行 876） | `tasks` 取值**闭集 `{0, 1}`**，「其它数字一律视为非法并丢弃」 |
+| 全文检索 `停留 / dwell / 时长 / 等待` | 只有以上三处；**不存在 `dwell_sec` / `wait_seconds` / 停留秒数之类字段** |
+| `5000 kind=4` | 文档连参数表都没有（kind 枚举标注「暂不对外开放」），抓包里也没有任何 `dwell*` 字段 |
+| APK 字符串 | 官方 App 内部有 `dwell_sec`（见 §三.1 表），但**不在线上报文里** → App 也是把它翻成 `tasks` |
+
+**结论：秒数只能靠「重复 `0`」累加表达，粒度 2 s。**
+
+### 5.2 我方实现（2026-11-15 落地）
+
+`business/client/src/zhpro/route.rs`：
+
+```rust
+pub const WAIT_TASK_SECONDS: i64 = 2;   // 本体每个「等待」动作的时长
+pub const MAX_WAIT_TASKS: i64 = 150;    // 单点封顶 300 s（填更大值会 WARN 后截断）
+fn wait_task_count(dwell: i64) -> usize // ceil(dwell / 2)，dwell<=0 → 0
+```
+
+映射关系（`point_path_tasks`）：
+
+| 平台 `dwell` | 下发 `tasks` | 实际停留 |
+| --- | --- | --- |
+| 0 | `[]`（只配拍照则 `[1]`） | 0 s，拍完就走 |
+| 1~2 | `[0]` | 2 s |
+| 3~4 | `[0,0]` | 4 s |
+| 5~6 | `[0,0,0]` | 6 s |
+| 6 + 拍照 | `[0,0,0,1]` | 6 s 后拍照 |
+| > 300 | 150 个 `0` | 300 s（WARN 截断） |
+
+向上取整（填 5 实际停 6 s），单测 `dwell_seconds_expand_to_repeated_waits` 覆盖。
+控制台「停留时长」输入框已改为 `step=2` 并提示「2 s 粒度」。
+
+### 5.3 仍待真机验证：连续多个 `0` 会不会被合并
+
+文档只说「可重复」，**没说连续 `0` 是否累加**。必须实测一次（`dwell=6` 的点），三选一：
+
+1. `5009` 的 `patrol.waiting` 与 `patrol.photographing` 两帧时间差应 ≈6 s；
+2. 本体巡检记录 `/ota/alg_data/patrol_record/<task_id>.json` 里 `phase` 中 `waiting` 的 `duration`；
+3. `5010/5011` 查记录（`phase[].started_at / ended_at / duration`，客户端尚未接）。
+
+- ≈6 s → 方案成立，可全量推广；
+- ≈2 s → 本体把连续 `0` 合并了，只能改回单个 `0`，并向厂商要 `tasks` 的时间参数。
+
+### 5.4 不要用 `5004/5006`（暂停/恢复）当停留定时器
+
+结论：**不用**。它把一个「本体自治」的问题退回成「客户端实时抢控制」，收益（精度）与风险不成比例。
+
+| 风险 | 具体原因 |
+| --- | --- |
+| 停不准 | `5009` 是 500 ms 周期快照 + 变化补帧；`point_arrived` → 客户端收到 → 发 `5004` → 本体减速收敛，量级 0.3~1 s+。等你停住，狗可能已离点 1 m，**停在半路** |
+| 语义未定义 | 文档只写「受理」，没写停在哪、恢复是否重算、**恢复后会不会对当前点重发 `patrol.point_arrived`**（会的话定时逻辑自我循环） |
+| 污染状态机 | 暂停期间 5009 `lifecycle=paused`（§2.6.5），客户端会把平台任务同步成「暂停」，看板/进度守卫/定时任务全部误判 |
+| 通道冲突 | 操作员在页面点「暂停」走的也是 `5004/5006`（`route.rs` 的 `Control::Pause/Resume`），内部定时暂停与人工暂停无法区分，谁恢复谁说不清 |
+| 能力占用 | 暂停时导航能力仍被占用；此时取消/断线会留下挂起任务 → `13897 capability busy`，现场恢复手段是重启本体 `dog_task`（见 `deploy/robodog-body.md` §10） |
+| 精度收益有限 | 真要「稳定 30 s 测温」还得读 `1401` 等底盘收敛、加超时与断线 watchdog，复杂度远超「重复 `0`」 |
+
+**唯一适合用暂停的场景：人工接管 / 作业时长不可预测**（操作员看画面确认、手动对准、临时遥控）。
+若使用，必须同时做到：
+
+1. 触发点选 `patrol.waiting`（不是 `point_arrived`），去重键 `task_id + point_index`；
+2. 与人工暂停互斥（内部暂停期间禁用页面按钮，或加 `internal_pause` 标志）；
+3. 定时恢复要有 watchdog：客户端重启/断线后主动 `5006` 或 `5002` 收尾，别把本体挂在暂停态；
+4. 恢复后观察该点是否重发 `point_arrived`，若重发按「同一点第二次作业」跳过；
+5. 把 `lifecycle=paused` 映射成「执行中（内部等待）」，不要显示成平台「暂停」。
+
+### 5.5 到点做平台侧作业（拍照 / AI 识别）的正确姿势
+
+分工：**采集归本体，识别归平台。**
+
+| 事情 | 谁做 | 怎么落 |
+| --- | --- | --- |
+| 到点停住 | 本体 | `tasks` 里的 `0`（2 s 粒度，可重复累加，见 5.2） |
+| 拍照/存图 | 本体 | `tasks` 里的 `1` → ALG 调 `/capture_image` → 落巡检记录 `5011` 的 `phase[].image_path` |
+| 拉图、AI 推理、告警入库 | 平台 | 任务结束后从 `5010/5011` 取 `image_path` → 拉图 → 推理 → `alerts` |
+
+- **识别不要卡在巡检执行里**：模型挂了不影响巡检跑完，图有落盘路径可复核/重跑；
+- 需要「到点实时出结果」时，客户端只做**只读**参与：收到 `patrol.waiting` → 抓帧上传 → 平台推理，
+  窗口不够就把该点 `dwell` 调大（`[0,0]`=4 s、`[0,0,0]`=6 s），**不要发 `5004`**；
+- 已知缺口：背包 Agent 只有「常开 detect」（`/api/detect/start|stop|config`）与浏览器 canvas 抓拍，
+  **没有「传一张图返回检测结果」的入口**。所以到点 AI 目前用「开识别窗口」实现（见 5.6），
+  单图推理接口一旦有了，5.6 的窗口可以直接换成「拍一张 → 推一张」。
+
+### 5.6 航点到点 AI 识别（已落地，2026-11-15）
+
+实现在 `business/server/src/ai_patrol.rs`，**全在服务端**，客户端零改动。
+
+```text
+客户端 task_progress（stage = patrol.point_arrived / patrol.waiting，带 pointIndex）
+  → 服务端按 taskCode 找到任务 → 路线 route_data.points[index].actions[]
+  → 命中「AI 识别」动作（动作名含 `AI` 或 `识别`）
+  → POST {agent}/api/detect/start（已在跑则 /config 热更新）
+  → 读 {agent}/api/events 的 SSE，只取 type=detect 的 boxes
+  → 框的 conf ≥ 阈值 → 写 alerts + task_events（同类目标窗口内只报一次）
+  → 窗口到期 / 任务终态 / 被下一个点顶替 → POST /api/detect/stop
+```
+
+**动作参数怎么填**（路线编辑器「该点执行动作」→ `AI 识别`）：
+
+| 字段 | 用途 | 例 |
+| --- | --- | --- |
+| `param` | **场景提示**，按 `/ 、 , 空格` 切词去匹配 Agent 的模型名/中文名/类别名；一个都不命中时退回第一个可用模型并打 WARN | `烟火 / 人员 / 安全帽` |
+| `threshold` | 置信度阈值：`0.85`、`> 0.85`、`85%` 都认；`> 65℃` 这类温度阈值不会被误当成置信度 | `置信度 > 0.85` |
+
+**窗口时长**：`max(dwell, 4) + 8` 秒，夹在 10~30 s（Agent 加载模型 1~3 s，太短狗就走了；
+太长会在离开航点后把别的画面当目标）。
+
+**与操作员手动识别的关系**：Agent 是单路单任务。
+
+- 操作员已在「实时视频」页开着识别 → 巡检窗口只做 `/api/detect/config` 热更新，
+  **窗口结束不会把操作员的识别停掉**；
+- 巡检窗口开着时操作员再点「开始识别」会被 Agent 拒绝（「识别已在运行」），属预期。
+
+**排查入口**：`GET /api/backpack/ai-window` 返回当前窗口（是否在跑、任务/航点、解析到的场景、
+阈值、相机、窗口内已上报类别）或 `{"active": false}`。现场「配了 AI 识别但没告警」按这个顺序看：
+
+1. 窗口有没有开 → 没开说明 `stage`/`pointIndex` 没上报，或动作类型不含 `AI`/`识别`；
+2. 场景对不对 → `scene` 是否解析到了期望的模型（不对就改动作 `param`）；
+3. 阈值 → `threshold` 是否过高（0.95 很难触发）；
+4. `hits` → 有 hits 说明识别到了，只是告警被去重（同类只报一次）或写在别的任务上。
+
+**部署前提（很容易踩）**：这条链路是**服务端**去调 Agent，所以业务服务必须能 HTTP 到板端：
+
+- ✅ 服务端在园区内网（或与板端同网段）：配 `ROBODOG_BACKPACK_URL=http://<板端>:8000`；
+- ❌ 只配了 `ROBODOG_BACKPACK_BROWSER_URL`（浏览器直连模式）：浏览器能看视频/AI，
+  但**服务端连不到 Agent，航点 AI 永远起不来**——日志里会出现
+  「本部署的服务端访问不到背包 Agent，跳过航点…」，`/api/backpack/ai-window` 始终 `active:false`；
+- 外网部署（`39.107.55.13`）要跑航点 AI，只能把业务服务下沉到现场，或给 Agent 一条
+  服务端可达的地址（反向控制信道目前只覆盖中台，未覆盖背包）。
+
+**测试**：`business/server/tests/ai_patrol.rs`（假 Agent 跑完整链路：开窗口 → 阈值过滤 →
+去重 → 告警/事件落库 → 终态停识别；以及「无 AI 动作不碰 Agent」「未配 Agent 不留脏窗口」）。

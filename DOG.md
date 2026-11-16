@@ -61,6 +61,8 @@ PUT    /api/<module>/{id}           修改
 DELETE /api/<module>/{id}           软删除
 POST   /api/dogMap/upload           上传 .zip 地图包（multipart：file + mapInfo）
 GET    /api/dogMap/{id}/image       地图栅格 PNG + 分辨率 / 原点
+POST   /api/dogMap/{id}/edit        橡皮擦：按像素笔画改写包内 model.pgm 噪点
+POST   /api/dogMap/{id}/push        把编辑后的地图下发到狗体（本体）并重新载图
 POST   /api/dogMap/{id}/publish     发布地图版本（记录发布时间）
 POST   /api/dogMap/{id}/newVersion  派生并发布下一个不可变版本
 GET    /api/dogStatistics/all       地图 / 模型 / 媒体 / 参数配置总量与本周曲线
@@ -90,6 +92,33 @@ POST   /api/dogInternal/maps/exists          地图 id 是否仍存在（业务�
 POST   /api/dogInternal/maps/upload          地图包回传（multipart：file + mapInfo）
 GET    /api/dogDevice/control-plane/ws       反向控制信道（WebSocket，业务平台拨入）
 ```
+
+### 3.0.1 地图编辑与写回狗体
+
+中台地图页的「地图」按钮打开预览 / 橡皮擦弹窗（`dogMap/{id}/image` +
+`dogMap/{id}/edit`）：坐标是栅格像素坐标，擦除值 `254` = 可通行（默认）、
+`205` = 未知；后端只改写包内 `model.pgm`（或本体命名的 `map.pgm`），
+`model.yaml` 与其余条目原样保留，`map_hash` 按新包重算，旧包留在磁盘上。
+只有 `草稿` / `部分标定` 版本可编辑，已发布 / 已归档请先派生新版本。
+
+编辑完点「下发到狗体」（`POST /api/dogMap/{id}/push`，也可在地图列表「更多」里触发）
+才会真正写回机器人，链路：
+
+```text
+中台 POST /api/dogMap/{id}/push
+  → 反向控制信道 push-map（或直连 POST /api/zentai/devices/{code}/push-map）
+     → 业务平台 apply_push_map
+        ① 按 source_id 找到业务库 map_versions（未导入过就直接报错）
+        ② 读中台最新包，暂存到业务 ingest 目录并刷新 file_path / map_hash / 尺寸
+        ③ 下发「下发地图」指令（带 mapId / mapDir / packagePath / mapHash）
+            → 设备客户端 GET /api/map-versions/{id}/package
+            → 写本体文件服务 map.pgm + map.yaml（读回校验）
+            → 4030 重新载图
+```
+
+设备必须在业务平台在线、本体上没有同名目录以外的猜测路径、且当前没有执行任务 /
+建图，否则直接报错而不是「静默下发」。只有 `map.pgm` / `map.yaml` 会被覆盖，
+`map.pcd` / `map.geojson` / `nav_paths` 保持原样，不影响已有路线。
 
 - `module` ∈ `dogMap`、`dogMedia`、`dogModel`、`dogConfig`，均提供 `getPage` + `getAll`。
 - 统计接口同样需要登录（`require_auth`）。

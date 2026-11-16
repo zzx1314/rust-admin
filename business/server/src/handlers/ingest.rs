@@ -6,7 +6,13 @@
 //!
 //! 请求为 multipart：
 //! - `file`：地图 `.zip` 包（必填）
-//! - `mapInfo`：`{ mapName, parkId, bind, mapType, remarks, source, sourceRef }`
+//! - `mapInfo`：`{ mapName, parkId, bind, mapType, remarks, source, sourceRef, mode }`
+//!
+//! `mode` 决定去重语义（见 [`crate::ingest::IngestMode`]）：
+//! - `incremental`（默认）：命中 `sourceRef` 直接跳过，只补平台没有的图；
+//! - `refresh`：中台/控制台显式「同步地图」时用，内容指纹变了就原地覆盖中台
+//!   同一条 `dog_map`（`mapInfo.mapId`），内容没变仍然跳过。中台的不可变版本
+//!   （已发布 / 部分标定 / 已归档）会拒绝覆盖，错误原样带回同步报告。
 
 use crate::app::AppState;
 use crate::db::now;
@@ -98,17 +104,25 @@ pub async fn ingest_map(
     // 「已同步」还要求中台那张地图仍存在：中台是地图主库，图被中台删掉（软删）后
     // 业务库里的历史行不能算已同步，否则这张图在中台永远回不来。
     // 这种场景不换业务地图 id：路线 / 任务通过 `map_version_id` 引用它。
+    //
+    // 两种模式的区别（`mapInfo.mode`）：
+    // - incremental（默认）：命中就跳过，只补平台没有的图，设备定时轮询走这条；
+    // - refresh：中台 / 控制台显式点「同步地图」时用，要求「全部更新到本体最新」，
+    //   所以不按 sourceRef 跳过；只有内容指纹完全一致才跳过，变了就覆盖中台同一条记录。
+    let refresh = request.mode.is_refresh();
     let mut reuse_map_id: Option<String> = None;
+    let mut replace_zentai_id: Option<i64> = None;
     if let Some(source_ref) = request
         .source_ref
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let existing: Option<(String, Option<String>)> = match device_code.as_deref() {
+        let existing: Option<(String, Option<String>, Option<String>)> = match device_code.as_deref()
+        {
             Some(code) => {
                 sqlx::query_as(
-                    "SELECT id, source_id FROM map_versions
+                    "SELECT id, source_id, file_path FROM map_versions
                      WHERE (device_code = ?1 OR device_code IS NULL) AND source_ref = ?2
                      ORDER BY CASE WHEN device_code = ?1 THEN 0 ELSE 1 END LIMIT 1",
                 )
@@ -118,13 +132,16 @@ pub async fn ingest_map(
                 .await?
             }
             None => {
-                sqlx::query_as("SELECT id, source_id FROM map_versions WHERE source_ref = ?1 LIMIT 1")
-                    .bind(source_ref)
-                    .fetch_optional(&state.db)
-                    .await?
+                sqlx::query_as(
+                    "SELECT id, source_id, file_path FROM map_versions
+                     WHERE source_ref = ?1 LIMIT 1",
+                )
+                .bind(source_ref)
+                .fetch_optional(&state.db)
+                .await?
             }
         };
-        if let Some((map_id, source_id)) = existing {
+        if let Some((map_id, source_id, stored_file)) = existing {
             let stale_zentai_id = source_id
                 .as_deref()
                 .map(str::trim)
@@ -136,7 +153,7 @@ pub async fn ingest_map(
                         Ok(alive) => Some(alive.contains(&zentai_id)),
                         Err(error) => {
                             // 中台不可达：按已同步处理，宁可漏传也不重复下载大文件
-                            warn!("校验中台地图 {zentai_id} 是否仍存在失败，按已同步跳过: {error}");
+                            warn!("校验中台地图 {zentai_id} 是否仍存在失败，按已同步处理: {error}");
                             None
                         }
                     }
@@ -144,26 +161,61 @@ pub async fn ingest_map(
                 // 没有中台 id 的历史行（如手工导入）无法校验，仍按已同步处理
                 None => None,
             };
-            if alive != Some(false) {
-                let map = crate::handlers::maps::fetch_map(&state, &map_id).await?;
-                info!("地图 {source_ref} 已同步过，跳过重复入库（{map_id}）");
-                return Ok(ApiResponse::ok(json!({
-                    "mapId": map.id,
-                    "mapName": map.map_name,
-                    "parkId": map.park_id,
-                    "zentaiMapId": Value::Null,
-                    "bound": false,
-                    "skipped": true,
-                    "reason": "sourceRef 已存在，跳过重复同步",
-                    "stashPath": Value::Null,
-                    "map": map,
-                })));
+
+            if refresh {
+                // 刷新：内容没变就不折腾中台（客户端每次现场重打包，zip 时间戳不同，
+                // 所以比的是「内容指纹」而不是整包哈希）。
+                if package_matches_stored(&state, stored_file.as_deref(), &package).await {
+                    let map = crate::handlers::maps::fetch_map(&state, &map_id).await?;
+                    info!("地图 {source_ref} 内容未变化，刷过同步（{map_id}）");
+                    return Ok(ApiResponse::ok(json!({
+                        "mapId": map.id,
+                        "mapName": map.map_name,
+                        "parkId": map.park_id,
+                        "zentaiMapId": stale_zentai_id,
+                        "bound": false,
+                        "skipped": true,
+                        "mode": request.mode.as_str(),
+                        "reason": "地图包内容未变化，平台副本已是最新",
+                        "stashPath": Value::Null,
+                        "map": map,
+                    })));
+                }
+                reuse_map_id = Some(map_id.clone());
+                // 中台那张图还在 → 原地覆盖它，不在地图列表里多出一份副本；
+                // 已被删掉则不传 id，按新建恢复。
+                if alive == Some(true) {
+                    replace_zentai_id = stale_zentai_id;
+                }
+                info!(
+                    "刷新地图 {source_ref}：复用业务地图 {map_id}，中台{}",
+                    replace_zentai_id
+                        .map(|id| format!("覆盖 dog_map #{id}"))
+                        .unwrap_or_else(|| "记录已不存在，重新上传".to_string())
+                );
+            } else {
+                if alive != Some(false) {
+                    let map = crate::handlers::maps::fetch_map(&state, &map_id).await?;
+                    info!("地图 {source_ref} 已同步过，跳过重复入库（{map_id}）");
+                    return Ok(ApiResponse::ok(json!({
+                        "mapId": map.id,
+                        "mapName": map.map_name,
+                        "parkId": map.park_id,
+                        "zentaiMapId": Value::Null,
+                        "bound": false,
+                        "skipped": true,
+                        "mode": request.mode.as_str(),
+                        "reason": "sourceRef 已存在，跳过重复同步",
+                        "stashPath": Value::Null,
+                        "map": map,
+                    })));
+                }
+                info!(
+                    "中台地图 {} 已被删除，重新上传并复用业务地图 {map_id}",
+                    stale_zentai_id.unwrap_or_default()
+                );
+                reuse_map_id = Some(map_id);
             }
-            info!(
-                "中台地图 {} 已被删除，重新上传并复用业务地图 {map_id}",
-                stale_zentai_id.unwrap_or_default()
-            );
-            reuse_map_id = Some(map_id);
         }
     }
 
@@ -199,7 +251,7 @@ pub async fn ingest_map(
         .build()
         .map_err(|e| AppError::Internal(format!("构造 HTTP 客户端失败: {e}")))?;
 
-    // 第一跳：推入中台 dog_map
+    // 第一跳：推入中台 dog_map（刷新模式下带 mapId 原地覆盖）
     let zentai = ingest::push_to_zentai(
         &state.config,
         &http,
@@ -208,6 +260,7 @@ pub async fn ingest_map(
         &file_name,
         &package,
         owner_user_id,
+        replace_zentai_id,
     )
     .await
     .inspect_err(|e| {
@@ -320,7 +373,35 @@ pub async fn ingest_map(
         "zentaiMapId": zentai.id,
         "bound": request.bind,
         "skipped": false,
+        "mode": request.mode.as_str(),
+        "replaced": replace_zentai_id.is_some(),
         "stashPath": stash_path.display().to_string(),
         "map": map,
     })))
+}
+
+/// 平台侧已有副本与刚上传的包内容是否完全一致（按内容指纹，不看 zip 时间戳）。
+///
+/// 读不到本地副本（已删、路径失效）时一律当作「有变化」：宁可多传一次，
+/// 也不要把「本体的新图」误判成已经同步。
+async fn package_matches_stored(
+    state: &AppState,
+    stored_file: Option<&str>,
+    package: &[u8],
+) -> bool {
+    let Some(stored_file) = stored_file.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    let Some(path) =
+        crate::handlers::maps::resolve_package_path(&state.config.backend_db_path, stored_file)
+    else {
+        return false;
+    };
+    match tokio::fs::read(&path).await {
+        Ok(stored) => ingest::package_fingerprint(&stored) == ingest::package_fingerprint(package),
+        Err(error) => {
+            warn!("读取本地地图副本失败（{}）: {error}", path.display());
+            false
+        }
+    }
 }

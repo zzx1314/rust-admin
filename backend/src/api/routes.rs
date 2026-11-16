@@ -307,12 +307,20 @@ pub fn dog_map_routes(state: AppState) -> Router<AppState> {
             get(dog_map_handlers::get_map_image_handler),
         )
         .route(
+            "/dogMap/{id}/edit",
+            post(dog_map_handlers::edit_map_handler).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
+        .route(
             "/dogMap/{id}/publish",
             post(dog_map_handlers::publish_map_handler),
         )
         .route(
             "/dogMap/{id}/newVersion",
             post(dog_map_handlers::new_map_version_handler),
+        )
+        .route(
+            "/dogMap/{id}/push",
+            post(dog_map_handlers::push_map_handler),
         )
         .route(
             "/dogMap/{id}",

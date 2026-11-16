@@ -1,0 +1,452 @@
+//! 地图编辑（橡皮擦）：在中台预览地图后擦除栅格噪点。
+//!
+//! 编辑走 `DogMapService::erase`：读取原 `.zip`，按像素笔画改写 `model.pgm`，
+//! 其余条目原样保留，落盘为新包并回写 `file_path` / `map_hash` / 尺寸。
+//! 已发布 / 已归档版本不可直接编辑（必须派生新版本），`map_hash` 不一致时
+//! 拒绝编辑，避免覆盖被偷改过的文件。
+
+use std::io::{Cursor, Write};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use x_rust::api::AppState;
+use x_rust::app::App;
+use x_rust::business::dog::map::domain::{
+    CreateMapRequest, MapEditPoint, MapEditRequest, MapEditStroke, UploadMapRequest,
+};
+use x_rust::business::dog::map::package::{parse_map_package, parse_pgm_raster, sha256_hex};
+use x_rust::common::data_scope::DataScope;
+use x_rust::system::auth::memory_store::InMemoryTokenStore;
+
+const JWT_SECRET: &str = "test-secret";
+const WIDTH: u32 = 8;
+const HEIGHT: u32 = 8;
+const NOISE_INDEX: usize = 4 * 8 + 4;
+
+struct Fixture {
+    state: AppState,
+    dir: PathBuf,
+    map_id: i64,
+    /// 原始地图包（带噪点）
+    original: Vec<u8>,
+}
+
+/// 生成一张 8x8、中心有一个噪点黑像素的地图包。
+fn sample_package(with_noise: bool) -> Vec<u8> {
+    let mut pixels = vec![254u8; (WIDTH * HEIGHT) as usize];
+    if with_noise {
+        pixels[NOISE_INDEX] = 0;
+    }
+    let mut pgm = format!("P5\n{WIDTH} {HEIGHT}\n255\n").into_bytes();
+    pgm.extend_from_slice(&pixels);
+    let yaml = b"image: model.pgm\nresolution: 0.05\norigin: [-1.0, -2.0, 0.0]\nnegate: 0\n";
+
+    let mut buffer = Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut buffer);
+        let options: zip::write::SimpleFileOptions = Default::default();
+        writer.start_file("map/model.pgm", options).unwrap();
+        writer.write_all(&pgm).unwrap();
+        writer.start_file("map/model.yaml", options).unwrap();
+        writer.write_all(yaml).unwrap();
+        writer.finish().unwrap();
+    }
+    buffer.into_inner()
+}
+
+fn create_request(status: &str) -> CreateMapRequest {
+    CreateMapRequest {
+        map_name: format!("橡皮擦测试 {status}"),
+        map_type: Some("离线地图".to_string()),
+        park_code: None,
+        park_name: None,
+        device_code: Some("RD-201".to_string()),
+        map_data: None,
+        file_name: Some("map.zip".to_string()),
+        file_path: Some("maps/original.zip".to_string()),
+        file_format: Some("zip".to_string()),
+        file_size: None,
+        remarks: None,
+        map_version: Some("v1.0".to_string()),
+        frame_id: None,
+        crs: None,
+        map_origin: Some("-1.0, -2.0, 0.0".to_string()),
+        resolution: Some("0.05".to_string()),
+        floors: None,
+        road_count: None,
+        nogo_count: None,
+        map_status: Some(status.to_string()),
+        map_hash: None,
+        map_width: Some(WIDTH as i32),
+        map_height: Some(HEIGHT as i32),
+    }
+}
+
+async fn fixture(status: &str) -> Fixture {
+    let dir = std::env::temp_dir().join(format!(
+        "rust_admin_map_edit_{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(dir.join("maps")).unwrap();
+    let original = sample_package(true);
+    std::fs::write(dir.join("maps/original.zip"), &original).unwrap();
+
+    let app = App::new("sqlite::memory:")
+        .await
+        .expect("in-memory database must migrate");
+    let mut state =
+        app.build_state_with_token_store(Arc::new(InMemoryTokenStore::new()), JWT_SECRET);
+    state.upload_dir = dir.clone();
+
+    let mut request = create_request(if status == "已发布" {
+        "草稿"
+    } else {
+        status
+    });
+    request.map_hash = Some(sha256_hex(&original));
+    request.file_size = i64::try_from(original.len()).ok();
+    let scope = DataScope::new(1, true);
+    let map = state
+        .dog_map_service
+        .create(request, &scope)
+        .await
+        .expect("map must be created");
+    if status == "已发布" {
+        // 新建只允许草稿 / 部分标定，发布态必须走发布流程
+        state
+            .dog_map_service
+            .publish(map.id, &scope)
+            .await
+            .expect("map must be published");
+    }
+
+    Fixture {
+        state,
+        dir,
+        map_id: map.id,
+        original,
+    }
+}
+
+fn center_stroke(radius: f64) -> MapEditRequest {
+    MapEditRequest {
+        strokes: vec![MapEditStroke {
+            points: vec![MapEditPoint { x: 4.5, y: 4.5 }],
+            radius: Some(radius),
+        }],
+        erase_value: None,
+    }
+}
+
+#[tokio::test]
+async fn erase_rewrites_pgm_and_updates_hash() {
+    let fixture = fixture("草稿").await;
+    let scope = DataScope::new(1, true);
+    let stored_path = fixture.dir.join("maps/original.zip");
+
+    let image = fixture
+        .state
+        .dog_map_service
+        .erase(
+            fixture.map_id,
+            center_stroke(0.6),
+            &fixture.state.upload_dir,
+            &scope,
+        )
+        .await
+        .expect("erase must succeed");
+
+    assert_eq!(image.width, WIDTH);
+    assert_eq!(image.height, HEIGHT);
+    assert_eq!(image.erased_pixels, Some(1));
+    assert!(image.image.starts_with("data:image/png;base64,"));
+    assert!((image.resolution - 0.05).abs() < f64::EPSILON);
+    assert_eq!(image.origin, vec![-1.0, -2.0, 0.0]);
+
+    // 记录被更新：新文件路径、新 hash、尺寸不变
+    let map = fixture
+        .state
+        .dog_map_service
+        .get_by_id(fixture.map_id, &scope)
+        .await
+        .expect("map must still exist");
+    let new_path = map.file_path.clone().expect("file path must be updated");
+    assert_ne!(new_path, "maps/original.zip");
+    assert_eq!(map.map_hash.as_deref(), image.map_hash.as_deref());
+    assert_eq!(map.map_width, Some(WIDTH as i32));
+    assert_eq!(map.map_height, Some(HEIGHT as i32));
+
+    let bytes = std::fs::read(fixture.state.upload_dir.join(&new_path)).unwrap();
+    assert_eq!(sha256_hex(&bytes), image.map_hash.clone().unwrap());
+    assert_eq!(bytes.len() as i64, map.file_size.unwrap());
+
+    // 噪点被擦成 254（自由空间），model.yaml 原样保留
+    let parsed = parse_map_package(&bytes).expect("edited package must still parse");
+    assert_eq!(parsed.width, WIDTH);
+    assert_eq!(parsed.origin, vec![-1.0, -2.0, 0.0]);
+    let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+    let mut pgm = Vec::new();
+    std::io::Read::read_to_end(&mut archive.by_name("map/model.pgm").unwrap(), &mut pgm).unwrap();
+    let raster = parse_pgm_raster(&pgm).unwrap();
+    assert_eq!(raster.pixels[NOISE_INDEX], 254);
+    assert!(archive.by_name("map/model.yaml").is_ok());
+
+    // 旧包保留在磁盘上（和 upload 覆盖旧包的行为一致）
+    assert!(stored_path.exists());
+}
+
+#[tokio::test]
+async fn erase_supports_unknown_value_and_multiple_strokes() {
+    let fixture = fixture("部分标定").await;
+    let scope = DataScope::new(1, true);
+
+    let request = MapEditRequest {
+        strokes: vec![
+            MapEditStroke {
+                points: vec![MapEditPoint { x: 4.5, y: 4.5 }],
+                radius: Some(1.0),
+            },
+            MapEditStroke {
+                points: vec![
+                    MapEditPoint { x: 0.5, y: 7.5 },
+                    MapEditPoint { x: 7.5, y: 7.5 },
+                ],
+                radius: Some(0.6),
+            },
+        ],
+        erase_value: Some(205),
+    };
+    let image = fixture
+        .state
+        .dog_map_service
+        .erase(fixture.map_id, request, &fixture.state.upload_dir, &scope)
+        .await
+        .expect("erase must succeed");
+    assert!(image.erased_pixels.unwrap() >= 8, "整条底边都应该被擦除");
+
+    let map = fixture
+        .state
+        .dog_map_service
+        .get_by_id(fixture.map_id, &scope)
+        .await
+        .unwrap();
+    let bytes = std::fs::read(fixture.state.upload_dir.join(map.file_path.unwrap())).unwrap();
+    let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+    let mut pgm = Vec::new();
+    std::io::Read::read_to_end(&mut archive.by_name("map/model.pgm").unwrap(), &mut pgm).unwrap();
+    let raster = parse_pgm_raster(&pgm).unwrap();
+    assert_eq!(raster.pixels[NOISE_INDEX], 205);
+    assert_eq!(raster.pixels[(7 * WIDTH) as usize + 3], 205);
+}
+
+#[tokio::test]
+async fn erase_rejects_published_map() {
+    let fixture = fixture("已发布").await;
+    let scope = DataScope::new(1, true);
+
+    let error = fixture
+        .state
+        .dog_map_service
+        .erase(
+            fixture.map_id,
+            center_stroke(1.0),
+            &fixture.state.upload_dir,
+            &scope,
+        )
+        .await
+        .expect_err("published maps are immutable");
+    let message = format!("{error}");
+    assert!(
+        message.contains("不可直接编辑"),
+        "unexpected error: {message}"
+    );
+
+    // 原文件没被改动
+    let stored = std::fs::read(fixture.dir.join("maps/original.zip")).unwrap();
+    assert_eq!(sha256_hex(&stored), sha256_hex(&fixture.original));
+}
+
+#[tokio::test]
+async fn erase_rejects_tampered_package() {
+    let fixture = fixture("草稿").await;
+    let scope = DataScope::new(1, true);
+
+    let tampered = sample_package(false);
+    std::fs::write(fixture.dir.join("maps/original.zip"), &tampered).unwrap();
+
+    let error = fixture
+        .state
+        .dog_map_service
+        .erase(
+            fixture.map_id,
+            center_stroke(1.0),
+            &fixture.state.upload_dir,
+            &scope,
+        )
+        .await
+        .expect_err("hash mismatch must be rejected");
+    let message = format!("{error}");
+    assert!(message.contains("map_hash"), "unexpected error: {message}");
+}
+
+#[tokio::test]
+async fn erase_rejects_empty_or_oversized_request() {
+    let fixture = fixture("草稿").await;
+    let scope = DataScope::new(1, true);
+
+    let empty = MapEditRequest {
+        strokes: Vec::new(),
+        erase_value: None,
+    };
+    assert!(
+        fixture
+            .state
+            .dog_map_service
+            .erase(fixture.map_id, empty, &fixture.state.upload_dir, &scope)
+            .await
+            .is_err()
+    );
+
+    let mut bad = center_stroke(1.0);
+    bad.strokes[0].points[0].x = f64::NAN;
+    assert!(
+        fixture
+            .state
+            .dog_map_service
+            .erase(fixture.map_id, bad, &fixture.state.upload_dir, &scope)
+            .await
+            .is_err()
+    );
+}
+
+// ─── 设备「同步地图」刷新：按 id 原地覆盖地图包 ─────────────────────
+
+fn upload_request(map_id: Option<i64>, version: Option<&str>, status: &str) -> UploadMapRequest {
+    UploadMapRequest {
+        id: map_id,
+        map_name: "刷新测试".to_string(),
+        map_type: Some("2D栅格".to_string()),
+        park_code: None,
+        park_name: None,
+        device_code: Some("RD-201".to_string()),
+        owner_user_id: None,
+        remarks: Some("机器人建图自动回传".to_string()),
+        map_version: version.map(str::to_string),
+        frame_id: None,
+        crs: None,
+        map_origin: None,
+        resolution: None,
+        floors: None,
+        road_count: None,
+        nogo_count: None,
+        map_status: Some(status.to_string()),
+        map_hash: None,
+        map_width: None,
+        map_height: None,
+    }
+}
+
+/// 业务平台刷新时带 `id` → 覆盖同一条记录，不新增副本，版本号/状态不被回退。
+#[tokio::test]
+async fn upload_with_id_replaces_package_in_place() {
+    let fixture = fixture("部分标定").await;
+    let scope = DataScope::new(1, true);
+    let before = fixture
+        .state
+        .dog_map_service
+        .get_by_id(fixture.map_id, &scope)
+        .await
+        .expect("map must exist");
+
+    // 本体上重新标定过的图（同样的坐标系，栅格变了）
+    let refreshed = sample_package(false);
+    let map = fixture
+        .state
+        .dog_map_service
+        .save_upload(
+            upload_request(Some(fixture.map_id), Some("v9.9"), "草稿"),
+            "map.zip",
+            &refreshed,
+            &fixture.state.upload_dir,
+            &scope,
+        )
+        .await
+        .expect("部分标定版本允许原地覆盖");
+
+    assert_eq!(map.id, fixture.map_id, "必须复用原 id，不能新建副本");
+    assert_eq!(
+        sha256_hex(&refreshed),
+        map.map_hash.clone().unwrap_or_default(),
+        "map_hash 要跟着新包更新"
+    );
+    assert_eq!(
+        map.map_version, before.map_version,
+        "回传里带的版本号不能覆盖中台版本（否则 v1.1 会被打回 v1.0）"
+    );
+    assert_eq!(
+        map.map_status, before.map_status,
+        "刷新只换栅格，状态由发布流程维护"
+    );
+    assert_eq!(
+        map.file_size,
+        Some(i64::try_from(refreshed.len()).unwrap()),
+        "文件大小应随新包更新"
+    );
+
+    // 落盘的是新包，旧包不再被引用
+    let stored_path = map.file_path.clone().expect("替换后必须有包路径");
+    let stored = std::fs::read(fixture.state.upload_dir.join(&stored_path)).unwrap();
+    assert_eq!(sha256_hex(&stored), sha256_hex(&refreshed));
+}
+
+/// 已发布版本不可原地覆盖：返回可操作的原因，且不落盘新文件。
+#[tokio::test]
+async fn upload_with_id_rejects_published_map() {
+    let fixture = fixture("已发布").await;
+    let scope = DataScope::new(1, true);
+    let before = fixture
+        .state
+        .dog_map_service
+        .get_by_id(fixture.map_id, &scope)
+        .await
+        .expect("map must exist");
+
+    let refreshed = sample_package(false);
+    let error = fixture
+        .state
+        .dog_map_service
+        .save_upload(
+            upload_request(Some(fixture.map_id), None, "部分标定"),
+            "map.zip",
+            &refreshed,
+            &fixture.state.upload_dir,
+            &scope,
+        )
+        .await
+        .expect_err("published maps must not be overwritten");
+    let message = format!("{error}");
+    assert!(
+        message.contains("派生新版本"),
+        "错误要告诉现场怎么办: {message}"
+    );
+
+    let after = fixture
+        .state
+        .dog_map_service
+        .get_by_id(fixture.map_id, &scope)
+        .await
+        .unwrap();
+    assert_eq!(after.map_hash, before.map_hash, "中台记录不能被改动");
+    assert_eq!(after.file_path, before.file_path, "包路径不能被改动");
+}
+
+/// 中台 `mapInfo` 的 `mapId` 也要认（业务平台旧版本用这个字段名）。
+#[test]
+fn upload_request_accepts_map_id_alias() {
+    let request: UploadMapRequest = serde_json::from_value(serde_json::json!({
+        "mapId": 42,
+        "mapName": "别名",
+    }))
+    .expect("mapId 应能反序列化到 id");
+    assert_eq!(request.id, Some(42));
+}

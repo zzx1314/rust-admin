@@ -158,6 +158,33 @@ impl DogDeviceService {
         self.to_vo(device).await
     }
 
+    /// 按设备编号取台账，并按数据范围做一次授权：
+    /// 普通用户只能取到 `dog_user_device` 分配给自己的设备（否则返回 None）。
+    pub async fn get_by_code(
+        &self,
+        code: &str,
+        scope: &DataScope,
+    ) -> Result<Option<DogDevice>, AppError> {
+        let Some(device) = self
+            .repo
+            .find_by_code(code)
+            .await
+            .map_err(AppError::DatabaseError)?
+        else {
+            return Ok(None);
+        };
+        if let Some(owner) = scope.owner_filter()
+            && !self
+                .repo
+                .is_assigned(device.id, owner)
+                .await
+                .map_err(AppError::DatabaseError)?
+        {
+            return Ok(None);
+        }
+        Ok(Some(device))
+    }
+
     pub async fn get_vo_by_code(&self, code: &str) -> Result<Option<DeviceVO>, AppError> {
         let Some(device) = self
             .repo

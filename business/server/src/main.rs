@@ -1,6 +1,6 @@
 use robodog_ops_server::app::{AppState, build_router};
 use robodog_ops_server::config::Config;
-use robodog_ops_server::{control_plane, db, gateway, seed};
+use robodog_ops_server::{control_plane, db, gateway, notify, seed};
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
@@ -25,11 +25,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     seed::seed(&pool).await?;
 
+    // 企业微信推送句柄：未配置 webhook 时是空句柄，所有 enqueue 静默丢弃
+    let (notifier, notify_rx) = notify::Notifier::channel(&config);
+    if let Some(webhook) = config.wecom_webhook.as_deref() {
+        // 只打 key 末 6 位：够核对「填的是哪一个」，又不把凭据写进日志
+        let key_tail: String = webhook
+            .chars()
+            .rev()
+            .take(6)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        tracing::info!(
+            enabled = config.wecom_enabled,
+            min_level = %config.wecom_min_level,
+            %key_tail,
+            "企业微信告警推送已配置"
+        );
+    }
+
     let state = AppState {
         db: pool,
         config: config.clone(),
         device_connections: gateway::new_device_connections(),
         video_hub: Default::default(),
+        notifier,
     };
     // 反向控制信道：配置了中台 WS 地址时主动拨出，内网部署靠它接收中台指令
     control_plane::spawn(state.clone());
@@ -39,6 +60,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     gateway::spawn_task_watchdog(state.clone());
     // 视频看门狗：没人观看却还在推流时让客户端停掉 ffmpeg
     robodog_ops_server::video::spawn_watchdog(state.clone());
+    // 企业微信推送消费端：限流 + 重试都在这里，调用方只负责入队
+    if let Some(rx) = notify_rx {
+        notify::spawn(state.clone(), rx);
+    }
     let router = build_router(state);
 
     let address = format!("0.0.0.0:{}", config.port);

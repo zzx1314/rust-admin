@@ -559,3 +559,89 @@ fn road_network_mode_maps_to_protocol_values() {
     assert_eq!(RoadNetworkMode::On.map_type(false, false), 3);
     assert_eq!(RoadNetworkMode::Off.map_type(true, true), 1);
 }
+
+/// 地图定时增量同步：默认 10 分钟，可调，也能彻底关掉。
+///
+/// 遥控器/官方 App 建的图不走 4001 自动回传，靠这个轮询把「平台还没有」的图补上去；
+/// `--no-map-sync` / `sync_interval_secs = 0` 必须是真的关掉（不发 4012）。
+#[test]
+fn map_sync_interval_defaults_and_overrides() {
+    use robodog_device_client::config::{
+        DEFAULT_MAP_SYNC_INTERVAL_SECS, ENV_MAP_SYNC_INTERVAL,
+    };
+
+    // 默认值
+    let config = Config::resolve(
+        &FileConfig::default(),
+        &EnvConfig::default(),
+        &CliArgs::default(),
+        Some(SN_FROM_PARTITION),
+    )
+    .expect("默认配置应可解析");
+    assert_eq!(config.map_sync_interval_secs, DEFAULT_MAP_SYNC_INTERVAL_SECS);
+
+    // 命令行
+    let config = Config::resolve(
+        &FileConfig::default(),
+        &EnvConfig::default(),
+        &CliArgs {
+            map_sync_interval: Some(120),
+            ..CliArgs::default()
+        },
+        Some(SN_FROM_PARTITION),
+    )
+    .expect("命令行间隔应可解析");
+    assert_eq!(config.map_sync_interval_secs, 120);
+
+    // 环境变量
+    let env = EnvConfig::from_pairs([(ENV_MAP_SYNC_INTERVAL, "300")]);
+    let config = Config::resolve(
+        &FileConfig::default(),
+        &env,
+        &CliArgs::default(),
+        Some(SN_FROM_PARTITION),
+    )
+    .expect("环境变量间隔应可解析");
+    assert_eq!(config.map_sync_interval_secs, 300);
+
+    // 配置文件
+    let file: FileConfig =
+        toml::from_str("[mapping]\nsync_interval_secs = 45\n").expect("配置应可解析");
+    let config = Config::resolve(
+        &file,
+        &EnvConfig::default(),
+        &CliArgs::default(),
+        Some(SN_FROM_PARTITION),
+    )
+    .expect("配置文件的间隔应可解析");
+    assert_eq!(config.map_sync_interval_secs, 45);
+
+    // 0 = 关闭
+    let config = Config::resolve(
+        &FileConfig::default(),
+        &EnvConfig::default(),
+        &CliArgs {
+            map_sync_interval: Some(0),
+            ..CliArgs::default()
+        },
+        Some(SN_FROM_PARTITION),
+    )
+    .expect("0 表示关闭");
+    assert_eq!(config.map_sync_interval_secs, 0);
+
+    // 关掉自动回传就不该偷偷定时上传
+    let config = Config::resolve(
+        &FileConfig::default(),
+        &EnvConfig::default(),
+        &CliArgs {
+            upload_map: Some(false),
+            ..CliArgs::default()
+        },
+        Some(SN_FROM_PARTITION),
+    )
+    .expect("关闭回传应可解析");
+    assert_eq!(
+        config.map_sync_interval_secs, 0,
+        "upload_map=false 时定时同步必须一并关闭"
+    );
+}

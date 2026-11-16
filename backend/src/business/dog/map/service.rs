@@ -1,9 +1,11 @@
 use crate::business::dog::map::domain::{
     CreateMapRequest, DogMap, MAP_STATUS_ARCHIVED, MAP_STATUS_DRAFT, MAP_STATUS_PARTIAL,
-    MAP_STATUS_PUBLISHED, MapImageVO, MapPageQuery, MapVO, UpdateMapRequest, UploadMapRequest,
-    is_valid_map_status,
+    MAP_STATUS_PUBLISHED, MapEditRequest, MapEditStroke, MapImageVO, MapPageQuery, MapVO,
+    UpdateMapRequest, UploadMapRequest, is_valid_map_status,
 };
-use crate::business::dog::map::package::{parse_map_package, sha256_hex};
+use crate::business::dog::map::package::{
+    MAX_EDIT_POINTS, MAX_EDIT_STROKES, parse_map_package, rewrite_map_package, sha256_hex,
+};
 use crate::business::dog::map::repository::SeaOrmDogMapRepository;
 use crate::common::data_scope::DataScope;
 use crate::common::error::AppError;
@@ -265,6 +267,21 @@ impl DogMapService {
         let map_width = i32::try_from(parsed.width).ok();
         let map_height = i32::try_from(parsed.height).ok();
 
+        // 原地覆盖（业务平台「同步地图」刷新）时先校验状态，再落盘：
+        // 已发布 / 已归档不可改包，与橡皮擦同一套规则（草稿 + 部分标定可编辑）。
+        if let Some(id) = info.id {
+            let existing = self.get_by_id(id, write_scope).await?;
+            if !matches!(
+                existing.map_status.as_str(),
+                MAP_STATUS_DRAFT | MAP_STATUS_PARTIAL
+            ) {
+                return Err(AppError::BadRequest(format!(
+                    "地图「{}」当前状态为 {}，不可原地覆盖地图包；请先派生新版本（新版本为草稿）再刷新",
+                    existing.map_name, existing.map_status
+                )));
+            }
+        }
+
         let dir = upload_root.join("maps");
         tokio::fs::create_dir_all(&dir)
             .await
@@ -291,7 +308,9 @@ impl DogMapService {
                     file_format: Some(file_format),
                     file_size: Some(file_size),
                     remarks: info.remarks,
-                    map_version: info.map_version,
+                    // 版本号 / 状态由发布流程维护：刷新只换栅格内容，
+                    // 否则一张 v1.1 的图会被业务平台回传的 v1.0 打回旧版本号。
+                    map_version: None,
                     frame_id: info.frame_id,
                     crs: info.crs,
                     map_origin: Some(canonical_origin),
@@ -299,12 +318,18 @@ impl DogMapService {
                     floors: info.floors,
                     road_count: info.road_count,
                     nogo_count: info.nogo_count,
-                    map_status: info.map_status,
+                    map_status: None,
                     map_hash: Some(map_hash),
                     map_width,
                     map_height,
                 };
-                self.update(id, req, write_scope).await
+                // 走 repo 而不是 `update()`：`update()` 会拦住「已发布/部分标定不可改包」，
+                // 而刷新语义正是只替换栅格内容（状态阈值已在上面校验过）。
+                self.repo
+                    .update(id, &req, write_scope)
+                    .await
+                    .map_err(AppError::DatabaseError)?
+                    .ok_or_else(|| AppError::NotFound(format!("Map with id {id} not found")))
             }
             None => {
                 let req = CreateMapRequest {
@@ -345,6 +370,115 @@ impl DogMapService {
         scope: &DataScope,
     ) -> Result<MapImageVO, AppError> {
         let map = self.get_by_id(id, scope).await?;
+        let bytes = self.read_package(&map, upload_root).await?;
+        let parsed = parse_map_package(&bytes)?;
+
+        Ok(MapImageVO {
+            image: parsed.png_data_url(),
+            resolution: parsed.resolution,
+            origin: parsed.origin,
+            width: parsed.width,
+            height: parsed.height,
+            map_hash: None,
+            erased_pixels: None,
+        })
+    }
+
+    /// 橡皮擦：擦除栅格噪点并落盘为新的地图包。
+    ///
+    /// - 只允许「草稿 / 部分标定」版本编辑，已发布 / 已归档版本必须派生新版本；
+    /// - 其余条目（`model.yaml` 等）原样保留，`map_hash` 按新包重算；
+    /// - 新包写新文件，旧包留在磁盘上便于回溯（与 `upload` 覆盖旧包的行为一致）。
+    pub async fn erase(
+        &self,
+        id: i64,
+        req: MapEditRequest,
+        upload_root: &std::path::Path,
+        scope: &DataScope,
+    ) -> Result<MapImageVO, AppError> {
+        let strokes = validate_edit_request(&req)?;
+        let erase_value = req.erase_value.unwrap_or(254);
+
+        let map = self.get_by_id(id, scope).await?;
+        if !matches!(
+            map.map_status.as_str(),
+            MAP_STATUS_DRAFT | MAP_STATUS_PARTIAL
+        ) {
+            return Err(AppError::BadRequest(format!(
+                "地图「{}」当前状态为 {}，不可直接编辑；请先派生新版本（新版本为草稿）再擦除噪点",
+                map.map_name, map.map_status
+            )));
+        }
+
+        let bytes = self.read_package(&map, upload_root).await?;
+        let (edited, erased_pixels) = rewrite_map_package(&bytes, strokes, erase_value)?;
+        let parsed = parse_map_package(&edited)?;
+
+        let original_name = map
+            .file_name
+            .clone()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| format!("map-{id}.zip"));
+        let dir = upload_root.join("maps");
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|error| AppError::InternalError(format!("创建地图目录失败: {error}")))?;
+        let stored_name = format!("{}-{}", generate_id(), original_name);
+        tokio::fs::write(dir.join(&stored_name), &edited)
+            .await
+            .map_err(|error| AppError::InternalError(format!("保存地图包失败: {error}")))?;
+
+        let file_size = i64::try_from(edited.len()).unwrap_or(i64::MAX);
+        let req = UpdateMapRequest {
+            map_name: None,
+            map_type: None,
+            park_code: None,
+            park_name: None,
+            device_code: None,
+            map_data: None,
+            file_name: Some(original_name),
+            file_path: Some(format!("maps/{stored_name}")),
+            file_format: Some("zip".to_string()),
+            file_size: Some(file_size),
+            remarks: None,
+            map_version: None,
+            frame_id: None,
+            crs: None,
+            map_origin: None,
+            resolution: None,
+            floors: None,
+            road_count: None,
+            nogo_count: None,
+            map_status: None,
+            map_hash: Some(parsed.sha256.clone()),
+            map_width: i32::try_from(parsed.width).ok(),
+            map_height: i32::try_from(parsed.height).ok(),
+        };
+        // 绕过 `update` 的「已发布不可改坐标」约束：这里改的是栅格内容，
+        // 分辨率 / 原点 / 版本号均未变化，状态校验已在上方完成。
+        self.repo
+            .update(id, &req, scope)
+            .await
+            .map_err(AppError::DatabaseError)?
+            .ok_or_else(|| AppError::NotFound(format!("Map with id {} not found", id)))?;
+
+        Ok(MapImageVO {
+            image: parsed.png_data_url(),
+            resolution: parsed.resolution,
+            origin: parsed.origin,
+            width: parsed.width,
+            height: parsed.height,
+            map_hash: Some(parsed.sha256),
+            erased_pixels: Some(erased_pixels),
+        })
+    }
+
+    /// 读取地图包字节并校验 `map_hash`（发布后内容不可被偷改）。
+    async fn read_package(
+        &self,
+        map: &DogMap,
+        upload_root: &std::path::Path,
+    ) -> Result<Vec<u8>, AppError> {
         let file_path = map
             .file_path
             .clone()
@@ -374,16 +508,39 @@ impl DogMapService {
             }
         }
 
-        let parsed = parse_map_package(&bytes)?;
-
-        Ok(MapImageVO {
-            image: parsed.png_data_url(),
-            resolution: parsed.resolution,
-            origin: parsed.origin,
-            width: parsed.width,
-            height: parsed.height,
-        })
+        Ok(bytes)
     }
+}
+
+/// 校验橡皮擦请求的规模，返回待应用的笔画。
+fn validate_edit_request(req: &MapEditRequest) -> Result<&[MapEditStroke], AppError> {
+    if req.strokes.is_empty() {
+        return Err(AppError::BadRequest(
+            "没有可提交的擦除笔画，请在预览画布上先用橡皮擦涂抹噪点".to_string(),
+        ));
+    }
+    if req.strokes.len() > MAX_EDIT_STROKES {
+        return Err(AppError::BadRequest(format!(
+            "一次最多提交 {MAX_EDIT_STROKES} 笔擦除，请分批保存"
+        )));
+    }
+    let points: usize = req.strokes.iter().map(|stroke| stroke.points.len()).sum();
+    if points == 0 {
+        return Err(AppError::BadRequest("擦除笔画为空".to_string()));
+    }
+    if points > MAX_EDIT_POINTS {
+        return Err(AppError::BadRequest(format!(
+            "一次最多提交 {MAX_EDIT_POINTS} 个采样点，请分批保存"
+        )));
+    }
+    for stroke in &req.strokes {
+        if let Some(radius) = stroke.radius
+            && !radius.is_finite()
+        {
+            return Err(AppError::BadRequest("笔刷半径无效".to_string()));
+        }
+    }
+    Ok(&req.strokes)
 }
 
 /// 校验前端手填的 resolution / origin 是否与地图包内容一致。

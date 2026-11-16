@@ -155,8 +155,10 @@ Authorization: Bearer <access_token>
 | `/api/dogMap/getPage`         | GET                | `mapName`（模糊）、`mapType`、`mapStatus`、`fileName`（模糊）、`deviceCode`（模糊）、`parkCode`（精确）、`beginTime`、`endTime`、`current`、`size`                                                                  |
 | `/api/dogMap/getAll`          | GET                | 全量列表（仅当前用户可见范围）                                                                                                                                                                                      |
 | `/api/dogMap`                 | POST               | 新增，`mapName` 必填；`mapType`、`parkCode`、`parkName`、`deviceCode`、`remarks`、`mapVersion`、`frameId`、`crs`、`mapOrigin`、`resolution`、`floors`、`roadCount`、`nogoCount`、`mapStatus`（草稿 / 部分标定）可选 |
-| `/api/dogMap/upload`          | POST               | 上传 `.zip` 地图包（`multipart/form-data`）：`file` = 地图包，`mapInfo` = JSON 字符串，字段同新增；带 `id` 时替换已有地图的包与信息，否则新建                                                                       |
+| `/api/dogMap/upload`          | POST               | 上传 `.zip` 地图包（`multipart/form-data`）：`file` = 地图包，`mapInfo` = JSON 字符串，字段同新增；带 `id`（或 `mapId`）时原地覆盖已有地图的包与信息，否则新建；覆盖只允许草稿 / 部分标定的版本，已发布 / 已归档返回 400 并提示先派生新版本                                                                       |
 | `/api/dogMap/{id}/image`      | GET                | 返回地图包栅格图（PNG base64）与 `resolution` / `origin` / 宽高                                                                                                                                                     |
+| `/api/dogMap/{id}/edit`       | POST               | 橡皮擦：按笔画改写包内 `model.pgm` 的噪点，返回新 PNG、`mapHash` 与 `erasedPixels`。仅草稿 / 部分标定可编辑                                                                                                          |
+| `/api/dogMap/{id}/push`       | POST               | 把编辑后的地图下发到狗体（本体）：`{ deviceCode?, requestId? }`，经业务平台 + 设备客户端写回本体并重新载图                                                                                                          |
 | `/api/dogMap/{id}/publish`    | POST               | 发布版本：状态推进为「已发布」（部分标定保持「部分标定」）并记录发布时间                                                                                                                                            |
 | `/api/dogMap/{id}/newVersion` | POST               | 基于当前版本派生下一个版本号并立即发布                                                                                                                                                                              |
 | `/api/dogMap/{id}`            | GET / PUT / DELETE | 详情 / 修改 / 软删除                                                                                                                                                                                                |
@@ -167,6 +169,14 @@ Authorization: Bearer <access_token>
 - 响应字段：`id`、`mapName`、`mapType`、`parkCode`、`parkName`、`deviceCode`、`mapData`、`userId`、`fileName`、`filePath`、`fileFormat`、`fileSize`、`remarks`、`mapVersion`、`frameId`、`crs`、`mapOrigin`、`resolution`、`floors`、`roadCount`、`nogoCount`、`mapStatus`、`mapHash`、`mapWidth`、`mapHeight`、`publishTime`、`createTime`、`updateTime`。
 - **上传即解析**：后端从地图包内 `model.pgm` / `model.yaml` 解析 `resolution`、`origin: [x, y, yaw]`、像素宽高，并计算整个 `.zip` 的 SHA-256 写入 `mapHash`、`mapWidth`、`mapHeight`。前端表单里的 `resolution` / `mapOrigin` 只用于校验：与包内容不一致会返回 400，留空则由服务端解析结果回写。
 - **版本不可变**：版本一旦发布（`已发布` / `部分标定`），`mapVersion`、`frameId`、`mapOrigin`、`resolution`、地图包不再允许修改；需要新坐标系时请上传新包或调用 `newVersion`。
+- **写回狗体**：`POST /api/dogMap/{id}/push`，请求体 `{ "deviceCode": "RD-201", "requestId": "可选幂等键" }`（`deviceCode` 缺省用地图上的 `deviceCode`）。中台把 `mapId` 发给业务平台，业务平台刷新自己的地图包副本后向设备下发「下发地图」指令；设备客户端从 `GET /api/map-versions/{id}/package` 拉包，写本体文件服务的 `map.pgm` / `map.yaml` 并读回校验，最后 4030 重新载图。设备未连接 / 正在执行任务 / 本体上没有该地图目录时返回 4xx，不会静默下发。
+- **橡皮擦**：`POST /api/dogMap/{id}/edit` 的请求体为
+  `{ "strokes": [{ "points": [{ "x": 120.5, "y": 88 }], "radius": 6 }], "eraseValue": 254 }`，
+  坐标是**栅格像素坐标**（左上角为原点，`x` 向右、`y` 向下，与 `/image` 返回的 `width` / `height` 同一坐标系）。
+  `eraseValue` 是擦除后写入的灰度值：`254` = 可通行（默认，用来擦掉自由空间里的噪点）、`205` = 未知。
+  服务端只改写包内 `model.pgm`（`model.yaml` 与其余条目原样保留），落盘为新包并回写
+  `filePath` / `mapHash` / 尺寸，旧包保留在磁盘上。仅 `草稿` / `部分标定` 可编辑，
+  已发布 / 已归档返回 400（请先 `newVersion`）；单次最多 2000 笔 / 20 万个采样点。
 
 ---
 

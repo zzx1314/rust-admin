@@ -4,7 +4,7 @@
 //! `points/legs/returnLeg`）。这里把它翻译成智航 Pro 可执行的 [`FlightPlan`]：
 //!
 //! ```text
-//! routeData.points[]  → Waypoint（x/y 取地图坐标，heading 取朝向，dwell 取停留）
+//! routeData.points[]  → Waypoint（x/y 取地图坐标，heading 取到点机身偏航角，dwell 取停留）
 //! routeData.loop      → 闭环则在末尾回到首点
 //! task.executeMode    → 结束动作（返回起点 / 返回充电 / 原地）
 //! payload.map         → 地图（mapId / mapPath / mapType）

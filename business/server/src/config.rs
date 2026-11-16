@@ -20,6 +20,8 @@ use std::path::{Path, PathBuf};
 pub const DEFAULT_CONFIG_FILE: &str = "server.toml";
 /// 指定配置文件路径的环境变量。
 pub const CONFIG_FILE_ENV: &str = "ROBODOG_SERVER_CONFIG";
+/// 企业微信群机器人 webhook（推荐只走环境变量）。
+pub const WECOM_WEBHOOK_ENV: &str = "ROBODOG_WECOM_WEBHOOK";
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -80,6 +82,25 @@ pub struct Config {
     /// REST/SSE（Agent 已开 CORS），视频仍然是浏览器 ⇄ mediamtx 直连。
     /// 配置了本项即进入直连模式，`backpack_base_url` 不再参与。
     pub backpack_browser_url: Option<String>,
+    /// 控制台对外访问地址（如 `http://39.107.55.13:3100`），用于拼告警消息里的链接。
+    ///
+    /// 为空时企业微信消息不带链接：猜一个地址比不给更容易误导人。
+    pub public_url: Option<String>,
+    /// 企业微信群机器人 webhook 是否启用（配置级总开关）。
+    ///
+    /// 与库里的 `alert_push` / `wecom_alert_push` 是**与**关系：这边是部署级
+    /// （有没有这个通道），那边是运营级（这个班次推不推）。
+    pub wecom_enabled: bool,
+    /// 企业微信群机器人 webhook 地址。**地址本身就是凭据**（无加签），
+    /// 只从 `ROBODOG_WECOM_WEBHOOK` 读；文件里出现时启动会告警。
+    pub wecom_webhook: Option<String>,
+    /// 推送级别下限：`严重` / `警告`（默认） / `提示`。
+    pub wecom_min_level: String,
+    /// 严重告警是否额外 @所有人。
+    ///
+    /// 注意：企微群机器人 markdown 不支持提及，实现上是**另发一条 text**
+    /// 带 `mentioned_list: ["@all"]`，所以开这个开关会占双倍限流额度。
+    pub wecom_mention_all: bool,
 }
 
 /// 配置文件读取 / 解析失败。
@@ -115,8 +136,23 @@ struct ServerFile {
     device_timeout_secs: Option<i64>,
     task_timeout_secs: Option<i64>,
     task_stuck_secs: Option<i64>,
+    public_url: Option<String>,
+    wecom: WecomFile,
     zentai: ZentaiFile,
     backpack: BackpackFile,
+}
+
+/// 企业微信群机器人推送配置。
+///
+/// webhook 地址等价于「谁拿到谁就能往群里发消息」，优先用环境变量
+/// `ROBODOG_WECOM_WEBHOOK`；写在本文件里意味着密钥进 git，启动时会打一条警告。
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct WecomFile {
+    enabled: Option<bool>,
+    webhook: Option<String>,
+    min_level: Option<String>,
+    mention_all: Option<bool>,
 }
 
 /// 数据采集背包（板端 Agent）接入配置。
@@ -164,7 +200,13 @@ impl Config {
             Some(path) => (Some(ServerFile::read(path)?), base_dir_of(path)),
             None => (None, None),
         };
-        Ok(Self::merge(file, base_dir, |name| env::var(name).ok()))
+        let config = Self::merge(file, base_dir, |name| env::var(name).ok());
+        if config.wecom_webhook_source_is_file(|name| env::var(name).ok()) {
+            tracing::warn!(
+                "企业微信 webhook 来自配置文件：该地址本身就是凭据，建议改用环境变量 {WECOM_WEBHOOK_ENV}"
+            );
+        }
+        Ok(config)
     }
 
     /// 只用环境变量的入口（忽略配置文件），兼容旧部署与脚本。
@@ -263,6 +305,19 @@ impl Config {
                 .or_else(|| file.backpack.webrtc_url.and_then(clean))
                 .map(|value| value.trim_end_matches('/').to_string()),
             backpack_browser_url: url("ROBODOG_BACKPACK_BROWSER_URL", file.backpack.browser_url),
+            public_url: url("ROBODOG_PUBLIC_URL", file.public_url),
+            wecom_enabled: env_flag(&env, "ROBODOG_WECOM_ENABLED")
+                .or(file.wecom.enabled)
+                .unwrap_or(true),
+            wecom_webhook: url(WECOM_WEBHOOK_ENV, file.wecom.webhook),
+            wecom_min_level: text(
+                "ROBODOG_WECOM_MIN_LEVEL",
+                file.wecom.min_level,
+                "警告".to_string(),
+            ),
+            wecom_mention_all: env_flag(&env, "ROBODOG_WECOM_MENTION_ALL")
+                .or(file.wecom.mention_all)
+                .unwrap_or(false),
         }
     }
 
@@ -342,6 +397,23 @@ impl Config {
     pub fn control_channel_ready(&self) -> bool {
         self.zentai_ws_url.is_some() && self.service_token.is_some()
     }
+
+    /// 企业微信推送通道是否就绪：开关打开 + 有 webhook。
+    pub fn wecom_ready(&self) -> bool {
+        self.wecom_enabled
+            && self
+                .wecom_webhook
+                .as_deref()
+                .is_some_and(|url| !url.trim().is_empty())
+    }
+
+    /// webhook 是否来自配置文件（而不是环境变量）。启动时打一条警告用。
+    pub fn wecom_webhook_source_is_file<F>(&self, env: F) -> bool
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        self.wecom_webhook.is_some() && env_text(&env, WECOM_WEBHOOK_ENV).is_none()
+    }
 }
 
 /// 由 Agent 地址推导浏览器侧 WHEP 基址：同主机、端口换成 mediamtx 的 8889。
@@ -393,6 +465,18 @@ where
     F: Fn(&str) -> Option<String>,
 {
     env(name).and_then(clean)
+}
+
+/// 布尔环境变量：`1/true/yes/on` 为真，`0/false/no/off` 为假，其他值视为未设置。
+fn env_flag<F>(env: &F, name: &str) -> Option<bool>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    match env_text(env, name)?.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 fn clean(value: String) -> Option<String> {
@@ -586,6 +670,95 @@ mod tests {
             Some("ws://192.168.41.10:3000")
         );
         assert_eq!(file.port, Some(3100));
+    }
+
+    #[test]
+    fn wecom_defaults_to_disabled_until_webhook_is_set() {
+        let config = Config::merge(None, None, no_env);
+        assert!(config.wecom_enabled, "没配 webhook 时开关本身没有意义");
+        assert!(config.wecom_webhook.is_none());
+        assert!(!config.wecom_ready(), "没有 webhook 就不算就绪");
+        assert_eq!(config.wecom_min_level, "警告");
+        assert!(!config.wecom_mention_all);
+        assert!(config.public_url.is_none());
+    }
+
+    #[test]
+    fn wecom_ready_needs_both_switch_and_webhook() {
+        let env = |name: &str| match name {
+            "ROBODOG_WECOM_WEBHOOK" => Some(" https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=k "
+                .to_string()),
+            _ => None,
+        };
+        let config = Config::merge(None, None, env);
+        assert_eq!(
+            config.wecom_webhook.as_deref(),
+            Some("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=k")
+        );
+        assert!(config.wecom_ready());
+
+        // 开关关掉后即使有 webhook 也不发
+        let env = |name: &str| match name {
+            "ROBODOG_WECOM_WEBHOOK" => Some("https://example.com/hook".to_string()),
+            "ROBODOG_WECOM_ENABLED" => Some("false".to_string()),
+            _ => None,
+        };
+        let config = Config::merge(None, None, env);
+        assert!(!config.wecom_enabled);
+        assert!(!config.wecom_ready());
+    }
+
+    #[test]
+    fn wecom_file_section_is_flagged() {
+        let config = Config::merge(
+            Some(parse(
+                r#"
+                [wecom]
+                webhook = "https://example.com/hook"
+                min_level = "严重"
+                mention_all = true
+                "#,
+            )),
+            None,
+            no_env,
+        );
+        assert_eq!(config.wecom_min_level, "严重");
+        assert!(config.wecom_mention_all);
+        // 文件里的地址能被识别出来，启动时打警告提示改用环境变量
+        assert!(config.wecom_webhook_source_is_file(no_env));
+        // 环境变量给了地址则不再告警（环境变量优先）
+        let env = |name: &str| match name {
+            "ROBODOG_WECOM_WEBHOOK" => Some("https://env.example.com/hook".to_string()),
+            _ => None,
+        };
+        let config = Config::merge(
+            Some(parse("[wecom]\nwebhook = \"https://file.example.com/hook\"")),
+            None,
+            env,
+        );
+        assert_eq!(
+            config.wecom_webhook.as_deref(),
+            Some("https://env.example.com/hook")
+        );
+        assert!(!config.wecom_webhook_source_is_file(|name| match name {
+            "ROBODOG_WECOM_WEBHOOK" => Some("https://env.example.com/hook".to_string()),
+            _ => None,
+        }));
+    }
+
+    #[test]
+    fn env_flag_accepts_common_truthy_values() {
+        for value in ["1", "true", "TRUE", "yes", "on"] {
+            let env = move |_: &str| Some(value.to_string());
+            assert_eq!(env_flag(&env, "X"), Some(true), "{value} 应为真");
+        }
+        for value in ["0", "false", "no", "off"] {
+            let env = move |_: &str| Some(value.to_string());
+            assert_eq!(env_flag(&env, "X"), Some(false), "{value} 应为假");
+        }
+        // 认不出来的值当作未设置，回落到文件/默认值
+        let env = |_: &str| Some("maybe".to_string());
+        assert_eq!(env_flag(&env, "X"), None);
     }
 
     #[test]

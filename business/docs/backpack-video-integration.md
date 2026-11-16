@@ -208,6 +208,11 @@ Chromium 的 **Local Network Access**（PNA 继任者）实测拦截，`Network.
 - **P1**：平台中继。背包 Agent 增加「向平台推流」（WHIP 或 FLV/WS，复用 `video.rs` 房间模型），
   公网/跨网段可用，代价 1~2s 延时。
 - **P2**：遥测 / 控制 / SOS 告警 / AI 事件入 `alerts` 与设备详情。
+  - ✅ 已落地「**航点到点 AI 识别**」：巡检走到带 `AI 识别` 动作的航点时自动开识别窗口，
+    检出的目标写进 `alerts` + `task_events`（`server/src/ai_patrol.rs`，
+    状态见 `GET /api/backpack/ai-window`，决策与边界见
+    [`official-app-parity.md`](official-app-parity.md) §5.5）；
+  - 遥测 / SOS / 其它事件的入库仍未接。
 - **P3**：多背包、设备-用户分配、录像与回放。
 
 ---
