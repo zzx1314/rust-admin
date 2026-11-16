@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { tokenStorage } from "@/api/http";
 import { wsOrigin } from "@/utils/runtime";
 import AppIcon from "./AppIcon.vue";
@@ -16,6 +16,17 @@ import AppIcon from "./AppIcon.vue";
  * - `rtsp`  → 浏览器不能直连：由设备客户端拉流转 FLV、经业务平台中继（见 server/src/video.rs）
  * - `relay` → 背包中继：板端推流服务把 RTSP 转成 FLV 推到平台，这里同源播放
  * - `none`  → 未配置，显示占位
+ *
+ * ## 直播「不许闪」的四条硬规则（改这块之前先读）
+ *
+ * 1. **缓冲 ≠ 断开**：`waiting` / `stalled` 只置一个「缓冲中」角标，绝不盖全屏错误层。
+ *    早期版本一 `waiting` 就把 `连接中` 的半透明层铺满画面，看起来就是一闪一闪。
+ * 2. **重连不清画面**：断流时先把当前帧抓成 poster 继续显示，再重建 flv 播放器，
+ *    所以重连过程中观众看到的是「上一帧 + 重连中」，不是黑屏闪一下。
+ * 3. **快速重连 + 退避**：服务端主动断开（推流端换流 / 观看端追不上）时 250ms 就重连，
+ *    连续失败才指数退避（上限 3s），不会 3s 一次空转刷屏。
+ * 4. **推流端要保持在跑**：服务端最后一个观看者离开时不立刻杀 ffmpeg，
+ *    所以这里的 `video_start` 重复下发也不会重启推流端（客户端按地址去重）。
  */
 const props = defineProps<{
   url: string | null;
@@ -32,11 +43,18 @@ const props = defineProps<{
   stream?: string | null;
 }>();
 
+type Status = "idle" | "loading" | "playing" | "retrying" | "error";
+
 const videoRef = ref<HTMLVideoElement | null>(null);
 const stageRef = ref<HTMLDivElement | null>(null);
-const status = ref<"idle" | "loading" | "playing" | "error">("idle");
+const status = ref<Status>("idle");
 const errorText = ref("");
 const muted = ref(true);
+/** 卡顿时角标显示「缓冲中」，不铺错误层 */
+const buffering = ref(false);
+/** 断流瞬间抓下来的最后一帧：重连期间继续显示，避免黑屏闪一下 */
+const poster = ref("");
+const retryAttempt = ref(0);
 
 // hls.js / flv.js 体积大（各 200KB+），只有真正需要播放时才拉进来，
 // 避免设备列表页为了一个播放器把整个 bundle 撑大
@@ -48,15 +66,25 @@ let flv: FlvPlayer | null = null;
 /** 每次 attach 自增，异步加载回来时据此判断是否已被新请求取代 */
 let attachSeq = 0;
 /**
- * RTSP 中继的重连计时器与次数。
+ * 中继断流的重连计时器与次数。
  *
- * 设备客户端的推流重连会丢弃旧房间（新流有新的 FLV 头/时间戳），浏览器这条 WS
- * 会被关掉；这里自动重连拿干净的新流，避免用户手动点「重连」。
+ * 推流端重连、观看端追不上、弱网抖动都会让这条 WS 被关掉；这里自动重连拿干净的
+ * 新流（服务端会补流头 + 关键帧），不让用户手动点「重连」。
  */
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
-let retryCount = 0;
-const MAX_RETRY = 10;
-const RETRY_DELAY = 3000;
+/** 首连重连的等待：服务端主动断开时几乎立刻就能拿回干净的新流 */
+const RETRY_BASE = 250;
+const RETRY_MAX = 3000;
+/** 连续失败这么多次才把错误铺在画面上（前几次只是角标提示，不打扰画面） */
+const HARD_ERROR_AFTER = 5;
+/** 画面停住多久判定「假死」并重连（弱网下 MSE 会卡在 readyState=2 不再前进） */
+const STALL_MS = 3000;
+/** 一次连接尝试多久没画面算超时（现场首次冷启动 ffmpeg 要 3~7s，留足余量） */
+const CONNECT_TIMEOUT_MS = 10_000;
+let stallTimer: ReturnType<typeof setInterval> | null = null;
+let lastTime = 0;
+let lastProgressAt = 0;
+let attachStartedAt = 0;
 
 const kind = computed(() => (props.type || "none").toLowerCase());
 
@@ -83,6 +111,9 @@ const isRelay = computed(
   () => (kind.value === "rtsp" && !!props.deviceId) || (kind.value === "relay" && !!props.stream)
 );
 
+/** 走 MSE / HTTP 拉流的直播通路：断流要自愈（mp4 / webm 是点播，不重连） */
+const retryable = computed(() => ["hls", "flv", "rtsp", "relay"].includes(kind.value));
+
 const playable = computed(() => {
   if (!props.online) return false;
   // 背包中继没有「视频地址」这个概念：板端推什么就看什么
@@ -93,13 +124,17 @@ const playable = computed(() => {
   return ["hls", "flv", "mp4"].includes(kind.value);
 });
 
+/** 全屏错误层只在这些状态出现：不能播 / 连续重连失败 */
+const showFallback = computed(() => !playable.value || status.value === "error");
+
 const hint = computed(() => {
   if (!props.online) return "设备离线，无实时画面";
   if (kind.value === "relay") {
     if (!props.stream) return "未选择背包通道";
     if (status.value === "error")
       return errorText.value || "中继拉流失败：确认背包上 backpack-relay 服务在线";
-    return status.value === "idle" ? "" : "正在连接平台中继…";
+    if (status.value === "loading") return "正在连接平台中继…";
+    return "";
   }
   if (!props.url) return "未配置视频地址，请在设备档案中填写";
   if (kind.value === "rtsp" && !props.deviceId)
@@ -112,14 +147,16 @@ const hint = computed(() => {
 
 const badge = computed(() => {
   if (!playable.value) return "OFFLINE";
-  if (status.value === "playing") return "LIVE";
-  if (status.value === "loading") return "连接中";
-  return "待连接";
+  if (status.value === "playing") return buffering.value ? "缓冲中" : "LIVE";
+  if (status.value === "retrying") return `重连中 ${retryAttempt.value}`;
+  if (status.value === "error") return "连接失败";
+  return "连接中";
 });
 
 const badgeTone = computed(() => {
   if (!playable.value) return "off";
-  if (status.value === "playing") return "live";
+  if (status.value === "playing") return buffering.value ? "wait" : "live";
+  if (status.value === "error") return "err";
   return "wait";
 });
 
@@ -130,22 +167,8 @@ function clearRetry() {
   }
 }
 
-/** 中继断流后退避重连（设备 RTSP 与背包中继都适用） */
-function scheduleRetry() {
-  if (!isRelay.value || !playable.value) return;
-  clearRetry();
-  if (retryCount >= MAX_RETRY) {
-    fail("实时视频多次重连失败：确认设备客户端在线且能访问 RTSP 地址");
-    return;
-  }
-  retryCount += 1;
-  retryTimer = setTimeout(() => {
-    retryTimer = null;
-    void attach();
-  }, RETRY_DELAY);
-}
-
-function destroy() {
+/** 只在销毁播放器内核，保留 `<video>` 与画面（重连时不留黑屏） */
+function teardownPlayer() {
   if (hls) {
     hls.destroy();
     hls = null;
@@ -154,6 +177,51 @@ function destroy() {
     flv.destroy();
     flv = null;
   }
+}
+
+/** 抓当前帧当 poster：重连期间继续显示「最后一帧」而不是黑屏 */
+function capturePoster() {
+  const el = videoRef.value;
+  if (!el || !el.videoWidth) return;
+  try {
+    const canvas = document.createElement("canvas");
+    const width = 320;
+    canvas.width = width;
+    canvas.height = Math.max(1, Math.round((el.videoHeight / el.videoWidth) * width));
+    canvas.getContext("2d")?.drawImage(el, 0, 0, canvas.width, canvas.height);
+    // 小图 + jpeg：一次 ~2ms，只在断流瞬间做一次
+    poster.value = canvas.toDataURL("image/jpeg", 0.5);
+  } catch {
+    /* 取不到帧就算了，重连本身不依赖它 */
+  }
+}
+
+/** 断流：先留帧，再按退避重连；前几次不弹错误，只改角标 */
+function scheduleRetry(reason: string) {
+  if (!retryable.value || !playable.value) return;
+  if (retryTimer) return;
+  // 作废可能还在异步加载 / 建连中的那一次尝试，避免两套播放器抢同一个 <video>
+  attachSeq += 1;
+  capturePoster();
+  teardownPlayer();
+  retryAttempt.value += 1;
+  buffering.value = false;
+  errorText.value = reason;
+  const delay = Math.min(RETRY_BASE * 2 ** (retryAttempt.value - 1), RETRY_MAX);
+  if (retryAttempt.value >= HARD_ERROR_AFTER) {
+    status.value = "error";
+  } else {
+    status.value = "retrying";
+  }
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    void attach();
+  }, delay);
+}
+
+function destroy() {
+  clearRetry();
+  teardownPlayer();
   const el = videoRef.value;
   if (el) {
     el.pause();
@@ -162,6 +230,12 @@ function destroy() {
   }
   status.value = "idle";
   errorText.value = "";
+  poster.value = "";
+  buffering.value = false;
+  retryAttempt.value = 0;
+  lastTime = 0;
+  lastProgressAt = 0;
+  attachStartedAt = 0;
 }
 
 function fail(message: string) {
@@ -169,13 +243,35 @@ function fail(message: string) {
   errorText.value = message;
 }
 
+/** flv.js 的直播参数：关掉 stash 缓冲，吃多少播多少（默认攒 3s 才起播，抖动就来回跳） */
+function liveFlvConfig(url: string) {
+  return {
+    type: "flv" as const,
+    url,
+    isLive: true,
+    hasAudio: false,
+    lazyLoad: false,
+    enableStashBuffer: false,
+    stashInitialSize: 128,
+    autoCleanupSourceBuffer: true,
+    fixAudioTimestampGap: false
+  };
+}
+
 async function attach() {
-  destroy();
   const el = videoRef.value;
   if (!el || !playable.value) return;
+  clearRetry();
+  teardownPlayer();
   const src = props.url ?? "";
   const seq = ++attachSeq;
-  status.value = "loading";
+  attachStartedAt = performance.now();
+  // 重连途中不要退回「连接中」：角标要一直显示重连次数
+  if (status.value !== "retrying") {
+    status.value = "loading";
+    errorText.value = "";
+  }
+  buffering.value = false;
 
   if (kind.value === "hls") {
     // Safari / iOS 原生支持 m3u8，省掉 hls.js
@@ -197,58 +293,102 @@ async function attach() {
       el.play().catch(() => fail("自动播放被浏览器拦截，请点击播放"));
     });
     hls.on(Hls.Events.ERROR, (_event, data) => {
-      if (data.fatal) fail(`HLS 播放失败：${data.details}`);
+      if (!data.fatal) return;
+      scheduleRetry(`HLS 播放失败：${data.details}`);
     });
     return;
   }
 
-  if (kind.value === "rtsp" || kind.value === "relay") {
+  if (kind.value === "rtsp" || kind.value === "relay" || kind.value === "flv") {
     // 推流端已把源转成 FLV，flv.js 的 WebSocketLoader 直接消费二进制帧
     const { default: flvjs } = await import("flv.js");
     if (seq !== attachSeq) return;
-    if (!flvjs.isSupported() || !relayUrl.value) {
-      fail("当前浏览器不支持实时视频播放");
-      return;
-    }
-    flv = flvjs.createPlayer({
-      type: "flv",
-      url: relayUrl.value,
-      isLive: true,
-      // 推流端只回传视频轨（-an），声明没有音轨避免解析告警
-      hasAudio: false
-    });
-    flv.attachMediaElement(el);
-    flv.load();
-    flv.play()?.catch(() => fail("自动播放被浏览器拦截，请点击播放"));
-    flv.on(flvjs.Events.ERROR, () => {
+    const target = kind.value === "flv" ? src : relayUrl.value;
+    if (!flvjs.isSupported() || !target) {
       fail(
-        kind.value === "relay"
-          ? "中继拉流失败：确认背包上 backpack-relay 服务在线"
-          : "实时视频连接失败：确认设备客户端在线且能访问 RTSP 地址"
+        kind.value === "flv"
+          ? "当前浏览器不支持 FLV 播放"
+          : "当前浏览器不支持实时视频播放"
       );
-      scheduleRetry();
-    });
-    return;
-  }
-
-  if (kind.value === "flv") {
-    const { default: flvjs } = await import("flv.js");
-    if (seq !== attachSeq) return;
-    if (!flvjs.isSupported()) {
-      fail("当前浏览器不支持 FLV 播放");
       return;
     }
-    flv = flvjs.createPlayer({ type: "flv", url: src, isLive: true });
-    flv.attachMediaElement(el);
-    flv.load();
-    flv.play()?.catch(() => fail("自动播放被浏览器拦截，请点击播放"));
-    flv.on(flvjs.Events.ERROR, () => fail("FLV 拉流失败，检查地址与鉴权"));
+    const player = flvjs.createPlayer(liveFlvConfig(target));
+    flv = player;
+    player.attachMediaElement(el);
+    player.load();
+    player.play()?.catch(() => undefined);
+    player.on(flvjs.Events.ERROR, (_type: string, detail: string) => {
+      // 已销毁 / 已被新播放器取代的旧实例的迟到事件不能搅乱新流
+      if (flv !== player) return;
+      scheduleRetry(
+        kind.value === "relay"
+          ? `中继断流（${detail || "unknown"}）：确认背包上 backpack-relay 服务在线`
+          : `实时视频断流（${detail || "unknown"}）：确认设备客户端在线且能访问 RTSP 地址`
+      );
+    });
     return;
   }
 
   // mp4 / webm 走原生
   el.src = src;
   el.play().catch(() => fail("自动播放被浏览器拦截，请点击播放"));
+}
+
+/* ---------------- 播放状态 ---------------- */
+
+function onPlaying() {
+  status.value = "playing";
+  buffering.value = false;
+  errorText.value = "";
+  retryAttempt.value = 0;
+  poster.value = "";
+  lastTime = videoRef.value?.currentTime ?? 0;
+  lastProgressAt = performance.now();
+}
+
+function onWaiting() {
+  // 直播偶发缓冲是常态：给个角标，别盖错误层
+  if (status.value === "playing") buffering.value = true;
+}
+
+/** `<video>` 自身的 error：装/卸播放器时也会冒（src 被清掉），只在真正播放中才算断流 */
+function onMediaError() {
+  if (status.value === "idle" || status.value === "retrying") return;
+  if (retryable.value) scheduleRetry("视频源不可达");
+  else fail("视频源不可达");
+}
+
+/** MSE 「假死」看门狗：playing 却连续 3s 时间轴不前进就自己重连；一直连不上也算超时 */
+function tickStall() {
+  const el = videoRef.value;
+  if (!el || !playable.value) {
+    lastProgressAt = performance.now();
+    return;
+  }
+  if (status.value === "loading" || status.value === "retrying") {
+    if (attachStartedAt && performance.now() - attachStartedAt > CONNECT_TIMEOUT_MS) {
+      scheduleRetry("连接超时，正在重新拉流");
+    }
+    return;
+  }
+  if (status.value !== "playing") {
+    lastProgressAt = performance.now();
+    return;
+  }
+  if (el.currentTime !== lastTime) {
+    lastTime = el.currentTime;
+    lastProgressAt = performance.now();
+    if (el.readyState >= 3) buffering.value = false;
+    return;
+  }
+  if (performance.now() - lastProgressAt > STALL_MS) {
+    scheduleRetry("画面停住，正在重新拉流");
+  }
+}
+
+/** 切回标签页时视频可能已被浏览器冻结：立刻检查一次，别等 3s 看门狗 */
+function onVisibility() {
+  if (document.visibilityState === "visible") tickStall();
 }
 
 function toggleMute() {
@@ -270,8 +410,8 @@ watch(
   () => [props.url, props.type, props.online, props.deviceId, props.stream],
   () => {
     // 设备 / 地址变化视为全新播放：清掉重连状态
-    clearRetry();
-    retryCount = 0;
+    retryAttempt.value = 0;
+    destroy();
     // 等 DOM 更新完再挂载播放器
     requestAnimationFrame(() => {
       void attach();
@@ -280,8 +420,17 @@ watch(
   { immediate: true }
 );
 
+onMounted(() => {
+  document.addEventListener("visibilitychange", onVisibility);
+  stallTimer = setInterval(tickStall, 1000);
+});
+
 onBeforeUnmount(() => {
-  clearRetry();
+  document.removeEventListener("visibilitychange", onVisibility);
+  if (stallTimer) {
+    clearInterval(stallTimer);
+    stallTimer = null;
+  }
   destroy();
 });
 </script>
@@ -295,12 +444,16 @@ onBeforeUnmount(() => {
       :muted="muted"
       playsinline
       autoplay
-      @playing="status = 'playing'"
-      @waiting="status = 'loading'"
-      @error="fail('视频源不可达')"
+      @playing="onPlaying"
+      @waiting="onWaiting"
+      @stalled="onWaiting"
+      @error="onMediaError"
     />
 
-    <div v-if="!playable || status !== 'playing'" class="video-fallback">
+    <!-- 断流重连期间继续显示最后一帧，避免「黑一下再闪回来」 -->
+    <img v-if="poster && status !== 'playing'" class="video-poster" :src="poster" alt="" />
+
+    <div v-if="showFallback" class="video-fallback">
       <AppIcon name="video" />
       <p>{{ hint }}</p>
       <button v-if="playable && status === 'error'" class="btn sm" @click="attach">
@@ -348,6 +501,16 @@ onBeforeUnmount(() => {
   opacity: 1;
 }
 
+/* 重连期间垫在底下的最后一帧：和 video 同样 object-fit，切换不跳位 */
+.video-poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
 .video-fallback {
   position: absolute;
   inset: 0;
@@ -359,6 +522,7 @@ onBeforeUnmount(() => {
   color: #94a3b8;
   padding: 12px;
   text-align: center;
+  background: rgb(11 18 32 / 72%);
 }
 
 .video-fallback p {
@@ -412,6 +576,14 @@ onBeforeUnmount(() => {
 
 .video-badge.wait i {
   background: #f59e0b;
+}
+
+.video-badge.err {
+  color: #fca5a5;
+}
+
+.video-badge.err i {
+  background: #ef4444;
 }
 
 .video-badge.off {

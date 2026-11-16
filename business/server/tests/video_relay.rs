@@ -9,10 +9,12 @@
 //!         └──── /ws/device 收到 video_start/video_stop ┘
 //! ```
 //!
-//! 断言三件事：
+//! 断言四件事：
 //! 1. 观看者连上后，设备端收到 `video_start`，且携带设备管理里配置的 RTSP 地址；
 //! 2. 推上来的二进制帧原样转发给观看者（浏览器侧 flv.js 就靠这个字节流解码）；
-//! 3. 最后一个观看者断开后，设备端收到 `video_stop`（没人看就停流）。
+//! 3. 最后一个观看者断开后**不立刻**停流，只进看门狗的空转名单（重连 / 切页签不用等
+//!    ffmpeg 重启，现场才不会看到「一闪一闪」）；
+//! 4. 同一条流里重新观看（关掉抽屉再打开 / 浏览器 WS 重连）也必须拿到流头。
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
@@ -221,7 +223,7 @@ async fn next_binary(
 }
 
 #[tokio::test]
-async fn rtsp_stream_is_relayed_to_browser_and_stopped_when_nobody_watches() {
+async fn rtsp_stream_is_relayed_to_browser_and_stops_after_a_grace_period() {
     let (state, _db) = test_state().await;
     let (device_pk, device_code) = prepare_device(&state).await;
     let (port, router) = spawn_server(state.clone()).await;
@@ -309,11 +311,51 @@ async fn rtsp_stream_is_relayed_to_browser_and_stopped_when_nobody_watches() {
         .unwrap();
     assert_eq!(next_binary(&mut late_viewer, "中途加入收帧").await, frame);
 
-    // 6) 最后一个观看者离开 → 设备端收到 video_stop
+    // 6) 最后一个观看者离开：**不立刻**停流 —— 现场关掉抽屉再打开、切页签、浏览器
+    //    WS 抖一下就重连，每次都重启 ffmpeg 要黑 3~7s 且换一条新 FLV，看起来就是
+    //    「一闪一闪的连接中断」。改成留给看门狗（~15s）收尾。
     late_viewer.close(None).await.unwrap();
     viewer.close(None).await.unwrap();
-    let stop = next_msg(&mut device_ws, "video_stop").await;
-    assert_eq!(stop["msgType"], "video_stop", "没人看时应停止拉流");
+    let early_stop = tokio::time::timeout(
+        Duration::from_millis(800),
+        next_msg(&mut device_ws, "video_stop"),
+    )
+    .await;
+    assert!(
+        early_stop.is_err(),
+        "最后一个观看者离开后不应立刻停流，要留重连 / 切页签的宽限"
+    );
+
+    // 观看者计数归零后，这路流进入看门狗的空转名单（下一次 tick 会下发 video_stop）
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if state.video_hub.viewers(&device_code).await == 0
+                && state
+                    .video_hub
+                    .idle_publishers()
+                    .await
+                    .contains(&device_code)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("没人看之后应进入看门狗的空转名单");
+
+    // 7) 宽限期内重新打开（关抽屉再打开 / 浏览器重连）：流还在跑，新观看者**立刻**
+    //    拿到上一轮的流头 + 关键帧，不必再等一次 ffmpeg 启动，也不会黑屏
+    let (mut reopen, _) = connect_async(format!(
+        "ws://127.0.0.1:{port}/api/devices/{device_pk}/video/ws?token={token}"
+    ))
+    .await
+    .expect("重开的观看者连接失败");
+    assert_eq!(
+        next_binary(&mut reopen, "重开补流头").await,
+        init,
+        "同一条流里重新观看也必须拿到流头，否则 flv.js 只能从中段字节开始解"
+    );
 }
 
 /// 用真实 ffmpeg 生成的 FLV 验证流头解析（手写字节可能和 ffmpeg 的实际布局有出入）

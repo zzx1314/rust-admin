@@ -717,17 +717,13 @@ impl VideoSource {
 
     /// 没人看了：让推流端停掉拉流 / 编码
     ///
-    /// 板端中继**不立刻停**：现场会来回切六路，每切一次都重启 ffmpeg 要等 5~14s
-    /// （首次出图 = 进程启动 + 首个关键帧）。保留 `streaming` 标记，交给看门狗在
-    /// 无人观看后 ~15~30s 内停——既让切源几乎无感，也不会一直空转编码。
+    /// 两种推流端都**不立刻停**：现场会来回切页签 / 切六路 / 关掉抽屉再打开，每停一次
+    /// ffmpeg 再重启要等 3~14s（进程启动 + 首个关键帧），现场看到的就是「黑一下 + 一闪」。
+    /// 保留 `streaming` 标记，交给看门狗在无人观看后 ~15~30s 内停：既让重看几乎无感，
+    /// 也不会一直空转编码。
     async fn stop(&self, state: &AppState) -> bool {
         match self {
-            VideoSource::DeviceClient { code, .. } => {
-                state.video_hub.mark_streaming(self.room(), false).await;
-                gateway::send_video_control(&state.device_connections, code, None).await
-            }
-            VideoSource::BoardPusher { .. } => {
-                // 保持 streaming=true，让看门狗（每 15s）在真的没人看时下发 video_stop
+            VideoSource::DeviceClient { .. } | VideoSource::BoardPusher { .. } => {
                 state.video_hub.mark_streaming(self.room(), true).await;
                 true
             }
@@ -740,13 +736,17 @@ async fn handle_viewer(socket: WebSocket, state: AppState, source: VideoSource) 
     let room = source.room().to_string();
     let (mut rx, first, init) = state.video_hub.viewer_join(&room).await;
 
-    // 中途加入：先补一个流头（FLV 魔数 + AVC 配置 + 关键帧），否则 flv.js 黑屏。
+    // 补流头（FLV 魔数 + AVC 配置 + 首个关键帧）：**只要房间里有当前这一轮的流头就补**，
+    // 不分是不是第一个观看者。
     //
-    // **第一个观看者例外**：它的加入才触发推流端起流（板端 relay 是常驻连接，
-    // 每次起流都换一条新 FLV），手上这份流头属于上一轮 —— 补出去会让 flv.js
-    // 先按旧头初始化、再撞上新流的中段字节，解析错位后卡在黑屏。
-    if !first
-        && let Some(init) = init
+    // 早先的做法是「第一个观看者不补旧流头」，前提是它的加入会拉起一条新流；现在
+    // 推流端在没人看时不会立刻被杀（见 `VideoSource::stop`），重复的 `video_start`
+    // 也被推流端按地址去重了 —— 不起新流却又不补头，浏览器就只能收到中段字节，
+    // flv.js 解析错位后黑屏，接着重连，看起来就是反复闪断。
+    //
+    // 流头不会串轮次：板端 relay 每次起 ffmpeg 前发 `video_reset`，设备客户端重连推流
+    // 时整个房间被换掉，两条路径都会把旧流头清掉。
+    if let Some(init) = init
         && sink
             .send(Message::Binary(init.as_ref().to_vec().into()))
             .await
@@ -772,8 +772,11 @@ async fn handle_viewer(socket: WebSocket, state: AppState, source: VideoSource) 
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    // 浏览器侧追不上：丢帧保实时
-                    warn!("viewer of {room} lagged, dropped {skipped} frames");
+                    // 追不上就**关连接**，别从中途丢帧继续发：FLV 是「tag 头 + tag 体」
+                    // 的连续字节流，丢掉任意一段之后后面全部错位，flv.js 只会报解析错误
+                    // 然后黑屏重连。断掉让浏览器重连，服务端会把流头 + 关键帧重发给他。
+                    warn!("viewer of {room} lagged, dropped {skipped} frames; closing for a clean restart");
+                    break;
                 }
                 Err(broadcast::error::RecvError::Closed) => {
                     debug!("viewer of {room}: room closed");

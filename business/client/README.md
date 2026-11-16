@@ -330,10 +330,15 @@ jq -c 'select(.dir=="recv" and .frame.head.type==4013)' /tmp/frames.jsonl
 ```
 
 **按需拉流**：控制台打开设备「实时监控」时才收到 `video_start`，携带的就是设备管理里
-填的 `video_url`；最后一个观看者离开立刻 `video_stop`。没人看时本进程不起 ffmpeg。
+填的 `video_url`；最后一个观看者离开不再立刻 `video_stop`（见下面「不闪的三条」）。
+没人看时本进程不起 ffmpeg。
 
 - 地址不落配置：`video_url` 属于设备档案，运营在「设备管理 → 编辑 → 视频地址」改一次即可。
-- 断流自动重连：ffmpeg 退出或中继连接断开后 3 秒重试，连续重试直到收到 `video_stop`。
+- **重复 `video_start` 按地址去重**：平台每次「第一个观看者进来」都会重发（关抽屉再打开、
+  切页签、浏览器 WS 抖一下都算），同一地址已经在推就不重启 ffmpeg —— 重启一次画面黑
+  3~7s 并换一条新 FLV，现场看到的就是「一闪一闪的连接中断」。
+- 断流自动重连：ffmpeg 退出或中继连接断开后 3 秒重试；每 20s 一个 WS ping 保活
+  （4G / 弱网 NAT 会回收「只上行、长时间无回包」的连接，服务端也会 60s 静默判死）。
 - 编码参数在 `client.toml` 的 `[video]` 段（见 `client.toml.example`）：
 
 | 键 | 默认值 | 说明 |
@@ -359,6 +364,12 @@ jq -c 'select(.dir=="recv" and .frame.head.type==4013)' /tmp/frames.jsonl
 所以拉流固定带 `-use_wallclock_as_timestamps 1`：用**到达时间**当 PTS，
 时间轴与真实时间 1:1（实测播放速率 0.98~1.00），配合 `-r 15` 输出 CFR。
 这项和相机帧率无关，相机哪天真的按 60fps 出流也不会跑偏。
+
+逐包 flush（现场踩过）：ffmpeg 写管道默认带 IO 缓冲，转码出来的小帧会被攒成
+「一阵一阵」的突发数据，浏览器 MSE 先饿死再猛灌，flv.js 在 playing / buffering 之间
+反复横跳（画面一闪一闪、角标在 LIVE / 连接中之间跳）。所以输出固定带
+`-flush_packets 1 -muxdelay 0 -muxpreload 0`，输入带 `-fflags +genpts`。
+板端 relay（`deploy/backpack-relay/relay_push.py`）一直这么配，所以那条链路稳。
 
 现场检查：
 

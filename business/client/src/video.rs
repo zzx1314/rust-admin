@@ -55,6 +55,8 @@ impl VideoRelay {
         tokio::spawn(async move {
             // 当前在跑的推流任务（句柄 + 停止信号）
             let mut active: Option<(tokio::task::JoinHandle<()>, oneshot::Sender<()>)> = None;
+            // 当前在回传的拉流地址：用来去重重复的 `video_start`
+            let mut current_url: Option<String> = None;
 
             while let Some(command) = rx.recv().await {
                 match command {
@@ -63,7 +65,20 @@ impl VideoRelay {
                             warn!("收到 video_start，但 video.enabled = false，忽略");
                             continue;
                         }
+                        // 平台每次「第一个观看者进来」都会重发 video_start：浏览器 WS 抖动
+                        // 重连、抽屉关掉再打开、切页签都算一次第一个观看者。同一地址重复
+                        // 起流会把 ffmpeg 重启一遍（黑 3~7s + 换新 FLV 头），现场看到的就是
+                        // 「画面一闪、连接中断」。已经在推同一地址就什么都不做。
+                        let running = active
+                            .as_ref()
+                            .map(|(handle, _)| !handle.is_finished())
+                            .unwrap_or(false);
+                        if running && current_url.as_deref() == Some(url.as_str()) {
+                            info!("已在回传 {}，忽略重复的 video_start", redact_url(&url));
+                            continue;
+                        }
                         shutdown(&mut active).await;
+                        current_url = Some(url.clone());
                         let (stop_tx, stop_rx) = oneshot::channel();
                         let config = config.clone();
                         let handle = tokio::spawn(async move {
@@ -75,6 +90,7 @@ impl VideoRelay {
                         if active.is_some() {
                             info!("业务平台结束实时视频，停止拉流");
                         }
+                        current_url = None;
                         shutdown(&mut active).await;
                     }
                 }
@@ -195,8 +211,18 @@ async fn pump_once(config: &Config, endpoint: &str, url: &str) -> bool {
     info!("ffmpeg 已启动，开始回传 FLV");
     let mut buffer = vec![0_u8; CHUNK_BYTES];
     let mut sent = 0_u64;
+    // 保活：现场是 4G / 弱网 wifi，NAT 与代理会回收「只上行、长时间无回包」的
+    // TCP 连接，服务端也有 60s 静默判死。每 20s 一个 WS ping，两边都顶得住。
+    let mut keepalive = tokio::time::interval(Duration::from_secs(20));
+    keepalive.tick().await;
     loop {
         tokio::select! {
+            _ = keepalive.tick() => {
+                if sink.send(Message::Ping(Vec::new())).await.is_err() {
+                    warn!("视频中继保活发送失败，连接已断开");
+                    break;
+                }
+            }
             read = stdout.read(&mut buffer) => match read {
                 Ok(0) => {
                     warn!("ffmpeg 结束（已传 {sent} 字节），{RETRY_DELAY:?} 后重试");
@@ -256,6 +282,10 @@ fn ffmpeg_args(config: &Config, url: &str, encoder: &str) -> Vec<String> {
         // 改成墙钟时间戳后时间轴与真实时间 1:1，播放才稳。
         args.push("-use_wallclock_as_timestamps".into());
         args.push("1".into());
+        // 源包里 PTS 缺失 / 不连续时补一个：`-r` 恒定帧率输出要靠它，
+        // 否则 MSE 的时间轴会跳（板端 relay 同样是这么配的）
+        args.push("-fflags".into());
+        args.push("+genpts".into());
         // 拉流侧：现场 RTSP 走 TCP 更稳（UDP 丢包会花屏）。
         // 非 RTSP 地址不能带这些私有选项，否则 ffmpeg 直接报错。
         args.push("-rtsp_transport".into());
@@ -300,6 +330,14 @@ fn ffmpeg_args(config: &Config, url: &str, encoder: &str) -> Vec<String> {
     }
     args.push("-bufsize".into());
     args.push(config.video_bitrate.clone());
+
+    // 输出必须**逐包立刻吐出**：ffmpeg 写管道默认带缓冲（攒满一整个 IO 块才 flush），
+    // 转码出来的小帧会被攒成「一阵一阵」的突发数据。浏览器 MSE 收到突发数据时
+    // 先饿死再猛灌，flv.js 在 playing / buffering 之间反复横跳 —— 现场就是「一闪一闪」。
+    // 板端 relay（`deploy/backpack-relay/relay_push.py`）一直带这三个参数，所以它稳。
+    for value in ["-flush_packets", "1", "-muxdelay", "0", "-muxpreload", "0"] {
+        args.push(value.into());
+    }
 
     // 缩放必须在输出 URL 之前
     if config.video_width > 0 {
@@ -479,6 +517,34 @@ mod tests {
         let format = args.iter().position(|arg| arg == "-f").unwrap();
         assert!(scale < format, "缩放参数放在输出 URL 之后会被 ffmpeg 忽略");
         assert_eq!(args[scale + 1], "scale=1280:-2");
+    }
+
+    /// 现场「一闪一闪 + 连接中断」的根因之一：ffmpeg 写管道是带缓冲的，
+    /// 不加 `-flush_packets` 时小帧被攒成突发数据，浏览器 MSE 反复饿死。
+    /// 板端 relay（`deploy/backpack-relay/relay_push.py`）一直带这几个参数，所以它稳。
+    #[test]
+    fn output_is_flushed_per_packet_for_low_latency() {
+        let args = ffmpeg_args(
+            &test_config(false),
+            "rtsp://192.168.234.1:8554/test",
+            "h264_rkmpp",
+        );
+        let flush = args
+            .iter()
+            .position(|arg| arg == "-flush_packets")
+            .expect("必须逐包 flush，否则浏览器 MSE 会一顿一顿");
+        assert_eq!(args[flush + 1], "1");
+        for expected in ["-muxdelay", "-muxpreload"] {
+            assert!(args.contains(&expected.to_string()), "缺少 {expected}");
+        }
+        // 这三个都是输出参数，必须在 `-f flv pipe:1` 之前
+        let format = args.iter().position(|arg| arg == "-f").unwrap();
+        assert!(flush < format, "-flush_packets 放在输出 URL 之后会被忽略");
+        // RTSP 输入要补 PTS，-r 恒定帧率输出的时间轴才连续
+        let fflags = args.iter().position(|arg| arg == "-fflags").unwrap();
+        let input = args.iter().position(|arg| arg == "-i").unwrap();
+        assert_eq!(args[fflags + 1], "+genpts");
+        assert!(fflags < input, "输入侧的 -fflags 要放在 -i 之前");
     }
 
     #[test]

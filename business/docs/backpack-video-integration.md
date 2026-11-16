@@ -353,15 +353,25 @@ POST /api/backpack/detect/config
 2. **`video_reset`**：板端每次起 ffmpeg 前先发一条，服务端据此清掉该房间的
    `init`/`pending`。常驻连接如果不清旧流头，后加入的观看者会拿到「上一轮的关键帧 +
    这一轮的中段字节」，flv.js 解析错位后卡 `readyState=0`（黑屏）。
-3. **第一个观看者不补流头**：它的加入才触发新流；补上一轮的 `init` 等于把播放器
-   初始化成旧时间轴。
+3. **有流头就补，不分第几个观看者**：只要房间里存着**当前这一轮**的 `init`，任何观看者
+   加入都先收它（FLV 魔数 + AVC 配置 + 首个关键帧）。
+   早先的规则是「第一个观看者不补头」，前提是它的加入必然拉起一条新流；现在没人看时
+   推流端不立刻被杀（见 6.4），重复的 `video_start` 也被推流端按地址去重了 ——
+   不起新流却又不补头，浏览器只能收到中段字节，flv.js 解析错位后黑屏 → 重连 → 再黑，
+   现场看到的就是「一闪一闪的连接中断」。
+   流头不会串轮次：板端 relay 起 ffmpeg 前发 `video_reset`（第 2 条），设备客户端重连
+   推流时整个房间被换掉（`VideoHub::publisher_attach`），两条路径都会清旧头。
 
 ### 6.4 按需与配额
 
 - 常驻 6 条 WS（`cam0..cam3`、`dogcam`、`dog-ipcam`），空闲时每条 ~1KB；
-- 第一个观看者 → `video_start` → 板端起 ffmpeg；最后一个离开 → `video_stop` → 杀进程；
-- 看门狗每 15s 兜一次「起过流但没人看」（`VideoHub::mark_streaming` 才会被盯），
-  板端 relay 的常驻连接不会被误杀；
+- 第一个观看者 → `video_start` → 推流端起 ffmpeg 或 RTSP 拉流；
+- 最后一个观看者离开 → **不立刻停**，只保留 `streaming` 标记；看门狗每 15s 兜一次
+  「起过流但没人看」，在 ~15~30s 内下发 `video_stop`（板端 relay 与设备客户端同一套
+  宽限，见 `VideoSource::stop`）。宽限期内重新打开是**秒开**：流还在跑，服务端直接把
+  流头补上，不用等 ffmpeg 重启；
+- 推流端按地址去重 `video_start`（`business/client/src/video.rs`）：同一地址已经在推就
+  不重启 ffmpeg（重启 = 黑 3~7s + 换新 FLV 头 = 一次闪断）；
 - 单路 2Mbps：六路同时看 = 12Mbps 上行，现场带宽要先确认。
 
 ### 6.4.1 排障：`GET /api/backpack/video/state`
@@ -383,6 +393,28 @@ curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/
 - 中继模式下**没有 AI 叠加**：板端在本机内网，公网页面拿不到 SSE `detect` 事件；
   AI 仍要现场入口。
 - 板端 relay 的推流连接是常驻的，**每次起流换一条新 FLV**，所以服务端必须靠 `video_reset`
-  清 `init`，观看端也必须「第一个观看者不补旧流头」—— 这两条少一条就是黑屏。
+  清 `init`，否则中途加入的观看者会拿到「上一轮关键帧 + 这一轮中段字节」而黑屏。
 - `dog-ipcam` 源若为 H.265，`-c:v copy` 无法封装成 FLV，需 `RELAY_TRANSCODE=1`
   （重编码，板端 CPU 开销大，优先改摄像头出 H.264）。
+
+### 6.6 为什么「设备管理」里的视频会闪（已修）
+
+现场现象：设备管理 → 控制抽屉里的实时监控画面一闪一闪，角标在「LIVE」与
+「连接中断」之间反复跳；而同一台狗的前置摄像头在「实时视频」页用平台中继看却很稳。
+两条链路其实是同一个 `VideoPlayer.vue` + 同一个 `VideoHub` 房间机制，
+差别全在**推流端参数**和**观看端重连策略**上，四个真因都改了：
+
+| # | 真因 | 修法 |
+| --- | --- | --- |
+| 1 | 客户端 ffmpeg 写管道**带缓冲**，转码小帧被攒成突发（板端 relay 一直带 `-flush_packets 1`，所以它稳） | `business/client/src/video.rs` 输出加 `-flush_packets 1 -muxdelay 0 -muxpreload 0`，输入加 `-fflags +genpts` |
+| 2 | 浏览器 WS 一抖，服务端就算「第一个观看者」，重发 `video_start` → 客户端**重启 ffmpeg** → 黑 3~7s + 新 FLV 头 | 客户端按地址去重；服务端最后一个观看者离开时留 15~30s 宽限（看门狗收尾） |
+| 3 | 宽限生效后「第一个观看者不补流头」就变成致命 bug：浏览器只收到中段字节 → flv.js 解析错位 → 黑屏 → 重连 → 循环 | 服务端改成**有流头就补**（不串轮次靠 `video_reset` / 房间替换） |
+| 4 | 观看端 `waiting` 就盖全屏错误层、重连先 `destroy` 清空画面、固定 3s 一次重试 | `VideoPlayer.vue`：缓冲只给角标；断流先抓末帧当 poster；250ms 起退避封顶 3s；3s「时间轴不前进」看门狗；flv.js `enableStashBuffer: false` |
+
+排障顺序（按成本从低到高）：
+
+1. `GET /api/backpack/video/state` 看 `viewers` 是否在 0/1 之间跳 —— 跳就是 2/3 类问题；
+2. 设备客户端日志里是否反复出现 `ffmpeg 已启动` / `video publisher reconnected` —— 是就没去重成功；
+3. 浏览器 Network → WS 帧时间轴：一秒钟一串小帧 = 正常；半秒一团再静默 = 推流端没 flush；
+4. 还闪就看 `viewer of <room> lagged` 日志：观看端网络追不上，服务端现在会主动断开让它拿
+   干净的新流（早先是从中间丢帧继续发，FLV 字节流错位后才一直黑屏重连）。
