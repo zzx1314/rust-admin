@@ -247,12 +247,11 @@ async fn client_reported_teleop_release_clears_holder() {
     assert_eq!(force, 0, "强制接管标记必须一并清掉");
 
     // 事件流留痕，便于运维追溯接管态为什么没了
-    let events: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM task_events WHERE event_type = 'device_event'",
-    )
-    .fetch_one(&state.db)
-    .await
-    .expect("统计事件失败");
+    let events: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM task_events WHERE event_type = 'device_event'")
+            .fetch_one(&state.db)
+            .await
+            .expect("统计事件失败");
     assert_eq!(events, 1, "释放接管应写入一条事件");
 
     close(ws).await;
@@ -367,7 +366,11 @@ async fn unbound_device_can_still_sync_maps() {
     let mut ws = register_device(port, DEVICE_CODE).await;
 
     let (status, body) = sync_maps(&state, DEVICE_CODE).await;
-    assert_eq!(status, StatusCode::OK, "未绑定园区的设备也能同步地图: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "未绑定园区的设备也能同步地图: {body}"
+    );
     assert_eq!(body["data"]["dispatched"], true);
     assert_eq!(body["data"]["parkId"], Value::Null);
 

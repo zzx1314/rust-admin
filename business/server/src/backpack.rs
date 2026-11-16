@@ -373,9 +373,7 @@ pub async fn events(
                 }
                 Ok(None) => break,
                 Err(error) => {
-                    let _ = tx
-                        .send(Err(std::io::Error::other(error.to_string())))
-                        .await;
+                    let _ = tx.send(Err(std::io::Error::other(error.to_string()))).await;
                     break;
                 }
             }

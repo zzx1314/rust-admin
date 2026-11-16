@@ -137,11 +137,10 @@ pub async fn backfill_map_device_codes(
         .connect_with(options)
         .await?;
 
-    let has_column: Option<(String,)> = sqlx::query_as(
-        "SELECT name FROM pragma_table_info('dog_map') WHERE name = 'device_code'",
-    )
-    .fetch_optional(&zentai)
-    .await?;
+    let has_column: Option<(String,)> =
+        sqlx::query_as("SELECT name FROM pragma_table_info('dog_map') WHERE name = 'device_code'")
+            .fetch_optional(&zentai)
+            .await?;
     if has_column.is_none() {
         zentai.close().await;
         return Ok(0);

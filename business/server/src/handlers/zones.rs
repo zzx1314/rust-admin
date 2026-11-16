@@ -3,9 +3,9 @@ use crate::auth::Claims;
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::models::{Zone, ZoneQuery, ZoneRequest};
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::Extension;
 use sqlx::QueryBuilder;
 
 const ZONE_SELECT: &str = "SELECT z.id, z.park_id, p.park_name, z.zone_name, z.zone_type,

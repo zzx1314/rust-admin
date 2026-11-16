@@ -112,8 +112,8 @@ pub async fn build_dispatch_payload(
 
     // 坐标守卫：航点必须是地图米制且在所选地图范围内（详见 [`check_route_data`]）。
     if let Some(data) = route_data.as_ref() {
-        let frame = crate::coords::frame_for_map(db, map.as_ref().map(|item| item.map_id.as_str()))
-            .await?;
+        let frame =
+            crate::coords::frame_for_map(db, map.as_ref().map(|item| item.map_id.as_str())).await?;
         check_route_data(task.route_code.as_deref().unwrap_or("—"), data, &frame)?;
     }
 

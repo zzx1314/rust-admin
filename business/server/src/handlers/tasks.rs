@@ -5,9 +5,9 @@ use crate::error::{ApiResponse, AppError};
 use crate::gateway;
 use crate::gateway_types::TaskControlPayload;
 use crate::models::{Task, TaskQuery, TaskRequest, TaskStatusRequest};
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::Extension;
 use serde_json::{Value, json};
 use sqlx::{QueryBuilder, SqlitePool};
 use tracing::{debug, info, warn};
@@ -93,11 +93,9 @@ pub async fn task_stats(
     } else {
         format!(" WHERE created_by = {}", claims.sub)
     };
-    let sql = format!("SELECT task_status, COUNT(*) FROM tasks{filter_clause} GROUP BY task_status");
-    let rows: Vec<(String, i64)> =
-        sqlx::query_as(&sql)
-            .fetch_all(&state.db)
-            .await?;
+    let sql =
+        format!("SELECT task_status, COUNT(*) FROM tasks{filter_clause} GROUP BY task_status");
+    let rows: Vec<(String, i64)> = sqlx::query_as(&sql).fetch_all(&state.db).await?;
     let total: i64 = rows.iter().map(|(_, count)| count).sum();
     let mut counts = serde_json::Map::new();
     for (status, count) in rows {
@@ -418,14 +416,8 @@ pub async fn update_task(
     } else {
         payload.task_name.trim().to_string()
     };
-    let plan_start = payload
-        .plan_start
-        .clone()
-        .or(existing.plan_start.clone());
-    let plan_end = payload
-        .plan_end
-        .clone()
-        .or(existing.plan_end.clone());
+    let plan_start = payload.plan_start.clone().or(existing.plan_start.clone());
+    let plan_end = payload.plan_end.clone().or(existing.plan_end.clone());
     validate_device_park(&state.db, device_id, park_id).await?;
     sqlx::query(
         "UPDATE tasks SET task_name = ?1, task_type = ?2, execute_mode = ?3, level = ?4,

@@ -238,7 +238,11 @@ async fn remote_takeover_raises_alert_once_and_resolves_when_released() {
     // 遥控器抢走控制权 → 一条未处理告警
     heartbeat(&mut ws, 3).await;
     assert_eq!(ctrl_source_of(&state).await, 3);
-    assert_eq!(preempt_alerts(&state).await, (1, 1), "抢占应落一条未处理告警");
+    assert_eq!(
+        preempt_alerts(&state).await,
+        (1, 1),
+        "抢占应落一条未处理告警"
+    );
 
     let (level, content): (String, String) = sqlx::query_as(
         "SELECT level, content FROM alerts WHERE alert_code LIKE 'AL-CTRL-%'
@@ -292,7 +296,11 @@ async fn flapping_remote_takeover_records_each_transition() {
     heartbeat(&mut ws, 3).await;
     heartbeat(&mut ws, 1).await;
     heartbeat(&mut ws, 3).await;
-    assert_eq!(preempt_alerts(&state).await, (2, 1), "每次抢占各自一条，只有最新未处理");
+    assert_eq!(
+        preempt_alerts(&state).await,
+        (2, 1),
+        "每次抢占各自一条，只有最新未处理"
+    );
     assert_eq!(control_events(&state).await, 3, "三次变化都进事件流");
 }
 
@@ -333,7 +341,11 @@ async fn running_task_suppresses_preempt_alert() {
         .unwrap();
     heartbeat(&mut ws, 1).await;
     heartbeat(&mut ws, 3).await;
-    assert_eq!(preempt_alerts(&state).await, (1, 1), "任务结束后的 3 仍要告警");
+    assert_eq!(
+        preempt_alerts(&state).await,
+        (1, 1),
+        "任务结束后的 3 仍要告警"
+    );
 }
 
 /// 本体近期回过 `13897 capability busy` 时，告警必须指向「本体自己占着导航能力」，
@@ -359,17 +371,19 @@ async fn capability_busy_refines_preempt_alert() {
 
     heartbeat(&mut ws, 3).await;
 
-    let content: String = sqlx::query_scalar(
-        "SELECT content FROM alerts WHERE alert_code LIKE 'AL-CTRL-%'",
-    )
-    .fetch_one(&state.db)
-    .await
-    .expect("应有抢占告警");
+    let content: String =
+        sqlx::query_scalar("SELECT content FROM alerts WHERE alert_code LIKE 'AL-CTRL-%'")
+            .fetch_one(&state.db)
+            .await
+            .expect("应有抢占告警");
     assert!(
         content.contains("13897") && content.contains("残留任务"),
         "有 capability busy 证据时要点明是本体内残留任务: {content}"
     );
-    assert!(!content.contains("被硬件遥控器"), "不能断言就是遥控器: {content}");
+    assert!(
+        !content.contains("被硬件遥控器"),
+        "不能断言就是遥控器: {content}"
+    );
 }
 
 /// 本体掉线（`bodyOnline=false`）时，1315 派生的健康字段必须置空，

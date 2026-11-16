@@ -11,10 +11,10 @@
 //! 3. 告警落到 `alerts`（告警中心）与 `task_events`（任务时间线）；
 //! 4. 窗口结束后（任务终态）状态清空，并真的把 Agent 的识别停掉。
 
-use axum::Router;
-use futures_util::StreamExt;
-use axum::routing::{get, post};
 use axum::Json;
+use axum::Router;
+use axum::routing::{get, post};
+use futures_util::StreamExt;
 use robodog_ops_server::app::AppState;
 use robodog_ops_server::config::Config;
 use robodog_ops_server::gateway_types::TaskProgressPayload;
@@ -297,21 +297,38 @@ async fn ai_action_at_waypoint_starts_detect_and_records_alert() {
     let task_code = seed_ai_route(&state, true).await;
 
     ai_patrol::global()
-        .on_progress(&state, "RD-TEST", &arrival(&task_code, "patrol.point_arrived"))
+        .on_progress(
+            &state,
+            "RD-TEST",
+            &arrival(&task_code, "patrol.point_arrived"),
+        )
         .await;
     tokio::time::sleep(Duration::from_millis(800)).await;
 
     // 告警中心：只报「火焰」一类（烟雾 0.5 低于阈值 0.8；两帧火焰只算一次）
     // 播种数据里本来就有 5 条演示告警，只看 AI 写的那条
-    let alerts: Vec<(String, String)> =
-        sqlx::query_as("SELECT alert_code, content FROM alerts WHERE content LIKE 'AI 识别：%' ORDER BY id")
-            .fetch_all(&state.db)
-            .await
-            .expect("查告警失败");
+    let alerts: Vec<(String, String)> = sqlx::query_as(
+        "SELECT alert_code, content FROM alerts WHERE content LIKE 'AI 识别：%' ORDER BY id",
+    )
+    .fetch_all(&state.db)
+    .await
+    .expect("查告警失败");
     assert_eq!(alerts.len(), 1, "应当只写一条告警，实际 {alerts:?}");
-    assert!(alerts[0].0.starts_with("AL-"), "告警编号格式不对: {}", alerts[0].0);
-    assert!(alerts[0].1.contains("火焰"), "告警内容缺类别: {}", alerts[0].1);
-    assert!(alerts[0].1.contains("配电柜"), "告警内容缺航点名: {}", alerts[0].1);
+    assert!(
+        alerts[0].0.starts_with("AL-"),
+        "告警编号格式不对: {}",
+        alerts[0].0
+    );
+    assert!(
+        alerts[0].1.contains("火焰"),
+        "告警内容缺类别: {}",
+        alerts[0].1
+    );
+    assert!(
+        alerts[0].1.contains("配电柜"),
+        "告警内容缺航点名: {}",
+        alerts[0].1
+    );
 
     // 任务时间线也留一条，现场排查「这条告警属于哪个点」
     let events: Vec<(String, String)> =
@@ -327,8 +344,16 @@ async fn ai_action_at_waypoint_starts_detect_and_records_alert() {
     // 状态接口能看到窗口与已上报类别
     let status = ai_patrol::global().status().await;
     assert_eq!(status["active"], json!(true), "窗口应当是开着的: {status}");
-    assert_eq!(status["scene"], json!("fire"), "场景应命中烟火模型: {status}");
-    assert_eq!(status["threshold"], json!(0.8), "阈值应取自动作配置: {status}");
+    assert_eq!(
+        status["scene"],
+        json!("fire"),
+        "场景应命中烟火模型: {status}"
+    );
+    assert_eq!(
+        status["threshold"],
+        json!(0.8),
+        "阈值应取自动作配置: {status}"
+    );
     assert_eq!(status["hits"].as_array().map(Vec::len), Some(1));
 
     // 任务终态 → 窗口关闭 + 真的停掉 Agent 的识别
@@ -338,8 +363,14 @@ async fn ai_action_at_waypoint_starts_detect_and_records_alert() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(ai_patrol::global().status().await["active"], json!(false));
     let log = calls.log.lock().unwrap().clone();
-    assert!(log.contains(&"start".to_string()), "应当启动过识别: {log:?}");
-    assert!(log.contains(&"stop".to_string()), "窗口结束应当停掉识别: {log:?}");
+    assert!(
+        log.contains(&"start".to_string()),
+        "应当启动过识别: {log:?}"
+    );
+    assert!(
+        log.contains(&"stop".to_string()),
+        "窗口结束应当停掉识别: {log:?}"
+    );
     drop(temp);
 }
 
@@ -360,11 +391,15 @@ async fn point_without_ai_action_never_starts_detect() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     assert_eq!(ai_patrol::global().status().await["active"], json!(false));
-    assert!(calls.log.lock().unwrap().is_empty(), "没有 AI 动作就不该碰 Agent");
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM alerts WHERE content LIKE 'AI 识别：%'")
-        .fetch_one(&state.db)
-        .await
-        .expect("查告警失败");
+    assert!(
+        calls.log.lock().unwrap().is_empty(),
+        "没有 AI 动作就不该碰 Agent"
+    );
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM alerts WHERE content LIKE 'AI 识别：%'")
+            .fetch_one(&state.db)
+            .await
+            .expect("查告警失败");
     assert_eq!(count, 0);
     drop(temp);
 }
@@ -381,7 +416,11 @@ async fn missing_agent_does_not_leave_stale_window() {
     let task_code = seed_ai_route(&state, true).await;
 
     ai_patrol::global()
-        .on_progress(&state, "RD-TEST", &arrival(&task_code, "patrol.point_arrived"))
+        .on_progress(
+            &state,
+            "RD-TEST",
+            &arrival(&task_code, "patrol.point_arrived"),
+        )
         .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 

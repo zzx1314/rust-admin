@@ -795,7 +795,10 @@ fn resolve_scene(tasks: Option<&Value>, hint: &str) -> Option<Scene> {
     }
 
     if let Some((score, scene)) = best {
-        debug!("AI 识别场景匹配：提示「{hint}」命中 {} 个关键词 → {}", score, scene.task);
+        debug!(
+            "AI 识别场景匹配：提示「{hint}」命中 {} 个关键词 → {}",
+            score, scene.task
+        );
         return Some(scene);
     }
     if let Some(scene) = fallback {

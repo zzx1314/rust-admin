@@ -54,9 +54,13 @@ impl IntoResponse for AppError {
         };
         let message = self.to_string();
         match status {
-            StatusCode::INTERNAL_SERVER_ERROR => tracing::error!(error = %message, "request failed"),
+            StatusCode::INTERNAL_SERVER_ERROR => {
+                tracing::error!(error = %message, "request failed")
+            }
             // 上游不可用是部署/网络问题，按 warn 记，别刷成 error 噪音
-            StatusCode::SERVICE_UNAVAILABLE => tracing::warn!(error = %message, "upstream unavailable"),
+            StatusCode::SERVICE_UNAVAILABLE => {
+                tracing::warn!(error = %message, "upstream unavailable")
+            }
             _ => {}
         }
         (

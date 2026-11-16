@@ -3,7 +3,9 @@ use crate::auth::{self, Claims};
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::gateway;
-use crate::models::{BindParkRequest, CommandRequest, Device, DeviceQuery, DeviceRequest, LocateRequest};
+use crate::models::{
+    BindParkRequest, CommandRequest, Device, DeviceQuery, DeviceRequest, LocateRequest,
+};
 use crate::zentai;
 use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
@@ -678,7 +680,8 @@ pub(crate) async fn push_command(
     }
     // 任务/运动类指令先过本体健康门禁；远程接管/释放/同步地图不涉及运动，放行。
     // 设备根本没有 WS 连接时保留原「未送达」语义，避免把“没连上”误报成“本体不健康”。
-    let connected = gateway::is_device_connected(&state.device_connections, &device.device_id).await;
+    let connected =
+        gateway::is_device_connected(&state.device_connections, &device.device_id).await;
     if connected
         && matches!(
             command,
@@ -716,7 +719,8 @@ pub(crate) async fn push_command(
                 device.device_id
             )));
         }
-        if device.teleop_holder.is_some() && !super::teleop::teleop_expired(device.teleop_at.as_deref())
+        if device.teleop_holder.is_some()
+            && !super::teleop::teleop_expired(device.teleop_at.as_deref())
         {
             return Err(AppError::BadRequest(format!(
                 "设备 {} 正在远程接管中，请先释放接管再重连（重连会丢掉接管态）",

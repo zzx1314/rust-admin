@@ -606,7 +606,10 @@ mod tests {
     #[test]
     fn map_info_carries_replace_id_only_when_asked() {
         let request = sample_request(None);
-        assert_eq!(zentai_map_info(&request, None, None, None)["id"], Value::Null);
+        assert_eq!(
+            zentai_map_info(&request, None, None, None)["id"],
+            Value::Null
+        );
         assert_eq!(
             zentai_map_info(&request, None, None, Some(42))["id"],
             json!(42)

@@ -454,11 +454,7 @@ async fn creating_park_adopts_unbound_device_map() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(
-        owner,
-        Some(park_id),
-        "被选中的设备地图应认领到新园区"
-    );
+    assert_eq!(owner, Some(park_id), "被选中的设备地图应认领到新园区");
 }
 
 #[tokio::test]
@@ -687,10 +683,7 @@ async fn dashboard_trend_and_timeline_use_live_data() {
         assert_ne!(value.as_i64(), Some(999), "趋势不能读预置的 daily_stats");
     }
     assert!(
-        data["kpis"]["todayTasks"]["value"]
-            .as_i64()
-            .unwrap_or(0)
-            >= 1,
+        data["kpis"]["todayTasks"]["value"].as_i64().unwrap_or(0) >= 1,
         "今日任务应按计划日期/创建日期统计"
     );
     assert!(
@@ -746,10 +739,10 @@ async fn body_actions_include_gait_modes() {
         "UPDATE devices SET status = '在线待命', body_online = 1,
             sdk_node_available = 1, estop_software = 0 WHERE id = ?1",
     )
-        .bind(id)
-        .execute(&state.db)
-        .await
-        .unwrap();
+    .bind(id)
+    .execute(&state.db)
+    .await
+    .unwrap();
     let taken = app
         .clone()
         .oneshot(
@@ -776,7 +769,10 @@ async fn body_actions_include_gait_modes() {
             .clone()
             .oneshot(
                 Request::post(format!("/api/devices/{id}/action"))
-                    .header(header::CONTENT_TYPE, header::HeaderValue::from_static("application/json"))
+                    .header(
+                        header::CONTENT_TYPE,
+                        header::HeaderValue::from_static("application/json"),
+                    )
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::from(format!(r#"{{"action":"{action}"}}"#)))
                     .unwrap(),
@@ -790,7 +786,10 @@ async fn body_actions_include_gait_modes() {
         // 急停 / 解除急停固件没有 1303 回执，响应必须带上回读校验窗口，
         // 前端据此提示「N 秒内自动校验」，而不是直报成功。
         if matches!(action, "emergency_stop" | "clear_emergency_stop") {
-            assert!(body["data"]["verify"].is_object(), "{action} 应带 verify: {body}");
+            assert!(
+                body["data"]["verify"].is_object(),
+                "{action} 应带 verify: {body}"
+            );
             assert_eq!(body["data"]["verify"]["field"], "estopSoftware");
         }
     }
@@ -900,7 +899,10 @@ async fn dispatch_gate_explains_capability_busy_instead_of_blaming_remote() {
         msg.contains("ctrl_source=3") && msg.contains("物理遥控器"),
         "门禁应说清是控制源问题: {msg}"
     );
-    assert!(!msg.contains("13897"), "没有证据时不能提 capability busy: {msg}");
+    assert!(
+        !msg.contains("13897"),
+        "没有证据时不能提 capability busy: {msg}"
+    );
 
     // 2) 本体近期回过 13897：文案要指向本体内残留任务 / 算法节点
     sqlx::query(
@@ -954,10 +956,10 @@ async fn task_dispatch_is_rejected_while_teleop_held() {
         "UPDATE devices SET status = '在线待命', body_online = 1,
             sdk_node_available = 1, estop_software = 0 WHERE id = ?1",
     )
-        .bind(device_pk)
-        .execute(&pool)
-        .await
-        .unwrap();
+    .bind(device_pk)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let task_id: i64 = sqlx::query_scalar(
         "INSERT INTO tasks (task_code, task_name, device_id, park_id, task_status, progress,
@@ -1003,10 +1005,7 @@ async fn task_dispatch_is_rejected_while_teleop_held() {
     );
     let body = json_body(response).await;
     let msg = body["msg"].as_str().unwrap_or_default();
-    assert!(
-        msg.contains("接管"),
-        "错误信息应说明接管中，实际: {msg}"
-    );
+    assert!(msg.contains("接管"), "错误信息应说明接管中，实际: {msg}");
 
     // 释放接管后校验通过（此时才会因为设备未连接而报另一个错）
     sqlx::query("UPDATE devices SET teleop_holder = NULL, teleop_at = NULL WHERE id = ?1")
@@ -1056,7 +1055,10 @@ async fn locate_device_dispatches_relocalize_with_pose() {
         .clone()
         .oneshot(
             Request::post(format!("/api/devices/{id}/locate"))
-                .header(header::CONTENT_TYPE, header::HeaderValue::from_static("application/json"))
+                .header(
+                    header::CONTENT_TYPE,
+                    header::HeaderValue::from_static("application/json"),
+                )
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::from("{}"))
                 .unwrap(),
@@ -1076,7 +1078,10 @@ async fn locate_device_dispatches_relocalize_with_pose() {
         .clone()
         .oneshot(
             Request::post(format!("/api/devices/{id}/locate"))
-                .header(header::CONTENT_TYPE, header::HeaderValue::from_static("application/json"))
+                .header(
+                    header::CONTENT_TYPE,
+                    header::HeaderValue::from_static("application/json"),
+                )
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::from(r#"{"mapId":"ROS-MAP-1@v1.0"}"#))
                 .unwrap(),
@@ -1101,14 +1106,23 @@ async fn locate_device_dispatches_relocalize_with_pose() {
     .await
     .unwrap();
     let (tx, mut rx) = tokio::sync::broadcast::channel(4);
-    state.device_connections.write().await.insert(code.clone(), tx);
+    state
+        .device_connections
+        .write()
+        .await
+        .insert(code.clone(), tx);
     let response = app
         .clone()
         .oneshot(
             Request::post(format!("/api/devices/{id}/locate"))
-                .header(header::CONTENT_TYPE, header::HeaderValue::from_static("application/json"))
+                .header(
+                    header::CONTENT_TYPE,
+                    header::HeaderValue::from_static("application/json"),
+                )
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                .body(Body::from(r#"{"mapId":"ROS-MAP-1@v1.0","x":1.5,"y":-2.0,"heading":90}"#))
+                .body(Body::from(
+                    r#"{"mapId":"ROS-MAP-1@v1.0","x":1.5,"y":-2.0,"heading":90}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -1248,9 +1262,8 @@ mod zentai_control {
         };
         let before = count().await;
 
-        let payload = format!(
-            r#"{{"taskName":"冒烟巡检","routeId":{route_id},"requestId":"smoke-task-1"}}"#
-        );
+        let payload =
+            format!(r#"{{"taskName":"冒烟巡检","routeId":{route_id},"requestId":"smoke-task-1"}}"#);
         let mut statuses = Vec::new();
         for _ in 0..2 {
             let response = app
@@ -1512,16 +1525,16 @@ mod zentai_service_token {
             service_token: Some(TOKEN.to_string()),
             zentai_ws_url: None,
             device_timeout_secs: 90,
-        task_timeout_secs: 120,
-        task_stuck_secs: 600,
-        backpack_base_url: None,
-        backpack_webrtc_url: None,
-        backpack_browser_url: None,
-        public_url: None,
-        wecom_enabled: false,
-        wecom_webhook: None,
-        wecom_min_level: "警告".to_string(),
-        wecom_mention_all: false,
+            task_timeout_secs: 120,
+            task_stuck_secs: 600,
+            backpack_base_url: None,
+            backpack_webrtc_url: None,
+            backpack_browser_url: None,
+            public_url: None,
+            wecom_enabled: false,
+            wecom_webhook: None,
+            wecom_min_level: "警告".to_string(),
+            wecom_mention_all: false,
         }
     }
 
@@ -2073,7 +2086,10 @@ async fn legacy_route_coordinates_are_migrated_once() {
     let x = data["points"][0]["x"].as_f64().unwrap();
     let y = data["points"][0]["y"].as_f64().unwrap();
     assert!((x - 5.71).abs() < 0.05, "x 应换算为地图米，实际 {x}");
-    assert!((y - 21.29).abs() < 0.05, "y 应换算为地图米（含 y 翻转），实际 {y}");
+    assert!(
+        (y - 21.29).abs() < 0.05,
+        "y 应换算为地图米（含 y 翻转），实际 {y}"
+    );
     // 里程按米重算：旧口径是「像素 × 1.2」
     let distance: f64 = sqlx::query_scalar("SELECT distance_m FROM routes WHERE id = ?1")
         .bind(route_id)
@@ -2148,7 +2164,10 @@ async fn dispatch_payload_prefers_robot_map_dir() {
         .expect("坐标合法时应能组装载荷");
     let map = payload.map.expect("应带地图绑定");
     assert_eq!(map.map_dir, "2026_11_10_16_15_06");
-    assert_eq!(map.map_path, "2026_11_10_16_15_06", "map_path 也要用真实目录名");
+    assert_eq!(
+        map.map_path, "2026_11_10_16_15_06",
+        "map_path 也要用真实目录名"
+    );
     assert_eq!(map.map_id, map_id);
 }
 
@@ -2178,7 +2197,10 @@ async fn dispatch_payload_falls_back_to_synthetic_map_dir() {
         .await
         .unwrap();
     let map = payload.map.unwrap();
-    assert_eq!(map.map_dir, robodog_ops_server::mapdir::synthetic_dir(&map_id));
+    assert_eq!(
+        map.map_dir,
+        robodog_ops_server::mapdir::synthetic_dir(&map_id)
+    );
 }
 
 /// 中台重复导入的包按「同名 zip」认回本体目录名，且可重复执行。
@@ -2398,10 +2420,7 @@ async fn body_reconnect_requires_online_client() {
     let body = json_body(response).await;
     let msg = body["msg"].as_str().unwrap_or_default();
     // 白名单要认这条指令（否则会是「不支持的指令」），拒绝原因是"未连接"
-    assert!(
-        !msg.contains("不支持的指令"),
-        "本体重连应在白名单内: {msg}"
-    );
+    assert!(!msg.contains("不支持的指令"), "本体重连应在白名单内: {msg}");
     assert!(msg.contains("未连接"), "拒绝原因应说明客户端未连接: {msg}");
 }
 
@@ -2414,8 +2433,9 @@ fn robot_map_zip(pgm: &[u8], mtime: (u16, u8, u8, u8, u8, u8)) -> Vec<u8> {
     let (year, month, day, hour, minute, second) = mtime;
     let mut buffer = std::io::Cursor::new(Vec::new());
     let mut writer = zip::ZipWriter::new(&mut buffer);
-    let options = zip::write::SimpleFileOptions::default()
-        .last_modified_time(zip::DateTime::from_date_and_time(year, month, day, hour, minute, second).unwrap());
+    let options = zip::write::SimpleFileOptions::default().last_modified_time(
+        zip::DateTime::from_date_and_time(year, month, day, hour, minute, second).unwrap(),
+    );
     writer.start_file("model.yaml", options).unwrap();
     writer
         .write_all(b"image: model.pgm\nresolution: 0.05\norigin: [-1.0, -2.0, 0.0]\nnegate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.196\n")
@@ -2466,10 +2486,7 @@ async fn post_ingest(app: &axum::Router, token: &str, package: &[u8], info: Valu
         .unwrap();
     let status = response.status();
     let body = json_body(response).await;
-    assert!(
-        status.is_success(),
-        "回传接口应成功（{status}）：{body}"
-    );
+    assert!(status.is_success(), "回传接口应成功（{status}）：{body}");
     body
 }
 
@@ -2634,7 +2651,6 @@ async fn ingest_refresh_overwrites_existing_map_only_when_content_changes() {
     );
 
     // 本地副本与业务行都被刷新成新内容
-    let refreshed =
-        std::fs::read(body["data"]["stashPath"].as_str().unwrap()).expect("读取暂存包");
+    let refreshed = std::fs::read(body["data"]["stashPath"].as_str().unwrap()).expect("读取暂存包");
     assert_eq!(sha256_hex(&refreshed), sha256_hex(&changed));
 }

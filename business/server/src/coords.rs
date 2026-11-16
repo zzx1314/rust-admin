@@ -106,7 +106,13 @@ impl MapFrame {
         let scale = (CANVAS_WIDTH / self.width).min(CANVAS_HEIGHT / self.height);
         let draw_w = self.width * scale;
         let draw_h = self.height * scale;
-        (scale, draw_w, draw_h, (CANVAS_WIDTH - draw_w) / 2.0, (CANVAS_HEIGHT - draw_h) / 2.0)
+        (
+            scale,
+            draw_w,
+            draw_h,
+            (CANVAS_WIDTH - draw_w) / 2.0,
+            (CANVAS_HEIGHT - draw_h) / 2.0,
+        )
     }
 
     /// 画布像素 → 地图米
@@ -142,10 +148,7 @@ impl MapFrame {
     pub fn contains(&self, x: f64, y: f64) -> bool {
         let (min_x, min_y, max_x, max_y) = self.extents();
         let margin = self.resolution;
-        x >= min_x - margin
-            && x <= max_x + margin
-            && y >= min_y - margin
-            && y <= max_y + margin
+        x >= min_x - margin && x <= max_x + margin && y >= min_y - margin && y <= max_y + margin
     }
 
     /// 冻结进路线数据的地图几何快照（便于离线核对与前端渲染）
@@ -189,12 +192,12 @@ pub async fn frame_for_map(
         return Ok(MapFrame::schematic());
     };
     let row: Option<MapRow> = sqlx::query_as(
-            "SELECT resolution, origin, map_width, map_height, file_path
+        "SELECT resolution, origin, map_width, map_height, file_path
              FROM map_versions WHERE id = ?1",
-        )
-        .bind(map_id)
-        .fetch_optional(pool)
-        .await?;
+    )
+    .bind(map_id)
+    .fetch_optional(pool)
+    .await?;
     Ok(row
         .map(|(resolution, origin, width, height, file_path)| {
             MapFrame::from_parts(
@@ -255,7 +258,13 @@ pub fn points_outside(data: &Value, frame: &MapFrame) -> Vec<(usize, f64, f64)> 
 }
 
 /// `map_versions` 里与坐标换算相关的列
-type MapRow = (Option<String>, Option<String>, Option<i64>, Option<i64>, Option<String>);
+type MapRow = (
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+);
 /// `routes` 里与坐标迁移相关的列
 type RouteRow = (i64, Option<String>, Option<String>, String, f64);
 

@@ -329,7 +329,11 @@ impl Config {
             self.backpack_browser_url
                 .as_deref()
                 .and_then(derive_webrtc_base)
-                .or_else(|| self.backpack_base_url.as_deref().and_then(derive_webrtc_base))
+                .or_else(|| {
+                    self.backpack_base_url
+                        .as_deref()
+                        .and_then(derive_webrtc_base)
+                })
         })
     }
 
@@ -686,8 +690,9 @@ mod tests {
     #[test]
     fn wecom_ready_needs_both_switch_and_webhook() {
         let env = |name: &str| match name {
-            "ROBODOG_WECOM_WEBHOOK" => Some(" https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=k "
-                .to_string()),
+            "ROBODOG_WECOM_WEBHOOK" => {
+                Some(" https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=k ".to_string())
+            }
             _ => None,
         };
         let config = Config::merge(None, None, env);
@@ -732,7 +737,9 @@ mod tests {
             _ => None,
         };
         let config = Config::merge(
-            Some(parse("[wecom]\nwebhook = \"https://file.example.com/hook\"")),
+            Some(parse(
+                "[wecom]\nwebhook = \"https://file.example.com/hook\"",
+            )),
             None,
             env,
         );

@@ -743,7 +743,9 @@ pub async fn sweep_stuck_tasks(state: &AppState) -> Result<u64, AppError> {
 
         // 设备离线导致的卡单按「严重」推：不是任务本身的问题，重启任务也没用
         let reason = if kind == "silent" {
-            format!("超过 {timeout}s 未收到进度上报（设备 {device_code} {device_status}），已判定为异常")
+            format!(
+                "超过 {timeout}s 未收到进度上报（设备 {device_code} {device_status}），已判定为异常"
+            )
         } else {
             format!(
                 "进度停在 {progress}% 超过 {stuck}s 没有任何推进（设备 {device_code} {device_status}），已判定为异常"
@@ -853,7 +855,11 @@ pub async fn notify_park_binding(
 ///
 /// 运行态（电量/信号/温度/里程/任务）每次覆写；台账类字段（型号/固件/状态）
 /// 变化时标记 `ledger_changed`，心跳末尾统一再同步一次中台，避免 10s 一次打接口。
-async fn handle_heartbeat(state: &crate::app::AppState, device_id: &str, payload: &HeartbeatPayload) {
+async fn handle_heartbeat(
+    state: &crate::app::AppState,
+    device_id: &str,
+    payload: &HeartbeatPayload,
+) {
     let db = &state.db;
     let config = &state.config;
     let timestamp = now();
@@ -984,14 +990,13 @@ async fn handle_heartbeat(state: &crate::app::AppState, device_id: &str, payload
     }
     // 定位状态与当前生效地图：设备详情页据此判断「狗在不在地图上」
     if let Some(loc) = payload.loc_status {
-        let _ = sqlx::query(
-            "UPDATE devices SET loc_status = ?1, updated_at = ?2 WHERE device_id = ?3",
-        )
-        .bind(loc)
-        .bind(&timestamp_clone)
-        .bind(&device_id_clone)
-        .execute(db)
-        .await;
+        let _ =
+            sqlx::query("UPDATE devices SET loc_status = ?1, updated_at = ?2 WHERE device_id = ?3")
+                .bind(loc)
+                .bind(&timestamp_clone)
+                .bind(&device_id_clone)
+                .execute(db)
+                .await;
     }
     if let Some(map) = payload
         .map_id
@@ -1239,12 +1244,13 @@ async fn record_control_source_change(
             .ok()
             .flatten();
 
-    let _ = sqlx::query("UPDATE devices SET ctrl_source = ?1, updated_at = ?2 WHERE device_id = ?3")
-        .bind(source)
-        .bind(timestamp)
-        .bind(device_id)
-        .execute(db)
-        .await;
+    let _ =
+        sqlx::query("UPDATE devices SET ctrl_source = ?1, updated_at = ?2 WHERE device_id = ?3")
+            .bind(source)
+            .bind(timestamp)
+            .bind(device_id)
+            .execute(db)
+            .await;
 
     if previous == Some(source) {
         return;
@@ -1915,10 +1921,7 @@ pub async fn send_video_control(
         return false;
     };
     let (cmd_type, payload) = match url {
-        Some(url) => (
-            "video_start",
-            json!({ "url": url, "format": "flv" }),
-        ),
+        Some(url) => ("video_start", json!({ "url": url, "format": "flv" })),
         None => ("video_stop", json!({})),
     };
     match tx.send(PendingCommand {
@@ -2100,17 +2103,11 @@ mod tests {
         };
         // 13504 level=3 必须落「严重」，不能被普通 fault 淹没
         assert_eq!(
-            event_alert_level(&event(
-                "fault",
-                Some(serde_json::json!({ "severity": 3 }))
-            )),
+            event_alert_level(&event("fault", Some(serde_json::json!({ "severity": 3 })))),
             "严重"
         );
         assert_eq!(
-            event_alert_level(&event(
-                "fault",
-                Some(serde_json::json!({ "severity": 1 }))
-            )),
+            event_alert_level(&event("fault", Some(serde_json::json!({ "severity": 1 })))),
             "警告"
         );
         assert_eq!(event_alert_level(&event("fault", None)), "警告");

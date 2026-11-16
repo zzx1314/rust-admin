@@ -97,7 +97,9 @@ async fn test_state() -> (AppState, TempDb) {
 /// 起真实监听端口，返回端口与 Router（登录用 `oneshot` 即可）
 async fn spawn_server(state: AppState) -> (u16, axum::Router) {
     let router = build_router(state);
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("绑定随机端口失败");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("绑定随机端口失败");
     let port = listener.local_addr().expect("取端口失败").port();
     let serving = router.clone();
     tokio::spawn(async move {
@@ -127,16 +129,19 @@ async fn login_token(router: &axum::Router) -> String {
 
 /// 把演示设备改成「在线 + 已配 RTSP 地址」
 async fn prepare_device(state: &AppState) -> (i64, String) {
-    let row: (i64, String) = sqlx::query_as("SELECT id, device_id FROM devices ORDER BY id LIMIT 1")
-        .fetch_one(&state.db)
-        .await
-        .expect("演示数据应至少有一台设备");
-    sqlx::query("UPDATE devices SET status = '在线待命', video_url = ?1, video_type = 'rtsp' WHERE id = ?2")
-        .bind(RTSP_URL)
-        .bind(row.0)
-        .execute(&state.db)
-        .await
-        .expect("写入视频地址失败");
+    let row: (i64, String) =
+        sqlx::query_as("SELECT id, device_id FROM devices ORDER BY id LIMIT 1")
+            .fetch_one(&state.db)
+            .await
+            .expect("演示数据应至少有一台设备");
+    sqlx::query(
+        "UPDATE devices SET status = '在线待命', video_url = ?1, video_type = 'rtsp' WHERE id = ?2",
+    )
+    .bind(RTSP_URL)
+    .bind(row.0)
+    .execute(&state.db)
+    .await
+    .expect("写入视频地址失败");
     row
 }
 
@@ -267,10 +272,7 @@ async fn rtsp_stream_is_relayed_to_browser_and_stopped_when_nobody_watches() {
 
     // 4) 推流：真 FLV 头 + 首关键帧后，字节原样转发给观看者
     let (init, frame) = flv_stream();
-    publisher
-        .send(Message::Binary(init.clone()))
-        .await
-        .unwrap();
+    publisher.send(Message::Binary(init.clone())).await.unwrap();
     assert_eq!(
         next_binary(&mut viewer, "首个观看者补流头").await,
         init,
@@ -360,12 +362,36 @@ async fn real_ffmpeg_flv_is_relayed_with_headers() {
     // 用合成画面代替 RTSP，编码参数与客户端 src/video.rs 保持一致
     let mut ffmpeg = tokio::process::Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-nostdin",
-            "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=10",
-            "-an", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-            "-profile:v", "baseline", "-pix_fmt", "yuv420p", "-g", "10",
-            "-sc_threshold", "0", "-r", "10", "-b:v", "300k",
-            "-f", "flv", "pipe:1",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=10",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-profile:v",
+            "baseline",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            "10",
+            "-sc_threshold",
+            "0",
+            "-r",
+            "10",
+            "-b:v",
+            "300k",
+            "-f",
+            "flv",
+            "pipe:1",
         ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -409,7 +435,11 @@ async fn real_ffmpeg_flv_is_relayed_with_headers() {
     .expect("中途观看者连接失败");
     let init = next_binary(&mut late_viewer, "真实流补头").await;
     assert!(init.starts_with(b"FLV"), "补发的流头应以 FLV 魔数开头");
-    assert!(init.len() > 100, "补发的流头应包含序列头与关键帧，实际 {} 字节", init.len());
+    assert!(
+        init.len() > 100,
+        "补发的流头应包含序列头与关键帧，实际 {} 字节",
+        init.len()
+    );
 
     pump.abort();
 }

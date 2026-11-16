@@ -118,29 +118,29 @@ pub async fn ingest_map(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let existing: Option<(String, Option<String>, Option<String>)> = match device_code.as_deref()
-        {
-            Some(code) => {
-                sqlx::query_as(
-                    "SELECT id, source_id, file_path FROM map_versions
+        let existing: Option<(String, Option<String>, Option<String>)> =
+            match device_code.as_deref() {
+                Some(code) => {
+                    sqlx::query_as(
+                        "SELECT id, source_id, file_path FROM map_versions
                      WHERE (device_code = ?1 OR device_code IS NULL) AND source_ref = ?2
                      ORDER BY CASE WHEN device_code = ?1 THEN 0 ELSE 1 END LIMIT 1",
-                )
-                .bind(code)
-                .bind(source_ref)
-                .fetch_optional(&state.db)
-                .await?
-            }
-            None => {
-                sqlx::query_as(
-                    "SELECT id, source_id, file_path FROM map_versions
+                    )
+                    .bind(code)
+                    .bind(source_ref)
+                    .fetch_optional(&state.db)
+                    .await?
+                }
+                None => {
+                    sqlx::query_as(
+                        "SELECT id, source_id, file_path FROM map_versions
                      WHERE source_ref = ?1 LIMIT 1",
-                )
-                .bind(source_ref)
-                .fetch_optional(&state.db)
-                .await?
-            }
-        };
+                    )
+                    .bind(source_ref)
+                    .fetch_optional(&state.db)
+                    .await?
+                }
+            };
         if let Some((map_id, source_id, stored_file)) = existing {
             let stale_zentai_id = source_id
                 .as_deref()

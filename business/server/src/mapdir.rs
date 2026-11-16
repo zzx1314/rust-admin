@@ -79,9 +79,7 @@ pub async fn source_ref_for_file_name(
     .await?;
     Ok(rows
         .into_iter()
-        .find(|(source_ref,)| {
-            dir_from_source_ref(source_ref).as_deref() == Some(stem.as_str())
-        })
+        .find(|(source_ref,)| dir_from_source_ref(source_ref).as_deref() == Some(stem.as_str()))
         .map(|(source_ref,)| source_ref.trim().to_string()))
 }
 

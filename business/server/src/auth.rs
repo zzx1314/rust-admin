@@ -261,7 +261,11 @@ fn token_from_query(query: Option<&str>) -> Option<String> {
         .split('&')
         .filter_map(|pair| pair.split_once('='))
         .find(|(key, _)| *key == "token")
-        .map(|(_, value)| urlencoding::decode(value).map(|v| v.into_owned()).unwrap_or_else(|_| value.to_string()))
+        .map(|(_, value)| {
+            urlencoding::decode(value)
+                .map(|v| v.into_owned())
+                .unwrap_or_else(|_| value.to_string())
+        })
         .filter(|token| !token.is_empty())
 }
 

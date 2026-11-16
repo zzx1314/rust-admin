@@ -4,9 +4,9 @@ use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::geo::{nearest_neighbor_order, route_metrics};
 use crate::models::{Route, RouteQuery, RouteRequest};
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::Extension;
 use serde_json::{Value, json};
 use sqlx::QueryBuilder;
 

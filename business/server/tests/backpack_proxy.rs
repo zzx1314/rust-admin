@@ -11,12 +11,12 @@
 //! 2. 未带 Authorization 的 SSE 能靠 `?token=` 通过鉴权（`EventSource` 不能带请求头）；
 //! 3. Agent 不可达时返回 503 且文案说明配哪个变量，而不是 500「服务器错误」。
 
+use axum::Json;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::Json;
 use robodog_ops_server::app::{AppState, build_router};
 use robodog_ops_server::config::Config;
 use robodog_ops_server::{db, gateway, seed};
@@ -148,7 +148,9 @@ async fn fake_cameras() -> impl IntoResponse {
 }
 
 async fn fake_relay() -> impl IntoResponse {
-    Json(json!({"enabled": true, "running": true, "restarts": 0, "last_error": "", "stream": "dogcam"}))
+    Json(
+        json!({"enabled": true, "running": true, "restarts": 0, "last_error": "", "stream": "dogcam"}),
+    )
 }
 
 async fn fake_tasks() -> impl IntoResponse {
@@ -171,7 +173,8 @@ async fn fake_start(Json(body): Json<Value>) -> impl IntoResponse {
 }
 
 async fn fake_events() -> impl IntoResponse {
-    const EVENT: &str = "data: {\"type\": \"detect\", \"cam\": \"dogcam\", \"boxes\": [], \"counts\": {}}\n\n";
+    const EVENT: &str =
+        "data: {\"type\": \"detect\", \"cam\": \"dogcam\", \"boxes\": [], \"counts\": {}}\n\n";
     (
         [(header::CONTENT_TYPE, "text/event-stream")],
         EVENT.to_string(),
@@ -188,10 +191,14 @@ async fn spawn_fake_agent() -> u16 {
         .route("/api/detect/start", post(fake_start))
         .route("/api/events", get(fake_events))
         .with_state(());
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("绑定假 Agent 失败");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("绑定假 Agent 失败");
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("假 Agent 运行失败");
+        axum::serve(listener, router)
+            .await
+            .expect("假 Agent 运行失败");
     });
     port
 }
@@ -210,7 +217,11 @@ async fn status_requires_login_and_normalizes_six_sources() {
     // 未登录必须 401：背包代理暴露的是板端控制面，不能匿名读
     let anonymous = router
         .clone()
-        .oneshot(Request::get("/api/backpack/status").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/api/backpack/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
@@ -282,7 +293,10 @@ async fn events_stream_accepts_token_in_query_string() {
         .await
         .unwrap();
     let text = String::from_utf8_lossy(&bytes);
-    assert!(text.contains("\"type\": \"detect\""), "SSE 内容必须原样透传");
+    assert!(
+        text.contains("\"type\": \"detect\""),
+        "SSE 内容必须原样透传"
+    );
 
     drop(temp);
 }
@@ -439,7 +453,10 @@ async fn direct_mode_reports_browser_endpoints_without_calling_upstream() {
 
     assert_eq!(data["mode"], json!("direct"));
     assert_eq!(data["configured"], json!(true));
-    assert_eq!(data["direct"]["apiBase"], json!("http://192.168.41.246:8000"));
+    assert_eq!(
+        data["direct"]["apiBase"],
+        json!("http://192.168.41.246:8000")
+    );
     // 浏览器直连的 mediamtx 地址由 apiBase 主机推导，端口 8889
     assert_eq!(
         data["direct"]["webrtcBase"],

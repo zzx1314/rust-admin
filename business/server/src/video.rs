@@ -93,14 +93,12 @@ impl VideoHub {
         drop(viewers);
 
         let mut rooms = self.rooms.write().await;
-        let room = rooms
-            .entry(device_id.to_string())
-            .or_insert_with(|| Room {
-                tx: broadcast::channel(VIEWER_BUFFER_FRAMES).0,
-                init: None,
-                pending: Vec::new(),
-                publisher: None,
-            });
+        let room = rooms.entry(device_id.to_string()).or_insert_with(|| Room {
+            tx: broadcast::channel(VIEWER_BUFFER_FRAMES).0,
+            init: None,
+            pending: Vec::new(),
+            publisher: None,
+        });
         let init = room.init.clone();
         (room.tx.subscribe(), first, init)
     }
@@ -300,7 +298,10 @@ pub fn spawn_watchdog(state: AppState) {
 ///
 /// 首帧必须是文本 `{"msgType":"video_register","payload":{"deviceId":"…"}}`，
 /// 之后全部是二进制 FLV 分片（客户端 ffmpeg 的 stdout 直传）。
-pub async fn publisher_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+pub async fn publisher_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_publisher(socket, state))
 }
 
@@ -345,7 +346,10 @@ async fn handle_publisher(socket: WebSocket, state: AppState) {
             Ok(Message::Binary(data)) => {
                 if let Some(ref code) = device_id {
                     frames += 1;
-                    state.video_hub.publish(code, Arc::from(data.as_ref())).await;
+                    state
+                        .video_hub
+                        .publish(code, Arc::from(data.as_ref()))
+                        .await;
                 }
             }
             Ok(Message::Close(_)) => break,
@@ -401,9 +405,7 @@ pub async fn viewer_ws(
         .to_string();
     let kind = video_type.unwrap_or_else(|| "rtsp".to_string());
 
-    Ok(ws.on_upgrade(move |socket| {
-        handle_viewer(socket, state, device_code, url, kind)
-    }))
+    Ok(ws.on_upgrade(move |socket| handle_viewer(socket, state, device_code, url, kind)))
 }
 
 async fn handle_viewer(
@@ -431,12 +433,8 @@ async fn handle_viewer(
 
     if first {
         info!("device {device_code} video requested, asking client to pull {kind} stream");
-        let delivered = gateway::send_video_control(
-            &state.device_connections,
-            &device_code,
-            Some(&url),
-        )
-        .await;
+        let delivered =
+            gateway::send_video_control(&state.device_connections, &device_code, Some(&url)).await;
         if !delivered {
             warn!("device {device_code} not connected, video_start dropped");
         }
@@ -558,7 +556,11 @@ mod tests {
 
         hub.publish("RD-001", Arc::from(&stream[10..])).await;
         let head = rx.recv().await.expect("应收到补齐后的流头");
-        assert_eq!(head.as_ref(), &stream[..INIT_LEN], "应从 FLV 魔数开始完整下发");
+        assert_eq!(
+            head.as_ref(),
+            &stream[..INIT_LEN],
+            "应从 FLV 魔数开始完整下发"
+        );
 
         let rest = rx.recv().await.expect("流头之后的帧继续下发");
         assert_eq!(rest.as_ref(), &stream[INIT_LEN..]);
@@ -618,7 +620,10 @@ mod tests {
         assert_eq!(hub.idle_publishers().await, vec!["RD-001".to_string()]);
 
         hub.publisher_gone("RD-001", 2).await;
-        assert!(hub.idle_publishers().await.is_empty(), "会话匹配时应清掉房间");
+        assert!(
+            hub.idle_publishers().await.is_empty(),
+            "会话匹配时应清掉房间"
+        );
     }
 
     /// 推流端抖动（房间被丢弃）时，最后一个观看者离开仍必须触发 `video_stop`，

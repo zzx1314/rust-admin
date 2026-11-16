@@ -3,9 +3,9 @@ use crate::auth::Claims;
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::models::{Park, ParkQuery, ParkRequest};
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::Extension;
 use sqlx::QueryBuilder;
 
 const PARK_SELECT: &str =
@@ -132,7 +132,12 @@ pub async fn update_park(
     Json(payload): Json<ParkRequest>,
 ) -> Result<Json<ApiResponse<Park>>, AppError> {
     let existing = fetch_park(&state, id).await?;
-    if !claims.is_admin && existing.created_by.map(|uid| uid != claims.sub).unwrap_or(true) {
+    if !claims.is_admin
+        && existing
+            .created_by
+            .map(|uid| uid != claims.sub)
+            .unwrap_or(true)
+    {
         return Err(AppError::NotFound("园区不存在".to_string()));
     }
     let (map_version_id, map_status) = resolve_park_map(&state, id, payload.map_version_id)
