@@ -219,7 +219,9 @@ Chromium 的 **Local Network Access**（PNA 继任者）实测拦截，`Network.
   - ✅ 已落地「**航点到点 AI 识别**」：巡检走到带 `AI 识别` 动作的航点时自动开识别窗口，
     检出的目标写进 `alerts` + `task_events`（`server/src/ai_patrol.rs`，
     状态见 `GET /api/backpack/ai-window`，决策与边界见
-    [`official-app-parity.md`](official-app-parity.md) §5.5）；
+    [`official-app-parity.md`](official-app-parity.md) §5.6）；窗口时长跟着停留时间走
+    （停留 + 8s，离开航点立即结束）；正式环境因平台在公网连不到板端，改由**设备客户端
+    代调**同机 Agent（`[backpack] point_ai`，见同一节 B 段）；
   - ✅ 路线编辑器的「AI 识别」动作**复用本页的模型目录**（`/api/backpack/status` 的
     `detect.tasks`）：场景 + 识别类别直接勾选，存成动作的 `scene` + `labels`，
     到点开窗口时原样下发，不再靠中文关键词猜场景；

@@ -84,6 +84,19 @@ base_url = "http://192.168.41.10:3000"
 # 环境变量：ROBODOG_BACKPACK_BROWSER_URL
 # browser_url = "http://192.168.41.246:8000"
 
+# 航点 AI 识别「谁去调板端 Agent」：auto（默认）/ client / server。
+#   - server：服务端直连 Agent，要求上面配了 base_url（服务端与板端同网段）；
+#   - client：由设备客户端代调（它与 Agent 同机，走 127.0.0.1:8000），正式环境用这个；
+#   - auto：配了 base_url 就 server，否则 client。两条链路不会重复开窗。
+# 环境变量：ROBODOG_POINT_AI
+# point_ai = "auto"
+
+# 识别窗口时长上限（秒，默认 300 = 路线单点停留上限）。
+# 窗口按「该点停留时长 + 8s」算，这条只是兜底；离开航点（stage 离开 patrol.point_*）
+# 会立刻结束窗口，所以不需要靠它防误报。担心长停留期间误报可以压小，比如 30。
+# 环境变量：ROBODOG_AI_WINDOW_MAX_SECS
+# ai_window_max_secs = 300
+
 # 企业微信群机器人告警推送
 #
 # 群里「添加群机器人」后拿到 webhook（https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx），
