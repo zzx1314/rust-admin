@@ -115,12 +115,26 @@ export interface BackpackDetectStatus {
   osd?: BackpackOsd;
 }
 
-/** 接法：`direct` = 浏览器直连板端（正式环境）；`proxy` = 业务服务代理；`none` = 未配置 */
-export type BackpackMode = "direct" | "proxy" | "none";
+/**
+ * 接法（页面只关心「AI 的 REST/SSE 走谁」）：
+ * - `direct` = 浏览器直连板端（现场入口，要求同网段）；
+ * - `proxy` = 业务服务直连板端（平台与背包同网段）；
+ * - `tunnel` = 业务服务经**设备客户端**代调（平台/浏览器都不在背包网段时）；
+ * - `none` = 未配置且没有设备客户端。
+ */
+export type BackpackMode = "direct" | "proxy" | "tunnel" | "none";
 
 export interface BackpackStatus {
   configured: boolean;
   mode?: BackpackMode;
+  /**
+   * 设备客户端隧道是否在位。
+   *
+   * `direct` 模式下浏览器会自己探测板端；探不通（换了 WiFi / 公网入口 / 出差）
+   * 且这里 `available` 为真时，页面改拉 `?transport=tunnel` 走平台代调，
+   * 不用再回现场入口。
+   */
+  tunnel?: { available: boolean; device: string };
   /** 直连模式下浏览器要用的两个基址（由后端下发，避免页面自己猜板子 IP） */
   direct?: { apiBase: string; webrtcBase: string | null };
   agent: { base: string; reachable: boolean; error: string };
@@ -345,6 +359,23 @@ export async function loadDirectStatus(shell: BackpackStatus): Promise<BackpackS
   };
 }
 
+/**
+ * 拉一次完整状态，把「三条通道的退让」收在一处。
+ *
+ * 1. 后端给 `mode`（direct / proxy / tunnel / none）；
+ * 2. `direct` 模式下浏览器自己探测板端（换了 WiFi、公网入口、Chrome 拦内网都会失败）；
+ * 3. 探不通但后端报 `tunnel.available`（板端客户端在线）→ 带 `?transport=tunnel` 重拉，
+ *    改由平台经设备客户端代调。这样「不在同一个网络」不再等于「AI 不能用」。
+ */
+export async function loadStatus(): Promise<BackpackStatus> {
+  const shell = await backpackApi.status();
+  const data = shell.mode === "direct" ? await loadDirectStatus(shell) : shell;
+  if (data.mode === "direct" && !data.agent.reachable && shell.tunnel?.available) {
+    return await backpackApi.status("tunnel");
+  }
+  return data;
+}
+
 /** 统一入口：代理模式走业务服务，直连模式走板端；页面只认这一层 */
 export interface AgentClient {
   mode: BackpackMode;
@@ -357,7 +388,8 @@ export interface AgentClient {
 export function clientFor(status: BackpackStatus | null): AgentClient {
   if (status?.mode !== "direct" || !status.direct) {
     return {
-      mode: "proxy",
+      // tunnel 与 proxy 的页面行为一致（都走业务服务），只是排障时看得见区别
+      mode: status?.mode === "tunnel" ? "tunnel" : "proxy",
       start: async body => (await backpackApi.start(body)) ?? {},
       stop: async () => (await backpackApi.stop()) ?? {},
       config: async body => (await backpackApi.config(body)) ?? {},
@@ -375,7 +407,12 @@ export function clientFor(status: BackpackStatus | null): AgentClient {
 }
 
 export const backpackApi = {
-  status: () => get<BackpackStatus>("/backpack/status"),
+  /**
+   * @param transport 传 `tunnel` 表示「跳过浏览器直连/服务端直连，走设备客户端代调」
+   *   （直连模式探测失败后的回退，见 `BackpackStatus.tunnel`）
+   */
+  status: (transport?: "tunnel") =>
+    get<BackpackStatus>(`/backpack/status${transport ? `?transport=${transport}` : ""}`),
   start: (body: BackpackStartBody) =>
     // 板端要加载模型（最多 30s）+ 启动画框（8s 确认窗口），20s 默认超时不够
     post<BackpackActionPayload>("/backpack/detect/start", body, 60000),

@@ -1122,19 +1122,32 @@ AI 可对除红外外的五路开启，画框方式二选一：
 | 背包烧录 | 板端把框烧进视频，推 `preview` 流 | 抓拍 / 录屏 / 转发自带中文标签 |
 
 ```text
-浏览器 ──/api/backpack/*（REST+SSE）──▶ 业务平台（backpack.rs 代理）──▶ 背包 Agent :8000
-浏览器 ──WHEP（信令 + 媒体）──────────────────────────────────────▶ 板端 mediamtx :8889
+接口（REST+SSE）三条通道，按可用性自动退让：
+  ① 浏览器直连 ──▶ 板端 Agent :8000            （同网段：延时最低）
+  ② 平台直连   ──▶ 背包 Agent :8000            （平台与背包同网段）
+  ③ 平台隧道   ──▶ 设备客户端 ──▶ 127.0.0.1:8000（哪边都不同网段时的兜底）
+视频：浏览器 ⇄ 板端 mediamtx（WHEP，直连）或 板端推流 → 平台房间 → 浏览器（中继）
 ```
 
-- **必须从现场入口打开**：<http://192.168.41.246:8080>（内网托管同一份控制台）。
-  云端 `http://39.107.55.13:3100` 打不开视频/AI —— Chrome 的 Local Network Access
-  禁止公网页面访问内网地址（`corsError=InsecureLocalNetwork`），实测确认；公网/跨网段
-  需要按文档 P1 做平台中继。
-- 现场入口的实现是 `deploy/site-console/`（标准库静态服务 + `/runtime-config.js`），
-  部署与校验步骤见 [`deploy/README.md`](../deploy/README.md)「数据采集背包」。
+- **接法由后端给结论**：`GET /api/backpack/status` 的 `mode` = `direct` / `proxy` / `tunnel`。
+  直连模式下浏览器先自己探测 Agent；探不通（换了 WiFi、出差远程、公网入口、Chrome 的
+  Local Network Access 拦截）且 `tunnel.available` 为真时，页面自动带
+  `?transport=tunnel` 重试，改走设备客户端代调——不再要求回现场入口。
+- 隧道怎么来的：设备客户端本来就跑在背包那块板子上（`127.0.0.1:8000` 一定通），
+  注册成功后发一条 `agent_hello`，平台据此把 `/api/backpack/*` 的请求挂到这条设备 WS 上
+  （服务端 `agent_tunnel.rs`，客户端 `agent_relay.rs`）。只放行 4 个只读接口
+  （`cameras` / `relay/status` / `detect/tasks` / `detect/status`）+ 3 个 AI 动作，
+  检出事件只转 `detect` 四类；多背包部署用 `ROBODOG_BACKPACK_TUNNEL_DEVICE` 指定设备号。
+- **视频跨网段走平台中继**（「平台中继」按钮，或用云端入口时自动选）：
+  延时 1~2 s，延时敏感场景仍建议现场入口。中继模式下浏览器画不了框，想让框跟着画面走就切
+  「背包烧录」——板端把中文标签烧进 `preview` 流，中继也把这一路推上来
+  （`RELAY_STREAMS` 需包含 `preview`，默认已含）。只看检出数量则不用切。
+- 现场入口（<http://192.168.41.246:8080>，`deploy/site-console/`）仍然是最低延时的那条路：
+  同一份 `dist`、WHEP 直连，部署与校验见 [`deploy/README.md`](../deploy/README.md)「数据采集背包」。
 - 配置：`ROBODOG_BACKPACK_BROWSER_URL`（浏览器可达的 Agent 地址，直连模式；正式环境用它）
   或 `ROBODOG_BACKPACK_URL`（平台能代理到 Agent 时用代理模式）；`ROBODOG_BACKPACK_WEBRTC_URL`
-  默认由 Agent 地址推导为同主机 `:8889`。未配置时页面给出配置指引。
+  默认由 Agent 地址推导为同主机 `:8889`。两者都不配时仍可只靠隧道工作（页面提示改为
+  「让板端客户端上线」）。
 - AI 启停 / 换源 / 改阈值都转发到板端 Agent，NPU 单路独占（红外不参与）。
 - **前置摄像头报「WHEP 协商失败（HTTP 404）」不是浏览器/网络问题**：`404 no stream is
   available on path 'dogcam'` 只说明板端 mediamtx 上没有这条流（`1080p60` 档靠 mediamtx

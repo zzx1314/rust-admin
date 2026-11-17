@@ -263,8 +263,12 @@ sqlite3 /opt/hz/rust-admin/robodog/data/robodog.db \
 - 延时 1~2s（WHEP 是 ~200ms），代价换「任何网络、任何浏览器都能看」；
 - **按需**：常驻 6 条 WS 连接（每条约 1KB），第一个观看者进来才起 ffmpeg，最后
   一个离开立刻杀（平台看门狗也会兜住空转）；
-- 前端 `/monitor` 页顶部有「现场直连 / 平台中继」切换，**直连失败会自动切中继**；
-- 中继模式下没有 AI 叠加（板端不可达时 SSE 也拿不到），要 AI 仍用现场入口。
+- 前端 `/monitor` 页顶部有「现场直连 / 平台中继」切换，**直连失败或页面在公网时自动切中继**；
+- 中继流里浏览器画不出框（FLV 没有与抽帧对齐的坐标），要看框就切「背包烧录」——
+  板端把中文标签烧进 `preview` 流，中继也推这一路（`RELAY_STREAMS` 默认已含 `preview`，
+  改过默认值的部署记得补上并 `systemctl restart backpack-relay`）；只看检出数量则不用切。
+- **AI 的启停 / 模型目录 / 运行态不再依赖浏览器同网段**（2026-11-19 起走设备客户端隧道，
+  见下一节）。
 
 部署（幂等）：
 
@@ -291,7 +295,53 @@ ssh root@39.107.55.13 'journalctl -u rust-admin-robodog -f | grep -E "backpack s
 | 切了通道自己跳回「机器狗前置」 | 页面轮询 | 已修（2026-11-16）：直连模式后端不下发 `sources`，刷新时别拿它比对 |
 | 想看房间/观看者状态 | `GET /api/backpack/video/state` | 返回每路的 `publisher/initBytes/viewers/streaming`，黑屏先看这张表 |
 
-### 为什么需要「现场入口」
+### 跨网段的接口 / AI：设备客户端隧道（2026-11-19 上线）
+
+之前「操作员电脑与背包不同网段」等于「背包页只能看不能开 AI」：面板要读的模型目录、
+运行态、AI 启停全靠浏览器直连 `192.168.41.246:8000`，而公网页面会被浏览器拦掉
+（`corsError=InsecureLocalNetwork`）。
+
+现在改用已有那条设备 WS：板端客户端本来就在背包那块板子上（`127.0.0.1:8000` 一定通），
+注册成功后发一条 `agent_hello`，平台就把 `/api/backpack/*` 的请求（只放行 4 个只读接口 +
+3 个 AI 动作）和检出事件挂到这条连接上：
+
+```text
+云端业务服务 ──agent_request(WS)──► 板端设备客户端 ──HTTP──► 127.0.0.1:8000
+             ◄──agent_result──────             ◄──SSE───  /api/events（只转 detect 四类）
+```
+
+- 页面无感：`GET /api/backpack/status` 的 `mode` 变成 `tunnel`，`tunnel.device` 是承载隧道的设备号；
+- 直连模式下（云端入口仍是 `ROBODOG_BACKPACK_BROWSER_URL` 形态）浏览器先自己探测，
+  探不通且 `tunnel.available=true` 就自动带 `?transport=tunnel` 重拉，不需要改任何配置；
+- 多背包园区必须配 `ROBODOG_BACKPACK_TUNNEL_DEVICE=<设备号>`，否则可能问到另一台狗。
+
+上线要做的两件事：
+
+```bash
+# 1) 板端客户端升级到含 agent_relay 的版本（[ai] enabled 必须为 true，默认是）
+#    编译与上传见本文「现场设备客户端」§1~2（aarch64-gnu + zigbuild，装到 /opt/robodog/client/）
+cd business/client && ./deploy/build-aarch64.sh
+#    按 §2 上传后：ssh root@192.168.41.246 'systemctl restart robodog-device-client'
+
+# 2) 板端日志确认已登记（没有这行说明本机 Agent 不通，隧道不会生效）
+ssh root@192.168.41.246 'journalctl -u robodog-device-client -n 80 | grep -E "板端 Agent 隧道"'
+# 期望：板端 Agent 隧道已登记：http://127.0.0.1:8000（背包页的模型目录 / 运行态 / AI 启停…）
+
+# 3) 平台侧验收：mode 应为 tunnel，agent.reachable=true
+curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/status \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin)["data"];print(d["mode"], d["agent"]["reachable"], d.get("tunnel"))'
+```
+
+排障：
+
+| 现象 | 看哪里 | 说明 |
+| --- | --- | --- |
+| `tunnel.available=false` | 板端客户端日志有没有「板端 Agent 隧道已登记」 | 没有 → 本机 Agent 不通或 `[ai] enabled=false` |
+| `available=true` 但 `reachable=false` | 板端 `curl 127.0.0.1:8000/api/cameras` | 客户端在线、Agent 挂了；重启 `backpack-agent` |
+| 能开 AI 但页面没有框 | 是否切了「背包烧录」 | 中继流上浏览器画不了框；框靠板端烧进 `preview` |
+| 页面问到了别的狗 | `tunnel.device` | 多背包必须配 `ROBODOG_BACKPACK_TUNNEL_DEVICE` |
+
+### 为什么还需要「现场入口」
 
 Chrome 的 **Local Network Access** 禁止**公网页面**访问**内网地址**（实测
 `corsError=InsecureLocalNetwork`）：
@@ -301,10 +351,13 @@ Chrome 的 **Local Network Access** 禁止**公网页面**访问**内网地址**
 页面 http://192.168.41.246:8080 ──fetch──▶  http://192.168.41.246:8000   ✓ 同为内网
 ```
 
-视频更是浏览器直连板端 mediamtx（`:8889` WHEP，媒体走 UDP）。所以：
+视频更是浏览器直连板端 mediamtx（`:8889` WHEP，媒体走 UDP）。
 
-- **常规后台**：<http://39.107.55.13:3100> —— 设备/任务/地图/告警，一切照旧；
-- **现场入口**：<http://192.168.41.246:8080> —— **同一套后台**，额外能看到实时视频与 AI。
+「接口 / AI」现在有设备客户端隧道兜底（见上一节），「视频」有平台中继兜底，
+所以现场入口不再是**唯一**能用的入口，但它仍是**延时最低、框最实时**的那条路：
+
+- **常规后台**：<http://39.107.55.13:3100> —— 全部功能；视频走中继（1~2s），要看框得板端烧录；
+- **现场入口**：<http://192.168.41.246:8080> —— 同一套后台，WHEP 直连（~200ms）、浏览器叠加可用。
 
 两个入口共用同一份 `business/web/dist`；现场入口通过 `/runtime-config.js`
 （运行时注入，不用重新构建）把 API 指回云端。
@@ -371,6 +424,8 @@ curl -s http://192.168.41.246:8080/runtime-config.js
 - 板端改代码后要 `systemctl restart backpack-agent`（别再用手工 `bash start.sh`，
   终端一断四路推流就没了）。
 - AI 只在开启时占 NPU；关掉后 `preview` 流随之消失，页面自动回干净流。
+- 中继要看框时依赖 `RELAY_STREAMS` 含 `preview`（默认已含）；少了这一路会报
+  「板端推流服务未连接」，此时页面会提示「检出数量看右侧」。
 
 ---
 

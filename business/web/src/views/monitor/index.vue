@@ -9,7 +9,10 @@
  * - 巡检/演示时看「谁在识别、跑多快、检出了什么」。
  *
  * 数据来源：`/api/backpack/status`（业务平台聚合背包 Agent）+ SSE `/api/backpack/events`。
- * 视频：浏览器直连板端 mediamtx（WHEP），地址由 status 的 `webrtc.base` 给出。
+ * 视频：浏览器直连板端 mediamtx（WHEP），地址由 status 的 `webrtc.base` 给出；
+ * 跨网段时切「平台中继」（板端推流 → 平台房间 → 同源 WS）。
+ * 三种接法（直连 / 平台代理 / 设备客户端隧道）由后端在 status 里给结论，
+ * 页面只按 `mode` 选地址、按 `tunnel.available` 决定要不要回退。
  * 设计与链路说明见 `business/docs/backpack-video-integration.md`。
  */
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
@@ -21,9 +24,8 @@ import VideoStage from "@/components/backpack/VideoStage.vue";
 import SourceRail from "@/components/backpack/SourceRail.vue";
 import AiPanel from "@/components/backpack/AiPanel.vue";
 import {
-  backpackApi,
   clientFor,
-  loadDirectStatus,
+  loadStatus,
   type BackpackBox,
   type BackpackDetectEvent,
   type BackpackSource,
@@ -53,10 +55,12 @@ const form = reactive({
 const boxes = ref<BackpackBox[]>([]);
 /**
  * 观看方式：`direct` = 浏览器直连板端（WHEP，延时最低，要求同内网 + 浏览器许可）；
- * `relay` = 板端推流到平台（任何网络都能看，延时 1~2s，无 AI 叠加）。
- * 板端不可达时自动切中继，现场也可以手动切。
+ * `relay` = 板端推流到平台（任何网络都能看，延时 1~2s）。
+ * 板端不可达 / 页面在公网 / 走隧道时自动切中继，现场也可以手动切（手动选过就不再自动翻）。
  */
 const watchMode = ref<"direct" | "relay">("direct");
+/** 现场手动切过观看方式：之后的自动判定不再覆盖他的选择 */
+const modePinned = ref(false);
 
 /** 中继模式下板端不可达，页面拿不到 cameras：用固定的六路清单顶上 */
 const RELAY_SOURCES: BackpackSource[] = [
@@ -116,7 +120,15 @@ const aiRunning = computed(() => !!detectStatus.value?.running);
 const aiCam = computed(() => detectStatus.value?.cams?.[0] ?? "");
 const tasks = computed(() => status.value?.detect.tasks?.tasks ?? []);
 
-/** 画框方式为「背包烧录」且板端真的在出图时，才切到 preview 流 */
+const relayMode = computed(() => watchMode.value === "relay");
+
+/**
+ * 是否真的要看板端烧录流（`preview`）。
+ *
+ * 中继模式下浏览器画不了框（视频是板端推上来的 FLV，没有坐标对应关系），
+ * 所以切到中继时会自动把画框方式改成「背包烧录」（可手动切回，此时只有检出数量、
+ * 画面没有框）。板端画框没就绪时按原逻辑回退浏览器叠加。
+ */
 const osdActive = computed(
   () => aiRunning.value && overlay.value === "osd" && !!status.value?.osd.ready
 );
@@ -125,6 +137,10 @@ const playStream = computed(() => {
   if (osdActive.value) return previewStream.value;
   return activeSource.value?.stream ?? "";
 });
+/** 中继播放器要放的流：烧录时就放 preview，否则放该路干净流 */
+const relayStream = computed(() =>
+  osdActive.value ? previewStream.value : activeSource.value?.stream || "dogcam"
+);
 
 const aiStat = computed(() => {
   const status0 = detectStatus.value;
@@ -168,7 +184,9 @@ const detailText = computed(() => {
   if (!activeSource.value) return "";
   const size = videoMeta.value ? `${videoMeta.value.w}×${videoMeta.value.h}` : "分辨率待测";
   if (watchMode.value === "relay")
-    return `平台中继 · H264 ${size} · 延时 1~2s（AI 叠加需现场直连）`;
+    return osdActive.value
+      ? `平台中继 · H264 ${size} · 延时 1~2s · 框由板端烧录进画面`
+      : `平台中继 · H264 ${size} · 延时 1~2s · 检出数量看右侧（框需板端烧录）`;
   if (!aiRunning.value) return `干净流 · H264 ${size} · 无 AI`;
   if (osdActive.value) return `背包烧录 · ${previewStream.value} 流自带中文标签`;
   if (overlay.value === "osd") return "背包烧录未就绪 · 已回退浏览器叠加";
@@ -176,7 +194,12 @@ const detailText = computed(() => {
 });
 
 const aiDisabledReason = computed(() => {
-  if (!status.value?.agent.reachable) return "背包不可达，暂不能开启 AI";
+  if (!status.value?.agent.reachable) {
+    // 直连探不通、隧道也没登记：把两条路都写清楚，现场不用猜
+    return status.value?.tunnel?.available
+      ? "背包不可达（隧道设备在线但 Agent 未响应），暂不能开启 AI"
+      : "背包不可达，暂不能开启 AI";
+  }
   if (!activeSource.value) return "没有可用的视频源";
   if (!activeSource.value.available) return activeSource.value.hint;
   if (!activeSource.value.ai) return `${activeSource.value.label}通道不支持 AI 识别，请切到可见光相机`;
@@ -185,9 +208,31 @@ const aiDisabledReason = computed(() => {
 });
 
 const overlayNote = computed(() => {
-  if (!aiRunning.value || overlay.value !== "osd" || osdActive.value) return "";
+  if (!aiRunning.value) return "";
+  if (relayMode.value) {
+    // 中继模式没有 SVG 叠加层：框只能靠板端烧录
+    if (overlay.value !== "osd") return "中继模式没有浏览器叠加层：要看框请切「背包烧录」";
+    if (!status.value?.osd.ready) {
+      return `板端画框未就绪（${status.value?.osd.error || "未知原因"}）：中继画面不会有框，检出数量以右侧卡片为准`;
+    }
+    return "";
+  }
+  if (overlay.value !== "osd" || osdActive.value) return "";
   const reason = status.value?.osd.error || "板端画框未就绪";
   return `已回退浏览器叠加：${reason}`;
+});
+
+/** 接入通道：排障时一眼看出「页面 → Agent」是怎么连的 */
+const channelText = computed(() => {
+  const current = status.value;
+  if (!current) return "—";
+  if (current.mode === "direct") return "浏览器直连板端";
+  if (current.mode === "tunnel") {
+    const device = current.tunnel?.device || "板端客户端";
+    return `平台隧道 · ${device}`;
+  }
+  if (current.mode === "proxy") return "平台直连板端";
+  return current.tunnel?.available ? "隧道待命（Agent 未响应）" : "未接入";
 });
 
 const relayText = computed(() => {
@@ -200,6 +245,8 @@ const relayText = computed(() => {
 /** 观看方式切换：清掉当前叠加层，并把通道对齐到该模式下真实可用的那一路 */
 function switchWatchMode(mode: "direct" | "relay") {
   if (watchMode.value === mode) return;
+  // 手动选过就钉住：之后的状态刷新不再把现场的选择翻回去
+  modePinned.value = true;
   watchMode.value = mode;
   boxes.value = [];
   if (mode === "relay") {
@@ -242,18 +289,23 @@ function labelsOfTask(taskId: string) {
 async function refreshStatus(quiet = false) {
   if (!quiet) refreshing.value = true;
   try {
-    const shell = await backpackApi.status();
-    // 直连模式（平台在公网、背包在现场内网）：聚合由浏览器自己向板端发起
-    const data = shell.mode === "direct" ? await loadDirectStatus(shell) : shell;
+    // 三条通道（浏览器直连 → 平台代理 → 设备客户端隧道）的退让在 loadStatus 里
+    const data = await loadStatus();
     const previous = status.value;
     status.value = data;
     loadError.value = "";
     updatedAt.value = new Date().toLocaleTimeString("zh-CN", { hour12: false });
 
-    // 板端不可达（换了 WiFi / 公网页面 / 浏览器拦了内网访问）：自动走平台中继，
-    // 免得现场只看到一句「连不上背包 Agent」就卡住
-    if (!data.agent.reachable && watchMode.value === "direct") {
-      watchMode.value = "relay";
+    // 观看方式的自动判定（手动切过就不再干预）：
+    // - 板端不可达（换了 WiFi / 浏览器拦了内网访问）→ 中继；
+    // - 页面本身在公网（云端入口）→ 浏览器够不到板端 mediamtx，直接中继，
+    //   免得现场先看到一块黑屏再自己点按钮。
+    if (!modePinned.value && watchMode.value === "direct") {
+      const unreachable = !data.agent.reachable;
+      const publicPage = data.mode !== "direct" && !isPrivateOrigin();
+      if (unreachable || publicPage) {
+        watchMode.value = "relay";
+      }
     }
 
     // 可选源：直连模式的后端只下发地址、**不下发 sources**，这时用固定六路清单顶上。
@@ -400,6 +452,11 @@ watch(
   }
 );
 
+// 中继模式没有 SVG 叠加层：进中继时把画框方式切到「背包烧录」，操作员仍可切回
+watch(watchMode, mode => {
+  if (mode === "relay" && overlay.value !== "osd") overlay.value = "osd";
+});
+
 /* ---------------- SSE：识别框与检出事件 ---------------- */
 
 function zhOf(label: string, fallback?: string) {
@@ -537,7 +594,7 @@ defineExpose({ refreshStatus });
             type="button"
             class="btn"
             :class="{ primary: watchMode === 'relay' }"
-            title="板端推流到平台：任何网络都能看，延时 1~2s，AI 叠加需现场直连"
+            title="板端推流到平台：任何网络都能看，延时 1~2s；想看到框就切「背包烧录」（板端把框烧进 preview 流）"
             @click="switchWatchMode('relay')"
           >
             平台中继
@@ -597,7 +654,7 @@ defineExpose({ refreshStatus });
           v-if="watchMode === 'relay'"
           type="relay"
           :url="''"
-          :stream="activeSource?.stream || 'dogcam'"
+          :stream="relayStream"
           :online="true"
           @meta="onVideoMeta"
         />
@@ -711,6 +768,10 @@ defineExpose({ refreshStatus });
           </div>
           <div class="card-body">
             <dl class="link-list">
+              <div>
+                <dt>接入通道</dt>
+                <dd :class="status?.configured ? 'ok' : ''">{{ channelText }}</dd>
+              </div>
               <div>
                 <dt>背包 Agent</dt>
                 <dd :class="status?.agent.reachable ? 'ok' : 'bad'">

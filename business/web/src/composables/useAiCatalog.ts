@@ -13,7 +13,7 @@
  * 失败不抛异常，由调用方展示 `error` 并给「重新读取」。
  */
 import { ref } from "vue";
-import { backpackApi, loadDirectStatus, type BackpackTask } from "@/api/backpack";
+import { loadStatus, type BackpackTask } from "@/api/backpack";
 
 export interface LiveAiSelection {
   task: string;
@@ -34,8 +34,9 @@ export function useAiCatalog() {
     loading.value = true;
     error.value = "";
     try {
-      const shell = await backpackApi.status();
-      const data = shell.mode === "direct" ? await loadDirectStatus(shell) : shell;
+      // 与「实时视频」页同一套通道退让：浏览器直连不通时自动走设备客户端隧道，
+      // 所以在园区外（出差 / 公网入口）也能拿到模型目录来配航点动作
+      const data = await loadStatus();
       const list = data.detect.tasks?.tasks ?? [];
       tasks.value = list;
       const status = data.detect.status;
@@ -49,7 +50,7 @@ export function useAiCatalog() {
           data.agent.error ||
           (data.configured
             ? "板端没有可用模型包（rknn/models/ 为空）"
-            : "未配置数据采集背包（ROBODOG_BACKPACK_URL）");
+            : "未配置数据采集背包（ROBODOG_BACKPACK_URL，或让板端客户端上线隧道）");
       }
     } catch (err) {
       tasks.value = [];

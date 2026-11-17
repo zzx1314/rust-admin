@@ -70,6 +70,15 @@ Any config key can be overridden with `APP_<SECTION>__<KEY>`.
 `ROBODOG_ZENTAI_WS_URL`（如 `ws://10.0.0.8:3000`）；不配置则沿用「中台直连
 HTTP」模式。两者共用同一个服务令牌，见 `business/README.md`。
 
+背包页（`business/` 的「实时视频」）的接口/AI 有三条通道，后端按可用性自动退让
+（`business/server/src/backpack.rs`）：浏览器直连（`ROBODOG_BACKPACK_BROWSER_URL`）→
+服务端直连（`ROBODOG_BACKPACK_URL`）→ **设备客户端隧道**（`agent_tunnel.rs` /
+`client/src/agent_relay.rs`，走已有设备 WS，只放行 4 个只读接口 + 3 个 AI 动作）。
+所以「浏览器和背包不在同一网段」不再等于「AI 不能用」；视频跨网段仍走平台中继
+（`deploy/backpack-relay/`），想看到框要让板端烧录（`preview` 流）。
+多背包部署配 `ROBODOG_BACKPACK_TUNNEL_DEVICE`。详见
+`business/docs/backpack-video-integration.md` §6.8。
+
 航点 AI 识别的「谁去调板端 Agent」由 `ROBODOG_POINT_AI`（`[backpack] point_ai`，默认
 `auto`）决定：配了 `ROBODOG_BACKPACK_URL` 就服务端直连，否则由现场设备客户端代调
 （客户端与背包 Agent 同在 `.246`，走 `127.0.0.1:8000`；消息为 `ai_point` / `ai_start` /

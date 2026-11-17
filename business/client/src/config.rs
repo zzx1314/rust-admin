@@ -618,9 +618,13 @@ pub struct Config {
     pub bound_park_id: Arc<Mutex<Option<i64>>>,
     /// 回传使用的地图名称；为空则用本体返回的目录名
     pub ingest_map_name: Option<String>,
-    /// 航点 AI 识别：板端 Agent 基地址（客户端本地代调，服务端够不到板端）
+    /// 板端 Agent 基地址（客户端本地代调，服务端够不到板端）。
+    ///
+    /// 两个用途共用这一份配置：巡检到点的 AI 识别（`ai_patrol`），以及把背包页
+    /// 要的模型目录 / 运行态 / AI 启停借给平台（`agent_relay`，见隧道）。
     pub ai_agent_url: String,
-    /// 航点 AI 识别总开关
+    /// 板端 Agent 代调总开关（`--no-ai` 关闭）：关掉后既不注册航点 AI 窗口，
+    /// 也不向平台发 `agent_hello`（背包页就只剩现场入口能用）
     pub ai_enabled: bool,
     /// 业务服务 REST 基地址（默认由 server_url 推导）
     pub api_base: Option<String>,

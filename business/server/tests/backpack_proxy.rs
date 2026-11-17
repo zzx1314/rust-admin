@@ -73,6 +73,7 @@ fn config_with(
         backpack_base_url,
         backpack_webrtc_url: None,
         backpack_browser_url,
+        backpack_tunnel_device: None,
         point_ai: "auto".to_string(),
         ai_window_max_secs: 300,
         public_url: None,
@@ -103,6 +104,7 @@ async fn state_with_browser(
         device_connections: gateway::new_device_connections(),
         command_results: gateway::new_command_result_waiters(),
         video_hub: Default::default(),
+        agent_tunnel: Default::default(),
     }
 }
 

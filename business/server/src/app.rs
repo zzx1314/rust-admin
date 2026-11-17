@@ -39,6 +39,8 @@ pub struct AppState {
     pub video_hub: VideoHub,
     /// 企业微信推送句柄（未配置 webhook 时是个静默丢弃的空句柄）
     pub notifier: Notifier,
+    /// 板端 Agent 隧道（平台与背包/浏览器都不同网段时，`/api/backpack/*` 走设备客户端）
+    pub agent_tunnel: Arc<crate::agent_tunnel::AgentTunnel>,
 }
 
 async fn health(State(state): State<AppState>) -> Json<ApiResponse<Value>> {
@@ -124,7 +126,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/devices/{id}/teleop/release", post(teleop::release))
         .route("/devices/{id}/teleop/ping", post(teleop::keepalive))
         // 实时视频：浏览器订阅设备回传的 FLV 流（?token= 鉴权，见 video.rs）
-        .route("/devices/{id}/video/ws", get(video::viewer_ws))        .route("/tasks", get(tasks::list_tasks).post(tasks::create_task))
+        .route("/devices/{id}/video/ws", get(video::viewer_ws))
+        .route("/tasks", get(tasks::list_tasks).post(tasks::create_task))
         .route("/tasks/stats", get(tasks::task_stats))
         .route(
             "/tasks/{id}",

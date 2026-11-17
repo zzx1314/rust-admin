@@ -92,6 +92,12 @@ pub struct Config {
     /// REST/SSE（Agent 已开 CORS），视频仍然是浏览器 ⇄ mediamtx 直连。
     /// 配置了本项即进入直连模式，`backpack_base_url` 不再参与。
     pub backpack_browser_url: Option<String>,
+    /// 隧道指定的设备码（`ROBODOG_BACKPACK_TUNNEL_DEVICE`）。
+    ///
+    /// 平台与背包/浏览器都不同网段时，`/api/backpack/*` 走「设备客户端代调」：
+    /// 板端客户端连得上本机 Agent，且有一条到平台的常驻 WS（见 `agent_tunnel.rs`）。
+    /// 多背包部署必须显式指定；只有一台时留空即可（取最近上报的那台）。
+    pub backpack_tunnel_device: Option<String>,
     /// 控制台对外访问地址（如 `http://39.107.55.13:3100`），用于拼告警消息里的链接。
     ///
     /// 为空时企业微信消息不带链接：猜一个地址比不给更容易误导人。
@@ -181,6 +187,8 @@ struct BackpackFile {
     webrtc_url: Option<String>,
     /// 浏览器 → 板端 Agent（直连模式；正式环境用这个）
     browser_url: Option<String>,
+    /// 板端 Agent 隧道指定的设备码（多背包部署时用）
+    tunnel_device: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -321,8 +329,11 @@ impl Config {
                 .or_else(|| file.backpack.webrtc_url.and_then(clean))
                 .map(|value| value.trim_end_matches('/').to_string()),
             backpack_browser_url: url("ROBODOG_BACKPACK_BROWSER_URL", file.backpack.browser_url),
+            backpack_tunnel_device: env_text(&env, "ROBODOG_BACKPACK_TUNNEL_DEVICE")
+                .or_else(|| file.backpack.tunnel_device.and_then(clean)),
             point_ai: point_ai_source(
-                env_text(&env, "ROBODOG_POINT_AI").or_else(|| file.backpack.point_ai.and_then(clean)),
+                env_text(&env, "ROBODOG_POINT_AI")
+                    .or_else(|| file.backpack.point_ai.and_then(clean)),
             ),
             // 窗口上限：默认等于路线停留上限（300 s）。低于 10 s 没有意义，按 10 处理。
             ai_window_max_secs: env_text(&env, "ROBODOG_AI_WINDOW_MAX_SECS")

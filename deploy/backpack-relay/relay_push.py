@@ -28,7 +28,7 @@ WebRTC 的 ~200ms 变成 1~2s，收益是任何网络、任何浏览器都能看
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `RELAY_PLATFORM` | `http://39.107.55.13:3100` | 平台基址，自动转成 `ws://…/ws/device/video` |
-| `RELAY_STREAMS` | `cam0,cam1,cam2,cam3,dogcam,dog-ipcam` | 要中继的 mediamtx path |
+| `RELAY_STREAMS` | `cam0,cam1,cam2,cam3,dogcam,dog-ipcam,preview` | 要中继的 mediamtx path |
 | `RELAY_RTSP_BASE` | `rtsp://127.0.0.1:8554` | 本地 mediamtx |
 | `RELAY_ROOM_PREFIX` | `bp:` | 房间前缀，必须与服务端 `video.rs::BACKPACK_ROOM_PREFIX` 一致 |
 | `RELAY_FFMPEG` | `ffmpeg` | ffmpeg 路径 |
@@ -50,7 +50,7 @@ PLATFORM = os.environ.get("RELAY_PLATFORM", "http://39.107.55.13:3100").rstrip("
 STREAMS = [
     item.strip()
     for item in os.environ.get(
-        "RELAY_STREAMS", "cam0,cam1,cam2,cam3,dogcam,dog-ipcam"
+        "RELAY_STREAMS", "cam0,cam1,cam2,cam3,dogcam,dog-ipcam,preview"
     ).split(",")
     if item.strip()
 ]

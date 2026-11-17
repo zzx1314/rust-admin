@@ -71,6 +71,7 @@ fn config_with(dir: &std::path::Path, point_ai: &str) -> Config {
         // 正式环境形态：服务端连不到板端，只能靠客户端代调
         backpack_base_url: None,
         backpack_webrtc_url: None,
+        backpack_tunnel_device: None,
         backpack_browser_url: Some("http://192.168.41.246:8000".to_string()),
         point_ai: point_ai.to_string(),
         ai_window_max_secs: 300,
@@ -112,6 +113,7 @@ async fn test_state(point_ai: &str) -> (AppState, TempDb) {
         device_connections: gateway::new_device_connections(),
         command_results: gateway::new_command_result_waiters(),
         video_hub: Default::default(),
+        agent_tunnel: Default::default(),
     };
     (state, temp)
 }

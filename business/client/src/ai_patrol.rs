@@ -760,7 +760,7 @@ fn count_alert(event: &Value, start: &AiStart) -> Option<Value> {
 }
 
 /// 从 SSE 缓冲里取出完整事件（以空行分隔），残留部分留在缓冲里等下一块
-fn take_sse_events(buffer: &mut String) -> Vec<String> {
+pub(crate) fn take_sse_events(buffer: &mut String) -> Vec<String> {
     let mut out = Vec::new();
     while let Some(index) = buffer.find("\n\n") {
         let block: String = buffer.drain(..index + 2).collect();

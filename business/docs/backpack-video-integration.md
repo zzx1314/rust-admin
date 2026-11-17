@@ -145,8 +145,12 @@ Chromium 的 **Local Network Access**（PNA 继任者）实测拦截，`Network.
 
 | 入口 | 用途 | 背包能力 |
 | --- | --- | --- |
-| `http://39.107.55.13:3100` | 常规后台（设备/任务/地图/告警） | 无（浏览器策略所限） |
-| `http://192.168.41.246:8080` | **现场入口**：同一份 `dist` 托管在内网机器上 | 视频 + AI 全功能 |
+| `http://39.107.55.13:3100` | 常规后台（设备/任务/地图/告警） | **视频**走平台中继、**AI**走设备客户端隧道（2026-11-19 起） |
+| `http://192.168.41.246:8080` | **现场入口**：同一份 `dist` 托管在内网机器上 | 视频 + AI 全功能，延时最低 |
+
+> 云端入口以前是「背包能力彻底没有」（浏览器 PNA 拦截 + 平台连不到板端）。现在两条独立通道
+> 补上了：视频由板端推流到平台房间（§6），接口/AI 由设备客户端代调（§6.8）。浏览器与背包
+> 是否同网段，只影响「走不走中继、延时多少」，不再影响「能不能用」。
 
 现场入口的实现是 `deploy/site-console/serve.py`（标准库静态服务 + SPA 回落 +
 `/runtime-config.js` 注入云端 API 地址），前端通过 `src/utils/runtime.ts` 读这份运行时配置，
@@ -215,6 +219,8 @@ Chromium 的 **Local Network Access**（PNA 继任者）实测拦截，`Network.
   视频仍走浏览器 ⇄ mediamtx WHEP，不引入中继延时。
 - **P1**：平台中继。背包 Agent 增加「向平台推流」（WHIP 或 FLV/WS，复用 `video.rs` 房间模型），
   公网/跨网段可用，代价 1~2s 延时。
+  - ✅ 已落地（`deploy/backpack-relay/relay_push.py` + `/api/backpack/video/ws`），见 §6；
+  - ✅ 跨网段的**接口/AI** 另走设备客户端隧道（§6.8），不依赖中继。
 - **P2**：遥测 / 控制 / SOS 告警 / AI 事件入 `alerts` 与设备详情。
   - ✅ 已落地「**航点到点 AI 识别**」：巡检走到带 `AI 识别` 动作的航点时自动开识别窗口，
     检出的目标写进 `alerts` + `task_events`（`server/src/ai_patrol.rs`，
@@ -400,8 +406,10 @@ curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/
 - 延时 1~2s（WHEP 直连 ~200ms）；延迟敏感场景仍建议现场入口。
 - **首次看某一路要 3~7s**（ffmpeg 启动 + 等下一个关键帧）；同一个通道 30s 内再切回来是
   秒开 —— 最后一个观看者离开时不立刻停流，交给看门狗在 15~30s 内停（见 `VideoSource::stop`）。
-- 中继模式下**没有 AI 叠加**：板端在本机内网，公网页面拿不到 SSE `detect` 事件；
-  AI 仍要现场入口。
+- 中继模式下**浏览器叠加用不了**（中继流是 FLV，没有与抽帧对齐的坐标关系）：想让框跟着画面走
+  就切「背包烧录」，板端把中文标签烧进 `preview` 流后一起中继（`RELAY_STREAMS` 需含
+  `preview`，默认已含）。AI 的启停 / 模型目录 / 运行态 / 检出数量走设备客户端隧道（§6.8），
+  与是否走中继无关。
 - 板端 relay 的推流连接是常驻的，**每次起流换一条新 FLV**，所以服务端必须靠 `video_reset`
   清 `init`，否则中途加入的观看者会拿到「上一轮关键帧 + 这一轮中段字节」而黑屏。
 - `dog-ipcam` 源若为 H.265，`-c:v copy` 无法封装成 FLV，需 `RELAY_TRANSCODE=1`
@@ -485,3 +493,51 @@ paths:
 于是错误只能从 WHEP 状态里暴露。前端因此把 404 翻成人话（`lib/whep.ts` 的
 `whepFailure`）：「板端 mediamtx 上没有「dogcam」这条流（path 未登记 / 名字不一致 /
 没有推流）」，省掉一轮猜。
+
+### 6.8 跨网段的接口/AI：设备客户端隧道（2026-11-19）
+
+**要解决的问题**：操作员电脑与背包不在同一网段时（换 WiFi、出差远程、走云端入口），
+背包页会写「背包不可达，暂不能开启 AI」——模型目录、运行态、AI 启停全靠浏览器直连
+`192.168.x.x:8000`，而 Chrome 的 Local Network Access 也不允许公网页面访问内网地址。
+巡检到点的 AI 早就由设备客户端代调（`official-app-parity.md` §5.6 B 段），但**手动开的
+识别**没有对应通道。
+
+**做法**：设备客户端本来就跑在背包那块板子上（`127.0.0.1:8000` 一定通），而且有一条到
+平台的常驻设备 WS。把背包页要的四件事挂到这条已有信道上，不新增端口、不依赖中继：
+
+```text
+浏览器 ──GET  /api/backpack/status────────▶ 平台 ──agent_request──▶ 客户端 ──HTTP──▶ Agent
+浏览器 ──POST /api/backpack/detect/start──▶ 平台 ──agent_request──▶ 客户端 ──HTTP──▶ Agent
+浏览器 ◀──SSE /api/backpack/events───────── 平台 ◀──agent_event──── 客户端 ◀──SSE── Agent
+```
+
+| 环节 | 代码 | 说明 |
+| --- | --- | --- |
+| 通道选择 | `server/src/backpack.rs::status` | `direct`（浏览器直连）→ `proxy`（服务端直连）→ `tunnel`（客户端代调）依次退让；`?transport=tunnel` 强制走隧道 |
+| 服务端隧道 | `server/src/agent_tunnel.rs` | 设备登记（`agent_hello`）、请求表（`requestId` + oneshot，超时清理）、检出事件广播 |
+| 消息收发 | `server/src/gateway.rs` | `agent_hello` / `agent_result` / `agent_event` 三类 |
+| 客户端代调 | `client/src/agent_relay.rs` | 白名单转发 + 常驻订阅 Agent `/api/events`（只转 detect 四类） |
+| 页面回退 | `web/src/views/monitor/index.vue` | 直连探测失败且 `tunnel.available` → 带 `transport=tunnel` 重拉 |
+
+**白名单**：4 个只读接口（`/api/cameras`、`/api/relay/status`、`/api/detect/tasks`、
+`/api/detect/status`）+ 3 个动作（`start` / `stop` / `config`）。板端 Agent 没有鉴权，
+做成通用代理等于把现场内网的任意 HTTP 能力暴露给控制台账号，两端各自校验一遍。
+
+**不缓存**：页面本来就 8s 轮询一次，服务端按需问一次客户端（4s 超时）。好处是「客户端掉线 /
+Agent 挂了」立刻表现为 `reachable=false`，没有一份迟早过期的快照要维护。
+
+**排障顺序**：
+
+1. `GET /api/backpack/status` 看 `mode` 与 `tunnel.available`：
+   - `mode=tunnel` + `reachable=true`：隧道正常；
+   - `tunnel.available=true` 但 `reachable=false`：客户端在线、本机 Agent 不通 →
+     在板子上 `curl 127.0.0.1:8000/api/cameras`，并看客户端日志有没有
+     `板端 Agent 隧道已登记`（没有说明 `hello` 探测就失败了）；
+   - `tunnel.available=false`：设备客户端没在线，或它 `[ai] enabled=false`。
+2. 客户端日志搜 `agent_request` / `板端 Agent 事件流已连接`：
+   前者是页面的请求到达了，后者是检出事件在转发（没有这行则页面收不到框）。
+3. 只差框不动、数量也不变：看板端 Agent 是不是根本没在识别
+   （`/api/detect/status` 的 `running`），隧道只负责搬数据。
+
+**多背包**：隧道默认取「最近上报且在线」的那台。园区里有多台背包时必须配
+`ROBODOG_BACKPACK_TUNNEL_DEVICE=<设备号>`，否则页面可能问到另一台狗上。

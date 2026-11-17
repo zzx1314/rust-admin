@@ -69,7 +69,18 @@ pub const BACKPACK_ROOM_PREFIX: &str = "bp:";
 /// 允许通过中继观看的背包通道（与板端 mediamtx 的 path 一致）
 ///
 /// 白名单而不是透传：房间名来自查询串，不限制就能被拿来刷任意 key 撑爆内存。
-const BACKPACK_STREAMS: [&str; 6] = ["cam0", "cam1", "cam2", "cam3", "dogcam", "dog-ipcam"];
+///
+/// `preview` 是板端 AI 烧框后的那一路（`osd.py` 把中文标签画进画面）。跨网段时
+/// 浏览器画不了框（中继流没有坐标对应关系），只能看这一路——所以它必须能被中继。
+const BACKPACK_STREAMS: [&str; 7] = [
+    "cam0",
+    "cam1",
+    "cam2",
+    "cam3",
+    "dogcam",
+    "dog-ipcam",
+    "preview",
+];
 
 /// 推流端控制通道表：`room -> (会话号, 文本帧发送端)`
 type ControlChannels = Arc<RwLock<HashMap<String, (u64, mpsc::Sender<String>)>>>;

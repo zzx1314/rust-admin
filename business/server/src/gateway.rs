@@ -383,6 +383,45 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                         .await;
                                 }
                             }
+                            // ── 板端 Agent 隧道（`agent_tunnel.rs`）──────────────
+                            // 设备客户端跑在背包那块板子上，`127.0.0.1:8000` 一定通。
+                            // 它上线时打个招呼，服务端据此知道「这台设备能代调 Agent」。
+                            "agent_hello" => {
+                                if let Some(ref did) = device_id {
+                                    let base = ws_msg
+                                        .payload
+                                        .get("base")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .trim()
+                                        .to_string();
+                                    if base.is_empty() {
+                                        warn!("设备 {did} 的 agent_hello 缺少 base，忽略");
+                                    } else {
+                                        state.agent_tunnel.hello(did, &base).await;
+                                    }
+                                }
+                            }
+                            // 隧道回执：唤醒 `/api/backpack/*` 那个正在等的 HTTP 请求
+                            "agent_result" => {
+                                let request_id = ws_msg
+                                    .payload
+                                    .get("requestId")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .trim()
+                                    .to_string();
+                                if request_id.is_empty() {
+                                    warn!("agent_result 缺少 requestId，忽略: {}", ws_msg.payload);
+                                } else {
+                                    state.agent_tunnel.complete(&request_id, ws_msg.payload).await;
+                                }
+                            }
+                            // Agent SSE 事件（页面画框 / 刷新状态）：原样广播给背包页
+                            "agent_event" => {
+                                state.agent_tunnel.publish(&ws_msg.payload);
+                            }
+
                             // 数量核对不一致（板端已判定）：告警落库 + 企业微信
                             "ai_alert" => {
                                 if let Some(ref did) = device_id {

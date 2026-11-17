@@ -76,6 +76,7 @@ async fn test_state_with_token(service_token: Option<&str>) -> (AppState, TempDb
         backpack_base_url: None,
         backpack_webrtc_url: None,
         backpack_browser_url: None,
+        backpack_tunnel_device: None,
         point_ai: "auto".to_string(),
         ai_window_max_secs: 300,
         public_url: None,
@@ -96,6 +97,7 @@ async fn test_state_with_token(service_token: Option<&str>) -> (AppState, TempDb
         device_connections: gateway::new_device_connections(),
         command_results: gateway::new_command_result_waiters(),
         video_hub: Default::default(),
+        agent_tunnel: Default::default(),
     };
     (state, db_dir)
 }
@@ -1418,6 +1420,7 @@ mod control_plane_channel {
             command_results: state.command_results,
             video_hub: state.video_hub,
             notifier: robodog_ops_server::notify::Notifier::disabled(),
+            agent_tunnel: Default::default(),
         };
         (state, db_dir)
     }
@@ -1534,6 +1537,7 @@ mod zentai_service_token {
             backpack_base_url: None,
             backpack_webrtc_url: None,
             backpack_browser_url: None,
+            backpack_tunnel_device: None,
             point_ai: "auto".to_string(),
             ai_window_max_secs: 300,
             public_url: None,
@@ -2587,6 +2591,7 @@ async fn ingest_refresh_overwrites_existing_map_only_when_content_changes() {
         device_connections: state.device_connections,
         command_results: state.command_results,
         video_hub: Default::default(),
+        agent_tunnel: Default::default(),
     };
     let app = build_router(state.clone());
     let token = login(&app).await;

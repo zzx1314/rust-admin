@@ -30,6 +30,7 @@
 //! cargo run -- --robot 192.168.234.234 --map-only --map-name A区新图
 //! ```
 
+mod agent_relay;
 mod ai_patrol;
 mod dispatch;
 mod mapupload;
@@ -38,6 +39,7 @@ mod mock_body;
 mod video;
 mod zhpro;
 
+use agent_relay::AgentRelay;
 use ai_patrol::{
     AiPatrol, AiPoint, AiStart, ai_point_at, is_arrival_stage, is_point_stage, parse_ai_points,
 };
@@ -1024,6 +1026,37 @@ async fn run_client(
     // 实时视频回传：按需拉流（业务平台有人观看时才 video_start），与主链路互不阻塞
     let video = VideoRelay::spawn(Arc::new(config.clone()));
 
+    // 板端 Agent 隧道：平台/浏览器都可能不在背包网段，页面要的模型目录、运行态、
+    // AI 启停与检出框都借这条设备 WS 回到平台（见 `agent_relay` 模块）
+    let relay = Arc::new(AgentRelay::new(
+        config.ai_agent_url.clone(),
+        config.ai_enabled,
+    ));
+    let relay_task = relay.enabled().then(|| {
+        let relay = relay.clone();
+        let out = out_tx.clone();
+        tokio::spawn(async move { relay.forward_events(out).await })
+    });
+    // Agent 可能比客户端晚起来（板子重启顺序不固定）：没登记成功就每 15s 补一次
+    let announce_task = relay.enabled().then(|| {
+        let relay = relay.clone();
+        let out = out_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                if relay.announce(&out).await {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(15)).await;
+            }
+        })
+    });
+    if relay.enabled() {
+        info!(
+            "板端 Agent 隧道已启用：{}（背包页的模型目录 / 运行态 / AI 启停可跨网段代调）",
+            relay.agent()
+        );
+    }
+
     // 单写循环：所有发送集中在一处，避免并发写锁
     let writer = tokio::spawn(async move {
         while let Some(msg) = out_rx.recv().await {
@@ -1207,6 +1240,7 @@ async fn run_client(
                             &video,
                             &body_reconnect_tx,
                             &ai,
+                            &relay,
                         ).await;
                     }
                     Some(Ok(Message::Ping(data))) => {
@@ -1371,6 +1405,12 @@ async fn run_client(
     }
 
     writer.abort();
+    if let Some(task) = relay_task {
+        task.abort();
+    }
+    if let Some(task) = announce_task {
+        task.abort();
+    }
     Ok(())
 }
 
@@ -2142,6 +2182,7 @@ async fn handle_server_message(
     video: &VideoRelay,
     body_reconnect: &mpsc::Sender<()>,
     ai: &Arc<AiPatrol>,
+    relay: &Arc<AgentRelay>,
 ) {
     match msg.msg_type.as_str() {
         "register_ack" => {
@@ -2156,6 +2197,9 @@ async fn handle_server_message(
                         config.device_id
                     ),
                 }
+                // 注册成功后立刻打个招呼：本机 Agent 真的连得上，平台才会把背包页的
+                // 请求（模型目录 / 运行态 / AI 启停）转到这条连接上
+                relay.announce(out_tx).await;
             } else {
                 error!(
                     "设备注册失败: {}",
@@ -2206,6 +2250,9 @@ async fn handle_server_message(
             Some(start) => ai.start(out_tx, start).await,
             None => warn!("ai_start 载荷缺少 windowId，忽略: {}", msg.payload),
         },
+
+        // 背包页的请求（模型目录 / 运行态 / AI 启停）：本机代调 Agent 后回 agent_result
+        "agent_request" => relay.on_request(out_tx, &msg.payload).await,
 
         // 平台关窗（任务终态 / 暂停 / 取消）：窗口任务自己停 Agent 并回报 ai_end
         "ai_stop" => {
