@@ -437,6 +437,45 @@ curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/
 4. 还闪就看 `viewer of <room> lagged` 日志：观看端网络追不上，服务端现在会主动断开让它拿
    干净的新流（早先是从中间丢帧继续发，FLV 字节流错位后才一直黑屏重连）。
 
+### 6.6.1 手动遥控视频「连接很慢」（2026-11-17 现场，已修）
+
+现象：遥控页视频长时间停在「连接中 / 重连中」、偶尔黑一下。实测（云端直连中继 WS +
+板端 ffprobe/ffmpeg）：
+
+- 板端 `ffmpeg` 被相机侧抖动打退：`ffmpeg 结束（已传 N 字节），3s 后重试` —— 每次黑 4~5s；
+- 最后一个观看者离开后看门狗 15s 内就 `video_stop`，浏览器刷新 / 切页签（只断几秒）
+  也要重新起 ffmpeg + 等关键帧；
+- 前端 3s 没新帧就判「假死」重连，重连又逼服务端重新拉流，越连越慢；
+- 相机侧卡住时 ffmpeg 不会失败：画面定格，连接仍显示在线；
+- 本体 RTSP 是 1080p、SDP 标 60fps，实际投递明显低于标称（`ffmpeg -f null` 里
+  `speed` < 1x）。
+
+改动：
+
+| 位置 | 改动 |
+| --- | --- |
+| `business/client/src/video.rs` | RTSP 输入加 `-timeout 8000000`（8s socket 读超时，卡住就报错让外层重启）；`RETRY_DELAY` 3s → 1s |
+| `business/server/src/video.rs` | `STREAM_IDLE_GRACE = 60s`：最后一个观看者离开后留 60s 宽限才停流，期间新观看者立刻拿到缓存流头 + 关键帧 |
+| `business/web/src/components/VideoPlayer.vue` | `STALL_MS` 3s → 8s |
+
+复用排查手法：
+
+```bash
+# 云端：量首字节延迟 / 速率 / 收包间隔（替代肉眼看浏览器）
+python3 - <<'EOF'
+import websocket, time
+url = "ws://127.0.0.1:3100/api/devices/15/video/ws?token=<JWT>"
+ws = websocket.create_connection(url, timeout=30); t0=time.time(); n=0
+while time.time()-t0 < 10:
+    op, data = ws.recv_data()
+    if op == websocket.ABNF.OPCODE_BINARY: n += 1
+print("首帧 %.2fs，消息 %d，%.0f kbps" % (time.time()-t0, n, 0))
+EOF
+
+# 板端：源流到底跟不跟得上实时（speed < 1x 就是源侧问题，不是平台）
+ffmpeg -rtsp_transport tcp -i "<video_url>" -an -t 5 -f null - 2>&1 | tail -2
+```
+
 ### 6.7 WHEP `HTTP 404` 排查（2026-11-17 现场事故，已修）
 
 **症状**：前置摄像头一直「WHEP 协商失败（HTTP 404），2 秒后重连」，四路 USB 与红外都正常。

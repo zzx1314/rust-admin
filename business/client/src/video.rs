@@ -30,7 +30,11 @@ use tracing::{error, info, warn};
 /// 读 ffmpeg stdout 的分片大小：一个 FLV tag 常见几 KB，8KB 足够低延迟
 const CHUNK_BYTES: usize = 8 * 1024;
 /// 断流重连间隔（本体没出流 / 网络抖动的退避）
-const RETRY_DELAY: Duration = Duration::from_secs(3);
+/// ffmpeg 退出后多久重启。
+///
+/// 现场 ffmpeg 会被相机侧抖动（乱序包 / 短暂无数据）打退，3s 一等 + 1~2s 起流
+/// 就是「黑 4~5 秒」；1s 重起能把这段压到 1~2s。
+const RETRY_DELAY: Duration = Duration::from_secs(1);
 /// 停止时等 ffmpeg 退出的上限
 const STOP_GRACE: Duration = Duration::from_secs(5);
 /// 连续多少次「一个字节都没推出去」就停止重试
@@ -290,6 +294,11 @@ fn ffmpeg_args(config: &Config, url: &str, encoder: &str) -> Vec<String> {
         // 非 RTSP 地址不能带这些私有选项，否则 ffmpeg 直接报错。
         args.push("-rtsp_transport".into());
         args.push(config.video_transport.clone());
+        // socket 读超时（微秒）：相机侧一旦不发数据，ffmpeg 会在 8s 后报错退出、
+        // 由本模块按 [`RETRY_DELAY`] 重启，而不是**画面定格但连接一直挂着**
+        // （现场表现是「视频卡住不动，刷新页面才好」）。
+        args.push("-timeout".into());
+        args.push("8000000".into());
     }
     args.push("-i".into());
     args.push(url.to_string());
@@ -504,6 +513,28 @@ mod tests {
         // 输出参数必须在输出 URL 之前，且输出固定是 FLV → pipe:1
         assert_eq!(&args[args.len() - 3..], ["-f", "flv", "pipe:1"]);
         assert!(!args.contains(&"-vf".to_string()), "未配置宽度时不该缩放");
+    }
+
+    /// 相机侧不发数据时必须让 ffmpeg 自己报错退出（然后由 RETRY_DELAY 重启），
+    /// 否则现场看到的是「画面定格、连接还在」，只能刷新页面。
+    #[test]
+    fn rtsp_input_has_socket_timeout() {
+        let args = ffmpeg_args(
+            &test_config(false),
+            "rtsp://user:pw@192.168.234.1:8554/test",
+            "h264_rkmpp",
+        );
+        let timeout = args
+            .iter()
+            .position(|arg| arg == "-timeout")
+            .expect("RTSP 输入必须带 socket 读超时");
+        let input = args.iter().position(|arg| arg == "-i").unwrap();
+        assert!(timeout < input, "读超时是输入侧选项，必须在 -i 之前");
+        assert_eq!(args[timeout + 1], "8000000", "8s（单位：微秒）");
+
+        // 非 RTSP 输入不能带 RTSP 私有选项，否则 ffmpeg 直接启动失败
+        let http = ffmpeg_args(&test_config(false), "http://example.com/a.flv", "h264_rkmpp");
+        assert!(!http.contains(&"-timeout".to_string()));
     }
 
     #[test]

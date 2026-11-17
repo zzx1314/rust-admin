@@ -50,6 +50,14 @@ use tracing::{debug, info, warn};
 /// 偶发卡顿扛得住，真断网才会走重连。
 const VIEWER_BUFFER_FRAMES: usize = 512;
 
+/// 「最后一个观看者离开」到真正停流之间的宽限。
+///
+/// 现场痛点：浏览器刷新 / 切换看板 / 弱网重连都只断几秒，而原来「最后一个观看者离开」
+/// 之后看门狗 15s 内就会下发 `video_stop`，客户端跟着杀掉 ffmpeg；等下一个观看者
+/// 进来又要重新起 ffmpeg + 等关键帧 —— 现场感受就是「视频连接特别慢、总要黑一下」。
+/// 留 60s 宽限：短时断开直接复用还在跑的流（新观看者立刻拿到缓存的流头）。
+const STREAM_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// 流头（FLV header + AVC 序列头 + 首个关键帧）解析的上限
 ///
 /// 1200kbps 下 4MB ≈ 26 秒，正常 2 秒内（一个 GOP）就拿到关键帧；
@@ -120,6 +128,9 @@ struct Room {
     pending: Vec<u8>,
     /// 推流会话标识：`Some(id)` 表示在线，`id` 用来区分「新连接」与「旧连接迟到的清理」
     publisher: Option<u64>,
+    /// 最后一个观看者离开的时刻（`None` = 还有人在看）。
+    /// 看门狗只有超过 [`STREAM_IDLE_GRACE`] 才会真去停流。
+    idle_since: Option<std::time::Instant>,
 }
 
 fn new_room(session: u64) -> Room {
@@ -128,6 +139,7 @@ fn new_room(session: u64) -> Room {
         init: None,
         pending: Vec::new(),
         publisher: Some(session),
+        idle_since: None,
     }
 }
 
@@ -149,7 +161,10 @@ impl VideoHub {
             init: None,
             pending: Vec::new(),
             publisher: None,
+            idle_since: None,
         });
+        // 有人回来看了：空闲计时清零，看门狗别把还热着的流停掉
+        room.idle_since = None;
         let init = room.init.clone();
         (room.tx.subscribe(), first, init)
     }
@@ -177,12 +192,14 @@ impl VideoHub {
         };
         if last {
             let mut rooms = self.rooms.write().await;
-            let no_publisher = rooms
-                .get(device_id)
-                .map(|room| room.publisher.is_none())
-                .unwrap_or(true);
-            if no_publisher {
-                rooms.remove(device_id);
+            match rooms.get_mut(device_id) {
+                // 推流端还在：开始计时，宽限内不断流（短时重连立刻能拿到流）
+                Some(room) if room.publisher.is_some() => {
+                    room.idle_since = Some(std::time::Instant::now());
+                }
+                _ => {
+                    rooms.remove(device_id);
+                }
             }
         }
         last
@@ -258,7 +275,11 @@ impl VideoHub {
     ///
     /// 只算**曾经被要求起流**的房间（[`VideoHub::mark_streaming`]）：板端 relay 的六条
     /// 连接平时一直挂着，不能让它们每 15s 被停一次。
-    pub async fn idle_publishers(&self) -> Vec<String> {
+    /// 已经没人看、且空闲超过 `grace` 的房间（看门狗据此下发 `video_stop`）。
+    ///
+    /// 宽限由调用方传入（看门狗用 [`STREAM_IDLE_GRACE`]，单测里可以传 0 / 很长），
+    /// 避免「刚走开两秒就把推流杀掉」。
+    pub async fn idle_publishers(&self, grace: std::time::Duration) -> Vec<String> {
         let rooms = self.rooms.read().await;
         let viewers = self.viewers.read().await;
         let streaming = self.streaming.read().await;
@@ -271,6 +292,12 @@ impl VideoHub {
                     .unwrap_or(false)
             })
             .filter(|device_id| viewers.get(*device_id).copied().unwrap_or(0) == 0)
+            .filter(|device_id| {
+                rooms
+                    .get(*device_id)
+                    .and_then(|room| room.idle_since)
+                    .is_some_and(|since| since.elapsed() >= grace)
+            })
             .cloned()
             .collect()
     }
@@ -441,7 +468,7 @@ pub fn spawn_watchdog(state: AppState) {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(15));
         loop {
             ticker.tick().await;
-            for device_id in state.video_hub.idle_publishers().await {
+            for device_id in state.video_hub.idle_publishers(STREAM_IDLE_GRACE).await {
                 // 板端推流房间（`bp:`）的控制通道直连它的推流连接；设备客户端只听设备网关
                 let stop = json!({"msgType": "video_stop", "payload": {}}).to_string();
                 if state.video_hub.send_control(&device_id, stop).await {
@@ -910,22 +937,42 @@ mod tests {
         assert_eq!(rest.as_ref(), &stream[INIT_LEN..]);
     }
 
+    /// 空转判定：起过流 + 没人看 + 空闲超过宽限。**宽限是必须的**：
+    /// 浏览器刷新 / 切换页面只断几秒，立刻停流会让下一个观看者重新等 ffmpeg + 关键帧
+    /// （现场「视频连接很慢」就是这么来的）。
     #[tokio::test]
-    async fn publisher_without_viewer_is_reported_idle() {
+    async fn publisher_without_viewer_is_reported_idle_only_after_grace() {
+        use std::time::Duration;
+        let grace = Duration::from_secs(60);
         let hub = VideoHub::default();
         hub.publisher_attach("RD-001", 1).await;
         // 没见过 video_start 的房间不算空转（板端 relay 的常驻连接就属于这种）
-        assert!(hub.idle_publishers().await.is_empty());
+        assert!(hub.idle_publishers(grace).await.is_empty());
 
         hub.mark_streaming("RD-001", true).await;
-        assert_eq!(
-            hub.idle_publishers().await,
-            vec!["RD-001".to_string()],
-            "起过流又没人看时看门狗应能发现"
+        // 推流端自己在推、还没人看过：没有 idle_since，不归看门狗停
+        assert!(
+            hub.idle_publishers(Duration::ZERO).await.is_empty(),
+            "没人看过就谈不上「看完走了」"
         );
 
         let (_rx, _, _) = hub.viewer_join("RD-001").await;
-        assert!(hub.idle_publishers().await.is_empty(), "有观看者时不算空转");
+        assert!(hub.idle_publishers(Duration::ZERO).await.is_empty(), "有观看者时不算空转");
+        assert!(hub.viewer_leave("RD-001").await, "最后一个观看者离开");
+
+        assert!(
+            hub.idle_publishers(grace).await.is_empty(),
+            "宽限内不许停流（短时重连要能立刻复用）"
+        );
+        assert_eq!(
+            hub.idle_publishers(Duration::ZERO).await,
+            vec!["RD-001".to_string()],
+            "宽限到期后看门狗应能发现"
+        );
+
+        // 又有人回来看了：空闲计时清零
+        let (_rx2, _, _) = hub.viewer_join("RD-001").await;
+        assert!(hub.idle_publishers(Duration::ZERO).await.is_empty());
     }
 
     /// 现场真实流程：观看者先进（它的加入才触发 video_start），推流端后到 ——

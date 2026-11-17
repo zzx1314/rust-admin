@@ -82,8 +82,13 @@ const RETRY_BASE = 250;
 const RETRY_MAX = 3000;
 /** 连续失败这么多次才把错误铺在画面上（前几次只是角标提示，不打扰画面） */
 const HARD_ERROR_AFTER = 5;
-/** 画面停住多久判定「假死」并重连（弱网下 MSE 会卡在 readyState=2 不再前进） */
-const STALL_MS = 3000;
+/**
+ * 画面停住多久判定「假死」并重连（弱网下 MSE 会卡在 readyState=2 不再前进）。
+ *
+ * 3s 太紧：现场本体 RTSP 是中低帧率、偶尔 1~2s 没新帧很常见，一超时就重连，
+ * 重连又会让服务端重新拉起 ffmpeg，越连越慢。给到 8s，既有自愈又不抖。
+ */
+const STALL_MS = 8000;
 /**
  * 一次连接尝试多久没画面算超时。
  *
