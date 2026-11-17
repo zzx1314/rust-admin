@@ -1200,6 +1200,18 @@ async fn seed_staff_schedules(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     let mut shift_id = 0;
     for (offset, slot, owner, park_id, zone_id, task_ref, status) in shifts {
         shift_id += 1;
+        // 演示数据写进已存在的库时，园区/区域 id 可能对不上（老库删过数据），
+        // 外键开着，这里必须退化成 NULL，否则整个服务起不来
+        let park_id = if ref_exists(pool, "parks", park_id).await? {
+            Some(park_id)
+        } else {
+            None
+        };
+        let zone_id = if ref_exists(pool, "zones", zone_id).await? {
+            Some(zone_id)
+        } else {
+            None
+        };
         let time_range = match slot {
             "早班" => "08:00 - 16:00",
             "中班" => "16:00 - 00:00",
@@ -1373,6 +1385,21 @@ async fn seed_staff_schedules(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             .bind(assignee)
             .fetch_optional(pool)
             .await?;
+        // 告警 / 设备 / 园区都是外键：老库里 id 对不上就写 NULL，只保留来源文案
+        let alert_id = match alert_id {
+            Some(id) if ref_exists(pool, "alerts", id).await? => Some(id),
+            _ => None,
+        };
+        let device_id = if ref_exists(pool, "devices", device_id).await? {
+            Some(device_id)
+        } else {
+            None
+        };
+        let park_id = if ref_exists(pool, "parks", park_id).await? {
+            Some(park_id)
+        } else {
+            None
+        };
         let created_at = format!("{} {:02}:{:02}:00", day(created_off), created_h, created_m);
         let deadline = format!("{} {:02}:{:02}", day(deadline_off), deadline_h, deadline_m);
         let closed_at = if status == "已完成" {
@@ -1429,4 +1456,14 @@ async fn seed_staff_schedules(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
     tracing::info!("seeded demo staff / shifts / work orders");
     Ok(())
+}
+
+/// 外键目标是否存在：演示数据写进已有库时用它把缺失的引用降级成 NULL。
+async fn ref_exists(pool: &SqlitePool, table: &str, id: i64) -> Result<bool, sqlx::Error> {
+    // table 只来自本文件里的常量字面量，不拼接外部输入
+    let found: Option<i64> = sqlx::query_scalar(&format!("SELECT id FROM {table} WHERE id = ?1"))
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(found.is_some())
 }
