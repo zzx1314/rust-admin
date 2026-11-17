@@ -1,0 +1,470 @@
+use crate::app::AppState;
+use crate::auth::Claims;
+use crate::db::now;
+use crate::error::{ApiResponse, AppError};
+use crate::models::{
+    WorkOrder, WorkOrderDetail, WorkOrderLog, WorkOrderLogRequest, WorkOrderQuery, WorkOrderRequest,
+    WorkOrderStatusRequest,
+};
+use axum::Extension;
+use axum::Json;
+use axum::extract::{Path, Query, State};
+use serde_json::{Value, json};
+use sqlx::QueryBuilder;
+
+const WORK_ORDER_SELECT: &str = "SELECT w.id, w.order_code, w.title, w.order_type, w.source,
+    w.source_ref, w.priority, w.staff_id, w.assignee, st.team AS staff_team,
+    st.color AS staff_color, w.park_id, p.park_name, w.device_id, d.device_id AS device_code,
+    w.deadline, w.status, w.progress, w.description, w.alert_id, w.closed_at,
+    w.created_at, w.updated_at, w.created_by
+    FROM work_orders w
+    LEFT JOIN staff st ON st.id = w.staff_id
+    LEFT JOIN parks p ON p.id = w.park_id
+    LEFT JOIN devices d ON d.id = w.device_id";
+
+/// 工单状态机：待接单 → 处理中 → 待验收 → 已完成。
+/// 看板拖拽允许回退（例如验收不通过退回处理中），回退时进度跟着状态走。
+const STATUS_FLOW: [&str; 4] = ["待接单", "处理中", "待验收", "已完成"];
+
+fn default_progress(status: &str) -> i64 {
+    match status {
+        "处理中" => 30,
+        "待验收" => 90,
+        "已完成" => 100,
+        _ => 0,
+    }
+}
+
+fn default_note(status: &str) -> &'static str {
+    match status {
+        "待接单" => "工单退回待接单",
+        "处理中" => "已接单，开始现场处理",
+        "待验收" => "处理完成，提交验收",
+        "已完成" => "验收通过，工单关闭",
+        _ => "工单状态变更",
+    }
+}
+
+fn action_of(status: &str) -> &'static str {
+    match status {
+        "处理中" => "accept",
+        "待验收" => "submit",
+        "已完成" => "close",
+        _ => "status",
+    }
+}
+
+pub async fn list_work_orders(
+    State(state): State<AppState>,
+    Query(query): Query<WorkOrderQuery>,
+    Extension(claims): Extension<Claims>,
+) -> Result<Json<ApiResponse<Vec<WorkOrder>>>, AppError> {
+    let mut builder = QueryBuilder::<sqlx::Sqlite>::new(WORK_ORDER_SELECT);
+    builder.push(" WHERE 1 = 1");
+    if let Some(status) = query
+        .status
+        .filter(|value| !value.is_empty() && value != "全部")
+    {
+        builder.push(" AND w.status = ").push_bind(status);
+    }
+    if let Some(priority) = query
+        .priority
+        .filter(|value| !value.is_empty() && value != "全部")
+    {
+        builder.push(" AND w.priority = ").push_bind(priority);
+    }
+    if let Some(staff_id) = query.staff_id {
+        builder.push(" AND w.staff_id = ").push_bind(staff_id);
+    }
+    if let Some(park_id) = query.park_id {
+        builder.push(" AND w.park_id = ").push_bind(park_id);
+    }
+    if let Some(keyword) = query.q.filter(|value| !value.trim().is_empty()) {
+        let like = format!("%{}%", keyword.trim());
+        builder
+            .push(" AND (w.title LIKE ")
+            .push_bind(like.clone())
+            .push(" OR w.order_code LIKE ")
+            .push_bind(like.clone())
+            .push(" OR w.assignee LIKE ")
+            .push_bind(like)
+            .push(")");
+    }
+    if !claims.is_admin {
+        builder.push(" AND w.created_by = ").push_bind(claims.sub);
+    }
+    builder.push(" ORDER BY w.created_at DESC, w.id DESC");
+    let orders = builder
+        .build_query_as::<WorkOrder>()
+        .fetch_all(&state.db)
+        .await?;
+    Ok(ApiResponse::ok(orders))
+}
+
+pub async fn work_order_stats(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let mut builder = QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT status, COUNT(*) FROM work_orders WHERE 1 = 1",
+    );
+    if !claims.is_admin {
+        builder.push(" AND created_by = ").push_bind(claims.sub);
+    }
+    builder.push(" GROUP BY status");
+    let rows: Vec<(String, i64)> = builder.build_query_as().fetch_all(&state.db).await?;
+    let total: i64 = rows.iter().map(|(_, count)| count).sum();
+    let mut counts = serde_json::Map::new();
+    for (status, count) in &rows {
+        counts.insert(status.clone(), json!(count));
+    }
+    let done = counts.get("已完成").and_then(Value::as_i64).unwrap_or(0);
+    Ok(ApiResponse::ok(json!({
+        "total": total,
+        "counts": counts,
+        "open": total - done,
+    })))
+}
+
+pub async fn get_work_order(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
+) -> Result<Json<ApiResponse<WorkOrderDetail>>, AppError> {
+    let order = fetch_order(&state, id).await?;
+    ensure_owner(order.created_by, &claims)?;
+    let logs = fetch_logs(&state, id).await?;
+    Ok(ApiResponse::ok(WorkOrderDetail { order, logs }))
+}
+
+pub async fn create_work_order(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(payload): Json<WorkOrderRequest>,
+) -> Result<Json<ApiResponse<WorkOrderDetail>>, AppError> {
+    let order = create_order_core(&state, payload, claims.sub, &claims.username).await?;
+    let logs = fetch_logs(&state, order.id).await?;
+    Ok(ApiResponse::ok(WorkOrderDetail { order, logs }))
+}
+
+/// 建工单的核心逻辑：网页新建与「告警转工单」共用，避免两套默认值。
+pub(crate) async fn create_order_core(
+    state: &AppState,
+    payload: WorkOrderRequest,
+    created_by: i64,
+    actor: &str,
+) -> Result<WorkOrder, AppError> {
+    let title = payload.title.trim();
+    if title.is_empty() {
+        return Err(AppError::BadRequest("工单标题不能为空".to_string()));
+    }
+    // 责任人：优先 staffId，其次姓名；姓名能对上责任人库时补 staffId
+    let (staff_id, assignee) = match (payload.staff_id, payload.assignee.as_deref()) {
+        (Some(staff_id), _) => {
+            let name: Option<String> =
+                sqlx::query_scalar("SELECT name FROM staff WHERE id = ?1")
+                    .bind(staff_id)
+                    .fetch_optional(&state.db)
+                    .await?;
+            let Some(name) = name else {
+                return Err(AppError::NotFound(format!("责任人 {staff_id} 不存在")));
+            };
+            (Some(staff_id), name)
+        }
+        (None, Some(assignee)) if !assignee.trim().is_empty() => {
+            let name = assignee.trim().to_string();
+            let matched =
+                super::schedules::staff_id_by_name(&state.db, &name).await?;
+            (matched, name)
+        }
+        _ => {
+            return Err(AppError::BadRequest("请选择处理责任人".to_string()));
+        }
+    };
+
+    // 时限缺省：2 小时内（与原型「紧急单 1 小时内闭环」的直觉一致）
+    let deadline = payload
+        .deadline
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| Some(default_deadline()));
+    let source = payload
+        .source
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "手动创建".to_string());
+
+    let next_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM work_orders")
+        .fetch_one(&state.db)
+        .await?;
+    let order_code = format!(
+        "WO-{}-{next_id:02}",
+        chrono::Local::now().format("%m%d")
+    );
+    let timestamp = now();
+    let status = "待接单";
+    let result = sqlx::query(
+        "INSERT INTO work_orders (order_code, title, order_type, source, source_ref, priority,
+            staff_id, assignee, park_id, device_id, deadline, status, progress, description,
+            alert_id, created_at, updated_at, created_by)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, ?13, ?14, ?15, ?15, ?16)",
+    )
+    .bind(&order_code)
+    .bind(title)
+    .bind(payload.order_type.unwrap_or_else(|| "告警处置".to_string()))
+    .bind(&source)
+    .bind(payload.source_ref)
+    .bind(payload.priority.unwrap_or_else(|| "中".to_string()))
+    .bind(staff_id)
+    .bind(&assignee)
+    .bind(payload.park_id)
+    .bind(payload.device_id)
+    .bind(&deadline)
+    .bind(status)
+    .bind(payload.description)
+    .bind(payload.alert_id)
+    .bind(&timestamp)
+    .bind(created_by)
+    .execute(&state.db)
+    .await?;
+    let id = result.last_insert_rowid();
+
+    let content = if payload.alert_id.is_some() {
+        format!("由{source}转人工单，指派 {assignee}")
+    } else {
+        format!("创建工单并指派 {assignee}")
+    };
+    insert_log(state, id, actor, "created", &content).await?;
+
+    // 告警转工单：原告警从「未处理」推进到「处理中」，两边状态不再互相打架
+    if let Some(alert_id) = payload.alert_id {
+        sqlx::query("UPDATE alerts SET status = '处理中' WHERE id = ?1 AND status = '未处理'")
+            .bind(alert_id)
+            .execute(&state.db)
+            .await?;
+    }
+
+    fetch_order(state, id).await
+}
+
+pub async fn update_work_order(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
+    Json(payload): Json<WorkOrderRequest>,
+) -> Result<Json<ApiResponse<WorkOrderDetail>>, AppError> {
+    let existing = fetch_order(&state, id).await?;
+    ensure_owner(existing.created_by, &claims)?;
+
+    // 改派：显式给 staffId 就按 id 取姓名；只给姓名时按姓名反查责任人库
+    let (staff_id, assignee) = match (payload.staff_id, payload.assignee.as_deref()) {
+        (None, None) => (existing.staff_id, existing.assignee.clone()),
+        (Some(staff_id), _) => {
+            let name: Option<String> =
+                sqlx::query_scalar("SELECT name FROM staff WHERE id = ?1")
+                    .bind(staff_id)
+                    .fetch_optional(&state.db)
+                    .await?;
+            let Some(name) = name.filter(|name| !name.trim().is_empty()) else {
+                return Err(AppError::NotFound(format!("责任人 {staff_id} 不存在")));
+            };
+            (Some(staff_id), name)
+        }
+        (None, Some(assignee)) => {
+            let name = assignee.trim().to_string();
+            if name.is_empty() {
+                return Err(AppError::BadRequest("处理责任人不能为空".to_string()));
+            }
+            let matched = super::schedules::staff_id_by_name(&state.db, &name).await?;
+            (matched, name)
+        }
+    };
+
+    sqlx::query(
+        "UPDATE work_orders SET title = ?1, order_type = ?2, priority = ?3, staff_id = ?4,
+            assignee = ?5, park_id = ?6, device_id = ?7, deadline = ?8, description = ?9,
+            updated_at = ?10 WHERE id = ?11",
+    )
+    .bind(if payload.title.trim().is_empty() {
+        existing.title
+    } else {
+        payload.title.trim().to_string()
+    })
+    .bind(payload.order_type.unwrap_or(existing.order_type))
+    .bind(payload.priority.unwrap_or(existing.priority))
+    .bind(staff_id)
+    .bind(&assignee)
+    .bind(payload.park_id.or(existing.park_id))
+    .bind(payload.device_id.or(existing.device_id))
+    .bind(payload.deadline.or(existing.deadline))
+    .bind(payload.description.or(existing.description))
+    .bind(now())
+    .bind(id)
+    .execute(&state.db)
+    .await?;
+
+    if assignee != existing.assignee {
+        insert_log(
+            &state,
+            id,
+            &claims.username,
+            "status",
+            &format!("改派给 {assignee}（原处理人 {}）", existing.assignee),
+        )
+        .await?;
+    }
+
+    let order = fetch_order(&state, id).await?;
+    let logs = fetch_logs(&state, id).await?;
+    Ok(ApiResponse::ok(WorkOrderDetail { order, logs }))
+}
+
+/// 状态流转：详情页按钮与看板拖拽都走这里。
+pub async fn update_work_order_status(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
+    Json(payload): Json<WorkOrderStatusRequest>,
+) -> Result<Json<ApiResponse<WorkOrderDetail>>, AppError> {
+    let existing = fetch_order(&state, id).await?;
+    ensure_owner(existing.created_by, &claims)?;
+
+    let status = payload.status.trim().to_string();
+    if !STATUS_FLOW.contains(&status.as_str()) {
+        return Err(AppError::BadRequest(format!("未知工单状态：{status}")));
+    }
+    if status == existing.status && payload.note.is_none() {
+        let logs = fetch_logs(&state, id).await?;
+        return Ok(ApiResponse::ok(WorkOrderDetail {
+            order: existing,
+            logs,
+        }));
+    }
+
+    let progress = payload.progress.unwrap_or_else(|| default_progress(&status));
+    let closed_at = if status == "已完成" {
+        Some(now())
+    } else {
+        None
+    };
+    sqlx::query(
+        "UPDATE work_orders SET status = ?1, progress = ?2, closed_at = ?3, updated_at = ?4
+         WHERE id = ?5",
+    )
+    .bind(&status)
+    .bind(progress)
+    .bind(&closed_at)
+    .bind(now())
+    .bind(id)
+    .execute(&state.db)
+    .await?;
+
+    let actor = payload
+        .actor
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| claims.username.clone());
+    let note = payload
+        .note
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default_note(&status).to_string());
+    insert_log(&state, id, &actor, action_of(&status), &note).await?;
+
+    let order = fetch_order(&state, id).await?;
+    let logs = fetch_logs(&state, id).await?;
+    Ok(ApiResponse::ok(WorkOrderDetail { order, logs }))
+}
+
+pub async fn add_work_order_log(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
+    Json(payload): Json<WorkOrderLogRequest>,
+) -> Result<Json<ApiResponse<WorkOrderDetail>>, AppError> {
+    let order = fetch_order(&state, id).await?;
+    ensure_owner(order.created_by, &claims)?;
+    if payload.content.trim().is_empty() {
+        return Err(AppError::BadRequest("处理记录不能为空".to_string()));
+    }
+    let actor = payload
+        .actor
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| claims.username.clone());
+    insert_log(&state, id, &actor, "comment", payload.content.trim()).await?;
+    sqlx::query("UPDATE work_orders SET updated_at = ?1 WHERE id = ?2")
+        .bind(now())
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+    let order = fetch_order(&state, id).await?;
+    let logs = fetch_logs(&state, id).await?;
+    Ok(ApiResponse::ok(WorkOrderDetail { order, logs }))
+}
+
+pub async fn delete_work_order(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
+) -> Result<Json<ApiResponse<bool>>, AppError> {
+    let order = fetch_order(&state, id).await?;
+    ensure_owner(order.created_by, &claims)?;
+    // logs 由外键 ON DELETE CASCADE 一并清掉（连接已开启 foreign_keys）
+    let result = sqlx::query("DELETE FROM work_orders WHERE id = ?1")
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+    Ok(ApiResponse::ok(result.rows_affected() > 0))
+}
+
+// ------------------------------------------------------------------ 内部
+
+fn ensure_owner(created_by: Option<i64>, claims: &Claims) -> Result<(), AppError> {
+    if claims.is_admin || created_by == Some(claims.sub) {
+        return Ok(());
+    }
+    Err(AppError::NotFound("工单不存在".to_string()))
+}
+
+fn default_deadline() -> String {
+    (chrono::Local::now() + chrono::Duration::hours(2))
+        .format("%Y-%m-%d %H:%M")
+        .to_string()
+}
+
+async fn fetch_order(state: &AppState, id: i64) -> Result<WorkOrder, AppError> {
+    let sql = format!("{WORK_ORDER_SELECT} WHERE w.id = ?1");
+    sqlx::query_as::<_, WorkOrder>(&sql)
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("工单不存在".to_string()))
+}
+
+async fn fetch_logs(state: &AppState, id: i64) -> Result<Vec<WorkOrderLog>, AppError> {
+    let logs = sqlx::query_as::<_, WorkOrderLog>(
+        "SELECT id, work_order_id, actor, action, content, created_at
+         FROM work_order_logs WHERE work_order_id = ?1 ORDER BY id ASC",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(logs)
+}
+
+async fn insert_log(
+    state: &AppState,
+    id: i64,
+    actor: &str,
+    action: &str,
+    content: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "INSERT INTO work_order_logs (work_order_id, actor, action, content, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )
+    .bind(id)
+    .bind(actor)
+    .bind(action)
+    .bind(content)
+    .bind(now())
+    .execute(&state.db)
+    .await?;
+    Ok(())
+}

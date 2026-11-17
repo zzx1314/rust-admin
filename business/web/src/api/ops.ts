@@ -16,8 +16,14 @@ import type {
   RouteValidation,
   Setting,
   Task,
+  Shift,
+  ShiftStats,
+  Staff,
   TaskEvent,
   UserInfo,
+  WorkOrder,
+  WorkOrderDetail,
+  WorkOrderStats,
   Zone
 } from "./types";
 
@@ -205,4 +211,36 @@ export const notifyApi = {
 
 export const dashboardApi = {
   summary: () => get<DashboardSummary>("/dashboard/summary")
+};
+
+/** 责任人库：排班与工单共用的处理人 */
+export const staffApi = {
+  list: (params?: object) => get<Staff[]>("/staff", params),
+  create: (data: object) => post<Staff>("/staff", data),
+  update: (id: number, data: object) => put<Staff>(`/staff/${id}`, data),
+  remove: (id: number) => del<boolean>(`/staff/${id}`)
+};
+
+/** 排班（计划层）：日期 + 班次 + 责任人 + 关联巡检计划 */
+export const shiftApi = {
+  list: (params?: object) => get<Shift[]>("/shifts", params),
+  stats: (params?: object) => get<ShiftStats>("/shifts/stats", params),
+  get: (id: number) => get<Shift>(`/shifts/${id}`),
+  create: (data: object) => post<Shift>("/shifts", data),
+  update: (id: number, data: object) => put<Shift>(`/shifts/${id}`, data),
+  remove: (id: number) => del<boolean>(`/shifts/${id}`)
+};
+
+/** 工单（执行层）：派发 → 接单 → 处理 → 验收 → 关闭 */
+export const workOrderApi = {
+  list: (params?: object) => get<WorkOrder[]>("/workorders", params),
+  stats: () => get<WorkOrderStats>("/workorders/stats"),
+  get: (id: number) => get<WorkOrderDetail>(`/workorders/${id}`),
+  create: (data: object) => post<WorkOrderDetail>("/workorders", data),
+  update: (id: number, data: object) => put<WorkOrderDetail>(`/workorders/${id}`, data),
+  updateStatus: (id: number, data: { status: string; note?: string; actor?: string; progress?: number }) =>
+    put<WorkOrderDetail>(`/workorders/${id}/status`, data),
+  addLog: (id: number, content: string, actor?: string) =>
+    post<WorkOrderDetail>(`/workorders/${id}/logs`, { content, actor }),
+  remove: (id: number) => del<boolean>(`/workorders/${id}`)
 };

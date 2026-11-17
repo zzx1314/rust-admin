@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
 import { useAppStore } from "@/stores/app";
-import { alertApi, deviceApi } from "@/api/ops";
+import { alertApi, deviceApi, workOrderApi } from "@/api/ops";
 import type { Alert } from "@/api/types";
 import { ElNotification, type NotificationHandle } from "element-plus";
 import AppIcon from "@/components/AppIcon.vue";
@@ -22,6 +22,8 @@ const userOpen = ref(false);
 const bellAlerts = ref<Alert[]>([]);
 const deviceTotal = ref(0);
 const onlineDevices = ref(0);
+/** 在办工单数（侧边栏红点）：待接单 / 处理中 / 待验收 合计 */
+const openWorkOrders = ref(0);
 let clockTimer = 0;
 let pollTimer = 0;
 let warmTimer = 0;
@@ -44,7 +46,9 @@ const navGroups = [
       { path: "/parks", label: "园区管理", icon: "park" },
       { path: "/routes", label: "巡检任务", icon: "route" },
       { path: "/devices", label: "设备管理", icon: "dog" },
-      { path: "/tasks", label: "计划管理", icon: "task" }
+      { path: "/tasks", label: "计划管理", icon: "task" },
+      { path: "/schedules", label: "排班管理", icon: "shift" },
+      { path: "/workorders", label: "工单管理", icon: "ticket" }
     ]
   },
   {
@@ -115,6 +119,12 @@ async function refreshStatus() {
     const stats = await deviceApi.stats();
     deviceTotal.value = stats.total;
     onlineDevices.value = stats.online;
+  } catch {
+    /* ignore transient polling errors */
+  }
+  try {
+    const stats = await workOrderApi.stats();
+    openWorkOrders.value = stats.open;
   } catch {
     /* ignore transient polling errors */
   }
@@ -216,6 +226,8 @@ onMounted(async () => {
   controlTimer = window.setInterval(watchControlSource, 10000);
   document.addEventListener("click", onDocumentClick);
   document.addEventListener("keydown", onKeydown);
+  // 工单页改了状态就刷新侧边栏红点，不用等下一轮轮询
+  window.addEventListener("robodog:workorders-changed", refreshStatus);
   warmTimer = window.setTimeout(warmNavRoutes, 600);
 });
 
@@ -228,6 +240,7 @@ onBeforeUnmount(() => {
   ctrlNotices.clear();
   document.removeEventListener("click", onDocumentClick);
   document.removeEventListener("keydown", onKeydown);
+  window.removeEventListener("robodog:workorders-changed", refreshStatus);
 });
 
 watch(
@@ -268,6 +281,12 @@ watch(
               class="nav-badge hide-c"
             >
               {{ app.pendingAlerts }}
+            </span>
+            <span
+              v-else-if="item.path === '/workorders' && openWorkOrders > 0"
+              class="nav-badge hide-c"
+            >
+              {{ openWorkOrders }}
             </span>
           </div>
         </template>

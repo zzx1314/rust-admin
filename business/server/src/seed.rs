@@ -1,7 +1,7 @@
 use crate::db::{now, today};
 use crate::geo::route_metrics;
 use bcrypt::{DEFAULT_COST, hash};
-use chrono::{Duration, Local};
+use chrono::{Datelike, Duration, Local};
 use serde_json::Value;
 use sqlx::SqlitePool;
 
@@ -16,6 +16,7 @@ pub async fn seed(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         seed_business_data(pool).await?;
     }
     seed_maps(pool).await?;
+    seed_staff_schedules(pool).await?;
 
     Ok(())
 }
@@ -1076,5 +1077,356 @@ async fn seed_maps(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     .await?;
 
     tracing::info!("seeded demo map baselines");
+    Ok(())
+}
+
+/// 排班 / 工单演示数据：责任人库为空时才写，已有真实数据不覆盖。
+///
+/// 班次按**当前真实周**生成（周一到周日），周视图打开就能看到人，
+/// 而不是原型里写死的 11-17 ~ 11-23。
+async fn seed_staff_schedules(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let staff_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM staff")
+        .fetch_one(pool)
+        .await?;
+    if staff_count > 0 {
+        return Ok(());
+    }
+
+    let created = now();
+    let today = Local::now().date_naive();
+    let monday = today - Duration::days(Local::now().weekday().num_days_from_monday() as i64);
+    let day = |offset: i64| (monday + Duration::days(offset)).format("%Y-%m-%d").to_string();
+
+    let staff = [
+        (
+            1,
+            "EMP-01",
+            "陈志远",
+            "巡检主管",
+            "运维一组",
+            "138****1203",
+            "#0284c7",
+            "在岗",
+            "红外测温 / 应急处置",
+        ),
+        (
+            2,
+            "EMP-02",
+            "李文博",
+            "资深工程师",
+            "运维二组",
+            "139****8871",
+            "#0d9488",
+            "在岗",
+            "设备维护 / 地图标定",
+        ),
+        (
+            3,
+            "EMP-03",
+            "周雨欣",
+            "运维工程师",
+            "运维一组",
+            "137****2245",
+            "#7c3aed",
+            "在岗",
+            "AI 识别 / 数据分析",
+        ),
+        (
+            4,
+            "EMP-04",
+            "王建国",
+            "夜班班长",
+            "运维夜班组",
+            "136****5612",
+            "#c2410c",
+            "休息",
+            "周界巡检 / 夜巡",
+        ),
+        (
+            5,
+            "EMP-05",
+            "赵敏",
+            "运维工程师",
+            "运维二组",
+            "135****9908",
+            "#d97706",
+            "在岗",
+            "冷链仓 / 传感器校准",
+        ),
+        (
+            6,
+            "EMP-06",
+            "孙浩",
+            "现场技术员",
+            "运维一组",
+            "188****3347",
+            "#2563eb",
+            "在岗",
+            "设备抢修 / 充电维护",
+        ),
+    ];
+    for (id, code, name, role, team, phone, color, status, skills) in staff {
+        sqlx::query(
+            "INSERT INTO staff (id, staff_code, name, role, team, phone, color, status, skills,
+                created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+        )
+        .bind(id)
+        .bind(code)
+        .bind(name)
+        .bind(role)
+        .bind(team)
+        .bind(phone)
+        .bind(color)
+        .bind(status)
+        .bind(skills)
+        .bind(&created)
+        .execute(pool)
+        .await?;
+    }
+
+    // (日期偏移, 班次, 责任人, 园区, 区域, 巡检计划编号或临时计划名, 状态)
+    let shifts = [
+        (0, "早班", "陈志远", 1, 1, "TK-1109-01", "已发布"),
+        (0, "中班", "周雨欣", 1, 2, "TK-1109-03", "已发布"),
+        (0, "夜班", "王建国", 1, 3, "C区周界围栏夜巡", "待确认"),
+        (1, "早班", "李文博", 2, 4, "TK-1109-05", "已发布"),
+        (1, "中班", "赵敏", 2, 5, "TK-1109-04", "已发布"),
+        (2, "早班", "孙浩", 2, 6, "TK-1109-07", "草案"),
+        (2, "夜班", "王建国", 3, 8, "地下车库建图补采", "待确认"),
+        (3, "早班", "陈志远", 3, 7, "TK-1109-06", "已发布"),
+        (4, "中班", "周雨欣", 1, 1, "一期周界全景建图", "已发布"),
+    ];
+    let mut shift_id = 0;
+    for (offset, slot, owner, park_id, zone_id, task_ref, status) in shifts {
+        shift_id += 1;
+        let time_range = match slot {
+            "早班" => "08:00 - 16:00",
+            "中班" => "16:00 - 00:00",
+            _ => "00:00 - 08:00",
+        };
+        // 计划编号能对上就关联任务，否则当成临时计划名写进 task_name
+        let task_id: Option<i64> = sqlx::query_scalar("SELECT id FROM tasks WHERE task_code = ?1")
+            .bind(task_ref)
+            .fetch_optional(pool)
+            .await?;
+        let task_name: String = if task_id.is_some() {
+            sqlx::query_scalar("SELECT task_name FROM tasks WHERE task_code = ?1")
+                .bind(task_ref)
+                .fetch_one(pool)
+                .await?
+        } else {
+            task_ref.to_string()
+        };
+        let staff_id: Option<i64> = sqlx::query_scalar("SELECT id FROM staff WHERE name = ?1")
+            .bind(owner)
+            .fetch_optional(pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO shifts (id, shift_code, shift_date, slot, time_range, staff_id, owner_name,
+                park_id, zone_id, task_id, task_name, status, note, created_at, updated_at,
+                created_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?13, ?13, 1)",
+        )
+        .bind(shift_id)
+        .bind(format!("SH-{shift_id:03}"))
+        .bind(day(offset))
+        .bind(slot)
+        .bind(time_range)
+        .bind(staff_id)
+        .bind(owner)
+        .bind(park_id)
+        .bind(zone_id)
+        .bind(task_id)
+        .bind(&task_name)
+        .bind(status)
+        .bind(&created)
+        .execute(pool)
+        .await?;
+    }
+
+    // 工单：告警转单 / 手动创建 / 验收完成各留一条，覆盖四种状态
+    let workorders = [
+        (
+            "WO-0001",
+            "RD-009 电池温度异常处置",
+            "告警处置",
+            "AL-001",
+            Some("AL-001"),
+            "紧急",
+            "李文博",
+            2,
+            6,
+            "处理中",
+            55,
+            "电池温度 56.2℃ 超过阈值，需现场检查散热与电池健康度，必要时停机检修。",
+            Some(1_i64),
+            (0, 9, 12),
+            (0, 10, 12),
+            vec![
+                ("09:12", "系统", "created", "由告警 AL-001 自动生成工单，指派运维二组"),
+                ("09:15", "李文博", "accept", "已接单，携带热成像仪赶往 E 区冷链仓"),
+                ("09:24", "李文博", "comment", "到达现场，开始检测电池模组温度分布"),
+            ],
+        ),
+        (
+            "WO-0002",
+            "RD-018 离线设备信号排查",
+            "告警处置",
+            "AL-002",
+            Some("AL-002"),
+            "高",
+            "孙浩",
+            3,
+            10,
+            "待接单",
+            0,
+            "设备离线超 2 小时、信号丢失，需排查地下车库网关覆盖与设备供电。",
+            Some(2_i64),
+            (0, 8, 50),
+            (0, 11, 50),
+            vec![("08:50", "系统", "created", "由告警 AL-002 自动生成工单，指派运维一组")],
+        ),
+        (
+            "WO-0003",
+            "E区冷链仓任务超时复核",
+            "巡检复核",
+            "AL-003",
+            Some("AL-003"),
+            "中",
+            "赵敏",
+            2,
+            5,
+            "待接单",
+            0,
+            "冷链仓巡检任务超时未开始，需确认设备状态与任务下发链路。",
+            Some(3_i64),
+            (0, 8, 35),
+            (0, 13, 0),
+            vec![("08:35", "系统", "created", "由告警 AL-003 转入工单，指派运维二组")],
+        ),
+        (
+            "WO-0004",
+            "RD-012 电量异常回充检查",
+            "设备维护",
+            "手动创建",
+            None,
+            "低",
+            "赵敏",
+            2,
+            8,
+            "待验收",
+            90,
+            "设备频繁低电量回充，检查充电座 P-04 接触点与电池衰减情况。",
+            None,
+            (-1, 8, 20),
+            (1, 18, 0),
+            vec![
+                ("08:20", "陈志远", "created", "创建工单并指派赵敏"),
+                ("10:15", "赵敏", "comment", "更换充电触点，观察一个充放电周期"),
+                ("09:40", "赵敏", "submit", "处理完成，回充频率已恢复正常，提交验收"),
+            ],
+        ),
+        (
+            "WO-0005",
+            "C区周界红外误报标定",
+            "巡检复核",
+            "TK-1109-02",
+            Some("TK-1109-02"),
+            "中",
+            "陈志远",
+            1,
+            11,
+            "已完成",
+            100,
+            "周界红外频繁误报，需调整识别阈值与 ROI 区域。",
+            None,
+            (-2, 14, 10),
+            (0, 18, 0),
+            vec![
+                ("14:10", "系统", "created", "由复核任务转入工单"),
+                ("15:30", "陈志远", "comment", "已完成阈值标定，连续 24h 无误报"),
+                ("09:00", "陈志远", "close", "验收通过，工单关闭"),
+            ],
+        ),
+    ];
+    for (
+        code,
+        title,
+        order_type,
+        source,
+        source_ref,
+        priority,
+        assignee,
+        park_id,
+        device_id,
+        status,
+        progress,
+        description,
+        alert_id,
+        (created_off, created_h, created_m),
+        (deadline_off, deadline_h, deadline_m),
+        logs,
+    ) in workorders
+    {
+        let staff_id: Option<i64> = sqlx::query_scalar("SELECT id FROM staff WHERE name = ?1")
+            .bind(assignee)
+            .fetch_optional(pool)
+            .await?;
+        let created_at = format!("{} {:02}:{:02}:00", day(created_off), created_h, created_m);
+        let deadline = format!("{} {:02}:{:02}", day(deadline_off), deadline_h, deadline_m);
+        let closed_at = if status == "已完成" {
+            Some(now())
+        } else {
+            None
+        };
+        let order_id: i64 = sqlx::query_scalar(
+            "INSERT INTO work_orders (order_code, title, order_type, source, source_ref, priority,
+                staff_id, assignee, park_id, device_id, deadline, status, progress, description,
+                alert_id, closed_at, created_at, updated_at, created_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                ?17, ?17, 1)
+             RETURNING id",
+        )
+        .bind(code)
+        .bind(title)
+        .bind(order_type)
+        .bind(source)
+        .bind(source_ref)
+        .bind(priority)
+        .bind(staff_id)
+        .bind(assignee)
+        .bind(park_id)
+        .bind(device_id)
+        .bind(&deadline)
+        .bind(status)
+        .bind(progress)
+        .bind(description)
+        .bind(alert_id)
+        .bind(&closed_at)
+        .bind(&created_at)
+        .fetch_one(pool)
+        .await?;
+        for (time, actor, action, content) in logs {
+            let stamp = if time.len() == 5 {
+                format!("{} {time}:00", day(created_off.max(0)))
+            } else {
+                format!("{} {time}", day(created_off.max(0)))
+            };
+            sqlx::query(
+                "INSERT INTO work_order_logs (work_order_id, actor, action, content, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .bind(order_id)
+            .bind(actor)
+            .bind(action)
+            .bind(content)
+            .bind(stamp)
+            .execute(pool)
+            .await?;
+        }
+    }
+
+    tracing::info!("seeded demo staff / shifts / work orders");
     Ok(())
 }

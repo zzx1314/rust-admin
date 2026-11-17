@@ -442,3 +442,102 @@ export interface RouteValidation {
   };
   items: RouteValidationItem[];
 }
+
+/** 责任人库：排班与工单共用的运维人员 */
+export interface Staff {
+  id: number;
+  staffCode: string;
+  name: string;
+  role: string | null;
+  team: string | null;
+  phone: string | null;
+  color: string;
+  status: string;
+  skills: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** 周视图范围内班次数（列表按 from/to 统计） */
+  shiftCount: number;
+  /** 在办工单数（状态不是「已完成」） */
+  openOrderCount: number;
+}
+
+/** 排班：某天某班次由某个责任人负责某条巡检计划 */
+export interface Shift {
+  id: number;
+  shiftCode: string;
+  /** YYYY-MM-DD */
+  shiftDate: string;
+  slot: string;
+  timeRange: string;
+  staffId: number | null;
+  ownerName: string;
+  staffRole: string | null;
+  staffTeam: string | null;
+  staffColor: string | null;
+  parkId: number | null;
+  parkName: string | null;
+  zoneId: number | null;
+  zoneName: string | null;
+  taskId: number | null;
+  taskName: string | null;
+  deviceCount: number;
+  status: string;
+  note: string | null;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: number | null;
+}
+
+export interface ShiftStats {
+  total: number;
+  counts: Record<string, number>;
+  published: number;
+  pending: number;
+  owners: number;
+}
+
+/** 工单：异常与人工任务的派发、处理与闭环 */
+export interface WorkOrder {
+  id: number;
+  orderCode: string;
+  title: string;
+  orderType: string;
+  source: string;
+  sourceRef: string | null;
+  priority: string;
+  staffId: number | null;
+  assignee: string;
+  staffTeam: string | null;
+  staffColor: string | null;
+  parkId: number | null;
+  parkName: string | null;
+  deviceId: number | null;
+  deviceCode: string | null;
+  deadline: string | null;
+  status: string;
+  progress: number;
+  description: string | null;
+  alertId: number | null;
+  closedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: number | null;
+}
+
+export interface WorkOrderLog {
+  id: number;
+  workOrderId: number;
+  actor: string;
+  action: string;
+  content: string;
+  createdAt: string;
+}
+
+export type WorkOrderDetail = WorkOrder & { logs: WorkOrderLog[] };
+
+export interface WorkOrderStats {
+  total: number;
+  counts: Record<string, number>;
+  open: number;
+}

@@ -26,9 +26,9 @@ business/
 │   │   ├── dispatch.rs            # 任务下发载荷组装（地图绑定/速度/结束动作）
 │   │   ├── ai_patrol.rs           # 航点到点 AI 识别（算场景/阈值 → 直连或经客户端调 Agent → 写告警）
 │   │   ├── notify.rs              # 企业微信告警推送（去重/限流/截断/重试）
-│   │   ├── handlers/              # 园区、区域、设备、任务、路线、告警、设置、驾驶舱
+│   │   ├── handlers/              # 园区、区域、设备、任务、路线、排班、工单、告警、设置、驾驶舱
 │   │   └── app.rs                 # 路由装配、CORS、静态资源
-│   ├── migrations/                # 001 建表 / 002 地图基线 / … / 019 推送记录
+│   ├── migrations/                # 001 建表 / 002 地图基线 / … / 019 推送记录 / 020 排班与工单
 │   ├── seed/routes.json           # 演示路线（航点/航段/动作）
 │   └── data/robodog.db            # 运行时生成，删除后自动重建并重新播种
 ├── client/                        # 设备客户端：业务协议 + 智航 Pro 本体驱动
@@ -40,7 +40,7 @@ business/
     ├── src/api/                   # 请求封装与类型
     ├── src/components/            # 图表、状态徽标、设备抽屉、园区态势图等
     ├── src/layout/                # 原型风格的侧边栏 + 顶栏
-    ├── src/views/                 # 7 个业务页面
+    ├── src/views/                 # 9 个业务页面
     └── src/styles/                # 原型设计令牌与页面样式
 ```
 
@@ -122,6 +122,8 @@ sudo ./deploy/install.sh
 | 巡检任务 | 三栏编辑器：路线模板、SVG 画布拖拽加点/选段、航点属性、航段任务、动作库、撤销、顺序优化、校验、发布、模拟执行 |
 | 设备管理 | 状态统计、筛选、电量/心跳、手动绑定园区、设备详情抽屉（实时监控 + **手动遥控页内嵌实时画面**）、远程指令、批量下发、CSV 导出 |
 | 计划管理 | 看板拖拽改状态、列表视图、任务创建/详情、航点执行序列、开始/暂停、**执行实时监控（本体视频 + 地图上的实时位置）** |
+| 排班管理 | 周视图（早/中/夜班 × 一周七天）与列表视图、新建排班（责任人/园区/区域/关联计划）、同人同时段冲突拦截、责任人负载条、责任人库、排班详情「据此派发工单」 |
+| 工单管理 | 看板拖拽流转 / 列表视图、优先级与时限、工单详情处理轨迹时间线、追加处理记录、告警与排班转工单（来源保留 AL-/TK- 编号）、CSV 导出 |
 | 告警中心 | 级别/状态筛选、单条/全部处理、告警详情 |
 | 系统设置 | 平台参数、通知开关、关于平台 |
 
@@ -180,6 +182,19 @@ GET    /api/alerts/stats
 POST   /api/alerts/handle-all
 GET    /api/alerts/{id}           PUT    /api/alerts/{id}      DELETE /api/alerts/{id}
 POST   /api/alerts/{id}/handle
+
+GET    /api/staff                 POST   /api/staff
+PUT    /api/staff/{id}            DELETE /api/staff/{id}
+
+GET    /api/shifts                POST   /api/shifts
+GET    /api/shifts/stats
+GET    /api/shifts/{id}           PUT    /api/shifts/{id}       DELETE /api/shifts/{id}
+
+GET    /api/workorders            POST   /api/workorders
+GET    /api/workorders/stats
+GET    /api/workorders/{id}       PUT    /api/workorders/{id}   DELETE /api/workorders/{id}
+PUT    /api/workorders/{id}/status   # 状态流转：待接单 → 处理中 → 待验收 → 已完成
+POST   /api/workorders/{id}/logs     # 追加处理记录（详情页时间线）
 
 GET    /api/settings              PUT    /api/settings
 GET    /api/dashboard/summary

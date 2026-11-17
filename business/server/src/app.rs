@@ -5,8 +5,8 @@ use crate::error::ApiResponse;
 use crate::gateway;
 use crate::gateway::DeviceConnections;
 use crate::handlers::{
-    alerts, dashboard, devices, ingest, maps, notifications, parks, routes, service, settings,
-    tasks, teleop, zones,
+    alerts, dashboard, devices, ingest, maps, notifications, parks, routes, schedules, service,
+    settings, tasks, teleop, workorders, zones,
 };
 use crate::notify::Notifier;
 use crate::video::{self, VideoHub};
@@ -172,6 +172,46 @@ pub fn build_router(state: AppState) -> Router {
         // 企业微信推送：记录查询 + 手动发一条测试消息（配好 webhook 先点这里验证）
         .route("/notifications", get(notifications::list_notifications))
         .route("/notifications/test", post(notifications::send_test))
+        // 排班（计划层）：责任人库 + 班次，工单派单时从同一责任人库选人
+        .route(
+            "/staff",
+            get(schedules::list_staff).post(schedules::create_staff),
+        )
+        .route(
+            "/staff/{id}",
+            axum::routing::put(schedules::update_staff).delete(schedules::delete_staff),
+        )
+        .route(
+            "/shifts",
+            get(schedules::list_shifts).post(schedules::create_shift),
+        )
+        .route("/shifts/stats", get(schedules::shift_stats))
+        .route(
+            "/shifts/{id}",
+            get(schedules::get_shift)
+                .put(schedules::update_shift)
+                .delete(schedules::delete_shift),
+        )
+        // 工单（执行层）：告警 / 巡检异常派发给责任人并跟踪到闭环
+        .route(
+            "/workorders",
+            get(workorders::list_work_orders).post(workorders::create_work_order),
+        )
+        .route("/workorders/stats", get(workorders::work_order_stats))
+        .route(
+            "/workorders/{id}",
+            get(workorders::get_work_order)
+                .put(workorders::update_work_order)
+                .delete(workorders::delete_work_order),
+        )
+        .route(
+            "/workorders/{id}/status",
+            axum::routing::put(workorders::update_work_order_status),
+        )
+        .route(
+            "/workorders/{id}/logs",
+            post(workorders::add_work_order_log),
+        )
         .route("/dashboard/summary", get(dashboard::summary))
         // 数据采集背包（板端 Agent）同源代理：REST 聚合 + SSE 透传 + AI 启停
         .route("/backpack/status", get(backpack::status))

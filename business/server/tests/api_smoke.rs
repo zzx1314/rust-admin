@@ -2661,3 +2661,158 @@ async fn ingest_refresh_overwrites_existing_map_only_when_content_changes() {
     let refreshed = std::fs::read(body["data"]["stashPath"].as_str().unwrap()).expect("读取暂存包");
     assert_eq!(sha256_hex(&refreshed), sha256_hex(&changed));
 }
+
+/// 排班 / 工单主流程：责任人库 → 排班（冲突拦截）→ 告警转工单 → 状态流转留痕。
+#[tokio::test]
+async fn schedules_and_work_orders_flow() {
+    let (state, _db) = test_state().await;
+    let app = build_router(state);
+    let token = login(&app).await;
+
+    let auth = |method: &str, path: &str| {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let send = |request: Request<Body>| {
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            (response.status(), json_body(response).await)
+        }
+    };
+    let post = |path: &str, body: String| {
+        let mut request = auth("POST", path);
+        *request.body_mut() = Body::from(body);
+        request
+    };
+    let put = |path: &str, body: String| {
+        let mut request = auth("PUT", path);
+        *request.body_mut() = Body::from(body);
+        request
+    };
+
+    // 演示数据里责任人库、排班、工单都不该为空
+    let (status, staff) = send(auth("GET", "/api/staff")).await;
+    assert_eq!(status, StatusCode::OK);
+    let staff_rows = staff["data"].as_array().expect("staff 应为数组");
+    assert!(!staff_rows.is_empty(), "演示数据应包含责任人");
+    assert!(
+        staff_rows[0].get("shiftCount").is_some() && staff_rows[0].get("openOrderCount").is_some(),
+        "责任人应带班次/在办工单统计"
+    );
+
+    let (status, shifts) = send(auth("GET", "/api/shifts")).await;
+    assert_eq!(status, StatusCode::OK);
+    let shift_rows = shifts["data"].as_array().expect("shifts 应为数组");
+    assert!(!shift_rows.is_empty(), "演示数据应包含排班");
+    // 负责设备台数按园区/区域实时统计，不能是缺列
+    assert!(shift_rows[0].get("deviceCount").is_some());
+
+    // 责任人库增改删：`fetch_staff` 用编号参数（?1/?2/?3），漏绑会直接 500
+    let (status, new_staff) = send(post(
+        "/api/staff",
+        r#"{"name":"冒烟责任人","role":"运维工程师","team":"运维三组"}"#.to_string(),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "新增责任人应成功: {new_staff}");
+    let staff_id = new_staff["data"]["id"].as_i64().expect("缺少责任人 id");
+    assert_eq!(new_staff["data"]["staffCode"], format!("EMP-{staff_id:02}"));
+
+    let (status, renamed) = send(put(
+        &format!("/api/staff/{staff_id}"),
+        r#"{"name":"冒烟责任人2","status":"休息"}"#.to_string(),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "修改责任人应成功: {renamed}");
+    assert_eq!(renamed["data"]["name"], "冒烟责任人2");
+    assert_eq!(renamed["data"]["status"], "休息");
+
+    // 新建排班（用很远的日期，避免与演示数据撞车）
+    let (status, created) = send(post(
+        "/api/shifts",
+        r#"{"shiftDate":"2030-01-01","slot":"早班","staffId":1,"parkId":1,"zoneId":1,
+            "status":"已发布"}"#
+            .to_string(),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "新建排班应成功: {created}");
+    assert_eq!(created["data"]["timeRange"], "08:00 - 16:00");
+    let shift_id = created["data"]["id"].as_i64().expect("缺少排班 id");
+
+    // 同一责任人同一天同一班次 → 冲突
+    let (status, conflict) = send(post(
+        "/api/shifts",
+        r#"{"shiftDate":"2030-01-01","slot":"早班","staffId":1}"#.to_string(),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "重复排班应被拦截");
+    assert!(
+        conflict["msg"].as_str().unwrap_or_default().contains("冲突"),
+        "提示应说明冲突原因: {conflict}"
+    );
+
+    // 告警转工单：保留来源编号，并原告警推进到「处理中」
+    let (status, order) = send(post(
+        "/api/workorders",
+        r#"{"title":"冒烟测试工单","orderType":"告警处置","priority":"高","staffId":2,
+            "parkId":1,"deviceId":1,"source":"告警 AL-001","sourceRef":"AL-001","alertId":1}"#
+            .to_string(),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "新建工单应成功: {order}");
+    assert_eq!(order["data"]["status"], "待接单");
+    assert_eq!(order["data"]["assignee"], "李文博");
+    let order_id = order["data"]["id"].as_i64().expect("缺少工单 id");
+    assert_eq!(
+        order["data"]["logs"].as_array().map(Vec::len),
+        Some(1),
+        "创建动作要留一条轨迹"
+    );
+
+    // 状态流转：待接单 → 处理中（进度 30 + 轨迹追加）
+    let (status, advanced) = send(put(
+        &format!("/api/workorders/{order_id}/status"),
+        r#"{"status":"处理中"}"#.to_string(),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(advanced["data"]["status"], "处理中");
+    assert_eq!(advanced["data"]["progress"], 30);
+    assert_eq!(
+        advanced["data"]["logs"].as_array().map(Vec::len),
+        Some(2),
+        "流转要留痕"
+    );
+
+    // 追加处理记录
+    let (status, logged) = send(post(
+        &format!("/api/workorders/{order_id}/logs"),
+        r#"{"content":"已到达现场，开始排查"}"#.to_string(),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(logged["data"]["logs"].as_array().map(Vec::len), Some(3));
+
+    let (_, stats) = send(auth("GET", "/api/workorders/stats")).await;
+    assert!(stats["data"]["open"].as_i64().unwrap_or_default() >= 1);
+    let (_, shift_stats) = send(auth("GET", "/api/shifts/stats")).await;
+    assert!(shift_stats["data"]["total"].as_i64().unwrap_or_default() >= 1);
+    // 去重人数跨状态统计：按状态分组后取最大值会漏人（演示数据里至少 4 人）
+    assert!(
+        shift_stats["data"]["owners"].as_i64().unwrap_or_default() >= 4,
+        "在岗责任人应是跨状态的去重人数: {shift_stats}"
+    );
+
+    // 清理：工单连带轨迹删除，排班删除
+    let (status, _) = send(auth("DELETE", &format!("/api/workorders/{order_id}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(auth("DELETE", &format!("/api/shifts/{shift_id}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(auth("DELETE", &format!("/api/staff/{staff_id}"))).await;
+    assert_eq!(status, StatusCode::OK, "没有排班/在办工单的责任人应可删除");
+}

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
+import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { alertApi } from "@/api/ops";
 import type { Alert } from "@/api/types";
@@ -10,6 +11,7 @@ import { useAppStore } from "@/stores/app";
 import { dateTime } from "@/utils/format";
 
 const app = useAppStore();
+const router = useRouter();
 const alerts = ref<Alert[]>([]);
 const stats = ref<{ total: number; counts: Record<string, number>; pending: number }>({
   total: 0,
@@ -59,6 +61,26 @@ async function handleAll() {
   const count = await alertApi.handleAll();
   ElMessage.success(`已处理 ${count} 条告警`);
   await load();
+}
+
+/** 告警 → 工单：内容、来源、园区、设备全带上，派单时只需选责任人 */
+function convertToOrder(alert: Alert) {
+  detailVisible.value = false;
+  router.push({
+    path: "/workorders",
+    query: {
+      create: "1",
+      title: alert.content,
+      orderType: "告警处置",
+      priority: alert.level === "严重" ? "紧急" : alert.level === "警告" ? "高" : "中",
+      parkId: alert.parkId ? String(alert.parkId) : "",
+      deviceId: alert.deviceId ? String(alert.deviceId) : "",
+      source: `告警 ${alert.alertCode}`,
+      sourceRef: alert.alertCode,
+      alertId: String(alert.id),
+      description: alert.content
+    }
+  });
 }
 
 function openDetail(alert: Alert) {
@@ -178,6 +200,13 @@ onMounted(load);
                   >
                     <AppIcon name="check" />标记处理
                   </button>
+                  <button
+                    class="btn sm"
+                    title="派发工单给责任人现场处理"
+                    @click="convertToOrder(alert)"
+                  >
+                    <AppIcon name="ticket" />转工单
+                  </button>
                   <button class="btn sm ghost icon" @click="openDetail(alert)">
                     <AppIcon name="eye" />
                   </button>
@@ -212,6 +241,13 @@ onMounted(load);
       </template>
       <template #footer>
         <button class="btn" @click="detailVisible = false">关闭</button>
+        <button
+          v-if="detailAlert"
+          class="btn"
+          @click="convertToOrder(detailAlert)"
+        >
+          <AppIcon name="ticket" />转为工单
+        </button>
         <button
           v-if="detailAlert && detailAlert.status !== '已处理'"
           class="btn primary"

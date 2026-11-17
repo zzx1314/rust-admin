@@ -633,3 +633,199 @@ pub struct ParkQuery {
     pub q: Option<String>,
     pub status: Option<String>,
 }
+
+#[derive(Debug, FromRow, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Staff {
+    pub id: i64,
+    pub staff_code: String,
+    pub name: String,
+    pub role: Option<String>,
+    pub team: Option<String>,
+    pub phone: Option<String>,
+    pub color: String,
+    pub status: String,
+    pub skills: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    /// 本周班次数（列表按 `from` / `to` 统计；不传时统计全部）
+    pub shift_count: i64,
+    /// 在办工单数（状态不是「已完成」）
+    pub open_order_count: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StaffRequest {
+    pub staff_code: Option<String>,
+    pub name: String,
+    pub role: Option<String>,
+    pub team: Option<String>,
+    pub phone: Option<String>,
+    pub color: Option<String>,
+    pub status: Option<String>,
+    pub skills: Option<String>,
+}
+
+/// 排班：一条 = 某天某班次由某个责任人负责某条巡检计划。
+#[derive(Debug, FromRow, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Shift {
+    pub id: i64,
+    pub shift_code: String,
+    /// `YYYY-MM-DD`，周视图 / 列表按它分列
+    pub shift_date: String,
+    pub slot: String,
+    pub time_range: String,
+    pub staff_id: Option<i64>,
+    pub owner_name: String,
+    pub staff_role: Option<String>,
+    pub staff_team: Option<String>,
+    pub staff_color: Option<String>,
+    pub park_id: Option<i64>,
+    pub park_name: Option<String>,
+    pub zone_id: Option<i64>,
+    pub zone_name: Option<String>,
+    pub task_id: Option<i64>,
+    pub task_name: Option<String>,
+    /// 负责设备台数：按园区/区域里已绑定的设备实时统计
+    pub device_count: i64,
+    pub status: String,
+    pub note: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub created_by: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShiftRequest {
+    /// `YYYY-MM-DD`
+    pub shift_date: Option<String>,
+    pub slot: Option<String>,
+    pub staff_id: Option<i64>,
+    pub owner_name: Option<String>,
+    pub park_id: Option<i64>,
+    pub zone_id: Option<i64>,
+    /// 关联巡检计划；显式传 null 表示解除
+    #[serde(default, deserialize_with = "double_option")]
+    pub task_id: Option<Option<i64>>,
+    pub task_name: Option<String>,
+    pub status: Option<String>,
+    pub note: Option<String>,
+}
+
+/// 责任人库统计窗口：只影响「本周班次」列
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StaffQuery {
+    pub from: Option<String>,
+    pub to: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShiftQuery {
+    /// `YYYY-MM-DD`，闭区间
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub status: Option<String>,
+    pub staff_id: Option<i64>,
+    pub park_id: Option<i64>,
+}
+
+/// 工单主记录（列表用）
+#[derive(Debug, FromRow, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkOrder {
+    pub id: i64,
+    pub order_code: String,
+    pub title: String,
+    pub order_type: String,
+    pub source: String,
+    pub source_ref: Option<String>,
+    pub priority: String,
+    pub staff_id: Option<i64>,
+    pub assignee: String,
+    pub staff_team: Option<String>,
+    pub staff_color: Option<String>,
+    pub park_id: Option<i64>,
+    pub park_name: Option<String>,
+    pub device_id: Option<i64>,
+    pub device_code: Option<String>,
+    pub deadline: Option<String>,
+    pub status: String,
+    pub progress: i64,
+    pub description: Option<String>,
+    pub alert_id: Option<i64>,
+    pub closed_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub created_by: Option<i64>,
+}
+
+#[derive(Debug, FromRow, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkOrderLog {
+    pub id: i64,
+    pub work_order_id: i64,
+    pub actor: String,
+    pub action: String,
+    pub content: String,
+    pub created_at: String,
+}
+
+/// 工单详情 = 主记录 + 处理轨迹（列表不返回 logs，避免翻页时体量翻倍）
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkOrderDetail {
+    #[serde(flatten)]
+    pub order: WorkOrder,
+    pub logs: Vec<WorkOrderLog>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkOrderRequest {
+    pub title: String,
+    pub order_type: Option<String>,
+    pub source: Option<String>,
+    pub source_ref: Option<String>,
+    pub priority: Option<String>,
+    pub staff_id: Option<i64>,
+    pub assignee: Option<String>,
+    pub park_id: Option<i64>,
+    pub device_id: Option<i64>,
+    pub deadline: Option<String>,
+    pub description: Option<String>,
+    /// 由告警「转工单」时带上，工单详情可反查原始告警
+    pub alert_id: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkOrderStatusRequest {
+    pub status: String,
+    /// 流转备注，写进处理轨迹（默认按状态给一句）
+    pub note: Option<String>,
+    /// 操作人，缺省用登录账号
+    pub actor: Option<String>,
+    pub progress: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkOrderLogRequest {
+    pub content: String,
+    pub actor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkOrderQuery {
+    pub status: Option<String>,
+    pub priority: Option<String>,
+    pub staff_id: Option<i64>,
+    pub park_id: Option<i64>,
+    pub q: Option<String>,
+}
