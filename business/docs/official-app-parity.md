@@ -260,7 +260,7 @@ fn wait_task_count(dwell: i64) -> usize // ceil(dwell / 2)，dwell<=0 → 0
 
 ```text
 A. server（服务端与板端同网段，配了 ROBODOG_BACKPACK_URL）
-客户端 task_progress（stage = patrol.point_arrived / patrol.waiting，带 pointIndex）
+客户端 task_progress（stage = patrol.point_arrived / patrol.waiting，带 waypointIndex）
   → 服务端按 taskCode 找到任务 → 路线 route_data.points[index].actions[]
   → 命中「AI 识别」动作（动作名含 `AI` 或 `识别`）
   → POST {agent}/api/detect/start（已在跑则 /config 热更新）
@@ -288,6 +288,22 @@ B. client（正式环境：平台在公网、Agent 只在内网，服务端连�
 > `AI 识别：本部署的服务端访问不到背包 Agent，跳过航点…`，告警表 0 条。
 > 设备客户端本来就跑在同一块板子上（`.246`，见 `deploy/README.md`），由它代调即可。
 > `auto` 会按「有没有配 `ROBODOG_BACKPACK_URL`」自动选，配错也不会两条链路各写一条告警。
+
+**「哪个航点」只认 `waypointIndex`，不要用 `pointIndex`**（2026-11-17 现场事故）：
+
+| 字段 | 语义 | 谁填 |
+| --- | --- | --- |
+| `waypointIndex` | **0 基航点下标**（= 5009 的 `detail_index`），查 `route_data.points[]` 用它 | 到点载荷与 5s 摘要都填 |
+| `pointIndex` | **已完成航点数**（1 基计数），前端「进度 n/N」用它；5s 摘要里它等于「当前点 + 1」 | 两处语义不同，别混用 |
+
+2026-11-17 18:26 `TK-1112-11`（路线 `RT-005`：0 号点 AI 识别灭火器、1 号点可见光拍照）
+用 0 号点开窗后，客户端 5s 摘要送的是 `pointIndex=1`（已完成 1 个），服务端拿它查到
+**1 号点**（无 AI 动作）→ 立刻「到达无 AI 动作的航点」关窗 + 下发 `ai_stop`；客户端收到
+`ai_stop` 清掉去重标记，下一个 5009 帧又重新 `ai_point`……于是**每 5s 开关一次窗口**：
+日志里 3 次「开始」（18:26:38 / 18:26:41 / 18:26:46，配置窗口 18s 实际只活 3~5s）、
+板端 `osd.session=3`、零 `ai_detect`、零告警。修复后到点判定只读 `waypointIndex`
+（老客户端不发这个字段时才退回 `pointIndex`，即保留差一位的老行为），回归测试见
+`business/server/tests/ai_patrol.rs::interval_summary_does_not_kill_the_window`。
 
 **动作参数怎么填**（路线编辑器「该点执行动作」→ `AI 识别`）：
 
@@ -347,7 +363,8 @@ B. client（正式环境：平台在公网、Agent 只在内网，服务端连�
    跑的，此时服务端**不该**出现「访问不到背包 Agent」的 WARN；客户端日志里要能看到
    `航点 AI 识别：请求开窗 …` 与 `航点 AI 识别开始：…`；
 
-1. 窗口有没有开 → 没开说明 `stage`/`pointIndex` 没上报，或动作类型不含 `AI`/`识别`；
+1. 窗口有没有开 → 没开说明 `stage`/`waypointIndex` 没上报，或动作类型不含 `AI`/`识别`；
+   窗口「开了又秒关」看关闭原因里的航点是不是下一个点（那就是 `pointIndex` 混用，见上表）；
 2. 场景对不对 → `scene` 是否解析到了期望的模型（不对就回路线编辑器重选场景，或改动作 `param`）；
 3. 类别对不对 → `labels` 是否只含勾选的那些（勾错了或板上已无该类别时会是空 = 全部类别）；
 4. 阈值 → `threshold` 是否过高（0.95 很难触发）；

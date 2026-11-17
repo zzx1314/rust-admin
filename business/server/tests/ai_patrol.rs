@@ -1,6 +1,6 @@
 //! 航点到点 AI 识别的集成测试。
 //!
-//! 链路：客户端 `task_progress`（`patrol.point_arrived` + `pointIndex`）
+//! 链路：客户端 `task_progress`（`patrol.point_arrived` + `waypointIndex`）
 //!   → 服务端查路线该点的 `actions[]`，命中「AI 识别」
 //!   → 调背包 Agent 开识别 → 读 SSE 的 `detect` 事件 → 写 `alerts` + `task_events`
 //!   → 窗口到期/任务终态时停识别。
@@ -274,15 +274,43 @@ async fn seed_ai_route(state: &AppState, ai_action: bool) -> String {
 }
 
 fn arrival(task_code: &str, stage: &str) -> TaskProgressPayload {
+    arrival_at(task_code, stage, 0)
+}
+
+/// 5009 驱动的到点载荷：`pointIndex` 与 `waypointIndex` 都是 5009 的 `detail_index`
+/// （0 基航点下标）——注意定时摘要里的 `pointIndex` 却是「已完成航点数」，两边语义不同。
+fn arrival_at(task_code: &str, stage: &str, waypoint_index: i64) -> TaskProgressPayload {
     serde_json::from_value(json!({
         "taskCode": task_code,
         "status": "执行中",
         "progress": 30,
-        "pointIndex": 0,
+        "pointIndex": waypoint_index,
+        "waypointIndex": waypoint_index,
         "stage": stage,
-        "totalPoints": 1,
+        "totalPoints": 2,
     }))
     .expect("构造进度载荷失败")
+}
+
+/// 客户端每 5s 的定时摘要（`已完成 n/N 个航点`）：
+/// `pointIndex` 是**已完成航点数**，不是航点下标——这正是 TK-1112-11 事故的起因。
+fn interval_summary(
+    task_code: &str,
+    completed: i64,
+    waypoint_index: i64,
+    total: i64,
+) -> TaskProgressPayload {
+    serde_json::from_value(json!({
+        "taskCode": task_code,
+        "status": "执行中",
+        "progress": 50,
+        "pointIndex": completed,
+        "waypointIndex": waypoint_index,
+        "message": format!("已完成 {completed}/{total} 个航点"),
+        "stage": "patrol.waiting",
+        "totalPoints": total,
+    }))
+    .expect("构造定时摘要载荷失败")
 }
 
 fn terminal(task_code: &str) -> TaskProgressPayload {
@@ -290,7 +318,8 @@ fn terminal(task_code: &str) -> TaskProgressPayload {
         "taskCode": task_code,
         "status": "已完成",
         "progress": 100,
-        "pointIndex": 0,
+        "pointIndex": 2,
+        "waypointIndex": 1,
         "stage": "patrol.completed",
         "totalPoints": 1,
     }))
@@ -493,5 +522,148 @@ async fn missing_agent_does_not_leave_stale_window() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     assert_eq!(ai_patrol::global().status().await["active"], json!(false));
+    drop(temp);
+}
+
+/// 插一条「0 号点带 AI 识别、1 号点是普通拍照」的两点路线 + 任务。
+///
+/// 这个形状就是 2026-11-17 现场 `TK-1112-11`（`RT-005 华致办公室`）的缩样：
+/// AI 点后面紧跟一个非 AI 点，是「AI 窗口被 5s 摘要关掉」那条回归的复现条件。
+async fn seed_ai_route_two_points(state: &AppState) -> String {
+    let device: (i64, Option<i64>) = sqlx::query_as("SELECT id, park_id FROM devices LIMIT 1")
+        .fetch_one(&state.db)
+        .await
+        .expect("播种数据里应至少有一台设备");
+    let route_data = json!({
+        "schemaVersion": 3,
+        "loop": "闭环",
+        "coordFrame": "map",
+        "points": [
+            {
+                "name": "新航点 1", "x": 1.0, "y": 2.0, "dwell": 10, "radius": 0.4,
+                "must": false, "onFail": "跳过继续",
+                "actions": [{ "type": "AI 识别", "param": "灭火器检测 · 灭火器",
+                              "scene": "firextinguisher", "labels": ["extinguisher"],
+                              "threshold": "置信度 ≥ 0.4", "trigger": "到达即执行" }]
+            },
+            {
+                "name": "新航点 2", "x": 8.0, "y": 2.0, "dwell": 5, "radius": 0.4,
+                "must": false, "onFail": "跳过继续",
+                "actions": [{ "type": "可见光拍照", "param": "1080P", "trigger": "到达即执行" }]
+            }
+        ],
+        "legs": []
+    });
+    let timestamp = "2026-11-17 18:26:00";
+    sqlx::query(
+        "INSERT INTO routes (route_code, route_name, park_id, status, loop_mode, default_speed,
+            route_data, point_count, created_at, updated_at)
+         VALUES ('RT-AI-2', 'AI 识别两点测试路线', ?1, '已发布', '闭环', 1.2, ?2, 2, ?3, ?3)",
+    )
+    .bind(device.1)
+    .bind(route_data.to_string())
+    .bind(timestamp)
+    .execute(&state.db)
+    .await
+    .expect("插入路线失败");
+    let route_id: i64 = sqlx::query_scalar("SELECT id FROM routes WHERE route_code = 'RT-AI-2'")
+        .fetch_one(&state.db)
+        .await
+        .expect("读路线 id 失败");
+
+    sqlx::query(
+        "INSERT INTO tasks (task_code, task_name, task_type, device_id, park_id, route_id,
+            task_status, progress, created_at, updated_at)
+         VALUES ('TK-AI-2', 'AI 识别两点测试任务', '定时巡检', ?1, ?2, ?3, '执行中', 0, ?4, ?4)",
+    )
+    .bind(device.0)
+    .bind(device.1)
+    .bind(route_id)
+    .bind(timestamp)
+    .execute(&state.db)
+    .await
+    .expect("插入任务失败");
+    "TK-AI-2".to_string()
+}
+
+/// 回归（2026-11-17 现场 `TK-1112-11`）：客户端的 5s 定时摘要把「已完成航点数」放在
+/// `pointIndex` 里，服务端曾拿它当航点下标 → 站在 0 号点却查到 1 号点（拍照，无 AI 动作）
+/// → 每 5s 关一次窗再被客户端重新开起来。
+///
+/// 现场特征：AI 窗口只活 3~5s（配置是 18s）、Agent 反复起停 3 次、零检出零告警。
+/// 现在只认 `waypointIndex`，摘要载荷不能再动窗口；真到 1 号点仍要收口。
+#[tokio::test]
+async fn interval_summary_does_not_kill_the_window() {
+    let _serial = TEST_LOCK.lock().await;
+    ai_patrol::global().stop("测试初始化").await;
+    let calls = Arc::new(AgentCalls::default());
+    let agent = spawn_fake_agent(calls.clone()).await;
+    let dir = temp_dir();
+    let temp = TempDb { dir: dir.clone() };
+    let state = state_with_point_ai(Some(agent), "server", dir).await;
+    let task_code = seed_ai_route_two_points(&state).await;
+
+    // 到点 0（有 AI 动作）→ 开窗
+    ai_patrol::global()
+        .on_progress(
+            &state,
+            "RD-TEST",
+            &arrival(&task_code, "patrol.point_arrived"),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let status = ai_patrol::global().status().await;
+    assert_eq!(status["active"], json!(true), "到点应开窗: {status}");
+    assert_eq!(status["pointIndex"], json!(0), "{status}");
+    // dwell=10 → 窗口 18s：现场被 5s 摘要打断的就是这个窗口
+    assert_eq!(status["windowSecs"], json!(18), "{status}");
+
+    // 第一次 5s 摘要：已完成 1/2、当前点仍是 0
+    ai_patrol::global()
+        .on_progress(&state, "RD-TEST", &interval_summary(&task_code, 1, 0, 2))
+        .await;
+    // 再来几次，模拟长停留时每 5s 一条
+    for _ in 0..3 {
+        ai_patrol::global()
+            .on_progress(&state, "RD-TEST", &interval_summary(&task_code, 1, 0, 2))
+            .await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let status = ai_patrol::global().status().await;
+    assert_eq!(
+        status["active"],
+        json!(true),
+        "定时摘要不能关掉窗口（pointIndex 是完成数，不是航点下标）: {status}"
+    );
+    assert_eq!(
+        status["pointIndex"],
+        json!(0),
+        "窗口应仍属于 0 号点: {status}"
+    );
+    let log = calls.log.lock().unwrap().clone();
+    assert!(
+        !log.contains(&"stop".to_string()),
+        "摘要不该让 Agent 停识别: {log:?}"
+    );
+
+    // 真的走到 1 号点（无 AI 动作）：窗口必须收口，别让相机继续把别的画面当 0 号点的目标
+    ai_patrol::global()
+        .on_progress(
+            &state,
+            "RD-TEST",
+            &arrival_at(&task_code, "patrol.point_arrived", 1),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        ai_patrol::global().status().await["active"],
+        json!(false),
+        "到达无 AI 动作的航点后窗口必须关闭"
+    );
+    let log = calls.log.lock().unwrap().clone();
+    assert!(
+        log.contains(&"stop".to_string()),
+        "窗口收口要真的停掉识别: {log:?}"
+    );
     drop(temp);
 }

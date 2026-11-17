@@ -87,6 +87,9 @@ HTTP」模式。两者共用同一个服务令牌，见 `business/README.md`。
 不一致含「一个都没找到」都告警，且只认窗口正常到期 `ai_end.expired`）。正式环境的云端
 平台连不到内网 Agent，`auto` 走的就是客户端这条路；改这块先读
 `business/docs/official-app-parity.md` §5.6。
+**「现在站在哪个航点」只认 `task_progress.waypointIndex`（0 基下标），
+`pointIndex` 是「已完成航点数」，混用会让 AI 窗口每 5s 被当成「到达下一个点」关掉**
+（2026-11-17 现场事故，回归测试 `tests/ai_patrol.rs::interval_summary_does_not_kill_the_window`）。
 
 企业微信告警推送：群机器人 webhook **在平台里配**（系统设置 → 企业微信群机器人，
 存 `settings.wecom_webhook`，`value_type='secret'`，保存即生效、接口只回掩码、

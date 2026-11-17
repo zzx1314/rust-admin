@@ -12,6 +12,11 @@
 //! 触发条件：`task_progress` 的 `stage` 命中 `patrol.point_arrived` / `patrol.waiting`，
 //! 且该航点的 `actions[]` 里有类型含 `AI` / `识别` 的动作。
 //!
+//! 「哪个航点」只认 `waypointIndex`（0 基下标）：`pointIndex` 在协议里是**已完成航点数**
+//! （1 基，5s 定时摘要就靠它显示「进度 n/N」），拿它查路线会查到下一个点，
+//! 表现为「AI 窗口刚开 3~5s 就被『到达无 AI 动作的航点』关掉、每 5s 开关一次」。
+//! 只有老客户端（不发 `waypointIndex`）才退回 `pointIndex`。
+//!
 //! 动作怎么配：路线编辑器「执行参数」直接取**「实时视频 → AI 识别」的模型目录**，
 //! 写成动作的 `scene`（模型包 id）+ `labels`（勾选的类别 `name`）+ `threshold`（置信度）；
 //! 没有这两个字段的历史数据仍按 `param` 里的中文关键词猜场景（兼容老路线）。
@@ -254,7 +259,14 @@ impl AiPatrol {
         if !is_arrival_stage(stage) {
             return;
         }
-        let Some(point_index) = payload.point_index else {
+        // 航点下标只认 `waypointIndex`（0 基，= 5009 的 `detail_index`）。
+        //
+        // 不能用 `point_index`：那是「已完成航点数」，客户端的 5s 定时摘要里它等于
+        // 「当前点 + 1」，拿它查路线会查到**下一个**航点——2026-11-17 现场
+        // TK-1112-11 就是这么每 5s 把刚开的窗口当成「到达无 AI 动作的航点」关掉的
+        // （AI 航点后面跟一个拍照点时必现：窗口活不过 5s，Agent 反复起停、零检出）。
+        // 老客户端不发 `waypointIndex`，只能退回 `point_index`（差一位的老行为）。
+        let Some(point_index) = payload.waypoint_index.or(payload.point_index) else {
             return;
         };
 
@@ -604,6 +616,12 @@ impl AiPatrol {
                 })
                 .unwrap_or(false);
             if !matches {
+                // 服务端已关窗（任务终态 / 离开航点 / 被新航点顶替）后才到的 ai_end：
+                // 不重复记事件，但留一行 debug——排查「窗口为什么没结束记录」时能对上
+                debug!(
+                    "航点 AI 识别：窗口 {} 已失效或已关闭，忽略 ai_end（{}）",
+                    payload.window_id, payload.reason
+                );
                 return;
             }
             guard.take()

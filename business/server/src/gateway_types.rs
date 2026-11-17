@@ -103,7 +103,17 @@ pub struct TaskProgressPayload {
     pub task_code: String,
     pub status: String,
     pub progress: i64,
+    /// **已完成航点数**（1 基计数），前端据此显示「进度 n/N」。
+    ///
+    /// 它**不是**航点下标，而且客户端两处语义并不一致：5s 定时摘要里是「已完成口径」
+    /// （当前点 + 1），5009 驱动的到点事件里却直接放的 `detail_index`（0 基下标）。
+    /// 要定位「现在站在哪个点」请一律用 [`Self::waypoint_index`]。
     pub point_index: Option<i64>,
+    /// 当前执行航点的**0 基下标**（= 5009 的 `detail_index`），查路线 `points[]` 用它。
+    ///
+    /// 老客户端不发这个字段，只能退回 `point_index`（语义不同，会差一位）。
+    #[serde(default)]
+    pub waypoint_index: Option<i64>,
     pub message: Option<String>,
     /// 智航 Pro 本体侧任务标识（客户端从 5009 快照中取得）
     #[serde(default)]

@@ -344,6 +344,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                             status: "unknown".to_string(),
                                             progress: 0,
                                             point_index: None,
+                                            waypoint_index: None,
                                             message: None,
                                             robot_task_id: None,
                                             stage: None,

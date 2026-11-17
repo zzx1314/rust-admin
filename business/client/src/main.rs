@@ -133,6 +133,12 @@ struct TaskProgressPayload {
     progress: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     point_index: Option<i64>,
+    /// 当前执行航点的 **0 基下标**（5009 的 `detail_index`）。
+    ///
+    /// 必须和 `point_index` 分开：`point_index` 是「已完成航点数」（1 基计数），
+    /// 定时摘要里它等于「当前点 + 1」，平台拿它开 AI 窗口会查到下一个航点。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waypoint_index: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
     /// 智航 5009 的阶段串，便于前端展示执行细节
@@ -513,6 +519,8 @@ struct ActiveTask {
     task_name: String,
     nav_task_id: Option<String>,
     stage: Option<String>,
+    /// 当前航点下标（5009 `detail_index`，0 基）：定时摘要里单独作为 `waypointIndex` 上报
+    point_index: Option<i64>,
     /// 本条路线里带「AI 识别」动作的航点（到点时按 `detail_index` 查）
     ai_points: Vec<AiPoint>,
 }
@@ -1305,6 +1313,7 @@ async fn run_client(
                     status: "执行中".to_string(),
                     progress: 0,
                     point_index: None,
+                    waypoint_index: task.point_index,
                     message: None,
                     stage: task.stage.clone(),
                     robot_task_id: runner_nav_task.or_else(|| task.nav_task_id.clone()),
@@ -1314,6 +1323,9 @@ async fn run_client(
                 if let Some(runner) = runner {
                     let (done, total) = runner.progress().await;
                     payload.progress = progress_pct(done, total);
+                    // `pointIndex` 是「已完成航点数」（1 基，前端显示「进度 n/N」）；
+                    // 平台拿它查路线航点会查到下一个点，所以「站在哪个点」另有
+                    // `waypointIndex`（上面已按 5009 的 detail_index 填好）。
                     payload.point_index = Some(done as i64);
                     payload.total_points = Some(total as i64);
                     payload.message = Some(format!("已完成 {done}/{total} 个航点"));
@@ -1946,6 +1958,7 @@ async fn handle_status_frame(
         if let Some(a) = guard.as_mut() {
             a.nav_task_id = Some(task.task_id.clone());
             a.stage = Some(task.stage.clone());
+            a.point_index = task.detail_index;
         }
     }
 
@@ -1969,6 +1982,7 @@ async fn handle_status_frame(
         status: status.to_string(),
         progress,
         point_index: index,
+        waypoint_index: index,
         message: Some(message),
         stage: Some(task.stage.clone()),
         robot_task_id: Some(task.task_id.clone()),
@@ -2315,6 +2329,7 @@ async fn handle_server_message(
                 task_name: task_name.clone(),
                 nav_task_id: None,
                 stage: None,
+                point_index: None,
                 ai_points,
             });
             state.lock().await.current_task = Some(task_name.clone());
@@ -3241,6 +3256,7 @@ async fn report_progress(
         status: status.to_string(),
         progress,
         point_index: None,
+        waypoint_index: None,
         message,
         stage,
         robot_task_id,
@@ -3707,6 +3723,7 @@ mod progress_reporter_tests {
             status: status.to_string(),
             progress: 40,
             point_index: Some(2),
+            waypoint_index: Some(1),
             message: Some("已完成 2/5 个航点".to_string()),
             stage: Some(stage.to_string()),
             robot_task_id: Some("nav-1".to_string()),
