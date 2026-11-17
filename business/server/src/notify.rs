@@ -941,9 +941,15 @@ pub async fn alert_created(state: &AppState, alert_code: &str) {
     // 同一设备的同一故障还在办：群里已经通知过一次，这条只是在「跟单」。
     // 现场实测：机器人每 ~90s 报一次 `12608 RS 与 lidar 时间不同步`，
     // 90 秒一条群消息没人受得了 —— 告警中心里仍然看得到，只是不再推。
+    //
+    // 例外：**数量核对的检出数变了**（1 个 → 2 个）要补推一条短跟单。
+    // 2026-11-17 现场：同一个航点先报「检查 3 个，实际检出 1 个」（推过群），
+    // 下一轮报「实际检出 2 个」被完全吞掉，现场以为「配了 3 个却没告警」。
+    let follow_up = assignment.as_ref().and_then(|assignment| assignment.follow_up);
     if assignment
         .as_ref()
         .is_some_and(|assignment| assignment.repeated)
+        && follow_up.is_none()
     {
         debug!(alert = %alert_code, "wecom: 同类告警已有在办工单，跳过推送");
         return;
@@ -995,8 +1001,23 @@ pub async fn alert_created(state: &AppState, alert_code: &str) {
         }
         fields.push(("当班责任人", assignment.summary()));
         if let Some(order) = &assignment.work_order_code {
-            fields.push(("工单", format!("{order}（已自动派单）")));
+            // 跟单消息要说清「挂的是原单」，否则群里会以为又新建了一张
+            let suffix = if follow_up.is_some() {
+                "（原工单，未新建）"
+            } else {
+                "（已自动派单）"
+            };
+            fields.push(("工单", format!("{order}{suffix}")));
         }
+    }
+    if let Some(change) = follow_up {
+        fields.push((
+            "数量变化",
+            format!(
+                "上一次检出 {} 个 → 本次 {} 个（同一问题继续挂在原工单）",
+                change.previous, change.current
+            ),
+        ));
     }
     fields.push(("时间", row.occurred_at));
     fields.push(("告警码", row.alert_code.clone()));
@@ -1013,7 +1034,9 @@ pub async fn alert_created(state: &AppState, alert_code: &str) {
         ref_type: Channel::Alert.ref_type(),
         ref_id: Some(row.id),
         dedupe_key: format!("alert:{}", row.alert_code),
-        title: if assignment
+        title: if follow_up.is_some() {
+            "设备异常告警（跟单：数值有变化）".to_string()
+        } else if assignment
             .as_ref()
             .is_some_and(|assignment| assignment.work_order_code.is_some())
         {
@@ -1023,9 +1046,19 @@ pub async fn alert_created(state: &AppState, alert_code: &str) {
         },
         fields,
         body: Some(row.content),
-        action: assignment
-            .as_ref()
-            .map(crate::alert_flow::Assignment::dispatch_sentence),
+        action: follow_up
+            .map(|change| {
+                format!(
+                    "同一问题的数量有变化：上次检出 {} 个，本次 {} 个；已挂到原工单，\
+                     不另建单。请责任人到场按最新情况处置并把结果回填到工单",
+                    change.previous, change.current
+                )
+            })
+            .or_else(|| {
+                assignment
+                    .as_ref()
+                    .map(crate::alert_flow::Assignment::dispatch_sentence)
+            }),
         link,
         mention_all: false,
         mentions: assignment

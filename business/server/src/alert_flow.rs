@@ -50,6 +50,16 @@ pub struct Assignment {
     pub work_order_code: Option<String>,
     /// 同一设备的同一故障已经有在办工单：本条告警只是在「跟单」，不再推群
     pub repeated: bool,
+    /// 跟单但**数值变了**（如数量核对 1 个 → 2 个）：仍然要推一条短消息，
+    /// 否则现场只看到第一次的数，后面的变化全被去重吞掉（2026-11-17 反馈）。
+    pub follow_up: Option<CountChange>,
+}
+
+/// 同一个「数量核对」问题两次告警之间，实际检出数的变化
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CountChange {
+    pub previous: i64,
+    pub current: i64,
 }
 
 impl Assignment {
@@ -269,6 +279,19 @@ pub async fn on_alert(state: &AppState, alert_code: &str) -> Option<Assignment> 
         assignment.work_order_id = Some(*id);
         assignment.work_order_code = Some(code.clone());
         assignment.repeated = true;
+        // 同一件事的第二次告警默认不出声；但「数量核对」的实际检出数变了要补推一条
+        // （1 个 → 2 个是不同的事实，全吞掉现场就以为「没告警」）。
+        let previous: Option<String> = sqlx::query_scalar(
+            "SELECT content FROM alerts
+              WHERE work_order_id = ?1 AND id <> ?2
+              ORDER BY id DESC LIMIT 1",
+        )
+        .bind(id)
+        .bind(context.id)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap_or(None);
+        assignment.follow_up = count_change(previous.as_deref(), &context.content);
     } else if context.work_order_id.is_none() && auto_workorder_enabled(state).await {
         match create_work_order(state, &context, &assignment).await {
             Ok((id, code)) => {
@@ -544,6 +567,27 @@ async fn create_work_order(
     Ok((order.id, order.order_code))
 }
 
+/// 从数量核对告警的内容里取「实际检出 N 个」。
+///
+/// 内容形如：
+/// `AI 识别数量核对不一致：任务「…」航点 0「…」检查 3 个，实际检出 2 个（证据：…）`
+fn found_count_of(content: &str) -> Option<i64> {
+    let rest = content.split("实际检出 ").nth(1)?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// 「同类告警继续挂着在办工单」时要不要补推一条群消息。
+///
+/// 只对**数量核对**这类带数值的结论补推：上次检出 1 个、这次 2 个是两个不同的事实；
+/// 同一数值（每次巡检都会再报一遍）继续静默，避免刷屏。
+/// 普通检出（`…检出 extinguisher（置信度 0.89）`）不补推——置信度抖动没有信息量。
+pub fn count_change(previous: Option<&str>, current: &str) -> Option<CountChange> {
+    let current = found_count_of(current)?;
+    let previous = found_count_of(previous?)?;
+    (previous != current).then_some(CountChange { previous, current })
+}
+
 /// 告警级别 → 工单优先级。
 fn priority_of(level: &str) -> &'static str {
     match level.trim() {
@@ -714,5 +758,51 @@ mod tests {
         let clipped = short(&long, 60);
         assert_eq!(clipped.chars().count(), 61);
         assert!(clipped.ends_with('…'));
+    }
+
+    /// 数量核对告警的「跟单补推」判定：只有检出数变了才说话。
+    ///
+    /// 现场（2026-11-17 20:15）：同一航点先报 1 个（推过群），下一轮报 2 个，
+    /// 全被「同类在办工单」吞掉，现场以为「配了检查 3 个却没告警」。
+    #[test]
+    fn count_change_only_when_number_moves() {
+        let first = "AI 识别数量核对不一致：任务「巡检」航点 0「A」检查 3 个，实际检出 1 个";
+        let second = "AI 识别数量核对不一致：任务「巡检」航点 0「A」检查 3 个，实际检出 2 个";
+
+        assert_eq!(
+            count_change(Some(first), second),
+            Some(CountChange {
+                previous: 1,
+                current: 2
+            })
+        );
+        // 同一个数重复报（每轮巡检都会）→ 不补推
+        assert_eq!(count_change(Some(second), second), None);
+        // 上次不是数量告警 / 缺失 → 没有可比对象，不补推
+        assert_eq!(count_change(None, second), None);
+        assert_eq!(
+            count_change(
+                Some("AI 识别：任务「巡检」航点 0「A」检出 extinguisher（置信度 0.89）"),
+                second
+            ),
+            None
+        );
+        // 普通检出（置信度抖动）不补推
+        assert_eq!(
+            count_change(
+                Some("AI 识别：任务「巡检」航点 0「A」检出 extinguisher（置信度 0.41）"),
+                "AI 识别：任务「巡检」航点 0「A」检出 extinguisher（置信度 0.77）"
+            ),
+            None
+        );
+        // 「一个都没找到」也算数值（0 个）
+        let zero = "AI 识别数量核对不一致：任务「巡检」航点 0「A」检查 3 个，实际检出 0 个";
+        assert_eq!(
+            count_change(Some(zero), second),
+            Some(CountChange {
+                previous: 0,
+                current: 2
+            })
+        );
     }
 }
