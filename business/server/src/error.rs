@@ -12,6 +12,9 @@ pub enum AppError {
     Unauthorized(String),
     #[error("{0}")]
     NotFound(String),
+    /// 已登录但没有权限（例如只有管理员能查看凭据原文）
+    #[error("{0}")]
+    Forbidden(String),
     /// 上游不可用（中台连不上 / 返回了无法理解的内容）
     ///
     /// 与 `Internal` 分开是为了**登录**这类场景：账号密码错是中台给出的 401，
@@ -49,6 +52,7 @@ impl IntoResponse for AppError {
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, 10400),
             Self::Unauthorized(_) => (StatusCode::UNAUTHORIZED, 10401),
             Self::NotFound(_) => (StatusCode::NOT_FOUND, 10404),
+            Self::Forbidden(_) => (StatusCode::FORBIDDEN, 10403),
             Self::Upstream(_) => (StatusCode::SERVICE_UNAVAILABLE, 10503),
             Self::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, 10500),
         };

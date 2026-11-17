@@ -1,9 +1,11 @@
 use crate::app::AppState;
+use crate::auth::Claims;
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::notify::{self, WebhookSource};
 use axum::Json;
 use axum::extract::{Query, State};
+use axum::Extension;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -45,6 +47,17 @@ pub struct WebhookStatus {
     pub masked: Option<String>,
     /// 部署级总开关（`wecom.enabled`）：关掉时填了地址也不会发
     pub enabled: bool,
+    /// 完整地址：**只有显式 `?reveal=true` 且是管理员**时才返回，
+    /// 平时这个字段直接不出现在响应里（连 `null` 都不占位）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookQuery {
+    /// 管理员在页面上点「显示」时才为真：找回之前配的地址（例如要粘到别处 / 核对）
+    pub reveal: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,10 +102,27 @@ pub async fn list_notifications(
 }
 
 /// 当前 webhook 配置（来源 + 掩码地址）。
+///
+/// 默认**永不返回完整地址**（地址即凭据，不该随手出现在屏幕 / 截图 / 录屏里）；
+/// 管理员在设置页点「显示」时才带 `?reveal=true` 取一次原文，用于
+/// 「我上次配的到底是什么」这种核对场景。
 pub async fn get_webhook(
     State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Query(query): Query<WebhookQuery>,
 ) -> Result<Json<ApiResponse<WebhookStatus>>, AppError> {
-    Ok(ApiResponse::ok(webhook_status(&state)))
+    let mut status = webhook_status(&state);
+    if query.reveal.unwrap_or(false) {
+        if claims.role != "admin" && !claims.is_admin {
+            return Err(AppError::Forbidden(
+                "只有管理员可以查看 webhook 地址原文".to_string(),
+            ));
+        }
+        status.url = state.notifier.webhook();
+        // 只记「谁看了」，不记地址本身
+        tracing::info!(user = %claims.username, "企业微信 webhook 原文被查看（设置页「显示」）");
+    }
+    Ok(ApiResponse::ok(status))
 }
 
 /// 在平台上配置 / 清除 webhook 地址。
@@ -159,6 +189,7 @@ fn webhook_status(state: &AppState) -> WebhookStatus {
         source: source.map(WebhookSource::label),
         masked: url.as_deref().map(notify::mask_webhook),
         enabled: state.config.wecom_enabled,
+        url: None,
     }
 }
 

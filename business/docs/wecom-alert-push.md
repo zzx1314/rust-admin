@@ -321,6 +321,8 @@ wecom_alert_push / wecom_task_abnormal  渠道级：这一类事件推不推企�
 
 - **地址配置**：显示「已配置 / 未配置 + 来源（平台配置 / 服务端环境变量）+ 掩码地址」，
   粘贴新地址保存即生效；「清除」把平台配置置空、回退环境变量；
+- **「显示原文」**：找回上次配的完整地址（只管理员，仅本次显示，不落 localStorage）；
+  输入框留空**不会**清除已有配置 —— 它只是「要覆盖成什么」的入口；
 - 右上按钮发测试消息（同步发，失败直接显示 errcode）；
 - 下面列最近 5 条推送记录（带 `last_error`）。
 
@@ -346,8 +348,13 @@ SELECT setting_key, length(setting_value) AS value_len, updated_at
 GET  /api/notifications?limit=20&status=failed&refType=task
 POST /api/notifications/test
 GET  /api/notifications/webhook            # configured / source(db|env) / masked / enabled
+GET  /api/notifications/webhook?reveal=true   # 管理员取一次原文（响应多一个 url 字段）
 PUT  /api/notifications/webhook            # {"webhook":"…"}；空串 = 清除并回退环境变量
 ```
+
+`url` 字段用 `skip_serializing_if` 抹掉，普通读取**连 null 都没有** —— 前端拿到的
+响应里根本不存在这个键，避免「顺手 console.log 就泄漏」。`reveal` 要管理员
+（`claims.role == "admin"` 或中台管理员），否则 403；日志只记用户名。
 
 ### 错误码
 
@@ -459,6 +466,7 @@ journalctl -u rust-admin-robodog -f | grep -i wecom
 | 一条告警一张工单，不看去重 | 上线当天机器人每 90s 报一次 `12608`，5 分钟堆 2 张单 + 2 条群消息 | 先去重再建单：同设备 + 同标题 + 24h 内在办 → 复用老单并不推群 |
 | 只改 `handlers/alerts.rs` 的 SELECT | `/dashboard/summary` 500（驾驶舱自己拼了一份 `Alert` 查询） | `Alert` 结构体加列时，全仓搜一遍 `query_as::<Alert>` / `build_query_as::<Alert>` |
 | webhook 只在启动时从环境变量读 | 「换个群」要 SSH 改 env 再重启，现场只能等运维 | 地址放进 `settings`（secret）+ `Notifier` 可写槽：页面保存即生效；环境变量保留为兜底 |
+| 页面只显示掩码 + 空输入框 | 现场以为「之前配的地址丢了」，反复重新粘贴，甚至以为被清空 | 输入框 placeholder 写清「当前已配置（来源）：<掩码>」，再加「显示原文」（`?reveal=true`，仅管理员） |
 | 把 secret 直接塞进通用 `settings` 行 | `GET /api/settings` 明文回显地址（地址即凭据，进页面就上屏幕） | `value_type='secret'` 的行从通用列表过滤掉，专用接口只回掩码；`PUT /api/settings` 拒收 secret 键 |
 
 ---

@@ -3314,6 +3314,19 @@ async fn wecom_webhook_is_configured_from_the_console() {
     let masked = body["data"]["masked"].as_str().unwrap_or_default();
     assert!(masked.contains("key=94fdb35e…"), "掩码应保留前 8 位: {masked}");
     assert!(!masked.contains(key), "掩码里不能有完整 key: {masked}");
+    // 默认连「原文」字段都不返回：地址即凭据，不该随手进屏幕
+    assert!(
+        body["data"].get("url").is_none(),
+        "普通读取不能带 url 字段: {body}"
+    );
+
+    // 3b. 管理员点「显示」才拿得到原文（保存后「我刚才配的是什么」要能找回）
+    let (status, body) = send(auth("GET", "/api/notifications/webhook?reveal=true")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["data"]["url"].as_str().unwrap_or_default().ends_with(key),
+        "reveal=true 应返回完整地址: {body}"
+    );
 
     // 4. 落库了（重启后仍生效），且通用设置接口既看不到这行、也不接受写
     let stored: Option<String> =

@@ -682,9 +682,14 @@ webhook 在企业微信**客户端**里创建（官方没有建机器人的 API�
 
 ```text
 GET  /api/notifications/webhook        # 状态：configured / source(db|env) / masked / enabled
+GET  /api/notifications/webhook?reveal=true   # 管理员取一次原文（页面「显示原文」）
 PUT  /api/notifications/webhook        # {"webhook":"https://…?key=…"}，传空串 = 清除
 POST /api/notifications/test           # 同步发一条，失败直接回 errcode
 ```
+
+页面上的「显示原文」= 带 `?reveal=true` 的读取：默认只有掩码，**想找回上次配的完整
+地址**才点它（仅管理员可用，日志里记「谁看过」但不记地址）。输入框留空不会清除配置，
+只有粘贴新地址并保存才会覆盖。
 
 地址存 `settings.wecom_webhook`（`value_type = secret`，所以**不出现在**通用
 `GET /api/settings` 列表里，`PUT /api/settings` 也不接受它）。

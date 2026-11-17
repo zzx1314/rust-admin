@@ -423,6 +423,11 @@ export interface NotifyWebhookStatus {
   masked: string | null;
   /** 部署级总开关（`wecom.enabled`），关掉时填了也不发 */
   enabled: boolean;
+  /**
+   * 完整地址：只有管理员点「显示」（`?reveal=true`）才有值，
+   * 普通读取连这个字段都不会出现。
+   */
+  url?: string | null;
 }
 
 export interface Setting {

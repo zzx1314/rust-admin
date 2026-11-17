@@ -19,6 +19,9 @@ const recentPushes = ref<NotificationRecord[]>([]);
 const webhookStatus = ref<NotifyWebhookStatus | null>(null);
 const webhookInput = ref("");
 const savingWebhook = ref(false);
+// 点「显示」才向后端要一次原文；平时只有掩码，避免凭据随手进截图 / 录屏
+const revealedWebhook = ref<string | null>(null);
+const revealingWebhook = ref(false);
 
 const sourceLabel = computed(() => {
   switch (webhookStatus.value?.source) {
@@ -39,6 +42,33 @@ async function loadWebhook() {
   }
 }
 
+/** 当前生效地址的简述：用在输入框 placeholder，避免「看起来是空的」。 */
+const currentHint = computed(() => {
+  switch (webhookStatus.value?.source) {
+    case "db":
+      return `当前已配置（平台配置）：${webhookStatus.value.masked ?? "…"}`;
+    case "env":
+      return `当前已配置（服务端环境变量）：${webhookStatus.value.masked ?? "…"}`;
+    default:
+      return "还没有配置地址：粘贴企业微信群机器人 webhook 后保存";
+  }
+});
+
+async function revealWebhook() {
+  if (revealedWebhook.value) {
+    revealedWebhook.value = null;
+    return;
+  }
+  revealingWebhook.value = true;
+  try {
+    const status = await notifyApi.webhook(true);
+    revealedWebhook.value = status.url ?? null;
+    webhookStatus.value = status;
+  } finally {
+    revealingWebhook.value = false;
+  }
+}
+
 /** 保存（`clear` = 清除平台配置、回退环境变量）。改完立即生效，不用重启服务。 */
 async function saveWebhook(clear = false) {
   const value = clear ? "" : webhookInput.value.trim();
@@ -50,6 +80,7 @@ async function saveWebhook(clear = false) {
   try {
     webhookStatus.value = await notifyApi.saveWebhook(value);
     webhookInput.value = "";
+    revealedWebhook.value = null;
     ElMessage.success(
       clear ? "已清除平台配置（若服务端配了环境变量则回退到它）" : "地址已保存，可点「发送测试消息」验证"
     );
@@ -260,12 +291,24 @@ onMounted(async () => {
             <code v-if="webhookStatus?.masked" class="webhook-masked">{{
               webhookStatus.masked
             }}</code>
+            <button
+              v-if="webhookStatus?.configured"
+              class="btn btn-mini"
+              :disabled="revealingWebhook"
+              @click="revealWebhook()"
+            >
+              {{ revealedWebhook ? "隐藏原文" : "显示原文" }}
+            </button>
+          </div>
+          <div v-if="revealedWebhook" class="webhook-reveal">
+            <code>{{ revealedWebhook }}</code>
+            <span class="muted">仅本次显示，刷新页面即消失</span>
           </div>
           <div class="webhook-form">
             <input
               v-model="webhookInput"
               class="input"
-              placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…"
+              :placeholder="currentHint"
               @keyup.enter="saveWebhook()"
             />
             <button class="btn primary" :disabled="savingWebhook" @click="saveWebhook()">
@@ -279,6 +322,10 @@ onMounted(async () => {
               清除
             </button>
           </div>
+          <p class="muted" style="font-size: 11.5px; margin: 8px 0 0; line-height: 1.7">
+            输入框留空<b>不会</b>清除已有配置 —— 只有粘贴新地址并保存才会覆盖；
+            点「显示原文」可以找回上次填的完整地址（仅管理员，日志里不记地址）。
+          </p>
           <p class="muted" style="font-size: 11.5px; margin: 8px 0 0; line-height: 1.7">
             平台配置优先于部署时的环境变量 <code>ROBODOG_WECOM_WEBHOOK</code>；
             「清除」后回退到环境变量。改了群机器人（删掉再重建会换 key）记得回来重新粘一次。
@@ -359,6 +406,32 @@ onMounted(async () => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 「显示原文」：仅本次显示，不落 localStorage */
+.webhook-reveal {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border: 1px dashed var(--line-2);
+  border-radius: 8px;
+  background: #fff;
+}
+.webhook-reveal code {
+  flex: 1 1 auto;
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  word-break: break-all;
+}
+.webhook-reveal .muted {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+}
+.btn-mini {
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 1.5;
 }
 .webhook-form {
   display: flex;
