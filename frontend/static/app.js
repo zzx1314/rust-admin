@@ -275,6 +275,8 @@ function connectSSE() {
     else if (msg.type === 'job_progress') handleJobProgress(msg);
     else if (msg.type === 'job_done') handleJobDone(msg);
     else if (msg.type === 'job_cancelled') handleJobCancelled(msg);
+    else if (msg.type === 'plan_hit') handlePlanHit(msg);
+    else if (msg.type === 'plan_miss') handlePlanMiss(msg);
     else if (msg.type === 'job_error') showHint('job-err', msg.msg || '任务异常', true);
     else if (msg.type === 'error') console.warn('后端错误:', msg.msg);
   };
@@ -896,14 +898,43 @@ function handleJobStarted(msg) {
   jobBusy = true;
   showHint('job-err', '', false);
   const box = document.getElementById('job-result');
-  if (box) box.innerHTML = `<div class="detect-muted">任务 ${escHtml(msg.job_id)} 已下发，识别中…（${(msg.cams || []).map(camName).join('、')}，${msg.duration}s）</div>`;
+  if (box) box.innerHTML = `<div class="detect-muted">任务 ${escHtml(msg.job_id)} 已下发，识别中…`
+    + `（${escHtml(checkTypeName(msg.check_type))}，${(msg.cams || []).map(camName).join('、')}，${msg.duration}s`
+    + `${msg.expect_count ? `，检查 ${escHtml(String(msg.expect_count))} 个` : ''}）</div>`;
   const je = document.getElementById('job-status');
-  if (je) je.innerHTML = `<b>任务 ${escHtml(msg.job_id)}</b> · 识别中`;
+  if (je) je.innerHTML = `<b>任务 ${escHtml(msg.job_id)}</b> · ${escHtml(checkTypeName(msg.check_type))} · 识别中`;
   refreshDetectStatus();
 }
+function checkTypeName(kind) {
+  return kind === 'count' ? '检测数量是否正确' : '检测是否存在';
+}
+
 function handleJobProgress(msg) {
   const je = document.getElementById('job-status');
   if (je) je.innerHTML = `<b>任务 ${escHtml(msg.job_id)}</b> · ${camName(msg.cam)} 命中 ${msg.streak}/${msg.need}（本帧 ${msg.boxes} 框）`;
+}
+// 版本 4：航点计划命中（带计划 id 的识别）。证据图 + result.json 已落到
+// detect_jobs/<计划id>/pt<航点下标>/，这里把数量核对结论也显示出来。
+function handlePlanHit(msg) {
+  const box = document.getElementById('job-result');
+  const je = document.getElementById('job-status');
+  if (je) je.innerHTML = `<b class="ok">航点命中</b> · 计划 ${escHtml(msg.plan_id || '—')}`
+    + `${msg.point_index === null || msg.point_index === undefined ? '' : ' 航点 ' + escHtml(String(msg.point_index))}`
+    + ` · ${escHtml(checkTypeName(msg.check_type))}`
+    + ` · ${camName(msg.found_cam)}（${escHtml(String(msg.found_count || 0))} 个目标）`;
+  if (!box) return;
+  const ec = msg.expect_count;
+  const countLine = (ec === null || ec === undefined)
+    ? '<span class="detect-muted">数量核对：未判断（存在性任务 / 未填检查数量）</span>'
+    : (msg.count_ok
+      ? `<span class="ok">数量核对：一致（检查 ${escHtml(String(ec))} / 检出 ${escHtml(String(msg.found_count))}）</span>`
+      : `<span class="bad">数量核对：不一致（检查 ${escHtml(String(ec))} / 检出 ${escHtml(String(msg.found_count))}）→ 已生成数量告警</span>`);
+  box.innerHTML = `<div class="job-hit">✅ 计划 <b>${escHtml(msg.plan_id || '—')}</b> 发现目标<br>`
+    + `<span class="detect-muted">存证目录：${escHtml(msg.dir || '')}</span><br>`
+    + `<span class="detect-muted">证据图：${escHtml(msg.evidence || '')}</span><br>`
+    + `<span class="detect-muted">描述：${escHtml(msg.result_json || '')}</span><br>`
+    + countLine + '</div>';
+  refreshDetectStatus();
 }
 function handleJobDone(msg) {
   jobBusy = false;
@@ -911,10 +942,17 @@ function handleJobDone(msg) {
   const box = document.getElementById('job-result');
   if (msg.found) {
     const name = msg.cam_title || camName(msg.cam);
-    if (je) je.innerHTML = `<b class="ok">任务完成</b> · ${name} 发现目标，已自动结束（${Number(msg.elapsed_s).toFixed(1)}s）`;
+    if (je) je.innerHTML = `<b class="ok">任务完成</b> · ${escHtml(checkTypeName(msg.check_type))} · ${name} 发现目标，已自动结束（${Number(msg.elapsed_s).toFixed(1)}s）`;
+    const ec = msg.expect_count;
+    const countLine = (ec === null || ec === undefined)
+      ? '<span class="detect-muted">数量核对：未判断（存在性任务 / 未填检查数量）</span>'
+      : (msg.count_ok
+        ? `<span class="ok">数量核对：一致（检查 ${escHtml(String(ec))} / 检出 ${escHtml(String(msg.found_count))}）</span>`
+        : `<span class="bad">数量核对：不一致（检查 ${escHtml(String(ec))} / 检出 ${escHtml(String(msg.found_count))}）→ 已生成数量告警</span>`);
     if (box) box.innerHTML = `<div class="job-hit">✅ <b>${escHtml(name)}</b> 发现目标，推理自动结束<br>`
       + `<span class="detect-muted">证据图：${escHtml(msg.evidence || '')}</span><br>`
-      + `<span class="detect-muted">描述：${escHtml(msg.result_json || '')}</span></div>`;
+      + `<span class="detect-muted">描述：${escHtml(msg.result_json || '')}</span><br>`
+      + countLine + '</div>';
   } else {
     if (je) je.innerHTML = `<b class="warn">任务结束</b> · ${msg.error ? '异常：' + escHtml(msg.error) : '识别时间内未找到目标'}`;
     if (box) box.innerHTML = `<div class="job-miss">⏱ 识别时间内未找到目标，推理自动结束${msg.error ? '<br>' + escHtml(msg.error) : ''}</div>`;
@@ -925,6 +963,26 @@ function handleJobCancelled(msg) {
   jobBusy = false;
   const je = document.getElementById('job-status');
   if (je) je.innerHTML = `任务 ${escHtml(msg.job_id || '')} 已取消`;
+  refreshDetectStatus();
+}
+
+// 窗口结束仍未命中：存在性任务是「没找到」，数量任务是「数量不一致（0 ≠ N）」
+function handlePlanMiss(msg) {
+  const box = document.getElementById('job-result');
+  const je = document.getElementById('job-status');
+  const countMode = msg.check_type === 'count' && msg.expect_count !== null && msg.expect_count !== undefined;
+  if (je) {
+    je.innerHTML = countMode
+      ? `<b class="bad">数量不一致</b> · 计划 ${escHtml(msg.plan_id || '—')}（检查 ${escHtml(String(msg.expect_count))} / 检出 0）`
+      : `<b class="warn">未找到目标</b> · 计划 ${escHtml(msg.plan_id || '—')}`;
+  }
+  if (!box) return;
+  box.innerHTML = `<div class="${countMode ? 'job-hit' : 'job-miss'}">`
+    + (countMode
+      ? `⚠ 计划 <b>${escHtml(msg.plan_id || '—')}</b> 数量核对不一致（检查 ${escHtml(String(msg.expect_count))} / 检出 0）→ 已生成数量告警<br>`
+      : `⏱ 计划 <b>${escHtml(msg.plan_id || '—')}</b> 窗口内未找到目标<br>`)
+    + `<span class="detect-muted">存证目录：${escHtml(msg.dir || '')}</span><br>`
+    + `<span class="detect-muted">描述：${escHtml(msg.result_json || '')}</span></div>`;
   refreshDetectStatus();
 }
 
@@ -1262,12 +1320,23 @@ function bindDetectControls() {
     if (!cfg.task) { showHint('job-err', '没有可用的识别场景', true); return; }
     if (!cfg.cams.length) { showHint('job-err', '至少选择一路摄像头', true); return; }
     const jid = (document.getElementById('job-id').value || '').trim();
+    const planId = (document.getElementById('job-plan-id').value || '').trim();
+    const checkType = (document.getElementById('job-check-type').value || 'exist').trim();
+    const expectRaw = (document.getElementById('job-expect-count').value || '').trim();
+    const expectCount = (checkType === 'count' && expectRaw)
+      ? Math.max(1, Math.min(999, parseInt(expectRaw, 10) || 0)) : null;
+    if (checkType === 'count' && !expectCount) {
+      showHint('job-err', '检测数量是否正确时必须填写检查目标数量', true);
+      return;
+    }
     const duration = parseInt(document.getElementById('job-duration').value, 10) || 5;
     const streak = parseInt(document.getElementById('job-streak').value, 10) || 3;
     showHint('job-err', '', false);
     const r = await postJson('/api/detect/job', {
       job_id: jid, task: cfg.task, labels: cfg.labels, conf: cfg.conf,
       cams: cfg.cams, fps: cfg.fps, duration: duration, streak: streak,
+      plan_id: planId || null, point_index: null,
+      check_type: checkType, expect_count: expectCount,
     });
     if (!r.ok) { showHint('job-err', r.error || '下发失败', true); return; }
     clearAllBoxes();

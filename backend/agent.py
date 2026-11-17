@@ -18,13 +18,18 @@
 - GET  /api/asr               -> asr 服务状态（active/activating/inactive/failed）
 - GET  /api/detect/tasks      -> AI 识别已接入模型清单（只读，不加载模型）
 - GET  /api/detect/status     -> 识别运行状态/模型契约/FPS/板端画框状态（默认关闭）
-- POST /api/detect/start      -> 开启常驻识别 {"task","labels","conf","cams","fps"}
-                                 版本 3：cams 可多路分时；背包本地画框推 preview 流
+- POST /api/detect/start      -> 开启常驻识别 {"task","labels","conf","cams","fps",
+                                 "plan_id","point_index","check_type","expect_count"}
+                                 版本 3：cams 可多路分时；背包本地画框推 preview 流；
+                                 带 plan_id = 航点计划模式（命中存证到计划目录 + 数量核对）
+- POST /api/detect/plan       -> [航点] 登记计划 {"plan_id","point_index","check_type",
+                                 "expect_count"}（check_type: exist|count）
+- POST /api/detect/plan/clear -> [航点] 清掉计划（窗口结束但识别继续跑时用）
 - POST /api/detect/job        -> 下发识别任务 {"job_id","task","labels","cams",
-                                 "duration","streak",...}；任一路连续 streak 帧命中
-                                 即自动结束并画框存证，超时未命中则通知前端
+                                 "duration","streak","plan_id","expect_count"}；
+                                 任一路连续 streak 帧命中即自动结束并画框存证，超时未命中则通知前端
 - POST /api/detect/job/cancel -> 取消当前任务
-- GET  /api/detect/jobs       -> 已落盘任务结果列表（读 jobs/*/result.json）
+- GET  /api/detect/jobs       -> 已落盘结果列表（递归读 result.json，含计划目录）
 - POST /api/detect/stop       -> 停止识别、关闭板端画框并清空画面上的框
 - POST /api/detect/config     -> 运行中热更新场景/类别/阈值/摄像头/帧率
 - POST /api/detect/once       -> [调试接口，网页已不暴露] 抓当前帧识别一次 {"cam":"cam0"}
@@ -405,29 +410,69 @@ async def _detect_body(request: Request):
 
 @app.post("/api/detect/start")
 async def detect_start(request: Request):
-    """开启识别：拉起 --serve 常驻进程 + 单路 RTSP 旁路抽帧 + 板端本地画框。"""
+    """开启识别：拉起 --serve 常驻进程 + 单路 RTSP 旁路抽帧 + 板端本地画框。
+
+    入参可选 `plan_id` / `point_index` / `check_type` / `expect_count`：航点任务模式。
+    `check_type` 两类任务：`exist`（检测是否存在）/ `count`（检测数量是否正确）。
+    给了计划 id 后，命中就把证据图 + result.json 落到 `detect_jobs/<plan_id>/pt<下标>/`；
+    数量任务还会核对数量，不一致在 `plan_hit` 里带 `count_alert`，窗口结束未命中的
+    数量任务发 `plan_miss`（同样是 `count_alert`）。
+    """
     b = await _detect_body(request)
     r = await asyncio.to_thread(
         detect.manager.start,
         b.get("task"), b.get("labels"), b.get("conf"),
-        b.get("cams"), b.get("fps"))
+        b.get("cams"), b.get("fps"),
+        b.get("plan_id"), b.get("point_index"), b.get("expect_count"),
+        b.get("check_type"))
     return JSONResponse(r, status_code=200 if r.get("ok") else 400)
+
+
+@app.post("/api/detect/plan")
+async def detect_plan(request: Request):
+    """[航点任务] 登记当前计划（运行中也能调）：
+    {plan_id, point_index, check_type, expect_count}。
+
+    `check_type`：`exist` = 只判是否存在（`expect_count` 不参与）；
+    `count` = 判数量是否正确（`expect_count` 必填，检出数量与它比对，不一致时
+    `plan_hit` 带 `count_alert=true`；窗口结束仍未命中发 `plan_miss`）。
+    不传 `check_type` 时按旧口径推断：给了 `expect_count` 就是数量任务。
+    """
+    b = await _detect_body(request)
+    r = await asyncio.to_thread(
+        detect.manager.set_plan,
+        b.get("plan_id"), b.get("point_index"), b.get("expect_count"),
+        b.get("check_type"))
+    return JSONResponse(r, status_code=200 if r.get("ok") else 400)
+
+
+@app.post("/api/detect/plan/clear")
+async def detect_plan_clear():
+    """[航点任务] 清掉当前计划（窗口结束但识别继续跑时用）。"""
+    r = await asyncio.to_thread(detect.manager.clear_plan)
+    return JSONResponse(r)
 
 
 @app.post("/api/detect/job")
 async def detect_job(request: Request):
     """版本 3：下发一次带 ID 的识别任务。
 
-    入参：{job_id, task, labels, conf, cams:[...], fps, duration, streak}
+    入参：{job_id, task, labels, conf, cams:[...], fps, duration, streak,
+           plan_id?, point_index?, check_type?, expect_count?}
     - cams 可多路（NPU 分时轮询）；任一路连续 streak 帧命中即自动结束并画框存证；
     - duration 秒内未命中则自动结束并通知前端"未找到"；
+    - 带 `plan_id` 时存证落到 `detect_jobs/<plan_id>/pt<下标>/`（航点任务）；
+      `check_type=count` + `expect_count` 则核对数量（未命中 = 0 ≠ N 也算不一致），
+      结论在 `job_done` 的 `count_ok / count_alert` 里；
     - 进度/结果通过 SSE 的 job_started/job_progress/job_done 事件推送。
     """
     b = await _detect_body(request)
     r = await asyncio.to_thread(
         detect.manager.submit_job,
         b.get("job_id"), b.get("task"), b.get("labels"), b.get("conf"),
-        b.get("cams"), b.get("fps"), b.get("duration"), b.get("streak"))
+        b.get("cams"), b.get("fps"), b.get("duration"), b.get("streak"),
+        b.get("plan_id"), b.get("point_index"), b.get("expect_count"),
+        b.get("check_type"))
     return JSONResponse(r, status_code=200 if r.get("ok") else 400)
 
 
@@ -440,7 +485,7 @@ async def detect_job_cancel():
 
 @app.get("/api/detect/jobs")
 async def detect_jobs():
-    """列出已落盘的任务结果（读每个 job 目录的 result.json）。"""
+    """列出已落盘的结果（递归读每个 result.json，含计划目录）。"""
     return JSONResponse(detect.manager.list_jobs(), headers={"Cache-Control": "no-store"})
 
 
@@ -456,7 +501,9 @@ async def detect_config(request: Request):
     r = await asyncio.to_thread(
         detect.manager.configure,
         b.get("task"), b.get("labels"), b.get("conf"),
-        b.get("cams"), b.get("fps"))
+        b.get("cams"), b.get("fps"),
+        b.get("plan_id"), b.get("point_index"), b.get("expect_count"),
+        b.get("check_type"))
     return JSONResponse(r, status_code=200 if r.get("ok") else 400)
 
 

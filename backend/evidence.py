@@ -13,6 +13,11 @@
   <DETECT_JOBS_DIR>/<job_id>/
       <cam>_<job_id>.jpg    命中帧（画框）
       result.json           任务描述（发现路 / 目标 / 结论 / 时间等）
+
+航点任务（带了计划 id）落在计划目录下，同一计划的每个航点一个子目录：
+  <DETECT_JOBS_DIR>/<plan_id>/pt<航点下标>/
+      <cam>_<时间戳>.jpg    命中帧（画框）
+      result.json           计划 id / 航点 / 数量核对结论 / 证据图路径
 """
 import json
 import os
@@ -137,6 +142,29 @@ def job_dir(job_id):
     return os.path.join(config.DETECT_JOBS_DIR, _safe_job_id(job_id))
 
 
+def plan_dir(plan_id, point_index=None):
+    """航点任务的存证目录：<jobs>/<plan_id>/pt<航点下标>/。
+
+    `point_index` 是 `routeData.points` 的 0-based 下标（与业务平台
+    `pointIndex` / 5009 的 `pointIndex` 一致，不 +1）。同一个计划的多个航点
+    各占一个子目录，否则同一计划的 `result.json` 会互相覆盖。
+    """
+    base = os.path.join(config.DETECT_JOBS_DIR, _safe_job_id(plan_id))
+    idx = point_index
+    try:
+        idx = None if idx in (None, "") else int(idx)
+    except (TypeError, ValueError):
+        idx = None
+    return os.path.join(base, "pt%d" % idx) if idx is not None else base
+
+
+def target_dir(plan_id=None, point_index=None, job_id=None):
+    """按有无计划 id 选存证目录：有计划走计划目录，否则退回任务目录。"""
+    if plan_id not in (None, "") and str(plan_id).strip():
+        return plan_dir(plan_id, point_index)
+    return job_dir(job_id)
+
+
 def save_frame(jpg_path, boxes, frame_w, frame_h, out_path):
     """把画框后的帧写到 out_path。失败退回原图复制，返回是否画框成功。"""
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -172,11 +200,10 @@ def save_frame(jpg_path, boxes, frame_w, frame_h, out_path):
     return False
 
 
-def write_result(job_id, payload):
-    """把任务结果描述写到 <job>/result.json（原子写）。"""
-    d = job_dir(job_id)
-    os.makedirs(d, exist_ok=True)
-    path = os.path.join(d, "result.json")
+def write_json(dir_path, payload, name="result.json"):
+    """把 JSON 描述写到 dir_path/name（原子写：先写 .tmp 再 rename）。"""
+    os.makedirs(dir_path, exist_ok=True)
+    path = os.path.join(dir_path, name)
     tmp = path + ".tmp"
     with _FILE_LOCK:
         with open(tmp, "w", encoding="utf-8") as f:
@@ -184,6 +211,11 @@ def write_result(job_id, payload):
             f.write("\n")
         os.replace(tmp, path)
     return path
+
+
+def write_result(job_id, payload):
+    """把任务结果描述写到 <job>/result.json（原子写）。"""
+    return write_json(job_dir(job_id), payload)
 
 
 def save_not_found(job_id, payload):

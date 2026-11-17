@@ -610,5 +610,74 @@ detect_jobs/<job_id>/
 ```
 （项目内 `mediamtx/mediamtx.yml` 已同步这份声明，仅 `MEDIAMTX_MANAGED=1` 时直接生效。）
 
+### ④ 航点计划：计划 ID + 两类识别任务（版本 4）
+
+业务平台的航点任务下发识别时，除「目标（场景 + 类别 + 阈值）」外还带一个**计划 ID**
+（`plan_id`，取业务任务号 `taskCode`）、**航点下标**（`point_index`，0-based，与
+`routeData.points` / 5009 的 `pointIndex` 一致）和**任务类型**（`check_type`）。
+板端据此把证据落到计划目录：
+
+```
+detect_jobs/<plan_id>/pt<point_index>/
+  <cam>_<时间戳>.jpg   # 命中帧（已画中文框，未命中则没有）
+  result.json          # plan_id / point_index / check_type / found / found_count /
+                       # expect_count / count_ok / count_alert / evidence
+```
+
+传入方式（几种都支持，按调用方选）：
+
+| 接口 | 入参 | 说明 |
+|---|---|---|
+| `POST /api/detect/start` | `plan_id`、`point_index`、`check_type`、`expect_count` | 航点窗口走这个（业务客户端代调） |
+| `POST /api/detect/config` | 同上 | 操作员已手动开着识别时热更新计划，不重启识别 |
+| `POST /api/detect/plan` | 同上 | 只登记/换计划，不动识别参数；`POST /api/detect/plan/clear` 清掉 |
+| `POST /api/detect/job` | 同上 + 原 job 参数 | 任务化下发也走计划目录存证 |
+
+#### 两类任务（`check_type`）
+
+| 类型 | 语义 | 命中 | 窗口结束仍未命中 |
+|---|---|---|---|
+| `exist` 检测是否存在 | 只判「有没有」 | `plan_hit`（`count_ok=null`），不判数量 | `plan_miss`（`count_alert=false`），只算「没找到」 |
+| `count` 检测数量是否正确 | 还要核对数量 | `plan_hit` + `found_count` 与 `expect_count` 比对，不一致 `count_alert=true` | `plan_miss` + `count_alert=true`（0 ≠ N 也是数量不一致） |
+
+- 不传 `check_type` 时按旧口径推断：**给了 `expect_count` 就是 `count`**，否则 `exist`
+  （老调用方无需改动）。`exist` 任务即使误传 `expect_count` 也不判数量。
+- `count` 任务没填 `expect_count` 时降级为存在性判定，并在日志里打一行提示
+  （`[detect] 计划 … 是数量任务但没填检查目标数量`）。
+- `found_count` = 本帧**通过类别 + 阈值过滤、且真正画出来的框数**（受
+  `DETECT_MAX_BOXES` 截断影响），与框上文字「火焰 3处」里的 3 是同一份口径。
+- 数量核对取「命中后连续 `DETECT_PLAN_COUNT_SAMPLE`（默认 3）帧里各类别的最大值」：
+  单帧遮挡 / 运动模糊少画一个框不会误报「数量不一致」；存证图也用那一帧。
+
+SSE 事件（每个计划 × 航点各一次）：
+
+```json
+{"type":"plan_hit","plan_id":"TK-1112-11","point_index":0,"check_type":"count","found":true,
+ "found_cam":"dogcam","found_cam_title":"机器狗前置","found_count":3,
+ "counts":{"extinguisher":3},"expect_count":3,"count_ok":true,"count_alert":false,
+ "dir":"backend/detect_jobs/TK-1112-11/pt0","evidence":".../dogcam_20261117_114848.jpg",
+ "result_json":".../result.json","reason":"命中目标"}
+
+{"type":"plan_miss","plan_id":"TK-1112-11","point_index":1,"check_type":"count","found":false,
+ "found_count":0,"expect_count":3,"count_ok":false,"count_alert":true,
+ "dir":"backend/detect_jobs/TK-1112-11/pt1","result_json":".../result.json","reason":"识别结束"}
+```
+
+收尾时机：命中采样结束即写盘；窗口结束（`/api/detect/stop`）、换计划、清除计划时
+若还在采样，会**先把已有命中收尾**再返回；一次都没命中则写 `found:false` 的
+`result.json` 并发 `plan_miss`，不会丢证据也不会漏记「没找到」。
+注意：`plan_miss` 是不是「数量不一致」由调用方按窗口是否正常到期判断——航点被任务结束/
+新航点提前打断时不该算账（业务侧 `ai_end.expired` 就是干这个的）。
+`GET /api/detect/status` 的 `plan` 字段给出当前计划快照
+（`plan_id / point_index / check_type / expect_count / done / sampling / dir`）。
+
+**现场自检**（不需要 NPU / 摄像头，纯状态机 + 假落盘）：
+
+```bash
+python3 backend/tools/plan_count_selftest.py
+# 校验：存在性 / 数量一致 / 数量不一致 / 未命中(两类) / 采样中途收尾不丢证 / 换计划收尾
+# 全绿输出 ALL OK；存证写到临时目录，不影响真实 detect_jobs/
+```
+
 ### 部署到板端需同步的新增/改动文件
 `backend/config.py`、`relay.py`、`detect.py`、`osd.py`、`agent.py`、**新增 `evidence.py`**、`frontend/index.html`、`static/app.js`、`static/style.css`、`mediamtx/mediamtx.yml`；并在 snap 配置加 `dogcam720` path。重启 agent。

@@ -249,10 +249,23 @@
 
       <!-- 版本 3：任务化识别下发 -->
       <div class="sub job-sub">
-        <div class="sub-h">识别任务下发 <span class="detect-muted">（命中即自动存证并结束）</span></div>
+        <div class="sub-h">识别任务下发 <span class="detect-muted">（命中即自动存证并结束；填了计划 ID 则按航点计划存证 + 数量核对）</span></div>
         <div class="row">
           <label>任务 ID</label>
           <input id="job-id" type="text" placeholder="留空自动生成" style="width:140px" title="自定义任务 ID；留空按时间自动生成" />
+        </div>
+        <div class="row">
+          <label>计划 ID</label>
+          <input id="job-plan-id" type="text" placeholder="留空不按计划存证" style="width:140px" title="航点任务的计划 id；填写后命中帧与 result.json 落到 detect_jobs/计划ID/ 下" />
+        </div>
+        <div class="row">
+          <label title="两类任务：只判「有没有」/ 判「数量对不对」">检测类型</label>
+          <select id="job-check-type" style="width:132px" title="检测是否存在：命中就存证；检测数量是否正确：还要核对目标数与检查数量">
+            <option value="exist">检测是否存在</option>
+            <option value="count">检测数量是否正确</option>
+          </select>
+          <label title="仅「检测数量是否正确」需要填：与 AI 检出的目标数比对，不一致告警（未命中 = 0 也算不一致）">检查目标数量</label>
+          <input id="job-expect-count" type="number" min="1" max="999" placeholder="数量任务必填" style="width:96px" title="仅数量任务需要：与 AI 检出的目标数比对，不一致告警（未命中 = 0 也算不一致）" />
         </div>
         <div class="row">
           <label>时长(秒)</label>
@@ -269,7 +282,7 @@
         <div id="job-err" class="hint bad"></div>
       </div>
 
-      <div id="detect-note" class="detect-note">常驻识别：可选五路中的一路或多路（NPU 单模型串行，多路分时、每路帧率≈总帧率÷路数），框在背包本地烧进视频。任务下发：带任务 ID 启动，任一路连续 N 帧命中目标即自动结束、画框存证到 jobs/任务ID/，超时未命中会通知页面。板端画框未就绪时自动回退浏览器叠加。状态栏可看物理上限与实测帧率</div>
+      <div id="detect-note" class="detect-note">常驻识别：可选五路中的一路或多路（NPU 单模型串行，多路分时、每路帧率≈总帧率÷路数），框在背包本地烧进视频。任务下发：带任务 ID 启动，任一路连续 N 帧命中目标即自动结束、画框存证到 jobs/任务ID/，超时未命中会通知页面。业务平台的航点任务还会额外传「计划 ID + 检查目标数量」：命中就存证到 jobs/计划ID/pt航点下标/，检出的目标数与检查数量不一致时上报数量告警（留空则不判断数量）。板端画框未就绪时自动回退浏览器叠加。状态栏可看物理上限与实测帧率</div>
     </div>
   </section>
 

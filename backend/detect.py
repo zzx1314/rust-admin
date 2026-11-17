@@ -24,6 +24,11 @@
 - 版本 2.2：每个框的展示文字在 _emit() 里统一生成（中文名 + 同类数量，
   例「火焰 3处」），同一份 box["text"] 供板端 OSD、SSE、JSONL 和浏览器
   SVG 回退使用；事件另带 counts = {类别名: 本帧数量}。
+- 版本 4：航点任务模式（plan mode）。除目标类别外再传一个**计划 id**
+  （`plan_id` + `point_index` + `expect_count`）：命中就把证据图 + result.json
+  落到 `detect_jobs/<plan_id>/pt<航点下标>/`，并按「检查目标数量」核对本帧
+  检出的同类数量，不一致时 `plan_hit` 事件带 `count_alert=true`（调用方据此
+  上报数量告警）。`expect_count` 为空 = 不核对数量。
 """
 import os
 import json
@@ -209,6 +214,50 @@ def scan_tasks(force=False):
     return data
 
 
+def _as_int(value):
+    """安全转 int：None / 空串 / 非法值都返回 None（用于 plan 参数容错）。"""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _count_by_label(boxes):
+    """{类别名: 本帧数量}：存证 JSON 给平台一份可直接消费的各类数量。"""
+    out = {}
+    for b in boxes or []:
+        key = b.get("label") or "?"
+        out[key] = out.get(key, 0) + 1
+    return out
+
+
+# 任务类型：只判「有没有」，或判「数量对不对」
+CHECK_EXIST = "exist"
+CHECK_COUNT = "count"
+_CHECK_TYPE_ALIASES = {
+    "exist": CHECK_EXIST, "exists": CHECK_EXIST, "presence": CHECK_EXIST,
+    "存在": CHECK_EXIST, "存在性": CHECK_EXIST, "检测是否存在": CHECK_EXIST,
+    "count": CHECK_COUNT, "quantity": CHECK_COUNT,
+    "数量": CHECK_COUNT, "数量校验": CHECK_COUNT, "检测数量是否正确": CHECK_COUNT,
+}
+
+
+def _norm_check_type(check_type, expect_count=None):
+    """归一化任务类型：兼容旧调用（只传 expect_count 就按数量任务算）。
+
+    - 显式 `check_type`（`exist` / `count`，也收中文与常见英文别名）优先；
+    - 没传时按「有没有 expect_count」推断：给了数量就是数量任务，否则存在性任务。
+    """
+    raw = str(check_type or "").strip().lower()
+    if raw:
+        mode = _CHECK_TYPE_ALIASES.get(raw) or _CHECK_TYPE_ALIASES.get(str(check_type).strip())
+        if mode:
+            return mode
+    return CHECK_COUNT if expect_count is not None else CHECK_EXIST
+
+
 def _find_task(task):
     for t in scan_tasks()["tasks"]:
         if t["task"] == task:
@@ -260,6 +309,9 @@ class DetectManager:
         self.job = None
         self._job_hits = {}             # {cam: 连续命中次数}，任一路达标即结束
         self._job_seq_lock = threading.Lock()
+        # ---- 版本 4：航点计划模式 ----
+        # plan = None 表示普通识别；有值时命中即按计划目录存证 + 数量核对。
+        self.plan = None
 
     # ---------- 对外：注入 SSE 发布函数 ----------
     def set_publisher(self, fn):
@@ -569,7 +621,11 @@ class DetectManager:
             # 用墙钟耗时（含 C++ 的 imread / letterbox / 后处理 / 行协议），
             # 而不是只覆盖 detect() 的 infer_ms，否则节拍会被低估。
             last_cost = min(0.5, max(0.0, time.monotonic() - t0))
-            boxes = self._emit(cam, resp, ts or time.time())
+            boxes, counts = self._emit(cam, resp, ts or time.time())
+
+            # 航点计划模式：命中即采样存证 + 按「检查目标数量」核对（见 _plan_frame）
+            if boxes and self.plan:
+                self._plan_frame(cam, jpg, boxes, counts, resp.get("frame") or {})
 
             # 任务模式：按路维护"连续命中"计数（同一路连续 N 帧命中才算找到，
             # 任一路未命中就清零该路计数），达标即结束并画框存证。
@@ -597,8 +653,19 @@ class DetectManager:
         jid = job["id"]
         elapsed = round(time.monotonic() - job["t_start"], 3)
         ts = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        found_count = len(boxes or []) if found else 0
+        count_mode = job.get("check_type") == CHECK_COUNT
+        expect = job.get("expect_count") if count_mode else None
+        # 数量任务里「没找到」= 数量不一致（0 ≠ N），所以未命中也要判
+        count_ok = None if expect is None else (found_count == expect)
+        # 存证目录：带计划 id 时落到 detect_jobs/<plan_id>/pt<下标>/（与航点窗口一致），
+        # 否则仍用 detect_jobs/<job_id>/。
+        out_dir = evidence.target_dir(job.get("plan_id"), job.get("point_index"), jid)
         result = {
             "job_id": jid,
+            "plan_id": job.get("plan_id"),
+            "point_index": job.get("point_index"),
+            "check_type": job.get("check_type"),
             "found": bool(found),
             "task": job.get("task"),
             "labels": job.get("labels"),
@@ -611,12 +678,17 @@ class DetectManager:
             "found_cam": cam if found else None,
             "found_cam_title": config.CAMERAS.get(cam, {}).get("title") if found else None,
             "boxes": boxes if found else [],
-            "counts": (sorted({b.get("label") for b in (boxes or [])})) if found else [],
+            "counts": dict(_count_by_label(boxes or [])) if found else {},
+            "found_count": found_count,
+            "expect_count": expect,
+            "count_ok": count_ok,
+            "count_alert": count_ok is False,
         }
+        result["dir"] = out_dir
         evidence_path = None
         if found and cam and jpg:
             fname = "%s_%s.jpg" % (cam, evidence._safe_job_id(jid))
-            out = os.path.join(evidence.job_dir(jid), fname)
+            out = os.path.join(out_dir, fname)
             try:
                 evidence.save_frame(
                     os.path.join(FRAME_DIR, cam + ".jpg"), boxes,
@@ -630,7 +702,7 @@ class DetectManager:
         if error:
             result["error"] = error
         try:
-            evidence.write_result(jid, result)
+            evidence.write_json(out_dir, result)
         except Exception as e:
             self._emit_sse({"type": "job_error", "job_id": jid,
                             "msg": "写 result.json 失败: %s" % e})
@@ -641,12 +713,248 @@ class DetectManager:
         self._emit_sse({
             "type": "job_done", "job_id": jid, "found": bool(found),
             "cam": cam, "cam_title": result["found_cam_title"],
+            "plan_id": result["plan_id"], "point_index": result["point_index"],
+            "check_type": result["check_type"],
+            "found_count": found_count, "expect_count": expect,
+            "count_ok": count_ok, "count_alert": result["count_alert"],
             "evidence": evidence_path, "elapsed_s": elapsed,
-            "result_json": os.path.join(evidence.job_dir(jid), "result.json"),
+            "result_json": os.path.join(out_dir, "result.json"),
             "error": error,
         })
         # 任务结束后停止本轮推理（复用 stop，会关抓帧/OSD/推理进程并清空画面）
         self.stop()
+
+    # ---------- 版本 4：航点计划模式（plan_id + 检查目标数量）----------
+    def set_plan(self, plan_id=None, point_index=None, expect_count=None,
+                 check_type=None):
+        """登记航点计划（运行中也能调，不必重启识别）。
+
+        `check_type` 两类任务：
+
+        - `exist`（检测是否存在）：命中即存证；`expect_count` 不参与判定；
+        - `count`（检测数量是否正确）：命中存证后把同类目标数与 `expect_count` 比对，
+          不一致就发 `plan_hit.count_alert`；窗口结束仍未命中也算不一致（0 ≠ N），
+          发 `plan_miss`。
+
+        换计划/清计划时会把上一个还在采样的命中先收尾（不丢证据）。
+        """
+        plan = self._plan_set(plan_id, point_index, expect_count, check_type)
+        return {"ok": True, "plan": None if not plan else {
+            "plan_id": plan["id"],
+            "point_index": plan["point_index"],
+            "check_type": plan["check_type"],
+            "expect_count": plan["expect_count"],
+            "dir": evidence.plan_dir(plan["id"], plan["point_index"]),
+        }}
+
+    def clear_plan(self):
+        """清掉航点计划（窗口结束但识别继续跑时用，避免后续命中写错目录）。"""
+        with self._lock:
+            prev = self.plan
+        self._plan_set(None)
+        return {"ok": True, "cleared": prev["id"] if prev else None}
+
+    def _plan_set(self, plan_id=None, point_index=None, expect_count=None,
+                  check_type=None):
+        pid = "" if plan_id is None else str(plan_id).strip()
+        if not pid:
+            self._plan_flush("计划结束")
+            with self._lock:
+                self.plan = None
+            return None
+        # 换计划前先把上一个还在采样的命中收尾（证据不丢）
+        self._plan_flush("计划切换")
+        expect = _as_int(expect_count)
+        if expect is not None:
+            expect = max(1, min(999, expect))
+        # 没传 check_type 时用旧调用口径推断：给了数量就是数量任务
+        mode = _norm_check_type(check_type, expect)
+        if mode != CHECK_COUNT:
+            # 存在性任务：即使误传了数量也不报数量告警
+            expect = None
+        count_missing = mode == CHECK_COUNT and expect is None
+        if count_missing:
+            print("[detect] 计划 %s 是数量任务但没填检查目标数量，按存在性判定" % pid[:80],
+                  flush=True)
+        plan = {
+            "id": pid[:80],
+            "point_index": _as_int(point_index),
+            "check_type": mode,
+            "expect_count": expect,
+            "count_missing": count_missing,
+            "sampling": None,
+            "done": False,
+            "t_start": time.monotonic(),
+        }
+        with self._lock:
+            self.plan = plan
+        return plan
+
+    def _plan_frame(self, cam, jpg, boxes, counts, frame):
+        """计划模式的一帧命中：采样 `DETECT_PLAN_COUNT_SAMPLE` 帧后收尾。
+
+        为什么采样：数量核对只看一帧时，遮挡 / 运动模糊少画一个框就会误报
+        「数量不一致」。这里在同一路连采几帧，取检出数量最大的那一帧作为结论
+        （存证图也用那一帧），单帧少框不会影响结论。
+        """
+        total = len(boxes)
+        final = None
+        with self._lock:
+            plan = self.plan
+            if not plan or plan["done"]:
+                return
+            st = plan["sampling"]
+            if st is None:
+                st = {
+                    "cam": cam,
+                    "left": max(1, config.DETECT_PLAN_COUNT_SAMPLE) - 1,
+                    "best_total": total,
+                    "best_counts": dict(counts or {}),
+                    "best_boxes": boxes,
+                    "best_jpg": jpg,
+                    "best_frame": dict(frame or {}),
+                }
+                plan["sampling"] = st
+                if st["left"] > 0:
+                    return
+            elif st["cam"] != cam:
+                # 另一路的采样还没采完：以先命中的那一路为准，不抢同一份存证
+                return
+            else:
+                if total >= st["best_total"]:
+                    st.update(best_total=total, best_counts=dict(counts or {}),
+                              best_boxes=boxes, best_jpg=jpg,
+                              best_frame=dict(frame or {}))
+                st["left"] -= 1
+                if st["left"] > 0:
+                    return
+            plan["sampling"] = None
+            plan["done"] = True
+            final = (plan, st)
+        self._plan_write(final[0], final[1], "命中目标")
+
+    def _plan_flush(self, reason="窗口结束"):
+        """把采样中的命中收尾；没命中也要收尾（未命中同样写 result.json）。"""
+        final = None
+        miss = None
+        with self._lock:
+            plan = self.plan
+            if plan and not plan.get("done"):
+                st = plan.get("sampling")
+                plan["sampling"] = None
+                plan["done"] = True
+                if st:
+                    final = (plan, st)
+                else:
+                    miss = plan
+        if final:
+            self._plan_write(final[0], final[1], reason)
+        elif miss:
+            self._plan_miss(miss, reason)
+
+    def _plan_miss(self, plan, reason):
+        """窗口结束仍未命中：写 found:false 的结果；数量任务另发 `plan_miss`。
+
+        数量任务（检测数量是否正确）里「一个都没找到」等于数量不一致（0 ≠ N），
+        所以 `plan_miss` 带 `count_alert=true`，由调用方决定要不要转成告警
+        （窗口被任务结束/新航点提前打断时不该算账，那是调用方判断的事）。
+        """
+        expect = plan.get("expect_count")
+        count_mode = plan.get("check_type") == CHECK_COUNT
+        warned = bool(count_mode and expect is not None)
+        out_dir = evidence.plan_dir(plan["id"], plan.get("point_index"))
+        result = {
+            "type": "plan_miss",
+            "plan_id": plan["id"],
+            "point_index": plan.get("point_index"),
+            "check_type": plan.get("check_type"),
+            "found": False,
+            "found_count": 0,
+            "counts": {},
+            "expect_count": expect,
+            "count_ok": (False if warned else None),
+            "count_alert": warned,
+            "task": self.cfg["task"],
+            "labels": self.cfg["labels"],
+            "conf": self.cfg["conf"],
+            "cams": list(self.cfg["cams"]),
+            "elapsed_s": round(time.monotonic() - plan["t_start"], 3),
+            "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "reason": reason,
+            "dir": out_dir,
+            "evidence": None,
+        }
+        try:
+            result["result_json"] = evidence.write_json(out_dir, result)
+        except Exception as e:
+            result["write_error"] = "写 result.json 失败: %s" % e
+        self._emit_sse(dict(result))
+        return result
+
+    def _plan_write(self, plan, st, reason):
+        """命中帧画框存证到 `<jobs>/<plan_id>/pt<下标>/`，按数量核对出结论并发 SSE。"""
+        cam = st["cam"]
+        boxes = st.get("best_boxes") or []
+        counts = st.get("best_counts") or {}
+        found_count = int(st.get("best_total") or 0)
+        count_mode = plan.get("check_type") == CHECK_COUNT
+        expect = plan.get("expect_count") if count_mode else None
+        count_ok = None if expect is None else (found_count == expect)
+        frame = st.get("best_frame") or {}
+        out_dir = evidence.plan_dir(plan["id"], plan.get("point_index"))
+        fname = "%s_%s.jpg" % (cam, time.strftime("%Y%m%d_%H%M%S"))
+        out = os.path.join(out_dir, fname)
+        evidence_path = None
+        evidence_error = ""
+        try:
+            # 存证用的是「检出数量最大的那一帧」的原始 JPEG，可能已经不是最新的
+            # /tmp 帧文件，所以先把它落成临时文件再交给画框流程。
+            src = os.path.join(FRAME_DIR, "_plan_best.jpg")
+            os.makedirs(FRAME_DIR, exist_ok=True)
+            with open(src, "wb") as f:
+                f.write(st.get("best_jpg") or b"")
+            evidence.save_frame(
+                src, boxes,
+                frame.get("w") or config.CAPTURE_WIDTH,
+                frame.get("h") or config.CAPTURE_HEIGHT,
+                out)
+            evidence_path = out
+        except Exception as e:
+            evidence_error = "画框存证失败: %s" % e
+        result = {
+            "type": "plan_hit",
+            "plan_id": plan["id"],
+            "point_index": plan.get("point_index"),
+            "check_type": plan.get("check_type"),
+            "found": True,
+            "task": self.cfg["task"],
+            "labels": self.cfg["labels"],
+            "conf": self.cfg["conf"],
+            "cams": list(self.cfg["cams"]),
+            "found_cam": cam,
+            "found_cam_title": config.CAMERAS.get(cam, {}).get("title"),
+            "found_count": found_count,
+            "counts": dict(counts),
+            "expect_count": expect,
+            "count_ok": count_ok,
+            "count_alert": count_ok is False,
+            "boxes": boxes,
+            "elapsed_s": round(time.monotonic() - plan["t_start"], 3),
+            "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "reason": reason,
+            "dir": out_dir,
+            "evidence": evidence_path,
+        }
+        if evidence_error:
+            result["evidence_error"] = evidence_error
+        try:
+            result["result_json"] = evidence.write_json(out_dir, result)
+        except Exception as e:
+            result["write_error"] = "写 result.json 失败: %s" % e
+        # SSE：`plan_hit` 只发一次（每个计划/航点一份存证），调用方据此上报
+        # 「找到目标」与「数量不一致告警」。框数据也带上，页面可以直接回放。
+        self._emit_sse({k: v for k, v in result.items() if k != "boxes"})
+        return result
 
     def _emit(self, cam, resp, ts):
         """过滤 + 中文映射 -> SSE detect 事件；有检出才落盘。"""
@@ -739,11 +1047,12 @@ class DetectManager:
                         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             except Exception:
                 pass
-        # 返回过滤后的框：任务状态机据此判断本帧是否命中目标（版本 3）
-        return boxes
+        # 返回（过滤后的框, 本帧各类数量）：任务/计划状态机据此判断命中与数量
+        return boxes, counts
 
     # ---------- 对外：启停 / 配置 / 立即识别 ----------
-    def start(self, task=None, labels=None, conf=None, cams=None, fps=None):
+    def start(self, task=None, labels=None, conf=None, cams=None, fps=None,
+              plan_id=None, point_index=None, expect_count=None, check_type=None):
         with self._lock:
             if self.state in ("starting", "running"):
                 return {"ok": False, "error": "识别已在运行，请先停止"}
@@ -833,6 +1142,10 @@ class DetectManager:
             self.warnings = warns
             self.state = "running"
 
+        # 航点任务：登记计划（计划 id / 航点下标 / 任务类型 / 检查目标数量）。
+        # 命中即按计划目录存证并核对数量；传空即清掉旧计划（普通「开始识别」与计划模式互斥）。
+        self._plan_set(plan_id, point_index, expect_count, check_type)
+
         self._start_grabbers()
         # 版本 2：板端本地画框。失败只记日志，不中断识别 —— 前端看到
         # status.osd.running=false 会自动回退到浏览器 SVG 叠加。
@@ -850,7 +1163,9 @@ class DetectManager:
         return {"ok": True, "status": self.status()}
 
     def submit_job(self, job_id=None, task=None, labels=None, conf=None,
-                   cams=None, fps=None, duration=None, streak=None):
+                   cams=None, fps=None, duration=None, streak=None,
+                   plan_id=None, point_index=None, expect_count=None,
+                   check_type=None):
         """版本 3：下发一次带 ID 的识别任务。
 
         复用 start() 的推理链路，但记录任务参数与开始时间；调度线程按"同一路
@@ -873,6 +1188,13 @@ class DetectManager:
         except (TypeError, ValueError):
             sk = config.DETECT_JOB_HIT_STREAK
         sk = max(1, min(config.DETECT_JOB_HIT_STREAK_MAX, sk))
+        expect = _as_int(expect_count)
+        if expect is not None:
+            expect = max(1, min(999, expect))
+        mode = _norm_check_type(check_type, expect)
+        if mode != CHECK_COUNT:
+            expect = None      # 存在性任务不判数量
+        pid = "" if plan_id is None else str(plan_id).strip()
 
         norm = self._norm_cams(cams if cams else config.DETECT_CAMS)
         task = task or (scan_tasks()["tasks"][0]["task"] if scan_tasks()["tasks"] else "")
@@ -883,6 +1205,10 @@ class DetectManager:
                 "labels": list(labels) if labels else None,
                 "cams": list(norm), "conf": conf,
                 "duration": dur, "streak": sk,
+                "plan_id": pid[:80] or None,
+                "point_index": _as_int(point_index),
+                "expect_count": expect,
+                "check_type": mode,
                 "t_start": time.monotonic(),
             }
             self._job_hits = {}
@@ -894,11 +1220,15 @@ class DetectManager:
             return r
         self._emit_sse({"type": "job_started", "job_id": jid,
                         "task": task, "cams": list(norm),
+                        "plan_id": pid or None, "point_index": _as_int(point_index),
+                        "expect_count": expect, "check_type": mode,
                         "duration": dur, "streak": sk})
         return {"ok": True, "job": {
             "job_id": jid, "task": task, "cams": list(norm),
             "duration": dur, "streak": sk,
-            "result_dir": evidence.job_dir(jid),
+            "plan_id": pid or None, "point_index": _as_int(point_index),
+            "expect_count": expect, "check_type": mode,
+            "result_dir": evidence.target_dir(pid, point_index, jid),
         }, "status": self.status()}
 
     def cancel_job(self):
@@ -912,23 +1242,24 @@ class DetectManager:
 
     @staticmethod
     def list_jobs():
-        """列出已落盘的任务结果（每个 job 目录的 result.json），按修改时间倒序。"""
+        """列出已落盘的任务/计划结果（所有 result.json），按修改时间倒序。
+
+        目录可能有一层（`<job_id>/`）或两层（`<plan_id>/pt<下标>/`），
+        所以递归走一遍而不是只列一级目录。
+        """
         root = config.DETECT_JOBS_DIR
         out = []
         if not os.path.isdir(root):
             return {"count": 0, "jobs": out}
-        for name in os.listdir(root):
-            d = os.path.join(root, name)
-            if not os.path.isdir(d):
+        for dirpath, _dirnames, filenames in os.walk(root):
+            if "result.json" not in filenames:
                 continue
-            rp = os.path.join(d, "result.json")
-            if not os.path.isfile(rp):
-                continue
+            rp = os.path.join(dirpath, "result.json")
             try:
                 with open(rp, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 data["_mtime"] = os.path.getmtime(rp)
-                data["_dir"] = d
+                data["_dir"] = dirpath
                 out.append(data)
             except Exception:
                 continue
@@ -960,10 +1291,14 @@ class DetectManager:
             self._proc = None
 
     def stop(self):
+        # 航点计划：先把还在采样的命中收尾（存证 + 数量核对 + plan_hit），再关流。
+        # 必须放在 stop_grabbers 之前：此时推理配置（场景/类别/相机）还没被清。
+        self._plan_flush("识别结束")
         was = self.state
         with self._lock:
             self.state = "stopped"
             self.error = ""
+            self.plan = None
         self._stop_evt.set()
         self._stop_grabbers()
         # 关掉板端画框编码器，preview 流随之消失，前端把卡片切回干净流
@@ -985,10 +1320,17 @@ class DetectManager:
             self._emit_sse({"type": "detect_state", "running": False})
         return {"ok": True, "status": self.status()}
 
-    def configure(self, task=None, labels=None, conf=None, cams=None, fps=None):
-        """运行中热更新：类别/阈值零成本；换场景走 SWITCH；改摄像头/帧率重启抓帧。"""
+    def configure(self, task=None, labels=None, conf=None, cams=None, fps=None,
+                  plan_id=None, point_index=None, expect_count=None, check_type=None):
+        """运行中热更新：类别/阈值零成本；换场景走 SWITCH；改摄像头/帧率重启抓帧。
+
+        `plan_id` 不为 None 时顺便登记/清掉航点计划（空串 = 清），这样「操作员
+        已经开着识别」时也能用 `/api/detect/config` 带上计划，不必重启识别。
+        """
         if self.state != "running":
             return {"ok": False, "error": "识别未运行，请先点「开始识别」"}
+        if plan_id is not None:
+            self._plan_set(plan_id, point_index, expect_count, check_type)
         with self._lock:
             old = dict(self.cfg)
         switched = False
@@ -1165,8 +1507,24 @@ class DetectManager:
                     "streak": self.job["streak"],
                     "elapsed_s": round(time.monotonic() - self.job["t_start"], 2),
                     "hits": dict(self._job_hits),
-                    "result_dir": evidence.job_dir(self.job["id"]),
+                    "plan_id": self.job.get("plan_id"),
+                    "point_index": self.job.get("point_index"),
+                    "expect_count": self.job.get("expect_count"),
+                    "result_dir": evidence.target_dir(
+                        self.job.get("plan_id"), self.job.get("point_index"),
+                        self.job["id"]),
                 } if self.job else None),
+                # 版本 4：航点计划快照（plan=None 表示当前不是计划模式）
+                "plan": ({
+                    "plan_id": self.plan["id"],
+                    "point_index": self.plan.get("point_index"),
+                    "check_type": self.plan.get("check_type"),
+                    "expect_count": self.plan.get("expect_count"),
+                    "done": bool(self.plan.get("done")),
+                    "sampling": bool(self.plan.get("sampling")),
+                    "elapsed_s": round(time.monotonic() - self.plan["t_start"], 2),
+                    "dir": evidence.plan_dir(self.plan["id"], self.plan.get("point_index")),
+                } if self.plan else None),
             }
 
 

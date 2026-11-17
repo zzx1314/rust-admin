@@ -154,6 +154,13 @@ DETECT_JOB_HIT_STREAK_MAX = int(os.getenv("DETECT_JOB_HIT_STREAK_MAX", "10"))
 # 任务存证根目录：jobs/<job_id>/<cam>_<job_id>.jpg + result.json
 DETECT_JOBS_DIR = os.getenv("DETECT_JOBS_DIR", os.path.join(_HERE, "detect_jobs"))
 
+# ---- 航点任务 AI 识别（计划 id + 检查目标数量）----
+# 航点窗口除了「目标类别」还要带一个计划 id：命中时把证据图 + result.json 落到
+# jobs/<plan_id>/pt<航点下标>/，并按「检查目标数量」核对本帧检出数量。
+# 数量核对取「命中后连续 N 帧里各类别的最大值」：单帧遮挡/运动模糊少框时
+# 直接比对会误报告警。1 = 只用命中的那一帧。
+DETECT_PLAN_COUNT_SAMPLE = int(os.getenv("DETECT_PLAN_COUNT_SAMPLE", "3"))
+
 # 板端本地画框：把框烧进视频再推一条 preview 流，浏览器只播带框视频、不再叠 SVG。
 # 设为 0 可随时回退到「浏览器画框」，便于两种方案对照测试。
 DETECT_OSD_ENABLED = os.getenv("DETECT_OSD_ENABLED", "1") == "1"
