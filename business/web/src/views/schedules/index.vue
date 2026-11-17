@@ -30,10 +30,15 @@ const tasks = ref<Task[]>([]);
 const loading = ref(true);
 
 const shiftDialog = ref(false);
+/** 正在编辑的排班 id（null = 新建） */
+const editingShiftId = ref<number | null>(null);
+const isEditingShift = computed(() => editingShiftId.value !== null);
 const shiftForm = reactive({
   shiftDate: "",
   slot: "早班",
   staffId: null as number | null,
+  /** 责任人已从库里移除时按姓名保留负责人，避免编辑时丢人 */
+  ownerName: "",
   status: "已发布",
   parkId: null as number | null,
   zoneId: null as number | null,
@@ -279,9 +284,11 @@ watch(weekOffset, () => {
 });
 
 function openShiftDialog(preset?: { date?: string; slot?: string }) {
+  editingShiftId.value = null;
   shiftForm.shiftDate = preset?.date ?? weekDays.value.find(day => day.today)?.date ?? weekStart.value;
   shiftForm.slot = preset?.slot ?? "早班";
   shiftForm.staffId = staff.value.find(item => item.status === "在岗")?.id ?? staff.value[0]?.id ?? null;
+  shiftForm.ownerName = "";
   shiftForm.status = "已发布";
   shiftForm.parkId = parks.value[0]?.id ?? null;
   shiftForm.zoneId = null;
@@ -302,16 +309,33 @@ watch(
   }
 );
 
+/** 编辑：把详情里的排班回填到表单（日期 / 班次 / 责任人 / 园区 / 计划都能改） */
+function editShift(shift: Shift) {
+  editingShiftId.value = shift.id;
+  shiftForm.shiftDate = shift.shiftDate;
+  shiftForm.slot = shift.slot;
+  shiftForm.staffId = shift.staffId;
+  shiftForm.ownerName = shift.ownerName;
+  shiftForm.status = shift.status;
+  shiftForm.parkId = shift.parkId;
+  shiftForm.zoneId = shift.zoneId;
+  shiftForm.taskId = shift.taskId;
+  shiftForm.note = shift.note ?? "";
+  detailVisible.value = false;
+  shiftDialog.value = true;
+}
+
 async function submitShift() {
   if (!shiftForm.shiftDate) {
     ElMessage.error("请选择排班日期");
     return;
   }
-  if (!shiftForm.staffId) {
+  // 责任人可能只存在于排班里（已从责任人库移除），按姓名也算填了人
+  if (shiftForm.staffId === null && !shiftForm.ownerName.trim()) {
     ElMessage.error("请选择责任人");
     return;
   }
-  await shiftApi.create({
+  const payload: Record<string, unknown> = {
     shiftDate: shiftForm.shiftDate,
     slot: shiftForm.slot,
     staffId: shiftForm.staffId,
@@ -320,10 +344,27 @@ async function submitShift() {
     zoneId: shiftForm.zoneId,
     taskId: shiftForm.taskId,
     note: shiftForm.note || null
-  });
+  };
+  if (shiftForm.staffId === null) {
+    payload.ownerName = shiftForm.ownerName.trim();
+  }
+
+  const editingId = editingShiftId.value;
   shiftDialog.value = false;
-  ElMessage.success("排班已添加");
+  if (editingId === null) {
+    await shiftApi.create(payload);
+    ElMessage.success("排班已添加");
+    await load();
+    return;
+  }
+
+  const updated = await shiftApi.update(editingId, payload);
+  ElMessage.success("排班已更新");
+  editingShiftId.value = null;
   await load();
+  // 改完接着看详情；日期被挪到别的周时用接口返回值兜底
+  detailShift.value = shifts.value.find(item => item.id === updated.id) ?? updated;
+  detailVisible.value = true;
 }
 
 function openDetail(shift: Shift) {
@@ -775,8 +816,12 @@ onMounted(async () => {
       </template>
     </el-dialog>
 
-    <!-- 新建排班 -->
-    <el-dialog v-model="shiftDialog" title="新建排班" width="640px">
+    <!-- 新建 / 编辑排班 -->
+    <el-dialog
+      v-model="shiftDialog"
+      :title="isEditingShift ? '编辑排班' : '新建排班'"
+      width="640px"
+    >
       <div class="form-grid">
         <div class="field">
           <label>日期 <em>*</em></label>
@@ -839,14 +884,15 @@ onMounted(async () => {
         </div>
         <div class="field" style="grid-column: 1 / -1">
           <div class="link-hint">
-            选择责任人后，系统会在该日期 / 班次的排班格中占位。若该责任人同一时段已有排班，将提示冲突。
+            选择责任人后，系统会在该日期 / 班次的排班格中占位。若该责任人同一时段已有排班，将提示冲突；
+            修改日期 / 班次 / 责任人时同样会重新校验。
           </div>
         </div>
       </div>
       <template #footer>
         <button class="btn" @click="shiftDialog = false">取消</button>
         <button class="btn primary" @click="submitShift">
-          <AppIcon name="check" />保存排班
+          <AppIcon name="check" />{{ isEditingShift ? "保存修改" : "保存排班" }}
         </button>
       </template>
     </el-dialog>
@@ -909,6 +955,9 @@ onMounted(async () => {
         </div>
       </template>
       <template #footer>
+        <button v-if="detailShift" class="btn" @click="editShift(detailShift)">
+          <AppIcon name="edit" />修改
+        </button>
         <button v-if="detailShift" class="btn" @click="removeShift(detailShift)">
           <AppIcon name="trash" />删除
         </button>
