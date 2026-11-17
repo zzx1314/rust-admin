@@ -428,3 +428,60 @@ curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/
 3. 浏览器 Network → WS 帧时间轴：一秒钟一串小帧 = 正常；半秒一团再静默 = 推流端没 flush；
 4. 还闪就看 `viewer of <room> lagged` 日志：观看端网络追不上，服务端现在会主动断开让它拿
    干净的新流（早先是从中间丢帧继续发，FLV 字节流错位后才一直黑屏重连）。
+
+### 6.7 WHEP `HTTP 404` 排查（2026-11-17 现场事故，已修）
+
+**症状**：前置摄像头一直「WHEP 协商失败（HTTP 404），2 秒后重连」，四路 USB 与红外都正常。
+
+**结论**：跟浏览器、网络、账号都没关系 —— **板端 mediamtx 上没有 `dogcam` 这条 path**。
+介质层证据（都不用进浏览器）：
+
+```bash
+# ① mediamtx 自己怎么说（404 的原文就是这句）
+curl -s -X POST -H 'Content-Type: application/sdp' --data-binary 'v=0' \
+  http://192.168.41.246:8889/dogcam/whep
+# {"status":"error","error":"no stream is available on path 'dogcam'"}
+
+# ② 同一个 path 的 RTSP 也一样 404（说明是 path 层面没流，不是 WHEP 的事）
+ffprobe -v error rtsp://192.168.41.246:8554/dogcam          # 404 Not Found
+ffprobe -v error rtsp://192.168.41.246:8554/cam0            # h264 1280x720 30（对照组）
+
+# ③ 源本身是好的：3588 的 1080p60 直连能出流
+ffprobe -v error "$(cat /root/261113/backpack_dashboard/backend/dog_rtsp_url)"
+# h264,1920,1080,60/1
+
+# ④ 活配置里根本没有 dogcam（生效的是 snap 的那份）
+ssh root@192.168.41.246 'sed -n "/^paths:/,$p" /var/snap/mediamtx/common/mediamtx.yml'
+# 事故现场只有：dog-front-cam（source 不带账号密码 → 每 5s 401 Unauthorized）
+#             dog-ipcam、all_others
+journalctl -u snap.mediamtx.mediamtx | grep 401     # [path dog-front-cam] bad status code: 401
+```
+
+链条：`1080p60` 档位下 relay **不参与**（`relay.py`：1080p60 = mediamtx 直拉 `dogcam`，
+只有 `720p30` 才由 relay 推 `dogcam720`），所以前置能不能看完全取决于 `mediamtx.yml`
+里有没有一条**能拉通**的 `dogcam`。事故现场被写成了 `dog-front-cam`（名字和前端/
+`/api/cameras` 的 `stream` 对不上），而且 source 少了 3588 的 `user:…@`，于是：
+path 名字没人读、拉流 401 循环、前端拿 `dogcam` 去要流 → 404。
+
+**修法**（板端，改完 `snap restart mediamtx`；cam0~cam3 由 5s 看门狗重新推上来，实测秒级恢复）：
+
+```yaml
+# /var/snap/mediamtx/common/mediamtx.yml —— 名字必须是 dogcam，source 必须带凭据
+paths:
+  dogcam:
+    source: 'rtsp://user:******@192.168.234.1:8554/test'   # 取 backend/dog_rtsp_url 第一行
+    sourceOnDemand: no
+```
+
+- 这个文件现在含口令，`chmod 600`（快照里那份 `mediamtx.yml` 备份也一起注意）；
+- 改完自检：`ffprobe rtsp://127.0.0.1:8554/dogcam` → `h264,1920,1080,60/1`；浏览器
+  WHEP 真握手实测 `HTTP 201` + `ICE connected`（≈200 ms）。
+- 不想在前置上写凭据时，另一条路是把档位切到 `720p30`（`POST /api/dogcam/profile`）：
+  relay 用 `dog_rtsp_url` 里的凭据拉流、重编码推 `dogcam720`，只需再确认
+  `dogcam720` 落在 `all_others`（publisher）里即可，不动 `mediamtx.yml`。代价是重编码 + 720p30。
+
+**踩坑记录**：`GET /api/relay/status` 在 `1080p60` 档位把 `running` 硬编码成 `true`
+（板端 `relay.py` 的既有实现，不在本仓库），平台据此把前置判为「可用、无 hint」，
+于是错误只能从 WHEP 状态里暴露。前端因此把 404 翻成人话（`lib/whep.ts` 的
+`whepFailure`）：「板端 mediamtx 上没有「dogcam」这条流（path 未登记 / 名字不一致 /
+没有推流）」，省掉一轮猜。

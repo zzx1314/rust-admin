@@ -86,6 +86,25 @@ function friendly(error: unknown): string {
   return raw;
 }
 
+/**
+ * WHEP 的信号失败翻译成人话。
+ *
+ * `404` 是背包现场最常见的一种，而且**不是浏览器/网络问题**：mediamtx 只会在
+ * 那条 path 上有推流（publisher）时才肯给 SDP，否则回
+ * `{"error":"no stream is available on path 'dogcam'"}`。
+ * 典型成因：`mediamtx.yml` 里没登记这条 path、登记的名字与 `<stream>` 不一致
+ * （如写成 `dog-front-cam`）、或者直拉源的账号密码不对（日志里 `401 Unauthorized`）。
+ */
+function whepFailure(status: number, url: string): string {
+  const stream = /\/([^/]+)\/whep(?:\?|$)/.exec(url)?.[1] ?? "该";
+  if (status === 404) {
+    return `板端 mediamtx 上没有「${stream}」这条流（path 未登记 / 名字不一致 / 没有推流）`;
+  }
+  if (status === 401 || status === 403) return "板端 mediamtx 拒绝访问（鉴权失败）";
+  if (status === 400 || status === 415) return "板端不接受这段 SDP（编码或协议不匹配）";
+  return `WHEP 协商失败（HTTP ${status}）`;
+}
+
 export function startWhep(options: WhepOptions): WhepSession {
   const iceWaitMs = options.iceWaitMs ?? DEFAULT_ICE_WAIT_MS;
   let closed = false;
@@ -173,7 +192,7 @@ export function startWhep(options: WhepOptions): WhepSession {
         body: next.localDescription?.sdp ?? ""
       });
       if (!response.ok) {
-        scheduleRetry(`WHEP 协商失败（HTTP ${response.status}）`);
+        scheduleRetry(whepFailure(response.status, options.url));
         return;
       }
       const location = response.headers.get("Location");
