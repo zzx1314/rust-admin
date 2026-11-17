@@ -35,6 +35,7 @@ import subprocess
 
 import config
 import osd
+import evidence   # 任务存证：命中帧画框 JPG + result.json
 import relay   # 只读 dogcam relay 状态，供前端一次轮询判断「狗前置是否有源」
 
 MODELS_DIR = config.DETECT_MODELS_DIR
@@ -254,6 +255,11 @@ class DetectManager:
             "fps": config.DETECT_FPS,
         }
         self.stats = {}
+        # ---- 版本 3：任务化识别状态 ----
+        # job = None 表示普通常驻识别（网页"开始识别"）；有值时是一次带 ID 的任务。
+        self.job = None
+        self._job_hits = {}             # {cam: 连续命中次数}，任一路达标即结束
+        self._job_seq_lock = threading.Lock()
 
     # ---------- 对外：注入 SSE 发布函数 ----------
     def set_publisher(self, fn):
@@ -334,18 +340,23 @@ class DetectManager:
             self.error = msg
         self._emit_sse({"type": "detect_error", "msg": msg})
 
-    # ---------- 单路约束（版本 2）----------
+    # ---------- 摄像头归一化（版本 3：恢复多路分时）----------
     @staticmethod
     def _norm_cams(cams):
-        """无论前端传几路，只保留第一个合法项；非法/空则回落到默认 dogcam。
+        """保留所有合法路（去重、按 allowed_cams 顺序），红外不参与。
 
-        NPU 独占一路，避免四路分时把每路帧率摊薄；也为板端 OSD 只需要
-        一条预览流提供前提。红外 dog-ipcam 不在允许列表里。
+        NPU 单模型串行，多路在 _sched_loop 里分时轮询：每路实际帧率约等于
+        DETECT_FPS / 路数。红外 dog-ipcam 不在允许列表里。空/全非法时回落默认路。
         """
         seq = cams if isinstance(cams, (list, tuple)) else [cams]
+        # 保序去重，只留合法路
+        seen = []
         for c in seq:
-            if c in config.DETECT_ALLOWED_CAMS and c in config.CAMERAS:
-                return [c]
+            if (c in config.DETECT_ALLOWED_CAMS and c in config.CAMERAS
+                    and c not in seen):
+                seen.append(c)
+        if seen:
+            return seen
         return [config.DETECT_DEFAULT_CAM
                 if config.DETECT_DEFAULT_CAM in config.DETECT_ALLOWED_CAMS
                 else config.DETECT_ALLOWED_CAMS[0]]
@@ -354,6 +365,10 @@ class DetectManager:
     def _rtsp_url(self, cam):
         info = config.CAMERAS.get(cam)
         stream = info["stream"] if info else cam
+        # 前置分辨率档位：dogcam 实际拉 dogcam（直拉 1080p60）或
+        # dogcam720（relay 重编码），逻辑路名 dogcam 不变。
+        if cam == "dogcam":
+            stream = relay.dogcam_stream()
         return "rtsp://%s:%d/%s" % (config.DETECT_RTSP_HOST, config.RTSP_PORT, stream)
 
     def _grab_loop(self, cam):
@@ -496,7 +511,7 @@ class DetectManager:
             return None, "抓帧失败（mediamtx 是否已启动？RTSP: %s）" % self._rtsp_url(cam)
         return path, ""
 
-    # ---------- 调度：单线程串行推理，四路分时复用 ----------
+    # ---------- 调度：单线程串行推理，多路分时复用 ----------
     def _sched_loop(self):
         i = 0
         # 上一轮「写帧 + DETECT + 拿到响应」的墙钟耗时。
@@ -505,6 +520,13 @@ class DetectManager:
         # 单次 120ms 时每轮变成 120+126=246ms，四路只剩约 1fps/路。
         last_cost = 0.0
         while not self._stop_evt.is_set():
+            # 任务模式：先检查是否超过识别时长（超时即结束并通知未命中）
+            with self._lock:
+                job = self.job
+            if job and time.monotonic() - job["t_start"] >= job["duration"]:
+                self._finish_job(found=False)
+                return
+
             with self._lock:
                 cams = list(self.cfg["cams"])
                 fps = max(1, int(self.cfg["fps"]))
@@ -536,13 +558,95 @@ class DetectManager:
             self._seq += 1
             resp = self._request("DETECT %d %s" % (self._seq, path), timeout=15)
             if not resp.get("ok"):
-                self._fail("推理中断: %s" % resp.get("error"))
+                err = resp.get("error")
+                # 任务模式：推理中断也作为任务失败结束，通知前端
+                if job:
+                    self._finish_job(found=False, error="推理中断: %s" % err)
+                    return
+                self._fail("推理中断: %s" % err)
                 self.stop()
                 return
             # 用墙钟耗时（含 C++ 的 imread / letterbox / 后处理 / 行协议），
             # 而不是只覆盖 detect() 的 infer_ms，否则节拍会被低估。
             last_cost = min(0.5, max(0.0, time.monotonic() - t0))
-            self._emit(cam, resp, ts or time.time())
+            boxes = self._emit(cam, resp, ts or time.time())
+
+            # 任务模式：按路维护"连续命中"计数（同一路连续 N 帧命中才算找到，
+            # 任一路未命中就清零该路计数），达标即结束并画框存证。
+            if job:
+                hit = bool(boxes)
+                with self._lock:
+                    cur = 0 if not hit else self._job_hits.get(cam, 0) + 1
+                    self._job_hits[cam] = cur
+                    streak = int(job["streak"])
+                if hit:
+                    self._emit_sse({"type": "job_progress", "job_id": job["id"],
+                                    "cam": cam, "streak": cur, "need": streak,
+                                    "boxes": len(boxes)})
+                    if cur >= streak:
+                        self._finish_job(found=True, cam=cam, boxes=boxes,
+                                         jpg=jpg, frame=resp.get("frame") or {})
+                        return
+
+    def _finish_job(self, found, cam=None, boxes=None, jpg=None, frame=None, error=None):
+        """任务收尾：命中则画框存证，未命中/失败只写 result.json + SSE 通知，然后停推理。"""
+        with self._lock:
+            job = dict(self.job) if self.job else None
+        if not job:
+            return
+        jid = job["id"]
+        elapsed = round(time.monotonic() - job["t_start"], 3)
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        result = {
+            "job_id": jid,
+            "found": bool(found),
+            "task": job.get("task"),
+            "labels": job.get("labels"),
+            "cams": job.get("cams"),
+            "conf": job.get("conf"),
+            "duration": job["duration"],
+            "streak": job["streak"],
+            "elapsed_s": elapsed,
+            "finished_at": ts,
+            "found_cam": cam if found else None,
+            "found_cam_title": config.CAMERAS.get(cam, {}).get("title") if found else None,
+            "boxes": boxes if found else [],
+            "counts": (sorted({b.get("label") for b in (boxes or [])})) if found else [],
+        }
+        evidence_path = None
+        if found and cam and jpg:
+            fname = "%s_%s.jpg" % (cam, evidence._safe_job_id(jid))
+            out = os.path.join(evidence.job_dir(jid), fname)
+            try:
+                evidence.save_frame(
+                    os.path.join(FRAME_DIR, cam + ".jpg"), boxes,
+                    (frame.get("w") or config.CAPTURE_WIDTH) if frame else config.CAPTURE_WIDTH,
+                    (frame.get("h") or config.CAPTURE_HEIGHT) if frame else config.CAPTURE_HEIGHT,
+                    out)
+                evidence_path = out
+            except Exception as e:
+                result["evidence_error"] = "画框存证失败: %s" % e
+        result["evidence"] = evidence_path
+        if error:
+            result["error"] = error
+        try:
+            evidence.write_result(jid, result)
+        except Exception as e:
+            self._emit_sse({"type": "job_error", "job_id": jid,
+                            "msg": "写 result.json 失败: %s" % e})
+        # 先清任务再 stop，避免 stop() 的 detect_clear 混淆任务状态
+        with self._lock:
+            self.job = None
+            self._job_hits = {}
+        self._emit_sse({
+            "type": "job_done", "job_id": jid, "found": bool(found),
+            "cam": cam, "cam_title": result["found_cam_title"],
+            "evidence": evidence_path, "elapsed_s": elapsed,
+            "result_json": os.path.join(evidence.job_dir(jid), "result.json"),
+            "error": error,
+        })
+        # 任务结束后停止本轮推理（复用 stop，会关抓帧/OSD/推理进程并清空画面）
+        self.stop()
 
     def _emit(self, cam, resp, ts):
         """过滤 + 中文映射 -> SSE detect 事件；有检出才落盘。"""
@@ -635,6 +739,8 @@ class DetectManager:
                         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             except Exception:
                 pass
+        # 返回过滤后的框：任务状态机据此判断本帧是否命中目标（版本 3）
+        return boxes
 
     # ---------- 对外：启停 / 配置 / 立即识别 ----------
     def start(self, task=None, labels=None, conf=None, cams=None, fps=None):
@@ -742,6 +848,92 @@ class DetectManager:
         self._emit_sse({"type": "detect_state", "running": True, "task": task,
                         "cam": self.cfg["cams"][0], "osd": osd.status()})
         return {"ok": True, "status": self.status()}
+
+    def submit_job(self, job_id=None, task=None, labels=None, conf=None,
+                   cams=None, fps=None, duration=None, streak=None):
+        """版本 3：下发一次带 ID 的识别任务。
+
+        复用 start() 的推理链路，但记录任务参数与开始时间；调度线程按"同一路
+        连续 N 帧命中即结束"或"超时未命中"自动收尾并通知前端。
+
+        入参校验：job_id 为空时自动生成；duration/streak 限幅防呆。
+        """
+        with self._lock:
+            if self.state in ("starting", "running"):
+                return {"ok": False, "error": "识别已在运行，请先停止或等待当前任务结束"}
+
+        jid = str(job_id or "").strip() or ("job_%s" % time.strftime("%Y%m%d_%H%M%S"))
+        try:
+            dur = int(duration if duration is not None else config.DETECT_JOB_DURATION_DEFAULT)
+        except (TypeError, ValueError):
+            dur = config.DETECT_JOB_DURATION_DEFAULT
+        dur = max(1, min(config.DETECT_JOB_DURATION_MAX, dur))
+        try:
+            sk = int(streak if streak is not None else config.DETECT_JOB_HIT_STREAK)
+        except (TypeError, ValueError):
+            sk = config.DETECT_JOB_HIT_STREAK
+        sk = max(1, min(config.DETECT_JOB_HIT_STREAK_MAX, sk))
+
+        norm = self._norm_cams(cams if cams else config.DETECT_CAMS)
+        task = task or (scan_tasks()["tasks"][0]["task"] if scan_tasks()["tasks"] else "")
+        # 先登记任务，再启动推理（调度线程起来后就能看到 job）
+        with self._lock:
+            self.job = {
+                "id": jid, "task": task,
+                "labels": list(labels) if labels else None,
+                "cams": list(norm), "conf": conf,
+                "duration": dur, "streak": sk,
+                "t_start": time.monotonic(),
+            }
+            self._job_hits = {}
+        r = self.start(task=task, labels=labels, conf=conf, cams=norm, fps=fps)
+        if not r.get("ok"):
+            with self._lock:
+                self.job = None
+                self._job_hits = {}
+            return r
+        self._emit_sse({"type": "job_started", "job_id": jid,
+                        "task": task, "cams": list(norm),
+                        "duration": dur, "streak": sk})
+        return {"ok": True, "job": {
+            "job_id": jid, "task": task, "cams": list(norm),
+            "duration": dur, "streak": sk,
+            "result_dir": evidence.job_dir(jid),
+        }, "status": self.status()}
+
+    def cancel_job(self):
+        """手动取消当前任务（等同 stop，但发一条 job 取消事件）。"""
+        with self._lock:
+            jid = self.job.get("id") if self.job else None
+        r = self.stop()
+        if jid:
+            self._emit_sse({"type": "job_cancelled", "job_id": jid})
+        return r
+
+    @staticmethod
+    def list_jobs():
+        """列出已落盘的任务结果（每个 job 目录的 result.json），按修改时间倒序。"""
+        root = config.DETECT_JOBS_DIR
+        out = []
+        if not os.path.isdir(root):
+            return {"count": 0, "jobs": out}
+        for name in os.listdir(root):
+            d = os.path.join(root, name)
+            if not os.path.isdir(d):
+                continue
+            rp = os.path.join(d, "result.json")
+            if not os.path.isfile(rp):
+                continue
+            try:
+                with open(rp, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                data["_mtime"] = os.path.getmtime(rp)
+                data["_dir"] = d
+                out.append(data)
+            except Exception:
+                continue
+        out.sort(key=lambda x: x.get("_mtime", 0), reverse=True)
+        return {"count": len(out), "jobs": out}
 
     def _cleanup_proc(self):
         proc = self._proc
@@ -942,22 +1134,39 @@ class DetectManager:
                 "events_file": EVENTS_FILE,
                 "serve_log": SERVE_LOG,
                 "error": self.error,
-                # 版本 2：单路约束与板端画框状态，前端据此决定切 preview 还是回退 SVG
+                # 多路分时（版本 3）：single_cam=false 表示前端允许多选
                 "single_cam": bool(config.DETECT_SINGLE_CAM),
+                "multi_cam": not config.DETECT_SINGLE_CAM,
                 "allowed_cams": list(config.DETECT_ALLOWED_CAMS),
                 "default_cam": config.DETECT_DEFAULT_CAM,
                 "preview_stream": config.OSD_STREAM,
                 "osd": osd.status(),
                 # 框上文字的格式，平台 / 前端可据此解释 box["text"]
+                # 示例与 _emit() 的拼接规则保持一致，开关/单位变了状态栏也跟着变
                 "label_format": {
                     "lang": "zh",
                     "show_count": bool(config.DETECT_SHOW_COUNT),
                     "show_conf": bool(config.DETECT_SHOW_CONF),
                     "unit": config.DETECT_LABEL_UNIT,
-                    "example": "火焰 3处",
+                    "example": " ".join(x for x in (
+                        "火焰",
+                        ("3" + config.DETECT_LABEL_UNIT) if config.DETECT_SHOW_COUNT else "",
+                        "0.90" if config.DETECT_SHOW_CONF else "",
+                    ) if x),
                 },
-                # 狗前置链路：前端据此解释「第 6 张卡为什么没画面 / AI 目标为何被改」
+                # 狗前置链路：前端据此解释「机器狗前置卡片为什么没画面 / AI 目标为何被改」
                 "relay": relay.status(),
+                # 版本 3：当前任务快照（job=None 表示普通常驻识别）
+                "job": ({
+                    "id": self.job["id"],
+                    "task": self.job.get("task"),
+                    "cams": list(self.job.get("cams") or []),
+                    "duration": self.job["duration"],
+                    "streak": self.job["streak"],
+                    "elapsed_s": round(time.monotonic() - self.job["t_start"], 2),
+                    "hits": dict(self._job_hits),
+                    "result_dir": evidence.job_dir(self.job["id"]),
+                } if self.job else None),
             }
 
 

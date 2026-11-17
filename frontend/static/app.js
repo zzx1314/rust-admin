@@ -47,8 +47,8 @@ function applyRelayUi(disabled) {
       radio.checked = false;
       if (radio.closest('label')) radio.closest('label').title = '板端未配置机器狗前置 RTSP 源';
     }
-    // 默认项不可用时补选第一路，否则「开始识别」会因没有目标路而失败
-    const first = document.querySelector('#detect-cams input[type="radio"]:not(:disabled)');
+    // 默认项不可用时补选第一路（cam0），否则「开始识别」会因没有目标路而失败
+    const first = document.querySelector('#detect-cams input[name="detect-cam"]:not(:disabled)');
     if (first) first.checked = true;
     if (hint) hint.textContent =
       '机器狗前置未配置 RTSP 源（relay.enabled=false）：AI 目标已临时改为 cam0；配置并重启 agent 后自动恢复默认「机器狗前置」。';
@@ -271,6 +271,11 @@ function connectSSE() {
       refreshDetectStatus();
     }
     else if (msg.type === 'detect_state') refreshDetectStatus();
+    else if (msg.type === 'job_started') handleJobStarted(msg);
+    else if (msg.type === 'job_progress') handleJobProgress(msg);
+    else if (msg.type === 'job_done') handleJobDone(msg);
+    else if (msg.type === 'job_cancelled') handleJobCancelled(msg);
+    else if (msg.type === 'job_error') showHint('job-err', msg.msg || '任务异常', true);
     else if (msg.type === 'error') console.warn('后端错误:', msg.msg);
   };
 }
@@ -635,6 +640,8 @@ function escHtml(s) {
 
 let detectTasks = [];
 let detectRunning = false;
+let detectState = null;             // 最近一次 /api/detect/status 快照
+let jobBusy = false;                // 任务下发进行中（防重复提交）
 let lastDetectLabelTouch = 0;
 let lastDetectCamTouch = 0;
 const boxAnim = {};                 // cam -> 两次检测结果之间的插值动画状态
@@ -769,14 +776,71 @@ function renderDetectLabels(keep) {
 function renderDetectCams() {
   const box = document.getElementById('detect-cams');
   if (!box) return;
-  // 版本 2：五路单选，默认「机器狗前置」（狗前 RTSP / dogcam）。
-  // 后端 _norm_cams() 还会强制只取一路，前后端双保险，NPU 不再分时摊薄。
+  // 版本 3：五路可多选，默认「机器狗前置」（狗前 RTSP / dogcam）。
+  // NPU 单模型串行，多路在后端分时轮询：每路实际帧率 ≈ 总帧率 ÷ 路数。
   // 红外 dog-ipcam 不参与 AI，故不在此列。
   const rows = [['dogcam', '机器狗前置'], ['cam0', '左前'],
                 ['cam1', '右前'], ['cam2', '右后'], ['cam3', '左后']];
+  const single = !!(detectState && detectState.multi_cam === false);
+  const type = single ? 'radio' : 'checkbox';
   box.innerHTML = rows
-    .map(([v, n], i) => `<label class="detect-check"><input type="radio" name="detect-cam" value="${v}"${i === 0 ? ' checked' : ''} />${n}</label>`)
+    .map(([v, n], i) => `<label class="detect-check"><input type="${type}" name="detect-cam" value="${v}"${i === 0 ? ' checked' : ''} />${n}</label>`)
     .join('');
+}
+
+// 收集当前勾选的识别路（供常驻识别与任务下发共用）
+function selectedDetectCams() {
+  return Array.from(document.querySelectorAll('#detect-cams input[name="detect-cam"]:checked'))
+    .map(el => el.value);
+}
+
+const CAM_LABELS = {dogcam: '机器狗前置', cam0: '左前', cam1: '右前', cam2: '右后', cam3: '左后'};
+function camName(c) { return CAM_LABELS[c] || c; }
+
+// ---------- 前置摄像头分辨率档位切换 ----------
+let dogcamProfile = '1080p60';
+function applyDogcamProfileUi(profile) {
+  dogcamProfile = profile;
+  document.querySelectorAll('#dogcam-profile button').forEach(b => {
+    b.classList.toggle('active', b.getAttribute('data-profile') === profile);
+  });
+  const hint = document.getElementById('dogcam-profile-hint');
+  if (hint) hint.textContent = profile === '1080p60'
+    ? '当前：mediamtx 直拉源 1920×1080@60，不经 relay 重编码'
+    : '当前：relay 重编码 1280×720@30（dogcam720）';
+}
+function bindDogcamProfile() {
+  document.querySelectorAll('#dogcam-profile button').forEach(btn => {
+    btn.onclick = async () => {
+      const profile = btn.getAttribute('data-profile');
+      if (profile === dogcamProfile) return;
+      const hint = document.getElementById('dogcam-profile-hint');
+      if (hint) hint.textContent = '切换中…前置画面短暂中断';
+      let r;
+      try {
+        r = await postJson('/api/dogcam/profile', { profile });
+      } catch (e) {
+        if (hint) hint.textContent = '切换失败：' + (e.message || e);
+        return;
+      }
+      if (!r.ok) {
+        if (hint) hint.textContent = '切换失败：' + (r.error || '未知错误');
+        return;
+      }
+      applyDogcamProfileUi(r.profile);
+      // 同步这张卡的「干净流」名：AI 停止后切回时用新档位的 stream
+      const card = cardOf('dogcam');
+      if (card) {
+        card._baseStream = r.stream || (r.profile === '1080p60' ? 'dogcam' : 'dogcam720');
+        // 未处于 AI 预览时，立即把这张卡的 WHEP 切到新 stream
+        if (!osdActive && card._whep && card._whep.switchStream) {
+          card._whep.switchStream(card._baseStream);
+        }
+      }
+      if (hint) hint.textContent = (r.profile === '1080p60'
+        ? '已切换：1080P60 直拉' : '已切换：720P30 重编码') + '，画面恢复中…';
+    };
+  });
 }
 
 async function refreshDetect() {
@@ -825,6 +889,43 @@ function buildBoxSvg(boxes) {
           + `<text x="${(b.x1 + 5).toFixed(1)}" y="${(ty + 12.5).toFixed(1)}" font-size="11" fill="#fff" font-family="sans-serif">${escHtml(b.label)}</text>`;
   });
   return html;
+}
+
+// ---------- 版本 3：任务事件 ----------
+function handleJobStarted(msg) {
+  jobBusy = true;
+  showHint('job-err', '', false);
+  const box = document.getElementById('job-result');
+  if (box) box.innerHTML = `<div class="detect-muted">任务 ${escHtml(msg.job_id)} 已下发，识别中…（${(msg.cams || []).map(camName).join('、')}，${msg.duration}s）</div>`;
+  const je = document.getElementById('job-status');
+  if (je) je.innerHTML = `<b>任务 ${escHtml(msg.job_id)}</b> · 识别中`;
+  refreshDetectStatus();
+}
+function handleJobProgress(msg) {
+  const je = document.getElementById('job-status');
+  if (je) je.innerHTML = `<b>任务 ${escHtml(msg.job_id)}</b> · ${camName(msg.cam)} 命中 ${msg.streak}/${msg.need}（本帧 ${msg.boxes} 框）`;
+}
+function handleJobDone(msg) {
+  jobBusy = false;
+  const je = document.getElementById('job-status');
+  const box = document.getElementById('job-result');
+  if (msg.found) {
+    const name = msg.cam_title || camName(msg.cam);
+    if (je) je.innerHTML = `<b class="ok">任务完成</b> · ${name} 发现目标，已自动结束（${Number(msg.elapsed_s).toFixed(1)}s）`;
+    if (box) box.innerHTML = `<div class="job-hit">✅ <b>${escHtml(name)}</b> 发现目标，推理自动结束<br>`
+      + `<span class="detect-muted">证据图：${escHtml(msg.evidence || '')}</span><br>`
+      + `<span class="detect-muted">描述：${escHtml(msg.result_json || '')}</span></div>`;
+  } else {
+    if (je) je.innerHTML = `<b class="warn">任务结束</b> · ${msg.error ? '异常：' + escHtml(msg.error) : '识别时间内未找到目标'}`;
+    if (box) box.innerHTML = `<div class="job-miss">⏱ 识别时间内未找到目标，推理自动结束${msg.error ? '<br>' + escHtml(msg.error) : ''}</div>`;
+  }
+  refreshDetectStatus();
+}
+function handleJobCancelled(msg) {
+  jobBusy = false;
+  const je = document.getElementById('job-status');
+  if (je) je.innerHTML = `任务 ${escHtml(msg.job_id || '')} 已取消`;
+  refreshDetectStatus();
 }
 
 function handleDetect(msg) {
@@ -946,8 +1047,16 @@ async function refreshDetectStatus() {
     const r = await fetch('/api/detect/status', { cache: 'no-store' });
     s = await r.json();
   } catch (e) { return; }
+  detectState = s;
   detectRunning = !!s.running;
   document.body.classList.toggle('detect-on', detectRunning);
+  // 任务状态快照（有 job 时显示进行中）
+  if (s.job) {
+    const j = s.job;
+    const hits = Object.entries(j.hits || {}).map(([c, n]) => `${camName(c)} ${n}/${j.streak}`).join('，') || '—';
+    const je = document.getElementById('job-status');
+    if (je) je.innerHTML = `<b>任务 ${escHtml(j.id)}</b> · ${escHtml(j.task || '')} · ${Number(j.elapsed_s).toFixed(1)}/${j.duration}s · 命中 ${escHtml(hits)}`;
+  }
   const osd = s.osd || {};
   // 后端每次 osd.start()（开始识别 / 换目标路）都会换一个 session；
   // OSD 从「没出帧」变成「出帧」也算一次新机会。除此之外一次失败后不再
@@ -967,10 +1076,10 @@ async function refreshDetectStatus() {
     lines.push(`<span class="detect-muted">当前查找路径：${escHtml(s.bin || '')}</span>`);
   }
   if (s.error) lines.push(`<span class="detect-warn">${escHtml(s.error)}</span>`);
-  // 狗前置链路：即使没开 AI 也显示，否则「第 6 张卡凭空不出图」无从排查
+  // 狗前置链路：即使没开 AI 也显示，否则「机器狗前置卡片凭空不出图」无从排查
   const rel = s.relay || state.relay || {};
   if (rel.enabled === false) {
-    lines.push('<span class="detect-warn">机器狗前置未配置 RTSP 源（relay.enabled=false）：第 6 张卡不出图，AI 目标已临时改为 cam0；板端设置 DOG_RTSP_URL 或创建 backend/dog_rtsp_url 后重启 agent 即恢复默认</span>');
+    lines.push('<span class="detect-warn">机器狗前置未配置 RTSP 源（relay.enabled=false）：机器狗前置卡片不出图，AI 目标已临时改为 cam0；板端设置 DOG_RTSP_URL 或创建 backend/dog_rtsp_url 后重启 agent 即恢复默认</span>');
   } else if (rel.enabled === true && rel.running === false) {
     lines.push(`<span class="detect-warn">机器狗前置源已配置但 relay 未运行（重启 ${Number(rel.restarts) || 0} 次）：检查 3588 是否在推流、网线、源 URL 是否可达</span>`);
   }
@@ -1145,6 +1254,32 @@ function bindDetectControls() {
     refreshDetectStatus();
   };
 
+  // 版本 3：任务下发
+  const submitBtn = document.getElementById('btn-job-submit');
+  if (submitBtn) submitBtn.onclick = async () => {
+    if (jobBusy) { showHint('job-err', '任务进行中，请等待结束或先取消', true); return; }
+    const cfg = collectDetectConfig();
+    if (!cfg.task) { showHint('job-err', '没有可用的识别场景', true); return; }
+    if (!cfg.cams.length) { showHint('job-err', '至少选择一路摄像头', true); return; }
+    const jid = (document.getElementById('job-id').value || '').trim();
+    const duration = parseInt(document.getElementById('job-duration').value, 10) || 5;
+    const streak = parseInt(document.getElementById('job-streak').value, 10) || 3;
+    showHint('job-err', '', false);
+    const r = await postJson('/api/detect/job', {
+      job_id: jid, task: cfg.task, labels: cfg.labels, conf: cfg.conf,
+      cams: cfg.cams, fps: cfg.fps, duration: duration, streak: streak,
+    });
+    if (!r.ok) { showHint('job-err', r.error || '下发失败', true); return; }
+    clearAllBoxes();
+    refreshDetectStatus();
+  };
+  const cancelBtn = document.getElementById('btn-job-cancel');
+  if (cancelBtn) cancelBtn.onclick = async () => {
+    await postJson('/api/detect/job/cancel', {});
+    jobBusy = false;
+    refreshDetectStatus();
+  };
+
 }
 
 // ---------- 启动 ----------
@@ -1163,13 +1298,27 @@ function bindDetectControls() {
   // 成「1 路走了内置播放页」。改为保留一张写明原因的占位卡。
   state.relay = await fetchRelayStatus();
   const dogcamDisabled = !!(state.relay && state.relay.enabled === false);
+  // 读取前置档位（1080p60 直拉 dogcam / 720p30 relay 推 dogcam720），
+  // 失败时按 relay.status().stream 兜底，再退回 dogcam。
+  let dogcamBase = 'dogcam';
+  try {
+    const pr = await fetch('/api/dogcam/profile', { cache: 'no-store' });
+    const ps = await pr.json();
+    applyDogcamProfileUi(ps.profile || '1080p60');
+    dogcamBase = ps.stream || dogcamBase;
+  } catch (e) {
+    dogcamBase = (state.relay && state.relay.stream) || dogcamBase;
+  }
+  bindDogcamProfile();
   document.querySelectorAll('.video-card').forEach(card => {
     const stream = card.getAttribute('data-stream');
-    card._baseStream = stream;                 // 切回干净流时用
+    // dogcam 卡的实际干净流随档位变化；data-stream 仍是逻辑名 dogcam
+    const actual = (stream === 'dogcam') ? dogcamBase : stream;
+    card._baseStream = actual;                 // 切回干净流时用（含档位 stream）
     if (stream === 'dogcam' && dogcamDisabled) return;   // 不创建 reader
     const video = card.querySelector('video');
     const msg = card.querySelector('.vc-msg');
-    card._whep = connectWebrtc(video, msg, stream);
+    card._whep = connectWebrtc(video, msg, actual);
   });
   applyRelayUi(dogcamDisabled);
   // 场景清单独立异步加载，不 await，避免拖慢首屏其他面板

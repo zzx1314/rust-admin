@@ -18,9 +18,13 @@
 - GET  /api/asr               -> asr 服务状态（active/activating/inactive/failed）
 - GET  /api/detect/tasks      -> AI 识别已接入模型清单（只读，不加载模型）
 - GET  /api/detect/status     -> 识别运行状态/模型契约/FPS/板端画框状态（默认关闭）
-- POST /api/detect/start      -> 开启识别 {"task","labels","conf","cams","fps"}
-                                 版本 2：cams 只取一路，默认 dogcam；
-                                 同时在背包本地画框并推 preview 流
+- POST /api/detect/start      -> 开启常驻识别 {"task","labels","conf","cams","fps"}
+                                 版本 3：cams 可多路分时；背包本地画框推 preview 流
+- POST /api/detect/job        -> 下发识别任务 {"job_id","task","labels","cams",
+                                 "duration","streak",...}；任一路连续 streak 帧命中
+                                 即自动结束并画框存证，超时未命中则通知前端
+- POST /api/detect/job/cancel -> 取消当前任务
+- GET  /api/detect/jobs       -> 已落盘任务结果列表（读 jobs/*/result.json）
 - POST /api/detect/stop       -> 停止识别、关闭板端画框并清空画面上的框
 - POST /api/detect/config     -> 运行中热更新场景/类别/阈值/摄像头/帧率
 - POST /api/detect/once       -> [调试接口，网页已不暴露] 抓当前帧识别一次 {"cam":"cam0"}
@@ -46,7 +50,6 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -155,40 +158,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# ---- 跨源访问（业务平台 / 开发机页面直接调本 Agent 时必需）----
-# Demo 原本把前端托管在 :8000，页面与 /api/* 同源，所以从来不需要 CORS。
-# 一旦页面搬到业务平台（http://39.107.55.13:3100）就变成跨源：
-#   - fetch  /api/*        需要 Access-Control-Allow-Origin
-#   - EventSource /api/events 同样受同源策略约束
-# 视频（:8889 WHEP）不经过这里，mediamtx 自己已放行 webrtcAllowOrigins: ['*']。
-# 允许来源用环境变量控制（逗号分隔）：
-#   AGENT_CORS_ORIGINS=http://39.107.55.13:3100,http://127.0.0.1:5273
-# 默认 "*" 是为现场首次部署方便；本 Agent **没有鉴权**，公网/办公网暴露时应
-# 显式收紧白名单，或干脆只让业务平台后端代理（服务端不受同源策略限制）。
-CORS_ORIGINS = [o.strip() for o in os.getenv("AGENT_CORS_ORIGINS", "*").split(",")
-                if o.strip()] or ["*"]
-# 内网来源一律放行：现场入口（deploy/site-console）可能架在任意内网机器/任意端口上，
-# 板子的 wifi IP 还是 DHCP 的，写死白名单会随 IP 变化而失效。
-# 公网来源仍只认上面的显式白名单（云控制台）。
-CORS_ORIGIN_REGEX = os.getenv(
-    "AGENT_CORS_ORIGIN_REGEX",
-    r"^https?://(localhost|127\.0\.0\.1"
-    r"|10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
-    r"|192\.168\.\d{1,3}\.\d{1,3}"
-    r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?::\d+)?$",
-)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
-    allow_origin_regex=CORS_ORIGIN_REGEX,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
-    # 预检结果缓存 10 分钟：AI 面板每次改类别都会 POST，别每次都多一轮 OPTIONS
-    max_age=600,
-)
-print("[agent] CORS allow_origins=%s regex=%s" % (CORS_ORIGINS, CORS_ORIGIN_REGEX),
-      flush=True)
-
 
 @app.middleware("http")
 async def no_cache(request: Request, call_next):
@@ -231,6 +200,28 @@ async def cameras():
 async def relay_status():
     """机器狗前置 relay 是否常驻；只回状态，不回含账号密码的源 URL。"""
     return relay.status()
+
+
+@app.get("/api/dogcam/profile")
+async def dogcam_profile_get():
+    """前置摄像头当前分辨率档位（1080p60 / 720p30）与对外 stream。"""
+    return {
+        "profile": relay.get_profile(),
+        "stream": relay.dogcam_stream(),
+        "profiles": list(config.DOG_PROFILES),
+        "relay": relay.status(),
+    }
+
+
+@app.post("/api/dogcam/profile")
+async def dogcam_profile_set(request: Request):
+    """切换前置分辨率档位：1080p60（直拉）或 720p30（relay 重编码）。
+
+    切换只启停 relay，不重启 mediamtx；dogcam 画面断几秒后恢复，其他五路不受影响。
+    """
+    b = await _detect_body(request)
+    r = await asyncio.to_thread(relay.set_profile, b.get("profile"))
+    return JSONResponse(r, status_code=200 if r.get("ok") else 400)
 
 
 # ---- WHEP 信令同源代理 ----
@@ -421,6 +412,36 @@ async def detect_start(request: Request):
         b.get("task"), b.get("labels"), b.get("conf"),
         b.get("cams"), b.get("fps"))
     return JSONResponse(r, status_code=200 if r.get("ok") else 400)
+
+
+@app.post("/api/detect/job")
+async def detect_job(request: Request):
+    """版本 3：下发一次带 ID 的识别任务。
+
+    入参：{job_id, task, labels, conf, cams:[...], fps, duration, streak}
+    - cams 可多路（NPU 分时轮询）；任一路连续 streak 帧命中即自动结束并画框存证；
+    - duration 秒内未命中则自动结束并通知前端"未找到"；
+    - 进度/结果通过 SSE 的 job_started/job_progress/job_done 事件推送。
+    """
+    b = await _detect_body(request)
+    r = await asyncio.to_thread(
+        detect.manager.submit_job,
+        b.get("job_id"), b.get("task"), b.get("labels"), b.get("conf"),
+        b.get("cams"), b.get("fps"), b.get("duration"), b.get("streak"))
+    return JSONResponse(r, status_code=200 if r.get("ok") else 400)
+
+
+@app.post("/api/detect/job/cancel")
+async def detect_job_cancel():
+    """取消当前任务（等同停止识别，另发 job_cancelled 事件）。"""
+    r = await asyncio.to_thread(detect.manager.cancel_job)
+    return JSONResponse(r)
+
+
+@app.get("/api/detect/jobs")
+async def detect_jobs():
+    """列出已落盘的任务结果（读每个 job 目录的 result.json）。"""
+    return JSONResponse(detect.manager.list_jobs(), headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/detect/stop")

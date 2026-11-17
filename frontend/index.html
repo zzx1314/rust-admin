@@ -18,20 +18,31 @@
     </div>
   </header>
 
+  <!-- 前置摄像头分辨率切换（1080p60 直拉 / 720p30 relay 重编码） -->
+  <div class="dogcam-bar">
+    <span class="dc-label">机器狗前置分辨率</span>
+    <span class="dc-switch" id="dogcam-profile">
+      <button type="button" data-profile="1080p60" class="active">1080P · 60帧</button>
+      <button type="button" data-profile="720p30">720P · 30帧</button>
+    </span>
+    <span class="dc-hint" id="dogcam-profile-hint">切换时前置画面短暂中断，其他五路不受影响</span>
+  </div>
+
   <!-- 视频区：4 路摄像头 + 机器狗前置 + 红外（3 列，正好两行） -->
+  <!-- 第一排：左前 / 机器狗前置 / 右前；第二排：左后 / 红外 / 右后 -->
   <section class="videos">
     <div class="video-card" data-stream="cam0" data-title="左前">
       <div class="vc-title">左前</div>
       <video autoplay playsinline muted></video>
       <div class="vc-msg">连接中…</div>
     </div>
-    <div class="video-card" data-stream="cam1" data-title="右前">
-      <div class="vc-title">右前</div>
+    <div class="video-card" data-stream="dogcam" data-title="机器狗前置">
+      <div class="vc-title">机器狗前置</div>
       <video autoplay playsinline muted></video>
       <div class="vc-msg">连接中…</div>
     </div>
-    <div class="video-card" data-stream="cam2" data-title="右后">
-      <div class="vc-title">右后</div>
+    <div class="video-card" data-stream="cam1" data-title="右前">
+      <div class="vc-title">右前</div>
       <video autoplay playsinline muted></video>
       <div class="vc-msg">连接中…</div>
     </div>
@@ -45,8 +56,8 @@
       <video autoplay playsinline muted></video>
       <div class="vc-msg">连接中…</div>
     </div>
-    <div class="video-card" data-stream="dogcam" data-title="机器狗前置">
-      <div class="vc-title">机器狗前置</div>
+    <div class="video-card" data-stream="cam2" data-title="右后">
+      <div class="vc-title">右后</div>
       <video autoplay playsinline muted></video>
       <div class="vc-msg">连接中…</div>
     </div>
@@ -221,12 +232,12 @@
         </div>
         <div class="detect-sub-h">识别类别 <span class="detect-muted">（勾选后才在画面中显示）</span></div>
         <div id="detect-labels" class="detect-checks"></div>
-        <div class="detect-sub-h">AI 识别目标（五路单选，默认机器狗前置）</div>
+        <div class="detect-sub-h" id="detect-cams-h">AI 识别目标（五路可多选，默认机器狗前置）</div>
         <div id="detect-cams" class="detect-checks"></div>
         <div id="dogcam-hint" class="hint warn"></div>
         <div class="row">
           <label>帧率</label>
-          <input id="detect-fps" type="number" min="1" max="12" value="6" style="width:44px" title="单路独占 NPU 时每秒推理次数；状态栏显示物理上限与实测帧率" />
+          <input id="detect-fps" type="number" min="1" max="12" value="6" style="width:44px" title="NPU 总推理次数/秒，多路时按路数平分；状态栏显示物理上限与实测帧率" />
         </div>
         <div class="btns">
           <button id="btn-detect-start">开始识别</button>
@@ -236,7 +247,29 @@
         <div id="detect-err" class="hint bad"></div>
       </div>
 
-      <div id="detect-note" class="detect-note">开启 AI 后只能选五路中的一路（默认机器狗前置），NPU 独占该路。框和标签在背包本地烧进视频，页面直接播放带框的 preview 流，浏览器不再叠加坐标；切换目标路时该路卡片自动切换画面。板端画框未就绪时自动回退浏览器叠加并在状态栏提示。状态栏可看物理上限与实测帧率</div>
+      <!-- 版本 3：任务化识别下发 -->
+      <div class="sub job-sub">
+        <div class="sub-h">识别任务下发 <span class="detect-muted">（命中即自动存证并结束）</span></div>
+        <div class="row">
+          <label>任务 ID</label>
+          <input id="job-id" type="text" placeholder="留空自动生成" style="width:140px" title="自定义任务 ID；留空按时间自动生成" />
+        </div>
+        <div class="row">
+          <label>时长(秒)</label>
+          <input id="job-duration" type="number" min="1" max="120" value="5" style="width:52px" title="识别持续时间，超时未命中自动结束并通知" />
+          <label>连续命中</label>
+          <input id="job-streak" type="number" min="1" max="10" value="3" style="width:44px" title="同一路连续 N 帧命中目标即判定找到并结束" />
+        </div>
+        <div class="row">
+          <button id="btn-job-submit">下发任务</button>
+          <button id="btn-job-cancel" class="mini">取消任务</button>
+        </div>
+        <div id="job-status" class="detect-status">无任务</div>
+        <div id="job-result" class="job-result"></div>
+        <div id="job-err" class="hint bad"></div>
+      </div>
+
+      <div id="detect-note" class="detect-note">常驻识别：可选五路中的一路或多路（NPU 单模型串行，多路分时、每路帧率≈总帧率÷路数），框在背包本地烧进视频。任务下发：带任务 ID 启动，任一路连续 N 帧命中目标即自动结束、画框存证到 jobs/任务ID/，超时未命中会通知页面。板端画框未就绪时自动回退浏览器叠加。状态栏可看物理上限与实测帧率</div>
     </div>
   </section>
 

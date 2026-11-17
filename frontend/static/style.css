@@ -236,8 +236,35 @@ body.detect-on:not(.osd-on) .video-card.no-overlay::after {
   margin-top: 8px; font-size: 11.5px; line-height: 1.6; color: var(--text);
 }
 .detect-status b { color: var(--ok); }
+.detect-status b.ok { color: var(--ok); }
+.detect-status b.warn { color: var(--warn); }
 .detect-warn { color: var(--warn); }
 .btns button:disabled { opacity: .45; cursor: not-allowed; filter: none; }
+
+/* 版本 3：识别任务下发 */
+.job-sub { border-top: 1px dashed var(--line); margin-top: 10px; padding-top: 10px; }
+.job-sub .row { margin: 5px 0; }
+#btn-job-submit { background: var(--primary); color: #fff; }
+.job-result { margin-top: 8px; font-size: 11.5px; line-height: 1.7; }
+.job-hit { padding: 8px 10px; border-radius: 6px; background: #e8f7ee; color: var(--ok); }
+.job-miss { padding: 8px 10px; border-radius: 6px; background: #fef3c7; color: var(--warn); }
+.job-result .detect-muted { color: var(--muted); word-break: break-all; }
+
+/* 前置摄像头分辨率切换条 */
+.dogcam-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 0 0 10px; padding: 7px 12px;
+  background: var(--panel, #fff); border: 1px solid var(--line);
+  border-radius: 8px; font-size: 12px;
+}
+.dogcam-bar .dc-label { font-weight: 600; }
+.dc-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.dc-switch button {
+  border: 0; background: transparent; color: var(--muted);
+  padding: 4px 12px; cursor: pointer; font-size: 12px;
+}
+.dc-switch button.active { background: var(--primary, #2563eb); color: #fff; font-weight: 600; }
+.dc-hint { color: var(--muted); font-size: 11px; }
 
 @media (max-width: 900px) {
   .videos, .panels { grid-template-columns: repeat(2, 1fr); }

@@ -144,27 +144,13 @@ backpack_dashboard/
 | `ASR_SERVICE`     | `asr`                      | 聆思 asr 服务（默认不启动，测试时拉起）                                                  |
 | `LINGS_CMD_FIFO`  | `/tmp/voice_assistant_cmd` | 聆思模式/音量控制管道                                                             |
 | `DOG_RTSP_URL`    | 空（不启用）                  | 机器狗前置 RTSP 源；空则读 `backend/dog_rtsp_url`，两者都无则 relay 不启动                  |
-| `DOGCAM_WIDTH` / `DOGCAM_HEIGHT` | `1920` / `1080` | dogcam 输出尺寸（与四路 USB 的 `CAPTURE_*` 分开） |
 
 ## 机器狗前置摄像头（`dogcam`）接入与 AI 识别
 
 3588 板卡提供一路现成 RTSP（实测 1920×1080@60 / H264 High@L4.0 / full-range）。
-`backend/relay.py` 把它拉到背包后重编码推到本机 mediamtx 的 `dogcam` path，
-随后 WHEP 播放、平台中继、AI 旁路抽帧都走同一路流。
-
-输出规格由板端环境变量控制，**默认保留 1080p**：
-
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `DOGCAM_WIDTH` / `DOGCAM_HEIGHT` | `1920` / `1080` | 输出尺寸（等比拉伸，源是 16:9） |
-| `DOGCAM_FPS` | `30` | 输出恒定帧率（源实际只投递 ~25 帧/秒，由 `fps=` 补/丢帧拉平） |
-| `DOGCAM_BITRATE` | `4000k` | 目标码率；1080p30 ≈ 4Mbps，1080p60 要 8Mbps 左右 |
-| `DOGCAM_GOP` | `30` | 关键帧间隔 |
-
-> 故意不复用 `CAPTURE_*`：那一组同时被 `stream.py` 的 v4l2 采集使用（USB 摄像头只出
-> MJPG 720p30），改它会把 `cam0~cam3` 一起搞挂。带宽不够时只想让狗那一路回退到 720p，
-> 设 `DOGCAM_WIDTH=1280 DOGCAM_HEIGHT=720 DOGCAM_BITRATE=2000k` 即可。
-> 注意「背包烧录」（`preview`）那一路仍按 `CAPTURE_*` 缩放，改 `DOGCAM_*` 不会把它变成 1080p。
+`backend/relay.py` 把它拉到背包并**归一化**成与 `cam0~cam3` 逐字段一致的
+`1280×720@30 / High@L3.1 / 无 B 帧 / GOP30 / 2Mbps / yuvj420p(pc) / 无音轨`，
+推到本机 mediamtx 的 `dogcam` path，随后 WHEP 播放与 AI 旁路抽帧都走同一路流。
 
 **配置源地址（二选一，都不要把带密码的 URL 写进仓库）：**
 
@@ -182,7 +168,7 @@ chmod 600 /root/backpack_dashboard/backend/dog_rtsp_url
 - 密码里的 `#` / `!` 必须转义成 `%23` / `%21`；命令行里 URL 要用**单引号**。
 - 源 URL 只作为 ffmpeg 参数存在于进程内存，**不会**出现在 `/api/cameras`、`/api/relay/status`、前端或日志里；`ffmpeg` 的 stderr 直接丢弃，要看告警请按 `ffprobe核验回执_分辨率与编码参数修订建议.md` §8.2.5 命令块 D 手动跑。
 - 运行状态：`GET /api/relay/status` → `{"enabled","running","restarts","last_error","stream"}`。进程意外退出由 5 秒看门狗自动拉起，连续失败按 5/10/20/30s 退避。
-- 页面新增第 6 张视频卡（3 列网格正好两行）。版本 2 起 AI 识别改为**五路单选**，且**默认选中「机器狗前置」**（`dogcam`）；NPU 独占这一路，不再分时摊薄。检出事件 `cam` 字段自动记为 `dogcam`。
+- 页面新增第 6 张视频卡（3 列网格正好两行）。版本 2 曾为**五路单选**（默认「机器狗前置」`dogcam`）；**版本 3 已恢复五路可多选**（多路分时轮询），详见文末「版本 3」章节。检出事件 `cam` 字段记为实际识别路。
 
 ### 背包未连接机器狗时的行为
 
@@ -214,7 +200,7 @@ chmod 600 /root/backpack_dashboard/backend/dog_rtsp_url
 | 框在哪画 | 浏览器 SVG 叠加坐标 | **背包本地** `backend/osd.py` 烧进 H264 帧 |
 | 前端看到什么 | 干净流 + SVG 图层 | 该路卡片自动切到 `preview` 带框流，浏览器不再叠框 |
 | 画框链路异常 | — | 自动回退浏览器叠加，状态栏给出具体原因 |
-| 框上文字 | 英文类名 + 置信度 | **中文类名 + 同类数量**，例「火焰 3处」 |
+| 框上文字 | 英文类名 + 置信度 | **中文类名 + 同类数量 + 置信度**，例「火焰 3处 0.90」 |
 
 链路（仅 AI 开启时存在）：`mediamtx/<cam> → osd.py ffmpeg(overlay + 重编码) → mediamtx/preview → WHEP`。
 `osd.py` 用纯标准库按 640×360 RGBA 画布画矩形与 16×16 中英文点阵标签，
@@ -224,7 +210,7 @@ chmod 600 /root/backpack_dashboard/backend/dog_rtsp_url
 
 #### 中文标签与同类数量（版本 2.2）
 
-框上文字形如 **`火焰 3处`**：中文类名来自模型包 `meta.json` 的 `labels.<类>.zh`，
+框上文字形如 **`火焰 3处 0.90`**：中文类名来自模型包 `meta.json` 的 `labels.<类>.zh`，末尾 `0.90` 是该框置信度（设 `DETECT_SHOW_CONF=0` 可关闭），
 `3` 是**当前这一帧**通过类别 / 阈值过滤后、实际画出的同类框数（受 `DETECT_MAX_BOXES` 截断影响，
 即「可见框数」而非模型原始检出数）。文字由 `detect.py._emit()` **统一生成一次**并写入
 `box["text"]`，板端 OSD、SSE 事件、JSONL 落盘、浏览器 SVG 回退全部复用同一份，四处必然一致。
@@ -235,7 +221,7 @@ SSE / 落盘的 `event["counts"]` 另给 `{模型类别名: 本帧数量}`，平
 | 环境变量 | 默认 | 作用 |
 |---|---|---|
 | `DETECT_SHOW_COUNT` | `1` | 显示「N处」；设 `0` 只显示中文类名 |
-| `DETECT_SHOW_CONF` | `0` | 设 `1` 在末尾追加置信度（例「火焰 3处 0.90」） |
+| `DETECT_SHOW_CONF` | `1` | 默认在末尾追加置信度（例「火焰 3处 0.90」）；设 `0` 关闭 |
 | `DETECT_LABEL_UNIT` | `处` | 数量单位；改成别的汉字后需重跑字库生成脚本 |
 
 **改中文名 / 加新场景后必须重跑字库**（字模离线烘焙，运行时不会读字体）：
@@ -246,7 +232,7 @@ python backend/tools/gen_cjk_font.py
 # 把新生成的 backend/cjk_font.py 同步到板端，重启 agent
 ```
 
-字库覆盖当前 `rknn/models/*/meta.json` 里全部中文别名 + 97 个汉字 + 95 个 ASCII 字符。
+字库由该脚本扫描 `rknn/models/*/meta.json` 的全部中文别名自动生成，当前 299 个字模（204 汉字 + 95 个 ASCII，覆盖 COCO80 等 10 个场景）。
 **漏同步或新增汉字**时：该字在画面上显示为空心方框，状态栏列出 `中文字库缺字：…`；
 若整个 `cjk_font.py` 没同步，会自动降级回旧英文字库（汉字显示 `?`）并在状态栏告警。
 部署时 `backend/cjk_font.py` 必须与 `osd.py` 一起拷过去。
@@ -582,3 +568,47 @@ python3 uvc_snapshot.py --shutter --video /dev/video121 --outdir /tmp/shots
 - SOS/STOP 按键已实测（639/128），若物理标签与功能相反，交换 `SOS_KEYCODE`/`STOP_KEYCODE` 即可。
 - SN：取自 `/dev/mmcblk0p5`（hexdump 第 3 行 ASCII 列），按 16 位 `[0-9A-Z]` 校验，0 偏多会告警。
 - 聆思播放测试：call 模式下 asr 拉起且模式生效即判通过；真实扬声器出声需现场人耳确认。
+
+## 版本 3：多路识别 + 任务化下发 + 前置分辨率切换
+
+### ① 五路可多选（恢复多路分时）
+- AI 识别目标从「五路单选」改回**五路可多选**（左前/右前/右后/左后 + 机器狗前置），红外不参与。默认仍选 `dogcam`。
+- **NPU 是单模型串行**，多路在 `_sched_loop()` 里分时轮询，不是真并发：每路实际帧率 ≈ `DETECT_FPS ÷ 路数`。5 路、总 6fps 时每路约 1.2fps。
+- `DETECT_SINGLE_CAM=1` 可退回单选（前端改回 radio）；默认 `0` 为多选。常驻识别与任务下发共用同一组勾选。
+
+### ② 任务化识别下发（`POST /api/detect/job`）
+入参：
+```json
+{"job_id":"fire_check_001","task":"fire","labels":null,"conf":0.25,
+ "cams":["dogcam","cam0"],"fps":6,"duration":5,"streak":3}
+```
+- `job_id`：自定义任务 ID，留空自动生成 `job_时间戳`；用于存证目录与文件名。
+- `duration`：识别时长（秒，默认 5，上限 `DETECT_JOB_DURATION_MAX=120`）；超时未命中自动结束并通知页面「未找到」。
+- `streak`：**同一路连续 N 帧命中**才算找到（默认 3，上限 10）；任一路达标即结束。多路时每路独立计数，某路某帧未命中就清零该路。
+- 下发后通过 SSE 推送：`job_started` / `job_progress`（命中进度）/ `job_done`（含 found、cam、证据图路径）/ `job_cancelled` / `job_error`。
+- 支持同时下发多路（在 `cams` 里选多路），但同一时刻只跑一个任务（NPU 单模型）；前端防重复提交。
+
+**存证**（`DETECT_JOBS_DIR`，默认 `backend/detect_jobs/`）：
+```
+detect_jobs/<job_id>/
+  <cam>_<job_id>.jpg   # 命中帧，中文框已画上（复用 cjk_font 点阵，板端零依赖）
+  result.json          # job_id/found/found_cam/found_cam_title/boxes/elapsed_s/duration/streak...
+```
+未命中也会写 `result.json`（`found:false`），无证据图。`GET /api/detect/jobs` 列出全部结果。`POST /api/detect/job/cancel` 取消当前任务。
+
+### ③ 前置摄像头分辨率切换
+页面顶部「机器狗前置分辨率」切换条，两档：
+- **1080P·60帧（默认）**：mediamtx 直拉 3588 源流（`dogcam`），不经 relay 重编码，CPU 最低。
+- **720P·30帧**：relay 重编码推 `dogcam720`（1280×720/30/h264_rkmpp/2Mbps），规格与四路一致。
+
+切换由 `POST /api/dogcam/profile {"profile":"1080p60"|"720p30"}` 完成，**只启停 relay、不重启 mediamtx**，dogcam 断几秒恢复，其他五路不受影响；档位写入 `backend/dogcam_profile`（重启保持）。前端 WHEP、AI 抓帧、板端 OSD 烧框的输入流都会随档位在 `dogcam`/`dogcam720` 间切换，逻辑路名 `dogcam` 不变。
+
+**板端一次性准备**（720p30 档需要）：在 snap 生效配置 `/var/snap/mediamtx/common/mediamtx.yml` 新增一条 path，重启 mediamtx 一次：
+```yaml
+  dogcam720:
+    source: publisher
+```
+（项目内 `mediamtx/mediamtx.yml` 已同步这份声明，仅 `MEDIAMTX_MANAGED=1` 时直接生效。）
+
+### 部署到板端需同步的新增/改动文件
+`backend/config.py`、`relay.py`、`detect.py`、`osd.py`、`agent.py`、**新增 `evidence.py`**、`frontend/index.html`、`static/app.js`、`static/style.css`、`mediamtx/mediamtx.yml`；并在 snap 配置加 `dogcam720` path。重启 agent。

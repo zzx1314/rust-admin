@@ -45,6 +45,15 @@ DOG_RTSP_URL_FILE = os.getenv(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "dog_rtsp_url"),
 )
 DOG_RELAY_ENABLED = os.getenv("DOG_RELAY_ENABLED", "1") == "1"
+# 720p30 档 relay 推流的目标 path（1080p60 档由 mediamtx 直拉 dogcam，不经 relay）
+DOG_RELAY_STREAM = os.getenv("DOG_RELAY_STREAM", "dogcam720")
+# 前置分辨率档位状态文件：运行时由接口读写，内容为 "1080p60" / "720p30"
+# 不存在时默认按当前部署（方案 A 直拉）取 1080p60。
+DOG_PROFILE_FILE = os.getenv(
+    "DOG_PROFILE_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "dogcam_profile"),
+)
+DOG_PROFILES = ("1080p60", "720p30")
 
 # ---- 摄像头 2P 端子硬件触发（干接点短接 / 电平型，待现场实测确认） ----
 # 详见 DEVELOPER_GUIDE.md 第 13 章；测试工具 backend/tools/gpio_short_trigger.py
@@ -63,18 +72,6 @@ CAPTURE_PIXFMT = os.getenv("CAPTURE_PIXFMT", "mjpeg")  # 摄像头枚举出的�
 # H264 编码器：优先 RK3588 硬编 h264_rkmpp，缺失时回退 libx264
 H264_ENCODER = os.getenv("H264_ENCODER", "h264_rkmpp")
 H264_BITRATE = os.getenv("H264_BITRATE", "2000k")
-
-# ---- dogcam（3588 机器狗前置）归一化输出参数 ----
-# 源是 3588 的 1920x1080@60 / H264 High@L4.0。
-# 这里**单独一组**，不复用 CAPTURE_*：CAPTURE_* 同时被 stream.py 的 v4l2 采集用
-# （USB 摄像头只出 MJPG 720p30），改它会把四路 USB 一起搞挂。
-# 机器狗那一路默认保留 1080p，浏览器看到的就是 1920x1080。
-# 带宽不够时往下调：1080p30 ≈ 4Mbps，1080p60 要 8Mbps 左右。
-DOGCAM_WIDTH = int(os.getenv("DOGCAM_WIDTH", "1920"))
-DOGCAM_HEIGHT = int(os.getenv("DOGCAM_HEIGHT", "1080"))
-DOGCAM_FPS = int(os.getenv("DOGCAM_FPS", "30"))
-DOGCAM_BITRATE = os.getenv("DOGCAM_BITRATE", "4000k")
-DOGCAM_GOP = int(os.getenv("DOGCAM_GOP", "30"))
 
 # ---- 硬件路径（沿用 yd_test_v4.0.sh 的取值） ----
 SHT4X_APP = os.getenv("SHT4X_APP", "/root/wenshidu/sht4x_app")   # 温湿度
@@ -131,20 +128,31 @@ DETECT_MAX_BOXES = int(os.getenv("DETECT_MAX_BOXES", "20"))
 # ---- 版本 2.2：检出框的标签文字（中文 + 同类数量）----
 # 由 detect.py._emit() 统一生成一次，板端 OSD / SSE / 事件落盘 / 浏览器 SVG
 # 回退全部复用同一个 box["text"]，避免四处各算一遍导致数量或语言不一致。
-# 例：火焰 3处   （同类数量 = 当前这一帧过滤后实际画出的该类框数）
+# 例：火焰 3处 0.90（同类数量 = 当前这一帧过滤后实际画出的该类框数，末尾为置信度）
 DETECT_SHOW_COUNT = os.getenv("DETECT_SHOW_COUNT", "1") == "1"
-DETECT_SHOW_CONF = os.getenv("DETECT_SHOW_CONF", "0") == "1"   # 设 1 追加置信度
+DETECT_SHOW_CONF = os.getenv("DETECT_SHOW_CONF", "1") == "1"   # 默认开启：标签末尾追加置信度（0.90）；设 0 关闭
 DETECT_LABEL_UNIT = os.getenv("DETECT_LABEL_UNIT", "处")        # 改字后需重跑字库生成脚本
 
-# ---- 版本 2：单路识别 + 背包本地画框（板端 OSD）----
-# AI 只允许从下列五路里选一路（红外 dog-ipcam 不参与 AI），默认机器狗前置。
-# 即使前端误传多个，后端也只取第一个，保证 NPU 不被分时摊薄。
+# ---- AI 识别摄像头范围（版本 3：恢复多路分时）----
+# 红外 dog-ipcam 不参与 AI。任务下发可指定用其中哪几路；NPU 单模型串行，
+# 多路是分时轮询而非真并发：每路实际帧率 ≈ DETECT_FPS / 路数。
 DETECT_ALLOWED_CAMS = ["cam0", "cam1", "cam2", "cam3", "dogcam"]
 DETECT_DEFAULT_CAM = os.getenv("DETECT_DEFAULT_CAM", "dogcam")
-DETECT_SINGLE_CAM = True
+# 前端是否允许一次选多路（true=复选，false=单选）。保留配置便于回退到演示版单路口径。
+DETECT_SINGLE_CAM = os.getenv("DETECT_SINGLE_CAM", "0") == "1"
 DETECT_CAMS = [c.strip() for c in
                os.getenv("DETECT_CAMS", DETECT_DEFAULT_CAM).split(",")
-               if c.strip()][:1] or [DETECT_DEFAULT_CAM]
+               if c.strip()] or [DETECT_DEFAULT_CAM]
+
+# ---- 版本 3：任务化识别（下发 job_id / duration / 连续命中即停 / 存证）----
+# 识别时长上限，防止一次任务长时间占住 NPU（秒）
+DETECT_JOB_DURATION_MAX = int(os.getenv("DETECT_JOB_DURATION_MAX", "120"))
+DETECT_JOB_DURATION_DEFAULT = int(os.getenv("DETECT_JOB_DURATION_DEFAULT", "5"))
+# 同一路连续命中多少次即判定"找到目标"并自动结束
+DETECT_JOB_HIT_STREAK = int(os.getenv("DETECT_JOB_HIT_STREAK", "3"))
+DETECT_JOB_HIT_STREAK_MAX = int(os.getenv("DETECT_JOB_HIT_STREAK_MAX", "10"))
+# 任务存证根目录：jobs/<job_id>/<cam>_<job_id>.jpg + result.json
+DETECT_JOBS_DIR = os.getenv("DETECT_JOBS_DIR", os.path.join(_HERE, "detect_jobs"))
 
 # 板端本地画框：把框烧进视频再推一条 preview 流，浏览器只播带框视频、不再叠 SVG。
 # 设为 0 可随时回退到「浏览器画框」，便于两种方案对照测试。

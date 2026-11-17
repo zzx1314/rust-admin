@@ -52,6 +52,7 @@ except ImportError:
 
 import config
 import stream  # 复用 ensure_encoder() 的 h264_rkmpp / libx264 探测
+import relay    # 前置分辨率档位：dogcam 实际拉 dogcam / dogcam720
 
 try:
     import cjk_font          # 预烘焙的 16x16 中英文点阵字库（tools/gen_cjk_font.py 生成）
@@ -399,6 +400,9 @@ class OsdEncoder:
     # ---------- ffmpeg 命令 ----------
     def _build_cmd(self, cam, enc):
         src_stream = config.CAMERAS[cam]["stream"] if cam in config.CAMERAS else cam
+        # 前置分辨率档位：dogcam 作为 AI 目标时，烧框编码器也要拉对应档位的流
+        if cam == "dogcam":
+            src_stream = relay.dogcam_stream()
         src = "rtsp://127.0.0.1:%d/%s" % (config.RTSP_PORT, src_stream)
         vfps = max(1, int(config.OSD_FPS))          # 视频输出帧率
         cfps = max(1, int(config.OSD_FIFO_FPS))     # 画布写入帧率（远低于 vfps）

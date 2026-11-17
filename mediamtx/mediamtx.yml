@@ -22,8 +22,16 @@ paths:
     source: publisher
   dog-ipcam:
     source: publisher
-  # 机器狗前置：由 backend/relay.py 归一化后推上来（snap 实例走 pathDefaults，无需改）
+  # 机器狗前置 1080p60 档：mediamtx 直拉 3588 源流（source: rtsp://...），
+  # 或由现场 snap 配置决定是否直拉；relay 不参与。此 path 不受分辨率切换影响。
   dogcam:
+    source: publisher
+  # 机器狗前置 720p30 档：由 backend/relay.py 重编码后推上来。
+  # 前置分辨率切到 720p30 时，前端 WHEP 与 AI 抓帧都改用这条 path；
+  # 切到 1080p60 时 relay 停止、改用上面的 dogcam。
+  # 注意：现场 snap 生效配置是 /var/snap/mediamtx/common/mediamtx.yml，
+  # 需在那一并新增 dogcam720: source: publisher 才会真正生效（改后重启 mediamtx）。
+  dogcam720:
     source: publisher
   # AI 带框预览：backend/osd.py 把框烧进选中那一路后推上来，仅 AI 开启时存在
   preview:
