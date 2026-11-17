@@ -48,7 +48,10 @@ pub struct Assignment {
     pub note: String,
     pub work_order_id: Option<i64>,
     pub work_order_code: Option<String>,
-    /// 同一设备的同一故障已经有在办工单：本条告警只是在「跟单」，不再推群
+    /// 同一设备的同一故障已经有在办工单：本条告警只是在「跟单」（挂到老单，不新建）。
+    ///
+    /// **不再等于「不推群」**：跟单消息默认照样推（`wecom_alert_repeat_push`），
+    /// 一次任务执行就是一次告警；只有 5 分钟窗口内的连刷会被合并。
     pub repeated: bool,
     /// 跟单但**数值变了**（如数量核对 1 个 → 2 个）：仍然要推一条短消息，
     /// 否则现场只看到第一次的数，后面的变化全被去重吞掉（2026-11-17 反馈）。
@@ -262,7 +265,7 @@ pub async fn on_alert(state: &AppState, alert_code: &str) -> Option<Assignment> 
     //
     // 现场踩过两次：
     // 1. 机器人每 ~90s 报一次 `12608 RS 与 lidar 时间不同步`，一条告警一张单，
-    //    5 分钟就堆出 2 张工单 + 2 条群消息，值班长会被淹掉；
+    //    5 分钟就堆出 2 张工单（群消息那边由推送层的 5 分钟窗口挡）；
     // 2. AI 告警内容带置信度 / 证据图路径，按标题去重等于没去重，每轮巡检一张新单。
     // 所以优先用告警自带的 `dedup_key`（结构化），只有它为空时才退回标题相等。
     let title = work_order_title(context.device_code.as_deref(), &context.content);
@@ -279,8 +282,8 @@ pub async fn on_alert(state: &AppState, alert_code: &str) -> Option<Assignment> 
         assignment.work_order_id = Some(*id);
         assignment.work_order_code = Some(code.clone());
         assignment.repeated = true;
-        // 同一件事的第二次告警默认不出声；但「数量核对」的实际检出数变了要补推一条
-        // （1 个 → 2 个是不同的事实，全吞掉现场就以为「没告警」）。
+        // 同一件事的第二次告警照样推（跟单），但「数量核对」的实际检出数变了
+        // 要单独标出来（1 个 → 2 个是不同的事实，消息里要写清）。
         let previous: Option<String> = sqlx::query_scalar(
             "SELECT content FROM alerts
               WHERE work_order_id = ?1 AND id <> ?2

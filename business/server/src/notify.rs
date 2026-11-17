@@ -900,6 +900,27 @@ async fn channel_enabled(state: &AppState, channel: Channel) -> bool {
     read(outer) && read(inner)
 }
 
+/// 跟单告警（同一问题已经挂在在办工单上）是否照样推企业微信。
+///
+/// 缺行视为**开启**：一次任务执行就是一次告警，默认要让群里看到；
+/// 只有明确关掉（`wecom_alert_repeat_push = false`）才退回
+/// 「24 小时内同一问题只推第一条」的老行为。
+async fn repeat_push_enabled(state: &AppState) -> bool {
+    let row: Option<(Option<String>,)> = sqlx::query_as(
+        "SELECT setting_value FROM settings WHERE setting_key = 'wecom_alert_repeat_push'",
+    )
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or(None);
+    match row {
+        Some((Some(value),)) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "false" | "0" | "off"
+        ),
+        _ => true,
+    }
+}
+
 /// `alert_created` 回查用：告警 + 设备 + 园区 + 区域。
 #[derive(Debug, sqlx::FromRow)]
 struct AlertLookup {
@@ -938,22 +959,21 @@ struct TaskLookup {
 pub async fn alert_created(state: &AppState, alert_code: &str) {
     let assignment = crate::alert_flow::on_alert(state, alert_code).await;
 
-    // 同一设备的同一故障还在办：群里已经通知过一次，这条只是在「跟单」。
-    // 现场实测：机器人每 ~90s 报一次 `12608 RS 与 lidar 时间不同步`，
-    // 90 秒一条群消息没人受得了 —— 告警中心里仍然看得到，只是不再推。
+    // 「跟单」= 同一件事已经挂在在办工单上（见 `alert_flow::find_open_order`）。
     //
-    // 例外：**数量核对的检出数变了**（1 个 → 2 个）要补推一条短跟单。
-    // 2026-11-17 现场：同一个航点先报「检查 3 个，实际检出 1 个」（推过群），
-    // 下一轮报「实际检出 2 个」被完全吞掉，现场以为「配了 3 个却没告警」。
+    // 默认**照样推**：一次任务执行就是一次告警，现场要的是「每轮巡检都在群里出现
+    // 一条」，而不是「24 小时内同一航点只出现一次」。2026-11-17 之后的老口径是
+    // 静默，只有数量核对的检出数变了才补推，导致同一条周期计划第二天再报同一处
+    // 隐患时群里什么都没有，现场以为「巡检没跑 / 没告警」。
+    //
+    // 嫌吵的部署可以在设置页关掉 `wecom_alert_repeat_push`（缺行视为开启）。
+    // 另外跟单消息共用 `alert-repeat:<工单>` 这个去重键，5 分钟窗口内的连刷
+    // 仍然会合并成一条（机器人每 90s 报一次 12608 时不会把群刷爆）。
     let follow_up = assignment.as_ref().and_then(|assignment| assignment.follow_up);
-    if assignment
+    let repeat = assignment
         .as_ref()
         .is_some_and(|assignment| assignment.repeated)
-        && follow_up.is_none()
-    {
-        debug!(alert = %alert_code, "wecom: 同类告警已有在办工单，跳过推送");
-        return;
-    }
+        && follow_up.is_none();
 
     if !state.notifier.is_enabled() {
         return;
@@ -961,6 +981,22 @@ pub async fn alert_created(state: &AppState, alert_code: &str) {
     if !channel_enabled(state, Channel::Alert).await {
         return;
     }
+    // 通道都不通时不做这两次查询：开关判断放在「能不能发」之后
+    if repeat && !repeat_push_enabled(state).await {
+        debug!(alert = %alert_code, "wecom: 同类告警已有在办工单且关闭了重复推送，跳过");
+        return;
+    }
+    // 第几次报警：跟着工单数一遍，群里那句「同一问题第 N 次」才有依据
+    let repeat_count = match (repeat, assignment.as_ref().and_then(|a| a.work_order_id)) {
+        (true, Some(order_id)) => {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM alerts WHERE work_order_id = ?1")
+                .bind(order_id)
+                .fetch_one(&state.db)
+                .await
+                .ok()
+        }
+        _ => None,
+    };
     let row: Option<AlertLookup> = sqlx::query_as(
         "SELECT a.id, a.alert_code, a.level, a.content, a.occurred_at,
                     d.device_id AS device_code, p.park_name, z.zone_name
@@ -1002,7 +1038,7 @@ pub async fn alert_created(state: &AppState, alert_code: &str) {
         fields.push(("当班责任人", assignment.summary()));
         if let Some(order) = &assignment.work_order_code {
             // 跟单消息要说清「挂的是原单」，否则群里会以为又新建了一张
-            let suffix = if follow_up.is_some() {
+            let suffix = if follow_up.is_some() || repeat {
                 "（原工单，未新建）"
             } else {
                 "（已自动派单）"
@@ -1033,9 +1069,22 @@ pub async fn alert_created(state: &AppState, alert_code: &str) {
         level: Level::parse(&row.level),
         ref_type: Channel::Alert.ref_type(),
         ref_id: Some(row.id),
-        dedupe_key: format!("alert:{}", row.alert_code),
+        // 跟单共用「按工单」的键：5 分钟内的连刷合并，跨轮次（分钟级以上）照推
+        dedupe_key: if repeat || follow_up.is_some() {
+            match assignment.as_ref().and_then(|assignment| assignment.work_order_id) {
+                Some(order_id) => format!("alert-repeat:{order_id}"),
+                None => format!("alert-repeat:{}", row.alert_code),
+            }
+        } else {
+            format!("alert:{}", row.alert_code)
+        },
         title: if follow_up.is_some() {
             "设备异常告警（跟单：数值有变化）".to_string()
+        } else if repeat {
+            match repeat_count {
+                Some(count) => format!("设备异常告警（跟单：同一问题第 {count} 次）"),
+                None => "设备异常告警（跟单：同一问题仍在办）".to_string(),
+            }
         } else if assignment
             .as_ref()
             .is_some_and(|assignment| assignment.work_order_code.is_some())
@@ -1055,18 +1104,36 @@ pub async fn alert_created(state: &AppState, alert_code: &str) {
                 )
             })
             .or_else(|| {
-                assignment
-                    .as_ref()
-                    .map(crate::alert_flow::Assignment::dispatch_sentence)
+                assignment.as_ref().map(|assignment| {
+                    if repeat {
+                        // 重复告警不再说「已自动派单」：工单早就建好了，这里要说清
+                        // 「没新建单」，否则值班长会去工单列表找根本不存在的第二张单
+                        format!(
+                            "同一问题仍在办（{}），本次不新建工单，继续挂在原单上。\
+                             请责任人按最新情况处置并把结果回填到工单",
+                            repeat_count
+                                .map(|count| format!("第 {count} 次告警"))
+                                .unwrap_or_else(|| "重复告警".to_string())
+                        )
+                    } else {
+                        assignment.dispatch_sentence()
+                    }
+                })
             }),
         link,
         mention_all: false,
-        mentions: assignment
-            .as_ref()
-            .and_then(|assignment| assignment.phone.as_deref())
-            .and_then(mentionable)
-            .map(|phone| vec![phone])
-            .unwrap_or_default(),
+        // 跟单不再 @ 人：一次任务里的重复告警每条都 @ 一遍等于骚扰，
+        // 人已经在第一条消息里被通知过了（数量变化那条仍 @，因为它带新信息）
+        mentions: if repeat {
+            Vec::new()
+        } else {
+            assignment
+                .as_ref()
+                .and_then(|assignment| assignment.phone.as_deref())
+                .and_then(mentionable)
+                .map(|phone| vec![phone])
+                .unwrap_or_default()
+        },
     };
     state.notifier.enqueue(notice);
 }

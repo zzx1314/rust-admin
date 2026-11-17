@@ -125,14 +125,15 @@
 | `notify.rs:142` `Notice::markdown()` | 渲染，只使用企微支持的语法 |
 | `notify.rs` `Notice::mention_text()` | @责任人 / @所有人用的**单行提醒**：只拼级别 + 标题 + 前两个字段 |
 | `notify.rs:193` `truncate_bytes()` | 按字节截断且不切半个汉字 |
-| `notify.rs:217` `struct Dedupe` | 5 分钟静默窗，键 `alert:{code}` / `task:{code}` |
+| `notify.rs:217` `struct Dedupe` | 5 分钟静默窗，键 `alert:{code}` / `task:{code}`；跟单用 `alert-repeat:{工单}`（连刷合并） |
 | `notify.rs:243` `struct RateGate` | 固定窗口令牌桶 |
 | `notify.rs:313` `Notifier::channel()` | 装配句柄 + 消费端；无 webhook 返回 `None` |
 | `notify.rs:355` `Notifier::enqueue()` | **同步**：级别过滤 → 去重 → `try_send` |
 | `notify.rs:394` `run_consumer()` | 单消费者循环，`select!` 收消息 + 60s tick 刷溢出汇总 |
 | `notify.rs` `deliver()` | @all 那条 + markdown 那条，含重试与落库；有 `mentions` 时改发 `mentioned_mobile_list` |
 | `notify.rs:551` `post()` | HTTP + `errcode` 分类（45009 / 其他 / 传输错误） |
-| `notify.rs:647` `channel_enabled()` | 读两个 settings 键，缺行视为开启 |
+| `notify.rs` `channel_enabled()` | 读两个 settings 键，缺行视为开启 |
+| `notify.rs` `repeat_push_enabled()` | 读 `wecom_alert_repeat_push`：跟单告警还推不推（缺行 = 推） |
 | `notify.rs` `alert_created()` | 告警入口：**先派单**（`alert_flow`）再推送 |
 | `notify.rs` `task_abnormal()` | 任务异常入口：同样带「当班责任人」并 @ 到人 |
 | `alert_flow.rs` `on_alert()` | 告警 → 责任人 → 自动建工单 → 回写 `alerts` 四列 |
@@ -192,6 +193,7 @@ status('sent'|'failed'), attempts, last_error, created_at, sent_at
 | --- | --- | --- |
 | `wecom_webhook` | `''` | **平台内配置的 webhook 地址**（`value_type='secret'`）。空 = 用环境变量；填了就以它为准，保存即生效 |
 | `wecom_alert_push` | `true` | 设备异常告警推企业微信 |
+| `wecom_alert_repeat_push` | `true` | 挂回在办工单的**跟单告警也推**（每次任务执行都算一次告警）。关掉 = 24h 内同一问题只推第一条 |
 | `wecom_task_abnormal` | `true` | 任务执行异常推企业微信 |
 | `alert_auto_workorder` | `true` | 告警按当班排班自动派单并建工单（关掉只停建单，责任人解析与推送照旧） |
 
@@ -260,6 +262,43 @@ wecom_alert_push / wecom_task_abnormal  渠道级：这一类事件推不推企�
 [查看详情 →](http://39.107.55.13:3100/workorders?focus=12)
 ```
 
+### 跟单告警（同一问题已挂在在办工单上）
+
+`wecom_alert_repeat_push`（默认开）为真时，挂回老单的告警**照样推**，只是标题、
+工单后缀和处置建议不同：
+
+```
+## 🟠 <font color="comment">警告</font> · 设备异常告警（跟单：同一问题第 3 次）
+> 设备：RD-002
+> 园区：张江智造园区
+> 区域：装卸区
+> 关联计划：装卸平台早班巡查
+> 当班责任人：陈志远（运维一组） · 早班 08:00 - 16:00（SH-012）
+> 工单：WO-1115-03（原工单，未新建）
+> 时间：2026-11-16 09:12:04
+> 告警码：AL-021
+
+**内容**：AI 识别：任务「装卸平台早班巡查」航点 3「货架 A」检出 extinguisher（置信度 0.88）
+
+**处置建议**：同一问题仍在办（第 3 次告警），本次不新建工单，继续挂在原单上。
+请责任人按最新情况处置并把结果回填到工单
+
+[查看详情 →](http://39.107.55.13:3100/workorders?focus=12)
+```
+
+为什么要推：**一次任务执行就是一次告警**。周期计划跑完会回到「待执行」重跑
+（`schedule::rearm_finished`），`task_code` 不变 → 去重键不变 → 老口径第二天
+直接静默，群里一片安静，现场以为「巡检没跑 / 没有告警」。
+
+跟单消息的特别处理：
+
+- **不 @ 人**：第一条消息已经 @ 过了，每轮都 @ 等于骚扰（数量变化那条仍 @，因为它带新信息）；
+- **去重键共用 `alert-repeat:{工单}`**：5 分钟窗口内的连刷仍会合并成一条，
+  机器人每 90s 报一次 `12608` 不会把群刷爆；
+- **标题带「第 N 次」**：N 是这张单上的告警条数（`SELECT COUNT(*) ... WHERE work_order_id`）。
+
+### @ 提醒那条
+
 有责任人手机号（或开了 `wecom_mention_all`）时，**卡片前面**还会有一条一行 `text`
 专门用于 @：markdown 不支持提及，只能另发。它只做提醒、**不重复卡片内容**：
 
@@ -301,8 +340,9 @@ wecom_alert_push / wecom_task_abnormal  渠道级：这一类事件推不推企�
 
 | 机制 | 行为 | 为什么必须 |
 | --- | --- | --- |
-| **同类告警不刷屏** | 同一设备 + 同一**结构化去重键**（`alerts.dedup_key`：`ai:<设备>:<任务>:<航点>:<类别>` / `fault:<设备>:<故障码>` / `hb:` / `ctrl:`）+ 24h 内已有**在办**自动派单工单 → 新告警挂到那张单上，**不入队**（`alert_flow::find_open_order` + `Assignment.repeated`）；没给键的来源退回旧行为（标题完全相等） | 机器人会每 90s 重复报同一个 `12608`，光靠 `alert_code` 去重无效（每次 code 都不同）；AI 告警内容带置信度/证据路径，**按标题比等于没去重**（2026-11-17 起改用结构化键，见迁移 024） |
-| **跟单补推**（上面那条的例外） | 挂回原单的告警如果**数量核对的检出数变了**（1 个 → 2 个），补推一条「跟单：数值有变化」，带上「上次 1 个 → 本次 2 个」与「原工单，未新建」；同一数值重复报继续静默。`alert_flow::count_change` + `Assignment.follow_up` | 2026-11-17 现场：同一航点先报「检查 3 个，实际检出 1 个」（推过群），下一轮报 2 个被完全吞掉，现场以为「配了 3 个却没告警」。置信度抖动不补推（没有信息量） |
+| **同类告警不刷屏** | 同一设备 + 同一**结构化去重键**（`alerts.dedup_key`：`ai:<设备>:<任务>:<航点>:<类别>` / `fault:<设备>:<故障码>` / `hb:` / `ctrl:`）+ 24h 内已有**在办**自动派单工单 → 新告警挂到那张单上，**不新建单**（`alert_flow::find_open_order` + `Assignment.repeated`）；没给键的来源退回旧行为（标题完全相等） | 机器人会每 90s 重复报同一个 `12608`，光靠 `alert_code` 去重无效（每次 code 都不同）；AI 告警内容带置信度/证据路径，**按标题比等于没去重**（2026-11-17 起改用结构化键，见迁移 024） |
+| **跟单照推**（上面那条不再顺带静默） | 挂回老单的告警默认**照样入队**，标题带「跟单：同一问题第 N 次」，工单后缀「（原工单，未新建）」，不 @ 人；去重键共用 `alert-repeat:{工单}`，同一问题 5 分钟内的连刷合并。`wecom_alert_repeat_push=false` 退回旧口径 | 一次任务执行就是一次告警：周期计划第二天再跑同一航点必须能在群里看到（之前 24h 只推第一条，现场以为巡检没跑）。连刷保护重新交给 5 分钟窗口，而不是 24h 工单复用 |
+| **跟单补推 · 数值变化** | 跟单里如果**数量核对的检出数变了**（1 个 → 2 个），消息额外带一行「数量变化：上次 1 个 → 本次 2 个」。`alert_flow::count_change` + `Assignment.follow_up` | 2026-11-17 现场：同一航点先报「检查 3 个，实际检出 1 个」，下一轮报 2 个被完全吞掉，现场以为「配了 3 个却没告警」。置信度抖动不带这行（没有信息量） |
 | **去重** | 同 `dedupe_key` 5 分钟内只放行一次（`DEDUPE_WINDOW`） | 心跳看门狗 15s 一轮、客户端 5s 一报进度，同一件事会被"发现"很多次；且看门狗和客户端上报都会判任务异常，靠它合并成一条 |
 | **限流** | 令牌桶 18/min，满了 `sleep` 到下一窗口 | 超 20 条/分钟企微直接拒，多余的消息会丢 |
 | **@all 计双份** | `cost = mention_all ? 2 : 1` | @all 实际发两条，按"消息条数"占额度 |
@@ -366,6 +406,27 @@ PUT  /api/notifications/webhook            # {"webhook":"…"}；空串 = 清除
 | `40058` | 内容超长 | 理论上已被截断兜住；真出现说明 `MARKDOWN_LIMIT` 被改大了 |
 | `connection refused` / `timeout` | 服务器出不了公网 | 见 §9「内网部署」 |
 
+### 群里只看到一次，后面的告警没进群
+
+先分辨是「**根本没入队**」还是「**入队了但只推了一次**」：
+
+```sql
+-- 告警到底挂在哪张单上（work_order_id 非空 = 跟单）
+SELECT alert_code, occurred_at, work_order_id, dedup_key
+  FROM alerts ORDER BY id DESC LIMIT 10;
+
+-- 推送记录里有没有后面的告警（ref_id = alerts.id）
+SELECT created_at, ref_type, ref_id, dedupe_key FROM notifications
+ ORDER BY id DESC LIMIT 10;
+```
+
+| 现象 | 原因 | 怎么办 |
+| --- | --- | --- |
+| 告警有 `work_order_id`，`notifications` 里没有后来那几条 | `wecom_alert_repeat_push` 被关了 | 设置页把「企业微信 · 重复告警也推」打开（缺行 = 开） |
+| 跟单消息共用的键在 5 分钟内 | `alert-repeat:{工单}` 刷屏保护，日志打 `去重窗口内，跳过` | 正常；隔 5 分钟以上的下一轮会推 |
+| 告警里 `dedup_key` 为空、标题又被截成同一句 | 没带结构化键的来源退回「标题相等」 | 新告警源请写 `alerts.dedup_key`（见 §10） |
+| `notifications` 里根本没有 | 通道/开关/级别被拦（见 §4 三层开关） | 按上一节的排查顺序逐层看 |
+
 ### 日志
 
 ```bash
@@ -374,6 +435,7 @@ journalctl -u rust-admin-robodog -f | grep -i wecom
 启动时打 `企业微信告警推送已配置 enabled=… min_level=… source=db|env key_tail=2c1314`
 （**只打 key 末 6 位**，够核对是哪一个，又不把凭据写进日志）。
 发送失败打 `wecom: 推送失败 key=… error=…`。
+跟单被去重/开关拦下时分别打 `wecom: 去重窗口内，跳过` / `wecom: 同类告警已有在办工单且关闭了重复推送，跳过`。
 
 ---
 
@@ -464,6 +526,8 @@ journalctl -u rust-admin-robodog -f | grep -i wecom
 | 改 `AppState` 加字段 | 7 个集成测试编译失败 | 新增字段记得改 `tests/*.rs` 的 `AppState { .. }` 字面量；`Notifier::disabled()` 就是为这个准备的 |
 | 自动派单复用「告警转工单」时顺手把告警置「处理中」 | `control_source` 三个用例全红：抢占告警刚建出来就被改成「处理中」，「未处理」计数变 0 | 人工转单 = 已接手 → 推进告警状态；**自动派单的工单还在「待接单」，告警必须留在「未处理」**（`create_order_core(..., promote_alert)`） |
 | 派单逻辑写在推送开关后面 | 没配 webhook 的环境里告警不建单也没人管，功能等于不存在 | 派单在建单前、`channel_enabled()` 判断之前执行 |
+| 把「工单复用」当成「推送去重」 | 24h 内同一结构键只推一条：周期计划第二天再跑同一航点，群里什么都没有，现场以为「巡检没跑 / 没告警」 | 建单去重（`find_open_order`）和推不推是两件事：跟单默认照推（`wecom_alert_repeat_push`），连刷交给 5 分钟窗口 `alert-repeat:{工单}` |
+| 跟单消息也 @ 当班责任人 | 一次任务里重复告警每条都 @ 一遍，手机响个不停 | 跟单不发 mentions；只有第一条和「数量变化」那条才 @ 人 |
 | 一条告警一张工单，不看去重 | 上线当天机器人每 90s 报一次 `12608`，5 分钟堆 2 张单 + 2 条群消息 | 先去重再建单：同设备 + 24h 内在办 → 复用老单并不推群 |
 | 拿工单标题当「同一件事」的判据 | AI 告警内容带置信度（0.41 → 0.77）/ 证据图路径，标题一变就每轮巡检新建一张单，24h 去重等于没有 | 告警写入时带 `dedup_key`（`alerts` + `work_orders` 两列，迁移 024），`find_open_order` 优先按它比；只有无键来源才退回标题 |
 | 只改 `handlers/alerts.rs` 的 SELECT | `/dashboard/summary` 500（驾驶舱自己拼了一份 `Alert` 查询） | `Alert` 结构体加列时，全仓搜一遍 `query_as::<Alert>` / `build_query_as::<Alert>` |

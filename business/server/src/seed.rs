@@ -101,6 +101,13 @@ async fn ensure_settings(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         ),
         (
             "notification",
+            "wecom_alert_repeat_push",
+            "true",
+            "bool",
+            "同一问题已有在办工单时，重复告警也推到企业微信群",
+        ),
+        (
+            "notification",
             "alert_auto_workorder",
             "true",
             "bool",
