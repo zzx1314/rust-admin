@@ -1134,10 +1134,11 @@ AI 可对除红外外的五路开启，画框方式二选一：
 - **航点动作复用这份模型目录**：路线编辑器里动作类型选「AI 识别」时，识别场景 / 识别类别
   直接勾选实时视频页的那一套（`GET /api/backpack/status` → `detect.tasks`），写进动作的
   `scene` + `labels`，到点开窗口时原样下发给板端，不用再手填关键词（老数据仍兼容关键词匹配）。
-  另可选填**「检查目标数量」（`expectCount`）**：留空 = 只判「能不能找到目标」；填了则由板端把
-  AI 检出的目标数与它比对，**不一致上报数量告警**（告警中心 + 任务时间线 + 企微）。
-  开窗同时把计划 id（= 业务任务号）与航点下标下发给板端，命中帧与 `result.json` 落到
-  `detect_jobs/<计划ID>/pt<航点下标>/`，可按计划回溯。
+  动作还有**检测类型**（`checkType`）两类：**检测是否存在**（找到就存证/上报，不判数量）与
+  **检测数量是否正确**（再核对「检查目标数量 `expectCount`」，不一致**上报数量告警**——包括
+  「一个都没找到」= 0 ≠ N，且只认窗口正常到期，被打断不记账）。老数据没有该字段时后端按
+  有没有 `expectCount` 推断。开窗同时把计划 id（= 业务任务号）与航点下标下发板端，
+  命中帧与 `result.json` 落到 `detect_jobs/<计划ID>/pt<航点下标>/`，可按计划回溯。
   窗口时长跟着该点的「停留时长」走（停留 + 8 s，最短 10 s、上限 `ai_window_max_secs`
   默认 300 s），**离开航点立即结束**——所以 `dwell=100` 的点会识别满整段停留，不再只覆盖前 30 s。
   链路与排查见 [`docs/official-app-parity.md`](docs/official-app-parity.md) §5.6、
@@ -1148,10 +1149,10 @@ AI 可对除红外外的五路开启，画框方式二选一：
 
   ```text
   客户端到点(5009) → GET tasks/status(本机) → ai_point（含模型目录）→ 服务端算场景/类别/阈值/窗口
-                → ai_start（含 planId/pointIndex/expectCount）
+                → ai_start（含 planId/pointIndex/checkType/expectCount）
                 → POST /api/detect/start|config → 读 SSE → ai_detect（按阈值+类别去重）
-                → 数量与 expectCount 不符 → ai_alert → 服务端写数量告警 + 企微
-                → ai_end → 服务端写 alerts + task_events + 企微推送
+                → 数量任务数量不符 → ai_alert → 服务端写数量告警 + 企微
+                → ai_end（带 expired）→ 服务端写 alerts + task_events + 企微推送
   任务终态/取消 → 服务端下发 ai_stop → 客户端 POST /api/detect/stop
   ```
 

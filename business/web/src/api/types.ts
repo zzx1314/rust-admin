@@ -180,13 +180,24 @@ export interface RoutePointAction {
    */
   labels?: string[];
   /**
-   * 「AI 识别」专用：检查目标数量。
+   * 「AI 识别」专用：任务类型。
    *
-   * 留空（或 0）= 不核对数量，只判「能不能找到目标」；填了则由板端把 AI 检出的
-   * 目标数与它比对，不一致时上报数量告警（告警中心 + 企业微信）。
+   * - `exist`：检测是否存在——找到目标就存证/上报，不判数量；
+   * - `count`：检测数量是否正确——还要核对数量，不一致（含「一个都没找到」）告警。
+   *
+   * 老数据没有这个字段时后端按「有没有 `expectCount`」推断。
+   */
+  checkType?: "exist" | "count";
+  /**
+   * 「AI 识别」专用：检查目标数量（`checkType: "count"` 时必填）。
+   *
+   * 由板端把 AI 检出的目标数与它比对，不一致时上报数量告警（告警中心 + 企业微信）。
    */
   expectCount?: number | null;
 }
+
+/** AI 识别的两类任务：检测是否存在 / 检测数量是否正确 */
+export type AiCheckType = "exist" | "count";
 
 export interface RoutePoint {
   name: string;

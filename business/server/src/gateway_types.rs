@@ -143,9 +143,12 @@ pub struct AiPointPayload {
     /// 动作 `threshold` 原文（「置信度 ≥ 0.35」）
     #[serde(default)]
     pub threshold: String,
-    /// 动作 `expectCount`：检查目标数量（空 = 不核对数量）
+    /// 动作 `expectCount`：检查目标数量（数量任务必填；存在性任务不参与判定）
     #[serde(default)]
     pub expect_count: Option<i64>,
+    /// 动作 `checkType`：任务类型，`exist` = 检测是否存在 / `count` = 检测数量是否正确
+    #[serde(default)]
+    pub check_type: Option<String>,
     /// 板端 `GET /api/detect/tasks` 原样
     #[serde(default)]
     pub tasks: Option<Value>,
@@ -177,6 +180,10 @@ pub struct AiEndPayload {
     pub reason: String,
     #[serde(default)]
     pub hits: i64,
+    /// 窗口是否**正常到期**（`false` = 任务结束 / 被新航点顶替而提前结束）。
+    /// 数量任务靠它区分「到期没找到 = 数量不一致」和「被打断，不记账」。
+    #[serde(default)]
+    pub expired: bool,
 }
 
 /// 客户端 → 服务端：AI 检出数量与「检查目标数量」不一致

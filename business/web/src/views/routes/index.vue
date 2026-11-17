@@ -4,6 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { parkApi, mapApi, routeApi, zoneApi } from "@/api/ops";
 import type {
+  AiCheckType,
   MapRaster,
   MapVersion,
   Park,
@@ -125,8 +126,14 @@ const actionForm = reactive({
   labels: [] as string[],
   aiConf: 0.35,
   /**
-   * AI 识别：检查目标数量。留空（null）= 不核对数量；
-   * 填了则由板端把 AI 检出的目标数与它比对，不一致上报数量告警。
+   * AI 识别：两类任务。
+   * - `exist`  检测是否存在：找到目标就存证/上报，不判数量；
+   * - `count`  检测数量是否正确：还要核对数量，不一致（含「一个都没找到」）告警。
+   */
+  checkType: "exist" as AiCheckType,
+  /**
+   * AI 识别：检查目标数量（仅 `count` 任务必填）。
+   * 与板端 AI 检出的目标数比对，不一致上报数量告警。
    */
   expectCount: null as number | null
 });
@@ -143,11 +150,21 @@ const aiParamAuto = computed(
 
 /**
  * 已保存动作是不是「AI 识别」：与后端 `is_ai_action` 同规则
- * （类型名含 `AI` 或 `识别`），只用于在动作卡片上展示检查数量。
+ * （类型名含 `AI` 或 `识别`），只用于在动作卡片上展示任务类型。
  */
 function isAiActionOf(action: { type?: string } | null | undefined) {
   const kind = String(action?.type ?? "");
   return kind.toUpperCase().includes("AI") || kind.includes("识别");
+}
+
+/** 动作卡片上的任务类型文案：老数据没 `checkType` 时按有无 `expectCount` 推断 */
+function actionCheckTypeLabel(action: { checkType?: string; expectCount?: number | null }) {
+  const countMode = action.checkType
+    ? action.checkType === "count"
+    : action.expectCount != null && Number(action.expectCount) > 0;
+  return countMode
+    ? `数量是否正确（检查 ${action.expectCount ?? "—"} 个，不一致告警）`
+    : "是否存在";
 }
 
 const filteredRoutes = computed(() => {
@@ -728,6 +745,7 @@ function openActionDialog(kind: "point" | "leg") {
     scene: "",
     labels: [],
     aiConf: 0.35,
+    checkType: "exist",
     expectCount: null
   });
   actionDialog.value = true;
@@ -741,6 +759,7 @@ function syncActionDefaults() {
   actionForm.scene = "";
   actionForm.labels = [];
   actionForm.aiConf = 0.35;
+  actionForm.checkType = "exist";
   actionForm.expectCount = null;
   if (actionForm.type === "AI 识别") void aiCatalog.load();
 }
@@ -778,6 +797,13 @@ function saveAction() {
   const target =
     actionKind.value === "point" ? selectedPoint.value?.actions : selectedLeg.value?.actions;
   if (!target) return;
+  // 数量任务必须填检查数量，否则板端只能按存在性判定（等于白配）
+  const countTask = isAiAction.value && actionForm.checkType === "count";
+  const expectCount = Math.max(1, Math.min(999, Number(actionForm.expectCount) || 0));
+  if (countTask && !expectCount) {
+    ElMessage.error("「检测数量是否正确」必须填写检查目标数量");
+    return;
+  }
   snapshot();
   // AI 识别：场景 / 类别来自实时视频模型目录，阈值走滑杆（后端按 `threshold` 解析置信度）
   const ai = isAiAction.value;
@@ -795,8 +821,9 @@ function saveAction() {
       : {}),
     ...(ai && actionForm.scene ? { scene: actionForm.scene } : {}),
     ...(ai && actionForm.labels.length ? { labels: [...actionForm.labels] } : {}),
-    // 检查目标数量：留空就不写这个字段（= 不核对数量）
-    ...(ai && actionForm.expectCount ? { expectCount: Number(actionForm.expectCount) } : {})
+    // 任务类型：存在性任务不写检查数量（后端也按 checkType 判，双保险）
+    ...(ai ? { checkType: actionForm.checkType } : {}),
+    ...(countTask ? { expectCount } : {})
   });
   actionDialog.value = false;
   ElMessage.success(`已添加动作：${actionForm.type}`);
@@ -1432,7 +1459,7 @@ onBeforeUnmount(() => {
                     </div>
                     <div>失败：<b>重试 {{ action.retry || 1 }} 次</b></div>
                     <div v-if="isAiActionOf(action)">
-                      检查数量：<b>{{ action.expectCount ? `${action.expectCount} 个（不一致告警）` : "不核对" }}</b>
+                      检测类型：<b>{{ actionCheckTypeLabel(action) }}</b>
                     </div>
                   </div>
                 </div>
@@ -1718,17 +1745,25 @@ onBeforeUnmount(() => {
               title="由上方「置信度阈值」滑杆决定"
             />
           </div>
-          <!-- 检查目标数量：留空 = 不核对数量（只判「能否找到目标」） -->
+          <!-- AI 识别：两类任务（只判「有没有」/ 判「数量对不对」） -->
           <div v-if="isAiAction" class="field">
-            <label>检查目标数量</label>
+            <label>检测类型</label>
+            <select v-model="actionForm.checkType" class="select" title="决定到点是只判「能否找到目标」，还是要核对数量">
+              <option value="exist">检测是否存在</option>
+              <option value="count">检测数量是否正确</option>
+            </select>
+          </div>
+          <!-- 检查目标数量：只有数量任务需要，且必填 -->
+          <div v-if="isAiAction && actionForm.checkType === 'count'" class="field">
+            <label>检查目标数量 <em>*</em></label>
             <input
               v-model.number="actionForm.expectCount"
               class="input mono"
               type="number"
               min="1"
               max="999"
-              placeholder="留空 = 不核对数量"
-              title="填了就让板端把 AI 检出的目标数与它比对，不一致时上报数量告警"
+              placeholder="如 3"
+              title="板端把 AI 检出的目标数与它比对，不一致（含一个都没找到）上报数量告警"
             />
           </div>
           <div class="field">
@@ -1738,8 +1773,9 @@ onBeforeUnmount(() => {
           <div v-if="isAiAction" class="rt-hint" style="margin: 0; grid-column: 1 / -1">
             到点后平台用<b>与实时视频同一套 AI 模型</b>开识别窗口：场景 = 模型包，类别 = 勾选的标签，
             阈值 = 置信度下限；检出目标写入「告警中心」。命中帧与 result.json 会落到板端
-            detect_jobs/计划ID/pt航点下标/（计划 ID = 业务任务号）。「检查目标数量」留空则只判
-            「能否找到目标」；填了则把 AI 检出的目标数与它比对，<b>不一致上报数量告警</b>。
+            detect_jobs/计划ID/pt航点下标/（计划 ID = 业务任务号）。检测类型二选一：
+            <b>检测是否存在</b>（找到就存证/上报）、<b>检测数量是否正确</b>（再核对数量，
+            不一致——含一个都没找到——上报数量告警）。
             窗口时长跟着「停留时长」走（停留 + 8s，最短 10s、最长 300s，离开航点立即结束），
             不额外占用停留时长。模型目录读不到时可以手填场景关键词，后端仍有关键词兜底。
           </div>

@@ -277,8 +277,9 @@ B. client（正式环境：平台在公网、Agent 只在内网，服务端连�
   → 下发 ai_start（含 planId / pointIndex / expectCount）
   → 客户端 POST /api/detect/start|config → 读本机 SSE
   → 按阈值 + 类别去重回传 ai_detect → 服务端写 alerts + task_events + 企微
-  → 数量与 expectCount 不符（SSE plan_hit.count_alert）→ 转发 `ai_alert`
-  → 客户端收尾 ai_end；任务终态/取消时服务端下发 ai_stop
+  → 数量任务（checkType=count）与 expectCount 不符（SSE plan_hit.count_alert）
+    → 转发 `ai_alert`；到期一个都没找到也由服务端按 ai_end.expired 判成数量不一致
+  → 客户端收尾 ai_end（带 expired）；任务终态/取消时服务端下发 ai_stop
 ```
 
 > 为什么要有 B：正式环境的业务平台在 `39.107.55.13`（公网），背包 Agent 在
@@ -296,16 +297,26 @@ B. client（正式环境：平台在公网、Agent 只在内网，服务端连�
 | `scene` | **模型包 id**，优先于 `param` 关键词：精确匹配 Agent `task`（模型包下线时才退回关键词匹配）。由路线编辑器从「实时视频 → AI 识别」的模型目录里选 | `fire` |
 | `labels` | **识别类别**（Agent 的 label `name`，与实时视频下发的 `labels` 同一套）；为空 = 该场景全部类别；板上不存在的类别会被忽略并打 WARN | `["flame", "smoke"]` |
 | `threshold` | 置信度阈值：`0.85`、`> 0.85`、`85%` 都认；`> 65℃` 这类温度阈值不会被误当成置信度 | `置信度 ≥ 0.40` |
-| `expectCount` | **检查目标数量**（可选）：留空 = 只判「能不能找到目标」，不核对数量；填了则由板端把 AI 检出的目标数与它比对，不一致上报数量告警 | `3` |
+| `checkType` | **任务类型**：`exist` 检测是否存在 / `count` 检测数量是否正确。老数据没有这个字段时后端按「有没有 `expectCount`」推断（给了数量就是数量任务） | `count` |
+| `expectCount` | **检查目标数量**：仅 `count` 任务必填；由板端把 AI 检出的目标数与它比对，不一致上报数量告警（`exist` 任务即使误传也不判数量） | `3` |
+
+**两类任务怎么落地**：
+
+| 类型 | 命中 | 窗口结束仍未命中 |
+| --- | --- | --- |
+| `exist` 检测是否存在 | 存证 + `ai_detect` 上报（不判数量） | 只算「没找到」，不产生数量告警 |
+| `count` 检测数量是否正确 | 存证 + `ai_detect`；`found_count ≠ expectCount` → 数量告警 | 0 ≠ N 也算数量不一致 → 数量告警（仅窗口**正常到期**时，被打断不记账） |
 
 **计划 id 与存证**：开窗同时把 `planId`（= 业务任务号 `taskCode`）与 `pointIndex`
 下发给板端，命中帧与 `result.json` 落到板端
 `detect_jobs/<planId>/pt<pointIndex>/`（图已画中文框），方便按计划回溯。
-`expectCount` 的判定在板端做（它知道本帧到底画了几个框），结论文案形如
+数量判定在板端做（它知道本帧到底画了几个框），结论文案形如
 `AI 识别数量核对不一致：任务「…」航点 0「…」检查 3 个，实际检出 2 个（证据：…/dogcam_x.jpg）`，
-客户端转发 `ai_alert`、服务端直连模式读 SSE 的 `plan_hit`，两条路最终都进同一个
-`record_count_alert`（告警中心 + 任务时间线 + 企微），每个窗口只落一条。
+客户端转发 `ai_alert`、服务端直连模式读 SSE 的 `plan_hit`/`plan_miss`，两条路最终都进
+同一个 `record_count_alert`（告警中心 + 任务时间线 + 企微），每个窗口只落一条。
 数量核对取「命中后连续几帧的检出最大值」，单帧遮挡少画一个框不会误报。
+「未命中 = 数量不一致」只认客户端的 `ai_end.expired=true`（窗口正常到期）；
+任务结束 / 被新航点顶替时 `expired=false`，服务端不记这笔账。
 
 **怎么配**：路线编辑器「该点执行动作」→ 动作类型选 `AI 识别`，场景与识别类别直接勾选
 「实时视频 → AI 识别」面板上的同一份模型目录（数据来自 `GET /api/backpack/status` 的

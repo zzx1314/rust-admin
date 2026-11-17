@@ -73,8 +73,11 @@ HTTP」模式。两者共用同一个服务令牌，见 `business/README.md`。
 航点 AI 识别的「谁去调板端 Agent」由 `ROBODOG_POINT_AI`（`[backpack] point_ai`，默认
 `auto`）决定：配了 `ROBODOG_BACKPACK_URL` 就服务端直连，否则由现场设备客户端代调
 （客户端与背包 Agent 同在 `.246`，走 `127.0.0.1:8000`；消息为 `ai_point` / `ai_start` /
-`ai_detect` / `ai_alert`（数量核对不一致）/ `ai_end` / `ai_stop`）。正式环境的云端平台连不到内网 Agent，`auto` 走的
-就是客户端这条路；改这块先读 `business/docs/official-app-parity.md` §5.6。
+`ai_detect` / `ai_alert`（数量核对不一致）/ `ai_end` / `ai_stop`）。航点动作的 `checkType`
+分两类任务：`exist` 检测是否存在 / `count` 检测数量是否正确（后者带 `expectCount`，
+不一致含「一个都没找到」都告警，且只认窗口正常到期 `ai_end.expired`）。正式环境的云端
+平台连不到内网 Agent，`auto` 走的就是客户端这条路；改这块先读
+`business/docs/official-app-parity.md` §5.6。
 
 企业微信告警推送：群机器人 webhook 只走环境变量 `ROBODOG_WECOM_WEBHOOK`
 （地址即凭据，不要写进 `server.toml`）；另可选 `ROBODOG_PUBLIC_URL` 拼消息里的

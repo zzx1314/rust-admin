@@ -208,11 +208,13 @@ async fn assert_no_msg(ws: &mut DeviceWs, msg_type: &str, within: Duration) {
 
 /// 插一条「首点带 AI 识别动作」的路线 + 一条引用它的任务
 ///
-/// `expect_count` = 动作里的「检查目标数量」（`None` = 不核对数量）。
+/// `check_type` = 任务类型（`exist` / `count`，`None` = 老数据靠 expectCount 推断）；
+/// `expect_count` = 动作里的「检查目标数量」（数量任务必填）。
 async fn seed_ai_route(
     state: &AppState,
     scene: Option<&str>,
     labels: &[&str],
+    check_type: Option<&str>,
     expect_count: Option<i64>,
 ) -> String {
     let device: (i64, Option<i64>) = sqlx::query_as("SELECT id, park_id FROM devices LIMIT 1")
@@ -227,7 +229,8 @@ async fn seed_ai_route(
         "trigger": "到达即执行",
         "threshold": "置信度 ≥ 0.35",
         "retry": 1,
-        // 检查目标数量：路线编辑器写进动作，服务端解析后随 ai_start 下发
+        // 任务类型 + 检查数量：路线编辑器写进动作，服务端解析后随 ai_start 下发
+        "checkType": check_type,
         "expectCount": expect_count,
     });
     let route_data = json!({
@@ -337,7 +340,7 @@ async fn client_relayed_point_ai_starts_window_and_records_hits() {
     let _serial = TEST_LOCK.lock().await;
     ai_patrol::global().stop("测试初始化").await;
     let (state, _temp) = test_state("client").await;
-    let task_code = seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], None).await;
+    let task_code = seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("exist"), None).await;
     let port = spawn_server(state.clone()).await;
     let (mut ws, _device) = register_device(port).await;
 
@@ -428,6 +431,7 @@ async fn unknown_scene_falls_back_to_keyword_and_filters_labels() {
         &state,
         Some("extinguisher"),
         &["extinguisher", "nope"],
+        Some("exist"),
         None,
     )
     .await;
@@ -456,7 +460,7 @@ async fn terminal_task_sends_ai_stop_to_device() {
     let _serial = TEST_LOCK.lock().await;
     ai_patrol::global().stop("测试初始化").await;
     let (state, _temp) = test_state("client").await;
-    let task_code = seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], None).await;
+    let task_code = seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("exist"), None).await;
     let port = spawn_server(state.clone()).await;
     let (mut ws, _device) = register_device(port).await;
 
@@ -501,7 +505,7 @@ async fn leaving_the_point_closes_window_immediately() {
     let _serial = TEST_LOCK.lock().await;
     ai_patrol::global().stop("测试初始化").await;
     let (state, _temp) = test_state("client").await;
-    let task_code = seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], None).await;
+    let task_code = seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("exist"), None).await;
     let port = spawn_server(state.clone()).await;
     let (mut ws, _device) = register_device(port).await;
 
@@ -552,7 +556,7 @@ async fn server_mode_ignores_client_point_request() {
     let _serial = TEST_LOCK.lock().await;
     ai_patrol::global().stop("测试初始化").await;
     let (state, _temp) = test_state("server").await;
-    let task_code = seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], None).await;
+    let task_code = seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("exist"), None).await;
     let port = spawn_server(state.clone()).await;
     let (mut ws, _device) = register_device(port).await;
 
@@ -569,7 +573,7 @@ async fn auto_mode_without_base_url_delegates_to_client() {
     let _serial = TEST_LOCK.lock().await;
     ai_patrol::global().stop("测试初始化").await;
     let (state, _temp) = test_state("auto").await;
-    let task_code = seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], None).await;
+    let task_code = seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("exist"), None).await;
     let port = spawn_server(state.clone()).await;
     let (mut ws, _device) = register_device(port).await;
 
@@ -589,7 +593,7 @@ async fn window_is_cleared_when_client_never_reports_end() {
     let (state, _temp) = test_state("client").await;
     // 这个点 dwell=0 → 窗口 12s，看门狗在 22s 后清窗口；测试里不想等那么久，
     // 直接验证「没有 ai_end 时窗口仍在」+「stop 能清掉」这条兜底路径。
-    let task_code = seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], None).await;
+    let task_code = seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("exist"), None).await;
     let port = spawn_server(state.clone()).await;
     let (mut ws, _device) = register_device(port).await;
     ws.send(Message::Text(ai_point(&task_code, false).to_string()))
@@ -609,7 +613,7 @@ async fn count_mismatch_alert_is_recorded_once() {
     let _serial = TEST_LOCK.lock().await;
     ai_patrol::global().stop("测试初始化").await;
     let (state, _temp) = test_state("client").await;
-    let task_code = seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some(3)).await;
+    let task_code = seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("count"), Some(3)).await;
     let port = spawn_server(state.clone()).await;
     let (mut ws, _device) = register_device(port).await;
 
@@ -689,4 +693,124 @@ async fn count_mismatch_alert_is_recorded_once() {
     );
 
     ai_patrol::global().stop("用例结束").await;
+}
+
+/// 数量任务：窗口正常到期却一个目标都没找到 = 数量不一致（0 ≠ N），
+/// 也要落数量告警；存在性任务同等情形只算「没找到」，不告警。
+#[tokio::test]
+async fn count_task_reports_mismatch_when_window_expires_without_hits() {
+    let _serial = TEST_LOCK.lock().await;
+    ai_patrol::global().stop("测试初始化").await;
+    let (state, _temp) = test_state("client").await;
+    let task_code =
+        seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("count"), Some(2))
+            .await;
+    let port = spawn_server(state.clone()).await;
+    let (mut ws, _device) = register_device(port).await;
+
+    ws.send(Message::Text(ai_point(&task_code, false).to_string()))
+        .await
+        .expect("发送 ai_point 失败");
+    let start = next_msg(&mut ws, "ai_start").await;
+    let window_id = start["payload"]["windowId"]
+        .as_str()
+        .expect("ai_start 必须带 windowId")
+        .to_string();
+    assert_eq!(start["payload"]["checkType"], "count", "{start}");
+    assert_eq!(start["payload"]["expectCount"], 2, "{start}");
+
+    // 窗口到期、一条检出都没有
+    ws.send(Message::Text(
+        json!({
+            "msgType": "ai_end",
+            "ts": "2026-11-16 10:01:48",
+            "payload": {
+                "windowId": window_id,
+                "reason": "窗口到期（108s）",
+                "hits": 0,
+                "expired": true
+            }
+        })
+        .to_string(),
+    ))
+    .await
+    .expect("发送 ai_end 失败");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let contents = alert_contents(&state).await;
+    assert_eq!(contents.len(), 1, "数量任务未命中要落数量告警: {contents:?}");
+    assert!(
+        contents[0].contains("数量核对不一致")
+            && contents[0].contains("检查 2 个")
+            && contents[0].contains("实际检出 0 个"),
+        "告警要写清「一个都没找到」: {}",
+        contents[0]
+    );
+    assert_eq!(ai_patrol::global().status().await["active"], false);
+}
+
+/// 存在性任务：① 到期没找到不告警；② 误收到数量告警也不落库（不判数量）。
+#[tokio::test]
+async fn exist_task_never_judges_quantity() {
+    let _serial = TEST_LOCK.lock().await;
+    ai_patrol::global().stop("测试初始化").await;
+    let (state, _temp) = test_state("client").await;
+    let task_code =
+        seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("exist"), None)
+            .await;
+    let port = spawn_server(state.clone()).await;
+    let (mut ws, _device) = register_device(port).await;
+
+    ws.send(Message::Text(ai_point(&task_code, false).to_string()))
+        .await
+        .expect("发送 ai_point 失败");
+    let start = next_msg(&mut ws, "ai_start").await;
+    assert_eq!(start["payload"]["checkType"], "exist", "{start}");
+    assert!(
+        start["payload"]["expectCount"].is_null(),
+        "存在性任务不该下发检查数量: {start}"
+    );
+    let window_id = start["payload"]["windowId"]
+        .as_str()
+        .expect("ai_start 必须带 windowId")
+        .to_string();
+
+    // 即使客户端误报数量不一致，服务端也按「存在性任务不判数量」丢弃
+    ws.send(Message::Text(
+        json!({
+            "msgType": "ai_alert",
+            "ts": "2026-11-16 10:00:02",
+            "payload": { "windowId": window_id, "expectCount": 3, "foundCount": 1 }
+        })
+        .to_string(),
+    ))
+    .await
+    .expect("发送 ai_alert 失败");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // 到期仍未命中：存在性任务 = 没找到，不告警
+    ws.send(Message::Text(
+        json!({
+            "msgType": "ai_end",
+            "ts": "2026-11-16 10:01:48",
+            "payload": {
+                "windowId": window_id,
+                "reason": "窗口到期（108s）",
+                "hits": 0,
+                "expired": true
+            }
+        })
+        .to_string(),
+    ))
+    .await
+    .expect("发送 ai_end 失败");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let contents = alert_contents(&state).await;
+    assert!(contents.is_empty(), "存在性任务不该产生数量告警: {contents:?}");
+    let events = event_descriptions(&state).await;
+    assert!(
+        events.iter().any(|text| text.contains("窗口结束")),
+        "没找到也要在任务时间线留痕: {events:?}"
+    );
 }

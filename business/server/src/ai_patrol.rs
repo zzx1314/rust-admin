@@ -20,10 +20,16 @@
 //!
 //! 开窗时代码把三个跟航点绑定的参数一起传给板端：`planId`（= 业务任务号
 //! `taskCode`，板端拿它建存证目录 `detect_jobs/<planId>/pt<航点下标>/`）、
-//! `pointIndex` 和 `expectCount`（动作里的「检查目标数量」）。`expectCount` 空 =
-//! 不核对数量；填了则由板端把 AI 检出的目标数与它比对，不一致时上报 `ai_alert`
-//! （客户端代调）或在 SSE 的 `plan_hit` 事件里带 `count_alert`（服务端直连），
+//! `pointIndex`、`checkType` 和 `expectCount`。`checkType` 区分两类任务：
+//!
+//! - `exist`（检测是否存在）：找到目标就存证/上报，数量不参与判定；
+//! - `count`（检测数量是否正确）：除了找到，还要把 AI 检出的目标数与
+//!   `expectCount` 比对，不一致（含「一个都没找到」= 0 ≠ N）就上报数量告警。
+//!
+//! 不一致时板端上报 `ai_alert`（客户端代调）或在 SSE 里带 `count_alert`（服务端直连），
 //! 两条路都落到同一个 `record_count_alert`：告警中心 + 任务时间线 + 企业微信。
+//! 「未命中」只在窗口**正常到期**时才算数量不一致（被任务结束/新航点打断不记账），
+//! 依据是客户端 `ai_end` 里的 `expired`。
 //!
 //! 窗口时长 = `dwell.max(4) + 8` 秒，下限 10 s（Agent 加载模型要 1~3 s，太短会
 //! 「还没开始识别狗就走了」），上限 `[backpack] ai_window_max_secs`（默认 300 s，与
@@ -309,6 +315,7 @@ impl AiPatrol {
             labels: action.labels.clone(),
             threshold_text: action.threshold.clone(),
             expect_count: action.expect_count,
+            check_type: action.check_type.clone(),
             secs: window_secs,
         };
 
@@ -442,11 +449,17 @@ impl AiPatrol {
         // 「检查目标数量」以路线数据为准（旧版客户端不会带 `expectCount`）；
         // 客户端带了而路线里没配时用客户端的值兜底。
         let mut expect_count = payload.expect_count.filter(|value| *value > 0);
+        // 任务类型同样以路线数据为准；旧版客户端不带 checkType 时按 expectCount 推断
+        let mut check_type = normalize_check_type(
+            payload.check_type.as_deref(),
+            expect_count,
+        );
         if let Some(route_id) = task.route_id
             && let Ok(Some(point)) = load_point(&state.db, route_id, payload.point_index).await
             && let Some(action) = point.find_ai_action()
         {
             expect_count = action.expect_count.or(expect_count);
+            check_type = action.check_type.clone();
         }
 
         let cfg = WindowConfig {
@@ -461,6 +474,7 @@ impl AiPatrol {
             labels: payload.labels.clone(),
             threshold_text: payload.threshold.clone(),
             expect_count,
+            check_type,
             secs,
         };
         let stop = Arc::new(Notify::new());
@@ -498,6 +512,7 @@ impl AiPatrol {
             "pointIndex": payload.point_index,
             "pointName": point_name,
             "planId": payload.task_code,
+            "checkType": cfg.check_type,
             "expectCount": expect_count,
             "labels": labels,
             "conf": threshold,
@@ -598,6 +613,16 @@ impl AiPatrol {
         };
         let hits = window.hits.lock().await.len();
         let at = now();
+        // 数量任务：窗口正常到期却一个目标都没找到 → 数量不一致（0 ≠ N）。
+        // 被任务结束 / 新航点顶替打断时 `expired=false`，不记账（狗可能还没看够）。
+        if window.cfg.check_type == "count"
+            && let Some(expect) = window.cfg.expect_count
+            && payload.hits <= 0
+            && payload.expired
+            && !window.alerted.swap(true, Ordering::Relaxed)
+        {
+            record_count_alert(state, &window.cfg, 0, expect, "").await;
+        }
         info!(
             "航点 AI 识别结束（客户端回报）：任务 {} 航点 {}「{}」{}，上报 {hits} 类目标",
             window.task_code, window.point_index, window.point_name, payload.reason
@@ -627,7 +652,7 @@ impl AiPatrol {
         device_code: &str,
         payload: &AiAlertPayload,
     ) {
-        let (cfg, alerted, expect) = {
+        let (cfg, alerted, expect, check_type) = {
             let guard = self.active.lock().await;
             let Some(window) = guard.as_ref() else {
                 debug!("航点 AI 识别：没有活动窗口，丢弃数量告警");
@@ -642,8 +667,18 @@ impl AiPatrol {
                 );
                 return;
             }
-            (window.cfg.clone(), window.alerted.clone(), window.cfg.expect_count)
+            (
+                window.cfg.clone(),
+                window.alerted.clone(),
+                window.cfg.expect_count,
+                window.cfg.check_type.clone(),
+            )
         };
+        if check_type != "count" {
+            // 存在性任务不判数量：脏数据/旧客户端误报一律丢弃
+            debug!("航点 AI 识别：本窗口是存在性任务，忽略数量告警");
+            return;
+        }
         let Some(expect) = payload
             .expect_count
             .filter(|value| *value > 0)
@@ -717,8 +752,10 @@ struct WindowConfig {
     labels: Vec<String>,
     /// 动作 `threshold` 原文，如「置信度 > 0.85」
     threshold_text: String,
-    /// 动作 `expectCount`：检查目标数量（`None` = 不核对数量）
+    /// 动作 `expectCount`：检查目标数量（数量任务必填）
     expect_count: Option<i64>,
+    /// 任务类型：`exist`（是否存在）/ `count`（数量是否正确）
+    check_type: String,
     secs: u64,
 }
 
@@ -798,6 +835,7 @@ async fn run_window(
         "fps": DETECT_FPS,
         "plan_id": config.task_code,
         "point_index": config.point_index,
+        "check_type": config.check_type,
         "expect_count": config.expect_count,
     });
     if let Err(error) = start_detect(&client, &base, &body, was_running).await {
@@ -827,7 +865,17 @@ async fn run_window(
         hits: hits.clone(),
         alerted: alerted.clone(),
     };
-    consume_events(&state, &base, &config, threshold, &stop, &sink, deadline).await;
+    let expired = consume_events(&state, &base, &config, threshold, &stop, &sink, deadline).await;
+    // 数量任务：窗口正常到期却一个目标都没找到 → 数量不一致（0 ≠ N）
+    if expired
+        && config.check_type == "count"
+        && let Some(expect) = config.expect_count
+    {
+        let empty = hits.lock().await.is_empty();
+        if empty && !alerted.swap(true, Ordering::Relaxed) {
+            record_count_alert(&state, &config, 0, expect, "").await;
+        }
+    }
 
     // 只在「本窗口还是当前窗口」时才去停 Agent：
     // - 被新窗口顶替时，新窗口已经接管（且可能有操作员的识别在跑），不能停；
@@ -867,11 +915,12 @@ async fn consume_events(
     stop: &Arc<Notify>,
     sink: &WindowSink,
     deadline: tokio::time::Instant,
-) {
+) -> bool {
+    // 返回值：窗口是否「正常到期」（false = 被 stop 打断 / 事件流断了）
     let hits = &sink.hits;
     let alerted = &sink.alerted;
     let Ok(client) = backpack::stream_client() else {
-        return;
+        return false;
     };
     let mut response = match client
         .get(format!("{base}/api/events"))
@@ -882,11 +931,11 @@ async fn consume_events(
         Ok(response) if response.status().is_success() => response,
         Ok(response) => {
             warn!("AI 识别：Agent 拒绝事件流 HTTP {}", response.status());
-            return;
+            return false;
         }
         Err(error) => {
             warn!("AI 识别：连不上 Agent 事件流: {error}");
-            return;
+            return false;
         }
     };
 
@@ -897,8 +946,8 @@ async fn consume_events(
 
     loop {
         tokio::select! {
-            _ = &mut notified => break,
-            _ = tokio::time::sleep_until(deadline) => break,
+            _ = &mut notified => return false,
+            _ = tokio::time::sleep_until(deadline) => return true,
             chunk = response.chunk() => {
                 match chunk {
                     Ok(Some(bytes)) => {
@@ -929,10 +978,10 @@ async fn consume_events(
                             record_hit(state, config, &label, conf, hits).await;
                         }
                     }
-                    Ok(None) => break,
+                    Ok(None) => return false,
                     Err(error) => {
                         warn!("AI 识别：事件流中断: {error}");
-                        break;
+                        return false;
                     }
                 }
             }
@@ -1057,8 +1106,10 @@ struct AiAction {
     scene: Option<String>,
     /// 动作 `labels`：勾选的识别类别（Agent 的 label `name`，空 = 该场景全部类别）
     labels: Vec<String>,
-    /// 动作 `expectCount`：检查目标数量（`None` = 不核对数量）
+    /// 动作 `expectCount`：检查目标数量（数量任务必填）
     expect_count: Option<i64>,
+    /// 动作 `checkType`：`exist`（是否存在）/ `count`（数量是否正确）
+    check_type: String,
 }
 
 impl PointRow {
@@ -1080,6 +1131,10 @@ impl PointRow {
                     .unwrap_or_default()
                     .to_string(),
                 expect_count: parse_expect_count(action.get("expectCount")),
+                check_type: normalize_check_type(
+                    action.get("checkType").and_then(Value::as_str),
+                    parse_expect_count(action.get("expectCount")),
+                ),
                 scene: action
                     .get("scene")
                     .and_then(Value::as_str)
@@ -1302,6 +1357,23 @@ fn parse_expect_count(value: Option<&Value>) -> Option<i64> {
         return None;
     }
     Some(number.min(999))
+}
+
+/// 任务类型归一化：`exist`（检测是否存在）/ `count`（检测数量是否正确）。
+///
+/// 兼容三种来源：路线编辑器写 `checkType`；老数据只有 `expectCount`（给了数量就按
+/// 数量任务算）；两者都没有就是存在性任务。中文别名也认（手改 route_data 时不踩坑）。
+fn normalize_check_type(explicit: Option<&str>, expect: Option<i64>) -> String {
+    let text = explicit.map(str::trim).unwrap_or_default();
+    if text.is_empty() {
+        return if expect.is_some() { "count" } else { "exist" }.to_string();
+    }
+    let lower = text.to_ascii_lowercase();
+    if lower == "count" || lower == "quantity" || text.contains("数量") {
+        "count".to_string()
+    } else {
+        "exist".to_string()
+    }
 }
 
 /// 板端 `plan_hit` 事件里的数量核对结论：只在 `countAlert` 为真时返回
@@ -1609,6 +1681,29 @@ mod tests {
         };
         let action = point.find_ai_action().expect("应识别出 AI 动作");
         assert_eq!(action.expect_count, Some(2));
+    }
+
+    #[test]
+    fn check_type_is_explicit_or_inferred() {
+        // 显式字段优先：存在性任务即使写了数量也不判数量
+        assert_eq!(normalize_check_type(Some("exist"), Some(5)), "exist");
+        assert_eq!(normalize_check_type(Some("count"), None), "count");
+        // 中文 / 别名（手改 route_data 时常见）
+        assert_eq!(normalize_check_type(Some("数量"), None), "count");
+        assert_eq!(normalize_check_type(Some("检测数量是否正确"), None), "count");
+        assert_eq!(normalize_check_type(Some("检测是否存在"), None), "exist");
+        // 老数据只有 expectCount：给了数量就是数量任务
+        assert_eq!(normalize_check_type(None, Some(3)), "count");
+        assert_eq!(normalize_check_type(None, None), "exist");
+
+        // 路线里的动作字段名是 `checkType`，与编辑器一致
+        let point = PointRow {
+            name: "P1".to_string(),
+            dwell: 5,
+            actions: vec![json!({"type": "AI 识别", "checkType": "exist", "expectCount": 9})],
+        };
+        let action = point.find_ai_action().expect("应识别出 AI 动作");
+        assert_eq!(action.check_type, "exist");
     }
 
     #[test]

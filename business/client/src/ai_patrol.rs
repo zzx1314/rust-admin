@@ -56,8 +56,10 @@ pub struct AiPoint {
     pub labels: Vec<String>,
     /// 动作 `threshold` 原文（「置信度 ≥ 0.35」），由服务端解析
     pub threshold: String,
-    /// 动作 `expectCount`：检查目标数量（`None` = 不核对数量）
+    /// 动作 `expectCount`：检查目标数量（数量任务必填；存在性任务不参与判定）
     pub expect_count: Option<i64>,
+    /// 任务类型：`exist` = 检测是否存在 / `count` = 检测数量是否正确
+    pub check_type: String,
 }
 
 /// 解析 `routeData`（`{"points":[...]}`）里所有带 AI 识别动作的航点。
@@ -114,6 +116,10 @@ pub fn parse_ai_points(route_data: &Value) -> Vec<AiPoint> {
                 .unwrap_or_default()
                 .to_string(),
             expect_count: parse_expect_count(action.get("expectCount")),
+            check_type: normalize_check_type(
+                action.get("checkType").and_then(Value::as_str),
+                parse_expect_count(action.get("expectCount")),
+            ),
         });
     }
     out
@@ -169,8 +175,10 @@ pub struct AiStart {
     pub point_index: i64,
     /// 计划 id（= 业务任务号）：板端拿它建存证目录 `detect_jobs/<planId>/pt<下标>/`
     pub plan_id: String,
-    /// 检查目标数量（`None` = 不核对数量）
+    /// 检查目标数量（数量任务必填）
     pub expect_count: Option<i64>,
+    /// 任务类型：`exist` / `count`（旧平台不下发时按 expectCount 推断）
+    pub check_type: String,
     pub labels: Vec<String>,
     pub conf: f64,
     pub cam: String,
@@ -224,6 +232,10 @@ impl AiStart {
                 })
                 .unwrap_or_default(),
             expect_count: parse_expect_count(value.get("expectCount")),
+            check_type: normalize_check_type(
+                value.get("checkType").and_then(Value::as_str),
+                parse_expect_count(value.get("expectCount")),
+            ),
             labels: value
                 .get("labels")
                 .and_then(Value::as_array)
@@ -378,7 +390,9 @@ impl AiPatrol {
                 "scene": point.scene,
                 "labels": point.labels,
                 "threshold": point.threshold,
-                // 检查目标数量：服务端会以路线数据为准，这里带上便于旧版路线也能核对
+                // 任务类型 + 检查数量：服务端会以路线数据为准，这里带上便于
+                // 旧版路线（没有 checkType 字段）也能核对
+                "checkType": point.check_type,
                 "expectCount": point.expect_count,
                 "tasks": tasks,
                 "agentRunning": running,
@@ -442,6 +456,7 @@ impl AiPatrol {
             // detect_jobs/<plan_id>/pt<航点下标>/，并按 expect_count 核对数量
             "plan_id": start.plan_id,
             "point_index": start.point_index,
+            "check_type": start.check_type,
             "expect_count": start.expect_count,
         });
         let path = if start.action == "config" {
@@ -467,7 +482,8 @@ impl AiPatrol {
                     "航点 AI 识别：启动失败（场景 {}，{path}）: {error}",
                     start.task
                 );
-                self.finish(&out_tx, &start, &format!("启动失败: {error}"), 0)
+                // 启动就失败：窗口没真正开起来，别让「未命中」被算成数量不一致
+                self.finish(&out_tx, &start, &format!("启动失败: {error}"), 0, false)
                     .await;
                 return;
             }
@@ -479,7 +495,10 @@ impl AiPatrol {
         } else {
             format!("窗口到期（{}s）", start.secs)
         };
-        self.finish(&out_tx, &start, &reason, hits).await;
+        // `expired = true` 只代表「窗口正常到期」：数量任务这时一个都没找到，
+        // 服务端才把它算成数量不一致（0 ≠ N）；被任务结束/新航点打断不算账。
+        self.finish(&out_tx, &start, &reason, hits, !stopped_early)
+            .await;
     }
 
     /// 读 SSE，把超过阈值的类别按「本窗口首次出现」上报；返回（上报类别数, 是否被提前打断）
@@ -583,6 +602,7 @@ impl AiPatrol {
         start: &AiStart,
         reason: &str,
         hits: usize,
+        expired: bool,
     ) {
         // 与平台侧 `replaced_by_other` 同一语义：窗口已被**新窗口**顶替时不停 Agent
         // （新窗口可能继承着操作员手动开的识别）；被 stop()/任务终态摘掉时窗口为空，
@@ -618,6 +638,8 @@ impl AiPatrol {
                 "task": start.task,
                 "reason": reason,
                 "hits": hits,
+                // 窗口是否正常到期：数量任务未命中时服务端据此判「数量不一致」
+                "expired": expired,
             }),
         )
         .await;
@@ -693,6 +715,23 @@ fn parse_expect_count(value: Option<&Value>) -> Option<i64> {
                 .map(|raw| raw as i64)
         })?;
     (number >= 1).then(|| number.min(999))
+}
+
+/// 任务类型归一化：`exist`（检测是否存在）/ `count`（检测数量是否正确）。
+///
+/// 兼容三种来源：新编辑器写 `checkType`；老数据只有 `expectCount`（给了数量就按
+/// 数量任务算）；两者都没有就是存在性任务。中文别名也认，避免手改路由数据时踩坑。
+fn normalize_check_type(explicit: Option<&str>, expect: Option<i64>) -> String {
+    let text = explicit.map(str::trim).unwrap_or_default();
+    if text.is_empty() {
+        return if expect.is_some() { "count" } else { "exist" }.to_string();
+    }
+    let lower = text.to_ascii_lowercase();
+    if lower == "count" || lower == "quantity" || text.contains("数量") {
+        "count".to_string()
+    } else {
+        "exist".to_string()
+    }
 }
 
 /// 板端 `plan_hit` 事件 → `ai_alert` 载荷。
@@ -825,6 +864,34 @@ mod tests {
             "points": [{"name": "P1", "actions": [{"type": "AI 识别", "expectCount": "2"}]}]
         }));
         assert_eq!(points[0].expect_count, Some(2));
+    }
+
+    #[test]
+    fn check_type_is_explicit_or_inferred_from_expect_count() {
+        // 显式字段优先
+        assert_eq!(normalize_check_type(Some("count"), None), "count");
+        assert_eq!(normalize_check_type(Some("exist"), Some(5)), "exist");
+        // 中文 / 别名
+        assert_eq!(normalize_check_type(Some("数量"), None), "count");
+        assert_eq!(normalize_check_type(Some("检测数量是否正确"), None), "count");
+        assert_eq!(normalize_check_type(Some("presence"), None), "exist");
+        // 老数据没 checkType：给了 expectCount 就是数量任务，否则存在性任务
+        assert_eq!(normalize_check_type(None, Some(3)), "count");
+        assert_eq!(normalize_check_type(None, None), "exist");
+    }
+
+    #[test]
+    fn check_type_reaches_agent_and_route_parse() {
+        let points = parse_ai_points(&json!({
+            "points": [
+                {"name": "存在性", "actions": [{"type": "AI 识别", "checkType": "exist"}]},
+                {"name": "数量", "actions": [{"type": "AI 识别", "expectCount": 2}]},
+                {"name": "老数据", "actions": [{"type": "AI 识别"}]}
+            ]
+        }));
+        assert_eq!(points[0].check_type, "exist");
+        assert_eq!(points[1].check_type, "count", "老数据靠 expectCount 推断");
+        assert_eq!(points[2].check_type, "exist");
     }
 
     #[test]
@@ -1071,6 +1138,7 @@ mod agent_flow {
             labels: vec!["extinguisher".to_string()],
             threshold: "置信度 ≥ 0.35".to_string(),
             expect_count: Some(3),
+            check_type: "count".to_string(),
         }
     }
 
@@ -1082,6 +1150,7 @@ mod agent_flow {
             "taskCode": "TK-1",
             "pointIndex": 0,
             "planId": "TK-1",
+            "checkType": "count",
             "expectCount": 3,
             "labels": ["extinguisher"],
             "conf": 0.35,
@@ -1135,6 +1204,7 @@ mod agent_flow {
         assert_eq!(msg.payload["labels"], json!(["extinguisher"]));
         assert_eq!(msg.payload["threshold"], "置信度 ≥ 0.35");
         assert_eq!(msg.payload["expectCount"], 3, "检查目标数量要一起报给平台");
+        assert_eq!(msg.payload["checkType"], "count", "任务类型要一起报给平台");
         assert_eq!(msg.payload["agentRunning"], false);
         assert_eq!(msg.payload["agentCam"], "dogcam");
         assert_eq!(
@@ -1201,6 +1271,7 @@ mod agent_flow {
             end["reason"].as_str().unwrap_or_default().contains("到期"),
             "{end}"
         );
+        assert_eq!(end["expired"], true, "正常到期要标 expired=true: {end}");
 
         // 窗口结束后要把 Agent 停掉（否则 NPU 一直占着）
         let kinds: Vec<String> = calls
