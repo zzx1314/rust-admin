@@ -816,3 +816,243 @@ async fn exist_task_never_judges_quantity() {
         "没找到也要在任务时间线留痕: {events:?}"
     );
 }
+
+/// 把已播种路线的 AI 动作改成「未检出也告警」（编辑器写 `alertWhenMissing`）。
+///
+/// 单独改 JSON 而不是给 `seed_ai_route` 加参数：那 9 个调用点都不需要这个开关。
+async fn enable_alert_when_missing(state: &AppState) {
+    let raw: (Option<String>,) =
+        sqlx::query_as("SELECT route_data FROM routes WHERE route_code = 'RT-AI-C'")
+            .fetch_one(&state.db)
+            .await
+            .expect("读路线失败");
+    let mut data: Value =
+        serde_json::from_str(raw.0.as_deref().unwrap_or("{}")).expect("路线不是合法 JSON");
+    data["points"][0]["actions"][0]["alertWhenMissing"] = json!(true);
+    sqlx::query("UPDATE routes SET route_data = ?1 WHERE route_code = 'RT-AI-C'")
+        .bind(data.to_string())
+        .execute(&state.db)
+        .await
+        .expect("更新路线失败");
+}
+
+/// `exist` + `alertWhenMissing`：窗口正常到期、一个目标都没找到 → 落「未检出」告警。
+///
+/// 这是 `exist` 缺的那半边语义（「灭火器不见了」）：不加开关时 `exist` 只在**检出**时
+/// 告警，缺了只能靠 `count` + `expectCount`。
+#[tokio::test]
+async fn exist_with_alert_when_missing_reports_when_nothing_found() {
+    let _serial = TEST_LOCK.lock().await;
+    ai_patrol::global().stop("测试初始化").await;
+    let (state, _temp) = test_state("client").await;
+    let task_code =
+        seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("exist"), None)
+            .await;
+    enable_alert_when_missing(&state).await;
+    let port = spawn_server(state.clone()).await;
+    let (mut ws, _device) = register_device(port).await;
+
+    ws.send(Message::Text(ai_point(&task_code, false).to_string()))
+        .await
+        .expect("发送 ai_point 失败");
+    let start = next_msg(&mut ws, "ai_start").await;
+    let window_id = start["payload"]["windowId"]
+        .as_str()
+        .expect("ai_start 必须带 windowId")
+        .to_string();
+
+    // 窗口正常到期，一条检出都没有
+    ws.send(Message::Text(
+        json!({
+            "msgType": "ai_end",
+            "ts": "2026-11-16 10:01:48",
+            "payload": {
+                "windowId": window_id,
+                "reason": "窗口到期（108s）",
+                "hits": 0,
+                "expired": true
+            }
+        })
+        .to_string(),
+    ))
+    .await
+    .expect("发送 ai_end 失败");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let contents = alert_contents(&state).await;
+    assert_eq!(contents.len(), 1, "未检出也要告警: {contents:?}");
+    assert!(
+        contents[0].contains("AI 识别未检出")
+            && contents[0].contains("新航点 1")
+            && contents[0].contains("extinguisher")
+            && contents[0].contains("firextinguisher"),
+        "告警要写清是哪个航点、找的是什么: {}",
+        contents[0]
+    );
+    // 结构化去重键：同一航点的「未检出」跨轮巡检都算同一件事
+    let key: Option<String> =
+        sqlx::query_scalar("SELECT dedup_key FROM alerts WHERE content LIKE 'AI 识别未检出%'")
+            .fetch_one(&state.db)
+            .await
+            .expect("查去重键失败");
+    assert_eq!(key.as_deref(), Some("ai:RD-AI-1:TK-AI-C:0:missing"));
+
+    let events = event_descriptions(&state).await;
+    assert!(
+        events.iter().any(|text| text.contains("AI 识别未检出")),
+        "未检出也要进任务时间线: {events:?}"
+    );
+}
+
+/// 没打开 `alertWhenMissing` 时，`exist` 到期没找到**不**告警（默认行为不变）。
+#[tokio::test]
+async fn exist_without_alert_when_missing_stays_quiet() {
+    let _serial = TEST_LOCK.lock().await;
+    ai_patrol::global().stop("测试初始化").await;
+    let (state, _temp) = test_state("client").await;
+    let task_code =
+        seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("exist"), None)
+            .await;
+    let port = spawn_server(state.clone()).await;
+    let (mut ws, _device) = register_device(port).await;
+
+    ws.send(Message::Text(ai_point(&task_code, false).to_string()))
+        .await
+        .expect("发送 ai_point 失败");
+    let start = next_msg(&mut ws, "ai_start").await;
+    let window_id = start["payload"]["windowId"]
+        .as_str()
+        .expect("ai_start 必须带 windowId")
+        .to_string();
+    ws.send(Message::Text(
+        json!({
+            "msgType": "ai_end",
+            "ts": "2026-11-16 10:01:48",
+            "payload": {
+                "windowId": window_id,
+                "reason": "窗口到期（108s）",
+                "hits": 0,
+                "expired": true
+            }
+        })
+        .to_string(),
+    ))
+    .await
+    .expect("发送 ai_end 失败");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let contents = alert_contents(&state).await;
+    assert!(contents.is_empty(), "没开开关就不该告警: {contents:?}");
+}
+
+/// 被任务结束/新航点打断（`expired=false`）时不算「未检出」：狗可能还没看够。
+#[tokio::test]
+async fn interrupted_window_does_not_report_missing() {
+    let _serial = TEST_LOCK.lock().await;
+    ai_patrol::global().stop("测试初始化").await;
+    let (state, _temp) = test_state("client").await;
+    let task_code =
+        seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("exist"), None)
+            .await;
+    enable_alert_when_missing(&state).await;
+    let port = spawn_server(state.clone()).await;
+    let (mut ws, _device) = register_device(port).await;
+
+    ws.send(Message::Text(ai_point(&task_code, false).to_string()))
+        .await
+        .expect("发送 ai_point 失败");
+    let start = next_msg(&mut ws, "ai_start").await;
+    let window_id = start["payload"]["windowId"]
+        .as_str()
+        .expect("ai_start 必须带 windowId")
+        .to_string();
+    ws.send(Message::Text(
+        json!({
+            "msgType": "ai_end",
+            "ts": "2026-11-16 10:00:20",
+            "payload": {
+                "windowId": window_id,
+                "reason": "任务结束 / 被新航点顶替",
+                "hits": 0,
+                "expired": false
+            }
+        })
+        .to_string(),
+    ))
+    .await
+    .expect("发送 ai_end 失败");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let contents = alert_contents(&state).await;
+    assert!(contents.is_empty(), "被打断的窗口不记账: {contents:?}");
+}
+
+/// 同一航点同一类别的 AI 问题，跨轮巡检只挂**一张**在办工单。
+///
+/// 老行为按「设备号 + 告警内容前 60 字」比标题，而 AI 内容里带置信度（0.41 → 0.77），
+/// 标题一变就新建一张单，一轮巡检攒一张。现在按 `dedup_key` 比。
+#[tokio::test]
+async fn same_ai_problem_across_patrols_reuses_one_work_order() {
+    let _serial = TEST_LOCK.lock().await;
+    ai_patrol::global().stop("测试初始化").await;
+    let (state, _temp) = test_state("client").await;
+    let task_code =
+        seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("exist"), None)
+            .await;
+    let port = spawn_server(state.clone()).await;
+    let (mut ws, _device) = register_device(port).await;
+
+    // 两轮巡检：同一航点、同一类别、不同置信度（= 不同的告警内容/标题）
+    for conf in [0.41_f64, 0.77_f64] {
+        ws.send(Message::Text(ai_point(&task_code, false).to_string()))
+            .await
+            .expect("发送 ai_point 失败");
+        let start = next_msg(&mut ws, "ai_start").await;
+        let window_id = start["payload"]["windowId"]
+            .as_str()
+            .expect("ai_start 必须带 windowId")
+            .to_string();
+        ws.send(Message::Text(detect(&window_id, "extinguisher", conf).to_string()))
+            .await
+            .expect("发送检出失败");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        ws.send(Message::Text(
+            json!({
+                "msgType": "ai_end",
+                "ts": "2026-11-16 10:01:48",
+                "payload": { "windowId": window_id, "reason": "窗口到期（108s）", "hits": 1 }
+            })
+            .to_string(),
+        ))
+        .await
+        .expect("发送 ai_end 失败");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    let contents = alert_contents(&state).await;
+    assert_eq!(contents.len(), 2, "两轮各一条告警: {contents:?}");
+    let key: Option<String> =
+        sqlx::query_scalar("SELECT dedup_key FROM alerts WHERE content LIKE 'AI 识别%' LIMIT 1")
+            .fetch_one(&state.db)
+            .await
+            .expect("查去重键失败");
+    assert_eq!(key.as_deref(), Some("ai:RD-AI-1:TK-AI-C:0:extinguisher"));
+
+    // 关键：两张告警挂的是同一张工单（标题不同也不会各建一张）
+    let orders: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM work_orders WHERE source = '告警自动派单' AND dedup_key IS NOT NULL",
+    )
+    .fetch_one(&state.db)
+    .await
+    .expect("查工单失败");
+    assert_eq!(orders, 1, "同一问题只能有一张在办工单");
+    let assigned: Vec<Option<i64>> = sqlx::query_scalar(
+        "SELECT work_order_id FROM alerts WHERE content LIKE 'AI 识别%' ORDER BY id",
+    )
+    .fetch_all(&state.db)
+    .await
+    .expect("查派单结果失败");
+    assert_eq!(assigned.len(), 2);
+    assert!(assigned[0].is_some(), "第一条告警应自动派单: {assigned:?}");
+    assert_eq!(assigned[0], assigned[1], "两条告警应挂同一张单: {assigned:?}");
+}

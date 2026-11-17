@@ -786,14 +786,16 @@ pub async fn sweep_stale_devices(state: &AppState) -> Result<u64, AppError> {
         let content = format!("设备 {code} 心跳超时（>{timeout}s 无上报），已标记离线");
         let _ = sqlx::query(
             "INSERT INTO alerts (alert_code, level, content, device_id, park_id, status,
-                occurred_at, created_at)
-             VALUES (?1, '警告', ?2, ?3, ?4, '未处理', ?5, ?5)",
+                occurred_at, created_at, dedup_key)
+             VALUES (?1, '警告', ?2, ?3, ?4, '未处理', ?5, ?5, ?6)",
         )
         .bind(&alert_code)
         .bind(&content)
         .bind(id)
         .bind(park_id)
         .bind(&timestamp)
+        // 同一台设备反复掉线 = 同一个问题，别再刷工单
+        .bind(format!("hb:{id}"))
         .execute(&state.db)
         .await;
         // 设备掉线是任务失败的头号原因，运维群里必须第一时间看到
@@ -1524,11 +1526,11 @@ async fn open_control_preempt_alert(
     let reason = ctrl_preempt_reason(db, device_id).await;
     let _ = sqlx::query(
         "INSERT INTO alerts (alert_code, level, content, device_id, park_id, status,
-            occurred_at, created_at)
+            occurred_at, created_at, dedup_key)
          VALUES (?1, '警告', ?2,
             (SELECT id FROM devices WHERE device_id = ?3),
             (SELECT park_id FROM devices WHERE device_id = ?3),
-            '未处理', ?4, ?4)",
+            '未处理', ?4, ?4, ?5)",
     )
     .bind(&alert_code)
     .bind(format!(
@@ -1538,6 +1540,8 @@ async fn open_control_preempt_alert(
     ))
     .bind(device_id)
     .bind(timestamp)
+    // 同一台设备反复被抢占 = 同一个问题（源码里已按「未处理就跳过」限流）
+    .bind(Some(format!("ctrl:{device_id}")))
     .execute(db)
     .await;
     // 控制权被抢是最需要"人马上知道"的一类：平台看起来一切正常，摇杆和任务却全失效
@@ -1704,6 +1708,19 @@ async fn handle_task_progress(
     }
 }
 
+/// 从本体故障文案里取故障码（`感知障碍物检测延迟（code=13382, 级别=1）` → `13382`）。
+///
+/// 拿它当自动工单的去重键：同一台设备的**同一个故障码**就是同一个问题，
+/// 而文案里的坐标/耗时/英文描述会变，按标题去重会拆成好几张单。
+/// 取不到码（翻译后的文案没有 `code=`）时返回 `None`，工单退回按标题去重。
+fn fault_code(message: &str) -> Option<&str> {
+    let rest = message.split("code=").nth(1)?.trim_start();
+    let end = rest
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(rest.len());
+    (end > 0).then(|| &rest[..end])
+}
+
 /// 设备事件 → 告警级别。
 ///
 /// 以前所有 `fault` 都写成「警告」，4021 的 `severity=3`（如 13504 内部节点异常）
@@ -1749,19 +1766,25 @@ async fn handle_device_event(
                 device_id,
                 timestamp.replace(['-', ' ', ':'], "")
             );
-
+            // 同一台设备的同一个故障码 = 同一个问题：拿它当自动工单的去重键。
+            // 以前按「设备号 + 内容前 60 字」比标题，内容里的坐标/时间一变就拆成两张单。
+            let dedup_key = fault_code(&payload.message)
+                .map(|code| format!("fault:{{device}}:{code}"))
+                .unwrap_or_default();
             sqlx::query(
-                "INSERT INTO alerts (alert_code, level, content, device_id, park_id, status, occurred_at, created_at)
+                "INSERT INTO alerts (alert_code, level, content, device_id, park_id, status, occurred_at, created_at, dedup_key)
                  VALUES (?1, ?2, ?3,
                      (SELECT id FROM devices WHERE device_id = ?4),
                      (SELECT park_id FROM devices WHERE device_id = ?4),
-                     '未处理', ?5, ?5)",
+                     '未处理', ?5, ?5,
+                     NULLIF(REPLACE(?6, '{device}', COALESCE(CAST((SELECT id FROM devices WHERE device_id = ?4) AS TEXT), '')), ''))",
             )
             .bind(&alert_code)
             .bind(event_alert_level(payload))
             .bind(&payload.message)
             .bind(device_id)
             .bind(&timestamp)
+            .bind(&dedup_key)
             .execute(db)
             .await
             .ok();
@@ -2198,14 +2221,34 @@ pub async fn is_device_online(connections: &DeviceConnections, device_id: &str) 
 #[cfg(test)]
 mod tests {
     use super::{
-        DeviceEventPayload, derive_device_status, event_alert_level, is_current_connection,
-        release_connection,
+        DeviceEventPayload, derive_device_status, event_alert_level, fault_code,
+        is_current_connection, release_connection,
     };
     use crate::gateway_types::PendingCommand;
     use std::collections::HashMap;
     use tokio::sync::broadcast;
 
     type Pool = HashMap<String, broadcast::Sender<PendingCommand>>;
+
+    /// 自动工单的去重键靠故障码：同一台设备的同一个码 = 同一个问题。
+    /// 文案里的坐标 / 耗时 / 英文描述一变就拆单，是 2026-11-17 之前的老毛病。
+    #[test]
+    fn fault_code_is_extracted_from_message() {
+        assert_eq!(fault_code("感知障碍物检测延迟（code=13382, 级别=1）"), Some("13382"));
+        assert_eq!(
+            fault_code("导航指令非法（code=13440, 级别=2）"),
+            Some("13440")
+        );
+        // 英文 / 带前缀的写法也能取到
+        assert_eq!(
+            fault_code("RS 与 lidar 时间不同步（code=12608, 级别=1）"),
+            Some("12608")
+        );
+        // 没有码（翻译文案 / 人工事件）→ 返回 None，工单退回按标题去重
+        assert_eq!(fault_code("The localization system has poor accuracy"), None);
+        assert_eq!(fault_code("code="), None);
+        assert_eq!(fault_code(""), None);
+    }
 
     fn channel() -> broadcast::Sender<PendingCommand> {
         // 保留 receiver 否则通道无接收者（本用例只关心 sender 身份）

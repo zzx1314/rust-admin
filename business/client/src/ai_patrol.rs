@@ -60,6 +60,10 @@ pub struct AiPoint {
     pub expect_count: Option<i64>,
     /// 任务类型：`exist` = 检测是否存在 / `count` = 检测数量是否正确
     pub check_type: String,
+    /// 动作 `alertWhenMissing`：`exist` 任务未检出时也告警（「应该有却没有」）
+    ///
+    /// 客户端不判定告警，只把配置转给平台（告警文案/去重都在服务端）。
+    pub alert_when_missing: bool,
 }
 
 /// 解析 `routeData`（`{"points":[...]}`）里所有带 AI 识别动作的航点。
@@ -120,6 +124,10 @@ pub fn parse_ai_points(route_data: &Value) -> Vec<AiPoint> {
                 action.get("checkType").and_then(Value::as_str),
                 parse_expect_count(action.get("expectCount")),
             ),
+            alert_when_missing: action
+                .get("alertWhenMissing")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         });
     }
     out
@@ -394,6 +402,7 @@ impl AiPatrol {
                 // 旧版路线（没有 checkType 字段）也能核对
                 "checkType": point.check_type,
                 "expectCount": point.expect_count,
+                "alertWhenMissing": point.alert_when_missing,
                 "tasks": tasks,
                 "agentRunning": running,
                 "agentCam": cam,
@@ -1139,6 +1148,7 @@ mod agent_flow {
             threshold: "置信度 ≥ 0.35".to_string(),
             expect_count: Some(3),
             check_type: "count".to_string(),
+            alert_when_missing: false,
         }
     }
 

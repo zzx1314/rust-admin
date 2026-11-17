@@ -159,6 +159,9 @@ pub struct AiPointPayload {
     /// 动作 `checkType`：任务类型，`exist` = 检测是否存在 / `count` = 检测数量是否正确
     #[serde(default)]
     pub check_type: Option<String>,
+    /// 动作 `alertWhenMissing`：`exist` 任务未检出时是否也告警（路线数据优先）
+    #[serde(default)]
+    pub alert_when_missing: Option<bool>,
     /// 板端 `GET /api/detect/tasks` 原样
     #[serde(default)]
     pub tasks: Option<Value>,

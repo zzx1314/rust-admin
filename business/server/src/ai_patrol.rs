@@ -316,6 +316,7 @@ impl AiPatrol {
         let hits = Arc::new(Mutex::new(Vec::new()));
         let alerted = Arc::new(AtomicBool::new(false));
         let config = WindowConfig {
+            device_code: device_code.to_string(),
             device_id: task.device_id,
             park_id: task.park_id,
             task_code: payload.task_code.clone(),
@@ -328,6 +329,7 @@ impl AiPatrol {
             threshold_text: action.threshold.clone(),
             expect_count: action.expect_count,
             check_type: action.check_type.clone(),
+            alert_when_missing: action.alert_when_missing,
             secs: window_secs,
         };
 
@@ -466,15 +468,19 @@ impl AiPatrol {
             payload.check_type.as_deref(),
             expect_count,
         );
+        // 「未检出也告警」同样以路线数据为准（客户端只做转发）
+        let mut alert_when_missing = payload.alert_when_missing.unwrap_or(false);
         if let Some(route_id) = task.route_id
             && let Ok(Some(point)) = load_point(&state.db, route_id, payload.point_index).await
             && let Some(action) = point.find_ai_action()
         {
             expect_count = action.expect_count.or(expect_count);
             check_type = action.check_type.clone();
+            alert_when_missing = action.alert_when_missing;
         }
 
         let cfg = WindowConfig {
+            device_code: device_code.to_string(),
             device_id: task.device_id,
             park_id: task.park_id,
             task_code: payload.task_code.clone(),
@@ -487,6 +493,7 @@ impl AiPatrol {
             threshold_text: payload.threshold.clone(),
             expect_count,
             check_type,
+            alert_when_missing,
             secs,
         };
         let stop = Arc::new(Notify::new());
@@ -641,6 +648,16 @@ impl AiPatrol {
         {
             record_count_alert(state, &window.cfg, 0, expect, "").await;
         }
+        // 「应该有却没有」：exist + alertWhenMissing，且窗口正常到期、一类目标都没检出。
+        // 被任务结束 / 新航点打断时不算（狗可能还没看够，与数量任务同一套道理）。
+        if window.cfg.check_type == "exist"
+            && window.cfg.alert_when_missing
+            && payload.hits <= 0
+            && payload.expired
+            && !window.alerted.swap(true, Ordering::Relaxed)
+        {
+            record_missing_alert(state, &window.cfg).await;
+        }
         info!(
             "航点 AI 识别结束（客户端回报）：任务 {} 航点 {}「{}」{}，上报 {hits} 类目标",
             window.task_code, window.point_index, window.point_name, payload.reason
@@ -756,6 +773,8 @@ fn spawn_client_window_timeout(
 /// 一个窗口的启动参数（算好后窗口任务只负责执行）
 #[derive(Clone)]
 struct WindowConfig {
+    /// 设备编号（`0202222672400230`）：告警去重键与文案都用它
+    device_code: String,
     device_id: Option<i64>,
     park_id: Option<i64>,
     task_code: String,
@@ -774,6 +793,11 @@ struct WindowConfig {
     expect_count: Option<i64>,
     /// 任务类型：`exist`（是否存在）/ `count`（数量是否正确）
     check_type: String,
+    /// 动作 `alertWhenMissing`：`exist` 任务在窗口正常到期且**一个都没检出**时也告警
+    ///
+    /// `exist` 默认只在「检出」时告警；「应该有却没有」这种语义靠这个开关（否则只能用
+    /// `count` + `expectCount`）。`count` 任务自带「0 ≠ N」告警，这个字段对它无效。
+    alert_when_missing: bool,
     secs: u64,
 }
 
@@ -892,6 +916,13 @@ async fn run_window(
         let empty = hits.lock().await.is_empty();
         if empty && !alerted.swap(true, Ordering::Relaxed) {
             record_count_alert(&state, &config, 0, expect, "").await;
+        }
+    }
+    // 「应该有却没有」：exist + alertWhenMissing，窗口正常到期且一类目标都没检出
+    if expired && config.check_type == "exist" && config.alert_when_missing {
+        let empty = hits.lock().await.is_empty();
+        if empty && !alerted.swap(true, Ordering::Relaxed) {
+            record_missing_alert(&state, &config).await;
         }
     }
 
@@ -1028,7 +1059,8 @@ async fn record_hit(
     );
     info!("{content}");
 
-    match insert_alert(&state.db, config, &content).await {
+    let key = ai_dedup_key(config, label);
+    match insert_alert(&state.db, config, &content, &key).await {
         Ok(alert_code) => crate::notify::alert_created(state, &alert_code).await,
         Err(error) => warn!("AI 识别：写告警失败: {error}"),
     }
@@ -1058,9 +1090,54 @@ async fn record_count_alert(
     }
     info!("{content}");
 
-    match insert_alert(&state.db, config, &content).await {
+    let key = ai_dedup_key(config, "count");
+    match insert_alert(&state.db, config, &content, &key).await {
         Ok(alert_code) => crate::notify::alert_created(state, &alert_code).await,
         Err(error) => warn!("AI 识别：写数量告警失败: {error}"),
+    }
+    if let Err(error) = insert_task_event(&state.db, config, &at, &content).await {
+        warn!("AI 识别：写任务事件失败: {error}");
+    }
+}
+
+/// 「应该有、但一个都没找到」→ 告警中心 + 任务时间线 + 企业微信。
+///
+/// 只给 `exist` + `alertWhenMissing` 的航点用：`exist` 本来只会在**检出**时告警，
+/// 「灭火器不见了」这类「缺失」语义以前根本报不出来（只能用 `count` + `expectCount`）。
+/// 与数量告警同理，只在窗口**正常到期**时才算——被任务结束/新航点打断时狗可能还没看够。
+async fn record_missing_alert(state: &AppState, config: &WindowConfig) {
+    let at = now();
+    let targets = if config.labels.is_empty() {
+        config
+            .scene
+            .clone()
+            .unwrap_or_else(|| config.hint.clone())
+    } else {
+        config.labels.join("/")
+    };
+    let content = format!(
+        "AI 识别未检出：任务「{}」航点 {}「{}」窗口 {}s 内没找到 {}（场景 {}）",
+        config.task_name,
+        config.point_index,
+        config.point_name,
+        config.secs,
+        if targets.trim().is_empty() {
+            "目标"
+        } else {
+            targets.as_str()
+        },
+        if config.scene.as_deref().unwrap_or_default().trim().is_empty() {
+            "-"
+        } else {
+            config.scene.as_deref().unwrap_or_default()
+        }
+    );
+    info!("{content}");
+
+    let key = ai_dedup_key(config, "missing");
+    match insert_alert(&state.db, config, &content, &key).await {
+        Ok(alert_code) => crate::notify::alert_created(state, &alert_code).await,
+        Err(error) => warn!("AI 识别：写未检出告警失败: {error}"),
     }
     if let Err(error) = insert_task_event(&state.db, config, &at, &content).await {
         warn!("AI 识别：写任务事件失败: {error}");
@@ -1128,6 +1205,8 @@ struct AiAction {
     expect_count: Option<i64>,
     /// 动作 `checkType`：`exist`（是否存在）/ `count`（数量是否正确）
     check_type: String,
+    /// 动作 `alertWhenMissing`：`exist` 任务未检出时也告警（「应该有却没有」）
+    alert_when_missing: bool,
 }
 
 impl PointRow {
@@ -1153,6 +1232,10 @@ impl PointRow {
                     action.get("checkType").and_then(Value::as_str),
                     parse_expect_count(action.get("expectCount")),
                 ),
+                alert_when_missing: action
+                    .get("alertWhenMissing")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
                 scene: action
                     .get("scene")
                     .and_then(Value::as_str)
@@ -1234,10 +1317,15 @@ async fn load_point(
 }
 
 /// 返回写入的 `alert_code`，供企业微信推送按码回查（见 `notify::alert_created`）。
+///
+/// `dedup_key` 是这个航点上的「同一个问题」的结构化标识（见
+/// `migrations/024_alert_dedup_key.sql`）：自动工单按它去重，不再拿带置信度/证据路径的
+/// 标题比相等，否则每轮巡检都会建一张新单。
 async fn insert_alert(
     db: &sqlx::SqlitePool,
     config: &WindowConfig,
     content: &str,
+    dedup_key: &str,
 ) -> Result<String, sqlx::Error> {
     let next_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM alerts")
         .fetch_one(db)
@@ -1246,17 +1334,32 @@ async fn insert_alert(
     let alert_code = format!("AL-{next_id:03}");
     sqlx::query(
         "INSERT INTO alerts (alert_code, level, content, device_id, park_id, status,
-            occurred_at, handled_at, created_at)
-         VALUES (?1, '警告', ?2, ?3, ?4, '未处理', ?5, NULL, ?5)",
+            occurred_at, handled_at, created_at, dedup_key)
+         VALUES (?1, '警告', ?2, ?3, ?4, '未处理', ?5, NULL, ?5, ?6)",
     )
     .bind(&alert_code)
     .bind(content)
     .bind(config.device_id)
     .bind(config.park_id)
     .bind(&timestamp)
+    .bind(dedup_key)
     .execute(db)
     .await?;
     Ok(alert_code)
+}
+
+/// 航点 AI 告警的结构化去重键：`ai:<device>:<taskCode>:<point>:<what>`
+///
+/// `what` 区分同一航点上的三件事：`<label>` 检出 / `count` 数量不一致 /
+/// `missing` 未检出。同一轮与跨轮的同一件事都能靠它命中同一张在办工单。
+fn ai_dedup_key(config: &WindowConfig, what: &str) -> String {
+    format!(
+        "ai:{}:{}:{}:{}",
+        config.device_code,
+        config.task_code,
+        config.point_index,
+        what
+    )
 }
 
 async fn insert_task_event(

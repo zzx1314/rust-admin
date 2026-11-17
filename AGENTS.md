@@ -84,7 +84,10 @@ HTTP」模式。两者共用同一个服务令牌，见 `business/README.md`。
 （客户端与背包 Agent 同在 `.246`，走 `127.0.0.1:8000`；消息为 `ai_point` / `ai_start` /
 `ai_detect` / `ai_alert`（数量核对不一致）/ `ai_end` / `ai_stop`）。航点动作的 `checkType`
 分两类任务：`exist` 检测是否存在 / `count` 检测数量是否正确（后者带 `expectCount`，
-不一致含「一个都没找到」都告警，且只认窗口正常到期 `ai_end.expired`）。正式环境的云端
+不一致含「一个都没找到」都告警，且只认窗口正常到期 `ai_end.expired`）。没有这个字段的历史数据按「有没有
+`expectCount`」推断。`exist` 默认**只在检出时告警**（适合「不该出现」的目标）；
+要「应该有却没有」，用 `count` + `expectCount`，或给 `exist` 勾上 `alertWhenMissing`
+（窗口正常到期且零检出 → 「AI 识别未检出」告警）。正式环境的云端
 平台连不到内网 Agent，`auto` 走的就是客户端这条路；改这块先读
 `business/docs/official-app-parity.md` §5.6。
 **「现在站在哪个航点」只认 `task_progress.waypointIndex`（0 基下标），
@@ -97,6 +100,12 @@ HTTP」模式。两者共用同一个服务令牌，见 `business/README.md`。
 时才用。另可选 `ROBODOG_PUBLIC_URL` 拼消息里的「查看详情」链接。用法见 `business/README.md`「企业微信告警推送」，**设计与扩展点见
 `business/docs/wecom-alert-push.md`（改这块之前必读）**：架构、代码地图、三层开关、
 去重/限流参数、触发点清单、新增告警源的做法、踩坑记录。
+
+告警自动派单（`settings.alert_auto_workorder`，默认开）的**去重键是结构化的**：
+建告警时写 `alerts.dedup_key`（`ai:<设备>:<任务>:<航点>:<类别|count|missing>` /
+`fault:<设备>:<故障码>` / `hb:<设备>` / `ctrl:<设备>`），`alert_flow::find_open_order` 按
+「同一设备 + 同一键 + 24h 内在办」复用老单。**新增告警源请带 key**——不要靠标题：
+标题是「设备号 + 内容前 60 字」，内容里一有置信度/证据路径就会每轮新建一张工单。
 
 `backend/run.sh` exports the required secret (and probes Redis for
 `APP_REDIS_PASSWORD`) before running `cargo run`. Set `APP_REDIS_PASSWORD`

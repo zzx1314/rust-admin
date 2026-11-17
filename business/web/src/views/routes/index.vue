@@ -137,7 +137,13 @@ const actionForm = reactive({
    * AI 识别：检查目标数量（仅 `count` 任务必填）。
    * 与板端 AI 检出的目标数比对，不一致上报数量告警。
    */
-  expectCount: null as number | null
+  expectCount: null as number | null,
+  /**
+   * AI 识别：未检出也告警（仅 `exist` 任务）。
+   * 适合「必须有」的目标（灭火器、气体钢瓶）：到期没找到就告警；
+   * `exist` 默认只在**检出**时告警，适合「不该出现」的目标（消防通道占用、明火）。
+   */
+  alertWhenMissing: false
 });
 
 /** 背包 AI 模型目录（场景 + 类别）：仅在配「AI 识别」动作时按需加载 */
@@ -160,13 +166,19 @@ function isAiActionOf(action: { type?: string } | null | undefined) {
 }
 
 /** 动作卡片上的任务类型文案：老数据没 `checkType` 时按有无 `expectCount` 推断 */
-function actionCheckTypeLabel(action: { checkType?: string; expectCount?: number | null }) {
+function actionCheckTypeLabel(action: {
+  checkType?: string;
+  expectCount?: number | null;
+  alertWhenMissing?: boolean;
+}) {
   const countMode = action.checkType
     ? action.checkType === "count"
     : action.expectCount != null && Number(action.expectCount) > 0;
-  return countMode
-    ? `数量是否正确（检查 ${action.expectCount ?? "—"} 个，不一致告警）`
-    : "是否存在";
+  if (countMode) {
+    return `数量是否正确（检查 ${action.expectCount ?? "—"} 个，不一致告警）`;
+  }
+  // 存在性任务里「找不到也告警」是另一种语义，卡片上必须能看出来，否则现场会以为配错
+  return action.alertWhenMissing ? "是否存在（找不到也告警）" : "是否存在";
 }
 
 const filteredRoutes = computed(() => {
@@ -762,7 +774,8 @@ function openActionDialog(kind: "point" | "leg", index: number | null = null) {
       checkType:
         existing.checkType ??
         (existing.expectCount != null && Number(existing.expectCount) > 0 ? "count" : "exist"),
-      expectCount: existing.expectCount ?? null
+      expectCount: existing.expectCount ?? null,
+      alertWhenMissing: existing.alertWhenMissing === true
     });
     actionEditIndex.value = index;
     if (actionForm.type === "AI 识别") void aiCatalog.load();
@@ -782,7 +795,8 @@ function openActionDialog(kind: "point" | "leg", index: number | null = null) {
     labels: [],
     aiConf: 0.35,
     checkType: "exist",
-    expectCount: null
+    expectCount: null,
+    alertWhenMissing: false
   });
   actionEditIndex.value = null;
   actionDialog.value = true;
@@ -798,6 +812,7 @@ function syncActionDefaults() {
   actionForm.aiConf = 0.35;
   actionForm.checkType = "exist";
   actionForm.expectCount = null;
+  actionForm.alertWhenMissing = false;
   if (actionForm.type === "AI 识别") void aiCatalog.load();
 }
 
@@ -860,7 +875,9 @@ function saveAction() {
     ...(ai && actionForm.labels.length ? { labels: [...actionForm.labels] } : {}),
     // 任务类型：存在性任务不写检查数量（后端也按 checkType 判，双保险）
     ...(ai ? { checkType: actionForm.checkType } : {}),
-    ...(countTask ? { expectCount } : {})
+    ...(countTask ? { expectCount } : {}),
+    // 「未检出也告警」只对存在性任务有意义（数量任务自带「0 ≠ N」告警）
+    ...(ai && !countTask && actionForm.alertWhenMissing ? { alertWhenMissing: true } : {})
   };
   // 修改：整条替换回原位置（顺序不变，撤销栈里是一条快照）
   const editIndex = actionEditIndex.value;
@@ -1833,6 +1850,14 @@ onBeforeUnmount(() => {
               title="板端把 AI 检出的目标数与它比对，不一致（含一个都没找到）上报数量告警"
             />
           </div>
+          <!-- 存在性任务的另一半语义：“应该有却没有”也要告警 -->
+          <div v-if="isAiAction && actionForm.checkType === 'exist'" class="field">
+            <label>未检出时</label>
+            <label class="chk" title="勾上后：窗口正常到期却一个目标都没找到，也上报告警（含自动派单）">
+              <input v-model="actionForm.alertWhenMissing" type="checkbox" />
+              未找到目标也告警
+            </label>
+          </div>
           <div class="field">
             <label>失败重试次数</label>
             <input v-model.number="actionForm.retry" class="input" type="number" min="0" max="5" />
@@ -1841,8 +1866,10 @@ onBeforeUnmount(() => {
             到点后平台用<b>与实时视频同一套 AI 模型</b>开识别窗口：场景 = 模型包，类别 = 勾选的标签，
             阈值 = 置信度下限；检出目标写入「告警中心」。命中帧与 result.json 会落到板端
             detect_jobs/计划ID/pt航点下标/（计划 ID = 业务任务号）。检测类型二选一：
-            <b>检测是否存在</b>（找到就存证/上报）、<b>检测数量是否正确</b>（再核对数量，
-            不一致——含一个都没找到——上报数量告警）。
+            <b>检测是否存在</b>（找到就存证/上报，勾上「未找到目标也告警」后反过来——
+            适合灭火器、气体钢瓶这类「必须有」的东西）、
+            <b>检测数量是否正确</b>（再核对数量，不一致——含一个都没找到——上报数量告警；
+            适合「必须有 N 个」的点）。
             窗口时长跟着「停留时长」走（停留 + 8s，最短 10s、最长 300s，离开航点立即结束），
             不额外占用停留时长。模型目录读不到时可以手填场景关键词，后端仍有关键词兜底。
           </div>

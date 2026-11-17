@@ -364,6 +364,8 @@ button{cursor:pointer}
 .field label{display:block;font-size:11.5px;font-weight:600;color:var(--text-2);margin-bottom:6px}
 .field label em{color:var(--danger);font-style:normal}
 .field .input,.field .select,.field .textarea{width:100%}
+/* 勾选型字段（如 AI 识别的「未找到目标也告警」）：与输入框同排，不要把文字变成粗体标签 */
+.field label.chk{display:flex;align-items:center;gap:6px;font-weight:500;cursor:pointer;margin-bottom:0}
 .textarea{height:76px;border:1px solid var(--line);border-radius:var(--r-sm);padding:9px 12px;font-size:13px;resize:vertical;outline:none;color:var(--text)}
 
 /* 模态 / 抽屉 / Toast */

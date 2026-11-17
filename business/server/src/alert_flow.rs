@@ -136,6 +136,11 @@ struct AlertContext {
     zone_name: Option<String>,
     /// 非空表示已经派过单（幂等依据）
     work_order_id: Option<i64>,
+    /// 告警来源给的结构化去重键（`ai:…` / `fault:…` / `hb:…` / `ctrl:…`）
+    ///
+    /// 有它就按「同一设备 + 同一键」找在办工单；为空才退回「标题相等」
+    /// （历史行为）。见 `migrations/024_alert_dedup_key.sql`。
+    dedup_key: Option<String>,
 }
 
 /// 排班候选（当天所有非草案排班）。
@@ -201,7 +206,7 @@ pub(crate) fn candidate_score(
 /// 全程只碰本地 SQLite（校验上限都在毫秒级），不 await 外网。
 pub async fn on_alert(state: &AppState, alert_code: &str) -> Option<Assignment> {
     let context: AlertContext = sqlx::query_as(
-        "SELECT a.id, a.alert_code, a.level, a.content,
+        "SELECT a.id, a.alert_code, a.level, a.content, a.dedup_key,
                 COALESCE(a.park_id, d.park_id) AS effective_park_id,
                 d.id AS device_pk, d.device_id AS device_code,
                 d.zone_id, z.zone_name, a.work_order_id
@@ -243,12 +248,21 @@ pub async fn on_alert(state: &AppState, alert_code: &str) -> Option<Assignment> 
         assignment.task_name = running_task_name;
     }
 
-    // 同一设备的同一故障还在办：直接挂到那张单上。
+    // 同一设备的**同一件事**还在办：直接挂到那张单上。
     //
-    // 现场踩过：机器人每 ~90s 报一次 `12608 RS 与 lidar 时间不同步`，一条告警一张单，
-    // 5 分钟就堆出 2 张工单 + 2 条群消息，值班长会被淹掉。
+    // 现场踩过两次：
+    // 1. 机器人每 ~90s 报一次 `12608 RS 与 lidar 时间不同步`，一条告警一张单，
+    //    5 分钟就堆出 2 张工单 + 2 条群消息，值班长会被淹掉；
+    // 2. AI 告警内容带置信度 / 证据图路径，按标题去重等于没去重，每轮巡检一张新单。
+    // 所以优先用告警自带的 `dedup_key`（结构化），只有它为空时才退回标题相等。
     let title = work_order_title(context.device_code.as_deref(), &context.content);
-    let existing = find_open_order(state, context.device_pk, &title).await;
+    let existing = find_open_order(
+        state,
+        context.device_pk,
+        context.dedup_key.as_deref(),
+        &title,
+    )
+    .await;
 
     // 自动建单：已经派过就跳过（幂等），开关关掉也跳过（但推送照样带责任人）
     if let Some((id, code)) = &existing {
@@ -427,22 +441,43 @@ fn work_order_title(device_code: Option<&str>, content: &str) -> String {
     short(&format!("{device} {content}"), 60)
 }
 
-/// 同一设备上因为同一句故障而建、且还没关闭的工单。
+/// 同一设备上因为**同一件事**而建、且还没关闭的工单。
+///
+/// 两条判据：
+/// 1. 告警带了 `dedup_key`（结构化：设备 + 任务 + 航点 + 类别 / 故障码）→ 按
+///    `work_orders.dedup_key` 比相等，内容里的置信度、证据图路径不会把工单拆成两张；
+/// 2. 没带键（人工告警 / 老数据）→ 退回「标题完全相等」的老行为。
 ///
 /// 窗口 24 小时：留着的老单说明问题还没解决，继续挂它；超过一天还没关的单
 /// 不再吞新告警，避免一个僵尸单永久吸走所有同类告警。
 async fn find_open_order(
     state: &AppState,
     device_pk: Option<i64>,
+    dedup_key: Option<&str>,
     title: &str,
 ) -> Option<(i64, String)> {
     let cutoff = (chrono::Local::now() - chrono::Duration::hours(24))
         .format("%Y-%m-%d %H:%M:%S")
         .to_string();
+    let key = dedup_key.map(str::trim).filter(|key| !key.is_empty());
+    if let Some(key) = key {
+        return sqlx::query_as::<_, (i64, String)>(
+            "SELECT id, order_code FROM work_orders
+              WHERE source = '告警自动派单' AND status <> '已完成'
+                AND device_id IS ?1 AND dedup_key = ?2 AND created_at >= ?3
+              ORDER BY id DESC LIMIT 1",
+        )
+        .bind(device_pk)
+        .bind(key)
+        .bind(cutoff)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap_or(None);
+    }
     sqlx::query_as::<_, (i64, String)>(
         "SELECT id, order_code FROM work_orders
           WHERE source = '告警自动派单' AND status <> '已完成'
-            AND device_id IS ?1 AND title = ?2 AND created_at >= ?3
+            AND device_id IS ?1 AND dedup_key IS NULL AND title = ?2 AND created_at >= ?3
           ORDER BY id DESC LIMIT 1",
     )
     .bind(device_pk)
@@ -495,6 +530,17 @@ async fn create_work_order(
     };
     let order =
         crate::handlers::workorders::create_order_core(state, payload, None, "系统", false).await?;
+    // 把结构化去重键落到工单上：下一轮同样的问题（同一设备 + 同一键）会挂到这张单
+    if let Some(key) = context.dedup_key.as_deref()
+        && !key.trim().is_empty()
+        && let Err(error) = sqlx::query("UPDATE work_orders SET dedup_key = ?1 WHERE id = ?2")
+            .bind(key.trim())
+            .bind(order.id)
+            .execute(&state.db)
+            .await
+    {
+        tracing::warn!(order = %order.order_code, "工单写入去重键失败: {error}");
+    }
     Ok((order.id, order.order_code))
 }
 
