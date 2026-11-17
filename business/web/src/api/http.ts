@@ -39,7 +39,7 @@ service.interceptors.response.use(
     }
     return response.data;
   },
-  error => {
+  async error => {
     if (error.response?.status === 401) {
       tokenStorage.clear();
       if (window.location.pathname !== "/login") {
@@ -49,7 +49,16 @@ service.interceptors.response.use(
     // 5xx 且响应体不是我们的 JSON（没有 msg）时，基本都是「后端没起来 / 端口不通」：
     // 用 vite 代理时上游连不上会退化成 500，axios 只能给出
     // "Request failed with status code 500"，看不出是哪个组件挂了。
-    const body = error.response?.data;
+    let body = error.response?.data;
+    // `responseType: "blob"` 的请求（模板下载）出错时，后端 JSON 会被包成 Blob，
+    // 这里读回文本，否则用户只看到「请求失败」而看不到原因
+    if (body instanceof Blob) {
+      try {
+        body = JSON.parse(await body.text());
+      } catch {
+        body = undefined;
+      }
+    }
     const serverMsg =
       body && typeof body === "object" ? (body as { msg?: string }).msg : undefined;
     const message =
@@ -66,6 +75,24 @@ service.interceptors.response.use(
 
 export function get<T>(url: string, params?: object) {
   return service.get<unknown, T>(url, { params });
+}
+
+/** 下载文件（导入模板 / 导出包）：后端直接回二进制，这里触发浏览器保存 */
+export function download(url: string, filename: string) {
+  return service
+    .get<unknown, Blob>(url, { responseType: "blob", timeout: 60000 })
+    .then(blob => {
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    });
+}
+
+/** 上传文件（multipart）：boundary 由 axios 自己生成，调用方不要手写 Content-Type */
+export function upload<T>(url: string, form: FormData, timeoutMs?: number) {
+  return service.post<unknown, T>(url, form, timeoutMs ? { timeout: timeoutMs } : undefined);
 }
 
 export function post<T>(url: string, data?: object, timeoutMs?: number) {

@@ -3,7 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { parkApi, shiftApi, staffApi, taskApi, zoneApi } from "@/api/ops";
-import type { Park, Shift, Staff, Task, Zone } from "@/api/types";
+import type { Park, Shift, Staff, StaffImportResult, Task, Zone } from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import AppIcon from "@/components/AppIcon.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
@@ -78,6 +78,23 @@ const staffForm = reactive({
 const STAFF_STATUSES = ["在岗", "休息", "请假"];
 const savingStaff = ref(false);
 const isEditingStaff = computed(() => staffForm.id !== null);
+
+/** Excel 导入：选择文件 → 上传 → 逐行结果（重名跳过 / 填写错误单独回显） */
+const importVisible = ref(false);
+const importing = ref(false);
+const downloadingTemplate = ref(false);
+const importFile = ref<File | null>(null);
+const importFileName = ref("");
+const importResult = ref<StaffImportResult | null>(null);
+const importInput = ref<HTMLInputElement | null>(null);
+/** 与后端 `staff_import::MAX_FILE_BYTES` 保持一致 */
+const IMPORT_MAX_BYTES = 4 * 1024 * 1024;
+/** 成功名单最多展开 20 个，避免一次导 500 人时把弹窗撑成一面墙 */
+const createdNamesPreview = computed(() => {
+  const names = importResult.value?.createdNames ?? [];
+  const shown = names.slice(0, 20).join("、");
+  return names.length > 20 ? `${shown} 等 ${names.length} 人` : shown;
+});
 
 function iso(date: Date): string {
   const pad = (value: number) => String(value).padStart(2, "0");
@@ -542,6 +559,73 @@ async function removeStaff(item: Staff) {
   ElMessage.success(`${item.name} 已移除`);
   if (staffForm.id === item.id) resetStaffForm();
   await Promise.all([loadStaffLibrary(), load()]);
+}
+
+async function downloadStaffTemplate() {
+  downloadingTemplate.value = true;
+  try {
+    await staffApi.downloadTemplate();
+    ElMessage.success("模板已下载，按「填写说明」填好后回来导入");
+  } finally {
+    downloadingTemplate.value = false;
+  }
+}
+
+function openStaffImport() {
+  resetStaffImport();
+  importVisible.value = true;
+}
+
+function resetStaffImport() {
+  importFile.value = null;
+  importFileName.value = "";
+  importResult.value = null;
+}
+
+function pickStaffImportFile() {
+  importInput.value?.click();
+}
+
+function onStaffImportFileChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0] ?? null;
+  // 清空 value，否则再次选同一个文件不会触发 change
+  input.value = "";
+  if (!file) return;
+  if (!file.name.toLowerCase().endsWith(".xlsx")) {
+    ElMessage.error("只支持 .xlsx 文件（旧版 .xls 请先另存为 .xlsx）");
+    return;
+  }
+  if (file.size > IMPORT_MAX_BYTES) {
+    ElMessage.error("文件超过 4MB，请拆成多个文件后再导入");
+    return;
+  }
+  importFile.value = file;
+  importFileName.value = file.name;
+  importResult.value = null;
+}
+
+async function submitStaffImport() {
+  if (!importFile.value) {
+    ElMessage.warning("请先选择填好的 Excel 文件");
+    return;
+  }
+  importing.value = true;
+  try {
+    const result = await staffApi.importExcel(importFile.value);
+    importResult.value = result;
+    if (result.created > 0) {
+      ElMessage.success(`已导入 ${result.created} 名责任人`);
+      importFile.value = null;
+      importFileName.value = "";
+      // 新责任人要出现在负载条与周视图里
+      await Promise.all([loadStaffLibrary(), load()]);
+    } else {
+      ElMessage.warning("没有新增责任人，原因见下方导入结果");
+    }
+  } finally {
+    importing.value = false;
+  }
 }
 
 const statusTone = (status: string) =>
@@ -1067,9 +1151,20 @@ onMounted(async () => {
       width="900px"
       @closed="resetStaffForm"
     >
-      <div class="link-hint" style="margin-bottom: 10px">
-        共 {{ staff.length }} 名责任人。排班决定谁负责哪个时段，工单派发时从该库中选择处理人。
-        修改姓名会同步历史排班 / 工单里的显示名；还有今天及以后的排班或在办工单时不允许移除。
+      <div class="staff-import-bar">
+        <div class="link-hint">
+          共 {{ staff.length }} 名责任人。排班决定谁负责哪个时段，工单派发时从该库中选择处理人。
+          修改姓名会同步历史排班 / 工单里的显示名；还有今天及以后的排班或在办工单时不允许移除。
+          <b>批量入库</b>：先下载 Excel 模板，按「填写说明」填好再导入，重名与工号重复的行会自动跳过。
+        </div>
+        <div class="staff-import-actions">
+          <button class="btn" :disabled="downloadingTemplate" @click="downloadStaffTemplate">
+            <AppIcon name="download" />{{ downloadingTemplate ? "生成中…" : "下载模板" }}
+          </button>
+          <button class="btn primary" @click="openStaffImport">
+            <AppIcon name="upload" />Excel 导入
+          </button>
+        </div>
       </div>
       <div class="table-wrap">
         <table class="table">
@@ -1153,6 +1248,94 @@ onMounted(async () => {
       </div>
     </el-dialog>
 
+    <!-- 责任人库 Excel 导入：下载模板 → 选择文件 → 逐行结果 -->
+    <el-dialog
+      v-model="importVisible"
+      title="Excel 导入责任人"
+      width="680px"
+      @closed="resetStaffImport"
+    >
+      <div class="import-step">
+        <span class="policy-n">1</span>
+        <div style="flex: 1">
+          <b>下载模板</b>
+          <p>两张表：「责任人」用来填写，「填写说明」写了每列要求。姓名必填，其余选填，列顺序可以调整。</p>
+        </div>
+        <button class="btn sm" :disabled="downloadingTemplate" @click="downloadStaffTemplate">
+          <AppIcon name="download" />下载模板
+        </button>
+      </div>
+      <div class="import-step">
+        <span class="policy-n">2</span>
+        <div style="flex: 1">
+          <b>选择填好的文件</b>
+          <p>
+            只读第一张工作表，空行自动忽略，一次最多 500 行。工号留空时按 EMP-01 这类编号自动生成；
+            在岗状态只能填 在岗 / 休息 / 请假，留空按在岗处理。
+          </p>
+        </div>
+        <button class="btn sm" @click="pickStaffImportFile">
+          <AppIcon name="upload" />选择文件
+        </button>
+        <input
+          ref="importInput"
+          type="file"
+          accept=".xlsx"
+          hidden
+          @change="onStaffImportFileChange"
+        />
+      </div>
+
+      <div v-if="importFileName" class="import-file">
+        <AppIcon name="file" />
+        <span class="mono">{{ importFileName }}</span>
+      </div>
+
+      <div v-if="importResult" class="import-result">
+        <div class="import-summary">
+          <span class="tag">共 {{ importResult.total }} 行</span>
+          <span class="tag teal">新增 {{ importResult.created }}</span>
+          <span class="tag orange">跳过 {{ importResult.skipped }}</span>
+          <span class="tag red">失败 {{ importResult.failed }}</span>
+        </div>
+        <div v-if="importResult.createdNames.length" class="import-created">
+          <b>已加入责任人库：</b>{{ createdNamesPreview }}
+        </div>
+        <div v-if="importResult.issues.length" class="table-wrap import-issues">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>行号</th>
+                <th>姓名</th>
+                <th>结果</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="issue in importResult.issues" :key="`${issue.row}-${issue.name}`">
+                <td class="mono">{{ issue.row }}</td>
+                <td>{{ issue.name || "—" }}</td>
+                <td>
+                  <span class="tag" :class="issue.status === 'skipped' ? '' : 'red'">
+                    {{ issue.status === "skipped" ? "跳过" : "失败" }}
+                  </span>
+                </td>
+                <td class="muted">{{ issue.message }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-else class="import-created">没有跳过或失败的行，整份文件都导入成功。</div>
+      </div>
+
+      <template #footer>
+        <button class="btn" @click="importVisible = false">关闭</button>
+        <button class="btn primary" :disabled="importing || !importFile" @click="submitStaffImport">
+          <AppIcon name="upload" />{{ importing ? "导入中…" : "开始导入" }}
+        </button>
+      </template>
+    </el-dialog>
+
     <!-- 排班规则 -->
     <el-dialog v-model="ruleVisible" title="排班规则" width="600px">
       <div class="policy-flow">
@@ -1234,6 +1417,85 @@ onMounted(async () => {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 10px;
+}
+.staff-import-bar {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.staff-import-bar .link-hint {
+  flex: 1;
+}
+.staff-import-actions {
+  display: flex;
+  gap: 8px;
+  flex: none;
+}
+.import-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px dashed var(--line);
+}
+.import-step:first-child {
+  padding-top: 0;
+}
+.import-step b {
+  font-size: 12.5px;
+}
+.import-step p {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-2);
+}
+.import-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  background: #f8fafc;
+  color: var(--text-2);
+}
+.import-result {
+  margin-top: 12px;
+}
+.import-summary {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.import-created {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-2);
+  word-break: break-all;
+}
+.import-issues {
+  margin-top: 10px;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+}
+.import-issues .table {
+  min-width: 0;
+}
+.import-issues .table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+/* .tag 只有 blue / purple / teal / orange，失败行用红色 */
+.tag.red {
+  background: #fdeced;
+  color: #dc2626;
 }
 @media (max-width: 900px) {
   .staff-form-grid {

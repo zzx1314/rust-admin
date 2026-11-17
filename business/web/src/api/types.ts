@@ -513,6 +513,27 @@ export interface Staff {
   openOrderCount: number;
 }
 
+/** 责任人库 Excel 导入：逐行结果（只回报跳过 / 失败的行） */
+export interface StaffImportRow {
+  /** Excel 行号（1 开始） */
+  row: number;
+  name: string;
+  /** 跳过（重名 / 工号重复）/ 失败（内容不合法或写库失败） */
+  status: "skipped" | "failed";
+  message: string;
+}
+
+/** 责任人库 Excel 导入结果 */
+export interface StaffImportResult {
+  /** 文件里的数据行数（不含表头与空行） */
+  total: number;
+  created: number;
+  skipped: number;
+  failed: number;
+  createdNames: string[];
+  issues: StaffImportRow[];
+}
+
 /** 排班：某天某班次由某个责任人负责某条巡检计划 */
 export interface Shift {
   id: number;

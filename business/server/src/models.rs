@@ -683,6 +683,31 @@ pub struct StaffRequest {
     pub skills: Option<String>,
 }
 
+/// 责任人库 Excel 导入：逐行结果（只回报跳过 / 失败的行，成功的只计数）
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StaffImportRow {
+    /// Excel 行号（1 开始），前端按它回显
+    pub row: i64,
+    pub name: String,
+    /// `skipped`（重名 / 工号重复，不算错）/ `failed`（内容不合法或写库失败）
+    pub status: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StaffImportResult {
+    /// 文件里的数据行数（不含表头与空行）
+    pub total: i64,
+    pub created: i64,
+    pub skipped: i64,
+    pub failed: i64,
+    /// 新加入责任人库的姓名（前端提示用）
+    pub created_names: Vec<String>,
+    pub issues: Vec<StaffImportRow>,
+}
+
 /// 排班：一条 = 某天某班次由某个责任人负责某条巡检计划。
 #[derive(Debug, FromRow, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]

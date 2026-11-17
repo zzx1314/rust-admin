@@ -1,4 +1,4 @@
-import { del, get, post, put } from "./http";
+import { del, download, get, post, put, upload } from "./http";
 import type {
   Alert,
   BackendMap,
@@ -21,6 +21,7 @@ import type {
   ShiftCopyResult,
   ShiftStats,
   Staff,
+  StaffImportResult,
   TaskEvent,
   UserInfo,
   WorkOrder,
@@ -226,7 +227,15 @@ export const staffApi = {
   list: (params?: object) => get<Staff[]>("/staff", params),
   create: (data: object) => post<Staff>("/staff", data),
   update: (id: number, data: object) => put<Staff>(`/staff/${id}`, data),
-  remove: (id: number) => del<boolean>(`/staff/${id}`)
+  remove: (id: number) => del<boolean>(`/staff/${id}`),
+  /** 下载 Excel 导入模板（.xlsx，含「填写说明」页） */
+  downloadTemplate: () => download("/staff/import-template", "责任人导入模板.xlsx"),
+  /** 上传填好的模板：逐行处理，返回新增 / 跳过 / 失败明细 */
+  importExcel: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return upload<StaffImportResult>("/staff/import", form, 60000);
+  }
 };
 
 /** 排班（计划层）：日期 + 班次 + 责任人 + 关联巡检计划 */

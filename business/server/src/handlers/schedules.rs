@@ -4,11 +4,14 @@ use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::models::{
     Shift, ShiftCopyRequest, ShiftCopyResult, ShiftCopySkip, ShiftDuplicateRequest, ShiftQuery,
-    ShiftRequest, Staff, StaffQuery, StaffRequest,
+    ShiftRequest, Staff, StaffImportResult, StaffImportRow, StaffQuery, StaffRequest,
 };
 use axum::Extension;
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::body::Body;
+use axum::extract::{Multipart, Path, Query, State};
+use axum::http::{StatusCode, header};
+use axum::response::Response;
 use chrono::{Duration, NaiveDate};
 use serde_json::{Value, json};
 use sqlx::{QueryBuilder, Sqlite, SqlitePool, Transaction};
@@ -24,6 +27,11 @@ const SLOT_RANGES: [(&str, &str); 3] = [
 
 /// 排班状态（复制时允许改写成其中一种）
 const SHIFT_STATUSES: [&str; 3] = ["已发布", "待确认", "草案"];
+
+/// Excel 导入时给新责任人轮换的头像底色（周视图的圆形头像用它上色）
+const STAFF_COLORS: [&str; 6] = [
+    "#0284c7", "#7c3aed", "#0f766e", "#b45309", "#be123c", "#4d7c0f",
+];
 
 fn slot_range(slot: &str) -> Option<&'static str> {
     SLOT_RANGES
@@ -199,6 +207,231 @@ pub async fn delete_staff(
         .await?;
     tx.commit().await?;
     Ok(ApiResponse::ok(result.rows_affected() > 0))
+}
+
+// ---------------------------------------------------- 责任人库 Excel 导入
+
+/// 导入模板下载：`GET /api/staff/import-template`
+///
+/// 模板里两张表：`责任人`（表头 + 列宽 + 冻结首行，由用户填）与 `填写说明`。
+/// 中文文件名同时给 `filename`（老浏览器）与 `filename*`（RFC 5987）。
+pub async fn staff_import_template() -> Result<Response, AppError> {
+    let bytes = crate::staff_import::template().map_err(AppError::Internal)?;
+    let disposition = format!(
+        "attachment; filename=\"staff-import-template.xlsx\"; filename*=UTF-8''{}",
+        urlencoding::encode(crate::staff_import::TEMPLATE_FILENAME)
+    );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            header::CONTENT_TYPE,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        .header(header::CONTENT_DISPOSITION, disposition)
+        .header(header::CONTENT_LENGTH, bytes.len().to_string())
+        .body(Body::from(bytes))
+        .map_err(|error| AppError::Internal(format!("构造导入模板响应失败: {error}")))
+}
+
+/// Excel 导入：`POST /api/staff/import`（multipart，字段名 `file`）
+///
+/// 逐行处理，坏行不影响好行：
+/// - 姓名为空 / 在岗状态不认识 / 内容超长 → `failed`，附原因；
+/// - 与库里或同一份文件里的姓名、工号重复 → `skipped`（重复导入同一份文件是安全的）。
+pub async fn import_staff(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Json<ApiResponse<StaffImportResult>>, AppError> {
+    let mut upload: Option<(String, Vec<u8>)> = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| AppError::BadRequest(format!("无效的上传请求: {error}")))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let file_name = field.file_name().unwrap_or("staff.xlsx").to_string();
+        let data = field
+            .bytes()
+            .await
+            .map_err(|error| AppError::BadRequest(format!("读取上传文件失败: {error}")))?;
+        upload = Some((file_name, data.to_vec()));
+    }
+
+    let (file_name, bytes) =
+        upload.ok_or_else(|| AppError::BadRequest("请选择要导入的 Excel 文件".to_string()))?;
+    if bytes.is_empty() {
+        return Err(AppError::BadRequest("上传的文件是空的".to_string()));
+    }
+    if !file_name.to_lowercase().ends_with(".xlsx") {
+        return Err(AppError::BadRequest(
+            "只支持 .xlsx（Excel 2007 及以上）；旧版 .xls 请先另存为 .xlsx".to_string(),
+        ));
+    }
+    if bytes.len() > crate::staff_import::MAX_FILE_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "文件超过 {}MB，请拆分后再导入",
+            crate::staff_import::MAX_FILE_BYTES / 1024 / 1024
+        )));
+    }
+
+    let outcome = crate::staff_import::parse_workbook(&bytes).map_err(AppError::BadRequest)?;
+    if outcome.total() == 0 {
+        return Err(AppError::BadRequest(
+            "文件里没有可导入的数据行：表头下面至少要填一行".to_string(),
+        ));
+    }
+
+    let mut issues: Vec<StaffImportRow> = outcome
+        .rejected
+        .iter()
+        .map(|rejected| StaffImportRow {
+            row: rejected.row as i64,
+            name: rejected.name.clone(),
+            status: "failed".to_string(),
+            message: rejected.message.clone(),
+        })
+        .collect();
+    let mut created_names: Vec<String> = Vec::new();
+    // 同一份文件内部的查重（大小写不敏感，中文姓名不受影响）
+    let mut seen_names: HashSet<String> = HashSet::new();
+    let mut seen_codes: HashSet<String> = HashSet::new();
+
+    for row in &outcome.rows {
+        let staff = &row.staff;
+        if !seen_names.insert(staff.name.to_lowercase()) {
+            issues.push(staff_import_issue(
+                row.row,
+                &staff.name,
+                "skipped",
+                "同一份文件里姓名重复，已跳过".to_string(),
+            ));
+            continue;
+        }
+        let same_name: Option<(String,)> =
+            sqlx::query_as("SELECT staff_code FROM staff WHERE name = ?1 LIMIT 1")
+                .bind(&staff.name)
+                .fetch_optional(&state.db)
+                .await?;
+        if let Some((code,)) = same_name {
+            issues.push(staff_import_issue(
+                row.row,
+                &staff.name,
+                "skipped",
+                format!("责任人库里已有同名责任人（{code}），已跳过"),
+            ));
+            continue;
+        }
+
+        let staff_code = match &staff.staff_code {
+            Some(code) => {
+                if !seen_codes.insert(code.to_lowercase()) {
+                    issues.push(staff_import_issue(
+                        row.row,
+                        &staff.name,
+                        "skipped",
+                        format!("同一份文件里工号 {code} 重复，已跳过"),
+                    ));
+                    continue;
+                }
+                let taken: Option<(String,)> =
+                    sqlx::query_as("SELECT name FROM staff WHERE staff_code = ?1 LIMIT 1")
+                        .bind(code)
+                        .fetch_optional(&state.db)
+                        .await?;
+                if let Some((owner,)) = taken {
+                    issues.push(staff_import_issue(
+                        row.row,
+                        &staff.name,
+                        "skipped",
+                        format!("工号 {code} 已被责任人「{owner}」占用，已跳过"),
+                    ));
+                    continue;
+                }
+                code.clone()
+            }
+            None => allocate_staff_code(&state).await?,
+        };
+
+        let timestamp = now();
+        let result = sqlx::query(
+            "INSERT INTO staff (staff_code, name, role, team, phone, color, status, skills,
+                created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        )
+        .bind(&staff_code)
+        .bind(&staff.name)
+        .bind(&staff.role)
+        .bind(&staff.team)
+        .bind(&staff.phone)
+        .bind(STAFF_COLORS[created_names.len() % STAFF_COLORS.len()])
+        .bind(staff.status.clone().unwrap_or_else(|| "在岗".to_string()))
+        .bind(&staff.skills)
+        .bind(&timestamp)
+        .bind(&timestamp)
+        .execute(&state.db)
+        .await;
+        match result {
+            Ok(_) => {
+                seen_codes.insert(staff_code.to_lowercase());
+                created_names.push(staff.name.clone());
+            }
+            Err(error) => issues.push(staff_import_issue(
+                row.row,
+                &staff.name,
+                "failed",
+                format!("写库失败：{error}"),
+            )),
+        }
+    }
+
+    issues.sort_by_key(|issue| issue.row);
+    let created = created_names.len() as i64;
+    let skipped = issues
+        .iter()
+        .filter(|issue| issue.status == "skipped")
+        .count() as i64;
+    let failed = issues
+        .iter()
+        .filter(|issue| issue.status == "failed")
+        .count() as i64;
+    Ok(ApiResponse::ok(StaffImportResult {
+        total: outcome.total() as i64,
+        created,
+        skipped,
+        failed,
+        created_names,
+        issues,
+    }))
+}
+
+/// 导入时给新责任人分配的编号：跟着 `MAX(id)+1` 走（与手动新增一致），
+/// 遇到已被手填占用的编号就往后顺延。
+async fn allocate_staff_code(state: &AppState) -> Result<String, AppError> {
+    let mut next: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM staff")
+        .fetch_one(&state.db)
+        .await?;
+    loop {
+        let code = format!("EMP-{next:02}");
+        let taken: Option<i64> = sqlx::query_scalar("SELECT id FROM staff WHERE staff_code = ?1")
+            .bind(&code)
+            .fetch_optional(&state.db)
+            .await?;
+        if taken.is_none() {
+            return Ok(code);
+        }
+        next += 1;
+    }
+}
+
+fn staff_import_issue(row: usize, name: &str, status: &str, message: String) -> StaffImportRow {
+    StaffImportRow {
+        row: row as i64,
+        name: name.to_string(),
+        status: status.to_string(),
+        message,
+    }
 }
 
 // ------------------------------------------------------------------ 排班

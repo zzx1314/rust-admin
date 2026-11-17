@@ -30,5 +30,7 @@ pub mod models;
 pub mod notify;
 pub mod schedule;
 pub mod seed;
+pub mod staff_import;
 pub mod video;
+pub mod xlsx;
 pub mod zentai;

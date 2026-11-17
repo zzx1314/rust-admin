@@ -3365,3 +3365,173 @@ async fn wecom_webhook_is_configured_from_the_console() {
             .unwrap();
     assert_eq!(cleared.as_deref(), Some(""), "清空后库里是空串");
 }
+
+/// 责任人库 Excel 导入：模板下载 → 导入（真 Excel 文件）→ 重复导入幂等 →
+/// 坏行只影响自己。
+#[tokio::test]
+async fn staff_excel_import_flow() {
+    let (state, _db) = test_state().await;
+    let app = build_router(state);
+    let token = login(&app).await;
+
+    let auth = |method: &str, path: &str| {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let send = |request: Request<Body>| {
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let content_type = response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            let disposition = response
+                .headers()
+                .get(header::CONTENT_DISPOSITION)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, content_type, disposition, bytes.to_vec())
+        }
+    };
+    let upload = |bytes: Vec<u8>, filename: &str| {
+        let boundary = "----robodogstaffimport";
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; \
+filename=\"{filename}\"\r\nContent-Type: application/vnd.openxmlformats-\
+officedocument.spreadsheetml.sheet\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(&bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let mut request = auth("POST", "/api/staff/import");
+        request.headers_mut().insert(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}")
+                .parse()
+                .unwrap(),
+        );
+        *request.body_mut() = Body::from(body);
+        request
+    };
+    // 1) 下载模板：xlsx MIME + 中文文件名 + 真的是 zip（PK 开头）
+    let (status, content_type, disposition, template) =
+        send(auth("GET", "/api/staff/import-template")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        content_type.contains("spreadsheetml.sheet"),
+        "模板 MIME 不对: {content_type}"
+    );
+    assert!(
+        disposition.contains("filename*=UTF-8''") && disposition.contains("staff-import-template"),
+        "缺少中文文件名回退: {disposition}"
+    );
+    assert!(template.starts_with(b"PK"), "模板不是 zip/xlsx");
+
+    // 2) 导入 openpyxl 生成的真 Excel 文件（inlineStr + 数字单元格 + 空行）
+    let fixture = include_bytes!("fixtures/staff-import-openpyxl.xlsx");
+    let request = upload(fixture.to_vec(), "staff.xlsx");
+    let (status, _, _, raw) = send(request).await;
+    assert_eq!(status, StatusCode::OK);
+    let body: Value = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(body["code"], 10200, "导入接口应返回业务码: {body}");
+    assert_eq!(body["data"]["total"], 3);
+    assert_eq!(body["data"]["created"], 3, "{body}");
+    assert_eq!(body["data"]["skipped"], 0);
+    assert_eq!(body["data"]["failed"], 0);
+
+    let (status, _, _, raw) = send(auth("GET", "/api/staff")).await;
+    assert_eq!(status, StatusCode::OK);
+    let list: Value = serde_json::from_slice(&raw).unwrap();
+    let rows = list["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    let names: Vec<&str> = rows.iter().filter_map(|row| row["name"].as_str()).collect();
+    assert_eq!(names, vec!["张三", "李四", "王五 & <测试>"]);
+    assert_eq!(rows[0]["staffCode"], "EMP-101");
+    assert_eq!(rows[1]["staffCode"], "EMP-02", "工号留空时自动分配");
+    assert_eq!(rows[1]["phone"], "13900000000", "数字单元格应还原成文本");
+    assert_eq!(rows[1]["status"], "休息");
+    assert_eq!(rows[2]["skills"], "充电维护");
+
+    // 3) 同一份文件再导一次：全部跳过，不重复建人
+    let request = upload(fixture.to_vec(), "staff.xlsx");
+    let (status, _, _, raw) = send(request).await;
+    let body: Value = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["created"], 0, "{body}");
+    assert_eq!(body["data"]["skipped"], 3);
+    let (_, _, _, raw) = send(auth("GET", "/api/staff")).await;
+    let list: Value = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(
+        list["data"].as_array().unwrap().len(),
+        3,
+        "重复导入不应新增"
+    );
+
+    // 4) 坏行只影响自己：重名跳过、状态不认识的报失败、好行照常入库
+    let sheet = robodog_ops_server::xlsx::Sheet {
+        name: "责任人".to_string(),
+        headers: vec![
+            "姓名".into(),
+            "工号".into(),
+            "角色".into(),
+            "班组".into(),
+            "联系电话".into(),
+            "在岗状态".into(),
+            "技能".into(),
+        ],
+        rows: vec![
+            vec!["赵六".into(), String::new(), "值班员".into()],
+            vec!["赵六".into(), String::new(), "值班员".into()],
+            vec!["钱七".into(), String::new(), "值班员".into()],
+            vec![String::new(), String::new(), "值班员".into()],
+        ]
+        .into_iter()
+        .map(|row| {
+            let mut row = row;
+            row.resize(7, String::new());
+            row
+        })
+        .collect(),
+        widths: vec![],
+    };
+    let bytes = robodog_ops_server::xlsx::write_workbook(&[sheet]).expect("构造测试 xlsx 失败");
+    let request = upload(bytes, "staff2.xlsx");
+    let (status, _, _, raw) = send(request).await;
+    let body: Value = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["total"], 4, "{body}");
+    assert_eq!(body["data"]["created"], 2, "赵六 + 钱七: {body}");
+    assert_eq!(body["data"]["skipped"], 1, "文件内重名: {body}");
+    assert_eq!(body["data"]["failed"], 1, "姓名为空: {body}");
+    let issues = body["data"]["issues"].as_array().unwrap();
+    assert_eq!(issues.len(), 2);
+    assert_eq!(issues[0]["row"], 3);
+    assert_eq!(issues[0]["status"], "skipped");
+    assert_eq!(issues[1]["row"], 5);
+    assert_eq!(issues[1]["status"], "failed");
+
+    // 5) 非 xlsx 拒收（.xls 只给可读提示，不做转换）
+    let request = upload(b"not an excel file".to_vec(), "staff.xls");
+    let (status, _, _, raw) = send(request).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(&raw).unwrap();
+    assert!(
+        body["msg"].as_str().unwrap_or_default().contains(".xlsx"),
+        "{body}"
+    );
+}

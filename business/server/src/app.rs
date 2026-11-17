@@ -185,6 +185,17 @@ pub fn build_router(state: AppState) -> Router {
             "/staff",
             get(schedules::list_staff).post(schedules::create_staff),
         )
+        // 责任人库 Excel 导入：模板下载 + 上传解析（静态路径要在 /staff/{id} 之前声明）
+        .route(
+            "/staff/import-template",
+            get(schedules::staff_import_template),
+        )
+        // 导入是文件上传：axum 默认 2MB 请求体上限会直接 413，这里跟 `MAX_FILE_BYTES` 对齐
+        .route(
+            "/staff/import",
+            post(schedules::import_staff)
+                .layer(DefaultBodyLimit::max(crate::staff_import::MAX_FILE_BYTES)),
+        )
         .route(
             "/staff/{id}",
             axum::routing::put(schedules::update_staff).delete(schedules::delete_staff),
