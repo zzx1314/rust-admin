@@ -791,6 +791,7 @@ async fn handle_viewer(socket: WebSocket, state: AppState, source: VideoSource) 
     //
     // 流头不会串轮次：板端 relay 每次起 ffmpeg 前发 `video_reset`，设备客户端重连推流
     // 时整个房间被换掉，两条路径都会把旧流头清掉。
+    let has_init = init.is_some();
     if let Some(init) = init
         && sink
             .send(Message::Binary(init.as_ref().to_vec().into()))
@@ -803,7 +804,12 @@ async fn handle_viewer(socket: WebSocket, state: AppState, source: VideoSource) 
         return;
     }
 
-    if first && !source.start(&state).await {
+    // 只在「流没真正在跑」时才要 video_start：房间没有推流端，或者有推流端但还没吐出
+    // 流头（刚启动 / 卡住）。没人看时推流端保留 60s（见 `STREAM_IDLE_GRACE`），这期间
+    // 新观看者（刷新页面、重开抽屉）直接复用还在跑的流 —— 再发一次 video_start 纯属噪声：
+    // 日志里反复出现「video requested」，客户端还得靠地址去重兜一层。
+    let needs_start = first && (!has_init || !state.video_hub.has_publisher(&room).await);
+    if needs_start && !source.start(&state).await {
         warn!("viewer of {room}: video_start 没送出去（推流端未连接）");
     }
 
