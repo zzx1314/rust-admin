@@ -133,9 +133,11 @@ function cellKey(date: string, slot: string) {
   return `${date}|${slot}`;
 }
 
-/** 目标格子能否接这条排班：正在拖 + 不是原格子 */
-function canDropInto(date: string, slot: string) {
-  const source = dragShift.value;
+/**
+ * 目标格子能否接这条排班：正在拖 + 不是原格子。
+ * `source` 显式传入：drop 里会先把 `dragShift` 清空，再回读 ref 会拿到 null。
+ */
+function canDropInto(date: string, slot: string, source: Shift | null = dragShift.value) {
   if (!source) return false;
   return !(source.shiftDate === date && source.slot === slot);
 }
@@ -174,7 +176,8 @@ async function onDropCell(date: string, slot: string) {
   const source = dragShift.value;
   dragShift.value = null;
   dragOverCell.value = "";
-  if (!source || !canDropInto(date, slot)) return;
+  // 注意：这里必须把 source 显式传进去，不能让它去读已经清空的 dragShift
+  if (!source || !canDropInto(date, slot, source)) return;
   try {
     const created = await shiftApi.duplicate(source.id, { shiftDate: date, slot });
     ElMessage.success(

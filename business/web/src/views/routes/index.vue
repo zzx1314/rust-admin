@@ -102,6 +102,8 @@ const actionDialog = ref(false);
 const validateVisible = ref(false);
 const validation = ref<RouteValidation | null>(null);
 const actionKind = ref<"point" | "leg">("point");
+/** 正在修改的动作下标（null = 新建）；对话框就地改参数，写回原位置 */
+const actionEditIndex = ref<number | null>(null);
 
 const routeForm = reactive({
   routeName: "",
@@ -724,7 +726,15 @@ async function saveBaseInfo() {
   await persist(false);
 }
 
-function openActionDialog(kind: "point" | "leg") {
+/** 从阈值文案里还原置信度（`置信度 ≥ 0.35` → 0.35），改 AI 动作时回填滑杆 */
+function parseConfidence(threshold?: string | null) {
+  const match = /(\d*\.?\d+)/.exec(String(threshold ?? ""));
+  const value = match ? Number(match[1]) : NaN;
+  return Number.isFinite(value) && value > 0 && value <= 1 ? value : 0.35;
+}
+
+/** 打开动作对话框：`index` 有值 = 修改已配置的那条，就地覆盖；否则新建 */
+function openActionDialog(kind: "point" | "leg", index: number | null = null) {
   if (kind === "point" && !selectedPoint.value) {
     ElMessage.warning("请先点选一个航点");
     return;
@@ -734,6 +744,32 @@ function openActionDialog(kind: "point" | "leg") {
     return;
   }
   actionKind.value = kind;
+  const existing =
+    index === null
+      ? null
+      : (kind === "point" ? selectedPoint.value : selectedLeg.value)?.actions[index] ?? null;
+  if (existing) {
+    // 修改：把已存的参数整套回填，参数 / 场景 / 类别 / 数量都能在原值上改
+    Object.assign(actionForm, {
+      type: existing.type,
+      param: existing.param ?? "",
+      trigger: existing.trigger ?? "到达即执行",
+      threshold: existing.threshold ?? "—",
+      retry: existing.retry ?? 1,
+      scene: existing.scene ?? "",
+      labels: [...(existing.labels ?? [])],
+      aiConf: parseConfidence(existing.threshold),
+      checkType:
+        existing.checkType ??
+        (existing.expectCount != null && Number(existing.expectCount) > 0 ? "count" : "exist"),
+      expectCount: existing.expectCount ?? null
+    });
+    actionEditIndex.value = index;
+    if (actionForm.type === "AI 识别") void aiCatalog.load();
+    actionDialog.value = true;
+    return;
+  }
+  // 新建：按动作类型带默认参数
   const type = actionOptions(kind)[0];
   const meta = actionMeta(type);
   Object.assign(actionForm, {
@@ -748,6 +784,7 @@ function openActionDialog(kind: "point" | "leg") {
     checkType: "exist",
     expectCount: null
   });
+  actionEditIndex.value = null;
   actionDialog.value = true;
 }
 
@@ -807,7 +844,7 @@ function saveAction() {
   snapshot();
   // AI 识别：场景 / 类别来自实时视频模型目录，阈值走滑杆（后端按 `threshold` 解析置信度）
   const ai = isAiAction.value;
-  target.push({
+  const action = {
     type: actionForm.type,
     param: ai && aiParamAuto.value ? composeAiParam() : actionForm.param,
     ...(actionKind.value === "point"
@@ -824,9 +861,17 @@ function saveAction() {
     // 任务类型：存在性任务不写检查数量（后端也按 checkType 判，双保险）
     ...(ai ? { checkType: actionForm.checkType } : {}),
     ...(countTask ? { expectCount } : {})
-  });
+  };
+  // 修改：整条替换回原位置（顺序不变，撤销栈里是一条快照）
+  const editIndex = actionEditIndex.value;
+  if (editIndex !== null && target[editIndex]) {
+    target[editIndex] = action as (typeof target)[number];
+  } else {
+    target.push(action as (typeof target)[number]);
+  }
   actionDialog.value = false;
-  ElMessage.success(`已添加动作：${actionForm.type}`);
+  actionEditIndex.value = null;
+  ElMessage.success(`${editIndex !== null ? "已更新" : "已添加"}动作：${actionForm.type}`);
 }
 
 function removeAction(kind: "point" | "leg", index: number) {
@@ -1448,6 +1493,13 @@ onBeforeUnmount(() => {
                       <AppIcon :name="actionMeta(action.type).icon" />
                     </span>
                     <b>{{ action.type }}</b>
+                    <button
+                      class="btn sm ghost icon"
+                      title="修改"
+                      @click="openActionDialog('point', index)"
+                    >
+                      <AppIcon name="edit" />
+                    </button>
                     <button class="btn sm ghost icon" title="删除" @click="removeAction('point', index)">
                       <AppIcon name="trash" />
                     </button>
@@ -1513,6 +1565,13 @@ onBeforeUnmount(() => {
                       <AppIcon :name="actionMeta(action.type).icon" />
                     </span>
                     <b>{{ action.type }}</b>
+                    <button
+                      class="btn sm ghost icon"
+                      title="修改"
+                      @click="openActionDialog('leg', index)"
+                    >
+                      <AppIcon name="edit" />
+                    </button>
                     <button class="btn sm ghost icon" title="删除" @click="removeAction('leg', index)">
                       <AppIcon name="trash" />
                     </button>
@@ -1687,7 +1746,15 @@ onBeforeUnmount(() => {
 
     <el-dialog
       v-model="actionDialog"
-      :title="actionKind === 'point' ? '添加航点动作' : '添加行进任务'"
+      :title="
+        actionEditIndex !== null
+          ? actionKind === 'point'
+            ? '修改航点动作'
+            : '修改行进任务'
+          : actionKind === 'point'
+            ? '添加航点动作'
+            : '添加行进任务'
+      "
       width="560px"
     >
       <div class="form-grid">
@@ -1786,7 +1853,9 @@ onBeforeUnmount(() => {
       </div>
       <template #footer>
         <button class="btn" @click="actionDialog = false"><AppIcon name="close" />取消</button>
-        <button class="btn primary" @click="saveAction"><AppIcon name="check" />添加</button>
+        <button class="btn primary" @click="saveAction">
+          <AppIcon name="check" />{{ actionEditIndex !== null ? "保存修改" : "添加" }}
+        </button>
       </template>
     </el-dialog>
 
