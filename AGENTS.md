@@ -88,9 +88,10 @@ HTTP」模式。两者共用同一个服务令牌，见 `business/README.md`。
 平台连不到内网 Agent，`auto` 走的就是客户端这条路；改这块先读
 `business/docs/official-app-parity.md` §5.6。
 
-企业微信告警推送：群机器人 webhook 只走环境变量 `ROBODOG_WECOM_WEBHOOK`
-（地址即凭据，不要写进 `server.toml`）；另可选 `ROBODOG_PUBLIC_URL` 拼消息里的
-「查看详情」链接。用法见 `business/README.md`「企业微信告警推送」，**设计与扩展点见
+企业微信告警推送：群机器人 webhook **在平台里配**（系统设置 → 企业微信群机器人，
+存 `settings.wecom_webhook`，`value_type='secret'`，保存即生效、接口只回掩码、
+不进 `server.toml`）；环境变量 `ROBODOG_WECOM_WEBHOOK` 保留为部署级兜底，平台为空
+时才用。另可选 `ROBODOG_PUBLIC_URL` 拼消息里的「查看详情」链接。用法见 `business/README.md`「企业微信告警推送」，**设计与扩展点见
 `business/docs/wecom-alert-push.md`（改这块之前必读）**：架构、代码地图、三层开关、
 去重/限流参数、触发点清单、新增告警源的做法、踩坑记录。
 

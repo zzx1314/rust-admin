@@ -3255,3 +3255,109 @@ async fn alert_auto_dispatches_to_duty_owner() {
     let (status, body) = send(auth("DELETE", &format!("/api/workorders/{order_id}"))).await;
     assert_eq!(status, StatusCode::OK, "删除工单应成功: {body}");
 }
+
+/// 企业微信 webhook 改为**平台内配置**：地址即凭据，所以读只回掩码、
+/// 写单独接口、通用设置接口既看不到也不接受它。
+#[tokio::test]
+async fn wecom_webhook_is_configured_from_the_console() {
+    let (state, _db) = test_state().await;
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+    let auth = |method: &str, path: &str| {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let send = |request: Request<Body>| {
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            (response.status(), json_body(response).await)
+        }
+    };
+    let put = |path: &str, body: &str| {
+        let mut request = auth("PUT", path);
+        *request.body_mut() = Body::from(body.to_string());
+        request
+    };
+
+    // 1. 新库里这行是空的：没配地址就不该自称能推
+    let (status, body) = send(auth("GET", "/api/notifications/webhook")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["configured"], false, "新库应未配置: {body}");
+    assert_eq!(body["data"]["source"], serde_json::Value::Null);
+
+    // 2. 少 key= 的地址保存时就拒掉（否则发出去只会拿到 93000）
+    let (status, body) = send(put(
+        "/api/notifications/webhook",
+        r#"{"webhook":"https://qyapi.weixin.qq.com/cgi-bin/webhook/send"}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "缺 key= 应拒绝: {body}");
+
+    // 3. 正常地址：只回掩码，完整 key 不出现在响应里
+    let key = "94fdb35e-1234-5678-9abc-def012345678";
+    let (status, body) = send(put(
+        "/api/notifications/webhook",
+        &format!(
+            r#"{{"webhook":"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={key}"}}"#
+        ),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "保存应成功: {body}");
+    assert_eq!(body["data"]["configured"], true);
+    assert_eq!(body["data"]["source"], "db", "平台配置的来源是 db: {body}");
+    let masked = body["data"]["masked"].as_str().unwrap_or_default();
+    assert!(masked.contains("key=94fdb35e…"), "掩码应保留前 8 位: {masked}");
+    assert!(!masked.contains(key), "掩码里不能有完整 key: {masked}");
+
+    // 4. 落库了（重启后仍生效），且通用设置接口既看不到这行、也不接受写
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT setting_value FROM settings WHERE setting_key = 'wecom_webhook'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert!(
+        stored.as_deref().unwrap_or_default().ends_with(key),
+        "地址应完整存进 settings：{stored:?}"
+    );
+
+    let (_, settings) = send(auth("GET", "/api/settings")).await;
+    let keys: Vec<&str> = settings["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["settingKey"].as_str())
+        .collect();
+    assert!(
+        !keys.contains(&"wecom_webhook"),
+        "secret 类型不出现在通用设置列表: {keys:?}"
+    );
+    assert!(keys.contains(&"wecom_alert_push"), "其它开关应照旧可见");
+
+    let (status, body) = send(put(
+        "/api/settings",
+        r#"[{"settingKey":"wecom_webhook","settingValue":"https://evil.example.com/send?key=x"}]"#,
+    ))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "敏感配置必须走专用接口: {body}"
+    );
+
+    // 5. 清空 = 回退环境变量（这里没有环境变量，于是回到未配置）
+    let (status, body) = send(put("/api/notifications/webhook", r#"{"webhook":""}"#)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["configured"], false, "清空后应未配置: {body}");
+    let cleared: Option<String> =
+        sqlx::query_scalar("SELECT setting_value FROM settings WHERE setting_key = 'wecom_webhook'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(cleared.as_deref(), Some(""), "清空后库里是空串");
+}

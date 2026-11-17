@@ -675,21 +675,37 @@ webhook 在企业微信**客户端**里创建（官方没有建机器人的 API�
 > 群聊 → 右上角「···」→ 添加群机器人 → 新建 → 复制 Webhook 地址
 
 拿到的地址形如 `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx`。
-**这个地址就是全部凭据**（没有签名校验，谁拿到谁能往群里发消息），所以：
+
+**推荐做法：直接在平台上填。** 控制台「系统设置 → 企业微信群机器人」粘贴地址 →
+「保存地址」→ 点「发送测试消息」验证。保存**立即生效**，不用重启服务；
+页面只回显掩码（`…?key=94fdb35e…`），完整地址不会回到浏览器。
+
+```text
+GET  /api/notifications/webhook        # 状态：configured / source(db|env) / masked / enabled
+PUT  /api/notifications/webhook        # {"webhook":"https://…?key=…"}，传空串 = 清除
+POST /api/notifications/test           # 同步发一条，失败直接回 errcode
+```
+
+地址存 `settings.wecom_webhook`（`value_type = secret`，所以**不出现在**通用
+`GET /api/settings` 列表里，`PUT /api/settings` 也不接受它）。
+
+**部署时的环境变量仍然有效**，优先级是 **平台配置 > 环境变量**：
 
 ```bash
-# 只放环境变量，不要写进 server.toml（文件会进 git）
+# 想「锁死」不让页面改，就只放环境变量；不要写进 server.toml（文件会进 git）
 export ROBODOG_WECOM_WEBHOOK='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx'
 export ROBODOG_PUBLIC_URL='http://39.107.55.13:3100'   # 可选：消息里的链接
 cargo run
 ```
 
-配好后在控制台「系统设置 → 企业微信群机器人」点**发送测试消息**：消息同步发出，
+> 地址就是全部凭据（没有签名校验，谁拿到谁能往群里发消息）：接口只回掩码、
+> 日志只打 key 末 6 位；数据库文件 / 备份同样要按凭据对待。
+
 失败时页面直接显示企业微信的 `errcode`（如 `93000 invalid webhook url`）。
 不点按钮也可以先 `curl` 验证：
 
 ```bash
-curl -sS "$ROBODOG_WECOM_WEBHOOK" -H 'Content-Type: application/json' \
+curl -sS "<webhook 地址>" -H 'Content-Type: application/json' \
   -d '{"msgtype":"text","text":{"content":"测试"}}'
 ```
 
@@ -697,7 +713,7 @@ curl -sS "$ROBODOG_WECOM_WEBHOOK" -H 'Content-Type: application/json' \
 
 | 层 | 位置 | 作用 |
 | --- | --- | --- |
-| 部署 | `wecom.enabled` + `ROBODOG_WECOM_WEBHOOK` | 这套部署有没有企业微信通道 |
+| 部署 | `wecom.enabled` + webhook（平台设置页或 `ROBODOG_WECOM_WEBHOOK`） | 这套部署有没有企业微信通道 |
 | 运营 | 设置页 `alert_push` / `task_timeout_notice` | 站内提示总开关 |
 | 渠道 | 设置页 `wecom_alert_push` / `wecom_task_abnormal` | 这一类事件推不推企业微信 |
 
@@ -737,7 +753,8 @@ SELECT created_at, status, level, ref_type, ref_id, attempts, last_error
   FROM notifications ORDER BY id DESC LIMIT 20;
 ```
 
-控制台接口：`GET /api/notifications?limit=20&status=failed`、`POST /api/notifications/test`。
+控制台接口：`GET /api/notifications?limit=20&status=failed`、`POST /api/notifications/test`、
+`GET/PUT /api/notifications/webhook`（webhook 状态与配置，见上文「配置」）。
 
 常见错误码：`93000` key/地址无效（机器人被删或复制不全）、`45009` 超频、
 `40058` 内容超长（理论上已被截断兜住）、`connection refused / timeout` 服务器出不了公网。
@@ -834,7 +851,7 @@ service_token = "change-me"
 | `ROBODOG_SERVICE_TOKEN` | 空 | 与中台之间的共享服务令牌：调中台内部接口 `/api/dogInternal/*`、反向控制信道握手。需与中台 `APP_DOG__BUSINESS_API_TOKEN` 一致 |
 | `ROBODOG_ZENTAI_WS_URL` | 空 | 反向控制信道的中台地址，如 `ws://10.0.0.8:3000`。与 `ROBODOG_SERVICE_TOKEN` 同时具备才建立信道；为空时走「中台直连 HTTP」 |
 | `ROBODOG_SERVER_CONFIG` | 空 | 指定配置文件路径；不设置时读取当前目录的 `server.toml`（不存在则只用环境变量） |
-| `ROBODOG_WECOM_WEBHOOK` | 空 | 企业微信群机器人地址，见上文「企业微信告警推送」。**地址即凭据**，只放环境变量 |
+| `ROBODOG_WECOM_WEBHOOK` | 空 | 企业微信群机器人地址的**部署级兜底**（平台设置页为空时才用）。见上文「企业微信告警推送」。**地址即凭据**，别写进 `server.toml` |
 | `ROBODOG_WECOM_ENABLED` | `true` | 企业微信推送的部署级总开关 |
 | `ROBODOG_WECOM_MIN_LEVEL` | `警告` | 推送级别下限（`严重` / `警告` / `提示`） |
 | `ROBODOG_WECOM_MENTION_ALL` | `false` | 严重级别是否额外 @所有人（会占双倍限流额度） |

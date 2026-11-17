@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { deviceApi, notifyApi, parkApi, settingApi } from "@/api/ops";
-import type { NotificationRecord, Park, Setting } from "@/api/types";
+import type { NotificationRecord, NotifyWebhookStatus, Park, Setting } from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import AppIcon from "@/components/AppIcon.vue";
 import { COORDINATE_SYSTEMS } from "@/utils/constants";
@@ -15,6 +15,50 @@ const saving = ref(false);
 const testing = ref(false);
 const testResult = ref<{ ok: boolean; message: string; webhook: string | null } | null>(null);
 const recentPushes = ref<NotificationRecord[]>([]);
+// webhook 在平台内配置：接口只回掩码，完整地址永远不回到浏览器
+const webhookStatus = ref<NotifyWebhookStatus | null>(null);
+const webhookInput = ref("");
+const savingWebhook = ref(false);
+
+const sourceLabel = computed(() => {
+  switch (webhookStatus.value?.source) {
+    case "db":
+      return "平台配置";
+    case "env":
+      return "服务端环境变量";
+    default:
+      return "未配置";
+  }
+});
+
+async function loadWebhook() {
+  try {
+    webhookStatus.value = await notifyApi.webhook();
+  } catch {
+    webhookStatus.value = null;
+  }
+}
+
+/** 保存（`clear` = 清除平台配置、回退环境变量）。改完立即生效，不用重启服务。 */
+async function saveWebhook(clear = false) {
+  const value = clear ? "" : webhookInput.value.trim();
+  if (!clear && !value) {
+    ElMessage.warning("请先粘贴企业微信群机器人地址");
+    return;
+  }
+  savingWebhook.value = true;
+  try {
+    webhookStatus.value = await notifyApi.saveWebhook(value);
+    webhookInput.value = "";
+    ElMessage.success(
+      clear ? "已清除平台配置（若服务端配了环境变量则回退到它）" : "地址已保存，可点「发送测试消息」验证"
+    );
+  } catch {
+    // 接口 4xx 的提示（如缺少 key=）已由 axios 拦截器弹出
+  } finally {
+    savingWebhook.value = false;
+  }
+}
 
 async function loadPushes() {
   try {
@@ -114,7 +158,7 @@ async function save() {
 
 onMounted(async () => {
   await load();
-  await loadPushes();
+  await Promise.all([loadPushes(), loadWebhook()]);
 });
 </script>
 
@@ -187,8 +231,8 @@ onMounted(async () => {
             />
           </div>
           <div class="rt-hint" style="margin-top: 12px">
-            企业微信推送需要先在服务端配置 <code>ROBODOG_WECOM_WEBHOOK</code>；
-            未配置时下方开关只影响站内提示。
+            企业微信推送地址在下方「企业微信群机器人」里配置，填好即生效；
+            未配置时上方开关只影响站内提示。
           </div>
         </div>
       </div>
@@ -203,10 +247,46 @@ onMounted(async () => {
       </div>
       <div class="card-body">
         <p class="muted" style="font-size: 12px; margin: 0 0 12px; line-height: 1.7">
-          群里「添加群机器人」→ 复制 webhook 地址 → 写入服务端环境变量
-          <code>ROBODOG_WECOM_WEBHOOK</code> 后重启服务。配好先点右上角按钮验证：
-          消息会同步发出，失败时下方直接显示企业微信返回的错误码。
+          企微群右上角「···」→ 添加群机器人 → 复制 webhook 地址 → 粘贴到下面保存即可
+          （地址本身就是凭据，页面只显示掩码）。保存后不用重启服务，
+          先点右上角「发送测试消息」验证：失败会直接显示企业微信返回的 errcode。
         </p>
+        <div class="webhook-box">
+          <div class="webhook-status">
+            <span class="push-badge" :class="webhookStatus?.configured ? 'ok' : 'warn'">
+              {{ webhookStatus?.configured ? "已配置" : "未配置" }}
+            </span>
+            <span class="muted">来源：{{ sourceLabel }}</span>
+            <code v-if="webhookStatus?.masked" class="webhook-masked">{{
+              webhookStatus.masked
+            }}</code>
+          </div>
+          <div class="webhook-form">
+            <input
+              v-model="webhookInput"
+              class="input"
+              placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…"
+              @keyup.enter="saveWebhook()"
+            />
+            <button class="btn primary" :disabled="savingWebhook" @click="saveWebhook()">
+              {{ savingWebhook ? "保存中…" : "保存地址" }}
+            </button>
+            <button
+              class="btn"
+              :disabled="savingWebhook || webhookStatus?.source !== 'db'"
+              @click="saveWebhook(true)"
+            >
+              清除
+            </button>
+          </div>
+          <p class="muted" style="font-size: 11.5px; margin: 8px 0 0; line-height: 1.7">
+            平台配置优先于部署时的环境变量 <code>ROBODOG_WECOM_WEBHOOK</code>；
+            「清除」后回退到环境变量。改了群机器人（删掉再重建会换 key）记得回来重新粘一次。
+          </p>
+        </div>
+        <div v-if="webhookStatus && !webhookStatus.enabled" class="rt-hint warn" style="margin-bottom: 12px">
+          部署级总开关已关闭（<code>wecom.enabled = false</code>）：地址会保存，但不会真的发消息。
+        </div>
         <div
           v-if="testResult"
           class="rt-hint"
@@ -257,6 +337,37 @@ onMounted(async () => {
 
 <style scoped>
 /* 企业微信推送记录：一行一条，失败行直接把 errcode 摊开，现场照着改配置 */
+/* webhook 配置区：地址即凭据，只展示掩码 + 来源 */
+.webhook-box {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  background: #fbfdff;
+}
+.webhook-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 11.5px;
+}
+.webhook-masked {
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.webhook-form {
+  display: flex;
+  gap: 8px;
+}
+.webhook-form .input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .push-list {
   display: flex;
   flex-direction: column;

@@ -20,7 +20,10 @@ use std::path::{Path, PathBuf};
 pub const DEFAULT_CONFIG_FILE: &str = "server.toml";
 /// 指定配置文件路径的环境变量。
 pub const CONFIG_FILE_ENV: &str = "ROBODOG_SERVER_CONFIG";
-/// 企业微信群机器人 webhook（推荐只走环境变量）。
+/// 企业微信群机器人 webhook 的**部署级兜底**入口。
+///
+/// 常规做法是在平台设置页里填（`settings.wecom_webhook`，保存即生效、只回掩码）；
+/// 这里配了但页面没配时才用它 —— 适合「锁定地址、不许页面上改」的部署。
 pub const WECOM_WEBHOOK_ENV: &str = "ROBODOG_WECOM_WEBHOOK";
 
 #[derive(Clone, Debug)]
@@ -107,8 +110,13 @@ pub struct Config {
     /// 与库里的 `alert_push` / `wecom_alert_push` 是**与**关系：这边是部署级
     /// （有没有这个通道），那边是运营级（这个班次推不推）。
     pub wecom_enabled: bool,
-    /// 企业微信群机器人 webhook 地址。**地址本身就是凭据**（无加签），
-    /// 只从 `ROBODOG_WECOM_WEBHOOK` 读；文件里出现时启动会告警。
+    /// 企业微信群机器人 webhook 地址（**部署级兜底**）。
+    ///
+    /// **地址本身就是凭据**（无加签），常规做法是在平台设置页里填
+    /// （`settings.wecom_webhook`，`value_type='secret'`，保存即生效）；
+    /// 这里的值只在平台配置为空时才生效。仍可从环境变量
+    /// `ROBODOG_WECOM_WEBHOOK` 读（文件里出现时启动会 warn），方便「锁定地址、
+    /// 不许页面上改」的部署。
     pub wecom_webhook: Option<String>,
     /// 推送级别下限：`严重` / `警告`（默认） / `提示`。
     pub wecom_min_level: String,
@@ -438,7 +446,10 @@ impl Config {
         self.zentai_ws_url.is_some() && self.service_token.is_some()
     }
 
-    /// 企业微信推送通道是否就绪：开关打开 + 有 webhook。
+    /// 配置层面是否就绪：开关打开 + **环境变量里**有 webhook。
+    ///
+    /// 注意运行时判定用 `Notifier::is_enabled()`：它还会看平台设置页里
+    /// 配的地址（[`crate::notify::stored_webhook`]），这里只反映部署侧配置。
     pub fn wecom_ready(&self) -> bool {
         self.wecom_enabled
             && self

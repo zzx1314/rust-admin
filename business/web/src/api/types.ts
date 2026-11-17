@@ -411,6 +411,20 @@ export interface NotifyTestResult {
   webhook: string | null;
 }
 
+/**
+ * 企业微信 webhook 的当前状态。
+ * 接口永不返回完整地址（地址即凭据），只有掩码后的 `masked`。
+ */
+export interface NotifyWebhookStatus {
+  /** 有没有可用地址：false 时告警不会真的进群 */
+  configured: boolean;
+  /** `db` = 平台里填的，`env` = 部署方的环境变量，`null` = 没配 */
+  source: "db" | "env" | null;
+  masked: string | null;
+  /** 部署级总开关（`wecom.enabled`），关掉时填了也不发 */
+  enabled: boolean;
+}
+
 export interface Setting {
   id: number;
   groupName: string;

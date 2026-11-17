@@ -175,6 +175,11 @@ pub fn build_router(state: AppState) -> Router {
         // 企业微信推送：记录查询 + 手动发一条测试消息（配好 webhook 先点这里验证）
         .route("/notifications", get(notifications::list_notifications))
         .route("/notifications/test", post(notifications::send_test))
+        // webhook 地址在平台内配置（地址即凭据，读写都只走这两个接口）
+        .route(
+            "/notifications/webhook",
+            get(notifications::get_webhook).put(notifications::update_webhook),
+        )
         // 排班（计划层）：责任人库 + 班次，工单派单时从同一责任人库选人
         .route(
             "/staff",

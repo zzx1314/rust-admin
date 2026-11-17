@@ -24,8 +24,9 @@
 | 按**当天排班**把告警派给当班责任人、自动建工单，并 `@` 到人 | 猜到「谁真的在现场」—— 名单来自平台里的排班，没排班就只能兜底到园区负责人 |
 
 **"建机器人"这一步是人工的**，代码只负责「配了地址就发」。所以需求里
-"在一个群聊创建一个机器人"落地成：文档教人建 → 拿到 webhook → 填环境变量 →
-页面点「发送测试消息」验证。这三步之外的一切都自动化了。
+"在一个群聊创建一个机器人"落地成：文档教人建 → 拿到 webhook → **粘贴到
+平台设置页**（或部署方写环境变量）→ 页面点「发送测试消息」验证。
+这三步之外的一切都自动化了。
 
 ### 建机器人（一次性人工操作）
 
@@ -96,9 +97,21 @@
    不能跟着通道一起失效。所以 `alert_flow::on_alert` 跑在 `notify::alert_created`
    的最前面、`channel_enabled()` 判断之前，推送只是它后面的一条旁路。
 
-4. **webhook 只从环境变量读。**
-   地址即凭据，写进 `server.toml` 就等于进 git。为兼容性保留了 `[wecom] webhook`
-   字段，但 `Config::load()` 检测到「值来自文件而非环境变量」会打一条 warn。
+4. **webhook 地址仍然不进 `server.toml`，但可以进库。**
+   地址即凭据，写进配置文件就等于进 git。2026-11 起改为「平台设置页优先、环境变量兜底」：
+
+   - 存 `settings.wecom_webhook`，`value_type = 'secret'` → **不出现在**
+     通用 `GET /api/settings` 列表里，`PUT /api/settings` 直接拒收；
+   - 读写走专用接口 `GET/PUT /api/notifications/webhook`，**读只回掩码**
+     （`…?key=94fdb35e…`），完整地址不出后端；
+   - 地址**不在启动时固化**：`Notifier` 持一个可写槽（`set_webhook`），
+     设置页保存后下一条消息就用新地址，**不用重启进程**；
+   - 日志只打 key 末 6 位（`notify::key_tail`），和其它凭据一致。
+
+   为什么不再强制只走环境变量：现场改一次地址要 SSH + 改 env + 重启服务，
+   而「群机器人被删了、换了个群」是最常见的一次性运维动作，全卡在运维手上。
+   只信任部署方锁定的部署，把 `ROBODOG_WECOM_WEBHOOK` 写进 `robodog.env`
+   并且**不在页面填**即可（平台配置为空时自动回退环境变量）。
 
 ---
 
@@ -128,11 +141,17 @@
 | `alert_flow.rs` `auto_workorder_enabled()` | 读 `alert_auto_workorder` 开关（缺行视为开启） |
 | `handlers/workorders.rs` `create_order_core()` | 建单核心（人工转单 `promote_alert=true`，自动派单 `false`） |
 | `notify.rs:787` `send_test()` | 同步发测试消息，返回企微原文 |
-| `handlers/notifications.rs` | `GET /api/notifications`、`POST /api/notifications/test` |
-| `config.rs` | `wecom_enabled` / `wecom_webhook` / `wecom_min_level` / `wecom_mention_all` / `public_url` |
-| `main.rs` | 装配 `Notifier`，`notify::spawn(state, rx)` |
-| `seed.rs` | 播种 `wecom_alert_push` / `wecom_task_abnormal` / `alert_auto_workorder` 三个开关 |
-| `web/src/views/settings/index.vue` | 开关 + 「发送测试消息」+ 最近 5 条推送记录 |
+| `notify.rs` `stored_webhook()` | 启动时从 `settings` 读平台侧地址（空 = 未配） |
+| `notify.rs` `validate_webhook()` | 保存前校验：http(s)、必须带 `key=`、不能有空白 |
+| `notify.rs` `mask_webhook()` / `key_tail()` | 读接口回显前 8 位 / 日志只打末 6 位 |
+| `notify.rs` `Notifier::set_webhook()` | 热更新地址（设置页保存后立即生效） |
+| `notify.rs` `Notifier::webhook_snapshot()` | 当前地址 + 来源（`Platform` / `Env`） |
+| `handlers/notifications.rs` | `GET /api/notifications`、`POST /api/notifications/test`、`GET/PUT /api/notifications/webhook` |
+| `handlers/settings.rs` | 通用设置列表过滤 `value_type='secret'`，并拒收此类键 |
+| `config.rs` | `wecom_enabled` / `wecom_webhook`（环境变量兜底） / `wecom_min_level` / `wecom_mention_all` / `public_url` |
+| `main.rs` | `stored_webhook()` → 装配 `Notifier`，`notify::spawn(state, rx)` |
+| `seed.rs` | 播种 `wecom_alert_push` / `wecom_task_abnormal` / `alert_auto_workorder` 开关 + `wecom_webhook`（secret，空值） |
+| `web/src/views/settings/index.vue` | 开关 + webhook 地址配置（掩码 + 来源）+ 「发送测试消息」+ 最近 5 条推送记录 |
 
 ### 触发点清单
 
@@ -171,6 +190,7 @@ status('sent'|'failed'), attempts, last_error, created_at, sent_at
 
 | key | 默认 | 说明 |
 | --- | --- | --- |
+| `wecom_webhook` | `''` | **平台内配置的 webhook 地址**（`value_type='secret'`）。空 = 用环境变量；填了就以它为准，保存即生效 |
 | `wecom_alert_push` | `true` | 设备异常告警推企业微信 |
 | `wecom_task_abnormal` | `true` | 任务执行异常推企业微信 |
 | `alert_auto_workorder` | `true` | 告警按当班排班自动派单并建工单（关掉只停建单，责任人解析与推送照旧） |
@@ -190,13 +210,14 @@ staff_id, assignee, work_order_id, assignee_note
 ### 三层开关（都得为真）
 
 ```
-wecom.enabled + ROBODOG_WECOM_WEBHOOK   部署级：这套部署有没有这个通道
+wecom.enabled + webhook(平台配置 > 环境变量)  部署级：这套部署有没有这个通道
 alert_push / task_timeout_notice        运营级：站内提示总开关
 wecom_alert_push / wecom_task_abnormal  渠道级：这一类事件推不推企微
 ```
 
-拆三层是因为职责不同：改地址要重启进程（配置），改"这个班次别吵了"是值班长在
-页面上点（DB）。`channel_enabled()` 每次入队都查一次库，所以页面改完**立即生效**，
+拆三层是因为职责不同：改**有没有**通道（`wecom.enabled`）是部署决策，改**发到哪个群**
+是运维在设置页里粘地址（DB，立即生效），改"这个班次别吵了"是值班长点开关（DB）。
+`channel_enabled()` 每次入队都查一次库，所以页面改完**立即生效**，
 代价是每次告警多 1 条索引查询（SQLite 亚毫秒，告警频率下无所谓）。
 
 缺行视为**开启** —— 新键在旧库还没播种时，不能把告警静默掉。
@@ -296,8 +317,12 @@ wecom_alert_push / wecom_task_abnormal  渠道级：这一类事件推不推企�
 
 ### 页面
 
-「系统设置 → 企业微信群机器人」：右上按钮发测试消息（同步发，失败直接显示 errcode），
-下面列最近 5 条推送记录（带 `last_error`）。
+「系统设置 → 企业微信群机器人」：
+
+- **地址配置**：显示「已配置 / 未配置 + 来源（平台配置 / 服务端环境变量）+ 掩码地址」，
+  粘贴新地址保存即生效；「清除」把平台配置置空、回退环境变量；
+- 右上按钮发测试消息（同步发，失败直接显示 errcode）；
+- 下面列最近 5 条推送记录（带 `last_error`）。
 
 ### SQL
 
@@ -308,6 +333,11 @@ SELECT created_at, status, level, ref_type, ref_id, attempts, last_error
 
 -- 某个告警推了几次、什么时候推的
 SELECT * FROM notifications WHERE dedupe_key = 'alert:AL-006';
+
+-- 平台里配了地址没有？**不要 SELECT setting_value**（那是凭据，会进终端历史 / 截图）
+SELECT setting_key, length(setting_value) AS value_len, updated_at
+  FROM settings WHERE setting_key = 'wecom_webhook';
+-- value_len = 0 → 平台没配，按环境变量走
 ```
 
 ### 接口
@@ -315,13 +345,15 @@ SELECT * FROM notifications WHERE dedupe_key = 'alert:AL-006';
 ```bash
 GET  /api/notifications?limit=20&status=failed&refType=task
 POST /api/notifications/test
+GET  /api/notifications/webhook            # configured / source(db|env) / masked / enabled
+PUT  /api/notifications/webhook            # {"webhook":"…"}；空串 = 清除并回退环境变量
 ```
 
 ### 错误码
 
 | errcode | 含义 | 怎么办 |
 | --- | --- | --- |
-| `93000` | webhook 地址无效 | 机器人被删了或地址复制不全，重新建一个 |
+| `93000` | webhook 地址无效 | 机器人被删了或地址复制不全：重新建一个，把新地址粘到设置页保存（不用重启） |
 | `45009` | 超频 | 调低 `RATE_PER_MIN`，或收紧 `min_level` |
 | `40058` | 内容超长 | 理论上已被截断兜住；真出现说明 `MARKDOWN_LIMIT` 被改大了 |
 | `connection refused` / `timeout` | 服务器出不了公网 | 见 §9「内网部署」 |
@@ -331,7 +363,7 @@ POST /api/notifications/test
 ```bash
 journalctl -u rust-admin-robodog -f | grep -i wecom
 ```
-启动时打 `企业微信告警推送已配置 enabled=… min_level=… key_tail=2c1314`
+启动时打 `企业微信告警推送已配置 enabled=… min_level=… source=db|env key_tail=2c1314`
 （**只打 key 末 6 位**，够核对是哪一个，又不把凭据写进日志）。
 发送失败打 `wecom: 推送失败 key=… error=…`。
 
@@ -426,6 +458,8 @@ journalctl -u rust-admin-robodog -f | grep -i wecom
 | 派单逻辑写在推送开关后面 | 没配 webhook 的环境里告警不建单也没人管，功能等于不存在 | 派单在建单前、`channel_enabled()` 判断之前执行 |
 | 一条告警一张工单，不看去重 | 上线当天机器人每 90s 报一次 `12608`，5 分钟堆 2 张单 + 2 条群消息 | 先去重再建单：同设备 + 同标题 + 24h 内在办 → 复用老单并不推群 |
 | 只改 `handlers/alerts.rs` 的 SELECT | `/dashboard/summary` 500（驾驶舱自己拼了一份 `Alert` 查询） | `Alert` 结构体加列时，全仓搜一遍 `query_as::<Alert>` / `build_query_as::<Alert>` |
+| webhook 只在启动时从环境变量读 | 「换个群」要 SSH 改 env 再重启，现场只能等运维 | 地址放进 `settings`（secret）+ `Notifier` 可写槽：页面保存即生效；环境变量保留为兜底 |
+| 把 secret 直接塞进通用 `settings` 行 | `GET /api/settings` 明文回显地址（地址即凭据，进页面就上屏幕） | `value_type='secret'` 的行从通用列表过滤掉，专用接口只回掩码；`PUT /api/settings` 拒收 secret 键 |
 
 ---
 
@@ -435,16 +469,19 @@ journalctl -u rust-admin-robodog -f | grep -i wecom
 # 1. 服务器能出公网
 curl -m 5 -sS https://qyapi.weixin.qq.com -o /dev/null && echo ok
 
-# 2. 填 webhook（robodog.env 权限 600，不进 git）
+# 2. 填 webhook —— 两条路，二选一
+#    a) 平台里填（推荐，运维自己就能改）：系统设置 → 企业微信群机器人 → 粘贴地址 → 保存地址
+#    b) 环境变量（想锁定不让页面改时用）：robodog.env 权限 600，不进 git
 ssh root@39.107.55.13
 vi /opt/hz/rust-admin/robodog.env
 #   ROBODOG_WECOM_WEBHOOK=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
 #   ROBODOG_PUBLIC_URL=http://39.107.55.13:3100
 
 systemctl restart rust-admin-robodog
-journalctl -u rust-admin-robodog -n 20 | grep 企业微信   # 应看到"已配置 … key_tail=xxxxxx"
+journalctl -u rust-admin-robodog -n 20 | grep 企业微信   # 应看到"已配置 … source=… key_tail=xxxxxx"
 
 # 3. 页面验证：系统设置 → 企业微信群机器人 → 发送测试消息
+#    （平台配置改完立即生效，只有改环境变量才需要 restart）
 ```
 
 `deploy/external-hz/install.sh` 的 `robodog.env` 模板已带注释占位；
@@ -455,7 +492,7 @@ journalctl -u rust-admin-robodog -n 20 | grep 企业微信   # 应看到"已配�
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `ROBODOG_WECOM_WEBHOOK` | 空 | webhook 地址。空 = 整个通道关闭 |
+| `ROBODOG_WECOM_WEBHOOK` | 空 | webhook 地址（**兜底**：平台设置页为空时才用它）。两边都空 = 整个通道关闭 |
 | `ROBODOG_WECOM_ENABLED` | `true` | 部署级总开关 |
 | `ROBODOG_WECOM_MIN_LEVEL` | `警告` | 推送下限（`严重`/`警告`/`提示`） |
 | `ROBODOG_WECOM_MENTION_ALL` | `false` | 严重级别是否 @所有人（占双倍额度） |

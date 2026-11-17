@@ -8,6 +8,7 @@ import type {
   MapRaster,
   NotificationRecord,
   NotifyTestResult,
+  NotifyWebhookStatus,
   MapRefs,
   MapVersion,
   Park,
@@ -207,7 +208,12 @@ export const notifyApi = {
   /** 推送记录：现场排查「告警到底推没推出去」 */
   records: (params?: object) => get<NotificationRecord[]>("/notifications", params),
   /** 同步发一条测试消息，返回企业微信的 errcode/errmsg 原文 */
-  test: () => post<NotifyTestResult>("/notifications/test")
+  test: () => post<NotifyTestResult>("/notifications/test"),
+  /** 当前 webhook 状态（来源 + 掩码地址，永不含完整地址） */
+  webhook: () => get<NotifyWebhookStatus>("/notifications/webhook"),
+  /** 保存 webhook 地址（立即生效，不用重启服务）；传空串 = 清除并回退环境变量 */
+  saveWebhook: (webhook: string) =>
+    put<NotifyWebhookStatus>("/notifications/webhook", { webhook })
 };
 
 export const dashboardApi = {

@@ -11,8 +11,10 @@
 //!
 //! # 硬约束（来自企业微信，不是选择）
 //!
-//! - **webhook 地址本身就是全部凭据**，没有加签。所以它只从环境变量
-//!   `ROBODOG_WECOM_WEBHOOK` 读，不进 `server.toml`、不进 SQLite、不进日志。
+//! - **webhook 地址本身就是全部凭据**，没有加签。它**优先**从平台设置页
+//!   （`settings.wecom_webhook`）读，未配置时回退环境变量 `ROBODOG_WECOM_WEBHOOK`；
+//!   环境变量/配置文件仍然是部署级入口。接口只回显掩码，日志只打 key 末几位。
+//!   平台配置改完**立即生效**（句柄在 `Notifier` 里，不在启动时固化）。
 //! - **20 条/分钟**：超了返回 `errcode 45009`。必须本地限流。
 //! - **markdown ≤ 4096 字节**（中文 3 字节/字）：超长整条被拒，不是截断。
 //! - **markdown 不支持 @提及**：要 @所有人得另发一条 `text`，用 `mentioned_list`。
@@ -43,6 +45,12 @@ pub const TEXT_LIMIT: usize = 2000;
 pub const RATE_PER_MIN: u32 = 18;
 /// 队列深度。看门狗 15s 一轮、设备事件突发，256 足够。
 const QUEUE_CAPACITY: usize = 256;
+/// 平台设置页保存 webhook 的 settings 键（`value_type = 'secret'`）。
+///
+/// 刻意**不出现在** `GET /api/settings` 的列表里：地址即凭据，通用设置接口
+/// 一律只回显掩码，真正的读写走 `/api/notifications/webhook`。
+pub const WEBHOOK_SETTING_KEY: &str = "wecom_webhook";
+
 /// 同一 `dedupe_key` 的静默窗口。
 ///
 /// 心跳看门狗 15s 扫一轮、客户端 5s 报一次进度，同一件事会被"发现"很多次。
@@ -311,25 +319,91 @@ impl Shared {
     }
 }
 
+/// webhook 从哪来的：平台设置页优先，其次部署时的环境变量/配置文件。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebhookSource {
+    /// 平台设置页填的（`settings.wecom_webhook`），改完立即生效
+    Platform,
+    /// 环境变量 `ROBODOG_WECOM_WEBHOOK`（或 `server.toml` 的 `[wecom] webhook`）
+    Env,
+}
+
+impl WebhookSource {
+    /// 给接口 / 页面用的稳定标识（`db` / `env`）。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Platform => "db",
+            Self::Env => "env",
+        }
+    }
+}
+
+/// 当前生效的 webhook 及其来源。
+///
+/// 放在 `Notifier` 里而不是 `Config` 里，是为了**不重启进程**就能改地址：
+/// 设置页保存后直接改这个槽，客户端下次发送就用了新地址。
+#[derive(Clone, Debug, Default)]
+struct WebhookTarget {
+    url: Option<String>,
+    source: Option<WebhookSource>,
+}
+
+impl WebhookTarget {
+    /// 平台配置优先，空则回退环境变量的地址。
+    fn resolve(platform: Option<String>, env: Option<String>) -> Self {
+        let platform = platform.map(|url| url.trim().to_string());
+        match platform.filter(|url| !url.is_empty()) {
+            Some(url) => Self {
+                url: Some(url),
+                source: Some(WebhookSource::Platform),
+            },
+            None => match env.map(|url| url.trim().to_string()) {
+                Some(url) if !url.is_empty() => Self {
+                    url: Some(url),
+                    source: Some(WebhookSource::Env),
+                },
+                _ => Self::default(),
+            },
+        }
+    }
+}
+
 /// 推送句柄（`AppState` 上挂一份，可自由 clone）。
 #[derive(Clone)]
 pub struct Notifier {
     tx: Option<mpsc::Sender<Notice>>,
     min_level: Level,
     mention_all: bool,
+    /// 可热更新的目标地址（设置页改完立即生效）
+    webhook: Arc<Mutex<WebhookTarget>>,
     shared: Arc<Shared>,
 }
 
 impl Notifier {
-    /// 装配句柄 + 消费端。未配置 webhook 时返回 `None` 消费端，所有 `enqueue` 静默丢弃。
-    pub fn channel(config: &Config) -> (Self, Option<mpsc::Receiver<Notice>>) {
+    /// 装配句柄 + 消费端。
+    ///
+    /// `platform_webhook` 是启动时从设置表读到的地址（平台里填的那个）；
+    /// 它和 `config.wecom_webhook`（环境变量 / 配置文件）同时存在时**平台优先**。
+    ///
+    /// 注意：即使当下一个地址都没有，只要部署级开关开着，消费端照样启动 ——
+    /// 否则现场在页面上填完地址还得重启进程才能生效。
+    pub fn channel(
+        config: &Config,
+        platform_webhook: Option<String>,
+    ) -> (Self, Option<mpsc::Receiver<Notice>>) {
         let min_level = Level::parse(&config.wecom_min_level);
-        if !config.wecom_ready() {
+        let webhook = Arc::new(Mutex::new(WebhookTarget::resolve(
+            platform_webhook,
+            config.wecom_webhook.clone(),
+        )));
+        if !config.wecom_enabled {
+            // 部署级总开关关掉：连消费端都不启动，页面上的配置也不该偷偷发消息
             return (
                 Self {
                     tx: None,
                     min_level,
                     mention_all: false,
+                    webhook,
                     shared: Arc::new(Shared::new()),
                 },
                 None,
@@ -341,6 +415,7 @@ impl Notifier {
                 tx: Some(tx),
                 min_level,
                 mention_all: config.wecom_mention_all,
+                webhook,
                 shared: Arc::new(Shared::new()),
             },
             Some(rx),
@@ -353,12 +428,41 @@ impl Notifier {
             tx: None,
             min_level: Level::Warning,
             mention_all: false,
+            webhook: Arc::new(Mutex::new(WebhookTarget::default())),
             shared: Arc::new(Shared::new()),
         }
     }
 
+    /// 当前生效的 webhook 地址。
+    pub fn webhook(&self) -> Option<String> {
+        self.webhook_target().url
+    }
+
+    /// 当前生效的 webhook + 来源（设置页展示「这是环境变量还是平台配的」）。
+    pub fn webhook_snapshot(&self) -> (Option<String>, Option<WebhookSource>) {
+        let target = self.webhook_target();
+        (target.url, target.source)
+    }
+
+    /// 热更新目标地址。设置页保存 / 清除后调用，不需要重启进程。
+    pub fn set_webhook(&self, url: Option<String>, source: Option<WebhookSource>) {
+        let mut slot = self
+            .webhook
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *slot = WebhookTarget { url, source };
+    }
+
+    fn webhook_target(&self) -> WebhookTarget {
+        self.webhook
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    /// 通道是否可用：部署开关开着、有地址、有消费端。
     pub fn is_enabled(&self) -> bool {
-        self.tx.is_some()
+        self.tx.is_some() && self.webhook().is_some()
     }
 
     /// 入队。**同步、不阻塞**：永不 await。
@@ -368,6 +472,11 @@ impl Notifier {
         let Some(tx) = &self.tx else {
             return false;
         };
+        // 地址可能刚在页面上被清空：这一条直接丢，别压进队列等一个不存在的目标
+        if self.webhook().is_none() {
+            debug!(key = %notice.dedupe_key, "wecom: 未配置 webhook，跳过");
+            return false;
+        }
         if notice.level < self.min_level {
             debug!(
                 key = %notice.dedupe_key,
@@ -396,6 +505,73 @@ impl Notifier {
     }
 }
 
+/// 从设置表读平台侧配置的 webhook（空值 / 缺行视为未配置）。
+///
+/// 启动时读一次交给 [`Notifier::channel`]，之后由设置页通过
+/// `PUT /api/notifications/webhook` 热更新，不需要重启进程。
+pub async fn stored_webhook(pool: &sqlx::SqlitePool) -> Option<String> {
+    let row: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT setting_value FROM settings WHERE setting_key = ?1")
+            .bind(WEBHOOK_SETTING_KEY)
+            .fetch_optional(pool)
+            .await
+            .ok()?;
+    row.and_then(|(value,)| value)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// 校验页面上填的 webhook 地址。
+///
+/// 不做「必须 qyapi.weixin.qq.com」的硬限制：私有化 / 代理网关的域名不同，
+/// 硬卡域名只会让现场以为功能坏了。但**必须有 key=**：没有 key 的地址
+/// 发出去只会拿到 `93000`，不如在保存时就报错。
+pub fn validate_webhook(raw: &str) -> Result<String, String> {
+    let url = raw.trim();
+    if url.is_empty() {
+        return Err("webhook 地址不能为空（要清空请用「清除」按钮）".to_string());
+    }
+    if url.len() > 512 {
+        return Err("webhook 地址过长（> 512 字节），请检查是不是复制错了".to_string());
+    }
+    if url.chars().any(char::is_whitespace) {
+        return Err("webhook 地址里不能有空格 / 换行，请重新复制一遍".to_string());
+    }
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+        return Err("webhook 地址必须以 https:// 开头（企业微信给的完整地址）".to_string());
+    }
+    if !url.contains("key=") {
+        return Err(
+            "webhook 地址缺少 key= 参数：请在企业微信群里「添加群机器人」后完整复制地址"
+                .to_string(),
+        );
+    }
+    Ok(url.to_string())
+}
+
+/// webhook 只回显 key 的前 8 位：足够核对「填的是哪一个」，又不至于泄漏。
+pub fn mask_webhook(url: &str) -> String {
+    match url.split_once("key=") {
+        Some((prefix, key)) => {
+            let head: String = key.chars().take(8).collect();
+            format!("{prefix}key={head}…")
+        }
+        None => "（格式异常：缺少 key= 参数）".to_string(),
+    }
+}
+
+/// 日志里用的 key 末 6 位；够核对是哪一个机器人，又不把凭据写进 journal。
+pub fn key_tail(url: &str) -> String {
+    url.chars()
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
 /// 启动消费端（`main.rs` 装配）。
 pub fn spawn(state: AppState, rx: mpsc::Receiver<Notice>) {
     tokio::spawn(async move {
@@ -404,9 +580,6 @@ pub fn spawn(state: AppState, rx: mpsc::Receiver<Notice>) {
 }
 
 async fn run_consumer(state: AppState, mut rx: mpsc::Receiver<Notice>) {
-    let Some(url) = state.config.wecom_webhook.clone() else {
-        return;
-    };
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -429,6 +602,11 @@ async fn run_consumer(state: AppState, mut rx: mpsc::Receiver<Notice>) {
         tokio::select! {
             maybe = rx.recv() => {
                 let Some(notice) = maybe else { break };
+                // 每条都取一次：设置页改地址后不重启即生效，清空后立刻停发
+                let Some(url) = state.notifier.webhook() else {
+                    debug!(key = %notice.dedupe_key, "wecom: 未配置 webhook，丢弃");
+                    continue;
+                };
                 // @所有人 / @具体责任人都要多发一条 text，企业微信按「消息条数」限流，
                 // 所以占两个额度
                 let cost = if notice.mention_all || !notice.mentions.is_empty() {
@@ -471,7 +649,7 @@ async fn flush_overflow(state: &AppState) {
         mention_all: false,
         mentions: Vec::new(),
     };
-    let Some(url) = state.config.wecom_webhook.clone() else {
+    let Some(url) = state.notifier.webhook() else {
         return;
     };
     let Ok(client) = reqwest::Client::builder()
@@ -939,14 +1117,16 @@ pub async fn task_abnormal(state: &AppState, task_code: &str, level: Level, reas
 ///
 /// 走同步是因为运维需要立刻看到 `errcode`（配错 key 时群里的静默失败最难查）。
 pub async fn send_test(state: &AppState) -> Result<String, String> {
-    let Some(url) = state.config.wecom_webhook.clone() else {
-        return Err(
-            "未配置 ROBODOG_WECOM_WEBHOOK：企业微信群机器人地址只能从环境变量读取".to_string(),
-        );
-    };
     if !state.config.wecom_enabled {
         return Err("推送通道已在配置中关闭（wecom.enabled = false）".to_string());
     }
+    let Some(url) = state.notifier.webhook() else {
+        return Err(
+            "未配置 webhook：请在「系统设置 → 企业微信群机器人」填写地址，\
+             或由部署方设置环境变量 ROBODOG_WECOM_WEBHOOK"
+                .to_string(),
+        );
+    };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -1153,11 +1333,85 @@ mod tests {
 
     #[test]
     fn disabled_notifier_drops_everything() {
-        let config = Config::from_env();
-        let (notifier, rx) = Notifier::channel(&config);
-        // 默认没有 webhook → 未启用、无消费端
+        let mut config = Config::from_env();
+        config.wecom_enabled = true;
+        config.wecom_webhook = None;
+        let (notifier, rx) = Notifier::channel(&config, None);
+        // 一个地址都没有 → 句柄不发消息（`is_enabled` 会把告警路径直接短路）
         assert!(!notifier.is_enabled());
-        assert!(rx.is_none());
         assert!(!notifier.enqueue(notice(Level::Critical)));
+        // 消费端仍会启动：现场在设置页填完地址就应该生效，不必重启进程
+        assert!(rx.is_some());
+        assert!(notifier.webhook().is_none());
+    }
+
+    fn test_config() -> Config {
+        let mut config = Config::from_env();
+        config.wecom_enabled = true;
+        config.wecom_webhook = None;
+        config
+    }
+
+    #[test]
+    fn platform_webhook_wins_over_env() {
+        let mut config = test_config();
+        config.wecom_webhook = Some("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=env".into());
+        let (notifier, _rx) = Notifier::channel(
+            &config,
+            Some("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=platform".into()),
+        );
+        assert!(notifier.is_enabled());
+        assert_eq!(notifier.webhook_snapshot().1, Some(WebhookSource::Platform));
+        assert!(notifier.webhook().unwrap().contains("key=platform"));
+    }
+
+    #[test]
+    fn webhook_falls_back_to_env_and_hot_reloads() {
+        let mut config = test_config();
+        config.wecom_webhook = Some("https://hook.example.com/send?key=envkey".into());
+        let (notifier, _rx) = Notifier::channel(&config, Some("   ".into()));
+        // 平台侧是空串（页面上清空了）→ 回退环境变量
+        assert_eq!(notifier.webhook_snapshot().1, Some(WebhookSource::Env));
+
+        // 页面保存后热更新：不重启进程，下一次发送就用新地址
+        notifier.set_webhook(
+            Some("https://hook.example.com/send?key=new".into()),
+            Some(WebhookSource::Platform),
+        );
+        assert!(notifier.webhook().unwrap().contains("key=new"));
+
+        // 清空 → 立刻停发（`is_enabled` 变假，告警链路不再拼消息）
+        notifier.set_webhook(None, None);
+        assert!(!notifier.is_enabled());
+        assert!(!notifier.enqueue(notice(Level::Critical)));
+    }
+
+    #[test]
+    fn validate_webhook_rejects_obviously_wrong_input() {
+        let ok = validate_webhook(
+            "  https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=94fdb35e-1111  ",
+        );
+        assert_eq!(
+            ok.unwrap(),
+            "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=94fdb35e-1111"
+        );
+        assert!(validate_webhook("").is_err());
+        assert!(validate_webhook("qyapi.weixin.qq.com/send?key=x").is_err(), "缺协议");
+        assert!(
+            validate_webhook("https://qyapi.weixin.qq.com/cgi-bin/webhook/send").is_err(),
+            "缺 key= 时发出去只会拿到 93000"
+        );
+        assert!(
+            validate_webhook("https://qyapi.weixin.qq.com/send?key=a b").is_err(),
+            "复制时带进了空格"
+        );
+    }
+
+    #[test]
+    fn mask_webhook_never_echoes_the_full_key() {
+        let masked = mask_webhook("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=94fdb35e-1234");
+        assert!(masked.contains("key=94fdb35e…"), "{masked}");
+        assert!(!masked.contains("1234"), "只回显前 8 位: {masked}");
+        assert_eq!(key_tail("send?key=ab12cd"), "ab12cd");
     }
 }

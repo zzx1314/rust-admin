@@ -1,5 +1,6 @@
 use crate::db::{now, today};
 use crate::geo::route_metrics;
+use crate::notify;
 use bcrypt::{DEFAULT_COST, hash};
 use chrono::{Datelike, Duration, Local};
 use serde_json::Value;
@@ -139,6 +140,16 @@ async fn ensure_settings(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             "false",
             "bool",
             "夜间静音模式",
+        ),
+        // 企业微信 webhook：地址即凭据，`value_type = 'secret'` 让它不出现在
+        // 通用设置列表里，只通过「系统设置 → 企业微信群机器人」专用接口读写。
+        // 留空 = 用环境变量 ROBODOG_WECOM_WEBHOOK；平台填了就以平台为准。
+        (
+            "notification",
+            notify::WEBHOOK_SETTING_KEY,
+            "",
+            "secret",
+            "企业微信群机器人 webhook 地址（平台内配置，留空则用环境变量）",
         ),
     ];
 

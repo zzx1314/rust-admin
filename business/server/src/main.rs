@@ -25,24 +25,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     seed::seed(&pool).await?;
 
-    // 企业微信推送句柄：未配置 webhook 时是空句柄，所有 enqueue 静默丢弃
-    let (notifier, notify_rx) = notify::Notifier::channel(&config);
-    if let Some(webhook) = config.wecom_webhook.as_deref() {
-        // 只打 key 末 6 位：够核对「填的是哪一个」，又不把凭据写进日志
-        let key_tail: String = webhook
-            .chars()
-            .rev()
-            .take(6)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        tracing::info!(
-            enabled = config.wecom_enabled,
-            min_level = %config.wecom_min_level,
-            %key_tail,
-            "企业微信告警推送已配置"
-        );
+    // 企业微信推送句柄：地址可以只在平台设置页里（settings.wecom_webhook），
+    // 也可以只在环境变量里；两边都空时句柄「不说话」，但消费端照样启动，
+    // 这样现场在页面上填完地址就立即生效，不用重启进程。
+    let stored_webhook = notify::stored_webhook(&pool).await;
+    let (notifier, notify_rx) = notify::Notifier::channel(&config, stored_webhook);
+    match notifier.webhook_snapshot() {
+        (Some(webhook), source) => {
+            // 只打 key 末 6 位：够核对「填的是哪一个」，又不把凭据写进日志
+            tracing::info!(
+                enabled = config.wecom_enabled,
+                min_level = %config.wecom_min_level,
+                source = source.map_or("?", |source| source.label()),
+                key_tail = %notify::key_tail(&webhook),
+                "企业微信告警推送已配置"
+            );
+        }
+        (None, _) => {
+            tracing::info!("企业微信告警推送未配置 webhook（可在「系统设置 → 企业微信群机器人」填写）")
+        }
     }
 
     let state = AppState {
