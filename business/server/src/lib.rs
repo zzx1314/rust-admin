@@ -28,6 +28,7 @@ pub mod ingest;
 pub mod mapdir;
 pub mod models;
 pub mod notify;
+pub mod schedule;
 pub mod seed;
 pub mod video;
 pub mod zentai;

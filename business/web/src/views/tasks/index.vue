@@ -50,9 +50,25 @@ const taskForm = reactive({
   routeId: null as number | null,
   planStart: "09:30",
   planEnd: "10:10",
+  /** 执行日：1=周一 … 7=周日；空数组 = 每天 */
+  scheduleDays: [] as number[],
   dispatchPolicy: "按路线顺序执行",
   description: ""
 });
+
+/** 周期任务的执行日选项（与后端 `schedule_days` 一一对应） */
+const WEEKDAYS = [
+  { value: 1, label: "一" },
+  { value: 2, label: "二" },
+  { value: 3, label: "三" },
+  { value: 4, label: "四" },
+  { value: 5, label: "五" },
+  { value: 6, label: "六" },
+  { value: 7, label: "日" }
+];
+
+/** 只有周期任务按时间窗调度；立即执行 / 临时下发 建好就发 */
+const isPeriodic = computed(() => taskForm.executeMode === "周期任务");
 const detailVisible = ref(false);
 const detailTask = ref<Task | null>(null);
 /** 任务事件流：定位未就绪、下发失败等可读原因都在这里 */
@@ -160,6 +176,42 @@ async function load() {
   }
 }
 
+/** `1,2,3` → `[1,2,3]`；非法 / 空值返回空数组（= 每天） */
+function parseScheduleDays(raw?: string | null): number[] {
+  return (raw ?? "")
+    .split(",")
+    .map(item => Number(item.trim()))
+    .filter(day => Number.isInteger(day) && day >= 1 && day <= 7);
+}
+
+/** 执行日的人话：每天 / 工作日 / 周一、周三 */
+function daysLabel(raw?: string | null): string {
+  const days = parseScheduleDays(raw);
+  if (!days.length || days.length === 7) return "每天";
+  if (days.join(",") === "1,2,3,4,5") return "工作日";
+  return days.map(day => `周${WEEKDAYS.find(item => item.value === day)?.label ?? "?"}`).join("、");
+}
+
+/**
+ * 计划时间的人话：`工作日 09:30-10:10`。
+ *
+ * 立即执行 / 临时下发不看时间窗，这里直接标「立即」，避免运维以为它还要等到点。
+ */
+function scheduleSummary(task: Task): string {
+  const range = task.planStart && task.planEnd ? `${task.planStart}-${task.planEnd}` : "—";
+  if (task.executeMode !== "周期任务") return `立即执行 · ${range}`;
+  return `${daysLabel(task.scheduleDays)} ${range}`;
+}
+
+/** 表单提交体：时间 / 执行日由选择器产出，后端再校验一次 */
+function formPayload() {
+  return {
+    ...taskForm,
+    // 空数组 = 每天：这里必须送空串（`null` 表示「保持原值」，清不掉已选的执行日）
+    scheduleDays: taskForm.scheduleDays.join(",")
+  };
+}
+
 function tagTone(type?: string | null) {
   const map: Record<string, string> = {
     定时巡检: "blue",
@@ -261,6 +313,7 @@ function openCreate() {
     routeId: routes.value.find(route => route.parkId === parkId)?.id ?? null,
     planStart: "09:30",
     planEnd: "10:10",
+    scheduleDays: [],
     dispatchPolicy: "按路线顺序执行",
     description: ""
   });
@@ -285,6 +338,7 @@ function openEdit(task: Task) {
     routeId: task.routeId ?? null,
     planStart: task.planStart ?? "09:30",
     planEnd: task.planEnd ?? "10:10",
+    scheduleDays: parseScheduleDays(task.scheduleDays),
     dispatchPolicy: task.dispatchPolicy ?? "按路线顺序执行",
     description: task.description ?? ""
   });
@@ -296,19 +350,36 @@ async function saveTask() {
     ElMessage.warning("请填写任务名称");
     return;
   }
+  if (!taskForm.deviceId) {
+    ElMessage.warning("请选择执行设备");
+    return;
+  }
+  // 周期任务的时间窗就是调度依据：必须选完整时间段（后端同样会拒）
+  if (isPeriodic.value) {
+    if (!taskForm.planStart || !taskForm.planEnd) {
+      ElMessage.warning("请选择计划时间段");
+      return;
+    }
+    if (taskForm.planStart === taskForm.planEnd) {
+      ElMessage.warning("计划开始与结束时间不能相同");
+      return;
+    }
+  }
   const editingId = editingTaskId.value;
   if (editingId !== null) {
-    await taskApi.update(editingId, { ...taskForm });
+    await taskApi.update(editingId, formPayload());
     taskDialog.value = false;
     editingTaskId.value = null;
     ElMessage.success("任务已更新");
     await load();
     return;
   }
-  await taskApi.create({ ...taskForm });
+  await taskApi.create(formPayload());
   taskDialog.value = false;
   viewMode.value = "board";
-  ElMessage.success("任务已创建并加入待执行队列");
+  ElMessage.success(
+    isPeriodic.value ? "任务已创建，将在配置的时间段内自动下发" : "任务已创建并下发"
+  );
   await load();
 }
 
@@ -616,7 +687,7 @@ onBeforeUnmount(() => {
           <div class="tc-info">
             <span><AppIcon name="dog" />{{ task.deviceCode }} · {{ task.executeMode }}</span>
             <span><AppIcon name="pin" />{{ task.parkName }} / {{ task.zoneName }}</span>
-            <span><AppIcon name="clock" />{{ task.planStart }} - {{ task.planEnd }}</span>
+            <span><AppIcon name="clock" />{{ scheduleSummary(task) }}</span>
             <span>
               <AppIcon name="route" />路线
               {{ task.routeCode ?? "—" }} · {{ task.routeId ? "已编排" : "临时路径" }}
@@ -736,7 +807,7 @@ onBeforeUnmount(() => {
                 {{ task.parkName }}
                 <div class="cell-sub">{{ task.zoneName }}</div>
               </td>
-              <td class="mono muted">{{ task.planStart }} - {{ task.planEnd }}</td>
+              <td class="mono muted">{{ scheduleSummary(task) }}</td>
               <td>
                 <StatusBadge :status="task.taskStatus" @click="clickStatusBadge(task.taskStatus)" />
               </td>
@@ -862,13 +933,57 @@ onBeforeUnmount(() => {
             </button>
           </div>
         </div>
-        <div class="field">
-          <label>计划开始时间</label>
-          <input v-model="taskForm.planStart" class="input" placeholder="09:30" />
+        <div class="field" style="grid-column: 1 / -1">
+          <label>计划时间段 <em v-if="isPeriodic">*</em></label>
+          <div class="time-range" :class="{ disabled: !isPeriodic }">
+            <el-time-select
+              v-model="taskForm.planStart"
+              :disabled="!isPeriodic"
+              start="00:00"
+              step="00:05"
+              end="23:55"
+              placeholder="开始"
+            />
+            <span class="time-sep">-</span>
+            <el-time-select
+              v-model="taskForm.planEnd"
+              :disabled="!isPeriodic"
+              start="00:05"
+              step="00:05"
+              end="23:59"
+              placeholder="结束"
+            />
+          </div>
+          <div class="rt-hint" style="margin: 4px 0 0">
+            <template v-if="!isPeriodic">「{{ taskForm.executeMode }}」创建后立即下发，不需要计划时间</template>
+            <template v-else-if="taskForm.planEnd && taskForm.planStart && taskForm.planEnd < taskForm.planStart">
+              跨零点执行：{{ taskForm.planStart }} 开始，次日 {{ taskForm.planEnd }} 结束
+            </template>
+            <template v-else>只在时间段内到点自动下发，设备就绪后不会提前跑</template>
+          </div>
         </div>
-        <div class="field">
-          <label>计划结束时间</label>
-          <input v-model="taskForm.planEnd" class="input" placeholder="10:10" />
+        <div class="field" style="grid-column: 1 / -1">
+          <label>执行日</label>
+          <div class="weekday-row" :class="{ disabled: !isPeriodic }">
+            <button
+              v-for="day in WEEKDAYS"
+              :key="day.value"
+              type="button"
+              class="weekday-chip"
+              :class="{ on: taskForm.scheduleDays.includes(day.value) }"
+              :disabled="!isPeriodic"
+              @click="
+                taskForm.scheduleDays = taskForm.scheduleDays.includes(day.value)
+                  ? taskForm.scheduleDays.filter(item => item !== day.value)
+                  : [...taskForm.scheduleDays, day.value].sort()
+              "
+            >
+              {{ day.label }}
+            </button>
+            <span class="rt-hint" style="margin-left: 6px">
+              {{ taskForm.scheduleDays.length ? daysLabel(taskForm.scheduleDays.join(",")) : "不选 = 每天" }}
+            </span>
+          </div>
         </div>
         <div class="field">
           <label>优先级</label>
@@ -932,7 +1047,11 @@ onBeforeUnmount(() => {
           <span>园区 / 区域</span><b>{{ detailTask.parkName }} / {{ detailTask.zoneName }}</b>
         </div>
         <div class="kv">
-          <span>计划时间</span><b class="mono">{{ detailTask.planStart }} - {{ detailTask.planEnd }}</b>
+          <span>计划时间</span><b class="mono">{{ scheduleSummary(detailTask) }}</b>
+        </div>
+        <div class="kv">
+          <span>最近自动下发</span>
+          <b class="mono">{{ detailTask.lastDispatchedOn || "—" }}</b>
         </div>
         <div class="kv">
           <span>关联路线</span>
@@ -1057,5 +1176,57 @@ onBeforeUnmount(() => {
 .task-live-dialog :deep(.el-dialog__body) {
   max-height: 76vh;
   overflow: auto;
+}
+
+/* 计划时间段：两颗时间选择器 + 分隔符。用选择器而不是输入框，
+   时间窗是调度依据，手填一个 `9点` 就等于这条计划永远不跑 */
+.time-range {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.time-range :deep(.el-select) {
+  flex: 0 1 220px;
+  min-width: 120px;
+}
+.time-range .time-sep {
+  color: var(--text-3, #94a3b8);
+}
+.time-range.disabled {
+  opacity: 0.55;
+}
+
+/* 执行日：周一到周日的开关片 */
+.weekday-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.weekday-row.disabled {
+  opacity: 0.55;
+}
+.weekday-chip {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid var(--line, #e2e8f0);
+  background: var(--bg-1, #fff);
+  color: var(--text-2, #475569);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.weekday-chip:hover:not(:disabled) {
+  border-color: var(--primary, #2563eb);
+  color: var(--primary, #2563eb);
+}
+.weekday-chip.on {
+  background: var(--primary, #2563eb);
+  border-color: var(--primary, #2563eb);
+  color: #fff;
+}
+.weekday-chip:disabled {
+  cursor: not-allowed;
 }
 </style>

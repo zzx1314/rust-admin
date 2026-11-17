@@ -12,9 +12,11 @@ use serde_json::{Value, json};
 use sqlx::{QueryBuilder, SqlitePool};
 use tracing::{debug, info, warn};
 
-const TASK_SELECT: &str = "SELECT t.id, t.task_code, t.task_name, t.task_type, t.execute_mode,
+/// 任务行 + 关联名称的公共列清单（服务端各处 SELECT 与集成测试共用，避免漏列）
+pub const TASK_SELECT: &str = "SELECT t.id, t.task_code, t.task_name, t.task_type, t.execute_mode,
     t.level, t.device_id, d.device_id AS device_code, t.park_id, p.park_name, t.zone_id,
     z.zone_name, t.route_id, r.route_code, r.route_name, t.plan_start, t.plan_end,
+    t.schedule_days, t.last_dispatched_on,
     t.task_status, t.progress, t.dispatch_policy, t.description, t.robot_task_id,
     t.robot_stage, t.robot_updated_at, t.created_at, t.updated_at, t.created_by
     FROM tasks t
@@ -139,7 +141,7 @@ pub async fn create_task(
 /// 建任务并尝试立即下发（设备已绑定且在线时）。
 ///
 /// 网页端与中台内部接口共用，避免「网页建任务」与「中台下发任务」两套语义。
-pub(crate) async fn create_task_core(
+pub async fn create_task_core(
     state: &AppState,
     payload: TaskRequest,
     created_by: Option<i64>,
@@ -147,6 +149,17 @@ pub(crate) async fn create_task_core(
     if payload.task_name.trim().is_empty() {
         return Err(AppError::BadRequest("任务名称不能为空".to_string()));
     }
+    // 定时巡检的时间窗是调度依据，不是展示字段：周期任务必须带合法起止时间
+    crate::schedule::validate_window(
+        payload.execute_mode.as_deref(),
+        payload.plan_start.as_deref(),
+        payload.plan_end.as_deref(),
+        payload.schedule_days.as_deref(),
+    )?;
+    let schedule_days = crate::schedule::normalize_days(payload.schedule_days.as_deref());
+    // 中台用 datetime 选择器填时间，业务侧时间窗只认 `HH:MM`，入库前统一
+    let plan_start = crate::schedule::normalize_clock(payload.plan_start.clone());
+    let plan_end = crate::schedule::normalize_clock(payload.plan_end.clone());
     validate_device_park(&state.db, payload.device_id, payload.park_id).await?;
     // 坐标预检放在插入之前：路线航点不能下发时直接 400，避免留下一条「建好了但发不出去」的任务
     crate::dispatch::ensure_route_dispatchable(
@@ -165,11 +178,11 @@ pub(crate) async fn create_task_core(
     let timestamp = now();
     let result = sqlx::query(
         "INSERT INTO tasks (task_code, task_name, task_type, execute_mode, level, device_id,
-            park_id, zone_id, route_id, plan_start, plan_end, task_status, progress,
+            park_id, zone_id, route_id, plan_start, plan_end, schedule_days, task_status, progress,
             dispatch_policy, description, created_at, updated_at, created_by,
             progress_updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-            ?18, ?16)",
+            ?18, ?19, ?17)",
     )
     .bind(&task_code)
     .bind(payload.task_name.trim())
@@ -180,8 +193,9 @@ pub(crate) async fn create_task_core(
     .bind(payload.park_id)
     .bind(payload.zone_id)
     .bind(payload.route_id.flatten())
-    .bind(payload.plan_start)
-    .bind(payload.plan_end)
+    .bind(plan_start)
+    .bind(plan_end)
+    .bind(schedule_days)
     .bind(payload.task_status.unwrap_or_else(|| "待执行".to_string()))
     .bind(payload.progress.unwrap_or(0))
     .bind(payload.dispatch_policy)
@@ -204,11 +218,30 @@ pub(crate) async fn create_task_core(
 
     // 如果任务已分配到设备，尝试通过 WebSocket 推送。
     //
+    // 定时巡检先看时间窗：没到点就只排期，交给 `schedule::sweep` 到点下发。
+    // 以前这里无条件现推，「计划时间 09:30」的任务刚建好（03:00）就跑去执行了。
+    //
     // 先过 ready 门禁：设备刚注册、本体还没连上时就把任务推出去，客户端只能回
     // 「未连接机器人本体」，任务在平台上看起来就是「已下发但不动」。此时保持
     // 待执行，等心跳确认本体就绪后由补发逻辑自动下发。
     if payload.device_id.is_some() {
         let task = fetch_task(state, id).await?;
+        let now = chrono::Local::now();
+        if matches!(
+            crate::schedule::due_state(&task, now),
+            crate::schedule::DueState::Waiting | crate::schedule::DueState::Missed
+        ) {
+            record_event(
+                state,
+                "schedule",
+                format!("任务 {} 已排期", task.task_code),
+                crate::schedule::schedule_hint(&task, now),
+                task.device_id,
+                Some(id),
+            )
+            .await?;
+            return fetch_task(state, id).await;
+        }
         let blocked = match task.device_id {
             Some(device_pk) => crate::dispatch::device_block_reason(&state.db, device_pk).await?,
             None => None,
@@ -248,7 +281,10 @@ fn resumable(task: &Task) -> bool {
 ///
 /// 返回设备编号：`Some(code)` 已下发，`None` 设备未连接（由调用方决定是否报错）。
 /// 这是唯一会给客户端发 `task_dispatch`（含航点 / 地图的完整载荷）的 REST 入口。
-async fn push_task_dispatch(state: &AppState, task: &Task) -> Result<Option<String>, AppError> {
+pub(crate) async fn push_task_dispatch(
+    state: &AppState,
+    task: &Task,
+) -> Result<Option<String>, AppError> {
     let Some(device_pk) = task.device_id else {
         return Ok(None);
     };
@@ -321,6 +357,14 @@ async fn push_task_dispatch(state: &AppState, task: &Task) -> Result<Option<Stri
     .bind(device_pk)
     .execute(&state.db)
     .await?;
+
+    // 记下「今天这个窗口已经跑过」：周期任务否则会在窗口内反复下发（跑完回到待执行
+    // 又被扫描器当成到点）。手动开始也走这里，所以手动跑一次同样不会被自动重跑。
+    sqlx::query("UPDATE tasks SET last_dispatched_on = ?1 WHERE id = ?2")
+        .bind(chrono::Local::now().format("%Y-%m-%d").to_string())
+        .bind(task.id)
+        .execute(&state.db)
+        .await?;
 
     // updated_at 已刷新，任务看门狗从这里开始计时
     Ok(Some(device_code))
@@ -416,18 +460,35 @@ pub async fn update_task(
     } else {
         payload.task_name.trim().to_string()
     };
-    let plan_start = payload.plan_start.clone().or(existing.plan_start.clone());
-    let plan_end = payload.plan_end.clone().or(existing.plan_end.clone());
+    let plan_start = crate::schedule::normalize_clock(payload.plan_start.clone())
+        .or(existing.plan_start.clone());
+    let plan_end =
+        crate::schedule::normalize_clock(payload.plan_end.clone()).or(existing.plan_end.clone());
+    let execute_mode = payload
+        .execute_mode
+        .clone()
+        .or(existing.execute_mode.clone());
+    let schedule_days = match payload.schedule_days.as_deref() {
+        // 显式传了就以请求为准（空字符串 = 取消周期日 = 每天）
+        Some(raw) => crate::schedule::normalize_days(Some(raw)),
+        None => existing.schedule_days.clone(),
+    };
+    crate::schedule::validate_window(
+        execute_mode.as_deref(),
+        plan_start.as_deref(),
+        plan_end.as_deref(),
+        schedule_days.as_deref(),
+    )?;
     validate_device_park(&state.db, device_id, park_id).await?;
     sqlx::query(
         "UPDATE tasks SET task_name = ?1, task_type = ?2, execute_mode = ?3, level = ?4,
             device_id = ?5, park_id = ?6, zone_id = ?7, route_id = ?8, plan_start = ?9,
-            plan_end = ?10, task_status = ?11, progress = ?12, dispatch_policy = ?13,
-            description = ?14, updated_at = ?15 WHERE id = ?16",
+            plan_end = ?10, schedule_days = ?11, task_status = ?12, progress = ?13,
+            dispatch_policy = ?14, description = ?15, updated_at = ?16 WHERE id = ?17",
     )
     .bind(&task_name)
     .bind(payload.task_type.or(existing.task_type))
-    .bind(payload.execute_mode.or(existing.execute_mode))
+    .bind(&execute_mode)
     .bind(payload.level.or(existing.level))
     .bind(device_id)
     .bind(park_id)
@@ -435,6 +496,7 @@ pub async fn update_task(
     .bind(route_id)
     .bind(plan_start)
     .bind(plan_end)
+    .bind(schedule_days)
     .bind(status)
     .bind(progress)
     .bind(payload.dispatch_policy.or(existing.dispatch_policy))
@@ -617,7 +679,7 @@ impl super::parks::OwnerCheck for Task {
     }
 }
 
-async fn fetch_task(state: &AppState, id: i64) -> Result<Task, AppError> {
+pub(crate) async fn fetch_task(state: &AppState, id: i64) -> Result<Task, AppError> {
     let sql = format!("{TASK_SELECT} WHERE t.id = ?1");
     sqlx::query_as::<_, Task>(&sql)
         .bind(id)

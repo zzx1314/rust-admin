@@ -438,6 +438,7 @@ pub async fn apply_task(
             route_id: Some(Some(payload.route_id)),
             plan_start: payload.plan_start.clone(),
             plan_end: payload.plan_end.clone(),
+            schedule_days: None,
             task_status: Some("待执行".to_string()),
             progress: None,
             dispatch_policy: None,

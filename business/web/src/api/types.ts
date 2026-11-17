@@ -148,8 +148,13 @@ export interface Task {
   routeId: number | null;
   routeCode: string | null;
   routeName: string | null;
+  /** 每天的执行窗口（`HH:MM`，允许跨零点）；由时间选择器写入，不再手填 */
   planStart: string | null;
   planEnd: string | null;
+  /** 周期日：`1,2,3,4,5`（1=周一 … 7=周日）；null / 空 = 每天 */
+  scheduleDays: string | null;
+  /** 最近一次「到点自动下发」的日期（`YYYY-MM-DD`），同一天不会重复跑 */
+  lastDispatchedOn: string | null;
   taskStatus: string;
   progress: number;
   dispatchPolicy: string | null;

@@ -1874,26 +1874,25 @@ async fn dispatch_pending_tasks(
         return Ok(());
     }
 
-    // 只取一条：优先级高、创建早的先跑
-    let task = sqlx::query_as::<_, Task>(
-        "SELECT t.id, t.task_code, t.task_name, t.task_type, t.execute_mode, t.level,
-            t.device_id, d.device_id AS device_code, t.park_id, p.park_name, t.zone_id,
-            z.zone_name, t.route_id, r.route_code, r.route_name, t.plan_start, t.plan_end,
-            t.task_status, t.progress, t.dispatch_policy, t.description, t.robot_task_id,
-            t.robot_stage, t.robot_updated_at, t.created_at, t.updated_at, t.created_by
-         FROM tasks t
-         LEFT JOIN devices d ON d.id = t.device_id
-         LEFT JOIN parks p ON p.id = t.park_id
-         LEFT JOIN zones z ON z.id = t.zone_id
-         LEFT JOIN routes r ON r.id = t.route_id
-         WHERE d.device_id = ?1 AND t.task_status = '待执行'
+    // 按优先级取一批，再在内存里过「计划时间窗」：没到点的定时巡检不能补发，
+    // 但排在它后面的临时任务照样要能跑，所以不能只取一条就放弃。
+    let candidates = sqlx::query_as::<_, Task>(&format!(
+        "{} WHERE d.device_id = ?1 AND t.task_status = '待执行'
             AND (t.park_id IS NULL OR t.park_id = ?2)
-         ORDER BY t.level DESC, t.created_at ASC, t.id ASC LIMIT 1",
-    )
+         ORDER BY t.level DESC, t.created_at ASC, t.id ASC LIMIT 20",
+        crate::handlers::tasks::TASK_SELECT
+    ))
     .bind(device_id)
     .bind(park_id)
-    .fetch_optional(db)
+    .fetch_all(db)
     .await?;
+    let clock = chrono::Local::now();
+    let task = candidates.into_iter().find(|task| {
+        matches!(
+            crate::schedule::due_state(task, clock),
+            crate::schedule::DueState::Due | crate::schedule::DueState::Immediate
+        )
+    });
     let Some(task) = task else {
         return Ok(());
     };
@@ -1954,6 +1953,15 @@ async fn dispatch_pending_tasks(
     .execute(db)
     .await
     .ok();
+
+    // 与 `push_task_dispatch` 一致：记下今天这个窗口跑过了，避免跑完回位后被当成
+    // 「到点该跑」反复下发。
+    sqlx::query("UPDATE tasks SET last_dispatched_on = ?1 WHERE id = ?2")
+        .bind(chrono::Local::now().format("%Y-%m-%d").to_string())
+        .bind(task.id)
+        .execute(db)
+        .await
+        .ok();
 
     info!("dispatched task {} to device {}", task.task_code, device_id);
     Ok(())

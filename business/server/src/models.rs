@@ -209,6 +209,10 @@ pub struct Task {
     pub route_name: Option<String>,
     pub plan_start: Option<String>,
     pub plan_end: Option<String>,
+    /// 周期日（`1,2,3,4,5`；1=周一 … 7=周日），空 = 每天都执行
+    pub schedule_days: Option<String>,
+    /// 最近一次「到点下发」的日期（`YYYY-MM-DD`）：同一窗口内不重复下发
+    pub last_dispatched_on: Option<String>,
     pub task_status: String,
     pub progress: i64,
     pub dispatch_policy: Option<String>,
@@ -401,6 +405,8 @@ pub struct TaskRequest {
     pub route_id: Option<Option<i64>>,
     pub plan_start: Option<String>,
     pub plan_end: Option<String>,
+    /// 周期日（`1,2,3,4,5`；1=周一 … 7=周日），空 = 每天都执行
+    pub schedule_days: Option<String>,
     pub task_status: Option<String>,
     pub progress: Option<i64>,
     pub dispatch_policy: Option<String>,

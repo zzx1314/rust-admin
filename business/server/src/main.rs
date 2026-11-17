@@ -61,6 +61,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     gateway::spawn_heartbeat_watchdog(state.clone());
     // 任务看门狗：`执行中` 但长时间没有进度上报、或进度停滞的任务置为异常
     gateway::spawn_task_watchdog(state.clone());
+    // 计划调度：定时巡检按配置的时间段/执行日到点下发（见 `schedule` 模块）
+    robodog_ops_server::schedule::spawn(state.clone());
     // 视频看门狗：没人观看却还在推流时让客户端停掉 ffmpeg
     robodog_ops_server::video::spawn_watchdog(state.clone());
     // 企业微信推送消费端：限流 + 重试都在这里，调用方只负责入队

@@ -2117,19 +2117,10 @@ async fn legacy_route_coordinates_are_migrated_once() {
 
 /// 取一条任务（与 `handlers::tasks::TASK_SELECT` 同列），用于组装下发载荷。
 async fn fetch_task_row(pool: &sqlx::SqlitePool, id: i64) -> robodog_ops_server::models::Task {
-    sqlx::query_as(
-        "SELECT t.id, t.task_code, t.task_name, t.task_type, t.execute_mode, t.level,
-            t.device_id, d.device_id AS device_code, t.park_id, p.park_name, t.zone_id,
-            z.zone_name, t.route_id, r.route_code, r.route_name, t.plan_start, t.plan_end,
-            t.task_status, t.progress, t.dispatch_policy, t.description, t.robot_task_id,
-            t.robot_stage, t.robot_updated_at, t.created_at, t.updated_at, t.created_by
-         FROM tasks t
-         LEFT JOIN devices d ON d.id = t.device_id
-         LEFT JOIN parks p ON p.id = t.park_id
-         LEFT JOIN zones z ON z.id = t.zone_id
-         LEFT JOIN routes r ON r.id = t.route_id
-         WHERE t.id = ?1",
-    )
+    sqlx::query_as(&format!(
+        "{} WHERE t.id = ?1",
+        robodog_ops_server::handlers::tasks::TASK_SELECT
+    ))
     .bind(id)
     .fetch_one(pool)
     .await
