@@ -1,4 +1,4 @@
-use crate::auth::{login_handler, me_handler, require_auth};
+use crate::auth::{list_accounts, login_handler, me_handler, require_auth};
 use crate::backpack;
 use crate::config::Config;
 use crate::error::ApiResponse;
@@ -61,6 +61,8 @@ async fn health(State(state): State<AppState>) -> Json<ApiResponse<Value>> {
 pub fn build_router(state: AppState) -> Router {
     let protected = Router::new()
         .route("/auth/me", get(me_handler))
+        // 责任人「关联平台账号」下拉：只读账号元数据（不含敏感列）
+        .route("/accounts", get(list_accounts))
         .route("/parks", get(parks::list_parks).post(parks::create_park))
         .route(
             "/parks/{id}",

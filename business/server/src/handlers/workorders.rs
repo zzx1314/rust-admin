@@ -90,8 +90,26 @@ pub async fn list_work_orders(
             .push_bind(like)
             .push(")");
     }
+    let my_staff = my_staff_id(&state, &claims).await?;
     if !claims.is_admin {
-        builder.push(" AND w.created_by = ").push_bind(claims.sub);
+        // 非管理员能看到的：
+        //   1. 自己建的；
+        //   2. 系统自动派单（`created_by` 为空）—— 派单本来就是「派给现场人去干」的，
+        //      2026-11-17 现场就因为这里只认创建人，运营账号打开工单管理一片空白；
+        //   3. 但**派给已经绑定了别的账号的责任人**的系统单要藏起来，
+        //      否则「派给谁」在平台上没有意义（未绑定账号的责任人仍按公共待办）。
+        append_visible_filter(&mut builder, &claims, my_staff);
+    }
+    if query.mine == Some(true) {
+        match my_staff {
+            Some(staff_id) => {
+                builder.push(" AND w.staff_id = ").push_bind(staff_id);
+            }
+            // 账号没绑责任人：「我的」= 自己建的（否则这个开关点了就空白，更容易误解）
+            None => {
+                builder.push(" AND w.created_by = ").push_bind(claims.sub);
+            }
+        }
     }
     builder.push(" ORDER BY w.created_at DESC, w.id DESC");
     let orders = builder
@@ -103,15 +121,28 @@ pub async fn list_work_orders(
 
 pub async fn work_order_stats(
     State(state): State<AppState>,
+    Query(query): Query<WorkOrderQuery>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     let mut builder = QueryBuilder::<sqlx::Sqlite>::new(
-        "SELECT status, COUNT(*) FROM work_orders WHERE 1 = 1",
+        "SELECT status, COUNT(*) FROM work_orders w WHERE 1 = 1",
     );
+    let my_staff = my_staff_id(&state, &claims).await?;
     if !claims.is_admin {
-        builder.push(" AND created_by = ").push_bind(claims.sub);
+        // 与列表同一套可见性（看板顶部的数字必须和列表条数对得上）
+        append_visible_filter(&mut builder, &claims, my_staff);
     }
-    builder.push(" GROUP BY status");
+    if query.mine == Some(true) {
+        match my_staff {
+            Some(staff_id) => {
+                builder.push(" AND w.staff_id = ").push_bind(staff_id);
+            }
+            None => {
+                builder.push(" AND w.created_by = ").push_bind(claims.sub);
+            }
+        }
+    }
+    builder.push(" GROUP BY w.status");
     let rows: Vec<(String, i64)> = builder.build_query_as().fetch_all(&state.db).await?;
     let total: i64 = rows.iter().map(|(_, count)| count).sum();
     let mut counts = serde_json::Map::new();
@@ -132,7 +163,7 @@ pub async fn get_work_order(
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<WorkOrderDetail>>, AppError> {
     let order = fetch_order(&state, id).await?;
-    ensure_owner(order.created_by, &claims)?;
+    ensure_order_access(&state, &order, &claims).await?;
     let logs = fetch_logs(&state, id).await?;
     Ok(ApiResponse::ok(WorkOrderDetail { order, logs }))
 }
@@ -278,7 +309,7 @@ pub async fn update_work_order(
     Json(payload): Json<WorkOrderRequest>,
 ) -> Result<Json<ApiResponse<WorkOrderDetail>>, AppError> {
     let existing = fetch_order(&state, id).await?;
-    ensure_owner(existing.created_by, &claims)?;
+    ensure_order_access(&state, &existing, &claims).await?;
 
     // 改派：显式给 staffId 就按 id 取姓名；只给姓名时按姓名反查责任人库
     let (staff_id, assignee) = match (payload.staff_id, payload.assignee.as_deref()) {
@@ -351,7 +382,7 @@ pub async fn update_work_order_status(
     Json(payload): Json<WorkOrderStatusRequest>,
 ) -> Result<Json<ApiResponse<WorkOrderDetail>>, AppError> {
     let existing = fetch_order(&state, id).await?;
-    ensure_owner(existing.created_by, &claims)?;
+    ensure_order_access(&state, &existing, &claims).await?;
 
     let status = payload.status.trim().to_string();
     if !STATUS_FLOW.contains(&status.as_str()) {
@@ -405,7 +436,7 @@ pub async fn add_work_order_log(
     Json(payload): Json<WorkOrderLogRequest>,
 ) -> Result<Json<ApiResponse<WorkOrderDetail>>, AppError> {
     let order = fetch_order(&state, id).await?;
-    ensure_owner(order.created_by, &claims)?;
+    ensure_order_access(&state, &order, &claims).await?;
     if payload.content.trim().is_empty() {
         return Err(AppError::BadRequest("处理记录不能为空".to_string()));
     }
@@ -430,7 +461,7 @@ pub async fn delete_work_order(
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<bool>>, AppError> {
     let order = fetch_order(&state, id).await?;
-    ensure_owner(order.created_by, &claims)?;
+    ensure_can_delete(order.created_by, &claims)?;
     // 自动派单会在 `alerts.work_order_id` 上指回来：先解除引用再删本单，
     // 否则撞 FOREIGN KEY（告警行本身保留，`assignee` / `assignee_note` 仍是当时的记录）。
     // logs 由外键 ON DELETE CASCADE 一并清掉（连接已开启 foreign_keys）
@@ -449,7 +480,103 @@ pub async fn delete_work_order(
 
 // ------------------------------------------------------------------ 内部
 
-fn ensure_owner(created_by: Option<i64>, claims: &Claims) -> Result<(), AppError> {
+/// 工单可读可处置：管理员 / 自己建的 / **系统自动派单的（`created_by` 为空）**。
+///
+/// 系统单是「告警自动派单」建的，`created_by` 落 NULL（派单人是「系统」，没有登录用户）。
+/// 2026-11-17 现场：`zhangzexin`（中台 role=common → `is_admin=false`）在列表里能看到
+/// `WO-1117-29` 是排班派给他的单，点开却报「工单不存在」—— 因为这里只认创建人。
+/// 系统派单本质上是**公共待办**：告警中心本来就对所有人可见，工单不能再藏起来，
+/// 否则「排班派给谁」这条链路在平台上就断了。
+/// 当前登录账号绑定的责任人（`staff.user_id = claims.sub`）。
+async fn my_staff_id(state: &AppState, claims: &Claims) -> Result<Option<i64>, AppError> {
+    Ok(
+        sqlx::query_scalar("SELECT id FROM staff WHERE user_id = ?1")
+            .bind(claims.sub)
+            .fetch_optional(&state.db)
+            .await?,
+    )
+}
+
+/// 非管理员在列表/统计里的可见范围。
+///
+/// - 自己建的；
+/// - 系统自动派单（`created_by` 为空）；
+/// - 但派给「已经绑定了别的账号」的责任人的系统单不给他看（否则「派给谁」没意义）；
+/// - 派给未绑定账号的责任人的单仍算公共待办（现场可能是外包 / 临时工，没有平台账号）。
+fn append_visible_filter(
+    builder: &mut QueryBuilder<'_, sqlx::Sqlite>,
+    claims: &Claims,
+    my_staff: Option<i64>,
+) {
+    if let Some(staff_id) = my_staff {
+        // (自己建的) OR (系统派单 AND (未指派 OR 派给我 OR 派给没绑账号的人))
+        builder
+            .push(" AND (w.created_by = ")
+            .push_bind(claims.sub)
+            .push(" OR (w.created_by IS NULL AND (w.staff_id IS NULL OR w.staff_id = ")
+            .push_bind(staff_id)
+            .push(" OR w.staff_id IN (SELECT id FROM staff WHERE user_id IS NULL))))");
+    } else {
+        // 还没绑责任人：保持老口径（自己建的 + 全部系统派单），否则一升级就全空白
+        builder
+            .push(" AND (w.created_by = ")
+            .push_bind(claims.sub)
+            .push(" OR w.created_by IS NULL)");
+    }
+}
+
+/// 这张单能不能由当前账号处置。
+///
+/// - 管理员 / 创建人：可以；
+/// - 系统派单（`created_by` 为空）：派给他自己 → 可以；派给没绑定账号的责任人 → 也算公共待办；
+///   派给人家的单（对方已绑定账号）→ 不行，去「只看我负责的」里那条才是他的。
+fn ensure_visible(
+    created_by: Option<i64>,
+    staff_id: Option<i64>,
+    assigned_user: Option<i64>,
+    claims: &Claims,
+    my_staff: Option<i64>,
+) -> Result<(), AppError> {
+    if claims.is_admin || created_by == Some(claims.sub) {
+        return Ok(());
+    }
+    if created_by.is_none() {
+        let public_pool =
+            staff_id.is_none() || Some(staff_id.unwrap()) == my_staff || assigned_user.is_none();
+        if public_pool {
+            return Ok(());
+        }
+    }
+    Err(AppError::NotFound("工单不存在".to_string()))
+}
+
+/// 取这张单的责任人绑定信息后做一次处置权限判断（每次处置只需一条极小的查询）。
+async fn ensure_order_access(
+    state: &AppState,
+    order: &WorkOrder,
+    claims: &Claims,
+) -> Result<(), AppError> {
+    let assigned_user: Option<Option<i64>> = match order.staff_id {
+        Some(staff_id) => {
+            sqlx::query_scalar("SELECT user_id FROM staff WHERE id = ?1")
+                .bind(staff_id)
+                .fetch_optional(&state.db)
+                .await?
+        }
+        None => None,
+    };
+    let my_staff = my_staff_id(state, claims).await?;
+    ensure_visible(
+        order.created_by,
+        order.staff_id,
+        assigned_user.flatten(),
+        claims,
+        my_staff,
+    )
+}
+
+/// 删除比处置更严格：系统单是告警的存证链，只允许管理员删。
+fn ensure_can_delete(created_by: Option<i64>, claims: &Claims) -> Result<(), AppError> {
     if claims.is_admin || created_by == Some(claims.sub) {
         return Ok(());
     }

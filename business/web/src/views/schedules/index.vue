@@ -2,8 +2,17 @@
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { parkApi, shiftApi, shiftSlotApi, staffApi, taskApi, zoneApi } from "@/api/ops";
-import type { Park, Shift, ShiftSlot, Staff, StaffImportResult, Task, Zone } from "@/api/types";
+import { accountApi, parkApi, shiftApi, shiftSlotApi, staffApi, taskApi, zoneApi } from "@/api/ops";
+import type {
+  AccountOption,
+  Park,
+  Shift,
+  ShiftSlot,
+  Staff,
+  StaffImportResult,
+  Task,
+  Zone
+} from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import AppIcon from "@/components/AppIcon.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
@@ -82,8 +91,13 @@ const staffForm = reactive({
   team: "",
   phone: "",
   skills: "",
-  status: "在岗"
+  status: "在岗",
+  /** 关联平台账号（null = 不关联）：决定「我的工单」与工单处置权限 */
+  userId: null as number | null
 });
+/** 账号下拉（`GET /api/accounts`）：已绑别人的人也要列出来，禁用 + 注明，避免“看不见的可选项” */
+const accounts = ref<AccountOption[]>([]);
+const accountsLoaded = ref(false);
 const STAFF_STATUSES = ["在岗", "休息", "请假"];
 const savingStaff = ref(false);
 const isEditingStaff = computed(() => staffForm.id !== null);
@@ -487,6 +501,11 @@ watch(weekOffset, () => {
   void load();
 });
 
+// 责任人库一打开就拉账号下拉（绑定「关联平台账号」用）
+watch(staffVisible, visible => {
+  if (visible) void ensureAccounts();
+});
+
 function openShiftDialog(preset?: { date?: string; slot?: string }) {
   editingShiftId.value = null;
   shiftForm.shiftDate = preset?.date ?? weekDays.value.find(day => day.today)?.date ?? weekStart.value;
@@ -621,6 +640,14 @@ function resetStaffForm() {
   staffForm.phone = "";
   staffForm.skills = "";
   staffForm.status = "在岗";
+  staffForm.userId = null;
+}
+
+/** 账号下拉按需加载一次（责任人弹窗打开时） */
+async function ensureAccounts() {
+  if (accountsLoaded.value) return;
+  accounts.value = await accountApi.list();
+  accountsLoaded.value = true;
 }
 
 function editStaff(item: Staff) {
@@ -631,6 +658,7 @@ function editStaff(item: Staff) {
   staffForm.phone = item.phone ?? "";
   staffForm.skills = item.skills ?? "";
   staffForm.status = item.status;
+  staffForm.userId = item.userId ?? null;
 }
 
 /** 新增 / 修改共用：空串表示清空该字段（后端按传入值覆盖） */
@@ -647,7 +675,9 @@ async function saveStaff() {
       team: staffForm.team,
       phone: staffForm.phone,
       skills: staffForm.skills,
-      status: staffForm.status
+      status: staffForm.status,
+      // null = 显式解绑（后端用「字段缺失 vs null」区分「不改」和「解绑」）
+      userId: staffForm.userId
     };
     if (staffForm.id === null) {
       await staffApi.create(payload);
@@ -1359,6 +1389,26 @@ onMounted(async () => {
           <select v-model="staffForm.status" class="select">
             <option v-for="status in STAFF_STATUSES" :key="status" :value="status">
               {{ status }}
+            </option>
+          </select>
+          <!-- 关联平台账号：绑定后「我的工单」/处置权限按这个人算；不关联=公共待办 -->
+          <select
+            v-model="staffForm.userId"
+            class="select"
+            title="绑定后：派给他的工单只有他本人（+管理员）能处置，并可「只看我负责的」；不绑定则按公共待办"
+            style="grid-column: 1 / -1"
+          >
+            <option :value="null">不关联平台账号（派给他的单按公共待办）</option>
+            <option
+              v-for="account in accounts"
+              :key="account.id"
+              :value="account.id"
+              :disabled="!!account.staffId && account.staffId !== staffForm.id"
+            >
+              {{ account.displayName || account.username }}（{{ account.username }}）
+              <template v-if="account.staffId && account.staffId !== staffForm.id">
+                · 已绑定 {{ account.staffName }}
+              </template>
             </option>
           </select>
         </div>

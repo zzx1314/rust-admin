@@ -223,6 +223,60 @@ pub async fn me_handler(
     }))
 }
 
+/// 责任人「关联平台账号」下拉用的账号选项。
+///
+/// 只暴露 id / 用户名 / 昵称 / 角色 + 已绑定的责任人，**不含密码哈希等敏感列**。
+/// 业务平台既支持本地账号也支持中台 SSO（登录时 upsert 本地 `users` 行），
+/// 所以这里直接列本地 `users`，两边都能选。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountOption {
+    pub id: i64,
+    pub username: String,
+    pub display_name: Option<String>,
+    pub role: String,
+    /// 该账号已绑定的责任人（一个账号最多绑一个）
+    pub staff_id: Option<i64>,
+    pub staff_name: Option<String>,
+}
+
+/// `GET /api/accounts` —— 责任人绑定账号时选人用（任何登录用户都能读，只读元数据）
+pub async fn list_accounts(
+    State(state): State<AppState>,
+    Extension(_claims): Extension<Claims>,
+) -> Result<Json<ApiResponse<Vec<AccountOption>>>, AppError> {
+    // 行结构单独定义，避免 clippy 的 `type_complexity`
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        id: i64,
+        username: String,
+        display_name: Option<String>,
+        role: String,
+        staff_id: Option<i64>,
+        staff_name: Option<String>,
+    }
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT u.id, u.username, u.display_name, u.role, st.id AS staff_id, st.name AS staff_name
+           FROM users u
+           LEFT JOIN staff st ON st.user_id = u.id
+          ORDER BY (st.id IS NOT NULL), u.username",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    Ok(ApiResponse::ok(
+        rows.into_iter()
+            .map(|row| AccountOption {
+                id: row.id,
+                username: row.username,
+                display_name: row.display_name,
+                role: row.role,
+                staff_id: row.staff_id,
+                staff_name: row.staff_name,
+            })
+            .collect(),
+    ))
+}
+
 pub async fn require_auth(
     State(state): State<AppState>,
     mut request: Request,

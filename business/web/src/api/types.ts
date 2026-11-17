@@ -515,12 +515,30 @@ export interface Staff {
   color: string;
   status: string;
   skills: string | null;
+  /**
+   * 关联的平台账号（`users.id`）：决定「我的工单」与处置权限。
+   * 空 = 没有平台账号的现场人员（外包/临时工），派给他的单按公共待办处理。
+   */
+  userId?: number | null;
+  /** 绑定账号的用户名（列表展示用） */
+  userName?: string | null;
   createdAt: string;
   updatedAt: string;
   /** 周视图范围内班次数（列表按 from/to 统计） */
   shiftCount: number;
   /** 在办工单数（状态不是「已完成」） */
   openOrderCount: number;
+}
+
+/** 责任人「关联平台账号」下拉选项（`GET /api/accounts`，不含任何敏感列） */
+export interface AccountOption {
+  id: number;
+  username: string;
+  displayName: string | null;
+  role: string;
+  /** 该账号已绑定的责任人（一个账号最多绑一个） */
+  staffId: number | null;
+  staffName: string | null;
 }
 
 /** 责任人库 Excel 导入：逐行结果（只回报跳过 / 失败的行） */

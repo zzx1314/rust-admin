@@ -101,6 +101,13 @@ HTTP」模式。两者共用同一个服务令牌，见 `business/README.md`。
 `business/docs/wecom-alert-push.md`（改这块之前必读）**：架构、代码地图、三层开关、
 去重/限流参数、触发点清单、新增告警源的做法、踩坑记录。
 
+责任人库（`staff`）可绑定平台账号（`staff.user_id`，迁移 025，一个账号最多一个责任人）：
+绑定后「只看我负责的」（`GET /api/workorders?mine=true`）按它过滤，且系统派单的处置权限
+收敛到该责任人 + 管理员；**没绑账号的责任人，其系统单仍是公共待办**（否则派了单没人能动）。
+账号没绑责任人时保持老口径（自己建的 + 全部系统派单）。改动这块注意
+`handlers/workorders.rs` 的 `append_visible_filter` / `ensure_visible` 与
+`staff.user_id` 的唯一索引，回归用例：`tests/workorder_scope.rs`。
+
 告警自动派单（`settings.alert_auto_workorder`，默认开）的**去重键是结构化的**：
 建告警时写 `alerts.dedup_key`（`ai:<设备>:<任务>:<航点>:<类别|count|missing>` /
 `fault:<设备>:<故障码>` / `hb:<设备>` / `ctrl:<设备>`），`alert_flow::find_open_order` 按

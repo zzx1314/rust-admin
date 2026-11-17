@@ -35,14 +35,16 @@ const SHIFT_SLOT_SELECT: &str = "SELECT ss.id, ss.name, ss.start_time, ss.end_ti
     FROM shift_slots ss";
 
 const STAFF_SELECT: &str = "SELECT st.id, st.staff_code, st.name, st.role, st.team, st.phone,
-    st.color, st.status, st.skills, st.created_at, st.updated_at,
+    st.color, st.status, st.skills, st.user_id, u.username AS user_name,
+    st.created_at, st.updated_at,
     (SELECT COUNT(*) FROM shifts s
       WHERE s.staff_id = st.id
         AND (?1 IS NULL OR s.shift_date >= ?1)
         AND (?2 IS NULL OR s.shift_date <= ?2)) AS shift_count,
     (SELECT COUNT(*) FROM work_orders w
       WHERE w.staff_id = st.id AND w.status <> '已完成') AS open_order_count
-    FROM staff st";
+    FROM staff st
+    LEFT JOIN users u ON u.id = st.user_id";
 
 const SHIFT_SELECT: &str = "SELECT s.id, s.shift_code, s.shift_date, s.slot, s.time_range,
     s.staff_id, s.owner_name, st.role AS staff_role, st.team AS staff_team,
@@ -94,10 +96,12 @@ pub async fn create_staff(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| format!("EMP-{next_id:02}"));
     let timestamp = now();
+    let user_id = payload.user_id.flatten();
+    check_account_binding(&state, user_id, None).await?;
     let result = sqlx::query(
         "INSERT INTO staff (staff_code, name, role, team, phone, color, status, skills,
-            created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            user_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
     )
     .bind(&staff_code)
     .bind(name)
@@ -107,6 +111,7 @@ pub async fn create_staff(
     .bind(payload.color.unwrap_or_else(|| "#0284c7".to_string()))
     .bind(payload.status.unwrap_or_else(|| "在岗".to_string()))
     .bind(payload.skills)
+    .bind(user_id)
     .bind(&timestamp)
     .bind(&timestamp)
     .execute(&state.db)
@@ -140,9 +145,17 @@ pub async fn update_staff(
             .execute(&state.db)
             .await?;
     }
+    // 账号绑定：请求里给了就按请求（含显式解绑 null），没给就保持原值
+    let user_id = match payload.user_id {
+        Some(requested) => {
+            check_account_binding(&state, requested, Some(id)).await?;
+            requested
+        }
+        None => existing.user_id,
+    };
     sqlx::query(
         "UPDATE staff SET name = ?1, role = ?2, team = ?3, phone = ?4, color = ?5,
-            status = ?6, skills = ?7, updated_at = ?8 WHERE id = ?9",
+            status = ?6, skills = ?7, user_id = ?8, updated_at = ?9 WHERE id = ?10",
     )
     .bind(&name)
     .bind(payload.role.or(existing.role))
@@ -151,6 +164,7 @@ pub async fn update_staff(
     .bind(payload.color.unwrap_or(existing.color))
     .bind(payload.status.unwrap_or(existing.status))
     .bind(payload.skills.or(existing.skills))
+    .bind(user_id)
     .bind(now())
     .bind(id)
     .execute(&state.db)
@@ -1289,6 +1303,40 @@ async fn ensure_slot_free(
     if let Some((code,)) = conflict {
         return Err(AppError::BadRequest(format!(
             "冲突：{owner_name} 在 {shift_date} {slot} 已有排班（{code}）"
+        )));
+    }
+    Ok(())
+}
+
+/// 校验「关联平台账号」：账号必须存在，且一个账号只能绑一个责任人。
+///
+/// 唯一性不能只靠数据库索引：撞索引会回落成 500，现场只看到「服务器错误」。
+/// `self_id` = 正在编辑的责任人（改自己时不该跟自己冲突）。
+async fn check_account_binding(
+    state: &AppState,
+    user_id: Option<i64>,
+    self_id: Option<i64>,
+) -> Result<(), AppError> {
+    let Some(user_id) = user_id else {
+        return Ok(());
+    };
+    let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM users WHERE id = ?1")
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await?;
+    if exists.is_none() {
+        return Err(AppError::BadRequest(format!("账号 {user_id} 不存在")));
+    }
+    let bound: Option<(i64, String)> = sqlx::query_as(
+        "SELECT id, name FROM staff WHERE user_id = ?1 AND id IS NOT ?2 LIMIT 1",
+    )
+    .bind(user_id)
+    .bind(self_id)
+    .fetch_optional(&state.db)
+    .await?;
+    if let Some((staff_id, name)) = bound {
+        return Err(AppError::BadRequest(format!(
+            "该账号已关联责任人「{name}」（#{staff_id}），一个账号只能绑定一个责任人"
         )));
     }
     Ok(())

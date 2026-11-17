@@ -662,6 +662,10 @@ pub struct Staff {
     pub color: String,
     pub status: String,
     pub skills: Option<String>,
+    /// 绑定平台账号（`users.id`）：决定「我的工单」与处置权限；空 = 没账号的现场人员
+    pub user_id: Option<i64>,
+    /// 绑定账号的用户名（列表展示用）
+    pub user_name: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     /// 本周班次数（列表按 `from` / `to` 统计；不传时统计全部）
@@ -681,7 +685,16 @@ pub struct StaffRequest {
     pub color: Option<String>,
     pub status: Option<String>,
     pub skills: Option<String>,
+    /// 绑定平台账号。
+    ///
+    /// 三态：**字段不出现** = 不改动（编辑时前端没带就沿用原值）；
+    /// `null` = 解除绑定；`数字` = 绑定到该账号。
+    /// 用 `Option<Option<i64>>` + `double_option` 表达「缺失 vs 显式 null」，
+    /// 否则解绑和「没传」在 JSON 里长得一样，解绑永远生效不了。
+    #[serde(default, deserialize_with = "double_option")]
+    pub user_id: Option<Option<i64>>,
 }
+
 
 /// 责任人库 Excel 导入：逐行结果（只回报跳过 / 失败的行，成功的只计数）
 #[derive(Debug, Serialize)]
@@ -955,4 +968,7 @@ pub struct WorkOrderQuery {
     pub staff_id: Option<i64>,
     pub park_id: Option<i64>,
     pub q: Option<String>,
+    /// 只看「派给我的」（当前账号绑定的责任人），见 `staff.user_id`
+    #[serde(default)]
+    pub mine: Option<bool>,
 }

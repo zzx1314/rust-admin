@@ -29,6 +29,11 @@ const parks = ref<Park[]>([]);
 const devices = ref<Device[]>([]);
 const viewMode = ref<"board" | "list">("board");
 const statusFilter = ref("全部");
+/**
+ * 只看我负责的：按当前账号绑定的责任人过滤（`staff.user_id`）。
+ * 账号没绑责任人时后端退化成「自己建的」，所以这个开关不会一点就空白。
+ */
+const mineOnly = ref(false);
 const loading = ref(true);
 const draggedId = ref<number | null>(null);
 
@@ -113,7 +118,7 @@ function logIcon(action: string) {
 async function load() {
   loading.value = true;
   try {
-    orders.value = await workOrderApi.list();
+    orders.value = await workOrderApi.list(mineOnly.value ? { mine: true } : undefined);
   } finally {
     loading.value = false;
   }
@@ -334,6 +339,15 @@ onMounted(async () => {
 
     <div class="card-head" style="background: transparent; border: none; padding: 0 0 12px">
       <div class="card-title" />
+      <div class="seg" style="margin-right: 8px">
+        <button
+          :class="{ on: mineOnly }"
+          title="只看派给「我」（当前账号绑定的责任人）的单。账号未绑定责任人时按「自己建的」算"
+          @click="mineOnly = !mineOnly; void load()"
+        >
+          只看我负责的
+        </button>
+      </div>
       <div class="seg">
         <button
           v-for="key in ['全部', ...WO_STATUSES]"

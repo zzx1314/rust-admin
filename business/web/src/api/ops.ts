@@ -1,5 +1,6 @@
 import { del, download, get, post, put, upload } from "./http";
 import type {
+  AccountOption,
   Alert,
   BackendMap,
   DashboardSummary,
@@ -224,6 +225,11 @@ export const dashboardApi = {
 };
 
 /** 责任人库：排班与工单共用的处理人 */
+/** 责任人「关联平台账号」下拉（只读账号元数据） */
+export const accountApi = {
+  list: () => get<AccountOption[]>("/accounts")
+};
+
 export const staffApi = {
   list: (params?: object) => get<Staff[]>("/staff", params),
   create: (data: object) => post<Staff>("/staff", data),
@@ -265,7 +271,7 @@ export const shiftSlotApi = {
 /** 工单（执行层）：派发 → 接单 → 处理 → 验收 → 关闭 */
 export const workOrderApi = {
   list: (params?: object) => get<WorkOrder[]>("/workorders", params),
-  stats: () => get<WorkOrderStats>("/workorders/stats"),
+  stats: (params?: object) => get<WorkOrderStats>("/workorders/stats", params),
   get: (id: number) => get<WorkOrderDetail>(`/workorders/${id}`),
   create: (data: object) => post<WorkOrderDetail>("/workorders", data),
   update: (id: number, data: object) => put<WorkOrderDetail>(`/workorders/${id}`, data),
