@@ -110,7 +110,7 @@
 | `notify.rs` `enum Level` | `Info < Warning < Critical`，`parse()` 容错（未知→警告） |
 | `notify.rs` `enum Channel` | `Alert` / `Task`，各绑一对 settings 键 |
 | `notify.rs:142` `Notice::markdown()` | 渲染，只使用企微支持的语法 |
-| `notify.rs:177` `Notice::mention_text()` | @所有人用的单行文本 |
+| `notify.rs` `Notice::mention_text()` | @责任人 / @所有人用的**单行提醒**：只拼级别 + 标题 + 前两个字段 |
 | `notify.rs:193` `truncate_bytes()` | 按字节截断且不切半个汉字 |
 | `notify.rs:217` `struct Dedupe` | 5 分钟静默窗，键 `alert:{code}` / `task:{code}` |
 | `notify.rs:243` `struct RateGate` | 固定窗口令牌桶 |
@@ -239,6 +239,16 @@ wecom_alert_push / wecom_task_abnormal  渠道级：这一类事件推不推企�
 [查看详情 →](http://39.107.55.13:3100/workorders?focus=12)
 ```
 
+有责任人手机号（或开了 `wecom_mention_all`）时，**卡片前面**还会有一条一行 `text`
+专门用于 @：markdown 不支持提及，只能另发。它只做提醒、**不重复卡片内容**：
+
+```
+【严重】设备异常告警（已自动派单）　设备：RD-002　园区：张江智造园区
+```
+
+正文、工单号、处置建议只留在 markdown 卡片里——两边都拼全的话，群里每条告警
+都会变成两条几乎一样的消息，现场会以为是重复告警。
+
 「谁去处理」来自**当天排班**（`shifts`）而不是计划（`tasks`）：计划只描述
 「哪个设备在什么时候跑哪条路线」，谁负责是按天、按班次排出来的。匹配打分见
 `alert_flow.rs::candidate_score`，兜底 **园区负责人 → 未指派**（兜底也会建单，
@@ -255,7 +265,7 @@ wecom_alert_push / wecom_task_abnormal  渠道级：这一类事件推不推企�
 | 20 条/分钟/机器人，超了 `45009` | 本地令牌桶 18/min，超出的**排队不丢** | `RATE_PER_MIN` |
 | markdown 正文 ≤ 4096 **字节**（中文 3 字节/字），超了整条被拒 `40058` | 按字节截断 + `…（已截断）`，断言不切半个汉字 | `MARKDOWN_LIMIT=4000` |
 | text ≤ 2048 字节 | 同上 | `TEXT_LIMIT=2000` |
-| markdown **不支持 @ 提及** | `mention_all` 时**另发一条 text** 带 `mentioned_list:["@all"]`；否则有责任人手机号时用 `mentioned_mobile_list` @ 到人（两种都算多发一条） | `wecom_mention_all` / `staff.phone` |
+| markdown **不支持 @ 提及** | `mention_all` 时**另发一条 text** 带 `mentioned_list:["@all"]`；否则有责任人手机号时用 `mentioned_mobile_list` @ 到人（两种都算多发一条）。**这条 text 只做提醒**：级别 + 标题 + 设备/园区，不拼正文 | `wecom_mention_all` / `staff.phone` |
 | 只能发不能收 | 消息带链接，处理仍在控制台 | — |
 | 支持语法有限 | 只用 `##` / `>` / `**粗**` / `[文字](url)` / `<font color>`；**不用 `-` 列表**（有单测守着） | — |
 
@@ -408,6 +418,7 @@ journalctl -u rust-admin-robodog -f | grep -i wecom
 | 在 handler 里直接 `reqwest::post().await` | 企微超时 → 心跳处理卡 10s → 设备全掉线 | 外网调用一律入队 |
 | markdown 里用 `- ` 写列表 | 群里显示字面量 `- xxx` | 群机器人 markdown 只支持部分语法 |
 | 假设 markdown 能 @ | @ 不生效，没人收到提醒 | 必须另发 text + `mentioned_list` |
+| @ 那一条 text 也拼上正文和前两个字段外的全部内容 | 群里每条告警都是两条几乎一样的消息（卡片 + 一长行），现场误以为告警重复了 | `Notice::mention_text()` 只当提醒：级别 + 标题 + 设备/园区；正文只留在 markdown 卡片里 |
 | 长文本直接发 | `40058 content exceed max length` 整条被拒 | 企微按**字节**算，中文 3 字节/字 |
 | 前端传 `ref_type` 后端收 `refType` | 筛选静默不生效 | 这个项目里模型统一 `#[serde(rename_all="camelCase")]`，Query 结构体也要加 |
 | 改 `AppState` 加字段 | 7 个集成测试编译失败 | 新增字段记得改 `tests/*.rs` 的 `AppState { .. }` 字面量；`Notifier::disabled()` 就是为这个准备的 |

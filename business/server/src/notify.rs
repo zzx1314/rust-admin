@@ -175,17 +175,24 @@ impl Notice {
         truncate_bytes(out.trim_end(), MARKDOWN_LIMIT)
     }
 
-    /// `@所有人` 用的一条短文本。
+    /// `@所有人` / `@当班责任人` 用的一条短文本。
     ///
     /// 单独发而不是合并进 markdown：群机器人 markdown 不支持提及，
-    /// 而 `mentioned_list` 只有 `text` 类型才认。
+    /// 而 `mentioned_list` / `mentioned_mobile_list` 只有 `text` 类型才认。
+    ///
+    /// **只当提醒，不复述卡片**：markdown 卡片紧跟在后面，把标题、字段和正文
+    /// 再拼一遍会让群里出现两条几乎一样的「设备异常告警」，现场会误以为是
+    /// 重复告警（2026-11-17 反馈：一条 markdown 卡片 + 一条一模一样的 text）。
+    /// 所以这里只保留级别 + 标题 + 前两个非空字段（设备/园区）。
     pub fn mention_text(&self) -> String {
         let mut line = format!("【{}】{}", self.level.label(), self.title);
-        for (name, value) in self.fields.iter().take(2) {
-            line.push_str(&format!("　{name}：{value}"));
-        }
-        if let Some(body) = self.body.as_deref().filter(|body| !body.trim().is_empty()) {
-            line.push_str(&format!("　{}", body.trim()));
+        for (name, value) in self
+            .fields
+            .iter()
+            .filter(|(_, value)| !value.trim().is_empty())
+            .take(2)
+        {
+            line.push_str(&format!("　{name}：{}", value.trim()));
         }
         truncate_bytes(&line, TEXT_LIMIT)
     }
@@ -1125,6 +1132,23 @@ mod tests {
         assert!(!text.contains('\n'));
         assert!(text.starts_with("【严重】设备异常告警"));
         assert!(text.len() <= TEXT_LIMIT);
+    }
+
+    #[test]
+    fn mention_text_does_not_repeat_the_card() {
+        // @责任人时那条 text 紧跟在 markdown 卡片前面；如果它也把正文和
+        // 全部字段拼进来，群里就是两条一模一样的告警（2026-11-17 反馈）
+        let item = notice(Level::Warning);
+        let text = item.mention_text();
+        assert!(
+            !text.contains("导航指令非法"),
+            "正文只在 markdown 卡片里出现一次: {text}"
+        );
+        assert!(!text.contains("告警码"), "只保留前两个字段: {text}");
+        assert!(text.contains("设备：DOG-003"));
+        assert!(text.contains("园区：张江智造园区"));
+        // 提醒行应该比卡片短得多
+        assert!(text.len() < item.markdown().len());
     }
 
     #[test]
