@@ -160,22 +160,44 @@ pub async fn delete_staff(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<ApiResponse<bool>>, AppError> {
-    let in_use: i64 = sqlx::query_scalar(
-        "SELECT (SELECT COUNT(*) FROM shifts WHERE staff_id = ?1)
-              + (SELECT COUNT(*) FROM work_orders WHERE staff_id = ?1 AND status <> '已完成')",
+    // 先确认存在，找不到给 404 而不是静默 true
+    fetch_staff(&state, id).await?;
+
+    // 今天及以后的排班 / 在办工单还指着这个人，直接删会在排班里留下空档
+    let upcoming: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM shifts WHERE staff_id = ?1 AND shift_date >= ?2",
+    )
+    .bind(id)
+    .bind(crate::db::today())
+    .fetch_one(&state.db)
+    .await?;
+    let open_orders: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM work_orders WHERE staff_id = ?1 AND status <> '已完成'",
     )
     .bind(id)
     .fetch_one(&state.db)
     .await?;
-    if in_use > 0 {
-        return Err(AppError::BadRequest(
-            "该责任人仍有排班或在办工单，改为「休息」而不是删除".to_string(),
-        ));
+    if upcoming > 0 || open_orders > 0 {
+        return Err(AppError::BadRequest(format!(
+            "该责任人还有 {upcoming} 条今天及以后的排班、{open_orders} 条在办工单，先改派或删除后再移除"
+        )));
     }
+
+    // 历史记录保留文案（owner_name / assignee），只解除对责任人库的引用
+    let mut tx = state.db.begin().await?;
+    sqlx::query("UPDATE shifts SET staff_id = NULL WHERE staff_id = ?1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE work_orders SET staff_id = NULL WHERE staff_id = ?1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     let result = sqlx::query("DELETE FROM staff WHERE id = ?1")
         .bind(id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(ApiResponse::ok(result.rows_affected() > 0))
 }
 

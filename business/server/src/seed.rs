@@ -16,7 +16,11 @@ pub async fn seed(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         seed_business_data(pool).await?;
     }
     seed_maps(pool).await?;
-    seed_staff_schedules(pool).await?;
+    // 排班 / 工单 / 责任人库默认不播种：上线后由运营自己建人排班，
+    // 只有显式设置 ROBODOG_SEED_DEMO=1 的本地 / 演示库才写入示例数据。
+    if demo_seed_enabled() {
+        seed_staff_schedules(pool).await?;
+    }
 
     Ok(())
 }
@@ -1078,6 +1082,18 @@ async fn seed_maps(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
     tracing::info!("seeded demo map baselines");
     Ok(())
+}
+
+/// 是否写入排班 / 工单演示数据（默认关闭，避免正式环境出现「陈志远」这类示例人员）。
+fn demo_seed_enabled() -> bool {
+    matches!(
+        std::env::var("ROBODOG_SEED_DEMO")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 /// 排班 / 工单演示数据：责任人库为空时才写，已有真实数据不覆盖。

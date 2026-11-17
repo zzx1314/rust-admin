@@ -60,13 +60,19 @@ const COPY_MODES = [
 
 const staffVisible = ref(false);
 const ruleVisible = ref(false);
-const newStaff = reactive({
+/** 责任人库表单：id 为空是新增，有值是在改这一条 */
+const staffForm = reactive({
+  id: null as number | null,
   name: "",
   role: "",
   team: "",
-  phone: ""
+  phone: "",
+  skills: "",
+  status: "在岗"
 });
+const STAFF_STATUSES = ["在岗", "休息", "请假"];
 const savingStaff = ref(false);
+const isEditingStaff = computed(() => staffForm.id !== null);
 
 function iso(date: Date): string {
   const pad = (value: number) => String(value).padStart(2, "0");
@@ -358,28 +364,71 @@ function createOrderFromShift(shift: Shift) {
   });
 }
 
-async function addStaff() {
-  if (!newStaff.name.trim()) {
+function staffCodeOf(id: number | null) {
+  return staff.value.find(item => item.id === id)?.staffCode ?? "";
+}
+
+function resetStaffForm() {
+  staffForm.id = null;
+  staffForm.name = "";
+  staffForm.role = "";
+  staffForm.team = "";
+  staffForm.phone = "";
+  staffForm.skills = "";
+  staffForm.status = "在岗";
+}
+
+function editStaff(item: Staff) {
+  staffForm.id = item.id;
+  staffForm.name = item.name;
+  staffForm.role = item.role ?? "";
+  staffForm.team = item.team ?? "";
+  staffForm.phone = item.phone ?? "";
+  staffForm.skills = item.skills ?? "";
+  staffForm.status = item.status;
+}
+
+/** 新增 / 修改共用：空串表示清空该字段（后端按传入值覆盖） */
+async function saveStaff() {
+  if (!staffForm.name.trim()) {
     ElMessage.error("请填写责任人姓名");
     return;
   }
   savingStaff.value = true;
   try {
-    await staffApi.create({
-      name: newStaff.name.trim(),
-      role: newStaff.role || null,
-      team: newStaff.team || null,
-      phone: newStaff.phone || null
-    });
-    newStaff.name = "";
-    newStaff.role = "";
-    newStaff.team = "";
-    newStaff.phone = "";
-    ElMessage.success("责任人已加入责任人库");
-    await loadStaffLibrary();
+    const payload = {
+      name: staffForm.name.trim(),
+      role: staffForm.role,
+      team: staffForm.team,
+      phone: staffForm.phone,
+      skills: staffForm.skills,
+      status: staffForm.status
+    };
+    if (staffForm.id === null) {
+      await staffApi.create(payload);
+      ElMessage.success("责任人已加入责任人库");
+    } else {
+      await staffApi.update(staffForm.id, payload);
+      ElMessage.success("责任人信息已更新");
+    }
+    resetStaffForm();
+    // 改名会同步排班 / 工单里的姓名，周视图要一起刷新
+    await Promise.all([loadStaffLibrary(), load()]);
   } finally {
     savingStaff.value = false;
   }
+}
+
+async function removeStaff(item: Staff) {
+  await ElMessageBox.confirm(
+    `确定移除 ${item.name}（${item.staffCode}）吗？历史排班与工单会保留姓名，但不再关联责任人库。`,
+    "移除责任人",
+    { type: "warning" }
+  );
+  await staffApi.remove(item.id);
+  ElMessage.success(`${item.name} 已移除`);
+  if (staffForm.id === item.id) resetStaffForm();
+  await Promise.all([loadStaffLibrary(), load()]);
 }
 
 const statusTone = (status: string) =>
@@ -874,10 +923,16 @@ onMounted(async () => {
       </template>
     </el-dialog>
 
-    <!-- 责任人库 -->
-    <el-dialog v-model="staffVisible" title="责任人库" width="820px">
+    <!-- 责任人库：新增 / 修改 / 删除，排班与工单共用 -->
+    <el-dialog
+      v-model="staffVisible"
+      title="责任人库"
+      width="900px"
+      @closed="resetStaffForm"
+    >
       <div class="link-hint" style="margin-bottom: 10px">
         共 {{ staff.length }} 名责任人。排班决定谁负责哪个时段，工单派发时从该库中选择处理人。
+        修改姓名会同步历史排班 / 工单里的显示名；还有今天及以后的排班或在办工单时不允许移除。
       </div>
       <div class="table-wrap">
         <table class="table">
@@ -891,6 +946,7 @@ onMounted(async () => {
               <th>本周班次</th>
               <th>在办工单</th>
               <th>技能</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -906,28 +962,57 @@ onMounted(async () => {
                   </div>
                 </div>
               </td>
-              <td>{{ item.role ?? "—" }}</td>
-              <td>{{ item.team ?? "—" }}</td>
-              <td class="mono muted">{{ item.phone ?? "—" }}</td>
+              <td>{{ item.role || "—" }}</td>
+              <td>{{ item.team || "—" }}</td>
+              <td class="mono muted">{{ item.phone || "—" }}</td>
               <td><StatusBadge :status="item.status" /></td>
               <td class="mono">{{ item.shiftCount }} 班</td>
               <td class="mono">{{ item.openOrderCount }} 单</td>
-              <td><span class="tag">{{ item.skills ?? "—" }}</span></td>
+              <td><span class="tag">{{ item.skills || "—" }}</span></td>
+              <td>
+                <div class="actions">
+                  <button class="btn sm" @click="editStaff(item)">
+                    <AppIcon name="edit" />修改
+                  </button>
+                  <button class="btn sm ghost icon" title="移除责任人" @click="removeStaff(item)">
+                    <AppIcon name="trash" />
+                  </button>
+                </div>
+              </td>
             </tr>
             <tr v-if="!staff.length">
-              <td colspan="8"><div class="empty-box">责任人库为空</div></td>
+              <td colspan="9">
+                <div class="empty-box">责任人库为空，先在下方添加处理人</div>
+              </td>
             </tr>
           </tbody>
         </table>
       </div>
-      <div class="staff-add">
-        <input v-model="newStaff.name" class="input" placeholder="姓名" />
-        <input v-model="newStaff.role" class="input" placeholder="角色（如 运维工程师）" />
-        <input v-model="newStaff.team" class="input" placeholder="班组" />
-        <input v-model="newStaff.phone" class="input" placeholder="联系电话" />
-        <button class="btn primary" :disabled="savingStaff" @click="addStaff">
-          <AppIcon name="plus" />加入责任人库
-        </button>
+
+      <div class="staff-form">
+        <div class="staff-form-head">
+          <b>{{ isEditingStaff ? "修改责任人" : "新增责任人" }}</b>
+          <span v-if="isEditingStaff" class="mono muted">{{ staffCodeOf(staffForm.id) }}</span>
+        </div>
+        <div class="staff-form-grid">
+          <input v-model="staffForm.name" class="input" placeholder="姓名 *" />
+          <input v-model="staffForm.role" class="input" placeholder="角色（如 运维工程师）" />
+          <input v-model="staffForm.team" class="input" placeholder="班组" />
+          <input v-model="staffForm.phone" class="input" placeholder="联系电话" />
+          <input v-model="staffForm.skills" class="input" placeholder="技能（如 红外测温 / 应急处置）" />
+          <select v-model="staffForm.status" class="select">
+            <option v-for="status in STAFF_STATUSES" :key="status" :value="status">
+              {{ status }}
+            </option>
+          </select>
+        </div>
+        <div class="staff-form-actions">
+          <button v-if="isEditingStaff" class="btn" @click="resetStaffForm">取消修改</button>
+          <button class="btn primary" :disabled="savingStaff" @click="saveStaff">
+            <AppIcon :name="isEditingStaff ? 'check' : 'plus'" />
+            {{ isEditingStaff ? "保存修改" : "加入责任人库" }}
+          </button>
+        </div>
       </div>
     </el-dialog>
 
@@ -990,16 +1075,31 @@ onMounted(async () => {
   top: 0;
   z-index: 1;
 }
-.staff-add {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr 1fr auto;
-  gap: 8px;
+.staff-form {
   margin-top: 14px;
   padding-top: 14px;
   border-top: 1px dashed var(--line);
 }
+.staff-form-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 12.5px;
+}
+.staff-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+}
+.staff-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
 @media (max-width: 900px) {
-  .staff-add {
+  .staff-form-grid {
     grid-template-columns: 1fr 1fr;
   }
 }

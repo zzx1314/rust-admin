@@ -2696,58 +2696,78 @@ async fn schedules_and_work_orders_flow() {
         request
     };
 
-    // 演示数据里责任人库、排班、工单都不该为空
+    // 演示数据默认不播种：新库的责任人库是空的，测试自己建
     let (status, staff) = send(auth("GET", "/api/staff")).await;
     assert_eq!(status, StatusCode::OK);
-    let staff_rows = staff["data"].as_array().expect("staff 应为数组");
-    assert!(!staff_rows.is_empty(), "演示数据应包含责任人");
-    assert!(
-        staff_rows[0].get("shiftCount").is_some() && staff_rows[0].get("openOrderCount").is_some(),
-        "责任人应带班次/在办工单统计"
+    assert_eq!(
+        staff["data"].as_array().map(Vec::len),
+        Some(0),
+        "默认不应写入示例责任人"
     );
 
-    let (status, shifts) = send(auth("GET", "/api/shifts")).await;
-    assert_eq!(status, StatusCode::OK);
-    let shift_rows = shifts["data"].as_array().expect("shifts 应为数组");
-    assert!(!shift_rows.is_empty(), "演示数据应包含排班");
-    // 负责设备台数按园区/区域实时统计，不能是缺列
-    assert!(shift_rows[0].get("deviceCount").is_some());
-
-    // 责任人库增改删：`fetch_staff` 用编号参数（?1/?2/?3），漏绑会直接 500
+    // 责任人库增：`fetch_staff` 用编号参数（?1/?2/?3），漏绑会直接 500
     let (status, new_staff) = send(post(
         "/api/staff",
-        r#"{"name":"冒烟责任人","role":"运维工程师","team":"运维三组"}"#.to_string(),
+        r#"{"name":"冒烟责任人","role":"运维工程师","team":"运维三组","phone":"13800000000"}"#
+            .to_string(),
     ))
     .await;
     assert_eq!(status, StatusCode::OK, "新增责任人应成功: {new_staff}");
     let staff_id = new_staff["data"]["id"].as_i64().expect("缺少责任人 id");
     assert_eq!(new_staff["data"]["staffCode"], format!("EMP-{staff_id:02}"));
+    assert_eq!(new_staff["data"]["status"], "在岗");
 
+    // 先排一条历史班，验证「责任人改名 → 排班里的冗余姓名跟着改」
+    let (status, past_shift) = send(post(
+        "/api/shifts",
+        format!(
+            r#"{{"shiftDate":"2020-12-31","slot":"早班","staffId":{staff_id},
+                "parkId":1,"zoneId":1,"status":"已发布"}}"#
+        ),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "准备历史排班失败: {past_shift}");
+
+    // 责任人库改：角色 / 状态 / 技能都能改，改名同步排班
     let (status, renamed) = send(put(
         &format!("/api/staff/{staff_id}"),
-        r#"{"name":"冒烟责任人2","status":"休息"}"#.to_string(),
+        r#"{"name":"冒烟责任人2","status":"休息","skills":"红外测温 / 应急处置"}"#.to_string(),
     ))
     .await;
     assert_eq!(status, StatusCode::OK, "修改责任人应成功: {renamed}");
     assert_eq!(renamed["data"]["name"], "冒烟责任人2");
     assert_eq!(renamed["data"]["status"], "休息");
+    assert_eq!(renamed["data"]["skills"], "红外测温 / 应急处置");
+    let (_, past_list) = send(auth(
+        "GET",
+        "/api/shifts?from=2020-12-31&to=2020-12-31",
+    ))
+    .await;
+    assert_eq!(
+        past_list["data"][0]["ownerName"], "冒烟责任人2",
+        "改名后历史排班的姓名应同步"
+    );
 
-    // 新建排班（用很远的日期，避免与演示数据撞车）
+    // 新建排班（用很远的日期，避免与其它用例撞车）
     let (status, created) = send(post(
         "/api/shifts",
-        r#"{"shiftDate":"2030-01-01","slot":"早班","staffId":1,"parkId":1,"zoneId":1,
-            "status":"已发布"}"#
-            .to_string(),
+        format!(
+            r#"{{"shiftDate":"2030-01-01","slot":"早班","staffId":{staff_id},
+                "parkId":1,"zoneId":1,"status":"已发布"}}"#
+        ),
     ))
     .await;
     assert_eq!(status, StatusCode::OK, "新建排班应成功: {created}");
     assert_eq!(created["data"]["timeRange"], "08:00 - 16:00");
+    assert_eq!(created["data"]["deviceCount"], 2, "负责设备按园区/区域实时统计");
     let shift_id = created["data"]["id"].as_i64().expect("缺少排班 id");
 
     // 同一责任人同一天同一班次 → 冲突
     let (status, conflict) = send(post(
         "/api/shifts",
-        r#"{"shiftDate":"2030-01-01","slot":"早班","staffId":1}"#.to_string(),
+        format!(
+            r#"{{"shiftDate":"2030-01-01","slot":"早班","staffId":{staff_id}}}"#
+        ),
     ))
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "重复排班应被拦截");
@@ -2759,19 +2779,32 @@ async fn schedules_and_work_orders_flow() {
     // 告警转工单：保留来源编号，并原告警推进到「处理中」
     let (status, order) = send(post(
         "/api/workorders",
-        r#"{"title":"冒烟测试工单","orderType":"告警处置","priority":"高","staffId":2,
-            "parkId":1,"deviceId":1,"source":"告警 AL-001","sourceRef":"AL-001","alertId":1}"#
-            .to_string(),
+        format!(
+            r#"{{"title":"冒烟测试工单","orderType":"告警处置","priority":"高",
+                "staffId":{staff_id},"parkId":1,"deviceId":1,"source":"告警 AL-001",
+                "sourceRef":"AL-001","alertId":1}}"#
+        ),
     ))
     .await;
     assert_eq!(status, StatusCode::OK, "新建工单应成功: {order}");
     assert_eq!(order["data"]["status"], "待接单");
-    assert_eq!(order["data"]["assignee"], "李文博");
+    assert_eq!(order["data"]["assignee"], "冒烟责任人2");
     let order_id = order["data"]["id"].as_i64().expect("缺少工单 id");
     assert_eq!(
         order["data"]["logs"].as_array().map(Vec::len),
         Some(1),
         "创建动作要留一条轨迹"
+    );
+
+    // 还有未来排班 + 在办工单时不允许删责任人（删了会在排班/派单里留空档）
+    let (status, blocked) = send(auth("DELETE", &format!("/api/staff/{staff_id}"))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "有在办工单/未来排班应拒绝删除");
+    assert!(
+        blocked["msg"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("排班"),
+        "提示应说明还有排班/工单: {blocked}"
     );
 
     // 状态流转：待接单 → 处理中（进度 30 + 轨迹追加）
@@ -2802,19 +2835,31 @@ async fn schedules_and_work_orders_flow() {
     assert!(stats["data"]["open"].as_i64().unwrap_or_default() >= 1);
     let (_, shift_stats) = send(auth("GET", "/api/shifts/stats")).await;
     assert!(shift_stats["data"]["total"].as_i64().unwrap_or_default() >= 1);
-    // 去重人数跨状态统计：按状态分组后取最大值会漏人（演示数据里至少 4 人）
-    assert!(
-        shift_stats["data"]["owners"].as_i64().unwrap_or_default() >= 4,
-        "在岗责任人应是跨状态的去重人数: {shift_stats}"
+    // 去重人数跨状态统计：按状态分组后取最大值会漏人
+    assert_eq!(
+        shift_stats["data"]["owners"].as_i64(),
+        Some(1),
+        "两个班次都是同一个责任人: {shift_stats}"
     );
 
-    // 清理：工单连带轨迹删除，排班删除
+    // 清理：工单（连带轨迹）→ 未来排班 → 责任人
     let (status, _) = send(auth("DELETE", &format!("/api/workorders/{order_id}"))).await;
     assert_eq!(status, StatusCode::OK);
     let (status, _) = send(auth("DELETE", &format!("/api/shifts/{shift_id}"))).await;
     assert_eq!(status, StatusCode::OK);
-    let (status, _) = send(auth("DELETE", &format!("/api/staff/{staff_id}"))).await;
-    assert_eq!(status, StatusCode::OK, "没有排班/在办工单的责任人应可删除");
+    let (status, removed) = send(auth("DELETE", &format!("/api/staff/{staff_id}"))).await;
+    assert_eq!(status, StatusCode::OK, "只剩历史排班的责任人应可删除: {removed}");
+
+    // 历史排班保留（姓名还在），但不再引用责任人库
+    let (_, past_after) = send(auth(
+        "GET",
+        "/api/shifts?from=2020-12-31&to=2020-12-31",
+    ))
+    .await;
+    let rows = past_after["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "历史排班不应被连带删除: {past_after}");
+    assert!(rows[0]["staffId"].is_null(), "历史排班应解除责任人引用");
+    assert_eq!(rows[0]["ownerName"], "冒烟责任人2");
 }
 
 /// 排班整段复制：周复制按星期对齐、月复制按日号对齐（天数不足跳过）、
@@ -2847,16 +2892,32 @@ async fn shift_copy_aligns_periods_and_handles_conflicts() {
         request
     };
 
+    // 演示数据默认不播种：先建责任人，后面所有排班都挂在这个人身上
+    let (status, staff) = send(post(
+        "/api/staff",
+        r#"{"name":"复制用例责任人","role":"运维工程师"}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "准备责任人失败: {staff}");
+    let staff_id = staff["data"]["id"].as_i64().unwrap();
+    let (status, other_staff) = send(post(
+        "/api/staff",
+        r#"{"name":"占位责任人","role":"运维工程师"}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "准备责任人失败: {other_staff}");
+    let other_staff_id = other_staff["data"]["id"].as_i64().unwrap();
+
     // 源区间：2031-03（3 月的 3 号、4 号、31 号各一条）
-    for (date, slot, staff_id) in [
-        ("2031-03-03", "早班", 1),
-        ("2031-03-04", "中班", 2),
-        ("2031-03-31", "夜班", 1),
+    for (date, slot, owner_id) in [
+        ("2031-03-03", "早班", staff_id),
+        ("2031-03-04", "中班", other_staff_id),
+        ("2031-03-31", "夜班", staff_id),
     ] {
         let (status, body) = send(post(
             "/api/shifts",
             &format!(
-                r#"{{"shiftDate":"{date}","slot":"{slot}","staffId":{staff_id},
+                r#"{{"shiftDate":"{date}","slot":"{slot}","staffId":{owner_id},
                     "parkId":1,"status":"已发布"}}"#
             ),
         ))
@@ -2919,7 +2980,9 @@ async fn shift_copy_aligns_periods_and_handles_conflicts() {
     // 目标时段被别人占了 → 覆盖模式替换该时段
     let (status, occupant) = send(post(
         "/api/shifts",
-        r#"{"shiftDate":"2031-04-03","slot":"早班","staffId":3,"status":"已发布"}"#,
+        &format!(
+            r#"{{"shiftDate":"2031-04-03","slot":"早班","staffId":{other_staff_id},"status":"已发布"}}"#
+        ),
     ))
     .await;
     assert_eq!(status, StatusCode::OK, "准备占用排班失败: {occupant}");
@@ -2950,7 +3013,9 @@ async fn shift_copy_aligns_periods_and_handles_conflicts() {
     // 周复制：保持同名星期（源周同一天 → 下周同一天）
     let (status, weekday_source) = send(post(
         "/api/shifts",
-        r#"{"shiftDate":"2031-04-07","slot":"早班","staffId":4,"parkId":1}"#,
+        &format!(
+            r#"{{"shiftDate":"2031-04-07","slot":"早班","staffId":{staff_id},"parkId":1}}"#
+        ),
     ))
     .await;
     assert_eq!(status, StatusCode::OK, "准备周复制源排班失败: {weekday_source}");
@@ -2969,7 +3034,7 @@ async fn shift_copy_aligns_periods_and_handles_conflicts() {
     let week_rows = week_target["data"].as_array().unwrap();
     assert_eq!(week_rows.len(), 1, "目标周应只有 1 条: {week_target}");
     assert_eq!(week_rows[0]["shiftDate"], "2031-04-14");
-    assert_eq!(week_rows[0]["ownerName"], "王建国");
+    assert_eq!(week_rows[0]["ownerName"], "复制用例责任人");
 
     // 区间重叠直接拒绝（避免把刚复制的记录再复制一遍）
     let (status, overlap) = send(post(
