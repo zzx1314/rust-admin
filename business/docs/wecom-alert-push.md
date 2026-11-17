@@ -270,6 +270,7 @@ wecom_alert_push / wecom_task_abnormal  渠道级：这一类事件推不推企�
 
 | 机制 | 行为 | 为什么必须 |
 | --- | --- | --- |
+| **同类告警不刷屏** | 同一设备 + 同一句故障 + 24h 内已有**在办**自动派单工单 → 新告警挂到那张单上，**不入队**（`alert_flow::find_open_order` + `Assignment.repeated`） | 机器人会每 90s 重复报同一个 `12608`，光靠 `alert_code` 去重无效（每次 code 都不同） |
 | **去重** | 同 `dedupe_key` 5 分钟内只放行一次（`DEDUPE_WINDOW`） | 心跳看门狗 15s 一轮、客户端 5s 一报进度，同一件事会被"发现"很多次；且看门狗和客户端上报都会判任务异常，靠它合并成一条 |
 | **限流** | 令牌桶 18/min，满了 `sleep` 到下一窗口 | 超 20 条/分钟企微直接拒，多余的消息会丢 |
 | **@all 计双份** | `cost = mention_all ? 2 : 1` | @all 实际发两条，按"消息条数"占额度 |
@@ -412,6 +413,7 @@ journalctl -u rust-admin-robodog -f | grep -i wecom
 | 改 `AppState` 加字段 | 7 个集成测试编译失败 | 新增字段记得改 `tests/*.rs` 的 `AppState { .. }` 字面量；`Notifier::disabled()` 就是为这个准备的 |
 | 自动派单复用「告警转工单」时顺手把告警置「处理中」 | `control_source` 三个用例全红：抢占告警刚建出来就被改成「处理中」，「未处理」计数变 0 | 人工转单 = 已接手 → 推进告警状态；**自动派单的工单还在「待接单」，告警必须留在「未处理」**（`create_order_core(..., promote_alert)`） |
 | 派单逻辑写在推送开关后面 | 没配 webhook 的环境里告警不建单也没人管，功能等于不存在 | 派单在建单前、`channel_enabled()` 判断之前执行 |
+| 一条告警一张工单，不看去重 | 上线当天机器人每 90s 报一次 `12608`，5 分钟堆 2 张单 + 2 条群消息 | 先去重再建单：同设备 + 同标题 + 24h 内在办 → 复用老单并不推群 |
 | 只改 `handlers/alerts.rs` 的 SELECT | `/dashboard/summary` 500（驾驶舱自己拼了一份 `Alert` 查询） | `Alert` 结构体加列时，全仓搜一遍 `query_as::<Alert>` / `build_query_as::<Alert>` |
 
 ---

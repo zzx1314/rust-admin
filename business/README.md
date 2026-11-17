@@ -767,6 +767,11 @@ SELECT created_at, status, level, ref_type, ref_id, attempts, last_error
 - 群消息在原有字段上多三行「关联计划 / 当班责任人 / 工单」，并附一段处置建议；
   责任人库里有手机号时**另发一条 text** 用 `mentioned_mobile_list` @ 到人
   （群机器人 markdown 不支持提及）。
+- **重复告警不重复建单、不重复吵群**：同一设备、同一句故障、24 小时内已有在办
+  （未「已完成」）的自动派单工单时，新告警直接挂到那张单上（`alerts.work_order_id`
+  指向老单），**不再推群**。告警中心里照样能看到，只是群里不刷屏。
+  现场实测过：机器人每 ~90s 报一次 `12608 RS 与 lidar 时间不同步`，
+  不去重的话 5 分钟就是 2 张工单 + 2 条群消息。
 - 开关：设置页「告警自动派单（生成工单）」（`notification.alert_auto_workorder`，
   默认开）。关掉只停建单，**责任人解析与推送照旧**。
 

@@ -753,6 +753,17 @@ struct TaskLookup {
 pub async fn alert_created(state: &AppState, alert_code: &str) {
     let assignment = crate::alert_flow::on_alert(state, alert_code).await;
 
+    // 同一设备的同一故障还在办：群里已经通知过一次，这条只是在「跟单」。
+    // 现场实测：机器人每 ~90s 报一次 `12608 RS 与 lidar 时间不同步`，
+    // 90 秒一条群消息没人受得了 —— 告警中心里仍然看得到，只是不再推。
+    if assignment
+        .as_ref()
+        .is_some_and(|assignment| assignment.repeated)
+    {
+        debug!(alert = %alert_code, "wecom: 同类告警已有在办工单，跳过推送");
+        return;
+    }
+
     if !state.notifier.is_enabled() {
         return;
     }
@@ -872,10 +883,7 @@ pub async fn task_abnormal(state: &AppState, task_code: &str, level: Level, reas
         crate::alert_flow::responsible_for_task(state, row.park_id, Some(row.id)).await;
 
     let mut fields: Vec<(&'static str, String)> = Vec::with_capacity(5);
-    fields.push((
-        "任务",
-        format!("{}（{}）", row.task_name, row.task_code),
-    ));
+    fields.push(("任务", format!("{}（{}）", row.task_name, row.task_code)));
     fields.push((
         "设备",
         row.device_code
@@ -1005,7 +1013,10 @@ mod tests {
         // 演示数据里的脱敏号码不能进 mentioned_mobile_list
         assert_eq!(mentionable("138****1203"), None);
         assert_eq!(mentionable("13800001203"), Some("13800001203".to_string()));
-        assert_eq!(mentionable("+8613800001203"), Some("+8613800001203".to_string()));
+        assert_eq!(
+            mentionable("+8613800001203"),
+            Some("+8613800001203".to_string())
+        );
         assert_eq!(mentionable(""), None);
         assert_eq!(mentionable("1234"), None, "太短的不当作号码");
     }

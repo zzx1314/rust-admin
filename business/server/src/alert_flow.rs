@@ -48,6 +48,8 @@ pub struct Assignment {
     pub note: String,
     pub work_order_id: Option<i64>,
     pub work_order_code: Option<String>,
+    /// 同一设备的同一故障已经有在办工单：本条告警只是在「跟单」，不再推群
+    pub repeated: bool,
 }
 
 impl Assignment {
@@ -96,23 +98,26 @@ impl Assignment {
         }
     }
 
-    /// 消息里那句「处置建议」：把排班、工单、下一步说成一段话。
+    /// 消息里那句「处置建议」：把派单依据、工单、下一步说成一段话。
+    ///
+    /// `slot` 有值 = 命中了当班排班；没有 = 走的园区负责人兜底，
+    /// 这时候不能说「已按当班排班」，否则群里会以为今天有人值班。
     pub fn dispatch_sentence(&self) -> String {
+        let lead = if self.slot.is_some() {
+            format!("已按当班排班派给 {}（{}）", self.summary(), self.note)
+        } else if self.staff_id.is_some() {
+            format!("当天没有当班排班，已派给园区负责人 {}", self.name)
+        } else {
+            "当天没有排班也没有园区负责人".to_string()
+        };
         match (&self.work_order_code, self.staff_id) {
-            (Some(order), Some(_)) => format!(
-                "已按当班排班派给 {}，工单 {order} 已自动生成（{}），请责任人到场确认并把处置结果回填到工单",
-                self.summary(),
-                self.note
-            ),
-            (Some(order), None) => format!(
-                "当天没有排班也没有园区负责人，工单 {order} 已按「未指派」创建，请值班长在工单看板改派后再通知现场"
-            ),
-            (None, Some(_)) => format!(
-                "本条告警派给 {}（{}），自动建单已关闭，请人工确认后在工单看板派单",
-                self.summary(),
-                self.note
-            ),
-            (None, None) => "当天没有排班也没有园区负责人，请值班长先补排班或直接派单".to_string(),
+            (Some(order), _) => {
+                format!("{lead}，工单 {order} 已自动生成，请责任人到场确认并把处置结果回填到工单")
+            }
+            (None, Some(_)) => format!("{lead}，自动建单已关闭，请人工确认后在工单看板派单"),
+            (None, None) => {
+                format!("{lead}，工单已按「未指派」创建，请值班长在看板上改派后再通知现场")
+            }
         }
     }
 }
@@ -238,8 +243,19 @@ pub async fn on_alert(state: &AppState, alert_code: &str) -> Option<Assignment> 
         assignment.task_name = running_task_name;
     }
 
+    // 同一设备的同一故障还在办：直接挂到那张单上。
+    //
+    // 现场踩过：机器人每 ~90s 报一次 `12608 RS 与 lidar 时间不同步`，一条告警一张单，
+    // 5 分钟就堆出 2 张工单 + 2 条群消息，值班长会被淹掉。
+    let title = work_order_title(context.device_code.as_deref(), &context.content);
+    let existing = find_open_order(state, context.device_pk, &title).await;
+
     // 自动建单：已经派过就跳过（幂等），开关关掉也跳过（但推送照样带责任人）
-    if context.work_order_id.is_none() && auto_workorder_enabled(state).await {
+    if let Some((id, code)) = &existing {
+        assignment.work_order_id = Some(*id);
+        assignment.work_order_code = Some(code.clone());
+        assignment.repeated = true;
+    } else if context.work_order_id.is_none() && auto_workorder_enabled(state).await {
         match create_work_order(state, &context, &assignment).await {
             Ok((id, code)) => {
                 assignment.work_order_id = Some(id);
@@ -403,6 +419,40 @@ async fn auto_workorder_enabled(state: &AppState) -> bool {
     }
 }
 
+/// 告警自动建单的标题（设备 + 内容前 60 字）。
+///
+/// 同一设备反复上报同一句故障时标题完全相同 —— 这就是「是不是同一件事」的判据。
+fn work_order_title(device_code: Option<&str>, content: &str) -> String {
+    let device = device_code.unwrap_or("未绑定设备");
+    short(&format!("{device} {content}"), 60)
+}
+
+/// 同一设备上因为同一句故障而建、且还没关闭的工单。
+///
+/// 窗口 24 小时：留着的老单说明问题还没解决，继续挂它；超过一天还没关的单
+/// 不再吞新告警，避免一个僵尸单永久吸走所有同类告警。
+async fn find_open_order(
+    state: &AppState,
+    device_pk: Option<i64>,
+    title: &str,
+) -> Option<(i64, String)> {
+    let cutoff = (chrono::Local::now() - chrono::Duration::hours(24))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    sqlx::query_as::<_, (i64, String)>(
+        "SELECT id, order_code FROM work_orders
+          WHERE source = '告警自动派单' AND status <> '已完成'
+            AND device_id IS ?1 AND title = ?2 AND created_at >= ?3
+          ORDER BY id DESC LIMIT 1",
+    )
+    .bind(device_pk)
+    .bind(title)
+    .bind(cutoff)
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or(None)
+}
+
 /// 建工单：来源写「告警自动派单」，`sourceRef` / `alert_id` 保留原始告警编号，
 /// 工单详情里能反查回告警。
 async fn create_work_order(
@@ -410,8 +460,7 @@ async fn create_work_order(
     context: &AlertContext,
     assignment: &Assignment,
 ) -> Result<(i64, String), AppError> {
-    let device = context.device_code.as_deref().unwrap_or("未绑定设备");
-    let title = short(&format!("{device} {}", context.content), 60);
+    let title = work_order_title(context.device_code.as_deref(), &context.content);
     let mut description = format!(
         "由告警 {} 自动派单。\n派单依据：{}。\n告警内容：{}",
         context.alert_code, assignment.note, context.content
@@ -587,6 +636,19 @@ mod tests {
             "陈志远（运维一组） · 早班 08:00 - 16:00（SH-001）"
         );
         assert!(assignment.dispatch_sentence().contains("WO-1115-01"));
+
+        // 兜底派单不能说「已按当班排班」，否则群里会以为今天有人值班
+        let park_owner = Assignment {
+            staff_id: Some(8),
+            name: "张泽新".to_string(),
+            team: Some("巡检一班".to_string()),
+            note: "当天没有当班排班，派给园区负责人".to_string(),
+            work_order_code: Some("WO-1117-09".to_string()),
+            ..Default::default()
+        };
+        let sentence = park_owner.dispatch_sentence();
+        assert!(!sentence.contains("按当班排班"), "{sentence}");
+        assert!(sentence.contains("园区负责人 张泽新"), "{sentence}");
 
         let fallback = Assignment::unassigned("当天没有当班排班，园区也没登记负责人");
         assert_eq!(

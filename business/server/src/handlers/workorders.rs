@@ -431,11 +431,19 @@ pub async fn delete_work_order(
 ) -> Result<Json<ApiResponse<bool>>, AppError> {
     let order = fetch_order(&state, id).await?;
     ensure_owner(order.created_by, &claims)?;
+    // 自动派单会在 `alerts.work_order_id` 上指回来：先解除引用再删本单，
+    // 否则撞 FOREIGN KEY（告警行本身保留，`assignee` / `assignee_note` 仍是当时的记录）。
     // logs 由外键 ON DELETE CASCADE 一并清掉（连接已开启 foreign_keys）
+    let mut tx = state.db.begin().await?;
+    sqlx::query("UPDATE alerts SET work_order_id = NULL WHERE work_order_id = ?1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     let result = sqlx::query("DELETE FROM work_orders WHERE id = ?1")
         .bind(id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(ApiResponse::ok(result.rows_affected() > 0))
 }
 

@@ -187,10 +187,19 @@ pub async fn delete_alert(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<ApiResponse<bool>>, AppError> {
+    // 告警与工单是双向引用（`work_orders.alert_id` ← 转单/自动派单，
+    // `alerts.work_order_id` → 自动派单）。直接删会撞 FOREIGN KEY，
+    // 所以先把指着本告警的工单解除引用 —— 工单本身保留，`source_ref` 里还有 AL 编号。
+    let mut tx = state.db.begin().await?;
+    sqlx::query("UPDATE work_orders SET alert_id = NULL WHERE alert_id = ?1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     let result = sqlx::query("DELETE FROM alerts WHERE id = ?1")
         .bind(id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(ApiResponse::ok(result.rows_affected() > 0))
 }
 

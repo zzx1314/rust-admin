@@ -3155,6 +3155,31 @@ async fn alert_auto_dispatches_to_duty_owner() {
     assert_eq!(order["assignee"], "派单责任人");
     assert_eq!(order["priority"], "紧急", "严重告警应派紧急单");
 
+    // 同一设备反复报同一句故障：复用那张还在办的工单，不新建第二张
+    let (status, repeated) = send(post(
+        "/api/alerts",
+        format!(
+            r#"{{"level":"严重","content":"导航指令非法（13440），航点 3 无法到达",
+                "deviceId":{device_pk},"parkId":2}}"#
+        ),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "重复告警写入失败: {repeated}");
+    assert_ne!(repeated["data"]["alertCode"], serde_json::json!(alert_code));
+    assert_eq!(
+        repeated["data"]["workOrderCode"],
+        serde_json::json!(order_code),
+        "同类告警应挂到同一张在办工单上: {repeated}"
+    );
+    let (_, after) = send(auth("GET", "/api/workorders")).await;
+    let same_title = after["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["title"] == order["title"])
+        .count();
+    assert_eq!(same_title, 1, "重复告警不应再建单: {after}");
+
     // 同一告警不允许再建一张单（页面「转工单」会撞上这条）
     let (status, duplicate) = send(post(
         "/api/workorders",
@@ -3166,4 +3191,22 @@ async fn alert_auto_dispatches_to_duty_owner() {
         duplicate["msg"].as_str().unwrap_or_default().contains("已派单"),
         "提示应说明已派过单: {duplicate}"
     );
+
+    // 双向外键（alerts.work_order_id ↔ work_orders.alert_id）：两边都要能删掉，
+    // 现场删测试数据时踩过 —— 直接 DELETE 会返回 FOREIGN KEY constraint failed。
+    let repeated_id = repeated["data"]["id"].as_i64().unwrap();
+    for id in [alert_id, repeated_id] {
+        let (status, body) = send(auth("DELETE", &format!("/api/alerts/{id}"))).await;
+        assert_eq!(status, StatusCode::OK, "删除已派单的告警应成功: {body}");
+    }
+    let (_, after_delete) = send(auth("GET", "/api/workorders")).await;
+    let order_id = after_delete["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["orderCode"] == serde_json::json!(order_code))
+        .and_then(|row| row["id"].as_i64())
+        .expect("工单应仍在（删告警只解除引用）");
+    let (status, body) = send(auth("DELETE", &format!("/api/workorders/{order_id}"))).await;
+    assert_eq!(status, StatusCode::OK, "删除工单应成功: {body}");
 }
