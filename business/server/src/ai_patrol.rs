@@ -16,6 +16,15 @@
 //! 写成动作的 `scene`（模型包 id）+ `labels`（勾选的类别 `name`）+ `threshold`（置信度）；
 //! 没有这两个字段的历史数据仍按 `param` 里的中文关键词猜场景（兼容老路线）。
 //!
+//! ### 计划 id 与「检查目标数量」
+//!
+//! 开窗时代码把三个跟航点绑定的参数一起传给板端：`planId`（= 业务任务号
+//! `taskCode`，板端拿它建存证目录 `detect_jobs/<planId>/pt<航点下标>/`）、
+//! `pointIndex` 和 `expectCount`（动作里的「检查目标数量」）。`expectCount` 空 =
+//! 不核对数量；填了则由板端把 AI 检出的目标数与它比对，不一致时上报 `ai_alert`
+//! （客户端代调）或在 SSE 的 `plan_hit` 事件里带 `count_alert`（服务端直连），
+//! 两条路都落到同一个 `record_count_alert`：告警中心 + 任务时间线 + 企业微信。
+//!
 //! 窗口时长 = `dwell.max(4) + 8` 秒，下限 10 s（Agent 加载模型要 1~3 s，太短会
 //! 「还没开始识别狗就走了」），上限 `[backpack] ai_window_max_secs`（默认 300 s，与
 //! 路线停留上限一致）——**停多久就识别多久**，不再把长停留截断成 30 s。
@@ -47,9 +56,12 @@
 use crate::app::AppState;
 use crate::backpack;
 use crate::db::now;
-use crate::gateway_types::{AiDetectPayload, AiEndPayload, AiPointPayload, TaskProgressPayload};
+use crate::gateway_types::{
+    AiAlertPayload, AiDetectPayload, AiEndPayload, AiPointPayload, TaskProgressPayload,
+};
 use serde_json::{Value, json};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::sync::{Mutex, Notify};
@@ -93,6 +105,8 @@ struct Window {
     stop: Arc<Notify>,
     /// 本窗口已上报的类别（同一类别只报一次，避免 3 fps 刷屏）
     hits: Arc<Mutex<Vec<Hit>>>,
+    /// 本窗口是否已经报过「数量不一致」：告警只落一条（同一个窗口可能收到多帧结论）
+    alerted: Arc<AtomicBool>,
     /// 告警 / 任务事件需要的上下文（任务名、园区、航点名等）
     cfg: WindowConfig,
 }
@@ -130,6 +144,14 @@ struct Hit {
     at: String,
     label: String,
     conf: f64,
+}
+
+/// 窗口的两个上报累加器：类别去重表 + 「数量告警已报过」标志。
+///
+/// 打包成一个参数传，是因为 `consume_events` 的参数个数已到 clippy 的上限（8/7）。
+struct WindowSink {
+    hits: Arc<Mutex<Vec<Hit>>>,
+    alerted: Arc<AtomicBool>,
 }
 
 pub struct AiPatrol {
@@ -274,6 +296,21 @@ impl AiPatrol {
         let window_secs = window_secs(point.dwell, state.config.ai_window_max_secs);
         let stop = Arc::new(Notify::new());
         let hits = Arc::new(Mutex::new(Vec::new()));
+        let alerted = Arc::new(AtomicBool::new(false));
+        let config = WindowConfig {
+            device_id: task.device_id,
+            park_id: task.park_id,
+            task_code: payload.task_code.clone(),
+            task_name: task.name.clone(),
+            point_index,
+            point_name: point.name.clone(),
+            hint: action.hint.clone(),
+            scene: action.scene.clone(),
+            labels: action.labels.clone(),
+            threshold_text: action.threshold.clone(),
+            expect_count: action.expect_count,
+            secs: window_secs,
+        };
 
         // 抢占：Agent 单路，先关旧窗口再开新窗口
         {
@@ -294,38 +331,14 @@ impl AiPatrol {
                 started_at: now(),
                 stop: stop.clone(),
                 hits: hits.clone(),
-                cfg: WindowConfig {
-                    device_id: task.device_id,
-                    park_id: task.park_id,
-                    task_code: payload.task_code.clone(),
-                    task_name: task.name.clone(),
-                    point_index,
-                    point_name: point.name.clone(),
-                    hint: action.hint.clone(),
-                    scene: action.scene.clone(),
-                    labels: action.labels.clone(),
-                    threshold_text: action.threshold.clone(),
-                    secs: window_secs,
-                },
+                alerted: alerted.clone(),
+                cfg: config.clone(),
             });
         }
 
-        let config = WindowConfig {
-            device_id: task.device_id,
-            park_id: task.park_id,
-            task_code: payload.task_code.clone(),
-            task_name: task.name.clone(),
-            point_index,
-            point_name: point.name.clone(),
-            hint: action.hint.clone(),
-            scene: action.scene.clone(),
-            labels: action.labels.clone(),
-            threshold_text: action.threshold.clone(),
-            secs: window_secs,
-        };
         let state = state.clone();
         tokio::spawn(async move {
-            run_window(state, config, stop, hits).await;
+            run_window(state, config, stop, hits, alerted).await;
         });
     }
 
@@ -426,6 +439,15 @@ impl AiPatrol {
             "AIW-{device_code}-{}-{}-{seq}",
             payload.task_code, payload.point_index
         );
+        // 「检查目标数量」以路线数据为准（旧版客户端不会带 `expectCount`）；
+        // 客户端带了而路线里没配时用客户端的值兜底。
+        let mut expect_count = payload.expect_count.filter(|value| *value > 0);
+        if let Some(route_id) = task.route_id
+            && let Ok(Some(point)) = load_point(&state.db, route_id, payload.point_index).await
+            && let Some(action) = point.find_ai_action()
+        {
+            expect_count = action.expect_count.or(expect_count);
+        }
 
         let cfg = WindowConfig {
             device_id: task.device_id,
@@ -438,10 +460,12 @@ impl AiPatrol {
             scene: payload.scene.clone(),
             labels: payload.labels.clone(),
             threshold_text: payload.threshold.clone(),
+            expect_count,
             secs,
         };
         let stop = Arc::new(Notify::new());
         let hits = Arc::new(Mutex::new(Vec::new()));
+        let alerted = Arc::new(AtomicBool::new(false));
         {
             let mut guard = self.active.lock().await;
             if let Some(previous) = guard.take() {
@@ -460,6 +484,7 @@ impl AiPatrol {
                 started_at: now(),
                 stop: stop.clone(),
                 hits,
+                alerted,
                 cfg: cfg.clone(),
             });
         }
@@ -472,6 +497,8 @@ impl AiPatrol {
             "taskCode": payload.task_code,
             "pointIndex": payload.point_index,
             "pointName": point_name,
+            "planId": payload.task_code,
+            "expectCount": expect_count,
             "labels": labels,
             "conf": threshold,
             "cam": cam,
@@ -588,6 +615,51 @@ impl AiPatrol {
             warn!("AI 识别：写任务事件失败: {error}");
         }
     }
+
+    /// 客户端转发的「数量不一致」（`ai_alert`）：告警中心 + 任务时间线 + 企业微信。
+    ///
+    /// 判定在板端做（Agent 知道本帧到底画出了几个框，也有证据图和 `result.json`）；
+    /// 这里只做归属校验与去重：同一个窗口只落一条告警，迟到（窗口已被新航点顶替）
+    /// 的直接丢弃，避免旧航点的结论污染新航点。
+    pub async fn on_client_alert(
+        &self,
+        state: &AppState,
+        device_code: &str,
+        payload: &AiAlertPayload,
+    ) {
+        let (cfg, alerted, expect) = {
+            let guard = self.active.lock().await;
+            let Some(window) = guard.as_ref() else {
+                debug!("航点 AI 识别：没有活动窗口，丢弃数量告警");
+                return;
+            };
+            if window.device_code != device_code
+                || (!window.window_id.is_empty() && window.window_id != payload.window_id)
+            {
+                debug!(
+                    "航点 AI 识别：窗口 {} 已失效，丢弃数量告警",
+                    payload.window_id
+                );
+                return;
+            }
+            (window.cfg.clone(), window.alerted.clone(), window.cfg.expect_count)
+        };
+        let Some(expect) = payload
+            .expect_count
+            .filter(|value| *value > 0)
+            .or(expect)
+        else {
+            // 没配「检查目标数量」却收到告警：按脏数据丢弃（不猜数量）
+            warn!("航点 AI 识别：收到数量告警但本窗口没配检查数量，忽略: {payload:?}");
+            return;
+        };
+        if alerted.swap(true, Ordering::Relaxed) {
+            debug!("航点 AI 识别：本窗口已报过数量告警，忽略重复上报");
+            return;
+        }
+        let found = payload.found_count.unwrap_or(0).max(0);
+        record_count_alert(state, &cfg, found, expect, &payload.evidence).await;
+    }
 }
 
 /// 客户端窗口的超时看门狗。
@@ -645,6 +717,8 @@ struct WindowConfig {
     labels: Vec<String>,
     /// 动作 `threshold` 原文，如「置信度 > 0.85」
     threshold_text: String,
+    /// 动作 `expectCount`：检查目标数量（`None` = 不核对数量）
+    expect_count: Option<i64>,
     secs: u64,
 }
 
@@ -654,6 +728,7 @@ async fn run_window(
     config: WindowConfig,
     stop: Arc<Notify>,
     hits: Arc<Mutex<Vec<Hit>>>,
+    alerted: Arc<AtomicBool>,
 ) {
     let Ok(base) = backpack::agent_base(&state.config).map(str::to_string) else {
         // 用 WARN 而不是 DEBUG：配了「只给浏览器直连地址」（`ROBODOG_BACKPACK_BROWSER_URL`）
@@ -709,6 +784,8 @@ async fn run_window(
     update_resolved(&stop, &task_name, &labels, threshold, &cam).await;
 
     // 2) 启动（已在跑就热更新，避免「识别已在运行」被拒）
+    //    计划 id / 航点下标 / 检查目标数量一并下发：板端命中即按计划目录存证，
+    //    数量与 expect_count 不符就在 SSE 的 plan_hit 里带 count_alert。
     let body = json!({
         "task": task_name,
         "labels": if labels.is_empty() {
@@ -719,6 +796,9 @@ async fn run_window(
         "conf": threshold,
         "cams": [cam],
         "fps": DETECT_FPS,
+        "plan_id": config.task_code,
+        "point_index": config.point_index,
+        "expect_count": config.expect_count,
     });
     if let Err(error) = start_detect(&client, &base, &body, was_running).await {
         warn!(
@@ -743,13 +823,23 @@ async fn run_window(
 
     // 3) 收事件（到期或被打断就收尾）
     let deadline = tokio::time::Instant::now() + Duration::from_secs(config.secs);
-    consume_events(&state, &base, &config, threshold, &stop, &hits, deadline).await;
+    let sink = WindowSink {
+        hits: hits.clone(),
+        alerted: alerted.clone(),
+    };
+    consume_events(&state, &base, &config, threshold, &stop, &sink, deadline).await;
 
     // 只在「本窗口还是当前窗口」时才去停 Agent：
     // - 被新窗口顶替时，新窗口已经接管（且可能有操作员的识别在跑），不能停；
     // - 操作员本来开着识别（was_running）时，窗口结束也不该把人家的停掉。
     if was_running {
         info!("航点 AI 识别窗口结束（保留操作员已开启的识别）");
+        // 识别留着，但计划必须摘掉：否则之后画面再命中会继续写这个航点的存证/告警
+        let _ = client
+            .post(format!("{base}/api/detect/plan/clear"))
+            .json(&json!({}))
+            .send()
+            .await;
         return;
     }
     if !global().replaced_by_other(&stop).await {
@@ -775,9 +865,11 @@ async fn consume_events(
     config: &WindowConfig,
     threshold: f64,
     stop: &Arc<Notify>,
-    hits: &Arc<Mutex<Vec<Hit>>>,
+    sink: &WindowSink,
     deadline: tokio::time::Instant,
 ) {
+    let hits = &sink.hits;
+    let alerted = &sink.alerted;
     let Ok(client) = backpack::stream_client() else {
         return;
     };
@@ -820,6 +912,14 @@ async fn consume_events(
                             let Ok(event) = serde_json::from_str::<Value>(&payload) else {
                                 continue;
                             };
+                            // 板端已判定的「数量不一致」：每个窗口只落一条告警
+                            if let Some((expect, found, evidence)) = plan_hit_alert(&event) {
+                                if !alerted.swap(true, Ordering::Relaxed) {
+                                    record_count_alert(state, config, found, expect, &evidence)
+                                        .await;
+                                }
+                                continue;
+                            }
                             let Some((label, conf)) = detect_hit(&event, threshold) else {
                                 continue;
                             };
@@ -864,6 +964,36 @@ async fn record_hit(
     match insert_alert(&state.db, config, &content).await {
         Ok(alert_code) => crate::notify::alert_created(state, &alert_code).await,
         Err(error) => warn!("AI 识别：写告警失败: {error}"),
+    }
+    if let Err(error) = insert_task_event(&state.db, config, &at, &content).await {
+        warn!("AI 识别：写任务事件失败: {error}");
+    }
+}
+
+/// 数量核对不一致 → 告警中心 + 任务时间线 + 企业微信
+///
+/// 与 [`record_hit`] 平级：检出是「找到了」，这里是「找到了但数量对不上」，
+/// 两者都要能推企业微信，所以告警入库后同样走 `notify::alert_created`。
+async fn record_count_alert(
+    state: &AppState,
+    config: &WindowConfig,
+    found: i64,
+    expect: i64,
+    evidence: &str,
+) {
+    let at = now();
+    let mut content = format!(
+        "AI 识别数量核对不一致：任务「{}」航点 {}「{}」检查 {} 个，实际检出 {} 个",
+        config.task_name, config.point_index, config.point_name, expect, found
+    );
+    if !evidence.trim().is_empty() {
+        content.push_str(&format!("（证据：{}）", evidence.trim()));
+    }
+    info!("{content}");
+
+    match insert_alert(&state.db, config, &content).await {
+        Ok(alert_code) => crate::notify::alert_created(state, &alert_code).await,
+        Err(error) => warn!("AI 识别：写数量告警失败: {error}"),
     }
     if let Err(error) = insert_task_event(&state.db, config, &at, &content).await {
         warn!("AI 识别：写任务事件失败: {error}");
@@ -927,6 +1057,8 @@ struct AiAction {
     scene: Option<String>,
     /// 动作 `labels`：勾选的识别类别（Agent 的 label `name`，空 = 该场景全部类别）
     labels: Vec<String>,
+    /// 动作 `expectCount`：检查目标数量（`None` = 不核对数量）
+    expect_count: Option<i64>,
 }
 
 impl PointRow {
@@ -947,6 +1079,7 @@ impl PointRow {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string(),
+                expect_count: parse_expect_count(action.get("expectCount")),
                 scene: action
                     .get("scene")
                     .and_then(Value::as_str)
@@ -1145,6 +1278,52 @@ fn first_number(text: &str) -> Option<f64> {
         return None;
     }
     buf.trim_end_matches('.').parse::<f64>().ok()
+}
+
+/// 动作里的「检查目标数量」：接受数字或数字字符串（编辑器可能是输入框），
+/// 空/0/非法一律当「不核对数量」（`None`），上限 999 防脏数据。
+fn parse_expect_count(value: Option<&Value>) -> Option<i64> {
+    let value = value?;
+    if value.is_null() {
+        return None;
+    }
+    let number = value
+        .as_i64()
+        .or_else(|| value.as_f64().map(|raw| raw as i64))
+        .or_else(|| {
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .and_then(|text| text.parse::<f64>().ok())
+                .map(|raw| raw as i64)
+        })?;
+    if number < 1 {
+        return None;
+    }
+    Some(number.min(999))
+}
+
+/// 板端 `plan_hit` 事件里的数量核对结论：只在 `countAlert` 为真时返回
+/// （期望数量, 实际检出, 证据图路径）。
+fn plan_hit_alert(event: &Value) -> Option<(i64, i64, String)> {
+    if event.get("type").and_then(Value::as_str) != Some("plan_hit") {
+        return None;
+    }
+    if event.get("count_alert").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let expect = event.get("expect_count").and_then(Value::as_i64)?;
+    let found = event
+        .get("found_count")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let evidence = event
+        .get("evidence")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    Some((expect, found, evidence))
 }
 
 /// `[name, {properties:{...}}]` 之类都无所谓的宽松查找：把 SSE 里的一帧 `detect` 事件
@@ -1405,6 +1584,54 @@ async fn start_detect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expect_count_parsing_is_lenient_but_never_zero() {
+        // 编辑器写数字；历史数据 / 手改可能是字符串
+        assert_eq!(parse_expect_count(Some(&json!(3))), Some(3));
+        assert_eq!(parse_expect_count(Some(&json!("4"))), Some(4));
+        assert_eq!(parse_expect_count(Some(&json!(" 5 "))), Some(5));
+        // 留空 / 0 / 负数 / 非法 = 不核对数量
+        assert_eq!(parse_expect_count(None), None);
+        assert_eq!(parse_expect_count(Some(&Value::Null)), None);
+        assert_eq!(parse_expect_count(Some(&json!(0))), None);
+        assert_eq!(parse_expect_count(Some(&json!(-2))), None);
+        assert_eq!(parse_expect_count(Some(&json!(""))), None);
+        assert_eq!(parse_expect_count(Some(&json!("abc"))), None);
+        // 上限防脏数据
+        assert_eq!(parse_expect_count(Some(&json!(100000))), Some(999));
+
+        // 动作里的字段名是 `expectCount`（与路线编辑器一致）
+        let point = PointRow {
+            name: "P1".to_string(),
+            dwell: 5,
+            actions: vec![json!({"type": "AI 识别", "expectCount": "2", "scene": "fire"})],
+        };
+        let action = point.find_ai_action().expect("应识别出 AI 动作");
+        assert_eq!(action.expect_count, Some(2));
+    }
+
+    #[test]
+    fn plan_hit_alerts_only_when_count_flagged() {
+        // 命中且数量一致：不告警
+        assert!(
+            plan_hit_alert(&json!({
+                "type": "plan_hit", "count_ok": true, "count_alert": false,
+                "expect_count": 3, "found_count": 3
+            }))
+            .is_none()
+        );
+        // 普通检出帧不告警
+        assert!(plan_hit_alert(&json!({"type": "detect", "boxes": []})).is_none());
+        // 数量不一致：拿得到期望/实际/证据
+        let (expect, found, evidence) = plan_hit_alert(&json!({
+            "type": "plan_hit", "count_alert": true, "expect_count": 3,
+            "found_count": 1, "evidence": "/x/y.jpg"
+        }))
+        .expect("数量不一致要告警");
+        assert_eq!((expect, found), (3, 1));
+        assert_eq!(evidence, "/x/y.jpg");
+    }
 
     #[test]
     fn point_ai_source_follows_config_and_deployment() {

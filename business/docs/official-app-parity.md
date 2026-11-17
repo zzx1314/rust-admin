@@ -264,15 +264,20 @@ A. server（服务端与板端同网段，配了 ROBODOG_BACKPACK_URL）
   → 服务端按 taskCode 找到任务 → 路线 route_data.points[index].actions[]
   → 命中「AI 识别」动作（动作名含 `AI` 或 `识别`）
   → POST {agent}/api/detect/start（已在跑则 /config 热更新）
+      body 带 plan_id(=taskCode) / point_index / expect_count
   → 读 {agent}/api/events 的 SSE，只取 type=detect 的 boxes
   → 框的 conf ≥ 阈值 → 写 alerts + task_events（同类目标窗口内只报一次）
+  → type=plan_hit 且 count_alert=true → 写「数量核对不一致」告警 + 任务事件 + 企微
   → 窗口到期 / 任务终态 / 被下一个点顶替 → POST /api/detect/stop
+     （只是「保留操作员已开的识别」时改发 /api/detect/plan/clear，把计划摘掉）
 
 B. client（正式环境：平台在公网、Agent 只在内网，服务端连不到板端）
 客户端到点 → GET 127.0.0.1:8000/api/detect/{tasks,status}
   → 上报 ai_point（动作参数 + 板端模型目录）→ 服务端用**同一套**规则算场景/类别/阈值/窗口
-  → 下发 ai_start → 客户端 POST /api/detect/start|config → 读本机 SSE
+  → 下发 ai_start（含 planId / pointIndex / expectCount）
+  → 客户端 POST /api/detect/start|config → 读本机 SSE
   → 按阈值 + 类别去重回传 ai_detect → 服务端写 alerts + task_events + 企微
+  → 数量与 expectCount 不符（SSE plan_hit.count_alert）→ 转发 `ai_alert`
   → 客户端收尾 ai_end；任务终态/取消时服务端下发 ai_stop
 ```
 
@@ -291,6 +296,16 @@ B. client（正式环境：平台在公网、Agent 只在内网，服务端连�
 | `scene` | **模型包 id**，优先于 `param` 关键词：精确匹配 Agent `task`（模型包下线时才退回关键词匹配）。由路线编辑器从「实时视频 → AI 识别」的模型目录里选 | `fire` |
 | `labels` | **识别类别**（Agent 的 label `name`，与实时视频下发的 `labels` 同一套）；为空 = 该场景全部类别；板上不存在的类别会被忽略并打 WARN | `["flame", "smoke"]` |
 | `threshold` | 置信度阈值：`0.85`、`> 0.85`、`85%` 都认；`> 65℃` 这类温度阈值不会被误当成置信度 | `置信度 ≥ 0.40` |
+| `expectCount` | **检查目标数量**（可选）：留空 = 只判「能不能找到目标」，不核对数量；填了则由板端把 AI 检出的目标数与它比对，不一致上报数量告警 | `3` |
+
+**计划 id 与存证**：开窗同时把 `planId`（= 业务任务号 `taskCode`）与 `pointIndex`
+下发给板端，命中帧与 `result.json` 落到板端
+`detect_jobs/<planId>/pt<pointIndex>/`（图已画中文框），方便按计划回溯。
+`expectCount` 的判定在板端做（它知道本帧到底画了几个框），结论文案形如
+`AI 识别数量核对不一致：任务「…」航点 0「…」检查 3 个，实际检出 2 个（证据：…/dogcam_x.jpg）`，
+客户端转发 `ai_alert`、服务端直连模式读 SSE 的 `plan_hit`，两条路最终都进同一个
+`record_count_alert`（告警中心 + 任务时间线 + 企微），每个窗口只落一条。
+数量核对取「命中后连续几帧的检出最大值」，单帧遮挡少画一个框不会误报。
 
 **怎么配**：路线编辑器「该点执行动作」→ 动作类型选 `AI 识别`，场景与识别类别直接勾选
 「实时视频 → AI 识别」面板上的同一份模型目录（数据来自 `GET /api/backpack/status` 的

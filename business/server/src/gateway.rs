@@ -383,6 +383,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                         .await;
                                 }
                             }
+                            // 数量核对不一致（板端已判定）：告警落库 + 企业微信
+                            "ai_alert" => {
+                                if let Some(ref did) = device_id {
+                                    let payload: crate::gateway_types::AiAlertPayload =
+                                        serde_json::from_value(ws_msg.payload).unwrap_or_default();
+                                    crate::ai_patrol::global()
+                                        .on_client_alert(&state, did, &payload)
+                                        .await;
+                                }
+                            }
                             "command_result" => {
                                 if let Some(ref did) = device_id {
                                     let payload: crate::gateway_types::CommandResultPayload =

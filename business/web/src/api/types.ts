@@ -179,6 +179,13 @@ export interface RoutePointAction {
    * 为空表示该场景的全部类别。
    */
   labels?: string[];
+  /**
+   * 「AI 识别」专用：检查目标数量。
+   *
+   * 留空（或 0）= 不核对数量，只判「能不能找到目标」；填了则由板端把 AI 检出的
+   * 目标数与它比对，不一致时上报数量告警（告警中心 + 企业微信）。
+   */
+  expectCount?: number | null;
 }
 
 export interface RoutePoint {

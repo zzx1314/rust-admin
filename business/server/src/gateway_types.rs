@@ -143,6 +143,9 @@ pub struct AiPointPayload {
     /// 动作 `threshold` 原文（「置信度 ≥ 0.35」）
     #[serde(default)]
     pub threshold: String,
+    /// 动作 `expectCount`：检查目标数量（空 = 不核对数量）
+    #[serde(default)]
+    pub expect_count: Option<i64>,
     /// 板端 `GET /api/detect/tasks` 原样
     #[serde(default)]
     pub tasks: Option<Value>,
@@ -174,6 +177,35 @@ pub struct AiEndPayload {
     pub reason: String,
     #[serde(default)]
     pub hits: i64,
+}
+
+/// 客户端 → 服务端：AI 检出数量与「检查目标数量」不一致
+///
+/// 判定在板端做（Agent 知道本帧到底画出了几个框，且有证据图/`result.json`）；
+/// 客户端只把这个结论转发上来，服务端负责告警落库 + 企业微信推送。
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAlertPayload {
+    pub window_id: String,
+    #[serde(default)]
+    pub task_code: String,
+    /// 计划 id（= 业务任务号），板端按它建存证目录
+    #[serde(default)]
+    pub plan_id: String,
+    #[serde(default)]
+    pub point_index: Option<i64>,
+    /// 动作里的「检查目标数量」
+    #[serde(default)]
+    pub expect_count: Option<i64>,
+    /// 板端 AI 实际检出的目标数
+    #[serde(default)]
+    pub found_count: Option<i64>,
+    /// 证据图路径（板端本地绝对路径，仅作运维线索）
+    #[serde(default)]
+    pub evidence: String,
+    /// 板端给的描述（可选，服务端会自己拼一条更全的）
+    #[serde(default)]
+    pub message: String,
 }
 
 /// 客户端 → 服务端：本地接管态变化

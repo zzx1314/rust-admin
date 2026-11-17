@@ -123,7 +123,12 @@ const actionForm = reactive({
   /** AI 识别：从「实时视频」同一份模型目录里选的模型包 / 类别 / 置信度 */
   scene: "",
   labels: [] as string[],
-  aiConf: 0.35
+  aiConf: 0.35,
+  /**
+   * AI 识别：检查目标数量。留空（null）= 不核对数量；
+   * 填了则由板端把 AI 检出的目标数与它比对，不一致上报数量告警。
+   */
+  expectCount: null as number | null
 });
 
 /** 背包 AI 模型目录（场景 + 类别）：仅在配「AI 识别」动作时按需加载 */
@@ -135,6 +140,15 @@ const isAiAction = computed(
 const aiParamAuto = computed(
   () => isAiAction.value && !!aiCatalog.taskOf(actionForm.scene)
 );
+
+/**
+ * 已保存动作是不是「AI 识别」：与后端 `is_ai_action` 同规则
+ * （类型名含 `AI` 或 `识别`），只用于在动作卡片上展示检查数量。
+ */
+function isAiActionOf(action: { type?: string } | null | undefined) {
+  const kind = String(action?.type ?? "");
+  return kind.toUpperCase().includes("AI") || kind.includes("识别");
+}
 
 const filteredRoutes = computed(() => {
   const keyword = routeQuery.value.trim().toLowerCase();
@@ -713,7 +727,8 @@ function openActionDialog(kind: "point" | "leg") {
     retry: 1,
     scene: "",
     labels: [],
-    aiConf: 0.35
+    aiConf: 0.35,
+    expectCount: null
   });
   actionDialog.value = true;
 }
@@ -726,6 +741,7 @@ function syncActionDefaults() {
   actionForm.scene = "";
   actionForm.labels = [];
   actionForm.aiConf = 0.35;
+  actionForm.expectCount = null;
   if (actionForm.type === "AI 识别") void aiCatalog.load();
 }
 
@@ -778,7 +794,9 @@ function saveAction() {
         }
       : {}),
     ...(ai && actionForm.scene ? { scene: actionForm.scene } : {}),
-    ...(ai && actionForm.labels.length ? { labels: [...actionForm.labels] } : {})
+    ...(ai && actionForm.labels.length ? { labels: [...actionForm.labels] } : {}),
+    // 检查目标数量：留空就不写这个字段（= 不核对数量）
+    ...(ai && actionForm.expectCount ? { expectCount: Number(actionForm.expectCount) } : {})
   });
   actionDialog.value = false;
   ElMessage.success(`已添加动作：${actionForm.type}`);
@@ -1413,6 +1431,9 @@ onBeforeUnmount(() => {
                       触发：<b>{{ action.trigger || "到达即执行" }}</b> · 阈值：<b>{{ action.threshold || "—" }}</b>
                     </div>
                     <div>失败：<b>重试 {{ action.retry || 1 }} 次</b></div>
+                    <div v-if="isAiActionOf(action)">
+                      检查数量：<b>{{ action.expectCount ? `${action.expectCount} 个（不一致告警）` : "不核对" }}</b>
+                    </div>
                   </div>
                 </div>
                 <div v-if="!pointActions.length" class="empty-box" style="padding: 16px 0">
@@ -1697,15 +1718,30 @@ onBeforeUnmount(() => {
               title="由上方「置信度阈值」滑杆决定"
             />
           </div>
+          <!-- 检查目标数量：留空 = 不核对数量（只判「能否找到目标」） -->
+          <div v-if="isAiAction" class="field">
+            <label>检查目标数量</label>
+            <input
+              v-model.number="actionForm.expectCount"
+              class="input mono"
+              type="number"
+              min="1"
+              max="999"
+              placeholder="留空 = 不核对数量"
+              title="填了就让板端把 AI 检出的目标数与它比对，不一致时上报数量告警"
+            />
+          </div>
           <div class="field">
             <label>失败重试次数</label>
             <input v-model.number="actionForm.retry" class="input" type="number" min="0" max="5" />
           </div>
           <div v-if="isAiAction" class="rt-hint" style="margin: 0; grid-column: 1 / -1">
             到点后平台用<b>与实时视频同一套 AI 模型</b>开识别窗口：场景 = 模型包，类别 = 勾选的标签，
-            阈值 = 置信度下限；检出目标写入「告警中心」。窗口时长跟着「停留时长」走
-            （停留 + 8s，最短 10s、最长 300s，离开航点立即结束），不额外占用停留时长。
-            模型目录读不到时可以手填场景关键词，后端仍有关键词兜底。
+            阈值 = 置信度下限；检出目标写入「告警中心」。命中帧与 result.json 会落到板端
+            detect_jobs/计划ID/pt航点下标/（计划 ID = 业务任务号）。「检查目标数量」留空则只判
+            「能否找到目标」；填了则把 AI 检出的目标数与它比对，<b>不一致上报数量告警</b>。
+            窗口时长跟着「停留时长」走（停留 + 8s，最短 10s、最长 300s，离开航点立即结束），
+            不额外占用停留时长。模型目录读不到时可以手填场景关键词，后端仍有关键词兜底。
           </div>
         </template>
         <div v-else class="field" style="grid-column: 1 / -1">
