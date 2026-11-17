@@ -392,6 +392,82 @@ async fn periodic_task_requires_window() {
     }
 }
 
+/// 到点但设备没就绪：控制台能看到「到点未下发」+ 原因，且不会每 30s 刷一条。
+#[tokio::test]
+async fn waiting_for_device_is_visible_in_events() {
+    let (state, _db) = test_state().await;
+    // 设备本体没连上（真实设备掉线后的状态）：门禁会挡住下发
+    sqlx::query(
+        "UPDATE devices SET run_mode = 'robot', body_online = 0, last_heartbeat = ?1
+         WHERE device_id = ?2",
+    )
+    .bind(
+        (chrono::Local::now() - chrono::Duration::seconds(600))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
+    )
+    .bind(DEVICE_CODE)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    // 用固定任务号：`WAIT_STATES` 是进程级状态，别和别的用例抢同一个 key
+    let pk = device_pk(&state).await;
+    let park: i64 = sqlx::query_scalar("SELECT park_id FROM devices WHERE id = ?1")
+        .bind(pk)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    let stamp = chrono::Local::now();
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO tasks (task_code, task_name, task_type, execute_mode, level, device_id,
+            park_id, plan_start, plan_end, task_status, progress, created_at, updated_at)
+         VALUES ('TK-WAIT-1', 'E区等待设备巡检', '定时巡检', '周期任务', '常规', ?1, ?2, ?3, ?4,
+            '待执行', 0, ?5, ?5) RETURNING id",
+    )
+    .bind(pk)
+    .bind(park)
+    .bind(clock(-5))
+    .bind(clock(30))
+    .bind(stamp.format("%Y-%m-%d %H:%M:%S").to_string())
+    .fetch_one(&state.db)
+    .await
+    .expect("插入任务失败");
+
+    let report = schedule::sweep(&state).await.expect("扫描失败");
+    assert_eq!(report.dispatched, 0, "设备没就绪不能下发");
+
+    let (title, description): (String, String) = sqlx::query_as(
+        "SELECT title, description FROM task_events
+          WHERE task_id = ?1 AND event_type = 'schedule_wait'",
+    )
+    .bind(id)
+    .fetch_one(&state.db)
+    .await
+    .expect("到点没发出去必须留一条可见事件");
+    assert!(title.contains("到点未下发"), "标题要说明没下发：{title}");
+    assert!(
+        description.contains("已重试 1 次"),
+        "首次等待事件要带重试次数：{description}"
+    );
+    assert!(
+        description.contains("本体未连接"),
+        "原因要写清是本体没连上，运维才知道去查客户端：{description}"
+    );
+
+    // 再扫两轮：30s 一轮不节流的话事件流会被刷爆，这里必须还是 1 条
+    schedule::sweep(&state).await.expect("扫描失败");
+    schedule::sweep(&state).await.expect("扫描失败");
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM task_events WHERE task_id = ?1 AND event_type = 'schedule_wait'",
+    )
+    .bind(id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(count, 1, "同一个窗口内只能有一条等待事件（描述可刷新）");
+}
+
 /// 跑完的周期任务在下一个执行日自动回到待执行，等下一个窗口。
 #[tokio::test]
 async fn finished_periodic_task_rearms_next_day() {

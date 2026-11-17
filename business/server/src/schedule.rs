@@ -9,6 +9,10 @@
 //! - **下发** [`sweep`]：每 [`TICK_SECS`] 秒扫一次「待执行」任务，到点走与手动下发
 //!   完全相同的门禁（`dispatch::device_block_reason` + `handlers::tasks::push_task_dispatch`），
 //!   设备没就绪就在窗口内继续重试；
+//! - **等待中可见**（[`report_waiting`]）：到点但设备没就绪时，在任务事件流里写一条
+//!   `schedule_wait`（原因 + 重试次数 + 窗口剩余时间），每 5 分钟刷新一次。以前这里
+//!   只有 debug 日志，线上 `RUST_LOG=info` 看不到，控制台表现就是「计划到点了却什么都不
+//!   发生」，只能上服务器翻日志才猜得到是设备掉线；
 //! - **收尾**：窗口过了还没跑成 → 记事件 + 企微告警，但任务保持「待执行」等下一个
 //!   执行日（周期计划不能因为某天设备离线就整条报废）；跑完「已完成」的周期任务
 //!   在下一个执行日自动回到「待执行」。
@@ -24,14 +28,38 @@ use crate::db::now as now_stamp;
 use crate::error::AppError;
 use crate::models::Task;
 use chrono::{DateTime, Datelike, Days, Local, NaiveTime, Timelike};
-use std::time::Duration;
-use tracing::{debug, info, warn};
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
+use tracing::{info, warn};
 
 /// 扫描周期：30s 足够准（用户填的时间精度是 5 分钟），又不会把库扫热。
 pub const TICK_SECS: u64 = 30;
 
 /// 「周期任务」这个执行模式才有执行日 / 时间窗的概念。
 const PERIODIC_MODE: &str = "周期任务";
+
+/// 「到点但设备没就绪」事件的刷新节流：同一个窗口内最多 5 分钟改一次描述。
+///
+/// 扫描是 30s 一轮，不节流的话设备离线一小时就能写出 120 条同样的「等待中」，
+/// 把真正要看的事件（导航指令非法、定位失败）全冲掉——客户端 5s 一报的进度事件
+/// 当年就是这么把事件流刷爆的。
+const WAIT_REFRESH_SECS: u64 = 300;
+
+/// 每个任务在当前窗口里的重试计数 / 上次落库时间。
+///
+/// 只放内存：进程重启后最多多写一条「等待中」事件，不影响正确性；反过来落库
+/// 就要给 `task_events` 加列，为一条提示性事件改表不值得。key 用 `task_code`
+/// 而不是自增 id，跨库/重建的场景也不会串台。
+static WAIT_STATES: LazyLock<Mutex<HashMap<String, WaitState>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+struct WaitState {
+    /// 当前窗口标识（`2026-11-17 16:00-17:00`）；换窗口就重新计次
+    window: String,
+    attempts: u32,
+    written_at: Instant,
+}
 
 /// 一天内的执行窗口
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -409,14 +437,11 @@ async fn dispatch_due(
     now: DateTime<Local>,
 ) -> Result<bool, AppError> {
     let Some(device_pk) = task.device_id else {
-        // 没分配设备：窗口内一直没法跑，交给 notice_missed 在窗口结束时告警
+        report_waiting(state, task, now, "任务还没有分配执行设备").await?;
         return Ok(false);
     };
     if let Some(reason) = crate::dispatch::device_block_reason(&state.db, device_pk).await? {
-        debug!(
-            task = %task.task_code,
-            "计划任务到点但设备未就绪，窗口内继续等待：{reason}"
-        );
+        report_waiting(state, task, now, &reason).await?;
         return Ok(false);
     }
     match crate::handlers::tasks::push_task_dispatch(state, task).await? {
@@ -436,13 +461,126 @@ async fn dispatch_due(
             Ok(true)
         }
         None => {
-            debug!(
-                task = %task.task_code,
-                "计划任务到点但设备未连接 WebSocket，窗口内继续等待"
-            );
+            report_waiting(
+                state,
+                task,
+                now,
+                "设备未与业务平台建立 WebSocket（客户端离线），任务推不出去",
+            )
+            .await?;
             Ok(false)
         }
     }
+}
+
+/// 到点了但没发出去：在任务事件流里留一条「到点未下发」，写清原因和进度。
+///
+/// 同一窗口内每 [`WAIT_REFRESH_SECS`] 秒刷新一次描述（首次立即写），标题固定为
+/// `任务 X 到点未下发（2026-11-17 16:00-17:00）`：同一条事件被反复 UPDATE，
+/// 运维在控制台看到的是一行「已重试 N 次 · 窗口剩余 M 分钟 · 原因 …」，
+/// 而不是一屏同样的记录。
+async fn report_waiting(
+    state: &AppState,
+    task: &Task,
+    now: DateTime<Local>,
+    reason: &str,
+) -> Result<(), AppError> {
+    let Some(window) = window_of(task) else {
+        return Ok(());
+    };
+    let key = window_key(&window, now);
+    let Some(attempts) = note_attempt(&task.task_code, &key) else {
+        return Ok(());
+    };
+    let remaining = window_instances(&window, now)
+        .0
+        .map(|(_, end)| (end - now).num_minutes().max(0));
+    let description = format!(
+        "计划窗口 {label}（{days}） · 到点后已重试 {attempts} 次{remaining} · 原因：{reason} · \
+         任务保持待执行，窗口内每 {TICK_SECS}s 自动重试，窗口结束仍未下发会单独告警",
+        label = window.label(),
+        days = days_label(task.schedule_days.as_deref()),
+        remaining = remaining
+            .map(|minutes| format!("（窗口剩余 {minutes} 分钟）"))
+            .unwrap_or_default(),
+    );
+    let title = format!("任务 {} 到点未下发（{key}）", task.task_code);
+
+    let existing: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM task_events
+          WHERE task_id = ?1 AND event_type = 'schedule_wait' AND title = ?2 LIMIT 1",
+    )
+    .bind(task.id)
+    .bind(&title)
+    .fetch_optional(&state.db)
+    .await?;
+    match existing {
+        Some(id) => {
+            sqlx::query("UPDATE task_events SET description = ?1 WHERE id = ?2")
+                .bind(&description)
+                .bind(id)
+                .execute(&state.db)
+                .await?;
+        }
+        None => {
+            sqlx::query(
+                "INSERT INTO task_events
+                    (event_type, title, description, device_id, task_id, created_at)
+                 VALUES ('schedule_wait', ?1, ?2, ?3, ?4, ?5)",
+            )
+            .bind(&title)
+            .bind(&description)
+            .bind(task.device_id)
+            .bind(task.id)
+            .bind(now_stamp())
+            .execute(&state.db)
+            .await?;
+        }
+    }
+    info!(
+        task = %task.task_code,
+        attempts,
+        "计划任务到点未下发，等待设备就绪：{reason}"
+    );
+    Ok(())
+}
+
+/// 计次 + 节流：`Some(attempts)` 表示本轮要落库，`None` 表示还没到刷新周期。
+fn note_attempt(task_code: &str, window_key: &str) -> Option<u32> {
+    let now = Instant::now();
+    let mut states = WAIT_STATES
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let state = states.entry(task_code.to_string()).or_insert(WaitState {
+        window: String::new(),
+        attempts: 0,
+        written_at: now,
+    });
+    // 首次 / 换窗口（比如第二天同一时段）：重新计次，并且立刻写一条
+    if state.window != window_key {
+        state.window = window_key.to_string();
+        state.attempts = 0;
+        state.written_at = now
+            .checked_sub(Duration::from_secs(WAIT_REFRESH_SECS))
+            .unwrap_or(now);
+    }
+    state.attempts += 1;
+    if now.duration_since(state.written_at).as_secs() < WAIT_REFRESH_SECS {
+        return None;
+    }
+    state.written_at = now;
+    Some(state.attempts)
+}
+
+/// 窗口标识：`2026-11-17 16:00-17:00`（跨零点窗口按起始日算）
+fn window_key(window: &Window, now: DateTime<Local>) -> String {
+    let (current, start_today) = window_instances(window, now);
+    let start = current.map_or(start_today, |(start, _)| start);
+    format!(
+        "{} {}",
+        start.date_naive().format("%Y-%m-%d"),
+        window.label()
+    )
 }
 
 /// 窗口过了还没跑成：记事件 + 告警（同一天只报一次）。
@@ -749,6 +887,38 @@ mod tests {
         assert_eq!(days_label(None), "每天");
         assert_eq!(days_label(Some("1,2,3,4,5")), "工作日");
         assert_eq!(days_label(Some("1,3")), "周一、周三");
+    }
+
+    #[test]
+    fn wait_state_throttles_but_counts_every_attempt() {
+        // 用独立的任务号：`WAIT_STATES` 是进程级状态，测试之间不能串台
+        let code = "TK-UNIT-WAIT";
+        let window = "2026-11-17 16:00-17:00";
+        // 首次一定落库，并记 1 次
+        assert_eq!(note_attempt(code, window), Some(1));
+        // 30s 一轮的后续尝试只攒着，不刷事件
+        for _ in 0..5 {
+            assert_eq!(note_attempt(code, window), None);
+        }
+        // 换窗口（第二天同一时段）→ 立刻落库并重新计次
+        assert_eq!(note_attempt(code, "2026-11-18 16:00-17:00"), Some(1));
+    }
+
+    #[test]
+    fn window_key_pins_the_start_day() {
+        let overnight = Window {
+            start: parse_hhmm("23:30").unwrap(),
+            end: parse_hhmm("00:30").unwrap(),
+        };
+        // 凌晨 00:10 属于「昨天那次」窗口
+        assert_eq!(
+            window_key(&overnight, at("2026-11-14 00:10:00")),
+            "2026-11-13 23:30-00:30"
+        );
+        assert_eq!(
+            window_key(&overnight, at("2026-11-14 23:45:00")),
+            "2026-11-14 23:30-00:30"
+        );
     }
 
     #[test]
