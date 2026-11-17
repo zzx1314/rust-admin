@@ -267,7 +267,7 @@ sqlite3 /opt/hz/rust-admin/robodog/data/robodog.db \
 - 中继流里浏览器画不出框（FLV 没有与抽帧对齐的坐标），要看框就切「背包烧录」——
   板端把中文标签烧进 `preview` 流，中继也推这一路（`RELAY_STREAMS` 默认已含 `preview`，
   改过默认值的部署记得补上并 `systemctl restart backpack-relay`）；只看检出数量则不用切。
-- **AI 的启停 / 模型目录 / 运行态不再依赖浏览器同网段**（2026-11-19 起走设备客户端隧道，
+- **AI 的启停 / 模型目录 / 运行态不再依赖浏览器同网段**（2026-11-17 起走设备客户端隧道，
   见下一节）。
 
 部署（幂等）：
@@ -295,7 +295,7 @@ ssh root@39.107.55.13 'journalctl -u rust-admin-robodog -f | grep -E "backpack s
 | 切了通道自己跳回「机器狗前置」 | 页面轮询 | 已修（2026-11-16）：直连模式后端不下发 `sources`，刷新时别拿它比对 |
 | 想看房间/观看者状态 | `GET /api/backpack/video/state` | 返回每路的 `publisher/initBytes/viewers/streaming`，黑屏先看这张表 |
 
-### 跨网段的接口 / AI：设备客户端隧道（2026-11-19 上线）
+### 跨网段的接口 / AI：设备客户端隧道（2026-11-17 上线）
 
 之前「操作员电脑与背包不同网段」等于「背包页只能看不能开 AI」：面板要读的模型目录、
 运行态、AI 启停全靠浏览器直连 `192.168.41.246:8000`，而公网页面会被浏览器拦掉
