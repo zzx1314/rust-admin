@@ -489,6 +489,23 @@ export interface Shift {
   createdBy: number | null;
 }
 
+/** 整段复制排班的跳过明细（目标时段已占用 / 目标区间天数不足） */
+export interface ShiftCopySkip {
+  shiftDate: string;
+  slot: string;
+  ownerName: string;
+  reason: string;
+}
+
+export interface ShiftCopyResult {
+  /** 源区间命中的排班条数 */
+  source: number;
+  created: number;
+  /** 覆盖模式清掉的目标排班条数 */
+  replaced: number;
+  skipped: ShiftCopySkip[];
+}
+
 export interface ShiftStats {
   total: number;
   counts: Record<string, number>;

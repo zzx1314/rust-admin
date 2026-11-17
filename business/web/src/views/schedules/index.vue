@@ -44,6 +44,20 @@ const shiftForm = reactive({
 const detailVisible = ref(false);
 const detailShift = ref<Shift | null>(null);
 
+/** 复制排班（上一周 / 上个月 → 当前视图区间） */
+const copyVisible = ref(false);
+const copyScope = ref<"week" | "month">("week");
+const copyStatus = ref("待确认");
+const copyMode = ref<"skip" | "replace">("skip");
+const copyPreview = ref<Shift[]>([]);
+const copyPreviewLoading = ref(false);
+const copying = ref(false);
+const COPY_STATUSES = ["待确认", "草案", "已发布", "保持原状态"];
+const COPY_MODES = [
+  { value: "skip", label: "跳过目标时段已有排班" },
+  { value: "replace", label: "覆盖目标时段已有排班" }
+];
+
 const staffVisible = ref(false);
 const ruleVisible = ref(false);
 const newStaff = reactive({
@@ -125,6 +139,101 @@ const tasksOfForm = computed(() =>
     ? tasks.value
     : tasks.value.filter(task => task.parkId === shiftForm.parkId)
 );
+
+/**
+ * 复制的源 / 目标区间。
+ *
+ * 周复制：目标 = 当前视图这一周，源 = 上一周（保持同名星期）。
+ * 月复制：以当前视图周的**周四**为锚点（跨月周按主月归属），目标 = 该月整月，
+ *        源 = 上个月整月（按同一日号对齐，天数不足由后端跳过并回报）。
+ */
+const copyRanges = computed(() => {
+  const anchor = new Date(`${weekDays.value[3].date}T00:00:00`);
+  if (copyScope.value === "month") {
+    const targetFrom = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+    const targetTo = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0);
+    const sourceFrom = new Date(anchor.getFullYear(), anchor.getMonth() - 1, 1);
+    const sourceTo = new Date(anchor.getFullYear(), anchor.getMonth(), 0);
+    return {
+      source: { from: iso(sourceFrom), to: iso(sourceTo) },
+      target: { from: iso(targetFrom), to: iso(targetTo) },
+      targetLabel: `${anchor.getFullYear()}-${String(anchor.getMonth() + 1).padStart(2, "0")} 月`
+    };
+  }
+  const from = new Date(`${weekStart.value}T00:00:00`);
+  const to = new Date(`${weekEnd.value}T00:00:00`);
+  const previousFrom = new Date(from);
+  previousFrom.setDate(from.getDate() - 7);
+  const previousTo = new Date(to);
+  previousTo.setDate(to.getDate() - 7);
+  return {
+    source: { from: iso(previousFrom), to: iso(previousTo) },
+    target: { from: iso(from), to: iso(to) },
+    targetLabel: weekOffset.value === 0 ? "本周" : "当前视图周"
+  };
+});
+
+async function loadCopyPreview() {
+  copyPreviewLoading.value = true;
+  try {
+    copyPreview.value = await shiftApi.list({
+      from: copyRanges.value.source.from,
+      to: copyRanges.value.source.to
+    });
+  } finally {
+    copyPreviewLoading.value = false;
+  }
+}
+
+async function openCopy(scope: "week" | "month") {
+  copyScope.value = scope;
+  copyStatus.value = "待确认";
+  copyMode.value = "skip";
+  copyVisible.value = true;
+  await loadCopyPreview();
+}
+
+async function switchCopyScope(scope: "week" | "month") {
+  if (copyScope.value === scope) return;
+  copyScope.value = scope;
+  await loadCopyPreview();
+}
+
+async function submitCopy() {
+  if (!copyPreview.value.length) {
+    ElMessage.info("源区间没有可复制的排班");
+    return;
+  }
+  copying.value = true;
+  try {
+    const result = await shiftApi.copy({
+      sourceFrom: copyRanges.value.source.from,
+      sourceTo: copyRanges.value.source.to,
+      targetFrom: copyRanges.value.target.from,
+      targetTo: copyRanges.value.target.to,
+      status: copyStatus.value === "保持原状态" ? null : copyStatus.value,
+      mode: copyMode.value
+    });
+    copyVisible.value = false;
+    await load();
+    if (result.created === 0 && result.skipped.length) {
+      ElMessage.warning(`没有新增排班：${result.skipped[0].reason}`);
+      return;
+    }
+    const replaced = result.replaced ? `，覆盖 ${result.replaced} 条` : "";
+    const skipped = result.skipped.length ? `，跳过 ${result.skipped.length} 条` : "";
+    ElMessage.success(`已复制 ${result.created} 条排班${replaced}${skipped}`);
+  } finally {
+    copying.value = false;
+  }
+}
+
+/** 预览表里的日期显示：MM-DD + 星期 */
+function previewDay(value: string) {
+  const date = new Date(`${value}T00:00:00`);
+  const weekday = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][date.getDay()];
+  return `${value.slice(5)} ${weekday}`;
+}
 
 async function load() {
   loading.value = true;
@@ -309,6 +418,12 @@ onMounted(async () => {
           <AppIcon name="chevron-right" />
         </button>
       </div>
+      <button class="btn sm" @click="openCopy('week')">
+        <AppIcon name="shuffle" />复制上一周
+      </button>
+      <button class="btn sm" @click="openCopy('month')">
+        <AppIcon name="calendar" />复制上个月
+      </button>
       <button class="btn sm" @click="ruleVisible = true">
         <AppIcon name="info" />排班规则
       </button>
@@ -509,6 +624,107 @@ onMounted(async () => {
         </div>
       </div>
     </div>
+
+    <!-- 复制排班：上一周 / 上个月 → 当前视图区间 -->
+    <el-dialog v-model="copyVisible" title="复制排班" width="680px">
+      <div class="form-grid">
+        <div class="field" style="grid-column: 1 / -1">
+          <label>复制来源</label>
+          <div class="seg">
+            <button :class="{ on: copyScope === 'week' }" @click="switchCopyScope('week')">
+              <AppIcon name="shuffle" />上一周
+            </button>
+            <button :class="{ on: copyScope === 'month' }" @click="switchCopyScope('month')">
+              <AppIcon name="calendar" />上个月
+            </button>
+          </div>
+        </div>
+        <div class="field">
+          <label>源区间</label>
+          <div class="copy-range mono">
+            {{ copyRanges.source.from }} 至 {{ copyRanges.source.to }}
+            <span class="tag">{{ copyPreview.length }} 条排班</span>
+          </div>
+        </div>
+        <div class="field">
+          <label>目标区间</label>
+          <div class="copy-range mono">
+            {{ copyRanges.target.from }} 至 {{ copyRanges.target.to }}
+            <span class="tag blue">{{ copyRanges.targetLabel }}</span>
+          </div>
+        </div>
+        <div class="field">
+          <label>复制后的状态</label>
+          <select v-model="copyStatus" class="select">
+            <option v-for="status in COPY_STATUSES" :key="status" :value="status">
+              {{ status }}
+            </option>
+          </select>
+        </div>
+        <div class="field">
+          <label>目标时段已有排班时</label>
+          <select v-model="copyMode" class="select">
+            <option v-for="mode in COPY_MODES" :key="mode.value" :value="mode.value">
+              {{ mode.label }}
+            </option>
+          </select>
+        </div>
+        <div class="field" style="grid-column: 1 / -1">
+          <label>待复制内容</label>
+          <div class="copy-preview">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>日期</th>
+                  <th>班次</th>
+                  <th>责任人</th>
+                  <th>关联计划</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="shift in copyPreview" :key="shift.id">
+                  <td class="mono">{{ previewDay(shift.shiftDate) }}</td>
+                  <td><span class="tag blue">{{ shift.slot }}</span></td>
+                  <td>
+                    <div class="row-flex">
+                      <span
+                        class="sc-ava"
+                        :style="{ background: shift.staffColor ?? '#94a3b8' }"
+                      >{{ initials(shift.ownerName) }}</span>
+                      <span class="cell-main">{{ shift.ownerName }}</span>
+                    </div>
+                  </td>
+                  <td>{{ shift.taskName ?? "—" }}</td>
+                </tr>
+                <tr v-if="!copyPreview.length">
+                  <td colspan="4">
+                    <div class="empty-box">
+                      {{ copyPreviewLoading ? "加载中…" : "源区间没有排班可复制" }}
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="field" style="grid-column: 1 / -1">
+          <div class="link-hint">
+            <b>对齐规则：</b>周复制保持同名星期（周一 → 周一）；月复制按同一日号（5 号 → 5 号），
+            目标月天数不足的日期会跳过。复制默认生成「待确认」状态，确认无误后再改为「已发布」。
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <button class="btn" @click="copyVisible = false">取消</button>
+        <button
+          class="btn primary"
+          :disabled="copying || !copyPreview.length"
+          @click="submitCopy"
+        >
+          <AppIcon name="check" />开始复制
+        </button>
+      </template>
+    </el-dialog>
 
     <!-- 新建排班 -->
     <el-dialog v-model="shiftDialog" title="新建排班" width="640px">
@@ -756,6 +972,24 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.copy-range {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  color: var(--text-2);
+}
+.copy-preview {
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+}
+.copy-preview .table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
 .staff-add {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr 1fr auto;

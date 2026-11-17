@@ -17,6 +17,7 @@ import type {
   Setting,
   Task,
   Shift,
+  ShiftCopyResult,
   ShiftStats,
   Staff,
   TaskEvent,
@@ -228,7 +229,9 @@ export const shiftApi = {
   get: (id: number) => get<Shift>(`/shifts/${id}`),
   create: (data: object) => post<Shift>("/shifts", data),
   update: (id: number, data: object) => put<Shift>(`/shifts/${id}`, data),
-  remove: (id: number) => del<boolean>(`/shifts/${id}`)
+  remove: (id: number) => del<boolean>(`/shifts/${id}`),
+  /** 整段复制（上一周 / 上个月 → 目标区间） */
+  copy: (data: object) => post<ShiftCopyResult>("/shifts/copy", data)
 };
 
 /** 工单（执行层）：派发 → 接单 → 处理 → 验收 → 关闭 */

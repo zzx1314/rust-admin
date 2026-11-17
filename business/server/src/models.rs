@@ -715,6 +715,45 @@ pub struct ShiftRequest {
     pub note: Option<String>,
 }
 
+/// 整段复制排班（上一周 / 上个月 → 当前区间）。
+///
+/// 复制按「源区间第一天 → 目标区间第一天」的天数偏移对齐：
+/// 周复制保持同名星期，月复制保持同一日号；超出目标区间（当月天数不足）的记录跳过。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShiftCopyRequest {
+    /// `YYYY-MM-DD`，源区间闭区间
+    pub source_from: String,
+    pub source_to: String,
+    /// 目标区间闭区间（同时用于裁剪：目标日期必须落在区间内）
+    pub target_from: String,
+    pub target_to: String,
+    /// 复制后的状态；缺省保持源排班状态
+    pub status: Option<String>,
+    /// `skip`（默认，跳过目标时段已有排班）/ `replace`（覆盖目标时段）
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShiftCopySkip {
+    pub shift_date: String,
+    pub slot: String,
+    pub owner_name: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShiftCopyResult {
+    /// 源区间命中的排班条数
+    pub source: i64,
+    pub created: i64,
+    /// 被覆盖掉的目标排班条数（`mode = replace` 才有）
+    pub replaced: i64,
+    pub skipped: Vec<ShiftCopySkip>,
+}
+
 /// 责任人库统计窗口：只影响「本周班次」列
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

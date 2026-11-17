@@ -2816,3 +2816,171 @@ async fn schedules_and_work_orders_flow() {
     let (status, _) = send(auth("DELETE", &format!("/api/staff/{staff_id}"))).await;
     assert_eq!(status, StatusCode::OK, "没有排班/在办工单的责任人应可删除");
 }
+
+/// 排班整段复制：周复制按星期对齐、月复制按日号对齐（天数不足跳过）、
+/// 重复复制不产生重复记录、覆盖模式替换目标时段。
+#[tokio::test]
+async fn shift_copy_aligns_periods_and_handles_conflicts() {
+    let (state, _db) = test_state().await;
+    let app = build_router(state);
+    let token = login(&app).await;
+
+    let auth = |method: &str, path: &str| {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let send = |request: Request<Body>| {
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            (response.status(), json_body(response).await)
+        }
+    };
+    let post = |path: &str, body: &str| {
+        let mut request = auth("POST", path);
+        *request.body_mut() = Body::from(body.to_string());
+        request
+    };
+
+    // 源区间：2031-03（3 月的 3 号、4 号、31 号各一条）
+    for (date, slot, staff_id) in [
+        ("2031-03-03", "早班", 1),
+        ("2031-03-04", "中班", 2),
+        ("2031-03-31", "夜班", 1),
+    ] {
+        let (status, body) = send(post(
+            "/api/shifts",
+            &format!(
+                r#"{{"shiftDate":"{date}","slot":"{slot}","staffId":{staff_id},
+                    "parkId":1,"status":"已发布"}}"#
+            ),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK, "准备源排班失败: {body}");
+    }
+
+    // 月复制：3 月 → 4 月，31 号超出 4 月天数被跳过
+    let (status, result) = send(post(
+        "/api/shifts/copy",
+        r#"{"sourceFrom":"2031-03-01","sourceTo":"2031-03-31",
+            "targetFrom":"2031-04-01","targetTo":"2031-04-30","status":"待确认"}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "月复制应成功: {result}");
+    assert_eq!(result["data"]["source"], 3);
+    assert_eq!(result["data"]["created"], 2, "3/31 应因 4 月无 31 号被跳过");
+    assert_eq!(result["data"]["skipped"].as_array().map(Vec::len), Some(1));
+    assert!(
+        result["data"]["skipped"][0]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("天数不足"),
+        "跳过原因应说明目标区间天数不足: {result}"
+    );
+
+    // 目标区间拿到的是「同一日号 + 复制时指定的状态」
+    let (_, target) = send(auth(
+        "GET",
+        "/api/shifts?from=2031-04-01&to=2031-04-30",
+    ))
+    .await;
+    let rows = target["data"].as_array().expect("shifts 应为数组");
+    assert_eq!(rows.len(), 2, "4 月应有 2 条复制记录: {target}");
+    let dates: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| row["shiftDate"].as_str())
+        .collect();
+    assert_eq!(dates, vec!["2031-04-03", "2031-04-04"]);
+    assert!(rows.iter().all(|row| row["status"] == "待确认"));
+
+    // 再复制一次（跳过模式）：不产生重复记录，全部回报「已有排班」
+    let (status, again) = send(post(
+        "/api/shifts/copy",
+        r#"{"sourceFrom":"2031-03-01","sourceTo":"2031-03-31",
+            "targetFrom":"2031-04-01","targetTo":"2031-04-30"}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(again["data"]["created"], 0);
+    assert_eq!(again["data"]["skipped"].as_array().map(Vec::len), Some(3));
+    assert!(
+        again["data"]["skipped"][0]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("已有排班"),
+        "跳过原因应说明目标时段已占用: {again}"
+    );
+
+    // 目标时段被别人占了 → 覆盖模式替换该时段
+    let (status, occupant) = send(post(
+        "/api/shifts",
+        r#"{"shiftDate":"2031-04-03","slot":"早班","staffId":3,"status":"已发布"}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "准备占用排班失败: {occupant}");
+    let occupant_id = occupant["data"]["id"].as_i64().unwrap();
+    let (status, replaced) = send(post(
+        "/api/shifts/copy",
+        r#"{"sourceFrom":"2031-03-01","sourceTo":"2031-03-31",
+            "targetFrom":"2031-04-01","targetTo":"2031-04-30","mode":"replace"}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "覆盖模式复制失败: {replaced}");
+    assert_eq!(replaced["data"]["created"], 2);
+    assert!(replaced["data"]["replaced"].as_i64().unwrap_or_default() >= 1);
+    let (_, after) = send(auth(
+        "GET",
+        "/api/shifts?from=2031-04-01&to=2031-04-30",
+    ))
+    .await;
+    assert!(
+        !after["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == occupant_id),
+        "覆盖模式应删掉目标时段原有排班"
+    );
+
+    // 周复制：保持同名星期（源周同一天 → 下周同一天）
+    let (status, weekday_source) = send(post(
+        "/api/shifts",
+        r#"{"shiftDate":"2031-04-07","slot":"早班","staffId":4,"parkId":1}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "准备周复制源排班失败: {weekday_source}");
+    let (_, week) = send(post(
+        "/api/shifts/copy",
+        r#"{"sourceFrom":"2031-04-07","sourceTo":"2031-04-13",
+            "targetFrom":"2031-04-14","targetTo":"2031-04-20"}"#,
+    ))
+    .await;
+    assert_eq!(week["data"]["created"], 1, "周复制应复制 1 条: {week}");
+    let (_, week_target) = send(auth(
+        "GET",
+        "/api/shifts?from=2031-04-14&to=2031-04-20",
+    ))
+    .await;
+    let week_rows = week_target["data"].as_array().unwrap();
+    assert_eq!(week_rows.len(), 1, "目标周应只有 1 条: {week_target}");
+    assert_eq!(week_rows[0]["shiftDate"], "2031-04-14");
+    assert_eq!(week_rows[0]["ownerName"], "王建国");
+
+    // 区间重叠直接拒绝（避免把刚复制的记录再复制一遍）
+    let (status, overlap) = send(post(
+        "/api/shifts/copy",
+        r#"{"sourceFrom":"2031-04-01","sourceTo":"2031-04-30",
+            "targetFrom":"2031-04-01","targetTo":"2031-04-30"}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "重叠区间应拒绝: {overlap}");
+    assert!(
+        overlap["msg"].as_str().unwrap_or_default().contains("重叠"),
+        "提示应说明区间重叠: {overlap}"
+    );
+}
