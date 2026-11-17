@@ -673,7 +673,22 @@ export interface WorkOrderLog {
   createdAt: string;
 }
 
-export type WorkOrderDetail = WorkOrder & { logs: WorkOrderLog[] };
+/** 工单关联的告警：自动派单时由告警建单，同类告警会持续挂到同一张单上 */
+export interface WorkOrderAlert {
+  id: number;
+  alertCode: string;
+  level: string;
+  /** 告警正文，AI 数量核对/检出会在这里带上板端证据图路径 */
+  content: string;
+  status: string;
+  occurredAt: string;
+}
+
+export type WorkOrderDetail = WorkOrder & {
+  logs: WorkOrderLog[];
+  /** 这张单挂着的全部告警（按时间正序），现场据此翻历次识别结论与证据路径 */
+  alerts: WorkOrderAlert[];
+};
 
 export interface WorkOrderStats {
   total: number;

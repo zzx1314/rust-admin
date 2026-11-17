@@ -915,13 +915,29 @@ pub struct WorkOrderLog {
     pub created_at: String,
 }
 
-/// 工单详情 = 主记录 + 处理轨迹（列表不返回 logs，避免翻页时体量翻倍）
+/// 工单关联的告警（自动派单时由告警建单，一条工单可能挂多条同类告警）。
+///
+/// 现场用途：`result.json` 每轮会被覆盖、群里也只推关键几条，
+/// 所以「这个航点历次识别的结论 + 证据图路径」要能在工单详情里翻到。
+#[derive(Debug, Serialize, Clone, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkOrderAlert {
+    pub id: i64,
+    pub alert_code: String,
+    pub level: String,
+    pub content: String,
+    pub status: String,
+    pub occurred_at: String,
+}
+
+/// 工单详情 = 主记录 + 处理轨迹 + 关联告警（列表不返回，避免翻页时体量翻倍）
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkOrderDetail {
     #[serde(flatten)]
     pub order: WorkOrder,
     pub logs: Vec<WorkOrderLog>,
+    pub alerts: Vec<WorkOrderAlert>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -332,6 +332,10 @@ B. client（正式环境：平台在公网、Agent 只在内网，服务端连�
 **计划 id 与存证**：开窗同时把 `planId`（= 业务任务号 `taskCode`）与 `pointIndex`
 下发给板端，命中帧与 `result.json` 落到板端
 `detect_jobs/<planId>/pt<pointIndex>/`（图已画中文框），方便按计划回溯。
+2026-11-17 起板端还会额外写一份 **`result_<YYYYmmdd_HHMMSS>.json`**：
+`result.json` 只保留最新一次，同一航点每轮都覆盖，历史结论靠这些副本翻
+（板端改动在 `/root/261113/backpack_dashboard/backend/detect.py::_finish_job`，
+不在本仓库；工单详情的「关联告警」里也能看到历次告警正文与证据图路径）。
 数量判定在板端做（它知道本帧到底画了几个框），结论文案形如
 `AI 识别数量核对不一致：任务「…」航点 0「…」检查 3 个，实际检出 2 个（证据：…/dogcam_x.jpg）`，
 客户端转发 `ai_alert`、服务端直连模式读 SSE 的 `plan_hit`/`plan_miss`，两条路最终都进

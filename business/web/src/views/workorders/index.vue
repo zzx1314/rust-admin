@@ -628,6 +628,34 @@ onMounted(async () => {
           </div>
         </div>
 
+        <!-- 关联告警：自动派单是「告警建单」，同类告警会持续挂到这张单上；
+             板端 result.json 每轮覆盖，历次结论 / 证据图路径要从这里翻 -->
+        <div
+          v-if="detail.alerts?.length"
+          class="card-head"
+          style="padding: 16px 0 10px; border: none"
+        >
+          <div class="card-title">
+            <AppIcon name="warn" />关联告警
+            <span class="card-sub">共 {{ detail.alerts.length }} 条（含证据路径）</span>
+          </div>
+        </div>
+        <div v-if="detail.alerts?.length" class="timeline">
+          <div v-for="alert in detail.alerts" :key="alert.id" class="tl-item">
+            <div class="tl-dot" :class="alert.level === '严重' ? 'bad' : 'warn'">
+              <AppIcon name="warn" />
+            </div>
+            <div class="tl-body">
+              <b>{{ alert.content }}</b>
+              <p>
+                <span class="mono">{{ alert.alertCode }}</span> · {{ alert.level }} ·
+                {{ alert.status }}
+                <time>{{ alert.occurredAt }}</time>
+              </p>
+            </div>
+          </div>
+        </div>
+
         <div class="wo-log-form">
           <input
             v-model="progressNote"
@@ -659,5 +687,11 @@ onMounted(async () => {
 .wo-detail-dialog :deep(.el-dialog__body) {
   max-height: 72vh;
   overflow-y: auto;
+}
+/* 关联告警里「严重」级别单独用红色，和「警告」区分开 */
+.tl-dot.bad {
+  background: #fdecec;
+  border-color: #f8c9c9;
+  color: #dc2626;
 }
 </style>

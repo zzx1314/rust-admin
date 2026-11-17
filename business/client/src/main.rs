@@ -232,6 +232,19 @@ const BODY_RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(10);
 const BODY_RECONNECT_SETTLE: Duration = Duration::from_secs(5);
 
 /// 下一次重连退避：翻倍并封顶（1s → 2s → 4s → 8s → 10s…）
+/// 一次连接「活过这么久」就认为平台侧是好的（重启 / 发布 / 抖动），
+/// 下次断开的退避从 1s 重新开始，别一路飙到 30s。
+const HEALTHY_CONNECTION: Duration = Duration::from_secs(30);
+
+/// 业务连接重连次数：连接稳定存活过 [`HEALTHY_CONNECTION`] 就重新从 1 开始退避。
+fn next_retry(previous: u64, elapsed: Duration) -> u64 {
+    if elapsed >= HEALTHY_CONNECTION {
+        1
+    } else {
+        previous + 1
+    }
+}
+
 fn next_body_backoff(current: Duration) -> Duration {
     (current * 2).min(BODY_RECONNECT_MAX_BACKOFF)
 }
@@ -608,15 +621,19 @@ async fn main() {
 
     let mut retry = 0_u64;
     loop {
+        let started = std::time::Instant::now();
         match run_client(&config, zhpro.clone()).await {
             Ok(()) => {
-                info!("连接正常关闭");
+                info!("收到中断信号，连接正常关闭，进程退出");
                 break;
             }
             Err(e) => {
-                retry += 1;
+                // 平台重启 / 发布 / 网络抖动：进程不退，原地按 1s → 30s 退避重连。
+                // 注意 `active` / `local_runner` 是 `run_client` 内的局部状态，
+                // 重连后任务上下文会重建（服务端会把断连期间的任务判异常）。
+                retry = next_retry(retry, started.elapsed());
                 let delay = retry.min(30);
-                warn!("业务连接断开 ({e})，{delay}s 后重试（第 {retry} 次）");
+                warn!("业务连接断开 ({e})，{delay}s 后原地重连（第 {retry} 次）");
                 tokio::time::sleep(Duration::from_secs(delay)).await;
             }
         }
@@ -1178,6 +1195,10 @@ async fn run_client(
     // 「执行中」更有用。
     let mut progress_reporter = ProgressReporter::default();
 
+    // 连接断开的原因：`None` = 主动退出（Ctrl-C）；`Some` = 平台侧断开 / 网络抖动，
+    // 交给 `main` 的重连循环**原地重连**，不再让进程退出等 systemd 拉起
+    // （以前一次平台重启就是「进程退出 → 5s 后 systemd 重启 → 再握手」，设备白掉线 10s+）。
+    let mut close_reason: Option<String> = None;
     loop {
         // 每次迭代拷一份链路监视器：`wait_body_down` 只借用这个临时副本，
         // 分支体里才能安全地重建 `body`
@@ -1256,16 +1277,19 @@ async fn run_client(
                         let _ = data;
                     }
                     Some(Ok(Message::Close(_))) => {
-                        info!("业务服务关闭了连接");
+                        info!("业务服务关闭了连接，准备原地重连");
+                        close_reason = Some("业务服务关闭了连接".to_string());
                         break;
                     }
                     Some(Ok(_)) => {}
                     Some(Err(e)) => {
-                        error!("WebSocket 错误: {e}");
+                        error!("WebSocket 错误: {e}，准备原地重连");
+                        close_reason = Some(e.to_string());
                         break;
                     }
                     None => {
-                        info!("业务连接已断开");
+                        info!("业务连接已断开，准备原地重连");
+                        close_reason = Some("业务连接已断开".to_string());
                         break;
                     }
                 }
@@ -1423,7 +1447,10 @@ async fn run_client(
     if let Some(task) = announce_task {
         task.abort();
     }
-    Ok(())
+    match close_reason {
+        Some(reason) => Err(reason.into()),
+        None => Ok(()),
+    }
 }
 
 /// 等本体链路断开（永不返回 = 没有本体连接 / 尚未断开）
@@ -3652,6 +3679,17 @@ async fn sync_maps_from_robot(
 #[cfg(test)]
 mod body_reconnect_tests {
     use super::*;
+
+    /// 业务连接重连计数：跑得久的连接断了 → 退避归 1；刚连上就断 → 继续累加
+    #[test]
+    fn retry_resets_after_a_healthy_connection() {
+        use super::{HEALTHY_CONNECTION, next_retry};
+        use std::time::Duration;
+        assert_eq!(next_retry(0, Duration::from_secs(1)), 1);
+        assert_eq!(next_retry(5, Duration::from_secs(2)), 6);
+        assert_eq!(next_retry(9, HEALTHY_CONNECTION), 1);
+        assert_eq!(next_retry(9, Duration::from_secs(600)), 1);
+    }
 
     /// 退避序列必须是「翻倍 + 封顶」，否则重连会退化成忙等
     #[test]

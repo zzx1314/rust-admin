@@ -203,6 +203,42 @@ async fn system_dispatched_orders_are_visible_to_operator() {
         StatusCode::OK,
         "系统派单的详情必须能打开"
     );
+
+    // 详情要带出「关联告警」：同类告警都挂在这张单上，现场的历次结论/证据路径靠它回看
+    sqlx::query(
+        "INSERT INTO alerts (alert_code, level, content, status, occurred_at, created_at,
+            work_order_id, dedup_key)
+         VALUES ('AL-WO-1', '警告',
+            'AI 识别数量核对不一致：…检查 3 个，实际检出 2 个（证据：/x/dogcam_1.jpg）',
+            '未处理', '2026-11-17 20:15:42', '2026-11-17 20:15:42', ?1,
+            'ai:RD-AI-1:TK-1:0:count')",
+    )
+    .bind(auto_id)
+    .execute(&state.db)
+    .await
+    .expect("插入关联告警失败");
+    let request = Request::get(format!("/api/workorders/{auto_id}"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(app.clone().oneshot(request).await.unwrap().into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let alerts = body["data"]["alerts"]
+        .as_array()
+        .unwrap_or_else(|| panic!("详情应带关联告警: {body}"));
+    assert_eq!(alerts.len(), 1, "应回 1 条关联告警: {alerts:?}");
+    assert_eq!(alerts[0]["alertCode"], "AL-WO-1");
+    assert!(
+        alerts[0]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("证据：/x/dogcam_1.jpg"),
+        "告警正文要能指到证据图: {alerts:?}"
+    );
     assert_eq!(
         status_of(&app, &token, "GET", &format!("/api/workorders/{other_id}")).await,
         StatusCode::NOT_FOUND,

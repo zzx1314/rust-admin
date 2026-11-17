@@ -3,8 +3,8 @@ use crate::auth::Claims;
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::models::{
-    WorkOrder, WorkOrderDetail, WorkOrderLog, WorkOrderLogRequest, WorkOrderQuery, WorkOrderRequest,
-    WorkOrderStatusRequest,
+    WorkOrder, WorkOrderAlert, WorkOrderDetail, WorkOrderLog, WorkOrderLogRequest, WorkOrderQuery,
+    WorkOrderRequest, WorkOrderStatusRequest,
 };
 use axum::Extension;
 use axum::Json;
@@ -165,7 +165,12 @@ pub async fn get_work_order(
     let order = fetch_order(&state, id).await?;
     ensure_order_access(&state, &order, &claims).await?;
     let logs = fetch_logs(&state, id).await?;
-    Ok(ApiResponse::ok(WorkOrderDetail { order, logs }))
+    let alerts = fetch_alerts(&state, id).await?;
+    Ok(ApiResponse::ok(WorkOrderDetail {
+        order,
+        logs,
+        alerts,
+    }))
 }
 
 pub async fn create_work_order(
@@ -177,7 +182,12 @@ pub async fn create_work_order(
     let order =
         create_order_core(&state, payload, Some(claims.sub), &claims.username, true).await?;
     let logs = fetch_logs(&state, order.id).await?;
-    Ok(ApiResponse::ok(WorkOrderDetail { order, logs }))
+    let alerts = fetch_alerts(&state, order.id).await?;
+    Ok(ApiResponse::ok(WorkOrderDetail {
+        order,
+        logs,
+        alerts,
+    }))
 }
 
 /// 建工单的核心逻辑：网页新建、「告警转工单」与「告警自动派单」共用，避免三套默认值。
@@ -371,7 +381,12 @@ pub async fn update_work_order(
 
     let order = fetch_order(&state, id).await?;
     let logs = fetch_logs(&state, id).await?;
-    Ok(ApiResponse::ok(WorkOrderDetail { order, logs }))
+    let alerts = fetch_alerts(&state, id).await?;
+    Ok(ApiResponse::ok(WorkOrderDetail {
+        order,
+        logs,
+        alerts,
+    }))
 }
 
 /// 状态流转：详情页按钮与看板拖拽都走这里。
@@ -390,9 +405,11 @@ pub async fn update_work_order_status(
     }
     if status == existing.status && payload.note.is_none() {
         let logs = fetch_logs(&state, id).await?;
+        let alerts = fetch_alerts(&state, id).await?;
         return Ok(ApiResponse::ok(WorkOrderDetail {
             order: existing,
             logs,
+            alerts,
         }));
     }
 
@@ -426,7 +443,12 @@ pub async fn update_work_order_status(
 
     let order = fetch_order(&state, id).await?;
     let logs = fetch_logs(&state, id).await?;
-    Ok(ApiResponse::ok(WorkOrderDetail { order, logs }))
+    let alerts = fetch_alerts(&state, id).await?;
+    Ok(ApiResponse::ok(WorkOrderDetail {
+        order,
+        logs,
+        alerts,
+    }))
 }
 
 pub async fn add_work_order_log(
@@ -452,7 +474,12 @@ pub async fn add_work_order_log(
         .await?;
     let order = fetch_order(&state, id).await?;
     let logs = fetch_logs(&state, id).await?;
-    Ok(ApiResponse::ok(WorkOrderDetail { order, logs }))
+    let alerts = fetch_alerts(&state, id).await?;
+    Ok(ApiResponse::ok(WorkOrderDetail {
+        order,
+        logs,
+        alerts,
+    }))
 }
 
 pub async fn delete_work_order(
@@ -607,6 +634,18 @@ async fn fetch_logs(state: &AppState, id: i64) -> Result<Vec<WorkOrderLog>, AppE
     .fetch_all(&state.db)
     .await?;
     Ok(logs)
+}
+
+/// 这张工单挂着的全部告警（自动派单 = 告警建单，同类告警会持续挂到同一张单上）
+async fn fetch_alerts(state: &AppState, id: i64) -> Result<Vec<WorkOrderAlert>, AppError> {
+    let alerts = sqlx::query_as::<_, WorkOrderAlert>(
+        "SELECT id, alert_code, level, content, status, occurred_at
+           FROM alerts WHERE work_order_id = ?1 ORDER BY id ASC",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(alerts)
 }
 
 async fn insert_log(
