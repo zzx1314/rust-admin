@@ -26,7 +26,10 @@ export const STATUS_TONES: Record<string, string> = {
   提示: "neutral",
   常规: "neutral",
   草稿: "neutral",
-  已发布: "ok"
+  已发布: "ok",
+  // 班次设置里的启用状态
+  启用中: "ok",
+  已停用: "neutral"
 };
 
 export function statusTone(status?: string | null): string {

@@ -561,6 +561,28 @@ export interface Shift {
   createdBy: number | null;
 }
 
+/** 班次定义：早 / 中 / 夜是默认班次，「班次设置」里可以自定义更多班次 */
+export interface ShiftSlot {
+  id: number;
+  name: string;
+  /** HH:MM */
+  startTime: string;
+  /** HH:MM；结束时间不晚于开始时间表示跨零点 */
+  endTime: string;
+  /** `08:00 - 16:00`（服务端按起止时间拼好） */
+  timeRange: string;
+  color: string;
+  /** 周视图行顺序，小的在上 */
+  sortOrder: number;
+  /** 停用的班次不出现在新建排班下拉里，历史排班照旧显示 */
+  active: boolean;
+  note: string | null;
+  /** 引用该班次的排班条数：有引用时只能停用，不能删除 */
+  shiftCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 /** 整段复制排班的跳过明细（目标时段已占用 / 目标区间天数不足） */
 export interface ShiftCopySkip {
   shiftDate: string;

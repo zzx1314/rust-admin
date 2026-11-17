@@ -805,6 +805,43 @@ pub struct ShiftCopyResult {
     pub skipped: Vec<ShiftCopySkip>,
 }
 
+/// 班次定义：早 / 中 / 夜三班是迁移插入的默认行，现场可以自定义更多班次。
+#[derive(Debug, FromRow, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ShiftSlot {
+    pub id: i64,
+    pub name: String,
+    /// `HH:MM`
+    pub start_time: String,
+    /// `HH:MM`；`end <= start` 表示跨零点
+    pub end_time: String,
+    /// `08:00 - 16:00`，由 start_time / end_time 现算（前端不用自己拼）
+    pub time_range: String,
+    pub color: String,
+    /// 周视图行顺序，小的在上
+    pub sort_order: i64,
+    /// 停用的班次不出现在新建排班下拉里，历史排班照旧显示
+    pub active: bool,
+    pub note: Option<String>,
+    /// 引用该班次的排班条数：有引用的班次不允许删除，只能停用
+    pub shift_count: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// 班次新增 / 修改：只传要改的字段（新建时名称、开始、结束必填）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShiftSlotRequest {
+    pub name: Option<String>,
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
+    pub color: Option<String>,
+    pub sort_order: Option<i64>,
+    pub active: Option<bool>,
+    pub note: Option<String>,
+}
+
 /// 责任人库统计窗口：只影响「本周班次」列
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

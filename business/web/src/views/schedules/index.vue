@@ -2,8 +2,8 @@
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { parkApi, shiftApi, staffApi, taskApi, zoneApi } from "@/api/ops";
-import type { Park, Shift, Staff, StaffImportResult, Task, Zone } from "@/api/types";
+import { parkApi, shiftApi, shiftSlotApi, staffApi, taskApi, zoneApi } from "@/api/ops";
+import type { Park, Shift, ShiftSlot, Staff, StaffImportResult, Task, Zone } from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import AppIcon from "@/components/AppIcon.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
@@ -11,12 +11,8 @@ import { initials } from "@/utils/format";
 
 const router = useRouter();
 
-/** 班次固定三班：时段与后端 `SLOT_RANGES` 保持一致 */
-const SHIFT_SLOTS = [
-  { name: "早班", time: "08:00 - 16:00" },
-  { name: "中班", time: "16:00 - 00:00" },
-  { name: "夜班", time: "00:00 - 08:00" }
-];
+/** 班次由「班次设置」维护（早 / 中 / 夜是默认三班，可自定义多个） */
+const shiftSlots = ref<ShiftSlot[]>([]);
 const WEEK_LABELS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 const SHIFT_STATUSES = ["已发布", "待确认", "草案"];
 
@@ -35,7 +31,7 @@ const editingShiftId = ref<number | null>(null);
 const isEditingShift = computed(() => editingShiftId.value !== null);
 const shiftForm = reactive({
   shiftDate: "",
-  slot: "早班",
+  slot: "",
   staffId: null as number | null,
   /** 责任人已从库里移除时按姓名保留负责人，避免编辑时丢人 */
   ownerName: "",
@@ -62,6 +58,19 @@ const COPY_MODES = [
   { value: "skip", label: "跳过目标时段已有排班" },
   { value: "replace", label: "覆盖目标时段已有排班" }
 ];
+
+/** 班次设置：自定义 / 修改 / 停用班次（时段由后端统一拼成 `08:00 - 16:00`） */
+const slotVisible = ref(false);
+const savingSlot = ref(false);
+const slotForm = reactive({
+  id: null as number | null,
+  name: "",
+  startTime: "08:00",
+  endTime: "16:00",
+  sortOrder: 0,
+  active: true
+});
+const isEditingSlot = computed(() => slotForm.id !== null);
 
 const staffVisible = ref(false);
 const ruleVisible = ref(false);
@@ -134,6 +143,33 @@ const weekLabel = computed(() => {
 function shiftsOfCell(date: string, slot: string) {
   return shifts.value.filter(shift => shift.shiftDate === date && shift.slot === slot);
 }
+
+/**
+ * 周视图的行：启用中的班次（按 `sortOrder`）＋本周排班里出现过的停用 / 已删班次。
+ * 后半句是为了让「班次被停用后」历史排班还能看见，否则卡片会凭空消失。
+ */
+const weekSlots = computed(() => {
+  const rows = shiftSlots.value
+    .filter(slot => slot.active)
+    .map(slot => ({ name: slot.name, time: slot.timeRange, active: true }));
+  const known = new Set(rows.map(row => row.name));
+  for (const shift of shifts.value) {
+    if (!shift.slot || known.has(shift.slot)) continue;
+    known.add(shift.slot);
+    const slot = shiftSlots.value.find(item => item.name === shift.slot);
+    rows.push({
+      name: shift.slot,
+      time: slot?.timeRange ?? shift.timeRange,
+      active: slot?.active ?? false
+    });
+  }
+  return rows;
+});
+
+/** 新建 / 编辑排班下拉：启用中的班次，再加上正在编辑的那条排班自己的班次 */
+const slotOptionsOfForm = computed(() =>
+  shiftSlots.value.filter(slot => slot.active || slot.name === shiftForm.slot)
+);
 
 // ---------------------------------------------------------------- 拖拽复制
 //
@@ -335,6 +371,85 @@ function previewDay(value: string) {
   return `${value.slice(5)} ${weekday}`;
 }
 
+async function loadShiftSlots() {
+  shiftSlots.value = await shiftSlotApi.list();
+}
+
+function resetSlotForm() {
+  slotForm.id = null;
+  slotForm.name = "";
+  slotForm.startTime = "08:00";
+  slotForm.endTime = "16:00";
+  // 新增默认排到最后一行，不挤在早班前面
+  slotForm.sortOrder = (shiftSlots.value.at(-1)?.sortOrder ?? 0) + 1;
+  slotForm.active = true;
+}
+
+function editSlot(slot: ShiftSlot) {
+  slotForm.id = slot.id;
+  slotForm.name = slot.name;
+  slotForm.startTime = slot.startTime;
+  slotForm.endTime = slot.endTime;
+  slotForm.sortOrder = slot.sortOrder;
+  slotForm.active = slot.active;
+}
+
+/** 新增 / 修改班次：改名与改时段会同步刷到已排的班次（后端一个事务里做） */
+async function saveSlot() {
+  if (!slotForm.name.trim()) {
+    ElMessage.error("请填写班次名称");
+    return;
+  }
+  if (!slotForm.startTime || !slotForm.endTime) {
+    ElMessage.error("请填写开始与结束时间");
+    return;
+  }
+  savingSlot.value = true;
+  try {
+    const payload = {
+      name: slotForm.name.trim(),
+      startTime: slotForm.startTime,
+      endTime: slotForm.endTime,
+      sortOrder: slotForm.sortOrder,
+      active: slotForm.active
+    };
+    if (slotForm.id === null) {
+      await shiftSlotApi.create(payload);
+      ElMessage.success("班次已添加");
+    } else {
+      await shiftSlotApi.update(slotForm.id, payload);
+      ElMessage.success("班次已更新，已排的排班同步刷新名称与时段");
+    }
+    resetSlotForm();
+    await Promise.all([loadShiftSlots(), load()]);
+  } finally {
+    savingSlot.value = false;
+  }
+}
+
+/** 停用 / 启用：停用后不再出现在新建排班的下拉与周视图行里，历史排班保留 */
+async function toggleSlotActive(slot: ShiftSlot) {
+  await shiftSlotApi.update(slot.id, { active: !slot.active });
+  ElMessage.success(`班次「${slot.name}」已${slot.active ? "停用" : "启用"}`);
+  await Promise.all([loadShiftSlots(), load()]);
+}
+
+async function removeSlot(slot: ShiftSlot) {
+  if (slot.shiftCount > 0) {
+    ElMessage.warning(
+      `「${slot.name}」还有 ${slot.shiftCount} 条排班在用，不能删除；可以先停用，历史排班照旧保留`
+    );
+    return;
+  }
+  await ElMessageBox.confirm(`确定删除班次「${slot.name}」吗？`, "删除班次", {
+    type: "warning"
+  });
+  await shiftSlotApi.remove(slot.id);
+  ElMessage.success(`班次「${slot.name}」已删除`);
+  if (slotForm.id === slot.id) resetSlotForm();
+  await loadShiftSlots();
+}
+
 async function load() {
   loading.value = true;
   try {
@@ -375,7 +490,7 @@ watch(weekOffset, () => {
 function openShiftDialog(preset?: { date?: string; slot?: string }) {
   editingShiftId.value = null;
   shiftForm.shiftDate = preset?.date ?? weekDays.value.find(day => day.today)?.date ?? weekStart.value;
-  shiftForm.slot = preset?.slot ?? "早班";
+  shiftForm.slot = preset?.slot ?? shiftSlots.value.find(slot => slot.active)?.name ?? "";
   shiftForm.staffId = staff.value.find(item => item.status === "在岗")?.id ?? staff.value[0]?.id ?? null;
   shiftForm.ownerName = "";
   shiftForm.status = "已发布";
@@ -632,7 +747,8 @@ const statusTone = (status: string) =>
   status === "已发布" ? "ok" : status === "待确认" ? "warn" : "neutral";
 
 onMounted(async () => {
-  await Promise.all([load(), loadOptions()]);
+  resetSlotForm();
+  await Promise.all([load(), loadOptions(), loadShiftSlots()]);
 });
 </script>
 
@@ -643,6 +759,9 @@ onMounted(async () => {
         <button class="btn" @click="staffVisible = true">
           <AppIcon name="user" />责任人库
         </button>
+        <button class="btn" @click="slotVisible = true">
+          <AppIcon name="shift" />班次设置
+        </button>
         <button class="btn primary" @click="openShiftDialog()">
           <AppIcon name="plus" />新建排班
         </button>
@@ -652,7 +771,7 @@ onMounted(async () => {
     <div class="shift-bar">
       <AppIcon name="shift" />
       <span class="sb-txt">
-        <b>排班是计划层：</b>为每一条巡检计划指定「谁负责」，按周排布早 / 中 / 夜班。排班决定责任归属，
+        <b>排班是计划层：</b>为每一条巡检计划指定「谁负责」，按周排布班次（默认早 / 中 / 夜班，可在「班次设置」里自定义）。排班决定责任归属，
         工单负责具体任务的派发与闭环 —— 派单时会优先推荐当班责任人。
       </span>
       <div class="sb-week">
@@ -724,9 +843,10 @@ onMounted(async () => {
           >
             {{ day.weekday }}<small>{{ day.label }}</small>
           </div>
-          <template v-for="shiftSlot in SHIFT_SLOTS" :key="shiftSlot.name">
+          <template v-for="shiftSlot in weekSlots" :key="shiftSlot.name">
             <div class="wg-slot">
               <b>{{ shiftSlot.name }}</b><small>{{ shiftSlot.time }}</small>
+              <small v-if="!shiftSlot.active" class="muted">（已停用）</small>
             </div>
             <div
               v-for="day in weekDays"
@@ -1002,8 +1122,12 @@ onMounted(async () => {
         <div class="field">
           <label>班次 <em>*</em></label>
           <select v-model="shiftForm.slot" class="select">
-            <option v-for="shiftSlot in SHIFT_SLOTS" :key="shiftSlot.name" :value="shiftSlot.name">
-              {{ shiftSlot.name }}（{{ shiftSlot.time }}）
+            <option
+              v-for="shiftSlot in slotOptionsOfForm"
+              :key="shiftSlot.id"
+              :value="shiftSlot.name"
+            >
+              {{ shiftSlot.name }}（{{ shiftSlot.timeRange }}）{{ shiftSlot.active ? "" : " · 已停用" }}
             </option>
           </select>
         </div>
@@ -1248,6 +1372,103 @@ onMounted(async () => {
       </div>
     </el-dialog>
 
+    <!-- 班次设置：默认早 / 中 / 夜班可改可停用，也可自定义更多班次 -->
+    <el-dialog v-model="slotVisible" title="班次设置" width="820px" @closed="resetSlotForm">
+      <div class="link-hint" style="margin-bottom: 12px">
+        班次名称与时段在这里维护。改名称 / 时段会同步刷新已排的排班（一个班次不会出现两种时段）；
+        停用后不再出现在「新建排班」下拉与周视图里，历史排班照旧显示；还有排班在用的班次不能删除。
+        结束时间不晚于开始时间表示<b>跨零点</b>（如 16:00 - 00:00、22:00 - 06:00）。
+      </div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>顺序</th>
+              <th>班次</th>
+              <th>时段</th>
+              <th>状态</th>
+              <th>排班数</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="slot in shiftSlots" :key="slot.id">
+              <td class="mono">{{ slot.sortOrder }}</td>
+              <td>
+                <span class="tag blue">{{ slot.name }}</span>
+              </td>
+              <td class="mono">{{ slot.timeRange }}</td>
+              <td>
+                <StatusBadge :status="slot.active ? '启用中' : '已停用'" />
+              </td>
+              <td class="mono">{{ slot.shiftCount }}</td>
+              <td>
+                <div class="actions">
+                  <button class="btn sm" @click="editSlot(slot)">
+                    <AppIcon name="edit" />修改
+                  </button>
+                  <button class="btn sm" @click="toggleSlotActive(slot)">
+                    {{ slot.active ? "停用" : "启用" }}
+                  </button>
+                  <button
+                    class="btn sm ghost icon"
+                    title="删除班次（有排班在用时请改为停用）"
+                    @click="removeSlot(slot)"
+                  >
+                    <AppIcon name="trash" />
+                  </button>
+                </div>
+              </td>
+            </tr>
+            <tr v-if="!shiftSlots.length">
+              <td colspan="6">
+                <div class="empty-box">还没有班次，先在下方添加一个</div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="staff-form">
+        <div class="staff-form-head">
+          <b>{{ isEditingSlot ? "修改班次" : "新增班次" }}</b>
+          <span v-if="isEditingSlot" class="mono muted">{{ slotForm.name }}</span>
+        </div>
+        <div class="staff-form-grid">
+          <div class="field">
+            <label>班次名称 <em>*</em></label>
+            <input v-model="slotForm.name" class="input" placeholder="如 白班 / 晚高峰班" />
+          </div>
+          <div class="field">
+            <label>开始时间 <em>*</em></label>
+            <input v-model="slotForm.startTime" class="input" type="time" />
+          </div>
+          <div class="field">
+            <label>结束时间 <em>*</em></label>
+            <input v-model="slotForm.endTime" class="input" type="time" />
+          </div>
+          <div class="field">
+            <label>行顺序</label>
+            <input v-model.number="slotForm.sortOrder" class="input" type="number" min="0" />
+          </div>
+          <div class="field">
+            <label>状态</label>
+            <select v-model="slotForm.active" class="select">
+              <option :value="true">启用中</option>
+              <option :value="false">停用</option>
+            </select>
+          </div>
+        </div>
+        <div class="staff-form-actions">
+          <button v-if="isEditingSlot" class="btn" @click="resetSlotForm">取消修改</button>
+          <button class="btn primary" :disabled="savingSlot" @click="saveSlot">
+            <AppIcon :name="isEditingSlot ? 'check' : 'plus'" />
+            {{ isEditingSlot ? "保存修改" : "添加班次" }}
+          </button>
+        </div>
+      </div>
+    </el-dialog>
+
     <!-- 责任人库 Excel 导入：下载模板 → 选择文件 → 逐行结果 -->
     <el-dialog
       v-model="importVisible"
@@ -1343,7 +1564,7 @@ onMounted(async () => {
           <span class="policy-n">1</span>
           <div style="flex: 1">
             <b>计划驱动排班</b>
-            <p>每条巡检计划在计划层指定责任人，按早 / 中 / 夜班落到周视图格子里。</p>
+            <p>每条巡检计划在计划层指定责任人，按班次（默认早 / 中 / 夜班，可自定义）落到周视图格子里。</p>
           </div>
           <span class="tag blue">计划</span>
         </div>

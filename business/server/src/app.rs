@@ -200,6 +200,16 @@ pub fn build_router(state: AppState) -> Router {
             "/staff/{id}",
             axum::routing::put(schedules::update_staff).delete(schedules::delete_staff),
         )
+        // 班次设置：早 / 中 / 夜三班之外可以自定义（名称 + 时段 + 行顺序 + 停用）
+        .route(
+            "/shift-slots",
+            get(schedules::list_shift_slots).post(schedules::create_shift_slot),
+        )
+        .route(
+            "/shift-slots/{id}",
+            axum::routing::put(schedules::update_shift_slot)
+                .delete(schedules::delete_shift_slot),
+        )
         .route(
             "/shifts",
             get(schedules::list_shifts).post(schedules::create_shift),

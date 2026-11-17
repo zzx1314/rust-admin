@@ -3086,6 +3086,174 @@ async fn shift_copy_aligns_periods_and_handles_conflicts() {
     );
 }
 
+/// 班次自定义：默认早 / 中 / 夜可改，也能自己加「白班」这类班次。
+///
+/// 关注三件事：时段一律由服务端按班次表算（前端只传班次名）、
+/// 改名 / 改时段要同步到已排的排班、被排班引用的班次只能停用不能删。
+#[tokio::test]
+async fn shift_slots_are_customizable() {
+    let (state, _db) = test_state().await;
+    let app = build_router(state);
+    let token = login(&app).await;
+
+    let auth = |method: &str, path: &str| {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let send = |request: Request<Body>| {
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            (response.status(), json_body(response).await)
+        }
+    };
+    let post = |path: &str, body: &str| {
+        let mut request = auth("POST", path);
+        *request.body_mut() = Body::from(body.to_string());
+        request
+    };
+    let put = |path: &str, body: &str| {
+        let mut request = auth("PUT", path);
+        *request.body_mut() = Body::from(body.to_string());
+        request
+    };
+
+    // 迁移插入的三个默认班次：名称 / 时段 / 顺序都在，且都是启用中
+    let (status, slots) = send(auth("GET", "/api/shift-slots")).await;
+    assert_eq!(status, StatusCode::OK, "班次列表应可读: {slots}");
+    let names: Vec<&str> = slots["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|slot| slot["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["早班", "中班", "夜班"], "应有三个默认班次");
+    assert_eq!(slots["data"][0]["timeRange"], "08:00 - 16:00");
+    assert_eq!(slots["data"][2]["timeRange"], "00:00 - 08:00");
+    assert_eq!(slots["data"][0]["active"], true);
+
+    // 自定义班次：`8:00` 这种写法后端会归一成 `08:00`，时段由服务端拼
+    let (status, created) = send(post(
+        "/api/shift-slots",
+        r#"{"name":"白班","startTime":"8:00","endTime":"20:00"}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "自定义班次应成功: {created}");
+    let slot_id = created["data"]["id"].as_i64().unwrap();
+    assert_eq!(created["data"]["timeRange"], "08:00 - 20:00");
+    assert_eq!(created["data"]["sortOrder"], 4, "不指定顺序应排到最后");
+    assert_eq!(created["data"]["shiftCount"], 0);
+
+    // 名称重复 / 时间格式不合法 → 400 且提示原因
+    let (status, dup) = send(post(
+        "/api/shift-slots",
+        r#"{"name":"白班","startTime":"08:00","endTime":"20:00"}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "重名班次应拒绝: {dup}");
+    let (status, bad_time) = send(post(
+        "/api/shift-slots",
+        r#"{"name":"早高峰","startTime":"7点","endTime":"09:00"}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "非法时间应拒绝: {bad_time}");
+    assert!(
+        bad_time["msg"].as_str().unwrap_or_default().contains("HH:MM"),
+        "提示应说明时间格式: {bad_time}"
+    );
+
+    // 用自定义班次排班：时段跟着班次走，未知班次直接拒绝
+    let (status, staff) = send(post(
+        "/api/staff",
+        r#"{"name":"自定义班次责任人","role":"运维工程师"}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "准备责任人失败: {staff}");
+    let staff_id = staff["data"]["id"].as_i64().unwrap();
+    let (status, shift) = send(post(
+        "/api/shifts",
+        &format!(
+            r#"{{"shiftDate":"2032-05-01","slot":"白班","staffId":{staff_id},
+                "parkId":1,"status":"已发布"}}"#
+        ),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "自定义班次应能排班: {shift}");
+    assert_eq!(shift["data"]["timeRange"], "08:00 - 20:00");
+    let shift_id = shift["data"]["id"].as_i64().unwrap();
+
+    let (status, unknown) = send(post(
+        "/api/shifts",
+        &format!(
+            r#"{{"shiftDate":"2032-05-02","slot":"不存在的班次","staffId":{staff_id}}}"#
+        ),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "未知班次应拒绝: {unknown}");
+    assert!(
+        unknown["msg"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("班次设置"),
+        "提示应指路「班次设置」: {unknown}"
+    );
+
+    // 改时段 + 改名：已排的排班同步刷成新名称与新时段
+    let (status, renamed) = send(put(
+        &format!("/api/shift-slots/{slot_id}"),
+        r#"{"name":"早晚班","startTime":"08:00","endTime":"21:30"}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "修改班次应成功: {renamed}");
+    assert_eq!(renamed["data"]["name"], "早晚班");
+    assert_eq!(renamed["data"]["shiftCount"], 1);
+    let (_, shift_after) = send(auth("GET", &format!("/api/shifts/{shift_id}"))).await;
+    assert_eq!(shift_after["data"]["slot"], "早晚班");
+    assert_eq!(shift_after["data"]["timeRange"], "08:00 - 21:30");
+
+    // 还有排班在用时不允许删除，只能停用
+    let (status, in_use) = send(auth("DELETE", &format!("/api/shift-slots/{slot_id}"))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "在用班次不应能删: {in_use}");
+    assert!(
+        in_use["msg"].as_str().unwrap_or_default().contains("停用"),
+        "提示应建议改为停用: {in_use}"
+    );
+
+    // 停用后：列表里还在（active=false），新建排班不带班次时落到第一个启用班次
+    let (status, deactivated) = send(put(
+        &format!("/api/shift-slots/{slot_id}"),
+        r#"{"active":false}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "停用班次应成功: {deactivated}");
+    assert_eq!(deactivated["data"]["active"], false);
+    let (status, fallback) = send(post(
+        "/api/shifts",
+        &format!(
+            r#"{{"shiftDate":"2032-05-03","staffId":{staff_id},"status":"草案"}}"#
+        ),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "不传班次应落到默认班次: {fallback}");
+    assert_eq!(fallback["data"]["slot"], "早班");
+
+    // 没被引用的班次可以直接删
+    let (status, spare) = send(post(
+        "/api/shift-slots",
+        r#"{"name":"临时班","startTime":"12:00","endTime":"14:00"}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "新增临时班次失败: {spare}");
+    let spare_id = spare["data"]["id"].as_i64().unwrap();
+    let (status, deleted) = send(auth("DELETE", &format!("/api/shift-slots/{spare_id}"))).await;
+    assert_eq!(status, StatusCode::OK, "未使用的班次应能删除: {deleted}");
+}
+
 /// 告警自动派单：告警 → 当天排班找到责任人 → 自动建工单 → 推送消息带上责任人与工单号。
 ///
 /// 这里刻意用 `Notifier::disabled()` 的 state：**派单与建单不能依赖企业微信配置**，

@@ -19,6 +19,7 @@ import type {
   Task,
   Shift,
   ShiftCopyResult,
+  ShiftSlot,
   ShiftStats,
   Staff,
   StaffImportResult,
@@ -251,6 +252,14 @@ export const shiftApi = {
     post<Shift>(`/shifts/${id}/duplicate`, data),
   /** 整段复制（上一周 / 上个月 → 目标区间） */
   copy: (data: object) => post<ShiftCopyResult>("/shifts/copy", data)
+};
+
+/** 班次设置：早 / 中 / 夜可改，也可自定义更多班次（名称 + 时段 + 顺序 + 停用） */
+export const shiftSlotApi = {
+  list: () => get<ShiftSlot[]>("/shift-slots"),
+  create: (data: object) => post<ShiftSlot>("/shift-slots", data),
+  update: (id: number, data: object) => put<ShiftSlot>(`/shift-slots/${id}`, data),
+  remove: (id: number) => del<boolean>(`/shift-slots/${id}`)
 };
 
 /** 工单（执行层）：派发 → 接单 → 处理 → 验收 → 关闭 */
