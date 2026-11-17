@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>华郅数据采集背包 · 离线直连演示</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <div class="title-wrap">
+      <h1>华郅数据采集背包 · 离线直连演示</h1>
+      <div class="subtitle" id="subtitle" title="双击查看原始遥测数据">仅供内部使用</div>
+    </div>
+    <div class="header-right">
+      <div class="conn" id="conn">连接中…</div>
+      <a href="/location" class="loc-link">设备定位 →</a>
+    </div>
+  </header>
+
+  <!-- 视频区：4 路摄像头 + 机器狗前置 + 红外（3 列，正好两行） -->
+  <section class="videos">
+    <div class="video-card" data-stream="cam0" data-title="左前">
+      <div class="vc-title">左前</div>
+      <video autoplay playsinline muted></video>
+      <div class="vc-msg">连接中…</div>
+    </div>
+    <div class="video-card" data-stream="cam1" data-title="右前">
+      <div class="vc-title">右前</div>
+      <video autoplay playsinline muted></video>
+      <div class="vc-msg">连接中…</div>
+    </div>
+    <div class="video-card" data-stream="cam2" data-title="右后">
+      <div class="vc-title">右后</div>
+      <video autoplay playsinline muted></video>
+      <div class="vc-msg">连接中…</div>
+    </div>
+    <div class="video-card" data-stream="cam3" data-title="左后">
+      <div class="vc-title">左后</div>
+      <video autoplay playsinline muted></video>
+      <div class="vc-msg">连接中…</div>
+    </div>
+    <div class="video-card infrared" data-stream="dog-ipcam" data-title="红外">
+      <div class="vc-title">红外网络摄像头</div>
+      <video autoplay playsinline muted></video>
+      <div class="vc-msg">连接中…</div>
+    </div>
+    <div class="video-card" data-stream="dogcam" data-title="机器狗前置">
+      <div class="vc-title">机器狗前置</div>
+      <video autoplay playsinline muted></video>
+      <div class="vc-msg">连接中…</div>
+    </div>
+  </section>
+
+  <!-- 状态区 -->
+  <section class="panels">
+    <div class="panel">
+      <h3>温湿度传感器（SHT4x）
+        <button id="btn-temp" class="mini" title="刷新温湿度" aria-label="刷新温湿度">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+            <polyline points="21 3 21 9 15 9"/>
+          </svg>
+        </button>
+      </h3>
+      <div id="temp" class="kv">—</div>
+    </div>
+
+    <div class="panel wide">
+      <h3>4G 信号
+        <button id="btn-g4" class="mini" title="刷新4G" aria-label="刷新4G">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+            <polyline points="21 3 21 9 15 9"/>
+          </svg>
+        </button>
+      </h3>
+      <div id="g4" class="kv">—</div>
+    </div>
+
+    <div class="panel">
+      <h3>WiFi 扫描 <span id="wifi-count" class="badge">0</span>
+        <button id="btn-wifi" class="mini" title="刷新WiFi" aria-label="刷新WiFi">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+            <polyline points="21 3 21 9 15 9"/>
+          </svg>
+        </button>
+      </h3>
+      <div id="wifi" class="list">—</div>
+    </div>
+
+    <div class="panel">
+      <h3>环境信息
+        <button id="btn-env" class="mini" title="刷新环境信息" aria-label="刷新环境信息">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+            <polyline points="21 3 21 9 15 9"/>
+          </svg>
+        </button>
+      </h3>
+      <div id="env" class="kv">—</div>
+    </div>
+
+    <div class="panel">
+      <h3>设备 SN
+        <button id="btn-sn" class="mini" title="刷新SN" aria-label="刷新SN">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+            <polyline points="21 3 21 9 15 9"/>
+          </svg>
+        </button>
+      </h3>
+      <div id="sn" class="kv">—</div>
+    </div>
+
+    <div class="panel">
+      <h3>风扇 / LED / 补光</h3>
+      <div class="kv">
+        <div>风扇：正常</div>
+        <div>补光灯：<span id="fill-state">关闭</span></div>
+      </div>
+      <div class="btns">
+        <button id="btn-led">LED 闪烁</button>
+        <button id="btn-fill-on">补光 开</button>
+        <button id="btn-fill-off">补光 关</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>SOS / STOP</h3>
+      <div class="kv sos">
+        <div id="sos" class="ind off">SOS：未触发</div>
+        <div id="stop" class="ind off">STOP：未触发</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>聆思小板
+        <button id="btn-lingsi-refresh" class="mini" title="刷新聆思状态" aria-label="刷新聆思状态">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+            <polyline points="21 3 21 9 15 9"/>
+          </svg>
+        </button>
+      </h3>
+      <div id="lingsi" class="kv">—</div>
+      <div class="btns">
+        <button id="btn-asr-start">启动服务</button>
+        <button id="btn-asr-stop">关闭服务</button>
+        <button id="btn-mode-call">call 模式</button>
+        <button id="btn-mode-voice">voice 模式</button>
+        <input id="vol" type="number" min="0" max="100" value="70" style="width:56px" />
+        <button id="btn-vol">音量设置</button>
+      </div>
+      <div id="lingsi-status-hint" class="hint warn"></div>
+
+      <!-- 模拟电话 phone 模式 -->
+      <div class="sub">
+        <div class="sub-h">模拟电话（phone）</div>
+        <div class="row">
+          <label>PC端IP</label>
+          <input id="phone-ip" type="text" value="192.168.234.1" />
+          <label>端口</label>
+          <input id="phone-port" type="text" value="5000" style="width:54px" />
+        </div>
+        <div class="btns">
+          <button id="btn-phone-start">发起通话</button>
+          <button id="btn-phone-stop">挂断</button>
+        </div>
+        <div id="phone-err" class="hint bad"></div>
+        <div class="hint">
+          <div id="phone-badge"></div>
+          <div>PC 端需运行对讲脚本（演示电脑可能未装 Python）：</div>
+          <ol class="steps">
+            <li>安装 Python：<code>winget install -e --id Python.Python.3.12</code>（装完重开 PowerShell）</li>
+            <li><code>python -m pip install sounddevice</code></li>
+            <li><code id="phone-run-cmd">python voice_call_pc.py --peer 板端IP --peer-port 5000 --local-port 5000</code></li>
+          </ol>
+          <div>脚本下载：<a href="/api/lingsi/voice_call_pc.py" target="_blank" download>voice_call_pc.py</a></div>
+        </div>
+      </div>
+
+      <!-- 播报内容 call 模式（带内容） -->
+      <div class="sub">
+        <div class="sub-h">播报内容（call）</div>
+        <div class="row">
+          <select id="call-loop">
+            <option value="0">单次</option>
+            <option value="1">循环</option>
+          </select>
+          <input id="call-text" type="text" maxlength="40"
+                 placeholder="输入播报内容（≤30汉字，仅中文）" />
+        </div>
+        <div class="btns">
+          <button id="btn-call-broadcast">开始播报</button>
+        </div>
+        <div id="call-hint" class="hint bad"></div>
+      </div>
+    </div>
+
+    <!-- AI 识别：可用场景 + 识别控制（默认关闭，演示时才开启） -->
+    <div class="panel">
+      <h3>AI 识别 <span id="detect-count" class="badge">0</span>
+        <button id="btn-detect-refresh" class="mini" title="刷新场景清单" aria-label="刷新场景清单">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+            <polyline points="21 3 21 9 15 9"/>
+          </svg>
+        </button>
+      </h3>
+      <div id="detect" class="detect">加载中…</div>
+
+      <div class="sub">
+        <div class="sub-h">识别控制</div>
+        <div class="row">
+          <label>场景</label>
+          <select id="detect-task" title="选择要识别的场景（每个场景 = 一个模型包）"></select>
+          <label>阈值</label>
+          <input id="detect-conf" type="number" min="0.05" max="0.95" step="0.05" value="0.25" style="width:56px" title="置信度阈值，越高越严格" />
+        </div>
+        <div class="detect-sub-h">识别类别 <span class="detect-muted">（勾选后才在画面中显示）</span></div>
+        <div id="detect-labels" class="detect-checks"></div>
+        <div class="detect-sub-h">AI 识别目标（五路单选，默认机器狗前置）</div>
+        <div id="detect-cams" class="detect-checks"></div>
+        <div id="dogcam-hint" class="hint warn"></div>
+        <div class="row">
+          <label>帧率</label>
+          <input id="detect-fps" type="number" min="1" max="12" value="6" style="width:44px" title="单路独占 NPU 时每秒推理次数；状态栏显示物理上限与实测帧率" />
+        </div>
+        <div class="btns">
+          <button id="btn-detect-start">开始识别</button>
+          <button id="btn-detect-stop">停止识别</button>
+        </div>
+        <div id="detect-status" class="detect-status">未开启</div>
+        <div id="detect-err" class="hint bad"></div>
+      </div>
+
+      <div id="detect-note" class="detect-note">开启 AI 后只能选五路中的一路（默认机器狗前置），NPU 独占该路。框和标签在背包本地烧进视频，页面直接播放带框的 preview 流，浏览器不再叠加坐标；切换目标路时该路卡片自动切换画面。板端画框未就绪时自动回退浏览器叠加并在状态栏提示。状态栏可看物理上限与实测帧率</div>
+    </div>
+  </section>
+
+  <pre id="dbg" class="dbg" hidden></pre>
+
+  <script src="/static/reader.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

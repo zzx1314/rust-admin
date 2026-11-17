@@ -1,0 +1,4 @@
+{
+  "opencellid": "在此填入 OpenCellID 的 32 位 hex key（可选，全球库但国内覆盖弱，作为 cellocation 命中失败后的补充）",
+  "note": "cellocation 国内基站库（http://api.cellocation.com:84/cell/）免 key，默认可用，无需在此配置。若留空或文件不存在，则只用 cellocation + IP 兜底；小区命中即几十~几百米精度。"
+}

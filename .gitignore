@@ -1,0 +1,8 @@
+# 离线安装用的本地包目录（pip download -d ./package 生成，已在 README 文档化）
+backend/package/
+
+# Python 字节码缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc

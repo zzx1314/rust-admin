@@ -1,0 +1,584 @@
+# 数据采集背包 · 离线直连演示 Dashboard
+
+方案 A：板端 Python Agent（FastAPI） + 前端 WebRTC Dashboard。  
+Windows 侧**零安装**——只需用 Chrome 打开 `http://192.168.234.200:8000`。
+
+## 架构
+
+```
+USB 摄像头(usbcam0-3, MJPG/720p30)
+      │ ffmpeg 转 H264(h264_rkmpp) 推 RTSP
+      ▼
+snap mediamtx(复用现场已有实例)  ──RTSP:8554──▶ dog-ipcam(红外, 已由现场提供)
+      │ WebRTC WHEP(:8889)         ┌───────────────┐
+      ▼                            │ 浏览器 WebRTC  │
+  Agent(FastAPI :8000)  ◀──REST/SSE──▶ Dashboard(Chrome, 零安装)
+  （封装 SHT4x/4G/WiFi/环境/SSD/风扇/聆思 采集 + LED/补光/聆思 控制 + SOS·STOP 监听）
+```
+
+**视频协议（重要）**
+
+- 浏览器**无法原生播放 RTSP**，因此 5 路视频统一经 **mediamtx 的 WebRTC(WHEP)** 低延迟拉流。
+- 前端使用 mediamtx 官方 `reader.js`（`static/reader.js`，已随项目内置），  
+  连接 `http://<板IP>:8889/<stream>/whep`。
+- 若 WHEP 被跨域拦截，前端会**自动回退**到 mediamtx 自带播放页 `http://<板IP>:8889/<stream>`（同源，无跨域问题）。
+- **注意：VLC 能收 RTSP 只证明 `:8554` 监听正常，不等于 `:8889` 的 WebRTC 已开。**  
+  浏览器视频依赖 WebRTC，请用下方命令确认/开启（见部署第 3 步）。
+
+其余（温湿度/4G/WiFi/环境/SSD/风扇/聆思）经 Agent 的 REST/SSE 实时展示；  
+LED 闪烁、补光灯开关由 Agent 控制接口触发；SOS/STOP 经 evdev 实时上报。
+
+## 目录
+
+```
+backpack_dashboard/
+├── backend/
+│   ├── agent.py          # FastAPI 主程序
+│   ├── config.py         # 全部可调参数（设备路径/端口/映射）
+│   ├── telemetry.py      # SHT4x/4G/WiFi/环境/SSD/风扇/聆思 采集
+│   ├── control.py        # LED 闪烁 / 补光开关
+│   ├── stream.py         # ffmpeg 推流编排 + 自动拉起
+│   ├── buttons.py        # SOS/STOP evdev 监听
+│   ├── requirements.txt
+│   └── start.sh          # 启动脚本
+├── frontend/
+│   ├── index.html
+│   └── static/{app.js,style.css}
+├── mediamtx/
+│   └── mediamtx.yml      # RTSP + WebRTC 配置
+└── README.md
+```
+
+## 部署到背包核心板（Ubuntu / RK3576）
+
+1. 拷贝整个 `backpack_dashboard/` 到板端，例如 `/root/backpack_dashboard/`。
+2. 安装 Python 依赖（一次性，**联网/离线二选一**）：
+
+   **方式 A：联网安装**（板端能访问 PyPI 时，最简单）
+   ```bash
+   cd /root/backpack_dashboard/backend
+   pip3 install -r requirements.txt
+   ```
+
+   **方式 B：离线安装**（板端无网络，但手头有另一台能上网的同架构机器时）
+
+   > 板端 CPU 是 RK3576（aarch64），下载包必须也在 **aarch64 Linux** 上做，否则
+   > pip 拉到的 x86_64 wheel 装不上去；`evdev` 还会因缺 `libevdev` 头文件导致本地编译失败。
+
+   ① 在**能上网的同架构机器**上把全部 whl 下载到 `./package/`：
+   ```bash
+   cd /root/backpack_dashboard/backend
+   mkdir -p package
+   pip3 download \
+       --dest ./package \
+       --requirement requirements.txt
+   ```
+   下载完成后 `./package/` 里会有 `fastapi`、`uvicorn`、`pyserial`、`evdev`
+   以及它们的全部传递依赖（whl 文件）。
+
+   ② 把整个 `./package/` 目录**拷贝到板端**（任选一种方式：U盘、`scp -r`、网线直传等）：
+   ```bash
+   # 假设板端开了 ssh，从下载机执行：
+   scp -r package root@192.168.234.200:/root/backpack_dashboard/backend/
+   ```
+
+   ③ 在板端**离线安装**（pip 禁止访问网络索引，只从 `./package/` 找包）：
+   ```bash
+   cd /root/backpack_dashboard/backend
+   pip3 install \
+       --no-index \
+       --find-links ./package \
+       --requirement requirements.txt
+   ```
+   `--no-index` 是关键——告诉 pip 不要去 PyPI 找，强制只用本地 `./package/` 里的 whl。
+   这样即便现场临时断网也能完成安装。
+
+   > `package/` 目录与平台/Python 版本绑定、体积大，已在 `.gitignore` 中排除，
+   > 不要进版本控制。
+3. 确认 mediamtx（snap）已安装并正在运行，且 **WebRTC 监听 `:8889` 已开启**（浏览器靠 WebRTC 拉流）：
+   ```bash
+   sudo snap install mediamtx
+   sudo snap connect mediamtx:network
+
+   # 查看当前 snap 配置（确认 webrtcAddress 为 :8889、webrtc 开启）
+   sudo snap get mediamtx
+
+   # 若 WebRTC 未开，编辑 snap 配置文件后重启：
+   sudo vim /var/snap/mediamtx/common/mediamtx.yml
+   #   设 webrtc: yes
+   #      webrtcAddress: :8889
+   #      webrtcAllowOrigin: '*'      # 允许跨域 WHEP（默认即 *，保留即可）
+   sudo snap restart mediamtx
+
+   # 验证 WebRTC WHEP 端点是否就绪（返回 200/204 即正常）：
+   curl -s -o /dev/null -w "WHEP HTTP %{http_code}\n" -X OPTIONS http://127.0.0.1:8889/cam0/whep
+   ```
+   > 红外 `dog-ipcam` 现已由该 mediamtx 提供（VLC 可拉 rtsp://192.168.234.200:8554/dog-ipcam），  
+   > 本项目**不再启动第二个 mediamtx**，只把四路摄像头推到这个已有实例。  
+   > 浏览器视频能否出图，取决于 `:8889` 的 WebRTC 是否就绪，与 RTSP 是否可用无关。
+4. 确认 H264 硬编码可用（否则自动回退软编 libx264，CPU 占用更高）：
+   ```bash
+   ffmpeg -hide_banner -encoders 2>/dev/null | grep h264_rkmpp
+   # 有输出即可用；stream.py 启动时会自动探测并选择 h264_rkmpp / libx264
+   ```
+
+5. 启动（拉起 camera-init → 复用已有 mediamtx → ffmpeg 推流 → Agent）：
+   ```bash
+   sudo bash /root/backpack_dashboard/backend/start.sh
+   ```
+6. Windows 笔记本用网线直连背包，手动配置同网段 IP（如 192.168.234.x），  
+   浏览器打开 `http://192.168.234.200:8000`。
+
+## 需要按现场核对的可调项（config.py / 环境变量）
+
+| 项                 | 默认值                        | 说明                                                                      |
+| ----------------- | -------------------------- | ----------------------------------------------------------------------- |
+| `MODEM_DEV`       | `/dev/ttyUSB2`             | 4G 模块 AT 口（已现场确认为 ttyUSB2）                                              |
+| `SHT4X_APP`       | `/root/wenshidu/sht4x_app` | 温湿度程序路径                                                                 |
+| `LED_TEST_BIN`    | `/root/led/test_rgbrun`    | LED 闪烁程序                                                                |
+| `BUTTON_MAP`      | SOS=639 / STOP=128         | **已用 evtest 实测**：code 639=未知键→SOS，code 128=KEY_STOP→STOP；若物理相反请交换两个环境变量 |
+| `FILL_LIGHT_GPIO` | `46`                       | 补光灯 GPIO；**设为 `-1` 可禁用**（该脚临时改作摄像头触发用时）                                 |
+| `CAM_TRIGGER_GPIO` | `-1`（未启用）                | 摄像头 2P 端子触发脚；**不可与 `FILL_LIGHT_GPIO` 同号**，同号时补光灯接口会直接拒绝执行 |
+| `H264_ENCODER`    | `h264_rkmpp`               | 摄像头→H264 编码器，缺失自动回退 `libx264`                                           |
+| `WIFI_IFACE`      | 自动探测                       | 留空自动取首个 `iw dev` 接口                                                     |
+| `ASR_SERVICE`     | `asr`                      | 聆思 asr 服务（默认不启动，测试时拉起）                                                  |
+| `LINGS_CMD_FIFO`  | `/tmp/voice_assistant_cmd` | 聆思模式/音量控制管道                                                             |
+| `DOG_RTSP_URL`    | 空（不启用）                  | 机器狗前置 RTSP 源；空则读 `backend/dog_rtsp_url`，两者都无则 relay 不启动                  |
+| `DOGCAM_WIDTH` / `DOGCAM_HEIGHT` | `1920` / `1080` | dogcam 输出尺寸（与四路 USB 的 `CAPTURE_*` 分开） |
+
+## 机器狗前置摄像头（`dogcam`）接入与 AI 识别
+
+3588 板卡提供一路现成 RTSP（实测 1920×1080@60 / H264 High@L4.0 / full-range）。
+`backend/relay.py` 把它拉到背包后重编码推到本机 mediamtx 的 `dogcam` path，
+随后 WHEP 播放、平台中继、AI 旁路抽帧都走同一路流。
+
+输出规格由板端环境变量控制，**默认保留 1080p**：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `DOGCAM_WIDTH` / `DOGCAM_HEIGHT` | `1920` / `1080` | 输出尺寸（等比拉伸，源是 16:9） |
+| `DOGCAM_FPS` | `30` | 输出恒定帧率（源实际只投递 ~25 帧/秒，由 `fps=` 补/丢帧拉平） |
+| `DOGCAM_BITRATE` | `4000k` | 目标码率；1080p30 ≈ 4Mbps，1080p60 要 8Mbps 左右 |
+| `DOGCAM_GOP` | `30` | 关键帧间隔 |
+
+> 故意不复用 `CAPTURE_*`：那一组同时被 `stream.py` 的 v4l2 采集使用（USB 摄像头只出
+> MJPG 720p30），改它会把 `cam0~cam3` 一起搞挂。带宽不够时只想让狗那一路回退到 720p，
+> 设 `DOGCAM_WIDTH=1280 DOGCAM_HEIGHT=720 DOGCAM_BITRATE=2000k` 即可。
+> 注意「背包烧录」（`preview`）那一路仍按 `CAPTURE_*` 缩放，改 `DOGCAM_*` 不会把它变成 1080p。
+
+**配置源地址（二选一，都不要把带密码的 URL 写进仓库）：**
+
+```bash
+# 方式 A：环境变量，随 start.sh 一起下发
+DOG_RTSP_URL='rtsp://<账号>:<密码>@192.168.234.1:8554/test' \
+  sudo bash /root/backpack_dashboard/backend/start.sh
+
+# 方式 B：板端本地文件（推荐，单行明文，权限收紧）
+printf '%s\n' 'rtsp://<账号>:<密码>@192.168.234.1:8554/test' \
+  > /root/backpack_dashboard/backend/dog_rtsp_url
+chmod 600 /root/backpack_dashboard/backend/dog_rtsp_url
+```
+
+- 密码里的 `#` / `!` 必须转义成 `%23` / `%21`；命令行里 URL 要用**单引号**。
+- 源 URL 只作为 ffmpeg 参数存在于进程内存，**不会**出现在 `/api/cameras`、`/api/relay/status`、前端或日志里；`ffmpeg` 的 stderr 直接丢弃，要看告警请按 `ffprobe核验回执_分辨率与编码参数修订建议.md` §8.2.5 命令块 D 手动跑。
+- 运行状态：`GET /api/relay/status` → `{"enabled","running","restarts","last_error","stream"}`。进程意外退出由 5 秒看门狗自动拉起，连续失败按 5/10/20/30s 退避。
+- 页面新增第 6 张视频卡（3 列网格正好两行）。版本 2 起 AI 识别改为**五路单选**，且**默认选中「机器狗前置」**（`dogcam`）；NPU 独占这一路，不再分时摊薄。检出事件 `cam` 字段自动记为 `dogcam`。
+
+### 背包未连接机器狗时的行为
+
+页面启动时会查询一次 `/api/relay/status`（1.2s 超时兜底），据此决定这一路的 UI：
+
+| 现场状态 | `enabled` | `running` | 第 6 张视频卡 | AI 单选项（默认 dogcam） |
+|---|---|---|---|---|
+| **从没配过源**（无 `dog_rtsp_url`、无环境变量，或 `DOG_RELAY_ENABLED=0`） | `false` | `false` | **保留**，白底橙框写明「未配置机器狗前置源」及配置方法；不创建 WHEP reader | **禁用 dogcam** 并自动补选第一路；状态栏与 AI 面板都说明「AI 目标已临时改为 cam0，配置并重启 agent 后恢复默认」 |
+| **配过源，但狗没连 / 3588 没推流** | `true` | 随看门狗重启抖动 | **保留**，WHEP 持续重试并显示连不上 | **保留且默认选中**（此时推流不通，建议现场改选四路之一） |
+| **配过源且狗正常连上** | `true` | `true` | 正常出图 | 默认选中 |
+
+判据是 `enabled`（**只看有没有配置源地址，不代表当前是否有流**），不是链路连通性。这样设计的原因：现场部署时配置文件是常驻的，临时拔网线不该把 UI 删掉——relay 的 5 秒看门狗会自动重连。
+
+> 早期版本在 `enabled=false` 时把整张卡 `display:none`，但那张卡仍在后台创建 WHEP reader，
+> 连不上就降级成 iframe：既留下一个黑框，又被状态栏统计成「1 路走了内置播放页」，用户完全
+> 不知道原因。现在未配置源时**根本不创建 reader**，改为一张写明恢复方法的占位卡，
+> 并在 `/api/detect/status` 里回传 `relay` 状态供状态栏解释。
+
+两点需要留意：
+
+- 该判断**只在页面加载时执行一次**。运行中才掉线不会自动收起卡片，恢复出图也不需要刷新（WHEP 自带重试）。刷新页面会按当时状态重新判断。
+- **已配置但狗没连时建议改选四路之一**：默认 AI 目标就是 `dogcam`，若 3588 没推流，`dogcam` path 没有 publisher，AI 抓帧线程会不断重连且拿不到帧。版本 2 只推一路，不再有「摊薄其它路帧率」的问题。
+
+### 版本 2：AI 单路选择 + 背包本地画框
+
+| 项 | 版本 1（已归档） | 版本 2（当前） |
+|---|---|---|
+| AI 目标 | cam0~cam3 + dogcam 可多选，NPU 分时 | **五路单选**，默认 `dogcam`，NPU 独占一路 |
+| 框在哪画 | 浏览器 SVG 叠加坐标 | **背包本地** `backend/osd.py` 烧进 H264 帧 |
+| 前端看到什么 | 干净流 + SVG 图层 | 该路卡片自动切到 `preview` 带框流，浏览器不再叠框 |
+| 画框链路异常 | — | 自动回退浏览器叠加，状态栏给出具体原因 |
+| 框上文字 | 英文类名 + 置信度 | **中文类名 + 同类数量**，例「火焰 3处」 |
+
+链路（仅 AI 开启时存在）：`mediamtx/<cam> → osd.py ffmpeg(overlay + 重编码) → mediamtx/preview → WHEP`。
+`osd.py` 用纯标准库按 640×360 RGBA 画布画矩形与 16×16 中英文点阵标签，
+经 FIFO 交给 ffmpeg 放大叠加并编码；**板端不需要 Pillow / OpenCV / 字体文件**，
+中文字模已预烘焙在 `backend/cjk_font.py`，AI 关闭时零额外负载。
+切换目标路时 `preview` 只换输入源、path 不变，前端无需重新协商 WHEP。
+
+#### 中文标签与同类数量（版本 2.2）
+
+框上文字形如 **`火焰 3处`**：中文类名来自模型包 `meta.json` 的 `labels.<类>.zh`，
+`3` 是**当前这一帧**通过类别 / 阈值过滤后、实际画出的同类框数（受 `DETECT_MAX_BOXES` 截断影响，
+即「可见框数」而非模型原始检出数）。文字由 `detect.py._emit()` **统一生成一次**并写入
+`box["text"]`，板端 OSD、SSE 事件、JSONL 落盘、浏览器 SVG 回退全部复用同一份，四处必然一致。
+
+SSE / 落盘的 `event["counts"]` 另给 `{模型类别名: 本帧数量}`，平台可直接消费，不必自己再数框。
+`/api/detect/status` 的 `label_format` 描述当前格式，`osd.missing_glyphs` 报告字库缺字。
+
+| 环境变量 | 默认 | 作用 |
+|---|---|---|
+| `DETECT_SHOW_COUNT` | `1` | 显示「N处」；设 `0` 只显示中文类名 |
+| `DETECT_SHOW_CONF` | `0` | 设 `1` 在末尾追加置信度（例「火焰 3处 0.90」） |
+| `DETECT_LABEL_UNIT` | `处` | 数量单位；改成别的汉字后需重跑字库生成脚本 |
+
+**改中文名 / 加新场景后必须重跑字库**（字模离线烘焙，运行时不会读字体）：
+
+```bash
+# 在开发机执行（需要 Pillow 与一个中文字体；Windows 默认用 SimHei）
+python backend/tools/gen_cjk_font.py
+# 把新生成的 backend/cjk_font.py 同步到板端，重启 agent
+```
+
+字库覆盖当前 `rknn/models/*/meta.json` 里全部中文别名 + 97 个汉字 + 95 个 ASCII 字符。
+**漏同步或新增汉字**时：该字在画面上显示为空心方框，状态栏列出 `中文字库缺字：…`；
+若整个 `cjk_font.py` 没同步，会自动降级回旧英文字库（汉字显示 `?`）并在状态栏告警。
+部署时 `backend/cjk_font.py` 必须与 `osd.py` 一起拷过去。
+
+相关配置：`DETECT_DEFAULT_CAM`（默认 `dogcam`）、`DETECT_ALLOWED_CAMS`（五路）、
+`DETECT_OSD_ENABLED`（设 `0` 强制回退浏览器画框，便于两种方案对照测试）、
+`DETECT_FPS`（默认 `6`，每秒推理次数）、
+`OSD_STREAM`（默认 `preview`）、`OSD_W` / `OSD_H` / `OSD_FPS`（视频 30fps）、
+`OSD_FIFO_FPS`（画布 8fps）、`OSD_LOW_LATENCY`（默认 `1`）、`OSD_GOP`（默认 `30`）、
+`OSD_FIFO`、`OSD_LOG`（默认 `/tmp/detect_osd.log`，ffmpeg 的 stderr 落点）、
+`OSD_READY_TIMEOUT`（默认 `8` 秒，启动确认窗口）。
+`/api/detect/status` 的 `osd.log_tail` 会带回 ffmpeg 日志最后 8 行，并显示在状态栏，
+现场无需 SSH 上板即可区分「path 未登记 / 源流无 publisher / 编码器不可用」。
+`mediamtx.yml` 必须包含 `preview: source: publisher`，**改完必须重启 mediamtx**。
+
+#### 画框链路排错（改完配置先看这三处）
+
+| 现象 | 判据 | 处理 |
+|---|---|---|
+| 点「开始识别」后该路画面变黑 / 卡片下方出现黑框 | `/api/detect/status` 里 `osd.ready=false` 或 `osd.error` 非空 | 多半是 mediamtx 没重启、`preview` path 未登记，或 `dogcam` 没有 publisher；看 `tail -50 /tmp/detect_osd.log` |
+| 狗的画面整张消失，四路正常 | `curl http://127.0.0.1:8000/api/relay/status` 的 `enabled` / `running` | `enabled=false` = 板端没找到 `backend/dog_rtsp_url`（或 `DOG_RTSP_URL`）：第 6 张卡显示白底橙框占位提示，AI 目标临时改为 cam0；写入源并重启 agent 即恢复。`enabled=true, running=false` = 3588 没推流，relay 5s 看门狗在重连 |
+| 状态栏显示「preview 流 N s 内未建立」 | `osd.ready=false`、`osd.error` 与 `osd.log_tail` | RTSP 输入已关掉默认流探测（`-analyzeduration 0`）；仍失败通常是 `preview` path 未登记、源流没有 publisher 或 `h264_rkmpp` 不可用。日志尾部已直接显示在状态栏 |
+| 状态栏显示「1 路走了内置播放页」 | 有卡片带 `no-overlay` 类 | 该路 WHEP 协商全失败后降级成内置 iframe。未配置 dogcam 源时不再创建 reader，此提示不应再因 dogcam 出现 |
+| 想立刻恢复原始画面 | — | 网页点「停止识别」；或设 `DETECT_OSD_ENABLED=0` 重启 agent，整体回退浏览器画框 |
+
+`osd.start()` 有 `OSD_READY_TIMEOUT`（默认 8 秒）启动确认窗口：ffmpeg 若因 path 不存在 /
+编码器不可用立刻退出就返回失败，前端**不会**把该路从干净流切走；只有画布确实被 ffmpeg
+读走（`ready=true`）才允许切 `preview`。这里曾固定 4 秒并要求 2 帧，而 ffmpeg 默认
+`analyzeduration` 最长 5 秒、探测没做完就不会打开画布 FIFO，于是把一个只是「慢一点」的
+进程直接 kill，永远报「preview 流 4s 内未建立」。现在 RTSP 输入加了
+`-analyzeduration 0 -probesize 32768 -flags low_delay`（与 `detect.py` 抓帧一致），
+窗口放宽到 8 秒、只要求写出 1 帧。
+切过去后若 6 秒内没收到视频轨（或 WHEP 协商全失败），
+前端会自动切回原干净流、恢复浏览器叠框，并在状态栏给出原因；
+同一个 OSD 会话内不再反复试探，避免每 3 秒状态轮询造成画面抖动。
+`osd.session` 每次启动 / 换目标路递增，重新点「开始识别」即可再试一次。
+WHEP 会话在切流时会主动 `DELETE`，不再在 mediamtx 侧堆积。
+
+#### AI 那一路的延时：原理与低延迟优化（版本 2.1）
+
+**先答「是不是每一帧都识别」：不是。** 四条节拍彼此独立：
+
+| 环节 | 频率 | 说明 |
+|---|---|---|
+| 视频采集 / 推流 | 30 fps | 由 `stream.py` / `relay.py` 决定，与 AI 无关 |
+| 旁路抓帧 | 8 fps | `detect.py` 的 ffmpeg 输出 MJPEG，只保留「最新一帧」覆盖写 |
+| NPU 推理 | 默认 6 次/秒 | `_sched_loop()` 补偿式节拍，单路独占；实测单次约 116ms，物理上限约 8.6 次/秒 |
+| 框叠加到视频 | 视频 30 fps / 画布 8 fps | 一次推理结果被缓存，画布复用同一份框，视频每帧都叠加 |
+
+所以「框」最多滞后 `抓帧 125ms + 推理 116ms ≈ 0.25s`。**几秒级延时与推理帧率无关**，
+只可能来自 preview 这条二次编码链路的帧队列。
+
+**6 秒是怎么堆出来的（旧版两个原因叠加）**
+
+1. **画布 FIFO 按 30fps 写，Python 跟不上。** 旧版要求纯标准库每 33ms 渲染并写走
+   640×360×4 ≈ 0.9MB（27MB/s）。但 rawvideo demuxer 的 `-framerate 30` 是**按帧序号**
+   打时间戳、不管实际写了多久：只要 Python 实际只有 10~15fps，画布 PTS 就持续
+   **领先于真实时钟**，主视频 PTS 却按真实 30fps 推进。overlay 的 framesync 于是
+   等待主视频追上，主视频帧在 demux 队列里越积越多，直到队列上限形成稳态 ——
+   表现正好是「稳定落后几秒」。
+2. **两个输入时钟不对齐。** RTSP 输入的 `start_time` 由 mediamtx 决定（可能是任意大值），
+   rawvideo FIFO 却从 0 开始；framesync 把差值理解成「某一路落后」，继续缓存。
+
+**已做的优化（`backend/osd.py`）**
+
+- 画布与视频帧率解耦：`OSD_FIFO_FPS=8`（≈ 推理节奏），视频仍由主输入保持 30fps，
+  overlay `repeatlast=1 / eof_action=pass` 复用上一张画布；单张画布覆盖 3.75 帧视频，
+  观感不变，管道写入量从 27MB/s 降到 7MB/s，主视频不再被反压。
+- 两个输入都用 `setpts=N/(fps*TB)` 按帧序号重造时间戳：起点都归零、各自匀速。
+- 输入 `-fflags +genpts+nobuffer`、`-avioflags direct`、`-analyzeduration 0`、
+  `-probesize 32768`、`-thread_queue_size 8/1`；输出 `-muxdelay 0`、`-muxpreload 0`、
+  `-flush_packets 1`、`-vsync 0`；去掉会让 muxer 预读平移的 `-avoid_negative_ts make_zero`；
+  软编加 `-tune zerolatency`。
+- 无检出时直接复用预置全透明帧（零渲染零拷贝）；Linux 上把 FIFO 缓冲扩到一帧，
+  0.9MB 一次 `os.write` 写完，避免几十次系统调用打乱节拍。
+- 状态栏实时显示 `preview 低延迟：视频 30fps / 画布 8fps（实测写入 x，渲染 y ms）`；
+  实测写入低于目标 70% 会变红并提示继续调低 `OSD_FIFO_FPS`。
+
+**验收 / 定位剩余延时**
+
+| 动作 | 期望 | 判定 |
+|---|---|---|
+| `DETECT_OSD_ENABLED=0` 重启 agent 后开 AI | 该路延时与其余四路一致 | 差异 100% 来自 preview 链路（浏览器叠框零额外编码） |
+| 状态栏「实测写入」≈「画布 fps」、渲染 < 30ms | 无背压 | 明显偏低就把 `OSD_FIFO_FPS` 降到 `6` 或 `4` |
+| 板端低缓存直接播 `preview` | 与网页延时接近 | 播放器也慢 → 后端 ffmpeg/mediamtx；只有网页慢 → WHEP/播放器侧 |
+| `OSD_LOW_LATENCY=0` 对比 | 仅关输入/输出缓冲参数 | 帧率解耦与 setpts 仍生效，用于单独量化缓冲参数收益 |
+
+```bash
+ffplay -fflags nobuffer -flags low_delay -rtsp_transport tcp \
+  rtsp://127.0.0.1:8554/preview
+curl -s http://127.0.0.1:8000/api/detect/status \
+  | python3 -m json.tool | grep -A16 '"osd"'
+```
+
+> `OSD_GOP` 默认 30（1 秒）；WHEP 新建会话要等下一个 IDR，设 `15` 可把首帧等待减半，
+> 但不改变稳态延时。`h264_rkmpp` 硬编内部可能有 1~3 帧缓冲，这部分无法从 ffmpeg 参数消除。
+> 若还要再降只能改结构：让 `osd.py` 直接读 3588 原始 RTSP（跳过 relay 一跳），或把 overlay
+> 合并进 `stream.py` 的主推流 ffmpeg（彻底去掉二次编码与第二次 mediamtx 转发）。
+> preview 仍是二次编码流，dogcam 还多经 relay 一次编码，评估端到端延时要把这两段算进去。
+> 标签文字已是「中文类名 + 同类数量」（16×16 预烘焙点阵，板端无需字体文件）；
+> 改中文名后记得重跑 `backend/tools/gen_cjk_font.py`，详见上文「中文标签与同类数量」。
+
+## 摄像头 2P 端子触发测试（`CAM_TRIGGER_GPIO`）
+
+四路摄像头的 2P 端子厂家称「短接即可触发拍照」，但**只验证过短接有效**，
+尚不确定它是「干接点/光耦输入」还是「电平型输入」——两者对 GPIO 的驱动要求完全不同。
+
+### 第一步：先搞清端子到底是什么信号
+
+⚠️ **注意：端子悬空时摄像头本来就正常出流**，所以「盯着画面看触发有没有生效」是**无效的观测方法**。
+触发多半是"抓一张静止图"或"发一个事件"，不会改变视频流。先用 `trigger_probe.py` 探明方向和作用：
+
+```bash
+cd /root/backpack_dashboard/backend/tools
+
+# ① 环境指纹：USB 接口构成（有没有 HID 接口）/ 输入设备 / UVC 控件 / 内核日志
+python3 trigger_probe.py --video /dev/video121
+
+# ② 监听见面事件：运行后**手动短接 2P 端子**，看有没有按键事件
+sudo python3 trigger_probe.py --watch-input --seconds 60
+
+# ③ 差分探测（推荐）：自动触发前后各采一次快照，打印差异
+python3 trigger_probe.py --diff --video /dev/video121 --gpio 46 --count 3
+python3 trigger_probe.py --diff --video /dev/video121      # 不接 GPIO → 手动短接后回车
+```
+
+判读：
+
+| 现象 | 结论 |
+|------|------|
+| USB 接口里有 `class=03 HID` | 端子是「按键型」触发，短接等于按下快门键 |
+| `--watch-input` 抓到 KEY 事件 | 同上，且 Linux 侧可用 evdev 检测 |
+| UVC 控件值发生变化 | 有 XU 反馈，可做成闭环 |
+| 四项全无变化 | 多半是摄像头内部行为（存图），或端子其实是**输出**，需万用表/示波器 |
+
+### 第二步：推测是输入，再试驱动方式
+
+工具：`backend/tools/gpio_short_trigger.py`
+
+```bash
+cd /root/backpack_dashboard/backend/tools
+
+# 0) 先看引脚现状（补光灯关灯后可能是 out+0 = 持续拉低 = 持续触发）
+python3 gpio_short_trigger.py --gpio 46 --status
+python3 gpio_short_trigger.py --gpio 46 --release     # 恢复高阻，停止持续触发
+
+# 1) 三种驱动方式依次自动跑一遍，人工观察哪种有效（推荐）
+python3 gpio_short_trigger.py --gpio 46 --sweep --count 3 --interval 3000
+
+# 2) 也可单独测某一种
+python3 gpio_short_trigger.py --gpio 46 --mode short   # 空闲高阻 / 触发拉低（等价手动短接）
+python3 gpio_short_trigger.py --gpio 46 --mode low     # 空闲推高 / 触发拉低
+python3 gpio_short_trigger.py --gpio 46 --mode high    # 空闲拉低 / 触发推高
+```
+
+结果判读：
+
+| 现象 | 结论 | 下一步 |
+|------|------|--------|
+| 只有 `short` 有效 | 干接点/光耦输入型，只能模拟短接 | 建议加一级 MOS 管做隔离（文档 13.12） |
+| `short` 和 `low` 都有效 | 电平型且低有效 | 空闲态用高阻即可，不必推高 |
+| 只有 `high` 有效 | 电平型且高有效 | 注意空闲时该脚是拉低的 |
+| 三种都无效 | 未共地 / 触发模式没切 / 电流不足 / 脚没引到端子 | 按 上文 4 步排查 |
+
+> 2026-10-15 实测进展：**触发语义已确认** —— 端子是**电平型输入**、
+> **空闲为高、靠"高→低"的下降沿触发**（必须先 `echo 1` 再 `echo 0`）。
+> 这也解释了"手动短接能触发"：短接 = 从高拉到低，本质是同一个动作。
+> 因此推荐 `--mode low`（空闲推高 / 触发拉低），PWM 方案同样适用，不需要 MOS 管模拟短接。
+> 详见 `DEVELOPER_GUIDE.md` 13.13。
+
+### 第三步（关键实验）：数帧数，判断是否"外触发出流"
+
+⚠️ **不能靠看画面**：厂商软件只把最新一帧显示在窗口、刷新很快，人眼分不出 2fps 和 30fps，
+也数不出张数。改用**在固定时间窗口内统计实际交付的帧数**——结论是数字，不用肉眼判断。
+
+```bash
+cd /root/backpack_dashboard/backend/tools
+
+# 一条命令跑完三段：基线 → 低频触发 2Hz → 高频触发 30Hz，并自动给出结论
+python3 trigger_frame_test.py --video /dev/video121 --gpio 46
+```
+
+**⚠️ 实测结论（2026-10-15）：这条路已否 —— 2P 端子与视频流出帧无关。**
+
+| 阶段 | 触发频率 | 输出下降沿数 | 实收帧数 | 平均 fps |
+|------|---------|-------------|---------|---------|
+| ① 不触发（基线） | — | 0 | 278 | 27.8 |
+| ② 低频触发 | 2 Hz | ≈20 | 284 | 28.4 |
+| ③ 高频触发 | 30 Hz | ≈299 | 285 | 28.5 |
+
+触发 0 / 20 / 299 次，帧数都是 ~280 → **触发与出帧完全无关**。
+该端子等效于**快门按键**（触发一次存一张静图），视频流端点始终自由运行 ~28.5fps。
+**因此不能用它做四路帧同步。** 替代方案见 `DEVELOPER_GUIDE.md` 13.14：
+
+1. **向厂家追问**（优先）：端子是 SNAP 快门还是 SENSOR 外触发同步？是否支持外触发/多机同步模式、有无 FSIN 同步引脚、如何切换？
+2. **软件方案**：服务器端 ffmpeg `xstack` 合流成一路（同帧由服务器保证，浏览器只拉一路）
+3. **换硬件**：选带 FSIN 输入 + 同步输出、提供 SDK 的工业相机模组
+
+> 四路推流（`stream.py`）与网页演示**不受影响**——本来就没用触发；
+> 仅"需要严格同时曝光"的场景（环视拼接 / 3D 重建 / 运动物体跨画面分析）需要按上面三条路径择一。
+
+<details>
+<summary>备选：人眼法（无法数帧时用）</summary>
+
+⚠️ **必须用低频（1~2Hz）方波，不能用 30Hz** —— 自由运行和外触发在 30Hz 下都是 30fps，
+两种结果完全一样，测了等于没测。降到 1~2Hz 才能拉开数量级。
+
+```bash
+# 终端 1：输出低频方波（每个周期 1 个下降沿 = 1 次触发）
+python3 gpio_short_trigger.py --gpio 46 --wave --hz 2 --seconds 20
+
+# 终端 2：同时看画面
+ffplay -f v4l2 -input_format mjpeg -video_size 1280x720 -framerate 30 /dev/videoXXX
+```
+
+| 观察结果 | 含义 |
+|----------|------|
+| 画面变成约 **hz** 帧/秒的**"幻灯片"** | ✅ 真·外触发模式，四路同步成立 |
+| 画面依旧**流畅 30fps** | ❌ 触发与视频流无关，只是拍照功能，须另找方案 |
+
+</details>
+
+### 第四步（可选·与同步路线无关）：扫出「最小高电平保持时间」
+
+> 由于第三步已否掉"用端子做同步"，这一步**只在需要做"高频抓拍"时才有意义**。
+> 一次触发耗时 = 高保持 + 低保持；若高保持必须 ≥100ms，最高只有约 10Hz。
+
+```bash
+python3 gpio_short_trigger.py --gpio 46 --probe-high
+# 每档触发 3 次并停顿 3 秒，盯着厂商软件数"照片多了几张"，对得上的最小档位就是答案
+```
+
+| 最小有效高保持 | 最高触发频率（低保持 100ms） | 对 30fps 同步 |
+|----------------|------------------------------|---------------|
+| ≤ 5 ms | ~100 Hz 以上 | ✅ 轻松 |
+| ~20 ms | ~30–40 Hz | ✅ 刚好够用 |
+| ≥ 100 ms | ~10 Hz | ❌ 做不了 |
+
+⚠️ **测试期间务必让补光灯让出这个脚**（两种做法任选）：
+```bash
+# 做法 A：禁用补光灯（推荐，持久）
+FILL_LIGHT_GPIO=-1 python3 agent.py          # 或写进 start.sh 的环境变量
+# 做法 B：测试期间不要从网页点击补光灯开关
+```
+否则补光灯会反复改写该脚的方向与电平，和你设的触发逻辑互相打架，造成误触发甚至持续触发，
+测试结果会完全乱掉。`control.py::fill_light()` 在检测到两者同号时会直接拒绝执行并返回错误。
+
+## 四路帧时间戳采集与同步量化（`tools/multi_cam_timeline.py`）
+
+时间精度专题：采集每路每帧的**微秒级到达时间戳**，量化四路的"同步散布"。
+
+```bash
+cd /root/backpack_dashboard/backend/tools
+
+# 四路采 10 秒（先小分辨率试 —— USB2 上四路 1080p 会超带宽）
+python3 multi_cam_timeline.py \
+    --cams /dev/video121,/dev/video122,/dev/video123,/dev/video124 \
+    --seconds 10 --size 640x480 --csv /root/timeline.csv
+
+# 带 GPIO 触发（每 2 秒拉低一次并记录触发时刻）
+python3 multi_cam_timeline.py --cams <4路> --seconds 20 --gpio 46 --csv /root/timeline.csv
+```
+
+**原理**：每路一个常驻 ffmpeg（`-c:v copy -f image2pipe`，**不落盘不重编码**），
+程序按 JPEG 的 SOI→段解析→SOS→EOI **分帧**，每切出一帧立刻记 `time.time()` → μs 级时间戳。
+
+**⚠️ 三个必须先明确的前提**：
+
+1. **跟那根 2pin 没关系** —— 拔掉 2P 线照样能测（图像照出），GPIO 只是**软件时间标记**
+2. **不存在"GPIO 触发出图的静图节点"** —— video122 是 Metadata Capture；uvcvideo 不实现 still image；
+   触发与取帧之间**没有硬件因果**（`bTriggerUsage=0`）
+3. **四路接同一个 GPIO ≠ 硬件同步** —— 共用一个信号只提供软件时间参考点，**不能让四路同时曝光**
+
+| 目标 | 能否实现 |
+|------|---------|
+| 每路帧间隔/帧率稳定性（μs 级时间戳） | ✅ |
+| 四路帧到达时刻的相互散布（同步误差量化） | ✅ |
+| "拉低 GPIO → 拿到帧"的链路延迟 | ✅（但这是**软件取帧延迟**） |
+| **"触发 → 摄像头产出对应图像"的延时** | ❌ 做不到 |
+| **四路同时曝光** | ❌ 需厂家 FSIN 同步或换模组 |
+
+## 获取"触发拍照"的那张图（`tools/uvc_snapshot.py`）
+
+四路同步暂时不需要（网页演示够用），但如果想拿到"GPIO 触发时拍的那张图"，用这个工具：
+
+```bash
+cd /root/backpack_dashboard/backend/tools
+
+# ① 探测机制：列所有 video 节点能力 / USB 接口构成 / Still Image 描述符 / 相关 XU 控件
+python3 uvc_snapshot.py --probe --video /dev/video121
+
+# ② 单纯从视频流抓一帧
+python3 uvc_snapshot.py --grab --video /dev/video121 -o /tmp/snap.jpg
+
+# ③ 先发一次 GPIO 触发再抓帧（与 ② 对比）
+python3 uvc_snapshot.py --grab --video /dev/video121 --gpio 46 --trigger -o /tmp/after.jpg
+
+# ④ 软快门：常驻读流，每次触发后保存一张（最接近厂商软件行为）
+python3 uvc_snapshot.py --shutter --video /dev/video121 --gpio 46 --count 3 --outdir /tmp/shots
+
+# ⑤ 不接 GPIO，按回车手动拍
+python3 uvc_snapshot.py --shutter --video /dev/video121 --outdir /tmp/shots
+```
+
+**关键结论**：既然触发信号是**我们自己发的**，触发时刻本来就知道——
+在发下降沿的同时从正在读的视频流里存当前帧，就复刻了厂商软件的"拍照"，
+**不依赖摄像头是否真的支持静图上传**。甚至可以用板子上已有的 **SOS/STOP 按键**当快门，
+连那根 2P 线都不需要。
+
+| | 本方案的图 | 若摄像头真支持静图上载 |
+|--|-----------|----------------------|
+| 来源 | 视频流里的一帧 | 摄像头独立上传的 JPEG |
+| 分辨率 | 受视频流分辨率限制 | 可能高于视频流 |
+| 时机精度 | ± 一个帧间隔（~35ms） | 精确对应触发瞬间 |
+| 依赖 | **不依赖**摄像头特殊功能 | 依赖固件 + vendor 协议 |
+
+机制判定与实现细节见 `DEVELOPER_GUIDE.md` 13.15。
+
+## 聆思小板（asr）交互说明
+
+- 服务默认不启动；点「执行测试」时 Agent 会 `systemctl start asr` 并等待 2s（与 `yd_test_v4.0.sh` 一致）。
+- 两种模式（写 `/tmp/voice_assistant_cmd`）：
+  - `voice`（默认）：联网下支持「小谷小谷」唤醒对话交互（对话请保持周围环境安静）；
+  - `call`：播放默认音频（用作播放测试）。
+- 音量：`set volume=0~100`（默认测试音量 70）。
+- 前端提供「call 模式 / voice 模式 / 音量」按钮，可实时切换；状态面板显示当前模式。
+
+## 已知待现场验证的点
+
+- 四路推流：确认 `usbcam0-3` 软链存在、`h264_rkmpp` 可用（否则自动回退软编，占用 CPU 更高）。
+- 红外 `dog-ipcam` 由已有 mediamtx 承载（8554），本项目复用；如现场该路径不是 mediamtx 提供，  
+  改在 `mediamtx.yml` 用 `source: rtsp://...` 拉流代理，或设 `MEDIAMTX_MANAGED=1` 自起 mediamtx。
+- SOS/STOP 按键已实测（639/128），若物理标签与功能相反，交换 `SOS_KEYCODE`/`STOP_KEYCODE` 即可。
+- SN：取自 `/dev/mmcblk0p5`（hexdump 第 3 行 ASCII 列），按 16 位 `[0-9A-Z]` 校验，0 偏多会告警。
+- 聆思播放测试：call 模式下 asr 拉起且模式生效即判通过；真实扬声器出声需现场人耳确认。

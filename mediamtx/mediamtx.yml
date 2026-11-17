@@ -1,0 +1,30 @@
+# mediamtx 配置（离线直连演示）
+# 启动：mediamtx /path/to/mediamtx.yml
+# 脚本已验证 mediamtx 通过 snap 安装；如 snap 版本需指定配置路径请按官方文档调整。
+
+# RTSP 服务（ffmpeg 推流 + 红外摄像头推流都走这里）
+rtspAddress: :8554
+rtspTransports: [tcp]
+
+# WebRTC 服务（浏览器通过它低延迟拉流，端口 8889）
+webrtc: yes
+webrtcAddress: :8889
+
+# 各路视频路径：来源均为 publisher（由 ffmpeg / 红外摄像头推上来）
+paths:
+  cam0:
+    source: publisher
+  cam1:
+    source: publisher
+  cam2:
+    source: publisher
+  cam3:
+    source: publisher
+  dog-ipcam:
+    source: publisher
+  # 机器狗前置：由 backend/relay.py 归一化后推上来（snap 实例走 pathDefaults，无需改）
+  dogcam:
+    source: publisher
+  # AI 带框预览：backend/osd.py 把框烧进选中那一路后推上来，仅 AI 开启时存在
+  preview:
+    source: publisher

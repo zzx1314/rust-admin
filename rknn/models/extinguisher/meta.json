@@ -1,0 +1,11 @@
+{
+  "name": "灭火器",
+  "desc": "识别画面中的灭火器",
+  "labels": {
+    "extinguisher": {"zh": "灭火器", "color": "#E24B4A"}
+  },
+  "ignore": [],
+  "conf": 0.35,
+  "alarm": ["extinguisher"],
+  "target": "rk3576"
+}
