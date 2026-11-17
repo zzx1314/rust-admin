@@ -100,6 +100,13 @@ async fn ensure_settings(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         ),
         (
             "notification",
+            "alert_auto_workorder",
+            "true",
+            "bool",
+            "告警按当班排班自动派单并生成工单",
+        ),
+        (
+            "notification",
             "task_timeout_notice",
             "true",
             "bool",

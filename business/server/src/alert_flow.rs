@@ -1,0 +1,610 @@
+//! 告警 → 责任人 → 企业微信 + 工单：执行计划时发现告警的闭环。
+//!
+//! # 为什么是「排班」而不是「计划」
+//!
+//! 计划（`tasks`）只描述「哪个设备在什么时候跑哪条路线」，**没有**「谁负责」的字段；
+//! 责任人只存在于计划层的排班里：
+//!
+//! ```text
+//! tasks（计划） ──┐
+//! parks / zones ──┴─→ shifts（某天某班次谁负责哪个园区/区域/计划）─→ staff（责任人库）
+//! ```
+//!
+//! 所以「通过计划找到关联责任人」= 拿告警的园区 / 区域 / 正在执行的任务，
+//! 去**当天**的排班里找最匹配的那一条。匹配是打分制（见 [`candidate_score`]）：
+//! 同一任务 > 同一区域 > 同一园区 > 已发布 > 在岗，取最高分那一条。
+//!
+//! # 兜底顺序
+//!
+//! 1. 当天当班排班（最准）
+//! 2. 园区负责人（`parks.owner_name`，能对上责任人库就带上 id/电话）
+//! 3. `未指派` —— 工单仍然建，让值班长在看板上改派，而不是把告警闷掉
+//!
+//! # 与推送的关系
+//!
+//! 派单 + 建工单**不依赖**企业微信配置（现场可能根本没配 webhook），
+//! 所以它跑在 [`crate::notify::alert_created`] 的最前面、开关判断之前；
+//! 推送才是旁路。
+//!
+//! 幂等：告警行的 `work_order_id` 非空就不再建单（重复调用 / 重试安全）。
+
+use crate::app::AppState;
+use crate::error::AppError;
+use crate::models::WorkOrderRequest;
+
+/// 一次派单的结果（既是工单入参，也是推送给群里的那几行字）。
+#[derive(Debug, Clone, Default)]
+pub struct Assignment {
+    pub staff_id: Option<i64>,
+    pub name: String,
+    pub team: Option<String>,
+    pub phone: Option<String>,
+    pub shift_code: Option<String>,
+    pub slot: Option<String>,
+    pub time_range: Option<String>,
+    /// 排班关联的巡检计划名（给消息里的「关联计划」用）
+    pub task_name: Option<String>,
+    /// 派单依据，落到 `alerts.assignee_note`
+    pub note: String,
+    pub work_order_id: Option<i64>,
+    pub work_order_code: Option<String>,
+}
+
+impl Assignment {
+    fn unassigned(note: impl Into<String>) -> Self {
+        Self {
+            staff_id: None,
+            name: "未指派".to_string(),
+            note: note.into(),
+            ..Default::default()
+        }
+    }
+
+    /// `陈志远（运维一组）· 早班 08:00 - 16:00（SH-001）` 这种一句话。
+    pub fn summary(&self) -> String {
+        let mut out = self.name.clone();
+        if let Some(team) = self.team.as_deref().filter(|team| !team.trim().is_empty()) {
+            out.push_str(&format!("（{team}）"));
+        }
+        if let Some(slot) = self.slot.as_deref() {
+            out.push_str(&format!(" · {slot}"));
+            if let Some(range) = self.time_range.as_deref() {
+                out.push(' ');
+                out.push_str(range);
+            }
+            if let Some(code) = self.shift_code.as_deref() {
+                out.push_str(&format!("（{code}）"));
+            }
+        } else if !self.note.is_empty() {
+            out.push_str(&format!(" · {}", self.note));
+        }
+        out
+    }
+
+    /// 任务异常推送用的一句：只说「这班谁在管」，不涉及建单（任务异常不建单）。
+    pub fn duty_sentence(&self) -> String {
+        match self.staff_id {
+            Some(_) => format!(
+                "当班责任人是 {}（{}），请同步跟进",
+                self.summary(),
+                self.note
+            ),
+            None => format!(
+                "未找到当班责任人（{}），请值班长先补排班或直接派单",
+                self.note
+            ),
+        }
+    }
+
+    /// 消息里那句「处置建议」：把排班、工单、下一步说成一段话。
+    pub fn dispatch_sentence(&self) -> String {
+        match (&self.work_order_code, self.staff_id) {
+            (Some(order), Some(_)) => format!(
+                "已按当班排班派给 {}，工单 {order} 已自动生成（{}），请责任人到场确认并把处置结果回填到工单",
+                self.summary(),
+                self.note
+            ),
+            (Some(order), None) => format!(
+                "当天没有排班也没有园区负责人，工单 {order} 已按「未指派」创建，请值班长在工单看板改派后再通知现场"
+            ),
+            (None, Some(_)) => format!(
+                "本条告警派给 {}（{}），自动建单已关闭，请人工确认后在工单看板派单",
+                self.summary(),
+                self.note
+            ),
+            (None, None) => "当天没有排班也没有园区负责人，请值班长先补排班或直接派单".to_string(),
+        }
+    }
+}
+
+/// 告警 → 园区 / 区域 / 设备 / 正在执行的任务。
+#[derive(Debug, sqlx::FromRow)]
+struct AlertContext {
+    id: i64,
+    alert_code: String,
+    level: String,
+    content: String,
+    effective_park_id: Option<i64>,
+    device_pk: Option<i64>,
+    device_code: Option<String>,
+    zone_id: Option<i64>,
+    zone_name: Option<String>,
+    /// 非空表示已经派过单（幂等依据）
+    work_order_id: Option<i64>,
+}
+
+/// 排班候选（当天所有非草案排班）。
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct ShiftCandidate {
+    pub shift_code: String,
+    pub slot: String,
+    pub time_range: String,
+    pub status: String,
+    pub staff_id: Option<i64>,
+    pub owner_name: String,
+    pub park_id: Option<i64>,
+    pub zone_id: Option<i64>,
+    pub task_id: Option<i64>,
+    pub task_name: Option<String>,
+    pub team: Option<String>,
+    pub phone: Option<String>,
+    /// 责任人库里的在岗状态（排班没关联责任人库时为空）
+    pub staff_status: Option<String>,
+}
+
+/// 匹配打分。**纯函数**，单测直接喂数据（`tests` 里那几条）。
+///
+/// 权重刻意拉开量级：同一任务(40) > 同一区域(20) > 同一园区(10)，
+/// 后面三个是「同等匹配下更该派给他」的加分项。
+pub(crate) fn candidate_score(
+    candidate: &ShiftCandidate,
+    park_id: Option<i64>,
+    zone_id: Option<i64>,
+    task_id: Option<i64>,
+) -> i64 {
+    let mut score = 0;
+    if let (Some(left), Some(right)) = (candidate.task_id, task_id)
+        && left == right
+    {
+        score += 40;
+    }
+    if let (Some(left), Some(right)) = (candidate.zone_id, zone_id)
+        && left == right
+    {
+        score += 20;
+    }
+    if let (Some(left), Some(right)) = (candidate.park_id, park_id)
+        && left == right
+    {
+        score += 10;
+    }
+    if candidate.status == "已发布" {
+        score += 4;
+    }
+    if candidate.staff_id.is_some() {
+        score += 2;
+    }
+    if candidate.staff_status.as_deref() == Some("在岗") {
+        score += 1;
+    }
+    score
+}
+
+/// 告警落库后调用：找责任人 → 自动建工单 → 回写告警行。
+///
+/// 返回的 [`Assignment`] 供 [`crate::notify::alert_created`] 渲染群消息。
+/// 全程只碰本地 SQLite（校验上限都在毫秒级），不 await 外网。
+pub async fn on_alert(state: &AppState, alert_code: &str) -> Option<Assignment> {
+    let context: AlertContext = sqlx::query_as(
+        "SELECT a.id, a.alert_code, a.level, a.content,
+                COALESCE(a.park_id, d.park_id) AS effective_park_id,
+                d.id AS device_pk, d.device_id AS device_code,
+                d.zone_id, z.zone_name, a.work_order_id
+           FROM alerts a
+           LEFT JOIN devices d ON d.id = a.device_id
+           LEFT JOIN zones z ON z.id = d.zone_id
+          WHERE a.alert_code = ?1",
+    )
+    .bind(alert_code)
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or(None)?;
+
+    // 设备上正在执行的计划（执行中优先于已暂停），用它把告警对到具体的排班条目
+    let running_task: Option<(i64, String)> = match context.device_pk {
+        Some(device_pk) => sqlx::query_as(
+            "SELECT id, task_name FROM tasks
+              WHERE device_id = ?1 AND task_status IN ('执行中', '已暂停')
+              ORDER BY (task_status = '执行中') DESC, updated_at DESC
+              LIMIT 1",
+        )
+        .bind(device_pk)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap_or(None),
+        None => None,
+    };
+    let running_task_id = running_task.as_ref().map(|(id, _)| *id);
+    let running_task_name = running_task.as_ref().map(|(_, name)| name.clone());
+
+    let mut assignment = resolve(
+        state,
+        context.effective_park_id,
+        context.zone_id,
+        running_task_id,
+    )
+    .await;
+    if assignment.task_name.is_none() {
+        assignment.task_name = running_task_name;
+    }
+
+    // 自动建单：已经派过就跳过（幂等），开关关掉也跳过（但推送照样带责任人）
+    if context.work_order_id.is_none() && auto_workorder_enabled(state).await {
+        match create_work_order(state, &context, &assignment).await {
+            Ok((id, code)) => {
+                assignment.work_order_id = Some(id);
+                assignment.work_order_code = Some(code);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    alert = %context.alert_code,
+                    "告警自动派单失败（不影响告警本身）: {error}"
+                );
+            }
+        }
+    } else if let Some(order_id) = context.work_order_id {
+        // 之前已经派过：把工单号补齐，消息里仍要显示「已派单」
+        assignment.work_order_id = Some(order_id);
+        assignment.work_order_code =
+            sqlx::query_scalar::<_, String>("SELECT order_code FROM work_orders WHERE id = ?1")
+                .bind(order_id)
+                .fetch_optional(&state.db)
+                .await
+                .unwrap_or(None);
+    }
+
+    if let Err(error) = sqlx::query(
+        "UPDATE alerts SET staff_id = ?1, assignee = ?2, work_order_id = ?3,
+            assignee_note = ?4 WHERE id = ?5",
+    )
+    .bind(assignment.staff_id)
+    .bind(&assignment.name)
+    .bind(assignment.work_order_id)
+    .bind(&assignment.note)
+    .bind(context.id)
+    .execute(&state.db)
+    .await
+    {
+        tracing::warn!(alert = %context.alert_code, "告警派单回写失败: {error}");
+    }
+
+    Some(assignment)
+}
+
+/// 只找责任人、不建工单：任务异常推送（`notify::task_abnormal`）复用同一套匹配。
+pub async fn responsible_for_task(
+    state: &AppState,
+    park_id: Option<i64>,
+    task_id: Option<i64>,
+) -> Option<Assignment> {
+    let assignment = resolve(state, park_id, None, task_id).await;
+    // 「未指派」等于没找到人，别把空派单塞进消息里
+    (assignment.name != "未指派").then_some(assignment)
+}
+
+/// 责任人解析：当天排班 → 园区负责人 → 未指派。
+async fn resolve(
+    state: &AppState,
+    park_id: Option<i64>,
+    zone_id: Option<i64>,
+    task_id: Option<i64>,
+) -> Assignment {
+    if let Some(candidate) = best_shift(state, park_id, zone_id, task_id).await {
+        return Assignment {
+            staff_id: candidate.staff_id,
+            name: candidate.owner_name.clone(),
+            team: candidate.team,
+            phone: candidate.phone,
+            note: format!(
+                "当班排班 {}（{} {}）",
+                candidate.shift_code, candidate.slot, candidate.time_range
+            ),
+            shift_code: Some(candidate.shift_code),
+            slot: Some(candidate.slot),
+            time_range: Some(candidate.time_range),
+            task_name: candidate.task_name,
+            ..Default::default()
+        };
+    }
+
+    // 兜底一：园区负责人。排班还没排到人时，园区负责人是最合理的默认派单人
+    if let Some(park_id) = park_id
+        && let Ok(Some(owner)) =
+            sqlx::query_scalar::<_, Option<String>>("SELECT owner_name FROM parks WHERE id = ?1")
+                .bind(park_id)
+                .fetch_optional(&state.db)
+                .await
+    {
+        let owner = owner.unwrap_or_default().trim().to_string();
+        if !owner.is_empty() {
+            let staff: Option<(i64, Option<String>, Option<String>)> = sqlx::query_as(
+                "SELECT id, team, phone FROM staff WHERE name = ?1 ORDER BY id ASC LIMIT 1",
+            )
+            .bind(&owner)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
+            let (staff_id, team, phone) = match staff {
+                Some((id, team, phone)) => (Some(id), team, phone),
+                None => (None, None, None),
+            };
+            return Assignment {
+                staff_id,
+                name: owner,
+                team,
+                phone,
+                note: "当天没有当班排班，派给园区负责人".to_string(),
+                ..Default::default()
+            };
+        }
+    }
+
+    Assignment::unassigned("当天没有当班排班，园区也没登记负责人")
+}
+
+/// 当天排班里分数最高的一条（分数为 0 视为没匹配上）。
+///
+/// 只看「今天」+ 非草案：草案是还没发布的想法，不该收到告警推送。
+async fn best_shift(
+    state: &AppState,
+    park_id: Option<i64>,
+    zone_id: Option<i64>,
+    task_id: Option<i64>,
+) -> Option<ShiftCandidate> {
+    let candidates: Vec<ShiftCandidate> = sqlx::query_as(
+        "SELECT s.shift_code, s.slot, s.time_range, s.status, s.staff_id, s.owner_name,
+                s.park_id, s.zone_id, s.task_id, s.task_name,
+                st.team, st.phone, st.status AS staff_status
+           FROM shifts s
+           LEFT JOIN staff st ON st.id = s.staff_id
+          WHERE s.shift_date = ?1 AND s.status <> '草案'
+          ORDER BY s.id ASC",
+    )
+    .bind(crate::db::today())
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    candidates
+        .into_iter()
+        .map(|candidate| {
+            let score = candidate_score(&candidate, park_id, zone_id, task_id);
+            (score, candidate)
+        })
+        // 同分时 `max_by_key` 取最后一个，所以先按 id 升序排 → 稳定地取最晚建的那条
+        .filter(|(score, _)| *score > 0)
+        .max_by_key(|(score, _)| *score)
+        .map(|(_, candidate)| candidate)
+}
+
+/// 自动建单开关（`settings.alert_auto_workorder`）。
+///
+/// 缺行视为**开启**：老库升级上来还没播种时，不应该把「告警自动派单」静默关掉。
+async fn auto_workorder_enabled(state: &AppState) -> bool {
+    let row: Option<(Option<String>,)> = sqlx::query_as(
+        "SELECT setting_value FROM settings WHERE setting_key = 'alert_auto_workorder'",
+    )
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or(None);
+    match row {
+        Some((Some(value),)) => value.trim() != "false",
+        _ => true,
+    }
+}
+
+/// 建工单：来源写「告警自动派单」，`sourceRef` / `alert_id` 保留原始告警编号，
+/// 工单详情里能反查回告警。
+async fn create_work_order(
+    state: &AppState,
+    context: &AlertContext,
+    assignment: &Assignment,
+) -> Result<(i64, String), AppError> {
+    let device = context.device_code.as_deref().unwrap_or("未绑定设备");
+    let title = short(&format!("{device} {}", context.content), 60);
+    let mut description = format!(
+        "由告警 {} 自动派单。\n派单依据：{}。\n告警内容：{}",
+        context.alert_code, assignment.note, context.content
+    );
+    if let Some(task_name) = assignment.task_name.as_deref() {
+        description.push_str(&format!("\n关联计划：{task_name}"));
+    }
+    if let Some(zone) = context.zone_name.as_deref() {
+        description.push_str(&format!("\n区域：{zone}"));
+    }
+    if let Some(phone) = assignment
+        .phone
+        .as_deref()
+        .filter(|phone| !phone.is_empty())
+    {
+        description.push_str(&format!("\n责任人电话：{phone}"));
+    }
+
+    let payload = WorkOrderRequest {
+        title,
+        order_type: Some("告警处置".to_string()),
+        source: Some("告警自动派单".to_string()),
+        source_ref: Some(context.alert_code.clone()),
+        priority: Some(priority_of(&context.level).to_string()),
+        staff_id: assignment.staff_id,
+        assignee: Some(assignment.name.clone()),
+        park_id: context.effective_park_id,
+        device_id: context.device_pk,
+        deadline: None,
+        description: Some(description),
+        alert_id: Some(context.id),
+    };
+    let order =
+        crate::handlers::workorders::create_order_core(state, payload, None, "系统", false).await?;
+    Ok((order.id, order.order_code))
+}
+
+/// 告警级别 → 工单优先级。
+fn priority_of(level: &str) -> &'static str {
+    match level.trim() {
+        "严重" => "紧急",
+        "警告" => "高",
+        _ => "中",
+    }
+}
+
+/// 按字符（不是字节）截断，保留可读前缀。
+fn short(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let mut out: String = trimmed.chars().take(max_chars).collect();
+    out.push('…');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(
+        shift_code: &str,
+        staff_id: Option<i64>,
+        park_id: Option<i64>,
+        zone_id: Option<i64>,
+        task_id: Option<i64>,
+        status: &str,
+        staff_status: Option<&str>,
+    ) -> ShiftCandidate {
+        ShiftCandidate {
+            shift_code: shift_code.to_string(),
+            slot: "早班".to_string(),
+            time_range: "08:00 - 16:00".to_string(),
+            status: status.to_string(),
+            staff_id,
+            owner_name: "陈志远".to_string(),
+            park_id,
+            zone_id,
+            task_id,
+            task_name: Some("装卸平台早班巡查".to_string()),
+            team: Some("运维一组".to_string()),
+            phone: Some("13800001203".to_string()),
+            staff_status: staff_status.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn same_task_beats_same_park() {
+        let by_task = candidate(
+            "SH-001",
+            Some(1),
+            Some(1),
+            Some(2),
+            Some(9),
+            "已发布",
+            Some("在岗"),
+        );
+        let by_park = candidate(
+            "SH-002",
+            Some(2),
+            Some(1),
+            Some(3),
+            Some(8),
+            "已发布",
+            Some("在岗"),
+        );
+        assert!(
+            candidate_score(&by_task, Some(1), Some(2), Some(9))
+                > candidate_score(&by_park, Some(1), Some(2), Some(9))
+        );
+    }
+
+    #[test]
+    fn zone_beats_park_and_published_breaks_tie() {
+        let by_zone = candidate("SH-003", Some(3), Some(1), Some(2), None, "待确认", None);
+        let by_park = candidate(
+            "SH-004",
+            Some(4),
+            Some(1),
+            Some(5),
+            None,
+            "已发布",
+            Some("在岗"),
+        );
+        assert!(
+            candidate_score(&by_zone, Some(1), Some(2), None)
+                > candidate_score(&by_park, Some(1), Some(2), None)
+        );
+        let drafted_park = candidate("SH-005", Some(5), Some(1), None, None, "待确认", None);
+        assert!(
+            candidate_score(&by_park, Some(1), None, None)
+                > candidate_score(&drafted_park, Some(1), None, None)
+        );
+    }
+
+    #[test]
+    fn unrelated_shift_scores_zero() {
+        let other = candidate(
+            "SH-006",
+            Some(6),
+            Some(2),
+            Some(7),
+            Some(9),
+            "已发布",
+            Some("在岗"),
+        );
+        assert_eq!(
+            candidate_score(&other, Some(1), Some(2), Some(8)),
+            4 + 2 + 1
+        );
+        // 只有「已发布/在岗」这类通用加分，没有任何业务匹配时应当判为"没匹配上"
+        let zero = candidate("SH-007", None, Some(2), Some(7), Some(9), "待确认", None);
+        assert_eq!(candidate_score(&zero, Some(1), Some(2), Some(8)), 0);
+    }
+
+    #[test]
+    fn summary_renders_shift_and_note() {
+        let assignment = Assignment {
+            staff_id: Some(1),
+            name: "陈志远".to_string(),
+            team: Some("运维一组".to_string()),
+            phone: Some("13800001203".to_string()),
+            shift_code: Some("SH-001".to_string()),
+            slot: Some("早班".to_string()),
+            time_range: Some("08:00 - 16:00".to_string()),
+            note: "当班排班 SH-001（早班 08:00 - 16:00）".to_string(),
+            work_order_code: Some("WO-1115-01".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            assignment.summary(),
+            "陈志远（运维一组） · 早班 08:00 - 16:00（SH-001）"
+        );
+        assert!(assignment.dispatch_sentence().contains("WO-1115-01"));
+
+        let fallback = Assignment::unassigned("当天没有当班排班，园区也没登记负责人");
+        assert_eq!(
+            fallback.summary(),
+            "未指派 · 当天没有当班排班，园区也没登记负责人"
+        );
+        assert!(fallback.dispatch_sentence().contains("值班长"));
+    }
+
+    #[test]
+    fn priority_and_title_helpers() {
+        assert_eq!(priority_of("严重"), "紧急");
+        assert_eq!(priority_of("警告"), "高");
+        assert_eq!(priority_of("提示"), "中");
+        assert_eq!(priority_of("未知"), "中");
+        let long = "告".repeat(80);
+        let clipped = short(&long, 60);
+        assert_eq!(clipped.chars().count(), 61);
+        assert!(clipped.ends_with('…'));
+    }
+}

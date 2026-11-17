@@ -9,10 +9,12 @@ use sqlx::QueryBuilder;
 
 const ALERT_SELECT: &str = "SELECT a.id, a.alert_code, a.level, a.content, a.device_id,
     d.device_id AS device_code, a.park_id, p.park_name, a.status, a.occurred_at, a.handled_at,
-    a.created_at
+    a.created_at, a.staff_id, a.assignee, a.work_order_id, w.order_code AS work_order_code,
+    a.assignee_note
     FROM alerts a
     LEFT JOIN devices d ON d.id = a.device_id
-    LEFT JOIN parks p ON p.id = a.park_id";
+    LEFT JOIN parks p ON p.id = a.park_id
+    LEFT JOIN work_orders w ON w.id = a.work_order_id";
 
 pub async fn list_alerts(
     State(state): State<AppState>,

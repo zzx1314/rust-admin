@@ -63,8 +63,18 @@ async function handleAll() {
   await load();
 }
 
+/** 已自动派单的告警：不再重复建单（后端同样会拦），直接去工单看板 */
+function openWorkOrder(alert: Alert) {
+  detailVisible.value = false;
+  router.push({ path: "/workorders", query: { focus: String(alert.workOrderId ?? "") } });
+}
+
 /** 告警 → 工单：内容、来源、园区、设备全带上，派单时只需选责任人 */
 function convertToOrder(alert: Alert) {
+  if (alert.workOrderId) {
+    openWorkOrder(alert);
+    return;
+  }
   detailVisible.value = false;
   router.push({
     path: "/workorders",
@@ -175,6 +185,7 @@ onMounted(load);
               <th>告警内容</th>
               <th>关联设备</th>
               <th>所属园区</th>
+              <th>责任人 / 工单</th>
               <th>发生时间</th>
               <th>状态</th>
               <th>操作</th>
@@ -189,6 +200,15 @@ onMounted(load);
               </td>
               <td class="mono">{{ alert.deviceCode ?? "—" }}</td>
               <td>{{ alert.parkName ?? "—" }}</td>
+              <td>
+                <div class="cell-main">{{ alert.assignee ?? "—" }}</div>
+                <div v-if="alert.workOrderCode" class="cell-sub mono">
+                  {{ alert.workOrderCode }}
+                </div>
+                <div v-else-if="alert.assigneeNote" class="cell-sub">
+                  {{ alert.assigneeNote }}
+                </div>
+              </td>
               <td class="mono muted">{{ dateTime(alert.occurredAt) }}</td>
               <td><StatusBadge :status="alert.status" /></td>
               <td>
@@ -201,6 +221,15 @@ onMounted(load);
                     <AppIcon name="check" />标记处理
                   </button>
                   <button
+                    v-if="alert.workOrderId"
+                    class="btn sm"
+                    title="已按当班排班自动派单，打开工单查看处置进度"
+                    @click="openWorkOrder(alert)"
+                  >
+                    <AppIcon name="ticket" />查看工单
+                  </button>
+                  <button
+                    v-else
                     class="btn sm"
                     title="派发工单给责任人现场处理"
                     @click="convertToOrder(alert)"
@@ -214,7 +243,7 @@ onMounted(load);
               </td>
             </tr>
             <tr v-if="!filteredAlerts.length">
-              <td colspan="7"><div class="empty-box">暂无告警记录</div></td>
+              <td colspan="8"><div class="empty-box">暂无告警记录</div></td>
             </tr>
           </tbody>
         </table>
@@ -231,6 +260,16 @@ onMounted(load);
         <div class="kv"><span>告警内容</span><b>{{ detailAlert.content }}</b></div>
         <div class="kv"><span>关联设备</span><b class="mono">{{ detailAlert.deviceCode ?? "—" }}</b></div>
         <div class="kv"><span>所属园区</span><b>{{ detailAlert.parkName ?? "—" }}</b></div>
+        <div class="kv">
+          <span>当班责任人</span><b>{{ detailAlert.assignee ?? "—" }}</b>
+        </div>
+        <div class="kv">
+          <span>派单依据</span><b>{{ detailAlert.assigneeNote ?? "—" }}</b>
+        </div>
+        <div class="kv">
+          <span>处置工单</span>
+          <b class="mono">{{ detailAlert.workOrderCode ?? "—" }}</b>
+        </div>
         <div class="kv"><span>发生时间</span><b class="mono">{{ detailAlert.occurredAt }}</b></div>
         <div class="kv">
           <span>处理状态</span><b><StatusBadge :status="detailAlert.status" /></b>
@@ -242,7 +281,14 @@ onMounted(load);
       <template #footer>
         <button class="btn" @click="detailVisible = false">关闭</button>
         <button
-          v-if="detailAlert"
+          v-if="detailAlert && detailAlert.workOrderId"
+          class="btn"
+          @click="openWorkOrder(detailAlert)"
+        >
+          <AppIcon name="ticket" />查看工单
+        </button>
+        <button
+          v-else-if="detailAlert"
           class="btn"
           @click="convertToOrder(detailAlert)"
         >

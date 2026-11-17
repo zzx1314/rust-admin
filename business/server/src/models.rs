@@ -268,6 +268,16 @@ pub struct Alert {
     pub occurred_at: String,
     pub handled_at: Option<String>,
     pub created_at: String,
+    /// 派单到的责任人（按当班排班匹配，见 `alert_flow`）
+    pub staff_id: Option<i64>,
+    /// 责任人姓名快照（责任人库改名/删除后仍显示当时派给了谁）
+    pub assignee: Option<String>,
+    /// 自动生成的工单；非空表示这条告警已经派过单
+    pub work_order_id: Option<i64>,
+    /// 工单编号（`WO-1115-01`），列表直接显示，免得再点一次
+    pub work_order_code: Option<String>,
+    /// 派单依据：当班排班 SH-001（早班 08:00 - 16:00）/ 园区负责人 / 当天没有排班…
+    pub assignee_note: Option<String>,
 }
 
 #[derive(Debug, FromRow, Serialize, Clone)]

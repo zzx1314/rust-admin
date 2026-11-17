@@ -359,6 +359,15 @@ export interface Alert {
   occurredAt: string;
   handledAt: string | null;
   createdAt: string;
+  /** 派单到的责任人（按当班排班匹配，见 server/src/alert_flow.rs） */
+  staffId: number | null;
+  assignee: string | null;
+  /** 自动生成的工单；非空表示这条告警已经派过单 */
+  workOrderId: number | null;
+  /** 工单编号（`WO-1115-01`） */
+  workOrderCode: string | null;
+  /** 派单依据：当班排班 SH-001（早班 08:00 - 16:00）/ 园区负责人 / 当天没有排班… */
+  assigneeNote: string | null;
 }
 
 /** 企业微信推送记录（`notifications` 表） */

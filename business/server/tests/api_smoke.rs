@@ -3049,3 +3049,121 @@ async fn shift_copy_aligns_periods_and_handles_conflicts() {
         "提示应说明区间重叠: {overlap}"
     );
 }
+
+/// 告警自动派单：告警 → 当天排班找到责任人 → 自动建工单 → 推送消息带上责任人与工单号。
+///
+/// 这里刻意用 `Notifier::disabled()` 的 state：**派单与建单不能依赖企业微信配置**，
+/// 现场没配 webhook 也必须有人管这条告警。
+#[tokio::test]
+async fn alert_auto_dispatches_to_duty_owner() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+
+    let auth = |method: &str, path: &str| {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let send = |request: Request<Body>| {
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            (response.status(), json_body(response).await)
+        }
+    };
+    let post = |path: &str, body: String| {
+        let mut request = auth("POST", path);
+        *request.body_mut() = Body::from(body);
+        request
+    };
+
+    // 设备绑到园区 2 / 区域 4：告警只有园区+区域，没有计划号也能对上当班排班
+    sqlx::query(
+        "UPDATE devices SET park_id = 2, zone_id = 4 WHERE device_id = 'RD-002'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let device_pk: i64 = sqlx::query_scalar("SELECT id FROM devices WHERE device_id = 'RD-002'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    // 责任人 + 今天早班排班（园区 2 / 区域 4）。演示播种的排班都在别的日期，
+    // 所以今天这条是唯一候选，匹配结果可断言。
+    let (status, staff) = send(post(
+        "/api/staff",
+        r#"{"name":"派单责任人","role":"运维工程师","team":"运维一组","phone":"13800001234"}"#
+            .to_string(),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "建责任人失败: {staff}");
+    let staff_id = staff["data"]["id"].as_i64().unwrap();
+
+    let today = robodog_ops_server::db::today();
+    let (status, shift) = send(post(
+        "/api/shifts",
+        format!(
+            r#"{{"shiftDate":"{today}","slot":"早班","staffId":{staff_id},
+                "parkId":2,"zoneId":4,"taskName":"装卸平台早班巡查","status":"已发布"}}"#
+        ),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "建当班排班失败: {shift}");
+
+    // 告警落库 → 自动派单
+    let (status, alert) = send(post(
+        "/api/alerts",
+        format!(
+            r#"{{"level":"严重","content":"导航指令非法（13440），航点 3 无法到达",
+                "deviceId":{device_pk},"parkId":2}}"#
+        ),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "建告警失败: {alert}");
+    let alert_id = alert["data"]["id"].as_i64().unwrap();
+    let alert_code = alert["data"]["alertCode"].as_str().unwrap().to_string();
+    assert_eq!(
+        alert["data"]["assignee"], "派单责任人",
+        "应按当班排班派给责任人: {alert}"
+    );
+    assert_eq!(alert["data"]["staffId"], serde_json::json!(staff_id));
+    let note = alert["data"]["assigneeNote"].as_str().unwrap_or_default();
+    assert!(note.contains("当班排班"), "派单依据应写明排班: {note}");
+    let order_code = alert["data"]["workOrderCode"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(order_code.starts_with("WO-"), "应自动建单: {alert}");
+
+    // 工单内容：来源、原始告警编号、优先级、处理人
+    let (_, orders) = send(auth("GET", "/api/workorders")).await;
+    let rows = orders["data"].as_array().unwrap();
+    let order = rows
+        .iter()
+        .find(|row| row["orderCode"] == serde_json::json!(order_code))
+        .expect("自动派单应生成工单");
+    assert_eq!(order["source"], "告警自动派单");
+    assert_eq!(order["sourceRef"], serde_json::json!(alert_code));
+    assert_eq!(order["alertId"], serde_json::json!(alert_id));
+    assert_eq!(order["assignee"], "派单责任人");
+    assert_eq!(order["priority"], "紧急", "严重告警应派紧急单");
+
+    // 同一告警不允许再建一张单（页面「转工单」会撞上这条）
+    let (status, duplicate) = send(post(
+        "/api/workorders",
+        format!(r#"{{"title":"重复转单","assignee":"派单责任人","alertId":{alert_id}}}"#),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "重复转单应拒绝: {duplicate}");
+    assert!(
+        duplicate["msg"].as_str().unwrap_or_default().contains("已派单"),
+        "提示应说明已派过单: {duplicate}"
+    );
+}

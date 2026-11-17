@@ -68,6 +68,11 @@ const switches = [
     title: "企业微信 · 任务执行异常",
     desc: "任务被判定异常时推送到企业微信群（带设备、进度与失败原因）"
   },
+  {
+    key: "alert_auto_workorder",
+    title: "告警自动派单（生成工单）",
+    desc: "告警落库后按当天排班找当班责任人，自动建工单并 @ 到人；关闭后仍会解析责任人，只是不建单"
+  },
   { key: "low_battery_recharge", title: "低电量自动回充", desc: "电量低于 20% 时自动下发回充任务" },
   { key: "daily_report_mail", title: "巡检日报邮件", desc: "每日 18:00 发送运行日报至运维组邮箱" },
   { key: "night_silent", title: "夜间静音模式", desc: "22:00 - 07:00 暂停非紧急告警声音提示" }

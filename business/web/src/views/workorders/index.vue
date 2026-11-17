@@ -296,6 +296,13 @@ onMounted(async () => {
     // 预填参数用完就清掉：刷新页面不该再弹一次新建窗口
     void router.replace({ path: "/workorders" });
   }
+  // 从告警中心「查看工单」/ 企业微信消息里的链接进来时直接打开这条工单详情
+  const focus = Number(route.query.focus);
+  if (Number.isFinite(focus) && focus > 0) {
+    const target = orders.value.find(order => order.id === focus);
+    if (target) await openDetail(target);
+    void router.replace({ path: "/workorders" });
+  }
 });
 </script>
 

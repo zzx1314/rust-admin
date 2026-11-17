@@ -1,9 +1,12 @@
 # 企业微信群机器人告警推送
 
-> 状态：已上线（2026-11 落地并端到端验证）
-> 代码：`server/src/notify.rs`（核心）、`server/src/handlers/notifications.rs`（接口）、
-> `server/migrations/019_notifications.sql`（表）
-> 需求来源：执行任务时出现异常告警，要推到企业微信群，值班的人手机能收到
+> 状态：已上线（2026-11 落地并端到端验证；告警自动派单 2026-11 追加）
+> 代码：`server/src/notify.rs`（核心）、`server/src/alert_flow.rs`（告警 → 责任人 → 工单）、
+> `server/src/handlers/notifications.rs`（接口）、
+> `server/migrations/019_notifications.sql`（推送记录表）、
+> `server/migrations/021_alert_dispatch.sql`（告警派单列）
+> 需求来源：执行任务时出现异常告警，要推到企业微信群，值班的人手机能收到；
+> 并且**告警要落到具体责任人头上**（自动建工单），不能只是群里刷一条消息
 
 本文是这份功能的**设计与扩展说明**，不是使用手册。使用手册在
 [`../README.md`](../README.md) 的「企业微信告警推送」一节；本文记录的是
@@ -18,6 +21,7 @@
 | 把告警 / 任务异常以 markdown 卡片推到**一个**企业微信群 | **用代码创建群机器人** —— 官方没有这个接口，只能在企微客户端里手动建 |
 | 按级别过滤、按业务类型分开关、夜间只推严重 | 接收群里的回复（webhook 单向，只能发） |
 | 失败时在页面上看到企业微信返回的 `errcode` | 保证送达（企业微信不返回 ACK，只有 `errcode: 0`） |
+| 按**当天排班**把告警派给当班责任人、自动建工单，并 `@` 到人 | 猜到「谁真的在现场」—— 名单来自平台里的排班，没排班就只能兜底到园区负责人 |
 
 **"建机器人"这一步是人工的**，代码只负责「配了地址就发」。所以需求里
 "在一个群聊创建一个机器人"落地成：文档教人建 → 拿到 webhook → 填环境变量 →
@@ -52,9 +56,11 @@
                               │
                               ▼
                    notify::alert_created(state, alert_code)
-                              │  ① 查 notifications 开关（DB）
-                              │  ② 按 alert_code 回查设备/园区
-                              │  ③ 渲染 Notice + 去重 → try_send
+                              │  ① alert_flow::on_alert —— 按当天排班找责任人
+                              │     并自动建工单（**不看推送开关**，先落单）
+                              │  ② 查 notifications 开关（DB）
+                              │  ③ 按 alert_code 回查设备/园区
+                              │  ④ 渲染 Notice + 去重 → try_send
                     ┌─────────┴──────────┐
    任务异常 3 处 ────┤ notify::task_abnormal(task_code, level, reason)
    （客户端上报 / 看门狗 / 手动置异常不做）   │
@@ -73,7 +79,7 @@
                     notifications 表（sent / failed + errcode）
 ```
 
-### 三条不可让步的设计约束
+### 四条不可让步的设计约束
 
 1. **绝不在 WS handler / 看门狗里 await 外网 HTTP。**
    一次 `qyapi` 超时是 10s，`handle_heartbeat` 是每 10s 一帧的心跳路径，
@@ -85,7 +91,12 @@
    "哪条告警会进群"。现在调用点只写一行 `notify::alert_created(state, &code)`，
    消息内容一律由 `alert_code` 回查得到 —— 调用点不需要知道消息长什么样。
 
-3. **webhook 只从环境变量读。**
+3. **派单不能依赖推送通道。**
+   现场很可能根本没配 webhook（内网部署、群机器人还没建），但「告警要有人管」
+   不能跟着通道一起失效。所以 `alert_flow::on_alert` 跑在 `notify::alert_created`
+   的最前面、`channel_enabled()` 判断之前，推送只是它后面的一条旁路。
+
+4. **webhook 只从环境变量读。**
    地址即凭据，写进 `server.toml` 就等于进 git。为兼容性保留了 `[wecom] webhook`
    字段，但 `Config::load()` 检测到「值来自文件而非环境变量」会打一条 warn。
 
@@ -106,16 +117,21 @@
 | `notify.rs:313` `Notifier::channel()` | 装配句柄 + 消费端；无 webhook 返回 `None` |
 | `notify.rs:355` `Notifier::enqueue()` | **同步**：级别过滤 → 去重 → `try_send` |
 | `notify.rs:394` `run_consumer()` | 单消费者循环，`select!` 收消息 + 60s tick 刷溢出汇总 |
-| `notify.rs:470` `deliver()` | @all 那条 + markdown 那条，含重试与落库 |
+| `notify.rs` `deliver()` | @all 那条 + markdown 那条，含重试与落库；有 `mentions` 时改发 `mentioned_mobile_list` |
 | `notify.rs:551` `post()` | HTTP + `errcode` 分类（45009 / 其他 / 传输错误） |
 | `notify.rs:647` `channel_enabled()` | 读两个 settings 键，缺行视为开启 |
-| `notify.rs:684` `alert_created()` | 告警入口 |
-| `notify.rs:735` `task_abnormal()` | 任务异常入口 |
+| `notify.rs` `alert_created()` | 告警入口：**先派单**（`alert_flow`）再推送 |
+| `notify.rs` `task_abnormal()` | 任务异常入口：同样带「当班责任人」并 @ 到人 |
+| `alert_flow.rs` `on_alert()` | 告警 → 责任人 → 自动建工单 → 回写 `alerts` 四列 |
+| `alert_flow.rs` `candidate_score()` | 排班匹配打分（同任务 40 / 同区域 20 / 同园区 10 / 已发布 4 / 有责任人 2 / 在岗 1） |
+| `alert_flow.rs` `responsible_for_task()` | 任务异常推送复用同一套匹配（只找人，不建单） |
+| `alert_flow.rs` `auto_workorder_enabled()` | 读 `alert_auto_workorder` 开关（缺行视为开启） |
+| `handlers/workorders.rs` `create_order_core()` | 建单核心（人工转单 `promote_alert=true`，自动派单 `false`） |
 | `notify.rs:787` `send_test()` | 同步发测试消息，返回企微原文 |
 | `handlers/notifications.rs` | `GET /api/notifications`、`POST /api/notifications/test` |
 | `config.rs` | `wecom_enabled` / `wecom_webhook` / `wecom_min_level` / `wecom_mention_all` / `public_url` |
 | `main.rs` | 装配 `Notifier`，`notify::spawn(state, rx)` |
-| `seed.rs` | 播种 `wecom_alert_push` / `wecom_task_abnormal` 两个开关 |
+| `seed.rs` | 播种 `wecom_alert_push` / `wecom_task_abnormal` / `alert_auto_workorder` 三个开关 |
 | `web/src/views/settings/index.vue` | 开关 + 「发送测试消息」+ 最近 5 条推送记录 |
 
 ### 触发点清单
@@ -126,7 +142,7 @@
 | 2 | 心跳超时被置离线 | `gateway.rs:625` | 警告 |
 | 3 | `ctrl_source=3` 控制权被抢 | `gateway.rs:1363` | 警告 |
 | 4 | AI 识别检出 | `ai_patrol.rs:453` | 警告 |
-| 5 | 页面手动新建告警 | `handlers/alerts.rs:109` | 按填写 |
+| 5 | 页面手动新建告警 | `handlers/alerts.rs` `create_alert` | 按填写 |
 | 6 | 客户端上报任务 `异常` | `gateway.rs:1492` | 警告 |
 | 7 | 任务看门狗判异常 | `gateway.rs:752` | 设备离线→**严重**，否则警告 |
 
@@ -157,6 +173,16 @@ status('sent'|'failed'), attempts, last_error, created_at, sent_at
 | --- | --- | --- |
 | `wecom_alert_push` | `true` | 设备异常告警推企业微信 |
 | `wecom_task_abnormal` | `true` | 任务执行异常推企业微信 |
+| `alert_auto_workorder` | `true` | 告警按当班排班自动派单并建工单（关掉只停建单，责任人解析与推送照旧） |
+
+### `alerts` 派单列（migration 021）
+
+```sql
+staff_id, assignee, work_order_id, assignee_note
+```
+
+为什么放告警行而不新建表：派单结果是告警的一次性派生数据，独立表只会让告警列表
+多一次 JOIN；`work_order_id` 非空同时充当**幂等守卫**（一条告警只派一单）。
 
 `seed.rs` 用 `INSERT OR IGNORE` 每启动跑一次，所以**老库升级后自动补上**，
 不需要手写迁移。
@@ -191,9 +217,36 @@ wecom_alert_push / wecom_task_abnormal  渠道级：这一类事件推不推企�
 [查看详情 →](http://39.107.55.13:3100/alerts)
 ```
 
-任务异常多两行（任务名+编号、进度）和一段**处置建议**，链接指向
-`/tasks?focus={id}`。链接的前缀来自 `ROBODOG_PUBLIC_URL`，**不配就不带链接**
-（猜一个地址比不给更容易误导人）。
+告警自动派单之后多四行（区域 / 关联计划 / 当班责任人 / 工单），`处置建议` 变成
+一段话，链接改指 `/workorders?focus={id}`：
+
+```
+## 🔴 <font color="warning">严重</font> · 设备异常告警（已自动派单）
+> 设备：RD-002
+> 园区：张江智造园区
+> 区域：装卸区
+> 关联计划：装卸平台早班巡查
+> 当班责任人：陈志远（运维一组） · 早班 08:00 - 16:00（SH-012）
+> 工单：WO-1115-03（已自动派单）
+> 时间：2026-11-15 18:37:47
+> 告警码：AL-006
+
+**内容**：导航指令非法（13440），航点 3 无法到达
+
+**处置建议**：已按当班排班派给 陈志远（运维一组） · 早班 08:00 - 16:00（SH-012），
+工单 WO-1115-03 已自动生成（当班排班 SH-012），请责任人到场确认并把处置结果回填到工单
+
+[查看详情 →](http://39.107.55.13:3100/workorders?focus=12)
+```
+
+「谁去处理」来自**当天排班**（`shifts`）而不是计划（`tasks`）：计划只描述
+「哪个设备在什么时候跑哪条路线」，谁负责是按天、按班次排出来的。匹配打分见
+`alert_flow.rs::candidate_score`，兜底 **园区负责人 → 未指派**（兜底也会建单，
+让值班长在看板上改派，而不是把告警闷掉）。
+
+任务异常多两行（任务名+编号、进度）、一行「当班责任人」和一段**处置建议**，
+链接指向 `/tasks?focus={id}`。链接的前缀来自 `ROBODOG_PUBLIC_URL`，
+**不配就不带链接**（猜一个地址比不给更容易误导人）。
 
 ### 企业微信的硬约束 → 代码里的处理
 
@@ -202,7 +255,7 @@ wecom_alert_push / wecom_task_abnormal  渠道级：这一类事件推不推企�
 | 20 条/分钟/机器人，超了 `45009` | 本地令牌桶 18/min，超出的**排队不丢** | `RATE_PER_MIN` |
 | markdown 正文 ≤ 4096 **字节**（中文 3 字节/字），超了整条被拒 `40058` | 按字节截断 + `…（已截断）`，断言不切半个汉字 | `MARKDOWN_LIMIT=4000` |
 | text ≤ 2048 字节 | 同上 | `TEXT_LIMIT=2000` |
-| markdown **不支持 @ 提及** | `mention_all` 时**另发一条 text** 带 `mentioned_list:["@all"]` | `wecom_mention_all` |
+| markdown **不支持 @ 提及** | `mention_all` 时**另发一条 text** 带 `mentioned_list:["@all"]`；否则有责任人手机号时用 `mentioned_mobile_list` @ 到人（两种都算多发一条） | `wecom_mention_all` / `staff.phone` |
 | 只能发不能收 | 消息带链接，处理仍在控制台 | — |
 | 支持语法有限 | 只用 `##` / `>` / `**粗**` / `[文字](url)` / `<font color>`；**不用 `-` 列表**（有单测守着） | — |
 
@@ -318,7 +371,7 @@ journalctl -u rust-admin-robodog -f | grep -i wecom
 | **推送记录页** | 后端 `GET /api/notifications` 已就绪，设置页现在只显示最近 5 条；做成「告警中心」的一个页签，支持按状态/类型筛选、手动重发 | 半天 |
 | **多群路由** | 严重 → 运维群，一般 → 值班群。现在 `Notifier` 只持有一个 `tx`，扩成 `Vec<(Channel, Sender)>` + 每个目标一套限流；配置从单 `webhook` 变成 `[[wecom.targets]]` | 1 天 |
 | **恢复通知** | 设备恢复在线 / 急停解除 / 控制权收回时补一条"已恢复"。要解决"给哪条消息回复"的问题（企微不支持消息引用），建议用独立的 `ref_type='recover'` + 原 `dedupe_key` 关联 | 半天 |
-| **@ 具体人** | markdown 不支持 @，可用 text 的 `mentioned_list:[userid]` / `mentioned_mobile_list:[手机号]`。需要维护"哪个园区找谁"的映射表 | 半天 |
+| ~~**@ 具体人**~~ | ✅ 已做：按当天排班取 `staff.phone`，用 `mentioned_mobile_list` @ 到人（`alert_flow` + `Notice.mentions`）。责任人库没填手机号时只在卡片里显示姓名 | 已完成 |
 | **夜间静音联动** | `night_silent` 开关已存在于 settings，可以在 `channel_enabled()` 里带上「22:00-07:00 只放行严重」 | 2 小时 |
 | **告警聚合** | 同一设备连续 N 条告警折叠成一条"设备 X 在过去 10 分钟触发 N 次告警" | 半天 |
 
@@ -357,6 +410,9 @@ journalctl -u rust-admin-robodog -f | grep -i wecom
 | 长文本直接发 | `40058 content exceed max length` 整条被拒 | 企微按**字节**算，中文 3 字节/字 |
 | 前端传 `ref_type` 后端收 `refType` | 筛选静默不生效 | 这个项目里模型统一 `#[serde(rename_all="camelCase")]`，Query 结构体也要加 |
 | 改 `AppState` 加字段 | 7 个集成测试编译失败 | 新增字段记得改 `tests/*.rs` 的 `AppState { .. }` 字面量；`Notifier::disabled()` 就是为这个准备的 |
+| 自动派单复用「告警转工单」时顺手把告警置「处理中」 | `control_source` 三个用例全红：抢占告警刚建出来就被改成「处理中」，「未处理」计数变 0 | 人工转单 = 已接手 → 推进告警状态；**自动派单的工单还在「待接单」，告警必须留在「未处理」**（`create_order_core(..., promote_alert)`） |
+| 派单逻辑写在推送开关后面 | 没配 webhook 的环境里告警不建单也没人管，功能等于不存在 | 派单在建单前、`channel_enabled()` 判断之前执行 |
+| 只改 `handlers/alerts.rs` 的 SELECT | `/dashboard/summary` 500（驾驶舱自己拼了一份 `Alert` 查询） | `Alert` 结构体加列时，全仓搜一遍 `query_as::<Alert>` / `build_query_as::<Alert>` |
 
 ---
 

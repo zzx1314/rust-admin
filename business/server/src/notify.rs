@@ -132,6 +132,11 @@ pub struct Notice {
     pub link: Option<String>,
     /// 严重级别是否 @所有人（由配置 `wecom_mention_all` 决定，构造时写入）。
     pub mention_all: bool,
+    /// 要 @ 的具体责任人手机号（企业微信 `mentioned_mobile_list`）。
+    ///
+    /// 群里只有手机号能被 @：责任人库没有电话时就只能靠 markdown 卡片里那一行
+    /// 「当班责任人」让人自己对号。与 `mention_all` 互斥使用（先 @所有人，否则 @具体人）。
+    pub mentions: Vec<String>,
 }
 
 impl Notice {
@@ -417,8 +422,13 @@ async fn run_consumer(state: AppState, mut rx: mpsc::Receiver<Notice>) {
         tokio::select! {
             maybe = rx.recv() => {
                 let Some(notice) = maybe else { break };
-                // @所有人要多发一条 text，企业微信按「消息条数」限流，所以占两个额度
-                let cost = if notice.mention_all { 2 } else { 1 };
+                // @所有人 / @具体责任人都要多发一条 text，企业微信按「消息条数」限流，
+                // 所以占两个额度
+                let cost = if notice.mention_all || !notice.mentions.is_empty() {
+                    2
+                } else {
+                    1
+                };
                 for _ in 0..cost {
                     while !gate.allow(Instant::now()) {
                         let wait = gate.wait_time(Instant::now());
@@ -452,6 +462,7 @@ async fn flush_overflow(state: &AppState) {
         action: Some("请到告警中心查看完整列表".to_string()),
         link: alerts_link(state),
         mention_all: false,
+        mentions: Vec::new(),
     };
     let Some(url) = state.config.wecom_webhook.clone() else {
         return;
@@ -488,6 +499,20 @@ async fn deliver(
         match post(client, url, &body).await {
             Ok(()) => {}
             Err(failure) => warn!("wecom: @所有人消息发送失败: {}", failure.message),
+        }
+    } else if !notice.mentions.is_empty() {
+        // @当班责任人：markdown 不支持提及，只能另发一条 text 带手机号。
+        // 手机号没在企微通讯录里时企微不报错、只不置红，所以这条失败也不影响正文
+        let body = json!({
+            "msgtype": "text",
+            "text": {
+                "content": truncate_bytes(&notice.mention_text(), TEXT_LIMIT),
+                "mentioned_mobile_list": notice.mentions,
+            }
+        });
+        match post(client, url, &body).await {
+            Ok(()) => {}
+            Err(failure) => warn!("wecom: @责任人消息发送失败: {}", failure.message),
         }
     }
 
@@ -630,6 +655,32 @@ fn alerts_link(state: &AppState) -> Option<String> {
         .map(|base| format!("{base}/alerts"))
 }
 
+/// 只 @ 看起来像手机号的号码。
+///
+/// 责任人库里的电话可能是脱敏值（演示数据是 `138****1203`），把它塞进
+/// `mentioned_mobile_list` 会让整条 text 被企微按参数错误拒掉 —— 一条 @ 都发不出去。
+/// 所以先做一次形状校验：失败就只保留 markdown 卡片里的「当班责任人」那一行。
+fn mentionable(phone: &str) -> Option<String> {
+    let phone = phone.trim();
+    let ok = phone.len() >= 5
+        && !phone.contains('*')
+        && phone
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ch == '+' || ch == '-');
+    ok.then(|| phone.to_string())
+}
+
+fn work_orders_link(state: &AppState, order_id: Option<i64>) -> Option<String> {
+    state
+        .config
+        .public_url
+        .as_deref()
+        .map(|base| match order_id {
+            Some(id) => format!("{base}/workorders?focus={id}"),
+            None => format!("{base}/workorders"),
+        })
+}
+
 fn tasks_link(state: &AppState, task_id: Option<i64>) -> Option<String> {
     state
         .config
@@ -664,24 +715,44 @@ async fn channel_enabled(state: &AppState, channel: Channel) -> bool {
     read(outer) && read(inner)
 }
 
-/// `alert_created` 回查用：(alert_pk, alert_code, level, content, occurred_at, device_code, park_name)
-type AlertLookup = (
-    i64,
-    String,
-    String,
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-);
+/// `alert_created` 回查用：告警 + 设备 + 园区 + 区域。
+#[derive(Debug, sqlx::FromRow)]
+struct AlertLookup {
+    id: i64,
+    alert_code: String,
+    level: String,
+    content: String,
+    occurred_at: String,
+    device_code: Option<String>,
+    park_name: Option<String>,
+    zone_name: Option<String>,
+}
 
-/// `task_abnormal` 回查用：(task_pk, task_code, task_name, progress, device_code, park_name)
-type TaskLookup = (i64, String, String, i64, Option<String>, Option<String>);
+/// `task_abnormal` 回查用：任务 + 设备 + 园区。
+#[derive(Debug, sqlx::FromRow)]
+struct TaskLookup {
+    id: i64,
+    task_code: String,
+    task_name: String,
+    progress: i64,
+    park_id: Option<i64>,
+    device_code: Option<String>,
+    park_name: Option<String>,
+}
 
-/// 告警落库后调用：按 `alert_code` 回查设备/园区并推送。
+/// 告警落库后调用：找责任人 → 自动建工单 → 推送企微。
 ///
-/// 失败一律只打日志 —— 推送是旁路，不能影响告警本身。
+/// 顺序不能颠倒：
+///
+/// 1. **派单 + 建工单**（[`crate::alert_flow::on_alert`]）放在最前面，且**不看推送开关**。
+///    现场很可能根本没配 webhook，但「告警要有人管」不能依赖群消息通道。
+/// 2. 推送才是旁路，失败只打日志。
+///
+/// 消息里因此能直接带「当班责任人 / 工单号」，并把责任人手机号塞进
+/// `mentioned_mobile_list`（markdown 不支持 @，只能另发一条 text）。
 pub async fn alert_created(state: &AppState, alert_code: &str) {
+    let assignment = crate::alert_flow::on_alert(state, alert_code).await;
+
     if !state.notifier.is_enabled() {
         return;
     }
@@ -690,43 +761,83 @@ pub async fn alert_created(state: &AppState, alert_code: &str) {
     }
     let row: Option<AlertLookup> = sqlx::query_as(
         "SELECT a.id, a.alert_code, a.level, a.content, a.occurred_at,
-                    d.device_id, p.park_name
+                    d.device_id AS device_code, p.park_name, z.zone_name
                FROM alerts a
                LEFT JOIN devices d ON d.id = a.device_id
-               LEFT JOIN parks p ON p.id = a.park_id
+               LEFT JOIN parks p ON p.id = COALESCE(a.park_id, d.park_id)
+               LEFT JOIN zones z ON z.id = d.zone_id
               WHERE a.alert_code = ?1",
     )
     .bind(alert_code)
     .fetch_optional(&state.db)
     .await
     .unwrap_or(None);
-    let Some((id, code, level, content, occurred_at, device_code, park_name)) = row else {
+    let Some(row) = row else {
         debug!("wecom: 告警 {alert_code} 回查不到，跳过推送");
         return;
     };
 
+    let mut fields: Vec<(&'static str, String)> = Vec::with_capacity(9);
+    fields.push((
+        "设备",
+        row.device_code
+            .clone()
+            .unwrap_or_else(|| "未绑定设备".to_string()),
+    ));
+    fields.push((
+        "园区",
+        row.park_name
+            .clone()
+            .unwrap_or_else(|| "未绑定园区".to_string()),
+    ));
+    if let Some(zone) = &row.zone_name {
+        fields.push(("区域", zone.clone()));
+    }
+    if let Some(assignment) = &assignment {
+        if let Some(task_name) = &assignment.task_name {
+            fields.push(("关联计划", task_name.clone()));
+        }
+        fields.push(("当班责任人", assignment.summary()));
+        if let Some(order) = &assignment.work_order_code {
+            fields.push(("工单", format!("{order}（已自动派单）")));
+        }
+    }
+    fields.push(("时间", row.occurred_at));
+    fields.push(("告警码", row.alert_code.clone()));
+
+    // 有工单就链到工单（责任人点进去就能回填处置记录），否则退回告警中心
+    let link = assignment
+        .as_ref()
+        .and_then(|assignment| assignment.work_order_id)
+        .and_then(|order_id| work_orders_link(state, Some(order_id)))
+        .or_else(|| alerts_link(state));
+
     let notice = Notice {
-        level: Level::parse(&level),
+        level: Level::parse(&row.level),
         ref_type: Channel::Alert.ref_type(),
-        ref_id: Some(id),
-        dedupe_key: format!("alert:{code}"),
-        title: "设备异常告警".to_string(),
-        fields: vec![
-            (
-                "设备",
-                device_code.unwrap_or_else(|| "未绑定设备".to_string()),
-            ),
-            (
-                "园区",
-                park_name.unwrap_or_else(|| "未绑定园区".to_string()),
-            ),
-            ("时间", occurred_at),
-            ("告警码", code),
-        ],
-        body: Some(content),
-        action: None,
-        link: alerts_link(state),
+        ref_id: Some(row.id),
+        dedupe_key: format!("alert:{}", row.alert_code),
+        title: if assignment
+            .as_ref()
+            .is_some_and(|assignment| assignment.work_order_code.is_some())
+        {
+            "设备异常告警（已自动派单）".to_string()
+        } else {
+            "设备异常告警".to_string()
+        },
+        fields,
+        body: Some(row.content),
+        action: assignment
+            .as_ref()
+            .map(crate::alert_flow::Assignment::dispatch_sentence),
+        link,
         mention_all: false,
+        mentions: assignment
+            .as_ref()
+            .and_then(|assignment| assignment.phone.as_deref())
+            .and_then(mentionable)
+            .map(|phone| vec![phone])
+            .unwrap_or_default(),
     };
     state.notifier.enqueue(notice);
 }
@@ -740,7 +851,8 @@ pub async fn task_abnormal(state: &AppState, task_code: &str, level: Level, reas
         return;
     }
     let row: Option<TaskLookup> = sqlx::query_as(
-        "SELECT t.id, t.task_code, t.task_name, t.progress, d.device_id, p.park_name
+        "SELECT t.id, t.task_code, t.task_name, t.progress, t.park_id,
+                d.device_id AS device_code, p.park_name
            FROM tasks t
            LEFT JOIN devices d ON d.id = t.device_id
            LEFT JOIN parks p ON p.id = t.park_id
@@ -750,33 +862,60 @@ pub async fn task_abnormal(state: &AppState, task_code: &str, level: Level, reas
     .fetch_optional(&state.db)
     .await
     .unwrap_or(None);
-    let Some((id, code, name, progress, device_code, park_name)) = row else {
+    let Some(row) = row else {
         debug!("wecom: 任务 {task_code} 回查不到，跳过推送");
         return;
     };
 
+    // 计划层的责任人：任务异常同样要 @ 到人，否则群里只是「又一条报错」
+    let assignment =
+        crate::alert_flow::responsible_for_task(state, row.park_id, Some(row.id)).await;
+
+    let mut fields: Vec<(&'static str, String)> = Vec::with_capacity(5);
+    fields.push((
+        "任务",
+        format!("{}（{}）", row.task_name, row.task_code),
+    ));
+    fields.push((
+        "设备",
+        row.device_code
+            .clone()
+            .unwrap_or_else(|| "未绑定设备".to_string()),
+    ));
+    fields.push((
+        "园区",
+        row.park_name
+            .clone()
+            .unwrap_or_else(|| "未绑定园区".to_string()),
+    ));
+    fields.push(("进度", format!("{}%", row.progress)));
+    if let Some(assignment) = &assignment {
+        fields.push(("当班责任人", assignment.summary()));
+    }
+
     let notice = Notice {
         level,
         ref_type: Channel::Task.ref_type(),
-        ref_id: Some(id),
-        dedupe_key: format!("task:{code}"),
+        ref_id: Some(row.id),
+        dedupe_key: format!("task:{}", row.task_code),
         title: "任务执行异常".to_string(),
-        fields: vec![
-            ("任务", format!("{name}（{code}）")),
-            (
-                "设备",
-                device_code.unwrap_or_else(|| "未绑定设备".to_string()),
-            ),
-            (
-                "园区",
-                park_name.unwrap_or_else(|| "未绑定园区".to_string()),
-            ),
-            ("进度", format!("{progress}%")),
-        ],
+        fields,
         body: Some(reason.to_string()),
-        action: Some("检查设备在线状态与本体定位/导航状态，确认后在平台重新下发任务".to_string()),
-        link: tasks_link(state, Some(id)),
+        action: Some(match &assignment {
+            Some(assignment) => format!(
+                "{}；请先检查设备在线状态与本体定位/导航状态，确认后在平台重新下发任务",
+                assignment.duty_sentence()
+            ),
+            None => "检查设备在线状态与本体定位/导航状态，确认后在平台重新下发任务".to_string(),
+        }),
+        link: tasks_link(state, Some(row.id)),
         mention_all: level == Level::Critical,
+        mentions: assignment
+            .as_ref()
+            .and_then(|assignment| assignment.phone.as_deref())
+            .and_then(mentionable)
+            .map(|phone| vec![phone])
+            .unwrap_or_default(),
     };
     state.notifier.enqueue(notice);
 }
@@ -811,6 +950,7 @@ pub async fn send_test(state: &AppState) -> Result<String, String> {
         action: None,
         link: None,
         mention_all: false,
+        mentions: Vec::new(),
     };
     let payload = notice.markdown();
     let body = json!({ "msgtype": "markdown", "markdown": { "content": payload } });
@@ -856,7 +996,18 @@ mod tests {
             action: None,
             link: Some("http://10.0.0.8:3100/alerts".to_string()),
             mention_all: false,
+            mentions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn mentions_skip_masked_phones() {
+        // 演示数据里的脱敏号码不能进 mentioned_mobile_list
+        assert_eq!(mentionable("138****1203"), None);
+        assert_eq!(mentionable("13800001203"), Some("13800001203".to_string()));
+        assert_eq!(mentionable("+8613800001203"), Some("+8613800001203".to_string()));
+        assert_eq!(mentionable(""), None);
+        assert_eq!(mentionable("1234"), None, "太短的不当作号码");
     }
 
     #[test]

@@ -142,21 +142,47 @@ pub async fn create_work_order(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<WorkOrderRequest>,
 ) -> Result<Json<ApiResponse<WorkOrderDetail>>, AppError> {
-    let order = create_order_core(&state, payload, claims.sub, &claims.username).await?;
+    // 页面上手动「转工单」算人工接手：原告警同步推进到「处理中」
+    let order =
+        create_order_core(&state, payload, Some(claims.sub), &claims.username, true).await?;
     let logs = fetch_logs(&state, order.id).await?;
     Ok(ApiResponse::ok(WorkOrderDetail { order, logs }))
 }
 
-/// 建工单的核心逻辑：网页新建与「告警转工单」共用，避免两套默认值。
+/// 建工单的核心逻辑：网页新建、「告警转工单」与「告警自动派单」共用，避免三套默认值。
+///
+/// `created_by` 可为空：自动派单没有登录用户，工单的 `created_by` 落 NULL，
+/// 处理轨迹里的操作人写「系统」。
+///
+/// `promote_alert`：建单时要不要把原告警从「未处理」推进到「处理中」。
+/// 人工「转工单」= 已接手 → true；**告警自动派单 → false**，因为工单还停在
+/// 「待接单」，责任人没接单前告警仍然是未处理，不能被数量统计悄悄吞掉。
 pub(crate) async fn create_order_core(
     state: &AppState,
     payload: WorkOrderRequest,
-    created_by: i64,
+    created_by: Option<i64>,
     actor: &str,
+    promote_alert: bool,
 ) -> Result<WorkOrder, AppError> {
     let title = payload.title.trim();
     if title.is_empty() {
         return Err(AppError::BadRequest("工单标题不能为空".to_string()));
+    }
+    // 一条告警只派一单：自动派单已经建过单时，页面上再点「转工单」直接给回原文号，
+    // 否则同一件事会在看板上出现两张单，责任人也不知道该关哪张。
+    if let Some(alert_id) = payload.alert_id
+        && let Some((order_code,)) = sqlx::query_as::<_, (String,)>(
+            "SELECT w.order_code FROM alerts a
+               JOIN work_orders w ON w.id = a.work_order_id
+              WHERE a.id = ?1",
+        )
+        .bind(alert_id)
+        .fetch_optional(&state.db)
+        .await?
+    {
+        return Err(AppError::BadRequest(format!(
+            "该告警已派单（{order_code}），请到工单看板处理"
+        )));
     }
     // 责任人：优先 staffId，其次姓名；姓名能对上责任人库时补 staffId
     let (staff_id, assignee) = match (payload.staff_id, payload.assignee.as_deref()) {
@@ -235,7 +261,7 @@ pub(crate) async fn create_order_core(
     insert_log(state, id, actor, "created", &content).await?;
 
     // 告警转工单：原告警从「未处理」推进到「处理中」，两边状态不再互相打架
-    if let Some(alert_id) = payload.alert_id {
+    if let Some(alert_id) = payload.alert_id.filter(|_| promote_alert) {
         sqlx::query("UPDATE alerts SET status = '处理中' WHERE id = ?1 AND status = '未处理'")
             .bind(alert_id)
             .execute(&state.db)
