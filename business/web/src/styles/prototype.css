@@ -578,6 +578,14 @@ button{cursor:pointer}
 .week-grid .wg-cell.empty-cell{background:#fbfcfe}
 .shift-chip{display:flex;align-items:center;gap:6px;padding:5px 6px;border-radius:7px;background:var(--brand-soft);border-left:3px solid var(--brand);font-size:11px;margin-bottom:4px;transition:.14s}
 .shift-chip:hover{filter:brightness(.97)}
+/* 周视图拖拽复制：卡片可拖，目标格子高亮，松开即复制 */
+.shift-chip{cursor:grab}
+.shift-chip:active{cursor:grabbing}
+.shift-chip.dragging{opacity:.45;transform:scale(.98)}
+.week-grid .wg-cell.drop-ok{background:#f0f9ff;box-shadow:inset 0 0 0 2px var(--brand)}
+.week-grid .wg-cell.drop-ok::after{content:"松开复制";position:absolute;top:4px;right:6px;font-size:9.5px;color:var(--brand);opacity:.85;pointer-events:none}
+.week-grid .wg-cell.drop-hover{background:var(--brand-soft);box-shadow:inset 0 0 0 2px var(--brand)}
+.week-grid .wg-cell.drop-hover::after{content:"复制到此处";font-weight:700;opacity:1}
 .shift-chip:last-child{margin-bottom:0}
 .shift-chip.off{background:#f1f5f9;border-left-color:#cbd5e1;color:var(--muted)}
 .sc-ava{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;color:#fff;font-size:10px;font-weight:700;flex:none}

@@ -188,6 +188,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/shifts/stats", get(schedules::shift_stats))
         // 整段复制（上一周 / 上个月 → 当前区间）
         .route("/shifts/copy", post(schedules::copy_shifts))
+        // 单条复制：周视图把卡片拖到目标日期 / 班次格子
+        .route("/shifts/{id}/duplicate", post(schedules::duplicate_shift))
         .route(
             "/shifts/{id}",
             get(schedules::get_shift)

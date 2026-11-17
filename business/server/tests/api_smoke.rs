@@ -2776,6 +2776,46 @@ async fn schedules_and_work_orders_flow() {
         "提示应说明冲突原因: {conflict}"
     );
 
+    // 周视图拖拽复制：把这条排班拖到另一天的另一个班次
+    let (status, duplicated) = send(post(
+        &format!("/api/shifts/{shift_id}/duplicate"),
+        r#"{"shiftDate":"2030-01-02","slot":"中班"}"#.to_string(),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "拖拽复制应成功: {duplicated}");
+    assert_eq!(duplicated["data"]["shiftDate"], "2030-01-02");
+    assert_eq!(duplicated["data"]["slot"], "中班");
+    assert_eq!(duplicated["data"]["timeRange"], "16:00 - 00:00");
+    assert_eq!(duplicated["data"]["ownerName"], "冒烟责任人2");
+    assert_eq!(duplicated["data"]["parkId"], 1, "园区要一起复制");
+    assert_eq!(duplicated["data"]["status"], "已发布", "状态一起复制");
+    assert_ne!(duplicated["data"]["shiftCode"], created["data"]["shiftCode"]);
+    let duplicated_id = duplicated["data"]["id"].as_i64().unwrap();
+
+    // 拖到原格子 / 拖到已有同名同时段 → 明确拒绝
+    let (status, same) = send(post(
+        &format!("/api/shifts/{duplicated_id}/duplicate"),
+        r#"{"shiftDate":"2030-01-02","slot":"中班"}"#.to_string(),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "拖回原格子应拒绝: {same}");
+    let (status, dup_conflict) = send(post(
+        &format!("/api/shifts/{shift_id}/duplicate"),
+        r#"{"shiftDate":"2030-01-02","slot":"中班"}"#.to_string(),
+    ))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "目标时段已有人应拒绝: {dup_conflict}"
+    );
+    assert!(
+        dup_conflict["msg"].as_str().unwrap_or_default().contains("冲突"),
+        "提示应说明冲突: {dup_conflict}"
+    );
+    let (status, _) = send(auth("DELETE", &format!("/api/shifts/{duplicated_id}"))).await;
+    assert_eq!(status, StatusCode::OK);
+
     // 告警转工单：保留来源编号，并原告警推进到「处理中」
     let (status, order) = send(post(
         "/api/workorders",

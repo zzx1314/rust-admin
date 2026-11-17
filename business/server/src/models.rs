@@ -725,6 +725,16 @@ pub struct ShiftRequest {
     pub note: Option<String>,
 }
 
+/// 复制单条排班到另一天 / 另一班次（周视图拖拽）。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShiftDuplicateRequest {
+    /// 目标日期 `YYYY-MM-DD`
+    pub shift_date: String,
+    /// 目标班次；缺省沿用源排班的班次
+    pub slot: Option<String>,
+}
+
 /// 整段复制排班（上一周 / 上个月 → 当前区间）。
 ///
 /// 复制按「源区间第一天 → 目标区间第一天」的天数偏移对齐：

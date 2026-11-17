@@ -3,8 +3,8 @@ use crate::auth::Claims;
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::models::{
-    Shift, ShiftCopyRequest, ShiftCopyResult, ShiftCopySkip, ShiftQuery, ShiftRequest, Staff,
-    StaffQuery, StaffRequest,
+    Shift, ShiftCopyRequest, ShiftCopyResult, ShiftCopySkip, ShiftDuplicateRequest, ShiftQuery,
+    ShiftRequest, Staff, StaffQuery, StaffRequest,
 };
 use axum::Extension;
 use axum::Json;
@@ -433,6 +433,71 @@ pub async fn delete_shift(
         .execute(&state.db)
         .await?;
     Ok(ApiResponse::ok(result.rows_affected() > 0))
+}
+
+/// 复制单条排班到另一天 / 另一班次（周视图把卡片拖到目标格子）。
+///
+/// 与「整段复制」的分工：这条只复制**一条**，用于「周三早班拖到周四」这种手工补排，
+/// 不用再打开表单重填一遍。冲突规则与新建完全一致（同人 + 同天 + 同班次只能一条），
+/// 撞上直接回带原因的 400，前端原样提示。
+pub async fn duplicate_shift(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
+    Json(payload): Json<ShiftDuplicateRequest>,
+) -> Result<Json<ApiResponse<Shift>>, AppError> {
+    let source = fetch_shift(&state, id).await?;
+    ensure_owner(source.created_by, &claims)?;
+
+    let shift_date = payload.shift_date.trim().to_string();
+    let parsed = parse_day(&shift_date, "目标日期")?;
+    let shift_date = parsed.format("%Y-%m-%d").to_string();
+    let slot = payload
+        .slot
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| source.slot.clone());
+    let time_range = slot_range(&slot)
+        .ok_or_else(|| AppError::BadRequest(format!("未知班次：{slot}")))?
+        .to_string();
+    if shift_date == source.shift_date && slot == source.slot {
+        return Err(AppError::BadRequest(
+            "目标就是原排班所在的日期与班次".to_string(),
+        ));
+    }
+    // 同一个人同一天同一班次只能一条：拖重了就直接说清是谁冲突
+    ensure_slot_free(&state, &shift_date, &slot, &source.owner_name, None).await?;
+
+    let next_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM shifts")
+        .fetch_one(&state.db)
+        .await?;
+    let timestamp = now();
+    let result = sqlx::query(
+        "INSERT INTO shifts (shift_code, shift_date, slot, time_range, staff_id, owner_name,
+            park_id, zone_id, task_id, task_name, status, note, created_at, updated_at, created_by)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?14)",
+    )
+    .bind(format!("SH-{next_id:03}"))
+    .bind(&shift_date)
+    .bind(&slot)
+    .bind(&time_range)
+    .bind(source.staff_id)
+    .bind(&source.owner_name)
+    .bind(source.park_id)
+    .bind(source.zone_id)
+    .bind(source.task_id)
+    .bind(&source.task_name)
+    .bind(&source.status)
+    .bind(&source.note)
+    .bind(&timestamp)
+    .bind(claims.sub)
+    .execute(&state.db)
+    .await?;
+    Ok(ApiResponse::ok(
+        fetch_shift(&state, result.last_insert_rowid()).await?,
+    ))
 }
 
 /// 整段复制排班：把「上一周 / 上个月」的排班平移到目标区间。

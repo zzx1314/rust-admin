@@ -230,6 +230,9 @@ export const shiftApi = {
   create: (data: object) => post<Shift>("/shifts", data),
   update: (id: number, data: object) => put<Shift>(`/shifts/${id}`, data),
   remove: (id: number) => del<boolean>(`/shifts/${id}`),
+  /** 单条复制：周视图把卡片拖到目标日期 / 班次（other 天不用再填表单） */
+  duplicate: (id: number, data: { shiftDate: string; slot?: string }) =>
+    post<Shift>(`/shifts/${id}/duplicate`, data),
   /** 整段复制（上一周 / 上个月 → 目标区间） */
   copy: (data: object) => post<ShiftCopyResult>("/shifts/copy", data)
 };

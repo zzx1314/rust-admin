@@ -118,6 +118,75 @@ function shiftsOfCell(date: string, slot: string) {
   return shifts.value.filter(shift => shift.shiftDate === date && shift.slot === slot);
 }
 
+// ---------------------------------------------------------------- 拖拽复制
+//
+// 周视图里把排班卡片拖到另一个格子 = 复制一条到那天那个班次，不用再开表单重填。
+// 只有「同一人 + 同一天 + 同班次」会冲突（后端 `ensure_slot_free` 兜底并回原因），
+// 拖回自己原来的格子则直接忽略。
+
+/** 正在拖动的排班（null = 没在拖） */
+const dragShift = ref<Shift | null>(null);
+/** 悬停中的目标格子 `date|slot` */
+const dragOverCell = ref("");
+
+function cellKey(date: string, slot: string) {
+  return `${date}|${slot}`;
+}
+
+/** 目标格子能否接这条排班：正在拖 + 不是原格子 */
+function canDropInto(date: string, slot: string) {
+  const source = dragShift.value;
+  if (!source) return false;
+  return !(source.shiftDate === date && source.slot === slot);
+}
+
+function onDragStart(shift: Shift, event: DragEvent) {
+  dragShift.value = shift;
+  dragOverCell.value = "";
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = "copy";
+    // Firefox 必须写点东西拖动才会开始
+    event.dataTransfer.setData("text/plain", shift.shiftCode);
+  }
+}
+
+function onDragEnd() {
+  dragShift.value = null;
+  dragOverCell.value = "";
+}
+
+/** 指针离开格子：从子元素冒泡上来的 dragleave 不算离开，否则高亮会闪 */
+function onDragLeaveCell(event: DragEvent) {
+  const next = event.relatedTarget as Node | null;
+  if (next && (event.currentTarget as HTMLElement).contains(next)) return;
+  dragOverCell.value = "";
+}
+
+/** 只有合法目标才 preventDefault（否则浏览器不给「松开」） */
+function onDragOverCell(event: DragEvent, date: string, slot: string) {
+  if (!canDropInto(date, slot)) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  dragOverCell.value = cellKey(date, slot);
+}
+
+async function onDropCell(date: string, slot: string) {
+  const source = dragShift.value;
+  dragShift.value = null;
+  dragOverCell.value = "";
+  if (!source || !canDropInto(date, slot)) return;
+  try {
+    const created = await shiftApi.duplicate(source.id, { shiftDate: date, slot });
+    ElMessage.success(
+      `已复制 ${created.ownerName} 的「${created.taskName || "排班"}」到 ${previewDay(date)} ${slot}`
+    );
+    await load();
+  } catch {
+    // 冲突 / 无权限由 axios 拦截器统一提示，这里只需要刷新一下视图
+    await load();
+  }
+}
+
 const shiftStats = computed(() => {
   const count = (status: string) =>
     shifts.value.filter(shift => shift.status === status).length;
@@ -545,6 +614,9 @@ onMounted(async () => {
           <span class="card-sub">{{ weekStart }} 至 {{ weekEnd }}</span>
         </div>
         <div class="seg">
+          <span v-if="viewMode === 'week'" class="muted" style="font-size: 11.5px">
+            拖动卡片到别的日期 / 班次即可复制
+          </span>
           <button :class="{ on: viewMode === 'week' }" @click="viewMode = 'week'">
             <AppIcon name="board" />周视图
           </button>
@@ -573,15 +645,28 @@ onMounted(async () => {
               v-for="day in weekDays"
               :key="`${day.date}-${shiftSlot.name}`"
               class="wg-cell"
-              :class="{ 'empty-cell': !shiftsOfCell(day.date, shiftSlot.name).length }"
+              :class="{
+                'empty-cell': !shiftsOfCell(day.date, shiftSlot.name).length,
+                'drop-ok': canDropInto(day.date, shiftSlot.name),
+                'drop-hover': dragOverCell === cellKey(day.date, shiftSlot.name)
+              }"
               @click="openShiftDialog({ date: day.date, slot: shiftSlot.name })"
+              @dragover="onDragOverCell($event, day.date, shiftSlot.name)"
+              @dragleave="onDragLeaveCell($event)"
+              @drop.prevent="onDropCell(day.date, shiftSlot.name)"
             >
               <div
                 v-for="shift in shiftsOfCell(day.date, shiftSlot.name)"
                 :key="shift.id"
                 class="shift-chip"
-                :class="{ off: shift.status === '草案' }"
-                :title="`${shift.parkName ?? ''} / ${shift.taskName ?? ''}`"
+                :class="{
+                  off: shift.status === '草案',
+                  dragging: dragShift?.id === shift.id
+                }"
+                :title="`${shift.parkName ?? ''} / ${shift.taskName ?? ''}｜拖动可复制到别的日期或班次`"
+                draggable="true"
+                @dragstart="onDragStart(shift, $event)"
+                @dragend="onDragEnd"
                 @click.stop="openDetail(shift)"
               >
                 <span
