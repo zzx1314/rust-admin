@@ -55,6 +55,7 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -162,6 +163,40 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+# ---- 跨源访问（业务平台 / 现场入口页面直接调本 Agent 时必需）----
+# 板端自己的前端在 :8000，页面与 /api/* 同源，本来不需要 CORS。但一旦页面搬到
+# 业务平台（http://39.107.55.13:3100）或现场入口（http://192.168.41.246:8080），
+# 浏览器就是**跨源**：
+#   - fetch /api/*            需要 Access-Control-Allow-Origin
+#   - EventSource /api/events 同样受同源策略约束
+#   - 路线编辑器读「AI 模型目录」= 浏览器 GET :8000/api/detect/tasks，缺了这层
+#     直接报 `TypeError: Failed to fetch`
+# 视频（:8889 WHEP）不经过这里，mediamtx 自己放行 webrtcAllowOrigins: ['*']。
+# 注意：本 Agent **没有鉴权**，公网暴露时应收紧 AGENT_CORS_ORIGINS 白名单，
+# 或者只让业务平台后端代理（服务端不受同源策略限制）。
+CORS_ORIGINS = [o.strip() for o in os.getenv("AGENT_CORS_ORIGINS", "*").split(",")
+                if o.strip()] or ["*"]
+# 内网来源一律放行：现场入口可能架在任意内网机器/任意端口，板子的 wifi IP 还是
+# DHCP 的，写死白名单会随 IP 变化失效。公网来源仍只认上面的显式白名单。
+CORS_ORIGIN_REGEX = os.getenv(
+    "AGENT_CORS_ORIGIN_REGEX",
+    r"^https?://(localhost|127\.0\.0\.1"
+    r"|10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+    r"|192\.168\.\d{1,3}\.\d{1,3}"
+    r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?::\d+)?$",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_origin_regex=CORS_ORIGIN_REGEX,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+    # 预检结果缓存 10 分钟：AI 面板每次改类别都会 POST，别每次都多一轮 OPTIONS
+    max_age=600,
+)
+print("[agent] CORS allow_origins=%s regex=%s" % (CORS_ORIGINS, CORS_ORIGIN_REGEX),
+      flush=True)
 
 
 @app.middleware("http")
