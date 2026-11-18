@@ -386,7 +386,7 @@ POST /api/backpack/detect/config
 - 常驻 6 条 WS（`cam0..cam3`、`dogcam`、`dog-ipcam`），空闲时每条 ~1KB；
 - 第一个观看者 → `video_start` → 推流端起 ffmpeg 或 RTSP 拉流；
 - 最后一个观看者离开 → **不立刻停**，只保留 `streaming` 标记；看门狗每 15s 兜一次
-  「起过流但没人看」，超过 `STREAM_IDLE_GRACE`（60s）才下发 `video_stop`。宽限期内
+  「起过流但没人看」，超过 `STREAM_IDLE_GRACE`（15s）才下发 `video_stop`。宽限期内
   重新打开是**秒开**：流还在跑，服务端直接把流头补上，不用等 ffmpeg 重启；
 - 推流端按 stream 去重 `video_start`（`deploy/backpack-relay/relay_push.py`）：同一路
   已经在推就不重启 ffmpeg（重启 = 黑 3~7s + 换新 FLV 头 = 一次闪断）；
@@ -407,7 +407,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/
 
 - 延时 1~2s（WHEP 直连 ~200ms）；延迟敏感场景仍建议现场入口。
 - **首次看某一路要 3~7s**（ffmpeg 启动 + 等下一个关键帧）；同一个通道 30s 内再切回来是
-  秒开 —— 最后一个观看者离开时不立刻停流，交给看门狗在宽限（`STREAM_IDLE_GRACE`，60s）
+  秒开 —— 最后一个观看者离开时不立刻停流，交给看门狗在宽限（`STREAM_IDLE_GRACE`，15s）
   过后才停。
 - 中继模式下**浏览器叠加用不了**（中继流是 FLV，没有与抽帧对齐的坐标关系）：想让框跟着画面走
   就切「背包烧录」，板端把中文标签烧进 `preview` 流后一起中继（`RELAY_STREAMS` 需含
@@ -421,7 +421,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/
 ### 6.6 为什么「设备管理」里的视频会闪（2026-11-16 修，旧链路已于 §6.9 删除）
 
 > **历史记录**：这里说的是已删除的「设备客户端拉 `video_url` → 平台中继」链路。
-> 结论（补流头 / 60s 宽限 / 观看端不闪）对现在的背包中继同样成立，只是推流端换成了
+> 结论（补流头 / 宽限 / 观看端不闪）对现在的背包中继同样成立，只是推流端换成了
 > 板端 `backpack-relay`；`business/client/src/video.rs` 已删除，别再照它改配置。
 
 现场现象：设备管理 → 控制抽屉里的实时监控画面一闪一闪，角标在「LIVE」与
@@ -465,7 +465,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/
 | 位置 | 改动 |
 | --- | --- |
 | `business/client/src/video.rs`（已删除） | RTSP 输入加 `-timeout 8000000`（8s socket 读超时，卡住就报错让外层重启）；`RETRY_DELAY` 3s → 1s |
-| `business/server/src/video.rs` | `STREAM_IDLE_GRACE = 60s`：最后一个观看者离开后留 60s 宽限才停流，期间新观看者立刻拿到缓存流头 + 关键帧 |
+| `business/server/src/video.rs` | `STREAM_IDLE_GRACE = 15s`：最后一个观看者离开后留 15s 宽限才停流，期间新观看者立刻拿到缓存流头 + 关键帧 |
 | `business/web/src/components/VideoPlayer.vue` | `STALL_MS` 3s → 8s |
 
 复用排查手法：
@@ -1194,6 +1194,42 @@ python3 deploy/backpack-relay/measure_bitrate.py --stream dogcam --seconds 20
 回归：`cargo test --lib video`（新增 `late_viewer_gets_the_current_gop_not_the_round_first_keyframe`、
 `catch_up_with_a_single_gop_starts_at_the_round_keyframe`、`new_round_forgets_the_gop`，
 并改写 `late_viewer_gets_init_prefix`）、`cargo test --test video_relay`（10 个）。
+
+#### ⑭ 出口换成 4G / 链路硬阻塞：一步压到极省流档（2026-11-18 晚）
+
+现场一天掉 32 次 Wi-Fi，每次掉的这几秒钟里现场就说「卡」：原来的降档链路太慢 ——
+
+```text
+Wi-Fi 掉 → ws.send 反压 → 5s 超时 → 断连重连（这时才降一档：1000k → 500k）
+         → 重连后发现还是慢 → 再一个 5s 窗口 → 再降一档（500k → 200k）
+```
+
+十~二十秒里画面全在看「推不动的 1000k」，用户体感就是卡死 + 黑一下。两条改动（都在
+`deploy/backpack-relay/relay_push.py`）：
+
+| 改动 | 说明 |
+| --- | --- |
+| 慢速出口识别 | `route_watcher` 每 5s 查 `ip route get <平台IP>` 的 `dev`；一旦变成 `enx…`/`wwan…`/`usb…`（USB 4G dongle，`RELAY_SLOW_IFACES`）就 `force_low_profile()` **直接压到极省流档** `320x180@8/200k`（`RELAY_SLOW_IFACE_LEVEL=2`），然后再重连 —— 新连接起流就用低档，不多推一轮。开机就在 4G 上也按这条走。 |
+| 硬阻塞一步到底 | `ws.send` 超时（`RELAY_SEND_TIMEOUT`）和 `video_reset` 发不出去这两处 `mark_congested(..., lowest=True)`：从任意档位**直接降到极省流档**，不再一次只降一档。软拥塞（还能推、只是码率不够）仍是一档一档降。 |
+| 回到快链路的收敛 | 出口变回 `wlp4s0`/`eth0` 时 `allow_fast_egress_recovery()` 把 300s 的降档窗口压到 `RELAY_SLOW_IFACE_RECOVER`（60s），之后照旧按**试用期一档一档**升（⑨的规矩不变：不跳级、积压超 0.6s 就退回）。 |
+
+两条日志（认这两行就知道状态机干了什么）：
+
+```text
+[relay] 出口 enx020c29a39b6d 是慢速链路（4G / USB 网卡），直接从配置档压到极省流档 320x180@8 200k（至少保持 300s）
+[relay] 出口恢复成快链路，60s 后开始试升档
+```
+
+> ⚠️ 平台把「自动降档」关掉时（`video_auto_degrade=false`）这里**不擅自换档**：那种配置
+> 的语义就是「锁死在我选的档位」，只保留 `send` 超时的断线重连保护。
+
+回归：`python3 deploy/backpack-relay/test_relay_push.py`（35 个用例，新增「出口是 4G 直接
+压到极省流档」「锁定档位时不强压」「回快链路缩短窗口」「send 超时一步到底」「软拥塞仍
+一次只降一档」）。
+
+顺带把 `STREAM_IDLE_GRACE` 从 60s 收到 **15s**（`business/server/src/video.rs`）：没人在看还
+一直编码，电池 / CPU / 4G 流量都在白烧；15s 足够盖住「刷新页面 / 切页签 / 断一两秒」，而
+重连能否秒开已经由 `Room::catch_up()`（⑬）保证，不再依赖这个宽限。
 
 #### 排查工具与清单
 

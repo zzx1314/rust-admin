@@ -43,6 +43,9 @@ WebRTC 的 ~200ms 变成 1~2s，收益是任何网络、任何浏览器都能看
 | `RELAY_SEND_TIMEOUT` | `5` | 单个分片写进 WS 的上限（秒）。超时 = 上行已死（Wi-Fi 掉线时 TCP 半开，send 不报错也不返回），断开重连。**别调大**：这段时间里 ffmpeg 还在往管道里写，链路恢复后会把攒下的帧以 2~3 倍速倒出去，观看端缓冲吃下十几秒就一直「慢几秒」 |
 | `RELAY_STALL_TIMEOUT` | `15` | 起流后这么久一个字节都没推出去（源卡住 / RTSP 半死）就重启 ffmpeg |
 | `RELAY_ROUTE_POLL` | `5` | 每这么久查一次平台出口网卡（`ip route get`），变了就重连；`0` 关闭 |
+| `RELAY_SLOW_IFACES` | `enx,wwan,usb` | 「慢速出口」的网卡名前缀：出口切到这些（USB 4G dongle）就**直接压到最低档**，不等 5s 超时 + 窗口降一档 |
+| `RELAY_SLOW_IFACE_LEVEL` | `2` | 慢速出口时压到哪一档（2 = 极省流 320x180@8/200k） |
+| `RELAY_SLOW_IFACE_RECOVER` | `60` | 出口回到 Wi-Fi / 有线后，这么久才允许按试用期一档一档试升 |
 | `RELAY_DEGRADE_TTL` | `300` | 首次降档后至少在省流档里待多久（秒）；到期还要链路真的恢复才回配置档 |
 | `RELAY_DEGRADE_TTL_MAX` | `1800` | 升降档来回抖时窗口逐次翻倍的上限（秒） |
 | `RELAY_FLAP_WINDOW` | `600` | 升档后这段时间内又拥塞 = 这一档撑不住，窗口翻倍 + 封顶（秒） |
@@ -183,6 +186,17 @@ MAX_BACKOFF = 15
 SEND_TIMEOUT = float(os.environ.get("RELAY_SEND_TIMEOUT", "5"))
 STALL_TIMEOUT = float(os.environ.get("RELAY_STALL_TIMEOUT", "15"))
 ROUTE_POLL = float(os.environ.get("RELAY_ROUTE_POLL", "5"))
+# 慢速出口（4G dongle / USB 网卡）的网卡名前缀：出口切到它们时**直接压到最低档**，
+# 不走「5s 超时 + 5s 窗口 + 一次只降一档」那条路（那条要十几秒，正是最卡的时候）。
+SLOW_IFACES = tuple(
+    item.strip()
+    for item in os.environ.get("RELAY_SLOW_IFACES", "enx,wwan,usb").split(",")
+    if item.strip()
+)
+# 慢速出口时压到哪一档：2 = 极省流 320x180@8/200k（4G 上行实测 0.25~0.6Mbps）
+SLOW_IFACE_LEVEL = int(os.environ.get("RELAY_SLOW_IFACE_LEVEL", "2"))
+# 出口回到快链路（Wi-Fi / 有线）后，多久允许开始按试用期一档一档试升
+SLOW_IFACE_RECOVER = float(os.environ.get("RELAY_SLOW_IFACE_RECOVER", "60"))
 
 
 def parse_bitrate(value: str) -> int:
@@ -349,6 +363,56 @@ def hold_seconds() -> float:
     return float(min(DEGRADE_TTL * (2 ** _flaps), max(DEGRADE_TTL, DEGRADE_TTL_MAX)))
 
 
+def is_slow_egress(iface: str | None) -> bool:
+    """这张网卡是不是「慢速出口」（4G dongle / USB 网卡）。
+
+    Wi-Fi 掉线后内核会把流量回落到 USB 4G 模块（`enx…`），上行只有 0.25~0.6Mbps，
+    配置档 1000k 必卡。这是**确定的**信号，不用等拥塞窗口去猜。
+    """
+    if not iface:
+        return False
+    return any(iface.startswith(prefix) for prefix in SLOW_IFACES)
+
+
+def force_low_profile(iface: str) -> bool:
+    """出口是慢速链路：直接压到 [`SLOW_IFACE_LEVEL`]（默认极省流），不等窗口、不降一档。
+
+    为什么不能靠现有那条路：`send` 反压要 5s 才超时、窗口统计 5s 一轮、而且一次只降
+    一档（配置档 → 省流档 → 极省流档），等降到底现场已经卡了十几秒 + 掉线重连一次。
+
+    `_ceiling_level` **不动**：这不是「这一档撑不住」，Wi-Fi 回来还要升回去。
+    """
+    global _degrade_level, _congested_until, _recovered_at
+    if not _auto_degrade:
+        return False
+    now = time.monotonic()
+    if _degrade_level >= SLOW_IFACE_LEVEL:
+        _congested_until = max(_congested_until, now + hold_seconds())
+        return False
+    previous = _degrade_level
+    _degrade_level = SLOW_IFACE_LEVEL
+    _congested_until = now + hold_seconds()
+    _recovered_at = 0.0
+    log(
+        f"出口 {iface} 是慢速链路（4G / USB 网卡），直接从{level_label(previous)}"
+        f"压到{level_label()} {profile_text(active_profile())}"
+        f"（至少保持 {hold_seconds():g}s）"
+    )
+    return True
+
+
+def allow_fast_egress_recovery() -> None:
+    """出口回到 Wi-Fi / 有线：缩短窗口，让 `profile_check` 按试用期一档一档试升。"""
+    global _congested_until
+    if not degraded():
+        return
+    now = time.monotonic()
+    target = now + SLOW_IFACE_RECOVER
+    if _congested_until > target:
+        _congested_until = target
+        log(f"出口恢复成快链路，{SLOW_IFACE_RECOVER:g}s 后开始试升档")
+
+
 def apply_remote_profile(profile: object) -> bool:
     """把平台下发的默认档位写进状态机；返回是否真的变了。
 
@@ -437,7 +501,7 @@ def note_link_window(duty: float) -> None:
 
 
 def mark_congested(
-    stream: str, reason: str, restream: bool = True, lag: bool = False
+    stream: str, reason: str, restream: bool = True, lag: bool = False, lowest: bool = False
 ) -> None:
     """上行吃不下当前档位：切省流档；已经在省流档就只把窗口往后延。
 
@@ -447,6 +511,8 @@ def mark_congested(
     `lag=True`：拥塞的证据是「积压持续上涨」（出帧跟不上），不是 send 反压。
     这种情况下不能再拿「实测码率还在目标附近」当「这一档还能跑」—— rkmpp 的 CBR
     正是靠丢帧保码率，码率看着没掉，画面却在一路掉队。
+
+    `lowest=True`：`send` 直接超时那种硬阻塞 —— 一次只降一档不够，直到最低档。
     """
     global _degrade_level, _congested_until, _flaps, _recovered_at
     global _ceiling_level, _ceiling_until, _locked_logged_at
@@ -461,7 +527,7 @@ def mark_congested(
         # 已经在最低档：只续窗口，不重复降档/重启
         _congested_until = max(_congested_until, now + hold_seconds())
         return
-    if failed > base and not lag and _current_level_is_workable():
+    if failed > base and not lag and not lowest and _current_level_is_workable():
         # 当前这一档还能跑，只是链路状态仍差：只续窗口，不重复降档/重启
         _congested_until = max(_congested_until, now + hold_seconds())
         return
@@ -475,7 +541,7 @@ def mark_congested(
                 "（自动降档关闭），保持当前档位"
             )
         return
-    target = failed + 1
+    target = failed + 1 if not lowest else max(failed + 1, SLOW_IFACE_LEVEL)
     if just_upgraded:
         _flaps = min(_flaps + 1, 5)
         _ceiling_level = failed
@@ -749,12 +815,20 @@ async def route_watcher() -> None:
         return
     last = egress_iface()
     log(f"平台出口网卡：{last or '未知'}（每 {ROUTE_POLL:g}s 巡检，变更即重建连接）")
+    # 开机就在 4G 上（Wi-Fi 没起来）：直接按最低档起流，不要先试 1000k
+    if is_slow_egress(last):
+        force_low_profile(last or "?")
     while True:
         await asyncio.sleep(ROUTE_POLL)
         current = egress_iface()
         if current is None or current == last:
             continue
         log(f"平台出口网卡 {last or '未知'} → {current}，重建全部推流连接")
+        # 换出口就是换带宽量级：先定档，再重连（新连接起流直接就用低档，不多推一轮）
+        if is_slow_egress(current):
+            force_low_profile(current)
+        else:
+            allow_fast_egress_recovery()
         last = current
         for stream, ws in list(_connections.items()):
             log(f"[{stream}] 出口变更，断开旧连接")
@@ -1225,7 +1299,10 @@ class StreamSession:
             # 这条连接已经死了：不起 ffmpeg，断开让外层重连
             # （restream=False：链路已死，其他流换档会在重连时自己生效）
             mark_congested(
-                self.stream, f"video_reset 发不出去（{SEND_TIMEOUT:g}s）", restream=False
+                self.stream,
+                f"video_reset 发不出去（{SEND_TIMEOUT:g}s）",
+                restream=False,
+                lowest=True,
             )
             log(f"[{self.stream}] 上行已死（video_reset 发不出去），断开重连")
             await close_quietly(ws)
@@ -1457,6 +1534,8 @@ class StreamSession:
                         self.stream,
                         f"上行阻塞超过 {SEND_TIMEOUT:g}s（Wi-Fi 掉线 / 平台不可达）",
                         restream=False,
+                        # 硬阻塞：一次只降一档不够，直接降到最低档（重连后就用它起流）
+                        lowest=True,
                     )
                     log(
                         f"[{self.stream}] 上行阻塞超过 {SEND_TIMEOUT:g}s"

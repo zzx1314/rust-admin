@@ -343,7 +343,7 @@ async fn backpack_stream_is_relayed_to_browser_and_stops_after_a_grace_period() 
     );
 
     // 观看者计数归零后，这路流进入看门狗的空转名单（宽限到期才下发 video_stop）。
-    // 这里用 `Duration::ZERO` 模拟「宽限已过」，看门狗真实用的是 60s 宽限。
+    // 这里用 `Duration::ZERO` 模拟「宽限已过」，看门狗真实用的是 15s 宽限。
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if state.video_hub.viewers(ROOM).await == 0
@@ -361,14 +361,14 @@ async fn backpack_stream_is_relayed_to_browser_and_stops_after_a_grace_period() 
     .await
     .expect("没人看之后应进入看门狗的空转名单");
 
-    // 宽限期（60s）内不应该进入空转名单：浏览器刷新 / 切页签是常态
+    // 宽限期（15s）内不应该进入空转名单：浏览器刷新 / 切页签是常态
     assert!(
         !state
             .video_hub
-            .idle_publishers(Duration::from_secs(60))
+            .idle_publishers(Duration::from_secs(15))
             .await
             .contains(&ROOM.to_string()),
-        "60s 宽限内不许停流"
+        "15s 宽限内不许停流"
     );
 
     // 5) 宽限期内重新打开（关抽屉再打开 / 浏览器重连）：流还在跑，新观看者**立刻**

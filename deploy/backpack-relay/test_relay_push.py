@@ -717,6 +717,72 @@ def test_decoder_probe_requires_real_frames() -> None:
         relay._decoder_picks.clear()
 
 
+def test_slow_egress_jumps_straight_to_the_lowest_tier() -> None:
+    """出口切到 4G dongle：直接压到极省流档，不等窗口、不一次只降一档。
+
+    现场（2026-11-18）：Wi-Fi 一掉，内核把流量回落到 USB 4G（上行 0.25~0.6Mbps），
+    而原来要 5s 超时 + 5s 窗口 + 两轮降档才能到底 —— 这十几秒里现场只能看着卡。
+    """
+    reset()
+    relay.apply_remote_profile({"tier": "light", "auto": True})  # 起点配置档 720p15/1000k
+    assert relay._degrade_level == 0
+
+    assert relay.is_slow_egress("enx020c29a39b6d"), "USB 4G dongle 应算慢速出口"
+    assert not relay.is_slow_egress("wlp4s0")
+    assert not relay.is_slow_egress("eth0")
+    assert not relay.is_slow_egress(None)
+
+    assert relay.force_low_profile("enx020c29a39b6d"), "应该真的换了档"
+    assert relay._degrade_level == 2
+    assert relay.active_profile() == (
+        relay.DEGRADE2_WIDTH,
+        relay.DEGRADE2_HEIGHT,
+        relay.DEGRADE2_FPS,
+        relay.DEGRADE2_BITRATE,
+    )
+    # 慢链路不是「这一档撑不住」：不能把上面几档封顶，Wi-Fi 回来还要升
+    assert relay._ceiling_level is None
+    # 重复调用不重复降档（只续窗口）
+    assert not relay.force_low_profile("enx020c29a39b6d")
+
+
+def test_locked_profile_is_not_forced_to_the_lowest_tier() -> None:
+    """平台把自动降档关掉时，出口是 4G 也不擅自换档（只靠 send 超时断线重连）。"""
+    reset()
+    relay.apply_remote_profile({"tier": "light", "auto": False})
+    assert not relay.force_low_profile("enx020c29a39b6d")
+    assert relay._degrade_level == 0
+
+
+def test_fast_egress_shrinks_the_degrade_window() -> None:
+    """出口回到 Wi-Fi：把 300s 的窗口压到 60s，好快点按试用期升回去。"""
+    reset()
+    relay.apply_remote_profile({"tier": "light", "auto": True})
+    relay.force_low_profile("enx020c29a39b6d")
+    assert relay._congested_until > time.monotonic() + 100
+
+    relay.allow_fast_egress_recovery()
+    remaining = relay._congested_until - time.monotonic()
+    assert 0 < remaining <= relay.SLOW_IFACE_RECOVER + 1, f"窗口应缩到 {relay.SLOW_IFACE_RECOVER}s"
+
+
+def test_send_timeout_jumps_to_the_lowest_tier() -> None:
+    """`send` 硬阻塞（上行已死）：一次到位降到底，重连后直接用极省流档起流。"""
+    reset()
+    relay.apply_remote_profile({"tier": "light", "auto": True})
+    relay.mark_congested("dogcam", "上行阻塞超过 5s", restream=False, lowest=True)
+    assert relay._degrade_level == 2, "硬阻塞应从配置档直接降到极省流档"
+
+
+def test_congestion_window_still_steps_one_level() -> None:
+    """软拥塞（还能推、只是码率不够）仍是一档一档降：不要一惊一咋就掉到 320x180。"""
+    reset()
+    relay.apply_remote_profile({"tier": "light", "auto": True})
+    relay._last_window_bps = 300_000  # 远低于 1000k 目标 → 这一档吃不下
+    relay.mark_congested("dogcam", "5s 内实测 400kbps", restream=False)
+    assert relay._degrade_level == 1
+
+
 def test_fixed_decoder_env_skips_probing() -> None:
     """`RELAY_DECODER=sw` / 写死 `h264_rkmpp` 时不探测，照办。"""
     real = relay.DECODER
