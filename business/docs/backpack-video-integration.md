@@ -824,6 +824,54 @@ python3 deploy/backpack-relay/measure_bitrate.py --stream dogcam --seconds 20
 - 仍是**单档**（配置档 ⇄ 省流档），不做多码率 ABR：要真正的「按 buffer 连续掉档」得给
   平台房间加多路/多码率层（`video.rs` 的房间模型 + `relay_push.py` 的起停协议都要改）。
 
+#### ⑦ 延迟大 / 降档不生效 / 越看越卡：`_stop_locked` 无限等 + 没有延迟看门狗（2026-11-18）
+
+现场现象：日志里已经打了 `降档：重启拉流换档位 → 640x360@12 500k`，但画面一直很糊、
+而且**延迟越来越大**；`video_stop` 也进不来（平台看门狗发停流没反应）。
+
+根因（`relay_push.py` 两个问题叠在一起）：
+
+| # | 位置 | 原来会怎样 |
+| --- | --- | --- |
+| 1 | `_stop_locked` 的 `await asyncio.gather(*tasks)` | 没有超时。上行拥塞时 `_pump` 卡在 `ws.send()`（transport 写不出去），`cancel()` 只是打标记、协程停不下来 → gather 永远不返回 → **锁一直被占着**，session 变僵尸：降档永远不生效（还在用旧档位推）、`video_stop` 进不来、ffmpeg 还被反压着继续跑 |
+| 2 | 没有任何「延迟」指标 | 只能看到「码率/帧率」，看到延迟只能靠肉眼。积压发生在 ffmpeg 内部，码率看着正常也无从发现 |
+
+事故实证（14:05:16）：
+
+```
+5s 内实测 336kbps（目标 1200kbps，send 占用 100%）→ 改用省流档 640x360@12 500k
+降档：重启拉流换档位 → 640x360@12 500k
+降档，停止拉流（已推 74771886 字节）     ← 之后既没有 `推流结束` 也没有 `开始拉流`
+# 8 分钟后仍在跑的仍是降档前的 light ffmpeg，send 队列积压，观看端越看越晚
+```
+
+修法：
+
+| 位置 | 改动 |
+| --- | --- |
+| `_stop_locked` | `asyncio.wait(tasks, timeout=RELAY_STOP_GRACE)`；超时就 `close_quietly(ws)` **把连接掐掉**（只有掐链路才解得了卡住的 `send`），置 `_conn_broken`，然后照常 terminate/kill ffmpeg |
+| `_restart` | 连接被掐断时不往死 WS 上贴流，交给外层 `stream_worker` 重连，重连后按新档位起流 |
+| `FlvScanner` + `_update_lag` | 解析 FLV 视频 tag 时间戳（跨分片，只吃 tag 头），`lag = 现在墙钟 - (ffmpeg 起流时刻 + tag_ts)` 就是「帧在管道里躺了多久」；`≥ RELAY_LAG_LOG`（1s）每 30s 记一行 `画面延迟 x.xs`，`≥ RELAY_MAX_LAG`（3s）重拉 ffmpeg 重新对齐（防抖 `RELAY_LAG_RESTART_MIN` 20s） |
+| `ffmpeg_args` | 补上 `-muxdelay 0 -muxpreload 0`（文档里一直写着有、代码里其实漏了）→ 白丢的 0.5~1.2s mux 缓冲 |
+
+实测（2026-11-18 14:13 重部署后）：
+
+| 指标 | 结果 |
+| --- | --- |
+| 板端积压延迟 | 起流后 2s 是 `1.2s`（含 RTSP 握手 + 等首个关键帧），3 分钟后回落至 **<1s** 且不再打日志 |
+| 平台观看端积压（60s 探针） | 增量 `-0.02s`（不累积；`fps` 滤镜的 CFR 时间轴让积压只会被排空） |
+| 无观看者时 | 不起 ffmpeg，零开销 |
+
+排障要点：
+
+- 用户说「延迟大」时，先在板端 `journalctl -u backpack-relay | grep 延迟` 看板端给到的数字：
+  **板端 <1s 而人看到好几秒** → 延迟在源侧（本体 `dogcam` 1080p60 RTSP / mediamtx
+  `sourceOnDemand`）或浏览器，不在中继；
+- 刚打开页面/刚发生重同步时要等关键帧（GOP 2s，`RELAY_GOP=20` 可降到 1s）；
+- 探针（平台侧跑，触发一次观看并算积压增量）：`python3 deploy/backpack-relay/latency_probe.py`。
+- 回归：`python3 deploy/backpack-relay/test_relay_push.py`（15 个用例，含 FLV 分片扫描、
+  延迟换算、`-muxdelay 0`）。
+
 #### 排查工具与清单
 
 ```bash

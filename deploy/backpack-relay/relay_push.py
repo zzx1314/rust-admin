@@ -51,6 +51,10 @@ WebRTC 的 ~200ms 变成 1~2s，收益是任何网络、任何浏览器都能看
 | `RELAY_CONGEST_DUTY` | `0.5` | 窗口内 `ws.send` 占用超过它算「被反压」 |
 | `RELAY_CONGEST_BPS_RATIO` | `0.9` | 实测码率低于目标档位的这个比例（配合上一项）即判拥塞、降档 |
 | `RELAY_RECOVER_DUTY` / `_STABLE` | `0.2` / `20` | send 占用持续低于它 `_STABLE` 秒才算链路恢复，可以回配置档 |
+| `RELAY_MAX_LAG` | `3` | 帧在管道里积压超过这么多秒就重拉 ffmpeg 重新对齐时间轴（延迟看门狗） |
+| `RELAY_LAG_LOG` | `1` | 延迟超过它就每 30s 记一行 `画面延迟 x.xs`（线上量延迟看这个） |
+| `RELAY_LAG_RESTART_MIN` | `20` | 两次「延迟重同步」的最小间隔（秒），防抖 |
+| `RELAY_STOP_GRACE` | `5` | 停流时等协程退出的上限；超时就掐连接（否则 session 会僵死） |
 
 ## 自适应档位
 
@@ -60,6 +64,12 @@ WebRTC 的 ~200ms 变成 1~2s，收益是任何网络、任何浏览器都能看
 看链路是否真恢复**（send 占用低于 `RELAY_RECOVER_DUTY` 并持续 `RELAY_RECOVER_STABLE`
 秒）才回配置档，否则继续省流；反复升降时窗口翻倍（上限 `RELAY_DEGRADE_TTL_MAX`）。
 没人在看的时候不做任何试探，到期直接清掉拥塞状态。
+
+## 延迟
+
+`-muxdelay 0 -muxpreload 0 -flush_packets 1`（mux 缓冲归零）。积压延迟用 FLV 视频 tag 的
+时间戳量：`lag = 现在墙钟 - (ffmpeg 起流时刻 + tag_ts)`，超过 `RELAY_MAX_LAG`（默认 3s）就
+重拉 ffmpeg 重新对齐（`video_reset`，观看端不重连）。日志里 `画面延迟 x.xs` 就是它。
 
 依赖：python3 + `websockets`（板子上随 FastAPI 生态已装）+ ffmpeg。
 """
@@ -159,6 +169,17 @@ RECOVER_STABLE = float(os.environ.get("RELAY_RECOVER_STABLE", "20"))
 RECOVER_POLL = float(os.environ.get("RELAY_RECOVER_POLL", "2"))
 # duty 的 EWMA：单窗口的抖动不该立刻决定「链路恢复了没」（Wi-Fi 刚重连时会有一两个空窗口）
 DUTY_ALPHA = 0.3
+
+# 停流时等协程退出的上限（秒）：卡在 ws.send 上的协程只能靠掐连接才停得下来，
+# 没有上限的 gather 会把整个 session（连同锁）冻死 —— 2026-11-18 事故见 §6.10⑦。
+STOP_GRACE = float(os.environ.get("RELAY_STOP_GRACE", "5"))
+
+# 延迟（积压）看门狗：tag 时间戳来自 `-use_wallclock_as_timestamps`（帧到达板端的时刻），
+# 它和现在墙钟的差 = 这帧在管道里躺了多久。超过 MAX_LAG 就重拉 ffmpeg 重新对齐时间轴。
+MAX_LAG = float(os.environ.get("RELAY_MAX_LAG", "3"))
+LAG_LOG = float(os.environ.get("RELAY_LAG_LOG", "1"))
+LAG_LOG_INTERVAL = 30.0
+LAG_RESTART_MIN = float(os.environ.get("RELAY_LAG_RESTART_MIN", "20"))
 
 # 省流档：Wi-Fi 断掉只剩 4G（实测 ~0.5Mbps）时，继续按 1200k 推只会每 10s 超时重连一次；
 # 降到 500k 至少画面是连续的。降档是全局的（上行共享），到期按链路实际恢复情况决定
@@ -558,8 +579,82 @@ def ffmpeg_args(stream: str) -> list[str]:
                 "-bufsize",
                 _double_bitrate(bitrate),
             ]
-    args += ["-f", "flv", "-flush_packets", "1", "pipe:1"]
+    # 低延迟：`-flush_packets 1` 每个包立刻吐；`-muxdelay/-muxpreload` 默认是 0.7s/0.5s 的
+    # mux 缓冲（文档里一直写着这两个参数，代码里其实一直漏着）→ 白送 0.5~1.2s 延迟。
+    args += [
+        "-muxdelay",
+        "0",
+        "-muxpreload",
+        "0",
+        "-f",
+        "flv",
+        "-flush_packets",
+        "1",
+        "pipe:1",
+    ]
     return args
+
+
+class FlvScanner:
+    """从 ffmpeg 的 FLV 字节流里取视频 tag 的时间戳（只解析 tag 头，跳过本体）。
+
+    有了它才能量「这一帧从进 ffmpeg 到现在多久了」：tag 时间戳来自
+    `-use_wallclock_as_timestamps`（输入到达时刻），和墙钟的差就是积压延迟。
+    分片边界会切断 tag 头 / 本体，所以状态要跨分片保存。
+    """
+
+    MAX_TAG = 32 * 1024 * 1024
+
+    def __init__(self) -> None:
+        self._head = bytearray()
+        self._skip = 0           # 还没跳过的 tag 本体 + PreviousTagSize 字节数
+        self._started = False
+        self.broken = False      # 解析错位（不是 FLV / size 离谱）就彻底停用，别吐垃圾
+        self.last_video_ts: int | None = None
+
+    def feed(self, chunk: bytes) -> None:
+        if self.broken:
+            return
+        if not self._started:
+            # 文件头（9 + 4 字节）本身也可能被分片切开，先攒够再说
+            self._head += chunk
+            if len(self._head) < 13:
+                return
+            if self._head[:3] != b"FLV":
+                self.broken = True
+                self._head.clear()
+                return
+            rest = bytes(self._head[13:])
+            self._head.clear()
+            self._started = True
+            if rest:
+                self.feed(rest)
+            return
+        n = len(chunk)
+        pos = 0
+        while pos < n:
+            if self._skip:
+                take = min(self._skip, n - pos)
+                self._skip -= take
+                pos += take
+                continue
+            need = 11 - len(self._head)
+            take = min(need, n - pos)
+            self._head += chunk[pos : pos + take]
+            pos += take
+            if len(self._head) < 11:
+                return
+            size = int.from_bytes(self._head[1:4], "big")
+            if size <= 0 or size > self.MAX_TAG:
+                self.broken = True
+                self._head.clear()
+                return
+            if self._head[0] == 9:  # video tag
+                self.last_video_ts = int.from_bytes(self._head[4:7], "big") | (
+                    self._head[7] << 24
+                )
+            self._skip = size + 4  # tag body + PreviousTagSize
+            self._head.clear()
 
 
 class StreamSession:
@@ -579,6 +674,14 @@ class StreamSession:
         self.profile: tuple | None = None
         # 推流用的 WS：降档/回档要就地重启 ffmpeg，不需要重新建连接
         self.ws = None
+        # 延迟统计：ffmpeg 起流时刻 + FLV tag 时间戳扫描器
+        self._started_wall = 0.0
+        self._flv = FlvScanner()
+        self.lag = 0.0
+        self._lag_logged_at = 0.0
+        self._lag_restart_at = 0.0
+        # 停流时连接被掐断（协程卡在 ws.send 上停不下来）：别在这条连接上重拉
+        self._conn_broken = False
         # 拥塞统计窗口：send 占用的累计时长 / 推出去的字节
         self._win_at = 0.0
         self._win_blocked = 0.0
@@ -605,6 +708,10 @@ class StreamSession:
         self.chunks = 0
         self.last_send = time.monotonic()
         self.ws = ws
+        self._conn_broken = False
+        self._started_wall = time.time()
+        self._flv = FlvScanner()
+        self.lag = 0.0
         self._win_at = self.last_send
         self._win_blocked = 0.0
         self._win_bytes = 0
@@ -661,8 +768,21 @@ class StreamSession:
             task.cancel()
         if tasks:
             # 必须等上一轮协程真的退出：否则它的 finally 可能在新一轮 start() 之后才跑，
-            # 把 `_stopping=False` 误当成「连接该关了」
-            await asyncio.gather(*tasks, return_exceptions=True)
+            # 把 `_stopping=False` 误当成「连接该关了」。
+            #
+            # 但**不能无上限地等**：协程卡在 `ws.send()`（上行拥塞、transport 写不出去）时，
+            # `cancel()` 只是打个标记，协程停不下来。2026-11-18 事故就是这里无限等 → 锁被
+            # 一直占着，session 变僵尸：日志打了「降档」但档位永远不生效，ffmpeg 被反压着
+            # 继续推高码率，观看端越看越延迟，而且后面的 video_stop 也进不来。
+            done, pending = await asyncio.wait(tasks, timeout=STOP_GRACE)
+            if pending:
+                log(
+                    f"[{self.stream}] {len(pending)} 个协程 {STOP_GRACE:g}s 没停下"
+                    "（多半卡在 ws.send），掐断连接"
+                )
+                await close_quietly(self.ws)
+                await asyncio.wait(pending, timeout=STOP_GRACE)
+                self._conn_broken = True
         if self.proc.returncode is None:
             try:
                 self.proc.terminate()
@@ -687,6 +807,10 @@ class StreamSession:
                 if only_if_profile_changed and active_profile() == self.profile:
                     return
                 await self._stop_locked(reason)
+                if self._conn_broken:
+                    # 连接已经掐了：外层会重连，重连后按新档位起流（别在死 WS 上贴流）
+                    log(f"[{self.stream}] 连接已断，交给外层重连后按新档位起流")
+                    return
                 await self._start_locked(ws)
         except Exception as exc:  # noqa: BLE001 - 重启失败就断开，交给外层重连
             log(f"[{self.stream}] 重启拉流失败：{exc!r}")
@@ -701,6 +825,29 @@ class StreamSession:
             f"{profile_text(active_profile())}"
         )
         await self._restart(self.ws, reason, only_if_profile_changed=True)
+
+    def _update_lag(self, now: float) -> None:
+        """量「帧在管道里躺了多久」，太久就重拉 ffmpeg 重新对齐（延迟看门狗）。
+
+        和「拥塞降档」是两个问题：上行跑得动、duty 也不高，但 ffmpeg 的输入/编码队列
+        积压时，码率看着正常，画面却越看越晚（旧版没有任何东西管这件事）。
+        """
+        tags = self._flv.last_video_ts
+        if not self._started_wall or tags is None:
+            return
+        self.lag = max(0.0, (time.time() - self._started_wall) - tags / 1000.0)
+        lag = self.lag
+        if lag >= LAG_LOG and now - self._lag_logged_at >= LAG_LOG_INTERVAL:
+            self._lag_logged_at = now
+            log(f"[{self.stream}] 画面延迟 {lag:.1f}s（帧在管道里积压）")
+        if lag < MAX_LAG or now - self._lag_restart_at < LAG_RESTART_MIN:
+            return
+        self._lag_restart_at = now
+        log(
+            f"[{self.stream}] 延迟 {lag:.1f}s 超过上限 {MAX_LAG:g}s，"
+            "重启 ffmpeg 重新对齐时间轴"
+        )
+        asyncio.create_task(self._restart(self.ws, f"延迟 {lag:.1f}s 超限"))
 
     def _sample_congestion(self, now: float) -> bool:
         """按窗口统计「实测码率 / send 占用」，判断上行是不是吃不下当前档位。
@@ -791,6 +938,8 @@ class StreamSession:
                 self.chunks += 1
                 self._win_blocked += now - started
                 self._win_bytes += len(chunk)
+                self._flv.feed(chunk)
+                self._update_lag(now)
                 if DEBUG and self.chunks <= 5:
                     log(
                         f"[{self.stream}] chunk#{self.chunks} {len(chunk)}B "

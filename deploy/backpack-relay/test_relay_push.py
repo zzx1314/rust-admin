@@ -120,6 +120,72 @@ def test_degraded_profile_actually_transcodes() -> None:
     filters = args[args.index("-vf") + 1]
     assert f"scale={relay.DEGRADE_WIDTH}:{relay.DEGRADE_HEIGHT}" in filters
     assert f"fps={relay.DEGRADE_FPS}" in filters
+    # mux 缓冲必须归零：默认 0.7s/0.5s 是白送的延迟
+    assert args[args.index("-muxdelay") + 1] == "0"
+    assert args[args.index("-muxpreload") + 1] == "0"
+
+
+def _flv_tag(tag_type: int, body: bytes, ts_ms: int) -> bytes:
+    out = bytes([tag_type]) + len(body).to_bytes(3, "big")
+    out += (ts_ms & 0xFFFFFF).to_bytes(3, "big") + bytes([(ts_ms >> 24) & 0xFF])
+    out += b"\x00\x00\x00" + body  # streamId + body
+    return out + (len(body) + 11).to_bytes(4, "big")  # PreviousTagSize
+
+
+def test_flv_scanner_reads_video_ts_across_chunks() -> None:
+    """FLV tag 会被 WS 分片切碎：扫描器要跨分片拼出 tag 头、并跳过本体。"""
+    stream = b"FLV\x01\x05" + b"\x00\x00\x00\x09" + b"\x00\x00\x00\x00"
+    stream += _flv_tag(9, b"\x17\x00\x00\x00\x00", 0)          # AVC 序列头
+    stream += _flv_tag(9, b"\x17\x01" + b"x" * 200, 40)          # 关键帧
+    stream += _flv_tag(8, b"a" * 30, 42)                            # 音频 tag 不该被当成视频
+    stream += _flv_tag(9, b"\x27\x01" + b"y" * 90, 90)           # 普通帧
+
+    scanner = relay.FlvScanner()
+    seen = []
+    for i in range(0, len(stream), 7):  # 故意用 7 字节的碎片喂
+        scanner.feed(stream[i : i + 7])
+        if scanner.last_video_ts is not None and scanner.last_video_ts not in seen:
+            seen.append(scanner.last_video_ts)
+    assert not scanner.broken
+    assert seen == [0, 40, 90], seen
+    assert scanner.last_video_ts == 90
+
+
+def test_flv_scanner_gives_up_on_garbage() -> None:
+    scanner = relay.FlvScanner()
+    scanner.feed(b"not an flv stream at all, 30 bytes")
+    assert scanner.broken, "不是 FLV 就别继续吐垃圾时间戳"
+    scanner.feed(_flv_tag(9, b"\x17\x01xyz", 500))
+    assert scanner.last_video_ts is None
+
+
+def test_lag_is_measured_from_flv_timestamps() -> None:
+    """延迟 = 现在墙钟 - (ffmpeg 起流时刻 + tag 时间戳)，tag 时间戳即帧到达板端时刻。"""
+    reset()
+    session = relay.StreamSession("dogcam")
+    session._started_wall = time.time() - 6.0
+    session._flv.last_video_ts = 2000  # 流里最新帧是第 2s 的
+    original, relay.MAX_LAG = relay.MAX_LAG, 999  # 先别触发重同步
+    try:
+        session._update_lag(time.monotonic())
+    finally:
+        relay.MAX_LAG = original
+    assert 3.5 <= session.lag <= 4.5, session.lag
+
+
+def test_lag_above_limit_requests_resync() -> None:
+    reset()
+    session = relay.StreamSession("dogcam")
+    session._started_wall = time.time() - 40.0
+    session._flv.last_video_ts = 1000  # 已经积压 39s
+
+    async def scenario() -> None:
+        session._update_lag(time.monotonic())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+    assert session._lag_restart_at > 0, "超过 RELAY_MAX_LAG 就应该请求重同步"
 
 
 def test_copy_profile_still_copies() -> None:
