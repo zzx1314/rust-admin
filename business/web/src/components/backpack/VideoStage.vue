@@ -10,6 +10,7 @@
  * `showBoxes` 置 false：那时框已经在视频像素里了，再叠一层会双重画框。
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { captureVideoPoster, getVideoPoster, setVideoPoster } from "@/composables/useVideoPoster";
 import { startWhep, type WhepPhase, type WhepSession } from "@/lib/whep";
 import type { BackpackBox } from "@/api/backpack";
 import AppIcon from "@/components/AppIcon.vue";
@@ -52,6 +53,11 @@ interface MappedBox {
 const root = ref<HTMLDivElement | null>(null);
 const videoEl = ref<HTMLVideoElement | null>(null);
 const phase = ref<WhepPhase>("connecting");
+/**
+ * 上一路的最后一帧：切通道 / 从平台中继切回直连时，WHEP 要 0.3~2s 才出画，
+ * 这期间用共享的最后一帧顶着 —— 现场才不会说「一切就卡住」。
+ */
+const poster = ref(getVideoPoster());
 const phaseMessage = ref("");
 const fullscreen = ref(false);
 const shown = ref<MappedBox[]>([]);
@@ -88,6 +94,12 @@ function whepUrl(): string | null {
 }
 
 function restart() {
+  // 先留帧再拆会话：新会话起不来时画面也不会变黑
+  const shot = captureVideoPoster(videoEl.value);
+  if (shot) {
+    poster.value = shot;
+    setVideoPoster(shot);
+  }
   session?.close();
   session = null;
   phase.value = "connecting";
@@ -101,7 +113,10 @@ function restart() {
       phase.value = detail.phase;
       phaseMessage.value = detail.message;
       emit("phase", { phase: detail.phase, message: detail.message });
-      if (detail.phase === "live") publishSize();
+      if (detail.phase === "live") {
+        poster.value = "";
+        publishSize();
+      }
     }
   });
 }
@@ -259,6 +274,9 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   document.removeEventListener("fullscreenchange", onFullscreenChange);
+  // 交给共享缓存：切到平台中继时由 VideoPlayer 先顶这一帧
+  const shot = captureVideoPoster(videoEl.value);
+  if (shot) setVideoPoster(shot);
   session?.close();
   session = null;
   resizeObserver?.disconnect();
@@ -271,6 +289,9 @@ defineExpose({ toggleFullscreen, snapshot, fullscreen });
 <template>
   <div ref="root" class="stage" :class="{ 'stage-ai': aiActive }">
     <video ref="videoEl" class="stage-video" autoplay muted playsinline />
+
+    <!-- 换通道 / 切回直连时的「最后一帧」，出画后立刻撤掉 -->
+    <img v-if="poster" class="stage-poster" :src="poster" alt="" />
 
     <svg
       v-if="showBoxes"
@@ -372,6 +393,15 @@ defineExpose({ toggleFullscreen, snapshot, fullscreen });
   object-fit: cover;
   display: block;
   background: transparent;
+}
+
+.stage-poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 
 .stage-boxes {

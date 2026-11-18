@@ -139,6 +139,14 @@ struct Room {
     /// 最后一帧推上来的时刻（排障用）：`GET /api/backpack/video/state` 里看它就知道
     /// 「推流端在线但画面不动」是推流端没数据，还是观看端没收到。
     last_frame: Option<std::time::Instant>,
+    /// 「推流端开了新一轮流」（`video_reset`）的信号：用来把**已经连着的**观看端踢下去
+    ///
+    /// 板端 relay 重启 ffmpeg 后，同一条推流连接上会接着发**新一轮的 FLV**：时间戳从 0
+    /// 重新开始、分辨率还可能变（降档 640x360 ⇄ 配置档 720p）。浏览器里的 flv.js 拿到的
+    /// 就是「上一轮的尾巴 + 时间轴倒退的新流」，它不会自己恢复 —— 现场表现是**画面定住、
+    /// 字节却还在流**（`pendingBytes` 一直是 0），只能等前端 8s 的假死看门狗重连。
+    /// 所以这里主动断开：前端 250ms 起就重连，重连时服务端会补**新流头**。
+    reset: Arc<tokio::sync::Notify>,
 }
 
 fn new_room(session: u64) -> Room {
@@ -149,6 +157,7 @@ fn new_room(session: u64) -> Room {
         publisher: Some(session),
         idle_since: None,
         last_frame: None,
+        reset: Arc::new(tokio::sync::Notify::new()),
     }
 }
 
@@ -172,6 +181,7 @@ impl VideoHub {
             publisher: None,
             idle_since: None,
             last_frame: None,
+            reset: Arc::new(tokio::sync::Notify::new()),
         });
         // 有人回来看了：空闲计时清零，看门狗别把还热着的流停掉
         room.idle_since = None;
@@ -385,9 +395,27 @@ impl VideoHub {
     pub async fn reset_stream(&self, device_id: &str) {
         let mut rooms = self.rooms.write().await;
         if let Some(room) = rooms.get_mut(device_id) {
+            // 只有「上一轮真的在播」才需要踢人。冷启动时这条 `video_reset` 是**刚进来的
+            // 观看者自己触发的那一次**（平台下发 video_start → 板端起 ffmpeg 前先 reset），
+            // 把人家踢掉纯属多余：前端 250ms 后会重连，但首帧凭空慢了一截（2026-11-18
+            // 发布后 `measure_bitrate` 探针直接被 1006 断掉，就是这么来的）。
+            let was_live = room.init.is_some() || room.last_frame.is_some();
             room.init = None;
             room.pending = Vec::new();
+            room.last_frame = None;
+            if was_live {
+                room.reset.notify_waiters();
+            }
         }
+    }
+
+    /// 取「新一轮流」的通知器：观看端在 `select!` 里等它，被叫醒就断开重连
+    pub async fn reset_signal(&self, device_id: &str) -> Option<Arc<tokio::sync::Notify>> {
+        self.rooms
+            .read()
+            .await
+            .get(device_id)
+            .map(|room| room.reset.clone())
     }
 
     /// 诊断快照：每个房间的推流 / 观看 / 起流状态（`GET /api/backpack/video/state`）
@@ -668,12 +696,22 @@ pub async fn viewer_state(
     Ok(ApiResponse::ok(state.video_hub.debug_state().await))
 }
 
+/// 等「推流端开启新一轮流」的信号；房间没有通知器时永远等下去（不占 CPU）
+async fn wait_for_reset(reset: Option<&tokio::sync::Notify>) {
+    match reset {
+        Some(notify) => notify.notified().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// 观看者的一条中继流（背包板端推流房间 `bp:<stream>`）
 ///
 /// 房间与控制消息都挂在板端那条常驻推流连接上（`handle_publisher` 的 `controls`）。
 async fn handle_viewer(socket: WebSocket, state: AppState, stream_name: String, room: String) {
     let (mut sink, mut stream) = socket.split();
     let (mut rx, first, init) = state.video_hub.viewer_join(&room).await;
+    // 推流端换新一轮流时要断开（拿不到流头就是「画面定住但字节还在流」）
+    let reset = state.video_hub.reset_signal(&room).await;
 
     // 补流头（FLV 魔数 + AVC 配置 + 首个关键帧）：**只要房间里有当前这一轮的流头就补**，
     // 不分是不是第一个观看者。
@@ -756,6 +794,12 @@ async fn handle_viewer(socket: WebSocket, state: AppState, stream_name: String, 
                     break;
                 }
             },
+            _ = wait_for_reset(reset.as_deref()) => {
+                info!(
+                    "viewer of {room} 推流端开启新一轮流（video_reset），断开让前端重连拿新流头"
+                );
+                break;
+            }
             incoming = stream.next() => match incoming {
                 Some(Ok(Message::Close(_))) | None => {
                     debug!("viewer of {room}: browser closed the socket");

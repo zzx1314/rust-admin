@@ -872,6 +872,27 @@ python3 deploy/backpack-relay/measure_bitrate.py --stream dogcam --seconds 20
 - 回归：`python3 deploy/backpack-relay/test_relay_push.py`（15 个用例，含 FLV 分片扫描、
   延迟换算、`-muxdelay 0`）。
 
+#### ⑧ 直连 ⇄ 中继切换时「卡住」、越看越延迟（2026-11-18 二次修复）
+
+现场反馈：「在**现场直连**和**平台中继**之间切换的时候卡住了，而且延迟感觉很大」。查下来是三个叠加：
+
+| # | 位置 | 现象 / 原因 | 修法 |
+| --- | --- | --- | --- |
+| 1 | 平台 `video.rs::reset_stream` | 中继重启 ffmpeg 时只清房间流头，**不踢已经在看的浏览器**。同一条推流连接上接着发新一轮 FLV（时间戳从 0 重来、降档后分辨率还从 720p 变 640x360），flv.js 收到时间轴倒退的字节流不会自愈 —— **画面定住、字节却还在流**（`pendingBytes` 一直是 0，服务端看不出异常），只能等前端 8s 假死看门狗 | `Room` 加 `reset: Arc<Notify>`，`video_reset` 时 `notify_waiters()`；观看端 `select!` 到它就断开，前端 250ms 起重连 → 拿到**新流头**。回归：`video_relay::video_reset_disconnects_attached_viewers_so_they_refetch_the_header` |
+| 2 | 前端 `VideoPlayer.vue` | 没有追直播边缘：MSE 里攒下的那截不会自己消化 → **越看越延迟**，最后定在某一帧 | 打开 flv.js `liveBufferLatencyChasing`（落后 >1.2s 直接跳到直播边缘，`liveBufferLatencyMinRemain=0.5`） |
+| 3 | 前端切流 | 切到中继要板端**重新起 ffmpeg**（1~7s，含等关键帧），这期间是老的黑屏，现场一律说「卡住了」 | 新增 `composables/useVideoPoster.ts`：直连/中继/换通道都把**最后一帧**存成 320px 小图，新播放器没出画前先顶着；起流超过 2.5s 角标变「起流中」并提示「板端正在起流（约 1~7s）」，不再让人以为卡死 |
+
+另外板端把关键帧间隔从 2s 收到 1s（`backpack-relay.service` 里 `RELAY_GOP=20`）：起流 / 重同步 / 切通道都要等一个关键帧，这一项直接砍掉一半等待。
+
+判定口诀（现场照着念）：
+
+- 页面底部写「**平台中继 · 机器狗前置 · 延时 1~2s**」→ 走中继，中继本身 1~2s 是设计值，
+  比直连（WHEP ~200ms）慢是**正常**的；要低延迟就切直连（需同内网 + 浏览器许可）；
+- 切过去先黑 1~7s 再出画 = 正常起流（角标会显示「起流中」）；一直不出画才是问题；
+- 画面定住但平台日志 `lastFrameAgeSecs` 还是 0（字节在流）= 第 1 条那个 bug，
+  现在会被平台主动断开重连，日志：`推流端开启新一轮流（video_reset），断开让前端重连拿新流头`；
+- 越看越晚 = 第 2 条，前端追边缘后不会再累积。
+
 #### 排查工具与清单
 
 ```bash

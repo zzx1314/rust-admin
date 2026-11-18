@@ -18,6 +18,9 @@ Environment=RELAY_PROFILE=light
 # Environment=RELAY_FPS=20
 # Environment=RELAY_WIDTH=1280
 # Environment=RELAY_HEIGHT=720
+# 关键帧间隔：20 帧 @20fps = 1s。开页面 / 切到中继 / 降档重同步都要等一个关键帧，
+# 1s 比默认 2s 少等一半（码率多几个百分点，换现场「切过去马上有画」）
+Environment=RELAY_GOP=20
 # 上行保护（Wi-Fi 掉线时自动断开重连，不再把画面冻住；默认值见 relay_push.py）
 # Environment=RELAY_SEND_TIMEOUT=10     # 单个分片写 WS 的上限（秒），超时判上行已死
 # Environment=RELAY_STALL_TIMEOUT=15    # 这么久没推出字节就重启 ffmpeg

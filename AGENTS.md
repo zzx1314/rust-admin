@@ -83,6 +83,10 @@ HTTP」模式。两者共用同一个服务令牌，见 `business/README.md`。
 ffmpeg，观看端不重连）；到期先确认链路真恢复才回配置档，反复升降时窗口翻倍。
 平台侧 `video.rs` 不做 ABR（观看端追不上就 `lagged` 断连重连），前端也没有掉档。
 改这块先读 §6.10⑥，回归：`python3 deploy/backpack-relay/test_relay_push.py`。
+中继重启 ffmpeg（`video_reset`）时平台会**主动断开观看端**让它重连拿新流头 ——
+否则 flv.js 收到倒退的时间轴会「画面定住但字节还在流」；前端用
+`liveBufferLatencyChasing` 追直播边缘（否则越看越延迟），切换直连/中继期间显示
+「最后一帧 + 起流中」。回归：`cargo test --test video_relay`（§6.10⑦⑧）。
 
 航点 AI 识别的「谁去调板端 Agent」由 `ROBODOG_POINT_AI`（`[backpack] point_ai`，默认
 `auto`）决定：配了 `ROBODOG_BACKPACK_URL` 就服务端直连，否则由现场设备客户端代调

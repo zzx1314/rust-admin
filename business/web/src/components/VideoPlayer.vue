@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { tokenStorage } from "@/api/http";
 import { wsOrigin } from "@/utils/runtime";
+import { captureVideoPoster, getVideoPoster, setVideoPoster } from "@/composables/useVideoPoster";
 import AppIcon from "./AppIcon.vue";
 
 /**
@@ -53,6 +54,8 @@ const buffering = ref(false);
 /** 断流瞬间抓下来的最后一帧：重连期间继续显示，避免黑屏闪一下 */
 const poster = ref("");
 const retryAttempt = ref(0);
+/** 起流超过 2.5s 才提示「板端正在起流」：正常情况下几十 ms 就 playing，不该先吓人 */
+const slowStart = ref(false);
 
 // flv.js 体积大（~150KB），只有真正需要播放时才拉进来，
 // 避免设备列表 / 任务看板为了一个播放器把整个 bundle 撑大
@@ -90,6 +93,7 @@ const STALL_MS = 8000;
  */
 const CONNECT_TIMEOUT_MS = 20_000;
 let stallTimer: ReturnType<typeof setInterval> | null = null;
+let slowStartTimer: ReturnType<typeof setTimeout> | null = null;
 let lastTime = 0;
 let lastProgressAt = 0;
 let attachStartedAt = 0;
@@ -114,7 +118,10 @@ const hint = computed(() => {
   if (!props.stream) return "未选择背包通道";
   if (status.value === "error")
     return errorText.value || "中继拉流失败：确认背包上 backpack-relay 服务在线";
-  if (status.value === "loading") return "正在连接平台中继…";
+  if (status.value === "loading")
+    return slowStart.value
+      ? "板端正在起流（约 1~7s）：切中继后要重新拉 RTSP + 等关键帧"
+      : "正在连接平台中继…";
   return "";
 });
 
@@ -123,7 +130,7 @@ const badge = computed(() => {
   if (status.value === "playing") return buffering.value ? "缓冲中" : "LIVE";
   if (status.value === "retrying") return `重连中 ${retryAttempt.value}`;
   if (status.value === "error") return "连接失败";
-  return "连接中";
+  return slowStart.value ? "起流中" : "连接中";
 });
 
 const badgeTone = computed(() => {
@@ -140,6 +147,21 @@ function clearRetry() {
   }
 }
 
+function armSlowStartHint() {
+  clearSlowStartHint();
+  slowStartTimer = setTimeout(() => {
+    if (status.value === "loading") slowStart.value = true;
+  }, 2500);
+}
+
+function clearSlowStartHint() {
+  if (slowStartTimer) {
+    clearTimeout(slowStartTimer);
+    slowStartTimer = null;
+  }
+  slowStart.value = false;
+}
+
 /** 只在销毁播放器内核，保留 `<video>` 与画面（重连时不留黑屏） */
 function teardownPlayer() {
   if (flv) {
@@ -148,21 +170,12 @@ function teardownPlayer() {
   }
 }
 
-/** 抓当前帧当 poster：重连期间继续显示「最后一帧」而不是黑屏 */
+/** 抓当前帧当 poster：重连 / 换通道期间继续显示「最后一帧」而不是黑屏 */
 function capturePoster() {
-  const el = videoRef.value;
-  if (!el || !el.videoWidth) return;
-  try {
-    const canvas = document.createElement("canvas");
-    const width = 320;
-    canvas.width = width;
-    canvas.height = Math.max(1, Math.round((el.videoHeight / el.videoWidth) * width));
-    canvas.getContext("2d")?.drawImage(el, 0, 0, canvas.width, canvas.height);
-    // 小图 + jpeg：一次 ~2ms，只在断流瞬间做一次
-    poster.value = canvas.toDataURL("image/jpeg", 0.5);
-  } catch {
-    /* 取不到帧就算了，重连本身不依赖它 */
-  }
+  const shot = captureVideoPoster(videoRef.value);
+  if (!shot) return;
+  poster.value = shot;
+  setVideoPoster(shot); // 切到直连 / 切通道时由下一个播放器接着顶
 }
 
 /** 断流：先留帧，再按退避重连；前几次不弹错误，只改角标 */
@@ -194,6 +207,8 @@ function scheduleRetry(reason: string) {
 
 function destroy() {
   clearRetry();
+  clearSlowStartHint();
+  capturePoster(); // 交给共享缓存：切到直连 / 切通道时由下一个播放器先顶这一帧
   teardownPlayer();
   const el = videoRef.value;
   if (el) {
@@ -216,7 +231,14 @@ function fail(message: string) {
   errorText.value = message;
 }
 
-/** flv.js 的直播参数：关掉 stash 缓冲，吃多少播多少（默认攒 3s 才起播，抖动就来回跳） */
+/**
+ * flv.js 的直播参数：关掉 stash 缓冲，吃多少播多少（默认攒 3s 才起播，抖动就来回跳）。
+ *
+ * `liveBufferLatencyChasing`：播放位置比"最新帧"落后超过 `liveBufferLatencyMaxLatency`
+ * 就**直接跳到直播边缘**。没有它时，MSE 里攒下的那截不会自己消化 —— 现场体感就是
+ * 「越看越延迟」，最后卡在某一帧（这正是 2026-11-18 反馈的那一条）。
+ * 阈值取 1.2s：中继本身 1~2s，再攒 1.2s 才追，不会因为偶尔抖一下就把画面跳得一惊一乍。
+ */
 function liveFlvConfig(url: string) {
   return {
     type: "flv" as const,
@@ -227,7 +249,10 @@ function liveFlvConfig(url: string) {
     enableStashBuffer: false,
     stashInitialSize: 128,
     autoCleanupSourceBuffer: true,
-    fixAudioTimestampGap: false
+    fixAudioTimestampGap: false,
+    liveBufferLatencyChasing: true,
+    liveBufferLatencyMaxLatency: 1.2,
+    liveBufferLatencyMinRemain: 0.5
   };
 }
 
@@ -244,6 +269,9 @@ async function attach() {
     errorText.value = "";
   }
   buffering.value = false;
+  // 上一路（直连 / 上一个通道）的最后一帧先顶着：切流期间不能是黑屏
+  if (!poster.value) poster.value = getVideoPoster();
+  armSlowStartHint();
 
   // 推流端已把源转成 FLV，flv.js 的 WebSocketLoader 直接消费二进制帧
   const { default: flvjs } = await import("flv.js");
@@ -271,6 +299,7 @@ async function attach() {
 function onPlaying() {
   status.value = "playing";
   buffering.value = false;
+  clearSlowStartHint();
   errorText.value = "";
   retryAttempt.value = 0;
   poster.value = "";

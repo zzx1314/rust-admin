@@ -581,3 +581,112 @@ async fn viewer_requires_token() {
         "期望 401 拒绝，实际: {text}"
     );
 }
+
+/// 板端 relay 重启 ffmpeg（`video_reset`）时，**已经连着的观看端必须被断开**。
+///
+/// 现场事故（2026-11-18）：同一条推流连接上接着发新一轮 FLV（时间戳从 0 重来、
+/// 降档后分辨率还从 720p 变 640x360），浏览器里的 flv.js 不会自己恢复 ——
+/// 画面定住、字节却还在流（`pendingBytes` 一直是 0），只能等前端的假死看门狗。
+/// 现在由平台主动断开：前端 250ms 起重连，重连时补到的是**新流头**。
+#[tokio::test]
+async fn video_reset_disconnects_attached_viewers_so_they_refetch_the_header() {
+    let (state, _db) = test_state().await;
+    let (port, router) = spawn_server(state.clone()).await;
+    let token = login_token(&router).await;
+    let mut publisher = publisher_for(port, &state).await;
+
+    let (mut viewer, _) = connect_async(format!(
+        "ws://127.0.0.1:{port}/api/backpack/video/ws?stream=dogcam&token={token}"
+    ))
+    .await
+    .expect("观看通道连接失败");
+    let (init, frame) = flv_stream();
+    publisher.send(Message::Binary(init.clone())).await.unwrap();
+    assert_eq!(
+        next_binary(&mut viewer, "首个观看者补流头").await,
+        init,
+        "观看端应从 FLV 魔数开始收到流"
+    );
+    publisher
+        .send(Message::Binary(frame.clone()))
+        .await
+        .unwrap();
+    assert_eq!(next_binary(&mut viewer, "首个观看者收帧").await, frame);
+
+    // 板端 relay 重启 ffmpeg：同一条推流连接上声明「新一轮流」
+    publisher
+        .send(Message::Text(
+            json!({ "msgType": "video_reset", "payload": { "stream": "dogcam" } }).to_string(),
+        ))
+        .await
+        .unwrap();
+
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match viewer.next().await {
+                None => return true,
+                Some(Ok(Message::Close(_))) => return true,
+                Some(Err(_)) => return true,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await
+    .expect("video_reset 之后老观看端应被断开");
+    assert!(closed, "老观看端必须重连才能拿到新流头");
+
+    // 重连的观看端拿到的是新一轮的流头（旧头已经被 reset 清掉）
+    let (mut fresh, _) = connect_async(format!(
+        "ws://127.0.0.1:{port}/api/backpack/video/ws?stream=dogcam&token={token}"
+    ))
+    .await
+    .expect("重连观看通道失败");
+    publisher.send(Message::Binary(init.clone())).await.unwrap();
+    assert_eq!(
+        next_binary(&mut fresh, "重连后补新一轮流头").await,
+        init,
+        "重连的观看端必须拿到新一轮流头，否则 flv.js 解析错位、画面定住"
+    );
+}
+
+/// 冷启动那一条 `video_reset` 不能踢人。
+///
+/// 时序：观看者进来 → 平台下发 `video_start` → 板端起 ffmpeg **前**先发 `video_reset`
+/// → 平台清流头。这一轮之前根本没有流（`init` / `last_frame` 都是空），观看者手上
+/// 没有「坏字节」，踢掉只会让首帧白等一次重连（`measure_bitrate` 这类一次性探针
+/// 会直接拿 1006 断连）。
+#[tokio::test]
+async fn video_reset_on_a_cold_start_does_not_kick_the_viewer() {
+    let (state, _db) = test_state().await;
+    let (port, router) = spawn_server(state.clone()).await;
+    let token = login_token(&router).await;
+    let mut publisher = publisher_for(port, &state).await;
+
+    let (mut viewer, _) = connect_async(format!(
+        "ws://127.0.0.1:{port}/api/backpack/video/ws?stream=dogcam&token={token}"
+    ))
+    .await
+    .expect("观看通道连接失败");
+    let _start = next_msg(&mut publisher, "video_start").await;
+
+    // 板端 relay 起 ffmpeg 前的 video_reset：这时房间里还没有任何流
+    publisher
+        .send(Message::Text(
+            json!({ "msgType": "video_reset", "payload": { "stream": "dogcam" } }).to_string(),
+        ))
+        .await
+        .unwrap();
+
+    let (init, frame) = flv_stream();
+    publisher.send(Message::Binary(init.clone())).await.unwrap();
+    assert_eq!(
+        next_binary(&mut viewer, "冷启动后首个观看者补流头").await,
+        init,
+        "冷启动的 video_reset 不该断开观看者，它应该直接收到新流头"
+    );
+    publisher
+        .send(Message::Binary(frame.clone()))
+        .await
+        .unwrap();
+    assert_eq!(next_binary(&mut viewer, "冷启动后收帧").await, frame);
+}
