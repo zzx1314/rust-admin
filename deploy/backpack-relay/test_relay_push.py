@@ -98,6 +98,44 @@ def test_congested_switches_to_low_profile_and_restreams() -> None:
     assert relay.hold_seconds() == relay.DEGRADE_TTL
 
 
+def test_degraded_profile_actually_transcodes() -> None:
+    """降档必须真的重编码（2026-11-18 线上事故）。
+
+    当时的错：`encoder = None if (profile[0] == "copy" or low) else pick_encoder()`
+    —— 降档时 `low` 为真，于是 encoder 被置成 None → `-c:v copy` → 1080p60 原样推
+    4~8Mbps，浏览器全部 `lagged`，也就是「越降越卡」。`-c:v copy` 没有码率可降。
+    """
+    reset()
+    original = relay.pick_encoder
+    relay.pick_encoder = lambda: "h264_rkmpp"
+    try:
+        relay.mark_congested("dogcam", "单测触发")
+        args = relay.ffmpeg_args("dogcam")
+    finally:
+        relay.pick_encoder = original
+
+    assert "copy" not in args, f"降档后仍是 -c:v copy：{' '.join(args)}"
+    assert args[args.index("-c:v") + 1] == "h264_rkmpp"
+    assert args[args.index("-b:v") + 1] == relay.DEGRADE_BITRATE
+    filters = args[args.index("-vf") + 1]
+    assert f"scale={relay.DEGRADE_WIDTH}:{relay.DEGRADE_HEIGHT}" in filters
+    assert f"fps={relay.DEGRADE_FPS}" in filters
+
+
+def test_copy_profile_still_copies() -> None:
+    """`RELAY_PROFILE=copy` 是显式要求只换容器，不能被「顺手转码」改掉。"""
+    reset()
+    original = relay.PROFILE
+    relay.PROFILE = "copy"
+    try:
+        args = relay.ffmpeg_args("dogcam")
+    finally:
+        relay.PROFILE = original
+
+    assert args[args.index("-c:v") + 1] == "copy"
+    assert "-vf" not in args
+
+
 def test_window_stats_decide_congestion() -> None:
     reset()
     session = fresh("dogcam")

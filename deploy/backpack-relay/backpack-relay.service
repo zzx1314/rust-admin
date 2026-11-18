@@ -22,7 +22,16 @@ Environment=RELAY_PROFILE=light
 # Environment=RELAY_SEND_TIMEOUT=10     # 单个分片写 WS 的上限（秒），超时判上行已死
 # Environment=RELAY_STALL_TIMEOUT=15    # 这么久没推出字节就重启 ffmpeg
 # Environment=RELAY_ROUTE_POLL=5        # 出口网卡巡检间隔（变了就重建连接；0 关闭）
-# Environment=RELAY_DEGRADE_TTL=300     # 拥塞后这段时间用省流档
+
+# 自适应档位（默认值见 relay_push.py；改了要 daemon-reload + restart）
+# Environment=RELAY_CONGEST_WINDOW=5     # 码率 / send 占用的统计窗口（秒）
+# Environment=RELAY_CONGEST_DUTY=0.5     # 窗口内 send 占用超过它算「被反压」
+# Environment=RELAY_CONGEST_BPS_RATIO=0.9 # 实测码率低于目标档位这个比例即降档
+# Environment=RELAY_RECOVER_DUTY=0.2     # 回配置档前 send 占用要持续低于它
+# Environment=RELAY_RECOVER_STABLE=20    # …并持续这么久（秒），否则继续省流
+# Environment=RELAY_DEGRADE_TTL=300      # 首次降档至少保持多久（秒）
+# Environment=RELAY_DEGRADE_TTL_MAX=1800 # 反复升降时窗口翻倍的上限（秒）
+# Environment=RELAY_FLAP_WINDOW=600      # 回档后这么久内又拥塞 = 链路没恢复
 # Environment=RELAY_DEGRADE_BITRATE=500k
 ExecStart=/usr/bin/python3 /opt/backpack-relay/relay_push.py
 Restart=always

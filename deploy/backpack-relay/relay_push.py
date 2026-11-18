@@ -521,15 +521,14 @@ def ffmpeg_args(stream: str) -> list[str]:
         source,
         "-an",  # 背包各流都没有音轨，FLV 里带空音轨会让 flv.js 报解析错
     ]
-    # 省流窗口内即使配的是 copy 也要重编码：copy 没法降码率，碰上只有 4G 的链路只会超时重连
-    encoder = None if (profile[0] == "copy" or low) else pick_encoder()
+    # 只有 `RELAY_PROFILE=copy` 才只换容器。降档时**必须**重编码 —— copy 改不了码率，
+    # 1080p60 会原样推 4~8Mbps（2026-11-18 事故：降档判断对了，但这里 `or low` 把
+    # encoder 也置成了 None → 降档后反而推 8Mbps，浏览器全部 lagged）。
+    encoder = None if profile[0] == "copy" else pick_encoder()
     if encoder is None:
         # 只换容器：源已经是 H.264 且码率不高时才该走这里
         args += ["-c:v", "copy"]
     else:
-        if profile[0] == "copy":
-            # copy 档位 + 编码器探测失败（没有可用编码器）时没有编码参数，按 default 档编
-            profile = (OUT_WIDTH, OUT_HEIGHT, OUT_FPS, OUT_BITRATE)
         width, height, fps, bitrate = profile
         # light：先缩后编。`force_original_aspect_ratio=decrease` 只缩不放，
         # 所以 640x360 的 preview 不会被放大成 720p（白吃码率与 CPU）。
@@ -611,15 +610,15 @@ class StreamSession:
         self._win_bytes = 0
         low = degraded()
         self.profile = active_profile()
-        if self.profile[0] == "copy":
-            detail = "，-c:v copy"
-        else:
-            detail = f"，{profile_text(self.profile)} enc={pick_encoder()}"
+        args = ffmpeg_args(self.stream)
+        # 编码器一律从**真实参数**里取：上次的教训是日志写着 enc=h264_rkmpp、
+        # 实际 args 里是 `-c:v copy`，把「降档为什么没降下来」藏了两天。
+        codec = args[args.index("-c:v") + 1] if "-c:v" in args else "?"
         log(
             f"[{self.stream}] 平台有观看者，开始拉流"
-            f"（profile={'省流' if low else PROFILE}{detail}，出口 {egress_iface() or '未知'}）"
+            f"（profile={'省流' if low else PROFILE}，{profile_text(self.profile)}"
+            f" 编码={codec}，出口 {egress_iface() or '未知'}）"
         )
-        args = ffmpeg_args(self.stream)
         if DEBUG:
             log(f"[{self.stream}] ffmpeg: {' '.join(args)}")
         # 告诉平台「这是一条新流」：常驻连接里每次起流都换新的 FLV 头与新时间戳，
