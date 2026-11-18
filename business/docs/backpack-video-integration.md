@@ -741,7 +741,7 @@ WHEP 拿到 404。处理（已按此配置）：
 
 | 位置 | 改动 |
 | --- | --- |
-| `relay_push.py` `_pump` | 每个分片的 `ws.send` 加 `RELAY_SEND_TIMEOUT`（默认 10s）。超时 = 上行已死：标记拥塞 → 关掉连接 → 外层 1~15s 退避重连，`ffmpeg` 随连接一起被杀。 |
+| `relay_push.py` `_pump` | 每个分片的 `ws.send` 加 `RELAY_SEND_TIMEOUT`（默认 5s，2026-11-18 晚从 10s 收紧）。超时 = 上行已死：标记拥塞 → 关掉连接 → 外层 1~15s 退避重连，`ffmpeg` 随连接一起被杀。 |
 | `relay_push.py` `_watch_stall` | 新增卡住看门狗：起流后 `RELAY_STALL_TIMEOUT`（默认 15s）一个字节都没推出去（RTSP 半死 / 相机卡住）就重启 `ffmpeg`（保留 WS，先发 `video_reset` 清平台旧流头），观看端不用重连。 |
 | `relay_push.py` `route_watcher` | 每 `RELAY_ROUTE_POLL`（默认 5s）`ip route get <平台IP>`，**出口网卡一变就断开全部推流连接**。Wi-Fi 断开回落 4G、Wi-Fi 恢复切回快链路，都靠它收敛（日志：`平台出口网卡 wlp4s0 → enx…`）。 |
 | `relay_push.py` 自适应档位 | 按 `RELAY_CONGEST_WINDOW`（5s）窗口统计 `ws.send` 占用与实测码率：**占用高 + 码率明显低于目标档位**（或单个分片 `send` 超时）即判「上行吃不下」→ 立刻发 `video_reset` + 重启 `ffmpeg` 换 `640x360@12 / 500k`（`RELAY_DEGRADE_*`），**观看端不用重连**。旧逻辑要等 10s 超时 → 断连 → 重连才降得下来，正好错过最卡的那十几秒。 |
@@ -1097,6 +1097,63 @@ python3 deploy/backpack-relay/measure_bitrate.py --stream dogcam --seconds 20
 回归：`python3 deploy/backpack-relay/test_relay_push.py`（30 个用例，新增
 「按流探测不串味」「探测须真解出帧 / 超时算不可用」「写死 `RELAY_DECODER` 不探测」）。
 
+#### ⑫ 越看越慢且日志一片安静：积压被「搬」进了观看端缓冲（2026-11-18 晚）
+
+现场反馈：「视频延迟有点长，中间有一段很卡（应该是网络信号），平台中继没发出去、一直
+积压」。翻日志看到的确实是上行在反复掉，但**卡完之后延迟并没有恢复**，也不再有日志。
+
+**上行侧（客观存在，已由 ⑤⑥ 兜住）**：2026-11-18 当天 `video publisher ... silent for
+35~75s`（7 条 relay 连接同时静默 = 整条上行断了）出现了十几次：
+`09:13 / 10:07 / 10:26 / 10:40 / 11:53 / 13:45 / 14:48 / 15:46 / 15:55 / 17:08 / 17:15 /
+17:22 / 17:49 / 18:15 / 19:27 / 19:56~19:59`；19:58:07 连设备心跳一起超时被标离线，
+证明不是视频单独的问题。
+
+**关键是恢复之后**（13:46 那次最典型）：
+
+```text
+13:45:56  bp:* silent for 34.9s                 ← 上行断
+13:46:10  stream reset（新一轮 ffmpeg）
+13:46:27  last viewer ... 6.9s / 2964 KB（3533 kbps）   ← 6.9 秒送出 2.9MB
+13:46:48  ... 6.4s / 2839 KB（3659 kbps）
+13:47:06  ... 6.4s / 2846 KB（3637 kbps）
+13:47:18  ... 6.9s / 2877 KB（3439 kbps）
+13:47:42  ... 6.7s / 2878 KB（3512 kbps）
+每次都是 viewer of bp:dogcam lagged, dropped 18/15/1/50/22 frames
+```
+
+当时档位是 `light`（1.2Mbps），**6.4 秒却送出 2.8MB ≈ 19 秒的内容** —— 板端 ffmpeg
+不受实时节流，链路堵过一次之后会把攒下的帧以 2~3 倍速倒出来。
+
+**真正的问题在观看端这一层**：平台给每个观看者的广播缓冲是
+`broadcast::channel(VIEWER_BUFFER_FRAMES)`，`512 × 8KB = 4MB` —— 500kbps 下等于
+**65 秒**画面可以静默躺在里面。它只会在「溢出」时报 `lagged`，而溢出之前**一行日志都
+没有**；积压也不会自己消失（推流码率 = 播放码率，落后多少就一直落后多少）。所以用户
+看到的是「很流畅，但比现场晚十几秒」，平台日志一片安静，`video/state` 也看不出来。
+
+修法（`business/server/src/video.rs`）：
+
+| 位置 | 改动 |
+| --- | --- |
+| `FlvScanner`（新增） | 增量解析每个观看者收到的 FLV 字节流（tag 可跨 8KB 分片），取视频 tag 时间戳。板端 ffmpeg 带 `-use_wallclock_as_timestamps`，所以「墙钟流逝 - 媒体流逝」的累计值 ≈ 这个观看者手上是多旧的画面；`|Δts| > 5s` 判为时间轴跳变（补的流头 → 直播帧、板端换档重启），不计入 |
+| `handle_viewer` | 累计落后超过 `VIEWER_LAG_DROP`（2s）就**断开**这个观看者：前端 250ms 重连，服务端补的流头就是直播边缘。日志留一行 `落后直播 x.xs（缓冲积压），断开让前端重连到直播边缘`。小于 2s 的抖动仍交给前端 `liveBufferLatencyChasing`（1.2s）自己追 |
+| `VIEWER_BUFFER_FRAMES` | 按房间分：设备客户端房间仍是 512 片（4Mbps 场景要 2 秒余量），**背包房间 `bp:` 降到 128 片 = 1MB ≈ 16 秒 @500k**。环形缓冲只能「限制」积压，不能「发现」它，所以必须配上面那条 |
+| `publisher_attach` | 推流端重连时**不再重建房间**（`rooms.insert(new_room)` 会把广播通道 close 掉、正在看的人直接被踢；而弱网重连时旧连接常是半开僵尸，要到 30s 才判死 → 2026-11-18 20:22:36 / 20:23:32 连踢两次）。改成沿用房间、只换会话号，并走与 `video_reset` 同一条 `reset` 通知（观看端仍会重连拿新流头，但房间 / 观看计数 / 空闲计时都不丢） |
+| `video/state` | 新增 `viewerLagSecs`：观看端落后直播多少秒（0 = 没观看者或还没量到）。以前这个值根本不存在，只能靠翻板端日志猜 |
+| `relay_push.py` | `RELAY_SEND_TIMEOUT` 10s → 5s：这十秒里 ffmpeg 仍在往管道里塞帧，链路一恢复就变上面那种「2~3 倍速倾泻」 |
+
+回归：`server/src/video.rs` 单测（`flv_scanner_reports_video_timestamps_across_chunks`、
+`publisher_reconnect_keeps_the_room_and_signals_a_new_stream`、
+`backpack_rooms_get_a_shallower_viewer_buffer`）、
+`server/tests/video_relay.rs::viewer_falling_behind_live_is_disconnected`。
+
+**排障口诀**：
+
+- 画面流畅但「总是慢几秒」→ 看 `video/state` 的 `viewerLagSecs`，>2 说明积压还没被追回
+  （旧版本会一直留着，升级后会在 2s 处自动重连一次）；
+- 先确认板端没在涨积压：平台机器上 `python3 deploy/backpack-relay/latency_probe.py
+  --stream dogcam --seconds 75`，`积压增长` ≈ 0 就说明板端是干净的，延迟在观看端 / 浏览器；
+- 如果 `积压增长` 持续为正 → 板端侧问题，回到 ⑥⑨（档位 / 出帧跟不上）。
+
 #### 排查工具与清单
 
 ```bash
@@ -1116,6 +1173,7 @@ ssh root@<背包IP> 'python3 /tmp/bw.py'              # 见 §6.10② 的量法�
 | 每 23s 左右断一次、20s 连接超时 | `/api/backpack/video/state` 的 `initBytes` + 服务端是否 `stream reset` | ①（已修） |
 | 有画面但卡、`measure_bitrate` 远低于配置 | 板端 `ip route get 39.107.55.13`、`bw.py` | ② 路由走了慢速 dongle |
 | 反复 `lagged`、`left after ... kbps` 高于出口 | `speedtest-cli` 的 Upload vs 平均 kbps | ③ 降档位 / 升带宽 |
+| 画面很流畅，但就是**比现场晚几秒**（不卡、不报错） | `video/state` 的 `viewerLagSecs`、平台日志 `落后直播 x.xs` | ⑫ 观看端缓冲积压（旧版本会一直留着）。先按 ⑫ 的口诀确认板端没在涨积压 |
 | 看着看着越来越卡（延迟涨），然后掉一下重连 | 板端 `画面延迟 x.xs` / `延迟 x.xs 超过上限` / `回到配置档`；平台 `stream reset` + `publisher detached` | ⑨（2026-11-18 已修）。修完还有：看 `试用期延迟` / `已知道撑不住` 两行，如果反复在降档，就把配置档降到链路能吃下的规格，别靠自适应救 |
 | 同时开多个视频页面更卡 | 每个观看者 = 一份出口带宽 | 出口按 1.5Mbps/路 规划 |
 | **某一路黑、其他路正常**（典型：`cam0~3` 全黑，`dogcam` 正常） | 板端 `[cam0] 推流结束：0 个分片 / 0B` + 15s 一次「没有推出任何字节」；`video/state` 里 `initBytes=0` / `lastFrameAgeSecs=null` | ⑪ 解码器选择串味（已修）。硬解对这几路源无效，要按流探测 + 真解出帧才算可用 |

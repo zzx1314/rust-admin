@@ -35,10 +35,11 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tracing::{debug, info, warn};
 
-/// 单个观看者的积压帧上限：网络慢时丢帧保实时，不把服务端内存拖爆
+/// 单个观看者的积压帧上限（设备客户端房间 `RD-*`）：网络慢时丢帧保实时，不把服务端内存拖爆
 ///
 /// 注意这里是**分片**数（推流端每次读 ffmpeg stdout 8KB，一个分片就 8KB），
 /// 所以 128 片只有 1MB：1080p/4Mbps 下就是 2 秒。实测现场浏览器只要卡 2 秒
@@ -47,6 +48,45 @@ use tracing::{debug, info, warn};
 /// 512 片 = 4MB，1080p 2.5Mbps 约 13 秒、720p 2Mbps 约 16 秒的余量，
 /// 偶发卡顿扛得住，真断网才会走重连。
 const VIEWER_BUFFER_FRAMES: usize = 512;
+
+/// 板端背包房间（`bp:`）单观看者的积压上限：128 片 = 1MB
+///
+/// 背包推的是省流档 500kbps ~ 配置档 1.2Mbps，8KB 一片 → 1MB ≈ 16 秒 @500k。
+/// 够扛住浏览器切标签 / 一次重连（128 片跑 4Mbps 才 2 秒，那是设备客户端房间的场景），
+/// 又**不允许**像 4MB 那样「65 秒前的画面静默躺在队列里」：2026-11-18 现场就是这种 ——
+/// 上行抖 45 秒，板端 ffmpeg 恢复后以 3 倍速把攒下的画面倒出来
+/// （日志 `last viewer ... 6.9s / 2964 KB → 3533 kbps`），观众端缓冲吃下十几秒，
+/// 于是「越看越慢」，而平台日志一个字都没打。真落后由 [`VIEWER_LAG_DROP`] 兜住。
+const BACKPACK_VIEWER_BUFFER_FRAMES: usize = 128;
+
+/// 观看端落后直播多少秒就断开让它重连（[`FlvScanner`] 量出来的「墙钟流逝 - 媒体流逝」）
+///
+/// 环形缓冲再小也只能**限制**静默积压，不能**发现**它 —— 只有拿 FLV 视频 tag 的时间戳
+/// 和墙钟比，才知道这个观看者手上是多旧的画面。超过阈值就断开：前端 250ms 后重连，
+/// 服务端补的是当前这一轮的流头（header + 关键帧）＝直播边缘。
+/// 取 2s：小于它的抖动交给前端 `liveBufferLatencyChasing`（1.2s）自己追；大于它的卡顿
+/// 用户早就看着画面定住了，重连一次不会有观感损失。
+const VIEWER_LAG_DROP: f64 = 2.0;
+
+/// FLV 时间轴「跳变」的判据（秒）
+///
+/// 中途加入补的流头（本轮第一帧，ts≈0）后面紧跟的是直播帧；板端换档重启 ffmpeg 时
+/// 时间轴也归零。这些**不是**积压，混进统计会算出几十秒的假延迟。
+const FLV_TS_JUMP_SECS: f64 = 5.0;
+
+/// 单个 FLV tag 的字节上限（解析缓冲兜底：坏流不能把内存吃满）
+const MAX_FLV_TAG_BYTES: usize = 1 << 20;
+
+/// 该房间单观看者的积压片数上限
+///
+/// 背包推流码率只有设备客户端的 1/4~1/8，同样片数换算成秒数差着量级，所以按房间分开。
+fn viewer_buffer_frames(device_id: &str) -> usize {
+    if device_id.starts_with(BACKPACK_ROOM_PREFIX) {
+        BACKPACK_VIEWER_BUFFER_FRAMES
+    } else {
+        VIEWER_BUFFER_FRAMES
+    }
+}
 
 /// 「最后一个观看者离开」到真正停流之间的宽限。
 ///
@@ -209,17 +249,23 @@ struct Room {
     /// 字节却还在流**（`pendingBytes` 一直是 0），只能等前端 8s 的假死看门狗重连。
     /// 所以这里主动断开：前端 250ms 起就重连，重连时服务端会补**新流头**。
     reset: Arc<tokio::sync::Notify>,
+    /// 观看端「落后直播」的观测值（毫秒）：`handle_viewer` 每收一片就刷新，没有观看者时归零
+    ///
+    /// `GET /api/backpack/video/state` 的 `viewerLagSecs` 就是它。以前这里什么都没有 ——
+    /// 现场「越看越慢」只能翻板端日志猜，因为积压是静默的（不到环形缓冲溢出不打日志）。
+    viewer_lag_ms: Arc<AtomicU64>,
 }
 
-fn new_room(session: u64) -> Room {
+fn new_room(device_id: &str, publisher: Option<u64>) -> Room {
     Room {
-        tx: broadcast::channel(VIEWER_BUFFER_FRAMES).0,
+        tx: broadcast::channel(viewer_buffer_frames(device_id)).0,
         init: None,
         pending: Vec::new(),
-        publisher: Some(session),
+        publisher,
         idle_since: None,
         last_frame: None,
         reset: Arc::new(tokio::sync::Notify::new()),
+        viewer_lag_ms: Arc::new(AtomicU64::new(0)),
     }
 }
 
@@ -236,15 +282,9 @@ impl VideoHub {
         drop(viewers);
 
         let mut rooms = self.rooms.write().await;
-        let room = rooms.entry(device_id.to_string()).or_insert_with(|| Room {
-            tx: broadcast::channel(VIEWER_BUFFER_FRAMES).0,
-            init: None,
-            pending: Vec::new(),
-            publisher: None,
-            idle_since: None,
-            last_frame: None,
-            reset: Arc::new(tokio::sync::Notify::new()),
-        });
+        let room = rooms
+            .entry(device_id.to_string())
+            .or_insert_with(|| new_room(device_id, None));
         // 有人回来看了：空闲计时清零，看门狗别把还热着的流停掉
         room.idle_since = None;
         let init = room.init.clone();
@@ -278,6 +318,8 @@ impl VideoHub {
                 // 推流端还在：开始计时，宽限内不断流（短时重连立刻能拿到流）
                 Some(room) if room.publisher.is_some() => {
                     room.idle_since = Some(std::time::Instant::now());
+                    // 没人看了，落后直播的观测值没意义（下一个人进来重新量）
+                    room.viewer_lag_ms.store(0, Ordering::Relaxed);
                 }
                 _ => {
                     rooms.remove(device_id);
@@ -327,29 +369,39 @@ impl VideoHub {
 
     /// 推流端注册 / 重连
     ///
-    /// 会先把旧房间整个扔掉：ffmpeg 重启后推的是**新的一条流**（新的 FLV 头、
-    /// 新的时间戳），继续往老观看者的 socket 里灌会让他们卡在解析错误上。
-    /// 丢掉房间 → 观看端 `recv` 返回 `Closed` → 前端断开后自动重连，拿到干净的流。
+    /// 推流端重连意味着**一条新流**（板端 ffmpeg 跟着连接一起被杀，重连后重新起流：
+    /// 新 FLV 头、时间戳归零），所以老流头必须丢掉，正在看的观看端要拿新流头。
+    /// 但**房间不能整个换掉**（以前是 `rooms.insert(new_room)`）：换掉会 close 广播通道，
+    /// 观看端直接收到 `Closed`；而弱网重连时旧连接常常是「半开」僵尸，要到
+    /// [`PUBLISHER_SILENCE`] 才被判死，于是新连接一 attach 就把正在看的人踢下去
+    /// （2026-11-18 20:22:36 / 20:23:32 连踢两次，现场就是「看着看着黑一下」）。
+    /// 现在沿用房间、只换会话号：流头清理与 `video_reset` 同一条路径（`reset` 通知）。
     pub async fn publisher_attach(&self, device_id: &str, session: u64) {
         let mut rooms = self.rooms.write().await;
-        match rooms.get(device_id).map(|room| room.publisher.is_some()) {
-            // 老推流端还挂着（ffmpeg 重连）：新旧两条流的 FLV 头/时间戳不能混在
-            // 同一批观看者上，整个房间换掉，让浏览器重连拿干净的新流。
-            Some(true) => {
-                info!("video publisher {device_id} 重连，重建房间");
-                rooms.insert(device_id.to_string(), new_room(session));
-            }
-            // 正常首帧流程：观看者先到（video_start 就是它触发的），推流端后到。
-            // 这里**不能**换房间，否则刚进来的观看者立刻被踢掉，画面永远出不来。
-            Some(false) => {
-                if let Some(room) = rooms.get_mut(device_id) {
-                    room.publisher = Some(session);
-                    room.init = None;
-                    room.pending = Vec::new();
+        match rooms.get_mut(device_id) {
+            // 老推流端还挂着：新一轮流，清流头 + 通知观看端重连拿新头
+            Some(room) if room.publisher.is_some() => {
+                let was_live = room.init.is_some() || room.last_frame.is_some();
+                info!("video publisher {device_id} 重连，沿用房间（新一轮流，时间轴归零）");
+                room.publisher = Some(session);
+                room.init = None;
+                room.pending.clear();
+                room.last_frame = None;
+                room.viewer_lag_ms.store(0, Ordering::Relaxed);
+                if was_live {
+                    room.reset.notify_waiters();
                 }
             }
+            // 正常首帧流程：观看者先到（video_start 就是它触发的），推流端后到。
+            // 这里**不能**清观看端，否则刚进来的观看者立刻被踢掉，画面永远出不来。
+            Some(room) => {
+                room.publisher = Some(session);
+                room.init = None;
+                room.pending.clear();
+                room.viewer_lag_ms.store(0, Ordering::Relaxed);
+            }
             None => {
-                rooms.insert(device_id.to_string(), new_room(session));
+                rooms.insert(device_id.to_string(), new_room(device_id, Some(session)));
             }
         }
     }
@@ -465,6 +517,8 @@ impl VideoHub {
             room.init = None;
             room.pending = Vec::new();
             room.last_frame = None;
+            // 时间轴重新开始，上一轮的「落后多少秒」没意义了
+            room.viewer_lag_ms.store(0, Ordering::Relaxed);
             if was_live {
                 room.reset.notify_waiters();
             }
@@ -478,6 +532,17 @@ impl VideoHub {
             .await
             .get(device_id)
             .map(|room| room.reset.clone())
+    }
+
+    /// 取「观看端落后直播」的记录器（毫秒）：`handle_viewer` 每收一片就把实测值写回去
+    ///
+    /// 拿的是 `Arc`，观看端循环里不需要每片都去抢房间锁。
+    pub async fn lag_meter(&self, device_id: &str) -> Option<Arc<AtomicU64>> {
+        self.rooms
+            .read()
+            .await
+            .get(device_id)
+            .map(|room| room.viewer_lag_ms.clone())
     }
 
     /// 诊断快照：每个房间的推流 / 观看 / 起流状态（`GET /api/backpack/video/state`）
@@ -499,6 +564,8 @@ impl VideoHub {
                     "viewers": viewers.get(key).copied().unwrap_or(0),
                     // 秒；null = 这一轮还没收到过字节。持续变大就是「推流端没数据」
                     "lastFrameAgeSecs": room.last_frame.map(|at| at.elapsed().as_secs()),
+                    // 秒；观看端落后直播多少（>2s 会被主动断开重连）。0 = 不知道或没观看者
+                    "viewerLagSecs": room.viewer_lag_ms.load(Ordering::Relaxed) as f64 / 1000.0,
                     "streaming": streaming.contains(key),
                     "control": controls.contains_key(key),
                 })
@@ -558,6 +625,72 @@ fn flv_init_len(buf: &[u8]) -> Option<usize> {
             }
         }
         pos = body + size + 4;
+    }
+}
+
+/// 增量 FLV tag 解析器：喂入字节流，回调每个**视频** tag 的时间戳
+///
+/// 用途只有一个：量「这个观看者落后直播多少秒」。平台给每个观看者的广播缓冲在弱网下
+/// 会静默攒住几秒~几十秒的画面（不到 4MB 的环形缓冲溢出，不会有一行日志），用户只能
+/// 看到「越看越慢」。 FLV 视频 tag 的时间戳是板端采集时刻（板端 ffmpeg 带
+/// `-use_wallclock_as_timestamps`），所以「墙钟流逝 - 媒体流逝」的累计值就等于积压。
+///
+/// tag 可以跨分片（板端每次写 8KB，一个 keyframe 往往比它大），所以要留尾巴。
+#[derive(Default)]
+struct FlvScanner {
+    /// 还没凑成完整 tag 的尾巴
+    buf: Vec<u8>,
+    /// 是否已经跳过 13 字节的 FLV 头（中途加入的观看者先收到流头）
+    header_done: bool,
+}
+
+impl FlvScanner {
+    /// 把新字节喂进去，对每个完整的视频 tag 调一次 `on_video(ts_ms)`
+    fn feed(&mut self, chunk: &[u8], mut on_video: impl FnMut(u32)) {
+        self.buf.extend_from_slice(chunk);
+        let mut pos = 0;
+        if !self.header_done {
+            if self.buf.len() < 13 {
+                return;
+            }
+            if &self.buf[..3] != b"FLV" {
+                // 不是 FLV（或已经错位）：别再攒了，下一片重新对
+                self.buf.clear();
+                self.header_done = true;
+                return;
+            }
+            pos = 13;
+            self.header_done = true;
+        }
+        while self.buf.len() >= pos + 11 {
+            let tag_type = self.buf[pos];
+            let size =
+                u32::from_be_bytes([0, self.buf[pos + 1], self.buf[pos + 2], self.buf[pos + 3]])
+                    as usize;
+            // 时间戳：低 24 位 + 扩展字节（第 4 个字节是高位）
+            let ts = u32::from_be_bytes([
+                self.buf[pos + 7],
+                self.buf[pos + 4],
+                self.buf[pos + 5],
+                self.buf[pos + 6],
+            ]);
+            let end = pos + 11 + size + 4;
+            if self.buf.len() < end {
+                break;
+            }
+            // 9 = 视频 tag；脚本 tag(18) / 音频 tag(8) 与积压无关
+            if tag_type == 9 {
+                on_video(ts);
+            }
+            pos = end;
+        }
+        if pos > 0 {
+            self.buf.drain(..pos);
+        }
+        // 一直凑不出完整 tag（坏流 / 错位）：丢掉，别把内存吃满
+        if self.buf.len() > MAX_FLV_TAG_BYTES {
+            self.buf.clear();
+        }
     }
 }
 
@@ -775,6 +908,38 @@ async fn handle_viewer(socket: WebSocket, state: AppState, stream_name: String, 
     // 推流端换新一轮流时要断开（拿不到流头就是「画面定住但字节还在流」）
     let reset = state.video_hub.reset_signal(&room).await;
 
+    // 「落后直播」量化器（每个观看者一份）：FLV 视频 tag 的时间戳是板端采集时刻，
+    // 所以「墙钟流逝 - 媒体流逝」的累计值 ≈ 这个观看者手上是多旧的画面。
+    //
+    // 为什么必须有：平台给每个观看者的广播缓冲是**静默**的 —— 弱网时它能攒住十几秒
+    // 画面而一行日志都不打（只有 4MB 环形缓冲溢出才报 `Lagged`），用户只会觉得
+    // 「越看越慢」。2026-11-18 现场：上行抖 45s → 板端 ffmpeg 恢复后以 3 倍速把积压
+    // 倒出来 → 观众端缓冲吃下十几秒（日志 `6.9s / 2964 KB → 3533 kbps`）→ 一直慢着。
+    let lag_meter = state.video_hub.lag_meter(&room).await;
+    let mut observe = {
+        let mut scanner = FlvScanner::default();
+        let mut prev: Option<(std::time::Instant, u32)> = None;
+        let mut lag = 0.0_f64;
+        // 返回「到目前为止落后直播多少秒」（累计值 = 墙钟流逝 - 媒体流逝）
+        move |bytes: &[u8], now: std::time::Instant| -> f64 {
+            scanner.feed(bytes, |ts| {
+                if let Some((last_at, last_ts)) = prev {
+                    let d_wall = now.saturating_duration_since(last_at).as_secs_f64();
+                    let d_ts = ts.wrapping_sub(last_ts) as f64 / 1000.0;
+                    // 时间轴跳变（补的流头 → 直播帧、板端换档重启）不是积压
+                    if d_ts.abs() <= FLV_TS_JUMP_SECS {
+                        // **不要每步都 clamp 到 0**：零均值的抖动被单向截断会变成系统性上偏
+                        // （12 片/秒 × 每秒多算几十毫秒 = 几秒就误报），所以允许负值（追上了
+                        // 就是负的），只把「信用卡」封顶在 -2s，避免一场追赶把真积压遮掉。
+                        lag = (lag + d_wall - d_ts).max(-VIEWER_LAG_DROP);
+                    }
+                }
+                prev = Some((now, ts));
+            });
+            lag
+        }
+    };
+
     // 补流头（FLV 魔数 + AVC 配置 + 首个关键帧）：**只要房间里有当前这一轮的流头就补**，
     // 不分是不是第一个观看者。
     //
@@ -784,18 +949,21 @@ async fn handle_viewer(socket: WebSocket, state: AppState, stream_name: String, 
     // flv.js 解析错位后黑屏，接着重连，看起来就是反复闪断。
     //
     // 流头不会串轮次：板端 relay 每次起 ffmpeg 前发 `video_reset`，推流端重连时
-    // 整个房间被换掉，两种情况都会把旧流头清掉。
-    if let Some(init) = init
-        && sink
+    // 房间也被清掉流头，两种情况都会让旧流头失效。
+    if let Some(init) = init {
+        // 流头也要喂给量化器：它的关键帧是本轮的基准点，不喂就从中段字节开始解析（错位）
+        observe(&init, std::time::Instant::now());
+        if sink
             .send(Message::Binary(init.as_ref().to_vec().into()))
             .await
             .is_err()
-    {
-        if state.video_hub.viewer_leave(&room).await {
-            // 不立刻停流：留给看门狗（宽限期内重看秒开）
-            state.video_hub.mark_streaming(&room, true).await;
+        {
+            if state.video_hub.viewer_leave(&room).await {
+                // 不立刻停流：留给看门狗（宽限期内重看秒开）
+                state.video_hub.mark_streaming(&room, true).await;
+            }
+            return;
         }
-        return;
     }
 
     // **每个「第一个观看者」都发 video_start**（不按 init / publisher 猜流在不在跑）。
@@ -846,8 +1014,22 @@ async fn handle_viewer(socket: WebSocket, state: AppState, stream_name: String, 
         tokio::select! {
             frame = rx.recv() => match frame {
                 Ok(bytes) => {
+                    let received_at = std::time::Instant::now();
+                    let lag = observe(&bytes, received_at);
                     forwarded += bytes.len() as u64;
                     if sink.send(Message::Binary(bytes.as_ref().to_vec().into())).await.is_err() {
+                        break;
+                    }
+                    if let Some(meter) = &lag_meter {
+                        meter.store((lag.max(0.0) * 1000.0) as u64, Ordering::Relaxed);
+                    }
+                    // 落后直播太多就断开重连（前端 250ms 后重连，补的流头就是直播边缘）。
+                    // 不断开的话这个观看者会一直「慢几秒」地看下去 —— 没有任何日志会提醒
+                    // 任何人，UI 上也看不出来（画面很流畅，只是比现场晚）。
+                    if lag > VIEWER_LAG_DROP {
+                        info!(
+                            "viewer of {room} 落后直播 {lag:.1}s（缓冲积压），断开让前端重连到直播边缘"
+                        );
                         break;
                     }
                 }
@@ -902,7 +1084,7 @@ async fn handle_viewer(socket: WebSocket, state: AppState, stream_name: String, 
 
 #[cfg(test)]
 mod tests {
-    use super::{VideoHub, flv_init_len};
+    use super::{FlvScanner, VideoHub, flv_init_len, viewer_buffer_frames};
     use std::sync::Arc;
 
     /// 造一段 FLV：header + AVC 序列头 tag + 关键帧 tag + 普通帧 tag
@@ -1046,15 +1228,115 @@ mod tests {
 
     #[tokio::test]
     async fn publisher_reconnect_closes_old_viewers() {
+        // 现在不再销毁房间（见 `publisher_reconnect_keeps_the_room_and_signals_a_new_stream`）：
+        // 观看端拿到的是「新一轮流」通知，行为与 `video_reset` 一致。
         let hub = VideoHub::default();
         let (mut rx, _, _) = hub.viewer_join("RD-001").await;
         hub.publisher_attach("RD-001", 1).await;
-        // 推流端重连 → 旧房间被丢弃，观看端收到 Closed（前端据此自动重连）
+        hub.publish("RD-001", Arc::from(flv_stream())).await;
+        assert!(rx.recv().await.is_ok(), "重连前观看端应正常工作");
+
         hub.publisher_attach("RD-001", 2).await;
-        assert!(matches!(
-            rx.recv().await,
-            Err(tokio::sync::broadcast::error::RecvError::Closed)
-        ));
+        // 广播通道没有被关掉：房间还在，旧字节之后不会再来新字节（等观看端被 reset 叫醒）
+        assert!(
+            !matches!(
+                rx.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed)
+            ),
+            "重连不应销毁房间、关掉观看端"
+        );
+    }
+
+    /// 推流端重连（弱网抖动）要**沿用房间**，只换会话号 + 通知观看端「换新流了」。
+    ///
+    /// 以前是 `rooms.insert(new_room)` 整间换掉：广播通道被 close，正在看的浏览器直接
+    /// 被踢；而旧连接常常是半开僵尸（要到 `PUBLISHER_SILENCE` 才判死），新连接一 attach
+    /// 就踢人 —— 2026-11-18 20:22:36 / 20:23:32 连踢两次，现场就是「看着看着黑一下」。
+    #[tokio::test]
+    async fn publisher_reconnect_keeps_the_room_and_signals_a_new_stream() {
+        let hub = VideoHub::default();
+        let (mut rx, _, _) = hub.viewer_join("RD-001").await;
+        hub.publisher_attach("RD-001", 1).await;
+        let stream = flv_stream();
+        hub.publish("RD-001", Arc::from(stream.clone())).await;
+        assert_eq!(
+            rx.recv().await.expect("应收到流头").as_ref(),
+            &stream[..INIT_LEN]
+        );
+
+        // 观看端挂着「新一轮流」的通知器（真实链路上是 `handle_viewer` 的 select 分支）
+        let reset = hub.reset_signal("RD-001").await.expect("房间应还在");
+        let waiter = tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(2), reset.notified())
+                .await
+                .is_ok()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        hub.publisher_attach("RD-001", 2).await;
+
+        assert!(
+            waiter.await.expect("等待任务不能 panic"),
+            "重连要通知观看端「换新流」，不能靠销毁房间"
+        );
+        assert!(hub.has_publisher("RD-001").await, "房间要沿用，不能重建");
+        assert_eq!(hub.viewers("RD-001").await, 1, "观看计数不能被清掉");
+        let (_rx2, first, init) = hub.viewer_join("RD-001").await;
+        assert!(!first, "房间沿用，第二个观看者仍不该触发 video_start");
+        assert!(init.is_none(), "重连后不能补上一轮的关键帧");
+    }
+
+    /// 背包房间的环形缓冲要比设备客户端房间浅：128 片 = 1MB ≈ 16 秒 @500k，
+    /// 而 4MB 那套能在没人察觉的情况下攒住 **65 秒**画面（2026-11-18「越看越慢」的根源）。
+    #[test]
+    fn backpack_rooms_get_a_shallower_viewer_buffer() {
+        assert_eq!(viewer_buffer_frames("bp:dogcam"), 128);
+        assert_eq!(viewer_buffer_frames("RD-001"), 512);
+    }
+
+    /// 造一段带指定时间戳的 FLV：header + 每帧一个视频 tag
+    fn flv_tags(timestamps: &[u32]) -> Vec<u8> {
+        fn tag(ts: u32, body: &[u8]) -> Vec<u8> {
+            let mut out = vec![9_u8];
+            let size = (body.len() as u32).to_be_bytes();
+            out.extend_from_slice(&size[1..]);
+            // FLV 时间戳：低 24 位大端 + 扩展字节（高位）
+            out.extend_from_slice(&[
+                (ts >> 16) as u8,
+                (ts >> 8) as u8,
+                ts as u8,
+                (ts >> 24) as u8,
+            ]);
+            out.extend_from_slice(&[0, 0, 0]); // streamId
+            out.extend_from_slice(body);
+            out.extend_from_slice(&((body.len() as u32 + 11).to_be_bytes()));
+            out
+        }
+        let mut out = b"FLV\x01\x05".to_vec();
+        out.extend_from_slice(&[0, 0, 0, 9]);
+        out.extend_from_slice(&[0, 0, 0, 0]);
+        for ts in timestamps {
+            out.extend(tag(*ts, &[0x27, 0x01, 0x00, 0x00, 0x00]));
+        }
+        out
+    }
+
+    /// 量化器要能跨分片拼 tag（板端每次写 8KB，keyframe 往往比它大），只认视频 tag
+    #[test]
+    fn flv_scanner_reports_video_timestamps_across_chunks() {
+        let stream = flv_tags(&[0, 100, 200, 300]);
+        let mut scanner = FlvScanner::default();
+        let mut seen = Vec::new();
+        for chunk in stream.chunks(7) {
+            scanner.feed(chunk, |ts| seen.push(ts));
+        }
+        assert_eq!(seen, vec![0, 100, 200, 300], "跨分片的 tag 一个都不能丢");
+
+        // 不是 FLV（或者已经错位）时不能 panic，也不能报假时间戳
+        let mut scanner = FlvScanner::default();
+        let mut none = Vec::new();
+        scanner.feed(b"not a flv stream at all", |ts| none.push(ts));
+        assert!(none.is_empty());
     }
 
     #[tokio::test]

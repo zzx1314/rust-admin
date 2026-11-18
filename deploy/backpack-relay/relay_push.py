@@ -40,7 +40,7 @@ WebRTC 的 ~200ms 变成 1~2s，收益是任何网络、任何浏览器都能看
 | `RELAY_GOP` | `40` | 关键帧间隔（帧）：40@20fps = 2s，加入 / 重连等待上限 |
 | `RELAY_ENCODER` | `auto` | `h264_rkmpp` → `h264_v4l2m2m` → `libx264` 自动挑，也可写死 |
 | `RELAY_TRANSCODE` | — | **已废弃、忽略**（历史 unit 里的 `=0` 不会再把档位压回 copy） |
-| `RELAY_SEND_TIMEOUT` | `10` | 单个分片写进 WS 的上限（秒）。超时 = 上行已死（Wi-Fi 掉线时 TCP 半开，send 不报错也不返回），断开重连 |
+| `RELAY_SEND_TIMEOUT` | `5` | 单个分片写进 WS 的上限（秒）。超时 = 上行已死（Wi-Fi 掉线时 TCP 半开，send 不报错也不返回），断开重连。**别调大**：这段时间里 ffmpeg 还在往管道里写，链路恢复后会把攒下的帧以 2~3 倍速倒出去，观看端缓冲吃下十几秒就一直「慢几秒」 |
 | `RELAY_STALL_TIMEOUT` | `15` | 起流后这么久一个字节都没推出去（源卡住 / RTSP 半死）就重启 ffmpeg |
 | `RELAY_ROUTE_POLL` | `5` | 每这么久查一次平台出口网卡（`ip route get`），变了就重连；`0` 关闭 |
 | `RELAY_DEGRADE_TTL` | `300` | 首次降档后至少在省流档里待多久（秒）；到期还要链路真的恢复才回配置档 |
@@ -174,7 +174,13 @@ MAX_BACKOFF = 15
 #
 # 三件事把它兜住：分片发送上限（判死上行）、卡住自愈（源侧卡住不拖累连接）、
 # 出口网卡巡检（Wi-Fi 恢复后旧连接不会自己换回快链路）。
-SEND_TIMEOUT = float(os.environ.get("RELAY_SEND_TIMEOUT", "10"))
+# 单个分片写 WS 的上限（秒）：超时就判上行已死、断开重连。
+#
+# 2026-11-18 纵深排查时从 10s 收到 5s：这十秒里 ffmpeg 没被反压停，它会继续把帧塞进
+# 管道；链路一恢复这些「陈旧帧」就以 2~3 倍速倒出去（平台日志 `6.9s / 2964 KB → 3533
+# kbps`），观看端缓冲吃下十几秒后**不会自己追回来**（画面很流畅，只是比现场晚）。
+# 8KB 一个分片在 500kbps 链路上只要 0.13s，5s 写不出去已经是「上行死了」。
+SEND_TIMEOUT = float(os.environ.get("RELAY_SEND_TIMEOUT", "5"))
 STALL_TIMEOUT = float(os.environ.get("RELAY_STALL_TIMEOUT", "15"))
 ROUTE_POLL = float(os.environ.get("RELAY_ROUTE_POLL", "5"))
 

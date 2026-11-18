@@ -1448,7 +1448,7 @@ mediamtx 的 `dogcam`，浏览器直连 mediamtx（WHEP）或走平台中继（F
 - **补流头**：房间里有当前这一轮的流头（FLV 头 + SPS/PPS + 首个关键帧）就补，不分是不是
   第一个观看者 —— 不补头浏览器只能从中段字节开始解，flv.js 解析错位后黑屏再重连
   （`server/src/video.rs` 的 `flv_init_len`）。流头不会串轮次：板端 relay 起流前发
-  `video_reset`，推流端重连会换掉整个房间。
+  `video_reset`；推送端重连时也是清掉流头 + 通知观看端重连（房间本身沿用，不重建）。
 - **先缩后编（默认 light 档位）**：`dogcam` 是 1080p60，`-c:v copy` 会把 4~8Mbps 原样
   推出去，而平台公网出口只有 ≈2.5Mbps（阿里云 ECS 实测），观看端追不上就被服务端判
   `lagged` 踢掉重连 —— 现场就是「很卡」。所以 relay 默认转成 **720p15 / 1.0Mbps**
@@ -1459,8 +1459,8 @@ mediamtx 的 `dogcam`，浏览器直连 mediamtx（WHEP）或走平台中继（F
   攒成一阵一阵的突发，浏览器 MSE 先饿死再猛灌，flv.js 在 playing / buffering 之间反复横跳。
 - **墙钟时间戳**：现场相机 SDP 标 60fps、实际只投递 ~25 帧/秒，relay 用
   `-use_wallclock_as_timestamps 1` 把 PTS 换成到达时间，避免浏览器 MSE 反复饿死（慢放）。
-- **上行掉线要自愈**（2026-11-18）：板端 relay 的分片发送带超时（默认 10s），超时即判
-  「Wi-Fi 半开」并断开重连；15s 一个字节都没推出去（源卡住）就重启 `ffmpeg`；每 5s 巡检
+- **上行掉线要自愈**（2026-11-18）：板端 relay 的分片发送带超时（默认 5s；原来 10s，
+  那十秒里 ffmpeg 仍在攒帧，恢复后会以 2~3 倍速倒出来），超时即判「Wi-Fi 半开」并断开重连；15s 一个字节都没推出去（源卡住）就重启 `ffmpeg`；每 5s 巡检
   平台出口网卡，出口变了主动重建连接。
 - **画质自己降**（2026-11-19）：relay 每 5s 统计一次 `ws.send` 占用与实测码率，发现「被反压
   + 码率低于目标档位」就就地换 `640x360@12 / 500k`（发 `video_reset` + 重启 ffmpeg，观看端
@@ -1474,6 +1474,12 @@ mediamtx 的 `dogcam`，浏览器直连 mediamtx（WHEP）或走平台中继（F
   平台侧推流端静默判定 30s，`/api/backpack/video/state` 多一个 `lastFrameAgeSecs`。
   旧版 relay 的「Wi-Fi 一断画面永久冻住」就是发送无超时 + `video_start` 幂等吃掉导致的，
   详见 `docs/backpack-video-integration.md` §6.10⑤。
+- **积压要看得见、要自己追回来**（2026-11-18 晚）：平台给每个观看者的环形缓冲在溢出前
+  **完全静默**（旧值 512×8KB = 4MB ≈ 65 秒 @500k），上行抖一次之后板端 ffmpeg 会把攒下的
+  画面以 2~3 倍速倒出来，观众端吃下十几秒就一直「慢几秒」地看下去。现在：`bp:` 房间的
+  缓冲降到 128 片（1MB ≈ 16 秒 @500k）；观看端按 FLV 视频 tag 时间戳量「墙钟流逝 - 媒体
+  流逝」，**超过 2s 就断开重连**（补的流头就是直播边缘）；`video/state` 新增 `viewerLagSecs`。
+  推流端重连也**不再重建房间**（以前会顺手把正在看的人踢掉）。见 §6.10⑫。
 - **鉴权**：浏览器 WS 握手不能带请求头，中继端点用 `?token=<JWT>`，
   `require_auth` 为此放开了查询串令牌（普通接口仍只认 `Authorization`）。
 - **观看端不许闪**（`web/src/components/VideoPlayer.vue`，现在只有中继一种播放方式）：

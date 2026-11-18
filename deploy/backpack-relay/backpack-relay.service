@@ -25,7 +25,7 @@ Environment=RELAY_HEIGHT=720
 # 1s 让现场「切过去马上有画」
 Environment=RELAY_GOP=15
 # 上行保护（Wi-Fi 掉线时自动断开重连，不再把画面冻住；默认值见 relay_push.py）
-# Environment=RELAY_SEND_TIMEOUT=10     # 单个分片写 WS 的上限（秒），超时判上行已死
+# Environment=RELAY_SEND_TIMEOUT=5      # 单个分片写 WS 的上限（秒），超时判上行已死（别调大，见 relay_push.py 注释）
 # Environment=RELAY_STALL_TIMEOUT=15    # 这么久没推出字节就重启 ffmpeg
 # Environment=RELAY_ROUTE_POLL=5        # 出口网卡巡检间隔（变了就重建连接；0 关闭）
 # 解码器：按流各自探测（可用的用硬解，解不出来的那条流回退软解）。`sw` = 全部软解。

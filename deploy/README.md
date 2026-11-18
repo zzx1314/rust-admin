@@ -281,7 +281,7 @@ sqlite3 /opt/hz/rust-admin/robodog/data/robodog.db \
   就被服务端判 `lagged` 踢掉重连，现场看到的就是「很卡」。带宽更紧再压
   `RELAY_BITRATE=800k RELAY_FPS=15`；真要在 6Mbps 以上的出口上看 1080p60 才用
   `RELAY_PROFILE=copy`；
-- **Wi-Fi 掉线不再冻住画面**（2026-11-18）：relay 的分片发送有超时（`RELAY_SEND_TIMEOUT`，默认 10s），
+- **Wi-Fi 掉线不再冻住画面**（2026-11-18）：relay 的分片发送有超时（`RELAY_SEND_TIMEOUT`，默认 5s；
   超时即判上行已死、断开重连；`RELAY_STALL_TIMEOUT`（默认 15s）内一个字节都没推出去就自己重启
   `ffmpeg`；每 5s 巡检平台出口网卡（`ip route get`），Wi-Fi 断开 / 恢复导致出口变更就重建连接；
   拥塞后自动降到 `640x360@12 / 500k`（`RELAY_DEGRADE_*`），**链路比 500k 还小（4G ~250k）时

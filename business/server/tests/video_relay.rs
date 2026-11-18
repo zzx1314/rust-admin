@@ -194,6 +194,27 @@ fn flv_stream() -> (Vec<u8>, Vec<u8>) {
     (init, frame)
 }
 
+/// 造一个带指定时间戳的视频 tag（P 帧）
+///
+/// 用来模拟「媒体时间只走了一点、墙钟却走了很多」：观看端落后直播时就会收到这种字节。
+fn video_tag(ts_ms: u32) -> Vec<u8> {
+    let body = [0x27_u8, 0x01, 0x00, 0x00, 0x00];
+    let mut out = vec![9_u8];
+    let size = (body.len() as u32).to_be_bytes();
+    out.extend_from_slice(&size[1..]);
+    // FLV 时间戳：低 24 位大端 + 扩展字节（高位）
+    out.extend_from_slice(&[
+        (ts_ms >> 16) as u8,
+        (ts_ms >> 8) as u8,
+        ts_ms as u8,
+        (ts_ms >> 24) as u8,
+    ]);
+    out.extend_from_slice(&[0, 0, 0]); // streamId
+    out.extend_from_slice(&body);
+    out.extend_from_slice(&((body.len() as u32 + 11).to_be_bytes()));
+    out
+}
+
 /// 等下一条指定类型的文本消息，超时即失败（避免用例挂死）
 async fn next_msg(
     stream: &mut (impl StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
@@ -689,6 +710,66 @@ async fn video_reset_on_a_cold_start_does_not_kick_the_viewer() {
         .await
         .unwrap();
     assert_eq!(next_binary(&mut viewer, "冷启动后收帧").await, frame);
+}
+
+/// 观看端落后直播超过阈值就断开，让它重连到直播边缘。
+///
+/// 现场背景（2026-11-18）：上行抖了 45 秒，板端 ffmpeg 恢复后以 3 倍速把攒下的画面倒
+/// 出来（日志 `last viewer ... 6.9s / 2964 KB → 3533 kbps`），平台给每个观看者留的
+/// 1MB 缓冲能把这些全吃下去 —— 于是观众看的是十几秒前的画面，而且**不会自己追回来**：
+/// 没有任何日志，UI 上也看不出来（画面很流畅，只是比现场晚）。
+/// 现在按 FLV 视频 tag 的时间戳量「墙钟流逝 - 媒体流逝」，超过 2s 就断开。
+#[tokio::test]
+async fn viewer_falling_behind_live_is_disconnected() {
+    let (state, _db) = test_state().await;
+    let (port, router) = spawn_server(state.clone()).await;
+    let token = login_token(&router).await;
+    let mut publisher = publisher_for(port, &state).await;
+
+    let (mut viewer, _) = connect_async(format!(
+        "ws://127.0.0.1:{port}/api/backpack/video/ws?stream=dogcam&token={token}"
+    ))
+    .await
+    .expect("观看通道连接失败");
+    let _start = next_msg(&mut publisher, "video_start").await;
+
+    let (init, _frame) = flv_stream();
+    publisher.send(Message::Binary(init.clone())).await.unwrap();
+    assert_eq!(next_binary(&mut viewer, "补流头").await, init);
+
+    // 正常节奏：媒体时间跟着墙钟走（100ms 一片）
+    publisher
+        .send(Message::Binary(video_tag(100)))
+        .await
+        .unwrap();
+    assert_eq!(next_binary(&mut viewer, "正常帧").await, video_tag(100));
+
+    // 链路卡了 3 秒，媒体时间只往前走了 100ms → 这个观看者落后直播 ≈2.9s
+    tokio::time::sleep(Duration::from_millis(3000)).await;
+    publisher
+        .send(Message::Binary(video_tag(200)))
+        .await
+        .unwrap();
+
+    let disconnected = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match viewer.next().await {
+                None => return true,
+                Some(Ok(Message::Close(_))) => return true,
+                Some(Err(_)) => return true,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await
+    .expect("落后直播超过阈值时平台应断开这个观看端");
+    assert!(disconnected, "否则观看端会一直「慢几秒」地看下去");
+
+    assert!(
+        state.video_hub.has_publisher(ROOM).await,
+        "只该断开观看端，推流房间要留着（重连后马上有画面）"
+    );
+    assert_eq!(state.video_hub.viewers(ROOM).await, 0);
 }
 
 /// 中继默认档位：`video_start` 要带平台配置（页面「系统设置 → 视频中继」），
