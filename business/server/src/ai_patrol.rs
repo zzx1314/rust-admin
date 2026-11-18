@@ -97,6 +97,9 @@ const SSE_BUF_LIMIT: usize = 64 * 1024;
 /// 客户端代调模式的窗口序号：同一个航点可能被开多次（长停留 / 重试），
 /// 必须让每次的 `windowId` 唯一，客户端才能靠它判断「我是不是已经被顶替」。
 static WINDOW_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+/// 已关窗口的留痕保留时长 / 条数：给迟到的 `ai_evidence` 找「该归到哪条告警」用。
+const RECENT_WINDOW_TTL: Duration = Duration::from_secs(30 * 60);
+const RECENT_WINDOW_KEEP: usize = 32;
 
 /// 到点 AI 识别的进程级状态（Agent 单路推理 → 窗口也只能有一个）。
 static GLOBAL: LazyLock<AiPatrol> = LazyLock::new(AiPatrol::new);
@@ -136,6 +139,19 @@ impl Window {
     fn watched(&self) -> Duration {
         self.started.elapsed()
     }
+}
+
+/// 已经关掉的窗口留下的薄薄一层痕迹：`windowId → 本窗口的检出/告警`。
+///
+/// 为什么需要它：平台收到「已离开航点」就摘窗口并下发 `ai_stop`，客户端**正是**
+/// 收到这条 `ai_stop` 才开始收尾（停识别 → `_plan_flush` 落盘 → 扫盘 → `ai_evidence`）。
+/// 所以证据图永远比窗口活得久，只认 `active` 窗口会把每张晚到的图都丢掉
+/// （2026-11-18 21:34 pt1「Trash over flow」卡片发了、图没发）。
+struct ClosedWindow {
+    window_id: String,
+    device_code: String,
+    closed_at: Instant,
+    hits: Vec<Hit>,
 }
 
 /// 航点 AI 到底谁去调 Agent。
@@ -187,12 +203,15 @@ struct WindowSink {
 
 pub struct AiPatrol {
     active: Mutex<Option<Window>>,
+    /// 刚关掉的窗口（最近的几条）：迟到的 `ai_evidence` 靠它找告警
+    recent: Mutex<Vec<ClosedWindow>>,
 }
 
 impl AiPatrol {
     fn new() -> Self {
         Self {
             active: Mutex::new(None),
+            recent: Mutex::new(Vec::new()),
         }
     }
 
@@ -416,6 +435,7 @@ impl AiPatrol {
         let hit_seen = !window.hits.lock().await.is_empty();
         let enough = watched_enough(&window.cfg, window.watched());
         settle_no_hit(state, &window.cfg, hit_seen, &window.alerted, enough).await;
+        self.remember(window).await;
         if source_for(&state.config) != PointAiSource::Client {
             return;
         }
@@ -426,6 +446,57 @@ impl AiPatrol {
             json!({ "reason": reason }),
         )
         .await;
+    }
+
+    /// 把一个刚关掉的窗口记到 `recent` 里（只留 30 分钟 / 最近 32 个）。
+    ///
+    /// 迟到的证据图（`ai_evidence`）要靠它找到「本窗口哪条告警还没图」。
+    async fn remember(&self, window: Window) {
+        let hits = window.hits.lock().await.clone();
+        let mut recent = self.recent.lock().await;
+        recent.retain(|item| item.closed_at.elapsed() < RECENT_WINDOW_TTL);
+        recent.push(ClosedWindow {
+            window_id: window.window_id,
+            device_code: window.device_code,
+            closed_at: Instant::now(),
+            hits,
+        });
+        let overflow = recent.len().saturating_sub(RECENT_WINDOW_KEEP);
+        if overflow > 0 {
+            recent.drain(..overflow);
+        }
+    }
+
+    /// 给一张迟到的证据图认领“该归到哪条告警”：返回告警码，并把这条检出标成「已带图」。
+    ///
+    /// 先看还开着的窗口，再看刚关掉的（`recent`）——后者才是常态，因为平台
+    /// 「已离开航点」关窗在先，客户端收尾扫盘在后（见 [`ClosedWindow`]）。
+    async fn claim_alert_for_evidence(
+        &self,
+        device_code: &str,
+        window_id: &str,
+    ) -> Option<String> {
+        {
+            let guard = self.active.lock().await;
+            if let Some(window) = guard.as_ref()
+                && window.device_code == device_code
+                && (window.window_id.is_empty() || window.window_id == window_id)
+            {
+                let mut hits = window.hits.lock().await;
+                let hit = hits.iter_mut().rev().find(|hit| !hit.image)?;
+                hit.image = true;
+                return hit.alert_code.clone();
+            }
+        }
+        let mut recent = self.recent.lock().await;
+        let window = recent.iter_mut().rev().find(|item| {
+            item.device_code == device_code
+                && (window_id.is_empty() || item.window_id == window_id)
+                && item.closed_at.elapsed() < RECENT_WINDOW_TTL
+        })?;
+        let hit = window.hits.iter_mut().rev().find(|hit| !hit.image)?;
+        hit.image = true;
+        hit.alert_code.clone()
     }
 
     /// 客户端到点后的开窗请求（`ai_point`）。
@@ -722,6 +793,8 @@ impl AiPatrol {
         if let Err(error) = insert_task_event(&state.db, &window.cfg, &at, &content).await {
             warn!("AI 识别：写任务事件失败: {error}");
         }
+        // 客户端已经收尾了，但图可能还在后面（`ai_evidence` 跟着 `ai_end` 到）：留下窗口痕迹
+        self.remember(window).await;
     }
 
     /// 客户端转发的「数量不一致」（`ai_alert`）：告警中心 + 任务时间线 + 企业微信。
@@ -795,8 +868,9 @@ impl AiPatrol {
     /// 采样一直到窗口收尾（客户端 POST `/api/detect/stop` → `_plan_flush`）才结束，
     /// 那时客户端已经用 8s 兜底把卡片发出去了。停识别后图才落盘，所以单独补报。
     ///
-    /// 归到哪条告警：本窗口里**还没带过图**的那条（`hits.image == false`），
-    /// 已带过就不再补（防重复）；窗口已关 / 不是本设备的直接丢弃。
+    /// 归到哪条告警：先找还开着的窗口，再找刚关掉的（`recent`）——平台「已离开航点」
+    /// 关窗在前、客户端扫盘上报在后，所以**后者才是常态**；两边都按「本窗口里还没
+    /// 带过图的那条检出」定位，已带过就不重复发。
     pub async fn on_client_evidence(
         &self,
         state: &AppState,
@@ -814,40 +888,25 @@ impl AiPatrol {
         }) else {
             return;
         };
-        let hits = {
-            let guard = self.active.lock().await;
-            let Some(window) = guard.as_ref() else {
-                // 平台已关窗（任务终态 / 离开航点）：卡片也早发了，图就不要了
-                debug!("航点 AI 识别：没有活动窗口，丢弃补发的证据图");
-                return;
-            };
-            if window.device_code != device_code
-                || (!window.window_id.is_empty() && window.window_id != payload.window_id)
-            {
-                debug!(
-                    "航点 AI 识别：窗口 {} 已失效，丢弃补发的证据图",
-                    payload.window_id
-                );
-                return;
-            }
-            window.hits.clone()
-        };
-        let mut hits = hits.lock().await;
-        let Some(hit) = hits.iter_mut().rev().find(|hit| !hit.image) else {
-            debug!("航点 AI 识别：本窗口的检出都带过图，忽略重复补发");
+        let Some(alert_code) = self
+            .claim_alert_for_evidence(device_code, &payload.window_id)
+            .await
+        else {
+            // 窗口既不在 `active` 也不在 `recent`，或者本窗口的检出都带过图：
+            // 前者是真丢图（现场只看得到「没图」），用 info 留一条线索
+            info!(
+                "航点 AI 识别：窗口 {} 的检出都带过图（或窗口已过期），忽略补发的证据图",
+                payload.window_id
+            );
             return;
         };
-        let Some(alert_code) = hit.alert_code.clone() else {
-            debug!("航点 AI 识别：检出没有关联告警（告警落库失败），无处补图");
-            return;
-        };
-        hit.image = true;
         info!(
-            "航点 AI 识别：补发命中帧证据图（{} 字节，告警 {alert_code}，证据：{}）",
+            "航点 AI 识别：补发命中帧证据图（{} 字节，告警 {alert_code}，任务 {} 航点 {:?}，证据：{}）",
             image.bytes,
+            payload.task_code,
+            payload.point_index,
             payload.evidence.trim()
         );
-        drop(hits);
         crate::notify::alert_evidence(state, &alert_code, image).await;
     }
 }
@@ -866,19 +925,17 @@ fn spawn_client_window_timeout(
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(secs.saturating_add(10))).await;
         let ai = global();
-        let (cfg, hits) = {
+        let taken = {
             let mut guard = ai.active.lock().await;
-            let Some(window) = guard.as_ref() else {
-                return;
-            };
-            if !Arc::ptr_eq(&window.stop, &stop) {
-                return;
+            match guard.as_ref() {
+                Some(window) if Arc::ptr_eq(&window.stop, &stop) => guard.take(),
+                _ => None,
             }
-            let hits = window.hits.lock().await.len();
-            let cfg = window.cfg.clone();
-            guard.take();
-            (cfg, hits)
         };
+        let Some(window) = taken else {
+            return;
+        };
+        let hits = window.hits.lock().await.len();
         warn!(
             "航点 AI 识别：客户端窗口 {window_id} 超过 {}s 未回报结束，服务端清掉窗口态",
             secs.saturating_add(10)
@@ -886,6 +943,8 @@ fn spawn_client_window_timeout(
         // 这里**不**记「没找到」：客户端的结论（有没有检出 / 停够了没有）全在它手里，
         // 它一句话都没回来说明链路己经断了，推“未检出”只会是误报。
         let content = format!("AI 识别窗口超时未收到客户端结束回报（已上报 {hits} 类目标）");
+        let cfg = window.cfg.clone();
+        ai.remember(window).await;
         if let Err(error) = insert_task_event(&state.db, &cfg, &now(), &content).await {
             warn!("AI 识别：写任务事件失败: {error}");
         }

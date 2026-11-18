@@ -364,6 +364,11 @@ B. client（正式环境：平台在公网、Agent 只在内网，服务端连�
 命中帧稀疏时（板上整个窗口只命中 1 帧，板端「连采 3 帧」的采样跑不完）`plan_hit` 要到**窗口收尾**
 才发，图往往比卡片晚几十秒：8s 兜底先发的卡片照旧，停识别扫到图后客户端单独报一条 `ai_evidence`，
 服务端 `notify::alert_evidence` 只补一张 `msgtype=image`（不重发卡片、不重复落告警）。
+这条 `ai_evidence` 几乎**总是**落在窗口关闭之后：平台收到「已离开航点」先摘窗口 + 下发 `ai_stop`，
+客户端正是收到它才开始停识别 / 扫盘。所以服务端要靠 `AiPatrol.recent`（已关窗口 30 分钟留痕，
+`windowId → 本窗口告警`）认领得主，只查 `active` 窗口会丢掉每一张晚到的图
+（2026-11-18 21:34 pt1「Trash over flow」只在群里发了卡片）。回归：
+`ai_client_mode::late_evidence_after_window_closed_is_still_pushed`。
 服务端 `record_hit` 校验后发 `msgtype=image`，路径同时写进正文「（证据：…）」。
 `jobs_dir` 优先级：`[ai] jobs_dir` / `ROBODOG_AI_JOBS_DIR`（客户端配置）> 从板端
 `plan_hit.evidence` 反推出的真实根 > 内置候选（`/root/backpack_dashboard/backend/detect_jobs`、

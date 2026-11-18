@@ -1372,3 +1372,88 @@ async fn late_evidence_is_pushed_as_an_image_only_message() {
 
     ai_patrol::global().stop("用例结束").await;
 }
+
+/// 现场常态：平台收到「已离开航点」先摘窗口并下发 `ai_stop`，客户端**才**开始收尾
+/// （停识别 → 板端 `_plan_flush` 落盘 → 扫盘 → `ai_evidence`）。
+///
+/// 所以证据图永远落在「窗口已关」之后，只认 `active` 窗口会把每张晚到的图都丢掉
+/// ——2026-11-18 21:34 办公室巡检 pt1「Trash over flow」卡片发了、图没发。
+#[tokio::test]
+async fn late_evidence_after_window_closed_is_still_pushed() {
+    let _serial = TEST_LOCK.lock().await;
+    ai_patrol::global().stop("测试初始化").await;
+    let (state, _temp, mut rx) = test_state_with_wecom("client", true).await;
+    let rx = rx.as_mut().expect("开了企微就该有入队接收端");
+    let task_code =
+        seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("exist"), None).await;
+    let port = spawn_server(state.clone()).await;
+    let (mut ws, _device) = register_device(port).await;
+
+    ws.send(Message::Text(ai_point(&task_code, false).to_string()))
+        .await
+        .expect("发送 ai_point 失败");
+    let start = next_msg(&mut ws, "ai_start").await;
+    let window_id = start["payload"]["windowId"]
+        .as_str()
+        .expect("ai_start 必须带 windowId")
+        .to_string();
+
+    // 1) 检出没带图（板端还在连采帧画框）→ 先发卡片
+    ws.send(Message::Text(detect(&window_id, "extinguisher", 0.42).to_string()))
+        .await
+        .expect("发送检出失败");
+    let card = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("等告警入队超时")
+        .expect("推送通道提前关闭");
+    assert!(card.image.is_none(), "这条卡片本来就没有图: {card:?}");
+
+    // 2) 狗走了：平台摘窗口 + 下发 ai_stop（客户端收到后才开始扫盘）
+    ws.send(Message::Text(
+        json!({
+            "msgType": "task_progress",
+            "ts": "2026-11-16 10:01:00",
+            "payload": {
+                "taskCode": task_code,
+                "status": "执行中",
+                "progress": 50,
+                "pointIndex": 0,
+                "stage": "patrol.navigating",
+                "totalPoints": 1
+            }
+        })
+        .to_string(),
+    ))
+    .await
+    .expect("发送导航阶段失败");
+    next_msg(&mut ws, "ai_stop").await;
+    assert_eq!(
+        ai_patrol::global().status().await["active"],
+        false,
+        "窗口已经关了：这正是补图容易丢的那一刻"
+    );
+
+    // 3) 图才落盘：`ai_evidence` 晚到，仍然要补出去
+    ws.send(Message::Text(late_evidence(&window_id).to_string()))
+        .await
+        .expect("发送 ai_evidence 失败");
+    let follow = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Some(notice) if notice.image.is_some() => return notice,
+                Some(_) => continue,
+                None => panic!("推送通道提前关闭"),
+            }
+        }
+    })
+    .await
+    .expect("窗口已关也要能补图，等入队超时");
+    assert!(follow.image_only, "补发的是「只发图」消息，不能重发卡片");
+    assert_eq!(
+        alert_count(&state).await,
+        1,
+        "补图不能重复落告警（群里会以为是第二条）"
+    );
+
+    ai_patrol::global().stop("用例结束").await;
+}

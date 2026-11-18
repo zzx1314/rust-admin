@@ -172,11 +172,15 @@ ffmpeg，观看端不重连）；到期先确认链路真恢复才回配置档�
 跑不完）`plan_hit` 要到**窗口收尾** `_plan_flush` 才发，图往往比卡片晚几十秒：客户端
 `finish()` 会**先停识别再扫盘**，扫到图就单独报一条 `ai_evidence`，服务端
 `notify::alert_evidence` 只补一张 `msgtype=image`（`Notice.image_only`，不重发卡片、
-不重复落告警）。服务端 `notify::evidence_image`
+不重复落告警）。⚠️ 这条 `ai_evidence` 几乎**总是**在窗口关闭之后才到（平台收到「已离开
+航点」就先摘窗口并下发 `ai_stop`，客户端正是收到它才开始扫盘），所以 `on_client_evidence`
+不能只查 `active` 窗口——关掉的窗口要在 `AiPatrol.recent` 里留 30 分钟痕迹（2026-11-18 21:34
+pt1「Trash over flow」卡片发了、图没发就是踩在这里）。服务端 `notify::evidence_image`
 校验（base64 / ≤2MB / JPG-PNG / md5 算**base64 之前**的字节）再发。⛔ 不要改成往 markdown
 里嵌 `![]()`（群机器人不支持），也不要存多 MB 的 base64 到 `notifications.payload`。
 开关 `settings.wecom_alert_image`（默认开），回归用例 `tests/alert_image.rs`、
-`tests/ai_client_mode.rs`（检出带图整条 WS 链路 / `ai_evidence` 只补图）、
+`tests/ai_client_mode.rs`（检出带图整条 WS 链路 / `ai_evidence` 只补图 /
+`late_evidence_after_window_closed_is_still_pushed` 窗口关了才补图）、
 `client ai_patrol::agent_flow::evidence_landing_seconds_late_still_rides_with_the_alert`、
 `client ai_patrol::agent_flow::card_sent_without_image_is_followed_by_ai_evidence`。
 
