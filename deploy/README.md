@@ -386,6 +386,11 @@ Chrome 的 **Local Network Access** 禁止**公网页面**访问**内网地址**
 两个入口共用同一份 `business/web/dist`；现场入口通过 `/runtime-config.js`
 （运行时注入，不用重新构建）把 API 指回云端。
 
+> ⚠️ **每次发布前端都要同步现场入口**：`push.sh` 只更新云端 `:3100` 的 `web/`，
+> 现场入口 `/opt/site-console/web` 是**另一份拷贝**。忘了同步就会出现「云端已修、
+> 现场入口还是旧界面」（2026-11-18：设备管理仍显示『未配置视频地址，请在设备档案中填写』）。
+> `serve.py` 在**启动时**读一次 `index.html`，所以替换后必须 `systemctl restart site-console`。
+
 ### 部署步骤（幂等，可重复执行）
 
 ```bash
@@ -401,12 +406,14 @@ scp /root/261113/backpack_dashboard/backend/agent.py root@192.168.41.246:/root/2
 scp deploy/backpack-agent.service root@192.168.41.246:/etc/systemd/system/
 ssh root@192.168.41.246 'systemctl daemon-reload && systemctl enable --now backpack-agent'
 
-# 4) 板端：现场入口静态服务
-ssh root@192.168.41.246 'mkdir -p /opt/site-console/web'
+# 4) 板端：现场入口静态服务（每次前端发布后重跑这一段）
+ssh root@192.168.41.246 'test -f /opt/site-console/web/index.html &&
+  mv /opt/site-console/web /opt/site-console/web.bak-$(date +%Y%m%d-%H%M%S) || true'
 scp deploy/site-console/serve.py root@192.168.41.246:/opt/site-console/serve.py
 scp -r business/web/dist/. root@192.168.41.246:/opt/site-console/web/
 scp deploy/site-console/site-console.service root@192.168.41.246:/etc/systemd/system/
-ssh root@192.168.41.246 'systemctl daemon-reload && systemctl enable --now site-console'
+ssh root@192.168.41.246 'chown -R developer:developer /opt/site-console/web;
+  systemctl daemon-reload && systemctl enable --now site-console && systemctl restart site-console'
 ```
 
 ### 校验

@@ -19,6 +19,19 @@ Chrome 的 **Local Network Access**（PNA 的继任者）禁止「公网页面�
 - 云端 `http://39.107.55.13:3100` —— 常规后台（设备/任务/地图/告警）；
 - 现场 `http://<内网机>:8080`    —— 额外能看实时视频与 AI。
 
+## 更新前端（每次 `business/web/dist` 变了都要做）
+
+```bash
+# 板端：先备份旧目录，再同步新 dist，最后重启（本进程启动时读一次 index.html）
+ssh root@<内网机> 'mv /opt/site-console/web /opt/site-console/web.bak-$(date +%Y%m%d-%H%M%S)'
+scp -r business/web/dist/. root@<内网机>:/opt/site-console/web/
+ssh root@<内网机> 'systemctl restart site-console'
+```
+
+忘同步的表现：云端已更新，现场入口还是旧界面（2026-11-18 出现过「设备管理仍提示
+未配置视频地址」）。`index.html` 由本服务按 `no-store` 返回、`/assets/*` 是内容哈希
+长缓存，所以只要目录换对了，普通刷新即可，不用清浏览器缓存。
+
 ## 用法
 
 ```bash

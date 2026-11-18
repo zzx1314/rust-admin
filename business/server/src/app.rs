@@ -10,11 +10,13 @@ use crate::handlers::{
 };
 use crate::notify::Notifier;
 use crate::video::{self, VideoHub};
-use axum::extract::{DefaultBodyLimit, State};
-use axum::http::Method;
-use axum::middleware::from_fn_with_state;
+use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::http::{Method, StatusCode, header};
+use axum::middleware::{Next, from_fn, from_fn_with_state};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use axum::http::HeaderValue;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use std::sync::Arc;
@@ -318,5 +320,29 @@ pub fn build_router(state: AppState) -> Router {
         );
     }
 
-    router
+    router.layer(from_fn(static_cache_headers))
+}
+
+/// 静态资源缓存策略：`index.html` 必须每次回源，`/assets/*` 可以长缓存。
+///
+/// 不给入口加 `no-cache` 时，浏览器会按 `Last-Modified` 做启发式缓存：发布新版本后
+/// 用户刷新仍然进旧 bundle —— 2026-11-18 现场就出现过「设备管理还显示『未配置视频地址，
+/// 请在设备档案中填写』」，其实服务端早已换成新前端，只有强制刷新才恢复。
+/// 带内容哈希的 `/assets/*` 反过来要长缓存 + immutable，避免每次开页面重下几 MB。
+async fn static_cache_headers(req: Request, next: Next) -> Response {
+    let path = req.uri().path().to_string();
+    let mut response = next.run(req).await;
+    // API / WebSocket 升级（101）不参与静态缓存
+    if path.starts_with("/api") || response.status() == StatusCode::SWITCHING_PROTOCOLS {
+        return response;
+    }
+    let value = if path.starts_with("/assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static(value));
+    response
 }

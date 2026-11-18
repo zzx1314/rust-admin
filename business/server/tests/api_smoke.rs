@@ -533,6 +533,46 @@ async fn internal_sync_endpoint_requires_service_token() {
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
+/// 入口 HTML 必须每次回源；带哈希的 `/assets/*` 才可以长缓存。
+///
+/// 2026-11-18 现场：发布新版本后浏览器仍按 `Last-Modified` 吃旧 bundle，
+/// 「设备管理还显示未配置视频地址」，必须强制刷新才恢复。
+#[tokio::test]
+async fn static_index_is_not_cached_and_assets_are_immutable() {
+    let (state, _db) = test_state().await;
+    let web = state.config.web_dist.clone();
+    std::fs::create_dir_all(web.join("assets")).unwrap();
+    std::fs::write(web.join("index.html"), "<!doctype html><div id=\"app\"></div>").unwrap();
+    std::fs::write(web.join("assets/app-abc123.js"), "console.log(1)").unwrap();
+    let app = build_router(state);
+
+    let index = app
+        .clone()
+        .oneshot(Request::get("/devices").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(index.status(), StatusCode::OK);
+    assert_eq!(
+        index.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-cache",
+        "SPA 入口不许被浏览器启发式缓存"
+    );
+
+    let asset = app
+        .oneshot(
+            Request::get("/assets/app-abc123.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(asset.status(), StatusCode::OK);
+    assert_eq!(
+        asset.headers().get(header::CACHE_CONTROL).unwrap(),
+        "public, max-age=31536000, immutable"
+    );
+}
+
 #[tokio::test]
 async fn parks_and_dashboard_work_after_login() {
     let (state, _db) = test_state().await;
