@@ -312,6 +312,11 @@ async fn seed_ai_route(
 
 /// 客户端上报的「到点开窗」请求（含板端模型目录，服务端据此解析场景）
 fn ai_point(task_code: &str, agent_running: bool) -> Value {
+    ai_point_with_dwell(task_code, 100, agent_running)
+}
+
+/// 同上，但指定航点停留时长：窗口时长 = `dwell + 8`，「看够了没有」的判据 = `dwell.max(4)`。
+fn ai_point_with_dwell(task_code: &str, dwell: i64, agent_running: bool) -> Value {
     json!({
         "msgType": "ai_point",
         "ts": "2026-11-16 10:00:01",
@@ -319,7 +324,7 @@ fn ai_point(task_code: &str, agent_running: bool) -> Value {
             "taskCode": task_code,
             "pointIndex": 0,
             "pointName": "新航点 1",
-            "dwell": 100,
+            "dwell": dwell,
             "hint": "灭火器 · 灭火器",
             "scene": "firextinguisher",
             "labels": ["extinguisher"],
@@ -1047,6 +1052,121 @@ async fn interrupted_window_does_not_report_missing() {
 
     let contents = alert_contents(&state).await;
     assert!(contents.is_empty(), "被打断的窗口不记账: {contents:?}");
+}
+
+/// 现场形态：狗停满 `dwell` 就走，平台先收到「已离开航点」把窗口摘掉，
+/// 客户端随后的 `ai_end` 已经找不到窗口 —— 「没找到也告警」不能因此丢掉。
+///
+/// 2026-11-18 办公室巡检 pt1「垃圾桶溢出」就是这么漏的：航点停 65 s、窗口 68 s，
+/// 窗口永远差几秒到期，「AI 识别未检出」一次都没报出来。
+#[tokio::test]
+async fn leaving_the_point_after_full_dwell_reports_missing() {
+    let _serial = TEST_LOCK.lock().await;
+    ai_patrol::global().stop("测试初始化").await;
+    let (state, _temp) = test_state("client").await;
+    let task_code =
+        seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("exist"), None)
+            .await;
+    enable_alert_when_missing(&state).await;
+    let port = spawn_server(state.clone()).await;
+    let (mut ws, _device) = register_device(port).await;
+
+    // 判据 = dwell.max(4) = 4 s：等到狗「停满」再让它走
+    ws.send(Message::Text(
+        ai_point_with_dwell(&task_code, 4, false).to_string(),
+    ))
+    .await
+    .expect("发送 ai_point 失败");
+    let start = next_msg(&mut ws, "ai_start").await;
+    assert!(
+        start["payload"]["windowId"].as_str().is_some(),
+        "ai_start 必须带 windowId: {start}"
+    );
+    assert_eq!(start["payload"]["secs"], 12, "窗口还是 dwell + 8: {start}");
+
+    tokio::time::sleep(Duration::from_millis(4300)).await;
+    ws.send(Message::Text(
+        json!({
+            "msgType": "task_progress",
+            "ts": "2026-11-16 10:01:00",
+            "payload": {
+                "taskCode": task_code,
+                "status": "执行中",
+                "progress": 50,
+                "pointIndex": 0,
+                "stage": "patrol.navigating",
+                "totalPoints": 1
+            }
+        })
+        .to_string(),
+    ))
+    .await
+    .expect("发送导航阶段失败");
+
+    // 窗口被平台摘掉，但「看够了」要照常记账
+    let stop = next_msg(&mut ws, "ai_stop").await;
+    assert!(
+        stop["payload"]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("离开"),
+        "ai_stop 要说明是离开航点: {stop}"
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let contents = alert_contents(&state).await;
+    assert_eq!(contents.len(), 1, "停满了没找到，也要告警: {contents:?}");
+    assert!(
+        contents[0].contains("AI 识别未检出") && contents[0].contains("extinguisher"),
+        "告警要写清找的是什么: {}",
+        contents[0]
+    );
+}
+
+/// 没停够 `dwell` 就走了（任务被中止 / 狗提前离开）：狗还没看够，不能报「未检出」。
+#[tokio::test]
+async fn leaving_the_point_early_stays_quiet() {
+    let _serial = TEST_LOCK.lock().await;
+    ai_patrol::global().stop("测试初始化").await;
+    let (state, _temp) = test_state("client").await;
+    let task_code =
+        seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("exist"), None)
+            .await;
+    enable_alert_when_missing(&state).await;
+    let port = spawn_server(state.clone()).await;
+    let (mut ws, _device) = register_device(port).await;
+
+    // dwell 20 s，却只看几百毫秒就走了
+    ws.send(Message::Text(
+        ai_point_with_dwell(&task_code, 20, false).to_string(),
+    ))
+    .await
+    .expect("发送 ai_point 失败");
+    next_msg(&mut ws, "ai_start").await;
+
+    // 提前离开：dwell 20 s，实际只有几百毫秒
+    ws.send(Message::Text(
+        json!({
+            "msgType": "task_progress",
+            "ts": "2026-11-16 10:01:00",
+            "payload": {
+                "taskCode": task_code,
+                "status": "执行中",
+                "progress": 50,
+                "pointIndex": 0,
+                "stage": "patrol.navigating",
+                "totalPoints": 1
+            }
+        })
+        .to_string(),
+    ))
+    .await
+    .expect("发送导航阶段失败");
+    next_msg(&mut ws, "ai_stop").await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let contents = alert_contents(&state).await;
+    assert!(contents.is_empty(), "没看够就不算「未检出」: {contents:?}");
 }
 
 /// 同一航点同一类别的 AI 问题，跨轮巡检只挂**一张**在办工单。

@@ -583,6 +583,8 @@ impl AiPatrol {
         };
         // `expired = true` 只代表「窗口正常到期」：数量任务这时一个都没找到，
         // 服务端才把它算成数量不一致（0 ≠ N）；被任务结束/新航点打断不算账。
+        // （平台另外还会把「停满 dwell 后离开」当看满——窗口是 dwell+8，狗停到 dwell
+        // 就走，只认到期会让「没找到也告警」永远报不出来，见 server/src/ai_patrol.rs。）
         self.finish(
             &out_tx,
             &start,

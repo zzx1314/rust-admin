@@ -104,10 +104,12 @@ ffmpeg，观看端不重连）；到期先确认链路真恢复才回配置档�
 （客户端与背包 Agent 同在 `.246`，走 `127.0.0.1:8000`；消息为 `ai_point` / `ai_start` /
 `ai_detect` / `ai_alert`（数量核对不一致）/ `ai_end` / `ai_stop`）。航点动作的 `checkType`
 分两类任务：`exist` 检测是否存在 / `count` 检测数量是否正确（后者带 `expectCount`，
-不一致含「一个都没找到」都告警，且只认窗口正常到期 `ai_end.expired`）。没有这个字段的历史数据按「有没有
+不一致含「一个都没找到」都告警，且要「看满了」——客户端 `ai_end.expired`，或狗在这个点
+停满 `dwell` 之后离开（平台先收到「已离开航点」关窗也算，窗口时长是 `dwell+8`，只认 `expired`
+会让这类告警**永远报不出来**，2026-11-18 垃圾桶溢出漏报就是这么来的）。没有这个字段的历史数据按「有没有
 `expectCount`」推断。`exist` 默认**只在检出时告警**（适合「不该出现」的目标）；
 要「应该有却没有」，用 `count` + `expectCount`，或给 `exist` 勾上 `alertWhenMissing`
-（窗口正常到期且零检出 → 「AI 识别未检出」告警）。正式环境的云端
+（看满停留时长且零检出 → 「AI 识别未检出」告警）。正式环境的云端
 平台连不到内网 Agent，`auto` 走的就是客户端这条路；改这块先读
 `business/docs/official-app-parity.md` §5.6。
 **「现在站在哪个航点」只认 `task_progress.waypointIndex`（0 基下标），

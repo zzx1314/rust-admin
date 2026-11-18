@@ -33,8 +33,13 @@
 //!
 //! 不一致时板端上报 `ai_alert`（客户端代调）或在 SSE 里带 `count_alert`（服务端直连），
 //! 两条路都落到同一个 `record_count_alert`：告警中心 + 任务时间线 + 企业微信。
-//! 「未命中」只在窗口**正常到期**时才算数量不一致（被任务结束/新航点打断不记账），
-//! 依据是客户端 `ai_end` 里的 `expired`。
+//! 「未命中」的判据是**狗在这个点上看够了没有**，而不是「窗口定时器有没有走到头」：
+//! 客户端 `ai_end` 的 `expired=true`，或者窗口从开出来到现在已经 ≥ `dwell` 秒（狗按计划
+//! 停满整个停留时长后离开，平台随之「已离开航点」关窗），都算正常结束。
+//! 只看 `expired` 是不行的：窗口时长是 `dwell + 8`，而狗停到 `dwell` 就走了，
+//! 于是窗口总是先被「已离开航点」摘掉、`expired` 永远是 false——「没找到也告警」
+//! 会**永远报不出来**（2026-11-18 办公室巡检「垃圾桶溢出」漏报，pt1 停 65 s、窗口 68 s）。
+//! 被任务结束 / 新航点顶替且**没停满** `dwell` 时才不记账（狗还没看够）。
 //!
 //! 窗口时长 = `dwell.max(4) + 8` 秒，下限 10 s（Agent 加载模型要 1~3 s，太短会
 //! 「还没开始识别狗就走了」），上限 `[backpack] ai_window_max_secs`（默认 300 s，与
@@ -76,7 +81,7 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 use tracing::{debug, info, warn};
 
@@ -114,6 +119,8 @@ struct Window {
     threshold: f64,
     cam: String,
     started_at: String,
+    /// 窗口开出来的时刻：判「狗在这个点上看够了没有」用（见 [`settle_no_hit`]）
+    started: Instant,
     /// 停止信号：`notify_one` 会留 permit，窗口任务即使在 `chunk().await` 里也能立刻醒
     stop: Arc<Notify>,
     /// 本窗口已上报的类别（同一类别只报一次，避免 3 fps 刷屏）
@@ -122,6 +129,13 @@ struct Window {
     alerted: Arc<AtomicBool>,
     /// 告警 / 任务事件需要的上下文（任务名、园区、航点名等）
     cfg: WindowConfig,
+}
+
+impl Window {
+    /// 这个窗口从开出来到现在过了多久（判「看够了没有」用，见 [`watched_enough`]）
+    fn watched(&self) -> Duration {
+        self.started.elapsed()
+    }
 }
 
 /// 航点 AI 到底谁去调 Agent。
@@ -182,7 +196,10 @@ impl AiPatrol {
         }
     }
 
-    /// 停掉当前窗口（任务终态、设备断线、新窗口抢占时调用）。
+    /// 停掉当前窗口（清状态、通知窗口任务退出），**不**做「没找到」的记账。
+    ///
+    /// 任务终态 / 已离开航点这类正常收口走 [`Self::close`]（它会在狗看够了时记账）；
+    /// 这里是给测试复位、以及「结论不可信」的场合用的（设备断线时谁也不知道板端看到了什么）。
     pub async fn stop(&self, reason: &str) {
         let mut guard = self.active.lock().await;
         if let Some(window) = guard.take() {
@@ -337,6 +354,7 @@ impl AiPatrol {
             check_type: action.check_type.clone(),
             alert_when_missing: action.alert_when_missing,
             secs: window_secs,
+            dwell: point.dwell.max(0) as u64,
         };
 
         // 抢占：Agent 单路，先关旧窗口再开新窗口
@@ -356,6 +374,7 @@ impl AiPatrol {
                 threshold,
                 cam: String::new(),
                 started_at: now(),
+                started: Instant::now(),
                 stop: stop.clone(),
                 hits: hits.clone(),
                 alerted: alerted.clone(),
@@ -373,19 +392,30 @@ impl AiPatrol {
     ///
     /// 服务端直连模式由窗口任务自己收尾（它知道我停的是不是别人的识别）；
     /// 客户端模式必须显式下发 `ai_stop`，否则板端 Agent 会一直跑下去占着 NPU。
+    ///
+    /// 两种模式都要在这里补一次「没找到」的记账：狗停满 `dwell` 之后离开时，
+    /// 平台会先收到「已离开航点」而把窗口摘掉，客户端随后的 `ai_end` 已经找不到窗口，
+    /// 只认「到期 / `expired=true`」的地方根本收不到结论（见 [`settle_no_hit`]）。
     async fn close(&self, state: &AppState, device_code: &str, reason: &str) {
         // 窗口是进程级单例：别的设备的终态/进度不应该把当前设备的窗口关掉
-        let had_window = {
-            let guard = self.active.lock().await;
-            guard
-                .as_ref()
-                .map(|window| window.device_code == device_code)
-                .unwrap_or(false)
+        let taken = {
+            let mut guard = self.active.lock().await;
+            match guard.as_ref() {
+                Some(window) if window.device_code == device_code => guard.take(),
+                _ => None,
+            }
         };
-        if !had_window {
+        let Some(window) = taken else {
             return;
-        }
-        self.stop(reason).await;
+        };
+        info!(
+            "航点 AI 识别窗口关闭（{reason}）：任务 {} 航点 {}「{}」",
+            window.task_code, window.point_index, window.point_name
+        );
+        window.stop.notify_one();
+        let hit_seen = !window.hits.lock().await.is_empty();
+        let enough = watched_enough(&window.cfg, window.watched());
+        settle_no_hit(state, &window.cfg, hit_seen, &window.alerted, enough).await;
         if source_for(&state.config) != PointAiSource::Client {
             return;
         }
@@ -501,6 +531,7 @@ impl AiPatrol {
             check_type,
             alert_when_missing,
             secs,
+            dwell: payload.dwell.unwrap_or(0).max(0) as u64,
         };
         let stop = Arc::new(Notify::new());
         let hits = Arc::new(Mutex::new(Vec::new()));
@@ -521,6 +552,7 @@ impl AiPatrol {
                 threshold,
                 cam: cam.clone(),
                 started_at: now(),
+                started: Instant::now(),
                 stop: stop.clone(),
                 hits,
                 alerted,
@@ -663,26 +695,17 @@ impl AiPatrol {
         };
         let hits = window.hits.lock().await.len();
         let at = now();
-        // 数量任务：窗口正常到期却一个目标都没找到 → 数量不一致（0 ≠ N）。
-        // 被任务结束 / 新航点顶替打断时 `expired=false`，不记账（狗可能还没看够）。
-        if window.cfg.check_type == "count"
-            && let Some(expect) = window.cfg.expect_count
-            && payload.hits <= 0
-            && payload.expired
-            && !window.alerted.swap(true, Ordering::Relaxed)
-        {
-            record_count_alert(state, &window.cfg, 0, expect, "", None).await;
-        }
-        // 「应该有却没有」：exist + alertWhenMissing，且窗口正常到期、一类目标都没检出。
-        // 被任务结束 / 新航点打断时不算（狗可能还没看够，与数量任务同一套道理）。
-        if window.cfg.check_type == "exist"
-            && window.cfg.alert_when_missing
-            && payload.hits <= 0
-            && payload.expired
-            && !window.alerted.swap(true, Ordering::Relaxed)
-        {
-            record_missing_alert(state, &window.cfg).await;
-        }
+        // 「看满了一个都没找到」：数量任务算数量不一致，exist + alertWhenMissing 算未检出。
+        // 看满 = 客户端回报窗口正常到期，或窗口实际已开够 `dwell` 秒（见 [`settle_no_hit`]）。
+        let enough = payload.expired || watched_enough(&window.cfg, window.watched());
+        settle_no_hit(
+            state,
+            &window.cfg,
+            payload.hits > 0 || hits > 0,
+            &window.alerted,
+            enough,
+        )
+        .await;
         info!(
             "航点 AI 识别结束（客户端回报）：任务 {} 航点 {}「{}」{}，上报 {hits} 类目标",
             window.task_code, window.point_index, window.point_name, payload.reason
@@ -860,6 +883,8 @@ fn spawn_client_window_timeout(
             "航点 AI 识别：客户端窗口 {window_id} 超过 {}s 未回报结束，服务端清掉窗口态",
             secs.saturating_add(10)
         );
+        // 这里**不**记「没找到」：客户端的结论（有没有检出 / 停够了没有）全在它手里，
+        // 它一句话都没回来说明链路己经断了，推“未检出”只会是误报。
         let content = format!("AI 识别窗口超时未收到客户端结束回报（已上报 {hits} 类目标）");
         if let Err(error) = insert_task_event(&state.db, &cfg, &now(), &content).await {
             warn!("AI 识别：写任务事件失败: {error}");
@@ -890,12 +915,14 @@ struct WindowConfig {
     expect_count: Option<i64>,
     /// 任务类型：`exist`（是否存在）/ `count`（数量是否正确）
     check_type: String,
-    /// 动作 `alertWhenMissing`：`exist` 任务在窗口正常到期且**一个都没检出**时也告警
+    /// 动作 `alertWhenMissing`：`exist` 任务看满停留时长、**一个都没检出**时也告警
     ///
     /// `exist` 默认只在「检出」时告警；「应该有却没有」这种语义靠这个开关（否则只能用
     /// `count` + `expectCount`）。`count` 任务自带「0 ≠ N」告警，这个字段对它无效。
     alert_when_missing: bool,
     secs: u64,
+    /// 航点停留时长（秒）：窗口开了这么久还没检出，才把「一个都没找到」算成结论
+    dwell: u64,
 }
 
 /// 打开识别 → 收 SSE → 检出即告警 → 到期/抢占收尾
@@ -906,6 +933,7 @@ async fn run_window(
     hits: Arc<Mutex<Vec<Hit>>>,
     alerted: Arc<AtomicBool>,
 ) {
+    let started = Instant::now();
     let Ok(base) = backpack::agent_base(&state.config).map(str::to_string) else {
         // 用 WARN 而不是 DEBUG：配了「只给浏览器直连地址」（`ROBODOG_BACKPACK_BROWSER_URL`）
         // 的部署里，服务端根本连不到 Agent，航点 AI 永远起不来；现场只看得到「没告警」，
@@ -1005,23 +1033,12 @@ async fn run_window(
         alerted: alerted.clone(),
     };
     let expired = consume_events(&state, &base, &config, threshold, &stop, &sink, deadline).await;
-    // 数量任务：窗口正常到期却一个目标都没找到 → 数量不一致（0 ≠ N）
-    if expired
-        && config.check_type == "count"
-        && let Some(expect) = config.expect_count
-    {
-        let empty = hits.lock().await.is_empty();
-        if empty && !alerted.swap(true, Ordering::Relaxed) {
-            record_count_alert(&state, &config, 0, expect, "", None).await;
-        }
-    }
-    // 「应该有却没有」：exist + alertWhenMissing，窗口正常到期且一类目标都没检出
-    if expired && config.check_type == "exist" && config.alert_when_missing {
-        let empty = hits.lock().await.is_empty();
-        if empty && !alerted.swap(true, Ordering::Relaxed) {
-            record_missing_alert(&state, &config).await;
-        }
-    }
+    // 看满了一个都没找到：数量任务算「数量不一致」，exist + alertWhenMissing 算「未检出」。
+    // 到期算看满；被「已离开航点」提前摘掉时，只要窗口已开够 dwell 也算看满
+    // （否则这类告警永远报不出来，见 [`watched_enough`]）。
+    let hit_seen = !hits.lock().await.is_empty();
+    let enough = expired || watched_enough(&config, started.elapsed());
+    settle_no_hit(&state, &config, hit_seen, &alerted, enough).await;
 
     // 只在「本窗口还是当前窗口」时才去停 Agent：
     // - 被新窗口顶替时，新窗口已经接管（且可能有操作员的识别在跑），不能停；
@@ -1227,7 +1244,8 @@ async fn record_count_alert(
 ///
 /// 只给 `exist` + `alertWhenMissing` 的航点用：`exist` 本来只会在**检出**时告警，
 /// 「灭火器不见了」这类「缺失」语义以前根本报不出来（只能用 `count` + `expectCount`）。
-/// 与数量告警同理，只在窗口**正常到期**时才算——被任务结束/新航点打断时狗可能还没看够。
+/// 与数量告警同理，只在「狗看够了」时才算（见 [`watched_enough`]）
+/// ——被任务结束/新航点打断且停留时间没走完时，狗可能还没看够。
 async fn record_missing_alert(state: &AppState, config: &WindowConfig) {
     let at = now();
     let targets = if config.labels.is_empty() {
@@ -1265,6 +1283,50 @@ async fn record_missing_alert(state: &AppState, config: &WindowConfig) {
     if let Err(error) = insert_task_event(&state.db, config, &at, &content).await {
         warn!("AI 识别：写任务事件失败: {error}");
     }
+}
+
+/// 「一个都没找到」的记账入口：数量任务落「数量不一致（0 ≠ N）」，
+/// `exist` + `alertWhenMissing` 落「AI 识别未检出」。
+///
+/// 两个调用前提都由调用方给：
+/// - `hit_seen`：本窗口有没有报过检出（报过就不再判「没找到」）；
+/// - `enough`：狗在这个点上看够了没有（见 [`watched_enough`]）。
+///
+/// 三条路（直连到期 / 客户端 `ai_end` / 平台「已离开航点」关窗）都会走到这里，
+/// 用共享的 `alerted` 保证一个窗口只落一条告警。
+async fn settle_no_hit(
+    state: &AppState,
+    config: &WindowConfig,
+    hit_seen: bool,
+    alerted: &Arc<AtomicBool>,
+    enough: bool,
+) {
+    if hit_seen || !enough {
+        return;
+    }
+    if config.check_type == "count" {
+        if let Some(expect) = config.expect_count
+            && !alerted.swap(true, Ordering::Relaxed)
+        {
+            record_count_alert(state, config, 0, expect, "", None).await;
+        }
+    } else if config.check_type == "exist"
+        && config.alert_when_missing
+        && !alerted.swap(true, Ordering::Relaxed)
+    {
+        record_missing_alert(state, config).await;
+    }
+}
+
+/// 狗在这个点上看够了没有：窗口开了至少 `dwell.max(4)` 秒。
+///
+/// 为什么不用「窗口到期」当唯一标准：窗口时长是 `dwell + 8`（给 Agent 加载模型留的余量），
+/// 而狗停到 `dwell` 就往下一点走了——平台收到「已离开航点」时窗口往往还差几秒没到点，
+/// 于是 `expired` 恒为 false、窗口也早被摘掉，「没找到也告警」永远报不出来
+/// （2026-11-18 办公室巡检「垃圾桶溢出」漏报：pt1 停 65 s、窗口 68 s）。
+/// 反过来，停留 0 秒的「路过点」`dwell.max(4)` 要求至少看 4 秒，也不至于误报。
+fn watched_enough(config: &WindowConfig, watched: Duration) -> bool {
+    watched >= Duration::from_secs(config.dwell.max(4))
 }
 
 /// 把解析出来的场景/阈值/相机回填到窗口记录（`GET /api/backpack/ai-window` 看得到）
