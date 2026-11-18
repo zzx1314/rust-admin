@@ -73,7 +73,7 @@ GET  /api/events             SSE：telemetry / button / lingsi / detect / detect
   （那组同时管 v4l2 采集尺寸，改了会连带影响四路 USB）。带宽吃紧时回退：
   `DOGCAM_WIDTH=1280 DOGCAM_HEIGHT=720 DOGCAM_BITRATE=2000k`。
 - 平台中继（`deploy/backpack-relay/relay_push.py`）默认 `RELAY_PROFILE=light`：
-  缩到 **720p20 / 1.2Mbps**（编码器自动挑 `h264_rkmpp` → `h264_v4l2m2m` → `libx264`）。
+  缩到 **720p15 / 1.0Mbps**（编码器自动挑 `h264_rkmpp` → `h264_v4l2m2m` → `libx264`）。
   原因见 §6.10：平台公网出口实测 ≈2.5Mbps，`-c:v copy` 的 1080p60（4~8Mbps）必卡。
   `RELAY_PROFILE=copy` 只在出口 ≥6Mbps 时用；页面上的分辨率由播放器实测上报
   （`VideoPlayer` / `VideoStage` 的 `meta` 事件），不写死规格。
@@ -882,7 +882,26 @@ python3 deploy/backpack-relay/measure_bitrate.py --stream dogcam --seconds 20
 | 2 | 前端 `VideoPlayer.vue` | 没有追直播边缘：MSE 里攒下的那截不会自己消化 → **越看越延迟**，最后定在某一帧 | 打开 flv.js `liveBufferLatencyChasing`（落后 >1.2s 直接跳到直播边缘，`liveBufferLatencyMinRemain=0.5`） |
 | 3 | 前端切流 | 切到中继要板端**重新起 ffmpeg**（1~7s，含等关键帧），这期间是老的黑屏，现场一律说「卡住了」 | 新增 `composables/useVideoPoster.ts`：直连/中继/换通道都把**最后一帧**存成 320px 小图，新播放器没出画前先顶着；起流超过 2.5s 角标变「起流中」并提示「板端正在起流（约 1~7s）」，不再让人以为卡死 |
 
-另外板端把关键帧间隔从 2s 收到 1s（`backpack-relay.service` 里 `RELAY_GOP=20`）：起流 / 重同步 / 切通道都要等一个关键帧，这一项直接砍掉一半等待。
+另外板端把关键帧间隔从 2s 收到 1s（`backpack-relay.service` 里 `RELAY_GOP=15`）：起流 / 重同步 / 切通道都要等一个关键帧，这一项直接砍掉一半等待。
+
+**越看越延迟的真正来源（2026-11-18 15:06 线上实证）**：板子出公网的上行实测只有
+**~1.15Mbps**，而编码按 1.2Mbps 跑 —— 链路永远差一点点，ffmpeg 又不会丢帧，于是帧一路
+攒着，延迟从 1.1s 涨到 4.0s（232s 内涨 2.9s ≈ 1.3%/s），攒到 `RELAY_MAX_LAG` 就被延迟看门狗
+重启一次，**每 4 分钟断你一次**：
+
+```
+15:03:04 画面延迟 1.1s
+15:06:47 画面延迟 1.3s
+15:06:55 延迟 4.0s 超过上限 3s，重启 ffmpeg 重新对齐时间轴
+15:07:00 1 个协程 5s 没停下（多半卡在 ws.send），掐断连接      ← 观看端被断开
+```
+
+修法：**留余量** —— `RELAY_BITRATE=1000k` + `RELAY_FPS=15`（720p15 / 1.0Mbps，比链路低
+~15%）。改完实测：60s 积压增量 `-0.03s`（此前 40s 涨 1.6s），板端起流后不再刷「画面延迟」，
+不再每 4 分钟重同步一次。
+
+> ⛔ 别用 `-fps_mode drop` 去"让 ffmpeg 丢帧"：这块板子的 ffmpeg（2023 构建）上它会把
+> 时间轴一起丢掉 —— 实测 20s 只出 273 帧、`tag_ts` 只走了 387ms，整路作废。
 
 判定口诀（现场照着念）：
 

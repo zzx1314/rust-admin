@@ -14,13 +14,16 @@ Environment=RELAY_RTSP_BASE=rtsp://127.0.0.1:8554
 #   copy = 只换容器（1080p60 会把 4~8Mbps 原样推出去，公网出口 2~3Mbps 时必卡）
 # 带宽更紧时再压：RELAY_BITRATE=800k RELAY_FPS=15
 Environment=RELAY_PROFILE=light
-# Environment=RELAY_BITRATE=1200k
-# Environment=RELAY_FPS=20
-# Environment=RELAY_WIDTH=1280
-# Environment=RELAY_HEIGHT=720
-# 关键帧间隔：20 帧 @20fps = 1s。开页面 / 切到中继 / 降档重同步都要等一个关键帧，
-# 1s 比默认 2s 少等一半（码率多几个百分点，换现场「切过去马上有画」）
-Environment=RELAY_GOP=20
+# 720p15 / 1.0Mbps：板子出公网的上行实测只有 ~1.15Mbps，编码按 1.2Mbps 跑时**链路永远
+# 差一点点**，ffmpeg 又不丢帧 → 帧越攒越多，延迟从 1.1s 涨到 3~4s，每 4 分钟被延迟看门狗
+# 重启一次（每次都要断一次观看端）。压到 1.0Mbps 留出余量，延迟才能稳在起流那 1s。
+Environment=RELAY_BITRATE=1000k
+Environment=RELAY_FPS=15
+Environment=RELAY_WIDTH=1280
+Environment=RELAY_HEIGHT=720
+# 关键帧间隔：15 帧 @15fps = 1s。开页面 / 切到中继 / 降档重同步都要等一个关键帧，
+# 1s 让现场「切过去马上有画」
+Environment=RELAY_GOP=15
 # 上行保护（Wi-Fi 掉线时自动断开重连，不再把画面冻住；默认值见 relay_push.py）
 # Environment=RELAY_SEND_TIMEOUT=10     # 单个分片写 WS 的上限（秒），超时判上行已死
 # Environment=RELAY_STALL_TIMEOUT=15    # 这么久没推出字节就重启 ffmpeg

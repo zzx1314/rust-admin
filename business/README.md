@@ -1442,7 +1442,7 @@ mediamtx 的 `dogcam`，浏览器直连 mediamtx（WHEP）或走平台中继（F
   `video_reset`，推流端重连会换掉整个房间。
 - **先缩后编（默认 light 档位）**：`dogcam` 是 1080p60，`-c:v copy` 会把 4~8Mbps 原样
   推出去，而平台公网出口只有 ≈2.5Mbps（阿里云 ECS 实测），观看端追不上就被服务端判
-  `lagged` 踢掉重连 —— 现场就是「很卡」。所以 relay 默认转成 **720p20 / 1.2Mbps**
+  `lagged` 踢掉重连 —— 现场就是「很卡」。所以 relay 默认转成 **720p15 / 1.0Mbps**
   （`RELAY_PROFILE=light`，编码器自动挑 rkmpp / v4l2m2m / libx264），带宽更紧用
   `RELAY_BITRATE=800k RELAY_FPS=15`。只有公网出口 ≥6Mbps 才考虑 `RELAY_PROFILE=copy`。
 - **逐包 flush**：板端 relay（`deploy/backpack-relay/relay_push.py`）固定带
