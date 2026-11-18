@@ -281,6 +281,7 @@ B. client（正式环境：平台在公网、Agent 只在内网，服务端连�
     → 服务端写 alerts + task_events + 企微（卡片后面跟一张证据图）
   → 数量任务（checkType=count）与 expectCount 不符（SSE plan_hit.count_alert）
     → 转发 `ai_alert`；到期一个都没找到也由服务端按 ai_end.expired 判成数量不一致
+  → 图晚于卡片（命中帧稀疏）→ 停识别扫盘后补 ai_evidence（平台只补一张图）
   → 客户端收尾 ai_end（带 expired）；任务终态/取消时服务端下发 ai_stop
 ```
 
@@ -353,7 +354,11 @@ B. client（正式环境：平台在公网、Agent 只在内网，服务端连�
 图优先读 `plan_hit.evidence` 给的路径，读不到再扫 `<jobs_dir>/<planId>/pt<航点下标>/` 取**窗口开始之后**
 写下的最新一张（mtime 卡 5s 容错）；一直等不到（老板端 / 画框失败）就在 8s 兜底时先发卡片。
 窗口结束时还在等图的，由 `finish()` **先停识别再扫盘**（板端 `_plan_flush` 正是停的时候才把采样中的
-命中落盘）后补发。服务端 `record_hit` 校验后发 `msgtype=image`，路径同时写进正文「（证据：…）」。
+命中落盘）后补发。
+命中帧稀疏时（板上整个窗口只命中 1 帧，板端「连采 3 帧」的采样跑不完）`plan_hit` 要到**窗口收尾**
+才发，图往往比卡片晚几十秒：8s 兜底先发的卡片照旧，停识别扫到图后客户端单独报一条 `ai_evidence`，
+服务端 `notify::alert_evidence` 只补一张 `msgtype=image`（不重发卡片、不重复落告警）。
+服务端 `record_hit` 校验后发 `msgtype=image`，路径同时写进正文「（证据：…）」。
 `jobs_dir` 优先级：`[ai] jobs_dir` / `ROBODOG_AI_JOBS_DIR`（客户端配置）> 从板端
 `plan_hit.evidence` 反推出的真实根 > 内置候选（`/root/backpack_dashboard/backend/detect_jobs`、
 `/root/261113/backpack_dashboard/backend/detect_jobs`）。板子路径与这两个都不同

@@ -295,6 +295,22 @@ impl AiStart {
     }
 }
 
+/// 窗口收尾要补的活（[`AiPatrol::consume`] → [`AiPatrol::finish`]）。
+///
+/// 板端命中帧不是检出那一刻就落盘：`_plan_frame` 要连采 3 帧命中才画框存证。命中帧
+/// 稀疏时（2026-11-18 19:35 那次只命中 1 帧）采样要到窗口收尾 `_plan_flush` 才结束，
+/// 所以图只能在停识别之后才拿到，收尾时按下面两种情况补：
+///
+/// - `pending`：卡片都还没发（命中后 8s 内没等到图），补发时直接带上图；
+/// - `image_missing`：卡片早就发了（8s 兜底），图只能单独再发一条（`ai_evidence`）。
+#[derive(Default)]
+struct Leftover {
+    /// 还没上报的检出（label, 置信度）
+    pending: Vec<(String, f64)>,
+    /// 有卡片发出时没带上图：收尾拿到图就补发一张
+    image_missing: bool,
+}
+
 /// 当前窗口（进程内唯一：Agent 单路推理）
 struct Window {
     id: String,
@@ -550,7 +566,7 @@ impl AiPatrol {
                     &format!("启动失败: {error}"),
                     0,
                     false,
-                    Vec::new(),
+                    Leftover::default(),
                     since,
                 )
                 .await;
@@ -558,7 +574,7 @@ impl AiPatrol {
             }
         }
 
-        let (hits, stopped_early, pending) =
+        let (hits, stopped_early, leftover) =
             self.consume(&out_tx, &start, &cancel, since).await;
         let reason = if stopped_early {
             "任务结束 / 被新航点顶替".to_string()
@@ -567,21 +583,31 @@ impl AiPatrol {
         };
         // `expired = true` 只代表「窗口正常到期」：数量任务这时一个都没找到，
         // 服务端才把它算成数量不一致（0 ≠ N）；被任务结束/新航点打断不算账。
-        self.finish(&out_tx, &start, &reason, hits, !stopped_early, pending, since)
-            .await;
+        self.finish(
+            &out_tx,
+            &start,
+            &reason,
+            hits,
+            !stopped_early,
+            leftover,
+            since,
+        )
+        .await;
     }
 
     /// 读 SSE，把超过阈值的类别按「本窗口首次出现」上报。
     ///
-    /// 返回（上报类别数, 是否被提前打断, 还没上报的检出）。最后一个非空说明窗口结束时
-    /// 还有命中在等证据图——交给 [`Self::finish`] 停掉板端后再补（板端 flush 计划时会写图）。
+    /// 返回（上报类别数, 是否被提前打断, 收尾要补的活）。
+    ///
+    /// `leftover` 交给 [`Self::finish`] 停掉板端后再补：板端 flush 计划时才把采样中的
+    /// 命中落盘，那时才拿得到图——挂起的补上卡片，已经发过卡片的单独补一张图（`ai_evidence`）。
     async fn consume(
         &self,
         out_tx: &mpsc::Sender<WsMessage>,
         start: &AiStart,
         cancel: &Arc<Notify>,
         since: SystemTime,
-    ) -> (usize, bool, Vec<(String, f64)>) {
+    ) -> (usize, bool, Leftover) {
         let response = self
             .stream
             .get(format!("{}/api/events", self.agent))
@@ -592,11 +618,11 @@ impl AiPatrol {
             Ok(response) if response.status().is_success() => response,
             Ok(response) => {
                 warn!("航点 AI 识别：Agent 拒绝事件流 HTTP {}", response.status());
-                return (0, false, Vec::new());
+                return (0, false, Leftover::default());
             }
             Err(error) => {
                 warn!("航点 AI 识别：连不上 Agent 事件流: {error}");
-                return (0, false, Vec::new());
+                return (0, false, Leftover::default());
             }
         };
 
@@ -614,6 +640,8 @@ impl AiPatrol {
         let mut evidence: Option<(String, String)> = None;
         // 挂起检出的兜底上报时刻：一直等不到证据图也要把告警发出去
         let mut pending_deadline: Option<Instant> = None;
+        // 有没有「卡片已经发出去、但没带上图」的检出：窗口收尾时补一张图（`ai_evidence`）
+        let mut image_missing = false;
 
         let stopped_early = loop {
             let flush_at = pending_deadline.unwrap_or(deadline);
@@ -634,6 +662,7 @@ impl AiPatrol {
                     if let Some(found) = self.window_evidence(start, since, 1).await {
                         evidence = Some(found);
                     }
+                    image_missing |= evidence.is_none();
                     for (label, conf) in std::mem::take(&mut pending) {
                         send_detect(out_tx, start, &label, conf, evidence.as_ref()).await;
                     }
@@ -691,6 +720,7 @@ impl AiPatrol {
                                             "航点 AI 识别：plan_hit 没有可读的证据图，{} 类检出只发卡片",
                                             pending.len()
                                         );
+                                        image_missing = true;
                                     }
                                     for (label, conf) in std::mem::take(&mut pending) {
                                         send_detect(out_tx, start, &label, conf, evidence.as_ref())
@@ -728,10 +758,17 @@ impl AiPatrol {
                 }
             }
         };
-        (hits, stopped_early, pending)
+        (
+            hits,
+            stopped_early,
+            Leftover {
+                pending,
+                image_missing,
+            },
+        )
     }
 
-    /// 收尾：按需停 Agent →（补发挂起的检出）→ 上报 `ai_end` → 释放窗口槽位
+    /// 收尾：按需停 Agent →（补发挂起的检出 / 补一张证据图）→ 上报 `ai_end` → 释放窗口槽位
     #[allow(clippy::too_many_arguments)]
     async fn finish(
         &self,
@@ -740,7 +777,7 @@ impl AiPatrol {
         reason: &str,
         hits: usize,
         expired: bool,
-        pending: Vec<(String, f64)>,
+        leftover: Leftover,
         since: SystemTime,
     ) {
         // 与平台侧 `replaced_by_other` 同一语义：窗口已被**新窗口**顶替时不停 Agent
@@ -770,16 +807,34 @@ impl AiPatrol {
         // 到窗口结束还没等到 `plan_hit` 的检出（命中后板端还在采样）：停识别会让板端
         // `_plan_flush` 把采样中的命中画框存证，所以**先停再扫**一次盘，往往能补上图。
         // 停之前扫是白扫——那时图根本还没写。
-        if !pending.is_empty() {
+        if !leftover.pending.is_empty() || leftover.image_missing {
             let evidence = self.window_evidence(start, since, 4).await;
-            if evidence.is_none() {
+            // 已经发过卡片的（`image_missing`）由后面单独补一张图，所以这里补发的卡片
+            // 就不再带图了——否则同一窗口会在群里冒出两张一样的命中帧。
+            let attach = if leftover.image_missing {
+                None
+            } else {
+                evidence.as_ref()
+            };
+            if !leftover.pending.is_empty() && attach.is_none() {
                 debug!(
                     "航点 AI 识别：窗口收尾时仍没有证据图，{} 类检出只发卡片",
-                    pending.len()
+                    leftover.pending.len()
                 );
             }
-            for (label, conf) in pending {
-                send_detect(out_tx, start, &label, conf, evidence.as_ref()).await;
+            for (label, conf) in leftover.pending {
+                send_detect(out_tx, start, &label, conf, attach).await;
+            }
+            if leftover.image_missing {
+                match evidence {
+                    Some((path, image)) => {
+                        debug!(
+                            "航点 AI 识别：卡片已发、图才落盘，单独补一张证据图（{path}）"
+                        );
+                        send_evidence(out_tx, start, &path, &image).await;
+                    }
+                    None => debug!("航点 AI 识别：窗口收尾时仍没有证据图，不再补图"),
+                }
             }
         }
         info!("航点 AI 识别结束：场景={} {reason}，上报 {hits} 类目标", start.task);
@@ -1000,6 +1055,31 @@ async fn send_detect(
         detect["evidenceImage"] = json!(image);
     }
     send(out_tx, "ai_detect", detect).await;
+}
+
+/// 补发一张命中帧（`ai_evidence`）：卡片已经发过了，平台只发 `msgtype=image`。
+///
+/// 只在「告警早就发出去、板端到窗口收尾才把图落盘」时用（见 [`Leftover`]）：
+/// 平台不会重发卡片，所以群里看到的就是「卡片在前、图在后」，与正常情况一致。
+async fn send_evidence(
+    out_tx: &mpsc::Sender<WsMessage>,
+    start: &AiStart,
+    path: &str,
+    image: &str,
+) {
+    send(
+        out_tx,
+        "ai_evidence",
+        json!({
+            "windowId": start.window_id,
+            "taskCode": start.task_code,
+            "planId": start.plan_id,
+            "pointIndex": start.point_index,
+            "evidence": path,
+            "evidenceImage": image,
+        }),
+    )
+    .await;
 }
 
 /// 板端 `plan_hit.evidence` 指向的命中帧：（路径, base64）。
@@ -2097,6 +2177,83 @@ mod agent_flow {
         let detect_at = kinds.iter().position(|kind| *kind == "ai_detect").unwrap();
         let end_at = kinds.iter().position(|kind| *kind == "ai_end").unwrap();
         assert!(detect_at < end_at, "检出要赶在 ai_end 之前上报: {kinds:?}");
+    }
+
+    /// 现场事故回归（2026-11-18 19:35，任务 TK-1112-11 航点 1「新航点 2」检出
+    /// `Trash over flow` 0.29）：板端整个窗口只命中 **1 帧**，采样（连采 3 帧命中）
+    /// 一直没跑完，`plan_hit` 要到窗口收尾 `_plan_flush` 才发。客户端 8s 兜底先把
+    /// 卡片发了（没图），停识别扫到图后**单独补一条 `ai_evidence`**——平台只补一张
+    /// 图，不重发卡片（群里不会出现两条告警）。
+    #[tokio::test]
+    async fn card_sent_without_image_is_followed_by_ai_evidence() {
+        let root = std::env::temp_dir().join(format!(
+            "robodog-jobs-follow-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        // 目录先建好，图要等停识别（板端 `_plan_flush`）时才写
+        let point_dir = root.join("TK-1").join("pt0");
+        std::fs::create_dir_all(&point_dir).expect("建存证目录失败");
+        let frame = point_dir.join("dogcam_20261118_193557.jpg");
+
+        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        let agent = spawn_agent_with(
+            calls,
+            DETECT_ONLY.to_string(),
+            None,
+            Some(frame.clone()),
+        )
+        .await;
+        let ai = Arc::new(AiPatrol::with_jobs_dir(
+            agent,
+            true,
+            Some(root.to_string_lossy().to_string()),
+        ));
+        let (tx, mut rx) = mpsc::channel(16);
+        ai.start(&tx, exist_start_payload_secs(60)).await;
+
+        // ① 等 8s 兜底：卡片先发出去，这时还没有图
+        let detect = tokio::time::timeout(Duration::from_secs(12), async {
+            loop {
+                match rx.recv().await {
+                    Some(msg) if msg.msg_type == "ai_detect" => return msg.payload,
+                    Some(_) => continue,
+                    None => panic!("通道关闭"),
+                }
+            }
+        })
+        .await
+        .expect("等兜底上报告警超时");
+        assert!(
+            detect["evidenceImage"].as_str().is_none(),
+            "兜底那条本来就没有图: {detect}"
+        );
+
+        // ② 窗口收尾：停识别 → 板端 flush 写出图 → 补 ai_evidence
+        ai.stop("测试结束").await;
+        let rest = drain_until_end(&mut rx, Duration::from_secs(8)).await;
+        let _ = std::fs::remove_dir_all(&root);
+
+        let evidence: Vec<&Value> = rest
+            .iter()
+            .filter(|(kind, _)| kind == "ai_evidence")
+            .map(|(_, payload)| payload)
+            .collect();
+        assert_eq!(evidence.len(), 1, "补发一条图就够: {rest:?}");
+        assert!(
+            evidence[0]["evidenceImage"].as_str().is_some(),
+            "补发必须带图字节: {}",
+            evidence[0]
+        );
+        assert_eq!(evidence[0]["windowId"], "AIW-1-0-2");
+        assert_eq!(evidence[0]["planId"], "TK-1");
+        assert!(
+            !rest.iter().any(|(kind, _)| kind == "ai_detect"),
+            "补图不能重复发卡片: {rest:?}"
+        );
     }
 
     #[tokio::test]

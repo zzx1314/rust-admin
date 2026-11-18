@@ -1399,8 +1399,9 @@ AI 可对除红外外的五路开启，画框方式二选一：
   **证据图**：检出 / 数量核对两类告警在企业微信里都会多一张板端命中帧（`msgtype=image`，
   卡片之后第二条）。数量核对用板端 `plan_hit.evidence` 给的路径；实时检出那一刻板端还在
   「连采 3 帧命中」采样、图还没落盘（实测比第一帧检出晚 4.6s），所以命中先挂起、等
-  `plan_hit` 送 `evidence` 来一起上报（8s 等不到就先发卡片），窗口收尾时还在等图的由
-  「先停识别再扫盘」补发。图优先读 `plan_hit.evidence`，读不到再扫 `[ai] jobs_dir` /
+  `plan_hit` 送 `evidence` 来一起上报（8s 等不到就先发卡片）。命中帧稀疏时 `plan_hit` 要到
+  窗口收尾才发：客户端「先停识别再扫盘」，扫到图就单独报 `ai_evidence`，平台只补一张图
+  （不重发卡片）。图优先读 `plan_hit.evidence`，读不到再扫 `[ai] jobs_dir` /
   `ROBODOG_AI_JOBS_DIR`（默认自动探测板端 `detect_jobs`，也会从 `plan_hit.evidence` 学到
   真实路径）下的 `<计划ID>/pt<航点>/` 取本轮最新一张。读不到图就只有卡片，告警本身照发
   （详见 [`docs/wecom-alert-push.md`](docs/wecom-alert-push.md)）。

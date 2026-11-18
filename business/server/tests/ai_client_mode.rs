@@ -359,6 +359,22 @@ fn detect_with_evidence(window_id: &str, label: &str, conf: f64) -> Value {
     })
 }
 
+/// 补发命中帧（客户端在窗口收尾、板端 `_plan_flush` 写出图之后才报的那条）
+fn late_evidence(window_id: &str) -> Value {
+    json!({
+        "msgType": "ai_evidence",
+        "ts": "2026-11-18 19:35:58",
+        "payload": {
+            "windowId": window_id,
+            "taskCode": "TK-AI-C",
+            "planId": "TK-AI-C",
+            "pointIndex": 0,
+            "evidence": "/root/261113/backpack_dashboard/backend/detect_jobs/TK-AI-C/pt0/dogcam_20261118_193557.jpg",
+            "evidenceImage": JPEG_BASE64,
+        }
+    })
+}
+
 /// 只数 AI 识别写出来的告警（播种数据里还有一批别的告警）
 async fn alert_count(state: &AppState) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM alerts WHERE content LIKE 'AI 识别%'")
@@ -1156,6 +1172,82 @@ async fn hit_alert_carries_the_relayed_evidence_image() {
         contents[0].contains("（证据：") && contents[0].contains("dogcam_1.jpg"),
         "告警正文要留证据图路径: {}",
         contents[0]
+    );
+
+    ai_patrol::global().stop("用例结束").await;
+}
+
+/// 「卡片已发、图晚到」补发一张图（2026-11-18 19:35 现场回归）：
+/// 板端只命中一帧、采样（连采 3 帧）一直没跑完，`plan_hit` 到窗口收尾
+/// `_plan_flush` 才发；客户端 8s 兜底先把卡片发了，停识别扫到图后单独报 `ai_evidence`。
+/// 服务端这时**只补一张 `msgtype=image`**，不重发卡片、不新建告警。
+#[tokio::test]
+async fn late_evidence_is_pushed_as_an_image_only_message() {
+    let _serial = TEST_LOCK.lock().await;
+    ai_patrol::global().stop("测试初始化").await;
+    let (state, _temp, mut rx) = test_state_with_wecom("client", true).await;
+    let rx = rx.as_mut().expect("开了企微就该有入队接收端");
+    let task_code =
+        seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("exist"), None).await;
+    let port = spawn_server(state.clone()).await;
+    let (mut ws, _device) = register_device(port).await;
+
+    ws.send(Message::Text(ai_point(&task_code, false).to_string()))
+        .await
+        .expect("发送 ai_point 失败");
+    let start = next_msg(&mut ws, "ai_start").await;
+    let window_id = start["payload"]["windowId"]
+        .as_str()
+        .expect("ai_start 必须带 windowId")
+        .to_string();
+
+    // 检出没带图（客户端当时还没拿到命中帧；阈值 0.35，0.42 能过）
+    ws.send(Message::Text(detect(&window_id, "extinguisher", 0.42).to_string()))
+        .await
+        .expect("发送检出失败");
+    let card = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("等告警入队超时")
+        .expect("推送通道提前关闭");
+    assert!(card.image.is_none(), "这条卡片本来就没有图: {card:?}");
+    assert!(!card.image_only, "卡片不是「只发图」");
+    assert_eq!(alert_count(&state).await, 1, "先落一条检出告警");
+
+    // 窗口收尾补发命中帧：只补图
+    ws.send(Message::Text(late_evidence(&window_id).to_string()))
+        .await
+        .expect("发送 ai_evidence 失败");
+    let follow = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Some(notice) if notice.image.is_some() => return notice,
+                Some(_) => continue,
+                None => panic!("推送通道提前关闭"),
+            }
+        }
+    })
+    .await
+    .expect("等补发的图片入队超时");
+    assert!(follow.image_only, "补发的是「只发图」消息，不能重发卡片");
+    assert_eq!(follow.title, "", "只发图的消息不该有卡片标题");
+    let image = follow.image.expect("补发消息必须带图");
+    assert_eq!(image.base64, JPEG_BASE64);
+    assert_eq!(image.md5, JPEG_MD5);
+    assert_eq!(
+        alert_count(&state).await,
+        1,
+        "补图不能重复落告警（群里会以为是第二条）"
+    );
+
+    // 重复补发要被吃掉（同一窗口只补一张）
+    ws.send(Message::Text(late_evidence(&window_id).to_string()))
+        .await
+        .expect("发送重复 ai_evidence 失败");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), rx.recv())
+            .await
+            .is_err(),
+        "重复补发不该再入队"
     );
 
     ai_patrol::global().stop("用例结束").await;

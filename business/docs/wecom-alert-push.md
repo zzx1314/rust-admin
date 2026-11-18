@@ -145,6 +145,9 @@
 | `client/src/ai_patrol.rs` `evidence_image_base64()` | 客户端从板端磁盘读数量告警的证据图 → `ai_alert.evidenceImage`（平台读不到那个文件系统） |
 | `client/src/ai_patrol.rs` `window_evidence()` / `newest_evidence_file()` | 实时检出：扫 `<jobs_dir>/<plan>/pt<n>/` 取本轮最新命中帧（退路）+ 窗口收尾时补扫 |
 | `client/src/ai_patrol.rs` `plan_hit_evidence()` / `send_detect()` | 实时检出：挂起命中 → `plan_hit.evidence` 一到就读图带 `ai_detect.evidenceImage` 上报 |
+| `client/src/ai_patrol.rs` `Leftover` / `send_evidence()` | 卡片已发、图晚到：停识别扫到图后补一条 `ai_evidence` |
+| `server/src/ai_patrol.rs` `on_client_evidence()` | `ai_evidence` 入口：本窗口还没带过图的那条告警 → `notify::alert_evidence` |
+| `notify.rs` `alert_evidence()` / `Notice.image_only` | 只补一张 `msgtype=image`（不重发卡片、不写 notifications） |
 | `server/src/ai_patrol.rs` `record_hit()` | 检出告警入口：正文带「（证据：路径）」，有字节就走 `alert_created_with_image` |
 | `notify.rs` `task_abnormal()` | 任务异常入口：同样带「当班责任人」并 @ 到人 |
 | `alert_flow.rs` `should_dispatch()` | 第一道门：只有「执行计划期间」的告警才建单 + 推群（`alert_only_in_task`） |
@@ -373,6 +376,9 @@ AI 识别**检出**、以及**数量核对不一致**时，群里会多一条图
              window_evidence() 扫 <jobs_dir>/<plan>/pt<n>/ 取本轮最新一张
              → ai_detect.evidence（路径）+ ai_detect.evidenceImage（base64）
              → 服务端 ai_patrol::on_client_detect
+             等不到图（板端只命中 1 帧、采样跑不完 → plan_hit 到窗口收尾才发）：
+             8s 兜底先发卡片；停识别后扫到图 → ai_evidence（只补图）
+             → 服务端 ai_patrol::on_client_evidence → notify::alert_evidence
         ▼
 notify::evidence_image()（校验）→ Notice.image
         ▼
@@ -394,6 +400,12 @@ notify::evidence_image()（校验）→ Notice.image
   容错）。路径同时写进告警正文（`（证据：…）`），现场可 ssh 复核。
 - **窗口结束时还在等图的命中**：`finish()` **先停识别再扫盘**（板端 `_plan_flush` 正是停的时候
   才把采样中的命中画框写盘）后补发，所以「狗刚命中就走向下一个点」也不会丢图。
+- **卡片已经发了、图才落盘**（2026-11-18 19:35 现场：`Trash over flow` 0.29 整个窗口只命中
+  1 帧，板端「连采 3 帧」的采样跑不完，`plan_hit` 到窗口收尾才发）：8s 兜底那条卡片照发，
+  停识别扫到图后单独报 `ai_evidence`，服务端 `notify::alert_evidence` 只补一张
+  `msgtype=image`（`Notice.image_only`：不重发卡片、不写 `notifications`、同一个告警只补一张，
+  去重键 `alert-image:<告警码>`）。因为企业微信的图本来就是独立一条消息，群里看到的还是
+  「卡片在前、图在后」，只是图晚了几十秒。
 - **检出卡片的时延**：正常跟着 `plan_hit` 走（命中后 1~5s），比「立刻发卡片」晚几秒；
   代价是换来群里那条卡片后面必有图（真等不到图时 8s 兜底只发卡片）。
 - **`jobs_dir` 从哪来**：`[ai] jobs_dir` / `ROBODOG_AI_JOBS_DIR` 优先（配了就**不**再被
@@ -416,6 +428,9 @@ notify::evidence_image()（校验）→ Notice.image
   （2026-11-18 事故回归：图比第一帧检出晚 4.6s 也要跟着告警发）、
   `client ai_patrol::agent_flow::evidence_written_on_plan_flush_is_picked_up_at_window_end`
   （窗口收尾时板端 flush 才写图，先停再扫也要带上）、
+  `client ai_patrol::agent_flow::card_sent_without_image_is_followed_by_ai_evidence` +
+  `server/tests/ai_client_mode.rs::late_evidence_is_pushed_as_an_image_only_message`
+  （卡片先发、图晚到 → `ai_evidence` 只补一张图，不重发卡片/不重复落告警）、
   `client ai_patrol::tests::newest_evidence_file_skips_stale_and_picks_freshest`（不拿上一轮的图）。
 
 ### @ 提醒那条

@@ -160,13 +160,17 @@ ffmpeg，观看端不重连）；到期先确认链路真恢复才回配置档�
 才发带 `evidence` 的 `plan_hit`（实测比第一帧检出晚 **4.6s**）。所以客户端把命中**先挂起**、
 拿到 `plan_hit.evidence` 再上报（`ai_detect` 晚几秒，换来卡片后面必有图；8s 等不到就先发
 卡片），读不到路径才退回扫 `<jobs_dir>/<plan>/pt<n>/` 取本轮最新一张（`jobs_dir` 见
-`[ai] jobs_dir` / `ROBODOG_AI_JOBS_DIR`）。窗口结束时还在等图的，由 `finish()` **先停识别
-再扫盘**（板端 `_plan_flush` 在停的时候才落盘）补发。服务端 `notify::evidence_image`
+`[ai] jobs_dir` / `ROBODOG_AI_JOBS_DIR`）。命中帧稀疏时（板上只命中 1 帧，采样连采 3 帧
+跑不完）`plan_hit` 要到**窗口收尾** `_plan_flush` 才发，图往往比卡片晚几十秒：客户端
+`finish()` 会**先停识别再扫盘**，扫到图就单独报一条 `ai_evidence`，服务端
+`notify::alert_evidence` 只补一张 `msgtype=image`（`Notice.image_only`，不重发卡片、
+不重复落告警）。服务端 `notify::evidence_image`
 校验（base64 / ≤2MB / JPG-PNG / md5 算**base64 之前**的字节）再发。⛔ 不要改成往 markdown
 里嵌 `![]()`（群机器人不支持），也不要存多 MB 的 base64 到 `notifications.payload`。
 开关 `settings.wecom_alert_image`（默认开），回归用例 `tests/alert_image.rs`、
-`tests/ai_client_mode.rs`（检出带图整条 WS 链路）、
-`client ai_patrol::agent_flow::evidence_landing_seconds_late_still_rides_with_the_alert`。
+`tests/ai_client_mode.rs`（检出带图整条 WS 链路 / `ai_evidence` 只补图）、
+`client ai_patrol::agent_flow::evidence_landing_seconds_late_still_rides_with_the_alert`、
+`client ai_patrol::agent_flow::card_sent_without_image_is_followed_by_ai_evidence`。
 
 `backend/run.sh` exports the required secret (and probes Redis for
 `APP_REDIS_PASSWORD`) before running `cargo run`. Set `APP_REDIS_PASSWORD`

@@ -68,7 +68,8 @@ use crate::app::AppState;
 use crate::backpack;
 use crate::db::now;
 use crate::gateway_types::{
-    AiAlertPayload, AiDetectPayload, AiEndPayload, AiPointPayload, TaskProgressPayload,
+    AiAlertPayload, AiDetectPayload, AiEndPayload, AiEvidencePayload, AiPointPayload,
+    TaskProgressPayload,
 };
 use crate::notify::NoticeImage;
 use serde_json::{Value, json};
@@ -156,6 +157,10 @@ struct Hit {
     at: String,
     label: String,
     conf: f64,
+    /// 这条检出对应的告警码：卡片已推、图晚到时靠它补发（`ai_evidence`）
+    alert_code: Option<String>,
+    /// 告警推的时候是否已经带上了证据图：带过就不用再补发
+    image: bool,
 }
 
 /// 窗口的两个上报累加器：类别去重表 + 「数量告警已报过」标志。
@@ -760,6 +765,68 @@ impl AiPatrol {
         });
         record_count_alert(state, &cfg, found, expect, &payload.evidence, image).await;
     }
+
+    /// 客户端补发的命中帧（`ai_evidence`）：告警卡片早就发过，这里**只补一张图**。
+    ///
+    /// 什么时候会走这条路：板端 `_plan_frame` 要连采 3 帧命中才画框存证，命中帧稀疏时
+    /// 采样一直到窗口收尾（客户端 POST `/api/detect/stop` → `_plan_flush`）才结束，
+    /// 那时客户端已经用 8s 兜底把卡片发出去了。停识别后图才落盘，所以单独补报。
+    ///
+    /// 归到哪条告警：本窗口里**还没带过图**的那条（`hits.image == false`），
+    /// 已带过就不再补（防重复）；窗口已关 / 不是本设备的直接丢弃。
+    pub async fn on_client_evidence(
+        &self,
+        state: &AppState,
+        device_code: &str,
+        payload: &AiEvidencePayload,
+    ) {
+        let Some(image) = payload.evidence_image.as_deref().and_then(|raw| {
+            match crate::notify::evidence_image(raw) {
+                Ok(image) => Some(image),
+                Err(error) => {
+                    warn!("AI 识别：补发的证据图不可用，跳过: {error}");
+                    None
+                }
+            }
+        }) else {
+            return;
+        };
+        let hits = {
+            let guard = self.active.lock().await;
+            let Some(window) = guard.as_ref() else {
+                // 平台已关窗（任务终态 / 离开航点）：卡片也早发了，图就不要了
+                debug!("航点 AI 识别：没有活动窗口，丢弃补发的证据图");
+                return;
+            };
+            if window.device_code != device_code
+                || (!window.window_id.is_empty() && window.window_id != payload.window_id)
+            {
+                debug!(
+                    "航点 AI 识别：窗口 {} 已失效，丢弃补发的证据图",
+                    payload.window_id
+                );
+                return;
+            }
+            window.hits.clone()
+        };
+        let mut hits = hits.lock().await;
+        let Some(hit) = hits.iter_mut().rev().find(|hit| !hit.image) else {
+            debug!("航点 AI 识别：本窗口的检出都带过图，忽略重复补发");
+            return;
+        };
+        let Some(alert_code) = hit.alert_code.clone() else {
+            debug!("航点 AI 识别：检出没有关联告警（告警落库失败），无处补图");
+            return;
+        };
+        hit.image = true;
+        info!(
+            "航点 AI 识别：补发命中帧证据图（{} 字节，告警 {alert_code}，证据：{}）",
+            image.bytes,
+            payload.evidence.trim()
+        );
+        drop(hits);
+        crate::notify::alert_evidence(state, &alert_code, image).await;
+    }
 }
 
 /// 客户端窗口的超时看门狗。
@@ -1084,12 +1151,7 @@ async fn record_hit(
     image: Option<NoticeImage>,
 ) {
     let at = now();
-    hits.lock().await.push(Hit {
-        at: at.clone(),
-        label: label.to_string(),
-        conf,
-    });
-
+    let key = ai_dedup_key(config, label);
     let mut content = format!(
         "AI 识别：任务「{}」航点 {}「{}」检出 {}（置信度 {:.2}）",
         config.task_name, config.point_index, config.point_name, label, conf
@@ -1099,13 +1161,25 @@ async fn record_hit(
     }
     info!("{content}");
 
-    let key = ai_dedup_key(config, label);
-    match insert_alert(&state.db, config, &content, &key).await {
+    let has_image = image.is_some();
+    let alert_code = match insert_alert(&state.db, config, &content, &key).await {
         Ok(alert_code) => {
-            crate::notify::alert_created_with_image(state, &alert_code, image).await
+            crate::notify::alert_created_with_image(state, &alert_code, image)
+                .await;
+            Some(alert_code)
         }
-        Err(error) => warn!("AI 识别：写告警失败: {error}"),
-    }
+        Err(error) => {
+            warn!("AI 识别：写告警失败: {error}");
+            None
+        }
+    };
+    hits.lock().await.push(Hit {
+        at: at.clone(),
+        label: label.to_string(),
+        conf,
+        alert_code,
+        image: has_image,
+    });
     if let Err(error) = insert_task_event(&state.db, config, &at, &content).await {
         warn!("AI 识别：写任务事件失败: {error}");
     }

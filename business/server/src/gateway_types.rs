@@ -248,6 +248,32 @@ pub struct AiAlertPayload {
     pub message: String,
 }
 
+/// 客户端 → 服务端：补发本窗口的命中帧（卡片已经发过，只补一张图）
+///
+/// 正常路径下检出与图是**一起**上报的（客户端等板端 `plan_hit` 里的 `evidence`）。
+/// 但板端的「连采 3 帧命中」采样要是一直没跑完，图要到窗口收尾
+/// （`/api/detect/stop` → `_plan_flush`）才写出来 —— 那时告警早就发了，
+/// 所以客户端停识别、扫到图之后再单独报一次，服务端只发 `msgtype=image`。
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AiEvidencePayload {
+    pub window_id: String,
+    #[serde(default)]
+    pub task_code: String,
+    /// 计划 id（= 业务任务号），板端按它建存证目录
+    #[serde(default)]
+    pub plan_id: String,
+    #[serde(default)]
+    pub point_index: Option<i64>,
+    /// 证据图路径（板端本地绝对路径，仅作运维线索）
+    #[serde(default)]
+    pub evidence: String,
+    /// 证据图本体（JPG/PNG 字节的 base64）：校验与约束同
+    /// [`AiAlertPayload::evidence_image`]
+    #[serde(default)]
+    pub evidence_image: Option<String>,
+}
+
 /// 客户端 → 服务端：本地接管态变化
 ///
 /// 设备客户端做**进程内重连**时，与业务平台的 WebSocket 不会断开，服务端也就

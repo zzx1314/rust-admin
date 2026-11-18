@@ -433,6 +433,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                         .await;
                                 }
                             }
+                            // 命中帧晚落盘：卡片已发过，只补一张证据图
+                            "ai_evidence" => {
+                                if let Some(ref did) = device_id {
+                                    let payload: crate::gateway_types::AiEvidencePayload =
+                                        serde_json::from_value(ws_msg.payload).unwrap_or_default();
+                                    crate::ai_patrol::global()
+                                        .on_client_evidence(&state, did, &payload)
+                                        .await;
+                                }
+                            }
                             "command_result" => {
                                 if let Some(ref did) = device_id {
                                     let payload: crate::gateway_types::CommandResultPayload =

@@ -131,6 +131,7 @@ async fn push_real_alert_card_with_evidence_image() {
         mention_all: false,
         mentions: Vec::new(),
         image: Some(image),
+        image_only: false,
     };
     assert!(state.notifier.enqueue(notice), "入队失败（队列满/未配置）");
 

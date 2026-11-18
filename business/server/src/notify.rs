@@ -156,6 +156,12 @@ pub struct Notice {
     /// 只有拿得到图片字节的告警才有（板端 AI 识别的**检出**与**数量核对不一致**，
     /// 两类都靠设备客户端从板端存证目录读图）；markdown 里挂不了图，见 [`evidence_image`]。
     pub image: Option<NoticeImage>,
+    /// 只发图、不发 markdown 卡片（用于「卡片早就发了，命中帧晚好几秒才落盘」的补发）。
+    ///
+    /// 企业微信本来就把图当**独立一条**消息发（`msgtype=image`），所以补发只是把
+    /// 第二条推后几秒，群里看到的效果与「卡片 + 图」一样；不发卡片是因为重发一遍
+    /// 会让群里当成两条告警。
+    pub image_only: bool,
 }
 
 /// 一条待发图片消息（企业微信 `msgtype=image`）。
@@ -722,6 +728,7 @@ async fn flush_overflow(state: &AppState) {
         mention_all: false,
         mentions: Vec::new(),
         image: None,
+        image_only: false,
     };
     let Some(url) = state.notifier.webhook() else {
         return;
@@ -744,6 +751,13 @@ async fn deliver(
     notice: &Notice,
     gate: &mut RateGate,
 ) {
+    // 只补发图（卡片早就发过了）：发完就返回，不要重发卡片也不要写 notifications
+    if notice.image_only {
+        if let Some(image) = &notice.image {
+            send_image(client, url, image).await;
+        }
+        return;
+    }
     let payload = notice.markdown();
 
     if notice.mention_all {
@@ -1281,6 +1295,7 @@ pub async fn alert_created_with_image(
                 .unwrap_or_default()
         },
         image: None,
+        image_only: false,
     };
     // 证据图是**可选附加**：开关关掉 / 拿不到字节就只发卡片
     if let Some(image) = image {
@@ -1291,6 +1306,64 @@ pub async fn alert_created_with_image(
         }
     }
     state.notifier.enqueue(notice);
+}
+
+/// 给**已经推过的**告警补一张证据图（只发 `msgtype=image`，不重发卡片）。
+///
+/// 为什么需要：板端的命中帧不是检出那一刻就落盘的。正常情况客户端会等 `plan_hit`
+/// 把图和告警一起上报；但如果板端「连采 3 帧命中」的采样一直没跑完，图要到窗口收尾
+/// （`/api/detect/stop` → `_plan_flush`）才写出来——那时告警早就发出去了（不能为了等图
+/// 把告警卡住）。于是客户端停识别、扫到图之后再单独报一次，这里只补发图片。
+///
+/// 企业微信本来就把图片当**独立一条**消息发（见 `deliver`），所以群里看到的效果与
+/// 「卡片 + 图」完全一样，只是第二条晚了几十秒（2026-11-18 19:35 现场：
+/// 检出 `Trash over flow` 0.29 只命中一帧，采样没跑完，图 38s 后才落盘）。
+///
+/// 开关与门禁与 [`alert_created_with_image`] 一致：关图 / 不在执行计划期间 / 通道关
+/// 都直接不发（卡片已经发了，图片只是辅证）。
+pub async fn alert_evidence(state: &AppState, alert_code: &str, image: NoticeImage) {
+    if !state.notifier.is_enabled() {
+        return;
+    }
+    if !channel_enabled(state, Channel::Alert).await {
+        return;
+    }
+    if !image_push_enabled(state).await {
+        debug!(alert = %alert_code, "wecom: 已关闭告警证据图推送，不补发图片");
+        return;
+    }
+    // 图跟着卡片走同一道门：卡片没推（不在执行计划期间）就不该单独冒出一张图
+    if !crate::alert_flow::should_dispatch(state, alert_code).await {
+        debug!(alert = %alert_code, "wecom: 告警不在任务执行期间，补发图片也跳过");
+        return;
+    }
+    // 级别要与原卡片一致：`enqueue` 会按 `min_level` 过滤，图片不能用别的级别
+    let level: Option<String> = sqlx::query_scalar("SELECT level FROM alerts WHERE alert_code = ?1")
+        .bind(alert_code)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+    let Some(level) = level else {
+        debug!(alert = %alert_code, "wecom: 回查不到告警级别，跳过补发图片");
+        return;
+    };
+    state.notifier.enqueue(Notice {
+        level: Level::parse(&level),
+        ref_type: Channel::Alert.ref_type(),
+        ref_id: None,
+        // 与卡片分开去重：同一张图重复上报时只发一次
+        dedupe_key: format!("alert-image:{alert_code}"),
+        title: String::new(),
+        fields: Vec::new(),
+        body: None,
+        action: None,
+        link: None,
+        mention_all: false,
+        mentions: Vec::new(),
+        image: Some(image),
+        image_only: true,
+    });
 }
 
 /// 任务被判「异常」时调用。看门狗与客户端上报终态两处都走这里，靠去重键合并。
@@ -1365,6 +1438,7 @@ pub async fn task_abnormal(state: &AppState, task_code: &str, level: Level, reas
             .map(|phone| vec![phone])
             .unwrap_or_default(),
         image: None,
+        image_only: false,
     };
     state.notifier.enqueue(notice);
 }
@@ -1403,6 +1477,7 @@ pub async fn send_test(state: &AppState) -> Result<String, String> {
         mention_all: false,
         mentions: Vec::new(),
         image: None,
+        image_only: false,
     };
     let payload = notice.markdown();
     let body = json!({ "msgtype": "markdown", "markdown": { "content": payload } });
@@ -1450,6 +1525,7 @@ mod tests {
             mention_all: false,
             mentions: Vec::new(),
             image: None,
+            image_only: false,
         }
     }
 
