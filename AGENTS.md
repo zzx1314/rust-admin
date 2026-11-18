@@ -78,6 +78,11 @@ HTTP」模式。两者共用同一个服务令牌，见 `business/README.md`。
 （`deploy/backpack-relay/`），想看到框要让板端烧录（`preview` 流）。
 多背包部署配 `ROBODOG_BACKPACK_TUNNEL_DEVICE`。详见
 `business/docs/backpack-video-integration.md` §6.8。
+中继画质是**板端自适应**的（`deploy/backpack-relay/relay_push.py`）：5s 窗口内 `ws.send`
+被反压且实测码率明显低于目标档位就就地换 `640x360@12 / 500k`（`video_reset` + 重启
+ffmpeg，观看端不重连）；到期先确认链路真恢复才回配置档，反复升降时窗口翻倍。
+平台侧 `video.rs` 不做 ABR（观看端追不上就 `lagged` 断连重连），前端也没有掉档。
+改这块先读 §6.10⑥，回归：`python3 deploy/backpack-relay/test_relay_push.py`。
 
 航点 AI 识别的「谁去调板端 Agent」由 `ROBODOG_POINT_AI`（`[backpack] point_ai`，默认
 `auto`）决定：配了 `ROBODOG_BACKPACK_URL` 就服务端直连，否则由现场设备客户端代调

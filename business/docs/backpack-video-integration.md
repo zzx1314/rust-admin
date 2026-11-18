@@ -744,7 +744,8 @@ WHEP 拿到 404。处理（已按此配置）：
 | `relay_push.py` `_pump` | 每个分片的 `ws.send` 加 `RELAY_SEND_TIMEOUT`（默认 10s）。超时 = 上行已死：标记拥塞 → 关掉连接 → 外层 1~15s 退避重连，`ffmpeg` 随连接一起被杀。 |
 | `relay_push.py` `_watch_stall` | 新增卡住看门狗：起流后 `RELAY_STALL_TIMEOUT`（默认 15s）一个字节都没推出去（RTSP 半死 / 相机卡住）就重启 `ffmpeg`（保留 WS，先发 `video_reset` 清平台旧流头），观看端不用重连。 |
 | `relay_push.py` `route_watcher` | 每 `RELAY_ROUTE_POLL`（默认 5s）`ip route get <平台IP>`，**出口网卡一变就断开全部推流连接**。Wi-Fi 断开回落 4G、Wi-Fi 恢复切回快链路，都靠它收敛（日志：`平台出口网卡 wlp4s0 → enx…`）。 |
-| `relay_push.py` 省流档 | 发送超时后 `RELAY_DEGRADE_TTL`（默认 300s）内改用 `640x360@12 / 500k`（`RELAY_DEGRADE_*`）：Wi-Fi 掉到只剩 4G 时宁可糊一点也要连续出图，不再每 10s 超时重连一次。到期自动回配置档。 |
+| `relay_push.py` 自适应档位 | 按 `RELAY_CONGEST_WINDOW`（5s）窗口统计 `ws.send` 占用与实测码率：**占用高 + 码率明显低于目标档位**（或单个分片 `send` 超时）即判「上行吃不下」→ 立刻发 `video_reset` + 重启 `ffmpeg` 换 `640x360@12 / 500k`（`RELAY_DEGRADE_*`），**观看端不用重连**。旧逻辑要等 10s 超时 → 断连 → 重连才降得下来，正好错过最卡的那十几秒。 |
+| `relay_push.py` 回档 | 降档后 `RELAY_DEGRADE_TTL`（默认 300s）到期**不盲目回配置档**：还要 `send` 占用低于 `RELAY_RECOVER_DUTY` 并持续 `RELAY_RECOVER_STABLE`（20s）才升回；链路仍拥塞就继续省流。刚回档又拥塞（`RELAY_FLAP_WINDOW` 内）= 链路没真恢复，窗口翻倍（上限 `RELAY_DEGRADE_TTL_MAX`），避免反复升降。 |
 | `relay_push.py` RTSP 输入 | 加 `-timeout 8000000`（8s socket 读超时）：源侧不吐数据时让 `ffmpeg` 报错退出，配合上面的看门狗。 |
 | `50-platform-route.sh` | 平台 /32 路由**真的变了**才 `systemctl try-restart backpack-relay`（不变不动，避免 dhcp4-change 抖动断流）。Wi-Fi 回来立即切回快链路。 |
 | `server/src/video.rs` | 推流端静默判定 60s → `PUBLISHER_SILENCE` 30s（板端 10s 一次心跳，3 次没到即判死）；`/api/backpack/video/state` 新增 `lastFrameAgeSecs`。 |
@@ -757,7 +758,9 @@ WHEP 拿到 404。处理（已按此配置）：
    - `上行阻塞超过 10s…断开重连` → 上行真死了（看 `ip route get 39.107.55.13`）；
    - `15s 没有推出任何字节…重启拉流` → 源侧卡住（`ffprobe rtsp://127.0.0.1:8554/<stream>`）；
    - `平台出口网卡 A → B` → 出口切换过（B 是 `eth0` 就说明走了狗体内网，见 `deploy/README.md` 三）；
-   - `开始拉流（profile=省流，640x360@12 500k…）` → 上行还在拥塞窗口里。
+   - `开始拉流（profile=省流，640x360@12 500k…）` → 上行还在拥塞窗口里；
+   - `5s 内实测 400kbps（目标 1200kbps，send 占用 95%）→ 改用省流档…` → 降档触发（见 ⑥）；
+   - `上行已恢复（send 占用 8%），回到配置档…` → 链路真好了、已回高画质（见 ⑥）。
 3. 浏览器端不需要动：播放器 8s 没新帧自己重连、连续失败也按 3s 上限持续重试，
    链路恢复后自动出图（不会停在错误层）。
 
@@ -771,6 +774,55 @@ ssh root@39.107.55.13 'journalctl -u rust-admin-robodog -f | grep -E "video publ
 # 码率仍按 §6.10 量（拥塞窗口内应该是 ~500kbps）
 python3 deploy/backpack-relay/measure_bitrate.py --stream dogcam --seconds 20
 ```
+
+#### ⑥ 画质不会自己变：加自适应档位（2026-11-19）
+
+现场问题：「平台中继会因为卡顿自动降画质吗？」—— 原来**不会**。三个环节全是
+「要么全速推、要么断线重连」，没有降档：
+
+| 环节 | 原来的行为 |
+| --- | --- |
+| 板端 `relay_push.py` | 档位只在起流时算一次；唯一的降档路径是 `ws.send` **超时**（10s 一个分片都写不出去）→ 断连 → 重连，重连后才用省流档 |
+| 平台 `server/src/video.rs` | 房间只有一路流（推流端给多少就转多少），没有多码率层/`quality` 参数；观看端追不上就 `lagged` → **关连接**重连（FLV 不能从中途丢帧，注释里有原因） |
+| 浏览器 `VideoPlayer.vue` | flv.js 单码率，没有 ABR（无 buffer 感知掉档） |
+
+所以「卡但还能出图」时只有 TCP 反压：上行吃不下 → `ws.send` 阻塞 → `ffmpeg`
+输出阻塞 → 帧率/码率被压到链路上限（§6.10② 实测 397kbps/7fps）。表现是糊+卡，
+不是稳定换成低画质。
+
+现在（**只改了板端 relay**，平台/浏览器不用动）：
+
+```
+每 RELAY_CONGEST_WINDOW(5s) 记一次：duty = send 占用时间比例，bps = 实测码率
+  duty ≥ RELAY_CONGEST_DUTY(0.5) 且 bps ≤ 目标 × RELAY_CONGEST_BPS_RATIO(0.9)
+        （`RELAY_PROFILE=copy` 没有目标码率，只判 duty）
+        └─► mark_congested()：video_reset + 重启 ffmpeg 换 640x360@12/500k
+              （WS 不动 → 观看端不重连、不黑屏；已在省流档只续窗口）
+
+每 RELAY_RECOVER_POLL(2s) 看一次窗口是否到期
+  _congested_until 到期 且 send 占用 ≤ RELAY_RECOVER_DUTY(0.2) 持续 20s
+        ├─ 是 ─► restore_profile()：回配置档（同样就地重启 ffmpeg）
+        └─ 否 ─► 继续省流（再续一个窗口）
+
+刚回档 RELAY_FLAP_WINDOW(600s) 内又拥塞 = 链路没真恢复 → 窗口 ×2（上限 1800s）
+```
+
+设计要点（改之前先看这几条，都是踩过的）：
+
+- **只看 `send` 耗时不够**：链路恰好跑满时每个 8KB 分片也会阻塞几十 ms、但画面是流畅的。
+  必须「占用高 **且** 实测码率低于目标」才判拥塞，否则正常跑满也会被误降档。
+- **降档不能 `return` 出 `_pump`**：`_pump` 的 `finally` 在没有 `_stopping` 时会关掉 WS，
+  那就变成「断线重连」而不是就地换档。降档后继续泵，重启任务会在锁里取消它并置
+  `_stopping=True`。
+- **`degraded()` 是独立布尔值**，不能由 `_congested_until > now` 推断：窗口到期只是
+  「可以开始评估」，链路没恢复还得继续待在省流档。
+- **回档要看得见链路**：`send` 占用的 EWMA 持续低于 `RELAY_RECOVER_DUTY`；没人在看时
+  不做试探，到期直接清掉拥塞状态（不占带宽、不闪）。
+- 回归：`python3 deploy/backpack-relay/test_relay_push.py`（纯状态机，不需要 websockets /
+  ffmpeg / 网络；9 个用例覆盖降档、窗口统计、到期仍拥塞、恢复回档、抖动翻倍、硬超时、
+  空跑不重启）。
+- 仍是**单档**（配置档 ⇄ 省流档），不做多码率 ABR：要真正的「按 buffer 连续掉档」得给
+  平台房间加多路/多码率层（`video.rs` 的房间模型 + `relay_push.py` 的起停协议都要改）。
 
 #### 排查工具与清单
 
@@ -787,7 +839,7 @@ ssh root@<背包IP> 'python3 /tmp/bw.py'              # 见 §6.10② 的量法�
 | 现象 | 先查 | 结论 |
 | --- | --- | --- |
 | 画面突然定格、重开页面也不动，重启 relay 才好 | `lastFrameAgeSecs`、板端 `上行阻塞` / `没有推出任何字节` | ⑤（2026-11-18 已修，板端要升级 relay） |
-| Wi-Fi 断了再连上，画面还是卡 / 很糊 | 板端 `平台出口网卡 A → B`、`profile=省流` | ⑤ 出口切到慢链路（4G / 狗体内网）；看 `ip route get`，5 分钟内会自己回配置档 |
+| Wi-Fi 断了再连上，画面还是卡 / 很糊 | 板端 `平台出口网卡 A → B`、`profile=省流` | ⑤ 出口切到慢链路（4G / 狗体内网）；看 `ip route get`。现在到期还会先确认链路已恢复才回配置档（⑥），仍糊就说明链路确实只有这么多 |
 | 每 23s 左右断一次、20s 连接超时 | `/api/backpack/video/state` 的 `initBytes` + 服务端是否 `stream reset` | ①（已修） |
 | 有画面但卡、`measure_bitrate` 远低于配置 | 板端 `ip route get 39.107.55.13`、`bw.py` | ② 路由走了慢速 dongle |
 | 反复 `lagged`、`left after ... kbps` 高于出口 | `speedtest-cli` 的 Upload vs 平均 kbps | ③ 降档位 / 升带宽 |

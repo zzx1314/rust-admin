@@ -43,8 +43,23 @@ WebRTC 的 ~200ms 变成 1~2s，收益是任何网络、任何浏览器都能看
 | `RELAY_SEND_TIMEOUT` | `10` | 单个分片写进 WS 的上限（秒）。超时 = 上行已死（Wi-Fi 掉线时 TCP 半开，send 不报错也不返回），断开重连 |
 | `RELAY_STALL_TIMEOUT` | `15` | 起流后这么久一个字节都没推出去（源卡住 / RTSP 半死）就重启 ffmpeg |
 | `RELAY_ROUTE_POLL` | `5` | 每这么久查一次平台出口网卡（`ip route get`），变了就重连；`0` 关闭 |
-| `RELAY_DEGRADE_TTL` | `300` | 上行吃不下当前码率后，这段时间内改用省流档（Wi-Fi 掉了只剩 4G 时不至于一直重连） |
+| `RELAY_DEGRADE_TTL` | `300` | 首次降档后至少在省流档里待多久（秒）；到期还要链路真的恢复才回配置档 |
+| `RELAY_DEGRADE_TTL_MAX` | `1800` | 升降档来回抖时窗口逐次翻倍的上限（秒） |
+| `RELAY_FLAP_WINDOW` | `600` | 回配置档后这段时间内又拥塞 = 链路其实没恢复，窗口翻倍（秒） |
 | `RELAY_DEGRADE_WIDTH` / `_HEIGHT` / `_FPS` / `_BITRATE` | `640` / `360` / `12` / `500k` | 省流档参数 |
+| `RELAY_CONGEST_WINDOW` | `5` | 码率 / send 占用的统计窗口（秒） |
+| `RELAY_CONGEST_DUTY` | `0.5` | 窗口内 `ws.send` 占用超过它算「被反压」 |
+| `RELAY_CONGEST_BPS_RATIO` | `0.9` | 实测码率低于目标档位的这个比例（配合上一项）即判拥塞、降档 |
+| `RELAY_RECOVER_DUTY` / `_STABLE` | `0.2` / `20` | send 占用持续低于它 `_STABLE` 秒才算链路恢复，可以回配置档 |
+
+## 自适应档位
+
+上行吃不下当前档位时**立刻降一档**，不用等断线重连：窗口内实测码率明显低于目标
+（`RELAY_CONGEST_*`）或某个分片 `send` 直接超时 → 发 `video_reset` + 重启 `ffmpeg`
+换 `640x360@12 / 500k`，观看端不用重连。降档后 `RELAY_DEGRADE_TTL` 起算，到期**先
+看链路是否真恢复**（send 占用低于 `RELAY_RECOVER_DUTY` 并持续 `RELAY_RECOVER_STABLE`
+秒）才回配置档，否则继续省流；反复升降时窗口翻倍（上限 `RELAY_DEGRADE_TTL_MAX`）。
+没人在看的时候不做任何试探，到期直接清掉拥塞状态。
 
 依赖：python3 + `websockets`（板子上随 FastAPI 生态已装）+ ffmpeg。
 """
@@ -60,7 +75,8 @@ import sys
 import time
 from datetime import datetime, timezone
 
-import websockets
+# `websockets` 只在真正连平台时用（`stream_worker` 里局部导入）：档位状态机
+# （`test_relay_push.py`）不需要它，导入模块时不强制装好依赖。
 
 PLATFORM = os.environ.get("RELAY_PLATFORM", "http://39.107.55.13:3100").rstrip("/")
 STREAMS = [
@@ -110,34 +126,193 @@ SEND_TIMEOUT = float(os.environ.get("RELAY_SEND_TIMEOUT", "10"))
 STALL_TIMEOUT = float(os.environ.get("RELAY_STALL_TIMEOUT", "15"))
 ROUTE_POLL = float(os.environ.get("RELAY_ROUTE_POLL", "5"))
 
-# 上行拥塞后的一段时间改用省流档：Wi-Fi 断掉只剩 4G（实测 ~0.5Mbps）时，继续按
-# 1200k 推只会每 10s 超时重连一次；降到 500k 至少画面是连续的。到期自动回配置档。
+
+def parse_bitrate(value: str) -> int:
+    """`1200k` / `1.5M` / `800000` → bps（解析不了返回 0 = 目标未知）。"""
+    text = value.strip().lower()
+    try:
+        if text.endswith("k"):
+            return int(float(text[:-1]) * 1000)
+        if text.endswith("m"):
+            return int(float(text[:-1]) * 1_000_000)
+        return int(float(text))
+    except ValueError:
+        return 0
+
+
+# ---- 自适应档位 ------------------------------------------------------------
+#
+# 现场教训：只认「发送超时」（10s 一个分片都写不出去）太晚也太糙 —— 卡顿的绝大部分时间
+# 是「还能推，但被反压成 400kbps/7fps」，这时连接是活的、不会触发任何超时，用户看到的
+# 就是卡；等真超时了才降档，正好错过了最卡的十几秒，而且还得断线重连才换得下来。
+#
+# 所以按窗口统计两个量来判断「吃不下」：
+#   duty = 窗口内 ws.send 占用的时间比例（被反压就接近 1）
+#   bps  = 窗口内实测推出去的码率（被反压就明显低于目标档位）
+# 两者同时成立才降档。只判 duty 不够：链路恰好跑满时每个 8KB 分片也会阻塞几十 ms，
+# 但画面是流畅的；只判 bps 也不够：`-c:v copy` 没有目标码率可言（此时按 duty 单独判）。
+CONGEST_WINDOW = max(1.0, float(os.environ.get("RELAY_CONGEST_WINDOW", "5")))
+CONGEST_DUTY = float(os.environ.get("RELAY_CONGEST_DUTY", "0.5"))
+CONGEST_BPS_RATIO = float(os.environ.get("RELAY_CONGEST_BPS_RATIO", "0.9"))
+RECOVER_DUTY = float(os.environ.get("RELAY_RECOVER_DUTY", "0.2"))
+RECOVER_STABLE = float(os.environ.get("RELAY_RECOVER_STABLE", "20"))
+RECOVER_POLL = float(os.environ.get("RELAY_RECOVER_POLL", "2"))
+# duty 的 EWMA：单窗口的抖动不该立刻决定「链路恢复了没」（Wi-Fi 刚重连时会有一两个空窗口）
+DUTY_ALPHA = 0.3
+
+# 省流档：Wi-Fi 断掉只剩 4G（实测 ~0.5Mbps）时，继续按 1200k 推只会每 10s 超时重连一次；
+# 降到 500k 至少画面是连续的。降档是全局的（上行共享），到期按链路实际恢复情况决定
+# 回不回配置档，反复升降时窗口翻倍。
 DEGRADE_TTL = float(os.environ.get("RELAY_DEGRADE_TTL", "300"))
+DEGRADE_TTL_MAX = float(os.environ.get("RELAY_DEGRADE_TTL_MAX", "1800"))
+FLAP_WINDOW = float(os.environ.get("RELAY_FLAP_WINDOW", "600"))
 DEGRADE_WIDTH = int(os.environ.get("RELAY_DEGRADE_WIDTH", "640"))
 DEGRADE_HEIGHT = int(os.environ.get("RELAY_DEGRADE_HEIGHT", "360"))
 DEGRADE_FPS = max(1, int(os.environ.get("RELAY_DEGRADE_FPS", "12")))
 DEGRADE_BITRATE = os.environ.get("RELAY_DEGRADE_BITRATE", "500k")
+
+# 当前是否在省流档里（跟 `_congested_until` 分开：窗口到期只是「可以开始评估能不能回
+# 配置档」，链路没恢复就继续待在省流档，不是一到点就自己升回去）
+_degraded = False
+# 省流档最早什么时候可以结束
 _congested_until = 0.0
+# 连续「回配置档 → 又拥塞」的次数：决定这次降档要撑多久（2 的幂翻倍）
+_flaps = 0
+_recovered_at = 0.0
+# duty 的 EWMA 与「持续健康」的起点：回配置档前先确认链路真的闲下来了
+_link_duty = 0.0
+_healthy_since = 0.0
+# stream -> StreamSession：档位变了要就地重启这些流
+_sessions: dict[str, "StreamSession"] = {}
 
 # 起流后这么久一个字节都没有，就判定「ffmpeg 拉不到流」并打印排查提示
 NO_DATA_TIMEOUT = 8.0
 
 
 def degraded() -> bool:
-    """当前是否处于「上行吃不下」的省流窗口内。"""
-    return _congested_until > time.monotonic()
+    """当前是否处于「上行吃不下」的省流档里。"""
+    return _degraded
 
 
-def mark_congested(stream: str) -> None:
-    """发送超时 = 链路吃不下当前码率：之后一段时间改用省流档。"""
+def hold_seconds() -> float:
+    """这次降档至少要撑多久：反复升降时逐次翻倍（上限 DEGRADE_TTL_MAX）。"""
+    return float(min(DEGRADE_TTL * (2 ** _flaps), max(DEGRADE_TTL, DEGRADE_TTL_MAX)))
+
+
+def active_profile() -> tuple:
+    """当前该用的输出档位：拥塞窗口内一律走省流档。"""
+    if degraded():
+        return (DEGRADE_WIDTH, DEGRADE_HEIGHT, DEGRADE_FPS, DEGRADE_BITRATE)
+    if PROFILE == "copy":
+        return ("copy",)
+    return (OUT_WIDTH, OUT_HEIGHT, OUT_FPS, OUT_BITRATE)
+
+
+def profile_text(profile: tuple) -> str:
+    if profile and profile[0] == "copy":
+        return "copy（只换容器）"
+    return f"{profile[0]}x{profile[1]}@{profile[2]} {profile[3]}"
+
+
+def profile_bps(profile: tuple) -> int:
+    """档位的目标码率（bps）；`copy` 没有目标码率，返回 0 表示「按 send 占用判」。"""
+    if profile and profile[0] == "copy":
+        return 0
+    return parse_bitrate(profile[3])
+
+
+def note_link_window(duty: float) -> None:
+    """记一个窗口的 send 占用，维护「链路已经健康多久」。"""
+    global _link_duty, _healthy_since
+    _link_duty = _link_duty * (1 - DUTY_ALPHA) + duty * DUTY_ALPHA
+    now = time.monotonic()
+    if _link_duty <= RECOVER_DUTY:
+        if not _healthy_since:
+            _healthy_since = now
+    else:
+        _healthy_since = 0.0
+
+
+def mark_congested(stream: str, reason: str, restream: bool = True) -> None:
+    """上行吃不下当前档位：切省流档；已经在省流档就只把窗口往后延。
+
+    `restream=True` 时立刻让正在跑的流换档（发 `video_reset` + 重启 ffmpeg，WS 不动），
+    不必再等一次「超时 → 断连 → 重连」—— 那中间的十几秒正是最卡的时候。
+    """
+    global _degraded, _congested_until, _flaps, _recovered_at
+    now = time.monotonic()
+    if _degraded:
+        # 省流档里还是被反压（链路比 500k 还差）：只续窗口，不重复降档/重启
+        _congested_until = max(_congested_until, now + hold_seconds())
+        return
+    # 刚回配置档又立刻拥塞 = 链路其实没恢复：窗口翻倍，别来回升降把画面折腾碎
+    _flaps = min(_flaps + 1, 5) if _recovered_at and now - _recovered_at < FLAP_WINDOW else 0
+    _recovered_at = 0.0
+    _degraded = True
+    _congested_until = now + hold_seconds()
+    log(
+        f"[{stream}] {reason} → 改用省流档 {profile_text(active_profile())}"
+        f"（至少保持 {hold_seconds():g}s）"
+    )
+    if restream:
+        restream_all("降档")
+
+
+def restore_profile() -> None:
+    """链路确认恢复：回到配置档（已经在配置档的流不动）。"""
+    global _degraded, _congested_until, _recovered_at
+    _degraded = False
+    _congested_until = 0.0
+    _recovered_at = time.monotonic()
+    log(
+        f"上行已恢复（send 占用 {_link_duty * 100:.0f}%），回到配置档 "
+        f"{profile_text(active_profile())}"
+    )
+    restream_all("回配置档")
+
+
+def restream_all(reason: str) -> None:
+    """档位变了：让正在跑的流就地重启 ffmpeg 换参数（WS 保留，观看端不用重连）。"""
+    for session in list(_sessions.values()):
+        if not session.running:
+            continue
+        try:
+            asyncio.get_running_loop().create_task(session.restart_for_profile(reason))
+        except RuntimeError:  # 没有事件循环（被当模块导入时）：什么都不用做
+            pass
+
+
+async def profile_check() -> None:
+    """省流窗口到期：链路真恢复了才回配置档，否则继续省流（不盲目到点就升回去）。"""
     global _congested_until
-    was_low = degraded()
-    _congested_until = time.monotonic() + DEGRADE_TTL
-    if not was_low:
+    if not degraded():
+        return
+    now = time.monotonic()
+    if now < _congested_until:
+        return
+    running = any(session.running for session in _sessions.values())
+    # 没人在看就没有试探成本，直接清掉拥塞状态；有人在看要看 send 占用是否真的下来了
+    healthy = (not running) or (
+        _healthy_since > 0 and now - _healthy_since >= RECOVER_STABLE
+    )
+    if not healthy:
+        _congested_until = now + hold_seconds()
         log(
-            f"[{stream}] 上行吃不下当前码率，{DEGRADE_TTL:g}s 内改用省流档 "
-            f"{DEGRADE_WIDTH}x{DEGRADE_HEIGHT}@{DEGRADE_FPS} {DEGRADE_BITRATE}"
+            f"省流窗口到期但链路仍拥塞（send 占用 {_link_duty * 100:.0f}%），"
+            f"再省流 {hold_seconds():g}s"
         )
+        return
+    restore_profile()
+
+
+async def profile_watcher() -> None:
+    """每 `RELAY_RECOVER_POLL` 秒检查一次省流窗口要不要结束。"""
+    while True:
+        await asyncio.sleep(max(0.5, RECOVER_POLL))
+        try:
+            await profile_check()
+        except Exception as exc:  # noqa: BLE001 - 这个巡检循环不能死
+            log(f"档位巡检异常：{exc!r}")
 
 
 def platform_host() -> str:
@@ -320,12 +495,8 @@ def _encoder_works(name: str) -> bool:
 
 
 def ffmpeg_args(stream: str) -> list[str]:
+    profile = active_profile()
     low = degraded()
-    width, height, fps, bitrate = (
-        (DEGRADE_WIDTH, DEGRADE_HEIGHT, DEGRADE_FPS, DEGRADE_BITRATE)
-        if low
-        else (OUT_WIDTH, OUT_HEIGHT, OUT_FPS, OUT_BITRATE)
-    )
     source = f"{RTSP_BASE}/{stream}"
     args = [
         FFMPEG,
@@ -351,11 +522,15 @@ def ffmpeg_args(stream: str) -> list[str]:
         "-an",  # 背包各流都没有音轨，FLV 里带空音轨会让 flv.js 报解析错
     ]
     # 省流窗口内即使配的是 copy 也要重编码：copy 没法降码率，碰上只有 4G 的链路只会超时重连
-    encoder = None if (PROFILE == "copy" and not low) else pick_encoder()
+    encoder = None if (profile[0] == "copy" or low) else pick_encoder()
     if encoder is None:
         # 只换容器：源已经是 H.264 且码率不高时才该走这里
         args += ["-c:v", "copy"]
     else:
+        if profile[0] == "copy":
+            # copy 档位 + 编码器探测失败（没有可用编码器）时没有编码参数，按 default 档编
+            profile = (OUT_WIDTH, OUT_HEIGHT, OUT_FPS, OUT_BITRATE)
+        width, height, fps, bitrate = profile
         # light：先缩后编。`force_original_aspect_ratio=decrease` 只缩不放，
         # 所以 640x360 的 preview 不会被放大成 720p（白吃码率与 CPU）。
         args += [
@@ -401,6 +576,14 @@ class StreamSession:
         self.chunks = 0
         # 最后一次真正写进 WS 的时刻：卡住判定（源不吐字节）用它
         self.last_send = 0.0
+        # 当前这条流用的档位（降档/回档时对比它，决定用不用重启 ffmpeg）
+        self.profile: tuple | None = None
+        # 推流用的 WS：降档/回档要就地重启 ffmpeg，不需要重新建连接
+        self.ws = None
+        # 拥塞统计窗口：send 占用的累计时长 / 推出去的字节
+        self._win_at = 0.0
+        self._win_blocked = 0.0
+        self._win_bytes = 0
         # 主动停流（video_stop / 断链清理）时置 True：推流协程退出时据此判断
         # 「是我自己关的」，不要顺手把 WS 也关掉
         self._stopping = False
@@ -422,16 +605,16 @@ class StreamSession:
         self.bytes_sent = 0
         self.chunks = 0
         self.last_send = time.monotonic()
+        self.ws = ws
+        self._win_at = self.last_send
+        self._win_blocked = 0.0
+        self._win_bytes = 0
         low = degraded()
-        if PROFILE == "copy" and not low:
+        self.profile = active_profile()
+        if self.profile[0] == "copy":
             detail = "，-c:v copy"
         else:
-            width, height, fps, bitrate = (
-                (DEGRADE_WIDTH, DEGRADE_HEIGHT, DEGRADE_FPS, DEGRADE_BITRATE)
-                if low
-                else (OUT_WIDTH, OUT_HEIGHT, OUT_FPS, OUT_BITRATE)
-            )
-            detail = f"，{width}x{height}@{fps} {bitrate} enc={pick_encoder()}"
+            detail = f"，{profile_text(self.profile)} enc={pick_encoder()}"
         log(
             f"[{self.stream}] 平台有观看者，开始拉流"
             f"（profile={'省流' if low else PROFILE}{detail}，出口 {egress_iface() or '未知'}）"
@@ -448,7 +631,10 @@ class StreamSession:
             )
         except asyncio.TimeoutError:
             # 这条连接已经死了：不起 ffmpeg，断开让外层重连
-            mark_congested(self.stream)
+            # （restream=False：链路已死，其他流换档会在重连时自己生效）
+            mark_congested(
+                self.stream, f"video_reset 发不出去（{SEND_TIMEOUT:g}s）", restream=False
+            )
             log(f"[{self.stream}] 上行已死（video_reset 发不出去），断开重连")
             await close_quietly(ws)
             return
@@ -487,15 +673,62 @@ class StreamSession:
                 self.proc.kill()
         self.proc = None
 
-    async def _restart(self, ws) -> None:
-        """卡住时重启 ffmpeg，但保留 WS（观看端不用重连，平台靠 video_reset 清旧流头）"""
+    async def _restart(
+        self, ws, reason: str = "卡住，重启拉流", only_if_profile_changed: bool = False
+    ) -> None:
+        """重启 ffmpeg，但保留 WS（观看端不用重连，平台靠 video_reset 清旧流头）。
+
+        `only_if_profile_changed=True`：档位已经和目标一致就不折腾 —— 降档/回档时用，
+        避免把本来就在省流档的流也重启一遍（白闪一下 + 重新等关键帧）。
+        """
         try:
             async with self._lock:
-                await self._stop_locked("卡住，重启拉流")
+                if not self.running:
+                    return  # 期间被 video_stop 停了，不能偷偷把流拉起来
+                if only_if_profile_changed and active_profile() == self.profile:
+                    return
+                await self._stop_locked(reason)
                 await self._start_locked(ws)
         except Exception as exc:  # noqa: BLE001 - 重启失败就断开，交给外层重连
             log(f"[{self.stream}] 重启拉流失败：{exc!r}")
             await close_quietly(ws)
+
+    async def restart_for_profile(self, reason: str) -> None:
+        """档位变了：就地重启 ffmpeg 换参数（观看端不用重连）"""
+        if self.profile is not None and active_profile() == self.profile:
+            return  # 已经在这个档位（_restart 里面还会在锁内再确认一次）
+        log(
+            f"[{self.stream}] {reason}：重启拉流换档位 → "
+            f"{profile_text(active_profile())}"
+        )
+        await self._restart(self.ws, reason, only_if_profile_changed=True)
+
+    def _sample_congestion(self, now: float) -> bool:
+        """按窗口统计「实测码率 / send 占用」，判断上行是不是吃不下当前档位。
+
+        只看 send 耗时不够：链路恰好跑满时每个 8KB 分片也会阻塞几十 ms，画面却是流畅的。
+        真正能说明问题的是「send 占用接近 100% **且**实测码率明显低于目标档位」—— 那就是
+        ffmpeg 被反压、帧被拖慢，用户看到的就是卡。`copy` 没有目标码率，此时按 send 占用判。
+        """
+        elapsed = now - self._win_at
+        if elapsed < CONGEST_WINDOW:
+            return False
+        bps = self._win_bytes * 8 / elapsed
+        duty = min(1.0, self._win_blocked / elapsed)
+        self._win_at = now
+        self._win_bytes = 0
+        self._win_blocked = 0.0
+        note_link_window(duty)
+        target = profile_bps(active_profile())
+        congested = duty >= CONGEST_DUTY and (
+            target <= 0 or bps <= target * CONGEST_BPS_RATIO
+        )
+        if congested:
+            log(
+                f"[{self.stream}] {CONGEST_WINDOW:g}s 内实测 {bps / 1000:.0f}kbps"
+                f"（目标 {target / 1000:.0f}kbps，send 占用 {duty * 100:.0f}%）"
+            )
+        return congested
 
     async def _watch_stall(self, ws) -> None:
         """ffmpeg 活着但一个字节也产不出来（Wi-Fi 掉线 / 相机卡住）时自己重启。
@@ -539,23 +772,36 @@ class StreamSession:
                     # 上行死掉时 send 会永久挂着（TCP 半开：不报错也不返回），
                     # ffmpeg 被反压到停住但进程还在 —— 现场就是「Wi-Fi 断了画面冻住，
                     # 重连也拉不起来」。超时就当链路已死，断开重连。
+                    started = time.monotonic()
                     await asyncio.wait_for(ws.send(chunk), SEND_TIMEOUT)
                 except asyncio.TimeoutError:
-                    mark_congested(self.stream)
+                    mark_congested(
+                        self.stream,
+                        f"上行阻塞超过 {SEND_TIMEOUT:g}s（Wi-Fi 掉线 / 平台不可达）",
+                        restream=False,
+                    )
                     log(
                         f"[{self.stream}] 上行阻塞超过 {SEND_TIMEOUT:g}s"
                         "（Wi-Fi 掉线 / 平台不可达），断开重连"
                     )
                     await close_quietly(ws)
                     return
-                self.last_send = time.monotonic()
+                now = time.monotonic()
+                self.last_send = now
                 self.bytes_sent += len(chunk)
                 self.chunks += 1
+                self._win_blocked += now - started
+                self._win_bytes += len(chunk)
                 if DEBUG and self.chunks <= 5:
                     log(
                         f"[{self.stream}] chunk#{self.chunks} {len(chunk)}B "
-                        f"累计 {self.bytes_sent}B"
+                        f"send {1000 * (now - started):.1f}ms 累计 {self.bytes_sent}B"
                     )
+                # 还没到超时那么糟，但已经能看出「推不动了」：立刻降档（restream_all
+                # 会重启本路 ffmpeg 换参数）。这里**不能 return** —— 退出 _pump 会走
+                # finally 把 WS 关掉，那就变成「断线重连」而不是就地换档了。
+                if self._sample_congestion(now) and not degraded():
+                    mark_congested(self.stream, "上行吃不下当前档位")
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - 连接断了交给外层重连
@@ -595,8 +841,12 @@ class StreamSession:
 
 async def stream_worker(stream: str) -> None:
     """一条流一个长连接：注册房间 → 等 video_start / video_stop → 重连退避"""
+    import websockets  # 局部导入：状态机可以脱离依赖被测试
+
     room = f"{ROOM_PREFIX}{stream}"
     session = StreamSession(stream)
+    # 登记进去：降档/回档要看有谁在跑（`restream_all` 用）
+    _sessions[stream] = session
     backoff = MIN_BACKOFF
     while True:
         try:
@@ -673,7 +923,9 @@ async def main() -> int:
     log(
         f"上行保护：分片发送上限 {SEND_TIMEOUT:g}s / 卡住重启 {STALL_TIMEOUT:g}s / "
         f"出口巡检 {ROUTE_POLL:g}s / 省流档 {DEGRADE_WIDTH}x{DEGRADE_HEIGHT}@{DEGRADE_FPS} "
-        f"{DEGRADE_BITRATE}（拥塞后 {DEGRADE_TTL:g}s 内）"
+        f"{DEGRADE_BITRATE}（{CONGEST_WINDOW:g}s 内实测码率 ≤{CONGEST_BPS_RATIO:.0%} 目标且 "
+        f"send 占用 ≥{CONGEST_DUTY:.0%} 即降档，至少保持 {DEGRADE_TTL:g}s，"
+        f"send 占用 ≤{RECOVER_DUTY:.0%} 持续 {RECOVER_STABLE:g}s 才回配置档）"
     )
     if PROFILE == "copy":
         log("输出档位 copy：只换容器（1080p60 源会原样推 4~8Mbps，公网出口小必卡）")
@@ -684,6 +936,8 @@ async def main() -> int:
         )
     tasks = [asyncio.create_task(stream_worker(stream)) for stream in STREAMS]
     tasks.append(asyncio.create_task(route_watcher()))
+    # 省流窗口到期后按链路实际情况决定回不回配置档
+    tasks.append(asyncio.create_task(profile_watcher()))
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

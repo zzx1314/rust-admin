@@ -1452,7 +1452,12 @@ mediamtx 的 `dogcam`，浏览器直连 mediamtx（WHEP）或走平台中继（F
   `-use_wallclock_as_timestamps 1` 把 PTS 换成到达时间，避免浏览器 MSE 反复饿死（慢放）。
 - **上行掉线要自愈**（2026-11-18）：板端 relay 的分片发送带超时（默认 10s），超时即判
   「Wi-Fi 半开」并断开重连；15s 一个字节都没推出去（源卡住）就重启 `ffmpeg`；每 5s 巡检
-  平台出口网卡，出口变了主动重建连接；拥塞后 5 分钟内自动降到 `640x360@12 / 500k`。
+  平台出口网卡，出口变了主动重建连接。
+- **画质自己降**（2026-11-19）：relay 每 5s 统计一次 `ws.send` 占用与实测码率，发现「被反压
+  + 码率低于目标档位」就就地换 `640x360@12 / 500k`（发 `video_reset` + 重启 ffmpeg，观看端
+  不用重连），不必再等 10s 超时断线；到期先看链路是否真恢复才回配置档，反复升降时窗口翻倍。
+  降档是板端行为，平台/前端不用改；参数与状态机见
+  `business/docs/backpack-video-integration.md` §6.10⑥。
   平台侧推流端静默判定 30s，`/api/backpack/video/state` 多一个 `lastFrameAgeSecs`。
   旧版 relay 的「Wi-Fi 一断画面永久冻住」就是发送无超时 + `video_start` 幂等吃掉导致的，
   详见 `docs/backpack-video-integration.md` §6.10⑤。
