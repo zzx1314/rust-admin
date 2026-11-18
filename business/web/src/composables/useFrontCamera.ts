@@ -87,20 +87,25 @@ export type FrontCameraPath = "direct" | "relay" | "none";
 
 export function frontCameraPath(
   status: BackpackStatus | null,
-  relayOnline: boolean
+  relayOnline: boolean,
+  /** 有没有拿到「中继房间」快照；`false` = 还不知道（接口刚失败过），此时不能判成离线 */
+  relayKnown = true
 ): FrontCameraPath {
   if (!status?.configured) return "none";
-  if (relayOnline) return "relay";
-  // 中继推流端不在：现场入口 / 内网页面还有直连可用（公网页面只能等中继恢复）
-  if (status.mode === "direct") {
-    return status.agent.reachable && status.webrtc.base ? "direct" : "relay";
-  }
+  // 中继在线 → 中继；**状态未知也先中继**：它任何网络都能用，而直连一旦判错就是
+  // 「连不上板端视频服务（mediamtx :8889）」——2026-11-18 现场就是这样卡住的。
+  if (relayOnline || !relayKnown) return "relay";
+  // 只有「确定中继没在推 + 页面本身在内网」才轮到直连（现场入口 / 同网段的控制台）。
+  // `status.agent.reachable` 是**服务端**能不能连到板端，不代表操作员的浏览器能直连
+  // 192.168.x.x:8889 —— 拿它决定直连是错的（公网页面必然弹 :8889 连不上）。
   return isPrivateOrigin() && status.webrtc.base ? "direct" : "relay";
 }
 
 export function useFrontCamera() {
   const status = ref<BackpackStatus | null>(null);
   const rooms = ref<BackpackVideoRoom[]>([]);
+  /** 房间快照是否拿到过：接口偶发失败时保留上一次结果，别把「中继在线」误判成离线 */
+  const roomsKnown = ref(false);
   const error = ref("");
   let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -118,8 +123,12 @@ export function useFrontCamera() {
           ? statusResult.reason.message
           : "读取背包状态失败";
     }
-    // 房间快照失败不影响主流程：默认仍按中继走，真正的报错由播放器显示
-    rooms.value = roomsResult.status === "fulfilled" ? roomsResult.value : [];
+    // 房间快照失败**不能清空**：清空会让 `relayOnline` 变假 → 页面切到直连 →
+    // 公网页面必然「连不上板端视频服务（mediamtx :8889）」。保留上一次结果、标记未知。
+    if (roomsResult.status === "fulfilled") {
+      rooms.value = roomsResult.value;
+      roomsKnown.value = true;
+    }
   }
 
   onMounted(() => {
@@ -144,7 +153,9 @@ export function useFrontCamera() {
     )
   );
 
-  const path = computed(() => frontCameraPath(status.value, relayOnline.value));
+  const path = computed(() =>
+    frontCameraPath(status.value, relayOnline.value, roomsKnown.value)
+  );
   const whepBase = computed(() => status.value?.webrtc.base ?? null);
 
   /** 直连模式下压在画面中央的可读原因（中继模式的报错由 VideoPlayer 自己显示） */

@@ -16,6 +16,8 @@
  * `skipAudioCodecHacks: true` 的原因。
  */
 
+import { isPrivateOrigin } from "@/utils/runtime";
+
 export type WhepPhase = "connecting" | "live" | "retry" | "closed";
 
 export interface WhepDetail {
@@ -74,11 +76,41 @@ async function iceServersOf(url: string): Promise<RTCIceServer[]> {
   }
 }
 
-/** 浏览器抛的原始错误对现场没意义，换成能直接指导排查的一句话 */
-function friendly(error: unknown): string {
+/**
+ * 浏览器抛的原始错误对现场没意义，换成能直接指导排查的一句话。
+ *
+ * 「failed to fetch」这一类**基本只有两种原因**，而且都跟板子无关（板子好着：
+ * 同网段机器 `curl -X OPTIONS http://<背包>:8889/<stream>/whep` 会回 204）：
+ *
+ * 1. 页面本身是**公网地址**（`http://39.107.55.13:3100`）→ Chrome（141+ 灰度、157 全量）
+ *    会拦截公网页面对内网 IP 的访问，除非用户在地址栏允许「本地网络访问」；
+ * 2. 页面在内网但浏览器/系统层拦了（权限被拒过、防火墙、换了网段）。
+ *
+ * 所以把「本页来源 + 目标地址 + 现场入口」都打出来，现场不用猜（2026-11-18 反馈：
+ * 操作员电脑明明在同一网段，却只看到一句「连不上板端视频服务」）。
+ */
+function friendly(error: unknown, url: string): string {
   const raw = error instanceof Error ? error.message : String(error);
   if (/failed to fetch|networkerror|load failed/i.test(raw)) {
-    return "连不上板端视频服务（mediamtx :8889）";
+    let host = "板端";
+    let entry = "现场入口 http://<背包IP>:8080";
+    try {
+      host = new URL(url).host;
+      entry = `现场入口 http://${new URL(url).hostname}:8080`;
+    } catch {
+      /* 地址解析不出来就用默认文案 */
+    }
+    const origin = location.origin;
+    if (isPrivateOrigin()) {
+      return (
+        `连不上板端视频服务（${host}）：本页来自 ${origin}（内网），确认背包 mediamtx 在跑、` +
+        `浏览器允许本地网络访问；也可以切「平台中继」`
+      );
+    }
+    return (
+      `连不上板端视频服务（${host}）：本页来自 ${origin}（公网地址），Chrome 会拦截公网页面` +
+      `访问内网 IP —— 在地址栏左侧允许「本地网络访问」后刷新，或用${entry}打开控制台，或切「平台中继」`
+    );
   }
   if (/operationerror|not supported/i.test(raw)) {
     return "浏览器不支持该视频编码（背包推的是 H264）";
@@ -207,7 +239,7 @@ export function startWhep(options: WhepOptions): WhepSession {
       const answer = await response.text();
       await next.setRemoteDescription({ type: "answer", sdp: answer });
     } catch (error) {
-      scheduleRetry(friendly(error));
+      scheduleRetry(friendly(error, options.url));
     }
   }
 
