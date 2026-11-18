@@ -629,52 +629,79 @@ Agent 挂了」立刻表现为 `reachable=false`，没有一份迟早过期的�
 这一页的 `status`（登录态、`?transport=tunnel`、页面是否公网打开）；两边都黑就是 §6.7 的
 `dogcam` path 问题，按 `ffprobe rtsp://<背包IP>:8554/dogcam` 往下查。
 
-### 6.10 「平台中继很卡」排查（2026-11-17）：出口带宽 < 中继码率
+### 6.10 「平台中继很卡」排查与修复（2026-11-18 上线验证）
 
-**现场反馈**：实时视频切「平台中继」后很卡（声音/画面一卡一卡、角标在 LIVE / 重连中之间跳），
-而切「现场直连」（WHEP）是流畅的；只是背包不可达，只能用中继。
+现场反馈：实时视频切「平台中继」很卡（甚至每 20 多秒断一次），切「现场直连」反而流畅；
+只是背包不是总能直连。2026-11-18 在正式环境逐项实测，**三个独立原因**，都已修：
 
-**结论**：不是前端播放器，也不是服务端房间机制，而是**平台公网出口带宽小于中继码率**：
+#### ① 每 23s 精确断一次：`init` 残留导致不发 `video_start`
 
-| 证据 | 数据 |
-| --- | --- |
-| 平台出口带宽（ECS `39.107.55.13` 上 `speedtest-cli --simple`） | Download 10.57 Mbps / **Upload 2.53 Mbps** |
-| 中继源 | `dogcam` = 本体前置 **1080p60**（HL4.0），`relay_push.py` 是 `-c:v copy` → 4~8Mbps 原样出去 |
-| 服务端日志 | `viewer of bp:dogcam lagged, dropped 39/82 frames; closing for a clean restart`（24h 内 11 次） |
-| 观看端日志 | `last viewer of bp:dogcam left` 每 15~20s 一次（浏览器 8s 没新帧 → 重连） |
-| 现场直连为什么没事 | WHEP 是浏览器 ⇄ 板端（内网/局域网），**不经过 ECS**，也不占公网出口 |
+- 现象：平台日志 `last viewer of bp:dogcam left` 的时间戳精确间隔 23.0s；
+  观看端先「正在连接平台中继」，20s 连接超时（`CONNECT_TIMEOUT_MS`）后重连。
+- 根因：最后一个人看完 → 看门狗 `video_stop` → 板端杀掉 ffmpeg，**但房间里的
+  `init`（FLV 头 + 关键帧）还留着**。旧判断是
+  「`first && (!has_init || !has_publisher)` 才发 `video_start`」，
+  于是新观看者看到「有 init + publisher 在线」→ 永远不重新起流 → 只能收到 40KB 旧流头。
+  `GET /api/backpack/video/state` 可直接看到 `initBytes: 41361` + `publisher: true` 但没有新字节。
+- 修复（`server/src/video.rs`）：**每个「第一个观看者」都发 `video_start`**
+  （板端 `StreamSession.start()` 幂等，已在推的流不会被重启）；看门狗停流时
+  `reset_stream()` 清掉上一轮 init。
+- 回归：`server/tests/video_relay.rs::stale_stream_header_does_not_block_video_start`。
 
-链路要过两段公网：板端上行（现场 4G/宽带）→ ECS（上传计费/限额）→ 观看端下载。
-**ECS 的公网出口是硬顶**：2.53Mbps 连一路 1080p60 `copy` 都不够，更别说同时开两个页面。
-服务端每路观看者用的是 512 片 × 8KB ≈ 4MB 的广播缓冲，码率超过出口后浏览器侧 `sink.send`
-反压 → 广播通道溢出 → `Lagged` → 服务端主动断开观看者（FLV 字节流不能从中间丢帧），
-浏览器 250ms~3s 后重连 → **卡 → 断开 → 重连** 的循环。
+#### ② 码率只有 400kbps / 7fps：板端出公网走的是 4G dongle
 
-**修法**：让中继输出的码率落到出口预算内（与旧客户端回传的 15fps/1.2Mbps 同一量级）：
+- 现象：`measure_bitrate.py` 量到 `dogcam: 397 kbps, 7 fps`（light 档位却是 1200k/20fps），
+  板端 `推流结束` 的字节数也对得上 ~0.5Mbps。
+- 根因：板子的默认路由是 **4G dongle**（`10.128.102.x`，`enx020c29a39b6d`，metric 100），
+  实测上行只有 **0.56Mbps**；而 Wi-Fi `HuaZhi`（`wlp4s0`）上行 **25Mbps**。
+  `ws.send` 被上行带宽反压 → ffmpeg 输出阻塞 → 实际帧率/码率被压到链路上限。
+- 修复：**只给平台 IP 加一条 /32 路由走 Wi-Fi**（不动默认路由，避免影响其它服务）：
+  `deploy/backpack-relay/50-platform-route.sh` → 安装到
+  `/etc/NetworkManager/dispatcher.d/50-backpack-relay-route`（Wi-Fi up / dhcp4-change 时自动补）。
+  ```bash
+  ip route replace 39.107.55.13/32 via 192.168.40.254 dev wlp4s0   # 手工等价命令
+  ```
+  改完必须 `systemctl restart backpack-relay`：已有 WS 连接走的是旧路由（conntrack），不重启不生效。
 
-- 板端 `relay_push.py` 默认 `RELAY_PROFILE=light`：`scale=1280x720(只缩不放)` +
-  `fps=20` + `-b:v 1200k` + `-g 40`（2s 一个关键帧），编码器运行时试编挑
-  `h264_rkmpp` → `h264_v4l2m2m` → `libx264`；板端 unit 里旧的 `RELAY_TRANSCODE=0`
-  已忽略（否则会把档位压回 `copy`）。
-- 带宽更紧：`RELAY_BITRATE=800k RELAY_FPS=15`（约 0.8Mbps，一路仍能看清人影/火点）。
-- 只有一个观看者时 ~1.2Mbps，2.53Mbps 出口还能看；**同时开多个视频页面就会互相挤**，
-  真要多看请升级 ECS 公网带宽（按 1.5Mbps/路估算）。
-- 服务端现在会在观看结束时打
-  `last viewer of bp:dogcam left after 12.3s / 1800 KB（平均 1150 kbps）`，
-  `lagged` 日志也带上了已转发字节 —— 下次一眼就能确认「码率 vs 带宽」。
+#### ③ 平台公网出口 2.5Mbps < 1080p60 copy 的 4~8Mbps
 
-**验证**：改完在板端 `journalctl -u backpack-relay -f` 应看到
-`开始拉流（profile=light，1280x720@20 1200k enc=h264_rkmpp）`；平台日志里不再出现
-`lagged`，`last viewer ... 平均 ≈1200 kbps`，画面连续、不再每 15s 断一次。
+- 平台 `speedtest-cli --simple`：Download 10.57 Mbps / **Upload 2.53 Mbps**（出口就是它）。
+- 中继原默认 `-c:v copy` 把 1080p60 原样推出去（4~8Mbps）→ 浏览器侧 `sink.send` 反压 →
+  广播缓冲溢出 → `lagged` 断开重连（24h 内 11 次）。
+- 修复：`relay_push.py` 默认 `RELAY_PROFILE=light`（720p20 / 1.2Mbps / GOP 2s，
+  编码器试编挑 `h264_rkmpp` → `h264_v4l2m2m` → `libx264`）。带宽紧再压
+  `RELAY_BITRATE=800k RELAY_FPS=15`；出口 ≥6Mbps 才考虑 `copy`。
 
-**量化工具**：在平台机器上跑 `deploy/backpack-relay/measure_bitrate.py`（走 loopback，
-不受公网带宽影响，量的是推流端真实码率 / 帧率）：
+#### 验证（2026-11-18 10:10 发布后，同一环境）
 
-```bash
-ssh root@39.107.55.13 'pip3 install -q -i https://mirrors.aliyun.com/pypi/simple websockets'
-scp deploy/backpack-relay/measure_bitrate.py root@39.107.55.13:/tmp/
-ssh root@39.107.55.13 'python3 /tmp/measure_bitrate.py --stream dogcam --seconds 20'
-# 预期：light ≈1200 kbps / 20 fps；copy（旧默认）= 4000~8000 kbps / 60 fps
+```text
+# 平台机器上（loopback，不占公网出口）
+dogcam: 1146 kbps, 19 fps, 收到 2.74 MB / 20.1s
+# 等 75s 让看门狗 video_stop（旧代码这里会残留 init 导致起不来）
+dogcam: 1156 kbps, 19 fps, 收到 2.07 MB / 15.0s
+# 平台日志
+last viewer of bp:dogcam left after 20.0s / 2806 KB（平均 1147 kbps）
+# 板端日志
+[dogcam] 开始拉流（profile=light，1280x720@20 1200k enc=h264_rkmpp）
 ```
 
-再和出口比：`speedtest-cli --simple` 的 Upload 就是平台能推给浏览器的上限。
+`lagged` 不再出现；`last viewer ... left` 不再按 23s 周期出现。
+
+#### 排查工具与清单
+
+```bash
+# 1) 中继真实码率 / 帧率（在平台机器上，loopback）
+python3 deploy/backpack-relay/measure_bitrate.py --stream dogcam --seconds 20
+# 2) 平台出口上限
+ssh root@39.107.55.13 'speedtest-cli --simple'      # 看 Upload
+# 3) 板端到平台走哪条路由 / 上行多少
+ssh root@<背包IP> 'ip route get 39.107.55.13'
+ssh root@<背包IP> 'python3 /tmp/bw.py'              # 见 §6.10② 的量法（WS 推 2MB 计速）
+```
+
+| 现象 | 先查 | 结论 |
+| --- | --- | --- |
+| 每 23s 左右断一次、20s 连接超时 | `/api/backpack/video/state` 的 `initBytes` + 服务端是否 `stream reset` | ①（已修） |
+| 有画面但卡、`measure_bitrate` 远低于配置 | 板端 `ip route get 39.107.55.13`、`bw.py` | ② 路由走了慢速 dongle |
+| 反复 `lagged`、`left after ... kbps` 高于出口 | `speedtest-cli` 的 Upload vs 平均 kbps | ③ 降档位 / 升带宽 |
+| 同时开多个视频页面更卡 | 每个观看者 = 一份出口带宽 | 出口按 1.5Mbps/路 规划 |

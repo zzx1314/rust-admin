@@ -1462,6 +1462,7 @@ mediamtx 的 `dogcam`，浏览器直连 mediamtx（WHEP）或走平台中继（F
 | 项 | 要求 |
 | --- | --- |
 | 板端 relay | `backpack-relay` 服务在跑，且能出公网（`ws://<平台>/ws/device/video`） |
+| 板端出口路由 | 到平台的流量必须走 Wi-Fi / 有线（实测 4G dongle 上行仅 ~0.5Mbps、Wi-Fi ~25Mbps）；用 `deploy/backpack-relay/50-platform-route.sh` 给平台加 /32 路由，详见 `docs/backpack-video-integration.md` §6.10 |
 | 背包 mediamtx | `dogcam` path 能拉通（`ffprobe rtsp://<背包IP>:8554/dogcam`） |
 | 平台 | 无需额外媒体服务器；`/ws/device/video` 与 `/api/backpack/video/ws` 已内置 |
 

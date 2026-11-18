@@ -361,6 +361,60 @@ async fn backpack_stream_is_relayed_to_browser_and_stops_after_a_grace_period() 
     );
 }
 
+/// 上一轮的流头（init）还在时，**不许**因此跳过 `video_start`。
+///
+/// 现场 2026-11-18：最后一个人看完 → 看门狗 `video_stop` → 板端杀掉 ffmpeg，但房间里的
+/// `init` 还留着。旧逻辑「有 init 且有 publisher 就不发 video_start」会让板端永远不重新
+/// 起流，浏览器只能收到 40KB 旧流头 → 20s 连接超时 → 重连，表现为精确每 23s 断一次。
+#[tokio::test]
+async fn stale_stream_header_does_not_block_video_start() {
+    let (state, _db) = test_state().await;
+    let (port, router) = spawn_server(state.clone()).await;
+    let token = login_token(&router).await;
+    let mut publisher = publisher_for(port, &state).await;
+
+    // 第一轮：有人看 → 起流 → 推流头
+    let (mut viewer, _) = connect_async(format!(
+        "ws://127.0.0.1:{port}/api/backpack/video/ws?stream=dogcam&token={token}"
+    ))
+    .await
+    .expect("观看通道连接失败");
+    next_msg(&mut publisher, "video_start").await;
+    let (init, _frame) = flv_stream();
+    publisher.send(Message::Binary(init.clone())).await.unwrap();
+    assert_eq!(next_binary(&mut viewer, "首轮流头").await, init);
+
+    // 第一个人离开
+    viewer.close(None).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.video_hub.viewers(ROOM).await != 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("观看者计数应归零");
+
+    // 模拟「流已经停了，但上一轮的 init 没被清掉」（旧逻辑就是被它骗过去的）
+    state.video_hub.mark_streaming(ROOM, false).await;
+    assert!(
+        state.video_hub.has_publisher(ROOM).await,
+        "推流连接应该还在（只是 ffmpeg 停了）"
+    );
+
+    // 新观看者进来：必须再次向板端要流，否则永远只有一段旧流头
+    let (_again, _) = connect_async(format!(
+        "ws://127.0.0.1:{port}/api/backpack/video/ws?stream=dogcam&token={token}"
+    ))
+    .await
+    .expect("第二个观看者连接失败");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        next_msg(&mut publisher, "video_start"),
+    )
+    .await
+    .expect("残留流头不应阻止 video_start（板端不会重新起流 → 每 23s 断一次）");
+}
+
 /// 用真实 ffmpeg 生成的 FLV 验证流头解析（手写字节可能和 ffmpeg 的实际布局有出入）
 ///
 /// 本机没装 ffmpeg 时自动跳过：现场板端侧才需要它，CI 不应因此变红。

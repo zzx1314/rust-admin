@@ -294,7 +294,9 @@ sqlite3 /opt/hz/rust-admin/robodog/data/robodog.db \
 ssh root@192.168.41.246 'mkdir -p /opt/backpack-relay'
 scp deploy/backpack-relay/relay_push.py root@192.168.41.246:/opt/backpack-relay/
 scp deploy/backpack-relay/backpack-relay.service root@192.168.41.246:/etc/systemd/system/
-ssh root@192.168.41.246 'systemctl daemon-reload && systemctl enable --now backpack-relay'
+# 板子出公网要走 Wi-Fi / 有线，别走 4G dongle（默认路由 metric 100 时上行只有 ~0.5Mbps）
+scp deploy/backpack-relay/50-platform-route.sh root@192.168.41.246:/etc/NetworkManager/dispatcher.d/50-backpack-relay-route
+ssh root@192.168.41.246 'chmod 755 /etc/NetworkManager/dispatcher.d/50-backpack-relay-route && systemctl daemon-reload && systemctl enable --now backpack-relay'
 
 # 验收：六条连接都在（journal 里应有 6 行「已连接平台，房间 bp:xxx」）
 ssh root@192.168.41.246 'systemctl status backpack-relay --no-pager -n 10'
@@ -313,6 +315,8 @@ ssh root@39.107.55.13 'journalctl -u rust-admin-robodog -f | grep -E "backpack s
 | 画面很卡、反复重连 | 平台日志 `viewer of bp:... lagged` / `left after ... kbps` | 平均 kbps 超过出口带宽就是它；降 `RELAY_BITRATE`/`RELAY_FPS`，或升级 ECS 公网带宽 |
 | 想先量中继码率 | `measure_bitrate.py --stream dogcam`（在平台机器上跑，loopback） | 预期 light ≈1200kbps/20fps；`copy` 是 4000~8000kbps/60fps，对 2.5Mbps 出口必卡 |
 | 切了通道自己跳回「机器狗前置」 | 页面轮询 | 已修（2026-11-16）：直连模式后端不下发 `sources`，刷新时别拿它比对 |
+| 每 23s 左右断一次 | 服务端 `stream reset` 是否出现 | 已修（2026-11-18）：`init` 残留不再阻塞 `video_start`，回归用例 `video_relay::stale_stream_header_does_not_block_video_start` |
+| 码率只有 ~400kbps / 7fps | 板端 `ip route get 39.107.55.13`、`ethtool` | 走了 4G dongle（上行 ~0.5Mbps）；装 `50-platform-route.sh` 让平台流量走 Wi-Fi（上行 ~25Mbps），改完重启 relay |
 | 想看房间/观看者状态 | `GET /api/backpack/video/state` | 返回每路的 `publisher/initBytes/viewers/streaming`，黑屏先看这张表 |
 
 ### 跨网段的接口 / AI：设备客户端隧道（2026-11-17 上线）

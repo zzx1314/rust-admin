@@ -472,6 +472,9 @@ pub fn spawn_watchdog(state: AppState) {
                 if !state.video_hub.send_control(&room, stop).await {
                     debug!("relay room {room}: 推流端已断开，跳过 video_stop");
                 }
+                // 停流后清掉上一轮的流头：否则下一个观看者会先收到一段旧 FLV 头 +
+                // 旧关键帧（画面卡住 / 花屏），还可能被「有 init 就别起流」的旧判断误导。
+                state.video_hub.reset_stream(&room).await;
                 state.video_hub.mark_streaming(&room, false).await;
                 info!("board relay {room} has no viewer, stopping stream");
             }
@@ -665,7 +668,6 @@ async fn handle_viewer(socket: WebSocket, state: AppState, stream_name: String, 
     //
     // 流头不会串轮次：板端 relay 每次起 ffmpeg 前发 `video_reset`，推流端重连时
     // 整个房间被换掉，两种情况都会把旧流头清掉。
-    let has_init = init.is_some();
     if let Some(init) = init
         && sink
             .send(Message::Binary(init.as_ref().to_vec().into()))
@@ -679,12 +681,17 @@ async fn handle_viewer(socket: WebSocket, state: AppState, stream_name: String, 
         return;
     }
 
-    // 只在「流没真正在跑」时才要 video_start：房间没有推流端，或者有推流端但还没吐出
-    // 流头（刚启动 / 卡住）。没人看时推流端保留 60s（见 `STREAM_IDLE_GRACE`），这期间
-    // 新观看者（刷新页面、重开抽屉）直接复用还在跑的流 —— 再发一次 video_start 纯属噪声：
-    // 日志里反复出现「video requested」，板端还得靠地址去重兜一层。
-    let needs_start = first && (!has_init || !state.video_hub.has_publisher(&room).await);
-    if needs_start {
+    // **每个「第一个观看者」都发 video_start**（不按 init / publisher 猜流在不在跑）。
+    //
+    // 旧逻辑是「房间里有流头且有推流端就不发」，但流头是上一轮留下的：
+    // 最后一个人看完 → 看门狗 video_stop → 板端杀掉 ffmpeg，房间的 `init` 还在。
+    // 下一个观看者进来时看到「有 init + publisher 在线」→ 不发 video_start →
+    // 板端永远不会重新起流，浏览器只能收到 40KB 旧流头，20s 连接超时后重连，
+    // 于是每 23s 断一次（2026-11-18 现场：`last viewer ... left` 精确 23s 一次）。
+    //
+    // 重复发是安全的：板端 relay 的 `StreamSession.start()` 是幂等的
+    // （`if self.running: return`），已经在推的流不会重启。
+    if first {
         info!("backpack stream {stream_name} requested, asking board relay to start");
         let sent = state
             .video_hub

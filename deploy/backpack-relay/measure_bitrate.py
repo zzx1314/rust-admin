@@ -38,7 +38,7 @@ import websockets
 FLV_VIDEO_TAG = 0x09
 
 
-def login(platform: str, username: str, password: str) -> str:
+def login(platform, username, password):
     """拿控制台 JWT（`/api/backpack/video/ws` 支持 `?token=`）。"""
     body = json.dumps({"username": username, "password": password}).encode()
     req = urllib.request.Request(
@@ -55,7 +55,7 @@ def login(platform: str, username: str, password: str) -> str:
     return token
 
 
-def count_video_frames(buffer: bytearray) -> tuple[int, int]:
+def count_video_frames(buffer):
     """从字节流里数 FLV 视频 tag（帧），顺便丢掉已消费的字节。
 
     返回 (本批新增帧数, 剩余字节数)。FLV 是「tag 头 11B + 数据 + 4B 前一个 tag 长度」，
@@ -78,7 +78,7 @@ def count_video_frames(buffer: bytearray) -> tuple[int, int]:
     return frames, len(buffer)
 
 
-async def measure(platform: str, token: str, stream: str, seconds: float) -> int:
+async def measure(platform, token, stream, seconds):
     base = platform.rstrip("/").replace("https://", "wss://").replace("http://", "ws://")
     url = f"{base}/api/backpack/video/ws?stream={stream}&token={token}"
     buffer = bytearray()
@@ -86,7 +86,7 @@ async def measure(platform: str, token: str, stream: str, seconds: float) -> int
     frames = 0
     started = time.monotonic()
     try:
-        async with websockets.connect(url, max_size=None, open_timeout=10) as ws:
+        async with websockets.connect(url, max_size=None) as ws:
             while time.monotonic() - started < seconds:
                 try:
                     message = await asyncio.wait_for(
@@ -112,7 +112,7 @@ async def measure(platform: str, token: str, stream: str, seconds: float) -> int
     return 0
 
 
-def main() -> int:
+def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", default="http://127.0.0.1:3100")
     parser.add_argument("--stream", default="dogcam")
@@ -125,7 +125,11 @@ def main() -> int:
     )
     args = parser.parse_args()
     token = login(args.platform, args.username, args.password)
-    return asyncio.run(measure(args.platform, token, args.stream, args.seconds))
+    # 目标平台是 CentOS 7 的 Python 3.6（没有 asyncio.run），用事件循环手动跑
+    loop = asyncio.get_event_loop()
+    return loop.run_until_complete(
+        measure(args.platform, token, args.stream, args.seconds)
+    )
 
 
 if __name__ == "__main__":
