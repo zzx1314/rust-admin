@@ -185,6 +185,9 @@ pub struct DispatchTaskRequest {
     pub plan_end: Option<String>,
     #[serde(default)]
     pub execute_mode: Option<String>,
+    /// 结束动作（返航开关）：缺省 = 跟随路线；`none` / `return_to_start` / `return_to_charge`
+    #[serde(default)]
+    pub end_task: Option<String>,
     #[serde(default)]
     pub level: Option<String>,
     #[serde(default)]

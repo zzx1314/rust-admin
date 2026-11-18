@@ -72,10 +72,6 @@ export interface Device {
   lastHeartbeat: string | null;
   firmware: string | null;
   deviceIp: string | null;
-  /** 实时视频地址（RTSP / HLS / FLV / WebRTC） */
-  videoUrl: string | null;
-  /** 视频协议类型：none / hls / flv / webrtc / rtsp / mp4 */
-  videoType: string;
   /** 当前远程接管人；为空表示无人接管 */
   teleopHolder: string | null;
   teleopAt: string | null;
@@ -138,6 +134,11 @@ export interface Task {
   taskName: string;
   taskType: string | null;
   executeMode: string | null;
+  /**
+   * 结束动作（返航开关）：null = 跟随路线；`none` = 原地待命；
+   * `return_to_start` / `return_to_charge`，见 `utils/constants.ts::END_ACTIONS`。
+   */
+  endTask: string | null;
   level: string | null;
   deviceId: number | null;
   deviceCode: string | null;

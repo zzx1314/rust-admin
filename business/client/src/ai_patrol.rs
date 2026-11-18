@@ -36,6 +36,9 @@ use tracing::{debug, info, warn};
 
 /// 探测用的短超时：Agent 与客户端同机，3s 足够；超时就按「没接背包」处理
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+/// 证据图体积上限（**原图字节**）：企业微信图片消息的硬限制是 2MB，超了整条被拒。
+/// 板端 `dogcam_*.jpg`（1080p 抓拍）通常几百 KB，真超了就不带图（卡片里仍有路径）。
+const EVIDENCE_IMAGE_MAX_BYTES: u64 = 2 * 1024 * 1024;
 /// 启停识别要等模型加载（板端实测 1~3s），给足余量
 const ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 /// SSE 单条缓冲上限：Agent 事件每条几十字节，超过说明流里没有 `\n\n`，丢弃重来
@@ -562,13 +565,19 @@ impl AiPatrol {
                                     continue;
                                 };
                                 // 板端已判定「数量与检查目标数量不一致」：转发成 ai_alert
-                                if let Some(alert) = count_alert(&event, start)
+                                if let Some(mut alert) = count_alert(&event, start)
                                     && !alerted.swap(true, Ordering::Relaxed)
                                 {
                                     let expect =
                                         alert.get("expectCount").and_then(|v| v.as_i64()).unwrap_or(0);
                                     let found =
                                         alert.get("foundCount").and_then(|v| v.as_i64()).unwrap_or(0);
+                                    // 证据图只存在于板端磁盘，平台拿不到（Agent 没有取文件接口），
+                                    // 只有本客户端能读。企业微信图片消息要的是字节不是路径，
+                                    // 所以读出来随告警一起上报，由平台校验后发 msgtype=image。
+                                    if let Some(image) = evidence_image_base64(&alert).await {
+                                        alert["evidenceImage"] = json!(image);
+                                    }
                                     warn!(
                                         "航点 AI 识别：数量核对不一致（检查 {expect} / 检出 {found}），上报告警"
                                     );
@@ -768,6 +777,60 @@ fn count_alert(event: &Value, start: &AiStart) -> Option<Value> {
     }))
 }
 
+/* ------------------------------- 证据图 ------------------------------- */
+
+/// 把「数量核对不一致」告警里的证据图读成 base64（供平台发企业微信图片消息）。
+///
+/// 图片在板端本地磁盘（`detect_jobs/<plan>/pt<n>/dogcam_1.jpg`），平台读不到，
+/// 只有本客户端（与 Agent 同机）能读。失败一律返回 `None`——**不带图不能影响告警**：
+/// 卡片里仍然有路径，现场可 ssh 上去看。
+pub(crate) async fn evidence_image_base64(alert: &Value) -> Option<String> {
+    let path = alert
+        .get("evidence")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())?;
+    evidence_image_from_path(path).await
+}
+
+/// 读文件 → 体积/格式校验 → base64（无换行）。
+///
+/// 只认 JPEG / PNG（按文件头，不信扩展名）：企业微信图片消息只收这两种，
+/// 且原图 ≤ 2MB。其余情况打一行 debug 就放弃，不刷 WARN（每轮巡检都会重试）。
+async fn evidence_image_from_path(path: &str) -> Option<String> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+
+    if let Ok(meta) = tokio::fs::metadata(path).await
+        && meta.len() > EVIDENCE_IMAGE_MAX_BYTES
+    {
+        debug!(
+            "航点 AI 识别：证据图 {} 字节，超过企业微信 2MB 上限，不带图（{path}）",
+            meta.len()
+        );
+        return None;
+    }
+    let bytes = match tokio::fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            // 客户端不在板端 / 路径不在本机 / 无权限：都不带图，卡片里仍有路径
+            debug!("航点 AI 识别：证据图读不到（{path}）: {error}");
+            return None;
+        }
+    };
+    if bytes.len() > EVIDENCE_IMAGE_MAX_BYTES as usize
+        || !(bytes.starts_with(&[0xFF, 0xD8, 0xFF]) || bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]))
+    {
+        debug!("航点 AI 识别：证据图不是 JPEG/PNG 或超过 2MB，不带图（{path}）");
+        return None;
+    }
+    debug!(
+        "航点 AI 识别：证据图随告警上报（{} 字节，{path}）",
+        bytes.len()
+    );
+    Some(BASE64.encode(&bytes))
+}
+
 /// 从 SSE 缓冲里取出完整事件（以空行分隔），残留部分留在缓冲里等下一块
 pub(crate) fn take_sse_events(buffer: &mut String) -> Vec<String> {
     let mut out = Vec::new();
@@ -935,6 +998,46 @@ mod tests {
         assert_eq!(alert["expectCount"], 3);
         assert_eq!(alert["foundCount"], 1);
         assert_eq!(alert["evidence"], "/x/y.jpg");
+    }
+
+    /// 证据图随告警上报：客户端与板端 Agent 同机，**只有它**能读到板端磁盘上的图，
+    /// 企业微信图片消息要的是字节不是路径。读不到 / 不是 JPG-PNG / 超 2MB 一律不传，
+    /// 告警本身不受影响（卡片里仍有路径）。
+    #[tokio::test]
+    async fn evidence_image_reads_board_file_and_skips_unusable_ones() {
+        let dir = std::env::temp_dir().join(format!("robodog-evidence-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // ① 正常 JPEG（只看文件头）
+        let jpeg = dir.join("dogcam_1.jpg");
+        std::fs::write(&jpeg, [0xFF_u8, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
+        let alert = json!({ "evidence": jpeg.to_string_lossy() });
+        let encoded = evidence_image_base64(&alert).await.expect("JPEG 应能读出来");
+        assert_eq!(encoded, "/9j/4AAQ", "base64 不能带换行");
+
+        // ② 文件不在（客户端不在板端 / 路径不在本机）→ 不传图
+        let missing = json!({ "evidence": dir.join("nope.jpg").to_string_lossy() });
+        assert!(evidence_image_base64(&missing).await.is_none());
+
+        // ③ 不是图片（只看文件头，不信扩展名）
+        let fake = dir.join("fake.jpg");
+        std::fs::write(&fake, b"hello world").unwrap();
+        let fake_alert = json!({ "evidence": fake.to_string_lossy() });
+        assert!(evidence_image_base64(&fake_alert).await.is_none());
+
+        // ④ 超过企业微信 2MB 上限
+        let huge = dir.join("huge.jpg");
+        let mut bytes = vec![0xFF_u8, 0xD8, 0xFF];
+        bytes.resize(EVIDENCE_IMAGE_MAX_BYTES as usize + 1, 0);
+        std::fs::write(&huge, &bytes).unwrap();
+        let huge_alert = json!({ "evidence": huge.to_string_lossy() });
+        assert!(evidence_image_base64(&huge_alert).await.is_none());
+
+        // ⑤ 没给路径（老客户端 / 事件没带 evidence）
+        assert!(evidence_image_base64(&json!({})).await.is_none());
+        assert!(evidence_image_base64(&json!({ "evidence": "  " })).await.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

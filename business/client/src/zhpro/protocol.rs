@@ -292,6 +292,16 @@ impl Default for Quaternion {
 }
 
 impl Quaternion {
+    /// 零四元数：协议 §2.4.1 里**唯一**表示「没有初始位姿」的写法
+    ///
+    /// 见 [`Pose::unspecified`]：和 `Default`（单位四元数）**不是**一回事。
+    pub const ZERO: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        w: 0.0,
+    };
+
     /// 由偏航角（弧度）构造平面四元数
     pub fn from_yaw(yaw: f64) -> Self {
         Self {
@@ -325,6 +335,21 @@ impl Pose {
         Self {
             position: Vector3 { x, y, z: 0.0 },
             orientation: Quaternion::from_yaw(yaw),
+        }
+    }
+
+    /// 「不指定初始位姿」：位置归零 + [`Quaternion::ZERO`]。
+    ///
+    /// 协议 §2.4.1：`initial_pose` 四元数**全零**时 SLAM 读上一份位姿文件做完整重定位。
+    ///
+    /// **不要**用 `Pose::default()` 顶这个位置：`Default` 是单位四元数（`w = 1`），那是
+    /// 一个**合法的初始位姿**，等于告诉本体「你在 (0,0)、航向 0°」——地图原点。巡检起步
+    /// 时 `capture_origin_pose` 采到的起点位姿就成了原点，`end_task=1` 返航会跑回地图
+    /// 原点，而不是出发时站的位置。
+    pub fn unspecified() -> Self {
+        Self {
+            position: Vector3::default(),
+            orientation: Quaternion::ZERO,
         }
     }
 
@@ -434,6 +459,24 @@ pub fn empty() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `unspecified()` 必须是零四元数（= 「读上一份位姿文件」），而 `default()` 是单位四元数
+    /// （= 「你在原点」）：混用会让巡检的起点位姿被采成地图原点，返航就回原点。
+    #[test]
+    fn unspecified_pose_uses_zero_quaternion() {
+        let unspecified = Pose::unspecified();
+        assert!(unspecified.position.x == 0.0 && unspecified.position.y == 0.0);
+        assert!(
+            unspecified.orientation.is_zero(),
+            "unspecified 必须是零四元数，协议才按「读上一份位姿文件」处理"
+        );
+        let value = serde_json::to_value(unspecified).unwrap();
+        assert_eq!(value["orientation"]["w"], json!(0.0));
+
+        // `Default` 保持「原点 + 0°」的语义（引用轨迹 / 回充点兜底在用），不能被顺手改掉
+        assert_eq!(Pose::default().orientation, Quaternion::default());
+        assert_eq!(Pose::default().orientation.w, 1.0);
+    }
 
     #[test]
     fn yaw_roundtrip() {

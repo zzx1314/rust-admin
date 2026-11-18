@@ -1,37 +1,35 @@
-//! RTSP 实时视频中继（HTTP-FLV over WebSocket）
+//! 背包实时视频中继（HTTP-FLV over WebSocket）
 //!
-//! 智航 Pro 协议没有视频接口，本体只对外提供 RTSP；浏览器不能直连 RTSP，
-//! 所以由**能访问内网的那一端**把流转成 FLV、主动推到平台，浏览器只跟平台同源通信：
+//! 板端 relay 把背包本地 RTSP（含本体前置 `dogcam`）转成 FLV、主动推到平台，
+//! 浏览器只跟平台同源通信：
 //!
 //! ```text
-//! 机器狗本体 RTSP ──ffmpeg──► 设备客户端 ──ws://平台/ws/device/video──► 业务平台 ──ws──► 浏览器(flv.js)
-//!  rtsp://…:8554/test          转封装 FLV            二进制帧中继              MSE 播放
-//! 背包本地 RTSP   ──ffmpeg──► 板端 relay   ──ws://平台/ws/device/video──┘
+//! 背包本地 RTSP ──ffmpeg──► 板端 relay ──ws://平台/ws/device/video──► 业务平台 ──ws──► 浏览器(flv.js)
 //! ```
 //!
-//! 四条约定：
+//! 三条约定：
 //!
-//! 1. **按需推流**：第一个观看者进来才给推流端下发 `video_start`，最后一个离开立刻
-//!    `video_stop`，没人看的时候现场侧不耗 CPU / 带宽。
+//! 1. **按需推流**：第一个观看者进来才给推流端下发 `video_start`，最后一个离开后留
+//!    [`STREAM_IDLE_GRACE`] 宽限再由看门狗 `video_stop`，没人看的时候现场侧不耗 CPU / 带宽。
 //! 2. **二进制专用连接**：浏览器这条 WS 只发 FLV 字节，绝不发文本帧 ——
 //!    flv.js 的 `WebSocketLoader` 收到文本帧会直接报错。
-//! 3. **地址唯一来源**（设备客户端）：拉流地址就是设备档案里的 `video_url`，
-//!    运营在「设备管理」里改一次即可，不需要再动客户端配置。
-//! 4. **两条控制通道**：设备客户端听设备网关上的 `video_start`；背包板端没有设备台账，
-//!    房间名用 [`BACKPACK_ROOM_PREFIX`] 前缀，控制消息直接走它自己那条推流连接
-//!    （文本帧），见 `handle_publisher` 里的 `controls`。
+//! 3. **房间名前缀**：板端推流没有设备台账，房间名用 [`BACKPACK_ROOM_PREFIX`]
+//!    （`bp:<stream>`），控制消息直接走它自己那条推流连接（文本帧），
+//!    见 `handle_publisher` 里的 `controls`。
+//!
+//! 设备客户端那条「拉 `devices.video_url` → 平台中继」的旧链路已于 2026-11-18 整体删除：
+//! 设备管理 / 计划管理 / 实时视频三处画面统一走背包前置 `dogcam`。
 //!
 //! 为什么背包也要走中继：现场入口（浏览器直连板端）必须「操作员电脑在同一个内网且
 //! 过了 Chrome 的 Local Network Access 许可」，换 WiFi / 远程 / 换浏览器就黑屏。
 //! 推流中继只要求**板子能出公网**，浏览器与平台同源，延时 1~2s。
 
 use crate::app::AppState;
-use crate::auth::{self, Claims};
+use crate::auth::Claims;
 use crate::error::{ApiResponse, AppError};
-use crate::gateway;
 use crate::gateway_types::WsMessage;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Extension, Path, Query, State};
+use axum::extract::{Extension, Query, State};
 use axum::response::{IntoResponse, Json};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
@@ -69,9 +67,9 @@ static PUBLISHER_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 
 /// 背包板端推流房间的房间名前缀（`bp:<stream>`）
 ///
-/// 设备客户端的房间名就是 `devices.device_id`；板端推流服务没有设备台账，用这个
-/// 前缀区分开：带前缀的房间在 `handle_publisher` 里会挂上**控制通道**，
-/// 控制消息直接写进它自己的推流连接，不经过设备网关。
+/// 板端推流服务没有设备台账，房间名统一带上这个前缀：带前缀的房间在
+/// `handle_publisher` 里会挂上**控制通道**，`video_start` / `video_stop`
+/// 直接写进它自己的推流连接（不经过设备网关）。
 pub const BACKPACK_ROOM_PREFIX: &str = "bp:";
 
 /// 允许通过中继观看的背包通道（与板端 mediamtx 的 path 一致）
@@ -235,7 +233,7 @@ impl VideoHub {
                 }
             }
             None if room.pending.len() > MAX_INIT_BYTES => {
-                warn!("device {device_id} video stream is not FLV/H.264, header capture abandoned");
+                warn!("video publisher {device_id}: 推上来的不是 FLV/H.264，放弃补流头");
                 room.pending = Vec::new();
             }
             None => {}
@@ -253,7 +251,7 @@ impl VideoHub {
             // 老推流端还挂着（ffmpeg 重连）：新旧两条流的 FLV 头/时间戳不能混在
             // 同一批观看者上，整个房间换掉，让浏览器重连拿干净的新流。
             Some(true) => {
-                info!("device {device_id} video publisher reconnected, restarting room");
+                info!("video publisher {device_id} 重连，重建房间");
                 rooms.insert(device_id.to_string(), new_room(session));
             }
             // 正常首帧流程：观看者先到（video_start 就是它触发的），推流端后到。
@@ -325,7 +323,7 @@ impl VideoHub {
             return;
         }
         if rooms.remove(device_id).is_some() {
-            info!("device {device_id} video publisher detached, room dropped");
+            info!("video publisher {device_id} 断开，房间已丢弃");
         }
     }
 
@@ -468,17 +466,14 @@ pub fn spawn_watchdog(state: AppState) {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(15));
         loop {
             ticker.tick().await;
-            for device_id in state.video_hub.idle_publishers(STREAM_IDLE_GRACE).await {
-                // 板端推流房间（`bp:`）的控制通道直连它的推流连接；设备客户端只听设备网关
+            for room in state.video_hub.idle_publishers(STREAM_IDLE_GRACE).await {
+                // 板端推流房间（`bp:`）的控制通道直连它的推流连接
                 let stop = json!({"msgType": "video_stop", "payload": {}}).to_string();
-                if state.video_hub.send_control(&device_id, stop).await {
-                    state.video_hub.mark_streaming(&device_id, false).await;
-                    info!("board relay {device_id} has no viewer, stopping stream");
-                    continue;
+                if !state.video_hub.send_control(&room, stop).await {
+                    debug!("relay room {room}: 推流端已断开，跳过 video_stop");
                 }
-                state.video_hub.mark_streaming(&device_id, false).await;
-                info!("device {device_id} has no viewer, stopping video stream");
-                gateway::send_video_control(&state.device_connections, &device_id, None).await;
+                state.video_hub.mark_streaming(&room, false).await;
+                info!("board relay {room} has no viewer, stopping stream");
             }
         }
     });
@@ -497,7 +492,7 @@ pub async fn publisher_ws(
 
 /// 推流端控制通道的下一条消息
 ///
-/// 没有通道（普通设备客户端）就永久挂起，让 `select!` 只等推流数据；
+/// 没有通道就永久挂起，让 `select!` 只等推流数据；
 /// 通道关闭返回 `None`，调用方会把 `controls` 置空后重新挂起，不会空转。
 async fn next_control(controls: &mut Option<mpsc::Receiver<String>>) -> Option<String> {
     match controls {
@@ -559,7 +554,7 @@ async fn handle_publisher(socket: WebSocket, state: AppState) {
                                         .await;
                                     continue;
                                 }
-                                info!("device {code} video publisher attached");
+                                info!("video publisher {code} attached");
                                 state.video_hub.publisher_attach(&code, session).await;
                                 if code.starts_with(BACKPACK_ROOM_PREFIX) {
                                     let (tx, rx) = mpsc::channel(8);
@@ -572,7 +567,7 @@ async fn handle_publisher(socket: WebSocket, state: AppState) {
                                 // 常驻推流连接里的 ffmpeg 重启了：清掉上一轮的流头，
                                 // 否则后加入的观看者会拿到错位的字节（黑屏）
                                 if let Some(ref code) = device_id {
-                                    info!("device {code} video stream reset (new ffmpeg run)");
+                                    info!("video publisher {code} stream reset（新一轮 ffmpeg）");
                                     state.video_hub.reset_stream(code).await;
                                 }
                             }
@@ -609,57 +604,10 @@ async fn handle_publisher(socket: WebSocket, state: AppState) {
     }
 
     if let Some(code) = device_id {
-        info!("device {code} video publisher detached after {frames} frames");
+        info!("video publisher {code} detached after {frames} frames");
         state.video_hub.unregister_control(&code, session).await;
         state.video_hub.publisher_gone(&code, session).await;
     }
-}
-
-/// 浏览器观看通道：`GET /api/devices/{id}/video/ws?token=…`
-///
-/// 浏览器 WS 不能带 `Authorization` 头，鉴权中间件因此也接受 `?token=`。
-/// 升级前的校验（设备存在 / 权限 / 在线 / 已配置地址）失败会走普通 HTTP 错误，
-/// 前端 `onerror` 里能直接给出提示，不必等推流超时。
-pub async fn viewer_ws(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-    Path(id): Path<i64>,
-) -> Result<impl IntoResponse, AppError> {
-    let row: Option<(String, Option<String>, Option<String>, String)> = sqlx::query_as(
-        "SELECT device_id, video_url, video_type, status FROM devices WHERE id = ?1",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?;
-    let (device_code, video_url, video_type, status) =
-        row.ok_or_else(|| AppError::NotFound("设备不存在".to_string()))?;
-
-    auth::ensure_device_access(&state, &claims, &device_code).await?;
-
-    if status == "离线" {
-        return Err(AppError::BadRequest(
-            "设备离线，无法拉取实时视频".to_string(),
-        ));
-    }
-    // 拉流地址就是设备档案里填的那个（设备管理 → 编辑 → 视频地址）
-    let url = video_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .ok_or_else(|| {
-            AppError::BadRequest("设备未配置视频地址，请在设备管理里填写 RTSP 地址".to_string())
-        })?
-        .to_string();
-    let kind = video_type.unwrap_or_else(|| "rtsp".to_string());
-
-    Ok(ws.on_upgrade(move |socket| {
-        handle_viewer(socket, state, VideoSource::DeviceClient {
-            code: device_code,
-            url,
-            kind,
-        })
-    }))
 }
 
 /// 背包中继观看通道：`GET /api/backpack/video/ws?token=…&stream=dogcam`
@@ -689,9 +637,7 @@ pub async fn backpack_viewer_ws(
         ));
     }
 
-    Ok(ws.on_upgrade(move |socket| {
-        handle_viewer(socket, state, VideoSource::BoardPusher { stream, room })
-    }))
+    Ok(ws.on_upgrade(move |socket| handle_viewer(socket, state, stream, room)))
 }
 
 /// 诊断：`GET /api/backpack/video/state` —— 每个视频房间的推流 / 观看 / 起流状态
@@ -702,95 +648,23 @@ pub async fn viewer_state(
     Ok(ApiResponse::ok(state.video_hub.debug_state().await))
 }
 
-/// 观看者的拉流方式（两者的房间与观看者逻辑一样，只是控制消息的通道不同）
-enum VideoSource {
-    /// 设备客户端：客户端自己拉 `devices.video_url`，控制消息走设备网关连接
-    DeviceClient {
-        code: String,
-        url: String,
-        kind: String,
-    },
-    /// 板端推流服务：它自己拉本地流，控制消息写回它自己那条推流连接
-    BoardPusher { stream: String, room: String },
-}
-
-impl VideoSource {
-    fn room(&self) -> &str {
-        match self {
-            VideoSource::DeviceClient { code, .. } => code,
-            VideoSource::BoardPusher { room, .. } => room,
-        }
-    }
-
-    /// 有人开始看：让推流端开始拉流 / 编码
-    async fn start(&self, state: &AppState) -> bool {
-        let sent = match self {
-            VideoSource::DeviceClient { code, url, kind } => {
-                info!("device {code} video requested, asking client to pull {kind} stream");
-                if gateway::send_video_control(&state.device_connections, code, Some(url)).await {
-                    true
-                } else {
-                    // 客户端没挂在设备网关上（如只连了推流连接）：回退到推流连接
-                    state
-                        .video_hub
-                        .send_control(
-                            code,
-                            json!({"msgType": "video_start", "payload": {"url": url, "format": "flv"}})
-                                .to_string(),
-                        )
-                        .await
-                }
-            }
-            VideoSource::BoardPusher { stream, room } => {
-                info!("backpack stream {stream} requested, asking board relay to start");
-                state
-                    .video_hub
-                    .send_control(
-                        room,
-                        json!({"msgType": "video_start", "payload": {"stream": stream, "format": "flv"}})
-                            .to_string(),
-                    )
-                    .await
-            }
-        };
-        // 只有真的让推流端起过流，才需要让看门狗盯着它
-        if sent {
-            state.video_hub.mark_streaming(self.room(), true).await;
-        }
-        sent
-    }
-
-    /// 没人看了：让推流端停掉拉流 / 编码
-    ///
-    /// 两种推流端都**不立刻停**：现场会来回切页签 / 切六路 / 关掉抽屉再打开，每停一次
-    /// ffmpeg 再重启要等 3~14s（进程启动 + 首个关键帧），现场看到的就是「黑一下 + 一闪」。
-    /// 保留 `streaming` 标记，交给看门狗在无人观看后 ~15~30s 内停：既让重看几乎无感，
-    /// 也不会一直空转编码。
-    async fn stop(&self, state: &AppState) -> bool {
-        match self {
-            VideoSource::DeviceClient { .. } | VideoSource::BoardPusher { .. } => {
-                state.video_hub.mark_streaming(self.room(), true).await;
-                true
-            }
-        }
-    }
-}
-
-async fn handle_viewer(socket: WebSocket, state: AppState, source: VideoSource) {
+/// 观看者的一条中继流（背包板端推流房间 `bp:<stream>`）
+///
+/// 房间与控制消息都挂在板端那条常驻推流连接上（`handle_publisher` 的 `controls`）。
+async fn handle_viewer(socket: WebSocket, state: AppState, stream_name: String, room: String) {
     let (mut sink, mut stream) = socket.split();
-    let room = source.room().to_string();
     let (mut rx, first, init) = state.video_hub.viewer_join(&room).await;
 
     // 补流头（FLV 魔数 + AVC 配置 + 首个关键帧）：**只要房间里有当前这一轮的流头就补**，
     // 不分是不是第一个观看者。
     //
     // 早先的做法是「第一个观看者不补旧流头」，前提是它的加入会拉起一条新流；现在
-    // 推流端在没人看时不会立刻被杀（见 `VideoSource::stop`），重复的 `video_start`
+    // 推流端在没人看时不会立刻被杀（见 `STREAM_IDLE_GRACE`），重复的 `video_start`
     // 也被推流端按地址去重了 —— 不起新流却又不补头，浏览器就只能收到中段字节，
     // flv.js 解析错位后黑屏，接着重连，看起来就是反复闪断。
     //
-    // 流头不会串轮次：板端 relay 每次起 ffmpeg 前发 `video_reset`，设备客户端重连推流
-    // 时整个房间被换掉，两条路径都会把旧流头清掉。
+    // 流头不会串轮次：板端 relay 每次起 ffmpeg 前发 `video_reset`，推流端重连时
+    // 整个房间被换掉，两种情况都会把旧流头清掉。
     let has_init = init.is_some();
     if let Some(init) = init
         && sink
@@ -799,7 +673,8 @@ async fn handle_viewer(socket: WebSocket, state: AppState, source: VideoSource) 
             .is_err()
     {
         if state.video_hub.viewer_leave(&room).await {
-            source.stop(&state).await;
+            // 不立刻停流：留给看门狗（宽限期内重看秒开）
+            state.video_hub.mark_streaming(&room, true).await;
         }
         return;
     }
@@ -807,17 +682,36 @@ async fn handle_viewer(socket: WebSocket, state: AppState, source: VideoSource) 
     // 只在「流没真正在跑」时才要 video_start：房间没有推流端，或者有推流端但还没吐出
     // 流头（刚启动 / 卡住）。没人看时推流端保留 60s（见 `STREAM_IDLE_GRACE`），这期间
     // 新观看者（刷新页面、重开抽屉）直接复用还在跑的流 —— 再发一次 video_start 纯属噪声：
-    // 日志里反复出现「video requested」，客户端还得靠地址去重兜一层。
+    // 日志里反复出现「video requested」，板端还得靠地址去重兜一层。
     let needs_start = first && (!has_init || !state.video_hub.has_publisher(&room).await);
-    if needs_start && !source.start(&state).await {
-        warn!("viewer of {room}: video_start 没送出去（推流端未连接）");
+    if needs_start {
+        info!("backpack stream {stream_name} requested, asking board relay to start");
+        let sent = state
+            .video_hub
+            .send_control(
+                &room,
+                json!({"msgType": "video_start", "payload": {"stream": stream_name, "format": "flv"}})
+                    .to_string(),
+            )
+            .await;
+        if sent {
+            // 只有真的让推流端起过流，才需要让看门狗盯着它
+            state.video_hub.mark_streaming(&room, true).await;
+        } else {
+            warn!("viewer of {room}: video_start 没送出去（推流端未连接）");
+        }
     }
 
     debug!("viewer of {room} attached (first={first})");
+    // 观看端吞吐统计：排「中继很卡」时，这行日志能直接看出是码率超过观看端带宽
+    // （例如 1080p60 copy ≈ 4~8Mbps，而平台公网出口只有 2~3Mbps）。
+    let started = std::time::Instant::now();
+    let mut forwarded: u64 = 0;
     loop {
         tokio::select! {
             frame = rx.recv() => match frame {
                 Ok(bytes) => {
+                    forwarded += bytes.len() as u64;
                     if sink.send(Message::Binary(bytes.as_ref().to_vec().into())).await.is_err() {
                         break;
                     }
@@ -826,7 +720,11 @@ async fn handle_viewer(socket: WebSocket, state: AppState, source: VideoSource) 
                     // 追不上就**关连接**，别从中途丢帧继续发：FLV 是「tag 头 + tag 体」
                     // 的连续字节流，丢掉任意一段之后后面全部错位，flv.js 只会报解析错误
                     // 然后黑屏重连。断掉让浏览器重连，服务端会把流头 + 关键帧重发给他。
-                    warn!("viewer of {room} lagged, dropped {skipped} frames; closing for a clean restart");
+                    warn!(
+                        "viewer of {room} lagged, dropped {skipped} frames after {:.1}s / {} KB（推流码率超过观看端带宽）; closing for a clean restart",
+                        started.elapsed().as_secs_f64(),
+                        forwarded / 1024
+                    );
                     break;
                 }
                 Err(broadcast::error::RecvError::Closed) => {
@@ -850,9 +748,14 @@ async fn handle_viewer(socket: WebSocket, state: AppState, source: VideoSource) 
     }
 
     if state.video_hub.viewer_leave(&room).await {
-        // 板端中继不立刻停（切源无感），交给看门狗；设备客户端当场停
-        info!("last viewer of {room} left");
-        source.stop(&state).await;
+        // 不立刻停（切源无感）：保留 streaming 标记，交给看门狗在宽限后 video_stop
+        let seconds = started.elapsed().as_secs_f64().max(0.1);
+        info!(
+            "last viewer of {room} left after {seconds:.1}s / {} KB（平均 {:.0} kbps）",
+            forwarded / 1024,
+            forwarded as f64 * 8.0 / seconds / 1000.0
+        );
+        state.video_hub.mark_streaming(&room, true).await;
     }
 }
 
@@ -963,7 +866,10 @@ mod tests {
         );
 
         let (_rx, _, _) = hub.viewer_join("RD-001").await;
-        assert!(hub.idle_publishers(Duration::ZERO).await.is_empty(), "有观看者时不算空转");
+        assert!(
+            hub.idle_publishers(Duration::ZERO).await.is_empty(),
+            "有观看者时不算空转"
+        );
         assert!(hub.viewer_leave("RD-001").await, "最后一个观看者离开");
 
         assert!(
@@ -1032,8 +938,14 @@ mod tests {
         hub.publisher_attach("bp:dogcam", 1).await;
         let (_rx, first, _) = hub.viewer_join("bp:dogcam").await;
         assert!(first);
-        assert!(hub.viewer_leave("bp:dogcam").await, "应判定为最后一个观看者");
-        assert!(hub.has_publisher("bp:dogcam").await, "推流端还在就不能丢房间");
+        assert!(
+            hub.viewer_leave("bp:dogcam").await,
+            "应判定为最后一个观看者"
+        );
+        assert!(
+            hub.has_publisher("bp:dogcam").await,
+            "推流端还在就不能丢房间"
+        );
 
         // 再来一个观看者：仍然认得这路推流，推上来的字节能收到
         let (mut rx, first, _) = hub.viewer_join("bp:dogcam").await;
@@ -1098,12 +1010,16 @@ mod tests {
     async fn board_relay_control_channel_follows_the_live_session() {
         let hub = VideoHub::default();
         hub.publisher_attach("bp:dogcam", 7).await;
-        assert!(hub.has_publisher("bp:dogcam").await, "relay 常驻连接应算在线");
+        assert!(
+            hub.has_publisher("bp:dogcam").await,
+            "relay 常驻连接应算在线"
+        );
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         hub.register_control("bp:dogcam", 7, tx).await;
         assert!(
-            hub.send_control("bp:dogcam", "video_start".to_string()).await,
+            hub.send_control("bp:dogcam", "video_start".to_string())
+                .await,
             "板端房间应能收到控制消息"
         );
         assert_eq!(rx.recv().await.as_deref(), Some("video_start"));
@@ -1123,6 +1039,9 @@ mod tests {
         hub.publisher_attach("RD-001", 1).await;
         assert!(!hub.send_control("RD-001", "video_stop".to_string()).await);
         assert!(hub.has_publisher("RD-001").await);
-        assert!(!hub.has_publisher("bp:cam0").await, "没有推流端时不应报在线");
+        assert!(
+            !hub.has_publisher("bp:cam0").await,
+            "没有推流端时不应报在线"
+        );
     }
 }

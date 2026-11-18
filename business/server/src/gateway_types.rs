@@ -223,6 +223,14 @@ pub struct AiAlertPayload {
     /// 证据图路径（板端本地绝对路径，仅作运维线索）
     #[serde(default)]
     pub evidence: String,
+    /// 证据图本体（JPG/PNG 字节的 base64），由客户端从板端磁盘读出后随告警带上。
+    ///
+    /// 为什么要客户端带：图片在板端 `/root/…/detect_jobs/<plan>/pt<n>/*.jpg`，
+    /// 平台拿不到那个文件系统（Agent 隧道白名单里也没有取图接口）。企业微信图片
+    /// 消息要的是**字节**（base64 + md5），不是路径，所以只能让能读盘的客户端给。
+    /// 超 2MB / 不是 JPG/PNG 时服务端会丢掉图片只发卡片（见 `notify::evidence_image`）。
+    #[serde(default)]
+    pub evidence_image: Option<String>,
     /// 板端给的描述（可选，服务端会自己拼一条更全的）
     #[serde(default)]
     pub message: String,
@@ -307,6 +315,15 @@ pub struct TaskDispatchPayload {
     /// 结束动作：`return_to_start` | `return_to_charge` | `none`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_task: Option<String>,
+    /// 任务级显式结束动作（**只有**在任务里配过 `/api/tasks` 的 `endTask` 时才带）：
+    /// `none` | `return_to_start` | `return_to_charge`。
+    ///
+    /// 为什么不直接复用 `end_task`：历史服务端对**所有**任务都发 `end_task: "none"`，
+    /// 客户端把 `none` 当成「没指定」再按闭环路线兜底“返回起点”。如果让 `end_task`
+    /// 承担「显式原地」语义，新旧版本混合部署时会让所有闭环路线静默停止返航。
+    /// 老客端忽略本字段，行为不变。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_task_mode: Option<String>,
 }
 
 /// 下发载荷中的地图绑定

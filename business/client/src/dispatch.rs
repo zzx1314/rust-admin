@@ -182,7 +182,7 @@ pub fn parse_flight_plan(payload: &Value, map_root: &str) -> Option<FlightPlan> 
                 .and_then(|legs| legs.iter().find_map(|l| l.get("speed")?.as_f64()))
         })
         .unwrap_or(1.2);
-    let end_task = parse_end_task(payload);
+    let (end_task, end_task_explicit) = parse_end_task(payload);
     let avoid_level = payload
         .get("avoidLevel")
         .and_then(Value::as_u64)
@@ -200,6 +200,7 @@ pub fn parse_flight_plan(payload: &Value, map_root: &str) -> Option<FlightPlan> 
         avoid_level,
         goal_tolerance: 0.25,
         end_task: end_task.as_str().to_string(),
+        end_task_explicit,
         // 官方 App 的 cruise_mode 是整条任务级开关：只有所有航段都写
         // “沿道路”才走路网；任意一段是直线/曲线平滑/原地转向就按自由导航，
         // 避免混合路线被整体强推到路网。
@@ -227,11 +228,24 @@ pub fn parse_flight_plan(payload: &Value, map_root: &str) -> Option<FlightPlan> 
     Some(plan)
 }
 
-fn parse_end_task(payload: &Value) -> EndTask {
-    if let Some(value) = payload.get("endTask").and_then(Value::as_str) {
+/// 解析任务结束动作，返回 `(结束动作, 是否为任务级显式配置)`。
+///
+/// 优先级：`endTaskMode`（新版服务端，仅显式配置才带）> `endTask` > `executeMode` 文案。
+/// 只有第一项能表达「显式原地」：老服务端对**所有**任务都发 `endTask: "none"`，客户端
+/// 只能把它当成「没指定」再按闭环兜底返回起点，所以不能把 `none` 的语义挂在 `endTask` 上。
+fn parse_end_task(payload: &Value) -> (EndTask, bool) {
+    if let Some(value) = payload.get("endTaskMode").and_then(Value::as_str) {
+        let value = value.trim();
+        if !value.is_empty() {
+            return (EndTask::parse(Some(value)), true);
+        }
+    }
+    if let Some(value) = payload.get("endTask").and_then(Value::as_str)
+        && !value.trim().is_empty()
+    {
         let parsed = EndTask::parse(Some(value));
         if parsed != EndTask::None {
-            return parsed;
+            return (parsed, true);
         }
     }
     // executeMode: 单次 / 循环 / 返航 / 返航充电 等前端枚举
@@ -241,11 +255,11 @@ fn parse_end_task(payload: &Value) -> EndTask {
         .and_then(Value::as_str)
         .unwrap_or_default();
     if mode.contains("返充") || mode.contains("返回充电") || mode.contains("充电") {
-        EndTask::ReturnToCharge
+        (EndTask::ReturnToCharge, true)
     } else if mode.contains("返航") || mode.contains("返回起点") {
-        EndTask::ReturnToStart
+        (EndTask::ReturnToStart, true)
     } else {
-        EndTask::None
+        (EndTask::None, false)
     }
 }
 
@@ -286,12 +300,33 @@ mod tests {
         assert_eq!(plan.loop_mode, "闭环");
         assert!((plan.speed_limit - 1.5).abs() < 1e-9);
         assert_eq!(plan.end_task(), EndTask::ReturnToCharge);
+        assert!(plan.end_task_explicit, "显式配置才算 explicit");
         assert_eq!(
             plan.map_path,
             "/ota/alg_data/map/history_map/MAP-ZJ-01_v2.1"
         );
         // 闭环仅在航点数 > 2 时补回首点；本例 2 个点保持原样
         assert_eq!(plan.waypoints.len(), 2);
+    }
+
+    #[test]
+    fn task_level_none_overrides_closed_loop() {
+        // 新版服务端：任务显式配了「原地」→ 载荷带 endTaskMode
+        let mut value = payload();
+        value["endTaskMode"] = json!("none");
+        value["endTask"] = json!("none");
+        value["routeData"]["loop"] = json!("闭环");
+        let plan = parse_flight_plan(&value, "/m").expect("plan");
+        assert_eq!(plan.end_task(), EndTask::None);
+        assert!(plan.end_task_explicit, "显式原地不能被闭环兜底");
+
+        // 老服务端（没有 endTaskMode、endTask=none）→ 跟随路线，不算显式
+        let mut value = payload();
+        value["endTask"] = json!("none");
+        value["executeMode"] = json!("周期任务");
+        let plan = parse_flight_plan(&value, "/m").expect("plan");
+        assert_eq!(plan.end_task(), EndTask::None);
+        assert!(!plan.end_task_explicit, "没配置就交给闭环兜底");
     }
 
     #[test]

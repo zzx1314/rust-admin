@@ -72,9 +72,11 @@ GET  /api/events             SSE：telemetry / button / lingsi / detect / detect
   由板端环境变量 `DOGCAM_WIDTH/HEIGHT/FPS/BITRATE/GOP` 控制；**故意不复用 `CAPTURE_*`**
   （那组同时管 v4l2 采集尺寸，改了会连带影响四路 USB）。带宽吃紧时回退：
   `DOGCAM_WIDTH=1280 DOGCAM_HEIGHT=720 DOGCAM_BITRATE=2000k`。
-- 平台中继（`deploy/backpack-relay/relay_push.py`）是 `-c:v copy` 只换容器，
-  浏览器看到的分辨率就是 dogcam path 的分辨率；页面上的「1920×1080」由播放器
-  实测上报（`VideoPlayer` / `VideoStage` 的 `meta` 事件），不再写死规格。
+- 平台中继（`deploy/backpack-relay/relay_push.py`）默认 `RELAY_PROFILE=light`：
+  缩到 **720p20 / 1.2Mbps**（编码器自动挑 `h264_rkmpp` → `h264_v4l2m2m` → `libx264`）。
+  原因见 §6.10：平台公网出口实测 ≈2.5Mbps，`-c:v copy` 的 1080p60（4~8Mbps）必卡。
+  `RELAY_PROFILE=copy` 只在出口 ≥6Mbps 时用；页面上的分辨率由播放器实测上报
+  （`VideoPlayer` / `VideoStage` 的 `meta` 事件），不写死规格。
 - 背包烧录（`preview`）仍按 `CAPTURE_*` 缩放：`DOGCAM_*` 调到 1080p 时，
   带框那一路仍是 720p30（OSD 画布 `OSD_W/H` 是 640x360 放大），属预期。
 - 红外：`dog-ipcam`，由现场已有 mediamtx 承载，**不参与 AI**
@@ -350,7 +352,8 @@ POST /api/backpack/detect/config
 
 ```text
 本地 mediamtx :8554/<stream>
-  └─ ffmpeg -rtsp_transport tcp -use_wallclock_as_timestamps 1 -c:v copy -f flv -
+  └─ ffmpeg -rtsp_transport tcp -use_wallclock_as_timestamps 1 \
+            -vf scale=720p,fps=20 -b:v 1200k -f flv -   （默认 light；copy 见 §6.10）
        └─ ws://<平台>/ws/device/video       video_register(deviceId="bp:<stream>") + 二进制 FLV
             └─ 平台 VideoHub 房间 bp:<stream>  ──ws──► 浏览器 flv.js
                  GET /api/backpack/video/ws?stream=<stream>&token=…
@@ -360,7 +363,7 @@ POST /api/backpack/detect/config
   + `app.rs` 路由 `/api/backpack/video/ws`（在 `require_auth` 层内，`?token=` 鉴权）。
 - 板端：`deploy/backpack-relay/relay_push.py` + `backpack-relay.service`。
 - 前端：`business/web/src/views/monitor/index.vue`（顶部「现场直连 / 平台中继」切换，
-  直连不可达时自动切中继）；播放器复用 `VideoPlayer.vue` 的 `type="relay"` 分支。
+  直连不可达时自动切中继）；中继播放器就是 `VideoPlayer.vue`（现在只播背包中继）。
 
 ### 6.3 三条协议约定（改这块必须同时看）
 
@@ -375,19 +378,18 @@ POST /api/backpack/detect/config
    推流端不立刻被杀（见 6.4），重复的 `video_start` 也被推流端按地址去重了 ——
    不起新流却又不补头，浏览器只能收到中段字节，flv.js 解析错位后黑屏 → 重连 → 再黑，
    现场看到的就是「一闪一闪的连接中断」。
-   流头不会串轮次：板端 relay 起 ffmpeg 前发 `video_reset`（第 2 条），设备客户端重连
-   推流时整个房间被换掉（`VideoHub::publisher_attach`），两条路径都会清旧头。
+   流头不会串轮次：板端 relay 起 ffmpeg 前发 `video_reset`（第 2 条），推流端重连时
+   整个房间被换掉（`VideoHub::publisher_attach`），两种情况都会清旧头。
 
 ### 6.4 按需与配额
 
 - 常驻 6 条 WS（`cam0..cam3`、`dogcam`、`dog-ipcam`），空闲时每条 ~1KB；
 - 第一个观看者 → `video_start` → 推流端起 ffmpeg 或 RTSP 拉流；
 - 最后一个观看者离开 → **不立刻停**，只保留 `streaming` 标记；看门狗每 15s 兜一次
-  「起过流但没人看」，在 ~15~30s 内下发 `video_stop`（板端 relay 与设备客户端同一套
-  宽限，见 `VideoSource::stop`）。宽限期内重新打开是**秒开**：流还在跑，服务端直接把
-  流头补上，不用等 ffmpeg 重启；
-- 推流端按地址去重 `video_start`（`business/client/src/video.rs`）：同一地址已经在推就
-  不重启 ffmpeg（重启 = 黑 3~7s + 换新 FLV 头 = 一次闪断）；
+  「起过流但没人看」，超过 `STREAM_IDLE_GRACE`（60s）才下发 `video_stop`。宽限期内
+  重新打开是**秒开**：流还在跑，服务端直接把流头补上，不用等 ffmpeg 重启；
+- 推流端按 stream 去重 `video_start`（`deploy/backpack-relay/relay_push.py`）：同一路
+  已经在推就不重启 ffmpeg（重启 = 黑 3~7s + 换新 FLV 头 = 一次闪断）；
 - 单路 2Mbps：六路同时看 = 12Mbps 上行，现场带宽要先确认。
 
 ### 6.4.1 排障：`GET /api/backpack/video/state`
@@ -405,7 +407,8 @@ curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/
 
 - 延时 1~2s（WHEP 直连 ~200ms）；延迟敏感场景仍建议现场入口。
 - **首次看某一路要 3~7s**（ffmpeg 启动 + 等下一个关键帧）；同一个通道 30s 内再切回来是
-  秒开 —— 最后一个观看者离开时不立刻停流，交给看门狗在 15~30s 内停（见 `VideoSource::stop`）。
+  秒开 —— 最后一个观看者离开时不立刻停流，交给看门狗在宽限（`STREAM_IDLE_GRACE`，60s）
+  过后才停。
 - 中继模式下**浏览器叠加用不了**（中继流是 FLV，没有与抽帧对齐的坐标关系）：想让框跟着画面走
   就切「背包烧录」，板端把中文标签烧进 `preview` 流后一起中继（`RELAY_STREAMS` 需含
   `preview`，默认已含）。AI 的启停 / 模型目录 / 运行态 / 检出数量走设备客户端隧道（§6.8），
@@ -415,7 +418,11 @@ curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/
 - `dog-ipcam` 源若为 H.265，`-c:v copy` 无法封装成 FLV，需 `RELAY_TRANSCODE=1`
   （重编码，板端 CPU 开销大，优先改摄像头出 H.264）。
 
-### 6.6 为什么「设备管理」里的视频会闪（已修）
+### 6.6 为什么「设备管理」里的视频会闪（2026-11-16 修，旧链路已于 §6.9 删除）
+
+> **历史记录**：这里说的是已删除的「设备客户端拉 `video_url` → 平台中继」链路。
+> 结论（补流头 / 60s 宽限 / 观看端不闪）对现在的背包中继同样成立，只是推流端换成了
+> 板端 `backpack-relay`；`business/client/src/video.rs` 已删除，别再照它改配置。
 
 现场现象：设备管理 → 控制抽屉里的实时监控画面一闪一闪，角标在「LIVE」与
 「连接中断」之间反复跳；而同一台狗的前置摄像头在「实时视频」页用平台中继看却很稳。
@@ -424,7 +431,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/
 
 | # | 真因 | 修法 |
 | --- | --- | --- |
-| 1 | 客户端 ffmpeg 写管道**带缓冲**，转码小帧被攒成突发（板端 relay 一直带 `-flush_packets 1`，所以它稳） | `business/client/src/video.rs` 输出加 `-flush_packets 1 -muxdelay 0 -muxpreload 0`，输入加 `-fflags +genpts` |
+| 1 | 客户端 ffmpeg 写管道**带缓冲**，转码小帧被攒成突发（板端 relay 一直带 `-flush_packets 1`，所以它稳） | `business/client/src/video.rs`（已删除）输出加 `-flush_packets 1 -muxdelay 0 -muxpreload 0`，输入加 `-fflags +genpts` |
 | 2 | 浏览器 WS 一抖，服务端就算「第一个观看者」，重发 `video_start` → 客户端**重启 ffmpeg** → 黑 3~7s + 新 FLV 头 | 客户端按地址去重；服务端最后一个观看者离开时留 15~30s 宽限（看门狗收尾） |
 | 3 | 宽限生效后「第一个观看者不补流头」就变成致命 bug：浏览器只收到中段字节 → flv.js 解析错位 → 黑屏 → 重连 → 循环 | 服务端改成**有流头就补**（不串轮次靠 `video_reset` / 房间替换） |
 | 4 | 观看端 `waiting` 就盖全屏错误层、重连先 `destroy` 清空画面、固定 3s 一次重试 | `VideoPlayer.vue`：缓冲只给角标；断流先抓末帧当 poster；250ms 起退避封顶 3s；3s「时间轴不前进」看门狗；flv.js `enableStashBuffer: false` |
@@ -437,7 +444,10 @@ curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/
 4. 还闪就看 `viewer of <room> lagged` 日志：观看端网络追不上，服务端现在会主动断开让它拿
    干净的新流（早先是从中间丢帧继续发，FLV 字节流错位后才一直黑屏重连）。
 
-### 6.6.1 手动遥控视频「连接很慢」（2026-11-17 现场，已修）
+### 6.6.1 手动遥控视频「连接很慢」（2026-11-17 现场，旧链路已删除）
+
+> 同样是历史记录：当时慢在设备客户端 ffmpeg；现在遥控页画面也走背包中继（§6.9），
+> 板端 relay 侧如果起流慢，按 §6.7 的顺序查。
 
 现象：遥控页视频长时间停在「连接中 / 重连中」、偶尔黑一下。实测（云端直连中继 WS +
 板端 ffprobe/ffmpeg）：
@@ -454,7 +464,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/
 
 | 位置 | 改动 |
 | --- | --- |
-| `business/client/src/video.rs` | RTSP 输入加 `-timeout 8000000`（8s socket 读超时，卡住就报错让外层重启）；`RETRY_DELAY` 3s → 1s |
+| `business/client/src/video.rs`（已删除） | RTSP 输入加 `-timeout 8000000`（8s socket 读超时，卡住就报错让外层重启）；`RETRY_DELAY` 3s → 1s |
 | `business/server/src/video.rs` | `STREAM_IDLE_GRACE = 60s`：最后一个观看者离开后留 60s 宽限才停流，期间新观看者立刻拿到缓存流头 + 关键帧 |
 | `business/web/src/components/VideoPlayer.vue` | `STALL_MS` 3s → 8s |
 
@@ -464,7 +474,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/
 # 云端：量首字节延迟 / 速率 / 收包间隔（替代肉眼看浏览器）
 python3 - <<'EOF'
 import websocket, time
-url = "ws://127.0.0.1:3100/api/devices/15/video/ws?token=<JWT>"
+url = "ws://127.0.0.1:3100/api/backpack/video/ws?stream=dogcam&token=<JWT>"
 ws = websocket.create_connection(url, timeout=30); t0=time.time(); n=0
 while time.time()-t0 < 10:
     op, data = ws.recv_data()
@@ -473,7 +483,7 @@ print("首帧 %.2fs，消息 %d，%.0f kbps" % (time.time()-t0, n, 0))
 EOF
 
 # 板端：源流到底跟不跟得上实时（speed < 1x 就是源侧问题，不是平台）
-ffmpeg -rtsp_transport tcp -i "<video_url>" -an -t 5 -f null - 2>&1 | tail -2
+ffmpeg -rtsp_transport tcp -i "rtsp://<背包IP>:8554/dogcam" -an -t 5 -f null - 2>&1 | tail -2
 ```
 
 ### 6.7 WHEP `HTTP 404` 排查（2026-11-17 现场事故，已修）
@@ -580,3 +590,91 @@ Agent 挂了」立刻表现为 `reachable=false`，没有一份迟早过期的�
 
 **多背包**：隧道默认取「最近上报且在线」的那台。园区里有多台背包时必须配
 `ROBODOG_BACKPACK_TUNNEL_DEVICE=<设备号>`，否则页面可能问到另一台狗上。
+
+### 6.9 设备管理 / 计划管理的视频统一到前置 `dogcam`
+
+**要解决的问题**：设备管理的控制抽屉、计划管理的「实时监控」原来播放的是
+`devices.video_url`（设备客户端 ffmpeg 拉本体 RTSP → 平台中继），而同一个本体前置在
+「实时视频」页走的是背包 relay 归一化的 `dogcam`。两套推流端、两套参数（§6.6 / §6.6.1 的
+闪断、起流慢都出在 `video_url` 那条路上），现场就会出现「实时视频很稳、抽屉一直重连」。
+
+**最终形态（2026-11-18）**：不保留兜底 —— 旧链路整条删除：
+`/api/devices/{id}/video/ws`、`VideoSource::DeviceClient`、`gateway::send_video_control`、
+`client/src/video.rs`（ffmpeg 拉流）、客户端 `[video]` 配置段、设备表暴露的
+`videoUrl` / `videoType`（DB 列保留但代码不再读写）、设备编辑弹窗的两个视频字段。
+没接背包的部署只看到说明卡，不再退到本体 RTSP。
+
+**做法**：新增 `web/src/components/FrontCameraVideo.vue` + `web/src/composables/useFrontCamera.ts`，
+三处（设备抽屉「实时监控」、抽屉「手动遥控」内嵌画面、任务实时监控）**同一份组件、同一路流**：
+
+| 判定 | 播放 | 与 `/monitor` 的对应 |
+| --- | --- | --- |
+| `mode=direct` 且浏览器探通板端、页面在内网 | `VideoStage`（WHEP `dogcam`） | 「现场直连」 |
+| 其余（公网页面 / 直连探不通 / `tunnel` / `proxy`） | `VideoPlayer`（中继 `bp:dogcam`） | 「平台中继」 |
+| `status.configured=false`（部署没接背包） | 只给「怎么配背包」的说明卡，不兜底、不拉流 | — |
+
+要点：
+
+- **规则只写一遍**：`frontCameraPath()` 复刻 `monitor/index.vue::refreshStatus` 的自动判定
+  （探不通或公网页面 → 中继）；以后改判定先改这里，别在三个页面各改一遍。
+- **status 共享**：`/api/backpack/status` 要聚合板端 4 个接口（含 `detect/tasks`），
+  抽屉/弹窗可能同时存在，所以 `useFrontCamera` 做进程内缓存（15s）+ 单飞合并，
+  挂载期间 20s 低频刷新（页面隐藏时不刷）。
+- **不抢 AI / 不拉 preview**：这里永远放干净流 `dogcam`；背包烧录（`preview`）与浏览器叠加
+  只属于「实时视频」页，避免两个页面互相覆盖板端画框会话。
+- **延时**：直连 ≈200ms，中继 1~2s，与「实时视频」页同一量级；中继首次起流 3~7s
+  （板端 relay 已常驻，通常秒开）。
+
+**排障**：抽屉/任务页黑屏时先看「实时视频」页的同一路是否正常 —— 同源，正常则问题在
+这一页的 `status`（登录态、`?transport=tunnel`、页面是否公网打开）；两边都黑就是 §6.7 的
+`dogcam` path 问题，按 `ffprobe rtsp://<背包IP>:8554/dogcam` 往下查。
+
+### 6.10 「平台中继很卡」排查（2026-11-17）：出口带宽 < 中继码率
+
+**现场反馈**：实时视频切「平台中继」后很卡（声音/画面一卡一卡、角标在 LIVE / 重连中之间跳），
+而切「现场直连」（WHEP）是流畅的；只是背包不可达，只能用中继。
+
+**结论**：不是前端播放器，也不是服务端房间机制，而是**平台公网出口带宽小于中继码率**：
+
+| 证据 | 数据 |
+| --- | --- |
+| 平台出口带宽（ECS `39.107.55.13` 上 `speedtest-cli --simple`） | Download 10.57 Mbps / **Upload 2.53 Mbps** |
+| 中继源 | `dogcam` = 本体前置 **1080p60**（HL4.0），`relay_push.py` 是 `-c:v copy` → 4~8Mbps 原样出去 |
+| 服务端日志 | `viewer of bp:dogcam lagged, dropped 39/82 frames; closing for a clean restart`（24h 内 11 次） |
+| 观看端日志 | `last viewer of bp:dogcam left` 每 15~20s 一次（浏览器 8s 没新帧 → 重连） |
+| 现场直连为什么没事 | WHEP 是浏览器 ⇄ 板端（内网/局域网），**不经过 ECS**，也不占公网出口 |
+
+链路要过两段公网：板端上行（现场 4G/宽带）→ ECS（上传计费/限额）→ 观看端下载。
+**ECS 的公网出口是硬顶**：2.53Mbps 连一路 1080p60 `copy` 都不够，更别说同时开两个页面。
+服务端每路观看者用的是 512 片 × 8KB ≈ 4MB 的广播缓冲，码率超过出口后浏览器侧 `sink.send`
+反压 → 广播通道溢出 → `Lagged` → 服务端主动断开观看者（FLV 字节流不能从中间丢帧），
+浏览器 250ms~3s 后重连 → **卡 → 断开 → 重连** 的循环。
+
+**修法**：让中继输出的码率落到出口预算内（与旧客户端回传的 15fps/1.2Mbps 同一量级）：
+
+- 板端 `relay_push.py` 默认 `RELAY_PROFILE=light`：`scale=1280x720(只缩不放)` +
+  `fps=20` + `-b:v 1200k` + `-g 40`（2s 一个关键帧），编码器运行时试编挑
+  `h264_rkmpp` → `h264_v4l2m2m` → `libx264`；板端 unit 里旧的 `RELAY_TRANSCODE=0`
+  已忽略（否则会把档位压回 `copy`）。
+- 带宽更紧：`RELAY_BITRATE=800k RELAY_FPS=15`（约 0.8Mbps，一路仍能看清人影/火点）。
+- 只有一个观看者时 ~1.2Mbps，2.53Mbps 出口还能看；**同时开多个视频页面就会互相挤**，
+  真要多看请升级 ECS 公网带宽（按 1.5Mbps/路估算）。
+- 服务端现在会在观看结束时打
+  `last viewer of bp:dogcam left after 12.3s / 1800 KB（平均 1150 kbps）`，
+  `lagged` 日志也带上了已转发字节 —— 下次一眼就能确认「码率 vs 带宽」。
+
+**验证**：改完在板端 `journalctl -u backpack-relay -f` 应看到
+`开始拉流（profile=light，1280x720@20 1200k enc=h264_rkmpp）`；平台日志里不再出现
+`lagged`，`last viewer ... 平均 ≈1200 kbps`，画面连续、不再每 15s 断一次。
+
+**量化工具**：在平台机器上跑 `deploy/backpack-relay/measure_bitrate.py`（走 loopback，
+不受公网带宽影响，量的是推流端真实码率 / 帧率）：
+
+```bash
+ssh root@39.107.55.13 'pip3 install -q -i https://mirrors.aliyun.com/pypi/simple websockets'
+scp deploy/backpack-relay/measure_bitrate.py root@39.107.55.13:/tmp/
+ssh root@39.107.55.13 'python3 /tmp/measure_bitrate.py --stream dogcam --seconds 20'
+# 预期：light ≈1200 kbps / 20 fps；copy（旧默认）= 4000~8000 kbps / 60 fps
+```
+
+再和出口比：`speedtest-cli --simple` 的 Upload 就是平台能推给浏览器的上限。

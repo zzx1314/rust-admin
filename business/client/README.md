@@ -260,8 +260,6 @@ jq -c 'select(.dir=="recv" and .frame.head.type==4013)' /tmp/frames.jsonl
 | `--map-name` | 时间戳 | `--map-only` 时的地图名 |
 | `--map-kind` | `outdoor` | 建图类型：`outdoor` / `indoor` |
 
-实时视频没有命令行开关：参数在 `client.toml` 的 `[video]` 段，拉流地址由业务平台下发。
-
 ### 建图回传中台（A 方案）
 
 | 参数 | 默认值 | 说明 |
@@ -319,69 +317,16 @@ jq -c 'select(.dir=="recv" and .frame.head.type==4013)' /tmp/frames.jsonl
 > 设备绑定人之后在业务控制台创建园区时把自己的设备地图挑一张绑成基线。
 > 控制台绑定 / 解绑会实时推送给在线设备，不需要重启客户端。
 
-## 实时视频回传（RTSP → FLV）
+## 实时视频（已不由客户端回传）
 
-本体只对外提供 RTSP（现场 `rtsp://user:***@192.168.234.1:8554/test`），浏览器不能直连；
-能访问本体网段的是本客户端，所以视频由客户端拉流回传：
+2026-11-18 起客户端**不再拉本体 RTSP**：设备管理、计划管理、实时视频三处画面统一走
+背包板端的 `dogcam`（`business/web/src/components/FrontCameraVideo.vue`），由板端
+`backpack-relay` 推流到业务平台，浏览器直连 mediamtx（WHEP）或走平台中继。
 
-```
-本体 RTSP ──ffmpeg──► 本客户端（src/video.rs） ──ws://平台/ws/device/video──► 业务平台 ──ws──► 浏览器
-                     H.264 / FLV / 低延迟              二进制帧中继                 flv.js（MSE）
-```
-
-**按需拉流**：控制台打开设备「实时监控」时才收到 `video_start`，携带的就是设备管理里
-填的 `video_url`；最后一个观看者离开不再立刻 `video_stop`（见下面「不闪的三条」）。
-没人看时本进程不起 ffmpeg。
-
-- 地址不落配置：`video_url` 属于设备档案，运营在「设备管理 → 编辑 → 视频地址」改一次即可。
-- **重复 `video_start` 按地址去重**：平台每次「第一个观看者进来」都会重发（关抽屉再打开、
-  切页签、浏览器 WS 抖一下都算），同一地址已经在推就不重启 ffmpeg —— 重启一次画面黑
-  3~7s 并换一条新 FLV，现场看到的就是「一闪一闪的连接中断」。
-- 断流自动重连：ffmpeg 退出或中继连接断开后 3 秒重试；每 20s 一个 WS ping 保活
-  （4G / 弱网 NAT 会回收「只上行、长时间无回包」的连接，服务端也会 60s 静默判死）。
-- 编码参数在 `client.toml` 的 `[video]` 段（见 `client.toml.example`）：
-
-| 键 | 默认值 | 说明 |
-|----|--------|------|
-| `enabled` | `true` | 是否响应 `video_start` |
-| `ffmpeg` | `ffmpeg` | ffmpeg 可执行文件路径 |
-| `transport` | `tcp` | RTSP 传输方式（非 `rtsp://` 地址不传该选项） |
-| `encoder` | `auto` | 编码器：按 `libx264` → `h264_rkmpp` → `h264_v4l2m2m` 探测，也可写死 |
-| `fps` | `15` | 输出帧率，同时决定关键帧间隔（`2×fps`） |
-| `bitrate` | `1200k` | 目标码率，一路流约等于这个值 |
-| `width` | `0` | 输出宽度，`0` = 保持原始分辨率（等比缩放） |
-
-编码器说明（现场踩过）：机器狗（瑞芯微 RK 系列）自带的是定制 ffmpeg，`--enable-rkmpp`
-但**没有 `--enable-libx264`**，带 `-preset` 会直接
-`Unrecognized option 'preset'` 启动失败。所以 `encoder = "auto"` 会探测并选中
-`h264_rkmpp`（硬件编码，实测 1080p60→1280x720/15fps 约 1 个核），
-硬件编码器分支不会传 `-preset/-tune/-profile/-sc_threshold` 这些 x264 专属参数。
-
-时间戳（现场踩过）：那条 RTSP 的 SDP 标 `60fps`、PTS 也按 `1/60` 递增，但实测只
-投递 **约 25 帧/秒**（12s 抓包 299 包）。直接沿用相机时间轴时，媒体时间只走
-0.42x 实时，浏览器 MSE 会反复饿死——播放器一直在「连接中 / LIVE」之间跳、画面慢放。
-
-所以拉流固定带 `-use_wallclock_as_timestamps 1`：用**到达时间**当 PTS，
-时间轴与真实时间 1:1（实测播放速率 0.98~1.00），配合 `-r 15` 输出 CFR。
-这项和相机帧率无关，相机哪天真的按 60fps 出流也不会跑偏。
-
-逐包 flush（现场踩过）：ffmpeg 写管道默认带 IO 缓冲，转码出来的小帧会被攒成
-「一阵一阵」的突发数据，浏览器 MSE 先饿死再猛灌，flv.js 在 playing / buffering 之间
-反复横跳（画面一闪一闪、角标在 LIVE / 连接中之间跳）。所以输出固定带
-`-flush_packets 1 -muxdelay 0 -muxpreload 0`，输入带 `-fflags +genpts`。
-板端 relay（`deploy/backpack-relay/relay_push.py`）一直这么配，所以那条链路稳。
-
-现场检查：
-
-```bash
-which ffmpeg && ffmpeg -version | head -1        # 没有就 apt install ffmpeg
-ffprobe -rtsp_transport tcp <RTSP地址>           # 确认能拉到流（会打印编码/分辨率）
-journalctl -u robodog-device-client -f | grep 视频
-```
-
-排障顺序：客户端日志出现「开始实时视频回传」→ 业务平台日志出现
-`video publisher attached` → 浏览器出画面。只出现前者说明推流通道没连上；
-都没有说明 `video_start` 没下发（检查设备是否「离线」、`video_url` 是否为空）。
+- 删掉的东西：`src/video.rs`（ffmpeg 拉流回传）、`video_start` / `video_stop` 处理、
+  `[video]` 配置段、设备档案里的 `video_url` / `video_type`。
+- 客户端现在只需要 `[ai] enabled = true`（板端 Agent 代调），视频与本进程无关 —— 现场
+  看视频排障请看 `business/README.md` 的视频章节 / `docs/backpack-video-integration.md`。
 
 ## 支持的任务类型
 
@@ -460,6 +405,13 @@ journalctl -u robodog-device-client -f | grep 视频
   「重新定位」（4030）与返充（5014 的 `map_id` 也是目录名）走同一套解析。
 - `endTask`：`return_to_charge` / `return_to_start` / `none`。
   缺省时客户端退化为按 `executeMode` 文案推断。
+- `endTaskMode`：任务里**显式配置**的结束动作（含显式 `none`），优先级高于 `endTask`。
+  没有这个字段才走兜底。为什么要分两个字段：老服务端对**所有**任务都发 `endTask: "none"`，
+  客户端只能把 `none` 当「没指定」再按闭环回落返回起点；把显式语义挂在 `endTask` 上会让
+  新旧版本混合部署时所有闭环路线静默停止返航。
+- 最终下发到巡检 `5000 kind=4` 的 `params.end_task` 数字枚举：
+  `endTaskMode`（或 `endTask`）显式给了就用它；否则 `loop_mode == "闭环"` → `1`（返回起点），
+  其余 → `0`（原地待命）。详见 `src/zhpro/route.rs::patrol_end_task`。
 - `avoidLevel`：10 关闭 / 20 仅急停 / 30 感知 / 40 全避障。任务级生效，
   进入 STANDBY 后本体自动恢复 40。
 - `routeData.legs[].mode` / `map_type`：**默认一律下发 `1`（2D 栅格）**，与协议文档的
@@ -1002,22 +954,39 @@ ssh root@192.168.41.246 'mv /tmp/rdc.new /opt/robodog/client/robodog-device-clie
 `pose` 缺省（或 `null`）时下发零四元数，由 SLAM 读上一份位姿文件做完整重定位；
 `heading` 单位是度。`mapId` 缺省时用机器人当前已载入地图（`state.active_map`）。
 
-### 巡检起步前的定位守卫
+### 巡检起步前的定位守卫（自动，不需要人工点「重新定位」）
 
 航线下发（`task_dispatch` 且 `routeData.points` 非空）后，客户端在发 `5000 kind=4`
 之前会做一次定位预检（巡检的载图与起点位姿采集由本体 `load_localization_map` /
-`capture_origin_pose` 负责，这里只保证「图存在 + 定位能收敛」，避免下发后秒失败）：
+`capture_origin_pose` 负责，这里只保证「图对 + 定位能收敛」，避免下发后秒失败）：
 
 0. 先 `1204` 取 RoamerX 控制权——`4030` / `4044` / `5000` 全在 4000~5999 非白名单区间，
    没控制权时网关**直接丢弃**，表现为「等 4031 超时」而本体那边什么都没做；
    （白名单只有 `4012` / `4022` / `5010`，见协议 §4000~5999）
-1. 读最近一帧 5009 的 `robot.loc_state.status`，已是 `100` 直接起步（不重载地图，保住位姿）；
+1. 判据是「**这条路线绑的那张图** + `robot.loc_state.status == 100`」，两者缺一就重定位：
+   - 已 `100` 但 `active_map` 不是这条路线绑的图（`MAP-ZJ-01@v2.1` / `MAP-ZJ-01_v2.1` /
+     目录名三种写法都认，见 `map_matches()`）→ 也要载图；否则本体会在错的地图坐标系里
+     跑完整条航线才报错；
+   - 已经是「这张图 + 100」→ 直接起步，**不重载**（重载会把位姿重置回上一份位姿文件）；
 2. 否则下发 `4030 op=1` 载图并等收敛（默认 60s）。`4031` 只等 3s，**等不到不判失败**，
    判据是 5009 `loc_state` 收敛到 100（现场固件的回执经常更慢）；
-3. 仍未收敛或 SLAM 明确失败（`203` / `210`）→ **不发 5000**，直接把任务置为「异常」，
-   进度消息写明「定位未就绪：... 请远程接管把设备移回地图覆盖范围，或下发「重新定位」后重试」；
-4. 巡检任务里不再传 `need_locate`（那是 `kind=2` 的字段）：本体自己载图并按路径执行；
-5. 真正发 `5000 kind=4` 前再补一次 `1302 cmd=62` 导航模式，并 `5002` 取消上一轮残留的本体任务。
+3. `initial_pose` **缺省时下发零四元数**（`Pose::unspecified()`）：协议 §2.4.1 里这才表示
+   「不指定初始位姿，SLAM 读上一份位姿文件做完整重定位」。**不能用 `Pose::default()`**——
+   那是单位四元数（`w = 1`），协议当它是**合法位姿 = 原点 + 0°**，载完图机器人被种在地图
+   原点，巡检 `capture_origin_pose` 采到的起点位姿也就成了原点，于是 `end_task=1`
+   「返回起点」会跑回**地图原点**而不是出发时站的位置（2026-11 修复，回归用例：
+   `zhpro::mapping::tests::load_map_without_pose_sends_zero_quaternion`）；
+4. 不收敛会自动**再试一次**（间隔 5s，共 `LOCATE_ATTEMPTS = 2` 次）：现场 SLAM 有一定
+   概率第一轮不收敛，重试能消掉绝大部分「必须人工重新定位」的情况；SLAM 明确失败
+   （`203` / `210`）不重试，直接判异常；
+5. 两次都不成 → **不发 5000**，任务置为「异常」，进度消息写明「定位未就绪：...（已自动重定位
+   2 次）。请远程接管把设备移回地图覆盖范围，或下发「重新定位」并给出初始位姿后重试」；
+6. 巡检任务里不再传 `need_locate`（那是 `kind=2` 的字段）：本体自己载图并按路径执行；
+7. 真正发 `5000 kind=4` 前再补一次 `1302 cmd=62` 导航模式，并 `5002` 取消上一轮残留的本体任务。
+
+所以「设备没动过、只是重启 / 定位丢了 / 载的是别的图」都会在派单时自愈，`active_map`
+也只在**定位真的成功之后**才更新（它同时被心跳的 `map_id` 和「召回充电」5014 的校验参数复用，
+不能按计划里的 `mapId` 乐观写入）。
 
 这样「机器狗不在地图上」就不会再以一条含义不明的 5000 失败收场。
 

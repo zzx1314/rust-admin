@@ -497,7 +497,12 @@ pub const LOCATE_ACK_WAIT: Duration = Duration::from_secs(3);
 
 /// 4030/4031 载图并定位。
 ///
-/// `initial_pose` 为 None 时等价于下发零四元数，由 SLAM 读取上一份位姿文件做完整重定位。
+/// `initial_pose` 为 `None` 时下发**零四元数**（[`Pose::unspecified`]），由 SLAM 读取上一份
+/// 位姿文件做完整重定位——协议 §2.4.1 里「不传 initial_pose」等价的就是这个。
+///
+/// ⚠️ 这里**不能**用 `Pose::default()` 兜底：`Default` 是单位四元数（`w = 1`），协议把它当
+/// 「合法初始位姿 = 你在 (0,0) 朝 0°」，载完图机器人就被种在地图原点，巡检的起点位姿
+/// （`capture_origin_pose`）也跟着变成原点，于是 `end_task=1` 返航会跑回地图原点。
 ///
 /// 返回 `Ok(None)` 表示本体没在 [`LOCATE_ACK_WAIT`] 内回 `4031`（继续等 5009 即可），
 /// `Ok(Some(data))` 表示 `4031` 已明确受理。
@@ -506,18 +511,25 @@ pub async fn load_map(
     map_path: &str,
     initial_pose: Option<Pose>,
 ) -> Result<Option<serde_json::Value>, String> {
-    let pose = initial_pose.unwrap_or_default();
     client
         .call_ack_optional(
             T_LOCATE,
-            serde_json::json!({
-                "op": 1,
-                "map_path": map_path,
-                "initial_pose": pose
-            }),
+            load_map_payload(map_path, initial_pose),
             LOCATE_ACK_WAIT,
         )
         .await
+}
+
+/// 4030 `op=1`（载图 + 定位）的载荷。
+///
+/// 单独抽出来是为了能直接回归「`initial_pose` 缺省时发的到底是什么」：
+/// 必须是零四元数（[`Pose::unspecified`]），不能是 `Pose::default()` 的单位四元数。
+pub fn load_map_payload(map_path: &str, initial_pose: Option<Pose>) -> serde_json::Value {
+    serde_json::json!({
+        "op": 1,
+        "map_path": map_path,
+        "initial_pose": initial_pose.unwrap_or_else(Pose::unspecified)
+    })
 }
 
 /// 候选目录名/路径 → 目录名（4013 `path` 的最后一段）
@@ -633,6 +645,14 @@ pub async fn wait_localized(client: &ZhProClient, timeout: Duration) -> Result<i
     }
 }
 
+/// [`wait_localized`] 报的是否「SLAM 明确失败」（`203` / `210`）。
+///
+/// 与 `wait_localized` 里的错误文案同源，供调用方决定「要不要自动重试一次」：
+/// 定位没收敛（超时 / `122`）值得重试，SLAM 自己宣告失败就不要再白等一轮。
+pub fn is_fatal_locate_error(error: &str) -> bool {
+    error.contains("SLAM 定位失败")
+}
+
 /// 载图 + 定位（4030），并等定位收敛。
 ///
 /// `initial_pose` 为 `None` 时下发零四元数，由 SLAM 读取上一份位姿文件做完整重定位，
@@ -700,6 +720,43 @@ mod tests {
         // 122 定位丢失还有救，不应当终止等待
         assert!(!loc_status_fatal(122));
         assert_eq!(describe_loc_status(122), "定位丢失");
+    }
+
+    /// 自动重定位只在「没收敛」时重试；SLAM 明确失败（203/210）不白等第二轮
+    #[test]
+    fn only_non_fatal_locate_errors_are_retried() {
+        assert!(!is_fatal_locate_error(
+            "等待定位收敛超时（60s），当前状态：定位丢失（status=122）"
+        ));
+        assert!(!is_fatal_locate_error("推送通道关闭，无法确认定位状态"));
+        assert!(is_fatal_locate_error(
+            "SLAM 定位失败：定位异常（status=203）"
+        ));
+        assert!(is_fatal_locate_error(
+            "SLAM 定位失败：定位失败（status=210）"
+        ));
+    }
+
+    /// 「不指定初始位姿」必须发零四元数，否则本体把自己种在地图原点（返航就回原点）
+    #[test]
+    fn load_map_without_pose_sends_zero_quaternion() {
+        let data = load_map_payload("/ota/alg_data/map/history_map/2026_11_10_16_15_06", None);
+        assert_eq!(data["op"], 1);
+        assert_eq!(
+            data["map_path"],
+            "/ota/alg_data/map/history_map/2026_11_10_16_15_06"
+        );
+        // 协议 §2.4.1：四元数全零 = 读上一份位姿文件做完整重定位
+        assert_eq!(data["initial_pose"]["orientation"]["w"], 0.0);
+        assert_eq!(data["initial_pose"]["orientation"]["x"], 0.0);
+        assert_eq!(data["initial_pose"]["orientation"]["z"], 0.0);
+        assert_eq!(data["initial_pose"]["position"]["x"], 0.0);
+
+        // 平台显式给了初始位姿时原样下发（手工「重新定位」带 pose 的场景）
+        let data = load_map_payload("/m", Some(Pose::new(1.5, -2.0, 90_f64.to_radians())));
+        assert_eq!(data["initial_pose"]["position"]["x"], 1.5);
+        assert_eq!(data["initial_pose"]["position"]["y"], -2.0);
+        assert!(data["initial_pose"]["orientation"]["w"].as_f64().unwrap() > 0.0);
     }
 
     #[test]

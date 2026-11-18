@@ -296,6 +296,21 @@ const {
             style="width: 100%"
           />
         </el-form-item>
+        <el-form-item label="跑完去哪">
+          <el-select
+            v-model="dispatchForm.endTask"
+            placeholder="跟随路线"
+            style="width: 100%"
+          >
+            <el-option label="跟随路线（闭环自动返航）" value="" />
+            <el-option label="原地待命（不返航）" value="none" />
+            <el-option label="返回起点" value="return_to_start" />
+            <el-option label="返回充电点" value="return_to_charge" />
+          </el-select>
+          <div class="text-muted" style="font-size: 12px; line-height: 1.5">
+            默认跟随路线：闭环路线跑完自动返回起点。选「原地待命」会停在最后一个航点。
+          </div>
+        </el-form-item>
         <el-form-item label="备注">
           <el-input
             v-model="dispatchForm.description"

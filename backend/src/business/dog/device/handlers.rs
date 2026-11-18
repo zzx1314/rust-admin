@@ -471,6 +471,7 @@ pub async fn dispatch_device_task_handler(
         "planStart": req.plan_start,
         "planEnd": req.plan_end,
         "executeMode": req.execute_mode,
+        "endTask": req.end_task,
         "level": req.level,
         "description": req.description,
         "requestId": request_id,

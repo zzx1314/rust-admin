@@ -48,9 +48,7 @@ const deviceForm = reactive({
   battery: 100,
   temperature: 32,
   firmware: "v2.6.1",
-  deviceIp: "",
-  videoUrl: "",
-  videoType: "none"
+  deviceIp: ""
 });
 
 /** 本体工作模式（1315 mode / MachineStatus）→ 中文；未知值原样展示 */
@@ -68,16 +66,6 @@ const ROBOT_MODE_LABELS: Record<string, string> = {
 function robotModeLabel(mode: string) {
   return ROBOT_MODE_LABELS[mode.toLowerCase()] ?? mode;
 }
-
-/** 视频协议选项，none 表示未接入 */
-const VIDEO_TYPES = [
-  { value: "none", label: "未接入" },
-  { value: "hls", label: "HLS（.m3u8）" },
-  { value: "flv", label: "HTTP-FLV（.flv）" },
-  { value: "mp4", label: "MP4 / WebM" },
-  { value: "webrtc", label: "WebRTC（需信令网关）" },
-  { value: "rtsp", label: "RTSP（经客户端回传，可播放）" }
-];
 
 const statusTabs = [
   { key: "全部", label: "全部设备", color: "#0284c7" },
@@ -197,9 +185,7 @@ function openCreateDevice() {
     battery: 100,
     temperature: 32,
     firmware: "v2.6.1",
-    deviceIp: "",
-    videoUrl: "",
-    videoType: "none"
+    deviceIp: ""
   });
   deviceDialog.value = true;
 }
@@ -215,9 +201,7 @@ function openEditDevice(device: Device) {
     battery: device.battery,
     temperature: device.temperature,
     firmware: device.firmware ?? "v2.6.1",
-    deviceIp: device.deviceIp ?? "",
-    videoUrl: device.videoUrl ?? "",
-    videoType: device.videoType ?? "none"
+    deviceIp: device.deviceIp ?? ""
   });
   deviceDialog.value = true;
 }
@@ -613,26 +597,6 @@ onMounted(load);
         <div class="field">
           <label>设备 IP</label>
           <input v-model="deviceForm.deviceIp" class="input" placeholder="选填" />
-        </div>
-        <div class="field">
-          <label>视频协议</label>
-          <select v-model="deviceForm.videoType" class="select">
-            <option v-for="item in VIDEO_TYPES" :key="item.value" :value="item.value">
-              {{ item.label }}
-            </option>
-          </select>
-        </div>
-        <div class="field" style="grid-column: 1 / -1">
-          <label>视频地址</label>
-          <input
-            v-model="deviceForm.videoUrl"
-            class="input mono"
-            placeholder="rtsp://user:密码@192.168.234.1:8554/test 或 http://.../live.m3u8"
-          />
-          <small class="muted" style="font-size: 11px">
-            留空则设备详情显示「未配置」。选「未接入」时会按地址后缀自动识别协议；
-            RTSP 由设备客户端拉流转 FLV 回传（浏览器不直连）。
-          </small>
         </div>
       </div>
       <template #footer>

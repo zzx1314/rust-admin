@@ -13,52 +13,9 @@ use serde_json::{Value, json};
 use sqlx::{QueryBuilder, SqlitePool};
 use tracing::info;
 
-/// 视频地址归一化：去空白，空串视为未配置
-fn normalize_video_url(raw: Option<String>) -> Option<String> {
-    raw.map(|url| url.trim().to_string())
-        .filter(|url| !url.is_empty())
-}
-
-/// 视频类型归一化：未显式给出时按地址后缀推断
-///
-/// - 用户明确选了类型 → 用用户的选择（非法值回落 `none`）
-/// - 用户没选（`None` 或 `none`）但填了地址 → 按后缀推断
-fn normalize_video_type(raw: Option<String>, url: Option<&str>) -> String {
-    let explicit = raw
-        .map(|kind| kind.trim().to_ascii_lowercase())
-        .filter(|kind| !kind.is_empty() && kind != "none");
-    match explicit {
-        Some(kind) if VIDEO_KINDS.contains(&kind.as_str()) => kind,
-        Some(_) => "none".to_string(),
-        None => url.map(infer_video_type).unwrap_or("none").to_string(),
-    }
-}
-
-const VIDEO_KINDS: [&str; 6] = ["hls", "flv", "webrtc", "rtsp", "mp4", "none"];
-
-/// 从地址推断视频协议，供前端在用户只填了地址时自动选择播放器
-fn infer_video_type(url: &str) -> &'static str {
-    let path = url.split(['?', '#']).next().unwrap_or(url);
-    let lower = path.to_ascii_lowercase();
-    if lower.starts_with("rtsp://") {
-        "rtsp"
-    } else if lower.ends_with(".m3u8") {
-        "hls"
-    } else if lower.ends_with(".flv") {
-        "flv"
-    } else if lower.ends_with(".mp4") || lower.ends_with(".webm") {
-        "mp4"
-    } else if lower.starts_with("webrtc://") || lower.starts_with("whep://") {
-        "webrtc"
-    } else {
-        "none"
-    }
-}
-
 pub(crate) const DEVICE_SELECT: &str = "SELECT d.id, d.device_id, d.model, d.park_id, p.park_name,
     d.zone_id, z.zone_name, d.status, d.battery, d.temperature, d.runtime_minutes,
     d.odometer, d.position, d.current_task_name, d.last_heartbeat, d.firmware, d.device_ip,
-    d.video_url, COALESCE(d.video_type, 'none') AS video_type,
     d.teleop_holder, d.teleop_at, COALESCE(d.teleop_force, 0) AS teleop_force,
     COALESCE(d.body_online, 0) AS body_online, d.run_mode,
     COALESCE(d.charging, 0) AS charging, d.robot_mode,
@@ -268,14 +225,11 @@ pub async fn create_device(
     let zone_id = payload.zone_id;
     validate_park_zone(&state.db, park_id, zone_id).await?;
     let status = payload.status.unwrap_or_else(|| default_status(park_id));
-    let video_url = normalize_video_url(payload.video_url);
-    let video_type = normalize_video_type(payload.video_type, video_url.as_deref());
     let result = sqlx::query(
         "INSERT INTO devices (device_id, model, park_id, zone_id, status, battery,
             temperature, runtime_minutes, odometer, position, current_task_name, last_heartbeat,
-            firmware, device_ip, video_url, video_type, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-            ?18)",
+            firmware, device_ip, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
     )
     .bind(payload.device_id.trim())
     .bind(payload.model)
@@ -291,8 +245,6 @@ pub async fn create_device(
     .bind(payload.last_heartbeat.unwrap_or_else(now))
     .bind(payload.firmware.unwrap_or_else(|| "v2.6.1".to_string()))
     .bind(payload.device_ip)
-    .bind(video_url)
-    .bind(video_type)
     .bind(&timestamp)
     .bind(&timestamp)
     .execute(&state.db)
@@ -319,12 +271,6 @@ pub async fn update_device(
         None => existing.zone_id,
     };
     validate_park_zone(&state.db, park_id, zone_id).await?;
-    // 视频配置：请求里没带就沿用旧值；带了空串表示清空
-    let video_url = match payload.video_url {
-        Some(url) => normalize_video_url(Some(url)),
-        None => existing.video_url.clone(),
-    };
-    let video_type = normalize_video_type(payload.video_type, video_url.as_deref());
     // 已绑定园区但仍是待绑定的设备，保存后恢复正常在线待命
     let status = payload.status.unwrap_or_else(|| {
         if park_id.is_some() && existing.status == DEVICE_STATUS_UNBOUND {
@@ -337,8 +283,8 @@ pub async fn update_device(
         "UPDATE devices SET device_id = ?1, model = ?2, park_id = ?3, zone_id = ?4,
             status = ?5, battery = ?6, temperature = ?7, runtime_minutes = ?8,
             odometer = ?9, position = ?10, current_task_name = ?11, last_heartbeat = ?12,
-            firmware = ?13, device_ip = ?14, video_url = ?15, video_type = ?16, updated_at = ?17
-         WHERE id = ?18",
+            firmware = ?13, device_ip = ?14, updated_at = ?15
+         WHERE id = ?16",
     )
     .bind(if payload.device_id.trim().is_empty() {
         existing.device_id
@@ -358,8 +304,6 @@ pub async fn update_device(
     .bind(payload.last_heartbeat.or(existing.last_heartbeat))
     .bind(payload.firmware.or(existing.firmware))
     .bind(payload.device_ip.or(existing.device_ip))
-    .bind(&video_url)
-    .bind(&video_type)
     .bind(now())
     .bind(id)
     .execute(&state.db)

@@ -83,7 +83,7 @@ pnpm dev
 浏览器打开 <http://127.0.0.1:5273>，使用 `admin / admin123` 登录。
 Vite 已将 `/api` 代理到 `http://127.0.0.1:3100`。
 
-> 代理里配了 `ws: true`：实时监控走 WebSocket（`/api/devices/{id}/video/ws`），
+> 代理里配了 `ws: true`：实时监控走 WebSocket（`/api/backpack/video/ws`），
 > 不加这项时代理只转发普通 HTTP，视频一路连不上——**页面没画面、后端日志里
 > 也一条请求都没有**，很容易误判成后端问题。改完 `vite.config.ts` 需要重启 `pnpm dev`。
 
@@ -706,8 +706,9 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 
 ## 企业微信告警推送
 
-设备故障 / 掉线 / 急停 / 控制权被抢，以及任务被判「异常」时，把消息推到企业微信群
-机器人。实现见 `server/src/notify.rs`，记录落 `notifications` 表。
+**执行计划期间**（设备有执行中的任务）的告警——本体故障/障碍、AI 识别检出/数量核对、
+以及任务被判「异常」——推到企业微信群机器人。掉线、控制权被抢、页面手动新建的告警
+**只落库不进群**（告警中心照常可见）。实现见 `server/src/notify.rs`，记录落 `notifications` 表。
 
 > **本节是使用手册。改这个功能之前先读
 > [`docs/wecom-alert-push.md`](docs/wecom-alert-push.md)** —— 那里有架构图、
@@ -765,23 +766,29 @@ curl -sS "<webhook 地址>" -H 'Content-Type: application/json' \
 | 层 | 位置 | 作用 |
 | --- | --- | --- |
 | 部署 | `wecom.enabled` + webhook（平台设置页或 `ROBODOG_WECOM_WEBHOOK`） | 这套部署有没有企业微信通道 |
+| 范围 | 设置页 `alert_only_in_task`（默认开） | **只有执行计划期间的告警**才建单 + 推群 |
 | 运营 | 设置页 `alert_push` / `task_timeout_notice` | 站内提示总开关 |
 | 渠道 | 设置页 `wecom_alert_push` / `wecom_task_abnormal` | 这一类事件推不推企业微信 |
 | 跟单 | 设置页 `wecom_alert_repeat_push`（默认开） | 同一问题已挂在在办工单上时，再次告警还推不推 |
+| 证据图 | 设置页 `wecom_alert_image`（默认开） | 带证据图的告警是否多发一条 `msgtype=image` |
 
-三层都要为真才发。改设置页上的开关立即生效（每次入队都会读库），不用重启。
+全部都要为真才发。改设置页上的开关立即生效（每次入队都会读库），不用重启。
 
 ### 会推什么
 
-| 触发 | 级别 |
-| --- | --- |
-| 设备上报 `error` / `fault` / `obstacle`（`handle_device_event`） | `error` → 严重；其余看 `severity` |
-| 心跳超时被看门狗置离线（`sweep_stale_devices`） | 警告 |
-| `1315 ctrl_source=3` 控制权被抢（`open_control_preempt_alert`） | 警告 |
-| AI 识别检出（`ai_patrol`） | 警告 |
-| 页面上手动新建告警 | 按填写的级别 |
-| 客户端上报任务 `异常` | 警告 |
-| 任务看门狗判异常（`sweep_stuck_tasks`） | 设备离线时**严重**，否则警告 |
+| 触发 | 是否执行计划期间 | 级别 |
+| --- | --- | --- |
+| 设备上报 `error` / `fault` / `obstacle`（`handle_device_event`） | 仅任务跑着时推 | `error` → 严重；其余看 `severity` |
+| AI 识别检出 / 数量核对 / 未检出（`ai_patrol`） | 推 | 警告 |
+| ↳ 数量核对不一致的**证据图**（板端抓拍） | 推（卡片之后的图片消息） | 警告 |
+| 客户端上报任务 `异常` | 推 | 警告 |
+| 任务看门狗判异常（`sweep_stuck_tasks`） | 推 | 设备离线时**严重**，否则警告 |
+| 心跳超时被看门狗置离线（`sweep_stale_devices`） | **只落库** | — |
+| `1315 ctrl_source=3` 控制权被抢（`open_control_preempt_alert`） | **只落库** | — |
+| 页面上手动新建告警 | **只落库**（告警中心里可人工转工单） | — |
+
+「只落库」= 告警中心看得见、能筛选、能转工单，但**不自动建单、不进群**，
+也不回写 `assignee` / `work_order_id`。
 
 急停解除、控制权收回这类「状态反转」**不发**消息（避免刷屏），只在告警中心自动结案。
 
@@ -792,6 +799,7 @@ curl -sS "<webhook 地址>" -H 'Content-Type: application/json' \
 | 20 条/分钟/机器人 | 本地令牌桶限流 18 条/分钟，多余的排队（不丢） |
 | markdown 正文 ≤ 4096 **字节**（中文 3 字节/字） | 按字节截断并补「…（已截断）」，不切半个汉字 |
 | markdown 不支持 @提及 | `mention_all` 时**另发一条 text** 带 `mentioned_list: ["@all"]` |
+| 图片消息：原图 ≤2MB、仅 JPG/PNG、`base64` + **原图** md5 | `notify::evidence_image()` 统一校验（客户端先按文件头/大小筛一次），超限就只发卡片 |
 | 只能发不能收 | 消息里带「查看详情」链接，处理动作仍在控制台 |
 | 同一件事会被反复"发现"（看门狗 15s 一轮、客户端 5s 一报） | 5 分钟去重窗口，键为 `alert_code` / `task_code` |
 | 外网 HTTP 可能超时 10s | 入队是同步的 `try_send`，**绝不在 WS handler / 看门狗里 await 外网** |
@@ -817,6 +825,27 @@ SELECT created_at, status, level, ref_type, ref_id, attempts, last_error
 （`shifts.task_id / park_id / zone_id → staff_id`）。所以告警落库后按**当天**排班找
 最匹配的那一条，再建单、再推群，链路只在一处：`server/src/alert_flow.rs`
 （由 `notify::alert_created` 统一调用）。
+
+### 只有「执行计划期间」的告警才建单 + 推群
+
+`notify::alert_created` 的第一道门是 `alert_flow::should_dispatch`：判据是**告警绑定的
+设备当时有 `执行中` 的任务**（`alert_flow::in_task_execution`）。
+
+| 告警来源 | 执行中 | 结果 |
+| --- | --- | --- |
+| 巡检中本体故障 / 障碍 / 急停（`AL-WS-*`，`fault:`） | 有 | 建单 + 推群 |
+| 航点 AI 识别检出 / 数量核对 / 未检出（`ai:`） | 有 | 建单 + 推群 |
+| 设备心跳超时掉线（`AL-HB-*`，`hb:`） | 无 | **只落库** |
+| 控制权被遥控器抢占（`AL-CTRL-*`，`ctrl:`） | 无 | **只落库** |
+| 页面手动新建（`POST /api/alerts`，未绑定设备也算） | 无 | **只落库** |
+
+「只落库」= 告警中心照常能看到、能筛选、能人工转工单，但**不自动建单、不进企业微信群**
+（`assignee` / `work_order_id` 也不回写）。这样夜里设备掉线或遥控器抢占不会往群里刷，
+值班的人只需要盯「巡检时发现的问题」。
+
+开关：设置页「只为执行计划期间的告警建单 + 推群」（`notification.alert_only_in_task`，
+**缺行视为开启**）。关掉就退回老口径（所有告警都建单 + 推群）。
+回归用例：`server/tests/alert_in_task.rs`。
 
 ### 派单规则（打分取最高）
 
@@ -866,7 +895,9 @@ SELECT created_at, status, level, ref_type, ref_id, attempts, last_error
   页面在「处理轨迹」上方列出——板端 `result.json` 每轮覆盖，历次结论和证据图路径
   从这里回看。
 - 开关：设置页「告警自动派单（生成工单）」（`notification.alert_auto_workorder`，
-  默认开）。关掉只停建单，**责任人解析与推送照旧**。
+  默认开）。关掉只停建单，**责任人解析与推送照旧**；
+  「只为执行计划期间的告警建单 + 推群」（`notification.alert_only_in_task`，默认开）
+  则决定**哪些告警**参与这一整套（建单 + 推群）。
 
 ### 责任人 ↔ 平台账号（「我的工单」）
 
@@ -992,7 +1023,42 @@ service_token = "change-me"
 | `map.mapType` | `map_versions.road_count > 0 ? 3 : 1` | 有路网段用 `3`（Route），否则 `1`（2D 栅格）；客户端还会用 `4013 map_route_exist` 再核对一次 |
 | `speedLimit` | `routes.default_speed` | m/s |
 | `avoidLevel` | 固定 `40`（全避障） | 10 关闭 / 20 仅急停 / 30 感知 / 40 全避障 |
-| `endTask` | 由 `executeMode` 推断 | `return_to_charge` / `return_to_start` / `none` |
+| `endTask` | `tasks.end_task` → 回退 `executeMode` 推断 | `return_to_charge` / `return_to_start` / `none`；老客端只认这个字段 |
+| `endTaskMode` | `tasks.end_task`（**仅显式配置时才带**） | 同上取值，包括显式 `none`；新客端用它区分「显式原地」与「跟随路线」 |
+
+### 跑完要不要返航（`endTask`，2026-11-18）
+
+以前「执行完去哪」**没有参数可配**，链路是：
+
+```text
+控制台执行模式只有 周期任务/临时下发/立即执行 → resolve_end_task 一律推断成 none
+  → 客户端把 endTask="none" 当成「没指定」
+  → patrol_end_task 兜底：loop_mode == "闭环" ? 返回起点 : 原地
+```
+
+而新建路线的闭环方式默认就是「闭环」，所以**每条路线跑完都必然返航**，想不返航只能把路线形态改成
+「往返/单向」——那会清掉 `returnLeg`、连带改里程/耗时/耗电和校验文案，而且同一路线无法按任务区分。
+
+现在把它提升为**任务属性**（`POST/PUT /api/tasks` 的 `endTask`，迁移 028）：
+
+| 值 | 含义 | 下发 |
+| --- | --- | --- |
+| 不传 / `null` | 跟随路线（老行为） | 不带 `endTaskMode`，闭环仍回起点 |
+| `none` | 原地待命（不返航） | `endTaskMode="none"` → 巡检 `end_task=0` |
+| `return_to_start` | 返回起点 | `end_task=1` |
+| `return_to_charge` | 返回充电点（地图需有回充点） | `end_task=2` |
+
+校验在 `handlers/tasks.rs::normalize_task_end_task`：认不出来的值直接 400，不会静默当成「跟随路线」。
+控制台「新建/编辑任务」有「跑完去哪（返航开关）」下拉；中台「下发任务」弹窗同名下拉（
+`endTask` 透传到业务平台）。**兼容性**：只有显式配置才下发 `endTaskMode`——
+老客端忽略它继续按 `endTask` + 闭环兜底跑，不会因为升级服务端就集体停止返航。
+
+选「原地待命」时狗会停在**最后一个航点**（巡检终态仍是 `success`，AI 窗口按终态关闭）；
+选「返回充电点」时客户端会先核对 `charge_point_exist`，没有就提前判异常而不是跑完才失败。
+
+> `routeData.returnLeg`（返航段）**只参与画布显示和里程/耗时/耗电估算**，不参与执行：
+> 巡检 `5000 kind=4` 只把原始 `points` 写成本体路径，返程由本体 ALG 按 `end_task` 自己规划。
+> 改返航段的速度/动作不会改变返航路径。
 
 客户端（`client/`）把载荷翻译成智航 Pro 指令驱动机器狗本体，详见
 [`client/README.md`](client/README.md)。
@@ -1112,7 +1178,22 @@ POST /api/devices/{id}/teleop/take
 
 ### 定位与「机器狗不在图上」
 
-任务能不能跑，取决于机器人**在地图坐标系里知不知道自己在哪**。链路是：
+任务能不能跑，取决于机器人**在地图坐标系里知不知道自己在哪**。
+
+巡检（`kind=4`，现在是唯一会跑航线的任务）走**自动定位**，不需要人工点「重新定位」：派单时
+客户端判「这条路线绑的图 + `loc_state.status == 100`」，缺一项就自己发 `4030` 载图重定位
+（`initial_pose` 缺省发**零四元数** = 读上一份位姿文件做完整重定位），不收敛再自动重试一次；
+两次都不成才把任务置「异常」并写清原因。细节见 `client/README.md`「巡检起步前的定位守卫」。
+
+「返回起点」（`endTaskMode=return_to_start` → 巡检 `end_task=1`）回到的是**起步时本体
+`capture_origin_pose` 采的起点位姿**，不是地图原点。所以若载图时误发了单位四元数 + 原点
+（协议里那是一个**合法位姿**，不是「没给」），起点位姿会被采成原点，表现就是「返航回地图
+原点」——2026-11 已改成缺省发零四元数，回归用例
+`business/client/src/zhpro/mapping.rs::tests::load_map_without_pose_sends_zero_quaternion`。
+
+历史 `kind=2` 导航链路的细节（客户端已不再使用）保留如下：
+
+链路是：
 
 1. `POST /api/tasks` / 重连补发 → 客户端发 `5000 kind=2`，首航点带
    `params.map_path` + `need_locate: true`（协议 §2.5.1：载图并等定位收敛，安全默认）；
@@ -1318,7 +1399,7 @@ AI 可对除红外外的五路开启，画框方式二选一：
 - 分析与后续路线（遥测、SOS 告警、中继、录像）见
   [`docs/backpack-video-integration.md`](docs/backpack-video-integration.md)。
 
-### 视频：协议里没有，只能外挂
+### 视频：协议里没有，统一走背包前置 `dogcam`
 
 协议原文已归档在 `business/docs/zhihang-pro-api-v1.0.3.pdf`（84 页），
 同目录 `.txt` 是便于检索的纯文本版；设备客户端与机器狗本体的连接方式（双通道建链、
@@ -1329,92 +1410,75 @@ AI 可对除红外外的五路开启，画框方式二选一：
 API Type 总表 60 个消息里也没有图像或流媒体类型。`bulkdata` 通道的大负载是
 1401/1403/1405/1407 的位姿与路径数据，不是视频帧。
 
-文档里与「影像」沾边的只有两处，都**不是视频流**：
+因此**实时视频只有一个来源**：数据采集背包的板端 relay 把本体前置 RTSP 归一化成
+mediamtx 的 `dogcam`，浏览器直连 mediamtx（WHEP）或走平台中继（FLV over WS）。
 
-- 巡检点动作 `tasks=1 拍照`，调用上装 `/capture_image`，单张静态图；
-  任务记录里用 `data.items[].phase[].image_path` 返回图片落盘路径。
-- §4「文件服务」HTTP 端口 `12000`，L2 根 `/userdata/alg_data`、M1 根
-  `/ota/alg_data`，用于下载地图包 / 图片等文件。
+| 页面 | 组件 | 说明 |
+| --- | --- | --- |
+| 实时视频 | `views/monitor/index.vue` | 六路源可选，默认 `dogcam`，带 AI 与画框 |
+| 设备管理（抽屉实时监控 / 手动遥控） | `components/FrontCameraVideo.vue` | 固定 `dogcam`，与实时视频同源同路 |
+| 计划管理（实时监控 / 详情） | `components/TaskLiveMonitor.vue` → `FrontCameraVideo.vue` | 同上 |
 
-因此视频由**本体自带的流服务**提供，设备档案里只存地址：
-设备编辑弹窗填 `videoUrl` + `videoType`（`none`/`hls`/`flv`/`mp4`/`webrtc`/`rtsp`），
-未显式选类型时按地址后缀自动推断。现场本体对外是 RTSP，例如：
+设备档案里**不再有视频地址**（`video_url` / `video_type` 已删除）：2026-11-18 起删掉了
+「设备客户端 ffmpeg 拉本体 RTSP → 平台中继」的整条旧链路，部署没接背包时页面直接给
+配置说明，不做兜底播放。设计背景见 `docs/backpack-video-integration.md` §6.9。
 
-```
-rtsp://user:Abcd%232027%21@192.168.234.1:8554/test
-        └── 用户名 └── 密码（URL 编码，解码后 Abcd#2027!）
-```
+### 平台中继：板端推流 → 平台房间 → 浏览器
 
-| 类型 | 播放方式 |
-| --- | --- |
-| `hls` | hls.js；Safari 走原生 `canPlayType` |
-| `flv` | flv.js（MSE） |
-| `mp4` | 原生 `<video>` |
-| `rtsp` | **经设备客户端回传**（见下节），浏览器用 flv.js 播中继流 |
-| `webrtc` | 需要信令网关，当前未接入，前端只给提示 |
-| `none` / 无地址 | 显示占位说明，不拉流 |
-
-前端 `VideoPlayer.vue` 里 hls.js / flv.js 按需动态导入，只有真正要播放时才加载。
-
-### RTSP：客户端拉流转 FLV，经业务平台中继给浏览器
-
-浏览器不能直连 RTSP，能访问本体网段（`192.168.234.x`）的是设备客户端。
-所以整条链路是「客户端拉流 → 平台中继 → 浏览器 MSE 播放」：
+跨网段 / 公网入口时（操作员电脑够不到背包的 `:8889`），板端 relay 主动推到平台，
+浏览器只跟平台同源通信：
 
 ```
-机器狗本体 RTSP ──ffmpeg──► 设备客户端 ──ws://平台/ws/device/video──► 业务平台 ──ws──► 浏览器(flv.js)
-                         转封装 H.264/FLV        二进制帧中继                 /api/devices/{id}/video/ws
+背包本地 RTSP ──ffmpeg──► 板端 relay ──ws://平台/ws/device/video──► 业务平台 ──ws──► 浏览器(flv.js)
+                         H.264/FLV         房间 bp:<stream>                  /api/backpack/video/ws
 ```
 
-- **按需推流**：控制台打开「实时监控」才下发 `video_start`（携带设备档案里的
-  `video_url`）。最后一个观看者离开**不立刻**停流，交给 15s 看门狗在 ~15~30s 后收尾：
-  现场关抽屉再打开、切页签、浏览器 WS 抖一下都会重新成为「第一个观看者」，
-  每次重启 ffmpeg 要黑 3~7s 并换一条新 FLV，看起来就是「一闪一闪的连接中断」。
-  客户端也按地址去重重复的 `video_start`，同一个地址已经在推就不重启 ffmpeg。
-- **拉流地址只有一处**：就是设备管理里的 `video_url`，改地址不用动客户端配置。
-- **补流头**：房间里有当前这一轮的流头（FLV 头 + SPS/PPS + 首个关键帧）就补，
-  不分是不是第一个观看者 —— 没人看时推流端还在跑，不补头浏览器就只能从中段字节开始解，
-  flv.js 解析错位后黑屏再重连，同样表现为闪断（`server/src/video.rs` 的 `flv_init_len`）。
-  流头不会串轮次：板端 relay 起流前发 `video_reset`，设备客户端重连会换掉整个房间。
-- **逐包 flush**：客户端拉流固定带 `-flush_packets 1 -muxdelay 0 -muxpreload 0`。
-  ffmpeg 写管道默认带缓冲，转码出来的小帧会被攒成一阵一阵的突发数据，
-  浏览器 MSE 先饿死再猛灌，flv.js 在 playing / buffering 之间反复横跳（「一闪一闪」）。
-  板端 relay（`deploy/backpack-relay/relay_push.py`）一直这么配，所以它稳。
-- **墙钟时间戳**：现场相机的 SDP 标 60fps、PTS 也按 1/60 递增，但实际只投递 ~25 帧/秒。
-  若沿用相机时间轴，媒体时间只走 0.42x 实时，浏览器 MSE 会反复饿死
-  （播放器在「连接中 / LIVE」之间来回跳、画面慢放）。客户端拉流时固定加
-  `-use_wallclock_as_timestamps 1`，把 PTS 换成到达时间，时间轴与真实时间 1:1。
+- **按需推流**：第一个观看者进来才下发 `video_start`（带 `stream`），最后一个离开
+  **不立刻**停流：房间保留 60s 宽限（`STREAM_IDLE_GRACE`），看门狗超时才 `video_stop`。
+  现场关抽屉再打开、切页签、浏览器 WS 抖一下都能复用还在跑的流，不会每次黑 3~7s。
+- **补流头**：房间里有当前这一轮的流头（FLV 头 + SPS/PPS + 首个关键帧）就补，不分是不是
+  第一个观看者 —— 不补头浏览器只能从中段字节开始解，flv.js 解析错位后黑屏再重连
+  （`server/src/video.rs` 的 `flv_init_len`）。流头不会串轮次：板端 relay 起流前发
+  `video_reset`，推流端重连会换掉整个房间。
+- **先缩后编（默认 light 档位）**：`dogcam` 是 1080p60，`-c:v copy` 会把 4~8Mbps 原样
+  推出去，而平台公网出口只有 ≈2.5Mbps（阿里云 ECS 实测），观看端追不上就被服务端判
+  `lagged` 踢掉重连 —— 现场就是「很卡」。所以 relay 默认转成 **720p20 / 1.2Mbps**
+  （`RELAY_PROFILE=light`，编码器自动挑 rkmpp / v4l2m2m / libx264），带宽更紧用
+  `RELAY_BITRATE=800k RELAY_FPS=15`。只有公网出口 ≥6Mbps 才考虑 `RELAY_PROFILE=copy`。
+- **逐包 flush**：板端 relay（`deploy/backpack-relay/relay_push.py`）固定带
+  `-flush_packets 1 -muxdelay 0 -muxpreload 0`。ffmpeg 写管道默认带缓冲，转码小帧会被
+  攒成一阵一阵的突发，浏览器 MSE 先饿死再猛灌，flv.js 在 playing / buffering 之间反复横跳。
+- **墙钟时间戳**：现场相机 SDP 标 60fps、实际只投递 ~25 帧/秒，relay 用
+  `-use_wallclock_as_timestamps 1` 把 PTS 换成到达时间，避免浏览器 MSE 反复饿死（慢放）。
 - **鉴权**：浏览器 WS 握手不能带请求头，中继端点用 `?token=<JWT>`，
   `require_auth` 为此放开了查询串令牌（普通接口仍只认 `Authorization`）。
-- **空转兜底**：推流重连会丢弃旧房间（新流的新 FLV 头不能混进老连接），
-  浏览器侧自动重连；另有 15s 看门狗把「有人在推、没人看」的流停掉，
-  防止浏览器崩溃（没有 Close 帧）时机器狗一直在编码。
-- **观看端不许闪**（`web/src/components/VideoPlayer.vue`）：缓冲只是角标、不盖错误层；
-  断流时先抓最后一帧当 poster 再重建 flv 播放器（不黑屏）；首连重连 250ms 起、
-  指数退避封顶 3s，连续失败 5 次才把错误铺在画面上；另有 3s「时间轴不前进」
-  看门狗主动重连。flv.js 按直播配：`enableStashBuffer: false`。
+- **观看端不许闪**（`web/src/components/VideoPlayer.vue`，现在只有中继一种播放方式）：
+  缓冲只是角标、不盖错误层；断流时先抓最后一帧当 poster 再重建 flv 播放器（不黑屏）；
+  首连重连 250ms 起、指数退避封顶 3s，连续失败 5 次才把错误铺在画面上；另有 8s
+  「时间轴不前进」看门狗主动重连。flv.js 按直播配：`enableStashBuffer: false`。
 
 现场前置条件：
 
 | 项 | 要求 |
 | --- | --- |
-| 客户端所在机器 | 能访问本体 RTSP 地址（现场就是机器狗自身 / 同网段） |
-| `ffmpeg` | 客户端机器上必须可执行，默认取 `PATH` 里的 `ffmpeg`，可用 `[video].ffmpeg` 指定 |
-| 编码器 | 默认 `[video].encoder = "auto"`：现场机器狗的 ffmpeg 没有 libx264，会选中瑞芯微硬件编码器 `h264_rkmpp` |
-| 客户端配置 | `[video].enabled = true`（默认开）；`fps` / `bitrate` / `width` 按带宽调 |
-| 平台 | 无需额外媒体服务器；`/ws/device/video` 与 `/api/devices/{id}/video/ws` 已内置 |
+| 板端 relay | `backpack-relay` 服务在跑，且能出公网（`ws://<平台>/ws/device/video`） |
+| 背包 mediamtx | `dogcam` path 能拉通（`ffprobe rtsp://<背包IP>:8554/dogcam`） |
+| 平台 | 无需额外媒体服务器；`/ws/device/video` 与 `/api/backpack/video/ws` 已内置 |
 
-延迟量级：编码 2 秒一个关键帧 + 网络 + MSE 缓冲，实测在 1~2 秒；带宽按
-`[video].bitrate`（默认 1200k）计，一台设备一路流。
+延迟量级：直连 WHEP ≈200ms；中继 1~2s（关键帧间隔 + 网络 + MSE 缓冲）。
 
 ### 任务执行实时监控（视频 + 地图位置）
 
 计划管理里所有 `执行中` / `已暂停` 的任务卡片都有一个「实时监控」按钮（详情弹窗顶部
 也内嵌同一块面板），同时看到两样实时数据：
 
+视频这一路固定是背包前置 `dogcam`（`web/src/components/FrontCameraVideo.vue`），
+与「实时视频」页的前置摄像头同一条推流、同一套直连/中继判定；设备档案里的视频地址已删除，
+见 `docs/backpack-video-integration.md` §6.9。
+
 | 区域 | 数据来源 | 刷新方式 |
 | --- | --- | --- |
-| 本体视频 | 设备档案的 `videoUrl` / `videoType`，RTSP 经客户端回传 + 平台中继 | WebSocket 直播（真正的实时流） |
+| 本体视频 | 背包 `dogcam`（本体前置 RTSP 归一化）—— 与「实时视频」页的前置摄像头同源同路 | WHEP 直连或平台中继（`FrontCameraVideo.vue`） |
 | 地图位置 | `devices.position`（本体 1401 位姿的地图米制 x/y） | 设备心跳 10s 上报 + 页面 5s 轮询 |
 | 进度 / 阶段 | `tasks.progress` / `tasks.robot_stage` | 客户端 5s 上报 + 页面 5s 轮询 |
 
@@ -1444,7 +1508,8 @@ rtsp://user:Abcd%232027%21@192.168.234.1:8554/test
 
 抽屉布局：进入「手动遥控」页时抽屉自动加宽到 780px，**左侧实时画面 + 电量/模式/位置/接管
 徽标，右侧摇杆 + 速度档 + 动作 + 急停**，一屏操作不必来回切页签；视口窄于 860px 时
-自动上下堆叠。画面同样是按需起流：只在打开抽屉、进入该页签时下发 `video_start`。
+自动上下堆叠。画面固定是背包前置 `dogcam`（与「实时视频」同源），按需起流由板端中继的
+`video_start` 控制（见上节「平台中继」）。
 
 协议对齐（v1.0.3 原文）：
 
@@ -1491,9 +1556,9 @@ rtsp://user:Abcd%232027%21@192.168.234.1:8554/test
   「分段导航任务（一段 = 一条 `5000`，`params.goals` 放该段全部航点）+ 客户端侧点位动作」
   实现，见 `client/README.md`。**不要逐点下发**：本体同一时刻只允许一个导航任务，
   逐点时第 2 个点起会全部回 `13897 capability busy`。
-- 视频：`hls`(m3u8) / `flv` / `mp4` 浏览器直连播放；`rtsp` 由设备客户端拉流转 FLV、
-  经业务平台中继（`server/src/video.rs` + `client/src/video.rs`），支持多观看者与按需起停。
-  `webrtc` 仍需要额外信令网关，前端只给提示；中继没有做录制 / 回放，也不做多路混流。
+- 视频：唯一来源是背包前置 `dogcam`（板端 relay → mediamtx WHEP 直连，或推到平台
+  `/api/backpack/video/ws` 中继），支持多观看者与按需起停；设备客户端不再参与拉流。
+  中继没有做录制 / 回放，也不做多路混流。
 - 手动遥控（接管 / 摇杆 / 本体动作 / 急停）前后端与客户端全链路已打通，接管态落库并按
   120s 空闲超时自动失效；但 holder 目前是设备维度标识（中间件没有把用户名透传到 handler），
   多个账号同时操作同一台设备时仍是「谁先接管谁控制」，不是按登录人隔离。
@@ -1522,7 +1587,7 @@ cd business/server && cargo run
 - 需要数据库、HTTP 路由、文件 IO 的用例一律放 `tests/`，不要塞进 `src/`；
 - 新增业务逻辑尽量先抽成纯函数，顺带补内联单测；临时资源（数据库、配置文件）用
   `std::env::temp_dir()` + 进程号 + 原子计数命名，并用 `Drop` 清理，保证并行安全；
-- 线上事故修复要补回归用例，例如驾驶舱 `video_url` 缺列 → `server/tests/api_smoke.rs`。
+- 线上事故修复要补回归用例，例如驾驶舱设备列缺字段 → `server/tests/api_smoke.rs`。
 
 当前覆盖：
 

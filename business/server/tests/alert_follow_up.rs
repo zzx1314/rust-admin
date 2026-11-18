@@ -111,10 +111,7 @@ async fn build_state(webhook: Option<&str>) -> (AppState, Option<mpsc::Receiver<
 
 /// 插一条「AI 数量核对不一致」告警，带上结构化去重键，返回 alert_code
 async fn insert_count_alert(state: &AppState, code: &str, found: i64) -> String {
-    let device: (i64,) = sqlx::query_as("SELECT id FROM devices LIMIT 1")
-        .fetch_one(&state.db)
-        .await
-        .expect("播种数据里应至少有一台设备");
+    let device = device_in_task(state).await;
     sqlx::query(
         "INSERT INTO alerts (alert_code, level, content, device_id, status, occurred_at,
             created_at, dedup_key)
@@ -124,7 +121,7 @@ async fn insert_count_alert(state: &AppState, code: &str, found: i64) -> String 
     .bind(format!(
         "AI 识别数量核对不一致：任务「办公区域例行巡检」航点 0「新航点 1」检查 3 个，实际检出 {found} 个"
     ))
-    .bind(device.0)
+    .bind(device)
     .bind("ai:RD-1:TK-1112-11:0:count")
     .execute(&state.db)
     .await
@@ -137,6 +134,23 @@ async fn open_order_count(state: &AppState) -> i64 {
         .fetch_one(&state.db)
         .await
         .expect("查工单失败")
+}
+
+/// 取一台「正在执行计划」的设备。
+///
+/// 现行口径（`alert_only_in_task`，缺行 = 开）只有**执行计划期间**的告警才会自动建单 +
+/// 推群，所以 AI 告警的夹具必须挂在一条 `执行中` 任务所属的设备上——
+/// `SELECT id FROM devices LIMIT 1` 取到的是随便一台（无 ORDER BY，实际可能是 RD-013），
+/// 那条告警会被新口径直接跳过。
+async fn device_in_task(state: &AppState) -> i64 {
+    sqlx::query_scalar(
+        "SELECT device_id FROM tasks
+          WHERE task_status = '执行中' AND device_id IS NOT NULL
+          ORDER BY id ASC LIMIT 1",
+    )
+    .fetch_one(&state.db)
+    .await
+    .expect("播种数据里应至少有一条执行中的任务")
 }
 
 #[tokio::test]
@@ -200,10 +214,7 @@ async fn count_change_attaches_but_flags_a_follow_up() {
 #[tokio::test]
 async fn detection_confidence_does_not_trigger_follow_up() {
     let (state, _temp) = test_state().await;
-    let device: (i64,) = sqlx::query_as("SELECT id FROM devices LIMIT 1")
-        .fetch_one(&state.db)
-        .await
-        .expect("播种数据里应至少有一台设备");
+    let device = device_in_task(&state).await;
     for (code, conf) in [("AL-DET-1", "0.81"), ("AL-DET-2", "0.93")] {
         sqlx::query(
             "INSERT INTO alerts (alert_code, level, content, device_id, status, occurred_at,
@@ -214,7 +225,7 @@ async fn detection_confidence_does_not_trigger_follow_up() {
         .bind(format!(
             "AI 识别：任务「办公区域例行巡检」航点 0「新航点 1」检出 extinguisher（置信度 {conf}）"
         ))
-        .bind(device.0)
+        .bind(device)
         .bind("ai:RD-1:TK-1112-11:0:extinguisher")
         .execute(&state.db)
         .await
@@ -234,10 +245,7 @@ async fn detection_confidence_does_not_trigger_follow_up() {
 
 /// 插一条「AI 检出」告警（同航点同类别 = 同一个结构化去重键，跨轮次也会命中老单）
 async fn insert_detect_alert(state: &AppState, code: &str, conf: &str) {
-    let device: (i64,) = sqlx::query_as("SELECT id FROM devices LIMIT 1")
-        .fetch_one(&state.db)
-        .await
-        .expect("播种数据里应至少有一台设备");
+    let device = device_in_task(state).await;
     sqlx::query(
         "INSERT INTO alerts (alert_code, level, content, device_id, status, occurred_at,
             created_at, dedup_key)
@@ -247,7 +255,7 @@ async fn insert_detect_alert(state: &AppState, code: &str, conf: &str) {
     .bind(format!(
         "AI 识别：任务「办公区域例行巡检」航点 0「新航点 1」检出 extinguisher（置信度 {conf}）"
     ))
-    .bind(device.0)
+    .bind(device)
     .bind("ai:RD-1:TK-1112-11:0:extinguisher")
     .execute(&state.db)
     .await

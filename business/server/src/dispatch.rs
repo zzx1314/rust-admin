@@ -24,8 +24,13 @@ pub fn to_map_dir_name(map_version_id: &str) -> String {
 
 /// 行程结束动作。
 ///
-/// `executeMode` 为前端枚举（单次 / 循环 / 返航 / 返航充电），映射到智航侧
-/// 的结束策略。注意「返航充电」包含「返航」，必须先判充电。
+/// `executeMode` 为前端枚举（周期任务 / 临时下发 / 立即执行，以及中台外部调用可能带的
+/// 单次 / 循环 / 返航 / 返航充电），映射到智航侧的结束策略。注意「返航充电」包含「返航」，
+/// 必须先判充电。
+///
+/// 这只是**历史兼容**的推断：控制台的执行模式里并没有「返航」这个值，所以网页建的任务
+/// 永远落到 `none`，真正让路线跑完必返航的是客户端 `patrol_end_task` 的闭环兜底
+/// （`loop_mode == "闭环"` → 返回起点）。要按任务控制请用 [`resolve_task_end`]。
 pub fn resolve_end_task(execute_mode: Option<&str>) -> &'static str {
     let mode = execute_mode.unwrap_or_default();
     if mode.contains("返充") || mode.contains("返回充电") || mode.contains("充电") {
@@ -35,6 +40,44 @@ pub fn resolve_end_task(execute_mode: Option<&str>) -> &'static str {
     } else {
         "none"
     }
+}
+
+/// 结束动作归一化：同时接受控制台中文枚举与载荷英文枚举。
+///
+/// 返回 `None` 表示「认不出来」——调用方应当拒绝请求，不要静默当成跟随路线
+/// （否则用户选了「原地」却因为拼错单词而继续返航，现场很难查）。
+pub fn normalize_end_task(value: &str) -> Option<&'static str> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if value == "return_to_charge" || value.contains("充电") || value.contains("返充") {
+        Some("return_to_charge")
+    } else if value == "return_to_start" || value.contains("返航") || value.contains("返回起点")
+    {
+        Some("return_to_start")
+    } else if matches!(value, "none" | "return_none" | "stay")
+        || value.contains("原地")
+        || value.contains("待命")
+    {
+        Some("none")
+    } else {
+        None
+    }
+}
+
+/// 任务级结束动作：显式 `tasks.end_task` 优先，否则沿用 `executeMode` 推断。
+///
+/// 返回 `(endTask, endTaskMode)`：
+/// - `endTask` 始终有值（老客户端只认这个字段）；
+/// - `endTaskMode` **只在任务显式配置时有值**。必须这样区分，因为老服务端对所有任务
+///   都发 `endTask: "none"`，客户端把 `none` 当「没指定」；若直接让 `endTask` 承担
+///   「显式原地」语义，老客户端会被误伤成「所有闭环路线都不返航」。
+pub fn resolve_task_end(task: &Task) -> (&'static str, Option<&'static str>) {
+    if let Some(explicit) = task.end_task.as_deref().and_then(normalize_end_task) {
+        return (explicit, Some(explicit));
+    }
+    (resolve_end_task(task.execute_mode.as_deref()), None)
 }
 
 /// `resolve_map` 读取的地图行：(id, park, map_name, version, file_path, source_ref, road_count)
@@ -109,6 +152,7 @@ pub async fn build_dispatch_payload(
     let route_data: Option<Value> = route_data_text.and_then(|s| serde_json::from_str(&s).ok());
 
     let map = resolve_map(db, task).await?;
+    let (end_task, end_task_mode) = resolve_task_end(task);
 
     // 坐标守卫：航点必须是地图米制且在所选地图范围内（详见 [`check_route_data`]）。
     if let Some(data) = route_data.as_ref() {
@@ -138,7 +182,9 @@ pub async fn build_dispatch_payload(
         map,
         speed_limit: default_speed,
         avoid_level: Some(40),
-        end_task: Some(resolve_end_task(task.execute_mode.as_deref()).to_string()),
+        end_task: Some(end_task.to_string()),
+        // 仅显式配置才带：客户端用它覆盖「闭环路线自动返航」的兜底
+        end_task_mode: end_task_mode.map(str::to_string),
     })
 }
 
@@ -323,5 +369,68 @@ mod tests {
         assert_eq!(resolve_end_task(Some("返航")), "return_to_start");
         assert_eq!(resolve_end_task(Some("单次")), "none");
         assert_eq!(resolve_end_task(None), "none");
+    }
+
+    #[test]
+    fn explicit_end_task_wins_over_execute_mode() {
+        let mut task = Task {
+            id: 1,
+            task_code: "TK-1".to_string(),
+            task_name: "巡检".to_string(),
+            task_type: None,
+            // 历史枚举「返航」本来会推断成返回起点
+            execute_mode: Some("返航".to_string()),
+            end_task: Some("none".to_string()),
+            level: None,
+            device_id: None,
+            device_code: None,
+            park_id: None,
+            park_name: None,
+            zone_id: None,
+            zone_name: None,
+            route_id: None,
+            route_code: None,
+            route_name: None,
+            plan_start: None,
+            plan_end: None,
+            schedule_days: None,
+            last_dispatched_on: None,
+            task_status: "待执行".to_string(),
+            progress: 0,
+            dispatch_policy: None,
+            description: None,
+            robot_task_id: None,
+            robot_stage: None,
+            robot_updated_at: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            created_by: None,
+        };
+        assert_eq!(resolve_task_end(&task), ("none", Some("none")));
+
+        // 未显式配置：沿用 executeMode 推断，且不带 endTaskMode（老客户端 / 老行为）
+        task.end_task = None;
+        task.execute_mode = Some("周期任务".to_string());
+        assert_eq!(resolve_task_end(&task), ("none", None));
+
+        task.execute_mode = Some("返航充电".to_string());
+        assert_eq!(
+            resolve_task_end(&task),
+            ("return_to_charge", None),
+            "外部调用仍可按 executeMode 文案指定"
+        );
+    }
+
+    #[test]
+    fn end_task_normalization() {
+        assert_eq!(normalize_end_task("原地待命"), Some("none"));
+        assert_eq!(normalize_end_task("none"), Some("none"));
+        assert_eq!(normalize_end_task("返回起点"), Some("return_to_start"));
+        assert_eq!(
+            normalize_end_task("return_to_charge"),
+            Some("return_to_charge")
+        );
+        assert_eq!(normalize_end_task("瞎写"), None);
+        assert_eq!(normalize_end_task("  "), None);
     }
 }

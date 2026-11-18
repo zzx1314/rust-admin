@@ -49,20 +49,11 @@ pub const DEFAULT_BATTERY: i64 = 86;
 pub const DEFAULT_POSITION: &str = "0.0, 0.0";
 pub const DEFAULT_API_USERNAME: &str = "admin";
 pub const DEFAULT_API_PASSWORD: &str = "admin123";
-/// 实时视频：ffmpeg 可执行文件（现场 aarch64 需自带，见 client/README.md）
-pub const DEFAULT_FFMPEG: &str = "ffmpeg";
 /// 地图定时增量同步间隔（秒）：只补平台没有的图，`0` = 关闭。
 ///
 /// 遥控器/官方 App 建的图不会走 4001 自动回传，靠这个轮询把本体上「平台还没有」
 /// 的地图补上去；中台点「同步地图」仍然走全量刷新。
 pub const DEFAULT_MAP_SYNC_INTERVAL_SECS: u64 = 600;
-/// 实时视频：H.264 目标码率
-pub const DEFAULT_VIDEO_BITRATE: &str = "1200k";
-/// 实时视频：输出帧率
-pub const DEFAULT_VIDEO_FPS: u32 = 15;
-/// 实时视频：编码器（`auto` = 按可用性挑硬件编码器，见 `video::detect_encoder`）
-pub const DEFAULT_VIDEO_ENCODER: &str = "auto";
-
 /// 航点 AI 识别：板端 Agent 地址。
 ///
 /// 默认 `127.0.0.1:8000` —— 背包 Agent 与设备客户端跑在同一块板子（现场 `.246`）上，
@@ -214,14 +205,16 @@ impl std::str::FromStr for RoadNetworkMode {
 // ─── 配置文件结构（client.toml） ───────────────────────────────
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+// 顶层**不** deny_unknown_fields：现场 `/etc/robodog/client.toml` 里还留着已删除的
+// `[video]` 段（2026-11-18 视频改由背包 relay 提供），升级后不能因为这一行起不来。
+// 单个配置段仍然严格校验（拼错键名会报错）。
+#[serde(default)]
 pub struct FileConfig {
     pub server: ServerSection,
     pub api: ApiSection,
     pub robot: RobotSection,
     pub mapping: MappingSection,
     pub simulation: SimulationSection,
-    pub video: VideoSection,
     pub ai: AiSection,
     pub log: LogSection,
 }
@@ -305,29 +298,6 @@ pub struct SimulationSection {
     pub battery: Option<i64>,
     pub position: Option<String>,
     pub firmware: Option<String>,
-}
-
-/// `[video]` 实时视频回传（RTSP → FLV → 业务平台）
-///
-/// 拉流地址不在这里配：业务平台在有人观看时下发 `video_start`，
-/// 携带的就是设备管理里填的 `video_url`，一处维护即可。
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct VideoSection {
-    /// 是否允许业务平台按需拉流（false = 完全不响应 video_start）
-    pub enabled: Option<bool>,
-    /// ffmpeg 可执行文件路径
-    pub ffmpeg: Option<String>,
-    /// RTSP 传输方式：tcp / udp
-    pub transport: Option<String>,
-    /// 编码器：`auto`（默认）/ `libx264` / `h264_rkmpp` / `h264_v4l2m2m` / 其它 ffmpeg 编码器名
-    pub encoder: Option<String>,
-    /// 输出帧率
-    pub fps: Option<u32>,
-    /// 目标码率，如 `1200k` / `2M`
-    pub bitrate: Option<String>,
-    /// 输出宽度（0 = 保持原始分辨率，等比缩放）
-    pub width: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -631,20 +601,6 @@ pub struct Config {
     /// 业务服务登录账号
     pub api_username: String,
     api_password: String,
-    /// 实时视频：是否允许业务平台按需拉流
-    pub video_enabled: bool,
-    /// 实时视频：ffmpeg 可执行文件
-    pub video_ffmpeg: String,
-    /// 实时视频：RTSP 传输方式（tcp / udp）
-    pub video_transport: String,
-    /// 实时视频：编码器名；`auto` 表示运行时探测
-    pub video_encoder: String,
-    /// 实时视频：输出帧率
-    pub video_fps: u32,
-    /// 实时视频：目标码率
-    pub video_bitrate: String,
-    /// 实时视频：输出宽度（0 = 原始分辨率）
-    pub video_width: u32,
     /// tracing 过滤器（RUST_LOG 优先）
     pub log_filter: Option<String>,
 }
@@ -892,29 +848,6 @@ impl Config {
             .or_else(|| file.api.password.clone())
             .unwrap_or_else(|| DEFAULT_API_PASSWORD.to_string());
 
-        let video_enabled = file.video.enabled.unwrap_or(true);
-        let video_ffmpeg = pick_string([file.video.ffmpeg.as_deref()])
-            .unwrap_or(DEFAULT_FFMPEG)
-            .to_string();
-        let video_transport = pick_string([file.video.transport.as_deref()])
-            .unwrap_or("tcp")
-            .to_lowercase();
-        if video_transport != "tcp" && video_transport != "udp" {
-            return Err(ConfigError::Invalid(format!(
-                "video.transport 只支持 tcp / udp，收到 {video_transport:?}"
-            )));
-        }
-        let video_encoder = pick_string([file.video.encoder.as_deref()])
-            .unwrap_or(DEFAULT_VIDEO_ENCODER)
-            .to_lowercase();
-        let video_fps = pick_number([file.video.fps])
-            .unwrap_or(DEFAULT_VIDEO_FPS)
-            .clamp(1, 60);
-        let video_bitrate = pick_string([file.video.bitrate.as_deref()])
-            .unwrap_or(DEFAULT_VIDEO_BITRATE)
-            .to_string();
-        let video_width = pick_number([file.video.width]).unwrap_or(0);
-
         Ok(Self {
             server_url,
             device_id,
@@ -944,13 +877,6 @@ impl Config {
             api_base,
             api_username,
             api_password,
-            video_enabled,
-            video_ffmpeg,
-            video_transport,
-            video_encoder,
-            video_fps,
-            video_bitrate,
-            video_width,
             log_filter: file.log.filter.clone(),
         })
     }
@@ -1011,13 +937,6 @@ mapping.sync_interval_s = {map_sync}
 simulation.battery      = {battery}
 simulation.position     = {position}
 simulation.firmware     = {firmware}
-video.enabled           = {video_enabled}
-video.ffmpeg            = {video_ffmpeg}
-video.transport         = {video_transport}
-video.encoder           = {video_encoder}
-video.fps               = {video_fps}
-video.bitrate           = {video_bitrate}
-video.width             = {video_width}
 log.filter              = {log_filter}",
             server_url = self.server_url,
             device_id = self.device_id,
@@ -1062,17 +981,6 @@ log.filter              = {log_filter}",
             battery = self.battery,
             position = self.position,
             firmware = self.firmware,
-            video_enabled = self.video_enabled,
-            video_ffmpeg = self.video_ffmpeg,
-            video_transport = self.video_transport,
-            video_encoder = self.video_encoder,
-            video_fps = self.video_fps,
-            video_bitrate = self.video_bitrate,
-            video_width = if self.video_width == 0 {
-                "（原始分辨率）".to_string()
-            } else {
-                self.video_width.to_string()
-            },
             log_filter = self.log_filter.as_deref().unwrap_or("（默认）"),
         )
     }

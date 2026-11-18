@@ -22,6 +22,8 @@ tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 base64 = "0.22"
+# 企业微信图片消息要「原图字节的 md5」（base64 之前）
+md-5 = "0.10"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 png = "0.17"
 urlencoding = "2"

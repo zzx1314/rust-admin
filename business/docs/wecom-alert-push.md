@@ -22,6 +22,7 @@
 | 按级别过滤、按业务类型分开关、夜间只推严重 | 接收群里的回复（webhook 单向，只能发） |
 | 失败时在页面上看到企业微信返回的 `errcode` | 保证送达（企业微信不返回 ACK，只有 `errcode: 0`） |
 | 按**当天排班**把告警派给当班责任人、自动建工单，并 `@` 到人 | 猜到「谁真的在现场」—— 名单来自平台里的排班，没排班就只能兜底到园区负责人 |
+| 把 AI 识别的**证据图**作为图片消息发到群里（`msgtype=image`，卡片之后一条） | 在 markdown 卡片里嵌图（群机器人 markdown 不支持 `![]()`），也不能让企微去拉我们的内网地址 |
 
 **"建机器人"这一步是人工的**，代码只负责「配了地址就发」。所以需求里
 "在一个群聊创建一个机器人"落地成：文档教人建 → 拿到 webhook → **粘贴到
@@ -57,6 +58,8 @@
                               │
                               ▼
                    notify::alert_created(state, alert_code)
+                              │  ⓪ alert_flow::should_dispatch —— 不是「执行计划期间」
+                              │     的告警（掉线 / 抢占 / 手动新建）到此为止：只落库
                               │  ① alert_flow::on_alert —— 按当天排班找责任人
                               │     并自动建工单（**不看推送开关**，先落单）
                               │  ② 查 notifications 开关（DB）
@@ -70,7 +73,8 @@
                               │
                               ▼
                       单个 consumer task
-                              │  · 令牌桶限流 18/min（@all 占 2 个额度）
+                              │  · 令牌桶限流 18/min（@all 占 2 个额度，带证据图再 +1）
+                              │  · 正文 markdown → 证据图 msgtype=image（各算一条消息）
                               │  · 4096 字节截断
                               │  · 45009 退避重试 / 9xxxx 直接放弃
                               ▼
@@ -134,8 +138,15 @@
 | `notify.rs:551` `post()` | HTTP + `errcode` 分类（45009 / 其他 / 传输错误） |
 | `notify.rs` `channel_enabled()` | 读两个 settings 键，缺行视为开启 |
 | `notify.rs` `repeat_push_enabled()` | 读 `wecom_alert_repeat_push`：跟单告警还推不推（缺行 = 推） |
-| `notify.rs` `alert_created()` | 告警入口：**先派单**（`alert_flow`）再推送 |
+| `notify.rs` `alert_created()` | 告警入口：**先判「是不是执行计划期间的告警」**（`should_dispatch`）→ 派单（`alert_flow`）→ 推送 |
+| `notify.rs` `alert_created_with_image()` | 同上，额外把证据图作为**第二条**消息发（`msgtype=image`）；开关 `wecom_alert_image` |
+| `notify.rs` `evidence_image()` / `NoticeImage` | 证据图校验（base64 / ≤2MB / JPG-PNG）+ 算 md5（**base64 之前**的字节） |
+| `notify.rs` `send_image()` | 卡片发成功后再发图片；失败只打 WARN（正文已送达） |
+| `client/src/ai_patrol.rs` `evidence_image_base64()` | 客户端从板端磁盘读证据图 → `ai_alert.evidenceImage`（平台读不到那个文件系统） |
 | `notify.rs` `task_abnormal()` | 任务异常入口：同样带「当班责任人」并 @ 到人 |
+| `alert_flow.rs` `should_dispatch()` | 第一道门：只有「执行计划期间」的告警才建单 + 推群（`alert_only_in_task`） |
+| `alert_flow.rs` `in_task_execution()` | 判据：告警绑定的设备当时有 `执行中` 的任务 |
+| `alert_flow.rs` `only_in_task_enabled()` | 读 `alert_only_in_task` 开关（缺行视为开启，关掉就回到「所有告警都建单推群」） |
 | `alert_flow.rs` `on_alert()` | 告警 → 责任人 → 自动建工单 → 回写 `alerts` 四列 |
 | `alert_flow.rs` `candidate_score()` | 排班匹配打分（同任务 40 / 同区域 20 / 同园区 10 / 已发布 4 / 有责任人 2 / 在岗 1） |
 | `alert_flow.rs` `responsible_for_task()` | 任务异常推送复用同一套匹配（只找人，不建单） |
@@ -169,6 +180,27 @@
 **故意不推的**：急停解除 / 控制权收回 / 告警被标记已处理（状态反转，纯刷屏）；
 运营在页面上手动把任务改成异常（自己点的，不用通知自己）。
 
+### 只有「执行计划期间」的告警才建单 + 推群
+
+`notify::alert_created` 的第一道门（`alert_flow::should_dispatch`，2026-11 加）判的是
+「告警绑定的设备当时有没有 `执行中` 的任务」：
+
+| 触发点 | 算执行计划期间 | 结果 |
+| --- | --- | --- |
+| 1 设备事件 `error`/`fault`/`obstacle`（任务在跑） | 是 | 建单 + 推群 |
+| 4 AI 识别检出 / 数量核对 / 未检出 | 是 | 建单 + 推群 |
+| 1 设备事件（没跑任务时） | 否 | 只落库 |
+| 2 心跳超时掉线 | 否 | 只落库 |
+| 3 控制权被抢占 | 否 | 只落库 |
+| 5 页面手动新建（含未绑设备） | 否 | 只落库 |
+
+「只落库」= 告警中心照常能看、能筛选、能人工转工单，但不自动建单、不进群，
+`assignee` / `work_order_id` 也不回写。夜里掉线 / 遥控器抢占不再刷群，
+值班的人只需要盯「巡检时发现的问题」。
+
+开关是 `notification.alert_only_in_task`（默认开）；关掉退回老口径。
+回归用例：`server/tests/alert_in_task.rs`（含开关关闭一侧）。
+
 ---
 
 ## 4. 数据模型
@@ -194,8 +226,10 @@ status('sent'|'failed'), attempts, last_error, created_at, sent_at
 | `wecom_webhook` | `''` | **平台内配置的 webhook 地址**（`value_type='secret'`）。空 = 用环境变量；填了就以它为准，保存即生效 |
 | `wecom_alert_push` | `true` | 设备异常告警推企业微信 |
 | `wecom_alert_repeat_push` | `true` | 挂回在办工单的**跟单告警也推**（每次任务执行都算一次告警）。关掉 = 24h 内同一问题只推第一条 |
+| `wecom_alert_image` | `true` | 告警证据图作为 `msgtype=image` 跟着卡片发（原图 ≤2MB、JPG/PNG）；关掉只发文字 |
 | `wecom_task_abnormal` | `true` | 任务执行异常推企业微信 |
 | `alert_auto_workorder` | `true` | 告警按当班排班自动派单并建工单（关掉只停建单，责任人解析与推送照旧） |
+| `alert_only_in_task` | `true` | **只有执行计划期间**的告警才建单 + 推群；掉线 / 控制权抢占 / 手动新建只落库 |
 
 ### `alerts` 派单列（migration 021）
 
@@ -216,6 +250,10 @@ wecom.enabled + webhook(平台配置 > 环境变量)  部署级：这套部署�
 alert_push / task_timeout_notice        运营级：站内提示总开关
 wecom_alert_push / wecom_task_abnormal  渠道级：这一类事件推不推企微
 ```
+
+在此之上还有一层**范围**门（`alert_only_in_task`，默认开）：告警如果不是
+「执行计划期间」产生的（掉线 / 控制权抢占 / 手动新建），连 `alert_auto_workorder`
+的建单都不会走——三层开关全开也不会推。
 
 拆三层是因为职责不同：改**有没有**通道（`wecom.enabled`）是部署决策，改**发到哪个群**
 是运维在设置页里粘地址（DB，立即生效），改"这个班次别吵了"是值班长点开关（DB）。
@@ -297,8 +335,55 @@ wecom_alert_push / wecom_task_abnormal  渠道级：这一类事件推不推企�
   机器人每 90s 报一次 `12608` 不会把群刷爆；
 - **标题带「第 N 次」**：N 是这张单上的告警条数（`SELECT COUNT(*) ... WHERE work_order_id`）。
 
-### @ 提醒那条
+### 证据图（图片消息）
 
+AI 识别数量核对不一致时，群里会多一条图片——**卡片之后**的第二条 HTTP 请求，正文不变。
+
+为什么不能嵌在卡片里：群机器人的 `markdown` 语法子集**没有图片**（`![]()` 不渲染），
+只有 `markdown_v2` 支持网络图，但那个要求图片有**公网 URL** 且客户端 ≥ 4.1.36；
+我们手上只有板端磁盘上的文件，所以走官方给的 `msgtype=image`：
+
+```json
+{ "msgtype": "image", "image": { "base64": "<原图字节的 base64>", "md5": "<原图字节的 md5>" } }
+```
+
+| 硬约束（企业微信） | 我们的处理 |
+| --- | --- |
+| 原图（base64 前）**≤ 2MB** | `notify::IMAGE_MAX_BYTES`；客户端先看文件大小，服务端再校一次，超了就只发卡片 |
+| 只收 **JPG / PNG** | 两边都按**文件头**判（不信扩展名），不合格就不带图 |
+| `base64` 不能带换行 | 服务端重新编码一遍（顺手吃掉客户端 `base64` 命令默认的 76 列换行） |
+| `md5` 算的是 **base64 之前**的字节 | `md5::Md5::digest(&bytes)`，算错企业微信回参数错误 |
+| 消息条数 20 条/分钟 | 带图的告警在本地令牌桶里占 **2 个额度** |
+
+**图片字节怎么到服务端**（关键：平台读不到板端磁盘）：
+
+```
+板端 detect_jobs/<plan>/pt<n>/dogcam_1.jpg
+        │  客户端与 Agent 同机（127.0.0.1），只有它能读盘
+        ▼
+客户端 ai_patrol::evidence_image_base64()  →  ai_alert.evidenceImage（base64）
+        ▼
+服务端 ai_patrol::on_client_alert → notify::evidence_image()（校验）→ Notice.image
+        ▼
+消费端：先发 markdown 卡片 → 再发 msgtype=image
+```
+
+约定与边界：
+
+- **只有「数量核对不一致」这类关键告警带图**（它有板端存证）；普通检出、未检出、
+  设备故障都没有图，卡片里仍只写路径。
+- **图片发失败不影响正文**：卡片已入群，图片只打一行 WARN（`wecom: 证据图推送失败（正文已发送）`）。
+- **服务端直连板端 Agent 的模式（`ROBODOG_BACKPACK_URL`）没有图**：服务端读不到板端
+  磁盘，隧道白名单也没取文件接口，只能发卡片（现场以客户端代调为主，不受影响）。
+- **客户端不在板端时也没有图**：读文件失败只打 `debug`（每轮巡检都重试，不刷 WARN），
+  告警本身照发。
+- 开关：设置页「企业微信 · 告警证据图」（`notification.wecom_alert_image`，默认开）。
+  关掉只影响图片那条，卡片/@/建单全不变。
+- 回归用例：`server/tests/alert_image.rs`（入队带图 / 开关关掉 / 坏图不影响告警）、
+  `notify::tests::evidence_image_*`（md5、2MB、JPG-PNG 校验）、
+  `client ai_patrol::tests::evidence_image_reads_board_file_and_skips_unusable_ones`。
+
+### @ 提醒那条
 有责任人手机号（或开了 `wecom_mention_all`）时，**卡片前面**还会有一条一行 `text`
 专门用于 @：markdown 不支持提及，只能另发。它只做提醒、**不重复卡片内容**：
 

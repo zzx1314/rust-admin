@@ -43,24 +43,6 @@ map_root = "/ota/alg_data/map"
 # auto（航段全「沿道路」且本体地图有 map.geojson 时用 3 路网）/ on（强制 3）
 # road_network = "off"
 
-[video]
-# 实时视频回传：控制台有人看「实时监控」时，业务平台下发 video_start，
-# 客户端用 ffmpeg 把设备档案里的 RTSP 转成 FLV，经 ws://…/ws/device/video 回传。
-# 没人看时不下发，不占 CPU / 带宽。拉流地址不在这里配（属于设备档案 video_url）。
-enabled = true
-# ffmpeg 可执行文件：现场 aarch64 需自带（apt install ffmpeg 或静态二进制）
-ffmpeg = "ffmpeg"
-# RTSP 传输方式：tcp（推荐，UDP 丢包会花屏）/ udp
-transport = "tcp"
-# 编码器：auto（默认，按可用性挑 libx264 → h264_rkmpp → h264_v4l2m2m）
-# 现场机器狗（瑞芯微）的 ffmpeg 没有 libx264，auto 会选中硬件编码器 h264_rkmpp
-encoder = "auto"
-# 输出帧率与目标码率：按现场带宽调，一路流约等于这里的码率
-fps = 15
-bitrate = "1200k"
-# 输出宽度（0 = 保持原始分辨率，等比缩放）
-width = 0
-
 [ai]
 # 航点 AI 识别：路线里某个航点配了「AI 识别」动作时，客户端到点会调本机板端 Agent
 # （背包 FastAPI，默认 127.0.0.1:8000），把检出回传业务平台写告警。

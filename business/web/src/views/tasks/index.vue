@@ -11,10 +11,12 @@ import ProgressBar from "@/components/ProgressBar.vue";
 import TaskLiveMonitor from "@/components/TaskLiveMonitor.vue";
 import {
   DISPATCH_POLICIES,
+  END_ACTIONS,
   EXECUTE_MODES,
   TASK_LEVELS,
   TASK_STATUSES,
-  TASK_TYPES
+  TASK_TYPES,
+  endActionLabel
 } from "@/utils/constants";
 import { parseRouteData } from "@/utils/format";
 
@@ -43,6 +45,8 @@ const taskForm = reactive({
   taskName: "",
   taskType: "定时巡检",
   executeMode: "周期任务",
+  /** 结束动作（返航开关）：空 = 跟随路线（闭环自动返航） */
+  endTask: "",
   level: "常规",
   parkId: 1,
   zoneId: null as number | null,
@@ -306,6 +310,7 @@ function openCreate() {
     taskName: "",
     taskType: "定时巡检",
     executeMode: "周期任务",
+    endTask: "",
     level: "常规",
     parkId,
     zoneId: zones.value.find(zone => zone.parkId === parkId)?.id ?? null,
@@ -331,6 +336,7 @@ function openEdit(task: Task) {
     taskName: task.taskName ?? "",
     taskType: task.taskType ?? "定时巡检",
     executeMode: task.executeMode ?? "周期任务",
+    endTask: task.endTask ?? "",
     level: task.level ?? "常规",
     parkId: task.parkId ?? parks.value[0]?.id ?? 1,
     zoneId: task.zoneId ?? null,
@@ -412,7 +418,7 @@ const detailRoute = computed(() => {
   return routes.value.find(route => route.id === routeId) ?? null;
 });
 
-/** 任务对应的执行设备（含实时位置 / 视频地址），来自设备列表轮询 */
+/** 任务对应的执行设备（实时位置 / 电量 / 定位状态），来自设备列表轮询 */
 function deviceOf(task: Task | null): Device | null {
   if (!task?.deviceId) return null;
   return devices.value.find(device => device.id === task.deviceId) ?? null;
@@ -454,7 +460,7 @@ function openMonitor(task: Task) {
   monitorVisible.value = true;
 }
 
-/** 执行中的任务：视频 + 地图位置都在轮询里实时刷新 */
+/** 执行中的任务：能看实时监控（视频走背包前置，地图位置由轮询驱动） */
 function isRunning(task: Task) {
   return task.taskStatus === "执行中" || task.taskStatus === "已暂停";
 }
@@ -524,9 +530,10 @@ function stampNow() {
 /**
  * 轮询任务数据（看板 / 列表 / 详情 / 监控共用）。
  *
- * 除了 `tasks` + `stats`，每轮也拉一次 `devices`：任务执行时的实时视频地址和
- * 地图位置都在设备行上（`position` 由心跳 10s 上报），这样才能在任务页看到
- * 机器狗走到哪了。设备/园区/路线/地图这类台账只在建任务时用，不重复拉。
+ * 除了 `tasks` + `stats`，每轮也拉一次 `devices`：任务监控要的实时位置 / 电量 /
+ * 定位状态都在设备行上（`position` 由心跳 10s 上报），这样才能在任务页看到
+ * 机器狗走到哪了。视频不走这里（统一由背包前置 `dogcam` 提供，与实时视频同源），
+ * 设备/园区/路线/地图这类台账只在建任务时用，不重复拉。
  */
 async function refreshLive() {
   // 页面在后台 / 编辑弹窗打开时先不抢刷新，避免把用户正在改的上下文顶掉
@@ -880,6 +887,18 @@ onBeforeUnmount(() => {
           </select>
         </div>
         <div class="field">
+          <label>跑完去哪（返航开关）</label>
+          <select v-model="taskForm.endTask" class="select">
+            <option v-for="item in END_ACTIONS" :key="item.value" :value="item.value">
+              {{ item.label }}
+            </option>
+          </select>
+          <div class="rt-hint" style="margin: 4px 0 0">
+            默认跟随路线：闭环路线跑完自动返回起点。「原地待命」会停在最后一个航点，
+            需要人再去处理；「返回充电点」要求地图已设置回充点。
+          </div>
+        </div>
+        <div class="field">
           <label>执行园区</label>
           <select v-model.number="taskForm.parkId" class="select">
             <option v-for="park in parks" :key="park.id" :value="park.id">{{ park.parkName }}</option>
@@ -1041,6 +1060,9 @@ onBeforeUnmount(() => {
         <div class="kv"><span>任务名称</span><b>{{ detailTask.taskName }}</b></div>
         <div class="kv">
           <span>任务类型 / 模式</span><b>{{ detailTask.taskType }} / {{ detailTask.executeMode }}</b>
+        </div>
+        <div class="kv">
+          <span>跑完去哪</span><b>{{ endActionLabel(detailTask.endTask, detailRoute?.loopMode) }}</b>
         </div>
         <div class="kv"><span>执行设备</span><b class="mono">{{ detailTask.deviceCode }}</b></div>
         <div class="kv">

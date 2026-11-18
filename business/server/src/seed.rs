@@ -108,10 +108,24 @@ async fn ensure_settings(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         ),
         (
             "notification",
+            "wecom_alert_image",
+            "true",
+            "bool",
+            "告警证据图（板端 AI 识别抓拍）作为图片消息推到企业微信群",
+        ),
+        (
+            "notification",
             "alert_auto_workorder",
             "true",
             "bool",
             "告警按当班排班自动派单并生成工单",
+        ),
+        (
+            "notification",
+            "alert_only_in_task",
+            "true",
+            "bool",
+            "只在执行计划期间为告警建单并推群（其余告警只落库）",
         ),
         (
             "notification",

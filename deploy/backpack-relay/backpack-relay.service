@@ -10,8 +10,14 @@ Type=simple
 Environment=RELAY_PLATFORM=http://39.107.55.13:3100
 Environment=RELAY_STREAMS=cam0,cam1,cam2,cam3,dogcam,dog-ipcam,preview
 Environment=RELAY_RTSP_BASE=rtsp://127.0.0.1:8554
-# 源不是 H.264 时才置 1（重编码，很吃 CPU）
-Environment=RELAY_TRANSCODE=0
+# 输出档位：light（默认，缩到 720p20 / 1.2Mbps，平台公网出口小也能看）
+#   copy = 只换容器（1080p60 会把 4~8Mbps 原样推出去，公网出口 2~3Mbps 时必卡）
+# 带宽更紧时再压：RELAY_BITRATE=800k RELAY_FPS=15
+Environment=RELAY_PROFILE=light
+# Environment=RELAY_BITRATE=1200k
+# Environment=RELAY_FPS=20
+# Environment=RELAY_WIDTH=1280
+# Environment=RELAY_HEIGHT=720
 ExecStart=/usr/bin/python3 /opt/backpack-relay/relay_push.py
 Restart=always
 RestartSec=5

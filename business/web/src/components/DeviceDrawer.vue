@@ -6,7 +6,7 @@ import { deviceApi } from "@/api/ops";
 import { verifyCommandAccepted } from "@/utils/commandFeedback";
 import AppIcon from "./AppIcon.vue";
 import StatusBadge from "./StatusBadge.vue";
-import VideoPlayer from "./VideoPlayer.vue";
+import FrontCameraVideo from "./FrontCameraVideo.vue";
 import TeleopJoystick from "./TeleopJoystick.vue";
 import {
   canGait,
@@ -446,12 +446,8 @@ async function emergencyStop() {
     <div class="drawer-body">
       <!-- ── 实时监控 ─────────────────────────────── -->
       <template v-if="tab === 'monitor'">
-        <VideoPlayer
-          :url="device.videoUrl"
-          :type="device.videoType"
-          :online="online"
-          :device-id="device.id"
-        />
+        <!-- 与「实时视频」页的前置摄像头同源同路（背包 dogcam） -->
+        <FrontCameraVideo :title="`${device.deviceId} · 前置摄像头`" />
 
         <div class="drawer-section-head">
           <div class="card-title"><AppIcon name="activity" />运行指标</div>
@@ -548,7 +544,10 @@ async function emergencyStop() {
           </b>
         </div>
         <div class="kv"><span>固件版本</span><b class="mono">{{ device.firmware }}</b></div>
-        <div class="kv"><span>视频源</span><b class="mono">{{ device.videoUrl || "未配置" }}</b></div>
+        <div class="kv">
+          <span>视频源</span>
+          <b>机器狗前置（背包 dogcam，与「实时视频」同源）</b>
+        </div>
         <div class="kv"><span>运行状态</span><b>{{ statusText }}</b></div>
 
         <div class="card-title" style="margin: 18px 0 10px"><AppIcon name="clock" />最近事件</div>
@@ -576,12 +575,7 @@ async function emergencyStop() {
       <template v-else>
         <div class="teleop-layout">
           <div class="teleop-visual">
-            <VideoPlayer
-              :url="device.videoUrl"
-              :type="device.videoType"
-              :online="online"
-              :device-id="device.id"
-            />
+            <FrontCameraVideo :title="`${device.deviceId} · 前置摄像头`" />
             <div class="visual-strip">
               <span class="chip"><AppIcon name="battery" />{{ device.battery }}%</span>
               <span class="chip"><AppIcon name="activity" />{{ device.robotMode || "—" }}</span>

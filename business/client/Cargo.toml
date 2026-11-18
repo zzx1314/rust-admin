@@ -22,6 +22,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # 本体文件服务（robot_http_server）没有 zip 端点，需要在本机打包后回传
 zip = { version = "2", default-features = false, features = ["deflate"] }
 url = "2"
+# 证据图随 AI 告警上报（企业微信图片消息要原图字节的 base64）
+base64 = "0.22"
 
 [dev-dependencies]
 # 单元测试里起一个假板端 Agent（HTTP + SSE），验证「客户端代调」整条链路

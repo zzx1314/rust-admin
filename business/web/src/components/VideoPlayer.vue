@@ -5,38 +5,31 @@ import { wsOrigin } from "@/utils/runtime";
 import AppIcon from "./AppIcon.vue";
 
 /**
- * 机器狗实时视频
+ * 背包实时视频（平台中继播放器）
  *
- * 智航 Pro 协议没有视频接口，视频由本体自带服务提供，后台只存地址与协议类型：
+ * 只做一件事：把板端 relay 推到平台房间的 FLV 字节流，经同源 WS 交给 flv.js 播放。
  *
- * - `hls`   → `*.m3u8`，走 hls.js（Safari 原生支持则直连）
- * - `flv`   → `*.flv`，走 flv.js（MSE）
- * - `mp4`   → 原生 `<video>`，也兼容 webm
- * - `webrtc`→ `whep://` 或 `webrtc://`，需要额外信令网关，这里只做提示
- * - `rtsp`  → 浏览器不能直连：由设备客户端拉流转 FLV、经业务平台中继（见 server/src/video.rs）
- * - `relay` → 背包中继：板端推流服务把 RTSP 转成 FLV 推到平台，这里同源播放
- * - `none`  → 未配置，显示占位
+ * - 实时视频页的「平台中继」、设备管理 / 计划管理的前置摄像头（`FrontCameraVideo.vue`）
+ *   在跨网段 / 公网入口时都走这里；
+ * - 板端 relay 常驻推流，服务端按需下发 `video_start` / `video_stop`（见 `server/src/video.rs`）；
+ * - 浏览器只跟平台同源通信，不依赖操作员电脑在内网、也不需要本地网络许可。
+ *
+ * 设备档案里的 RTSP / HLS 地址已不再播放（2026-11-18 起统一到背包前置 `dogcam`），
+ * 所以这里不再有 hls / flv(HTTP) / mp4 分支。
  *
  * ## 直播「不许闪」的四条硬规则（改这块之前先读）
  *
  * 1. **缓冲 ≠ 断开**：`waiting` / `stalled` 只置一个「缓冲中」角标，绝不盖全屏错误层。
- *    早期版本一 `waiting` 就把 `连接中` 的半透明层铺满画面，看起来就是一闪一闪。
  * 2. **重连不清画面**：断流时先把当前帧抓成 poster 继续显示，再重建 flv 播放器，
  *    所以重连过程中观众看到的是「上一帧 + 重连中」，不是黑屏闪一下。
  * 3. **快速重连 + 退避**：服务端主动断开（推流端换流 / 观看端追不上）时 250ms 就重连，
  *    连续失败才指数退避（上限 3s），不会 3s 一次空转刷屏。
- * 4. **推流端要保持在跑**：服务端最后一个观看者离开时不立刻杀 ffmpeg，
- *    所以这里的 `video_start` 重复下发也不会重启推流端（客户端按地址去重）。
+ * 4. **推流端要保持在跑**：服务端最后一个观看者离开时不立刻杀 ffmpeg（60s 宽限），
+ *    所以这里的 `video_start` 重复下发也不会重启推流端（板端 relay 按 stream 去重）。
  */
 const props = defineProps<{
-  url: string | null;
-  type: string;
-  /** 设备是否在线，离线时即使配了地址也不拉流 */
-  online: boolean;
-  /** 设备主键：RTSP 走 `/api/devices/{id}/video/ws` 中继，必须传 */
-  deviceId?: number | null;
   /**
-   * 背包通道（`cam0`…`dogcam`）：`type="relay"` 时走 `/api/backpack/video/ws`。
+   * 背包通道（`cam0`…`dogcam` / `preview`）：房间名是 `bp:<stream>`。
    *
    * 这条通路不经过浏览器直连板端，因此不受「换 WiFi / 换浏览器 / LNA 许可」影响。
    */
@@ -61,12 +54,10 @@ const buffering = ref(false);
 const poster = ref("");
 const retryAttempt = ref(0);
 
-// hls.js / flv.js 体积大（各 200KB+），只有真正需要播放时才拉进来，
-// 避免设备列表页为了一个播放器把整个 bundle 撑大
-type HlsInstance = import("hls.js").default;
+// flv.js 体积大（~150KB），只有真正需要播放时才拉进来，
+// 避免设备列表 / 任务看板为了一个播放器把整个 bundle 撑大
 // flv.js 的类型是全局命名空间 `FlvJs`，没有具名导出 Player
 type FlvPlayer = ReturnType<typeof import("flv.js").default.createPlayer>;
-let hls: HlsInstance | null = null;
 let flv: FlvPlayer | null = null;
 /** 每次 attach 自增，异步加载回来时据此判断是否已被新请求取代 */
 let attachSeq = 0;
@@ -85,14 +76,14 @@ const HARD_ERROR_AFTER = 5;
 /**
  * 画面停住多久判定「假死」并重连（弱网下 MSE 会卡在 readyState=2 不再前进）。
  *
- * 3s 太紧：现场本体 RTSP 是中低帧率、偶尔 1~2s 没新帧很常见，一超时就重连，
+ * 3s 太紧：现场背包推的是中低帧率、偶尔 1~2s 没新帧很常见，一超时就重连，
  * 重连又会让服务端重新拉起 ffmpeg，越连越慢。给到 8s，既有自愈又不抖。
  */
 const STALL_MS = 8000;
 /**
  * 一次连接尝试多久没画面算超时。
  *
- * 现场路径：浏览器连上中继 → 平台下发 video_start → 设备客户端起 ffmpeg（3~7s）
+ * 现场路径：浏览器连上中继 → 平台下发 video_start → 板端起 ffmpeg（3~7s）
  * → 等首个关键帧（GOP 2s）→ 才有画面。看门狗刚把推流停掉时这串要重新走一遍，
  * 10s 太紧：一旦超时就断连，服务端数到「没人看」又把流停掉，下一轮更慢 ——
  * 现场看到的就是「一直在重连」。给到 20s，宁可多等一会也不要打死再重来。
@@ -103,62 +94,27 @@ let lastTime = 0;
 let lastProgressAt = 0;
 let attachStartedAt = 0;
 
-const kind = computed(() => (props.type || "none").toLowerCase());
-
 /**
- * 中继地址：业务平台把推流端回传的 FLV 通过 WS 转给浏览器。
- *
- * - `rtsp`：设备客户端拉 `devices.video_url`，房间名是设备编号；
- * - `relay`：背包板端 relay 拉本地流，房间名是 `bp:<stream>`（服务端前缀固定）。
+ * 中继地址：业务平台把板端 relay 推上来的 FLV 通过 WS 转给浏览器。
  *
  * 浏览器 WS 握手不能带 Authorization 头，令牌只能放查询串（服务端 require_auth 支持）。
  */
 const relayUrl = computed(() => {
+  if (!props.stream) return "";
   const token = tokenStorage.get() || "";
-  if (kind.value === "relay") {
-    if (!props.stream) return "";
-    // 页面可能由现场入口托管（内网静态服务），中继仍在云端：用运行时基址
-    return `${wsOrigin()}/api/backpack/video/ws?stream=${encodeURIComponent(props.stream)}&token=${encodeURIComponent(token)}`;
-  }
-  if (!props.deviceId) return "";
-  return `${wsOrigin()}/api/devices/${props.deviceId}/video/ws?token=${encodeURIComponent(token)}`;
+  // 页面可能由现场入口托管（内网静态服务），中继仍在云端：用运行时基址
+  return `${wsOrigin()}/api/backpack/video/ws?stream=${encodeURIComponent(props.stream)}&token=${encodeURIComponent(token)}`;
 });
 
-const isRelay = computed(
-  () => (kind.value === "rtsp" && !!props.deviceId) || (kind.value === "relay" && !!props.stream)
-);
-
-/** 走 MSE / HTTP 拉流的直播通路：断流要自愈（mp4 / webm 是点播，不重连） */
-const retryable = computed(() => ["hls", "flv", "rtsp", "relay"].includes(kind.value));
-
-const playable = computed(() => {
-  if (!props.online) return false;
-  // 背包中继没有「视频地址」这个概念：板端推什么就看什么
-  if (kind.value === "relay") return !!relayUrl.value;
-  if (!props.url) return false;
-  // RTSP 浏览器不能直连，只有拿到中继地址才谈得上播放
-  if (kind.value === "rtsp") return isRelay.value;
-  return ["hls", "flv", "mp4"].includes(kind.value);
-});
-
+const playable = computed(() => !!relayUrl.value);
 /** 全屏错误层只在这些状态出现：不能播 / 连续重连失败 */
 const showFallback = computed(() => !playable.value || status.value === "error");
 
 const hint = computed(() => {
-  if (!props.online) return "设备离线，无实时画面";
-  if (kind.value === "relay") {
-    if (!props.stream) return "未选择背包通道";
-    if (status.value === "error")
-      return errorText.value || "中继拉流失败：确认背包上 backpack-relay 服务在线";
-    if (status.value === "loading") return "正在连接平台中继…";
-    return "";
-  }
-  if (!props.url) return "未配置视频地址，请在设备档案中填写";
-  if (kind.value === "rtsp" && !props.deviceId)
-    return "RTSP 需要经设备客户端回传播放，缺少设备标识";
-  if (kind.value === "webrtc") return "WebRTC 需要信令网关，当前未接入";
-  if (kind.value === "none") return "视频协议未识别，请在设备档案中选择类型";
-  if (status.value === "error") return errorText.value || "视频加载失败";
+  if (!props.stream) return "未选择背包通道";
+  if (status.value === "error")
+    return errorText.value || "中继拉流失败：确认背包上 backpack-relay 服务在线";
+  if (status.value === "loading") return "正在连接平台中继…";
   return "";
 });
 
@@ -186,10 +142,6 @@ function clearRetry() {
 
 /** 只在销毁播放器内核，保留 `<video>` 与画面（重连时不留黑屏） */
 function teardownPlayer() {
-  if (hls) {
-    hls.destroy();
-    hls = null;
-  }
   if (flv) {
     flv.destroy();
     flv = null;
@@ -215,7 +167,7 @@ function capturePoster() {
 
 /** 断流：先留帧，再按退避重连；前几次不弹错误，只改角标 */
 function scheduleRetry(reason: string) {
-  if (!retryable.value || !playable.value) return;
+  if (!playable.value) return;
   if (retryTimer) return;
   // 作废可能还在异步加载 / 建连中的那一次尝试，避免两套播放器抢同一个 <video>
   attachSeq += 1;
@@ -284,7 +236,6 @@ async function attach() {
   if (!el || !playable.value) return;
   clearRetry();
   teardownPlayer();
-  const src = props.url ?? "";
   const seq = ++attachSeq;
   attachStartedAt = performance.now();
   // 重连途中不要退回「连接中」：角标要一直显示重连次数
@@ -294,65 +245,25 @@ async function attach() {
   }
   buffering.value = false;
 
-  if (kind.value === "hls") {
-    // Safari / iOS 原生支持 m3u8，省掉 hls.js
-    if (el.canPlayType("application/vnd.apple.mpegurl")) {
-      el.src = src;
-      el.play().catch(() => fail("自动播放被浏览器拦截，请点击播放"));
-      return;
-    }
-    const { default: Hls } = await import("hls.js");
-    if (seq !== attachSeq) return;
-    if (!Hls.isSupported()) {
-      fail("当前浏览器不支持 HLS 播放");
-      return;
-    }
-    hls = new Hls({ lowLatencyMode: true, liveSyncDurationCount: 2 });
-    hls.loadSource(src);
-    hls.attachMedia(el);
-    hls.on(Hls.Events.MANIFEST_PARSED, () => {
-      el.play().catch(() => fail("自动播放被浏览器拦截，请点击播放"));
-    });
-    hls.on(Hls.Events.ERROR, (_event, data) => {
-      if (!data.fatal) return;
-      scheduleRetry(`HLS 播放失败：${data.details}`);
-    });
+  // 推流端已把源转成 FLV，flv.js 的 WebSocketLoader 直接消费二进制帧
+  const { default: flvjs } = await import("flv.js");
+  if (seq !== attachSeq) return;
+  if (!flvjs.isSupported()) {
+    fail("当前浏览器不支持 FLV 播放");
     return;
   }
-
-  if (kind.value === "rtsp" || kind.value === "relay" || kind.value === "flv") {
-    // 推流端已把源转成 FLV，flv.js 的 WebSocketLoader 直接消费二进制帧
-    const { default: flvjs } = await import("flv.js");
-    if (seq !== attachSeq) return;
-    const target = kind.value === "flv" ? src : relayUrl.value;
-    if (!flvjs.isSupported() || !target) {
-      fail(
-        kind.value === "flv"
-          ? "当前浏览器不支持 FLV 播放"
-          : "当前浏览器不支持实时视频播放"
-      );
-      return;
-    }
-    const player = flvjs.createPlayer(liveFlvConfig(target));
-    flv = player;
-    player.attachMediaElement(el);
-    player.load();
-    player.play()?.catch(() => undefined);
-    player.on(flvjs.Events.ERROR, (_type: string, detail: string) => {
-      // 已销毁 / 已被新播放器取代的旧实例的迟到事件不能搅乱新流
-      if (flv !== player) return;
-      scheduleRetry(
-        kind.value === "relay"
-          ? `中继断流（${detail || "unknown"}）：确认背包上 backpack-relay 服务在线`
-          : `实时视频断流（${detail || "unknown"}）：确认设备客户端在线且能访问 RTSP 地址`
-      );
-    });
-    return;
-  }
-
-  // mp4 / webm 走原生
-  el.src = src;
-  el.play().catch(() => fail("自动播放被浏览器拦截，请点击播放"));
+  const player = flvjs.createPlayer(liveFlvConfig(relayUrl.value));
+  flv = player;
+  player.attachMediaElement(el);
+  player.load();
+  player.play()?.catch(() => undefined);
+  player.on(flvjs.Events.ERROR, (_type: string, detail: string) => {
+    // 已销毁 / 已被新播放器取代的旧实例的迟到事件不能搅乱新流
+    if (flv !== player) return;
+    scheduleRetry(
+      `中继断流（${detail || "unknown"}）：确认背包上 backpack-relay 服务在线`
+    );
+  });
 }
 
 /* ---------------- 播放状态 ---------------- */
@@ -378,11 +289,10 @@ function onWaiting() {
 /** `<video>` 自身的 error：装/卸播放器时也会冒（src 被清掉），只在真正播放中才算断流 */
 function onMediaError() {
   if (status.value === "idle" || status.value === "retrying") return;
-  if (retryable.value) scheduleRetry("视频源不可达");
-  else fail("视频源不可达");
+  scheduleRetry("视频源不可达");
 }
 
-/** MSE 「假死」看门狗：playing 却连续 3s 时间轴不前进就自己重连；一直连不上也算超时 */
+/** MSE 「假死」看门狗：playing 却长时间时间轴不前进就自己重连；一直连不上也算超时 */
 function tickStall() {
   // 后台标签页：浏览器不渲染也不解码，时间轴停住是正常现象。这里若继续判
   // 「超时 / 假死」就是后台无限重连，还会反复拉起推流端 ffmpeg。
@@ -413,7 +323,7 @@ function tickStall() {
   }
 }
 
-/** 切回标签页时视频可能已被浏览器冻结：立刻检查一次，别等 3s 看门狗 */
+/** 切回标签页时视频可能已被浏览器冻结：立刻检查一次，别等看门狗 */
 function onVisibility() {
   if (document.visibilityState !== "visible") return;
   // 后台被冻结的那段不能算进「没画面 / 假死」的计时，回前台重新起算
@@ -444,9 +354,9 @@ async function enterFullscreen() {
 }
 
 watch(
-  () => [props.url, props.type, props.online, props.deviceId, props.stream],
+  () => props.stream,
   () => {
-    // 设备 / 地址变化视为全新播放：清掉重连状态
+    // 通道变化视为全新播放：清掉重连状态
     retryAttempt.value = 0;
     destroy();
     // 等 DOM 更新完再挂载播放器
@@ -500,7 +410,7 @@ onBeforeUnmount(() => {
 
     <div class="video-top">
       <span class="video-badge" :class="badgeTone"><i />{{ badge }}</span>
-      <span v-if="playable" class="video-proto">{{ kind.toUpperCase() }}</span>
+      <span v-if="playable" class="video-proto">FLV · 中继</span>
     </div>
 
     <div v-if="playable" class="video-bottom">

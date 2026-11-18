@@ -7,7 +7,7 @@
 //! - 未登录访问受保护接口返回 401；
 //! - `admin/admin123` 登录后能取到令牌；
 //! - `GET /api/dashboard/summary` 驾驶舱接口（包含 `mapDevices` 的设备列映射，
-//!   历史上漏选 `video_url` 曾导致首页 500，这里作为回归用例）。
+//!   历史上漏选设备列曾导致首页 500，这里作为回归用例）。
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
@@ -575,7 +575,6 @@ async fn parks_and_dashboard_work_after_login() {
     assert!(body["data"]["mapDevices"].is_array());
     for device in body["data"]["mapDevices"].as_array().unwrap() {
         // 新字段必须出现在响应里（缺失即为回归）
-        assert!(device.get("videoType").is_some(), "设备缺少 videoType");
         assert!(
             device.get("teleopHolder").is_some(),
             "设备缺少 teleopHolder"
@@ -816,7 +815,9 @@ async fn device_events_expose_client_side_rejection() {
                  'wsDelivered=true', ?1, NULL, ?2)",
     )
     .bind(device_pk)
-    .bind(robodog_ops_server::db::now())
+    // 不能用 `db::now()`：演示数据里预置了当天 08:35 / 09:00 的事件，
+    // 早上 9 点前跑这个测试时「刚才插入的那条」反而不是最新的（时间排序依赖真实时钟）。
+    .bind("9999-12-31 23:59:59")
     .execute(&pool)
     .await
     .unwrap();
@@ -2204,6 +2205,101 @@ async fn dispatch_payload_falls_back_to_synthetic_map_dir() {
     );
 }
 
+/// 任务级结束动作（返航开关）：显式 `endTask` 必须覆盖推断，并用独立的
+/// `endTaskMode` 表达（旧客端只认 `endTask`，不能把 `none` 的语义挂到它上面）。
+#[tokio::test]
+async fn task_end_action_drives_dispatch_payload() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let map_id = insert_real_map(&pool).await;
+    let route_id = insert_dispatchable_route(&pool, &map_id).await;
+    let device_pk = bound_device_pk(&pool).await;
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+
+    async fn create(app: &axum::Router, token: &str, body: String) -> Value {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/tasks")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "建任务应成功");
+        json_body(response).await
+    }
+
+    // 1) 显式「原地待命」：落库 + 载荷带 endTaskMode
+    let body = create(
+        &app,
+        &token,
+        format!(
+            r#"{{"taskName":"原地待命任务","deviceId":{device_pk},"parkId":1,
+                "routeId":{route_id},"endTask":"none"}}"#
+        ),
+    )
+    .await;
+    assert_eq!(body["data"]["endTask"], "none");
+    let task_id = body["data"]["id"].as_i64().expect("应返回任务 id");
+    let task = fetch_task_row(&pool, task_id).await;
+    let payload = robodog_ops_server::dispatch::build_dispatch_payload(&pool, &task)
+        .await
+        .expect("应能组装载荷");
+    assert_eq!(payload.end_task.as_deref(), Some("none"));
+    assert_eq!(
+        payload.end_task_mode.as_deref(),
+        Some("none"),
+        "显式原地必须带 endTaskMode，否则旧兜底会继续返航"
+    );
+
+    // 2) 不传：跟随路线（老行为），不带 endTaskMode
+    let body = create(
+        &app,
+        &token,
+        format!(
+            r#"{{"taskName":"跟随路线任务","deviceId":{device_pk},"parkId":1,
+                "routeId":{route_id}}}"#
+        ),
+    )
+    .await;
+    assert!(body["data"]["endTask"].is_null());
+    let task_id = body["data"]["id"].as_i64().expect("应返回任务 id");
+    let task = fetch_task_row(&pool, task_id).await;
+    let payload = robodog_ops_server::dispatch::build_dispatch_payload(&pool, &task)
+        .await
+        .unwrap();
+    assert!(payload.end_task_mode.is_none(), "没配置就不应该下发");
+
+    // 3) 乱填：建任务阶段就 400，不要静默当成跟随路线
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/tasks")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(format!(
+                    r#"{{"taskName":"错误结束动作","deviceId":{device_pk},"parkId":1,
+                        "routeId":{route_id},"endTask":"回家"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert!(
+        body["msg"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("结束动作"),
+        "错误信息应说明结束动作可选值: {body}"
+    );
+}
+
 /// 中台重复导入的包按「同名 zip」认回本体目录名，且可重复执行。
 #[tokio::test]
 async fn map_source_ref_backfills_from_same_package_name() {
@@ -2734,11 +2830,7 @@ async fn schedules_and_work_orders_flow() {
     assert_eq!(renamed["data"]["name"], "冒烟责任人2");
     assert_eq!(renamed["data"]["status"], "休息");
     assert_eq!(renamed["data"]["skills"], "红外测温 / 应急处置");
-    let (_, past_list) = send(auth(
-        "GET",
-        "/api/shifts?from=2020-12-31&to=2020-12-31",
-    ))
-    .await;
+    let (_, past_list) = send(auth("GET", "/api/shifts?from=2020-12-31&to=2020-12-31")).await;
     assert_eq!(
         past_list["data"][0]["ownerName"], "冒烟责任人2",
         "改名后历史排班的姓名应同步"
@@ -2755,20 +2847,24 @@ async fn schedules_and_work_orders_flow() {
     .await;
     assert_eq!(status, StatusCode::OK, "新建排班应成功: {created}");
     assert_eq!(created["data"]["timeRange"], "08:00 - 16:00");
-    assert_eq!(created["data"]["deviceCount"], 2, "负责设备按园区/区域实时统计");
+    assert_eq!(
+        created["data"]["deviceCount"], 2,
+        "负责设备按园区/区域实时统计"
+    );
     let shift_id = created["data"]["id"].as_i64().expect("缺少排班 id");
 
     // 同一责任人同一天同一班次 → 冲突
     let (status, conflict) = send(post(
         "/api/shifts",
-        format!(
-            r#"{{"shiftDate":"2030-01-01","slot":"早班","staffId":{staff_id}}}"#
-        ),
+        format!(r#"{{"shiftDate":"2030-01-01","slot":"早班","staffId":{staff_id}}}"#),
     ))
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "重复排班应被拦截");
     assert!(
-        conflict["msg"].as_str().unwrap_or_default().contains("冲突"),
+        conflict["msg"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("冲突"),
         "提示应说明冲突原因: {conflict}"
     );
 
@@ -2785,7 +2881,10 @@ async fn schedules_and_work_orders_flow() {
     assert_eq!(duplicated["data"]["ownerName"], "冒烟责任人2");
     assert_eq!(duplicated["data"]["parkId"], 1, "园区要一起复制");
     assert_eq!(duplicated["data"]["status"], "已发布", "状态一起复制");
-    assert_ne!(duplicated["data"]["shiftCode"], created["data"]["shiftCode"]);
+    assert_ne!(
+        duplicated["data"]["shiftCode"],
+        created["data"]["shiftCode"]
+    );
     let duplicated_id = duplicated["data"]["id"].as_i64().unwrap();
 
     // 拖到原格子 / 拖到已有同名同时段 → 明确拒绝
@@ -2806,7 +2905,10 @@ async fn schedules_and_work_orders_flow() {
         "目标时段已有人应拒绝: {dup_conflict}"
     );
     assert!(
-        dup_conflict["msg"].as_str().unwrap_or_default().contains("冲突"),
+        dup_conflict["msg"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("冲突"),
         "提示应说明冲突: {dup_conflict}"
     );
     let (status, _) = send(auth("DELETE", &format!("/api/shifts/{duplicated_id}"))).await;
@@ -2834,12 +2936,13 @@ async fn schedules_and_work_orders_flow() {
 
     // 还有未来排班 + 在办工单时不允许删责任人（删了会在排班/派单里留空档）
     let (status, blocked) = send(auth("DELETE", &format!("/api/staff/{staff_id}"))).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "有在办工单/未来排班应拒绝删除");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "有在办工单/未来排班应拒绝删除"
+    );
     assert!(
-        blocked["msg"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("排班"),
+        blocked["msg"].as_str().unwrap_or_default().contains("排班"),
         "提示应说明还有排班/工单: {blocked}"
     );
 
@@ -2884,14 +2987,14 @@ async fn schedules_and_work_orders_flow() {
     let (status, _) = send(auth("DELETE", &format!("/api/shifts/{shift_id}"))).await;
     assert_eq!(status, StatusCode::OK);
     let (status, removed) = send(auth("DELETE", &format!("/api/staff/{staff_id}"))).await;
-    assert_eq!(status, StatusCode::OK, "只剩历史排班的责任人应可删除: {removed}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "只剩历史排班的责任人应可删除: {removed}"
+    );
 
     // 历史排班保留（姓名还在），但不再引用责任人库
-    let (_, past_after) = send(auth(
-        "GET",
-        "/api/shifts?from=2020-12-31&to=2020-12-31",
-    ))
-    .await;
+    let (_, past_after) = send(auth("GET", "/api/shifts?from=2020-12-31&to=2020-12-31")).await;
     let rows = past_after["data"].as_array().unwrap();
     assert_eq!(rows.len(), 1, "历史排班不应被连带删除: {past_after}");
     assert!(rows[0]["staffId"].is_null(), "历史排班应解除责任人引用");
@@ -2981,11 +3084,7 @@ async fn shift_copy_aligns_periods_and_handles_conflicts() {
     );
 
     // 目标区间拿到的是「同一日号 + 复制时指定的状态」
-    let (_, target) = send(auth(
-        "GET",
-        "/api/shifts?from=2031-04-01&to=2031-04-30",
-    ))
-    .await;
+    let (_, target) = send(auth("GET", "/api/shifts?from=2031-04-01&to=2031-04-30")).await;
     let rows = target["data"].as_array().expect("shifts 应为数组");
     assert_eq!(rows.len(), 2, "4 月应有 2 条复制记录: {target}");
     let dates: Vec<&str> = rows
@@ -3032,11 +3131,7 @@ async fn shift_copy_aligns_periods_and_handles_conflicts() {
     assert_eq!(status, StatusCode::OK, "覆盖模式复制失败: {replaced}");
     assert_eq!(replaced["data"]["created"], 2);
     assert!(replaced["data"]["replaced"].as_i64().unwrap_or_default() >= 1);
-    let (_, after) = send(auth(
-        "GET",
-        "/api/shifts?from=2031-04-01&to=2031-04-30",
-    ))
-    .await;
+    let (_, after) = send(auth("GET", "/api/shifts?from=2031-04-01&to=2031-04-30")).await;
     assert!(
         !after["data"]
             .as_array()
@@ -3049,12 +3144,14 @@ async fn shift_copy_aligns_periods_and_handles_conflicts() {
     // 周复制：保持同名星期（源周同一天 → 下周同一天）
     let (status, weekday_source) = send(post(
         "/api/shifts",
-        &format!(
-            r#"{{"shiftDate":"2031-04-07","slot":"早班","staffId":{staff_id},"parkId":1}}"#
-        ),
+        &format!(r#"{{"shiftDate":"2031-04-07","slot":"早班","staffId":{staff_id},"parkId":1}}"#),
     ))
     .await;
-    assert_eq!(status, StatusCode::OK, "准备周复制源排班失败: {weekday_source}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "准备周复制源排班失败: {weekday_source}"
+    );
     let (_, week) = send(post(
         "/api/shifts/copy",
         r#"{"sourceFrom":"2031-04-07","sourceTo":"2031-04-13",
@@ -3062,11 +3159,7 @@ async fn shift_copy_aligns_periods_and_handles_conflicts() {
     ))
     .await;
     assert_eq!(week["data"]["created"], 1, "周复制应复制 1 条: {week}");
-    let (_, week_target) = send(auth(
-        "GET",
-        "/api/shifts?from=2031-04-14&to=2031-04-20",
-    ))
-    .await;
+    let (_, week_target) = send(auth("GET", "/api/shifts?from=2031-04-14&to=2031-04-20")).await;
     let week_rows = week_target["data"].as_array().unwrap();
     assert_eq!(week_rows.len(), 1, "目标周应只有 1 条: {week_target}");
     assert_eq!(week_rows[0]["shiftDate"], "2031-04-14");
@@ -3161,9 +3254,16 @@ async fn shift_slots_are_customizable() {
         r#"{"name":"早高峰","startTime":"7点","endTime":"09:00"}"#,
     ))
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "非法时间应拒绝: {bad_time}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "非法时间应拒绝: {bad_time}"
+    );
     assert!(
-        bad_time["msg"].as_str().unwrap_or_default().contains("HH:MM"),
+        bad_time["msg"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("HH:MM"),
         "提示应说明时间格式: {bad_time}"
     );
 
@@ -3189,9 +3289,7 @@ async fn shift_slots_are_customizable() {
 
     let (status, unknown) = send(post(
         "/api/shifts",
-        &format!(
-            r#"{{"shiftDate":"2032-05-02","slot":"不存在的班次","staffId":{staff_id}}}"#
-        ),
+        &format!(r#"{{"shiftDate":"2032-05-02","slot":"不存在的班次","staffId":{staff_id}}}"#),
     ))
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "未知班次应拒绝: {unknown}");
@@ -3218,7 +3316,11 @@ async fn shift_slots_are_customizable() {
 
     // 还有排班在用时不允许删除，只能停用
     let (status, in_use) = send(auth("DELETE", &format!("/api/shift-slots/{slot_id}"))).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "在用班次不应能删: {in_use}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "在用班次不应能删: {in_use}"
+    );
     assert!(
         in_use["msg"].as_str().unwrap_or_default().contains("停用"),
         "提示应建议改为停用: {in_use}"
@@ -3234,9 +3336,7 @@ async fn shift_slots_are_customizable() {
     assert_eq!(deactivated["data"]["active"], false);
     let (status, fallback) = send(post(
         "/api/shifts",
-        &format!(
-            r#"{{"shiftDate":"2032-05-03","staffId":{staff_id},"status":"草案"}}"#
-        ),
+        &format!(r#"{{"shiftDate":"2032-05-03","staffId":{staff_id},"status":"草案"}}"#),
     ))
     .await;
     assert_eq!(status, StatusCode::OK, "不传班次应落到默认班次: {fallback}");
@@ -3288,14 +3388,20 @@ async fn alert_auto_dispatches_to_duty_owner() {
     };
 
     // 设备绑到园区 2 / 区域 4：告警只有园区+区域，没有计划号也能对上当班排班
-    sqlx::query(
-        "UPDATE devices SET park_id = 2, zone_id = 4 WHERE device_id = 'RD-002'",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
+    sqlx::query("UPDATE devices SET park_id = 2, zone_id = 4 WHERE device_id = 'RD-002'")
+        .execute(&pool)
+        .await
+        .unwrap();
     let device_pk: i64 = sqlx::query_scalar("SELECT id FROM devices WHERE device_id = 'RD-002'")
         .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    // 告警模拟的是「设备正在执行计划时报错」：现行口径（`alert_only_in_task`）只有
+    // 执行计划期间的告警才会自动建单 + 推群，所以先把设备上的任务置成执行中。
+    sqlx::query("UPDATE tasks SET task_status = '执行中' WHERE device_id = ?1")
+        .bind(device_pk)
+        .execute(&pool)
         .await
         .unwrap();
 
@@ -3390,9 +3496,16 @@ async fn alert_auto_dispatches_to_duty_owner() {
         format!(r#"{{"title":"重复转单","assignee":"派单责任人","alertId":{alert_id}}}"#),
     ))
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "重复转单应拒绝: {duplicate}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "重复转单应拒绝: {duplicate}"
+    );
     assert!(
-        duplicate["msg"].as_str().unwrap_or_default().contains("已派单"),
+        duplicate["msg"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("已派单"),
         "提示应说明已派过单: {duplicate}"
     );
 
@@ -3462,16 +3575,17 @@ async fn wecom_webhook_is_configured_from_the_console() {
     let key = "94fdb35e-1234-5678-9abc-def012345678";
     let (status, body) = send(put(
         "/api/notifications/webhook",
-        &format!(
-            r#"{{"webhook":"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={key}"}}"#
-        ),
+        &format!(r#"{{"webhook":"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={key}"}}"#),
     ))
     .await;
     assert_eq!(status, StatusCode::OK, "保存应成功: {body}");
     assert_eq!(body["data"]["configured"], true);
     assert_eq!(body["data"]["source"], "db", "平台配置的来源是 db: {body}");
     let masked = body["data"]["masked"].as_str().unwrap_or_default();
-    assert!(masked.contains("key=94fdb35e…"), "掩码应保留前 8 位: {masked}");
+    assert!(
+        masked.contains("key=94fdb35e…"),
+        "掩码应保留前 8 位: {masked}"
+    );
     assert!(!masked.contains(key), "掩码里不能有完整 key: {masked}");
     // 默认连「原文」字段都不返回：地址即凭据，不该随手进屏幕
     assert!(
@@ -3483,16 +3597,20 @@ async fn wecom_webhook_is_configured_from_the_console() {
     let (status, body) = send(auth("GET", "/api/notifications/webhook?reveal=true")).await;
     assert_eq!(status, StatusCode::OK);
     assert!(
-        body["data"]["url"].as_str().unwrap_or_default().ends_with(key),
+        body["data"]["url"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with(key),
         "reveal=true 应返回完整地址: {body}"
     );
 
     // 4. 落库了（重启后仍生效），且通用设置接口既看不到这行、也不接受写
-    let stored: Option<String> =
-        sqlx::query_scalar("SELECT setting_value FROM settings WHERE setting_key = 'wecom_webhook'")
-            .fetch_one(&state.db)
-            .await
-            .unwrap();
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT setting_value FROM settings WHERE setting_key = 'wecom_webhook'",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
     assert!(
         stored.as_deref().unwrap_or_default().ends_with(key),
         "地址应完整存进 settings：{stored:?}"
@@ -3526,11 +3644,12 @@ async fn wecom_webhook_is_configured_from_the_console() {
     let (status, body) = send(put("/api/notifications/webhook", r#"{"webhook":""}"#)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["data"]["configured"], false, "清空后应未配置: {body}");
-    let cleared: Option<String> =
-        sqlx::query_scalar("SELECT setting_value FROM settings WHERE setting_key = 'wecom_webhook'")
-            .fetch_one(&state.db)
-            .await
-            .unwrap();
+    let cleared: Option<String> = sqlx::query_scalar(
+        "SELECT setting_value FROM settings WHERE setting_key = 'wecom_webhook'",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
     assert_eq!(cleared.as_deref(), Some(""), "清空后库里是空串");
 }
 

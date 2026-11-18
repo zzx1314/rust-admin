@@ -70,6 +70,7 @@ use crate::db::now;
 use crate::gateway_types::{
     AiAlertPayload, AiDetectPayload, AiEndPayload, AiPointPayload, TaskProgressPayload,
 };
+use crate::notify::NoticeImage;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -646,7 +647,7 @@ impl AiPatrol {
             && payload.expired
             && !window.alerted.swap(true, Ordering::Relaxed)
         {
-            record_count_alert(state, &window.cfg, 0, expect, "").await;
+            record_count_alert(state, &window.cfg, 0, expect, "", None).await;
         }
         // 「应该有却没有」：exist + alertWhenMissing，且窗口正常到期、一类目标都没检出。
         // 被任务结束 / 新航点打断时不算（狗可能还没看够，与数量任务同一套道理）。
@@ -728,7 +729,17 @@ impl AiPatrol {
             return;
         }
         let found = payload.found_count.unwrap_or(0).max(0);
-        record_count_alert(state, &cfg, found, expect, &payload.evidence).await;
+        // 客户端随告警带上来的证据图（base64）；校验不过就只发卡片
+        let image = payload.evidence_image.as_deref().and_then(|raw| {
+            match crate::notify::evidence_image(raw) {
+                Ok(image) => Some(image),
+                Err(error) => {
+                    warn!("AI 识别：客户端上报的证据图不可用，只发卡片: {error}");
+                    None
+                }
+            }
+        });
+        record_count_alert(state, &cfg, found, expect, &payload.evidence, image).await;
     }
 }
 
@@ -915,7 +926,7 @@ async fn run_window(
     {
         let empty = hits.lock().await.is_empty();
         if empty && !alerted.swap(true, Ordering::Relaxed) {
-            record_count_alert(&state, &config, 0, expect, "").await;
+            record_count_alert(&state, &config, 0, expect, "", None).await;
         }
     }
     // 「应该有却没有」：exist + alertWhenMissing，窗口正常到期且一类目标都没检出
@@ -1013,7 +1024,7 @@ async fn consume_events(
                             // 板端已判定的「数量不一致」：每个窗口只落一条告警
                             if let Some((expect, found, evidence)) = plan_hit_alert(&event) {
                                 if !alerted.swap(true, Ordering::Relaxed) {
-                                    record_count_alert(state, config, found, expect, &evidence)
+                                    record_count_alert(state, config, found, expect, &evidence, None)
                                         .await;
                                 }
                                 continue;
@@ -1069,16 +1080,21 @@ async fn record_hit(
     }
 }
 
-/// 数量核对不一致 → 告警中心 + 任务时间线 + 企业微信
+/// 数量核对不一致 → 告警中心 + 任务时间线 + 企业微信（带证据图）
 ///
 /// 与 [`record_hit`] 平级：检出是「找到了」，这里是「找到了但数量对不上」，
-/// 两者都要能推企业微信，所以告警入库后同样走 `notify::alert_created`。
+/// 两者都要能推企业微信，所以告警入库后同样走 `notify::alert_created*`。
+///
+/// `image` 是板端证据图（客户端从磁盘读出后随 `ai_alert` 带上）：企业微信的图片消息
+/// 要字节不要路径，见 [`crate::notify::evidence_image`]。服务端直连板端 Agent 的模式下
+/// 平台读不到板端磁盘，这时只有路径、没有图，卡片照发。
 async fn record_count_alert(
     state: &AppState,
     config: &WindowConfig,
     found: i64,
     expect: i64,
     evidence: &str,
+    image: Option<NoticeImage>,
 ) {
     let at = now();
     let mut content = format!(
@@ -1092,7 +1108,9 @@ async fn record_count_alert(
 
     let key = ai_dedup_key(config, "count");
     match insert_alert(&state.db, config, &content, &key).await {
-        Ok(alert_code) => crate::notify::alert_created(state, &alert_code).await,
+        Ok(alert_code) => {
+            crate::notify::alert_created_with_image(state, &alert_code, image).await
+        }
         Err(error) => warn!("AI 识别：写数量告警失败: {error}"),
     }
     if let Err(error) = insert_task_event(&state.db, config, &at, &content).await {

@@ -754,6 +754,7 @@ mod tests {
             task_name: "测试".to_string(),
             task_type: Some("定时巡检".to_string()),
             execute_mode: execute_mode.map(str::to_string),
+            end_task: None,
             level: Some("常规".to_string()),
             device_id: Some(1),
             device_code: Some("RD-001".to_string()),

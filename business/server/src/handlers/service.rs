@@ -194,6 +194,9 @@ pub struct TaskDispatchRequest {
     pub plan_end: Option<String>,
     #[serde(default)]
     pub execute_mode: Option<String>,
+    /// 结束动作（返航开关）：缺省 = 跟随路线；`none` / `return_to_start` / `return_to_charge`
+    #[serde(default)]
+    pub end_task: Option<String>,
     #[serde(default)]
     pub level: Option<String>,
     #[serde(default)]
@@ -431,6 +434,7 @@ pub async fn apply_task(
             task_name: payload.task_name.trim().to_string(),
             task_type: None,
             execute_mode: payload.execute_mode.clone(),
+            end_task: Some(payload.end_task.clone()),
             level: payload.level.clone(),
             device_id: Some(device.id),
             park_id: Some(park_id),
@@ -501,8 +505,6 @@ pub async fn runtime_snapshot(state: &AppState, device_code: &str) -> Result<Val
         "parkId": device.park_id,
         "parkName": device.park_name,
         "teleopHolder": device.teleop_holder,
-        "videoUrl": device.video_url,
-        "videoType": device.video_type,
         "currentTask": current.map(|task| json!({
             "taskCode": task.task_code,
             "taskName": task.task_name,

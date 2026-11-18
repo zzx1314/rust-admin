@@ -119,6 +119,11 @@ export const dogDeviceDispatchTask = (
     planStart?: string | null;
     planEnd?: string | null;
     executeMode?: string | null;
+    /**
+     * 结束动作（返航开关）：不传 = 跟随路线（闭环自动返航）；
+     * `none` = 原地待命；`return_to_start` / `return_to_charge`
+     */
+    endTask?: string | null;
     level?: string | null;
     description?: string | null;
     requestId?: string;

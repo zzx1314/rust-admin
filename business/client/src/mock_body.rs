@@ -59,6 +59,24 @@ pub fn is_mock_alias(raw: &str) -> bool {
     MOCK_ALIASES.contains(&value.as_str())
 }
 
+/// 把 4030 `initial_pose` 翻成人话（日志用）。
+///
+/// 零四元数才是「不指定初始位姿」，详见 [`crate::zhpro::protocol::Pose::unspecified`]；
+/// 单位四元数 + 原点是**合法位姿**，等于把机器人种在地图原点。
+fn describe_initial_pose(pose: Option<&Value>) -> String {
+    let Some(pose) = pose else {
+        return "未带 initial_pose（= 读上一份位姿文件完整重定位）".to_string();
+    };
+    let w = pose
+        .get("orientation")
+        .and_then(|o| o.get("w"))
+        .and_then(Value::as_f64);
+    if w == Some(0.0) {
+        return "零四元数 → 读上一份位姿文件做完整重定位".to_string();
+    }
+    format!("显式初始位姿 {pose}")
+}
+
 /// 按环境变量启动假本体，返回可交给 `ZhProClient::connect` 的地址
 ///
 /// 必须带 `ws://` 前缀：`host_base` 只对裸主机补 `:10010`，带端口的裸地址会被补成
@@ -581,6 +599,18 @@ async fn run_control<S>(
                 let _ = tx.send(response(T_MAP_LIST, msg_id, list)).await;
             }
             T_LOCATE => {
+                // 4030 op=1 载图定位。把 `initial_pose` 的语义打到日志里：
+                // 零四元数 = 「不指定初始位姿」，本体 SLAM 读上一份位姿文件做完整重定位；
+                // 非零 = 被显式种在某一位姿上（常见坑：单位四元数 + 原点）。
+                let map_path = env
+                    .data
+                    .get("map_path")
+                    .and_then(|path| path.as_str())
+                    .unwrap_or("<未指定>");
+                info!(
+                    "← 4030 载图定位: map={map_path} {}",
+                    describe_initial_pose(env.data.get("initial_pose"))
+                );
                 guard.loc_status = 100;
                 let _ = tx.send(ok_ack(T_LOCATE, msg_id)).await;
             }
@@ -879,6 +909,24 @@ mod tests {
             json!(format!("{MAP_ROOT}/history_map/{DEFAULT_MAP_DIR}"))
         );
         assert_eq!(items[0]["charge_point_exist"], json!(true));
+    }
+
+    #[test]
+    fn initial_pose_log_distinguishes_zero_quaternion() {
+        // 零四元数 = 「不指定初始位姿」，由 SLAM 读上一份位姿文件做完整重定位
+        let zero = json!({
+            "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 0.0}
+        });
+        assert!(describe_initial_pose(Some(&zero)).contains("读上一份位姿文件"));
+
+        // 单位四元数 + 原点是一个**合法位姿**（= 把机器人种在地图原点），不能当成「没给」
+        let origin = json!({
+            "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
+        });
+        assert!(describe_initial_pose(Some(&origin)).contains("显式初始位姿"));
+        assert!(describe_initial_pose(None).contains("未带 initial_pose"));
     }
 
     #[test]

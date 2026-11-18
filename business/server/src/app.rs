@@ -127,8 +127,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/devices/{id}/teleop/take", post(teleop::take_over))
         .route("/devices/{id}/teleop/release", post(teleop::release))
         .route("/devices/{id}/teleop/ping", post(teleop::keepalive))
-        // 实时视频：浏览器订阅设备回传的 FLV 流（?token= 鉴权，见 video.rs）
-        .route("/devices/{id}/video/ws", get(video::viewer_ws))
+        // 实时视频：背包前置（`/backpack/video/ws`）是唯一通路，设备客户端回传已删除
         .route("/tasks", get(tasks::list_tasks).post(tasks::create_task))
         .route("/tasks/stats", get(tasks::task_stats))
         .route(
@@ -209,8 +208,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/shift-slots/{id}",
-            axum::routing::put(schedules::update_shift_slot)
-                .delete(schedules::delete_shift_slot),
+            axum::routing::put(schedules::update_shift_slot).delete(schedules::delete_shift_slot),
         )
         .route(
             "/shifts",

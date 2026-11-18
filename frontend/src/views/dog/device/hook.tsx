@@ -216,6 +216,8 @@ export function useDogDevice() {
     routeId: undefined as number | undefined,
     planStart: "",
     planEnd: "",
+    /** 结束动作（返航开关）：空 = 跟随路线；none / return_to_start / return_to_charge */
+    endTask: "",
     description: ""
   });
 
@@ -433,6 +435,7 @@ export function useDogDevice() {
     dispatchForm.routeId = undefined;
     dispatchForm.planStart = "";
     dispatchForm.planEnd = "";
+    dispatchForm.endTask = "";
     dispatchForm.description = "";
     dispatchVisible.value = true;
   }
@@ -455,6 +458,8 @@ export function useDogDevice() {
         routeId: dispatchForm.routeId,
         planStart: dispatchForm.planStart || null,
         planEnd: dispatchForm.planEnd || null,
+        // 空串 = 跟随路线：不传 endTask，让业务平台保持老行为（闭环自动返航）
+        endTask: dispatchForm.endTask || null,
         description: dispatchForm.description || null,
         requestId: newRequestId(device.deviceId)
       });

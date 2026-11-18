@@ -18,6 +18,9 @@
 //! - **20 条/分钟**：超了返回 `errcode 45009`。必须本地限流。
 //! - **markdown ≤ 4096 字节**（中文 3 字节/字）：超长整条被拒，不是截断。
 //! - **markdown 不支持 @提及**：要 @所有人得另发一条 `text`，用 `mentioned_list`。
+//! - **markdown 也不支持显示图片**（官方语法子集里没有 `![]()`）：要发证据图只能走
+//!   `msgtype=image`，带**原图字节的 base64 + 原图 md5**，原图 ≤ 2MB、仅 JPG/PNG。
+//!   见 [`NoticeImage`] / [`evidence_image`]。
 //! - **只能发不能收**：消息里带平台链接，处理动作仍在平台内完成。
 //!
 //! # 不能阻塞调用方
@@ -45,6 +48,9 @@ pub const TEXT_LIMIT: usize = 2000;
 pub const RATE_PER_MIN: u32 = 18;
 /// 队列深度。看门狗 15s 一轮、设备事件突发，256 足够。
 const QUEUE_CAPACITY: usize = 256;
+
+/// 图片消息的体积上限（**原图字节**，base64 编码前）。企业微信硬限制 2MB。
+pub const IMAGE_MAX_BYTES: usize = 2 * 1024 * 1024;
 /// 平台设置页保存 webhook 的 settings 键（`value_type = 'secret'`）。
 ///
 /// 刻意**不出现在** `GET /api/settings` 的列表里：地址即凭据，通用设置接口
@@ -145,6 +151,67 @@ pub struct Notice {
     /// 群里只有手机号能被 @：责任人库没有电话时就只能靠 markdown 卡片里那一行
     /// 「当班责任人」让人自己对号。与 `mention_all` 互斥使用（先 @所有人，否则 @具体人）。
     pub mentions: Vec<String>,
+    /// 证据图：渲染成 markdown 之后**另发一条** `msgtype=image`。
+    ///
+    /// 只有拿得到图片字节的告警才有（目前是板端 AI 识别数量核对不一致）；
+    /// markdown 里挂不了图，见 [`evidence_image`]。
+    pub image: Option<NoticeImage>,
+}
+
+/// 一条待发图片消息（企业微信 `msgtype=image`）。
+///
+/// 企业微信要的是「原图字节的 base64」+「**base64 之前**字节的 md5」，两个都得给；
+/// 不能直接用文件路径：群机器人不能让企微去拉我们的内网地址。
+#[derive(Debug, Clone)]
+pub struct NoticeImage {
+    /// 原图字节的 base64（无换行，由 [`evidence_image`] 规范化）
+    pub base64: String,
+    /// 原图字节的 md5（小写十六进制）
+    pub md5: String,
+    /// 原图字节数（只用于日志/排查）
+    pub bytes: usize,
+}
+
+/// 把客户端/板端给的 base64 证据图变成可发的 [`NoticeImage`]。
+///
+/// 校验都放在这里，因为企业微信对图片的要求是硬约束，错一个字段整条消息被拒：
+///
+/// - 必须是合法 base64，**不能带换行**（重新编码一遍，顺手吃掉空格/换行）；
+/// - 原图 ≤ [`IMAGE_MAX_BYTES`]（2MB），且必须是 **JPEG / PNG**（按文件头判，不信扩展名）；
+/// - md5 算的是**base64 编码前**的字节，算错企业微信回参数错误。
+pub fn evidence_image(base64_input: &str) -> Result<NoticeImage, String> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+
+    let cleaned: String = base64_input.chars().filter(|c| !c.is_whitespace()).collect();
+    if cleaned.is_empty() {
+        return Err("证据图为空".to_string());
+    }
+    let bytes = BASE64
+        .decode(cleaned.as_bytes())
+        .map_err(|error| format!("证据图不是合法 base64: {error}"))?;
+    if bytes.len() > IMAGE_MAX_BYTES {
+        return Err(format!(
+            "证据图 {} 字节，超过企业微信 2MB 上限",
+            bytes.len()
+        ));
+    }
+    if !is_jpeg_or_png(&bytes) {
+        return Err("证据图不是 JPEG/PNG（企业微信只收这两种）".to_string());
+    }
+    use md5::{Digest as _, Md5};
+    let digest = Md5::digest(&bytes);
+    let md5 = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    Ok(NoticeImage {
+        base64: BASE64.encode(&bytes),
+        md5,
+        bytes: bytes.len(),
+    })
+}
+
+/// 文件头判定：JPEG `FF D8 FF` / PNG `89 50 4E 47`
+fn is_jpeg_or_png(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0xFF, 0xD8, 0xFF]) || bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47])
 }
 
 impl Notice {
@@ -493,6 +560,12 @@ impl Notifier {
                 return false;
             }
         }
+        // 证据图是队列里最贵的东西（单条最多 2MB base64）。队列积压时**先丢图保卡片**：
+        // 正文才是告警信息本身，图只是辅证，不能因为一张图把队列存储吃到爆炸。
+        if notice.image.is_some() && tx.capacity() < QUEUE_CAPACITY / 2 {
+            debug!(key = %notice.dedupe_key, "wecom: 队列积压，本条只发卡片不带证据图");
+            notice.image = None;
+        }
         match tx.try_send(notice) {
             Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -608,12 +681,12 @@ async fn run_consumer(state: AppState, mut rx: mpsc::Receiver<Notice>) {
                     continue;
                 };
                 // @所有人 / @具体责任人都要多发一条 text，企业微信按「消息条数」限流，
-                // 所以占两个额度
+                // 所以占两个额度；带证据图的话再加一条 image 消息
                 let cost = if notice.mention_all || !notice.mentions.is_empty() {
                     2
                 } else {
                     1
-                };
+                } + u32::from(notice.image.is_some());
                 for _ in 0..cost {
                     while !gate.allow(Instant::now()) {
                         let wait = gate.wait_time(Instant::now());
@@ -648,6 +721,7 @@ async fn flush_overflow(state: &AppState) {
         link: alerts_link(state),
         mention_all: false,
         mentions: Vec::new(),
+        image: None,
     };
     let Some(url) = state.notifier.webhook() else {
         return;
@@ -710,6 +784,11 @@ async fn deliver(
             Ok(()) => {
                 record(state, notice, &payload, "sent", attempts, None).await;
                 debug!(key = %notice.dedupe_key, "wecom: 推送成功");
+                // 图片排在正文之后：群里先看到卡片再看图（发送顺序 = 消息顺序）。
+                // 失败只打日志——正文已经送到了，不能因一张图把告警判失败。
+                if let Some(image) = &notice.image {
+                    send_image(client, url, image).await;
+                }
                 return;
             }
             Err(failure) => {
@@ -751,6 +830,26 @@ enum FailureKind {
     Rejected,
     /// 网络 / HTTP 层失败
     Transport,
+}
+
+/// 发一条 `msgtype=image`（证据图）。
+///
+/// 企业微信要求：`base64` = **原图字节**的 base64（不能带换行），`md5` = base64 **之前**
+/// 字节的 md5，原图 ≤ 2MB 且只有 JPG/PNG。这些校验在 [`evidence_image`] 里已经做完，
+/// 到这里就是黑盒发送。
+async fn send_image(client: &reqwest::Client, url: &str, image: &NoticeImage) {
+    let body = json!({
+        "msgtype": "image",
+        "image": { "base64": image.base64, "md5": image.md5 }
+    });
+    match post(client, url, &body).await {
+        Ok(()) => debug!(bytes = image.bytes, "wecom: 证据图推送成功"),
+        Err(failure) => warn!(
+            bytes = image.bytes,
+            "wecom: 证据图推送失败（正文已发送）: {}",
+            failure.message
+        ),
+    }
 }
 
 struct SendFailure {
@@ -921,6 +1020,26 @@ async fn repeat_push_enabled(state: &AppState) -> bool {
     }
 }
 
+/// 告警证据图（`msgtype=image`）是否推到企业微信。
+///
+/// 缺行视为**开启**：站点拿到图才是真需要的（「AI 说数量不对，到底几个？」）；
+/// 嫌图多费流量/刷屏时在设置页关掉，卡片照旧发。
+async fn image_push_enabled(state: &AppState) -> bool {
+    let row: Option<(Option<String>,)> = sqlx::query_as(
+        "SELECT setting_value FROM settings WHERE setting_key = 'wecom_alert_image'",
+    )
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or(None);
+    match row {
+        Some((Some(value),)) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "false" | "0" | "off"
+        ),
+        _ => true,
+    }
+}
+
 /// `alert_created` 回查用：告警 + 设备 + 园区 + 区域。
 #[derive(Debug, sqlx::FromRow)]
 struct AlertLookup {
@@ -948,7 +1067,12 @@ struct TaskLookup {
 
 /// 告警落库后调用：找责任人 → 自动建工单 → 推送企微。
 ///
-/// 顺序不能颠倒：
+/// 第一道门是 [`crate::alert_flow::should_dispatch`]：**只有执行计划期间**的告警
+/// （告警绑定的设备当时有 `执行中` 的任务）才会走到下面两步。掉线 / 控制权抢占 /
+/// 手动新建这类只落库，告警中心能看到，但不建单也不推群（`alert_only_in_task`
+/// 关掉时退回老口径：所有告警都建单推群）。
+///
+/// 剩下的顺序不能颠倒：
 ///
 /// 1. **派单 + 建工单**（[`crate::alert_flow::on_alert`]）放在最前面，且**不看推送开关**。
 ///    现场很可能根本没配 webhook，但「告警要有人管」不能依赖群消息通道。
@@ -956,7 +1080,29 @@ struct TaskLookup {
 ///
 /// 消息里因此能直接带「当班责任人 / 工单号」，并把责任人手机号塞进
 /// `mentioned_mobile_list`（markdown 不支持 @，只能另发一条 text）。
+///
+/// 带证据图的告警（AI 识别数量核对不一致）用 [`alert_created_with_image`]，
+/// 多推一条 `msgtype=image`；其余来源没有图片字节，走这个无图版本。
 pub async fn alert_created(state: &AppState, alert_code: &str) {
+    alert_created_with_image(state, alert_code, None).await;
+}
+
+/// 同 [`alert_created`]，额外把证据图作为**第二条**消息发出去。
+///
+/// 图片只在 `wecom_alert_image` 开着（缺行 = 开）时附上；图片发送失败**不影响**
+/// 正文那条：卡片已经进群了，不能因为一张图把整条告警判失败。
+pub async fn alert_created_with_image(
+    state: &AppState,
+    alert_code: &str,
+    image: Option<NoticeImage>,
+) {
+    if !crate::alert_flow::should_dispatch(state, alert_code).await {
+        debug!(
+            alert = %alert_code,
+            "告警不在任务执行期间：跳过自动建单与企业微信推送（告警本身照常落库）"
+        );
+        return;
+    }
     let assignment = crate::alert_flow::on_alert(state, alert_code).await;
 
     // 「跟单」= 同一件事已经挂在在办工单上（见 `alert_flow::find_open_order`）。
@@ -1065,7 +1211,7 @@ pub async fn alert_created(state: &AppState, alert_code: &str) {
         .and_then(|order_id| work_orders_link(state, Some(order_id)))
         .or_else(|| alerts_link(state));
 
-    let notice = Notice {
+    let mut notice = Notice {
         level: Level::parse(&row.level),
         ref_type: Channel::Alert.ref_type(),
         ref_id: Some(row.id),
@@ -1134,7 +1280,16 @@ pub async fn alert_created(state: &AppState, alert_code: &str) {
                 .map(|phone| vec![phone])
                 .unwrap_or_default()
         },
+        image: None,
     };
+    // 证据图是**可选附加**：开关关掉 / 拿不到字节就只发卡片
+    if let Some(image) = image {
+        if image_push_enabled(state).await {
+            notice.image = Some(image);
+        } else {
+            debug!(alert = %alert_code, "wecom: 已关闭告警证据图推送，只发卡片");
+        }
+    }
     state.notifier.enqueue(notice);
 }
 
@@ -1209,6 +1364,7 @@ pub async fn task_abnormal(state: &AppState, task_code: &str, level: Level, reas
             .and_then(mentionable)
             .map(|phone| vec![phone])
             .unwrap_or_default(),
+        image: None,
     };
     state.notifier.enqueue(notice);
 }
@@ -1246,6 +1402,7 @@ pub async fn send_test(state: &AppState) -> Result<String, String> {
         link: None,
         mention_all: false,
         mentions: Vec::new(),
+        image: None,
     };
     let payload = notice.markdown();
     let body = json!({ "msgtype": "markdown", "markdown": { "content": payload } });
@@ -1292,7 +1449,46 @@ mod tests {
             link: Some("http://10.0.0.8:3100/alerts".to_string()),
             mention_all: false,
             mentions: Vec::new(),
+            image: None,
         }
+    }
+
+    /// 证据图 → `msgtype=image` 的三个硬约束：base64 合法、≤ 2MB、JPG/PNG，
+    /// 以及 md5 算的是 **base64 之前** 的字节（算错企业微信直接拒）
+    #[test]
+    fn evidence_image_validates_and_computes_md5() {
+        // 最小 JPEG（只看文件头）：FF D8 FF …
+        const JPEG: &str = "/9j/4AAQSkZJRgAB";
+        let image = evidence_image(JPEG).expect("合法 JPEG 应该可用");
+        assert_eq!(
+            image.md5, "cbde0fdf7fab6fefd9fe12fec4967cf9",
+            "md5 必须算原图字节，不是 base64 文本"
+        );
+        assert_eq!(image.bytes, 12);
+        assert_eq!(image.base64, JPEG, "重新编码后应完全一致（无换行）");
+
+        // 带换行 / 空格也要能吃下去（现场 `base64` 命令默认 76 列换行）
+        let wrapped = "/9j/4AAQ\nSkZJRgAB\n";
+        assert_eq!(evidence_image(wrapped).expect("应忽略空白").base64, JPEG);
+
+        // PNG 文件头 `89 50 4E 47`
+        assert!(evidence_image("iVBORw0KGgo=").is_ok());
+
+        assert!(evidence_image("").is_err(), "空值不能用");
+        assert!(evidence_image("这不是 base64").is_err());
+        // 合法 base64 但不是我要求的两种图片格式
+        assert!(evidence_image("aGVsbG8=").is_err(), "hello 不是图片");
+    }
+
+    /// 超过 2MB 的图不能发（企业微信整条拒掉，还不如不发图）
+    #[test]
+    fn evidence_image_rejects_oversized() {
+        let mut bytes = vec![0xFF_u8, 0xD8, 0xFF];
+        bytes.resize(IMAGE_MAX_BYTES + 1, 0);
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let error = evidence_image(&encoded).expect_err("2MB 以上应被拒");
+        assert!(error.contains("2MB"), "错误要说清是体积问题: {error}");
     }
 
     #[test]

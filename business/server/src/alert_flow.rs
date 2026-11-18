@@ -26,6 +26,11 @@
 //! 所以它跑在 [`crate::notify::alert_created`] 的最前面、开关判断之前；
 //! 推送才是旁路。
 //!
+//! 但 **哪些告警值得派单**是另一回事：[`should_dispatch`] 是两者的共同前置门——
+//! 只有「执行计划期间」（告警设备当时有 `执行中` 的任务）的告警才建单 + 推群，
+//! 掉线 / 控制权抢占 / 手动新建只落库。判据见 [`in_task_execution`]，
+//! 开关是 `settings.alert_only_in_task`（缺行视为开启，关掉回到老口径）。
+//!
 //! 幂等：告警行的 `work_order_id` 非空就不再建单（重复调用 / 重试安全）。
 
 use crate::app::AppState;
@@ -457,6 +462,61 @@ async fn auto_workorder_enabled(state: &AppState) -> bool {
         Some((Some(value),)) => value.trim() != "false",
         _ => true,
     }
+}
+
+/// 「只在执行计划时建单 + 推群」开关（`settings.alert_only_in_task`）。
+///
+/// 缺行视为**开启**（现行口径）：只有「执行计划期间」产生的告警才自动建工单、推企业微信。
+/// 掉线（`hb:`）/ 控制权抢占（`ctrl:`）/ 手动新建 这类一律**只落库**——告警中心照常
+/// 能看到，但不再派生工单、也不再往群里刷。要恢复「所有告警都建单推群」的老口径，
+/// 在设置页把它关掉即可。
+pub async fn only_in_task_enabled(state: &AppState) -> bool {
+    let row: Option<(Option<String>,)> = sqlx::query_as(
+        "SELECT setting_value FROM settings WHERE setting_key = 'alert_only_in_task'",
+    )
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or(None);
+    match row {
+        Some((Some(value),)) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "false" | "0" | "off"
+        ),
+        _ => true,
+    }
+}
+
+/// 这条告警是否应该派生「自动建工单 + 企业微信推送」。
+///
+/// [`crate::notify::alert_created`] 的第一道门：只负责判「现在该不该动作」，
+/// 具体派给谁、建不建单还是后面的 [`on_alert`]。
+pub async fn should_dispatch(state: &AppState, alert_code: &str) -> bool {
+    if !only_in_task_enabled(state).await {
+        return true;
+    }
+    in_task_execution(state, alert_code).await
+}
+
+/// 告警落库那一刻，它绑定的设备上是否有 `执行中` 的任务。
+///
+/// 这就是「执行计划期间」的判据：巡检/任务在跑时本体报障碍、故障、AI 检出才算得上是
+/// 执行任务的告警；没跑任务的时候报的（掉线、遥控器抢占、页面手动新建）不属于这一类。
+///
+/// 未绑定设备的告警一律为 `false`（连不上任何计划）。
+pub async fn in_task_execution(state: &AppState, alert_code: &str) -> bool {
+    let hit: Option<i64> = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM alerts a
+               JOIN tasks t ON t.device_id = a.device_id
+              WHERE a.alert_code = ?1 AND t.task_status = '执行中'
+         )",
+    )
+    .bind(alert_code)
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or(None);
+    hit.unwrap_or(0) != 0
 }
 
 /// 告警自动建单的标题（设备 + 内容前 60 字）。

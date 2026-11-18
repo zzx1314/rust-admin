@@ -798,7 +798,9 @@ pub async fn sweep_stale_devices(state: &AppState) -> Result<u64, AppError> {
         .bind(format!("hb:{id}"))
         .execute(&state.db)
         .await;
-        // 设备掉线是任务失败的头号原因，运维群里必须第一时间看到
+        // 落库后走统一出口；要不要建单 + 推群由 `alert_flow::should_dispatch` 判：
+        // 掉线告警**只在设备当时有执行中任务**时才进群（巡检中掉线是最典型的失败场景），
+        // 闲置掉线只留在告警中心。
         crate::notify::alert_created(state, &alert_code).await;
     }
 
@@ -972,7 +974,7 @@ async fn park_code_of(db: &SqlitePool, park_id: Option<i64>) -> Option<String> {
 /// 按设备编号读取设备（含园区 / 区域名称）
 ///
 /// 列清单复用 `handlers::devices::DEVICE_SELECT`，避免与设备接口漂移
-/// （历史上漏选 `video_url` 等列导致注册回执失败）。
+/// （历史上漏选列导致注册回执失败）。
 async fn fetch_device_by_code(db: &SqlitePool, device_id: &str) -> Result<Device, AppError> {
     let sql = format!(
         "{} WHERE d.device_id = ?1",
@@ -1544,7 +1546,8 @@ async fn open_control_preempt_alert(
     .bind(Some(format!("ctrl:{device_id}")))
     .execute(db)
     .await;
-    // 控制权被抢是最需要"人马上知道"的一类：平台看起来一切正常，摇杆和任务却全失效
+    // 落库后走统一出口；`alert_flow::should_dispatch` 只在「执行计划期间」才建单 + 推群。
+    // 闲置时被抢占只留在告警中心（平台摇杆与任务同样会被门禁拦下，页面上看得见）。
     crate::notify::alert_created(state, &alert_code).await;
 }
 
@@ -2140,37 +2143,6 @@ pub async fn send_command_to_device(
     }
 }
 
-/// 向指定设备发送实时视频开关指令
-///
-/// `video_start` 带拉流地址（就是设备档案里的 `video_url`），客户端据此起 ffmpeg；
-/// `video_stop` 不带载荷，客户端收到就杀掉拉流进程。两者都是独立 msgType，
-/// 不走 `command`，避免和业务指令（开始巡检 / 召回充电）混在一起。
-pub async fn send_video_control(
-    connections: &DeviceConnections,
-    device_id: &str,
-    url: Option<&str>,
-) -> bool {
-    let map = connections.read().await;
-    let Some(tx) = map.get(device_id) else {
-        warn!("device {device_id} not connected, cannot send video control");
-        return false;
-    };
-    let (cmd_type, payload) = match url {
-        Some(url) => ("video_start", json!({ "url": url, "format": "flv" })),
-        None => ("video_stop", json!({})),
-    };
-    match tx.send(PendingCommand {
-        cmd_type: cmd_type.to_string(),
-        payload,
-    }) {
-        Ok(_) => true,
-        Err(_) => {
-            warn!("failed to send {cmd_type} to device {device_id} (no receivers)");
-            false
-        }
-    }
-}
-
 /// 向指定设备发送遥控摇杆
 ///
 /// 摇杆走高频通道，载荷按 `{msgType:"teleop"}` 下发，客户端转成智航 1304。
@@ -2234,7 +2206,10 @@ mod tests {
     /// 文案里的坐标 / 耗时 / 英文描述一变就拆单，是 2026-11-17 之前的老毛病。
     #[test]
     fn fault_code_is_extracted_from_message() {
-        assert_eq!(fault_code("感知障碍物检测延迟（code=13382, 级别=1）"), Some("13382"));
+        assert_eq!(
+            fault_code("感知障碍物检测延迟（code=13382, 级别=1）"),
+            Some("13382")
+        );
         assert_eq!(
             fault_code("导航指令非法（code=13440, 级别=2）"),
             Some("13440")
@@ -2245,7 +2220,10 @@ mod tests {
             Some("12608")
         );
         // 没有码（翻译文案 / 人工事件）→ 返回 None，工单退回按标题去重
-        assert_eq!(fault_code("The localization system has poor accuracy"), None);
+        assert_eq!(
+            fault_code("The localization system has poor accuracy"),
+            None
+        );
         assert_eq!(fault_code("code="), None);
         assert_eq!(fault_code(""), None);
     }

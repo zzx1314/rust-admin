@@ -121,6 +121,28 @@ export const PARK_TYPES = ["生产制造", "仓储物流", "研发办公", "综�
 export const ZONE_TYPES = ["生产区", "仓储区", "周界", "办公区", "公共区", "地下", "作业区"];
 export const TASK_TYPES = ["定时巡检", "定点拍照", "夜巡任务", "应急处置", "设备维护", "地图采集"];
 export const EXECUTE_MODES = ["周期任务", "临时下发", "立即执行"];
+/**
+ * 任务结束动作（跑完要不要返航）。
+ *
+ * 值对应后端 `tasks.end_task` / 载荷 `endTaskMode`；空串 = 跟随路线，
+ * 此时闭环路线仍按老行为「返航回起点」。巡检本体侧对应 `5000 kind=4` 的 `params.end_task`。
+ */
+export const END_ACTIONS = [
+  { value: "", label: "跟随路线（由路线闭环方式决定）" },
+  { value: "none", label: "原地待命（不返航）" },
+  { value: "return_to_start", label: "返回起点" },
+  { value: "return_to_charge", label: "返回充电点" }
+] as const;
+
+/**
+ * 结束动作的中文文案。`loopMode` 只在「跟随路线」时有意义：
+ * 闭环 → 返回起点，往返 / 单向 → 原地待命（客户端 `patrol_end_task` 的兜底）。
+ */
+export function endActionLabel(value?: string | null, loopMode?: string | null) {
+  const found = END_ACTIONS.find(item => item.value === (value ?? ""));
+  if (found && found.value) return found.label;
+  return loopMode === "闭环" ? "跟随路线（闭环 → 返回起点）" : "跟随路线（原地待命）";
+}
 export const TASK_LEVELS = ["常规", "重要", "紧急"];
 export const DISPATCH_POLICIES = ["按路线顺序执行", "跳过非必经点", "仅执行采集动作"];
 export const TASK_STATUSES = ["待执行", "执行中", "已暂停", "已完成", "异常"];

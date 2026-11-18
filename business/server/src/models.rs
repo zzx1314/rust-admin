@@ -152,10 +152,6 @@ pub struct Device {
     pub last_heartbeat: Option<String>,
     pub firmware: Option<String>,
     pub device_ip: Option<String>,
-    /// 实时视频地址（RTSP / HLS / FLV / WebRTC），由本体自带服务提供
-    pub video_url: Option<String>,
-    /// 视频协议类型：none / hls / flv / webrtc / rtsp / mp4
-    pub video_type: String,
     /// 当前远程接管人；为空表示无人接管，遥控指令一律拒绝
     pub teleop_holder: Option<String>,
     /// 接管时间，用于超时自动释放
@@ -197,6 +193,9 @@ pub struct Task {
     pub task_name: String,
     pub task_type: Option<String>,
     pub execute_mode: Option<String>,
+    /// 结束动作（返航开关）：`NULL` 跟随路线 / `none` / `return_to_start` /
+    /// `return_to_charge`，见 [`crate::dispatch::resolve_task_end`]。
+    pub end_task: Option<String>,
     pub level: Option<String>,
     pub device_id: Option<i64>,
     pub device_code: Option<String>,
@@ -377,8 +376,6 @@ pub struct DeviceRequest {
     pub last_heartbeat: Option<String>,
     pub firmware: Option<String>,
     pub device_ip: Option<String>,
-    pub video_url: Option<String>,
-    pub video_type: Option<String>,
 }
 
 /// 手动把设备绑定到园区（可同时指定园区下的区域）。
@@ -396,6 +393,10 @@ pub struct TaskRequest {
     pub task_name: String,
     pub task_type: Option<String>,
     pub execute_mode: Option<String>,
+    /// 结束动作（返航开关）：`none` / `return_to_start` / `return_to_charge`。
+    /// 缺省 = 跟随路线；更新时显式传 null 表示改回「跟随路线」。
+    #[serde(default, deserialize_with = "double_option")]
+    pub end_task: Option<Option<String>>,
     pub level: Option<String>,
     pub device_id: Option<i64>,
     pub park_id: Option<i64>,
@@ -694,7 +695,6 @@ pub struct StaffRequest {
     #[serde(default, deserialize_with = "double_option")]
     pub user_id: Option<Option<i64>>,
 }
-
 
 /// 责任人库 Excel 导入：逐行结果（只回报跳过 / 失败的行，成功的只计数）
 #[derive(Debug, Serialize)]

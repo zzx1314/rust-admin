@@ -108,7 +108,7 @@ SmartSdk connect
    | `dwell_sec` / `points` | —（不在请求里） | 停留/作业由路径点 `properties.tasks` 决定：`0`=等待（固定 2 s）、`1`=拍照。**平台侧 `dwell` 秒数用重复 `0` 表达（`ceil(dwell/2)` 个），粒度 2 s，单点封顶 300 s**（`business/client/src/zhpro/route.rs` 的 `wait_task_count`） |
    | `patrolSpeedVx` | `params.speed_limit.vx` | 实测 `0.5`（我们一直发 `1.2`） |
    | `minimum_battery` | `params.min_recharge_battery` | 浮点，实测 `25.0` |
-   | `end_task` | `params.end_task` | **数字枚举**：`0`=none / `1`=return_to_start / `2`=return_to_charge（与记录里 `properties.end_task` 的字符串一一对应，已实测 0 和 1） |
+   | `end_task` | `params.end_task` | **数字枚举**：`0`=none / `1`=return_to_start / `2`=return_to_charge（与记录里 `properties.end_task` 的字符串一一对应，已实测 0 和 1）。平台侧已提升为**任务属性**：`tasks.end_task` / 载荷 `endTaskMode`，不配则按 `loop_mode == "闭环"` 兜底返回起点（见 `../README.md`「跑完要不要返航」） |
    | `schedule_type` | `schedule` + `execute_at` | `schedule=0`（立即）；**`execute_at` 是本地时间字符串 `"YYYY-MM-DD HH:MM:SS"`，不是毫秒时间戳** |
    | `repeat` / `periodic` | 预约任务的字段 | 立即执行时不下发（记录里 `periodic=false`） |
    | `record` | `record` | **`true`**（写 5010/5011 巡检记录；我们目前发 `false`） |

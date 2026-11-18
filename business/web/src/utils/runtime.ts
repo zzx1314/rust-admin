@@ -33,7 +33,7 @@ export function apiBaseUrl(): string {
   return (runtime.apiBase || "/api").replace(/\/+$/, "");
 }
 
-/** 设备视频中继（`/api/devices/{id}/video/ws`）所在源 */
+/** 视频中继所在源：`/api/backpack/video/ws`（实时视频 / 设备 / 任务共用的唯一视频通路） */
 export function wsOrigin(): string {
   if (runtime.videoWsBase) return runtime.videoWsBase.replace(/\/+$/, "");
   const scheme = location.protocol === "https:" ? "wss" : "ws";

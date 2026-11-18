@@ -172,7 +172,7 @@ ssh root@192.168.41.246 'cd /opt/robodog/client && ./deploy/check.sh'
 
 | 文件 | 内容 | 说明 |
 | --- | --- | --- |
-| `/etc/robodog/client.toml` | `[server] url`、`[robot] host`、`[video]` 等 | 首次安装由 `deploy/client.toml.template` 生成，之后**保留不覆盖** |
+| `/etc/robodog/client.toml` | `[server] url`、`[robot] host`、`[mapping]` 等 | 首次安装由 `deploy/client.toml.template` 生成，之后**保留不覆盖**（旧的 `[video]` 段已废弃，留着也不会报错） |
 | `/etc/robodog/client.env` | `ROBODOG_DEVICE_SECRET`、`ROBODOG_API_PASSWORD` | `chmod 600`，systemd 用 `EnvironmentFile` 加载 |
 | `/opt/robodog/client/robodog-device-client` | 二进制 | 发布时先备份成 `.bak-<时间戳>` |
 
@@ -267,14 +267,20 @@ sqlite3 /opt/hz/rust-admin/robodog/data/robodog.db \
 所以把方向反过来：**由板子出公网推流**，浏览器只跟平台同源通信。
 
 ```text
-本地 mediamtx :8554 ──ffmpeg -c:v copy -f flv──► backpack-relay ──ws──► 平台 VideoHub
+本地 mediamtx :8554 ──ffmpeg 720p20/1.2Mbps / 或 -c:v copy──► backpack-relay ──ws──► 平台 VideoHub
    房间名 bp:<stream>                                                      │
                                   浏览器 ◄── ws /api/backpack/video/ws ──┘（flv.js）
 ```
 
 - 延时 1~2s（WHEP 是 ~200ms），代价换「任何网络、任何浏览器都能看」；
-- **按需**：常驻 6 条 WS 连接（每条约 1KB），第一个观看者进来才起 ffmpeg，最后
-  一个离开立刻杀（平台看门狗也会兜住空转）；
+- **按需**：常驻 6 条 WS 连接（每条约 1KB），第一个观看者进来才起 ffmpeg，最后一个
+  离开后平台留 60s 宽限再由看门狗 `video_stop`（切页签 / 刷新不用重新起 ffmpeg）；
+- **默认转成 720p20 / 1.2Mbps**（`RELAY_PROFILE=light`，编码器自动挑
+  `h264_rkmpp` → `h264_v4l2m2m` → `libx264`）：平台是阿里云 ECS，公网出口实测只有
+  **≈2.5Mbps**，而 `dogcam` 是 1080p60、`-c:v copy` 会原样推 4~8Mbps —— 观看端追不上
+  就被服务端判 `lagged` 踢掉重连，现场看到的就是「很卡」。带宽更紧再压
+  `RELAY_BITRATE=800k RELAY_FPS=15`；真要在 6Mbps 以上的出口上看 1080p60 才用
+  `RELAY_PROFILE=copy`；
 - 前端 `/monitor` 页顶部有「现场直连 / 平台中继」切换，**直连失败或页面在公网时自动切中继**；
 - 中继流里浏览器画不出框（FLV 没有与抽帧对齐的坐标），要看框就切「背包烧录」——
   板端把中文标签烧进 `preview` 流，中继也推这一路（`RELAY_STREAMS` 默认已含 `preview`，
@@ -303,7 +309,9 @@ ssh root@39.107.55.13 'journalctl -u rust-admin-robodog -f | grep -E "backpack s
 | `板端推流服务未连接` | 板端 `backpack-relay` 是否 active | 房间名 `bp:` 由服务端 `BACKPACK_ROOM_PREFIX` 定义，两边必须一致 |
 | 有画面但卡住/黑屏 | 板端 `ffmpeg:` 警告 | `Timestamps are unset` → 必须带 `-use_wallclock_as_timestamps 1`（脚本已带） |
 | 只有第一次能看 | 平台日志 `video stream reset` | 常驻连接复用了旧流头，服务端靠 `video_reset` 清 `init` |
-| 帧率偏低/断流 | 现场上行带宽 | 单路 2Mbps，六路同时看就是 12Mbps |
+| 帧率偏低/断流 | 现场上行带宽 + 平台公网出口 | 单路默认 1.2Mbps；平台出口只有 ≈2.5Mbps，**同时看两路就会卡** |
+| 画面很卡、反复重连 | 平台日志 `viewer of bp:... lagged` / `left after ... kbps` | 平均 kbps 超过出口带宽就是它；降 `RELAY_BITRATE`/`RELAY_FPS`，或升级 ECS 公网带宽 |
+| 想先量中继码率 | `measure_bitrate.py --stream dogcam`（在平台机器上跑，loopback） | 预期 light ≈1200kbps/20fps；`copy` 是 4000~8000kbps/60fps，对 2.5Mbps 出口必卡 |
 | 切了通道自己跳回「机器狗前置」 | 页面轮询 | 已修（2026-11-16）：直连模式后端不下发 `sources`，刷新时别拿它比对 |
 | 想看房间/观看者状态 | `GET /api/backpack/video/state` | 返回每路的 `publisher/initBytes/viewers/streaming`，黑屏先看这张表 |
 

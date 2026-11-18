@@ -119,6 +119,9 @@ impl EndTask {
         match value.unwrap_or_default().trim() {
             "返回起点" | "return_to_start" => EndTask::ReturnToStart,
             "返回充电" | "返回充电点" | "return_to_charge" => EndTask::ReturnToCharge,
+            // 显式「原地」：以前落到 `_ => None`，带 `endTaskMode="none"` 时会被
+            // `patrol_end_task` 的闭环兜底误当成「没指定」→ 还是返航，所以这里要认出来。
+            "原地" | "原地待命" | "待命" | "none" | "return_none" | "stay" => EndTask::None,
             _ => EndTask::None,
         }
     }
@@ -165,6 +168,12 @@ pub struct FlightPlan {
     /// 结束后动作
     #[serde(default)]
     pub end_task: String,
+    /// 结束动作是否为**任务级显式配置**（服务端载荷里的 `endTaskMode`）。
+    ///
+    /// 必须与 `end_task` 分开：`end_task` 为空 / `none` 既可能是「没指定」，也可能是
+    /// 「显式原地」，而这两种在 [`patrol_end_task`] 里的结果完全不同（闭环兜底 vs 0）。
+    #[serde(default)]
+    pub end_task_explicit: bool,
     /// 航段是否为「沿道路」：决定 5000 用 2D 栅格还是路网地图
     #[serde(default)]
     pub road_network: bool,
@@ -189,6 +198,19 @@ fn default_tolerance() -> f64 {
 impl FlightPlan {
     pub fn end_task(&self) -> EndTask {
         EndTask::parse(Some(self.end_task.as_str()))
+    }
+
+    /// 日志 / 事件里的结束动作文案。
+    ///
+    /// `EndTask::None` 既可能是「显式原地」也可能是「没配置」（跟随路线 → 闭环兜底），
+    /// 两者的 `params.end_task` 不同，日志必须能区分，否则现场看不出到底是谁决定的。
+    pub fn end_task_label(&self) -> &'static str {
+        match (self.end_task(), self.end_task_explicit) {
+            (EndTask::ReturnToStart, _) => "返回起点",
+            (EndTask::ReturnToCharge, _) => "返回充电点",
+            (EndTask::None, true) => "原地待命（任务显式配置）",
+            (EndTask::None, false) => "跟随路线",
+        }
     }
 
     /// 本体地图目录名（4013 `path` 的最后一段）。
@@ -421,11 +443,14 @@ fn patrol_map_type(plan: &FlightPlan) -> u32 {
 
 /// 巡检的 `end_task` 数字枚举：`0` = 原地 / `1` = 返回起点 / `2` = 返回充电点
 ///
-/// 闭环航线且没显式指定结束动作时，按「返回起点」下发（与旧 `kind=2` 的闭环语义一致）。
+/// 闭环航线且**没显式指定**结束动作时，按「返回起点」下发（与旧 `kind=2` 的闭环语义一致）。
+/// 任务里配了结束动作（载荷带 `endTaskMode`，含显式「原地」）就不再走这条兜底。
 fn patrol_end_task(plan: &FlightPlan) -> u32 {
     match plan.end_task() {
         EndTask::ReturnToStart => 1,
         EndTask::ReturnToCharge => 2,
+        // 显式「原地」：不能掉进下面的闭环兜底，否则用户设了不返航还是照返
+        EndTask::None if plan.end_task_explicit => 0,
         EndTask::None if plan.loop_mode == "闭环" => 1,
         EndTask::None => 0,
     }
@@ -938,6 +963,7 @@ mod tests {
             avoid_level: 40,
             goal_tolerance: 0.25,
             end_task: "返回充电".to_string(),
+            end_task_explicit: false,
             road_network: false,
             fence_path: None,
         }
@@ -1023,6 +1049,26 @@ mod tests {
         p.map_type = 1;
         let data = patrol_task_payload(&p, "m", "p", 20.0);
         assert_eq!(data["params"]["map_type"], 0, "2D 栅格 = 0");
+    }
+
+    #[test]
+    fn explicit_none_overrides_closed_loop_return() {
+        // 任务里显式配了「原地」（载荷带 `endTaskMode="none"`）→ end_task_explicit
+        let mut p = plan("闭环");
+        p.end_task = String::new();
+        p.end_task_explicit = true;
+        let data = patrol_task_payload(&p, "m", "p", 25.0);
+        assert_eq!(
+            data["params"]["end_task"], 0,
+            "显式原地不能被闭环兜底改成返回起点"
+        );
+        assert_eq!(p.end_task_label(), "原地待命（任务显式配置）");
+
+        // 没配（跟随路线）才按闭环兜底，保持老行为
+        p.end_task_explicit = false;
+        assert_eq!(p.end_task_label(), "跟随路线");
+        let data = patrol_task_payload(&p, "m", "p", 25.0);
+        assert_eq!(data["params"]["end_task"], 1, "闭环 + 未指定 → 返回起点");
     }
 
     #[test]

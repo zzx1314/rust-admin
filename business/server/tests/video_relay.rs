@@ -1,20 +1,24 @@
-//! 实时视频中继集成测试。
+//! 背包实时视频中继集成测试。
 //!
 //! WebSocket 必须走真实 TCP，所以这里不像 `api_smoke.rs` 那样用 `oneshot` 直接打
 //! Router，而是监听 127.0.0.1 的随机端口，用真实的 ws:// 客户端复现现场链路：
 //!
 //! ```text
-//! 设备客户端（本测试扮演）──/ws/device/video──► 平台 ──/api/devices/{id}/video/ws──► 浏览器（本测试扮演）
-//!         ▲                                          │
-//!         └──── /ws/device 收到 video_start/video_stop ┘
+//! 板端 relay（本测试扮演）──/ws/device/video──► 平台 ──/api/backpack/video/ws──► 浏览器（本测试扮演）
+//!         ▲                                         │
+//!         └──── 推流连接上收到 video_start/video_stop ┘
 //! ```
 //!
-//! 断言四件事：
-//! 1. 观看者连上后，设备端收到 `video_start`，且携带设备管理里配置的 RTSP 地址；
+//! 断言五件事：
+//! 1. 观看者连上后，板端 relay 收到 `video_start`（带 `stream`），且只发一次；
 //! 2. 推上来的二进制帧原样转发给观看者（浏览器侧 flv.js 就靠这个字节流解码）；
 //! 3. 最后一个观看者断开后**不立刻**停流，只进看门狗的空转名单（重连 / 切页签不用等
 //!    ffmpeg 重启，现场才不会看到「一闪一闪」）；
 //! 4. 同一条流里重新观看（关掉抽屉再打开 / 浏览器 WS 重连）也必须拿到流头。
+//! 5. 鉴权与通道白名单在升级前就拦掉（`?token=` + 固定六路 + preview）。
+//!
+//! 设备客户端那条「拉 `devices.video_url` → 平台中继」的旧链路已删除，
+//! 设备管理 / 计划管理 / 实时视频三处画面统一走背包前置 `dogcam`。
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
@@ -32,8 +36,8 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tower::ServiceExt;
 
-/// 设备管理里配置的现场 RTSP 地址（密码是 URL 编码的 `Abcd#2027!`）
-const RTSP_URL: &str = "rtsp://user:Abcd%232027%21@192.168.234.1:8554/test";
+/// 板端 relay 推的房间名（与服务端 `BACKPACK_ROOM_PREFIX` 一致）
+const ROOM: &str = "bp:dogcam";
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
@@ -134,22 +138,34 @@ async fn login_token(router: &axum::Router) -> String {
     body["data"]["token"].as_str().unwrap().to_string()
 }
 
-/// 把演示设备改成「在线 + 已配 RTSP 地址」
-async fn prepare_device(state: &AppState) -> (i64, String) {
-    let row: (i64, String) =
-        sqlx::query_as("SELECT id, device_id FROM devices ORDER BY id LIMIT 1")
-            .fetch_one(&state.db)
-            .await
-            .expect("演示数据应至少有一台设备");
-    sqlx::query(
-        "UPDATE devices SET status = '在线待命', video_url = ?1, video_type = 'rtsp' WHERE id = ?2",
-    )
-    .bind(RTSP_URL)
-    .bind(row.0)
-    .execute(&state.db)
+/// 连上推流通道并注册成板端 relay 房间，等平台真的登记成功再返回
+async fn publisher_for(
+    port: u16,
+    state: &AppState,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    let (mut publisher, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/device/video"))
+        .await
+        .expect("推流通道连接失败");
+    publisher
+        .send(Message::Text(
+            json!({
+                "msgType": "video_register",
+                "ts": "2026-01-01T00:00:00Z",
+                "payload": { "deviceId": ROOM },
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    // 观看通道升级前会校验 `has_publisher`：注册是异步处理的，必须等它生效
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !state.video_hub.has_publisher(ROOM).await {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
     .await
-    .expect("写入视频地址失败");
-    row
+    .expect("推流端注册未被平台登记");
+    publisher
 }
 
 /// 造一段最小可用的 FLV：header + AVC 序列头 + 关键帧 + 普通帧
@@ -179,9 +195,6 @@ fn flv_stream() -> (Vec<u8>, Vec<u8>) {
 }
 
 /// 等下一条指定类型的文本消息，超时即失败（避免用例挂死）
-///
-/// 设备通道上还有 `ping` 之类的保活消息（心跳定时器首个 tick 是立即触发的），
-/// 所以这里按 msgType 过滤而不是取「第一条」。
 async fn next_msg(
     stream: &mut (impl StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
     msg_type: &str,
@@ -227,57 +240,23 @@ async fn next_binary(
 }
 
 #[tokio::test]
-async fn rtsp_stream_is_relayed_to_browser_and_stops_after_a_grace_period() {
+async fn backpack_stream_is_relayed_to_browser_and_stops_after_a_grace_period() {
     let (state, _db) = test_state().await;
-    let (device_pk, device_code) = prepare_device(&state).await;
     let (port, router) = spawn_server(state.clone()).await;
     let token = login_token(&router).await;
+    let mut publisher = publisher_for(port, &state).await;
 
-    // 1) 设备端接入主链路（只有连着，平台才能下发 video_start）
-    let (mut device_ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/device"))
-        .await
-        .expect("设备接入失败");
-    device_ws
-        .send(Message::Text(
-            json!({
-                "msgType": "register",
-                "ts": "2026-01-01T00:00:00Z",
-                "payload": { "deviceId": device_code },
-            })
-            .to_string(),
-        ))
-        .await
-        .unwrap();
-    let ack = next_msg(&mut device_ws, "register_ack").await;
-    assert_eq!(ack["payload"]["success"], true, "设备注册应成功: {ack}");
-
-    // 2) 客户端视频推流通道注册
-    let (mut publisher, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/device/video"))
-        .await
-        .expect("推流通道连接失败");
-    publisher
-        .send(Message::Text(
-            json!({
-                "msgType": "video_register",
-                "ts": "2026-01-01T00:00:00Z",
-                "payload": { "deviceId": device_code },
-            })
-            .to_string(),
-        ))
-        .await
-        .unwrap();
-
-    // 3) 浏览器订阅：平台应立刻要求设备端拉流，地址就是设备档案里的那个
+    // 1) 浏览器订阅：平台应要求板端起流，且带的就是这个通道
     let (mut viewer, _) = connect_async(format!(
-        "ws://127.0.0.1:{port}/api/devices/{device_pk}/video/ws?token={token}"
+        "ws://127.0.0.1:{port}/api/backpack/video/ws?stream=dogcam&token={token}"
     ))
     .await
     .expect("观看通道连接失败");
 
-    let start = next_msg(&mut device_ws, "video_start").await;
-    assert_eq!(start["payload"]["url"], RTSP_URL, "应下发设备档案里的地址");
+    let start = next_msg(&mut publisher, "video_start").await;
+    assert_eq!(start["payload"]["stream"], "dogcam", "应下发当前通道名");
 
-    // 4) 推流：真 FLV 头 + 首关键帧后，字节原样转发给观看者
+    // 2) 推流：真 FLV 头 + 首关键帧后，字节原样转发给观看者
     let (init, frame) = flv_stream();
     publisher.send(Message::Binary(init.clone())).await.unwrap();
     assert_eq!(
@@ -296,9 +275,9 @@ async fn rtsp_stream_is_relayed_to_browser_and_stops_after_a_grace_period() {
         "推上来的帧应原样转发"
     );
 
-    // 5) 中途加入的观看者：必须补到流头，否则浏览器黑屏
+    // 3) 中途加入的观看者：必须补到流头，否则浏览器黑屏
     let (mut late_viewer, _) = connect_async(format!(
-        "ws://127.0.0.1:{port}/api/devices/{device_pk}/video/ws?token={token}"
+        "ws://127.0.0.1:{port}/api/backpack/video/ws?stream=dogcam&token={token}"
     ))
     .await
     .expect("第二个观看者连接失败");
@@ -308,21 +287,30 @@ async fn rtsp_stream_is_relayed_to_browser_and_stops_after_a_grace_period() {
         "中途加入的观看者应收到补发的流头"
     );
 
-    // 中途加入不该重复触发 video_start（设备端只在第一个观看者进来时收到）
+    // 中途加入不该重复触发 video_start（推流端是常驻连接，重复起流会白换一条 FLV）
     publisher
         .send(Message::Binary(frame.clone()))
         .await
         .unwrap();
     assert_eq!(next_binary(&mut late_viewer, "中途加入收帧").await, frame);
+    let duplicate_start = tokio::time::timeout(
+        Duration::from_millis(500),
+        next_msg(&mut publisher, "video_start"),
+    )
+    .await;
+    assert!(
+        duplicate_start.is_err(),
+        "中途加入的观看者不应再触发一次 video_start"
+    );
 
-    // 6) 最后一个观看者离开：**不立刻**停流 —— 现场关掉抽屉再打开、切页签、浏览器
+    // 4) 最后一个观看者离开：**不立刻**停流 —— 现场关掉抽屉再打开、切页签、浏览器
     //    WS 抖一下就重连，每次都重启 ffmpeg 要黑 3~7s 且换一条新 FLV，看起来就是
     //    「一闪一闪的连接中断」。改成留给看门狗（~15s）收尾。
     late_viewer.close(None).await.unwrap();
     viewer.close(None).await.unwrap();
     let early_stop = tokio::time::timeout(
         Duration::from_millis(800),
-        next_msg(&mut device_ws, "video_stop"),
+        next_msg(&mut publisher, "video_stop"),
     )
     .await;
     assert!(
@@ -334,12 +322,12 @@ async fn rtsp_stream_is_relayed_to_browser_and_stops_after_a_grace_period() {
     // 这里用 `Duration::ZERO` 模拟「宽限已过」，看门狗真实用的是 60s 宽限。
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if state.video_hub.viewers(&device_code).await == 0
+            if state.video_hub.viewers(ROOM).await == 0
                 && state
                     .video_hub
                     .idle_publishers(Duration::ZERO)
                     .await
-                    .contains(&device_code)
+                    .contains(&ROOM.to_string())
             {
                 return;
             }
@@ -355,14 +343,14 @@ async fn rtsp_stream_is_relayed_to_browser_and_stops_after_a_grace_period() {
             .video_hub
             .idle_publishers(Duration::from_secs(60))
             .await
-            .contains(&device_code),
+            .contains(&ROOM.to_string()),
         "60s 宽限内不许停流"
     );
 
-    // 7) 宽限期内重新打开（关抽屉再打开 / 浏览器重连）：流还在跑，新观看者**立刻**
+    // 5) 宽限期内重新打开（关抽屉再打开 / 浏览器重连）：流还在跑，新观看者**立刻**
     //    拿到上一轮的流头 + 关键帧，不必再等一次 ffmpeg 启动，也不会黑屏
     let (mut reopen, _) = connect_async(format!(
-        "ws://127.0.0.1:{port}/api/devices/{device_pk}/video/ws?token={token}"
+        "ws://127.0.0.1:{port}/api/backpack/video/ws?stream=dogcam&token={token}"
     ))
     .await
     .expect("重开的观看者连接失败");
@@ -375,7 +363,7 @@ async fn rtsp_stream_is_relayed_to_browser_and_stops_after_a_grace_period() {
 
 /// 用真实 ffmpeg 生成的 FLV 验证流头解析（手写字节可能和 ffmpeg 的实际布局有出入）
 ///
-/// 本机没装 ffmpeg 时自动跳过：现场机器狗侧才需要它，CI 不应因此变红。
+/// 本机没装 ffmpeg 时自动跳过：现场板端侧才需要它，CI 不应因此变红。
 #[tokio::test]
 async fn real_ffmpeg_flv_is_relayed_with_headers() {
     if std::process::Command::new("ffmpeg")
@@ -390,34 +378,19 @@ async fn real_ffmpeg_flv_is_relayed_with_headers() {
     }
 
     let (state, _db) = test_state().await;
-    let (device_pk, device_code) = prepare_device(&state).await;
     let (port, router) = spawn_server(state.clone()).await;
     let token = login_token(&router).await;
-
-    // 客户端推流通道
-    let (mut publisher, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/device/video"))
-        .await
-        .expect("推流通道连接失败");
-    publisher
-        .send(Message::Text(
-            json!({
-                "msgType": "video_register",
-                "ts": "2026-01-01T00:00:00Z",
-                "payload": { "deviceId": device_code },
-            })
-            .to_string(),
-        ))
-        .await
-        .unwrap();
+    let mut publisher = publisher_for(port, &state).await;
 
     // 浏览器观看
     let (mut viewer, _) = connect_async(format!(
-        "ws://127.0.0.1:{port}/api/devices/{device_pk}/video/ws?token={token}"
+        "ws://127.0.0.1:{port}/api/backpack/video/ws?stream=dogcam&token={token}"
     ))
     .await
     .expect("观看通道连接失败");
+    next_msg(&mut publisher, "video_start").await;
 
-    // 用合成画面代替 RTSP，编码参数与客户端 src/video.rs 保持一致
+    // 用合成画面代替 RTSP，编码参数与板端 relay 保持一致
     let mut ffmpeg = tokio::process::Command::new("ffmpeg")
         .args([
             "-hide_banner",
@@ -487,7 +460,7 @@ async fn real_ffmpeg_flv_is_relayed_with_headers() {
 
     // 中途加入的观看者也要补到流头（真实流的流头布局由 ffmpeg 决定）
     let (mut late_viewer, _) = connect_async(format!(
-        "ws://127.0.0.1:{port}/api/devices/{device_pk}/video/ws?token={token}"
+        "ws://127.0.0.1:{port}/api/backpack/video/ws?stream=dogcam&token={token}"
     ))
     .await
     .expect("中途观看者连接失败");
@@ -503,23 +476,34 @@ async fn real_ffmpeg_flv_is_relayed_with_headers() {
 }
 
 #[tokio::test]
-async fn viewer_without_video_url_is_rejected_before_upgrade() {
+async fn viewer_without_publisher_is_rejected_before_upgrade() {
     let (state, _db) = test_state().await;
-    let (device_pk, _device_code) = prepare_device(&state).await;
-    // 清空地址：升级前就该报错，而不是让浏览器干等
-    sqlx::query("UPDATE devices SET video_url = NULL WHERE id = ?1")
-        .bind(device_pk)
-        .execute(&state.db)
-        .await
-        .unwrap();
     let (port, router) = spawn_server(state.clone()).await;
     let token = login_token(&router).await;
 
     let error = connect_async(format!(
-        "ws://127.0.0.1:{port}/api/devices/{device_pk}/video/ws?token={token}"
+        "ws://127.0.0.1:{port}/api/backpack/video/ws?stream=dogcam&token={token}"
     ))
     .await
-    .expect_err("未配置视频地址应拒绝升级");
+    .expect_err("板端推流未连接时应拒绝升级");
+    let text = error.to_string();
+    assert!(
+        text.contains("400") || text.contains("Bad Request"),
+        "期望 400 拒绝，实际: {text}"
+    );
+}
+
+#[tokio::test]
+async fn unknown_backpack_stream_is_rejected() {
+    let (state, _db) = test_state().await;
+    let (port, router) = spawn_server(state.clone()).await;
+    let token = login_token(&router).await;
+
+    let error = connect_async(format!(
+        "ws://127.0.0.1:{port}/api/backpack/video/ws?stream=../../etc/passwd&token={token}"
+    ))
+    .await
+    .expect_err("白名单之外的通道应被拒绝");
     let text = error.to_string();
     assert!(
         text.contains("400") || text.contains("Bad Request"),
@@ -530,11 +514,10 @@ async fn viewer_without_video_url_is_rejected_before_upgrade() {
 #[tokio::test]
 async fn viewer_requires_token() {
     let (state, _db) = test_state().await;
-    let (device_pk, _device_code) = prepare_device(&state).await;
     let (port, _router) = spawn_server(state.clone()).await;
 
     let error = connect_async(format!(
-        "ws://127.0.0.1:{port}/api/devices/{device_pk}/video/ws"
+        "ws://127.0.0.1:{port}/api/backpack/video/ws?stream=dogcam"
     ))
     .await
     .expect_err("没有令牌应被拒绝");

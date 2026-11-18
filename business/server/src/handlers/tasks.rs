@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 
 /// 任务行 + 关联名称的公共列清单（服务端各处 SELECT 与集成测试共用，避免漏列）
 pub const TASK_SELECT: &str = "SELECT t.id, t.task_code, t.task_name, t.task_type, t.execute_mode,
+    t.end_task,
     t.level, t.device_id, d.device_id AS device_code, t.park_id, p.park_name, t.zone_id,
     z.zone_name, t.route_id, r.route_code, r.route_name, t.plan_start, t.plan_end,
     t.schedule_days, t.last_dispatched_on,
@@ -51,6 +52,27 @@ async fn validate_device_park(
             _ => Ok(()),
         },
     }
+}
+
+/// 结束动作入库前的归一化与校验。
+///
+/// 认不出来就直接 400：静默当成「跟随路线」会让用户以为选了「原地」，
+/// 实际跑完还是返航，现场排查成本很高。
+fn normalize_task_end_task(value: Option<String>) -> Result<Option<String>, AppError> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    crate::dispatch::normalize_end_task(&raw)
+        .map(|normalized| Some(normalized.to_string()))
+        .ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "无效的结束动作「{raw}」；可选：不传 = 跟随路线 / none = 原地待命 / \
+                 return_to_start = 返回起点 / return_to_charge = 返回充电点"
+            ))
+        })
 }
 
 pub async fn list_tasks(
@@ -175,19 +197,21 @@ pub async fn create_task_core(
         .task_code
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| format!("TK-{}-{next_id:02}", chrono::Local::now().format("%m%d")));
+    let end_task = normalize_task_end_task(payload.end_task.flatten())?;
     let timestamp = now();
     let result = sqlx::query(
-        "INSERT INTO tasks (task_code, task_name, task_type, execute_mode, level, device_id,
+        "INSERT INTO tasks (task_code, task_name, task_type, execute_mode, end_task, level, device_id,
             park_id, zone_id, route_id, plan_start, plan_end, schedule_days, task_status, progress,
             dispatch_policy, description, created_at, updated_at, created_by,
             progress_updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-            ?18, ?19, ?17)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+            ?17, ?18, ?19, ?20, ?18)",
     )
     .bind(&task_code)
     .bind(payload.task_name.trim())
     .bind(payload.task_type)
     .bind(payload.execute_mode)
+    .bind(&end_task)
     .bind(payload.level.unwrap_or_else(|| "常规".to_string()))
     .bind(payload.device_id)
     .bind(payload.park_id)
@@ -468,6 +492,11 @@ pub async fn update_task(
         .execute_mode
         .clone()
         .or(existing.execute_mode.clone());
+    // 结束动作：缺省保持原值；显式 null = 改回「跟随路线」
+    let end_task = match &payload.end_task {
+        Some(value) => normalize_task_end_task(value.clone())?,
+        None => existing.end_task.clone(),
+    };
     let schedule_days = match payload.schedule_days.as_deref() {
         // 显式传了就以请求为准（空字符串 = 取消周期日 = 每天）
         Some(raw) => crate::schedule::normalize_days(Some(raw)),
@@ -481,14 +510,16 @@ pub async fn update_task(
     )?;
     validate_device_park(&state.db, device_id, park_id).await?;
     sqlx::query(
-        "UPDATE tasks SET task_name = ?1, task_type = ?2, execute_mode = ?3, level = ?4,
-            device_id = ?5, park_id = ?6, zone_id = ?7, route_id = ?8, plan_start = ?9,
-            plan_end = ?10, schedule_days = ?11, task_status = ?12, progress = ?13,
-            dispatch_policy = ?14, description = ?15, updated_at = ?16 WHERE id = ?17",
+        "UPDATE tasks SET task_name = ?1, task_type = ?2, execute_mode = ?3, end_task = ?4,
+            level = ?5, device_id = ?6, park_id = ?7, zone_id = ?8, route_id = ?9,
+            plan_start = ?10, plan_end = ?11, schedule_days = ?12, task_status = ?13,
+            progress = ?14, dispatch_policy = ?15, description = ?16, updated_at = ?17
+         WHERE id = ?18",
     )
     .bind(&task_name)
     .bind(payload.task_type.or(existing.task_type))
     .bind(&execute_mode)
+    .bind(&end_task)
     .bind(payload.level.or(existing.level))
     .bind(device_id)
     .bind(park_id)

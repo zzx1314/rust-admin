@@ -652,10 +652,7 @@ defineExpose({ refreshStatus });
 
         <VideoPlayer
           v-if="watchMode === 'relay'"
-          type="relay"
-          :url="''"
           :stream="relayStream"
-          :online="true"
           @meta="onVideoMeta"
         />
 

@@ -1,0 +1,20 @@
+-- 任务级「结束动作」：跑完要不要返航。
+--
+-- 以前这件事没有参数可配：
+--   1. `dispatch.rs::resolve_end_task` 只按 `execute_mode` 文案推断，而控制台的执行模式
+--      只有「周期任务 / 临时下发 / 立即执行」，三者都落到 `none`；
+--   2. 客户端 `parse_end_task` 把 `endTask: "none"` 当成「没指定」，继续往下走；
+--   3. 最后兜底在 `client/src/zhpro/route.rs::patrol_end_task`：
+--      `EndTask::None if loop_mode == "闭环" => 1`（返回起点）。
+-- 建路线时 `loopMode` 默认就是「闭环」，所以每条路线跑完都必然返航，
+-- 想不返航只能把路线形态改成「往返/单向」（会清掉 returnLeg、改里程/耗时/耗电）。
+--
+-- 现在把结束动作提升为任务属性（协议侧对应巡检 `5000 kind=4` 的 `params.end_task`）：
+--   NULL                = 跟随路线（闭环 → 返回起点；老数据全走这里，行为不变）
+--   'none'              = 原地待命
+--   'return_to_start'   = 返回起点
+--   'return_to_charge'  = 返回充电点（地图需有 charge_point_exist）
+--
+-- 下发时同时写 `endTask`（老客端只认它）与 `endTaskMode`（仅显式配置才带，
+-- 用来区分「显式原地」和「跟随路线」，避免旧服务端对所有任务都发 none 的问题）。
+ALTER TABLE tasks ADD COLUMN end_task TEXT;

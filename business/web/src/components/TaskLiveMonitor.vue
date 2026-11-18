@@ -3,7 +3,7 @@ import { computed, ref, watch } from "vue";
 import type { Device, MapRaster, MapVersion, Route, Task } from "@/api/types";
 import { mapApi } from "@/api/ops";
 import AppIcon from "./AppIcon.vue";
-import VideoPlayer from "./VideoPlayer.vue";
+import FrontCameraVideo from "./FrontCameraVideo.vue";
 import TaskLiveMap from "./TaskLiveMap.vue";
 import { locStatusMeta, robotStageLabel, timeOnly } from "@/utils/format";
 
@@ -56,15 +56,7 @@ watch(
   { immediate: true }
 );
 
-const online = computed(() => Boolean(props.device) && props.device?.status !== "离线");
 const locMeta = computed(() => locStatusMeta(props.device?.locStatus));
-
-/** 视频不能播时可读原因（设备页/任务页提示保持一致） */
-const videoHint = computed(() => {
-  if (!props.device) return "任务未关联执行设备";
-  if (!props.device.videoUrl) return "该设备未配置视频地址（设备档案里填写 RTSP / HLS 地址）";
-  return "";
-});
 
 const positionText = computed(() => props.device?.position || "未上报");
 const stageText = computed(() => robotStageLabel(props.task?.robotStage));
@@ -85,16 +77,14 @@ const healthNote = computed(() => {
   <div class="tlmon">
     <div class="tlmon-media">
       <div class="tlmon-video">
-        <VideoPlayer
+        <!-- 与「实时视频」页的前置摄像头同源同路（背包 dogcam） -->
+        <FrontCameraVideo
           v-if="device"
-          :url="device.videoUrl"
-          :type="device.videoType"
-          :online="online"
-          :device-id="device.id"
+          :title="`${device.deviceId} · 前置摄像头`"
         />
         <div v-else class="tlmon-empty">
           <AppIcon name="video" />
-          <p>{{ videoHint }}</p>
+          <p>任务未关联执行设备</p>
         </div>
       </div>
 
@@ -137,9 +127,6 @@ const healthNote = computed(() => {
 
     <p v-if="healthNote" class="tlmon-note">
       <AppIcon name="warn" />{{ healthNote }}
-    </p>
-    <p v-else-if="videoHint" class="tlmon-note">
-      <AppIcon name="info" />{{ videoHint }}
     </p>
   </div>
 </template>

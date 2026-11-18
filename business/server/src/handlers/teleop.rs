@@ -624,8 +624,6 @@ mod tests {
             last_heartbeat: None,
             firmware: None,
             device_ip: None,
-            video_url: None,
-            video_type: "none".to_string(),
             teleop_holder: holder.map(str::to_string),
             teleop_at: at.map(str::to_string),
             teleop_force: false,
