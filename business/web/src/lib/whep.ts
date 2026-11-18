@@ -92,13 +92,18 @@ function friendly(error: unknown): string {
  * `404` 是背包现场最常见的一种，而且**不是浏览器/网络问题**：mediamtx 只会在
  * 那条 path 上有推流（publisher）时才肯给 SDP，否则回
  * `{"error":"no stream is available on path 'dogcam'"}`。
- * 典型成因：`mediamtx.yml` 里没登记这条 path、登记的名字与 `<stream>` 不一致
- * （如写成 `dog-front-cam`）、或者直拉源的账号密码不对（日志里 `401 Unauthorized`）。
+ * 现场 2026-11-18 的实际成因是**上游没就绪**：板端重启后本体 RTSP
+ * （`192.168.234.1:8554/test`）还没起来 / 正在重连，`dogcam` path 已登记但暂时没流
+ * （mediamtx 日志 `dial tcp ... connect: connection refused` / `404 Not Found`）。
+ * 其它可能：path 没登记、名字不一致（如写成 `dog-front-cam`）、直拉源账号密码不对。
  */
 function whepFailure(status: number, url: string): string {
   const stream = /\/([^/]+)\/whep(?:\?|$)/.exec(url)?.[1] ?? "该";
   if (status === 404) {
-    return `板端 mediamtx 上没有「${stream}」这条流（path 未登记 / 名字不一致 / 没有推流）`;
+    return (
+      `板端「${stream}」暂时没有流：本体 RTSP 未就绪 / 正在重连（板端或本体刚重启时常见），10~30 秒会自动恢复；` +
+      `持续不恢复请查板端 mediamtx 与本体 192.168.234.1:8554（path 未登记 / 名字不一致 / 没有推流）`
+    );
   }
   if (status === 401 || status === 403) return "板端 mediamtx 拒绝访问（鉴权失败）";
   if (status === 400 || status === 415) return "板端不接受这段 SDP（编码或协议不匹配）";

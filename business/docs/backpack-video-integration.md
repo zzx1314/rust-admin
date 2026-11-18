@@ -687,6 +687,42 @@ last viewer of bp:dogcam left after 20.0s / 2806 KB（平均 1147 kbps）
 
 `lagged` 不再出现；`last viewer ... left` 不再按 23s 周期出现。
 
+#### ④ 板端重启 / 本体 RTSP 未就绪时的 WHEP 404（2026-11-18）
+
+现场报「板端 mediamtx 上没有「dogcam」这条流（path 未登记 / 名字不一致 / 没有推流）」，
+但 `mediamtx.yml` 里 `dogcam` 明明是登记好的。查下来是**上游没就绪**：
+
+```text
+# 板端 mediamtx 日志
+ERR [path dogcam] [RTSP source] dial tcp 192.168.234.1:8554: connect: connection refused
+ERR [path dogcam] [RTSP source] bad status code: 404 (Not Found)
+INF [path dogcam] stream is available and online, 1 track (H264)     # 几秒后又好了
+
+# 板端启动记录：09:12 / 10:32 / 10:39 三次「重启」，都没有干净的 shutdown 日志（硬复位/掉电）
+$ last -x reboot
+```
+
+板端（`.246`）会随本体一起断电/复位，mediamtx 起来时本体 RK3588 的
+`media_server`（`192.168.234.1:8554/test`）还没就绪，`dogcam` 就没有流 → 直连页面的
+WHEP 拿到 404。处理（已按此配置）：
+
+```yaml
+# /var/snap/mediamtx/common/mediamtx.yml（snap 的活配置）
+  dogcam:
+    source: 'rtsp://user:…@192.168.234.1:8554/test'
+    sourceOnDemand: yes            # 有人看才拉流：板子刚启动时观看者被挂住等，而不是立刻 404
+    sourceOnDemandStartTimeout: 15s
+    rtspTransport: tcp             # 1080p60 走 UDP 会丢包（RTP packets lost），固定 TCP
+  # 已删除遗留的 dog-front-cam（source 没带凭据 → 每 5s 401 重试，纯噪声）
+```
+
+- 前端 404 文案也改成了能指导现场的话（「本体 RTSP 未就绪 / 正在重连，10~30 秒会自动恢复」）；
+- 没人看时不再常驻拉 1080p60，本体 `media_server` 的负载也小一截；
+- 中继（`backpack-relay` 拉本地 RTSP）同样受益：它是个 reader，会触发按需起流。
+
+**仍要现场关注**：板端为什么反复硬复位（供电 / 看门狗 / 与本体急停、重启同源）。
+只要板端或本体在重启，直连视频一定会短暂中断；现在最多等 15s 自动恢复，不会再立刻报 404。
+
 #### 排查工具与清单
 
 ```bash
