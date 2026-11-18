@@ -47,6 +47,7 @@ WebRTC 的 ~200ms 变成 1~2s，收益是任何网络、任何浏览器都能看
 | `RELAY_DEGRADE_TTL_MAX` | `1800` | 升降档来回抖时窗口逐次翻倍的上限（秒） |
 | `RELAY_FLAP_WINDOW` | `600` | 回配置档后这段时间内又拥塞 = 链路其实没恢复，窗口翻倍（秒） |
 | `RELAY_DEGRADE_WIDTH` / `_HEIGHT` / `_FPS` / `_BITRATE` | `640` / `360` / `12` / `500k` | 省流档参数 |
+| `RELAY_DEGRADE2_WIDTH` / `_HEIGHT` / `_FPS` / `_BITRATE` | `320` / `180` / `8` / `200k` | 极省流档（4G / 弱 Wi-Fi：链路比 500k 还小时用） |
 | `RELAY_CONGEST_WINDOW` | `5` | 码率 / send 占用的统计窗口（秒） |
 | `RELAY_CONGEST_DUTY` | `0.5` | 窗口内 `ws.send` 占用超过它算「被反压」 |
 | `RELAY_CONGEST_BPS_RATIO` | `0.9` | 实测码率低于目标档位的这个比例（配合上一项）即判拥塞、降档 |
@@ -198,9 +199,25 @@ DEGRADE_HEIGHT = int(os.environ.get("RELAY_DEGRADE_HEIGHT", "360"))
 DEGRADE_FPS = max(1, int(os.environ.get("RELAY_DEGRADE_FPS", "12")))
 DEGRADE_BITRATE = os.environ.get("RELAY_DEGRADE_BITRATE", "500k")
 
-# 当前是否在省流档里（跟 `_congested_until` 分开：窗口到期只是「可以开始评估能不能回
-# 配置档」，链路没恢复就继续待在省流档，不是一到点就自己升回去）
-_degraded = False
+# 第二档「极省流」：给 4G / 弱 Wi-Fi 用。
+#
+# 现场（2026-11-18 15:54）：板子出口掉到 4G dongle，实测上行只有 ~0.25Mbps，而省流档
+# 目标就是 500kbps —— **链路比目标还小一半**，于是 send 永远 100% 占用、延迟涨到 5.9s、
+# 每 40 秒被延迟看门狗重启一次（每次重启都要掐连接、把你踢下线）。
+# 再往下一档 320x180@8 / 200k：糊，但能连续出图，不再反复重连。
+DEGRADE2_WIDTH = int(os.environ.get("RELAY_DEGRADE2_WIDTH", "320"))
+DEGRADE2_HEIGHT = int(os.environ.get("RELAY_DEGRADE2_HEIGHT", "180"))
+DEGRADE2_FPS = max(1, int(os.environ.get("RELAY_DEGRADE2_FPS", "8")))
+DEGRADE2_BITRATE = os.environ.get("RELAY_DEGRADE2_BITRATE", "200k")
+DEGRADE2_BPS = parse_bitrate(DEGRADE2_BITRATE)
+
+# 当前降到第几档：0 = 配置档，1 = 省流档（640x360@12/500k），2 = 极省流档（320x180@8/200k）
+#
+# 跟 `_congested_until` 分开：窗口到期只是「可以开始评估能不能回配置档」，链路没恢复就
+# 继续待在当前档，不是一到点就自己升回去。
+_degrade_level = 0
+# 最近一个 5s 窗口实测推出去的码率（bps）：决定「当前这一档是不是也吃不下」→ 要不要再降一档
+_last_window_bps = 0.0
 # 省流档最早什么时候可以结束
 _congested_until = 0.0
 # 连续「回配置档 → 又拥塞」的次数：决定这次降档要撑多久（2 的幂翻倍）
@@ -217,8 +234,13 @@ NO_DATA_TIMEOUT = 8.0
 
 
 def degraded() -> bool:
-    """当前是否处于「上行吃不下」的省流档里。"""
-    return _degraded
+    """当前是否处于降档状态（任一档）。"""
+    return _degrade_level > 0
+
+
+def level_label(level: int | None = None) -> str:
+    level = _degrade_level if level is None else level
+    return {0: "配置档", 1: "省流档", 2: "极省流档"}.get(level, f"{level} 档")
 
 
 def hold_seconds() -> float:
@@ -227,8 +249,10 @@ def hold_seconds() -> float:
 
 
 def active_profile() -> tuple:
-    """当前该用的输出档位：拥塞窗口内一律走省流档。"""
-    if degraded():
+    """当前该用的输出档位：拥塞窗口内按档位走省流 / 极省流。"""
+    if _degrade_level >= 2:
+        return (DEGRADE2_WIDTH, DEGRADE2_HEIGHT, DEGRADE2_FPS, DEGRADE2_BITRATE)
+    if _degrade_level == 1:
         return (DEGRADE_WIDTH, DEGRADE_HEIGHT, DEGRADE_FPS, DEGRADE_BITRATE)
     if PROFILE == "copy":
         return ("copy",)
@@ -266,29 +290,47 @@ def mark_congested(stream: str, reason: str, restream: bool = True) -> None:
     `restream=True` 时立刻让正在跑的流换档（发 `video_reset` + 重启 ffmpeg，WS 不动），
     不必再等一次「超时 → 断连 → 重连」—— 那中间的十几秒正是最卡的时候。
     """
-    global _degraded, _congested_until, _flaps, _recovered_at
+    global _degrade_level, _congested_until, _flaps, _recovered_at
     now = time.monotonic()
-    if _degraded:
-        # 省流档里还是被反压（链路比 500k 还差）：只续窗口，不重复降档/重启
+    if _degrade_level == 0:
+        # 刚回配置档又立刻拥塞 = 链路其实没恢复：窗口翻倍，别来回升降把画面折腾碎
+        _flaps = (
+            min(_flaps + 1, 5) if _recovered_at and now - _recovered_at < FLAP_WINDOW else 0
+        )
+        _recovered_at = 0.0
+        _degrade_level = 1
+    elif _degrade_level == 1 and not _current_level_is_workable():
+        # 省流档（500k）也吃不下（4G 只有 250k 那种）：再降一档
+        _degrade_level = 2
+    else:
+        # 当前这一档还能跑，只是链路状态仍差：只续窗口，不重复降档/重启
         _congested_until = max(_congested_until, now + hold_seconds())
         return
-    # 刚回配置档又立刻拥塞 = 链路其实没恢复：窗口翻倍，别来回升降把画面折腾碎
-    _flaps = min(_flaps + 1, 5) if _recovered_at and now - _recovered_at < FLAP_WINDOW else 0
-    _recovered_at = 0.0
-    _degraded = True
     _congested_until = now + hold_seconds()
     log(
-        f"[{stream}] {reason} → 改用省流档 {profile_text(active_profile())}"
+        f"[{stream}] {reason} → 改用{level_label()} {profile_text(active_profile())}"
         f"（至少保持 {hold_seconds():g}s）"
     )
     if restream:
-        restream_all("降档")
+        restream_all(f"降档到{level_label()}")
+
+
+def _current_level_is_workable() -> bool:
+    """当前档位的码率还推得出去吗？
+
+    用最近一个窗口的实测值判断：明显低于本档目标（<90%）就是「这一档也吃不下」，
+    该再降一档。没量到（0）时按「还能跑」处理，不冒进。
+    """
+    target = profile_bps(active_profile())
+    if target <= 0 or _last_window_bps <= 0:
+        return True
+    return _last_window_bps >= target * CONGEST_BPS_RATIO
 
 
 def restore_profile() -> None:
     """链路确认恢复：回到配置档（已经在配置档的流不动）。"""
-    global _degraded, _congested_until, _recovered_at
-    _degraded = False
+    global _degrade_level, _congested_until, _recovered_at
+    _degrade_level = 0
     _congested_until = 0.0
     _recovered_at = time.monotonic()
     log(
@@ -813,7 +855,7 @@ class StreamSession:
         codec = args[args.index("-c:v") + 1] if "-c:v" in args else "?"
         log(
             f"[{self.stream}] 平台有观看者，开始拉流"
-            f"（profile={'省流' if low else PROFILE}，{profile_text(self.profile)}"
+            f"（profile={level_label()}，{profile_text(self.profile)}"
             f" 编码={codec}，出口 {egress_iface() or '未知'}）"
         )
         if DEBUG:
@@ -963,6 +1005,8 @@ class StreamSession:
         self._win_bytes = 0
         self._win_blocked = 0.0
         note_link_window(duty)
+        global _last_window_bps
+        _last_window_bps = bps
         target = profile_bps(active_profile())
         congested = duty >= CONGEST_DUTY and (
             target <= 0 or bps <= target * CONGEST_BPS_RATIO
@@ -1046,7 +1090,8 @@ class StreamSession:
                 # 还没到超时那么糟，但已经能看出「推不动了」：立刻降档（restream_all
                 # 会重启本路 ffmpeg 换参数）。这里**不能 return** —— 退出 _pump 会走
                 # finally 把 WS 关掉，那就变成「断线重连」而不是就地换档了。
-                if self._sample_congestion(now) and not degraded():
+                if self._sample_congestion(now):
+                    # 降档后仍然拥塞也要上报：`mark_congested` 会判「这一档也吃不下」再降一档
                     mark_congested(self.stream, "上行吃不下当前档位")
         except asyncio.CancelledError:
             raise
@@ -1169,7 +1214,8 @@ async def main() -> int:
     log(
         f"上行保护：分片发送上限 {SEND_TIMEOUT:g}s / 卡住重启 {STALL_TIMEOUT:g}s / "
         f"出口巡检 {ROUTE_POLL:g}s / 省流档 {DEGRADE_WIDTH}x{DEGRADE_HEIGHT}@{DEGRADE_FPS} "
-        f"{DEGRADE_BITRATE}（{CONGEST_WINDOW:g}s 内实测码率 ≤{CONGEST_BPS_RATIO:.0%} 目标且 "
+        f"{DEGRADE_BITRATE} / 极省流档 {DEGRADE2_WIDTH}x{DEGRADE2_HEIGHT}@{DEGRADE2_FPS} "
+        f"{DEGRADE2_BITRATE}（{CONGEST_WINDOW:g}s 内实测码率 ≤{CONGEST_BPS_RATIO:.0%} 目标且 "
         f"send 占用 ≥{CONGEST_DUTY:.0%} 即降档，至少保持 {DEGRADE_TTL:g}s，"
         f"send 占用 ≤{RECOVER_DUTY:.0%} 持续 {RECOVER_STABLE:g}s 才回配置档）"
     )

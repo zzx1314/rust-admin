@@ -20,6 +20,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import relay_push as relay  # noqa: E402  （必须在 sys.path 之后导入）
 
 
+def pytest_approx(value: float, tol: float = 0.05):
+    """极简近似比较（测试不引 pytest，但仍想要「容差」语义）。"""
+
+    class _Approx:
+        def __eq__(self, other):
+            return abs(other - value) <= abs(value) * tol
+
+        def __repr__(self):
+            return f"≈{value}"
+
+    return _Approx()
+
+
 class FakeSession:
     """只用来观察「档位变了有没有人去重启拉流」。"""
 
@@ -32,7 +45,8 @@ class FakeSession:
 
 
 def reset() -> None:
-    relay._degraded = False
+    relay._degrade_level = 0
+    relay._last_window_bps = 0.0
     relay._congested_until = 0.0
     relay._flaps = 0
     relay._recovered_at = 0.0
@@ -93,7 +107,7 @@ def test_congested_switches_to_low_profile_and_restreams() -> None:
         relay.DEGRADE_BITRATE,
     )
     # 立刻换档，不用等断线重连
-    assert only.restarts == ["降档"]
+    assert only.restarts == ["降档到省流档"]
     # 首次降档按配置的窗口，不翻倍
     assert relay.hold_seconds() == relay.DEGRADE_TTL
 
@@ -114,8 +128,10 @@ def test_degraded_profile_actually_transcodes() -> None:
     finally:
         relay.pick_encoder = original
 
+    # 注意：`-c:v` 可能出现两次（输入硬件解码 + 输出编码），输出编码看**最后一个**
+    codecs = [args[i + 1] for i, arg in enumerate(args) if arg == "-c:v"]
     assert "copy" not in args, f"降档后仍是 -c:v copy：{' '.join(args)}"
-    assert args[args.index("-c:v") + 1] == "h264_rkmpp"
+    assert codecs[-1] == "h264_rkmpp"
     assert args[args.index("-b:v") + 1] == relay.DEGRADE_BITRATE
     filters = args[args.index("-vf") + 1]
     assert f"scale={relay.DEGRADE_WIDTH}:{relay.DEGRADE_HEIGHT}" in filters
@@ -123,6 +139,57 @@ def test_degraded_profile_actually_transcodes() -> None:
     # mux 缓冲必须归零：默认 0.7s/0.5s 是白送的延迟
     assert args[args.index("-muxdelay") + 1] == "0"
     assert args[args.index("-muxpreload") + 1] == "0"
+
+
+def test_second_degrade_tier_for_4g_links() -> None:
+    """链路比省流档还小时（4G ~250kbps < 500k 目标）再降一档：320x180@8/200k。
+
+    现场 2026-11-18 15:54：出口掉到 4G dongle，实测 254kbps 而省流档目标 500k —
+    链路比目标还小一半，send 永远 100% 占用 → 延迟涨到 5.9s → 每 40 秒被掐一次。
+    """
+    reset()
+    session = FakeSession()
+    relay._sessions["dogcam"] = session
+    asyncio.run(degrade_in_loop())                      # 配置档 → 省流档
+    assert relay._degrade_level == 1
+
+    # 省流档也吃不下（实测只有 250kbps）→ 自动再降一档
+    relay._last_window_bps = 250_000
+    asyncio.run(degrade_in_loop(reason="省流档也吃不下"))
+    assert relay._degrade_level == 2, "链路比 500k 还小时应该降到极省流档"
+    assert relay.active_profile() == (
+        relay.DEGRADE2_WIDTH,
+        relay.DEGRADE2_HEIGHT,
+        relay.DEGRADE2_FPS,
+        relay.DEGRADE2_BITRATE,
+    )
+    assert session.restarts == ["降档到省流档", "降档到极省流档"]
+
+    original = relay.pick_encoder
+    relay.pick_encoder = lambda: "h264_rkmpp"
+    try:
+        args = relay.ffmpeg_args("dogcam")
+    finally:
+        relay.pick_encoder = original
+    filters = args[args.index("-vf") + 1]
+    assert "scale=320:180" in filters and "fps=8" in filters
+    assert args[args.index("-b:v") + 1] == relay.DEGRADE2_BITRATE
+
+
+def test_extreme_tier_is_not_escalated_further() -> None:
+    """已经在极省流档就只续窗口，不再「降档」（也不会反复重启 ffmpeg）。"""
+    reset()
+    only = FakeSession()
+    relay._sessions["dogcam"] = only
+    asyncio.run(degrade_in_loop())
+    relay._last_window_bps = 250_000
+    asyncio.run(degrade_in_loop())
+    only.restarts.clear()
+
+    relay._last_window_bps = 150_000   # 依然吃不下
+    asyncio.run(degrade_in_loop(reason="还是不行"))
+    assert relay._degrade_level == 2
+    assert only.restarts == [], "已经是最低档，不该再重启 ffmpeg"
 
 
 def _flv_tag(tag_type: int, body: bytes, ts_ms: int) -> bytes:
@@ -203,7 +270,8 @@ def test_copy_profile_still_copies() -> None:
     finally:
         relay.PROFILE = original
 
-    assert args[args.index("-c:v") + 1] == "copy"
+    codecs = [args[i + 1] for i, arg in enumerate(args) if arg == "-c:v"]
+    assert codecs[-1] == "copy", f"-c:v 链：{codecs}"
     assert "-vf" not in args
 
 
@@ -216,6 +284,7 @@ def test_window_stats_decide_congestion() -> None:
     assert not window(session, relay.CONGEST_WINDOW, 1200, 1.0, now)
     # 被反压：send 全程阻塞，实测只有 400kbps
     assert window(session, relay.CONGEST_WINDOW, 400, 0.95, now)
+    assert relay._last_window_bps == pytest_approx(400_000), relay._last_window_bps
     # 空闲：send 很快、码率也达标
     assert not window(session, relay.CONGEST_WINDOW, 1200, 0.05, now)
     # 窗口还没攒够不下结论

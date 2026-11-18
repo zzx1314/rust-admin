@@ -284,7 +284,8 @@ sqlite3 /opt/hz/rust-admin/robodog/data/robodog.db \
 - **Wi-Fi 掉线不再冻住画面**（2026-11-18）：relay 的分片发送有超时（`RELAY_SEND_TIMEOUT`，默认 10s），
   超时即判上行已死、断开重连；`RELAY_STALL_TIMEOUT`（默认 15s）内一个字节都没推出去就自己重启
   `ffmpeg`；每 5s 巡检平台出口网卡（`ip route get`），Wi-Fi 断开 / 恢复导致出口变更就重建连接；
-  拥塞后自动降到 `640x360@12 / 500k`（`RELAY_DEGRADE_*`），只剩 4G 时也不至于每 10s 重连一次；
+  拥塞后自动降到 `640x360@12 / 500k`（`RELAY_DEGRADE_*`），**链路比 500k 还小（4G ~250k）时
+  再降一档 `320x180@8 / 200k`**（`RELAY_DEGRADE2_*`，约 2~3fps 的慢刷新，但不会反复重连）；
   降档**不等超时**：5s 窗口内 `ws.send` 占用高 + 实测码率明显低于目标档位（或分片发送超时）就
   立刻换档，`video_reset` + 重启 ffmpeg，观看端不重连；到期还会先确认链路真恢复才回配置档，
   反复升降时窗口翻倍（不来回闪）。细节见 `business/docs/backpack-video-integration.md` §6.10⑥；
