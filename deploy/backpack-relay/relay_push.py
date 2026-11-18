@@ -114,6 +114,12 @@ OUT_FPS = max(1, int(os.environ.get("RELAY_FPS", "20")))
 OUT_BITRATE = os.environ.get("RELAY_BITRATE", "1200k")
 OUT_GOP = max(1, int(os.environ.get("RELAY_GOP", str(OUT_FPS * 2))))
 ENCODER = os.environ.get("RELAY_ENCODER", "auto").strip()
+# 解码器：`auto` = 先试板端硬件解码（rkmpp），不行就用 ffmpeg 默认（软解）
+#
+# 现场实测（1080p60 源 → 720p15 转码）：软解 ~122% CPU、硬解 ~81%，帧率还略高。
+# 这块板子的 CPU/CMA 已经被 4 路 USB 相机常驻编码吃得很紧（见 deploy/README.md
+# 「板子会硬复位」），省下来的 CPU 直接换来推流更稳。
+DECODER = os.environ.get("RELAY_DECODER", "auto").strip()
 # 排障开关：把分片大小、ffmpeg 退出码、完整 stderr 都打出来（生产默认关）
 DEBUG = os.environ.get("RELAY_DEBUG", "0") == "1"
 
@@ -486,6 +492,69 @@ def pick_encoder() -> str | None:
     return chosen
 
 
+_decoder_pick: str | None | bool = False
+
+
+def pick_decoder(stream: str) -> str | None:
+    """挑硬件解码器；挑不到返回 None（让 ffmpeg 自己用软解）。
+
+    跟 `pick_encoder` 一样要**真解一帧**才算数：板子上解码器可能编排在列表里但没设备。
+    只探测一次（结果缓存），探测用的就是这条流的源，拿不到流就老实软解。
+    """
+    global _decoder_pick
+    if _decoder_pick is not False:
+        return _decoder_pick  # type: ignore[return-value]
+    if DECODER and DECODER not in ("auto", "sw"):
+        _decoder_pick = DECODER
+        return DECODER
+    if DECODER == "sw":
+        _decoder_pick = None
+        return None
+    chosen: str | None = None
+    try:
+        listed = subprocess.run(
+            [FFMPEG, "-hide_banner", "-decoders"], capture_output=True, text=True, timeout=10
+        ).stdout
+        if "h264_rkmpp" in listed and _decoder_works("h264_rkmpp", stream):
+            chosen = "h264_rkmpp"
+    except Exception as exc:  # noqa: BLE001 - 探测失败就当没有，退回软解
+        log(f"解码器探测失败：{exc!r}（用 ffmpeg 默认软解）")
+    log(f"解码器：{chosen or 'ffmpeg 默认（软解）'}")
+    _decoder_pick = chosen
+    return chosen
+
+
+def _decoder_works(name: str, stream: str) -> bool:
+    """拿真实源解两帧：能跑通才算可用。"""
+    try:
+        proc = subprocess.run(
+            [
+                FFMPEG,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-rtsp_transport",
+                "tcp",
+                "-timeout",
+                "5000000",
+                "-c:v",
+                name,
+                "-i",
+                f"{RTSP_BASE}/{stream}",
+                "-frames:v",
+                "2",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            timeout=25,
+        )
+        return proc.returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _encoder_works(name: str) -> bool:
     """拿一帧黑图试编，确认编码器在这台机器上真的可用。"""
     try:
@@ -538,6 +607,11 @@ def ffmpeg_args(stream: str) -> list[str]:
         "1",
         "-fflags",
         "+genpts",
+    ]
+    decoder = pick_decoder(stream)
+    if decoder:
+        args += ["-c:v", decoder]
+    args += [
         "-i",
         source,
         "-an",  # 背包各流都没有音轨，FLV 里带空音轨会让 flv.js 报解析错
@@ -681,10 +755,17 @@ class StreamSession:
         self.profile: tuple | None = None
         # 推流用的 WS：降档/回档要就地重启 ffmpeg，不需要重新建连接
         self.ws = None
-        # 延迟统计：ffmpeg 起流时刻 + FLV tag 时间戳扫描器
+        # 延迟统计：ffmpeg 起流时刻（墙钟 + 单调钟）+ FLV tag 时间戳扫描器
         self._started_wall = 0.0
+        self._started_mono = 0.0
         self._flv = FlvScanner()
         self.lag = 0.0
+        # 延迟基准：**首帧**到达时的时间和它自己的 tag 时间戳
+        #
+        # 只用这两个算「积压增长」：起流那一下要等 RTSP 握手 + 首个关键帧（0.5~2s，取决于
+        # 运气），把它算进延迟会让看门狗一起流就误判超限 —— 2026-11-18 15:19 就这么
+        # 45 秒重启一次的。起流耗时单独打一行日志，不进指标。
+        self._lag_ref: tuple[float, int] | None = None
         self._lag_logged_at = 0.0
         self._lag_restart_at = 0.0
         # 停流时连接被掐断（协程卡在 ws.send 上停不下来）：别在这条连接上重拉
@@ -717,8 +798,10 @@ class StreamSession:
         self.ws = ws
         self._conn_broken = False
         self._started_wall = time.time()
+        self._started_mono = time.monotonic()
         self._flv = FlvScanner()
         self.lag = 0.0
+        self._lag_ref = None
         self._win_at = self.last_send
         self._win_blocked = 0.0
         self._win_bytes = 0
@@ -840,9 +923,17 @@ class StreamSession:
         积压时，码率看着正常，画面却越看越晚（旧版没有任何东西管这件事）。
         """
         tags = self._flv.last_video_ts
-        if not self._started_wall or tags is None:
+        if tags is None or not self._started_wall:
             return
-        self.lag = max(0.0, (time.time() - self._started_wall) - tags / 1000.0)
+        if self._lag_ref is None:
+            # 首帧：建基准。起流耗时（RTSP 握手 + 等关键帧）单独记，不进积压指标
+            self._lag_ref = (now, tags)
+            startup = now - self._started_mono
+            if startup >= 1.0:
+                log(f"[{self.stream}] 起流 {startup:.1f}s 后出首帧（RTSP 握手 / 等关键帧）")
+            return
+        base_wall, base_ts = self._lag_ref
+        self.lag = max(0.0, (now - base_wall) - (tags - base_ts) / 1000.0)
         lag = self.lag
         if lag >= LAG_LOG and now - self._lag_logged_at >= LAG_LOG_INTERVAL:
             self._lag_logged_at = now

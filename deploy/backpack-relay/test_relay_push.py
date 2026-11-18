@@ -159,28 +159,33 @@ def test_flv_scanner_gives_up_on_garbage() -> None:
     assert scanner.last_video_ts is None
 
 
-def test_lag_is_measured_from_flv_timestamps() -> None:
-    """延迟 = 现在墙钟 - (ffmpeg 起流时刻 + tag 时间戳)，tag 时间戳即帧到达板端时刻。"""
+def test_lag_is_measured_as_growth_after_the_first_frame() -> None:
+    """只量「首帧之后的积压增长」：起流等关键帧的耗时不能算进去（否则一起流就误判）。"""
     reset()
     session = relay.StreamSession("dogcam")
-    session._started_wall = time.time() - 6.0
-    session._flv.last_video_ts = 2000  # 流里最新帧是第 2s 的
+    session._started_wall = time.time() - 6.0   # 起流已经 6s（含等关键帧）
+    session._flv.last_video_ts = 2000
     original, relay.MAX_LAG = relay.MAX_LAG, 999  # 先别触发重同步
     try:
-        session._update_lag(time.monotonic())
+        session._update_lag(time.monotonic())         # 首帧 → 只建基准
+        assert session.lag == 0.0
+        session._flv.last_video_ts = 3000             # 时间戳只走了 1s
+        session._update_lag(time.monotonic() + 2.0)   # 但过了 2s → 积压 1s
     finally:
         relay.MAX_LAG = original
-    assert 3.5 <= session.lag <= 4.5, session.lag
+    assert 0.9 <= session.lag <= 1.1, session.lag
 
 
 def test_lag_above_limit_requests_resync() -> None:
     reset()
     session = relay.StreamSession("dogcam")
     session._started_wall = time.time() - 40.0
-    session._flv.last_video_ts = 1000  # 已经积压 39s
+    session._flv.last_video_ts = 1000
+    session._update_lag(time.monotonic())        # 首帧建基准
+    session._flv.last_video_ts += 1000           # 时间戳只走 1s
 
     async def scenario() -> None:
-        session._update_lag(time.monotonic())
+        session._update_lag(time.monotonic() + 6.0)   # 实际过了 6s → 积压 5s
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
