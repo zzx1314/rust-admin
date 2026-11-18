@@ -760,10 +760,13 @@ impl AiPatrol {
         if plan.is_empty() {
             return None;
         }
-        // 板端写图和 SSE 事件之间差几十~几百毫秒：给两次短重试，别为一张图拖住窗口
-        for attempt in 0..3 {
+        // 板端命中帧不是「检出瞬间」就落盘：实测 `result.json`/图是在作业收尾
+        // （`_finish_job`，命中后约 1~2s）才写的，而 SSE 的 `detect` 事件来得更早。
+        // 所以给 8 次×300ms（≈2.4s，命中帧一到就立刻返回）的重试预算，
+        // 宁可在后台任务里多等两秒，也别把「有图」的告警发成「只有文字」。
+        for attempt in 0..8 {
             if attempt > 0 {
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
             }
             let root = self.jobs_root().await?;
             let dir = Path::new(&root)
@@ -1737,6 +1740,50 @@ mod agent_flow {
             .decode(encoded)
             .expect("证据图应是合法 base64");
         assert_eq!(decoded, bytes, "发出去的必须是命中帧原图字节");
+    }
+
+    /// 板端命中帧比 SSE `detect` 晚落盘（现场实测作业收尾时才写）：客户端要等它一会儿，
+    /// 而不是「那一刻没文件就不带图」。
+    #[tokio::test]
+    async fn evidence_frame_that_lands_late_is_still_picked_up() {
+        let root = std::env::temp_dir().join(format!(
+            "robodog-jobs-late-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        let point_dir = root.join("TK-1").join("pt0");
+        std::fs::create_dir_all(&point_dir).expect("建存证目录失败");
+        // 后台 600ms 后才写命中帧：早于/晚于第一个重试都要能等到
+        let late = point_dir.join("dogcam_20261118_174010.jpg");
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            std::fs::write(&late, [0xFF_u8, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).expect("写命中帧失败");
+        });
+
+        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        let agent = spawn_agent(calls).await;
+        let ai = Arc::new(AiPatrol::with_jobs_dir(
+            agent,
+            true,
+            Some(root.to_string_lossy().to_string()),
+        ));
+        let (tx, mut rx) = mpsc::channel(16);
+        ai.start(&tx, exist_start_payload()).await;
+        let messages = drain_until_end(&mut rx, Duration::from_secs(5)).await;
+        let _ = std::fs::remove_dir_all(&root);
+
+        let detect = messages
+            .iter()
+            .find(|(kind, _)| kind == "ai_detect")
+            .map(|(_, payload)| payload)
+            .expect("应上报检出");
+        assert!(
+            detect["evidenceImage"].as_str().is_some(),
+            "晚落盘的命中帧也要带上: {detect}"
+        );
     }
 
     #[tokio::test]

@@ -383,7 +383,8 @@ notify::evidence_image()（校验）→ Notice.image
 - **检出告警的图是「扫目录」来的**：板端 `plan_hit`（带 `evidence`）要约窗口收尾才发，
   检出告警是实时的，所以客户端扫 `<jobs_dir>/<planId>/pt<航点下标>/` 取**窗口开始之后**
   写下的最新一张（`EVIDENCE_MTIME_SLACK`=5s 容错）；路径同时写进告警正文
-  （`（证据：…）`），现场可 ssh 复核。
+  （`（证据：…）`），现场可 ssh 复核。命中帧是**作业收尾**（`_finish_job`，命中后 1~2s）
+  才落盘的，所以扫描带 8×300ms 重试（命中帧一到立刻返回，最多等 ≈2.4s）。
 - **`jobs_dir` 从哪来**：`[ai] jobs_dir` / `ROBODOG_AI_JOBS_DIR` 优先（配了就**不**再被
   板端事件覆盖），其次从板端 `plan_hit.evidence` 反推（`<存证根>/<计划>/pt<n>/<图>`，
   见 `jobs_root_from_evidence`），最后才是内置候选 `/root/backpack_dashboard/backend/detect_jobs`、
