@@ -607,16 +607,18 @@ Agent 挂了」立刻表现为 `reachable=false`，没有一份迟早过期的�
 **做法**：新增 `web/src/components/FrontCameraVideo.vue` + `web/src/composables/useFrontCamera.ts`，
 三处（设备抽屉「实时监控」、抽屉「手动遥控」内嵌画面、任务实时监控）**同一份组件、同一路流**：
 
-| 判定 | 播放 | 与 `/monitor` 的对应 |
+| 判定 | 播放 | 说明 |
 | --- | --- | --- |
-| `mode=direct` 且浏览器探通板端、页面在内网 | `VideoStage`（WHEP `dogcam`） | 「现场直连」 |
-| 其余（公网页面 / 直连探不通 / `tunnel` / `proxy`） | `VideoPlayer`（中继 `bp:dogcam`） | 「平台中继」 |
+| 板端 relay 在线（`/api/backpack/video/state` 里 `bp:dogcam` 的 `publisher=true`） | `VideoPlayer`（中继 `bp:dogcam`） | **默认**：设备管理 / 计划管理固定中继优先，与实时视频的「平台中继」同一条通路 |
+| 中继推流端不在，且页面在内网 / 直连探通 | `VideoStage`（WHEP `dogcam`） | 兜底：现场入口还能看，不至于直接黑屏 |
+| 中继推流端不在，且页面在公网 | 仍按中继（等板端 relay 恢复） | — |
 | `status.configured=false`（部署没接背包） | 只给「怎么配背包」的说明卡，不兜底、不拉流 | — |
 
 要点：
 
-- **规则只写一遍**：`frontCameraPath()` 复刻 `monitor/index.vue::refreshStatus` 的自动判定
-  （探不通或公网页面 → 中继）；以后改判定先改这里，别在三个页面各改一遍。
+- **中继优先**：`frontCameraPath()` 只看「板端 relay 是否在线」（`bp:dogcam` 的 publisher），
+  在线就走中继；不在线才退回 WHEP（现场入口/内网）。实时视频页仍保留手动「现场直连 /
+  平台中继」切换，判定逻辑不共用（2026-11-18 现场要求设备/任务页默认中继）。
 - **status 共享**：`/api/backpack/status` 要聚合板端 4 个接口（含 `detect/tasks`），
   抽屉/弹窗可能同时存在，所以 `useFrontCamera` 做进程内缓存（15s）+ 单飞合并，
   挂载期间 20s 低频刷新（页面隐藏时不刷）。

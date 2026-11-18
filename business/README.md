@@ -1474,12 +1474,13 @@ mediamtx 的 `dogcam`，浏览器直连 mediamtx（WHEP）或走平台中继（F
 也内嵌同一块面板），同时看到两样实时数据：
 
 视频这一路固定是背包前置 `dogcam`（`web/src/components/FrontCameraVideo.vue`），
-与「实时视频」页的前置摄像头同一条推流、同一套直连/中继判定；设备档案里的视频地址已删除，
-见 `docs/backpack-video-integration.md` §6.9。
+与「实时视频」页的前置摄像头同一条推流；**设备管理 / 计划管理默认走平台中继**，
+只有中继推流端不在时才退回 WHEP。设备档案里的视频地址已删除，见
+`docs/backpack-video-integration.md` §6.9。
 
 | 区域 | 数据来源 | 刷新方式 |
 | --- | --- | --- |
-| 本体视频 | 背包 `dogcam`（本体前置 RTSP 归一化）—— 与「实时视频」页的前置摄像头同源同路 | WHEP 直连或平台中继（`FrontCameraVideo.vue`） |
+| 本体视频 | 背包 `dogcam`（本体前置 RTSP 归一化）—— 与「实时视频」页的前置摄像头同源同路 | 默认平台中继（`FrontCameraVideo.vue`）；中继不可用时退回 WHEP |
 | 地图位置 | `devices.position`（本体 1401 位姿的地图米制 x/y） | 设备心跳 10s 上报 + 页面 5s 轮询 |
 | 进度 / 阶段 | `tasks.progress` / `tasks.robot_stage` | 客户端 5s 上报 + 页面 5s 轮询 |
 

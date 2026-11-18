@@ -406,6 +406,17 @@ export function clientFor(status: BackpackStatus | null): AgentClient {
   };
 }
 
+/** 平台中继房间状态（`GET /api/backpack/video/state`，服务端内存快照） */
+export interface BackpackVideoRoom {
+  /** 房间名，背包板端是 `bp:<stream>` */
+  room: string;
+  /** 板端 relay 的推流连接是否在线（否则中继一定没有画面） */
+  publisher: boolean;
+  streaming: boolean;
+  viewers: number;
+  initBytes: number;
+}
+
 export const backpackApi = {
   /**
    * @param transport 传 `tunnel` 表示「跳过浏览器直连/服务端直连，走设备客户端代调」
@@ -418,7 +429,9 @@ export const backpackApi = {
     post<BackpackActionPayload>("/backpack/detect/start", body, 60000),
   stop: () => post<BackpackActionPayload>("/backpack/detect/stop"),
   config: (body: Partial<BackpackStartBody>) =>
-    post<BackpackActionPayload>("/backpack/detect/config", body as object)
+    post<BackpackActionPayload>("/backpack/detect/config", body as object),
+  /** 中继房间快照：设备/任务页据此判断「默认走中继」时中继到底在不在 */
+  videoState: () => get<{ rooms: BackpackVideoRoom[] }>("/backpack/video/state")
 };
 
 /**
