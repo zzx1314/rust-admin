@@ -820,24 +820,49 @@ def pick_encoder() -> str | None:
     return chosen
 
 
-_decoder_pick: str | None | bool = False
+# 每条流各自的解码器判定：`{stream: decoder|None}`（None = ffmpeg 默认软解）。
+#
+# ⛔ 不能做成全局缓存：板子上 `h264_rkmpp` 解本体 1080p（dogcam）没问题，解四路 USB
+# 相机（cam0~cam3，同样是本机 rkmpp 编出来的 720p）却**一帧都解不出来** —— ffmpeg
+# 挂在 `-frames:v 2` 上永远等不到帧。原来只探测「第一条进来的流」并把结论套给所有流，
+# 于是 dogcam 探测通过后 cam* 也拿到 h264_rkmpp → 每 15s 被卡住看门狗重启一次、已推
+# 0 字节，前端「平台中继」的 USB 相机通道永远没画面（2026-11-18 事故，见
+# business/docs/backpack-video-integration.md §6.10⑪）。
+#
+# 也不在起流路径上同步探测：probe 是同步 subprocess，解不出来的流要等超时，会把事件
+# 循环卡住几秒，连带正在推的其他流 `ws.send` 阻塞（看门狗会误判上行拥塞去降档）。
+# 所以：**没探测过的流先用软解**（永远能用），开机在后台逐条探一次，结果留给下次起流。
+_decoder_picks: dict[str, str | None] = {}
+DECODER_PROBE_TIMEOUT = float(os.environ.get("RELAY_DECODER_PROBE_TIMEOUT", "6"))
 
 
 def pick_decoder(stream: str) -> str | None:
-    """挑硬件解码器；挑不到返回 None（让 ffmpeg 自己用软解）。
+    """这条流该用哪个解码器；`None` = 让 ffmpeg 自己用软解。
 
-    跟 `pick_encoder` 一样要**真解一帧**才算数：板子上解码器可能编排在列表里但没设备。
-    只探测一次（结果缓存），探测用的就是这条流的源，拿不到流就老实软解。
+    `RELAY_DECODER` 写死（例如 `h264_rkmpp`）或 `sw` 时直接照办，不探测、不缓存。
+    没探测过的流返回 None（软解）—— 起流路径上不许阻塞，见上面的说明。
     """
-    global _decoder_pick
-    if _decoder_pick is not False:
-        return _decoder_pick  # type: ignore[return-value]
-    if DECODER and DECODER not in ("auto", "sw"):
-        _decoder_pick = DECODER
-        return DECODER
     if DECODER == "sw":
-        _decoder_pick = None
         return None
+    if DECODER and DECODER != "auto":
+        return DECODER
+    return _decoder_picks.get(stream)
+
+
+def probe_decoder(stream: str) -> str | None:
+    """探测一条流的解码器并缓存（同步、可能阻塞几秒，只从 executor 里调）。
+
+    跟 `pick_encoder` 一样要**真解出像素**才算数：板子上解码器可能编排在列表里但没设备，
+    也可能列表里有、设备也在，但对某一路源就是解不出来（cam0~3）。
+    """
+    if DECODER == "sw":
+        _decoder_picks[stream] = None
+        return None
+    if DECODER and DECODER != "auto":
+        _decoder_picks[stream] = DECODER
+        return DECODER
+    if stream in _decoder_picks:
+        return _decoder_picks[stream]
     chosen: str | None = None
     try:
         listed = subprocess.run(
@@ -846,14 +871,31 @@ def pick_decoder(stream: str) -> str | None:
         if "h264_rkmpp" in listed and _decoder_works("h264_rkmpp", stream):
             chosen = "h264_rkmpp"
     except Exception as exc:  # noqa: BLE001 - 探测失败就当没有，退回软解
-        log(f"解码器探测失败：{exc!r}（用 ffmpeg 默认软解）")
-    log(f"解码器：{chosen or 'ffmpeg 默认（软解）'}")
-    _decoder_pick = chosen
+        log(f"[{stream}] 解码器探测失败：{exc!r}（用 ffmpeg 默认软解）")
+    log(f"[{stream}] 解码器：{chosen or 'ffmpeg 默认（软解）'}")
+    _decoder_picks[stream] = chosen
     return chosen
 
 
+async def warm_decoders() -> None:
+    """开机后台逐条流探一次解码器（可用的 ~1s/条，解不出来的等探测超时才放弃）。"""
+    if DECODER == "sw" or (DECODER and DECODER != "auto"):
+        return
+    loop = asyncio.get_event_loop()
+    for stream in STREAMS:
+        try:
+            await loop.run_in_executor(None, probe_decoder, stream)
+        except Exception as exc:  # noqa: BLE001 - 预热失败不影响推流
+            log(f"[{stream}] 解码器预热失败：{exc!r}（继续用软解）")
+
+
 def _decoder_works(name: str, stream: str) -> bool:
-    """拿真实源解两帧：能跑通才算可用。"""
+    """拿真实源解两帧：**真的解出像素**才算可用。
+
+    只看 `returncode == 0` 不可靠：一帧都没解出来时 ffmpeg 只打一行
+    `Nothing was written into output file…` 也可能返回 0。所以用 rawvideo 数输出
+    字节，并给探测本身兜个超时 —— 解不出来的解码器不是报错退出，而是永远等不到帧。
+    """
     try:
         proc = subprocess.run(
             [
@@ -871,15 +913,16 @@ def _decoder_works(name: str, stream: str) -> bool:
                 f"{RTSP_BASE}/{stream}",
                 "-frames:v",
                 "2",
+                # rawvideo 落 stdout：2 帧全尺寸像素至少几 KB，0 字节 = 一帧都没解出来
                 "-f",
-                "null",
+                "rawvideo",
                 "-",
             ],
             capture_output=True,
-            timeout=25,
+            timeout=DECODER_PROBE_TIMEOUT,
         )
-        return proc.returncode == 0
-    except Exception:  # noqa: BLE001
+        return proc.returncode == 0 and len(proc.stdout) > 0
+    except Exception:  # noqa: BLE001 - 超时 / 起不来一律当不可用
         return False
 
 
@@ -1581,6 +1624,8 @@ async def main() -> int:
         "（平台页面「系统设置 → 视频中继」可改默认档位与是否自动降档）"
     )
     tasks = [asyncio.create_task(stream_worker(stream)) for stream in STREAMS]
+    # 解码器按流后台探测（不阻塞起流：没探完的流先用软解）
+    tasks.append(asyncio.create_task(warm_decoders()))
     tasks.append(asyncio.create_task(route_watcher()))
     # 省流窗口到期后按链路实际情况决定要不要升一档
     tasks.append(asyncio.create_task(profile_watcher()))

@@ -28,6 +28,10 @@ Environment=RELAY_GOP=15
 # Environment=RELAY_SEND_TIMEOUT=10     # 单个分片写 WS 的上限（秒），超时判上行已死
 # Environment=RELAY_STALL_TIMEOUT=15    # 这么久没推出字节就重启 ffmpeg
 # Environment=RELAY_ROUTE_POLL=5        # 出口网卡巡检间隔（变了就重建连接；0 关闭）
+# 解码器：按流各自探测（可用的用硬解，解不出来的那条流回退软解）。`sw` = 全部软解。
+# 探测超时不能太长：解不出来的解码器不是报错退出，而是永远等不到帧（cam0~cam3 就是这样）。
+# Environment=RELAY_DECODER=auto          # auto | sw | h264_rkmpp
+# Environment=RELAY_DECODER_PROBE_TIMEOUT=6
 
 # 自适应档位（默认值见 relay_push.py；改了要 daemon-reload + restart）
 # Environment=RELAY_CONGEST_WINDOW=5     # 码率 / send 占用的统计窗口（秒）

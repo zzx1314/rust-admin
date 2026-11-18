@@ -1029,7 +1029,7 @@ python3 deploy/backpack-relay/measure_bitrate.py --stream dogcam --seconds 20
 
 回归：
 
-- 板端状态机：`python3 deploy/backpack-relay/test_relay_push.py`（27 个用例，含
+- 板端状态机：`python3 deploy/backpack-relay/test_relay_push.py`（30 个用例，含
   「平台起点省流档」「起点极省流档不再降」「锁定档位不降档」「换档后旧拥塞状态作废」
   「老平台不带 profile」）；
 - 平台：`cargo test --test video_relay`（`relay_profile_defaults_and_updates_reach_the_board`）、
@@ -1038,6 +1038,64 @@ python3 deploy/backpack-relay/measure_bitrate.py --stream dogcam --seconds 20
 > ⚠️ 页面只选**档位**；档位背后的分辨率 / 帧率 / 码率仍由板端 `RELAY_*` 决定（本节的
 > 默认值就是 §6.10⑥⑧ 调出来的那套）。要现场微调又不改页面，就改板端环境变量后重启
 > `backpack-relay`（平台下发的档位名不变，参数跟着变）。
+
+#### ⑪ 4 路 USB 相机（cam0~cam3）在中继下全黑：解码器选择是「全局缓存」（2026-11-18）
+
+现场反馈：「**平台中继，浏览器卡住了，没有画面**」。切机器狗前置（`dogcam`）正常，切
+「左前 / 右前…」（`cam0~cam3`）永远黑屏。
+
+**根因：`pick_decoder()` 把「第一条进来的流」的探测结果缓存成全局结论。**
+
+```text
+板端实测（同一套 relay 参数，逐流）：
+  dogcam（本体 1080p）：-c:v h264_rkmpp  → 1.2s 解出帧 ✅
+  cam0~cam3（USB 720p）：-c:v h264_rkmpp → 0 帧，而且挂住不退出 ❌（软解正常）
+```
+
+`pick_decoder()` 只在服务启动后**第一条有观看者的流**上探一次（`_decoder_pick` 是
+模块级全局），探到 `h264_rkmpp` 就套给全部 7 条流。于是：
+
+```text
+[relay] 解码器：h264_rkmpp                                  ← 用 dogcam 探出来的，套给了 cam*
+[relay] [cam0] 平台有观看者，开始拉流（… 编码=h264_rkmpp …）
+[relay] [cam0] 15s 没有推出任何字节（源卡住 / 上行阻塞），重启拉流   ← 每 15s 一次死循环
+[relay] [cam0] 推流结束：0 个分片 / 0B，ffmpeg 退出码 None
+```
+
+平台侧对应 `last viewer of bp:cam0 left after 37.4s / 0 KB（平均 0 kbps）`，`video/state`
+里 `lastFrameAgeSecs=null` + `initBytes=0`。**15:22 引入（提交 `530528d0`）之后，cam0~3
+一次都没成功推过**（`journalctl -u backpack-relay | grep "\[cam[0-3]\] 推流结束：[1-9]"` 全空）。
+
+修法（`relay_push.py`，平台 / 前端不用动）：
+
+| 改动 | 说明 |
+| --- | --- |
+| 解码器**按流**缓存 | `_decoder_picks: dict[stream, decoder]`，每条流自己探一次；`pick_decoder()` 只读缓存 |
+| 探测**不在起流路径上** | `probe_decoder()` 是同步 subprocess，解不出来的流要等超时，会把事件循环卡住几秒 → 连带正在推的流 `ws.send` 阻塞（会被判成上行拥塞去降档）。改成开机后台 `warm_decoders()` 逐条探（`run_in_executor`），**没探过的流先用软解**（永远能用） |
+| 探测要**真解出像素** | `_decoder_works()` 原来只看 `returncode == 0`，而「一帧都没解出来」时 ffmpeg 只打一行 `Nothing was written into output file…`、退出码仍是 0。改成 `-f rawvideo -` 数输出字节 > 0，并给探测兜超时（`RELAY_DECODER_PROBE_TIMEOUT`，默认 6s） |
+
+现场日志现在长这样（开机 4s 内全部探完）：
+
+```text
+[relay] [cam0] 解码器：ffmpeg 默认（软解）
+[relay] [cam1] 解码器：ffmpeg 默认（软解）
+[relay] [cam2] 解码器：ffmpeg 默认（软解）
+[relay] [cam3] 解码器：ffmpeg 默认（软解）
+[relay] [dogcam] 解码器：h264_rkmpp
+[relay] [dog-ipcam] 解码器：h264_rkmpp
+[relay] [preview] 解码器：ffmpeg 默认（软解）
+```
+
+热修（先救画面、不做代码改动）：unit 里加 `Environment=RELAY_DECODER=sw` 后
+`daemon-reload + restart`，7 条流全走软解（dogcam 1080p 软解约多 40% CPU）。
+代价可接受，但 USB 相机本来只需要软解，改完 `pick_decoder` 后就该把这行删掉。
+
+排障口令：**「某一路黑，其他路正常」→ 先比这几路源的解码器差异**
+（`ffmpeg -c:v h264_rkmpp -i rtsp://127.0.0.1:8554/<stream> -frames:v 2 -f rawvideo - | wc -c`，
+0 = 硬解对这条源无效）；「已推 0 字节 + 15s 一次重启」基本都是解码器 / 源不可用，不是上行。
+
+回归：`python3 deploy/backpack-relay/test_relay_push.py`（30 个用例，新增
+「按流探测不串味」「探测须真解出帧 / 超时算不可用」「写死 `RELAY_DECODER` 不探测」）。
 
 #### 排查工具与清单
 
@@ -1060,3 +1118,4 @@ ssh root@<背包IP> 'python3 /tmp/bw.py'              # 见 §6.10② 的量法�
 | 反复 `lagged`、`left after ... kbps` 高于出口 | `speedtest-cli` 的 Upload vs 平均 kbps | ③ 降档位 / 升带宽 |
 | 看着看着越来越卡（延迟涨），然后掉一下重连 | 板端 `画面延迟 x.xs` / `延迟 x.xs 超过上限` / `回到配置档`；平台 `stream reset` + `publisher detached` | ⑨（2026-11-18 已修）。修完还有：看 `试用期延迟` / `已知道撑不住` 两行，如果反复在降档，就把配置档降到链路能吃下的规格，别靠自适应救 |
 | 同时开多个视频页面更卡 | 每个观看者 = 一份出口带宽 | 出口按 1.5Mbps/路 规划 |
+| **某一路黑、其他路正常**（典型：`cam0~3` 全黑，`dogcam` 正常） | 板端 `[cam0] 推流结束：0 个分片 / 0B` + 15s 一次「没有推出任何字节」；`video/state` 里 `initBytes=0` / `lastFrameAgeSecs=null` | ⑪ 解码器选择串味（已修）。硬解对这几路源无效，要按流探测 + 真解出帧才算可用 |

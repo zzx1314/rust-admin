@@ -11,9 +11,12 @@
 """
 
 import asyncio
+import contextlib
 import os
+import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -647,6 +650,86 @@ def test_legacy_platform_without_profile_keeps_env_default() -> None:
         relay.OUT_FPS,
         relay.OUT_BITRATE,
     )
+
+
+@contextlib.contextmanager
+def patched(**attrs):
+    """临时把 relay 模块上的属性（subprocess / _decoder_works 等）换掉。"""
+    old = {name: getattr(relay, name) for name in attrs}
+    for name, value in attrs.items():
+        setattr(relay, name, value)
+    try:
+        yield
+    finally:
+        for name, value in old.items():
+            setattr(relay, name, value)
+
+
+def test_decoder_pick_is_per_stream() -> None:
+    """一条流探测通过，不代表另一条能用（cam0~3 硬解一帧都解不出来）。
+
+    2026-11-18 事故：`_decoder_pick` 是全局缓存，dogcam 探测通过后 cam* 也拿到
+    `h264_rkmpp` → 推 0 字节、每 15s 被卡住看门狗重启，USB 相机通道永远没画面。
+    """
+
+    class Listed:
+        stdout = " V....D h264_rkmpp   Rockchip MPP (Media Process Platform)"
+
+    with patched(
+        _decoder_works=lambda name, stream: stream == "dogcam",
+        subprocess=SimpleNamespace(run=lambda *a, **k: Listed()),
+    ):
+        relay._decoder_picks.clear()
+        try:
+            assert relay.probe_decoder("dogcam") == "h264_rkmpp"
+            assert relay.probe_decoder("cam0") is None, "cam0 不能继承 dogcam 的硬解结论"
+            assert relay.pick_decoder("dogcam") == "h264_rkmpp"
+            assert relay.pick_decoder("cam0") is None
+            # 没探测过的流先用软解（探测不在起流路径上同步跑）
+            assert relay.pick_decoder("cam1") is None
+        finally:
+            relay._decoder_picks.clear()
+
+
+def test_decoder_probe_requires_real_frames() -> None:
+    """只看 `returncode == 0` 不够：一帧没解出来时 ffmpeg 也可能返回 0。"""
+
+    class ZeroFrames:
+        returncode = 0
+        stdout = b""
+
+    class TwoFrames:
+        returncode = 0
+        stdout = b"\x00" * 4096
+
+    try:
+        with patched(subprocess=SimpleNamespace(run=lambda *a, **k: ZeroFrames())):
+            assert not relay._decoder_works("h264_rkmpp", "cam0")
+        with patched(subprocess=SimpleNamespace(run=lambda *a, **k: TwoFrames())):
+            assert relay._decoder_works("h264_rkmpp", "dogcam")
+
+        def hang(*args, **kwargs):
+            raise subprocess.TimeoutExpired("ffmpeg", relay.DECODER_PROBE_TIMEOUT)
+
+        with patched(subprocess=SimpleNamespace(run=hang)):
+            assert not relay._decoder_works("h264_rkmpp", "cam0"), "解不出来会挂住，超时算不可用"
+    finally:
+        relay._decoder_picks.clear()
+
+
+def test_fixed_decoder_env_skips_probing() -> None:
+    """`RELAY_DECODER=sw` / 写死 `h264_rkmpp` 时不探测，照办。"""
+    real = relay.DECODER
+    try:
+        relay.DECODER = "sw"
+        relay._decoder_picks.clear()
+        assert relay.pick_decoder("cam0") is None
+        relay.DECODER = "h264_rkmpp"
+        assert relay.pick_decoder("cam0") == "h264_rkmpp"
+        assert "cam0" not in relay._decoder_picks, "写死时不该写缓存"
+    finally:
+        relay.DECODER = real
+        relay._decoder_picks.clear()
 
 
 def main() -> int:
