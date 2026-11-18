@@ -313,10 +313,23 @@ ssh root@192.168.41.246 'systemctl status backpack-relay --no-pager -n 10'
 ssh root@39.107.55.13 'journalctl -u rust-admin-robodog -f | grep -E "backpack stream|video stream reset|last viewer of bp"'
 ```
 
+> **板子会硬复位（2026-11-18 当天 11:53 / 13:34 / 14:49 三次）**：`journalctl -b -1` 最后一条
+> 停在应用日志、没有任何关机流程 = 断电式重启。`/proc/meminfo` 里 `CmaTotal: 16384 kB`、
+> `CmaFree: 0 kB`，内核反复报 `cma: cma_alloc ... alloc failed`（开机时 + 每次有人看视频、
+> 中继起转码时），而 cmdline 里**没有 `cma=`** —— 板上同时跑 5 个 rkmpp 编码器（4 路 USB 相机
+> 常驻 `h264_rkmpp` + 中继按需转码），16MB CMA 根本不够。复位后 7 路推流静默 34s，平台
+> 按 `PUBLISHER_SILENCE` 判死丢房间，现场看到的就是「画面突然冻住」。
+>
+> 处置优先级：① 现场确认 4 路 USB 相机是否需要常驻编码（改成按需 / 降到 640x360@15 400k，
+> 脚本在 `/root/261113/backpack_dashboard`）；② 把 boot 的 CMA 提到 64~128MB（Rockchip
+> Android 风格 boot，需现场/串口改 boot 配置，别远程动）；③ 别同时看多路（每路多一个转码）。
+> 中继侧已加的缓解：`-bf 0 -refs 1`（少占编码缓冲）+ 关键帧 1s + 按需起流。
+
 排障对照：
 
 | 现象 | 看哪里 | 说明 |
 | --- | --- | --- |
+| 板端整机重启过（画面冻住几分钟） | `journalctl -b -1 -n 5`、`grep cma /proc/meminfo`、`dmesg | grep cma_alloc` | 见上方「板子会硬复位」 |
 | `板端推流服务未连接` | 板端 `backpack-relay` 是否 active | 房间名 `bp:` 由服务端 `BACKPACK_ROOM_PREFIX` 定义，两边必须一致 |
 | 有画面但卡住/黑屏 | 板端 `ffmpeg:` 警告 | `Timestamps are unset` → 必须带 `-use_wallclock_as_timestamps 1`（脚本已带） |
 | 只有第一次能看 | 平台日志 `video stream reset` | 常驻连接复用了旧流头，服务端靠 `video_reset` 清 `init` |

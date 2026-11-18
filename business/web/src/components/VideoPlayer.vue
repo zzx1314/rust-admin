@@ -2,7 +2,12 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { tokenStorage } from "@/api/http";
 import { wsOrigin } from "@/utils/runtime";
-import { captureVideoPoster, getVideoPoster, setVideoPoster } from "@/composables/useVideoPoster";
+import {
+  captureVideoPoster,
+  clearVideoPoster,
+  getVideoPoster,
+  setVideoPoster
+} from "@/composables/useVideoPoster";
 import AppIcon from "./AppIcon.vue";
 
 /**
@@ -94,6 +99,9 @@ const STALL_MS = 8000;
 const CONNECT_TIMEOUT_MS = 20_000;
 let stallTimer: ReturnType<typeof setInterval> | null = null;
 let slowStartTimer: ReturnType<typeof setTimeout> | null = null;
+/** 「上一帧」最多顶这么久：中继真断了就老实显示连接中/失败，不能拿静帧冒充直播 */
+const POSTER_MAX_MS = 6_000;
+let posterTimer: ReturnType<typeof setTimeout> | null = null;
 let lastTime = 0;
 let lastProgressAt = 0;
 let attachStartedAt = 0;
@@ -145,6 +153,24 @@ function clearRetry() {
     clearTimeout(retryTimer);
     retryTimer = null;
   }
+}
+
+/** 静帧超时：到点还没出画就把 poster 撤掉（同时清掉共享缓存，别传给下一个播放器） */
+function armPosterTimeout() {
+  if (posterTimer) clearTimeout(posterTimer);
+  posterTimer = setTimeout(() => {
+    posterTimer = null;
+    poster.value = "";
+    clearVideoPoster();
+  }, POSTER_MAX_MS);
+}
+
+function clearPoster() {
+  if (posterTimer) {
+    clearTimeout(posterTimer);
+    posterTimer = null;
+  }
+  poster.value = "";
 }
 
 function armSlowStartHint() {
@@ -229,6 +255,9 @@ function destroy() {
 function fail(message: string) {
   status.value = "error";
   errorText.value = message;
+  // 失败就别再挂着静帧：让错误层和「重连中 N」角标说人话
+  clearPoster();
+  clearVideoPoster();
 }
 
 /**
@@ -269,8 +298,10 @@ async function attach() {
     errorText.value = "";
   }
   buffering.value = false;
-  // 上一路（直连 / 上一个通道）的最后一帧先顶着：切流期间不能是黑屏
+  // 上一路（直连 / 上一个通道）的最后一帧先顶着：切流期间不能是黑屏。
+  // 只顶 6s（见 armPosterTimeout）：板端复位后中继要几十秒才回来，静帧挂着就是「卡住」。
   if (!poster.value) poster.value = getVideoPoster();
+  if (poster.value) armPosterTimeout();
   armSlowStartHint();
 
   // 推流端已把源转成 FLV，flv.js 的 WebSocketLoader 直接消费二进制帧
@@ -300,6 +331,7 @@ function onPlaying() {
   status.value = "playing";
   buffering.value = false;
   clearSlowStartHint();
+  clearPoster();
   errorText.value = "";
   retryAttempt.value = 0;
   poster.value = "";

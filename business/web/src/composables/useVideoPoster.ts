@@ -6,15 +6,33 @@
  * 现场一律说「卡住了」。所以把上一路解出来的帧存成小图，新播放器没出画之前先顶着。
  *
  * 只放一张 320px 宽的 jpeg（~10KB），不做帧缓冲；换流成功播放后由播放器自己清掉。
+ *
+ * **必须带时效**：静帧只能在「正在换流」的几个心跳内出现。板端硬复位 / 断网时中继
+ * 会黑很久，这时候还挂着上一帧，现场就会说「卡住了」（2026-11-18 设备抽屉那次）。
+ * 所以取的时候按时间戳过滤，过期就当没有；播放器另外还有一层定时清。
  */
-let poster = "";
-
-export function setVideoPoster(src: string): void {
-  poster = src;
+interface Shot {
+  src: string;
+  at: number;
 }
 
-export function getVideoPoster(): string {
-  return poster;
+/** 共享静帧的有效期：超过这个时间还没出画，就该老实显示「连接中 / 失败」 */
+const MAX_AGE_MS = 5_000;
+
+let shot: Shot | null = null;
+
+export function setVideoPoster(src: string): void {
+  shot = src ? { src, at: Date.now() } : null;
+}
+
+export function getVideoPoster(maxAgeMs = MAX_AGE_MS): string {
+  if (!shot) return "";
+  if (Date.now() - shot.at > maxAgeMs) return "";
+  return shot.src;
+}
+
+export function clearVideoPoster(): void {
+  shot = null;
 }
 
 /** `<video>` 当前帧 → 320px jpeg 的 dataURL；取不到（跨域 / 还没出画）返回空串 */

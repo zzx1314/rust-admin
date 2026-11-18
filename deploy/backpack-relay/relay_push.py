@@ -562,6 +562,13 @@ def ffmpeg_args(stream: str) -> list[str]:
             "yuv420p",
             "-b:v",
             bitrate,
+            # 不用 B 帧：少一层重排延迟，也少占一份编码缓冲（板子 CMA 只有 16MB，
+            # 4 路 USB 相机常驻编码 + 本路转码已经把它吃满，日志一直刷
+            # `cma: cma_alloc ... failed`；`-bf 0 -refs 1` 是这里最省的配置）
+            "-bf",
+            "0",
+            "-refs",
+            "1",
             "-g",
             # 关键帧间隔按实际帧率走 2s；显式配了 RELAY_GOP 时以配置为准（省流档除外）
             str(OUT_GOP if not low else max(1, fps * 2)),

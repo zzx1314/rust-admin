@@ -58,6 +58,26 @@ const phase = ref<WhepPhase>("connecting");
  * 这期间用共享的最后一帧顶着 —— 现场才不会说「一切就卡住」。
  */
 const poster = ref(getVideoPoster());
+/** 静帧最多顶 6s：WHEP 真连不上时要露出「连接中/失败」，不能拿上一帧冒充直播 */
+const POSTER_MAX_MS = 6_000;
+let posterTimer: ReturnType<typeof setTimeout> | null = null;
+
+function armPosterTimeout() {
+  if (posterTimer) clearTimeout(posterTimer);
+  if (!poster.value) return;
+  posterTimer = setTimeout(() => {
+    posterTimer = null;
+    poster.value = "";
+  }, POSTER_MAX_MS);
+}
+
+function clearPoster() {
+  if (posterTimer) {
+    clearTimeout(posterTimer);
+    posterTimer = null;
+  }
+  poster.value = "";
+}
 const phaseMessage = ref("");
 const fullscreen = ref(false);
 const shown = ref<MappedBox[]>([]);
@@ -99,6 +119,7 @@ function restart() {
   if (shot) {
     poster.value = shot;
     setVideoPoster(shot);
+    armPosterTimeout();
   }
   session?.close();
   session = null;
@@ -114,7 +135,7 @@ function restart() {
       phaseMessage.value = detail.message;
       emit("phase", { phase: detail.phase, message: detail.message });
       if (detail.phase === "live") {
-        poster.value = "";
+        clearPoster();
         publishSize();
       }
     }
@@ -253,6 +274,9 @@ function snapshot() {
 }
 
 onMounted(() => {
+  // 从别的页面 / 另一条通道切过来时，先顶上一帧（有时效，见 armPosterTimeout）
+  poster.value = getVideoPoster();
+  armPosterTimeout();
   document.addEventListener("fullscreenchange", onFullscreenChange);
   if (videoEl.value) {
     resizeObserver = new ResizeObserver(() => {
@@ -274,6 +298,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   document.removeEventListener("fullscreenchange", onFullscreenChange);
+  clearPoster();
   // 交给共享缓存：切到平台中继时由 VideoPlayer 先顶这一帧
   const shot = captureVideoPoster(videoEl.value);
   if (shot) setVideoPoster(shot);
