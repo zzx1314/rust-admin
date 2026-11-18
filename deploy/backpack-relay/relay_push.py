@@ -45,32 +45,50 @@ WebRTC 的 ~200ms 变成 1~2s，收益是任何网络、任何浏览器都能看
 | `RELAY_ROUTE_POLL` | `5` | 每这么久查一次平台出口网卡（`ip route get`），变了就重连；`0` 关闭 |
 | `RELAY_DEGRADE_TTL` | `300` | 首次降档后至少在省流档里待多久（秒）；到期还要链路真的恢复才回配置档 |
 | `RELAY_DEGRADE_TTL_MAX` | `1800` | 升降档来回抖时窗口逐次翻倍的上限（秒） |
-| `RELAY_FLAP_WINDOW` | `600` | 回配置档后这段时间内又拥塞 = 链路其实没恢复，窗口翻倍（秒） |
+| `RELAY_FLAP_WINDOW` | `600` | 升档后这段时间内又拥塞 = 这一档撑不住，窗口翻倍 + 封顶（秒） |
 | `RELAY_DEGRADE_WIDTH` / `_HEIGHT` / `_FPS` / `_BITRATE` | `640` / `360` / `12` / `500k` | 省流档参数 |
 | `RELAY_DEGRADE2_WIDTH` / `_HEIGHT` / `_FPS` / `_BITRATE` | `320` / `180` / `8` / `200k` | 极省流档（4G / 弱 Wi-Fi：链路比 500k 还小时用） |
 | `RELAY_CONGEST_WINDOW` | `5` | 码率 / send 占用的统计窗口（秒） |
 | `RELAY_CONGEST_DUTY` | `0.5` | 窗口内 `ws.send` 占用超过它算「被反压」 |
 | `RELAY_CONGEST_BPS_RATIO` | `0.9` | 实测码率低于目标档位的这个比例（配合上一项）即判拥塞、降档 |
-| `RELAY_RECOVER_DUTY` / `_STABLE` | `0.2` / `20` | send 占用持续低于它 `_STABLE` 秒才算链路恢复，可以回配置档 |
+| `RELAY_RECOVER_DUTY` / `_STABLE` | `0.2` / `20` | send 占用持续低于它 `_STABLE` 秒才算链路恢复，可以试升一档 |
+| `RELAY_PROBATION` / `_LAG` | `45` / `0.6` | 升档试用期：这么久内积压超过 `_LAG` 秒就退回上一档 |
 | `RELAY_MAX_LAG` | `3` | 帧在管道里积压超过这么多秒就重拉 ffmpeg 重新对齐时间轴（延迟看门狗） |
 | `RELAY_LAG_LOG` | `1` | 延迟超过它就每 30s 记一行 `画面延迟 x.xs`（线上量延迟看这个） |
 | `RELAY_LAG_RESTART_MIN` | `20` | 两次「延迟重同步」的最小间隔（秒），防抖 |
+| `RELAY_LAG_DEGRADE` / `_HOLD` / `_DEBOUNCE` | `1.2` / `10` / `30` | 积压持续上涨就降一档（比 `RELAY_MAX_LAG` 的硬重同步早得多） |
 | `RELAY_STOP_GRACE` | `5` | 停流时等协程退出的上限；超时就掐连接（否则 session 会僵死） |
 
 ## 自适应档位
 
-上行吃不下当前档位时**立刻降一档**，不用等断线重连：窗口内实测码率明显低于目标
-（`RELAY_CONGEST_*`）或某个分片 `send` 直接超时 → 发 `video_reset` + 重启 `ffmpeg`
-换 `640x360@12 / 500k`，观看端不用重连。降档后 `RELAY_DEGRADE_TTL` 起算，到期**先
-看链路是否真恢复**（send 占用低于 `RELAY_RECOVER_DUTY` 并持续 `RELAY_RECOVER_STABLE`
-秒）才回配置档，否则继续省流；反复升降时窗口翻倍（上限 `RELAY_DEGRADE_TTL_MAX`）。
-没人在看的时候不做任何试探，到期直接清掉拥塞状态。
+```text
+配置档 720p15/1000k ⇄ 省流档 640x360@12/500k ⇄ 极省流档 320x180@8/200k
+```
+
+**降档**（三档，一次降一档）：窗口内实测码率明显低于目标（`RELAY_CONGEST_*`）、
+某个分片 `send` 超时，或**积压持续上涨**（`RELAY_LAG_DEGRADE`，出帧跟不上这一档）
+→ 发 `video_reset` + 重启 `ffmpeg` 换档，观看端不用重连。
+
+**升档**（回档）只升**一档**，而且必须同时满足：窗口到期、有人在看、`send` 占用
+持续低于 `RELAY_RECOVER_DUTY`、当前档实测码率打得到本档目标；升上去之后进入
+`RELAY_PROBATION` 试用期，积压超过 `RELAY_PROBATION_LAG` 就**立刻退回上一档**。
+撑不住的档位记为 `_ceiling_level`，在 `hold_seconds()` 内不再尝试。
+
+为什么这么小心（2026-11-18 现场）：升档以前是判断「send 占用 ≤20%」直接跳回配置档。
+可是在极省流 200k 上 send 占用天然是 0%（根本没东西可发），于是被判「链路已恢复」
+→ 回 1000k → 板子出帧只有 ~91%（rkmpp CBR 靠丢帧保码率）→ 积压以 ~1.6%/s 涨 →
+5 分钟涨到 5.3s → 延迟看门狗重启 ffmpeg + 掰连接 → 观众被踢下线重连。
+周期约 10 分钟，现场体感就是「平台中继看着看着就卡住了」。
+
+反复升降时窗口翻倍（`RELAY_DEGRADE_TTL` → `_TTL_MAX`）。**没人在看时不升档**：
+既没试探成本也没证据（`send 占用 0%` 什么也证明不了），保持当前档位等下一个观众。
 
 ## 延迟
 
 `-muxdelay 0 -muxpreload 0 -flush_packets 1`（mux 缓冲归零）。积压延迟用 FLV 视频 tag 的
-时间戳量：`lag = 现在墙钟 - (ffmpeg 起流时刻 + tag_ts)`，超过 `RELAY_MAX_LAG`（默认 3s）就
+时间戳量：`lag = 现在墙钟 - (首帧时刻 + tag_ts 增量)`，超过 `RELAY_MAX_LAG`（默认 3s）就
 重拉 ffmpeg 重新对齐（`video_reset`，观看端不重连）。日志里 `画面延迟 x.xs` 就是它。
+积压**持续上涨**（`RELAY_LAG_DEGRADE`）会先降档——那是「这一档出帧跟不上」，不是丢包。
 
 依赖：python3 + `websockets`（板子上随 FastAPI 生态已装）+ ffmpeg。
 """
@@ -188,6 +206,27 @@ LAG_LOG = float(os.environ.get("RELAY_LAG_LOG", "1"))
 LAG_LOG_INTERVAL = 30.0
 LAG_RESTART_MIN = float(os.environ.get("RELAY_LAG_RESTART_MIN", "20"))
 
+# 延迟**增速**也当降档信号（比 `MAX_LAG` 的硬重启早得多）。
+#
+# 现场 2026-11-18：配置档 720p15/1000k 在板子上出帧只有 ~91%，rkmpp 的 CBR 靠丢帧保
+# 码率 → tag 时间戳比墙钟走得慢 → 积压按 ~1.6%/s 涨。`_sample_congestion` 完全看不出来
+# （bps 909k vs 目标 1000k = 0.909 > 0.9，duty 也不高），于是一路涨到 5.3s 才被 MAX_LAG
+# 重启 —— 这 5 分钟观众看到的就是「越来越卡，然后掉线」。所以「延迟在涨」本身就要降档。
+LAG_DEGRADE = float(os.environ.get("RELAY_LAG_DEGRADE", "1.2"))
+# 积压要持续这么久才动手：单次抖动（等关键帧、Wi-Fi 轻微排队）不该立刻降档
+LAG_DEGRADE_HOLD = float(os.environ.get("RELAY_LAG_DEGRADE_HOLD", "10"))
+# 两次「因延迟降档」之间的最小间隔：降档后重新计时，别把刚起的流反复重启
+LAG_DEGRADE_DEBOUNCE = float(os.environ.get("RELAY_LAG_DEGRADE_DEBOUNCE", "30"))
+
+# 升档试用期：回档只升一档，升上去之后立刻盯积压，撑不住就退回上一档。
+#
+# 为什么必须有：`send 占用` 只在「档位高于链路」时才高，档位远低于链路时天然接近 0%，
+# 拿它证明「链路恢复到能跑配置档」是假的（2026-11-18：极省流 200k 占用 0% → 回配置档
+# 1000k → 5 分钟涨 5.3s 延迟 → 被掐连接）。试用期用「积压增长」当判据，30~45s 就能
+# 看出这一档撑不撑得住，代价只有一次就地重启 ffmpeg（观看端不重连）。
+PROBATION_SECS = float(os.environ.get("RELAY_PROBATION", "45"))
+PROBATION_LAG = float(os.environ.get("RELAY_PROBATION_LAG", "0.6"))
+
 # 省流档：Wi-Fi 断掉只剩 4G（实测 ~0.5Mbps）时，继续按 1200k 推只会每 10s 超时重连一次；
 # 降到 500k 至少画面是连续的。降档是全局的（上行共享），到期按链路实际恢复情况决定
 # 回不回配置档，反复升降时窗口翻倍。
@@ -213,19 +252,29 @@ DEGRADE2_BPS = parse_bitrate(DEGRADE2_BITRATE)
 
 # 当前降到第几档：0 = 配置档，1 = 省流档（640x360@12/500k），2 = 极省流档（320x180@8/200k）
 #
-# 跟 `_congested_until` 分开：窗口到期只是「可以开始评估能不能回配置档」，链路没恢复就
+# 跟 `_congested_until` 分开：窗口到期只是「可以开始评估能不能升一档」，链路没恢复就
 # 继续待在当前档，不是一到点就自己升回去。
 _degrade_level = 0
 # 最近一个 5s 窗口实测推出去的码率（bps）：决定「当前这一档是不是也吃不下」→ 要不要再降一档
 _last_window_bps = 0.0
 # 省流档最早什么时候可以结束
 _congested_until = 0.0
-# 连续「回配置档 → 又拥塞」的次数：决定这次降档要撑多久（2 的幂翻倍）
+# 连续「升一档 → 又拥塞」的次数：决定这次降档要撑多久（2 的幂翻倍）
 _flaps = 0
 _recovered_at = 0.0
-# duty 的 EWMA 与「持续健康」的起点：回配置档前先确认链路真的闲下来了
+# duty 的 EWMA 与「持续健康」的起点：升档前先确认链路真的闲下来了
 _link_duty = 0.0
 _healthy_since = 0.0
+# 升档试用期：升上去的那一档能不能稳住（见 PROBATION_*）
+_probation_level = -1
+_probation_from = 0
+_probation_until = 0.0
+# 已知「这一档及以上吃不下」的封顶：试用期失败 / 刚升档就拥塞时记下来，
+# 到期前不再往上试（避免「升 → 涨 5 分钟延迟 → 被掰 → 再升」的循环）
+_ceiling_level: int | None = None
+_ceiling_until = 0.0
+# 没人看时的日志去重（看门狗每 2s 跑一次，别刷屏）
+_idle_logged_at = 0.0
 # stream -> StreamSession：档位变了要就地重启这些流
 _sessions: dict[str, "StreamSession"] = {}
 
@@ -284,28 +333,42 @@ def note_link_window(duty: float) -> None:
         _healthy_since = 0.0
 
 
-def mark_congested(stream: str, reason: str, restream: bool = True) -> None:
+def mark_congested(
+    stream: str, reason: str, restream: bool = True, lag: bool = False
+) -> None:
     """上行吃不下当前档位：切省流档；已经在省流档就只把窗口往后延。
 
     `restream=True` 时立刻让正在跑的流换档（发 `video_reset` + 重启 ffmpeg，WS 不动），
     不必再等一次「超时 → 断连 → 重连」—— 那中间的十几秒正是最卡的时候。
+
+    `lag=True`：拥塞的证据是「积压持续上涨」（出帧跟不上），不是 send 反压。
+    这种情况下不能再拿「实测码率还在目标附近」当「这一档还能跑」—— rkmpp 的 CBR
+    正是靠丢帧保码率，码率看着没掉，画面却在一路掉队。
     """
     global _degrade_level, _congested_until, _flaps, _recovered_at
+    global _ceiling_level, _ceiling_until
     now = time.monotonic()
-    if _degrade_level == 0:
-        # 刚回配置档又立刻拥塞 = 链路其实没恢复：窗口翻倍，别来回升降把画面折腾碎
-        _flaps = (
-            min(_flaps + 1, 5) if _recovered_at and now - _recovered_at < FLAP_WINDOW else 0
-        )
-        _recovered_at = 0.0
-        _degrade_level = 1
-    elif _degrade_level == 1 and not _current_level_is_workable():
-        # 省流档（500k）也吃不下（4G 只有 250k 那种）：再降一档
-        _degrade_level = 2
+    # 刚升到的那一档又吃不下 = 这一档撑不住：记成封顶，到期前不再自己升回去
+    # （否则就是「升 → 涨 5 分钟延迟 → 被掰 → 再升」的循环，2026-11-18 现场每 10 分钟一轮）
+    failed = _degrade_level
+    just_upgraded = bool(_recovered_at) and now - _recovered_at < FLAP_WINDOW
+    _recovered_at = 0.0
+    if failed == 0:
+        target = 1
+    elif failed == 1 and (lag or not _current_level_is_workable()):
+        # 省流档（500k）也吃不下（4G 只有 250k / 出帧跟不上）：再降一档
+        target = 2
     else:
         # 当前这一档还能跑，只是链路状态仍差：只续窗口，不重复降档/重启
         _congested_until = max(_congested_until, now + hold_seconds())
         return
+    if just_upgraded:
+        _flaps = min(_flaps + 1, 5)
+        _ceiling_level = failed
+        _ceiling_until = now + hold_seconds()
+    elif failed == 0:
+        _flaps = 0
+    _degrade_level = target
     _congested_until = now + hold_seconds()
     log(
         f"[{stream}] {reason} → 改用{level_label()} {profile_text(active_profile())}"
@@ -327,17 +390,112 @@ def _current_level_is_workable() -> bool:
     return _last_window_bps >= target * CONGEST_BPS_RATIO
 
 
-def restore_profile() -> None:
-    """链路确认恢复：回到配置档（已经在配置档的流不动）。"""
-    global _degrade_level, _congested_until, _recovered_at
-    _degrade_level = 0
-    _congested_until = 0.0
-    _recovered_at = time.monotonic()
+def probation_active() -> bool:
+    """当前是否在「刚升了一档，正在试」的阶段。"""
+    return _probation_until > 0
+
+
+def start_probation(level: int, previous: int) -> None:
+    global _probation_level, _probation_from, _probation_until
+    _probation_level = level
+    _probation_from = previous
+    _probation_until = time.monotonic() + PROBATION_SECS
+
+
+def expire_probation() -> None:
+    """试用期到点且没有被退回 = 这一档稳住了。"""
+    global _probation_until, _probation_level, _congested_until
+    if not _probation_until:
+        return
+    now = time.monotonic()
+    if now < _probation_until:
+        return
     log(
-        f"上行已恢复（send 占用 {_link_duty * 100:.0f}%），回到配置档 "
-        f"{profile_text(active_profile())}"
+        f"{level_label(_probation_level)} 试用期通过"
+        f"（{PROBATION_SECS:g}s 内没有积压，{profile_text(active_profile())}）"
     )
-    restream_all("回配置档")
+    _probation_until = 0.0
+    _probation_level = -1
+    if degraded():
+        # 还想继续往上试？按窗口节奏来，不是刚试完就再升一档
+        _congested_until = now + hold_seconds()
+
+
+def step_up_allowed(level: int, now: float | None = None) -> bool:
+    """能不能升到这一档（`_ceiling_level` 是最近试过、已知撑不住的那一档）。
+
+    档位数字越小画质越高（0 配置 / 1 省流 / 2 极省流）。“比它好”的档位同样要挡：
+    省流档都撑不住时，配置档更不可能撑住。
+    """
+    if level < 0:
+        return False
+    now = time.monotonic() if now is None else now
+    if _ceiling_level is not None and level <= _ceiling_level and now < _ceiling_until:
+        return False
+    return True
+
+
+def relapse(stream: str, reason: str, now: float | None = None) -> bool:
+    """升上去的这一档撑不住：立刻退回上一档，并把它记成「短期别再试」。
+
+    比等 `MAX_LAG` 的硬重同步早得多，而且**不进退化循环**——退回的是上一档（已经
+    验证过能跑），不是直接回配置档再降。
+    """
+    global _degrade_level, _probation_until, _probation_level, _probation_from
+    global _ceiling_level, _ceiling_until, _congested_until, _flaps
+    if not _probation_until:
+        return False
+    now = time.monotonic() if now is None else now
+    failed = _probation_level
+    _degrade_level = _probation_from
+    _probation_until = 0.0
+    _probation_level = -1
+    _flaps = min(_flaps + 1, 5)
+    hold = hold_seconds()
+    _congested_until = now + hold
+    _ceiling_level = failed
+    _ceiling_until = now + hold
+    log(
+        f"[{stream}] {reason} → 退回{level_label()} {profile_text(active_profile())}"
+        f"（{hold:g}s 内不再试{level_label(failed)}）"
+    )
+    restream_all(f"退回{level_label()}")
+    return True
+
+
+def step_up_profile() -> bool:
+    """链路看起来恢复了：**一次只升一档**（2→1→0），升完进试用期。
+
+    以前是直接 `_degrade_level = 0`：极省流 200k 时 send 占用天然是 0%，被当成
+    「链路满了 → 回配置档 1000k」，结果板子出帧跟不上，5 分钟积压到 5.3s 再被掰。
+    一档一档升 + 试用期，最坏情况也只是「一档高了一点点，几十秒内退回」；
+    再加上 `_ceiling_level`，同一个坑不会每 10 分钟踩一次。
+    """
+    global _degrade_level, _congested_until, _recovered_at
+    now = time.monotonic()
+    if _degrade_level <= 0:
+        return False
+    target = _degrade_level - 1
+    if not step_up_allowed(target, now):
+        hold = hold_seconds()
+        _congested_until = now + hold
+        log(
+            f"省流窗口到期，但{level_label(target)}已知撑不住，"
+            f"继续待在{level_label()}（{hold:g}s 后再试）"
+        )
+        return False
+    previous = _degrade_level
+    _degrade_level = target
+    _congested_until = 0.0
+    _recovered_at = now
+    start_probation(target, previous)
+    log(
+        f"上行看起来恢复了（send 占用 {_link_duty * 100:.0f}%），升一档到{level_label()}"
+        f" {profile_text(active_profile())}，{PROBATION_SECS:g}s 试用期"
+        f"（积压超过 {PROBATION_LAG:g}s 就退回）"
+    )
+    restream_all(f"升一档到{level_label()}")
+    return True
 
 
 def restream_all(reason: str) -> None:
@@ -352,18 +510,29 @@ def restream_all(reason: str) -> None:
 
 
 async def profile_check() -> None:
-    """省流窗口到期：链路真恢复了才回配置档，否则继续省流（不盲目到点就升回去）。"""
-    global _congested_until
+    """省流窗口到期：链路真恢复了才**升一档**，否则继续省流（不盲目到点就升回去）。"""
+    global _congested_until, _idle_logged_at, _healthy_since
+    expire_probation()
     if not degraded():
         return
     now = time.monotonic()
     if now < _congested_until:
         return
     running = any(session.running for session in _sessions.values())
-    # 没人在看就没有试探成本，直接清掉拥塞状态；有人在看要看 send 占用是否真的下来了
-    healthy = (not running) or (
-        _healthy_since > 0 and now - _healthy_since >= RECOVER_STABLE
-    )
+    if not running:
+        # 没人在看：不下发试探（不占带宽、不闪），但也**不盲回配置档**。
+        #
+        # 2026-11-18 就是在这里把「send 占用 0%」当成「链路恢复了」——没人在看的 0%
+        # 什么都没证明；而极省流 200k 时它天然就是 0%。保持当前档位，等真有人看、
+        # 并且真的能跑满时再一档一档往上试。
+        _congested_until = now
+        _healthy_since = 0.0  # 没有窗口统计，别拿上一次观看时的记录判「健康」
+        if now - _idle_logged_at >= 60:
+            _idle_logged_at = now
+            log(f"没人看：继续待在{level_label()}，有人看时再评估要不要升档")
+        return
+    # 有人在看：要 send 占用真的下来了才算健康
+    healthy = _healthy_since > 0 and now - _healthy_since >= RECOVER_STABLE
     if not healthy:
         _congested_until = now + hold_seconds()
         log(
@@ -371,7 +540,16 @@ async def profile_check() -> None:
             f"再省流 {hold_seconds():g}s"
         )
         return
-    restore_profile()
+    if not _current_level_is_workable():
+        # 当前这一档自己都打不满目标码率：再往上试只会重演「越看越卡」
+        _congested_until = now + hold_seconds()
+        log(
+            f"省流窗口到期但实测 {_last_window_bps / 1000:.0f}kbps"
+            f"（本档目标 {profile_bps(active_profile()) / 1000:.0f}kbps），"
+            f"不升档，再省流 {hold_seconds():g}s"
+        )
+        return
+    step_up_profile()
 
 
 async def profile_watcher() -> None:
@@ -810,6 +988,10 @@ class StreamSession:
         self._lag_ref: tuple[float, int] | None = None
         self._lag_logged_at = 0.0
         self._lag_restart_at = 0.0
+        # 延迟降档：积压超过 LAG_DEGRADE 且持续 LAG_DEGRADE_HOLD 才动手，动手后
+        # LAG_DEGRADE_DEBOUNCE 内不再动（降档会重启本路的 ffmpeg）
+        self._lag_degrade_since = 0.0
+        self._lag_degrade_at = 0.0
         # 停流时连接被掐断（协程卡在 ws.send 上停不下来）：别在这条连接上重拉
         self._conn_broken = False
         # 拥塞统计窗口：send 占用的累计时长 / 推出去的字节
@@ -844,6 +1026,8 @@ class StreamSession:
         self._flv = FlvScanner()
         self.lag = 0.0
         self._lag_ref = None
+        self._lag_degrade_since = 0.0
+        self._lag_degrade_at = 0.0
         self._win_at = self.last_send
         self._win_blocked = 0.0
         self._win_bytes = 0
@@ -980,14 +1164,50 @@ class StreamSession:
         if lag >= LAG_LOG and now - self._lag_logged_at >= LAG_LOG_INTERVAL:
             self._lag_logged_at = now
             log(f"[{self.stream}] 画面延迟 {lag:.1f}s（帧在管道里积压）")
+        # 先试「降一档」，降不下来再靠下面的 MAX_LAG 硬重同步：
+        # 硬重同步会重拉 ffmpeg（每次都可能搞丢协程/掰连接），而降档只是就地换参数。
+        self._check_lag_growth(now)
         if lag < MAX_LAG or now - self._lag_restart_at < LAG_RESTART_MIN:
             return
         self._lag_restart_at = now
+        self._lag_degrade_since = 0.0
         log(
             f"[{self.stream}] 延迟 {lag:.1f}s 超过上限 {MAX_LAG:g}s，"
             "重启 ffmpeg 重新对齐时间轴"
         )
         asyncio.create_task(self._restart(self.ws, f"延迟 {lag:.1f}s 超限"))
+
+    def _check_lag_growth(self, now: float) -> None:
+        """积压一直往上涨 = 这一档的出帧跟不上（不是丢包，也不是 send 反压）。
+
+        两种处理：
+        - 试用期内（刚升了一档）→ 立刻退回上一档（几十秒内就结束，不等到 3s）；
+        - 平时 → 持续 `LAG_DEGRADE_HOLD` 秒后降一档，比 `MAX_LAG` 的硬重启早得多。
+        """
+        if probation_active() and now < _probation_until:
+            # 试用期的阈值（PROBATION_LAG，~0.6s）比平时的 LAG_DEGRADE（~1.2s）低：
+            # 刚升到高一点的档位，积压一开始涨就是信号，没必要等到「明显不对」。
+            if self.lag >= PROBATION_LAG:
+                relapse(self.stream, f"试用期延迟 {self.lag:.1f}s（这一档出帧跟不上）", now)
+            else:
+                self._lag_degrade_since = 0.0
+            return
+        if self.lag < LAG_DEGRADE:
+            self._lag_degrade_since = 0.0
+            return
+        if not self._lag_degrade_since:
+            self._lag_degrade_since = now
+            return
+        if now - self._lag_degrade_since < LAG_DEGRADE_HOLD:
+            return
+        if now - self._lag_degrade_at < LAG_DEGRADE_DEBOUNCE:
+            return
+        self._lag_degrade_at = now
+        mark_congested(
+            self.stream,
+            f"延迟 {self.lag:.1f}s 持续上涨（{profile_text(active_profile())} 出帧跟不上）",
+            lag=True,
+        )
 
     def _sample_congestion(self, now: float) -> bool:
         """按窗口统计「实测码率 / send 占用」，判断上行是不是吃不下当前档位。
@@ -1217,7 +1437,8 @@ async def main() -> int:
         f"{DEGRADE_BITRATE} / 极省流档 {DEGRADE2_WIDTH}x{DEGRADE2_HEIGHT}@{DEGRADE2_FPS} "
         f"{DEGRADE2_BITRATE}（{CONGEST_WINDOW:g}s 内实测码率 ≤{CONGEST_BPS_RATIO:.0%} 目标且 "
         f"send 占用 ≥{CONGEST_DUTY:.0%} 即降档，至少保持 {DEGRADE_TTL:g}s，"
-        f"send 占用 ≤{RECOVER_DUTY:.0%} 持续 {RECOVER_STABLE:g}s 才回配置档）"
+        f"send 占用 ≤{RECOVER_DUTY:.0%} 持续 {RECOVER_STABLE:g}s 才试升一档，"
+        f"升上去 {PROBATION_SECS:g}s 内积压超 {PROBATION_LAG:g}s 就退回）"
     )
     if PROFILE == "copy":
         log("输出档位 copy：只换容器（1080p60 源会原样推 4~8Mbps，公网出口小必卡）")
@@ -1228,7 +1449,7 @@ async def main() -> int:
         )
     tasks = [asyncio.create_task(stream_worker(stream)) for stream in STREAMS]
     tasks.append(asyncio.create_task(route_watcher()))
-    # 省流窗口到期后按链路实际情况决定回不回配置档
+    # 省流窗口到期后按链路实际情况决定要不要升一档
     tasks.append(asyncio.create_task(profile_watcher()))
 
     stop = asyncio.Event()

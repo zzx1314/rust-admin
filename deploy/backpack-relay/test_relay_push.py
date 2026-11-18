@@ -52,6 +52,12 @@ def reset() -> None:
     relay._recovered_at = 0.0
     relay._link_duty = 0.0
     relay._healthy_since = 0.0
+    relay._probation_level = -1
+    relay._probation_from = 0
+    relay._probation_until = 0.0
+    relay._ceiling_level = None
+    relay._ceiling_until = 0.0
+    relay._idle_logged_at = 0.0
     relay._sessions.clear()
 
 
@@ -317,16 +323,133 @@ def test_recovered_link_returns_to_configured_profile() -> None:
     relay._congested_until = time.monotonic() - 1
     relay._link_duty = 0.1
     relay._healthy_since = time.monotonic() - relay.RECOVER_STABLE - 1
+    relay._last_window_bps = relay.profile_bps(relay.active_profile())
 
     asyncio.run(relay.profile_check())
     asyncio.run(asyncio.sleep(0))
 
     assert not relay.degraded()
     assert relay.active_profile()[0] == relay.OUT_WIDTH
-    assert only.restarts == ["回配置档"]
+    assert only.restarts == ["升一档到配置档"]
+    # 升上去之后要进试用期：这一档能不能稳住还没证明
+    assert relay.probation_active()
 
 
-def test_idle_restores_without_probing() -> None:
+def test_step_up_is_one_level_at_a_time() -> None:
+    """极省流 → 省流 → 配置档，一次只升一档（2026-11-18 直接跳回配置档的根因）。"""
+    reset()
+    only = FakeSession()
+    relay._sessions["dogcam"] = only
+    asyncio.run(degrade_in_loop())                     # 1
+    relay._last_window_bps = 250_000                  # 省流档也吃不下
+    asyncio.run(degrade_in_loop())
+    assert relay._degrade_level == 2
+    only.restarts.clear()
+
+    relay._congested_until = time.monotonic() - 1
+    relay._link_duty = 0.05
+    relay._healthy_since = time.monotonic() - relay.RECOVER_STABLE - 1
+    relay._last_window_bps = relay.profile_bps(relay.active_profile())
+    asyncio.run(relay.profile_check())
+
+    assert relay._degrade_level == 1, "不能从极省流直接跳回配置档"
+    assert only.restarts == ["升一档到省流档"]
+
+
+def test_probation_relapse_returns_one_level_and_pins_it() -> None:
+    """升档后积压往上涨 = 这一档撑不住：退回上一档，并记住别马上再试。"""
+    reset()
+    only = FakeSession()
+    relay._sessions["dogcam"] = only
+    asyncio.run(degrade_in_loop())                     # 配置档 → 省流档
+    only.restarts.clear()
+
+    relay._congested_until = time.monotonic() - 1
+    relay._link_duty = 0.1
+    relay._healthy_since = time.monotonic() - relay.RECOVER_STABLE - 1
+    relay._last_window_bps = relay.profile_bps(relay.active_profile())
+    asyncio.run(relay.profile_check())                 # 升到配置档，进试用期
+    assert relay._degrade_level == 0 and relay.probation_active()
+    only.restarts.clear()
+
+    session = relay.StreamSession("dogcam")
+    session._started_wall = time.time() - 60.0
+    session._flv.last_video_ts = 0
+    session._update_lag(time.monotonic())              # 首帧建基准
+    session._flv.last_video_ts = 1000                  # 时间戳只走 1s
+
+    async def growth() -> None:
+        session._update_lag(time.monotonic() + 2.0)    # 实际过了 2s → 积压 1s
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(growth())
+
+    assert relay._degrade_level == 1, "试用期内积压超限就应该退回上一档"
+    assert not relay.probation_active()
+    assert relay._ceiling_level == 0, "配置档撑不住要记下来"
+    assert relay._ceiling_until > time.monotonic()
+    assert only.restarts == ["退回省流档"]
+
+    # 窗口到期后不马上去碰已知撑不住的档位
+    relay._congested_until = time.monotonic() - 1
+    relay._healthy_since = time.monotonic() - relay.RECOVER_STABLE - 1
+    relay._last_window_bps = relay.profile_bps(relay.active_profile())
+    only.restarts.clear()
+    asyncio.run(relay.profile_check())
+    assert relay._degrade_level == 1, "ceiling 内的档位不该再试"
+    assert only.restarts == []
+
+
+def test_lag_growth_degrades_before_the_hard_restart() -> None:
+    """积压持续上涨就先降档，不等 RELAY_MAX_LAG 的硬重启（现场那 5 分钟）。"""
+    reset()
+    only = FakeSession()
+    relay._sessions["dogcam"] = only
+    session = relay.StreamSession("dogcam")
+    session._started_wall = time.time()
+    base = time.monotonic()
+    session._flv.last_video_ts = 0
+    session._update_lag(base)                       # 首帧建基准
+
+    def feed(elapsed: float, lag: float = 1.5) -> None:
+        """让墙钟跑 elapsed 秒、时间戳只跑 (elapsed - lag) 秒 → 积压始终是 lag。"""
+        session._flv.last_video_ts = int((elapsed - lag) * 1000)
+        session._update_lag(base + elapsed)
+
+    hold = relay.LAG_DEGRADE_HOLD
+
+    async def growth() -> None:
+        feed(2.5)                                   # 积压 1.5s：先记下起点（< HOLD）
+        await asyncio.sleep(0)
+        assert relay._degrade_level == 0
+        feed(2.5 + hold + 2)                         # 持续超限 → 降档
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(growth())
+    assert session.lag < relay.MAX_LAG, "还没到硬重同步的阈值就该先降档"
+    assert relay._degrade_level == 1, "积压持续上涨就该降档，而不是等着被硬重启"
+    assert only.restarts == ["降档到省流档"]
+    assert session._lag_restart_at == 0.0, "不该走到 MAX_LAG 的 ffmpeg 重启"
+
+    # 省流档也追不上：码率看着正常（`_last_window_bps` 达标）也要再降一档 ——
+    # rkmpp 的 CBR 就是靠丢帧保码率的，光看码率会把「画面一路掉队」当成正常
+    relay._last_window_bps = relay.profile_bps(relay.active_profile())
+    later = 2.5 + hold + 2 + relay.LAG_DEGRADE_DEBOUNCE + 2
+
+    async def growth_again() -> None:
+        feed(later)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(growth_again())
+    assert relay._degrade_level == 2
+    assert only.restarts == ["降档到省流档", "降档到极省流档"]
+
+
+def test_idle_keeps_the_level_instead_of_restoring() -> None:
+    """没人在看：不升档（send 占用 0% 什么都没证明），保持当前档位。"""
     reset()
     asyncio.run(degrade_in_loop())
     relay._congested_until = time.monotonic() - 1
@@ -334,24 +457,64 @@ def test_idle_restores_without_probing() -> None:
 
     asyncio.run(relay.profile_check())
 
-    assert not relay.degraded(), "没人在看时不做试探，到期直接清掉拥塞状态"
+    assert relay.degraded(), "没人在看时不该盲回配置档（那正是越看越卡的起点）"
+    assert relay._degrade_level == 1
+    assert not relay.probation_active(), "没人看就别开试用期"
+
+
+def test_probation_success_waits_for_the_next_window() -> None:
+    """试用期通过后不立刻再升一档：升档节奏还是按窗口走（2→1…→0 不能一次跳完）。"""
+    reset()
+    only = FakeSession()
+    relay._sessions["dogcam"] = only
+    relay._degrade_level = 2
+    relay._congested_until = time.monotonic() - 1
+    relay._link_duty = 0.05
+    relay._healthy_since = time.monotonic() - relay.RECOVER_STABLE - 1
+    asyncio.run(relay.profile_check())
+    assert relay._degrade_level == 1 and relay.probation_active()
+
+    # 试用期平静结束
+    relay._probation_until = time.monotonic() - 1
+    relay._healthy_since = time.monotonic() - relay.RECOVER_STABLE - 1
+    asyncio.run(relay.profile_check())
+
+    assert relay._degrade_level == 1, "刚试完一档不该立刻再升一档"
+    assert relay._congested_until > time.monotonic(), "下一次升档要等一个窗口"
+
+
+def test_ceiling_blocks_only_the_level_that_could_not_hold() -> None:
+    """封顶只挡「试过撑不住的那一档及以上」，更低的一档照样可以试。"""
+    reset()
+    relay._ceiling_level = 0
+    relay._ceiling_until = time.monotonic() + 300
+    assert not relay.step_up_allowed(0), "配置档已知撑不住，别再去撞"
+    assert relay.step_up_allowed(1), "省流档没被否定，还能试"
+
+    relay._ceiling_until = time.monotonic() - 1
+    assert relay.step_up_allowed(0), "封顶到期了应该允许再试一次"
 
 
 def test_flapping_doubles_the_hold_window() -> None:
     reset()
+    only = FakeSession()
+    relay._sessions["dogcam"] = only
     asyncio.run(degrade_in_loop())
     assert relay.hold_seconds() == relay.DEGRADE_TTL
 
     relay._congested_until = time.monotonic() - 1
     relay._link_duty = 0.1
     relay._healthy_since = time.monotonic() - relay.RECOVER_STABLE - 1
-    asyncio.run(relay.profile_check())  # 回到配置档
+    asyncio.run(relay.profile_check())  # 升一档 → 配置档
     assert not relay.degraded()
 
     # 刚回档又拥塞 = 链路其实没恢复：窗口翻倍，避免来回升降把画面折腾碎
     asyncio.run(degrade_in_loop(reason="又吃不下"))
     assert relay.degraded()
     assert relay.hold_seconds() == relay.DEGRADE_TTL * 2
+    # 同时记住「配置档撑不住」，到期前不再自己升回去
+    assert relay._ceiling_level == 0
+    assert relay._ceiling_until > time.monotonic()
 
     # 一直翻倍到上限
     relay._flaps = 9

@@ -800,11 +800,14 @@ python3 deploy/backpack-relay/measure_bitrate.py --stream dogcam --seconds 20
               （WS 不动 → 观看端不重连、不黑屏；已在省流档只续窗口）
 
 每 RELAY_RECOVER_POLL(2s) 看一次窗口是否到期
-  _congested_until 到期 且 send 占用 ≤ RELAY_RECOVER_DUTY(0.2) 持续 20s
-        ├─ 是 ─► restore_profile()：回配置档（同样就地重启 ffmpeg）
+  _congested_until 到期 且 有人在看 且 send 占用 ≤ RELAY_RECOVER_DUTY(0.2) 持续 20s
+  且 当前档实测码率打得到本档目标
+        ├─ 是 ─► step_up_profile()：**只升一档**（2→1→0）+ 45s 试用期
+        │        积压超过 RELAY_PROBATION_LAG(0.6s) → relapse() 退回上一档
+        │        并把那一档封顶（hold_seconds() 内不再试）
         └─ 否 ─► 继续省流（再续一个窗口）
 
-刚回档 RELAY_FLAP_WINDOW(600s) 内又拥塞 = 链路没真恢复 → 窗口 ×2（上限 1800s）
+刚升档 RELAY_FLAP_WINDOW(600s) 内又拥塞 = 这一档撑不住 → 窗口 ×2（上限 1800s）+ 封顶
 ```
 
 设计要点（改之前先看这几条，都是踩过的）：
@@ -816,11 +819,14 @@ python3 deploy/backpack-relay/measure_bitrate.py --stream dogcam --seconds 20
   `_stopping=True`。
 - **`degraded()` 是独立布尔值**，不能由 `_congested_until > now` 推断：窗口到期只是
   「可以开始评估」，链路没恢复还得继续待在省流档。
-- **回档要看得见链路**：`send` 占用的 EWMA 持续低于 `RELAY_RECOVER_DUTY`；没人在看时
-  不做试探，到期直接清掉拥塞状态（不占带宽、不闪）。
+- **升档要看得见链路**：`send` 占用的 EWMA 持续低于 `RELAY_RECOVER_DUTY`，而且
+  当前档自己得跑满本档目标。没人在看时**不升档**（`send 占用 0%` 什么都证明不了，
+  以前就是在这里把极省流档的 0% 当成「链路恢复了」，见⑨）。
+- **回档只升一档 + 试用期**：跳回配置档会让「板子出帧跟不上」的那 5 分钟没人管；
+  一档一档升、积压一涨就退，代价只有一次就地换档（观看端不重连）。
 - 回归：`python3 deploy/backpack-relay/test_relay_push.py`（纯状态机，不需要 websockets /
-  ffmpeg / 网络；9 个用例覆盖降档、窗口统计、到期仍拥塞、恢复回档、抖动翻倍、硬超时、
-  空跑不重启）。
+  ffmpeg / 网络；22 个用例覆盖降档、两级降档、窗口统计、延迟降档、延迟换算、
+  一次只升一档、试用期退回、封顶、抖动翻倍、硬超时、空跑不重启）。
 - 仍是**单档**（配置档 ⇄ 省流档），不做多码率 ABR：要真正的「按 buffer 连续掉档」得给
   平台房间加多路/多码率层（`video.rs` 的房间模型 + `relay_push.py` 的起停协议都要改）。
 
@@ -916,7 +922,8 @@ python3 deploy/backpack-relay/measure_bitrate.py --stream dogcam --seconds 20
 
 - 升级判据：`_current_level_is_workable()` —— 最近一个窗口实测码率 < 本档目标 ×90% 就再降一档；
   已经是极省流档就只续窗口、不重启；
-- 回档：窗口到期 + `send` 占用 ≤20% 持续 20s → 直接回配置档（抖动时窗口翻倍，见上）；
+- 升档：窗口到期 + `send` 占用 ≤20% 持续 20s + 当前档跑得满 → **只升一档**并进 45s
+  试用期（积压超 0.6s 就退回），不再是「直接回配置档」，见⑨；
 - 实测（板端真机，`ffmpeg` 直出 20s 稳态）：`320x180@8/200k` → **~2.2 fps、~170 kbps**，
   `640x360@12/500k` → ~5 fps，`720p15/1000k` → 13.9 fps。
 
@@ -925,7 +932,8 @@ python3 deploy/backpack-relay/measure_bitrate.py --stream dogcam --seconds 20
 > （0.3fps）；唯一有效的是拉长 GOP：`-g 200` 能到 3.2fps，但关键帧间隔 25s 意味着重连要
 > 等很久才出图，不划算，所以维持 `-g fps*2`。真要 8fps 的 320x180，大约需要 600~800kbps。
 > 结论：这一档的定位是「**慢刷新幻灯片，但不断线**」，不是「流畅」。
-> 回归：`python3 deploy/backpack-relay/test_relay_push.py`（17 个用例，含两级降档 + 不再升档）。
+> 回归：`python3 deploy/backpack-relay/test_relay_push.py`（22 个用例，含两级降档 +
+> 一次只升一档 / 试用期退回 / 封顶）。
 
 判定口诀（现场照着念）：
 
@@ -935,6 +943,64 @@ python3 deploy/backpack-relay/measure_bitrate.py --stream dogcam --seconds 20
 - 画面定住但平台日志 `lastFrameAgeSecs` 还是 0（字节在流）= 第 1 条那个 bug，
   现在会被平台主动断开重连，日志：`推流端开启新一轮流（video_reset），断开让前端重连拿新流头`；
 - 越看越晚 = 第 2 条，前端追边缘后不会再累积。
+
+#### ⑨ 每 10 分钟「越看越卡 → 掉线重连」：回档判据是假的（2026-11-18 三次修复）
+
+现场反馈：「平台中继看着看着就卡住了」。两边日志对齐后是一条**固定周期**：
+
+```text
+16:38:24 板端 配置档实测 846kbps（目标 1000k，send 占用 53%）→ 降省流档
+16:38:57 板端 省流档实测 418kbps（目标 500k，send 占用 79%） → 降极省流档
+16:39:16 极省流 320x180 开跑；平台侧这段 283.5s / 6.6MB / 平均 192kbps
+16:43:58 板端「上行已恢复（send 占用 0%），回到配置档」          ← 问题在这
+16:43:59 配置档 720p15/1000k 开跑；平台侧这 144s 平均 909kbps
+16:49:29 板端「画面延迟 1.7s」
+16:49:33 板端「延迟 5.3s 超过上限 3s，重启 ffmpeg」+ 再降省流档
+16:49:33 平台「stream reset（新一轮 ffmpeg）」→ 主动踢观看端
+16:49:41 平台「video publisher detached」← relay 自己「1 个协程 5s 没停下」掐了 WS
+```
+
+三个叠在一起的问题：
+
+| # | 位置 | 原来会怎样 |
+| --- | --- | --- |
+| 1 | `profile_check` 的「链路已恢复」判据 | 只看 `send` 占用 ≤20%。**极省流 200k 档上它天然是 0%**（根本没东西可发），等于「用最低档的闲」证明「1Mbps 带宽恢复了」→ 直接跳回配置档。
+| 2 | 跳回是 `_degrade_level = 0` | 极省流 → 配置档一步到位，跳过了省流档的验证；配置档在这块板子上撑不住（出帧只有目标帧率的 ~91%，rkmpp 的 CBR 靠丢帧保码率）→ tag 时间戳比墙钟走得慢 → **积压以 ~1.6%/s 涨**，5 分钟涨到 5.3s，中间这段时间观众看到的就是「越来越卡」。
+| 3 | 没有「延迟」类降档信号 | 窗口判据是「`send` 占用高 **且** 码率低于目标×0.9」。配置档实测 909kbps / 1000k = 0.909，刚好在阈值之上，`duty` 也不高 —— 完全看不出问题，只能等 3s 的硬重同步（顺带把连接掰了）。
+
+修法（只改板端 `deploy/backpack-relay/relay_push.py`，平台与前端不用动）：
+
+| 改动 | 说明 |
+| --- | --- |
+| **回档只升一档** | `step_up_profile()`：2→1→0，不再跳级。每一档都要单独验证过才允许再往上。 |
+| **升档试用期** | 升上去进 `RELAY_PROBATION`（45s）试用期，期间积压超过 `RELAY_PROBATION_LAG`（0.6s）就 `relapse()` **立刻退回上一档** + 就地重启 ffmpeg（观看端不重连）。代价从「5 分钟越来越卡 + 被踢」变成「几秒内闪一下」。 |
+| **封顶 `_ceiling_level`** | 试用期失败 / 刚升档就拥塞的那一档记下来，`hold_seconds()` 内不再尝试（比它更好的档位一起挡）。同一个坑不会每 10 分钟踩一次。 |
+| **延迟增速当降档信号** | `_check_lag_growth()`：积压 ≥ `RELAY_LAG_DEGRADE`（1.2s）并持续 `_HOLD`（10s）就降一档 —— 这比 `RELAY_MAX_LAG`（3s）的硬重启早得多，也不会掰连接。 |
+| **没人在看不升档** | 原来「没人在看 → 到期直接清掉拥塞状态」（= 回配置档）。可 `send 占用 0%` 在没有流的时候什么都没证明。现在保持当前档位，等真有人看、且真跑满本档目标时才评估。 |
+| **升档还要「本档自己跑得满」** | `profile_check` 多一道 `_current_level_is_workable()`：当前档实测码率打不到本档目标×0.9，就别往上试。 |
+
+新增/改动日志（认这几行就知道状态机在干什么）：
+
+```text
+上行看起来恢复了（send 占用 8%），升一档到省流档 640x360@12 500k，45s 试用期（积压超过 0.6s 就退回）
+省流档 试用期通过（45s 内没有积压，640x360@12 500k）
+[dogcam] 试用期延迟 1.1s（这一档出帧跟不上） → 退回省流档 640x360@12 500k（600s 内不再试配置档）
+省流窗口到期，但配置档已知撑不住，继续待在省流档（600s 后再试）
+[dogcam] 延迟 1.9s 持续上涨（1280x720@15 1000k 出帧跟不上） → 改用省流档 640x360@12 500k（至少保持 300s）
+没人看：继续待在省流档，有人看时再评估要不要升档
+```
+
+新增环境变量（都有默认值，一般不配）：`RELAY_PROBATION`（45）、`RELAY_PROBATION_LAG`（0.6）、
+`RELAY_LAG_DEGRADE`（1.2）、`RELAY_LAG_DEGRADE_HOLD`（10）、`RELAY_LAG_DEGRADE_DEBOUNCE`（30）。
+
+回归：`python3 deploy/backpack-relay/test_relay_push.py`（22 个用例，含「一次只升一档」
+「试用期失败退回并封顶」「积压持续上涨先降档而不是硬重启」「没人看保持档位」）；
+纯状态机，不需要 websockets / ffmpeg / 网络。
+
+> ⚠️ 如果**修完还在降档**，说明这块板子的链路 / 出帧能力就是撑不住配置档：
+> 直接把配置档降到它能吃下的规格（例如 `RELAY_BITRATE=900k RELAY_FPS=12`，
+> 或 `RELAY_WIDTH=1024 RELAY_HEIGHT=576`），别靠自适应去救 —— 自适应只能保证「体感可接受」，
+> 不能凭空变出带宽。
 
 #### 排查工具与清单
 
@@ -955,4 +1021,5 @@ ssh root@<背包IP> 'python3 /tmp/bw.py'              # 见 §6.10② 的量法�
 | 每 23s 左右断一次、20s 连接超时 | `/api/backpack/video/state` 的 `initBytes` + 服务端是否 `stream reset` | ①（已修） |
 | 有画面但卡、`measure_bitrate` 远低于配置 | 板端 `ip route get 39.107.55.13`、`bw.py` | ② 路由走了慢速 dongle |
 | 反复 `lagged`、`left after ... kbps` 高于出口 | `speedtest-cli` 的 Upload vs 平均 kbps | ③ 降档位 / 升带宽 |
+| 看着看着越来越卡（延迟涨），然后掉一下重连 | 板端 `画面延迟 x.xs` / `延迟 x.xs 超过上限` / `回到配置档`；平台 `stream reset` + `publisher detached` | ⑨（2026-11-18 已修）。修完还有：看 `试用期延迟` / `已知道撑不住` 两行，如果反复在降档，就把配置档降到链路能吃下的规格，别靠自适应救 |
 | 同时开多个视频页面更卡 | 每个观看者 = 一份出口带宽 | 出口按 1.5Mbps/路 规划 |

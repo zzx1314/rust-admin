@@ -33,15 +33,19 @@ Environment=RELAY_GOP=15
 # Environment=RELAY_CONGEST_WINDOW=5     # 码率 / send 占用的统计窗口（秒）
 # Environment=RELAY_CONGEST_DUTY=0.5     # 窗口内 send 占用超过它算「被反压」
 # Environment=RELAY_CONGEST_BPS_RATIO=0.9 # 实测码率低于目标档位这个比例即降档
-# Environment=RELAY_RECOVER_DUTY=0.2     # 回配置档前 send 占用要持续低于它
+# Environment=RELAY_RECOVER_DUTY=0.2     # 升档前 send 占用要持续低于它
 # Environment=RELAY_RECOVER_STABLE=20    # …并持续这么久（秒），否则继续省流
+# Environment=RELAY_PROBATION=45         # 升一档后的试用期（秒）
+# Environment=RELAY_PROBATION_LAG=0.6    # 试用期内积压超过它（秒）就退回上一档
 # Environment=RELAY_DEGRADE_TTL=300      # 首次降档至少保持多久（秒）
 # Environment=RELAY_DEGRADE_TTL_MAX=1800 # 反复升降时窗口翻倍的上限（秒）
-# Environment=RELAY_FLAP_WINDOW=600      # 回档后这么久内又拥塞 = 链路没恢复
+# Environment=RELAY_FLAP_WINDOW=600      # 升档后这么久内又拥塞 = 这一档撑不住（封顶）
 # Environment=RELAY_DEGRADE_BITRATE=500k
 # 延迟看门狗（默认 3s 重同步 / 1s 起打日志 / 20s 防抖）
 # Environment=RELAY_MAX_LAG=3
 # Environment=RELAY_LAG_LOG=1
+# Environment=RELAY_LAG_DEGRADE=1.2      # 积压持续上涨就降一档（比硬重同步早）
+# Environment=RELAY_LAG_DEGRADE_HOLD=10
 # Environment=RELAY_LAG_RESTART_MIN=20
 # Environment=RELAY_STOP_GRACE=5
 ExecStart=/usr/bin/python3 /opt/backpack-relay/relay_push.py

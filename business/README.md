@@ -1455,9 +1455,13 @@ mediamtx 的 `dogcam`，浏览器直连 mediamtx（WHEP）或走平台中继（F
   平台出口网卡，出口变了主动重建连接。
 - **画质自己降**（2026-11-19）：relay 每 5s 统计一次 `ws.send` 占用与实测码率，发现「被反压
   + 码率低于目标档位」就就地换 `640x360@12 / 500k`（发 `video_reset` + 重启 ffmpeg，观看端
-  不用重连），不必再等 10s 超时断线；到期先看链路是否真恢复才回配置档，反复升降时窗口翻倍。
+  不用重连），不必再等 10s 超时断线；`RELAY_LAG_DEGRADE` 让「积压持续上涨」（出帧跟不上
+  这一档）也降档，比 3s 的硬重同步早得多。
+  **升档（回档）一次只升一档**（极省流 → 省流 → 配置）+ `RELAY_PROBATION` 试用期：升上去
+  积压超过 `RELAY_PROBATION_LAG` 就立即退回，并把那一档封顶一段时间不再试；没人在看时不升档。
+  反复升降时窗口翻倍。
   降档是板端行为，平台/前端不用改；参数与状态机见
-  `business/docs/backpack-video-integration.md` §6.10⑥。
+  `business/docs/backpack-video-integration.md` §6.10⑥⑨。
   平台侧推流端静默判定 30s，`/api/backpack/video/state` 多一个 `lastFrameAgeSecs`。
   旧版 relay 的「Wi-Fi 一断画面永久冻住」就是发送无超时 + `video_start` 幂等吃掉导致的，
   详见 `docs/backpack-video-integration.md` §6.10⑤。
