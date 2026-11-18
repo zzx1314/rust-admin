@@ -296,16 +296,19 @@ async fn backpack_stream_is_relayed_to_browser_and_stops_after_a_grace_period() 
         "推上来的帧应原样转发"
     );
 
-    // 3) 中途加入的观看者：必须补到流头，否则浏览器黑屏
+    // 3) 中途加入的观看者：补「流头 + **当前 GOP**」，否则浏览器 MSE 里会出现
+    //    「几百秒空洞 + 缺参考帧的 P 帧」→ 现场表现为「字节还在流、画面定住」。
     let (mut late_viewer, _) = connect_async(format!(
         "ws://127.0.0.1:{port}/api/backpack/video/ws?stream=dogcam&token={token}"
     ))
     .await
     .expect("第二个观看者连接失败");
+    let mut expected = init.clone();
+    expected.extend_from_slice(&frame); // 当前 GOP：关键帧 + 已推过的 P 帧
     assert_eq!(
-        next_binary(&mut late_viewer, "中途加入补流头").await,
-        init,
-        "中途加入的观看者应收到补发的流头"
+        next_binary(&mut late_viewer, "中途加入补流").await,
+        expected,
+        "中途加入的观看者应收到「流头 + 当前 GOP」（时间轴连续、参考帧完整）"
     );
 
     // 中途加入不该重复触发 video_start（推流端是常驻连接，重复起流会白换一条 FLV）
@@ -369,16 +372,20 @@ async fn backpack_stream_is_relayed_to_browser_and_stops_after_a_grace_period() 
     );
 
     // 5) 宽限期内重新打开（关抽屉再打开 / 浏览器重连）：流还在跑，新观看者**立刻**
-    //    拿到上一轮的流头 + 关键帧，不必再等一次 ffmpeg 启动，也不会黑屏
+    //    拿到（流头 + 当前 GOP）字节，不必再等一次 ffmpeg 启动，也不会黑屏。
+    //    到这里已经推过 init + 2 个 P 帧，所以补的就是这几段（时间轴连续）。
     let (mut reopen, _) = connect_async(format!(
         "ws://127.0.0.1:{port}/api/backpack/video/ws?stream=dogcam&token={token}"
     ))
     .await
     .expect("重开的观看者连接失败");
+    let mut expected = init.clone();
+    expected.extend_from_slice(&frame);
+    expected.extend_from_slice(&frame);
     assert_eq!(
-        next_binary(&mut reopen, "重开补流头").await,
-        init,
-        "同一条流里重新观看也必须拿到流头，否则 flv.js 只能从中段字节开始解"
+        next_binary(&mut reopen, "重开补流").await,
+        expected,
+        "重开的观看者必须立刻拿到流头 + 当前 GOP（不必等 ffmpeg）"
     );
 }
 

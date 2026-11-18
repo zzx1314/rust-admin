@@ -109,6 +109,11 @@ const PUBLISHER_SILENCE: std::time::Duration = std::time::Duration::from_secs(30
 /// 超出说明推上来的不是 FLV/H.264，直接放弃补头，避免内存被吃满。
 const MAX_INIT_BYTES: usize = 4 * 1024 * 1024;
 
+/// 「当前 GOP」缓冲的上限：720p15/1000k 一个 GOP（2s）约 250KB，给 4MB 富余
+///
+/// 超限（编码器不吐关键帧 / 码率失控）就整个丢掉，退回用 `init` 补流 —— 宁可变卡，不能把内存吃满。
+const MAX_GOP_BYTES: usize = 4 * 1024 * 1024;
+
 /// 推流会话自增号（见 `VideoHub::publisher_attach`）
 static PUBLISHER_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -230,7 +235,28 @@ struct Room {
     ///
     /// 推流是持续的，后打开页面的浏览器只能收到中途的字节；没有这个头，
     /// flv.js 连 `FLV` 魔数和 AVC 配置都看不到，直接黑屏。
+    ///
+    /// ⚠️ 它只是**兜底**（这一轮还没攒出完整 GOP 时才用），正常补流走
+    /// [`Room::header`] + [`Room::gop`]，原因见 `gop` 的注释。
     init: Option<Arc<[u8]>>,
+    /// `init` 去掉「首个关键帧」的部分：FLV header(13) + onMetaData + AVC 序列头
+    ///
+    /// 补当前 GOP 时要把它接在 GOP 前面（浏览器必须有 FLV 魔数和 SPS/PPS）。
+    header: Option<Arc<[u8]>>,
+    /// 当前 GOP 的字节：从**最近一个视频关键帧 tag 开头**开始，给中途加入的观看者补流
+    ///
+    /// 为什么不直接补 `init`（本轮第一个关键帧）：那段时间戳是本轮开头（ts≈0），而直播帧
+    /// 已经跑到几百秒 —— 浏览器 MSE 里会出现一个**几百秒的空洞**；而且紧跟在补的关键帧
+    /// 后面的是**缺参考帧的 P 帧**（花屏 / 画面定住，要等下一个关键帧才自愈）。
+    /// 现场表现就是「字节还在流、画面定住」（2026-11-18 21:53 事故：补的流头 ts=0，
+    /// 直播帧已经 ts=435s）。
+    ///
+    /// 补当前 GOP 则是：时间轴连续、参考帧完整、最多落后一个 GOP（默认 2s）。
+    gop: Vec<u8>,
+    /// 当前 GOP 第一个字节到达的时刻（诊断用 `gopAgeSecs`）
+    gop_at: Option<std::time::Instant>,
+    /// `gop` 的组装缓冲：还没对齐到 tag 边界的尾巴（一个 keyframe 往往比 8KB 分片大）
+    gop_pending: Vec<u8>,
     /// 流头解析完成前先缓存，避免把不完整的字节发给观看者
     pending: Vec<u8>,
     /// 推流会话标识：`Some(id)` 表示在线，`id` 用来区分「新连接」与「旧连接迟到的清理」
@@ -260,12 +286,82 @@ fn new_room(device_id: &str, publisher: Option<u64>) -> Room {
     Room {
         tx: broadcast::channel(viewer_buffer_frames(device_id)).0,
         init: None,
+        header: None,
+        gop: Vec::new(),
+        gop_at: None,
+        gop_pending: Vec::new(),
         pending: Vec::new(),
         publisher,
         idle_since: None,
         last_frame: None,
         reset: Arc::new(tokio::sync::Notify::new()),
         viewer_lag_ms: Arc::new(AtomicU64::new(0)),
+    }
+}
+
+impl Room {
+    /// 中途加入的观看者要补的字节：`FLV header + onMetaData + AVC 序列头 + 当前 GOP`
+    ///
+    /// - 有完整 GOP → 补当前 GOP（时间轴连续、参考帧完整，最多落后一个 GOP）；
+    /// - 这一轮刚起、还没攒出 GOP（或刚被截断）→ 退回 `init`（本轮第一个关键帧）。
+    ///   旧行为，只能在极短窗口内出现。
+    fn catch_up(&self) -> Option<Arc<[u8]>> {
+        match &self.header {
+            Some(header) if !self.gop.is_empty() => {
+                let mut buf = Vec::with_capacity(header.len() + self.gop.len());
+                buf.extend_from_slice(header);
+                buf.extend_from_slice(&self.gop);
+                Some(Arc::from(buf))
+            }
+            _ => self.init.clone(),
+        }
+    }
+
+    /// 维护「当前 GOP」：从最近一个视频关键帧 tag 开头开始累积
+    ///
+    /// 推上来的 8KB 分片不一定 tag 对齐（一个关键帧往往比分片大），所以先用
+    /// `gop_pending` 攒到完整 tag 再决定要不要从它重新开一个 GOP。
+    fn gop_feed(&mut self, chunk: &[u8]) {
+        self.gop_pending.extend_from_slice(chunk);
+        let mut pos = 0;
+        while self.gop_pending.len() >= pos + 11 {
+            let size = u32::from_be_bytes([
+                0,
+                self.gop_pending[pos + 1],
+                self.gop_pending[pos + 2],
+                self.gop_pending[pos + 3],
+            ]) as usize;
+            let end = pos + 11 + size + 4;
+            if self.gop_pending.len() < end {
+                break;
+            }
+            let tag = &self.gop_pending[pos..end];
+            if video_keyframe_tag(tag) {
+                // 新 GOP：之前攒的（上一个 GOP 的 P 帧）全部作废
+                self.gop.clear();
+                self.gop_at = Some(std::time::Instant::now());
+            }
+            if self.gop_at.is_some() {
+                self.gop.extend_from_slice(tag);
+            }
+            pos = end;
+        }
+        self.gop_pending.drain(..pos);
+        if self.gop.len() > MAX_GOP_BYTES || self.gop_pending.len() > MAX_FLV_TAG_BYTES {
+            self.gop.clear();
+            self.gop_pending.clear();
+            self.gop_at = None;
+        }
+    }
+
+    /// 新一轮流开始：流头、GOP 全部作废
+    fn forget_stream_bytes(&mut self) {
+        self.init = None;
+        self.header = None;
+        self.gop.clear();
+        self.gop_pending.clear();
+        self.gop_at = None;
+        self.pending = Vec::new();
     }
 }
 
@@ -287,8 +383,8 @@ impl VideoHub {
             .or_insert_with(|| new_room(device_id, None));
         // 有人回来看了：空闲计时清零，看门狗别把还热着的流停掉
         room.idle_since = None;
-        let init = room.init.clone();
-        (room.tx.subscribe(), first, init)
+        let catch_up = room.catch_up();
+        (room.tx.subscribe(), first, catch_up)
     }
 
     /// 观看者离开：返回是否是「最后一个观看者」
@@ -340,22 +436,31 @@ impl VideoHub {
         };
         room.last_frame = Some(std::time::Instant::now());
         if room.init.is_some() {
+            // 维护「当前 GOP」：中途加入的观看者靠它拿到时间轴连续的一段
+            room.gop_feed(&frame);
             // 接收端全掉线时 send 报错，忽略即可；下游会自行关闭连接
             let _ = room.tx.send(frame);
             return;
         }
 
         room.pending.extend_from_slice(&frame);
-        match flv_init_len(&room.pending) {
-            Some(len) => {
+        match flv_init_span(&room.pending) {
+            Some((prefix_len, len)) => {
                 let init: Arc<[u8]> = Arc::from(&room.pending[..len]);
+                let header: Arc<[u8]> = Arc::from(&room.pending[..prefix_len]);
+                // 13 = FLV header(9) + PrevTagSize0(4)，从这之后都是 tag 对齐的
+                let init_tail: Vec<u8> = room.pending[13..len].to_vec();
                 let rest: Arc<[u8]> = Arc::from(&room.pending[len..]);
                 // 先补流头：先到的观看者是「流头还没解析出来就加入」的，
                 // 他们的字节被缓存了，这里必须一次性补上，否则永远收不到 FLV 魔数
                 let _ = room.tx.send(init.clone());
                 room.init = Some(init);
+                room.header = Some(header);
                 room.pending = Vec::new();
+                // 用本轮的第一个关键帧给 GOP 打底
+                room.gop_feed(&init_tail);
                 if !rest.is_empty() {
+                    room.gop_feed(&rest);
                     let _ = room.tx.send(rest);
                 }
             }
@@ -384,8 +489,7 @@ impl VideoHub {
                 let was_live = room.init.is_some() || room.last_frame.is_some();
                 info!("video publisher {device_id} 重连，沿用房间（新一轮流，时间轴归零）");
                 room.publisher = Some(session);
-                room.init = None;
-                room.pending.clear();
+                room.forget_stream_bytes();
                 room.last_frame = None;
                 room.viewer_lag_ms.store(0, Ordering::Relaxed);
                 if was_live {
@@ -396,8 +500,7 @@ impl VideoHub {
             // 这里**不能**清观看端，否则刚进来的观看者立刻被踢掉，画面永远出不来。
             Some(room) => {
                 room.publisher = Some(session);
-                room.init = None;
-                room.pending.clear();
+                room.forget_stream_bytes();
                 room.viewer_lag_ms.store(0, Ordering::Relaxed);
             }
             None => {
@@ -514,8 +617,7 @@ impl VideoHub {
             // 把人家踢掉纯属多余：前端 250ms 后会重连，但首帧凭空慢了一截（2026-11-18
             // 发布后 `measure_bitrate` 探针直接被 1006 断掉，就是这么来的）。
             let was_live = room.init.is_some() || room.last_frame.is_some();
-            room.init = None;
-            room.pending = Vec::new();
+            room.forget_stream_bytes();
             room.last_frame = None;
             // 时间轴重新开始，上一轮的「落后多少秒」没意义了
             room.viewer_lag_ms.store(0, Ordering::Relaxed);
@@ -560,6 +662,10 @@ impl VideoHub {
                     "room": key,
                     "publisher": room.publisher.is_some(),
                     "initBytes": room.init.as_ref().map(|init| init.len()).unwrap_or(0),
+                    // 补流用的「当前 GOP」大小 / 它是多久前开始的（大 = 一个 GOP 太长；
+                    // null = 还没攒出 GOP，中途加入的观看者目前只能用本轮第一个关键帧兜底）
+                    "gopBytes": room.gop.len(),
+                    "gopAgeSecs": room.gop_at.map(|at| at.elapsed().as_secs()),
                     "pendingBytes": room.pending.len(),
                     "viewers": viewers.get(key).copied().unwrap_or(0),
                     // 秒；null = 这一轮还没收到过字节。持续变大就是「推流端没数据」
@@ -586,11 +692,12 @@ impl VideoHub {
     }
 }
 
-/// 解析 FLV 流头长度：`FLV header(9) + PrevTagSize0(4) + AVC 序列头 + 首个关键帧`
+/// 解析 FLV 开头：`(header 长度, 流头长度)`
 ///
-/// 返回 `Some(字节数)` 表示从流开头到首个关键帧 tag 结束的完整前缀，
-/// 中途加入的观看者补发这一段就能正常解码；数据还不完整（或不是 FLV）返回 `None`。
-fn flv_init_len(buf: &[u8]) -> Option<usize> {
+/// - `header` = `FLV header(13) + onMetaData + AVC 序列头`（不含关键帧）—— 补当前 GOP 时
+///   要接在它后面，浏览器必须有 FLV 魔数和 SPS/PPS；
+/// - `init` = `header` + 首个关键帧 tag（中途加入的观看者靠它解码；也是 GOP 攒不出来时的兜底）。
+fn flv_init_span(buf: &[u8]) -> Option<(usize, usize)> {
     // FLV header: "FLV" + version + flags，再跟 4 字节 PreviousTagSize0
     if buf.len() < 9 || &buf[..3] != b"FLV" {
         return None;
@@ -621,11 +728,28 @@ fn flv_init_len(buf: &[u8]) -> Option<usize> {
             } else if frame_type == 1 && (codec != 7 || header_tag) {
                 // 关键帧 NALU（AVC 是 packet_type = 1）。AVC 必须已经拿到序列头，
                 // 否则补出去的是没有 SPS/PPS 的裸 IDR，播放器照样解不出来。
-                return Some(body + size + 4);
+                return Some((pos, body + size + 4));
             }
         }
         pos = body + size + 4;
     }
+}
+
+/// 一个 **tag 对齐**的字节段是不是「视频关键帧」
+///
+/// AVC 的序列头（`packet_type == 0`）也是 `frameType == 1`，它不带图像，不能当 GOP 起点。
+fn video_keyframe_tag(tag: &[u8]) -> bool {
+    if tag.len() < 13 || tag[0] != 9 {
+        return false;
+    }
+    let size = u32::from_be_bytes([0, tag[1], tag[2], tag[3]]) as usize;
+    if size < 2 || tag.len() < 11 + size {
+        return false;
+    }
+    let frame_type = tag[11] >> 4;
+    let codec = tag[11] & 0x0f;
+    let packet_type = tag[12];
+    frame_type == 1 && (codec != 7 || packet_type == 1)
 }
 
 /// 增量 FLV tag 解析器：喂入字节流，回调每个**视频** tag 的时间戳
@@ -904,7 +1028,7 @@ async fn wait_for_reset(reset: Option<&tokio::sync::Notify>) {
 /// 房间与控制消息都挂在板端那条常驻推流连接上（`handle_publisher` 的 `controls`）。
 async fn handle_viewer(socket: WebSocket, state: AppState, stream_name: String, room: String) {
     let (mut sink, mut stream) = socket.split();
-    let (mut rx, first, init) = state.video_hub.viewer_join(&room).await;
+    let (mut rx, first, catch_up) = state.video_hub.viewer_join(&room).await;
     // 推流端换新一轮流时要断开（拿不到流头就是「画面定住但字节还在流」）
     let reset = state.video_hub.reset_signal(&room).await;
 
@@ -940,21 +1064,20 @@ async fn handle_viewer(socket: WebSocket, state: AppState, stream_name: String, 
         }
     };
 
-    // 补流头（FLV 魔数 + AVC 配置 + 首个关键帧）：**只要房间里有当前这一轮的流头就补**，
-    // 不分是不是第一个观看者。
+    // 补流：**只要房间里有当前这一轮的字节就补**，不分是不是第一个观看者。
     //
-    // 早先的做法是「第一个观看者不补旧流头」，前提是它的加入会拉起一条新流；现在
-    // 推流端在没人看时不会立刻被杀（见 `STREAM_IDLE_GRACE`），重复的 `video_start`
-    // 也被推流端按地址去重了 —— 不起新流却又不补头，浏览器就只能收到中段字节，
-    // flv.js 解析错位后黑屏，接着重连，看起来就是反复闪断。
+    // 补的内容是「FLV 头 + AVC 配置 + **当前 GOP**」（见 `Room::catch_up`）：
+    // 早先补的是「本轮第一个关键帧」，时间戳是本轮开头（ts≈0），而直播帧已经跑到
+    // 几百秒 —— 浏览器 MSE 里就多一个几百秒的空洞，且紧跟的 P 帧缺参考帧，
+    // 现场就是「字节在流、画面定住」（2026-11-18 21:53：补的 ts=0、直播 ts=435）。
     //
     // 流头不会串轮次：板端 relay 每次起 ffmpeg 前发 `video_reset`，推流端重连时
-    // 房间也被清掉流头，两种情况都会让旧流头失效。
-    if let Some(init) = init {
-        // 流头也要喂给量化器：它的关键帧是本轮的基准点，不喂就从中段字节开始解析（错位）
-        observe(&init, std::time::Instant::now());
+    // 房间也会清掉流头与 GOP，两种情况都会让旧字节失效。
+    if let Some(catch_up) = catch_up {
+        // 补的字节也要喂给量化器：它的关键帧是基准点，不喂就从中段字节开始解析（错位）
+        observe(&catch_up, std::time::Instant::now());
         if sink
-            .send(Message::Binary(init.as_ref().to_vec().into()))
+            .send(Message::Binary(catch_up.as_ref().to_vec().into()))
             .await
             .is_err()
         {
@@ -1084,7 +1207,7 @@ async fn handle_viewer(socket: WebSocket, state: AppState, stream_name: String, 
 
 #[cfg(test)]
 mod tests {
-    use super::{FlvScanner, VideoHub, flv_init_len, viewer_buffer_frames};
+    use super::{FlvScanner, VideoHub, flv_init_span, viewer_buffer_frames};
     use std::sync::Arc;
 
     /// 造一段 FLV：header + AVC 序列头 tag + 关键帧 tag + 普通帧 tag
@@ -1112,10 +1235,106 @@ mod tests {
     #[test]
     fn init_prefix_stops_right_after_the_keyframe_tag() {
         let stream = flv_stream();
-        assert_eq!(flv_init_len(&stream), Some(INIT_LEN));
+        assert_eq!(flv_init_span(&stream), Some((13 + 20, INIT_LEN)));
         // 只给到关键帧 tag 的一半：还解析不出来
-        assert_eq!(flv_init_len(&stream[..INIT_LEN - 3]), None);
-        assert_eq!(flv_init_len(b"not a flv stream"), None);
+        assert_eq!(flv_init_span(&stream[..INIT_LEN - 3]), None);
+        assert_eq!(flv_init_span(b"not a flv stream"), None);
+    }
+
+    /// 造一段带时间戳的 FLV：header + AVC 序列头 + `frames`（每项 `(时间戳 ms, 是否关键帧)`）
+    fn flv_stream_with(frames: &[(u32, bool)]) -> Vec<u8> {
+        fn tag(tag_type: u8, ts: u32, body: &[u8]) -> Vec<u8> {
+            let mut out = vec![tag_type];
+            out.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+            out.extend_from_slice(&ts.to_be_bytes()[1..]); // 时间戳低 24 位
+            out.push((ts >> 24) as u8); // 时间戳高位
+            out.extend_from_slice(&[0, 0, 0]); // streamId
+            out.extend_from_slice(body);
+            out.extend_from_slice(&(body.len() as u32 + 11).to_be_bytes());
+            out
+        }
+        let mut out = b"FLV\x01\x05".to_vec();
+        out.extend_from_slice(&[0, 0, 0, 9]); // DataOffset = 9
+        out.extend_from_slice(&[0, 0, 0, 0]); // PreviousTagSize0
+        out.extend(tag(9, 0, &[0x17, 0x00, 0x00, 0x00, 0x00])); // AVC 序列头
+        for (ts, keyframe) in frames {
+            let head = if *keyframe { 0x17 } else { 0x27 };
+            out.extend(tag(9, *ts, &[head, 0x01, 0x00, 0x00, 0x00]));
+        }
+        out
+    }
+
+    /// 把一段 FLV 里的视频 tag 解成 `(时间戳 ms, 是否关键帧)`（序列头算 `(0, false)`）
+    fn video_tags(buf: &[u8]) -> Vec<(u32, bool)> {
+        let mut out = Vec::new();
+        let mut pos = 13;
+        while pos + 11 <= buf.len() {
+            let size = u32::from_be_bytes([0, buf[pos + 1], buf[pos + 2], buf[pos + 3]]) as usize;
+            let end = pos + 11 + size + 4;
+            if end > buf.len() {
+                break;
+            }
+            if buf[pos] == 9 && size >= 2 {
+                let ts = u32::from_be_bytes([buf[pos + 7], buf[pos + 4], buf[pos + 5], buf[pos + 6]]);
+                let keyframe = (buf[pos + 11] >> 4) == 1 && buf[pos + 12] == 1;
+                out.push((ts, keyframe));
+            }
+            pos = end;
+        }
+        out
+    }
+
+    /// 中途加入的观看者必须补「**当前 GOP**」，而不是本轮第一个关键帧。
+    ///
+    /// 2026-11-18 21:53 现场：补的流头 ts=0，直播帧已经 ts=435s —— MSE 里多出 435 秒
+    /// 空洞，且紧跟着的 P 帧缺参考帧，浏览器就是「字节还在流、画面定住」。
+    #[tokio::test]
+    async fn late_viewer_gets_the_current_gop_not_the_round_first_keyframe() {
+        let hub = VideoHub::default();
+        hub.publisher_attach("bp:dogcam", 1).await;
+        // 两个 GOP：ts 0/40/80，然后关键帧 2000 起新 GOP
+        let stream = flv_stream_with(&[(0, true), (40, false), (80, false), (2000, true), (2040, false)]);
+        hub.publish("bp:dogcam", Arc::from(stream)).await;
+
+        let (_rx, _, catch_up) = hub.viewer_join("bp:dogcam").await;
+        let catch_up = catch_up.expect("同一条流的中途加入应补字节");
+        assert_eq!(&catch_up[..3], b"FLV", "补的字节要从 FLV 魔数开始");
+        assert_eq!(
+            video_tags(&catch_up),
+            vec![(0, false), (2000, true), (2040, false)],
+            "序列头 + 最近一个 GOP（从 2000 的关键帧开始）"
+        );
+    }
+
+    /// 这一轮只有一个 GOP（刚起流）时，补的就是「本轮第一个关键帧」—— 旧行为仍可用
+    #[tokio::test]
+    async fn catch_up_with_a_single_gop_starts_at_the_round_keyframe() {
+        let hub = VideoHub::default();
+        hub.publisher_attach("bp:dogcam", 1).await;
+        hub.publish("bp:dogcam", Arc::from(flv_stream_with(&[(0, true), (40, false)])))
+            .await;
+
+        let (_rx, _, catch_up) = hub.viewer_join("bp:dogcam").await;
+        assert_eq!(
+            video_tags(&catch_up.expect("应补字节")),
+            vec![(0, false), (0, true), (40, false)]
+        );
+    }
+
+    /// 换一轮流（ffmpeg 重启 / 推流端重连）时 GOP 也要清掉，不能把上一轮的帧补出去
+    #[tokio::test]
+    async fn new_round_forgets_the_gop() {
+        let hub = VideoHub::default();
+        hub.publisher_attach("bp:dogcam", 1).await;
+        hub.publish("bp:dogcam", Arc::from(flv_stream_with(&[(0, true), (40, false)])))
+            .await;
+        let state = hub.debug_state().await;
+        assert!(state["rooms"][0]["gopBytes"].as_u64().unwrap() > 0, "应攒出 GOP");
+
+        hub.reset_stream("bp:dogcam").await;
+        assert_eq!(hub.debug_state().await["rooms"][0]["gopBytes"], 0);
+        let (_rx, _, catch_up) = hub.viewer_join("bp:dogcam").await;
+        assert!(catch_up.is_none(), "新一轮还没字节，不能补上一轮的");
     }
 
     #[tokio::test]
@@ -1415,6 +1634,8 @@ mod tests {
         assert_eq!(hub.viewers("RD-001").await, 0);
     }
 
+    /// 后加入的观看者拿到的补流以「本轮第一个关键帧」开头（这一轮只有一个 GOP 时，
+    /// 它同时也是当前 GOP 的起点），后面会接着这一轮已经推过的帧。
     #[tokio::test]
     async fn late_viewer_gets_init_prefix() {
         let hub = VideoHub::default();
@@ -1422,9 +1643,15 @@ mod tests {
         let stream = flv_stream();
         hub.publish("RD-001", Arc::from(stream.clone())).await;
 
-        let (_rx, _, init) = hub.viewer_join("RD-001").await;
-        let init = init.expect("后加入的观看者应拿到流头");
-        assert_eq!(init.as_ref(), &stream[..INIT_LEN]);
+        let (_rx, _, catch_up) = hub.viewer_join("RD-001").await;
+        let catch_up = catch_up.expect("后加入的观看者应拿到补流字节");
+        assert!(
+            catch_up.starts_with(&stream[..INIT_LEN]),
+            "必须以 FLV 头 + AVC 序列头 + 本轮关键帧开头"
+        );
+        // 流量后面接着本 GOP 的 P 帧（时间轴连续，不是只给一个孤立关键帧）
+        assert_eq!(catch_up.len(), stream.len());
+        assert_eq!(catch_up.as_ref(), &stream[..]);
     }
 
     /// 板端 relay 房间（`bp:`）：控制消息通过推流连接下发，且旧连接迟到的清理

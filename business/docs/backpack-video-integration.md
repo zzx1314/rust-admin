@@ -1154,6 +1154,47 @@ python3 deploy/backpack-relay/measure_bitrate.py --stream dogcam --seconds 20
   --stream dogcam --seconds 75`，`积压增长` ≈ 0 就说明板端是干净的，延迟在观看端 / 浏览器；
 - 如果 `积压增长` 持续为正 → 板端侧问题，回到 ⑥⑨（档位 / 出帧跟不上）。
 
+#### ⑬ 「字节还在流、画面定住」：补的流头是本轮第一个关键帧（2026-11-18 21:53）
+
+现场反复报「平台中继卡住了」，但平台侧一切正常：`lastFrameAgeSecs=0`、`pendingBytes=0`、
+`viewerLagSecs=0`，探针实测 15.1fps、每秒都有帧、无 >0.5s 空档、平台没踢人。
+
+根因在**中途加入的观看者拿到的补流字节**：房间里的 `init` 是「本轮**第一个**关键帧」，
+整轮不变。实测一个新观看者的前几个 tag：
+
+```text
+(0.00s) script  ts=0.00
+(0.00s) video   ts=0.00   KEY      ← 本轮起流时的关键帧（已经 435 秒前）
+(0.01s) video   ts=435.73 inter   ← 直接跳到实时的 435 秒
+```
+
+两个后果，都会让播放器「定住」：
+
+1. 浏览器 MSE 里多出**几百秒的空洞**（越晚打开越大）；
+2. 紧跟在补的关键帧后面的是**缺参考帧的 P 帧**（这些帧参考的中间帧从来没发出去），
+   画面要么花要么冻，要等下一个关键帧（2s）才自愈。
+
+修法（`business/server/src/video.rs`，补**当前 GOP** 而不是本轮第一个关键帧）：
+
+| 改动 | 说明 |
+| --- | --- |
+| `Room.gop` / `gop_pending` | 推流字节按 tag 对齐切分，遇到视频关键帧 tag 就把缓冲清空从头存 → 始终保存「当前 GOP」（上限 4MB） |
+| `Room.header` | `init` 去掉首个关键帧的部分（FLV 头 + onMetaData + AVC 序列头），补流时接在 GOP 前面 |
+| `Room::catch_up()` | 有 GOP → `header + gop`（时间轴连续、参考帧完整、最多落后一个 GOP）；这一轮刚起还没攒出 GOP → 退回 `init`（旧行为） |
+| `forget_stream_bytes()` | `video_reset` / 推流端重连时连 GOP 一起清（不能把上一轮的帧补出去） |
+| `/api/backpack/video/state` | 新增 `gopBytes` / `gopAgeSecs`：大 = GOP 太长；`null` = 还没攒出 GOP（此时补流会退回旧行为） |
+
+上线后实测（同一条流跑到 60 秒时加入）：
+
+```text
+修复前：script(0) / 序列头(0) / 关键帧(0)   → 跳到 435s
+修复后：script(0) / 序列头(0) / 关键帧(60.0) / 60.08 / 60.17 / …   （落差 ≤ 一个 GOP）
+```
+
+回归：`cargo test --lib video`（新增 `late_viewer_gets_the_current_gop_not_the_round_first_keyframe`、
+`catch_up_with_a_single_gop_starts_at_the_round_keyframe`、`new_round_forgets_the_gop`，
+并改写 `late_viewer_gets_init_prefix`）、`cargo test --test video_relay`（10 个）。
+
 #### 排查工具与清单
 
 ```bash
@@ -1177,3 +1218,4 @@ ssh root@<背包IP> 'python3 /tmp/bw.py'              # 见 §6.10② 的量法�
 | 看着看着越来越卡（延迟涨），然后掉一下重连 | 板端 `画面延迟 x.xs` / `延迟 x.xs 超过上限` / `回到配置档`；平台 `stream reset` + `publisher detached` | ⑨（2026-11-18 已修）。修完还有：看 `试用期延迟` / `已知道撑不住` 两行，如果反复在降档，就把配置档降到链路能吃下的规格，别靠自适应救 |
 | 同时开多个视频页面更卡 | 每个观看者 = 一份出口带宽 | 出口按 1.5Mbps/路 规划 |
 | **某一路黑、其他路正常**（典型：`cam0~3` 全黑，`dogcam` 正常） | 板端 `[cam0] 推流结束：0 个分片 / 0B` + 15s 一次「没有推出任何字节」；`video/state` 里 `initBytes=0` / `lastFrameAgeSecs=null` | ⑪ 解码器选择串味（已修）。硬解对这几路源无效，要按流探测 + 真解出帧才算可用 |
+| 服务端看着全健康（`lastFrameAgeSecs=0` / `pendingBytes=0` / `viewerLagSecs=0`）但**画面定住**，探针实测帧率也正常 | 新开一个观看端，看它前几个 tag 的关键帧时间戳 vs 直播时间戳（差几百秒 = 有问题）；`video/state` 的 `gopBytes`/`gopAgeSecs` | ⑬ 补流头是本轮第一个关键帧（已修）。`gopBytes>0` 才是新逻辑 |
