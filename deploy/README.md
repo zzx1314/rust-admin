@@ -281,6 +281,12 @@ sqlite3 /opt/hz/rust-admin/robodog/data/robodog.db \
   就被服务端判 `lagged` 踢掉重连，现场看到的就是「很卡」。带宽更紧再压
   `RELAY_BITRATE=800k RELAY_FPS=15`；真要在 6Mbps 以上的出口上看 1080p60 才用
   `RELAY_PROFILE=copy`；
+- **Wi-Fi 掉线不再冻住画面**（2026-11-18）：relay 的分片发送有超时（`RELAY_SEND_TIMEOUT`，默认 10s），
+  超时即判上行已死、断开重连；`RELAY_STALL_TIMEOUT`（默认 15s）内一个字节都没推出去就自己重启
+  `ffmpeg`；每 5s 巡检平台出口网卡（`ip route get`），Wi-Fi 断开 / 恢复导致出口变更就重建连接；
+  拥塞后 5 分钟内自动降到 `640x360@12 / 500k`（`RELAY_DEGRADE_*`），只剩 4G 时也不至于每 10s 重连一次。
+  路由脚本在 /32 路由变化后会 `systemctl try-restart backpack-relay`。细节见
+  `business/docs/backpack-video-integration.md` §6.10⑤；
 - 前端 `/monitor` 页顶部有「现场直连 / 平台中继」切换，**直连失败或页面在公网时自动切中继**；
 - 中继流里浏览器画不出框（FLV 没有与抽帧对齐的坐标），要看框就切「背包烧录」——
   板端把中文标签烧进 `preview` 流，中继也推这一路（`RELAY_STREAMS` 默认已含 `preview`，
@@ -317,6 +323,8 @@ ssh root@39.107.55.13 'journalctl -u rust-admin-robodog -f | grep -E "backpack s
 | 切了通道自己跳回「机器狗前置」 | 页面轮询 | 已修（2026-11-16）：直连模式后端不下发 `sources`，刷新时别拿它比对 |
 | 每 23s 左右断一次 | 服务端 `stream reset` 是否出现 | 已修（2026-11-18）：`init` 残留不再阻塞 `video_start`，回归用例 `video_relay::stale_stream_header_does_not_block_video_start` |
 | 码率只有 ~400kbps / 7fps | 板端 `ip route get 39.107.55.13`、`ethtool` | 走了 4G dongle（上行 ~0.5Mbps）；装 `50-platform-route.sh` 让平台流量走 Wi-Fi（上行 ~25Mbps），改完重启 relay |
+| 画面定格、重开页面也不动 | 板端 `journalctl -u backpack-relay` 搜 `上行阻塞` / `没有推出任何字节` | Wi-Fi 半开连接把管道反压死了（旧版 relay）；升级 relay 后会自动断开重连 / 重启 ffmpeg |
+| Wi-Fi 断了再连上还是很卡 | 板端日志 `平台出口网卡 A → B` | 出口还挂在慢链路（4G / 狗体内网 eth0）；relay 每 5s 巡检、路由脚本也会重启它 |
 | 想看房间/观看者状态 | `GET /api/backpack/video/state` | 返回每路的 `publisher/initBytes/viewers/streaming`，黑屏先看这张表 |
 
 ### 跨网段的接口 / AI：设备客户端隧道（2026-11-17 上线）

@@ -56,6 +56,13 @@ const VIEWER_BUFFER_FRAMES: usize = 512;
 /// 留 60s 宽限：短时断开直接复用还在跑的流（新观看者立刻拿到缓存的流头）。
 const STREAM_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// 推流端多久没有任何消息（二进制帧 / WS ping）就判死。
+///
+/// 现场板子出公网走 Wi-Fi，掉线后到平台的 TCP 常常是半开：不 FIN、不 RST，平台会一直
+/// 以为「推流端在线」，观看者进来永远等不到画面（以前要 60s 才判死，画面就冻住 1 分钟）。
+/// 板端 relay 每 10s 一个心跳，这里 30s 即 3 次没到，足够保守也不会误杀。
+const PUBLISHER_SILENCE: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// 流头（FLV header + AVC 序列头 + 首个关键帧）解析的上限
 ///
 /// 1200kbps 下 4MB ≈ 26 秒，正常 2 秒内（一个 GOP）就拿到关键帧；
@@ -129,6 +136,9 @@ struct Room {
     /// 最后一个观看者离开的时刻（`None` = 还有人在看）。
     /// 看门狗只有超过 [`STREAM_IDLE_GRACE`] 才会真去停流。
     idle_since: Option<std::time::Instant>,
+    /// 最后一帧推上来的时刻（排障用）：`GET /api/backpack/video/state` 里看它就知道
+    /// 「推流端在线但画面不动」是推流端没数据，还是观看端没收到。
+    last_frame: Option<std::time::Instant>,
 }
 
 fn new_room(session: u64) -> Room {
@@ -138,6 +148,7 @@ fn new_room(session: u64) -> Room {
         pending: Vec::new(),
         publisher: Some(session),
         idle_since: None,
+        last_frame: None,
     }
 }
 
@@ -160,6 +171,7 @@ impl VideoHub {
             pending: Vec::new(),
             publisher: None,
             idle_since: None,
+            last_frame: None,
         });
         // 有人回来看了：空闲计时清零，看门狗别把还热着的流停掉
         room.idle_since = None;
@@ -212,6 +224,7 @@ impl VideoHub {
         let Some(room) = rooms.get_mut(device_id) else {
             return;
         };
+        room.last_frame = Some(std::time::Instant::now());
         if room.init.is_some() {
             // 接收端全掉线时 send 报错，忽略即可；下游会自行关闭连接
             let _ = room.tx.send(frame);
@@ -394,6 +407,8 @@ impl VideoHub {
                     "initBytes": room.init.as_ref().map(|init| init.len()).unwrap_or(0),
                     "pendingBytes": room.pending.len(),
                     "viewers": viewers.get(key).copied().unwrap_or(0),
+                    // 秒；null = 这一轮还没收到过字节。持续变大就是「推流端没数据」
+                    "lastFrameAgeSecs": room.last_frame.map(|at| at.elapsed().as_secs()),
                     "streaming": streaming.contains(key),
                     "control": controls.contains_key(key),
                 })
@@ -522,7 +537,7 @@ async fn handle_publisher(socket: WebSocket, state: AppState) {
     loop {
         tokio::select! {
             _ = liveness.tick() => {
-                if last_seen.elapsed() > std::time::Duration::from_secs(60) {
+                if last_seen.elapsed() > PUBLISHER_SILENCE {
                     warn!(
                         "video publisher {:?} silent for {:?}, closing",
                         device_id,
@@ -610,6 +625,8 @@ async fn handle_publisher(socket: WebSocket, state: AppState) {
         info!("video publisher {code} detached after {frames} frames");
         state.video_hub.unregister_control(&code, session).await;
         state.video_hub.publisher_gone(&code, session).await;
+        // 房间已经没了：顺手把「起过流」标记清掉，看门狗不用再盯着这条死链
+        state.video_hub.mark_streaming(&code, false).await;
     }
 }
 
@@ -1037,6 +1054,26 @@ mod tests {
 
         hub.unregister_control("bp:dogcam", 7).await;
         assert!(!hub.send_control("bp:dogcam", "gone".to_string()).await);
+    }
+
+    /// 排障快照要能把「推流端在线但不动」和「观看端没收到」分开：
+    /// `lastFrameAgeSecs` 持续变大 = 板端没有新字节（Wi-Fi 掉线 / 源卡住）。
+    #[tokio::test]
+    async fn debug_state_reports_last_frame_age() {
+        let hub = VideoHub::default();
+        hub.publisher_attach("bp:dogcam", 1).await;
+        let state = hub.debug_state().await;
+        assert!(
+            state["rooms"][0]["lastFrameAgeSecs"].is_null(),
+            "本轮还没推出字节时应为 null"
+        );
+
+        hub.publish("bp:dogcam", Arc::from(flv_stream())).await;
+        let state = hub.debug_state().await;
+        assert!(
+            state["rooms"][0]["lastFrameAgeSecs"].as_u64().is_some(),
+            "推过帧之后应给出距最后一帧的秒数"
+        );
     }
 
     /// 设备客户端的房间没有控制通道（控制走设备网关），看门狗与观看端据此分流。

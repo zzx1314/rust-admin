@@ -1450,6 +1450,12 @@ mediamtx 的 `dogcam`，浏览器直连 mediamtx（WHEP）或走平台中继（F
   攒成一阵一阵的突发，浏览器 MSE 先饿死再猛灌，flv.js 在 playing / buffering 之间反复横跳。
 - **墙钟时间戳**：现场相机 SDP 标 60fps、实际只投递 ~25 帧/秒，relay 用
   `-use_wallclock_as_timestamps 1` 把 PTS 换成到达时间，避免浏览器 MSE 反复饿死（慢放）。
+- **上行掉线要自愈**（2026-11-18）：板端 relay 的分片发送带超时（默认 10s），超时即判
+  「Wi-Fi 半开」并断开重连；15s 一个字节都没推出去（源卡住）就重启 `ffmpeg`；每 5s 巡检
+  平台出口网卡，出口变了主动重建连接；拥塞后 5 分钟内自动降到 `640x360@12 / 500k`。
+  平台侧推流端静默判定 30s，`/api/backpack/video/state` 多一个 `lastFrameAgeSecs`。
+  旧版 relay 的「Wi-Fi 一断画面永久冻住」就是发送无超时 + `video_start` 幂等吃掉导致的，
+  详见 `docs/backpack-video-integration.md` §6.10⑤。
 - **鉴权**：浏览器 WS 握手不能带请求头，中继端点用 `?token=<JWT>`，
   `require_auth` 为此放开了查询串令牌（普通接口仍只认 `Authorization`）。
 - **观看端不许闪**（`web/src/components/VideoPlayer.vue`，现在只有中继一种播放方式）：
@@ -1462,7 +1468,7 @@ mediamtx 的 `dogcam`，浏览器直连 mediamtx（WHEP）或走平台中继（F
 | 项 | 要求 |
 | --- | --- |
 | 板端 relay | `backpack-relay` 服务在跑，且能出公网（`ws://<平台>/ws/device/video`） |
-| 板端出口路由 | 到平台的流量必须走 Wi-Fi / 有线（实测 4G dongle 上行仅 ~0.5Mbps、Wi-Fi ~25Mbps）；用 `deploy/backpack-relay/50-platform-route.sh` 给平台加 /32 路由，详见 `docs/backpack-video-integration.md` §6.10 |
+| 板端出口路由 | 到平台的流量必须走 Wi-Fi / 有线（实测 4G dongle 上行仅 ~0.5Mbps、Wi-Fi ~25Mbps）；用 `deploy/backpack-relay/50-platform-route.sh` 给平台加 /32 路由（路由变化会重启 relay），详见 `docs/backpack-video-integration.md` §6.10 |
 | 背包 mediamtx | `dogcam` path 能拉通（`ffprobe rtsp://<背包IP>:8554/dogcam`） |
 | 平台 | 无需额外媒体服务器；`/ws/device/video` 与 `/api/backpack/video/ws` 已内置 |
 

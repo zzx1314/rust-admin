@@ -725,6 +725,53 @@ WHEP 拿到 404。处理（已按此配置）：
 **仍要现场关注**：板端为什么反复硬复位（供电 / 看门狗 / 与本体急停、重启同源）。
 只要板端或本体在重启，直连视频一定会短暂中断；现在最多等 15s 自动恢复，不会再立刻报 404。
 
+#### ⑤ Wi-Fi 掉线 / 出口切走以后画面冻住（2026-11-18，板端 relay 已补）
+
+现场反馈：「平台中继好像有一部分还是走狗体的 Wi-Fi，Wi-Fi 连不上以后画面就卡住了」。
+检查下来不是浏览器的问题，而是**板端到平台这条 WS 在链路死掉以后不会自己恢复**，
+三个叠加点：
+
+| # | 位置 | 原来会怎样 |
+| --- | --- | --- |
+| 1 | `relay_push.py` 的 `ws.send` | 没有超时。Wi-Fi 一断，TCP 是**半开**状态（不 FIN 也不 RST，`send` 既不报错也不返回），整条管道被反压到停住；`ffmpeg` 还活着，`StreamSession.running` 仍是 `True`。 |
+| 2 | 平台 + relay 的 `video_start` | 新观看者重连后平台会再发 `video_start`，但 relay 用 `if self.running: return` 幂等吃掉 —— 永不重启，只能 `systemctl restart backpack-relay`。平台侧则要 60s 没消息才判推流端死。 |
+| 3 | 出口路由 | 平台 /32 路由压在 Wi-Fi 上；Wi-Fi 断开后内核撤掉这条路由、流量回落默认路由（4G dongle ~0.5Mbps 或狗体内网 eth0），但**已建立的 TCP 不会自己换**。Wi-Fi 恢复后旧连接也还挂在慢链路上。 |
+
+修法（板端 `backpack-relay` 升级 + 一行路由脚本，平台侧只收紧判定）：
+
+| 位置 | 改动 |
+| --- | --- |
+| `relay_push.py` `_pump` | 每个分片的 `ws.send` 加 `RELAY_SEND_TIMEOUT`（默认 10s）。超时 = 上行已死：标记拥塞 → 关掉连接 → 外层 1~15s 退避重连，`ffmpeg` 随连接一起被杀。 |
+| `relay_push.py` `_watch_stall` | 新增卡住看门狗：起流后 `RELAY_STALL_TIMEOUT`（默认 15s）一个字节都没推出去（RTSP 半死 / 相机卡住）就重启 `ffmpeg`（保留 WS，先发 `video_reset` 清平台旧流头），观看端不用重连。 |
+| `relay_push.py` `route_watcher` | 每 `RELAY_ROUTE_POLL`（默认 5s）`ip route get <平台IP>`，**出口网卡一变就断开全部推流连接**。Wi-Fi 断开回落 4G、Wi-Fi 恢复切回快链路，都靠它收敛（日志：`平台出口网卡 wlp4s0 → enx…`）。 |
+| `relay_push.py` 省流档 | 发送超时后 `RELAY_DEGRADE_TTL`（默认 300s）内改用 `640x360@12 / 500k`（`RELAY_DEGRADE_*`）：Wi-Fi 掉到只剩 4G 时宁可糊一点也要连续出图，不再每 10s 超时重连一次。到期自动回配置档。 |
+| `relay_push.py` RTSP 输入 | 加 `-timeout 8000000`（8s socket 读超时）：源侧不吐数据时让 `ffmpeg` 报错退出，配合上面的看门狗。 |
+| `50-platform-route.sh` | 平台 /32 路由**真的变了**才 `systemctl try-restart backpack-relay`（不变不动，避免 dhcp4-change 抖动断流）。Wi-Fi 回来立即切回快链路。 |
+| `server/src/video.rs` | 推流端静默判定 60s → `PUBLISHER_SILENCE` 30s（板端 10s 一次心跳，3 次没到即判死）；`/api/backpack/video/state` 新增 `lastFrameAgeSecs`。 |
+
+**排障顺序**（画面又冻住时）：
+
+1. `GET /api/backpack/video/state`：`lastFrameAgeSecs` 一直涨 → 板端没新字节（Wi-Fi / 源侧）；
+   一直是 `null` + `initBytes=0` → 起流就没成功；
+2. 板端 `journalctl -u backpack-relay -f`，认这几行：
+   - `上行阻塞超过 10s…断开重连` → 上行真死了（看 `ip route get 39.107.55.13`）；
+   - `15s 没有推出任何字节…重启拉流` → 源侧卡住（`ffprobe rtsp://127.0.0.1:8554/<stream>`）；
+   - `平台出口网卡 A → B` → 出口切换过（B 是 `eth0` 就说明走了狗体内网，见 `deploy/README.md` 三）；
+   - `开始拉流（profile=省流，640x360@12 500k…）` → 上行还在拥塞窗口里。
+3. 浏览器端不需要动：播放器 8s 没新帧自己重连、连续失败也按 3s 上限持续重试，
+   链路恢复后自动出图（不会停在错误层）。
+
+验收（拔 Wi-Fi 再插回）：
+
+```bash
+# 板端：拔掉 wlp4s0 后 10~20s 内应看到这两行，然后按退避重连
+ssh root@192.168.41.246 'journalctl -u backpack-relay -f | grep -E "上行阻塞|出口网卡"'
+# 平台：推流端断开（最多 30s）→ 观看端收到 Closed 自动重连；Wi-Fi 回来后恢复出图
+ssh root@39.107.55.13 'journalctl -u rust-admin-robodog -f | grep -E "video publisher|backpack stream"'
+# 码率仍按 §6.10 量（拥塞窗口内应该是 ~500kbps）
+python3 deploy/backpack-relay/measure_bitrate.py --stream dogcam --seconds 20
+```
+
 #### 排查工具与清单
 
 ```bash
@@ -739,6 +786,8 @@ ssh root@<背包IP> 'python3 /tmp/bw.py'              # 见 §6.10② 的量法�
 
 | 现象 | 先查 | 结论 |
 | --- | --- | --- |
+| 画面突然定格、重开页面也不动，重启 relay 才好 | `lastFrameAgeSecs`、板端 `上行阻塞` / `没有推出任何字节` | ⑤（2026-11-18 已修，板端要升级 relay） |
+| Wi-Fi 断了再连上，画面还是卡 / 很糊 | 板端 `平台出口网卡 A → B`、`profile=省流` | ⑤ 出口切到慢链路（4G / 狗体内网）；看 `ip route get`，5 分钟内会自己回配置档 |
 | 每 23s 左右断一次、20s 连接超时 | `/api/backpack/video/state` 的 `initBytes` + 服务端是否 `stream reset` | ①（已修） |
 | 有画面但卡、`measure_bitrate` 远低于配置 | 板端 `ip route get 39.107.55.13`、`bw.py` | ② 路由走了慢速 dongle |
 | 反复 `lagged`、`left after ... kbps` 高于出口 | `speedtest-cli` 的 Upload vs 平均 kbps | ③ 降档位 / 升带宽 |
