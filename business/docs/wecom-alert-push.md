@@ -143,7 +143,8 @@
 | `notify.rs` `evidence_image()` / `NoticeImage` | 证据图校验（base64 / ≤2MB / JPG-PNG）+ 算 md5（**base64 之前**的字节） |
 | `notify.rs` `send_image()` | 卡片发成功后再发图片；失败只打 WARN（正文已送达） |
 | `client/src/ai_patrol.rs` `evidence_image_base64()` | 客户端从板端磁盘读数量告警的证据图 → `ai_alert.evidenceImage`（平台读不到那个文件系统） |
-| `client/src/ai_patrol.rs` `window_evidence()` / `newest_evidence_file()` | 实时检出：扫 `<jobs_dir>/<plan>/pt<n>/` 取本轮最新命中帧 → `ai_detect.evidenceImage` |
+| `client/src/ai_patrol.rs` `window_evidence()` / `newest_evidence_file()` | 实时检出：扫 `<jobs_dir>/<plan>/pt<n>/` 取本轮最新命中帧（退路）+ 窗口收尾时补扫 |
+| `client/src/ai_patrol.rs` `plan_hit_evidence()` / `send_detect()` | 实时检出：挂起命中 → `plan_hit.evidence` 一到就读图带 `ai_detect.evidenceImage` 上报 |
 | `server/src/ai_patrol.rs` `record_hit()` | 检出告警入口：正文带「（证据：路径）」，有字节就走 `alert_created_with_image` |
 | `notify.rs` `task_abnormal()` | 任务异常入口：同样带「当班责任人」并 @ 到人 |
 | `alert_flow.rs` `should_dispatch()` | 第一道门：只有「执行计划期间」的告警才建单 + 推群（`alert_only_in_task`） |
@@ -367,7 +368,9 @@ AI 识别**检出**、以及**数量核对不一致**时，群里会多一条图
         │    ai_patrol::evidence_image_base64() → ai_alert.evidenceImage
         │    → 服务端 ai_patrol::on_client_alert
         └─ 实时检出（SSE detect 只有框、没有路径）
-             ai_patrol::window_evidence() 扫 <jobs_dir>/<plan>/pt<n>/ 取本轮最新一张
+             命中先挂起（不发空卡片），等板端 plan_hit（图在它之前已落盘）
+             ai_patrol::plan_hit_evidence() 读 plan_hit.evidence；读不到再
+             window_evidence() 扫 <jobs_dir>/<plan>/pt<n>/ 取本轮最新一张
              → ai_detect.evidence（路径）+ ai_detect.evidenceImage（base64）
              → 服务端 ai_patrol::on_client_detect
         ▼
@@ -380,11 +383,19 @@ notify::evidence_image()（校验）→ Notice.image
 
 - **有人能读盘的时候两类 AI 告警都带图**：检出（实时）+ 数量核对。未检出、设备故障
   这类本来就没有命中帧，仍然只发卡片（卡片里有路径就写路径）。
-- **检出告警的图是「扫目录」来的**：板端 `plan_hit`（带 `evidence`）要约窗口收尾才发，
-  检出告警是实时的，所以客户端扫 `<jobs_dir>/<planId>/pt<航点下标>/` 取**窗口开始之后**
-  写下的最新一张（`EVIDENCE_MTIME_SLACK`=5s 容错）；路径同时写进告警正文
-  （`（证据：…）`），现场可 ssh 复核。命中帧是**作业收尾**（`_finish_job`，命中后 1~2s）
-  才落盘的，所以扫描带 8×300ms 重试（命中帧一到立刻返回，最多等 ≈2.4s）。
+- **检出告警的图要等板端「采样收尾」**：板端 `_plan_frame` 命中后要连采
+  `DETECT_PLAN_COUNT_SAMPLE`（默认 3）帧命中、画框存证，才发带 `evidence` 的 `plan_hit`。
+  现场实测命中帧比**第一帧检出**晚 **4.6s**（2026-11-18 18:54 任务 `TK-1112-11` 航点 1 那条
+  「检出 Broken trash can」因此只有卡片；客户端当时只等 2.4s）。所以客户端把命中先挂起，
+  等 `plan_hit` 送证据图来**一起**上报（卡片晚几秒，但后面跟得上图）；一直等不到
+  （老板端 / 画框失败）就在 `EVIDENCE_PENDING_WAIT`=8s 到期时先发卡片保告警。
+- **图从哪读**：`plan_hit.evidence` 给的路径优先（板端自己写的，唯一真相），读不到再扫
+  `<jobs_dir>/<planId>/pt<航点下标>/` 取**窗口开始之后**写下的最新一张（`EVIDENCE_MTIME_SLACK`=5s
+  容错）。路径同时写进告警正文（`（证据：…）`），现场可 ssh 复核。
+- **窗口结束时还在等图的命中**：`finish()` **先停识别再扫盘**（板端 `_plan_flush` 正是停的时候
+  才把采样中的命中画框写盘）后补发，所以「狗刚命中就走向下一个点」也不会丢图。
+- **检出卡片的时延**：正常跟着 `plan_hit` 走（命中后 1~5s），比「立刻发卡片」晚几秒；
+  代价是换来群里那条卡片后面必有图（真等不到图时 8s 兜底只发卡片）。
 - **`jobs_dir` 从哪来**：`[ai] jobs_dir` / `ROBODOG_AI_JOBS_DIR` 优先（配了就**不**再被
   板端事件覆盖），其次从板端 `plan_hit.evidence` 反推（`<存证根>/<计划>/pt<n>/<图>`，
   见 `jobs_root_from_evidence`），最后才是内置候选 `/root/backpack_dashboard/backend/detect_jobs`、
@@ -401,6 +412,10 @@ notify::evidence_image()（校验）→ Notice.image
   （检出带图走完整 WS 链路）、`notify::tests::evidence_image_*`（md5、2MB、JPG-PNG 校验）、
   `client ai_patrol::tests::evidence_image_reads_board_file_and_skips_unusable_ones`、
   `client ai_patrol::agent_flow::hit_alert_carries_the_board_evidence_frame`（扫目录取命中帧）、
+  `client ai_patrol::agent_flow::evidence_landing_seconds_late_still_rides_with_the_alert`
+  （2026-11-18 事故回归：图比第一帧检出晚 4.6s 也要跟着告警发）、
+  `client ai_patrol::agent_flow::evidence_written_on_plan_flush_is_picked_up_at_window_end`
+  （窗口收尾时板端 flush 才写图，先停再扫也要带上）、
   `client ai_patrol::tests::newest_evidence_file_skips_stale_and_picks_freshest`（不拿上一轮的图）。
 
 ### @ 提醒那条

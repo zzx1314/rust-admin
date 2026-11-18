@@ -155,12 +155,18 @@ ffmpeg，观看端不重连）；到期先确认链路真恢复才回配置档�
 `msgtype=image`，作为 markdown 卡片之后的**第二条**消息：板端图在
 `detect_jobs/<plan>/pt<n>/*.jpg`，平台读不到，所以由客户端（与 Agent 同机）读盘后上报 ——
 数量核对附在 `ai_alert.evidenceImage`（板端 `plan_hit.evidence` 给路径），实时检出附在
-`ai_detect.evidenceImage`（SSE 只有框没路径，客户端扫 `<jobs_dir>/<plan>/pt<n>/` 取本轮最新一张，
-`jobs_dir` 见 `[ai] jobs_dir` / `ROBODOG_AI_JOBS_DIR`）。服务端 `notify::evidence_image`
+`ai_detect.evidenceImage`。
+⚠️ 检出的图**不是检出那一刻就有的**：板端 `_plan_frame` 要先连采 3 帧命中、画框存证，
+才发带 `evidence` 的 `plan_hit`（实测比第一帧检出晚 **4.6s**）。所以客户端把命中**先挂起**、
+拿到 `plan_hit.evidence` 再上报（`ai_detect` 晚几秒，换来卡片后面必有图；8s 等不到就先发
+卡片），读不到路径才退回扫 `<jobs_dir>/<plan>/pt<n>/` 取本轮最新一张（`jobs_dir` 见
+`[ai] jobs_dir` / `ROBODOG_AI_JOBS_DIR`）。窗口结束时还在等图的，由 `finish()` **先停识别
+再扫盘**（板端 `_plan_flush` 在停的时候才落盘）补发。服务端 `notify::evidence_image`
 校验（base64 / ≤2MB / JPG-PNG / md5 算**base64 之前**的字节）再发。⛔ 不要改成往 markdown
 里嵌 `![]()`（群机器人不支持），也不要存多 MB 的 base64 到 `notifications.payload`。
 开关 `settings.wecom_alert_image`（默认开），回归用例 `tests/alert_image.rs`、
-`tests/ai_client_mode.rs`（检出带图整条 WS 链路）。
+`tests/ai_client_mode.rs`（检出带图整条 WS 链路）、
+`client ai_patrol::agent_flow::evidence_landing_seconds_late_still_rides_with_the_alert`。
 
 `backend/run.sh` exports the required secret (and probes Redis for
 `APP_REDIS_PASSWORD`) before running `cargo run`. Set `APP_REDIS_PASSWORD`

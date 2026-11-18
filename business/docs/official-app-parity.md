@@ -276,7 +276,8 @@ B. client（正式环境：平台在公网、Agent 只在内网，服务端连�
   → 上报 ai_point（动作参数 + 板端模型目录）→ 服务端用**同一套**规则算场景/类别/阈值/窗口
   → 下发 ai_start（含 planId / pointIndex / expectCount）
   → 客户端 POST /api/detect/start|config → 读本机 SSE
-  → 按阈值 + 类别去重回传 ai_detect（带命中帧：扫 detect_jobs/<plan>/pt<n>/ 取本轮最新一张）
+  → 按阈值 + 类别去重回传 ai_detect（带命中帧：等 plan_hit.evidence，读不到再扫
+    detect_jobs/<plan>/pt<n>/ 取本轮最新一张）
     → 服务端写 alerts + task_events + 企微（卡片后面跟一张证据图）
   → 数量任务（checkType=count）与 expectCount 不符（SSE plan_hit.count_alert）
     → 转发 `ai_alert`；到期一个都没找到也由服务端按 ai_end.expired 判成数量不一致
@@ -344,11 +345,15 @@ B. client（正式环境：平台在公网、Agent 只在内网，服务端连�
 「未命中 = 数量不一致」只认客户端的 `ai_end.expired=true`（窗口正常到期）；
 任务结束 / 被新航点顶替时 `expired=false`，服务端不记这笔账。
 
-**检出告警的证据图**（2026-11-18 加）：企业微信那条卡片后面跟一张命中帧。
-`plan_hit`（带 `evidence`）要约窗口收尾才发，而检出是实时的，所以客户端在命中那一刻
-自己扫 `<jobs_dir>/<planId>/pt<航点下标>/` 取**窗口开始之后**写下的最新一张（mtime 卡
-5s 容错），把 `evidence`（路径）+ `evidenceImage`（base64）放进 `ai_detect`；服务端
-`record_hit` 校验后发 `msgtype=image`，路径同时写进告警正文「（证据：…）」。
+**检出告警的证据图**（2026-11-18 加，同日 18:54 修复「只有卡片没图」）：企业微信那条卡片后面跟一张命中帧。
+**图不是检出那一刻就有的**：板端 `_plan_frame` 要连采 `DETECT_PLAN_COUNT_SAMPLE`（默认 3）帧命中、
+画框存证，才发带 `evidence` 的 `plan_hit`（现场实测比第一帧检出晚 **4.6s**）。所以客户端把命中
+**先挂起**，等 `plan_hit` 送图来一起上报（`ai_detect` 晚几秒，但卡片后面必有图）；旧实现在命中后
+只扫盘等 2.4s，晚了就只有卡片。
+图优先读 `plan_hit.evidence` 给的路径，读不到再扫 `<jobs_dir>/<planId>/pt<航点下标>/` 取**窗口开始之后**
+写下的最新一张（mtime 卡 5s 容错）；一直等不到（老板端 / 画框失败）就在 8s 兜底时先发卡片。
+窗口结束时还在等图的，由 `finish()` **先停识别再扫盘**（板端 `_plan_flush` 正是停的时候才把采样中的
+命中落盘）后补发。服务端 `record_hit` 校验后发 `msgtype=image`，路径同时写进正文「（证据：…）」。
 `jobs_dir` 优先级：`[ai] jobs_dir` / `ROBODOG_AI_JOBS_DIR`（客户端配置）> 从板端
 `plan_hit.evidence` 反推出的真实根 > 内置候选（`/root/backpack_dashboard/backend/detect_jobs`、
 `/root/261113/backpack_dashboard/backend/detect_jobs`）。板子路径与这两个都不同

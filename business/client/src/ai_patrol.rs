@@ -43,6 +43,12 @@ const EVIDENCE_IMAGE_MAX_BYTES: u64 = 2 * 1024 * 1024;
 /// 存证图的「新鲜度」余量：只有 mtime 在本轮窗口开始（减这个余量）之后的图才认。
 /// 板端写图和 SSE 事件之间差几百毫秒，留 5s 免得刚写下的图被当成上一轮的。
 const EVIDENCE_MTIME_SLACK: Duration = Duration::from_secs(5);
+/// 检出「等证据图」的上限：命中帧不是检出那一刻就落盘的，板端要先连采
+/// `DETECT_PLAN_COUNT_SAMPLE`（默认 3）帧命中、画框存证，再发带 `evidence` 的
+/// `plan_hit`。2026-11-18 现场那次（垃圾桶模型 0.05 阈值）：第一帧检出 18:54:48.8，
+/// 命中帧不连续，第二/三帧到 18:54:53.0 才凑够，图 18:54:53.7 落盘——比检出晚
+/// **4.6s**。所以命中先挂起等 `plan_hit`，最多等这么久；还是等不到就先发卡片保告警。
+const EVIDENCE_PENDING_WAIT: Duration = Duration::from_secs(8);
 /// 板端存证根目录（`detect_jobs`）的默认位置：Agent 把命中帧写在
 /// `<jobs_dir>/<planId>/pt<航点下标>/` 下。
 ///
@@ -517,6 +523,8 @@ impl AiPatrol {
         } else {
             "/api/detect/start"
         };
+        // 证据图的「新鲜度」基准就是本轮窗口开始（板端写完图再发 SSE，留余量）
+        let since = SystemTime::now() - EVIDENCE_MTIME_SLACK;
         match self.post_json(path, &body).await {
             Ok(_) => info!(
                 "航点 AI 识别开始：场景={} 类别={} 阈值={:.2} 相机={} 窗口={}s",
@@ -536,13 +544,22 @@ impl AiPatrol {
                     start.task
                 );
                 // 启动就失败：窗口没真正开起来，别让「未命中」被算成数量不一致
-                self.finish(&out_tx, &start, &format!("启动失败: {error}"), 0, false)
-                    .await;
+                self.finish(
+                    &out_tx,
+                    &start,
+                    &format!("启动失败: {error}"),
+                    0,
+                    false,
+                    Vec::new(),
+                    since,
+                )
+                .await;
                 return;
             }
         }
 
-        let (hits, stopped_early) = self.consume(&out_tx, &start, &cancel).await;
+        let (hits, stopped_early, pending) =
+            self.consume(&out_tx, &start, &cancel, since).await;
         let reason = if stopped_early {
             "任务结束 / 被新航点顶替".to_string()
         } else {
@@ -550,17 +567,21 @@ impl AiPatrol {
         };
         // `expired = true` 只代表「窗口正常到期」：数量任务这时一个都没找到，
         // 服务端才把它算成数量不一致（0 ≠ N）；被任务结束/新航点打断不算账。
-        self.finish(&out_tx, &start, &reason, hits, !stopped_early)
+        self.finish(&out_tx, &start, &reason, hits, !stopped_early, pending, since)
             .await;
     }
 
-    /// 读 SSE，把超过阈值的类别按「本窗口首次出现」上报；返回（上报类别数, 是否被提前打断）
+    /// 读 SSE，把超过阈值的类别按「本窗口首次出现」上报。
+    ///
+    /// 返回（上报类别数, 是否被提前打断, 还没上报的检出）。最后一个非空说明窗口结束时
+    /// 还有命中在等证据图——交给 [`Self::finish`] 停掉板端后再补（板端 flush 计划时会写图）。
     async fn consume(
         &self,
         out_tx: &mpsc::Sender<WsMessage>,
         start: &AiStart,
         cancel: &Arc<Notify>,
-    ) -> (usize, bool) {
+        since: SystemTime,
+    ) -> (usize, bool, Vec<(String, f64)>) {
         let response = self
             .stream
             .get(format!("{}/api/events", self.agent))
@@ -571,30 +592,53 @@ impl AiPatrol {
             Ok(response) if response.status().is_success() => response,
             Ok(response) => {
                 warn!("航点 AI 识别：Agent 拒绝事件流 HTTP {}", response.status());
-                return (0, false);
+                return (0, false, Vec::new());
             }
             Err(error) => {
                 warn!("航点 AI 识别：连不上 Agent 事件流: {error}");
-                return (0, false);
+                return (0, false, Vec::new());
             }
         };
 
         let notified = cancel.notified();
         tokio::pin!(notified);
         let deadline = Instant::now() + Duration::from_secs(start.secs.max(1));
-        // 存证目录里只有本轮（窗口开始之后）写下的图能当证据：同一航点每轮巡检都
-        // 覆盖同名文件，用时间戳把上一轮留下的图挡掉（板端写图比 SSE 早/晚几百毫秒，留 5s 余量）
-        let since = SystemTime::now() - EVIDENCE_MTIME_SLACK;
         let mut buffer = String::new();
         let mut seen: HashSet<String> = HashSet::new();
         let mut hits = 0usize;
         // 数量核对告警每个窗口只上报一条（板端 `plan_hit` 也只发一次，双保险）
         let alerted = AtomicBool::new(false);
+        // 等着带上证据图的检出（`label`, 置信度），见 [`EVIDENCE_PENDING_WAIT`] 的注释
+        let mut pending: Vec<(String, f64)> = Vec::new();
+        // 本窗口已拿到的命中帧（板端路径, base64）：同一窗口后来再命中别的类别直接复用
+        let mut evidence: Option<(String, String)> = None;
+        // 挂起检出的兜底上报时刻：一直等不到证据图也要把告警发出去
+        let mut pending_deadline: Option<Instant> = None;
 
-        loop {
+        let stopped_early = loop {
+            let flush_at = pending_deadline.unwrap_or(deadline);
             tokio::select! {
-                _ = &mut notified => return (hits, true),
-                _ = tokio::time::sleep_until(deadline) => return (hits, false),
+                _ = &mut notified => break true,
+                _ = tokio::time::sleep_until(deadline) => break false,
+                // 兜底：板端迟迟不给证据图（老板端 / 画框失败）就先发卡片保告警
+                _ = tokio::time::sleep_until(flush_at) => {
+                    if pending.is_empty() {
+                        // `flush_at` 就是窗口到期时刻，与上面那个分支同义
+                        break false;
+                    }
+                    debug!(
+                        "航点 AI 识别：{}s 内没等到证据图，先上报 {} 类检出",
+                        EVIDENCE_PENDING_WAIT.as_secs(),
+                        pending.len()
+                    );
+                    if let Some(found) = self.window_evidence(start, since, 1).await {
+                        evidence = Some(found);
+                    }
+                    for (label, conf) in std::mem::take(&mut pending) {
+                        send_detect(out_tx, start, &label, conf, evidence.as_ref()).await;
+                    }
+                    pending_deadline = None;
+                }
                 chunk = response.chunk() => {
                     match chunk {
                         Ok(Some(bytes)) => {
@@ -632,40 +676,63 @@ impl AiPatrol {
                                 if let Some(root) = jobs_root_from_evidence(&event) {
                                     self.learn_jobs_root(root).await;
                                 }
+                                // 板端 `plan_hit` 才是「命中帧已画框落盘」的信号（检出那一刻
+                                // 还在采样）：拿它把挂起的检出补上图再上报。路径优先用事件里
+                                // 的 `evidence`，读不到（bind-mount / 换了盘符）就退回扫存证目录。
+                                if event.get("type").and_then(Value::as_str) == Some("plan_hit")
+                                    && !pending.is_empty()
+                                {
+                                    evidence = match plan_hit_evidence(&event).await {
+                                        Some(found) => Some(found),
+                                        None => self.window_evidence(start, since, 4).await,
+                                    };
+                                    if evidence.is_none() {
+                                        debug!(
+                                            "航点 AI 识别：plan_hit 没有可读的证据图，{} 类检出只发卡片",
+                                            pending.len()
+                                        );
+                                    }
+                                    for (label, conf) in std::mem::take(&mut pending) {
+                                        send_detect(out_tx, start, &label, conf, evidence.as_ref())
+                                            .await;
+                                    }
+                                    pending_deadline = None;
+                                }
                                 for (label, conf) in take_hits(&event, start.conf, &mut seen) {
                                     hits += 1;
                                     debug!("航点 AI 识别：检出 {label}（{conf:.2}）");
-                                    let mut detect = json!({
-                                        "windowId": start.window_id,
-                                        "task": start.task,
-                                        "planId": start.plan_id,
-                                        "pointIndex": start.point_index,
-                                        "label": label,
-                                        "conf": conf,
-                                    });
-                                    // 检出告警也要证据图（群里「检出灭火器」那条卡片后面再看图）。
-                                    // 这一帧的图还在板端盘上、`plan_hit` 里也没有路径，所以
-                                    // 自己扫 `<存证根>/<计划>/pt<航点>/` 取最新一张。
-                                    if let Some((path, image)) = self.window_evidence(start, since).await {
-                                        detect["evidence"] = json!(path);
-                                        detect["evidenceImage"] = json!(image);
+                                    // 证据图这时通常还没落盘（见 [`EVIDENCE_PENDING_WAIT`]）。
+                                    // 先探一次盘（`plan_hit` 后来的那些命中，图已经在盘上），
+                                    // 探不到就先挂起等 `plan_hit`——群里那条卡片晚几秒，
+                                    // 但后面跟得上证据图。
+                                    if evidence.is_none() {
+                                        evidence = self.window_evidence(start, since, 1).await;
                                     }
-                                    send(out_tx, "ai_detect", detect).await;
+                                    if let Some(found) = evidence.as_ref() {
+                                        send_detect(out_tx, start, &label, conf, Some(found)).await;
+                                        continue;
+                                    }
+                                    pending.push((label, conf));
+                                    pending_deadline.get_or_insert_with(|| {
+                                        Instant::now() + EVIDENCE_PENDING_WAIT
+                                    });
                                 }
                             }
                         }
-                        Ok(None) => return (hits, false),
+                        Ok(None) => break false,
                         Err(error) => {
                             warn!("航点 AI 识别：事件流中断: {error}");
-                            return (hits, false);
+                            break false;
                         }
                     }
                 }
             }
-        }
+        };
+        (hits, stopped_early, pending)
     }
 
-    /// 收尾：按需停 Agent → 上报 `ai_end` → 释放窗口槽位
+    /// 收尾：按需停 Agent →（补发挂起的检出）→ 上报 `ai_end` → 释放窗口槽位
+    #[allow(clippy::too_many_arguments)]
     async fn finish(
         &self,
         out_tx: &mpsc::Sender<WsMessage>,
@@ -673,6 +740,8 @@ impl AiPatrol {
         reason: &str,
         hits: usize,
         expired: bool,
+        pending: Vec<(String, f64)>,
+        since: SystemTime,
     ) {
         // 与平台侧 `replaced_by_other` 同一语义：窗口已被**新窗口**顶替时不停 Agent
         // （新窗口可能继承着操作员手动开的识别）；被 stop()/任务终态摘掉时窗口为空，
@@ -697,6 +766,21 @@ impl AiPatrol {
             && let Err(error) = self.post_json("/api/detect/stop", &json!({})).await
         {
             warn!("航点 AI 识别：停识别失败: {error}");
+        }
+        // 到窗口结束还没等到 `plan_hit` 的检出（命中后板端还在采样）：停识别会让板端
+        // `_plan_flush` 把采样中的命中画框存证，所以**先停再扫**一次盘，往往能补上图。
+        // 停之前扫是白扫——那时图根本还没写。
+        if !pending.is_empty() {
+            let evidence = self.window_evidence(start, since, 4).await;
+            if evidence.is_none() {
+                debug!(
+                    "航点 AI 识别：窗口收尾时仍没有证据图，{} 类检出只发卡片",
+                    pending.len()
+                );
+            }
+            for (label, conf) in pending {
+                send_detect(out_tx, start, &label, conf, evidence.as_ref()).await;
+            }
         }
         info!("航点 AI 识别结束：场景={} {reason}，上报 {hits} 类目标", start.task);
 
@@ -748,23 +832,21 @@ impl AiPatrol {
 
     /// 本轮窗口的一张命中帧：（板端路径, base64）。
     ///
-    /// 检出告警是**实时**推的，`plan_hit`（带 `evidence` 路径）要到窗口收尾才来，
-    /// 所以这里直接扫板端存证目录：`<存证根>/<计划 id>/pt<航点下标>/`，取
-    /// 「窗口开始之后写下的」最新一张。失败一律 `None`：**不带图不能影响告警**。
+    /// 这是「拿不到 `plan_hit` 的 path 时」的退路：扫板端存证目录
+    /// `<存证根>/<计划 id>/pt<航点下标>/`，取「窗口开始之后写下的」最新一张。
+    /// `attempts` 是重试次数（每次间隔 300ms）：窗口收尾时给几次就够，兜底上报可以只给 1。
+    /// 失败一律 `None`：**不带图不能影响告警**。
     async fn window_evidence(
         &self,
         start: &AiStart,
         since: SystemTime,
+        attempts: usize,
     ) -> Option<(String, String)> {
         let plan = start.plan_id.trim();
-        if plan.is_empty() {
+        if plan.is_empty() || attempts == 0 {
             return None;
         }
-        // 板端命中帧不是「检出瞬间」就落盘：实测 `result.json`/图是在作业收尾
-        // （`_finish_job`，命中后约 1~2s）才写的，而 SSE 的 `detect` 事件来得更早。
-        // 所以给 8 次×300ms（≈2.4s，命中帧一到就立刻返回）的重试预算，
-        // 宁可在后台任务里多等两秒，也别把「有图」的告警发成「只有文字」。
-        for attempt in 0..8 {
+        for attempt in 0..attempts {
             if attempt > 0 {
                 tokio::time::sleep(Duration::from_millis(300)).await;
             }
@@ -893,6 +975,48 @@ fn count_alert(event: &Value, start: &AiStart) -> Option<Value> {
 }
 
 /* ------------------------------- 证据图 ------------------------------- */
+
+/// 上报一条检出（`ai_detect`）。
+///
+/// `evidence` = （板端路径, base64）：拿到命中帧就带图，没拿到就只发卡片
+/// （见 [`EVIDENCE_PENDING_WAIT`]——先挂起等板端落盘，等不到也不能把告警拖没了）。
+async fn send_detect(
+    out_tx: &mpsc::Sender<WsMessage>,
+    start: &AiStart,
+    label: &str,
+    conf: f64,
+    evidence: Option<&(String, String)>,
+) {
+    let mut detect = json!({
+        "windowId": start.window_id,
+        "task": start.task,
+        "planId": start.plan_id,
+        "pointIndex": start.point_index,
+        "label": label,
+        "conf": conf,
+    });
+    if let Some((path, image)) = evidence {
+        detect["evidence"] = json!(path);
+        detect["evidenceImage"] = json!(image);
+    }
+    send(out_tx, "ai_detect", detect).await;
+}
+
+/// 板端 `plan_hit.evidence` 指向的命中帧：（路径, base64）。
+///
+/// `plan_hit` 是板端「已经把这一帧画框存证」的信号，文件在这条事件之前就写好了，
+/// 所以正常情况下一次就能读到。读不到（bind-mount / 换盘符）返回 `None`，
+/// 由调用方退回扫存证目录（`AiPatrol::window_evidence`）。
+async fn plan_hit_evidence(event: &Value) -> Option<(String, String)> {
+    let path = event
+        .get("evidence")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())?
+        .to_string();
+    let image = evidence_image_from_path(&path).await?;
+    Some((path, image))
+}
 
 /// 把「数量核对不一致」告警里的证据图读成 base64（供平台发企业微信图片消息）。
 ///
@@ -1426,10 +1550,32 @@ mod agent_flow {
         "\"evidence\":\"/root/backpack_dashboard/backend/detect_jobs/TK-1/pt0/dogcam_1.jpg\"}\n\n",
     );
 
+    /// 只有检出、没有 `plan_hit` 的事件流：模拟「命中帧还在采样、还没落盘」的那几秒
+    const DETECT_ONLY: &str = concat!(
+        "data: {\"type\":\"detect\",\"cam\":\"dogcam\",\"task\":\"firextinguisher\",",
+        "\"boxes\":[{\"label\":\"extinguisher\",\"zh\":\"灭火器\",\"conf\":0.92}]}\n\n",
+    );
+
     /// 假 Agent 收到的调用：`(路径, body)`，body 用来验证计划参数确实透传了
     type Calls = Arc<Mutex<Vec<(String, Value)>>>;
 
     async fn spawn_agent(calls: Calls) -> String {
+        spawn_agent_with(calls, EVENTS.to_string(), None, None).await
+    }
+
+    /// 可定制的假 Agent：
+    ///
+    /// - `events`：SSE 正文；
+    /// - `delayed`：（多久之后, 又一段 SSE 正文）——用来模拟板端「命中帧落盘后才发
+    ///   `plan_hit`」：现场实测比第一帧检出晚 4~5s；
+    /// - `on_stop`：`/api/detect/stop` 时要写一个 JPEG 到哪里——模拟板端
+    ///   `_plan_flush` 在停识别时把还在采样中的命中收尾存证。
+    async fn spawn_agent_with(
+        calls: Calls,
+        events: String,
+        delayed: Option<(Duration, String)>,
+        on_stop: Option<std::path::PathBuf>,
+    ) -> String {
         let app = Router::new()
             .route("/api/detect/tasks", get(|| async { TASKS }))
             .route("/api/detect/status", get(|| async { STATUS }))
@@ -1466,25 +1612,47 @@ mod agent_flow {
             .route(
                 "/api/detect/stop",
                 post(
-                    |axum::extract::State(calls): axum::extract::State<Calls>,
-                     axum::Json(body): axum::Json<Value>| async move {
-                        calls.lock().await.push(("stop".to_string(), body));
-                        axum::Json(json!({"ok": true}))
+                    move |axum::extract::State(calls): axum::extract::State<Calls>,
+                          axum::Json(body): axum::Json<Value>| {
+                        let on_stop = on_stop.clone();
+                        async move {
+                            calls.lock().await.push(("stop".to_string(), body));
+                            // 板端停识别时会 `_plan_flush`：命中帧在这一刻才落盘
+                            if let Some(path) = on_stop {
+                                if let Some(parent) = path.parent() {
+                                    let _ = std::fs::create_dir_all(parent);
+                                }
+                                let _ = std::fs::write(path, [0xFF_u8, 0xD8, 0xFF, 0xE0, 0x00, 0x10]);
+                            }
+                            axum::Json(json!({"ok": true}))
+                        }
                     },
                 ),
             )
             .route(
                 "/api/events",
-                get(|| async {
-                    // 真机 SSE 是长连接：推完事件挂着不断开，收尾只能靠窗口到期/打断
-                    let stream = futures_util::stream::once(async {
-                        Ok::<_, std::io::Error>(EVENTS.as_bytes().to_vec())
-                    })
-                    .chain(futures_util::stream::pending());
-                    (
-                        [("content-type", "text/event-stream")],
-                        axum::body::Body::from_stream(stream),
-                    )
+                get(move || {
+                    let events = events.clone();
+                    let delayed = delayed.clone();
+                    async move {
+                        // 真机 SSE 是长连接：推完事件挂着不断开，收尾只能靠窗口到期/打断
+                        let head = futures_util::stream::once(async move {
+                            Ok::<_, std::io::Error>(events.into_bytes())
+                        });
+                        let tail = match delayed {
+                            Some((after, body)) => futures_util::stream::once(async move {
+                                tokio::time::sleep(after).await;
+                                Ok::<_, std::io::Error>(body.into_bytes())
+                            })
+                            .boxed(),
+                            None => futures_util::stream::empty().boxed(),
+                        };
+                        let stream = head.chain(tail).chain(futures_util::stream::pending());
+                        (
+                            [("content-type", "text/event-stream")],
+                            axum::body::Body::from_stream(stream),
+                        )
+                    }
                 }),
             )
             .with_state(calls);
@@ -1534,6 +1702,10 @@ mod agent_flow {
     /// 存在性任务（`exist`，没有 `expectCount`）的开窗指令：
     /// 「存在就告警」这类航点同样要带证据图，与数量任务走同一条 `ai_detect`。
     fn exist_start_payload() -> AiStart {
+        exist_start_payload_secs(1)
+    }
+
+    fn exist_start_payload_secs(secs: u64) -> AiStart {
         AiStart::from_value(&json!({
             "windowId": "AIW-1-0-2",
             "action": "start",
@@ -1546,7 +1718,7 @@ mod agent_flow {
             "conf": 0.35,
             "cam": "dogcam",
             "fps": 3,
-            "secs": 1,
+            "secs": secs,
             "wasRunning": false,
         }))
         .expect("构造开窗指令失败")
@@ -1784,6 +1956,147 @@ mod agent_flow {
             detect["evidenceImage"].as_str().is_some(),
             "晚落盘的命中帧也要带上: {detect}"
         );
+    }
+
+    /// 现场事故回归（2026-11-18 18:54，任务 TK-1112-11 航点 1「新航点 2」）：
+    /// 板端 `_plan_frame` 要连采 3 帧命中才 `_plan_write` 落盘，现场那次命中帧比第一帧
+    /// 检出晚 **4.6s**；客户端以前命中后只等 2.4s 就上报，群里那条「检出 Broken trash can」
+    /// 只有卡片、没有图。现在命中先挂起、等 `plan_hit` 带 `evidence` 来（图在它之前已写好）
+    /// 再上报，晚几秒也能带上图。
+    #[tokio::test]
+    async fn evidence_landing_seconds_late_still_rides_with_the_alert() {
+        let root = std::env::temp_dir().join(format!(
+            "robodog-jobs-plan-hit-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        let point_dir = root.join("TK-1").join("pt0");
+        std::fs::create_dir_all(&point_dir).expect("建存证目录失败");
+        let frame = point_dir.join("dogcam_20261118_185453.jpg");
+        // 板端先写图（18:54:53.7）再发 `plan_hit`（带 evidence）；这里 4s 落盘、4.2s 才来事件
+        let writer = frame.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            std::fs::write(&writer, [0xFF_u8, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).expect("写命中帧失败");
+        });
+        let delayed = format!(
+            concat!(
+                "data: {{\"type\":\"plan_hit\",\"plan_id\":\"TK-1\",\"point_index\":0,",
+                "\"found\":true,\"found_count\":1,\"count_alert\":false,",
+                "\"evidence\":\"{}\"}}\n\n"
+            ),
+            frame.display()
+        );
+
+        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        let agent = spawn_agent_with(
+            calls,
+            DETECT_ONLY.to_string(),
+            Some((Duration::from_secs(4), delayed)),
+            None,
+        )
+        .await;
+        let ai = Arc::new(AiPatrol::with_jobs_dir(
+            agent,
+            true,
+            Some(root.to_string_lossy().to_string()),
+        ));
+        let (tx, mut rx) = mpsc::channel(16);
+        let started = tokio::time::Instant::now();
+        ai.start(&tx, exist_start_payload_secs(30)).await;
+
+        let mut detects = Vec::new();
+        while detects.is_empty() {
+            let msg = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+                .await
+                .expect("等检出超时")
+                .expect("通道关闭");
+            if msg.msg_type == "ai_detect" {
+                detects.push(msg.payload);
+            }
+        }
+        let waited = started.elapsed();
+        ai.stop("测试结束").await;
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(
+            waited >= Duration::from_secs(3),
+            "要等到板端落盘才上报（旧实现 2.4s 就放弃带图了）: {waited:?}"
+        );
+        assert!(
+            detects[0]["evidenceImage"].as_str().is_some(),
+            "晚几秒落盘的命中帧也要跟着告警发出去: {}",
+            detects[0]
+        );
+        assert!(
+            detects[0]["evidence"]
+                .as_str()
+                .unwrap_or_default()
+                .ends_with("pt0/dogcam_20261118_185453.jpg"),
+            "证据路径要用板端 `plan_hit.evidence`: {}",
+            detects[0]
+        );
+    }
+
+    /// 窗口结束前板端还在采样（没等到 `plan_hit`）：停识别会让板端 `_plan_flush`
+    /// 把采样中的命中画框存证，客户端要**先停再扫**，把图带上再发告警。
+    #[tokio::test]
+    async fn evidence_written_on_plan_flush_is_picked_up_at_window_end() {
+        let root = std::env::temp_dir().join(format!(
+            "robodog-jobs-flush-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        let frame = root
+            .join("TK-1")
+            .join("pt0")
+            .join("dogcam_20261118_185500.jpg");
+
+        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        // 停识别时才写图（=板端 `_plan_flush`），此前目录里什么都没有
+        let agent = spawn_agent_with(
+            calls,
+            DETECT_ONLY.to_string(),
+            None,
+            Some(frame.clone()),
+        )
+        .await;
+        let ai = Arc::new(AiPatrol::with_jobs_dir(
+            agent,
+            true,
+            Some(root.to_string_lossy().to_string()),
+        ));
+        let (tx, mut rx) = mpsc::channel(16);
+        ai.start(&tx, exist_start_payload()).await;
+        let messages = drain_until_end(&mut rx, Duration::from_secs(8)).await;
+        let _ = std::fs::remove_dir_all(&root);
+
+        let detects: Vec<&Value> = messages
+            .iter()
+            .filter(|(kind, _)| kind == "ai_detect")
+            .map(|(_, payload)| payload)
+            .collect();
+        assert_eq!(
+            detects.len(),
+            1,
+            "挂起的检出不能丢（也不能重复发）: {messages:?}"
+        );
+        assert!(
+            detects[0]["evidenceImage"].as_str().is_some(),
+            "停识别后补扫到的命中帧要跟着告警发: {}",
+            detects[0]
+        );
+        // 顺序：先停 Agent（板端才会 flush），再发检出，最后 ai_end
+        let kinds: Vec<&str> = messages.iter().map(|(kind, _)| kind.as_str()).collect();
+        let detect_at = kinds.iter().position(|kind| *kind == "ai_detect").unwrap();
+        let end_at = kinds.iter().position(|kind| *kind == "ai_end").unwrap();
+        assert!(detect_at < end_at, "检出要赶在 ai_end 之前上报: {kinds:?}");
     }
 
     #[tokio::test]
