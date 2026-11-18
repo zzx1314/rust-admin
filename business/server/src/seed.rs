@@ -1,6 +1,7 @@
 use crate::db::{now, today};
 use crate::geo::route_metrics;
 use crate::notify;
+use crate::video;
 use bcrypt::{DEFAULT_COST, hash};
 use chrono::{Datelike, Duration, Local};
 use serde_json::Value;
@@ -171,6 +172,23 @@ async fn ensure_settings(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             "",
             "secret",
             "企业微信群机器人 webhook 地址（平台内配置，留空则用环境变量）",
+        ),
+        // 平台中继默认档位：现场板子出公网主要走 4G 模块，720p/1000k 起流就会被反压，
+        // 所以默认直接用省流档 640x360@12/500k，链路再差由板端自动降一档。
+        // 改这里只影响「以后起流」；保存设置时会立刻 `video_config` 广播给在线板端。
+        (
+            "video",
+            video::RELAY_PROFILE_SETTING,
+            video::DEFAULT_RELAY_TIER,
+            "string",
+            "平台中继默认档位：light=高清 720p / degrade=省流 640x360（4G 推荐）/ degrade2=极省流 320x180",
+        ),
+        (
+            "video",
+            video::RELAY_AUTO_DEGRADE_SETTING,
+            "true",
+            "bool",
+            "中继按上行带宽自动降档（关闭则锁死在默认档位，只保留断线重连保护）",
         ),
     ];
 

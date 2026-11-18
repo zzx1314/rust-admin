@@ -1002,6 +1002,43 @@ python3 deploy/backpack-relay/measure_bitrate.py --stream dogcam --seconds 20
 > 或 `RELAY_WIDTH=1024 RELAY_HEIGHT=576`），别靠自适应去救 —— 自适应只能保证「体感可接受」，
 > 不能凭空变出带宽。
 
+#### ⑩ 档位改成页面可配置（默认省流档，4G 主用）
+
+原来的默认档位只能在**板端**改 `RELAY_PROFILE` / `RELAY_*` 环境变量再重启 `backpack-relay`；
+现场主要走 4G 模块，希望「不登板子就能把起流画质定下来」。现在：
+
+- 页面：**系统设置 → 视频中继**
+  - 默认档位：`light` 高清 720p15/1000k / `degrade` 省流 640x360@12/500k（默认，4G 推荐）/
+    `degrade2` 极省流 320x180@8/200k；
+  - 按上行带宽自动降档：开（默认）/ 关（锁死选定档位，只保留上行彻底断掉时的重连保护）。
+- 存储：`settings.video_relay_profile` / `settings.video_relay_auto_degrade`
+  （`seed.rs` 写入默认值 `degrade` + `true`，老库启动时 `INSERT OR IGNORE` 补上）。
+- 平台 → 板端协议（都在推流 WS 的文本帧里）：
+  - `video_start.payload.profile = {"tier": "degrade", "auto": true}`：第一个观看者进来时下发；
+  - `video_config.payload.profile = …`：设置页保存后**广播**给 7 条在线推流连接，正在看的流
+    就地换档（`video_reset` + 重启 ffmpeg，观看端不重连），不用等下一次起流。
+- 板端（`relay_push.py`）：平台下发的 `tier` 成为**起点档位**（`base_level()`），
+  `_degrade_level` 改为绝对档位（起点 1 = 省流档时还能再降到 2 = 极省流档，但不会再往上升）；
+  `auto=false` 时 `mark_congested()` 只续窗口、不降档（日志每分钟一条「平台已锁定…」）。
+  没有 `profile` 字段时（老平台 / 手工运行）完全按环境变量走，行为与以前一致。
+
+两条兼容性约定（改协议时别破坏）：
+
+- **老板端 + 新平台**：老 `relay_push.py` 忽略 `payload.profile`，继续用板端环境变量；
+- **新板端 + 老平台**：没字段 → `base_level()` 返回 0（= `RELAY_PROFILE`），与原来一致。
+
+回归：
+
+- 板端状态机：`python3 deploy/backpack-relay/test_relay_push.py`（27 个用例，含
+  「平台起点省流档」「起点极省流档不再降」「锁定档位不降档」「换档后旧拥塞状态作废」
+  「老平台不带 profile」）；
+- 平台：`cargo test --test video_relay`（`relay_profile_defaults_and_updates_reach_the_board`）、
+  `cargo test --test api_smoke relay_profile_setting_is_validated`（枚举校验 + 默认值可读）。
+
+> ⚠️ 页面只选**档位**；档位背后的分辨率 / 帧率 / 码率仍由板端 `RELAY_*` 决定（本节的
+> 默认值就是 §6.10⑥⑧ 调出来的那套）。要现场微调又不改页面，就改板端环境变量后重启
+> `backpack-relay`（平台下发的档位名不变，参数跟着变）。
+
 #### 排查工具与清单
 
 ```bash

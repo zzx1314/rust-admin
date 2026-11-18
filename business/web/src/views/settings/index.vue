@@ -168,7 +168,32 @@ const switches = [
   { key: "night_silent", title: "夜间静音模式", desc: "22:00 - 07:00 暂停非紧急告警声音提示" }
 ];
 
+/** 中继默认档位：改完立即生效（平台随 `video_start` 下发 / 保存时广播 `video_config`）。
+ *
+ *  现场板子出公网主要走 4G 模块（实测上行 0.25~0.6Mbps），720p/1000k 起流就会被反压，
+ *  所以默认是省流档；链路更差时板端还会再降到极省流档（慢刷新，但不断线）。
+ */
+const relayTiers = [
+  {
+    value: "light",
+    label: "高清 720p15 / 1000k",
+    hint: "画质最好；需要稳定 ≥2Mbps 上行（Wi-Fi / 有线），4G 模块基本撑不住"
+  },
+  {
+    value: "degrade",
+    label: "省流 640x360@12 / 500k（推荐 4G）",
+    hint: "4G 模块的主力档位；链路更差时自动再降到极省流档"
+  },
+  {
+    value: "degrade2",
+    label: "极省流 320x180@8 / 200k",
+    hint: "弱 4G / 流量卡：约 2~3fps 慢刷新，但不会反复断线重连"
+  }
+];
 
+const currentRelayTier = computed(
+  () => relayTiers.find(tier => tier.value === values.video_relay_profile) ?? relayTiers[1]
+);
 
 async function load() {
   const [settingList, parkList, stats] = await Promise.all([
@@ -280,6 +305,55 @@ onMounted(async () => {
             企业微信推送地址在下方「企业微信群机器人」里配置，填好即生效；
             未配置时上方开关只影响站内提示。
           </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mt18">
+      <div class="card-head">
+        <div class="card-title"><AppIcon name="video" />视频中继</div>
+        <button class="btn" :disabled="saving" @click="save">
+          <AppIcon name="check" />{{ saving ? "保存中…" : "保存档位" }}
+        </button>
+      </div>
+      <div class="card-body">
+        <p class="muted" style="font-size: 12px; margin: 0 0 12px; line-height: 1.7">
+          背包实时视频走「平台中继」时，板端起流的<b>默认档位</b>在这里定。现场出公网主要走
+          4G 模块，默认用省流档（640x360@12 / 500k）；链路更差时板端会自己再降一档。
+          改完保存立即生效，正在看的流会在几秒内就地换档（播放器不重连，只短暂等一个关键帧）。
+        </p>
+        <div class="form-grid">
+          <div class="field">
+            <label>默认档位</label>
+            <select v-model="values.video_relay_profile" class="select">
+              <option v-for="tier in relayTiers" :key="tier.value" :value="tier.value">
+                {{ tier.label }}
+              </option>
+            </select>
+            <span class="muted" style="font-size: 11px">{{ currentRelayTier.hint }}</span>
+          </div>
+        </div>
+        <div class="divider" />
+        <div class="setting-row">
+          <div>
+            <b>按上行带宽自动降档</b>
+            <p>
+              开启（默认）：板端发现上行吃不下当前档位时自动再降一档；关闭则锁死在上面选定的
+              档位，只保留「上行彻底断掉」时的重连保护（固定流量套餐 / 只想要稳定画质时用）。
+            </p>
+          </div>
+          <button
+            class="switch"
+            :class="{ on: values.video_relay_auto_degrade === 'true' }"
+            aria-label="切换中继自动降档"
+            @click="toggle('video_relay_auto_degrade')"
+          />
+        </div>
+        <div class="rt-hint" style="margin-top: 12px">
+          档位对应的分辨率 / 帧率 / 码率由板端 <code>backpack-relay</code> 的
+          <code>RELAY_*</code> 环境变量细化（默认：高清 1280x720@20/1200k、省流
+          640x360@12/500k、极省流 320x180@8/200k）。板端 relay 未升级到支持页内配置的
+          版本时，这个设置不生效，仍用板端环境变量里的档位。
         </div>
       </div>
     </div>

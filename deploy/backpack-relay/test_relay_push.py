@@ -46,6 +46,9 @@ class FakeSession:
 
 def reset() -> None:
     relay._degrade_level = 0
+    relay._requested_tier = None
+    relay._auto_degrade = True
+    relay._locked_logged_at = 0.0
     relay._last_window_bps = 0.0
     relay._congested_until = 0.0
     relay._flaps = 0
@@ -559,6 +562,91 @@ def test_restream_skips_idle_sessions() -> None:
 
     assert running.restarts == ["降档"]
     assert idle.restarts == [], "没在推的流不该被拉起来"
+
+
+def test_platform_default_tier_sets_the_starting_point() -> None:
+    """页面选「省流档」：起流就是 640x360@12/500k，而不是先推 720p 再降。"""
+    reset()
+    assert relay.apply_remote_profile({"tier": "degrade", "auto": True})
+    assert relay.base_level() == 1
+    assert relay.active_profile() == (
+        relay.DEGRADE_WIDTH,
+        relay.DEGRADE_HEIGHT,
+        relay.DEGRADE_FPS,
+        relay.DEGRADE_BITRATE,
+    )
+    # 起点本身就是省流档，不算「自动降过档」
+    assert not relay.degraded()
+
+    # 链路比省流档还小：还能再降一档到极省流
+    relay._last_window_bps = 250_000
+    asyncio.run(degrade_in_loop(reason="省流档也吃不下"))
+    assert relay._degrade_level == 2
+    assert relay.active_profile()[0] == relay.DEGRADE2_WIDTH
+
+    # 已经到了最低档：再拥塞也不会继续降（只会续窗口）
+    assert relay.active_profile()[0] == relay.DEGRADE2_WIDTH
+    asyncio.run(degrade_in_loop(reason="还是不行"))
+    assert relay._degrade_level == 2
+
+
+def test_platform_low_tier_is_already_the_floor() -> None:
+    """页面选「极省流档」：没有更低的档可以降，也不反复重启 ffmpeg。"""
+    reset()
+    only = FakeSession()
+    relay._sessions["dogcam"] = only
+    assert relay.apply_remote_profile({"tier": "degrade2", "auto": True})
+    assert relay.active_profile()[0] == relay.DEGRADE2_WIDTH
+
+    asyncio.run(degrade_in_loop(reason="还是不行"))
+    assert relay._degrade_level == 2
+    assert only.restarts == [], "已经在最低档，不该再降档/重启"
+
+
+def test_platform_can_lock_the_tier() -> None:
+    """页面关掉「自动降档」：链路再差也保持平台选的档位（只留 send 超时保护）。"""
+    reset()
+    only = FakeSession()
+    relay._sessions["dogcam"] = only
+    assert relay.apply_remote_profile({"tier": "degrade", "auto": False})
+
+    relay._last_window_bps = 200_000
+    asyncio.run(degrade_in_loop(reason="上行吃不下当前档位"))
+
+    assert relay._degrade_level == 1, "锁定后不该再降档"
+    assert only.restarts == []
+    assert not relay.degraded()
+
+
+def test_platform_tier_change_resets_old_degrade_state() -> None:
+    """页面把档位从省流档改成高清：旧档位的拥塞窗口/封顶作废，按新起点重来。"""
+    reset()
+    assert relay.apply_remote_profile({"tier": "degrade", "auto": True})
+    relay._congested_until = time.monotonic() + 300
+    relay._ceiling_level = 0
+    relay._ceiling_until = time.monotonic() + 600
+
+    assert relay.apply_remote_profile({"tier": "light", "auto": True})
+    assert relay.base_level() == 0
+    assert relay.active_profile()[0] == relay.OUT_WIDTH
+    assert relay._congested_until == 0
+    assert relay._ceiling_level is None
+    # 同一份配置重复下发不算变化（避免每次 video_start 都重启 ffmpeg）
+    assert not relay.apply_remote_profile({"tier": "light", "auto": True})
+    # 老平台不带 profile：不改任何东西，继续按已下发的档位
+    assert not relay.apply_remote_profile(None)
+    assert relay.base_level() == 0
+
+
+def test_legacy_platform_without_profile_keeps_env_default() -> None:
+    reset()
+    assert relay.base_level() == 0
+    assert relay.active_profile() == (
+        relay.OUT_WIDTH,
+        relay.OUT_HEIGHT,
+        relay.OUT_FPS,
+        relay.OUT_BITRATE,
+    )
 
 
 def main() -> int:

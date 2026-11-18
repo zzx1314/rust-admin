@@ -690,3 +690,47 @@ async fn video_reset_on_a_cold_start_does_not_kick_the_viewer() {
         .unwrap();
     assert_eq!(next_binary(&mut viewer, "冷启动后收帧").await, frame);
 }
+
+/// 中继默认档位：`video_start` 要带平台配置（页面「系统设置 → 视频中继」），
+/// 改设置后立刻广播 `video_config` 给在线板端 —— 正在看的流就地换档，不用等下一次起流。
+///
+/// 现场背景：板子出公网主要走 4G 模块，720p15/1000k 起流就被反压；默认档位是
+/// 省流档 640x360@12/500k，板端再按链路自动降一档到 320x180@8/200k。
+#[tokio::test]
+async fn relay_profile_defaults_and_updates_reach_the_board() {
+    let (state, _db) = test_state().await;
+    let (port, router) = spawn_server(state.clone()).await;
+    let token = login_token(&router).await;
+    let mut publisher = publisher_for(port, &state).await;
+
+    let (_viewer, _) = connect_async(format!(
+        "ws://127.0.0.1:{port}/api/backpack/video/ws?stream=dogcam&token={token}"
+    ))
+    .await
+    .expect("观看通道连接失败");
+
+    let start = next_msg(&mut publisher, "video_start").await;
+    assert_eq!(start["payload"]["stream"], "dogcam");
+    assert_eq!(
+        start["payload"]["profile"]["tier"], "degrade",
+        "4G 场景默认档位应是省流档（640x360@12/500k）: {start}"
+    );
+    assert_eq!(
+        start["payload"]["profile"]["auto"], true,
+        "默认允许板端按链路自动降档: {start}"
+    );
+
+    // 页面保存设置 → 平台广播 video_config（板端收到后就地换档，观看端不重连）
+    sqlx::query(
+        "UPDATE settings SET setting_value = 'degrade2' WHERE setting_key = 'video_relay_profile'",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+    let sent = robodog_ops_server::video::broadcast_relay_profile(&state).await;
+    assert_eq!(sent, 1, "在线的那条推流连接应该收到新配置");
+
+    let config = next_msg(&mut publisher, "video_config").await;
+    assert_eq!(config["payload"]["profile"]["tier"], "degrade2");
+    assert_eq!(config["payload"]["profile"]["auto"], true);
+}

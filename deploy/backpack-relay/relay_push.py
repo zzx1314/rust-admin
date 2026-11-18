@@ -33,7 +33,7 @@ WebRTC 的 ~200ms 变成 1~2s，收益是任何网络、任何浏览器都能看
 | `RELAY_RTSP_BASE` | `rtsp://127.0.0.1:8554` | 本地 mediamtx |
 | `RELAY_ROOM_PREFIX` | `bp:` | 房间前缀，必须与服务端 `video.rs::BACKPACK_ROOM_PREFIX` 一致 |
 | `RELAY_FFMPEG` | `ffmpeg` | ffmpeg 路径 |
-| `RELAY_PROFILE` | `light` | 输出档位：`light`（默认，缩到 720p20 / 1.2Mbps）/ `copy`（只换容器）/ `transcode`（同 light） |
+| `RELAY_PROFILE` | `light` | 输出档位：`light`（默认，缩到 720p20 / 1.2Mbps）/ `copy`（只换容器）/ `transcode`（同 light）。**平台页面「系统设置 → 视频中继」下发默认档位后以平台为准**（见下面「平台默认档位」） |
 | `RELAY_WIDTH` / `RELAY_HEIGHT` | `1280` / `720` | `light` 档位的目标外框（只缩不放，保持比例） |
 | `RELAY_FPS` | `20` | `light` 档位输出帧率（源 60fps 时降到 20，MSE / 弱网友好） |
 | `RELAY_BITRATE` | `1200k` | `light` 档位目标码率；平台公网出口小就再降（800k 也够看） |
@@ -59,11 +59,28 @@ WebRTC 的 ~200ms 变成 1~2s，收益是任何网络、任何浏览器都能看
 | `RELAY_LAG_DEGRADE` / `_HOLD` / `_DEBOUNCE` | `1.2` / `10` / `30` | 积压持续上涨就降一档（比 `RELAY_MAX_LAG` 的硬重同步早得多） |
 | `RELAY_STOP_GRACE` | `5` | 停流时等协程退出的上限；超时就掐连接（否则 session 会僵死） |
 
+## 平台默认档位（页面配置）
+
+平台「系统设置 → 视频中继」里可以选**默认档位**（`light` / `degrade` / `degrade2`）和是否允许
+**自动降档**。第一个观看者进来时平台在 `video_start.payload.profile` 里下发：
+
+```json
+{"tier": "degrade", "auto": true}
+```
+
+板端把它当作「配置档」：`tier` 决定起点（`degrade` = 直接从省流档起，4G 主用），`auto=false`
+则锁死在这一档（不再自动降档，只保留 `send` 超时的断线重连保护）。页面改了设置会再广播
+`video_config`，正在看的流就地换档（观看端不重连）。**没有这个字段时**（老平台 / 手工运行）
+沿用下面的 `RELAY_PROFILE` + `RELAY_*` 环境变量，行为与以前完全一致。
+
 ## 自适应档位
 
 ```text
 配置档 720p15/1000k ⇄ 省流档 640x360@12/500k ⇄ 极省流档 320x180@8/200k
 ```
+
+平台下发的默认档位就是这里的「配置档」：默认 `degrade` 时起点是省流档，还能再降一档到
+极省流档（不会再往上升）。
 
 **降档**（三档，一次降一档）：窗口内实测码率明显低于目标（`RELAY_CONGEST_*`）、
 某个分片 `send` 超时，或**积压持续上涨**（`RELAY_LAG_DEGRADE`，出帧跟不上这一档）
@@ -250,10 +267,23 @@ DEGRADE2_FPS = max(1, int(os.environ.get("RELAY_DEGRADE2_FPS", "8")))
 DEGRADE2_BITRATE = os.environ.get("RELAY_DEGRADE2_BITRATE", "200k")
 DEGRADE2_BPS = parse_bitrate(DEGRADE2_BITRATE)
 
-# 当前降到第几档：0 = 配置档，1 = 省流档（640x360@12/500k），2 = 极省流档（320x180@8/200k）
+# 档位名 → 内部档位序号（0 配置 / 1 省流 / 2 极省流）。名字与平台
+# `server/src/video.rs::RELAY_TIERS` 一致：平台页面选什么，`video_start` 就下发什么。
+TIER_LEVELS = {"light": 0, "degrade": 1, "degrade2": 2}
+
+# 平台下发的默认档位（`video_start` / `video_config` 的 payload.profile.tier）：
+# `None` = 平台没下发，按环境变量 `RELAY_PROFILE` 走（与旧版本行为一致）。
+_requested_tier: str | None = None
+# 平台是否允许自动降档：`False` = 锁死在平台选的档位（4G 专用 SIM 有固定套餐时可关掉）
+_auto_degrade = True
+# 「锁定档位不再降档」的日志去重时刻（窗口每 5s 触发一次，别刷屏）
+_locked_logged_at = 0.0
+
+# 当前档位：0 = 配置档，1 = 省流档（640x360@12/500k），2 = 极省流档（320x180@8/200k）
 #
-# 跟 `_congested_until` 分开：窗口到期只是「可以开始评估能不能升一档」，链路没恢复就
-# 继续待在当前档，不是一到点就自己升回去。
+# 注意这是**绝对档位**，起点由平台下发（`_requested_tier`）或环境变量决定，见 `base_level()`；
+# `_degrade_level` 不会再低于起点。跟 `_congested_until` 分开：窗口到期只是「可以开始评估
+# 能不能升一档」，链路没恢复就继续待在当前档，不是一到点就自己升回去。
 _degrade_level = 0
 # 最近一个 5s 窗口实测推出去的码率（bps）：决定「当前这一档是不是也吃不下」→ 要不要再降一档
 _last_window_bps = 0.0
@@ -282,9 +312,16 @@ _sessions: dict[str, "StreamSession"] = {}
 NO_DATA_TIMEOUT = 8.0
 
 
+def base_level() -> int:
+    """这一轮起流的起点档位：平台下发的优先，否则用环境变量（配置档 = 0）。"""
+    if _requested_tier in TIER_LEVELS:
+        return TIER_LEVELS[_requested_tier]
+    return 0
+
+
 def degraded() -> bool:
-    """当前是否处于降档状态（任一档）。"""
-    return _degrade_level > 0
+    """当前是否比起点更低（真的自动降过档）。"""
+    return _degrade_level > base_level()
 
 
 def level_label(level: int | None = None) -> str:
@@ -292,9 +329,69 @@ def level_label(level: int | None = None) -> str:
     return {0: "配置档", 1: "省流档", 2: "极省流档"}.get(level, f"{level} 档")
 
 
+def tier_label() -> str:
+    """起点档位的描述：日志和页面排查时一眼看出「为什么起流就是 640x360」。"""
+    base = base_level()
+    if _requested_tier is None:
+        return f"环境变量 RELAY_PROFILE（{level_label(base)}）"
+    auto = "开" if _auto_degrade else "关"
+    return f"平台下发 {level_label(base)}，自动降档{auto}"
+
+
 def hold_seconds() -> float:
     """这次降档至少要撑多久：反复升降时逐次翻倍（上限 DEGRADE_TTL_MAX）。"""
     return float(min(DEGRADE_TTL * (2 ** _flaps), max(DEGRADE_TTL, DEGRADE_TTL_MAX)))
+
+
+def apply_remote_profile(profile: object) -> bool:
+    """把平台下发的默认档位写进状态机；返回是否真的变了。
+
+    `profile` 来自 `video_start` / `video_config` 的 `payload.profile`：
+
+    ```json
+    {"tier": "light|degrade|degrade2", "auto": true}
+    ```
+
+    缺字段 / 名字不认识时**什么都不改**（老平台只发 `stream`，继续用环境变量）。
+    平台重新选了档位 = 旧档位的拥塞窗口 / 封顶 / 试用期全部作废：起点变了，那些结论
+    都是按旧起点算的。
+    """
+    global _requested_tier, _auto_degrade, _degrade_level, _congested_until
+    global _flaps, _recovered_at, _probation_level, _probation_from, _probation_until
+    global _ceiling_level, _ceiling_until, _healthy_since, _locked_logged_at
+    global _last_window_bps, _link_duty
+    if not isinstance(profile, dict):
+        return False
+    tier = str(profile.get("tier") or "").strip().lower()
+    if tier not in TIER_LEVELS:
+        return False
+    auto = profile.get("auto", True)
+    if isinstance(auto, str):
+        auto = auto.strip().lower() not in ("0", "false", "no", "off")
+    else:
+        auto = bool(auto)
+    if tier == _requested_tier and auto == _auto_degrade:
+        return False
+    _requested_tier = tier
+    _auto_degrade = auto
+    _degrade_level = TIER_LEVELS[tier]
+    _congested_until = 0.0
+    _flaps = 0
+    _recovered_at = 0.0
+    _probation_level = -1
+    _probation_from = 0
+    _probation_until = 0.0
+    _ceiling_level = None
+    _ceiling_until = 0.0
+    _healthy_since = 0.0
+    _link_duty = 0.0
+    _last_window_bps = 0.0
+    _locked_logged_at = 0.0
+    log(
+        f"平台下发中继档位：{level_label(_degrade_level)}"
+        f"（{profile_text(active_profile())}，自动降档{'开' if auto else '关'}）"
+    )
+    return True
 
 
 def active_profile() -> tuple:
@@ -346,27 +443,38 @@ def mark_congested(
     正是靠丢帧保码率，码率看着没掉，画面却在一路掉队。
     """
     global _degrade_level, _congested_until, _flaps, _recovered_at
-    global _ceiling_level, _ceiling_until
+    global _ceiling_level, _ceiling_until, _locked_logged_at
     now = time.monotonic()
     # 刚升到的那一档又吃不下 = 这一档撑不住：记成封顶，到期前不再自己升回去
     # （否则就是「升 → 涨 5 分钟延迟 → 被掰 → 再升」的循环，2026-11-18 现场每 10 分钟一轮）
     failed = _degrade_level
+    base = base_level()
     just_upgraded = bool(_recovered_at) and now - _recovered_at < FLAP_WINDOW
     _recovered_at = 0.0
-    if failed == 0:
-        target = 1
-    elif failed == 1 and (lag or not _current_level_is_workable()):
-        # 省流档（500k）也吃不下（4G 只有 250k / 出帧跟不上）：再降一档
-        target = 2
-    else:
+    if failed >= 2:
+        # 已经在最低档：只续窗口，不重复降档/重启
+        _congested_until = max(_congested_until, now + hold_seconds())
+        return
+    if failed > base and not lag and _current_level_is_workable():
         # 当前这一档还能跑，只是链路状态仍差：只续窗口，不重复降档/重启
         _congested_until = max(_congested_until, now + hold_seconds())
         return
+    if not _auto_degrade:
+        # 平台锁定档位：不降档、不重启（`send` 超时仍会断开重连，那是链路已死）
+        _congested_until = max(_congested_until, now + hold_seconds())
+        if now - _locked_logged_at >= 60:
+            _locked_logged_at = now
+            log(
+                f"[{stream}] {reason}，但平台已锁定{level_label(failed)}"
+                "（自动降档关闭），保持当前档位"
+            )
+        return
+    target = failed + 1
     if just_upgraded:
         _flaps = min(_flaps + 1, 5)
         _ceiling_level = failed
         _ceiling_until = now + hold_seconds()
-    elif failed == 0:
+    elif failed == base:
         _flaps = 0
     _degrade_level = target
     _congested_until = now + hold_seconds()
@@ -473,7 +581,7 @@ def step_up_profile() -> bool:
     """
     global _degrade_level, _congested_until, _recovered_at
     now = time.monotonic()
-    if _degrade_level <= 0:
+    if _degrade_level <= base_level():
         return False
     target = _degrade_level - 1
     if not step_up_allowed(target, now):
@@ -806,7 +914,8 @@ def _encoder_works(name: str) -> bool:
 
 def ffmpeg_args(stream: str) -> list[str]:
     profile = active_profile()
-    low = degraded()
+    # 「低档」按绝对档位判：平台把起点设成省流档（1）时也要走低档的 GOP 与重编码参数
+    low = _degrade_level > 0
     source = f"{RTSP_BASE}/{stream}"
     args = [
         FFMPEG,
@@ -1007,8 +1116,21 @@ class StreamSession:
     def running(self) -> bool:
         return self.proc is not None and self.proc.returncode is None
 
-    async def start(self, ws) -> None:
+    async def start(self, ws, profile: object = None) -> None:
+        """平台要求起流。`profile` = `payload.profile`（默认档位 + 是否允许自动降档）。
+
+        老平台只发 `stream`，这时 `profile=None`，继续按环境变量走；新平台每次都会带上
+        当前设置 —— 观看期间在页面上改了档位，下次 `video_start` 也能收敛。
+        """
+        changed = apply_remote_profile(profile)
         async with self._lock:
+            # 幂等：已经在推就不重启（重复 video_start 不能黑 3~7s，也不能换新 FLV 头）。
+            # 但如果平台这次的档位跟正在用的不一样，就地换档（观看端不重连）。
+            if self.running:
+                if changed:
+                    log(f"[{self.stream}] 平台更新了中继档位，就地换档")
+                    asyncio.create_task(self.restart_for_profile("平台更新了中继档位"))
+                return
             await self._start_locked(ws)
 
     async def _start_locked(self, ws) -> None:
@@ -1031,7 +1153,6 @@ class StreamSession:
         self._win_at = self.last_send
         self._win_blocked = 0.0
         self._win_bytes = 0
-        low = degraded()
         self.profile = active_profile()
         args = ffmpeg_args(self.stream)
         # 编码器一律从**真实参数**里取：上次的教训是日志写着 enc=h264_rkmpp、
@@ -1040,7 +1161,7 @@ class StreamSession:
         log(
             f"[{self.stream}] 平台有观看者，开始拉流"
             f"（profile={level_label()}，{profile_text(self.profile)}"
-            f" 编码={codec}，出口 {egress_iface() or '未知'}）"
+            f" 编码={codec}，出口 {egress_iface() or '未知'}；{tier_label()}）"
         )
         if DEBUG:
             log(f"[{self.stream}] ffmpeg: {' '.join(args)}")
@@ -1409,7 +1530,15 @@ async def stream_worker(stream: str) -> None:
                             continue
                         kind = payload.get("msgType")
                         if kind == "video_start":
-                            await session.start(ws)
+                            body = payload.get("payload")
+                            requested = body.get("profile") if isinstance(body, dict) else None
+                            await session.start(ws, requested)
+                        elif kind == "video_config":
+                            # 页面改了「视频中继」设置：立即生效，不用等下一次起流
+                            body = payload.get("payload")
+                            requested = body.get("profile") if isinstance(body, dict) else None
+                            if apply_remote_profile(requested):
+                                restream_all("平台更新了中继档位")
                         elif kind == "video_stop":
                             await session.stop("平台结束观看")
                 finally:
@@ -1447,6 +1576,10 @@ async def main() -> int:
             f"输出档位 light：{OUT_WIDTH}x{OUT_HEIGHT}@{OUT_FPS} {OUT_BITRATE}，"
             f"编码器 {pick_encoder() or '（无可用编码器，运行时退回 copy）'}"
         )
+    log(
+        f"起点档位：{tier_label()} → {profile_text(active_profile())}"
+        "（平台页面「系统设置 → 视频中继」可改默认档位与是否自动降档）"
+    )
     tasks = [asyncio.create_task(stream_worker(stream)) for stream in STREAMS]
     tasks.append(asyncio.create_task(route_watcher()))
     # 省流窗口到期后按链路实际情况决定要不要升一档

@@ -81,8 +81,13 @@ HTTP」模式。两者共用同一个服务令牌，见 `business/README.md`。
 中继画质是**板端自适应**的（`deploy/backpack-relay/relay_push.py`）：5s 窗口内 `ws.send`
 被反压且实测码率明显低于目标档位就就地换 `640x360@12 / 500k`（`video_reset` + 重启
 ffmpeg，观看端不重连）；到期先确认链路真恢复才回配置档，反复升降时窗口翻倍。
+**起流默认档位在平台「系统设置 → 视频中继」配**（`settings.video_relay_profile` /
+`video_relay_auto_degrade`，默认 `degrade` 省流档 + 允许自动降档，现场主用 4G）：平台随
+`video_start.payload.profile` 下发，保存设置时再广播 `video_config` 让正在看的流就地换档；
+板端把它当起点（省流档还能再降到极省流档），关掉自动降档就锁死在该档。没有该字段时
+（老板端 / 老平台）仍按板端 `RELAY_*` 环境变量走。
 平台侧 `video.rs` 不做 ABR（观看端追不上就 `lagged` 断连重连），前端也没有掉档。
-改这块先读 §6.10⑥，回归：`python3 deploy/backpack-relay/test_relay_push.py`。
+改这块先读 §6.10⑥⑩，回归：`python3 deploy/backpack-relay/test_relay_push.py`。
 中继重启 ffmpeg（`video_reset`）时平台会**主动断开观看端**让它重连拿新流头 ——
 否则 flv.js 收到倒退的时间轴会「画面定住但字节还在流」；前端用
 `liveBufferLatencyChasing` 追直播边缘（否则越看越延迟），切换直连/中继期间显示

@@ -95,6 +95,68 @@ const BACKPACK_STREAMS: [&str; 7] = [
     "preview",
 ];
 
+/// 系统设置里「中继默认档位」的键（页面：系统设置 → 视频中继）
+///
+/// 板端 relay 起流时按它选起点（`video_start.payload.profile`），不用再去板子上改
+/// `RELAY_PROFILE` 环境变量重启服务。
+pub const RELAY_PROFILE_SETTING: &str = "video_relay_profile";
+
+/// 系统设置里「中继是否允许自动降档」的键
+pub const RELAY_AUTO_DEGRADE_SETTING: &str = "video_relay_auto_degrade";
+
+/// 可选档位名，必须与 `deploy/backpack-relay/relay_push.py::TIER_LEVELS` 一致
+pub const RELAY_TIERS: [&str; 3] = ["light", "degrade", "degrade2"];
+
+/// 默认档位：现场板子出公网主要走 4G 模块（实测上行 0.25~0.6Mbps），
+/// 720p15/1000k 的 `light` 起流就会被反压；直接用省流档（640x360@12/500k），
+/// 链路再差由自动降档掉到极省流档（320x180@8/200k）。
+pub const DEFAULT_RELAY_TIER: &str = "degrade";
+
+/// 当前中继档位配置：`{"tier": "light|degrade|degrade2", "auto": true}`
+///
+/// 库里的值不认识（手改了 SQL / 老库）就回退默认，不让一个坏值把中继锁在未知状态。
+pub async fn relay_profile(state: &AppState) -> serde_json::Value {
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT setting_key, setting_value FROM settings WHERE setting_key IN (?1, ?2)",
+    )
+    .bind(RELAY_PROFILE_SETTING)
+    .bind(RELAY_AUTO_DEGRADE_SETTING)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    let mut tier = DEFAULT_RELAY_TIER.to_string();
+    let mut auto = true;
+    for (key, value) in rows {
+        let value = value.unwrap_or_default().trim().to_lowercase();
+        match key.as_str() {
+            RELAY_PROFILE_SETTING if RELAY_TIERS.contains(&value.as_str()) => tier = value,
+            RELAY_AUTO_DEGRADE_SETTING => auto = value != "false",
+            _ => {}
+        }
+    }
+    json!({ "tier": tier, "auto": auto })
+}
+
+/// 设置页改了中继档位：立刻广播 `video_config` 给在线板端
+///
+/// 正在看的流会就地换档（板端 `video_start` 幂等，但这里要的是**不重连**地换参数），
+/// 没人看的流下次 `video_start` 自然带上新配置。返回送达了几条推流连接。
+pub async fn broadcast_relay_profile(state: &AppState) -> usize {
+    let message = json!({
+        "msgType": "video_config",
+        "payload": { "profile": relay_profile(state).await },
+    })
+    .to_string();
+    let mut sent = 0;
+    for stream in BACKPACK_STREAMS {
+        let room = format!("{BACKPACK_ROOM_PREFIX}{stream}");
+        if state.video_hub.send_control(&room, message.clone()).await {
+            sent += 1;
+        }
+    }
+    sent
+}
+
 /// 推流端控制通道表：`room -> (会话号, 文本帧发送端)`
 type ControlChannels = Arc<RwLock<HashMap<String, (u64, mpsc::Sender<String>)>>>;
 
@@ -748,12 +810,23 @@ async fn handle_viewer(socket: WebSocket, state: AppState, stream_name: String, 
     // （`if self.running: return`），已经在推的流不会重启。
     if first {
         info!("backpack stream {stream_name} requested, asking board relay to start");
+        // 带上平台配置的默认档位（系统设置 → 视频中继）：板端起流就按它选参数，
+        // 不用登到板子上改 `RELAY_PROFILE` 再重启服务。老板端忽略这个字段，
+        // 仍按自己的环境变量走（向后兼容）。
+        let profile = relay_profile(&state).await;
         let sent = state
             .video_hub
             .send_control(
                 &room,
-                json!({"msgType": "video_start", "payload": {"stream": stream_name, "format": "flv"}})
-                    .to_string(),
+                json!({
+                    "msgType": "video_start",
+                    "payload": {
+                        "stream": stream_name,
+                        "format": "flv",
+                        "profile": profile,
+                    }
+                })
+                .to_string(),
             )
             .await;
         if sent {

@@ -2,6 +2,7 @@ use crate::app::AppState;
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::models::{Setting, SettingItem};
+use crate::video;
 use axum::Json;
 use axum::extract::State;
 
@@ -20,6 +21,11 @@ pub async fn update_settings(
         return Err(AppError::BadRequest("没有需要保存的配置".to_string()));
     }
     let timestamp = now();
+    // 中继档位改完要立刻下发到在线板端（`video_config`），否则正在看的流还在旧档位
+    let relay_profile_changed = items.iter().any(|item| {
+        item.setting_key == video::RELAY_PROFILE_SETTING
+            || item.setting_key == video::RELAY_AUTO_DEGRADE_SETTING
+    });
     let mut transaction = state.db.begin().await?;
     for item in items {
         let exists: Option<(i64, String)> =
@@ -40,6 +46,23 @@ pub async fn update_settings(
                 item.setting_key
             )));
         }
+        // 中继档位是板端协议里的枚举：写坏了会让起流退回默认档，不如直接拒绝
+        let value = item.setting_value.clone().unwrap_or_default();
+        if item.setting_key == video::RELAY_PROFILE_SETTING
+            && !video::RELAY_TIERS.contains(&value.trim())
+        {
+            return Err(AppError::BadRequest(format!(
+                "中继档位只能是 {}（收到 {value}）",
+                video::RELAY_TIERS.join(" / ")
+            )));
+        }
+        if item.setting_key == video::RELAY_AUTO_DEGRADE_SETTING
+            && !matches!(value.as_str(), "true" | "false")
+        {
+            return Err(AppError::BadRequest(format!(
+                "中继自动降档只能是 true / false（收到 {value}）"
+            )));
+        }
         sqlx::query(
             "UPDATE settings SET setting_value = ?1, updated_at = ?2 WHERE setting_key = ?3",
         )
@@ -50,6 +73,10 @@ pub async fn update_settings(
         .await?;
     }
     transaction.commit().await?;
+    if relay_profile_changed {
+        let sent = video::broadcast_relay_profile(&state).await;
+        tracing::info!("中继档位配置已更新，已下发到 {sent} 条在线推流连接");
+    }
     Ok(ApiResponse::ok(fetch_settings(&state).await?))
 }
 

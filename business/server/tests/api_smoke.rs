@@ -3862,3 +3862,73 @@ officedocument.spreadsheetml.sheet\r\n\r\n"
         "{body}"
     );
 }
+
+/// 中继默认档位是页面可配置项（系统设置 → 视频中继）：枚举写坏了要拒绝，
+/// 合法值保存后通用设置接口能读回来（板端起流时平台再随 `video_start` 下发）。
+#[tokio::test]
+async fn relay_profile_setting_is_validated() {
+    let (state, _db) = test_state().await;
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+    let auth = |method: &str, path: &str| {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let send = |request: Request<Body>| {
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            (response.status(), json_body(response).await)
+        }
+    };
+    let put = |path: &str, body: &str| {
+        let mut request = auth("PUT", path);
+        *request.body_mut() = Body::from(body.to_string());
+        request
+    };
+
+    // 默认档位：现场主要走 4G，省流档 + 允许自动降档
+    let (_, body) = send(auth("GET", "/api/settings")).await;
+    let row = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["settingKey"] == "video_relay_profile")
+        .expect("默认档位应出现在系统设置里");
+    assert_eq!(row["settingValue"], "degrade", "{body}");
+    let auto = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["settingKey"] == "video_relay_auto_degrade")
+        .expect("自动降档开关应出现在系统设置里");
+    assert_eq!(auto["settingValue"], "true", "{body}");
+
+    // 不认识的档位名：直接拒绝，别让板端拿到一个只能回退默认的配置
+    let (status, body) = send(put(
+        "/api/settings",
+        r#"[{"settingKey":"video_relay_profile","settingValue":"1080p"}]"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "非法档位应拒绝: {body}");
+
+    // 合法值保存成功，读回来是新值
+    let (status, body) = send(put(
+        "/api/settings",
+        r#"[{"settingKey":"video_relay_profile","settingValue":"degrade2"}]"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "合法档位应保存: {body}");
+    let saved = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["settingKey"] == "video_relay_profile")
+        .and_then(|row| row["settingValue"].as_str());
+    assert_eq!(saved, Some("degrade2"));
+}
