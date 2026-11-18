@@ -100,22 +100,48 @@ const TASKS: &str = r#"{
 }"#;
 
 async fn test_state(point_ai: &str) -> (AppState, TempDb) {
+    let (state, temp, _rx) = test_state_with_wecom(point_ai, false).await;
+    (state, temp)
+}
+
+/// 同上，但可选打开企业微信推送（`true` 时返回入队接收端，只观察消息形状，不碰外网）。
+async fn test_state_with_wecom(
+    point_ai: &str,
+    wecom: bool,
+) -> (
+    AppState,
+    TempDb,
+    Option<tokio::sync::mpsc::Receiver<robodog_ops_server::notify::Notice>>,
+) {
     let dir = temp_dir();
     let temp = TempDb { dir: dir.clone() };
-    let config = Arc::new(config_with(&dir, point_ai));
+    let mut config = config_with(&dir, point_ai);
+    if wecom {
+        config.wecom_enabled = true;
+        config.wecom_webhook = Some(
+            "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-key".to_string(),
+        );
+    }
+    let config = Arc::new(config);
     let pool = db::connect(&config).await.expect("连接测试库失败");
     db::migrate(&pool).await.expect("迁移失败");
     seed::seed(&pool).await.expect("播种失败");
+    let (notifier, rx) = if wecom {
+        let (notifier, rx) = robodog_ops_server::notify::Notifier::channel(&config, None);
+        (notifier, rx)
+    } else {
+        (robodog_ops_server::notify::Notifier::disabled(), None)
+    };
     let state = AppState {
         db: pool,
-        notifier: robodog_ops_server::notify::Notifier::disabled(),
+        notifier,
         config,
         device_connections: gateway::new_device_connections(),
         command_results: gateway::new_command_result_waiters(),
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
     };
-    (state, temp)
+    (state, temp, rx)
 }
 
 /// 起真实监听端口（WebSocket 必须走 TCP）
@@ -310,6 +336,26 @@ fn detect(window_id: &str, label: &str, conf: f64) -> Value {
         "msgType": "ai_detect",
         "ts": "2026-11-16 10:00:02",
         "payload": { "windowId": window_id, "task": "firextinguisher", "label": label, "conf": conf }
+    })
+}
+
+/// 最小 JPEG（只看文件头 `FF D8 FF`）：md5 = cbde0fdf7fab6fefd9fe12fec4967cf9
+const JPEG_BASE64: &str = "/9j/4AAQSkZJRgAB";
+const JPEG_MD5: &str = "cbde0fdf7fab6fefd9fe12fec4967cf9";
+
+/// 带证据图的检出（客户端扫板端存证目录后随 `ai_detect` 带上）
+fn detect_with_evidence(window_id: &str, label: &str, conf: f64) -> Value {
+    json!({
+        "msgType": "ai_detect",
+        "ts": "2026-11-16 10:00:02",
+        "payload": {
+            "windowId": window_id,
+            "task": "firextinguisher",
+            "label": label,
+            "conf": conf,
+            "evidence": "/root/261113/backpack_dashboard/backend/detect_jobs/TK-AI-C/pt0/dogcam_1.jpg",
+            "evidenceImage": JPEG_BASE64,
+        }
     })
 }
 
@@ -1055,4 +1101,62 @@ async fn same_ai_problem_across_patrols_reuses_one_work_order() {
     assert_eq!(assigned.len(), 2);
     assert!(assigned[0].is_some(), "第一条告警应自动派单: {assigned:?}");
     assert_eq!(assigned[0], assigned[1], "两条告警应挂同一张单: {assigned:?}");
+}
+
+/// 检出告警也要证据图（存在性任务 `exist`：灭火器「在」就告警那一类）：
+/// 客户端把命中帧（板端路径 + base64）随 `ai_detect` 带上来，
+/// 服务端校验后作为**卡片之后的第二条**消息入队（`msgtype=image`），
+/// 告警正文里也留一份路径给现场 ssh 复核。
+#[tokio::test]
+async fn hit_alert_carries_the_relayed_evidence_image() {
+    let _serial = TEST_LOCK.lock().await;
+    ai_patrol::global().stop("测试初始化").await;
+    let (state, _temp, mut rx) = test_state_with_wecom("client", true).await;
+    let rx = rx.as_mut().expect("开了企微就该有入队接收端");
+    let task_code =
+        seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("exist"), None).await;
+    let port = spawn_server(state.clone()).await;
+    let (mut ws, _device) = register_device(port).await;
+
+    ws.send(Message::Text(ai_point(&task_code, false).to_string()))
+        .await
+        .expect("发送 ai_point 失败");
+    let start = next_msg(&mut ws, "ai_start").await;
+    let window_id = start["payload"]["windowId"]
+        .as_str()
+        .expect("ai_start 必须带 windowId")
+        .to_string();
+
+    ws.send(Message::Text(
+        detect_with_evidence(&window_id, "extinguisher", 0.64).to_string(),
+    ))
+    .await
+    .expect("发送带证据图的检出失败");
+
+    // 卡片先入队（图片是消费端在正文之后补发的第二条 HTTP 消息）
+    let notice = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Some(notice) if notice.image.is_some() => return notice,
+                Some(_) => continue,
+                None => panic!("推送通道提前关闭"),
+            }
+        }
+    })
+    .await
+    .expect("等带图告警入队超时");
+    let image = notice.image.expect("检出告警应带证据图");
+    assert_eq!(image.base64, JPEG_BASE64, "base64 不能带换行/空格");
+    assert_eq!(image.md5, JPEG_MD5, "md5 算的是 base64 之前的字节");
+
+    // 正文里带板端路径（运维回头能 ssh 上去看原图）
+    let contents = alert_contents(&state).await;
+    assert_eq!(contents.len(), 1, "{contents:?}");
+    assert!(
+        contents[0].contains("（证据：") && contents[0].contains("dogcam_1.jpg"),
+        "告警正文要留证据图路径: {}",
+        contents[0]
+    );
+
+    ai_patrol::global().stop("用例结束").await;
 }

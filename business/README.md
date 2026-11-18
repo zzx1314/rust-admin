@@ -1396,6 +1396,12 @@ AI 可对除红外外的五路开启，画框方式二选一：
   直连，否则交给客户端。决策逻辑（场景匹配、阈值解析、窗口时长）只有 `ai_patrol.rs` 一份，
   客户端只负责搬运，两边不会各说一套。客户端配置看 `client.toml` 的 `[ai]` 段
   （`agent_url` 默认 `http://127.0.0.1:8000`，`--no-ai` 可关闭）。
+  **证据图**：检出 / 数量核对两类告警在企业微信里都会多一张板端命中帧（`msgtype=image`，
+  卡片之后第二条）。数量核对用板端 `plan_hit.evidence` 给的路径；实时检出那一刻还没有
+  该路径，客户端扫 `[ai] jobs_dir` / `ROBODOG_AI_JOBS_DIR`（默认自动探测板端
+  `detect_jobs`，也会从 `plan_hit.evidence` 学到真实路径）下的 `<计划ID>/pt<航点>/` 取
+  本轮最新一张。读不到图就只有卡片，告警本身照发（详见
+  [`docs/wecom-alert-push.md`](docs/wecom-alert-push.md)）。
 - 分析与后续路线（遥测、SOS 告警、中继、录像）见
   [`docs/backpack-video-integration.md`](docs/backpack-video-integration.md)。
 

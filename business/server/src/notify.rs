@@ -153,8 +153,8 @@ pub struct Notice {
     pub mentions: Vec<String>,
     /// 证据图：渲染成 markdown 之后**另发一条** `msgtype=image`。
     ///
-    /// 只有拿得到图片字节的告警才有（目前是板端 AI 识别数量核对不一致）；
-    /// markdown 里挂不了图，见 [`evidence_image`]。
+    /// 只有拿得到图片字节的告警才有（板端 AI 识别的**检出**与**数量核对不一致**，
+    /// 两类都靠设备客户端从板端存证目录读图）；markdown 里挂不了图，见 [`evidence_image`]。
     pub image: Option<NoticeImage>,
 }
 
@@ -1081,7 +1081,7 @@ struct TaskLookup {
 /// 消息里因此能直接带「当班责任人 / 工单号」，并把责任人手机号塞进
 /// `mentioned_mobile_list`（markdown 不支持 @，只能另发一条 text）。
 ///
-/// 带证据图的告警（AI 识别数量核对不一致）用 [`alert_created_with_image`]，
+/// 带证据图的告警（AI 识别检出 / 数量核对不一致）用 [`alert_created_with_image`]，
 /// 多推一条 `msgtype=image`；其余来源没有图片字节，走这个无图版本。
 pub async fn alert_created(state: &AppState, alert_code: &str) {
     alert_created_with_image(state, alert_code, None).await;

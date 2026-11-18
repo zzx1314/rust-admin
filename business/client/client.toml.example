@@ -52,6 +52,10 @@ agent_url = "http://127.0.0.1:8000"
 # 没接背包的机器可以关掉（等价 --no-ai / ROBODOG_AI_ENABLED=0）；
 # 开着也只在「到点且有 AI 动作」时才探测一次 Agent，连不上只打一条 WARN
 enabled = true
+# 板端存证根目录（Agent 把命中帧写在 <jobs_dir>/<计划ID>/pt<航点下标>/）。
+# 检出告警的证据图从这里读；留空 = 自动探测（也会从板端 plan_hit.evidence 学到真实路径），
+# 板子路径与默认不同时才需要钉死（等价 ROBODOG_AI_JOBS_DIR）
+# jobs_dir = "/root/backpack_dashboard/backend/detect_jobs"
 
 [mapping]
 # 建图类型：outdoor / indoor

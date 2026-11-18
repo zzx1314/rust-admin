@@ -99,6 +99,8 @@ pub const ENV_MAP_SYNC_INTERVAL: &str = "ROBODOG_MAP_SYNC_INTERVAL";
 pub const ENV_AI_AGENT_URL: &str = "ROBODOG_AI_AGENT_URL";
 /// 航点 AI 识别总开关（`0` / `false` 关闭）
 pub const ENV_AI_ENABLED: &str = "ROBODOG_AI_ENABLED";
+/// 航点 AI 识别：板端存证根目录（`detect_jobs`），命中帧在这里，检出告警靠它发证据图
+pub const ENV_AI_JOBS_DIR: &str = "ROBODOG_AI_JOBS_DIR";
 
 // ─── 错误类型 ──────────────────────────────────────────────────
 
@@ -227,6 +229,13 @@ pub struct AiSection {
     pub agent_url: Option<String>,
     /// 总开关，默认开启；没接背包的机器上会在到点时打一条 WARN 后跳过
     pub enabled: Option<bool>,
+    /// 板端存证根目录（`detect_jobs`）：Agent 把命中帧写在
+    /// `<jobs_dir>/<计划 id>/pt<航点下标>/`，检出告警的证据图从这里读。
+    ///
+    /// 留空 = 用板端默认位置（`/root/backpack_dashboard/backend/detect_jobs` 等），
+    /// 且会从板端 `plan_hit.evidence` 自动学到真实路径。板子路径与其他部署不同时
+    /// 才需要显式配（`[ai] jobs_dir` / `ROBODOG_AI_JOBS_DIR`）。
+    pub jobs_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -593,6 +602,8 @@ pub struct Config {
     /// 两个用途共用这一份配置：巡检到点的 AI 识别（`ai_patrol`），以及把背包页
     /// 要的模型目录 / 运行态 / AI 启停借给平台（`agent_relay`，见隧道）。
     pub ai_agent_url: String,
+    /// 板端存证根目录（`detect_jobs`）：显式配置优先，留空由 `ai_patrol` 自己探/学
+    pub ai_jobs_dir: Option<String>,
     /// 板端 Agent 代调总开关（`--no-ai` 关闭）：关掉后既不注册航点 AI 窗口，
     /// 也不向平台发 `agent_hello`（背包页就只剩现场入口能用）
     pub ai_enabled: bool,
@@ -821,6 +832,12 @@ impl Config {
             .or_else(|| env.get(ENV_AI_ENABLED).map(parse_bool))
             .or(file.ai.enabled)
             .unwrap_or(true);
+        let env_jobs_dir = env.get_string(ENV_AI_JOBS_DIR);
+        let ai_jobs_dir = pick_string([
+            env_jobs_dir.as_deref(),
+            file.ai.jobs_dir.as_deref(),
+        ])
+        .map(str::to_string);
 
         let api_base = pick_string([
             cli.api_base.as_deref(),
@@ -873,6 +890,7 @@ impl Config {
             bound_park_id: Arc::new(Mutex::new(None)),
             ingest_map_name,
             ai_agent_url,
+            ai_jobs_dir,
             ai_enabled,
             api_base,
             api_username,
@@ -923,6 +941,7 @@ route.road_network      = {road_network}
 task.patrol_path_prefix = {patrol_path_prefix}
 task.min_recharge_batt  = {min_recharge_battery}
 ai.agent_url            = {ai_agent_url}
+ai.jobs_dir             = {ai_jobs_dir}
 ai.enabled              = {ai_enabled}
 api.base                = {api_base}
 api.username            = {api_username}
@@ -957,6 +976,10 @@ log.filter              = {log_filter}",
             patrol_path_prefix = self.patrol_path_prefix,
             min_recharge_battery = self.min_recharge_battery,
             ai_agent_url = self.ai_agent_url,
+            ai_jobs_dir = self
+                .ai_jobs_dir
+                .as_deref()
+                .unwrap_or("（未配置，自动探测板端 detect_jobs）"),
             ai_enabled = self.ai_enabled,
             api_base = self.api_base.as_deref().unwrap_or("（按 server.url 推导）"),
             api_username = self.api_username,

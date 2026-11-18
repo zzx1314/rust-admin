@@ -142,7 +142,9 @@
 | `notify.rs` `alert_created_with_image()` | 同上，额外把证据图作为**第二条**消息发（`msgtype=image`）；开关 `wecom_alert_image` |
 | `notify.rs` `evidence_image()` / `NoticeImage` | 证据图校验（base64 / ≤2MB / JPG-PNG）+ 算 md5（**base64 之前**的字节） |
 | `notify.rs` `send_image()` | 卡片发成功后再发图片；失败只打 WARN（正文已送达） |
-| `client/src/ai_patrol.rs` `evidence_image_base64()` | 客户端从板端磁盘读证据图 → `ai_alert.evidenceImage`（平台读不到那个文件系统） |
+| `client/src/ai_patrol.rs` `evidence_image_base64()` | 客户端从板端磁盘读数量告警的证据图 → `ai_alert.evidenceImage`（平台读不到那个文件系统） |
+| `client/src/ai_patrol.rs` `window_evidence()` / `newest_evidence_file()` | 实时检出：扫 `<jobs_dir>/<plan>/pt<n>/` 取本轮最新命中帧 → `ai_detect.evidenceImage` |
+| `server/src/ai_patrol.rs` `record_hit()` | 检出告警入口：正文带「（证据：路径）」，有字节就走 `alert_created_with_image` |
 | `notify.rs` `task_abnormal()` | 任务异常入口：同样带「当班责任人」并 @ 到人 |
 | `alert_flow.rs` `should_dispatch()` | 第一道门：只有「执行计划期间」的告警才建单 + 推群（`alert_only_in_task`） |
 | `alert_flow.rs` `in_task_execution()` | 判据：告警绑定的设备当时有 `执行中` 的任务 |
@@ -172,7 +174,7 @@
 | 1 | 设备事件 `error` / `fault` / `obstacle` | `gateway.rs:1587` | `error`→严重，`fault` 看 `severity>=2` |
 | 2 | 心跳超时被置离线 | `gateway.rs:625` | 警告 |
 | 3 | `ctrl_source=3` 控制权被抢 | `gateway.rs:1363` | 警告 |
-| 4 | AI 识别检出 | `ai_patrol.rs:453` | 警告 |
+| 4 | AI 识别检出 / 数量核对不一致 /**未检出** | `ai_patrol.rs` `record_hit` / `record_count_alert` / `record_missing_alert` | 警告（前两个带证据图） |
 | 5 | 页面手动新建告警 | `handlers/alerts.rs` `create_alert` | 按填写 |
 | 6 | 客户端上报任务 `异常` | `gateway.rs:1492` | 警告 |
 | 7 | 任务看门狗判异常 | `gateway.rs:752` | 设备离线→**严重**，否则警告 |
@@ -337,7 +339,8 @@ wecom_alert_push / wecom_task_abnormal  渠道级：这一类事件推不推企�
 
 ### 证据图（图片消息）
 
-AI 识别数量核对不一致时，群里会多一条图片——**卡片之后**的第二条 HTTP 请求，正文不变。
+AI 识别**检出**、以及**数量核对不一致**时，群里会多一条图片——**卡片之后**的第二条 HTTP
+请求，正文不变。
 
 为什么不能嵌在卡片里：群机器人的 `markdown` 语法子集**没有图片**（`![]()` 不渲染），
 只有 `markdown_v2` 支持网络图，但那个要求图片有**公网 URL** 且客户端 ≥ 4.1.36；
@@ -360,18 +363,31 @@ AI 识别数量核对不一致时，群里会多一条图片——**卡片之后
 ```
 板端 detect_jobs/<plan>/pt<n>/dogcam_1.jpg
         │  客户端与 Agent 同机（127.0.0.1），只有它能读盘
+        ├─ 数量核对（plan_hit.evidence 直接给路径）
+        │    ai_patrol::evidence_image_base64() → ai_alert.evidenceImage
+        │    → 服务端 ai_patrol::on_client_alert
+        └─ 实时检出（SSE detect 只有框、没有路径）
+             ai_patrol::window_evidence() 扫 <jobs_dir>/<plan>/pt<n>/ 取本轮最新一张
+             → ai_detect.evidence（路径）+ ai_detect.evidenceImage（base64）
+             → 服务端 ai_patrol::on_client_detect
         ▼
-客户端 ai_patrol::evidence_image_base64()  →  ai_alert.evidenceImage（base64）
-        ▼
-服务端 ai_patrol::on_client_alert → notify::evidence_image()（校验）→ Notice.image
+notify::evidence_image()（校验）→ Notice.image
         ▼
 消费端：先发 markdown 卡片 → 再发 msgtype=image
 ```
 
 约定与边界：
 
-- **只有「数量核对不一致」这类关键告警带图**（它有板端存证）；普通检出、未检出、
-  设备故障都没有图，卡片里仍只写路径。
+- **有人能读盘的时候两类 AI 告警都带图**：检出（实时）+ 数量核对。未检出、设备故障
+  这类本来就没有命中帧，仍然只发卡片（卡片里有路径就写路径）。
+- **检出告警的图是「扫目录」来的**：板端 `plan_hit`（带 `evidence`）要约窗口收尾才发，
+  检出告警是实时的，所以客户端扫 `<jobs_dir>/<planId>/pt<航点下标>/` 取**窗口开始之后**
+  写下的最新一张（`EVIDENCE_MTIME_SLACK`=5s 容错）；路径同时写进告警正文
+  （`（证据：…）`），现场可 ssh 复核。
+- **`jobs_dir` 从哪来**：`[ai] jobs_dir` / `ROBODOG_AI_JOBS_DIR` 优先（配了就**不**再被
+  板端事件覆盖），其次从板端 `plan_hit.evidence` 反推（`<存证根>/<计划>/pt<n>/<图>`，
+  见 `jobs_root_from_evidence`），最后才是内置候选 `/root/backpack_dashboard/backend/detect_jobs`、
+  `/root/261113/backpack_dashboard/backend/detect_jobs`。一个都不中就不带图，告警照发。
 - **图片发失败不影响正文**：卡片已入群，图片只打一行 WARN（`wecom: 证据图推送失败（正文已发送）`）。
 - **服务端直连板端 Agent 的模式（`ROBODOG_BACKPACK_URL`）没有图**：服务端读不到板端
   磁盘，隧道白名单也没取文件接口，只能发卡片（现场以客户端代调为主，不受影响）。
@@ -380,8 +396,11 @@ AI 识别数量核对不一致时，群里会多一条图片——**卡片之后
 - 开关：设置页「企业微信 · 告警证据图」（`notification.wecom_alert_image`，默认开）。
   关掉只影响图片那条，卡片/@/建单全不变。
 - 回归用例：`server/tests/alert_image.rs`（入队带图 / 开关关掉 / 坏图不影响告警）、
-  `notify::tests::evidence_image_*`（md5、2MB、JPG-PNG 校验）、
-  `client ai_patrol::tests::evidence_image_reads_board_file_and_skips_unusable_ones`。
+  `server/tests/ai_client_mode.rs::hit_alert_carries_the_relayed_evidence_image`
+  （检出带图走完整 WS 链路）、`notify::tests::evidence_image_*`（md5、2MB、JPG-PNG 校验）、
+  `client ai_patrol::tests::evidence_image_reads_board_file_and_skips_unusable_ones`、
+  `client ai_patrol::agent_flow::hit_alert_carries_the_board_evidence_frame`（扫目录取命中帧）、
+  `client ai_patrol::tests::newest_evidence_file_skips_stale_and_picks_freshest`（不拿上一轮的图）。
 
 ### @ 提醒那条
 有责任人手机号（或开了 `wecom_mention_all`）时，**卡片前面**还会有一条一行 `text`

@@ -182,6 +182,18 @@ pub struct AiDetectPayload {
     pub task: String,
     pub label: String,
     pub conf: f64,
+    /// 命中帧路径（板端本地绝对路径，仅作运维线索）。
+    ///
+    /// 检出是**实时**推的：那一刻板端还没发 `plan_hit`，客户端是自己扫
+    /// `detect_jobs/<planId>/pt<n>/` 取「本轮最新一张」得到的路径。
+    #[serde(default)]
+    pub evidence: String,
+    /// 命中帧本体（JPG/PNG 字节的 base64），由客户端读盘后随检出带上。
+    ///
+    /// 与 [`AiAlertPayload::evidence_image`] 同一套约束（≤2MB / JPG-PNG / 不带换行），
+    /// 服务端用 `notify::evidence_image` 再校一次；不合格就只发卡片。
+    #[serde(default)]
+    pub evidence_image: Option<String>,
 }
 
 /// 客户端 → 服务端：识别窗口结束

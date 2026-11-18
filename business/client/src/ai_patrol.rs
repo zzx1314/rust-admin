@@ -27,9 +27,10 @@
 use crate::{WsMessage, send};
 use serde_json::{Value, json};
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
@@ -39,6 +40,20 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// 证据图体积上限（**原图字节**）：企业微信图片消息的硬限制是 2MB，超了整条被拒。
 /// 板端 `dogcam_*.jpg`（1080p 抓拍）通常几百 KB，真超了就不带图（卡片里仍有路径）。
 const EVIDENCE_IMAGE_MAX_BYTES: u64 = 2 * 1024 * 1024;
+/// 存证图的「新鲜度」余量：只有 mtime 在本轮窗口开始（减这个余量）之后的图才认。
+/// 板端写图和 SSE 事件之间差几百毫秒，留 5s 免得刚写下的图被当成上一轮的。
+const EVIDENCE_MTIME_SLACK: Duration = Duration::from_secs(5);
+/// 板端存证根目录（`detect_jobs`）的默认位置：Agent 把命中帧写在
+/// `<jobs_dir>/<planId>/pt<航点下标>/` 下。
+///
+/// 板子上的部署路径不止一种（官方镜像 `/root/backpack_dashboard/backend`，
+/// 现场实测 `/root/261113/backpack_dashboard/backend`），所以这里只是「先试的候选」，
+/// 真正以板端 `plan_hit.evidence` 反推出来的目录为准（见 [`jobs_root_from_evidence`]）；
+/// 也可以直接配 `[ai] jobs_dir` / `ROBODOG_AI_JOBS_DIR` 钉死。
+const DEFAULT_JOBS_DIRS: [&str; 2] = [
+    "/root/backpack_dashboard/backend/detect_jobs",
+    "/root/261113/backpack_dashboard/backend/detect_jobs",
+];
 /// 启停识别要等模型加载（板端实测 1~3s），给足余量
 const ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 /// SSE 单条缓冲上限：Agent 事件每条几十字节，超过说明流里没有 `\n\n`，丢弃重来
@@ -295,11 +310,35 @@ pub struct AiPatrol {
     /// 已经为哪个 (任务, 航点) 发过 `ai_point`：5009 每 500ms 一帧，
     /// 没有这个去重就会把同一个点请求几十次。窗口建立或换点/结束时清掉。
     requested: Mutex<Option<(String, i64)>>,
+    /// 板端存证根目录（`detect_jobs`）：检出告警要的证据图从这里读。
+    ///
+    /// 三类来源，优先级从高到低：显式配置（`[ai] jobs_dir` / `ROBODOG_AI_JOBS_DIR`）→
+    /// 板端 `plan_hit.evidence` 反推出来的真实根 → 内置默认候选
+    /// （[`DEFAULT_JOBS_DIRS`]）。都没有就不带图，告警照发。
+    /// 显式配置的值不会被板端事件覆盖（[`AiPatrol::jobs_dir_pinned`]）。
+    jobs_dir: Mutex<Option<String>>,
+    /// `jobs_dir` 是不是运维显式配的：配了就**不**被板端事件学到的新路径覆盖
+    /// （现场可能把存证目录 bind-mount 到别处，客户端比板端日志更可信）
+    jobs_dir_pinned: bool,
 }
 
 impl AiPatrol {
+    /// 不带存证目录的构造（给单元测试用；进程里走 [`AiPatrol::with_jobs_dir`]）
+    #[cfg(test)]
     pub fn new(agent: impl Into<String>, enabled: bool) -> Self {
+        Self::with_jobs_dir(agent, enabled, None)
+    }
+
+    /// 同 [`AiPatrol::new`]，额外指定板端存证目录（`[ai] jobs_dir`）
+    pub fn with_jobs_dir(
+        agent: impl Into<String>,
+        enabled: bool,
+        jobs_dir: Option<String>,
+    ) -> Self {
         let agent = agent.into().trim().trim_end_matches('/').to_string();
+        let jobs_dir = jobs_dir
+            .map(|dir| dir.trim().trim_end_matches('/').to_string())
+            .filter(|dir| !dir.is_empty());
         Self {
             agent,
             enabled,
@@ -318,6 +357,8 @@ impl AiPatrol {
                 .unwrap_or_else(|_| reqwest::Client::new()),
             window: Mutex::new(None),
             requested: Mutex::new(None),
+            jobs_dir_pinned: jobs_dir.is_some(),
+            jobs_dir: Mutex::new(jobs_dir),
         }
     }
 
@@ -541,6 +582,9 @@ impl AiPatrol {
         let notified = cancel.notified();
         tokio::pin!(notified);
         let deadline = Instant::now() + Duration::from_secs(start.secs.max(1));
+        // 存证目录里只有本轮（窗口开始之后）写下的图能当证据：同一航点每轮巡检都
+        // 覆盖同名文件，用时间戳把上一轮留下的图挡掉（板端写图比 SSE 早/晚几百毫秒，留 5s 余量）
+        let since = SystemTime::now() - EVIDENCE_MTIME_SLACK;
         let mut buffer = String::new();
         let mut seen: HashSet<String> = HashSet::new();
         let mut hits = 0usize;
@@ -583,22 +627,30 @@ impl AiPatrol {
                                     );
                                     send(out_tx, "ai_alert", alert).await;
                                 }
+                                // 板端 `plan_hit` 里的证据图路径能反推出存证根目录：记下来，
+                                // 下一轮（甚至本轮后续航点）扫目录时就不用猜 `detect_jobs` 在哪
+                                if let Some(root) = jobs_root_from_evidence(&event) {
+                                    self.learn_jobs_root(root).await;
+                                }
                                 for (label, conf) in take_hits(&event, start.conf, &mut seen) {
                                     hits += 1;
                                     debug!("航点 AI 识别：检出 {label}（{conf:.2}）");
-                                    send(
-                                        out_tx,
-                                        "ai_detect",
-                                        json!({
-                                            "windowId": start.window_id,
-                                            "task": start.task,
-                                            "planId": start.plan_id,
-                                            "pointIndex": start.point_index,
-                                            "label": label,
-                                            "conf": conf,
-                                        }),
-                                    )
-                                    .await;
+                                    let mut detect = json!({
+                                        "windowId": start.window_id,
+                                        "task": start.task,
+                                        "planId": start.plan_id,
+                                        "pointIndex": start.point_index,
+                                        "label": label,
+                                        "conf": conf,
+                                    });
+                                    // 检出告警也要证据图（群里「检出灭火器」那条卡片后面再看图）。
+                                    // 这一帧的图还在板端盘上、`plan_hit` 里也没有路径，所以
+                                    // 自己扫 `<存证根>/<计划>/pt<航点>/` 取最新一张。
+                                    if let Some((path, image)) = self.window_evidence(start, since).await {
+                                        detect["evidence"] = json!(path);
+                                        detect["evidenceImage"] = json!(image);
+                                    }
+                                    send(out_tx, "ai_detect", detect).await;
                                 }
                             }
                         }
@@ -665,6 +717,66 @@ impl AiPatrol {
         if !replaced {
             *self.window.lock().await = None;
         }
+    }
+
+    /// 存证根目录（`detect_jobs`）：显式配置优先，否则试内置默认位置并记住能用的那个。
+    async fn jobs_root(&self) -> Option<String> {
+        if let Some(dir) = self.jobs_dir.lock().await.clone() {
+            return Some(dir);
+        }
+        for candidate in DEFAULT_JOBS_DIRS {
+            if tokio::fs::metadata(candidate).await.is_ok() {
+                *self.jobs_dir.lock().await = Some(candidate.to_string());
+                debug!("航点 AI 识别：命中帧存证目录 {candidate}");
+                return Some(candidate.to_string());
+            }
+        }
+        None
+    }
+
+    /// 板端 `plan_hit.evidence` 反推出的真实存证根：比猜默认路径可靠，学到就钉住。
+    async fn learn_jobs_root(&self, root: String) {
+        if self.jobs_dir_pinned {
+            return;
+        }
+        let mut guard = self.jobs_dir.lock().await;
+        if guard.as_deref() != Some(root.as_str()) {
+            debug!("航点 AI 识别：从板端事件学到存证目录 {root}");
+            *guard = Some(root);
+        }
+    }
+
+    /// 本轮窗口的一张命中帧：（板端路径, base64）。
+    ///
+    /// 检出告警是**实时**推的，`plan_hit`（带 `evidence` 路径）要到窗口收尾才来，
+    /// 所以这里直接扫板端存证目录：`<存证根>/<计划 id>/pt<航点下标>/`，取
+    /// 「窗口开始之后写下的」最新一张。失败一律 `None`：**不带图不能影响告警**。
+    async fn window_evidence(
+        &self,
+        start: &AiStart,
+        since: SystemTime,
+    ) -> Option<(String, String)> {
+        let plan = start.plan_id.trim();
+        if plan.is_empty() {
+            return None;
+        }
+        // 板端写图和 SSE 事件之间差几十~几百毫秒：给两次短重试，别为一张图拖住窗口
+        for attempt in 0..3 {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            let root = self.jobs_root().await?;
+            let dir = Path::new(&root)
+                .join(plan)
+                .join(format!("pt{}", start.point_index));
+            let Some(path) = newest_evidence_file(&dir, since).await else {
+                continue;
+            };
+            if let Some(image) = evidence_image_from_path(&path).await {
+                return Some((path, image));
+            }
+        }
+        None
     }
 
     async fn fetch_json(&self, path: &str) -> Result<Value, String> {
@@ -829,6 +941,69 @@ async fn evidence_image_from_path(path: &str) -> Option<String> {
         bytes.len()
     );
     Some(BASE64.encode(&bytes))
+}
+
+/// 从板端 `plan_hit.evidence`（`<存证根>/<计划>/pt<n>/dogcam_1.jpg`）反推存证根目录。
+///
+/// 板子上的路径前缀不统一（`/root/backpack_dashboard/backend`、
+/// `/root/261113/backpack_dashboard/backend` …），拿板端自己写出来的路径当唯一真相，
+/// 比硬编码候选靠谱。形如不对就返回 `None`（宁可带不了图，也不要拼出错路径）。
+fn jobs_root_from_evidence(event: &Value) -> Option<String> {
+    if event.get("type").and_then(Value::as_str) != Some("plan_hit") {
+        return None;
+    }
+    let evidence = event
+        .get("evidence")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())?;
+    let point_dir = Path::new(evidence).parent()?;
+    // 目录名必须是 `pt<n>`：否则说明板端换了存证布局，反推出来的根不可信
+    if !point_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().starts_with("pt"))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let root = point_dir.parent()?.parent()?;
+    let root = root.to_string_lossy().trim_end_matches('/').to_string();
+    Some(root).filter(|root| !root.is_empty())
+}
+
+/// 存证目录里「本轮写下的」最新一张图（JPG/PNG）。
+///
+/// 只认 mtime ≥ `since` 的文件：同一航点每轮巡检覆盖同名文件，不卡时间就会把
+/// **上一轮**的图当成这一帧的证据发给群里（比没图更糟）。
+async fn newest_evidence_file(dir: &Path, since: SystemTime) -> Option<String> {
+    let mut entries = tokio::fs::read_dir(dir).await.ok()?;
+    let mut best: Option<(SystemTime, String)> = None;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if !(name.ends_with(".jpg") || name.ends_with(".jpeg") || name.ends_with(".png")) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata().await else {
+            continue;
+        };
+        if meta.len() > EVIDENCE_IMAGE_MAX_BYTES {
+            continue;
+        }
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        if modified < since {
+            continue;
+        }
+        if best.as_ref().map(|(at, _)| modified > *at).unwrap_or(true) {
+            best = Some((modified, path.to_string_lossy().to_string()));
+        }
+    }
+    best.map(|(_, path)| path)
 }
 
 /// 从 SSE 缓冲里取出完整事件（以空行分隔），残留部分留在缓冲里等下一块
@@ -1036,6 +1211,84 @@ mod tests {
         // ⑤ 没给路径（老客户端 / 事件没带 evidence）
         assert!(evidence_image_base64(&json!({})).await.is_none());
         assert!(evidence_image_base64(&json!({ "evidence": "  " })).await.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 板端 `plan_hit.evidence` 能反推出存证根目录（板子路径前缀不统一，不硬编码）
+    #[test]
+    fn jobs_root_is_learned_from_plan_hit_evidence() {
+        assert_eq!(
+            jobs_root_from_evidence(&json!({
+                "type": "plan_hit",
+                "evidence": "/root/261113/backpack_dashboard/backend/detect_jobs/TK-1/pt0/dogcam_1.jpg"
+            })),
+            Some("/root/261113/backpack_dashboard/backend/detect_jobs".to_string())
+        );
+        // 不是 plan_hit / 没给路径 / 布局不是 `<根>/<计划>/pt<n>/<图>`：一律不猜
+        assert!(
+            jobs_root_from_evidence(&json!({"type": "detect", "evidence": "/a/b/pt0/x.jpg"}))
+                .is_none()
+        );
+        assert!(jobs_root_from_evidence(&json!({"type": "plan_hit"})).is_none());
+        assert!(
+            jobs_root_from_evidence(&json!({"type": "plan_hit", "evidence": "  "})).is_none()
+        );
+        assert!(
+            jobs_root_from_evidence(&json!({"type": "plan_hit", "evidence": "/x/y.jpg"}))
+                .is_none(),
+            "目录不叫 pt<n> 就说明板端换了存证布局，反推出来的根不可信"
+        );
+    }
+
+    /// 显式配的 `jobs_dir` 不能被板端事件覆盖（现场可能 bind-mount 到别处）
+    #[tokio::test]
+    async fn pinned_jobs_dir_wins_over_what_the_board_reports() {
+        let ai = AiPatrol::with_jobs_dir("http://127.0.0.1:9", true, Some("/pinned/".to_string()));
+        ai.learn_jobs_root("/from/board".to_string()).await;
+        assert_eq!(ai.jobs_root().await.as_deref(), Some("/pinned"));
+
+        // 没配时才学板端给的路径
+        let ai = AiPatrol::with_jobs_dir("http://127.0.0.1:9", true, None);
+        ai.learn_jobs_root("/from/board/detect_jobs".to_string()).await;
+        assert_eq!(
+            ai.jobs_root().await.as_deref(),
+            Some("/from/board/detect_jobs")
+        );
+    }
+
+    /// 存证目录里只认「本轮写下的」最新一张：上一轮巡检的图不能当这一帧的证据
+    #[tokio::test]
+    async fn newest_evidence_file_skips_stale_and_picks_freshest() {
+        let dir = std::env::temp_dir().join(format!(
+            "robodog-jobs-scan-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("dogcam_1.jpg"), [0xFF_u8, 0xD8, 0xFF, 0x00]).unwrap();
+        std::fs::write(dir.join("notes.txt"), b"not an image").unwrap();
+
+        // 窗口开始时间在未来（= 这些文件都是「上一轮的」）→ 不带图
+        let future = SystemTime::now() + Duration::from_secs(60);
+        assert!(newest_evidence_file(&dir, future).await.is_none());
+
+        // 正常窗口：取到那张 jpg（非图片后缀直接忽略）
+        let past = SystemTime::now() - Duration::from_secs(60);
+        let picked = newest_evidence_file(&dir, past)
+            .await
+            .expect("应扫到命中帧");
+        assert!(picked.ends_with("dogcam_1.jpg"), "{picked}");
+
+        // 目录不存在（客户端不在板端 / 板端换了目录）：安静返回 None
+        assert!(
+            newest_evidence_file(&dir.join("nope"), past)
+                .await
+                .is_none()
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1275,6 +1528,27 @@ mod agent_flow {
         .expect("构造开窗指令失败")
     }
 
+    /// 存在性任务（`exist`，没有 `expectCount`）的开窗指令：
+    /// 「存在就告警」这类航点同样要带证据图，与数量任务走同一条 `ai_detect`。
+    fn exist_start_payload() -> AiStart {
+        AiStart::from_value(&json!({
+            "windowId": "AIW-1-0-2",
+            "action": "start",
+            "task": "firextinguisher",
+            "taskCode": "TK-1",
+            "pointIndex": 0,
+            "planId": "TK-1",
+            "checkType": "exist",
+            "labels": ["extinguisher"],
+            "conf": 0.35,
+            "cam": "dogcam",
+            "fps": 3,
+            "secs": 1,
+            "wasRunning": false,
+        }))
+        .expect("构造开窗指令失败")
+    }
+
     /// 收消息直到收到 `ai_end`（或超时），返回期间收到的 (msgType, payload)
     async fn drain_until_end(
         rx: &mut mpsc::Receiver<WsMessage>,
@@ -1407,6 +1681,62 @@ mod agent_flow {
         assert_eq!(started["point_index"], 0);
         assert_eq!(started["expect_count"], 3);
         assert!(!ai.status_active().await, "窗口结束后不该还挂着窗口");
+    }
+
+    /// 检出告警要证据图：板端命中帧落在 `detect_jobs/<计划>/pt<航点>/`，
+    /// 客户端自己扫目录取出最新一张，随 `ai_detect` 上报路径 + base64。
+    ///
+    /// 用**存在性任务**（`checkType=exist`）跑：现场「灭火器在不在」这类航点就是它，
+    /// 与数量任务共用同一条 `ai_detect`，图不能只挂在数量告警上。
+    #[tokio::test]
+    async fn hit_alert_carries_the_board_evidence_frame() {
+        let root = std::env::temp_dir().join(format!(
+            "robodog-jobs-hit-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        let point_dir = root.join("TK-1").join("pt0");
+        std::fs::create_dir_all(&point_dir).expect("建存证目录失败");
+        let frame = point_dir.join("dogcam_1.jpg");
+        let bytes = [0xFF_u8, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        std::fs::write(&frame, bytes).expect("写命中帧失败");
+
+        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        let agent = spawn_agent(calls).await;
+        let ai = Arc::new(AiPatrol::with_jobs_dir(
+            agent,
+            true,
+            Some(root.to_string_lossy().to_string()),
+        ));
+        let (tx, mut rx) = mpsc::channel(16);
+        // 存在性任务（checkType=exist）也要图：现场配的灭火器巡检就是这一类
+        ai.start(&tx, exist_start_payload()).await;
+        let messages = drain_until_end(&mut rx, Duration::from_secs(5)).await;
+        let _ = std::fs::remove_dir_all(&root);
+
+        let detects: Vec<&Value> = messages
+            .iter()
+            .filter(|(kind, _)| kind == "ai_detect")
+            .map(|(_, payload)| payload)
+            .collect();
+        assert_eq!(detects.len(), 1, "{messages:?}");
+        let evidence = detects[0]["evidence"].as_str().unwrap_or_default();
+        assert!(
+            evidence.ends_with("TK-1/pt0/dogcam_1.jpg"),
+            "检出要带命中帧路径: {}",
+            detects[0]
+        );
+        let encoded = detects[0]["evidenceImage"]
+            .as_str()
+            .expect("检出要带证据图字节");
+        use base64::Engine as _;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("证据图应是合法 base64");
+        assert_eq!(decoded, bytes, "发出去的必须是命中帧原图字节");
     }
 
     #[tokio::test]

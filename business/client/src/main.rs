@@ -1148,9 +1148,10 @@ async fn run_client(
 
     // 航点 AI 识别：板端 Agent 与客户端同机（127.0.0.1 一定通），
     // 业务平台在公网够不到板端，所以由客户端本地代调 Agent（见 `ai_patrol` 模块）
-    let ai = Arc::new(AiPatrol::new(
+    let ai = Arc::new(AiPatrol::with_jobs_dir(
         config.ai_agent_url.clone(),
         config.ai_enabled,
+        config.ai_jobs_dir.clone(),
     ));
     if config.ai_enabled {
         info!(

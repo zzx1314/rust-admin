@@ -276,7 +276,8 @@ B. client（正式环境：平台在公网、Agent 只在内网，服务端连�
   → 上报 ai_point（动作参数 + 板端模型目录）→ 服务端用**同一套**规则算场景/类别/阈值/窗口
   → 下发 ai_start（含 planId / pointIndex / expectCount）
   → 客户端 POST /api/detect/start|config → 读本机 SSE
-  → 按阈值 + 类别去重回传 ai_detect → 服务端写 alerts + task_events + 企微
+  → 按阈值 + 类别去重回传 ai_detect（带命中帧：扫 detect_jobs/<plan>/pt<n>/ 取本轮最新一张）
+    → 服务端写 alerts + task_events + 企微（卡片后面跟一张证据图）
   → 数量任务（checkType=count）与 expectCount 不符（SSE plan_hit.count_alert）
     → 转发 `ai_alert`；到期一个都没找到也由服务端按 ai_end.expired 判成数量不一致
   → 客户端收尾 ai_end（带 expired）；任务终态/取消时服务端下发 ai_stop
@@ -331,8 +332,7 @@ B. client（正式环境：平台在公网、Agent 只在内网，服务端连�
 
 **计划 id 与存证**：开窗同时把 `planId`（= 业务任务号 `taskCode`）与 `pointIndex`
 下发给板端，命中帧与 `result.json` 落到板端
-`detect_jobs/<planId>/pt<pointIndex>/`（图已画中文框），方便按计划回溯。
-2026-11-17 起板端还会额外写一份 **`result_<YYYYmmdd_HHMMSS>.json`**：
+`detect_jobs/<planId>/pt<pointIndex>/`（图已画中文框），方便按计划回溯。2026-11-17 起板端还会额外写一份 **`result_<YYYYmmdd_HHMMSS>.json`**：
 `result.json` 只保留最新一次，同一航点每轮都覆盖，历史结论靠这些副本翻
 （板端改动在 `/root/261113/backpack_dashboard/backend/detect.py::_finish_job`，
 不在本仓库；工单详情的「关联告警」里也能看到历次告警正文与证据图路径）。
@@ -343,6 +343,17 @@ B. client（正式环境：平台在公网、Agent 只在内网，服务端连�
 数量核对取「命中后连续几帧的检出最大值」，单帧遮挡少画一个框不会误报。
 「未命中 = 数量不一致」只认客户端的 `ai_end.expired=true`（窗口正常到期）；
 任务结束 / 被新航点顶替时 `expired=false`，服务端不记这笔账。
+
+**检出告警的证据图**（2026-11-18 加）：企业微信那条卡片后面跟一张命中帧。
+`plan_hit`（带 `evidence`）要约窗口收尾才发，而检出是实时的，所以客户端在命中那一刻
+自己扫 `<jobs_dir>/<planId>/pt<航点下标>/` 取**窗口开始之后**写下的最新一张（mtime 卡
+5s 容错），把 `evidence`（路径）+ `evidenceImage`（base64）放进 `ai_detect`；服务端
+`record_hit` 校验后发 `msgtype=image`，路径同时写进告警正文「（证据：…）」。
+`jobs_dir` 优先级：`[ai] jobs_dir` / `ROBODOG_AI_JOBS_DIR`（客户端配置）> 从板端
+`plan_hit.evidence` 反推出的真实根 > 内置候选（`/root/backpack_dashboard/backend/detect_jobs`、
+`/root/261113/backpack_dashboard/backend/detect_jobs`）。板子路径与这两个都不同
+（或客户端不在板端）时不带图，告警照发——与 `count` 那条的退让一致。
+设计与回归见 `business/docs/wecom-alert-push.md`「证据图」一节。
 
 **怎么配**：路线编辑器「该点执行动作」→ 动作类型选 `AI 识别`，场景与识别类别直接勾选
 「实时视频 → AI 识别」面板上的同一份模型目录（数据来自 `GET /api/backpack/status` 的

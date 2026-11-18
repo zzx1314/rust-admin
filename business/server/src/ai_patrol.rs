@@ -608,7 +608,26 @@ impl AiPatrol {
         if hits.lock().await.iter().any(|hit| hit.label == payload.label) {
             return;
         }
-        record_hit(state, &cfg, &payload.label, payload.conf, &hits).await;
+        // 客户端随检出带上来的命中帧（路径 + base64）：读不到图就只发卡片
+        let image = payload.evidence_image.as_deref().and_then(|raw| {
+            match crate::notify::evidence_image(raw) {
+                Ok(image) => Some(image),
+                Err(error) => {
+                    warn!("AI 识别：客户端上报的检出证据图不可用，只发卡片: {error}");
+                    None
+                }
+            }
+        });
+        record_hit(
+            state,
+            &cfg,
+            &payload.label,
+            payload.conf,
+            &hits,
+            &payload.evidence,
+            image,
+        )
+        .await;
     }
 
     /// 客户端回报窗口结束（`ai_end`）：收尾 + 记一条任务事件。
@@ -1035,7 +1054,7 @@ async fn consume_events(
                             if !seen.insert(label.clone()) {
                                 continue;
                             }
-                            record_hit(state, config, &label, conf, hits).await;
+                            record_hit(state, config, &label, conf, hits, "", None).await;
                         }
                     }
                     Ok(None) => return false,
@@ -1050,12 +1069,19 @@ async fn consume_events(
 }
 
 /// 检出 → 告警 + 任务事件
+///
+/// `evidence` / `image` 是这一帧命中图的「板端路径」和「字节」：企业微信的图片消息
+/// 要字节不要路径（见 [`crate::notify::evidence_image`]），路径只写进告警正文方便
+/// 现场 ssh 上去复核。客户端代调模式下由客户端扫板端存证目录给出；服务端直连模式
+/// （`ROBODOG_BACKPACK_URL`）读不到板端磁盘，两个都是空 → 只发卡片。
 async fn record_hit(
     state: &AppState,
     config: &WindowConfig,
     label: &str,
     conf: f64,
     hits: &Arc<Mutex<Vec<Hit>>>,
+    evidence: &str,
+    image: Option<NoticeImage>,
 ) {
     let at = now();
     hits.lock().await.push(Hit {
@@ -1064,15 +1090,20 @@ async fn record_hit(
         conf,
     });
 
-    let content = format!(
+    let mut content = format!(
         "AI 识别：任务「{}」航点 {}「{}」检出 {}（置信度 {:.2}）",
         config.task_name, config.point_index, config.point_name, label, conf
     );
+    if !evidence.trim().is_empty() {
+        content.push_str(&format!("（证据：{}）", evidence.trim()));
+    }
     info!("{content}");
 
     let key = ai_dedup_key(config, label);
     match insert_alert(&state.db, config, &content, &key).await {
-        Ok(alert_code) => crate::notify::alert_created(state, &alert_code).await,
+        Ok(alert_code) => {
+            crate::notify::alert_created_with_image(state, &alert_code, image).await
+        }
         Err(error) => warn!("AI 识别：写告警失败: {error}"),
     }
     if let Err(error) = insert_task_event(&state.db, config, &at, &content).await {
