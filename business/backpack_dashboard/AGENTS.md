@@ -1,0 +1,133 @@
+# AGENTS.md — backpack_dashboard（板端数据采集 Agent）
+
+板子 `.246` 上跑的那套「数据采集背包 Agent + 离线 Dashboard」。2026-11-19 起并入主仓库
+（`git subtree` 导入，保留原有提交历史），板端部署位置仍是 `/root/261113/backpack_dashboard`。
+
+**这货不在开发机上真跑**：它依赖 RK3576 的 NPU（`librknnrt.so`）、4 路 USB 相机、GPIO、
+4G 模块、聆思语音服务。改完要验接口链路，用 `deploy/backpack-sim/`（模拟 Agent + 假相机），
+板端行为差异见那边的 README。
+
+## 与其他子项目的关系
+
+```text
+business/backpack_dashboard（本目录，板端 .246）
+   ▲ REST/SSE :8000
+   │
+   ├── 浏览器直连（现场入口 deploy/site-console/，同网段）
+   ├── business/client（设备客户端，跑在同一块板子上）──agent_relay──▶ 平台隧道
+   └── deploy/backpack-relay/relay_push.py（同一块板子，把 RTSP 转 FLV 推到平台）
+          │
+          ▼
+business/server（平台 :3100）── /api/backpack/* 聚合、AI 启停、企业微信证据图
+```
+
+契约是谁在消费：`business/web/src/api/backpack.ts`（页面类型）、
+`business/server/src/backpack.rs`（聚合/白名单）、`business/server/src/agent_tunnel.rs`
+与 `business/client/src/agent_relay.rs`（隧道白名单：4 个只读 + `start/stop/config`）。
+**改字段先改这三处 + `business/docs/backpack-video-integration.md` §2.1。**
+航点 AI 的完整协议（`ai_point/ai_start/ai_detect/ai_alert/ai_end/ai_stop`、`plan_hit`、
+`check_type`、证据图）见 `business/docs/official-app-parity.md` §5.6。
+
+## 目录地图
+
+```text
+backend/
+├── agent.py          FastAPI 主程序：摄像头清单、AI 启停、遥测/控制、SSE、WHEP 同源代理
+├── config.py         全部可调项（环境变量 + 默认值），改参数只改这里
+├── detect.py         AI 识别：拉 RTSP 旁路 → 帧 → 调 C++ detector（--serve）→ 框/事件/存证
+├── evidence.py       证据图落盘：DETECT_JOBS_DIR/<plan|job>/pt<n>/*.jpg + result.json
+├── osd.py            板端画框（ffmpeg 叠加，写 FIFO；中继「preview」流靠它带框）
+├── relay.py          dogcam 归一化/转发（本体 RTSP → mediamtx）
+├── stream.py         4 路 USB ffmpeg 推流编排（h264_rkmpp → libx264 回退）
+├── telemetry.py      SHT4x/4G/WiFi/环境/SSD/风扇/聆思 采集
+├── control.py        LED 闪烁 / 补光开关
+├── buttons.py        SOS/STOP evdev 监听
+├── cjk_font.py       画框中文字模（由 backend/tools/gen_cjk_font.py 生成）
+├── start.sh          板端启动：camera-init → 复用 snap mediamtx → Agent
+└── tools/            现场一次性工具（UVC 探测、GPIO 触发、四路时间轴、plan_count_selftest）
+
+frontend/            零安装 Dashboard（原生 JS + mediamtx reader.js，WHEP 播放）
+rknn/
+├── librknnrt.so      自带 NPU runtime（start.sh 会加进 LD_LIBRARY_PATH）
+├── code/code/        YOLOv8 C++ 推理（CMake，板端编译出 build/yolov8_detector）
+└── models/           combined / extinguisher 两个 .rknn 模型包（各 27MB，已入库）
+mediamtx/             自管 mediamtx 的配置样板（现场默认复用 snap 实例）
+```
+
+`README.md` 是原始现场文档（部署、摄像头触发、同步采集、画框排错），**细节以它为准**；
+本文件只写「在本仓库里怎么改、改完要同步什么」。
+
+## 常用命令
+
+```bash
+# 语法/静态检查（开发机即可，不 import 板端依赖）
+python3 -m py_compile business/backpack_dashboard/backend/*.py
+python3 -m py_compile business/backpack_dashboard/backend/tools/*.py
+
+# 航点计划状态机自检（不需要 NPU / 相机，改 detect.py 的计划逻辑后必跑）
+python3 business/backpack_dashboard/backend/tools/plan_count_selftest.py
+
+# 本地接口链路（模拟 Agent，不需要板子）
+cd deploy/backpack-sim && python3 run.py up && python3 run.py smoke
+
+# 板端（.246）启动 / 重启
+ssh root@192.168.41.246 'systemctl restart backpack-agent'   # 或 bash backend/start.sh
+
+# 板端日志 / AI 运行态
+ssh root@192.168.41.246 'journalctl -u backpack-agent -f'
+curl -s 127.0.0.1:8000/api/detect/status
+```
+
+`deploy/backpack-agent.service` 是 systemd unit（`WorkingDirectory=/root/261113/backpack_dashboard/backend`）。
+
+## 发布到板端
+
+板端没有 Rust/Node 工具链，也不需要：改的是 Python/JS/模型时直接同步文件即可。
+
+```bash
+# 只改后端（最常见）
+rsync -av business/backpack_dashboard/backend/ \
+  root@192.168.41.246:/root/261113/backpack_dashboard/backend/
+ssh root@192.168.41.246 'systemctl restart backpack-agent'
+
+# 改了 rknn（模型/so/C++ detector）后还要重启中继（preview 流的画框由 Agent 推）
+rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/root/261113/backpack_dashboard/rknn/
+
+# 改了画框字库（cjk_font.py 由 tools/gen_cjk_font.py 生成）→ 同步后重启 Agent
+# 改了 detector C++（rknn/code/code）→ 板端 cmake 编译，不是在开发机
+```
+
+重启顺序：`camera-init` → `backpack-agent` → `backpack-relay`（见 `deploy/backpack-246.md` §7）。
+
+## 代码约定
+
+- **配置集中在 `config.py`**：新参数一律 `os.getenv("XXX", 默认值)` + 在 README「需要按现场
+  核对的可调项」里补一行；不要在业务代码里散写魔法路径/端口。
+- **Agent 没有鉴权**（板端内网、FastAPI 裸跑）：CORS 只允许白名单
+  (`AGENT_CORS_ORIGINS`)，别写成 `*`；也不要新增「任意 URL 转发」这类接口——平台侧
+  `agent_tunnel.rs` 的白名单是同样的理由。
+- **SSE 事件是外部契约**：`detect` / `detect_clear` / `detect_state` / `detect_error` /
+  `plan_hit` / `telemetry` / `button` / `lingsi`。客户端只转 detect 四类，平台 `/api/backpack/events`
+  原样透传；新增字段可以，**改/删已有字段要同时改页面与两边测试**。
+- **存证目录布局固定**：`DETECT_JOBS_DIR/<plan_id>/pt<航点下标>/*.jpg` + `result.json`。
+  客户端靠它读证据图（`ROBODOG_AI_JOBS_DIR`）、平台靠 `plan_hit.evidence` 反推根目录。
+  改布局 = 改 `evidence.py`、`client/src/ai_patrol.rs`、`deploy/backpack-sim/mock_agent.py` 三处。
+- **计划状态机分两类任务**：`check_type=exist`（是否检出）/ `count`（数量是否等于
+  `expect_count`）。数量不一致、以及「窗口到期一个都没找到」都要 `count_alert=true`；
+  `_plan_flush` 要在停识别时把采样中的命中落盘（客户端靠「先停再扫」补图）。
+  改这块先读 `official-app-parity.md` §5.6，并跑 `plan_count_selftest.py`。
+- **OSD 会反压主视频**：`OSD_FIFO_FPS` 默认 4，别为了「画框更顺」拉到 8+——板端实测会拖慢
+  AI 那一路（`deploy/README.md` 有现场记录）。
+- **NPU 单路独占**：`DETECT_FPS_MAX=12` 是上限；`/api/detect/start` 只接受一路 camera
+  （`single_cam=true`），不要放开多路并发。
+- 代码风格沿用现有：4 空格、中文注释/文档字符串、模块顶部写「为什么」；不要引入
+  pandas/numpy 这类板端没有的依赖（离线包在 `backend/package/`，已在 `.gitignore`）。
+
+## 仓库化后的注意事项
+
+- 模型与 `librknnrt.so` 已入库（约 61MB）。**不要**再往仓库里塞新的 `.rknn`/so；确实要换模型
+  先跟维护者确认（必要时迁 Git LFS）。
+- `backend/detect_jobs/`、`backend/package/`、`__pycache__` 是运行期/离线包产物，已 ignore。
+  `backend/detect_events.jsonl` 是事件样例（默认落盘路径），改动它等于改动默认输出格式，谨慎。
+- 部分文件历史上是 CRLF（`.vscode/settings.json`、`tools/uvc_ctrl_probe.py`、
+  `detect_events.jsonl`）。编辑时保持原样或用 LF 都行，但**不要整文件重排**，否则 diff 全是噪音。

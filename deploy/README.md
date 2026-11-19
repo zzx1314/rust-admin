@@ -200,7 +200,7 @@ ssh root@192.168.41.246 'cd /opt/robodog/client &&
 
 ## 二·补充、数据采集背包：实时视频 + AI（2026-11-14 上线）
 
-背包（`.246`，`/root/261113/backpack_dashboard`）自带 4 路 USB + 机器狗前置 RTSP + 红外，
+背包（`.246`，板端 `/root/261113/backpack_dashboard`，仓库 `business/backpack_dashboard/`）自带 4 路 USB + 机器狗前置 RTSP + 红外，
 板端 RKNN 单路识别。控制台新增「监控运维 → 实时视频」，但要分**三个组件**看：
 
 | 组件 | 跑在哪 | 作用 |
@@ -450,7 +450,7 @@ ssh root@39.107.55.13 'printf "%s\n"   ROBODOG_BACKPACK_BROWSER_URL=http://192.1
   systemctl restart rust-admin-robodog'
 
 # 3) 板端：Agent 做成服务（开机自启 + 崩溃重启），并修掉 CORS 白名单
-scp /root/261113/backpack_dashboard/backend/agent.py root@192.168.41.246:/root/261113/backpack_dashboard/backend/
+scp business/backpack_dashboard/backend/agent.py root@192.168.41.246:/root/261113/backpack_dashboard/backend/
 scp deploy/backpack-agent.service root@192.168.41.246:/etc/systemd/system/
 ssh root@192.168.41.246 'systemctl daemon-reload && systemctl enable --now backpack-agent'
 

@@ -8,6 +8,7 @@ Monorepo containing a Rust backend API, a Vue 3 frontend admin panel and the sta
 ./
 ├── backend/          # Rust REST API (axum + sea-orm + SQLite)
 ├── business/         # Standalone robot-dog service: parks/devices/tasks/routes + console
+│   └── backpack_dashboard/  # Board-side backpack Agent (Python/FastAPI + RKNN + dashboard)
 └── frontend/         # Vue 3 admin panel (vue-pure-admin-max)
 ```
 
@@ -15,6 +16,7 @@ Monorepo containing a Rust backend API, a Vue 3 frontend admin panel and the sta
 - `backend/AGENTS.md` — Rust backend patterns, SeaORM conventions, test structure
 - `frontend/AGENTS.md` — Vue/TypeScript frontend patterns, component conventions
 - `business/README.md` — standalone robot-dog service (parks, devices, tasks, routes)
+- `business/backpack_dashboard/AGENTS.md` — board backpack Agent (Python + RKNN, `.246`)
 - `DOG.md` — middle-platform resource module (maps, models, media, config)
 
 ## Commands
@@ -262,5 +264,6 @@ RKNN、真相机、Wi-Fi/4G 出口切换不能模拟（要真机）；细节与�
 | Backend code changes | `backend/AGENTS.md` |
 | Frontend code changes | `frontend/AGENTS.md` |
 | Robot-dog park/device/task/route changes | `business/README.md` |
+| Backpack board Agent (Python, RKNN, cameras) | `business/backpack_dashboard/AGENTS.md` |
 | Architecture questions | Both sub-AGENTS.md |
 | Running/building | This file |

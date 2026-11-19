@@ -1,5 +1,10 @@
 # 数据采集背包 · 离线直连演示 Dashboard
 
+> **仓库位置**：本目录是主仓库 `rust-admin/business/backpack_dashboard`（2026-11-19 并入，保留原提交
+> 历史）；板端部署位置仍是 `/root/261113/backpack_dashboard`。改代码/发布约定见同目录
+> [`AGENTS.md`](AGENTS.md)，平台侧契约与排障见 `business/docs/backpack-video-integration.md`。
+> 不在板子旁边时，用 `deploy/backpack-sim/` 在本地复刻 Agent + 相机 + 中继。
+
 方案 A：板端 Python Agent（FastAPI） + 前端 WebRTC Dashboard。  
 Windows 侧**零安装**——只需用 Chrome 打开 `http://192.168.234.200:8000`。
 

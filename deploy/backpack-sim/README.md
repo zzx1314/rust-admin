@@ -73,7 +73,7 @@ cd business/web && pnpm dev      # → http://127.0.0.1:5273，/api 已代理到
 | `robodog-device-client.service` | **同一个二进制**，`--robot mock` | ✅ 注册/心跳/隧道/ai_patrol/假本体协议全真 |
 | `site-console.service` | **同一个 `serve.py`** | ✅ |
 | `business/server`（平台） | **同一个 crate** | ✅ 但库是新建的（`data/robodog.db`） |
-| `backpack-agent`（FastAPI + RKNN） | `mock_agent.py`（纯标准库） | ⚠️ 接口契约一致，识别是假的 |
+| `backpack-agent`（FastAPI + RKNN） | 默认 `mock_agent.py`（纯标准库）；`--agent real` 用**仓库里**的 `business/backpack_dashboard/` | ⚠️ mock 契约一致、识别是假的；real 需板端依赖（fastapi/evdev/rknn） |
 | mediamtx（7 条 path） | 官方二进制 + `mediamtx.yml` | ✅ RTSP/WHEP 行为一致，源全当 publisher |
 | 4 路 USB 相机 / 本体前置 | `fake_cams.py`（ffmpeg `testsrc2`） | ⚠️ 只有彩条 |
 | Wi-Fi / 4G 双出口 | 无 | ❌ `RELAY_ROUTE_POLL=0`，没有出口切换 |
@@ -103,6 +103,7 @@ cd business/web && pnpm dev      # → http://127.0.0.1:5273，/api 已代理到
 
 ```bash
 python3 run.py up --mode direct          # 浏览器直连 Agent
+python3 run.py up --agent real           # 用仓库里的真 Agent（要 fastapi/evdev/rknn，一般只在板子上）
 python3 run.py up --platform http://127.0.0.1:3100   # 只起板端，复用一个已有平台
 python3 run.py up --no-platform          # 等价写法（假定 :3100 已有平台）
 python3 run.py up --with-console         # 额外起 :8080 现场入口（要 business/web/dist）

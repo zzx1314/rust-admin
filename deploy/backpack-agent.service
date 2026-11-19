@@ -1,12 +1,18 @@
 [Unit]
 # 数据采集背包板端 Agent（FastAPI :8000）
 #
-# 安装位置（现场板子 192.168.41.246 / 背包内网 192.168.234.200）：
+# 源码位置：仓库 business/backpack_dashboard/（板端部署在 /root/261113/backpack_dashboard）
 #   /root/261113/backpack_dashboard/backend/agent.py
 #
 # 安装：
 #   sudo cp deploy/backpack-agent.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now backpack-agent
+#
+# 更新代码（开发机）：
+#   rsync -av business/backpack_dashboard/backend/ \
+#     root@192.168.41.246:/root/261113/backpack_dashboard/backend/
+#   ssh root@192.168.41.246 'systemctl restart backpack-agent'
+#   细节见 business/backpack_dashboard/AGENTS.md
 #
 # 为什么需要它：Demo 原来靠人 ssh 上去 `bash start.sh`，终端一断 Agent 就没了，
 # 四路推流 / AI / 遥测全停，平台侧只看到「背包不可达」。做成服务后开机自启、

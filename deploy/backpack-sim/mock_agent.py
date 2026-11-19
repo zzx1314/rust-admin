@@ -3,9 +3,12 @@
 
 ## 它解决什么问题
 
-`192.168.41.246` 那台背包机上有三样东西是仓库外的现场件：mediamtx、Agent
-（`/root/261113/backpack_dashboard/backend/agent.py`）、USB 相机 / RKNN。板子连不上时，
-背包页、航点 AI、企业微信证据图这些链路就全断了，没法在本地改/验。
+`192.168.41.246` 那台背包机上有三样东西跑不进笔记本：mediamtx、真 Agent（源码已在仓库
+`business/backpack_dashboard/`，但启动要 `fastapi` + `evdev` + `librknnrt.so` + 相机）、
+USB 相机 / RKNN。板子连不上时，背包页、航点 AI、企业微信证据图这些链路就没法在本地改/验。
+
+模拟件的用途是「没有 NPU 也能跑通接口链路」；想要**真实现**的接口/SSE（比如在板子上
+自测），用 `python3 run.py up --agent real`。
 
 本文件用**纯标准库**复刻 Agent 对平台/客户端暴露的那一份契约
 （`business/docs/backpack-video-integration.md` §2.1 / `business/web/src/api/backpack.ts`）：

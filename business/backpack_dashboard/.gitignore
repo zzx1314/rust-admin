@@ -1,6 +1,13 @@
 # 离线安装用的本地包目录（pip download -d ./package 生成，已在 README 文档化）
 backend/package/
 
+# 运行期产物（AI 存证图 / job 结果 / 抓帧缓存）
+backend/detect_jobs/
+dist/
+
+# RKNN C++ 编译产物（板端 cmake --build build 生成）
+rknn/code/code/build/
+
 # Python 字节码缓存
 __pycache__/
 *.py[cod]

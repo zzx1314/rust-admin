@@ -21,11 +21,12 @@
 
 用到的**都是仓库里的真实实现**（`deploy/backpack-relay/relay_push.py`、
 `business/client`、`deploy/site-console/serve.py`、`business/server`），只有板端那三样
-仓库外的现场件（Agent / mediamtx / 相机）用模拟件顶替：
+跑不进笔记本的件（真 Agent 的 NPU/相机依赖、mediamtx、相机）用模拟件顶替。真 Agent 的
+源码已在仓库 `business/backpack_dashboard/`，用 `--agent real` 可直接跑它：
 
 | `.246` 上的东西 | 本地模拟 |
 | --- | --- |
-| `backpack-agent.service`（FastAPI :8000 + RKNN） | `mock_agent.py`（纯标准库，假装检出/画框/落证据图） |
+| `backpack-agent.service`（FastAPI :8000 + RKNN） | 默认 `mock_agent.py`（纯标准库，假装检出/画框/落证据图）；`--agent real` 跑仓库里的真实现 |
 | mediamtx（7 条 path） | `bin/mediamtx` + `mediamtx.yml`（下载的官方二进制） |
 | 4 路 USB 相机 + 本体前置 `dogcam` | `fake_cams.py`（ffmpeg `testsrc2` 推 RTSP） |
 | `backpack-relay.service` | 同一个脚本，`RELAY_PLATFORM` 指向本机平台 |
@@ -71,8 +72,9 @@ SIM_LATE_EVIDENCE=1 python3 run.py up         # 图比卡片晚到 → 验证 ai
 
 ## 与真实 `.246` 的差异（排障时别被它带偏）
 
-1. **没有 RKNN**：`/api/detect/tasks` 的两个模型包是写死的，框是编的，`osd.ready` 恒真。
-   真机上的模型加载/NPU 忙/画框字体缺失，这里都复现不了；验这些要连真板子。
+1. **默认 Agent 没有 RKNN**：`mock_agent.py` 的两个模型包是写死的，框是编的，`osd.ready` 恒真。
+   真机上的模型加载/NPU 忙/画框字体缺失，这里都复现不了；验这些要连真板子（或 `--agent real`
+   在板子上跑，接口/SSE 是真实现，AI 仍要 NPU 与编译好的 `yolov8_detector`）。
 2. **视频是 `testsrc2`**：只有一路「彩条」。相机没插、本体没推流、红外黑屏这类现象不模拟。
 3. **网络是 localhost**：没有 Wi-Fi/4G 切换、没有 P2P、没有 `ip route` 出口。
    `relay_push.py` 的降档逻辑仍在跑，但 `RELAY_ROUTE_POLL=0`（本机没有 `enx*`/`wlp*` 出口，
@@ -103,6 +105,7 @@ ROBODOG_BACKPACK_WEBRTC_URL=http://127.0.0.1:8889
 deploy/backpack-sim/
 ├── run.py           进程编排 + 依赖检查（up/down/status/smoke/setup）
 ├── mock_agent.py    模拟 Agent（:8000，契约见 docs/backpack-video-integration.md §2.1）
+│                    真实现是仓库里的 business/backpack_dashboard/backend/agent.py（--agent real）
 ├── fake_cams.py     ffmpeg 假相机 → mediamtx
 ├── smoke.py         冒烟自测（run.py smoke 调它）
 ├── mediamtx.yml     7 条 path（全部 source: publisher，本地没有真 RTSP 源）
@@ -424,6 +427,54 @@ def client_env(device_id, agent_port, jobs_dir, server_url):
     return env
 
 
+REAL_AGENT = os.path.join(ROOT, "business/backpack_dashboard/backend/agent.py")
+
+
+def real_agent_missing_deps():
+    """真 Agent 启动依赖：板端有，开发机一般没有（只在选 --agent real 时检查）。"""
+    missing = []
+    for module in ("fastapi", "uvicorn", "evdev"):
+        try:
+            __import__(module)
+        except Exception:  # noqa: BLE001 - 缺系统库也可能是 OSError
+            missing.append(module)
+    return missing
+
+
+def make_agent_proc(mode, jobs_dir):
+    """mock = 接口契约的替身；real = 仓库里 `business/backpack_dashboard` 的真实现。"""
+    if mode == "real":
+        if not os.path.exists(REAL_AGENT):
+            say("找不到真 Agent：%s" % REAL_AGENT, "err")
+            return None
+        missing = real_agent_missing_deps()
+        if missing:
+            say("真 Agent 缺依赖：%s。它只能在板子上跑（pip install -r "
+                "business/backpack_dashboard/backend/requirements.txt，再装 evdev 系统库与 "
+                "librknnrt.so）；开发机请用默认 --agent mock" % ", ".join(missing), "err")
+            return None
+        env = dict(os.environ)
+        env.pop("SIM_JOBS_DIR", None)
+        env.update({
+            "AGENT_PORT": str(AGENT_PORT),
+            "AGENT_CORS_ORIGINS": "http://127.0.0.1:5273,http://localhost:5273,"
+                                  "http://127.0.0.1:%d,http://127.0.0.1:8080" % PLATFORM_PORT,
+            # 证据图要和设备客户端的 ROBODOG_AI_JOBS_DIR 指同一处
+            "DETECT_JOBS_DIR": jobs_dir,
+            # sim 把「假本体前置」推到本地 mediamtx 的 dogcam path，真 Agent 的 relay 去拉它
+            "DOG_RTSP_URL": "rtsp://127.0.0.1:8554/dogcam",
+            "DOG_RELAY_STREAM": "dogcam",
+            "MEDIAMTX_WEBRTC_HOST": "127.0.0.1",
+            "PYTHONUNBUFFERED": "1",
+        })
+        say("使用仓库里的真 Agent：%s（无 NPU / 相机时四路与 AI 会报错，属预期；"
+            "接口与 SSE 仍是真实现）" % REAL_AGENT)
+        return Proc("agent", [sys.executable, REAL_AGENT], env=env,
+                    cwd=os.path.dirname(REAL_AGENT))
+    return Proc("agent", [sys.executable, os.path.join(HERE, "mock_agent.py")],
+                env=dict(os.environ, SIM_JOBS_DIR=jobs_dir))
+
+
 def platform_ws(platform_url):
     """`http(s)://host:port` → `ws(s)://host:port`（客户端自己会补 `/ws/device`）。"""
     if platform_url.startswith("https://"):
@@ -521,12 +572,16 @@ def cmd_up(args):
                           env=dict(os.environ, SIM_PUBLISH_STREAMS=",".join(streams))))
         procs[-1].start()
 
-    # ---- 2. 模拟 Agent ----
+    # ---- 2. Agent（模拟 / 仓库里的真实现）----
     if not args.no_agent:
-        procs.append(Proc("agent", [sys.executable, os.path.join(HERE, "mock_agent.py")],
-                          env=dict(os.environ, SIM_JOBS_DIR=jobs_dir)))
+        agent_proc = make_agent_proc(args.agent, jobs_dir)
+        if agent_proc is None:
+            for proc in reversed(procs):
+                proc.stop()
+            return 1
+        procs.append(agent_proc)
         procs[-1].start()
-        wait_for("模拟 Agent", "http://127.0.0.1:%d/api/cameras" % AGENT_PORT, seconds=20)
+        wait_for("背包 Agent", "http://127.0.0.1:%d/api/cameras" % AGENT_PORT, seconds=20)
 
     # ---- 3. 平台 ----
     if not args.platform and not args.no_platform:
@@ -595,8 +650,9 @@ def cmd_up(args):
     say("=" * 72)
     say("模拟环境已启动（Ctrl-C 全部停止）")
     say("  业务平台      %s   （admin / admin123）" % platform_url)
-    say("  背包 Agent    http://127.0.0.1:%d  （接入模式：%s）"
-        % (AGENT_PORT, args.mode if not args.platform else "由远端平台配置决定"))
+    say("  背包 Agent    http://127.0.0.1:%d  （%s，接入模式：%s）"
+        % (AGENT_PORT, "mock 模拟" if args.agent == "mock" else "仓库真实现",
+           args.mode if not args.platform else "由远端平台配置决定"))
     say("  设备          %s（--robot mock：任务会真的跑完）" % args.device_id)
     say("  视频流        %s" % ", ".join(streams) if streams else "  视频流        未推流")
     say("  现场入口      %s" % ("http://127.0.0.1:%d" % CONSOLE_PORT if args.with_console
@@ -733,7 +789,7 @@ def cmd_status(_args):
     say("端口：")
     for name, host, port in [("mediamtx RTSP", "127.0.0.1", 8554),
                              ("mediamtx WHEP", "127.0.0.1", 8889),
-                             ("模拟 Agent", "127.0.0.1", agent_port),
+                             ("背包 Agent", "127.0.0.1", agent_port),
                              ("业务平台", platform_host, platform_port),
                              ("现场入口", "127.0.0.1", console_port)]:
         print("  %-16s %s:%d  %s" % (name, host, port,
@@ -792,7 +848,10 @@ def main():
                          "direct=浏览器直连 :8000")
     up.add_argument("--device-id", default=DEVICE_ID, help="设备号（默认 %s）" % DEVICE_ID)
     up.add_argument("--with-console", action="store_true", help="额外起 :8080 现场入口")
-    up.add_argument("--no-agent", action="store_true", help="不起模拟 Agent")
+    up.add_argument("--agent", choices=["mock", "real"], default="mock",
+                    help="mock=模拟 Agent（默认，契约一致、不需要 NPU）；"
+                         "real=business/backpack_dashboard 里的真实现（需要板端依赖）")
+    up.add_argument("--no-agent", action="store_true", help="不起 Agent")
     up.add_argument("--no-cams", action="store_true", help="不起 mediamtx / 假相机")
     up.add_argument("--no-relay", action="store_true", help="不起视频中继")
     up.add_argument("--no-client", action="store_true", help="不起设备客户端")

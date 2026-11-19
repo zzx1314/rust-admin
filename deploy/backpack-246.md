@@ -41,7 +41,7 @@ default via 192.168.234.1  dev eth0            metric 1000   # netplan 兜底
 | unit | 作用 | 端口 | ExecStart / 工作目录 | 仓库来源 |
 | --- | --- | --- | --- | --- |
 | `snap.mediamtx.mediamtx.service` | RTSP 分发中枢：把本体/网络摄像头的流变成 7 条本地 path，供 relay、Agent、浏览器共用 | `8554` RTSP、`8888` HLS/HTTP、`8889` WebRTC | snap 托管 | 不在仓库（厂商镜像 + 现场配置） |
-| `backpack-agent.service` | 背包数据采集 Agent：FastAPI + 6 路流 + RKNN AI 识别（航点存证 `detect_jobs/`） | `8000` | `/root/261113/backpack_dashboard/backend` → `python3 agent.py` | 不在仓库（现场 Agent） |
+| `backpack-agent.service` | 背包数据采集 Agent：FastAPI + 6 路流 + RKNN AI 识别（航点存证 `detect_jobs/`） | `8000` | `/root/261113/backpack_dashboard/backend` → `python3 agent.py` | `business/backpack_dashboard/` |
 | `camera-init.service` | USB 相机初始化（`/root/camera/testc.sh`，启动前 sleep 8） | — | `backpack-agent` 的 `ExecStartPre` 也会重启它 | 不在仓库 |
 | `backpack-relay.service` | **视频中继**：按需把本地 RTSP 转码成 FLV 推到平台 `ws://39.107.55.13:3100/ws/device/video` | 无常驻端口（纯出站 WS） | `/usr/bin/python3 /opt/backpack-relay/relay_push.py` | `deploy/backpack-relay/` |
 | `robodog-device-client.service` | 设备客户端：连平台 `:3100` 做注册/心跳/任务，反代本体 `:10010`，转发 Agent 事件与 AI 证据图 | 无常驻端口（出站 WS） | `/opt/robodog/client/robodog-device-client --config /etc/robodog/client.toml` | `business/client/`（`build-aarch64.sh` 出包） |
@@ -69,7 +69,7 @@ default via 192.168.234.1  dev eth0            metric 1000   # netplan 兜底
 ├── serve.py                             静态服务 + /api 反代
 └── web/                                 构建产物（另有 web.bak-* 3 份）
 
-/root/261113/backpack_dashboard/         ← 背包 Agent（不在本仓库）
+/root/261113/backpack_dashboard/         ← 背包 Agent（仓库：business/backpack_dashboard/，见同目录 AGENTS.md）
 ├── backend/agent.py                     FastAPI :8000
 ├── backend/detect_jobs/<plan>/pt<n>/     AI 存证图 + result.json（平台读不到，由客户端上报）
 ├── rknn/                                RKNN 运行库（LD_LIBRARY_PATH）
@@ -207,5 +207,5 @@ ssh root@192.168.41.246 'systemctl daemon-reload && systemctl restart backpack-r
 | `deploy/backpack-relay/test_relay_push.py`、`measure_bitrate.py`、`latency_probe.py` | `/opt/backpack-relay/`（可选，现场自测用） | `scp` |
 | `business/client/` | `/opt/robodog/client/robodog-device-client` | `business/client/deploy/build-aarch64.sh` 交叉编译 + `scp` |
 | `deploy/site-console/` | `/opt/site-console/`（`serve.py` + `web/`） | `scp` 构建产物 + `restart site-console` |
-| — | `/root/261113/backpack_dashboard/`（Agent） | 不在本仓库，厂商/现场维护 |
+| — | `/root/261113/backpack_dashboard/`（Agent） | `business/backpack_dashboard/` | 改完 `rsync backend/` + `systemctl restart backpack-agent`（模型/so 一并同步，见该目录 AGENTS.md） |
 | — | `/var/snap/mediamtx/common/mediamtx.yml` | 不在本仓库，现场按 §3 的 7 条 path 配 |

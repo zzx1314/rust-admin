@@ -1,6 +1,7 @@
 # 数据采集背包 Demo 分析 · 视频与 AI 识别接入业务平台
 
-> 分析对象：`~/IdeaProjects/backpack_dashboard`（板端 Python Agent + mediamtx + RKNN 旁路识别）
+> 分析对象：`business/backpack_dashboard/`（板端 Python Agent + mediamtx + RKNN 旁路识别，
+> 板端部署在 `/root/261113/backpack_dashboard`）
 > 集成目标：`business/`（RoboDog OPS，Rust 服务 3100 + Vue 3 控制台 5273）
 > 本文第一阶段只落地**单路视频 + AI 识别 + 两种画框方式**，其余能力列在路线图里。
 

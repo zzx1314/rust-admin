@@ -32,7 +32,8 @@ rust-admin/
 │   └── config.toml    # Server, Redis, and database configuration
 ├── business/          # Standalone robot-dog service (Rust server + Vue console)
 │   ├── server/        # axum + sqlx service (parks / devices / tasks / routes)
-│   └── web/           # Vue 3 operations console
+│   ├── web/           # Vue 3 operations console
+│   └── backpack_dashboard/  # Board-side backpack Agent (Python/FastAPI + RKNN + dashboard)
 └── frontend/          # Vue 3 admin panel (vue-pure-admin)
     ├── src/
     │   ├── api/       # API service functions
