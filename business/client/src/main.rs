@@ -2810,6 +2810,7 @@ async fn handle_server_message(
                     let code = task_code.clone();
                     let state = state.clone();
                     let active = active.clone();
+                    let runner_slot = local_runner.clone();
                     tokio::spawn(async move {
                         let outcome = runner.run().await;
                         let (status, message) = match outcome {
@@ -2834,6 +2835,10 @@ async fn handle_server_message(
                             Some(total_points),
                         )
                         .await;
+                        // 收尾必须把槽位里的 runner 摘掉：业务侧的下发地图 / 继续任务等
+                        // 门禁都看这个槽位，残留的 runner 会让设备在任务早已结束（甚至
+                        // 取消）之后仍报「设备正在执行任务」（2026-11-19 现场事故）。
+                        clear_local_runner(&runner_slot, &runner).await;
                         *active.lock().await = None;
                         state.lock().await.current_task = None;
                     });
@@ -3543,6 +3548,48 @@ async fn upload_mapping_to_zentai(config: &Config, saved: &MappingSaved) -> Uplo
     mapupload::ingest_map(&http, &ingest, &saved, &package).await
 }
 
+/// 任务收尾时把 `local_runner` 槽位里的这一份摘掉（只摘自己）。
+///
+/// 用的是 `Arc::ptr_eq` 而不是无条件 `= None`：任务结束的瞬间平台可能已经下发了
+/// 下一轮任务（槽位里换成了新 runner），无条件清空会误伤新任务。
+async fn clear_local_runner(
+    local_runner: &Shared<Option<Arc<RouteRunner>>>,
+    finished: &Arc<RouteRunner>,
+) {
+    let mut slot = local_runner.lock().await;
+    if slot
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, finished))
+    {
+        *slot = None;
+    }
+}
+
+/// 「下发地图」的忙碌门禁：只有**真的在跑**的任务 / 建图才拒绝。
+///
+/// 不要退回去看 `local_runner.lock().await.is_some()`：槽位里可能残留着上一轮的
+/// runner（任务取消 / 执行失败后没摘干净），那时平台侧任务早已是「异常/已完成」，
+/// 但设备会永远回「设备正在执行任务，请先暂停/结束任务后再下发地图」。
+/// 2026-11-19 现场 `0202222672400230` 连续 6 次下发地图失败就是踩在这里（13 号任务
+/// 已于 16:13:48 取消，设备状态「在线待命」，下发地图仍被拒）。
+async fn map_push_block(
+    local_runner: &Shared<Option<Arc<RouteRunner>>>,
+    local_mapping: &Shared<Option<Arc<MappingSession>>>,
+) -> Option<String> {
+    if local_runner
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|runner| runner.is_running())
+    {
+        return Some("设备正在执行任务，请先暂停/结束任务后再下发地图".to_string());
+    }
+    if local_mapping.lock().await.is_some() {
+        return Some("设备正在建图，请先结束建图后再下发地图".to_string());
+    }
+    None
+}
+
 /// 中台设备页「同步地图」：4012 拉取地图列表，只下载业务库缺失的地图并回传。
 ///
 /// 不要求设备绑定园区：地图跟着设备走，园区在控制台创建时再挑图。
@@ -3562,11 +3609,8 @@ async fn push_map_to_body(
     local_mapping: &Shared<Option<Arc<MappingSession>>>,
     msg: &WsMessage,
 ) -> Result<String, String> {
-    if local_runner.lock().await.is_some() {
-        return Err("设备正在执行任务，请先暂停/结束任务后再下发地图".to_string());
-    }
-    if local_mapping.lock().await.is_some() {
-        return Err("设备正在建图，请先结束建图后再下发地图".to_string());
+    if let Some(block) = map_push_block(local_runner, local_mapping).await {
+        return Err(block);
     }
 
     let outer = msg.payload.get("params");
@@ -3937,5 +3981,83 @@ mod command_result_tests {
 
         let blank = message(json!({ "params": { "requestId": "   " } }));
         assert!(command_request_id(&blank).is_none());
+    }
+}
+
+#[cfg(test)]
+mod map_push_guard_tests {
+    use super::{clear_local_runner, map_push_block};
+    use crate::mock_body;
+    use crate::zhpro::client::ZhProClient;
+    use crate::zhpro::mapping::MappingSession;
+    use crate::zhpro::route::RouteRunner;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Mutex;
+
+    type RunnerSlot = Arc<Mutex<Option<Arc<RouteRunner>>>>;
+    type MappingSlot = Arc<Mutex<Option<Arc<MappingSession>>>>;
+
+    async fn client() -> Arc<ZhProClient> {
+        // 假本体（`--robot mock`）是仓库里唯一不依赖真机的 ZhProClient 来源
+        let host = mock_body::start(0, Duration::from_millis(100), vec![], true)
+            .await
+            .expect("假本体启动失败");
+        Arc::new(ZhProClient::connect(&host).await.expect("连接假本体失败"))
+    }
+
+    /// 回归 2026-11-19 现场：任务取消后 `local_runner` 槽位残留，
+    /// 「下发地图」永久报「设备正在执行任务」（设备其实已经待命）
+    #[tokio::test]
+    async fn stale_runner_does_not_block_map_push() {
+        let client = client().await;
+        let slot: RunnerSlot = Arc::new(Mutex::new(Some(Arc::new(RouteRunner::new(client)))));
+        let mapping: MappingSlot = Arc::new(Mutex::new(None));
+        assert_eq!(map_push_block(&slot, &mapping).await, None);
+    }
+
+    /// 真在跑的任务仍然要挡住下发地图（否则改图与导航互相打架）
+    #[tokio::test]
+    async fn running_task_still_blocks_map_push() {
+        let client = client().await;
+        let runner = Arc::new(RouteRunner::new(client));
+        runner.mark_running(true);
+        let slot: RunnerSlot = Arc::new(Mutex::new(Some(runner)));
+        let mapping: MappingSlot = Arc::new(Mutex::new(None));
+        let blocked = map_push_block(&slot, &mapping).await;
+        assert!(
+            blocked
+                .as_deref()
+                .unwrap_or_default()
+                .contains("正在执行任务"),
+            "运行中的任务必须拒绝下发地图: {blocked:?}"
+        );
+    }
+
+    /// `run()` 无论从哪条分支返回都要复位「执行中」标记
+    #[tokio::test]
+    async fn run_clears_running_flag_on_early_return() {
+        let client = client().await;
+        let runner = RouteRunner::new(client);
+        assert!(runner.run().await.is_err(), "没有执行计划时必须报错");
+        assert!(!runner.is_running(), "run() 退出后必须复位执行中标记");
+    }
+
+    /// 收尾只摘自己那一份：新任务已经写进槽位时不能被上一轮的收尾清空
+    #[tokio::test]
+    async fn clear_local_runner_only_removes_itself() {
+        let client = client().await;
+        let previous = Arc::new(RouteRunner::new(client.clone()));
+        let current = Arc::new(RouteRunner::new(client));
+        let slot: RunnerSlot = Arc::new(Mutex::new(Some(current.clone())));
+
+        clear_local_runner(&slot, &previous).await;
+        assert!(
+            slot.lock().await.is_some(),
+            "上一轮的收尾不能清掉新任务的 runner"
+        );
+
+        clear_local_runner(&slot, &current).await;
+        assert!(slot.lock().await.is_none(), "自己收尾时必须摘掉槽位");
     }
 }

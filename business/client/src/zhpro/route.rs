@@ -480,6 +480,13 @@ pub struct RouteRunner {
     cancelled: AtomicBool,
     /// 暂停标记（客户端侧作业暂停）
     paused: AtomicBool,
+    /// 是否真的在跑（`run()` 进入→返回之间）
+    ///
+    /// 业务侧的「忙碌门禁」（下发地图 / 继续任务）只认这个标记，不认
+    /// `local_runner` 槽位是否为空：槽位在任务结束（正常完成 / 取消 / 下发失败）
+    /// 之后可能还残留着上一轮的 runner（2026-11-19 现场 `0202222672400230`
+    /// 下发地图连续 6 次报「设备正在执行任务」的根因）。
+    running: AtomicBool,
     total: Mutex<usize>,
     completed: Mutex<usize>,
     skipped: Mutex<usize>,
@@ -499,6 +506,7 @@ impl RouteRunner {
             nav_task_id: Mutex::new(None),
             cancelled: AtomicBool::new(false),
             paused: AtomicBool::new(false),
+            running: AtomicBool::new(false),
             total: Mutex::new(0),
             completed: Mutex::new(0),
             skipped: Mutex::new(0),
@@ -594,8 +602,30 @@ impl RouteRunner {
         }
     }
 
+    /// 是否真的在执行中（`run()` 期间为 true）
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    /// 标记执行中 / 已收尾
+    ///
+    /// 正常由 [`RouteRunner::run`] 自己置位与复位；单独暴露是为了让业务侧的
+    /// 忙碌门禁在单元测试里能构造「跑着」和「跑完了」两种状态。
+    pub fn mark_running(&self, running: bool) {
+        self.running.store(running, Ordering::SeqCst);
+    }
+
     /// 执行整条航线（巡检 `5000 kind=4`）
     pub async fn run(&self) -> Result<ExecutionOutcome, String> {
+        // 不管从哪条分支返回（未准备 / 低电 / 超时 / 取消 / 终态失败）都必须复位，
+        // 否则「设备正在执行任务」会一直挂在那里，直到客户端重启。
+        self.mark_running(true);
+        let outcome = self.run_prepared().await;
+        self.mark_running(false);
+        outcome
+    }
+
+    async fn run_prepared(&self) -> Result<ExecutionOutcome, String> {
         let plan = self
             .plan
             .lock()

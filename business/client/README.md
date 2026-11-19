@@ -1000,6 +1000,22 @@ ssh root@192.168.41.246 'mv /tmp/rdc.new /opt/robodog/client/robodog-device-clie
 平台侧对应约束：远程接管期间**不下发任务**（本体在通用/手动模式下，导航能力被判给手动控制），
 服务端 `dispatch_task` 会直接返回 400 而不是让本体拒五次。
 
+### 「设备正在执行任务，请先暂停/结束任务后再下发地图」但平台显示没任务
+
+中台点「下发地图」被设备回绝，而任务列表里该设备早已是「已完成/异常」、设备状态「在线待命」——
+这是客户端 `local_runner` 槽位里**残留了上一轮的 runner**（2026-11-19 现场
+`0202222672400230`，13 号任务 16:13:48 取消后连续 6 次下发地图都被这句话挡住）。
+
+- 判据只能是 `RouteRunner::is_running()`（任务真的在跑），**不是槽位是否为空**；
+  槽位只在任务收尾时由 `clear_local_runner` 按 `Arc::ptr_eq` 摘掉自己那一份。
+- 现场临时解法：`systemctl restart robodog-device-client`（重启即清空进程内状态），
+  再点「下发地图」。根治要升级客户端二进制。
+- 同一时期若还夹着「本体软件急停已触发」：那条门禁（`motion_block_reason`）在
+  「下发地图」的**总线门禁**里、先于上面这条执行，说明本体当时确实报过急停，
+  与本 bug 无关（见 `deploy/robodog-body.md` §10）。
+- 回归用例：`cargo test map_push_guard`（`business/client/src/main.rs` 的
+  `map_push_guard_tests`）。
+
 ## 与 REST API 的联动
 
 | REST API | WebSocket 行为 |
