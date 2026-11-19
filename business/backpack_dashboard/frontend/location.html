@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>设备定位 · 背包 Dashboard</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; }
+    #app { display: flex; height: 100vh; }
+    #side {
+      width: 340px; min-width: 340px; padding: 16px; overflow-y: auto;
+      background: #1f2430; color: #e6e9ef; border-right: 1px solid #333a4a;
+    }
+    #map { flex: 1; }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    .sub { font-size: 12px; color: #9aa4b2; margin-bottom: 12px; }
+    .card { background: #2a3140; border: 1px solid #39425a; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+    .kv { display: flex; justify-content: space-between; font-size: 13px; padding: 2px 0; }
+    .kv .k { color: #9aa4b2; }
+    .kv .v { color: #e6e9ef; font-weight: 600; word-break: break-all; text-align: right; max-width: 200px; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+    .b-ok { background: #1d6f42; color: #d6ffe6; }
+    .b-warn { background: #8a6d1b; color: #fff3cf; }
+    .b-none { background: #5a2b2b; color: #ffd6d6; }
+    button {
+      width: 100%; padding: 10px; margin-top: 6px; border: 0; border-radius: 8px;
+      background: #2f6df0; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    button:hover { background: #2559c9; }
+    .hint { font-size: 12px; color: #9aa4b2; line-height: 1.5; }
+    .ts { font-size: 11px; color: #7c8696; margin-top: 4px; }
+    a.back { color: #8ab4ff; font-size: 12px; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <aside id="side">
+      <h1>设备定位</h1>
+      <div class="sub">基站小区号 → 经纬度（cellocation 国内库 / OpenCellID → IP 兜底）</div>
+      <a class="back" href="/">← 返回总览</a>
+
+      <div class="card" id="status-card">
+        <div class="kv"><span class="k">定位方式</span><span class="v" id="method">—</span></div>
+        <div class="kv"><span class="k">精度半径</span><span class="v" id="accuracy">—</span></div>
+        <div class="kv"><span class="k">坐标</span><span class="v" id="coords">—</span></div>
+        <div class="ts" id="ts">—</div>
+      </div>
+
+      <div class="card">
+        <div class="kv"><span class="k">运营商</span><span class="v" id="operator">—</span></div>
+        <div class="kv"><span class="k">MCC</span><span class="v" id="mcc">—</span></div>
+        <div class="kv"><span class="k">MNC</span><span class="v" id="mnc">—</span></div>
+        <div class="kv"><span class="k">TAC</span><span class="v" id="tac">—</span></div>
+        <div class="kv"><span class="k">CI(小区)</span><span class="v" id="ci">—</span></div>
+        <div class="kv"><span class="k">制式/RAT</span><span class="v" id="rat">—</span></div>
+        <div class="kv"><span class="k">RSRP</span><span class="v" id="rsrp">—</span></div>
+      </div>
+
+      <div id="note" class="card" style="display:none"></div>
+
+      <button id="btn-refresh">立即刷新定位</button>
+      <div class="ts" id="last-fetch">—</div>
+      <div class="hint" style="margin-top:10px">
+        说明：设备当前若未联网(PDP 未激活)，只能记录小区号、暂无法显示坐标；
+        联网后下次采集会自动解析出位置。轨迹按时间连成路径，可用于防丢找回。<br>
+        <b>定位方式说明：</b><br>
+        · <b>基站精确定位</b>（cellocation 国内库 / OpenCellID）：由小区号查基站铁塔坐标，可精确到几十~几百米，
+          精度半径显示基站库返回的理论值；<br>
+        · <b>IP 城市级定位</b>（兜底）：当未联网或小区未入库时启用，指向运营商骨干网出口，
+          误差约数公里，<b>不展示具体精度数值</b>，仅作城市级大致定位。
+      </div>
+    </aside>
+    <div id="map"></div>
+  </div>
+  <script src="/static/location.js"></script>
+</body>
+</html>

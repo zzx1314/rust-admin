@@ -1,0 +1,38 @@
+# mediamtx 配置（离线直连演示）
+# 启动：mediamtx /path/to/mediamtx.yml
+# 脚本已验证 mediamtx 通过 snap 安装；如 snap 版本需指定配置路径请按官方文档调整。
+
+# RTSP 服务（ffmpeg 推流 + 红外摄像头推流都走这里）
+rtspAddress: :8554
+rtspTransports: [tcp]
+
+# WebRTC 服务（浏览器通过它低延迟拉流，端口 8889）
+webrtc: yes
+webrtcAddress: :8889
+
+# 各路视频路径：来源均为 publisher（由 ffmpeg / 红外摄像头推上来）
+paths:
+  cam0:
+    source: publisher
+  cam1:
+    source: publisher
+  cam2:
+    source: publisher
+  cam3:
+    source: publisher
+  dog-ipcam:
+    source: publisher
+  # 机器狗前置 1080p60 档：mediamtx 直拉 3588 源流（source: rtsp://...），
+  # 或由现场 snap 配置决定是否直拉；relay 不参与。此 path 不受分辨率切换影响。
+  dogcam:
+    source: publisher
+  # 机器狗前置 720p30 档：由 backend/relay.py 重编码后推上来。
+  # 前置分辨率切到 720p30 时，前端 WHEP 与 AI 抓帧都改用这条 path；
+  # 切到 1080p60 时 relay 停止、改用上面的 dogcam。
+  # 注意：现场 snap 生效配置是 /var/snap/mediamtx/common/mediamtx.yml，
+  # 需在那一并新增 dogcam720: source: publisher 才会真正生效（改后重启 mediamtx）。
+  dogcam720:
+    source: publisher
+  # AI 带框预览：backend/osd.py 把框烧进选中那一路后推上来，仅 AI 开启时存在
+  preview:
+    source: publisher
