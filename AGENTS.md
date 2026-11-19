@@ -230,6 +230,9 @@ systemd unit 写法、安全组端口）见 `deploy/external-hz/README.md`。
 （含 `.234`/`.1` 的 `robots_dog_msgs` 版本不一致导致 `dog_task` 崩溃、
 以及**用官方 APK 可以正常执行任务的临时方案**）见 `deploy/robodog-issues-2026-11-14.md`。
 部署与现场发布流程见 `deploy/README.md`。
+背包机 `.246` 本身（7 个 unit、`/opt/backpack-relay`、`/opt/robodog/client`、
+`/root/261113/backpack_dashboard`、mediamtx 的 7 条 path、`dispatcher.d` 路由脚本、
+`/etc/robodog/client.toml` 等）的位置与环境变量见 `deploy/backpack-246.md`。
 
 ## Important Notes
 
