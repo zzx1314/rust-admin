@@ -34,6 +34,16 @@ Environment=RELAY_GOP=15
 # Environment=RELAY_DECODER_PROBE_TIMEOUT=6
 
 # 自适应档位（默认值见 relay_push.py；改了要 daemon-reload + restart）
+# 慢链路压档：默认 `enx,wwan,usb`（出口是 4G dongle 就直接压到极省流档）。
+#
+# 2026-11-19 现场改成了**钉死 4G**（`50-platform-route.sh` 的 `PIN_IFACE=none`），平台流量
+# 恒定走 4G；这时再按「慢链路」压档就等于**永远 320x180**。实测这块板子的 4G 上行
+# **8.5Mbps**（WS 推 8.5MB / 8.2s 到平台，RTT ~75ms），720p15/1000k 只用掉 12%，
+# 所以这里把「慢链路压档」关掉，交给自适应：不够时 5s 窗口照样会一档一档降，
+# 4G 真掉到 300k 也会自动落到极省流档（只是不用「按网卡名一刀切」）。
+# 换回 Wi-Fi 优先（`PIN_IFACE=wlp4s0`）时把这行注掉：那时 4G 只是掉线兜底，
+# 一刀压到极省流档才是对的。
+Environment=RELAY_SLOW_IFACES=
 # Environment=RELAY_CONGEST_WINDOW=5     # 码率 / send 占用的统计窗口（秒）
 # Environment=RELAY_CONGEST_DUTY=0.5     # 窗口内 send 占用超过它算「被反压」
 # Environment=RELAY_CONGEST_BPS_RATIO=0.9 # 实测码率低于目标档位这个比例即降档

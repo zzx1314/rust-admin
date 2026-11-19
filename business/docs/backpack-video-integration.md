@@ -1259,11 +1259,41 @@ ssh root@192.168.41.246 '
 | 项 | 钉死 4G（`PIN_IFACE=none`） |
 | --- | --- |
 | 出口 | 恒为 `enx…`（4G dongle）；`route_watcher` 只打一行 `平台出口网卡：enx…`，**不再出现** `A → B` |
-| 画质 | `force_low_profile()` 一步压到极省流档 `320x180@8/200k` ≈ 2~3fps（⑭：能再降的只有这一档） |
-| 流量 | ≈90MB/小时（200kbps）；没人看时平台 `video_stop`（`STREAM_IDLE_GRACE` 15s），不烧 |
+| 画质 | 4G 真的只有 0.25~0.6Mbps 时：`force_low_profile()` 一步压到极省流档 `320x180@8/200k` ≈ 2~3fps。**4G 实测够快时必须把 `RELAY_SLOW_IFACES` 清空**（见下），否则就一直是 320x180 |
+| 流量 | 按档位算：极省流 200k ≈ 90MB/小时，`light` 1000k ≈ 450MB/小时；没人看时平台 `video_stop`，不烧 |
 | 前提 | 页面「系统设置 → 视频中继 → 按上行带宽自动降档」必须**开**；关掉=锁在你选的档位硬推，在 0.3Mbps 上必卡。开着时平台下发的起点档位（省流 500k）也**不会**把慢链路判定覆盖掉：`apply_remote_profile()` 最后会调 `force_low_profile()` 把它拉回极省流档（否则每次开页面都要先卡 5~10s 等拥塞窗口） |
 | 心跳 | 设备客户端也走 4G → Wi-Fi 掉线不再把设备打成「离线」 |
 | 恢复 | 常规「断→恢复」链路（⑤⑬）仍在，但只在 **4G 自己掉线** 时才走；Wi-Fi 抖动不再触发 |
+
+⚠️ **「4G = 慢链路」是个会过期的假设，先量再压档。** 2026-11-19 现场复查：这块板子的
+4G（换了 SIM / 位置后）**上行实测 8.5Mbps**（WS 推 8.5MB / 8.2s 到平台，RTT ~75ms），
+云服务器出口也不再是 2.5Mbps 的瓶颈 —— 这时 `enx…` 还按慢链路一刀压到 320x180 就是白扔带宽。
+所以现场 unit 里把它关掉，让 4G 当主链路、按页面档位 `light`（720p15/1000k）起流：
+
+```ini
+# /etc/systemd/system/backpack-relay.service（钉死 4G 且实测够快时）
+Environment=RELAY_SLOW_IFACES=      # 空 = 不按网卡名一刀切，交给 5s 窗口自适应
+```
+
+量法（在板子上跑，走的就是平台那条路）：
+
+```bash
+python3 - <<\EOF
+import asyncio, json, time, websockets
+async def main():
+    total, chunk = 0, b"\x00" * 8192
+    async with websockets.connect("ws://39.107.55.13:3100/ws/device/video", max_size=None) as ws:
+        await ws.send(json.dumps({"msgType": "video_register",
+            "payload": {"deviceId": "bp:__speedtest", "kind": "backpack", "stream": "__speedtest"}}))
+        t = time.monotonic()
+        while time.monotonic() - t < 8:
+            await ws.send(chunk); total += len(chunk)
+        print(f"{total*8/(time.monotonic()-t)/1000:.0f} kbps")
+asyncio.run(main())
+EOF
+```
+
+≥1.5Mbps 就值得关掉压档（配 `light`）；只有 0.3~0.6Mbps 就保留 `enx,wwan,usb`。
 
 两个别踩的：
 

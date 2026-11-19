@@ -100,7 +100,9 @@ ffmpeg，观看端不重连）；到期先确认链路真恢复才回配置档�
 看 `viewerLagSecs`。推流端重连**不要**再 `重建房间`（会顺手踢掉正在看的人）。§6.10⑫。
 平台流量默认被 `/32` 钉在 Wi-Fi 上（画质优先）。Wi-Fi 一天抖几十次、宁可牺牲画质也要
 稳定时，把 `deploy/backpack-relay/50-platform-route.sh` 的 `PIN_IFACE` 改成 `none`
-（钉死 4G：`enx…` 会被判成慢链路，一步压到极省流档 320x180@8/200k）。§6.10⑮。
+（钉死 4G）。钉死后 `enx…` 默认还会被判成「慢链路」一步压到极省流档 320x180@8/200k ——
+**先量 4G 真实上行**（2026-11-19 现场实测 8.5Mbps）：够快就在 unit 里加
+`RELAY_SLOW_IFACES=` 关掉压档，交给自适应。§6.10⑮。
 
 航点 AI 识别的「谁去调板端 Agent」由 `ROBODOG_POINT_AI`（`[backpack] point_ai`，默认
 `auto`）决定：配了 `ROBODOG_BACKPACK_URL` 就服务端直连，否则由现场设备客户端代调
