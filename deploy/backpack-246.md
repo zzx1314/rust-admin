@@ -170,6 +170,38 @@ ps -eo args | grep '[v]4l2' | head -1   # 应能看到 -framerate 30 ... -vf fps
 dogcam 是 mediamtx 直拉本体 1080p60，relay 用软解拉到 320x180（单进程 70% CPU）。
 要查它得看 4G 上行实测和 `RELAY_DECODER`（是否真用上了 `h264_rkmpp` 硬解）。
 
+### 4.1.1 顺手治了「吃 70% CPU 的那条 ffmpeg」
+
+先纠正一个现场常见误判：吃 70% CPU 的**不是中继**，是 **Agent 的 `relay.py`** ——
+`dogcam_profile` 停在 `720p30`，于是 Agent 常驻一条 `本体 1080p60 → 720p` 重编码
+（`dogcam720`），给 AI / 调试页用。软解 1080p60 一个核就没了。
+
+| 方案（.246 实测） | 单核占用 |
+| --- | --- |
+| 现状：软解 1080p60 + swscale + 硬编 | **71%** |
+| 加 `-c:v h264_rkmpp` 硬解（已改） | **23%**（线上实测） |
+| 硬解 + `scale_rkrga`（RGA 硬缩放） | ❌ `Error reinitializing filters`，三种写法都失败 |
+| 干脆切回 `1080p60` 档（不做这路转码） | 0%（但 AI/调试页 拿 1080p60） |
+
+改动：`backend/relay.py` 新增 `_probe_decoder()`（探一次真解出 2 帧才用，失败退回软解），
+`_build_cmd()` 在 `-i` 前插 `-c:v h264_rkmpp`，`/api/relay/status` 多一个 `decoder` 字段。
+输出仍为 `1280x720@15`（`CAPTURE_NOUT_FPS`）。
+
+🔴 **真正的隐患：CMA 只有 16MB，已经长期打满**。改前后两次 boot 都大量刷
+`cma: cma_alloc: reserved: alloc failed, req-size: 8~16 pages, ret: -12`（本次 boot 45 条），
+而且 **15:46:33 板子无任何关机日志硬重启**——时间点紧挨着一次 1080p60 解码压测。
+也就是说 `scale_rkrga` 失败和那次重启大概率是同一件事：CMA 被打爆。
+要根治（按侵入性排序）：切回 `1080p60` 档省掉一整套 1080p 解码/720p 编码的 CMA；
+或给内核 cmdline 加 `cma=256M`（需改 boot args + 重启，现场窗口要做）；
+或把 AI 不跑时的 `dogcam720` 改成按需启停。
+
+观测命令：
+```bash
+journalctl -b | grep -c cma            # 期望个位数，几十条就是快满了
+cat /proc/meminfo | grep Cma
+curl -s localhost:8000/api/relay/status   # decoder 应为 h264_rkmpp
+```
+
 ## 5. 备份文件现状与清理建议
 
 | 位置 | 数量 / 体积 | 说明 |

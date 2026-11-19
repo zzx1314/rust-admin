@@ -118,6 +118,14 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/root/261113/bac
   `expect_count`）。数量不一致、以及「窗口到期一个都没找到」都要 `count_alert=true`；
   `_plan_flush` 要在停识别时把采样中的命中落盘（客户端靠「先停再扫」补图）。
   改这块先读 `official-app-parity.md` §5.6，并跑 `plan_count_selftest.py`。
+- **`relay.py` 的 dogcam720 要硬解**：它常驻把本体 1080p60 转成 720p，软解一条就吃
+  一个核的 71%（`.246` 实测）。`_probe_decoder()` 会先真解 2 帧确认 `h264_rkmpp` 可用
+  （写死 `-c:v` 有风险：解不出来时 ffmpeg 不报错、只是永远等不到帧），失败退回软解；
+  状态看 `GET /api/relay/status` 的 `decoder`。`scale_rkrga`（RGA 硬缩放）在这台机器的
+  ffmpeg 上用不了（`Error reinitializing filters`），别费劲。
+- **CMA 只有 16MB，是这台板子的硬瓶颈**：`journalctl -b | grep -c cma` 几十条就是
+  快满了，会连带 `scale_rkrga` 失败、甚至无日志硬重启。减 CMA 首选「少一路 1080p 转码」
+  （前置切回 `1080p60` 档直拉），详见 `deploy/backpack-246.md` §4.1.1。
 - **OSD 会反压主视频**：`OSD_FIFO_FPS` 默认 4，别为了「画框更顺」拉到 8+——板端实测会拖慢
   AI 那一路（`deploy/README.md` 有现场记录）。
 - **降帧率只能走 `CAPTURE_OUT_FPS`**：现场四路 USB 相机 MJPG 只报 **30fps 的离散帧间隔**

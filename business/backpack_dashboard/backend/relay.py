@@ -104,6 +104,7 @@ def set_profile(profile):
     # 切到 720p30：启动 relay（若看门狗未起则一并启动）
     enc = stream.ensure_encoder()
     url = resolve_url()
+    _probe_decoder(url)
     try:
         _spawn(url, enc)
     except Exception as e:
@@ -117,6 +118,50 @@ def set_profile(profile):
             "relay_running": True, "changed": True}
 
 
+_DECODER = None            # None = ffmpeg 默认软解；探到 h264_rkmpp 就用硬解
+_DECODER_PROBED = False
+
+
+def _probe_decoder(url):
+    """探一次本体的流能不能用 h264_rkmpp 硬解（只探一次，结果缓存）。
+
+    为什么要改：这一路是「本体 1080p60 → 720p 重编码」，默认软解时一个核的
+    **71%** 全花在解 1080p60 上（2026-11-19 在 .246 实测），而板子还要跑四路
+    USB 编码 + 中继转码。硬解之后同一路降到 **31%**（剩下的主要是 swscale）。
+
+    为什么不用 `scale_rkrga`（RGA 硬缩放）：本机 ffmpeg 上它一进滤镜图就
+    `Error reinitializing filters`，硬解帧喂不进去（同一天实测，三种写法都失败），
+    所以缩放仍走 swscale —— 好在 `fps=15` 在 `scale` 前面，缩放只跑 15fps。
+
+    为什么只看 `-decoders` 不够：列表里有不等于能解（设备没起 / 对某路源解不出来），
+    必须真解出两帧像素；解不出来时 ffmpeg 不报错，只是永远等不到帧。
+    """
+    global _DECODER, _DECODER_PROBED
+    if _DECODER_PROBED:
+        return _DECODER
+    _DECODER_PROBED = True
+    try:
+        listed = subprocess.run(["ffmpeg", "-hide_banner", "-decoders"],
+                                capture_output=True, text=True, timeout=10).stdout
+        if "h264_rkmpp" not in listed:
+            return _DECODER
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-rtsp_transport", "tcp", "-c:v", "h264_rkmpp",
+             "-i", url, "-frames:v", "2", "-f", "rawvideo", "-"],
+            capture_output=True, timeout=8,
+        )
+        if proc.returncode == 0 and len(proc.stdout) > 0:
+            _DECODER = "h264_rkmpp"
+        else:
+            print("[relay] h264_rkmpp 硬解探测失败（%s），继续软解"
+                  % (proc.stderr.decode("utf-8", "replace").strip()[:80]
+                     or "两帧都没解出像素"), flush=True)
+    except Exception as e:  # noqa: BLE001 - 探测失败一律退回软解
+        print("[relay] 硬解探测异常: %s（继续软解）" % e, flush=True)
+    return _DECODER
+
+
 def _build_cmd(url, enc):
     # 输出帧率用 CAPTURE_NOUT_FPS（= CAPTURE_OUT_FPS 或 CAPTURE_FPS）：
     # 现场相机只支持 30fps 采集，降帧率走输出侧 fps 滤镜，见 config.py。
@@ -126,9 +171,11 @@ def _build_cmd(url, enc):
     enc_args = ["-c:v", enc]
     if enc == "libx264":
         enc_args += ["-preset", "ultrafast"]
+    dec_args = ["-c:v", _DECODER] if _DECODER else []
     return [
         "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin",
         "-rtsp_transport", "tcp", "-fflags", "+genpts",
+    ] + dec_args + [
         "-i", url,
         "-an", "-vf", vf,
     ] + enc_args + [
@@ -199,6 +246,7 @@ def start_all():
               "（四路与红外不受影响）", flush=True)
         return False
     enc = stream.ensure_encoder()
+    dec = _probe_decoder(url)
     try:
         _spawn(url, enc)
     except Exception as e:
@@ -209,8 +257,10 @@ def start_all():
             _MONITOR_STARTED = True
             threading.Thread(target=_monitor, args=(url, enc),
                              daemon=True).start()
-    print("[relay] dogcam 720p30 已启动 -> rtsp://127.0.0.1:%d/%s（编码器 %s）"
-          % (config.RTSP_PORT, config.DOG_RELAY_STREAM, enc), flush=True)
+    print("[relay] dogcam 720p30 已启动 -> rtsp://127.0.0.1:%d/%s"
+          "（编码器 %s / 解码器 %s）"
+          % (config.RTSP_PORT, config.DOG_RELAY_STREAM, enc, dec or "软解"),
+          flush=True)
     return True
 
 
@@ -256,4 +306,5 @@ def status():
         "profiles": list(config.DOG_PROFILES),
         "restarts": restarts,
         "last_error": _LAST_ERROR,
+        "decoder": _DECODER or "sw",
     }
