@@ -1492,7 +1492,7 @@ async fn next_alert_notice(
     .expect("等告警入队超时")
 }
 
-/// 2026-11-19 现场回归：**取消后立刻重跑，第二轮 AI 命中必须照样进群**。
+/// 2026-11-19 现场回归：**取消后重跑，AI 命中照样进群**。
 ///
 /// 那天 TK-1112-11 在 11:09:09 被取消、11:09:20 重新下发，11:09:44 / 11:10:09
 /// 两个航点都命中了（AL-879/880/881 都已入库、还挂回了原工单 52/57/58），但
@@ -1500,7 +1500,10 @@ async fn next_alert_notice(
 /// 跟单消息共用 `alert-repeat:<工单>` 这个 5 分钟去重键 → 第二轮被静默合并，
 /// 群里看着就是「重跑后 AI 没上报」。
 ///
-/// 现在 AI 告警按「一条告警一个去重键」推，工单照样复用。
+/// 现在 AI 告警按 `ai:<设备>:<任务>:<航点>:<类别>` + 1 分钟推：「同一分钟内的重复
+/// 上报」合并（防抖），跨轮次（几分钟一轮、取消后重跑）照推。这里用「重跑时走到
+/// 另一个 AI 航点」验证推送通道没被上一轮的键锁死；同一航点 4 分钟后再命中的
+/// 时间维度由 `notify::tests::ai_hit_window_lets_the_next_round_through` 钉住。
 #[tokio::test]
 async fn restart_after_cancel_still_pushes_the_next_round() {
     let _serial = TEST_LOCK.lock().await;
@@ -1512,7 +1515,7 @@ async fn restart_after_cancel_still_pushes_the_next_round() {
     let port = spawn_server(state.clone()).await;
     let (mut ws, _device) = register_device(port).await;
 
-    // ① 第一轮：到点开窗 + 检出 → 告警入库 + 入队一条推送
+    // ① 第一轮：航点 0 到点开窗 + 检出 → 告警入库 + 入队一条推送
     ws.send(Message::Text(ai_point(&task_code, false).to_string()))
         .await
         .expect("发送 ai_point 失败");
@@ -1522,10 +1525,14 @@ async fn restart_after_cancel_still_pushes_the_next_round() {
         .await
         .expect("发送检出失败");
     let first_notice = next_alert_notice(rx).await;
-    assert!(
-        first_notice.dedupe_key.starts_with("alert:"),
-        "第一次是正常告警: {}",
-        first_notice.dedupe_key
+    assert_eq!(
+        first_notice.dedupe_key, "ai:RD-AI-1:TK-AI-C:0:extinguisher",
+        "AI 告警按结构化键推，不能跟设备故障共用 alert-repeat:<工单>"
+    );
+    assert_eq!(
+        first_notice.dedupe_window,
+        Some(Duration::from_secs(60)),
+        "AI 告警的去重窗口是 1 分钟"
     );
 
     // ② 取消任务：窗口关掉 + 下发 ai_stop
@@ -1541,32 +1548,30 @@ async fn restart_after_cancel_still_pushes_the_next_round() {
         .await
         .expect("把任务切回执行中失败");
 
-    // ④ 第二轮：同一个航点、同一类别又命中（几秒后，远在 5 分钟窗口内）
-    ws.send(Message::Text(ai_point(&task_code, false).to_string()))
+    // ④ 重跑后走到**另一个** AI 航点（航点 1）：必须重新开窗、重新进群
+    let mut point = ai_point(&task_code, false);
+    point["payload"]["pointIndex"] = json!(1);
+    point["payload"]["pointName"] = json!("新航点 2");
+    ws.send(Message::Text(point.to_string()))
         .await
         .expect("发送第二次 ai_point 失败");
     let second = next_msg(&mut ws, "ai_start").await;
-    let second_window = second["payload"]["windowId"].as_str().unwrap().to_string();
+    let second_window = second["payload"]["windowId"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert_ne!(first_window, second_window, "新窗口要有新的 windowId");
     ws.send(Message::Text(detect(&second_window, "extinguisher", 0.93).to_string()))
         .await
         .expect("发送第二次检出失败");
     // 取消那一步会先入队一条「任务异常」通知，这里只等告警消息
     let second_notice = next_alert_notice(rx).await;
-    assert!(
-        second_notice.dedupe_key.starts_with("alert:"),
-        "重跑后的 AI 命中按告警码推，不能被 5 分钟跟单窗口吞掉: {}",
-        second_notice.dedupe_key
-    );
-    assert!(
-        second_notice.title.contains("同一问题第 2 次"),
-        "工单照样复用，消息要说清是第几次: {}",
-        second_notice.title
+    assert_eq!(
+        second_notice.dedupe_key, "ai:RD-AI-1:TK-AI-C:1:extinguisher",
+        "重跑后的 AI 命中按自己的结构化键推（不能沿用上一轮已推过的键）"
     );
 
-    // ⑤ 第三轮（同一问题再来一次，仍在 5 分钟窗口内）：
-    //    老实现这一步会被 `alert-repeat:<工单>` 吞掉 —— 上一轮刚用这个键推过，
-    //    而它正是生产上 AL-879/880/881 消失的方式。
+    // ⑤ 同一航点一分钟内再命中：告警照常入库，只是不再推第二条（防抖）
     ws.send(Message::Text(
         json!({
             "msgType": "ai_end",
@@ -1585,22 +1590,13 @@ async fn restart_after_cancel_still_pushes_the_next_round() {
     ws.send(Message::Text(detect(&third_window, "extinguisher", 0.94).to_string()))
         .await
         .expect("发送第三次检出失败");
-    let third_notice = next_alert_notice(rx).await;
-    assert!(
-        third_notice.dedupe_key.starts_with("alert:"),
-        "第三轮也必须按告警码推，不能被上一轮的跟单键合并: {}",
-        third_notice.dedupe_key
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        alert_count(&state).await,
+        3,
+        "三轮都要落告警: {:?}",
+        alert_contents(&state).await
     );
-
-    // 告警三条、工单一张
-    assert_eq!(alert_count(&state).await, 3, "{:?}", alert_contents(&state).await);
-    let orders: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM work_orders WHERE source = '告警自动派单' AND dedup_key IS NOT NULL",
-    )
-    .fetch_one(&state.db)
-    .await
-    .expect("查工单失败");
-    assert_eq!(orders, 1, "同一问题只能有一张在办工单");
 
     ai_patrol::global().stop("用例结束").await;
 }

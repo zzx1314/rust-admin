@@ -262,16 +262,18 @@ async fn insert_detect_alert(state: &AppState, code: &str, conf: &str) {
     .expect("插入告警失败");
 }
 
-/// 现场要的：**每次任务执行都要在群里出现一条**。
+/// AI 告警的推送键与窗口（2026-11-19 事故的直接修复点）。
 ///
-/// 周期计划跑完会回到「待执行」重跑（`schedule::rearm_finished`），`task_code` 不变，
-/// 所以第二天同一航点的去重键完全相同 —— 老口径直接 `return`，群里一片安静，
-/// 现场以为「巡检没跑 / 没告警」。现在跟单消息默认照推。
+/// 那天 TK-1112-11 取消后 246s 重跑同一个航点，AL-879/880/881 都入库、也挂回了
+/// 原工单 52/57/58，但推送与上一轮共用 `alert-repeat:<工单>` → 落在 5 分钟窗口里
+/// 被静默合并，群里一条 AI 告警都没有（看着就是「重跑后 AI 没上报」）。
+///
+/// 现在 AI 命中按 `ai:<设备>:<任务>:<航点>:<类别>` + **1 分钟**推：
+/// 一轮一条，同一分钟内同一航点的重复上报才合并。
 #[tokio::test]
-async fn repeated_alert_is_pushed_every_round() {
+async fn ai_hit_is_pushed_on_the_structural_key_with_a_short_window() {
     let (state, mut rx, _temp) = test_state_with_webhook().await;
 
-    // ① 第一轮：建单 + 推一条「已自动派单」
     insert_detect_alert(&state, "AL-RP-1", "0.81").await;
     robodog_ops_server::notify::alert_created(&state, "AL-RP-1").await;
     let first = rx.try_recv().expect("第一条应入队");
@@ -280,76 +282,28 @@ async fn repeated_alert_is_pushed_every_round() {
         "第一条应是正常派单消息: {}",
         first.title
     );
-
-    // ② 第二轮（下一次任务执行）：同键挂回原单，但消息照样推
-    insert_detect_alert(&state, "AL-RP-2", "0.88").await;
-    robodog_ops_server::notify::alert_created(&state, "AL-RP-2").await;
-    let second = rx.try_recv().expect("跟单消息也应入队（每次都推）");
-    assert!(
-        second.title.contains("同一问题第 2 次"),
-        "跟单消息要说清是第几次: {}",
-        second.title
-    );
-    assert!(
-        second
-            .fields
-            .iter()
-            .any(|(name, value)| *name == "工单" && value.contains("原工单，未新建")),
-        "跟单消息要说清没新建单: {:?}",
-        second.fields
-    );
-    assert!(
-        second.mentions.is_empty(),
-        "跟单不再 @ 人（第一条已经 @ 过）"
-    );
-    assert_eq!(open_order_count(&state).await, 1, "跟单不能新建工单");
-
-    // ③ 第三轮（同一分钟内又命中）：同一结构化键按 **1 分钟**窗口合并——
-    //    窗口抖动 / 客户端重开识别时那几秒重复上报不该刷屏。
-    //    几分钟后的下一轮会照推，见 `notify::tests::ai_hit_window_lets_the_next_round_through`。
-    insert_detect_alert(&state, "AL-RP-3", "0.92").await;
-    robodog_ops_server::notify::alert_created(&state, "AL-RP-3").await;
-    assert!(
-        rx.try_recv().is_err(),
-        "同一分钟内的重复上报仍要合并（不能把群刷爆）"
-    );
-    assert_eq!(open_order_count(&state).await, 1, "照样挂回原工单，不新建");
-}
-
-/// AI 命中的推送去重键是 **结构化键 + 1 分钟**，不是「按工单 5 分钟」。
-///
-/// 2026-11-19 现场：取消后 246s 重跑，AL-879/880/881 都挂回了原工单 52/57/58，
-/// 但跟上一次推送共用了 `alert-repeat:<工单>` → 被 5 分钟窗口静默合并，群里
-/// 一条都没有。这条用例把「键」和「窗口」两件事一起钉住。
-#[tokio::test]
-async fn ai_hit_pushes_on_the_structural_key_with_a_short_window() {
-    let (state, mut rx, _temp) = test_state_with_webhook().await;
-    // 前两轮：第一轮建单，第二轮跟单（都是 AI 检出）
-    insert_detect_alert(&state, "AL-AI-1", "0.81").await;
-    robodog_ops_server::notify::alert_created(&state, "AL-AI-1").await;
-    assert!(rx.try_recv().is_ok(), "第一轮要推");
-
-    insert_detect_alert(&state, "AL-AI-2", "0.88").await;
-    robodog_ops_server::notify::alert_created(&state, "AL-AI-2").await;
-    let notice = rx.try_recv().expect("跟单那一轮也要推");
     assert_eq!(
-        notice.dedupe_key, "ai:RD-1:TK-1112-11:0:extinguisher",
+        first.dedupe_key, "ai:RD-1:TK-1112-11:0:extinguisher",
         "AI 命中按结构化键去重，不能跟设备故障共用 alert-repeat:<工单>"
     );
     assert_eq!(
-        notice.dedupe_window,
+        first.dedupe_window,
         Some(std::time::Duration::from_secs(60)),
         "AI 命中的去重窗口是 1 分钟（跨轮次照推）"
     );
+
+    // 同一航点一分钟内的重复上报：告警照常入库并挂回原单，只是不再推第二条
+    insert_detect_alert(&state, "AL-RP-2", "0.88").await;
+    robodog_ops_server::notify::alert_created(&state, "AL-RP-2").await;
     assert!(
-        notice.title.contains("同一问题第 2 次"),
-        "工单照样复用: {}",
-        notice.title
+        rx.try_recv().is_err(),
+        "同一航点 1 分钟内的重复上报要合并（不刷屏）"
     );
+    assert_eq!(open_order_count(&state).await, 1, "跟单不能新建工单");
 }
 
-/// 设备故障连刷仍然要合并——这才是 5 分钟窗口的原始目标（12608 每 90s 一条）。
-/// AI 命中改成「一条告警一个键」后，这条用例钉住非 AI 来源没有跟着一起放开。
+/// 设备故障仍然按「工单 + 5 分钟」合并——这才是 5 分钟窗口的原始目标
+/// （12608 每 90s 一条）。AI 命中改用结构化键后，这条用例钉住非 AI 来源没被放开。
 #[tokio::test]
 async fn device_fault_repeats_still_merge_inside_the_window() {
     let (state, mut rx, _temp) = test_state_with_webhook().await;
@@ -378,6 +332,7 @@ async fn device_fault_repeats_still_merge_inside_the_window() {
         "第一次是新问题，按告警码推: {}",
         first.dedupe_key
     );
+    assert_eq!(first.dedupe_window, None, "设备故障仍用默认 5 分钟窗口");
 
     // 第二次（挂回原单）→ 换成「按工单」的键，仍要推一条（"第 2 次"）
     insert_fault(&state, device, "AL-FT-2", "12608").await;
