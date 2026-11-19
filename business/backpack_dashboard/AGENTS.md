@@ -50,7 +50,9 @@ frontend/            零安装 Dashboard（原生 JS + mediamtx reader.js，WHEP
 rknn/
 ├── librknnrt.so      自带 NPU runtime（start.sh 会加进 LD_LIBRARY_PATH）
 ├── code/code/        YOLOv8 C++ 推理（CMake，板端编译出 build/yolov8_detector）
-└── models/           combined / extinguisher 两个 .rknn 模型包（各 27MB，已入库）
+└── models/           8 个 .rknn 模型包（每个 ~27MB，合计 ~211MB，已入库）：
+                      fall / fire / fire-lane / firextinguisher / garbage_can /
+                      overflow / plastic / smoke（每个目录 labels.txt + meta.json + model.json + model.rknn）
 mediamtx/             自管 mediamtx 的配置样板（现场默认复用 snap 实例）
 ```
 
@@ -125,8 +127,9 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/root/261113/bac
 
 ## 仓库化后的注意事项
 
-- 模型与 `librknnrt.so` 已入库（约 61MB）。**不要**再往仓库里塞新的 `.rknn`/so；确实要换模型
-  先跟维护者确认（必要时迁 Git LFS）。
+- 模型与 `librknnrt.so` 已入库（`rknn/models/` 8 个包约 211MB）。**不要**再往仓库里塞新的
+  `.rknn`/so；确实要换模型先跟维护者确认（必要时迁 Git LFS）。板端 `/root/261113/backend`
+  下的模型是现场真源，换代时用 rsync 同步（见上文「发布到板端」）。
 - `backend/detect_jobs/`、`backend/package/`、`__pycache__` 是运行期/离线包产物，已 ignore。
   `backend/detect_events.jsonl` 是事件样例（默认落盘路径），改动它等于改动默认输出格式，谨慎。
 - 部分文件历史上是 CRLF（`.vscode/settings.json`、`tools/uvc_ctrl_probe.py`、

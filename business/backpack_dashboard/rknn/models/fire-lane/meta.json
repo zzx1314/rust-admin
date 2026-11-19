@@ -1,0 +1,30 @@
+{
+  "name": "消防通道占用",
+  "desc": "消防通道占用检测（5 类，模型输出 9 通道）。演示页只做通用检出框显示；原 model.json 里的多边形/重叠判定属于另一套程序，未接入。",
+  "labels": {
+    "Barricade": {
+      "zh": "路障围挡",
+      "color": "#E8A33D"
+    },
+    "Car": {
+      "zh": "汽车",
+      "color": "#4A90D9"
+    },
+    "ElectricBike": {
+      "zh": "电动车",
+      "color": "#6AA6E8"
+    },
+    "FirelaneArea": {
+      "zh": "消防通道",
+      "color": "#F2C14E"
+    },
+    "Person": {
+      "zh": "行人",
+      "color": "#9B6BD6"
+    }
+  },
+  "ignore": [],
+  "conf": 0.25,
+  "alarm": [],
+  "target": "rk3576"
+}

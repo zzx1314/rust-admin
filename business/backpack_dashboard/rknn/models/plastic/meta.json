@@ -1,0 +1,26 @@
+{
+  "name": "塑料制品检测",
+  "desc": "塑料制品检测（4 类，模型输出 8 通道），输出检出框与同类数量。",
+  "labels": {
+    "other_plastic": {
+      "zh": "其他塑料",
+      "color": "#8C9BB4"
+    },
+    "plastic_bag": {
+      "zh": "塑料袋",
+      "color": "#A3B18A"
+    },
+    "plastic_bottle": {
+      "zh": "塑料瓶",
+      "color": "#6FA8A7"
+    },
+    "plastic_package": {
+      "zh": "塑料包装",
+      "color": "#8FB996"
+    }
+  },
+  "ignore": [],
+  "conf": 0.25,
+  "alarm": [],
+  "target": "rk3576"
+}

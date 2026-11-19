@@ -1,0 +1,5 @@
+Barricade
+Car
+ElectricBike
+FirelaneArea
+Person

@@ -1,0 +1,26 @@
+{
+  "name": "垃圾桶开合与满空状态",
+  "desc": "垃圾桶开合与满空状态检测（4 类，模型输出 8 通道），四种状态为闭合空桶/闭合满桶/敞开空桶/敞开满桶，输出检出框与同类数量。原 model.json 的 name/description 为从 overflow 复制的旧文案（标注 5 类），已按 labels.txt 与模型输出通道更正为 4 类。",
+  "labels": {
+    "Close_empty": {
+      "zh": "闭合空桶",
+      "color": "#4CAF8E"
+    },
+    "Close_full": {
+      "zh": "闭合满桶",
+      "color": "#E06C5B"
+    },
+    "Open_empty": {
+      "zh": "敞开空桶",
+      "color": "#52A8A0"
+    },
+    "Open_full": {
+      "zh": "敞开满桶",
+      "color": "#E9A23B"
+    }
+  },
+  "ignore": [],
+  "conf": 0.25,
+  "alarm": [],
+  "target": "rk3576"
+}

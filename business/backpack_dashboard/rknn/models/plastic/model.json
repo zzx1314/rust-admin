@@ -1,0 +1,11 @@
+{
+  "name": "plastic",
+  "description": "塑料制品检测（4 类），通用计数场景（detect）输出检出框与个数",
+  "model": "model.rknn",
+  "labels": "labels.txt",
+  "conf": 0.25,
+  "nms": 0.45,
+  "imgsz": 640,
+  "scene": "detect",
+  "json": false
+}

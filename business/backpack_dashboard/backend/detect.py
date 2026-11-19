@@ -703,6 +703,10 @@ class DetectManager:
             result["error"] = error
         try:
             evidence.write_json(out_dir, result)
+            # 按次留档：`result.json` 只保留「最新一份」，同一个航点每跑一轮都会被覆盖，
+            # 现场想回看历史结论就只能靠这些按完成时间命名的副本（图片本来就是一图一次）。
+            evidence.write_json(
+                out_dir, result, "result_%s.json" % time.strftime("%Y%m%d_%H%M%S"))
         except Exception as e:
             self._emit_sse({"type": "job_error", "job_id": jid,
                             "msg": "写 result.json 失败: %s" % e})

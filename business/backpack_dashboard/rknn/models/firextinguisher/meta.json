@@ -1,0 +1,16 @@
+{
+  "name": "灭火器检测",
+  "desc": "灭火器检测（1 类，模型输出 5 通道）。与 extinguisher 场景为同一模型的不同命名目录。",
+  "labels": {
+    "extinguisher": {
+      "zh": "灭火器",
+      "color": "#E24B4A"
+    }
+  },
+  "ignore": [],
+  "conf": 0.25,
+  "alarm": [
+    "extinguisher"
+  ],
+  "target": "rk3576"
+}

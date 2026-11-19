@@ -1,0 +1,4 @@
+other_plastic
+plastic_bag
+plastic_bottle
+plastic_package

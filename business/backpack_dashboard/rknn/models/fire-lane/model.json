@@ -1,0 +1,12 @@
+{
+  "name": "fire-lane",
+  "description": "消防通道占用检测（5 类），判定障碍物与 FirelaneArea 是否重叠",
+  "model": "model.rknn",
+  "labels": "labels.txt",
+  "conf": 0.25,
+  "nms": 0.45,
+  "imgsz": 640,
+  "scene": "fire-lane",
+  "json": false,
+  "overlap": 0.10
+}

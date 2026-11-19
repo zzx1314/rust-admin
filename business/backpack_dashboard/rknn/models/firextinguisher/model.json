@@ -1,0 +1,11 @@
+{
+  "name": "firextinguisher",
+  "description": "灭火器检测（1 类），业务输出检测到的个数",
+  "model": "model.rknn",
+  "labels": "labels.txt",
+  "conf": 0.25,
+  "nms": 0.45,
+  "imgsz": 640,
+  "scene": "firextinguisher",
+  "json": false
+}

@@ -1,0 +1,30 @@
+{
+  "name": "垃圾桶状态与溢出",
+  "desc": "垃圾桶状态与溢出检测（5 类，模型输出 9 通道），输出检出框与同类数量。",
+  "labels": {
+    "Broken trash can": {
+      "zh": "破损垃圾桶",
+      "color": "#E06C5B"
+    },
+    "Healthy trash can": {
+      "zh": "完好垃圾桶",
+      "color": "#4CAF8E"
+    },
+    "Trash can closed": {
+      "zh": "垃圾桶闭合",
+      "color": "#52A8A0"
+    },
+    "Trash can open": {
+      "zh": "垃圾桶敞开",
+      "color": "#E9A23B"
+    },
+    "Trash over flow": {
+      "zh": "垃圾溢出",
+      "color": "#D9724A"
+    }
+  },
+  "ignore": [],
+  "conf": 0.25,
+  "alarm": [],
+  "target": "rk3576"
+}

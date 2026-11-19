@@ -1,0 +1,5 @@
+Broken trash can
+Healthy trash can
+Trash can closed
+Trash can open
+Trash over flow
