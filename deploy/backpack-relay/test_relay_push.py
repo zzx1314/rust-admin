@@ -64,6 +64,7 @@ def reset() -> None:
     relay._ceiling_level = None
     relay._ceiling_until = 0.0
     relay._idle_logged_at = 0.0
+    relay._last_egress_iface = None
     relay._sessions.clear()
 
 
@@ -781,6 +782,42 @@ def test_congestion_window_still_steps_one_level() -> None:
     relay._last_window_bps = 300_000  # 远低于 1000k 目标 → 这一档吃不下
     relay.mark_congested("dogcam", "5s 内实测 400kbps", restream=False)
     assert relay._degrade_level == 1
+
+
+def test_platform_tier_does_not_override_a_slow_egress() -> None:
+    """钉死 4G（`PIN_IFACE=none`）时，平台下发的起点档位也要让位给慢链路。
+
+    现场（2026-11-18）：页面默认档位是省流档 500k，`video_start` 一到就把 `route_watcher`
+    压好的极省流档覆盖回 500k，而 4G 上行只有 0.25~0.6Mbps → 每次开页面先卡 5~10 秒，
+    等拥塞窗口（`CONGEST_WINDOW`）再降一次档。
+    """
+    reset()
+    try:
+        # 快链路（Wi-Fi）：平台选什么就是什么
+        relay._last_egress_iface = "wlp4s0"
+        assert relay.apply_remote_profile({"tier": "degrade", "auto": True})
+        assert relay._degrade_level == 1, "Wi-Fi 上应该按平台选的省流档起流"
+
+        # 慢链路（4G dongle）：起点直接拉到极省流档，不等窗口
+        reset()
+        relay._last_egress_iface = "enx020c29a39b6d"
+        assert relay.apply_remote_profile({"tier": "degrade", "auto": True})
+        assert relay._degrade_level == 2, "4G 上不能按 500k 起流，直接极省流档"
+        assert relay.active_profile() == (
+            relay.DEGRADE2_WIDTH,
+            relay.DEGRADE2_HEIGHT,
+            relay.DEGRADE2_FPS,
+            relay.DEGRADE2_BITRATE,
+        )
+        assert relay._ceiling_level is None, "这不是「这一档撑不住」，Wi-Fi 回来还要升"
+
+        # 平台锁死档位（自动降档关）：用户明确要求锁档，不擅自改
+        reset()
+        relay._last_egress_iface = "enx020c29a39b6d"
+        assert relay.apply_remote_profile({"tier": "degrade", "auto": False})
+        assert relay._degrade_level == 1, "锁档时不该被强压到极省流档"
+    finally:
+        relay._last_egress_iface = None
 
 
 def test_fixed_decoder_env_skips_probing() -> None:

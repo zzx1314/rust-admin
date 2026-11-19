@@ -98,6 +98,9 @@ ffmpeg，观看端不重连）；到期先确认链路真恢复才回配置档�
 一直「慢几秒」地看下去。所以 `bp:` 房间缓冲降到 128 片（1MB），并且按 FLV 视频 tag 时间戳
 量「墙钟流逝 - 媒体流逝」，**超过 2s 就断开重连**（补的流头＝直播边缘），`video/state` 里
 看 `viewerLagSecs`。推流端重连**不要**再 `重建房间`（会顺手踢掉正在看的人）。§6.10⑫。
+平台流量默认被 `/32` 钉在 Wi-Fi 上（画质优先）。Wi-Fi 一天抖几十次、宁可牺牲画质也要
+稳定时，把 `deploy/backpack-relay/50-platform-route.sh` 的 `PIN_IFACE` 改成 `none`
+（钉死 4G：`enx…` 会被判成慢链路，一步压到极省流档 320x180@8/200k）。§6.10⑮。
 
 航点 AI 识别的「谁去调板端 Agent」由 `ROBODOG_POINT_AI`（`[backpack] point_ai`，默认
 `auto`）决定：配了 `ROBODOG_BACKPACK_URL` 就服务端直连，否则由现场设备客户端代调

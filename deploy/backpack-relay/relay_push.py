@@ -327,6 +327,12 @@ _ceiling_until = 0.0
 _idle_logged_at = 0.0
 # stream -> StreamSession：档位变了要就地重启这些流
 _sessions: dict[str, "StreamSession"] = {}
+# 最近一次巡检看到的平台出口网卡（`egress_iface()` 顺手缓存）。
+#
+# 用它把平台下发的「起点档位」拉回慢链路该有的档位：钉死 4G 的部署里平台并不知道
+# 这一秒走的是 0.25~0.6Mbps 的 dongle，`video_start` 一到就把 `route_watcher` 压好的
+# 极省流档覆盖回省流 500k → 每次开页面先卡 5~10 秒等拥塞窗口再降档。
+_last_egress_iface: str | None = None
 
 # 起流后这么久一个字节都没有，就判定「ffmpeg 拉不到流」并打印排查提示
 NO_DATA_TIMEOUT = 8.0
@@ -461,6 +467,11 @@ def apply_remote_profile(profile: object) -> bool:
         f"平台下发中继档位：{level_label(_degrade_level)}"
         f"（{profile_text(active_profile())}，自动降档{'开' if auto else '关'}）"
     )
+    # 慢速出口上不能按平台起点档位起流（钉死 4G / Wi-Fi 刚掉线）：0.25~0.6Mbps 推 500k
+    # 也是背压，等 5s 拥塞窗口降下来现场就是「一打开就卡一下」。
+    # 不算「这一档撑不住」（`_ceiling_level` 不动），Wi-Fi 回来还要按试用期升上去。
+    if is_slow_egress(_last_egress_iface):
+        force_low_profile(_last_egress_iface or "?")
     return True
 
 
@@ -771,7 +782,12 @@ def platform_ip() -> str | None:
 
 
 def egress_iface() -> str | None:
-    """到平台走哪张网卡（`ip route get <平台IP>` 的 dev）；查不到返回 None。"""
+    """到平台走哪张网卡（`ip route get <平台IP>` 的 dev）；查不到返回 None。
+
+    顺手把结果缓存到 [`_last_egress_iface`]：平台下发档位时用它判断要不要压档
+    （那里不能同步跑 `ip route get`，会卡住事件循环）。
+    """
+    global _last_egress_iface
     target = platform_ip()
     if not target:
         return None
@@ -784,7 +800,10 @@ def egress_iface() -> str | None:
     if proc.returncode != 0:
         return None
     match = re.search(r"\bdev\s+(\S+)", proc.stdout)
-    return match.group(1) if match else None
+    if not match:
+        return None
+    _last_egress_iface = match.group(1)
+    return _last_egress_iface
 
 
 async def close_quietly(ws) -> None:

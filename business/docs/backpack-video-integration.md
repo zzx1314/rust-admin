@@ -1231,6 +1231,56 @@ Wi-Fi 掉 → ws.send 反压 → 5s 超时 → 断连重连（这时才降一档
 一直编码，电池 / CPU / 4G 流量都在白烧；15s 足够盖住「刷新页面 / 切页签 / 断一两秒」，而
 重连能否秒开已经由 `Room::catch_up()`（⑬）保证，不再依赖这个宽限。
 
+#### ⑮ 出口钉死 4G：用画质换「Wi-Fi 抖一下也不断」（2026-11-18）
+
+现场一天掉 32 次 Wi-Fi。每次掉的这几秒里其实发生了三件事：
+
+```text
+Wi-Fi 掉 → 平台 /32 路由被撤 → 流量回落 4G → route_watcher 看到出口变更
+        → 7 条推流全部断开重连 + force_low_profile（一步压到极省流档）
+Wi-Fi 回来 → NetworkManager dispatcher 重新加回 /32 → try-restart backpack-relay
+        → 再按试用期一档一档升回去（⑨）
+同时：设备客户端心跳 / 控制 WS 用的是**同一个平台 IP** → 一起断，平台把设备标「离线」
+```
+
+也就是说：只要平台流量还钉在 Wi-Fi 上，这条链就**注定**被 Wi-Fi 的稳定性绑架，
+板端调得再好也只能「掉得快一点」（⑭ 已经把降档压到一步到底）。如果画质可以让步，
+最彻底的做法是**不给平台加 /32**，让它跟着默认路由（本来就是 4G，metric 100）走 ——
+出口恒定，Wi-Fi 掉多少次都影响不到推流和心跳：
+
+```bash
+ssh root@192.168.41.246 '
+  sed -i "s/^PIN_IFACE=.*/PIN_IFACE=none/" /etc/NetworkManager/dispatcher.d/50-backpack-relay-route &&
+  chmod 755 /etc/NetworkManager/dispatcher.d/50-backpack-relay-route &&
+  ip route del 39.107.55.13/32 2>/dev/null;
+  systemctl restart backpack-relay'
+```
+
+| 项 | 钉死 4G（`PIN_IFACE=none`） |
+| --- | --- |
+| 出口 | 恒为 `enx…`（4G dongle）；`route_watcher` 只打一行 `平台出口网卡：enx…`，**不再出现** `A → B` |
+| 画质 | `force_low_profile()` 一步压到极省流档 `320x180@8/200k` ≈ 2~3fps（⑭：能再降的只有这一档） |
+| 流量 | ≈90MB/小时（200kbps）；没人看时平台 `video_stop`（`STREAM_IDLE_GRACE` 15s），不烧 |
+| 前提 | 页面「系统设置 → 视频中继 → 按上行带宽自动降档」必须**开**；关掉=锁在你选的档位硬推，在 0.3Mbps 上必卡。开着时平台下发的起点档位（省流 500k）也**不会**把慢链路判定覆盖掉：`apply_remote_profile()` 最后会调 `force_low_profile()` 把它拉回极省流档（否则每次开页面都要先卡 5~10s 等拥塞窗口） |
+| 心跳 | 设备客户端也走 4G → Wi-Fi 掉线不再把设备打成「离线」 |
+| 恢复 | 常规「断→恢复」链路（⑤⑬）仍在，但只在 **4G 自己掉线** 时才走；Wi-Fi 抖动不再触发 |
+
+两个别踩的：
+
+- **不要** `nmcli con mod … ipv4.never-default yes`：默认路由本来就是 4G 优先（100 < 600），
+  删掉 /32 就够了；设了反而让「4G 模块重拨失败」变成**彻底没有出网**（Wi-Fi 救不回来，
+  心跳也停，平台只能标离线）。要真「绝不走 Wi-Fi」再开它。
+- **不要**改成给 4G 也加一条 `/32`：4G 重拨会换网关，/32 会指向死网关，表现是「路由在、
+  但一个字节都推不出去」，比走 Wi-Fi 更难查。要钉就钉「不钉任何网卡」。
+
+回滚：`sed -i "s/^PIN_IFACE=.*/PIN_IFACE=wlp4s0/" …` + `systemctl restart backpack-relay`
+（Wi-Fi 抖得治好了就切回画质优先）。`ssh root@192.168.41.246` 走 Wi-Fi 网段的直连路由，
+不受影响。
+
+回归：`python3 deploy/backpack-relay/test_relay_push.py`（36 个用例，新增
+`test_platform_tier_does_not_override_a_slow_egress`：快链路上按平台档位起流、4G 上起点
+直接极省流、平台锁档时不强压）。
+
 #### 排查工具与清单
 
 ```bash
@@ -1246,6 +1296,7 @@ ssh root@<背包IP> 'python3 /tmp/bw.py'              # 见 §6.10② 的量法�
 | 现象 | 先查 | 结论 |
 | --- | --- | --- |
 | 画面突然定格、重开页面也不动，重启 relay 才好 | `lastFrameAgeSecs`、板端 `上行阻塞` / `没有推出任何字节` | ⑤（2026-11-18 已修，板端要升级 relay） |
+| Wi-Fi 一天抖很多次，每次抖都卡一下且设备显示离线 | 板端 `ip route get 39.107.55.13`、`journalctl -t backpack-relay-route` | 平台流量钉在 Wi-Fi 上（`/32`）；要稳定就 `PIN_IFACE=none` 钉死 4G（⑮），要画质就去治 Wi-Fi 本身 |
 | Wi-Fi 断了再连上，画面还是卡 / 很糊 | 板端 `平台出口网卡 A → B`、`profile=省流` | ⑤ 出口切到慢链路（4G / 狗体内网）；看 `ip route get`。现在到期还会先确认链路已恢复才回配置档（⑥），仍糊就说明链路确实只有这么多 |
 | 每 23s 左右断一次、20s 连接超时 | `/api/backpack/video/state` 的 `initBytes` + 服务端是否 `stream reset` | ①（已修） |
 | 有画面但卡、`measure_bitrate` 远低于配置 | 板端 `ip route get 39.107.55.13`、`bw.py` | ② 路由走了慢速 dongle |

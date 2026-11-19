@@ -306,7 +306,8 @@ sqlite3 /opt/hz/rust-admin/robodog/data/robodog.db \
 ssh root@192.168.41.246 'mkdir -p /opt/backpack-relay'
 scp deploy/backpack-relay/relay_push.py root@192.168.41.246:/opt/backpack-relay/
 scp deploy/backpack-relay/backpack-relay.service root@192.168.41.246:/etc/systemd/system/
-# 板子出公网要走 Wi-Fi / 有线，别走 4G dongle（默认路由 metric 100 时上行只有 ~0.5Mbps）
+# 平台流量走哪张网卡见「三、`.246` 的出网路由 → 方案 B」：默认给平台加 /32 走 Wi-Fi
+# （上行 ~25Mbps）；钉死 4G 的话把安装后的 PIN_IFACE 改成 none
 scp deploy/backpack-relay/50-platform-route.sh root@192.168.41.246:/etc/NetworkManager/dispatcher.d/50-backpack-relay-route
 ssh root@192.168.41.246 'chmod 755 /etc/NetworkManager/dispatcher.d/50-backpack-relay-route && systemctl daemon-reload && systemctl enable --now backpack-relay'
 
@@ -341,7 +342,7 @@ ssh root@39.107.55.13 'journalctl -u rust-admin-robodog -f | grep -E "backpack s
 | 想先量中继码率 | `measure_bitrate.py --stream dogcam`（在平台机器上跑，loopback） | 预期 light ≈1200kbps/20fps；`copy` 是 4000~8000kbps/60fps，对 2.5Mbps 出口必卡 |
 | 切了通道自己跳回「机器狗前置」 | 页面轮询 | 已修（2026-11-16）：直连模式后端不下发 `sources`，刷新时别拿它比对 |
 | 每 23s 左右断一次 | 服务端 `stream reset` 是否出现 | 已修（2026-11-18）：`init` 残留不再阻塞 `video_start`，回归用例 `video_relay::stale_stream_header_does_not_block_video_start` |
-| 码率只有 ~400kbps / 7fps | 板端 `ip route get 39.107.55.13`、`ethtool` | 走了 4G dongle（上行 ~0.5Mbps）；装 `50-platform-route.sh` 让平台流量走 Wi-Fi（上行 ~25Mbps），改完重启 relay |
+| 码率只有 ~400kbps / 7fps | 板端 `ip route get 39.107.55.13`、`ethtool` | 走了 4G dongle（上行 ~0.5Mbps）；装 `50-platform-route.sh` 让平台流量走 Wi-Fi（上行 ~25Mbps），改完重启 relay。反过来「就是要走 4G」见「三 → 方案 B」 |
 | 画面定格、重开页面也不动 | 板端 `journalctl -u backpack-relay` 搜 `上行阻塞` / `没有推出任何字节` | Wi-Fi 半开连接把管道反压死了（旧版 relay）；升级 relay 后会自动断开重连 / 重启 ffmpeg |
 | Wi-Fi 断了再连上还是很卡 | 板端日志 `平台出口网卡 A → B` | 出口还挂在慢链路（4G / 狗体内网 eth0）；relay 每 5s 巡检、路由脚本也会重启它 |
 | 想看房间/观看者状态 | `GET /api/backpack/video/state` | 返回每路的 `publisher/initBytes/viewers/streaming`，黑屏先看这张表 |
@@ -562,6 +563,37 @@ ip monitor route                          # 抓到路由被谁改的时刻，再
 `4g-connect.service` 本身还会重写 `/etc/resolv.conf`；4G 模块一直注册不上
 （`AT+COPS: 0` / `Failed to get IP ... after 30s`）时它就是在空转，确不需要 4G 兜底可以
 `systemctl disable --now 4g-connect.service`。
+
+### 方案 B：钉死 4G（Wi-Fi 抖动频繁时，稳定优先）
+
+现场一天掉 32 次 Wi-Fi，每次掉的那几秒里：平台流量回落 4G → relay 重连全部推流 + 压到
+极省流档，Wi-Fi 回来再逐级升档；**设备客户端心跳走的是同一个平台 IP，也会一起断**
+（平台侧直接看到设备「离线」，2026-11-18 19:58 那次就是）。
+如果画质可以让步、稳定性优先，就不要给平台加 /32，让它跟着默认路由（4G）走：
+
+```bash
+ssh root@192.168.41.246 '
+  sed -i "s/^PIN_IFACE=.*/PIN_IFACE=none/" /etc/NetworkManager/dispatcher.d/50-backpack-relay-route &&
+  chmod 755 /etc/NetworkManager/dispatcher.d/50-backpack-relay-route &&
+  ip route del 39.107.55.13/32 2>/dev/null;
+  systemctl restart backpack-relay'
+```
+
+- `PIN_IFACE=none` 之后脚本的职责变成「一有网卡上线就把残留的 /32 清掉」，所以装了旧版
+  脚本的机器重连 Wi-Fi 也不会再把平台钉回 Wi-Fi；
+- 代价：4G 上行 0.25~0.6Mbps → relay 判成慢链路、**一步压到极省流档 `320x180@8/200k`**
+  （约 2~3fps 的慢刷新），约 90MB/小时流量（没人看时平台会 `video_stop`，不烧）；
+- **页面「系统设置 → 视频中继 → 按上行带宽自动降档」必须开着**，否则会按你选的档位
+  （1000k）硬推，在 0.3Mbps 链路上必然卡。开着时平台下发的起点档位（省流 500k）也不会
+  把慢链路判定覆盖掉：relay 会把起点拉回极省流档（不会每次开页面先卡 5~10s）；
+- **不需要** `nmcli ... ipv4.never-default yes`：默认路由本来就是 4G（metric 100）优先于
+  Wi-Fi（600），删掉 /32 就够了；设了反而让「4G 挂了」变成彻底没有出网；
+- 回滚：`sed -i "s/^PIN_IFACE=.*/PIN_IFACE=wlp4s0/" …` + `systemctl restart backpack-relay`；
+- 验收：`ip route get 39.107.55.13` 应是 `via 10.128.102.1 dev enx…`；板端日志只有一次
+  `平台出口网卡：enx…` 和一次 `出口 … 是慢速链路 … 压到极省流档`，之后**不再出现**
+  `平台出口网卡 A → B`（那就是「Wi-Fi 又抖了一次」）。
+
+> `ssh root@192.168.41.246` 走的是 Wi-Fi 网段的直连路由，不受这条 /32 影响，改完照样能连。
 
 ## 四、正式环境与设备客户端的联动检查
 
