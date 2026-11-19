@@ -527,7 +527,7 @@ async fn missing_agent_does_not_leave_stale_window() {
 
 /// 插一条「0 号点带 AI 识别、1 号点是普通拍照」的两点路线 + 任务。
 ///
-/// 这个形状就是 2026-11-17 现场 `TK-1112-11`（`RT-005 华致办公室`）的缩样：
+/// 这个形状就是 2026-11-17 现场 `TK-1112-11`（`RT-005 华郅办公室`）的缩样：
 /// AI 点后面紧跟一个非 AI 点，是「AI 窗口被 5s 摘要关掉」那条回归的复现条件。
 async fn seed_ai_route_two_points(state: &AppState) -> String {
     let device: (i64, Option<i64>) = sqlx::query_as("SELECT id, park_id FROM devices LIMIT 1")

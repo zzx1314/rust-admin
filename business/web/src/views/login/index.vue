@@ -58,7 +58,7 @@ async function submit() {
       </div>
 
       <div class="login-feature" style="position: relative; z-index: 1">
-        RoboDog OPS · 北京华致技术
+        RoboDog OPS · 北京华郅技术
       </div>
     </section>
 
