@@ -204,8 +204,14 @@ export function startWhep(options: WhepOptions): WhepSession {
   async function connect() {
     if (closed) return;
     emit("connecting", attempt ? `第 ${attempt + 1} 次重连…` : "");
+    // 会话地址必须用**绝对**基址解析：走平台反代时 `options.url` 是相对路径
+    // （`/api/backpack/whep/<stream>/whep`），而 `new URL(path, base)` 的 base 必须是
+    // 绝对地址，否则直接抛 `Invalid base URL` —— 外层 catch 会把它当「连接失败」重连，
+    // 于是 answer 永远不 setRemoteDescription、ICE 一次都不开始，页面就一直「重连中」，
+    // 服务端只看到 `session … deadline exceeded`（2026-11-19 现场就是这么误判成网络问题的）。
+    const absoluteUrl = new URL(options.url, window.location.origin).toString();
     try {
-      const next = new RTCPeerConnection({ iceServers: await iceServersOf(options.url) });
+      const next = new RTCPeerConnection({ iceServers: await iceServersOf(absoluteUrl) });
       peer = next;
       // 只要视频：背包推流本身没有音轨
       next.addTransceiver("video", { direction: "recvonly" });
@@ -237,23 +243,25 @@ export function startWhep(options: WhepOptions): WhepSession {
         cleanupPeer();
         return;
       }
-      const response = await fetch(options.url, {
+      const response = await fetch(absoluteUrl, {
         method: "POST",
         headers: { "Content-Type": "application/sdp", Accept: "application/sdp" },
         body: next.localDescription?.sdp ?? ""
       });
       if (!response.ok) {
-        scheduleRetry(whepFailure(response.status, options.url));
+        scheduleRetry(whepFailure(response.status, absoluteUrl));
         return;
       }
       const location = response.headers.get("Location");
       if (location) {
-        sessionUrl = new URL(location, options.url).toString();
+        // mediamtx 回的是站内绝对路径（`/bp_dogcam/whep/<id>`）；板端直连时 URL 是
+        // 绝对地址，用请求地址当 base 两边都对
+        sessionUrl = new URL(location, absoluteUrl).toString();
       }
       const answer = await response.text();
       await next.setRemoteDescription({ type: "answer", sdp: answer });
     } catch (error) {
-      scheduleRetry(friendly(error, options.url));
+      scheduleRetry(friendly(error, absoluteUrl));
     }
   }
 

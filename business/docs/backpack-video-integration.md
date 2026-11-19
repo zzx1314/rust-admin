@@ -1481,6 +1481,8 @@ WHEP 模式下浏览器仍然会开一条 `/api/backpack/video/ws?media=0&stream
 | --- | --- | --- |
 | 页面显示 `WebRTC · 中继` + 「起流中 · 已等 Ns」一直不动 | 板端 `媒体=rtsp→平台 WebRTC` 后有没有 `rtsp 通路失败`；`curl -s 127.0.0.1:9997/v3/paths/list` 里有没有 `bp_<stream>` | 8554 没放通 / 口令不一致 / 板端没配 `RELAY_RTSP_URL`（会自动退回 FLV，角标变 `FLV · 中继`） |
 | WHEP 协商成功（`/v3/paths/list` 里 `readers` 有记录）但画面黑 | 浏览器 `chrome://webrtc-internals` 的 ICE 状态；安全组 UDP 8189；`webrtcAdditionalHosts` | `ICE failed` = UDP 8189 没放通或被企业网封；可开 TCP 8189 做回退 |
+| 一直「重连中」，服务端日志只有 `session … deadline exceeded` | 浏览器控制台/F12 里有没有 `Failed to construct 'URL': Invalid base URL` | **前端 bug（2026-11-19 已修）**：`lib/whep.ts` 用 `new URL(res.Location, options.url)` 解析会话地址，走平台反代时 `options.url` 是相对路径 → 抛异常 → answer 从未 `setRemoteDescription`，ICE 一次都没开始。**别被 `deadline exceeded` 误导成网络问题** |
+| 同上，但前端无异常、`/v3/webrtc/sessions` 里也看不到任何连接尝试 | 云端 `tcpdump -ni any port 8189` 抓包（**必须加 `-l` 或等进程退出再看，否则 stdio 有缓冲看不到**），同时让操作员刷新页面 | 操作员网络到 8189 的 UDP/TCP 都不通（代理/白名单）。应急：`webrtcLocalUDPAddress: ""` 只发 TCP 候选，或回 `RELAY_OUTPUT=ws` |
 | 一直 `没有流（404）` | 板端 `开始拉流` 之后有没有字节；`bp_<stream>` 是否很快变 `ready` | 板端 ffmpeg 起不来（源 RTSP 没有流 / 解码器选错，见 §6.10⑪） |
 | 画面正常但比现场晚 | 板端 `画面延迟 x.xs`、`media=` 那行 | 与 §6 同一套延迟看门狗（`RELAY_MAX_LAG`），只是阈值更容易满足 |
 | 切换/重连后黑一下 | 板端 `平台侧 RTSP 连接断开` | 推流端重启 = mediamtx 的 path 被销毁重建，浏览器要重新 ICE 协商（~1s），不会闪回老画面 |
