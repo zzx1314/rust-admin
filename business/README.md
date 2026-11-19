@@ -780,6 +780,7 @@ curl -sS "<webhook 地址>" -H 'Content-Type: application/json' \
 | --- | --- | --- |
 | 设备上报 `error` / `fault` / `obstacle`（`handle_device_event`） | 仅任务跑着时推 | `error` → 严重；其余看 `severity` |
 | AI 识别检出 / 数量核对 / 未检出（`ai_patrol`） | 推 | 警告 |
+| ↳ `count` 任务（数量核对）的检出 | **只进任务时间线**（不落告警、不推群） | — |
 | ↳ 数量核对不一致的**证据图**（板端抓拍） | 推（卡片之后的图片消息） | 警告 |
 | 客户端上报任务 `异常` | 推 | 警告 |
 | 任务看门狗判异常（`sweep_stuck_tasks`） | 推 | 设备离线时**严重**，否则警告 |

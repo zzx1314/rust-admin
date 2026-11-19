@@ -117,7 +117,10 @@ ffmpeg，观看端不重连）；到期先确认链路真恢复才回配置档�
 会让这类告警**永远报不出来**，2026-11-18 垃圾桶溢出漏报就是这么来的）。没有这个字段的历史数据按「有没有
 `expectCount`」推断。`exist` 默认**只在检出时告警**（适合「不该出现」的目标）；
 要「应该有却没有」，用 `count` + `expectCount`，或给 `exist` 勾上 `alertWhenMissing`
-（看满停留时长且零检出 → 「AI 识别未检出」告警）。正式环境的云端
+（看满停留时长且零检出 → 「AI 识别未检出」告警）。**`count` 任务只有「数量核对不一致」
+会建单推群**：`ai_detect` 的检出只写任务时间线（`record_hit` 对 `count` 跳过告警入库），
+不然一个航点检出几类目标就是几张工单几条群消息，把真正的数量结论淹掉
+（回归 `ai_client_mode::count_task_detections_stay_out_of_alerts_and_wecom`）。正式环境的云端
 平台连不到内网 Agent，`auto` 走的就是客户端这条路；改这块先读
 `business/docs/official-app-parity.md` §5.6。
 **「现在站在哪个航点」只认 `task_progress.waypointIndex`（0 基下标），

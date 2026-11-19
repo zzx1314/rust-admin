@@ -327,6 +327,11 @@ B. client（正式环境：平台在公网、Agent 只在内网，服务端连�
 | `exist` 检测是否存在 | 存证 + `ai_detect` 上报（不判数量） | 默认：只算「没找到」；勾了 `alertWhenMissing` → 「AI 识别未检出」告警（同样要**看满停留时长**） |
 | `count` 检测数量是否正确 | 存证 + `ai_detect`；`found_count ≠ expectCount` → 数量告警 | 0 ≠ N 也算数量不一致 → 数量告警（同样要**看满停留时长**，没停够就走的被打断不记账） |
 
+> ⚠️ `count` 任务**只有数量告警会建单/推群**：`ai_detect` 的检出只写任务时间线
+> （`task_events`）留痕，不落告警（`record_hit` 对 `checkType=count` 直接跳过告警入库）。
+> 一个航点检出 3 类目标就是 3 张工单 3 条群消息，会把「检查 3 个、实际检出 2 个」淹没。
+> 回归用例：`ai_client_mode::count_task_detections_stay_out_of_alerts_and_wecom`。
+
 > 选哪个：**「不该出现的东西」（消防通道占用 / 明火 / 闯入人员）选 `exist`**——检出即告警；
 > **「必须有 N 个」（灭火器、钢瓶）选 `count` + `expectCount`**；
 > **「必须有、但个数不重要」选 `exist` + `alertWhenMissing`**。

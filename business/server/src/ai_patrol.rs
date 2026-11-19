@@ -30,6 +30,8 @@
 //! - `exist`（检测是否存在）：找到目标就存证/上报，数量不参与判定；
 //! - `count`（检测数量是否正确）：除了找到，还要把 AI 检出的目标数与
 //!   `expectCount` 比对，不一致（含「一个都没找到」= 0 ≠ N）就上报数量告警。
+//!   ⚠️ `count` 任务的**检出只进任务时间线**（不落告警、不建工单、不推企业微信）：
+//!   数量任务只有一个结论要处置，检出是它的中间过程。见 [`record_hit`]。
 //!
 //! 不一致时板端上报 `ai_alert`（客户端代调）或在 SSE 里带 `count_alert`（服务端直连），
 //! 两条路都落到同一个 `record_count_alert`：告警中心 + 任务时间线 + 企业微信。
@@ -1213,6 +1215,10 @@ async fn consume_events(
 
 /// 检出 → 告警 + 任务事件
 ///
+/// **数量核对任务（`checkType=count`）例外**：检出只写任务事件，不落告警、不建工单、
+/// 不推企业微信——数量任务只有「检查 N 个、实际检出 M 个」这一个结论要处置，
+/// 把每个检出类别都报一遍会把那条结论淹掉（见 [`record_count_alert`]）。
+///
 /// `evidence` / `image` 是这一帧命中图的「板端路径」和「字节」：企业微信的图片消息
 /// 要字节不要路径（见 [`crate::notify::evidence_image`]），路径只写进告警正文方便
 /// 现场 ssh 上去复核。客户端代调模式下由客户端扫板端存证目录给出；服务端直连模式
@@ -1237,16 +1243,26 @@ async fn record_hit(
     }
     info!("{content}");
 
+    // 数量核对任务（`checkType=count`）**只认数量结论**：检出本身不是结论，
+    // 「检查 N 个，实际检出 M 个」才是。每检出一种目标就落一条告警，会把真正要处置的
+    // 那条数量告警淹掉（一个航点检出 3 类目标就是 4 条告警 / 4 张工单 / 4 条群消息），
+    // 现场要的是「只推数量不一致」。所以这里只留任务时间线：不落告警、不建工单、
+    // 不推企业微信，数量结论统一由 [`record_count_alert`] 出。
+    let count_task = config.check_type == "count";
     let has_image = image.is_some();
-    let alert_code = match insert_alert(&state.db, config, &content, &key).await {
-        Ok(alert_code) => {
-            crate::notify::alert_created_with_image(state, &alert_code, image)
-                .await;
-            Some(alert_code)
-        }
-        Err(error) => {
-            warn!("AI 识别：写告警失败: {error}");
-            None
+    let alert_code = if count_task {
+        None
+    } else {
+        match insert_alert(&state.db, config, &content, &key).await {
+            Ok(alert_code) => {
+                crate::notify::alert_created_with_image(state, &alert_code, image)
+                    .await;
+                Some(alert_code)
+            }
+            Err(error) => {
+                warn!("AI 识别：写告警失败: {error}");
+                None
+            }
         }
     };
     hits.lock().await.push(Hit {
@@ -1254,7 +1270,9 @@ async fn record_hit(
         label: label.to_string(),
         conf,
         alert_code,
-        image: has_image,
+        // 数量任务的检出没有告警可补图（`ai_evidence` 认领的是「还没带过图的检出」），
+        // 标记成已带图，免得晚到的图白认领一次、还打一条「都已带过图」的日志
+        image: has_image || count_task,
     });
     if let Err(error) = insert_task_event(&state.db, config, &at, &content).await {
         warn!("AI 识别：写任务事件失败: {error}");

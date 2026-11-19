@@ -764,6 +764,92 @@ async fn count_mismatch_alert_is_recorded_once() {
     ai_patrol::global().stop("用例结束").await;
 }
 
+/// 数量核对任务（`checkType=count`）只推「数量不一致」那一条。
+///
+/// 检出（`ai_detect`）是过程数据：一个航点检出 3 类目标就落 3 条告警 / 3 张工单 /
+/// 3 条群消息，真正要处置的「检查 3 个、实际检出 2 个」反而被淹掉。所以数量任务的检出
+/// 只进任务时间线留痕，**不落告警、不建工单、不推企业微信**。
+#[tokio::test]
+async fn count_task_detections_stay_out_of_alerts_and_wecom() {
+    let _serial = TEST_LOCK.lock().await;
+    ai_patrol::global().stop("测试初始化").await;
+    let (state, _temp, mut rx) = test_state_with_wecom("client", true).await;
+    let rx = rx.as_mut().expect("开了企微就该有入队接收端");
+    let task_code =
+        seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("count"), Some(2))
+            .await;
+    let port = spawn_server(state.clone()).await;
+    let (mut ws, _device) = register_device(port).await;
+
+    ws.send(Message::Text(ai_point(&task_code, false).to_string()))
+        .await
+        .expect("发送 ai_point 失败");
+    let start = next_msg(&mut ws, "ai_start").await;
+    let window_id = start["payload"]["windowId"]
+        .as_str()
+        .expect("ai_start 必须带 windowId")
+        .to_string();
+
+    // 1) 检出（带证据图也一样）：不落告警、不推群
+    ws.send(Message::Text(
+        detect_with_evidence(&window_id, "extinguisher", 0.91).to_string(),
+    ))
+    .await
+    .expect("发送检出失败");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(800), rx.recv())
+            .await
+            .is_err(),
+        "数量任务的检出不该推企业微信"
+    );
+    assert_eq!(
+        alert_count(&state).await,
+        0,
+        "数量任务的检出不该落告警（也就不会建工单）: {:?}",
+        alert_contents(&state).await
+    );
+    // 但任务时间线仍要留痕：现场还得能追溯「这一轮到底认出了什么」
+    let events = event_descriptions(&state).await;
+    assert!(
+        events
+            .iter()
+            .any(|text| text.contains("检出 extinguisher")),
+        "检出要留在任务时间线里: {events:?}"
+    );
+
+    // 2) 板端判定数量不一致 → 这一条才是要处置的告警（照旧推群）
+    ws.send(Message::Text(
+        json!({
+            "msgType": "ai_alert",
+            "ts": "2026-11-16 10:00:02",
+            "payload": {
+                "windowId": window_id,
+                "taskCode": task_code,
+                "planId": task_code,
+                "pointIndex": 0,
+                "expectCount": 2,
+                "foundCount": 1
+            }
+        })
+        .to_string(),
+    ))
+    .await
+    .expect("发送 ai_alert 失败");
+    let notice = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("等数量告警入队超时")
+        .expect("推送通道提前关闭");
+    assert!(
+        notice.body.as_deref().unwrap_or_default().contains("数量核对不一致"),
+        "群里只该有数量不一致这一条: {notice:?}"
+    );
+    let contents = alert_contents(&state).await;
+    assert_eq!(contents.len(), 1, "整个窗口只该有一条告警: {contents:?}");
+    assert!(contents[0].contains("实际检出 1 个"), "{}", contents[0]);
+
+    ai_patrol::global().stop("用例结束").await;
+}
+
 /// 数量任务：窗口正常到期却一个目标都没找到 = 数量不一致（0 ≠ N），
 /// 也要落数量告警；存在性任务同等情形只算「没找到」，不告警。
 #[tokio::test]
