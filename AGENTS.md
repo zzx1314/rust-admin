@@ -222,6 +222,18 @@ cd ../backend && APP_SERVER__STATIC_DIR=../frontend/dist ./run.sh
 注意事项与目标机约束（CentOS 7 / glibc 2.17 / systemd 219、musl 静态构建、
 systemd unit 写法、安全组端口）见 `deploy/external-hz/README.md`。
 
+背包机 `.246` 连不上（拔电 / 不在现场）时，用 `deploy/backpack-sim/` 在本机复刻它：
+mediamtx + ffmpeg 假相机 + 模拟 Agent（`:8000`）+ 仓库原版 relay / 设备客户端 /
+site-console，可连本地 `business/server` 或已有平台。
+
+```bash
+cd deploy/backpack-sim && python3 run.py setup && python3 run.py up
+# 另开终端：python3 run.py status  /  python3 run.py smoke
+```
+
+RKNN、真相机、Wi-Fi/4G 出口切换不能模拟（要真机）；细节与「能验 / 不能验」见
+`deploy/backpack-sim/README.md`。
+
 现场机器人本体（背包 `.246` → Orin NX `192.168.234.234` + RK3588 `192.168.234.1`）的
 服务树、日志路径、`sdk_node=false` / `13897 capability busy` / `ctrl_source=3` / 急停卡死
 （`estop.software` 恒 true、点「解除急停」无效）/ 「任务第 1 点秒失败」的排查顺序与

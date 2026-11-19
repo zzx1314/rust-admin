@@ -211,6 +211,21 @@ ssh root@192.168.41.246 'cd /opt/robodog/client &&
 | `rust-admin-robodog` | 云端 `39.107.55.13:3100` | 业务平台；背包接入方式由 `ROBODOG_BACKPACK_BROWSER_URL` 决定（直连模式） |
 | `robodog-device-client` | 板子 `.246` | 设备客户端。2026-11-16 起**兼任航点 AI 的本地代理**：到点自己调 `127.0.0.1:8000`，因为云端平台连不到内网 Agent |
 
+### 板子连不上：本地模拟 `.246`（`deploy/backpack-sim/`）
+
+`.246` 出差拔电 / 不在手边时，用 `deploy/backpack-sim/` 在本机复刻这台机器：
+mediamtx + 假相机（ffmpeg testsrc2）+ 模拟 Agent（:8000，RKNN 用固定节拍假装检出）
++ **仓库原版** `relay_push.py` / `robodog-device-client` / `site-console`，可连本地
+`business/server` 或已有平台。接口契约与证据图落盘跟真板子一致，能验隧道、中继按需
+起流、AI 启停与 `plan_hit`/证据图；RKNN、相机、Wi-Fi/4G 出口切换仍要真机。
+
+```bash
+cd deploy/backpack-sim
+python3 run.py setup && python3 run.py up     # 另开终端：python3 run.py status / smoke
+```
+
+细节与「能验 / 不能验」清单见 `deploy/backpack-sim/README.md`。
+
 ### 业务连接断开：客户端原地重连（2026-11-17）
 
 平台重启 / 发布 / 网络抖动导致设备 WS 断开时，客户端**不再退出进程**（以前会被

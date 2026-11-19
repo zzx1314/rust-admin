@@ -1,0 +1,52 @@
+###############################################
+# backpack-sim 用的 mediamtx 配置
+#
+# 对位 `.246` 的 `/var/snap/mediamtx/common/mediamtx.yml`：同样 7 条 path，
+# 差别只在 source —— 现场 `dogcam` 是 `rtsp://…234.1:8554/test`（sourceOnDemand），
+# `cam0~cam3`/`preview` 由 Agent 推（publisher）；本地没有真 RTSP 源，全部当 publisher，
+# 由 `fake_cams.py` 用 ffmpeg 推进来。详见 deploy/backpack-246.md §3。
+#
+# 端口与现场一致（8554 / 8889 / 8888），这样 relay、浏览器 WHEP、平台配置的默认值
+# 都不用改。
+###############################################
+
+logLevel: info
+logDestinations: [stdout]
+logFile: ""
+
+api: no
+metrics: no
+pprof: no
+playback: no
+
+###############################################
+# RTSP：relay_push.py 从这里拉（RELAY_RTSP_BASE=http://127.0.0.1:8554）
+rtsp: true
+rtspAddress: 127.0.0.1:8554
+rtspTransports: [tcp]
+rtspEncryption: "no"
+
+# 本地联调不需要 RTMP / HLS / SRT / MoQ
+rtmp: no
+hls: no
+srt: no
+moq: no
+
+###############################################
+# WebRTC：浏览器直连（现场入口 / 直连模式）走 <base>/<stream>/whep
+webrtc: true
+webrtcAddress: 127.0.0.1:8889
+webrtcEncryption: false
+webrtcAllowOrigins: ["*"]
+# 页面在 127.0.0.1/localhost 上打开，ICE 候选手动补一条，避免只通告网卡 IP
+webrtcAdditionalHosts: [127.0.0.1]
+webrtcLocalUDPAddress: :8189
+
+###############################################
+# 所有 path 都由客户端推流（fake_cams.py / 真 Agent 都一样）
+pathDefaults:
+  source: publisher
+
+paths:
+  # 与 .246 的 7 条 path 同名：页面上的「摄像头」就是这些名字
+  all_others:

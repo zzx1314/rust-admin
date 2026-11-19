@@ -6,6 +6,9 @@
 > 相关文档：本体侧（Orin NX `.234` / RK3588 `.1`）见 [`robodog-body.md`](robodog-body.md)；
 > 中继原理与排障见 [`../business/docs/backpack-video-integration.md`](../business/docs/backpack-video-integration.md) §6；
 > 本次「钉死 4G」的实施记录见 [`backpack-4g-pin-2026-11-19.md`](backpack-4g-pin-2026-11-19.md)。
+>
+> **板子连不上时**：`deploy/backpack-sim/` 能在本机复刻这台机器（mediamtx + 假相机 +
+> 模拟 Agent + 原版 relay / client / site-console），见该目录 `README.md`。
 
 ## 0. 机器身份
 

@@ -1,0 +1,10 @@
+# 本地模拟环境的运行时产物（不要提交）
+bin/
+runtime/
+data/
+logs/
+run/
+__pycache__/
+# mediamtx 启用 MoQ/TLS 时会自己生成（本配置已关，防手滑）
+auto.crt
+auto.key
