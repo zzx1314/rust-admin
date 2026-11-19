@@ -111,6 +111,7 @@ async fn push_real_alert_card_with_evidence_image() {
         ref_type: "alert",
         ref_id: None,
         dedupe_key: format!("live-image-test:{}", chrono::Local::now().timestamp()),
+        dedupe_window: None,
         title: "设备异常告警（证据图联调，可忽略）".to_string(),
         fields: vec![
             ("设备", "0202222672400230".to_string()),

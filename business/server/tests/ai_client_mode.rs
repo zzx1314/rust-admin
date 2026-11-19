@@ -1457,3 +1457,150 @@ async fn late_evidence_after_window_closed_is_still_pushed() {
 
     ai_patrol::global().stop("用例结束").await;
 }
+
+/// 客户端上报的进度帧（取消 = `status: "异常"` + `stage: patrol.navigating`）
+fn task_progress(task_code: &str, status: &str, stage: &str) -> Value {
+    json!({
+        "msgType": "task_progress",
+        "ts": "2026-11-19 11:09:09",
+        "payload": {
+            "taskCode": task_code,
+            "status": status,
+            "progress": if status == "异常" { 100 } else { 0 },
+            "pointIndex": 0,
+            "waypointIndex": 0,
+            "stage": stage,
+            "totalPoints": 1
+        }
+    })
+}
+
+/// 取下一条**告警**消息（取消任务本身会先入队一条 `task:` 任务异常通知，跳过）
+async fn next_alert_notice(
+    rx: &mut tokio::sync::mpsc::Receiver<robodog_ops_server::notify::Notice>,
+) -> robodog_ops_server::notify::Notice {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Some(notice) if notice.ref_type == "alert" => return notice,
+                Some(_) => continue,
+                None => panic!("推送通道提前关闭"),
+            }
+        }
+    })
+    .await
+    .expect("等告警入队超时")
+}
+
+/// 2026-11-19 现场回归：**取消后立刻重跑，第二轮 AI 命中必须照样进群**。
+///
+/// 那天 TK-1112-11 在 11:09:09 被取消、11:09:20 重新下发，11:09:44 / 11:10:09
+/// 两个航点都命中了（AL-879/880/881 都已入库、还挂回了原工单 52/57/58），但
+/// `notifications` 一条都没有：上一轮在 11:05:38 / 11:06:06 刚推过同一个问题，
+/// 跟单消息共用 `alert-repeat:<工单>` 这个 5 分钟去重键 → 第二轮被静默合并，
+/// 群里看着就是「重跑后 AI 没上报」。
+///
+/// 现在 AI 告警按「一条告警一个去重键」推，工单照样复用。
+#[tokio::test]
+async fn restart_after_cancel_still_pushes_the_next_round() {
+    let _serial = TEST_LOCK.lock().await;
+    ai_patrol::global().stop("测试初始化").await;
+    let (state, _temp, mut rx) = test_state_with_wecom("client", true).await;
+    let rx = rx.as_mut().expect("开了企微就该有入队接收端");
+    let task_code =
+        seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("exist"), None).await;
+    let port = spawn_server(state.clone()).await;
+    let (mut ws, _device) = register_device(port).await;
+
+    // ① 第一轮：到点开窗 + 检出 → 告警入库 + 入队一条推送
+    ws.send(Message::Text(ai_point(&task_code, false).to_string()))
+        .await
+        .expect("发送 ai_point 失败");
+    let first = next_msg(&mut ws, "ai_start").await;
+    let first_window = first["payload"]["windowId"].as_str().unwrap().to_string();
+    ws.send(Message::Text(detect(&first_window, "extinguisher", 0.92).to_string()))
+        .await
+        .expect("发送检出失败");
+    let first_notice = next_alert_notice(rx).await;
+    assert!(
+        first_notice.dedupe_key.starts_with("alert:"),
+        "第一次是正常告警: {}",
+        first_notice.dedupe_key
+    );
+
+    // ② 取消任务：窗口关掉 + 下发 ai_stop
+    ws.send(Message::Text(task_progress(&task_code, "异常", "patrol.navigating").to_string()))
+        .await
+        .expect("发送取消失败");
+    next_msg(&mut ws, "ai_stop").await;
+
+    // ③ 重新下发（`push_task_dispatch` 会把任务切回执行中）
+    sqlx::query("UPDATE tasks SET task_status = '执行中', progress = 0 WHERE task_code = ?1")
+        .bind(&task_code)
+        .execute(&state.db)
+        .await
+        .expect("把任务切回执行中失败");
+
+    // ④ 第二轮：同一个航点、同一类别又命中（几秒后，远在 5 分钟窗口内）
+    ws.send(Message::Text(ai_point(&task_code, false).to_string()))
+        .await
+        .expect("发送第二次 ai_point 失败");
+    let second = next_msg(&mut ws, "ai_start").await;
+    let second_window = second["payload"]["windowId"].as_str().unwrap().to_string();
+    assert_ne!(first_window, second_window, "新窗口要有新的 windowId");
+    ws.send(Message::Text(detect(&second_window, "extinguisher", 0.93).to_string()))
+        .await
+        .expect("发送第二次检出失败");
+    // 取消那一步会先入队一条「任务异常」通知，这里只等告警消息
+    let second_notice = next_alert_notice(rx).await;
+    assert!(
+        second_notice.dedupe_key.starts_with("alert:"),
+        "重跑后的 AI 命中按告警码推，不能被 5 分钟跟单窗口吞掉: {}",
+        second_notice.dedupe_key
+    );
+    assert!(
+        second_notice.title.contains("同一问题第 2 次"),
+        "工单照样复用，消息要说清是第几次: {}",
+        second_notice.title
+    );
+
+    // ⑤ 第三轮（同一问题再来一次，仍在 5 分钟窗口内）：
+    //    老实现这一步会被 `alert-repeat:<工单>` 吞掉 —— 上一轮刚用这个键推过，
+    //    而它正是生产上 AL-879/880/881 消失的方式。
+    ws.send(Message::Text(
+        json!({
+            "msgType": "ai_end",
+            "ts": "2026-11-19 11:10:20",
+            "payload": { "windowId": second_window, "reason": "已离开航点", "hits": 1 }
+        })
+        .to_string(),
+    ))
+    .await
+    .expect("发送 ai_end 失败");
+    ws.send(Message::Text(ai_point(&task_code, false).to_string()))
+        .await
+        .expect("发送第三次 ai_point 失败");
+    let third = next_msg(&mut ws, "ai_start").await;
+    let third_window = third["payload"]["windowId"].as_str().unwrap().to_string();
+    ws.send(Message::Text(detect(&third_window, "extinguisher", 0.94).to_string()))
+        .await
+        .expect("发送第三次检出失败");
+    let third_notice = next_alert_notice(rx).await;
+    assert!(
+        third_notice.dedupe_key.starts_with("alert:"),
+        "第三轮也必须按告警码推，不能被上一轮的跟单键合并: {}",
+        third_notice.dedupe_key
+    );
+
+    // 告警三条、工单一张
+    assert_eq!(alert_count(&state).await, 3, "{:?}", alert_contents(&state).await);
+    let orders: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM work_orders WHERE source = '告警自动派单' AND dedup_key IS NOT NULL",
+    )
+    .fetch_one(&state.db)
+    .await
+    .expect("查工单失败");
+    assert_eq!(orders, 1, "同一问题只能有一张在办工单");
+
+    ai_patrol::global().stop("用例结束").await;
+}

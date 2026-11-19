@@ -62,6 +62,13 @@ pub const WEBHOOK_SETTING_KEY: &str = "wecom_webhook";
 /// 心跳看门狗 15s 扫一轮、客户端 5s 报一次进度，同一件事会被"发现"很多次。
 const DEDUPE_WINDOW: Duration = Duration::from_secs(300);
 
+/// AI 命中（`ai:` 结构化键）的推送去重窗口：**1 分钟**。
+///
+/// 一轮巡检就是一次结论，跨轮次（几分钟一轮、取消后重跑）必须各推一条；
+/// 但窗口抖动 / 客户端重开识别时，同一航点同一类别可能几秒内重复上报，
+/// 那几条要合并。所以按「结构化键 + 60s」，而不是跟设备故障一样按工单 5 分钟。
+const AI_HIT_DEDUPE_WINDOW: Duration = Duration::from_secs(60);
+
 /// 告警级别。顺序即严重度：`Info < Warning < Critical`。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
@@ -138,6 +145,11 @@ pub struct Notice {
     pub ref_id: Option<i64>,
     /// 去重键：告警用 `alert_code`，任务用 `task:{task_code}`。
     pub dedupe_key: String,
+    /// 覆盖默认去重窗口（`DEDUPE_WINDOW`）：`None` = 5 分钟。
+    ///
+    /// AI 命中用它压到 1 分钟（`AI_HIT_DEDUPE_WINDOW`）：既要「每轮巡检都进群」，
+    /// 又不能让窗口抖动时同一件事几秒一条。
+    pub dedupe_window: Option<Duration>,
     pub title: String,
     /// 字段名 → 值，渲染成 `> 名：值` 的引用行。
     pub fields: Vec<(&'static str, String)>,
@@ -312,6 +324,12 @@ struct Dedupe {
     window: Duration,
 }
 
+/// 去重结果：放行返回 `Ok(())`，被挡返回 `Err(还要等多久)`。
+///
+/// 把「剩余窗口」返回给调用方，是为了能打成一行**生产可见**的 info：
+/// 以前去重只打 debug，现场看到的只有「告警没进群」，无从分辨是没触发还是被合并。
+type DedupeResult = Result<(), Duration>;
+
 impl Dedupe {
     fn new(window: Duration) -> Self {
         Self {
@@ -320,15 +338,29 @@ impl Dedupe {
         }
     }
 
-    fn accept(&mut self, key: &str, at: Instant) -> bool {
+    fn accept(&mut self, key: &str, at: Instant) -> DedupeResult {
+        self.accept_within(key, at, self.window)
+    }
+
+    /// 同上，但允许调用方指定窗口（AI 命中用 1 分钟，见 [`AI_HIT_DEDUPE_WINDOW`]）。
+    ///
+    /// 清理按「两者较大值」做：同一个 `seen` 表里同时存在两种窗口的键，
+    /// 而它们的键前缀互斥（`alert:` / `alert-repeat:` / `task:` / `ai:` / …），
+    /// 所以各键按自己那一档判定、互不影响。
+    fn accept_within(&mut self, key: &str, at: Instant, window: Duration) -> DedupeResult {
+        let keep = self.window.max(window);
         // 顺带清理过期项：告警量级下这张表始终只有几十个键
         self.seen
-            .retain(|_, seen_at| at.saturating_duration_since(*seen_at) < self.window);
-        if self.seen.contains_key(key) {
-            return false;
+            .retain(|_, seen_at| at.saturating_duration_since(*seen_at) < keep);
+        if let Some(seen_at) = self.seen.get(key) {
+            let age = at.saturating_duration_since(*seen_at);
+            if age < window {
+                return Err(window - age);
+            }
         }
+        // 放行就刷新时间戳（同一键换了更短的窗口时，别按老时间继续算）
         self.seen.insert(key.to_string(), at);
-        true
+        Ok(())
     }
 }
 
@@ -559,10 +591,23 @@ impl Notifier {
             return false;
         }
         notice.mention_all = notice.mention_all && self.mention_all;
+        // 去重键 `alert-repeat:<工单>` 会复用（同一问题连刷合并），所以被挡时
+        // **必须留一行生产可见的日志**：2026-11-19 现场「重跑后 AI 没上报」
+        // 就是在这里被静默合并掉的（只有 debug，`notifications` 也不落行）。
         {
             let mut dedupe = self.shared.dedupe();
-            if !dedupe.accept(&notice.dedupe_key, Instant::now()) {
-                debug!(key = %notice.dedupe_key, "wecom: 去重窗口内，跳过");
+            let window = notice.dedupe_window;
+            let verdict = match window {
+                Some(window) => dedupe.accept_within(&notice.dedupe_key, Instant::now(), window),
+                None => dedupe.accept(&notice.dedupe_key, Instant::now()),
+            };
+            if let Err(remaining) = verdict {
+                let remaining = remaining.as_secs();
+                info!(
+                    key = %notice.dedupe_key,
+                    remaining_secs = remaining,
+                    "wecom: 去重窗口内，跳过本条推送（还有 {remaining}s 到期；告警/工单本身已入库）"
+                );
                 return false;
             }
         }
@@ -720,6 +765,7 @@ async fn flush_overflow(state: &AppState) {
         ref_type: "summary",
         ref_id: None,
         dedupe_key: format!("summary:{}", now()),
+        dedupe_window: None,
         title: "告警推送积压".to_string(),
         fields: vec![("说明", "以下消息因队列积压未逐条推送".to_string())],
         body: Some(format!("过去 1 分钟内有 {dropped} 条告警未逐条推送")),
@@ -1065,6 +1111,9 @@ struct AlertLookup {
     device_code: Option<String>,
     park_name: Option<String>,
     zone_name: Option<String>,
+    /// 结构化去重键（`ai:` / `fault:` / `hb:` / `ctrl:`）：
+    /// 用它区分「AI 命中（每一轮都是新信息）」和「设备故障连刷」两种推送节奏。
+    dedup_key: Option<String>,
 }
 
 /// `task_abnormal` 回查用：任务 + 设备 + 园区。
@@ -1129,7 +1178,15 @@ pub async fn alert_created_with_image(
     // 嫌吵的部署可以在设置页关掉 `wecom_alert_repeat_push`（缺行视为开启）。
     // 另外跟单消息共用 `alert-repeat:<工单>` 这个去重键，5 分钟窗口内的连刷
     // 仍然会合并成一条（机器人每 90s 报一次 12608 时不会把群刷爆）。
-    let follow_up = assignment.as_ref().and_then(|assignment| assignment.follow_up);
+    //
+    // ⚠️ **AI 命中不吃这个 5 分钟窗口**（`ai:` 键，见下面的 `ai_hit`）：
+    // 一轮巡检就是一次结论，同一航点上一轮命中、下一轮又命中是**新信息**，
+    // 跟设备故障 90s 连刷不是一回事。2026-11-19 现场踩过：取消任务后 4 分钟
+    // 内重跑，AL-879/880/881 三条 AI 告警全被上一轮的同工单推送（246/243/242s
+    // 前）合并掉了，群里一条都没有，看着就是「重跑后 AI 没上报」。
+    let follow_up = assignment
+        .as_ref()
+        .and_then(|assignment| assignment.follow_up);
     let repeat = assignment
         .as_ref()
         .is_some_and(|assignment| assignment.repeated)
@@ -1158,7 +1215,7 @@ pub async fn alert_created_with_image(
         _ => None,
     };
     let row: Option<AlertLookup> = sqlx::query_as(
-        "SELECT a.id, a.alert_code, a.level, a.content, a.occurred_at,
+        "SELECT a.id, a.alert_code, a.level, a.content, a.occurred_at, a.dedup_key,
                     d.device_id AS device_code, p.park_name, z.zone_name
                FROM alerts a
                LEFT JOIN devices d ON d.id = a.device_id
@@ -1174,6 +1231,12 @@ pub async fn alert_created_with_image(
         debug!("wecom: 告警 {alert_code} 回查不到，跳过推送");
         return;
     };
+
+    // AI 命中 / 数量核对的告警不走「按工单」的 5 分钟去重（见上面的注释）。
+    let ai_hit = row
+        .dedup_key
+        .as_deref()
+        .is_some_and(|key| key.starts_with("ai:"));
 
     let mut fields: Vec<(&'static str, String)> = Vec::with_capacity(9);
     fields.push((
@@ -1229,15 +1292,28 @@ pub async fn alert_created_with_image(
         level: Level::parse(&row.level),
         ref_type: Channel::Alert.ref_type(),
         ref_id: Some(row.id),
-        // 跟单共用「按工单」的键：5 分钟内的连刷合并，跨轮次（分钟级以上）照推
-        dedupe_key: if repeat || follow_up.is_some() {
-            match assignment.as_ref().and_then(|assignment| assignment.work_order_id) {
+        // 跟单共用「按工单」的键：5 分钟内的连刷合并，跨轮次（分钟级以上）照推。
+        //
+        // AI 命中反着来：**按结构化键 + 1 分钟**（`AI_HIT_DEDUPE_WINDOW`）。
+        // 一轮巡检就是一次结论，按工单合并 5 分钟只会把下一轮的真实检出吞掉
+        // （2026-11-19 AL-879/880/881）；但同一窗口抖动/重开时那几秒重复上报
+        // 仍要合并，所以用 `ai:<设备>:<任务>:<航点>:<类别>` + 60s。
+        dedupe_key: if ai_hit {
+            row.dedup_key
+                .clone()
+                .unwrap_or_else(|| format!("alert:{}", row.alert_code))
+        } else if repeat || follow_up.is_some() {
+            match assignment
+                .as_ref()
+                .and_then(|assignment| assignment.work_order_id)
+            {
                 Some(order_id) => format!("alert-repeat:{order_id}"),
                 None => format!("alert-repeat:{}", row.alert_code),
             }
         } else {
             format!("alert:{}", row.alert_code)
         },
+        dedupe_window: ai_hit.then_some(AI_HIT_DEDUPE_WINDOW),
         title: if follow_up.is_some() {
             "设备异常告警（跟单：数值有变化）".to_string()
         } else if repeat {
@@ -1354,6 +1430,7 @@ pub async fn alert_evidence(state: &AppState, alert_code: &str, image: NoticeIma
         ref_id: None,
         // 与卡片分开去重：同一张图重复上报时只发一次
         dedupe_key: format!("alert-image:{alert_code}"),
+        dedupe_window: None,
         title: String::new(),
         fields: Vec::new(),
         body: None,
@@ -1419,6 +1496,7 @@ pub async fn task_abnormal(state: &AppState, task_code: &str, level: Level, reas
         ref_type: Channel::Task.ref_type(),
         ref_id: Some(row.id),
         dedupe_key: format!("task:{}", row.task_code),
+        dedupe_window: None,
         title: "任务执行异常".to_string(),
         fields,
         body: Some(reason.to_string()),
@@ -1466,6 +1544,7 @@ pub async fn send_test(state: &AppState) -> Result<String, String> {
         ref_type: "test",
         ref_id: None,
         dedupe_key: format!("test:{}", now()),
+        dedupe_window: None,
         title: "推送通道测试".to_string(),
         fields: vec![
             ("平台", state.config.public_url.clone().unwrap_or_default()),
@@ -1512,6 +1591,7 @@ mod tests {
             ref_type: "alert",
             ref_id: Some(1),
             dedupe_key: "alert:AL-1".to_string(),
+            dedupe_window: None,
             title: "设备异常告警".to_string(),
             fields: vec![
                 ("设备", "DOG-003".to_string()),
@@ -1644,12 +1724,57 @@ mod tests {
     fn dedupe_suppresses_repeats_inside_window() {
         let mut dedupe = Dedupe::new(Duration::from_secs(300));
         let start = Instant::now();
-        assert!(dedupe.accept("alert:AL-1", start));
-        assert!(!dedupe.accept("alert:AL-1", start + Duration::from_secs(10)));
+        assert!(dedupe.accept("alert:AL-1", start).is_ok());
+        let blocked = dedupe.accept("alert:AL-1", start + Duration::from_secs(10));
+        assert_eq!(
+            blocked,
+            Err(Duration::from_secs(290)),
+            "被挡时要告诉调用方还剩多少秒（这行会进生产日志）"
+        );
         // 窗口外重新放行
-        assert!(dedupe.accept("alert:AL-1", start + Duration::from_secs(400)));
+        assert!(
+            dedupe
+                .accept("alert:AL-1", start + Duration::from_secs(400))
+                .is_ok()
+        );
         // 不同键互不影响
-        assert!(dedupe.accept("alert:AL-2", start));
+        assert!(dedupe.accept("alert:AL-2", start).is_ok());
+    }
+
+    /// AI 命中用 1 分钟窗口：**几分钟后的下一轮必须放行**（2026-11-19 现场：
+    /// 取消任务后 246s 重跑，三条 AI 告警被上一轮 5 分钟的跟单键合并掉）。
+    /// 同时又不能放开到「窗口抖动几秒一条」。
+    #[test]
+    fn ai_hit_window_lets_the_next_round_through() {
+        let mut dedupe = Dedupe::new(Duration::from_secs(300));
+        let start = Instant::now();
+        let key = "ai:0202222672400230:TK-1112-11:0:extinguisher";
+
+        // 上一轮 11:05:38 推过
+        assert!(
+            dedupe
+                .accept_within(key, start, AI_HIT_DEDUPE_WINDOW)
+                .is_ok()
+        );
+        // 同一窗口抖动/重开识别时几秒内重复上报 → 合并
+        assert_eq!(
+            dedupe.accept_within(key, start + Duration::from_secs(10), AI_HIT_DEDUPE_WINDOW),
+            Err(Duration::from_secs(50))
+        );
+        // 下一轮 246s 后（现场那次取消→重跑）→ 必须放行
+        assert!(
+            dedupe
+                .accept_within(key, start + Duration::from_secs(246), AI_HIT_DEDUPE_WINDOW)
+                .is_ok(),
+            "1 分钟之外的下一轮巡检必须重新进群"
+        );
+        // 反例：如果按 5 分钟窗口（旧的跟单键行为），246s 那条会被吞掉
+        assert!(
+            dedupe
+                .accept_within(key, start + Duration::from_secs(246), DEDUPE_WINDOW)
+                .is_err(),
+            "旧的 5 分钟窗口正是现场丢告警的原因"
+        );
     }
 
     #[test]
