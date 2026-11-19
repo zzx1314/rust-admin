@@ -102,7 +102,8 @@ ffmpeg，观看端不重连）；到期先确认链路真恢复才回配置档�
 稳定时，把 `deploy/backpack-relay/50-platform-route.sh` 的 `PIN_IFACE` 改成 `none`
 （钉死 4G）。钉死后 `enx…` 默认还会被判成「慢链路」一步压到极省流档 320x180@8/200k ——
 **先量 4G 真实上行**（2026-11-19 现场实测 8.5Mbps）：够快就在 unit 里加
-`RELAY_SLOW_IFACES=` 关掉压档，交给自适应。§6.10⑮。
+`RELAY_SLOW_IFACES=` 关掉压档，交给自适应。§6.10⑮；现场实施记录（含 `.bak` dispatcher
+抢路由那个坑）见 `deploy/backpack-4g-pin-2026-11-19.md`。
 
 航点 AI 识别的「谁去调板端 Agent」由 `ROBODOG_POINT_AI`（`[backpack] point_ai`，默认
 `auto`）决定：配了 `ROBODOG_BACKPACK_URL` 就服务端直连，否则由现场设备客户端代调

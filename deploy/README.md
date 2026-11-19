@@ -36,6 +36,9 @@
 > 2026-11-14 现场那批问题（急停卡死、`dog_task` 崩溃、任务首点秒失败、**用官方 APK 可正常跑任务**）
 > 的完整证据链、结论和给厂商的问题单见
 > [`robodog-issues-2026-11-14.md`](robodog-issues-2026-11-14.md)。
+> 2026-11-19 「平台出口钉死 4G」的实施实录（4G 上行实测 8.5Mbps、`dispatcher.d` 的 `.bak`
+> 抢路由、慢链路压档的撤除、验收与回滚命令）见
+> [`backpack-4g-pin-2026-11-19.md`](backpack-4g-pin-2026-11-19.md)。
 
 ---
 
@@ -597,6 +600,7 @@ ssh root@192.168.41.246 '
 - **不需要** `nmcli ... ipv4.never-default yes`：默认路由本来就是 4G（metric 100）优先于
   Wi-Fi（600），删掉 /32 就够了；设了反而让「4G 挂了」变成彻底没有出网；
 - 回滚：`sed -i "s/^PIN_IFACE=.*/PIN_IFACE=wlp4s0/" …` + `systemctl restart backpack-relay`；
+  实施实录（实测数据、踩过的坑、时间线）见 [`backpack-4g-pin-2026-11-19.md`](backpack-4g-pin-2026-11-19.md)；
 - 验收：`ip route get 39.107.55.13` 应是 `via 10.128.x.x dev enx…`；板端日志只有一次
   `平台出口网卡：enx…`，之后**不再出现** `平台出口网卡 A → B`（那就是「Wi-Fi 又抖了一次」）。
 

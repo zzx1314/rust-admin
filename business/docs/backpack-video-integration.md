@@ -1311,6 +1311,9 @@ EOF
 `test_platform_tier_does_not_override_a_slow_egress`：快链路上按平台档位起流、4G 上起点
 直接极省流、平台锁档时不强压）。
 
+现场实施实录（2026-11-19 真正切过去的那一次：实测数据、`.bak` 脚本抢路由的坑、时间线、
+验收与回滚命令）见 `deploy/backpack-4g-pin-2026-11-19.md`。
+
 #### 排查工具与清单
 
 ```bash

@@ -1493,7 +1493,7 @@ mediamtx 的 `dogcam`，浏览器直连 mediamtx（WHEP）或走平台中继（F
 | 项 | 要求 |
 | --- | --- |
 | 板端 relay | `backpack-relay` 服务在跑，且能出公网（`ws://<平台>/ws/device/video`） |
-| 板端出口路由 | 到平台的流量默认走 Wi-Fi（实测 Wi-Fi ~25Mbps、4G dongle 上行仅 0.25~0.6Mbps）：`deploy/backpack-relay/50-platform-route.sh` 给平台加 /32 路由（路由变化会重启 relay）。Wi-Fi 抖得厉害、宁可牺牲画质也要稳定时，把它改成 `PIN_IFACE=none` **钉死 4G**（中继会一步压到极省流档）。详见 `docs/backpack-video-integration.md` §6.10⑮ |
+| 板端出口路由 | 到平台的流量默认走 Wi-Fi（实测 Wi-Fi ~25Mbps、4G dongle 上行仅 0.25~0.6Mbps）：`deploy/backpack-relay/50-platform-route.sh` 给平台加 /32 路由（路由变化会重启 relay）。Wi-Fi 抖得厉害、宁可牺牲画质也要稳定时，把它改成 `PIN_IFACE=none` **钉死 4G**（钉死后先量 4G 上行：配 `RELAY_SLOW_IFACES=` 才不会被当成慢链路压到 320x180）。详见 `docs/backpack-video-integration.md` §6.10⑮ |
 | 背包 mediamtx | `dogcam` path 能拉通（`ffprobe rtsp://<背包IP>:8554/dogcam`） |
 | 平台 | 无需额外媒体服务器；`/ws/device/video` 与 `/api/backpack/video/ws` 已内置 |
 
