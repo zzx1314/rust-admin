@@ -841,7 +841,7 @@ def main():
     sub = parser.add_subparsers(dest="command")
 
     up = sub.add_parser("up", help="起全套（前台；Ctrl-C 停止）")
-    up.add_argument("--platform", help="复用已有业务平台（如 http://39.107.55.13:3100）")
+    up.add_argument("--platform", help="复用已有业务平台（如 http://39.107.55.13:3008）")
     up.add_argument("--no-platform", action="store_true", help="不起本地平台")
     up.add_argument("--mode", choices=["tunnel", "direct"], default="tunnel",
                     help="tunnel=平台经设备客户端代调 Agent（默认，线上形态）；"

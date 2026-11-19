@@ -92,6 +92,15 @@ async function iceServersOf(url: string): Promise<RTCIceServer[]> {
 function friendly(error: unknown, url: string): string {
   const raw = error instanceof Error ? error.message : String(error);
   if (/failed to fetch|networkerror|load failed/i.test(raw)) {
+    // 同源地址（`/api/backpack/whep/…`）= 平台侧 WHEP 代理，不是「浏览器直连板端」：
+    // 它失败只有两种原因 —— 平台后端没在跑，或部署没开 mediamtx。
+    const sameOrigin = url.startsWith("/") || url.startsWith(location.origin);
+    if (sameOrigin) {
+      return (
+        `平台 WebRTC 出口不可达（${url}）：确认业务平台在运行、且服务器上 mediamtx 已启动` +
+        `（systemctl status mediamtx）；也可以先在平台设置里改回 FLV 中继`
+      );
+    }
     let host = "板端";
     let entry = "现场入口 http://<背包IP>:8080";
     try {
@@ -132,13 +141,18 @@ function friendly(error: unknown, url: string): string {
 function whepFailure(status: number, url: string): string {
   const stream = /\/([^/]+)\/whep(?:\?|$)/.exec(url)?.[1] ?? "该";
   if (status === 404) {
+    // 两个部署都会回 404，都是「这一路还没有流」：
+    // - 浏览器直连板端：本体 RTSP 未就绪 / path 未登记；
+    // - 平台反代：板端 relay 还没起 ffmpeg（按需推流，第一个观看者进来才起，3~7s）。
     return (
-      `板端「${stream}」暂时没有流：本体 RTSP 未就绪 / 正在重连（板端或本体刚重启时常见），10~30 秒会自动恢复；` +
-      `持续不恢复请查板端 mediamtx 与本体 192.168.234.1:8554（path 未登记 / 名字不一致 / 没有推流）`
+      `「${stream}」暂时没有流：板端还没起 ffmpeg（按需推流，约 3~7s）/ 本体 RTSP 未就绪，` +
+      `10~30 秒会自动恢复；持续不恢复请看板端 relay 日志与本地 mediamtx`
     );
   }
-  if (status === 401 || status === 403) return "板端 mediamtx 拒绝访问（鉴权失败）";
-  if (status === 400 || status === 415) return "板端不接受这段 SDP（编码或协议不匹配）";
+  if (status === 401 || status === 403) return "拒绝访问（鉴权失败）";
+  if (status === 400 || status === 415) return "不接受这段 SDP（编码或协议不匹配）";
+  if (status === 503)
+    return "平台 WebRTC 出口未启用（mediamtx 未部署 / 未配置 ROBODOG_MEDIAMTX_URL）";
   return `WHEP 协商失败（HTTP ${status}）`;
 }
 

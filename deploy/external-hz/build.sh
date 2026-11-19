@@ -110,6 +110,31 @@ cp "$HERE/systemd/"*.service "$OUT/systemd/"
 cp "$HERE/install.sh" "$OUT/"
 chmod +x "$OUT/install.sh"
 
+# ---------------------------------------------------------------- mediamtx
+# 平台侧视频 SFU（板端 RTSP 推上来 → 浏览器 WHEP 拉下去）。官方 release 是静态 Go
+# 二进制，glibc 2.17 上直接能跑；和 Rust 产物一样打进发布包，目标机不用联网。
+#
+# 下载走本机代理（有 https_proxy 就用），并缓存到 /tmp：重复发布不重复拉 28MB。
+MEDIAMTX_VERSION="${MEDIAMTX_VERSION:-v1.21.4}"
+fetch_mediamtx() {
+  local cache="/tmp/mediamtx-${MEDIAMTX_VERSION}-linux-amd64"
+  if [[ ! -x "$cache" ]]; then
+    local url="https://github.com/bluenviron/mediamtx/releases/download/${MEDIAMTX_VERSION}/mediamtx_${MEDIAMTX_VERSION}_linux_amd64.tar.gz"
+    local tgz="/tmp/mediamtx-${MEDIAMTX_VERSION}.tgz"
+    info "下载 mediamtx $MEDIAMTX_VERSION"
+    [[ -f "$tgz" ]] || curl -fSL --retry 3 --max-time 300 -o "$tgz" "$url"
+    local unpack=/tmp/mediamtx-unpack
+    rm -rf "$unpack" && mkdir -p "$unpack"
+    tar xzf "$tgz" -C "$unpack" mediamtx
+    mv "$unpack/mediamtx" "$cache"
+    chmod +x "$cache"
+  fi
+  install -m 0755 "$cache" "$OUT/mediamtx/mediamtx"
+}
+mkdir -p "$OUT/mediamtx"
+fetch_mediamtx
+cp "$HERE/mediamtx/mediamtx.yml" "$OUT/mediamtx/mediamtx.yml"
+
 info "产物就绪：$OUT（总用时 $(( $(now) - T0 ))s）"
 du -sh "$OUT"/* 2>/dev/null | sed 's/^/       /'
 info "下一步：tar czf /tmp/rust-admin-deploy.tgz -C $OUT . && scp /tmp/rust-admin-deploy.tgz root@39.107.55.13:/tmp/"

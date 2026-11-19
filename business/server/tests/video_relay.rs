@@ -79,6 +79,7 @@ async fn test_state() -> (AppState, TempDb) {
         backpack_base_url: None,
         backpack_webrtc_url: None,
         backpack_browser_url: None,
+        mediamtx_url: None,
         backpack_tunnel_device: None,
         point_ai: "auto".to_string(),
         ai_window_max_secs: 300,
@@ -870,4 +871,168 @@ async fn relay_profile_defaults_and_updates_reach_the_board() {
     let config = next_msg(&mut publisher, "video_config").await;
     assert_eq!(config["payload"]["profile"]["tier"], "degrade2");
     assert_eq!(config["payload"]["profile"]["auto"], true);
+}
+
+/// 平台 WebRTC 通路：浏览器开 `media=0` 的观看通道 —— **只计数、不传字节**。
+///
+/// 板端把媒体用 RTSP 推给平台 mediamtx（`business/docs/backpack-video-integration.md` §7），
+/// 这条 WS 上根本不会有 FLV 字节。它仍然必须：
+/// 1. 触发 `video_start`（否则板端不会起 ffmpeg，按需推流就没了）；
+/// 2. 计入观看者（否则看门狗 30s 后下发 `video_stop` 把流停掉）；
+/// 3. 一个字节都不下发（否则等于把 1.2Mbps 白推一遍给浏览器）。
+#[tokio::test]
+async fn control_only_viewer_triggers_the_stream_but_receives_no_media() {
+    let (state, _db) = test_state().await;
+    let (port, router) = spawn_server(state.clone()).await;
+    let token = login_token(&router).await;
+    let mut publisher = publisher_for(port, &state).await;
+
+    let (mut viewer, _) = connect_async(format!(
+        "ws://127.0.0.1:{port}/api/backpack/video/ws?stream=dogcam&media=0&token={token}"
+    ))
+    .await
+    .expect("观看通道连接失败");
+
+    let start = next_msg(&mut publisher, "video_start").await;
+    assert_eq!(start["payload"]["stream"], "dogcam");
+    assert_eq!(
+        state.video_hub.viewers(ROOM).await,
+        1,
+        "WHEP 模式下这条连接就是「有人在看」的唯一凭据"
+    );
+
+    // 推流端即便真有字节上来，也不能往这条连接发
+    let (init, frame) = flv_stream();
+    publisher.send(Message::Binary(init)).await.unwrap();
+    publisher.send(Message::Binary(frame)).await.unwrap();
+
+    let leaked = tokio::time::timeout(Duration::from_millis(600), async {
+        loop {
+            match viewer.next().await {
+                Some(Ok(Message::Binary(bytes))) => return Some(bytes.len()),
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return None,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await
+    .unwrap_or(None);
+    assert_eq!(leaked, None, "只计数的那条连接不该收到媒体字节");
+
+    // 断开就少一个观看者（宽限期内不停流）
+    viewer.close(None).await.ok();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.video_hub.viewers(ROOM).await != 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("观看者断开后计数应归零");
+}
+
+/// 板端上报 `video_transport` → `video/state` 的 `transport` 给前端选播放器。
+///
+/// 这条字段是前端**唯一**的判据：两条通路在平台上都表现为「房间里有推流端」，
+/// 靠猜会把 WHEP 会话打到一条没有字节的 FLV 上（或者反过来，永远等不到画面）。
+#[tokio::test]
+async fn video_transport_is_reported_to_the_console() {
+    let (state, _db) = test_state().await;
+    let (port, router) = spawn_server(state.clone()).await;
+    let token = login_token(&router).await;
+    let mut publisher = publisher_for(port, &state).await;
+
+    let transport = |state: &AppState| {
+        let state = state.clone();
+        async move {
+            let value = state.video_hub.debug_state().await;
+            value["rooms"]
+                .as_array()
+                .and_then(|rooms| rooms.iter().find(|room| room["room"] == ROOM))
+                .map(|room| room["transport"].clone())
+                .unwrap_or(Value::Null)
+        }
+    };
+    assert_eq!(transport(&state).await, Value::Null, "还没上报时是 null（按 FLV 走）");
+
+    publisher
+        .send(Message::Text(
+            json!({
+                "msgType": "video_transport",
+                "payload": { "stream": "dogcam", "transport": "rtsp" },
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while transport(&state).await != json!("rtsp") {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("video_transport 应刷到房间状态里");
+
+    // 诊断接口也要能看到（现场排障只看这一个接口）
+    let request = Request::get("/api/backpack/video/state")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    let room = body["data"]["rooms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|room| room["room"] == ROOM)
+        .expect("诊断接口里应有这一路");
+    assert_eq!(room["transport"], "rtsp");
+}
+
+/// WHEP 反代的两个前置条件：本部署没开 WebRTC 出口 → 503（前端据此提示）；
+/// 通道不在白名单 → 400（路径来自 URL，不能让它替我们创建任意 mediamtx path）。
+#[tokio::test]
+async fn whep_proxy_rejects_unknown_streams_and_unconfigured_deployments() {
+    let (state, _db) = test_state().await;
+    let (_port, router) = spawn_server(state.clone()).await;
+    let token = login_token(&router).await;
+
+    let call = |method: &str, path: &str| {
+        let router = router.clone();
+        let token = token.clone();
+        let method = method.to_string();
+        let path = path.to_string();
+        async move {
+            let request = Request::builder()
+                .method(method.as_str())
+                .uri(format!("{path}?token={token}"))
+                .body(Body::empty())
+                .unwrap();
+            router.oneshot(request).await.unwrap().status()
+        }
+    };
+
+    // 注意这里用 POST 而不是 OPTIONS：全站的 `CorsLayer` 会先吃掉**任何** OPTIONS
+    // （回 200 空响应），所以 WHEP 的 OPTIONS 根本到不了反代 —— 这也意味着
+    // `lib/whep.ts` 取不到 `Link: <…>; rel="ice-server"`。当前 mediamtx 有公网地址、
+    // 不需要 STUN，所以没影响；将来要接 TURN 得换一种下发方式（见文档 §7.6）。
+    assert_eq!(
+        call("POST", "/api/backpack/whep/dogcam/whep").await,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "未配置 ROBODOG_MEDIAMTX_URL 时应明确说「本部署没有 WebRTC 出口」"
+    );
+    assert_eq!(
+        call("POST", "/api/backpack/whep/backdoor/whep").await,
+        StatusCode::BAD_REQUEST,
+        "任意 path 不能透传给 mediamtx"
+    );
+    assert_eq!(
+        call("POST", "/api/backpack/whep/dogcam/config/get").await,
+        StatusCode::BAD_REQUEST,
+        "只反代 WHEP，mediamtx 的其它端点不能出去"
+    );
 }

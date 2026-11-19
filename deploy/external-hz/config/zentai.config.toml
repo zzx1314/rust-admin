@@ -13,9 +13,9 @@ token_store = "memory"
 
 [server]
 host = "0.0.0.0"
-# 3000 已被本机 frps 占用；3005 空闲。
-# 注意：需要在阿里云安全组放通 3005（见 deploy/external-hz/README.md）。
-port = 3005
+# 3000 被本机 frps 占用、3005 已被同机其它业务占用，中台用 3007（业务平台用 3008）。
+# 注意：需要在阿里云安全组放通 3007 / 3008（见 deploy/external-hz/README.md）。
+port = 3007
 # 前端构建产物：本服务自己托管，因此 80/443 上不需要 nginx。
 # 相对路径按进程工作目录（= /opt/hz/rust-admin/zentai）解析。
 static_dir = "web"
@@ -24,4 +24,4 @@ static_dir = "web"
 # 地图包上传目录（<upload_dir>/maps）
 upload_dir = "data/device_uploads"
 # 业务平台与本服务同机部署，「同步地图」按钮走本机回环即可。
-business_api_url = "http://127.0.0.1:3100"
+business_api_url = "http://127.0.0.1:3008"

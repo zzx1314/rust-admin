@@ -131,13 +131,23 @@ static PUBLISHER_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 /// 直接写进它自己的推流连接（不经过设备网关）。
 pub const BACKPACK_ROOM_PREFIX: &str = "bp:";
 
+/// 平台 mediamtx 上的 path 名前缀（`bp_dogcam` / `bp_cam0` …）
+///
+/// 与 [`BACKPACK_ROOM_PREFIX`] 是两套命名空间，别混：房间名是平台 `VideoHub` 的
+/// （带冒号，走 WS），path 名是 mediamtx 的（下划线，走 RTSP/WebRTC —— RTSP 的 URL
+/// 里冒号要转义，且 mediamtx 的 path 不允许冒号）。
+///
+/// `deploy/external-hz/mediamtx/mediamtx.yml` 的推流鉴权就是按这个前缀放行的
+/// （`path: "~^bp_"`），改这里必须同步改那份配置。
+pub const BACKPACK_MEDIAMTX_PATH_PREFIX: &str = "bp_";
+
 /// 允许通过中继观看的背包通道（与板端 mediamtx 的 path 一致）
 ///
 /// 白名单而不是透传：房间名来自查询串，不限制就能被拿来刷任意 key 撑爆内存。
 ///
 /// `preview` 是板端 AI 烧框后的那一路（`osd.py` 把中文标签画进画面）。跨网段时
 /// 浏览器画不了框（中继流没有坐标对应关系），只能看这一路——所以它必须能被中继。
-const BACKPACK_STREAMS: [&str; 7] = [
+pub const BACKPACK_STREAMS: [&str; 7] = [
     "cam0",
     "cam1",
     "cam2",
@@ -146,7 +156,6 @@ const BACKPACK_STREAMS: [&str; 7] = [
     "dog-ipcam",
     "preview",
 ];
-
 /// 系统设置里「中继默认档位」的键（页面：系统设置 → 视频中继）
 ///
 /// 板端 relay 起流时按它选起点（`video_start.payload.profile`），不用再去板子上改
@@ -303,6 +312,12 @@ struct Room {
     /// `GET /api/backpack/video/state` 的 `viewerLagSecs` 就是它。以前这里什么都没有 ——
     /// 现场「越看越慢」只能翻板端日志猜，因为积压是静默的（不到环形缓冲溢出不打日志）。
     viewer_lag_ms: Arc<AtomicU64>,
+    /// 推流端用哪条通路送媒体：`None`（还没报）/ `"ws"`（FLV over WS）/ `"rtsp"`（平台 mediamtx）
+    ///
+    /// 板端 `relay_push.py` 起流时用 `video_transport` 报上来。前端据此决定播放器：
+    /// `rtsp` → WHEP（`/api/backpack/whep/<stream>`），其它 → FLV（`/api/backpack/video/ws`）。
+    /// **不能靠猜**：两种通路在平台上都表现为「房间里有 publisher」，只是有没有字节而已。
+    transport: Option<String>,
 }
 
 fn new_room(device_id: &str, publisher: Option<u64>) -> Room {
@@ -319,6 +334,7 @@ fn new_room(device_id: &str, publisher: Option<u64>) -> Room {
         last_frame: None,
         reset: Arc::new(tokio::sync::Notify::new()),
         viewer_lag_ms: Arc::new(AtomicU64::new(0)),
+        transport: None,
     }
 }
 
@@ -617,9 +633,19 @@ impl VideoHub {
         }
     }
 
+    /// 登记推流端用的媒体通路（`video_transport` 消息，见 `relay_push.py`）
+    ///
+    /// 只影响前端选播放器（WHEP / FLV），不参与服务端转发：`rtsp` 时这条 WS 上没有
+    /// 二进制帧，房间的 `init` / `gop` 永远是空的，观看端都走 `media=0`（只计数）。
+    pub async fn set_transport(&self, room: &str, transport: Option<String>) {
+        let mut rooms = self.rooms.write().await;
+        if let Some(entry) = rooms.get_mut(room) {
+            entry.transport = transport;
+        }
+    }
+
     /// 该房间当前是否有推流端在线（板端 relay 常驻连接，用来判断能不能看）
-    pub async fn has_publisher(&self, room: &str) -> bool {
-        self.rooms
+    pub async fn has_publisher(&self, room: &str) -> bool {        self.rooms
             .read()
             .await
             .get(room)
@@ -697,6 +723,8 @@ impl VideoHub {
                     "viewerLagSecs": room.viewer_lag_ms.load(Ordering::Relaxed) as f64 / 1000.0,
                     "streaming": streaming.contains(key),
                     "control": controls.contains_key(key),
+                    // 推流端用哪条通路送媒体：`rtsp` → 前端走 WHEP，`ws`/null → FLV
+                    "transport": room.transport,
                 })
             })
             .collect();
@@ -1005,6 +1033,29 @@ async fn handle_publisher(socket: WebSocket, state: AppState) {
                                     state.video_hub.reset_stream(code).await;
                                 }
                             }
+                            // 板端在起流时告诉平台「媒体走哪条路」：
+                            //   ws   → 这条连接上接着推 FLV（默认，兼容老板端）
+                            //   rtsp → 媒体直接推平台 mediamtx，本连接只发控制消息
+                            // 前端据此选播放器（WHEP / FLV），看 `/api/backpack/video/state`。
+                            "video_transport" => {
+                                if let Some(ref code) = device_id {
+                                    let transport = ws_msg.payload["transport"]
+                                        .as_str()
+                                        .unwrap_or_default()
+                                        .trim()
+                                        .to_string();
+                                    let transport = if transport.is_empty() {
+                                        None
+                                    } else {
+                                        Some(transport)
+                                    };
+                                    info!(
+                                        "video publisher {code} 媒体通路 = {}",
+                                        transport.as_deref().unwrap_or("ws")
+                                    );
+                                    state.video_hub.set_transport(code, transport).await;
+                                }
+                            }
                             other => warn!("unknown video publisher message: {other}"),
                         }
                     }
@@ -1066,6 +1117,17 @@ pub async fn backpack_viewer_ws(
     if !BACKPACK_STREAMS.contains(&stream.as_str()) {
         return Err(AppError::BadRequest(format!("未知的背包通道：{stream}")));
     }
+    // `media=0`：**只要存在性**（计数 + 触发 video_start），不要 FLV 字节。
+    //
+    // 板端把媒体走 RTSP 推平台 mediamtx（WebRTC）时，这条 WS 上没有字节可发：
+    // 浏览器用 WHEP 拉流，但仍需要有人把「有人在看」告诉平台，否则：
+    //   - `video_start` 永远不发出，板端不会起 ffmpeg（按需推流就没了）；
+    //   - 看门狗数不到观看者，30s 后下发 `video_stop` 把流停掉。
+    // 所以这条连接当「在场心跳」用，后台逻辑完全复用。
+    let media = params
+        .get("media")
+        .map(|value| value.trim() != "0")
+        .unwrap_or(true);
     let room = format!("{BACKPACK_ROOM_PREFIX}{stream}");
     if !state.video_hub.has_publisher(&room).await {
         return Err(AppError::BadRequest(
@@ -1073,7 +1135,7 @@ pub async fn backpack_viewer_ws(
         ));
     }
 
-    Ok(ws.on_upgrade(move |socket| handle_viewer(socket, state, stream, room)))
+    Ok(ws.on_upgrade(move |socket| handle_viewer(socket, state, stream, room, media)))
 }
 
 /// 诊断：`GET /api/backpack/video/state` —— 每个视频房间的推流 / 观看 / 起流状态
@@ -1095,7 +1157,13 @@ async fn wait_for_reset(reset: Option<&tokio::sync::Notify>) {
 /// 观看者的一条中继流（背包板端推流房间 `bp:<stream>`）
 ///
 /// 房间与控制消息都挂在板端那条常驻推流连接上（`handle_publisher` 的 `controls`）。
-async fn handle_viewer(socket: WebSocket, state: AppState, stream_name: String, room: String) {
+async fn handle_viewer(
+    socket: WebSocket,
+    state: AppState,
+    stream_name: String,
+    room: String,
+    media: bool,
+) {
     let (mut sink, mut stream) = socket.split();
     let (mut rx, first, catch_up) = state.video_hub.viewer_join(&room).await;
     // 推流端换新一轮流时要断开（拿不到流头就是「画面定住但字节还在流」）
@@ -1142,7 +1210,7 @@ async fn handle_viewer(socket: WebSocket, state: AppState, stream_name: String, 
     //
     // 流头不会串轮次：板端 relay 每次起 ffmpeg 前发 `video_reset`，推流端重连时
     // 房间也会清掉流头与 GOP，两种情况都会让旧字节失效。
-    if let Some(catch_up) = catch_up {
+    if media && let Some(catch_up) = catch_up {
         // 补的字节也要喂给量化器：它的关键帧是基准点，不喂就从中段字节开始解析（错位）
         observe(&catch_up, std::time::Instant::now());
         if sink
@@ -1187,6 +1255,21 @@ async fn handle_viewer(socket: WebSocket, state: AppState, stream_name: String, 
     }
 
     debug!("viewer of {room} attached (first={first})");
+    // 媒体走 WebRTC 的部署：这条连接**只当在场心跳**（上面已经把 video_start 发出去了）。
+    // 房间里的 `init` / `gop` 永远是空的（板端不再往 WS 推字节），所以不能进下面那个转发循环：
+    // `rx` 永远不会来消息，而 `wait_for_reset` 会在每次起流时把观看者踢下线。
+    if !media {
+        while let Some(Ok(message)) = stream.next().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+        if state.video_hub.viewer_leave(&room).await {
+            info!("last viewer of {room} left（WebRTC 会话结束，交给看门狗宽限后停流）");
+            state.video_hub.mark_streaming(&room, true).await;
+        }
+        return;
+    }
     // 观看端吞吐统计：排「中继很卡」时，这行日志能直接看出是码率超过观看端带宽
     // （例如 1080p60 copy ≈ 4~8Mbps，而平台公网出口只有 2~3Mbps）。
     let started = std::time::Instant::now();

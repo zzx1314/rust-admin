@@ -88,6 +88,14 @@ pub struct Config {
     /// 浏览器本来就要在背包所在局域网才能看画面，多一跳只会增加延时。
     /// 未配置时由 `backpack_base_url` / `backpack_browser_url` 推导（同主机、端口 8889）。
     pub backpack_webrtc_url: Option<String>,
+    /// **平台侧** mediamtx 的信令地址（`http://127.0.0.1:8889`，默认只绑回环）。
+    ///
+    /// 有它才有一条「平台自己出 WebRTC」的通路：板端 relay 用 RTSP 把流转推到平台
+    /// mediamtx（`deploy/external-hz/mediamtx/`），浏览器经 `/api/backpack/whep/<stream>`
+    /// 同源反代拉 WHEP。和上面的 `backpack_webrtc_url`（浏览器直连板端）是两条完全
+    /// 不同的路：前者受「操作员电脑必须在内网」限制，后者只要求板子能出公网。
+    /// 为空时 `/api/backpack/whep/*` 返回 503（本部署没开 WebRTC 出口，走 FLV 中继）。
+    pub mediamtx_url: Option<String>,
     /// **浏览器**可访问的 Agent 地址（`http://<板IP>:8000`），用于「直连模式」。
     ///
     /// 平台在公网、背包在现场内网时（本项目的正式环境），业务服务连不上 Agent，
@@ -193,6 +201,8 @@ struct BackpackFile {
     ai_window_max_secs: Option<u64>,
     /// 浏览器 → mediamtx（WHEP 信令 + 媒体）
     webrtc_url: Option<String>,
+    /// 平台侧 mediamtx 的信令地址（服务端反代 WHEP 用）
+    mediamtx_url: Option<String>,
     /// 浏览器 → 板端 Agent（直连模式；正式环境用这个）
     browser_url: Option<String>,
     /// 板端 Agent 隧道指定的设备码（多背包部署时用）
@@ -337,7 +347,13 @@ impl Config {
                 .or_else(|| file.backpack.webrtc_url.and_then(clean))
                 .map(|value| value.trim_end_matches('/').to_string()),
             backpack_browser_url: url("ROBODOG_BACKPACK_BROWSER_URL", file.backpack.browser_url),
-            backpack_tunnel_device: env_text(&env, "ROBODOG_BACKPACK_TUNNEL_DEVICE")
+            // 平台侧 mediamtx（板端 RTSP 推上来 → 浏览器 WHEP 拉下去）。
+            // 默认不配：只有部署了 mediamtx 的环境才该开这条通路（见
+            // deploy/external-hz/mediamtx/），否则前端会去协商一条不存在的流。
+            mediamtx_url: url(
+                "ROBODOG_MEDIAMTX_URL",
+                file.backpack.mediamtx_url,
+            ),            backpack_tunnel_device: env_text(&env, "ROBODOG_BACKPACK_TUNNEL_DEVICE")
                 .or_else(|| file.backpack.tunnel_device.and_then(clean)),
             point_ai: point_ai_source(
                 env_text(&env, "ROBODOG_POINT_AI")

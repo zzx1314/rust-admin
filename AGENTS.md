@@ -80,6 +80,17 @@ HTTP」模式。两者共用同一个服务令牌，见 `business/README.md`。
 （`deploy/backpack-relay/`），想看到框要让板端烧录（`preview` 流）。
 多背包部署配 `ROBODOG_BACKPACK_TUNNEL_DEVICE`。详见
 `business/docs/backpack-video-integration.md` §6.8。
+**媒体通路有两条，由板端 `RELAY_OUTPUT` 决定，平台前端按上报自动选播放器**：
+`rtsp` = 板端推平台 mediamtx（`deploy/external-hz/mediamtx/`，TCP 8554 进 / UDP 8189 出）
+→ 浏览器 WHEP（`/api/backpack/whep/*`，业务平台反代到只绑回环的 `:8889`），延时 ~300ms；
+`ws` = 老通路（FLV over WS 中继，任何网络都能出图）。板端起流时发
+`video_transport` 上报选的是哪条，`GET /api/backpack/video/state` 的 `transport` 字段
+就是它 —— **前端不能靠猜**（两条通路都表现为「房间里有推流端」）。WHEP 模式下浏览器
+仍开一条 `.../video/ws?media=0`：只计数/触发 `video_start`，不传媒体（没有它按需推流
+和 30s 看门狗都不工作）。`auto`（默认）在 rtsp 连续失败两次时退回 `ws`，所以
+「云上 mediamtx 挂了 / 8554 没放通」表现为画面还在、只是慢一点。改这块先读
+`business/docs/backpack-video-integration.md` §7。
+
 中继画质是**板端自适应**的（`deploy/backpack-relay/relay_push.py`）：5s 窗口内 `ws.send`
 被反压且实测码率明显低于目标档位就就地换 `640x360@12 / 500k`（`video_reset` + 重启
 ffmpeg，观看端不重连）；到期先确认链路真恢复才回配置档，反复升降时窗口翻倍。
@@ -217,8 +228,8 @@ cd ../backend && APP_SERVER__STATIC_DIR=../frontend/dist ./run.sh
 ## Deployment
 
 外网正式环境：`root@39.107.55.13`，安装目录 `/opt/hz/rust-admin`，
-中台 <http://39.107.55.13:3005>（3000 被本机 frps 占用）、业务平台/设备网关
-<http://39.107.55.13:3100>。一键发布：
+中台 <http://39.107.55.13:3007>（3000 被本机 frps 占用）、业务平台/设备网关
+<http://39.107.55.13:3008>。一键发布：
 
 ```bash
 ./deploy/external-hz/push.sh          # 打包 + 上传 + 安装重启

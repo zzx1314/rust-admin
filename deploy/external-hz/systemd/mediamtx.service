@@ -1,0 +1,26 @@
+[Unit]
+Description=mediamtx 背包视频 SFU（RTSP 入 / WebRTC 出，:8554 + UDP/TCP 8189）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# mediamtx.yml 与二进制都在这个目录，配置里的相对路径按它解析
+WorkingDirectory=/opt/hz/rust-admin/mediamtx
+ExecStart=/opt/hz/rust-admin/mediamtx/mediamtx mediamtx.yml
+Restart=always
+RestartSec=3
+# 崩溃后无限重试（systemd 219 的 StartLimit* 在 [Service] 段）
+StartLimitInterval=0
+StartLimitBurst=0
+# 一条 WebRTC 会话至少 2 个 socket，多观看者时别撞 fd 上限
+LimitNOFILE=65535
+
+# 只读系统目录；工作目录（配置）与日志走 stdout
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

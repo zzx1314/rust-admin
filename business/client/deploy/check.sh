@@ -18,7 +18,7 @@
 set -uo pipefail
 
 # 与 src/config.rs 的内置默认值保持一致
-SERVER_URL="${SERVER_URL:-ws://39.107.55.13:3100}"
+SERVER_URL="${SERVER_URL:-ws://39.107.55.13:3008}"
 ROBOT_HOST="${ROBOT_HOST:-192.168.234.234}"
 ROBOT_PORT="${ROBOT_PORT:-10010}"
 FILE_PORT="${FILE_PORT:-12000}"

@@ -2,7 +2,7 @@
 
 > 分析对象：`business/backpack_dashboard/`（板端 Python Agent + mediamtx + RKNN 旁路识别，
 > 板端部署在 `/root/261113/backpack_dashboard`）
-> 集成目标：`business/`（RoboDog OPS，Rust 服务 3100 + Vue 3 控制台 5273）
+> 集成目标：`business/`（RoboDog OPS，Rust 服务 3008 + Vue 3 控制台 5273）
 > 本文第一阶段只落地**单路视频 + AI 识别 + 两种画框方式**，其余能力列在路线图里。
 
 ---
@@ -136,7 +136,7 @@ Chromium 的 **Local Network Access**（PNA 继任者）实测拦截，`Network.
 的 `corsError=InsecureLocalNetwork`：
 
 ```text
-页面 http://39.107.55.13:3100  ──fetch──▶  http://192.168.41.246:8000   ✗
+页面 http://39.107.55.13:3008  ──fetch──▶  http://192.168.41.246:8000   ✗
 页面 http://192.168.41.246:8080 ──fetch──▶  http://192.168.41.246:8000   ✓
 ```
 
@@ -148,7 +148,7 @@ Chromium 的 **Local Network Access**（PNA 继任者）实测拦截，`Network.
 
 | 入口 | 用途 | 背包能力 |
 | --- | --- | --- |
-| `http://39.107.55.13:3100` | 常规后台（设备/任务/地图/告警） | **视频**走平台中继、**AI**走设备客户端隧道（2026-11-17 起） |
+| `http://39.107.55.13:3008` | 常规后台（设备/任务/地图/告警） | **视频**走平台中继、**AI**走设备客户端隧道（2026-11-17 起） |
 | `http://192.168.41.246:8080` | **现场入口**：同一份 `dist` 托管在内网机器上 | 视频 + AI 全功能，延时最低 |
 
 > 云端入口以前是「背包能力彻底没有」（浏览器 PNA 拦截 + 平台连不到板端）。现在两条独立通道
@@ -164,7 +164,7 @@ Chromium 的 **Local Network Access**（PNA 继任者）实测拦截，`Network.
 ```text
 现场入口页面 ──REST/SSE──▶ 板端 Agent :8000        （内网 → 内网，CORS 已放行）
              ──WHEP+UDP─▶ 板端 mediamtx :8889      （内网 → 内网）
-             ──REST/SSE──▶ 云端业务平台 :3100/api   （内网 → 公网，反方向不受限）
+             ──REST/SSE──▶ 云端业务平台 :3008/api   （内网 → 公网，反方向不受限）
 ```
 
 板端为此补了 CORS 中间件（`AGENT_CORS_ORIGINS` 白名单 + 内网来源正则），并做成
@@ -336,7 +336,7 @@ POST /api/backpack/detect/config
 | 变化 | 结果 |
 | --- | --- |
 | 换一个 WiFi（`192.168.41.x` → `192.168.43.x`，同一条 `/22`） | REST/SSE 全通、WHEP 信令通，但媒体 ICE 一直 `deadline exceeded` → 黑屏 |
-| 用公网地址 `39.107.55.13:3100` 打开 | Chrome LNA 拦掉页面 → `Failed to fetch`，除非本机手动「允许本地网络访问」 |
+| 用公网地址 `39.107.55.13:3008` 打开 | Chrome LNA 拦掉页面 → `Failed to fetch`，除非本机手动「允许本地网络访问」 |
 | 清浏览器数据 / 换台电脑 | 上面那条许可没了，又黑 |
 
 浏览器那侧的原理（两闸门，缺一不可）：
@@ -401,7 +401,7 @@ POST /api/backpack/detect/config
 
 ```bash
 TOKEN=<控制台登录拿到的 token>
-curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/video/state | python3 -m json.tool
+curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3008/api/backpack/video/state | python3 -m json.tool
 ```
 
 ### 6.5 已知限制
@@ -1287,7 +1287,7 @@ python3 - <<\EOF
 import asyncio, json, time, websockets
 async def main():
     total, chunk = 0, b"\x00" * 8192
-    async with websockets.connect("ws://39.107.55.13:3100/ws/device/video", max_size=None) as ws:
+    async with websockets.connect("ws://39.107.55.13:3008/ws/device/video", max_size=None) as ws:
         await ws.send(json.dumps({"msgType": "video_register",
             "payload": {"deviceId": "bp:__speedtest", "kind": "backpack", "stream": "__speedtest"}}))
         t = time.monotonic()
@@ -1378,3 +1378,130 @@ ssh root@<背包IP> 'python3 /tmp/bw.py'              # 见 §6.10② 的量法�
 | 同时开多个视频页面更卡 | 每个观看者 = 一份出口带宽 | 出口按 1.5Mbps/路 规划 |
 | **某一路黑、其他路正常**（典型：`cam0~3` 全黑，`dogcam` 正常） | 板端 `[cam0] 推流结束：0 个分片 / 0B` + 15s 一次「没有推出任何字节」；`video/state` 里 `initBytes=0` / `lastFrameAgeSecs=null` | ⑪ 解码器选择串味（已修）。硬解对这几路源无效，要按流探测 + 真解出帧才算可用 |
 | 服务端看着全健康（`lastFrameAgeSecs=0` / `pendingBytes=0` / `viewerLagSecs=0`）但**画面定住**，探针实测帧率也正常 | 新开一个观看端，看它前几个 tag 的关键帧时间戳 vs 直播时间戳（差几百秒 = 有问题）；`video/state` 的 `gopBytes`/`gopAgeSecs` | ⑬ 补流头是本轮第一个关键帧（已修）。`gopBytes>0` 才是新逻辑 |
+
+---
+
+## 7. 平台侧 WebRTC 出口（mediamtx，2026-11-19）：把「1~2s」砍到「~300ms」
+
+§6 的 WS 中继解决了「任何网络都能看」，代价是 **1~2s 延时 + 一整套 MSE 衍生的坑**
+（补流头 / `video_reset` / 环形缓冲静默积压 / `viewerLagSecs` / 前端 `liveBufferLatencyChasing`）。
+这一节把**媒体**搬到 WebRTC，控制与按需逻辑不变。
+
+### 7.1 链路
+
+```text
+板端 mediamtx :8554/<stream>
+  └─ relay_push.py: ffmpeg -f rtsp -rtsp_transport tcp
+       └─ 127.0.0.1:<临时端口>（RtspUplink 透明中转，字节从这里过 → 记账）
+            └─ rtsp://relay:<口令>@39.107.55.13:8554/bp_<stream>   ← 平台 mediamtx
+                 └─ 浏览器 WHEP：POST /api/backpack/whep/<stream>/whep?token=…
+                      （业务平台反代 → 127.0.0.1:8889，mediamtx 只绑回环）
+                 └─ 媒体：浏览器 ⇄ mediamtx UDP 8189（SRTP，不经业务平台）
+```
+
+控制面**完全不变**：板端仍然是那 6 条常驻 WS（`/ws/device/video`），
+`video_start` / `video_stop` / `video_config` 照旧从这条连接下发 —— 按需推流、30s 宽限、
+档位下发、看门狗全部复用。
+
+### 7.2 端口（阿里云安全组）
+
+| 端口 | 方向 | 用途 | 备注 |
+| --- | --- | --- | --- |
+| TCP 8554 | 入（板端 → 平台） | 板端推 RTSP（`ANNOUNCE`/`SETUP`/`RECORD`，Basic 认证） | 板端在 4G CGNAT 后面、出口 IP 不固定，只能对 0.0.0.0/0 开，靠口令保护 |
+| UDP 8189 | 入（浏览器 → 平台） | WebRTC 媒体（ICE-Lite 单端口复用） | **必须开**，否则 WHEP 协商成功但没画面（ICE `deadline exceeded`） |
+| TCP 8189 | 入（浏览器 → 平台） | ICE-TCP 回退 | 企业网/代理封 UDP 时用，延时略高；可选 |
+| TCP 3007 / 3008 | 入 | 原有 | WHEP **信令**走 3008 的 `/api/backpack/whep/*`，不需要额外 HTTP 端口 |
+
+mediamtx 自己的其它监听全部关掉或只绑回环：`webrtcAddress: 127.0.0.1:8889`（信令）、
+`apiAddress: 127.0.0.1:9997`（排障），`rtmp/hls/srt/moq/playback/metrics/pprof` 全 `false`。
+
+> 服务器是 **EIP + NAT**（网卡上只有 `172.29.x.x`），所以 `webrtcIPsFromInterfaces: false`
+> + `webrtcAdditionalHosts: ["39.107.55.13"]`。不配这两条，mediamtx 会把自己的内网地址
+> 当候选发给浏览器 → ICE 永远连不上 → 黑屏且日志里只有 `deadline exceeded`。
+
+### 7.3 部署
+
+```bash
+./deploy/external-hz/push.sh          # 一起装 mediamtx（二进制随发布包，目标机不用联网）
+# 服务器上：
+cat /opt/hz/rust-admin/mediamtx-publish-url.txt      # → RELAY_RTSP_URL=rtsp://relay:<口令>@39.107.55.13:8554/bp_
+systemctl status mediamtx
+curl -s 127.0.0.1:9997/v3/paths/list | python3 -m json.tool      # 看 publisher / reader
+```
+
+板端（`.246`）：
+
+```bash
+printf 'RELAY_RTSP_URL=rtsp://relay:<口令>@39.107.55.13:8554/bp_\n' > /etc/robodog/relay.env
+chmod 600 /etc/robodog/relay.env
+systemctl restart backpack-relay
+journalctl -u backpack-relay -n 30 | grep -E "媒体通路|媒体="
+```
+
+口令在 `mediamtx.yml`（`/opt/hz/rust-admin/mediamtx/mediamtx.yml`，0640）与 relay 的
+`relay.env` 两边必须一致。`mediamtx.env` 是唯一真源：`install.sh` 生成一次，重装沿用，
+不会把正在用的口令换掉。
+
+### 7.4 谁决定走哪条通路
+
+`RELAY_OUTPUT`（板端 `/etc/systemd/system/backpack-relay.service`）：
+
+| 值 | 行为 |
+| --- | --- |
+| `auto`（默认） | 配了 `RELAY_RTSP_URL` 就先 rtsp；连续失败 2 次（预检连不上 8554 / ffmpeg 连不上中转端口）就**退回 ws**（FLV 中继）并保持 `RELAY_RTSP_FALLBACK`（600s），到期再试 |
+| `rtsp` | 只试 rtsp（失败仍会退回 ws 起流，但每次起流都会重试 rtsp） |
+| `ws` | 只走老 FLV 通路（等价于 §6 的行为） |
+
+板端起流时通过控制通道上报 `{"msgType":"video_transport","payload":{"stream":…,"transport":"rtsp|ws"}}`，
+平台存进房间，`GET /api/backpack/video/state` 的 `transport` 字段就是它。
+**前端据此选播放器**（`VideoPlayer.vue`）：`rtsp` → WHEP（`/api/backpack/whep/<stream>`），
+其它 → FLV（`/api/backpack/video/ws`）。不能靠猜：两条通路在平台上都表现为「房间里有推流端」。
+
+WHEP 模式下浏览器仍然会开一条 `/api/backpack/video/ws?media=0&stream=…` ——
+**只计数、不传媒体**：
+
+- 没有它就不会有「第一个观看者」，平台不会下发 `video_start`，板端永不推流；
+- 没它看门狗 30s 后会认为没人看而下发 `video_stop`。
+
+### 7.5 为什么媒体要过一遍 Python（`RtspUplink`）
+
+上行健康的三条判据（`send` 占用、实测码率、分片超时）与延迟判据（帧积压）都建立在
+「字节从本进程过」上 —— 那是 §6.10 反复踩坑攒出来的。所以 ffmpeg 推的是**本机临时端口**，
+`relay_push.py` 再连平台并按 8KB 分片对拷：
+
+- `drain()` 阻塞时长 = 老通路的 `ws.send` 占用（同阈值、同退让状态机，一行判据没改）；
+- 帧积压改用 **RTP 时间戳**（90kHz）量，公式与 FLV 的毫秒版本完全相同（`clock_rate`）；
+- 连不上 8554 时在**起 ffmpeg 之前**就能判失败，`auto` 立刻改走 ws（不用等 3~7s 黑屏）。
+
+代价是一次 8KB 内存拷贝 + 一个本地 socket；换来与 §6 完全一致的降档/回档行为。
+
+### 7.6 排障
+
+| 现象 | 先查 | 结论 |
+| --- | --- | --- |
+| 页面显示 `WebRTC · 中继` + 「起流中 · 已等 Ns」一直不动 | 板端 `媒体=rtsp→平台 WebRTC` 后有没有 `rtsp 通路失败`；`curl -s 127.0.0.1:9997/v3/paths/list` 里有没有 `bp_<stream>` | 8554 没放通 / 口令不一致 / 板端没配 `RELAY_RTSP_URL`（会自动退回 FLV，角标变 `FLV · 中继`） |
+| WHEP 协商成功（`/v3/paths/list` 里 `readers` 有记录）但画面黑 | 浏览器 `chrome://webrtc-internals` 的 ICE 状态；安全组 UDP 8189；`webrtcAdditionalHosts` | `ICE failed` = UDP 8189 没放通或被企业网封；可开 TCP 8189 做回退 |
+| 一直 `没有流（404）` | 板端 `开始拉流` 之后有没有字节；`bp_<stream>` 是否很快变 `ready` | 板端 ffmpeg 起不来（源 RTSP 没有流 / 解码器选错，见 §6.10⑪） |
+| 画面正常但比现场晚 | 板端 `画面延迟 x.xs`、`media=` 那行 | 与 §6 同一套延迟看门狗（`RELAY_MAX_LAG`），只是阈值更容易满足 |
+| 切换/重连后黑一下 | 板端 `平台侧 RTSP 连接断开` | 推流端重启 = mediamtx 的 path 被销毁重建，浏览器要重新 ICE 协商（~1s），不会闪回老画面 |
+| 服务器内存涨 | `free -m`；mediamtx `writeQueueSize` | 每条 path 只缓存 `writeQueueSize` 个 RTP 包（512 ≈ 3~4s @720p） |
+
+回归：
+
+```bash
+python3 deploy/backpack-relay/test_relay_push.py     # 含 RTP 扫描 / 通路退让 / 推送地址解析
+cargo test --test video_relay                       # 含 media=0 与 video_transport
+```
+
+手工验一遍 WebRTC 通路（本机就能做，不用上板子）：
+
+```bash
+# 1) 本机起一个 mediamtx 当「平台」，配 auth + bp_ 前缀
+# 2) 推一路测试源进 mediamtx 的 src：ffmpeg -re -f lavfi -i testsrc=... -f rtsp rtsp://.../src
+# 3) 用 relay_push.RtspUplink("src") + ffmpeg_args(...,output="rtsp") 起一次推流
+# 4) 校验：curl 127.0.0.1:9997/v3/paths/list 里 bp_src 有 publisher/bytesReceived，
+#          ffprobe rtsp://…/bp_src 能解出 H264（证明 -c:v copy 的 AnnexB 没问题）
+```
+
+> 判据：`ffprobe` 能读、`RtpScanner` 量出的「时间戳增量 vs 墙钟增量」漂移应 < 0.5%/10s
+> （2026-11-19 实测 11.8s 窗口漂移 +51ms）。

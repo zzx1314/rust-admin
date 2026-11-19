@@ -40,7 +40,7 @@ default via 192.168.234.1 dev eth0            metric 1000    # netplan 兜底
 | 流量 | 原来掉 Wi-Fi 时 |
 | --- | --- |
 | 视频中继 7 条推流 WS | 出口变更 → 全部重连 + 一步压到极省流档 |
-| 设备客户端心跳 / 控制 WS（`ws://39.107.55.13:3100`） | 心跳断 → 平台标「离线」 |
+| 设备客户端心跳 / 控制 WS（`ws://39.107.55.13:3008`） | 心跳断 → 平台标「离线」 |
 | AI 证据图 / 识别结果上报 | 同样断 |
 
 ## 2. 仓库改动（commit 之前的工作区）
@@ -99,7 +99,7 @@ python3 - <<\EOF
 import asyncio, json, time, websockets
 async def main():
     total, chunk = 0, b"\x00" * 8192
-    async with websockets.connect("ws://39.107.55.13:3100/ws/device/video", max_size=None) as ws:
+    async with websockets.connect("ws://39.107.55.13:3008/ws/device/video", max_size=None) as ws:
         await ws.send(json.dumps({"msgType": "video_register",
             "payload": {"deviceId": "bp:__speedtest", "kind": "backpack", "stream": "__speedtest"}}))
         t = time.monotonic()

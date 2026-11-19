@@ -98,7 +98,7 @@ cd ../server && cargo run
 
 ### 4. 启动设备客户端（部署在 192.168.41.246）
 
-内置默认值就是正式环境值：业务服务 `ws://39.107.55.13:3100`（外网）、本体 `192.168.234.234:10010`；
+内置默认值就是正式环境值：业务服务 `ws://39.107.55.13:3008`（外网）、本体 `192.168.234.234:10010`；
 设备编号不用配，客户端启动时自动读本体 SN 分区 `/dev/mmcblk0p5`。
 
 ```bash
@@ -746,7 +746,7 @@ POST /api/notifications/test           # 同步发一条，失败直接回 errco
 ```bash
 # 想「锁死」不让页面改，就只放环境变量；不要写进 server.toml（文件会进 git）
 export ROBODOG_WECOM_WEBHOOK='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx'
-export ROBODOG_PUBLIC_URL='http://39.107.55.13:3100'   # 可选：消息里的链接
+export ROBODOG_PUBLIC_URL='http://39.107.55.13:3008'   # 可选：消息里的链接
 cargo run
 ```
 
@@ -980,7 +980,7 @@ service_token = "change-me"
 | `ROBODOG_WECOM_ENABLED` | `true` | 企业微信推送的部署级总开关 |
 | `ROBODOG_WECOM_MIN_LEVEL` | `警告` | 推送级别下限（`严重` / `警告` / `提示`） |
 | `ROBODOG_WECOM_MENTION_ALL` | `false` | 严重级别是否额外 @所有人（会占双倍限流额度） |
-| `ROBODOG_PUBLIC_URL` | 空 | 控制台对外地址，如 `http://39.107.55.13:3100`，用于告警消息里的「查看详情」链接 |
+| `ROBODOG_PUBLIC_URL` | 空 | 控制台对外地址，如 `http://39.107.55.13:3008`，用于告警消息里的「查看详情」链接 |
 
 ## 任务下发与本体对接
 
@@ -1654,7 +1654,7 @@ cd business/web && pnpm typecheck && pnpm build
 现场拓扑：业务服务跑在 **192.168.41.227**（开发机，`./target/debug/robodog-ops-server`
 `setsid nohup` 启动，日志 `/tmp/robodog-server.log`，端口 3100）；设备客户端跑在
 **192.168.41.246**（aarch64 Ubuntu 22.04，无 Rust 工具链、无外网，连外网业务平台
-`ws://39.107.55.13:3100`）。
+`ws://39.107.55.13:3008`）。
 
 | 改动了什么 | 产物 | 怎么上线 |
 | --- | --- | --- |

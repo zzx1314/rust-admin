@@ -22,7 +22,7 @@ Type=simple
 WorkingDirectory=/opt/site-console
 Environment=CONSOLE_DIR=/opt/site-console/web
 # 业务平台（云端）；页面据此拼 REST/SSE 与设备视频 WS 地址
-Environment=CONSOLE_API_BASE=http://39.107.55.13:3100/api
+Environment=CONSOLE_API_BASE=http://39.107.55.13:3008/api
 Environment=CONSOLE_PORT=8080
 ExecStart=/usr/bin/python3 /opt/site-console/serve.py
 Restart=always

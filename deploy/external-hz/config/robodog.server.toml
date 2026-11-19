@@ -7,7 +7,7 @@
 #
 # 相对路径按本文件所在目录（/opt/hz/rust-admin/robodog）解析。
 
-port = 3100
+port = 3008
 database = "data/robodog.db"
 web_dist = "web"
 ingest_dir = "data/map_ingest"
@@ -23,13 +23,13 @@ task_timeout_secs = 120
 # 控制台对外地址：企业微信告警消息里的「查看详情」链接。
 # 不填则消息不带链接（猜一个地址比不给更容易误导人）。
 # 注意：必须放在任何 [section] 之前，否则会被解析成上一个表的字段（启动直接报错）。
-public_url = "http://39.107.55.13:3100"
+public_url = "http://39.107.55.13:3008"
 
 [zentai]
 # 同机部署：反向控制信道与内部接口都走本机回环
-# 端口必须与中台 [server] port 一致（3000 被本机 frps 占用，中台用 3005）
-ws_url = "ws://127.0.0.1:3005"
-base_url = "http://127.0.0.1:3005"
+# 端口必须与中台 [server] port 一致（3000 被 frps、3005 被同机其它业务占用，中台用 3007）
+ws_url = "ws://127.0.0.1:3007"
+base_url = "http://127.0.0.1:3007"
 
 # ---- 数据采集背包（板端 Agent，控制台「实时视频」页）----
 #
@@ -46,6 +46,12 @@ base_url = "http://127.0.0.1:3005"
 # 若哪天把平台也部署到现场内网（业务服务能直接访问板端），改用代理模式即可：
 #   [backpack]
 #   base_url = "http://192.168.41.246:8000"
+#
+# 平台自己的 WebRTC 出口（/api/backpack/whep/* 反代到 mediamtx，只绑回环）。
+# 一般不用在这里写：install.sh 会往 robodog.env 里放 ROBODOG_MEDIAMTX_URL。
+# 留空 = 本部署没开 WebRTC 出口，前端自动走 FLV 中继。
+# 见 deploy/external-hz/mediamtx/ 与 docs/backpack-video-integration.md §7
+#   mediamtx_url = "http://127.0.0.1:8889"
 # 详细链路与取舍见 business/docs/backpack-video-integration.md
 [backpack]
 # browser_url = "http://192.168.41.246:8000"

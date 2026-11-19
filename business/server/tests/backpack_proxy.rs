@@ -73,6 +73,8 @@ fn config_with(
         backpack_base_url,
         backpack_webrtc_url: None,
         backpack_browser_url,
+        // 平台侧 mediamtx 反代（这里不涉及视频，保持未配置）
+        mediamtx_url: None,
         backpack_tunnel_device: None,
         point_ai: "auto".to_string(),
         ai_window_max_secs: 300,

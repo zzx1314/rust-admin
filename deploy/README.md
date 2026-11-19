@@ -17,15 +17,15 @@
 
 | 环境 | 中台 | 业务平台 / 设备网关 | 备注 |
 | --- | --- | --- | --- |
-| **正式** | <http://39.107.55.13:3005> | <http://39.107.55.13:3100> · `ws://39.107.55.13:3100/ws/device` | 前端由 Rust 进程托管，**无 nginx、无 Redis**；3000 被本机 frps 占用所以中台用 3005 |
+| **正式** | <http://39.107.55.13:3007> | <http://39.107.55.13:3008> · `ws://39.107.55.13:3008/ws/device` | 前端由 Rust 进程托管，**无 nginx、无 Redis**；3000 被本机 frps 占用所以中台用 3005 |
 | **开发** | <http://127.0.0.1:3000>（前端 vite 5198 / 8848） | <http://127.0.0.1:3100>（前端 vite 5273） | `business/server/server.toml` 的 `[zentai]` 指向 `127.0.0.1:3000` |
-| **现场内网** | 视部署而定，如 `ws://192.168.41.10:3000` | 设备客户端连 `ws://39.107.55.13:3100`（正式） | 机器狗本体 `192.168.234.234:10010`、文件服务 `:12000`、RTSP `192.168.234.1:8554` |
+| **现场内网** | 视部署而定，如 `ws://192.168.41.10:3000` | 设备客户端连 `ws://39.107.55.13:3008`（正式） | 机器狗本体 `192.168.234.234:10010`、文件服务 `:12000`、RTSP `192.168.234.1:8554` |
 
 现场设备机 `192.168.41.246` 跑的是设备客户端，它再连机器狗本体：
 
 ```text
 192.168.41.246 (aarch64 Ubuntu 22.04, systemd: robodog-device-client)
-   ├─ ws://39.107.55.13:3100/ws/device   业务平台（正式环境外网）
+   ├─ ws://39.107.55.13:3008/ws/device   业务平台（正式环境外网）
    └─ ws://192.168.234.234:10010        机器狗本体（control + bulkdata）
 ```
 
@@ -73,7 +73,7 @@ ssh root@39.107.55.13 'hostname'                         # 免密登录
 2. **保留** `zentai.env` / `robodog.env`（不存在才生成，两个服务共用同一个
    `SERVICE_TOKEN`）；
 3. 重装两个 systemd unit 并 `restart`（会话存内存，重启后用户需重新登录）；
-4. 自检：打印 `:3005`、`:3100` 的 HTTP 状态和 `/api/health`。
+4. 自检：打印 `:3007`、`:3008` 的 HTTP 状态和 `/api/health`。
 
 ### 发布后校验
 
@@ -83,21 +83,21 @@ ssh root@39.107.55.13 'systemctl is-active rust-admin-zentai rust-admin-robodog'
 ssh root@39.107.55.13 'journalctl -u rust-admin-robodog -n 30 --no-pager'
 
 # 外网可达 + 版本内容
-curl -s -o /dev/null -w '%{http_code}\n' http://39.107.55.13:3005/
-curl -s http://39.107.55.13:3100/api/health | python3 -m json.tool
+curl -s -o /dev/null -w '%{http_code}\n' http://39.107.55.13:3007/
+curl -s http://39.107.55.13:3008/api/health | python3 -m json.tool
 ```
 
 `/api/health` 里要看到（正式环境）：
 
 ```json
 {"status":"ok","database":"/opt/hz/rust-admin/robodog/data/robodog.db",
- "mapIngest":{"authMode":"service-token","ready":true,"zentaiUrl":"http://127.0.0.1:3005"}}
+ "mapIngest":{"authMode":"service-token","ready":true,"zentaiUrl":"http://127.0.0.1:3007"}}
 ```
 
 业务平台日志里应出现反向控制信道已连上中台：
 
 ```text
-控制信道已连上中台: ws://127.0.0.1:3005/api/dogDevice/control-plane/ws
+控制信道已连上中台: ws://127.0.0.1:3007/api/dogDevice/control-plane/ws
 ```
 
 ### 回滚
@@ -164,13 +164,13 @@ ssh root@192.168.41.246 'cd /opt/robodog/client && ./deploy/check.sh'
 日志里要看到这几行：
 
 ```text
-启动设备客户端: device_id=0202222672400230, 业务服务=ws://39.107.55.13:3100, 本体=192.168.234.234
+启动设备客户端: device_id=0202222672400230, 业务服务=ws://39.107.55.13:3008, 本体=192.168.234.234
 本体连接就绪: client_id=…, 型号=…
 握手成功 / bulkdata 绑定成功
 设备注册成功: 0202222672400230（园区 …）
 ```
 
-再到正式环境控制台 <http://39.107.55.13:3100> → 设备管理，确认该设备「在线待命」、
+再到正式环境控制台 <http://39.107.55.13:3008> → 设备管理，确认该设备「在线待命」、
 心跳在刷新。
 
 ### 4. 现场配置在哪里
@@ -206,9 +206,9 @@ ssh root@192.168.41.246 'cd /opt/robodog/client &&
 | 组件 | 跑在哪 | 作用 |
 | --- | --- | --- |
 | `backpack-agent.service` | 板子 `.246` | 板端 Agent（`:8000`）：六路推流、AI 识别、板端画框、遥测/控制 |
-| `backpack-relay.service` | 板子 `.246` | **板端推流中继**：按需把本地 RTSP 转 FLV 推到平台 `:3100`，公网入口也能看（见下方「推流中继」） |
+| `backpack-relay.service` | 板子 `.246` | **板端推流中继**：按需把本地 RTSP 推到平台（WebRTC 走 mediamtx，回退 FLV 走 `:3008`），公网入口也能看（见下方「推流中继」） |
 | `site-console.service` | 板子 `.246`（可换任意内网机） | 内网托管同一份控制台 `dist`（`:8080`），见下方「为什么需要现场入口」 |
-| `rust-admin-robodog` | 云端 `39.107.55.13:3100` | 业务平台；背包接入方式由 `ROBODOG_BACKPACK_BROWSER_URL` 决定（直连模式） |
+| `rust-admin-robodog` | 云端 `39.107.55.13:3008` | 业务平台；背包接入方式由 `ROBODOG_BACKPACK_BROWSER_URL` 决定（直连模式） |
 | `robodog-device-client` | 板子 `.246` | 设备客户端。2026-11-16 起**兼任航点 AI 的本地代理**：到点自己调 `127.0.0.1:8000`，因为云端平台连不到内网 Agent |
 
 ### 板子连不上：本地模拟 `.246`（`deploy/backpack-sim/`）
@@ -272,7 +272,7 @@ ssh root@192.168.41.246 'journalctl -u robodog-device-client -f | grep -E "航�
 #  航点 AI 识别结束：场景=firextinguisher 窗口到期（30s），上报 1 类目标
 
 # 平台侧：窗口态（source 应为 client）
-curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/ai-window
+curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3008/api/backpack/ai-window
 # 平台侧：告警与任务时间线
 sqlite3 /opt/hz/rust-admin/robodog/data/robodog.db \
   "SELECT alert_code,content,occurred_at FROM alerts WHERE content LIKE 'AI 识别%' ORDER BY id DESC LIMIT 5;"
@@ -402,7 +402,7 @@ ssh root@192.168.41.246 'journalctl -u robodog-device-client -n 80 | grep -E "�
 # 期望：板端 Agent 隧道已登记：http://127.0.0.1:8000（背包页的模型目录 / 运行态 / AI 启停…）
 
 # 3) 平台侧验收：mode 应为 tunnel，agent.reachable=true
-curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/status \
+curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3008/api/backpack/status \
   | python3 -c 'import sys,json;d=json.load(sys.stdin)["data"];print(d["mode"], d["agent"]["reachable"], d.get("tunnel"))'
 ```
 
@@ -421,7 +421,7 @@ Chrome 的 **Local Network Access** 禁止**公网页面**访问**内网地址**
 `corsError=InsecureLocalNetwork`）：
 
 ```text
-页面 http://39.107.55.13:3100  ──fetch──▶  http://192.168.41.246:8000   ✗ 被浏览器拦掉
+页面 http://39.107.55.13:3008  ──fetch──▶  http://192.168.41.246:8000   ✗ 被浏览器拦掉
 页面 http://192.168.41.246:8080 ──fetch──▶  http://192.168.41.246:8000   ✓ 同为内网
 ```
 
@@ -430,13 +430,13 @@ Chrome 的 **Local Network Access** 禁止**公网页面**访问**内网地址**
 「接口 / AI」现在有设备客户端隧道兜底（见上一节），「视频」有平台中继兜底，
 所以现场入口不再是**唯一**能用的入口，但它仍是**延时最低、框最实时**的那条路：
 
-- **常规后台**：<http://39.107.55.13:3100> —— 全部功能；视频走中继（1~2s），要看框得板端烧录；
+- **常规后台**：<http://39.107.55.13:3008> —— 全部功能；视频走中继（1~2s），要看框得板端烧录；
 - **现场入口**：<http://192.168.41.246:8080> —— 同一套后台，WHEP 直连（~200ms）、浏览器叠加可用。
 
 两个入口共用同一份 `business/web/dist`；现场入口通过 `/runtime-config.js`
 （运行时注入，不用重新构建）把 API 指回云端。
 
-> ⚠️ **每次发布前端都要同步现场入口**：`push.sh` 只更新云端 `:3100` 的 `web/`，
+> ⚠️ **每次发布前端都要同步现场入口**：`push.sh` 只更新云端 `:3008` 的 `web/`，
 > 现场入口 `/opt/site-console/web` 是**另一份拷贝**。忘了同步就会出现「云端已修、
 > 现场入口还是旧界面」（2026-11-18：设备管理仍显示『未配置视频地址，请在设备档案中填写』）。
 > `serve.py` 在**启动时**读一次 `index.html`，所以替换后必须 `systemctl restart site-console`。
@@ -476,8 +476,8 @@ ssh root@192.168.41.246 'for p in cam0 cam1 cam2 cam3 dogcam dog-ipcam; do   pri
 ssh root@192.168.41.246 'curl -s -o /dev/null -D - http://127.0.0.1:8000/api/cameras   -H "Origin: http://192.168.41.246:8080" | grep -i access-control-allow-origin'
 
 # 云端：直连模式下发给页面的两个地址
-TOKEN=$(curl -s -X POST http://39.107.55.13:3100/api/auth/login -H 'Content-Type: application/json'   -d '{"username":"admin","password":"admin123"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["token"])')
-curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/status   | python3 -c 'import sys,json;d=json.load(sys.stdin)["data"];print(d["mode"], d.get("direct"))'
+TOKEN=$(curl -s -X POST http://39.107.55.13:3008/api/auth/login -H 'Content-Type: application/json'   -d '{"username":"admin","password":"admin123"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["token"])')
+curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3008/api/backpack/status   | python3 -c 'import sys,json;d=json.load(sys.stdin)["data"];print(d["mode"], d.get("direct"))'
 # 期望：direct {'apiBase': 'http://192.168.41.246:8000', 'webrtcBase': 'http://192.168.41.246:8889'}'
 
 # 现场入口
@@ -521,7 +521,7 @@ default via 192.168.40.254 dev wlp4s0 proto dhcp metric 600
 ```
 
 结果：`ip route get 39.107.55.13` 走 `eth0`（机器人网关），SYN 被吞，客户端日志停在
-「正在连接业务服务: ws://39.107.55.13:3100/ws/device」，平台侧一直「离线」，
+「正在连接业务服务: ws://39.107.55.13:3008/ws/device」，平台侧一直「离线」，
 而且**不会报错**（TCP 连接一直挂着）。
 
 修复：给机器人网卡的默认路由加 metric，让 wifi 的 DHCP 路由（600）胜出。
@@ -631,12 +631,12 @@ ssh root@192.168.41.246 '
 
 ```bash
 # 1) 正式环境健康
-curl -s http://39.107.55.13:3100/api/health | python3 -m json.tool
+curl -s http://39.107.55.13:3008/api/health | python3 -m json.tool
 
 # 2) 客户端在线（.246 本机看日志）
 ssh root@192.168.41.246 'journalctl -u robodog-device-client -n 5 --no-pager'
 
-# 3) 中台台账同步（控制台 :3005 → 设备管理，或直接看库）
+# 3) 中台台账同步（控制台 :3007 → 设备管理，或直接看库）
 ssh root@39.107.55.13 'sqlite3 /opt/hz/rust-admin/zentai/data/users.db \
   "select device_id,status,device_ip,park_code,update_time from dog_device
    where is_deleted=0 order by update_time desc limit 5;"'
@@ -654,9 +654,9 @@ ssh root@39.107.55.13 'sqlite3 /opt/hz/rust-admin/zentai/data/users.db \
 | --- | --- |
 | 目标机 `GLIBC_2.34 not found` | 必须用 musl 静态构建（`build.sh` 已默认）；不要直接 `cargo build` |
 | 客户端 `GLIBC_2.39 not found` | 用 `build-aarch64.sh`（zigbuild 按 2.35 链接），别用普通交叉编译 |
-| 正式环境打不开 3000 | 中台在 **3005**，3000 被 frps 占用 |
+| 正式环境打不开 3000 | 中台在 **3007**，3000 被 frps 占用；3005/3100 已被同机其它业务占用 |
 | 业务平台报「无法校验设备分配关系」 | `zentai.env` 与 `robodog.env` 的令牌不一致，或只有地址没有令牌 |
-| 客户端起来了但平台看不到 | 检查 `[server] url` 是否 `ws://39.107.55.13:3100`；`journalctl` 里找「设备注册成功」 |
+| 客户端起来了但平台看不到 | 检查 `[server] url` 是否 `ws://39.107.55.13:3008`；`journalctl` 里找「设备注册成功」 |
 | 任务下发后立刻「异常」 | 设备未绑园区 / 本体离线（`body_online=false`）/ 定位未就绪，原因在任务事件里 |
 | 想在没有真机时验证全链路 | 本机 `--robot mock`（见 `business/client/README.md`），能看到真实 5000/5001/5009 报文 |
 | 现场 journald 里看不到报文了 | 新版客户端把周期推送（`1315/1317/1325/1327/5009`）降到 TRACE，只保留应答类报文；看全量加 `RUST_LOG=robodog_device_client=debug,robodog_device_client::zhpro::client=trace`，或 `ROBODOG_FRAME_DUMP=/var/log/robodog-frames.jsonl` |
@@ -674,6 +674,6 @@ ssh root@39.107.55.13 'sqlite3 /opt/hz/rust-admin/zentai/data/users.db \
 
 - [ ] `cargo test` / `cargo clippy --all-targets -- -D warnings`（backend、business/server、business/client）
 - [ ] `cd frontend && pnpm lint`、`cd business/web && pnpm typecheck`
-- [ ] 正式环境：`push.sh` → 两个 unit `active` → `:3005` 200 → `/api/health` 正常 → 控制信道日志
+- [ ] 正式环境：`push.sh` → 三个 unit `active`（含 mediamtx）→ `:3007` 200 → `:3008/api/health` 正常 → 控制信道日志
 - [ ] 客户端：`build-aarch64.sh` 符号校验通过 → 备份旧二进制 → `systemctl restart` → 「设备注册成功」
 - [ ] 控制台设备管理里该设备「在线待命」、心跳刷新

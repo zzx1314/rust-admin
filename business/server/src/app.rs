@@ -257,6 +257,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/backpack/detect/config", post(backpack::detect_config))
         // 背包实时视频：板端 relay 主动推流到平台，浏览器同源播放（不依赖内网可达）
         .route("/backpack/video/ws", get(video::backpack_viewer_ws))
+        // 背包实时视频（WebRTC）：板端用 RTSP 推到平台 mediamtx，浏览器经这里拉 WHEP。
+        // 只反代 WHEP 的四个动词；媒体是浏览器 ⇄ mediamtx 的 UDP，不经本进程。
+        .route(
+            "/backpack/whep/{*rest}",
+            axum::routing::any(crate::whep::proxy),
+        )
         // 排障：每个视频房间的推流 / 观看 / 起流状态（只读）
         .route("/backpack/video/state", get(video::viewer_state))
         .layer(from_fn_with_state(state.clone(), require_auth));

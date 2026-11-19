@@ -166,7 +166,7 @@ app = FastAPI(lifespan=lifespan)
 
 # ---- 跨源访问（业务平台 / 现场入口页面直接调本 Agent 时必需）----
 # 板端自己的前端在 :8000，页面与 /api/* 同源，本来不需要 CORS。但一旦页面搬到
-# 业务平台（http://39.107.55.13:3100）或现场入口（http://192.168.41.246:8080），
+# 业务平台（http://39.107.55.13:3008）或现场入口（http://192.168.41.246:8080），
 # 浏览器就是**跨源**：
 #   - fetch /api/*            需要 Access-Control-Allow-Origin
 #   - EventSource /api/events 同样受同源策略约束

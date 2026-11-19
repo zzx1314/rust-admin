@@ -1,0 +1,101 @@
+# 平台侧 mediamtx：背包视频的 WebRTC 出口（板端 RTSP/TCP 推上来 → 浏览器 WHEP 拉下去）
+#
+# 这是**模板**，进 git 的版本里没有密码。`deploy/external-hz/install.sh` 在服务器上
+# 渲染成 /opt/hz/rust-admin/mediamtx/mediamtx.yml，替换两个占位符：
+#   __PUBLISH_PASS__  板端 relay 推流用的口令（随机生成，落在 mediamtx-publish-url.txt）
+#   __PUBLIC_HOST__   平台公网地址（这台机器是阿里云 EIP，网卡上只有内网 IP，
+#                     不显式告诉 mediamtx 的话它会把自己的 172.29.x.x 发给浏览器，
+#                     ICE 永远连不上 → 黑屏）
+#
+# 端口清单（阿里云安全组要放通的只有这三条）：
+#   TCP 8554   板端 relay 从 4G/现场网络推 RTSP（publish，要口令）
+#   UDP 8189   浏览器 ← WebRTC 媒体（ICE，单端口复用）
+#   TCP 8189   上面那条的 ICE-TCP 回退（企业网/代理封 UDP 时用，可不开）
+#
+# 其余监听全部只绑回环：WHEP 信令由业务平台 `/api/backpack/whep/*` 代理（同源 + JWT），
+# 所以 mediamtx 自己不需要往公网暴露 HTTP。
+
+###############################################
+# 日志与缓冲
+logLevel: info
+logDestinations: [stdout]
+logStructured: false
+# 读/写超时：推流端上行抖动时不要一断就是半小时（板端会自己重连）
+readTimeout: 10s
+writeTimeout: 10s
+# 每个读者的发送队列：512 个 RTP 包（720p20 约 3~4s 余量）。
+# 再大就会「静默攒几十秒画面」，观众越看越晚（FLV 中继时代踩过这个坑）。
+writeQueueSize: 512
+
+###############################################
+# 鉴权
+#
+# 默认配置里 `user: any` 是「谁都能推、谁都能读」，这里必须换掉：
+# 8554 是公网开放的，不鉴权等于让任何人往平台推流。
+authMethod: internal
+authInternalUsers:
+  # 板端 relay：只能推 `bp_` 前缀的 path（`bp_dogcam` / `bp_cam0` …），不能读
+  - user: relay
+    pass: __PUBLISH_PASS__
+    ips: []
+    permissions:
+      - action: publish
+        path: "~^bp_"
+  # 本机回环：业务服务的 WHEP 代理与运维 curl 用，只能读、不能推
+  - user: any
+    pass:
+    ips: ["127.0.0.1", "::1"]
+    permissions:
+      - action: read
+        path: "~^bp_"
+      - action: api
+
+###############################################
+# 控制 API（只绑回环，排障用）
+#
+#   curl -s 127.0.0.1:9997/v3/paths/list | python3 -m json.tool
+#   → 每路有没有 publisher / reader / 字节数
+api: true
+apiAddress: 127.0.0.1:9997
+
+# 不用的协议全部关掉：多开一个监听就多一个要放通/要解释的端口
+metrics: false
+pprof: false
+playback: false
+rtmp: false
+hls: false
+srt: false
+moq: false
+
+###############################################
+# RTSP（板端推流入口）
+rtsp: true
+# 只允许 TCP：UDP RTP 在 4G / NAT 后面几乎不可用，而且 P 帧丢了要看很久
+rtspTransports: [tcp]
+rtspAddress: :8554
+rtspAuthMethods: [basic]
+
+###############################################
+# WebRTC（浏览器看）
+webrtc: true
+# 信令只绑回环：浏览器不会直连 8889，走业务平台的同源代理
+webrtcAddress: 127.0.0.1:8889
+webrtcEncryption: false
+# 浏览器不会直接访问这里（同源代理），留空即可
+webrtcAllowOrigins: []
+# 媒体：单端口复用所有 WebRTC 会话（安全组只需一条 UDP）
+webrtcLocalUDPAddress: :8189
+# ICE-TCP 回退：企业网/某些代理会封 UDP，开了它至少还能连（延时略高）
+webrtcLocalTCPAddress: :8189
+# 不要从网卡取 IP：这台机器是 EIP + NAT，网卡上只有 172.29.x.x
+webrtcIPsFromInterfaces: false
+webrtcAdditionalHosts: ["__PUBLIC_HOST__"]
+# 服务器自己有公网地址，不需要 STUN；真遇到对称 NAT 的客户端再在这里加 TURN
+webrtcICEServers2: []
+
+###############################################
+# Path：全部按需由推流端创建（`source: publisher` 是 pathDefaults 的默认值）。
+# 板端只在有人看时才起 ffmpeg 推流，所以「没有 publisher」= 这一路正在起流/没人看，
+# WHEP 会回 404，前端据此显示「起流中」并重试。
+paths:
+  all_others:

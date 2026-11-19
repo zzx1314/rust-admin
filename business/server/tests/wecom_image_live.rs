@@ -42,6 +42,7 @@ fn test_config(dir: &Path, webhook: String) -> Config {
         backpack_base_url: None,
         backpack_webrtc_url: None,
         backpack_browser_url: None,
+        mediamtx_url: None,
         backpack_tunnel_device: None,
         point_ai: "auto".to_string(),
         ai_window_max_secs: 300,

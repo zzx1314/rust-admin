@@ -7,7 +7,7 @@ Chrome 的 **Local Network Access**（PNA 的继任者）禁止「公网页面�
 实测报错是 `corsError=InsecureLocalNetwork`：
 
 ```text
-页面 http://39.107.55.13:3100  ──fetch──▶  http://192.168.41.246:8000   ✗ 被浏览器拦掉
+页面 http://39.107.55.13:3008  ──fetch──▶  http://192.168.41.246:8000   ✗ 被浏览器拦掉
 页面 http://192.168.41.246:8080 ──fetch──▶  http://192.168.41.246:8000   ✓ 同为内网
 ```
 
@@ -16,7 +16,7 @@ Chrome 的 **Local Network Access**（PNA 的继任者）禁止「公网页面�
 （内网页面访问公网 API 是允许的）。
 
 所以：同一份 `business/web/dist`，
-- 云端 `http://39.107.55.13:3100` —— 常规后台（设备/任务/地图/告警）；
+- 云端 `http://39.107.55.13:3008` —— 常规后台（设备/任务/地图/告警）；
 - 现场 `http://<内网机>:8080`    —— 额外能看实时视频与 AI。
 
 ## 更新前端（每次 `business/web/dist` 变了都要做）
@@ -36,7 +36,7 @@ ssh root@<内网机> 'systemctl restart site-console'
 
 ```bash
 CONSOLE_DIR=/opt/site-console/web \
-CONSOLE_API_BASE=http://39.107.55.13:3100/api \
+CONSOLE_API_BASE=http://39.107.55.13:3008/api \
 CONSOLE_PORT=8080 \
 python3 serve.py
 ```
@@ -56,7 +56,7 @@ from urllib.parse import unquote, urlparse
 
 ROOT = os.path.abspath(os.environ.get("CONSOLE_DIR", "/opt/site-console/web"))
 API_BASE = os.environ.get(
-    "CONSOLE_API_BASE", "http://39.107.55.13:3100/api"
+    "CONSOLE_API_BASE", "http://39.107.55.13:3008/api"
 ).rstrip("/")
 # 未显式给出时按 API 主机推同端口的 ws（设备视频中继也在这个服务里）
 _video_ws = os.environ.get("CONSOLE_VIDEO_WS_BASE", "").strip()

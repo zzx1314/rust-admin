@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { tokenStorage } from "@/api/http";
-import { wsOrigin } from "@/utils/runtime";
+import { apiBaseUrl, wsOrigin } from "@/utils/runtime";
+import { startWhep, type WhepSession } from "@/lib/whep";
 import {
   captureVideoPoster,
   clearVideoPoster,
@@ -49,7 +50,37 @@ const emit = defineEmits<{
   (event: "meta", size: { w: number; h: number }): void;
 }>();
 
+/**
+ * 媒体通路：
+ *
+ * - `flv` —— 板端 relay 把 FLV 推进平台房间，浏览器经同源 WS 交给 flv.js（老通路，
+ *   延时 1~2s，但只靠 TCP/443，**任何网络都能出图**）；
+ * - `whep` —— 板端用 RTSP 把流转推到平台 mediamtx，浏览器经 `/api/backpack/whep/`
+ *   同源反代拉 WebRTC（延时 ~300ms，需要平台侧 UDP 8189 可达）。
+ *
+ * 走哪条**由板端决定**（`relay_push.py` 的 `RELAY_OUTPUT`），起流时通过控制通道报
+ * 给平台，前端从 `/api/backpack/video/state` 读回来 —— 不能靠猜：两条通路在平台上
+ * 都表现为「房间里有推流端」。
+ */
+type Transport = "flv" | "whep";
+
 type Status = "idle" | "loading" | "playing" | "retrying" | "error";
+
+const transport = ref<Transport>("flv");
+/** WebRTC 会话句柄（`lib/whep.ts` 自带指数退避重连，我们只负责建与拆） */
+let whep: WhepSession | null = null;
+/**
+ * 在场心跳：媒体走 WHEP 时，平台就靠这条 WS 数观看者。
+ *
+ * 没有它：第一个观看者进来不会触发 `video_start`（板端不会起 ffmpeg），
+ * 30s 后看门狗还会认为没人看而下发 `video_stop` 把流停掉。
+ * `media=0` 让服务端只做计数与起停流，不再往这里推 FLV 字节。
+ */
+let presence: WebSocket | null = null;
+let presenceWanted = false;
+let presenceTimer: ReturnType<typeof setTimeout> | null = null;
+/** WHEP 会话代次：异步回调靠它判断自己是不是已经被新一轮取代 */
+let whepSeq = 0;
 
 const videoRef = ref<HTMLVideoElement | null>(null);
 const stageRef = ref<HTMLDivElement | null>(null);
@@ -129,7 +160,14 @@ const relayUrl = computed(() => {
   return `${wsOrigin()}/api/backpack/video/ws?stream=${encodeURIComponent(props.stream)}&token=${encodeURIComponent(token)}`;
 });
 
-const playable = computed(() => !!relayUrl.value);
+const playable = computed(() => !!props.stream);
+
+/** WHEP 地址：平台同源反代（`mediamtx :8889` 只绑回环，不对外） */
+const whepUrl = computed(() => {
+  if (!props.stream) return "";
+  const token = tokenStorage.get() || "";
+  return `${apiBaseUrl()}/backpack/whep/${encodeURIComponent(props.stream)}/whep?token=${encodeURIComponent(token)}`;
+});
 /** 全屏错误层只在这些状态出现：不能播 / 连续重连失败 */
 const showFallback = computed(() => !playable.value || status.value === "error");
 
@@ -229,6 +267,97 @@ function teardownPlayer() {
     flv.destroy();
     flv = null;
   }
+  teardownWhep();
+}
+
+/** 拆 WebRTC 会话：`close()` 会 DELETE 掉 mediamtx 的会话，不留僵尸 reader */
+function teardownWhep() {
+  whepSeq += 1;
+  const session = whep;
+  whep = null;
+  if (session) session.close();
+}
+
+/**
+ * 问服务端：这一路的媒体走 WebRTC 还是 FLV。
+ *
+ * 结果是 `bp:<stream>` 房间的 `transport` 字段（板端 `video_transport` 报上来）。
+ * 查不到（没登录 / 推流端未连接 / 老人板端）一律当 `flv` —— 老通路永远在，不能因为
+ * 一个探测请求失败就把画面搞没。
+ */
+async function detectTransport(): Promise<Transport> {
+  if (!props.stream) return "flv";
+  const token = tokenStorage.get() || "";
+  try {
+    const response = await fetch(`${apiBaseUrl()}/backpack/video/state`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined
+    });
+    if (!response.ok) return "flv";
+    const body = (await response.json()) as { data?: { rooms?: Array<Record<string, unknown>> } };
+    const room = body?.data?.rooms?.find(item => item.room === `bp:${props.stream}`);
+    return room?.transport === "rtsp" ? "whep" : "flv";
+  } catch {
+    return "flv";
+  }
+}
+
+/** 在场心跳：媒体走 WHEP 时，平台只能靠这条 WS 知道「有人在看」 */
+function openPresence() {
+  if (!props.stream) return;
+  presenceWanted = true;
+  if (presence) return;
+  const token = tokenStorage.get() || "";
+  const socket = new WebSocket(
+    `${wsOrigin()}/api/backpack/video/ws?media=0&stream=${encodeURIComponent(props.stream)}&token=${encodeURIComponent(token)}`
+  );
+  presence = socket;
+  socket.onclose = () => {
+    if (presence !== socket) return;
+    presence = null;
+    if (!presenceWanted) return;
+    // 平台重启 / 推流端未连接都会把它断掉：按住时重连，别让观看者计数掉成 0
+    // （丢了计数 → 看门狗 30s 后下发 video_stop，板端就把 ffmpeg 停了）
+    presenceTimer = setTimeout(() => {
+      presenceTimer = null;
+      if (presenceWanted) openPresence();
+    }, 3000);
+  };
+}
+
+function closePresence() {
+  presenceWanted = false;
+  if (presenceTimer) {
+    clearTimeout(presenceTimer);
+    presenceTimer = null;
+  }
+  const socket = presence;
+  presence = null;
+  if (socket) socket.close();
+}
+
+/** 起 WebRTC：媒体由 mediamtx 直接发到浏览器（UDP 8189），不进平台后端 */
+function attachWhep(el: HTMLVideoElement, seq: number) {
+  const mine = ++whepSeq;
+  openPresence();
+  whep = startWhep({
+    url: whepUrl.value,
+    video: el,
+    onPhase: detail => {
+      if (mine !== whepSeq || seq !== attachSeq) return;
+      if (detail.phase === "live") return; // `onPlaying` 事件接管状态
+      if (detail.phase === "connecting") {
+        if (status.value !== "retrying") status.value = "loading";
+        return;
+      }
+      if (detail.phase === "retry") {
+        // 「路径上还没有 publisher」是起流中的常态（板端刚被叫起来推流），不是故障：
+        // 文案由 `lib/whep.ts` 翻成人话，前几次只改角标。
+        retryAttempt.value += 1;
+        errorText.value = detail.message;
+        status.value = retryAttempt.value >= HARD_ERROR_AFTER ? "error" : "retrying";
+      }
+    }
+  });
 }
 
 /** 抓当前帧当 poster：重连 / 换通道期间继续显示「最后一帧」而不是黑屏 */
@@ -271,6 +400,7 @@ function destroy() {
   clearSlowStartHint();
   capturePoster(); // 交给共享缓存：切到直连 / 切通道时由下一个播放器先顶这一帧
   teardownPlayer();
+  closePresence();
   const el = videoRef.value;
   if (el) {
     el.pause();
@@ -341,6 +471,15 @@ async function attach() {
   waitingSecs.value = 0;
   armSlowStartHint();
 
+  // 先问服务端这一路的媒体通路（板端起流时上报）。
+  // WebRTC 优先：平台 mediamtx 有 publisher 就拉 WHEP（~300ms）；否则走老的 FLV 中继。
+  transport.value = await detectTransport();
+  if (seq !== attachSeq) return;
+  if (transport.value === "whep") {
+    attachWhep(el, seq);
+    return;
+  }
+
   // 推流端已把源转成 FLV，flv.js 的 WebSocketLoader 直接消费二进制帧
   const { default: flvjs } = await import("flv.js");
   if (seq !== attachSeq) return;
@@ -404,6 +543,9 @@ function tickStall() {
     const waited = attachStartedAt ? (performance.now() - attachStartedAt) / 1000 : 0;
     waitingSecs.value = Math.max(0, Math.round(waited));
     if (attachStartedAt && performance.now() - attachStartedAt > CONNECT_TIMEOUT_MS) {
+      // WHEP 自带指数退避重连（`lib/whep.ts`）：这里再打死重来只会两边抢同一条流，
+      // 而且每次重来都要重新 ICE 协商。连接真的建不起来时它自己会把 `failed` 报上来。
+      if (transport.value === "whep") return;
       scheduleRetry("连接超时，正在重新拉流");
     }
     return;
@@ -517,7 +659,9 @@ onBeforeUnmount(() => {
 
     <div class="video-top">
       <span class="video-badge" :class="badgeTone"><i />{{ badge }}</span>
-      <span v-if="playable" class="video-proto">FLV · 中继</span>
+      <span v-if="playable" class="video-proto">
+        {{ transport === "whep" ? "WebRTC · 中继" : "FLV · 中继" }}
+      </span>
     </div>
 
     <div v-if="playable" class="video-bottom">

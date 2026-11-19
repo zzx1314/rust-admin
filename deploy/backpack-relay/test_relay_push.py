@@ -835,6 +835,84 @@ def test_fixed_decoder_env_skips_probing() -> None:
         relay._decoder_picks.clear()
 
 
+def test_rtsp_scanner_reads_interleaved_timestamps() -> None:
+    """RTSP/TCP 通路靠 RTP 时间戳量延迟：交错帧头 + RTP 头，90kHz。
+
+    现场等价物：`-use_wallclock_as_timestamps 1` 把采集时刻写成 PTS，RTP 时间戳
+    跟着 PTS 走 —— 所以「时间戳增量 vs 墙钟增量」就是帧积压（与 FLV 那条一样）。
+    分片边界会切断 `$` 头 / RTP 头，夹在中间的 RTSP 文本（keepalive 请求）也得跳过。
+    """
+
+    def interleaved(ts: int, channel: int = 0, payload: bytes = b"\x00" * 8) -> bytes:
+        rtp = bytes([0x80, 0x60, 0x00, 0x01]) + ts.to_bytes(4, "big") + payload
+        return b"$" + bytes([channel]) + len(rtp).to_bytes(2, "big") + rtp
+
+    scanner = relay.RtpScanner()
+    assert scanner.clock_rate == relay.RtpScanner.clock_rate == 90_000
+    # 切成两半喂进去（模拟 8KB 分片切断头）
+    blob = interleaved(90_000) + b"OPTIONS rtsp://x RTSP/1.0\r\n\r\n" + interleaved(180_000)
+    scanner.feed(blob[:7])
+    assert scanner.last_video_ts is None
+    scanner.feed(blob[7:])
+    assert scanner.last_video_ts == 180_000, scanner.last_video_ts
+    # 奇通道是 RTCP（没有时间戳字段），不能污染指标
+    scanner.feed(interleaved(42, channel=1))
+    assert scanner.last_video_ts == 180_000
+
+
+def test_output_mode_falls_back_to_ws_when_rtsp_is_unreachable() -> None:
+    """`auto` 连续两次 rtsp 失败就退回 ws 一段时间，到期再试。"""
+    reset()
+    real_output, real_push, real_fallback = relay.OUTPUT, relay.RTSP_PUSH, relay.RTSP_FALLBACK
+    try:
+        relay.OUTPUT = "auto"
+        relay.RTSP_PUSH = ""
+        assert relay.output_mode() == "ws", "没配推流地址就是老通路"
+        relay.RTSP_PUSH = "rtsp://relay:pass@10.0.0.8:8554/bp_"
+        relay.RTSP_FALLBACK = 600
+        assert relay.output_mode() == "rtsp"
+        relay.note_rtsp_failure("平台 :8554 连不上")
+        assert relay.output_mode() == "rtsp", "第一次失败先原地重试（可能是瞬时抖动）"
+        relay.note_rtsp_failure("平台 :8554 连不上")
+        assert relay.output_mode() == "ws", "连续两次失败就把画面交给 FLV 中继"
+        relay._rtsp_disabled_until = time.monotonic() - 1
+        assert relay.output_mode() == "rtsp", "退让到期后再试一次 rtsp"
+        # 写死 rtsp 时也不把画面搞没：只是不设置退让窗口
+        relay.OUTPUT = "rtsp"
+        relay.note_rtsp_failure("x")
+        relay.note_rtsp_failure("x")
+        assert relay.output_mode() == "rtsp"
+    finally:
+        relay.OUTPUT, relay.RTSP_PUSH, relay.RTSP_FALLBACK = (
+            real_output,
+            real_push,
+            real_fallback,
+        )
+        relay._rtsp_failures = 0
+        relay._rtsp_disabled_until = 0.0
+
+
+def test_rtsp_publish_plan_appends_stream_and_keeps_credentials() -> None:
+    """`RELAY_RTSP_URL` 是前缀（…/bp_），每路拼自己的名字；口令要能转义。"""
+    real = relay.RTSP_PUSH
+    try:
+        relay.RTSP_PUSH = "rtsp://relay:pa%2Fss@39.107.55.13:8554/bp_"
+        host, port, path, userinfo = relay.rtsp_publish_plan("dogcam")
+        assert (host, port, path) == ("39.107.55.13", 8554, "bp_dogcam")
+        assert userinfo == "relay:pa%2Fss@"
+        relay.RTSP_PUSH = "rtsp://relay:pass@10.0.0.8/bp_"
+        assert relay.rtsp_publish_plan("cam0")[1] == 8554, "没写端口时用 RTSP 默认值"
+        relay.RTSP_PUSH = "http://wrong"
+        try:
+            relay.rtsp_publish_plan("dogcam")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("非 rtsp 地址应该直接报错")
+    finally:
+        relay.RTSP_PUSH = real
+
+
 def main() -> int:
     tests = [value for name, value in sorted(globals().items()) if name.startswith("test_")]
     failed = 0

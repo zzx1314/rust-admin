@@ -286,7 +286,7 @@ wecom_alert_push / wecom_task_abnormal  渠道级：这一类事件推不推企�
 
 **内容**：导航指令非法（13440），航点 3 无法到达
 
-[查看详情 →](http://39.107.55.13:3100/alerts)
+[查看详情 →](http://39.107.55.13:3008/alerts)
 ```
 
 告警自动派单之后多四行（区域 / 关联计划 / 当班责任人 / 工单），`处置建议` 变成
@@ -308,7 +308,7 @@ wecom_alert_push / wecom_task_abnormal  渠道级：这一类事件推不推企�
 **处置建议**：已按当班排班派给 陈志远（运维一组） · 早班 08:00 - 16:00（SH-012），
 工单 WO-1115-03 已自动生成（当班排班 SH-012），请责任人到场确认并把处置结果回填到工单
 
-[查看详情 →](http://39.107.55.13:3100/workorders?focus=12)
+[查看详情 →](http://39.107.55.13:3008/workorders?focus=12)
 ```
 
 ### 跟单告警（同一问题已挂在在办工单上）
@@ -332,7 +332,7 @@ wecom_alert_push / wecom_task_abnormal  渠道级：这一类事件推不推企�
 **处置建议**：同一问题仍在办（第 3 次告警），本次不新建工单，继续挂在原单上。
 请责任人按最新情况处置并把结果回填到工单
 
-[查看详情 →](http://39.107.55.13:3100/workorders?focus=12)
+[查看详情 →](http://39.107.55.13:3008/workorders?focus=12)
 ```
 
 为什么要推：**一次任务执行就是一次告警**。周期计划跑完会回到「待执行」重跑
@@ -612,7 +612,7 @@ journalctl -u rust-admin-robodog -f | grep -i wecom
 
 | 部署形态 | 能否直发 | 做法 |
 | --- | --- | --- |
-| 外网正式环境（`39.107.55.13:3100`） | 能 | 当前实现，业务平台直发 |
+| 外网正式环境（`39.107.55.13:3008`） | 能 | 当前实现，业务平台直发 |
 | 现场内网（无入站端口，靠反向控制信道拨中台） | **要确认** | 若不能出公网，需要中台代发 |
 
 中台代发的改动面（预埋好了）：`notify.rs` 的出口只有 `post()` 一个函数，
@@ -697,7 +697,7 @@ curl -m 5 -sS https://qyapi.weixin.qq.com -o /dev/null && echo ok
 ssh root@39.107.55.13
 vi /opt/hz/rust-admin/robodog.env
 #   ROBODOG_WECOM_WEBHOOK=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
-#   ROBODOG_PUBLIC_URL=http://39.107.55.13:3100
+#   ROBODOG_PUBLIC_URL=http://39.107.55.13:3008
 
 systemctl restart rust-admin-robodog
 journalctl -u rust-admin-robodog -n 20 | grep 企业微信   # 应看到"已配置 … source=… key_tail=xxxxxx"

@@ -97,7 +97,7 @@ root@ubuntu-arm64:~# hexdump -C /dev/mmcblk0p5 2>/dev/null \
 | 项 | 值 |
 |------|------|
 | 客户端所在服务器 | `192.168.41.246` |
-| 业务服务（外网） | `ws://39.107.55.13:3100`（REST：`http://39.107.55.13:3100`） |
+| 业务服务（外网） | `ws://39.107.55.13:3008`（REST：`http://39.107.55.13:3008`） |
 | 设备编号（= 机器狗 SN，客户端自动读取） | `0202222672400230`（实测） |
 | 机器狗本体 | `192.168.234.234:10010`（文件服务 `:12000`） |
 
@@ -396,7 +396,7 @@ cargo run -- --print-config      # 查看脱敏后的生效配置
 
 | 配置文件 | 环境变量 | 命令行 | 默认值 |
 |------|------|------|------|
-| `server.url` | `ROBODOG_SERVER_URL` | `--server` | `ws://39.107.55.13:3100` |
+| `server.url` | `ROBODOG_SERVER_URL` | `--server` | `ws://39.107.55.13:3008` |
 | ~~`server.device_id`~~ | `ROBODOG_DEVICE_ID` | `--device-id` | **不在配置文件里**：默认自动读 `/dev/mmcblk0p5`（`ROBODOG_SN_PATH` 可改路径），写进 `client.toml` 会按未知字段报错 |
 | `server.secret` / `server.secret_env` | `ROBODOG_DEVICE_SECRET` | `--secret` | 空（可选） |
 | `server.heartbeat_secs` | `ROBODOG_HEARTBEAT` | `--heartbeat` | `10`（最小 1） |
