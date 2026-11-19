@@ -136,6 +136,40 @@ Environment=RELAY_SLOW_IFACES=           # 空 = 不按网卡名一刀压档（4
 `settings.video_relay_profile=light`、`settings.video_relay_auto_degrade=true`
 （库：`/opt/hz/rust-admin/robodog/data/robodog.db`）。
 
+## 4.1 2026-11-19 晚：Agent 降帧率 30 → 15fps
+
+起因：平台中继看着「不流畅」。先量清楚再改——**问题不在中继的码率，在板端 CPU**
+（改前 load average 3.96，四路 `h264_rkmpp` + 四路 MJPG 软解）。
+
+关键发现：**四路 USB 相机 MJPG 只报 30.000fps 的离散帧间隔**，
+`v4l2-ctl --list-formats-ext -d /dev/usbcam0` 里所有尺寸都只有 `Interval: Discrete 0.033s`。
+所以 `CAPTURE_FPS=15` 会让 v4l2 直接 EINVAL、四路全黑，降帧率**只能在编码前丢帧**。
+
+| 对象 | 改成什么 | 回滚 |
+| --- | --- | --- |
+| `backend/config.py` | 新增 `CAPTURE_OUT_FPS`（默认 0=不转换）/ `CAPTURE_NOUT_FPS` | `.bak-20261119-152702` |
+| `backend/stream.py` | `-vf fps=$CAPTURE_OUT_FPS`（采集仍 30fps） | 同上 |
+| `backend/relay.py` | dogcam720 的 `fps=` 改用 `CAPTURE_NOUT_FPS` | 同上 |
+| `/etc/systemd/system/backpack-agent.service` | `Environment=CAPTURE_OUT_FPS=15` + `Environment=OSD_FPS=15` | `/root/backpack-agent.service.bak-20261119-152702` |
+
+为什么值 15：中继 `RELAY_FPS=15`，源给 30 是「白解 30 帧、丢一半再编 15 帧」；
+AI 抽帧是 `max(8, min(12, DETECT_FPS))` = **8fps**，15fps 源完全喂得动。
+**别压到 8 以下**，否则抽帧与源帧率打架、漏检变多。
+
+改后实测：`ffprobe` 四路 `1280,720,15/1`；load average 3.96 → 2.6，CPU idle 73%。
+
+```bash
+# 验证
+for c in cam0 cam1 cam2 cam3; do printf "%s: " $c; ffprobe -v error -select_streams v:0 \
+  -show_entries stream=width,height,avg_frame_rate -of csv=p=0 rtsp://127.0.0.1:8554/$c; done
+ps -eo args | grep '[v]4l2' | head -1   # 应能看到 -framerate 30 ... -vf fps=15
+```
+
+⚠️ 同一时间段 `dogcam` 那一路仍在降档（`极省流档 320x180@8 200k`，15:12 日志
+`省流窗口到期但实测 190kbps（本档目标 500kbps）`）——**这条跟四路 USB 无关**：
+dogcam 是 mediamtx 直拉本体 1080p60，relay 用软解拉到 320x180（单进程 70% CPU）。
+要查它得看 4G 上行实测和 `RELAY_DECODER`（是否真用上了 `h264_rkmpp` 硬解）。
+
 ## 5. 备份文件现状与清理建议
 
 | 位置 | 数量 / 体积 | 说明 |

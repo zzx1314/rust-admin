@@ -73,6 +73,15 @@ CAPTURE_PIXFMT = os.getenv("CAPTURE_PIXFMT", "mjpeg")  # 摄像头枚举出的�
 H264_ENCODER = os.getenv("H264_ENCODER", "h264_rkmpp")
 H264_BITRATE = os.getenv("H264_BITRATE", "2000k")
 
+# 输出帧率。**降帧率只动这里，不要动 CAPTURE_FPS**：现场四路 USB 相机
+# （v4l2-ctl --list-formats-ext 实测）MJPG 只报 30.000fps 的**离散**帧间隔，
+# 把 `-framerate` 设成 15 会让 v4l2 直接 EINVAL，四路全黑。
+# 采集保持 30，编码前用 fps 滤镜丢帧；平台中继（relay）本来就只要 15fps，
+# 多出来的帧在板端是白解、白编、白占 MPP。0 = 不转换，沿用 CAPTURE_FPS。
+CAPTURE_OUT_FPS = int(os.getenv("CAPTURE_OUT_FPS", "0"))
+# 对外（推给 mediamtx）的帧率：relay.py 的 dogcam720 重编码用它
+CAPTURE_NOUT_FPS = CAPTURE_OUT_FPS or CAPTURE_FPS
+
 # ---- 硬件路径（沿用 yd_test_v4.0.sh 的取值） ----
 SHT4X_APP = os.getenv("SHT4X_APP", "/root/wenshidu/sht4x_app")   # 温湿度
 MODEM_DEV = os.getenv("MODEM_DEV", "/dev/ttyUSB2")               # 4G(Quectel) AT 口

@@ -8,7 +8,8 @@ import threading
 import time
 import os
 from config import (CAMERAS, RTSP_PORT, CAPTURE_WIDTH, CAPTURE_HEIGHT,
-                     CAPTURE_FPS, CAPTURE_PIXFMT, H264_ENCODER, H264_BITRATE)
+                     CAPTURE_FPS, CAPTURE_OUT_FPS, CAPTURE_PIXFMT,
+                     H264_ENCODER, H264_BITRATE)
 
 _PROCS = {}
 _ENCODER = None
@@ -42,6 +43,11 @@ def _build_cmd(cam):
         "-video_size", f"{CAPTURE_WIDTH}x{CAPTURE_HEIGHT}",
         "-framerate", str(CAPTURE_FPS),
         "-i", cam["device"],
+    ]
+    if CAPTURE_OUT_FPS:
+        # 相机 MJPG 只有 30fps 的离散帧间隔（v4l2-ctl 实测），降帧率只能在输出侧丢帧。
+        cmd += ["-vf", f"fps={CAPTURE_OUT_FPS}"]
+    cmd += [
         "-c:v", enc,
         "-b:v", H264_BITRATE,
     ]

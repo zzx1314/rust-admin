@@ -120,6 +120,12 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/root/261113/bac
   改这块先读 `official-app-parity.md` §5.6，并跑 `plan_count_selftest.py`。
 - **OSD 会反压主视频**：`OSD_FIFO_FPS` 默认 4，别为了「画框更顺」拉到 8+——板端实测会拖慢
   AI 那一路（`deploy/README.md` 有现场记录）。
+- **降帧率只能走 `CAPTURE_OUT_FPS`**：现场四路 USB 相机 MJPG 只报 **30fps 的离散帧间隔**
+  （`v4l2-ctl --list-formats-ext` 实测），把 `CAPTURE_FPS` 改成 15 会让 v4l2 直接 EINVAL、
+  四路全黑。`stream.py` 在编码前加 `-vf fps=N` 丢帧；`CAPTURE_FPS` 保持 30（采集侧），
+  `relay.py` 的 dogcam720 用 `CAPTURE_NOUT_FPS`。带框预览的 `OSD_FPS` 要同步降，
+  否则源 15fps 会被 `fps=30` 补重复帧白耗编码。2026-11-19 线上已设 15，见
+  `deploy/backpack-246.md` §4.1。
 - **NPU 单路独占**：`DETECT_FPS_MAX=12` 是上限；`/api/detect/start` 只接受一路 camera
   （`single_cam=true`），不要放开多路并发。
 - 代码风格沿用现有：4 空格、中文注释/文档字符串、模块顶部写「为什么」；不要引入

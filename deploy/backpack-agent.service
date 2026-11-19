@@ -34,6 +34,12 @@ Environment=LD_LIBRARY_PATH=/root/261113/backpack_dashboard/rknn
 Environment=PYTHONUNBUFFERED=1
 # 板端 OSD 纯 Python 渲染，实测写入跟不上 8fps 时会反压主视频（表现为 AI 那路慢几秒）
 Environment=OSD_FIFO_FPS=4
+# 降帧率：现场四路 USB 相机 MJPG **只报 30fps 的离散帧间隔**（`v4l2-ctl --list-formats-ext`
+# 实测），所以不能在采集侧改 `CAPTURE_FPS=15`（v4l2 直接 EINVAL、四路全黑），
+# 而是编码前用 fps 滤镜丢帧。中继只推 15fps（`RELAY_FPS=15`），多出来的帧纯属白解白编。
+Environment=CAPTURE_OUT_FPS=15
+# 带框预览（preview）输出帧率跟着降：源已经是 15fps，`fps=30` 只会补重复帧白耗编码
+Environment=OSD_FPS=15
 
 ExecStartPre=/bin/sh -c 'systemctl restart camera-init.service || true'
 ExecStart=/usr/bin/python3 agent.py

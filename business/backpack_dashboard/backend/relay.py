@@ -118,8 +118,10 @@ def set_profile(profile):
 
 
 def _build_cmd(url, enc):
+    # 输出帧率用 CAPTURE_NOUT_FPS（= CAPTURE_OUT_FPS 或 CAPTURE_FPS）：
+    # 现场相机只支持 30fps 采集，降帧率走输出侧 fps 滤镜，见 config.py。
     vf = ("fps=%d,scale=%d:%d:flags=bicubic:in_range=full:out_range=full,"
-          "format=yuv420p") % (config.CAPTURE_FPS, config.CAPTURE_WIDTH,
+          "format=yuv420p") % (config.CAPTURE_NOUT_FPS, config.CAPTURE_WIDTH,
                                config.CAPTURE_HEIGHT)
     enc_args = ["-c:v", enc]
     if enc == "libx264":
