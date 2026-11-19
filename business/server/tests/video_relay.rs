@@ -443,6 +443,55 @@ async fn stale_stream_header_does_not_block_video_start() {
     .expect("残留流头不应阻止 video_start（板端不会重新起流 → 每 23s 断一次）");
 }
 
+/// 推流端重连（上一条连接已经死了、平台还没判死）时必须**补发** `video_start`。
+///
+/// 现场时序（2026-11-19「起流黑好大一会」）：
+///
+/// ```text
+/// T0 观看者进来 → 平台下发 video_start → 板端起 ffmpeg（还没有任何字节）
+/// T1 Wi-Fi 抖一下 → 板端 relay 断开（同时杀掉 ffmpeg），平台那条连接还没被写活
+/// T2 1s 后 relay 重连 → publisher_attach 沿用房间；这一轮没有字节，所以既不 reset
+///    也不踢人 → 观看者手上那条 video_start 早就打在死连接上丢了
+/// T3 观看者干等到前端 20s 连接超时 → 重连 → 才重新要流
+/// ```
+///
+/// 修法：推流端重连登记控制通道时，若「有人在看 + 房间里一个字节都没有」就补发一次
+/// （板端 `StreamSession.start()` 幂等，真有流时重复下发不会重启 ffmpeg）。
+#[tokio::test]
+async fn relay_reconnect_resends_video_start_to_waiting_viewers() {
+    let (state, _db) = test_state().await;
+    let (port, router) = spawn_server(state.clone()).await;
+    let token = login_token(&router).await;
+    // T0：老推流连接在线，观看者进来，它的 video_start 打在这条（马上就死的）通道上
+    let _old_publisher = publisher_for(port, &state).await;
+    let (_viewer, _) = connect_async(format!(
+        "ws://127.0.0.1:{port}/api/backpack/video/ws?stream=dogcam&token={token}"
+    ))
+    .await
+    .expect("观看通道连接失败");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.video_hub.viewers(ROOM).await == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("观看者未被登记");
+
+    // T2：板端 relay 重连（老连接还挂在平台上，房间沿用、这一轮还没有任何字节）
+    let mut new_publisher = publisher_for(port, &state).await;
+
+    // 新连接必须重新拿到 video_start，否则观看者只能黑到前端超时重连
+    let start = next_msg(&mut new_publisher, "video_start").await;
+    assert_eq!(
+        start["payload"]["stream"], "dogcam",
+        "补发的 video_start 要带通道名（房间名去掉 bp: 前缀）: {start}"
+    );
+    assert_eq!(
+        start["payload"]["profile"]["tier"], "degrade",
+        "补发时也要带上平台配置的档位: {start}"
+    );
+}
+
 /// 用真实 ffmpeg 生成的 FLV 验证流头解析（手写字节可能和 ffmpeg 的实际布局有出入）
 ///
 /// 本机没装 ffmpeg 时自动跳过：现场板端侧才需要它，CI 不应因此变红。

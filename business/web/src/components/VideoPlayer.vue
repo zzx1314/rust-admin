@@ -30,8 +30,10 @@ import AppIcon from "./AppIcon.vue";
  *    所以重连过程中观众看到的是「上一帧 + 重连中」，不是黑屏闪一下。
  * 3. **快速重连 + 退避**：服务端主动断开（推流端换流 / 观看端追不上）时 250ms 就重连，
  *    连续失败才指数退避（上限 3s），不会 3s 一次空转刷屏。
- * 4. **推流端要保持在跑**：服务端最后一个观看者离开时不立刻杀 ffmpeg（15s 宽限），
+ * 4. **推流端要保持在跑**：服务端最后一个观看者离开时不立刻杀 ffmpeg（30s 宽限），
  *    所以这里的 `video_start` 重复下发也不会重启推流端（板端 relay 按 stream 去重）。
+ * 5. **起流期间不许是纯黑**：没有画面时用「上一帧 + 起流中遮罩」顶着，并实时显示已经等了
+ *    多少秒（板端起 ffmpeg + 等关键帧 1~7s，低档位 GOP 更长）。纯黑会被现场一律读成「卡死」。
  */
 const props = defineProps<{
   /**
@@ -61,6 +63,8 @@ const poster = ref("");
 const retryAttempt = ref(0);
 /** 起流超过 2.5s 才提示「板端正在起流」：正常情况下几十 ms 就 playing，不该先吓人 */
 const slowStart = ref(false);
+/** 这一次连接已经等了多久（秒）：起流 / 重连遮罩上直接显示，别让观众对着黑屏猜 */
+const waitingSecs = ref(0);
 
 // flv.js 体积大（~150KB），只有真正需要播放时才拉进来，
 // 避免设备列表 / 任务看板为了一个播放器把整个 bundle 撑大
@@ -99,8 +103,15 @@ const STALL_MS = 8000;
 const CONNECT_TIMEOUT_MS = 20_000;
 let stallTimer: ReturnType<typeof setInterval> | null = null;
 let slowStartTimer: ReturnType<typeof setTimeout> | null = null;
-/** 「上一帧」最多顶这么久：中继真断了就老实显示连接中/失败，不能拿静帧冒充直播 */
-const POSTER_MAX_MS = 6_000;
+/**
+ * 「上一帧」最多顶这么久：中继真断了就老实显示连接中/失败，不能拿静帧冒充直播。
+ *
+ * 和 [`CONNECT_TIMEOUT_MS`] 对齐：板端起 ffmpeg + 等关键帧要 1~7s，低档位（极省流
+ * 320x180，rkmpp 靠丢帧保码率、实测 ~2fps）GOP 换算成时间能到 7~8s。静帧 6s 就撤掉时，
+ * 剩下的时间就是**纯黑**，现场看到的就是「起流黑好大一会」。现在静帧顶上到超时为止，
+ * 同时盖一层「起流中 · 已等 Ns」遮罩（静帧只陪跑，不冒充直播）。
+ */
+const POSTER_MAX_MS = 20_000;
 let posterTimer: ReturnType<typeof setTimeout> | null = null;
 let lastTime = 0;
 let lastProgressAt = 0;
@@ -146,6 +157,30 @@ const badgeTone = computed(() => {
   if (status.value === "playing") return buffering.value ? "wait" : "live";
   if (status.value === "error") return "err";
   return "wait";
+});
+
+/**
+ * 起流 / 重连遮罩的文案（空串 = 不显示）。
+ *
+ * 起流本来就慢：浏览器连上中继 → 平台下发 `video_start` → 板端起 ffmpeg（1~7s）
+ * → 等首个关键帧。这期间如果画面是纯黑，现场一律说「卡住了」；显示「已等 Ns」
+ * 就能把「在干活」和「真死了」区分开。
+ */
+const startHint = computed(() => {
+  if (!playable.value) return "";
+  if (status.value === "retrying")
+    return `重连中（第 ${retryAttempt.value} 次）· 已等 ${waitingSecs.value}s`;
+  if (status.value === "loading")
+    return slowStart.value ? `起流中 · 已等 ${waitingSecs.value}s` : "正在连接平台中继…";
+  return "";
+});
+
+/** 起流慢时的补充说明：说清楚在等什么、等多久会自己重连 */
+const startDetail = computed(() => {
+  if (!slowStart.value) return "";
+  return `板端 relay 起 ffmpeg + 等关键帧，约 1~7s；超过 ${Math.round(
+    CONNECT_TIMEOUT_MS / 1000
+  )}s 自动重连`;
 });
 
 function clearRetry() {
@@ -299,9 +334,11 @@ async function attach() {
   }
   buffering.value = false;
   // 上一路（直连 / 上一个通道）的最后一帧先顶着：切流期间不能是黑屏。
-  // 只顶 6s（见 armPosterTimeout）：板端复位后中继要几十秒才回来，静帧挂着就是「卡住」。
+  // 顶到一次连接尝试超时为止（见 armPosterTimeout）：板端复位后中继要几十秒才回来，
+  // 那时候静帧已经过期，遮罩会接管（不能拿静帧冒充直播）。
   if (!poster.value) poster.value = getVideoPoster();
   if (poster.value) armPosterTimeout();
+  waitingSecs.value = 0;
   armSlowStartHint();
 
   // 推流端已把源转成 FLV，flv.js 的 WebSocketLoader 直接消费二进制帧
@@ -364,6 +401,8 @@ function tickStall() {
     return;
   }
   if (status.value === "loading" || status.value === "retrying") {
+    const waited = attachStartedAt ? (performance.now() - attachStartedAt) / 1000 : 0;
+    waitingSecs.value = Math.max(0, Math.round(waited));
     if (attachStartedAt && performance.now() - attachStartedAt > CONNECT_TIMEOUT_MS) {
       scheduleRetry("连接超时，正在重新拉流");
     }
@@ -461,6 +500,13 @@ onBeforeUnmount(() => {
     <!-- 断流重连期间继续显示最后一帧，避免「黑一下再闪回来」 -->
     <img v-if="poster && status !== 'playing'" class="video-poster" :src="poster" alt="" />
 
+    <!-- 起流 / 重连：上一帧后面盖一层「已等 Ns」。起流本来要 1~7s，纯黑会被当成卡死 -->
+    <div v-if="startHint" class="video-starting">
+      <i class="video-starting-dot" />
+      <strong>{{ startHint }}</strong>
+      <small v-if="startDetail">{{ startDetail }}</small>
+    </div>
+
     <div v-if="showFallback" class="video-fallback">
       <AppIcon name="video" />
       <p>{{ hint }}</p>
@@ -531,6 +577,46 @@ onBeforeUnmount(() => {
   padding: 12px;
   text-align: center;
   background: rgb(11 18 32 / 72%);
+}
+
+/* 起流 / 重连遮罩：只占中间一块，上一帧仍可见（既能说明在干活，也不冒充直播） */
+.video-starting {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  max-width: 82%;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: rgb(11 18 32 / 78%);
+  border: 1px solid rgb(148 163 184 / 22%);
+  color: #e2e8f0;
+  text-align: center;
+  pointer-events: none;
+}
+
+.video-starting strong {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.video-starting small {
+  font-size: 10px;
+  line-height: 1.5;
+  color: #94a3b8;
+}
+
+.video-starting-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #f59e0b;
+  animation: pulse 1.2s infinite;
 }
 
 .video-fallback p {

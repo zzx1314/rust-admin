@@ -95,10 +95,13 @@ fn viewer_buffer_frames(device_id: &str) -> usize {
 /// 「视频连接特别慢、总要黑一下」。
 ///
 /// 但也不能太长：没人在看也一直在编码，机器狗的电池 / CPU / 4G 流量都在白烧（现场开了
-/// 代理后「看一会儿就掉电」很难解释）。 15s 足够盖住「刷新页面 / 切页签 / 断一两秒」，
-/// 又能在走开后很快停掉。重连时能拿到多少缓存跟这个宽限无关（靠 `Room::catch_up()` 补
-/// 当前 GOP），所以没必要为了 "秒开" 拿 60s。
-const STREAM_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
+/// 代理后「看一会儿就掉电」很难解释）。
+///
+/// 15s（2026-11-18 从 60s 收下来的值）在现场**偏紧**：手机切个页 / 看板上翻两屏 / 网络
+/// 抖一下就超过 15s，回来时 `video_stop` 已经下发，板端 ffmpeg 被杀 → 重新走一遍冷启动
+/// （ffmpeg + 等关键帧 1~7s，低档位 GOP 更长），现场就是「起流黑好大一会」。
+/// 30s 能盖住这类日常操作，代价是白编码最多多 15s；再往上就没必要了。
+const STREAM_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// 推流端多久没有任何消息（二进制帧 / WS ping）就判死。
 ///
@@ -184,6 +187,22 @@ pub async fn relay_profile(state: &AppState) -> serde_json::Value {
         }
     }
     json!({ "tier": tier, "auto": auto })
+}
+
+/// `video_start` 控制消息。
+///
+/// 观看者进来、以及推流端重连后补发，都是这同一条 —— 两处各写一份 JSON 迟早会走样
+/// （板端只认 `payload.stream` 和 `payload.profile`）。
+fn video_start_message(stream: &str, profile: serde_json::Value) -> String {
+    json!({
+        "msgType": "video_start",
+        "payload": {
+            "stream": stream,
+            "format": "flv",
+            "profile": profile,
+        }
+    })
+    .to_string()
 }
 
 /// 设置页改了中继档位：立刻广播 `video_config` 给在线板端
@@ -694,6 +713,30 @@ impl VideoHub {
             .copied()
             .unwrap_or(0)
     }
+
+    /// 有人在等这一路、但房间里还没有可播的字节（流头 / GOP 都空）。
+    ///
+    /// 推流端重连后据此决定要不要**补发** `video_start`：观看者可能是在「上一条推流
+    /// 连接已经死了、平台还没判死」的空窗里进来的，它那条 `video_start` 打在僵尸通道上
+    /// 丢了（`send_control` 只看到 sender 还在就返回成功），板端根本没收到。
+    pub async fn viewers_waiting(&self, device_id: &str) -> bool {
+        let watching = self
+            .viewers
+            .read()
+            .await
+            .get(device_id)
+            .copied()
+            .unwrap_or(0);
+        if watching == 0 {
+            return false;
+        }
+        self.rooms
+            .read()
+            .await
+            .get(device_id)
+            .map(|room| room.init.is_none())
+            .unwrap_or(false)
+    }
 }
 
 /// 解析 FLV 开头：`(header 长度, 流头长度)`
@@ -929,6 +972,28 @@ async fn handle_publisher(socket: WebSocket, state: AppState) {
                                     let (tx, rx) = mpsc::channel(8);
                                     state.video_hub.register_control(&code, session, tx).await;
                                     controls = Some(rx);
+                                    // 还有人在等、而且房间里一个字节都没有：说明这个观看者的
+                                    // `video_start` 打在了上一条（已经死掉但平台还没判死的）推流
+                                    // 连接上，板端根本没收到。这里补发一次，否则他要一直黑到前端
+                                    // 20s 连接超时再重连（现场＝「起流黑好大一会」）。
+                                    // 板端 `StreamSession.start()` 幂等：真有流时重复下发不会重启 ffmpeg。
+                                    if state.video_hub.viewers_waiting(&code).await {
+                                        let stream = code
+                                            .strip_prefix(BACKPACK_ROOM_PREFIX)
+                                            .unwrap_or(&code)
+                                            .to_string();
+                                        let profile = relay_profile(&state).await;
+                                        let resent = state
+                                            .video_hub
+                                            .send_control(&code, video_start_message(&stream, profile))
+                                            .await;
+                                        if resent {
+                                            info!(
+                                                "video publisher {code} 重连后仍有观看者在等，补发 video_start（stream={stream}）"
+                                            );
+                                            state.video_hub.mark_streaming(&code, true).await;
+                                        }
+                                    }
                                 }
                                 device_id = Some(code);
                             }
@@ -1111,18 +1176,7 @@ async fn handle_viewer(socket: WebSocket, state: AppState, stream_name: String, 
         let profile = relay_profile(&state).await;
         let sent = state
             .video_hub
-            .send_control(
-                &room,
-                json!({
-                    "msgType": "video_start",
-                    "payload": {
-                        "stream": stream_name,
-                        "format": "flv",
-                        "profile": profile,
-                    }
-                })
-                .to_string(),
-            )
+            .send_control(&room, video_start_message(&stream_name, profile))
             .await;
         if sent {
             // 只有真的让推流端起过流，才需要让看门狗盯着它
@@ -1279,7 +1333,8 @@ mod tests {
                 break;
             }
             if buf[pos] == 9 && size >= 2 {
-                let ts = u32::from_be_bytes([buf[pos + 7], buf[pos + 4], buf[pos + 5], buf[pos + 6]]);
+                let ts =
+                    u32::from_be_bytes([buf[pos + 7], buf[pos + 4], buf[pos + 5], buf[pos + 6]]);
                 let keyframe = (buf[pos + 11] >> 4) == 1 && buf[pos + 12] == 1;
                 out.push((ts, keyframe));
             }
@@ -1297,7 +1352,13 @@ mod tests {
         let hub = VideoHub::default();
         hub.publisher_attach("bp:dogcam", 1).await;
         // 两个 GOP：ts 0/40/80，然后关键帧 2000 起新 GOP
-        let stream = flv_stream_with(&[(0, true), (40, false), (80, false), (2000, true), (2040, false)]);
+        let stream = flv_stream_with(&[
+            (0, true),
+            (40, false),
+            (80, false),
+            (2000, true),
+            (2040, false),
+        ]);
         hub.publish("bp:dogcam", Arc::from(stream)).await;
 
         let (_rx, _, catch_up) = hub.viewer_join("bp:dogcam").await;
@@ -1315,8 +1376,11 @@ mod tests {
     async fn catch_up_with_a_single_gop_starts_at_the_round_keyframe() {
         let hub = VideoHub::default();
         hub.publisher_attach("bp:dogcam", 1).await;
-        hub.publish("bp:dogcam", Arc::from(flv_stream_with(&[(0, true), (40, false)])))
-            .await;
+        hub.publish(
+            "bp:dogcam",
+            Arc::from(flv_stream_with(&[(0, true), (40, false)])),
+        )
+        .await;
 
         let (_rx, _, catch_up) = hub.viewer_join("bp:dogcam").await;
         assert_eq!(
@@ -1330,10 +1394,16 @@ mod tests {
     async fn new_round_forgets_the_gop() {
         let hub = VideoHub::default();
         hub.publisher_attach("bp:dogcam", 1).await;
-        hub.publish("bp:dogcam", Arc::from(flv_stream_with(&[(0, true), (40, false)])))
-            .await;
+        hub.publish(
+            "bp:dogcam",
+            Arc::from(flv_stream_with(&[(0, true), (40, false)])),
+        )
+        .await;
         let state = hub.debug_state().await;
-        assert!(state["rooms"][0]["gopBytes"].as_u64().unwrap() > 0, "应攒出 GOP");
+        assert!(
+            state["rooms"][0]["gopBytes"].as_u64().unwrap() > 0,
+            "应攒出 GOP"
+        );
 
         hub.reset_stream("bp:dogcam").await;
         assert_eq!(hub.debug_state().await["rooms"][0]["gopBytes"], 0);

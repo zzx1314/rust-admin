@@ -387,7 +387,7 @@ POST /api/backpack/detect/config
 - 常驻 6 条 WS（`cam0..cam3`、`dogcam`、`dog-ipcam`），空闲时每条 ~1KB；
 - 第一个观看者 → `video_start` → 推流端起 ffmpeg 或 RTSP 拉流；
 - 最后一个观看者离开 → **不立刻停**，只保留 `streaming` 标记；看门狗每 15s 兜一次
-  「起过流但没人看」，超过 `STREAM_IDLE_GRACE`（15s）才下发 `video_stop`。宽限期内
+  「起过流但没人看」，超过 `STREAM_IDLE_GRACE`（30s）才下发 `video_stop`。宽限期内
   重新打开是**秒开**：流还在跑，服务端直接把流头补上，不用等 ffmpeg 重启；
 - 推流端按 stream 去重 `video_start`（`deploy/backpack-relay/relay_push.py`）：同一路
   已经在推就不重启 ffmpeg（重启 = 黑 3~7s + 换新 FLV 头 = 一次闪断）；
@@ -408,8 +408,8 @@ curl -s -H "Authorization: Bearer $TOKEN" http://39.107.55.13:3100/api/backpack/
 
 - 延时 1~2s（WHEP 直连 ~200ms）；延迟敏感场景仍建议现场入口。
 - **首次看某一路要 3~7s**（ffmpeg 启动 + 等下一个关键帧）；同一个通道 30s 内再切回来是
-  秒开 —— 最后一个观看者离开时不立刻停流，交给看门狗在宽限（`STREAM_IDLE_GRACE`，15s）
-  过后才停。
+  秒开 —— 最后一个观看者离开时不立刻停流，交给看门狗在宽限（`STREAM_IDLE_GRACE`，30s）
+  过后才停。这 3~7s 里画面是「上一帧 + 起流中 · 已等 Ns」遮罩，**不是纯黑**（见 ⑯）。
 - 中继模式下**浏览器叠加用不了**（中继流是 FLV，没有与抽帧对齐的坐标关系）：想让框跟着画面走
   就切「背包烧录」，板端把中文标签烧进 `preview` 流后一起中继（`RELAY_STREAMS` 需含
   `preview`，默认已含）。AI 的启停 / 模型目录 / 运行态 / 检出数量走设备客户端隧道（§6.8），
@@ -1232,6 +1232,10 @@ Wi-Fi 掉 → ws.send 反压 → 5s 超时 → 断连重连（这时才降一档
 一直编码，电池 / CPU / 4G 流量都在白烧；15s 足够盖住「刷新页面 / 切页签 / 断一两秒」，而
 重连能否秒开已经由 `Room::catch_up()`（⑬）保证，不再依赖这个宽限。
 
+> 2026-11-19 回调到 **30s**：15s 在现场偏紧，手机切页 / 看板翻屏 / 网络抖一下就超了，
+> 回来要重新冷启动（=「起流黑好大一会」，见 ⑯）。30s 是「白编码最多多 15s」和「日常操作
+> 不用重新起流」的折中，再长（60s）就没必要了。
+
 #### ⑮ 出口钉死 4G：用画质换「Wi-Fi 抖一下也不断」（2026-11-18）
 
 现场一天掉 32 次 Wi-Fi。每次掉的这几秒里其实发生了三件事：
@@ -1315,6 +1319,39 @@ EOF
 现场实施实录（2026-11-19 真正切过去的那一次：实测数据、`.bak` 脚本抢路由的坑、时间线、
 验收与回滚命令）见 `deploy/backpack-4g-pin-2026-11-19.md`。
 
+#### ⑯ 「起流黑好大一会」（2026-11-19）
+
+现场反馈：「有时候起流会黑屏好大一会」。黑屏时长其实是三段相加，任何一段变长都表现为
+「全黑」：
+
+| 段 | 谁决定 | 典型值 |
+| --- | --- | --- |
+| ① 从 `video_start` 到板端出第一帧 | ffmpeg 冷启动 + RTSP 握手 + 等关键帧 | 1~7s（低档位 GOP 折算更长） |
+| ② 浏览器有没有东西可顶 | `VideoPlayer.vue` 的 `POSTER_MAX_MS` / `useVideoPoster.MAX_AGE_MS` | 原来只有 6s / 5s |
+| ③ 前端多久判这次连接失败并重连 | `CONNECT_TIMEOUT_MS` | 20s |
+
+所以只要 ① 超过 6s，剩下的就是**纯黑**，而且前端还会一直等到 20s。三处一起改：
+
+| # | 位置 | 问题 | 修法 |
+| --- | --- | --- | --- |
+| 1 | `business/web/src/components/VideoPlayer.vue` | 静帧 6s 后撤掉 → 纯黑；观众看不出「在起流」还是「卡死了」 | 静帧顶到一次连接超时（`POSTER_MAX_MS` / `useVideoPoster.MAX_AGE_MS` 都改成 20s），并在上面盖一层「起流中 · 已等 Ns / 重连中（第 N 次）· 已等 Ns」遮罩 + 「板端起 ffmpeg + 等关键帧约 1~7s，超过 20s 自动重连」。静帧只陪跑，不冒充直播（遮罩一直在） |
+| 2 | `business/server/src/video.rs` `handle_publisher` | 观看者若在「推流连接已死、平台还没判死」的空窗里进来，它的 `video_start` 打在僵尸通道上丢了（`send_control` 看到 sender 还在就返回成功），板端根本没收到；新连接登记后没人补发 → 观众黑到前端 20s 超时 | 推流端登记控制通道时若 `viewers_waiting()`（有人看 + `init` 为空）就**补发** `video_start`（带平台配置的档位）。板端 `StreamSession.start()` 幂等，真有流时重复下发不会重启 ffmpeg |
+| 3 | `business/server/src/video.rs` `STREAM_IDLE_GRACE` | 15s 偏紧：切页 / 翻屏 / 网络抖一下回来就是冷启动 | 回调到 30s |
+
+现场判定口诀（顺序照这个走）：
+
+1. `GET /api/backpack/video/state`：`publisher=false` → 板端 relay 没连上；
+   `publisher=true` + `initBytes=0` + `lastFrameAgeSecs` 在涨 → 起来了但没数据（查源）；
+   `initBytes>0` 但浏览器还黑 → 前端补流 / 关键帧（看 `gopAgeSecs`）。
+2. 板端 `journalctl -u backpack-relay -f`：`开始拉流` 之后 7s 内没画面就是帧还在路上；
+   `连接平台失败/断开` 反复出现 = WS 在抖（⑯ 第 2 条就是兜它的）。
+3. 平台日志里同一路反复出现 `推流端开启新一轮流（video_reset），断开让前端重连` = 板端
+   在反复换档 / 延迟看门狗重启 ffmpeg（⑨），那不是「起流慢」，是「起流一直被打断」。
+
+回归：`cargo test --test video_relay`（新增
+`relay_reconnect_resends_video_start_to_waiting_viewers`：老推流连接还挂着时新连接登记，
+必须补发 `video_start`，且带 `stream` 与平台档位）。
+
 #### 排查工具与清单
 
 ```bash
@@ -1333,6 +1370,7 @@ ssh root@<背包IP> 'python3 /tmp/bw.py'              # 见 §6.10② 的量法�
 | Wi-Fi 一天抖很多次，每次抖都卡一下且设备显示离线 | 板端 `ip route get 39.107.55.13`、`journalctl -t backpack-relay-route` | 平台流量钉在 Wi-Fi 上（`/32`）；要稳定就 `PIN_IFACE=none` 钉死 4G（⑮），要画质就去治 Wi-Fi 本身 |
 | Wi-Fi 断了再连上，画面还是卡 / 很糊 | 板端 `平台出口网卡 A → B`、`profile=省流` | ⑤ 出口切到慢链路（4G / 狗体内网）；看 `ip route get`。现在到期还会先确认链路已恢复才回配置档（⑥），仍糊就说明链路确实只有这么多 |
 | 每 23s 左右断一次、20s 连接超时 | `/api/backpack/video/state` 的 `initBytes` + 服务端是否 `stream reset` | ①（已修） |
+| **起流黑好大一会**（十几秒纯黑，之后自己出画） | `video/state` 的 `publisher` / `initBytes` / `lastFrameAgeSecs`；板端是否反复 `连接平台失败/断开` | ⑯：静帧 6s 就撤（已改成顶到 20s + 起流遮罩）、推流端重连后没补发 `video_start`（已修）、宽限 15s 偏紧（已回调 30s） |
 | 有画面但卡、`measure_bitrate` 远低于配置 | 板端 `ip route get 39.107.55.13`、`bw.py` | ② 路由走了慢速 dongle |
 | 反复 `lagged`、`left after ... kbps` 高于出口 | `speedtest-cli` 的 Upload vs 平均 kbps | ③ 降档位 / 升带宽 |
 | 画面很流畅，但就是**比现场晚几秒**（不卡、不报错） | `video/state` 的 `viewerLagSecs`、平台日志 `落后直播 x.xs` | ⑫ 观看端缓冲积压（旧版本会一直留着）。先按 ⑫ 的口诀确认板端没在涨积压 |

@@ -294,7 +294,9 @@ sqlite3 /opt/hz/rust-admin/robodog/data/robodog.db \
 
 - 延时 1~2s（WHEP 是 ~200ms），代价换「任何网络、任何浏览器都能看」；
 - **按需**：常驻 6 条 WS 连接（每条约 1KB），第一个观看者进来才起 ffmpeg，最后一个
-  离开后平台留 15s 宽限再由看门狗 `video_stop`（切页签 / 刷新不用重新起 ffmpeg）；
+  离开后平台留 30s 宽限再由看门狗 `video_stop`（切页签 / 刷新不用重新起 ffmpeg）；
+  推流端重连时若还有人在等、房间里却没字节，平台会补发 `video_start`（不然那条请求
+  已打在死连接上丢了，观看端要黑到前端 20s 超时）；
 - **默认转成 720p15 / 1.0Mbps**（`RELAY_PROFILE=light`，编码器自动挑
   `h264_rkmpp` → `h264_v4l2m2m` → `libx264`）：平台是阿里云 ECS，公网出口实测只有
   **≈2.5Mbps**，而 `dogcam` 是 1080p60、`-c:v copy` 会原样推 4~8Mbps —— 观看端追不上
