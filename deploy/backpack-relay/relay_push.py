@@ -35,6 +35,7 @@ WebRTC 的 ~200ms 变成 1~2s，收益是任何网络、任何浏览器都能看
 | `RELAY_RTSP_URL` | — | 平台 mediamtx 的推流地址**前缀**，如 `rtsp://relay:<口令>@39.107.55.13:8554/bp_`（口令见平台 `/opt/hz/rust-admin/mediamtx-publish-url.txt`）。不配就整个走 `ws` |
 | `RELAY_RTSP_FALLBACK` | `600` | rtsp 连续失败后退回 ws 并保持多久（秒），到期再试 |
 | `RELAY_RTSP_CONNECT_TIMEOUT` | `10` | 等 ffmpeg 连上本地中转端口的时限（秒） |
+| `RELAY_RTSP_BATCH_BYTES` / `_SECS` | `24576` / `0.06` | rtsp 通路攒这么多字节 / 这么久再写。**别关**：逐包转发会把上行 TCP 卡在 cwnd=10，高 RTT 下吞吐只有 ~0.5Mbps（实测聚合后 0.55 → 1.03Mbps） |
 | `RELAY_ROOM_PREFIX` | `bp:` | 房间前缀，必须与服务端 `video.rs::BACKPACK_ROOM_PREFIX` 一致 |
 | `RELAY_FFMPEG` | `ffmpeg` | ffmpeg 路径 |
 | `RELAY_PROFILE` | `light` | 输出档位：`light`（默认，缩到 720p20 / 1.2Mbps）/ `copy`（只换容器）/ `transcode`（同 light）。**平台页面「系统设置 → 视频中继」下发默认档位后以平台为准**（见下面「平台默认档位」） |
@@ -167,6 +168,18 @@ RTSP_PUSH = os.environ.get("RELAY_RTSP_URL", "").strip()
 RTSP_FALLBACK = float(os.environ.get("RELAY_RTSP_FALLBACK", "600"))
 # 等 ffmpeg 连上本地中转端口的上限（秒）：超时说明 ffmpeg 起不来，按失败处理
 RTSP_CONNECT_TIMEOUT = float(os.environ.get("RELAY_RTSP_CONNECT_TIMEOUT", "10"))
+
+# rtsp 通路一次写多少字节 / 最多攒多久（毫秒）再写。
+#
+# 为什么要聚合（2026-11-19 现场实测，板端 4G → 平台）：
+# `-f rtsp -rtsp_transport tcp` 的 ffmpeg 每个 RTP 包（~1400B）单独 write()，我们按
+# 「读到就写」转发时，上行 TCP 变成 **application-limited**：cwnd 停在初始 10 个段
+# （≈13KB），叠加上行 96ms RTT + 延迟 ACK，吞吐天花板 ≈ 0.5Mbps —— 而同一块板子的链路
+# 裸测 8Mbps、同一套编码参数走 FLV/WS 通路能跑满 1000kbps。攒到 24KB / 60ms 再写，
+# 实测从 0.55Mbps 回到 1.03Mbps（drain 占用 70% → 1%，不再误判拥塞降档）。
+# 别调到 64KB/200ms：那样变成突发，实测更差（0.57Mbps），而且白加 200ms 延迟。
+RTSP_BATCH_BYTES = int(os.environ.get("RELAY_RTSP_BATCH_BYTES", str(24 * 1024)))
+RTSP_BATCH_SECS = float(os.environ.get("RELAY_RTSP_BATCH_SECS", "0.06"))
 
 # rtsp 通路的运行时状态：连续失败次数 / 到什么时刻之前别再试
 _rtsp_failures = 0
@@ -1906,6 +1919,34 @@ class StreamSession:
             asyncio.create_task(self._restart(ws))
             return
 
+    async def _read_batch(self, reader) -> bytes:
+        """攒够 `RTSP_BATCH_BYTES` 或等满 `RTSP_BATCH_SECS` 再交给上行（rtsp 通路）
+
+        ⚠️ 第一块**必须阻塞等**（无超时）：它是 RTSP 握手 / 数据流的起点，等不到就是
+        「没数据」。`RTSP_BATCH_SECS` 只用于「已经拿到一块、还想多凑一点」的阶段 ——
+        把超时套在第一次读上会让空闲瞬间返回空字节，被 `_pump` 当成 EOF，于是每次都在
+        握手第一步就把流判死（2026-11-19 实测：`推流结束：1 个分片 / 89B` 反复刷屏）。
+        """
+        first = await reader.read(RTSP_BATCH_BYTES)
+        if not first:
+            return b""  # EOF：ffmpeg 退出 / 上行断了
+        buf = bytearray(first)
+        deadline = time.monotonic() + RTSP_BATCH_SECS
+        while len(buf) < RTSP_BATCH_BYTES:
+            timeout = deadline - time.monotonic()
+            if timeout <= 0:
+                break
+            try:
+                chunk = await asyncio.wait_for(
+                    reader.read(RTSP_BATCH_BYTES - len(buf)), timeout
+                )
+            except asyncio.TimeoutError:
+                break
+            if not chunk:
+                break
+            buf.extend(chunk)
+        return bytes(buf)
+
     async def _pump(self, ws) -> None:
         """把上行字节搬出去并记账（两条通路共用这一份逻辑）。
 
@@ -1922,7 +1963,13 @@ class StreamSession:
         first = True
         try:
             while True:
-                chunk = await reader.read(CHUNK_BYTES)
+                # rtsp 通路先攒一小段再写（原因见 RTSP_BATCH_BYTES 的注释：小分片会把
+                # 上行 TCP 卡在 cwnd=10，高 RTT 下吞吐只有 0.5Mbps）
+                chunk = (
+                    await self._read_batch(reader)
+                    if self._output == "rtsp"
+                    else await reader.read(CHUNK_BYTES)
+                )
                 if not chunk:
                     break
                 if first:

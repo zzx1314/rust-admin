@@ -88,7 +88,10 @@ HTTP」模式。两者共用同一个服务令牌，见 `business/README.md`。
 就是它 —— **前端不能靠猜**（两条通路都表现为「房间里有推流端」）。WHEP 模式下浏览器
 仍开一条 `.../video/ws?media=0`：只计数/触发 `video_start`，不传媒体（没有它按需推流
 和 30s 看门狗都不工作）。`auto`（默认）在 rtsp 连续失败两次时退回 `ws`，所以
-「云上 mediamtx 挂了 / 8554 没放通」表现为画面还在、只是慢一点。改这块先读
+「云上 mediamtx 挂了 / 8554 没放通」表现为画面还在、只是慢一点。**rtsp 通路的字节必须
+聚合后再写**（`RELAY_RTSP_BATCH_*`，24KB/60ms）：ffmpeg 每包 write 的话上行 TCP 是
+app-limited、cwnd 停在 10 个段，4G 的 96ms RTT 把吞吐压到 ~0.5Mbps（现场实测 0.55 →
+1.03Mbps，drain 占用 70% → 1%）。改这块先读
 `business/docs/backpack-video-integration.md` §7。
 
 中继画质是**板端自适应**的（`deploy/backpack-relay/relay_push.py`）：5s 窗口内 `ws.send`
