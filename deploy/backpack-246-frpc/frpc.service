@@ -1,0 +1,14 @@
+[Unit]
+Description=frp client (backpack .246 ssh -> 39.107.55.13:3006)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/frp/frpc -c /etc/frp/frpc.toml
+Restart=always
+RestartSec=5
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

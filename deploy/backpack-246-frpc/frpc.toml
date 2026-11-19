@@ -1,0 +1,21 @@
+# `.246` 背包机 → 公网 39.107.55.13（frps v0.68.0，bindPort 8090）
+# 用途：把本机 22 端口映射到公网 39.107.55.13:3006，外网直接 ssh 运维
+#   ssh -p 3006 root@39.107.55.13   →   192.168.41.246:22
+# 装到：/etc/frp/frpc.toml（600）；unit 见同目录 frpc.service
+serverAddr = "39.107.55.13"
+serverPort = 8090
+
+# frps 目前未配 auth.token（历史遗留，见 deploy/backpack-246.md §4.2）。
+# 首连失败不退出：4G 拨号 / 路由切换期间靠 frpc 自己重试，别让 systemd 打出
+# 一堆 start-stop 日志。
+loginFailExit = false
+
+log.level = "info"
+log.maxDays = 7
+
+[[proxies]]
+name = "backpack-246-ssh"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 22
+remotePort = 3006

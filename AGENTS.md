@@ -247,9 +247,11 @@ RKNN、真相机、Wi-Fi/4G 出口切换不能模拟（要真机）；细节与�
 （含 `.234`/`.1` 的 `robots_dog_msgs` 版本不一致导致 `dog_task` 崩溃、
 以及**用官方 APK 可以正常执行任务的临时方案**）见 `deploy/robodog-issues-2026-11-14.md`。
 部署与现场发布流程见 `deploy/README.md`。
-背包机 `.246` 本身（7 个 unit、`/opt/backpack-relay`、`/opt/robodog/client`、
+背包机 `.246` 本身（8 个 unit、`/opt/backpack-relay`、`/opt/robodog/client`、
 `/root/261113/backpack_dashboard`、mediamtx 的 7 条 path、`dispatcher.d` 路由脚本、
 `/etc/robodog/client.toml` 等）的位置与环境变量见 `deploy/backpack-246.md`。
+人不在现场同网段时，走它上面那条 frpc 反向隧道：`ssh -p 3006 root@39.107.55.13`
+（公网 frps `:8090` → `.246:22`，出网走 4G；仓库 `deploy/backpack-246-frpc/`）。
 
 ## Important Notes
 

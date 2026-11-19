@@ -48,6 +48,7 @@ default via 192.168.234.1  dev eth0            metric 1000   # netplan 兜底
 | `site-console.service` | 现场控制台门户：静态页 + 把 `/api` 转到平台，给同网段的浏览器用 | `8080` | `/opt/site-console` → `python3 serve.py` | `deploy/site-console/` |
 | `4g-connect.service` | 厂商脚本：管理 4G dongle 拨号与默认路由（`Restart=always`，每轮会重建默认路由） | — | `/usr/local/bin/4g-connect.sh` | 不在仓库（厂商） |
 | `ota_service.service` | 厂商 OTA | — | — | 不在仓库（厂商） |
+| `frpc.service` | **外网运维隧道**：本机 22 → 公网 `39.107.55.13:3006`（见 §4.2） | 无常驻端口（出站到 `frps:8090`） | `/opt/frp/frpc -c /etc/frp/frpc.toml` | `deploy/backpack-246-frpc/` |
 
 `ss -lnt` 实测监听：`22`（ssh）、`8000`（Agent）、`8080`（site-console）、`8554`/`8888`/`8889`（mediamtx）。
 
@@ -83,6 +84,7 @@ default via 192.168.234.1  dev eth0            metric 1000   # netplan 兜底
 ├── camera-init.service                  相机初始化
 ├── robodog-device-client.service        客户端 unit（仓库：business/client/deploy/）
 ├── site-console.service                 控制台 unit
+├── frpc.service                         外网 ssh 隧道 unit（仓库：deploy/backpack-246-frpc/）
 ├── 4g-connect.service                   厂商
 └── *.bak-*                              历史备份（逐个看过再删，见 §5）
 
@@ -92,6 +94,8 @@ default via 192.168.234.1  dev eth0            metric 1000   # netplan 兜底
                                          ⚠️ 目录里别再放可执行的 .bak：NM 会照样执行（见 §6）
 
 /etc/netplan/01-eth0.yaml                eth0 默认路由 metric（1000，避免抢 Wi-Fi/4G 出网）
+/opt/frp/frpc                            frpc v0.68.0 aarch64（不在仓库，见 §4.2）
+/etc/frp/frpc.toml                       frpc 配置（公网 frps + 22→3006 代理，600）
 /etc/robodog/client.toml                 客户端配置（平台地址、token、本体地址）
 /etc/robodog/client.env                  客户端环境变量（EnvironmentFile，含敏感项，600）
 /usr/local/bin/4g-connect.sh             厂商 4G 拨号脚本（改过 eth0 metric，见 §6）
@@ -202,6 +206,28 @@ cat /proc/meminfo | grep Cma
 curl -s localhost:8000/api/relay/status   # decoder 应为 h264_rkmpp
 ```
 
+## 4.2 2026-11-19 晚：装 frpc，公网 `3006` → 本机 `22`
+
+现场不在同一网段时这台机器完全失联，于是复用了公网那台已有的 `frps`
+（`39.107.55.13:8090`，就是占着 3000 的那个）做一条反向隧道：
+
+```
+ssh -p 3006 root@39.107.55.13  →  frps  →  .246 的 frpc  →  127.0.0.1:22
+```
+
+- 板端：`/opt/frp/frpc`（frp **v0.68.0 aarch64**，与公网 `frps` 同版本）、
+  `/etc/frp/frpc.toml`、`/etc/systemd/system/frpc.service`（`enable --now` + `Restart=always`）；
+  仓库副本 `deploy/backpack-246-frpc/`（含 README 的安装/验证/回滚）
+- 公网侧**没改动**：`frps.toml` 只有 `bindPort = 8090`，没有 `allowPorts`，
+  远端端口默认放开；3006 在阿里云安全组里本来就通
+- 隧道跑在 4G 上（`ip route get 39.107.55.13` → `enx…`，metric 100），
+  Wi-Fi 掉了不影响；4G 重拨时 `loginFailExit = false` + `Restart=always` 自己重连
+- ⚠️ `frps` **没有配 `auth.token`**（历史和现有客户端都这样），任何能连 8090 的人都能
+  抢占远端端口；隧道里只走 key 登录，别传明文密码。要收紧得给 `frps.toml` 加
+  `auth.token` 并同步所有客户端（会重启 frps，3000/3005 那条隧道会短暂断）
+- 验证：公网 `ss -lntp | grep 3006` 有 `frps` 监听 + 任意外网机器
+  `ssh -p 3006 root@39.107.55.13 'hostname'` → `ubuntu-arm64`
+
 ## 5. 备份文件现状与清理建议
 
 | 位置 | 数量 / 体积 | 说明 |
@@ -234,7 +260,11 @@ curl -s localhost:8000/api/relay/status   # decoder 应为 h264_rkmpp
 
 ```bash
 # 状态
-systemctl status backpack-relay backpack-agent robodog-device-client site-console --no-pager
+systemctl status backpack-relay backpack-agent robodog-device-client site-console frpc --no-pager
+
+# 外网 ssh 隧道（frpc → 39.107.55.13:3006）
+journalctl -u frpc -f | grep -E "login|proxy|start"
+systemctl restart frpc
 ip route get 39.107.55.13; ip route show default; ip route show 39.107.55.13/32
 
 # 视频中继
@@ -273,5 +303,6 @@ ssh root@192.168.41.246 'systemctl daemon-reload && systemctl restart backpack-r
 | `deploy/backpack-relay/test_relay_push.py`、`measure_bitrate.py`、`latency_probe.py` | `/opt/backpack-relay/`（可选，现场自测用） | `scp` |
 | `business/client/` | `/opt/robodog/client/robodog-device-client` | `business/client/deploy/build-aarch64.sh` 交叉编译 + `scp` |
 | `deploy/site-console/` | `/opt/site-console/`（`serve.py` + `web/`） | `scp` 构建产物 + `restart site-console` |
+| `deploy/backpack-246-frpc/frpc.toml`、`frpc.service` | `/etc/frp/frpc.toml`、`/etc/systemd/system/frpc.service` | `scp` + `daemon-reload` + `restart frpc`（二进制手工 `scp`，见其 README） |
 | — | `/root/261113/backpack_dashboard/`（Agent） | `business/backpack_dashboard/` | 改完 `rsync backend/` + `systemctl restart backpack-agent`（模型/so 一并同步，见该目录 AGENTS.md） |
 | — | `/var/snap/mediamtx/common/mediamtx.yml` | 不在本仓库，现场按 §3 的 7 条 path 配 |
