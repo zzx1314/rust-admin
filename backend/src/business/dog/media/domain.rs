@@ -88,6 +88,35 @@ pub struct UploadMediaRequest {
     pub media_name: Option<String>,
 }
 
+/// 压缩包回传的批次描述（客户端一次传 N 张）。
+///
+/// `entries` 与 zip 包内文件名一一对应：中台只处理「元数据里声明过」的条目，
+/// 因此批量上传不能夹带任意文件。
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UploadMediaBatch {
+    pub device_code: Option<String>,
+    pub park_code: Option<String>,
+    pub source: Option<String>,
+    pub entries: Vec<UploadMediaEntry>,
+}
+
+/// 压缩包里的一个条目（`name` = 包内文件名，如 `0001.jpg`）
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UploadMediaEntry {
+    pub name: String,
+    pub plan_id: Option<String>,
+    pub plan_name: Option<String>,
+    pub point_index: Option<i32>,
+    pub point_name: Option<String>,
+    pub captured_at: Option<String>,
+    pub source: Option<String>,
+    /// 原始文件名等说明（客户端把原名放这里）
+    pub remarks: Option<String>,
+    pub media_name: Option<String>,
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaVO {

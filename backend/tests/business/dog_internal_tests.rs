@@ -477,7 +477,11 @@ async fn media_upload_lands_in_dog_media_and_dedupes_by_sha256() {
     service.delete(id).await.expect("删除应成功");
     let revived = upload_media(&base, &info, "dogcam_01.jpg", jpeg_bytes(1)).await;
     assert_eq!(revived["data"]["created"], json!(true));
-    assert_eq!(revived["data"]["media"]["id"], json!(id), "应恢复同一条记录");
+    assert_eq!(
+        revived["data"]["media"]["id"],
+        json!(id),
+        "应恢复同一条记录"
+    );
     let record = service.get_by_id(id).await.expect("恢复后应可查询");
     assert_eq!(record.is_deleted, 0, "恢复后 is_deleted 必须清回 0");
     assert_eq!(record.device_code.as_deref(), Some("RD-201"));
@@ -548,4 +552,220 @@ async fn media_config_exposes_seeded_capture_settings() {
     assert_eq!(body["code"], json!(10200), "{body}");
     assert_eq!(body["data"]["pictureDir"], "/media/media-data/picture");
     assert_eq!(body["data"]["frames"], 3);
+}
+
+/// 客户端现行方式：一个 zip 传 N 张（`mediaInfo.entries` 逐条目带计划/航点）。
+#[tokio::test]
+async fn media_zip_upload_stores_every_declared_entry() {
+    let mut state = test_state(Some(TOKEN)).await;
+    let upload_dir = std::env::temp_dir().join(format!(
+        "zentai-media-zip-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&upload_dir);
+    state.upload_dir = upload_dir.clone();
+    let service = state.dog_media_service.clone();
+    let base = spawn_zentai(state).await;
+
+    // 包内 4 个条目：2 个正常、1 个没在 entries 里声明、1 个名字不合法（声明了也不用）
+    let zip_bytes = media_zip(&[
+        ("0001.jpg", jpeg_bytes(11)),
+        ("0002.jpg", jpeg_bytes(12)),
+        ("0003.jpg", jpeg_bytes(13)),
+        ("../evil.jpg", jpeg_bytes(14)),
+    ]);
+    let info = json!({
+        "deviceCode": "RD-201",
+        "source": "ai-patrol",
+        "entries": [
+            {"name": "0001.jpg", "planId": "TK-9", "pointIndex": 0, "capturedAt": "2026-11-20 10:00:00", "remarks": "dogcam_01.jpg"},
+            {"name": "0002.jpg", "planId": "TK-9", "pointIndex": 2, "capturedAt": "2026-11-20 10:00:02", "remarks": "dogcam_02.jpg"},
+            {"name": "../evil.jpg", "planId": "TK-9", "pointIndex": 0},
+        ],
+    });
+    let body = upload_media_zip(&base, &info, zip_bytes).await;
+    assert_eq!(body["code"], json!(10200), "批量上传应成功：{body}");
+    let data = &body["data"];
+    assert_eq!(data["total"], 4);
+    assert_eq!(data["failed"], 2, "未声明与非法名各算一个失败");
+    let results = data["results"].as_array().expect("results 数组");
+    let by_name = |name: &str| {
+        results
+            .iter()
+            .find(|item| item["name"] == name)
+            .unwrap_or_else(|| panic!("缺少条目 {name}：{results:?}"))
+    };
+    assert_eq!(by_name("0001.jpg")["ok"], json!(true));
+    assert_eq!(by_name("0002.jpg")["ok"], json!(true));
+    assert_eq!(
+        by_name("0003.jpg")["ok"],
+        json!(false),
+        "未声明的条目必须拒绝"
+    );
+    assert!(
+        by_name("../evil.jpg")["ok"] == json!(false),
+        "包内名不合法必须拒绝"
+    );
+    let (id1, id2) = (
+        by_name("0001.jpg")["mediaId"].as_i64().expect("媒体 id"),
+        by_name("0002.jpg")["mediaId"].as_i64().expect("媒体 id"),
+    );
+
+    let first = service.get_by_id(id1).await.expect("第一条应可查");
+    assert_eq!(first.plan_id.as_deref(), Some("TK-9"));
+    assert_eq!(first.point_index, Some(0));
+    assert_eq!(first.device_code.as_deref(), Some("RD-201"));
+    assert_eq!(first.source.as_deref(), Some("ai-patrol"));
+    let second = service.get_by_id(id2).await.expect("第二条应可查");
+    assert_eq!(second.point_index, Some(2));
+
+    // 两张图各自落盘（一张一条记录、一个文件）
+    let files = std::fs::read_dir(upload_dir.join("media/RD-201/TK-9/pt0"))
+        .expect("航点目录应存在")
+        .flatten()
+        .filter(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("jpg"))
+        .count();
+    assert!(files >= 1, "pt0 下应至少有一张图");
+
+    // 同一个包重传：全部按 sha256 命中已有记录，不新增行（客户端据此删板端文件）
+    let again = upload_media_zip(
+        &base,
+        &json!({
+            "deviceCode": "RD-201",
+            "entries": [
+                {"name": "0001.jpg", "planId": "TK-9", "pointIndex": 0},
+                {"name": "0002.jpg", "planId": "TK-9", "pointIndex": 2},
+            ],
+        }),
+        media_zip(&[("0001.jpg", jpeg_bytes(11)), ("0002.jpg", jpeg_bytes(12))]),
+    )
+    .await;
+    let results = again["data"]["results"].as_array().expect("results");
+    assert!(
+        results
+            .iter()
+            .all(|item| item["ok"] == json!(true) && item["created"] == json!(false)),
+        "重复包应全部命中已有记录：{results:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&upload_dir);
+}
+
+fn media_zip(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let cursor = std::io::Cursor::new(Vec::new());
+    let mut writer = zip::ZipWriter::new(cursor);
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (name, bytes) in entries {
+        use std::io::Write;
+        writer.start_file(*name, options).expect("写入条目");
+        writer.write_all(bytes).expect("写入内容");
+    }
+    writer.finish().expect("生成 zip").into_inner()
+}
+
+async fn upload_media_zip(base: &str, info: &Value, bytes: Vec<u8>) -> Value {
+    let form = reqwest::multipart::Form::new()
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(bytes)
+                .file_name("media.zip")
+                .mime_str("application/zip")
+                .expect("mime"),
+        )
+        .text("mediaInfo", info.to_string());
+    let response = reqwest::Client::new()
+        .post(format!("{base}/api/dogInternal/media/upload"))
+        .header("x-service-token", TOKEN)
+        .multipart(form)
+        .send()
+        .await
+        .expect("zip upload request");
+    json(response).await
+}
+
+/// 「参数配置」页改的两项是板端媒体目录的真源：写图（`ai_start`）与回传
+/// （`同步媒体` 指令 / 客户端扫描）都读它，写坏了要回退默认值而不是卡住巡检。
+#[tokio::test]
+async fn media_capture_config_reads_params_and_falls_back_on_garbage() {
+    use x_rust::business::dog::config::domain::UpdateConfigRequest;
+    use x_rust::business::dog::media::service::{DEFAULT_MEDIA_PICTURE_DIR, load_capture_config};
+
+    let state = test_state(Some(TOKEN)).await;
+    let configs = state
+        .dog_config_service
+        .list_all()
+        .await
+        .expect("配置表应可读");
+    let by_name = |name: &str| {
+        configs
+            .iter()
+            .find(|config| config.config_name == name)
+            .unwrap_or_else(|| panic!("缺少预置配置 {name}"))
+            .id
+    };
+    let dir_id = by_name("media_picture_dir");
+    let frames_id = by_name("media_frames");
+
+    // 正常值：原样生效
+    state
+        .dog_config_service
+        .update(
+            dir_id,
+            UpdateConfigRequest {
+                config_name: None,
+                config_value: Some("/data/picture".to_string()),
+                description: None,
+            },
+        )
+        .await
+        .expect("改目录");
+    state
+        .dog_config_service
+        .update(
+            frames_id,
+            UpdateConfigRequest {
+                config_name: None,
+                config_value: Some("5".to_string()),
+                description: None,
+            },
+        )
+        .await
+        .expect("改帧数");
+    let config = load_capture_config(&state.dog_config_service).await;
+    assert_eq!(config.picture_dir, "/data/picture");
+    assert_eq!(config.frames, 5);
+
+    // 写坏（相对路径 / 超出 1~10）：逐项回退，不影响另一个合法值
+    state
+        .dog_config_service
+        .update(
+            dir_id,
+            UpdateConfigRequest {
+                config_name: None,
+                config_value: Some("../etc".to_string()),
+                description: None,
+            },
+        )
+        .await
+        .expect("改坏目录");
+    state
+        .dog_config_service
+        .update(
+            frames_id,
+            UpdateConfigRequest {
+                config_name: None,
+                config_value: Some("99".to_string()),
+                description: None,
+            },
+        )
+        .await
+        .expect("改大帧数");
+    let config = load_capture_config(&state.dog_config_service).await;
+    assert_eq!(
+        config.picture_dir, DEFAULT_MEDIA_PICTURE_DIR,
+        "坏路径回退默认"
+    );
+    assert_eq!(config.frames, 10, "帧数上限 10");
 }

@@ -10,19 +10,27 @@
 //!   → 业务平台 push_command（原样透传 params）
 //!     → 设备 WS：command = 同步媒体
 //!       → 本模块扫 /media/media-data/picture/<planId>/pt<n>/*.jpg
-//!         → 逐张 POST {业务平台}/api/media/ingest（file + mediaInfo）
-//!           → 业务平台转发中台 /api/dogInternal/media/upload → dog_media
-//!             → 中台「媒体资源」页展示
+//!         → 每 BATCH_MAX_FILES 张打成一个 zip（Stored，不重复压缩 JPEG）
+//!           → POST {业务平台}/api/media/ingest（file=zip + mediaInfo.entries）
+//!             → 业务平台转发中台 /api/dogInternal/media/upload
+//!               → 中台解包，逐张入库 + 落盘（一张一条 `dog_media`）
+//!                 → 中台「媒体资源」页展示
 //! ```
+//!
+//! 为什么打 zip：一轮巡检几十张，按张请求在 4G 上握手开销占比太高；打包后一次
+//! 握手传 8 张。**入库粒度仍是一张一条**（媒体页要逐张预览），所以中台返回
+//! `results[]`，客户端**只删返回 `ok` 的那几张**，失败的留在板端下次重试。
 //!
 //! 板端文件**上传成功才删**（中台按 sha256 去重，`created=false` 也算成功），
 //! 删完把空的 `pt<n>/`、计划目录一起收掉，避免 SSD 被巡检图写满。
 //!
 //! 与 `mapupload` 的分工：那边回传地图包（走 `/api/map-versions/ingest`），
-//! 这边只回传图片（走 `/api/media/ingest`），登录与 multipart 约定完全一致。
+//! 这边只回传图片（走 `/api/media/ingest`），登录约定一致。
 
 use robodog_device_client::config::Config;
 use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use tracing::{info, warn};
@@ -36,8 +44,15 @@ pub const DEFAULT_FRAMES: usize = 3;
 pub const MAX_FILES_PER_RUN: usize = 200;
 /// 单张图片上限，与业务平台 / 中台保持一致（8MB）。
 const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
-/// 连续失败几次就中止本轮（网络断了没必要把几百张都试一遍）。
+/// 一个压缩包最多装几张。8 张 ≈ 2.4MB，4G 上约 20~30s 一个包；
+/// 太少省不下握手、太多单包重传代价大。
+const BATCH_MAX_FILES: usize = 8;
+/// 一个压缩包的**原始字节**上限（JPEG 已压缩，zip 用 Stored 只做打包）。
+const BATCH_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// 连续失败几次（按张计）就中止本轮（网络断了没必要把几百张都试一遍）。
 const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+/// 单个压缩包上传超时：8MB 在弱网（~1Mbps）也要 1 分钟以上
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// 一张待回传的图片
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +63,13 @@ pub struct MediaFile {
     pub size: u64,
 }
 
+/// 压缩包里的一个条目（`zip_name` 是包内名，元数据里的原名在 `remarks`）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchEntry {
+    pub zip_name: String,
+    pub file: MediaFile,
+}
+
 /// 一次同步的结果（`Display` 直接作为指令回执文案给中台审计看）。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SyncSummary {
@@ -56,6 +78,7 @@ pub struct SyncSummary {
     pub existing: usize,
     pub deleted: usize,
     pub failed: usize,
+    pub batches: usize,
     pub errors: Vec<String>,
     pub picture_dir: String,
 }
@@ -64,13 +87,14 @@ impl std::fmt::Display for SyncSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "媒体回传完成：扫描 {} 张，上传成功 {}（新增 {} / 已存在 {}），失败 {}，已删除板端文件 {}（目录 {}）",
+            "媒体回传完成：扫描 {} 张，上传成功 {}（新增 {} / 已存在 {}），失败 {}，已删除板端文件 {}，共 {} 个压缩包（目录 {}）",
             self.scanned,
             self.uploaded,
             self.uploaded.saturating_sub(self.existing),
             self.existing,
             self.failed,
             self.deleted,
+            self.batches,
             self.picture_dir
         )?;
         if !self.errors.is_empty() {
@@ -211,6 +235,80 @@ pub fn collect_files(
     Ok(files)
 }
 
+/// 按「每包 8 张 / 8MB」把待传图片切成压缩包批次。
+pub fn build_batches(files: Vec<MediaFile>) -> Vec<Vec<BatchEntry>> {
+    let mut batches = Vec::new();
+    let mut current: Vec<BatchEntry> = Vec::new();
+    let mut current_bytes = 0u64;
+    for file in files {
+        let overflow = !current.is_empty()
+            && (current.len() >= BATCH_MAX_FILES
+                || current_bytes.saturating_add(file.size) > BATCH_MAX_BYTES as u64);
+        if overflow {
+            batches.push(std::mem::take(&mut current));
+            current_bytes = 0;
+        }
+        let zip_name = zip_entry_name(current.len() + 1, &file.path);
+        current_bytes = current_bytes.saturating_add(file.size);
+        current.push(BatchEntry { zip_name, file });
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
+}
+
+/// 包内文件名：`0001.jpg` —— **纯 ASCII**。
+///
+/// zip 里的中文名在不同 `unzip` 实现里会乱码（板端/运维会用 CLI 解包排查），
+/// 原名放 `mediaInfo.entries[].remarks`，入中台后进 `dog_media.remarks`。
+fn zip_entry_name(seq: usize, path: &Path) -> String {
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .unwrap_or_else(|| "jpg".to_string());
+    format!("{seq:04}.{ext}")
+}
+
+/// 把一批图片打成 zip（`Stored`：JPEG 已经压缩过，Deflate 只烧板子 CPU）。
+async fn build_zip(entries: &[BatchEntry]) -> Result<Vec<u8>, String> {
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .unix_permissions(0o644);
+    let mut total = 0usize;
+    for entry in entries {
+        let bytes = tokio::fs::read(&entry.file.path)
+            .await
+            .map_err(|error| format!("读取 {} 失败: {error}", entry.zip_name))?;
+        if bytes.is_empty() {
+            return Err(format!("{} 是空文件", entry.file.path.display()));
+        }
+        if bytes.len() > MAX_IMAGE_BYTES {
+            return Err(format!(
+                "{} 超过 8MB 上限（{} 字节）",
+                entry.file.path.display(),
+                bytes.len()
+            ));
+        }
+        total += bytes.len();
+        writer
+            .start_file(entry.zip_name.clone(), options)
+            .map_err(|error| format!("写入 {} 失败: {error}", entry.zip_name))?;
+        writer
+            .write_all(&bytes)
+            .map_err(|error| format!("写入 {} 失败: {error}", entry.zip_name))?;
+    }
+    if total == 0 {
+        return Err("没有可打包的图片".to_string());
+    }
+    let cursor = writer
+        .finish()
+        .map_err(|error| format!("生成压缩包失败: {error}"))?;
+    Ok(cursor.into_inner())
+}
+
 /// `pt3` → `3`；不匹配（`ptx` / `preview`）返回 None。
 pub fn parse_point_index(name: &str) -> Option<i32> {
     let rest = name.strip_prefix("pt")?;
@@ -227,19 +325,6 @@ fn is_image(path: &Path) -> bool {
         .unwrap_or_default()
         .to_ascii_lowercase();
     matches!(ext.as_str(), "jpg" | "jpeg" | "png")
-}
-
-fn content_type(path: &Path) -> &'static str {
-    if path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or_default()
-        .eq_ignore_ascii_case("png")
-    {
-        "image/png"
-    } else {
-        "image/jpeg"
-    }
 }
 
 fn captured_at(path: &Path) -> String {
@@ -263,60 +348,190 @@ pub async fn sync(params: Option<&Value>, config: &Config) -> Result<String, Str
             picture_dir.display()
         ));
     }
+    let batches = build_batches(files);
+    let total: usize = batches.iter().map(Vec::len).sum();
     info!(
-        "同步媒体：{} 下找到 {} 张待回传图片（每航点上限 {frames} 张）",
+        "同步媒体：{} 下找到 {} 张待回传图片（每航点上限 {frames} 张），分 {} 个压缩包",
         picture_dir.display(),
-        files.len()
+        total,
+        batches.len()
     );
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
+        .timeout(UPLOAD_TIMEOUT)
         .build()
         .map_err(|error| format!("构造 HTTP 客户端失败: {error}"))?;
     let api_base = config.resolve_api_base();
     let token = login(&client, &api_base, config).await?;
 
     let mut summary = SyncSummary {
-        scanned: files.len(),
+        scanned: total,
+        batches: batches.len(),
         picture_dir: picture_dir.display().to_string(),
         ..Default::default()
     };
     let mut consecutive_failures = 0u32;
-    for file in files {
-        match upload_one(&client, &api_base, &token, config, &file).await {
-            Ok(created) => {
-                consecutive_failures = 0;
-                summary.uploaded += 1;
-                if !created {
-                    summary.existing += 1;
-                }
-                // 中台已经收下（或是重复图）→ 板端这张就没有第二次用途了
-                if remove_file(&file.path).await {
-                    summary.deleted += 1;
-                }
-                cleanup_empty_dirs(&picture_dir, &file).await;
-            }
+    for (index, entries) in batches.into_iter().enumerate() {
+        let outcomes = upload_batch(&client, &api_base, &token, config, &entries).await;
+        let outcomes = match outcomes {
+            Ok(outcomes) => outcomes,
             Err(error) => {
-                consecutive_failures += 1;
-                summary.failed += 1;
+                // 整包失败：条目没法归因，全部算失败（板端文件全留，下次重试）
+                consecutive_failures += entries.len() as u32;
+                summary.failed += entries.len();
                 if summary.errors.len() < 5 {
                     summary.errors.push(format!(
-                        "{}: {error}",
-                        file.path.file_name().unwrap_or_default().to_string_lossy()
+                        "压缩包 {}（{} 张）: {error}",
+                        index + 1,
+                        entries.len()
                     ));
                 }
-                warn!("同步媒体：上传失败 {}: {error}", file.path.display());
+                warn!("同步媒体：第 {} 个压缩包上传失败: {error}", index + 1);
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                     summary.errors.push(format!(
                         "连续 {consecutive_failures} 张失败，已中止本轮（板端文件保留，稍后重试）"
                     ));
                     break;
                 }
+                continue;
             }
+        };
+        for (entry, outcome) in entries.iter().zip(outcomes) {
+            let Some((ok, created)) = outcome else {
+                consecutive_failures += 1;
+                summary.failed += 1;
+                if summary.errors.len() < 5 {
+                    summary.errors.push(format!(
+                        "{}: 中台未返回该条目的结果",
+                        entry
+                            .file
+                            .path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                    ));
+                }
+                continue;
+            };
+            if !ok {
+                consecutive_failures += 1;
+                summary.failed += 1;
+                if summary.errors.len() < 5 {
+                    summary.errors.push(format!(
+                        "{}: 中台入库失败",
+                        entry
+                            .file
+                            .path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                    ));
+                }
+                continue;
+            }
+            consecutive_failures = 0;
+            summary.uploaded += 1;
+            if !created {
+                summary.existing += 1;
+            }
+            // 中台已经收下（或是重复图）→ 板端这张就没有第二次用途了
+            if remove_file(&entry.file.path).await {
+                summary.deleted += 1;
+            }
+            cleanup_empty_dirs(&picture_dir, &entry.file).await;
+        }
+        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+            summary.errors.push(format!(
+                "连续 {consecutive_failures} 张失败，已中止本轮（板端文件保留，稍后重试）"
+            ));
+            break;
         }
     }
     info!("同步媒体：{summary}");
     Ok(summary.to_string())
+}
+
+/// 上传一个压缩包。
+///
+/// 返回与 `entries` **同序**的结果：`None` = 中台没给这个条目的结论（按失败处理）。
+async fn upload_batch(
+    client: &reqwest::Client,
+    api_base: &str,
+    token: &str,
+    config: &Config,
+    entries: &[BatchEntry],
+) -> Result<Vec<Option<(bool, bool)>>, String> {
+    let zip_bytes = build_zip(entries).await?;
+    let meta: Vec<Value> = entries
+        .iter()
+        .map(|entry| {
+            json!({
+                "name": entry.zip_name,
+                "planId": entry.file.plan_id,
+                "pointIndex": entry.file.point_index,
+                "capturedAt": captured_at(&entry.file.path),
+                "source": "ai-patrol",
+                // 真原名（包内名是 0001.jpg 这种 ASCII）
+                "remarks": entry
+                    .file
+                    .path
+                    .file_name()
+                    .map(|value| value.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+            })
+        })
+        .collect();
+    let info = json!({
+        // 中台 `mediaInfo` 用 `deviceCode`（与地图回传的 `deviceId` 不同名）；
+        // 业务平台会再兜底复制一份，两个字段都在
+        "deviceCode": config.device_id,
+        "deviceId": config.device_id,
+        "source": "ai-patrol",
+        "entries": meta,
+    });
+    let part = reqwest::multipart::Part::bytes(zip_bytes)
+        .file_name(format!("media-{}.zip", config.device_id))
+        .mime_str("application/zip")
+        .map_err(|error| format!("构造上传体失败: {error}"))?;
+    let form = reqwest::multipart::Form::new()
+        .part("file", part)
+        .text("mediaInfo", info.to_string());
+    let url = format!("{}/api/media/ingest", api_base.trim_end_matches('/'));
+    let resp = client
+        .post(&url)
+        .bearer_auth(token)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|error| format!("请求业务服务失败: {error}"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("业务服务返回 HTTP {status}: {text}"));
+    }
+    let value: Value =
+        serde_json::from_str(&text).map_err(|error| format!("响应不是 JSON: {error}"))?;
+    let results = value
+        .get("data")
+        .and_then(|data| data.get("results"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("响应缺少 results: {text}"))?;
+    let mut by_name: HashMap<String, (bool, bool)> = HashMap::new();
+    for item in results {
+        let Some(name) = item.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let ok = item.get("ok").and_then(Value::as_bool).unwrap_or(false);
+        let created = item
+            .get("created")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        by_name.insert(name.to_string(), (ok, created));
+    }
+    Ok(entries
+        .iter()
+        .map(|entry| by_name.get(&entry.zip_name).copied())
+        .collect())
 }
 
 async fn login(
@@ -347,68 +562,6 @@ async fn login(
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| format!("登录响应缺少 token: {text}"))
-}
-
-/// 上传一张；返回 `created`（false = 中台按 sha256 判定已存在）。
-async fn upload_one(
-    client: &reqwest::Client,
-    api_base: &str,
-    token: &str,
-    config: &Config,
-    file: &MediaFile,
-) -> Result<bool, String> {
-    if file.size > MAX_IMAGE_BYTES as u64 {
-        return Err(format!("超过 8MB 上限（{} 字节）", file.size));
-    }
-    let bytes = tokio::fs::read(&file.path)
-        .await
-        .map_err(|error| format!("读取失败: {error}"))?;
-    if bytes.is_empty() {
-        return Err("文件为空".to_string());
-    }
-    let name = file
-        .path
-        .file_name()
-        .map(|value| value.to_string_lossy().to_string())
-        .unwrap_or_else(|| "frame.jpg".to_string());
-    let info = json!({
-        // 中台 `mediaInfo` 用 `deviceCode`（与地图回传的 `deviceId` 不同名）；
-        // 业务平台会再兜底复制一份，两个字段都在
-        "deviceCode": config.device_id,
-        "deviceId": config.device_id,
-        "planId": file.plan_id,
-        "pointIndex": file.point_index,
-        "capturedAt": captured_at(&file.path),
-        "source": "ai-patrol",
-        "remarks": name,
-    });
-    let part = reqwest::multipart::Part::bytes(bytes)
-        .file_name(name)
-        .mime_str(content_type(&file.path))
-        .map_err(|error| format!("构造上传体失败: {error}"))?;
-    let form = reqwest::multipart::Form::new()
-        .part("file", part)
-        .text("mediaInfo", info.to_string());
-    let url = format!("{}/api/media/ingest", api_base.trim_end_matches('/'));
-    let resp = client
-        .post(&url)
-        .bearer_auth(token)
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|error| format!("请求业务服务失败: {error}"))?;
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(format!("业务服务返回 HTTP {status}: {text}"));
-    }
-    let value: Value =
-        serde_json::from_str(&text).map_err(|error| format!("响应不是 JSON: {error}"))?;
-    Ok(value
-        .get("data")
-        .and_then(|data| data.get("created"))
-        .and_then(Value::as_bool)
-        .unwrap_or(true))
 }
 
 async fn remove_file(path: &Path) -> bool {
@@ -566,12 +719,100 @@ mod tests {
             existing: 1,
             deleted: 3,
             failed: 1,
+            batches: 1,
             errors: vec!["a.jpg: 超时".to_string()],
             picture_dir: "/media/media-data/picture".to_string(),
         };
         let text = summary.to_string();
         assert!(text.contains("扫描 4 张"), "{text}");
         assert!(text.contains("新增 2 / 已存在 1"), "{text}");
+        assert!(text.contains("共 1 个压缩包"), "{text}");
         assert!(text.contains("a.jpg: 超时"), "{text}");
+    }
+
+    fn media_file(
+        dir: &std::path::Path,
+        plan: &str,
+        point: i32,
+        name: &str,
+        size: u64,
+    ) -> MediaFile {
+        MediaFile {
+            path: dir.join(plan).join(format!("pt{point}")).join(name),
+            plan_id: plan.to_string(),
+            point_index: point,
+            size,
+        }
+    }
+
+    #[test]
+    fn batches_split_by_count_and_bytes() {
+        let dir = PathBuf::from("/media/media-data/picture");
+        // 9 张 1KB：按「每包 8 张」切成 8 + 1
+        let files: Vec<MediaFile> = (0..9)
+            .map(|index| media_file(&dir, "T-1", 0, &format!("{index}.jpg"), 1024))
+            .collect();
+        let batches = build_batches(files);
+        assert_eq!(batches.len(), 2, "每包最多 8 张");
+        assert_eq!(batches[0].len(), 8);
+        assert_eq!(batches[1].len(), 1);
+        assert_eq!(batches[0][0].zip_name, "0001.jpg", "包内名按序号，ASCII");
+        assert_eq!(batches[0][7].zip_name, "0008.jpg");
+        assert_eq!(batches[1][0].zip_name, "0001.jpg", "新包序号重新开始");
+
+        // 字节上限：单张 6MB 时一个包只装得下 1 张（8MB 上限）
+        let big: Vec<MediaFile> = (0..3)
+            .map(|index| media_file(&dir, "T-2", index, &format!("{index}.jpg"), 6 * 1024 * 1024))
+            .collect();
+        let batches = build_batches(big);
+        assert_eq!(batches.len(), 3, "6MB + 6MB 超过 8MB → 每张一包");
+        assert!(batches.iter().all(|batch| batch.len() == 1));
+
+        assert!(build_batches(Vec::new()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn zip_contains_every_entry_with_ascii_names() {
+        let root = tmp_root("zip");
+        let point = root.join("T-1").join("pt0");
+        std::fs::create_dir_all(&point).expect("创建航点目录");
+        let mut files = Vec::new();
+        for index in 0..2 {
+            let name = format!("dogcam_0{index}.jpg");
+            std::fs::write(point.join(&name), format!("jpeg-{index}")).expect("写图");
+            files.push(media_file(&root, "T-1", 0, &name, 6));
+        }
+        let entries: Vec<BatchEntry> = build_batches(files).into_iter().flatten().collect();
+        assert_eq!(entries.len(), 2);
+        let bytes = build_zip(&entries).await.expect("打包成功");
+        assert!(bytes.starts_with(b"PK\x03\x04"), "应是 zip 魔数");
+
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("能解包");
+        assert_eq!(archive.len(), 2);
+        let mut names = Vec::new();
+        for index in 0..archive.len() {
+            let entry = archive.by_index(index).expect("读条目");
+            names.push(entry.name().to_string());
+        }
+        assert_eq!(names, vec!["0001.jpg", "0002.jpg"]);
+        let mut first = archive.by_name("0001.jpg").expect("按名取");
+        let mut content = String::new();
+        std::io::Read::read_to_string(&mut first, &mut content).expect("读内容");
+        assert_eq!(content, "jpeg-0");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn zip_rejects_oversized_entry() {
+        let root = tmp_root("zip-big");
+        let point = root.join("T-1").join("pt0");
+        std::fs::create_dir_all(&point).expect("创建航点目录");
+        std::fs::write(point.join("big.jpg"), vec![0u8; 9 * 1024 * 1024]).expect("写大图");
+        // 扫描时只记大小，打包时按真实字节复核 8MB 上限
+        let files = vec![media_file(&root, "T-1", 0, "big.jpg", 9 * 1024 * 1024)];
+        let entries: Vec<BatchEntry> = build_batches(files).into_iter().flatten().collect();
+        let error = build_zip(&entries).await.expect_err("超 8MB 应拒绝");
+        assert!(error.contains("8MB"), "{error}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

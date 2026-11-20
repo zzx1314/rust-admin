@@ -543,7 +543,11 @@ async fn static_index_is_not_cached_and_assets_are_immutable() {
     let (state, _db) = test_state().await;
     let web = state.config.web_dist.clone();
     std::fs::create_dir_all(web.join("assets")).unwrap();
-    std::fs::write(web.join("index.html"), "<!doctype html><div id=\"app\"></div>").unwrap();
+    std::fs::write(
+        web.join("index.html"),
+        "<!doctype html><div id=\"app\"></div>",
+    )
+    .unwrap();
     std::fs::write(web.join("assets/app-abc123.js"), "console.log(1)").unwrap();
     let app = build_router(state);
 
@@ -1648,15 +1652,20 @@ mod zentai_service_token {
                         Some(TOKEN)
                     );
                     let mut saw_file = false;
+                    let mut saw_zip = false;
                     let mut info = Value::Null;
                     while let Some(field) = multipart.next_field().await.unwrap() {
                         match field.name() {
                             Some("file") => {
                                 let bytes = field.bytes().await.unwrap();
-                                assert!(
-                                    bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
-                                    "图片原字节应被原样转发"
-                                );
+                                if bytes.starts_with(b"PK\x03\x04") {
+                                    saw_zip = true;
+                                } else {
+                                    assert!(
+                                        bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
+                                        "图片原字节应被原样转发"
+                                    );
+                                }
                                 saw_file = true;
                             }
                             Some("mediaInfo") => {
@@ -1666,9 +1675,29 @@ mod zentai_service_token {
                             _ => {}
                         }
                     }
-                    assert!(saw_file, "必须收到图片文件");
+                    assert!(saw_file, "必须收到媒体文件");
                     assert_eq!(info["deviceCode"], "RD-001");
                     assert_eq!(info["deviceId"], "RD-001", "两份设备编号都要补齐");
+                    // 批量（zip）：业务平台不解包，只把条目元数据原样转发给中台
+                    if info.get("entries").is_some() {
+                        assert!(saw_zip, "带 entries 的必须是压缩包");
+                        assert_eq!(info["entries"].as_array().map(Vec::len), Some(2));
+                        assert_eq!(info["entries"][0]["name"], "0001.jpg");
+                        assert_eq!(info["entries"][0]["planId"], "TK-9");
+                        return axum::Json(serde_json::json!({
+                            "code": 10200,
+                            "msg": "success",
+                            "data": {
+                                "created": true,
+                                "total": 2,
+                                "failed": 0,
+                                "results": [
+                                    {"name": "0001.jpg", "ok": true, "created": true, "mediaId": 7},
+                                    {"name": "0002.jpg", "ok": true, "created": false, "mediaId": 8},
+                                ],
+                            },
+                        }));
+                    }
                     assert_eq!(info["planId"], "TK-9");
                     assert_eq!(info["pointIndex"], 2);
                     axum::Json(serde_json::json!({
@@ -1924,6 +1953,115 @@ mod zentai_service_token {
             .await
             .expect("media ingest");
         assert_eq!(response.status(), 400, "非图片必须拒绝");
+    }
+
+    /// 客户端现行方式：一个 zip 传 N 张。业务平台只验大小/形态 + 补设备信息，
+    /// 解包与逐张入库都在中台，响应原样带回 `results[]`（客户端按它删板端文件）。
+    #[tokio::test]
+    async fn media_zip_ingest_forwards_batch_to_zentai() {
+        let (base, token_calls) = spawn_fake_zentai().await;
+        let config = service_config(base);
+        let (state, _db) = test_state_with_token(Some(TOKEN)).await;
+        let state = AppState {
+            config: Arc::new(config),
+            ..state
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind api");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, build_router(state)).await;
+        });
+        let api = format!("http://{addr}");
+        let login: Value = reqwest::Client::new()
+            .post(format!("{api}/api/auth/login"))
+            .json(&serde_json::json!({"username": "admin", "password": "admin123"}))
+            .send()
+            .await
+            .expect("login")
+            .json()
+            .await
+            .expect("login json");
+        let token = login["data"]["token"].as_str().expect("token").to_string();
+
+        let info = serde_json::json!({
+            "deviceCode": "RD-001",
+            "source": "ai-patrol",
+            "entries": [
+                {"name": "0001.jpg", "planId": "TK-9", "pointIndex": 0, "capturedAt": "2026-11-20 10:00:00"},
+                {"name": "0002.jpg", "planId": "TK-9", "pointIndex": 0, "capturedAt": "2026-11-20 10:00:01"},
+            ],
+        });
+        let zip = media_zip(&[
+            ("0001.jpg", vec![0xFF, 0xD8, 0xFF, 0x01]),
+            ("0002.jpg", vec![0xFF, 0xD8, 0xFF, 0x02]),
+        ]);
+        let form = reqwest::multipart::Form::new()
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(zip)
+                    .file_name("media-RD-001.zip")
+                    .mime_str("application/zip")
+                    .expect("mime"),
+            )
+            .text("mediaInfo", info.to_string());
+        let response = reqwest::Client::new()
+            .post(format!("{api}/api/media/ingest"))
+            .bearer_auth(&token)
+            .multipart(form)
+            .send()
+            .await
+            .expect("zip media ingest");
+        assert_eq!(response.status(), 200, "压缩包回传应成功");
+        let body: Value = response.json().await.expect("json");
+        let results = body["data"]["results"].as_array().expect("results 数组");
+        assert_eq!(results.len(), 2);
+        assert_eq!(body["data"]["failed"], serde_json::json!(0));
+        assert_eq!(results[0]["created"], serde_json::json!(true));
+        assert_eq!(results[1]["created"], serde_json::json!(false));
+        assert_eq!(
+            token_calls.load(Ordering::SeqCst),
+            0,
+            "压缩包回传同样不该走账号登录"
+        );
+
+        // 压缩包但没带 entries：直接拒绝（不猜每张图属于哪个计划/航点）
+        let form = reqwest::multipart::Form::new()
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(media_zip(&[(
+                    "0001.jpg",
+                    vec![0xFF, 0xD8, 0xFF, 0x01],
+                )]))
+                .file_name("media-RD-001.zip")
+                .mime_str("application/zip")
+                .expect("mime"),
+            )
+            .text(
+                "mediaInfo",
+                serde_json::json!({"deviceCode": "RD-001"}).to_string(),
+            );
+        let response = reqwest::Client::new()
+            .post(format!("{api}/api/media/ingest"))
+            .bearer_auth(&token)
+            .multipart(form)
+            .send()
+            .await
+            .expect("zip media ingest");
+        assert_eq!(response.status(), 400, "缺 entries 必须拒绝");
+    }
+
+    fn media_zip(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        use std::io::Write;
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, bytes) in entries {
+            writer.start_file(*name, options).expect("写入条目");
+            writer.write_all(bytes).expect("写入内容");
+        }
+        writer.finish().expect("生成 zip").into_inner()
     }
 
     /// 中台已删除的地图不能算「已同步」，否则设备端永远不会重传。

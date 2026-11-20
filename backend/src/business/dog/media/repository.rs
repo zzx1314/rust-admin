@@ -74,11 +74,7 @@ impl SeaOrmDogMediaRepository {
     }
 
     /// 恢复一条被软删除的媒体记录（同一张图重新回传时用）。
-    pub async fn revive(
-        &self,
-        id: i64,
-        req: &CreateMediaRequest,
-    ) -> Result<Media, sea_orm::DbErr> {
+    pub async fn revive(&self, id: i64, req: &CreateMediaRequest) -> Result<Media, sea_orm::DbErr> {
         let now = chrono::Utc::now();
         MediaEntity::update(MediaActiveModel {
             id: ActiveValue::set(id),

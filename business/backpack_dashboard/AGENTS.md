@@ -117,7 +117,8 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/root/261113/bac
   2. `MEDIA_DATA_DIR/<plan_id>/pt<航点下标>/<cam>_<序号>_<时间戳>.jpg` + `result.json`
      —— **媒体归档**，给中台「媒体资源」用。命中时固定保存 `save_frames` 帧
      （取采样窗口里检出数最大的前 N 帧，每张都画框），中台设备页点「同步媒体」
-     后由客户端逐张回传、**传成功才删**。
+     后由客户端**按每包 8 张打 zip** 回传（中台解包后仍一张一条入库），
+     **只删 `results[].ok` 的条目**。
   目录/帧数的唯一真源是**中台「参数配置」**（`media_picture_dir` / `media_frames`），
   随 `ai_start` 的 `media_dir` / `save_frames` 下发；板端 `config.py` 的
   `MEDIA_DATA_DIR` / `DETECT_PLAN_SAVE_FRAMES` 只是没收到配置时的兜底。

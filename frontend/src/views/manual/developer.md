@@ -135,7 +135,7 @@ Authorization: Bearer <access_token>
 
 ```text
 中台 →（参数配置 media_picture_dir / media_frames）→ 业务平台 → 设备 WS
-  → 客户端逐张 POST {业务平台}/api/media/ingest (file + mediaInfo)
+  → 客户端每包 8 张打成 zip → POST {业务平台}/api/media/ingest (file=zip + mediaInfo.entries)
     → 业务平台转发 POST /api/dogInternal/media/upload（x-service-token）
       → dog_media + <upload_dir>/media/<设备>/<计划>/pt<n>/<sha256>.<ext>
         → 上传成功才删板端文件；同一张图（sha256）重复回传只留一条
@@ -146,7 +146,7 @@ Authorization: Bearer <access_token>
 | 接口 | 方法 | 说明 |
 | ---- | ---- | ---- |
 | `/api/dogInternal/media/config` | GET | `{ pictureDir, frames }`（业务平台组装 `ai_start` 时取，缓存 60s） |
-| `/api/dogInternal/media/upload` | POST | multipart：`file` + `mediaInfo`（`deviceCode`/`planId`/`pointIndex`/`capturedAt`/`source`；`deviceId` 也接受，服务端会统一），返回 `{ created, media }` |
+| `/api/dogInternal/media/upload` | POST | multipart。**单张**：`file`=JPG/PNG + `mediaInfo{deviceCode,planId,pointIndex,capturedAt,source}` → `{created, media}`；**压缩包**：`file`=zip + `mediaInfo{deviceCode,entries:[{name,planId,pointIndex,capturedAt,remarks}]}` → `{created,total,failed,results:[{name,ok,created,mediaId,error}]}` |
 
 ### 4.3 参数配置 `/api/dogConfig`
 

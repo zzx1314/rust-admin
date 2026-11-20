@@ -13,7 +13,7 @@
 //! POST   /api/dogInternal/maps/exists           查询地图是否仍存在（业务平台判重）
 //! POST   /api/dogInternal/maps/upload           地图包回传（multipart）
 //! GET    /api/dogInternal/media/config          板端媒体目录 / 固定帧数（参数配置页）
-//! POST   /api/dogInternal/media/upload          航点 AI 存证图片回传（multipart）
+//! POST   /api/dogInternal/media/upload          航点 AI 存证图片回传（multipart：单张或 zip）
 //! ```
 //!
 //! 与公开接口的关系：复用同一批 service，只是身份从「JWT 用户 + 行级权限」
@@ -31,12 +31,18 @@ use crate::api::AppState;
 use crate::business::dog::device::control_channel::SERVICE_TOKEN_HEADER;
 use crate::business::dog::device::domain::{CreateDeviceRequest, DeviceFilter};
 use crate::business::dog::map::domain::UploadMapRequest;
-use crate::business::dog::media::domain::UploadMediaRequest;
+use crate::business::dog::media::domain::{UploadMediaBatch, UploadMediaEntry, UploadMediaRequest};
 use crate::common::data_scope::DataScope;
 use crate::common::error::{ApiResponse, AppError};
+use std::collections::HashMap;
+use std::io::{Cursor, Read};
 
 /// 与 `/api/dogMap/upload` 保持一致的地图包上限。
 const MAP_UPLOAD_LIMIT: usize = 256 * 1024 * 1024;
+/// 媒体压缩包上限（与业务平台 `MEDIA_ZIP_MAX_BYTES` 同值）。
+const MEDIA_ZIP_MAX_BYTES: usize = 64 * 1024 * 1024;
+/// 一个压缩包里最多接受多少张：挡住「把整个目录打成包」的误用。
+const MEDIA_BATCH_MAX_ENTRIES: usize = 100;
 
 /// 内部接口的数据范围：管理员范围（不做归属过滤）。
 ///
@@ -254,12 +260,18 @@ pub async fn media_config_handler(
     Ok(Json(ApiResponse::ok(json!(config))))
 }
 
-/// `POST /api/dogInternal/media/upload` — 航点 AI 存证图片回传（multipart：file + mediaInfo）。
+/// `POST /api/dogInternal/media/upload` — 航点 AI 存证图片回传。
 ///
-/// 链路：板端 `/media/media-data/picture/<planId>/pt<n>/*.jpg` →（中台下发
-/// 「同步媒体」指令）设备客户端 → 业务平台 `/api/media/ingest` → 这里。
-/// 同一张图（sha256 相同）重复回传只保留一条记录，`created=false` 用于让客户端
-/// 知道「已经有人传过了」，可以安全删除板端文件。
+/// 两种载荷（业务平台原样转发，客户端决定用哪种）：
+///
+/// 1. **压缩包（现行）**：`file` = `media.zip`（Stored 打包，≤64MB），
+///    `mediaInfo = { deviceCode, parkCode, source, entries: [{ name, planId, pointIndex, capturedAt, remarks }] }`。
+///    逐条目解包 → **一张一条** `dog_media` → 回 `results[]`，客户端只删 `ok` 的；
+/// 2. **单张（老客户端）**：`file` = JPG/PNG，`mediaInfo` 是单张的描述。
+///
+/// 两种都按图片 `sha256` 去重（`created=false` = 之前传过，也算成功）。
+/// 条目名必须在 `entries` 里显式声明过（白名单），这同时挡掉 zip 里塞
+/// `../` 或任意文件的玩法。
 pub async fn upload_media_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -267,7 +279,7 @@ pub async fn upload_media_handler(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     authorize(&state, &headers)?;
 
-    let mut info: Option<UploadMediaRequest> = None;
+    let mut info_text: Option<String> = None;
     let mut file: Option<(String, Vec<u8>)> = None;
     while let Some(field) = multipart
         .next_field()
@@ -280,7 +292,7 @@ pub async fn upload_media_handler(
                 let data = field
                     .bytes()
                     .await
-                    .map_err(|error| AppError::BadRequest(format!("读取上传图片失败: {error}")))?;
+                    .map_err(|error| AppError::BadRequest(format!("读取上传文件失败: {error}")))?;
                 file = Some((name, data.to_vec()));
             }
             Some("mediaInfo") => {
@@ -288,18 +300,26 @@ pub async fn upload_media_handler(
                     .text()
                     .await
                     .map_err(|error| AppError::BadRequest(format!("读取图片信息失败: {error}")))?;
-                info =
-                    Some(serde_json::from_str(&text).map_err(|error| {
-                        AppError::BadRequest(format!("图片信息格式错误: {error}"))
-                    })?);
+                info_text = Some(text);
             }
             _ => {}
         }
     }
 
-    let info = info.unwrap_or_default();
+    let info_text = info_text.ok_or_else(|| AppError::BadRequest("缺少 mediaInfo".to_string()))?;
     let (file_name, bytes) =
-        file.ok_or_else(|| AppError::BadRequest("请上传图片文件".to_string()))?;
+        file.ok_or_else(|| AppError::BadRequest("请上传媒体文件".to_string()))?;
+
+    // zip 魔数：`PK\x03\x04`
+    if bytes.starts_with(b"PK\x03\x04") {
+        let batch: UploadMediaBatch = serde_json::from_str(&info_text)
+            .map_err(|error| AppError::BadRequest(format!("批量图片信息格式错误: {error}")))?;
+        let value = save_media_batch(&state, batch, &bytes).await?;
+        return Ok(Json(ApiResponse::ok(value)));
+    }
+
+    let info: UploadMediaRequest = serde_json::from_str(&info_text)
+        .map_err(|error| AppError::BadRequest(format!("图片信息格式错误: {error}")))?;
     let (media, created) = state
         .dog_media_service
         .save_upload(info, &file_name, &bytes, &state.upload_dir)
@@ -309,6 +329,139 @@ pub async fn upload_media_handler(
         "created": created,
         "media": serde_json::to_value(vo).unwrap_or_default(),
     }))))
+}
+
+/// 解包并逐张入库，返回 `{ total, failed, results[] }`（客户端按 `results` 删板端文件）。
+async fn save_media_batch(
+    state: &AppState,
+    batch: UploadMediaBatch,
+    zip_bytes: &[u8],
+) -> Result<serde_json::Value, AppError> {
+    if zip_bytes.len() > MEDIA_ZIP_MAX_BYTES {
+        return Err(AppError::BadRequest("媒体压缩包超过 64MB 上限".to_string()));
+    }
+    if batch.entries.is_empty() {
+        return Err(AppError::BadRequest(
+            "mediaInfo.entries 为空：压缩包里每张图都要有计划和航点信息".to_string(),
+        ));
+    }
+    // 只认「元数据里声明过 + 包内名合法」的条目：白名单同时也挡住了 zip 里的路径穿越
+    let by_name: HashMap<&str, &UploadMediaEntry> = batch
+        .entries
+        .iter()
+        .filter(|entry| is_safe_media_name(&entry.name))
+        .map(|entry| (entry.name.as_str(), entry))
+        .collect();
+
+    let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes))
+        .map_err(|error| AppError::BadRequest(format!("媒体压缩包无效: {error}")))?;
+    if archive.len() > MEDIA_BATCH_MAX_ENTRIES {
+        return Err(AppError::BadRequest(format!(
+            "一次最多 {MEDIA_BATCH_MAX_ENTRIES} 张（收到 {} 张）",
+            archive.len()
+        )));
+    }
+
+    let mut results = Vec::with_capacity(archive.len());
+    let mut created_any = false;
+    let mut failed = 0usize;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| AppError::BadRequest(format!("读取压缩包条目失败: {error}")))?;
+        let name = entry.name().to_string();
+        let Some(meta) = by_name.get(name.as_str()).copied() else {
+            failed += 1;
+            results.push(json!({
+                "name": name,
+                "ok": false,
+                "error": "条目未在 mediaInfo.entries 声明（或包内名不合法）",
+            }));
+            continue;
+        };
+        // 单张上限按「解压后」算：`take` 多读 1 字节就能判超限，不把大文件读进内存
+        let mut bytes = Vec::new();
+        let limit = (crate::business::dog::media::service::MEDIA_IMAGE_MAX_BYTES + 1) as u64;
+        if let Err(error) = entry.by_ref().take(limit).read_to_end(&mut bytes) {
+            failed += 1;
+            results
+                .push(json!({ "name": name, "ok": false, "error": format!("读取失败: {error}") }));
+            continue;
+        }
+        if bytes.len() > crate::business::dog::media::service::MEDIA_IMAGE_MAX_BYTES {
+            failed += 1;
+            results.push(json!({
+                "name": name,
+                "ok": false,
+                "error": format!("单张超过 {}MB 上限", crate::business::dog::media::service::MEDIA_IMAGE_MAX_BYTES / 1024 / 1024),
+            }));
+            continue;
+        }
+        let request = UploadMediaRequest {
+            device_code: batch.device_code.clone(),
+            park_code: batch.park_code.clone(),
+            plan_id: meta.plan_id.clone(),
+            plan_name: meta.plan_name.clone(),
+            point_index: meta.point_index,
+            point_name: meta.point_name.clone(),
+            captured_at: meta.captured_at.clone(),
+            source: meta.source.clone().or_else(|| batch.source.clone()),
+            remarks: meta.remarks.clone(),
+            sha256: None,
+            media_name: meta.media_name.clone(),
+        };
+        match state
+            .dog_media_service
+            .save_upload(request, &name, &bytes, &state.upload_dir)
+            .await
+        {
+            Ok((media, created)) => {
+                created_any |= created;
+                results.push(json!({
+                    "name": name,
+                    "ok": true,
+                    "created": created,
+                    "mediaId": media.id,
+                }));
+            }
+            Err(error) => {
+                failed += 1;
+                results.push(json!({
+                    "name": name,
+                    "ok": false,
+                    "error": error.to_string(),
+                }));
+            }
+        }
+    }
+
+    Ok(json!({
+        "created": created_any,
+        "total": results.len(),
+        "failed": failed,
+        "results": results,
+    }))
+}
+
+/// 包内名白名单：`0001.jpg` 这类纯 ASCII 名字（不超过 64 字符）。
+///
+/// 客户端打的就是这个格式；不认子目录、不认中文、不认 `..` —— 走 zip 的路由
+/// 只该出现这种名字，出现别的说明不是我们的客户端。
+fn is_safe_media_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 64 || name.contains('/') || name.contains('\\') {
+        return false;
+    }
+    let Some((stem, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    if stem.is_empty()
+        || !stem
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+    {
+        return false;
+    }
+    matches!(ext.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "png")
 }
 
 #[cfg(test)]

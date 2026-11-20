@@ -11,12 +11,12 @@ use crate::handlers::{
 use crate::notify::Notifier;
 use crate::video::{self, VideoHub};
 use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::http::HeaderValue;
 use axum::http::{Method, StatusCode, header};
 use axum::middleware::{Next, from_fn, from_fn_with_state};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use axum::http::HeaderValue;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use std::sync::Arc;
@@ -30,11 +30,11 @@ use tower_http::trace::TraceLayer;
 /// axum 默认 2MB 会让真实设备回传直接 400（`Error parsing multipart/form-data`）。
 const MAP_UPLOAD_LIMIT: usize = 256 * 1024 * 1024;
 
-/// 单张媒体图片上传上限。
+/// 媒体回传请求体上限。
 ///
-/// 板端 720p 画框 JPG 通常 200~500KB；这里留到 8MB + multipart 开销，
-/// 既不会把真实图片挡在 2MB 默认体量之外，也能挡住误传视频。
-const MEDIA_UPLOAD_LIMIT: usize = 8 * 1024 * 1024 + 64 * 1024;
+/// 客户端按「每包 8 张 / 8MB」打 zip，上限留到 64MB + multipart 开销
+/// （中台 `MEDIA_ZIP_MAX_BYTES` 同值）；单张模式仍按 8MB 在 handler 里卡。
+const MEDIA_UPLOAD_LIMIT: usize = 64 * 1024 * 1024 + 128 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {

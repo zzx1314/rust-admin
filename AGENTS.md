@@ -144,10 +144,12 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 `ai_cleanup`）。目录与帧数在**中台「参数配置」**里配（`media_picture_dir` /
 `media_frames`，迁移 31 预置），链路是：中台读配置 → `ai_start` 下发 `mediaDir` /
 `mediaFrames` → 业务平台 → 设备客户端 → 板端 Agent 写入；中台设备页「同步媒体」
-按钮再沿同一条设备 WS 下发 `pictureDir`/`frames`，客户端扫目录逐张
-`POST /api/media/ingest` → 业务平台转发中台 `POST /api/dogInternal/media/upload`
-（`x-service-token`）→ `dog_media` + 落盘 `<upload_dir>/media/<设备>/<计划>/pt<n>/`，
-**上传成功才删板端文件**，中台按图片 sha256 去重。页面预览走
+按钮再沿同一条设备 WS 下发 `pictureDir`/`frames`，客户端扫目录**按每包 8 张/8MB
+打 zip**（Stored，JPEG 不重复压缩）→ `POST /api/media/ingest` → 业务平台转发中台
+`POST /api/dogInternal/media/upload`（`x-service-token`）→ 中台**解包后仍一张一条**
+写入 `dog_media` + 落盘 `<upload_dir>/media/<设备>/<计划>/pt<n>/`，回 `results[]`；
+客户端**只删 `ok` 的条目**（中台按图片 sha256 去重，`created=false` 也算成功），
+单张模式保留给老客户端。页面预览走
 `GET /api/dogMedia/{id}/image`（JSON + base64，与地图预览同约定）。中台配置是唯一
 真源（60s 缓存），不要再在板端/客户端各配一份；改这条链路先读
 `business/backpack_dashboard/AGENTS.md` 的「存证目录」一节与

@@ -92,7 +92,7 @@ DELETE /api/dogInternal/devices/{deviceCode} 删除设备台账（幂等）
 POST   /api/dogInternal/maps/exists          地图 id 是否仍存在（业务平台判重）
 POST   /api/dogInternal/maps/upload          地图包回传（multipart：file + mapInfo）
 GET    /api/dogInternal/media/config         板端媒体目录 / 固定帧数（参数配置页，业务平台 60s 缓存）
-POST   /api/dogInternal/media/upload         航点 AI 存证图片回传（multipart：file + mediaInfo，按 sha256 去重）
+POST   /api/dogInternal/media/upload         航点 AI 存证图片回传（multipart：单张 JPG/PNG 或 zip 批量；按 sha256 去重）
 GET    /api/dogDevice/control-plane/ws       反向控制信道（WebSocket，业务平台拨入）
 ```
 
