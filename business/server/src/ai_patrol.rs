@@ -37,6 +37,8 @@
 //!   `expectCount` 比对，不一致（含「一个都没找到」= 0 ≠ N）就上报数量告警。
 //!   ⚠️ `count` 任务的**检出只进任务时间线**（不落告警、不建工单、不推企业微信）：
 //!   数量任务只有一个结论要处置，检出是它的中间过程。见 [`record_hit`]。
+//!   核对**一致**默认也不出声；动作勾了 `notifyWhenCountOk` 时只推一条企业微信群回执
+//!   （`ai_count` → [`record_count_ok`]，**不落告警、不建工单**）。
 //!
 //! 不一致时板端上报 `ai_alert`（客户端代调）或在 SSE 里带 `count_alert`（服务端直连），
 //! 两条路都落到同一个 `record_count_alert`：告警中心 + 任务时间线 + 企业微信。
@@ -88,8 +90,8 @@ use crate::app::AppState;
 use crate::backpack;
 use crate::db::now;
 use crate::gateway_types::{
-    AiAlertPayload, AiDetectPayload, AiEndPayload, AiEvidencePayload, AiPointPayload,
-    TaskProgressPayload,
+    AiAlertPayload, AiCountPayload, AiDetectPayload, AiEndPayload, AiEvidencePayload,
+    AiPointPayload, TaskProgressPayload,
 };
 use crate::notify::NoticeImage;
 use serde_json::{Value, json};
@@ -406,6 +408,7 @@ impl AiPatrol {
             expect_count: action.expect_count,
             check_type: action.check_type.clone(),
             alert_when_missing: action.alert_when_missing,
+            notify_when_count_ok: action.notify_when_count_ok,
             secs: window_secs,
             dwell: point.dwell.max(0) as u64,
         };
@@ -656,6 +659,8 @@ impl AiPatrol {
         );
         // 「未检出也告警」同样以路线数据为准（客户端只做转发）
         let mut alert_when_missing = payload.alert_when_missing.unwrap_or(false);
+        // 「数量一致也通知」同理：新平台随 `ai_point` 带上，老平台没有就用路线数据
+        let mut notify_when_count_ok = payload.notify_when_count_ok.unwrap_or(false);
         if let Some(route_id) = task.route_id
             && let Ok(Some(point)) = load_point(&state.db, route_id, payload.point_index).await
             && let Some(action) = point.find_ai_action()
@@ -663,6 +668,7 @@ impl AiPatrol {
             expect_count = action.expect_count.or(expect_count);
             check_type = action.check_type.clone();
             alert_when_missing = action.alert_when_missing;
+            notify_when_count_ok = action.notify_when_count_ok;
         }
 
         let cfg = WindowConfig {
@@ -680,6 +686,7 @@ impl AiPatrol {
             expect_count,
             check_type,
             alert_when_missing,
+            notify_when_count_ok,
             secs,
             dwell: payload.dwell.unwrap_or(0).max(0) as u64,
         };
@@ -732,6 +739,9 @@ impl AiPatrol {
             "planId": payload.task_code,
             "checkType": cfg.check_type,
             "expectCount": expect_count,
+            // 数量一致也通知：客户端据此把板端 `plan_hit.count_ok=true` 转成 `ai_count`
+            // （平台只推企业微信回执，不落告警、不建工单）
+            "notifyWhenCountOk": cfg.notify_when_count_ok,
             "labels": labels,
             "conf": threshold,
             "cam": cam,
@@ -954,6 +964,84 @@ impl AiPatrol {
         record_count_alert(state, &cfg, found, expect, &payload.evidence, image).await;
     }
 
+    /// 客户端转发的「数量核对一致」（`ai_count`）：**只推企业微信回执**。
+    ///
+    /// 数量任务默认只有「不一致」才出声（[`record_count_alert`]）；有的现场想把
+    /// 「这轮核对上了」也留在群里，动作里勾了 `notifyWhenCountOk` 才走到这里。
+    /// 这类消息不是告警：不落 `alerts`、不派单、不建工单（见 [`crate::notify::count_matched`]）。
+    pub async fn on_client_count(
+        &self,
+        state: &AppState,
+        device_code: &str,
+        payload: &AiCountPayload,
+    ) {
+        let (cfg, alerted, expect) = {
+            let guard = self.active.lock().await;
+            let Some(window) = guard.as_ref() else {
+                // 板端 `plan_hit` 可能在窗口收尾（`ai_stop`）之后才落盘：那时没有活动窗口，
+                // 没有告警要补图，也没有任务上下文，只能丢（下面留一行 debug 可查）
+                debug!("航点 AI 识别：没有活动窗口，丢弃数量一致通知");
+                return;
+            };
+            if window.device_code != device_code
+                || (!window.window_id.is_empty() && window.window_id != payload.window_id)
+            {
+                debug!(
+                    "航点 AI 识别：窗口 {} 已失效，丢弃数量一致通知",
+                    payload.window_id
+                );
+                return;
+            }
+            (
+                window.cfg.clone(),
+                window.alerted.clone(),
+                window.cfg.expect_count,
+            )
+        };
+        if cfg.check_type != "count" {
+            // 存在性任务没有「数量一致」这种结论：脏数据 / 旧客户端误报一律丢弃
+            debug!("航点 AI 识别：本窗口是存在性任务，忽略数量一致通知");
+            return;
+        }
+        if !cfg.notify_when_count_ok {
+            // 动作里没勾「数量一致也通知」：客户端本不该发（新客户端会按 `ai_start` 自己门控）
+            debug!("航点 AI 识别：本窗口未开启「数量一致也通知」，忽略 ai_count");
+            return;
+        }
+        let Some(expect) = payload.expect_count.filter(|value| *value > 0).or(expect) else {
+            warn!("航点 AI 识别：收到数量一致通知但本窗口没配检查数量，忽略: {payload:?}");
+            return;
+        };
+        // 只认「确实对上了」的结论：不一致（或没带检出数）走 `ai_alert` 那条路，
+        // 这里**不能**拿 expect 当成 found 凑一个一致出来
+        let Some(found) = payload.found_count.filter(|value| *value >= 0) else {
+            warn!("航点 AI 识别：数量一致通知没带 foundCount，忽略: {payload:?}");
+            return;
+        };
+        if found != expect {
+            debug!(
+                "航点 AI 识别：数量一致通知的检出色数 {} ≠ 检查数量 {expect}，忽略（不一致走 ai_alert）",
+                found
+            );
+            return;
+        }
+        // 与数量告警共用「本窗口结论已上报」标志：`plan_hit` 只发一次，抖动重发也合并
+        if alerted.swap(true, Ordering::Relaxed) {
+            debug!("航点 AI 识别：本窗口结论已上报过，忽略重复的数量一致通知");
+            return;
+        }
+        let image = payload.evidence_image.as_deref().and_then(|raw| {
+            match crate::notify::evidence_image(raw) {
+                Ok(image) => Some(image),
+                Err(error) => {
+                    warn!("AI 识别：数量一致通知的证据图不可用，只发卡片: {error}");
+                    None
+                }
+            }
+        });
+        record_count_ok(state, &cfg, found, expect, &payload.evidence, image).await;
+    }
+
     /// 客户端补发的命中帧（`ai_evidence`）：告警卡片早就发过，这里**只补一张图**。
     ///
     /// 什么时候会走这条路：板端 `_plan_frame` 要连采 3 帧命中才画框存证，命中帧稀疏时
@@ -1108,6 +1196,11 @@ struct WindowConfig {
     /// `exist` 默认只在「检出」时告警；「应该有却没有」这种语义靠这个开关（否则只能用
     /// `count` + `expectCount`）。`count` 任务自带「0 ≠ N」告警，这个字段对它无效。
     alert_when_missing: bool,
+    /// 动作 `notifyWhenCountOk`：`count` 任务数量**一致**时也推一条企业微信回执
+    ///
+    /// 只发群消息：不进告警中心、不派单、不建工单（见 `notify::count_matched`）。
+    /// `exist` 任务没有「数量一致」这种结论，这个字段对它无效。
+    notify_when_count_ok: bool,
     secs: u64,
     /// 航点停留时长（秒）：窗口开了这么久还没检出，才把「一个都没找到」算成结论
     dwell: u64,
@@ -1320,6 +1413,16 @@ async fn consume_events(
                                 }
                                 continue;
                             }
+                            // 板端已判定的「数量一致」：勾了「一致也通知」才推一条企业微信回执
+                            // （不落告警、不建工单，见 [`record_count_ok`]）
+                            if let Some((expect, found, evidence)) = plan_hit_count_ok(&event, config)
+                            {
+                                if !alerted.swap(true, Ordering::Relaxed) {
+                                    record_count_ok(state, config, found, expect, &evidence, None)
+                                        .await;
+                                }
+                                continue;
+                            }
                             let Some((label, conf)) = detect_hit(&event, threshold) else {
                                 continue;
                             };
@@ -1439,6 +1542,53 @@ async fn record_count_alert(
         }
         Err(error) => warn!("AI 识别：写数量告警失败: {error}"),
     }
+    if let Err(error) = insert_task_event(&state.db, config, &at, &content).await {
+        warn!("AI 识别：写任务事件失败: {error}");
+    }
+}
+
+/// 数量核对一致 → 企业微信回执 + 任务时间线（**不落告警、不派单、不建工单**）
+///
+/// 与 [`record_count_alert`] 是两条路：那条是「对不上，要处置」，这条是「对上了，
+/// 留个回执」。只在动作勾了 `notifyWhenCountOk` 时才会被调用（见
+/// [`AiPatrol::on_client_count`] 与 `plan_hit_count_ok`）。
+///
+/// 为什么不能复用 `insert_alert` + `alert_created`：那条链路的第一步就是自动派单
+/// （`alert_flow::on_alert`），工单列表里多一条「检查 3 个、检出 3 个」只会让真正
+/// 要处置的单淹掉。
+async fn record_count_ok(
+    state: &AppState,
+    config: &WindowConfig,
+    found: i64,
+    expect: i64,
+    evidence: &str,
+    image: Option<NoticeImage>,
+) {
+    let at = now();
+    let mut content = format!(
+        "AI 识别数量核对一致：任务「{}」航点「{}」检查 {} 个，实际检出 {} 个",
+        config.task_name, config.point_name, expect, found
+    );
+    if !evidence.trim().is_empty() {
+        content.push_str(&format!("（证据：{}）", evidence.trim()));
+    }
+    info!("{content}");
+
+    crate::notify::count_matched(
+        state,
+        crate::notify::CountMatched {
+            device_code: &config.device_code,
+            task_code: &config.task_code,
+            task_name: &config.task_name,
+            point_index: config.point_index,
+            point_name: &config.point_name,
+            expect,
+            found,
+            content: &content,
+            image,
+        },
+    )
+    .await;
     if let Err(error) = insert_task_event(&state.db, config, &at, &content).await {
         warn!("AI 识别：写任务事件失败: {error}");
     }
@@ -1595,6 +1745,8 @@ struct AiAction {
     check_type: String,
     /// 动作 `alertWhenMissing`：`exist` 任务未检出时也告警（「应该有却没有」）
     alert_when_missing: bool,
+    /// 动作 `notifyWhenCountOk`：`count` 任务数量一致时也推企业微信（不建单）
+    notify_when_count_ok: bool,
 }
 
 impl PointRow {
@@ -1622,6 +1774,10 @@ impl PointRow {
                 ),
                 alert_when_missing: action
                     .get("alertWhenMissing")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                notify_when_count_ok: action
+                    .get("notifyWhenCountOk")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
                 scene: action
@@ -1896,6 +2052,37 @@ fn plan_hit_alert(event: &Value) -> Option<(i64, i64, String)> {
         .get("found_count")
         .and_then(Value::as_i64)
         .unwrap_or(0);
+    let evidence = event
+        .get("evidence")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    Some((expect, found, evidence))
+}
+
+/// 板端 `plan_hit` 事件里的「数量核对一致」：只有**数量任务 + 开了「一致也通知」+
+/// `count_ok=true`** 才返回（期望数量, 实际检出, 证据图路径）。
+///
+/// 服务端直连板端时走这条路；客户端代调模式下由客户端把同一事件转成 `ai_count`
+/// （见 [`AiPatrol::on_client_count`]），两边最后都到 [`record_count_ok`]。
+fn plan_hit_count_ok(event: &Value, config: &WindowConfig) -> Option<(i64, i64, String)> {
+    if config.check_type != "count" || !config.notify_when_count_ok {
+        return None;
+    }
+    if event.get("type").and_then(Value::as_str) != Some("plan_hit") {
+        return None;
+    }
+    if event.get("count_ok").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let expect = event.get("expect_count").and_then(Value::as_i64)?;
+    let found = event
+        .get("found_count")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    if found != expect {
+        return None;
+    }
     let evidence = event
         .get("evidence")
         .and_then(Value::as_str)
@@ -2232,6 +2419,76 @@ mod tests {
         .expect("数量不一致要告警");
         assert_eq!((expect, found), (3, 1));
         assert_eq!(evidence, "/x/y.jpg");
+    }
+
+    /// 数量**一致**的回执：只有「数量任务 + 动作里勾了 notifyWhenCountOk + 真的对上了」
+    /// 才返回；其它一律 None（一致且没勾就该安静，不一致走告警那条路）。
+    #[test]
+    fn count_ok_notice_needs_the_waypoint_switch_and_a_real_match() {
+        let cfg = |check_type: &str, notify: bool| WindowConfig {
+            device_code: "D1".to_string(),
+            device_id: None,
+            park_id: None,
+            task_code: "TK-1".to_string(),
+            task_name: "巡检".to_string(),
+            point_index: 0,
+            point_name: "P1".to_string(),
+            hint: String::new(),
+            scene: None,
+            labels: vec![],
+            threshold_text: String::new(),
+            expect_count: Some(3),
+            check_type: check_type.to_string(),
+            alert_when_missing: false,
+            notify_when_count_ok: notify,
+            secs: 20,
+            dwell: 10,
+        };
+        let hit = json!({
+            "type": "plan_hit", "count_ok": true, "count_alert": false,
+            "expect_count": 3, "found_count": 3, "evidence": "/x/y.jpg"
+        });
+        let (expect, found, evidence) =
+            plan_hit_count_ok(&hit, &cfg("count", true)).expect("勾了开关且一致时应该发回执");
+        assert_eq!((expect, found), (3, 3));
+        assert_eq!(evidence, "/x/y.jpg");
+        // 没勾：默认安静（数量任务只报不一致）
+        assert!(plan_hit_count_ok(&hit, &cfg("count", false)).is_none());
+        // 存在性任务没有「数量一致」这种结论
+        assert!(plan_hit_count_ok(&hit, &cfg("exist", true)).is_none());
+        // 不一致：那是 `plan_hit_alert` 的事
+        assert!(
+            plan_hit_count_ok(
+                &json!({"type": "plan_hit", "count_ok": false, "count_alert": true,
+                         "expect_count": 3, "found_count": 2}),
+                &cfg("count", true),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn notify_when_count_ok_is_parsed_from_the_action() {
+        let point = PointRow {
+            name: "P1".to_string(),
+            dwell: 5,
+            actions: vec![json!({
+                "type": "AI 识别", "checkType": "count", "expectCount": 3,
+                "notifyWhenCountOk": true
+            })],
+        };
+        let action = point.find_ai_action().expect("应识别出 AI 动作");
+        assert!(
+            action.notify_when_count_ok,
+            "编辑器写的 notifyWhenCountOk 要生效"
+        );
+        // 老数据没这个字段：默认关
+        let legacy = PointRow {
+            name: "P1".to_string(),
+            dwell: 5,
+            actions: vec![json!({"type": "AI 识别", "checkType": "count", "expectCount": 3})],
+        };
+        assert!(!legacy.find_ai_action().unwrap().notify_when_count_ok);
     }
 
     #[test]

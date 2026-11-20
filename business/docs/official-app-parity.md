@@ -268,6 +268,8 @@ A. server（服务端与板端同网段，配了 ROBODOG_BACKPACK_URL）
   → 读 {agent}/api/events 的 SSE，只取 type=detect 的 boxes
   → 框的 conf ≥ 阈值 → 写 alerts + task_events（同类目标窗口内只报一次）
   → type=plan_hit 且 count_alert=true → 写「数量核对不一致」告警 + 任务事件 + 企微
+  → type=plan_hit 且 count_ok=true 且动作勾了 notifyWhenCountOk
+    → 只推一条企业微信群回执（**不落告警、不建工单**）
   → 窗口到期 / 任务终态 / 被下一个点顶替 → POST /api/detect/stop
      （只是「保留操作员已开的识别」时改发 /api/detect/plan/clear，把计划摘掉）
 
@@ -281,6 +283,8 @@ B. client（正式环境：平台在公网、Agent 只在内网，服务端连�
     → 服务端写 alerts + task_events + 企微（卡片后面跟一张证据图）
   → 数量任务（checkType=count）与 expectCount 不符（SSE plan_hit.count_alert）
     → 转发 `ai_alert`；到期一个都没找到也由服务端按 ai_end.expired 判成数量不一致
+  → 数量任务核对一致且动作勾了 notifyWhenCountOk（SSE plan_hit.count_ok）
+    → 转发 `ai_count`；服务端只推一条企业微信群回执，不落告警、不建工单
   → 图晚于卡片（命中帧稀疏）→ 停识别扫盘后补 ai_evidence（平台只补一张图）
   → 客户端收尾 ai_end（带 expired）；任务终态/取消时服务端下发 ai_stop
 ```

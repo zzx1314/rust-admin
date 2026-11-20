@@ -150,7 +150,12 @@ const actionForm = reactive({
    * 适合「必须有」的目标（灭火器、气体钢瓶）：到期没找到就告警；
    * `exist` 默认只在**检出**时告警，适合「不该出现」的目标（消防通道占用、明火）。
    */
-  alertWhenMissing: false
+  alertWhenMissing: false,
+  /**
+   * AI 识别：数量**一致**时也通知（仅 `count` 任务）。
+   * 只发企业微信群回执，不落告警、不建工单；默认关（数量任务只报不一致）。
+   */
+  notifyWhenCountOk: false
 });
 
 /** 背包 AI 模型目录（场景 + 类别）：仅在配「AI 识别」动作时按需加载 */
@@ -177,12 +182,15 @@ function actionCheckTypeLabel(action: {
   checkType?: string;
   expectCount?: number | null;
   alertWhenMissing?: boolean;
+  notifyWhenCountOk?: boolean;
 }) {
   const countMode = action.checkType
     ? action.checkType === "count"
     : action.expectCount != null && Number(action.expectCount) > 0;
   if (countMode) {
-    return `数量是否正确（检查 ${action.expectCount ?? "—"} 个，不一致告警）`;
+    return `数量是否正确（检查 ${action.expectCount ?? "—"} 个，不一致告警${
+      action.notifyWhenCountOk ? "，一致也通知" : ""
+    }）`;
   }
   // 存在性任务里「找不到也告警」是另一种语义，卡片上必须能看出来，否则现场会以为配错
   return action.alertWhenMissing ? "是否存在（找不到也告警）" : "是否存在";
@@ -878,7 +886,8 @@ function openActionDialog(kind: "point" | "leg", index: number | null = null) {
         existing.checkType ??
         (existing.expectCount != null && Number(existing.expectCount) > 0 ? "count" : "exist"),
       expectCount: existing.expectCount ?? null,
-      alertWhenMissing: existing.alertWhenMissing === true
+      alertWhenMissing: existing.alertWhenMissing === true,
+      notifyWhenCountOk: existing.notifyWhenCountOk === true
     });
     actionEditIndex.value = index;
     if (actionForm.type === "AI 识别") void aiCatalog.load();
@@ -899,7 +908,8 @@ function openActionDialog(kind: "point" | "leg", index: number | null = null) {
     aiConf: 0.35,
     checkType: "exist",
     expectCount: null,
-    alertWhenMissing: false
+    alertWhenMissing: false,
+    notifyWhenCountOk: false
   });
   actionEditIndex.value = null;
   actionDialog.value = true;
@@ -916,6 +926,7 @@ function syncActionDefaults() {
   actionForm.checkType = "exist";
   actionForm.expectCount = null;
   actionForm.alertWhenMissing = false;
+  actionForm.notifyWhenCountOk = false;
   if (actionForm.type === "AI 识别") void aiCatalog.load();
 }
 
@@ -979,6 +990,8 @@ function saveAction() {
     // 任务类型：存在性任务不写检查数量（后端也按 checkType 判，双保险）
     ...(ai ? { checkType: actionForm.checkType } : {}),
     ...(countTask ? { expectCount } : {}),
+    // 数量任务：核对一致也发群消息（只推企业微信，不落告警、不建工单）
+    ...(countTask && actionForm.notifyWhenCountOk ? { notifyWhenCountOk: true } : {}),
     // 「未检出也告警」只对存在性任务有意义（数量任务自带「0 ≠ N」告警）
     ...(ai && !countTask && actionForm.alertWhenMissing ? { alertWhenMissing: true } : {})
   };
@@ -1968,6 +1981,13 @@ onBeforeUnmount(() => {
               placeholder="如 3"
               title="板端把 AI 检出的目标数与它比对，不一致（含一个都没找到）上报数量告警"
             />
+            <label
+              class="chk"
+              title="勾上后：核对一致也发一条企业微信群消息作为巡检回执，但不落告警、不建工单"
+            >
+              <input v-model="actionForm.notifyWhenCountOk" type="checkbox" />
+              数量一致也通知
+            </label>
           </div>
           <!-- 存在性任务的另一半语义：“应该有却没有”也要告警 -->
           <div v-if="isAiAction && actionForm.checkType === 'exist'" class="field">
@@ -1988,7 +2008,8 @@ onBeforeUnmount(() => {
             <b>检测是否存在</b>（找到就存证/上报，勾上「未找到目标也告警」后反过来——
             适合灭火器、气体钢瓶这类「必须有」的东西）、
             <b>检测数量是否正确</b>（再核对数量，不一致——含一个都没找到——上报数量告警；
-            适合「必须有 N 个」的点）。
+            适合「必须有 N 个」的点；勾上「数量一致也通知」后核对一致也会发一条群消息回执，
+            但不落告警、不建工单）。
             窗口时长跟着「停留时长」走（停留 + 8s，最短 10s、最长 300s，离开航点立即结束），
             不额外占用停留时长。模型目录读不到时可以手填场景关键词，后端仍有关键词兜底。
           </div>

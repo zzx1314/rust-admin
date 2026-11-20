@@ -162,6 +162,9 @@ pub struct AiPointPayload {
     /// 动作 `alertWhenMissing`：`exist` 任务未检出时是否也告警（路线数据优先）
     #[serde(default)]
     pub alert_when_missing: Option<bool>,
+    /// 动作 `notifyWhenCountOk`：`count` 任务数量**一致**时是否也推企业微信（路线数据优先）
+    #[serde(default)]
+    pub notify_when_count_ok: Option<bool>,
     /// 板端 `GET /api/detect/tasks` 原样
     #[serde(default)]
     pub tasks: Option<Value>,
@@ -246,6 +249,36 @@ pub struct AiAlertPayload {
     /// 板端给的描述（可选，服务端会自己拼一条更全的）
     #[serde(default)]
     pub message: String,
+}
+
+/// 客户端 → 服务端：AI 检出数量与「检查目标数量」**一致**
+///
+/// 数量任务默认只有「不一致」才出声（[`AiAlertPayload`]）；有的现场想把「这轮核对上了」
+/// 也当成回执留在企业微信群里（动作字段 `notifyWhenCountOk`）。这类消息**不是告警**：
+/// 平台只推一条群消息，不落 `alerts`、不派单、不建工单。
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCountPayload {
+    pub window_id: String,
+    #[serde(default)]
+    pub task_code: String,
+    /// 计划 id（= 业务任务号），板端按它建存证目录
+    #[serde(default)]
+    pub plan_id: String,
+    #[serde(default)]
+    pub point_index: Option<i64>,
+    /// 动作里的「检查目标数量」
+    #[serde(default)]
+    pub expect_count: Option<i64>,
+    /// 板端 AI 实际检出的目标数（一致时与 `expect_count` 相等）
+    #[serde(default)]
+    pub found_count: Option<i64>,
+    /// 证据图路径（板端本地绝对路径，仅作运维线索）
+    #[serde(default)]
+    pub evidence: String,
+    /// 证据图本体（JPG/PNG 字节的 base64）：约束同 [`AiAlertPayload::evidence_image`]
+    #[serde(default)]
+    pub evidence_image: Option<String>,
 }
 
 /// 客户端 → 服务端：补发本窗口的命中帧（卡片已经发过，只补一张图）

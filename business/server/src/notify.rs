@@ -180,6 +180,12 @@ pub struct Notice {
     /// 板端那一轮存证（画框 JPG + `result.json`）就没有第二次用途了。
     /// `None`、或者图片那一条发送失败，都不删（删了不可逆，留着还能人工补推）。
     pub cleanup: Option<EvidenceCleanup>,
+    /// 忽略 `wecom_min_level`（部署级「只推 ≥ 某级别」的过滤）。
+    ///
+    /// 只给**航点级别显式打开**的通知用（`notifyWhenCountOk`）：运维在航点上勾了
+    /// 「数量一致也通知」就是明确要这条回执，再被全局的 `min_level=警告` 静默掉
+    /// 会表现为「配了却什么都不发」。告警（`alert:` / `task:`）一律 `false`。
+    pub bypass_min_level: bool,
 }
 
 /// 「证据图已经进群」之后要删掉的板端存证目录（`detect_jobs/<计划>/pt<航点>/`）。
@@ -651,7 +657,7 @@ impl Notifier {
             debug!(key = %notice.dedupe_key, "wecom: 未配置 webhook，跳过");
             return false;
         }
-        if notice.level < self.min_level {
+        if notice.level < self.min_level && !notice.bypass_min_level {
             debug!(
                 key = %notice.dedupe_key,
                 level = notice.level.label(),
@@ -845,6 +851,7 @@ async fn flush_overflow(state: &AppState) {
         image: None,
         image_only: false,
         cleanup: None,
+        bypass_min_level: false,
     };
     let Some(url) = state.notifier.webhook() else {
         return;
@@ -1494,6 +1501,7 @@ pub async fn alert_created_with_image(
         image: None,
         image_only: false,
         cleanup: None,
+        bypass_min_level: false,
     };
     // 证据图是**可选附加**：开关关掉 / 拿不到字节就只发卡片
     if let Some(image) = image {
@@ -1575,7 +1583,113 @@ pub async fn alert_evidence(state: &AppState, alert_code: &str, image: NoticeIma
         image_only: true,
         // 晚到的图马上要进群：板端存证可以清了（客户端会等窗口收尾再动手）
         cleanup: evidence_cleanup(dedup_key.as_deref(), device_code.as_deref()),
+        bypass_min_level: false,
     });
+}
+
+/// 一条「数量核对一致」通知的内容。
+///
+/// 故意没有 `alert_code`：这类消息**不是告警**，不进告警中心、不派单、不建工单，
+/// 只往企业微信群里发一条回执（见 [`count_matched`]）。
+///
+/// 为什么要有它：`count` 任务默认只有「不一致」才出声（见 `ai_patrol::record_count_alert`），
+/// 但有的现场想把「这一轮核对上了」当巡检回执留在群里——动作字段
+/// `notifyWhenCountOk` 就是这个开关（按航点开，默认关）。
+#[derive(Debug, Clone)]
+pub struct CountMatched<'a> {
+    pub device_code: &'a str,
+    pub task_code: &'a str,
+    pub task_name: &'a str,
+    pub point_index: i64,
+    pub point_name: &'a str,
+    /// 动作里的「检查目标数量」
+    pub expect: i64,
+    /// 板端 AI 实际检出的目标数（一致时等于 `expect`）
+    pub found: i64,
+    /// 与任务时间线同一句正文
+    pub content: &'a str,
+    /// 证据图（客户端读板端存证目录后带上）；`None` = 只发卡片
+    pub image: Option<NoticeImage>,
+}
+
+/// 「数量核对一致」→ **只推企业微信群，不落告警、不派单、不建工单**。
+///
+/// 与 [`alert_created`] 是两条路，不能合并：那条的第一件事就是
+/// `alert_flow::on_alert`（建工单）。这里是巡检**正常**的结论，工单列表里多一条
+/// 「检查 3 个、检出 3 个」只会让真正要处置的单淹掉。
+///
+/// 门禁与告警共用（通道开关 `alert_push` / `wecom_alert_push`、图片开关
+/// `wecom_alert_image`），但不走 `alert_only_in_task`：能走到这里的只有
+/// 「正在执行计划、到点开窗」的那条链路，天然就在执行计划期间。
+pub async fn count_matched(state: &AppState, matched: CountMatched<'_>) {
+    if !state.notifier.is_enabled() {
+        return;
+    }
+    // 关掉「企业微信告警推送」的部署不会想收到巡检回执：与告警共用同一对开关
+    if !channel_enabled(state, Channel::Alert).await {
+        return;
+    }
+    let park: Option<String> = sqlx::query_scalar(
+        "SELECT p.park_name
+           FROM devices d
+           LEFT JOIN parks p ON p.id = d.park_id
+          WHERE d.device_id = ?1",
+    )
+    .bind(matched.device_code)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let mut notice = Notice {
+        level: Level::Info,
+        // 新来源：推送记录里能看出「这是数量核对回执」，不是告警
+        ref_type: "count",
+        // 没有告警行可以引用（本来就是不落库的通知）
+        ref_id: None,
+        // 一轮巡检就是一条回执：同一窗口重复上报合并 1 分钟，下一轮照发
+        dedupe_key: format!(
+            "count-ok:{}:{}:{}",
+            matched.device_code, matched.task_code, matched.point_index
+        ),
+        dedupe_window: Some(AI_HIT_DEDUPE_WINDOW),
+        title: "AI 数量核对一致".to_string(),
+        fields: vec![
+            ("设备", matched.device_code.to_string()),
+            ("园区", park.unwrap_or_else(|| "未绑定园区".to_string())),
+            (
+                "计划",
+                format!("{}（{}）", matched.task_name, matched.task_code),
+            ),
+            ("航点", matched.point_name.to_string()),
+            (
+                "核对",
+                format!(
+                    "检查 {} 个，实际检出 {} 个（一致）",
+                    matched.expect, matched.found
+                ),
+            ),
+            ("时间", now()),
+        ],
+        body: Some(matched.content.to_string()),
+        // 正常结论：不派单、不建议处置，只说清楚结论
+        action: Some("数量核对一致，无需处置；本条仅为巡检回执，不生成告警与工单".to_string()),
+        link: None,
+        mention_all: false,
+        mentions: Vec::new(),
+        image: None,
+        image_only: false,
+        // 存证由「计划跑完删整个目录」那条统一收（`ai_cleanup` 只认告警去重键）
+        cleanup: None,
+        // 级别是「提示」，而默认 `wecom_min_level=警告`：运维在航点上显式勾了
+        // 「数量一致也通知」，就不该被全局级别过滤静默掉（否则表现为「配了却没发」）
+        bypass_min_level: true,
+    };
+    if let Some(image) = matched.image
+        && image_push_enabled(state).await
+    {
+        notice.image = Some(image);
+    }
+    state.notifier.enqueue(notice);
 }
 
 /// 任务被判「异常」时调用。看门狗与客户端上报终态两处都走这里，靠去重键合并。
@@ -1654,6 +1768,7 @@ pub async fn task_abnormal(state: &AppState, task_code: &str, level: Level, reas
         image_only: false,
         // 任务异常没有板端存证要清（AI 存证只跟「带图的告警」走）
         cleanup: None,
+        bypass_min_level: false,
     };
     state.notifier.enqueue(notice);
 }
@@ -1695,6 +1810,7 @@ pub async fn send_test(state: &AppState) -> Result<String, String> {
         image: None,
         image_only: false,
         cleanup: None,
+        bypass_min_level: false,
     };
     let payload = notice.markdown();
     let body = json!({ "msgtype": "markdown", "markdown": { "content": payload } });
@@ -1745,6 +1861,7 @@ mod tests {
             image: None,
             image_only: false,
             cleanup: None,
+            bypass_min_level: false,
         }
     }
 

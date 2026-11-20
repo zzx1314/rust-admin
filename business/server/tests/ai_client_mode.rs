@@ -889,6 +889,128 @@ async fn count_mismatch_alert_is_recorded_once() {
     ai_patrol::global().stop("用例结束").await;
 }
 
+/// 数量核对**一致** + 动作勾了 `notifyWhenCountOk`：客户端转发的 `ai_count` 只推
+/// 一条企业微信回执，**不落告警、不建工单**（正常结论不该进处置列表）。
+#[tokio::test]
+async fn matched_count_notifies_wecom_without_alert_or_work_order() {
+    let _serial = TEST_LOCK.lock().await;
+    ai_patrol::global().stop("测试初始化").await;
+    let (state, _temp, rx) = test_state_with_wecom("client", true).await;
+    let mut rx = rx.expect("开了企微就该有消费端");
+    let task_code =
+        seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("count"), Some(3))
+            .await;
+    enable_notify_when_count_ok(&state).await;
+    let port = spawn_server(state.clone()).await;
+    let (mut ws, _device) = register_device(port).await;
+
+    // 1) 开窗：开关随 `ai_start` 下发给客户端（它据此把 `plan_hit.count_ok` 转成 ai_count）
+    ws.send(Message::Text(ai_point(&task_code, false).to_string()))
+        .await
+        .expect("发送 ai_point 失败");
+    let start = next_msg(&mut ws, "ai_start").await;
+    let start = &start["payload"];
+    assert_eq!(
+        start["notifyWhenCountOk"], true,
+        "「数量一致也通知」要下发给客户端: {start}"
+    );
+    let window_id = start["windowId"]
+        .as_str()
+        .expect("ai_start 必须带 windowId")
+        .to_string();
+
+    // 2) 板端判定数量一致 → 客户端转发 ai_count
+    ws.send(Message::Text(ai_count(&window_id, &task_code).to_string()))
+        .await
+        .expect("发送 ai_count 失败");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let notice = rx.try_recv().expect("数量一致要推一条企业微信回执");
+    assert_eq!(notice.ref_type, "count", "推送记录里要能认出这是数量核对回执");
+    assert!(
+        notice.title.contains("数量核对一致"),
+        "标题要说清是一致: {}",
+        notice.title
+    );
+    assert!(
+        notice
+            .fields
+            .iter()
+            .any(|(name, value)| *name == "核对"
+                && value.contains("检查 3 个")
+                && value.contains("实际检出 3 个")),
+        "卡片要带核对结论: {:?}",
+        notice.fields
+    );
+
+    // 3) 不落告警、不建工单（这正是它不能走 `alert_created` 的原因）
+    let contents = alert_contents(&state).await;
+    assert!(contents.is_empty(), "数量一致不能落告警: {contents:?}");
+    let orders: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM work_orders")
+        .fetch_one(&state.db)
+        .await
+        .expect("查工单失败");
+    assert_eq!(orders, 0, "数量一致不能建工单");
+
+    // 4) 任务时间线留痕（现场回看时能看到「这轮核对上了」）
+    let events = event_descriptions(&state).await;
+    assert!(
+        events.iter().any(|text| text.contains("数量核对一致")),
+        "任务时间线应记录数量一致: {events:?}"
+    );
+
+    // 5) 同一窗口重复上报只推一条（1 分钟去重窗）
+    ws.send(Message::Text(ai_count(&window_id, &task_code).to_string()))
+        .await
+        .expect("发送重复 ai_count 失败");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        rx.try_recv().is_err(),
+        "同一个窗口的数量一致回执只该有一条"
+    );
+
+    ai_patrol::global().stop("用例结束").await;
+}
+
+/// 没勾「数量一致也通知」时，`ai_count` 一律忽略（默认行为不变：只报不一致）。
+#[tokio::test]
+async fn matched_count_stays_quiet_without_the_waypoint_switch() {
+    let _serial = TEST_LOCK.lock().await;
+    ai_patrol::global().stop("测试初始化").await;
+    let (state, _temp, rx) = test_state_with_wecom("client", true).await;
+    let mut rx = rx.expect("开了企微就该有消费端");
+    let task_code =
+        seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("count"), Some(3))
+            .await;
+    let port = spawn_server(state.clone()).await;
+    let (mut ws, _device) = register_device(port).await;
+
+    ws.send(Message::Text(ai_point(&task_code, false).to_string()))
+        .await
+        .expect("发送 ai_point 失败");
+    let start = next_msg(&mut ws, "ai_start").await;
+    assert_eq!(
+        start["payload"]["notifyWhenCountOk"], false,
+        "默认不下发「一致也通知」: {start}"
+    );
+    let window_id = start["payload"]["windowId"]
+        .as_str()
+        .expect("ai_start 必须带 windowId")
+        .to_string();
+    ws.send(Message::Text(ai_count(&window_id, &task_code).to_string()))
+        .await
+        .expect("发送 ai_count 失败");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert!(rx.try_recv().is_err(), "没开开关就不该发群消息");
+    assert!(
+        alert_contents(&state).await.is_empty(),
+        "数量一致本来就不是告警"
+    );
+
+    ai_patrol::global().stop("用例结束").await;
+}
+
 /// 数量核对任务（`checkType=count`）只推「数量不一致」那一条。
 ///
 /// 检出（`ai_detect`）是过程数据：一个航点检出 3 类目标就落 3 条告警 / 3 张工单 /
@@ -1216,6 +1338,40 @@ async fn enable_alert_when_missing(state: &AppState) {
         .execute(&state.db)
         .await
         .expect("更新路线失败");
+}
+
+/// 把 AI 动作改成「数量一致也通知」（编辑器写 `notifyWhenCountOk`）。
+async fn enable_notify_when_count_ok(state: &AppState) {
+    let raw: (Option<String>,) =
+        sqlx::query_as("SELECT route_data FROM routes WHERE route_code = 'RT-AI-C'")
+            .fetch_one(&state.db)
+            .await
+            .expect("读路线失败");
+    let mut data: Value =
+        serde_json::from_str(raw.0.as_deref().unwrap_or("{}")).expect("路线不是合法 JSON");
+    data["points"][0]["actions"][0]["notifyWhenCountOk"] = json!(true);
+    sqlx::query("UPDATE routes SET route_data = ?1 WHERE route_code = 'RT-AI-C'")
+        .bind(data.to_string())
+        .execute(&state.db)
+        .await
+        .expect("更新路线失败");
+}
+
+/// 客户端上报的「数量核对一致」（板端 `plan_hit.count_ok=true`）
+fn ai_count(window_id: &str, task_code: &str) -> Value {
+    json!({
+        "msgType": "ai_count",
+        "ts": "2026-11-16 10:00:02",
+        "payload": {
+            "windowId": window_id,
+            "taskCode": task_code,
+            "planId": task_code,
+            "pointIndex": 0,
+            "expectCount": 3,
+            "foundCount": 3,
+            "evidence": "/root/backpack_dashboard/backend/detect_jobs/TK-AI-C/pt0/dogcam_1.jpg"
+        }
+    })
 }
 
 /// `exist` + `alertWhenMissing`：窗口正常到期、一个目标都没找到 → 落「未检出」告警。

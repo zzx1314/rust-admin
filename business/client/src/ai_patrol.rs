@@ -102,6 +102,11 @@ pub struct AiPoint {
     ///
     /// 客户端不判定告警，只把配置转给平台（告警文案/去重都在服务端）。
     pub alert_when_missing: bool,
+    /// 动作 `notifyWhenCountOk`：`count` 任务数量**一致**时也通知企业微信
+    ///
+    /// 只影响「要不要把板端的 `plan_hit.count_ok=true` 转成 `ai_count`」；
+    /// 平台收到后**只推群消息，不落告警、不建工单**（见 `server/src/notify.rs`）。
+    pub notify_when_count_ok: bool,
 }
 
 /// 解析 `routeData`（`{"points":[...]}`）里所有带 AI 识别动作的航点。
@@ -166,6 +171,10 @@ pub fn parse_ai_points(route_data: &Value) -> Vec<AiPoint> {
                 .get("alertWhenMissing")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            notify_when_count_ok: action
+                .get("notifyWhenCountOk")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         });
     }
     out
@@ -225,6 +234,8 @@ pub struct AiStart {
     pub expect_count: Option<i64>,
     /// 任务类型：`exist` / `count`（旧平台不下发时按 expectCount 推断）
     pub check_type: String,
+    /// 数量**一致**时是否也通知企业微信（动作 `notifyWhenCountOk`，平台据此判）
+    pub notify_when_count_ok: bool,
     pub labels: Vec<String>,
     pub conf: f64,
     pub cam: String,
@@ -287,6 +298,10 @@ impl AiStart {
                 value.get("checkType").and_then(Value::as_str),
                 parse_expect_count(value.get("expectCount")),
             ),
+            notify_when_count_ok: value
+                .get("notifyWhenCountOk")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             labels: value
                 .get("labels")
                 .and_then(Value::as_array)
@@ -521,6 +536,7 @@ impl AiPatrol {
                 "checkType": point.check_type,
                 "expectCount": point.expect_count,
                 "alertWhenMissing": point.alert_when_missing,
+                "notifyWhenCountOk": point.notify_when_count_ok,
                 "tasks": tasks,
                 "agentRunning": running,
                 "agentCam": cam,
@@ -763,6 +779,30 @@ impl AiPatrol {
                                         "航点 AI 识别：数量核对不一致（检查 {expect} / 检出 {found}），上报告警"
                                     );
                                     send(out_tx, "ai_alert", alert).await;
+                                }
+                                // 板端已判定「数量与检查目标数量一致」：动作勾了
+                                // `notifyWhenCountOk` 时转发成 `ai_count`。平台只发一条
+                                // 企业微信回执，**不落告警、不建工单**（正常结论不该派单），
+                                // 所以不能走 `ai_alert` 那条路。
+                                if let Some(mut counted) = count_matched(&event, start)
+                                    && !alerted.swap(true, Ordering::Relaxed)
+                                {
+                                    let expect = counted
+                                        .get("expectCount")
+                                        .and_then(|v| v.as_i64())
+                                        .unwrap_or(0);
+                                    let found = counted
+                                        .get("foundCount")
+                                        .and_then(|v| v.as_i64())
+                                        .unwrap_or(0);
+                                    // 证据图同告警：「一致」的回执带一张图才看得清是哪几个
+                                    if let Some(image) = evidence_image_base64(&counted).await {
+                                        counted["evidenceImage"] = json!(image);
+                                    }
+                                    info!(
+                                        "航点 AI 识别：数量核对一致（检查 {expect} / 检出 {found}），上报通知"
+                                    );
+                                    send(out_tx, "ai_count", counted).await;
                                 }
                                 // 板端 `plan_hit` 里的证据图路径能反推出存证根目录：记下来，
                                 // 下一轮（甚至本轮后续航点）扫目录时就不用猜 `detect_jobs` 在哪
@@ -1337,6 +1377,41 @@ fn count_alert(event: &Value, start: &AiStart) -> Option<Value> {
     }))
 }
 
+/// 板端 `plan_hit` 事件 → `ai_count` 载荷（数量**一致**）。
+///
+/// 只在「数量核对任务 + 动作勾了 `notifyWhenCountOk` + 板端 `count_ok=true`」时转发：
+/// 一致是正常结论，默认不打扰群；不一致走 [`count_alert`] → `ai_alert`（会建单）。
+/// 平台收到 `ai_count` 后**只推企业微信，不落告警、不建工单**。
+fn count_matched(event: &Value, start: &AiStart) -> Option<Value> {
+    if start.check_type != "count" || !start.notify_when_count_ok {
+        return None;
+    }
+    if event.get("type").and_then(Value::as_str) != Some("plan_hit") {
+        return None;
+    }
+    if event.get("count_ok").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let expect = event
+        .get("expect_count")
+        .and_then(Value::as_i64)
+        .or(start.expect_count)?;
+    let found = event.get("found_count").and_then(Value::as_i64)?;
+    // 双保险：只有真的对上了才当「一致」报，别把不一致的通知成正常
+    if found != expect {
+        return None;
+    }
+    Some(json!({
+        "windowId": start.window_id,
+        "taskCode": start.task_code,
+        "planId": start.plan_id,
+        "pointIndex": start.point_index,
+        "expectCount": expect,
+        "foundCount": found,
+        "evidence": event.get("evidence").and_then(Value::as_str).unwrap_or_default(),
+    }))
+}
+
 /* ------------------------------- 证据图 ------------------------------- */
 
 /// 上报一条检出（`ai_detect`）。
@@ -1752,6 +1827,48 @@ mod tests {
         assert_eq!(alert["evidence"], "/x/y.jpg");
     }
 
+    /// 数量**一致**：只有动作勾了 `notifyWhenCountOk` 才转 `ai_count`；
+    /// 不一致 / 普通检出 / 存在性任务都不走这条路（告警另有一条 `count_alert`）。
+    #[test]
+    fn count_matched_only_when_the_waypoint_asks_for_it() {
+        let mut start = AiStart::from_value(&json!({
+            "windowId": "AIW-1-0-1",
+            "taskCode": "TK-1",
+            "planId": "TK-1",
+            "pointIndex": 0,
+            "checkType": "count",
+            "expectCount": 3,
+            "notifyWhenCountOk": true,
+        }))
+        .expect("构造开窗指令失败");
+        let hit = json!({"type": "plan_hit", "count_ok": true, "count_alert": false,
+                          "expect_count": 3, "found_count": 3, "evidence": "/x/y.jpg"});
+        let counted = count_matched(&hit, &start).expect("勾了「一致也通知」时应该上报");
+        assert_eq!(counted["windowId"], "AIW-1-0-1");
+        assert_eq!(counted["planId"], "TK-1");
+        assert_eq!(counted["expectCount"], 3);
+        assert_eq!(counted["foundCount"], 3);
+        assert_eq!(counted["evidence"], "/x/y.jpg");
+        // 与告警互斥：不一致的那条不能被当成「一致」
+        assert!(
+            count_matched(
+                &json!({"type": "plan_hit", "count_ok": false, "count_alert": true,
+                        "expect_count": 3, "found_count": 2}),
+                &start,
+            )
+            .is_none()
+        );
+        assert!(count_matched(&json!({"type": "detect", "boxes": []}), &start).is_none());
+
+        // 没勾开关：默认安静（数量任务只报「不一致」）
+        start.notify_when_count_ok = false;
+        assert!(count_matched(&hit, &start).is_none());
+        // 存在性任务没有「数量一致」这种结论
+        start.notify_when_count_ok = true;
+        start.check_type = "exist".to_string();
+        assert!(count_matched(&hit, &start).is_none());
+    }
+
     /// 证据图随告警上报：客户端与板端 Agent 同机，**只有它**能读到板端磁盘上的图，
     /// 企业微信图片消息要的是字节不是路径。读不到 / 不是 JPG-PNG / 超 2MB 一律不传，
     /// 告警本身不受影响（卡片里仍有路径）。
@@ -2126,6 +2243,7 @@ mod agent_flow {
             expect_count: Some(3),
             check_type: "count".to_string(),
             alert_when_missing: false,
+            notify_when_count_ok: false,
         }
     }
 
@@ -2306,6 +2424,51 @@ mod agent_flow {
         assert_eq!(started["point_index"], 0);
         assert_eq!(started["expect_count"], 3);
         assert!(!ai.status_active().await, "窗口结束后不该还挂着窗口");
+    }
+
+    /// 数量核对**一致** + 动作勾了「一致也通知」：板端 `plan_hit.count_ok=true` →
+    /// 客户端转一条 `ai_count`（平台只推企业微信群，不落告警/工单）。
+    #[tokio::test]
+    async fn matched_count_is_reported_as_a_notification_only() {
+        const MATCHED: &str = concat!(
+            "data: {\"type\":\"detect\",\"cam\":\"dogcam\",\"task\":\"firextinguisher\",",
+            "\"boxes\":[{\"label\":\"extinguisher\",\"zh\":\"灭火器\",\"conf\":0.92}]}\n\n",
+            "data: {\"type\":\"plan_hit\",\"plan_id\":\"TK-1\",\"point_index\":0,\"found\":true,",
+            "\"found_count\":3,\"expect_count\":3,\"count_ok\":true,\"count_alert\":false,",
+            "\"evidence\":\"/root/backpack_dashboard/backend/detect_jobs/TK-1/pt0/dogcam_1.jpg\"}\n\n",
+        );
+        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        let agent = spawn_agent_with(calls.clone(), MATCHED.to_string(), None, None).await;
+        let ai = Arc::new(AiPatrol::new(agent, true));
+        let (tx, mut rx) = mpsc::channel(16);
+
+        let mut start = start_payload(1, false);
+        start.notify_when_count_ok = true;
+        ai.start(&tx, start).await;
+        let messages = drain_until_end(&mut rx, Duration::from_secs(5)).await;
+
+        let counted: Vec<&Value> = messages
+            .iter()
+            .filter(|(kind, _)| kind == "ai_count")
+            .map(|(_, payload)| payload)
+            .collect();
+        assert_eq!(counted.len(), 1, "数量一致要上报一条通知: {messages:?}");
+        assert_eq!(counted[0]["windowId"], "AIW-1-0-1");
+        assert_eq!(counted[0]["planId"], "TK-1");
+        assert_eq!(counted[0]["expectCount"], 3);
+        assert_eq!(counted[0]["foundCount"], 3);
+        assert!(
+            counted[0]["evidence"]
+                .as_str()
+                .unwrap_or_default()
+                .ends_with(".jpg"),
+            "通知也要带证据图路径: {}",
+            counted[0]
+        );
+        assert!(
+            messages.iter().all(|(kind, _)| kind != "ai_alert"),
+            "一致不能走告警那条路（告警会建工单）: {messages:?}"
+        );
     }
 
     /// 检出告警要证据图：板端命中帧落在 `detect_jobs/<计划>/pt<航点>/`，

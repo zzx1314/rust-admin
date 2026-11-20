@@ -148,6 +148,8 @@
 | `client/src/ai_patrol.rs` `Leftover` / `send_evidence()` | 卡片已发、图晚到：停识别扫到图后补一条 `ai_evidence` |
 | `server/src/ai_patrol.rs` `on_client_evidence()` | `ai_evidence` 入口：本窗口还没带过图的那条告警 → `notify::alert_evidence` |
 | `notify.rs` `alert_evidence()` / `Notice.image_only` | 只补一张 `msgtype=image`（不重发卡片、不写 notifications） |
+| `notify.rs` `count_matched()` | **数量核对一致**的回执：只推群，**不落告警、不建工单**（`ref_type=count`，不走 `alert_flow`）；航点动作 `notifyWhenCountOk` 才开 |
+| `server/src/ai_patrol.rs` `on_client_count()` / `record_count_ok()` / `plan_hit_count_ok()` | `ai_count` / 直连 SSE 的「一致」结论 → `notify::count_matched` + 任务时间线 |
 | `server/src/ai_patrol.rs` `record_hit()` | 检出告警入口：正文带「（证据：路径）」，有字节就走 `alert_created_with_image` |
 | `notify.rs` `task_abnormal()` | 任务异常入口：同样带「当班责任人」并 @ 到人 |
 | `alert_flow.rs` `should_dispatch()` | 第一道门：只有「执行计划期间」的告警才建单 + 推群（`alert_only_in_task`） |
@@ -179,11 +181,18 @@
 | 2 | 心跳超时被置离线 | `gateway.rs:625` | 警告 |
 | 3 | `ctrl_source=3` 控制权被抢 | `gateway.rs:1363` | 警告 |
 | 4 | AI 识别检出 / 数量核对不一致 /**未检出** | `ai_patrol.rs` `record_hit` / `record_count_alert` / `record_missing_alert` | 警告（前两个带证据图） |
+| 4b | 数量核对**一致**（航点勾了 `notifyWhenCountOk`） | `ai_patrol.rs` `record_count_ok` → `notify::count_matched` | 提示（`bypass_min_level`：显式开关优先于全局级别过滤） |
 
 > ⚠️ **数量核对任务（`checkType=count`）只推「数量核对不一致」那一条**：检出（`record_hit`）
 > 是过程数据，一个航点检出 3 类目标就会产生 3 条告警 / 3 张工单 / 3 条群消息，
 > 把真正要处置的「检查 N 个、实际检出 M 个」淹掉。这些检出只写任务时间线留痕，
 > 不落告警、不建工单、不推群（`exist` 任务的检出照旧推）。
+>
+> 核对**一致**默认也不出声；想留一条「这轮核对上了」的回执，给航点动作勾
+> `notifyWhenCountOk`：`ai_start` 把它下发给客户端，板端 `plan_hit.count_ok=true` 时
+> 客户端转 `ai_count`（服务端直连模式自己从 SSE 的 `plan_hit` 认），
+> `record_count_ok` → `notify::count_matched` **只推企业微信群，不落 `alerts`、不建工单**
+> （`notifications.ref_type=count`，设置页推送记录显示为「数量核对回执」）。
 | 5 | 页面手动新建告警 | `handlers/alerts.rs` `create_alert` | 按填写 |
 | 6 | 客户端上报任务 `异常` | `gateway.rs:1492` | 警告 |
 | 7 | 任务看门狗判异常 | `gateway.rs:752` | 设备离线→**严重**，否则警告 |

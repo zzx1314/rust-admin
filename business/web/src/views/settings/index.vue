@@ -439,7 +439,7 @@ onMounted(async () => {
             </span>
             <span class="push-level">{{ item.level }}</span>
             <span class="push-type">{{
-              { alert: "告警", task: "任务异常", summary: "积压汇总", test: "测试" }[item.refType] ??
+              { alert: "告警", task: "任务异常", summary: "积压汇总", test: "测试", count: "数量核对回执" }[item.refType] ??
               item.refType
             }}</span>
             <span class="muted push-time">{{ item.createdAt }}</span>

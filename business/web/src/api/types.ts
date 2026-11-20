@@ -210,6 +210,14 @@ export interface RoutePointAction {
    * `count` 任务自带「0 ≠ N」数量告警，这个字段对它无效。
    */
   alertWhenMissing?: boolean;
+  /**
+   * 「AI 识别」专用（仅 `checkType: "count"`）：数量**一致**时也通知企业微信。
+   *
+   * 默认关闭：数量任务只在「不一致」时告警（告警中心 + 企业微信 + 自动派单）。
+   * 勾上后，核对一致也会发一条群消息作为巡检回执，但**不落告警、不建工单**——
+   * 正常结论不该进处置列表。
+   */
+  notifyWhenCountOk?: boolean;
 }
 
 /** AI 识别的两类任务：检测是否存在 / 检测数量是否正确 */

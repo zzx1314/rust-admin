@@ -121,7 +121,7 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 航点 AI 识别的「谁去调板端 Agent」由 `ROBODOG_POINT_AI`（`[backpack] point_ai`，默认
 `auto`）决定：配了 `ROBODOG_BACKPACK_URL` 就服务端直连，否则由现场设备客户端代调
 （客户端与背包 Agent 同在 `.246`，走 `127.0.0.1:8000`；消息为 `ai_point` / `ai_start` /
-`ai_detect` / `ai_alert`（数量核对不一致）/ `ai_end` / `ai_stop`）。航点动作的 `checkType`
+`ai_detect` / `ai_alert`（数量核对不一致）/ `ai_count`（数量核对一致回执，见下）/ `ai_end` / `ai_stop`）。航点动作的 `checkType`
 分两类任务：`exist` 检测是否存在 / `count` 检测数量是否正确（后者带 `expectCount`，
 不一致含「一个都没找到」都告警，且要「看满了」——客户端 `ai_end.expired`，或狗在这个点
 停满 `dwell` 之后离开（平台先收到「已离开航点」关窗也算，窗口时长是 `dwell+8`，只认 `expired`
@@ -131,7 +131,11 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 （看满停留时长且零检出 → 「AI 识别未检出」告警）。**`count` 任务只有「数量核对不一致」
 会建单推群**：`ai_detect` 的检出只写任务时间线（`record_hit` 对 `count` 跳过告警入库），
 不然一个航点检出几类目标就是几张工单几条群消息，把真正的数量结论淹掉
-（回归 `ai_client_mode::count_task_detections_stay_out_of_alerts_and_wecom`）。正式环境的云端
+（回归 `ai_client_mode::count_task_detections_stay_out_of_alerts_and_wecom`）。
+**核对一致默认不出声**；要在群里留一条「这轮核对上了」的回执，给动作勾
+`notifyWhenCountOk`：板端 `plan_hit.count_ok=true` → 客户端转 `ai_count`（或服务端直连
+模式自己识别）→ `notify::count_matched` **只推企业微信群，不落告警、不建工单**
+（回归 `ai_client_mode::matched_count_notifies_wecom_without_alert_or_work_order`）。正式环境的云端
 平台连不到内网 Agent，`auto` 走的就是客户端这条路；改这块先读
 `business/docs/official-app-parity.md` §5.6。
 **「现在站在哪个航点」只认 `task_progress.waypointIndex`（0 基下标），
