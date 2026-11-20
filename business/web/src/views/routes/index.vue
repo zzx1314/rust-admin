@@ -91,6 +91,11 @@ const canvasRef = ref<SVGSVGElement>();
 const simActive = ref(false);
 const simIndex = ref(0);
 let simTimer = 0;
+/** 「保存」旁的时间戳：上一次写库成功的时刻（自动保存成功也刷新），让人知道改动真的落库了 */
+const lastSavedAt = ref("");
+/** 自动保存的防抖定时器 / 串行队列（见 [`autoSave`]） */
+let autoSaveTimer = 0;
+let autoSaveChain: Promise<unknown> = Promise.resolve();
 
 const routeDialog = ref(false);
 const baseDialog = ref(false);
@@ -392,6 +397,13 @@ async function load(selectZoneId?: number) {
 }
 
 function selectRoute(route: Route, notify = true) {
+  // 在 400 ms 防抖窗口里就切了路线：先把上一条改完的动作写回它自己（persist 里的
+  // 数据快照在第一个 await 之前取，随后才换 draft，不会写到新路线头上）
+  if (autoSaveTimer) {
+    window.clearTimeout(autoSaveTimer);
+    autoSaveTimer = 0;
+    void persist(true).catch(error => console.warn("切换路线前的补存失败", error));
+  }
   stopSimulation();
   currentId.value = route.id;
   draft.value = {
@@ -438,6 +450,8 @@ function undo() {
   draft.value.data = JSON.parse(raw) as RouteData;
   selIdx.value = Math.min(selIdx.value, Math.max(0, draft.value.data.points.length - 1));
   ElMessage.success("已撤销上一步操作");
+  // 撤销也要落库：动作改动刚被自动保存过，不回写就会出现「页面已撤销、平台还是新参数」
+  autoSave("撤销");
 }
 
 function svgCoords(event: MouseEvent | PointerEvent) {
@@ -606,16 +620,57 @@ async function persist(silent = true) {
     routeData: cloneRouteData(draft.value.data),
     mapVersionId: draft.value.mapVersionId
   });
-  draft.value.status = updated.status;
-  draft.value.version = updated.version;
-  draft.value.usedTaskCount = updated.usedTaskCount;
+  // 回写只回给「请求发出去时的那条草稿」：发出后用户可能已经切到别的路线了，
+  // 无脑写 draft 会把 A 的版本号/状态写到 B 头上
+  if (draft.value?.id === updated.id) {
+    draft.value.status = updated.status;
+    draft.value.version = updated.version;
+    draft.value.usedTaskCount = updated.usedTaskCount;
+  }
   const index = routes.value.findIndex(item => item.id === updated.id);
   if (index >= 0) routes.value[index] = updated;
+  stampSaved();
   if (!silent) ElMessage.success("路线已保存");
   return updated;
 }
 
+/** 记下「刚刚写过库」的时刻（保存按钮旁的小字） */
+function stampSaved() {
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  lastSavedAt.value = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+}
+
+/**
+ * 动作改完就自己存盘，不用再记得点「保存」。
+ *
+ * 只给「新增 / 修改 / 删除航点动作」用：动作是任务的实质内容（AI 识别配的场景、
+ * 类别、检查数量都写在这里），配完忘了点「保存」就等于白配 —— 任务下发时用的
+ * 还是老口径，站到航点上才发现识别跑的是上一版的参数。
+ *
+ * 400 ms 合并 + 串行：连点几下「添加」「删除」只会发一次 PUT，也不会出现
+ * 后发的请求先到、把新改动覆盖回旧数据的静默丢改。失败不重试也不自己弹 toast
+ * （`src/api/http.ts` 已经弹过原因了），「已保存 HH:mm:ss」小字不会跟着说谎。
+ */
+function autoSave(reason: string) {
+  window.clearTimeout(autoSaveTimer);
+  autoSaveTimer = window.setTimeout(() => {
+    autoSaveTimer = 0;
+    autoSaveChain = autoSaveChain.then(async () => {
+      if (!draft.value) return;
+      try {
+        await persist(true);
+      } catch (error) {
+        console.warn(`自动保存失败（${reason}）`, error);
+      }
+    });
+  }, 400);
+}
+
 async function saveRoute() {
+  // 正等着自动保存的改动就一起在这次里写，不必再补一次 PUT
+  window.clearTimeout(autoSaveTimer);
+  autoSaveTimer = 0;
   await persist(false);
 }
 
@@ -889,14 +944,17 @@ function saveAction() {
   actionDialog.value = false;
   actionEditIndex.value = null;
   ElMessage.success(`${editIndex !== null ? "已更新" : "已添加"}动作：${actionForm.type}`);
+  // 动作是任务的实质内容：配完直接落库，不要求操作员再记得点「保存」
+  autoSave(`${editIndex !== null ? "修改" : "新增"}动作 ${actionForm.type}`);
 }
 
 function removeAction(kind: "point" | "leg", index: number) {
   const target = kind === "point" ? selectedPoint.value?.actions : selectedLeg.value?.actions;
   if (!target) return;
   snapshot();
-  target.splice(index, 1);
+  const [removed] = target.splice(index, 1);
   ElMessage.success("动作已删除");
+  autoSave(`删除动作 ${removed?.type ?? ""}`.trim());
 }
 
 function startSimulation() {
@@ -982,6 +1040,12 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.clearInterval(simTimer);
   window.clearTimeout(skeletonTimer);
+  // 还在 400ms 防抖窗口里就离开页面：立刻补一次写库，别把最后一次动作改动丢掉
+  if (autoSaveTimer) {
+    window.clearTimeout(autoSaveTimer);
+    autoSaveTimer = 0;
+    void persist(true).catch(error => console.warn("离开页面时补存失败", error));
+  }
 });
 </script>
 
@@ -1149,7 +1213,14 @@ onBeforeUnmount(() => {
             <button class="rt-tool" @click="undo"><AppIcon name="undo" />撤销</button>
             <button class="rt-tool" @click="optimizeRoute"><AppIcon name="shuffle" />顺序优化</button>
             <button class="rt-tool danger" @click="deletePoint"><AppIcon name="trash" />删除航点</button>
-            <button class="rt-tool" @click="saveRoute"><AppIcon name="check" />保存</button>
+            <button
+              class="rt-tool save"
+              title="保存任务规划（新增 / 修改 / 删除动作会自动保存）"
+              @click="saveRoute"
+            >
+              <AppIcon name="check" />保存
+            </button>
+            <span v-if="lastSavedAt" class="rt-save-hint">已保存 {{ lastSavedAt }}</span>
             <div class="sep" />
             <button class="rt-tool" :class="{ on: simActive }" @click="startSimulation">
               <AppIcon :name="simActive ? 'pause' : 'play'" />{{ simActive ? "停止模拟" : "模拟执行" }}

@@ -429,6 +429,31 @@
   background: #fef2f2;
 }
 
+/* 「保存」是这页最容易漏的一步：给它一块实心主色，别混在一排白按钮里被划过去 */
+.rt-tool.save {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+  box-shadow: 0 2px 6px rgba(2, 132, 199, 0.28);
+}
+
+.rt-tool.save .ic {
+  color: #fff;
+}
+
+.rt-tool.save:hover {
+  background: #0369a1;
+  border-color: #0369a1;
+  color: #fff;
+}
+
+/* 「已保存 09:24:31」：自动保存成功后刷新，让人知道动作改动已经落库 */
+.rt-save-hint {
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: 2px;
+}
+
 .rt-step.active {
   border-color: var(--brand);
   background: var(--brand-soft);
