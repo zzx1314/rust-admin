@@ -484,6 +484,8 @@ mod tests {
                 "add_map_device_code",
                 "backfill_map_version",
                 "add_media_origin_fields",
+                "media_sha_plain_unique_index",
+                "media_sha_index_repair",
             ]
         );
         assert_eq!(migrations[0].name(), "p_sys_tables_from_file");

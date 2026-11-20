@@ -429,6 +429,7 @@ async fn media_upload_lands_in_dog_media_and_dedupes_by_sha256() {
     ));
     let _ = std::fs::remove_dir_all(&upload_dir);
     state.upload_dir = upload_dir.clone();
+    let service = state.dog_media_service.clone();
     let base = spawn_zentai(state).await;
 
     let info = json!({
@@ -470,6 +471,16 @@ async fn media_upload_lands_in_dog_media_and_dedupes_by_sha256() {
     let again = upload_media(&base, &info, "dogcam_01.jpg", jpeg_bytes(1)).await;
     assert_eq!(again["data"]["created"], json!(false));
     assert_eq!(again["data"]["media"]["id"], json!(id));
+
+    // 软删除后同一张图再传回来：恢复原记录（普通唯一索引会挡住重复插入，
+    // 恢复语义也让「删了又被同一个客户端重传」不会 500）
+    service.delete(id).await.expect("删除应成功");
+    let revived = upload_media(&base, &info, "dogcam_01.jpg", jpeg_bytes(1)).await;
+    assert_eq!(revived["data"]["created"], json!(true));
+    assert_eq!(revived["data"]["media"]["id"], json!(id), "应恢复同一条记录");
+    let record = service.get_by_id(id).await.expect("恢复后应可查询");
+    assert_eq!(record.is_deleted, 0, "恢复后 is_deleted 必须清回 0");
+    assert_eq!(record.device_code.as_deref(), Some("RD-201"));
 
     let _ = std::fs::remove_dir_all(&upload_dir);
 }

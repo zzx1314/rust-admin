@@ -18,7 +18,7 @@
 | 后端业务代码 | `backend/src/business/dog/{map,media,model,config,statistics,device}/` |
 | 后端路由 | `backend/src/api/routes.rs`（每个子域一个 `dog_*_routes`，统一挂 `require_auth`） |
 | 服务装配 | `backend/src/app.rs` → `App::build_state_with_token_store` |
-| 数据库迁移 | `.../7_create_dog_tables.sql`、`.../19_add_map_file_fields.sql`、`.../22_add_map_baseline_*.sql`、`.../23_add_map_dimensions.sql`、`.../24_drop_retired_dog_tables.sql`、`.../25_drop_command_services_tables.sql`、`.../26_add_map_park.sql`、`.../27_add_device_management.sql`（重建 `dog_device` / `dog_user_device`）、`.../29_add_map_device_code.sql`、`.../31_add_media_origin_fields.sql`（媒体来源字段 + 参数配置预置 `media_picture_dir` / `media_frames`） |
+| 数据库迁移 | `.../7_create_dog_tables.sql`、`.../19_add_map_file_fields.sql`、`.../22_add_map_baseline_*.sql`、`.../23_add_map_dimensions.sql`、`.../24_drop_retired_dog_tables.sql`、`.../25_drop_command_services_tables.sql`、`.../26_add_map_park.sql`、`.../27_add_device_management.sql`（重建 `dog_device` / `dog_user_device`）、`.../29_add_map_device_code.sql`、`.../31_add_media_origin_fields.sql`（媒体来源字段 + 参数配置预置 `media_picture_dir` / `media_frames`）、`.../32_media_sha_plain_unique_index.sql` + `.../33_media_sha_index_repair.sql`（sha256 去重键用**普通**唯一索引：正式机 sqlite3 3.7 不认 partial index） |
 | 菜单 | `backend/migrations/p_sys/9_add_dog_menus.sql`、`.../21_remove_retired_dog_menus.sql`、`.../22_remove_command_services_menus.sql`、`.../27_add_device_management_menu.sql` |
 | 前端页面 | `frontend/src/views/dog/{map,media,model,config,device}/` |
 | 前端请求封装 | `frontend/src/api/dog{Map,Media,Model,Config,Statistics,Device}.ts` |

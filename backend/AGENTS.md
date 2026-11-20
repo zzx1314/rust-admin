@@ -63,6 +63,24 @@ cargo test --test auth_service_tests  # 运行 auth service tests
 
 > Note: 测试使用 UUID-based 数据库文件（如 user_repo_{uuid}.db）自动创建。
 
+## 数据库迁移约定
+
+迁移是 `migrations/<domain>/*.sql`，启动时按版本号顺序执行（`src/migration/mod.rs`），
+文件头指令：
+
+- `-- @migration-name: <name>`：写进 `seaql_migrations` 的版本名；
+- `-- @if-not-exists: column <table>.<column>`：**前置条件**——该列存在时整个文件
+  跳过（但仍记为已执行）。只能用于「加列」这类场景，别用在修改/删除已有对象上
+  （`32_media_sha_plain_unique_index.sql` 首次发布就踩过这个坑：列早就存在，
+  文件被跳过，索引没换掉）。
+
+⚠️ 正式环境（CentOS 7）自带的 `sqlite3` CLI 是 **3.7.17**：不支持 partial index
+（`CREATE INDEX ... WHERE ...`）、不支持 `RETURNING`/`JSON1` 之类的新语法。
+迁移里写这类语法，服务用自带的现代 SQLite 能跑，但现场 `sqlite3 users.db`
+会直接报 `malformed database schema`，连 `pragma table_info` 都查不了。
+需要唯一性约束时用**普通**唯一索引（NULL 本来就不参与唯一性），软删除语义交给
+应用层处理（见 `dog/media` 的 sha256 去重/恢复）。
+
 ## Architecture
 
 ```src/

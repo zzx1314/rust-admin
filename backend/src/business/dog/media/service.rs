@@ -157,24 +157,6 @@ impl DogMediaService {
         let (file_name, extension) = validate_image(original_name, bytes)?;
         let sha256 = hex_sha256(bytes);
 
-        // 去重：板端可能因为断电/重试把同一张图传两次
-        if let Some(existing) = self
-            .repo
-            .find_by_sha256(&sha256)
-            .await
-            .map_err(AppError::DatabaseError)?
-        {
-            if let Some(relative) = existing.media_path.as_deref()
-                && !relative.trim().is_empty()
-            {
-                let absolute = upload_root.join(relative);
-                if !absolute.exists() {
-                    write_file(&absolute, bytes).await?;
-                }
-            }
-            return Ok((existing, false));
-        }
-
         let device_code = info
             .device_code
             .as_deref()
@@ -247,8 +229,39 @@ impl DogMediaService {
             point_index: Some(point_index),
             captured_at: Some(captured_at),
             source: Some(source),
-            sha256: Some(sha256),
+            sha256: Some(sha256.clone()),
         };
+
+        // 去重：板端可能因为断电/重试把同一张图传两次。
+        // `sha256` 上是**普通**唯一索引（迁移 32：正式机的 sqlite3 3.7 不认 partial
+        // index），所以这里连软删除的行一起查：
+        //   - 还在：不新建行，只保证文件在盘上；
+        //   - 已删：同一张图再传回来就把那条记录恢复（否则插入会撞唯一索引）。
+        if let Some(existing) = self
+            .repo
+            .find_by_sha256_any(&sha256)
+            .await
+            .map_err(AppError::DatabaseError)?
+        {
+            if existing.is_deleted != 0 {
+                let revived = self
+                    .repo
+                    .revive(existing.id, &req)
+                    .await
+                    .map_err(AppError::DatabaseError)?;
+                return Ok((revived, true));
+            }
+            if let Some(relative) = existing.media_path.as_deref()
+                && !relative.trim().is_empty()
+            {
+                let absolute = upload_root.join(relative);
+                if !absolute.exists() {
+                    write_file(&absolute, bytes).await?;
+                }
+            }
+            return Ok((existing, false));
+        }
+
         let record = self
             .repo
             .create(&req, generate_id())

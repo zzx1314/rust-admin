@@ -57,6 +57,55 @@ impl SeaOrmDogMediaRepository {
             .await
     }
 
+    /// 同 [`Self::find_by_sha256`]，但**包含软删除**的行。
+    ///
+    /// `sha256` 上是普通唯一索引（迁移 32），已删除的记录仍然占着这个值：
+    /// 同一张图再次回传时必须恢复它，否则插入会撞唯一索引。
+    pub async fn find_by_sha256_any(&self, sha256: &str) -> Result<Option<Media>, sea_orm::DbErr> {
+        // 历史库可能残留同一 sha 的多行（迁移 33 前的软删除重传）：优先未删除的那条，
+        // 再按 id 取最新；`limit(1)` 顺便避免 `one()` 在多行时直接报错。
+        MediaEntity::find()
+            .filter(MediaColumn::Sha256.eq(sha256))
+            .order_by_asc(MediaColumn::IsDeleted)
+            .order_by_desc(MediaColumn::Id)
+            .limit(1)
+            .one(&*self.conn)
+            .await
+    }
+
+    /// 恢复一条被软删除的媒体记录（同一张图重新回传时用）。
+    pub async fn revive(
+        &self,
+        id: i64,
+        req: &CreateMediaRequest,
+    ) -> Result<Media, sea_orm::DbErr> {
+        let now = chrono::Utc::now();
+        MediaEntity::update(MediaActiveModel {
+            id: ActiveValue::set(id),
+            media_name: ActiveValue::set(req.media_name.clone()),
+            media_type: ActiveValue::set(req.media_type.clone()),
+            media_path: ActiveValue::set(req.media_path.clone()),
+            media_size: ActiveValue::set(req.media_size),
+            remarks: ActiveValue::set(req.remarks.clone()),
+            device_code: ActiveValue::set(req.device_code.clone()),
+            park_code: ActiveValue::set(req.park_code.clone()),
+            plan_id: ActiveValue::set(req.plan_id.clone()),
+            point_index: ActiveValue::set(req.point_index),
+            captured_at: ActiveValue::set(req.captured_at.clone()),
+            source: ActiveValue::set(req.source.clone()),
+            sha256: ActiveValue::set(req.sha256.clone()),
+            create_time: ActiveValue::not_set(),
+            update_time: ActiveValue::set(Some(now)),
+            is_deleted: ActiveValue::set(0),
+        })
+        .exec(&*self.conn)
+        .await?;
+        MediaEntity::find_by_id(id)
+            .one(&*self.conn)
+            .await
+            .map(|row| row.expect("刚更新过的行必然存在"))
+    }
+
     pub async fn find_all_with_page(
         &self,
         query: &MediaPageQuery,
