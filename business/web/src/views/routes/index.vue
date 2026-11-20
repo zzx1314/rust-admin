@@ -96,6 +96,8 @@ const lastSavedAt = ref("");
 /** 自动保存的防抖定时器 / 串行队列（见 [`autoSave`]） */
 let autoSaveTimer = 0;
 let autoSaveChain: Promise<unknown> = Promise.resolve();
+/** 程序自己写 draft 时先置上：那种改动不需要再存一趟（见 [`withoutAutoSave`]） */
+let autoSaveSuppressed = false;
 
 const routeDialog = ref(false);
 const baseDialog = ref(false);
@@ -406,23 +408,26 @@ function selectRoute(route: Route, notify = true) {
   }
   stopSimulation();
   currentId.value = route.id;
-  draft.value = {
-    id: route.id,
-    routeCode: route.routeCode,
-    routeName: route.routeName,
-    parkId: route.parkId,
-    zoneId: route.zoneId,
-    model: route.model ?? "X30-Pro",
-    status: route.status,
-    version: route.version,
-    loopMode: route.loopMode,
-    defaultSpeed: route.defaultSpeed,
-    routeDescription: route.routeDescription ?? "",
-    data: parseRouteData(route.routeData),
-    usedTaskCount: route.usedTaskCount,
-    mapVersionId: route.mapVersionId,
-    mapStatus: route.mapStatus
-  };
+  // 换草稿是「加载」不是「用户编辑」，不能触发自动保存
+  withoutAutoSave(() => {
+    draft.value = {
+      id: route.id,
+      routeCode: route.routeCode,
+      routeName: route.routeName,
+      parkId: route.parkId,
+      zoneId: route.zoneId,
+      model: route.model ?? "X30-Pro",
+      status: route.status,
+      version: route.version,
+      loopMode: route.loopMode,
+      defaultSpeed: route.defaultSpeed,
+      routeDescription: route.routeDescription ?? "",
+      data: parseRouteData(route.routeData),
+      usedTaskCount: route.usedTaskCount,
+      mapVersionId: route.mapVersionId,
+      mapStatus: route.mapStatus
+    };
+  });
   selType.value = "point";
   selIdx.value = 0;
   activeTab.value = "point";
@@ -596,17 +601,23 @@ function timelineSteps() {
 
 async function persist(silent = true) {
   if (!draft.value) return null;
-  if (draft.value.data.loop === "闭环" && !draft.value.data.returnLeg) {
-    draft.value.data.returnLeg = {
-      mode: "沿道路",
-      speed: draft.value.defaultSpeed,
-      avoid: "标准",
-      actions: [{ type: "静默通行", param: "返航不采集" }]
-    };
-  }
-  if (draft.value.data.loop !== "闭环") {
-    draft.value.data.returnLeg = null;
-  }
+  // 下面两段是服务端要求的规范化（闭环必须有返航段）：属于「补数据」不是用户改动，
+  // 不能让它再触发一次自动保存
+  withoutAutoSave(() => {
+    if (!draft.value) return;
+    if (draft.value.data.loop === "闭环" && !draft.value.data.returnLeg) {
+      draft.value.data.returnLeg = {
+        mode: "沿道路",
+        speed: draft.value.defaultSpeed,
+        avoid: "标准",
+        actions: [{ type: "静默通行", param: "返航不采集" }]
+      };
+    }
+    if (draft.value.data.loop !== "闭环") {
+      draft.value.data.returnLeg = null;
+    }
+  });
+  if (!draft.value) return null;
   const updated = await routeApi.update(draft.value.id, {
     routeName: draft.value.routeName,
     parkId: draft.value.parkId,
@@ -667,6 +678,34 @@ function autoSave(reason: string) {
   }, 400);
 }
 
+/** 程序自己改 draft（加载路线 / 顺序优化 / 规范化补字段）时，别把这次改动当成用户编辑去存 */
+function withoutAutoSave(run: () => void) {
+  const previous = autoSaveSuppressed;
+  autoSaveSuppressed = true;
+  try {
+    run();
+  } finally {
+    autoSaveSuppressed = previous;
+  }
+}
+
+/**
+ * 属性面板（航点 / 航段属性）是直接 `v-model` 到 `draft.data` 上的，没有统一入口，
+ * 所以靠**深度监听草稿数据**兜住：名字、坐标、停留时长、机身偏航、半径、容错、
+ * 航段方式/速度/避障……改完就自动落库（含画布拖点、新增/删除航点）。
+ *
+ * `flush: "sync"` 是必须的：回调要跟着这次改动**同步**执行，[`withoutAutoSave`]
+ * 的抑制标记才盖得住；默认的异步 flush 会拖到标记复位之后才跑到。
+ */
+watch(
+  () => draft.value?.data,
+  () => {
+    if (autoSaveSuppressed) return;
+    autoSave("属性修改");
+  },
+  { deep: true, flush: "sync" }
+);
+
 async function saveRoute() {
   // 正等着自动保存的改动就一起在这次里写，不必再补一次 PUT
   window.clearTimeout(autoSaveTimer);
@@ -682,7 +721,12 @@ async function optimizeRoute() {
   }
   await persist(true);
   const updated = await routeApi.optimize(draft.value.id);
-  draft.value.data = parseRouteData(updated.routeData);
+  // 服务端回来的重排结果是「结果渲染」，不是用户编辑：不再自动存一趟
+  withoutAutoSave(() => {
+    if (!draft.value) return;
+    draft.value.data = parseRouteData(updated.routeData);
+  });
+  if (!draft.value) return;
   draft.value.status = updated.status;
   draft.value.version = updated.version;
   const index = routes.value.findIndex(item => item.id === updated.id);
@@ -776,19 +820,23 @@ async function saveBaseInfo() {
   draft.value.defaultSpeed = Number(routeForm.defaultSpeed) || 1.2;
   draft.value.status = routeForm.status;
   draft.value.routeDescription = routeForm.routeDescription;
-  draft.value.data.loop = routeForm.loopMode;
-  draft.value.loopMode = routeForm.loopMode;
-  if (routeForm.loopMode === "闭环" && !draft.value.data.returnLeg) {
-    draft.value.data.returnLeg = {
-      mode: "沿道路",
-      speed: draft.value.defaultSpeed,
-      avoid: "标准",
-      actions: [{ type: "静默通行", param: "返航不采集" }]
-    };
-  }
-  if (routeForm.loopMode !== "闭环") {
-    draft.value.data.returnLeg = null;
-  }
+  // data 上的改动（循环方式 + 返航段）紧接着就 persist(false)，不用再等自动保存
+  withoutAutoSave(() => {
+    if (!draft.value) return;
+    draft.value.data.loop = routeForm.loopMode;
+    draft.value.loopMode = routeForm.loopMode;
+    if (routeForm.loopMode === "闭环" && !draft.value.data.returnLeg) {
+      draft.value.data.returnLeg = {
+        mode: "沿道路",
+        speed: draft.value.defaultSpeed,
+        avoid: "标准",
+        actions: [{ type: "静默通行", param: "返航不采集" }]
+      };
+    }
+    if (routeForm.loopMode !== "闭环") {
+      draft.value.data.returnLeg = null;
+    }
+  });
   baseDialog.value = false;
   await persist(false);
 }
@@ -1215,7 +1263,7 @@ onBeforeUnmount(() => {
             <button class="rt-tool danger" @click="deletePoint"><AppIcon name="trash" />删除航点</button>
             <button
               class="rt-tool save"
-              title="保存任务规划（新增 / 修改 / 删除动作会自动保存）"
+              title="保存任务规划（动作 / 属性的改动都会自动保存）"
               @click="saveRoute"
             >
               <AppIcon name="check" />保存
