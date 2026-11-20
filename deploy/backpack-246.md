@@ -72,8 +72,7 @@ default via 192.168.234.1  dev eth0            metric 1000   # netplan 兜底
 └── web/                                 构建产物（另有 web.bak-* 3 份）
 
 /opt/xjpt/backpack_dashboard/         ← 背包 Agent（仓库：business/backpack_dashboard/，见同目录 AGENTS.md）
-                                         2026-11-20 从 /root/261113/backpack_dashboard 迁来（见 §4.3），
-                                         旧路径留了同名软链
+                                         2026-11-20 从 /root/261113/backpack_dashboard 迁来（见 §4.3）
 ├── backend/agent.py                     FastAPI :8000
 ├── backend/detect_jobs/<plan>/pt<n>/     AI 临时存证 + result.json（平台读不到，由客户端上报；
 │                                         图进企业微信群后平台下发 ai_cleanup，客户端删掉该 pt 目录；
@@ -94,7 +93,7 @@ default via 192.168.234.1  dev eth0            metric 1000   # netplan 兜底
 /opt/xjpt/led/test_rgbrun                ← LED 灯带闪烁（Agent 「LED」按钮 + led_blue.service；原 /root/led/）
 /opt/xjpt/LED/                           ← 厂商 LED 常亮服务源码/二进制（light_service、light_client；原 /root/LED/）
 /opt/xjpt/wenshidu/sht4x_app             ← 温湿度传感器（Agent `/api/temp`；原 /root/wenshidu/）
-/root/{LED,led,lingsi,wenshidu}          ← 四个软链，指向上面对应目录（迁就还没改路径的厂商脚本）
+/root/{LED,led,lingsi,wenshidu}          ← 已不存在（2026-11-20 搬进 /opt/xjpt 后软链也删了，见 §4.4）
 
 /etc/systemd/system/
 ├── backpack-relay.service               中继 unit（仓库同名文件）
@@ -263,9 +262,9 @@ Agent 代码里**没有写死绝对路径**（`config.py` 全部以 `_HERE` 相�
 | `/etc/systemd/system/backpack-agent.service` | `WorkingDirectory=` 与 `LD_LIBRARY_PATH=` 换成新路径（备份 `*.bak-20261120-151458`） |
 | `/etc/robodog/client.toml` | 新增 `[ai] jobs_dir = "/opt/xjpt/backpack_dashboard/backend/detect_jobs"` 钉死存证目录（备份 `*.bak-20261120-151458`），否则客户端只能靠 `DEFAULT_JOBS_DIRS` 猜或等板端 `plan_hit.evidence` 反推 |
 | `rknn/code/code/build/**` | `CMakeCache.txt` / `Makefile` 里的绝对路径 `sed` 成新路径（只影响以后重新编译 detector，编译产物本来靠 `LD_LIBRARY_PATH`） |
-| `/root/261113/backpack_dashboard` | **留了指向新目录的软链**，给还没升级的老客户端（`DEFAULT_JOBS_DIRS` 里是旧路径）兜底；客户端版本对齐后可 `rm` 掉 |
+| `/root/261113/backpack_dashboard` | 一开始留了指向新目录的软链做兼容，**2026-11-20 15:30 已删**（见 §4.4 末尾：「软链已删」）；回滚就是把它 `mv` 回来 |
 
-回滚：`systemctl stop backpack-agent` → 删软链 → `mv /opt/xjpt/backpack_dashboard /root/261113/backpack_dashboard`
+回滚：`systemctl stop backpack-agent` → `mv /opt/xjpt/backpack_dashboard /root/261113/backpack_dashboard`
 → 恢复 unit / `client.toml` 的 `.bak-20261120-151458` → `daemon-reload` + `restart`。
 
 验证（都是实测过的）：`systemctl is-active backpack-agent`=active、`curl -s 127.0.0.1:8000/api/detect/status`
@@ -281,7 +280,7 @@ ffmpeg 推流在、客户端日志 `ai.jobs_dir = /opt/xjpt/backpack_dashboard/b
 ## 4.4 2026-11-20：硬件目录也收进 `/opt/xjpt`（`LED` / `led` / `lingsi` / `wenshidu`）
 
 跟 Agent 同一批：厂商那四个硬件程序目录从 `/root` 搬到 `/opt/xjpt`，
-**旧路径全部留软链**（厂商脚本/人工习惯一时改不完，而厂商脚本我们改不了）。
+搬的时候先留了软链，**当天 15:30 全部删掉**（见本节末「软链已删」）。
 
 | 原路径 | 现路径 | 谁在用 |
 | --- | --- | --- |
@@ -311,6 +310,38 @@ stop 又等了 90s 才 SIGKILL，见 §4.3 尾注）。
 > 顺带发现：`LINGS_PLAY_WAV`（默认 `/opt/xjpt/lingsi/call.wav`）在 `telemetry.py` 里
 > **只 import 未使用**，而且那个 `call.wav` 目录里从来没有（只有 `tencent_test.pcm`）——
 > 死配置，改路径只是为了不留旧路径。
+
+### 软链已删（2026-11-20 15:30）
+
+两个迁移（§4.3 / §4.4）最初都留了 `/root/…` 旧路径软链做过渡，当天就删了：
+
+```
+/root/261113/backpack_dashboard  /root/LED  /root/led  /root/lingsi  /root/wenshidu   ← 均已 rm
+```
+
+删前确认过没人再依赖旧路径：
+
+- 板端 `grep -rIl '/root/\(261113\|LED\|led\|lingsi\|wenshidu\)'`（`/etc`、`/usr/local`、
+  `/opt/{xjpt/camera,backpack-relay,site-console}`、`/root`）只剩 `*.bak-*` 与
+  `/etc/robodog/client.toml` 里**一句注释**，没有活引用；
+- 厂商 `yd_test_v4.0.sh` / `device_selfcheck.sh` 已改成 `/opt/xjpt/…`；
+- 客户端不再靠候选路径猜：`[ai] jobs_dir` 钉死在 `/opt/xjpt/…`，而且当天把
+  aarch64 客户端重新编了（`DEFAULT_JOBS_DIRS` 多了 `/opt/xjpt/…` 这一项）并装上：
+
+```bash
+cd business/client && ./deploy/build-aarch64.sh        # GLIBC_2.34 ≤ 目标机 2.35
+scp target/aarch64-unknown-linux-gnu/release/robodog-device-client \
+  root@192.168.41.246:/tmp/robodog-device-client.new   # 直接覆盖会 ETXTBSY，先传 /tmp
+# 板上：install -m 0755 /tmp/robodog-device-client.new /opt/robodog/client/robodog-device-client
+#       systemctl restart robodog-device-client
+#       旧二进制备份：robodog-device-client.bak-20261120-153044（md5 f6905d4a…→ 新 33c6fd2c…）
+```
+
+删完复测：6 个 unit 全 active（`backpack-agent`/`asr`/`backpack-relay`/`robodog-device-client`/
+`site-console`/`camera-init`）、`/api/temp` 仍读到 `28.9 °C`（走 `/opt/xjpt/wenshidu`）、
+`ls -ld /root/{LED,led,lingsi,wenshidu}` 全部 `No such file`。
+> 若真要回滚到旧路径，需要**手动** `ln -s /opt/xjpt/<名字> /root/<名字>` 或改回引用——
+> 软链已经不在了。
 
 ## 5. 备份文件现状与清理建议
 

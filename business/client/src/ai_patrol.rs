@@ -54,7 +54,7 @@ const EVIDENCE_PENDING_WAIT: Duration = Duration::from_secs(8);
 ///
 /// 板子上的部署路径不止一种（官方镜像 `/root/backpack_dashboard/backend`；
 /// 现场那台 `.246` 2026-11-20 从 `/root/261113/backpack_dashboard/backend` 迁到了
-/// `/opt/xjpt/backpack_dashboard/backend`，旧路径留了软链），所以这里只是「先试的候选」，
+/// `/opt/xjpt/backpack_dashboard/backend`，旧路径已删），所以这里只是「先试的候选」，
 /// 真正以板端 `plan_hit.evidence` 反推出来的目录为准（见 [`jobs_root_from_evidence`]）；
 /// 也可以直接配 `[ai] jobs_dir` / `ROBODOG_AI_JOBS_DIR` 钉死。
 const DEFAULT_JOBS_DIRS: [&str; 3] = [

@@ -2,7 +2,7 @@
 
 板子 `.246` 上跑的那套「数据采集背包 Agent + 离线 Dashboard」。2026-11-19 起并入主仓库
 （`git subtree` 导入，保留原有提交历史）。板端部署位置（2026-11-20 起）是
-`/opt/xjpt/backpack_dashboard`，原 `/root/261113/backpack_dashboard` 留了同名软链
+`/opt/xjpt/backpack_dashboard`，旧路径 `/root/261113/backpack_dashboard` **已不存在**
 （迁移记录见 `deploy/backpack-246.md` §4.3）。
 
 **这货不在开发机上真跑**：它依赖 RK3576 的 NPU（`librknnrt.so`）、4 路 USB 相机、GPIO、
@@ -87,7 +87,7 @@ curl -s 127.0.0.1:8000/api/detect/status
 板端依赖的厂商硬件程序不在本仓库，2026-11-20 起统一在 `/opt/xjpt/` 下
 （`led/test_rgbrun`、`wenshidu/sht4x_app`、`lingsi/asr_usb_record`、`LED/`），
 `config.py` 里 `LED_TEST_BIN` / `SHT4X_APP` / `LINGS_PLAY_WAV` 的默认值就指那里；
-`/root/{led,LED,lingsi,wenshidu}` 只剩软链（历史路径兼容）。详见 `deploy/backpack-246.md` §4.4。
+`/root/{led,LED,lingsi,wenshidu}` **已不存在**（搬走后就删了软链）。详见 `deploy/backpack-246.md` §4.4。
 
 ## 发布到板端
 
