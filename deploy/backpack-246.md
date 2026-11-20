@@ -43,7 +43,7 @@ default via 192.168.234.1  dev eth0            metric 1000   # netplan 兜底
 | `snap.mediamtx.mediamtx.service` | RTSP 分发中枢：把本体/网络摄像头的流变成 7 条本地 path，供 relay、Agent、浏览器共用 | `8554` RTSP、`8888` HLS/HTTP、`8889` WebRTC | snap 托管 | 不在仓库（厂商镜像 + 现场配置） |
 | `backpack-agent.service` | 背包数据采集 Agent：FastAPI + 6 路流 + RKNN AI 识别（航点存证 `detect_jobs/`） | `8000` | `/root/261113/backpack_dashboard/backend` → `python3 agent.py` | `business/backpack_dashboard/` |
 | `camera-init.service` | USB 相机初始化（`/root/camera/testc.sh`，启动前 sleep 8） | — | `backpack-agent` 的 `ExecStartPre` 也会重启它 | 不在仓库 |
-| `backpack-relay.service` | **视频中继**：按需把本地 RTSP 转码成 FLV 推到平台 `ws://39.107.55.13:3008/ws/device/video` | 无常驻端口（纯出站 WS） | `/usr/bin/python3 /opt/backpack-relay/relay_push.py` | `deploy/backpack-relay/` |
+| `backpack-relay.service` | **视频中继**：按需把本地 RTSP 推到平台 mediamtx（`RELAY_RTSP_URL`，浏览器 WHEP 看）；控制面走 `ws://39.107.55.13:3008/ws/device/video` | 无常驻端口（纯出站 WS） | `/usr/bin/python3 /opt/backpack-relay/relay_push.py` | `deploy/backpack-relay/` |
 | `robodog-device-client.service` | 设备客户端：连平台 `:3008` 做注册/心跳/任务，反代本体 `:10010`，转发 Agent 事件与 AI 证据图 | 无常驻端口（出站 WS） | `/opt/robodog/client/robodog-device-client --config /etc/robodog/client.toml` | `business/client/`（`build-aarch64.sh` 出包） |
 | `site-console.service` | 现场控制台门户：静态页 + 把 `/api` 转到平台，给同网段的浏览器用 | `8080` | `/opt/site-console` → `python3 serve.py` | `deploy/site-console/` |
 | `4g-connect.service` | 厂商脚本：管理 4G dongle 拨号与默认路由（`Restart=always`，每轮会重建默认路由） | — | `/usr/local/bin/4g-connect.sh` | 不在仓库（厂商） |
@@ -58,7 +58,6 @@ default via 192.168.234.1  dev eth0            metric 1000   # netplan 兜底
 /opt/backpack-relay/                     ← 中继（仓库：deploy/backpack-relay/）
 ├── relay_push.py                        主程序（2026-11-19 更新）
 ├── test_relay_push.py                   纯状态机回归（板端也留了一份，便于现场自测）
-├── measure_bitrate.py                   量中继真实码率/帧率
 └── relay_push.py.bak-* / .bak.*         历史备份（9 份，见 §5）
 
 /opt/robodog/client/                     ← 设备客户端（仓库：business/client/）
@@ -269,7 +268,8 @@ ip route get 39.107.55.13; ip route show default; ip route show 39.107.55.13/32
 
 # 视频中继
 journalctl -u backpack-relay -f | grep -E "出口|开始拉流|实测|延迟|降档|慢速"
-python3 /opt/backpack-relay/measure_bitrate.py --stream dogcam --seconds 20
+# 媒体走 RTSP→平台 mediamtx：板上可以直接读回来验有没有在推（本机 mediamtx 上的 bp_<stream>）
+ffprobe -v error -rtsp_transport tcp -i rtsp://127.0.0.1:8554/dogcam -show_entries stream=codec_name
 python3 /opt/backpack-relay/test_relay_push.py          # 状态机回归，不需要网络
 
 # 设备客户端
@@ -300,7 +300,7 @@ ssh root@192.168.41.246 'systemctl daemon-reload && systemctl restart backpack-r
 | `deploy/backpack-relay/relay_push.py` | `/opt/backpack-relay/relay_push.py` | `scp` + `systemctl restart backpack-relay` |
 | `deploy/backpack-relay/backpack-relay.service` | `/etc/systemd/system/backpack-relay.service` | `scp` + `daemon-reload` + `restart` |
 | `deploy/backpack-relay/50-platform-route.sh` | `/etc/NetworkManager/dispatcher.d/50-backpack-relay-route` | `scp` + `chmod 755` |
-| `deploy/backpack-relay/test_relay_push.py`、`measure_bitrate.py`、`latency_probe.py` | `/opt/backpack-relay/`（可选，现场自测用） | `scp` |
+| `deploy/backpack-relay/test_relay_push.py` | `/opt/backpack-relay/`（可选，现场自测用） | `scp` |
 | `business/client/` | `/opt/robodog/client/robodog-device-client` | `business/client/deploy/build-aarch64.sh` 交叉编译 + `scp` |
 | `deploy/site-console/` | `/opt/site-console/`（`serve.py` + `web/`） | `scp` 构建产物 + `restart site-console` |
 | `deploy/backpack-246-frpc/frpc.toml`、`frpc.service` | `/etc/frp/frpc.toml`、`/etc/systemd/system/frpc.service` | `scp` + `daemon-reload` + `restart frpc`（二进制手工 `scp`，见其 README） |

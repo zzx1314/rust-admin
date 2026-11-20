@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""板端推流服务：按需把背包的 RTSP 流转封装成 FLV，推给业务平台中继。
+"""板端推流服务：按需把背包的 RTSP 流转推到平台 mediamtx（浏览器用 WHEP 拉 WebRTC）。
 
 ```text
 本地 mediamtx  rtsp://127.0.0.1:8554/<stream>
-    └─ ffmpeg -vf scale=720p,fps=20 -b:v 1200k -f flv -   （默认 light 档位）
+    └─ ffmpeg -vf scale=720p,fps=20 -b:v 1200k -f rtsp -rtsp_transport tcp
          或 -c:v copy（RELAY_PROFILE=copy：只换容器，不重编码）
-         └─ ws://<平台>/ws/device/video   video_register + 二进制 FLV 分片
-              └─ 平台 VideoHub 房间 bp:<stream> ──ws──► 浏览器 flv.js
+         └─ 127.0.0.1:<临时端口>（RtspUplink 透明中转，字节从这里过 → 记账）
+              └─ rtsp://relay:<口令>@<平台>:8554/bp_<stream>   ← 平台 mediamtx
+                   └─ 浏览器 WHEP：/api/backpack/whep/<stream>/whep   延时 ~300ms
 ```
+
+控制面是另一条常驻 WS（`ws://<平台>/ws/device/video`，房间 `bp:<stream>`）：
+平台按需下发 `video_start` / `video_stop` / `video_config`，本进程上报
+`video_reset`（新一轮流）/ `video_transport`（媒体通路）。
 
 ## 为什么需要它
 
@@ -15,12 +20,18 @@
 网段**、**浏览器放行 Local Network Access**。换 WiFi、出差远程、换台电脑或清一次浏览器
 数据，画面就黑 —— 这不是配置问题，是浏览器策略。
 
-这个服务把方向反过来：由**板子出公网推流**，浏览器只跟平台同源通信。代价是延时从
-WebRTC 的 ~200ms 变成 1~2s，收益是任何网络、任何浏览器都能看。
+这个服务把方向反过来：由**板子出公网把流转推到平台**，浏览器只跟平台同源通信。
+
+## 历史
+
+2026-11-19 之前媒体走「HTTP-FLV over WebSocket」（平台环形缓冲扇出给 flv.js，延时
+1~2s）。WebRTC 出口上线后那条通路已**整体删除**：只有 rtsp 一条，没有 `RELAY_OUTPUT`
+开关，也没有「失败退回 FLV」。那套设计的坑（补流头 / 当前 GOP / 静默积压 / 时间轴跳变）
+记在 `business/docs/backpack-video-integration.md` §6，别再把它加回来。
 
 ## 按需
 
-常驻 6 条 WS 连接（每条约 1KB 空闲开销）。平台在**第一个观看者进来时**才下发
+常驻 7 条 WS 连接（每条约 1KB 空闲开销）。平台在**第一个观看者进来时**才下发
 `video_start`，这时才起 ffmpeg；最后一个观看者离开（或看门狗发现空转）下发
 `video_stop`，立刻杀进程。没人看的时候不耗 CPU、不占上行带宽。
 
@@ -31,9 +42,8 @@ WebRTC 的 ~200ms 变成 1~2s，收益是任何网络、任何浏览器都能看
 | `RELAY_PLATFORM` | `http://39.107.55.13:3008` | 平台基址，自动转成 `ws://…/ws/device/video` |
 | `RELAY_STREAMS` | `cam0,cam1,cam2,cam3,dogcam,dog-ipcam,preview` | 要中继的 mediamtx path |
 | `RELAY_RTSP_BASE` | `rtsp://127.0.0.1:8554` | 本地 mediamtx |
-| `RELAY_OUTPUT` | `auto` | 媒体通路：`auto`（有 `RELAY_RTSP_URL` 就先试 rtsp，连续失败退 ws）/ `rtsp`（推平台 mediamtx → 浏览器 WebRTC）/ `ws`（FLV over WS 中继，老通路） |
-| `RELAY_RTSP_URL` | — | 平台 mediamtx 的推流地址**前缀**，如 `rtsp://relay:<口令>@39.107.55.13:8554/bp_`（口令见平台 `/opt/hz/rust-admin/mediamtx-publish-url.txt`）。不配就整个走 `ws` |
-| `RELAY_RTSP_FALLBACK` | `600` | rtsp 连续失败后退回 ws 并保持多久（秒），到期再试 |
+| `RELAY_OUTPUT` | — | **已删除**。媒体只有 RTSP → 平台 mediamtx 一条路（浏览器 WebRTC） |
+| `RELAY_RTSP_URL` | — | **必填**。平台 mediamtx 的推流地址**前缀**，如 `rtsp://relay:<口令>@39.107.55.13:8554/bp_`（口令见平台 `/opt/hz/rust-admin/mediamtx-publish-url.txt`）。不配就推不了流，日志会直说 |
 | `RELAY_RTSP_CONNECT_TIMEOUT` | `10` | 等 ffmpeg 连上本地中转端口的时限（秒） |
 | `RELAY_RTSP_BATCH_BYTES` / `_SECS` | `24576` / `0.06` | rtsp 通路攒这么多字节 / 这么久再写。**别关**：逐包转发会把上行 TCP 卡在 cwnd=10，高 RTT 下吞吐只有 ~0.5Mbps（实测聚合后 0.55 → 1.03Mbps） |
 | `RELAY_ROOM_PREFIX` | `bp:` | 房间前缀，必须与服务端 `video.rs::BACKPACK_ROOM_PREFIX` 一致 |
@@ -45,7 +55,7 @@ WebRTC 的 ~200ms 变成 1~2s，收益是任何网络、任何浏览器都能看
 | `RELAY_GOP` | `40` | 关键帧间隔（帧）：40@20fps = 2s，加入 / 重连等待上限 |
 | `RELAY_ENCODER` | `auto` | `h264_rkmpp` → `h264_v4l2m2m` → `libx264` 自动挑，也可写死 |
 | `RELAY_TRANSCODE` | — | **已废弃、忽略**（历史 unit 里的 `=0` 不会再把档位压回 copy） |
-| `RELAY_SEND_TIMEOUT` | `5` | 单个分片写进 WS 的上限（秒）。超时 = 上行已死（Wi-Fi 掉线时 TCP 半开，send 不报错也不返回），断开重连。**别调大**：这段时间里 ffmpeg 还在往管道里写，链路恢复后会把攒下的帧以 2~3 倍速倒出去，观看端缓冲吃下十几秒就一直「慢几秒」 |
+| `RELAY_SEND_TIMEOUT` | `5` | 一次写平台 mediamtx 的上限（秒）。超时 = 上行已死（Wi-Fi 掉线时 TCP 半开，send 不报错也不返回），断开重连。**别调大**：这段时间里 ffmpeg 还在往管道里写，链路恢复后会把攒下的帧以 2~3 倍速倒出去，观看端缓冲吃下十几秒就一直「慢几秒」 |
 | `RELAY_STALL_TIMEOUT` | `15` | 起流后这么久一个字节都没推出去（源卡住 / RTSP 半死）就重启 ffmpeg |
 | `RELAY_ROUTE_POLL` | `5` | 每这么久查一次平台出口网卡（`ip route get`），变了就重连；`0` 关闭 |
 | `RELAY_SLOW_IFACES` | `enx,wwan,usb` | 「慢速出口」的网卡名前缀：出口切到这些（USB 4G dongle）就**直接压到最低档**，不等 5s 超时 + 窗口降一档 |
@@ -145,27 +155,20 @@ STREAMS = [
 RTSP_BASE = os.environ.get("RELAY_RTSP_BASE", "rtsp://127.0.0.1:8554").rstrip("/")
 ROOM_PREFIX = os.environ.get("RELAY_ROOM_PREFIX", "bp:")
 
-# ---- 媒体通路：FLV over WS（默认）还是 RTSP 推平台 mediamtx（WebRTC）-------------
+# ---- 媒体通路：RTSP 推平台 mediamtx（WebRTC）--------------------------------------
 #
-# `ws`   ：老通路。ffmpeg 输出 FLV → 本进程 ws.send → 平台按房间扇出给浏览器（flv.js）。
-#          延时 1~2s，但走 TCP/443 语义，**任何网络都能出图**。
-# `rtsp` ：媒体用 RTSP/TCP 推给平台 mediamtx，浏览器用 WHEP 拉 WebRTC。延时 ~300ms，
-#          没有 FLV 补头 / MSE 缓冲 / 时间轴错位那一整套坑（WebRTC 自己会等关键帧）。
-#          代价：浏览器侧要能过 UDP 8189（平台安全组 + 企业网不封 UDP）。
-# `auto` ：配了 RELAY_RTSP_URL 就先试 rtsp；连不上平台 mediamtx（没部署 / 端口没放通 /
-#          服务挂了）连续失败 2 次就**自动退回 ws** 并保持一段时间，不把画面搞没。
+# 只有一条：ffmpeg 用 RTSP/TCP 把流转推到平台 mediamtx，浏览器用 WHEP 拉 WebRTC
+#（延时 ~300ms，没有 FLV 补头 / MSE 缓冲 / 时间轴错位那一整套坑）。
 #
-# 不管走哪条，**控制通道永远是那条常驻 WS**（按需起流 / 换档 / 看门狗都靠它）。
-OUTPUT = os.environ.get("RELAY_OUTPUT", "auto").strip().lower()
-if OUTPUT not in ("auto", "rtsp", "ws"):
-    OUTPUT = "auto"
+# 历史：`RELAY_OUTPUT=ws`（FLV over WS 中继）已于 2026-11-19 删除；`auto` 的
+# 「rtsp 失败退回 ws」也一并删了 —— 现在 rtsp 起不来就**断开重连重试**（平台需要流时
+# 会再下发 `video_start`，见 `stream_worker`），而不是降级到一条已经没人维护的通路。
+#
+# 控制通道永远是那条常驻 WS（按需起流 / 换档 / 看门狗都靠它）。
 # 平台 mediamtx 的推流地址，形如 rtsp://relay:<口令>@39.107.55.13:8554/bp_
 # （**末尾是 path 前缀**，本服务在后面拼 stream；口令由平台 install.sh 生成，见
 #  /opt/hz/rust-admin/mediamtx-publish-url.txt）
 RTSP_PUSH = os.environ.get("RELAY_RTSP_URL", "").strip()
-# rtsp 连续失败后退回 ws 并保持多久（秒）。到时再试一次 rtsp：现场修好 mediamtx /
-# 放通端口后不用登板子重启服务。
-RTSP_FALLBACK = float(os.environ.get("RELAY_RTSP_FALLBACK", "600"))
 # 等 ffmpeg 连上本地中转端口的上限（秒）：超时说明 ffmpeg 起不来，按失败处理
 RTSP_CONNECT_TIMEOUT = float(os.environ.get("RELAY_RTSP_CONNECT_TIMEOUT", "10"))
 
@@ -181,9 +184,7 @@ RTSP_CONNECT_TIMEOUT = float(os.environ.get("RELAY_RTSP_CONNECT_TIMEOUT", "10"))
 RTSP_BATCH_BYTES = int(os.environ.get("RELAY_RTSP_BATCH_BYTES", str(24 * 1024)))
 RTSP_BATCH_SECS = float(os.environ.get("RELAY_RTSP_BATCH_SECS", "0.06"))
 
-# rtsp 通路的运行时状态：连续失败次数 / 到什么时刻之前别再试
-_rtsp_failures = 0
-_rtsp_disabled_until = 0.0
+# rtsp 通路的运行时状态已随 FLV 退让逻辑一起删除（失败直接断开重连，见 _start_locked）
 FFMPEG = os.environ.get("RELAY_FFMPEG", "ffmpeg")
 # 输出档位。默认 light：平台公网出口往往只有 2~3Mbps（现场实测 2.5Mbps），
 # 而 1080p60 的 dogcam 直接 copy 是 4~8Mbps —— 浏览器追不上就被服务端判 lagged
@@ -209,7 +210,7 @@ DECODER = os.environ.get("RELAY_DECODER", "auto").strip()
 # 排障开关：把分片大小、ffmpeg 退出码、完整 stderr 都打出来（生产默认关）
 DEBUG = os.environ.get("RELAY_DEBUG", "0") == "1"
 
-# 分片大小：一个 FLV tag 常见几 KB，8KB 兼顾低延时与帧数开销
+# 中转连接每次读的字节数（[`RtspUplink`] 的对拷缓冲，与 ffmpeg 的分片无关）
 CHUNK_BYTES = 8 * 1024
 # WS 重连退避
 MIN_BACKOFF = 1
@@ -224,7 +225,7 @@ MAX_BACKOFF = 15
 #
 # 三件事把它兜住：分片发送上限（判死上行）、卡住自愈（源侧卡住不拖累连接）、
 # 出口网卡巡检（Wi-Fi 恢复后旧连接不会自己换回快链路）。
-# 单个分片写 WS 的上限（秒）：超时就判上行已死、断开重连。
+# 一次写平台 mediamtx 的上限（秒）：超时就判上行已死、断开重连。
 #
 # 2026-11-18 纵深排查时从 10s 收到 5s：这十秒里 ffmpeg 没被反压停，它会继续把帧塞进
 # 管道；链路一恢复这些「陈旧帧」就以 2~3 倍速倒出去（平台日志 `6.9s / 2964 KB → 3533
@@ -1101,7 +1102,7 @@ def _encoder_works(name: str) -> bool:
         return False
 
 
-def ffmpeg_args(stream: str, output: str = "ws", target: str | None = None) -> list[str]:
+def ffmpeg_args(stream: str, target: str) -> list[str]:
     profile = active_profile()
     # 「低档」按绝对档位判：平台把起点设成省流档（1）时也要走低档的 GOP 与重编码参数
     low = _degrade_level > 0
@@ -1132,7 +1133,7 @@ def ffmpeg_args(stream: str, output: str = "ws", target: str | None = None) -> l
     args += [
         "-i",
         source,
-        "-an",  # 背包各流都没有音轨，FLV 里带空音轨会让 flv.js 报解析错
+        "-an",  # 背包各流都没有音轨（带进去只会白占带宽，播放端也不解它）
     ]
     # 只有 `RELAY_PROFILE=copy` 才只换容器。降档时**必须**重编码 —— copy 改不了码率，
     # 1080p60 会原样推 4~8Mbps（2026-11-18 事故：降档判断对了，但这里 `or low` 把
@@ -1179,61 +1180,15 @@ def ffmpeg_args(stream: str, output: str = "ws", target: str | None = None) -> l
                 _double_bitrate(bitrate),
             ]
     # 低延迟：`-muxdelay/-muxpreload` 默认是 0.7s/0.5s 的 mux 缓冲（文档里一直写着这两个
-    # 参数，代码里其实一直漏着）→ 白送 0.5~1.2s 延迟。两个通路共用。
+    # 参数，代码里其实一直漏着）→ 白送 0.5~1.2s 延迟。
     args += ["-muxdelay", "0", "-muxpreload", "0"]
-    if output == "rtsp":
-        # 媒体走平台 mediamtx（RTSP/TCP）→ 浏览器用 WHEP 拉 WebRTC。
-        #
-        # ⚠️ `target` 是**本机中转端口**（[`RtspUplink`]），不是平台地址：
-        # 字节要从 Python 过一遍才能继续算 send 占用 / 实测码率 / 帧积压。
-        # 必须 TCP：UDP 的 RTP 在 4G/NAT 后面几乎不可用（丢一个 P 帧就要等关键帧）。
-        args += ["-f", "rtsp", "-rtsp_transport", "tcp", target or ""]
-    else:
-        # `-flush_packets 1` 每个包立刻吐（不然 mux 会攒）
-        args += ["-f", "flv", "-flush_packets", "1", "pipe:1"]
+    # 媒体走平台 mediamtx（RTSP/TCP）→ 浏览器用 WHEP 拉 WebRTC。
+    #
+    # ⚠️ `target` 是**本机中转端口**（[`RtspUplink`]），不是平台地址：
+    # 字节要从 Python 过一遍才能继续算 send 占用 / 实测码率 / 帧积压。
+    # 必须 TCP：UDP 的 RTP 在 4G/NAT 后面几乎不可用（丢一个 P 帧就要等关键帧）。
+    args += ["-f", "rtsp", "-rtsp_transport", "tcp", target]
     return args
-
-
-def output_mode() -> str:
-    """本路这次起流用哪条媒体通路（`rtsp` / `ws`）。
-
-    只读配置与退让状态，不碰网络：`auto` 的“试一试再退”由
-    [`note_rtsp_failure`] / [`note_rtsp_ok`] 推动。
-    """
-    if OUTPUT == "ws":
-        return "ws"
-    if not RTSP_PUSH:
-        if OUTPUT == "rtsp":
-            log("RELAY_OUTPUT=rtsp 但没配 RELAY_RTSP_URL，回退到 ws（FLV 中继）")
-        return "ws"
-    if time.monotonic() < _rtsp_disabled_until:
-        return "ws"
-    return "rtsp"
-
-
-def note_rtsp_failure(reason: str) -> None:
-    """rtsp 通路起不来：`auto` 连续失败两次就退回 ws 一段时间（不把画面搞没）"""
-    global _rtsp_failures, _rtsp_disabled_until
-    _rtsp_failures += 1
-    if OUTPUT == "rtsp" or _rtsp_failures < 2:
-        log(f"rtsp 通路失败（{reason}），第 {_rtsp_failures} 次")
-        return
-    _rtsp_disabled_until = time.monotonic() + RTSP_FALLBACK
-    _rtsp_failures = 0
-    log(
-        f"rtsp 通路连续失败（{reason}），退回 FLV 中继（ws）{RTSP_FALLBACK:g}s；"
-        "排查：平台 mediamtx 是否在跑（systemctl status mediamtx）、"
-        "安全组是否放通 TCP 8554、RELAY_RTSP_URL 的口令是否与"
-        " /opt/hz/rust-admin/mediamtx-publish-url.txt 一致"
-    )
-
-
-def note_rtsp_ok() -> None:
-    """rtsp 通路通了：清掉失败计数，下次退让窗口重置"""
-    global _rtsp_failures, _rtsp_disabled_until
-    if _rtsp_failures or _rtsp_disabled_until:
-        _rtsp_failures = 0
-        _rtsp_disabled_until = 0.0
 
 
 def rtsp_publish_plan(stream: str) -> tuple[str, int, str, str]:
@@ -1259,11 +1214,8 @@ def rtsp_publish_plan(stream: str) -> tuple[str, int, str, str]:
 class RtpScanner:
     """从 RTSP 交错的字节流里取视频 RTP 时间戳（只解析 `$` 头 + RTP 头，跳过负载）。
 
-    作用与 [`FlvScanner`] 完全一样：有了采集时刻才能量「这帧在管道里躺了多久」。
-    两个差别：
-
-    - RTP 时间戳是 90kHz（`clock_rate`），FLV 是毫秒；
-    - 时间戳来自 `-use_wallclock_as_timestamps` 的 PTS，所以**增量**就是采集时间增量。
+    有了采集时刻才能量「这帧在管道里躺了多久」。时间戳是 90kHz（`clock_rate`）；
+    它来自 `-use_wallclock_as_timestamps` 的 PTS，所以**增量**就是采集时间增量。
 
     分片边界会切断 `$` 头 / RTP 头，所以状态要跳分片保存（`_pending`）。
     """
@@ -1454,70 +1406,6 @@ class RtspUplink:
         self.up_reader = None
 
 
-class FlvScanner:
-    """从 ffmpeg 的 FLV 字节流里取视频 tag 的时间戳（只解析 tag 头，跳过本体）。
-
-    有了它才能量「这一帧从进 ffmpeg 到现在多久了」：tag 时间戳来自
-    `-use_wallclock_as_timestamps`（输入到达时刻），和墙钟的差就是积压延迟。
-    分片边界会切断 tag 头 / 本体，所以状态要跨分片保存。
-    """
-
-    MAX_TAG = 32 * 1024 * 1024
-    # FLV 视频 tag 的时间戳是毫秒（与 [`RtpScanner`] 的 90kHz 对齐用）
-    clock_rate = 1000
-
-    def __init__(self) -> None:
-        self._head = bytearray()
-        self._skip = 0           # 还没跳过的 tag 本体 + PreviousTagSize 字节数
-        self._started = False
-        self.broken = False      # 解析错位（不是 FLV / size 离谱）就彻底停用，别吐垃圾
-        self.last_video_ts: int | None = None
-
-    def feed(self, chunk: bytes) -> None:
-        if self.broken:
-            return
-        if not self._started:
-            # 文件头（9 + 4 字节）本身也可能被分片切开，先攒够再说
-            self._head += chunk
-            if len(self._head) < 13:
-                return
-            if self._head[:3] != b"FLV":
-                self.broken = True
-                self._head.clear()
-                return
-            rest = bytes(self._head[13:])
-            self._head.clear()
-            self._started = True
-            if rest:
-                self.feed(rest)
-            return
-        n = len(chunk)
-        pos = 0
-        while pos < n:
-            if self._skip:
-                take = min(self._skip, n - pos)
-                self._skip -= take
-                pos += take
-                continue
-            need = 11 - len(self._head)
-            take = min(need, n - pos)
-            self._head += chunk[pos : pos + take]
-            pos += take
-            if len(self._head) < 11:
-                return
-            size = int.from_bytes(self._head[1:4], "big")
-            if size <= 0 or size > self.MAX_TAG:
-                self.broken = True
-                self._head.clear()
-                return
-            if self._head[0] == 9:  # video tag
-                self.last_video_ts = int.from_bytes(self._head[4:7], "big") | (
-                    self._head[7] << 24
-                )
-            self._skip = size + 4  # tag body + PreviousTagSize
-            self._head.clear()
-
-
 class StreamSession:
     """一路流的拉取 + 推送（起停由平台的 video_start / video_stop 驱动）"""
 
@@ -1529,25 +1417,20 @@ class StreamSession:
         self.watch: asyncio.Task | None = None
         self.bytes_sent = 0
         self.chunks = 0
-        # 最后一次真正写进 WS 的时刻：卡住判定（源不吐字节）用它
+        # 最后一次真正写进平台 mediamtx 的时刻：卡住判定（源不吐字节）用它
         self.last_send = 0.0
         # 当前这条流用的档位（降档/回档时对比它，决定用不用重启 ffmpeg）
         self.profile: tuple | None = None
-        # 推流用的 WS：降档/回档要就地重启 ffmpeg，不需要重新建连接
+        # 控制用的 WS：降档/回档要就地重启 ffmpeg，不需要重新建连接
         self.ws = None
-        # 延迟统计：ffmpeg 起流时刻（墙钟 + 单调钟）+ 帧时间戳扫描器
+        # 延迟统计：ffmpeg 起流时刻（墙钟 + 单调钟）+ RTP 时间戳扫描器
         self._started_wall = 0.0
         self._started_mono = 0.0
-        self._flv = FlvScanner()
-        # rtsp 通路的扫描器（`None` = 本次起流走 ws）：RTP 时间戳 90kHz，与 FLV 毫秒不同，
-        # 两者共用 `_update_lag` 的计算公式，只差 `clock_rate`。
-        self._rtp: RtpScanner | None = None
-        # 本次起流的字节来源与去向：ws 是 ffmpeg 的 stdout + `ws.send`；
-        # rtsp 是本地中转连接 + 平台 TCP。`_pump` 两边完全一样。
+        self._rtp = RtpScanner()
+        # 本次起流的字节来源与去向：本地中转连接（ffmpeg 写进来）+ 平台 TCP（本进程写出去）
         self._reader: asyncio.StreamReader | None = None
         self._send = None
         self._uplink: RtspUplink | None = None
-        self._output = "ws"
         self.lag = 0.0
         # 延迟基准：**首帧**到达时的时间和它自己的 tag 时间戳
         #
@@ -1576,10 +1459,6 @@ class StreamSession:
     def running(self) -> bool:
         return self.proc is not None and self.proc.returncode is None
 
-    def _scanner(self):
-        """本次起流的时间戳扫描器（ws → FLV 毫秒；rtsp → RTP 90kHz）"""
-        return self._rtp if self._rtp is not None else self._flv
-
     async def start(self, ws, profile: object = None) -> None:
         """平台要求起流。`profile` = `payload.profile`（默认档位 + 是否允许自动降档）。
 
@@ -1597,9 +1476,18 @@ class StreamSession:
                 return
             await self._start_locked(ws)
 
-    async def _start_locked(self, ws, prefer_ws: bool = False) -> None:
-        # 幂等：已经在推就不重启（重复 video_start 不能黑 3~7s，也不能换新 FLV 头）
+    async def _start_locked(self, ws) -> None:
+        # 幂等：已经在推就不重启（重复 video_start 不能黑 3~7s）
         if self.running:
+            return
+        if not RTSP_PUSH:
+            # 媒体只有 RTSP 一条路：没配推送地址就根本推不出去。日志要能直接定位，
+            # 别静默起一个只会报错的 ffmpeg。
+            log(
+                f"[{self.stream}] 未配置 RELAY_RTSP_URL，无法推流："
+                "平台已只支持 WebRTC（板端 RTSP → 平台 mediamtx），"
+                "地址见平台 /opt/hz/rust-admin/mediamtx-publish-url.txt"
+            )
             return
         self._stopping = False
         self.bytes_sent = 0
@@ -1609,7 +1497,7 @@ class StreamSession:
         self._conn_broken = False
         self._started_wall = time.time()
         self._started_mono = time.monotonic()
-        self._flv = FlvScanner()
+        self._rtp = RtpScanner()
         self.lag = 0.0
         self._lag_ref = None
         self._lag_degrade_since = 0.0
@@ -1618,20 +1506,23 @@ class StreamSession:
         self._win_blocked = 0.0
         self._win_bytes = 0
         self.profile = active_profile()
-        # 选媒体通路：rtsp（平台 mediamtx / WebRTC）优先，起不来就回退 ws（FLV 中继）
-        mode = "ws" if prefer_ws else output_mode()
-        uplink: RtspUplink | None = None
-        if mode == "rtsp":
-            uplink = RtspUplink(self.stream)
-            try:
-                target = await uplink.open()
-            except Exception as exc:  # noqa: BLE001 - 配置错 / 平台不可达都走回退
-                await uplink.close()
-                uplink = None
-                note_rtsp_failure(f"{exc}")
-                # 立刻用 ws 再起：等下一轮 video_start 会黑 20s（前端连接超时）
-                mode = "ws"
-        args = ffmpeg_args(self.stream, output=mode, target=target if uplink else None)
+        # 本地中转端口：起不来（平台 :8554 连不上 / 口令不对 / 没部署 mediamtx）就
+        # 断开这条 WS，让 stream_worker 重连重试 —— 平台还有观看者在等的话，
+        # 重连后它会把 video_start 再补发一次（不要在这里重试或降级：死链上的重试
+        # 只会把 ffmpeg 一遍遍拉起杀掉）。
+        uplink = RtspUplink(self.stream)
+        try:
+            target = await uplink.open()
+        except Exception as exc:  # noqa: BLE001 - 配置错 / 平台不可达
+            await uplink.close()
+            log(
+                f"[{self.stream}] 平台 mediamtx 达不到（{exc}）："
+                "排查 systemctl status mediamtx / 安全组 TCP 8554 / "
+                "RELAY_RTSP_URL 口令是否与 mediamtx-publish-url.txt 一致；断开重连重试"
+            )
+            await close_quietly(ws)
+            return
+        args = ffmpeg_args(self.stream, target)
         # 编码器一律从**真实参数**里取：上次的教训是日志写着 enc=h264_rkmpp、
         # 实际 args 里是 `-c:v copy`，把「降档为什么没降下来」藏了两天。
         codec = args[args.index("-c:v") + 1] if "-c:v" in args else "?"
@@ -1639,27 +1530,24 @@ class StreamSession:
             f"[{self.stream}] 平台有观看者，开始拉流"
             f"（profile={level_label()}，{profile_text(self.profile)}"
             f" 编码={codec}，出口 {egress_iface() or '未知'}；{tier_label()}；"
-            f"媒体={('rtsp→平台 WebRTC' if mode == 'rtsp' else 'FLV over WS')}）"
+            f"媒体=rtsp→平台 WebRTC）"
         )
         if DEBUG:
             log(f"[{self.stream}] ffmpeg: {' '.join(args)}")
-        # 告诉平台「这是一条新流」：常驻连接里每次起流都换新的 FLV 头与新时间戳，
-        # 平台必须先丢掉上一轮的流头，否则后加入的观看者会拿到错位的字节（黑屏）。
-        # 媒体走 rtsp 时这条已经没有流头可言，但 `video_reset` 仍要发：平台据此知道
-        # “新一轮”已开始（房间清空 + 下游统计归零），前端也靠它切“起流中”遮罩。
+        # 告诉平台「新一轮流开始了」：媒体在 mediamtx 里，平台没有流头要清，但这两个
+        # 报文都留着 —— `video_reset` 让别障日志能把「板端起 ffmpeg」和平台侧对上，
+        # `video_transport` 让平台能分辨「这台板子的 relay 是不是升级了」（旧版报 ws）。
         try:
             await asyncio.wait_for(
                 ws.send(json.dumps({"msgType": "video_reset", "payload": {"stream": self.stream}})),
                 SEND_TIMEOUT,
             )
-            # 顺带告诉平台这次媒体走哪条路（前端据此选 WHEP 还是 FLV 播放器）：
-            #   rtsp → `/api/backpack/whep/<stream>`；ws → `/api/backpack/video/ws`
             await asyncio.wait_for(
                 ws.send(
                     json.dumps(
                         {
                             "msgType": "video_transport",
-                            "payload": {"stream": self.stream, "transport": mode},
+                            "payload": {"stream": self.stream, "transport": "rtsp"},
                         }
                     )
                 ),
@@ -1675,44 +1563,33 @@ class StreamSession:
                 lowest=True,
             )
             log(f"[{self.stream}] 上行已死（video_reset 发不出去），断开重连")
-            if uplink is not None:
-                await uplink.close()
+            await uplink.close()
             await close_quietly(ws)
             return
-        self._output = mode
-        self._rtp = RtpScanner() if mode == "rtsp" else None
         self._uplink = uplink
         self.proc = await asyncio.create_subprocess_exec(
             *args,
             # rtsp 通路 ffmpeg 自己写 socket（不经 stdout），stdout 只能丢
-            stdout=asyncio.subprocess.PIPE if mode == "ws" else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
-        if uplink is not None:
-            # 等 ffmpeg 连上本地中转端口：连不上就是起流失败（让外层退避重试）
+        # 等 ffmpeg 连上本地中转端口：连不上就是起流失败（断开重连，让平台再补一次
+        # video_start；这里不再「马上用另一条通路再起一次」，那条通路已经不存在了）
+        try:
+            await uplink.wait_client()
+        except Exception as exc:  # noqa: BLE001
+            log(f"[{self.stream}] rtsp 通路没起来：{exc}，断开重连（排查见上面那行）")
+            await uplink.close()
+            self._uplink = None
             try:
-                await uplink.wait_client()
-                note_rtsp_ok()
-            except Exception as exc:  # noqa: BLE001
-                note_rtsp_failure(f"{exc}")
-                log(f"[{self.stream}] rtsp 通路没起来：{exc}")
-                await uplink.close()
-                self._uplink = None
-                self._rtp = None
-                try:
-                    self.proc.kill()
-                except ProcessLookupError:
-                    pass
-                self.proc = None
-                # 这一路马上用 ws 再起一次（rtsp 已经证明起不来）：
-                # 不重试的话观众要等到 20s 前端超时才可能看到东西
-                await self._start_locked(ws, prefer_ws=True)
-                return
-            self._reader = uplink.client_reader
-            self._send = uplink.send
-        else:
-            self._reader = self.proc.stdout
-            self._send = ws.send
+                self.proc.kill()
+            except ProcessLookupError:
+                pass
+            self.proc = None
+            await close_quietly(ws)
+            return
+        self._reader = uplink.client_reader
+        self._send = uplink.send
         self.pump = asyncio.create_task(self._pump(ws))
         self.stderr = asyncio.create_task(self._drain_stderr())
         self.watch = asyncio.create_task(self._watch_stall(ws))
@@ -1734,22 +1611,26 @@ class StreamSession:
             # 必须等上一轮协程真的退出：否则它的 finally 可能在新一轮 start() 之后才跑，
             # 把 `_stopping=False` 误当成「连接该关了」。
             #
-            # 但**不能无上限地等**：协程卡在 `ws.send()`（上行拥塞、transport 写不出去）时，
+            # 但**不能无上限地等**：协程卡在 `uplink.send()`（上行拥塞、写不进 mediamtx）时，
             # `cancel()` 只是打个标记，协程停不下来。2026-11-18 事故就是这里无限等 → 锁被
             # 一直占着，session 变僵尸：日志打了「降档」但档位永远不生效，ffmpeg 被反压着
             # 继续推高码率，观看端越看越延迟，而且后面的 video_stop 也进不来。
+            #
+            # ⚠️ 卡住的是**上行连接**（ffmpeg → 本机中转 → 平台 mediamtx），不是控制 WS。
+            # 以前两者是同一条 WS，只能连它一起掐；现在媒体独立了，掐控制 WS 的代价是
+            # 「重连 + 平台补发 video_start + 再起一次 ffmpeg」—— 2026-11-20 现场在
+            # 100% send 占用的 4G 链路上就是这么白黑了一次。所以只掐上行，控制通道留着，
+            # 让 `_restart` 照常在本连接上按新档位重起。
             done, pending = await asyncio.wait(tasks, timeout=STOP_GRACE)
             if pending:
                 log(
                     f"[{self.stream}] {len(pending)} 个协程 {STOP_GRACE:g}s 没停下"
-                    "（多半卡在 ws.send），掐断连接"
+                    "（多半卡在写平台 mediamtx），掐断上行连接"
                 )
-                await close_quietly(self.ws)
                 if self._uplink is not None:
                     await self._uplink.close()
                     self._uplink = None
                 await asyncio.wait(pending, timeout=STOP_GRACE)
-                self._conn_broken = True
         if self.proc.returncode is None:
             try:
                 self.proc.terminate()
@@ -1764,12 +1645,11 @@ class StreamSession:
             self._uplink = None
         self._reader = None
         self._send = None
-        self._rtp = None
 
     async def _restart(
         self, ws, reason: str = "卡住，重启拉流", only_if_profile_changed: bool = False
     ) -> None:
-        """重启 ffmpeg，但保留 WS（观看端不用重连，平台靠 video_reset 清旧流头）。
+        """重启 ffmpeg，但保留 WS（观看端不用重连）。
 
         `only_if_profile_changed=True`：档位已经和目标一致就不折腾 —— 降档/回档时用，
         避免把本来就在省流档的流也重启一遍（白闪一下 + 重新等关键帧）。
@@ -1806,9 +1686,8 @@ class StreamSession:
         和「拥塞降档」是两个问题：上行跑得动、duty 也不高，但 ffmpeg 的输入/编码队列
         积压时，码率看着正常，画面却越看越晚（旧版没有任何东西管这件事）。
         """
-        # ws 通路是 FLV tag 时间戳（毫秒），rtsp 通路是 RTP 时间戳（90kHz）：
-        # 两个扫描器各带 `clock_rate`，换算成秒的公式相同。
-        scanner = self._scanner()
+        # RTP 时间戳 90kHz（`clock_rate`），换算成秒就是采集时间
+        scanner = self._rtp
         tags = scanner.last_video_ts
         if tags is None or not self._started_wall:
             return
@@ -1948,39 +1827,19 @@ class StreamSession:
         return bytes(buf)
 
     async def _pump(self, ws) -> None:
-        """把上行字节搬出去并记账（两条通路共用这一份逻辑）。
+        """读 ffmpeg 连上来的本地中转 socket → 写平台 mediamtx 的 TCP，并记账。
 
-        - `ws`  ：读 ffmpeg 的 FLV stdout → `ws.send`（平台按房间转发给 flv.js）
-        - `rtsp`：读 ffmpeg 连上来的本地中转 socket → 写平台 mediamtx 的 TCP
-
-        两种通路的判据完全一样（`send` 占用 / 实测码率 / 分片超时 / 帧积压）——
-        这正是 [`RtspUplink`] 存在的理由：字节必须过一遍这里。
+        字节必须过一遍本进程（[`RtspUplink`]）才能算 `send` 占用 / 实测码率 / 帧积压。
         """
         proc = self.proc
         reader = self._reader
         send = self._send
         assert proc and reader and send
-        first = True
         try:
             while True:
-                # rtsp 通路先攒一小段再写（原因见 RTSP_BATCH_BYTES 的注释：小分片会把
-                # 上行 TCP 卡在 cwnd=10，高 RTT 下吞吐只有 0.5Mbps）
-                chunk = (
-                    await self._read_batch(reader)
-                    if self._output == "rtsp"
-                    else await reader.read(CHUNK_BYTES)
-                )
+                chunk = await self._read_batch(reader)
                 if not chunk:
                     break
-                if first:
-                    first = False
-                    # FLV 魔数检查只对 ws 有意义（rtsp 是交错的 RTP 字节流）
-                    if self._output == "ws" and not chunk.startswith(b"FLV"):
-                        # 平台要按 FLV 魔数解析流头，不是 FLV 就没法给中途加入的观众补头
-                        log(
-                            f"[{self.stream}] 警告：输出不是 FLV（可能是 H.265 源），"
-                            "把 RELAY_PROFILE 设成 light（重编码成 H.264）"
-                        )
                 try:
                     # 上行死掉时 send 会永久挂着（TCP 半开：不报错也不返回），
                     # ffmpeg 被反压到停住但进程还在 —— 现场就是「Wi-Fi 断了画面冻住，
@@ -2007,7 +1866,7 @@ class StreamSession:
                 self.chunks += 1
                 self._win_blocked += now - started
                 self._win_bytes += len(chunk)
-                self._scanner().feed(chunk)
+                self._rtp.feed(chunk)
                 self._update_lag(now)
                 if DEBUG and self.chunks <= 5:
                     log(
@@ -2036,7 +1895,7 @@ class StreamSession:
                     f"[{self.stream}] ffmpeg 退出且没推出任何数据："
                     f"检查 {RTSP_BASE}/{self.stream} 是否在推流"
                 )
-            # rtsp 通路的本地中转 / 平台连接也要收掉，不然下一轮 start 会和旧 socket 抢
+            # 本地中转 / 平台连接也要收掉，不然下一轮 start 会和旧 socket 抢
             if self._uplink is not None:
                 await self._uplink.close()
                 self._uplink = None
@@ -2151,11 +2010,11 @@ async def main() -> int:
         return 2
     log(f"目标平台 {endpoint()}；通道 {', '.join(STREAMS)}；源 {RTSP_BASE}")
     log(
-        "媒体通路："
+        "媒体通路：rtsp → 平台 mediamtx（浏览器 WebRTC）"
         + (
-            f"{OUTPUT}（优先 rtsp → {RTSP_PUSH.split('@')[-1] if RTSP_PUSH else '未配 RELAY_RTSP_URL'}）"
-            if OUTPUT != "ws"
-            else "ws（FLV over WS 中继）"
+            f" → {RTSP_PUSH.split('@')[-1]}"
+            if RTSP_PUSH
+            else "；⚠️ 未配 RELAY_RTSP_URL，推不了流"
         )
     )
     log(

@@ -80,40 +80,37 @@ HTTP」模式。两者共用同一个服务令牌，见 `business/README.md`。
 （`deploy/backpack-relay/`），想看到框要让板端烧录（`preview` 流）。
 多背包部署配 `ROBODOG_BACKPACK_TUNNEL_DEVICE`。详见
 `business/docs/backpack-video-integration.md` §6.8。
-**媒体通路有两条，由板端 `RELAY_OUTPUT` 决定，平台前端按上报自动选播放器**：
-`rtsp` = 板端推平台 mediamtx（`deploy/external-hz/mediamtx/`，TCP 8554 进 / UDP 8189 出）
-→ 浏览器 WHEP（`/api/backpack/whep/*`，业务平台反代到只绑回环的 `:8889`），延时 ~300ms；
-`ws` = 老通路（FLV over WS 中继，任何网络都能出图）。板端起流时发
-`video_transport` 上报选的是哪条，`GET /api/backpack/video/state` 的 `transport` 字段
-就是它 —— **前端不能靠猜**（两条通路都表现为「房间里有推流端」）。WHEP 模式下浏览器
-仍开一条 `.../video/ws?media=0`：只计数/触发 `video_start`，不传媒体（没有它按需推流
-和 30s 看门狗都不工作）。`auto`（默认）在 rtsp 连续失败两次时退回 `ws`，所以
-「云上 mediamtx 挂了 / 8554 没放通」表现为画面还在、只是慢一点。**rtsp 通路的字节必须
-聚合后再写**（`RELAY_RTSP_BATCH_*`，24KB/60ms）：ffmpeg 每包 write 的话上行 TCP 是
+**媒体只有一条路：WebRTC**（2026-11-19 起）。板端 relay 用 RTSP/TCP 把流转推到平台
+mediamtx（`deploy/external-hz/mediamtx/`，TCP 8554 进 / UDP 8189 出）→ 浏览器 WHEP
+（`/api/backpack/whep/*`，业务平台反代到只绑回环的 `:8889`），延时 ~300ms。
+「FLV over WebSocket」那条老通路（含 `RELAY_OUTPUT`、`media=1`、平台环形缓冲扇出、
+`RELAY_RTSP_FALLBACK` 退让）**已整体删除**，别再把它加回来——那一整套坑记在
+`business/docs/backpack-video-integration.md` §6。
+平台侧 `/api/backpack/video/ws` 仍然存在，但**只当在场心跳**：只计数 + 触发 `video_start`，
+一个媒体字节都不转发。没有它按需推流和 30s 看门狗都不工作。板端起流时发
+`video_transport` 上报通路，`GET /api/backpack/video/state` 的 `transport` 字段就是它：
+现在只可能是 `rtsp`，**`ws`/null 说明那台板子的 relay 没升级**（前端据此直接报错，
+而不是让人对着「起流中」干等）。**rtsp 通路的字节必须聚合后再写**
+（`RELAY_RTSP_BATCH_*`，24KB/60ms）：ffmpeg 每包 write 的话上行 TCP 是
 app-limited、cwnd 停在 10 个段，4G 的 96ms RTT 把吞吐压到 ~0.5Mbps（现场实测 0.55 →
 1.03Mbps，drain 占用 70% → 1%）。改这块先读
 `business/docs/backpack-video-integration.md` §7。
 
-中继画质是**板端自适应**的（`deploy/backpack-relay/relay_push.py`）：5s 窗口内 `ws.send`
-被反压且实测码率明显低于目标档位就就地换 `640x360@12 / 500k`（`video_reset` + 重启
-ffmpeg，观看端不重连）；到期先确认链路真恢复才回配置档，反复升降时窗口翻倍。
+中继画质是**板端自适应**的（`deploy/backpack-relay/relay_push.py`）：5s 窗口内写平台
+mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@12 / 500k`（`video_reset` +
+重启 ffmpeg，观看端不重连）；到期先确认链路真恢复才回配置档，反复升降时窗口翻倍。
 **起流默认档位在平台「系统设置 → 视频中继」配**（`settings.video_relay_profile` /
 `video_relay_auto_degrade`，默认 `degrade` 省流档 + 允许自动降档，现场主用 4G）：平台随
 `video_start.payload.profile` 下发，保存设置时再广播 `video_config` 让正在看的流就地换档；
 板端把它当起点（省流档还能再降到极省流档），关掉自动降档就锁死在该档。没有该字段时
 （老板端 / 老平台）仍按板端 `RELAY_*` 环境变量走。
-平台侧 `video.rs` 不做 ABR（观看端追不上就 `lagged` 断连重连），前端也没有掉档。
-改这块先读 §6.10⑥⑩，回归：`python3 deploy/backpack-relay/test_relay_push.py`。
-中继重启 ffmpeg（`video_reset`）时平台会**主动断开观看端**让它重连拿新流头 ——
-否则 flv.js 收到倒退的时间轴会「画面定住但字节还在流」；前端用
-`liveBufferLatencyChasing` 追直播边缘（否则越看越延迟），切换直连/中继期间显示
-「最后一帧 + 起流中」。回归：`cargo test --test video_relay`（§6.10⑦⑧）。
-
-**积压是静默的**：平台给每个观看者的环形缓冲在溢出前不打任何日志（旧值 4MB ≈ 65 秒
-@500k），上行抖一次之后板端 ffmpeg 会以 2~3 倍速把攒下的帧倒出来，观众端吃下十几秒就
-一直「慢几秒」地看下去。所以 `bp:` 房间缓冲降到 128 片（1MB），并且按 FLV 视频 tag 时间戳
-量「墙钟流逝 - 媒体流逝」，**超过 2s 就断开重连**（补的流头＝直播边缘），`video/state` 里
-看 `viewerLagSecs`。推流端重连**不要**再 `重建房间`（会顺手踢掉正在看的人）。§6.10⑫。
+平台侧 `video.rs` 不做 ABR，前端也没有掉档 —— 积压判断全在板端（`_update_lag` 量 RTP
+时间戳 vs 墙钟，超 `RELAY_MAX_LAG` 重启 ffmpeg）。改这块先读 §6.10⑥⑩、§7.5，回归：
+`python3 deploy/backpack-relay/test_relay_push.py`。
+`video_reset` 现在**只是一行日志**（平台没有流头要清、也不许踢观看端：媒体在 mediamtx 里，
+重协商由 `lib/whep.ts` 自己按指数退避做，平台断了观看通道只会让计数掉到 0、看门狗跟着
+`video_stop`）。切换直连/中继期间前端显示「最后一帧 + 起流中」。回归：
+`cargo test --test video_relay`。
 平台流量默认被 `/32` 钉在 Wi-Fi 上（画质优先）。Wi-Fi 一天抖几十次、宁可牺牲画质也要
 稳定时，把 `deploy/backpack-relay/50-platform-route.sh` 的 `PIN_IFACE` 改成 `none`
 （钉死 4G）。钉死后 `enx…` 默认还会被判成「慢链路」一步压到极省流档 320x180@8/200k ——

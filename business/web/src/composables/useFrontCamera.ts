@@ -2,7 +2,8 @@
  * 机器狗前置摄像头（背包 `dogcam`）——「实时视频」页默认那一路。
  *
  * 设备管理的控制抽屉、计划管理的实时监控都用它，保证三处的画面**同源同路**：
- * 板端 relay 把本体前置 RTSP 归一化成 `dogcam`，**默认走平台中继**（FLV/WS）。
+ * 板端 relay 把本体前置 RTSP 归一化成 `dogcam`，**默认走平台中继**（板端推到平台
+ * mediamtx，浏览器 WHEP 拉）。
  * 只有中继推流端不在（板端 `backpack-relay` 没连上 / 没部署）时，才退回浏览器直连
  * mediamtx（WHEP）—— 现场入口、同网段时仍能看，不至于直接黑屏。
  *
@@ -75,8 +76,8 @@ async function sharedRelayRooms(force = false): Promise<BackpackVideoRoom[]> {
 
 /**
  * 走哪条路（设备管理 / 计划管理固定「中继优先」）：
- * - `relay`：板端推流 → 平台房间 → 同源 WS（FLV）—— **默认**，与「实时视频」的
- *   「平台中继」同一条通路，任何网络都能看；
+ * - `relay`：板端推流 → 平台 mediamtx → 浏览器 WHEP（同源反代信令）—— **默认**，
+ *   与「实时视频」的「平台中继」同一条通路，任何网络都能看；
  * - `direct`：中继推流端不在时的兜底，浏览器 ⇄ 板端 mediamtx（WHEP，延时最低）；
  * - `none`：本部署没接背包，前置这一路不存在。
  *
@@ -174,7 +175,7 @@ export function useFrontCamera() {
   /** 画面底部的一行说明：现场一眼看出看的是哪条路 */
   const detail = computed(() => {
     if (path.value === "direct") return "现场直连（中继不可用）· 机器狗前置 WHEP · 延时最低";
-    if (path.value === "relay") return "平台中继 · 机器狗前置 · 延时 1~2s";
+    if (path.value === "relay") return "平台中继 · 机器狗前置 · 延时 ~300ms";
     return "";
   });
 

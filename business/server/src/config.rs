@@ -94,7 +94,8 @@ pub struct Config {
     /// mediamtx（`deploy/external-hz/mediamtx/`），浏览器经 `/api/backpack/whep/<stream>`
     /// 同源反代拉 WHEP。和上面的 `backpack_webrtc_url`（浏览器直连板端）是两条完全
     /// 不同的路：前者受「操作员电脑必须在内网」限制，后者只要求板子能出公网。
-    /// 为空时 `/api/backpack/whep/*` 返回 503（本部署没开 WebRTC 出口，走 FLV 中继）。
+    /// 为空时 `/api/backpack/whep/*` 返回 503（本部署没开 WebRTC 出口 —— 媒体只有这一条路，
+    /// 也就是「实时视频看不了」）。
     pub mediamtx_url: Option<String>,
     /// **浏览器**可访问的 Agent 地址（`http://<板IP>:8000`），用于「直连模式」。
     ///

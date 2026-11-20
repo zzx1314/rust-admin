@@ -12,25 +12,27 @@ import {
 import AppIcon from "./AppIcon.vue";
 
 /**
- * 背包实时视频（平台中继播放器）
+ * 背包实时视频（平台中继播放器，**只有 WebRTC 一条路**）
  *
- * 只做一件事：把板端 relay 推到平台房间的 FLV 字节流，经同源 WS 交给 flv.js 播放。
+ * 媒体链路：板端 relay 用 RTSP/TCP 把流转推到平台 mediamtx（`bp_<stream>`），
+ * 浏览器经同源反代 `POST /api/backpack/whep/<stream>/whep` 拉 WebRTC（延时 ~300ms）。
  *
  * - 实时视频页的「平台中继」、设备管理 / 计划管理的前置摄像头（`FrontCameraVideo.vue`）
  *   在跨网段 / 公网入口时都走这里；
  * - 板端 relay 常驻推流，服务端按需下发 `video_start` / `video_stop`（见 `server/src/video.rs`）；
- * - 浏览器只跟平台同源通信，不依赖操作员电脑在内网、也不需要本地网络许可。
+ * - 平台只有一个进程：WHEP 信令同源反代，**媒体不过后端**（浏览器 ⇄ mediamtx UDP 8189）。
  *
- * 设备档案里的 RTSP / HLS 地址已不再播放（2026-11-18 起统一到背包前置 `dogcam`），
- * 所以这里不再有 hls / flv(HTTP) / mp4 分支。
+ * 设备档案里的 RTSP / HLS 地址已不再播放（2026-11-18 起统一到背包前置 `dogcam`）；
+ * 「HTTP-FLV over WebSocket」那条老通路已于 2026-11-19 整体删除 —— 别再把它加回来，
+ * 补流头 / 当前 GOP / 积压断开那一整套坑见 `docs/backpack-video-integration.md` §6。
  *
  * ## 直播「不许闪」的四条硬规则（改这块之前先读）
  *
  * 1. **缓冲 ≠ 断开**：`waiting` / `stalled` 只置一个「缓冲中」角标，绝不盖全屏错误层。
- * 2. **重连不清画面**：断流时先把当前帧抓成 poster 继续显示，再重建 flv 播放器，
+ * 2. **重连不清画面**：断流时先把当前帧抓成 poster 继续显示，再重建播放器，
  *    所以重连过程中观众看到的是「上一帧 + 重连中」，不是黑屏闪一下。
- * 3. **快速重连 + 退避**：服务端主动断开（推流端换流 / 观看端追不上）时 250ms 就重连，
- *    连续失败才指数退避（上限 3s），不会 3s 一次空转刷屏。
+ * 3. **重连交给 `lib/whep.ts`**：它自带指数退避（1s → 8s）与会话 `DELETE`，
+ *    这里只在「画面停住」时整体重来一次，别两边抢同一条流。
  * 4. **推流端要保持在跑**：服务端最后一个观看者离开时不立刻杀 ffmpeg（30s 宽限），
  *    所以这里的 `video_start` 重复下发也不会重启推流端（板端 relay 按 stream 去重）。
  * 5. **起流期间不许是纯黑**：没有画面时用「上一帧 + 起流中遮罩」顶着，并实时显示已经等了
@@ -50,31 +52,25 @@ const emit = defineEmits<{
   (event: "meta", size: { w: number; h: number }): void;
 }>();
 
-/**
- * 媒体通路：
- *
- * - `flv` —— 板端 relay 把 FLV 推进平台房间，浏览器经同源 WS 交给 flv.js（老通路，
- *   延时 1~2s，但只靠 TCP/443，**任何网络都能出图**）；
- * - `whep` —— 板端用 RTSP 把流转推到平台 mediamtx，浏览器经 `/api/backpack/whep/`
- *   同源反代拉 WebRTC（延时 ~300ms，需要平台侧 UDP 8189 可达）。
- *
- * 走哪条**由板端决定**（`relay_push.py` 的 `RELAY_OUTPUT`），起流时通过控制通道报
- * 给平台，前端从 `/api/backpack/video/state` 读回来 —— 不能靠猜：两条通路在平台上
- * 都表现为「房间里有推流端」。
- */
-type Transport = "flv" | "whep";
-
 type Status = "idle" | "loading" | "playing" | "retrying" | "error";
 
-const transport = ref<Transport>("flv");
+/**
+ * 板端上报的媒体通路（`/api/backpack/video/state` 的 `transport` 字段）。
+ *
+ * 平台侧只有 WebRTC 一条路，这个值只用来识别「那台板子的 relay 还是老版本」：
+ * 老版本报 `ws`（媒体走已删除的 FLV 通路），这时直接给出升级提示，
+ * 而不是让人对着「起流中」干等一个永远不会来的流。`null` = 还没上报（常见于
+ * 刚触发起流的那几百毫秒），照常起 WHEP。
+ */
+const boardTransport = ref<"rtsp" | "ws" | null>(null);
 /** WebRTC 会话句柄（`lib/whep.ts` 自带指数退避重连，我们只负责建与拆） */
 let whep: WhepSession | null = null;
 /**
- * 在场心跳：媒体走 WHEP 时，平台就靠这条 WS 数观看者。
+ * 在场心跳：平台就靠这条 WS 数观看者（媒体走 WebRTC，不经过它）。
  *
  * 没有它：第一个观看者进来不会触发 `video_start`（板端不会起 ffmpeg），
  * 30s 后看门狗还会认为没人看而下发 `video_stop` 把流停掉。
- * `media=0` 让服务端只做计数与起停流，不再往这里推 FLV 字节。
+ * `media=0` 是历史参数（平台已只做计数），保留是为了老缓存的页面也能连上。
  */
 let presence: WebSocket | null = null;
 let presenceWanted = false;
@@ -97,18 +93,13 @@ const slowStart = ref(false);
 /** 这一次连接已经等了多久（秒）：起流 / 重连遮罩上直接显示，别让观众对着黑屏猜 */
 const waitingSecs = ref(0);
 
-// flv.js 体积大（~150KB），只有真正需要播放时才拉进来，
-// 避免设备列表 / 任务看板为了一个播放器把整个 bundle 撑大
-// flv.js 的类型是全局命名空间 `FlvJs`，没有具名导出 Player
-type FlvPlayer = ReturnType<typeof import("flv.js").default.createPlayer>;
-let flv: FlvPlayer | null = null;
-/** 每次 attach 自增，异步加载回来时据此判断是否已被新请求取代 */
+/** 每次 attach 自增，异步回调回来时据此判断是否已被新请求取代 */
 let attachSeq = 0;
 /**
- * 中继断流的重连计时器与次数。
+ * 「画面停住」时整体重来的计时器与次数。
  *
- * 推流端重连、观看端追不上、弱网抖动都会让这条 WS 被关掉；这里自动重连拿干净的
- * 新流（服务端会补流头 + 关键帧），不让用户手动点「重连」。
+ * 正常断流由 `lib/whep.ts` 自己退避重连；这里只在**播放中时间轴不再前进**时
+ * 重建一次会话（ICE 半死时 `connectionState` 可能一直挂着 `connected`）。
  */
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 /** 首连重连的等待：服务端主动断开时几乎立刻就能拿回干净的新流 */
@@ -117,19 +108,19 @@ const RETRY_MAX = 3000;
 /** 连续失败这么多次才把错误铺在画面上（前几次只是角标提示，不打扰画面） */
 const HARD_ERROR_AFTER = 5;
 /**
- * 画面停住多久判定「假死」并重连（弱网下 MSE 会卡在 readyState=2 不再前进）。
+ * 画面停住多久判定「假死」并重连（WebRTC 也可能「连着但不再出帧」：ICE 半死时
+ * `connectionState` 仍然是 `connected`，只能看时间轴）。
  *
  * 3s 太紧：现场背包推的是中低帧率、偶尔 1~2s 没新帧很常见，一超时就重连，
  * 重连又会让服务端重新拉起 ffmpeg，越连越慢。给到 8s，既有自愈又不抖。
  */
 const STALL_MS = 8000;
 /**
- * 一次连接尝试多久没画面算超时。
+ * 「一次起流最多等这么久」——只用来定静帧（poster）能顶多久。
  *
- * 现场路径：浏览器连上中继 → 平台下发 video_start → 板端起 ffmpeg（3~7s）
- * → 等首个关键帧（GOP 2s）→ 才有画面。看门狗刚把推流停掉时这串要重新走一遍，
- * 10s 太紧：一旦超时就断连，服务端数到「没人看」又把流停掉，下一轮更慢 ——
- * 现场看到的就是「一直在重连」。给到 20s，宁可多等一会也不要打死再重来。
+ * 现场路径：浏览器拿到 WHEP answer → 平台下发 video_start → 板端起 ffmpeg（3~7s）
+ * → 等首个关键帧（GOP 2s）→ 才有画面。看门狗刚把推流停掉时这串要重新走一遍。
+ * 重连本身由 `lib/whep.ts` 指数退避负责，这里不拿它判超时（否则两边抢同一条流）。
  */
 const CONNECT_TIMEOUT_MS = 20_000;
 let stallTimer: ReturnType<typeof setInterval> | null = null;
@@ -147,18 +138,6 @@ let posterTimer: ReturnType<typeof setTimeout> | null = null;
 let lastTime = 0;
 let lastProgressAt = 0;
 let attachStartedAt = 0;
-
-/**
- * 中继地址：业务平台把板端 relay 推上来的 FLV 通过 WS 转给浏览器。
- *
- * 浏览器 WS 握手不能带 Authorization 头，令牌只能放查询串（服务端 require_auth 支持）。
- */
-const relayUrl = computed(() => {
-  if (!props.stream) return "";
-  const token = tokenStorage.get() || "";
-  // 页面可能由现场入口托管（内网静态服务），中继仍在云端：用运行时基址
-  return `${wsOrigin()}/api/backpack/video/ws?stream=${encodeURIComponent(props.stream)}&token=${encodeURIComponent(token)}`;
-});
 
 const playable = computed(() => !!props.stream);
 
@@ -213,12 +192,10 @@ const startHint = computed(() => {
   return "";
 });
 
-/** 起流慢时的补充说明：说清楚在等什么、等多久会自己重连 */
+/** 起流慢时的补充说明：说清楚在等什么、为什么慢下来也不用刷新页面 */
 const startDetail = computed(() => {
   if (!slowStart.value) return "";
-  return `板端 relay 起 ffmpeg + 等关键帧，约 1~7s；超过 ${Math.round(
-    CONNECT_TIMEOUT_MS / 1000
-  )}s 自动重连`;
+  return "板端 relay 起 ffmpeg + 等关键帧，约 1~7s；连不上会自动退避重试";
 });
 
 function clearRetry() {
@@ -263,10 +240,6 @@ function clearSlowStartHint() {
 
 /** 只在销毁播放器内核，保留 `<video>` 与画面（重连时不留黑屏） */
 function teardownPlayer() {
-  if (flv) {
-    flv.destroy();
-    flv = null;
-  }
   teardownWhep();
 }
 
@@ -279,25 +252,25 @@ function teardownWhep() {
 }
 
 /**
- * 问服务端：这一路的媒体走 WebRTC 还是 FLV。
+ * 问服务端：这台板子的 relay 报的媒体通路是什么（`bp:<stream>` 房间的 `transport`）。
  *
- * 结果是 `bp:<stream>` 房间的 `transport` 字段（板端 `video_transport` 报上来）。
- * 查不到（没登录 / 推流端未连接 / 老人板端）一律当 `flv` —— 老通路永远在，不能因为
- * 一个探测请求失败就把画面搞没。
+ * 只用来识别老版本板端：`ws` = 它还在往平台上推 FLV（平台已丢弃），永远不会出画面，
+ * 直接把话说明白。查不到（没登录 / 推流端刚连上还没上报）返回 `null`，照常起 WHEP ——
+ * 一个探测请求失败不能把画面搞没。
  */
-async function detectTransport(): Promise<Transport> {
-  if (!props.stream) return "flv";
+async function probeTransport(): Promise<"rtsp" | "ws" | null> {
+  if (!props.stream) return null;
   const token = tokenStorage.get() || "";
   try {
     const response = await fetch(`${apiBaseUrl()}/backpack/video/state`, {
       headers: token ? { Authorization: `Bearer ${token}` } : undefined
     });
-    if (!response.ok) return "flv";
+    if (!response.ok) return null;
     const body = (await response.json()) as { data?: { rooms?: Array<Record<string, unknown>> } };
     const room = body?.data?.rooms?.find(item => item.room === `bp:${props.stream}`);
-    return room?.transport === "rtsp" ? "whep" : "flv";
+    return room?.transport === "rtsp" ? "rtsp" : room?.transport === "ws" ? "ws" : null;
   } catch {
-    return "flv";
+    return null;
   }
 }
 
@@ -425,31 +398,6 @@ function fail(message: string) {
   clearVideoPoster();
 }
 
-/**
- * flv.js 的直播参数：关掉 stash 缓冲，吃多少播多少（默认攒 3s 才起播，抖动就来回跳）。
- *
- * `liveBufferLatencyChasing`：播放位置比"最新帧"落后超过 `liveBufferLatencyMaxLatency`
- * 就**直接跳到直播边缘**。没有它时，MSE 里攒下的那截不会自己消化 —— 现场体感就是
- * 「越看越延迟」，最后卡在某一帧（这正是 2026-11-18 反馈的那一条）。
- * 阈值取 1.2s：中继本身 1~2s，再攒 1.2s 才追，不会因为偶尔抖一下就把画面跳得一惊一乍。
- */
-function liveFlvConfig(url: string) {
-  return {
-    type: "flv" as const,
-    url,
-    isLive: true,
-    hasAudio: false,
-    lazyLoad: false,
-    enableStashBuffer: false,
-    stashInitialSize: 128,
-    autoCleanupSourceBuffer: true,
-    fixAudioTimestampGap: false,
-    liveBufferLatencyChasing: true,
-    liveBufferLatencyMaxLatency: 1.2,
-    liveBufferLatencyMinRemain: 0.5
-  };
-}
-
 async function attach() {
   const el = videoRef.value;
   if (!el || !playable.value) return;
@@ -471,34 +419,18 @@ async function attach() {
   waitingSecs.value = 0;
   armSlowStartHint();
 
-  // 先问服务端这一路的媒体通路（板端起流时上报）。
-  // WebRTC 优先：平台 mediamtx 有 publisher 就拉 WHEP（~300ms）；否则走老的 FLV 中继。
-  transport.value = await detectTransport();
+  // 板端 relay 老版本还报 `ws`（媒体走已删除的 FLV 通路）：它推上来的字节会被平台丢弃，
+  // WHEP 永远等不到流。这里直接把话说明白，别让人对着「起流中」干等到超时。
+  boardTransport.value = await probeTransport();
   if (seq !== attachSeq) return;
-  if (transport.value === "whep") {
-    attachWhep(el, seq);
+  if (boardTransport.value === "ws") {
+    fail(
+      "板端 relay 还是老版本（媒体走已删除的 FLV 通路）：升级背包上的 backpack-relay 后重试"
+    );
     return;
   }
 
-  // 推流端已把源转成 FLV，flv.js 的 WebSocketLoader 直接消费二进制帧
-  const { default: flvjs } = await import("flv.js");
-  if (seq !== attachSeq) return;
-  if (!flvjs.isSupported()) {
-    fail("当前浏览器不支持 FLV 播放");
-    return;
-  }
-  const player = flvjs.createPlayer(liveFlvConfig(relayUrl.value));
-  flv = player;
-  player.attachMediaElement(el);
-  player.load();
-  player.play()?.catch(() => undefined);
-  player.on(flvjs.Events.ERROR, (_type: string, detail: string) => {
-    // 已销毁 / 已被新播放器取代的旧实例的迟到事件不能搅乱新流
-    if (flv !== player) return;
-    scheduleRetry(
-      `中继断流（${detail || "unknown"}）：确认背包上 backpack-relay 服务在线`
-    );
-  });
+  attachWhep(el, seq);
 }
 
 /* ---------------- 播放状态 ---------------- */
@@ -529,7 +461,7 @@ function onMediaError() {
   scheduleRetry("视频源不可达");
 }
 
-/** MSE 「假死」看门狗：playing 却长时间时间轴不前进就自己重连；一直连不上也算超时 */
+/** 「假死」看门狗：playing 却长时间时间轴不前进就整体重来一次 */
 function tickStall() {
   // 后台标签页：浏览器不渲染也不解码，时间轴停住是正常现象。这里若继续判
   // 「超时 / 假死」就是后台无限重连，还会反复拉起推流端 ffmpeg。
@@ -542,12 +474,8 @@ function tickStall() {
   if (status.value === "loading" || status.value === "retrying") {
     const waited = attachStartedAt ? (performance.now() - attachStartedAt) / 1000 : 0;
     waitingSecs.value = Math.max(0, Math.round(waited));
-    if (attachStartedAt && performance.now() - attachStartedAt > CONNECT_TIMEOUT_MS) {
-      // WHEP 自带指数退避重连（`lib/whep.ts`）：这里再打死重来只会两边抢同一条流，
-      // 而且每次重来都要重新 ICE 协商。连接真的建不起来时它自己会把 `failed` 报上来。
-      if (transport.value === "whep") return;
-      scheduleRetry("连接超时，正在重新拉流");
-    }
+    // 连接建不起来的重试由 `lib/whep.ts` 自己按指数退避做（1s → 8s）：这里再打死重来
+    // 只会两边抢同一条流，而且每次重来都要重新 ICE 协商。
     return;
   }
   if (status.value !== "playing") {
@@ -660,7 +588,7 @@ onBeforeUnmount(() => {
     <div class="video-top">
       <span class="video-badge" :class="badgeTone"><i />{{ badge }}</span>
       <span v-if="playable" class="video-proto">
-        {{ transport === "whep" ? "WebRTC · 中继" : "FLV · 中继" }}
+        WebRTC · 中继
       </span>
     </div>
 

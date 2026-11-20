@@ -10,7 +10,7 @@
  *
  * 数据来源：`/api/backpack/status`（业务平台聚合背包 Agent）+ SSE `/api/backpack/events`。
  * 视频：浏览器直连板端 mediamtx（WHEP），地址由 status 的 `webrtc.base` 给出；
- * 跨网段时切「平台中继」（板端推流 → 平台房间 → 同源 WS）。
+ * 跨网段时切「平台中继」（板端推到平台 mediamtx → 浏览器 WHEP）。
  * 三种接法（直连 / 平台代理 / 设备客户端隧道）由后端在 status 里给结论，
  * 页面只按 `mode` 选地址、按 `tunnel.available` 决定要不要回退。
  * 设计与链路说明见 `business/docs/backpack-video-integration.md`。
@@ -55,7 +55,7 @@ const form = reactive({
 const boxes = ref<BackpackBox[]>([]);
 /**
  * 观看方式：`direct` = 浏览器直连板端（WHEP，延时最低，要求同内网 + 浏览器许可）；
- * `relay` = 板端推流到平台（任何网络都能看，延时 1~2s）。
+ * `relay` = 板端推流到平台（任何网络都能看，延时 ~300ms）。
  *
  * **默认中继**（2026-11-18 起）：直连要求操作员电脑真能访问 192.168.x.x:8889，而页面
  * 猜不出来（同网段 / 浏览器 LNA 许可 / 换 WiFi 都会变），猜错就是一句
@@ -129,7 +129,7 @@ const relayMode = computed(() => watchMode.value === "relay");
 /**
  * 是否真的要看板端烧录流（`preview`）。
  *
- * 中继模式下浏览器画不了框（视频是板端推上来的 FLV，没有坐标对应关系），
+ * 中继模式下浏览器画不了框（视频是板端烧录后的画面，没有坐标对应关系），
  * 所以切到中继时会自动把画框方式改成「背包烧录」（可手动切回，此时只有检出数量、
  * 画面没有框）。板端画框没就绪时按原逻辑回退浏览器叠加。
  */
@@ -189,8 +189,8 @@ const detailText = computed(() => {
   const size = videoMeta.value ? `${videoMeta.value.w}×${videoMeta.value.h}` : "分辨率待测";
   if (watchMode.value === "relay")
     return osdActive.value
-      ? `平台中继 · H264 ${size} · 延时 1~2s · 框由板端烧录进画面`
-      : `平台中继 · H264 ${size} · 延时 1~2s · 检出数量看右侧（框需板端烧录）`;
+      ? `平台中继 · H264 ${size} · 延时 ~300ms · 框由板端烧录进画面`
+      : `平台中继 · H264 ${size} · 延时 ~300ms · 检出数量看右侧（框需板端烧录）`;
   if (!aiRunning.value) return `干净流 · H264 ${size} · 无 AI`;
   if (osdActive.value) return `背包烧录 · ${previewStream.value} 流自带中文标签`;
   if (overlay.value === "osd") return "背包烧录未就绪 · 已回退浏览器叠加";
@@ -598,7 +598,7 @@ defineExpose({ refreshStatus });
             type="button"
             class="btn"
             :class="{ primary: watchMode === 'relay' }"
-            title="板端推流到平台：任何网络都能看，延时 1~2s；想看到框就切「背包烧录」（板端把框烧进 preview 流）"
+            title="板端推流到平台：任何网络都能看，延时 ~300ms；想看到框就切「背包烧录」（板端把框烧进 preview 流）"
             @click="switchWatchMode('relay')"
           >
             平台中继
@@ -811,7 +811,7 @@ defineExpose({ refreshStatus });
 </template>
 
 <style scoped>
-/* 观看方式二选一（现场直连 WHEP / 平台中继 FLV） */
+/* 观看方式二选一（现场直连 WHEP / 平台中继 WHEP） */
 .seg {
   display: inline-flex;
   align-items: center;

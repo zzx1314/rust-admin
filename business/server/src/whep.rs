@@ -56,7 +56,7 @@ fn client() -> &'static reqwest::Client {
 
 /// `OPTIONS|POST|PATCH|DELETE /api/backpack/whep/<stream>/whep[/<session>]`
 ///
-/// `<stream>` 必须在白名单里（与 FLV 中继共用 [`BACKPACK_STREAMS`]）：路径来自 URL，
+/// `<stream>` 必须在白名单里（与观看通道共用 [`BACKPACK_STREAMS`]）：路径来自 URL，
 /// 不限制就能被拿来让 mediamtx 创建任意 path。
 pub async fn proxy(
     State(state): State<AppState>,
@@ -159,7 +159,7 @@ fn token_query(query: Option<&str>) -> String {
 fn upstream_url(base: &str, stream: &str, tail: &str) -> String {
     let tail = if tail.is_empty() { "/whep" } else { tail };
     format!(
-        "{}/{BACKPACK_MEDIAMTX_PATH_PREFIX}{stream}{tail}",
+        "{base}/{BACKPACK_MEDIAMTX_PATH_PREFIX}{stream}{tail}",
         base = base.trim_end_matches('/'),
     )
 }

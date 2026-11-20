@@ -4,7 +4,7 @@
 ```text
 [1] 模拟 Agent 契约      /api/cameras|relay/status|detect/tasks|detect/status|events
 [2] 平台 → 客户端隧道    /api/backpack/status  reachable=true，mode=direct|tunnel|proxy
-[3] 视频中继            浏览器 WS 拿到 FLV 分片（触发 relay 起 ffmpeg）
+[3] 视频中继            观看通道触发 relay 起 ffmpeg（媒体走 RTSP→mediamtx/WHEP）
 [4] 航点 AI 计划         detect/start(plan_id) → SSE plan_hit + 证据图落盘
 [5] AI 启停走隧道        POST /api/backpack/detect/start|stop 真的改了 Agent 运行态
 ```
@@ -155,33 +155,47 @@ def check_video(token):
                "用 `python3 run.py smoke` 跑（会用 runtime/venv 里的 python）")
         return
     import asyncio
+    import subprocess
 
     async def run():
-        url = "%s/api/backpack/video/ws?token=%s&stream=%s" % (VIDEO_WS, token, STREAM)
+        # 观看通道只做「在场心跳」：媒体是板端 RTSP → mediamtx，浏览器 WHEP 拉。
+        url = "%s/api/backpack/video/ws?token=%s&stream=%s&media=0" % (VIDEO_WS, token, STREAM)
         frames = 0
-        payload = 0
         try:
             async with websockets.connect(url, max_size=None, open_timeout=8) as ws:
                 deadline = time.time() + 25
-                while time.time() < deadline and frames < 20:
+                while time.time() < deadline and not frames:
                     try:
                         message = await asyncio.wait_for(ws.recv(), timeout=5)
                     except asyncio.TimeoutError:
                         continue
                     if isinstance(message, (bytes, bytearray)):
                         frames += 1
-                        payload += len(message)
         except Exception as error:  # noqa: BLE001
-            report("中继 FLV 分片", False, "%s（relay 起来了吗？看 logs/relay.log）" % error)
+            report("观看通道", False, "%s（relay 起来了吗？看 logs/relay.log）" % error)
             return
-        if frames:
-            report("中继 FLV 分片", payload > 0,
-                   "%d 片 / %.1f KB（stream=%s）" % (frames, payload / 1024, STREAM))
-        else:
-            report("中继 FLV 分片", False,
-                   "25s 内没有二进制分片：检查 relay 是否在看板端 rtsp（logs/relay.log）")
+        report("观看通道", True, "media=0 只计数（stream=%s）" % STREAM)
+        report("观看通道不传媒体", frames == 0,
+               "收到 %d 个二进制分片，媒体应该走 WebRTC" % frames if frames else "一个字节都没有")
 
     asyncio.run(run())
+
+    # relay 有没有真的把流推到 mediamtx：本机 ffprobe 直接读 `bp_<stream>`。
+    # （平台侧只看得到「推流端在线」，看不出有没有字节 —— 媒体不过后端。）
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-rtsp_transport", "tcp", "-i",
+             "rtsp://127.0.0.1:8554/bp_%s" % STREAM, "-show_entries", "stream=codec_name"],
+            capture_output=True, text=True, timeout=20,
+        )
+        report("中继推流（bp_%s）" % STREAM, result.returncode == 0,
+               (result.stdout.strip() or result.stderr.strip()[:120]))
+    except FileNotFoundError:
+        report("中继推流", False, "本机没有 ffprobe：装 ffmpeg 后再跑")
+    except subprocess.TimeoutExpired:
+        report("中继推流", False, "20s 内没读到流：看 logs/relay.log 的「开始拉流」")
+    except Exception as error:  # noqa: BLE001
+        report("中继推流", False, str(error))
 
 
 # ------------------------------------------------------------ [4][5] AI

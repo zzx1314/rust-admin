@@ -4,7 +4,8 @@
  *
  * 设备管理 → 控制抽屉、计划管理 → 实时监控都渲染它，因此三处看到的永远是
  * 同一块画面：板端 `dogcam`（本体前置 RTSP 归一化）→ 浏览器直连 mediamtx（WHEP）
- * 或平台中继（FLV over WS）。判定规则与 `/monitor` 一致，见 `useFrontCamera`。
+ * 或平台中继（板端推到平台 mediamtx，同样是 WHEP）。判定规则与 `/monitor` 一致，
+ * 见 `useFrontCamera`。
  *
  * 部署没接背包时不做任何兜底（设备档案里的 `video_url` 已不再播放），
  * 直接给一张「怎么配背包」的说明卡 —— 不显示一块永远黑屏的播放器。

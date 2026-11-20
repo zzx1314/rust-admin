@@ -10,9 +10,11 @@
 │ mock_agent.py :8000 ────┘（cam0~cam3/preview 由 Agent 推）│   │  ├ /api/backpack/*   │
 │      ▲   ▲                                               │   │  └ /ws/device/video  │
 │      │   └──SSE──┐                                       │   │                      │
-│  relay_push.py ──┼──WS /ws/device/video（FLV 分片）──────┼──▶│  VideoHub 房间 bp:*  │
-│  （仓库原版脚本） │                                       │   │                      │
-│                  │                                       │   │                      │
+│  relay_push.py ──┼──RTSP/TCP :8554/bp_<stream>───────────┼──▶│  mediamtx :8889      │
+│  （仓库原版脚本） │  （媒体：浏览器 WHEP ⇄ mediamtx）      │   │  ◀─ /api/backpack/   │
+│                  │                                       │   │      whep/*  反代    │
+│  relay_push.py ──┴──WS /ws/device/video（只有控制消息）──┼──▶│  VideoHub 房间 bp:*  │
+│                                                          │   │                      │
 │ robodog-device-client --robot mock ──WS /ws/device──────┼──▶│  设备台账 / 任务 / AI │
 │      （仓库原版二进制）  │                               │   └──────────────────────┘
 │                        └──HTTP 127.0.0.1:8000（agent_relay 隧道）
@@ -402,6 +404,9 @@ def platform_env(mode):
         # 本机上浏览器/平台都能直连 mediamtx：两种模式都给 WHEP 基址，
         # 页面想用「直连看流」时不用再去猜 8889 端口
         "ROBODOG_BACKPACK_WEBRTC_URL": "http://127.0.0.1:8889",
+        # 平台中继也是 WebRTC：`/api/backpack/whep/*` 反代到这里（现场是平台自己的 mediamtx）。
+        # sim 里 relay 推进来的 `bp_<stream>` 就在这一个 mediamtx 上，路径不冲突。
+        "ROBODOG_MEDIAMTX_URL": "http://127.0.0.1:8889",
         "ROBODOG_AUTO_DEGRADE": os.environ.get("SIM_VIDEO_AUTO_DEGRADE", "true"),
     })
     if mode == "direct":
@@ -494,6 +499,9 @@ def relay_env(platform_url, streams):
         "RELAY_PLATFORM": platform_url,
         "RELAY_STREAMS": streams,
         "RELAY_RTSP_BASE": "rtsp://127.0.0.1:8554",
+        # 媒体只有一条路：推到本机 mediamtx 的 `bp_<stream>`，平台 WHEP 反代再去拉
+        # （现场是 `rtsp://relay:<口令>@39.107.55.13:8554/bp_`，本机没有鉴权）
+        "RELAY_RTSP_URL": os.environ.get("SIM_RELAY_RTSP_URL", "rtsp://127.0.0.1:8554/bp_"),
         "RELAY_ROOM_PREFIX": "bp:",
         "RELAY_PROFILE": os.environ.get("SIM_RELAY_PROFILE", "light"),
         "RELAY_WIDTH": os.environ.get("SIM_RELAY_WIDTH", "1280"),

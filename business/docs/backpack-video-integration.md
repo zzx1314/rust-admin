@@ -220,9 +220,9 @@ Chromium 的 **Local Network Access**（PNA 继任者）实测拦截，`Network.
 
 - **P0（本次实现）**：现场直连。浏览器与背包同局域网，平台后端只做 **REST/SSE 同源代理**，
   视频仍走浏览器 ⇄ mediamtx WHEP，不引入中继延时。
-- **P1**：平台中继。背包 Agent 增加「向平台推流」（WHIP 或 FLV/WS，复用 `video.rs` 房间模型），
-  公网/跨网段可用，代价 1~2s 延时。
-  - ✅ 已落地（`deploy/backpack-relay/relay_push.py` + `/api/backpack/video/ws`），见 §6；
+- **P1**：平台中继。背包 Agent 增加「向平台推流」，公网/跨网段可用。
+  - ✅ 已落地：最终形态是**板端 RTSP → 平台 mediamtx → 浏览器 WHEP（WebRTC，延时 ~300ms）**，
+    见 §7；中间那一版 FLV/WS 中继（延时 1~2s）已于 2026-11-19 删除，其设计保留在 §6；
   - ✅ 跨网段的**接口/AI** 另走设备客户端隧道（§6.8），不依赖中继。
 - **P2**：遥测 / 控制 / SOS 告警 / AI 事件入 `alerts` 与设备详情。
   - ✅ 已落地「**航点到点 AI 识别**」：巡检走到带 `AI 识别` 动作的航点时自动开识别窗口，
@@ -328,6 +328,19 @@ POST /api/backpack/detect/config
 
 ## 6. 推流中继（2026-11-16 上线）：让公网入口也能看
 
+> ⚠️ **本章是历史记录（2026-11-19 起媒体走 WebRTC，见 §7）。**
+> 「HTTP-FLV over WebSocket」那条媒体通路**已整体删除**：平台不再环形缓冲扇出、
+> 不再补流头 / 追当前 GOP / 按 FLV 时间戳断开观看端，`RELAY_OUTPUT` 与「rtsp 失败退回
+> ws」的退让逻辑也一并删掉。仍然活着的只有**控制面**：`/ws/device/video` 上的
+> `video_register` / `video_start` / `video_stop` / `video_config` / `video_reset` /
+> `video_transport`，以及 `/api/backpack/video/ws` 的「在场心跳」（只计数，不传字节）。
+> 下面 §6.1~§6.10 保留下来是因为**那些坑一个都没消失**（按需起流、30s 宽限、
+> 档位下发、上行自愈、延迟看门狗、4G 出口），只是搬到了 rtsp 通路上。
+> 文中提到的两个探针 `deploy/backpack-relay/latency_probe.py` / `measure_bitrate.py`
+> 读的是 FLV 字节流，已随通路一起删除；现在量码率/延迟看板端 relay 日志的
+> `实测 xkbps` / `画面延迟 x.xs`，或 `curl -s 127.0.0.1:9997/v3/paths/list`。
+> 改代码前先读 §7。
+
 ### 6.1 为什么必须做
 
 §3.5 的两个入口方案有个绕不过去的副作用：**「实时视频」能不能看，取决于操作员那台
@@ -395,9 +408,11 @@ POST /api/backpack/detect/config
 
 ### 6.4.1 排障：`GET /api/backpack/video/state`
 
-返回每个房间的 `publisher / initBytes / pendingBytes / viewers / streaming / control`。
+返回每个房间的 `publisher / viewers / idleSecs / streaming / control / transport`。
 「这一路黑屏」九成能从这张表看出来：`publisher=false` → 板端 relay 没连上；
-`initBytes=0` 且 `viewers>0` → 推流端起流失败或还没出关键帧；`viewers` 不掉 → 有僵尸观看者。
+`viewers=0` 且有人在看 → 观看通道掉了（按需推流会被看门狗停掉）；
+`transport` 不是 `rtsp` → 那台板子的 relay 没升级。
+（`initBytes / pendingBytes / viewerLagSecs` 是已删除的 FLV 通路字段。）
 
 ```bash
 TOKEN=<控制台登录拿到的 token>
@@ -1442,23 +1457,22 @@ journalctl -u backpack-relay -n 30 | grep -E "媒体通路|媒体="
 `relay.env` 两边必须一致。`mediamtx.env` 是唯一真源：`install.sh` 生成一次，重装沿用，
 不会把正在用的口令换掉。
 
-### 7.4 谁决定走哪条通路
+### 7.4 没有「走哪条通路」了（2026-11-19 删掉 `RELAY_OUTPUT`）
 
-`RELAY_OUTPUT`（板端 `/etc/systemd/system/backpack-relay.service`）：
+媒体只有一条：板端 `RELAY_RTSP_URL` → 平台 mediamtx，浏览器 WHEP。所谓「退让」不存在了：
 
-| 值 | 行为 |
-| --- | --- |
-| `auto`（默认） | 配了 `RELAY_RTSP_URL` 就先 rtsp；连续失败 2 次（预检连不上 8554 / ffmpeg 连不上中转端口）就**退回 ws**（FLV 中继）并保持 `RELAY_RTSP_FALLBACK`（600s），到期再试 |
-| `rtsp` | 只试 rtsp（失败仍会退回 ws 起流，但每次起流都会重试 rtsp） |
-| `ws` | 只走老 FLV 通路（等价于 §6 的行为） |
+- 没配 `RELAY_RTSP_URL`：直接推不了流，板端日志直说（不再降级到 FLV）；
+- 连不上平台 8554 / ffmpeg 连不上本地中转端口：**断开这条 WS 重连重试**，平台还有人在看
+  时会补发 `video_start`（板端 `start()` 幂等，不会把在跑的流重启）；
+- 浏览器到 8189 不通：前端显示错误并退避重连，**平台侧没有第二条媒体通路可退**。
 
-板端起流时通过控制通道上报 `{"msgType":"video_transport","payload":{"stream":…,"transport":"rtsp|ws"}}`，
-平台存进房间，`GET /api/backpack/video/state` 的 `transport` 字段就是它。
-**前端据此选播放器**（`VideoPlayer.vue`）：`rtsp` → WHEP（`/api/backpack/whep/<stream>`），
-其它 → FLV（`/api/backpack/video/ws`）。不能靠猜：两条通路在平台上都表现为「房间里有推流端」。
+板端起流时仍会上报 `{"msgType":"video_transport","payload":{"stream":…,"transport":"rtsp"}}`，
+`GET /api/backpack/video/state` 的 `transport` 字段就是它。它现在唯一的用途是识别
+**没升级的板端**（老 relay 报 `ws` 或什么都不报）：前端 `VideoPlayer.vue` 见到 `ws` 会直接
+提示「升级 backpack-relay」，而不是对着「起流中」干等。
 
-WHEP 模式下浏览器仍然会开一条 `/api/backpack/video/ws?media=0&stream=…` ——
-**只计数、不传媒体**：
+浏览器仍然会开一条 `/api/backpack/video/ws?media=0&stream=…` —— **只计数、不传媒体**
+（`media` 参数已无作用，保留只为兼容老页面缓存）：
 
 - 没有它就不会有「第一个观看者」，平台不会下发 `video_start`，板端永不推流；
 - 没它看门狗 30s 后会认为没人看而下发 `video_stop`。
@@ -1482,7 +1496,7 @@ WHEP 模式下浏览器仍然会开一条 `/api/backpack/video/ws?media=0&stream
 | 页面显示 `WebRTC · 中继` + 「起流中 · 已等 Ns」一直不动 | 板端 `媒体=rtsp→平台 WebRTC` 后有没有 `rtsp 通路失败`；`curl -s 127.0.0.1:9997/v3/paths/list` 里有没有 `bp_<stream>` | 8554 没放通 / 口令不一致 / 板端没配 `RELAY_RTSP_URL`（会自动退回 FLV，角标变 `FLV · 中继`） |
 | WHEP 协商成功（`/v3/paths/list` 里 `readers` 有记录）但画面黑 | 浏览器 `chrome://webrtc-internals` 的 ICE 状态；安全组 UDP 8189；`webrtcAdditionalHosts` | `ICE failed` = UDP 8189 没放通或被企业网封；可开 TCP 8189 做回退 |
 | 一直「重连中」，服务端日志只有 `session … deadline exceeded` | 浏览器控制台/F12 里有没有 `Failed to construct 'URL': Invalid base URL` | **前端 bug（2026-11-19 已修）**：`lib/whep.ts` 用 `new URL(res.Location, options.url)` 解析会话地址，走平台反代时 `options.url` 是相对路径 → 抛异常 → answer 从未 `setRemoteDescription`，ICE 一次都没开始。**别被 `deadline exceeded` 误导成网络问题** |
-| 同上，但前端无异常、`/v3/webrtc/sessions` 里也看不到任何连接尝试 | 云端 `tcpdump -ni any port 8189` 抓包（**必须加 `-l` 或等进程退出再看，否则 stdio 有缓冲看不到**），同时让操作员刷新页面 | 操作员网络到 8189 的 UDP/TCP 都不通（代理/白名单）。应急：`webrtcLocalUDPAddress: ""` 只发 TCP 候选，或回 `RELAY_OUTPUT=ws` |
+| 同上，但前端无异常、`/v3/webrtc/sessions` 里也看不到任何连接尝试 | 云端 `tcpdump -ni any port 8189` 抓包（**必须加 `-l` 或等进程退出再看，否则 stdio 有缓冲看不到**），同时让操作员刷新页面 | 操作员网络到 8189 的 UDP/TCP 都不通（代理/白名单）。应急：`webrtcLocalUDPAddress: ""` 只发 TCP 候选、把 TCP 8189 也放通；**没有 FLV 通路可退**（2026-11-19 已删除） |
 | 一直 `没有流（404）` | 板端 `开始拉流` 之后有没有字节；`bp_<stream>` 是否很快变 `ready` | 板端 ffmpeg 起不来（源 RTSP 没有流 / 解码器选错，见 §6.10⑪） |
 | 画面正常但比现场晚 | 板端 `画面延迟 x.xs`、`media=` 那行 | 与 §6 同一套延迟看门狗（`RELAY_MAX_LAG`），只是阈值更容易满足 |
 | 切换/重连后黑一下 | 板端 `平台侧 RTSP 连接断开` | 推流端重启 = mediamtx 的 path 被销毁重建，浏览器要重新 ICE 协商（~1s），不会闪回老画面 |
@@ -1491,8 +1505,8 @@ WHEP 模式下浏览器仍然会开一条 `/api/backpack/video/ws?media=0&stream
 回归：
 
 ```bash
-python3 deploy/backpack-relay/test_relay_push.py     # 含 RTP 扫描 / 通路退让 / 推送地址解析
-cargo test --test video_relay                       # 含 media=0 与 video_transport
+python3 deploy/backpack-relay/test_relay_push.py     # 含 RTP 扫描 / 只有 rtsp 一条路 / 推送地址解析
+cargo test --test video_relay                       # 观看通道只计数 + video_transport + WHEP 反代
 ```
 
 手工验一遍 WebRTC 通路（本机就能做，不用上板子）：
@@ -1500,7 +1514,7 @@ cargo test --test video_relay                       # 含 media=0 与 video_tran
 ```bash
 # 1) 本机起一个 mediamtx 当「平台」，配 auth + bp_ 前缀
 # 2) 推一路测试源进 mediamtx 的 src：ffmpeg -re -f lavfi -i testsrc=... -f rtsp rtsp://.../src
-# 3) 用 relay_push.RtspUplink("src") + ffmpeg_args(...,output="rtsp") 起一次推流
+# 3) 用 relay_push.RtspUplink("src") + ffmpeg_args("src", target) 起一次推流
 # 4) 校验：curl 127.0.0.1:9997/v3/paths/list 里 bp_src 有 publisher/bytesReceived，
 #          ffprobe rtsp://…/bp_src 能解出 H264（证明 -c:v copy 的 AnnexB 没问题）
 ```

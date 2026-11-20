@@ -16,8 +16,8 @@ export default defineConfig({
       "/api": {
         target: "http://127.0.0.1:3100",
         changeOrigin: true,
-        // 实时视频走 WebSocket（/api/backpack/video/ws），
-        // 不加 ws:true 时代理只转发 HTTP，播放器会一直连不上（页面无画面、后端无日志）
+        // 观看通道是 WebSocket（/api/backpack/video/ws，只做在场计数；媒体走 WebRTC）
+        // 不加 ws:true 时代理只转发 HTTP，播放器不会触发起流（页面无画面、后端无日志）
         ws: true
       }
     }

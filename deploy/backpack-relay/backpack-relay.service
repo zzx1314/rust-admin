@@ -1,5 +1,5 @@
 [Unit]
-Description=Backpack relay: push RTSP to RoboDog OPS platform (WebRTC) or RTSP->FLV fallback
+Description=Backpack relay: push RTSP to RoboDog OPS platform (browser plays WebRTC)
 Documentation=file:///opt/backpack-relay/relay_push.py
 # 只要求"网络就绪"：板子出公网即可，不需要平台能反向访问它（这正是本服务存在的理由）
 After=network-online.target mediamtx.service snap.mediamtx.mediamtx.service
@@ -24,21 +24,19 @@ Environment=RELAY_HEIGHT=720
 # 关键帧间隔：15 帧 @15fps = 1s。开页面 / 切到中继 / 降档重同步都要等一个关键帧，
 # 1s 让现场「切过去马上有画」
 Environment=RELAY_GOP=15
-# ---- 媒体通路：WebRTC（平台 mediamtx）还是 FLV over WS ----
-# auto（默认）：配了 RELAY_RTSP_URL 就先推 RTSP 到平台 mediamtx（浏览器 WHEP 看，
-#   延时 ~300ms）；连不上（没部署 / 端口没放通 / mediamtx 挂了）连续失败两次就
-#   自动退回 FLV 中继，不把画面搞没。rtsp = 只走 WebRTC；ws = 只走老通路。
-Environment=RELAY_OUTPUT=auto
+# ---- 媒体通路：只有 RTSP → 平台 mediamtx（浏览器 WHEP 看，延时 ~300ms）----
+# 2026-11-19 起 `RELAY_OUTPUT` 与「rtsp 失败退回 FLV」已删除：起不来的处理是
+# 断开重连重试（平台还有观看者在等时会再补一次 video_start）。
 # 平台 mediamtx 的推流地址（**末尾是 path 前缀**，每路会拼上自己的 stream 名）。
 # 口令由平台 install.sh 随机生成，抄这行过去即可：
 #   服务器上：cat /opt/hz/rust-admin/mediamtx-publish-url.txt
 #   板子上：  printf 'RELAY_RTSP_URL=rtsp://relay:<口令>@39.107.55.13:8554/bp_\n' > /etc/robodog/relay.env
 #             chmod 600 /etc/robodog/relay.env
-# 不建这个文件也不影响启动（老 FLV 通路照常工作）。
+# ⚠️ 这是**必填**：没有它推不了流（日志里会直说），浏览器也看不到画面。
 EnvironmentFile=-/etc/robodog/relay.env
 
 # 上行保护（Wi-Fi 掉线时自动断开重连，不再把画面冻住；默认值见 relay_push.py）
-# Environment=RELAY_SEND_TIMEOUT=5      # 单个分片写 WS 的上限（秒），超时判上行已死（别调大，见 relay_push.py 注释）
+# Environment=RELAY_SEND_TIMEOUT=5      # 一次写平台 mediamtx 的上限（秒），超时判上行已死（别调大，见 relay_push.py 注释）
 # Environment=RELAY_STALL_TIMEOUT=15    # 这么久没推出字节就重启 ffmpeg
 # Environment=RELAY_ROUTE_POLL=5        # 出口网卡巡检间隔（变了就重建连接；0 关闭）
 # 解码器：按流各自探测（可用的用硬解，解不出来的那条流回退软解）。`sw` = 全部软解。

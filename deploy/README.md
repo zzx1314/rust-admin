@@ -206,7 +206,7 @@ ssh root@192.168.41.246 'cd /opt/robodog/client &&
 | 组件 | 跑在哪 | 作用 |
 | --- | --- | --- |
 | `backpack-agent.service` | 板子 `.246` | 板端 Agent（`:8000`）：六路推流、AI 识别、板端画框、遥测/控制 |
-| `backpack-relay.service` | 板子 `.246` | **板端推流中继**：按需把本地 RTSP 推到平台（WebRTC 走 mediamtx，回退 FLV 走 `:3008`），公网入口也能看（见下方「推流中继」） |
+| `backpack-relay.service` | 板子 `.246` | **板端推流中继**：按需把本地 RTSP 推到平台 mediamtx（浏览器 WHEP 看，WebRTC 是唯一媒体通路），公网入口也能看（见下方「推流中继」） |
 | `site-console.service` | 板子 `.246`（可换任意内网机） | 内网托管同一份控制台 `dist`（`:8080`），见下方「为什么需要现场入口」 |
 | `rust-admin-robodog` | 云端 `39.107.55.13:3008` | 业务平台；背包接入方式由 `ROBODOG_BACKPACK_BROWSER_URL` 决定（直连模式） |
 | `robodog-device-client` | 板子 `.246` | 设备客户端。2026-11-16 起**兼任航点 AI 的本地代理**：到点自己调 `127.0.0.1:8000`，因为云端平台连不到内网 Agent |
@@ -287,16 +287,19 @@ sqlite3 /opt/hz/rust-admin/robodog/data/robodog.db \
 所以把方向反过来：**由板子出公网推流**，浏览器只跟平台同源通信。
 
 ```text
-本地 mediamtx :8554 ──ffmpeg 720p15/1.0Mbps / 或 -c:v copy──► backpack-relay ──ws──► 平台 VideoHub
-   房间名 bp:<stream>                                                      │
-                                  浏览器 ◄── ws /api/backpack/video/ws ──┘（flv.js）
+本地 mediamtx :8554 ──ffmpeg 720p15/1.0Mbps / 或 -c:v copy──► backpack-relay
+                                                                 │ RTSP/TCP :8554/bp_<stream>
+                                                                 ▼
+                                                        平台 mediamtx ──WHEP──► 浏览器
+控制面（按需起流 / 换档）：板端 ⇄ ws://平台/ws/device/video（房间 bp:<stream>，只有文本帧）
 ```
 
-- 延时 1~2s（WHEP 是 ~200ms），代价换「任何网络、任何浏览器都能看」；
+- 延时 ~300ms；媒体是浏览器 ⇄ mediamtx 的 WebRTC（**不过业务后端**），所以操作员网络
+  必须能到平台的 UDP 8189（或 TCP 8189）；
 - **按需**：常驻 6 条 WS 连接（每条约 1KB），第一个观看者进来才起 ffmpeg，最后一个
   离开后平台留 30s 宽限再由看门狗 `video_stop`（切页签 / 刷新不用重新起 ffmpeg）；
-  推流端重连时若还有人在等、房间里却没字节，平台会补发 `video_start`（不然那条请求
-  已打在死连接上丢了，观看端要黑到前端 20s 超时）；
+  推流端重连时只要还有人在看，平台就补发 `video_start`（不然那条请求已打在死连接上
+  丢了，观看端要黑到前端重连）；
 - **默认转成 720p15 / 1.0Mbps**（`RELAY_PROFILE=light`，编码器自动挑
   `h264_rkmpp` → `h264_v4l2m2m` → `libx264`）：平台是阿里云 ECS，公网出口实测只有
   **≈2.5Mbps**，而 `dogcam` 是 1080p60、`-c:v copy` 会原样推 4~8Mbps —— 观看端追不上
@@ -316,7 +319,7 @@ sqlite3 /opt/hz/rust-admin/robodog/data/robodog.db \
   路由脚本在 /32 路由变化后会 `systemctl try-restart backpack-relay`。细节见
   `business/docs/backpack-video-integration.md` §6.10⑤；
 - 前端 `/monitor` 页顶部有「现场直连 / 平台中继」切换，**直连失败或页面在公网时自动切中继**；
-- 中继流里浏览器画不出框（FLV 没有与抽帧对齐的坐标），要看框就切「背包烧录」——
+- 中继流里浏览器画不出框（推上来的画面与浏览器抽帧没有坐标对应关系），要看框就切「背包烧录」——
   板端把中文标签烧进 `preview` 流，中继也推这一路（`RELAY_STREAMS` 默认已含 `preview`，
   改过默认值的部署记得补上并 `systemctl restart backpack-relay`）；只看检出数量则不用切。
 - **AI 的启停 / 模型目录 / 运行态不再依赖浏览器同网段**（2026-11-17 起走设备客户端隧道，
@@ -358,16 +361,16 @@ ssh root@39.107.55.13 'journalctl -u rust-admin-robodog -f | grep -E "backpack s
 | 板端整机重启过（画面冻住几分钟） | `journalctl -b -1 -n 5`、`grep cma /proc/meminfo`、`dmesg | grep cma_alloc` | 见上方「板子会硬复位」 |
 | `板端推流服务未连接` | 板端 `backpack-relay` 是否 active | 房间名 `bp:` 由服务端 `BACKPACK_ROOM_PREFIX` 定义，两边必须一致 |
 | 有画面但卡住/黑屏 | 板端 `ffmpeg:` 警告 | `Timestamps are unset` → 必须带 `-use_wallclock_as_timestamps 1`（脚本已带） |
-| 只有第一次能看 | 平台日志 `video stream reset` | 常驻连接复用了旧流头，服务端靠 `video_reset` 清 `init` |
+| 只有第一次能看 | 平台日志 `新一轮流（板端起 ffmpeg）` | 板端 `StreamSession.start()` 幂等；流没起来就看板端 `开始拉流` 之后有没有字节 |
 | 帧率偏低/断流 | 现场上行带宽 + 平台公网出口 | 单路默认 1.2Mbps；平台出口只有 ≈2.5Mbps，**同时看两路就会卡** |
-| 画面很卡、反复重连 | 平台日志 `viewer of bp:... lagged` / `left after ... kbps` | 平均 kbps 超过出口带宽就是它；降 `RELAY_BITRATE`/`RELAY_FPS`，或升级 ECS 公网带宽 |
-| 想先量中继码率 | `measure_bitrate.py --stream dogcam`（在平台机器上跑，loopback） | 预期 light ≈1200kbps/20fps；`copy` 是 4000~8000kbps/60fps，对 2.5Mbps 出口必卡 |
+| 画面很卡、反复重连 | 板端日志 `实测 xkbps（目标 y）` / `画面延迟 x.xs` | 上行吃不下当前档位（relay 会自己降档）；也可以手动降 `RELAY_BITRATE`/`RELAY_FPS` |
+| 想先量中继码率 | 板端日志的 `实测 xkbps` / 平台 `curl -s 127.0.0.1:9997/v3/paths/list` 的 `bytesReceived` | 预期 light ≈1000kbps/15fps；`copy` 是 4000~8000kbps/60fps |
 | 切了通道自己跳回「机器狗前置」 | 页面轮询 | 已修（2026-11-16）：直连模式后端不下发 `sources`，刷新时别拿它比对 |
-| 每 23s 左右断一次 | 服务端 `stream reset` 是否出现 | 已修（2026-11-18）：`init` 残留不再阻塞 `video_start`，回归用例 `video_relay::stale_stream_header_does_not_block_video_start` |
+| 每 23s 左右断一次 | 服务端是否还在下发 `video_start` | 已修（2026-11-18）：观看通道每次加入都重新要流，回归用例 `video_relay::stale_stream_does_not_block_video_start` |
 | 码率只有 ~400kbps / 7fps | 板端 `ip route get 39.107.55.13`、`ethtool` | 走了 4G dongle（上行 ~0.5Mbps）；装 `50-platform-route.sh` 让平台流量走 Wi-Fi（上行 ~25Mbps），改完重启 relay。反过来「就是要走 4G」见「三 → 方案 B」 |
 | 画面定格、重开页面也不动 | 板端 `journalctl -u backpack-relay` 搜 `上行阻塞` / `没有推出任何字节` | Wi-Fi 半开连接把管道反压死了（旧版 relay）；升级 relay 后会自动断开重连 / 重启 ffmpeg |
 | Wi-Fi 断了再连上还是很卡 | 板端日志 `平台出口网卡 A → B` | 出口还挂在慢链路（4G / 狗体内网 eth0）；relay 每 5s 巡检、路由脚本也会重启它 |
-| 想看房间/观看者状态 | `GET /api/backpack/video/state` | 返回每路的 `publisher/initBytes/viewers/streaming`，黑屏先看这张表 |
+| 想看房间/观看者状态 | `GET /api/backpack/video/state` | 返回每路的 `publisher/viewers/streaming/transport`，黑屏先看这张表（`transport` 不是 `rtsp` = 板端 relay 没升级） |
 
 ### 跨网段的接口 / AI：设备客户端隧道（2026-11-17 上线）
 
@@ -430,7 +433,7 @@ Chrome 的 **Local Network Access** 禁止**公网页面**访问**内网地址**
 「接口 / AI」现在有设备客户端隧道兜底（见上一节），「视频」有平台中继兜底，
 所以现场入口不再是**唯一**能用的入口，但它仍是**延时最低、框最实时**的那条路：
 
-- **常规后台**：<http://39.107.55.13:3008> —— 全部功能；视频走中继（1~2s），要看框得板端烧录；
+- **常规后台**：<http://39.107.55.13:3008> —— 全部功能；视频走中继（~300ms，WebRTC），要看框得板端烧录；
 - **现场入口**：<http://192.168.41.246:8080> —— 同一套后台，WHEP 直连（~200ms）、浏览器叠加可用。
 
 两个入口共用同一份 `business/web/dist`；现场入口通过 `/runtime-config.js`

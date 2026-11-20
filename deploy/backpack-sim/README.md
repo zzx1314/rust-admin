@@ -15,9 +15,11 @@ RKNN）、视频中继、设备客户端、现场控制台。它一旦连不上�
 │ mock_agent.py :8000 ────┘（cam0~cam3/preview 由 Agent 推）│   │  ├ /api/backpack/*   │
 │      ▲   ▲                                               │   │  └ /ws/device/video  │
 │      │   └──SSE──┐                                       │   │                      │
-│  relay_push.py ──┼──WS /ws/device/video（FLV 分片）──────┼──▶│  VideoHub 房间 bp:*  │
-│  （仓库原版脚本） │                                       │   │                      │
-│                  │                                       │   │                      │
+│  relay_push.py ──┼──RTSP/TCP :8554/bp_<stream>───────────┼──▶│  mediamtx :8889      │
+│  （仓库原版脚本） │  （媒体：浏览器 WHEP ⇄ mediamtx）      │   │  ◀─ /api/backpack/   │
+│                  │                                       │   │      whep/*  反代    │
+│  relay_push.py ──┴──WS /ws/device/video（只有控制消息）──┼──▶│  VideoHub 房间 bp:*  │
+│                                                          │   │                      │
 │ robodog-device-client --robot mock ──WS /ws/device──────┼──▶│  设备台账 / 任务 / AI │
 │      （仓库原版二进制）  │                               │   └──────────────────────┘
 │                        └──HTTP 127.0.0.1:8000（agent_relay 隧道）
@@ -150,7 +152,8 @@ curl -s -XPOST 127.0.0.1:8000/api/sim/flush                                     
 
 1. 模拟 Agent 的 4 个只读接口；
 2. 平台聚合 `/api/backpack/status` + 隧道 `agent_hello` 登记；
-3. **视频中继**：用浏览器同款方式连 `/api/backpack/video/ws`，收到 FLV 分片才算过
+3. **视频中继**：用浏览器同款方式连 `/api/backpack/video/ws?media=0`（在场心跳，不该收到
+   任何二进制），再用 `ffprobe rtsp://127.0.0.1:8554/bp_<stream>` 确认 relay 真推上去了
    （这一步才会触发 `video_start` → relay 起 ffmpeg）；只连上但没二进制分片＝没通；
 4. **航点 AI**：`detect/start(plan_id)` → SSE `plan_hit` → 证据图落盘且是 JPG/PNG ≤2MB；
 5. **AI 启停经平台隧道**下发，并回读 Agent 运行态确认真改了。
@@ -160,7 +163,7 @@ curl -s -XPOST 127.0.0.1:8000/api/sim/flush                                     
 能验：
 
 - 背包页三种通道（direct / proxy / tunnel）的成败与回退；
-- 中继按需起流、FLV 分片、档位下发（平台「系统设置 → 视频中继」改档会就地生效）；
+- 中继按需起流、`bp_<stream>` 真的推到了 mediamtx、档位下发（平台「系统设置 → 视频中继」改档会就地生效）；
 - 航点 AI 的计划事件、证据图落盘、`ai_detect` / `ai_alert` / `ai_evidence` 的服务端处理
   （配合 `business/server/tests/*` 或看告警中心/日志）；
 - 设备客户端的注册、心跳、任务执行（假本体）、agent_relay 白名单。

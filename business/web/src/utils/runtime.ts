@@ -33,7 +33,7 @@ export function apiBaseUrl(): string {
   return (runtime.apiBase || "/api").replace(/\/+$/, "");
 }
 
-/** 视频中继所在源：`/api/backpack/video/ws`（实时视频 / 设备 / 任务共用的唯一视频通路） */
+/** 中继控制面所在源：`/api/backpack/video/ws`（在场心跳；媒体走 WebRTC，由 `apiBaseUrl()` 出） */
 export function wsOrigin(): string {
   if (runtime.videoWsBase) return runtime.videoWsBase.replace(/\/+$/, "");
   const scheme = location.protocol === "https:" ? "wss" : "ws";

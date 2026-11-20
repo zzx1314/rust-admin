@@ -49,7 +49,7 @@ base_url = "http://127.0.0.1:3007"
 #
 # 平台自己的 WebRTC 出口（/api/backpack/whep/* 反代到 mediamtx，只绑回环）。
 # 一般不用在这里写：install.sh 会往 robodog.env 里放 ROBODOG_MEDIAMTX_URL。
-# 留空 = 本部署没开 WebRTC 出口，前端自动走 FLV 中继。
+# ⚠️ 留空 = 视频完全看不了（媒体只有 WebRTC 一条路，FLV 通路已于 2026-11-19 删除）。
 # 见 deploy/external-hz/mediamtx/ 与 docs/backpack-video-integration.md §7
 #   mediamtx_url = "http://127.0.0.1:8889"
 # 详细链路与取舍见 business/docs/backpack-video-integration.md

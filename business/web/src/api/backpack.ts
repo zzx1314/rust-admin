@@ -414,7 +414,10 @@ export interface BackpackVideoRoom {
   publisher: boolean;
   streaming: boolean;
   viewers: number;
-  initBytes: number;
+  /** (秒) 最后一个观看者离开后过了多久；null = 还有人在看 / 从没人看过 */
+  idleSecs: number | null;
+  /** 板端上报的媒体通路：`rtsp` = WebRTC 出口；null/`ws` = 板端 relay 没升级 */
+  transport: "rtsp" | "ws" | null;
 }
 
 export const backpackApi = {

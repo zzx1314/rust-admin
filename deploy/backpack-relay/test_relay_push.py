@@ -137,7 +137,7 @@ def test_degraded_profile_actually_transcodes() -> None:
     relay.pick_encoder = lambda: "h264_rkmpp"
     try:
         relay.mark_congested("dogcam", "单测触发")
-        args = relay.ffmpeg_args("dogcam")
+        args = relay.ffmpeg_args("dogcam", "rtsp://127.0.0.1:9999/bp_dogcam")
     finally:
         relay.pick_encoder = original
 
@@ -181,7 +181,7 @@ def test_second_degrade_tier_for_4g_links() -> None:
     original = relay.pick_encoder
     relay.pick_encoder = lambda: "h264_rkmpp"
     try:
-        args = relay.ffmpeg_args("dogcam")
+        args = relay.ffmpeg_args("dogcam", "rtsp://127.0.0.1:9999/bp_dogcam")
     finally:
         relay.pick_encoder = original
     filters = args[args.index("-vf") + 1]
@@ -205,51 +205,17 @@ def test_extreme_tier_is_not_escalated_further() -> None:
     assert only.restarts == [], "已经是最低档，不该再重启 ffmpeg"
 
 
-def _flv_tag(tag_type: int, body: bytes, ts_ms: int) -> bytes:
-    out = bytes([tag_type]) + len(body).to_bytes(3, "big")
-    out += (ts_ms & 0xFFFFFF).to_bytes(3, "big") + bytes([(ts_ms >> 24) & 0xFF])
-    out += b"\x00\x00\x00" + body  # streamId + body
-    return out + (len(body) + 11).to_bytes(4, "big")  # PreviousTagSize
-
-
-def test_flv_scanner_reads_video_ts_across_chunks() -> None:
-    """FLV tag 会被 WS 分片切碎：扫描器要跨分片拼出 tag 头、并跳过本体。"""
-    stream = b"FLV\x01\x05" + b"\x00\x00\x00\x09" + b"\x00\x00\x00\x00"
-    stream += _flv_tag(9, b"\x17\x00\x00\x00\x00", 0)          # AVC 序列头
-    stream += _flv_tag(9, b"\x17\x01" + b"x" * 200, 40)          # 关键帧
-    stream += _flv_tag(8, b"a" * 30, 42)                            # 音频 tag 不该被当成视频
-    stream += _flv_tag(9, b"\x27\x01" + b"y" * 90, 90)           # 普通帧
-
-    scanner = relay.FlvScanner()
-    seen = []
-    for i in range(0, len(stream), 7):  # 故意用 7 字节的碎片喂
-        scanner.feed(stream[i : i + 7])
-        if scanner.last_video_ts is not None and scanner.last_video_ts not in seen:
-            seen.append(scanner.last_video_ts)
-    assert not scanner.broken
-    assert seen == [0, 40, 90], seen
-    assert scanner.last_video_ts == 90
-
-
-def test_flv_scanner_gives_up_on_garbage() -> None:
-    scanner = relay.FlvScanner()
-    scanner.feed(b"not an flv stream at all, 30 bytes")
-    assert scanner.broken, "不是 FLV 就别继续吐垃圾时间戳"
-    scanner.feed(_flv_tag(9, b"\x17\x01xyz", 500))
-    assert scanner.last_video_ts is None
-
-
 def test_lag_is_measured_as_growth_after_the_first_frame() -> None:
     """只量「首帧之后的积压增长」：起流等关键帧的耗时不能算进去（否则一起流就误判）。"""
     reset()
     session = relay.StreamSession("dogcam")
     session._started_wall = time.time() - 6.0   # 起流已经 6s（含等关键帧）
-    session._flv.last_video_ts = 2000
+    session._rtp.last_video_ts = 2000 * 90
     original, relay.MAX_LAG = relay.MAX_LAG, 999  # 先别触发重同步
     try:
         session._update_lag(time.monotonic())         # 首帧 → 只建基准
         assert session.lag == 0.0
-        session._flv.last_video_ts = 3000             # 时间戳只走了 1s
+        session._rtp.last_video_ts = 3000 * 90          # 时间戳只走了 1s
         session._update_lag(time.monotonic() + 2.0)   # 但过了 2s → 积压 1s
     finally:
         relay.MAX_LAG = original
@@ -260,9 +226,9 @@ def test_lag_above_limit_requests_resync() -> None:
     reset()
     session = relay.StreamSession("dogcam")
     session._started_wall = time.time() - 40.0
-    session._flv.last_video_ts = 1000
+    session._rtp.last_video_ts = 1000 * 90
     session._update_lag(time.monotonic())        # 首帧建基准
-    session._flv.last_video_ts += 1000           # 时间戳只走 1s
+    session._rtp.last_video_ts += 1000 * 90       # 时间戳只走 1s
 
     async def scenario() -> None:
         session._update_lag(time.monotonic() + 6.0)   # 实际过了 6s → 积压 5s
@@ -279,7 +245,7 @@ def test_copy_profile_still_copies() -> None:
     original = relay.PROFILE
     relay.PROFILE = "copy"
     try:
-        args = relay.ffmpeg_args("dogcam")
+        args = relay.ffmpeg_args("dogcam", "rtsp://127.0.0.1:9999/bp_dogcam")
     finally:
         relay.PROFILE = original
 
@@ -381,9 +347,9 @@ def test_probation_relapse_returns_one_level_and_pins_it() -> None:
 
     session = relay.StreamSession("dogcam")
     session._started_wall = time.time() - 60.0
-    session._flv.last_video_ts = 0
+    session._rtp.last_video_ts = 0
     session._update_lag(time.monotonic())              # 首帧建基准
-    session._flv.last_video_ts = 1000                  # 时间戳只走 1s
+    session._rtp.last_video_ts = 1000 * 90            # 时间戳只走 1s
 
     async def growth() -> None:
         session._update_lag(time.monotonic() + 2.0)    # 实际过了 2s → 积压 1s
@@ -416,12 +382,12 @@ def test_lag_growth_degrades_before_the_hard_restart() -> None:
     session = relay.StreamSession("dogcam")
     session._started_wall = time.time()
     base = time.monotonic()
-    session._flv.last_video_ts = 0
+    session._rtp.last_video_ts = 0
     session._update_lag(base)                       # 首帧建基准
 
     def feed(elapsed: float, lag: float = 1.5) -> None:
         """让墙钟跑 elapsed 秒、时间戳只跑 (elapsed - lag) 秒 → 积压始终是 lag。"""
-        session._flv.last_video_ts = int((elapsed - lag) * 1000)
+        session._rtp.last_video_ts = int((elapsed - lag) * 90_000)
         session._update_lag(base + elapsed)
 
     hold = relay.LAG_DEGRADE_HOLD
@@ -839,7 +805,7 @@ def test_rtsp_scanner_reads_interleaved_timestamps() -> None:
     """RTSP/TCP 通路靠 RTP 时间戳量延迟：交错帧头 + RTP 头，90kHz。
 
     现场等价物：`-use_wallclock_as_timestamps 1` 把采集时刻写成 PTS，RTP 时间戳
-    跟着 PTS 走 —— 所以「时间戳增量 vs 墙钟增量」就是帧积压（与 FLV 那条一样）。
+    跟着 PTS 走 —— 所以「时间戳增量 vs 墙钟增量」就是帧积压。
     分片边界会切断 `$` 头 / RTP 头，夹在中间的 RTSP 文本（keepalive 请求）也得跳过。
     """
 
@@ -860,36 +826,22 @@ def test_rtsp_scanner_reads_interleaved_timestamps() -> None:
     assert scanner.last_video_ts == 180_000
 
 
-def test_output_mode_falls_back_to_ws_when_rtsp_is_unreachable() -> None:
-    """`auto` 连续两次 rtsp 失败就退回 ws 一段时间，到期再试。"""
+def test_media_path_is_rtsp_only() -> None:
+    """媒体只有一条路：ffmpeg 输出 RTSP/TCP 到本机中转端口。
+
+    2026-11-19 之后没有 `RELAY_OUTPUT`、没有 `-f flv`、也没有「rtsp 失败退回 ws」：
+    起不来的处理是断开重连（`stream_worker`），平台还有人在看就再补一次 video_start。
+    """
     reset()
-    real_output, real_push, real_fallback = relay.OUTPUT, relay.RTSP_PUSH, relay.RTSP_FALLBACK
-    try:
-        relay.OUTPUT = "auto"
-        relay.RTSP_PUSH = ""
-        assert relay.output_mode() == "ws", "没配推流地址就是老通路"
-        relay.RTSP_PUSH = "rtsp://relay:pass@10.0.0.8:8554/bp_"
-        relay.RTSP_FALLBACK = 600
-        assert relay.output_mode() == "rtsp"
-        relay.note_rtsp_failure("平台 :8554 连不上")
-        assert relay.output_mode() == "rtsp", "第一次失败先原地重试（可能是瞬时抖动）"
-        relay.note_rtsp_failure("平台 :8554 连不上")
-        assert relay.output_mode() == "ws", "连续两次失败就把画面交给 FLV 中继"
-        relay._rtsp_disabled_until = time.monotonic() - 1
-        assert relay.output_mode() == "rtsp", "退让到期后再试一次 rtsp"
-        # 写死 rtsp 时也不把画面搞没：只是不设置退让窗口
-        relay.OUTPUT = "rtsp"
-        relay.note_rtsp_failure("x")
-        relay.note_rtsp_failure("x")
-        assert relay.output_mode() == "rtsp"
-    finally:
-        relay.OUTPUT, relay.RTSP_PUSH, relay.RTSP_FALLBACK = (
-            real_output,
-            real_push,
-            real_fallback,
-        )
-        relay._rtsp_failures = 0
-        relay._rtsp_disabled_until = 0.0
+    assert not hasattr(relay, "OUTPUT"), "RELAY_OUTPUT 开关应已删除"
+    assert not hasattr(relay, "output_mode"), "退让状态机应已删除"
+    assert not hasattr(relay, "FlvScanner"), "FLV 扫描器应已删除"
+
+    args = relay.ffmpeg_args("dogcam", "rtsp://127.0.0.1:9999/bp_dogcam")
+    assert "flv" not in args, f"不该再出现 FLV 输出参数：{' '.join(args)}"
+    assert args[args.index("-f") + 1] == "rtsp"
+    assert args[args.index("-rtsp_transport") + 1] == "tcp"
+    assert args[-1] == "rtsp://127.0.0.1:9999/bp_dogcam", "推的是本机中转端口（RtspUplink）"
 
 
 def test_rtsp_publish_plan_appends_stream_and_keeps_credentials() -> None:

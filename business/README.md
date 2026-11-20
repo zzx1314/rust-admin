@@ -83,7 +83,7 @@ pnpm dev
 浏览器打开 <http://127.0.0.1:5273>，使用 `admin / admin123` 登录。
 Vite 已将 `/api` 代理到 `http://127.0.0.1:3100`。
 
-> 代理里配了 `ws: true`：实时监控走 WebSocket（`/api/backpack/video/ws`），
+> 代理里配了 `ws: true`：观看通道是 WebSocket（`/api/backpack/video/ws`，只做在场计数），
 > 不加这项时代理只转发普通 HTTP，视频一路连不上——**页面没画面、后端日志里
 > 也一条请求都没有**，很容易误判成后端问题。改完 `vite.config.ts` 需要重启 `pnpm dev`。
 
@@ -1425,7 +1425,8 @@ API Type 总表 60 个消息里也没有图像或流媒体类型。`bulkdata` �
 1401/1403/1405/1407 的位姿与路径数据，不是视频帧。
 
 因此**实时视频只有一个来源**：数据采集背包的板端 relay 把本体前置 RTSP 归一化成
-mediamtx 的 `dogcam`，浏览器直连 mediamtx（WHEP）或走平台中继（FLV over WS）。
+mediamtx 的 `dogcam`，浏览器直连板端 mediamtx（WHEP）或走平台中继（板端推到平台
+mediamtx，同样是 WHEP）。
 
 | 页面 | 组件 | 说明 |
 | --- | --- | --- |
@@ -1437,75 +1438,73 @@ mediamtx 的 `dogcam`，浏览器直连 mediamtx（WHEP）或走平台中继（F
 「设备客户端 ffmpeg 拉本体 RTSP → 平台中继」的整条旧链路，部署没接背包时页面直接给
 配置说明，不做兜底播放。设计背景见 `docs/backpack-video-integration.md` §6.9。
 
-### 平台中继：板端推流 → 平台房间 → 浏览器
+### 平台中继：板端推流 → 平台 mediamtx → 浏览器（WebRTC）
 
-跨网段 / 公网入口时（操作员电脑够不到背包的 `:8889`），板端 relay 主动推到平台，
-浏览器只跟平台同源通信：
+跨网段 / 公网入口时（操作员电脑够不到背包的 `:8889`），板端 relay 主动把流推到平台，
+浏览器只跟平台同源通信、媒体走 WebRTC：
 
 ```
-背包本地 RTSP ──ffmpeg──► 板端 relay ──ws://平台/ws/device/video──► 业务平台 ──ws──► 浏览器(flv.js)
-                         H.264/FLV         房间 bp:<stream>                  /api/backpack/video/ws
+背包本地 RTSP ──ffmpeg──► 板端 relay ──RTSP/TCP :8554/bp_<stream>──► 平台 mediamtx
+                            (RtspUplink)                              │  └ WHEP（只绑回环 :8889）
+平台控制面：板端 ⇄ ws://平台/ws/device/video（房间 bp:<stream>，只有文本帧）
+浏览器：POST /api/backpack/whep/<stream>/whep（同源反代）+ 一条 .../video/ws?media=0 心跳
 ```
 
-- **按需推流**：第一个观看者进来才下发 `video_start`（带 `stream`），最后一个离开
-  **不立刻**停流：房间保留 30s 宽限（`STREAM_IDLE_GRACE`），看门狗超时才 `video_stop`。
+2026-11-19 起**只有这一条媒体通路**。之前的「FLV over WebSocket」中继（平台环形缓冲
+扇出给 flv.js，延时 1~2s）连同它的补流头 / 当前 GOP / 积压断开 / `RELAY_OUTPUT` 退让
+一起删除了：那一整套坑见 `docs/backpack-video-integration.md` §6，现行链路见 §7。
+
+- **按需推流**：第一个观看者进来才下发 `video_start`（带 `stream` + 平台档位），最后一个
+  离开**不立刻**停流：房间保留 30s 宽限（`STREAM_IDLE_GRACE`），看门狗超时才 `video_stop`。
   现场关抽屉再打开、切页签、浏览器 WS 抖一下都能复用还在跑的流，不会每次黑 3~7s。
-  推流端重连时若还有人干等着（房间里一个字节都没有），平台会**补发** `video_start` ——
-  否则那条请求打在已死的旧连接上丢了，观看者只能黑到前端 20s 连接超时（§6.10⑯）。
-- **补流头**：房间里有当前这一轮的流头（FLV 头 + SPS/PPS + 首个关键帧）就补，不分是不是
-  第一个观看者 —— 不补头浏览器只能从中段字节开始解，flv.js 解析错位后黑屏再重连
-  （`server/src/video.rs` 的 `flv_init_len`）。流头不会串轮次：板端 relay 起流前发
-  `video_reset`；推送端重连时也是清掉流头 + 通知观看端重连（房间本身沿用，不重建）。
+  推流端重连时只要**还有人在看**，平台就**补发** `video_start` —— 否则那条请求打在已死的
+  旧连接上丢了，观看者只能黑到前端重连（§6.10⑯）。
+- **观看通道只当心跳**（`/api/backpack/video/ws`）：只计数 + 触发 `video_start`，一个媒体
+  字节都不转发。没有它就没有「第一个观看者」，看门狗也会在宽限后把流停掉。鉴权用
+  `?token=<JWT>`（浏览器 WS 握手不能带请求头，`require_auth` 为此放开了查询串令牌）。
+- **平台部署要求**：服务器上要有 mediamtx（`deploy/external-hz/mediamtx/`），安全组放通
+  **TCP 8554**（板端推流）与 **UDP 8189**（WebRTC 媒体，最容易漏；可选 TCP 8189 做
+  ICE-TCP 回退）。业务平台通过 `ROBODOG_MEDIAMTX_URL`（默认 `http://127.0.0.1:8889`）
+  反代 WHEP，mediamtx 的信令端口只绑回环。
 - **先缩后编（默认 light 档位）**：`dogcam` 是 1080p60，`-c:v copy` 会把 4~8Mbps 原样
-  推出去，而平台公网出口只有 ≈2.5Mbps（阿里云 ECS 实测），观看端追不上就被服务端判
-  `lagged` 踢掉重连 —— 现场就是「很卡」。所以 relay 默认转成 **720p15 / 1.0Mbps**
-  （`RELAY_PROFILE=light`，编码器自动挑 rkmpp / v4l2m2m / libx264），带宽更紧用
-  `RELAY_BITRATE=800k RELAY_FPS=15`。只有公网出口 ≥6Mbps 才考虑 `RELAY_PROFILE=copy`。
-- **逐包 flush**：板端 relay（`deploy/backpack-relay/relay_push.py`）固定带
-  `-flush_packets 1 -muxdelay 0 -muxpreload 0`。ffmpeg 写管道默认带缓冲，转码小帧会被
-  攒成一阵一阵的突发，浏览器 MSE 先饿死再猛灌，flv.js 在 playing / buffering 之间反复横跳。
+  推出去，而板子出公网的上行常常只有 1Mbps 量级。所以 relay 默认转成
+  **720p15 / 1.0Mbps**（`RELAY_PROFILE=light`，编码器自动挑 rkmpp / v4l2m2m / libx264），
+  带宽更紧用 `RELAY_BITRATE=800k RELAY_FPS=15`。只有上行 ≥6Mbps 才考虑 `RELAY_PROFILE=copy`。
 - **墙钟时间戳**：现场相机 SDP 标 60fps、实际只投递 ~25 帧/秒，relay 用
-  `-use_wallclock_as_timestamps 1` 把 PTS 换成到达时间，避免浏览器 MSE 反复饿死（慢放）。
-- **上行掉线要自愈**（2026-11-18）：板端 relay 的分片发送带超时（默认 5s；原来 10s，
-  那十秒里 ffmpeg 仍在攒帧，恢复后会以 2~3 倍速倒出来），超时即判「Wi-Fi 半开」并断开重连；15s 一个字节都没推出去（源卡住）就重启 `ffmpeg`；每 5s 巡检
-  平台出口网卡，出口变了主动重建连接。
-- **画质自己降**（2026-11-19）：relay 每 5s 统计一次 `ws.send` 占用与实测码率，发现「被反压
+  `-use_wallclock_as_timestamps 1` 把 PTS 换成到达时间，避免播放端反复饿死（慢放）。
+- **上行掉线要自愈**（2026-11-18）：板端 relay 每次写平台带超时（默认 5s；原来 10s，
+  那十秒里 ffmpeg 仍在攒帧，恢复后会以 2~3 倍速倒出来），超时即判「Wi-Fi 半开」并断开重连；
+  15s 一个字节都没推出去（源卡住）就重启 `ffmpeg`；每 5s 巡检平台出口网卡，出口变了主动
+  重建连接。rtsp 通路的字节**必须聚合后再写**（`RELAY_RTSP_BATCH_*`，24KB/60ms）：
+  逐包 write 会让上行 TCP 变 app-limited，4G 的 96ms RTT 把吞吐压到 ~0.5Mbps。
+- **画质自己降**（2026-11-19）：relay 每 5s 统计一次写平台的占用与实测码率，发现「被反压
   + 码率低于目标档位」就就地换 `640x360@12 / 500k`（发 `video_reset` + 重启 ffmpeg，观看端
-  不用重连），不必再等 10s 超时断线；`RELAY_LAG_DEGRADE` 让「积压持续上涨」（出帧跟不上
-  这一档）也降档，比 3s 的硬重同步早得多。
+  不用重连）；`RELAY_LAG_DEGRADE` 让「积压持续上涨」（出帧跟不上这一档）也降档，比
+  `RELAY_MAX_LAG` 的硬重同步早得多。
   **升档（回档）一次只升一档**（极省流 → 省流 → 配置）+ `RELAY_PROBATION` 试用期：升上去
   积压超过 `RELAY_PROBATION_LAG` 就立即退回，并把那一档封顶一段时间不再试；没人在看时不升档。
-  反复升降时窗口翻倍。
-  降档是板端行为，平台/前端不用改；参数与状态机见
-  `business/docs/backpack-video-integration.md` §6.10⑥⑨。
-  平台侧推流端静默判定 30s，`/api/backpack/video/state` 多一个 `lastFrameAgeSecs`。
-  旧版 relay 的「Wi-Fi 一断画面永久冻住」就是发送无超时 + `video_start` 幂等吃掉导致的，
-  详见 `docs/backpack-video-integration.md` §6.10⑤。
-- **积压要看得见、要自己追回来**（2026-11-18 晚）：平台给每个观看者的环形缓冲在溢出前
-  **完全静默**（旧值 512×8KB = 4MB ≈ 65 秒 @500k），上行抖一次之后板端 ffmpeg 会把攒下的
-  画面以 2~3 倍速倒出来，观众端吃下十几秒就一直「慢几秒」地看下去。现在：`bp:` 房间的
-  缓冲降到 128 片（1MB ≈ 16 秒 @500k）；观看端按 FLV 视频 tag 时间戳量「墙钟流逝 - 媒体
-  流逝」，**超过 2s 就断开重连**（补的流头就是直播边缘）；`video/state` 新增 `viewerLagSecs`。
-  推流端重连也**不再重建房间**（以前会顺手把正在看的人踢掉）。见 §6.10⑫。
-- **鉴权**：浏览器 WS 握手不能带请求头，中继端点用 `?token=<JWT>`，
-  `require_auth` 为此放开了查询串令牌（普通接口仍只认 `Authorization`）。
-- **观看端不许闪**（`web/src/components/VideoPlayer.vue`，现在只有中继一种播放方式）：
-  缓冲只是角标、不盖错误层；断流时先抓最后一帧当 poster 再重建 flv 播放器（不黑屏）；
-  首连重连 250ms 起、指数退避封顶 3s，连续失败 5 次才把错误铺在画面上；另有 8s
-  「时间轴不前进」看门狗主动重连。flv.js 按直播配：`enableStashBuffer: false`。
+  反复升降时窗口翻倍。降档是板端行为，平台/前端不用改；参数与状态机见
+  `business/docs/backpack-video-integration.md` §6.10⑥⑨、§7.5。
+- **观看端不许闪**（`web/src/components/VideoPlayer.vue`）：断流时先抓最后一帧当 poster
+  继续显示（不黑屏）；重连交给 `lib/whep.ts` 的指数退避（1s → 8s，`close()` 会 DELETE
+  会话，不在 mediamtx 里留僵尸 reader）；另有 8s「时间轴不前进」看门狗整体重来一次。
   **起流期间不许纯黑**：poster 顶到一次连接超时（20s）为止，并盖一层
   「起流中 · 已等 Ns」遮罩（板端起 ffmpeg + 等关键帧 1~7s），静帧不冒充直播。见 §6.10⑯。
+- **板端没升级要知道**：板端起流时上报 `video_transport`，`GET /api/backpack/video/state`
+  的 `transport` 字段就是它。现在只可能是 `rtsp`；`ws`/`null` = 那台板子的 relay 还是老
+  版本（媒体走已删除的通路），前端直接报「升级 backpack-relay」而不是让人干等。
 
 现场前置条件：
 
 | 项 | 要求 |
 | --- | --- |
-| 板端 relay | `backpack-relay` 服务在跑，且能出公网（`ws://<平台>/ws/device/video`） |
+| 板端 relay | `backpack-relay` 服务在跑，能出公网（`ws://<平台>/ws/device/video`），且 `/etc/robodog/relay.env` 里配了 **`RELAY_RTSP_URL`**（口令见平台 `/opt/hz/rust-admin/mediamtx-publish-url.txt`） |
 | 板端出口路由 | 到平台的流量默认走 Wi-Fi（实测 Wi-Fi ~25Mbps、4G dongle 上行仅 0.25~0.6Mbps）：`deploy/backpack-relay/50-platform-route.sh` 给平台加 /32 路由（路由变化会重启 relay）。Wi-Fi 抖得厉害、宁可牺牲画质也要稳定时，把它改成 `PIN_IFACE=none` **钉死 4G**（钉死后先量 4G 上行：配 `RELAY_SLOW_IFACES=` 才不会被当成慢链路压到 320x180）。详见 `docs/backpack-video-integration.md` §6.10⑮ |
 | 背包 mediamtx | `dogcam` path 能拉通（`ffprobe rtsp://<背包IP>:8554/dogcam`） |
-| 平台 | 无需额外媒体服务器；`/ws/device/video` 与 `/api/backpack/video/ws` 已内置 |
+| 平台 mediamtx | `systemctl status mediamtx` 在跑；安全组 **TCP 8554** + **UDP 8189**（+ 可选 TCP 8189）；平台 `ROBODOG_MEDIAMTX_URL` 已配 |
+| 操作员网络 | 能到平台 UDP 8189（企业代理只放 443 时会协商成功但黑屏 —— 症状见 §7.6 排障表） |
 
-延迟量级：直连 WHEP ≈200ms；中继 1~2s（关键帧间隔 + 网络 + MSE 缓冲）。
+延迟量级：直连板端 WHEP ≈200ms；平台中继 ≈300ms（设备 4G 时多一点）。
 
 ### 任务执行实时监控（视频 + 地图位置）
 
@@ -1598,7 +1597,7 @@ mediamtx 的 `dogcam`，浏览器直连 mediamtx（WHEP）或走平台中继（F
   实现，见 `client/README.md`。**不要逐点下发**：本体同一时刻只允许一个导航任务，
   逐点时第 2 个点起会全部回 `13897 capability busy`。
 - 视频：唯一来源是背包前置 `dogcam`（板端 relay → mediamtx WHEP 直连，或推到平台
-  `/api/backpack/video/ws` 中继），支持多观看者与按需起停；设备客户端不再参与拉流。
+  mediamtx 走 WebRTC 中继），支持多观看者与按需起停；设备客户端不再参与拉流。
   中继没有做录制 / 回放，也不做多路混流。
 - 手动遥控（接管 / 摇杆 / 本体动作 / 急停）前后端与客户端全链路已打通，接管态落库并按
   120s 空闲超时自动失效；但 holder 目前是设备维度标识（中间件没有把用户名透传到 handler），

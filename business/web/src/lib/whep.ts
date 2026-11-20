@@ -1,9 +1,10 @@
 /**
  * 极简 WHEP（WebRTC-HTTP Egress Protocol）客户端。
  *
- * 背包板端用 mediamtx 的 WebRTC 出流：`<webrtcBase>/<stream>/whep`。
- * 平台自带的 `VideoPlayer.vue` 走的是 FLV/WS 中继（平台中继设备推上来的流），
- * 与这里不是同一类通路 —— 背包是**浏览器直连板端**，要的是低延时，所以单独实现。
+ * 两个用途，协议完全一样，只是地址不同：
+ * 1. **现场直连**板端 mediamtx：`<webrtcBase>/<stream>/whep`（同内网 + 浏览器许可）；
+ * 2. **平台中继**：`/api/backpack/whep/<stream>/whep`（平台同源反代到它自己的
+ *    mediamtx，媒体仍是浏览器 ⇄ mediamtx 的 UDP，不过后端）。
  *
  * 只做三件事：
  * 1. `OPTIONS` 取 ICE 服务器（mediamtx 用 `Link: <stun:…>; rel="ice-server"` 声明）；
@@ -98,7 +99,7 @@ function friendly(error: unknown, url: string): string {
     if (sameOrigin) {
       return (
         `平台 WebRTC 出口不可达（${url}）：确认业务平台在运行、且服务器上 mediamtx 已启动` +
-        `（systemctl status mediamtx）；也可以先在平台设置里改回 FLV 中继`
+        `（systemctl status mediamtx）；并确认安全组放通了 UDP 8189（WebRTC 媒体）`
       );
     }
     let host = "板端";

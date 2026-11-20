@@ -58,8 +58,9 @@ ssh root@39.107.55.13 'rm -rf /tmp/ra-deploy && mkdir /tmp/ra-deploy &&
 
 ## 背包视频的 WebRTC 出口（mediamtx）
 
-板端 `backpack-relay` 把 6 路流按需推到平台 mediamtx（RTSP/TCP），浏览器用 WHEP 拉
-（同一份 `:3008` 前端，`VideoPlayer.vue` 自动选 WHEP 还是 FLV）。
+板端 `backpack-relay` 把 6 路流按需推到平台 mediamtx（RTSP/TCP），浏览器用 WHEP 拉。
+**这是平台中继唯一的媒体通路**（2026-11-19 删除了 FLV over WS 那条备路），所以
+`ROBODOG_MEDIAMTX_URL` + 8554/8189 放通是**必需项**，不是可选的优化。
 `install.sh` 会一并安装并渲染配置：
 
 ```text
