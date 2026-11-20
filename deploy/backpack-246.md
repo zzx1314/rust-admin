@@ -72,8 +72,10 @@ default via 192.168.234.1  dev eth0            metric 1000   # netplan 兜底
 /root/261113/backpack_dashboard/         ← 背包 Agent（仓库：business/backpack_dashboard/，见同目录 AGENTS.md）
 ├── backend/agent.py                     FastAPI :8000
 ├── backend/detect_jobs/<plan>/pt<n>/     AI 临时存证 + result.json（平台读不到，由客户端上报；
-│                                         图进企业微信群后平台下发 ai_cleanup，客户端删掉该 pt 目录，
-│                                         只剩「没推出去」的帧 —— 见 business/docs/wecom-alert-push.md）
+│                                         图进企业微信群后平台下发 ai_cleanup，客户端删掉该 pt 目录；
+│                                         任务终态 / 取消时客户端再把整个 <plan>/ 删掉（没命中、
+│                                         不推图的航点只靠 ai_cleanup 清不掉），启动时还会清
+│                                         超过 3 天没动过的残留 —— 见 business/docs/wecom-alert-push.md）
 ├── /media/media-data/picture/<plan>/pt<n>/  媒体归档（N 帧画框图 + result.json）：中台设备页
 │                                         「同步媒体」→ 客户端逐张传中台「媒体资源」→ 传成功才删。
 │                                         目录/帧数在中台「参数配置」改（media_picture_dir / media_frames），
