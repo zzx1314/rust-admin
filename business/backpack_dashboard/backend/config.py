@@ -170,6 +170,15 @@ DETECT_JOBS_DIR = os.getenv("DETECT_JOBS_DIR", os.path.join(_HERE, "detect_jobs"
 # 直接比对会误报告警。1 = 只用命中的那一帧。
 DETECT_PLAN_COUNT_SAMPLE = int(os.getenv("DETECT_PLAN_COUNT_SAMPLE", "3"))
 
+# ---- 航点存证归档目录（中台「同步媒体」从这里取图）----
+# 中台「参数配置 → 板端媒体目录」会随 ai_start 下发（`media_dir`）覆盖它；
+# 这里只是没收到配置时的兜底。客户端「同步媒体」指令按同一个目录扫描回传，
+# 所以两边必须是同一份路径（只在中台配一次，不要各改各的）。
+MEDIA_DATA_DIR = os.getenv("MEDIA_DATA_DIR", "/media/media-data/picture")
+# 每个航点固定保存几帧（1~10）。中台 `media_frames` 下发时以中台为准：
+# 帧数越多，中台「媒体资源」里一次巡检的证据越全，但板端多跑几次画框 + 上传。
+DETECT_PLAN_SAVE_FRAMES = max(1, min(10, int(os.getenv("DETECT_PLAN_SAVE_FRAMES", "3"))))
+
 # 板端本地画框：把框烧进视频再推一条 preview 流，浏览器只播带框视频、不再叠 SVG。
 # 设为 0 可随时回退到「浏览器画框」，便于两种方案对照测试。
 DETECT_OSD_ENABLED = os.getenv("DETECT_OSD_ENABLED", "1") == "1"

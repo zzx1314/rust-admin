@@ -3,6 +3,7 @@ pub mod dashboard;
 pub mod devices;
 pub mod ingest;
 pub mod maps;
+pub mod media;
 pub mod notifications;
 pub mod parks;
 pub mod routes;

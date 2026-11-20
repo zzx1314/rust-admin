@@ -639,6 +639,9 @@ impl AiPatrol {
         }
 
         let scene_name = task_name.clone();
+        // 板端媒体目录 / 固定帧数：中台参数配置是唯一真源（带 60s 缓存），
+        // 客户端原样转给板端 Agent 决定「存哪、存几张」，「同步媒体」按同一目录回传。
+        let media = crate::zentai::media_capture_config(&state.config).await;
         let body = json!({
             "windowId": window_id,
             "action": if was_running { "config" } else { "start" },
@@ -655,6 +658,8 @@ impl AiPatrol {
             "fps": DETECT_FPS,
             "secs": secs,
             "wasRunning": was_running,
+            "mediaDir": media.picture_dir,
+            "mediaFrames": media.frames,
         });
         if !crate::gateway::send_message_to_device(
             &state.device_connections,

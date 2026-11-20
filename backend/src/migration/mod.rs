@@ -483,6 +483,7 @@ mod tests {
                 "add_dog_command_audit",
                 "add_map_device_code",
                 "backfill_map_version",
+                "add_media_origin_fields",
             ]
         );
         assert_eq!(migrations[0].name(), "p_sys_tables_from_file");

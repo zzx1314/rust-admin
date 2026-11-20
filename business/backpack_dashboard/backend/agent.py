@@ -447,7 +447,9 @@ async def _detect_body(request: Request):
 async def detect_start(request: Request):
     """开启识别：拉起 --serve 常驻进程 + 单路 RTSP 旁路抽帧 + 板端本地画框。
 
-    入参可选 `plan_id` / `point_index` / `check_type` / `expect_count`：航点任务模式。
+    入参可选 `plan_id` / `point_index` / `check_type` / `expect_count`：航点任务模式；
+    还有 `media_dir` / `save_frames`（中台参数配置随 ai_start 下发）：命中帧除了
+    写 `detect_jobs` 临时存证，再固定存 N 帧到媒体归档目录（中台「同步媒体」取图）。
     `check_type` 两类任务：`exist`（检测是否存在）/ `count`（检测数量是否正确）。
     给了计划 id 后，命中就把证据图 + result.json 落到 `detect_jobs/<plan_id>/pt<下标>/`；
     数量任务还会核对数量，不一致在 `plan_hit` 里带 `count_alert`，窗口结束未命中的
@@ -459,7 +461,8 @@ async def detect_start(request: Request):
         b.get("task"), b.get("labels"), b.get("conf"),
         b.get("cams"), b.get("fps"),
         b.get("plan_id"), b.get("point_index"), b.get("expect_count"),
-        b.get("check_type"))
+        b.get("check_type"),
+        b.get("media_dir"), b.get("save_frames"))
     return JSONResponse(r, status_code=200 if r.get("ok") else 400)
 
 
@@ -477,7 +480,8 @@ async def detect_plan(request: Request):
     r = await asyncio.to_thread(
         detect.manager.set_plan,
         b.get("plan_id"), b.get("point_index"), b.get("expect_count"),
-        b.get("check_type"))
+        b.get("check_type"),
+        b.get("media_dir"), b.get("save_frames"))
     return JSONResponse(r, status_code=200 if r.get("ok") else 400)
 
 
@@ -538,7 +542,8 @@ async def detect_config(request: Request):
         b.get("task"), b.get("labels"), b.get("conf"),
         b.get("cams"), b.get("fps"),
         b.get("plan_id"), b.get("point_index"), b.get("expect_count"),
-        b.get("check_type"))
+        b.get("check_type"),
+        b.get("media_dir"), b.get("save_frames"))
     return JSONResponse(r, status_code=200 if r.get("ok") else 400)
 
 

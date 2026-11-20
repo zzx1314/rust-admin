@@ -23,13 +23,15 @@ const PUSH_MAP_TIMEOUT: Duration = Duration::from_secs(65);
 
 /// 允许从中台发起的设备指令白名单（与业务平台 `teleop::BUSINESS_COMMANDS` 对齐）。
 /// 「同步地图」有独立入口 `syncMaps`，这里不重复暴露。
-const ALLOWED_COMMANDS: [&str; 6] = [
+const ALLOWED_COMMANDS: [&str; 7] = [
     "开始巡检",
     "暂停任务",
     "继续任务",
     "召回充电",
     "远程接管",
     "释放接管",
+    // 把板端 `/media/media-data/picture` 里的 AI 存证图回传到中台「媒体资源」
+    "同步媒体",
 ];
 
 #[derive(serde::Deserialize)]
@@ -427,9 +429,10 @@ pub async fn send_device_command_handler(
         return Err(AppError::BadRequest(format!("不支持的指令：{command}")));
     }
     let request_id = resolve_request_id(req.request_id);
+    let params = command_params(&state, &command, req.params, &user.username).await;
     let body = json!({
         "command": command,
-        "params": req.params,
+        "params": params,
         "requestId": request_id,
     });
     let data = forward(
@@ -443,6 +446,29 @@ pub async fn send_device_command_handler(
     )
     .await?;
     Ok(Json(ApiResponse::ok(data)))
+}
+
+/// 指令参数：设备侧需要的「板端事实」由中台补齐，前端只按按钮。
+///
+/// 目前只有「同步媒体」需要：板端存证目录与固定帧数在「参数配置」页维护
+/// （`dog_config.media_picture_dir` / `media_frames`），现场改配置即可生效，
+/// 不必登板子改 `config.py`；配置缺失/写坏时回退到默认值，不影响指令下发。
+async fn command_params(
+    state: &AppState,
+    command: &str,
+    params: Option<Value>,
+    operator: &str,
+) -> Value {
+    let mut params = params.unwrap_or_else(|| json!({}));
+    if command != "同步媒体" {
+        return params;
+    }
+    let config =
+        crate::business::dog::media::service::load_capture_config(&state.dog_config_service).await;
+    params["pictureDir"] = json!(config.picture_dir);
+    params["frames"] = json!(config.frames);
+    params["operator"] = json!(operator);
+    params
 }
 
 /// `POST /api/dogDevice/{id}/tasks` — 中台给指定设备下发一条巡检任务。

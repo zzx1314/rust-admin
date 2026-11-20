@@ -12,6 +12,8 @@
 //! DELETE /api/dogInternal/devices/{device_code} 删除设备台账
 //! POST   /api/dogInternal/maps/exists           查询地图是否仍存在（业务平台判重）
 //! POST   /api/dogInternal/maps/upload           地图包回传（multipart）
+//! GET    /api/dogInternal/media/config          板端媒体目录 / 固定帧数（参数配置页）
+//! POST   /api/dogInternal/media/upload          航点 AI 存证图片回传（multipart）
 //! ```
 //!
 //! 与公开接口的关系：复用同一批 service，只是身份从「JWT 用户 + 行级权限」
@@ -29,6 +31,7 @@ use crate::api::AppState;
 use crate::business::dog::device::control_channel::SERVICE_TOKEN_HEADER;
 use crate::business::dog::device::domain::{CreateDeviceRequest, DeviceFilter};
 use crate::business::dog::map::domain::UploadMapRequest;
+use crate::business::dog::media::domain::UploadMediaRequest;
 use crate::common::data_scope::DataScope;
 use crate::common::error::{ApiResponse, AppError};
 
@@ -76,9 +79,16 @@ pub fn internal_routes() -> Router<AppState> {
             delete(delete_device_handler),
         )
         .route("/dogInternal/maps/exists", post(map_exists_handler))
+        .route("/dogInternal/media/config", get(media_config_handler))
         .route(
             "/dogInternal/maps/upload",
             post(upload_map_handler).layer(DefaultBodyLimit::max(MAP_UPLOAD_LIMIT)),
+        )
+        .route(
+            "/dogInternal/media/upload",
+            post(upload_media_handler).layer(DefaultBodyLimit::max(
+                crate::business::dog::media::service::MEDIA_IMAGE_MAX_BYTES + 64 * 1024,
+            )),
         )
 }
 
@@ -228,6 +238,77 @@ pub async fn upload_map_handler(
     Ok(Json(ApiResponse::ok(
         serde_json::to_value(vo).unwrap_or_default(),
     )))
+}
+
+/// `GET /api/dogInternal/media/config` — 板端媒体目录与每航点固定帧数。
+///
+/// 业务平台组装 `ai_start` 时取一次（缓存 60s）随指令下发：板端写图的目录与
+/// 「同步媒体」读图的目录必须是同一份配置，否则现场改了配置就会传空。
+pub async fn media_config_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    authorize(&state, &headers)?;
+    let config =
+        crate::business::dog::media::service::load_capture_config(&state.dog_config_service).await;
+    Ok(Json(ApiResponse::ok(json!(config))))
+}
+
+/// `POST /api/dogInternal/media/upload` — 航点 AI 存证图片回传（multipart：file + mediaInfo）。
+///
+/// 链路：板端 `/media/media-data/picture/<planId>/pt<n>/*.jpg` →（中台下发
+/// 「同步媒体」指令）设备客户端 → 业务平台 `/api/media/ingest` → 这里。
+/// 同一张图（sha256 相同）重复回传只保留一条记录，`created=false` 用于让客户端
+/// 知道「已经有人传过了」，可以安全删除板端文件。
+pub async fn upload_media_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    authorize(&state, &headers)?;
+
+    let mut info: Option<UploadMediaRequest> = None;
+    let mut file: Option<(String, Vec<u8>)> = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| AppError::BadRequest(format!("无效的上传请求: {error}")))?
+    {
+        match field.name() {
+            Some("file") => {
+                let name = field.file_name().unwrap_or("frame.jpg").to_string();
+                let data = field
+                    .bytes()
+                    .await
+                    .map_err(|error| AppError::BadRequest(format!("读取上传图片失败: {error}")))?;
+                file = Some((name, data.to_vec()));
+            }
+            Some("mediaInfo") => {
+                let text = field
+                    .text()
+                    .await
+                    .map_err(|error| AppError::BadRequest(format!("读取图片信息失败: {error}")))?;
+                info =
+                    Some(serde_json::from_str(&text).map_err(|error| {
+                        AppError::BadRequest(format!("图片信息格式错误: {error}"))
+                    })?);
+            }
+            _ => {}
+        }
+    }
+
+    let info = info.unwrap_or_default();
+    let (file_name, bytes) =
+        file.ok_or_else(|| AppError::BadRequest("请上传图片文件".to_string()))?;
+    let (media, created) = state
+        .dog_media_service
+        .save_upload(info, &file_name, &bytes, &state.upload_dir)
+        .await?;
+    let vo = crate::business::dog::media::domain::MediaVO::from(media);
+    Ok(Json(ApiResponse::ok(json!({
+        "created": created,
+        "media": serde_json::to_value(vo).unwrap_or_default(),
+    }))))
 }
 
 #[cfg(test)]

@@ -6,11 +6,18 @@ import {
   dogMediaSave,
   dogMediaPage,
   dogMediaUpdate,
-  dogMediaDelete
+  dogMediaDelete,
+  dogMediaImage
 } from "@/api/dogMedia";
 import { CREATE_TIME_FIELDS, type DogSearchField } from "../components/search";
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
+
+/** 媒体来源：设备「同步媒体」回传 vs 手工新增 */
+export const MEDIA_SOURCE_LABEL: Record<string, string> = {
+  "ai-patrol": "AI巡检",
+  manual: "手工上传"
+};
 
 export function useDogMedia() {
   const rules = reactive<FormRules>({
@@ -25,26 +32,85 @@ export function useDogMedia() {
       label: "勾选列"
     },
     { label: "序号", type: "index", fixed: "left", width: 70 },
-    { label: "媒体名称", prop: "mediaName", minWidth: 150 },
-    { label: "媒体类型", prop: "mediaType", width: 100 },
-    { label: "文件路径", prop: "mediaPath", minWidth: 200 },
-    { label: "文件大小", prop: "mediaSize", width: 120 },
+    { label: "媒体名称", prop: "mediaName", minWidth: 180 },
+    { label: "媒体类型", prop: "mediaType", width: 90 },
+    { label: "设备编号", prop: "deviceCode", width: 130 },
+    { label: "巡检计划", prop: "planId", minWidth: 130 },
+    {
+      label: "航点",
+      prop: "pointIndex",
+      width: 80,
+      formatter: row =>
+        row.pointIndex === null || row.pointIndex === undefined
+          ? "-"
+          : row.pointIndex
+    },
+    {
+      label: "来源",
+      prop: "source",
+      width: 110,
+      formatter: row => MEDIA_SOURCE_LABEL[row.source] ?? row.source ?? "-"
+    },
+    { label: "采集时间", prop: "capturedAt", width: 170 },
+    { label: "文件路径", prop: "mediaPath", minWidth: 220 },
+    { label: "文件大小", prop: "mediaSize", width: 110 },
     { label: "备注", prop: "remarks", minWidth: 150 },
-    { label: "创建时间", prop: "createTime", width: 180 },
-    { label: "操作", fixed: "right", width: 180, slot: "operation" }
+    { label: "创建时间", prop: "createTime", width: 170 },
+    { label: "操作", fixed: "right", width: 220, slot: "operation" }
   ];
 
   const queryFields: DogSearchField[] = [
     { label: "媒体名称", prop: "mediaName" },
-    { label: "媒体类型", prop: "mediaType" }
+    { label: "媒体类型", prop: "mediaType" },
+    { label: "设备编号", prop: "deviceCode" }
   ];
-  const moreQueryFields: DogSearchField[] = [...CREATE_TIME_FIELDS];
+  const moreQueryFields: DogSearchField[] = [
+    { label: "巡检计划", prop: "planId" },
+    {
+      label: "来源",
+      prop: "source",
+      type: "select",
+      options: Object.entries(MEDIA_SOURCE_LABEL).map(([value, label]) => ({
+        label,
+        value
+      }))
+    },
+    ...CREATE_TIME_FIELDS
+  ];
   const queryForm = ref({
     mediaName: "",
     mediaType: "",
+    deviceCode: "",
+    planId: "",
+    source: "",
     beginTime: "",
     endTime: ""
   });
+
+  // 预览：图片走 /api/dogMedia/{id}/image（JSON + base64 data URL），
+  // 手工登记的历史记录没有落盘文件，接口 404，这里只提示不挡操作。
+  const previewVisible = ref(false);
+  const previewLoading = ref(false);
+  const previewImage = ref("");
+  const previewTitle = ref("");
+  async function handlePreview(row) {
+    previewVisible.value = true;
+    previewLoading.value = true;
+    previewImage.value = "";
+    previewTitle.value = `${row.mediaName}（${MEDIA_SOURCE_LABEL[row.source] ?? "手工上传"}）`;
+    const { code, data, msg } = await dogMediaImage(row.id);
+    if (code === SUCCESS && data?.image) {
+      previewImage.value = data.image;
+    } else {
+      message(msg || "这张记录没有可预览的图片文件", { type: "warning" });
+      previewVisible.value = false;
+    }
+    previewLoading.value = false;
+  }
+  function closePreview() {
+    previewVisible.value = false;
+    previewImage.value = "";
+  }
   const dataList = ref([]);
   const loading = ref(true);
   const pagination = reactive<PaginationProps>({
@@ -122,6 +188,9 @@ export function useDogMedia() {
     queryForm.value = {
       mediaName: "",
       mediaType: "",
+      deviceCode: "",
+      planId: "",
+      source: "",
       beginTime: "",
       endTime: ""
     };
@@ -155,6 +224,12 @@ export function useDogMedia() {
     handleSubmit,
     handleSubmitError,
     cancel,
-    openDia
+    openDia,
+    previewVisible,
+    previewLoading,
+    previewImage,
+    previewTitle,
+    handlePreview,
+    closePreview
   };
 }

@@ -51,7 +51,10 @@ export const DEVICE_COMMANDS = [
   "继续任务",
   "召回充电",
   "远程接管",
-  "释放接管"
+  "释放接管",
+  // 把板端 `/media/media-data/picture` 里的航点 AI 存证图回传到「媒体资源」
+  // （目录/帧数在「参数配置」页维护，见 media_picture_dir / media_frames）
+  "同步媒体"
 ];
 
 /**

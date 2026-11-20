@@ -33,7 +33,11 @@ def _install_stubs(root):
     """把落盘改成「桩」：不跑 ffmpeg，也不碰 /tmp 下的真实帧文件。"""
     config.DETECT_JOBS_DIR = os.path.join(root, "detect_jobs")
     config.DETECT_FRAME_DIR = os.path.join(root, "frames")
+    # 媒体归档也指到临时目录：开发机上没有 /media/media-data（板端才有），
+    # 真往那儿写真会 EACCES，自检就变成「一步三行报错」。
+    config.MEDIA_DATA_DIR = os.path.join(root, "media-data", "picture")
     config.DETECT_PLAN_COUNT_SAMPLE = 3
+    config.DETECT_PLAN_SAVE_FRAMES = 3
     detect.FRAME_DIR = config.DETECT_FRAME_DIR
     os.makedirs(config.DETECT_FRAME_DIR, exist_ok=True)
 
@@ -117,6 +121,27 @@ def main():
         check("数量一致：found_count=3", hit.get("found_count") == 3, str(hit.get("found_count")))
         check("数量一致：count_ok=true", hit.get("count_ok") is True, str(hit.get("count_ok")))
         check("数量一致：count_alert=false", hit.get("count_alert") is False)
+
+    # ---- 媒体归档（中台「同步媒体」从这里取图）----
+    manager.set_plan("SELFTEST-MEDIA", 0, 2, "count")
+    hit = _sample(manager, "dogcam", 2, events)
+    check("媒体归档：plan_hit 带 media_dir", hit is not None and bool(hit.get("media_dir")))
+    if hit:
+        frames = hit.get("media_frames") or []
+        check("媒体归档：固定保存 3 帧", len(frames) == 3, str(len(frames)))
+        check("媒体归档：帧都落盘",
+              all(os.path.isfile(os.path.join(hit["media_dir"], n)) for n in frames),
+              hit["media_dir"])
+        check("媒体归档：目录布局 = 计划/航点",
+              os.path.basename(os.path.dirname(hit["media_dir"])) == "SELFTEST-MEDIA"
+              and os.path.basename(hit["media_dir"]) == "pt0", hit["media_dir"])
+        check("媒体归档：result.json 与图同目录",
+              os.path.isfile(os.path.join(hit["media_dir"], "result.json")))
+        # 临时存证（detect_jobs）与媒体归档是两份目录：前者会被 ai_cleanup 删，
+        # 后者要留给中台媒体资源，两者不能是同一个路径。
+        check("媒体归档与临时存证目录分离",
+              os.path.abspath(hit["media_dir"]) != os.path.abspath(hit["dir"]),
+              "%s vs %s" % (hit["media_dir"], hit["dir"]))
 
     # ---- 任务类型 2：数量不一致 ----
     manager.set_plan("SELFTEST-PLAN", 2, 5, "count")

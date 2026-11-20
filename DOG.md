@@ -18,7 +18,7 @@
 | 后端业务代码 | `backend/src/business/dog/{map,media,model,config,statistics,device}/` |
 | 后端路由 | `backend/src/api/routes.rs`（每个子域一个 `dog_*_routes`，统一挂 `require_auth`） |
 | 服务装配 | `backend/src/app.rs` → `App::build_state_with_token_store` |
-| 数据库迁移 | `.../7_create_dog_tables.sql`、`.../19_add_map_file_fields.sql`、`.../22_add_map_baseline_*.sql`、`.../23_add_map_dimensions.sql`、`.../24_drop_retired_dog_tables.sql`、`.../25_drop_command_services_tables.sql`、`.../26_add_map_park.sql`、`.../27_add_device_management.sql`（重建 `dog_device` / `dog_user_device`）、`.../29_add_map_device_code.sql` |
+| 数据库迁移 | `.../7_create_dog_tables.sql`、`.../19_add_map_file_fields.sql`、`.../22_add_map_baseline_*.sql`、`.../23_add_map_dimensions.sql`、`.../24_drop_retired_dog_tables.sql`、`.../25_drop_command_services_tables.sql`、`.../26_add_map_park.sql`、`.../27_add_device_management.sql`（重建 `dog_device` / `dog_user_device`）、`.../29_add_map_device_code.sql`、`.../31_add_media_origin_fields.sql`（媒体来源字段 + 参数配置预置 `media_picture_dir` / `media_frames`） |
 | 菜单 | `backend/migrations/p_sys/9_add_dog_menus.sql`、`.../21_remove_retired_dog_menus.sql`、`.../22_remove_command_services_menus.sql`、`.../27_add_device_management_menu.sql` |
 | 前端页面 | `frontend/src/views/dog/{map,media,model,config,device}/` |
 | 前端请求封装 | `frontend/src/api/dog{Map,Media,Model,Config,Statistics,Device}.ts` |
@@ -35,7 +35,7 @@
 | --- | --- | --- |
 | `dog_map` | 地图基线版本 | `map_name`、`map_type`、`file_name`、`file_path`、`file_format`、`file_size`、`remarks`、`user_id`(创建者)、`map_version`、`frame_id`、`crs`、`map_origin`、`resolution`、`floors`、`road_count`、`nogo_count`、`map_status`(草稿/部分标定/已发布/已归档)、`map_hash`(上传时计算的 SHA-256)、`map_width`/`map_height`、`publish_time`、`park_code`/`park_name`(业务园区归属，可选)、`device_code`(上报该地图的设备编号，可选)；地图以 `.zip` 包上传，文件落盘到 `<upload_dir>/maps/`。上传时后端解析 PGM/YAML 并回写 resolution/origin/尺寸/哈希，表单值与包内容冲突会被拒绝。发布后版本不可变 |
 | `dog_model` | 模型 | `model_name`、`model_type`、`file_name`、`file_path`、`file_format`、`file_size`、`remarks` |
-| `dog_media` | 媒体 | `media_name`、`media_type`、`media_path`、`media_size`、`remarks` |
+| `dog_media` | 媒体 | `media_name`、`media_type`、`media_path`、`media_size`、`remarks`；迁移 31 起还有来源字段：`device_code`、`park_code`、`plan_id`、`point_index`、`captured_at`、`source`(`ai-patrol`/`manual`)、`sha256`(去重键)。图片落盘 `<upload_dir>/media/<设备>/<计划>/pt<n>/<sha256>.<ext>` |
 | `dog_config` | 参数配置 | `config_name`、`config_value`、`description` |
 | `dog_device` | 设备台账（业务平台同步） | `device_id`(业务设备编号)、`device_name`、`model`、`status`、`firmware`、`device_ip`、`park_code`/`park_name`、`user_id`(创建者) |
 | `dog_user_device` | 设备-用户分配（多对多） | `user_id`、`device_id`(dog_device.id)、`is_deleted` |
@@ -61,6 +61,7 @@ PUT    /api/<module>/{id}           修改
 DELETE /api/<module>/{id}           软删除
 POST   /api/dogMap/upload           上传 .zip 地图包（multipart：file + mapInfo）
 GET    /api/dogMap/{id}/image       地图栅格 PNG + 分辨率 / 原点
+GET    /api/dogMedia/{id}/image     媒体图片内容（data URL）+ 类型 / 大小（手工登记的行返回 404）
 POST   /api/dogMap/{id}/edit        橡皮擦：按像素笔画改写包内 model.pgm 噪点
 POST   /api/dogMap/{id}/push        把编辑后的地图下发到狗体（本体）并重新载图
 POST   /api/dogMap/{id}/publish     发布地图版本（记录发布时间）
@@ -78,7 +79,7 @@ DELETE /api/dogDevice/{id}          软删除设备
 GET    /api/dogDevice/users         可分配用户下拉
 GET    /api/dogDevice/byCode/{code} 按设备编号查询（业务平台内部使用）
 POST   /api/dogDevice/{id}/syncMaps  中台手动触发设备同步地图
-POST   /api/dogDevice/{id}/command  中台向设备下发指令（经业务平台转发）
+POST   /api/dogDevice/{id}/command  中台向设备下发指令（经业务平台转发；`同步媒体` 会按参数配置自动带上 `pictureDir`/`frames`）
 POST   /api/dogDevice/{id}/tasks    中台给设备下发一条巡检任务（选路线 + 计划时间）
 GET    /api/dogDevice/{id}/runtime  设备运行态只读视图（在线/任务/进度/电量）
 POST   /api/dogDevice/assignUsers   批量分配 { deviceIds, userIds, mode: append|replace }
@@ -90,6 +91,8 @@ POST   /api/dogInternal/devices/upsert       设备台账幂等同步
 DELETE /api/dogInternal/devices/{deviceCode} 删除设备台账（幂等）
 POST   /api/dogInternal/maps/exists          地图 id 是否仍存在（业务平台判重）
 POST   /api/dogInternal/maps/upload          地图包回传（multipart：file + mapInfo）
+GET    /api/dogInternal/media/config         板端媒体目录 / 固定帧数（参数配置页，业务平台 60s 缓存）
+POST   /api/dogInternal/media/upload         航点 AI 存证图片回传（multipart：file + mediaInfo，按 sha256 去重）
 GET    /api/dogDevice/control-plane/ws       反向控制信道（WebSocket，业务平台拨入）
 ```
 

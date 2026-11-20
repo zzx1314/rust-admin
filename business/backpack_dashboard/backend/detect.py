@@ -214,6 +214,28 @@ def scan_tasks(force=False):
     return data
 
 
+def _media_root(value):
+    """中台下发的板端媒体目录：只接受绝对路径且不含 `..`，否则回退 config 兜底。"""
+    raw = str(value or "").strip()
+    if raw:
+        if os.path.isabs(raw) and ".." not in raw.split(os.sep):
+            return os.path.abspath(raw)
+        print("[detect] 媒体目录不合法（%s），回退 %s"
+              % (raw, config.MEDIA_DATA_DIR), flush=True)
+    return os.path.abspath(config.MEDIA_DATA_DIR)
+
+
+def _save_frames(value):
+    """每航点固定保存帧数：1~10，非法值回退 config。"""
+    try:
+        frames = int(value)
+    except (TypeError, ValueError):
+        frames = 0
+    if frames <= 0:
+        frames = config.DETECT_PLAN_SAVE_FRAMES
+    return max(1, min(10, frames))
+
+
 def _as_int(value):
     """安全转 int：None / 空串 / 非法值都返回 None（用于 plan 参数容错）。"""
     if value is None or (isinstance(value, str) and not value.strip()):
@@ -730,7 +752,7 @@ class DetectManager:
 
     # ---------- 版本 4：航点计划模式（plan_id + 检查目标数量）----------
     def set_plan(self, plan_id=None, point_index=None, expect_count=None,
-                 check_type=None):
+                 check_type=None, media_dir=None, save_frames=None):
         """登记航点计划（运行中也能调，不必重启识别）。
 
         `check_type` 两类任务：
@@ -742,13 +764,18 @@ class DetectManager:
 
         换计划/清计划时会把上一个还在采样的命中先收尾（不丢证据）。
         """
-        plan = self._plan_set(plan_id, point_index, expect_count, check_type)
+        plan = self._plan_set(plan_id, point_index, expect_count, check_type,
+                              media_dir=media_dir, save_frames=save_frames)
         return {"ok": True, "plan": None if not plan else {
             "plan_id": plan["id"],
             "point_index": plan["point_index"],
             "check_type": plan["check_type"],
             "expect_count": plan["expect_count"],
             "dir": evidence.plan_dir(plan["id"], plan["point_index"]),
+            # 媒体归档目录（中台「同步媒体」按它扫描回传）
+            "media_dir": evidence.media_plan_dir(
+                plan["id"], plan["point_index"], root=plan["media_dir"]),
+            "save_frames": plan["save_frames"],
         }}
 
     def clear_plan(self):
@@ -759,7 +786,7 @@ class DetectManager:
         return {"ok": True, "cleared": prev["id"] if prev else None}
 
     def _plan_set(self, plan_id=None, point_index=None, expect_count=None,
-                  check_type=None):
+                  check_type=None, media_dir=None, save_frames=None):
         pid = "" if plan_id is None else str(plan_id).strip()
         if not pid:
             self._plan_flush("计划结束")
@@ -786,6 +813,10 @@ class DetectManager:
             "check_type": mode,
             "expect_count": expect,
             "count_missing": count_missing,
+            # 媒体归档目录与固定帧数：中台参数配置随 ai_start 下发
+            # （客户端转成 media_dir / save_frames），缺省用板端 config 兜底。
+            "media_dir": _media_root(media_dir),
+            "save_frames": _save_frames(save_frames),
             "sampling": None,
             "done": False,
             "t_start": time.monotonic(),
@@ -807,11 +838,25 @@ class DetectManager:
             plan = self.plan
             if not plan or plan["done"]:
                 return
+            save_frames = max(1, min(10, int(plan.get("save_frames") or
+                                              config.DETECT_PLAN_SAVE_FRAMES)))
+            # 采样帧数取「数量核对需要的帧数」与「媒体归档要留的帧数」的较大者：
+            # 存 3 帧就不能只采 1 帧，否则媒体资源里永远只有一张图。
+            need = max(1, int(config.DETECT_PLAN_COUNT_SAMPLE), save_frames)
+            record = {
+                "jpg": jpg,
+                "boxes": boxes,
+                "counts": dict(counts or {}),
+                "total": total,
+                "frame": dict(frame or {}),
+            }
             st = plan["sampling"]
             if st is None:
                 st = {
                     "cam": cam,
-                    "left": max(1, config.DETECT_PLAN_COUNT_SAMPLE) - 1,
+                    "left": need - 1,
+                    # 本次窗口内看到的命中帧（最多 save_frames 张），媒体归档用
+                    "frames": [record],
                     "best_total": total,
                     "best_counts": dict(counts or {}),
                     "best_boxes": boxes,
@@ -825,6 +870,8 @@ class DetectManager:
                 # 另一路的采样还没采完：以先命中的那一路为准，不抢同一份存证
                 return
             else:
+                st["frames"].append(record)
+                del st["frames"][:-save_frames]
                 if total >= st["best_total"]:
                     st.update(best_total=total, best_counts=dict(counts or {}),
                               best_boxes=boxes, best_jpg=jpg,
@@ -855,6 +902,62 @@ class DetectManager:
             self._plan_write(final[0], final[1], reason)
         elif miss:
             self._plan_miss(miss, reason)
+
+    def _plan_write_media(self, plan, st, result):
+        """把本轮命中帧写进媒体归档目录（中台「同步媒体」取图）。
+
+        固定保存 `save_frames` 帧（取采样窗口里看到的命中帧，按检出数量降序，
+        第一张就是结论帧），每张都在**原始分辨率**上画框；写图走
+        `evidence.save_frame`，失败会退回原图复制，绝不因为画框失败丢掉证据。
+
+        返回 `(媒体航点目录, 文件名列表)`；一张都没写成时目录视为不存在。
+        """
+        frames = list(st.get("frames") or [])
+        if not frames:
+            return None, []
+        root = plan.get("media_dir") or config.MEDIA_DATA_DIR
+        out_dir = evidence.media_plan_dir(plan["id"], plan.get("point_index"), root=root)
+        limit = max(1, min(10, int(plan.get("save_frames") or
+                                  config.DETECT_PLAN_SAVE_FRAMES)))
+        # 结论帧（检出数最大）排最前：观看端第一张就是画框最全的那帧
+        frames.sort(key=lambda item: int(item.get("total") or 0), reverse=True)
+        frames = frames[:limit]
+        cam = st.get("cam") or "cam"
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        tmp = os.path.join(FRAME_DIR, "_media_frame.jpg")
+        written = []
+        try:
+            os.makedirs(FRAME_DIR, exist_ok=True)
+        except Exception:
+            pass
+        for seq, item in enumerate(frames, start=1):
+            jpg = item.get("jpg") or b""
+            if not jpg:
+                continue
+            name = "%s_%02d_%s.jpg" % (cam, seq, stamp)
+            out = os.path.join(out_dir, name)
+            frame_meta = item.get("frame") or {}
+            try:
+                with open(tmp, "wb") as f:
+                    f.write(jpg)
+                evidence.save_frame(
+                    tmp, item.get("boxes") or [],
+                    frame_meta.get("w") or config.CAPTURE_WIDTH,
+                    frame_meta.get("h") or config.CAPTURE_HEIGHT,
+                    out)
+                written.append(name)
+            except Exception as e:
+                print("[detect] 媒体归档写图失败 %s: %s" % (out, e), flush=True)
+        if not written:
+            return None, []
+        try:
+            evidence.write_json(
+                out_dir,
+                dict(result, media_dir=out_dir, media_frames=written,
+                     type="plan_media"))
+        except Exception as e:
+            print("[detect] 媒体归档 result.json 写入失败: %s" % e, flush=True)
+        return out_dir, written
 
     def _plan_miss(self, plan, reason):
         """窗口结束仍未命中：写 found:false 的结果；数量任务另发 `plan_miss`。
@@ -949,6 +1052,16 @@ class DetectManager:
             "dir": out_dir,
             "evidence": evidence_path,
         }
+        # 媒体归档：本次固定保存的 N 帧写进 MEDIA_DATA_DIR/<plan>/pt<n>/，
+        # 中台下发「同步媒体」后由设备客户端逐张回传并删除。这一步失败不影响
+        # 企业微信证据图那条主链路（只是媒体资源里少几张）。
+        try:
+            media_dir, media_frames = self._plan_write_media(plan, st, result)
+        except Exception as e:
+            media_dir, media_frames = None, []
+            result["media_error"] = "媒体归档失败: %s" % e
+        result["media_dir"] = media_dir
+        result["media_frames"] = media_frames
         if evidence_error:
             result["evidence_error"] = evidence_error
         try:
@@ -1056,7 +1169,8 @@ class DetectManager:
 
     # ---------- 对外：启停 / 配置 / 立即识别 ----------
     def start(self, task=None, labels=None, conf=None, cams=None, fps=None,
-              plan_id=None, point_index=None, expect_count=None, check_type=None):
+              plan_id=None, point_index=None, expect_count=None, check_type=None,
+              media_dir=None, save_frames=None):
         with self._lock:
             if self.state in ("starting", "running"):
                 return {"ok": False, "error": "识别已在运行，请先停止"}
@@ -1148,7 +1262,8 @@ class DetectManager:
 
         # 航点任务：登记计划（计划 id / 航点下标 / 任务类型 / 检查目标数量）。
         # 命中即按计划目录存证并核对数量；传空即清掉旧计划（普通「开始识别」与计划模式互斥）。
-        self._plan_set(plan_id, point_index, expect_count, check_type)
+        self._plan_set(plan_id, point_index, expect_count, check_type,
+                       media_dir=media_dir, save_frames=save_frames)
 
         self._start_grabbers()
         # 版本 2：板端本地画框。失败只记日志，不中断识别 —— 前端看到
@@ -1325,7 +1440,8 @@ class DetectManager:
         return {"ok": True, "status": self.status()}
 
     def configure(self, task=None, labels=None, conf=None, cams=None, fps=None,
-                  plan_id=None, point_index=None, expect_count=None, check_type=None):
+                  plan_id=None, point_index=None, expect_count=None, check_type=None,
+                  media_dir=None, save_frames=None):
         """运行中热更新：类别/阈值零成本；换场景走 SWITCH；改摄像头/帧率重启抓帧。
 
         `plan_id` 不为 None 时顺便登记/清掉航点计划（空串 = 清），这样「操作员
@@ -1334,7 +1450,8 @@ class DetectManager:
         if self.state != "running":
             return {"ok": False, "error": "识别未运行，请先点「开始识别」"}
         if plan_id is not None:
-            self._plan_set(plan_id, point_index, expect_count, check_type)
+            self._plan_set(plan_id, point_index, expect_count, check_type,
+                           media_dir=media_dir, save_frames=save_frames)
         with self._lock:
             old = dict(self.cfg)
         switched = False

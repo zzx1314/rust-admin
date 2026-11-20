@@ -5,8 +5,8 @@ use crate::error::ApiResponse;
 use crate::gateway;
 use crate::gateway::DeviceConnections;
 use crate::handlers::{
-    alerts, dashboard, devices, ingest, maps, notifications, parks, routes, schedules, service,
-    settings, tasks, teleop, workorders, zones,
+    alerts, dashboard, devices, ingest, maps, media, notifications, parks, routes, schedules,
+    service, settings, tasks, teleop, workorders, zones,
 };
 use crate::notify::Notifier;
 use crate::video::{self, VideoHub};
@@ -29,6 +29,12 @@ use tower_http::trace::TraceLayer;
 /// 本体地图目录打包后常见 10~50MB（`map.pcd` 27MB、`map.pgm` 1MB、`map.txt`…），
 /// axum 默认 2MB 会让真实设备回传直接 400（`Error parsing multipart/form-data`）。
 const MAP_UPLOAD_LIMIT: usize = 256 * 1024 * 1024;
+
+/// 单张媒体图片上传上限。
+///
+/// 板端 720p 画框 JPG 通常 200~500KB；这里留到 8MB + multipart 开销，
+/// 既不会把真实图片挡在 2MB 默认体量之外，也能挡住误传视频。
+const MEDIA_UPLOAD_LIMIT: usize = 8 * 1024 * 1024 + 64 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -86,6 +92,11 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/map-versions/ingest",
             post(ingest::ingest_map).layer(DefaultBodyLimit::max(MAP_UPLOAD_LIMIT)),
+        )
+        // 板端 AI 存证图片回传（中台「同步媒体」指令 → 设备客户端逐张上传）
+        .route(
+            "/media/ingest",
+            post(media::ingest_media).layer(DefaultBodyLimit::max(MEDIA_UPLOAD_LIMIT)),
         )
         .route("/map-versions/{id}", get(maps::get_map))
         .route("/map-versions/{id}/raster", get(maps::map_raster))

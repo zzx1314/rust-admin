@@ -14,11 +14,119 @@ use crate::error::AppError;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 const TOKEN_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// 板端媒体采集配置的缓存时长。
+///
+/// 每次 AI 开窗都会用一次；中台「参数配置」改完最多 1 分钟生效，不必每个航点
+/// 都去问一次中台（内网部署时中台并不总是可达）。
+const MEDIA_CONFIG_TTL: Duration = Duration::from_secs(60);
+
+/// 板端媒体采集配置（中台参数配置页 `media_picture_dir` / `media_frames`）。
+///
+/// 必须与「同步媒体」指令里下发的目录一致：板端按这个目录写图，客户端按同一个
+/// 目录扫描回传，否则现场改了配置就会「传了个空目录」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaCaptureConfig {
+    pub picture_dir: String,
+    pub frames: u32,
+}
+
+impl Default for MediaCaptureConfig {
+    fn default() -> Self {
+        Self {
+            picture_dir: "/media/media-data/picture".to_string(),
+            frames: 3,
+        }
+    }
+}
+
+static MEDIA_CONFIG_CACHE: OnceLock<Mutex<Option<(Instant, MediaCaptureConfig)>>> = OnceLock::new();
+
+fn media_config_cache() -> &'static Mutex<Option<(Instant, MediaCaptureConfig)>> {
+    MEDIA_CONFIG_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// 取一次板端媒体配置（带 60s 缓存）。
+///
+/// 失败时沿用上一次成功的值（实在没有就用默认值）并只打 WARN：中台不可达
+/// **不能**让航点 AI 识别停下来，板端仍然按默认目录写图。
+pub async fn media_capture_config(config: &Config) -> MediaCaptureConfig {
+    if let Some((at, value)) = media_config_cache().lock().await.as_ref()
+        && at.elapsed() < MEDIA_CONFIG_TTL
+    {
+        return value.clone();
+    }
+    match fetch_media_capture_config(config).await {
+        Ok(value) => {
+            *media_config_cache().lock().await = Some((Instant::now(), value.clone()));
+            value
+        }
+        Err(error) => {
+            let cached = media_config_cache()
+                .lock()
+                .await
+                .as_ref()
+                .map(|(_, value)| value.clone());
+            let value = cached.unwrap_or_default();
+            // 失败也记时间戳：中台不可达时不要每个航点都刷一条 WARN + 一次超时，
+            // 一个 TTL 内沿用上次的值（没有就默认值），下一个 TTL 再试。
+            warn!(
+                "读取中台媒体配置失败，沿用 {}（一个 TTL 后重试）: {error}",
+                value.picture_dir
+            );
+            *media_config_cache().lock().await = Some((Instant::now(), value.clone()));
+            value
+        }
+    }
+}
+
+async fn fetch_media_capture_config(config: &Config) -> Result<MediaCaptureConfig, AppError> {
+    let base = zentai_base(config)?;
+    let auth = Auth::resolve(config).await?;
+    if !auth.is_service() {
+        return Err(AppError::Internal(
+            "中台未配置服务令牌（ROBODOG_SERVICE_TOKEN），无法读取媒体配置".to_string(),
+        ));
+    }
+    let http = http_client()?;
+    let url = format!("{base}/api/dogInternal/media/config");
+    let resp = auth
+        .apply(http.get(&url))
+        .send()
+        .await
+        .map_err(|error| AppError::Internal(format!("请求中台媒体配置失败: {error}")))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(AppError::Internal(format!(
+            "中台媒体配置 HTTP {status}: {text}"
+        )));
+    }
+    let value: Value = serde_json::from_str(&text)
+        .map_err(|error| AppError::Internal(format!("媒体配置响应不是 JSON: {error}")))?;
+    let data = value.get("data").cloned().unwrap_or(value);
+    let picture_dir = data
+        .get("pictureDir")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| MediaCaptureConfig::default().picture_dir);
+    let frames = data
+        .get("frames")
+        .and_then(Value::as_u64)
+        .map(|value| (value as u32).clamp(1, 10))
+        .unwrap_or(3);
+    Ok(MediaCaptureConfig {
+        picture_dir,
+        frames,
+    })
+}
 
 /// 一次中台登录的结果
 #[derive(Debug, Clone)]

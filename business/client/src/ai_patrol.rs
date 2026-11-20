@@ -216,6 +216,11 @@ pub struct AiStart {
     pub cam: String,
     pub fps: u32,
     pub secs: u64,
+    /// 板端媒体目录（中台参数配置 `media_picture_dir`，经业务平台下发）。
+    /// 板端按它落图，「同步媒体」按同一目录回传；缺省时用板端 `MEDIA_DATA_DIR`。
+    pub media_dir: Option<String>,
+    /// 每个航点固定保存几帧（中台 `media_frames`，1~10）
+    pub media_frames: Option<u32>,
     /// 开窗前 Agent 是否已在识别（操作员手动开的）：是则窗口结束不停它
     pub was_running: bool,
 }
@@ -286,6 +291,16 @@ impl AiStart {
                 .unwrap_or("dogcam")
                 .to_string(),
             fps: value.get("fps").and_then(Value::as_u64).unwrap_or(3) as u32,
+            media_dir: value
+                .get("mediaDir")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string),
+            media_frames: value
+                .get("mediaFrames")
+                .and_then(Value::as_u64)
+                .map(|frames| (frames as u32).clamp(1, 10)),
             secs: value.get("secs").and_then(Value::as_u64).unwrap_or(15),
             was_running: value
                 .get("wasRunning")
@@ -548,6 +563,9 @@ impl AiPatrol {
             "point_index": start.point_index,
             "check_type": start.check_type,
             "expect_count": start.expect_count,
+            // 中台参数配置里的板端媒体目录 / 固定帧数（缺省由板端 config.py 兜底）
+            "media_dir": start.media_dir,
+            "save_frames": start.media_frames,
         });
         let path = if start.action == "config" {
             "/api/detect/config"

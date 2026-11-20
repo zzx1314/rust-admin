@@ -48,6 +48,15 @@ impl SeaOrmDogMediaRepository {
             .await
     }
 
+    /// 按原图 SHA-256 查重：设备重复回传同一张图时复用已有记录，不新增一行。
+    pub async fn find_by_sha256(&self, sha256: &str) -> Result<Option<Media>, sea_orm::DbErr> {
+        MediaEntity::find()
+            .filter(MediaColumn::Sha256.eq(sha256))
+            .filter(MediaColumn::IsDeleted.eq(0))
+            .one(&*self.conn)
+            .await
+    }
+
     pub async fn find_all_with_page(
         &self,
         query: &MediaPageQuery,
@@ -59,6 +68,21 @@ impl SeaOrmDogMediaRepository {
         }
         if let Some(ref mtype) = query.media_type {
             cond = cond.add(MediaColumn::MediaType.eq(mtype.as_str()));
+        }
+        if let Some(ref device) = query.device_code
+            && !device.trim().is_empty()
+        {
+            cond = cond.add(MediaColumn::DeviceCode.eq(device.trim()));
+        }
+        if let Some(ref plan) = query.plan_id
+            && !plan.trim().is_empty()
+        {
+            cond = cond.add(MediaColumn::PlanId.eq(plan.trim()));
+        }
+        if let Some(ref source) = query.source
+            && !source.trim().is_empty()
+        {
+            cond = cond.add(MediaColumn::Source.eq(source.trim()));
         }
 
         if let Some(ref begin) = query.begin_time

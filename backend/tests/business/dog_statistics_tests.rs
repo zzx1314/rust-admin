@@ -158,10 +158,7 @@ async fn create_media(state: &AppState, name: &str) {
         .dog_media_service
         .create(CreateMediaRequest {
             media_name: name.to_string(),
-            media_type: None,
-            media_path: None,
-            media_size: None,
-            remarks: None,
+            ..Default::default()
         })
         .await
         .expect("media must be created");
@@ -179,6 +176,10 @@ async fn create_config(state: &AppState, name: &str) {
         .expect("config must be created");
 }
 
+/// 迁移 31 会给「参数配置」预置两条媒体回传设置
+/// （`media_picture_dir` / `media_frames`），所以空库里这两张卡不是 0。
+const SEEDED_CONFIGS: i64 = 2;
+
 #[tokio::test]
 async fn empty_database_reports_zeroes_instead_of_placeholders() {
     let state = test_state().await;
@@ -191,14 +192,32 @@ async fn empty_database_reports_zeroes_instead_of_placeholders() {
 
     assert_eq!(stats.len(), 4);
     for summary in &stats {
-        assert_eq!(summary.value, 0, "{} must start at zero", summary.name);
+        let expected = if summary.name == "参数配置" {
+            SEEDED_CONFIGS
+        } else {
+            0
+        };
         assert_eq!(
-            summary.percent, "0%",
-            "{} has no history, growth must be 0%",
+            summary.value, expected,
+            "{} 的初始值应为 {}",
+            summary.name, expected
+        );
+        let expected_percent = if expected == 0 { "0%" } else { "+100%" };
+        assert_eq!(
+            summary.percent, expected_percent,
+            "{} 的周同比（预置配置是本周新增）",
             summary.name
         );
         assert_eq!(summary.data.len(), 7, "each card shows a full week");
-        assert!(summary.data.iter().all(|count| *count == 0));
+        assert_eq!(
+            summary.data.iter().sum::<i64>(),
+            expected,
+            "{} 只有预置配置落在今天这一格",
+            summary.name
+        );
+        if expected == 0 {
+            assert!(summary.data.iter().all(|count| *count == 0));
+        }
     }
 
     let weekly = state
@@ -208,7 +227,11 @@ async fn empty_database_reports_zeroes_instead_of_placeholders() {
         .unwrap();
     assert_eq!(weekly.len(), 2, "previous week + current week");
     assert!(weekly[0].map_count.iter().all(|count| *count == 0));
-    assert!(weekly[1].config_count.iter().all(|count| *count == 0));
+    assert_eq!(
+        weekly[1].config_count.iter().sum::<i64>(),
+        SEEDED_CONFIGS,
+        "预置的参数配置都记在本周"
+    );
 }
 
 #[tokio::test]
@@ -236,22 +259,26 @@ async fn summary_cards_reflect_stored_rows_and_week_to_date_series() {
     assert_eq!(value_of("地图数量"), 1);
     assert_eq!(value_of("模型数量"), 1);
     assert_eq!(value_of("媒体数量"), 1);
-    assert_eq!(value_of("参数配置"), 1);
+    assert_eq!(value_of("参数配置"), 1 + SEEDED_CONFIGS);
 
     for summary in &stats {
-        assert_eq!(summary.value, 1, "{} counts the stored row", summary.name);
+        let expected = if summary.name == "参数配置" {
+            1 + SEEDED_CONFIGS
+        } else {
+            1
+        };
+        assert_eq!(
+            summary.value, expected,
+            "{} counts the stored row",
+            summary.name
+        );
         // Rows were just created, so exactly one weekday bucket is filled.
         assert!(
-            summary.data.contains(&1),
+            summary.data.contains(&expected),
             "{} must bucket today's row into the current week",
             summary.name
         );
-        assert_eq!(summary.data.iter().sum::<i64>(), 1);
-        assert_eq!(
-            summary.percent, "+100%",
-            "{} grew from zero to one this week",
-            summary.name
-        );
+        assert_eq!(summary.data.iter().sum::<i64>(), expected);
     }
 
     let weekly = state
@@ -263,10 +290,15 @@ async fn summary_cards_reflect_stored_rows_and_week_to_date_series() {
         &weekly[1].map_count,
         &weekly[1].model_count,
         &weekly[1].media_count,
-        &weekly[1].config_count,
     ] {
         assert_eq!(series.len(), 7);
         assert_eq!(series.iter().sum::<i64>(), 1);
     }
+    assert_eq!(weekly[1].config_count.len(), 7);
+    assert_eq!(
+        weekly[1].config_count.iter().sum::<i64>(),
+        1 + SEEDED_CONFIGS,
+        "手工新增的一条 + 迁移预置的两条"
+    );
     assert_eq!(weekly[1].map_count, stats[0].data);
 }

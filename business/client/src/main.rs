@@ -34,6 +34,7 @@ mod agent_relay;
 mod ai_patrol;
 mod dispatch;
 mod mapupload;
+mod media_sync;
 /// 联调用「假本体」：`--robot mock` 时在进程内起一个智航 Pro 网关模拟器
 mod mock_body;
 mod zhpro;
@@ -3005,6 +3006,32 @@ async fn handle_server_message(
                 // 任务置异常、窗口内失败后交 systemd 兜底）
                 if body_reconnect.try_send(()).is_err() {
                     warn!("本体重连请求未入队（已有一次重连在进行中）");
+                }
+                return;
+            }
+
+            // 「同步媒体」只动板子自己的磁盘与上行网络，不碰本体：本体没连（关机 /
+            // 断链）也应该能把已经采好的巡检图传回中台，所以放在本体门禁之前。
+            if command == "同步媒体" {
+                let outer = msg.payload.get("params");
+                let result = media_sync::sync(outer, config).await;
+                send_command_result(out_tx, &msg, command, &result).await;
+                match result {
+                    Ok(note) => info!("指令 {command} 执行: {note}"),
+                    Err(error) => {
+                        warn!("指令 {command} 执行失败: {error}");
+                        let event = DeviceEventPayload {
+                            event_type: "error".to_string(),
+                            message: format!("指令 {command} 执行失败: {error}"),
+                            data: None,
+                        };
+                        send(
+                            out_tx,
+                            "event",
+                            serde_json::to_value(event).unwrap_or_default(),
+                        )
+                        .await;
+                    }
                 }
                 return;
             }

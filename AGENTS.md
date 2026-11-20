@@ -138,6 +138,21 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 `pointIndex` 是「已完成航点数」，混用会让 AI 窗口每 5s 被当成「到达下一个点」关掉**
 （2026-11-17 现场事故，回归测试 `tests/ai_patrol.rs::interval_summary_does_not_kill_the_window`）。
 
+**航点 AI 存证图 → 中台「媒体资源」**（2026-11-20 起）：板端命中时除了写临时存证
+`detect_jobs/<planId>/pt<n>/`（企业微信推完即删），还固定保存 N 帧到媒体归档目录
+（默认 `/media/media-data/picture/<planId>/pt<n>/`，与临时存证**分开**，不参与
+`ai_cleanup`）。目录与帧数在**中台「参数配置」**里配（`media_picture_dir` /
+`media_frames`，迁移 31 预置），链路是：中台读配置 → `ai_start` 下发 `mediaDir` /
+`mediaFrames` → 业务平台 → 设备客户端 → 板端 Agent 写入；中台设备页「同步媒体」
+按钮再沿同一条设备 WS 下发 `pictureDir`/`frames`，客户端扫目录逐张
+`POST /api/media/ingest` → 业务平台转发中台 `POST /api/dogInternal/media/upload`
+（`x-service-token`）→ `dog_media` + 落盘 `<upload_dir>/media/<设备>/<计划>/pt<n>/`，
+**上传成功才删板端文件**，中台按图片 sha256 去重。页面预览走
+`GET /api/dogMedia/{id}/image`（JSON + base64，与地图预览同约定）。中台配置是唯一
+真源（60s 缓存），不要再在板端/客户端各配一份；改这条链路先读
+`business/backpack_dashboard/AGENTS.md` 的「存证目录」一节与
+`DOG.md` §2/§3。
+
 「跑完要不要返航」是**任务属性**（`tasks.end_task` → 载荷 `endTaskMode`，
 `none` / `return_to_start` / `return_to_charge`，不配 = 跟随路线），不是路线属性：
 巡检 `5000 kind=4` 只把原始 `points` 写成本体路径，返程由本体按 `end_task` 自己规划。

@@ -119,12 +119,34 @@ Authorization: Bearer <access_token>
 
 | 接口                    | 方法               | 说明                                                                |
 | ----------------------- | ------------------ | ------------------------------------------------------------------- |
-| `/api/dogMedia/getPage` | GET                | `mediaName`、`mediaType`、`beginTime`、`endTime`、`current`、`size` |
+| `/api/dogMedia/getPage` | GET                | `mediaName`、`mediaType`、`deviceCode`、`planId`、`source`、`beginTime`、`endTime`、`current`、`size` |
 | `/api/dogMedia/getAll`  | GET                | 全量列表                                                            |
 | `/api/dogMedia`         | POST               | 新增，`mediaName` 必填                                              |
 | `/api/dogMedia/{id}`    | GET / PUT / DELETE | 详情 / 修改 / 软删除                                                |
+| `/api/dogMedia/{id}/image` | GET             | 图片内容：`{ image: "data:image/jpeg;base64,...", contentType, size }`；手工登记（无文件）返回 404 |
 
-字段：`mediaName`、`mediaType`、`mediaPath`、`mediaSize`、`remarks`、`createTime`、`updateTime`。
+字段：`mediaName`、`mediaType`、`mediaPath`、`mediaSize`、`remarks`、`createTime`、`updateTime`，
+以及设备回传带上的来源字段 `deviceCode`、`parkCode`、`planId`、`pointIndex`、`capturedAt`、`source`。
+
+### 4.2.1 航点 AI 存证回传（`同步媒体`）
+
+板端每一轮航点 AI 识别会固定保存 N 帧到 `/media/media-data/picture/<计划>/pt<航点>/`，
+中台设备页点「同步媒体」后：
+
+```text
+中台 →（参数配置 media_picture_dir / media_frames）→ 业务平台 → 设备 WS
+  → 客户端逐张 POST {业务平台}/api/media/ingest (file + mediaInfo)
+    → 业务平台转发 POST /api/dogInternal/media/upload（x-service-token）
+      → dog_media + <upload_dir>/media/<设备>/<计划>/pt<n>/<sha256>.<ext>
+        → 上传成功才删板端文件；同一张图（sha256）重复回传只留一条
+```
+
+内部接口（业务平台专用，共享服务令牌 `x-service-token`）：
+
+| 接口 | 方法 | 说明 |
+| ---- | ---- | ---- |
+| `/api/dogInternal/media/config` | GET | `{ pictureDir, frames }`（业务平台组装 `ai_start` 时取，缓存 60s） |
+| `/api/dogInternal/media/upload` | POST | multipart：`file` + `mediaInfo`（`deviceCode`/`planId`/`pointIndex`/`capturedAt`/`source`；`deviceId` 也接受，服务端会统一），返回 `{ created, media }` |
 
 ### 4.3 参数配置 `/api/dogConfig`
 

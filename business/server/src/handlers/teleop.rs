@@ -55,7 +55,7 @@ const BODY_ACTIONS: [(&str, &str); 11] = [
 ];
 
 /// 允许通过 `/command` 下发的业务指令
-const BUSINESS_COMMANDS: [&str; 10] = [
+const BUSINESS_COMMANDS: [&str; 11] = [
     "开始巡检",
     "暂停任务",
     "继续任务",
@@ -69,6 +69,10 @@ const BUSINESS_COMMANDS: [&str; 10] = [
     // 「本体重连」：让设备客户端退出并由 systemd 重建到本体的连接。
     // 它是运维手段（链路/会话半死时用），不改本体任何状态。
     "本体重连",
+    // 「同步媒体」：把板端 `/media/media-data/picture` 里的航点 AI 存证图
+    // 逐张回传中台「媒体资源」（见 handlers::media::ingest_media）。
+    // 参数（`pictureDir` / `frames`）由中台按「参数配置」页组装，这里原样透传给客户端。
+    "同步媒体",
 ];
 
 fn invalid(message: impl Into<String>) -> AppError {

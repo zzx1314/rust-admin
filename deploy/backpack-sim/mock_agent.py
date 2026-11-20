@@ -42,6 +42,8 @@ GET  /api/events            SSE：detect / plan_hit / detect_state / detect_erro
 | `SIM_JOBS_DIR` | `./data/detect_jobs` | 证据图根目录，**要和设备客户端 `ROBODOG_AI_JOBS_DIR` 指同一个** |
 | `SIM_RELAY_RUNNING` | `1` | `/api/relay/status` 是否报「狗前置在推流」 |
 | `SIM_PLAN_HIT_DELAY` | `4.5` | 开窗后多久发 `plan_hit`（真板子实测 4.6s：先连采 3 帧再落盘） |
+| `SIM_MEDIA_DIR` | `./data/media-data/picture` | 媒体归档目录（真板子 `/media/media-data/picture`），「同步媒体」从这里取图 |
+| `SIM_PLAN_SAVE_FRAMES` | `3` | 每个航点写几帧到媒体归档目录（中台 `media_frames` 下发时以中台为准） |
 | `SIM_COUNT_RESULT` | `ok` | 数量任务的结果：`ok` / `mismatch`（少 1 个）/ `none`（一个没找到）/ `random` |
 | `SIM_EXIST_FOUND` | `1` | 存在性任务是否检出；`0` = 一直不命中（用来验证「未检出」告警） |
 | `SIM_LATE_EVIDENCE` | `0` | 设 1 时图**不在 `plan_hit` 里给**，只在 `stop` 时由 `ai_evidence` 补（复现「卡片先发、图晚到」） |
@@ -71,6 +73,12 @@ HOST = os.environ.get("SIM_AGENT_HOST", "0.0.0.0")
 JOBS_DIR = os.path.abspath(
     os.environ.get("SIM_JOBS_DIR", os.path.join(HERE, "data", "detect_jobs"))
 )
+# 媒体归档目录（真板子是 /media/media-data/picture）：中台「同步媒体」从这里取图。
+# 模拟环境默认落在仓库 data/ 下，客户端用 ROBODOG_MEDIA_DIR 指同一处即可。
+MEDIA_DIR = os.path.abspath(
+    os.environ.get("SIM_MEDIA_DIR", os.path.join(HERE, "data", "media-data", "picture"))
+)
+PLAN_SAVE_FRAMES = max(1, min(10, int(os.environ.get("SIM_PLAN_SAVE_FRAMES", "3"))))
 RELAY_RUNNING = os.environ.get("SIM_RELAY_RUNNING", "1") == "1"
 PLAN_HIT_DELAY = float(os.environ.get("SIM_PLAN_HIT_DELAY", "4.5"))
 COUNT_RESULT = os.environ.get("SIM_COUNT_RESULT", "ok").strip().lower()
@@ -308,7 +316,7 @@ def render_jpeg(path, boxes, caption=""):
 
 
 def write_evidence(plan, label, found):
-    """落盘 `<jobs>/<plan_id>/pt<idx>/*.jpg` + `result.json`（真板子的目录布局）。"""
+    """落盘 `<jobs>/<plan_id>/pt<idx>/*.jpg` + `result.json`（真板子的目录布局）"""
     directory = os.path.join(JOBS_DIR, str(plan["plan_id"]), "pt%d" % plan["point_index"])
     os.makedirs(directory, exist_ok=True)
     stamp = int(time.time() * 1000)
@@ -338,7 +346,40 @@ def write_evidence(plan, label, found):
             "evidence": path,
             "ts": time.time(),
         }, handle, ensure_ascii=False, indent=2)
-    return path, boxes
+    media_dir, media_frames = write_media_frames(plan, label, boxes, caption)
+    return path, boxes, media_dir, media_frames
+
+
+def write_media_frames(plan, label, boxes, caption):
+    """再写一份媒体归档：`<MEDIA_DIR>/<plan>/pt<idx>/<cam>_<n>_<ts>.jpg`。
+
+    真板子固定保存 N 帧（中台 `media_frames`），这里照抄布局，好让设备客户端的
+    「同步媒体」指令在模拟环境里也能端到端跑通（上传成功会删掉这些文件）。
+    """
+    root = plan.get("media_dir") or MEDIA_DIR
+    frames = max(1, min(10, int(plan.get("save_frames") or PLAN_SAVE_FRAMES)))
+    directory = os.path.join(os.path.abspath(root), str(plan["plan_id"]),
+                             "pt%d" % plan["point_index"])
+    os.makedirs(directory, exist_ok=True)
+    cam = (STATE.cams[0] if STATE.cams else "dogcam")
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    written = []
+    for seq in range(1, frames + 1):
+        name = "%s_%02d_%s.jpg" % (cam, seq, stamp)
+        render_jpeg(os.path.join(directory, name), boxes,
+                    "%s（第 %d/%d 帧）" % (caption, seq, frames))
+        written.append(name)
+    with open(os.path.join(directory, "result.json"), "w", encoding="utf-8") as handle:
+        json.dump({
+            "type": "plan_media",
+            "plan_id": plan["plan_id"],
+            "point_index": plan["point_index"],
+            "label": label["name"],
+            "media_dir": directory,
+            "media_frames": written,
+            "ts": time.time(),
+        }, handle, ensure_ascii=False, indent=2)
+    return directory, written
 
 
 # ------------------------------------------------------------------ 识别引擎
@@ -379,9 +420,12 @@ def emit_plan_hit(plan, with_evidence):
         "evidence": "",
     }
     if found > 0 and with_evidence:
-        path, boxes = write_evidence(plan, label, found)
+        path, boxes, media_dir, media_frames = write_evidence(plan, label, found)
         event["evidence"] = path
         event["boxes"] = boxes
+        # 媒体归档（中台「同步媒体」从这里取图）
+        event["media_dir"] = media_dir
+        event["media_frames"] = media_frames
     plan["hit"] = dict(event)
     STATE.publish(event)
 
@@ -603,6 +647,9 @@ class Handler(BaseHTTPRequestHandler):
                     "check_type": str(body.get("check_type") or "").lower()
                     or ("count" if body.get("expect_count") else "exist"),
                     "expect_count": body.get("expect_count"),
+                    # 中台参数配置随 ai_start 下发；缺省用模拟的 MEDIA_DIR / 帧数
+                    "media_dir": str(body.get("media_dir") or MEDIA_DIR),
+                    "save_frames": int(body.get("save_frames") or PLAN_SAVE_FRAMES),
                     "started": time.time(),
                     "hit": None,
                 }

@@ -1641,6 +1641,44 @@ mod zentai_service_token {
                 }),
             )
             .route(
+                "/api/dogInternal/media/upload",
+                post(|headers: HeaderMap, mut multipart: Multipart| async move {
+                    assert_eq!(
+                        headers.get("x-service-token").and_then(|v| v.to_str().ok()),
+                        Some(TOKEN)
+                    );
+                    let mut saw_file = false;
+                    let mut info = Value::Null;
+                    while let Some(field) = multipart.next_field().await.unwrap() {
+                        match field.name() {
+                            Some("file") => {
+                                let bytes = field.bytes().await.unwrap();
+                                assert!(
+                                    bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
+                                    "图片原字节应被原样转发"
+                                );
+                                saw_file = true;
+                            }
+                            Some("mediaInfo") => {
+                                let text = field.text().await.unwrap();
+                                info = serde_json::from_str(&text).unwrap();
+                            }
+                            _ => {}
+                        }
+                    }
+                    assert!(saw_file, "必须收到图片文件");
+                    assert_eq!(info["deviceCode"], "RD-001");
+                    assert_eq!(info["deviceId"], "RD-001", "两份设备编号都要补齐");
+                    assert_eq!(info["planId"], "TK-9");
+                    assert_eq!(info["pointIndex"], 2);
+                    axum::Json(serde_json::json!({
+                        "code": 10200,
+                        "msg": "success",
+                        "data": {"created": true, "media": {"id": 7, "mediaName": "RD-001 TK-9 航点2"}},
+                    }))
+                }),
+            )
+            .route(
                 "/api/dogInternal/maps/exists",
                 post(|headers: HeaderMap, body: axum::Json<Value>| async move {
                     assert_eq!(
@@ -1767,6 +1805,125 @@ mod zentai_service_token {
 
         // 全程没有登录换 JWT
         assert_eq!(token_calls.load(Ordering::SeqCst), 0, "不应调用 /api/token");
+    }
+
+    /// 设备客户端回传航点 AI 存证图：业务平台只做校验 + 转发中台内部接口，
+    /// 中台凭证/账号留在服务端（这里断言全程没走 `/api/token`）。
+    #[tokio::test]
+    async fn media_ingest_forwards_to_zentai_internal_upload() {
+        let (base, token_calls) = spawn_fake_zentai().await;
+        let config = service_config(base);
+        let (state, _db) = test_state_with_token(Some(TOKEN)).await;
+        let state = AppState {
+            config: Arc::new(config),
+            ..state
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind api");
+        let addr = listener.local_addr().expect("local addr");
+        let router = build_router(state);
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        let api = format!("http://{addr}");
+
+        let login: Value = reqwest::Client::new()
+            .post(format!("{api}/api/auth/login"))
+            .json(&serde_json::json!({"username": "admin", "password": "admin123"}))
+            .send()
+            .await
+            .expect("login")
+            .json()
+            .await
+            .expect("login json");
+        let token = login["data"]["token"].as_str().expect("token").to_string();
+
+        let info = serde_json::json!({
+            "deviceCode": "RD-001",
+            "planId": "TK-9",
+            "pointIndex": 2,
+            "capturedAt": "2026-11-20 10:00:00",
+            "source": "ai-patrol",
+            "remarks": "dogcam_01.jpg",
+        });
+        let form = reqwest::multipart::Form::new()
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(vec![0xFF, 0xD8, 0xFF, 0x01, 0x02])
+                    .file_name("dogcam_01.jpg")
+                    .mime_str("image/jpeg")
+                    .expect("mime"),
+            )
+            .text("mediaInfo", info.to_string());
+        let response = reqwest::Client::new()
+            .post(format!("{api}/api/media/ingest"))
+            .bearer_auth(&token)
+            .multipart(form)
+            .send()
+            .await
+            .expect("media ingest");
+        assert_eq!(response.status(), 200, "回传应成功");
+        let body: Value = response.json().await.expect("json");
+        assert_eq!(body["data"]["created"], serde_json::json!(true));
+        assert_eq!(body["data"]["media"]["id"], serde_json::json!(7));
+        assert_eq!(
+            token_calls.load(Ordering::SeqCst),
+            0,
+            "媒体回传也不该走账号登录"
+        );
+    }
+
+    /// 扩展名/文件头不是图片直接拒绝：不要把任意文件往中台搬。
+    #[tokio::test]
+    async fn media_ingest_rejects_non_image() {
+        let (base, _token_calls) = spawn_fake_zentai().await;
+        let config = service_config(base);
+        let (state, _db) = test_state_with_token(Some(TOKEN)).await;
+        let state = AppState {
+            config: Arc::new(config),
+            ..state
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind api");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, build_router(state)).await;
+        });
+        let api = format!("http://{addr}");
+        let login: Value = reqwest::Client::new()
+            .post(format!("{api}/api/auth/login"))
+            .json(&serde_json::json!({"username": "admin", "password": "admin123"}))
+            .send()
+            .await
+            .expect("login")
+            .json()
+            .await
+            .expect("login json");
+        let token = login["data"]["token"].as_str().expect("token").to_string();
+
+        let form = reqwest::multipart::Form::new()
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(b"plain text".to_vec())
+                    .file_name("notes.txt")
+                    .mime_str("text/plain")
+                    .expect("mime"),
+            )
+            .text(
+                "mediaInfo",
+                serde_json::json!({"deviceId": "RD-001"}).to_string(),
+            );
+        let response = reqwest::Client::new()
+            .post(format!("{api}/api/media/ingest"))
+            .bearer_auth(&token)
+            .multipart(form)
+            .send()
+            .await
+            .expect("media ingest");
+        assert_eq!(response.status(), 400, "非图片必须拒绝");
     }
 
     /// 中台已删除的地图不能算「已同步」，否则设备端永远不会重传。

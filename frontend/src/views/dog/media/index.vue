@@ -34,7 +34,13 @@ const {
   handleSubmitError,
   handleSubmit,
   cancel,
-  openDia
+  openDia,
+  previewVisible,
+  previewLoading,
+  previewImage,
+  previewTitle,
+  handlePreview,
+  closePreview
 } = useDogMedia();
 </script>
 <template>
@@ -79,6 +85,14 @@ const {
           @page-current-change="handleCurrentChange"
         >
           <template #operation="{ row }">
+            <el-button
+              class="reset-margin"
+              link
+              type="primary"
+              :size="size"
+              @click="handlePreview(row)"
+              >预览</el-button
+            >
             <DogTableActions
               :row="row"
               :size="size"
@@ -99,5 +113,33 @@ const {
       @confirm-error="handleSubmitError"
       @confirm="handleSubmit"
     />
+
+    <!-- 图片预览：内容来自 /api/dogMedia/{id}/image（base64 data URL） -->
+    <el-dialog
+      v-model="previewVisible"
+      :title="previewTitle"
+      width="760px"
+      destroy-on-close
+      @close="closePreview"
+    >
+      <div v-loading="previewLoading" class="media-preview">
+        <img v-if="previewImage" :src="previewImage" alt="媒体预览" />
+      </div>
+    </el-dialog>
   </div>
 </template>
+
+<style scoped>
+.media-preview {
+  min-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.media-preview img {
+  max-width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+}
+</style>

@@ -633,6 +633,35 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 `MAP_UPLOAD_LIMIT`）；axum 默认 2MB，不放宽会在真实回传时直接
 `400 Error parsing multipart/form-data`。
 
+## 航点 AI 存证图回传（「同步媒体」）
+
+板端每一轮航点 AI 识别会固定保存 N 帧到 `/media/media-data/picture/<计划>/pt<航点>/`
+（临时存证 `detect_jobs/` 是另一份，企业微信推完即删）。让图进中台「媒体资源」：
+
+```text
+中台设备页「同步媒体」
+  → 业务平台 push_command（白名单 BUSINESS_COMMANDS，原样透传 params）
+    → 设备 WS：command=同步媒体（不需要本体在线：客户端只读本地磁盘 + 上行）
+      → 客户端 media_sync 扫 <pictureDir>/<plan>/pt<n>/*.jpg
+        → 逐张 POST /api/media/ingest（multipart：file + mediaInfo）
+          → 转发中台 POST /api/dogInternal/media/upload（x-service-token）
+            → dog_media + <upload_dir>/media/<设备>/<计划>/pt<n>/<sha256>.<ext>
+              → 中台媒体资源页（GET /api/dogMedia/{id}/image）
+```
+
+要点：
+
+- **目录/帧数只在中台「参数配置」配**（`media_picture_dir` / `media_frames`）。
+  业务平台在组装 `ai_start` 时通过 `GET /api/dogInternal/media/config` 取一次
+  （60s 缓存，中台不可达就沿用上次值/默认值，**不能**让 AI 停摆），随指令下发；
+  「同步媒体」指令再带同一份配置。两边目录必须一致，否则会传空。
+- **上传成功才删板端文件**：中台按图片 sha256 去重，`created=false`（重复图）也算成功。
+  连续失败 3 张就中止本轮，文件保留，下次再点按钮重试。
+- 单张上限 8MB（`MEDIA_UPLOAD_LIMIT`，axum 默认 2MB 会直接 413/400），只收 JPG/PNG
+  且校验文件头。
+- 「同步媒体」是长任务：`push_command` 只保证「已下发」，真实结果由客户端
+  `command_result` 回执（中台审计里能看到传了几张、删了几张）。
+
 ## 路线数据模型
 
 路线保存在 `routes.route_data`（JSON），结构为：

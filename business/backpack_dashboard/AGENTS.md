@@ -111,9 +111,18 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/root/261113/bac
 - **SSE 事件是外部契约**：`detect` / `detect_clear` / `detect_state` / `detect_error` /
   `plan_hit` / `telemetry` / `button` / `lingsi`。客户端只转 detect 四类，平台 `/api/backpack/events`
   原样透传；新增字段可以，**改/删已有字段要同时改页面与两边测试**。
-- **存证目录布局固定**：`DETECT_JOBS_DIR/<plan_id>/pt<航点下标>/*.jpg` + `result.json`。
-  客户端靠它读证据图（`ROBODOG_AI_JOBS_DIR`）、平台靠 `plan_hit.evidence` 反推根目录。
-  改布局 = 改 `evidence.py`、`client/src/ai_patrol.rs`、`deploy/backpack-sim/mock_agent.py` 三处。
+- **存证目录分两份，别合并**：
+  1. `DETECT_JOBS_DIR/<plan_id>/pt<航点下标>/*.jpg` + `result.json` —— **临时存证**，
+     客户端读它给企业微信配图（`ROBODOG_AI_JOBS_DIR`），推完图由 `ai_cleanup` 删；
+  2. `MEDIA_DATA_DIR/<plan_id>/pt<航点下标>/<cam>_<序号>_<时间戳>.jpg` + `result.json`
+     —— **媒体归档**，给中台「媒体资源」用。命中时固定保存 `save_frames` 帧
+     （取采样窗口里检出数最大的前 N 帧，每张都画框），中台设备页点「同步媒体」
+     后由客户端逐张回传、**传成功才删**。
+  目录/帧数的唯一真源是**中台「参数配置」**（`media_picture_dir` / `media_frames`），
+  随 `ai_start` 的 `media_dir` / `save_frames` 下发；板端 `config.py` 的
+  `MEDIA_DATA_DIR` / `DETECT_PLAN_SAVE_FRAMES` 只是没收到配置时的兜底。
+  改目录布局 = 改 `evidence.py`、`detect.py` 的 `_plan_write_media`、
+  `client/src/{ai_patrol,media_sync}.rs`、`deploy/backpack-sim/mock_agent.py`。
 - **计划状态机分两类任务**：`check_type=exist`（是否检出）/ `count`（数量是否等于
   `expect_count`）。数量不一致、以及「窗口到期一个都没找到」都要 `count_alert=true`；
   `_plan_flush` 要在停识别时把采样中的命中落盘（客户端靠「先停再扫」补图）。

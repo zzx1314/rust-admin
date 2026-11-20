@@ -18,6 +18,15 @@
   <DETECT_JOBS_DIR>/<plan_id>/pt<航点下标>/
       <cam>_<时间戳>.jpg    命中帧（画框）
       result.json           计划 id / 航点 / 数量核对结论 / 证据图路径
+
+媒体归档目录（中台「同步媒体」取图，与 jobs 分开）：
+  <MEDIA_DATA_DIR>/<plan_id>/pt<航点下标>/
+      <cam>_<序号>_<时间戳>.jpg   本次固定保存的 N 帧（都画了框）
+      result.json                 同一份结论描述
+
+为什么要两个目录：`detect_jobs` 是「临时存证」，企业微信推完图就会被客户端删掉
+（`ai_cleanup`）；媒体归档是「要长期留给中台媒体资源」的那一份，删不删由
+「同步媒体」上传成功后的客户端决定。
 """
 import json
 import os
@@ -142,20 +151,39 @@ def job_dir(job_id):
     return os.path.join(config.DETECT_JOBS_DIR, _safe_job_id(job_id))
 
 
-def plan_dir(plan_id, point_index=None):
-    """航点任务的存证目录：<jobs>/<plan_id>/pt<航点下标>/。
-
-    `point_index` 是 `routeData.points` 的 0-based 下标（与业务平台
-    `pointIndex` / 5009 的 `pointIndex` 一致，不 +1）。同一个计划的多个航点
-    各占一个子目录，否则同一计划的 `result.json` 会互相覆盖。
-    """
-    base = os.path.join(config.DETECT_JOBS_DIR, _safe_job_id(plan_id))
+def _point_dir(base, point_index=None):
+    """`<base>/pt<航点下标>`：下标是 0-based（与业务平台 `pointIndex` 一致，不 +1）。"""
     idx = point_index
     try:
         idx = None if idx in (None, "") else int(idx)
     except (TypeError, ValueError):
         idx = None
     return os.path.join(base, "pt%d" % idx) if idx is not None else base
+
+
+def plan_dir(plan_id, point_index=None):
+    """航点任务的**临时**存证目录：<jobs>/<plan_id>/pt<航点下标>/。
+
+    同一个计划的多个航点各占一个子目录，否则同一计划的 `result.json`
+    会互相覆盖。这一份会在企业微信推完图后被 `ai_cleanup` 删掉。
+    """
+    return _point_dir(os.path.join(config.DETECT_JOBS_DIR, _safe_job_id(plan_id)),
+                      point_index)
+
+
+def media_root(root=None):
+    """媒体归档根目录：中台下发的值优先（已校验），否则 config 兜底。"""
+    return os.path.abspath(root or config.MEDIA_DATA_DIR)
+
+
+def media_plan_dir(plan_id, point_index=None, root=None):
+    """媒体归档目录：<MEDIA_DATA_DIR>/<plan_id>/pt<航点下标>/。
+
+    客户端「同步媒体」按同一布局扫描（见 `business/client/src/media_sync.rs`），
+    改这里要同步改它和 `deploy/backpack-sim/mock_agent.py`。
+    """
+    return _point_dir(os.path.join(media_root(root), _safe_job_id(plan_id)),
+                      point_index)
 
 
 def target_dir(plan_id=None, point_index=None, job_id=None):

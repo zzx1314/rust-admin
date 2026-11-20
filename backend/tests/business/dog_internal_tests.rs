@@ -386,3 +386,155 @@ fn sample_package() -> Vec<u8> {
     }
     writer.finish().expect("finish zip").into_inner()
 }
+
+// ---------------------------------------------------------------------------
+// 媒体资源回传：板端 AI 存证图（`/media/media-data/picture/<plan>/pt<n>/*.jpg`）
+// ---------------------------------------------------------------------------
+
+fn jpeg_bytes(payload: u8) -> Vec<u8> {
+    // 服务端只校验文件头（真实 JPG 的 SOI），后面字节随便，够证明「落盘的是原字节」
+    let mut bytes = vec![0xFF, 0xD8, 0xFF];
+    bytes.extend_from_slice(&[payload; 128]);
+    bytes
+}
+
+async fn upload_media(base: &str, info: &Value, file_name: &str, bytes: Vec<u8>) -> Value {
+    let form = reqwest::multipart::Form::new()
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(bytes)
+                .file_name(file_name.to_string())
+                .mime_str("image/jpeg")
+                .expect("mime"),
+        )
+        .text("mediaInfo", info.to_string());
+    let response = reqwest::Client::new()
+        .post(format!("{base}/api/dogInternal/media/upload"))
+        .header("x-service-token", TOKEN)
+        .multipart(form)
+        .send()
+        .await
+        .expect("media upload request");
+    json(response).await
+}
+
+#[tokio::test]
+async fn media_upload_lands_in_dog_media_and_dedupes_by_sha256() {
+    let mut state = test_state(Some(TOKEN)).await;
+    // 落盘目录指到临时目录：默认的 `data/device_uploads` 会把测试图片写进仓库
+    let upload_dir = std::env::temp_dir().join(format!(
+        "zentai-media-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&upload_dir);
+    state.upload_dir = upload_dir.clone();
+    let base = spawn_zentai(state).await;
+
+    let info = json!({
+        "deviceCode": "RD-201",
+        "planId": "TK-9",
+        "pointIndex": 2,
+        "capturedAt": "2026-11-20 10:00:00",
+        "source": "ai-patrol",
+        "remarks": "dogcam_01.jpg",
+    });
+    let body = upload_media(&base, &info, "dogcam_01.jpg", jpeg_bytes(1)).await;
+    assert_eq!(body["code"], json!(10200), "上传应成功：{body}");
+    let data = &body["data"];
+    assert_eq!(data["created"], json!(true));
+    let media = &data["media"];
+    let id = media["id"].as_i64().expect("媒体 id");
+    assert_eq!(media["deviceCode"], "RD-201");
+    assert_eq!(media["planId"], "TK-9");
+    assert_eq!(media["pointIndex"], 2);
+    assert_eq!(media["source"], "ai-patrol");
+    assert_eq!(media["mediaType"], "图片");
+    assert_eq!(media["capturedAt"], "2026-11-20 10:00:00");
+    let relative = media["mediaPath"].as_str().expect("相对路径");
+    assert!(
+        relative.starts_with("media/RD-201/TK-9/pt2/"),
+        "落盘路径应带设备/计划/航点：{relative}"
+    );
+    assert!(
+        !relative.contains("..") && !relative.starts_with('/'),
+        "mediaPath 必须是上传目录下的相对路径：{relative}"
+    );
+    assert!(
+        upload_dir.join(relative).is_file(),
+        "图片应真实落盘：{}",
+        upload_dir.join(relative).display()
+    );
+
+    // 同一张图重复回传（板端重试 / 客户端重连）：复用同一条记录，不刷重复行
+    let again = upload_media(&base, &info, "dogcam_01.jpg", jpeg_bytes(1)).await;
+    assert_eq!(again["data"]["created"], json!(false));
+    assert_eq!(again["data"]["media"]["id"], json!(id));
+
+    let _ = std::fs::remove_dir_all(&upload_dir);
+}
+
+#[tokio::test]
+async fn media_upload_rejects_non_image_payload() {
+    let mut state = test_state(Some(TOKEN)).await;
+    state.upload_dir = std::env::temp_dir().join("zentai-media-reject");
+    let base = spawn_zentai(state).await;
+
+    let info = json!({"deviceCode": "RD-201", "planId": "TK-9", "pointIndex": 0});
+    // 扩展名对、内容不是 JPG：不信任客户端声明的 mime
+    let response = reqwest::Client::new()
+        .post(format!("{base}/api/dogInternal/media/upload"))
+        .header("x-service-token", TOKEN)
+        .multipart(
+            reqwest::multipart::Form::new()
+                .part(
+                    "file",
+                    reqwest::multipart::Part::bytes(b"not a jpeg".to_vec())
+                        .file_name("frame.jpg")
+                        .mime_str("image/jpeg")
+                        .expect("mime"),
+                )
+                .text("mediaInfo", info.to_string()),
+        )
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(response.status(), 400, "内容与扩展名不符应拒绝");
+
+    // 不支持的扩展名同样拒绝
+    let response = reqwest::Client::new()
+        .post(format!("{base}/api/dogInternal/media/upload"))
+        .header("x-service-token", TOKEN)
+        .multipart(
+            reqwest::multipart::Form::new()
+                .part(
+                    "file",
+                    reqwest::multipart::Part::bytes(jpeg_bytes(2))
+                        .file_name("clip.mp4")
+                        .mime_str("video/mp4")
+                        .expect("mime"),
+                )
+                .text("mediaInfo", info.to_string()),
+        )
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(response.status(), 400, "媒体只接受 JPG/PNG");
+}
+
+#[tokio::test]
+async fn media_config_exposes_seeded_capture_settings() {
+    let base = spawn_zentai(test_state(Some(TOKEN)).await).await;
+    let body = reqwest::Client::new()
+        .get(format!("{base}/api/dogInternal/media/config"))
+        .header("x-service-token", TOKEN)
+        .send()
+        .await
+        .expect("request")
+        .json::<Value>()
+        .await
+        .expect("json");
+    assert_eq!(body["code"], json!(10200), "{body}");
+    assert_eq!(body["data"]["pictureDir"], "/media/media-data/picture");
+    assert_eq!(body["data"]["frames"], 3);
+}
