@@ -35,12 +35,10 @@ const {
   handleSubmit,
   cancel,
   openDia,
-  previewVisible,
-  previewLoading,
-  previewImage,
-  previewTitle,
-  handlePreview,
-  closePreview
+  selectedIds,
+  exporting,
+  handleDownload,
+  handleExport
 } = useDogMedia();
 </script>
 <template>
@@ -54,14 +52,25 @@ const {
       @reset="cancel"
     />
     <PureTableBar title="媒体列表" :columns="columns" @refresh="onSearch">
-      <template #buttons
-        ><el-button
+      <template #buttons>
+        <el-button
           type="primary"
           :icon="useRenderIcon(AddFill)"
           @click="openDia('新增媒体', addFormRef)"
           >新增</el-button
-        ></template
-      >
+        >
+        <el-button
+          type="success"
+          plain
+          :loading="exporting"
+          @click="handleExport"
+          >{{
+            selectedIds.length
+              ? `下载选中（${selectedIds.length}）`
+              : "导出筛选结果"
+          }}</el-button
+        >
+      </template>
       <template v-slot="{ size, checkList, dynamicColumns }">
         <pure-table
           border
@@ -90,8 +99,8 @@ const {
               link
               type="primary"
               :size="size"
-              @click="handlePreview(row)"
-              >预览</el-button
+              @click="handleDownload(row)"
+              >下载</el-button
             >
             <DogTableActions
               :row="row"
@@ -113,33 +122,5 @@ const {
       @confirm-error="handleSubmitError"
       @confirm="handleSubmit"
     />
-
-    <!-- 图片预览：内容来自 /api/dogMedia/{id}/image（base64 data URL） -->
-    <el-dialog
-      v-model="previewVisible"
-      :title="previewTitle"
-      width="760px"
-      destroy-on-close
-      @close="closePreview"
-    >
-      <div v-loading="previewLoading" class="media-preview">
-        <img v-if="previewImage" :src="previewImage" alt="媒体预览" />
-      </div>
-    </el-dialog>
   </div>
 </template>
-
-<style scoped>
-.media-preview {
-  min-height: 220px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.media-preview img {
-  max-width: 100%;
-  max-height: 70vh;
-  object-fit: contain;
-}
-</style>

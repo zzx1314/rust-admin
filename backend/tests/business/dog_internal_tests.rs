@@ -769,3 +769,133 @@ async fn media_capture_config_reads_params_and_falls_back_on_garbage() {
     );
     assert_eq!(config.frames, 10, "帧数上限 10");
 }
+
+/// 训练数据下载：单张给原文件，批量给 zip（原图 + manifest.json）。
+#[tokio::test]
+async fn media_download_returns_file_and_export_bundles_manifest() {
+    use x_rust::business::dog::media::domain::{CreateMediaRequest, ExportMediaQuery};
+
+    let mut state = test_state(Some(TOKEN)).await;
+    let upload_dir = std::env::temp_dir().join(format!(
+        "zentai-media-export-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&upload_dir);
+    state.upload_dir = upload_dir.clone();
+    let service = state.dog_media_service.clone();
+    let base = spawn_zentai(state).await;
+
+    let mut ids = Vec::new();
+    for (index, point) in [(1u8, 0i32), (2, 1)] {
+        let info = json!({
+            "deviceCode": "RD-EXPORT",
+            "planId": "TK-EXPORT",
+            "pointIndex": point,
+            "capturedAt": "2026-11-20 13:00:00",
+            "source": "ai-patrol",
+            "remarks": format!("frame-{index}.jpg"),
+        });
+        let body = upload_media(&base, &info, "frame.jpg", jpeg_bytes(index)).await;
+        ids.push(body["data"]["media"]["id"].as_i64().expect("媒体 id"));
+    }
+
+    // 单张下载：拿回原字节 + 可用的下载文件名
+    let (bytes, file_name, content_type) = service
+        .load_file(ids[0], &upload_dir)
+        .await
+        .expect("单张下载");
+    assert_eq!(bytes, jpeg_bytes(1), "应为原图字节");
+    assert_eq!(file_name, format!("media-{}.jpg", ids[0]));
+    assert_eq!(content_type, "image/jpeg");
+
+    // 手工登记且没有文件的记录：不进 zip，只记在 manifest 的 error 里
+    let manual = service
+        .create(CreateMediaRequest {
+            media_name: "手工登记".to_string(),
+            source: Some("manual".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("手工记录");
+
+    // 批量导出（勾选两条 + 一条没有文件的）
+    let export = service
+        .export_zip(
+            ExportMediaQuery {
+                ids: Some(format!("{},{},{}", ids[0], ids[1], manual.id)),
+                ..Default::default()
+            },
+            &upload_dir,
+        )
+        .await
+        .expect("批量导出");
+    assert_eq!(export.count, 2, "两张有文件的应进包");
+    assert_eq!(export.skipped, 1, "没有文件的记 skipped");
+    assert!(
+        export.file_name.starts_with("media-export-") && export.file_name.ends_with(".zip"),
+        "{}",
+        export.file_name
+    );
+
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(export.bytes)).expect("能解包");
+    let names: Vec<String> = (0..archive.len())
+        .map(|index| archive.by_index(index).expect("取条目").name().to_string())
+        .collect();
+    assert_eq!(names.len(), 3, "两张图 + manifest.json");
+    assert!(names.contains(&"manifest.json".to_string()));
+    assert!(
+        names
+            .iter()
+            .filter(|name| name.ends_with(".jpg"))
+            .all(|name| name.starts_with("RD-EXPORT_TK-EXPORT_pt")),
+        "包内名应带设备/计划/航点：{names:?}"
+    );
+    let mut manifest = String::new();
+    {
+        use std::io::Read;
+        archive
+            .by_name("manifest.json")
+            .expect("manifest")
+            .read_to_string(&mut manifest)
+            .expect("读 manifest");
+    }
+    let manifest: Value = serde_json::from_str(&manifest).expect("manifest 是 JSON");
+    assert_eq!(manifest["count"], json!(2));
+    assert_eq!(manifest["skipped"], json!(1));
+    let items = manifest["items"].as_array().expect("items");
+    assert!(
+        items.iter().any(|item| item["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("没有文件路径"))),
+        "缺文件的条目要有 error：{items:?}"
+    );
+
+    // 按筛选条件导出（不传 ids）
+    let by_filter = service
+        .export_zip(
+            ExportMediaQuery {
+                plan_id: Some("TK-EXPORT".to_string()),
+                ..Default::default()
+            },
+            &upload_dir,
+        )
+        .await
+        .expect("按计划导出");
+    assert_eq!(by_filter.count, 2);
+    assert_eq!(by_filter.skipped, 0, "筛选只命中落盘过的行");
+
+    // 什么都没有：明确报错（而不是给一个空包）
+    let empty = service
+        .export_zip(
+            ExportMediaQuery {
+                plan_id: Some("NOT-EXIST".to_string()),
+                ..Default::default()
+            },
+            &upload_dir,
+        )
+        .await;
+    assert!(empty.is_err(), "空结果应报错");
+
+    let _ = std::fs::remove_dir_all(&upload_dir);
+}

@@ -348,10 +348,14 @@ pub fn dog_media_routes(state: AppState) -> Router<AppState> {
                 .put(dog_media_handlers::update_media_handler)
                 .delete(dog_media_handlers::delete_media_handler),
         )
-        // 图片内容（data URL）：与地图预览同一套约定，前端 <img> 直接用
+        // 训练数据下载：单张（attachment）与批量 zip（勾选 ids 或按筛选条件）
         .route(
-            "/dogMedia/{id}/image",
-            get(dog_media_handlers::get_media_image_handler),
+            "/dogMedia/{id}/file",
+            get(dog_media_handlers::download_media_handler),
+        )
+        .route(
+            "/dogMedia/export",
+            get(dog_media_handlers::export_media_handler),
         )
         .layer(from_fn_with_state(state.clone(), require_auth))
 }

@@ -12,6 +12,43 @@ use sea_orm::{
 };
 use std::sync::Arc;
 
+/// 列表与批量下载共用的筛选条件（改一处两边一致）。
+fn filter_condition(query: &MediaPageQuery) -> Condition {
+    let mut cond = Condition::all();
+    if let Some(ref name) = query.media_name {
+        cond = cond.add(MediaColumn::MediaName.contains(name.as_str()));
+    }
+    if let Some(ref mtype) = query.media_type {
+        cond = cond.add(MediaColumn::MediaType.eq(mtype.as_str()));
+    }
+    if let Some(ref device) = query.device_code
+        && !device.trim().is_empty()
+    {
+        cond = cond.add(MediaColumn::DeviceCode.eq(device.trim()));
+    }
+    if let Some(ref plan) = query.plan_id
+        && !plan.trim().is_empty()
+    {
+        cond = cond.add(MediaColumn::PlanId.eq(plan.trim()));
+    }
+    if let Some(ref source) = query.source
+        && !source.trim().is_empty()
+    {
+        cond = cond.add(MediaColumn::Source.eq(source.trim()));
+    }
+    if let Some(ref begin) = query.begin_time
+        && let Some(utc_dt) = parse_beijing_datetime(begin, false)
+    {
+        cond = cond.add(MediaColumn::CreateTime.gte(utc_dt));
+    }
+    if let Some(ref end) = query.end_time
+        && let Some(utc_dt) = parse_beijing_datetime(end, true)
+    {
+        cond = cond.add(MediaColumn::CreateTime.lte(utc_dt));
+    }
+    cond
+}
+
 #[derive(Clone)]
 pub struct SeaOrmDogMediaRepository {
     conn: Arc<DatabaseConnection>,
@@ -107,39 +144,7 @@ impl SeaOrmDogMediaRepository {
         query: &MediaPageQuery,
     ) -> Result<(Vec<Media>, i64), sea_orm::DbErr> {
         let base_query = MediaEntity::find().filter(MediaColumn::IsDeleted.eq(0));
-        let mut cond = Condition::all();
-        if let Some(ref name) = query.media_name {
-            cond = cond.add(MediaColumn::MediaName.contains(name.as_str()));
-        }
-        if let Some(ref mtype) = query.media_type {
-            cond = cond.add(MediaColumn::MediaType.eq(mtype.as_str()));
-        }
-        if let Some(ref device) = query.device_code
-            && !device.trim().is_empty()
-        {
-            cond = cond.add(MediaColumn::DeviceCode.eq(device.trim()));
-        }
-        if let Some(ref plan) = query.plan_id
-            && !plan.trim().is_empty()
-        {
-            cond = cond.add(MediaColumn::PlanId.eq(plan.trim()));
-        }
-        if let Some(ref source) = query.source
-            && !source.trim().is_empty()
-        {
-            cond = cond.add(MediaColumn::Source.eq(source.trim()));
-        }
-
-        if let Some(ref begin) = query.begin_time
-            && let Some(utc_dt) = parse_beijing_datetime(begin, false)
-        {
-            cond = cond.add(MediaColumn::CreateTime.gte(utc_dt));
-        }
-        if let Some(ref end) = query.end_time
-            && let Some(utc_dt) = parse_beijing_datetime(end, true)
-        {
-            cond = cond.add(MediaColumn::CreateTime.lte(utc_dt));
-        }
+        let cond = filter_condition(query);
 
         let total = base_query
             .clone()
@@ -159,6 +164,28 @@ impl SeaOrmDogMediaRepository {
             .await?;
 
         Ok((records, total as i64))
+    }
+
+    /// 批量下载用：按 `ids`（页面勾选）或筛选条件取记录，最多 `limit` 条。
+    ///
+    /// 不做分页偏移，按 id 升序 —— 导出的包内顺序稳定，便于训练数据对账。
+    pub async fn find_for_export(
+        &self,
+        query: &MediaPageQuery,
+        ids: &[i64],
+        limit: i64,
+    ) -> Result<Vec<Media>, sea_orm::DbErr> {
+        let mut statement = MediaEntity::find().filter(MediaColumn::IsDeleted.eq(0));
+        statement = if ids.is_empty() {
+            statement.filter(filter_condition(query))
+        } else {
+            statement.filter(MediaColumn::Id.is_in(ids.iter().copied()))
+        };
+        statement
+            .order_by_asc(MediaColumn::Id)
+            .limit(limit.max(1) as u64)
+            .all(&*self.conn)
+            .await
     }
 
     pub async fn update(

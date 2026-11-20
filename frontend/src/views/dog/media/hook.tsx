@@ -7,7 +7,8 @@ import {
   dogMediaPage,
   dogMediaUpdate,
   dogMediaDelete,
-  dogMediaImage
+  dogMediaDownload,
+  dogMediaExport
 } from "@/api/dogMedia";
 import { CREATE_TIME_FIELDS, type DogSearchField } from "../components/search";
 import { SUCCESS } from "@/api/base";
@@ -87,29 +88,51 @@ export function useDogMedia() {
     endTime: ""
   });
 
-  // 预览：图片走 /api/dogMedia/{id}/image（JSON + base64 data URL），
-  // 手工登记的历史记录没有落盘文件，接口 404，这里只提示不挡操作。
-  const previewVisible = ref(false);
-  const previewLoading = ref(false);
-  const previewImage = ref("");
-  const previewTitle = ref("");
-  async function handlePreview(row) {
-    previewVisible.value = true;
-    previewLoading.value = true;
-    previewImage.value = "";
-    previewTitle.value = `${row.mediaName}（${MEDIA_SOURCE_LABEL[row.source] ?? "手工上传"}）`;
-    const { code, data, msg } = await dogMediaImage(row.id);
-    if (code === SUCCESS && data?.image) {
-      previewImage.value = data.image;
-    } else {
-      message(msg || "这张记录没有可预览的图片文件", { type: "warning" });
-      previewVisible.value = false;
+  // 这些图是训练数据：页面只提供「下载」，不做逐张预览。
+  // 单张走 /api/dogMedia/{id}/file；批量走 /api/dogMedia/export（勾选优先，
+  // 否则按当前筛选条件），服务端打包成 zip（原图 + manifest.json）。
+  const selectedIds = ref<number[]>([]);
+  const exporting = ref(false);
+  async function handleDownload(row) {
+    try {
+      await dogMediaDownload(row.id);
+    } catch (error) {
+      message(
+        `下载失败：${(error as any)?.message ?? "该记录可能没有落盘文件"}`,
+        { type: "error" }
+      );
     }
-    previewLoading.value = false;
   }
-  function closePreview() {
-    previewVisible.value = false;
-    previewImage.value = "";
+  async function handleExport() {
+    if (exporting.value) return;
+    exporting.value = true;
+    try {
+      const params =
+        selectedIds.value.length > 0
+          ? { ids: selectedIds.value.join(",") }
+          : {
+              mediaName: queryForm.value.mediaName,
+              mediaType: queryForm.value.mediaType,
+              deviceCode: queryForm.value.deviceCode,
+              planId: queryForm.value.planId,
+              source: queryForm.value.source,
+              beginTime: queryForm.value.beginTime,
+              endTime: queryForm.value.endTime
+            };
+      await dogMediaExport(params);
+      message(
+        selectedIds.value.length > 0
+          ? `已导出选中的 ${selectedIds.value.length} 条`
+          : "已按当前筛选条件导出（单次最多 200 张 / 100MB）",
+        { type: "success" }
+      );
+    } catch (error) {
+      message(`导出失败：${(error as any)?.message ?? "没有符合条件的文件"}`, {
+        type: "error"
+      });
+    } finally {
+      exporting.value = false;
+    }
   }
   const dataList = ref([]);
   const loading = ref(true);
@@ -145,7 +168,9 @@ export function useDogMedia() {
     pagination.currentPage = val;
     onSearch();
   }
-  function handleSelectionChange(_val) {}
+  function handleSelectionChange(rows) {
+    selectedIds.value = (rows ?? []).map((row: any) => Number(row.id));
+  }
   const handleSubmitError = (err: any) => {
     console.log(err);
   };
@@ -225,11 +250,9 @@ export function useDogMedia() {
     handleSubmitError,
     cancel,
     openDia,
-    previewVisible,
-    previewLoading,
-    previewImage,
-    previewTitle,
-    handlePreview,
-    closePreview
+    selectedIds,
+    exporting,
+    handleDownload,
+    handleExport
   };
 }

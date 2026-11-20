@@ -123,7 +123,8 @@ Authorization: Bearer <access_token>
 | `/api/dogMedia/getAll`  | GET                | 全量列表                                                            |
 | `/api/dogMedia`         | POST               | 新增，`mediaName` 必填                                              |
 | `/api/dogMedia/{id}`    | GET / PUT / DELETE | 详情 / 修改 / 软删除                                                |
-| `/api/dogMedia/{id}/image` | GET             | 图片内容：`{ image: "data:image/jpeg;base64,...", contentType, size }`；手工登记（无文件）返回 404 |
+| `/api/dogMedia/{id}/file`  | GET             | 下载单张原图（`attachment`，`media-<id>.jpg`）；手工登记（无文件）返回 404 |
+| `/api/dogMedia/export`     | GET             | 批量下载 zip：`ids=1,2,3`（勾选优先）或 `deviceCode`/`planId`/`source`/`mediaName`/`beginTime`/`endTime`/`size`；包内是原图 + `manifest.json`；上限 200 张 / 100MB |
 
 字段：`mediaName`、`mediaType`、`mediaPath`、`mediaSize`、`remarks`、`createTime`、`updateTime`，
 以及设备回传带上的来源字段 `deviceCode`、`parkCode`、`planId`、`pointIndex`、`capturedAt`、`source`。

@@ -1,12 +1,15 @@
 use crate::api::AppState;
 use crate::business::dog::media::domain::{
-    CreateMediaRequest, MediaImageVO, MediaPageQuery, MediaVO, UpdateMediaRequest,
+    CreateMediaRequest, ExportMediaQuery, MediaPageQuery, MediaVO, UpdateMediaRequest,
 };
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
 use axum::{
     Json,
+    body::Body,
     extract::{Path, Query, State},
+    http::{HeaderValue, header},
+    response::Response,
 };
 
 #[derive(serde::Deserialize)]
@@ -67,17 +70,60 @@ pub async fn delete_media_handler(
     Ok(Json(ApiResponse::ok(())))
 }
 
-/// `GET /api/dogMedia/{id}/image` — 图片内容（data URL）。
+/// `GET /api/dogMedia/{id}/file` — 下载单张图片（原始字节，`attachment`）。
 ///
-/// 与 `/api/dogMap/{id}/image` 同一套约定：返回 JSON + base64，前端 `<img>` 直接用。
-/// 手工登记（只有 `mediaPath` 文本、没有落盘文件）的记录返回 404，页面据此收起预览。
-pub async fn get_media_image_handler(
+/// 这些图是训练数据，页面只做下载、不做逐张预览；手工登记的记录没有落盘文件，
+/// 返回 404。
+pub async fn download_media_handler(
     State(state): State<AppState>,
     Path(params): Path<IdParam>,
-) -> Result<Json<ApiResponse<MediaImageVO>>, AppError> {
-    let image = state
+) -> Result<Response, AppError> {
+    let (bytes, file_name, content_type) = state
         .dog_media_service
-        .load_image(params.id, &state.upload_dir)
+        .load_file(params.id, &state.upload_dir)
         .await?;
-    Ok(Json(ApiResponse::ok(image)))
+    Ok(attachment(bytes, &file_name, &content_type))
+}
+
+/// `GET /api/dogMedia/export` — 批量下载：按勾选 `ids` 或筛选条件打包成 zip。
+///
+/// 包内是原图 + `manifest.json`（每张图的计划/航点/采集时间等元数据），
+/// 直接喂训练流程；单次上限 200 张 / 100MB，再多请按计划或时间分批。
+pub async fn export_media_handler(
+    State(state): State<AppState>,
+    Query(query): Query<ExportMediaQuery>,
+) -> Result<Response, AppError> {
+    let export = state
+        .dog_media_service
+        .export_zip(query, &state.upload_dir)
+        .await?;
+    if export.count == 0 {
+        return Err(AppError::NotFound(format!(
+            "符合条件的 {} 条记录都没有落盘文件（手工登记的行没有图片）",
+            export.skipped
+        )));
+    }
+    Ok(attachment(
+        export.bytes,
+        &export.file_name,
+        "application/zip",
+    ))
+}
+
+/// 附件响应：`Content-Disposition` 只用 ASCII 文件名（中文名会被浏览器截断）。
+fn attachment(bytes: Vec<u8>, file_name: &str, content_type: &str) -> Response {
+    let mut response = Response::new(Body::from(bytes));
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(content_type)
+            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+    );
+    let disposition = format!("attachment; filename=\"{file_name}\"");
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&disposition)
+            .unwrap_or_else(|_| HeaderValue::from_static("attachment")),
+    );
+    response
 }

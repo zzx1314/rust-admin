@@ -647,7 +647,7 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
           → 转发中台 POST /api/dogInternal/media/upload（x-service-token）
             → 中台解包，**一张一条** dog_media + <upload_dir>/media/<设备>/<计划>/pt<n>/<sha256>.<ext>
               → 回 results[]，客户端只删 ok 的条目
-                → 中台媒体资源页（GET /api/dogMedia/{id}/image）
+                → 中台媒体资源页（下载：GET /api/dogMedia/{id}/file，批量 /export）
 ```
 
 压缩包规则：`Stored`（JPEG 已压缩，再 deflate 只烧板子 CPU）；包内名是纯 ASCII

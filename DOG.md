@@ -61,7 +61,8 @@ PUT    /api/<module>/{id}           修改
 DELETE /api/<module>/{id}           软删除
 POST   /api/dogMap/upload           上传 .zip 地图包（multipart：file + mapInfo）
 GET    /api/dogMap/{id}/image       地图栅格 PNG + 分辨率 / 原点
-GET    /api/dogMedia/{id}/image     媒体图片内容（data URL）+ 类型 / 大小（手工登记的行返回 404）
+GET    /api/dogMedia/{id}/file      下载单张原图（attachment；手工登记的行返回 404）
+GET    /api/dogMedia/export         批量下载 zip（ids 或筛选条件；原图 + manifest.json；上限 200 张 / 100MB）
 POST   /api/dogMap/{id}/edit        橡皮擦：按像素笔画改写包内 model.pgm 噪点
 POST   /api/dogMap/{id}/push        把编辑后的地图下发到狗体（本体）并重新载图
 POST   /api/dogMap/{id}/publish     发布地图版本（记录发布时间）

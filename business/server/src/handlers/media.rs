@@ -7,7 +7,7 @@
 //!   └─ 中台设备页「同步媒体」→ 业务平台 → 设备 WS（command=同步媒体）
 //!        └─ 客户端读图 → POST /api/media/ingest（本接口）
 //!             └─ 转发中台 POST /api/dogInternal/media/upload → dog_media
-//!                  └─ 中台「媒体资源」页展示（GET /api/dogMedia/{id}/image）
+//!                  └─ 中台「媒体资源」页下载（/api/dogMedia/{id}/file、/export）
 //! ```
 //!
 //! 请求为 multipart，`file` 两种形态都支持：

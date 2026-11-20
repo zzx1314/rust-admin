@@ -65,6 +65,26 @@ impl MediaPageQuery {
     }
 }
 
+/// 批量下载（训练数据）的筛选条件。
+///
+/// 支持两种用法，优先级：`ids`（页面勾选）> 其余筛选项（按条件导出，便于
+/// 「按巡检计划把这一轮的全部帧打包下载」）。`ids` 用逗号分隔：
+/// `?ids=1,2,3`。
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExportMediaQuery {
+    pub ids: Option<String>,
+    pub media_name: Option<String>,
+    pub media_type: Option<String>,
+    pub device_code: Option<String>,
+    pub plan_id: Option<String>,
+    pub source: Option<String>,
+    pub begin_time: Option<String>,
+    pub end_time: Option<String>,
+    /// 未给 `ids` 时的条数上限（默认 200，最大 200）
+    pub size: Option<i64>,
+}
+
 /// 设备回传一张图片时的描述（业务平台 `/api/media/ingest` 与中台
 /// `/api/dogInternal/media/upload` 共用同一份 JSON）。
 ///
@@ -155,20 +175,6 @@ impl From<DogMedia> for MediaVO {
             update_time: m.update_time.map(format_datetime),
         }
     }
-}
-
-/// `GET /api/dogMedia/{id}/image` — 图片内容（data URL）、类型与大小。
-///
-/// 和地图预览（`/api/dogMap/{id}/image`）同一套约定：返回 JSON + base64，
-/// 前端 `<img>` 直接用，不必处理二进制流与鉴权头。
-#[derive(Debug, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct MediaImageVO {
-    pub id: i64,
-    pub media_name: String,
-    pub content_type: String,
-    pub size: i64,
-    pub image: String,
 }
 
 impl CreateMediaRequest {
