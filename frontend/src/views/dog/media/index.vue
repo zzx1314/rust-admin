@@ -122,8 +122,7 @@ const {
                 type="primary"
                 :size="size"
                 :icon="useRenderIcon(More)"
-                >更多</el-button
-              >
+              />
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item command="download"
