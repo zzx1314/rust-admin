@@ -48,6 +48,14 @@
 //! 会**永远报不出来**（2026-11-18 办公室巡检「垃圾桶溢出」漏报，pt1 停 65 s、窗口 68 s）。
 //! 被任务结束 / 新航点顶替且**没停满** `dwell` 时才不记账（狗还没看够）。
 //!
+//! 但「看够了」不等于「现在就能下结论」：客户端模式的结论比「已离开航点」晚一步
+//! （`ai_stop` → 板端 `_plan_flush` 落盘 → 扫盘/读图 → `ai_detect` / `ai_alert` /
+//! `ai_end`）。所以关窗不再当场结算，而是把窗口标成 `closing` 留在 `active` 里，
+//! 等客户端 `ai_end` 或最多 [`CLOSE_GRACE`] 秒（见 [`AiPatrol::close_client`]）。
+//! 2026-11-20 13:38:03（TK-1112-11 PT2）就是没等：平台写了「检查 2 个，实际检出 0 个」，
+//! 板端 `result.json` 却是 `found_count: 1`，客户端 0.6 s 后到的 `ai_alert` + 证据图
+//! 还被当成失效窗口丢掉。
+//!
 //! 窗口时长 = `dwell.max(4) + 8` 秒，下限 10 s（Agent 加载模型要 1~3 s，太短会
 //! 「还没开始识别狗就走了」），上限 `[backpack] ai_window_max_secs`（默认 300 s，与
 //! 路线停留上限一致）——**停多久就识别多久**，不再把长停留截断成 30 s。
@@ -107,6 +115,16 @@ static WINDOW_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 /// 已关窗口的留痕保留时长 / 条数：给迟到的 `ai_evidence` 找「该归到哪条告警」用。
 const RECENT_WINDOW_TTL: Duration = Duration::from_secs(30 * 60);
 const RECENT_WINDOW_KEEP: usize = 32;
+/// 客户端模式关窗后的宽限期（秒）：见 [`AiPatrol::close_client`]。
+///
+/// 平台收到「已离开航点」时**不能立刻**判「一个都没找到」：客户端的结论天然比它晚
+/// ——停识别 → 板端 `_plan_flush` 把采样中的命中落盘 → 扫盘/读图 → `ai_detect` /
+/// `ai_alert` → `ai_end`。2026-11-20 13:38:03 现场（TK-1112-11 PT2）就是在这条缝里丢的：
+/// 平台 03.908 写下「检查 2 个，实际检出 0 个」，板端 `result.json` 其实是
+/// `found_count: 1`，客户端 04.506 才把 `ai_alert` + 证据图送上来，被当成失效窗口丢掉。
+/// 所以先下发 `ai_stop`、把窗口留在 `active` 里等客户端说完（最多这么久），到点还没
+/// 回话才按已上报的检出结算。
+const CLOSE_GRACE: Duration = Duration::from_secs(12);
 
 /// 到点 AI 识别的进程级状态（Agent 单路推理 → 窗口也只能有一个）。
 static GLOBAL: LazyLock<AiPatrol> = LazyLock::new(AiPatrol::new);
@@ -139,6 +157,13 @@ struct Window {
     alerted: Arc<AtomicBool>,
     /// 告警 / 任务事件需要的上下文（任务名、园区、航点名等）
     cfg: WindowConfig,
+    /// 已经下发 `ai_stop`、正等客户端把本窗口的结论说完（见 [`CLOSE_GRACE`]）。
+    ///
+    /// `Some(原因)` = 窗口已经「下班」（不再对外开窗、也不会再开新的一轮），但还留在
+    /// [`AiPatrol::active`] 里十几秒：客户端收尾时回来的 `ai_detect` / `ai_alert` /
+    /// `ai_evidence` / `ai_end` 必须还能归到它身上，否则「实际检出 0 个」这种假结论
+    /// 和证据图一起丢（2026-11-20 13:38 现场）。
+    closing: Option<String>,
 }
 
 impl Window {
@@ -262,6 +287,8 @@ impl AiPatrol {
                     "cam": window.cam,
                     "startedAt": window.started_at,
                     "windowSecs": window.cfg.secs,
+                    // 收尾宽限期里窗口还「在」，但已经不再接受新的一轮（见 `CLOSE_GRACE`）
+                    "closing": window.closing,
                     "hits": hits.iter().map(|h| json!({
                         "at": h.at, "label": h.label, "conf": h.conf
                     })).collect::<Vec<_>>(),
@@ -405,6 +432,7 @@ impl AiPatrol {
                 hits: hits.clone(),
                 alerted: alerted.clone(),
                 cfg: config.clone(),
+                closing: None,
             });
         }
 
@@ -416,13 +444,17 @@ impl AiPatrol {
 
     /// 关窗并（客户端代调模式下）通知设备：任务终态 / 暂停 / 走到没有 AI 动作的航点。
     ///
-    /// 服务端直连模式由窗口任务自己收尾（它知道我停的是不是别人的识别）；
-    /// 客户端模式必须显式下发 `ai_stop`，否则板端 Agent 会一直跑下去占着 NPU。
+    /// 服务端直连模式由窗口任务自己收尾（它知道我停的是不是别人的识别），这里补一次
+    /// 「没找到」的记账：狗停满 `dwell` 之后离开时，平台会先收到「已离开航点」而把
+    /// 窗口摘掉，客户端随后的 `ai_end` 已经找不到窗口，只认「到期 / `expired=true`」的
+    /// 地方根本收不到结论（见 [`settle_no_hit`]）。
     ///
-    /// 两种模式都要在这里补一次「没找到」的记账：狗停满 `dwell` 之后离开时，
-    /// 平台会先收到「已离开航点」而把窗口摘掉，客户端随后的 `ai_end` 已经找不到窗口，
-    /// 只认「到期 / `expired=true`」的地方根本收不到结论（见 [`settle_no_hit`]）。
+    /// 客户端模式**不**立刻摘窗口：见 [`Self::close_client`]。
     async fn close(&self, state: &AppState, device_code: &str, reason: &str) {
+        if source_for(&state.config) == PointAiSource::Client {
+            self.close_client(state, device_code, reason).await;
+            return;
+        }
         // 窗口是进程级单例：别的设备的终态/进度不应该把当前设备的窗口关掉
         let taken = {
             let mut guard = self.active.lock().await;
@@ -439,13 +471,42 @@ impl AiPatrol {
             window.task_code, window.point_index, window.point_name
         );
         window.stop.notify_one();
-        let hit_seen = !window.hits.lock().await.is_empty();
-        let enough = watched_enough(&window.cfg, window.watched());
-        settle_no_hit(state, &window.cfg, hit_seen, &window.alerted, enough).await;
-        self.remember(window).await;
-        if source_for(&state.config) != PointAiSource::Client {
-            return;
-        }
+        self.settle_and_remember(state, window).await;
+    }
+
+    /// 客户端模式的关窗：**先让客户端把话说完**。
+    ///
+    /// 下发 `ai_stop` 之后，客户端的收尾（停识别 → 板端 `_plan_flush` 落盘 → 扫盘 →
+    /// `ai_detect` / `ai_alert` / `ai_end`）才真正开始，本窗口的结论（含证据图）就在
+    /// 这几百毫秒到几秒里回来。以前这里立刻 `settle_no_hit` 判「0 ≠ N」，那条真结论
+    /// 回来时窗口已经没了，被当成失效上报直接丢弃：群里既写错数量、也丢了命中帧。
+    ///
+    /// 所以：窗口标成 `closing` 留在 `active` 里（迟到的上报还能归到它身上），超时
+    /// `CLOSE_GRACE` 或客户端 `ai_end` 到了才结算（后者在 [`Self::on_client_end`]）。
+    async fn close_client(&self, state: &AppState, device_code: &str, reason: &str) {
+        let stop = {
+            let mut guard = self.active.lock().await;
+            let Some(window) = guard.as_mut() else {
+                return;
+            };
+            // 窗口是进程级单例：别的设备的终态/进度不应该把当前设备的窗口关掉
+            if window.device_code != device_code {
+                return;
+            }
+            if window.closing.is_some() {
+                // 已经收尾过（先「已离开航点」、后任务终态）：`ai_stop` 也发过了
+                return;
+            }
+            window.closing = Some(reason.to_string());
+            info!(
+                "航点 AI 识别窗口关闭（{reason}）：任务 {} 航点 {}「{}」，等客户端回报结论（最多 {}s）",
+                window.task_code,
+                window.point_index,
+                window.point_name,
+                CLOSE_GRACE.as_secs()
+            );
+            window.stop.clone()
+        };
         let _ = crate::gateway::send_message_to_device(
             &state.device_connections,
             device_code,
@@ -453,6 +514,17 @@ impl AiPatrol {
             json!({ "reason": reason }),
         )
         .await;
+        spawn_close_grace(state.clone(), stop);
+    }
+
+    /// 结算一个窗口（「一个都没找到」记账）+ 留痕。
+    ///
+    /// 关窗、宽限期到点、被新航点顶替都走这里：判定规则只有 [`settle_no_hit`] 一份。
+    async fn settle_and_remember(&self, state: &AppState, window: Window) {
+        let hit_seen = !window.hits.lock().await.is_empty();
+        let enough = watched_enough(&window.cfg, window.watched());
+        settle_no_hit(state, &window.cfg, hit_seen, &window.alerted, enough).await;
+        self.remember(window).await;
     }
 
     /// 把一个刚关掉的窗口记到 `recent` 里（只留 30 分钟 / 最近 32 个）。
@@ -614,11 +686,9 @@ impl AiPatrol {
         let stop = Arc::new(Notify::new());
         let hits = Arc::new(Mutex::new(Vec::new()));
         let alerted = Arc::new(AtomicBool::new(false));
-        {
+        let previous = {
             let mut guard = self.active.lock().await;
-            if let Some(previous) = guard.take() {
-                previous.stop.notify_one();
-            }
+            let previous = guard.take();
             *guard = Some(Window {
                 window_id: window_id.clone(),
                 device_code: device_code.to_string(),
@@ -635,7 +705,17 @@ impl AiPatrol {
                 hits,
                 alerted,
                 cfg: cfg.clone(),
+                closing: None,
             });
+            previous
+        };
+        if let Some(previous) = previous {
+            previous.stop.notify_one();
+            if previous.closing.is_some() {
+                // 上一个点还在收尾宽限里（新航点已经到点，客户端来不及回结论）：
+                // 先把它结算掉，不能因为被顶替就把「有/没找到」吞掉。
+                self.settle_and_remember(state, previous).await;
+            }
         }
 
         let scene_name = task_name.clone();
@@ -952,6 +1032,12 @@ fn spawn_client_window_timeout(
             "航点 AI 识别：客户端窗口 {window_id} 超过 {}s 未回报结束，服务端清掉窗口态",
             secs.saturating_add(10)
         );
+        if window.closing.is_some() {
+            // 已经在收尾宽限里（平台先下了 `ai_stop`，看门狗却先到点）：
+            // 按已上报的检出结算，「没找到」不能因为客户端没回话就永远丢。
+            ai.settle_and_remember(&state, window).await;
+            return;
+        }
         // 这里**不**记「没找到」：客户端的结论（有没有检出 / 停够了没有）全在它手里，
         // 它一句话都没回来说明链路己经断了，推“未检出”只会是误报。
         let content = format!("AI 识别窗口超时未收到客户端结束回报（已上报 {hits} 类目标）");
@@ -960,6 +1046,37 @@ fn spawn_client_window_timeout(
         if let Err(error) = insert_task_event(&state.db, &cfg, &now(), &content).await {
             warn!("AI 识别：写任务事件失败: {error}");
         }
+    });
+}
+
+/// 关窗后的收尾看门狗：等客户端把本窗口的结论说完，最多 [`CLOSE_GRACE`] 秒。
+///
+/// 正常路径是客户端 `ai_end` 先到（[`AiPatrol::on_client_end`] 摘窗口并结算），这里
+/// 什么也不做。只有客户端进程崩了 / 业务 WS 断了才由这里按已上报的检出结算 ——
+/// 「看满了却没找到」不能因为一条永远不来的 `ai_end` 就不告警。
+fn spawn_close_grace(state: AppState, stop: Arc<Notify>) {
+    tokio::spawn(async move {
+        tokio::time::sleep(CLOSE_GRACE).await;
+        let ai = global();
+        let taken = {
+            let mut guard = ai.active.lock().await;
+            match guard.as_ref() {
+                Some(window) if Arc::ptr_eq(&window.stop, &stop) && window.closing.is_some() => {
+                    guard.take()
+                }
+                _ => None,
+            }
+        };
+        let Some(window) = taken else {
+            return;
+        };
+        let hits = window.hits.lock().await.len();
+        warn!(
+            "航点 AI 识别：窗口 {} 收尾 {}s 内没等到客户端回报结束，按已上报的 {hits} 类目标结算",
+            window.window_id,
+            CLOSE_GRACE.as_secs()
+        );
+        ai.settle_and_remember(&state, window).await;
     });
 }
 

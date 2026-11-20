@@ -138,6 +138,14 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 `pointIndex` 是「已完成航点数」，混用会让 AI 窗口每 5s 被当成「到达下一个点」关掉**
 （2026-11-17 现场事故，回归测试 `tests/ai_patrol.rs::interval_summary_does_not_kill_the_window`）。
 
+**关窗不等于立刻下结论**：平台收到「已离开航点」时只下发 `ai_stop`、把窗口标成 `closing`
+留在 `active` 里，等客户端把本点的 `ai_detect` / `ai_alert` / `ai_end` 说完（最多
+`CLOSE_GRACE` = 12 s）。客户端收尾天然比关窗晚（停识别 → 板端 `_plan_flush` 落盘 →
+扫盘/读图 → 上报），以前当场 `settle_no_hit` 会把「板端后到的检出 1 个」写成「实际检出 0 个」
+并把证据图一起丢掉（2026-11-20 13:38 `TK-1112-11` PT2 现场，板端 `result.json` 是
+`found_count: 1`）。改这段先看 `ai_patrol::close_client` / `spawn_close_grace`，回归
+`ai_client_mode::late_count_alert_after_leaving_point_is_not_recorded_as_zero`。
+
 **航点 AI 存证图 → 中台「媒体资源」**（2026-11-20 起）：板端命中时除了写临时存证
 `detect_jobs/<planId>/pt<n>/`（企业微信推完即删），还固定保存 N 帧到媒体归档目录
 （默认 `/media/media-data/picture/<planId>/pt<n>/`，**原始帧、不画框**——中台当训练

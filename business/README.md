@@ -1420,6 +1420,9 @@ AI 可对除红外外的五路开启，画框方式二选一：
   否则一天几十轮巡检很快把板子存储写满；推送失败的保留，见下面的「证据图」）。
   窗口时长跟着该点的「停留时长」走（停留 + 8 s，最短 10 s、上限 `ai_window_max_secs`
   默认 300 s），**离开航点立即结束**——所以 `dwell=100` 的点会识别满整段停留，不再只覆盖前 30 s。
+  但「立刻结束」只是不再识别：平台会再等客户端 12 s 把本点的结论说完（`ai_detect` /
+  `ai_alert` / `ai_end`，窗口标成 `closing`），否则板端后到的「检出 1 个」会被平台记成
+  「实际检出 0 个」、证据图一起丢（2026-11-20 13:38 现场）。
   链路与排查见 [`docs/official-app-parity.md`](docs/official-app-parity.md) §5.6、
   [`docs/backpack-video-integration.md`](docs/backpack-video-integration.md)。
 - **正式环境的航点 AI 由设备客户端代调**（`[backpack] point_ai` / `ROBODOG_POINT_AI`）：

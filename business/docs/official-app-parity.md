@@ -357,6 +357,16 @@ B. client（正式环境：平台在公网、Agent 只在内网，服务端连�
 `ai_client_mode::leaving_the_point_after_full_dwell_reports_missing` 与
 `leaving_the_point_early_stays_quiet`。
 
+**结论要等客户端说完话**（2026-11-20 加）：「看够了」不等于「现在就能下结论」——客户端
+收到 `ai_stop` 才开始收尾（停识别 → 板端 `_plan_flush` 落盘 → 扫盘/读图 → `ai_detect` /
+`ai_alert` / `ai_end`），天然比「已离开航点」晚几百毫秒到几秒。所以关窗不再当场结算：窗口
+标成 `closing` 留在 `active` 里，等客户端 `ai_end` 或最多 `CLOSE_GRACE`（12 s）才落结论。
+否则那条真结论回来时窗口已经没了、被当成失效上报丢掉：2026-11-20 13:38 现场
+`TK-1112-11` PT2 就记成了「检查 2 个，实际检出 0 个」，而板端 `result.json` 写的是
+`found_count: 1`（命中帧 0.91，图也没进群）。代码：`ai_patrol::close_client` /
+`spawn_close_grace`，回归用例
+`ai_client_mode::late_count_alert_after_leaving_point_is_not_recorded_as_zero`。
+
 **检出告警的证据图**（2026-11-18 加，同日 18:54 修复「只有卡片没图」）：企业微信那条卡片后面跟一张命中帧。
 **图不是检出那一刻就有的**：板端 `_plan_frame` 要连采 `DETECT_PLAN_COUNT_SAMPLE`（默认 3）帧命中、
 画框存证，才发带 `evidence` 的 `plan_hit`（现场实测比第一帧检出晚 **4.6s**）。所以客户端把命中

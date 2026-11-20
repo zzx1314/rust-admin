@@ -597,7 +597,11 @@ async fn terminal_task_sends_ai_stop_to_device() {
     ws.send(Message::Text(ai_point(&task_code, false).to_string()))
         .await
         .expect("发送 ai_point 失败");
-    next_msg(&mut ws, "ai_start").await;
+    let start = next_msg(&mut ws, "ai_start").await;
+    let window_id = start["payload"]["windowId"]
+        .as_str()
+        .expect("ai_start 必须带 windowId")
+        .to_string();
 
     ws.send(Message::Text(
         json!({
@@ -625,6 +629,27 @@ async fn terminal_task_sends_ai_stop_to_device() {
             .contains("终态"),
         "ai_stop 要带原因: {stop}"
     );
+    // 终态也是「先等客户端说完」：窗口标记收尾中，`ai_end` 到了才真正摘掉
+    assert_eq!(
+        ai_patrol::global()
+            .status()
+            .await["closing"]
+            .as_str()
+            .map(|s| s.contains("终态")),
+        Some(true),
+        "终态关窗也要进宽限期"
+    );
+    ws.send(Message::Text(
+        json!({
+            "msgType": "ai_end",
+            "ts": "2026-11-16 10:01:05",
+            "payload": { "windowId": window_id, "reason": "任务结束", "hits": 0, "expired": false }
+        })
+        .to_string(),
+    ))
+    .await
+    .expect("发送 ai_end 失败");
+    tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(ai_patrol::global().status().await["active"], false);
 }
 
@@ -672,10 +697,36 @@ async fn leaving_the_point_closes_window_immediately() {
             .contains("离开"),
         "ai_stop 要说明是离开航点: {stop}"
     );
+    // 窗口已经被平台「下班」了（不再识别），但还留一段宽限期等客户端把本点的结论说完：
+    // 这几秒里到的 `ai_detect` / `ai_alert` / `ai_end` 必须还能归到它身上，
+    // 否则就会出现 2026-11-20 13:38 那种「板端 found=1、平台记成 0」的假结论。
+    let status = ai_patrol::global().status().await;
+    assert_eq!(
+        status["closing"].as_str().map(|s| s.contains("离开")),
+        Some(true),
+        "窗口要标成收尾中（{window_id}）: {status}"
+    );
+    // 客户端回报结束之后窗口才真正摘掉
+    ws.send(Message::Text(
+        json!({
+            "msgType": "ai_end",
+            "ts": "2026-11-16 10:01:05",
+            "payload": {
+                "windowId": window_id,
+                "reason": "已离开航点",
+                "hits": 0,
+                "expired": false
+            }
+        })
+        .to_string(),
+    ))
+    .await
+    .expect("发送 ai_end 失败");
+    tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
         ai_patrol::global().status().await["active"],
         false,
-        "离开航点后窗口必须清空（{window_id}）"
+        "客户端回报结束后窗口必须清空（{window_id}）"
     );
 }
 
@@ -978,6 +1029,110 @@ async fn count_task_reports_mismatch_when_window_expires_without_hits() {
     assert_eq!(ai_patrol::global().status().await["active"], false);
 }
 
+/// 2026-11-20 13:38 现场（TK-1112-11 PT2）：狗到点 13 s 后才第一次命中（置信度 0.91），
+/// `dwell` 已满、平台刚收到「已离开航点」就摘了窗口并写下「检查 2 个，实际检出 0 个」；
+/// 客户端 0.6 s 后送来的 `ai_alert`（`foundCount=1` + 证据图）被当成失效窗口丢掉 ——
+/// 群里既拿到错的数量，也丢了一张命中帧（板端 `result.json` 写的是 `found_count: 1`）。
+///
+/// 关窗后的宽限期就是为这条缝加的：结论按板端给的 `foundCount` 落，不再凭空写 0。
+#[tokio::test]
+async fn late_count_alert_after_leaving_point_is_not_recorded_as_zero() {
+    let _serial = TEST_LOCK.lock().await;
+    ai_patrol::global().stop("测试初始化").await;
+    let (state, _temp) = test_state("client").await;
+    let task_code =
+        seed_ai_route(&state, Some("firextinguisher"), &["extinguisher"], Some("count"), Some(2))
+            .await;
+    let port = spawn_server(state.clone()).await;
+    let (mut ws, _device) = register_device(port).await;
+
+    // dwell 4 s（「看够了」的判据 = 4 s）：狗停满就走，和现场一样
+    ws.send(Message::Text(
+        ai_point_with_dwell(&task_code, 4, false).to_string(),
+    ))
+    .await
+    .expect("发送 ai_point 失败");
+    let start = next_msg(&mut ws, "ai_start").await;
+    assert_eq!(start["payload"]["checkType"], "count", "{start}");
+    assert_eq!(start["payload"]["expectCount"], 2, "{start}");
+    let window_id = start["payload"]["windowId"]
+        .as_str()
+        .expect("ai_start 必须带 windowId")
+        .to_string();
+
+    tokio::time::sleep(Duration::from_millis(4300)).await;
+    ws.send(Message::Text(
+        task_progress(&task_code, "执行中", "patrol.returning").to_string(),
+    ))
+    .await
+    .expect("发送离开航点失败");
+    next_msg(&mut ws, "ai_stop").await;
+
+    // 平台这一刻还不能下结论：客户端正在收尾（停识别 → 板端 `_plan_flush` → 扫盘）
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        alert_contents(&state).await.is_empty(),
+        "关窗后不能立刻写「实际检出 0 个」: {:?}",
+        alert_contents(&state).await
+    );
+
+    // 客户端把板端结论补上来：1 个命中（带图）+ 数量核对不一致 + 窗口结束
+    ws.send(Message::Text(
+        detect_with_evidence(&window_id, "extinguisher", 0.91).to_string(),
+    ))
+    .await
+    .expect("发送检出失败");
+    ws.send(Message::Text(
+        json!({
+            "msgType": "ai_alert",
+            "ts": "2026-11-20 13:38:04",
+            "payload": {
+                "windowId": window_id,
+                "taskCode": task_code,
+                "planId": task_code,
+                "pointIndex": 0,
+                "expectCount": 2,
+                "foundCount": 1,
+                "evidence": "/root/261113/backpack_dashboard/backend/detect_jobs/TK-1112-11/pt1/dogcam_20261120_133803.jpg"
+            }
+        })
+        .to_string(),
+    ))
+    .await
+    .expect("发送数量告警失败");
+    ws.send(Message::Text(
+        json!({
+            "msgType": "ai_end",
+            "ts": "2026-11-20 13:38:04",
+            "payload": {
+                "windowId": window_id,
+                "reason": "已离开航点",
+                "hits": 1,
+                "expired": false
+            }
+        })
+        .to_string(),
+    ))
+    .await
+    .expect("发送 ai_end 失败");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let contents = alert_contents(&state).await;
+    assert_eq!(
+        contents.len(),
+        1,
+        "只该有一条数量告警（不能先来一条假的 0 个）: {contents:?}"
+    );
+    assert!(
+        contents[0].contains("检查 2 个")
+            && contents[0].contains("实际检出 1 个")
+            && contents[0].contains("dogcam_20261120_133803.jpg"),
+        "结论要按板端给的 foundCount 落，并带上证据路径: {}",
+        contents[0]
+    );
+    assert_eq!(ai_patrol::global().status().await["active"], false);
+}
+
 /// 存在性任务：① 到期没找到不告警；② 误收到数量告警也不落库（不判数量）。
 #[tokio::test]
 async fn exist_task_never_judges_quantity() {
@@ -1243,6 +1398,10 @@ async fn leaving_the_point_after_full_dwell_reports_missing() {
         "ai_start 必须带 windowId: {start}"
     );
     assert_eq!(start["payload"]["secs"], 12, "窗口还是 dwell + 8: {start}");
+    let window_id = start["payload"]["windowId"]
+        .as_str()
+        .expect("ai_start 必须带 windowId")
+        .to_string();
 
     tokio::time::sleep(Duration::from_millis(4300)).await;
     ws.send(Message::Text(
@@ -1263,7 +1422,7 @@ async fn leaving_the_point_after_full_dwell_reports_missing() {
     .await
     .expect("发送导航阶段失败");
 
-    // 窗口被平台摘掉，但「看够了」要照常记账
+    // 窗口被平台「下班」了，但「看够了」的结论还要结算 —— 只不过要等客户端说完话
     let stop = next_msg(&mut ws, "ai_stop").await;
     assert!(
         stop["payload"]["reason"]
@@ -1272,6 +1431,27 @@ async fn leaving_the_point_after_full_dwell_reports_missing() {
             .contains("离开"),
         "ai_stop 要说明是离开航点: {stop}"
     );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        alert_contents(&state).await.is_empty(),
+        "关窗那一刻还没收到客户端回报，不能先写「未检出」: {:?}",
+        alert_contents(&state).await
+    );
+    ws.send(Message::Text(
+        json!({
+            "msgType": "ai_end",
+            "ts": "2026-11-16 10:01:05",
+            "payload": {
+                "windowId": window_id,
+                "reason": "已离开航点",
+                "hits": 0,
+                "expired": false
+            }
+        })
+        .to_string(),
+    ))
+    .await
+    .expect("发送 ai_end 失败");
     tokio::time::sleep(Duration::from_millis(400)).await;
 
     let contents = alert_contents(&state).await;
@@ -1591,10 +1771,12 @@ async fn late_evidence_after_window_closed_is_still_pushed() {
     .await
     .expect("发送导航阶段失败");
     next_msg(&mut ws, "ai_stop").await;
+    // 窗口已进入收尾宽限（`closing`）：不再接受新的一轮，但迟到的结论/图仍要认领
+    let status = ai_patrol::global().status().await;
     assert_eq!(
-        ai_patrol::global().status().await["active"],
-        false,
-        "窗口已经关了：这正是补图容易丢的那一刻"
+        status["closing"].as_str().map(|s| s.contains("离开")),
+        Some(true),
+        "窗口已收尾：这正是补图容易丢的那一刻: {status}"
     );
 
     // 3) 图才落盘：`ai_evidence` 晚到，仍然要补出去
