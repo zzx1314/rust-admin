@@ -52,12 +52,14 @@ const EVIDENCE_PENDING_WAIT: Duration = Duration::from_secs(8);
 /// 板端存证根目录（`detect_jobs`）的默认位置：Agent 把命中帧写在
 /// `<jobs_dir>/<planId>/pt<航点下标>/` 下。
 ///
-/// 板子上的部署路径不止一种（官方镜像 `/root/backpack_dashboard/backend`，
-/// 现场实测 `/root/261113/backpack_dashboard/backend`），所以这里只是「先试的候选」，
+/// 板子上的部署路径不止一种（官方镜像 `/root/backpack_dashboard/backend`；
+/// 现场那台 `.246` 2026-11-20 从 `/root/261113/backpack_dashboard/backend` 迁到了
+/// `/opt/xjpt/backpack_dashboard/backend`，旧路径留了软链），所以这里只是「先试的候选」，
 /// 真正以板端 `plan_hit.evidence` 反推出来的目录为准（见 [`jobs_root_from_evidence`]）；
 /// 也可以直接配 `[ai] jobs_dir` / `ROBODOG_AI_JOBS_DIR` 钉死。
-const DEFAULT_JOBS_DIRS: [&str; 2] = [
+const DEFAULT_JOBS_DIRS: [&str; 3] = [
     "/root/backpack_dashboard/backend/detect_jobs",
+    "/opt/xjpt/backpack_dashboard/backend/detect_jobs",
     "/root/261113/backpack_dashboard/backend/detect_jobs",
 ];
 /// 计划跑完之后等窗口收尾的重试节奏：任务终态时最后一个窗口可能还在收尾
@@ -1459,7 +1461,8 @@ async fn evidence_image_from_path(path: &str) -> Option<String> {
 /// 从板端 `plan_hit.evidence`（`<存证根>/<计划>/pt<n>/dogcam_1.jpg`）反推存证根目录。
 ///
 /// 板子上的路径前缀不统一（`/root/backpack_dashboard/backend`、
-/// `/root/261113/backpack_dashboard/backend` …），拿板端自己写出来的路径当唯一真相，
+/// `/opt/xjpt/backpack_dashboard/backend`、`/root/261113/backpack_dashboard/backend` …），
+/// 拿板端自己写出来的路径当唯一真相，
 /// 比硬编码候选靠谱。形如不对就返回 `None`（宁可带不了图，也不要拼出错路径）。
 fn jobs_root_from_evidence(event: &Value) -> Option<String> {
     if event.get("type").and_then(Value::as_str) != Some("plan_hit") {

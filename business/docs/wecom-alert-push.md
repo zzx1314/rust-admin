@@ -422,7 +422,8 @@ notify::evidence_image()（校验）→ Notice.image
 - **`jobs_dir` 从哪来**：`[ai] jobs_dir` / `ROBODOG_AI_JOBS_DIR` 优先（配了就**不**再被
   板端事件覆盖），其次从板端 `plan_hit.evidence` 反推（`<存证根>/<计划>/pt<n>/<图>`，
   见 `jobs_root_from_evidence`），最后才是内置候选 `/root/backpack_dashboard/backend/detect_jobs`、
-  `/root/261113/backpack_dashboard/backend/detect_jobs`。一个都不中就不带图，告警照发。
+  `/opt/xjpt/backpack_dashboard/backend/detect_jobs`、`/root/261113/backpack_dashboard/backend/detect_jobs`。
+  一个都不中就不带图，告警照发。
 - **推完即删板端存证**：图片那条回 `errcode 0` 之后，服务端在同一条设备 WS 上下发
   `ai_cleanup {planId, pointIndex, reason}`，客户端删掉 `detect_jobs/<计划ID>/pt<航点>/`
   （画框 JPG + `result.json`；计划目录空了连它一起删）。为什么要删：板端每命中一次写一张图，

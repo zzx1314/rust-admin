@@ -41,8 +41,10 @@ default via 192.168.234.1  dev eth0            metric 1000   # netplan 兜底
 | unit | 作用 | 端口 | ExecStart / 工作目录 | 仓库来源 |
 | --- | --- | --- | --- | --- |
 | `snap.mediamtx.mediamtx.service` | RTSP 分发中枢：把本体/网络摄像头的流变成 7 条本地 path，供 relay、Agent、浏览器共用 | `8554` RTSP、`8888` HLS/HTTP、`8889` WebRTC | snap 托管 | 不在仓库（厂商镜像 + 现场配置） |
-| `backpack-agent.service` | 背包数据采集 Agent：FastAPI + 6 路流 + RKNN AI 识别（航点存证 `detect_jobs/`） | `8000` | `/root/261113/backpack_dashboard/backend` → `python3 agent.py` | `business/backpack_dashboard/` |
-| `camera-init.service` | USB 相机初始化（`/root/camera/testc.sh`，启动前 sleep 8） | — | `backpack-agent` 的 `ExecStartPre` 也会重启它 | 不在仓库 |
+| `backpack-agent.service` | 背包数据采集 Agent：FastAPI + 6 路流 + RKNN AI 识别（航点存证 `detect_jobs/`） | `8000` | `/opt/xjpt/backpack_dashboard/backend` → `python3 agent.py` | `business/backpack_dashboard/` |
+| `camera-init.service` | USB 相机初始化（`/opt/xjpt/camera/testc.sh`，启动前 sleep 8） | — | `backpack-agent` 的 `ExecStartPre` 也会重启它 | 不在仓库（厂商） |
+| `asr.service` | 聆思 USB 麦克风语音识别（`asr_usb_record`，腾讯云 ASR/TTS）；Agent 的「语音助手」页面在它上面发命令 | — | `WorkingDirectory=/opt/xjpt/lingsi`、`LD_LIBRARY_PATH=/opt/xjpt/lingsi/lib`、`ExecStart=/opt/xjpt/lingsi/asr_usb_record` | 不在仓库（厂商） |
+| `led_blue.service` | LED 灯带闪烁程序（`test_rgbrun`）；**当前 disabled**，Agent 的「LED 闪烁」按钮直接拉起同一个二进制 | — | `ExecStart=/opt/xjpt/led/test_rgbrun` | 不在仓库（厂商） |
 | `backpack-relay.service` | **视频中继**：按需把本地 RTSP 推到平台 mediamtx（`RELAY_RTSP_URL`，浏览器 WHEP 看）；控制面走 `ws://39.107.55.13:3008/ws/device/video` | 无常驻端口（纯出站 WS） | `/usr/bin/python3 /opt/backpack-relay/relay_push.py` | `deploy/backpack-relay/` |
 | `robodog-device-client.service` | 设备客户端：连平台 `:3008` 做注册/心跳/任务，反代本体 `:10010`，转发 Agent 事件与 AI 证据图 | 无常驻端口（出站 WS） | `/opt/robodog/client/robodog-device-client --config /etc/robodog/client.toml` | `business/client/`（`build-aarch64.sh` 出包） |
 | `site-console.service` | 现场控制台门户：静态页 + 把 `/api` 转到平台，给同网段的浏览器用 | `8080` | `/opt/site-console` → `python3 serve.py` | `deploy/site-console/` |
@@ -69,7 +71,9 @@ default via 192.168.234.1  dev eth0            metric 1000   # netplan 兜底
 ├── serve.py                             静态服务 + /api 反代
 └── web/                                 构建产物（另有 web.bak-* 3 份）
 
-/root/261113/backpack_dashboard/         ← 背包 Agent（仓库：business/backpack_dashboard/，见同目录 AGENTS.md）
+/opt/xjpt/backpack_dashboard/         ← 背包 Agent（仓库：business/backpack_dashboard/，见同目录 AGENTS.md）
+                                         2026-11-20 从 /root/261113/backpack_dashboard 迁来（见 §4.3），
+                                         旧路径留了同名软链
 ├── backend/agent.py                     FastAPI :8000
 ├── backend/detect_jobs/<plan>/pt<n>/     AI 临时存证 + result.json（平台读不到，由客户端上报；
 │                                         图进企业微信群后平台下发 ai_cleanup，客户端删掉该 pt 目录；
@@ -83,7 +87,14 @@ default via 192.168.234.1  dev eth0            metric 1000   # netplan 兜底
 ├── rknn/                                RKNN 运行库（LD_LIBRARY_PATH）
 └── frontend/                            厂商调试页
 
-/root/camera/testc.sh                    ← USB 相机初始化（camera-init.service）
+/opt/xjpt/camera/testc.sh                 ← USB 相机初始化（camera-init.service，原 /root/camera/）
+/opt/xjpt/lingsi/                         ← 聆思语音（asr.service；原 /root/lingsi/）
+├── asr_usb_record                       语音识别主程序 + `lib/` + `asr.conf`（腾讯云密钥）
+└── device_selfcheck.sh                  厂商自检（已改为指向 /opt/xjpt/wenshidu）
+/opt/xjpt/led/test_rgbrun                ← LED 灯带闪烁（Agent 「LED」按钮 + led_blue.service；原 /root/led/）
+/opt/xjpt/LED/                           ← 厂商 LED 常亮服务源码/二进制（light_service、light_client；原 /root/LED/）
+/opt/xjpt/wenshidu/sht4x_app             ← 温湿度传感器（Agent `/api/temp`；原 /root/wenshidu/）
+/root/{LED,led,lingsi,wenshidu}          ← 四个软链，指向上面对应目录（迁就还没改路径的厂商脚本）
 
 /etc/systemd/system/
 ├── backpack-relay.service               中继 unit（仓库同名文件）
@@ -91,6 +102,8 @@ default via 192.168.234.1  dev eth0            metric 1000   # netplan 兜底
 ├── camera-init.service                  相机初始化
 ├── robodog-device-client.service        客户端 unit（仓库：business/client/deploy/）
 ├── site-console.service                 控制台 unit
+├── asr.service                         聆思语音 unit（WorkingDirectory=/opt/xjpt/lingsi）
+├── led_blue.service                    LED 闪烁 unit（disabled，ExecStart=/opt/xjpt/led/test_rgbrun）
 ├── frpc.service                         外网 ssh 隧道 unit（仓库：deploy/backpack-246-frpc/）
 ├── 4g-connect.service                   厂商
 └── *.bak-*                              历史备份（逐个看过再删，见 §5）
@@ -235,6 +248,70 @@ ssh -p 3006 root@39.107.55.13  →  frps  →  .246 的 frpc  →  127.0.0.1:22
 - 验证：公网 `ss -lntp | grep 3006` 有 `frps` 监听 + 任意外网机器
   `ssh -p 3006 root@39.107.55.13 'hostname'` → `ubuntu-arm64`
 
+## 4.3 2026-11-20：Agent 目录迁到 `/opt/xjpt`
+
+`/root/261113/backpack_dashboard` → **`/opt/xjpt/backpack_dashboard`**（`/opt` 与 `/root`
+同一文件系统 `/dev/root`，`mv` 是瞬时的，不用拷 267M）。同批把更早搬过去的
+`/opt/xjpt/camera`（`camera-init.service` 已经指它）也算在这一套里。
+
+Agent 代码里**没有写死绝对路径**（`config.py` 全部以 `_HERE` 相对推导：`detect_jobs/`、
+`detect_events.jsonl`、`rknn/models`、`rknn/code/code/build/yolov8_detector`），`start.sh`
+也是 `dirname $0` 推导，所以这次只需要改 unit 和客户端配置：
+
+| 文件 | 改动 |
+| --- | --- |
+| `/etc/systemd/system/backpack-agent.service` | `WorkingDirectory=` 与 `LD_LIBRARY_PATH=` 换成新路径（备份 `*.bak-20261120-151458`） |
+| `/etc/robodog/client.toml` | 新增 `[ai] jobs_dir = "/opt/xjpt/backpack_dashboard/backend/detect_jobs"` 钉死存证目录（备份 `*.bak-20261120-151458`），否则客户端只能靠 `DEFAULT_JOBS_DIRS` 猜或等板端 `plan_hit.evidence` 反推 |
+| `rknn/code/code/build/**` | `CMakeCache.txt` / `Makefile` 里的绝对路径 `sed` 成新路径（只影响以后重新编译 detector，编译产物本来靠 `LD_LIBRARY_PATH`） |
+| `/root/261113/backpack_dashboard` | **留了指向新目录的软链**，给还没升级的老客户端（`DEFAULT_JOBS_DIRS` 里是旧路径）兜底；客户端版本对齐后可 `rm` 掉 |
+
+回滚：`systemctl stop backpack-agent` → 删软链 → `mv /opt/xjpt/backpack_dashboard /root/261113/backpack_dashboard`
+→ 恢复 unit / `client.toml` 的 `.bak-20261120-151458` → `daemon-reload` + `restart`。
+
+验证（都是实测过的）：`systemctl is-active backpack-agent`=active、`curl -s 127.0.0.1:8000/api/detect/status`
+里 `bin`/`models_dir`/`events_file` 全指向 `/opt/xjpt/…` 且 `bin_exists:true`、
+`rknn/code/code/build/yolov8_detector --help` 能跑（带 `LD_LIBRARY_PATH`）、四路 `cam0~cam3`
+ffmpeg 推流在、客户端日志 `ai.jobs_dir = /opt/xjpt/backpack_dashboard/backend/detect_jobs`。
+
+> ⚠️ 顺便踩到的：`agent.py` 不处理 SIGTERM，`systemctl stop/restart backpack-agent`
+> **要等满 `TimeoutStopSec`（默认 90s）再 SIGKILL**（journal 里是 `State 'stop-sigterm' timed out.
+> Killing.`），这次迁移的“停服务”就是这样过的。影响：重启一次视频断约 1.5 分钟。
+> 想快就在 unit 里加 `TimeoutStopSec=10`（反正最后还是 SIGKILL），本次没改。
+
+## 4.4 2026-11-20：硬件目录也收进 `/opt/xjpt`（`LED` / `led` / `lingsi` / `wenshidu`）
+
+跟 Agent 同一批：厂商那四个硬件程序目录从 `/root` 搬到 `/opt/xjpt`，
+**旧路径全部留软链**（厂商脚本/人工习惯一时改不完，而厂商脚本我们改不了）。
+
+| 原路径 | 现路径 | 谁在用 |
+| --- | --- | --- |
+| `/root/lingsi/` | `/opt/xjpt/lingsi/` | `asr.service`（`WorkingDirectory` + `LD_LIBRARY_PATH` + `ExecStart` 原本就已经指 `/opt/xjpt/lingsi`，优先搬的；旧目录是一份**内容完全相同的拷贝**，已改名为 `/root/lingsi.bak-20261120-152530`）|
+| `/root/led/` | `/opt/xjpt/led/` | Agent 「LED 闪烁」（`config.py` 的 `LED_TEST_BIN`）+ `led_blue.service` 的 `ExecStart` |
+| `/root/wenshidu/` | `/opt/xjpt/wenshidu/` | Agent `/api/temp`（`config.py` 的 `SHT4X_APP`）+ 两个厂商自检脚本 |
+| `/root/LED/` | `/opt/xjpt/LED/` | 没人引用（厂商 `light_service`/`light_client` 源码与二进制），纯粹跟着搬 |
+
+需要改引用的文件（均已备份 `*.bak-20261120-152530`）：
+
+| 文件 | 改动 |
+| --- | --- |
+| `/etc/systemd/system/led_blue.service` | `ExecStart=/opt/xjpt/led/test_rgbrun` |
+| `/root/yd_test_v4.0.sh` | 厂商总自检脚本，11 处 `/root/led/`、`/root/wenshidu/` 全改成 `/opt/xjpt/…` |
+| `/opt/xjpt/lingsi/device_selfcheck.sh` | 2 处 `/root/wenshidu/sht4x_app` → `/opt/xjpt/wenshidu/sht4x_app` |
+| `/opt/xjpt/backpack_dashboard/backend/config.py` | `SHT4X_APP` / `LED_TEST_BIN` / `LINGS_PLAY_WAV` 三个默认值（仓库 `business/backpack_dashboard/backend/config.py` 同步改，两边 md5 一致）|
+
+`asr.service` 本来就已经指向 `/opt/xjpt/lingsi`，**不用重启**（`ps` 里 `asr_usb_record`
+一直跑在 `/opt/xjpt/lingsi/asr_usb_record`）；Agent 换了 `config.py` 所以要重启（这一轮
+stop 又等了 90s 才 SIGKILL，见 §4.3 尾注）。
+
+验证（实测）：`/opt/xjpt/wenshidu/sht4x_app` → `Temperature: 28.88 °C…`、`/api/temp` 同值；
+`timeout 2 /opt/xjpt/led/test_rgbrun` 正常跑（`ldd` 无缺失）、`/api/asr` → `active`、
+`/api/lingsi` → `asr_running:true`；`grep -rI '/root/\(LED\|led\|lingsi\|wenshidu\)'`
+除备份文件外无残留（`/root/261117/…` 是另一份历史快照，不算）。
+
+> 顺带发现：`LINGS_PLAY_WAV`（默认 `/opt/xjpt/lingsi/call.wav`）在 `telemetry.py` 里
+> **只 import 未使用**，而且那个 `call.wav` 目录里从来没有（只有 `tencent_test.pcm`）——
+> 死配置，改路径只是为了不留旧路径。
+
 ## 5. 备份文件现状与清理建议
 
 | 位置 | 数量 / 体积 | 说明 |
@@ -242,7 +319,10 @@ ssh -p 3006 root@39.107.55.13  →  frps  →  .246 的 frpc  →  127.0.0.1:22
 | `/opt/backpack-relay/relay_push.py.bak*` | 9 份，约 0.5M | 11-18 反复调试留下的，**留最近 2 份即可** |
 | `/opt/robodog/client/robodog-device-client.bak*` | 35 份，约 275M | 每次发布都留一份，建议只留最近 3 份 |
 | `/var/snap/mediamtx/common/mediamtx.yml.bak*` | 5 份 | 现状稳定，留 1 份即可 |
-| `/etc/systemd/system/*.service.bak-*` | 3 份 | 与本仓库 unit 重复，可删 |
+| `/etc/systemd/system/*.service.bak-*` | 4 份 | 与本仓库 unit 重复，可删（最新一份是 2026-11-20 迁移前的 `backpack-agent.service.bak-20261120-151458`） |
+| `/etc/robodog/client.toml.bak-*` | 1 份 | 2026-11-20 迁移前（没有 `[ai] jobs_dir`）的副本，确认新配置生效后可删 |
+| `/root/lingsi.bak-20261120-152530/` | 1 份，21M | 2026-11-20 搬 `lingsi` 前留下的旧拷贝（与 `/opt/xjpt/lingsi` 内容完全相同），**可删** |
+| `/root/yd_test_v4.0.sh.bak-*`、`/opt/xjpt/lingsi/device_selfcheck.sh.bak-*`、`/opt/xjpt/backpack_dashboard/backend/config.py.bak-*` | 各 1 份 | 2026-11-20 改硬件路径前的副本，可删 |
 | `/root/dispatcher-backup/` | 1 份 | **别删**：这是那次把路由抢回 Wi-Fi 的元凶，留作证据（也别放回 `dispatcher.d`） |
 
 清理时只删「可执行且不在生效路径」的备份；**`/etc/NetworkManager/dispatcher.d/` 里不要留任何可执行文件**（见 §6 第 1 条）。
@@ -286,7 +366,7 @@ cat /etc/robodog/client.toml | sed 's/token.*/token=***/'
 
 # 采集 / AI
 journalctl -u backpack-agent -f
-ls -lt /root/261113/backpack_dashboard/backend/detect_jobs | head
+ls -lt /opt/xjpt/backpack_dashboard/backend/detect_jobs | head
 
 # mediamtx
 ffprobe -v error -rtsp_transport tcp -i rtsp://127.0.0.1:8554/dogcam -show_entries stream=codec_name,width,height,avg_frame_rate
@@ -312,5 +392,5 @@ ssh root@192.168.41.246 'systemctl daemon-reload && systemctl restart backpack-r
 | `business/client/` | `/opt/robodog/client/robodog-device-client` | `business/client/deploy/build-aarch64.sh` 交叉编译 + `scp` |
 | `deploy/site-console/` | `/opt/site-console/`（`serve.py` + `web/`） | `scp` 构建产物 + `restart site-console` |
 | `deploy/backpack-246-frpc/frpc.toml`、`frpc.service` | `/etc/frp/frpc.toml`、`/etc/systemd/system/frpc.service` | `scp` + `daemon-reload` + `restart frpc`（二进制手工 `scp`，见其 README） |
-| — | `/root/261113/backpack_dashboard/`（Agent） | `business/backpack_dashboard/` | 改完 `rsync backend/` + `systemctl restart backpack-agent`（模型/so 一并同步，见该目录 AGENTS.md） |
+| — | `/opt/xjpt/backpack_dashboard/`（Agent） | `business/backpack_dashboard/` | 改完 `rsync backend/` + `systemctl restart backpack-agent`（模型/so 一并同步，见该目录 AGENTS.md） |
 | — | `/var/snap/mediamtx/common/mediamtx.yml` | 不在本仓库，现场按 §3 的 7 条 path 配 |

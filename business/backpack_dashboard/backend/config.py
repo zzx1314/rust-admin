@@ -83,14 +83,14 @@ CAPTURE_OUT_FPS = int(os.getenv("CAPTURE_OUT_FPS", "0"))
 CAPTURE_NOUT_FPS = CAPTURE_OUT_FPS or CAPTURE_FPS
 
 # ---- 硬件路径（沿用 yd_test_v4.0.sh 的取值） ----
-SHT4X_APP = os.getenv("SHT4X_APP", "/root/wenshidu/sht4x_app")   # 温湿度
+SHT4X_APP = os.getenv("SHT4X_APP", "/opt/xjpt/wenshidu/sht4x_app")   # 温湿度
 MODEM_DEV = os.getenv("MODEM_DEV", "/dev/ttyUSB2")               # 4G(Quectel) AT 口
 LOCATION_INTERVAL = int(os.getenv("LOCATION_INTERVAL", "60"))     # 定位采集周期(秒)
 WIFI_IFACE = os.getenv("WIFI_IFACE", "")                          # 空=自动探测
 FILL_LIGHT_GPIO = int(os.getenv("FILL_LIGHT_GPIO", "46"))         # 补光灯 GPIO（设为 -1 可禁用，例如该脚临时改作摄像头触发用）
-LED_TEST_BIN = os.getenv("LED_TEST_BIN", "/root/led/test_rgbrun")  # LED 灯带闪烁程序
+LED_TEST_BIN = os.getenv("LED_TEST_BIN", "/opt/xjpt/led/test_rgbrun")  # LED 灯带闪烁程序
 SSD_DEV = os.getenv("SSD_DEV", "/dev/nvme0n1")                    # SSD 设备
-LINGS_PLAY_WAV = os.getenv("LINGS_PLAY_WAV", "/root/lingsi/call.wav")  # 聆思播放测试音
+LINGS_PLAY_WAV = os.getenv("LINGS_PLAY_WAV", "/opt/xjpt/lingsi/call.wav")  # 聆思播放测试音
 LINGS_CMD_FIFO = os.getenv("LINGS_CMD_FIFO", "/tmp/voice_assistant_cmd")  # asr 控制管道
 LINGS_STATE_FILE = os.getenv("LINGS_STATE_FILE", "/tmp/lingsi_last_cmd")    # 最近一次命令状态（普通文件，供前端查询）
 ASR_SERVICE = os.getenv("ASR_SERVICE", "asr")            # 聆思 asr 服务名

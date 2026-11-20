@@ -1365,7 +1365,7 @@ curl -X POST /api/devices/12/locate -H 'Content-Type: application/json' \
 
 ### 数据采集背包：单路视频 + AI 识别（`/monitor`）
 
-背包（`business/backpack_dashboard/`，板端部署在 `/root/261113/backpack_dashboard`）自带 4 路 USB 相机 + 机器狗前置 RTSP + 红外，
+背包（`business/backpack_dashboard/`，板端部署在 `/opt/xjpt/backpack_dashboard`）自带 4 路 USB 相机 + 机器狗前置 RTSP + 红外，
 并在板端用 RKNN 做单路 AI 识别。控制台「实时视频」页只展示**一路**，可随时切换六路源；
 AI 可对除红外外的五路开启，画框方式二选一：
 

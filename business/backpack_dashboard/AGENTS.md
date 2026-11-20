@@ -1,7 +1,9 @@
 # AGENTS.md — backpack_dashboard（板端数据采集 Agent）
 
 板子 `.246` 上跑的那套「数据采集背包 Agent + 离线 Dashboard」。2026-11-19 起并入主仓库
-（`git subtree` 导入，保留原有提交历史），板端部署位置仍是 `/root/261113/backpack_dashboard`。
+（`git subtree` 导入，保留原有提交历史）。板端部署位置（2026-11-20 起）是
+`/opt/xjpt/backpack_dashboard`，原 `/root/261113/backpack_dashboard` 留了同名软链
+（迁移记录见 `deploy/backpack-246.md` §4.3）。
 
 **这货不在开发机上真跑**：它依赖 RK3576 的 NPU（`librknnrt.so`）、4 路 USB 相机、GPIO、
 4G 模块、聆思语音服务。改完要验接口链路，用 `deploy/backpack-sim/`（模拟 Agent + 假相机），
@@ -80,7 +82,12 @@ ssh root@192.168.41.246 'journalctl -u backpack-agent -f'
 curl -s 127.0.0.1:8000/api/detect/status
 ```
 
-`deploy/backpack-agent.service` 是 systemd unit（`WorkingDirectory=/root/261113/backpack_dashboard/backend`）。
+`deploy/backpack-agent.service` 是 systemd unit（`WorkingDirectory=/opt/xjpt/backpack_dashboard/backend`）。
+
+板端依赖的厂商硬件程序不在本仓库，2026-11-20 起统一在 `/opt/xjpt/` 下
+（`led/test_rgbrun`、`wenshidu/sht4x_app`、`lingsi/asr_usb_record`、`LED/`），
+`config.py` 里 `LED_TEST_BIN` / `SHT4X_APP` / `LINGS_PLAY_WAV` 的默认值就指那里；
+`/root/{led,LED,lingsi,wenshidu}` 只剩软链（历史路径兼容）。详见 `deploy/backpack-246.md` §4.4。
 
 ## 发布到板端
 
@@ -89,11 +96,11 @@ curl -s 127.0.0.1:8000/api/detect/status
 ```bash
 # 只改后端（最常见）
 rsync -av business/backpack_dashboard/backend/ \
-  root@192.168.41.246:/root/261113/backpack_dashboard/backend/
+  root@192.168.41.246:/opt/xjpt/backpack_dashboard/backend/
 ssh root@192.168.41.246 'systemctl restart backpack-agent'
 
 # 改了 rknn（模型/so/C++ detector）后还要重启中继（preview 流的画框由 Agent 推）
-rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/root/261113/backpack_dashboard/rknn/
+rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpack_dashboard/rknn/
 
 # 改了画框字库（cjk_font.py 由 tools/gen_cjk_font.py 生成）→ 同步后重启 Agent
 # 改了 detector C++（rknn/code/code）→ 板端 cmake 编译，不是在开发机
@@ -155,7 +162,7 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/root/261113/bac
 ## 仓库化后的注意事项
 
 - 模型与 `librknnrt.so` 已入库（`rknn/models/` 8 个包约 211MB）。**不要**再往仓库里塞新的
-  `.rknn`/so；确实要换模型先跟维护者确认（必要时迁 Git LFS）。板端 `/root/261113/backend`
+  `.rknn`/so；确实要换模型先跟维护者确认（必要时迁 Git LFS）。板端 `/opt/xjpt/backpack_dashboard/backend`
   下的模型是现场真源，换代时用 rsync 同步（见上文「发布到板端」）。
 - `backend/detect_jobs/`、`backend/package/`、`__pycache__` 是运行期/离线包产物，已 ignore。
   `backend/detect_events.jsonl` 是事件样例（默认落盘路径），改动它等于改动默认输出格式，谨慎。

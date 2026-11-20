@@ -61,7 +61,7 @@ def ping_ok(host, count=1, wait=2, ttl=10):
 # ---------------- 温湿度 (SHT4x) ----------------
 def get_temp_humidity():
     """直接运行 sht4x_app 并打印原始输出（最多 40 字符）。
-    参考：/root/wenshidu/sht4x_app -> 'Temperature: 27.15 °C, Humidity: 56.64 %'
+    参考：/opt/xjpt/wenshidu/sht4x_app -> 'Temperature: 27.15 °C, Humidity: 56.64 %'
     """
     if not os.path.exists(SHT4X_APP):
         print(f"[DEBUG][temp] 未找到 {SHT4X_APP}", flush=True)

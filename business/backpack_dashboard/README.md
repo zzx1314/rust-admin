@@ -1,7 +1,8 @@
 # 数据采集背包 · 离线直连演示 Dashboard
 
 > **仓库位置**：本目录是主仓库 `rust-admin/business/backpack_dashboard`（2026-11-19 并入，保留原提交
-> 历史）；板端部署位置仍是 `/root/261113/backpack_dashboard`。改代码/发布约定见同目录
+> 历史）；板端部署位置（2026-11-20 起）是 `/opt/xjpt/backpack_dashboard`（原 `/root/261113/backpack_dashboard`
+> 留了同名软链）。改代码/发布约定见同目录
 > [`AGENTS.md`](AGENTS.md)，平台侧契约与排障见 `business/docs/backpack-video-integration.md`。
 > 不在板子旁边时，用 `deploy/backpack-sim/` 在本地复刻 Agent + 相机 + 中继。
 
@@ -56,12 +57,12 @@ backpack_dashboard/
 
 ## 部署到背包核心板（Ubuntu / RK3576）
 
-1. 拷贝整个 `backpack_dashboard/` 到板端，例如 `/root/backpack_dashboard/`。
+1. 拷贝整个 `backpack_dashboard/` 到板端，例如 `/opt/xjpt/backpack_dashboard/`。
 2. 安装 Python 依赖（一次性，**联网/离线二选一**）：
 
    **方式 A：联网安装**（板端能访问 PyPI 时，最简单）
    ```bash
-   cd /root/backpack_dashboard/backend
+   cd /opt/xjpt/backpack_dashboard/backend
    pip3 install -r requirements.txt
    ```
 
@@ -72,7 +73,7 @@ backpack_dashboard/
 
    ① 在**能上网的同架构机器**上把全部 whl 下载到 `./package/`：
    ```bash
-   cd /root/backpack_dashboard/backend
+   cd /opt/xjpt/backpack_dashboard/backend
    mkdir -p package
    pip3 download \
        --dest ./package \
@@ -84,12 +85,12 @@ backpack_dashboard/
    ② 把整个 `./package/` 目录**拷贝到板端**（任选一种方式：U盘、`scp -r`、网线直传等）：
    ```bash
    # 假设板端开了 ssh，从下载机执行：
-   scp -r package root@192.168.234.200:/root/backpack_dashboard/backend/
+   scp -r package root@192.168.234.200:/opt/xjpt/backpack_dashboard/backend/
    ```
 
    ③ 在板端**离线安装**（pip 禁止访问网络索引，只从 `./package/` 找包）：
    ```bash
-   cd /root/backpack_dashboard/backend
+   cd /opt/xjpt/backpack_dashboard/backend
    pip3 install \
        --no-index \
        --find-links ./package \
@@ -129,7 +130,7 @@ backpack_dashboard/
 
 5. 启动（拉起 camera-init → 复用已有 mediamtx → ffmpeg 推流 → Agent）：
    ```bash
-   sudo bash /root/backpack_dashboard/backend/start.sh
+   sudo bash /opt/xjpt/backpack_dashboard/backend/start.sh
    ```
 6. Windows 笔记本用网线直连背包，手动配置同网段 IP（如 192.168.234.x），  
    浏览器打开 `http://192.168.234.200:8000`。
@@ -139,8 +140,8 @@ backpack_dashboard/
 | 项                 | 默认值                        | 说明                                                                      |
 | ----------------- | -------------------------- | ----------------------------------------------------------------------- |
 | `MODEM_DEV`       | `/dev/ttyUSB2`             | 4G 模块 AT 口（已现场确认为 ttyUSB2）                                              |
-| `SHT4X_APP`       | `/root/wenshidu/sht4x_app` | 温湿度程序路径                                                                 |
-| `LED_TEST_BIN`    | `/root/led/test_rgbrun`    | LED 闪烁程序                                                                |
+| `SHT4X_APP`       | `/opt/xjpt/wenshidu/sht4x_app` | 温湿度程序路径                                                                 |
+| `LED_TEST_BIN`    | `/opt/xjpt/led/test_rgbrun`    | LED 闪烁程序                                                                |
 | `BUTTON_MAP`      | SOS=639 / STOP=128         | **已用 evtest 实测**：code 639=未知键→SOS，code 128=KEY_STOP→STOP；若物理相反请交换两个环境变量 |
 | `FILL_LIGHT_GPIO` | `46`                       | 补光灯 GPIO；**设为 `-1` 可禁用**（该脚临时改作摄像头触发用时）                                 |
 | `CAM_TRIGGER_GPIO` | `-1`（未启用）                | 摄像头 2P 端子触发脚；**不可与 `FILL_LIGHT_GPIO` 同号**，同号时补光灯接口会直接拒绝执行 |
@@ -162,12 +163,12 @@ backpack_dashboard/
 ```bash
 # 方式 A：环境变量，随 start.sh 一起下发
 DOG_RTSP_URL='rtsp://<账号>:<密码>@192.168.234.1:8554/test' \
-  sudo bash /root/backpack_dashboard/backend/start.sh
+  sudo bash /opt/xjpt/backpack_dashboard/backend/start.sh
 
 # 方式 B：板端本地文件（推荐，单行明文，权限收紧）
 printf '%s\n' 'rtsp://<账号>:<密码>@192.168.234.1:8554/test' \
-  > /root/backpack_dashboard/backend/dog_rtsp_url
-chmod 600 /root/backpack_dashboard/backend/dog_rtsp_url
+  > /opt/xjpt/backpack_dashboard/backend/dog_rtsp_url
+chmod 600 /opt/xjpt/backpack_dashboard/backend/dog_rtsp_url
 ```
 
 - 密码里的 `#` / `!` 必须转义成 `%23` / `%21`；命令行里 URL 要用**单引号**。
@@ -351,7 +352,7 @@ curl -s http://127.0.0.1:8000/api/detect/status \
 触发多半是"抓一张静止图"或"发一个事件"，不会改变视频流。先用 `trigger_probe.py` 探明方向和作用：
 
 ```bash
-cd /root/backpack_dashboard/backend/tools
+cd /opt/xjpt/backpack_dashboard/backend/tools
 
 # ① 环境指纹：USB 接口构成（有没有 HID 接口）/ 输入设备 / UVC 控件 / 内核日志
 python3 trigger_probe.py --video /dev/video121
@@ -378,7 +379,7 @@ python3 trigger_probe.py --diff --video /dev/video121      # 不接 GPIO → 手
 工具：`backend/tools/gpio_short_trigger.py`
 
 ```bash
-cd /root/backpack_dashboard/backend/tools
+cd /opt/xjpt/backpack_dashboard/backend/tools
 
 # 0) 先看引脚现状（补光灯关灯后可能是 out+0 = 持续拉低 = 持续触发）
 python3 gpio_short_trigger.py --gpio 46 --status
@@ -414,7 +415,7 @@ python3 gpio_short_trigger.py --gpio 46 --mode high    # 空闲拉低 / 触发�
 也数不出张数。改用**在固定时间窗口内统计实际交付的帧数**——结论是数字，不用肉眼判断。
 
 ```bash
-cd /root/backpack_dashboard/backend/tools
+cd /opt/xjpt/backpack_dashboard/backend/tools
 
 # 一条命令跑完三段：基线 → 低频触发 2Hz → 高频触发 30Hz，并自动给出结论
 python3 trigger_frame_test.py --video /dev/video121 --gpio 46
@@ -490,7 +491,7 @@ FILL_LIGHT_GPIO=-1 python3 agent.py          # 或写进 start.sh 的环境变�
 时间精度专题：采集每路每帧的**微秒级到达时间戳**，量化四路的"同步散布"。
 
 ```bash
-cd /root/backpack_dashboard/backend/tools
+cd /opt/xjpt/backpack_dashboard/backend/tools
 
 # 四路采 10 秒（先小分辨率试 —— USB2 上四路 1080p 会超带宽）
 python3 multi_cam_timeline.py \
@@ -524,7 +525,7 @@ python3 multi_cam_timeline.py --cams <4路> --seconds 20 --gpio 46 --csv /root/t
 四路同步暂时不需要（网页演示够用），但如果想拿到"GPIO 触发时拍的那张图"，用这个工具：
 
 ```bash
-cd /root/backpack_dashboard/backend/tools
+cd /opt/xjpt/backpack_dashboard/backend/tools
 
 # ① 探测机制：列所有 video 节点能力 / USB 接口构成 / Still Image 描述符 / 相关 XU 控件
 python3 uvc_snapshot.py --probe --video /dev/video121

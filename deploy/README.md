@@ -200,7 +200,7 @@ ssh root@192.168.41.246 'cd /opt/robodog/client &&
 
 ## 二·补充、数据采集背包：实时视频 + AI（2026-11-14 上线）
 
-背包（`.246`，板端 `/root/261113/backpack_dashboard`，仓库 `business/backpack_dashboard/`）自带 4 路 USB + 机器狗前置 RTSP + 红外，
+背包（`.246`，板端 `/opt/xjpt/backpack_dashboard`，仓库 `business/backpack_dashboard/`）自带 4 路 USB + 机器狗前置 RTSP + 红外，
 板端 RKNN 单路识别。控制台新增「监控运维 → 实时视频」，但要分**三个组件**看：
 
 | 组件 | 跑在哪 | 作用 |
@@ -350,7 +350,7 @@ ssh root@39.107.55.13 'journalctl -u rust-admin-robodog -f | grep -E "backpack s
 > 按 `PUBLISHER_SILENCE` 判死丢房间，现场看到的就是「画面突然冻住」。
 >
 > 处置优先级：① 现场确认 4 路 USB 相机是否需要常驻编码（改成按需 / 降到 640x360@15 400k，
-> 脚本在 `/root/261113/backpack_dashboard`）；② 把 boot 的 CMA 提到 64~128MB（Rockchip
+> 脚本在 `/opt/xjpt/backpack_dashboard`）；② 把 boot 的 CMA 提到 64~128MB（Rockchip
 > Android 风格 boot，需现场/串口改 boot 配置，别远程动）；③ 别同时看多路（每路多一个转码）。
 > 中继侧已加的缓解：`-bf 0 -refs 1`（少占编码缓冲）+ 关键帧 1s + 按需起流。
 
@@ -455,7 +455,7 @@ ssh root@39.107.55.13 'printf "%s\n"   ROBODOG_BACKPACK_BROWSER_URL=http://192.1
   systemctl restart rust-admin-robodog'
 
 # 3) 板端：Agent 做成服务（开机自启 + 崩溃重启），并修掉 CORS 白名单
-scp business/backpack_dashboard/backend/agent.py root@192.168.41.246:/root/261113/backpack_dashboard/backend/
+scp business/backpack_dashboard/backend/agent.py root@192.168.41.246:/opt/xjpt/backpack_dashboard/backend/
 scp deploy/backpack-agent.service root@192.168.41.246:/etc/systemd/system/
 ssh root@192.168.41.246 'systemctl daemon-reload && systemctl enable --now backpack-agent'
 
