@@ -55,18 +55,18 @@ const DEVICE_STATUS_TAG_TYPE: Record<
 /** 「同步媒体」：长任务，下发后要靠 `mediaSyncStatus` 轮询才看得到结果 */
 export const MEDIA_SYNC_COMMAND = "同步媒体";
 
-/** 允许从中台发起的指令，与后端白名单、业务平台 `BUSINESS_COMMANDS` 对齐 */
-export const DEVICE_COMMANDS = [
-  "开始巡检",
-  "暂停任务",
-  "继续任务",
-  "召回充电",
-  "远程接管",
-  "释放接管",
-  // 把板端 `/media/media-data/picture` 里的航点 AI 存证图回传到「媒体资源」
-  // （目录/帧数在「参数配置」页维护，见 media_picture_dir / media_frames）
-  MEDIA_SYNC_COMMAND
-];
+/**
+ * 设备页「更多 → 下发指令」里暴露的指令。
+ *
+ * **只留「同步媒体」**：巡检启停、召回充电、远程接管/释放这些动作都在业务平台
+ * （现场控制台 / 遥控台）做，中台这边重复放一份容易两头操作打架。中台只保留
+ * 自己独有的那条——把板端 `/media/media-data/picture` 里的航点 AI 存证图回传到
+ * 「媒体资源」（目录/帧数在「参数配置」页维护，见 media_picture_dir / media_frames）。
+ *
+ * 后端白名单（`backend/.../device/handlers.rs::ALLOWED_COMMANDS`）没有跟着收窄：
+ * 接口保持兼容，老页面 / 脚本仍可调，只是中台页面不再展示。
+ */
+export const DEVICE_COMMANDS = [MEDIA_SYNC_COMMAND];
 
 /**
  * 幂等键：一次用户操作一个值，失败重试时复用同一个值，
