@@ -640,7 +640,9 @@ detect_jobs/<plan_id>/pt<point_index>/
 
 `media_dir` / `save_frames`：**媒体归档目录与固定帧数**（中台「参数配置」随
 `ai_start` 下发，缺省用 `MEDIA_DATA_DIR` / `DETECT_PLAN_SAVE_FRAMES`）。命中时除了写
-`detect_jobs/<plan_id>/pt<n>/`（临时存证，企业微信推完即删），还会把
+`detect_jobs/<plan_id>/pt<n>/`（临时存证，企业微信推完即删**单个航点**，任务终态 / 取消时
+设备客户端再把这个计划的目录**整个删掉**——没命中的航点 / 数量任务的检出不推图，只靠
+`ai_cleanup` 永远清不干净），还会把
 **检出数最大的前 N 帧**写进媒体归档目录，供中台设备页的「同步媒体」逐张回传：
 
 ```

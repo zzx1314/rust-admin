@@ -1163,6 +1163,16 @@ async fn run_client(
         info!("航点 AI 识别已关闭（--no-ai / ROBODOG_AI_ENABLED=0）");
     }
 
+    // 启动时兜一把残留：`detect_jobs` 下的计划目录本该在任务结束时删（`finish_plan`），
+    // 但客户端被 kill / 断电时收尾没跑到，那些目录就永远留在板子上。这里只清「早就
+    // 该走了」的（`STALE_PLAN_AGE`），不碰正在跑的和刚跑完的。
+    {
+        let ai = ai.clone();
+        tokio::spawn(async move {
+            ai.sweep_stale_plans().await;
+        });
+    }
+
     // 本体链路（可变）：断连后原地重建，业务 WebSocket 不受影响
     let body_ctx = BodyContext {
         config: Arc::new(config.clone()),
@@ -2021,6 +2031,17 @@ async fn handle_status_frame(
     // 识别失败只打日志，绝不影响巡检本身。
     if task.is_terminal() {
         ai.stop("任务终态").await;
+        // 任务跑完了（成功 / 失败 / 取消都一样）：整个计划的板端存证都没用了。
+        // 只靠「推过图就删这个航点」（`ai_cleanup`）清不干净——数量任务的检出不建单
+        // 不推群、一个都没命中的航点只留一份 result.json，它们等不到 `ai_cleanup`。
+        let plan_id = active
+            .lock()
+            .await
+            .as_ref()
+            .map(|task| task.task_code.clone());
+        if let Some(plan_id) = plan_id {
+            ai.finish_plan(&plan_id, "任务终态").await;
+        }
     } else if is_arrival_stage(&task.stage) {
         let current = active.lock().await.clone();
         if let (Some(current), Some(index)) = (current, index) {
@@ -2821,6 +2842,7 @@ async fn handle_server_message(
                     let state = state.clone();
                     let active = active.clone();
                     let runner_slot = local_runner.clone();
+                    let ai = ai.clone();
                     tokio::spawn(async move {
                         let outcome = runner.run().await;
                         let (status, message) = match outcome {
@@ -2845,6 +2867,8 @@ async fn handle_server_message(
                             Some(total_points),
                         )
                         .await;
+                        // 本地跑的路子同样要在任务收尾时清掉整个计划的板端存证
+                        ai.finish_plan(&code, "本地任务结束").await;
                         // 收尾必须把槽位里的 runner 摘掉：业务侧的下发地图 / 继续任务等
                         // 门禁都看这个槽位，残留的 runner 会让设备在任务早已结束（甚至
                         // 取消）之后仍报「设备正在执行任务」（2026-11-19 现场事故）。
@@ -2925,6 +2949,8 @@ async fn handle_server_message(
                 }
                 // 任务取消：识别窗口没有继续的意义（Agent 单路，别占着）
                 ai.stop("任务已取消").await;
+                // 取消也是计划收尾：板端整个计划目录都不需要了（理由同终态那条）
+                ai.finish_plan(task_code, "任务已取消").await;
                 *active.lock().await = None;
                 state.lock().await.current_task = None;
             }

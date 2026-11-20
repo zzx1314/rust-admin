@@ -60,6 +60,18 @@ const DEFAULT_JOBS_DIRS: [&str; 2] = [
     "/root/backpack_dashboard/backend/detect_jobs",
     "/root/261113/backpack_dashboard/backend/detect_jobs",
 ];
+/// 计划跑完之后等窗口收尾的重试节奏：任务终态时最后一个窗口可能还在收尾
+/// （停识别 → 板端 `_plan_flush` 落盘 → 扫盘补图，见 [`AiPatrol::finish`]），
+/// 那段代码还在读存证图，删早了会把还没推出去的图毁掉。
+const PLAN_CLEANUP_RETRY: Duration = Duration::from_secs(5);
+/// 计划收尾最多等这么久（24 × 5s）：窗口一直不收尾就先留着，交给下次启动的
+/// [`AiPatrol::sweep_stale_plans`]。
+const PLAN_CLEANUP_ATTEMPTS: usize = 24;
+/// 启动时兜底清理的年龄阈值：`detect_jobs` 下超过这么久没动过的计划目录，说明
+/// 「那次计划收尾没跑到」（客户端被 kill / 断电 / 老版本只删推过图的航点）。
+/// 这里全是临时存证（画框 JPG + `result.json`，图已经进过企业微信群），留 3 天
+/// 只是为了出问题还能人工翻一翻。
+const STALE_PLAN_AGE: Duration = Duration::from_secs(3 * 24 * 3600);
 /// 启停识别要等模型加载（板端实测 1~3s），给足余量
 const ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 /// SSE 单条缓冲上限：Agent 事件每条几十字节，超过说明流里没有 `\n\n`，丢弃重来
@@ -370,6 +382,14 @@ pub struct AiPatrol {
     /// 那张图毁掉——图只在板端，删了不可逆。所以窗口开着就先记账，收尾后再删
     /// （见 [`AiPatrol::cleanup_evidence`] / [`AiPatrol::finish`]）。
     pending_cleanup: Mutex<Vec<CleanupTarget>>,
+    /// 已经跑完（终态 / 取消）、等窗口收尾后要**整个**删掉的计划 id。
+    ///
+    /// 只删「推过图的航点」（`ai_cleanup`）清不干净：数量任务的检出只落任务时间线、
+    /// 一个都没命中的航点只留一份 `result.json`、图被拒 / 设备不在线也一样，这些点
+    /// 永远等不到 `ai_cleanup`，`detect_jobs/<计划>/` 就一直留在板子上。所以任务结束时
+    /// 把整个计划目录删掉（见 [`AiPatrol::finish_plan`]）；新一轮同名计划开始时把它
+    /// 从这份名单里摘掉，别把新跑出来的存证顺手删了。
+    ending_plans: Mutex<Vec<String>>,
 }
 
 impl AiPatrol {
@@ -410,6 +430,7 @@ impl AiPatrol {
             jobs_dir_pinned: jobs_dir.is_some(),
             jobs_dir: Mutex::new(jobs_dir),
             pending_cleanup: Mutex::new(Vec::new()),
+            ending_plans: Mutex::new(Vec::new()),
         }
     }
 
@@ -512,6 +533,12 @@ impl AiPatrol {
             return;
         }
         let cancel = Arc::new(Notify::new());
+        // 同一计划号又开窗了（任务号复用 / 重跑）：上一次收尾还没删的整个计划目录
+        // 现在装着**这一轮**的存证，不能再删（见 [`AiPatrol::ending_plans`]）。
+        self.ending_plans
+            .lock()
+            .await
+            .retain(|plan| plan != &start.plan_id);
         {
             let mut guard = self.window.lock().await;
             // 抢占：Agent 单路，先让旧窗口收尾（它自己判断要不要停 Agent）
@@ -1000,6 +1027,170 @@ impl AiPatrol {
         let _ = tokio::fs::remove_dir(Path::new(&root).join(plan_id.trim())).await;
     }
 
+    /// 计划（任务）跑完了（终态 / 取消）：把板端**整个计划目录**删掉。
+    ///
+    /// 为什么不能只靠 [`AiPatrol::cleanup_evidence`]：那条是「这一张证据图已经进群，
+    /// 删这个航点」，只有真的推过图的航点才有。数量任务的检出只写任务时间线（不建单
+    /// 不推群）、一个都没命中的航点只留一份 `result.json`、图被企业微信拒收 / 设备当时
+    /// 不在线——这些都等不到 `ai_cleanup`，`detect_jobs/<计划>/` 于是长期堆在板子上。
+    /// 而任务都跑完了，这些图已经没有任何用途（图只在板端、平台读不到）。
+    ///
+    /// 窗口还在收尾时不能当场删（收尾要停识别、板端 `_plan_flush` 落盘、再扫盘补图，
+    /// 删早了会把还没推出去的那张图毁掉），所以先记账、起个短任务等它跑完再删。
+    pub async fn finish_plan(self: &Arc<Self>, plan_id: &str, reason: &str) {
+        let plan_id = plan_id.trim();
+        if !safe_plan_id(plan_id) {
+            debug!("航点 AI 识别：计划 id 不合法（{plan_id:?}），跳过存证清理");
+            return;
+        }
+        {
+            let mut ending = self.ending_plans.lock().await;
+            if !ending.iter().any(|plan| plan == plan_id) {
+                ending.push(plan_id.to_string());
+            }
+        }
+        if self.plan_window_active(plan_id).await {
+            debug!("航点 AI 识别：计划 {plan_id} 的窗口还在收尾，存证等它跑完再删（{reason}）");
+            let this = self.clone();
+            let plan_id = plan_id.to_string();
+            let reason = reason.to_string();
+            tokio::spawn(async move { this.reap_plan_dir(plan_id, reason).await });
+            return;
+        }
+        self.ending_plans
+            .lock()
+            .await
+            .retain(|plan| plan != plan_id);
+        self.remove_plan_dir(plan_id, reason).await;
+    }
+
+    /// 计划目录是不是正被某个窗口用着（`pt<n>/` 还在写、还要扫图）
+    async fn plan_window_active(&self, plan_id: &str) -> bool {
+        self.window
+            .lock()
+            .await
+            .as_ref()
+            .map(|window| window.plan_id == plan_id)
+            .unwrap_or(false)
+    }
+
+    /// 等这一轮窗口收尾，再删整个计划目录（[`AiPatrol::finish_plan`] 的延迟分支）。
+    async fn reap_plan_dir(&self, plan_id: String, reason: String) {
+        for _ in 0..PLAN_CLEANUP_ATTEMPTS {
+            // 新一轮同名计划开始了：这次跑出来的存证不能删
+            if !self
+                .ending_plans
+                .lock()
+                .await
+                .iter()
+                .any(|plan| plan == &plan_id)
+            {
+                return;
+            }
+            if !self.plan_window_active(&plan_id).await {
+                break;
+            }
+            tokio::time::sleep(PLAN_CLEANUP_RETRY).await;
+        }
+        if self.plan_window_active(&plan_id).await {
+            warn!("航点 AI 识别：计划 {plan_id} 的窗口迟迟不收尾，存证先留着（下次启动兜底清理）");
+            return;
+        }
+        self.ending_plans
+            .lock()
+            .await
+            .retain(|plan| plan != &plan_id);
+        self.remove_plan_dir(&plan_id, &reason).await;
+    }
+
+    /// 真删 `<存证根>/<计划>/`（整个计划，含从没推过图的航点）
+    async fn remove_plan_dir(&self, plan_id: &str, reason: &str) {
+        if !safe_plan_id(plan_id) {
+            return;
+        }
+        let Some(root) = self.jobs_root().await else {
+            debug!("航点 AI 识别：找不到存证根目录，跳过清理计划 {plan_id}");
+            return;
+        };
+        let dir = Path::new(&root).join(plan_id.trim());
+        match tokio::fs::remove_dir_all(&dir).await {
+            Ok(()) => info!(
+                "航点 AI 识别：已清理板端计划存证 {}（{reason}）",
+                dir.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                debug!("航点 AI 识别：板端计划存证已经不在了（{}）", dir.display())
+            }
+            Err(error) => warn!(
+                "航点 AI 识别：清理板端计划存证失败（{}）: {error}",
+                dir.display()
+            ),
+        }
+    }
+
+    /// 客户端启动时的兜底清理：`detect_jobs` 下超过 [`STALE_PLAN_AGE`] 没动过的
+    /// 目录直接删掉（返回删了几个）。
+    ///
+    /// 正常路径是 [`AiPatrol::finish_plan`] 在任务结束时清；这里兜的是「那次收尾没
+    /// 跑到」——客户端中途被 kill / 断电 / 还是老版本（只删推过图的航点），板子上的
+    /// `detect_jobs` 只增不减，很快就会把盘写满。
+    pub async fn sweep_stale_plans(&self) -> usize {
+        self.sweep_plans_older_than(STALE_PLAN_AGE).await
+    }
+
+    /// 按年龄清残留（`age` 只是给单测用的入口）
+    async fn sweep_plans_older_than(&self, age: Duration) -> usize {
+        let Some(root) = self.jobs_root().await else {
+            return 0;
+        };
+        let now = SystemTime::now();
+        let Ok(mut entries) = tokio::fs::read_dir(&root).await else {
+            return 0;
+        };
+        let mut removed = 0usize;
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if !entry.file_type().await.map(|kind| kind.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !safe_plan_id(&name) {
+                continue;
+            }
+            // 正在跑 / 刚跑完还没收尾的计划不能动
+            if self.plan_window_active(&name).await
+                || self
+                    .ending_plans
+                    .lock()
+                    .await
+                    .iter()
+                    .any(|plan| plan == &name)
+            {
+                continue;
+            }
+            let Some(last_touch) = dir_last_touch(&path).await else {
+                continue;
+            };
+            if now.duration_since(last_touch).unwrap_or_default() < age {
+                continue;
+            }
+            match tokio::fs::remove_dir_all(&path).await {
+                Ok(()) => {
+                    removed += 1;
+                    info!("航点 AI 识别：清理残留的计划存证 {}", path.display());
+                }
+                Err(error) => warn!(
+                    "航点 AI 识别：清理残留的计划存证失败（{}）: {error}",
+                    path.display()
+                ),
+            }
+        }
+        if removed > 0 {
+            info!("航点 AI 识别：启动兜底清理了 {removed} 个残留的计划存证目录");
+        }
+        removed
+    }
+
     /// 本轮窗口的一张命中帧：（板端路径, base64）。
     ///
     /// 这是「拿不到 `plan_hit` 的 path 时」的退路：扫板端存证目录
@@ -1318,8 +1509,44 @@ fn point_dir(root: &str, plan_id: &str, point_index: i64) -> Option<std::path::P
     )
 }
 
-/// 存证目录里「本轮写下的」最新一张图（JPG/PNG）。
+/// 存证目录「最后一次动过」的时间：取自己、直接子目录、以及子目录里文件的 mtime 最大值。
 ///
+/// 为什么不只看目录自己的 mtime：计划目录（`detect_jobs/<计划>/`）只在增删 `pt<n>/`
+/// 时变，同一计划每轮巡检都是在同样的航点上**覆盖写**图（`pt<n>/` 和 `<计划>/` 的
+/// mtime 都不动），只看目录会把「今天还在用」的计划当成几天前的残留删掉。
+async fn dir_last_touch(dir: &Path) -> Option<SystemTime> {
+    let newest_of = |a: Option<SystemTime>, b: SystemTime| Some(a.map_or(b, |prev| prev.max(b)));
+    let mut newest = tokio::fs::metadata(dir)
+        .await
+        .ok()
+        .and_then(|meta| meta.modified().ok());
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        return newest;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if let Ok(Ok(time)) = entry.metadata().await.map(|meta| meta.modified()) {
+            newest = newest_of(newest, time);
+        }
+        if !entry
+            .file_type()
+            .await
+            .map(|kind| kind.is_dir())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if let Ok(mut inner) = tokio::fs::read_dir(entry.path()).await {
+            while let Ok(Some(file)) = inner.next_entry().await {
+                if let Ok(Ok(time)) = file.metadata().await.map(|meta| meta.modified()) {
+                    newest = newest_of(newest, time);
+                }
+            }
+        }
+    }
+    newest
+}
+
+/// 存证目录里「本轮写下的」最新一张图（JPG/PNG）。///
 /// 只认 mtime ≥ `since` 的文件：同一航点每轮巡检覆盖同名文件，不卡时间就会把
 /// **上一轮**的图当成这一帧的证据发给群里（比没图更糟）。
 async fn newest_evidence_file(dir: &Path, since: SystemTime) -> Option<String> {
@@ -2532,6 +2759,92 @@ mod agent_flow {
             assert!(point_dir(root, bad, 0).is_none(), "{bad:?} 不能被拼进路径");
         }
         assert!(point_dir(root, "TK-1", -1).is_none(), "航点下标不能是负数");
+    }
+
+    /// 任务跑完：整个计划目录都删，包括**从没推过图**的航点（数量任务的检出不建单、
+    /// 一个都没命中的航点只留 `result.json`）—— 它们永远等不到 `ai_cleanup`。
+    #[tokio::test]
+    async fn finish_plan_removes_the_whole_plan_dir() {
+        let root = temp_jobs_dir("plan-end");
+        let pt0 = root.join("TK-1").join("pt0");
+        let pt1 = root.join("TK-1").join("pt1");
+        let other = root.join("TK-2").join("pt0");
+        for dir in [&pt0, &pt1, &other] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("result.json"), b"{}").unwrap();
+        }
+        std::fs::write(pt0.join("dogcam_1.jpg"), [0xFF_u8, 0xD8, 0xFF]).unwrap();
+        let ai = Arc::new(AiPatrol::with_jobs_dir(
+            "http://127.0.0.1:9",
+            true,
+            Some(root.to_string_lossy().to_string()),
+        ));
+
+        ai.finish_plan("TK-1", "单测").await;
+        assert!(!root.join("TK-1").exists(), "整个计划目录要删干净");
+        assert!(other.exists(), "别的计划不能动");
+        assert!(root.exists(), "存证根本身不能动");
+        assert!(ai.ending_plans.lock().await.is_empty(), "删完要把待清理标记摘掉");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 窗口还在收尾（停识别 → 板端 flush 落盘 → 扫盘补图）时不能当场删：
+    /// 那几张图还要读出来推群。先记账，等窗口跑完再删。
+    #[tokio::test]
+    async fn finish_plan_while_the_window_is_open_defers_to_the_reaper() {
+        let root = temp_jobs_dir("plan-defer");
+        let pt0 = root.join("TK-1").join("pt0");
+        std::fs::create_dir_all(&pt0).unwrap();
+        std::fs::write(pt0.join("dogcam_1.jpg"), [0xFF_u8, 0xD8, 0xFF]).unwrap();
+        let ai = Arc::new(AiPatrol::with_jobs_dir(
+            "http://127.0.0.1:9",
+            true,
+            Some(root.to_string_lossy().to_string()),
+        ));
+        *ai.window.lock().await = Some(Window {
+            id: "AIW-1".to_string(),
+            task_code: "TK-1".to_string(),
+            plan_id: "TK-1".to_string(),
+            point_index: 0,
+            cancel: Arc::new(Notify::new()),
+        });
+
+        ai.finish_plan("TK-1", "单测").await;
+        assert!(pt0.exists(), "窗口还开着就不能删（图还没推出去）");
+        assert_eq!(
+            ai.ending_plans.lock().await.clone(),
+            vec!["TK-1".to_string()],
+            "要记账，等收尾再删"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 启动兜底：只清「早就该删」的残留，正在跑的 / 刚建的不能动
+    #[tokio::test]
+    async fn sweep_removes_only_stale_plan_dirs() {
+        let root = temp_jobs_dir("sweep");
+        let stale = root.join("TK-OLD").join("pt0");
+        let fresh = root.join("TK-NEW").join("pt0");
+        for dir in [&stale, &fresh] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("result.json"), b"{}").unwrap();
+        }
+        let ai = AiPatrol::with_jobs_dir(
+            "http://127.0.0.1:9",
+            true,
+            Some(root.to_string_lossy().to_string()),
+        );
+
+        assert_eq!(ai.sweep_plans_older_than(Duration::from_secs(3600)).await, 0);
+        assert!(stale.exists() && fresh.exists(), "刚写下的存证不能被当残留");
+
+        assert_eq!(ai.sweep_plans_older_than(Duration::ZERO).await, 2);
+        assert!(!stale.exists() && !fresh.exists());
+        assert!(root.exists(), "存证根本身不能动");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn temp_jobs_dir(tag: &str) -> std::path::PathBuf {

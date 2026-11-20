@@ -1455,6 +1455,10 @@ AI 可对除红外外的五路开启，画框方式二选一：
   `ai_cleanup {planId, pointIndex}`，客户端删掉 `detect_jobs/<计划ID>/pt<航点>/`
   （画框 JPG + `result.json`，计划目录空了连它一起删）。窗口还开着时客户端先记账、
   等收尾（停识别 → 扫盘补图 → `ai_end`）之后再删，避免把还没推出去的图毁掉。
+  **计划跑完删整个目录**：上面那条只覆盖「推过图的航点」，没命中的航点 / 数量任务的检出 /
+  图被拒的都等不到它。所以任务终态 / 取消时客户端调 `AiPatrol::finish_plan` 把
+  `detect_jobs/<计划ID>/` 整个删掉（窗口还在收尾就先记账等它跑完；同计划号重跑会撤销），
+  启动时 `AiPatrol::sweep_stale_plans` 再清一把超过 3 天没动过的残留。
 - 分析与后续路线（遥测、SOS 告警、中继、录像）见
   [`docs/backpack-video-integration.md`](docs/backpack-video-integration.md)。
 

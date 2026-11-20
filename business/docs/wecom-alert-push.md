@@ -437,9 +437,19 @@ notify::evidence_image()（校验）→ Notice.image
      其余一律拒绝（删目录不可逆）。
   要清理哪一轮由告警的结构化去重键反推（`ai:<设备>:<任务>:<航点下标>:<what>`），设备以键里
   那个为准（报警的那个客户端，存证在它的盘上）；非 AI 告警（`fault:` / `hb:` / `ctrl:`）没有
-  存证可删。`count` 任务的「检出」本来就不落告警（只进任务时间线），所以那类航点不会被清，
-  攒图主要来自它们——结论告警（数量不一致）带图时照样会清，实在要兜底就在板端调
-  `evidence.cleanup_old(days)`。
+  存证可删。
+- **计划跑完就删整个计划目录**（2026-11-21 起）：`ai_cleanup` 只覆盖「推过图的那个航点」，
+  `count` 任务的检出（只进任务时间线、不建单不推群）、一个都没命中的航点、图被拒 / 设备当时
+  不在线——这些点永远等不到 `ai_cleanup`，`detect_jobs/<计划>/` 就一直堆在板子上，越攒越多。
+  所以客户端在**任务终态 / 取消**时调 `AiPatrol::finish_plan`，把 `detect_jobs/<计划>/`
+  整个删掉（`remove_plan_dir`）；本地跑的任务（`RouteRunner` 收尾）同样清。三条安全线：
+  1. **等窗口收尾**：任务终态那一刻最后一个窗口可能还在收尾（停识别 → 板端 `_plan_flush`
+     落盘 → 扫盘补图），先记账（`AiPatrol::ending_plans`）再起个短任务轮询，窗口跑完才删；
+  2. **新一轮同名计划开始就撤销**（`AiPatrol::start` 从 `ending_plans` 里摘掉）：任务号复用 /
+     重跑时目录里装的是新存证，不能删；
+  3. **启动兜底清扫**（`AiPatrol::sweep_stale_plans`，`STALE_PLAN_AGE` = 3 天）：收尾没跑到
+     （客户端被 kill / 断电 / 老版本）的残留，超过 3 天没动过才删，正在跑的不碰。
+  板端 `evidence.cleanup_old(days)` 仍然**不自动调用**（那是另一个进程，判断不了「计划跑完没」）。
 - **图片发失败不影响正文**：卡片已入群，图片只打一行 WARN（`wecom: 证据图推送失败（正文已发送）`）。
 - **服务端直连板端 Agent 的模式（`ROBODOG_BACKPACK_URL`）没有图**：服务端读不到板端
   磁盘，隧道白名单也没取文件接口，只能发卡片（现场以客户端代调为主，不受影响）。
@@ -465,7 +475,10 @@ notify::evidence_image()（校验）→ Notice.image
   设备 WS 收到 `ai_cleanup`）、`alert_without_image_keeps_the_board_evidence` +
   `rejected_evidence_image_keeps_the_board_evidence`（没图 / 图被拒 → 不删）、
   `client ai_patrol::tests::ai_cleanup_removes_the_point_dir_after_the_image_is_pushed` +
-  `ai_cleanup_while_the_window_is_open_is_deferred` + `evidence_paths_refuse_unsafe_plan_ids`。
+  `ai_cleanup_while_the_window_is_open_is_deferred` + `evidence_paths_refuse_unsafe_plan_ids`、
+  `client ai_patrol::agent_flow::finish_plan_removes_the_whole_plan_dir`（任务跑完整删计划目录）+
+  `finish_plan_while_the_window_is_open_defers_to_the_reaper`（窗口还在收尾就先记账）+
+  `sweep_removes_only_stale_plan_dirs`（启动兜底只清旧残留）。
 
 ### @ 提醒那条
 有责任人手机号（或开了 `wecom_mention_all`）时，**卡片前面**还会有一条一行 `text`

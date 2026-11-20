@@ -249,6 +249,17 @@ pt1「Trash over flow」卡片发了、图没发就是踩在这里）。服务�
 `client ai_patrol::tests::ai_cleanup_removes_the_point_dir_after_the_image_is_pushed` /
 `ai_cleanup_while_the_window_is_open_is_deferred` / `evidence_paths_refuse_unsafe_plan_ids`。
 
+**计划跑完就删整个计划目录**（2026-11-21 起）：`ai_cleanup` 只覆盖「推过图的那个航点」，
+数量任务的检出、一个都没命中的航点、图被拒 / 设备当时不在线的都等不到它，
+`detect_jobs/<计划>/` 就一直堆在板子上。所以客户端在**任务终态 / 取消**时调
+`AiPatrol::finish_plan`（本地 `RouteRunner` 收尾同样调），整个删 `detect_jobs/<计划>/`：
+窗口还在收尾就记账（`AiPatrol::ending_plans`）等它跑完再删；新一轮同名计划开始就把标记撤销
+（`AiPatrol::start`），别删新存证；客户端启动时 `AiPatrol::sweep_stale_plans` 再兜一把
+「收尾没跑到」的残留（`STALE_PLAN_AGE` = 3 天没动过才删）。回归用例：
+`client ai_patrol::agent_flow::finish_plan_removes_the_whole_plan_dir` /
+`finish_plan_while_the_window_is_open_defers_to_the_reaper` /
+`sweep_removes_only_stale_plan_dirs`。
+
 `backend/run.sh` exports the required secret (and probes Redis for
 `APP_REDIS_PASSWORD`) before running `cargo run`. Set `APP_REDIS_PASSWORD`
 when Redis enforces `requirepass` (the compose one uses `123456`), otherwise
