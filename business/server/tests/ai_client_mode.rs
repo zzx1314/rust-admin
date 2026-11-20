@@ -403,6 +403,14 @@ async fn event_descriptions(state: &AppState) -> Vec<String> {
         .expect("查任务事件失败")
 }
 
+/// AI 事件标题（`AI 识别 · 航点「…」`）：文案里不该出现 0 基航点下标。
+async fn event_titles(state: &AppState) -> Vec<String> {
+    sqlx::query_scalar("SELECT title FROM task_events WHERE event_type = 'ai' ORDER BY id")
+        .fetch_all(&state.db)
+        .await
+        .expect("查任务事件失败")
+}
+
 /// 客户端上报 `ai_point` → 服务端按同一套规则解析并下发 `ai_start`，
 /// 检出落库（阈值 + 类别去重），`ai_end` 清空窗口态。
 #[tokio::test]
@@ -736,6 +744,13 @@ async fn count_mismatch_alert_is_recorded_once() {
         "证据图路径要带上，便于回溯: {}",
         contents[0]
     );
+    // 文案里**不写**航点下标（页面上航点从 P1 开始编号，写「航点 0」会让人
+    // 以为凭空多了一个点／少了航点），只写航点名。
+    assert!(
+        contents[0].contains("航点「新航点 1」") && !contents[0].contains("航点 0"),
+        "告警文案只写航点名、不带 0 基下标: {}",
+        contents[0]
+    );
 
     // 3) 同一窗口重复上报：不重复落告警
     ws.send(Message::Text(
@@ -760,6 +775,12 @@ async fn count_mismatch_alert_is_recorded_once() {
     assert!(
         events.iter().any(|text| text.contains("数量核对不一致")),
         "任务时间线应记录数量不一致: {events:?}"
+    );
+    // 时间线标题同理：只写航点名，不写 0 基下标
+    let titles = event_titles(&state).await;
+    assert!(
+        titles.iter().any(|text| text == "AI 识别 · 航点「新航点 1」"),
+        "事件标题只写航点名: {titles:?}"
     );
 
     ai_patrol::global().stop("用例结束").await;

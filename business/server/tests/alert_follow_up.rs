@@ -120,7 +120,7 @@ async fn insert_count_alert(state: &AppState, code: &str, found: i64) -> String 
     )
     .bind(code)
     .bind(format!(
-        "AI 识别数量核对不一致：任务「办公区域例行巡检」航点 0「新航点 1」检查 3 个，实际检出 {found} 个"
+        "AI 识别数量核对不一致：任务「办公区域例行巡检」航点「新航点 1」检查 3 个，实际检出 {found} 个"
     ))
     .bind(device)
     .bind("ai:RD-1:TK-1112-11:0:count")
@@ -224,7 +224,7 @@ async fn detection_confidence_does_not_trigger_follow_up() {
         )
         .bind(code)
         .bind(format!(
-            "AI 识别：任务「办公区域例行巡检」航点 0「新航点 1」检出 extinguisher（置信度 {conf}）"
+            "AI 识别：任务「办公区域例行巡检」航点「新航点 1」检出 extinguisher（置信度 {conf}）"
         ))
         .bind(device)
         .bind("ai:RD-1:TK-1112-11:0:extinguisher")
@@ -254,7 +254,7 @@ async fn insert_detect_alert(state: &AppState, code: &str, conf: &str) {
     )
     .bind(code)
     .bind(format!(
-        "AI 识别：任务「办公区域例行巡检」航点 0「新航点 1」检出 extinguisher（置信度 {conf}）"
+        "AI 识别：任务「办公区域例行巡检」航点「新航点 1」检出 extinguisher（置信度 {conf}）"
     ))
     .bind(device)
     .bind("ai:RD-1:TK-1112-11:0:extinguisher")

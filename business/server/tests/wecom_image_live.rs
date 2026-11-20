@@ -73,7 +73,7 @@ async fn push_real_alert_card_with_evidence_image() {
     let evidence =
         std::env::var("ROBODOG_LIVE_EVIDENCE").expect("必须设置 ROBODOG_LIVE_EVIDENCE");
     let body = std::env::var("ROBODOG_LIVE_BODY").unwrap_or_else(|_| {
-        "AI 识别数量核对不一致：任务「办公区域例行巡检」航点 0「新航点 1」\
+        "AI 识别数量核对不一致：任务「办公区域例行巡检」航点「新航点 1」\
          检查 5 个，实际检出 2 个（证据：/root/261113/backpack_dashboard/backend/\
          detect_jobs/TK-1112-11/pt0/dogcam_20261118_105828.jpg）"
             .to_string()

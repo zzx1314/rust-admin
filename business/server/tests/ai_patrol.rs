@@ -371,6 +371,12 @@ async fn ai_action_at_waypoint_starts_detect_and_records_alert() {
         "告警内容缺航点名: {}",
         alerts[0].1
     );
+    // 文案不写航点下标（页面上航点从 P1 编号，`航点 0` 会被误读成「多了个点」）
+    assert!(
+        alerts[0].1.contains("航点「配电柜」") && !alerts[0].1.contains("航点 0"),
+        "告警文案只写航点名、不带 0 基下标: {}",
+        alerts[0].1
+    );
 
     // 任务时间线也留一条，现场排查「这条告警属于哪个点」
     let events: Vec<(String, String)> =
@@ -382,6 +388,10 @@ async fn ai_action_at_waypoint_starts_detect_and_records_alert() {
         events.iter().filter(|(kind, _)| kind == "ai").collect();
     assert_eq!(ai_events.len(), 1, "应写一条 ai 事件，实际 {events:?}");
     assert!(ai_events[0].1.contains("配电柜"), "事件标题缺航点名");
+    assert_eq!(
+        ai_events[0].1, "AI 识别 · 航点「配电柜」",
+        "事件标题只写航点名，不写 0 基下标"
+    );
 
     // 状态接口能看到窗口与已上报类别
     let status = ai_patrol::global().status().await;

@@ -17,6 +17,11 @@
 //! 表现为「AI 窗口刚开 3~5s 就被『到达无 AI 动作的航点』关掉、每 5s 开关一次」。
 //! 只有老客户端（不发 `waypointIndex`）才退回 `pointIndex`。
 //!
+//! ⚠️ 这个下标是**内部**用的：查路线 `points[]`、拼去重键 `ai_dedup_key`、打日志。
+//! 告警正文与任务时间线里**不写它**，只写航点名（`航点「新航点 5」`）——页面上航点
+//! 按 1 基编号（P1、P2…），写成 `航点 3` 会让人以为凭空多了一个点（2026-11-19
+//! 「华郅9层巡检」那条 `航点 3「新航点 5」` 就是 P4，名字里的 5 是删点后没重编号的残留）。
+//!
 //! 动作怎么配：路线编辑器「执行参数」直接取**「实时视频 → AI 识别」的模型目录**，
 //! 写成动作的 `scene`（模型包 id）+ `labels`（勾选的类别 `name`）+ `threshold`（置信度）；
 //! 没有这两个字段的历史数据仍按 `param` 里的中文关键词猜场景（兼容老路线）。
@@ -1235,8 +1240,8 @@ async fn record_hit(
     let at = now();
     let key = ai_dedup_key(config, label);
     let mut content = format!(
-        "AI 识别：任务「{}」航点 {}「{}」检出 {}（置信度 {:.2}）",
-        config.task_name, config.point_index, config.point_name, label, conf
+        "AI 识别：任务「{}」航点「{}」检出 {}（置信度 {:.2}）",
+        config.task_name, config.point_name, label, conf
     );
     if !evidence.trim().is_empty() {
         content.push_str(&format!("（证据：{}）", evidence.trim()));
@@ -1297,8 +1302,8 @@ async fn record_count_alert(
 ) {
     let at = now();
     let mut content = format!(
-        "AI 识别数量核对不一致：任务「{}」航点 {}「{}」检查 {} 个，实际检出 {} 个",
-        config.task_name, config.point_index, config.point_name, expect, found
+        "AI 识别数量核对不一致：任务「{}」航点「{}」检查 {} 个，实际检出 {} 个",
+        config.task_name, config.point_name, expect, found
     );
     if !evidence.trim().is_empty() {
         content.push_str(&format!("（证据：{}）", evidence.trim()));
@@ -1334,9 +1339,8 @@ async fn record_missing_alert(state: &AppState, config: &WindowConfig) {
         config.labels.join("/")
     };
     let content = format!(
-        "AI 识别未检出：任务「{}」航点 {}「{}」窗口 {}s 内没找到 {}（场景 {}）",
+        "AI 识别未检出：任务「{}」航点「{}」窗口 {}s 内没找到 {}（场景 {}）",
         config.task_name,
-        config.point_index,
         config.point_name,
         config.secs,
         if targets.trim().is_empty() {
@@ -1635,10 +1639,7 @@ async fn insert_task_event(
          VALUES ('ai', ?1, ?2, ?3,
                  (SELECT id FROM tasks WHERE task_code = ?4), ?5)",
     )
-    .bind(format!(
-        "AI 识别 · 航点 {}「{}」",
-        config.point_index, config.point_name
-    ))
+    .bind(format!("AI 识别 · 航点「{}」", config.point_name))
     .bind(content)
     .bind(config.device_id)
     .bind(&config.task_code)

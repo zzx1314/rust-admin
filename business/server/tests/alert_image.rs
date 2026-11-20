@@ -123,7 +123,7 @@ async fn insert_count_alert(state: &AppState, code: &str) -> String {
          VALUES (?1, '警告', ?2, ?3, '未处理', '2026-11-18 09:20:00', '2026-11-18 09:20:00', ?4)",
     )
     .bind(code)
-    .bind("AI 识别数量核对不一致：任务「A区上午例行巡检」航点 0「新航点 1」检查 3 个，实际检出 1 个")
+    .bind("AI 识别数量核对不一致：任务「A区上午例行巡检」航点「新航点 1」检查 3 个，实际检出 1 个")
     .bind(device)
     .bind(format!("ai:{device}:TK-1:0:count"))
     .execute(&state.db)

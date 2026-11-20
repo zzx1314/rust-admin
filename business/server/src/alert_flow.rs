@@ -633,7 +633,7 @@ async fn create_work_order(
 /// 从数量核对告警的内容里取「实际检出 N 个」。
 ///
 /// 内容形如：
-/// `AI 识别数量核对不一致：任务「…」航点 0「…」检查 3 个，实际检出 2 个（证据：…）`
+/// `AI 识别数量核对不一致：任务「…」航点「…」检查 3 个，实际检出 2 个（证据：…）`
 fn found_count_of(content: &str) -> Option<i64> {
     let rest = content.split("实际检出 ").nth(1)?;
     let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
@@ -829,8 +829,8 @@ mod tests {
     /// 全被「同类在办工单」吞掉，现场以为「配了检查 3 个却没告警」。
     #[test]
     fn count_change_only_when_number_moves() {
-        let first = "AI 识别数量核对不一致：任务「巡检」航点 0「A」检查 3 个，实际检出 1 个";
-        let second = "AI 识别数量核对不一致：任务「巡检」航点 0「A」检查 3 个，实际检出 2 个";
+        let first = "AI 识别数量核对不一致：任务「巡检」航点「A」检查 3 个，实际检出 1 个";
+        let second = "AI 识别数量核对不一致：任务「巡检」航点「A」检查 3 个，实际检出 2 个";
 
         assert_eq!(
             count_change(Some(first), second),
@@ -845,7 +845,7 @@ mod tests {
         assert_eq!(count_change(None, second), None);
         assert_eq!(
             count_change(
-                Some("AI 识别：任务「巡检」航点 0「A」检出 extinguisher（置信度 0.89）"),
+                Some("AI 识别：任务「巡检」航点「A」检出 extinguisher（置信度 0.89）"),
                 second
             ),
             None
@@ -853,13 +853,13 @@ mod tests {
         // 普通检出（置信度抖动）不补推
         assert_eq!(
             count_change(
-                Some("AI 识别：任务「巡检」航点 0「A」检出 extinguisher（置信度 0.41）"),
-                "AI 识别：任务「巡检」航点 0「A」检出 extinguisher（置信度 0.77）"
+                Some("AI 识别：任务「巡检」航点「A」检出 extinguisher（置信度 0.41）"),
+                "AI 识别：任务「巡检」航点「A」检出 extinguisher（置信度 0.77）"
             ),
             None
         );
         // 「一个都没找到」也算数值（0 个）
-        let zero = "AI 识别数量核对不一致：任务「巡检」航点 0「A」检查 3 个，实际检出 0 个";
+        let zero = "AI 识别数量核对不一致：任务「巡检」航点「A」检查 3 个，实际检出 0 个";
         assert_eq!(
             count_change(Some(zero), second),
             Some(CountChange {
