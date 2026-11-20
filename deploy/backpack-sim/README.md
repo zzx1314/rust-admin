@@ -142,7 +142,8 @@ curl -s -XPOST 127.0.0.1:8000/api/sim/flush                                     
 
 计划模式（`detect/start` 带 `plan_id`）下，Agent 会按真板子的节拍走：先出 `detect`，
 `SIM_PLAN_HIT_DELAY`（默认 4.5s，真机实测 4.6s）后把命中帧画框落盘到
-`data/detect_jobs/<plan_id>/pt<idx>/`，再发 `plan_hit`（带 `evidence` / `found_count` /
+`data/detect_jobs/<plan_id>/pt<idx>/`（同时把 N 帧写到 `data/media-data/picture/<plan_id>/pt<idx>/`
+供「同步媒体」回传，`SIM_MEDIA_DIR` / `SIM_PLAN_SAVE_FRAMES` 可改），再发 `plan_hit`（带 `evidence` / `found_count` /
 `expect_count` / `count_alert`）。停识别时如果命中还在「采样中」，会像板端 `_plan_flush`
 一样先落盘再返回——这就是客户端「图晚到、`ai_evidence` 只补图」那条链路的复现口。
 

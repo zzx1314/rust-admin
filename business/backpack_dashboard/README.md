@@ -633,10 +633,24 @@ detect_jobs/<plan_id>/pt<point_index>/
 
 | 接口 | 入参 | 说明 |
 |---|---|---|
-| `POST /api/detect/start` | `plan_id`、`point_index`、`check_type`、`expect_count` | 航点窗口走这个（业务客户端代调） |
+| `POST /api/detect/start` | `plan_id`、`point_index`、`check_type`、`expect_count`、`media_dir`、`save_frames` | 航点窗口走这个（业务客户端代调） |
 | `POST /api/detect/config` | 同上 | 操作员已手动开着识别时热更新计划，不重启识别 |
 | `POST /api/detect/plan` | 同上 | 只登记/换计划，不动识别参数；`POST /api/detect/plan/clear` 清掉 |
 | `POST /api/detect/job` | 同上 + 原 job 参数 | 任务化下发也走计划目录存证 |
+
+`media_dir` / `save_frames`：**媒体归档目录与固定帧数**（中台「参数配置」随
+`ai_start` 下发，缺省用 `MEDIA_DATA_DIR` / `DETECT_PLAN_SAVE_FRAMES`）。命中时除了写
+`detect_jobs/<plan_id>/pt<n>/`（临时存证，企业微信推完即删），还会把
+**检出数最大的前 N 帧**写进媒体归档目录，供中台设备页的「同步媒体」逐张回传：
+
+```
+/media/media-data/picture/<plan_id>/pt<point_index>/
+  <cam>_01_<时间戳>.jpg …     # N 帧，都画了中文框，第 1 张是结论帧
+  result.json                 # 同 detect_jobs 的结论 + media_dir / media_frames
+```
+
+两边目录必须指向同一份配置（中台参数配置是唯一真源）：板端按它**写**，
+设备客户端按它**扫描回传**，改了中台配置两边一起变。
 
 #### 两类任务（`check_type`）
 
@@ -653,6 +667,8 @@ detect_jobs/<plan_id>/pt<point_index>/
   `DETECT_MAX_BOXES` 截断影响），与框上文字「火焰 3处」里的 3 是同一份口径。
 - 数量核对取「命中后连续 `DETECT_PLAN_COUNT_SAMPLE`（默认 3）帧里各类别的最大值」：
   单帧遮挡 / 运动模糊少画一个框不会误报「数量不一致」；存证图也用那一帧。
+- 采样帧数取 `max(DETECT_PLAN_COUNT_SAMPLE, DETECT_PLAN_SAVE_FRAMES)`：要留 3 帧媒体
+  归档就不能只采 1 帧。
 
 SSE 事件（每个计划 × 航点各一次）：
 
