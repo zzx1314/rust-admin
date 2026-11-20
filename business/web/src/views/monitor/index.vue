@@ -498,7 +498,10 @@ function handleDetect(event: BackpackDetectEvent) {
 }
 
 function onPhase(value: { phase: WhepPhase; message: string }) {
-  phase.value = value;
+  // 「这一路还没流」（板端按需起 ffmpeg）是常态，不是重连错误：归到 connecting，
+  // 别让页面弹「视频流重连中…」（`lib/whep.ts` 的 waiting 阶段）
+  phase.value =
+    value.phase === "waiting" ? { phase: "connecting", message: value.message } : value;
 }
 
 /** 换了通道 / 换了观看方式，上一路的尺寸不能挂在新的画面上 */

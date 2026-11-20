@@ -54,15 +54,6 @@ const emit = defineEmits<{
 
 type Status = "idle" | "loading" | "playing" | "retrying" | "error";
 
-/**
- * 板端上报的媒体通路（`/api/backpack/video/state` 的 `transport` 字段）。
- *
- * 平台侧只有 WebRTC 一条路，这个值只用来识别「那台板子的 relay 还是老版本」：
- * 老版本报 `ws`（媒体走已删除的 FLV 通路），这时直接给出升级提示，
- * 而不是让人对着「起流中」干等一个永远不会来的流。`null` = 还没上报（常见于
- * 刚触发起流的那几百毫秒），照常起 WHEP。
- */
-const boardTransport = ref<"rtsp" | "ws" | null>(null);
 /** WebRTC 会话句柄（`lib/whep.ts` 自带指数退避重连，我们只负责建与拆） */
 let whep: WhepSession | null = null;
 /**
@@ -322,9 +313,15 @@ function attachWhep(el: HTMLVideoElement, seq: number) {
         if (status.value !== "retrying") status.value = "loading";
         return;
       }
+      if (detail.phase === "waiting") {
+        // mediamtx 回「这一路还没有流」：板端正在起 ffmpeg（按需推流 1~7s），是常态。
+        // 角标继续走「起流中 · 已等 Ns」，别显示成「重连中 N」——那会让现场以为是故障。
+        errorText.value = detail.message;
+        retryAttempt.value = 0;
+        if (status.value !== "loading") status.value = "loading";
+        return;
+      }
       if (detail.phase === "retry") {
-        // 「路径上还没有 publisher」是起流中的常态（板端刚被叫起来推流），不是故障：
-        // 文案由 `lib/whep.ts` 翻成人话，前几次只改角标。
         retryAttempt.value += 1;
         errorText.value = detail.message;
         status.value = retryAttempt.value >= HARD_ERROR_AFTER ? "error" : "retrying";
@@ -419,18 +416,25 @@ async function attach() {
   waitingSecs.value = 0;
   armSlowStartHint();
 
-  // 板端 relay 老版本还报 `ws`（媒体走已删除的 FLV 通路）：它推上来的字节会被平台丢弃，
-  // WHEP 永远等不到流。这里直接把话说明白，别让人对着「起流中」干等到超时。
-  boardTransport.value = await probeTransport();
-  if (seq !== attachSeq) return;
-  if (boardTransport.value === "ws") {
-    fail(
-      "板端 relay 还是老版本（媒体走已删除的 FLV 通路）：升级背包上的 backpack-relay 后重试"
-    );
-    return;
-  }
-
+  // **立刻**起 WHEP。以前这里先 `await` 一次 `/video/state` 探测、再起流：白花一个
+  // RTT，而且冷启动那段时间正好和板端起 ffmpeg 的 2s 重叠，等于把首帧又往后推。
   attachWhep(el, seq);
+  void checkStaleBoard(seq);
+}
+
+/**
+ * 后台确认板端是不是老版本（还在往 WS 推 FLV）。
+ *
+ * 平台已只支持 WebRTC：老板子永远不会出现在 mediamtx 上，WHEP 只会一直「还没流」，
+ * 让人对着「起流中」干等。所以探测放到后台跑，探到 `ws` 再把话说清楚。
+ */
+async function checkStaleBoard(seq: number) {
+  const transport = await probeTransport();
+  if (seq !== attachSeq) return;
+  if (transport !== "ws") return;
+  teardownPlayer();
+  closePresence();
+  fail("板端 relay 还是老版本（媒体走已删除的 FLV 通路）：升级背包上的 backpack-relay 后重试");
 }
 
 /* ---------------- 播放状态 ---------------- */

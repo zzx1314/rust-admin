@@ -19,7 +19,15 @@
 
 import { isPrivateOrigin } from "@/utils/runtime";
 
-export type WhepPhase = "connecting" | "live" | "retry" | "closed";
+/**
+ * - `connecting`：正在协商（首连或轮询中的每一次尝试）
+ * - `waiting`   ：**协商请求被拒是因为「这一路还没有流」**（mediamtx 回 404）——
+ *                 板端按需起 ffmpeg 要 1~7s，这是常态，不是故障
+ * - `live`      ：`ontrack` 到货，画面交给 `<video>`
+ * - `retry`     ：真失败（ICE 失败 / 5xx / 网络），走指数退避
+ * - `closed`    ：调用方已关闭
+ */
+export type WhepPhase = "connecting" | "waiting" | "live" | "retry" | "closed";
 
 export interface WhepDetail {
   phase: WhepPhase;
@@ -40,8 +48,28 @@ export interface WhepOptions {
   iceWaitMs?: number;
 }
 
-const DEFAULT_ICE_WAIT_MS = 2500;
+/**
+ * 等 ICE 收集的上限。
+ *
+ * 只影响「POST 之前能收集到多少候选」。平台 mediamtx 是 ICE-lite，而且它的候选地址
+ * 在 **answer** 里；浏览器自己的地址根本不需要进 SDP（服务端按收到的 STUN 学出
+ * `prflx` 地址，现场日志里就是 `remote candidate: prflx/udp/...`）。所以这里不需要
+ * 等满 2.5s —— host 候选通常几十毫秒就齐了。
+ */
+const DEFAULT_ICE_WAIT_MS = 1200;
 const MAX_BACKOFF_MS = 8000;
+/**
+ * 「这一路还没流」时的探测间隔。
+ *
+ * mediamtx 在 path 上没有 publisher（或还没出关键帧）时对 WHEP 回
+ * `404 no stream is available`。板端是**按需起 ffmpeg**：冷启动实测 ~2s 才出首帧
+ * （`起流 2.0s 后出首帧`），低档位 GOP 更长。这段等待必须贴着轮询：
+ * 以前用 1s→2s→4s 的指数退避，等于白等 3s，现场就是「点开要 5 秒才出画」
+ * （2026-11-20 09:14 / 09:15 两次实测的日志：404 → 1s → 404 → 2s → 成功）。
+ */
+const WAIT_POLL_MS = 350;
+/** 轮询上限：350ms × 90 ≈ 31s，足够覆盖冷启动 + 一次板端重启，之后按真失败处理 */
+const WAIT_MAX_ATTEMPTS = 90;
 
 function waitIceGathering(peer: RTCPeerConnection, timeoutMs: number): Promise<void> {
   if (peer.iceGatheringState === "complete") return Promise.resolve();
@@ -57,6 +85,27 @@ function waitIceGathering(peer: RTCPeerConnection, timeoutMs: number): Promise<v
     }
     peer.addEventListener("icegatheringstatechange", check);
   });
+}
+
+/**
+ * 这个地址能不能问出 ICE 服务器。
+ *
+ * 只有「浏览器直连板端 mediamtx」那条路能问出来。走平台反代
+ * （`/api/backpack/whep/…`）时问不出来：
+ * 1. 全站的 `CorsLayer` 会先吃掉**任何** `OPTIONS`（回 200 空响应），请求根本到不了反代
+ *    （见 `server/tests/video_relay.rs::whep_proxy_rejects_…` 的注释）；
+ * 2. 反代本身只转发 SDP 与 `Location`，不转发 `Link`。
+ *
+ * 所以这两类地址直接跳过 —— 现在「还没流」是 350ms 一跳的轮询，每次多一个 RTT 就白花。
+ */
+function canAskIceServers(url: string): boolean {
+  if (url.startsWith("/api/backpack/whep/")) return false;
+  try {
+    const target = new URL(url, window.location.origin);
+    return target.origin !== window.location.origin;
+  } catch {
+    return false;
+  }
 }
 
 /** 从 WHEP 的 `OPTIONS` 响应里取 ICE 服务器；取不到就只靠 host candidate（局域网够用） */
@@ -160,7 +209,10 @@ function whepFailure(status: number, url: string): string {
 export function startWhep(options: WhepOptions): WhepSession {
   const iceWaitMs = options.iceWaitMs ?? DEFAULT_ICE_WAIT_MS;
   let closed = false;
+  /** 真失败的重连次数（决定指数退避与 UI 上的「重连中 N」） */
   let attempt = 0;
+  /** 「还没流」的轮询次数（不计入重连，UI 也不该显示成故障） */
+  let waitAttempts = 0;
   let peer: RTCPeerConnection | null = null;
   let sessionUrl = "";
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -202,6 +254,37 @@ export function startWhep(options: WhepOptions): WhepSession {
     }, delay);
   }
 
+  /**
+   * 「这一路还没有流」→ 快速轮询，而不是当故障退避。
+   *
+   * 判据只有一个：mediamtx 回 `404 no stream is available on path '…'`。它意味着
+   * 板端 relay 还没来得及起 ffmpeg（按需推流），或者 ffmpeg 起来了但还没吐关键帧。
+   * 这时候立刻重试（`WAIT_POLL_MS`）比指数退避快一个数量级，而且不该让界面闪
+   * 「重连中 1 / 2」—— 那不是故障。
+   *
+   * 超上限（≈31s）说明板端真的起不来（源 RTSP 没流 / relay 挂了），再交给
+   * `scheduleRetry` 按真失败处理，让界面显示错误与退避。
+   */
+  function scheduleWait(reason: string) {
+    if (closed) return;
+    cleanupPeer();
+    endSession();
+    options.video.srcObject = null;
+    waitAttempts += 1;
+    if (waitAttempts > WAIT_MAX_ATTEMPTS) {
+      waitAttempts = 0;
+      scheduleRetry(
+        `等了 ${Math.round((WAIT_MAX_ATTEMPTS * WAIT_POLL_MS) / 1000)}s 这一路还没有流（板端起不来？）`
+      );
+      return;
+    }
+    emit("waiting", reason);
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      void connect();
+    }, WAIT_POLL_MS);
+  }
+
   async function connect() {
     if (closed) return;
     emit("connecting", attempt ? `第 ${attempt + 1} 次重连…` : "");
@@ -212,7 +295,9 @@ export function startWhep(options: WhepOptions): WhepSession {
     // 服务端只看到 `session … deadline exceeded`（2026-11-19 现场就是这么误判成网络问题的）。
     const absoluteUrl = new URL(options.url, window.location.origin).toString();
     try {
-      const next = new RTCPeerConnection({ iceServers: await iceServersOf(absoluteUrl) });
+      const next = new RTCPeerConnection({
+        iceServers: canAskIceServers(absoluteUrl) ? await iceServersOf(absoluteUrl) : []
+      });
       peer = next;
       // 只要视频：背包推流本身没有音轨
       next.addTransceiver("video", { direction: "recvonly" });
@@ -222,6 +307,7 @@ export function startWhep(options: WhepOptions): WhepSession {
           event.streams[0] ?? new MediaStream([event.track]);
         void options.video.play().catch(() => undefined);
         attempt = 0;
+        waitAttempts = 0;
         emit("live");
       };
       next.onconnectionstatechange = () => {
@@ -250,6 +336,11 @@ export function startWhep(options: WhepOptions): WhepSession {
         body: next.localDescription?.sdp ?? ""
       });
       if (!response.ok) {
+        // 404 = 「这一路还没有流」（板端起流中），按常态轮询；其它状态才是真失败
+        if (response.status === 404) {
+          scheduleWait(whepFailure(response.status, absoluteUrl));
+          return;
+        }
         scheduleRetry(whepFailure(response.status, absoluteUrl));
         return;
       }
