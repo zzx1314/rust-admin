@@ -149,9 +149,10 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 `POST /api/dogInternal/media/upload`（`x-service-token`）→ 中台**解包后仍一张一条**
 写入 `dog_media` + 落盘 `<upload_dir>/media/<设备>/<计划>/pt<n>/`，回 `results[]`；
 客户端**只删 `ok` 的条目**（中台按图片 sha256 去重，`created=false` 也算成功），
-单张模式保留给老客户端。这些图是**训练数据**，媒体页只做下载（不做预览）：
-单张 `GET /api/dogMedia/{id}/file`，批量 `GET /api/dogMedia/export`（勾选 ids 或
-按设备/计划/来源/时间筛选，服务端打 zip + `manifest.json`，上限 200 张 / 100MB）。
+单张模式保留给老客户端。这些图是**训练数据**：媒体页以下载为主（单张
+`GET /api/dogMedia/{id}/file`，批量 `GET /api/dogMedia/export`——勾选 ids 或按
+设备/计划/来源/时间筛选，服务端打 zip + `manifest.json`，上限 200 张 / 100MB），
+同时保留单张预览 `GET /api/dogMedia/{id}/image`（JSON + base64，排查画框用）。
 中台配置是唯一真源（60s 缓存），不要再在板端/客户端各配一份；改这条链路先读
 `business/backpack_dashboard/AGENTS.md` 的「存证目录」一节与
 `DOG.md` §2/§3。

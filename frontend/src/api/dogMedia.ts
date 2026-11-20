@@ -13,7 +13,8 @@ const dogMediaUrls = {
   save: "/api/dogMedia",
   update: "/api/dogMedia/",
   delete: `/api/dogMedia/`,
-  // 训练数据下载：单张（attachment）与批量 zip
+  // 单张预览（data URL）与训练数据下载（单张 / 批量 zip）
+  image: "/api/dogMedia/",
   file: "/api/dogMedia/",
   export: "/api/dogMedia/export"
 };
@@ -28,6 +29,22 @@ export const dogMediaUpdate = (id: string | number, param?: object) =>
   http.axiosPut<Result>(dogMediaUrls.update + id, param);
 export const dogMediaDelete = (id: string | number) =>
   http.axiosDelete<Result>(dogMediaUrls.delete + id);
+export interface MediaImageResult {
+  id: number;
+  mediaName: string;
+  contentType: string;
+  size: number;
+  /** `data:image/jpeg;base64,...`，直接给 <img src> */
+  image: string;
+}
+
+/** 单张预览：图片内容（data URL），列表里逐张看一眼用。 */
+export const dogMediaImage = (id: string | number) =>
+  http.axiosGetRequest<{ code: number; msg: string; data?: MediaImageResult }>(
+    dogMediaUrls.image + id + "/image",
+    {}
+  );
+
 /** 触发浏览器保存一个 blob（训练数据下载用）。 */
 function saveBlob(blob: Blob, filename: string) {
   const url = window.URL.createObjectURL(blob);

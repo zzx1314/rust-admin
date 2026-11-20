@@ -1,6 +1,6 @@
 use crate::api::AppState;
 use crate::business::dog::media::domain::{
-    CreateMediaRequest, ExportMediaQuery, MediaPageQuery, MediaVO, UpdateMediaRequest,
+    CreateMediaRequest, ExportMediaQuery, MediaImageVO, MediaPageQuery, MediaVO, UpdateMediaRequest,
 };
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
@@ -68,6 +68,20 @@ pub async fn delete_media_handler(
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     state.dog_media_service.delete(params.id).await?;
     Ok(Json(ApiResponse::ok(())))
+}
+
+/// `GET /api/dogMedia/{id}/image` — 单张预览（JSON + base64 data URL）。
+///
+/// 列表里逐张看一眼用（图糊没糊、框画偏没偏）；批量下载走 `/export`。
+pub async fn get_media_image_handler(
+    State(state): State<AppState>,
+    Path(params): Path<IdParam>,
+) -> Result<Json<ApiResponse<MediaImageVO>>, AppError> {
+    let image = state
+        .dog_media_service
+        .load_image(params.id, &state.upload_dir)
+        .await?;
+    Ok(Json(ApiResponse::ok(image)))
 }
 
 /// `GET /api/dogMedia/{id}/file` — 下载单张图片（原始字节，`attachment`）。

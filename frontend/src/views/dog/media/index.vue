@@ -38,7 +38,13 @@ const {
   selectedIds,
   exporting,
   handleDownload,
-  handleExport
+  handleExport,
+  previewVisible,
+  previewLoading,
+  previewImage,
+  previewTitle,
+  handlePreview,
+  closePreview
 } = useDogMedia();
 </script>
 <template>
@@ -99,6 +105,14 @@ const {
               link
               type="primary"
               :size="size"
+              @click="handlePreview(row)"
+              >预览</el-button
+            >
+            <el-button
+              class="reset-margin"
+              link
+              type="primary"
+              :size="size"
               @click="handleDownload(row)"
               >下载</el-button
             >
@@ -122,5 +136,36 @@ const {
       @confirm-error="handleSubmitError"
       @confirm="handleSubmit"
     />
+
+    <!-- 单张预览：内容来自 /api/dogMedia/{id}/image（base64 data URL） -->
+    <el-dialog
+      v-model="previewVisible"
+      :title="previewTitle"
+      width="760px"
+      destroy-on-close
+      @close="closePreview"
+    >
+      <div v-loading="previewLoading" class="media-preview">
+        <img v-if="previewImage" :src="previewImage" alt="媒体预览" />
+      </div>
+      <template #footer>
+        <el-button @click="closePreview">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
+
+<style scoped>
+.media-preview {
+  min-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.media-preview img {
+  max-width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+}
+</style>

@@ -1,11 +1,12 @@
 use crate::business::dog::config::service::DogConfigService;
 use crate::business::dog::media::domain::{
-    CreateMediaRequest, DogMedia, ExportMediaQuery, MediaPageQuery, MediaVO, UpdateMediaRequest,
-    UploadMediaRequest,
+    CreateMediaRequest, DogMedia, ExportMediaQuery, MediaImageVO, MediaPageQuery, MediaVO,
+    UpdateMediaRequest, UploadMediaRequest,
 };
 use crate::business::dog::media::repository::SeaOrmDogMediaRepository;
 use crate::common::error::AppError;
 use crate::common::pagination::PageResponse;
+use base64::Engine;
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Write};
 use std::path::Path;
@@ -295,6 +296,28 @@ impl DogMediaService {
             .unwrap_or("jpg")
             .to_ascii_lowercase();
         Ok((bytes, format!("media-{id}.{extension}"), content_type))
+    }
+
+    /// 单张预览（`GET /api/dogMedia/{id}/image`）：图片内容 + 元数据。
+    ///
+    /// 和地图预览同一套约定（JSON + base64 data URL），前端 `<img>` 直接用；
+    /// 只做单张，批量训练数据仍走 [`Self::export_zip`]。
+    pub async fn load_image(&self, id: i64, upload_root: &Path) -> Result<MediaImageVO, AppError> {
+        let media = self.get_by_id(id).await?;
+        let (bytes, _name, content_type) = self.load_file(id, upload_root).await?;
+        if bytes.len() > MEDIA_IMAGE_MAX_BYTES {
+            return Err(AppError::BadRequest(
+                "媒体文件超过 8MB 上限，不做预览（可直接下载）".to_string(),
+            ));
+        }
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Ok(MediaImageVO {
+            id: media.id,
+            media_name: media.media_name,
+            content_type: content_type.clone(),
+            size: i64::try_from(bytes.len()).unwrap_or(i64::MAX),
+            image: format!("data:{content_type};base64,{encoded}"),
+        })
     }
 
     /// 批量下载：把筛选到的图片打成一个 zip（`Stored`，JPEG 不再压缩）。

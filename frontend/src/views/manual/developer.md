@@ -117,14 +117,15 @@ Authorization: Bearer <access_token>
 
 ### 4.2 媒体 `/api/dogMedia`
 
-| 接口                    | 方法               | 说明                                                                |
-| ----------------------- | ------------------ | ------------------------------------------------------------------- |
-| `/api/dogMedia/getPage` | GET                | `mediaName`、`mediaType`、`deviceCode`、`planId`、`source`、`beginTime`、`endTime`、`current`、`size` |
-| `/api/dogMedia/getAll`  | GET                | 全量列表                                                            |
-| `/api/dogMedia`         | POST               | 新增，`mediaName` 必填                                              |
-| `/api/dogMedia/{id}`    | GET / PUT / DELETE | 详情 / 修改 / 软删除                                                |
-| `/api/dogMedia/{id}/file`  | GET             | 下载单张原图（`attachment`，`media-<id>.jpg`）；手工登记（无文件）返回 404 |
-| `/api/dogMedia/export`     | GET             | 批量下载 zip：`ids=1,2,3`（勾选优先）或 `deviceCode`/`planId`/`source`/`mediaName`/`beginTime`/`endTime`/`size`；包内是原图 + `manifest.json`；上限 200 张 / 100MB |
+| 接口                       | 方法               | 说明                                                                                                                                                               |
+| -------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/api/dogMedia/getPage`    | GET                | `mediaName`、`mediaType`、`deviceCode`、`planId`、`source`、`beginTime`、`endTime`、`current`、`size`                                                              |
+| `/api/dogMedia/getAll`     | GET                | 全量列表                                                                                                                                                           |
+| `/api/dogMedia`            | POST               | 新增，`mediaName` 必填                                                                                                                                             |
+| `/api/dogMedia/{id}`       | GET / PUT / DELETE | 详情 / 修改 / 软删除                                                                                                                                               |
+| `/api/dogMedia/{id}/image` | GET                | 单张预览：`{ image: "data:image/jpeg;base64,...", contentType, size }`；手工登记（无文件）返回 404                                                                 |
+| `/api/dogMedia/{id}/file`  | GET                | 下载单张原图（`attachment`，`media-<id>.jpg`）；手工登记（无文件）返回 404                                                                                         |
+| `/api/dogMedia/export`     | GET                | 批量下载 zip：`ids=1,2,3`（勾选优先）或 `deviceCode`/`planId`/`source`/`mediaName`/`beginTime`/`endTime`/`size`；包内是原图 + `manifest.json`；上限 200 张 / 100MB |
 
 字段：`mediaName`、`mediaType`、`mediaPath`、`mediaSize`、`remarks`、`createTime`、`updateTime`，
 以及设备回传带上的来源字段 `deviceCode`、`parkCode`、`planId`、`pointIndex`、`capturedAt`、`source`。
@@ -144,9 +145,9 @@ Authorization: Bearer <access_token>
 
 内部接口（业务平台专用，共享服务令牌 `x-service-token`）：
 
-| 接口 | 方法 | 说明 |
-| ---- | ---- | ---- |
-| `/api/dogInternal/media/config` | GET | `{ pictureDir, frames }`（业务平台组装 `ai_start` 时取，缓存 60s） |
+| 接口                            | 方法 | 说明                                                                                                                                                                                                                                                                                                |
+| ------------------------------- | ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/api/dogInternal/media/config` | GET  | `{ pictureDir, frames }`（业务平台组装 `ai_start` 时取，缓存 60s）                                                                                                                                                                                                                                  |
 | `/api/dogInternal/media/upload` | POST | multipart。**单张**：`file`=JPG/PNG + `mediaInfo{deviceCode,planId,pointIndex,capturedAt,source}` → `{created, media}`；**压缩包**：`file`=zip + `mediaInfo{deviceCode,entries:[{name,planId,pointIndex,capturedAt,remarks}]}` → `{created,total,failed,results:[{name,ok,created,mediaId,error}]}` |
 
 ### 4.3 参数配置 `/api/dogConfig`

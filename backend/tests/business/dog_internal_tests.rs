@@ -809,7 +809,21 @@ async fn media_download_returns_file_and_export_bundles_manifest() {
     assert_eq!(file_name, format!("media-{}.jpg", ids[0]));
     assert_eq!(content_type, "image/jpeg");
 
-    // 手工登记且没有文件的记录：不进 zip，只记在 manifest 的 error 里
+    // 单张预览：JSON + base64 data URL（列表演示与现场排查用，批量仍走 export）
+    let preview = service
+        .load_image(ids[0], &upload_dir)
+        .await
+        .expect("单张预览");
+    assert_eq!(preview.content_type, "image/jpeg");
+    assert_eq!(preview.size as usize, jpeg_bytes(1).len());
+    assert!(
+        preview.image.starts_with("data:image/jpeg;base64,"),
+        "预览应是 data URL：{}",
+        preview.image
+    );
+
+    // 手工登记且没有文件的记录：预览与导出都给明确的 404/跳过，而不是 500
+    //（放在下面创建，见 preview 断言）
     let manual = service
         .create(CreateMediaRequest {
             media_name: "手工登记".to_string(),

@@ -65,6 +65,20 @@ impl MediaPageQuery {
     }
 }
 
+/// `GET /api/dogMedia/{id}/image` — 单张预览（data URL）。
+///
+/// 这些图是训练数据，页面以「下载」为主，但列表里逐张看一眼仍是最快的排查方式
+/// （图是不是糊了 / 框画偏了），所以保留预览；批量仍走 `/export` 打 zip。
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaImageVO {
+    pub id: i64,
+    pub media_name: String,
+    pub content_type: String,
+    pub size: i64,
+    pub image: String,
+}
+
 /// 批量下载（训练数据）的筛选条件。
 ///
 /// 支持两种用法，优先级：`ids`（页面勾选）> 其余筛选项（按条件导出，便于

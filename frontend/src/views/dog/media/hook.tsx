@@ -8,7 +8,8 @@ import {
   dogMediaUpdate,
   dogMediaDelete,
   dogMediaDownload,
-  dogMediaExport
+  dogMediaExport,
+  dogMediaImage
 } from "@/api/dogMedia";
 import { CREATE_TIME_FIELDS, type DogSearchField } from "../components/search";
 import { SUCCESS } from "@/api/base";
@@ -88,7 +89,34 @@ export function useDogMedia() {
     endTime: ""
   });
 
-  // 这些图是训练数据：页面只提供「下载」，不做逐张预览。
+  // 预览：单张走 /api/dogMedia/{id}/image（JSON + base64 data URL），
+  // 列表里看一眼图糊没糊 / 框偏没偏；手工登记的历史记录没有落盘文件，接口 404。
+  const previewVisible = ref(false);
+  const previewLoading = ref(false);
+  const previewImage = ref("");
+  const previewTitle = ref("");
+  async function handlePreview(row) {
+    previewVisible.value = true;
+    previewLoading.value = true;
+    previewImage.value = "";
+    previewTitle.value = `${row.mediaName}（${MEDIA_SOURCE_LABEL[row.source] ?? "手工上传"}）`;
+    const { code, data, msg } = await dogMediaImage(row.id);
+    if (code === SUCCESS && data?.image) {
+      previewImage.value = data.image;
+    } else {
+      message(msg || "这张记录没有可预览的图片文件（可直接下载或走批量导出）", {
+        type: "warning"
+      });
+      previewVisible.value = false;
+    }
+    previewLoading.value = false;
+  }
+  function closePreview() {
+    previewVisible.value = false;
+    previewImage.value = "";
+  }
+
+  // 这些图是训练数据：除了单张预览，还提供下载（单张 / 批量 zip）。
   // 单张走 /api/dogMedia/{id}/file；批量走 /api/dogMedia/export（勾选优先，
   // 否则按当前筛选条件），服务端打包成 zip（原图 + manifest.json）。
   const selectedIds = ref<number[]>([]);
@@ -253,6 +281,12 @@ export function useDogMedia() {
     selectedIds,
     exporting,
     handleDownload,
-    handleExport
+    handleExport,
+    previewVisible,
+    previewLoading,
+    previewImage,
+    previewTitle,
+    handlePreview,
+    closePreview
   };
 }
