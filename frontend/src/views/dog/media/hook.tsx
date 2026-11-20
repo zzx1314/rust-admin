@@ -1,4 +1,5 @@
 import { nextTick, onMounted, reactive, ref } from "vue";
+import { ElMessageBox } from "element-plus";
 import type { PaginationProps } from "@pureadmin/table";
 import type { FormRules } from "element-plus";
 import type { FieldValues } from "plus-pro-components";
@@ -58,7 +59,7 @@ export function useDogMedia() {
     { label: "文件大小", prop: "mediaSize", width: 110 },
     { label: "备注", prop: "remarks", minWidth: 150 },
     { label: "创建时间", prop: "createTime", width: 170 },
-    { label: "操作", fixed: "right", width: 220, slot: "operation" }
+    { label: "操作", fixed: "right", width: 170, slot: "operation" }
   ];
 
   const queryFields: DogSearchField[] = [
@@ -178,7 +179,16 @@ export function useDogMedia() {
     addForm.value = JSON.parse(JSON.stringify(row));
     openDia("修改媒体", formEl);
   }
-  function handleDelete(row) {
+  async function handleDelete(row) {
+    try {
+      await ElMessageBox.confirm(`确认删除媒体「${row.mediaName}」？`, "提示", {
+        type: "warning",
+        confirmButtonText: "删除",
+        cancelButtonText: "取消"
+      });
+    } catch {
+      return;
+    }
     dogMediaDelete(row.id).then(res => {
       if (res.code === SUCCESS) {
         message("删除成功！", { type: "success" });
@@ -187,6 +197,25 @@ export function useDogMedia() {
         message(res.msg, { type: "error" });
       }
     });
+  }
+
+  /**
+   * 行内「更多」菜单：下载 / 修改 / 删除。
+   *
+   * 操作列只留「预览 + 更多」两个控件，按需展开，避免一行堆四个按钮。
+   */
+  function handleRowCommand(command: string, row: any, formEl?: any) {
+    if (command === "download") {
+      handleDownload(row);
+      return;
+    }
+    if (command === "edit") {
+      handleUpdate(row, formEl);
+      return;
+    }
+    if (command === "delete") {
+      handleDelete(row);
+    }
   }
   function handleSizeChange(val: number) {
     pagination.pageSize = val;
@@ -282,6 +311,7 @@ export function useDogMedia() {
     exporting,
     handleDownload,
     handleExport,
+    handleRowCommand,
     previewVisible,
     previewLoading,
     previewImage,

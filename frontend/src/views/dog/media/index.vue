@@ -4,7 +4,7 @@ import type { FormInstance } from "element-plus";
 import { useDogMedia } from "./hook";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 import AddFill from "~icons/ri/add-circle-line";
-import DogTableActions from "@/components/DogUI/DogTableActions.vue";
+import More from "~icons/ep/more-filled";
 import { PureTableBar } from "@/components/RePureTableBar";
 import { useCollectorMediaForm } from "./form";
 import PureTable from "@pureadmin/table";
@@ -39,6 +39,7 @@ const {
   exporting,
   handleDownload,
   handleExport,
+  handleRowCommand,
   previewVisible,
   previewLoading,
   previewImage,
@@ -99,6 +100,7 @@ const {
           @page-size-change="handleSizeChange"
           @page-current-change="handleCurrentChange"
         >
+          <!-- 操作列：只留「预览」+「更多」（下载原图 / 修改 / 删除） -->
           <template #operation="{ row }">
             <el-button
               class="reset-margin"
@@ -108,20 +110,32 @@ const {
               @click="handlePreview(row)"
               >预览</el-button
             >
-            <el-button
-              class="reset-margin"
-              link
-              type="primary"
-              :size="size"
-              @click="handleDownload(row)"
-              >下载</el-button
+            <el-dropdown
+              trigger="click"
+              @command="
+                (command: string) => handleRowCommand(command, row, addFormRef)
+              "
             >
-            <DogTableActions
-              :row="row"
-              :size="size"
-              @edit="handleUpdate(row, addFormRef)"
-              @delete="handleDelete(row)"
-            />
+              <el-button
+                class="reset-margin"
+                link
+                type="primary"
+                :size="size"
+                :icon="useRenderIcon(More)"
+                >更多</el-button
+              >
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="download"
+                    >下载原图</el-dropdown-item
+                  >
+                  <el-dropdown-item command="edit" divided
+                    >修改</el-dropdown-item
+                  >
+                  <el-dropdown-item command="delete">删除</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </template>
         </pure-table>
       </template>
