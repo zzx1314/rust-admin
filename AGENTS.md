@@ -181,7 +181,14 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 8/24）/ `command_result`（扫几张、删几张、目录是否清空）经业务平台回写
 `POST /api/dogInternal/media/sync-status`（`x-service-token`，只认 `同步媒体` 那一条
 审计 + 设备编号要对得上），设备页轮询 `GET /api/dogDevice/{id}/mediaSyncStatus`；
-`pending` 超过 10 分钟没有回报显示「无回报」。回归：
+`pending` 超过 10 分钟没有回报显示「无回报」。两个 2026-11-20 发布联调时踩到的坑：
+① `requestId` 在设备侧是 **`params.params.requestId`**（业务平台 `push_command` 会再包一层），
+`client main::command_request_id` 少认这一层就会「审计一直停在已下发」（回归
+`command_result_tests::reads_request_id_when_the_platform_wraps_params_twice`）；
+② 进度与结论是两条**各自 spawn 的异步上报**，晚到的进度会把「已完成：扫描 9 张…」
+盖成「同步中：已上传 9/9 张」——所以 `audit::update_from_device` 里进度只允许改
+`pending` 行（回归 `dog_command_control_tests::media_sync_dispatch_stays_pending_until_the_device_reports`
+最后一段）。回归：
 `dog_command_control_tests::media_sync_dispatch_stays_pending_until_the_device_reports`、
 `dog_internal_tests::media_sync_status_report_updates_only_its_own_audit`、
 `client media_sync::tests::collect_files_drains_every_frame_of_the_point`。

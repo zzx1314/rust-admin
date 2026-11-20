@@ -82,6 +82,11 @@ pub async fn find_latest(
 ///
 /// `status = None` 表示「进度，不改结论」（仍停在 pending）；给了 `status`
 /// 就是终态（succeeded / failed）。
+///
+/// **进度只允许改还在 pending 的行**：进度与最终结论是两条独立的异步上报
+/// （业务平台各自 spawn 一次 HTTP），晚到的进度会把「已完成：扫描 16 张…」
+/// 盖成「同步中：已上传 16/16 张」。2026-11-20 现场联调就撞到了这个覆盖，
+/// 所以这里用 `?2 IS NOT NULL OR status = 'pending'` 把迟到的进度丢掉。
 pub async fn update_from_device(
     conn: &DatabaseConnection,
     request_id: &str,
@@ -98,7 +103,8 @@ pub async fn update_from_device(
                  result = COALESCE(?3, result), \
                  message = COALESCE(?4, message), \
                  update_time = ?5 \
-             WHERE is_deleted = 0 AND request_id = ?1",
+             WHERE is_deleted = 0 AND request_id = ?1 \
+               AND (?2 IS NOT NULL OR status = 'pending')",
             vec![
                 Value::from(request_id.trim()),
                 Value::String(status.map(|text| Box::new(text.to_string()))),

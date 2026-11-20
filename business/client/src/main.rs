@@ -3513,11 +3513,20 @@ async fn send(tx: &mpsc::Sender<WsMessage>, msg_type: &str, payload: Value) {
     let _ = tx.send(msg).await;
 }
 
-/// 从平台下发指令里取 `requestId`（业务平台把它放在 `params.requestId`）。
+/// 从平台下发指令里取 `requestId`。
+///
+/// 两种形态都要认：
+/// - 「下发地图」这类由业务平台自己组参数：`params.requestId`；
+/// - 中台转发过来的普通指令走 `push_command`，业务平台会把中台参数**再包一层**：
+///   `params.params.requestId`（与 `media_sync::parse_params` 兼容的两层一致）。
+///   少了这一层，`同步媒体` 的进度/结论回执会因为取不到 requestId 直接不发，
+///   中台审计就一直停在「已下发」。
 fn command_request_id(msg: &WsMessage) -> Option<String> {
-    msg.payload
-        .get("params")
+    let params = msg.payload.get("params");
+    params
+        .and_then(|params| params.get("params"))
         .and_then(|params| params.get("requestId"))
+        .or_else(|| params.and_then(|params| params.get("requestId")))
         .or_else(|| msg.payload.get("requestId"))
         .and_then(Value::as_str)
         .map(str::trim)
@@ -4086,6 +4095,28 @@ mod command_result_tests {
             "params": { "mapId": "ROS-MAP-1@v1.0", "requestId": "req-push-1" }
         }));
         assert_eq!(command_request_id(&msg).as_deref(), Some("req-push-1"));
+    }
+
+    #[test]
+    fn reads_request_id_when_the_platform_wraps_params_twice() {
+        // 中台 → 业务平台 push_command → 设备 WS：中台参数被包成 params.params
+        let msg = message(json!({
+            "command": "同步媒体",
+            "params": {
+                "dispatchedAt": "2026-11-20 17:21:38",
+                "operator": "admin",
+                "params": {
+                    "pictureDir": "/media/media-data/picture",
+                    "frames": 3,
+                    "requestId": "cmd-9f2"
+                }
+            }
+        }));
+        assert_eq!(
+            command_request_id(&msg).as_deref(),
+            Some("cmd-9f2"),
+            "同步媒体的进度/结论就是靠这个 requestId 回写到中台审计的"
+        );
     }
 
     #[test]

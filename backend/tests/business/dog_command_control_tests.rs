@@ -447,6 +447,40 @@ async fn media_sync_dispatch_stays_pending_until_the_device_reports() {
         serde_json::from_str(&finished.result.unwrap_or_default()).expect("结构化细节要能解析");
     assert_eq!(detail["drained"], true);
 
+    // 3.5) 迟到的进度回报不能把结论盖掉（进度与结论是两条独立异步上报）
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "x-service-token",
+        axum::http::HeaderValue::from_static("test-service-token"),
+    );
+    let late = x_rust::business::dog::internal::media_sync_status_handler(
+        axum::extract::State(state.clone()),
+        headers,
+        Json(x_rust::business::dog::internal::MediaSyncStatusRequest {
+            device_code: "RD-100".to_string(),
+            request_id: "req-media-1".to_string(),
+            status: "running".to_string(),
+            message: "同步中：已上传 24/24 张（第 3/3 个压缩包）".to_string(),
+            detail: None,
+        }),
+    )
+    .await
+    .expect("迟到的进度上报不应报错")
+    .0
+    .data;
+    assert_eq!(late["updated"], 0, "终态之后的进度必须丢弃");
+    let record = state
+        .dog_device_service
+        .find_command("req-media-1")
+        .await
+        .expect("审计查询")
+        .expect("审计行");
+    assert_eq!(record.status, audit::STATUS_SUCCEEDED);
+    assert!(
+        record.message.unwrap_or_default().contains("扫描 24 张"),
+        "结论文案不能被迟到的进度覆盖"
+    );
+
     // 4) 设备页查询：读到的就是这条结论
     let status = x_rust::business::dog::device::handlers::media_sync_status_handler(
         axum::extract::State(state.clone()),
