@@ -169,6 +169,23 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 `business/backpack_dashboard/AGENTS.md` 的「存证目录」一节与
 `DOG.md` §2/§3。
 
+「同步媒体」的**回传是「清空目录」而不是「每航点最多 N 张」**：同一个 `pt<n>/`
+每跑一轮就多 `media_frames` 张（文件名带时间戳），按帧数截断会让板端永远传不干净
+（2026-11-20 现场：回执「删除板端文件 6」但目录里还躺着 6 张，就是每航点只传走 3 张）。
+`media_frames` 只管板端写几张；客户端把 `pt<n>/` 里的图全部回传（单轮仍限 200 张，
+超了回执「板端仍有 N 张未回传」），跑完连「只剩 `result.json`」的空目录一起收掉。
+
+**「同步媒体」的状态要看得到**：它是长任务，中台 `POST /api/dogDevice/{id}/command`
+只回「已下发」，审计**停在 `pending`**（`awaitingDevice=true`，同一 `requestId` 在跑的
+10 分钟内不重复下发）。真实进度/结论由客户端 `command_progress`（每传完一包：已上传
+8/24）/ `command_result`（扫几张、删几张、目录是否清空）经业务平台回写
+`POST /api/dogInternal/media/sync-status`（`x-service-token`，只认 `同步媒体` 那一条
+审计 + 设备编号要对得上），设备页轮询 `GET /api/dogDevice/{id}/mediaSyncStatus`；
+`pending` 超过 10 分钟没有回报显示「无回报」。回归：
+`dog_command_control_tests::media_sync_dispatch_stays_pending_until_the_device_reports`、
+`dog_internal_tests::media_sync_status_report_updates_only_its_own_audit`、
+`client media_sync::tests::collect_files_drains_every_frame_of_the_point`。
+
 「跑完要不要返航」是**任务属性**（`tasks.end_task` → 载荷 `endTaskMode`，
 `none` / `return_to_start` / `return_to_charge`，不配 = 跟随路线），不是路线属性：
 巡检 `5000 kind=4` 只把原始 `points` 写成本体路径，返程由本体按 `end_task` 自己规划。

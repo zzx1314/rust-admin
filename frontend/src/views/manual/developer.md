@@ -137,18 +137,27 @@ Authorization: Bearer <access_token>
 
 ```text
 中台 →（参数配置 media_picture_dir / media_frames）→ 业务平台 → 设备 WS
-  → 客户端每包 8 张打成 zip → POST {业务平台}/api/media/ingest (file=zip + mediaInfo.entries)
-    → 业务平台转发 POST /api/dogInternal/media/upload（x-service-token）
-      → dog_media + <upload_dir>/media/<设备>/<计划>/pt<n>/<sha256>.<ext>
-        → 上传成功才删板端文件；同一张图（sha256）重复回传只留一条
+  → 客户端把 <计划>/pt<航点>/ 下的图**全部**回传（单轮上限 200 张），每包 8 张打成 zip
+    → POST {业务平台}/api/media/ingest (file=zip + mediaInfo.entries)
+      → 业务平台转发 POST /api/dogInternal/media/upload（x-service-token）
+        → dog_media + <upload_dir>/media/<设备>/<计划>/pt<n>/<sha256>.<ext>
+          → 上传成功才删板端文件；同一张图（sha256）重复回传只留一条
 ```
+
+下发接口只回「已下发」（审计 `pending`，`requestId` 随 `params` 下发到设备）。真实进度与
+结论由设备客户端回报：`command_progress`（每包一次）→ 业务平台 →
+`POST /api/dogInternal/media/sync-status`（`status=running`，审计仍 pending）；
+`command_result` → 同上 `status=succeeded|failed` + `detail{drained,scanned,uploaded,deleted,remaining}`。
+设备页轮询 `GET /api/dogDevice/{id}/mediaSyncStatus` 显示状态（`pending` 超过 10 分钟
+返回 `stale=true` → 显示「无回报」）。
 
 内部接口（业务平台专用，共享服务令牌 `x-service-token`）：
 
-| 接口                            | 方法 | 说明                                                                                                                                                                                                                                                                                                |
-| ------------------------------- | ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/api/dogInternal/media/config` | GET  | `{ pictureDir, frames }`（业务平台组装 `ai_start` 时取，缓存 60s）                                                                                                                                                                                                                                  |
-| `/api/dogInternal/media/upload` | POST | multipart。**单张**：`file`=JPG/PNG + `mediaInfo{deviceCode,planId,pointIndex,capturedAt,source}` → `{created, media}`；**压缩包**：`file`=zip + `mediaInfo{deviceCode,entries:[{name,planId,pointIndex,capturedAt,remarks}]}` → `{created,total,failed,results:[{name,ok,created,mediaId,error}]}` |
+| 接口                                 | 方法 | 说明                                                                                                                                                                                                                                                                                                |
+| ------------------------------------ | ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/api/dogInternal/media/config`      | GET  | `{ pictureDir, frames }`（业务平台组装 `ai_start` 时取，缓存 60s）                                                                                                                                                                                                                                  |
+| `/api/dogInternal/media/sync-status` | POST | `{deviceCode, requestId, status: running/succeeded/failed, message, detail}` → 写 `dog_command_audit`（只认 `同步媒体` 且设备编号要对得上）                                                                                                                                                         |
+| `/api/dogInternal/media/upload`      | POST | multipart。**单张**：`file`=JPG/PNG + `mediaInfo{deviceCode,planId,pointIndex,capturedAt,source}` → `{created, media}`；**压缩包**：`file`=zip + `mediaInfo{deviceCode,entries:[{name,planId,pointIndex,capturedAt,remarks}]}` → `{created,total,failed,results:[{name,ok,created,mediaId,error}]}` |
 
 ### 4.3 参数配置 `/api/dogConfig`
 

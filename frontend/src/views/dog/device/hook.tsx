@@ -1,4 +1,11 @@
-import { computed, nextTick, onMounted, reactive, ref } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  reactive,
+  ref
+} from "vue";
 import type { PaginationProps } from "@pureadmin/table";
 import type { FormRules } from "element-plus";
 import { ElMessageBox } from "element-plus";
@@ -7,6 +14,7 @@ import {
   dogDeviceCommand,
   dogDeviceDelete,
   dogDeviceDispatchTask,
+  dogDeviceMediaSyncStatus,
   dogDevicePage,
   dogDeviceRuntime,
   dogDeviceSave,
@@ -44,6 +52,9 @@ const DEVICE_STATUS_TAG_TYPE: Record<
   离线: "info"
 };
 
+/** 「同步媒体」：长任务，下发后要靠 `mediaSyncStatus` 轮询才看得到结果 */
+export const MEDIA_SYNC_COMMAND = "同步媒体";
+
 /** 允许从中台发起的指令，与后端白名单、业务平台 `BUSINESS_COMMANDS` 对齐 */
 export const DEVICE_COMMANDS = [
   "开始巡检",
@@ -54,7 +65,7 @@ export const DEVICE_COMMANDS = [
   "释放接管",
   // 把板端 `/media/media-data/picture` 里的航点 AI 存证图回传到「媒体资源」
   // （目录/帧数在「参数配置」页维护，见 media_picture_dir / media_frames）
-  "同步媒体"
+  MEDIA_SYNC_COMMAND
 ];
 
 /**
@@ -228,6 +239,14 @@ export function useDogDevice() {
   const runtimeLoading = ref(false);
   const runtimeDevice = ref<DogDevice | null>(null);
   const runtimeData = ref<Record<string, any> | null>(null);
+
+  /** 「同步媒体」进度 / 结论：下发只回「已下发」，真实状态要靠轮询 */
+  const mediaSyncVisible = ref(false);
+  const mediaSyncLoading = ref(false);
+  const mediaSyncDevice = ref<DogDevice | null>(null);
+  const mediaSyncStatus = ref<Record<string, any> | null>(null);
+  const mediaSyncPolling = ref(false);
+  let mediaSyncTimer: ReturnType<typeof setTimeout> | null = null;
 
   async function onSearch() {
     loading.value = true;
@@ -424,6 +443,11 @@ export function useDogDevice() {
       if (res.code === SUCCESS) {
         message(`指令「${command}」已下发`, { type: "success" });
         onSearch();
+        // 「同步媒体」是长任务：下发成功只代表客户端收到了，图片要一张张传。
+        // 直接把同步进度弹窗打开，让人看到扫了几张 / 传了几张 / 目录清没清。
+        if (command === MEDIA_SYNC_COMMAND) {
+          openMediaSync(row);
+        }
       } else {
         message(res.msg || "下发失败", { type: "error" });
       }
@@ -478,6 +502,70 @@ export function useDogDevice() {
     }
   }
 
+  function openMediaSync(row: DogDevice | null) {
+    if (!row) return;
+    mediaSyncDevice.value = row;
+    mediaSyncStatus.value = null;
+    mediaSyncVisible.value = true;
+    startMediaSyncPolling();
+  }
+
+  /** 停掉轮询（弹窗关闭 / 有结论 / 组件卸载） */
+  function stopMediaSyncPolling() {
+    mediaSyncPolling.value = false;
+    if (mediaSyncTimer) {
+      clearTimeout(mediaSyncTimer);
+      mediaSyncTimer = null;
+    }
+  }
+
+  /** `pending` 才是进行中；其它（succeeded/failed/null）都不用再轮询 */
+  function isMediaSyncRunning() {
+    const status = mediaSyncStatus.value;
+    if (!status) return false;
+    return status.status === "pending" && !status.stale;
+  }
+
+  async function fetchMediaSyncStatus() {
+    const device = mediaSyncDevice.value;
+    if (!device) return;
+    mediaSyncLoading.value = true;
+    try {
+      const res = await dogDeviceMediaSyncStatus(device.id);
+      if (res.code === SUCCESS) {
+        mediaSyncStatus.value = res.data ?? null;
+      } else {
+        message(res.msg || "读取同步状态失败", { type: "error" });
+      }
+    } finally {
+      mediaSyncLoading.value = false;
+    }
+  }
+
+  /**
+   * 轮询「同步媒体」状态。
+   *
+   * 长任务（扫板端目录 → 逐个压缩包传中台）在 4G 上可能跑几分钟，下发接口
+   * 只回「已下发」，所以这里每 3s 拉一次，直到出结论或者判定「没有回报」。
+   */
+  function startMediaSyncPolling() {
+    stopMediaSyncPolling();
+    mediaSyncPolling.value = true;
+    const tick = async () => {
+      if (!mediaSyncVisible.value) {
+        stopMediaSyncPolling();
+        return;
+      }
+      await fetchMediaSyncStatus();
+      if (!isMediaSyncRunning()) {
+        stopMediaSyncPolling();
+        return;
+      }
+      mediaSyncTimer = setTimeout(tick, 3000);
+    };
+    void tick();
+  }
+
   async function openRuntime(row: DogDevice) {
     runtimeDevice.value = row;
     runtimeData.value = null;
@@ -518,6 +606,9 @@ export function useDogDevice() {
       case "runtime":
         openRuntime(row);
         break;
+      case "media":
+        openMediaSync(row);
+        break;
     }
   }
 
@@ -539,6 +630,11 @@ export function useDogDevice() {
   onMounted(() => {
     onSearch();
     loadUsers();
+  });
+
+  // 弹窗关掉 / 页面切走时别再轮询，避免留下一串后台请求
+  onBeforeUnmount(() => {
+    stopMediaSyncPolling();
   });
 
   return {
@@ -570,6 +666,11 @@ export function useDogDevice() {
     runtimeLoading,
     runtimeDevice,
     runtimeData,
+    mediaSyncVisible,
+    mediaSyncLoading,
+    mediaSyncDevice,
+    mediaSyncStatus,
+    mediaSyncPolling,
     onSearch,
     handleSizeChange,
     handleCurrentChange,
@@ -587,6 +688,9 @@ export function useDogDevice() {
     openDispatch,
     submitDispatch,
     openRuntime,
+    openMediaSync,
+    fetchMediaSyncStatus,
+    stopMediaSyncPolling,
     cancel
   };
 }

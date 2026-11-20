@@ -353,4 +353,29 @@ impl DogDeviceService {
             tracing::error!(audit_id = id, %error, "回填指令审计失败");
         }
     }
+
+    /// 设备回报后更新审计：`status = None` 只记进度（仍 pending），
+    /// 给了 `status` 就是终态。没用到的降级日志，不影响调用方。
+    pub async fn record_device_report(
+        &self,
+        request_id: &str,
+        status: Option<&str>,
+        result: Option<&str>,
+        message: Option<&str>,
+    ) -> Result<u64, AppError> {
+        audit::update_from_device(self.repo.conn(), request_id, status, result, message)
+            .await
+            .map_err(AppError::DatabaseError)
+    }
+
+    /// 某设备某类指令的最新一条（设备页显示「上一次同步媒体」）。
+    pub async fn latest_command(
+        &self,
+        device_code: &str,
+        action: &str,
+    ) -> Result<Option<CommandAudit>, AppError> {
+        audit::find_latest(self.repo.conn(), device_code, action)
+            .await
+            .map_err(AppError::DatabaseError)
+    }
 }

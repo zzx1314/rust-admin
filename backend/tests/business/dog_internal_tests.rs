@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 use x_rust::api::AppState;
 use x_rust::app::App;
+use x_rust::business::dog::device::audit::{self, NewCommandAudit};
 use x_rust::common::error::AppError;
 use x_rust::common::traits::{DynFuture, TokenStore};
 use zip::write::SimpleFileOptions;
@@ -244,6 +245,123 @@ async fn delete_is_idempotent() {
         assert_eq!(response.status(), 200);
         assert_eq!(json(response).await["data"]["deleted"], json!(expected));
     }
+}
+
+/// 「同步媒体」状态回报：业务平台把客户端进度/结论写回中台指令审计。
+///
+/// 这条链路决定了设备页能不能看到「同步中 / 已完成 / 还有几张没传」，
+/// 所以要卡住三件事：没有服务令牌不许写、设备编号必须对得上、
+/// 只能改「同步媒体」那一条审计（不能借内部令牌改别的指令结论）。
+#[tokio::test]
+async fn media_sync_status_report_updates_only_its_own_audit() {
+    let state = test_state(Some(TOKEN)).await;
+    for (request_id, device_code, action) in [
+        ("req-media-1", "RD-300", "同步媒体"),
+        ("req-charge-1", "RD-300", "召回充电"),
+    ] {
+        state
+            .dog_device_service
+            .begin_command(NewCommandAudit {
+                user_id: 1,
+                username: "admin",
+                device_code,
+                action,
+                request_id,
+                params: None,
+            })
+            .await
+            .expect("写入 pending 审计");
+    }
+    let base = spawn_zentai(state.clone()).await;
+    let url = format!("{base}/api/dogInternal/media/sync-status");
+
+    // 没令牌 → 401（内部通道不允许匿名改审计）
+    let anonymous = reqwest::Client::new()
+        .post(&url)
+        .json(&json!({
+            "deviceCode": "RD-300",
+            "requestId": "req-media-1",
+            "status": "succeeded",
+            "message": "不该写进去",
+        }))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(anonymous.status(), 401);
+
+    let client = reqwest::Client::new();
+    let report = |body: Value| {
+        let client = client.clone();
+        let url = url.clone();
+        async move {
+            client
+                .post(&url)
+                .header("x-service-token", TOKEN)
+                .json(&body)
+                .send()
+                .await
+                .expect("请求成功但状态码异常")
+        }
+    };
+
+    // 进度：仍停在 pending，只刷新文案
+    let running = report(json!({
+        "deviceCode": "RD-300",
+        "requestId": "req-media-1",
+        "status": "running",
+        "message": "同步中：已上传 8/24 张",
+    }))
+    .await;
+    assert_eq!(running.status(), 200);
+    let record = state
+        .dog_device_service
+        .find_command("req-media-1")
+        .await
+        .expect("查询审计")
+        .expect("审计存在");
+    assert_eq!(record.status, audit::STATUS_PENDING);
+    assert!(record.message.unwrap_or_default().contains("8/24"));
+
+    // 结论：终态 + 结构化细节（设备页据此显示「目录已清空 / 还有 N 张」）
+    let done = report(json!({
+        "deviceCode": "RD-300",
+        "requestId": "req-media-1",
+        "status": "succeeded",
+        "message": "媒体回传完成：扫描 24 张，已删除板端文件 24；板端目录已清空",
+        "detail": {"drained": true, "uploaded": 24, "remaining": 0},
+    }))
+    .await;
+    assert_eq!(done.status(), 200);
+    let record = state
+        .dog_device_service
+        .find_command("req-media-1")
+        .await
+        .expect("查询审计")
+        .expect("审计存在");
+    assert_eq!(record.status, audit::STATUS_SUCCEEDED);
+    let detail: Value =
+        serde_json::from_str(&record.result.unwrap_or_default()).expect("细节是 JSON");
+    assert_eq!(detail["drained"], true);
+
+    // 设备编号对不上 → 拒绝（防止串台设备的状态写进来）
+    let wrong_device = report(json!({
+        "deviceCode": "RD-999",
+        "requestId": "req-media-1",
+        "status": "failed",
+        "message": "不该生效",
+    }))
+    .await;
+    assert_eq!(wrong_device.status(), 400);
+
+    // 不是「同步媒体」的审计 → 拒绝
+    let wrong_action = report(json!({
+        "deviceCode": "RD-300",
+        "requestId": "req-charge-1",
+        "status": "succeeded",
+        "message": "不该生效",
+    }))
+    .await;
+    assert_eq!(wrong_action.status(), 400);
 }
 
 #[tokio::test]

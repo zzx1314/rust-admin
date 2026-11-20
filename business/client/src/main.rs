@@ -3040,8 +3040,48 @@ async fn handle_server_message(
             // 断链）也应该能把已经采好的巡检图传回中台，所以放在本体门禁之前。
             if command == "同步媒体" {
                 let outer = msg.payload.get("params");
-                let result = media_sync::sync(outer, config).await;
-                send_command_result(out_tx, &msg, command, &result).await;
+                // 进度上报：一轮同步在 4G 上可能跑几分钟，中台设备页要能看到
+                // 「已上传 8/24」而不是干等 final 的 command_result。
+                let progress_tx = out_tx.clone();
+                let progress_request_id = command_request_id(&msg);
+                let progress = move |p: media_sync::SyncProgress| {
+                    let Some(request_id) = progress_request_id.clone() else {
+                        return;
+                    };
+                    let _ = progress_tx.try_send(WsMessage {
+                        msg_type: "command_progress".to_string(),
+                        ts: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                        payload: json!({
+                            "requestId": request_id,
+                            "command": "同步媒体",
+                            "uploaded": p.uploaded,
+                            "failed": p.failed,
+                            "total": p.total,
+                            "batchesDone": p.batches_done,
+                            "batchesTotal": p.batches_total,
+                        }),
+                    });
+                };
+                let summary = media_sync::sync(outer, config, Some(&progress)).await;
+                // 结构化结果比纯文案好判：中台要区分「目录已清空」与「还剩几张」，
+                // 前端才能把「完成」和「部分完成 / 再点一次」分开显示。
+                let result: Result<String, String> = match &summary {
+                    Ok(summary) => Ok(summary.to_string()),
+                    Err(error) => Err(error.clone()),
+                };
+                let extra = match &summary {
+                    Ok(summary) => json!({
+                        "drained": summary.drained(),
+                        "scanned": summary.scanned,
+                        "uploaded": summary.uploaded,
+                        "existing": summary.existing,
+                        "failed": summary.failed,
+                        "deleted": summary.deleted,
+                        "remaining": summary.remaining,
+                    }),
+                    Err(_) => json!({}),
+                };
+                send_command_result_with(out_tx, &msg, command, &result, extra).await;
                 match result {
                     Ok(note) => info!("指令 {command} 执行: {note}"),
                     Err(error) => {
@@ -3495,6 +3535,17 @@ async fn send_command_result(
     command: &str,
     result: &Result<String, String>,
 ) {
+    send_command_result_with(out_tx, msg, command, result, json!({})).await;
+}
+
+/// 同上，带结构化细节（响应目录是否已清空等）。
+async fn send_command_result_with(
+    out_tx: &mpsc::Sender<WsMessage>,
+    msg: &WsMessage,
+    command: &str,
+    result: &Result<String, String>,
+    extra: Value,
+) {
     let Some(request_id) = command_request_id(msg) else {
         return;
     };
@@ -3502,17 +3553,18 @@ async fn send_command_result(
         Ok(note) => (true, note.clone()),
         Err(error) => (false, error.clone()),
     };
-    send(
-        out_tx,
-        "command_result",
-        json!({
-            "requestId": request_id,
-            "command": command,
-            "ok": ok,
-            "message": message,
-        }),
-    )
-    .await;
+    let mut payload = json!({
+        "requestId": request_id,
+        "command": command,
+        "ok": ok,
+        "message": message,
+    });
+    if let (Some(payload), Value::Object(extra)) = (payload.as_object_mut(), extra) {
+        for (key, value) in extra {
+            payload.insert(key, value);
+        }
+    }
+    send(out_tx, "command_result", payload).await;
 }
 
 /// 上报一条「地图保存」事件（信息流留痕，与任务终态分开）

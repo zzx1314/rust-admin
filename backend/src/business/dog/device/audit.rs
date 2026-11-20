@@ -14,14 +14,18 @@ pub const STATUS_PENDING: &str = "pending";
 pub const STATUS_SUCCEEDED: &str = "succeeded";
 pub const STATUS_FAILED: &str = "failed";
 
-/// 一条指令记录（幂等回放只需要这几个字段）。
+/// 一条指令记录（幂等回放只需要前几个字段；设备回报时还要核对设备与指令名）。
 #[derive(Debug, Clone, FromQueryResult)]
 pub struct CommandAudit {
     pub id: i64,
     pub request_id: String,
+    pub device_code: String,
+    pub action: String,
     pub status: String,
     pub result: Option<String>,
     pub message: Option<String>,
+    pub create_time: String,
+    pub update_time: Option<String>,
 }
 
 /// 待写入的指令记录。
@@ -44,12 +48,67 @@ pub async fn find_by_request(
 ) -> Result<Option<CommandAudit>, DbErr> {
     CommandAudit::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Sqlite,
-        "SELECT id, request_id, status, result, message FROM dog_command_audit \
+        "SELECT id, request_id, device_code, action, status, result, message, \
+         create_time, update_time FROM dog_command_audit \
          WHERE is_deleted = 0 AND request_id = ?1 LIMIT 1",
         vec![Value::from(request_id.trim())],
     ))
     .one(conn)
     .await
+}
+
+/// 某台设备某类指令的**最新一条**记录。
+///
+/// 设备页靠它回答「上一次『同步媒体』跑完了没有」：长任务的结果是设备
+/// 异步回报的，没有这个查询，刷新页面就只剩一条 `pending`。
+pub async fn find_latest(
+    conn: &DatabaseConnection,
+    device_code: &str,
+    action: &str,
+) -> Result<Option<CommandAudit>, DbErr> {
+    CommandAudit::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "SELECT id, request_id, device_code, action, status, result, message, \
+         create_time, update_time FROM dog_command_audit \
+         WHERE is_deleted = 0 AND device_code = ?1 AND action = ?2 \
+         ORDER BY create_time DESC, id DESC LIMIT 1",
+        vec![Value::from(device_code.trim()), Value::from(action.trim())],
+    ))
+    .one(conn)
+    .await
+}
+
+/// 设备回报后更新一条审计。
+///
+/// `status = None` 表示「进度，不改结论」（仍停在 pending）；给了 `status`
+/// 就是终态（succeeded / failed）。
+pub async fn update_from_device(
+    conn: &DatabaseConnection,
+    request_id: &str,
+    status: Option<&str>,
+    result: Option<&str>,
+    message: Option<&str>,
+) -> Result<u64, DbErr> {
+    let now = format_datetime(Utc::now());
+    let outcome = conn
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "UPDATE dog_command_audit \
+             SET status = COALESCE(?2, status), \
+                 result = COALESCE(?3, result), \
+                 message = COALESCE(?4, message), \
+                 update_time = ?5 \
+             WHERE is_deleted = 0 AND request_id = ?1",
+            vec![
+                Value::from(request_id.trim()),
+                Value::String(status.map(|text| Box::new(text.to_string()))),
+                Value::String(result.map(|text| Box::new(text.to_string()))),
+                Value::String(message.map(|text| Box::new(text.to_string()))),
+                Value::from(now),
+            ],
+        ))
+        .await?;
+    Ok(outcome.rows_affected())
 }
 
 /// 写入 pending 记录并返回主键；`request_id` 冲突时说明并发重试已抢到，

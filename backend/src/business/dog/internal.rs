@@ -14,6 +14,7 @@
 //! POST   /api/dogInternal/maps/upload           地图包回传（multipart）
 //! GET    /api/dogInternal/media/config          板端媒体目录 / 固定帧数（参数配置页）
 //! POST   /api/dogInternal/media/upload          航点 AI 存证图片回传（multipart：单张或 zip）
+//! POST   /api/dogInternal/media/sync-status     「同步媒体」进度 / 结论回报（写指令审计）
 //! ```
 //!
 //! 与公开接口的关系：复用同一批 service，只是身份从「JWT 用户 + 行级权限」
@@ -86,6 +87,10 @@ pub fn internal_routes() -> Router<AppState> {
         )
         .route("/dogInternal/maps/exists", post(map_exists_handler))
         .route("/dogInternal/media/config", get(media_config_handler))
+        .route(
+            "/dogInternal/media/sync-status",
+            post(media_sync_status_handler),
+        )
         .route(
             "/dogInternal/maps/upload",
             post(upload_map_handler).layer(DefaultBodyLimit::max(MAP_UPLOAD_LIMIT)),
@@ -244,6 +249,78 @@ pub async fn upload_map_handler(
     Ok(Json(ApiResponse::ok(
         serde_json::to_value(vo).unwrap_or_default(),
     )))
+}
+
+/// `POST /api/dogInternal/media/sync-status` — 「同步媒体」的进度与最终结论回报。
+///
+/// 链路：设备客户端（`command_progress` / `command_result`）→ 业务平台 →
+/// 本接口 → `dog_command_audit`。为什么要绕这一圈：中台只负责下发，「扫了几张、
+/// 传了几张、板端目录清没清」只有板端知道；不回写的话设备页只能看到
+/// 「已下发」，现场无法判断同步有没有完成。
+///
+/// `requestId` 必须与中台下发时的一致（中台把它放在指令 `params.requestId`），
+/// 且设备编号 / 指令名必须对得上——内部令牌虽然是服务级，也不该能改别的设备。
+pub async fn media_sync_status_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<MediaSyncStatusRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    authorize(&state, &headers)?;
+    let request_id = req.request_id.trim();
+    if request_id.is_empty() {
+        return Err(AppError::BadRequest("缺少 requestId".to_string()));
+    }
+    let Some(record) = state.dog_device_service.find_command(request_id).await? else {
+        return Err(AppError::BadRequest(format!(
+            "找不到 requestId={request_id} 的指令审计（中台可能已清理）"
+        )));
+    };
+    if !req.device_code.trim().is_empty() && record.device_code != req.device_code.trim() {
+        return Err(AppError::BadRequest("设备编号与审计记录不一致".to_string()));
+    }
+    if record.action != "同步媒体" {
+        return Err(AppError::BadRequest(format!(
+            "该 requestId 属于指令「{}」，不接受媒体同步状态回报",
+            record.action
+        )));
+    }
+
+    let status = match req.status.trim() {
+        // 进度：仍停在 pending，只刷新 message
+        "running" | "pending" | "" => None,
+        "succeeded" | "ok" => Some(crate::business::dog::device::audit::STATUS_SUCCEEDED),
+        "failed" | "error" => Some(crate::business::dog::device::audit::STATUS_FAILED),
+        other => {
+            return Err(AppError::BadRequest(format!("未知状态：{other}")));
+        }
+    };
+    let result = req.detail.as_ref().map(|detail| detail.to_string());
+    let rows = state
+        .dog_device_service
+        .record_device_report(request_id, status, result.as_deref(), Some(&req.message))
+        .await?;
+    Ok(Json(ApiResponse::ok(json!({
+        "requestId": request_id,
+        "status": status.unwrap_or("pending"),
+        "updated": rows,
+    }))))
+}
+
+/// 业务平台转来的「同步媒体」回报。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaSyncStatusRequest {
+    #[serde(default)]
+    pub device_code: String,
+    pub request_id: String,
+    /// running / succeeded / failed
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub message: String,
+    /// 客户端上报的结构化细节（扫几张 / 传几张 / 目录是否清空）
+    #[serde(default)]
+    pub detail: Option<serde_json::Value>,
 }
 
 /// `GET /api/dogInternal/media/config` — 板端媒体目录与每航点固定帧数。

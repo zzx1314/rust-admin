@@ -43,6 +43,47 @@ pub struct CommandResult {
 pub type CommandResultWaiters = Arc<Mutex<HashMap<String, oneshot::Sender<CommandResult>>>>;
 pub type CommandResultReceiver = oneshot::Receiver<CommandResult>;
 
+/// 「同步媒体」进度文案：中台设备页直接展示 `message`，所以这里把
+/// 「已传 / 总数 / 第几个包」拼成一句人看得懂的话。
+fn media_sync_progress_text(payload: &crate::gateway_types::CommandProgressPayload) -> String {
+    let total = payload.total;
+    let uploaded = payload.uploaded;
+    let mut text = if total > 0 {
+        format!("同步中：已上传 {uploaded}/{total} 张")
+    } else {
+        format!("同步中：已上传 {uploaded} 张")
+    };
+    if payload.batches_total > 0 {
+        text.push_str(&format!(
+            "（第 {}/{} 个压缩包）",
+            payload.batches_done, payload.batches_total
+        ));
+    }
+    if payload.failed > 0 {
+        text.push_str(&format!("，失败 {} 张", payload.failed));
+    }
+    text
+}
+
+/// 把「同步媒体」的最终结果回报给中台审计（异步后台跑，不堵 WS 循环）。
+fn report_media_sync_to_zentai(
+    state: &AppState,
+    device_id: &str,
+    payload: &crate::gateway_types::CommandResultPayload,
+) {
+    let body = json!({
+        "deviceCode": device_id,
+        "requestId": payload.request_id.trim(),
+        "status": if payload.ok { "succeeded" } else { "failed" },
+        "message": payload.message.as_str(),
+        "detail": payload.extra,
+    });
+    let config = state.config.clone();
+    tokio::spawn(async move {
+        crate::zentai::try_report_media_sync(&config, body).await;
+    });
+}
+
 pub fn new_command_result_waiters() -> CommandResultWaiters {
     Arc::new(Mutex::new(HashMap::new()))
 }
@@ -466,13 +507,49 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                             payload.request_id.trim(),
                                             CommandResult {
                                                 ok: payload.ok,
-                                                message: payload.message,
-                                                data: payload.data,
+                                                message: payload.message.clone(),
+                                                data: payload.data.clone(),
                                             },
                                         )
                                         .await;
                                     }
+                                    // 「同步媒体」是长任务：中台下发时只拿到「已送达」，
+                                    // 真实进度/结论由这里回写中台审计（否则设备页只能猜）。
+                                    if payload.command == "同步媒体" {
+                                        report_media_sync_to_zentai(&state, did, &payload);
+                                    }
                                     send_msg(&tx, "command_result_ack", json!({"received": true})).await;
+                                }
+                            }
+                            // 长任务进度（目前只有「同步媒体」）：只回写状态，不动等待表
+                            "command_progress" => {
+                                if let Some(ref did) = device_id {
+                                    let payload: crate::gateway_types::CommandProgressPayload =
+                                        serde_json::from_value(ws_msg.payload).unwrap_or_default();
+                                    if payload.request_id.trim().is_empty() {
+                                        warn!("设备 {did} 的 command_progress 缺少 requestId");
+                                    } else if payload.command == "同步媒体" {
+                                        let body = json!({
+                                            "deviceCode": did,
+                                            "requestId": payload.request_id.trim(),
+                                            "status": "running",
+                                            "message": media_sync_progress_text(&payload),
+                                            // 结构化进度也存一份（审计的 result 字段）：
+                                            // 页面想画进度条时不用去解析中文文案
+                                            "detail": {
+                                                "running": true,
+                                                "uploaded": payload.uploaded,
+                                                "failed": payload.failed,
+                                                "total": payload.total,
+                                                "batchesDone": payload.batches_done,
+                                                "batchesTotal": payload.batches_total,
+                                            },
+                                        });
+                                        let config = state.config.clone();
+                                        tokio::spawn(async move {
+                                            crate::zentai::try_report_media_sync(&config, body).await;
+                                        });
+                                    }
                                 }
                             }
                             "event" => {

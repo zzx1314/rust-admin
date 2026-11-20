@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 
 /// WebSocket 消息信封
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -343,6 +344,31 @@ pub struct CommandResultPayload {
     pub message: String,
     #[serde(default)]
     pub data: Option<Value>,
+    /// 结构化细节（目前只有「同步媒体」用：`drained` / `scanned` / `uploaded` …）
+    #[serde(flatten, default)]
+    pub extra: HashMap<String, Value>,
+}
+
+/// 客户端 → 服务端：长任务中间进度（目前只有「同步媒体」用）。
+///
+/// 同步一场在 4G 上可能跑几分钟，中台设备页需要看到「已上传 8/24」而不是干等
+/// 最终的 `command_result`。
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandProgressPayload {
+    pub request_id: String,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub uploaded: u64,
+    #[serde(default)]
+    pub failed: u64,
+    #[serde(default)]
+    pub total: u64,
+    #[serde(default)]
+    pub batches_done: u64,
+    #[serde(default)]
+    pub batches_total: u64,
 }
 
 /// 客户端 → 服务端：设备事件

@@ -38,6 +38,11 @@ const {
   runtimeLoading,
   runtimeDevice,
   runtimeData,
+  mediaSyncVisible,
+  mediaSyncLoading,
+  mediaSyncDevice,
+  mediaSyncStatus,
+  mediaSyncPolling,
   onSearch,
   handleSizeChange,
   handleCurrentChange,
@@ -50,6 +55,9 @@ const {
   submitUnassign,
   handleRowCommand,
   submitDispatch,
+  openMediaSync,
+  fetchMediaSyncStatus,
+  stopMediaSyncPolling,
   cancel
 } = useDogDevice();
 </script>
@@ -136,6 +144,9 @@ const {
                       >
                       <el-dropdown-item command="runtime"
                         >运行态</el-dropdown-item
+                      >
+                      <el-dropdown-item command="media"
+                        >媒体同步状态</el-dropdown-item
                       >
                       <el-dropdown-item divided disabled class="menu-group">
                         下发指令
@@ -411,6 +422,98 @@ const {
         <el-empty v-else-if="!runtimeLoading" description="暂无运行数据" />
       </div>
     </el-drawer>
+
+    <!-- 「同步媒体」进度 / 结论：下发只回「已下发」，扫了几张、传了几张靠这里看 -->
+    <el-dialog
+      v-model="mediaSyncVisible"
+      width="560px"
+      :title="`媒体同步 · ${mediaSyncDevice?.deviceName || mediaSyncDevice?.deviceId || ''}`"
+      @closed="stopMediaSyncPolling"
+    >
+      <div v-loading="mediaSyncLoading && !mediaSyncStatus">
+        <el-alert
+          v-if="!mediaSyncStatus"
+          type="info"
+          :closable="false"
+          title="这台设备还没有「同步媒体」记录"
+          description="在「下发指令」里点「同步媒体」，板端会把 /media/media-data/picture 下的存证图回传到媒体资源。"
+        />
+        <template v-else>
+          <el-descriptions :column="1" border>
+            <el-descriptions-item label="状态">
+              <el-tag
+                :type="
+                  mediaSyncStatus.status === 'succeeded'
+                    ? 'success'
+                    : mediaSyncStatus.status === 'failed'
+                      ? 'danger'
+                      : mediaSyncStatus.stale
+                        ? 'warning'
+                        : 'primary'
+                "
+                size="small"
+              >
+                {{
+                  mediaSyncStatus.status === "succeeded"
+                    ? "已完成"
+                    : mediaSyncStatus.status === "failed"
+                      ? "失败"
+                      : mediaSyncStatus.stale
+                        ? "无回报"
+                        : "同步中"
+                }}
+              </el-tag>
+              <span
+                v-if="mediaSyncPolling"
+                class="text-muted"
+                style="margin-left: 8px; font-size: 12px"
+                >自动刷新中…</span
+              >
+            </el-descriptions-item>
+            <el-descriptions-item label="说明">
+              {{ mediaSyncStatus.message || "-" }}
+            </el-descriptions-item>
+            <el-descriptions-item label="下发时间">
+              {{ mediaSyncStatus.createTime || "-" }}
+            </el-descriptions-item>
+            <el-descriptions-item label="最近更新">
+              {{ mediaSyncStatus.updateTime || "-" }}
+            </el-descriptions-item>
+          </el-descriptions>
+          <el-alert
+            v-if="mediaSyncStatus.stale"
+            style="margin-top: 12px"
+            type="warning"
+            :closable="false"
+            title="设备超过 10 分钟没有回报"
+            description="可能是客户端掉线或同步卡住：先看设备是否在线，必要时重新点一次「同步媒体」。"
+          />
+          <el-alert
+            v-else-if="
+              mediaSyncStatus.status === 'succeeded' &&
+              mediaSyncStatus.result &&
+              mediaSyncStatus.result.remaining > 0
+            "
+            style="margin-top: 12px"
+            type="info"
+            :closable="false"
+            :title="`板端还有 ${mediaSyncStatus.result.remaining} 张未回传`"
+            description="单轮上限 200 张，再点一次「同步媒体」把剩下的传完。"
+          />
+        </template>
+      </div>
+      <template #footer>
+        <el-button @click="fetchMediaSyncStatus">刷新</el-button>
+        <el-button
+          v-if="mediaSyncDevice"
+          type="primary"
+          plain
+          @click="openMediaSync(mediaSyncDevice)"
+          >继续轮询</el-button
+        >
+        <el-button @click="mediaSyncVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 

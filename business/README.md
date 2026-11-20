@@ -641,14 +641,23 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 
 ```text
 中台设备页「同步媒体」
-  → 业务平台 push_command（白名单 BUSINESS_COMMANDS，原样透传 params）
+  → 业务平台 push_command（白名单 BUSINESS_COMMANDS，原样透传 params + requestId）
     → 设备 WS：command=同步媒体（不需要本体在线：客户端只读本地磁盘 + 上行）
-      → 客户端 media_sync 扫 <pictureDir>/<plan>/pt<n>/*.jpg，**每包 8 张 / 8MB 打成 zip**
+      → 客户端 media_sync 扫 <pictureDir>/<plan>/pt<n>/*.jpg（**整个目录全传**），
+        每包 8 张 / 8MB 打成 zip
         → POST /api/media/ingest（multipart：file=zip + mediaInfo.entries）
           → 转发中台 POST /api/dogInternal/media/upload（x-service-token）
-            → 中台解包，**一张一条** dog_media + <upload_dir>/media/<设备>/<计划>/pt<n>/<sha256>.<ext>
+            → 中台解包，**一条一条** dog_media + <upload_dir>/media/<设备>/<计划>/pt<n>/<sha256>.<ext>
               → 回 results[]，客户端只删 ok 的条目
                 → 中台媒体资源页（下载：GET /api/dogMedia/{id}/file，批量 /export）
+
+设备 → 平台的状态回报（设备页「媒体同步状态」看的就是这条）：
+      command_progress（每传完一包：已上传 8/24 张）
+        → POST /api/dogInternal/media/sync-status（status=running，仍 pending）
+      command_result（最终：扫了几张、删了几张、目录是否清空）
+        → 同上 status=succeeded / failed + detail{drained,remaining,…}
+          → 中台写 dog_command_audit（requestId 与下发时一致）
+            → GET /api/dogDevice/{id}/mediaSyncStatus 供页面轮询
 ```
 
 压缩包规则：`Stored`（JPEG 已压缩，再 deflate 只烧板子 CPU）；包内名是纯 ASCII
@@ -662,12 +671,20 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
   业务平台在组装 `ai_start` 时通过 `GET /api/dogInternal/media/config` 取一次
   （60s 缓存，中台不可达就沿用上次值/默认值，**不能**让 AI 停摆），随指令下发；
   「同步媒体」指令再带同一份配置。两边目录必须一致，否则会传空。
+- **回传以「清空目录」为准，不按每航点帧数截断**：同一个 `pt<n>/` 每跑一轮就多
+  `media_frames` 张（文件名带时间戳），按张数截断会让板端永远传不干净
+  （2026-11-20 现场：点完「同步媒体」审计说删了 6 张，目录里还躺着 6 张）。
+  单轮仍受 200 张上限约束，超了会回执「板端仍有 N 张未回传」，再点一次即可。
 - **按条目删板端文件**：中台按图片 sha256 去重，`created=false`（重复图）也算成功；
   只有 `results[].ok=true` 的那几张会被删，失败的留到下次。连续失败 3 张中止本轮。
+  跑完还会清掉「只剩 `result.json`」的空航点目录与空计划目录。
 - 体量上限：单张 8MB、压缩包 64MB（`MEDIA_UPLOAD_LIMIT`，axum 默认 2MB 会直接 413/400），
   只收 JPG/PNG 且校验文件头；业务平台两种形态（zip / 单张）都接受。
-- 「同步媒体」是长任务：`push_command` 只保证「已下发」，真实结果由客户端
-  `command_result` 回执（中台审计里能看到传了几张、删了几张）。
+- 「同步媒体」是长任务：`push_command` 只保证「已下发」，中台审计**停在 pending**
+  （`awaitingDevice=true`），真实进度/结论由客户端 `command_progress` /
+  `command_result` 经业务平台回写 `POST /api/dogInternal/media/sync-status`。
+  设备页通过 `GET /api/dogDevice/{id}/mediaSyncStatus` 轮询；pending 超过 10 分钟
+  没有回报就显示「无回报」，允许重新下发（同一 `requestId` 在跑时不会重复下发）。
 
 ## 路线数据模型
 

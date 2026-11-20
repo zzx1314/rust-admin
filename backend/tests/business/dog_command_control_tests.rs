@@ -146,13 +146,18 @@ async fn spawn_fake_business() -> (String, Hits) {
                     async move {
                         counter.fetch_add(1, Ordering::SeqCst);
                         assert_eq!(code, "RD-100");
-                        assert_eq!(body["command"], "召回充电");
+                        // 指令名由测试决定（召回充电 / 同步媒体…），业务平台原样回显
+                        let command = body["command"].clone();
                         Json(json!({
                             "code": 10200,
                             "msg": "success",
                             "data": {
                                 "duplicated": false,
-                                "result": {"wsDelivered": true, "deviceId": code},
+                                "result": {
+                                    "wsDelivered": true,
+                                    "deviceId": code,
+                                    "command": command,
+                                },
                             },
                         }))
                     }
@@ -322,6 +327,139 @@ async fn forwards_command_and_audits_it() {
         .expect("audit row must exist");
     assert_eq!(audit.status, audit::STATUS_SUCCEEDED);
     assert!(audit.result.unwrap_or_default().contains("wsDelivered"));
+}
+
+#[tokio::test]
+async fn media_sync_dispatch_stays_pending_until_the_device_reports() {
+    let (base, hits) = spawn_fake_business().await;
+    let state = test_state(&base).await;
+    let device_id = create_device(&state, "RD-100").await;
+
+    // 1) 下发：只能回「已下发」，不能假装「已完成」（图片要一张张传）
+    let response = send_device_command_handler(
+        axum::extract::State(state.clone()),
+        axum::Extension(admin()),
+        AxumPath(IdParam { id: device_id }),
+        Json(command_request("同步媒体", "req-media-1")),
+    )
+    .await
+    .expect("同步媒体必须能下发")
+    .0
+    .data;
+    assert_eq!(
+        response["status"],
+        audit::STATUS_PENDING,
+        "同步媒体是长任务，下发完成时审计必须停在 pending：{response}"
+    );
+    assert_eq!(response["awaitingDevice"], true);
+
+    let audit = state
+        .dog_device_service
+        .find_command("req-media-1")
+        .await
+        .expect("审计查询")
+        .expect("审计行");
+    assert_eq!(audit.status, audit::STATUS_PENDING);
+    assert!(
+        audit.message.unwrap_or_default().contains("等待设备"),
+        "pending 的文案要说明「在等设备回执」"
+    );
+
+    // 2) 同一个 requestId 再点一次：不重复下发，只回「同步中」
+    let again = send_device_command_handler(
+        axum::extract::State(state.clone()),
+        axum::Extension(admin()),
+        AxumPath(IdParam { id: device_id }),
+        Json(command_request("同步媒体", "req-media-1")),
+    )
+    .await
+    .expect("重复点击必须成功")
+    .0
+    .data;
+    assert_eq!(again["duplicated"], true);
+    assert_eq!(again["status"], audit::STATUS_PENDING);
+    assert_eq!(hits.command(), 1, "跑着的同步不能被重复下发");
+
+    // 3) 客户端回报进度 / 结论（业务平台 → 内部接口）
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "x-service-token",
+        axum::http::HeaderValue::from_static("test-service-token"),
+    );
+    let acked = x_rust::business::dog::internal::media_sync_status_handler(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        Json(x_rust::business::dog::internal::MediaSyncStatusRequest {
+            device_code: "RD-100".to_string(),
+            request_id: "req-media-1".to_string(),
+            status: "running".to_string(),
+            message: "同步中：已上传 8/24 张".to_string(),
+            detail: None,
+        }),
+    )
+    .await
+    .expect("进度回报必须成功")
+    .0
+    .data;
+    assert_eq!(acked["status"], "pending", "进度回报不改结论");
+
+    let running = state
+        .dog_device_service
+        .find_command("req-media-1")
+        .await
+        .expect("审计查询")
+        .expect("审计行");
+    assert_eq!(running.status, audit::STATUS_PENDING, "进度不改结论");
+    assert!(
+        running.message.unwrap_or_default().contains("8/24"),
+        "进度文案要落库，设备页才能显示"
+    );
+
+    let acked = x_rust::business::dog::internal::media_sync_status_handler(
+        axum::extract::State(state.clone()),
+        headers,
+        Json(x_rust::business::dog::internal::MediaSyncStatusRequest {
+            device_code: "RD-100".to_string(),
+            request_id: "req-media-1".to_string(),
+            status: "succeeded".to_string(),
+            message: "媒体回传完成：扫描 24 张，已删除板端文件 24".to_string(),
+            detail: Some(json!({"drained": true, "uploaded": 24, "remaining": 0})),
+        }),
+    )
+    .await
+    .expect("结论回报必须成功")
+    .0
+    .data;
+    assert_eq!(acked["status"], "succeeded");
+
+    let finished = state
+        .dog_device_service
+        .find_command("req-media-1")
+        .await
+        .expect("审计查询")
+        .expect("审计行");
+    assert_eq!(finished.status, audit::STATUS_SUCCEEDED);
+    assert!(
+        finished.message.unwrap_or_default().contains("扫描 24 张"),
+        "结论文案要落库"
+    );
+    let detail: Value =
+        serde_json::from_str(&finished.result.unwrap_or_default()).expect("结构化细节要能解析");
+    assert_eq!(detail["drained"], true);
+
+    // 4) 设备页查询：读到的就是这条结论
+    let status = x_rust::business::dog::device::handlers::media_sync_status_handler(
+        axum::extract::State(state.clone()),
+        axum::Extension(admin()),
+        AxumPath(IdParam { id: device_id }),
+    )
+    .await
+    .expect("状态查询必须成功")
+    .0
+    .data;
+    assert_eq!(status["status"], audit::STATUS_SUCCEEDED);
+    assert_eq!(status["stale"], false);
+    assert_eq!(status["result"]["drained"], true);
 }
 
 #[tokio::test]

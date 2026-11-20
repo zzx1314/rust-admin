@@ -24,6 +24,13 @@
 //! 板端文件**上传成功才删**（中台按 sha256 去重，`created=false` 也算成功），
 //! 删完把空的 `pt<n>/`、计划目录一起收掉，避免 SSD 被巡检图写满。
 //!
+//! 一轮「同步媒体」把目录里**所有**符合布局的图片回传，不再按「每航点最多 N 张」截断：
+//! 板端同一个航点每跑一轮就往 `pt<n>/` 里多写 `mediaFrames` 张（文件名带时间戳），
+//! 十轮就是几十张；以前按 `frames` 截断，每次都只传走最老的 N 张，剩下的永远留在板子上
+//! （2026-11-20 现场：点完「同步媒体」回执说删了 6 张，目录里还躺着 6 张）。
+//! `frames`（中台 `media_frames`）现在只管**板端每轮写几张**，回传侧以「清空目录」为准；
+//! 单轮上限 `MAX_FILES_PER_RUN` 仍然保留，防止误配目录一次传爆。
+//!
 //! 与 `mapupload` 的分工：那边回传地图包（走 `/api/map-versions/ingest`），
 //! 这边只回传图片（走 `/api/media/ingest`），登录约定一致。
 
@@ -38,7 +45,9 @@ use tracing::{info, warn};
 /// 板端 AI 存证根目录默认值（中台参数配置 `dog_config.media_picture_dir` 优先，
 /// 板端 `MEDIA_DATA_DIR` 是同一份约定的兜底）。
 pub const DEFAULT_PICTURE_DIR: &str = "/media/media-data/picture";
-/// 每航点最多回传几张（中台 `dog_config.media_frames`，1~10）。
+/// 板端每航点每轮写入几张的默认值（中台 `dog_config.media_frames`，1~10）。
+///
+/// 只用于日志与老中台兼容：回传以「清空目录」为准，不再按它截断。
 pub const DEFAULT_FRAMES: usize = 3;
 /// 一次「同步媒体」最多扫多少张：防止误配路径（例如指到 `/`）把整盘都传上去。
 pub const MAX_FILES_PER_RUN: usize = 200;
@@ -79,30 +88,64 @@ pub struct SyncSummary {
     pub deleted: usize,
     pub failed: usize,
     pub batches: usize,
+    /// 本轮结束后板端还剩几张（失败 / 超过 `MAX_FILES_PER_RUN` 截断的）
+    pub remaining: usize,
     pub errors: Vec<String>,
     pub picture_dir: String,
 }
 
+impl SyncSummary {
+    /// 板端目录是否已经清空（中台据此显示「完成」还是「还有剩余」）。
+    pub fn drained(&self) -> bool {
+        self.remaining == 0
+    }
+}
+
 impl std::fmt::Display for SyncSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.scanned == 0 && self.failed == 0 {
+            return write!(f, "板端媒体目录没有待回传的图片（{}）", self.picture_dir);
+        }
         write!(
             f,
-            "媒体回传完成：扫描 {} 张，上传成功 {}（新增 {} / 已存在 {}），失败 {}，已删除板端文件 {}，共 {} 个压缩包（目录 {}）",
+            "媒体回传完成：扫描 {} 张，上传成功 {}（新增 {} / 已存在 {}），失败 {}，已删除板端文件 {}，共 {} 个压缩包",
             self.scanned,
             self.uploaded,
             self.uploaded.saturating_sub(self.existing),
             self.existing,
             self.failed,
             self.deleted,
-            self.batches,
-            self.picture_dir
+            self.batches
         )?;
+        if self.drained() {
+            write!(f, "；板端目录已清空（{}）", self.picture_dir)?;
+        } else {
+            write!(
+                f,
+                "；板端仍有 {} 张未回传，请再点一次「同步媒体」（{}）",
+                self.remaining, self.picture_dir
+            )?;
+        }
         if !self.errors.is_empty() {
             write!(f, "；前几条错误：{}", self.errors.join(" | "))?;
         }
         Ok(())
     }
 }
+
+/// 一轮同步的进度（每传完一个压缩包上报一次，供中台设备页显示「同步中 8/24」）。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SyncProgress {
+    pub uploaded: usize,
+    pub failed: usize,
+    pub total: usize,
+    pub batches_done: usize,
+    pub batches_total: usize,
+}
+
+/// 进度回调。同步是长任务（弱网下一包 20~30s），没法等 `command_result`
+/// 才知道进展，所以每批结束就回调一次。
+pub type ProgressFn<'a> = &'a (dyn Fn(SyncProgress) + Send + Sync);
 
 /// 解析中台下发的指令参数。
 ///
@@ -155,13 +198,10 @@ pub fn parse_params(params: Option<&Value>) -> Result<(PathBuf, usize, Option<St
 /// 扫出待回传的图片：`<root>/<planId>/pt<n>/<*.jpg|jpeg|png>`。
 ///
 /// - 只认 `pt<数字>` 子目录（与板端 `evidence.py` 的落盘布局一致）；
-/// - 每个航点最多取 `frames` 张（按文件名排序，板端命名带时间戳）；
+/// - **每个航点不再按张数截断**（见文件头：同一个 `pt<n>/` 会攒下多轮巡检的帧，
+///   截断会让板端永远传不干净）；总数仍受 `MAX_FILES_PER_RUN` 约束；
 /// - 任何解析失败都跳过，不让一个脏目录毁掉整轮回传。
-pub fn collect_files(
-    root: &Path,
-    plan_filter: Option<&str>,
-    frames: usize,
-) -> Result<Vec<MediaFile>, String> {
+pub fn collect_files(root: &Path, plan_filter: Option<&str>) -> Result<Vec<MediaFile>, String> {
     let root = root
         .canonicalize()
         .map_err(|error| format!("板端媒体目录不可用（{}）: {error}", root.display()))?;
@@ -225,7 +265,7 @@ pub fn collect_files(
                 })
                 .collect();
             point_files.sort_by(|a, b| a.path.cmp(&b.path));
-            files.extend(point_files.into_iter().take(frames.max(1)));
+            files.extend(point_files);
             if files.len() >= MAX_FILES_PER_RUN {
                 files.truncate(MAX_FILES_PER_RUN);
                 return Ok(files);
@@ -233,6 +273,48 @@ pub fn collect_files(
         }
     }
     Ok(files)
+}
+
+/// 数一遍板端还剩几张待回传的图（不受 `MAX_FILES_PER_RUN` 截断影响）。
+///
+/// 只要一个数，所以不建 `MediaFile`、也不跟着软链走；目录读不了就当 0。
+fn count_images(root: &Path, plan_filter: Option<&str>) -> usize {
+    let Ok(root) = root.canonicalize() else {
+        return 0;
+    };
+    let Ok(plans) = std::fs::read_dir(&root) else {
+        return 0;
+    };
+    let mut count = 0usize;
+    for plan_entry in plans.flatten() {
+        let plan_path = plan_entry.path();
+        if !plan_path.is_dir() || plan_entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        if let Some(filter) = plan_filter
+            && plan_entry.file_name().to_string_lossy() != filter
+        {
+            continue;
+        }
+        let Ok(points) = std::fs::read_dir(&plan_path) else {
+            continue;
+        };
+        for point_entry in points.flatten() {
+            let point_path = point_entry.path();
+            if !point_path.is_dir()
+                || parse_point_index(&point_entry.file_name().to_string_lossy()).is_none()
+            {
+                continue;
+            }
+            if let Ok(entries) = std::fs::read_dir(&point_path) {
+                count += entries
+                    .flatten()
+                    .filter(|entry| is_image(&entry.path()))
+                    .count();
+            }
+        }
+    }
+    count
 }
 
 /// 按「每包 8 张 / 8MB」把待传图片切成压缩包批次。
@@ -338,24 +420,42 @@ fn captured_at(path: &Path) -> String {
 
 /// 执行一轮「同步媒体」。
 ///
-/// 返回指令回执文案（成功也有内容：中台审计里能直接看到传了几张、删了几张）。
-pub async fn sync(params: Option<&Value>, config: &Config) -> Result<String, String> {
+/// 返回本轮统计（`Display` 直接作为指令回执文案；`drained()` 供中台判断
+/// 「目录已清空」还是「还有剩余」）。
+/// `progress` 每传完一个压缩包回调一次（中台设备页据此显示「同步中 8/24」）。
+pub async fn sync(
+    params: Option<&Value>,
+    config: &Config,
+    progress: Option<ProgressFn<'_>>,
+) -> Result<SyncSummary, String> {
     let (picture_dir, frames, plan_filter) = parse_params(params)?;
-    let files = collect_files(&picture_dir, plan_filter.as_deref(), frames)?;
+    let files = collect_files(&picture_dir, plan_filter.as_deref())?;
     if files.is_empty() {
-        return Ok(format!(
-            "板端媒体目录没有待回传的图片（{}）",
-            picture_dir.display()
-        ));
+        // 顺手把「只剩 result.json / 空壳子」的目录清掉：上一轮可能已经把图传完，
+        // 只有结论文件还在，不清会让板端永远留一堆空航点目录。
+        prune_empty(&picture_dir).await;
+        return Ok(SyncSummary {
+            picture_dir: picture_dir.display().to_string(),
+            ..Default::default()
+        });
     }
     let batches = build_batches(files);
     let total: usize = batches.iter().map(Vec::len).sum();
+    let batches_total = batches.len();
     info!(
-        "同步媒体：{} 下找到 {} 张待回传图片（每航点上限 {frames} 张），分 {} 个压缩包",
+        "同步媒体：{} 下找到 {} 张待回传图片（板端每航点每轮写 {frames} 张，本轮全部回传），分 {} 个压缩包",
         picture_dir.display(),
         total,
-        batches.len()
+        batches_total
     );
+    // 第一次上报：让中台立刻看到「开始同步」和总量（弱网下一包要 20~30s）
+    if let Some(report) = progress {
+        report(SyncProgress {
+            total,
+            batches_total,
+            ..Default::default()
+        });
+    }
 
     let client = reqwest::Client::builder()
         .timeout(UPLOAD_TIMEOUT)
@@ -366,7 +466,7 @@ pub async fn sync(params: Option<&Value>, config: &Config) -> Result<String, Str
 
     let mut summary = SyncSummary {
         scanned: total,
-        batches: batches.len(),
+        batches: batches_total,
         picture_dir: picture_dir.display().to_string(),
         ..Default::default()
     };
@@ -387,6 +487,15 @@ pub async fn sync(params: Option<&Value>, config: &Config) -> Result<String, Str
                     ));
                 }
                 warn!("同步媒体：第 {} 个压缩包上传失败: {error}", index + 1);
+                if let Some(report) = progress {
+                    report(SyncProgress {
+                        uploaded: summary.uploaded,
+                        failed: summary.failed,
+                        total,
+                        batches_done: index + 1,
+                        batches_total,
+                    });
+                }
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                     summary.errors.push(format!(
                         "连续 {consecutive_failures} 张失败，已中止本轮（板端文件保留，稍后重试）"
@@ -440,6 +549,15 @@ pub async fn sync(params: Option<&Value>, config: &Config) -> Result<String, Str
             }
             cleanup_empty_dirs(&picture_dir, &entry.file).await;
         }
+        if let Some(report) = progress {
+            report(SyncProgress {
+                uploaded: summary.uploaded,
+                failed: summary.failed,
+                total,
+                batches_done: index + 1,
+                batches_total,
+            });
+        }
         if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
             summary.errors.push(format!(
                 "连续 {consecutive_failures} 张失败，已中止本轮（板端文件保留，稍后重试）"
@@ -447,8 +565,12 @@ pub async fn sync(params: Option<&Value>, config: &Config) -> Result<String, Str
             break;
         }
     }
+    // 收尾：删掉已经空的航点/计划目录（只有 result.json 的也算空），
+    // 再数一遍还剩几张——中台设备页据此显示「完成」还是「还有剩余」。
+    prune_empty(&picture_dir).await;
+    summary.remaining = count_images(&picture_dir, plan_filter.as_deref());
     info!("同步媒体：{summary}");
-    Ok(summary.to_string())
+    Ok(summary)
 }
 
 /// 上传一个压缩包。
@@ -585,11 +707,45 @@ async fn cleanup_empty_dirs(root: &Path, file: &MediaFile) {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| file.path.clone());
     if has_images(&point_dir) {
-        return; // 这个航点还有没传完的帧（本轮失败或超过 frames 上限）
+        return; // 这个航点还有没传完的帧（本轮失败 / 后面还有批次）
     }
     let _ = tokio::fs::remove_file(point_dir.join("result.json")).await;
     let _ = tokio::fs::remove_dir(&point_dir).await;
     let _ = tokio::fs::remove_dir(root.join(&file.plan_id)).await;
+}
+
+/// 收尾清理：把「已经没有图片」的航点目录（连 `result.json`）和空计划目录删掉。
+///
+/// 为什么还需要这一次扫描：`cleanup_empty_dirs` 只在「某张图刚被删掉」时触发，
+/// 而现场更常见的情况是整个航点上一轮就传完了、只留下一个 `result.json` 壳子，
+/// 或者本轮一张都没传成。不清的话板子上会积一堆空目录，「同步完成后目录是空的」
+/// 这个预期就对不上。
+async fn prune_empty(root: &Path) {
+    let Ok(root) = root.canonicalize() else {
+        return;
+    };
+    let Ok(plans) = std::fs::read_dir(&root) else {
+        return;
+    };
+    for plan_entry in plans.flatten() {
+        let plan_path = plan_entry.path();
+        if !plan_path.is_dir() || plan_entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let Ok(points) = std::fs::read_dir(&plan_path) else {
+            continue;
+        };
+        for point_entry in points.flatten() {
+            let point_path = point_entry.path();
+            if !point_path.is_dir() || has_images(&point_path) {
+                continue;
+            }
+            let _ = tokio::fs::remove_file(point_path.join("result.json")).await;
+            let _ = tokio::fs::remove_dir(&point_path).await;
+        }
+        // 计划目录空了（没有航点、也没别的文件）就连它一起收掉
+        let _ = tokio::fs::remove_dir(&plan_path).await;
+    }
 }
 
 fn has_images(dir: &Path) -> bool {
@@ -643,19 +799,32 @@ mod tests {
     }
 
     #[test]
-    fn collect_files_respects_layout_and_frames_cap() {
+    fn collect_files_drains_every_frame_of_the_point() {
         let root = tmp_root("collect");
         let point = root.join("T-1").join("pt2");
         std::fs::create_dir_all(&point).expect("创建航点目录");
-        for name in ["cam0_1.jpg", "cam0_2.jpg", "cam0_3.jpg", "result.json"] {
+        for name in [
+            "dogcam_01_20261120_145844.jpg",
+            "dogcam_02_20261120_145844.jpg",
+            "dogcam_03_20261120_145844.jpg",
+            "dogcam_01_20261120_165044.jpg",
+            "dogcam_02_20261120_165044.jpg",
+            "dogcam_03_20261120_165044.jpg",
+            "result.json",
+        ] {
             std::fs::write(point.join(name), b"x").expect("写文件");
         }
         // 非 `pt<n>` 目录与计划过滤都不该被收
         std::fs::create_dir_all(root.join("T-1").join("preview")).expect("创建脏目录");
         std::fs::write(root.join("T-1").join("preview").join("a.jpg"), b"x").expect("写文件");
 
-        let files = collect_files(&root, Some("T-1"), 2).expect("扫描成功");
-        assert_eq!(files.len(), 2, "每航点最多 frames 张");
+        let files = collect_files(&root, Some("T-1")).expect("扫描成功");
+        assert_eq!(
+            files.len(),
+            6,
+            "两轮巡检攒下的 6 帧必须一次全部回传（不能按每航点 3 张截断，
+             否则板端目录永远传不干净——2026-11-20 现场问题）"
+        );
         assert!(files.iter().all(|file| file.point_index == 2));
         assert_eq!(files[0].plan_id, "T-1");
         assert!(
@@ -665,7 +834,7 @@ mod tests {
         );
 
         assert!(
-            collect_files(&root, Some("other"), 3)
+            collect_files(&root, Some("other"))
                 .expect("扫描成功")
                 .is_empty(),
             "计划过滤"
@@ -675,9 +844,40 @@ mod tests {
 
     #[test]
     fn collect_files_reports_missing_root() {
-        let error = collect_files(Path::new("/definitely/not/here"), None, 3)
-            .expect_err("目录不存在要报错");
+        let error =
+            collect_files(Path::new("/definitely/not/here"), None).expect_err("目录不存在要报错");
         assert!(error.contains("不可用"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn prune_empty_removes_shell_dirs_left_by_previous_runs() {
+        let root = tmp_root("prune");
+        // 上一轮已经把图传走，只剩结论文件
+        let shell = root.join("T-9").join("pt0");
+        std::fs::create_dir_all(&shell).expect("创建航点目录");
+        std::fs::write(shell.join("result.json"), b"{}").expect("写 result.json");
+        // 还有图的航点不能被碰
+        let alive = root.join("T-9").join("pt1");
+        std::fs::create_dir_all(&alive).expect("创建航点目录");
+        std::fs::write(alive.join("a.jpg"), b"x").expect("写图");
+
+        assert_eq!(
+            count_images(&root, Some("T-9")),
+            1,
+            "只剩 result.json 的航点不该算作待回传"
+        );
+        assert_eq!(count_images(&root, Some("T-其他")), 0, "计划过滤");
+
+        prune_empty(&root).await;
+        assert!(!shell.exists(), "只剩 result.json 的航点目录要收掉");
+        assert!(alive.join("a.jpg").is_file(), "还有图的航点不能动");
+        assert!(root.join("T-9").is_dir(), "计划目录还有图，不能删");
+
+        // 计划目录也空了就连它一起收
+        std::fs::remove_file(alive.join("a.jpg")).expect("删图");
+        prune_empty(&root).await;
+        assert!(!root.join("T-9").exists(), "空计划目录要收掉");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
@@ -720,6 +920,7 @@ mod tests {
             deleted: 3,
             failed: 1,
             batches: 1,
+            remaining: 1,
             errors: vec!["a.jpg: 超时".to_string()],
             picture_dir: "/media/media-data/picture".to_string(),
         };
@@ -727,7 +928,23 @@ mod tests {
         assert!(text.contains("扫描 4 张"), "{text}");
         assert!(text.contains("新增 2 / 已存在 1"), "{text}");
         assert!(text.contains("共 1 个压缩包"), "{text}");
+        assert!(text.contains("仍有 1 张未回传"), "{text}");
         assert!(text.contains("a.jpg: 超时"), "{text}");
+
+        let drained = SyncSummary {
+            scanned: 2,
+            uploaded: 2,
+            deleted: 2,
+            batches: 1,
+            picture_dir: "/media/media-data/picture".to_string(),
+            ..Default::default()
+        };
+        assert!(drained.drained());
+        assert!(
+            drained.to_string().contains("板端目录已清空"),
+            "{}",
+            drained
+        );
     }
 
     fn media_file(

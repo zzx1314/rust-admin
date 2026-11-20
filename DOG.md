@@ -81,9 +81,10 @@ DELETE /api/dogDevice/{id}          软删除设备
 GET    /api/dogDevice/users         可分配用户下拉
 GET    /api/dogDevice/byCode/{code} 按设备编号查询（业务平台内部使用）
 POST   /api/dogDevice/{id}/syncMaps  中台手动触发设备同步地图
-POST   /api/dogDevice/{id}/command  中台向设备下发指令（经业务平台转发；`同步媒体` 会按参数配置自动带上 `pictureDir`/`frames`）
+POST   /api/dogDevice/{id}/command  中台向设备下发指令（经业务平台转发；`同步媒体` 会按参数配置自动带上 `pictureDir`/`frames`/`requestId`，审计先停在 pending）
 POST   /api/dogDevice/{id}/tasks    中台给设备下发一条巡检任务（选路线 + 计划时间）
 GET    /api/dogDevice/{id}/runtime  设备运行态只读视图（在线/任务/进度/电量）
+GET    /api/dogDevice/{id}/mediaSyncStatus  最近一次「同步媒体」的状态（pending / succeeded / failed + 进度文案 + `stale`）
 POST   /api/dogDevice/assignUsers   批量分配 { deviceIds, userIds, mode: append|replace }
 POST   /api/dogDevice/unassignUsers 批量解除分配 { deviceIds, userIds }
 
@@ -95,6 +96,7 @@ POST   /api/dogInternal/maps/exists          地图 id 是否仍存在（业务�
 POST   /api/dogInternal/maps/upload          地图包回传（multipart：file + mapInfo）
 GET    /api/dogInternal/media/config         板端媒体目录 / 固定帧数（参数配置页，业务平台 60s 缓存）
 POST   /api/dogInternal/media/upload         航点 AI 存证图片回传（multipart：单张 JPG/PNG 或 zip 批量；按 sha256 去重）
+POST   /api/dogInternal/media/sync-status    「同步媒体」进度 / 结论回报（写 dog_command_audit，供设备页轮询）
 GET    /api/dogDevice/control-plane/ws       反向控制信道（WebSocket，业务平台拨入）
 ```
 

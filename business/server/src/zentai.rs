@@ -534,6 +534,49 @@ pub struct DeviceUpsert {
     pub user_ids: Vec<i64>,
 }
 
+/// 中台「同步媒体」状态回报：设备客户端 → 业务平台 → 中台内部接口。
+///
+/// 中台只负责下发「同步媒体」，真正干活的是板端客户端；这条上报把
+/// 「已上传 8/24」与最终结论（扫了几张、删了几张、目录是否清空）回写到
+/// `dog_command_audit`，设备页才不用靠猜就知道同步有没有完成。
+///
+/// 只在配了共享服务令牌（`ROBODOG_SERVICE_TOKEN`）时可用：中台内部接口是
+/// 唯一入口，公开接口不开放「改别人审计状态」。
+pub async fn report_media_sync(config: &Config, payload: &Value) -> Result<(), AppError> {
+    let base = zentai_base(config)?;
+    let auth = Auth::resolve(config).await?;
+    if !auth.is_service() {
+        return Err(AppError::BadRequest(
+            "未配置中台服务令牌，无法回报同步媒体状态".to_string(),
+        ));
+    }
+    let http = http_client()?;
+    let url = format!("{base}/api/dogInternal/media/sync-status");
+    let resp = auth
+        .apply(http.post(&url).json(payload))
+        .send()
+        .await
+        .map_err(|error| AppError::Internal(format!("上报中台同步媒体状态失败: {error}")))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(AppError::Internal(format!(
+            "上报中台同步媒体状态失败 HTTP {status}: {text}"
+        )));
+    }
+    Ok(())
+}
+
+/// 尽力上报：这条链路纯粹是「让人看见状态」，失败只记日志。
+pub async fn try_report_media_sync(config: &Config, payload: Value) {
+    if !config.zentai_ready() {
+        return;
+    }
+    if let Err(error) = report_media_sync(config, &payload).await {
+        warn!("同步媒体状态上报中台失败: {error}");
+    }
+}
+
 /// 尽力同步：失败只记录日志，不阻断业务平台的设备增改。
 pub async fn try_upsert_device(config: &Config, device: &DeviceUpsert) {
     if !config.zentai_ready() {

@@ -276,6 +276,11 @@ pub fn dog_device_routes(state: AppState) -> Router<AppState> {
             "/dogDevice/{id}/runtime",
             get(dog_device_handlers::device_runtime_handler),
         )
+        // 「同步媒体」是长任务：下发只回「已下发」，进度与结论靠这个查询
+        .route(
+            "/dogDevice/{id}/mediaSyncStatus",
+            get(dog_device_handlers::media_sync_status_handler),
+        )
         .route(
             "/dogDevice",
             post(dog_device_handlers::create_device_handler),

@@ -21,6 +21,11 @@ use std::time::Duration;
 /// 比普通指令慢得多；其余控制请求仍用 8s 的默认回执超时。
 const PUSH_MAP_TIMEOUT: Duration = Duration::from_secs(65);
 
+/// 「同步媒体」：异步长任务，中台下发后审计停在 pending，等客户端回报结论。
+/// 超过这么久还没结论，就当这轮丢了（客户端崩溃 / 断网），允许重新下发。
+const MEDIA_SYNC_ACTION: &str = "同步媒体";
+const MEDIA_SYNC_STALE_SECS: i64 = 600;
+
 /// 允许从中台发起的设备指令白名单（与业务平台 `teleop::BUSINESS_COMMANDS` 对齐）。
 /// 「同步地图」有独立入口 `syncMaps`，这里不重复暴露。
 const ALLOWED_COMMANDS: [&str; 7] = [
@@ -344,6 +349,16 @@ pub(crate) async fn forward(
     request_id: &str,
     body: Value,
 ) -> Result<Value, AppError> {
+    // 已经有一轮「同步媒体」在跑：不重复下发（重复下发会让板端同时跑两轮扫描），
+    // 直接把「同步中」回给页面。超过 `MEDIA_SYNC_STALE_SECS` 没结论就当丢了，
+    // 走原来的「复用审计 + 重新下发」。
+    if action == MEDIA_SYNC_ACTION
+        && let Some(previous) = state.dog_device_service.find_command(request_id).await?
+        && previous.status == audit::STATUS_PENDING
+        && !audit_is_stale(&previous)
+    {
+        return Ok(replay(device_code, action, request_id, &previous));
+    }
     let audit_id = match state.dog_device_service.find_command(request_id).await? {
         // 已经有结论：回放上次结果，不再向设备重复下发
         Some(previous) if previous.status != audit::STATUS_PENDING => {
@@ -372,6 +387,37 @@ pub(crate) async fn forward(
 
     match outcome {
         Ok(data) => {
+            // 「同步媒体」是长任务：下发成功只代表设备客户端收到了，图片要一张张
+            // 传上来（4G 上一轮几十张可能跑几分钟）。真实结论由客户端异步回报
+            // （→ 业务平台 → `POST /api/dogInternal/media/sync-status`），
+            // 所以审计**停在 pending**，设备页显示「同步中」而不是假的「已完成」。
+            if action == MEDIA_SYNC_ACTION
+                && data
+                    .get("wsDelivered")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true)
+            {
+                state
+                    .dog_device_service
+                    .record_device_report(
+                        request_id,
+                        None,
+                        Some(&data.to_string()),
+                        Some("已下发，等待设备客户端回传同步结果"),
+                    )
+                    .await
+                    .ok();
+                return Ok(json!({
+                    "deviceId": device_code,
+                    "action": action,
+                    "requestId": request_id,
+                    "duplicated": false,
+                    "status": audit::STATUS_PENDING,
+                    "awaitingDevice": true,
+                    "latencyMs": latency_ms,
+                    "result": data,
+                }));
+            }
             state
                 .dog_device_service
                 .finish_command(
@@ -408,6 +454,20 @@ pub(crate) async fn forward(
     }
 }
 
+/// pending 指令是否已经「等到发霉」：`update_time` / `create_time` 是北京时间字符串。
+fn audit_is_stale(record: &audit::CommandAudit) -> bool {
+    use chrono::TimeZone;
+    let stamp = record
+        .update_time
+        .as_deref()
+        .unwrap_or(record.create_time.as_str());
+    let Ok(at) = chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M:%S") else {
+        return false;
+    };
+    let at = chrono::Utc.from_utc_datetime(&at) - chrono::Duration::hours(8);
+    chrono::Utc::now().signed_duration_since(at).num_seconds() > MEDIA_SYNC_STALE_SECS
+}
+
 /// `POST /api/dogDevice/{id}/command` — 中台向设备下发一条指令。
 ///
 /// 授权：管理员可操作全部设备，普通用户只能操作分配给自己的设备（`dog_user_device`）。
@@ -429,7 +489,7 @@ pub async fn send_device_command_handler(
         return Err(AppError::BadRequest(format!("不支持的指令：{command}")));
     }
     let request_id = resolve_request_id(req.request_id);
-    let params = command_params(&state, &command, req.params, &user.username).await;
+    let params = command_params(&state, &command, req.params, &user.username, &request_id).await;
     let body = json!({
         "command": command,
         "params": params,
@@ -453,14 +513,18 @@ pub async fn send_device_command_handler(
 /// 目前只有「同步媒体」需要：板端存证目录与固定帧数在「参数配置」页维护
 /// （`dog_config.media_picture_dir` / `media_frames`），现场改配置即可生效，
 /// 不必登板子改 `config.py`；配置缺失/写坏时回退到默认值，不影响指令下发。
+///
+/// `requestId` 也一并下发：客户端用它回传进度与最终结论
+/// （`command_progress` / `command_result` → 业务平台 → 本机内部接口）。
 async fn command_params(
     state: &AppState,
     command: &str,
     params: Option<Value>,
     operator: &str,
+    request_id: &str,
 ) -> Value {
     let mut params = params.unwrap_or_else(|| json!({}));
-    if command != "同步媒体" {
+    if command != MEDIA_SYNC_ACTION {
         return params;
     }
     let config =
@@ -468,6 +532,7 @@ async fn command_params(
     params["pictureDir"] = json!(config.picture_dir);
     params["frames"] = json!(config.frames);
     params["operator"] = json!(operator);
+    params["requestId"] = json!(request_id);
     params
 }
 
@@ -538,4 +603,46 @@ pub async fn device_runtime_handler(
     )
     .await?;
     Ok(Json(ApiResponse::ok(data)))
+}
+
+/// `GET /api/dogDevice/{id}/mediaSyncStatus` — 最近一次「同步媒体」的状态。
+///
+/// 「同步媒体」是长任务（扫板端目录 → 逐个压缩包传中台），下发接口只回
+/// 「已下发」。设备页靠这个查询看进度与结论：
+///
+/// - `pending`：还在跑（`message` 里带「已上传 8/24 张」这种进度）；
+/// - `succeeded`：客户端回报的真结论（扫了几张、传了几张、目录是否清空）；
+/// - `failed`：客户端报错 / 本轮失败；
+/// - `null`：这台设备从未「同步媒体」过。
+pub async fn media_sync_status_handler(
+    State(state): State<AppState>,
+    Extension(user): Extension<RequestUser>,
+    Path(params): Path<IdParam>,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let device = state
+        .dog_device_service
+        .get(params.id, &user.data_scope())
+        .await?;
+    let latest = state
+        .dog_device_service
+        .latest_command(&device.device_id, MEDIA_SYNC_ACTION)
+        .await?;
+    let Some(record) = latest else {
+        return Ok(Json(ApiResponse::ok(Value::Null)));
+    };
+    let stale = record.status == audit::STATUS_PENDING && audit_is_stale(&record);
+    Ok(Json(ApiResponse::ok(json!({
+        "deviceId": device.device_id,
+        "requestId": record.request_id,
+        "status": record.status,
+        // 等太久还没结论：页面刷成「没有回报」而不是一直转圈
+        "stale": stale,
+        "message": record.message,
+        "result": record
+            .result
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<Value>(text).ok()),
+        "createTime": record.create_time,
+        "updateTime": record.update_time,
+    }))))
 }
