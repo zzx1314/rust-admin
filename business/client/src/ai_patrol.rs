@@ -315,10 +315,16 @@ struct Leftover {
 struct Window {
     id: String,
     task_code: String,
+    /// 计划 id（= 业务任务号）：板端拿它建存证目录 `detect_jobs/<planId>/pt<下标>/`。
+    /// 老平台不下发 `planId` 时等于 `task_code`（见 [`AiStart::from_value`]）。
+    plan_id: String,
     point_index: i64,
     /// 停止信号：`notify_one` 留 permit，窗口任务即使在 `chunk().await` 里也能立刻醒
     cancel: Arc<Notify>,
 }
+
+/// 待清理的板端存证目标：（计划 id, 航点下标）
+type CleanupTarget = (String, i64);
 
 /// 航点 AI 识别运行态
 pub struct AiPatrol {
@@ -342,6 +348,13 @@ pub struct AiPatrol {
     /// `jobs_dir` 是不是运维显式配的：配了就**不**被板端事件学到的新路径覆盖
     /// （现场可能把存证目录 bind-mount 到别处，客户端比板端日志更可信）
     jobs_dir_pinned: bool,
+    /// 平台已经推完图、等窗口收尾才删的板端存证（计划 id, 航点下标）。
+    ///
+    /// 为什么不当场删：告警推送往往在窗口中间就完成了，那时板端可能还在写图，
+    /// 客户端收尾时也要再扫一次存证目录补图（`ai_evidence`）。删早了会把还没推出去的
+    /// 那张图毁掉——图只在板端，删了不可逆。所以窗口开着就先记账，收尾后再删
+    /// （见 [`AiPatrol::cleanup_evidence`] / [`AiPatrol::finish`]）。
+    pending_cleanup: Mutex<Vec<CleanupTarget>>,
 }
 
 impl AiPatrol {
@@ -381,6 +394,7 @@ impl AiPatrol {
             requested: Mutex::new(None),
             jobs_dir_pinned: jobs_dir.is_some(),
             jobs_dir: Mutex::new(jobs_dir),
+            pending_cleanup: Mutex::new(Vec::new()),
         }
     }
 
@@ -492,6 +506,7 @@ impl AiPatrol {
             *guard = Some(Window {
                 id: start.window_id.clone(),
                 task_code: start.task_code.clone(),
+                plan_id: start.plan_id.clone(),
                 point_index: start.point_index,
                 cancel: cancel.clone(),
             });
@@ -858,6 +873,27 @@ impl AiPatrol {
         if !replaced {
             *self.window.lock().await = None;
         }
+        // 平台已经把这些航点的证据图推进群了：窗口收尾（含停识别后的补图扫描）
+        // 之后才真删板端存证。还属于「当前活动窗口」的条目留着，不能提前删。
+        let active = self
+            .window
+            .lock()
+            .await
+            .as_ref()
+            .map(|window| (window.plan_id.clone(), window.point_index));
+        let (ready, keep): (Vec<CleanupTarget>, Vec<CleanupTarget>) = {
+            let mut pending = self.pending_cleanup.lock().await;
+            std::mem::take(&mut *pending)
+                .into_iter()
+                .partition(|item| active.as_ref() != Some(item))
+        };
+        if !keep.is_empty() {
+            *self.pending_cleanup.lock().await = keep;
+        }
+        for (plan_id, point_index) in ready {
+            self.remove_point_dir(&plan_id, point_index, "窗口收尾")
+                .await;
+        }
     }
 
     /// 存证根目录（`detect_jobs`）：显式配置优先，否则试内置默认位置并记住能用的那个。
@@ -885,6 +921,65 @@ impl AiPatrol {
             debug!("航点 AI 识别：从板端事件学到存证目录 {root}");
             *guard = Some(root);
         }
+    }
+
+    /// 平台把证据图推进企业微信群之后，删掉板端这一轮的存证
+    /// （`detect_jobs/<计划>/pt<航点>/` 里的画框 JPG + `result.json`）。
+    ///
+    /// 为什么要删：板端每命中一次写一张图，巡检一天几十轮，板子存储很快被图片吃满；
+    /// 而图进了群之后没有第二次用途（平台读不到板端磁盘）。
+    ///
+    /// 窗口还开着就先记账（[`AiPatrol::pending_cleanup`]）：那时板端可能还在写图，
+    /// 客户端收尾时也要再扫一次存证目录补图（`ai_evidence`），删早了会把还没推出去的
+    /// 那张图毁掉。窗口收尾后由 [`AiPatrol::finish`] 统一删。
+    pub async fn cleanup_evidence(&self, plan_id: &str, point_index: i64, reason: &str) {
+        let plan_id = plan_id.trim();
+        if !safe_plan_id(plan_id) || point_index < 0 {
+            debug!(
+                "航点 AI 识别：存证清理载荷不合法（plan={plan_id:?} point={point_index}），忽略"
+            );
+            return;
+        }
+        {
+            let guard = self.window.lock().await;
+            if let Some(window) = guard.as_ref()
+                && window.plan_id == plan_id
+                && window.point_index == point_index
+            {
+                debug!(
+                    "航点 AI 识别：窗口还没收尾，存证 {plan_id}/pt{point_index} 等收尾后再删（{reason}）"
+                );
+                self.pending_cleanup
+                    .lock()
+                    .await
+                    .push((plan_id.to_string(), point_index));
+                return;
+            }
+        }
+        self.remove_point_dir(plan_id, point_index, reason).await;
+    }
+
+    /// 真删 `<存证根>/<计划>/pt<n>/`（图和 `result.json` 都在这一层）。
+    async fn remove_point_dir(&self, plan_id: &str, point_index: i64, reason: &str) {
+        let Some(root) = self.jobs_root().await else {
+            debug!("航点 AI 识别：找不到存证根目录，跳过清理 {plan_id}/pt{point_index}");
+            return;
+        };
+        let Some(dir) = point_dir(&root, plan_id, point_index) else {
+            return;
+        };
+        match tokio::fs::remove_dir_all(&dir).await {
+            Ok(()) => info!("航点 AI 识别：已清理板端存证 {}（{reason}）", dir.display()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                debug!("航点 AI 识别：板端存证已经不在了（{}）", dir.display())
+            }
+            Err(error) => warn!(
+                "航点 AI 识别：清理板端存证失败（{}）: {error}",
+                dir.display()
+            ),
+        }
+        // 计划目录空了就顺手删掉，别在 detect_jobs 下留一堆空壳（非空时 remove_dir 会失败）
+        let _ = tokio::fs::remove_dir(Path::new(&root).join(plan_id.trim())).await;
     }
 
     /// 本轮窗口的一张命中帧：（板端路径, base64）。
@@ -1178,6 +1273,31 @@ fn jobs_root_from_evidence(event: &Value) -> Option<String> {
     let root = point_dir.parent()?.parent()?;
     let root = root.to_string_lossy().trim_end_matches('/').to_string();
     Some(root).filter(|root| !root.is_empty())
+}
+
+/// 计划 id 能不能安全地拼进存证路径。
+///
+/// 删目录不可逆，所以对平台下发的 `planId` 只做「拒绝」不做替换：只认字母 / 数字 /
+/// 汉字 / `-` / `_`，其余（空、路径分隔符、`..`、控制字符）一律不删。
+/// 正常任务号（`TK-1112-11`）和板端 `evidence.py::_safe_job_id` 的产物都落在这个范围里。
+fn safe_plan_id(plan_id: &str) -> bool {
+    let plan_id = plan_id.trim();
+    !plan_id.is_empty()
+        && plan_id
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_')
+}
+
+/// 板端存证目录：`<存证根>/<计划>/pt<航点下标>`（与 `evidence.py::plan_dir` 对齐）。
+fn point_dir(root: &str, plan_id: &str, point_index: i64) -> Option<std::path::PathBuf> {
+    if !safe_plan_id(plan_id) || point_index < 0 {
+        return None;
+    }
+    Some(
+        Path::new(root)
+            .join(plan_id.trim())
+            .join(format!("pt{point_index}")),
+    )
 }
 
 /// 存证目录里「本轮写下的」最新一张图（JPG/PNG）。
@@ -2303,5 +2423,109 @@ mod agent_flow {
                 .is_err(),
             "连不上 Agent 时不该往平台发消息（只在本地打 WARN）"
         );
+    }
+
+    /// 平台把证据图推进企业微信群 → 删掉板端这一轮的存证（画框 JPG + `result.json`）。
+    ///
+    /// 只删「这个计划的这个航点」：同一计划别的航点还在跑；整个计划目录空了才顺手删掉。
+    #[tokio::test]
+    async fn ai_cleanup_removes_the_point_dir_after_the_image_is_pushed() {
+        let root = temp_jobs_dir("cleanup");
+        let pt0 = root.join("TK-1").join("pt0");
+        let pt1 = root.join("TK-1").join("pt1");
+        for dir in [&pt0, &pt1] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("dogcam_1.jpg"), [0xFF_u8, 0xD8, 0xFF]).unwrap();
+            std::fs::write(dir.join("result.json"), b"{}").unwrap();
+        }
+        let ai = AiPatrol::with_jobs_dir(
+            "http://127.0.0.1:9",
+            true,
+            Some(root.to_string_lossy().to_string()),
+        );
+
+        ai.cleanup_evidence("TK-1", 0, "单测").await;
+        assert!(!pt0.exists(), "命中的那个航点存证要删干净");
+        assert!(pt1.exists(), "同一计划的其它航点不能动");
+        assert!(root.join("TK-1").exists(), "计划目录还有 pt1，不能删");
+
+        ai.cleanup_evidence("TK-1", 1, "单测").await;
+        assert!(!pt1.exists());
+        assert!(
+            !root.join("TK-1").exists(),
+            "计划目录空了就一起删，别在 detect_jobs 下留空壳"
+        );
+        assert!(root.exists(), "存证根本身不能动");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 窗口还开着时不能当场删：板端可能还在写图，客户端收尾还要扫目录补图（`ai_evidence`）。
+    /// 先记账，收尾（[`AiPatrol::finish`]）后再删。
+    #[tokio::test]
+    async fn ai_cleanup_while_the_window_is_open_is_deferred() {
+        let root = temp_jobs_dir("cleanup-defer");
+        let pt0 = root.join("TK-1").join("pt0");
+        std::fs::create_dir_all(&pt0).unwrap();
+        std::fs::write(pt0.join("dogcam_1.jpg"), [0xFF_u8, 0xD8, 0xFF]).unwrap();
+        let ai = AiPatrol::with_jobs_dir(
+            "http://127.0.0.1:9",
+            true,
+            Some(root.to_string_lossy().to_string()),
+        );
+        *ai.window.lock().await = Some(Window {
+            id: "AIW-1".to_string(),
+            task_code: "TK-1".to_string(),
+            plan_id: "TK-1".to_string(),
+            point_index: 0,
+            cancel: Arc::new(Notify::new()),
+        });
+
+        ai.cleanup_evidence("TK-1", 0, "单测").await;
+        assert!(pt0.exists(), "窗口还开着就不能删（板端可能还在写图）");
+        assert_eq!(
+            ai.pending_cleanup.lock().await.clone(),
+            vec![("TK-1".to_string(), 0)],
+            "要记账，等收尾再删"
+        );
+
+        // 不是当前窗口的航点就可以当场删
+        let pt2 = root.join("TK-1").join("pt2");
+        std::fs::create_dir_all(&pt2).unwrap();
+        ai.cleanup_evidence("TK-1", 2, "单测").await;
+        assert!(!pt2.exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 删目录不可逆：平台下发的 `planId` 只认安全字符，路径穿越一律拒绝
+    #[test]
+    fn evidence_paths_refuse_unsafe_plan_ids() {
+        let root = "/root/detect_jobs";
+        assert_eq!(
+            point_dir(root, "TK-1112-11", 3),
+            Some(std::path::PathBuf::from("/root/detect_jobs/TK-1112-11/pt3"))
+        );
+        assert!(
+            point_dir(root, "巡检计划-1", 0).is_some(),
+            "汉字任务号要能用"
+        );
+        for bad in ["", "  ", "../etc", "a/b", "a\\b", "TK-1/../..", "TK:1"] {
+            assert!(point_dir(root, bad, 0).is_none(), "{bad:?} 不能被拼进路径");
+        }
+        assert!(point_dir(root, "TK-1", -1).is_none(), "航点下标不能是负数");
+    }
+
+    fn temp_jobs_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "robodog-jobs-{tag}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

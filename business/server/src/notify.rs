@@ -174,6 +174,75 @@ pub struct Notice {
     /// 第二条推后几秒，群里看到的效果与「卡片 + 图」一样；不发卡片是因为重发一遍
     /// 会让群里当成两条告警。
     pub image_only: bool,
+    /// 推完这条（含 `msgtype=image`）之后要清掉的板端存证目录。
+    ///
+    /// 只有**真的带了证据图**的 AI 告警才有（见 [`EvidenceCleanup`]）：图进了群，
+    /// 板端那一轮存证（画框 JPG + `result.json`）就没有第二次用途了。
+    /// `None`、或者图片那一条发送失败，都不删（删了不可逆，留着还能人工补推）。
+    pub cleanup: Option<EvidenceCleanup>,
+}
+
+/// 「证据图已经进群」之后要删掉的板端存证目录（`detect_jobs/<计划>/pt<航点>/`）。
+///
+/// 板端每命中一次就往 `<存证根>/<计划>/pt<航点>/` 写一张画框 JPG 和一份
+/// `result.json`（见 `backpack_dashboard/backend/evidence.py`）；巡检一天几十轮，
+/// 板子存储很快被图片吃满。这些图的唯一去处是群里那条 `msgtype=image`
+/// （平台读不到板端磁盘，没有第二次用途），所以**推送成功后**让现场客户端把这一轮
+/// 的存证删掉。
+///
+/// 为什么不在这里直接删：路径在**板端**磁盘上，只有与 Agent 同机的设备客户端能删，
+/// 所以下发一条 `ai_cleanup` 走已有的设备 WS（见 [`dispatch_evidence_cleanup`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceCleanup {
+    /// 存证写在**哪台**设备的盘上：指令要在那台设备的 WS 上下发
+    pub device_code: String,
+    /// 计划 id（= 业务任务号），板端拿它建目录
+    pub plan_id: String,
+    /// 航点下标（0 基，与 `routeData.points` 一致）
+    pub point_index: i64,
+}
+
+/// 从 AI 告警的结构化去重键（`ai:<设备>:<任务>:<航点下标>:<what>`）反推要清理的目录。
+///
+/// 为什么从 `dedup_key` 反推、而不是给 `alert_created*` 加参数：告警写入点有 5 处，
+/// 推送侧只按 `alert_code` 回查（见 [`alert_created`]）。多加一个参数等于让每个调用点
+/// 都知道「板端存证怎么放」——那是 `ai_patrol` 与设备客户端之间的事。键里已经带了
+/// 设备 / 任务 / 航点，正好够用。
+///
+/// **设备以键里那个为准**（报警的那个客户端），告警行的 `device_id` 只当兜底：
+/// 键里的设备就是开窗、读盘、上报的那个客户端，存证也在它的盘上；
+/// 告警行记的是**任务**绑的设备，两者在数据不全时可能不是同一行（集成测试里就遇到过，
+/// 指向另一台设备的话 `ai_cleanup` 会发给一个不在线的号，文件永远删不掉）。
+///
+/// 非 AI 告警（`fault:` / `hb:` / `ctrl:` / `alert:`）返回 `None`：那些告警没有板端存证。
+pub fn evidence_cleanup(
+    dedup_key: Option<&str>,
+    device_code: Option<&str>,
+) -> Option<EvidenceCleanup> {
+    let key = dedup_key?.trim();
+    let mut parts = key.strip_prefix("ai:")?.split(':');
+    let keyed_device = parts.next()?.trim();
+    let plan_id = parts.next()?.trim();
+    let point_index = parts.next()?.trim().parse::<i64>().ok()?;
+    if plan_id.is_empty() || point_index < 0 {
+        return None;
+    }
+    let device_code = if keyed_device.is_empty() {
+        device_code
+            .map(str::trim)
+            .filter(|code| !code.is_empty())
+            .unwrap_or_default()
+    } else {
+        keyed_device
+    };
+    if device_code.is_empty() {
+        return None;
+    }
+    Some(EvidenceCleanup {
+        device_code: device_code.to_string(),
+        plan_id: plan_id.to_string(),
+        point_index,
+    })
 }
 
 /// 一条待发图片消息（企业微信 `msgtype=image`）。
@@ -775,6 +844,7 @@ async fn flush_overflow(state: &AppState) {
         mentions: Vec::new(),
         image: None,
         image_only: false,
+        cleanup: None,
     };
     let Some(url) = state.notifier.webhook() else {
         return;
@@ -799,8 +869,11 @@ async fn deliver(
 ) {
     // 只补发图（卡片早就发过了）：发完就返回，不要重发卡片也不要写 notifications
     if notice.image_only {
-        if let Some(image) = &notice.image {
-            send_image(client, url, image).await;
+        if let Some(image) = &notice.image
+            && send_image(client, url, image).await
+        {
+            // 图真的进群了，板端这一轮存证可以删了
+            dispatch_evidence_cleanup(state, notice).await;
         }
         return;
     }
@@ -846,8 +919,11 @@ async fn deliver(
                 debug!(key = %notice.dedupe_key, "wecom: 推送成功");
                 // 图片排在正文之后：群里先看到卡片再看图（发送顺序 = 消息顺序）。
                 // 失败只打日志——正文已经送到了，不能因一张图把告警判失败。
-                if let Some(image) = &notice.image {
-                    send_image(client, url, image).await;
+                if let Some(image) = &notice.image
+                    && send_image(client, url, image).await
+                {
+                    // 企业微信确认收到图之后才删板端存证：删了不可逆
+                    dispatch_evidence_cleanup(state, notice).await;
                 }
                 return;
             }
@@ -897,18 +973,63 @@ enum FailureKind {
 /// 企业微信要求：`base64` = **原图字节**的 base64（不能带换行），`md5` = base64 **之前**
 /// 字节的 md5，原图 ≤ 2MB 且只有 JPG/PNG。这些校验在 [`evidence_image`] 里已经做完，
 /// 到这里就是黑盒发送。
-async fn send_image(client: &reqwest::Client, url: &str, image: &NoticeImage) {
+/// 返回**企业微信是否真的收了**：调用方据此决定要不要删板端存证（删了不可逆）。
+async fn send_image(client: &reqwest::Client, url: &str, image: &NoticeImage) -> bool {
     let body = json!({
         "msgtype": "image",
         "image": { "base64": image.base64, "md5": image.md5 }
     });
     match post(client, url, &body).await {
-        Ok(()) => debug!(bytes = image.bytes, "wecom: 证据图推送成功"),
-        Err(failure) => warn!(
-            bytes = image.bytes,
-            "wecom: 证据图推送失败（正文已发送）: {}",
-            failure.message
-        ),
+        Ok(()) => {
+            debug!(bytes = image.bytes, "wecom: 证据图推送成功");
+            true
+        }
+        Err(failure) => {
+            warn!(
+                bytes = image.bytes,
+                "wecom: 证据图推送失败（正文已发送）: {}", failure.message
+            );
+            false
+        }
+    }
+}
+
+/// 证据图进群之后，让板端把这一轮的存证删掉（`detect_jobs/<计划>/pt<航点>/`）。
+///
+/// 走**已有的设备 WS**（和 `ai_start` / `ai_stop` 同一条链路）：存证在板端磁盘上，
+/// 平台读不到也删不到，只有与 Agent 同机的设备客户端能动手。
+///
+/// 设备不在线（后台重连 / 已下线）就放弃：`send_message_to_device` 返回 false，
+/// 文件留在板子上，等于退回老行为——丢的是磁盘，不是告警。
+async fn dispatch_evidence_cleanup(state: &AppState, notice: &Notice) {
+    let Some(target) = &notice.cleanup else {
+        return;
+    };
+    let sent = crate::gateway::send_message_to_device(
+        &state.device_connections,
+        &target.device_code,
+        "ai_cleanup",
+        json!({
+            "planId": target.plan_id,
+            "pointIndex": target.point_index,
+            "reason": "证据图已推送企业微信",
+        }),
+    )
+    .await;
+    if sent {
+        info!(
+            device = %target.device_code,
+            plan = %target.plan_id,
+            point = target.point_index,
+            "wecom: 证据图已进群，通知客户端清理板端存证"
+        );
+    } else {
+        debug!(
+            device = %target.device_code,
+            plan = %target.plan_id,
+            point = target.point_index,
+            "wecom: 证据图已进群，但设备不在线，板端存证留在原地"
+        );
     }
 }
 
@@ -1372,11 +1493,16 @@ pub async fn alert_created_with_image(
         },
         image: None,
         image_only: false,
+        cleanup: None,
     };
     // 证据图是**可选附加**：开关关掉 / 拿不到字节就只发卡片
     if let Some(image) = image {
         if image_push_enabled(state).await {
             notice.image = Some(image);
+            // 图马上就要进群：板端这一轮存证（画框 JPG + result.json）之后没有第二次
+            // 用途，推送成功后让客户端删掉（见 [`dispatch_evidence_cleanup`]）。
+            // 没带图 / 图被开关挡掉就不删——文件留在板子上，还能人工补推。
+            notice.cleanup = evidence_cleanup(row.dedup_key.as_deref(), row.device_code.as_deref());
         } else {
             debug!(alert = %alert_code, "wecom: 已关闭告警证据图推送，只发卡片");
         }
@@ -1414,13 +1540,20 @@ pub async fn alert_evidence(state: &AppState, alert_code: &str, image: NoticeIma
         return;
     }
     // 级别要与原卡片一致：`enqueue` 会按 `min_level` 过滤，图片不能用别的级别
-    let level: Option<String> = sqlx::query_scalar("SELECT level FROM alerts WHERE alert_code = ?1")
-        .bind(alert_code)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten();
-    let Some(level) = level else {
+    //
+    // 顺带把结构化键与设备取出来：图进群之后要通知客户端删板端存证（见 [`EvidenceCleanup`]）
+    let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT a.level, a.dedup_key, d.device_id
+           FROM alerts a
+           LEFT JOIN devices d ON d.id = a.device_id
+          WHERE a.alert_code = ?1",
+    )
+    .bind(alert_code)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let Some((level, dedup_key, device_code)) = row else {
         debug!(alert = %alert_code, "wecom: 回查不到告警级别，跳过补发图片");
         return;
     };
@@ -1440,6 +1573,8 @@ pub async fn alert_evidence(state: &AppState, alert_code: &str, image: NoticeIma
         mentions: Vec::new(),
         image: Some(image),
         image_only: true,
+        // 晚到的图马上要进群：板端存证可以清了（客户端会等窗口收尾再动手）
+        cleanup: evidence_cleanup(dedup_key.as_deref(), device_code.as_deref()),
     });
 }
 
@@ -1517,6 +1652,8 @@ pub async fn task_abnormal(state: &AppState, task_code: &str, level: Level, reas
             .unwrap_or_default(),
         image: None,
         image_only: false,
+        // 任务异常没有板端存证要清（AI 存证只跟「带图的告警」走）
+        cleanup: None,
     };
     state.notifier.enqueue(notice);
 }
@@ -1557,6 +1694,7 @@ pub async fn send_test(state: &AppState) -> Result<String, String> {
         mentions: Vec::new(),
         image: None,
         image_only: false,
+        cleanup: None,
     };
     let payload = notice.markdown();
     let body = json!({ "msgtype": "markdown", "markdown": { "content": payload } });
@@ -1606,6 +1744,7 @@ mod tests {
             mentions: Vec::new(),
             image: None,
             image_only: false,
+            cleanup: None,
         }
     }
 
@@ -1634,6 +1773,43 @@ mod tests {
         assert!(evidence_image("这不是 base64").is_err());
         // 合法 base64 但不是我要求的两种图片格式
         assert!(evidence_image("aGVsbG8=").is_err(), "hello 不是图片");
+    }
+
+    /// AI 告警的去重键能反解出「删哪个航点的存证」；非 AI 告警一律不删。
+    ///
+    /// 删目录不可逆，所以键不完整（老数据没有 `ai:` 前缀 / 航点下标不是数字）时
+    /// 一律返回 `None`，宁可留一堆图，也不要删错。
+    #[test]
+    fn evidence_cleanup_parses_only_ai_keys() {
+        let target = evidence_cleanup(Some("ai:RD-013:TK-1112-11:2:extinguisher"), Some("RD-999"))
+            .expect("AI 键应该能反解");
+        assert_eq!(
+            target.device_code, "RD-013",
+            "设备以键里报上来的那个为准（报警的客户端，存证也在它的盘上）"
+        );
+        assert_eq!(target.plan_id, "TK-1112-11");
+        assert_eq!(target.point_index, 2);
+
+        // 键里没带设备（老数据）：退回告警回查到的设备
+        assert_eq!(
+            evidence_cleanup(Some("ai::TK-1:0:count"), Some("RD-013")).map(|t| t.device_code),
+            Some("RD-013".to_string())
+        );
+
+        for key in [
+            None,
+            Some("fault:RD-013:13382"),
+            Some("hb:RD-013"),
+            Some("ctrl:RD-013"),
+            Some("alert:AL-001"),
+        ] {
+            assert!(evidence_cleanup(key, Some("RD-013")).is_none(), "{key:?}");
+        }
+        // 键不全 / 航点下标非法 / 计划 id 为空：都不删
+        assert!(evidence_cleanup(Some("ai:RD-013:TK-1"), Some("RD-013")).is_none());
+        assert!(evidence_cleanup(Some("ai:RD-013:TK-1:-1:count"), Some("RD-013")).is_none());
+        assert!(evidence_cleanup(Some("ai:RD-013:TK-1:x:count"), Some("RD-013")).is_none());
+        assert!(evidence_cleanup(Some("ai:RD-013::0:count"), Some("RD-013")).is_none());
     }
 
     /// 超过 2MB 的图不能发（企业微信整条拒掉，还不如不发图）

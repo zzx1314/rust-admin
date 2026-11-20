@@ -423,6 +423,23 @@ notify::evidence_image()（校验）→ Notice.image
   板端事件覆盖），其次从板端 `plan_hit.evidence` 反推（`<存证根>/<计划>/pt<n>/<图>`，
   见 `jobs_root_from_evidence`），最后才是内置候选 `/root/backpack_dashboard/backend/detect_jobs`、
   `/root/261113/backpack_dashboard/backend/detect_jobs`。一个都不中就不带图，告警照发。
+- **推完即删板端存证**：图片那条回 `errcode 0` 之后，服务端在同一条设备 WS 上下发
+  `ai_cleanup {planId, pointIndex, reason}`，客户端删掉 `detect_jobs/<计划ID>/pt<航点>/`
+  （画框 JPG + `result.json`；计划目录空了连它一起删）。为什么要删：板端每命中一次写一张图，
+  一天几十轮巡检很快把板子存储写满，而图进了群之后没有第二次用途（平台读不到板端磁盘）。
+  三条安全线：
+  1. **只在推送成功后删**（`send_image` 返回 `true` 才发指令）：图片被拒 / webhook 失效 /
+     设备不在线都不删，文件留着还能人工补推；
+  2. **窗口还开着先记账**（`AiPatrol::pending_cleanup`）：告警往往在窗口中间就推完了，那时
+     板端可能还在写图、客户端收尾还要扫盘补图（`ai_evidence`），窗口收尾（停识别 → 扫盘 →
+     `ai_end`）之后才真删；
+  3. **只删安全路径**：只认字母 / 数字 / 汉字 / `-` / `_` 的 `planId`，航点下标必须 ≥ 0，
+     其余一律拒绝（删目录不可逆）。
+  要清理哪一轮由告警的结构化去重键反推（`ai:<设备>:<任务>:<航点下标>:<what>`），设备以键里
+  那个为准（报警的那个客户端，存证在它的盘上）；非 AI 告警（`fault:` / `hb:` / `ctrl:`）没有
+  存证可删。`count` 任务的「检出」本来就不落告警（只进任务时间线），所以那类航点不会被清，
+  攒图主要来自它们——结论告警（数量不一致）带图时照样会清，实在要兜底就在板端调
+  `evidence.cleanup_old(days)`。
 - **图片发失败不影响正文**：卡片已入群，图片只打一行 WARN（`wecom: 证据图推送失败（正文已发送）`）。
 - **服务端直连板端 Agent 的模式（`ROBODOG_BACKPACK_URL`）没有图**：服务端读不到板端
   磁盘，隧道白名单也没取文件接口，只能发卡片（现场以客户端代调为主，不受影响）。
@@ -442,7 +459,13 @@ notify::evidence_image()（校验）→ Notice.image
   `client ai_patrol::agent_flow::card_sent_without_image_is_followed_by_ai_evidence` +
   `server/tests/ai_client_mode.rs::late_evidence_is_pushed_as_an_image_only_message`
   （卡片先发、图晚到 → `ai_evidence` 只补一张图，不重发卡片/不重复落告警）、
-  `client ai_patrol::tests::newest_evidence_file_skips_stale_and_picks_freshest`（不拿上一轮的图）。
+  `client ai_patrol::tests::newest_evidence_file_skips_stale_and_picks_freshest`（不拿上一轮的图）、
+  `notify::tests::evidence_cleanup_parses_only_ai_keys`（反解清理目标）、
+  `server/tests/ai_client_mode.rs::pushed_evidence_image_triggers_board_cleanup`（推送成功 →
+  设备 WS 收到 `ai_cleanup`）、`alert_without_image_keeps_the_board_evidence` +
+  `rejected_evidence_image_keeps_the_board_evidence`（没图 / 图被拒 → 不删）、
+  `client ai_patrol::tests::ai_cleanup_removes_the_point_dir_after_the_image_is_pushed` +
+  `ai_cleanup_while_the_window_is_open_is_deferred` + `evidence_paths_refuse_unsafe_plan_ids`。
 
 ### @ 提醒那条
 有责任人手机号（或开了 `wecom_mention_all`）时，**卡片前面**还会有一条一行 `text`

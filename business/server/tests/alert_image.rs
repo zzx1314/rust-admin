@@ -150,6 +150,12 @@ async fn alert_with_evidence_image_queues_an_image_message() {
     assert_eq!(image.base64, JPEG_BASE64, "base64 不能带换行/空格");
     assert_eq!(image.md5, JPEG_MD5);
     assert_eq!(image.bytes, 12);
+    // 图进了群，板端那一轮存证（画框 JPG + result.json）就没有第二次用途了：
+    // 推送成功后下发 `ai_cleanup` 让客户端删（计划 / 航点从结构化键反推）
+    let cleanup = notice.cleanup.as_ref().expect("带图的 AI 告警要带清理目标");
+    assert_eq!(cleanup.plan_id, "TK-1", "计划 id 来自去重键的第二段");
+    assert_eq!(cleanup.point_index, 0, "航点下标来自去重键的第三段");
+    assert!(!cleanup.device_code.is_empty(), "要能定位到哪台设备的盘");
     // 只有一条 Note：图片是消费端在正文之后补发的第二条 HTTP 消息
     assert!(rx.try_recv().is_err());
 }
@@ -169,6 +175,8 @@ async fn image_can_be_switched_off() {
 
     let notice = rx.try_recv().expect("卡片仍应入队");
     assert!(notice.image.is_none(), "开关关掉后不该再带图");
+    // 没带图就不删存证：图没进群，板端那几张图还能人工补推
+    assert!(notice.cleanup.is_none(), "关掉证据图时不能删板端存证");
     assert!(alert_flow::should_dispatch(&state, &code).await);
 }
 
@@ -185,6 +193,10 @@ async fn invalid_image_is_dropped_but_the_alert_still_goes_out() {
 
     let notice = rx.try_recv().expect("卡片仍要入队");
     assert!(notice.image.is_none());
+    assert!(
+        notice.cleanup.is_none(),
+        "图不合法（没进群）就不能删板端存证"
+    );
     let orders: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM work_orders WHERE source = '告警自动派单'")
             .fetch_one(&state.db)

@@ -145,6 +145,58 @@ async fn test_state_with_wecom(
     (state, temp, rx)
 }
 
+/// 假企业微信群机器人：数一下收到几条消息，`fail_image` 时图片那条回 `93000`。
+async fn spawn_fake_wecom(fail_image: bool) -> (u16, Arc<AtomicUsize>) {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = hits.clone();
+    let router = axum::Router::new().route(
+        "/send",
+        axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::Relaxed);
+                if body["msgtype"] == "image" && fail_image {
+                    axum::Json(json!({"errcode": 93000, "errmsg": "invalid image"}))
+                } else {
+                    axum::Json(json!({"errcode": 0, "errmsg": "ok"}))
+                }
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("绑定假企微失败");
+    let port = listener.local_addr().expect("取端口失败").port();
+    tokio::spawn(async move { axum::serve(listener, router).await.expect("假企微运行失败") });
+
+    (port, hits)
+}
+
+/// webhook 指向本机假企微，并**真的启动消费端**：只有推送真的成功才会有 `ai_cleanup`。
+async fn state_with_live_wecom(point_ai: &str, webhook: String) -> (AppState, TempDb) {
+    let dir = temp_dir();
+    let temp = TempDb { dir: dir.clone() };
+    let mut config = config_with(&dir, point_ai);
+    config.wecom_enabled = true;
+    config.wecom_webhook = Some(webhook);
+    let config = Arc::new(config);
+    let pool = db::connect(&config).await.expect("连接测试库失败");
+    db::migrate(&pool).await.expect("迁移失败");
+    seed::seed(&pool).await.expect("播种失败");
+    let (notifier, rx) = robodog_ops_server::notify::Notifier::channel(&config, None);
+    let state = AppState {
+        db: pool,
+        notifier,
+        config,
+        device_connections: gateway::new_device_connections(),
+        command_results: gateway::new_command_result_waiters(),
+        video_hub: Default::default(),
+        agent_tunnel: Default::default(),
+    };
+    robodog_ops_server::notify::spawn(state.clone(), rx.expect("开了企微就该有消费端"));
+    (state, temp)
+}
+
 /// 起真实监听端口（WebSocket 必须走 TCP）
 async fn spawn_server(state: AppState) -> u16 {
     let router = build_router(state);
@@ -1430,9 +1482,11 @@ async fn late_evidence_is_pushed_as_an_image_only_message() {
         .to_string();
 
     // 检出没带图（客户端当时还没拿到命中帧；阈值 0.35，0.42 能过）
-    ws.send(Message::Text(detect(&window_id, "extinguisher", 0.42).to_string()))
-        .await
-        .expect("发送检出失败");
+    ws.send(Message::Text(
+        detect(&window_id, "extinguisher", 0.42).to_string(),
+    ))
+    .await
+    .expect("发送检出失败");
     let card = tokio::time::timeout(Duration::from_secs(5), rx.recv())
         .await
         .expect("等告警入队超时")
@@ -1507,9 +1561,11 @@ async fn late_evidence_after_window_closed_is_still_pushed() {
         .to_string();
 
     // 1) 检出没带图（板端还在连采帧画框）→ 先发卡片
-    ws.send(Message::Text(detect(&window_id, "extinguisher", 0.42).to_string()))
-        .await
-        .expect("发送检出失败");
+    ws.send(Message::Text(
+        detect(&window_id, "extinguisher", 0.42).to_string(),
+    ))
+    .await
+    .expect("发送检出失败");
     let card = tokio::time::timeout(Duration::from_secs(5), rx.recv())
         .await
         .expect("等告警入队超时")
@@ -1705,6 +1761,148 @@ async fn restart_after_cancel_still_pushes_the_next_round() {
         "三轮都要落告警: {:?}",
         alert_contents(&state).await
     );
+
+    ai_patrol::global().stop("用例结束").await;
+}
+
+/// 证据图进了企业微信群之后，服务端在**已有的设备 WS 链路**上下发 `ai_cleanup`：
+/// 存证在板端磁盘（`detect_jobs/<计划>/pt<n>/` 的画框 JPG + `result.json`），
+/// 平台读不到也删不掉，只有与 Agent 同机的客户端能动手。
+///
+/// 删除不可逆，所以只在**图片真的进群**之后才发：这条用例把 webhook 指向本机假企微，
+/// 走真的 `Notifier::enqueue → 消费端 → deliver → msgtype=image` 链路。
+#[tokio::test]
+async fn pushed_evidence_image_triggers_board_cleanup() {
+    let _serial = TEST_LOCK.lock().await;
+    ai_patrol::global().stop("测试初始化").await;
+    let (wecom_port, hits) = spawn_fake_wecom(false).await;
+    let (state, _temp) =
+        state_with_live_wecom("client", format!("http://127.0.0.1:{wecom_port}/send")).await;
+    let task_code = seed_ai_route(
+        &state,
+        Some("firextinguisher"),
+        &["extinguisher"],
+        Some("exist"),
+        None,
+    )
+    .await;
+    let port = spawn_server(state.clone()).await;
+    let (mut ws, _device) = register_device(port).await;
+
+    ws.send(Message::Text(ai_point(&task_code, false).to_string()))
+        .await
+        .expect("发送 ai_point 失败");
+    let start = next_msg(&mut ws, "ai_start").await;
+    let window_id = start["payload"]["windowId"]
+        .as_str()
+        .expect("ai_start 必须带 windowId")
+        .to_string();
+
+    ws.send(Message::Text(
+        detect_with_evidence(&window_id, "extinguisher", 0.64).to_string(),
+    ))
+    .await
+    .expect("发送带证据图的检出失败");
+
+    let cleanup = next_msg(&mut ws, "ai_cleanup").await;
+    assert_eq!(
+        cleanup["payload"]["planId"].as_str(),
+        Some(task_code.as_str()),
+        "计划 id 就是业务任务号（板端拿它建 `detect_jobs/<计划>/`）"
+    );
+    assert_eq!(
+        cleanup["payload"]["pointIndex"].as_i64(),
+        Some(0),
+        "只删这个航点的目录"
+    );
+    assert!(
+        hits.load(Ordering::Relaxed) >= 2,
+        "卡片 + 图片两条都送到了企微才允许删存证"
+    );
+
+    ai_patrol::global().stop("用例结束").await;
+}
+
+/// 反例：卡片上没图（客户端当时还没扫到命中帧）→ 群里没有图，板端存证不能删。
+///
+/// 那种情况下客户端收尾时还会扫一次盘补图（`ai_evidence`），删早了那张图就没了。
+#[tokio::test]
+async fn alert_without_image_keeps_the_board_evidence() {
+    let _serial = TEST_LOCK.lock().await;
+    ai_patrol::global().stop("测试初始化").await;
+    let (wecom_port, hits) = spawn_fake_wecom(false).await;
+    let (state, _temp) =
+        state_with_live_wecom("client", format!("http://127.0.0.1:{wecom_port}/send")).await;
+    let task_code = seed_ai_route(
+        &state,
+        Some("firextinguisher"),
+        &["extinguisher"],
+        Some("exist"),
+        None,
+    )
+    .await;
+    let port = spawn_server(state.clone()).await;
+    let (mut ws, _device) = register_device(port).await;
+
+    ws.send(Message::Text(ai_point(&task_code, false).to_string()))
+        .await
+        .expect("发送 ai_point 失败");
+    let start = next_msg(&mut ws, "ai_start").await;
+    let window_id = start["payload"]["windowId"].as_str().unwrap().to_string();
+    ws.send(Message::Text(
+        detect(&window_id, "extinguisher", 0.42).to_string(),
+    ))
+    .await
+    .expect("发送检出失败");
+
+    // 卡片发出去了（假企微收到至少一条），但没有图 → 不能发清理指令
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while hits.load(Ordering::Relaxed) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(hits.load(Ordering::Relaxed), 1, "只有卡片一条消息");
+    assert_no_msg(&mut ws, "ai_cleanup", Duration::from_millis(800)).await;
+
+    ai_patrol::global().stop("用例结束").await;
+}
+
+/// 反例：图片那条被企微拒了（`errcode 93000`）→ 图没进群，板端存证必须留着，能人工补推。
+#[tokio::test]
+async fn rejected_evidence_image_keeps_the_board_evidence() {
+    let _serial = TEST_LOCK.lock().await;
+    ai_patrol::global().stop("测试初始化").await;
+    let (wecom_port, hits) = spawn_fake_wecom(true).await;
+    let (state, _temp) =
+        state_with_live_wecom("client", format!("http://127.0.0.1:{wecom_port}/send")).await;
+    let task_code = seed_ai_route(
+        &state,
+        Some("firextinguisher"),
+        &["extinguisher"],
+        Some("exist"),
+        None,
+    )
+    .await;
+    let port = spawn_server(state.clone()).await;
+    let (mut ws, _device) = register_device(port).await;
+
+    ws.send(Message::Text(ai_point(&task_code, false).to_string()))
+        .await
+        .expect("发送 ai_point 失败");
+    let start = next_msg(&mut ws, "ai_start").await;
+    let window_id = start["payload"]["windowId"].as_str().unwrap().to_string();
+    ws.send(Message::Text(
+        detect_with_evidence(&window_id, "extinguisher", 0.64).to_string(),
+    ))
+    .await
+    .expect("发送带证据图的检出失败");
+
+    // 卡片 + 图片两条都发过（图片被拒），但没有 ai_cleanup
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while hits.load(Ordering::Relaxed) < 2 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(hits.load(Ordering::Relaxed) >= 2, "应尝试发过卡片 + 图片");
+    assert_no_msg(&mut ws, "ai_cleanup", Duration::from_millis(800)).await;
 
     ai_patrol::global().stop("用例结束").await;
 }

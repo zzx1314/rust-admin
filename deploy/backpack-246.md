@@ -71,7 +71,9 @@ default via 192.168.234.1  dev eth0            metric 1000   # netplan 兜底
 
 /root/261113/backpack_dashboard/         ← 背包 Agent（仓库：business/backpack_dashboard/，见同目录 AGENTS.md）
 ├── backend/agent.py                     FastAPI :8000
-├── backend/detect_jobs/<plan>/pt<n>/     AI 存证图 + result.json（平台读不到，由客户端上报）
+├── backend/detect_jobs/<plan>/pt<n>/     AI 存证图 + result.json（平台读不到，由客户端上报；
+│                                         图进企业微信群后平台下发 ai_cleanup，客户端删掉该 pt 目录，
+│                                         只剩「没推出去」的帧 —— 见 business/docs/wecom-alert-push.md）
 ├── rknn/                                RKNN 运行库（LD_LIBRARY_PATH）
 └── frontend/                            厂商调试页
 

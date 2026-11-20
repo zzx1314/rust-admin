@@ -206,6 +206,22 @@ pt1「Trash over flow」卡片发了、图没发就是踩在这里）。服务�
 `client ai_patrol::agent_flow::evidence_landing_seconds_late_still_rides_with_the_alert`、
 `client ai_patrol::agent_flow::card_sent_without_image_is_followed_by_ai_evidence`。
 
+**推完即删板端存证**：图片那条企业微信回 `errcode 0` 之后，服务端在同一条设备 WS 上下发
+`ai_cleanup {planId, pointIndex}`，客户端删掉 `detect_jobs/<计划ID>/pt<航点>/`
+（画框 JPG + `result.json`，计划目录空了连它一起删）——板端每命中一次写一张图，一天几十轮
+巡检很快把板子写满，而图进群之后没有第二次用途。三条线不能松：**只在推送成功后删**
+（没图 / 图被拒 / 设备不在线都不删）、**窗口还开着先记账**（`AiPatrol::pending_cleanup`，
+收尾扫完盘再删，否则会把还没推出去的那张图毁掉）、**只删安全路径**（`planId` 只认字母数字
+汉字 `-` `_`，航点下标 ≥ 0）。要清哪一轮由告警的 `dedup_key` 反推
+（`notify::evidence_cleanup`，`ai:<设备>:<任务>:<航点下标>:<what>`），非 AI 告警没有存证可删；
+`count` 任务的**检出**不落告警，所以那些航点不会被清（结论告警带图时照样清）。回归用例：
+`tests/ai_client_mode.rs::pushed_evidence_image_triggers_board_cleanup`（推送成功 → 收到
+`ai_cleanup`）、`alert_without_image_keeps_the_board_evidence` /
+`rejected_evidence_image_keeps_the_board_evidence`（不删）、
+`notify::tests::evidence_cleanup_parses_only_ai_keys`、
+`client ai_patrol::tests::ai_cleanup_removes_the_point_dir_after_the_image_is_pushed` /
+`ai_cleanup_while_the_window_is_open_is_deferred` / `evidence_paths_refuse_unsafe_plan_ids`。
+
 `backend/run.sh` exports the required secret (and probes Redis for
 `APP_REDIS_PASSWORD`) before running `cargo run`. Set `APP_REDIS_PASSWORD`
 when Redis enforces `requirepass` (the compose one uses `123456`), otherwise

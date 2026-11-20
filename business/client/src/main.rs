@@ -2350,6 +2350,15 @@ async fn handle_server_message(
             ai.stop(reason).await;
         }
 
+        // 证据图已经进了企业微信群：删掉板端这一轮的存证
+        // （`detect_jobs/<计划>/pt<航点>/` 里的画框 JPG + result.json）
+        "ai_cleanup" => {
+            let plan_id = msg.payload["planId"].as_str().unwrap_or("");
+            let point_index = msg.payload["pointIndex"].as_i64().unwrap_or(-1);
+            let reason = msg.payload["reason"].as_str().unwrap_or("平台已推送证据图");
+            ai.cleanup_evidence(plan_id, point_index, reason).await;
+        }
+
         // 事件回执：客户端发的 event 由服务端落库后回 ack，不需要额外处理
         "event_ack" => {}
 

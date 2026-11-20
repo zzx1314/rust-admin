@@ -1379,7 +1379,9 @@ AI 可对除红外外的五路开启，画框方式二选一：
   「一个都没找到」= 0 ≠ N，且要「看满了」——窗口正常到期，或狗停满 `dwell` 后离开
   （窗口时长是 `dwell+8`，只认「到期」会永远报不出来），被打断且没停够不记账）。老数据没有该字段时后端按
   有没有 `expectCount` 推断。开窗同时把计划 id（= 业务任务号）与航点下标下发板端，
-  命中帧与 `result.json` 落到 `detect_jobs/<计划ID>/pt<航点下标>/`，可按计划回溯。
+  命中帧与 `result.json` 落到 `detect_jobs/<计划ID>/pt<航点下标>/`，可按计划回溯
+  （**图进了企业微信群之后平台会下发 `ai_cleanup`，客户端收尾时把这个航点目录删掉**，
+  否则一天几十轮巡检很快把板子存储写满；推送失败的保留，见下面的「证据图」）。
   窗口时长跟着该点的「停留时长」走（停留 + 8 s，最短 10 s、上限 `ai_window_max_secs`
   默认 300 s），**离开航点立即结束**——所以 `dwell=100` 的点会识别满整段停留，不再只覆盖前 30 s。
   链路与排查见 [`docs/official-app-parity.md`](docs/official-app-parity.md) §5.6、
@@ -1410,6 +1412,10 @@ AI 可对除红外外的五路开启，画框方式二选一：
   `ROBODOG_AI_JOBS_DIR`（默认自动探测板端 `detect_jobs`，也会从 `plan_hit.evidence` 学到
   真实路径）下的 `<计划ID>/pt<航点>/` 取本轮最新一张。读不到图就只有卡片，告警本身照发
   （详见 [`docs/wecom-alert-push.md`](docs/wecom-alert-push.md)）。
+  **推完即删**：图片那条企业微信回 `errcode 0` 之后，服务端在同一条设备 WS 上下发
+  `ai_cleanup {planId, pointIndex}`，客户端删掉 `detect_jobs/<计划ID>/pt<航点>/`
+  （画框 JPG + `result.json`，计划目录空了连它一起删）。窗口还开着时客户端先记账、
+  等收尾（停识别 → 扫盘补图 → `ai_end`）之后再删，避免把还没推出去的图毁掉。
 - 分析与后续路线（遥测、SOS 告警、中继、录像）见
   [`docs/backpack-video-integration.md`](docs/backpack-video-integration.md)。
 
