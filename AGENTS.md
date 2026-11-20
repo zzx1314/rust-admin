@@ -140,8 +140,8 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 
 **航点 AI 存证图 → 中台「媒体资源」**（2026-11-20 起）：板端命中时除了写临时存证
 `detect_jobs/<planId>/pt<n>/`（企业微信推完即删），还固定保存 N 帧到媒体归档目录
-（默认 `/media/media-data/picture/<planId>/pt<n>/`，与临时存证**分开**，不参与
-`ai_cleanup`）。目录与帧数在**中台「参数配置」**里配（`media_picture_dir` /
+（默认 `/media/media-data/picture/<planId>/pt<n>/`，**原始帧、不画框**——中台当训练
+数据用；带框的那份只在临时存证里。与临时存证**分开**，不参与 `ai_cleanup`）。目录与帧数在**中台「参数配置」**里配（`media_picture_dir` /
 `media_frames`，迁移 31 预置），链路是：中台读配置 → `ai_start` 下发 `mediaDir` /
 `mediaFrames` → 业务平台 → 设备客户端 → 板端 Agent 写入；中台设备页「同步媒体」
 按钮再沿同一条设备 WS 下发 `pictureDir`/`frames`，客户端扫目录**按每包 8 张/8MB

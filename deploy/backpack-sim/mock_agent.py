@@ -280,7 +280,7 @@ def _box(label):
     }
 
 
-def render_jpeg(path, boxes, caption=""):
+def render_jpeg(path, boxes=(), caption=""):
     """画一张带框的 1280x720 JPEG：PIL → ffmpeg → 内置小图。"""
     try:
         from PIL import Image, ImageDraw  # noqa: PLC0415 - 可选依赖
@@ -346,15 +346,17 @@ def write_evidence(plan, label, found):
             "evidence": path,
             "ts": time.time(),
         }, handle, ensure_ascii=False, indent=2)
-    media_dir, media_frames = write_media_frames(plan, label, boxes, caption)
+    media_dir, media_frames = write_media_frames(plan, label)
     return path, boxes, media_dir, media_frames
 
 
-def write_media_frames(plan, label, boxes, caption):
+def write_media_frames(plan, label):
     """再写一份媒体归档：`<MEDIA_DIR>/<plan>/pt<idx>/<cam>_<n>_<ts>.jpg`。
 
     真板子固定保存 N 帧（中台 `media_frames`），这里照抄布局，好让设备客户端的
     「同步媒体」指令在模拟环境里也能端到端跑通（上传成功会删掉这些文件）。
+    ⚠ 媒体归档存的是**原始帧**（中台当训练数据用），**不画框也不加文字**；
+    带框的那份只在 `JOBS_DIR`（临时存证 → 企业微信证据图）。
     """
     root = plan.get("media_dir") or MEDIA_DIR
     frames = max(1, min(10, int(plan.get("save_frames") or PLAN_SAVE_FRAMES)))
@@ -366,8 +368,7 @@ def write_media_frames(plan, label, boxes, caption):
     written = []
     for seq in range(1, frames + 1):
         name = "%s_%02d_%s.jpg" % (cam, seq, stamp)
-        render_jpeg(os.path.join(directory, name), boxes,
-                    "%s（第 %d/%d 帧）" % (caption, seq, frames))
+        render_jpeg(os.path.join(directory, name))
         written.append(name)
     with open(os.path.join(directory, "result.json"), "w", encoding="utf-8") as handle:
         json.dump({

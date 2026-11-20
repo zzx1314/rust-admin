@@ -116,7 +116,8 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/root/261113/bac
      客户端读它给企业微信配图（`ROBODOG_AI_JOBS_DIR`），推完图由 `ai_cleanup` 删；
   2. `MEDIA_DATA_DIR/<plan_id>/pt<航点下标>/<cam>_<序号>_<时间戳>.jpg` + `result.json`
      —— **媒体归档**，给中台「媒体资源」用。命中时固定保存 `save_frames` 帧
-     （取采样窗口里检出数最大的前 N 帧，每张都画框），中台设备页点「同步媒体」
+     （取采样窗口里检出数最大的前 N 帧，**一律存原始帧、不画框**——它是训练数据，
+     带框会污染标注；画框那份只在 `detect_jobs` 里），中台设备页点「同步媒体」
      后由客户端**按每包 8 张打 zip** 回传（中台解包后仍一张一条入库），
      **只删 `results[].ok` 的条目**。
   目录/帧数的唯一真源是**中台「参数配置」**（`media_picture_dir` / `media_frames`），

@@ -44,10 +44,14 @@ def _install_stubs(root):
     def fake_save_frame(jpg_path, boxes, frame_w, frame_h, out_path):
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         with open(out_path, "wb") as f:
-            f.write(b"\xff\xd8stub-jpeg")     # 内容不重要，只看文件是否生成
+            # 画框的桩：内容故意与原始帧不同，便于断言「媒体归档没画框」
+            f.write(b"\xff\xd8boxed-jpeg")
         return True
 
     evidence.save_frame = fake_save_frame
+
+
+RAW_JPEG = b"\xff\xd8stub-jpeg"      # 抓帧线程给的原始帧（未画框）
 
 
 def _box(i=0):
@@ -60,7 +64,7 @@ def _run(manager, cam, total, events):
     """推一帧命中（`total` 个框），返回本次新增的 plan_hit（可能没有）。"""
     before = len(events)
     boxes = [_box(i) for i in range(total)]
-    manager._plan_frame(cam, b"\xff\xd8stub-jpeg", boxes,
+    manager._plan_frame(cam, RAW_JPEG, boxes,
                         {"extinguisher": total}, {"w": 640, "h": 360})
     hits = [e for e in events[before:] if e.get("type") == "plan_hit"]
     return hits[0] if hits else None
@@ -137,6 +141,10 @@ def main():
               and os.path.basename(hit["media_dir"]) == "pt0", hit["media_dir"])
         check("媒体归档：result.json 与图同目录",
               os.path.isfile(os.path.join(hit["media_dir"], "result.json")))
+        # 媒体归档是中台「媒体资源」里的训练数据：必须是相机原始帧，不能带框
+        check("媒体归档：存原始帧（未画框）",
+              all(open(os.path.join(hit["media_dir"], n), "rb").read() == RAW_JPEG
+                  for n in frames), hit["media_dir"])
         # 临时存证（detect_jobs）与媒体归档是两份目录：前者会被 ai_cleanup 删，
         # 后者要留给中台媒体资源，两者不能是同一个路径。
         check("媒体归档与临时存证目录分离",

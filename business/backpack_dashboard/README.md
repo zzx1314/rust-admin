@@ -645,9 +645,12 @@ detect_jobs/<plan_id>/pt<point_index>/
 
 ```
 /media/media-data/picture/<plan_id>/pt<point_index>/
-  <cam>_01_<时间戳>.jpg …     # N 帧，都画了中文框，第 1 张是结论帧
+  <cam>_01_<时间戳>.jpg …     # N 帧**原始帧**（不画框），第 1 张是结论帧
   result.json                 # 同 detect_jobs 的结论 + media_dir / media_frames
 ```
+
+媒体归档的图是**训练数据**（中台「媒体资源」以下载为主），所以只存相机出来的原始
+帧，**不画框、不加文字**；带框的那份留在 `detect_jobs` 当告警证据（企业微信配图）。
 
 两边目录必须指向同一份配置（中台参数配置是唯一真源）：板端按它**写**，
 设备客户端按它**扫描回传**，改了中台配置两边一起变。

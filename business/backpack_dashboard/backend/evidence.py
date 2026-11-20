@@ -21,8 +21,11 @@
 
 媒体归档目录（中台「同步媒体」取图，与 jobs 分开）：
   <MEDIA_DATA_DIR>/<plan_id>/pt<航点下标>/
-      <cam>_<序号>_<时间戳>.jpg   本次固定保存的 N 帧（都画了框）
+      <cam>_<序号>_<时间戳>.jpg   本次固定保存的 N 帧**原始帧**（不画框，见 save_raw）
       result.json                 同一份结论描述
+
+两份目录的图**用途不同**：`detect_jobs` 的画框图是给人看的告警证据；媒体归档的
+原始帧是**训练数据**（中台「媒体资源」以下载为主），图上带叠加层会污染标注。
 
 为什么要两个目录：`detect_jobs` 是「临时存证」，企业微信推完图就会被客户端删掉
 （`ai_cleanup`）；媒体归档是「要长期留给中台媒体资源」的那一份，删不删由
@@ -191,6 +194,25 @@ def target_dir(plan_id=None, point_index=None, job_id=None):
     if plan_id not in (None, "") and str(plan_id).strip():
         return plan_dir(plan_id, point_index)
     return job_dir(job_id)
+
+
+def save_raw(frame, out_path):
+    """把**原始帧原样**落盘（不画框）：媒体归档/训练数据专用。
+
+    `frame` 可以是帧字节（detect 抓帧线程给的原始 JPEG）或已落盘的帧路径。
+    这里故意不碰 ffmpeg、也不做任何转码：媒体资源要的是相机出来的那一帧，
+    带框的图只能当告警证据（走 `save_frame`），不能当训练数据。
+    """
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    if isinstance(frame, (bytes, bytearray, memoryview)):
+        data = bytes(frame)
+        if not data:
+            raise ValueError("原始帧为空")
+        with open(out_path, "wb") as f:
+            f.write(data)
+        return True
+    shutil.copyfile(frame, out_path)
+    return True
 
 
 def save_frame(jpg_path, boxes, frame_w, frame_h, out_path):

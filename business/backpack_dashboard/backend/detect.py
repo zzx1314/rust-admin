@@ -907,8 +907,9 @@ class DetectManager:
         """把本轮命中帧写进媒体归档目录（中台「同步媒体」取图）。
 
         固定保存 `save_frames` 帧（取采样窗口里看到的命中帧，按检出数量降序，
-        第一张就是结论帧），每张都在**原始分辨率**上画框；写图走
-        `evidence.save_frame`，失败会退回原图复制，绝不因为画框失败丢掉证据。
+        第一张就是结论帧），**一律存原始帧、不画框**：媒体归档是中台「媒体资源」
+        里的训练数据，叠加层（框 + 文字）会污染标注；画框的那份留在
+        `detect_jobs/<plan>/pt<n>/` 当告警证据（`evidence.save_frame`）。
 
         返回 `(媒体航点目录, 文件名列表)`；一张都没写成时目录视为不存在。
         """
@@ -919,32 +920,20 @@ class DetectManager:
         out_dir = evidence.media_plan_dir(plan["id"], plan.get("point_index"), root=root)
         limit = max(1, min(10, int(plan.get("save_frames") or
                                   config.DETECT_PLAN_SAVE_FRAMES)))
-        # 结论帧（检出数最大）排最前：观看端第一张就是画框最全的那帧
+        # 结论帧（检出数最大）排最前：观看端第一张就是检出最全的那帧
         frames.sort(key=lambda item: int(item.get("total") or 0), reverse=True)
         frames = frames[:limit]
         cam = st.get("cam") or "cam"
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        tmp = os.path.join(FRAME_DIR, "_media_frame.jpg")
         written = []
-        try:
-            os.makedirs(FRAME_DIR, exist_ok=True)
-        except Exception:
-            pass
         for seq, item in enumerate(frames, start=1):
             jpg = item.get("jpg") or b""
             if not jpg:
                 continue
             name = "%s_%02d_%s.jpg" % (cam, seq, stamp)
             out = os.path.join(out_dir, name)
-            frame_meta = item.get("frame") or {}
             try:
-                with open(tmp, "wb") as f:
-                    f.write(jpg)
-                evidence.save_frame(
-                    tmp, item.get("boxes") or [],
-                    frame_meta.get("w") or config.CAPTURE_WIDTH,
-                    frame_meta.get("h") or config.CAPTURE_HEIGHT,
-                    out)
+                evidence.save_raw(jpg, out)
                 written.append(name)
             except Exception as e:
                 print("[detect] 媒体归档写图失败 %s: %s" % (out, e), flush=True)
