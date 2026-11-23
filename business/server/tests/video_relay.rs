@@ -223,7 +223,10 @@ async fn expect_no_media(
     })
     .await
     .unwrap_or(None);
-    assert_eq!(leaked, None, "观看通道不该收到任何媒体字节（媒体走 WebRTC）");
+    assert_eq!(
+        leaked, None,
+        "观看通道不该收到任何媒体字节（媒体走 WebRTC）"
+    );
 }
 
 #[tokio::test]
@@ -250,10 +253,7 @@ async fn viewer_triggers_the_stream_and_leaves_a_grace_period_before_stop() {
         next_msg(&mut publisher, "video_start"),
     )
     .await;
-    assert!(
-        duplicate.is_err(),
-        "第二个观看者不应再触发一次 video_start"
-    );
+    assert!(duplicate.is_err(), "第二个观看者不应再触发一次 video_start");
 
     // 3) 老板端还会往推流连接上推 FLV 字节：平台丢弃，绝不转给观看端
     publisher

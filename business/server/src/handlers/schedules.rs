@@ -4,8 +4,8 @@ use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::models::{
     Shift, ShiftCopyRequest, ShiftCopyResult, ShiftCopySkip, ShiftDuplicateRequest, ShiftQuery,
-    ShiftRequest, ShiftSlot, ShiftSlotRequest, Staff, StaffImportResult, StaffImportRow, StaffQuery,
-    StaffRequest,
+    ShiftRequest, ShiftSlot, ShiftSlotRequest, Staff, StaffImportResult, StaffImportRow,
+    StaffQuery, StaffRequest,
 };
 use axum::Extension;
 use axum::Json;
@@ -180,13 +180,12 @@ pub async fn delete_staff(
     fetch_staff(&state, id).await?;
 
     // 今天及以后的排班 / 在办工单还指着这个人，直接删会在排班里留下空档
-    let upcoming: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM shifts WHERE staff_id = ?1 AND shift_date >= ?2",
-    )
-    .bind(id)
-    .bind(crate::db::today())
-    .fetch_one(&state.db)
-    .await?;
+    let upcoming: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM shifts WHERE staff_id = ?1 AND shift_date >= ?2")
+            .bind(id)
+            .bind(crate::db::today())
+            .fetch_one(&state.db)
+            .await?;
     let open_orders: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM work_orders WHERE staff_id = ?1 AND status <> '已完成'",
     )
@@ -484,11 +483,10 @@ pub async fn create_shift_slot(
     let sort_order = match payload.sort_order {
         Some(value) => value,
         None => {
-            let max: i64 = sqlx::query_scalar(
-                "SELECT COALESCE(MAX(sort_order), 0) FROM shift_slots",
-            )
-            .fetch_one(&state.db)
-            .await?;
+            let max: i64 =
+                sqlx::query_scalar("SELECT COALESCE(MAX(sort_order), 0) FROM shift_slots")
+                    .fetch_one(&state.db)
+                    .await?;
             max + 1
         }
     };
@@ -542,12 +540,11 @@ pub async fn update_shift_slot(
     let active = payload.active.unwrap_or(existing.active);
     if existing.active && !active {
         // 全部停用后就无法新建排班了，这里先拦住
-        let others: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM shift_slots WHERE active = 1 AND id <> ?1",
-        )
-        .bind(id)
-        .fetch_one(&state.db)
-        .await?;
+        let others: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM shift_slots WHERE active = 1 AND id <> ?1")
+                .bind(id)
+                .fetch_one(&state.db)
+                .await?;
         if others == 0 {
             return Err(AppError::BadRequest(
                 "至少要保留一个启用中的班次".to_string(),
@@ -627,12 +624,11 @@ pub async fn delete_shift_slot(
         )));
     }
     if existing.active {
-        let others: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM shift_slots WHERE active = 1 AND id <> ?1",
-        )
-        .bind(id)
-        .fetch_one(&state.db)
-        .await?;
+        let others: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM shift_slots WHERE active = 1 AND id <> ?1")
+                .bind(id)
+                .fetch_one(&state.db)
+                .await?;
         if others == 0 {
             return Err(AppError::BadRequest(
                 "至少要保留一个启用中的班次".to_string(),
@@ -648,9 +644,7 @@ pub async fn delete_shift_slot(
 
 fn validate_slot_name(name: &str) -> Result<(), AppError> {
     if name.chars().count() > 20 {
-        return Err(AppError::BadRequest(
-            "班次名称不要超过 20 个字".to_string(),
-        ));
+        return Err(AppError::BadRequest("班次名称不要超过 20 个字".to_string()));
     }
     Ok(())
 }
@@ -750,7 +744,10 @@ pub async fn shift_stats(
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     // 借用而不是移动：同一组过滤条件要跑两条 SQL（分组计数 + 去重人数）
-    let from = query.from.as_deref().filter(|value| !value.trim().is_empty());
+    let from = query
+        .from
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
     let to = query.to.as_deref().filter(|value| !value.trim().is_empty());
 
     let mut builder =
@@ -779,7 +776,9 @@ pub async fn shift_stats(
         owners_builder.push(" AND shift_date <= ").push_bind(to);
     }
     if !claims.is_admin {
-        owners_builder.push(" AND created_by = ").push_bind(claims.sub);
+        owners_builder
+            .push(" AND created_by = ")
+            .push_bind(claims.sub);
     }
     let owners: i64 = owners_builder
         .build_query_scalar()
@@ -835,7 +834,8 @@ pub async fn create_shift(
         None => default_slot_name(&state).await?,
     };
     let time_range = slot_time_range(&state, &slot).await?;
-    let (staff_id, owner_name) = resolve_staff(&state, payload.staff_id, payload.owner_name).await?;
+    let (staff_id, owner_name) =
+        resolve_staff(&state, payload.staff_id, payload.owner_name).await?;
     let task_name = resolve_task_name(&state, payload.task_id.flatten(), payload.task_name).await?;
 
     ensure_slot_free(&state, &shift_date, &slot, &owner_name, None).await?;
@@ -896,7 +896,10 @@ pub async fn update_shift(
             task_id,
             resolve_task_name(&state, task_id, payload.task_name.clone()).await?,
         ),
-        None => (existing.task_id, payload.task_name.or(existing.task_name.clone())),
+        None => (
+            existing.task_id,
+            payload.task_name.or(existing.task_name.clone()),
+        ),
     };
 
     ensure_slot_free(&state, &shift_date, &slot, &owner_name, Some(id)).await?;
@@ -1101,8 +1104,7 @@ pub async fn copy_shifts(
         }
         let target_date = target_date.format("%Y-%m-%d").to_string();
 
-        let occupant =
-            slot_occupant(&mut tx, &target_date, &source.slot, &claims).await?;
+        let occupant = slot_occupant(&mut tx, &target_date, &source.slot, &claims).await?;
         if mode == "skip" {
             if let Some(code) = occupant {
                 skipped.push(ShiftCopySkip {
@@ -1271,11 +1273,10 @@ async fn resolve_task_name(
     task_name: Option<String>,
 ) -> Result<Option<String>, AppError> {
     if let Some(task_id) = task_id {
-        let name: Option<String> =
-            sqlx::query_scalar("SELECT task_name FROM tasks WHERE id = ?1")
-                .bind(task_id)
-                .fetch_optional(&state.db)
-                .await?;
+        let name: Option<String> = sqlx::query_scalar("SELECT task_name FROM tasks WHERE id = ?1")
+            .bind(task_id)
+            .fetch_optional(&state.db)
+            .await?;
         return Ok(name.or(task_name));
     }
     Ok(task_name)
@@ -1327,13 +1328,12 @@ async fn check_account_binding(
     if exists.is_none() {
         return Err(AppError::BadRequest(format!("账号 {user_id} 不存在")));
     }
-    let bound: Option<(i64, String)> = sqlx::query_as(
-        "SELECT id, name FROM staff WHERE user_id = ?1 AND id IS NOT ?2 LIMIT 1",
-    )
-    .bind(user_id)
-    .bind(self_id)
-    .fetch_optional(&state.db)
-    .await?;
+    let bound: Option<(i64, String)> =
+        sqlx::query_as("SELECT id, name FROM staff WHERE user_id = ?1 AND id IS NOT ?2 LIMIT 1")
+            .bind(user_id)
+            .bind(self_id)
+            .fetch_optional(&state.db)
+            .await?;
     if let Some((staff_id, name)) = bound {
         return Err(AppError::BadRequest(format!(
             "该账号已关联责任人「{name}」（#{staff_id}），一个账号只能绑定一个责任人"

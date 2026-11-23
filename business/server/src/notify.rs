@@ -276,7 +276,10 @@ pub fn evidence_image(base64_input: &str) -> Result<NoticeImage, String> {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64;
 
-    let cleaned: String = base64_input.chars().filter(|c| !c.is_whitespace()).collect();
+    let cleaned: String = base64_input
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
     if cleaned.is_empty() {
         return Err("证据图为空".to_string());
     }
@@ -2145,7 +2148,8 @@ mod tests {
     #[test]
     fn platform_webhook_wins_over_env() {
         let mut config = test_config();
-        config.wecom_webhook = Some("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=env".into());
+        config.wecom_webhook =
+            Some("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=env".into());
         let (notifier, _rx) = Notifier::channel(
             &config,
             Some("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=platform".into()),
@@ -2186,7 +2190,10 @@ mod tests {
             "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=94fdb35e-1111"
         );
         assert!(validate_webhook("").is_err());
-        assert!(validate_webhook("qyapi.weixin.qq.com/send?key=x").is_err(), "缺协议");
+        assert!(
+            validate_webhook("qyapi.weixin.qq.com/send?key=x").is_err(),
+            "缺协议"
+        );
         assert!(
             validate_webhook("https://qyapi.weixin.qq.com/cgi-bin/webhook/send").is_err(),
             "缺 key= 时发出去只会拿到 93000"
@@ -2199,7 +2206,8 @@ mod tests {
 
     #[test]
     fn mask_webhook_never_echoes_the_full_key() {
-        let masked = mask_webhook("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=94fdb35e-1234");
+        let masked =
+            mask_webhook("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=94fdb35e-1234");
         assert!(masked.contains("key=94fdb35e…"), "{masked}");
         assert!(!masked.contains("1234"), "只回显前 8 位: {masked}");
         assert_eq!(key_tail("send?key=ab12cd"), "ab12cd");

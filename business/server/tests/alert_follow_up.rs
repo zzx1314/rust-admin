@@ -12,10 +12,10 @@
 //! 这些用例同时钉住 `alert_flow::on_alert` 返回的 `repeated` / `follow_up` 两个标志
 //! 和 `notify::alert_created` 的入队行为（用假 webhook 只验入队，不发外网）。
 
-use robodog_ops_server::notify::Notice;
 use robodog_ops_server::alert_flow::CountChange;
 use robodog_ops_server::app::AppState;
 use robodog_ops_server::config::Config;
+use robodog_ops_server::notify::Notice;
 use robodog_ops_server::notify::Notifier;
 use robodog_ops_server::{alert_flow, db, gateway, seed};
 use std::path::{Path, PathBuf};
@@ -232,9 +232,13 @@ async fn detection_confidence_does_not_trigger_follow_up() {
         .await
         .expect("插入告警失败");
     }
-    let first = alert_flow::on_alert(&state, "AL-DET-1").await.expect("应派单");
+    let first = alert_flow::on_alert(&state, "AL-DET-1")
+        .await
+        .expect("应派单");
     assert!(!first.repeated);
-    let second = alert_flow::on_alert(&state, "AL-DET-2").await.expect("应派单");
+    let second = alert_flow::on_alert(&state, "AL-DET-2")
+        .await
+        .expect("应派单");
     assert!(second.repeated, "第二次同类检出是跟单");
     assert!(
         second.follow_up.is_none(),
@@ -358,10 +362,12 @@ async fn device_fault_repeats_still_merge_inside_the_window() {
 #[tokio::test]
 async fn repeat_push_can_be_switched_off() {
     let (state, mut rx, _temp) = test_state_with_webhook().await;
-    sqlx::query("UPDATE settings SET setting_value = 'false' WHERE setting_key = 'wecom_alert_repeat_push'")
-        .execute(&state.db)
-        .await
-        .expect("关掉重复推送开关失败");
+    sqlx::query(
+        "UPDATE settings SET setting_value = 'false' WHERE setting_key = 'wecom_alert_repeat_push'",
+    )
+    .execute(&state.db)
+    .await
+    .expect("关掉重复推送开关失败");
 
     insert_detect_alert(&state, "AL-OFF-1", "0.81").await;
     robodog_ops_server::notify::alert_created(&state, "AL-OFF-1").await;
@@ -369,9 +375,6 @@ async fn repeat_push_can_be_switched_off() {
 
     insert_detect_alert(&state, "AL-OFF-2", "0.83").await;
     robodog_ops_server::notify::alert_created(&state, "AL-OFF-2").await;
-    assert!(
-        rx.try_recv().is_err(),
-        "关掉开关后跟单不推（老口径）"
-    );
+    assert!(rx.try_recv().is_err(), "关掉开关后跟单不推（老口径）");
     assert_eq!(open_order_count(&state).await, 1);
 }

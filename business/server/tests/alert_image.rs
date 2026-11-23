@@ -13,8 +13,8 @@
 use robodog_ops_server::alert_flow;
 use robodog_ops_server::app::AppState;
 use robodog_ops_server::config::Config;
-use robodog_ops_server::notify::{self, Notice};
 use robodog_ops_server::notify::Notifier;
+use robodog_ops_server::notify::{self, Notice};
 use robodog_ops_server::{db, gateway, seed};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -164,10 +164,12 @@ async fn alert_with_evidence_image_queues_an_image_message() {
 #[tokio::test]
 async fn image_can_be_switched_off() {
     let (state, mut rx, _temp) = build_state().await;
-    sqlx::query("UPDATE settings SET setting_value = 'false' WHERE setting_key = 'wecom_alert_image'")
-        .execute(&state.db)
-        .await
-        .expect("关掉证据图开关失败");
+    sqlx::query(
+        "UPDATE settings SET setting_value = 'false' WHERE setting_key = 'wecom_alert_image'",
+    )
+    .execute(&state.db)
+    .await
+    .expect("关掉证据图开关失败");
 
     let code = insert_count_alert(&state, "AL-IMG-2").await;
     let image = notify::evidence_image(JPEG_BASE64).expect("样本图应通过校验");

@@ -351,10 +351,8 @@ impl Config {
             // 平台侧 mediamtx（板端 RTSP 推上来 → 浏览器 WHEP 拉下去）。
             // 默认不配：只有部署了 mediamtx 的环境才该开这条通路（见
             // deploy/external-hz/mediamtx/），否则前端会去协商一条不存在的流。
-            mediamtx_url: url(
-                "ROBODOG_MEDIAMTX_URL",
-                file.backpack.mediamtx_url,
-            ),            backpack_tunnel_device: env_text(&env, "ROBODOG_BACKPACK_TUNNEL_DEVICE")
+            mediamtx_url: url("ROBODOG_MEDIAMTX_URL", file.backpack.mediamtx_url),
+            backpack_tunnel_device: env_text(&env, "ROBODOG_BACKPACK_TUNNEL_DEVICE")
                 .or_else(|| file.backpack.tunnel_device.and_then(clean)),
             point_ai: point_ai_source(
                 env_text(&env, "ROBODOG_POINT_AI")

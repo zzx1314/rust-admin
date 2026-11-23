@@ -1168,7 +1168,11 @@ async fn seed_staff_schedules(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     let created = now();
     let today = Local::now().date_naive();
     let monday = today - Duration::days(Local::now().weekday().num_days_from_monday() as i64);
-    let day = |offset: i64| (monday + Duration::days(offset)).format("%Y-%m-%d").to_string();
+    let day = |offset: i64| {
+        (monday + Duration::days(offset))
+            .format("%Y-%m-%d")
+            .to_string()
+    };
 
     let staff = [
         (
@@ -1349,9 +1353,24 @@ async fn seed_staff_schedules(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             (0, 9, 12),
             (0, 10, 12),
             vec![
-                ("09:12", "系统", "created", "由告警 AL-001 自动生成工单，指派运维二组"),
-                ("09:15", "李文博", "accept", "已接单，携带热成像仪赶往 E 区冷链仓"),
-                ("09:24", "李文博", "comment", "到达现场，开始检测电池模组温度分布"),
+                (
+                    "09:12",
+                    "系统",
+                    "created",
+                    "由告警 AL-001 自动生成工单，指派运维二组",
+                ),
+                (
+                    "09:15",
+                    "李文博",
+                    "accept",
+                    "已接单，携带热成像仪赶往 E 区冷链仓",
+                ),
+                (
+                    "09:24",
+                    "李文博",
+                    "comment",
+                    "到达现场，开始检测电池模组温度分布",
+                ),
             ],
         ),
         (
@@ -1370,7 +1389,12 @@ async fn seed_staff_schedules(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             Some(2_i64),
             (0, 8, 50),
             (0, 11, 50),
-            vec![("08:50", "系统", "created", "由告警 AL-002 自动生成工单，指派运维一组")],
+            vec![(
+                "08:50",
+                "系统",
+                "created",
+                "由告警 AL-002 自动生成工单，指派运维一组",
+            )],
         ),
         (
             "WO-0003",
@@ -1388,7 +1412,12 @@ async fn seed_staff_schedules(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             Some(3_i64),
             (0, 8, 35),
             (0, 13, 0),
-            vec![("08:35", "系统", "created", "由告警 AL-003 转入工单，指派运维二组")],
+            vec![(
+                "08:35",
+                "系统",
+                "created",
+                "由告警 AL-003 转入工单，指派运维二组",
+            )],
         ),
         (
             "WO-0004",
@@ -1408,8 +1437,18 @@ async fn seed_staff_schedules(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             (1, 18, 0),
             vec![
                 ("08:20", "陈志远", "created", "创建工单并指派赵敏"),
-                ("10:15", "赵敏", "comment", "更换充电触点，观察一个充放电周期"),
-                ("09:40", "赵敏", "submit", "处理完成，回充频率已恢复正常，提交验收"),
+                (
+                    "10:15",
+                    "赵敏",
+                    "comment",
+                    "更换充电触点，观察一个充放电周期",
+                ),
+                (
+                    "09:40",
+                    "赵敏",
+                    "submit",
+                    "处理完成，回充频率已恢复正常，提交验收",
+                ),
             ],
         ),
         (
@@ -1430,7 +1469,12 @@ async fn seed_staff_schedules(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             (0, 18, 0),
             vec![
                 ("14:10", "系统", "created", "由复核任务转入工单"),
-                ("15:30", "陈志远", "comment", "已完成阈值标定，连续 24h 无误报"),
+                (
+                    "15:30",
+                    "陈志远",
+                    "comment",
+                    "已完成阈值标定，连续 24h 无误报",
+                ),
                 ("09:00", "陈志远", "close", "验收通过，工单关闭"),
             ],
         ),

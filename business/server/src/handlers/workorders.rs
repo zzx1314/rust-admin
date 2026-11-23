@@ -124,9 +124,8 @@ pub async fn work_order_stats(
     Query(query): Query<WorkOrderQuery>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
-    let mut builder = QueryBuilder::<sqlx::Sqlite>::new(
-        "SELECT status, COUNT(*) FROM work_orders w WHERE 1 = 1",
-    );
+    let mut builder =
+        QueryBuilder::<sqlx::Sqlite>::new("SELECT status, COUNT(*) FROM work_orders w WHERE 1 = 1");
     let my_staff = my_staff_id(&state, &claims).await?;
     if !claims.is_admin {
         // 与列表同一套可见性（看板顶部的数字必须和列表条数对得上）
@@ -228,11 +227,10 @@ pub(crate) async fn create_order_core(
     // 责任人：优先 staffId，其次姓名；姓名能对上责任人库时补 staffId
     let (staff_id, assignee) = match (payload.staff_id, payload.assignee.as_deref()) {
         (Some(staff_id), _) => {
-            let name: Option<String> =
-                sqlx::query_scalar("SELECT name FROM staff WHERE id = ?1")
-                    .bind(staff_id)
-                    .fetch_optional(&state.db)
-                    .await?;
+            let name: Option<String> = sqlx::query_scalar("SELECT name FROM staff WHERE id = ?1")
+                .bind(staff_id)
+                .fetch_optional(&state.db)
+                .await?;
             let Some(name) = name else {
                 return Err(AppError::NotFound(format!("责任人 {staff_id} 不存在")));
             };
@@ -240,8 +238,7 @@ pub(crate) async fn create_order_core(
         }
         (None, Some(assignee)) if !assignee.trim().is_empty() => {
             let name = assignee.trim().to_string();
-            let matched =
-                super::schedules::staff_id_by_name(&state.db, &name).await?;
+            let matched = super::schedules::staff_id_by_name(&state.db, &name).await?;
             (matched, name)
         }
         _ => {
@@ -262,10 +259,7 @@ pub(crate) async fn create_order_core(
     let next_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM work_orders")
         .fetch_one(&state.db)
         .await?;
-    let order_code = format!(
-        "WO-{}-{next_id:02}",
-        chrono::Local::now().format("%m%d")
-    );
+    let order_code = format!("WO-{}-{next_id:02}", chrono::Local::now().format("%m%d"));
     let timestamp = now();
     let status = "待接单";
     let result = sqlx::query(
@@ -325,11 +319,10 @@ pub async fn update_work_order(
     let (staff_id, assignee) = match (payload.staff_id, payload.assignee.as_deref()) {
         (None, None) => (existing.staff_id, existing.assignee.clone()),
         (Some(staff_id), _) => {
-            let name: Option<String> =
-                sqlx::query_scalar("SELECT name FROM staff WHERE id = ?1")
-                    .bind(staff_id)
-                    .fetch_optional(&state.db)
-                    .await?;
+            let name: Option<String> = sqlx::query_scalar("SELECT name FROM staff WHERE id = ?1")
+                .bind(staff_id)
+                .fetch_optional(&state.db)
+                .await?;
             let Some(name) = name.filter(|name| !name.trim().is_empty()) else {
                 return Err(AppError::NotFound(format!("责任人 {staff_id} 不存在")));
             };
@@ -413,7 +406,9 @@ pub async fn update_work_order_status(
         }));
     }
 
-    let progress = payload.progress.unwrap_or_else(|| default_progress(&status));
+    let progress = payload
+        .progress
+        .unwrap_or_else(|| default_progress(&status));
     let closed_at = if status == "已完成" {
         Some(now())
     } else {

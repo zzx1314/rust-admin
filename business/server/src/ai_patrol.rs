@@ -553,11 +553,7 @@ impl AiPatrol {
     ///
     /// 先看还开着的窗口，再看刚关掉的（`recent`）——后者才是常态，因为平台
     /// 「已离开航点」关窗在先，客户端收尾扫盘在后（见 [`ClosedWindow`]）。
-    async fn claim_alert_for_evidence(
-        &self,
-        device_code: &str,
-        window_id: &str,
-    ) -> Option<String> {
+    async fn claim_alert_for_evidence(&self, device_code: &str, window_id: &str) -> Option<String> {
         {
             let guard = self.active.lock().await;
             if let Some(window) = guard.as_ref()
@@ -653,10 +649,7 @@ impl AiPatrol {
         // 客户端带了而路线里没配时用客户端的值兜底。
         let mut expect_count = payload.expect_count.filter(|value| *value > 0);
         // 任务类型同样以路线数据为准；旧版客户端不带 checkType 时按 expectCount 推断
-        let mut check_type = normalize_check_type(
-            payload.check_type.as_deref(),
-            expect_count,
-        );
+        let mut check_type = normalize_check_type(payload.check_type.as_deref(), expect_count);
         // 「未检出也告警」同样以路线数据为准（客户端只做转发）
         let mut alert_when_missing = payload.alert_when_missing.unwrap_or(false);
         // 「数量一致也通知」同理：新平台随 `ai_point` 带上，老平台没有就用路线数据
@@ -776,7 +769,11 @@ impl AiPatrol {
             } else {
                 labels.join("/")
             },
-            if was_running { "config（复用已开的识别）" } else { "start" }
+            if was_running {
+                "config（复用已开的识别）"
+            } else {
+                "start"
+            }
         );
         spawn_client_window_timeout(state.clone(), window_id, stop, secs);
     }
@@ -815,7 +812,12 @@ impl AiPatrol {
             );
             return;
         }
-        if hits.lock().await.iter().any(|hit| hit.label == payload.label) {
+        if hits
+            .lock()
+            .await
+            .iter()
+            .any(|hit| hit.label == payload.label)
+        {
             return;
         }
         // 客户端随检出带上来的命中帧（路径 + base64）：读不到图就只发卡片
@@ -848,8 +850,7 @@ impl AiPatrol {
                 .as_ref()
                 .map(|window| {
                     window.device_code == device_code
-                        && (window.window_id.is_empty()
-                            || window.window_id == payload.window_id)
+                        && (window.window_id.is_empty() || window.window_id == payload.window_id)
                 })
                 .unwrap_or(false);
             if !matches {
@@ -937,11 +938,7 @@ impl AiPatrol {
             debug!("航点 AI 识别：本窗口是存在性任务，忽略数量告警");
             return;
         }
-        let Some(expect) = payload
-            .expect_count
-            .filter(|value| *value > 0)
-            .or(expect)
-        else {
+        let Some(expect) = payload.expect_count.filter(|value| *value > 0).or(expect) else {
             // 没配「检查目标数量」却收到告警：按脏数据丢弃（不猜数量）
             warn!("航点 AI 识别：收到数量告警但本窗口没配检查数量，忽略: {payload:?}");
             return;
@@ -1096,12 +1093,7 @@ impl AiPatrol {
 /// 客户端进程崩了 / 业务 WS 断了，「窗口结束」就永远不来；不清窗口态的话
 /// `GET /api/backpack/ai-window` 会一直显示「在识别」，下次到点还会被判成
 /// 「这个点已经在识别」而跳过。窗口秒数 + 10s 兜底。
-fn spawn_client_window_timeout(
-    state: AppState,
-    window_id: String,
-    stop: Arc<Notify>,
-    secs: u64,
-) {
+fn spawn_client_window_timeout(state: AppState, window_id: String, stop: Arc<Notify>, secs: u64) {
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(secs.saturating_add(10))).await;
         let ai = global();
@@ -1485,8 +1477,7 @@ async fn record_hit(
     } else {
         match insert_alert(&state.db, config, &content, &key).await {
             Ok(alert_code) => {
-                crate::notify::alert_created_with_image(state, &alert_code, image)
-                    .await;
+                crate::notify::alert_created_with_image(state, &alert_code, image).await;
                 Some(alert_code)
             }
             Err(error) => {
@@ -1537,9 +1528,7 @@ async fn record_count_alert(
 
     let key = ai_dedup_key(config, "count");
     match insert_alert(&state.db, config, &content, &key).await {
-        Ok(alert_code) => {
-            crate::notify::alert_created_with_image(state, &alert_code, image).await
-        }
+        Ok(alert_code) => crate::notify::alert_created_with_image(state, &alert_code, image).await,
         Err(error) => warn!("AI 识别：写数量告警失败: {error}"),
     }
     if let Err(error) = insert_task_event(&state.db, config, &at, &content).await {
@@ -1603,10 +1592,7 @@ async fn record_count_ok(
 async fn record_missing_alert(state: &AppState, config: &WindowConfig) {
     let at = now();
     let targets = if config.labels.is_empty() {
-        config
-            .scene
-            .clone()
-            .unwrap_or_else(|| config.hint.clone())
+        config.scene.clone().unwrap_or_else(|| config.hint.clone())
     } else {
         config.labels.join("/")
     };
@@ -1620,7 +1606,13 @@ async fn record_missing_alert(state: &AppState, config: &WindowConfig) {
         } else {
             targets.as_str()
         },
-        if config.scene.as_deref().unwrap_or_default().trim().is_empty() {
+        if config
+            .scene
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+        {
             "-"
         } else {
             config.scene.as_deref().unwrap_or_default()
@@ -1899,10 +1891,7 @@ async fn insert_alert(
 fn ai_dedup_key(config: &WindowConfig, what: &str) -> String {
     format!(
         "ai:{}:{}:{}:{}",
-        config.device_code,
-        config.task_code,
-        config.point_index,
-        what
+        config.device_code, config.task_code, config.point_index, what
     )
 }
 
@@ -1961,7 +1950,10 @@ fn window_secs(dwell: i64, max_secs: u64) -> u64 {
 fn is_point_stage(stage: &str) -> bool {
     matches!(
         stage,
-        "patrol.point_arrived" | "patrol.waiting" | "patrol.photographing" | "patrol.point_completed"
+        "patrol.point_arrived"
+            | "patrol.waiting"
+            | "patrol.photographing"
+            | "patrol.point_completed"
     )
 }
 
@@ -2383,7 +2375,10 @@ mod tests {
         assert_eq!(normalize_check_type(Some("count"), None), "count");
         // 中文 / 别名（手改 route_data 时常见）
         assert_eq!(normalize_check_type(Some("数量"), None), "count");
-        assert_eq!(normalize_check_type(Some("检测数量是否正确"), None), "count");
+        assert_eq!(
+            normalize_check_type(Some("检测数量是否正确"), None),
+            "count"
+        );
         assert_eq!(normalize_check_type(Some("检测是否存在"), None), "exist");
         // 老数据只有 expectCount：给了数量就是数量任务
         assert_eq!(normalize_check_type(None, Some(3)), "count");
@@ -2659,7 +2654,11 @@ mod tests {
         let labels = scene_labels(
             Some(&tasks),
             "fire",
-            &["flame".to_string(), "person".to_string(), "ghost".to_string()],
+            &[
+                "flame".to_string(),
+                "person".to_string(),
+                "ghost".to_string(),
+            ],
         );
         assert_eq!(labels, vec!["flame".to_string()]);
         // 一个都没勾 / 全部无效 → 空，调用方传 `labels: null`（该场景全部类别）
@@ -2698,7 +2697,10 @@ mod tests {
         };
         let action = structured.find_ai_action().expect("ai action");
         assert_eq!(action.scene.as_deref(), Some("fire"));
-        assert_eq!(action.labels, vec!["flame".to_string(), "smoke".to_string()]);
+        assert_eq!(
+            action.labels,
+            vec!["flame".to_string(), "smoke".to_string()]
+        );
         assert_eq!(parse_conf(&action.threshold), Some(0.4));
 
         let plain = PointRow {

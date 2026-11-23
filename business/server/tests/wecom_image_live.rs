@@ -70,8 +70,7 @@ async fn push_real_alert_card_with_evidence_image() {
         .try_init();
 
     let webhook = std::env::var("ROBODOG_LIVE_WEBHOOK").expect("必须设置 ROBODOG_LIVE_WEBHOOK");
-    let evidence =
-        std::env::var("ROBODOG_LIVE_EVIDENCE").expect("必须设置 ROBODOG_LIVE_EVIDENCE");
+    let evidence = std::env::var("ROBODOG_LIVE_EVIDENCE").expect("必须设置 ROBODOG_LIVE_EVIDENCE");
     let body = std::env::var("ROBODOG_LIVE_BODY").unwrap_or_else(|_| {
         "AI 识别数量核对不一致：任务「办公区域例行巡检」航点「新航点 1」\
          检查 5 个，实际检出 2 个（证据：/root/261113/backpack_dashboard/backend/\
@@ -118,7 +117,10 @@ async fn push_real_alert_card_with_evidence_image() {
             ("设备", "0202222672400230".to_string()),
             ("园区", "金澳国际".to_string()),
             ("关联计划", "办公区域例行巡检".to_string()),
-            ("当班责任人", "张泽新（巡检一班） · 早班 08:00 - 16:00（SH-014）".to_string()),
+            (
+                "当班责任人",
+                "张泽新（巡检一班） · 早班 08:00 - 16:00（SH-014）".to_string(),
+            ),
             ("工单", "WO-1117-35（原工单，未新建）".to_string()),
             ("时间", "2026-11-18 10:58:30".to_string()),
             ("告警码", "AL-541".to_string()),
@@ -128,7 +130,9 @@ async fn push_real_alert_card_with_evidence_image() {
             ),
         ],
         body: Some(body),
-        action: Some("若群里只看到卡片没有图，查服务端日志「证据图推送失败」的 errcode".to_string()),
+        action: Some(
+            "若群里只看到卡片没有图，查服务端日志「证据图推送失败」的 errcode".to_string(),
+        ),
         link: None,
         mention_all: false,
         mentions: Vec::new(),

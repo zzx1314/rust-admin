@@ -167,20 +167,8 @@ async fn system_dispatched_orders_are_visible_to_operator() {
         None,
     )
     .await;
-    insert_order(
-        &state,
-        "WO-SCOPE-MINE",
-        "【自己建】手工巡检复核",
-        Some(2),
-    )
-    .await;
-    let other_id = insert_order(
-        &state,
-        "WO-SCOPE-OTHER",
-        "【别人建】管理员的单",
-        Some(1),
-    )
-    .await;
+    insert_order(&state, "WO-SCOPE-MINE", "【自己建】手工巡检复核", Some(2)).await;
+    let other_id = insert_order(&state, "WO-SCOPE-OTHER", "【别人建】管理员的单", Some(1)).await;
 
     let app = build_router(state.clone());
     let titles = list_titles(&app, &operator_token()).await;
@@ -223,9 +211,12 @@ async fn system_dispatched_orders_are_visible_to_operator() {
         .body(Body::empty())
         .unwrap();
     let body: Value = serde_json::from_slice(
-        &axum::body::to_bytes(app.clone().oneshot(request).await.unwrap().into_body(), 1024 * 1024)
-            .await
-            .unwrap(),
+        &axum::body::to_bytes(
+            app.clone().oneshot(request).await.unwrap().into_body(),
+            1024 * 1024,
+        )
+        .await
+        .unwrap(),
     )
     .unwrap();
     let alerts = body["data"]["alerts"]
@@ -276,19 +267,20 @@ async fn system_dispatched_orders_are_visible_to_operator() {
 
     // 删除仍然只给管理员：系统单是告警的存证链
     assert_eq!(
-        status_of(&app, &token, "DELETE", &format!("/api/workorders/{auto_id}")).await,
+        status_of(
+            &app,
+            &token,
+            "DELETE",
+            &format!("/api/workorders/{auto_id}")
+        )
+        .await,
         StatusCode::NOT_FOUND,
         "非管理员不能删系统派单"
     );
 }
 
 /// 只关心状态码的简易请求
-async fn status_of(
-    app: &axum::Router,
-    token: &str,
-    method: &str,
-    path: &str,
-) -> StatusCode {
+async fn status_of(app: &axum::Router, token: &str, method: &str, path: &str) -> StatusCode {
     let builder = match method {
         "GET" => Request::get(path),
         "DELETE" => Request::delete(path),
@@ -458,7 +450,11 @@ async fn one_account_binds_one_staff() {
         .body(Body::from(r#"{"name":"另一个人","userId":2}"#))
         .unwrap();
     let response = app.clone().oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "同一账号不能绑两个责任人");
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "同一账号不能绑两个责任人"
+    );
 
     // 解绑：传 userId = null
     let request = Request::put(format!("/api/staff/{first_id}"))
@@ -476,5 +472,8 @@ async fn one_account_binds_one_staff() {
             .unwrap(),
     )
     .unwrap();
-    assert!(body["data"]["userId"].is_null(), "解绑后 user_id 应为空: {body}");
+    assert!(
+        body["data"]["userId"].is_null(),
+        "解绑后 user_id 应为空: {body}"
+    );
 }

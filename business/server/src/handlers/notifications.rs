@@ -3,9 +3,9 @@ use crate::auth::Claims;
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::notify::{self, WebhookSource};
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Query, State};
-use axum::Extension;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -167,7 +167,11 @@ pub async fn update_webhook(
 pub async fn send_test(
     State(state): State<AppState>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
-    let masked = state.notifier.webhook().as_deref().map(notify::mask_webhook);
+    let masked = state
+        .notifier
+        .webhook()
+        .as_deref()
+        .map(notify::mask_webhook);
     match notify::send_test(&state).await {
         Ok(message) => Ok(ApiResponse::ok(json!({
             "sent": true,

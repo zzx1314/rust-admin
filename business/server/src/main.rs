@@ -42,7 +42,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         (None, _) => {
-            tracing::info!("企业微信告警推送未配置 webhook（可在「系统设置 → 企业微信群机器人」填写）")
+            tracing::info!(
+                "企业微信告警推送未配置 webhook（可在「系统设置 → 企业微信群机器人」填写）"
+            )
         }
     }
 
