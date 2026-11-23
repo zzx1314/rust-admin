@@ -51,7 +51,8 @@ pub async fn list_routes(
     if !claims.is_admin {
         builder.push(" AND r.created_by = ").push_bind(claims.sub);
     }
-    builder.push(" ORDER BY r.id ASC");
+    // 路线模板按最近更新倒序：任务规划的下拉框默认选中第一条，也应该是刚编排过的路线。
+    builder.push(" ORDER BY r.updated_at DESC, r.id DESC");
     let routes = builder
         .build_query_as::<Route>()
         .fetch_all(&state.db)

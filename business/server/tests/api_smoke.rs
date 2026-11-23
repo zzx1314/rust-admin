@@ -299,6 +299,55 @@ async fn synced_sources_lists_source_refs_for_park() {
     assert_eq!(body["data"][0], "/ota/alg_data/map/history_map/demo");
 }
 
+/// 任务规划里的「巡检路线」下拉直接按后端顺序展示，模板必须最近更新在前。
+#[tokio::test]
+async fn route_list_is_ordered_by_recent_update() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let (old_id,): (i64,) = sqlx::query_as("SELECT id FROM routes ORDER BY id ASC LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .expect("演示数据应包含路线");
+    sqlx::query("UPDATE routes SET updated_at = '2020-01-01 00:00:00' WHERE id = ?1")
+        .bind(old_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let new_id = sqlx::query(
+        "INSERT INTO routes (route_code, route_name, park_id, status, version, loop_mode,
+            default_speed, route_data, point_count, distance_m, duration_s, battery_pct,
+            created_at, updated_at, created_by)
+         VALUES ('RT-NEWEST', '最新编排的路线', 1, '草稿', 'v1.0', '往返', 1.2, '{}', 0, 0,
+            0, 0, '2026-11-01 00:00:00', '2030-01-01 00:00:00', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+
+    let app = build_router(state);
+    let token = login(&app).await;
+    let response = app
+        .oneshot(
+            Request::get("/api/routes")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    let ids: Vec<i64> = body["data"]
+        .as_array()
+        .expect("路线列表应是数组")
+        .iter()
+        .map(|route| route["id"].as_i64().expect("路线缺少 id"))
+        .collect();
+    assert_eq!(ids.first().copied(), Some(new_id), "最新更新的路线应排第一: {ids:?}");
+    assert_eq!(ids.last().copied(), Some(old_id), "最久未动的路线应排最后: {ids:?}");
+}
+
 #[tokio::test]
 async fn synced_sources_drops_maps_deleted_in_zentai() {
     // 假中台：只认 dog_map.id = 1 仍存在（另一张已被软删除）
