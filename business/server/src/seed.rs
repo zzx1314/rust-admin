@@ -128,6 +128,17 @@ async fn ensure_settings(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             "bool",
             "只在执行计划期间为告警建单并推群（其余告警只落库）",
         ),
+        // 告警白名单：命中的故障码**不落告警、不建工单、不推企业微信**。
+        // 预置现场明确不关心的高频噪音：12608 RS/lidar 时间不同步（每 ~90s 一条）、
+        // 13440 导航指令非法（一定跟着 13897 能力占用，处理根因那条即可）。
+        // 留空 = 全部告警照旧；填了就以平台配置为准（60s 内生效）。
+        (
+            "notification",
+            "alert_ignore_fault_codes",
+            "12608,13440",
+            "string",
+            "告警白名单（忽略的故障码，逗号分隔）：命中的不落告警、不建工单、不推企业微信",
+        ),
         (
             "notification",
             "task_timeout_notice",

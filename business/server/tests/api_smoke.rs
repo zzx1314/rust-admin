@@ -4478,3 +4478,80 @@ async fn relay_profile_setting_is_validated() {
         .and_then(|row| row["settingValue"].as_str());
     assert_eq!(saved, Some("degrade2"));
 }
+
+/// 告警白名单（系统设置 → 通知策略）：默认压掉 `12608,13440`，错项当场拒收。
+///
+/// 这个键写错的代价很隐蔽：填了「RS 与 lidar 时间不同步」不会报错，白名单等于
+/// 没配，现场只看到告警还在刷 → 只能靠接口把错项直接退回去。
+#[tokio::test]
+async fn alert_ignore_fault_codes_setting_is_validated() {
+    let (state, _db) = test_state().await;
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+    let auth = |method: &str, path: &str| {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let send = |request: Request<Body>| {
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            (response.status(), json_body(response).await)
+        }
+    };
+    let put = |body: &str| {
+        let mut request = auth("PUT", "/api/settings");
+        *request.body_mut() = Body::from(body.to_string());
+        request
+    };
+
+    // 默认值：现场那两条高频噪音，老库升级也靠 seed 补上
+    let (_, body) = send(auth("GET", "/api/settings")).await;
+    let row = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["settingKey"] == "alert_ignore_fault_codes")
+        .expect("告警白名单应出现在系统设置里");
+    assert_eq!(row["settingValue"], "12608,13440", "{body}");
+
+    // 粘了整句说明：直接拒收（静默丢掉 = 填了不生效，现场查不出来）
+    let (status, body) = send(put(
+        r#"[{"settingKey":"alert_ignore_fault_codes","settingValue":"12608,RS 与 lidar 时间不同步"}]"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "非数字项应拒绝: {body}");
+    assert!(
+        body["msg"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("RS"),
+        "错误提示要点出哪一项不认识: {body}"
+    );
+
+    // 合法值：逗号 / code= 前缀 / 中文逗号都接受，保存后读回来是规范化后的原文
+    let (status, body) = send(put(
+        r#"[{"settingKey":"alert_ignore_fault_codes","settingValue":" code=12608，13382 "}]"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "合法白名单应保存: {body}");
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT setting_value FROM settings WHERE setting_key = 'alert_ignore_fault_codes'",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(stored.as_deref(), Some(" code=12608，13382 "));
+
+    // 清空 = 不再过滤（不能把「没配」当成「全静默」）
+    let (status, _) = send(put(
+        r#"[{"settingKey":"alert_ignore_fault_codes","settingValue":""}]"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}

@@ -153,6 +153,9 @@
 | `server/src/ai_patrol.rs` `record_hit()` | 检出告警入口：告警正文带「（证据：路径）」，有字节就走 `alert_created_with_image`（群卡片正文会去掉路径，见 `notify::without_evidence_path`） |
 | `notify.rs` `task_abnormal()` | 任务异常入口：同样带「当班责任人」并 @ 到人 |
 | `alert_flow.rs` `should_dispatch()` | 第一道门：只有「执行计划期间」的告警才建单 + 推群（`alert_only_in_task`） |
+| `alert_flow.rs` `IGNORE_CODES_SETTING` / `parse_ignored_codes()` / `fault_code_ignored()` / `message_ignored()` | 告警白名单：读 `alert_ignore_fault_codes`，命中的故障码**连告警都不落**（见下面「告警白名单」） |
+| `gateway.rs` `fault_code()` | 从本体文案抽故障码：白名单与自动工单去重键**共用这一份解析** |
+| `gateway.rs` `handle_device_event()` | 设备事件入口：先过白名单，再落 `alerts` → `notify::alert_created()` |
 | `alert_flow.rs` `in_task_execution()` | 判据：告警绑定的设备当时有 `执行中` 的任务 |
 | `alert_flow.rs` `only_in_task_enabled()` | 读 `alert_only_in_task` 开关（缺行视为开启，关掉就回到「所有告警都建单推群」） |
 | `alert_flow.rs` `on_alert()` | 告警 → 责任人 → 自动建工单 → 回写 `alerts` 四列 |
@@ -170,8 +173,8 @@
 | `handlers/settings.rs` | 通用设置列表过滤 `value_type='secret'`，并拒收此类键 |
 | `config.rs` | `wecom_enabled` / `wecom_webhook`（环境变量兜底） / `wecom_min_level` / `wecom_mention_all` / `public_url` |
 | `main.rs` | `stored_webhook()` → 装配 `Notifier`，`notify::spawn(state, rx)` |
-| `seed.rs` | 播种 `wecom_alert_push` / `wecom_task_abnormal` / `alert_auto_workorder` 开关 + `wecom_webhook`（secret，空值） |
-| `web/src/views/settings/index.vue` | 开关 + webhook 地址配置（掩码 + 来源）+ 「发送测试消息」+ 最近 5 条推送记录 |
+| `seed.rs` | 播种 `wecom_alert_push` / `wecom_task_abnormal` / `alert_auto_workorder` / `alert_ignore_fault_codes`（默认 `12608,13440`） + `wecom_webhook`（secret，空值） |
+| `web/src/views/settings/index.vue` | 开关 + 告警白名单输入框 + webhook 地址配置（掩码 + 来源）+ 「发送测试消息」+ 最近 5 条推送记录 |
 
 ### 触发点清单
 
@@ -198,7 +201,37 @@
 | 7 | 任务看门狗判异常 | `gateway.rs:752` | 设备离线→**严重**，否则警告 |
 
 **故意不推的**：急停解除 / 控制权收回 / 告警被标记已处理（状态反转，纯刷屏）；
-运营在页面上手动把任务改成异常（自己点的，不用通知自己）。
+运营在页面上手动把任务改成异常（自己点的，不用通知自己）；**命中告警白名单的故障码**
+（见下面「告警白名单」，连 `alerts` 都不落）。
+
+### 告警白名单（忽略的故障码）
+
+`gateway::handle_device_event` 在落库**之前**先过一道白名单（`alert_flow::message_ignored`）：
+命中 `settings.alert_ignore_fault_codes` 的故障码**不落 `alerts`、不建工单、不推企业微信**，
+只在 `task_events` 事件流里留一行（排查时要能证明「本体确实报过」）。
+
+> 事件流那行**不能一起省**：`ctrl_source=3` 的文案判断
+> （`gateway::recent_capability_busy`）正是翻 `task_events` 里的 `13440` / `13897`
+> 才能区分「本体能力被占」和「遥控器被接管」。
+
+| 故障码 | 现场表现 | 为什么默认压掉 |
+| --- | --- | --- |
+| `12608` RS 与 lidar 时间不同步（级别 1） | 每 ~90s 一条 | 一直是它，真正要处置的是根因；不去重时 5 分钟两张工单 |
+| `13440` 导航指令非法（级别 2） | 跟着 `13897 capability busy` | 派生现象，看根因（控制权 / 能力占用）那条 |
+
+几条不能松的口径：
+
+- **默认值就是上表两条**（`seed.rs`，`INSERT OR IGNORE`，老库升级自动补上）；
+  留空 = 全部告警照旧（**不能**把「没配」当成「全静默」）。
+- **只认故障码，不认文案**：解析复用 `gateway::fault_code`（与自动工单去重键同一份），
+  取不到 `code=` 的事件（人工事件 / 翻译文案）一律不过滤。
+- 白名单是**更靠前的一道门**，不替代 `alert_only_in_task`：白名单命中的根本不会走到
+  `notify::alert_created`，所以也不会有 `assignee` / `work_order_id` 回写。
+- 每次事件读一次库（和 `channel_enabled()` 一个口径），设置页保存立即生效。
+- `task_events` 那行**必须保留**（见上）：一起过滤掉，`ctrl_source=3` 就退化成
+  「可能是遥控器」。
+- 回归用例：`server/tests/alert_whitelist.rs`（默认白名单、非白名单照旧、运行时改配置、
+  无码事件不过滤）+ `alert_flow::tests::ignored_codes_parse_tolerates_what_people_paste`。
 
 ### 只有「执行计划期间」的告警才建单 + 推群
 
@@ -250,6 +283,7 @@ status('sent'|'failed'), attempts, last_error, created_at, sent_at
 | `wecom_task_abnormal` | `true` | 任务执行异常推企业微信 |
 | `alert_auto_workorder` | `true` | 告警按当班排班自动派单并建工单（关掉只停建单，责任人解析与推送照旧） |
 | `alert_only_in_task` | `true` | **只有执行计划期间**的告警才建单 + 推群；掉线 / 控制权抢占 / 手动新建只落库 |
+| `alert_ignore_fault_codes` | `12608,13440` | **告警白名单**：命中的故障码不落告警、不建工单、不推群（逗号分隔；留空 = 不过滤） |
 
 ### `alerts` 派单列（migration 021）
 
@@ -274,6 +308,9 @@ wecom_alert_push / wecom_task_abnormal  渠道级：这一类事件推不推企�
 在此之上还有一层**范围**门（`alert_only_in_task`，默认开）：告警如果不是
 「执行计划期间」产生的（掉线 / 控制权抢占 / 手动新建），连 `alert_auto_workorder`
 的建单都不会走——三层开关全开也不会推。
+
+再往上还有一层**白名单**（`alert_ignore_fault_codes`）：命中的故障码在**落库之前**
+就被丢掉，所以三层开关全开也不会有告警行、工单和群消息。
 
 拆三层是因为职责不同：改**有没有**通道（`wecom.enabled`）是部署决策，改**发到哪个群**
 是运维在设置页里粘地址（DB，立即生效），改"这个班次别吵了"是值班长点开关（DB）。
@@ -704,6 +741,10 @@ journalctl -u rust-admin-robodog -f | grep -i wecom
 3. **新的推送渠道（钉钉/飞书/短信）** → 不动 `Notice` 和调用点，只加一个
    `enum Channel` 分支和一个 `post_xxx()`；`notifications.channel` 列已经预留。
 
+> 白名单（`alert_ignore_fault_codes`）目前只对**设备故障事件**（带 `code=` 的 1301/1317 文案）
+> 生效。新加的告警源如果也有「码」的概念，在落库前自己接一次
+> `alert_flow::fault_code_ignored()`，**别加到推送层**（否则告警行、工单已经建了）。
+
 ---
 
 ## 11. 踩过的坑（别再踩）
@@ -727,6 +768,7 @@ journalctl -u rust-admin-robodog -f | grep -i wecom
 | 拿工单标题当「同一件事」的判据 | AI 告警内容带置信度（0.41 → 0.77）/ 证据图路径，标题一变就每轮巡检新建一张单，24h 去重等于没有 | 告警写入时带 `dedup_key`（`alerts` + `work_orders` 两列，迁移 024），`find_open_order` 优先按它比；只有无键来源才退回标题 |
 | 只改 `handlers/alerts.rs` 的 SELECT | `/dashboard/summary` 500（驾驶舱自己拼了一份 `Alert` 查询） | `Alert` 结构体加列时，全仓搜一遍 `query_as::<Alert>` / `build_query_as::<Alert>` |
 | webhook 只在启动时从环境变量读 | 「换个群」要 SSH 改 env 再重启，现场只能等运维 | 地址放进 `settings`（secret）+ `Notifier` 可写槽：页面保存即生效；环境变量保留为兜底 |
+| 把「不想看的故障码」写在推送层 | 群里是安静了，但告警中心里还是一秒一条、还自动建单派给人 | 白名单必须卡在**落库之前**（`gateway::handle_device_event`），语料只认故障码；留空不能等于「全静默」 |
 | 页面只显示掩码 + 空输入框 | 现场以为「之前配的地址丢了」，反复重新粘贴，甚至以为被清空 | 输入框 placeholder 写清「当前已配置（来源）：<掩码>」，再加「显示原文」（`?reveal=true`，仅管理员） |
 | 把 secret 直接塞进通用 `settings` 行 | `GET /api/settings` 明文回显地址（地址即凭据，进页面就上屏幕） | `value_type='secret'` 的行从通用列表过滤掉，专用接口只回掩码；`PUT /api/settings` 拒收 secret 键 |
 

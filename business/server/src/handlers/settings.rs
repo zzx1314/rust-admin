@@ -63,6 +63,18 @@ pub async fn update_settings(
                 "中继自动降档只能是 true / false（收到 {value}）"
             )));
         }
+        // 告警白名单：错项**当场拒收**。静默丢掉就等于「填了却不生效」，
+        // 现场看到告警还在刷也查不出原因。
+        if item.setting_key == crate::alert_flow::IGNORE_CODES_SETTING {
+            let invalid = crate::alert_flow::invalid_code_tokens(&value);
+            if !invalid.is_empty() {
+                return Err(AppError::BadRequest(format!(
+                    "告警白名单只能填本体故障码（纯数字），逗号分隔，如 12608,13440；
+                     无法识别：{}",
+                    invalid.join("、")
+                )));
+            }
+        }
         sqlx::query(
             "UPDATE settings SET setting_value = ?1, updated_at = ?2 WHERE setting_key = ?3",
         )

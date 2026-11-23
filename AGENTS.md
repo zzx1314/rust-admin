@@ -258,6 +258,13 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 `handlers/workorders.rs` 的 `append_visible_filter` / `ensure_visible` 与
 `staff.user_id` 的唯一索引，回归用例：`tests/workorder_scope.rs`。
 
+**告警白名单（`settings.alert_ignore_fault_codes`，默认 `12608,13440`）是落库前的一道门**：
+命中白名单的**本体故障码**（`code=12608` RS/lidar 时间不同步、`code=13440` 导航指令非法）
+**不落 `alerts`、不自动建单、不推企业微信**，只在 `task_events` 事件流留一行。
+过滤点在 `gateway::handle_device_event`（不是 `notify`）：放到推送层会让告警中心照样一秒一条。
+只认码值（解析复用 `gateway::fault_code`，与自动工单去重键同一份），取不到 `code=` 的事件
+一律不过滤；白名单留空 = 不过滤。改这块回归 `tests/alert_whitelist.rs`。
+
 告警自动派单（`settings.alert_auto_workorder`，默认开）的**去重键是结构化的**：
 建告警时写 `alerts.dedup_key`（`ai:<设备>:<任务>:<航点>:<类别|count|missing>` /
 `fault:<设备>:<故障码>` / `hb:<设备>` / `ctrl:<设备>`），`alert_flow::find_open_order` 按

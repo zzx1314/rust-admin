@@ -305,6 +305,22 @@ onMounted(async () => {
             企业微信推送地址在下方「企业微信群机器人」里配置，填好即生效；
             未配置时上方开关只影响站内提示。
           </div>
+          <div class="divider" />
+          <div class="field">
+            <label>告警白名单（忽略的故障码）</label>
+            <input
+              v-model="values.alert_ignore_fault_codes"
+              class="input"
+              placeholder="12608,13440"
+            />
+            <span class="muted" style="font-size: 11.5px; line-height: 1.7; margin-top: 6px">
+              这里列出的本体故障码<b>不落告警、不建工单、不推企业微信</b>（事件流里仍留一行，
+              方便排查「本体确实报过」）。逗号分隔，直接填数字即可；留空 = 全部告警照旧。
+              默认压掉两条高频噪音：<code>12608</code> RS 与 lidar 时间不同步（每 ~90s 一条）、
+              <code>13440</code> 导航指令非法（跟着 13897 能力占用出现，处理根因那条就行）。
+              改完点左侧「保存配置」立即生效（无需重启）。
+            </span>
+          </div>
         </div>
       </div>
     </div>

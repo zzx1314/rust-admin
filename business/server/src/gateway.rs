@@ -1814,7 +1814,10 @@ async fn handle_task_progress(
 /// 拿它当自动工单的去重键：同一台设备的**同一个故障码**就是同一个问题，
 /// 而文案里的坐标/耗时/英文描述会变，按标题去重会拆成好几张单。
 /// 取不到码（翻译后的文案没有 `code=`）时返回 `None`，工单退回按标题去重。
-fn fault_code(message: &str) -> Option<&str> {
+///
+/// 告警白名单也用它取码（[`crate::alert_flow::message_ignored`]），所以是
+/// `pub(crate)`：两处必须用同一套解析，否则「去重按 A 码、白名单按 B 码」。
+pub(crate) fn fault_code(message: &str) -> Option<&str> {
     let rest = message.split("code=").nth(1)?.trim_start();
     let end = rest
         .find(|ch: char| !ch.is_ascii_digit())
@@ -1858,38 +1861,51 @@ async fn handle_device_event(
     // 根据事件类型处理
     match payload.event_type.as_str() {
         "error" | "fault" | "obstacle" => {
-            // alert_code 带设备号 + 秒级时间戳。
-            // 以前是 `AL-WS-{日期}-{小时}`：`alert_code` 有 UNIQUE 约束，
-            // 同一小时内的第二条故障事件插入直接失败（静默 `.ok()` 吞掉），
-            // 告警中心一小时内只留得下**全局第一条**故障，其余全丢。
-            let alert_code = format!(
-                "AL-WS-{}-{}",
-                device_id,
-                timestamp.replace(['-', ' ', ':'], "")
-            );
-            // 同一台设备的同一个故障码 = 同一个问题：拿它当自动工单的去重键。
-            // 以前按「设备号 + 内容前 60 字」比标题，内容里的坐标/时间一变就拆成两张单。
-            let dedup_key = fault_code(&payload.message)
-                .map(|code| format!("fault:{{device}}:{code}"))
-                .unwrap_or_default();
-            sqlx::query(
-                "INSERT INTO alerts (alert_code, level, content, device_id, park_id, status, occurred_at, created_at, dedup_key)
-                 VALUES (?1, ?2, ?3,
-                     (SELECT id FROM devices WHERE device_id = ?4),
-                     (SELECT park_id FROM devices WHERE device_id = ?4),
-                     '未处理', ?5, ?5,
-                     NULLIF(REPLACE(?6, '{device}', COALESCE(CAST((SELECT id FROM devices WHERE device_id = ?4) AS TEXT), '')), ''))",
-            )
-            .bind(&alert_code)
-            .bind(event_alert_level(payload))
-            .bind(&payload.message)
-            .bind(device_id)
-            .bind(&timestamp)
-            .bind(&dedup_key)
-            .execute(db)
-            .await
-            .ok();
-            crate::notify::alert_created(state, &alert_code).await;
+            // 告警白名单（`settings.alert_ignore_fault_codes`）：现场明确不关心的
+            // 高频故障码（如 12608 RS/lidar 时间不同步、13440 导航指令非法）
+            // **不落告警、不建工单、不推企业微信**，只在下面的 `task_events`
+            // 事件流里留一行。事件流不能一起省：`recent_capability_busy` 正是靠
+            // task_events 里的 13440 / 13897 区分「本体能力被占」和「遥控器接管」。
+            if crate::alert_flow::message_ignored(state, &payload.message).await {
+                info!(
+                    device = %device_id,
+                    content = %payload.message,
+                    "故障码在告警白名单内：跳过告警/自动建单/企业微信推送（事件流照常留痕）"
+                );
+            } else {
+                // alert_code 带设备号 + 秒级时间戳。
+                // 以前是 `AL-WS-{日期}-{小时}`：`alert_code` 有 UNIQUE 约束，
+                // 同一小时内的第二条故障事件插入直接失败（静默 `.ok()` 吞掉），
+                // 告警中心一小时内只留得下**全局第一条**故障，其余全丢。
+                let alert_code = format!(
+                    "AL-WS-{}-{}",
+                    device_id,
+                    timestamp.replace(['-', ' ', ':'], "")
+                );
+                // 同一台设备的同一个故障码 = 同一个问题：拿它当自动工单的去重键。
+                // 以前按「设备号 + 内容前 60 字」比标题，内容里的坐标/时间一变就拆成两张单。
+                let dedup_key = fault_code(&payload.message)
+                    .map(|code| format!("fault:{{device}}:{code}"))
+                    .unwrap_or_default();
+                sqlx::query(
+                    "INSERT INTO alerts (alert_code, level, content, device_id, park_id, status, occurred_at, created_at, dedup_key)
+                     VALUES (?1, ?2, ?3,
+                         (SELECT id FROM devices WHERE device_id = ?4),
+                         (SELECT park_id FROM devices WHERE device_id = ?4),
+                         '未处理', ?5, ?5,
+                         NULLIF(REPLACE(?6, '{device}', COALESCE(CAST((SELECT id FROM devices WHERE device_id = ?4) AS TEXT), '')), ''))",
+                )
+                .bind(&alert_code)
+                .bind(event_alert_level(payload))
+                .bind(&payload.message)
+                .bind(device_id)
+                .bind(&timestamp)
+                .bind(&dedup_key)
+                .execute(db)
+                .await
+                .ok();
+                crate::notify::alert_created(state, &alert_code).await;
+            }
         }
         _ => {}
     }

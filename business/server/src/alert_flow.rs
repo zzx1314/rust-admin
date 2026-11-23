@@ -486,6 +486,77 @@ pub async fn only_in_task_enabled(state: &AppState) -> bool {
     }
 }
 
+/// 告警白名单配置键（`settings.alert_ignore_fault_codes`）。
+///
+/// 白名单里列的是**故障码**（本体 1301 / `code=12608` 这种），命中的故障
+/// **不落 `alerts`、不建工单、不推企业微信**，只在 `task_events` 事件流里留痕。
+/// 现场高频噪音靠它压掉：`12608 RS 与 lidar 时间不同步`（每 ~90s 一条）、
+/// `13440 导航指令非法`（一定跟着 13897 能力占用一起出现，处理的是根因那条）。
+pub const IGNORE_CODES_SETTING: &str = "alert_ignore_fault_codes";
+
+/// 白名单文本的分隔符：中英文逗号 / 分号 / 空白都接受（现场是随手粘的）。
+const IGNORE_CODE_SEPARATORS: [char; 8] = [',', '，', ';', '；', ' ', '\t', '\n', '\r'];
+
+/// 单个 token 归一化：去空白 → 剥 `code=` 前缀 → 只留纯数字码。
+fn code_token(item: &str) -> Option<String> {
+    let item = item.trim();
+    let item = item.strip_prefix("code=").unwrap_or(item).trim();
+    (!item.is_empty() && item.chars().all(|ch| ch.is_ascii_digit())).then(|| item.to_string())
+}
+
+/// 解析白名单文本：逗号（中英文）/ 分号 / 空白分隔，`code=` 前缀与空项都丢掉。
+///
+/// 现场两种粘法都见过：`12608,13440` 和从本体日志里连 `code=12608` 一起复制过来。
+/// **只认数字码值**（本体 1301/1317 的码都是数字）：这样即使有人整句粘进来
+/// （`RS 与 lidar 时间不同步`），也不会把 `RS` / `lidar` 当成码。
+pub fn parse_ignored_codes(raw: &str) -> Vec<String> {
+    raw.split(IGNORE_CODE_SEPARATORS)
+        .filter_map(code_token)
+        .collect()
+}
+
+/// 白名单文本里「看起来想填码、但不是码」的项。
+///
+/// 保存设置时用它把关：静默丢掉错项 = 「填了白名单却不生效」，现场查不出来。
+/// 空串 / 只有分隔符返回空（= 清空白名单，合法）。
+pub fn invalid_code_tokens(raw: &str) -> Vec<String> {
+    raw.split(IGNORE_CODE_SEPARATORS)
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .filter(|item| code_token(item).is_none())
+        .map(str::to_string)
+        .collect()
+}
+
+/// 这个故障码是否在白名单里（= 不落告警、不建单、不推群）。
+pub async fn fault_code_ignored(state: &AppState, code: &str) -> bool {
+    let code = code.trim();
+    if code.is_empty() {
+        return false;
+    }
+    let raw: Option<String> = sqlx::query_scalar(
+        "SELECT COALESCE(setting_value, '') FROM settings WHERE setting_key = ?1",
+    )
+    .bind(IGNORE_CODES_SETTING)
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or(None);
+    parse_ignored_codes(&raw.unwrap_or_default())
+        .iter()
+        .any(|ignored| ignored == code)
+}
+
+/// 本体故障文案是否命中白名单（文案里带 `code=12608, 级别=1` 这种码值）。
+///
+/// 取不到码（人工事件 / 翻译文案）时一律**不**命中：白名单只过滤明确的故障码，
+/// 不能因为「文案里没码」就把告警静默掉。
+pub async fn message_ignored(state: &AppState, message: &str) -> bool {
+    match crate::gateway::fault_code(message) {
+        Some(code) => fault_code_ignored(state, code).await,
+        None => false,
+    }
+}
+
 /// 这条告警是否应该派生「自动建工单 + 企业微信推送」。
 ///
 /// [`crate::notify::alert_created`] 的第一道门：只负责判「现在该不该动作」，
@@ -866,6 +937,55 @@ mod tests {
                 previous: 0,
                 current: 2
             })
+        );
+    }
+
+    /// 白名单文本解析：容忍中英文逗号、`code=` 前缀与多余空白，垃圾项直接丢掉。
+    ///
+    /// 现场是照本体日志粘的（`code=12608`），也可能顺手打中文逗号；
+    /// 解析太严格就变成「填了白名单却不生效」，而且没有任何提示。
+    #[test]
+    fn ignored_codes_parse_tolerates_what_people_paste() {
+        assert_eq!(
+            parse_ignored_codes("12608,13440"),
+            vec!["12608".to_string(), "13440".to_string()]
+        );
+        assert_eq!(
+            parse_ignored_codes(" code=12608， 13440 ; 13382\n"),
+            vec![
+                "12608".to_string(),
+                "13440".to_string(),
+                "13382".to_string()
+            ]
+        );
+        // 空值 / 说明文字 / 重复项都不能变成「永久静默所有告警」
+        assert!(parse_ignored_codes("").is_empty());
+        assert!(parse_ignored_codes("   ").is_empty());
+        assert!(parse_ignored_codes("RS 与 lidar 时间不同步").is_empty());
+        assert_eq!(
+            parse_ignored_codes("12608"),
+            vec!["12608".to_string()]
+        );
+    }
+
+    /// 保存时把关用的「垃圾项」识别：错项必须能报出来，否则白名单就是静默不生效。
+    #[test]
+    fn invalid_code_tokens_point_at_what_people_typed_wrong() {
+        assert!(invalid_code_tokens("").is_empty());
+        assert!(invalid_code_tokens("12608, code=13440").is_empty());
+        assert_eq!(
+            invalid_code_tokens("12608,12a08"),
+            vec!["12a08".to_string()]
+        );
+        // 整句粘进来：每个非数字 token 都要能报出来
+        assert_eq!(
+            invalid_code_tokens("12608,RS 与 lidar 时间不同步"),
+            vec![
+                "RS".to_string(),
+                "与".to_string(),
+                "lidar".to_string(),
+                "时间不同步".to_string()
+            ]
         );
     }
 }
