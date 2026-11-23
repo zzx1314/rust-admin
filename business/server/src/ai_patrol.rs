@@ -1442,8 +1442,10 @@ async fn consume_events(
 /// 把每个检出类别都报一遍会把那条结论淹掉（见 [`record_count_alert`]）。
 ///
 /// `evidence` / `image` 是这一帧命中图的「板端路径」和「字节」：企业微信的图片消息
-/// 要字节不要路径（见 [`crate::notify::evidence_image`]），路径只写进告警正文方便
-/// 现场 ssh 上去复核。客户端代调模式下由客户端扫板端存证目录给出；服务端直连模式
+/// 要字节不要路径（见 [`crate::notify::evidence_image`]），路径只留在告警正文
+/// （告警中心 / 工单详情能回看）与任务时间线里，**群卡片正文不带**
+/// （`notify::without_evidence_path`：图就紧跟在卡片后面，路径是噪点）。
+/// 客户端代调模式下由客户端扫板端存证目录给出；服务端直连模式
 /// （`ROBODOG_BACKPACK_URL`）读不到板端磁盘，两个都是空 → 只发卡片。
 async fn record_hit(
     state: &AppState,

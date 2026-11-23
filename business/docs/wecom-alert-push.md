@@ -150,7 +150,7 @@
 | `notify.rs` `alert_evidence()` / `Notice.image_only` | 只补一张 `msgtype=image`（不重发卡片、不写 notifications） |
 | `notify.rs` `count_matched()` | **数量核对一致**的回执：只推群，**不落告警、不建工单**（`ref_type=count`，不走 `alert_flow`）；航点动作 `notifyWhenCountOk` 才开 |
 | `server/src/ai_patrol.rs` `on_client_count()` / `record_count_ok()` / `plan_hit_count_ok()` | `ai_count` / 直连 SSE 的「一致」结论 → `notify::count_matched` + 任务时间线 |
-| `server/src/ai_patrol.rs` `record_hit()` | 检出告警入口：正文带「（证据：路径）」，有字节就走 `alert_created_with_image` |
+| `server/src/ai_patrol.rs` `record_hit()` | 检出告警入口：告警正文带「（证据：路径）」，有字节就走 `alert_created_with_image`（群卡片正文会去掉路径，见 `notify::without_evidence_path`） |
 | `notify.rs` `task_abnormal()` | 任务异常入口：同样带「当班责任人」并 @ 到人 |
 | `alert_flow.rs` `should_dispatch()` | 第一道门：只有「执行计划期间」的告警才建单 + 推群（`alert_only_in_task`） |
 | `alert_flow.rs` `in_task_execution()` | 判据：告警绑定的设备当时有 `执行中` 的任务 |
@@ -417,7 +417,8 @@ notify::evidence_image()（校验）→ Notice.image
   （老板端 / 画框失败）就在 `EVIDENCE_PENDING_WAIT`=8s 到期时先发卡片保告警。
 - **图从哪读**：`plan_hit.evidence` 给的路径优先（板端自己写的，唯一真相），读不到再扫
   `<jobs_dir>/<planId>/pt<航点下标>/` 取**窗口开始之后**写下的最新一张（`EVIDENCE_MTIME_SLACK`=5s
-  容错）。路径同时写进告警正文（`（证据：…）`），现场可 ssh 复核。
+  容错）。路径同时写进告警正文（`（证据：…）`，告警中心 / 工单详情可回看），
+  **但企业微信群卡片的正文不带**（`notify::without_evidence_path`：图紧跟卡片后面，路径只是噪点）。
 - **窗口结束时还在等图的命中**：`finish()` **先停识别再扫盘**（板端 `_plan_flush` 正是停的时候
   才把采样中的命中画框写盘）后补发，所以「狗刚命中就走向下一个点」也不会丢图。
 - **卡片已经发了、图才落盘**（2026-11-18 19:35 现场：`Trash over flow` 0.29 整个窗口只命中

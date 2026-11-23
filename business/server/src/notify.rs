@@ -310,6 +310,38 @@ fn is_jpeg_or_png(bytes: &[u8]) -> bool {
     bytes.starts_with(&[0xFF, 0xD8, 0xFF]) || bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47])
 }
 
+/// 去掉卡片正文里的板端证据路径（`（证据：/root/…/dogcam_1.jpg）`）。
+///
+/// 群里**不需要**这串路径：图已经作为 `msgtype=image` 紧跟在卡片后面，而且推完就让
+/// 客户端删掉了（[`dispatch_evidence_cleanup`]），留着只会把卡片撑长、还容易被当成
+/// 「点得开的链接」。
+///
+/// **只影响企业微信**：`alerts.content` / 任务时间线照旧留完整路径，告警中心、工单详情
+/// 还能回看（`record_hit` / `record_count_alert` / `record_count_ok` 拼的正文不变）。
+fn without_evidence_path(text: &str) -> String {
+    const MARKERS: [&str; 2] = ["（证据：", "（证据:"];
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let found = MARKERS
+            .iter()
+            .filter_map(|marker| rest.find(marker).map(|at| (at, *marker)))
+            .min_by_key(|(at, _)| *at);
+        let Some((start, marker)) = found else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let after = &rest[start + marker.len()..];
+        match after.find('）') {
+            Some(end) => rest = &after[end + '）'.len_utf8()..],
+            // 只有开头没有结尾：剩下的整段丢掉，宁可少一句话也不要把半截路径发进群
+            None => break,
+        }
+    }
+    out.trim_end().to_string()
+}
+
 impl Notice {
     /// 渲染成企业微信 markdown。
     ///
@@ -1461,7 +1493,8 @@ pub async fn alert_created_with_image(
             "设备异常告警".to_string()
         },
         fields,
-        body: Some(row.content),
+        // 群里不带板端证据路径（见 [`without_evidence_path`]）；告警正文里照旧保留
+        body: Some(without_evidence_path(&row.content)),
         action: follow_up
             .map(|change| {
                 format!(
@@ -1673,7 +1706,7 @@ pub async fn count_matched(state: &AppState, matched: CountMatched<'_>) {
             ),
             ("时间", now()),
         ],
-        body: Some(matched.content.to_string()),
+        body: Some(without_evidence_path(matched.content)),
         // 正常结论：不派单、不建议处置，只说清楚结论
         action: Some("数量核对一致，无需处置；本条仅为巡检回执，不生成告警与工单".to_string()),
         link: None,
@@ -1941,6 +1974,36 @@ mod tests {
         let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
         let error = evidence_image(&encoded).expect_err("2MB 以上应被拒");
         assert!(error.contains("2MB"), "错误要说清是体积问题: {error}");
+    }
+
+    /// 群里不带板端证据路径：图作为 `msgtype=image` 紧接着卡片发，路径一串
+    /// `/root/.../detect_jobs/...` 只是噪音（告警正文里照旧保留，见调用点）。
+    #[test]
+    fn evidence_path_is_dropped_from_the_card_body() {
+        let body = "AI 识别数量核对不一致：任务「TK-1」航点「垃圾桶」检查 3 个，实际检出 2 个（证据：/root/detect_jobs/TK-1/pt0/dogcam_1.jpg）";
+        let stripped = without_evidence_path(body);
+        assert_eq!(
+            stripped, "AI 识别数量核对不一致：任务「TK-1」航点「垃圾桶」检查 3 个，实际检出 2 个",
+            "只去掉（证据：…），前面的结论一个字都不能少"
+        );
+
+        let mut item = notice(Level::Warning);
+        item.body = Some(stripped);
+        let text = item.markdown();
+        assert!(!text.contains("证据"), "{text}");
+        assert!(!text.contains("dogcam_1.jpg"), "{text}");
+
+        // 没有路径的正文原样返回（不能把正文搞坏）
+        assert_eq!(
+            without_evidence_path("导航指令非法（13440）"),
+            "导航指令非法（13440）"
+        );
+        // 多个 / 半角冒号 / 只有开头没结尾：都不留半截路径
+        assert_eq!(
+            without_evidence_path("检出 A（证据:/a.jpg）（证据：/b.jpg）"),
+            "检出 A"
+        );
+        assert_eq!(without_evidence_path("检出 A（证据：/a.jpg"), "检出 A");
     }
 
     #[test]

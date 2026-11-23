@@ -1869,7 +1869,7 @@ async fn same_ai_problem_across_patrols_reuses_one_work_order() {
 /// 检出告警也要证据图（存在性任务 `exist`：灭火器「在」就告警那一类）：
 /// 客户端把命中帧（板端路径 + base64）随 `ai_detect` 带上来，
 /// 服务端校验后作为**卡片之后的第二条**消息入队（`msgtype=image`），
-/// 告警正文里也留一份路径给现场 ssh 复核。
+/// 告警正文（DB）里也留一份路径给现场 ssh 复核，**但群卡片正文不带**（图就在后面）。
 #[tokio::test]
 async fn hit_alert_carries_the_relayed_evidence_image() {
     let _serial = TEST_LOCK.lock().await;
@@ -1918,7 +1918,14 @@ async fn hit_alert_carries_the_relayed_evidence_image() {
     assert_eq!(image.base64, JPEG_BASE64, "base64 不能带换行/空格");
     assert_eq!(image.md5, JPEG_MD5, "md5 算的是 base64 之前的字节");
 
-    // 正文里带板端路径（运维回头能 ssh 上去看原图）
+    // 群里那张卡片**不带**板端路径：图紧跟在后，路径只是噪音
+    let body = notice.body.clone().expect("卡片应有正文");
+    assert!(
+        !body.contains("证据") && !body.contains("dogcam_1.jpg"),
+        "企业微信正文不该再写证据路径: {body}"
+    );
+
+    // 告警正文（DB）里照旧带板端路径（告警中心 / 工单详情回头能看）
     let contents = alert_contents(&state).await;
     assert_eq!(contents.len(), 1, "{contents:?}");
     assert!(
