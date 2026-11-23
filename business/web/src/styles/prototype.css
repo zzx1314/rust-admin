@@ -477,11 +477,19 @@ button{cursor:pointer}
 .wp-hit:active{cursor:grabbing}
 .leg-hit{cursor:pointer;stroke:transparent;stroke-width:20;fill:none}
 .leg-hit:hover{stroke:rgba(2,132,199,.09)}
-.rt-canvas-tag{position:absolute;left:12px;top:12px;background:rgba(255,255,255,.93);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:10.5px;color:var(--text-2);box-shadow:var(--shadow)}
+.rt-canvas-tag{position:absolute;left:12px;top:12px;max-width:calc(100% - 190px);background:rgba(255,255,255,.93);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:10.5px;line-height:1.5;color:var(--text-2);box-shadow:var(--shadow)}
 .rt-canvas-warn{position:absolute;left:12px;bottom:12px;display:flex;align-items:center;gap:6px;max-width:62%;background:rgba(255,247,237,.96);border:1px solid #fed7aa;border-radius:8px;padding:7px 10px;font-size:10.5px;line-height:1.5;color:#b45309;box-shadow:var(--shadow)}
 .rt-legend{position:absolute;right:12px;bottom:12px;background:rgba(255,255,255,.93);border:1px solid var(--line);border-radius:8px;padding:8px 11px;display:grid;gap:5px;font-size:10.5px;color:var(--text-2)}
 .rt-legend span{display:flex;align-items:center;gap:6px}
 .rt-legend i{width:9px;height:9px;border-radius:50%}
+/* 画布缩放：航点密集的巡检路线要能放大到米级再落点，缩回来看整条航线 */
+.rt-zoom{position:absolute;right:12px;top:12px;display:flex;align-items:center;gap:2px;background:rgba(255,255,255,.95);border:1px solid var(--line);border-radius:8px;padding:3px;box-shadow:var(--shadow)}
+.rt-zoom button{min-width:26px;height:24px;padding:0 4px;border:none;background:none;border-radius:6px;font-size:15px;font-weight:700;line-height:1;color:var(--text-2);display:inline-flex;align-items:center;justify-content:center;gap:4px;cursor:pointer;transition:.15s}
+.rt-zoom button:hover:not(:disabled){background:#f1f7fc;color:var(--brand)}
+.rt-zoom button:disabled{opacity:.35;cursor:not-allowed}
+.rt-zoom .lv{min-width:40px;text-align:center;font-size:11px;font-weight:700;color:var(--text-2);font-variant-numeric:tabular-nums}
+.rt-zoom .fit{font-size:11px;font-weight:600;padding:0 7px;margin-left:2px;border-left:1px solid var(--line);border-radius:0 6px 6px 0}
+.rt-zoom .fit .ic{width:12px;height:12px}
 .rt-metrics{display:grid;grid-template-columns:repeat(5,1fr);border-top:1px solid var(--line-2);background:#fbfcfe}
 .rt-metric{padding:11px 14px;border-right:1px solid var(--line-2)}
 .rt-metric:last-child{border-right:none}

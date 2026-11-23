@@ -401,6 +401,13 @@
   cursor: pointer;
 }
 
+/* 平移中（中键 / Shift+左键 / 选择模式拖空白）：手型，别还在显示十字准星 */
+.rt-canvas > svg.panning,
+.rt-canvas > svg.panning .wp-hit,
+.rt-canvas > svg.panning .leg-hit {
+  cursor: grabbing;
+}
+
 .leg-hit {
   stroke: transparent;
   stroke-width: 18;

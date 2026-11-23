@@ -45,7 +45,14 @@ import {
   newRouteData,
   parseRouteData
 } from "@/utils/format";
-import { canvasToMap, frameOf, mapToCanvas, type MapFrame } from "@/utils/coords";
+import {
+  CANVAS_HEIGHT,
+  CANVAS_WIDTH,
+  canvasToMap,
+  frameOf,
+  mapToCanvas,
+  type MapFrame
+} from "@/utils/coords";
 import { useAiCatalog } from "@/composables/useAiCatalog";
 
 interface RouteDraft {
@@ -483,14 +490,123 @@ function undo() {
   autoSave("撤销");
 }
 
-function svgCoords(event: MouseEvent | PointerEvent) {
+/* ---------------- 画布缩放 / 平移 ----------------
+ * 底图、栅格、航线、航点全部画在 800×460 的内容坐标系里，缩放平移只是一个
+ * `<g transform>`，**不碰**航点里存的地图米制坐标（`RouteData.points[].x/y`）。
+ * 所以所有「屏幕 → 画布」的换算必须先还原这个变换（见 [svgCoords]）：漏还原
+ * 的话放大 2 倍后点一下画布，新航点会落在鼠标旁边的别处。
+ */
+const ZOOM_MIN = 0.6;
+const ZOOM_MAX = 4;
+const ZOOM_WHEEL_STEP = 1.15;
+const zoom = ref(1);
+const panX = ref(0);
+const panY = ref(0);
+const panning = ref(false);
+let panOrigin = { x: 0, y: 0, panX: 0, panY: 0, moved: false, button: 0 };
+/** 平移结束时吞掉随之而来的那次 click（否则 Shift+拖拽会顺手落一个航点） */
+let swallowClick = false;
+
+const viewTransform = computed(
+  () => `translate(${panX.value} ${panY.value}) scale(${zoom.value})`
+);
+/** 标注 / 徽标反向缩放：地图放大 4 倍时航点名称不该跟着变成巨字 */
+const labelScale = computed(() => 1 / zoom.value);
+const zoomPct = computed(() => Math.round(zoom.value * 100));
+
+function clampAxis(position: number, size: number, view: number) {
+  const span = size * view;
+  // 缩小到装不满画布时居中，别把地图缩在左上角
+  if (span <= size) return (size - span) / 2;
+  return Math.min(0, Math.max(size - span, position));
+}
+
+function applyView(next: number, x: number, y: number) {
+  const view = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, next));
+  zoom.value = view;
+  panX.value = clampAxis(x, CANVAS_WIDTH, view);
+  panY.value = clampAxis(y, CANVAS_HEIGHT, view);
+}
+
+/** 以画布上的 [anchor]（viewBox 坐标，缺省画布中心）为不动点缩放 */
+function zoomAt(next: number, anchor?: { x: number; y: number }) {
+  const previous = zoom.value;
+  const view = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, next));
+  if (Math.abs(view - previous) < 1e-4) return;
+  const at = anchor ?? { x: CANVAS_WIDTH / 2, y: CANVAS_HEIGHT / 2 };
+  // 锚点在内容坐标系里的位置保持不变
+  const contentX = (at.x - panX.value) / previous;
+  const contentY = (at.y - panY.value) / previous;
+  applyView(view, at.x - contentX * view, at.y - contentY * view);
+}
+
+function zoomBy(factor: number) {
+  zoomAt(zoom.value * factor);
+}
+
+function resetView() {
+  applyView(1, 0, 0);
+}
+
+function onWheel(event: WheelEvent) {
+  if (!draft.value) return;
+  zoomAt(
+    event.deltaY < 0 ? zoom.value * ZOOM_WHEEL_STEP : zoom.value / ZOOM_WHEEL_STEP,
+    viewBoxCoords(event)
+  );
+}
+
+/** 屏幕 → viewBox（800×460 用户坐标，**未含**缩放平移） */
+function viewBoxCoords(event: MouseEvent | PointerEvent | WheelEvent) {
   const svg = canvasRef.value;
   if (!svg) return { x: 0, y: 0 };
+  const ctm = svg.getScreenCTM?.();
+  if (ctm) {
+    const point = svg.createSVGPoint();
+    point.x = event.clientX;
+    point.y = event.clientY;
+    const mapped = point.matrixTransform(ctm.inverse());
+    return { x: mapped.x, y: mapped.y };
+  }
   const rect = svg.getBoundingClientRect();
+  if (!rect.width || !rect.height) return { x: 0, y: 0 };
   return {
-    x: Math.max(24, Math.min(776, ((event.clientX - rect.left) / rect.width) * 800)),
-    y: Math.max(22, Math.min(438, ((event.clientY - rect.top) / rect.height) * 460))
+    x: ((event.clientX - rect.left) / rect.width) * CANVAS_WIDTH,
+    y: ((event.clientY - rect.top) / rect.height) * CANVAS_HEIGHT
   };
+}
+
+/** 屏幕 → 内容坐标（已还原缩放平移），再夹到画布边框内 */
+function svgCoords(event: MouseEvent | PointerEvent) {
+  const view = viewBoxCoords(event);
+  return {
+    x: Math.max(24, Math.min(776, (view.x - panX.value) / zoom.value)),
+    y: Math.max(22, Math.min(438, (view.y - panY.value) / zoom.value))
+  };
+}
+
+function onCanvasDown(event: PointerEvent) {
+  if (!draft.value) return;
+  const target = event.target as Element | null;
+  const onWaypoint = Boolean(target?.closest?.(".wp-hit"));
+  // 中键 / Shift+左键随时可平移；选择模式下空白处左键拖动也平移
+  const panWithLeft = mode.value === "select" && !onWaypoint;
+  const wantPan =
+    event.button === 1 || (event.button === 0 && (event.shiftKey || panWithLeft));
+  if (!wantPan) return;
+  event.preventDefault();
+  panning.value = true;
+  swallowClick = false;
+  const start = viewBoxCoords(event);
+  panOrigin = {
+    x: start.x,
+    y: start.y,
+    panX: panX.value,
+    panY: panY.value,
+    moved: false,
+    button: event.button
+  };
+  (event.currentTarget as Element).setPointerCapture?.(event.pointerId);
 }
 
 function snapPoint(point: { x: number; y: number }) {
@@ -503,6 +619,11 @@ function snapPoint(point: { x: number; y: number }) {
 }
 
 function onCanvasClick(event: MouseEvent) {
+  // 刚平移过：这一下 click 是拖拽的尾巴，不能当「新增航点」
+  if (swallowClick) {
+    swallowClick = false;
+    return;
+  }
   if (mode.value !== "add" || !draft.value) return;
   snapshot();
   const position = snapPoint(svgCoords(event));
@@ -530,6 +651,14 @@ function onPointDown(event: PointerEvent, index: number) {
 }
 
 function onCanvasMove(event: PointerEvent) {
+  if (panning.value) {
+    const view = viewBoxCoords(event);
+    const dx = view.x - panOrigin.x;
+    const dy = view.y - panOrigin.y;
+    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) panOrigin.moved = true;
+    applyView(zoom.value, panOrigin.panX + dx, panOrigin.panY + dy);
+    return;
+  }
   if (dragIndex.value === null || !draft.value) return;
   const position = snapPoint(svgCoords(event));
   const point = draft.value.data.points[dragIndex.value];
@@ -541,7 +670,19 @@ function onCanvasMove(event: PointerEvent) {
   justDragged.value = true;
 }
 
-function onCanvasUp() {
+function onCanvasUp(event?: PointerEvent) {
+  if (panning.value) {
+    panning.value = false;
+    // 只有左键平移会跟着一个 click；中键平移不会，不能把标记留下吞下一次点选
+    swallowClick = panOrigin.moved && panOrigin.button === 0;
+    if (event && event.pointerId !== undefined) {
+      const element = event.currentTarget as Element | null;
+      if (element?.hasPointerCapture?.(event.pointerId)) {
+        element.releasePointerCapture?.(event.pointerId);
+      }
+    }
+    return;
+  }
   if (dragIndex.value === null) return;
   const index = dragIndex.value;
   dragIndex.value = null;
@@ -1317,211 +1458,227 @@ onBeforeUnmount(() => {
             <svg
               ref="canvasRef"
               viewBox="0 0 800 460"
-              :class="{ 'select-mode': mode === 'select' }"
+              :class="{ 'select-mode': mode === 'select', panning }"
               role="img"
               aria-label="巡检路线编辑画布"
               @click="onCanvasClick"
+              @pointerdown="onCanvasDown"
               @pointermove="onCanvasMove"
               @pointerup="onCanvasUp"
               @pointercancel="onCanvasUp"
+              @wheel.prevent="onWheel"
             >
-              <RouteBaseMap />
-              <template v-if="rasterVisible && raster && rasterRect">
-                <rect width="800" height="460" fill="#0b1220" />
-                <image
-                  :href="raster.image"
-                  :x="rasterRect.x"
-                  :y="rasterRect.y"
-                  :width="rasterRect.width"
-                  :height="rasterRect.height"
-                  preserveAspectRatio="none"
-                />
-              </template>
-              <g id="routeLayer">
-                <template v-for="(leg, index) in draft.data.legs" :key="`leg-${index}`">
-                  <template v-if="draft.data.points[index] && draft.data.points[index + 1]">
+              <!-- 缩放 / 平移只作用在这层：内部一律是 800×460 的内容坐标 -->
+              <g class="rt-view" :transform="viewTransform">
+                <RouteBaseMap />
+                <template v-if="rasterVisible && raster && rasterRect">
+                  <rect width="800" height="460" fill="#0b1220" />
+                  <image
+                    :href="raster.image"
+                    :x="rasterRect.x"
+                    :y="rasterRect.y"
+                    :width="rasterRect.width"
+                    :height="rasterRect.height"
+                    preserveAspectRatio="none"
+                  />
+                </template>
+                <g id="routeLayer">
+                  <template v-for="(leg, index) in draft.data.legs" :key="`leg-${index}`">
+                    <template v-if="draft.data.points[index] && draft.data.points[index + 1]">
+                      <line
+                        :x1="canvasPoints[index].cx"
+                        :y1="canvasPoints[index].cy"
+                        :x2="canvasPoints[index + 1].cx"
+                        :y2="canvasPoints[index + 1].cy"
+                        :stroke="selType === 'leg' && selIdx === index ? '#f59e0b' : '#0284c7'"
+                        :stroke-width="selType === 'leg' && selIdx === index ? 5 : 3"
+                        stroke-dasharray="9 7"
+                        marker-end="url(#rtarrow)"
+                        :opacity="selType === 'leg' && selIdx === index ? 1 : 0.85"
+                        vector-effect="non-scaling-stroke"
+                      />
+                      <line
+                        class="leg-hit"
+                        :x1="canvasPoints[index].cx"
+                        :y1="canvasPoints[index].cy"
+                        :x2="canvasPoints[index + 1].cx"
+                        :y2="canvasPoints[index + 1].cy"
+                        @click.stop="selectLeg(index)"
+                      />
+                      <g
+                        style="cursor: pointer"
+                        :transform="`translate(${(canvasPoints[index].cx + canvasPoints[index + 1].cx) / 2},${(canvasPoints[index].cy + canvasPoints[index + 1].cy) / 2 - 17}) scale(${labelScale})`"
+                        @click.stop="selectLeg(index)"
+                      >
+                        <rect
+                          x="-20"
+                          y="-8"
+                          width="40"
+                          height="16"
+                          rx="5"
+                          :fill="selType === 'leg' && selIdx === index ? '#f59e0b' : '#fff'"
+                          :stroke="selType === 'leg' && selIdx === index ? '#f59e0b' : '#cfe3f2'"
+                        />
+                        <text
+                          x="0"
+                          y="3"
+                          font-size="9.5"
+                          :fill="selType === 'leg' && selIdx === index ? '#fff' : '#0369a1'"
+                          text-anchor="middle"
+                          font-weight="700"
+                        >
+                          {{ leg.actions.length }} 项
+                        </text>
+                      </g>
+                    </template>
+                  </template>
+
+                  <template
+                    v-if="
+                      draft.data.loop === '闭环' &&
+                      draft.data.returnLeg &&
+                      draft.data.points.length > 2
+                    "
+                  >
                     <line
-                      :x1="canvasPoints[index].cx"
-                      :y1="canvasPoints[index].cy"
-                      :x2="canvasPoints[index + 1].cx"
-                      :y2="canvasPoints[index + 1].cy"
-                      :stroke="selType === 'leg' && selIdx === index ? '#f59e0b' : '#0284c7'"
-                      :stroke-width="selType === 'leg' && selIdx === index ? 5 : 3"
-                      stroke-dasharray="9 7"
-                      marker-end="url(#rtarrow)"
-                      :opacity="selType === 'leg' && selIdx === index ? 1 : 0.85"
+                      :x1="canvasPoints[draft.data.points.length - 1].cx"
+                      :y1="canvasPoints[draft.data.points.length - 1].cy"
+                      :x2="canvasPoints[0].cx"
+                      :y2="canvasPoints[0].cy"
+                      :stroke="selType === 'leg' && isReturnLeg ? '#f59e0b' : '#94a3b8'"
+                      stroke-width="2.4"
+                      stroke-dasharray="4 7"
+                      opacity=".85"
                     />
                     <line
                       class="leg-hit"
-                      :x1="canvasPoints[index].cx"
-                      :y1="canvasPoints[index].cy"
-                      :x2="canvasPoints[index + 1].cx"
-                      :y2="canvasPoints[index + 1].cy"
-                      @click.stop="selectLeg(index)"
+                      :x1="canvasPoints[draft.data.points.length - 1].cx"
+                      :y1="canvasPoints[draft.data.points.length - 1].cy"
+                      :x2="canvasPoints[0].cx"
+                      :y2="canvasPoints[0].cy"
+                      @click.stop="selectLeg(draft.data.legs.length)"
                     />
                     <g
                       style="cursor: pointer"
-                      @click.stop="selectLeg(index)"
+                      :transform="`translate(${(canvasPoints[draft.data.points.length - 1].cx + canvasPoints[0].cx) / 2},${(canvasPoints[draft.data.points.length - 1].cy + canvasPoints[0].cy) / 2 - 2}) scale(${labelScale})`"
+                      @click.stop="selectLeg(draft.data.legs.length)"
                     >
                       <rect
-                        :x="(canvasPoints[index].cx + canvasPoints[index + 1].cx) / 2 - 20"
-                        :y="(canvasPoints[index].cy + canvasPoints[index + 1].cy) / 2 - 25"
-                        width="40"
+                        x="-18"
+                        y="-8"
+                        width="36"
                         height="16"
                         rx="5"
-                        :fill="selType === 'leg' && selIdx === index ? '#f59e0b' : '#fff'"
-                        :stroke="selType === 'leg' && selIdx === index ? '#f59e0b' : '#cfe3f2'"
+                        fill="#fff"
+                        stroke="#cbd5e1"
                       />
                       <text
-                        :x="(canvasPoints[index].cx + canvasPoints[index + 1].cx) / 2"
-                        :y="(canvasPoints[index].cy + canvasPoints[index + 1].cy) / 2 - 14"
+                        x="0"
+                        y="3"
                         font-size="9.5"
-                        :fill="selType === 'leg' && selIdx === index ? '#fff' : '#0369a1'"
+                        fill="#64748b"
                         text-anchor="middle"
                         font-weight="700"
                       >
-                        {{ leg.actions.length }} 项
+                        返航
                       </text>
                     </g>
                   </template>
-                </template>
 
-                <template
-                  v-if="
-                    draft.data.loop === '闭环' &&
-                    draft.data.returnLeg &&
-                    draft.data.points.length > 2
-                  "
-                >
-                  <line
-                    :x1="canvasPoints[draft.data.points.length - 1].cx"
-                    :y1="canvasPoints[draft.data.points.length - 1].cy"
-                    :x2="canvasPoints[0].cx"
-                    :y2="canvasPoints[0].cy"
-                    :stroke="selType === 'leg' && isReturnLeg ? '#f59e0b' : '#94a3b8'"
-                    stroke-width="2.4"
-                    stroke-dasharray="4 7"
-                    opacity=".85"
-                  />
-                  <line
-                    class="leg-hit"
-                    :x1="canvasPoints[draft.data.points.length - 1].cx"
-                    :y1="canvasPoints[draft.data.points.length - 1].cy"
-                    :x2="canvasPoints[0].cx"
-                    :y2="canvasPoints[0].cy"
-                    @click.stop="selectLeg(draft.data.legs.length)"
-                  />
-                  <g style="cursor: pointer" @click.stop="selectLeg(draft.data.legs.length)">
-                    <rect
-                      :x="(canvasPoints[draft.data.points.length - 1].cx + canvasPoints[0].cx) / 2 - 18"
-                      :y="(canvasPoints[draft.data.points.length - 1].cy + canvasPoints[0].cy) / 2 - 10"
-                      width="36"
-                      height="16"
-                      rx="5"
+                  <g
+                    v-for="(point, index) in draft.data.points"
+                    :key="`point-${index}`"
+                    class="wp-hit"
+                    style="cursor: pointer"
+                    @pointerdown="onPointDown($event, index)"
+                    @click.stop="selectPoint(index)"
+                  >
+                    <circle
+                      v-if="selType === 'point' && selIdx === index"
+                      :cx="canvasPoints[index].cx"
+                      :cy="canvasPoints[index].cy"
+                      r="21"
+                      fill="none"
+                      stroke="#f59e0b"
+                      stroke-width="2"
+                      stroke-dasharray="4 3"
+                    />
+                    <circle
+                      :cx="canvasPoints[index].cx"
+                      :cy="canvasPoints[index].cy"
+                      r="14"
                       fill="#fff"
-                      stroke="#cbd5e1"
+                      :stroke="
+                        index === 0 ? '#0d9488' : index === draft.data.points.length - 1 ? '#0f172a' : '#0284c7'
+                      "
+                      stroke-width="2.5"
+                    />
+                    <circle
+                      :cx="canvasPoints[index].cx"
+                      :cy="canvasPoints[index].cy"
+                      r="7"
+                      :fill="
+                        index === 0 ? '#0d9488' : index === draft.data.points.length - 1 ? '#0f172a' : '#0284c7'
+                      "
                     />
                     <text
-                      :x="(canvasPoints[draft.data.points.length - 1].cx + canvasPoints[0].cx) / 2"
-                      :y="(canvasPoints[draft.data.points.length - 1].cy + canvasPoints[0].cy) / 2 + 1"
-                      font-size="9.5"
-                      fill="#64748b"
+                      :x="canvasPoints[index].cx"
+                      :y="canvasPoints[index].cy + 3.5"
+                      font-size="9"
+                      fill="#fff"
                       text-anchor="middle"
                       font-weight="700"
                     >
-                      返航
+                      {{ index + 1 }}
                     </text>
-                  </g>
-                </template>
-
-                <g
-                  v-for="(point, index) in draft.data.points"
-                  :key="`point-${index}`"
-                  class="wp-hit"
-                  style="cursor: pointer"
-                  @pointerdown="onPointDown($event, index)"
-                  @click.stop="selectPoint(index)"
-                >
-                  <circle
-                    v-if="selType === 'point' && selIdx === index"
-                    :cx="canvasPoints[index].cx"
-                    :cy="canvasPoints[index].cy"
-                    r="21"
-                    fill="none"
-                    stroke="#f59e0b"
-                    stroke-width="2"
-                    stroke-dasharray="4 3"
-                  />
-                  <circle
-                    :cx="canvasPoints[index].cx"
-                    :cy="canvasPoints[index].cy"
-                    r="14"
-                    fill="#fff"
-                    :stroke="
-                      index === 0 ? '#0d9488' : index === draft.data.points.length - 1 ? '#0f172a' : '#0284c7'
-                    "
-                    stroke-width="2.5"
-                  />
-                  <circle
-                    :cx="canvasPoints[index].cx"
-                    :cy="canvasPoints[index].cy"
-                    r="7"
-                    :fill="
-                      index === 0 ? '#0d9488' : index === draft.data.points.length - 1 ? '#0f172a' : '#0284c7'
-                    "
-                  />
-                  <text
-                    :x="canvasPoints[index].cx"
-                    :y="canvasPoints[index].cy + 3.5"
-                    font-size="9"
-                    fill="#fff"
-                    text-anchor="middle"
-                    font-weight="700"
-                  >
-                    {{ index + 1 }}
-                  </text>
-                  <g :transform="`translate(${canvasPoints[index].cx - 46},${index % 2 ? canvasPoints[index].cy - 38 : canvasPoints[index].cy + 18})`">
-                    <rect
-                      width="92"
-                      height="18"
-                      rx="5"
-                      fill="#fff"
-                      :stroke="selType === 'point' && selIdx === index ? '#f59e0b' : '#e2e8f0'"
-                    />
-                    <text
-                      x="46"
-                      y="12.5"
-                      font-size="9.5"
-                      fill="#334155"
-                      text-anchor="middle"
-                      font-weight="600"
+                    <g
+                      :transform="`translate(${canvasPoints[index].cx},${canvasPoints[index].cy + (index % 2 ? -29 : 27)}) scale(${labelScale})`"
                     >
-                      {{ point.name.length > 9 ? `${point.name.slice(0, 9)}…` : point.name }}
-                    </text>
+                      <rect
+                        x="-46"
+                        y="-9"
+                        width="92"
+                        height="18"
+                        rx="5"
+                        fill="#fff"
+                        :stroke="selType === 'point' && selIdx === index ? '#f59e0b' : '#e2e8f0'"
+                      />
+                      <text
+                        x="0"
+                        y="3.5"
+                        font-size="9.5"
+                        fill="#334155"
+                        text-anchor="middle"
+                        font-weight="600"
+                      >
+                        {{ point.name.length > 9 ? `${point.name.slice(0, 9)}…` : point.name }}
+                      </text>
+                    </g>
                   </g>
-                </g>
 
-                <text
-                  v-if="!draft.data.points.length"
-                  x="400"
-                  y="230"
-                  font-size="14"
-                  fill="#94a3b8"
-                  text-anchor="middle"
-                >
-                  点击画布添加第一个航点
-                </text>
+                  <text
+                    v-if="!draft.data.points.length"
+                    x="400"
+                    y="230"
+                    font-size="14"
+                    fill="#94a3b8"
+                    text-anchor="middle"
+                  >
+                    点击画布添加第一个航点
+                  </text>
 
-                <g v-if="simActive && simDog" :transform="`translate(${simDog.x},${simDog.y})`" class="sim-dog">
-                  <circle r="15" fill="#06b6d4" opacity=".22" />
-                  <circle r="9" fill="#fff" stroke="#0284c7" stroke-width="2.5" />
-                  <circle r="4" fill="#0284c7" />
+                  <g v-if="simActive && simDog" :transform="`translate(${simDog.x},${simDog.y})`" class="sim-dog">
+                    <circle r="15" fill="#06b6d4" opacity=".22" />
+                    <circle r="9" fill="#fff" stroke="#0284c7" stroke-width="2.5" />
+                    <circle r="4" fill="#0284c7" />
+                  </g>
                 </g>
               </g>
             </svg>
             <div class="rt-canvas-tag">
               <AppIcon name="info" />
               {{ mode === "add" ? "点击画布新增航点 · 拖拽航点调整位置" : "点选航点或航段编辑属性" }}
+              · 滚轮缩放 · Shift / 中键拖动平移
               · {{ rasterVisible && raster ? "ROS 栅格底图" : "示意图底图" }}
               · 航点存地图米制坐标
             </div>
@@ -1534,6 +1691,14 @@ onBeforeUnmount(() => {
               <span><i style="background: #0284c7" />途经航点</span>
               <span><i style="background: #0f172a" />终点</span>
               <span><i style="background: #f59e0b" />当前选中</span>
+            </div>
+            <div class="rt-zoom">
+              <button title="缩小" :disabled="zoom <= ZOOM_MIN" @click="zoomBy(0.8)">−</button>
+              <span class="lv">{{ zoomPct }}%</span>
+              <button title="放大" :disabled="zoom >= ZOOM_MAX" @click="zoomBy(1.25)">+</button>
+              <button class="fit" title="恢复 100% 并居中" @click="resetView">
+                <AppIcon name="maximize" />适配
+              </button>
             </div>
           </div>
 
