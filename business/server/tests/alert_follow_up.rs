@@ -106,6 +106,7 @@ async fn build_state(webhook: Option<&str>) -> (AppState, Option<mpsc::Receiver<
         command_results: gateway::new_command_result_waiters(),
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
+        ai_patrol: Default::default(),
     };
     (state, rx, temp)
 }
@@ -160,7 +161,7 @@ async fn count_change_attaches_but_flags_a_follow_up() {
 
     // ① 第一轮：检出 1 个 → 新建工单并正常推群
     let first_code = insert_count_alert(&state, "AL-FU-1", 1).await;
-    let first = alert_flow::on_alert(&state, &first_code)
+    let first = alert_flow::on_alert(&state.db, &first_code)
         .await
         .expect("第一次告警应有派单结果");
     assert!(!first.repeated, "第一次不是跟单");
@@ -171,7 +172,7 @@ async fn count_change_attaches_but_flags_a_follow_up() {
 
     // ② 第二轮：检出 2 个 → 挂回原单，但要补推一条「跟单」
     let second_code = insert_count_alert(&state, "AL-FU-2", 2).await;
-    let second = alert_flow::on_alert(&state, &second_code)
+    let second = alert_flow::on_alert(&state.db, &second_code)
         .await
         .expect("第二次告警也应有派单结果");
     assert!(second.repeated, "第二次是跟单（不新建单）");
@@ -189,7 +190,7 @@ async fn count_change_attaches_but_flags_a_follow_up() {
 
     // ③ 第三轮：还是 2 个 → 继续静默（每轮巡检都会报一遍，不能刷屏）
     let third_code = insert_count_alert(&state, "AL-FU-3", 2).await;
-    let third = alert_flow::on_alert(&state, &third_code)
+    let third = alert_flow::on_alert(&state.db, &third_code)
         .await
         .expect("第三次告警也应有派单结果");
     assert!(third.repeated);
@@ -198,7 +199,7 @@ async fn count_change_attaches_but_flags_a_follow_up() {
 
     // ④ 第四轮：变成 3 个（符合要求）→ 不再有告警；但若再来 4 个仍算「变化」
     let fourth_code = insert_count_alert(&state, "AL-FU-4", 4).await;
-    let fourth = alert_flow::on_alert(&state, &fourth_code)
+    let fourth = alert_flow::on_alert(&state.db, &fourth_code)
         .await
         .expect("第四次告警也应有派单结果");
     assert_eq!(
@@ -232,11 +233,11 @@ async fn detection_confidence_does_not_trigger_follow_up() {
         .await
         .expect("插入告警失败");
     }
-    let first = alert_flow::on_alert(&state, "AL-DET-1")
+    let first = alert_flow::on_alert(&state.db, "AL-DET-1")
         .await
         .expect("应派单");
     assert!(!first.repeated);
-    let second = alert_flow::on_alert(&state, "AL-DET-2")
+    let second = alert_flow::on_alert(&state.db, "AL-DET-2")
         .await
         .expect("应派单");
     assert!(second.repeated, "第二次同类检出是跟单");
@@ -280,7 +281,7 @@ async fn ai_hit_is_pushed_on_the_structural_key_with_a_short_window() {
     let (state, mut rx, _temp) = test_state_with_webhook().await;
 
     insert_detect_alert(&state, "AL-RP-1", "0.81").await;
-    robodog_ops_server::notify::alert_created(&state, "AL-RP-1").await;
+    robodog_ops_server::notify::alert_created(&state.notify(), "AL-RP-1").await;
     let first = rx.try_recv().expect("第一条应入队");
     assert!(
         first.title.contains("已自动派单"),
@@ -299,7 +300,7 @@ async fn ai_hit_is_pushed_on_the_structural_key_with_a_short_window() {
 
     // 同一航点一分钟内的重复上报：告警照常入库并挂回原单，只是不再推第二条
     insert_detect_alert(&state, "AL-RP-2", "0.88").await;
-    robodog_ops_server::notify::alert_created(&state, "AL-RP-2").await;
+    robodog_ops_server::notify::alert_created(&state.notify(), "AL-RP-2").await;
     assert!(
         rx.try_recv().is_err(),
         "同一航点 1 分钟内的重复上报要合并（不刷屏）"
@@ -330,7 +331,7 @@ async fn device_fault_repeats_still_merge_inside_the_window() {
     }
 
     insert_fault(&state, device, "AL-FT-1", "12608").await;
-    robodog_ops_server::notify::alert_created(&state, "AL-FT-1").await;
+    robodog_ops_server::notify::alert_created(&state.notify(), "AL-FT-1").await;
     let first = rx.try_recv().expect("第一条故障告警要推");
     assert_eq!(
         first.dedupe_key, "alert:AL-FT-1",
@@ -341,7 +342,7 @@ async fn device_fault_repeats_still_merge_inside_the_window() {
 
     // 第二次（挂回原单）→ 换成「按工单」的键，仍要推一条（"第 2 次"）
     insert_fault(&state, device, "AL-FT-2", "12608").await;
-    robodog_ops_server::notify::alert_created(&state, "AL-FT-2").await;
+    robodog_ops_server::notify::alert_created(&state.notify(), "AL-FT-2").await;
     let second = rx.try_recv().expect("跟单第一条要推");
     assert!(
         second.dedupe_key.starts_with("alert-repeat:"),
@@ -351,7 +352,7 @@ async fn device_fault_repeats_still_merge_inside_the_window() {
 
     // 第三次（同一故障 90s 内再次）→ 被 5 分钟窗口合并
     insert_fault(&state, device, "AL-FT-3", "12608").await;
-    robodog_ops_server::notify::alert_created(&state, "AL-FT-3").await;
+    robodog_ops_server::notify::alert_created(&state.notify(), "AL-FT-3").await;
     assert!(
         rx.try_recv().is_err(),
         "90s 内同一个故障码连刷仍要合并成一条（机器人不会把群刷爆）"
@@ -370,11 +371,11 @@ async fn repeat_push_can_be_switched_off() {
     .expect("关掉重复推送开关失败");
 
     insert_detect_alert(&state, "AL-OFF-1", "0.81").await;
-    robodog_ops_server::notify::alert_created(&state, "AL-OFF-1").await;
+    robodog_ops_server::notify::alert_created(&state.notify(), "AL-OFF-1").await;
     assert!(rx.try_recv().is_ok(), "第一条仍要推");
 
     insert_detect_alert(&state, "AL-OFF-2", "0.83").await;
-    robodog_ops_server::notify::alert_created(&state, "AL-OFF-2").await;
+    robodog_ops_server::notify::alert_created(&state.notify(), "AL-OFF-2").await;
     assert!(rx.try_recv().is_err(), "关掉开关后跟单不推（老口径）");
     assert_eq!(open_order_count(&state).await, 1);
 }

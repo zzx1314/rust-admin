@@ -10,7 +10,7 @@ use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use serde_json::{Value, json};
-use sqlx::QueryBuilder;
+use sqlx::{QueryBuilder, SqlitePool};
 
 const WORK_ORDER_SELECT: &str = "SELECT w.id, w.order_code, w.title, w.order_type, w.source,
     w.source_ref, w.priority, w.staff_id, w.assignee, st.team AS staff_team,
@@ -161,7 +161,7 @@ pub async fn get_work_order(
     Path(id): Path<i64>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<WorkOrderDetail>>, AppError> {
-    let order = fetch_order(&state, id).await?;
+    let order = fetch_order(&state.db, id).await?;
     ensure_order_access(&state, &order, &claims).await?;
     let logs = fetch_logs(&state, id).await?;
     let alerts = fetch_alerts(&state, id).await?;
@@ -179,7 +179,7 @@ pub async fn create_work_order(
 ) -> Result<Json<ApiResponse<WorkOrderDetail>>, AppError> {
     // 页面上手动「转工单」算人工接手：原告警同步推进到「处理中」
     let order =
-        create_order_core(&state, payload, Some(claims.sub), &claims.username, true).await?;
+        create_order_core(&state.db, payload, Some(claims.sub), &claims.username, true).await?;
     let logs = fetch_logs(&state, order.id).await?;
     let alerts = fetch_alerts(&state, order.id).await?;
     Ok(ApiResponse::ok(WorkOrderDetail {
@@ -198,7 +198,7 @@ pub async fn create_work_order(
 /// 人工「转工单」= 已接手 → true；**告警自动派单 → false**，因为工单还停在
 /// 「待接单」，责任人没接单前告警仍然是未处理，不能被数量统计悄悄吞掉。
 pub(crate) async fn create_order_core(
-    state: &AppState,
+    db: &SqlitePool,
     payload: WorkOrderRequest,
     created_by: Option<i64>,
     actor: &str,
@@ -217,7 +217,7 @@ pub(crate) async fn create_order_core(
               WHERE a.id = ?1",
         )
         .bind(alert_id)
-        .fetch_optional(&state.db)
+        .fetch_optional(db)
         .await?
     {
         return Err(AppError::BadRequest(format!(
@@ -229,7 +229,7 @@ pub(crate) async fn create_order_core(
         (Some(staff_id), _) => {
             let name: Option<String> = sqlx::query_scalar("SELECT name FROM staff WHERE id = ?1")
                 .bind(staff_id)
-                .fetch_optional(&state.db)
+                .fetch_optional(db)
                 .await?;
             let Some(name) = name else {
                 return Err(AppError::NotFound(format!("责任人 {staff_id} 不存在")));
@@ -238,7 +238,7 @@ pub(crate) async fn create_order_core(
         }
         (None, Some(assignee)) if !assignee.trim().is_empty() => {
             let name = assignee.trim().to_string();
-            let matched = super::schedules::staff_id_by_name(&state.db, &name).await?;
+            let matched = super::schedules::staff_id_by_name(db, &name).await?;
             (matched, name)
         }
         _ => {
@@ -256,7 +256,7 @@ pub(crate) async fn create_order_core(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "手动创建".to_string());
 
-    let next_id = crate::ids::next_id(&state.db, "work_orders", "work_orders").await?;
+    let next_id = crate::ids::next_id(db, "work_orders", "work_orders").await?;
     let order_code = format!("WO-{}-{next_id:02}", chrono::Local::now().format("%m%d"));
     let timestamp = now();
     let status = "待接单";
@@ -282,7 +282,7 @@ pub(crate) async fn create_order_core(
     .bind(payload.alert_id)
     .bind(&timestamp)
     .bind(created_by)
-    .execute(&state.db)
+    .execute(db)
     .await?;
     let id = result.last_insert_rowid();
 
@@ -291,17 +291,17 @@ pub(crate) async fn create_order_core(
     } else {
         format!("创建工单并指派 {assignee}")
     };
-    insert_log(state, id, actor, "created", &content).await?;
+    insert_log(db, id, actor, "created", &content).await?;
 
     // 告警转工单：原告警从「未处理」推进到「处理中」，两边状态不再互相打架
     if let Some(alert_id) = payload.alert_id.filter(|_| promote_alert) {
         sqlx::query("UPDATE alerts SET status = '处理中' WHERE id = ?1 AND status = '未处理'")
             .bind(alert_id)
-            .execute(&state.db)
+            .execute(db)
             .await?;
     }
 
-    fetch_order(state, id).await
+    fetch_order(db, id).await
 }
 
 pub async fn update_work_order(
@@ -310,7 +310,7 @@ pub async fn update_work_order(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<WorkOrderRequest>,
 ) -> Result<Json<ApiResponse<WorkOrderDetail>>, AppError> {
-    let existing = fetch_order(&state, id).await?;
+    let existing = fetch_order(&state.db, id).await?;
     ensure_order_access(&state, &existing, &claims).await?;
 
     // 改派：显式给 staffId 就按 id 取姓名；只给姓名时按姓名反查责任人库
@@ -361,7 +361,7 @@ pub async fn update_work_order(
 
     if assignee != existing.assignee {
         insert_log(
-            &state,
+            &state.db,
             id,
             &claims.username,
             "status",
@@ -370,7 +370,7 @@ pub async fn update_work_order(
         .await?;
     }
 
-    let order = fetch_order(&state, id).await?;
+    let order = fetch_order(&state.db, id).await?;
     let logs = fetch_logs(&state, id).await?;
     let alerts = fetch_alerts(&state, id).await?;
     Ok(ApiResponse::ok(WorkOrderDetail {
@@ -387,7 +387,7 @@ pub async fn update_work_order_status(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<WorkOrderStatusRequest>,
 ) -> Result<Json<ApiResponse<WorkOrderDetail>>, AppError> {
-    let existing = fetch_order(&state, id).await?;
+    let existing = fetch_order(&state.db, id).await?;
     ensure_order_access(&state, &existing, &claims).await?;
 
     let status = payload.status.trim().to_string();
@@ -432,9 +432,9 @@ pub async fn update_work_order_status(
         .note
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| default_note(&status).to_string());
-    insert_log(&state, id, &actor, action_of(&status), &note).await?;
+    insert_log(&state.db, id, &actor, action_of(&status), &note).await?;
 
-    let order = fetch_order(&state, id).await?;
+    let order = fetch_order(&state.db, id).await?;
     let logs = fetch_logs(&state, id).await?;
     let alerts = fetch_alerts(&state, id).await?;
     Ok(ApiResponse::ok(WorkOrderDetail {
@@ -450,7 +450,7 @@ pub async fn add_work_order_log(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<WorkOrderLogRequest>,
 ) -> Result<Json<ApiResponse<WorkOrderDetail>>, AppError> {
-    let order = fetch_order(&state, id).await?;
+    let order = fetch_order(&state.db, id).await?;
     ensure_order_access(&state, &order, &claims).await?;
     if payload.content.trim().is_empty() {
         return Err(AppError::BadRequest("处理记录不能为空".to_string()));
@@ -459,13 +459,13 @@ pub async fn add_work_order_log(
         .actor
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| claims.username.clone());
-    insert_log(&state, id, &actor, "comment", payload.content.trim()).await?;
+    insert_log(&state.db, id, &actor, "comment", payload.content.trim()).await?;
     sqlx::query("UPDATE work_orders SET updated_at = ?1 WHERE id = ?2")
         .bind(now())
         .bind(id)
         .execute(&state.db)
         .await?;
-    let order = fetch_order(&state, id).await?;
+    let order = fetch_order(&state.db, id).await?;
     let logs = fetch_logs(&state, id).await?;
     let alerts = fetch_alerts(&state, id).await?;
     Ok(ApiResponse::ok(WorkOrderDetail {
@@ -480,7 +480,7 @@ pub async fn delete_work_order(
     Path(id): Path<i64>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<bool>>, AppError> {
-    let order = fetch_order(&state, id).await?;
+    let order = fetch_order(&state.db, id).await?;
     ensure_can_delete(order.created_by, &claims)?;
     // 自动派单会在 `alerts.work_order_id` 上指回来：先解除引用再删本单，
     // 否则撞 FOREIGN KEY（告警行本身保留，`assignee` / `assignee_note` 仍是当时的记录）。
@@ -609,11 +609,11 @@ fn default_deadline() -> String {
         .to_string()
 }
 
-async fn fetch_order(state: &AppState, id: i64) -> Result<WorkOrder, AppError> {
+async fn fetch_order(db: &SqlitePool, id: i64) -> Result<WorkOrder, AppError> {
     let sql = format!("{WORK_ORDER_SELECT} WHERE w.id = ?1");
     sqlx::query_as::<_, WorkOrder>(&sql)
         .bind(id)
-        .fetch_optional(&state.db)
+        .fetch_optional(db)
         .await?
         .ok_or_else(|| AppError::NotFound("工单不存在".to_string()))
 }
@@ -642,7 +642,7 @@ async fn fetch_alerts(state: &AppState, id: i64) -> Result<Vec<WorkOrderAlert>, 
 }
 
 async fn insert_log(
-    state: &AppState,
+    db: &SqlitePool,
     id: i64,
     actor: &str,
     action: &str,
@@ -657,7 +657,7 @@ async fn insert_log(
     .bind(action)
     .bind(content)
     .bind(now())
-    .execute(&state.db)
+    .execute(db)
     .await?;
     Ok(())
 }

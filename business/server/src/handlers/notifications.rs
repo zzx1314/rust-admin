@@ -172,7 +172,7 @@ pub async fn send_test(
         .webhook()
         .as_deref()
         .map(notify::mask_webhook);
-    match notify::send_test(&state).await {
+    match notify::send_test(&state.notify()).await {
         Ok(message) => Ok(ApiResponse::ok(json!({
             "sent": true,
             "message": message,

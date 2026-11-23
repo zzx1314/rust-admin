@@ -43,7 +43,11 @@ impl Drop for TempDb {
 }
 
 /// 有 webhook 但**不启动消费端**：只看「入没入队」，不发外网。
-async fn build_state() -> (AppState, mpsc::Receiver<robodog_ops_server::notify::Notice>, TempDb) {
+async fn build_state() -> (
+    AppState,
+    mpsc::Receiver<robodog_ops_server::notify::Notice>,
+    TempDb,
+) {
     let dir = std::env::temp_dir().join(format!(
         "robodog-ops-whitelist-{}-{}",
         std::process::id(),
@@ -94,6 +98,7 @@ async fn build_state() -> (AppState, mpsc::Receiver<robodog_ops_server::notify::
         command_results: gateway::new_command_result_waiters(),
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
+        ai_patrol: Default::default(),
     };
     (state, rx.expect("部署开关开着时应有消费端"), temp)
 }
@@ -246,16 +251,18 @@ async fn whitelisted_fault_codes_are_not_recorded_or_pushed() {
         1,
     )
     .await;
-    send_event(
-        &mut ws,
-        "fault",
-        "导航指令非法（code=13440, 级别=2）",
-        2,
-    )
-    .await;
+    send_event(&mut ws, "fault", "导航指令非法（code=13440, 级别=2）", 2).await;
 
-    assert_eq!(alert_count(&state, "%code=12608%").await, 0, "12608 不该落告警");
-    assert_eq!(alert_count(&state, "%code=13440%").await, 0, "13440 不该落告警");
+    assert_eq!(
+        alert_count(&state, "%code=12608%").await,
+        0,
+        "12608 不该落告警"
+    );
+    assert_eq!(
+        alert_count(&state, "%code=13440%").await,
+        0,
+        "13440 不该落告警"
+    );
     assert_eq!(auto_order_count(&state).await, 0, "白名单故障不该建单");
     assert!(rx.try_recv().is_err(), "白名单故障不该推企业微信");
     // 事件流照常留痕：排查时要能证明「本体确实报过」
@@ -279,7 +286,11 @@ async fn other_fault_codes_still_alert_and_push() {
     )
     .await;
 
-    assert_eq!(alert_count(&state, "%code=13382%").await, 1, "13382 应照常落告警");
+    assert_eq!(
+        alert_count(&state, "%code=13382%").await,
+        1,
+        "13382 应照常落告警"
+    );
     assert_eq!(auto_order_count(&state).await, 1, "执行计划期间应自动建单");
     assert!(rx.try_recv().is_ok(), "执行计划期间应推企业微信");
 }
@@ -301,13 +312,17 @@ async fn whitelist_is_configurable_at_runtime() {
     )
     .await;
 
-    assert_eq!(alert_count(&state, "%code=12608%").await, 1, "移出白名单后应落告警");
+    assert_eq!(
+        alert_count(&state, "%code=12608%").await,
+        1,
+        "移出白名单后应落告警"
+    );
     assert!(rx.try_recv().is_ok(), "移出白名单后应推企业微信");
 
     // 清空白名单 = 全部告警照旧（不能因为「没配」就静默掉）
     set_whitelist(&state, "").await;
     assert!(
-        !alert_flow::fault_code_ignored(&state, "12608").await,
+        !alert_flow::fault_code_ignored(&state.db, "12608").await,
         "空白名单不该命中任何码"
     );
 }
@@ -317,9 +332,9 @@ async fn whitelist_is_configurable_at_runtime() {
 async fn event_without_code_is_never_whitelisted() {
     let (state, _rx, _temp) = build_state().await;
     assert!(
-        !alert_flow::message_ignored(&state, "The localization system has poor accuracy").await,
+        !alert_flow::message_ignored(&state.db, "The localization system has poor accuracy").await,
         "取不到码的文案不能因为白名单被静默"
     );
-    assert!(alert_flow::message_ignored(&state, "任意文案（code=12608, 级别=1）").await);
-    assert!(!alert_flow::message_ignored(&state, "任意文案（code=13382, 级别=1）").await);
+    assert!(alert_flow::message_ignored(&state.db, "任意文案（code=12608, 级别=1）").await);
+    assert!(!alert_flow::message_ignored(&state.db, "任意文案（code=13382, 级别=1）").await);
 }

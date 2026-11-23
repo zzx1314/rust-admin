@@ -78,7 +78,8 @@
 //!
 //! 已知边界（写在这里以免下次重新踩）：
 //!
-//! - Agent 的 AI 是**单路单任务**（`single_cam`），所以窗口是进程级唯一的；
+//! - Agent 的 AI 是**单路单任务**（`single_cam`），所以窗口只能有一份
+//!   （状态挂在 [`crate::app::AppState`] 上，生产环境就是一个实例）；
 //!   操作员在「实时视频」页手动开的识别会被巡检窗口视为「已在运行」，
 //!   我们只做热更新（`/api/detect/config`），窗口结束后**不会**把操作员的识别停掉；
 //! - Agent 目前没有「传一张图返回结果」的接口，所以只能这样开窗口，做不到「按张推理」；
@@ -96,8 +97,8 @@ use crate::gateway_types::{
 use crate::notify::NoticeImage;
 use serde_json::{Value, json};
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 use tracing::{debug, info, warn};
@@ -127,13 +128,6 @@ const RECENT_WINDOW_KEEP: usize = 32;
 /// 所以先下发 `ai_stop`、把窗口留在 `active` 里等客户端说完（最多这么久），到点还没
 /// 回话才按已上报的检出结算。
 const CLOSE_GRACE: Duration = Duration::from_secs(12);
-
-/// 到点 AI 识别的进程级状态（Agent 单路推理 → 窗口也只能有一个）。
-static GLOBAL: LazyLock<AiPatrol> = LazyLock::new(AiPatrol::new);
-
-pub fn global() -> &'static AiPatrol {
-    &GLOBAL
-}
 
 /// 已经在跑的一个识别窗口
 struct Window {
@@ -241,8 +235,21 @@ pub struct AiPatrol {
     recent: Mutex<Vec<ClosedWindow>>,
 }
 
+impl Default for AiPatrol {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AiPatrol {
-    fn new() -> Self {
+    /// 新建一份识别窗口状态。
+    ///
+    /// **一份实例 = 一路推理**（板端 Agent 只有一个推理进程，所以窗口也只能有一个）。
+    /// 它挂在 [`crate::app::AppState`] 上，不再是进程级 `static`：
+    /// 以前那份 `LazyLock<AiPatrol>` 让所有集成测试共用同一个窗口，
+    /// 只能靠 `TEST_LOCK` 串行 + 「用独立任务号别串台」的注释兜着；
+    /// 现在每个 `test_state()` 都是干净的实例，想跑多实例也不会打架。
+    pub fn new() -> Self {
         Self {
             active: Mutex::new(None),
             recent: Mutex::new(Vec::new()),
@@ -759,7 +766,7 @@ impl AiPatrol {
                 "航点 AI 识别：设备 {device_code} 不在线，航点 {}「{point_name}」跳过",
                 payload.point_index
             );
-            stop_if_current(&stop).await;
+            stop_if_current(state, &stop).await;
             return;
         }
         info!(
@@ -1087,7 +1094,7 @@ impl AiPatrol {
             payload.point_index,
             payload.evidence.trim()
         );
-        crate::notify::alert_evidence(state, &alert_code, image).await;
+        crate::notify::alert_evidence(&state.notify(), &alert_code, image).await;
     }
 }
 
@@ -1099,7 +1106,7 @@ impl AiPatrol {
 fn spawn_client_window_timeout(state: AppState, window_id: String, stop: Arc<Notify>, secs: u64) {
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(secs.saturating_add(10))).await;
-        let ai = global();
+        let ai = &state.ai_patrol;
         let taken = {
             let mut guard = ai.active.lock().await;
             match guard.as_ref() {
@@ -1140,7 +1147,7 @@ fn spawn_client_window_timeout(state: AppState, window_id: String, stop: Arc<Not
 fn spawn_close_grace(state: AppState, stop: Arc<Notify>) {
     tokio::spawn(async move {
         tokio::time::sleep(CLOSE_GRACE).await;
-        let ai = global();
+        let ai = &state.ai_patrol;
         let taken = {
             let mut guard = ai.active.lock().await;
             match guard.as_ref() {
@@ -1220,7 +1227,7 @@ async fn run_window(
             config.point_name
         );
         // 没接背包时不要把窗口留在状态里（否则 `/backpack/ai-window` 会一直说「在识别」）
-        stop_if_current(&stop).await;
+        stop_if_current(&state, &stop).await;
         return;
     };
     let Ok(client) = backpack::api_client() else {
@@ -1261,7 +1268,7 @@ async fn run_window(
         .map(|item| item.task.clone())
         .unwrap_or_else(|| config.hint.clone());
 
-    update_resolved(&stop, &task_name, &labels, threshold, &cam).await;
+    update_resolved(&state, &stop, &task_name, &labels, threshold, &cam).await;
 
     // 2) 启动（已在跑就热更新，避免「识别已在运行」被拒）
     //    计划 id / 航点下标 / 检查目标数量一并下发：板端命中即按计划目录存证，
@@ -1292,7 +1299,7 @@ async fn run_window(
             "AI 识别：启动失败（航点「{}」场景 {task_name}）: {error}",
             config.point_name
         );
-        stop_if_current(&stop).await;
+        stop_if_current(&state, &stop).await;
         return;
     }
     info!(
@@ -1335,7 +1342,7 @@ async fn run_window(
             .await;
         return;
     }
-    if !global().replaced_by_other(&stop).await {
+    if !state.ai_patrol.replaced_by_other(&stop).await {
         let _ = client
             .post(format!("{base}/api/detect/stop"))
             .json(&json!({}))
@@ -1488,7 +1495,7 @@ async fn record_hit(
     } else {
         match insert_alert(&state.db, config, &content, &key).await {
             Ok(alert_code) => {
-                crate::notify::alert_created_with_image(state, &alert_code, image).await;
+                crate::notify::alert_created_with_image(&state.notify(), &alert_code, image).await;
                 Some(alert_code)
             }
             Err(error) => {
@@ -1539,7 +1546,9 @@ async fn record_count_alert(
 
     let key = ai_dedup_key(config, "count");
     match insert_alert(&state.db, config, &content, &key).await {
-        Ok(alert_code) => crate::notify::alert_created_with_image(state, &alert_code, image).await,
+        Ok(alert_code) => {
+            crate::notify::alert_created_with_image(&state.notify(), &alert_code, image).await;
+        }
         Err(error) => warn!("AI 识别：写数量告警失败: {error}"),
     }
     if let Err(error) = insert_task_event(&state.db, config, &at, &content).await {
@@ -1575,7 +1584,7 @@ async fn record_count_ok(
     info!("{content}");
 
     crate::notify::count_matched(
-        state,
+        &state.notify(),
         crate::notify::CountMatched {
             device_code: &config.device_code,
             task_code: &config.task_code,
@@ -1633,7 +1642,7 @@ async fn record_missing_alert(state: &AppState, config: &WindowConfig) {
 
     let key = ai_dedup_key(config, "missing");
     match insert_alert(&state.db, config, &content, &key).await {
-        Ok(alert_code) => crate::notify::alert_created(state, &alert_code).await,
+        Ok(alert_code) => crate::notify::alert_created(&state.notify(), &alert_code).await,
         Err(error) => warn!("AI 识别：写未检出告警失败: {error}"),
     }
     if let Err(error) = insert_task_event(&state.db, config, &at, &content).await {
@@ -1687,14 +1696,14 @@ fn watched_enough(config: &WindowConfig, watched: Duration) -> bool {
 
 /// 把解析出来的场景/阈值/相机回填到窗口记录（`GET /api/backpack/ai-window` 看得到）
 async fn update_resolved(
+    state: &AppState,
     stop: &Arc<Notify>,
     scene: &str,
     labels: &[String],
     threshold: f64,
     cam: &str,
 ) {
-    let ai = global();
-    let mut guard = ai.active.lock().await;
+    let mut guard = state.ai_patrol.active.lock().await;
     if let Some(window) = guard.as_mut()
         && Arc::ptr_eq(&window.stop, stop)
     {
@@ -1706,9 +1715,8 @@ async fn update_resolved(
 }
 
 /// 启动失败时把自己从状态里摘掉（只摘自己，不误伤已经接管的新窗口）
-async fn stop_if_current(stop: &Arc<Notify>) {
-    let ai = global();
-    let mut guard = ai.active.lock().await;
+async fn stop_if_current(state: &AppState, stop: &Arc<Notify>) {
+    let mut guard = state.ai_patrol.active.lock().await;
     if guard
         .as_ref()
         .map(|window| Arc::ptr_eq(&window.stop, stop))

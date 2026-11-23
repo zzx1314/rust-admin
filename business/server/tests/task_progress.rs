@@ -87,6 +87,7 @@ async fn test_state() -> (AppState, TempDb) {
         command_results: gateway::new_command_result_waiters(),
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
+        ai_patrol: Default::default(),
     };
     (state, temp)
 }

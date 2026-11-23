@@ -692,7 +692,7 @@ async fn notice_missed(
     .await?;
 
     crate::notify::task_abnormal(
-        state,
+        &state.notify(),
         &task.task_code,
         crate::notify::Level::Warning,
         &format!("计划窗口 {} 内未能执行", window.label()),

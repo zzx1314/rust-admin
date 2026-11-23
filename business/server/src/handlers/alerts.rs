@@ -108,7 +108,7 @@ pub async fn create_alert(
     // 手动新建的告警**默认只落库**：现行口径（`alert_only_in_task`）只有「执行计划期间」
     // 的告警才会自动建单 + 推企业微信（判据见 `alert_flow::in_task_execution`）。
     // 想当着群里报一句的场合，请先把对应任务置为执行中，或在设置页关掉那个开关。
-    crate::notify::alert_created(&state, &alert_code).await;
+    crate::notify::alert_created(&state.notify(), &alert_code).await;
     Ok(ApiResponse::ok(
         fetch_alert(&state, result.last_insert_rowid()).await?,
     ))

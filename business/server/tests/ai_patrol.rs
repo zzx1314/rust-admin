@@ -18,7 +18,7 @@ use futures_util::StreamExt;
 use robodog_ops_server::app::AppState;
 use robodog_ops_server::config::Config;
 use robodog_ops_server::gateway_types::TaskProgressPayload;
-use robodog_ops_server::{ai_patrol, db, gateway, seed};
+use robodog_ops_server::{db, gateway, seed};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -28,8 +28,8 @@ use tokio::net::TcpListener;
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
-/// AI 窗口是**进程级单例**（Agent 单路推理），三个用例必须串行跑，
-/// 否则一个用例的窗口会把另一个用例的断言顶掉。
+/// 每个用例有自己的 `AppState`（也就有自己的 AI 窗口），但都会起假 Agent / 真端口，
+/// 串行跑更稳；窗口状态本身已不再是进程级单例。
 static TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 struct TempDb {
@@ -210,6 +210,7 @@ async fn state_with_point_ai(agent: Option<String>, point_ai: &str, dir: PathBuf
         command_results: gateway::new_command_result_waiters(),
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
+        ai_patrol: Default::default(),
     }
 }
 
@@ -330,7 +331,6 @@ fn terminal(task_code: &str) -> TaskProgressPayload {
 #[tokio::test]
 async fn ai_action_at_waypoint_starts_detect_and_records_alert() {
     let _serial = TEST_LOCK.lock().await;
-    ai_patrol::global().stop("测试初始化").await;
     let calls = Arc::new(AgentCalls::default());
     let agent = spawn_fake_agent(calls.clone()).await;
     let dir = temp_dir();
@@ -338,7 +338,8 @@ async fn ai_action_at_waypoint_starts_detect_and_records_alert() {
     let state = state_with(Some(agent), dir).await;
     let task_code = seed_ai_route(&state, true).await;
 
-    ai_patrol::global()
+    state
+        .ai_patrol
         .on_progress(
             &state,
             "RD-TEST",
@@ -394,7 +395,7 @@ async fn ai_action_at_waypoint_starts_detect_and_records_alert() {
     );
 
     // 状态接口能看到窗口与已上报类别
-    let status = ai_patrol::global().status().await;
+    let status = state.ai_patrol.status().await;
     assert_eq!(status["active"], json!(true), "窗口应当是开着的: {status}");
     assert_eq!(
         status["scene"],
@@ -409,11 +410,12 @@ async fn ai_action_at_waypoint_starts_detect_and_records_alert() {
     assert_eq!(status["hits"].as_array().map(Vec::len), Some(1));
 
     // 任务终态 → 窗口关闭 + 真的停掉 Agent 的识别
-    ai_patrol::global()
+    state
+        .ai_patrol
         .on_progress(&state, "RD-TEST", &terminal(&task_code))
         .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(ai_patrol::global().status().await["active"], json!(false));
+    assert_eq!(state.ai_patrol.status().await["active"], json!(false));
     let log = calls.log.lock().unwrap().clone();
     assert!(
         log.contains(&"start".to_string()),
@@ -431,7 +433,6 @@ async fn ai_action_at_waypoint_starts_detect_and_records_alert() {
 #[tokio::test]
 async fn leaving_the_point_stops_detect_in_server_mode() {
     let _serial = TEST_LOCK.lock().await;
-    ai_patrol::global().stop("测试初始化").await;
     let calls = Arc::new(AgentCalls::default());
     let agent = spawn_fake_agent(calls.clone()).await;
     let dir = temp_dir();
@@ -439,7 +440,8 @@ async fn leaving_the_point_stops_detect_in_server_mode() {
     let state = state_with_point_ai(Some(agent), "server", dir).await;
     let task_code = seed_ai_route(&state, true).await;
 
-    ai_patrol::global()
+    state
+        .ai_patrol
         .on_progress(
             &state,
             "RD-TEST",
@@ -447,7 +449,7 @@ async fn leaving_the_point_stops_detect_in_server_mode() {
         )
         .await;
     tokio::time::sleep(Duration::from_millis(800)).await;
-    let status = ai_patrol::global().status().await;
+    let status = state.ai_patrol.status().await;
     assert_eq!(status["active"], json!(true), "到点应开窗: {status}");
     // dwell=6 → 14s 窗口（不再是 30s 上限，也不该被别的规则改回去）
     assert_eq!(status["windowSecs"], json!(14), "{status}");
@@ -461,13 +463,14 @@ async fn leaving_the_point_stops_detect_in_server_mode() {
         "totalPoints": 1,
     }))
     .expect("构造导航阶段载荷失败");
-    ai_patrol::global()
+    state
+        .ai_patrol
         .on_progress(&state, "RD-TEST", &leaving)
         .await;
     tokio::time::sleep(Duration::from_millis(400)).await;
 
     assert_eq!(
-        ai_patrol::global().status().await["active"],
+        state.ai_patrol.status().await["active"],
         json!(false),
         "离开航点后窗口必须关闭"
     );
@@ -482,7 +485,6 @@ async fn leaving_the_point_stops_detect_in_server_mode() {
 #[tokio::test]
 async fn point_without_ai_action_never_starts_detect() {
     let _serial = TEST_LOCK.lock().await;
-    ai_patrol::global().stop("测试初始化").await;
     let calls = Arc::new(AgentCalls::default());
     let agent = spawn_fake_agent(calls.clone()).await;
     let dir = temp_dir();
@@ -490,12 +492,13 @@ async fn point_without_ai_action_never_starts_detect() {
     let state = state_with(Some(agent), dir).await;
     let task_code = seed_ai_route(&state, false).await;
 
-    ai_patrol::global()
+    state
+        .ai_patrol
         .on_progress(&state, "RD-TEST", &arrival(&task_code, "patrol.waiting"))
         .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    assert_eq!(ai_patrol::global().status().await["active"], json!(false));
+    assert_eq!(state.ai_patrol.status().await["active"], json!(false));
     assert!(
         calls.log.lock().unwrap().is_empty(),
         "没有 AI 动作就不该碰 Agent"
@@ -517,13 +520,13 @@ async fn point_without_ai_action_never_starts_detect() {
 #[tokio::test]
 async fn missing_agent_does_not_leave_stale_window() {
     let _serial = TEST_LOCK.lock().await;
-    ai_patrol::global().stop("测试初始化").await;
     let dir = temp_dir();
     let temp = TempDb { dir: dir.clone() };
     let state = state_with_point_ai(None, "server", dir).await;
     let task_code = seed_ai_route(&state, true).await;
 
-    ai_patrol::global()
+    state
+        .ai_patrol
         .on_progress(
             &state,
             "RD-TEST",
@@ -532,7 +535,7 @@ async fn missing_agent_does_not_leave_stale_window() {
         .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    assert_eq!(ai_patrol::global().status().await["active"], json!(false));
+    assert_eq!(state.ai_patrol.status().await["active"], json!(false));
     drop(temp);
 }
 
@@ -606,7 +609,6 @@ async fn seed_ai_route_two_points(state: &AppState) -> String {
 #[tokio::test]
 async fn interval_summary_does_not_kill_the_window() {
     let _serial = TEST_LOCK.lock().await;
-    ai_patrol::global().stop("测试初始化").await;
     let calls = Arc::new(AgentCalls::default());
     let agent = spawn_fake_agent(calls.clone()).await;
     let dir = temp_dir();
@@ -615,7 +617,8 @@ async fn interval_summary_does_not_kill_the_window() {
     let task_code = seed_ai_route_two_points(&state).await;
 
     // 到点 0（有 AI 动作）→ 开窗
-    ai_patrol::global()
+    state
+        .ai_patrol
         .on_progress(
             &state,
             "RD-TEST",
@@ -623,24 +626,26 @@ async fn interval_summary_does_not_kill_the_window() {
         )
         .await;
     tokio::time::sleep(Duration::from_millis(600)).await;
-    let status = ai_patrol::global().status().await;
+    let status = state.ai_patrol.status().await;
     assert_eq!(status["active"], json!(true), "到点应开窗: {status}");
     assert_eq!(status["pointIndex"], json!(0), "{status}");
     // dwell=10 → 窗口 18s：现场被 5s 摘要打断的就是这个窗口
     assert_eq!(status["windowSecs"], json!(18), "{status}");
 
     // 第一次 5s 摘要：已完成 1/2、当前点仍是 0
-    ai_patrol::global()
+    state
+        .ai_patrol
         .on_progress(&state, "RD-TEST", &interval_summary(&task_code, 1, 0, 2))
         .await;
     // 再来几次，模拟长停留时每 5s 一条
     for _ in 0..3 {
-        ai_patrol::global()
+        state
+            .ai_patrol
             .on_progress(&state, "RD-TEST", &interval_summary(&task_code, 1, 0, 2))
             .await;
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let status = ai_patrol::global().status().await;
+    let status = state.ai_patrol.status().await;
     assert_eq!(
         status["active"],
         json!(true),
@@ -658,7 +663,8 @@ async fn interval_summary_does_not_kill_the_window() {
     );
 
     // 真的走到 1 号点（无 AI 动作）：窗口必须收口，别让相机继续把别的画面当 0 号点的目标
-    ai_patrol::global()
+    state
+        .ai_patrol
         .on_progress(
             &state,
             "RD-TEST",
@@ -667,7 +673,7 @@ async fn interval_summary_does_not_kill_the_window() {
         .await;
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(
-        ai_patrol::global().status().await["active"],
+        state.ai_patrol.status().await["active"],
         json!(false),
         "到达无 AI 动作的航点后窗口必须关闭"
     );

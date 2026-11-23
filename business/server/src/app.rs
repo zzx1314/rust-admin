@@ -49,6 +49,28 @@ pub struct AppState {
     pub notifier: Notifier,
     /// 板端 Agent 隧道（平台与背包/浏览器都不同网段时，`/api/backpack/*` 走设备客户端）
     pub agent_tunnel: Arc<crate::agent_tunnel::AgentTunnel>,
+    /// 航点 AI 识别窗口状态（一份实例 = 一路推理，板端只有一个推理进程）
+    ///
+    /// 以前是 `ai_patrol` 模块里的进程级 `static`：所有测试共用同一个窗口、
+    /// 只能靠串行 + 不同任务号避免串台，也没法在同一个进程里跑两份状态。
+    pub ai_patrol: Arc<crate::ai_patrol::AiPatrol>,
+}
+
+impl AppState {
+    /// 推送层用的窄上下文（见 [`crate::notify::NotifyCtx`]）。
+    ///
+    /// 所有调用 `notify::*` 的地方都走这里，而不是把整个 `AppState` 递进推送层：
+    /// 那样推送模块会反过来依赖视频房间、指令回执这些跟它无关的东西
+    /// （`app -> notify -> app` 成环，推送也没法单独测）。
+    #[must_use]
+    pub fn notify(&self) -> crate::notify::NotifyCtx {
+        crate::notify::NotifyCtx {
+            db: self.db.clone(),
+            config: self.config.clone(),
+            notifier: self.notifier.clone(),
+            device_connections: self.device_connections.clone(),
+        }
+    }
 }
 
 async fn health(State(state): State<AppState>) -> Json<ApiResponse<Value>> {

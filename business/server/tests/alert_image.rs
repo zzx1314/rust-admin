@@ -98,6 +98,7 @@ async fn build_state() -> (AppState, mpsc::Receiver<Notice>, TempDb) {
         command_results: gateway::new_command_result_waiters(),
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
+        ai_patrol: Default::default(),
     };
     (state, rx.expect("部署开关开着时应有消费端"), temp)
 }
@@ -138,7 +139,7 @@ async fn alert_with_evidence_image_queues_an_image_message() {
     let code = insert_count_alert(&state, "AL-IMG-1").await;
     let image = notify::evidence_image(JPEG_BASE64).expect("样本图应通过校验");
 
-    notify::alert_created_with_image(&state, &code, Some(image)).await;
+    notify::alert_created_with_image(&state.notify(), &code, Some(image)).await;
 
     let notice = rx.try_recv().expect("卡片应先入队");
     assert!(
@@ -173,13 +174,13 @@ async fn image_can_be_switched_off() {
 
     let code = insert_count_alert(&state, "AL-IMG-2").await;
     let image = notify::evidence_image(JPEG_BASE64).expect("样本图应通过校验");
-    notify::alert_created_with_image(&state, &code, Some(image)).await;
+    notify::alert_created_with_image(&state.notify(), &code, Some(image)).await;
 
     let notice = rx.try_recv().expect("卡片仍应入队");
     assert!(notice.image.is_none(), "开关关掉后不该再带图");
     // 没带图就不删存证：图没进群，板端那几张图还能人工补推
     assert!(notice.cleanup.is_none(), "关掉证据图时不能删板端存证");
-    assert!(alert_flow::should_dispatch(&state, &code).await);
+    assert!(alert_flow::should_dispatch(&state.db, &code).await);
 }
 
 /// 图不合法时不带图，但**告警本身照发**（不能因为一张图把告警丢了）
@@ -191,7 +192,7 @@ async fn invalid_image_is_dropped_but_the_alert_still_goes_out() {
     // 客户端给的是坏图：校验层拒绝，调用方按 None 处理
     let image = notify::evidence_image("aGVsbG8=").ok();
     assert!(image.is_none(), "hello 不是图片，必须被拒");
-    notify::alert_created_with_image(&state, &code, image).await;
+    notify::alert_created_with_image(&state.notify(), &code, image).await;
 
     let notice = rx.try_recv().expect("卡片仍要入队");
     assert!(notice.image.is_none());

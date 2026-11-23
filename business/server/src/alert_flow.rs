@@ -33,9 +33,9 @@
 //!
 //! 幂等：告警行的 `work_order_id` 非空就不再建单（重复调用 / 重试安全）。
 
-use crate::app::AppState;
 use crate::error::AppError;
 use crate::models::WorkOrderRequest;
+use sqlx::SqlitePool;
 
 /// 一次派单的结果（既是工单入参，也是推送给群里的那几行字）。
 #[derive(Debug, Clone, Default)]
@@ -222,7 +222,7 @@ pub(crate) fn candidate_score(
 ///
 /// 返回的 [`Assignment`] 供 [`crate::notify::alert_created`] 渲染群消息。
 /// 全程只碰本地 SQLite（校验上限都在毫秒级），不 await 外网。
-pub async fn on_alert(state: &AppState, alert_code: &str) -> Option<Assignment> {
+pub async fn on_alert(db: &SqlitePool, alert_code: &str) -> Option<Assignment> {
     let context: AlertContext = sqlx::query_as(
         "SELECT a.id, a.alert_code, a.level, a.content, a.dedup_key,
                 COALESCE(a.park_id, d.park_id) AS effective_park_id,
@@ -234,7 +234,7 @@ pub async fn on_alert(state: &AppState, alert_code: &str) -> Option<Assignment> 
           WHERE a.alert_code = ?1",
     )
     .bind(alert_code)
-    .fetch_optional(&state.db)
+    .fetch_optional(db)
     .await
     .unwrap_or(None)?;
 
@@ -247,7 +247,7 @@ pub async fn on_alert(state: &AppState, alert_code: &str) -> Option<Assignment> 
               LIMIT 1",
         )
         .bind(device_pk)
-        .fetch_optional(&state.db)
+        .fetch_optional(db)
         .await
         .unwrap_or(None),
         None => None,
@@ -256,7 +256,7 @@ pub async fn on_alert(state: &AppState, alert_code: &str) -> Option<Assignment> 
     let running_task_name = running_task.as_ref().map(|(_, name)| name.clone());
 
     let mut assignment = resolve(
-        state,
+        db,
         context.effective_park_id,
         context.zone_id,
         running_task_id,
@@ -274,13 +274,8 @@ pub async fn on_alert(state: &AppState, alert_code: &str) -> Option<Assignment> 
     // 2. AI 告警内容带置信度 / 证据图路径，按标题去重等于没去重，每轮巡检一张新单。
     // 所以优先用告警自带的 `dedup_key`（结构化），只有它为空时才退回标题相等。
     let title = work_order_title(context.device_code.as_deref(), &context.content);
-    let existing = find_open_order(
-        state,
-        context.device_pk,
-        context.dedup_key.as_deref(),
-        &title,
-    )
-    .await;
+    let existing =
+        find_open_order(db, context.device_pk, context.dedup_key.as_deref(), &title).await;
 
     // 自动建单：已经派过就跳过（幂等），开关关掉也跳过（但推送照样带责任人）
     if let Some((id, code)) = &existing {
@@ -296,12 +291,12 @@ pub async fn on_alert(state: &AppState, alert_code: &str) -> Option<Assignment> 
         )
         .bind(id)
         .bind(context.id)
-        .fetch_optional(&state.db)
+        .fetch_optional(db)
         .await
         .unwrap_or(None);
         assignment.follow_up = count_change(previous.as_deref(), &context.content);
-    } else if context.work_order_id.is_none() && auto_workorder_enabled(state).await {
-        match create_work_order(state, &context, &assignment).await {
+    } else if context.work_order_id.is_none() && auto_workorder_enabled(db).await {
+        match create_work_order(db, &context, &assignment).await {
             Ok((id, code)) => {
                 assignment.work_order_id = Some(id);
                 assignment.work_order_code = Some(code);
@@ -319,7 +314,7 @@ pub async fn on_alert(state: &AppState, alert_code: &str) -> Option<Assignment> 
         assignment.work_order_code =
             sqlx::query_scalar::<_, String>("SELECT order_code FROM work_orders WHERE id = ?1")
                 .bind(order_id)
-                .fetch_optional(&state.db)
+                .fetch_optional(db)
                 .await
                 .unwrap_or(None);
     }
@@ -333,7 +328,7 @@ pub async fn on_alert(state: &AppState, alert_code: &str) -> Option<Assignment> 
     .bind(assignment.work_order_id)
     .bind(&assignment.note)
     .bind(context.id)
-    .execute(&state.db)
+    .execute(db)
     .await
     {
         tracing::warn!(alert = %context.alert_code, "告警派单回写失败: {error}");
@@ -344,23 +339,23 @@ pub async fn on_alert(state: &AppState, alert_code: &str) -> Option<Assignment> 
 
 /// 只找责任人、不建工单：任务异常推送（`notify::task_abnormal`）复用同一套匹配。
 pub async fn responsible_for_task(
-    state: &AppState,
+    db: &SqlitePool,
     park_id: Option<i64>,
     task_id: Option<i64>,
 ) -> Option<Assignment> {
-    let assignment = resolve(state, park_id, None, task_id).await;
+    let assignment = resolve(db, park_id, None, task_id).await;
     // 「未指派」等于没找到人，别把空派单塞进消息里
     (assignment.name != "未指派").then_some(assignment)
 }
 
 /// 责任人解析：当天排班 → 园区负责人 → 未指派。
 async fn resolve(
-    state: &AppState,
+    db: &SqlitePool,
     park_id: Option<i64>,
     zone_id: Option<i64>,
     task_id: Option<i64>,
 ) -> Assignment {
-    if let Some(candidate) = best_shift(state, park_id, zone_id, task_id).await {
+    if let Some(candidate) = best_shift(db, park_id, zone_id, task_id).await {
         return Assignment {
             staff_id: candidate.staff_id,
             name: candidate.owner_name.clone(),
@@ -383,7 +378,7 @@ async fn resolve(
         && let Ok(Some(owner)) =
             sqlx::query_scalar::<_, Option<String>>("SELECT owner_name FROM parks WHERE id = ?1")
                 .bind(park_id)
-                .fetch_optional(&state.db)
+                .fetch_optional(db)
                 .await
     {
         let owner = owner.unwrap_or_default().trim().to_string();
@@ -392,7 +387,7 @@ async fn resolve(
                 "SELECT id, team, phone FROM staff WHERE name = ?1 ORDER BY id ASC LIMIT 1",
             )
             .bind(&owner)
-            .fetch_optional(&state.db)
+            .fetch_optional(db)
             .await
             .unwrap_or(None);
             let (staff_id, team, phone) = match staff {
@@ -417,7 +412,7 @@ async fn resolve(
 ///
 /// 只看「今天」+ 非草案：草案是还没发布的想法，不该收到告警推送。
 async fn best_shift(
-    state: &AppState,
+    db: &SqlitePool,
     park_id: Option<i64>,
     zone_id: Option<i64>,
     task_id: Option<i64>,
@@ -432,7 +427,7 @@ async fn best_shift(
           ORDER BY s.id ASC",
     )
     .bind(crate::db::today())
-    .fetch_all(&state.db)
+    .fetch_all(db)
     .await
     .unwrap_or_default();
 
@@ -451,11 +446,11 @@ async fn best_shift(
 /// 自动建单开关（`settings.alert_auto_workorder`）。
 ///
 /// 缺行视为**开启**：老库升级上来还没播种时，不应该把「告警自动派单」静默关掉。
-async fn auto_workorder_enabled(state: &AppState) -> bool {
+async fn auto_workorder_enabled(db: &SqlitePool) -> bool {
     let row: Option<(Option<String>,)> = sqlx::query_as(
         "SELECT setting_value FROM settings WHERE setting_key = 'alert_auto_workorder'",
     )
-    .fetch_optional(&state.db)
+    .fetch_optional(db)
     .await
     .unwrap_or(None);
     match row {
@@ -470,11 +465,11 @@ async fn auto_workorder_enabled(state: &AppState) -> bool {
 /// 掉线（`hb:`）/ 控制权抢占（`ctrl:`）/ 手动新建 这类一律**只落库**——告警中心照常
 /// 能看到，但不再派生工单、也不再往群里刷。要恢复「所有告警都建单推群」的老口径，
 /// 在设置页把它关掉即可。
-pub async fn only_in_task_enabled(state: &AppState) -> bool {
+pub async fn only_in_task_enabled(db: &SqlitePool) -> bool {
     let row: Option<(Option<String>,)> = sqlx::query_as(
         "SELECT setting_value FROM settings WHERE setting_key = 'alert_only_in_task'",
     )
-    .fetch_optional(&state.db)
+    .fetch_optional(db)
     .await
     .unwrap_or(None);
     match row {
@@ -529,7 +524,7 @@ pub fn invalid_code_tokens(raw: &str) -> Vec<String> {
 }
 
 /// 这个故障码是否在白名单里（= 不落告警、不建单、不推群）。
-pub async fn fault_code_ignored(state: &AppState, code: &str) -> bool {
+pub async fn fault_code_ignored(db: &SqlitePool, code: &str) -> bool {
     let code = code.trim();
     if code.is_empty() {
         return false;
@@ -538,7 +533,7 @@ pub async fn fault_code_ignored(state: &AppState, code: &str) -> bool {
         "SELECT COALESCE(setting_value, '') FROM settings WHERE setting_key = ?1",
     )
     .bind(IGNORE_CODES_SETTING)
-    .fetch_optional(&state.db)
+    .fetch_optional(db)
     .await
     .unwrap_or(None);
     parse_ignored_codes(&raw.unwrap_or_default())
@@ -550,9 +545,9 @@ pub async fn fault_code_ignored(state: &AppState, code: &str) -> bool {
 ///
 /// 取不到码（人工事件 / 翻译文案）时一律**不**命中：白名单只过滤明确的故障码，
 /// 不能因为「文案里没码」就把告警静默掉。
-pub async fn message_ignored(state: &AppState, message: &str) -> bool {
+pub async fn message_ignored(db: &SqlitePool, message: &str) -> bool {
     match crate::gateway::fault_code(message) {
-        Some(code) => fault_code_ignored(state, code).await,
+        Some(code) => fault_code_ignored(db, code).await,
         None => false,
     }
 }
@@ -561,11 +556,11 @@ pub async fn message_ignored(state: &AppState, message: &str) -> bool {
 ///
 /// [`crate::notify::alert_created`] 的第一道门：只负责判「现在该不该动作」，
 /// 具体派给谁、建不建单还是后面的 [`on_alert`]。
-pub async fn should_dispatch(state: &AppState, alert_code: &str) -> bool {
-    if !only_in_task_enabled(state).await {
+pub async fn should_dispatch(db: &SqlitePool, alert_code: &str) -> bool {
+    if !only_in_task_enabled(db).await {
         return true;
     }
-    in_task_execution(state, alert_code).await
+    in_task_execution(db, alert_code).await
 }
 
 /// 告警落库那一刻，它绑定的设备上是否有 `执行中` 的任务。
@@ -574,7 +569,7 @@ pub async fn should_dispatch(state: &AppState, alert_code: &str) -> bool {
 /// 执行任务的告警；没跑任务的时候报的（掉线、遥控器抢占、页面手动新建）不属于这一类。
 ///
 /// 未绑定设备的告警一律为 `false`（连不上任何计划）。
-pub async fn in_task_execution(state: &AppState, alert_code: &str) -> bool {
+pub async fn in_task_execution(db: &SqlitePool, alert_code: &str) -> bool {
     let hit: Option<i64> = sqlx::query_scalar(
         "SELECT EXISTS (
              SELECT 1
@@ -584,7 +579,7 @@ pub async fn in_task_execution(state: &AppState, alert_code: &str) -> bool {
          )",
     )
     .bind(alert_code)
-    .fetch_optional(&state.db)
+    .fetch_optional(db)
     .await
     .unwrap_or(None);
     hit.unwrap_or(0) != 0
@@ -608,7 +603,7 @@ fn work_order_title(device_code: Option<&str>, content: &str) -> String {
 /// 窗口 24 小时：留着的老单说明问题还没解决，继续挂它；超过一天还没关的单
 /// 不再吞新告警，避免一个僵尸单永久吸走所有同类告警。
 async fn find_open_order(
-    state: &AppState,
+    db: &SqlitePool,
     device_pk: Option<i64>,
     dedup_key: Option<&str>,
     title: &str,
@@ -627,7 +622,7 @@ async fn find_open_order(
         .bind(device_pk)
         .bind(key)
         .bind(cutoff)
-        .fetch_optional(&state.db)
+        .fetch_optional(db)
         .await
         .unwrap_or(None);
     }
@@ -640,7 +635,7 @@ async fn find_open_order(
     .bind(device_pk)
     .bind(title)
     .bind(cutoff)
-    .fetch_optional(&state.db)
+    .fetch_optional(db)
     .await
     .unwrap_or(None)
 }
@@ -648,7 +643,7 @@ async fn find_open_order(
 /// 建工单：来源写「告警自动派单」，`sourceRef` / `alert_id` 保留原始告警编号，
 /// 工单详情里能反查回告警。
 async fn create_work_order(
-    state: &AppState,
+    db: &SqlitePool,
     context: &AlertContext,
     assignment: &Assignment,
 ) -> Result<(i64, String), AppError> {
@@ -686,14 +681,14 @@ async fn create_work_order(
         alert_id: Some(context.id),
     };
     let order =
-        crate::handlers::workorders::create_order_core(state, payload, None, "系统", false).await?;
+        crate::handlers::workorders::create_order_core(db, payload, None, "系统", false).await?;
     // 把结构化去重键落到工单上：下一轮同样的问题（同一设备 + 同一键）会挂到这张单
     if let Some(key) = context.dedup_key.as_deref()
         && !key.trim().is_empty()
         && let Err(error) = sqlx::query("UPDATE work_orders SET dedup_key = ?1 WHERE id = ?2")
             .bind(key.trim())
             .bind(order.id)
-            .execute(&state.db)
+            .execute(db)
             .await
     {
         tracing::warn!(order = %order.order_code, "工单写入去重键失败: {error}");
@@ -962,10 +957,7 @@ mod tests {
         assert!(parse_ignored_codes("").is_empty());
         assert!(parse_ignored_codes("   ").is_empty());
         assert!(parse_ignored_codes("RS 与 lidar 时间不同步").is_empty());
-        assert_eq!(
-            parse_ignored_codes("12608"),
-            vec!["12608".to_string()]
-        );
+        assert_eq!(parse_ignored_codes("12608"), vec!["12608".to_string()]);
     }
 
     /// 保存时把关用的「垃圾项」识别：错项必须能报出来，否则白名单就是静默不生效。

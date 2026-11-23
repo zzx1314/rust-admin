@@ -56,6 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         video_hub: Default::default(),
         notifier,
         agent_tunnel: Default::default(),
+        ai_patrol: Default::default(),
     };
     // 反向控制信道：配置了中台 WS 地址时主动拨出，内网部署靠它接收中台指令
     control_plane::spawn(state.clone());
@@ -69,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     robodog_ops_server::video::spawn_watchdog(state.clone());
     // 企业微信推送消费端：限流 + 重试都在这里，调用方只负责入队
     if let Some(rx) = notify_rx {
-        notify::spawn(state.clone(), rx);
+        notify::spawn(state.notify(), rx);
     }
     let router = build_router(state);
 

@@ -29,16 +29,37 @@
 //! 「另有 N 条未逐条推送」）。绝不能在 WS handler / 看门狗里 await 外网 HTTP：
 //! `qyapi.weixin.qq.com` 一次超时 10s，会把心跳处理和看门狗 tick 全拖住。
 
-use crate::app::AppState;
 use crate::config::Config;
 use crate::db::now;
+use crate::gateway::DeviceConnections;
 use serde_json::{Value, json};
+use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
+
+/// 推送层需要的最小上下文。
+///
+/// 以前这里每个 `pub async fn` 都收 `&AppState`，等于让「传输层」反向依赖整个应用
+/// （视频房间、指令回执、调度……），于是 `app -> notify -> app` 成了一个环：
+/// 想给推送写单测、或者想在别的进程里复用推送通道，都必须先造一个完整 `AppState`。
+///
+/// 现在只收推送真正用得上的四样东西，由 `AppState::notify()` 装配：
+///
+/// - `db`：回查告警 / 工单 / 任务 / 设置（文案与「该不该推」都在库里）；
+/// - `config`：只读 `public_url`（消息里的「查看详情」）与 `wecom_enabled`；
+/// - `notifier`：入队句柄（webhook 可热更新、队列满丢包计数都在它里面）；
+/// - `device_connections`：证据图进群后要沿**设备 WS** 下发 `ai_cleanup`。
+#[derive(Clone)]
+pub struct NotifyCtx {
+    pub db: SqlitePool,
+    pub config: Arc<Config>,
+    pub notifier: Notifier,
+    pub device_connections: DeviceConnections,
+}
 
 /// markdown content 上限（**字节**）。留 96 字节余量给可能的包装。
 pub const MARKDOWN_LIMIT: usize = 4000;
@@ -823,13 +844,13 @@ pub fn key_tail(url: &str) -> String {
 }
 
 /// 启动消费端（`main.rs` 装配）。
-pub fn spawn(state: AppState, rx: mpsc::Receiver<Notice>) {
+pub fn spawn(ctx: NotifyCtx, rx: mpsc::Receiver<Notice>) {
     tokio::spawn(async move {
-        run_consumer(state, rx).await;
+        run_consumer(ctx, rx).await;
     });
 }
 
-async fn run_consumer(state: AppState, mut rx: mpsc::Receiver<Notice>) {
+async fn run_consumer(ctx: NotifyCtx, mut rx: mpsc::Receiver<Notice>) {
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -844,7 +865,7 @@ async fn run_consumer(state: AppState, mut rx: mpsc::Receiver<Notice>) {
     let mut ticker = tokio::time::interval(Duration::from_secs(60));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     info!(
-        min_level = state.notifier.min_level.label(),
+        min_level = ctx.notifier.min_level.label(),
         "企业微信推送通道已启动"
     );
 
@@ -853,18 +874,18 @@ async fn run_consumer(state: AppState, mut rx: mpsc::Receiver<Notice>) {
             maybe = rx.recv() => {
                 let Some(notice) = maybe else { break };
                 // 每条都取一次：设置页改地址后不重启即生效，清空后立刻停发
-                let Some(url) = state.notifier.webhook() else {
+                let Some(url) = ctx.notifier.webhook() else {
                     debug!(key = %notice.dedupe_key, "wecom: 未配置 webhook，丢弃");
                     continue;
                 };
                 // 额度在**真正发送的那一刻**才可取（`RateGate::acquire`），
                 // 不再在这里预扣：预扣会让被拒绝（errcode≠0）/ 因去重没发出去的消息
                 // 白占额度，而降级汇总又另建了一把 gate，两边各算各的。
-                deliver(&state, &client, &url, &notice, &mut gate).await;
+                deliver(&ctx, &client, &url, &notice, &mut gate).await;
                 continue;
             }
             _ = ticker.tick() => {
-                flush_overflow(&state, &client, &mut gate).await;
+                flush_overflow(&ctx, &client, &mut gate).await;
             }
         }
     }
@@ -873,8 +894,8 @@ async fn run_consumer(state: AppState, mut rx: mpsc::Receiver<Notice>) {
 /// 队列满丢掉的条数汇总成一条，避免"静默丢消息"。
 ///
 /// 走**同一把** `gate`：汇总也是一条企业微信消息，另建限流器会让它绕开额度。
-async fn flush_overflow(state: &AppState, client: &reqwest::Client, gate: &mut RateGate) {
-    let dropped = state.notifier.shared.dropped.swap(0, Ordering::Relaxed);
+async fn flush_overflow(ctx: &NotifyCtx, client: &reqwest::Client, gate: &mut RateGate) {
+    let dropped = ctx.notifier.shared.dropped.swap(0, Ordering::Relaxed);
     if dropped == 0 {
         return;
     }
@@ -888,7 +909,7 @@ async fn flush_overflow(state: &AppState, client: &reqwest::Client, gate: &mut R
         fields: vec![("说明", "以下消息因队列积压未逐条推送".to_string())],
         body: Some(format!("过去 1 分钟内有 {dropped} 条告警未逐条推送")),
         action: Some("请到告警中心查看完整列表".to_string()),
-        link: alerts_link(state),
+        link: alerts_link(ctx),
         mention_all: false,
         mentions: Vec::new(),
         image: None,
@@ -896,15 +917,15 @@ async fn flush_overflow(state: &AppState, client: &reqwest::Client, gate: &mut R
         cleanup: None,
         bypass_min_level: false,
     };
-    let Some(url) = state.notifier.webhook() else {
+    let Some(url) = ctx.notifier.webhook() else {
         return;
     };
-    deliver(state, client, &url, &notice, gate).await;
+    deliver(ctx, client, &url, &notice, gate).await;
 }
 
 /// 发送一条（含重试与落库）。
 async fn deliver(
-    state: &AppState,
+    ctx: &NotifyCtx,
     client: &reqwest::Client,
     url: &str,
     notice: &Notice,
@@ -916,7 +937,7 @@ async fn deliver(
             && send_image(client, url, gate, image).await
         {
             // 图真的进群了，板端这一轮存证可以删了
-            dispatch_evidence_cleanup(state, notice).await;
+            dispatch_evidence_cleanup(ctx, notice).await;
         }
         return;
     }
@@ -961,7 +982,7 @@ async fn deliver(
         gate.acquire().await;
         match post(client, url, &body).await {
             Ok(()) => {
-                record(state, notice, &payload, "sent", attempts, None).await;
+                record(ctx, notice, &payload, "sent", attempts, None).await;
                 debug!(key = %notice.dedupe_key, "wecom: 推送成功");
                 // 图片排在正文之后：群里先看到卡片再看图（发送顺序 = 消息顺序）。
                 // 失败只打日志——正文已经送到了，不能因一张图把告警判失败。
@@ -969,7 +990,7 @@ async fn deliver(
                     && send_image(client, url, gate, image).await
                 {
                     // 企业微信确认收到图之后才删板端存证：删了不可逆
-                    dispatch_evidence_cleanup(state, notice).await;
+                    dispatch_evidence_cleanup(ctx, notice).await;
                 }
                 return;
             }
@@ -994,15 +1015,7 @@ async fn deliver(
         }
     }
     warn!(key = %notice.dedupe_key, error = %last_error, "wecom: 推送失败");
-    record(
-        state,
-        notice,
-        &payload,
-        "failed",
-        attempts,
-        Some(&last_error),
-    )
-    .await;
+    record(ctx, notice, &payload, "failed", attempts, Some(&last_error)).await;
 }
 
 enum FailureKind {
@@ -1053,12 +1066,12 @@ async fn send_image(
 ///
 /// 设备不在线（后台重连 / 已下线）就放弃：`send_message_to_device` 返回 false，
 /// 文件留在板子上，等于退回老行为——丢的是磁盘，不是告警。
-async fn dispatch_evidence_cleanup(state: &AppState, notice: &Notice) {
+async fn dispatch_evidence_cleanup(ctx: &NotifyCtx, notice: &Notice) {
     let Some(target) = &notice.cleanup else {
         return;
     };
     let sent = crate::gateway::send_message_to_device(
-        &state.device_connections,
+        &ctx.device_connections,
         &target.device_code,
         "ai_cleanup",
         json!({
@@ -1129,7 +1142,7 @@ async fn post(client: &reqwest::Client, url: &str, body: &Value) -> Result<(), S
 }
 
 async fn record(
-    state: &AppState,
+    ctx: &NotifyCtx,
     notice: &Notice,
     payload: &str,
     status: &str,
@@ -1157,16 +1170,15 @@ async fn record(
     } else {
         None
     })
-    .execute(&state.db)
+    .execute(&ctx.db)
     .await;
     if let Err(error) = result {
         warn!("wecom: 写推送记录失败: {error}");
     }
 }
 
-fn alerts_link(state: &AppState) -> Option<String> {
-    state
-        .config
+fn alerts_link(ctx: &NotifyCtx) -> Option<String> {
+    ctx.config
         .public_url
         .as_deref()
         .map(|base| format!("{base}/alerts"))
@@ -1187,39 +1199,31 @@ fn mentionable(phone: &str) -> Option<String> {
     ok.then(|| phone.to_string())
 }
 
-fn work_orders_link(state: &AppState, order_id: Option<i64>) -> Option<String> {
-    state
-        .config
-        .public_url
-        .as_deref()
-        .map(|base| match order_id {
-            Some(id) => format!("{base}/workorders?focus={id}"),
-            None => format!("{base}/workorders"),
-        })
+fn work_orders_link(ctx: &NotifyCtx, order_id: Option<i64>) -> Option<String> {
+    ctx.config.public_url.as_deref().map(|base| match order_id {
+        Some(id) => format!("{base}/workorders?focus={id}"),
+        None => format!("{base}/workorders"),
+    })
 }
 
-fn tasks_link(state: &AppState, task_id: Option<i64>) -> Option<String> {
-    state
-        .config
-        .public_url
-        .as_deref()
-        .map(|base| match task_id {
-            Some(id) => format!("{base}/tasks?focus={id}"),
-            None => format!("{base}/tasks"),
-        })
+fn tasks_link(ctx: &NotifyCtx, task_id: Option<i64>) -> Option<String> {
+    ctx.config.public_url.as_deref().map(|base| match task_id {
+        Some(id) => format!("{base}/tasks?focus={id}"),
+        None => format!("{base}/tasks"),
+    })
 }
 
 /// 两个开关都为真才推。
 ///
 /// 缺行视为开启：新增开关项在旧库上还没播种时，不应该把告警静默掉。
-async fn channel_enabled(state: &AppState, channel: Channel) -> bool {
+async fn channel_enabled(ctx: &NotifyCtx, channel: Channel) -> bool {
     let [outer, inner] = channel.settings_keys();
     let rows: Vec<(String, Option<String>)> = sqlx::query_as(
         "SELECT setting_key, setting_value FROM settings WHERE setting_key IN (?1, ?2)",
     )
     .bind(outer)
     .bind(inner)
-    .fetch_all(&state.db)
+    .fetch_all(&ctx.db)
     .await
     .unwrap_or_default();
     let read = |key: &str| {
@@ -1237,11 +1241,11 @@ async fn channel_enabled(state: &AppState, channel: Channel) -> bool {
 /// 缺行视为**开启**：一次任务执行就是一次告警，默认要让群里看到；
 /// 只有明确关掉（`wecom_alert_repeat_push = false`）才退回
 /// 「24 小时内同一问题只推第一条」的老行为。
-async fn repeat_push_enabled(state: &AppState) -> bool {
+async fn repeat_push_enabled(ctx: &NotifyCtx) -> bool {
     let row: Option<(Option<String>,)> = sqlx::query_as(
         "SELECT setting_value FROM settings WHERE setting_key = 'wecom_alert_repeat_push'",
     )
-    .fetch_optional(&state.db)
+    .fetch_optional(&ctx.db)
     .await
     .unwrap_or(None);
     match row {
@@ -1257,11 +1261,11 @@ async fn repeat_push_enabled(state: &AppState) -> bool {
 ///
 /// 缺行视为**开启**：站点拿到图才是真需要的（「AI 说数量不对，到底几个？」）；
 /// 嫌图多费流量/刷屏时在设置页关掉，卡片照旧发。
-async fn image_push_enabled(state: &AppState) -> bool {
+async fn image_push_enabled(ctx: &NotifyCtx) -> bool {
     let row: Option<(Option<String>,)> = sqlx::query_as(
         "SELECT setting_value FROM settings WHERE setting_key = 'wecom_alert_image'",
     )
-    .fetch_optional(&state.db)
+    .fetch_optional(&ctx.db)
     .await
     .unwrap_or(None);
     match row {
@@ -1319,8 +1323,8 @@ struct TaskLookup {
 ///
 /// 带证据图的告警（AI 识别检出 / 数量核对不一致）用 [`alert_created_with_image`]，
 /// 多推一条 `msgtype=image`；其余来源没有图片字节，走这个无图版本。
-pub async fn alert_created(state: &AppState, alert_code: &str) {
-    alert_created_with_image(state, alert_code, None).await;
+pub async fn alert_created(ctx: &NotifyCtx, alert_code: &str) {
+    alert_created_with_image(ctx, alert_code, None).await;
 }
 
 /// 同 [`alert_created`]，额外把证据图作为**第二条**消息发出去。
@@ -1328,18 +1332,18 @@ pub async fn alert_created(state: &AppState, alert_code: &str) {
 /// 图片只在 `wecom_alert_image` 开着（缺行 = 开）时附上；图片发送失败**不影响**
 /// 正文那条：卡片已经进群了，不能因为一张图把整条告警判失败。
 pub async fn alert_created_with_image(
-    state: &AppState,
+    ctx: &NotifyCtx,
     alert_code: &str,
     image: Option<NoticeImage>,
 ) {
-    if !crate::alert_flow::should_dispatch(state, alert_code).await {
+    if !crate::alert_flow::should_dispatch(&ctx.db, alert_code).await {
         debug!(
             alert = %alert_code,
             "告警不在任务执行期间：跳过自动建单与企业微信推送（告警本身照常落库）"
         );
         return;
     }
-    let assignment = crate::alert_flow::on_alert(state, alert_code).await;
+    let assignment = crate::alert_flow::on_alert(&ctx.db, alert_code).await;
 
     // 「跟单」= 同一件事已经挂在在办工单上（见 `alert_flow::find_open_order`）。
     //
@@ -1365,14 +1369,14 @@ pub async fn alert_created_with_image(
         .is_some_and(|assignment| assignment.repeated)
         && follow_up.is_none();
 
-    if !state.notifier.is_enabled() {
+    if !ctx.notifier.is_enabled() {
         return;
     }
-    if !channel_enabled(state, Channel::Alert).await {
+    if !channel_enabled(ctx, Channel::Alert).await {
         return;
     }
     // 通道都不通时不做这两次查询：开关判断放在「能不能发」之后
-    if repeat && !repeat_push_enabled(state).await {
+    if repeat && !repeat_push_enabled(ctx).await {
         debug!(alert = %alert_code, "wecom: 同类告警已有在办工单且关闭了重复推送，跳过");
         return;
     }
@@ -1381,7 +1385,7 @@ pub async fn alert_created_with_image(
         (true, Some(order_id)) => {
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM alerts WHERE work_order_id = ?1")
                 .bind(order_id)
-                .fetch_one(&state.db)
+                .fetch_one(&ctx.db)
                 .await
                 .ok()
         }
@@ -1397,7 +1401,7 @@ pub async fn alert_created_with_image(
               WHERE a.alert_code = ?1",
     )
     .bind(alert_code)
-    .fetch_optional(&state.db)
+    .fetch_optional(&ctx.db)
     .await
     .unwrap_or(None);
     let Some(row) = row else {
@@ -1458,8 +1462,8 @@ pub async fn alert_created_with_image(
     let link = assignment
         .as_ref()
         .and_then(|assignment| assignment.work_order_id)
-        .and_then(|order_id| work_orders_link(state, Some(order_id)))
-        .or_else(|| alerts_link(state));
+        .and_then(|order_id| work_orders_link(ctx, Some(order_id)))
+        .or_else(|| alerts_link(ctx));
 
     let mut notice = Notice {
         level: Level::parse(&row.level),
@@ -1551,7 +1555,7 @@ pub async fn alert_created_with_image(
     };
     // 证据图是**可选附加**：开关关掉 / 拿不到字节就只发卡片
     if let Some(image) = image {
-        if image_push_enabled(state).await {
+        if image_push_enabled(ctx).await {
             notice.image = Some(image);
             // 图马上就要进群：板端这一轮存证（画框 JPG + result.json）之后没有第二次
             // 用途，推送成功后让客户端删掉（见 [`dispatch_evidence_cleanup`]）。
@@ -1561,7 +1565,7 @@ pub async fn alert_created_with_image(
             debug!(alert = %alert_code, "wecom: 已关闭告警证据图推送，只发卡片");
         }
     }
-    state.notifier.enqueue(notice);
+    ctx.notifier.enqueue(notice);
 }
 
 /// 给**已经推过的**告警补一张证据图（只发 `msgtype=image`，不重发卡片）。
@@ -1577,19 +1581,19 @@ pub async fn alert_created_with_image(
 ///
 /// 开关与门禁与 [`alert_created_with_image`] 一致：关图 / 不在执行计划期间 / 通道关
 /// 都直接不发（卡片已经发了，图片只是辅证）。
-pub async fn alert_evidence(state: &AppState, alert_code: &str, image: NoticeImage) {
-    if !state.notifier.is_enabled() {
+pub async fn alert_evidence(ctx: &NotifyCtx, alert_code: &str, image: NoticeImage) {
+    if !ctx.notifier.is_enabled() {
         return;
     }
-    if !channel_enabled(state, Channel::Alert).await {
+    if !channel_enabled(ctx, Channel::Alert).await {
         return;
     }
-    if !image_push_enabled(state).await {
+    if !image_push_enabled(ctx).await {
         debug!(alert = %alert_code, "wecom: 已关闭告警证据图推送，不补发图片");
         return;
     }
     // 图跟着卡片走同一道门：卡片没推（不在执行计划期间）就不该单独冒出一张图
-    if !crate::alert_flow::should_dispatch(state, alert_code).await {
+    if !crate::alert_flow::should_dispatch(&ctx.db, alert_code).await {
         debug!(alert = %alert_code, "wecom: 告警不在任务执行期间，补发图片也跳过");
         return;
     }
@@ -1603,7 +1607,7 @@ pub async fn alert_evidence(state: &AppState, alert_code: &str, image: NoticeIma
           WHERE a.alert_code = ?1",
     )
     .bind(alert_code)
-    .fetch_optional(&state.db)
+    .fetch_optional(&ctx.db)
     .await
     .ok()
     .flatten();
@@ -1611,7 +1615,7 @@ pub async fn alert_evidence(state: &AppState, alert_code: &str, image: NoticeIma
         debug!(alert = %alert_code, "wecom: 回查不到告警级别，跳过补发图片");
         return;
     };
-    state.notifier.enqueue(Notice {
+    ctx.notifier.enqueue(Notice {
         level: Level::parse(&level),
         ref_type: Channel::Alert.ref_type(),
         ref_id: None,
@@ -1667,12 +1671,12 @@ pub struct CountMatched<'a> {
 /// 门禁与告警共用（通道开关 `alert_push` / `wecom_alert_push`、图片开关
 /// `wecom_alert_image`），但不走 `alert_only_in_task`：能走到这里的只有
 /// 「正在执行计划、到点开窗」的那条链路，天然就在执行计划期间。
-pub async fn count_matched(state: &AppState, matched: CountMatched<'_>) {
-    if !state.notifier.is_enabled() {
+pub async fn count_matched(ctx: &NotifyCtx, matched: CountMatched<'_>) {
+    if !ctx.notifier.is_enabled() {
         return;
     }
     // 关掉「企业微信告警推送」的部署不会想收到巡检回执：与告警共用同一对开关
-    if !channel_enabled(state, Channel::Alert).await {
+    if !channel_enabled(ctx, Channel::Alert).await {
         return;
     }
     let park: Option<String> = sqlx::query_scalar(
@@ -1682,7 +1686,7 @@ pub async fn count_matched(state: &AppState, matched: CountMatched<'_>) {
           WHERE d.device_id = ?1",
     )
     .bind(matched.device_code)
-    .fetch_optional(&state.db)
+    .fetch_optional(&ctx.db)
     .await
     .ok()
     .flatten();
@@ -1731,19 +1735,19 @@ pub async fn count_matched(state: &AppState, matched: CountMatched<'_>) {
         bypass_min_level: true,
     };
     if let Some(image) = matched.image
-        && image_push_enabled(state).await
+        && image_push_enabled(ctx).await
     {
         notice.image = Some(image);
     }
-    state.notifier.enqueue(notice);
+    ctx.notifier.enqueue(notice);
 }
 
 /// 任务被判「异常」时调用。看门狗与客户端上报终态两处都走这里，靠去重键合并。
-pub async fn task_abnormal(state: &AppState, task_code: &str, level: Level, reason: &str) {
-    if !state.notifier.is_enabled() {
+pub async fn task_abnormal(ctx: &NotifyCtx, task_code: &str, level: Level, reason: &str) {
+    if !ctx.notifier.is_enabled() {
         return;
     }
-    if !channel_enabled(state, Channel::Task).await {
+    if !channel_enabled(ctx, Channel::Task).await {
         return;
     }
     let row: Option<TaskLookup> = sqlx::query_as(
@@ -1755,7 +1759,7 @@ pub async fn task_abnormal(state: &AppState, task_code: &str, level: Level, reas
           WHERE t.task_code = ?1",
     )
     .bind(task_code)
-    .fetch_optional(&state.db)
+    .fetch_optional(&ctx.db)
     .await
     .unwrap_or(None);
     let Some(row) = row else {
@@ -1765,7 +1769,7 @@ pub async fn task_abnormal(state: &AppState, task_code: &str, level: Level, reas
 
     // 计划层的责任人：任务异常同样要 @ 到人，否则群里只是「又一条报错」
     let assignment =
-        crate::alert_flow::responsible_for_task(state, row.park_id, Some(row.id)).await;
+        crate::alert_flow::responsible_for_task(&ctx.db, row.park_id, Some(row.id)).await;
 
     let mut fields: Vec<(&'static str, String)> = Vec::with_capacity(5);
     fields.push(("任务", format!("{}（{}）", row.task_name, row.task_code)));
@@ -1802,7 +1806,7 @@ pub async fn task_abnormal(state: &AppState, task_code: &str, level: Level, reas
             ),
             None => "检查设备在线状态与本体定位/导航状态，确认后在平台重新下发任务".to_string(),
         }),
-        link: tasks_link(state, Some(row.id)),
+        link: tasks_link(ctx, Some(row.id)),
         mention_all: level == Level::Critical,
         mentions: assignment
             .as_ref()
@@ -1816,17 +1820,17 @@ pub async fn task_abnormal(state: &AppState, task_code: &str, level: Level, reas
         cleanup: None,
         bypass_min_level: false,
     };
-    state.notifier.enqueue(notice);
+    ctx.notifier.enqueue(notice);
 }
 
 /// 设置页「发送测试消息」：**同步**发一条并返回企业微信的原始结果。
 ///
 /// 走同步是因为运维需要立刻看到 `errcode`（配错 key 时群里的静默失败最难查）。
-pub async fn send_test(state: &AppState) -> Result<String, String> {
-    if !state.config.wecom_enabled {
+pub async fn send_test(ctx: &NotifyCtx) -> Result<String, String> {
+    if !ctx.config.wecom_enabled {
         return Err("推送通道已在配置中关闭（wecom.enabled = false）".to_string());
     }
-    let Some(url) = state.notifier.webhook() else {
+    let Some(url) = ctx.notifier.webhook() else {
         return Err(
             "未配置 webhook：请在「系统设置 → 企业微信群机器人」填写地址，\
              或由部署方设置环境变量 ROBODOG_WECOM_WEBHOOK"
@@ -1845,7 +1849,7 @@ pub async fn send_test(state: &AppState) -> Result<String, String> {
         dedupe_window: None,
         title: "推送通道测试".to_string(),
         fields: vec![
-            ("平台", state.config.public_url.clone().unwrap_or_default()),
+            ("平台", ctx.config.public_url.clone().unwrap_or_default()),
             ("时间", now()),
         ],
         body: Some("这是一条手动触发的测试消息，收到即表示企业微信告警推送可用".to_string()),
@@ -1862,20 +1866,12 @@ pub async fn send_test(state: &AppState) -> Result<String, String> {
     let body = json!({ "msgtype": "markdown", "markdown": { "content": payload } });
     match post(&client, &url, &body).await {
         Ok(()) => {
-            record(state, &notice, &payload, "sent", 1, None).await;
+            record(ctx, &notice, &payload, "sent", 1, None).await;
             info!("wecom: 测试消息发送成功");
             Ok("测试消息已发送，请检查企业微信群".to_string())
         }
         Err(failure) => {
-            record(
-                state,
-                &notice,
-                &payload,
-                "failed",
-                1,
-                Some(&failure.message),
-            )
-            .await;
+            record(ctx, &notice, &payload, "failed", 1, Some(&failure.message)).await;
             Err(failure.message)
         }
     }

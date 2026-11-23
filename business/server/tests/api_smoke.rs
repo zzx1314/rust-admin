@@ -99,6 +99,7 @@ async fn test_state_with_token(service_token: Option<&str>) -> (AppState, TempDb
         command_results: gateway::new_command_result_waiters(),
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
+        ai_patrol: Default::default(),
     };
     (state, db_dir)
 }
@@ -1467,6 +1468,7 @@ mod control_plane_channel {
             video_hub: state.video_hub,
             notifier: robodog_ops_server::notify::Notifier::disabled(),
             agent_tunnel: Default::default(),
+            ai_patrol: Default::default(),
         };
         (state, db_dir)
     }
@@ -3265,6 +3267,7 @@ async fn ingest_refresh_overwrites_existing_map_only_when_content_changes() {
         command_results: state.command_results,
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
+        ai_patrol: Default::default(),
     };
     let app = build_router(state.clone());
     let token = login(&app).await;

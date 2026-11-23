@@ -102,8 +102,9 @@ async fn push_real_alert_card_with_evidence_image() {
         command_results: gateway::new_command_result_waiters(),
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
+        ai_patrol: Default::default(),
     };
-    notify::spawn(state.clone(), rx.expect("部署开关开着时应有消费端"));
+    notify::spawn(state.notify(), rx.expect("部署开关开着时应有消费端"));
 
     // ③ 手工造等价于线上那条「执行计划期间的数量告警」的 Notice 并入队
     let notice = Notice {

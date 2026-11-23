@@ -91,6 +91,7 @@ async fn build_state() -> (AppState, mpsc::Receiver<Notice>, TempDb) {
         command_results: gateway::new_command_result_waiters(),
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
+        ai_patrol: Default::default(),
     };
     (state, rx.expect("部署开关开着时应有消费端"), temp)
 }
@@ -159,10 +160,10 @@ async fn alert_outside_task_creates_no_order_and_no_push() {
     insert_alert(&state, "AL-HB-1", Some(device), "hb:1").await;
 
     assert!(
-        !alert_flow::in_task_execution(&state, "AL-HB-1").await,
+        !alert_flow::in_task_execution(&state.db, "AL-HB-1").await,
         "空闲设备上的告警不算执行计划期间的告警"
     );
-    robodog_ops_server::notify::alert_created(&state, "AL-HB-1").await;
+    robodog_ops_server::notify::alert_created(&state.notify(), "AL-HB-1").await;
 
     assert_eq!(auto_order_count(&state).await, 0, "不该自动建工单");
     assert!(rx.try_recv().is_err(), "不该推企业微信");
@@ -184,8 +185,8 @@ async fn alert_during_task_creates_order_and_pushes() {
     let device = device_in_task(&state).await;
     insert_alert(&state, "AL-TASK-1", Some(device), "fault:1:12608").await;
 
-    assert!(alert_flow::in_task_execution(&state, "AL-TASK-1").await);
-    robodog_ops_server::notify::alert_created(&state, "AL-TASK-1").await;
+    assert!(alert_flow::in_task_execution(&state.db, "AL-TASK-1").await);
+    robodog_ops_server::notify::alert_created(&state.notify(), "AL-TASK-1").await;
 
     assert_eq!(auto_order_count(&state).await, 1, "执行计划期间应自动建单");
     let notice = rx.try_recv().expect("执行计划期间应推企业微信");
@@ -208,8 +209,8 @@ async fn unbound_alert_is_skipped() {
     let (state, mut rx, _temp) = build_state().await;
     insert_alert(&state, "AL-NONE-1", None, "").await;
 
-    assert!(!alert_flow::in_task_execution(&state, "AL-NONE-1").await);
-    robodog_ops_server::notify::alert_created(&state, "AL-NONE-1").await;
+    assert!(!alert_flow::in_task_execution(&state.db, "AL-NONE-1").await);
+    robodog_ops_server::notify::alert_created(&state.notify(), "AL-NONE-1").await;
 
     assert_eq!(auto_order_count(&state).await, 0);
     assert!(rx.try_recv().is_err());
@@ -230,11 +231,11 @@ async fn switch_off_restores_dispatch_for_every_alert() {
     let device = device_idle(&state).await;
     insert_alert(&state, "AL-HB-2", Some(device), "hb:2").await;
     assert!(
-        alert_flow::should_dispatch(&state, "AL-HB-2").await,
+        alert_flow::should_dispatch(&state.db, "AL-HB-2").await,
         "关掉开关后不再按「执行计划期间」过滤"
     );
 
-    robodog_ops_server::notify::alert_created(&state, "AL-HB-2").await;
+    robodog_ops_server::notify::alert_created(&state.notify(), "AL-HB-2").await;
     assert_eq!(auto_order_count(&state).await, 1, "老口径下应建单");
     assert!(rx.try_recv().is_ok(), "老口径下应推企业微信");
 }

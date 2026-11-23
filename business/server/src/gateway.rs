@@ -402,7 +402,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                 if let Some(ref did) = device_id {
                                     let payload: AiPointPayload = serde_json::from_value(ws_msg.payload)
                                         .unwrap_or_default();
-                                    crate::ai_patrol::global()
+                                    state.ai_patrol.as_ref()
                                         .on_client_point(&state, did, &payload)
                                         .await;
                                 }
@@ -411,7 +411,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                 if let Some(ref did) = device_id {
                                     let payload: AiDetectPayload = serde_json::from_value(ws_msg.payload)
                                         .unwrap_or_default();
-                                    crate::ai_patrol::global()
+                                    state.ai_patrol.as_ref()
                                         .on_client_detect(&state, did, &payload)
                                         .await;
                                 }
@@ -420,7 +420,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                 if let Some(ref did) = device_id {
                                     let payload: AiEndPayload = serde_json::from_value(ws_msg.payload)
                                         .unwrap_or_default();
-                                    crate::ai_patrol::global()
+                                    state.ai_patrol.as_ref()
                                         .on_client_end(&state, did, &payload)
                                         .await;
                                 }
@@ -469,7 +469,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                 if let Some(ref did) = device_id {
                                     let payload: crate::gateway_types::AiAlertPayload =
                                         serde_json::from_value(ws_msg.payload).unwrap_or_default();
-                                    crate::ai_patrol::global()
+                                    state.ai_patrol.as_ref()
                                         .on_client_alert(&state, did, &payload)
                                         .await;
                                 }
@@ -480,7 +480,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                 if let Some(ref did) = device_id {
                                     let payload: crate::gateway_types::AiCountPayload =
                                         serde_json::from_value(ws_msg.payload).unwrap_or_default();
-                                    crate::ai_patrol::global()
+                                    state.ai_patrol.as_ref()
                                         .on_client_count(&state, did, &payload)
                                         .await;
                                 }
@@ -490,7 +490,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: Option<Strin
                                 if let Some(ref did) = device_id {
                                     let payload: crate::gateway_types::AiEvidencePayload =
                                         serde_json::from_value(ws_msg.payload).unwrap_or_default();
-                                    crate::ai_patrol::global()
+                                    state.ai_patrol.as_ref()
                                         .on_client_evidence(&state, did, &payload)
                                         .await;
                                 }
@@ -899,7 +899,7 @@ pub async fn sweep_stale_devices(state: &AppState) -> Result<u64, AppError> {
         // 落库后走统一出口；要不要建单 + 推群由 `alert_flow::should_dispatch` 判：
         // 掉线告警**只在设备当时有执行中任务**时才进群（巡检中掉线是最典型的失败场景），
         // 闲置掉线只留在告警中心。
-        crate::notify::alert_created(state, &alert_code).await;
+        crate::notify::alert_created(&state.notify(), &alert_code).await;
     }
 
     Ok(affected)
@@ -1029,7 +1029,7 @@ pub async fn sweep_stuck_tasks(state: &AppState) -> Result<u64, AppError> {
             )
         };
         crate::notify::task_abnormal(
-            state,
+            &state.notify(),
             task_code,
             if device_status == "离线" {
                 crate::notify::Level::Critical
@@ -1646,7 +1646,7 @@ async fn open_control_preempt_alert(
     .await;
     // 落库后走统一出口；`alert_flow::should_dispatch` 只在「执行计划期间」才建单 + 推群。
     // 闲置时被抢占只留在告警中心（平台摇杆与任务同样会被门禁拦下，页面上看得见）。
-    crate::notify::alert_created(state, &alert_code).await;
+    crate::notify::alert_created(&state.notify(), &alert_code).await;
 }
 
 /// 控制权回到 APP / SDK：自动把抢占告警结掉，避免告警中心长期挂着已恢复的条目。
@@ -1692,7 +1692,9 @@ async fn handle_task_progress(
 
     // 航点到点 AI 识别：走到带「AI 识别」动作的航点时开识别窗口，终态时关窗口。
     // 与任务状态更新解耦——识别失败只打日志，不影响任务本身（见 ai_patrol 模块头）。
-    crate::ai_patrol::global()
+    state
+        .ai_patrol
+        .as_ref()
         .on_progress(state, device_id, payload)
         .await;
 
@@ -1776,7 +1778,7 @@ async fn handle_task_progress(
         // 先到的是客户端原因（更有信息量），看门狗那条会被静默窗口吃掉。
         if status == "异常" {
             crate::notify::task_abnormal(
-                state,
+                &state.notify(),
                 &payload.task_code,
                 crate::notify::Level::Warning,
                 &format!("客户端上报任务异常：{message}"),
@@ -1866,7 +1868,7 @@ async fn handle_device_event(
             // **不落告警、不建工单、不推企业微信**，只在下面的 `task_events`
             // 事件流里留一行。事件流不能一起省：`recent_capability_busy` 正是靠
             // task_events 里的 13440 / 13897 区分「本体能力被占」和「遥控器接管」。
-            if crate::alert_flow::message_ignored(state, &payload.message).await {
+            if crate::alert_flow::message_ignored(&state.db, &payload.message).await {
                 info!(
                     device = %device_id,
                     content = %payload.message,
@@ -1904,7 +1906,7 @@ async fn handle_device_event(
                 .execute(db)
                 .await
                 .ok();
-                crate::notify::alert_created(state, &alert_code).await;
+                crate::notify::alert_created(&state.notify(), &alert_code).await;
             }
         }
         _ => {}

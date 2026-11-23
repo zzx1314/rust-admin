@@ -486,10 +486,10 @@ pub async fn status(
 /// 排查「航点配了 AI 识别但没出告警」时先看这里：窗口有没有开、配到了哪个场景、
 /// 阈值多少、窗口内上报了哪几类目标。逻辑见 [`crate::ai_patrol`]。
 pub async fn ai_window(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Extension(_claims): Extension<Claims>,
 ) -> Json<ApiResponse<Value>> {
-    ApiResponse::ok(crate::ai_patrol::global().status().await)
+    ApiResponse::ok(state.ai_patrol.status().await)
 }
 
 /// `GET /api/backpack/events` —— Agent SSE 透传
