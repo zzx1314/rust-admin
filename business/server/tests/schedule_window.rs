@@ -9,6 +9,7 @@
 
 use futures_util::{SinkExt, StreamExt};
 use robodog_ops_server::app::{AppState, build_router};
+use robodog_ops_server::auth::Claims;
 use robodog_ops_server::config::Config;
 use robodog_ops_server::models::TaskRequest;
 use robodog_ops_server::{db, gateway, handlers, schedule, seed};
@@ -178,6 +179,17 @@ async fn device_pk(state: &AppState) -> i64 {
 }
 
 async fn create_scheduled(state: &AppState, name: &str, plan_start: &str, plan_end: &str) -> i64 {
+    create_scheduled_with(state, name, plan_start, plan_end, None).await
+}
+
+/// `publish_status` 为 `None` 时走默认值（= 已发布，老调用方语义不变）。
+async fn create_scheduled_with(
+    state: &AppState,
+    name: &str,
+    plan_start: &str,
+    plan_end: &str,
+    publish_status: Option<&str>,
+) -> i64 {
     let pk = device_pk(state).await;
     let park: i64 = sqlx::query_scalar("SELECT park_id FROM devices WHERE id = ?1")
         .bind(pk)
@@ -200,6 +212,7 @@ async fn create_scheduled(state: &AppState, name: &str, plan_start: &str, plan_e
             plan_start: Some(plan_start.to_string()),
             plan_end: Some(plan_end.to_string()),
             schedule_days: None,
+            publish_status: publish_status.map(str::to_string),
             task_status: None,
             progress: None,
             dispatch_policy: None,
@@ -227,6 +240,111 @@ fn clock(offset_minutes: i64) -> String {
 
 fn today() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// 直接插一条周期任务（绕过建任务时的坐标预检，用来造「到点必发不出去」的坏数据）。
+async fn insert_periodic(
+    state: &AppState,
+    code: &str,
+    name: &str,
+    route_id: Option<i64>,
+    start: &str,
+    end: &str,
+) -> i64 {
+    let pk = device_pk(state).await;
+    let park: i64 = sqlx::query_scalar("SELECT park_id FROM devices WHERE id = ?1")
+        .bind(pk)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    let stamp = robodog_ops_server::db::now();
+    sqlx::query_scalar(
+        "INSERT INTO tasks (task_code, task_name, task_type, execute_mode, level, device_id,
+            park_id, route_id, plan_start, plan_end, task_status, progress, created_at, updated_at)
+         VALUES (?1, ?2, '定时巡检', '周期任务', '常规', ?3, ?4, ?5, ?6, ?7, '待执行', 0, ?8, ?8)
+         RETURNING id",
+    )
+    .bind(code)
+    .bind(name)
+    .bind(pk)
+    .bind(park)
+    .bind(route_id)
+    .bind(start)
+    .bind(end)
+    .bind(&stamp)
+    .fetch_one(&state.db)
+    .await
+    .expect("插入周期任务失败")
+}
+
+/// 一条「到点就下发不出去」的计划不能拖垮整轮扫描：排在它后面的计划照常下发。
+///
+/// 背景：`sweep` 以前对 `dispatch_due` 用 `?`，一条坏数据（路线坐标不是米制 / 地图
+/// 是示意坐标系 / 地图包缺失）就会让整轮扫描中止，后面所有待执行的计划一起停摆，
+/// 而日志里只有一句「计划调度扫描失败」。现场表现：某些时段整个平台的定时巡检都不动。
+#[tokio::test]
+async fn one_undispatchable_plan_does_not_stop_the_whole_sweep() {
+    let (state, _db) = test_state().await;
+    let port = spawn_server(state.clone()).await;
+    let mut ws = register_device(port).await;
+
+    // 把种子路线改成「画布像素坐标」（缺 coordFrame=map）：引用它的计划到点必报错
+    let route_id: i64 = sqlx::query_scalar("SELECT id FROM routes ORDER BY id ASC LIMIT 1")
+        .fetch_one(&state.db)
+        .await
+        .expect("演示数据应包含路线");
+    sqlx::query("UPDATE routes SET route_data = ?1 WHERE id = ?2")
+        .bind(
+            r#"{"schemaVersion":2,"points":[{"name":"P1","x":335,"y":120},
+                {"name":"P2","x":555,"y":145}],"legs":[],"returnLeg":null}"#,
+        )
+        .bind(route_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    // 坏任务先建（id 小 → 先被扫到），好任务在后
+    let bad = insert_periodic(
+        &state,
+        "TK-BAD-1",
+        "坏路线计划",
+        Some(route_id),
+        &clock(-5),
+        &clock(30),
+    )
+    .await;
+    let good = insert_periodic(&state, "TK-GOOD-1", "好计划", None, &clock(-5), &clock(30)).await;
+
+    let report = schedule::sweep(&state)
+        .await
+        .expect("一条坏计划不能把扫描器打断");
+    assert!(report.dispatched >= 1, "排在坏计划后面的任务应该照常下发");
+
+    let (bad_status, bad_dispatched) = task_row(&state, bad).await;
+    assert_eq!(bad_status, "待执行", "发不出去就保持待执行，窗口内继续重试");
+    assert_eq!(bad_dispatched, None);
+    let (good_status, good_dispatched) = task_row(&state, good).await;
+    assert_eq!(good_status, "执行中", "好计划不能被坏数据挡住");
+    assert_eq!(good_dispatched.as_deref(), Some(today().as_str()));
+
+    // 事件流里要写清「下发失败 + 原因」，控制台不用上服务器翻日志
+    let reason: Option<String> = sqlx::query_scalar(
+        "SELECT description FROM task_events
+          WHERE task_id = ?1 AND event_type = 'schedule_wait' ORDER BY id DESC LIMIT 1",
+    )
+    .bind(bad)
+    .fetch_optional(&state.db)
+    .await
+    .unwrap();
+    let reason = reason.expect("下发失败要留一条等待事件");
+    assert!(
+        reason.contains("下发失败"),
+        "事件要写明下发失败及原因，实际：{reason}"
+    );
+
+    // 设备侧真的收到了好计划
+    let frame = next_msg_type(&mut ws, "task_dispatch").await;
+    assert_eq!(frame["msgType"], "task_dispatch");
 }
 
 /// 窗口还早：建任务不下发，扫描器也不下发，事件流里写明「到点自动下发」。
@@ -286,6 +404,73 @@ async fn due_window_is_dispatched_once_per_day() {
     // 同一天再扫一轮：不会重复下发（last_dispatched_on 挡住）
     let report = schedule::sweep(&state).await.expect("扫描失败");
     assert_eq!(report.dispatched, 0, "同一个窗口内不能重复下发");
+}
+
+/// 草稿计划：窗口内也不下发（建计划 / 扫描器 / 补发三条自动路径都认发布状态），
+/// 调用发布接口之后才进入自动调度。
+#[tokio::test]
+async fn draft_plan_is_not_dispatched_until_published() {
+    let (state, _db) = test_state().await;
+    let port = spawn_server(state.clone()).await;
+    let mut ws = register_device(port).await;
+
+    // 窗口覆盖当前时刻的草稿：以前这种情况建好就推送了
+    let id =
+        create_scheduled_with(&state, "D区草稿计划", &clock(-5), &clock(30), Some("草稿")).await;
+    assert!(
+        next_msg(&mut ws, "task_dispatch", Duration::from_millis(600))
+            .await
+            .is_none(),
+        "草稿计划不能建好就下发"
+    );
+
+    let report = schedule::sweep(&state).await.expect("扫描失败");
+    assert_eq!(report.dispatched, 0, "草稿不参与自动调度");
+    assert_eq!(report.missed, 0, "草稿不能报「窗口未执行」");
+    let (status, dispatched_on) = task_row(&state, id).await;
+    assert_eq!(status, "待执行");
+    assert_eq!(dispatched_on, None);
+
+    // 事件流里要写清为什么没跑（否则控制台表现就是「到点了什么都不发生」）
+    let hint: Option<String> = sqlx::query_scalar(
+        "SELECT description FROM task_events
+          WHERE task_id = ?1 AND event_type = 'schedule' ORDER BY id ASC LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
+    .unwrap();
+    let hint = hint.expect("建草稿时应写一条说明事件");
+    assert!(hint.contains("草稿"), "事件要说清是草稿，实际：{hint}");
+
+    // 发布（走真实接口：时间窗 / 路线坐标校验一并回归）
+    let published = handlers::tasks::publish_task(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(id),
+        axum::Extension(Claims {
+            sub: 1,
+            username: "admin".to_string(),
+            role: "admin".to_string(),
+            exp: 0,
+            zentai_user_id: None,
+            zentai_username: None,
+            is_admin: true,
+        }),
+    )
+    .await
+    .expect("发布应成功")
+    .0
+    .data;
+    assert_eq!(published.publish_status, "已发布");
+
+    // 发布后由扫描器接管（真实部署里 30s 一轮）
+    let report = schedule::sweep(&state).await.expect("扫描失败");
+    assert_eq!(report.dispatched, 1, "已发布的计划到点就该下发");
+    let frame = next_msg_type(&mut ws, "task_dispatch").await;
+    assert_eq!(frame["msgType"], "task_dispatch");
+    let (status, dispatched_on) = task_row(&state, id).await;
+    assert_eq!(status, "执行中");
+    assert_eq!(dispatched_on.as_deref(), Some(today().as_str()));
 }
 
 /// 窗口已过：不是立刻下发，而是记一次「未执行」告警，任务留在待执行等下一个执行日。
@@ -377,6 +562,7 @@ async fn periodic_task_requires_window() {
                 plan_start: start.map(str::to_string),
                 plan_end: end.map(str::to_string),
                 schedule_days: None,
+                publish_status: None,
                 task_status: None,
                 progress: None,
                 dispatch_policy: None,

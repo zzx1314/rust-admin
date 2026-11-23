@@ -212,6 +212,11 @@ pub struct Task {
     pub schedule_days: Option<String>,
     /// 最近一次「到点下发」的日期（`YYYY-MM-DD`）：同一窗口内不重复下发
     pub last_dispatched_on: Option<String>,
+    /// 发布状态：`草稿` / `已发布`。只有「已发布」的计划才会被自动调度
+    /// （`schedule::is_published`），草稿只保存、不下发。与执行状态 `task_status` 是两回事。
+    pub publish_status: String,
+    /// 最近一次发布的时间（撤回不清空，用于回溯这一版从什么时候开始自动跑）
+    pub published_at: Option<String>,
     pub task_status: String,
     pub progress: i64,
     pub dispatch_policy: Option<String>,
@@ -408,6 +413,8 @@ pub struct TaskRequest {
     pub plan_end: Option<String>,
     /// 周期日（`1,2,3,4,5`；1=周一 … 7=周日），空 = 每天都执行
     pub schedule_days: Option<String>,
+    /// 发布状态：`草稿` / `已发布`（缺省 = 已发布，保持老调用方「建好就排期」的语义）
+    pub publish_status: Option<String>,
     pub task_status: Option<String>,
     pub progress: Option<i64>,
     pub dispatch_policy: Option<String>,

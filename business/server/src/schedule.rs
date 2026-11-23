@@ -39,6 +39,10 @@ pub const TICK_SECS: u64 = 30;
 /// 「周期任务」这个执行模式才有执行日 / 时间窗的概念。
 const PERIODIC_MODE: &str = "周期任务";
 
+/// 发布状态取值（与路线 `routes.status` 同口径，落库就是这两个中文枚举）。
+pub const DRAFT: &str = "草稿";
+pub const PUBLISHED: &str = "已发布";
+
 /// 「到点但设备没就绪」事件的刷新节流：同一个窗口内最多 5 分钟改一次描述。
 ///
 /// 扫描是 30s 一轮，不节流的话设备离线一小时就能写出 120 条同样的「等待中」，
@@ -99,6 +103,8 @@ pub enum DueState {
     Waiting,
     /// 今天是执行日，窗口已经结束但没跑成 → 告警，等下一个执行日
     Missed,
+    /// 计划还是草稿（未发布）→ 不自动执行，等发布后再说
+    Draft,
     /// 不按时间窗调度（立即执行 / 临时下发 / 没填时间）
     Immediate,
 }
@@ -164,6 +170,21 @@ pub fn window_of_parts(start: Option<&str>, end: Option<&str>) -> Option<Window>
 /// 任务配置的执行窗口
 pub fn window_of(task: &Task) -> Option<Window> {
     window_of_parts(task.plan_start.as_deref(), task.plan_end.as_deref())
+}
+
+/// 发布状态是否合法（`草稿` / `已发布`）
+pub fn is_valid_publish_status(raw: &str) -> bool {
+    matches!(raw, DRAFT | PUBLISHED)
+}
+
+/// 计划是否已发布——**只有已发布的计划才会被自动执行**。
+///
+/// 自动下发一共有三条路：建计划时顺手下发（`handlers::tasks::create_task_core`）、
+/// 设备上线补发（`gateway::dispatch_pending_tasks`）、后台扫描（[`sweep`]）。
+/// 三条都用 [`due_state`] 做门禁，所以草稿只要在这里被挡一次就全挡住了；
+/// 人工「开始执行 / 重新下发」（`POST /tasks/{id}/dispatch`）不走这里，仍可跑。
+pub fn is_published(task: &Task) -> bool {
+    task.publish_status == PUBLISHED
 }
 
 /// 是否按时间窗调度。
@@ -286,6 +307,11 @@ fn window_instances(window: &Window, now: DateTime<Local>) -> (Option<Span>, Dat
 ///
 /// 「今天」对跨零点窗口取**窗口起始日**：`23:30-00:30` 在凌晨 00:10 仍算前一晚那次。
 pub fn due_state(task: &Task, now: DateTime<Local>) -> DueState {
+    // 草稿先挡：没发布的计划不参与任何自动下发（执行模式是周期还是立即都一样），
+    // 否则「存一份备稿」就等于「立刻让它跑起来」。
+    if !is_published(task) {
+        return DueState::Draft;
+    }
     if !is_scheduled(task) {
         return DueState::Immediate;
     }
@@ -340,6 +366,11 @@ pub fn schedule_hint(task: &Task, now: DateTime<Local>) -> String {
             format!("计划窗口 {range}（{days}）今天的窗口已过，将在下一个执行日的同一时段自动执行")
         }
         DueState::Waiting => format!("计划窗口 {range}（{days}），到点自动下发"),
+        DueState::Draft => {
+            format!(
+                "计划还是草稿（窗口 {range} · {days}）：发布之后才会按时段自动执行，现在只保存不下发"
+            )
+        }
         DueState::Immediate => "立即执行：不受计划时间窗限制，创建后直接下发".to_string(),
     }
 }
@@ -405,26 +436,35 @@ pub async fn sweep(state: &AppState) -> Result<SweepReport, AppError> {
     rearm_finished(state, now, &mut report).await?;
 
     let pending = sqlx::query_as::<_, Task>(&format!(
-        "{} WHERE t.task_status = '待执行' AND t.execute_mode = ?1 ORDER BY t.id ASC",
+        "{} WHERE t.task_status = '待执行' AND t.execute_mode = ?1 AND t.publish_status = ?2 \
+         ORDER BY t.id ASC",
         crate::handlers::tasks::TASK_SELECT
     ))
     .bind(PERIODIC_MODE)
+    .bind(PUBLISHED)
     .fetch_all(&state.db)
     .await?;
 
     for task in pending {
         match due_state(&task, now) {
-            DueState::Due => {
-                if dispatch_due(state, &task, now).await? {
-                    report.dispatched += 1;
+            DueState::Due => match dispatch_due(state, &task, now).await {
+                Ok(true) => report.dispatched += 1,
+                Ok(false) => {}
+                // **一条任务下发失败不能拖垮整轮扫描**：以前这里把错误 `?` 出去，
+                // 排在它后面的计划全部停摆（示意坐标系地图的演示任务在 09:20 窗口内、
+                // 或者某条路线被改坏，就会把整轮扫描打断，且只在日志里报一行
+                // `计划调度扫描失败`）。现在当成「这条暂时发不出去」记录下来继续扫。
+                Err(error) => {
+                    warn!(task = %task.task_code, "计划到点下发失败：{error}");
+                    report_waiting(state, &task, now, &format!("下发失败：{error}")).await?;
                 }
-            }
+            },
             DueState::Missed => {
                 if notice_missed(state, &task, now).await? {
                     report.missed += 1;
                 }
             }
-            DueState::Waiting | DueState::Immediate => {}
+            DueState::Waiting | DueState::Immediate | DueState::Draft => {}
         }
     }
     Ok(report)
@@ -776,6 +816,8 @@ mod tests {
             robot_updated_at: None,
             schedule_days: None,
             last_dispatched_on: None,
+            publish_status: PUBLISHED.to_string(),
+            published_at: None,
             created_at: "2026-11-14 08:00:00".to_string(),
             updated_at: "2026-11-14 08:00:00".to_string(),
             created_by: None,
@@ -854,6 +896,33 @@ mod tests {
         assert_eq!(due_state(&t, at("2026-11-14 09:40:00")), DueState::Waiting);
         // 错过判定同样不重复
         assert_eq!(due_state(&t, at("2026-11-14 11:00:00")), DueState::Waiting);
+    }
+
+    #[test]
+    fn draft_plans_are_never_auto_dispatched() {
+        // 草稿：窗口内、今天该跑、设备就绪也不下发，且不能报「漏执行」
+        let mut t = task(Some("周期任务"), Some("09:30"), Some("10:10"));
+        t.publish_status = DRAFT.to_string();
+        assert_eq!(due_state(&t, at("2026-11-14 09:40:00")), DueState::Draft);
+        assert_eq!(due_state(&t, at("2026-11-14 11:00:00")), DueState::Draft);
+        // 「立即执行 / 临时下发」的草稿同样不自动跑：存一份备稿不等于立刻开跑
+        let mut immediate = task(Some("立即执行"), None, None);
+        immediate.publish_status = DRAFT.to_string();
+        assert_eq!(
+            due_state(&immediate, at("2026-11-14 09:40:00")),
+            DueState::Draft
+        );
+        // 发布之后回到正常判定
+        t.publish_status = PUBLISHED.to_string();
+        assert_eq!(due_state(&t, at("2026-11-14 09:40:00")), DueState::Due);
+    }
+
+    #[test]
+    fn only_known_publish_status_values_pass_validation() {
+        assert!(is_valid_publish_status(PUBLISHED));
+        assert!(is_valid_publish_status(DRAFT));
+        assert!(!is_valid_publish_status("发布"));
+        assert!(!is_valid_publish_status(""));
     }
 
     #[test]

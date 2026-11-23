@@ -193,6 +193,18 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 `dog_internal_tests::media_sync_status_report_updates_only_its_own_audit`、
 `client media_sync::tests::collect_files_drains_every_frame_of_the_point`。
 
+**计划的「发布状态」不是执行状态**：`tasks.publish_status`（`草稿` / `已发布`，迁移 029）
+决定自动调度，`task_status` 只管执行进度。**只有已发布的计划才会自动执行定时任务**；
+草稿在建计划（`create_task_core`）、设备上线补发（`gateway::dispatch_pending_tasks`）、
+后台扫描（`schedule::sweep`）三条自动路径上全部被 `schedule::DueState::Draft` 挡住，
+所以草稿也不报「窗口未执行」；人工 `POST /tasks/{id}/dispatch` 不受限（现场要能直接跑一次）。
+**默认值必须是 `已发布`**（历史数据 / 老客户端行为不变），改成 `草稿` 等于升级当天全量停跑。
+中台一键下发（`/zentai/devices/{id}/tasks`）建的任务固定 `已发布`。
+发布 = `POST /tasks/{id}/publish`（先校验时间窗 + 路线坐标），撤回 = `unpublish`。
+回归：`schedule::tests::draft_plans_are_never_auto_dispatched`、
+`tests/schedule_window.rs::draft_plan_is_not_dispatched_until_published`、
+`tests/api_smoke.rs::task_publish_status_gates_auto_scheduling`。
+
 「跑完要不要返航」是**任务属性**（`tasks.end_task` → 载荷 `endTaskMode`，
 `none` / `return_to_start` / `return_to_charge`，不配 = 跟随路线），不是路线属性：
 巡检 `5000 kind=4` 只把原始 `points` 写成本体路径，返程由本体按 `end_task` 自己规划。

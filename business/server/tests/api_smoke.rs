@@ -2542,6 +2542,148 @@ async fn dispatch_payload_falls_back_to_synthetic_map_dir() {
     );
 }
 
+/// 计划发布状态（`publishStatus`）：草稿只保存，已发布才进自动调度。
+///
+/// 背景：`task_status` 是执行状态，没有「这条计划定稿了没有」的概念。
+/// 草稿必须能被自动调度器、设备上线补发两条自动路径一起挡住（`schedule::DueState::Draft`），
+/// 否则「先存一份备稿」就等于「立刻让它跑起来」。
+#[tokio::test]
+async fn task_publish_status_gates_auto_scheduling() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let device_pk = bound_device_pk(&pool).await;
+    let park_id: Option<i64> = sqlx::query_scalar("SELECT park_id FROM devices WHERE id = ?1")
+        .bind(device_pk)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let park_id = park_id.expect("演示设备应已绑定园区");
+
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+
+    // 1) 建成草稿：窗口覆盖当前时刻也不下发（三条自动路径都认 publish_status）
+    let now = chrono::Local::now();
+    let start = (now - chrono::Duration::minutes(5))
+        .format("%H:%M")
+        .to_string();
+    let end = (now + chrono::Duration::minutes(30))
+        .format("%H:%M")
+        .to_string();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/tasks")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(format!(
+                    r#"{{"taskName":"备稿计划","executeMode":"周期任务","deviceId":{device_pk},
+                        "parkId":{park_id},"planStart":"{start}","planEnd":"{end}",
+                        "publishStatus":"草稿"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(
+        body["data"]["publishStatus"], "草稿",
+        "建计划时要认 publishStatus"
+    );
+    assert!(body["data"]["publishedAt"].is_null(), "草稿没有发布时间");
+    let task_id = body["data"]["id"].as_i64().expect("应返回任务 id");
+    let (status, dispatched_on): (String, Option<String>) =
+        sqlx::query_as("SELECT task_status, last_dispatched_on FROM tasks WHERE id = ?1")
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "待执行", "草稿不能直接被下发成执行中");
+    assert!(dispatched_on.is_none(), "草稿不应计入当天已下发");
+
+    // 2) 发布：翻成已发布 + 补发布时间，事件流里写清后续怎么跑
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/tasks/{task_id}/publish"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["data"]["publishStatus"], "已发布");
+    assert!(
+        body["data"]["publishedAt"].as_str().is_some(),
+        "发布要记下发布时间"
+    );
+    let published_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM task_events WHERE task_id = ?1 AND event_type = 'published'",
+    )
+    .bind(task_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(published_events, 1, "发布要留痕（运维要看它什么时候生效）");
+
+    // 3) 重复发布 / 重复撤回：状态没变就 400，不要静默成功
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/tasks/{task_id}/publish"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // 4) 撤回：回草稿，不再自动下发（已发布的那一次不受影响）
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/tasks/{task_id}/unpublish"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["data"]["publishStatus"], "草稿");
+    assert!(
+        body["data"]["publishedAt"].as_str().is_some(),
+        "撤回不清空发布时间（用来回溯这一版从什么时候开始跑）"
+    );
+
+    // 5) 乱填发布状态：建计划阶段就 400，不要静默当成已发布
+    let response = app
+        .oneshot(
+            Request::post("/api/tasks")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(format!(
+                    r#"{{"taskName":"乱填状态","deviceId":{device_pk},"parkId":{park_id},
+                        "publishStatus":"发布"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    let message = body["msg"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("发布状态"),
+        "错误文案要指出发布状态，实际: {message}"
+    );
+}
+
 /// 任务级结束动作（返航开关）：显式 `endTask` 必须覆盖推断，并用独立的
 /// `endTaskMode` 表达（旧客端只认 `endTask`，不能把 `none` 的语义挂到它上面）。
 #[tokio::test]

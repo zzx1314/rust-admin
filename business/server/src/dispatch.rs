@@ -395,6 +395,8 @@ mod tests {
             plan_end: None,
             schedule_days: None,
             last_dispatched_on: None,
+            publish_status: "已发布".to_string(),
+            published_at: None,
             task_status: "待执行".to_string(),
             progress: 0,
             dispatch_policy: None,

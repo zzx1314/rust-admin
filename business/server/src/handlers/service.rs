@@ -443,6 +443,9 @@ pub async fn apply_task(
             plan_start: payload.plan_start.clone(),
             plan_end: payload.plan_end.clone(),
             schedule_days: None,
+            // 中台控制面「一键下发」建出来的任务必须立刻生效：它就是一次人工派单，
+            // 存成草稿会让设备永远等不到这条任务
+            publish_status: Some(crate::schedule::PUBLISHED.to_string()),
             task_status: Some("待执行".to_string()),
             progress: None,
             dispatch_policy: None,

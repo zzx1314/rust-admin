@@ -13,6 +13,7 @@ import {
   DISPATCH_POLICIES,
   END_ACTIONS,
   EXECUTE_MODES,
+  PUBLISH_STATUSES,
   TASK_LEVELS,
   TASK_STATUSES,
   TASK_TYPES,
@@ -56,6 +57,8 @@ const taskForm = reactive({
   planEnd: "10:10",
   /** 执行日：1=周一 … 7=周日；空数组 = 每天 */
   scheduleDays: [] as number[],
+  /** 发布状态：只有「已发布」的计划才会到点自动执行 */
+  publishStatus: "已发布" as string,
   dispatchPolicy: "按路线顺序执行",
   description: ""
 });
@@ -260,6 +263,49 @@ async function startTask(task: Task) {
   openMonitor(task);
 }
 
+/** 草稿：只保存、不参与自动调度（人工「开始执行」仍可跑） */
+function isDraft(task: Task) {
+  return task.publishStatus === "草稿";
+}
+
+/**
+ * 发布计划：之后才会到点自动执行。
+ *
+ * 服务端发布前会校验周期任务的时间窗与路线坐标——跑不起来的计划当场报错，
+ * 而不是发布完在「待执行」里干等到退役。
+ */
+async function publishTask(task: Task) {
+  await taskApi.publish(task.id);
+  await load();
+  ElMessage.success(`${task.taskCode} 已发布，将按计划时间自动执行`);
+}
+
+async function unpublishTask(task: Task) {
+  await ElMessageBox.confirm(
+    `确定把「${task.taskName}」撤回为草稿吗？撤回后不再按计划时间自动下发；已经下发的那一次不受影响。`,
+    "撤回计划",
+    { type: "warning", confirmButtonText: "撤回为草稿", cancelButtonText: "返回" }
+  );
+  await taskApi.unpublish(task.id);
+  await load();
+  ElMessage.info(`${task.taskCode} 已撤回为草稿，不再自动执行`);
+}
+
+/** 详情里的发布 / 撤回：完成后把详情行换成最新一份，不关弹窗 */
+async function publishFromDetail() {
+  const task = detailTask.value;
+  if (!task) return;
+  await publishTask(task);
+  detailTask.value = tasks.value.find(item => item.id === task.id) ?? null;
+}
+
+async function unpublishFromDetail() {
+  const task = detailTask.value;
+  if (!task) return;
+  await unpublishTask(task);
+  detailTask.value = tasks.value.find(item => item.id === task.id) ?? null;
+}
+
 /**
  * 恢复已暂停的任务：走 `PUT /tasks/{id}/status`，由服务端判断
  * 「本体已受理过（有 robot_task_id）→ 5006 恢复」还是「没真正下发过 → 重新下发」。
@@ -319,6 +365,7 @@ function openCreate() {
     planStart: "09:30",
     planEnd: "10:10",
     scheduleDays: [],
+    publishStatus: "已发布",
     dispatchPolicy: "按路线顺序执行",
     description: ""
   });
@@ -345,6 +392,7 @@ function openEdit(task: Task) {
     planStart: task.planStart ?? "09:30",
     planEnd: task.planEnd ?? "10:10",
     scheduleDays: parseScheduleDays(task.scheduleDays),
+    publishStatus: task.publishStatus ?? "已发布",
     dispatchPolicy: task.dispatchPolicy ?? "按路线顺序执行",
     description: task.description ?? ""
   });
@@ -383,9 +431,13 @@ async function saveTask() {
   await taskApi.create(formPayload());
   taskDialog.value = false;
   viewMode.value = "board";
-  ElMessage.success(
-    isPeriodic.value ? "任务已创建，将在配置的时间段内自动下发" : "任务已创建并下发"
-  );
+  if (taskForm.publishStatus === "草稿") {
+    ElMessage.success("计划已存为草稿：发布之后才会按时段自动执行");
+  } else {
+    ElMessage.success(
+      isPeriodic.value ? "任务已创建，将在配置的时间段内自动下发" : "任务已创建并下发"
+    );
+  }
   await load();
 }
 
@@ -683,6 +735,9 @@ onBeforeUnmount(() => {
         >
           <div class="tc-top">
             <span class="tag" :class="tagTone(task.taskType)">{{ task.taskType }}</span>
+            <span v-if="isDraft(task)" class="tag" title="草稿：只保存，不按计划时间自动下发">
+              草稿
+            </span>
             <span
               v-if="task.level === '紧急' || task.level === '重要'"
               class="tag orange"
@@ -735,6 +790,22 @@ onBeforeUnmount(() => {
                 @click="openEdit(task)"
               >
                 <AppIcon name="edit" />
+              </button>
+              <button
+                v-if="isDraft(task) && task.taskStatus !== '执行中' && task.taskStatus !== '已暂停'"
+                class="btn sm ghost icon"
+                title="发布（之后才按计划时间自动执行）"
+                @click="publishTask(task)"
+              >
+                <AppIcon name="send" />
+              </button>
+              <button
+                v-if="!isDraft(task) && task.taskStatus !== '执行中' && task.taskStatus !== '已暂停'"
+                class="btn sm ghost icon"
+                title="撤回为草稿（停止自动执行）"
+                @click="unpublishTask(task)"
+              >
+                <AppIcon name="close" />
               </button>
               <button
                 v-if="isRunning(task)"
@@ -793,6 +864,7 @@ onBeforeUnmount(() => {
               <th>园区 / 区域</th>
               <th>计划时间</th>
               <th>状态</th>
+              <th>发布</th>
               <th>进度</th>
               <th>操作</th>
             </tr>
@@ -818,6 +890,13 @@ onBeforeUnmount(() => {
               <td>
                 <StatusBadge :status="task.taskStatus" @click="clickStatusBadge(task.taskStatus)" />
               </td>
+              <td>
+                <span
+                  :title="isDraft(task) ? '草稿：只保存，不按计划时间自动下发' : '已发布：到点自动执行'"
+                >
+                  <StatusBadge :status="task.publishStatus" />
+                </span>
+              </td>
               <td style="min-width: 120px">
                 <ProgressBar
                   :value="task.progress"
@@ -842,6 +921,22 @@ onBeforeUnmount(() => {
                   >
                     <AppIcon name="edit" />
                   </button>
+                  <button
+                    v-if="isDraft(task) && task.taskStatus !== '执行中' && task.taskStatus !== '已暂停'"
+                    class="btn sm ghost icon"
+                    title="发布（之后才按计划时间自动执行）"
+                    @click="publishTask(task)"
+                  >
+                    <AppIcon name="send" />
+                  </button>
+                  <button
+                    v-if="!isDraft(task) && task.taskStatus !== '执行中' && task.taskStatus !== '已暂停'"
+                    class="btn sm ghost icon"
+                    title="撤回为草稿（停止自动执行）"
+                    @click="unpublishTask(task)"
+                  >
+                    <AppIcon name="close" />
+                  </button>
                   <button class="btn sm ghost icon" title="详情" @click="openDetail(task)">
                     <AppIcon name="eye" />
                   </button>
@@ -856,7 +951,7 @@ onBeforeUnmount(() => {
               </td>
             </tr>
             <tr v-if="!filteredTasks.length">
-              <td colspan="10"><div class="empty-box">没有符合条件的任务</div></td>
+              <td colspan="11"><div class="empty-box">没有符合条件的任务</div></td>
             </tr>
           </tbody>
         </table>
@@ -885,6 +980,18 @@ onBeforeUnmount(() => {
           <select v-model="taskForm.executeMode" class="select">
             <option v-for="mode in EXECUTE_MODES" :key="mode">{{ mode }}</option>
           </select>
+        </div>
+        <div class="field">
+          <label>发布状态</label>
+          <select v-model="taskForm.publishStatus" class="select">
+            <option v-for="status in PUBLISH_STATUSES" :key="status">{{ status }}</option>
+          </select>
+          <div class="rt-hint" style="margin: 4px 0 0">
+            <template v-if="taskForm.publishStatus === '草稿'">
+              只保存、不自动执行：建好不下发、设备上线也不补发，发布后才按计划时间跑
+            </template>
+            <template v-else>已发布：到点自动下发（人工「开始执行」随时可跑）</template>
+          </div>
         </div>
         <div class="field">
           <label>跑完去哪（返航开关）</label>
@@ -1072,6 +1179,18 @@ onBeforeUnmount(() => {
           <span>计划时间</span><b class="mono">{{ scheduleSummary(detailTask) }}</b>
         </div>
         <div class="kv">
+          <span>发布状态</span>
+          <b>
+            <StatusBadge :status="detailTask.publishStatus" />
+            <span v-if="detailTask.publishedAt" class="muted" style="margin-left: 6px">
+              发布于 {{ detailTask.publishedAt.slice(0, 16) }}
+            </span>
+            <span v-else-if="isDraft(detailTask)" class="muted" style="margin-left: 6px">
+              未发布，不会自动执行
+            </span>
+          </b>
+        </div>
+        <div class="kv">
           <span>最近自动下发</span>
           <b class="mono">{{ detailTask.lastDispatchedOn || "—" }}</b>
         </div>
@@ -1119,6 +1238,22 @@ onBeforeUnmount(() => {
             @click="editFromDetail"
           >
             <AppIcon name="edit" />编辑任务
+          </button>
+          <button
+            v-if="isDraft(detailTask) && detailTask.taskStatus !== '执行中' && detailTask.taskStatus !== '已暂停'"
+            class="btn primary sm"
+            title="发布后才会按计划时间自动执行"
+            @click="publishFromDetail"
+          >
+            <AppIcon name="send" />发布计划
+          </button>
+          <button
+            v-if="!isDraft(detailTask) && detailTask.taskStatus !== '执行中' && detailTask.taskStatus !== '已暂停'"
+            class="btn sm"
+            title="撤回为草稿，停止自动执行"
+            @click="unpublishFromDetail"
+          >
+            <AppIcon name="close" />撤回为草稿
           </button>
           <button
             v-if="detailRoute"

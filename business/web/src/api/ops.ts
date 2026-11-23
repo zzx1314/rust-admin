@@ -173,7 +173,14 @@ export const taskApi = {
   updateStatus: (id: number, taskStatus: string, progress?: number) =>
     put<Task>(`/tasks/${id}/status`, { taskStatus, progress }),
   /** 真正下发任务（含航点 / 地图）；设备离线时接口直接报错 */
-  dispatch: (id: number) => post<Task>(`/tasks/${id}/dispatch`)
+  dispatch: (id: number) => post<Task>(`/tasks/${id}/dispatch`),
+  /**
+   * 发布计划：之后才会到点自动执行（草稿不参与自动调度）。
+   * 服务端会先校验时间窗 / 路线坐标，跑不起来的计划发布时就会报错。
+   */
+  publish: (id: number) => post<Task>(`/tasks/${id}/publish`),
+  /** 撤回成草稿：停止自动下发（执行中 / 已暂停的要先暂停并取消） */
+  unpublish: (id: number) => post<Task>(`/tasks/${id}/unpublish`)
 };
 
 export const routeApi = {

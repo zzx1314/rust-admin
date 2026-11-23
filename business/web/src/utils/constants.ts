@@ -146,5 +146,12 @@ export function endActionLabel(value?: string | null, loopMode?: string | null) 
 export const TASK_LEVELS = ["常规", "重要", "紧急"];
 export const DISPATCH_POLICIES = ["按路线顺序执行", "跳过非必经点", "仅执行采集动作"];
 export const TASK_STATUSES = ["待执行", "执行中", "已暂停", "已完成", "异常"];
+/**
+ * 计划发布状态（`tasks.publish_status`）：**只有已发布的计划才会自动执行定时任务**。
+ *
+ * 草稿 = 只保存：建计划不顺手下发、后台扫描跳过、设备上线也不补发；
+ * 人工「开始执行 / 重新下发」不受限制（现场要能直接跑一次）。
+ */
+export const PUBLISH_STATUSES = ["草稿", "已发布"] as const;
 export const DEVICE_STATUSES = ["在线待命", "执行任务", "充电中", "待绑定", "离线", "故障"];
 export const COORDINATE_SYSTEMS = ["WGS-84", "GCJ-02"];

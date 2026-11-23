@@ -156,6 +156,16 @@ export interface Task {
   scheduleDays: string | null;
   /** 最近一次「到点自动下发」的日期（`YYYY-MM-DD`），同一天不会重复跑 */
   lastDispatchedOn: string | null;
+  /**
+   * 发布状态：`草稿` / `已发布`。
+   *
+   * **只有「已发布」的计划才会到点自动执行**：草稿只保存，建计划不顺手下发、
+   * 扫描器跳过、设备上线也不补发（人工「开始执行」仍可跑）。
+   * 与执行状态 `taskStatus` 是两回事，见 `utils/constants.ts::PUBLISH_STATUSES`。
+   */
+  publishStatus: string;
+  /** 最近一次发布的时间（撤回不清空） */
+  publishedAt: string | null;
   taskStatus: string;
   progress: number;
   dispatchPolicy: string | null;

@@ -155,6 +155,8 @@ pub fn build_router(state: AppState) -> Router {
         )
         // 真正下发任务（发 task_dispatch）：前端「开始执行 / 重新下发」走这里
         .route("/tasks/{id}/dispatch", post(tasks::dispatch_task))
+        .route("/tasks/{id}/publish", post(tasks::publish_task))
+        .route("/tasks/{id}/unpublish", post(tasks::unpublish_task))
         .route("/tasks/{id}/events", get(tasks::list_task_events))
         .route(
             "/routes",

@@ -17,7 +17,7 @@ pub const TASK_SELECT: &str = "SELECT t.id, t.task_code, t.task_name, t.task_typ
     t.end_task,
     t.level, t.device_id, d.device_id AS device_code, t.park_id, p.park_name, t.zone_id,
     z.zone_name, t.route_id, r.route_code, r.route_name, t.plan_start, t.plan_end,
-    t.schedule_days, t.last_dispatched_on,
+    t.schedule_days, t.last_dispatched_on, t.publish_status, t.published_at,
     t.task_status, t.progress, t.dispatch_policy, t.description, t.robot_task_id,
     t.robot_stage, t.robot_updated_at, t.created_at, t.updated_at, t.created_by
     FROM tasks t
@@ -25,6 +25,28 @@ pub const TASK_SELECT: &str = "SELECT t.id, t.task_code, t.task_name, t.task_typ
     LEFT JOIN parks p ON p.id = t.park_id
     LEFT JOIN zones z ON z.id = t.zone_id
     LEFT JOIN routes r ON r.id = t.route_id";
+
+/// 发布状态入库前的归一化与校验。
+///
+/// 认不出来的值直接 400：静默当成「已发布」会让一条本该先存着的计划立刻开跑，
+/// 静默当成「草稿」会让用户以为计划已经生效、实际永远不跑——两种都比报错难查。
+fn normalize_publish_status(value: Option<String>) -> Result<String, AppError> {
+    let Some(raw) = value else {
+        return Ok(crate::schedule::PUBLISHED.to_string());
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(crate::schedule::PUBLISHED.to_string());
+    }
+    if !crate::schedule::is_valid_publish_status(raw) {
+        return Err(AppError::BadRequest(format!(
+            "无效的发布状态「{raw}」；可选：{} / {}",
+            crate::schedule::DRAFT,
+            crate::schedule::PUBLISHED
+        )));
+    }
+    Ok(raw.to_string())
+}
 
 /// 任务只能下发给已绑定园区的设备，且任务园区必须与设备园区一致。
 async fn validate_device_park(
@@ -198,14 +220,17 @@ pub async fn create_task_core(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| format!("TK-{}-{next_id:02}", chrono::Local::now().format("%m%d")));
     let end_task = normalize_task_end_task(payload.end_task.flatten())?;
+    // 计划发布状态：只有「已发布」的计划才会被自动执行（`schedule::is_published`）
+    let publish_status = normalize_publish_status(payload.publish_status.clone())?;
     let timestamp = now();
+    let published_at = (publish_status == crate::schedule::PUBLISHED).then(|| timestamp.clone());
     let result = sqlx::query(
         "INSERT INTO tasks (task_code, task_name, task_type, execute_mode, end_task, level, device_id,
             park_id, zone_id, route_id, plan_start, plan_end, schedule_days, task_status, progress,
             dispatch_policy, description, created_at, updated_at, created_by,
-            progress_updated_at)
+            progress_updated_at, publish_status, published_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-            ?17, ?18, ?19, ?20, ?18)",
+            ?17, ?18, ?19, ?20, ?18, ?21, ?22)",
     )
     .bind(&task_code)
     .bind(payload.task_name.trim())
@@ -227,6 +252,8 @@ pub async fn create_task_core(
     .bind(&timestamp)
     .bind(&timestamp)
     .bind(created_by)
+    .bind(&publish_status)
+    .bind(&published_at)
     .execute(&state.db)
     .await?;
     let id = result.last_insert_rowid();
@@ -234,7 +261,7 @@ pub async fn create_task_core(
         state,
         "created",
         format!("创建任务：{}", payload.task_name.trim()),
-        "任务已加入待执行队列".to_string(),
+        format!("任务已加入待执行队列（发布状态：{publish_status}）"),
         payload.device_id,
         Some(id),
     )
@@ -248,12 +275,28 @@ pub async fn create_task_core(
     // 先过 ready 门禁：设备刚注册、本体还没连上时就把任务推出去，客户端只能回
     // 「未连接机器人本体」，任务在平台上看起来就是「已下发但不动」。此时保持
     // 待执行，等心跳确认本体就绪后由补发逻辑自动下发。
+    let task = fetch_task(state, id).await?;
+    let now = chrono::Local::now();
+    // 草稿只保存、不自动下发（建计划顺手下发是最容易漏掉的一条自动路径）：
+    // 发布接口（`POST /tasks/{id}/publish`）把状态翻成已发布后，扫描器 30s 内接管。
+    if !crate::schedule::is_published(&task) {
+        record_event(
+            state,
+            "schedule",
+            format!("计划 {} 已存为草稿", task.task_code),
+            crate::schedule::schedule_hint(&task, now),
+            task.device_id,
+            Some(id),
+        )
+        .await?;
+        return Ok(task);
+    }
     if payload.device_id.is_some() {
-        let task = fetch_task(state, id).await?;
-        let now = chrono::Local::now();
         if matches!(
             crate::schedule::due_state(&task, now),
-            crate::schedule::DueState::Waiting | crate::schedule::DueState::Missed
+            crate::schedule::DueState::Waiting
+                | crate::schedule::DueState::Missed
+                | crate::schedule::DueState::Draft
         ) {
             record_event(
                 state,
@@ -459,6 +502,99 @@ pub async fn dispatch_task(
     Ok(ApiResponse::ok(fetch_task(&state, id).await?))
 }
 
+/// `POST /tasks/{id}/publish` —— 发布计划：此后才会到点自动执行。
+///
+/// 发布前把「跑不起来」的原因当场报出来（周期任务没有合法时间窗、路线坐标不能下发），
+/// 而不是让一条已发布的计划在扫描器里永远 `Waiting`。
+pub async fn publish_task(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
+) -> Result<Json<ApiResponse<Task>>, AppError> {
+    let task = fetch_task(&state, id).await?;
+    super::parks::ensure_owner(&task, &claims)?;
+    if crate::schedule::is_published(&task) {
+        return Err(AppError::BadRequest(format!(
+            "计划 {} 已经是「已发布」状态",
+            task.task_code
+        )));
+    }
+    crate::schedule::validate_window(
+        task.execute_mode.as_deref(),
+        task.plan_start.as_deref(),
+        task.plan_end.as_deref(),
+        task.schedule_days.as_deref(),
+    )?;
+    // 发布即意味着会被自动下发：路线坐标不合法时宁可现在拦住，也别等设备上线才失败
+    crate::dispatch::ensure_route_dispatchable(&state.db, task.route_id, task.park_id).await?;
+
+    sqlx::query(
+        "UPDATE tasks SET publish_status = ?1, published_at = ?2, updated_at = ?2 WHERE id = ?3",
+    )
+    .bind(crate::schedule::PUBLISHED)
+    .bind(now())
+    .bind(id)
+    .execute(&state.db)
+    .await?;
+
+    let updated = fetch_task(&state, id).await?;
+    let hint = crate::schedule::schedule_hint(&updated, chrono::Local::now());
+    record_event(
+        &state,
+        "published",
+        format!("计划 {} 已发布", updated.task_code),
+        format!("{hint}（人工「开始执行」不受发布状态限制）"),
+        updated.device_id,
+        Some(id),
+    )
+    .await?;
+    info!("task {} 已发布，进入自动调度", updated.task_code);
+    Ok(ApiResponse::ok(updated))
+}
+
+/// `POST /tasks/{id}/unpublish` —— 撤回成草稿：停止自动执行。
+///
+/// 只拦「执行中 / 已暂停」：那两条说明本体已经受理了这轮任务，先停再撤，
+/// 否则运维会以为任务已经停了，实际狗还在跑。已完成 / 异常 / 待执行都可以直接撤回。
+pub async fn unpublish_task(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
+) -> Result<Json<ApiResponse<Task>>, AppError> {
+    let task = fetch_task(&state, id).await?;
+    super::parks::ensure_owner(&task, &claims)?;
+    if !crate::schedule::is_published(&task) {
+        return Err(AppError::BadRequest(format!(
+            "计划 {} 已经是「草稿」状态",
+            task.task_code
+        )));
+    }
+    if matches!(task.task_status.as_str(), "执行中" | "已暂停") {
+        return Err(AppError::BadRequest(format!(
+            "计划 {} 正在执行（{}），请先暂停并取消后再撤回",
+            task.task_code, task.task_status
+        )));
+    }
+
+    sqlx::query("UPDATE tasks SET publish_status = ?1, updated_at = ?2 WHERE id = ?3")
+        .bind(crate::schedule::DRAFT)
+        .bind(now())
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+    record_event(
+        &state,
+        "draft",
+        format!("计划 {} 已撤回为草稿", task.task_code),
+        "不再按计划时间自动下发；已经下发的那一次不受影响，需要人跟着收尾".to_string(),
+        task.device_id,
+        Some(id),
+    )
+    .await?;
+    info!("task {} 已撤回为草稿，停止自动调度", task.task_code);
+    Ok(ApiResponse::ok(fetch_task(&state, id).await?))
+}
+
 pub async fn update_task(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -508,12 +644,25 @@ pub async fn update_task(
         plan_end.as_deref(),
         schedule_days.as_deref(),
     )?;
+    // 发布状态：缺省保持原值（编辑弹窗没传就不动它，避免"改个名字"把已发布改成草稿）
+    let publish_status = match payload.publish_status.as_deref().map(str::trim) {
+        Some("") => existing.publish_status.clone(),
+        Some(raw) => normalize_publish_status(Some(raw.to_string()))?,
+        None => existing.publish_status.clone(),
+    };
+    // 从草稿改成已发布时补上发布时间；已发布的仍保留首次发布时间
+    let published_at = if publish_status == crate::schedule::PUBLISHED {
+        existing.published_at.clone().or_else(|| Some(now()))
+    } else {
+        existing.published_at.clone()
+    };
     validate_device_park(&state.db, device_id, park_id).await?;
     sqlx::query(
         "UPDATE tasks SET task_name = ?1, task_type = ?2, execute_mode = ?3, end_task = ?4,
             level = ?5, device_id = ?6, park_id = ?7, zone_id = ?8, route_id = ?9,
             plan_start = ?10, plan_end = ?11, schedule_days = ?12, task_status = ?13,
-            progress = ?14, dispatch_policy = ?15, description = ?16, updated_at = ?17
+            progress = ?14, dispatch_policy = ?15, description = ?16, updated_at = ?17,
+            publish_status = ?19, published_at = ?20
          WHERE id = ?18",
     )
     .bind(&task_name)
@@ -534,6 +683,8 @@ pub async fn update_task(
     .bind(payload.description.or(existing.description))
     .bind(now())
     .bind(id)
+    .bind(&publish_status)
+    .bind(&published_at)
     .execute(&state.db)
     .await?;
     record_event(
