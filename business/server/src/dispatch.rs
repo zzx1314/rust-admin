@@ -185,6 +185,8 @@ pub async fn build_dispatch_payload(
         end_task: Some(end_task.to_string()),
         // 仅显式配置才带：客户端用它覆盖「闭环路线自动返航」的兜底
         end_task_mode: end_task_mode.map(str::to_string),
+        // 计划级「仅夜间自动开灯」：客户端原样转给板端 Agent，判定在板端
+        light_night_only: task.light_night_only,
     })
 }
 
@@ -381,6 +383,7 @@ mod tests {
             // 历史枚举「返航」本来会推断成返回起点
             execute_mode: Some("返航".to_string()),
             end_task: Some("none".to_string()),
+            light_night_only: false,
             level: None,
             device_id: None,
             device_code: None,

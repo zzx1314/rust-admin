@@ -33,6 +33,7 @@
 mod agent_relay;
 mod ai_patrol;
 mod dispatch;
+mod lights;
 mod mapupload;
 mod media_sync;
 /// 联调用「假本体」：`--robot mock` 时在进程内起一个智航 Pro 网关模拟器
@@ -46,6 +47,7 @@ use ai_patrol::{
 use chrono::Local;
 use dispatch::{TaskMode, parse_flight_plan, parse_map_binding};
 use futures_util::{SinkExt, StreamExt};
+use lights::{LightPoint, PointLights, light_point_at, parse_light_points};
 use mapupload::{IngestConfig, UploadOutcome};
 use rand::Rng;
 use robodog_device_client::config::{CliArgs, Config, EnvConfig, RoadNetworkMode, print_help};
@@ -535,6 +537,12 @@ struct ActiveTask {
     point_index: Option<i64>,
     /// 本条路线里带「AI 识别」动作的航点（到点时按 `detail_index` 查）
     ai_points: Vec<AiPoint>,
+    /// 本条路线里带「开补光灯 / 开 LED」动作的航点（与 `ai_points` 分开：
+    /// 有点只开灯不识别）
+    light_points: Vec<LightPoint>,
+    /// 计划级「仅夜间自动开灯」（`tasks.light_night_only` → 载荷 `lightNightOnly`）：
+    /// 为 true 时把 `nightOnly` 交给板端按本地时间窗判，白天到达不开灯
+    light_night_only: bool,
 }
 
 type Shared<T> = Arc<Mutex<T>>;
@@ -789,6 +797,7 @@ async fn run_mapping_once(config: &Config, zhpro: Arc<ZhProClient>) {
 struct BodyContext {
     config: Arc<Config>,
     ai: Arc<AiPatrol>,
+    lights: Arc<PointLights>,
     out_tx: mpsc::Sender<WsMessage>,
     state: Shared<RobotState>,
     active: Shared<Option<ActiveTask>>,
@@ -837,6 +846,7 @@ impl BodyLink {
             ctx.teleop.clone(),
             ctx.config.clone(),
             ctx.ai.clone(),
+            ctx.lights.clone(),
         ));
         // 摇杆重发（50Hz）：浏览器 ~10Hz 的离散帧需要在本体侧连续化，否则看着像点动
         self.republisher = Some(teleop::spawn_republisher(
@@ -1163,6 +1173,19 @@ async fn run_client(
         info!("航点 AI 识别已关闭（--no-ai / ROBODOG_AI_ENABLED=0）");
     }
 
+    // 航点灯光（补光灯 / LED）：与 AI 同一个板端 Agent、同一个总开关（`--no-ai`）。
+    // 到点由 5009 `detail_index` 查路线动作，离开航点/任务结束关灯；夜间判定在板端。
+    let lights = Arc::new(PointLights::new(
+        config.ai_agent_url.clone(),
+        config.ai_enabled,
+    ));
+    if config.ai_enabled {
+        info!(
+            "航点灯光已启用：板端 Agent = {}（航点动作 lightFill/lightLed，计划 lightNightOnly）",
+            lights.agent()
+        );
+    }
+
     // 启动时兜一把残留：`detect_jobs` 下的计划目录本该在任务结束时删（`finish_plan`），
     // 但客户端被 kill / 断电时收尾没跑到，那些目录就永远留在板子上。这里只清「早就
     // 该走了」的（`STALE_PLAN_AGE`），不碰正在跑的和刚跑完的。
@@ -1177,6 +1200,7 @@ async fn run_client(
     let body_ctx = BodyContext {
         config: Arc::new(config.clone()),
         ai: ai.clone(),
+        lights: lights.clone(),
         out_tx: out_tx.clone(),
         state: state.clone(),
         active: active.clone(),
@@ -1275,6 +1299,7 @@ async fn run_client(
                             &teleop,
                             &body_reconnect_tx,
                             &ai,
+                            &lights,
                             &relay,
                         ).await;
                     }
@@ -1552,6 +1577,7 @@ fn spawn_zhpro_pump(
     teleop: SharedTeleop,
     config: Arc<Config>,
     ai: Arc<AiPatrol>,
+    lights: Arc<PointLights>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut rx = client.subscribe();
@@ -1661,6 +1687,7 @@ fn spawn_zhpro_pump(
                         &monitor,
                         &mut progress_reporter,
                         &ai,
+                        &lights,
                     )
                     .await;
                 }
@@ -1931,6 +1958,7 @@ fn spawn_zhpro_pump(
 }
 
 /// 把 5009 快照翻译成业务侧进度
+#[allow(clippy::too_many_arguments)]
 async fn handle_status_frame(
     frame: &StatusFrame,
     out_tx: &mpsc::Sender<WsMessage>,
@@ -1939,6 +1967,7 @@ async fn handle_status_frame(
     monitor: &Arc<Mutex<TaskMonitor>>,
     reporter: &mut ProgressReporter,
     ai: &Arc<AiPatrol>,
+    lights: &Arc<PointLights>,
 ) {
     // 文档 §2.6.10 第 5 条：即时终态可能已经在 `current_task` 里被回收，只留在
     // `recent_terminal_tasks` 里（最多 3 条 / 约 30s）。两处都要识别，否则
@@ -2031,6 +2060,8 @@ async fn handle_status_frame(
     // 识别失败只打日志，绝不影响巡检本身。
     if task.is_terminal() {
         ai.stop("任务终态").await;
+        // 灯光：跑完 / 失败 / 取消都要收——灯亮着没人管就是白耗电
+        lights.leave("任务终态").await;
         // 任务跑完了（成功 / 失败 / 取消都一样）：整个计划的板端存证都没用了。
         // 只靠「推过图就删这个航点」（`ai_cleanup`）清不干净——数量任务的检出不建单
         // 不推群、一个都没命中的航点只留一份 result.json，它们等不到 `ai_cleanup`。
@@ -2045,6 +2076,22 @@ async fn handle_status_frame(
     } else if is_arrival_stage(&task.stage) {
         let current = active.lock().await.clone();
         if let (Some(current), Some(index)) = (current, index) {
+            // 灯光先开：AI 要亮着灯看，顺序反了前几帧还是黑的（补光灯从写 GPIO
+            // 到真正亮起来只要几十毫秒，但识别窗口开得比这快）。开灯放到后台——
+            // `POST /api/lights` 里有几次 GPIO shell 调用，不能让 5009 处理链路等它
+            match light_point_at(&current.light_points, index) {
+                Some(point) => {
+                    let lights = lights.clone();
+                    let task_code = current.task_code.clone();
+                    let point = point.clone();
+                    let night_only = current.light_night_only;
+                    tokio::spawn(async move {
+                        lights.point_arrived(&task_code, &point, night_only).await;
+                    });
+                }
+                // 这个点没配灯：上一个点的灯别继续亮着（狗已经走了）
+                None => lights.leave("到达无灯光动作的航点").await,
+            }
             match ai_point_at(&current.ai_points, index) {
                 Some(point) => {
                     ai.point_arrived(out_tx, &current.task_code.clone(), point)
@@ -2058,6 +2105,8 @@ async fn handle_status_frame(
         // 狗已经离开航点（前往下一点 / 返航 / 别的任务阶段）：窗口时长跟着停留时间走，
         // 收口交给这里，别让相机把路过的东西当成这个点的目标
         ai.stop("已离开航点").await;
+        // 灯同一个道理：录像/识别已经结束，补光灯没必要一路亮到下一个点
+        lights.leave("已离开航点").await;
     }
 
     // 离散事件（去重后只报一次）
@@ -2314,6 +2363,7 @@ async fn handle_server_message(
     teleop: &SharedTeleop,
     body_reconnect: &mpsc::Sender<()>,
     ai: &Arc<AiPatrol>,
+    lights: &Arc<PointLights>,
     relay: &Arc<AgentRelay>,
 ) {
     match msg.msg_type.as_str() {
@@ -2431,6 +2481,20 @@ async fn handle_server_message(
                         .collect::<Vec<_>>()
                 );
             }
+            // 航点灯光（与 AI 动作分开：有点只开灯不识别）+ 计划级「仅夜间自动开灯」
+            let light_points = parse_light_points(&msg.payload["routeData"]);
+            if !light_points.is_empty() {
+                info!(
+                    "任务 {task_code} 含 {} 个灯光航点: {:?}",
+                    light_points.len(),
+                    light_points
+                        .iter()
+                        .map(|point| (point.index, point.fill, point.led))
+                        .collect::<Vec<_>>()
+                );
+            }
+            // 老平台不发 `lightNightOnly`：按「到点就开」跑（历史行为=不开灯）
+            let light_night_only = msg.payload["lightNightOnly"].as_bool().unwrap_or(false);
             *active.lock().await = Some(ActiveTask {
                 task_code: task_code.clone(),
                 task_name: task_name.clone(),
@@ -2438,6 +2502,8 @@ async fn handle_server_message(
                 stage: None,
                 point_index: None,
                 ai_points,
+                light_points,
+                light_night_only,
             });
             state.lock().await.current_task = Some(task_name.clone());
 
@@ -2843,6 +2909,7 @@ async fn handle_server_message(
                     let active = active.clone();
                     let runner_slot = local_runner.clone();
                     let ai = ai.clone();
+                    let lights = lights.clone();
                     tokio::spawn(async move {
                         let outcome = runner.run().await;
                         let (status, message) = match outcome {
@@ -2869,6 +2936,8 @@ async fn handle_server_message(
                         .await;
                         // 本地跑的路子同样要在任务收尾时清掉整个计划的板端存证
                         ai.finish_plan(&code, "本地任务结束").await;
+                        // 本地跑不一定会走到 5009 的「离开航点」，这里直接收灯
+                        lights.leave("本地任务结束").await;
                         // 收尾必须把槽位里的 runner 摘掉：业务侧的下发地图 / 继续任务等
                         // 门禁都看这个槽位，残留的 runner 会让设备在任务早已结束（甚至
                         // 取消）之后仍报「设备正在执行任务」（2026-11-19 现场事故）。
@@ -2949,6 +3018,8 @@ async fn handle_server_message(
                 }
                 // 任务取消：识别窗口没有继续的意义（Agent 单路，别占着）
                 ai.stop("任务已取消").await;
+                // 灯光也是：取消后狗不再跑这条路线，灯必须当场收掉
+                lights.leave("任务已取消").await;
                 // 取消也是计划收尾：板端整个计划目录都不需要了（理由同终态那条）
                 ai.finish_plan(task_code, "任务已取消").await;
                 *active.lock().await = None;

@@ -90,6 +90,18 @@ WIFI_IFACE = os.getenv("WIFI_IFACE", "")                          # 空=自动�
 FILL_LIGHT_GPIO = int(os.getenv("FILL_LIGHT_GPIO", "46"))         # 补光灯 GPIO（设为 -1 可禁用，例如该脚临时改作摄像头触发用）
 LED_TEST_BIN = os.getenv("LED_TEST_BIN", "/opt/xjpt/led/test_rgbrun")  # LED 灯带闪烁程序
 SSD_DEV = os.getenv("SSD_DEV", "/dev/nvme0n1")                    # SSD 设备
+
+# ---- 计划灯光（航点动作「开补光灯 / 开 LED」+ 计划「仅夜间自动开灯」）----
+# 夜间时间窗：**板端本地时间**，允许跨零点（18:00-06:00）。起点 == 终点 = 关闭夜间
+# 判定（等于「白天也开」），用来临时把「仅夜间」退化成「到点就开」。
+# 为什么在板端判：平台/客户端与板子可能不同网段、不同时区，灯亮了却不知道为
+# 什么亮最难查；板端时钟 + 板端时间窗是唯一真源（`control.is_night`）。
+LIGHT_NIGHT_START = os.getenv("LIGHT_NIGHT_START", "18:00")
+LIGHT_NIGHT_END = os.getenv("LIGHT_NIGHT_END", "06:00")
+# 计划点亮的灯最多亮这么久（秒）后自动关：客户端掉线 / 任务被强杀 / 断电重启时
+# 灯会一直亮着（补光灯 + LED 一直耗电，4G 背包扛不住）。手动按钮开的灯不受此限。
+# 取值要大于单点最长停留（路线停留上限 300s）并留出余量。
+LIGHT_MAX_ON_SECS = int(os.getenv("LIGHT_MAX_ON_SECS", "900"))
 LINGS_PLAY_WAV = os.getenv("LINGS_PLAY_WAV", "/opt/xjpt/lingsi/call.wav")  # 聆思播放测试音
 LINGS_CMD_FIFO = os.getenv("LINGS_CMD_FIFO", "/tmp/voice_assistant_cmd")  # asr 控制管道
 LINGS_STATE_FILE = os.getenv("LINGS_STATE_FILE", "/tmp/lingsi_last_cmd")    # 最近一次命令状态（普通文件，供前端查询）

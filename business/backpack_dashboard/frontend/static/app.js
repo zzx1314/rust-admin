@@ -464,7 +464,28 @@ document.getElementById('btn-fill-on').onclick = async () => {
 document.getElementById('btn-fill-off').onclick = async () => {
   const r = await postJson('/api/filllight', { state: false });
   document.getElementById('fill-state').textContent = r.ok && r.state === 'off' ? '关闭' : '—';
+  refreshLights();
 };
+
+// 计划灯光（航点动作 + 计划「仅夜间自动开灯」）状态。
+// 现场经常要回答「灯为什么亮着」：这里同时显示是谁点的灯、亮多久、当前算不算夜间。
+async function refreshLights() {
+  const el = document.getElementById('light-plan');
+  if (!el) return;
+  let s;
+  try {
+    const r = await fetch('/api/lights', { cache: 'no-store' });
+    s = await r.json();
+  } catch (e) { return; }
+  const window_ = s.night_window || {};
+  const parts = [];
+  parts.push(`补光 ${s.fill ? '开' : '关'}`);
+  parts.push(`LED ${s.led ? '亮' : '关'}`);
+  if (s.on_secs != null) parts.push(`已亮 ${Math.round(Number(s.on_secs))}s`);
+  parts.push(`${s.night ? '夜间' : '白天'} ${window_.enabled === false ? '（未启用夜间窗）' : `${window_.start || '—'}-${window_.end || '—'}`}`);
+  el.textContent = parts.join(' · ');
+  el.title = s.source ? `来源：${s.source}` : '';
+}
 // 旧的 "执行测试" 按钮已拆为 "启动服务"/"关闭服务" 两个独立按钮
 async function refreshLingsi() {
   try {
@@ -1394,6 +1415,8 @@ function bindDetectControls() {
   refreshDetect();
   refreshDetectStatus();
   setInterval(refreshDetectStatus, 3000);
+  refreshLights();
+  setInterval(refreshLights, 5000);
   const dr = document.getElementById('btn-detect-refresh');
   if (dr) dr.onclick = (ev) => {
     const b = ev.currentTarget;

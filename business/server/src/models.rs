@@ -196,6 +196,10 @@ pub struct Task {
     /// 结束动作（返航开关）：`NULL` 跟随路线 / `none` / `return_to_start` /
     /// `return_to_charge`，见 [`crate::dispatch::resolve_task_end`]。
     pub end_task: Option<String>,
+    /// 计划级「仅夜间自动开灯」：勾上时航点动作上的 `lightFill` / `lightLed` 只在
+    /// 板端夜间时间窗内生效（`LIGHT_NIGHT_START`/`LIGHT_NIGHT_END`，默认 18:00-06:00）。
+    /// 见迁移 030。
+    pub light_night_only: bool,
     pub level: Option<String>,
     pub device_id: Option<i64>,
     pub device_code: Option<String>,
@@ -402,6 +406,9 @@ pub struct TaskRequest {
     /// 缺省 = 跟随路线；更新时显式传 null 表示改回「跟随路线」。
     #[serde(default, deserialize_with = "double_option")]
     pub end_task: Option<Option<String>>,
+    /// 计划级「仅夜间自动开灯」：`true` 时航点上的补光灯 / LED 只在夜间时段开。
+    /// 缺省 / `null` = 不勾（到点就开）；老调用方不发这个字段，行为不变。
+    pub light_night_only: Option<bool>,
     pub level: Option<String>,
     pub device_id: Option<i64>,
     pub park_id: Option<i64>,

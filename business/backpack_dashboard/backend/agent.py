@@ -43,8 +43,13 @@
 - POST /api/lingsi/test       -> 触发聆思测试序列
 - POST /api/asr/start         -> 启动 asr 服务（后台触发 systemctl start）
 - POST /api/asr/stop          -> 关闭 asr 服务（后台触发 systemctl stop）
-- POST /api/led/blink         -> LED 灯带闪烁
-- POST /api/filllight         -> 补光灯开关 {"state": true/false}
+- POST /api/led/blink         -> LED 灯带闪烁（手动按钮；与计划灯光共用同一个进程）
+- POST /api/filllight         -> 补光灯开关 {"state": true/false}（手动按钮）
+- GET  /api/lights            -> 灯光状态（补光/LED、是否计划点亮、当前是否夜间、夜间时间窗）
+- POST /api/lights            -> [航点] 开灯 {"fill":true,"led":true,"nightOnly":false,
+                                 "planId":"TK-..","pointIndex":3}；
+                                 `nightOnly` 且不在夜间窗内 → 跳过（返回 skipped=daytime）
+- POST /api/lights/off        -> [航点/计划] 关灯 {"reason":"已离开航点"}
 """
 import os
 import json
@@ -600,6 +605,62 @@ async def filllight(request: Request):
         body = {}
     state = bool(body.get("state", True))
     return JSONResponse(control.fill_light(state))
+
+
+def _tri_state(value):
+    """三态开关：True / False / None（请求里没带 = 这次不动这盏灯）。"""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("1", "true", "on", "yes"):
+            return True
+        if text in ("0", "false", "off", "no"):
+            return False
+        return None
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return None
+
+
+@app.get("/api/lights")
+async def lights_status():
+    """灯光状态：补光灯 / LED、是否计划点亮、当前是否夜间与夜间时间窗。
+
+    纯内存 + GPIO 文件探测，不触发任何采集；Dashboard 每 5s 拉一次。
+    """
+    return JSONResponse(control.lights_status(), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/lights")
+async def lights_on(request: Request):
+    """[航点动作] 开灯：`{"fill":true,"led":true,"nightOnly":false}`。
+
+    由设备客户端在到达带「开补光灯 / 开 LED」动作的航点时调用（客户端与 Agent 同机，
+    平台够不到板端）。`nightOnly` = 计划勾了「仅夜间自动开灯」：交给**板端**按
+    `LIGHT_NIGHT_START`/`LIGHT_NIGHT_END` 判定，白天到达时什么都不做，返回
+    `skipped=daytime`（客户端据此不记「已开灯」，离开航点时也不用发关灯）。
+    """
+    b = await _detect_body(request)
+    source = "计划 %s 航点 %s" % (b.get("planId") or b.get("taskCode") or "—",
+                                  b.get("pointIndex"))
+    r = await asyncio.to_thread(
+        control.lights_apply,
+        _tri_state(b.get("fill")), _tri_state(b.get("led")),
+        bool(b.get("nightOnly")), source)
+    # 硬件不可用（补光灯 GPIO 被禁用 / LED 程序缺失）也算「请求受理了」：LED 可能
+    # 已经点亮，客户端要记下这一轮才能离开航点时关回来。结论看 `ok` / `errors`。
+    return JSONResponse(r)
+
+
+@app.post("/api/lights/off")
+async def lights_off(request: Request):
+    """[航点动作 / 计划收尾] 关灯：离开航点、任务终态、任务取消、看门狗超时。"""
+    b = await _detect_body(request)
+    r = await asyncio.to_thread(control.lights_off, str(b.get("reason") or "计划结束"))
+    return JSONResponse(r)
 
 
 @app.get("/api/events")

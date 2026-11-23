@@ -421,6 +421,13 @@ pub struct TaskDispatchPayload {
     /// 老客端忽略本字段，行为不变。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_task_mode: Option<String>,
+    /// 计划级「仅夜间自动开灯」（`tasks.light_night_only`）：勾上时航点动作上的
+    /// `lightFill` / `lightLed` 只在夜间时段开（板端 `LIGHT_NIGHT_START`/
+    /// `LIGHT_NIGHT_END`，默认 18:00-06:00 本地时间）。
+    ///
+    /// 客户端只把 `nightOnly` 转给板端 Agent，不自己判夜间（平台/板子可能不同时区）。
+    /// 总是下发（`false` 也发）：老客户端忽略未知字段，语义比「缺省 = true」安全。
+    pub light_night_only: bool,
 }
 
 /// 下发载荷中的地图绑定

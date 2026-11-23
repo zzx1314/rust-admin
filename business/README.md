@@ -1514,6 +1514,19 @@ AI 可对除红外外的五路开启，画框方式二选一：
   图被拒的都等不到它。所以任务终态 / 取消时客户端调 `AiPatrol::finish_plan` 把
   `detect_jobs/<计划ID>/` 整个删掉（窗口还在收尾就先记账等它跑完；同计划号重跑会撤销），
   启动时 `AiPatrol::sweep_stale_plans` 再清一把超过 3 天没动过的残留。
+- **航点灯光（背包板补光灯 / LED）**：路线编辑器的航点动作多两个开关——
+  `lightFill`（开补光灯，板端 GPIO 46）与 `lightLed`（开 LED 灯带，板端拉起厂商
+  `test_rgbrun`，行为是循环闪烁）。客户端在 `patrol.point_arrived` / `patrol.waiting`
+  时调板端 Agent `POST /api/lights`，**离开航点 / 到达无灯光动作的航点 / 任务终态 /
+  任务取消**时调 `POST /api/lights/off` 关灯；Agent 自己还有看门狗
+  （`LIGHT_MAX_ON_SECS`，默认 900 s），客户端掉线或被 kill 时兜底关灯。
+  计划（`tasks.light_night_only`，迁移 030，表单上叫「仅夜间自动开灯」）勾上后，
+  客户端只把 `nightOnly` 转给板端，由**板端按本地时间窗**（`LIGHT_NIGHT_START` /
+  `LIGHT_NIGHT_END`，默认 18:00-06:00）判定——白天到达板端直接跳过、不开灯，平台不
+  参与算夜间（两地时区/时钟不一致时白天开灯最难查）。不勾 = 到点就开。
+  回归：`backend/tools/lights_selftest.py`（时间窗 / 白天跳过 / 看门狗）、
+  `client lights::tests::*`、`api_smoke::task_light_night_only_reaches_dispatch_payload`。
+  设计与踩坑见 [`docs/plan-lights.md`](docs/plan-lights.md)。
 - 分析与后续路线（遥测、SOS 告警、中继、录像）见
   [`docs/backpack-video-integration.md`](docs/backpack-video-integration.md)。
 

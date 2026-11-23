@@ -139,6 +139,13 @@ export interface Task {
    * `return_to_start` / `return_to_charge`，见 `utils/constants.ts::END_ACTIONS`。
    */
   endTask: string | null;
+  /**
+   * 计划级「仅夜间自动开灯」：`true` = 航点动作上的补光灯 / LED 只在夜间时段开。
+   *
+   * 夜间判定在**板端**（`LIGHT_NIGHT_START` / `LIGHT_NIGHT_END`，默认 18:00-06:00，
+   * 板子本地时间），平台/客户端只把开关转下去。`false` = 到点就开。
+   */
+  lightNightOnly: boolean;
   level: string | null;
   deviceId: number | null;
   deviceCode: string | null;
@@ -228,6 +235,19 @@ export interface RoutePointAction {
    * 正常结论不该进处置列表。
    */
   notifyWhenCountOk?: boolean;
+  /**
+   * 到点开**补光灯**（背包板 GPIO，经板端 Agent `/api/lights`）。
+   *
+   * 与 AI 识别无关：不配 AI 动作的航点也能只开灯。离开航点 / 任务结束时自动关灯；
+   * 计划里勾了「仅夜间自动开灯」时只有夜间时段才真的开。
+   */
+  lightFill?: boolean;
+  /**
+   * 到点开 **LED 灯带**（板端 Agent 拉起厂商的 `test_rgbrun`，行为是循环闪烁）。
+   *
+   * 同上：离开航点 / 任务结束时关；计划「仅夜间自动开灯」勾上时只在夜间开。
+   */
+  lightLed?: boolean;
 }
 
 /** AI 识别的两类任务：检测是否存在 / 检测数量是否正确 */

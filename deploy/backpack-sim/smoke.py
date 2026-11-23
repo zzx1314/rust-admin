@@ -7,6 +7,7 @@
 [3] 视频中继            观看通道触发 relay 起 ffmpeg（媒体走 RTSP→mediamtx/WHEP）
 [4] 航点 AI 计划         detect/start(plan_id) → SSE plan_hit + 证据图落盘
 [5] AI 启停走隧道        POST /api/backpack/detect/start|stop 真的改了 Agent 运行态
+[6] 计划灯光            /api/lights 开关补光/LED，off 能收回去（SIM_NIGHT=0 时验证白天跳过）
 ```
 
 为什么值得单独跑：这五条里有三条（隧道、中继按需起流、证据图落盘）**只在有人看/有任务
@@ -264,6 +265,54 @@ def check_ai(token, plan_id="TK-SMOKE-01"):
         report("平台 detect/start|stop", False, str(error))
 
 
+def check_lights():
+    """[6] 计划灯光：客户端到点时打的三个接口（补光 / LED / 关灯）。"""
+    print("[6] 计划灯光：/api/lights 开灯 + off 关灯")
+    try:
+        status = get_json(AGENT + "/api/lights")
+        report("GET /api/lights", "night" in status and "night_window" in status,
+               "night=%s window=%s" % (status.get("night"), status.get("night_window")))
+    except Exception as error:  # noqa: BLE001
+        report("GET /api/lights", False, str(error))
+        return False
+
+    # 白天（SIM_NIGHT=0 或真实白天）+ nightOnly：必须跳过，且不能把 previous 状态改掉
+    daytime = status.get("night") is False
+    try:
+        result = post_json(AGENT + "/api/lights", {
+            "fill": True, "led": True, "nightOnly": True,
+            "taskCode": "TK-SMOKE-LIGHT", "pointIndex": 0,
+        })
+        if daytime:
+            report("白天 + 仅夜间 → skipped=daytime",
+                   result.get("skipped") == "daytime",
+                   "fill=%s led=%s" % (result.get("status", {}).get("fill"),
+                                       result.get("status", {}).get("led")))
+        else:
+            report("夜间到点开灯", bool(result.get("ok")) and not result.get("skipped"),
+                   str(result.get("skipped")))
+    except Exception as error:  # noqa: BLE001
+        report("POST /api/lights", False, str(error))
+        return False
+
+    try:
+        post_json(AGENT + "/api/lights", {
+            "fill": True, "led": True, "nightOnly": False,
+            "taskCode": "TK-SMOKE-LIGHT", "pointIndex": 0,
+        })
+        lit = get_json(AGENT + "/api/lights")
+        report("开灯后 status.fill=true", lit.get("fill") is True,
+               "fill=%s led=%s" % (lit.get("fill"), lit.get("led")))
+        off = post_json(AGENT + "/api/lights/off", {"reason": "smoke"})
+        off_status = off.get("status") or get_json(AGENT + "/api/lights")
+        report("off 后两盏灯都关",
+               off_status.get("fill") is False and off_status.get("led") is False,
+               "fill=%s led=%s" % (off_status.get("fill"), off_status.get("led")))
+    except Exception as error:  # noqa: BLE001
+        report("POST /api/lights/off", False, str(error))
+    return True
+
+
 def main():
     print()
     print("backpack-sim 冒烟自测：agent=%s platform=%s stream=%s" % (AGENT, PLATFORM, STREAM))
@@ -280,6 +329,7 @@ def main():
     check_platform(token)
     check_video(token)
     check_ai(token)
+    check_lights()
     print()
     ok = all(checks)
     print("结果：%s（%d/%d 通过）" % ("全部通过" if ok else "有链路没通",

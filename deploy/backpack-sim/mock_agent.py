@@ -48,13 +48,16 @@ GET  /api/events            SSE：detect / plan_hit / detect_state / detect_erro
 | `SIM_EXIST_FOUND` | `1` | 存在性任务是否检出；`0` = 一直不命中（用来验证「未检出」告警） |
 | `SIM_LATE_EVIDENCE` | `0` | 设 1 时图**不在 `plan_hit` 里给**，只在 `stop` 时由 `ai_evidence` 补（复现「卡片先发、图晚到」） |
 | `SIM_TICK` | `1.2` | 普通（非计划）识别的检出节拍（秒） |
+| `SIM_NIGHT` | 空 | 计划灯光的「现在算不算夜间」：`1` / `0` 钉死，空 = 按本地时间窗（`LIGHT_NIGHT_START`/`LIGHT_NIGHT_END`，与板端同规则） |
 
 控制接口（只在本模拟里有，真 Agent 没有）：
 
 ```bash
 curl -s 127.0.0.1:8000/api/sim/state
-curl -s -XPOST 127.0.0.1:8000/api/sim/relay -d '{"running":false}'
+curl -s 127.0.0.1:8000/api/sim/relay -d '{"running":false}'
 curl -s -XPOST 127.0.0.1:8000/api/sim/emit  -d '{"type":"telemetry","battery":88}'
+curl -s 127.0.0.1:8000/api/lights          # 计划灯光（补光 / LED / 是否夜间）
+curl -s -XPOST 127.0.0.1:8000/api/lights/off -d '{"reason":"manual"}'
 ```
 """
 
@@ -85,6 +88,11 @@ COUNT_RESULT = os.environ.get("SIM_COUNT_RESULT", "ok").strip().lower()
 EXIST_FOUND = os.environ.get("SIM_EXIST_FOUND", "1") == "1"
 LATE_EVIDENCE = os.environ.get("SIM_LATE_EVIDENCE", "0") == "1"
 TICK = float(os.environ.get("SIM_TICK", "1.2"))
+# 计划灯光的夜间判定：空 = 按本地时间窗（与板端 `control.is_night` 同规则），
+# `1` / `0` 钉死（联调「白天到达跳过开灯」时不用等到晚上）。
+SIM_NIGHT = os.environ.get("SIM_NIGHT", "").strip()
+LIGHT_NIGHT_START = os.environ.get("LIGHT_NIGHT_START", "18:00")
+LIGHT_NIGHT_END = os.environ.get("LIGHT_NIGHT_END", "06:00")
 
 # 与真板子一致的六路源（cam0~cam3 由 Agent 推给 mediamtx，dogcam 是本体前置）
 CAMERAS = {
@@ -138,6 +146,39 @@ FALLBACK_JPEG = bytes.fromhex(
 )
 
 
+# --------------------------------------------------------------------------- 计划灯光
+#
+# 真板子在 `backend/control.py`：夜间窗跑本地时间、`nightOnly` 白天的返回
+# `skipped="daytime"`。模拟里只维持状态计数，不碰 GPIO / 进程。
+
+def _hhmm_minutes(text):
+    try:
+        hh, mm = str(text).strip().split(":")
+        hh, mm = int(hh), int(mm)
+        if 0 <= hh <= 24 and 0 <= mm <= 59:
+            return (hh % 24) * 60 + mm
+    except Exception:
+        pass
+    return None
+
+
+def sim_is_night(now=None):
+    """与板端 `control.is_night` 同一规则（18:00-06:00，允许跨零点）。"""
+    if SIM_NIGHT in ("1", "true", "on", "yes"):
+        return True
+    if SIM_NIGHT in ("0", "false", "off", "no"):
+        return False
+    start = _hhmm_minutes(LIGHT_NIGHT_START)
+    end = _hhmm_minutes(LIGHT_NIGHT_END)
+    if start is None or end is None or start == end:
+        return False
+    now = now or time.localtime()
+    minutes = now.tm_hour * 60 + now.tm_min
+    if start < end:
+        return start <= minutes < end
+    return minutes >= start or minutes < end
+
+
 # --------------------------------------------------------------------------- 状态
 
 
@@ -160,6 +201,10 @@ class State:
         self.subscribers = []  # list[queue.Queue]
         self.relay = {"enabled": True, "running": RELAY_RUNNING, "restarts": 0,
                       "last_error": "", "stream": "dogcam"}
+        # 计划灯光（客户端在 5009 到点 / 离开航点时调的 /api/lights）
+        self.lights = {"fill": False, "led": False, "managed": False,
+                       "night_only": False, "source": "", "applied": 0,
+                       "off": 0, "skipped": 0}
         self.seen_events = 0
 
     # ---- 事件 ----
@@ -243,6 +288,28 @@ class State:
                     "jobs_dir": JOBS_DIR,
                 },
             }
+
+    def lights_status(self):
+        """计划灯光快照（GET /api/lights）——字段与板端 `control.lights_status` 对齐。"""
+        with self.lock:
+            lights = dict(self.lights)
+        window = {"start": LIGHT_NIGHT_START, "end": LIGHT_NIGHT_END,
+                  "enabled": _hhmm_minutes(LIGHT_NIGHT_START) is not None
+                             and _hhmm_minutes(LIGHT_NIGHT_END) is not None
+                             and _hhmm_minutes(LIGHT_NIGHT_START)
+                             != _hhmm_minutes(LIGHT_NIGHT_END)}
+        lights.update({
+            "night": sim_is_night(),
+            "night_window": window,
+            "fill_gpio": 46,
+            "led_bin": "sim/no-led",
+            "led_bin_exists": True,
+            "fill_available": True,
+            "max_on_secs": 900,
+            "on_secs": None,
+            "sim": True,
+        })
+        return lights
 
     def detect_state_event(self):
         snapshot = self.status()
@@ -554,6 +621,8 @@ class Handler(BaseHTTPRequestHandler):
             })
         if path == "/api/detect/status":
             return self.json(STATE.status())
+        if path == "/api/lights":
+            return self.json(STATE.lights_status())
         if path == "/api/events":
             return self.sse()
         if path == "/api/sim/state":
@@ -562,6 +631,7 @@ class Handler(BaseHTTPRequestHandler):
                 "plan": STATE.plan,
                 "subscribers": len(STATE.subscribers),
                 "relay": STATE.relay,
+                "lights": STATE.lights,
                 "events": STATE.seen_events,
             })
         if path == "/":
@@ -594,6 +664,41 @@ class Handler(BaseHTTPRequestHandler):
             with STATE.lock:
                 STATE.plan = None
             return self.json({"ok": True, "status": STATE.status()})
+
+        # 计划灯光（客户端在 5009 到点 / 离开航点时调；与真板端同一份字段）
+        if path == "/api/lights":
+            night = sim_is_night()
+            night_only = bool(body.get("nightOnly"))
+            if night_only and not night:
+                with STATE.lock:
+                    STATE.lights["skipped"] += 1
+                return self.json({"ok": True, "night": night, "skipped": "daytime",
+                                  "detail": "当前不在夜间时段，跳过开灯",
+                                  "status": STATE.lights_status()})
+            with STATE.lock:
+                for name in ("fill", "led"):
+                    if body.get(name) is not None:
+                        STATE.lights[name] = bool(body.get(name))
+                STATE.lights.update({
+                    "managed": STATE.lights["fill"] or STATE.lights["led"],
+                    "night_only": night_only,
+                    "source": "计划 %s 航点 %s" % (
+                        body.get("planId") or body.get("taskCode") or "—",
+                        body.get("pointIndex")),
+                })
+                STATE.lights["applied"] += 1
+            return self.json({"ok": True, "night": night, "skipped": None,
+                              "applied": {"fill": STATE.lights["fill"],
+                                          "led": STATE.lights["led"]},
+                              "errors": [], "status": STATE.lights_status()})
+        if path == "/api/lights/off":
+            reason = str(body.get("reason") or "计划结束")
+            with STATE.lock:
+                STATE.lights.update({"fill": False, "led": False, "managed": False,
+                                     "night_only": False, "source": "off"})
+                STATE.lights["off"] += 1
+            return self.json({"ok": True, "reason": reason,
+                              "status": STATE.lights_status()})
 
         # 模拟专用
         if path == "/api/sim/relay":

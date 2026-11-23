@@ -71,6 +71,9 @@ python3 -m py_compile business/backpack_dashboard/backend/tools/*.py
 # 航点计划状态机自检（不需要 NPU / 相机，改 detect.py 的计划逻辑后必跑）
 python3 business/backpack_dashboard/backend/tools/plan_count_selftest.py
 
+# 计划灯光自检（夜间时间窗 / 白天跳过 / GPIO+LED / 看门狗，改 control.py 后必跑）
+python3 business/backpack_dashboard/backend/tools/lights_selftest.py
+
 # 本地接口链路（模拟 Agent，不需要板子）
 cd deploy/backpack-sim && python3 run.py up && python3 run.py smoke
 
@@ -143,6 +146,17 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
   `_plan_flush` 要在停识别时把采样中的命中落盘（客户端靠「先停再扫」补图）。
   改这块先读 `official-app-parity.md` §5.6，并跑 `plan_count_selftest.py`
   （里面有「采集关闭：不写媒体归档、证据图照写」与「不传开关默认开」两条）。
+- **计划灯光（补光灯 / LED）只有一份状态**：`control.py` 的补光灯 GPIO + LED 进程句柄
+  被**手动按钮**（`/api/filllight`、`/api/led/blink`）和**计划**（`/api/lights`、
+  `/api/lights/off`）共用。`LED_TEST_BIN` 只有「循环闪烁」没有常亮接口，所以「LED 开」
+  = 拉起进程、「关」= 按进程组杀掉（`start_new_session=True`，厂商程序可能 fork）；
+  手动与计划必须共用 `_LED_PROC`，否则计划结束时杀不掉手动拉起的那一个。
+  「仅夜间自动开灯」的夜间判定**只在板端**（`control.is_night`，`LIGHT_NIGHT_START` /
+  `LIGHT_NIGHT_END` 默认 18:00-06:00，允许跨零点，起止相同 = 关闭）：白天到达返回
+  `skipped=daytime` 且**什么都不做**（不写 GPIO、不拉进程、不记「已开灯」——否则离开
+  航点时会把操作员手动开的灯顺手关掉）。计划灯有看门狗（`LIGHT_MAX_ON_SECS` 默认
+  900s），客户端掉线 / 被 kill 时兜底关灯；手动开的灯不进看门狗。
+  改这块先读 `business/docs/plan-lights.md`，并跑 `lights_selftest.py`。
 - **`relay.py` 的 dogcam720 要硬解**：它常驻把本体 1080p60 转成 720p，软解一条就吃
   一个核的 71%（`.246` 实测）。`_probe_decoder()` 会先真解 2 帧确认 `h264_rkmpp` 可用
   （写死 `-c:v` 有风险：解不出来时 ffmpeg 不报错、只是永远等不到帧），失败退回软解；

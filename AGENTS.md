@@ -228,6 +228,22 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 重试一次，不依赖人工点「重新定位」；`state.active_map` 只在定位真的成功后更新，不要按计划里
 的 `mapId` 乐观写入（否则守卫会误判「已载好」而跳过自动重定位）。
 
+**航点灯光（补光灯 / LED）= 航点动作 + 计划夜间开关**：路线编辑器的航点动作多了
+`lightFill`（开补光灯）/ `lightLed`（开 LED 灯带），计划（`tasks.light_night_only`，
+迁移 030，表单上叫「仅夜间自动开灯」）决定它们是不是只在夜里开。客户端与 Agent
+同机，到点（5009 `patrol.point_arrived` / `patrol.waiting`）调板端 `POST /api/lights`，
+离开航点 / 到达无灯光动作的点 / 任务终态 / 取消时调 `/api/lights/off`。
+**夜间判定只在板端**（`control.is_night`，`LIGHT_NIGHT_START` / `LIGHT_NIGHT_END`
+默认 18:00-06:00 本地时间、允许跨零点、起止相同 = 关闭）：客户端只把 `nightOnly`
+转下去，白天到达板端直接 `skipped=daytime` 什么都不做（不写 GPIO、不拉进程、
+不记「已开灯」——否则离开航点会顺手关掉操作员手动开的灯）。**别把判夜搬到平台/客户端**：
+两地时区或时钟不一致时，白天开灯现场无法解释。LED 只有厂商的 `test_rgbrun`（循环
+闪烁，无常亮接口），开关 = 拉起/按进程组杀掉，手动按钮与计划**共用同一个进程句柄**。
+计划灯有看门狗 `LIGHT_MAX_ON_SECS`（默认 900s），手动开的灯不看门狗。
+改这块先读 `business/docs/plan-lights.md`；回归
+`backend/tools/lights_selftest.py`、`client lights::tests`、
+`api_smoke::task_light_night_only_reaches_dispatch_payload`。
+
 企业微信告警推送：群机器人 webhook **在平台里配**（系统设置 → 企业微信群机器人，
 存 `settings.wecom_webhook`，`value_type='secret'`，保存即生效、接口只回掩码、
 不进 `server.toml`）；环境变量 `ROBODOG_WECOM_WEBHOOK` 保留为部署级兜底，平台为空

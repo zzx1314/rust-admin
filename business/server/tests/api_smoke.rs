@@ -2779,6 +2779,113 @@ async fn task_end_action_drives_dispatch_payload() {
     );
 }
 
+/// 计划级「仅夜间自动开灯」：建计划时能存下来，并原样进下发载荷
+/// （客户端只把它转给板端 Agent，白天/夜间的判定在板端）。
+#[tokio::test]
+async fn task_light_night_only_reaches_dispatch_payload() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let map_id = insert_real_map(&pool).await;
+    let route_id = insert_dispatchable_route(&pool, &map_id).await;
+    let device_pk = bound_device_pk(&pool).await;
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+
+    async fn create(app: &axum::Router, token: &str, body: String) -> Value {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/tasks")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "建任务应成功");
+        json_body(response).await
+    }
+
+    // 1) 勾上：落库 + 载荷为 true
+    let body = create(
+        &app,
+        &token,
+        format!(
+            r#"{{"taskName":"夜间补光巡检","deviceId":{device_pk},"parkId":1,
+                "routeId":{route_id},"lightNightOnly":true}}"#
+        ),
+    )
+    .await;
+    assert_eq!(
+        body["data"]["lightNightOnly"], true,
+        "建任务的回执要带回来，否则前端以为没存上: {body}"
+    );
+    let task_id = body["data"]["id"].as_i64().expect("应返回任务 id");
+    let task = fetch_task_row(&pool, task_id).await;
+    assert!(task.light_night_only);
+    let payload = robodog_ops_server::dispatch::build_dispatch_payload(&pool, &task)
+        .await
+        .expect("应能组装载荷");
+    assert!(
+        payload.light_night_only,
+        "勾了仅夜间必须下发，否则板端会白天也开灯"
+    );
+
+    // 2) 不传：默认不限制时段（老计划 / 老调用方行为不变）
+    let body = create(
+        &app,
+        &token,
+        format!(
+            r#"{{"taskName":"普通巡检","deviceId":{device_pk},"parkId":1,
+                "routeId":{route_id}}}"#
+        ),
+    )
+    .await;
+    assert_eq!(body["data"]["lightNightOnly"], false);
+    let task_id = body["data"]["id"].as_i64().expect("应返回任务 id");
+    let task = fetch_task_row(&pool, task_id).await;
+    assert!(!task.light_night_only);
+    let payload = robodog_ops_server::dispatch::build_dispatch_payload(&pool, &task)
+        .await
+        .unwrap();
+    assert!(!payload.light_night_only);
+
+    // 3) 编辑时显式改成 false（编辑弹窗取消勾选）：不能因为「没传」被忽略
+    let response = app
+        .clone()
+        .oneshot(
+            Request::put(format!("/api/tasks/{task_id}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(
+                    r#"{"taskName":"普通巡检","lightNightOnly":true}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "编辑应成功");
+    let task = fetch_task_row(&pool, task_id).await;
+    assert!(task.light_night_only, "编辑弹窗勾上要生效");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::put(format!("/api/tasks/{task_id}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(
+                    r#"{"taskName":"普通巡检","lightNightOnly":false}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let task = fetch_task_row(&pool, task_id).await;
+    assert!(!task.light_night_only, "取消勾选也要生效");
+}
+
 /// 中台重复导入的包按「同名 zip」认回本体目录名，且可重复执行。
 #[tokio::test]
 async fn map_source_ref_backfills_from_same_package_name() {

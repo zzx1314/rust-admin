@@ -435,6 +435,9 @@ pub async fn apply_task(
             task_type: None,
             execute_mode: payload.execute_mode.clone(),
             end_task: Some(payload.end_task.clone()),
+            // 中台「一键下发」不配灯光：航点动作里的 lightFill / lightLed 照旧生效，
+            // 但不加「仅夜间」限制（中台没有这个开关，别自己发明一个默认值）
+            light_night_only: None,
             level: payload.level.clone(),
             device_id: Some(device.id),
             park_id: Some(park_id),

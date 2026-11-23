@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 
 /// 任务行 + 关联名称的公共列清单（服务端各处 SELECT 与集成测试共用，避免漏列）
 pub const TASK_SELECT: &str = "SELECT t.id, t.task_code, t.task_name, t.task_type, t.execute_mode,
-    t.end_task,
+    t.end_task, t.light_night_only,
     t.level, t.device_id, d.device_id AS device_code, t.park_id, p.park_name, t.zone_id,
     z.zone_name, t.route_id, r.route_code, r.route_name, t.plan_start, t.plan_end,
     t.schedule_days, t.last_dispatched_on, t.publish_status, t.published_at,
@@ -220,6 +220,8 @@ pub async fn create_task_core(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| format!("TK-{}-{next_id:02}", chrono::Local::now().format("%m%d")));
     let end_task = normalize_task_end_task(payload.end_task.flatten())?;
+    // 计划级「仅夜间自动开灯」：只有航点动作里配了 lightFill / lightLed 才起作用
+    let light_night_only = payload.light_night_only.unwrap_or(false);
     // 计划发布状态：只有「已发布」的计划才会被自动执行（`schedule::is_published`）
     let publish_status = normalize_publish_status(payload.publish_status.clone())?;
     let timestamp = now();
@@ -228,9 +230,9 @@ pub async fn create_task_core(
         "INSERT INTO tasks (task_code, task_name, task_type, execute_mode, end_task, level, device_id,
             park_id, zone_id, route_id, plan_start, plan_end, schedule_days, task_status, progress,
             dispatch_policy, description, created_at, updated_at, created_by,
-            progress_updated_at, publish_status, published_at)
+            progress_updated_at, publish_status, published_at, light_night_only)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-            ?17, ?18, ?19, ?20, ?18, ?21, ?22)",
+            ?17, ?18, ?19, ?20, ?18, ?21, ?22, ?23)",
     )
     .bind(&task_code)
     .bind(payload.task_name.trim())
@@ -254,6 +256,7 @@ pub async fn create_task_core(
     .bind(created_by)
     .bind(&publish_status)
     .bind(&published_at)
+    .bind(light_night_only)
     .execute(&state.db)
     .await?;
     let id = result.last_insert_rowid();
@@ -633,6 +636,10 @@ pub async fn update_task(
         Some(value) => normalize_task_end_task(value.clone())?,
         None => existing.end_task.clone(),
     };
+    // 仅夜间自动开灯：缺省保持原值（编辑弹窗没传就不动它）
+    let light_night_only = payload
+        .light_night_only
+        .unwrap_or(existing.light_night_only);
     let schedule_days = match payload.schedule_days.as_deref() {
         // 显式传了就以请求为准（空字符串 = 取消周期日 = 每天）
         Some(raw) => crate::schedule::normalize_days(Some(raw)),
@@ -662,7 +669,7 @@ pub async fn update_task(
             level = ?5, device_id = ?6, park_id = ?7, zone_id = ?8, route_id = ?9,
             plan_start = ?10, plan_end = ?11, schedule_days = ?12, task_status = ?13,
             progress = ?14, dispatch_policy = ?15, description = ?16, updated_at = ?17,
-            publish_status = ?19, published_at = ?20
+            publish_status = ?19, published_at = ?20, light_night_only = ?21
          WHERE id = ?18",
     )
     .bind(&task_name)
@@ -685,6 +692,7 @@ pub async fn update_task(
     .bind(id)
     .bind(&publish_status)
     .bind(&published_at)
+    .bind(light_night_only)
     .execute(&state.db)
     .await?;
     record_event(

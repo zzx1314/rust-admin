@@ -155,7 +155,14 @@ const actionForm = reactive({
    * AI 识别：数量**一致**时也通知（仅 `count` 任务）。
    * 只发企业微信群回执，不落告警、不建工单；默认关（数量任务只报不一致）。
    */
-  notifyWhenCountOk: false
+  notifyWhenCountOk: false,
+  /**
+   * 到点开补光灯（背包板 GPIO，走板端 Agent `/api/lights`）。
+   * 离开航点 / 任务结束时自动关；计划勾了「仅夜间自动开灯」时只在夜间开。
+   */
+  lightFill: false,
+  /** 到点开 LED 灯带（板端拉起厂商 `test_rgbrun`，循环闪烁） */
+  lightLed: false
 });
 
 /** 背包 AI 模型目录（场景 + 类别）：仅在配「AI 识别」动作时按需加载 */
@@ -194,6 +201,15 @@ function actionCheckTypeLabel(action: {
   }
   // 存在性任务里「找不到也告警」是另一种语义，卡片上必须能看出来，否则现场会以为配错
   return action.alertWhenMissing ? "是否存在（找不到也告警）" : "是否存在";
+}
+
+/** 动作卡片上的灯光文案：没配灯返回空串（不占一行） */
+function actionLightLabel(action: { lightFill?: boolean; lightLed?: boolean }) {
+  const lights = [
+    action.lightFill ? "补光灯" : "",
+    action.lightLed ? "LED" : ""
+  ].filter(Boolean);
+  return lights.length ? `到点开${lights.join(" + ")}` : "";
 }
 
 const filteredRoutes = computed(() => {
@@ -887,7 +903,9 @@ function openActionDialog(kind: "point" | "leg", index: number | null = null) {
         (existing.expectCount != null && Number(existing.expectCount) > 0 ? "count" : "exist"),
       expectCount: existing.expectCount ?? null,
       alertWhenMissing: existing.alertWhenMissing === true,
-      notifyWhenCountOk: existing.notifyWhenCountOk === true
+      notifyWhenCountOk: existing.notifyWhenCountOk === true,
+      lightFill: existing.lightFill === true,
+      lightLed: existing.lightLed === true
     });
     actionEditIndex.value = index;
     if (actionForm.type === "AI 识别") void aiCatalog.load();
@@ -909,7 +927,9 @@ function openActionDialog(kind: "point" | "leg", index: number | null = null) {
     checkType: "exist",
     expectCount: null,
     alertWhenMissing: false,
-    notifyWhenCountOk: false
+    notifyWhenCountOk: false,
+    lightFill: false,
+    lightLed: false
   });
   actionEditIndex.value = null;
   actionDialog.value = true;
@@ -927,6 +947,8 @@ function syncActionDefaults() {
   actionForm.expectCount = null;
   actionForm.alertWhenMissing = false;
   actionForm.notifyWhenCountOk = false;
+  actionForm.lightFill = false;
+  actionForm.lightLed = false;
   if (actionForm.type === "AI 识别") void aiCatalog.load();
 }
 
@@ -993,7 +1015,10 @@ function saveAction() {
     // 数量任务：核对一致也发群消息（只推企业微信，不落告警、不建工单）
     ...(countTask && actionForm.notifyWhenCountOk ? { notifyWhenCountOk: true } : {}),
     // 「未检出也告警」只对存在性任务有意义（数量任务自带「0 ≠ N」告警）
-    ...(ai && !countTask && actionForm.alertWhenMissing ? { alertWhenMissing: true } : {})
+    ...(ai && !countTask && actionForm.alertWhenMissing ? { alertWhenMissing: true } : {}),
+    // 灯光只挂在航点动作上（行进任务没有「到点」，也就没有开灯时机）
+    ...(actionKind.value === "point" && actionForm.lightFill ? { lightFill: true } : {}),
+    ...(actionKind.value === "point" && actionForm.lightLed ? { lightLed: true } : {})
   };
   // 修改：整条替换回原位置（顺序不变，撤销栈里是一条快照）
   const editIndex = actionEditIndex.value;
@@ -1662,6 +1687,9 @@ onBeforeUnmount(() => {
                     <div v-if="isAiActionOf(action)">
                       检测类型：<b>{{ actionCheckTypeLabel(action) }}</b>
                     </div>
+                    <div v-if="actionLightLabel(action)">
+                      灯光：<b>{{ actionLightLabel(action) }}</b>
+                    </div>
                   </div>
                 </div>
                 <div v-if="!pointActions.length" class="empty-box" style="padding: 16px 0">
@@ -1996,6 +2024,27 @@ onBeforeUnmount(() => {
               <input v-model="actionForm.alertWhenMissing" type="checkbox" />
               未找到目标也告警
             </label>
+          </div>
+          <!-- 航点灯光：补光灯 / LED 灯带（与 AI 识别无关，不配 AI 也能只开灯） -->
+          <div class="field" style="grid-column: 1 / -1">
+            <label>
+              到点开灯
+              <span class="muted">（背包板上的补光灯 / LED 灯带，离开航点与任务结束时自动关）</span>
+            </label>
+            <div style="display: flex; gap: 18px; flex-wrap: wrap">
+              <label class="chk" title="板端拉高补光灯 GPIO；与摄像头触发脚同号或 FILL_LIGHT_GPIO=-1 时板端会拒绝，日志里有原因">
+                <input v-model="actionForm.lightFill" type="checkbox" />
+                开补光灯
+              </label>
+              <label class="chk" title="板端拉起厂商 LED 程序（循环闪烁，没有常亮接口）">
+                <input v-model="actionForm.lightLed" type="checkbox" />
+                开 LED 灯带
+              </label>
+            </div>
+            <div class="rt-hint" style="margin: 4px 0 0">
+              计划里勾了<b>「仅夜间自动开灯」</b>时，只有夜间时段（板端默认 18:00-06:00）到达该航点才真的开灯，
+              白天到达由板端直接跳过；补光灯与 LED 各自独立配置。
+            </div>
           </div>
           <div class="field">
             <label>失败重试次数</label>

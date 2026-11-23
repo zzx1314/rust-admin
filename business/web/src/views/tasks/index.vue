@@ -48,6 +48,11 @@ const taskForm = reactive({
   executeMode: "周期任务",
   /** 结束动作（返航开关）：空 = 跟随路线（闭环自动返航） */
   endTask: "",
+  /**
+   * 计划级「仅夜间自动开灯」：勾上后航点动作里的补光灯 / LED 只在夜间时段开。
+   * 夜间判定在板端（`LIGHT_NIGHT_START`/`LIGHT_NIGHT_END`，默认 18:00-06:00）。
+   */
+  lightNightOnly: false,
   level: "常规",
   parkId: 1,
   zoneId: null as number | null,
@@ -357,6 +362,7 @@ function openCreate() {
     taskType: "定时巡检",
     executeMode: "周期任务",
     endTask: "",
+    lightNightOnly: false,
     level: "常规",
     parkId,
     zoneId: zones.value.find(zone => zone.parkId === parkId)?.id ?? null,
@@ -384,6 +390,7 @@ function openEdit(task: Task) {
     taskType: task.taskType ?? "定时巡检",
     executeMode: task.executeMode ?? "周期任务",
     endTask: task.endTask ?? "",
+    lightNightOnly: task.lightNightOnly === true,
     level: task.level ?? "常规",
     parkId: task.parkId ?? parks.value[0]?.id ?? 1,
     zoneId: task.zoneId ?? null,
@@ -1006,6 +1013,20 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="field">
+          <label>夜间开灯（补光灯 / LED）</label>
+          <label
+            class="chk"
+            title="只影响路线里勾了「开补光灯 / 开 LED」的航点动作：勾上后白天到达不开灯"
+          >
+            <input v-model="taskForm.lightNightOnly" type="checkbox" />
+            仅夜间自动开灯
+          </label>
+          <div class="rt-hint" style="margin: 4px 0 0">
+            航点动作里要勾「开补光灯 / 开 LED」才有效；夜间时段由板端判（默认 18:00-06:00），
+            白天到达直接跳过，离开航点与任务结束时都会关灯。
+          </div>
+        </div>
+        <div class="field">
           <label>执行园区</label>
           <select v-model.number="taskForm.parkId" class="select">
             <option v-for="park in parks" :key="park.id" :value="park.id">{{ park.parkName }}</option>
@@ -1170,6 +1191,10 @@ onBeforeUnmount(() => {
         </div>
         <div class="kv">
           <span>跑完去哪</span><b>{{ endActionLabel(detailTask.endTask, detailRoute?.loopMode) }}</b>
+        </div>
+        <div class="kv">
+          <span>夜间开灯</span>
+          <b>{{ detailTask.lightNightOnly ? "仅夜间自动开灯" : "不限时段（白天也开）" }}</b>
         </div>
         <div class="kv"><span>执行设备</span><b class="mono">{{ detailTask.deviceCode }}</b></div>
         <div class="kv">

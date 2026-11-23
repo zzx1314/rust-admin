@@ -1,0 +1,18 @@
+-- 计划级「仅夜间自动开灯」：补光灯 / LED 灯带只在夜间时段点灯。
+--
+-- 灯怎么配分两层（都在网页配，缺一层现场就问「灯为什么不亮」）：
+--
+-- 1. **航点动作**（`routes.route_data` 的 `points[].actions[]`，JSON，不用迁移）：
+--    `lightFill` = 到点开补光灯、`lightLed` = 到点开 LED 灯带。由客户端在
+--    `patrol.point_arrived` / `patrol.waiting` 时调板端 Agent（`POST /api/lights`），
+--    离开航点 / 任务终态 / 取消时关灯（`POST /api/lights/off`）。
+-- 2. **计划**（本列）：`1` = 上面那些灯只在夜间时段开。
+--
+-- 夜里判定放在**板端**（`LIGHT_NIGHT_START` / `LIGHT_NIGHT_END`，默认 18:00-06:00，
+-- 板子本地时间）：业务平台在公网、可能与板子不同时区，客户端只把
+-- `nightOnly` 交给 Agent，由 `control.is_night` 一处判定。白天到达时板端返回
+-- `skipped=daytime`，客户端不记「已开灯」，离开航点也不会顺手关掉操作员手动开的灯。
+--
+-- 默认 0（到点就开）：老计划 / 老平台没有这个字段，行为不变——本来也没有灯光动作，
+-- 等于不加任何灯；**不要**默认 1，那会让白天跑的巡检突然不开灯，而用户以为配了。
+ALTER TABLE tasks ADD COLUMN light_night_only INTEGER NOT NULL DEFAULT 0;
