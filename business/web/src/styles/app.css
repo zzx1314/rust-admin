@@ -161,13 +161,6 @@
   font-size: 13.5px;
 }
 
-.login-hint {
-  margin-top: 18px;
-  font-size: 11.5px;
-  color: var(--muted);
-  text-align: center;
-}
-
 /* ---------- 顶栏用户菜单 ---------- */
 .user-pop {
   position: absolute;

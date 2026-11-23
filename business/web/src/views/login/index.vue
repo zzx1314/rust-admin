@@ -9,8 +9,8 @@ const auth = useAuthStore();
 const router = useRouter();
 const route = useRoute();
 
-const username = ref("admin");
-const password = ref("admin123");
+const username = ref("");
+const password = ref("");
 const loading = ref(false);
 
 async function submit() {
@@ -88,8 +88,6 @@ async function submit() {
           <AppIcon name="shield" />
           {{ loading ? "正在登录…" : "进入控制台" }}
         </button>
-
-        <div class="login-hint">演示账号：admin / admin123</div>
       </div>
     </section>
   </div>
