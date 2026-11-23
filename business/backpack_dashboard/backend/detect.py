@@ -236,6 +236,25 @@ def _save_frames(value):
     return max(1, min(10, frames))
 
 
+def _capture_enabled(value):
+    """中台下发的「到点自动采集」总开关（`media_capture_enabled`）。
+
+    缺省 / 空串（老平台、老客户端、工具自测）一律当**开**，保持历史行为；
+    显式 `false` / `0` / `"0"` / `"off"` 等才关——关时只写告警证据图，
+    不再往媒体归档目录（`MEDIA_DATA_DIR`）攒训练图。
+    """
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if not text:
+        return True
+    return text not in ("0", "false", "off", "no", "否", "关", "关闭")
+
+
 def _as_int(value):
     """安全转 int：None / 空串 / 非法值都返回 None（用于 plan 参数容错）。"""
     if value is None or (isinstance(value, str) and not value.strip()):
@@ -752,7 +771,8 @@ class DetectManager:
 
     # ---------- 版本 4：航点计划模式（plan_id + 检查目标数量）----------
     def set_plan(self, plan_id=None, point_index=None, expect_count=None,
-                 check_type=None, media_dir=None, save_frames=None):
+                 check_type=None, media_dir=None, save_frames=None,
+                 capture_enabled=None):
         """登记航点计划（运行中也能调，不必重启识别）。
 
         `check_type` 两类任务：
@@ -765,7 +785,8 @@ class DetectManager:
         换计划/清计划时会把上一个还在采样的命中先收尾（不丢证据）。
         """
         plan = self._plan_set(plan_id, point_index, expect_count, check_type,
-                              media_dir=media_dir, save_frames=save_frames)
+                              media_dir=media_dir, save_frames=save_frames,
+                              capture_enabled=capture_enabled)
         return {"ok": True, "plan": None if not plan else {
             "plan_id": plan["id"],
             "point_index": plan["point_index"],
@@ -776,6 +797,7 @@ class DetectManager:
             "media_dir": evidence.media_plan_dir(
                 plan["id"], plan["point_index"], root=plan["media_dir"]),
             "save_frames": plan["save_frames"],
+            "capture_enabled": plan["capture_enabled"],
         }}
 
     def clear_plan(self):
@@ -786,7 +808,8 @@ class DetectManager:
         return {"ok": True, "cleared": prev["id"] if prev else None}
 
     def _plan_set(self, plan_id=None, point_index=None, expect_count=None,
-                  check_type=None, media_dir=None, save_frames=None):
+                  check_type=None, media_dir=None, save_frames=None,
+                  capture_enabled=None):
         pid = "" if plan_id is None else str(plan_id).strip()
         if not pid:
             self._plan_flush("计划结束")
@@ -817,6 +840,9 @@ class DetectManager:
             # （客户端转成 media_dir / save_frames），缺省用板端 config 兜底。
             "media_dir": _media_root(media_dir),
             "save_frames": _save_frames(save_frames),
+            # 到点自动采集总开关（中台 `media_capture_enabled`，默认关）：关时
+            # 只写 detect_jobs 告警证据图，不攒媒体归档（训练数据）。
+            "capture_enabled": _capture_enabled(capture_enabled),
             "sampling": None,
             "done": False,
             "t_start": time.monotonic(),
@@ -911,8 +937,13 @@ class DetectManager:
         里的训练数据，叠加层（框 + 文字）会污染标注；画框的那份留在
         `detect_jobs/<plan>/pt<n>/` 当告警证据（`evidence.save_frame`）。
 
+        采集总开关（中台 `media_capture_enabled`）关着时直接跳过：告警证据图与
+        数量核对不受影响，只是不攒训练数据。
+
         返回 `(媒体航点目录, 文件名列表)`；一张都没写成时目录视为不存在。
         """
+        if not plan.get("capture_enabled", True):
+            return None, []
         frames = list(st.get("frames") or [])
         if not frames:
             return None, []
@@ -1159,7 +1190,7 @@ class DetectManager:
     # ---------- 对外：启停 / 配置 / 立即识别 ----------
     def start(self, task=None, labels=None, conf=None, cams=None, fps=None,
               plan_id=None, point_index=None, expect_count=None, check_type=None,
-              media_dir=None, save_frames=None):
+              media_dir=None, save_frames=None, capture_enabled=None):
         with self._lock:
             if self.state in ("starting", "running"):
                 return {"ok": False, "error": "识别已在运行，请先停止"}
@@ -1252,7 +1283,8 @@ class DetectManager:
         # 航点任务：登记计划（计划 id / 航点下标 / 任务类型 / 检查目标数量）。
         # 命中即按计划目录存证并核对数量；传空即清掉旧计划（普通「开始识别」与计划模式互斥）。
         self._plan_set(plan_id, point_index, expect_count, check_type,
-                       media_dir=media_dir, save_frames=save_frames)
+                       media_dir=media_dir, save_frames=save_frames,
+                       capture_enabled=capture_enabled)
 
         self._start_grabbers()
         # 版本 2：板端本地画框。失败只记日志，不中断识别 —— 前端看到
@@ -1430,7 +1462,7 @@ class DetectManager:
 
     def configure(self, task=None, labels=None, conf=None, cams=None, fps=None,
                   plan_id=None, point_index=None, expect_count=None, check_type=None,
-                  media_dir=None, save_frames=None):
+                  media_dir=None, save_frames=None, capture_enabled=None):
         """运行中热更新：类别/阈值零成本；换场景走 SWITCH；改摄像头/帧率重启抓帧。
 
         `plan_id` 不为 None 时顺便登记/清掉航点计划（空串 = 清），这样「操作员
@@ -1440,7 +1472,8 @@ class DetectManager:
             return {"ok": False, "error": "识别未运行，请先点「开始识别」"}
         if plan_id is not None:
             self._plan_set(plan_id, point_index, expect_count, check_type,
-                           media_dir=media_dir, save_frames=save_frames)
+                           media_dir=media_dir, save_frames=save_frames,
+                           capture_enabled=capture_enabled)
         with self._lock:
             old = dict(self.cfg)
         switched = False

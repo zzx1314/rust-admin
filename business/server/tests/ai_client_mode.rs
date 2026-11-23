@@ -503,6 +503,9 @@ async fn client_relayed_point_ai_starts_window_and_records_hits() {
         "dwell=100 就该识别 108s（以前被截断成 30s）: {start}"
     );
     assert_eq!(start["wasRunning"], false);
+    // 采集总开关（中台 `media_capture_enabled`）随 ai_start 下发：
+    // 取不到配置 / 老中台时默认「关」，板端只写告警证据图，不攒训练数据。
+    assert_eq!(start["captureEnabled"], false, "{start}");
     let window_id = start["windowId"]
         .as_str()
         .expect("ai_start 必须带 windowId")

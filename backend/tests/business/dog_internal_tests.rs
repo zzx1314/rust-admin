@@ -670,6 +670,8 @@ async fn media_config_exposes_seeded_capture_settings() {
     assert_eq!(body["code"], json!(10200), "{body}");
     assert_eq!(body["data"]["pictureDir"], "/media/media-data/picture");
     assert_eq!(body["data"]["frames"], 3);
+    // 采集总开关默认关：不配置就不攒训练数据（告警证据图不受影响）
+    assert_eq!(body["data"]["enabled"], json!(false), "{body}");
 }
 
 /// 客户端现行方式：一个 zip 传 N 张（`mediaInfo.entries` 逐条目带计划/航点）。
@@ -825,6 +827,13 @@ async fn media_capture_config_reads_params_and_falls_back_on_garbage() {
     };
     let dir_id = by_name("media_picture_dir");
     let frames_id = by_name("media_frames");
+    let enabled_id = by_name("media_capture_enabled");
+
+    // 默认关：升级后不再自动往媒体归档目录攒图
+    assert!(
+        !load_capture_config(&state.dog_config_service).await.enabled,
+        "media_capture_enabled 预置值必须是关"
+    );
 
     // 正常值：原样生效
     state
@@ -851,9 +860,22 @@ async fn media_capture_config_reads_params_and_falls_back_on_garbage() {
         )
         .await
         .expect("改帧数");
+    state
+        .dog_config_service
+        .update(
+            enabled_id,
+            UpdateConfigRequest {
+                config_name: None,
+                config_value: Some("1".to_string()),
+                description: None,
+            },
+        )
+        .await
+        .expect("开采集");
     let config = load_capture_config(&state.dog_config_service).await;
     assert_eq!(config.picture_dir, "/data/picture");
     assert_eq!(config.frames, 5);
+    assert!(config.enabled, "media_capture_enabled=1 应视为开");
 
     // 写坏（相对路径 / 超出 1~10）：逐项回退，不影响另一个合法值
     state
@@ -880,12 +902,25 @@ async fn media_capture_config_reads_params_and_falls_back_on_garbage() {
         )
         .await
         .expect("改大帧数");
+    state
+        .dog_config_service
+        .update(
+            enabled_id,
+            UpdateConfigRequest {
+                config_name: None,
+                config_value: Some("garbage".to_string()),
+                description: None,
+            },
+        )
+        .await
+        .expect("写坏开关");
     let config = load_capture_config(&state.dog_config_service).await;
     assert_eq!(
         config.picture_dir, DEFAULT_MEDIA_PICTURE_DIR,
         "坏路径回退默认"
     );
     assert_eq!(config.frames, 10, "帧数上限 10");
+    assert!(!config.enabled, "开关写坏按关处理，不能默默开始攒图");
 }
 
 /// 训练数据下载：单张给原文件，批量给 zip（原图 + manifest.json）。

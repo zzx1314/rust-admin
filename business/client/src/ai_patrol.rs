@@ -246,6 +246,10 @@ pub struct AiStart {
     pub media_dir: Option<String>,
     /// 每个航点固定保存几帧（中台 `media_frames`，1~10）
     pub media_frames: Option<u32>,
+    /// 航点自动采集总开关（中台 `media_capture_enabled`，默认关）：
+    /// `Some(false)` 时板端只写告警证据图，不往媒体归档目录攒训练图；
+    /// 老平台没这个字段（`None`）时按板端 / 老行为走。
+    pub media_capture: Option<bool>,
     /// 开窗前 Agent 是否已在识别（操作员手动开的）：是则窗口结束不停它
     pub was_running: bool,
 }
@@ -330,6 +334,7 @@ impl AiStart {
                 .get("mediaFrames")
                 .and_then(Value::as_u64)
                 .map(|frames| (frames as u32).clamp(1, 10)),
+            media_capture: value.get("captureEnabled").and_then(Value::as_bool),
             secs: value.get("secs").and_then(Value::as_u64).unwrap_or(15),
             was_running: value
                 .get("wasRunning")
@@ -611,6 +616,9 @@ impl AiPatrol {
             // 中台参数配置里的板端媒体目录 / 固定帧数（缺省由板端 config.py 兜底）
             "media_dir": start.media_dir,
             "save_frames": start.media_frames,
+            // 航点自动采集总开关（中台 `media_capture_enabled`，默认关；
+            // 老平台没下发时不传，板端按老行为——即「开」）
+            "capture_enabled": start.media_capture,
         });
         let path = if start.action == "config" {
             "/api/detect/config"
@@ -1777,6 +1785,30 @@ mod tests {
         // 老数据没 checkType：给了 expectCount 就是数量任务，否则存在性任务
         assert_eq!(normalize_check_type(None, Some(3)), "count");
         assert_eq!(normalize_check_type(None, None), "exist");
+    }
+
+    #[test]
+    fn capture_switch_reaches_the_agent_and_defaults_to_legacy_when_absent() {
+        // 中台 `media_capture_enabled` 关：平台下发 `captureEnabled=false`，客户端原样转给板端
+        let off = AiStart::from_value(&json!({
+            "windowId": "AIW-1-0-9",
+            "task": "firextinguisher",
+            "mediaDir": "/media/media-data/picture",
+            "mediaFrames": 3,
+            "captureEnabled": false,
+        }))
+        .expect("构造开窗指令失败");
+        assert_eq!(off.media_capture, Some(false));
+        let on = AiStart::from_value(&json!({
+            "windowId": "AIW-1-0-10",
+            "captureEnabled": true,
+        }))
+        .expect("构造开窗指令失败");
+        assert_eq!(on.media_capture, Some(true));
+        // 老平台没这个字段：不传，板端按老行为（即开），不能被升级顺手关掉
+        let legacy = AiStart::from_value(&json!({"windowId": "AIW-1-0-11"}))
+            .expect("构造开窗指令失败");
+        assert_eq!(legacy.media_capture, None);
     }
 
     #[test]

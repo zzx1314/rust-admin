@@ -22,9 +22,14 @@ pub const MEDIA_EXPORT_MAX_FILES: i64 = 200;
 /// 批量下载单次体积上限：中台是 2 核 3.6G 的小机器，打包在内存里做。
 pub const MEDIA_EXPORT_MAX_BYTES: usize = 100 * 1024 * 1024;
 
-/// 「参数配置」页里的两个键：板端存证目录与每航点固定帧数。
+/// 「参数配置」页里的三个键：板端存证目录、每航点固定帧数、巡检到点是否采集。
+///
+/// `media_capture_enabled` 是**总开关**（默认关）：关掉时板端不再把命中帧写进
+/// 训练数据目录（`media_picture_dir`），告警证据图（`detect_jobs/…`）与数量核对
+/// 完全不受影响。现场要攒训练数据时才打开。
 pub const MEDIA_CONFIG_DIR: &str = "media_picture_dir";
 pub const MEDIA_CONFIG_FRAMES: &str = "media_frames";
+pub const MEDIA_CONFIG_ENABLED: &str = "media_capture_enabled";
 
 /// 板端采集配置（中台参数配置 → 业务平台 → `ai_start` → 客户端 → 板端 Agent）。
 ///
@@ -35,6 +40,11 @@ pub const MEDIA_CONFIG_FRAMES: &str = "media_frames";
 pub struct MediaCaptureConfig {
     pub picture_dir: String,
     pub frames: u32,
+    /// 巡检到点是否自动采集（`media_capture_enabled`，**默认关**）。
+    ///
+    /// 关：板端只写告警证据图，不攒训练数据（媒体资源页不会再有 AI 巡检的新图）。
+    /// 开：每次命中额外把 N 帧原始图写进 `picture_dir`，等「同步媒体」回传。
+    pub enabled: bool,
 }
 
 impl Default for MediaCaptureConfig {
@@ -42,8 +52,17 @@ impl Default for MediaCaptureConfig {
         Self {
             picture_dir: DEFAULT_MEDIA_PICTURE_DIR.to_string(),
             frames: DEFAULT_MEDIA_FRAMES,
+            enabled: false,
         }
     }
+}
+
+/// 开关值判定：只认「明确开启」的写法，其余（含缺失、写坏、`0`）都算关。
+fn parse_switch(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "on" | "yes" | "是" | "开" | "开启"
+    )
 }
 
 /// 读参数配置页里的板端媒体设置；配置缺失 / 写坏（相对路径、`..`）时回退默认值，
@@ -51,9 +70,13 @@ impl Default for MediaCaptureConfig {
 pub async fn load_capture_config(service: &DogConfigService) -> MediaCaptureConfig {
     let mut picture_dir: Option<String> = None;
     let mut frames: Option<u32> = None;
+    let mut enabled: Option<bool> = None;
     if let Ok(configs) = service.list_all().await {
         for config in configs {
             match config.config_name.trim() {
+                MEDIA_CONFIG_ENABLED => {
+                    enabled = config.config_value.as_deref().map(parse_switch);
+                }
                 MEDIA_CONFIG_DIR => {
                     picture_dir = config.config_value.map(|value| value.trim().to_string());
                 }
@@ -72,6 +95,7 @@ pub async fn load_capture_config(service: &DogConfigService) -> MediaCaptureConf
     MediaCaptureConfig {
         picture_dir,
         frames: frames.unwrap_or(DEFAULT_MEDIA_FRAMES).clamp(1, 10),
+        enabled: enabled.unwrap_or(false),
     }
 }
 

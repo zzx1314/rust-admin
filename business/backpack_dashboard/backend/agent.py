@@ -462,7 +462,7 @@ async def detect_start(request: Request):
         b.get("cams"), b.get("fps"),
         b.get("plan_id"), b.get("point_index"), b.get("expect_count"),
         b.get("check_type"),
-        b.get("media_dir"), b.get("save_frames"))
+        b.get("media_dir"), b.get("save_frames"), b.get("capture_enabled"))
     return JSONResponse(r, status_code=200 if r.get("ok") else 400)
 
 
@@ -481,7 +481,7 @@ async def detect_plan(request: Request):
         detect.manager.set_plan,
         b.get("plan_id"), b.get("point_index"), b.get("expect_count"),
         b.get("check_type"),
-        b.get("media_dir"), b.get("save_frames"))
+        b.get("media_dir"), b.get("save_frames"), b.get("capture_enabled"))
     return JSONResponse(r, status_code=200 if r.get("ok") else 400)
 
 
@@ -543,7 +543,7 @@ async def detect_config(request: Request):
         b.get("cams"), b.get("fps"),
         b.get("plan_id"), b.get("point_index"), b.get("expect_count"),
         b.get("check_type"),
-        b.get("media_dir"), b.get("save_frames"))
+        b.get("media_dir"), b.get("save_frames"), b.get("capture_enabled"))
     return JSONResponse(r, status_code=200 if r.get("ok") else 400)
 
 

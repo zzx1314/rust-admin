@@ -151,6 +151,31 @@ def main():
               os.path.abspath(hit["media_dir"]) != os.path.abspath(hit["dir"]),
               "%s vs %s" % (hit["media_dir"], hit["dir"]))
 
+    # ---- 采集总开关（中台 `media_capture_enabled`，默认关）----
+    # 关着的时候只写告警证据图（detect_jobs），不往媒体归档目录攒训练图。
+    manager.set_plan("SELFTEST-NOCAP", 0, 1, "exist", media_dir=None,
+                     save_frames=None, capture_enabled=False)
+    hit = _sample(manager, "dogcam", 1, events)
+    check("采集关闭：仍然生成 plan_hit 与证据图",
+          hit is not None and bool(hit.get("evidence")),
+          str(hit and hit.get("evidence")))
+    if hit:
+        check("采集关闭：plan_hit 不带媒体归档",
+              not hit.get("media_dir") and not (hit.get("media_frames") or []),
+              str(hit.get("media_dir")))
+        check("采集关闭：媒体目录没被创建",
+              not os.path.isdir(evidence.media_plan_dir("SELFTEST-NOCAP", 0)),
+              evidence.media_plan_dir("SELFTEST-NOCAP", 0))
+        check("采集关闭：result.json 照常落盘",
+              os.path.isfile(os.path.join(hit["dir"], "result.json")), hit["dir"])
+
+    # 老平台 / 工具自测不传开关：默认仍然是开（历史行为），不能被默默关掉。
+    manager.set_plan("SELFTEST-LEGACY-CAP", 0, 1, "exist")
+    hit = _sample(manager, "dogcam", 1, events)
+    check("采集默认开：不传开关时仍然写媒体归档",
+          hit is not None and bool(hit.get("media_dir")),
+          str(hit and hit.get("media_dir")))
+
     # ---- 任务类型 2：数量不一致 ----
     manager.set_plan("SELFTEST-PLAN", 2, 5, "count")
     hit = _sample(manager, "cam0", 3, events)

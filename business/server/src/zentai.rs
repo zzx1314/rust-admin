@@ -26,7 +26,8 @@ const TOKEN_TTL: Duration = Duration::from_secs(10 * 60);
 /// 都去问一次中台（内网部署时中台并不总是可达）。
 const MEDIA_CONFIG_TTL: Duration = Duration::from_secs(60);
 
-/// 板端媒体采集配置（中台参数配置页 `media_picture_dir` / `media_frames`）。
+/// 板端媒体采集配置（中台参数配置页 `media_picture_dir` / `media_frames` /
+/// `media_capture_enabled`）。
 ///
 /// 必须与「同步媒体」指令里下发的目录一致：板端按这个目录写图，客户端按同一个
 /// 目录扫描回传，否则现场改了配置就会「传了个空目录」。
@@ -34,6 +35,11 @@ const MEDIA_CONFIG_TTL: Duration = Duration::from_secs(60);
 pub struct MediaCaptureConfig {
     pub picture_dir: String,
     pub frames: u32,
+    /// 巡检到点是否自动采集（中台 `media_capture_enabled`，**默认关**）。
+    ///
+    /// 关时随 `ai_start` 下发 `captureEnabled=false`，板端只写告警证据图；
+    /// 老中台 / 取配置失败时同样按关处理（不再默默攒训练图）。
+    pub enabled: bool,
 }
 
 impl Default for MediaCaptureConfig {
@@ -41,6 +47,7 @@ impl Default for MediaCaptureConfig {
         Self {
             picture_dir: "/media/media-data/picture".to_string(),
             frames: 3,
+            enabled: false,
         }
     }
 }
@@ -122,10 +129,26 @@ async fn fetch_media_capture_config(config: &Config) -> Result<MediaCaptureConfi
         .and_then(Value::as_u64)
         .map(|value| (value as u32).clamp(1, 10))
         .unwrap_or(3);
+    // 开关：缺省 / 写坏一律当「关」（新中台下发 `enabled` 布尔或 0/1）
+    let enabled = parse_capture_switch(data.get("enabled"));
     Ok(MediaCaptureConfig {
         picture_dir,
         frames,
+        enabled,
     })
+}
+
+/// 中台采集开关的宽容解析：`true` / `1` / `"1"` / `"true"` 算开，其余算关。
+fn parse_capture_switch(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::Bool(flag)) => *flag,
+        Some(Value::Number(number)) => number.as_i64().map(|raw| raw != 0).unwrap_or(false),
+        Some(Value::String(text)) => matches!(
+            text.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "on" | "yes" | "是" | "开" | "开启"
+        ),
+        _ => false,
+    }
 }
 
 /// 一次中台登录的结果
@@ -657,4 +680,30 @@ pub async fn user_can_access_device(
         .get(device_id.trim())
         .map(|users| users.contains(&user_id))
         .unwrap_or(false))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_capture_switch;
+    use serde_json::json;
+
+    /// 采集总开关的宽容解析：只有**明确开启**才算开，缺省 / 写坏一律关，
+    /// 免得老中台没这个字段时又默默开始往媒体归档目录攒训练图。
+    #[test]
+    fn capture_switch_only_trusts_explicit_on() {
+        assert!(parse_capture_switch(Some(&json!(true))));
+        assert!(parse_capture_switch(Some(&json!(1))));
+        assert!(parse_capture_switch(Some(&json!("1"))));
+        assert!(parse_capture_switch(Some(&json!("true"))));
+        assert!(parse_capture_switch(Some(&json!("ON"))));
+        assert!(parse_capture_switch(Some(&json!("开"))));
+
+        assert!(!parse_capture_switch(None));
+        assert!(!parse_capture_switch(Some(&json!(false))));
+        assert!(!parse_capture_switch(Some(&json!(0))));
+        assert!(!parse_capture_switch(Some(&json!("0"))));
+        assert!(!parse_capture_switch(Some(&json!("off"))));
+        assert!(!parse_capture_switch(Some(&json!("garbage"))));
+        assert!(!parse_capture_switch(Some(&json!(null))));
+    }
 }

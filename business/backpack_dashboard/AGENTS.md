@@ -129,15 +129,20 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
      带框会污染标注；画框那份只在 `detect_jobs` 里），中台设备页点「同步媒体」
      后由客户端**按每包 8 张打 zip** 回传（中台解包后仍一张一条入库），
      **只删 `results[].ok` 的条目**。
-  目录/帧数的唯一真源是**中台「参数配置」**（`media_picture_dir` / `media_frames`），
-  随 `ai_start` 的 `media_dir` / `save_frames` 下发；板端 `config.py` 的
+  目录/帧数/开关的唯一真源是**中台「参数配置」**（`media_picture_dir` /
+  `media_frames` / `media_capture_enabled`），随 `ai_start` 的 `media_dir` /
+  `save_frames` / `captureEnabled` 下发；板端 `config.py` 的
   `MEDIA_DATA_DIR` / `DETECT_PLAN_SAVE_FRAMES` 只是没收到配置时的兜底。
+  **采集默认关**（`media_capture_enabled=0`）：关着时 `_plan_write_media` 直接
+  跳过——告警证据图、数量核对不受影响，只是不攒训练数据；请求里没带
+  `capture_enabled`（老平台 / 自测工具）时按「开」跑，保持历史行为。
   改目录布局 = 改 `evidence.py`、`detect.py` 的 `_plan_write_media`、
   `client/src/{ai_patrol,media_sync}.rs`、`deploy/backpack-sim/mock_agent.py`。
 - **计划状态机分两类任务**：`check_type=exist`（是否检出）/ `count`（数量是否等于
   `expect_count`）。数量不一致、以及「窗口到期一个都没找到」都要 `count_alert=true`；
   `_plan_flush` 要在停识别时把采样中的命中落盘（客户端靠「先停再扫」补图）。
-  改这块先读 `official-app-parity.md` §5.6，并跑 `plan_count_selftest.py`。
+  改这块先读 `official-app-parity.md` §5.6，并跑 `plan_count_selftest.py`
+  （里面有「采集关闭：不写媒体归档、证据图照写」与「不传开关默认开」两条）。
 - **`relay.py` 的 dogcam720 要硬解**：它常驻把本体 1080p60 转成 720p，软解一条就吃
   一个核的 71%（`.246` 实测）。`_probe_decoder()` 会先真解 2 帧确认 `h264_rkmpp` 可用
   （写死 `-c:v` 有风险：解不出来时 ffmpeg 不报错、只是永远等不到帧），失败退回软解；

@@ -743,6 +743,9 @@ impl AiPatrol {
             "wasRunning": was_running,
             "mediaDir": media.picture_dir,
             "mediaFrames": media.frames,
+            // 航点自动采集总开关（中台 `media_capture_enabled`，默认关）：
+            // 关时板端只写告警证据图，不再往媒体归档目录攒训练图。
+            "captureEnabled": media.enabled,
         });
         if !crate::gateway::send_message_to_device(
             &state.device_connections,
@@ -1263,6 +1266,11 @@ async fn run_window(
     // 2) 启动（已在跑就热更新，避免「识别已在运行」被拒）
     //    计划 id / 航点下标 / 检查目标数量一并下发：板端命中即按计划目录存证，
     //    数量与 expect_count 不符就在 SSE 的 plan_hit 里带 count_alert。
+    //    `capture_enabled` 是航点自动采集总开关（中台 `media_capture_enabled`，默认关）：
+    //    直连模式以前不带媒体参数，板端按自己的 `MEDIA_DATA_DIR` 默默攒图，这条一并收口。
+    let capture_enabled = crate::zentai::media_capture_config(&state.config)
+        .await
+        .enabled;
     let body = json!({
         "task": task_name,
         "labels": if labels.is_empty() {
@@ -1277,6 +1285,7 @@ async fn run_window(
         "point_index": config.point_index,
         "check_type": config.check_type,
         "expect_count": config.expect_count,
+        "capture_enabled": capture_enabled,
     });
     if let Err(error) = start_detect(&client, &base, &body, was_running).await {
         warn!(
