@@ -176,9 +176,10 @@ async fn create_config(state: &AppState, name: &str) {
         .expect("config must be created");
 }
 
-/// 迁移 31 会给「参数配置」预置两条媒体回传设置
-/// （`media_picture_dir` / `media_frames`），所以空库里这两张卡不是 0。
-const SEEDED_CONFIGS: i64 = 2;
+/// 迁移 31 / 34 会给「参数配置」预置三条媒体设置
+/// （`media_picture_dir` / `media_frames` / `media_capture_enabled`），
+/// 所以空库里这两张卡不是 0。
+const SEEDED_CONFIGS: i64 = 3;
 
 #[tokio::test]
 async fn empty_database_reports_zeroes_instead_of_placeholders() {

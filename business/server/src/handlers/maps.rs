@@ -217,6 +217,39 @@ async fn dog_map_has_park_columns(pool: &SqlitePool) -> Result<bool, AppError> {
     Ok(columns.iter().any(|(name,)| name == "park_code"))
 }
 
+/// 根库是否已有地图分享表（根 backend 迁移 35 才有）。
+/// 旧库（业务平台先于中台升级）降级为「没有分享」，不能因为缺表把地图列表打挂。
+async fn dog_map_has_share_table(pool: &SqlitePool) -> Result<bool, AppError> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'dog_map_share'",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(count > 0)
+}
+
+/// 中台地图是否分享给了「分配给该中台账号」的设备。
+///
+/// 中台地图列表与这里同一口径：分享出去的地图，目标设备的管理员也能看到、
+/// 也能导入业务库，不需要重新建图。
+async fn map_shared_to_user(
+    pool: &SqlitePool,
+    map_id: i64,
+    user_id: i64,
+) -> Result<bool, AppError> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM dog_map_share s
+         JOIN dog_device d ON d.device_id = s.device_code AND d.is_deleted = 0
+         JOIN dog_user_device ud ON ud.device_id = d.id AND ud.is_deleted = 0
+         WHERE s.is_deleted = 0 AND s.map_id = ?1 AND ud.user_id = ?2",
+    )
+    .bind(map_id)
+    .bind(user_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(count > 0)
+}
+
 /// 列出根目录 `backend` 的 `dog_map` 地图库（ROS map_server 包等）。
 ///
 /// 可选 `parkCode`：只返回该业务园区下的地图（设备端建图回传时写入）。
@@ -249,15 +282,29 @@ pub async fn list_backend_maps(
             .push(" AND d.park_code = ")
             .push_bind(park_code.trim().to_string());
     }
-    // 业务用户只能看到自己名下机器狗采集的地图；中台管理员可看全部，
-    // 也可用 ownerUserId 指定查看某个用户的地图。
+    // 业务用户只能看到自己名下机器狗采集的地图（含共享给自己管辖设备的图）；
+    // 中台管理员可看全部，也可用 ownerUserId 指定查看某个用户的地图。
     let owner_filter = if claims.is_admin {
         query.owner_user_id
     } else {
         claims.zentai_user_id
     };
     if let Some(owner) = owner_filter {
-        builder.push(" AND d.user_id = ").push_bind(owner);
+        if dog_map_has_share_table(&pool).await? {
+            builder
+                .push(" AND (d.user_id = ")
+                .push_bind(owner)
+                .push(
+                    " OR d.id IN (SELECT s.map_id FROM dog_map_share s \
+                     JOIN dog_device dev ON dev.device_id = s.device_code AND dev.is_deleted = 0 \
+                     JOIN dog_user_device ud ON ud.device_id = dev.id AND ud.is_deleted = 0 \
+                     WHERE s.is_deleted = 0 AND ud.user_id = ",
+                )
+                .push_bind(owner)
+                .push("))");
+        } else {
+            builder.push(" AND d.user_id = ").push_bind(owner);
+        }
     } else if claims.zentai_user_id.is_some() && !claims.is_admin {
         return Ok(ApiResponse::ok(Vec::new()));
     }
@@ -295,14 +342,18 @@ pub async fn import_backend_map(
         .await?
         .ok_or_else(|| AppError::NotFound("backend 地图不存在".to_string()))?;
 
-    // 非管理员只能导入自己名下的地图。
+    // 非管理员只能导入自己名下的地图，或中台分享给自己管辖设备的地图。
     if !claims.is_admin
         && let Some(zentai_user_id) = claims.zentai_user_id
         && source.user_id != Some(zentai_user_id)
     {
-        return Err(AppError::NotFound(
-            "地图不存在或不在你的管辖范围内".to_string(),
-        ));
+        let shared = dog_map_has_share_table(&backend_pool).await?
+            && map_shared_to_user(&backend_pool, source.id, zentai_user_id).await?;
+        if !shared {
+            return Err(AppError::NotFound(
+                "地图不存在或不在你的管辖范围内".to_string(),
+            ));
+        }
     }
 
     // 园区：请求优先；否则按中台地图携带的园区编码反查

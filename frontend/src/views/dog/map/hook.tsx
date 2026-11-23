@@ -89,6 +89,22 @@ export function useDogMap() {
           <span class="text-xs text-gray-400">手工上传</span>
         )
     },
+    {
+      label: "共享设备",
+      prop: "sharedDeviceCodes",
+      width: 160,
+      cellRenderer: ({ row }) => {
+        const codes: string[] = row.sharedDeviceCodes ?? [];
+        return codes.length ? (
+          <span class="font-mono text-xs" title={codes.join("、")}>
+            {codes.slice(0, 2).join("、")}
+            {codes.length > 2 ? ` +${codes.length - 2}` : ""}
+          </span>
+        ) : (
+          <span class="text-xs text-gray-400">未分享</span>
+        );
+      }
+    },
     { label: "文件名称", prop: "fileName", minWidth: 180 },
     {
       label: "基线版本",
@@ -404,6 +420,19 @@ export function useDogMap() {
     });
   }
 
+  /**
+   * 「下发到狗体」的目标设备：上报设备在前，分享设备在后。
+   * 分享不复制地图，只是让同一张图也能下发 / 被看到。
+   */
+  function pushTargets(row): string[] {
+    const codes: string[] = [];
+    if (row.deviceCode) codes.push(row.deviceCode);
+    for (const code of row.sharedDeviceCodes ?? []) {
+      if (!codes.includes(code)) codes.push(code);
+    }
+    return codes;
+  }
+
   onMounted(() => {
     // 业务控制台「在中台地图管理查看」会带 ?mapName= / ?deviceCode= / ?fileName= 跳过来，
     // 预填筛选条件，避免用户拿业务地图编号在中台列表里找不到对应图。
@@ -448,6 +477,7 @@ export function useDogMap() {
     cancel,
     openDia,
     publishMap,
-    newVersionMap
+    newVersionMap,
+    pushTargets
   };
 }

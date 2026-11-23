@@ -1,7 +1,7 @@
 use crate::business::dog::map::domain::{
     CreateMapRequest, DogMap, MAP_STATUS_ARCHIVED, MAP_STATUS_DRAFT, MAP_STATUS_PARTIAL,
-    MAP_STATUS_PUBLISHED, MapEditRequest, MapEditStroke, MapImageVO, MapPageQuery, MapVO,
-    UpdateMapRequest, UploadMapRequest, is_valid_map_status,
+    MAP_STATUS_PUBLISHED, MapEditRequest, MapEditStroke, MapImageVO, MapPageQuery, MapShareResult,
+    MapShareVO, MapVO, ShareMapRequest, UpdateMapRequest, UploadMapRequest, is_valid_map_status,
 };
 use crate::business::dog::map::package::{
     MAX_EDIT_POINTS, MAX_EDIT_STROKES, parse_map_package, rewrite_map_package, sha256_hex,
@@ -48,15 +48,42 @@ impl DogMapService {
 
     pub async fn get_by_id(&self, id: i64, scope: &DataScope) -> Result<DogMap, AppError> {
         self.repo
+            .find_visible_by_id(id, scope)
+            .await
+            .map_err(AppError::DatabaseError)?
+            .ok_or_else(|| AppError::NotFound(format!("Map with id {} not found", id)))
+    }
+
+    /// 只认「自己的地图」：改 / 删 / 发版 / 擦除 / 覆盖地图包 / 管理分享都走这里。
+    async fn get_owned_by_id(&self, id: i64, scope: &DataScope) -> Result<DogMap, AppError> {
+        self.repo
             .find_by_id(id, scope)
             .await
             .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Map with id {} not found", id)))
     }
 
-    /// 转成 VO，供单条详情 / 新增 / 修改接口返回。
-    pub fn to_vo(&self, map: DogMap) -> MapVO {
-        MapVO::from(map)
+    /// 转成 VO（带分享设备清单），供单条详情 / 新增 / 修改接口返回。
+    pub async fn to_vo(&self, map: DogMap) -> Result<MapVO, AppError> {
+        self.to_vos(vec![map]).await.map(|mut vos| vos.remove(0))
+    }
+
+    /// 批量转 VO：一次查出所有分享关系，列表页不会 N+1。
+    async fn to_vos(&self, maps: Vec<DogMap>) -> Result<Vec<MapVO>, AppError> {
+        let ids: Vec<i64> = maps.iter().map(|map| map.id).collect();
+        let mut shares = self
+            .repo
+            .find_share_codes_for_maps(&ids)
+            .await
+            .map_err(AppError::DatabaseError)?;
+        Ok(maps
+            .into_iter()
+            .map(|map| {
+                let mut vo = MapVO::from(map);
+                vo.shared_device_codes = shares.remove(&vo.id).unwrap_or_default();
+                vo
+            })
+            .collect())
     }
 
     pub async fn list_page(
@@ -70,7 +97,7 @@ impl DogMapService {
             .await
             .map_err(AppError::DatabaseError)?;
 
-        let vo_list: Vec<MapVO> = records.into_iter().map(MapVO::from).collect();
+        let vo_list = self.to_vos(records).await?;
 
         Ok(PageResponse::new(
             vo_list,
@@ -80,11 +107,13 @@ impl DogMapService {
         ))
     }
 
-    pub async fn list_all(&self, scope: &DataScope) -> Result<Vec<DogMap>, AppError> {
-        self.repo
+    pub async fn list_all(&self, scope: &DataScope) -> Result<Vec<MapVO>, AppError> {
+        let maps = self
+            .repo
             .find_all(scope)
             .await
-            .map_err(AppError::DatabaseError)
+            .map_err(AppError::DatabaseError)?;
+        self.to_vos(maps).await
     }
 
     pub async fn update(
@@ -93,7 +122,7 @@ impl DogMapService {
         req: UpdateMapRequest,
         scope: &DataScope,
     ) -> Result<DogMap, AppError> {
-        let existing = self.get_by_id(id, scope).await?;
+        let existing = self.get_owned_by_id(id, scope).await?;
         if let Some(status) = req.map_status.as_deref()
             && !is_valid_map_status(status)
         {
@@ -155,7 +184,7 @@ impl DogMapService {
     ///
     /// 已发布版本视为不可变；归档由发布新版本或人工操作完成。
     pub async fn publish(&self, id: i64, scope: &DataScope) -> Result<DogMap, AppError> {
-        let map = self.get_by_id(id, scope).await?;
+        let map = self.get_owned_by_id(id, scope).await?;
         if map.map_status == MAP_STATUS_ARCHIVED {
             return Err(AppError::BadRequest(
                 "已归档的地图版本不可再次发布，请创建新版本".to_string(),
@@ -182,7 +211,9 @@ impl DogMapService {
 
     /// 基于当前版本派生下一个不可变版本并立即发布。
     pub async fn new_version(&self, id: i64, scope: &DataScope) -> Result<DogMap, AppError> {
-        let map = self.get_by_id(id, scope).await?;
+        let map = self.get_owned_by_id(id, scope).await?;
+        // 派生版本要继承分享设备：否则发一次新版，被分享的设备立刻看不到图了
+        let shared_device_codes = self.share_codes(id).await?;
         let next_version = bump_minor_version(map.map_version.as_deref());
         let req = CreateMapRequest {
             map_name: map.map_name.clone(),
@@ -215,7 +246,130 @@ impl DogMapService {
             .create(&req, new_id, scope)
             .await
             .map_err(AppError::DatabaseError)?;
+        for device_code in shared_device_codes {
+            self.repo
+                .add_share(new_id, &device_code, scope.user_id())
+                .await
+                .map_err(AppError::DatabaseError)?;
+        }
         self.publish(new_id, scope).await
+    }
+
+    /// 把地图分享给其他设备使用（不复制地图包，也不重新建图）。
+    ///
+    /// 只有地图归属人（或管理员）能分享；上报设备本身不算分享，会被忽略。
+    pub async fn share(
+        &self,
+        id: i64,
+        req: ShareMapRequest,
+        scope: &DataScope,
+    ) -> Result<MapShareResult, AppError> {
+        let map = self.get_owned_by_id(id, scope).await?;
+        let replace = req
+            .mode
+            .as_deref()
+            .map(|mode| mode.trim().eq_ignore_ascii_case("replace"))
+            .unwrap_or(false);
+
+        let mut codes: Vec<String> = Vec::new();
+        for code in &req.device_codes {
+            let code = code.trim();
+            if code.is_empty() || Some(code) == map.device_code.as_deref() {
+                continue;
+            }
+            if !codes.iter().any(|kept| kept == code) {
+                codes.push(code.to_string());
+            }
+        }
+        if !replace && codes.is_empty() {
+            return Err(AppError::BadRequest(
+                "请选择要分享的设备（上报设备本身就是可用设备，无需分享）".to_string(),
+            ));
+        }
+
+        let mut removed = 0;
+        if replace {
+            removed = self
+                .repo
+                .remove_shares_not_in(id, &codes)
+                .await
+                .map_err(AppError::DatabaseError)?;
+        }
+        let mut added = 0;
+        for code in &codes {
+            if self
+                .repo
+                .add_share(id, code, scope.user_id())
+                .await
+                .map_err(AppError::DatabaseError)?
+            {
+                added += 1;
+            }
+        }
+
+        let shared_device_codes = self.share_codes(id).await?;
+        Ok(MapShareResult {
+            map_id: id,
+            shared_device_codes,
+            added,
+            removed,
+        })
+    }
+
+    /// 取消分享（幂等：本来没分享也返回成功）。
+    pub async fn unshare(
+        &self,
+        id: i64,
+        device_code: &str,
+        scope: &DataScope,
+    ) -> Result<MapShareResult, AppError> {
+        self.get_owned_by_id(id, scope).await?;
+        let device_code = device_code.trim();
+        if device_code.is_empty() {
+            return Err(AppError::BadRequest("缺少设备编号".to_string()));
+        }
+        let removed = self
+            .repo
+            .remove_share(id, device_code)
+            .await
+            .map_err(AppError::DatabaseError)?;
+        let shared_device_codes = self.share_codes(id).await?;
+        Ok(MapShareResult {
+            map_id: id,
+            shared_device_codes,
+            added: 0,
+            removed,
+        })
+    }
+
+    /// 当前分享给了哪些设备。
+    pub async fn list_shares(
+        &self,
+        id: i64,
+        scope: &DataScope,
+    ) -> Result<Vec<MapShareVO>, AppError> {
+        // 读权限：自己的地图，或分享给了自己管辖设备的地图
+        self.get_by_id(id, scope).await?;
+        Ok(self
+            .repo
+            .find_shares(id)
+            .await
+            .map_err(AppError::DatabaseError)?
+            .into_iter()
+            .map(|share| MapShareVO {
+                map_id: share.map_id,
+                device_code: share.device_code,
+                create_time: format_datetime(share.create_time),
+            })
+            .collect())
+    }
+
+    /// 分享设备清单（下发地图的目标候选）。
+    pub async fn share_codes(&self, id: i64) -> Result<Vec<String>, AppError> {
+        self.repo
+            .find_share_codes(id)
+            .await
+            .map_err(AppError::DatabaseError)
     }
 
     /// Stores an uploaded `.zip` map package and creates/updates the map row.
@@ -270,7 +424,7 @@ impl DogMapService {
         // 原地覆盖（业务平台「同步地图」刷新）时先校验状态，再落盘：
         // 已发布 / 已归档不可改包，与橡皮擦同一套规则（草稿 + 部分标定可编辑）。
         if let Some(id) = info.id {
-            let existing = self.get_by_id(id, write_scope).await?;
+            let existing = self.get_owned_by_id(id, write_scope).await?;
             if !matches!(
                 existing.map_status.as_str(),
                 MAP_STATUS_DRAFT | MAP_STATUS_PARTIAL
@@ -401,7 +555,7 @@ impl DogMapService {
         let strokes = validate_edit_request(&req)?;
         let erase_value = req.erase_value.unwrap_or(254);
 
-        let map = self.get_by_id(id, scope).await?;
+        let map = self.get_owned_by_id(id, scope).await?;
         if !matches!(
             map.map_status.as_str(),
             MAP_STATUS_DRAFT | MAP_STATUS_PARTIAL

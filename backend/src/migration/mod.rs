@@ -486,6 +486,8 @@ mod tests {
                 "add_media_origin_fields",
                 "media_sha_plain_unique_index",
                 "media_sha_index_repair",
+                "add_media_capture_switch",
+                "add_map_share",
             ]
         );
         assert_eq!(migrations[0].name(), "p_sys_tables_from_file");
@@ -499,7 +501,7 @@ mod tests {
             .await
             .unwrap();
 
-        for table in ["p_sys_user", "p_sys_logrecord", "dog_map"] {
+        for table in ["p_sys_user", "p_sys_logrecord", "dog_map", "dog_map_share"] {
             let statement = Statement::from_string(
                 DbBackend::Sqlite,
                 format!(

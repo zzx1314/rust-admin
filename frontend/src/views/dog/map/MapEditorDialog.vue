@@ -77,7 +77,21 @@ const hasPackageHint = computed(() =>
     ? `${currentMap.value.mapWidth}×${currentMap.value.mapHeight}`
     : "-"
 );
-const canPush = computed(() => !!currentMap.value?.deviceCode);
+/**
+ * 可下发的设备：上报设备在前，分享设备在后。
+ * 分享是同一张图给多台设备用，不是地图副本。
+ */
+const pushTargets = computed<string[]>(() => {
+  const row = currentMap.value;
+  if (!row) return [];
+  const codes: string[] = [];
+  if (row.deviceCode) codes.push(row.deviceCode);
+  for (const code of row.sharedDeviceCodes ?? []) {
+    if (!codes.includes(code)) codes.push(code);
+  }
+  return codes;
+});
+const canPush = computed(() => pushTargets.value.length > 0);
 const brushColor = computed(() =>
   eraseValue.value === 254
     ? "#ffffff"
@@ -409,9 +423,12 @@ async function save() {
 
 async function pushToDog() {
   const row = currentMap.value;
+  const deviceCode = pushTargets.value[0];
   if (!row?.id || pushing.value) return;
-  if (!canPush.value) {
-    message("该地图没有关联上报设备，无法下发到狗体", { type: "warning" });
+  if (!deviceCode) {
+    message("该地图没有关联上报设备，也没有分享给其他设备，无法下发到狗体", {
+      type: "warning"
+    });
     return;
   }
   if (dirty.value) {
@@ -422,10 +439,7 @@ async function pushToDog() {
   }
   pushing.value = true;
   try {
-    const { code, msg, data } = await dogMapPushToDevice(
-      row.id,
-      row.deviceCode
-    );
+    const { code, msg, data } = await dogMapPushToDevice(row.id, deviceCode);
     if (code !== SUCCESS) {
       message(msg || "下发失败", { type: "error" });
       return;
@@ -435,8 +449,8 @@ async function pushToDog() {
       data?.result?.message ?? data?.result?.deviceResult?.message ?? "";
     message(
       detail
-        ? `已下发到 ${row.deviceCode}：${detail}`
-        : `已下发到 ${row.deviceCode}，设备已确认执行`,
+        ? `已下发到 ${deviceCode}：${detail}`
+        : `已下发到 ${deviceCode}，设备已确认执行`,
       { type: "success", duration: 10000 }
     );
     emit("pushed", row);
@@ -588,6 +602,9 @@ defineExpose({ open });
         <span>分辨率：{{ meta.resolution || "-" }} m/px</span>
         <span>原点：{{ meta.origin.join(", ") || "-" }}</span>
         <span>设备编号：{{ currentMap?.deviceCode || "手工上传" }}</span>
+        <span v-if="currentMap?.sharedDeviceCodes?.length">
+          共享设备：{{ currentMap.sharedDeviceCodes.join("、") }}
+        </span>
         <span>版本：{{ currentMap?.mapVersion || "-" }}</span>
         <span v-if="dirty" class="dirty">有未保存的擦除</span>
       </div>
@@ -629,7 +646,7 @@ defineExpose({ open });
     <template #footer>
       <el-tooltip
         :disabled="canPush"
-        content="该地图没有关联上报设备，无法下发到狗体"
+        content="该地图没有关联上报设备，也没有分享给其他设备，无法下发到狗体"
         placement="top"
       >
         <span>
@@ -639,7 +656,7 @@ defineExpose({ open });
             :disabled="!canPush"
             @click="pushToDog"
           >
-            下发到狗体（{{ currentMap?.deviceCode || "未关联设备" }}）
+            下发到狗体（{{ pushTargets[0] || "未关联设备" }}）
           </el-button>
         </span>
       </el-tooltip>

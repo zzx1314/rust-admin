@@ -2,7 +2,7 @@ use axum::{
     Router,
     extract::DefaultBodyLimit,
     middleware::from_fn_with_state,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
@@ -326,6 +326,18 @@ pub fn dog_map_routes(state: AppState) -> Router<AppState> {
         .route(
             "/dogMap/{id}/push",
             post(dog_map_handlers::push_map_handler),
+        )
+        .route(
+            "/dogMap/{id}/shares",
+            get(dog_map_handlers::list_map_shares_handler),
+        )
+        .route(
+            "/dogMap/{id}/share",
+            post(dog_map_handlers::share_map_handler),
+        )
+        .route(
+            "/dogMap/{id}/share/{device_code}",
+            delete(dog_map_handlers::unshare_map_handler),
         )
         .route(
             "/dogMap/{id}",

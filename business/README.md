@@ -517,9 +517,12 @@ HTTP 链路（②）的三个约定：
 - `GET /api/map-versions` 支持 `parkId`、`deviceCode`、`unbound`、`status` 过滤，前端用它渲染基线徽章与版本下拉；
   非管理员只返回自己设备采的地图（`owner_user_id`，管理员可看全部 / 用 `ownerUserId` 指定他人）。
 - `GET /api/map-versions/backend` 读取仓库根目录 `backend` 的 `dog_map` 地图库，列出已上传的 ROS map_server 地图包；
-  支持 `parkCode` 过滤，业务平台可据此只查看某园区的地图。
+  支持 `parkCode` 过滤，业务平台可据此只查看某园区的地图。非管理员除了自己名下的地图，
+  还能看到中台**分享给「分配给自己的设备」**的地图（`dog_map_share`，中台地图页「更多 →
+  分享设备」），因此同一张图可以直接给多台设备用，不用重新建图。根库还没有该表时退回原行为。
 - `POST /api/map-versions/import-backend` 把 `{ backendMapId, parkId?, bind }` 指定的地图导入本业务库；
   `parkId` 缺省时按中台地图携带的 `parkCode` 反查业务园区，园区编码未登记会报错。
+  导入权限与上面的列表同一口径：自己名下的地图，或分享给自己管辖设备的中台地图。
   导入时会从 `.zip` 内解析 `model.yaml` 的 `resolution` / `origin` 和 `model.pgm` 的宽高，并可选绑定为园区当前基线。
 - `GET /api/map-versions/{id}/raster` 解析地图包里的 `model.pgm`，转成 PNG data URL，返回分辨率、原点与栅格宽高；路线编辑画布可切换「真实地图」底图。
 - `GET /api/map-versions/{id}/refs` 返回引用该版本的路线、任务与园区设备数，用于影响分析。

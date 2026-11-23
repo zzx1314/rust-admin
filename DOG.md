@@ -18,14 +18,14 @@
 | 后端业务代码 | `backend/src/business/dog/{map,media,model,config,statistics,device}/` |
 | 后端路由 | `backend/src/api/routes.rs`（每个子域一个 `dog_*_routes`，统一挂 `require_auth`） |
 | 服务装配 | `backend/src/app.rs` → `App::build_state_with_token_store` |
-| 数据库迁移 | `.../7_create_dog_tables.sql`、`.../19_add_map_file_fields.sql`、`.../22_add_map_baseline_*.sql`、`.../23_add_map_dimensions.sql`、`.../24_drop_retired_dog_tables.sql`、`.../25_drop_command_services_tables.sql`、`.../26_add_map_park.sql`、`.../27_add_device_management.sql`（重建 `dog_device` / `dog_user_device`）、`.../29_add_map_device_code.sql`、`.../31_add_media_origin_fields.sql`（媒体来源字段 + 参数配置预置 `media_picture_dir` / `media_frames`）、`.../32_media_sha_plain_unique_index.sql` + `.../33_media_sha_index_repair.sql`（sha256 去重键用**普通**唯一索引：正式机 sqlite3 3.7 不认 partial index）、`.../34_add_media_capture_switch.sql`（预置 `media_capture_enabled=0`，航点自动采集默认关） |
+| 数据库迁移 | `.../7_create_dog_tables.sql`、`.../19_add_map_file_fields.sql`、`.../22_add_map_baseline_*.sql`、`.../23_add_map_dimensions.sql`、`.../24_drop_retired_dog_tables.sql`、`.../25_drop_command_services_tables.sql`、`.../26_add_map_park.sql`、`.../27_add_device_management.sql`（重建 `dog_device` / `dog_user_device`）、`.../29_add_map_device_code.sql`、`.../31_add_media_origin_fields.sql`（媒体来源字段 + 参数配置预置 `media_picture_dir` / `media_frames`）、`.../32_media_sha_plain_unique_index.sql` + `.../33_media_sha_index_repair.sql`（sha256 去重键用**普通**唯一索引：正式机 sqlite3 3.7 不认 partial index）、`.../34_add_media_capture_switch.sql`（预置 `media_capture_enabled=0`，航点自动采集默认关）、`.../35_add_map_share.sql`（`dog_map_share`：地图分享给其他设备，不用重新建图） |
 | 菜单 | `backend/migrations/p_sys/9_add_dog_menus.sql`、`.../21_remove_retired_dog_menus.sql`、`.../22_remove_command_services_menus.sql`、`.../27_add_device_management_menu.sql` |
 | 前端页面 | `frontend/src/views/dog/{map,media,model,config,device}/` |
 | 前端请求封装 | `frontend/src/api/dog{Map,Media,Model,Config,Statistics,Device}.ts` |
 | 首页仪表盘 | `frontend/src/views/welcome/index.vue` + `frontend/src/api/dogStatistics.ts` |
 | 在线手册 | `frontend/src/views/manual/admin.md`（管理员）、`developer.md`（接口对接） |
 
-每个子域内部固定分层：`domain.rs`（请求/VO/字段映射）、`entity.rs`（SeaORM 实体）、`repository.rs`（SQL/条件构造）、`service.rs`（业务编排与错误映射）、`handlers.rs`（HTTP 层）、`mod.rs`。
+每个子域内部固定分层：`domain.rs`（请求/VO/字段映射）、`entity.rs`（SeaORM 实体）、`repository.rs`（SQL/条件构造）、`service.rs`（业务编排与错误映射）、`handlers.rs`（HTTP 层）、`mod.rs`。地图域额外有 `share_entity.rs`（`dog_map_share`，地图分享给多台设备的多对多关系）。
 
 ---
 
@@ -34,6 +34,7 @@
 | 表 | 说明 | 关键字段 |
 | --- | --- | --- |
 | `dog_map` | 地图基线版本 | `map_name`、`map_type`、`file_name`、`file_path`、`file_format`、`file_size`、`remarks`、`user_id`(创建者)、`map_version`、`frame_id`、`crs`、`map_origin`、`resolution`、`floors`、`road_count`、`nogo_count`、`map_status`(草稿/部分标定/已发布/已归档)、`map_hash`(上传时计算的 SHA-256)、`map_width`/`map_height`、`publish_time`、`park_code`/`park_name`(业务园区归属，可选)、`device_code`(上报该地图的设备编号，可选)；地图以 `.zip` 包上传，文件落盘到 `<upload_dir>/maps/`。上传时后端解析 PGM/YAML 并回写 resolution/origin/尺寸/哈希，表单值与包内容冲突会被拒绝。发布后版本不可变 |
+| `dog_map_share` | 地图分享（多对多） | `map_id`(中台 `dog_map.id`)、`device_code`(共享给哪台设备，与 `dog_map.device_code` 同口径)、`user_id`(操作人)；`(map_id, device_code)` 唯一索引覆盖软删除行，重复分享恢复旧行。分享不复制地图包，只让同一张图可被其他设备使用、且其管理者可见 |
 | `dog_model` | 模型 | `model_name`、`model_type`、`file_name`、`file_path`、`file_format`、`file_size`、`remarks` |
 | `dog_media` | 媒体 | `media_name`、`media_type`、`media_path`、`media_size`、`remarks`；迁移 31 起还有来源字段：`device_code`、`park_code`、`plan_id`、`point_index`、`captured_at`、`source`(`ai-patrol`/`manual`)、`sha256`(去重键)。图片落盘 `<upload_dir>/media/<设备>/<计划>/pt<n>/<sha256>.<ext>` |
 | `dog_config` | 参数配置 | `config_name`、`config_value`、`description`；媒体相关预置项：`media_picture_dir`（板端存证目录）、`media_frames`（每航点固定帧数）、`media_capture_enabled`（**巡检到点自动采集总开关，默认 `0` 关**；关着只写告警证据图，不攒训练数据） |
@@ -66,6 +67,9 @@ GET    /api/dogMedia/{id}/file      下载单张原图（attachment；手工登�
 GET    /api/dogMedia/export         批量下载 zip（ids 或筛选条件；原图 + manifest.json；上限 200 张 / 100MB）
 POST   /api/dogMap/{id}/edit        橡皮擦：按像素笔画改写包内 model.pgm 噪点
 POST   /api/dogMap/{id}/push        把编辑后的地图下发到狗体（本体）并重新载图
+POST   /api/dogMap/{id}/share       把地图分享给其他设备使用（`deviceCodes` + `mode: append|replace`）
+GET    /api/dogMap/{id}/shares      当前分享给了哪些设备
+DELETE /api/dogMap/{id}/share/{deviceCode}  取消分享给单台设备（幂等）
 POST   /api/dogMap/{id}/publish     发布地图版本（记录发布时间）
 POST   /api/dogMap/{id}/newVersion  派生并发布下一个不可变版本
 GET    /api/dogStatistics/all       地图 / 模型 / 媒体 / 参数配置总量与本周曲线
@@ -144,6 +148,26 @@ ROS `model.pgm` 包）时才退回 `model.pgm` / `map.pgm`。编辑只改写编�
 
 - `module` ∈ `dogMap`、`dogMedia`、`dogModel`、`dogConfig`，均提供 `getPage` + `getAll`。
 - 统计接口同样需要登录（`require_auth`）。
+
+### 3.0.2 地图分享（同一张图给多台设备用）
+
+一张地图可以分享给多台设备，**不复制地图包、不新建地图记录**：
+
+- `dog_map.device_code` 仍然只记「上报（采集）这张图的设备」，分享关系落在
+  `dog_map_share`；上报设备本身天然可用，不进分享表（提交里带它会被忽略）。
+- 前端：地图列表「更多 → 分享设备」打开 `MapShareDialog`，多选设备（`/api/dogDevice/getAll`
+  的设备台账）后一次保存（`mode: replace`，清空即取消全部分享）。列表新增「共享设备」列。
+- 分享后：
+  - **可见性**：分配给目标设备的中台用户也能在地图列表 / 详情里看到这张图（只读）；
+    `GET /api/dogMap/getPage` 的 `deviceCode` 过滤同时匹配上报设备与分享设备。
+  - **下发**：「下发到狗体」的目标设备 = 上报设备 + 分享设备，前端按设备列成多个下拉项；
+    对未关联也未分享的设备下发会被拒绝（提示先分享）。
+  - **写权限不变**：改 / 删 / 发版 / 擦除 / 覆盖地图包仍只认地图归属人（或管理员），
+    分享不会把别人的地图变成可编辑的。
+- 业务平台（`business/server` 的 `/api/map-versions/backend` 与 `import-backend`）也按同一口径
+  放开：分享给「分配给当前中台账号的设备」的地图，目标设备的管理员在业务控制台里能看到并
+  导入，不需要重新建图。业务平台读取前会先探测 `dog_map_share` 是否存在，旧库退回原行为。
+- 删除地图时分享记录一并软删除（`repo.delete` → `delete_shares`）。
 
 ### 3.0 地图归属园区与上报设备
 
@@ -246,13 +270,16 @@ ingest 侧同样先复核：中台已删就走正常上传并把业务行指向�
 
 ### 3.3 数据权限
 
-`dog_map` 与 `dog_device` 都带 `user_id`：地图按“谁创建谁可见”做行级隔离；
+`dog_map` 与 `dog_device` 都带 `user_id`：地图按“谁创建谁可见”做行级隔离，
+**分享给「分配给自己的设备」的地图对普通用户只读可见**；
 设备按 `dog_user_device` 分配关系隔离（一个设备可分配给多个用户）。模型 / 媒体 / 参数配置为全局共享。
 
 | 操作 | 普通用户 | 管理员 |
 | --- | --- | --- |
 | 新增地图 | `user_id` 由服务端从 JWT 写入（忽略请求体） | 同左；可通过 `mapInfo.ownerUserId` 指定归属 |
-| 地图列表 / 详情 / 修改 / 删除 | 仅 `user_id = 当前用户`，否则 404 | 全部 |
+| 地图列表 / 详情 | `user_id = 当前用户`，或分享给了分配给自己的设备；否则 404 | 全部 |
+| 地图修改 / 删除 / 发布 / 擦除 | 仅 `user_id = 当前用户` | 全部 |
+| 地图分享 / 取消分享 | 仅 `user_id = 当前用户`，且目标设备需分配给自己 | 允许，设备不限 |
 | 设备列表 / 详情 / 修改 / 删除 | 仅被分配的设备 | 全部 |
 | 设备分配 / 解除分配 | 拒绝 | 允许，支持批量 |
 | 首页统计 | 全部资源总量 | 同左 |

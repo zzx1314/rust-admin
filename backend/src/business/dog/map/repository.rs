@@ -3,14 +3,19 @@ use crate::business::dog::map::entity::ActiveModel as MapActiveModel;
 use crate::business::dog::map::entity::Column as MapColumn;
 use crate::business::dog::map::entity::Entity as MapEntity;
 use crate::business::dog::map::entity::Model as Map;
-use crate::common::base::{BaseRepository, order_desc};
+use crate::business::dog::map::share_entity::ActiveModel as MapShareActiveModel;
+use crate::business::dog::map::share_entity::Column as MapShareColumn;
+use crate::business::dog::map::share_entity::Entity as MapShareEntity;
+use crate::business::dog::map::share_entity::Model as MapShare;
+use crate::common::base::{BaseRepository, order_asc, order_desc};
 use crate::common::data_scope::DataScope;
-use crate::common::util::parse_beijing_datetime;
+use crate::common::util::{generate_id, parse_beijing_datetime};
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect,
+    ActiveValue, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, DbBackend,
+    EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Statement,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -52,6 +57,42 @@ impl SeaOrmDogMapRepository {
         query.one(&*self.conn).await
     }
 
+    /// 读接口的可见范围：自己的地图 + 分享给自己管辖设备的其他地图。
+    ///
+    /// 写接口（改 / 删 / 发版 / 擦除 / 覆盖地图包）仍然只认 [`Self::find_by_id`]，
+    /// 分享出去的地图不因此变成别人可编辑的。
+    pub async fn find_visible_by_id(
+        &self,
+        id: i64,
+        scope: &DataScope,
+    ) -> Result<Option<Map>, sea_orm::DbErr> {
+        let map = MapEntity::find()
+            .filter(MapColumn::Id.eq(id))
+            .filter(MapColumn::IsDeleted.eq(0))
+            .one(&*self.conn)
+            .await?;
+        let Some(map) = map else {
+            return Ok(None);
+        };
+        if let Some(owner) = scope.owner_filter()
+            && map.user_id != owner
+            && !self.is_shared_to_user(map.id, owner).await?
+        {
+            return Ok(None);
+        }
+        Ok(Some(map))
+    }
+
+    /// 普通用户的可见条件：自己的地图，或分享给了分配给自己的设备的地图。
+    async fn visibility_condition(&self, owner: i64) -> Result<Condition, sea_orm::DbErr> {
+        let shared = self.find_shared_map_ids_for_user(owner).await?;
+        let mut condition = Condition::any().add(MapColumn::UserId.eq(owner));
+        if !shared.is_empty() {
+            condition = condition.add(MapColumn::Id.is_in(shared));
+        }
+        Ok(condition)
+    }
+
     pub async fn find_all_with_page(
         &self,
         query: &MapPageQuery,
@@ -59,7 +100,7 @@ impl SeaOrmDogMapRepository {
     ) -> Result<(Vec<Map>, i64), sea_orm::DbErr> {
         let mut base_query = MapEntity::find().filter(MapColumn::IsDeleted.eq(0));
         if let Some(owner) = scope.owner_filter() {
-            base_query = base_query.filter(MapColumn::UserId.eq(owner));
+            base_query = base_query.filter(self.visibility_condition(owner).await?);
         }
 
         let mut cond = Condition::all();
@@ -77,7 +118,15 @@ impl SeaOrmDogMapRepository {
         if let Some(ref device_code) = query.device_code
             && !device_code.trim().is_empty()
         {
-            cond = cond.add(MapColumn::DeviceCode.contains(device_code.trim()));
+            let code = device_code.trim();
+            // 设备编号既匹配「上报设备」，也匹配「分享给这台设备」：
+            // 从设备视角看，两者都是这台设备能用的图。
+            let shared_ids = self.find_map_ids_shared_to_device(code).await?;
+            let mut device_cond = Condition::any().add(MapColumn::DeviceCode.contains(code));
+            if !shared_ids.is_empty() {
+                device_cond = device_cond.add(MapColumn::Id.is_in(shared_ids));
+            }
+            cond = cond.add(device_cond);
         }
         if let Some(ref status) = query.map_status
             && !status.trim().is_empty()
@@ -120,7 +169,7 @@ impl SeaOrmDogMapRepository {
     pub async fn find_all(&self, scope: &DataScope) -> Result<Vec<Map>, sea_orm::DbErr> {
         let mut query = MapEntity::find().filter(MapColumn::IsDeleted.eq(0));
         if let Some(owner) = scope.owner_filter() {
-            query = query.filter(MapColumn::UserId.eq(owner));
+            query = query.filter(self.visibility_condition(owner).await?);
         }
         query
             .order_by(MapColumn::CreateTime, order_desc())
@@ -284,6 +333,8 @@ impl SeaOrmDogMapRepository {
             update = update.filter(MapColumn::UserId.eq(owner));
         }
         update.exec(&*self.conn).await?;
+        // 地图删了，分享关系一并收起（软删；重新建同名 id 不会撞唯一索引）
+        self.delete_shares(id).await?;
         Ok(true)
     }
 
@@ -312,6 +363,201 @@ impl SeaOrmDogMapRepository {
         }
         update.exec(&*self.conn).await?;
         self.find_by_id(id, scope).await
+    }
+
+    /// 当前分享给了哪些设备（按分享时间排序）。
+    pub async fn find_shares(&self, map_id: i64) -> Result<Vec<MapShare>, sea_orm::DbErr> {
+        MapShareEntity::find()
+            .filter(MapShareColumn::MapId.eq(map_id))
+            .filter(MapShareColumn::IsDeleted.eq(0))
+            .order_by(MapShareColumn::CreateTime, order_asc())
+            .all(&*self.conn)
+            .await
+    }
+
+    pub async fn find_share_codes(&self, map_id: i64) -> Result<Vec<String>, sea_orm::DbErr> {
+        Ok(self
+            .find_shares(map_id)
+            .await?
+            .into_iter()
+            .map(|share| share.device_code)
+            .collect())
+    }
+
+    /// 一次取多张地图的分享设备，避免列表页 N+1。
+    pub async fn find_share_codes_for_maps(
+        &self,
+        ids: &[i64],
+    ) -> Result<HashMap<i64, Vec<String>>, sea_orm::DbErr> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows = MapShareEntity::find()
+            .filter(MapShareColumn::MapId.is_in(ids.iter().copied()))
+            .filter(MapShareColumn::IsDeleted.eq(0))
+            .order_by(MapShareColumn::CreateTime, order_asc())
+            .all(&*self.conn)
+            .await?;
+        let mut grouped: HashMap<i64, Vec<String>> = HashMap::new();
+        for row in rows {
+            grouped.entry(row.map_id).or_default().push(row.device_code);
+        }
+        Ok(grouped)
+    }
+
+    /// 分享给一台设备；已分享（含软删除后重新分享）不重复插入。
+    ///
+    /// 返回 `true` 表示本次真的写入 / 恢复了记录。
+    pub async fn add_share(
+        &self,
+        map_id: i64,
+        device_code: &str,
+        user_id: i64,
+    ) -> Result<bool, sea_orm::DbErr> {
+        let existing = MapShareEntity::find()
+            .filter(MapShareColumn::MapId.eq(map_id))
+            .filter(MapShareColumn::DeviceCode.eq(device_code))
+            .one(&*self.conn)
+            .await?;
+        let now = Utc::now();
+        match existing {
+            Some(share) if share.is_deleted == 0 => Ok(false),
+            Some(share) => {
+                let mut active_model: MapShareActiveModel = share.into();
+                active_model.user_id = ActiveValue::set(Some(user_id));
+                active_model.update_time = ActiveValue::set(Some(now));
+                active_model.is_deleted = ActiveValue::set(0);
+                MapShareEntity::update(active_model)
+                    .exec(&*self.conn)
+                    .await?;
+                Ok(true)
+            }
+            None => {
+                MapShareEntity::insert(MapShareActiveModel {
+                    id: ActiveValue::set(generate_id()),
+                    map_id: ActiveValue::set(map_id),
+                    device_code: ActiveValue::set(device_code.to_string()),
+                    user_id: ActiveValue::set(Some(user_id)),
+                    create_time: ActiveValue::set(now),
+                    update_time: ActiveValue::set(Some(now)),
+                    is_deleted: ActiveValue::set(0),
+                })
+                .exec(&*self.conn)
+                .await?;
+                Ok(true)
+            }
+        }
+    }
+
+    /// 取消分享一台设备，返回实际软删除的条数。
+    pub async fn remove_share(
+        &self,
+        map_id: i64,
+        device_code: &str,
+    ) -> Result<u64, sea_orm::DbErr> {
+        let rows = MapShareEntity::find()
+            .filter(MapShareColumn::MapId.eq(map_id))
+            .filter(MapShareColumn::DeviceCode.eq(device_code))
+            .filter(MapShareColumn::IsDeleted.eq(0))
+            .all(&*self.conn)
+            .await?;
+        let mut removed = 0;
+        for row in rows {
+            let mut active_model: MapShareActiveModel = row.into();
+            active_model.is_deleted = ActiveValue::set(1);
+            active_model.update_time = ActiveValue::set(Some(Utc::now()));
+            MapShareEntity::update(active_model)
+                .exec(&*self.conn)
+                .await?;
+            removed += 1;
+        }
+        Ok(removed)
+    }
+
+    /// `replace` 语义：移除非 `keep` 里的分享。
+    pub async fn remove_shares_not_in(
+        &self,
+        map_id: i64,
+        keep: &[String],
+    ) -> Result<u64, sea_orm::DbErr> {
+        let rows = MapShareEntity::find()
+            .filter(MapShareColumn::MapId.eq(map_id))
+            .filter(MapShareColumn::IsDeleted.eq(0))
+            .all(&*self.conn)
+            .await?;
+        let mut removed = 0;
+        for row in rows {
+            if keep.iter().any(|code| code == &row.device_code) {
+                continue;
+            }
+            let mut active_model: MapShareActiveModel = row.into();
+            active_model.is_deleted = ActiveValue::set(1);
+            active_model.update_time = ActiveValue::set(Some(Utc::now()));
+            MapShareEntity::update(active_model)
+                .exec(&*self.conn)
+                .await?;
+            removed += 1;
+        }
+        Ok(removed)
+    }
+
+    /// 清空一张地图的全部分享（地图删除时调用）。
+    pub async fn delete_shares(&self, map_id: i64) -> Result<u64, sea_orm::DbErr> {
+        self.remove_shares_not_in(map_id, &[]).await
+    }
+
+    /// 分享给「分配给该用户」的设备的地图 id（普通用户可见范围）。
+    async fn find_shared_map_ids_for_user(&self, user_id: i64) -> Result<Vec<i64>, sea_orm::DbErr> {
+        let rows = self
+            .conn
+            .query_all(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "SELECT DISTINCT s.map_id AS map_id FROM dog_map_share s \
+                 JOIN dog_device d ON d.device_id = s.device_code AND d.is_deleted = 0 \
+                 JOIN dog_user_device ud ON ud.device_id = d.id AND ud.is_deleted = 0 \
+                 WHERE s.is_deleted = 0 AND ud.user_id = ?1",
+                [user_id.into()],
+            ))
+            .await?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| row.try_get::<i64>("", "map_id").ok())
+            .collect())
+    }
+
+    /// 这张地图是否分享给了分配给 `user_id` 的设备。
+    async fn is_shared_to_user(&self, map_id: i64, user_id: i64) -> Result<bool, sea_orm::DbErr> {
+        let row = self
+            .conn
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "SELECT 1 FROM dog_map_share s \
+                 JOIN dog_device d ON d.device_id = s.device_code AND d.is_deleted = 0 \
+                 JOIN dog_user_device ud ON ud.device_id = d.id AND ud.is_deleted = 0 \
+                 WHERE s.is_deleted = 0 AND s.map_id = ?1 AND ud.user_id = ?2 LIMIT 1",
+                [map_id.into(), user_id.into()],
+            ))
+            .await?;
+        Ok(row.is_some())
+    }
+
+    async fn find_map_ids_shared_to_device(
+        &self,
+        device_code: &str,
+    ) -> Result<Vec<i64>, sea_orm::DbErr> {
+        let rows = self
+            .conn
+            .query_all(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "SELECT DISTINCT map_id AS map_id FROM dog_map_share \
+                 WHERE is_deleted = 0 AND device_code = ?1",
+                [device_code.into()],
+            ))
+            .await?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| row.try_get::<i64>("", "map_id").ok())
+            .collect())
     }
 }
 

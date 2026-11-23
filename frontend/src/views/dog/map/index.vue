@@ -11,6 +11,7 @@ import {
 } from "element-plus";
 import { useDogMap } from "./hook";
 import MapEditorDialog from "./MapEditorDialog.vue";
+import MapShareDialog from "./MapShareDialog.vue";
 import { dogMapPushToDevice } from "@/api/dogMap";
 import { SUCCESS } from "@/api/base";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
@@ -34,6 +35,7 @@ defineOptions({ name: "DogMap" });
 const addFormRef = ref<FormInstance>();
 const uploadRef = ref<UploadInstance>();
 const mapEditorRef = ref<InstanceType<typeof MapEditorDialog>>();
+const mapShareRef = ref<InstanceType<typeof MapShareDialog>>();
 const {
   queryForm,
   dataList,
@@ -59,7 +61,8 @@ const {
   cancel,
   openDia,
   publishMap,
-  newVersionMap
+  newVersionMap,
+  pushTargets
 } = useDogMap();
 
 const statusFormOptions = MAP_STATUS_OPTIONS.filter(
@@ -104,17 +107,20 @@ const handleNewVersion = row => {
 };
 
 /** 把地图包下发到狗体（本体）并重新载图。 */
-const handlePush = row => {
-  if (!row.deviceCode) {
-    message("该地图没有关联上报设备，无法下发到狗体", { type: "warning" });
+const handlePush = (row, target?: string) => {
+  const deviceCode = target || pushTargets(row)[0];
+  if (!deviceCode) {
+    message("该地图没有关联上报设备，也没有分享给其他设备，无法下发到狗体", {
+      type: "warning"
+    });
     return;
   }
   ElMessageBox.confirm(
-    `将把「${row.mapName}」当前地图包下发到狗体 ${row.deviceCode}，写回本体后重新载图。设备需处于空闲状态。是否继续？`,
+    `将把「${row.mapName}」当前地图包下发到狗体 ${deviceCode}，写回本体后重新载图。设备需处于空闲状态。是否继续？`,
     "下发到狗体",
     { type: "warning", confirmButtonText: "下发", cancelButtonText: "取消" }
   )
-    .then(() => dogMapPushToDevice(row.id, row.deviceCode))
+    .then(() => dogMapPushToDevice(row.id, deviceCode))
     .then(res => {
       if (res.code === SUCCESS) {
         const detail =
@@ -123,8 +129,8 @@ const handlePush = row => {
           "";
         message(
           detail
-            ? `已下发到 ${row.deviceCode}：${detail}`
-            : `已下发到 ${row.deviceCode}，设备已确认执行`,
+            ? `已下发到 ${deviceCode}：${detail}`
+            : `已下发到 ${deviceCode}，设备已确认执行`,
           { type: "success", duration: 10000 }
         );
         onSearch();
@@ -135,14 +141,16 @@ const handlePush = row => {
     .catch(() => {});
 };
 
-/** 操作列「更多」菜单分发：发布 / 新版本 / 下发到狗体。 */
+/** 操作列「更多」菜单分发：发布 / 新版本 / 分享设备 / 下发到狗体。 */
 const handleRowCommand = (row, command: string) => {
   if (command === "publish") {
     handlePublish(row);
   } else if (command === "newVersion") {
     handleNewVersion(row);
-  } else if (command === "push") {
-    handlePush(row);
+  } else if (command === "share") {
+    mapShareRef.value?.open(row);
+  } else if (command.startsWith("push:")) {
+    handlePush(row, command.slice("push:".length));
   }
 };
 
@@ -251,8 +259,14 @@ const submitForm = async (formEl?: FormInstance) => {
                         command="newVersion"
                         >新版本</el-dropdown-item
                       >
-                      <el-dropdown-item v-if="current.deviceCode" command="push"
-                        >下发到狗体</el-dropdown-item
+                      <el-dropdown-item command="share"
+                        >分享设备</el-dropdown-item
+                      >
+                      <el-dropdown-item
+                        v-for="code in pushTargets(current)"
+                        :key="`push:${code}`"
+                        :command="`push:${code}`"
+                        >下发到 {{ code }}</el-dropdown-item
                       >
                     </el-dropdown-menu>
                   </template>
@@ -390,5 +404,6 @@ const submitForm = async (formEl?: FormInstance) => {
       </template>
     </el-dialog>
     <MapEditorDialog ref="mapEditorRef" @saved="onSearch" @pushed="onSearch" />
+    <MapShareDialog ref="mapShareRef" @saved="onSearch" />
   </div>
 </template>

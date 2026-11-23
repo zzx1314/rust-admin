@@ -245,7 +245,7 @@ pub async fn upload_map_handler(
             &internal_scope(None),
         )
         .await?;
-    let vo = state.dog_map_service.to_vo(map);
+    let vo = state.dog_map_service.to_vo(map).await?;
     Ok(Json(ApiResponse::ok(
         serde_json::to_value(vo).unwrap_or_default(),
     )))

@@ -1,8 +1,8 @@
 use crate::api::AppState;
 use crate::api::middleware::RequestUser;
 use crate::business::dog::map::domain::{
-    CreateMapRequest, MapEditRequest, MapImageVO, MapPageQuery, MapVO, PushMapRequest,
-    UpdateMapRequest, UploadMapRequest,
+    CreateMapRequest, MapEditRequest, MapImageVO, MapPageQuery, MapShareResult, MapShareVO, MapVO,
+    PushMapRequest, ShareMapRequest, UpdateMapRequest, UploadMapRequest,
 };
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
@@ -23,7 +23,7 @@ pub async fn create_map_handler(
 ) -> Result<Json<ApiResponse<MapVO>>, AppError> {
     let scope = user.data_scope();
     let map = state.dog_map_service.create(req, &scope).await?;
-    let vo = state.dog_map_service.to_vo(map);
+    let vo = state.dog_map_service.to_vo(map).await?;
     Ok(Json(ApiResponse::ok(vo)))
 }
 
@@ -77,7 +77,7 @@ pub async fn upload_map_handler(
         .dog_map_service
         .save_upload(info, &file_name, &bytes, &state.upload_dir, &scope)
         .await?;
-    let vo = state.dog_map_service.to_vo(map);
+    let vo = state.dog_map_service.to_vo(map).await?;
 
     Ok(Json(ApiResponse::ok(vo)))
 }
@@ -89,7 +89,7 @@ pub async fn get_map_handler(
 ) -> Result<Json<ApiResponse<MapVO>>, AppError> {
     let scope = user.data_scope();
     let map = state.dog_map_service.get_by_id(params.id, &scope).await?;
-    let vo = state.dog_map_service.to_vo(map);
+    let vo = state.dog_map_service.to_vo(map).await?;
     Ok(Json(ApiResponse::ok(vo)))
 }
 
@@ -110,9 +110,7 @@ pub async fn list_all_maps_handler(
     Extension(user): Extension<RequestUser>,
 ) -> Result<Json<ApiResponse<Vec<MapVO>>>, AppError> {
     let maps = state.dog_map_service.list_all(&user.data_scope()).await?;
-    Ok(Json(ApiResponse::ok(
-        maps.into_iter().map(MapVO::from).collect(),
-    )))
+    Ok(Json(ApiResponse::ok(maps)))
 }
 
 pub async fn update_map_handler(
@@ -123,7 +121,7 @@ pub async fn update_map_handler(
 ) -> Result<Json<ApiResponse<MapVO>>, AppError> {
     let scope = user.data_scope();
     let map = state.dog_map_service.update(params.id, req, &scope).await?;
-    let vo = state.dog_map_service.to_vo(map);
+    let vo = state.dog_map_service.to_vo(map).await?;
     Ok(Json(ApiResponse::ok(vo)))
 }
 
@@ -176,22 +174,44 @@ pub async fn push_map_handler(
         .dog_map_service
         .get_by_id(params.id, &user.data_scope())
         .await?;
-    let device_code = req
+
+    // 可选目标：上报设备在前，分享设备在后（分享不复制地图，只是同一张图的另一台使用者）
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(code) = map
         .device_code
         .as_deref()
         .map(str::trim)
         .filter(|code| !code.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            map.device_code
-                .as_deref()
-                .map(str::trim)
-                .filter(|code| !code.is_empty())
-                .map(str::to_string)
-        })
-        .ok_or_else(|| {
-            AppError::BadRequest("该地图没有关联上报设备，请指定 deviceCode 后再下发".to_string())
-        })?;
+    {
+        candidates.push(code.to_string());
+    }
+    for code in state.dog_map_service.share_codes(map.id).await? {
+        if !candidates.iter().any(|known| known == &code) {
+            candidates.push(code);
+        }
+    }
+    let device_code = match req
+        .device_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|code| !code.is_empty())
+    {
+        Some(code) => {
+            if !candidates.iter().any(|known| known == code) {
+                return Err(AppError::BadRequest(format!(
+                    "地图「{}」没有关联也没有分享给设备 {}；请先在地图列表里把这张图分享给该设备",
+                    map.map_name, code
+                )));
+            }
+            code.to_string()
+        }
+        None => candidates.first().cloned().ok_or_else(|| {
+            AppError::BadRequest(
+                "该地图既没有关联上报设备，也没有分享给其他设备，无法下发；请先分享给目标设备"
+                    .to_string(),
+            )
+        })?,
+    };
     if map
         .file_path
         .as_deref()
@@ -252,7 +272,7 @@ pub async fn publish_map_handler(
 ) -> Result<Json<ApiResponse<MapVO>>, AppError> {
     let scope = user.data_scope();
     let map = state.dog_map_service.publish(params.id, &scope).await?;
-    let vo = state.dog_map_service.to_vo(map);
+    let vo = state.dog_map_service.to_vo(map).await?;
     Ok(Json(ApiResponse::ok(vo)))
 }
 
@@ -264,6 +284,71 @@ pub async fn new_map_version_handler(
 ) -> Result<Json<ApiResponse<MapVO>>, AppError> {
     let scope = user.data_scope();
     let map = state.dog_map_service.new_version(params.id, &scope).await?;
-    let vo = state.dog_map_service.to_vo(map);
+    let vo = state.dog_map_service.to_vo(map).await?;
     Ok(Json(ApiResponse::ok(vo)))
+}
+
+/// `GET /api/dogMap/{id}/shares` — 这张地图分享给了哪些设备。
+pub async fn list_map_shares_handler(
+    State(state): State<AppState>,
+    Extension(user): Extension<RequestUser>,
+    Path(params): Path<IdParam>,
+) -> Result<Json<ApiResponse<Vec<MapShareVO>>>, AppError> {
+    let shares = state
+        .dog_map_service
+        .list_shares(params.id, &user.data_scope())
+        .await?;
+    Ok(Json(ApiResponse::ok(shares)))
+}
+
+/// `POST /api/dogMap/{id}/share` — 把这张地图分享给其他设备使用，不用重新建图。
+///
+/// 请求体：`{ "deviceCodes": ["RD-002", "RD-003"], "mode": "replace" }`。
+/// `mode = append`（默认）只追加；`replace` 以本次提交为准（空数组 = 清空分享）。
+pub async fn share_map_handler(
+    State(state): State<AppState>,
+    Extension(user): Extension<RequestUser>,
+    Path(params): Path<IdParam>,
+    Json(req): Json<ShareMapRequest>,
+) -> Result<Json<ApiResponse<MapShareResult>>, AppError> {
+    let scope = user.data_scope();
+    // 设备必须在中台台账里，且（非管理员）在分配给自己的设备范围内
+    let mut device_codes = Vec::new();
+    for code in &req.device_codes {
+        let code = code.trim();
+        if code.is_empty() {
+            continue;
+        }
+        state
+            .dog_device_service
+            .get_by_code(code, &scope)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("设备 {code} 不存在或未分配给你")))?;
+        device_codes.push(code.to_string());
+    }
+    let result = state
+        .dog_map_service
+        .share(
+            params.id,
+            ShareMapRequest {
+                device_codes,
+                mode: req.mode,
+            },
+            &scope,
+        )
+        .await?;
+    Ok(Json(ApiResponse::ok(result)))
+}
+
+/// `DELETE /api/dogMap/{id}/share/{device_code}` — 取消分享给单台设备。
+pub async fn unshare_map_handler(
+    State(state): State<AppState>,
+    Extension(user): Extension<RequestUser>,
+    Path((id, device_code)): Path<(i64, String)>,
+) -> Result<Json<ApiResponse<MapShareResult>>, AppError> {
+    let result = state
+        .dog_map_service
+        .unshare(id, &device_code, &user.data_scope())
+        .await?;
+    Ok(Json(ApiResponse::ok(result)))
 }

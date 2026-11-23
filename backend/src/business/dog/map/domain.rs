@@ -134,10 +134,42 @@ pub struct UpdateMapRequest {
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct PushMapRequest {
-    /// 目标设备编号（业务平台 `devices.device_id`）；缺省用地图上的 `deviceCode`
+    /// 目标设备编号（业务平台 `devices.device_id`）；缺省用地图上的 `deviceCode`，
+    /// 没有上报设备时用第一个被分享的设备
     pub device_code: Option<String>,
     /// 幂等键：重试时原样回传，避免重复下发
     pub request_id: Option<String>,
+}
+
+/// 把地图分享给其他设备使用（无需重新建图）。
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareMapRequest {
+    /// 目标设备编号（业务平台 `devices.device_id`）
+    #[serde(default)]
+    pub device_codes: Vec<String>,
+    /// `replace`：以本次提交为准（空数组 = 清空分享）；`append`（默认）：只追加
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+/// 一条地图分享关系。
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MapShareVO {
+    pub map_id: i64,
+    pub device_code: String,
+    pub create_time: String,
+}
+
+/// 分享结果：写入 / 移除的数量与当前分享设备清单。
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MapShareResult {
+    pub map_id: i64,
+    pub shared_device_codes: Vec<String>,
+    pub added: u64,
+    pub removed: u64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -188,6 +220,8 @@ pub struct MapVO {
     pub publish_time: Option<String>,
     pub map_width: Option<i32>,
     pub map_height: Option<i32>,
+    /// 分享给了哪些设备（不含上报设备本身）
+    pub shared_device_codes: Vec<String>,
     pub create_time: String,
     pub update_time: Option<String>,
 }
@@ -273,6 +307,7 @@ impl From<DogMap> for MapVO {
             publish_time: m.publish_time,
             map_width: m.map_width,
             map_height: m.map_height,
+            shared_device_codes: Vec::new(),
             create_time: format_datetime(m.create_time),
             update_time: m.update_time.map(format_datetime),
         }

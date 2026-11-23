@@ -17,6 +17,8 @@ const dogMapUrls = {
   edit: "/api/dogMap/",
   publish: "/api/dogMap/",
   newVersion: "/api/dogMap/",
+  push: "/api/dogMap/",
+  shares: "/api/dogMap/",
   delete: `/api/dogMap/`
 };
 
@@ -88,9 +90,42 @@ export const dogMapErase = (
  * 后才返回：急停、任务占用、写文件失败、未回执都会返回错误并带设备侧原因。
  */
 export const dogMapPushToDevice = (id: string | number, deviceCode?: string) =>
-  http.axiosPostRequest<Result>(`${dogMapUrls.edit}${id}/push`, {
+  http.axiosPostRequest<Result>(`${dogMapUrls.push}${id}/push`, {
     deviceCode: deviceCode || undefined
   });
+
+/** 一条地图分享关系（`deviceCode` 是分享了这张图的其他设备） */
+export type MapShare = {
+  mapId: number;
+  deviceCode: string;
+  createTime: string;
+};
+
+/** 这张地图当前分享给了哪些设备。 */
+export const dogMapListShares = (id: string | number) =>
+  http.axiosGetRequest<Result>(`${dogMapUrls.shares}${id}/shares`, {});
+
+/**
+ * 把地图分享给其他设备使用（不复制地图包，也不用重新建图）。
+ *
+ * `mode = replace` 以本次提交为准（空数组 = 清空分享）；`append` 只追加。
+ * 分享后：分配给目标设备的中台用户也能看到这张图，「下发到狗体」可选该设备。
+ */
+export const dogMapShareDevices = (
+  id: string | number,
+  deviceCodes: string[],
+  mode: "append" | "replace" = "replace"
+) =>
+  http.axiosPostRequest<Result>(`${dogMapUrls.shares}${id}/share`, {
+    deviceCodes,
+    mode
+  });
+
+/** 取消分享给单台设备（幂等）。 */
+export const dogMapUnshareDevice = (id: string | number, deviceCode: string) =>
+  http.axiosDelete<Result>(
+    `${dogMapUrls.shares}${id}/share/${encodeURIComponent(deviceCode)}`
+  );
 
 /** 获取地图图片（后端优先把包内 map_edit/map.pgm 转成 PNG） */
 export const dogMapGetImage = (id: string | number) =>
