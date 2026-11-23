@@ -22,15 +22,13 @@ use robodog_ops_server::{db, gateway, seed};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpListener;
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
 /// 每个用例有自己的 `AppState`（也就有自己的 AI 窗口），但都会起假 Agent / 真端口，
-/// 串行跑更稳；窗口状态本身已不再是进程级单例。
-static TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 struct TempDb {
     dir: PathBuf,
@@ -331,7 +329,6 @@ fn terminal(task_code: &str) -> TaskProgressPayload {
 
 #[tokio::test]
 async fn ai_action_at_waypoint_starts_detect_and_records_alert() {
-    let _serial = TEST_LOCK.lock().await;
     let calls = Arc::new(AgentCalls::default());
     let agent = spawn_fake_agent(calls.clone()).await;
     let dir = temp_dir();
@@ -433,7 +430,6 @@ async fn ai_action_at_waypoint_starts_detect_and_records_alert() {
 /// 必须立刻停识别——这是取代「截断时长」的防误报机制。
 #[tokio::test]
 async fn leaving_the_point_stops_detect_in_server_mode() {
-    let _serial = TEST_LOCK.lock().await;
     let calls = Arc::new(AgentCalls::default());
     let agent = spawn_fake_agent(calls.clone()).await;
     let dir = temp_dir();
@@ -485,7 +481,6 @@ async fn leaving_the_point_stops_detect_in_server_mode() {
 
 #[tokio::test]
 async fn point_without_ai_action_never_starts_detect() {
-    let _serial = TEST_LOCK.lock().await;
     let calls = Arc::new(AgentCalls::default());
     let agent = spawn_fake_agent(calls.clone()).await;
     let dir = temp_dir();
@@ -520,7 +515,6 @@ async fn point_without_ai_action_never_starts_detect() {
 /// 这条只覆盖「显式配成 server 但漏了地址」的错配。
 #[tokio::test]
 async fn missing_agent_does_not_leave_stale_window() {
-    let _serial = TEST_LOCK.lock().await;
     let dir = temp_dir();
     let temp = TempDb { dir: dir.clone() };
     let state = state_with_point_ai(None, "server", dir).await;
@@ -609,7 +603,6 @@ async fn seed_ai_route_two_points(state: &AppState) -> String {
 /// 现在只认 `waypointIndex`，摘要载荷不能再动窗口；真到 1 号点仍要收口。
 #[tokio::test]
 async fn interval_summary_does_not_kill_the_window() {
-    let _serial = TEST_LOCK.lock().await;
     let calls = Arc::new(AgentCalls::default());
     let agent = spawn_fake_agent(calls.clone()).await;
     let dir = temp_dir();

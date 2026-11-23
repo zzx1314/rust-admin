@@ -2458,15 +2458,18 @@ async fn legacy_route_coordinates_are_migrated_once() {
 }
 
 /// 取一条任务（与 `handlers::tasks::TASK_SELECT` 同列），用于组装下发载荷。
+///
+/// 走 `TaskRow`（持久化投影）再转 `Task`（对外形状），和服务端同一条路径。
 async fn fetch_task_row(pool: &sqlx::SqlitePool, id: i64) -> robodog_ops_server::models::Task {
-    sqlx::query_as(&format!(
+    let row: robodog_ops_server::models::TaskRow = sqlx::query_as(&format!(
         "{} WHERE t.id = ?1",
         robodog_ops_server::handlers::tasks::TASK_SELECT
     ))
     .bind(id)
     .fetch_one(pool)
     .await
-    .unwrap()
+    .unwrap();
+    row.into()
 }
 
 /// 下发载荷必须带本体真实目录名（`source_ref`），而不是业务 ID 的合成名。

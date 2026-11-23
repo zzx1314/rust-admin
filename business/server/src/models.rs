@@ -185,7 +185,7 @@ pub struct Device {
     pub updated_at: String,
 }
 
-#[derive(Debug, FromRow, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
     pub id: i64,
@@ -233,6 +233,93 @@ pub struct Task {
     pub created_at: String,
     pub updated_at: String,
     pub created_by: Option<i64>,
+}
+
+/// `tasks` 的**持久化投影**：`TASK_SELECT`（任务行 + 设备/园区/区域/路线名称）1:1 对应。
+///
+/// 为什么和 [`Task`] 分开：
+///
+/// - 这是**库里的形状**：迁移加一列、改一个 join 都动这里，前端不该被动跟着变；
+///   以前 `Task` 同时是 `FromRow` 和响应体，加一列就等于改了 HTTP 契约；
+/// - 反过来，`Task` 是**对外的形状**：要不要把新列给前端、叫什么名字，
+///   在 `From` 里显式决定，而不是被数据库推着走。
+///
+/// 集成测试也可以直接用它取行（`query_as::<_, TaskRow>` + `.into()`）。
+#[derive(Debug, FromRow)]
+pub struct TaskRow {
+    pub id: i64,
+    pub task_code: String,
+    pub task_name: String,
+    pub task_type: Option<String>,
+    pub execute_mode: Option<String>,
+    pub end_task: Option<String>,
+    pub light_night_only: bool,
+    pub level: Option<String>,
+    pub device_id: Option<i64>,
+    pub device_code: Option<String>,
+    pub park_id: Option<i64>,
+    pub park_name: Option<String>,
+    pub zone_id: Option<i64>,
+    pub zone_name: Option<String>,
+    pub route_id: Option<i64>,
+    pub route_code: Option<String>,
+    pub route_name: Option<String>,
+    pub plan_start: Option<String>,
+    pub plan_end: Option<String>,
+    pub schedule_days: Option<String>,
+    pub last_dispatched_on: Option<String>,
+    pub publish_status: String,
+    pub published_at: Option<String>,
+    pub task_status: String,
+    pub progress: i64,
+    pub dispatch_policy: Option<String>,
+    pub description: Option<String>,
+    pub robot_task_id: Option<String>,
+    pub robot_stage: Option<String>,
+    pub robot_updated_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub created_by: Option<i64>,
+}
+
+impl From<TaskRow> for Task {
+    fn from(row: TaskRow) -> Self {
+        Self {
+            id: row.id,
+            task_code: row.task_code,
+            task_name: row.task_name,
+            task_type: row.task_type,
+            execute_mode: row.execute_mode,
+            end_task: row.end_task,
+            light_night_only: row.light_night_only,
+            level: row.level,
+            device_id: row.device_id,
+            device_code: row.device_code,
+            park_id: row.park_id,
+            park_name: row.park_name,
+            zone_id: row.zone_id,
+            zone_name: row.zone_name,
+            route_id: row.route_id,
+            route_code: row.route_code,
+            route_name: row.route_name,
+            plan_start: row.plan_start,
+            plan_end: row.plan_end,
+            schedule_days: row.schedule_days,
+            last_dispatched_on: row.last_dispatched_on,
+            publish_status: row.publish_status,
+            published_at: row.published_at,
+            task_status: row.task_status,
+            progress: row.progress,
+            dispatch_policy: row.dispatch_policy,
+            description: row.description,
+            robot_task_id: row.robot_task_id,
+            robot_stage: row.robot_stage,
+            robot_updated_at: row.robot_updated_at,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            created_by: row.created_by,
+        }
+    }
 }
 
 #[derive(Debug, FromRow, Serialize, Clone)]

@@ -484,7 +484,7 @@ pub async fn sweep(state: &AppState) -> Result<SweepReport, AppError> {
     let mut report = SweepReport::default();
     rearm_finished(state, now, &mut report).await?;
 
-    let pending = sqlx::query_as::<_, Task>(&format!(
+    let pending: Vec<Task> = sqlx::query_as::<_, crate::models::TaskRow>(&format!(
         "{} WHERE t.task_status = '待执行' AND t.execute_mode = ?1 AND t.publish_status = ?2 \
          ORDER BY t.id ASC",
         crate::handlers::tasks::TASK_SELECT
@@ -492,7 +492,10 @@ pub async fn sweep(state: &AppState) -> Result<SweepReport, AppError> {
     .bind(PERIODIC_MODE)
     .bind(PUBLISHED)
     .fetch_all(&state.db)
-    .await?;
+    .await?
+    .into_iter()
+    .map(Task::from)
+    .collect();
 
     for task in pending {
         match due_state(&task, now) {

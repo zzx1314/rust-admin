@@ -123,10 +123,13 @@ pub async fn list_tasks(
         builder.push(" AND t.created_by = ").push_bind(claims.sub);
     }
     builder.push(" ORDER BY t.created_at DESC, t.id DESC");
-    let tasks = builder
-        .build_query_as::<Task>()
+    let tasks: Vec<Task> = builder
+        .build_query_as::<crate::models::TaskRow>()
         .fetch_all(&state.db)
-        .await?;
+        .await?
+        .into_iter()
+        .map(Task::from)
+        .collect();
     Ok(ApiResponse::ok(tasks))
 }
 
@@ -889,10 +892,11 @@ impl super::parks::OwnerCheck for Task {
 
 pub(crate) async fn fetch_task(state: &AppState, id: i64) -> Result<Task, AppError> {
     let sql = format!("{TASK_SELECT} WHERE t.id = ?1");
-    sqlx::query_as::<_, Task>(&sql)
+    sqlx::query_as::<_, crate::models::TaskRow>(&sql)
         .bind(id)
         .fetch_optional(&state.db)
         .await?
+        .map(Task::from)
         .ok_or_else(|| AppError::NotFound("任务不存在".to_string()))
 }
 

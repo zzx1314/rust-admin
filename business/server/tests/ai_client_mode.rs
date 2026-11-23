@@ -19,7 +19,6 @@ use robodog_ops_server::{db, gateway, seed};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -29,8 +28,6 @@ use tokio_tungstenite::tungstenite::Message;
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
 /// 这些用例会起真实的 axum + WS + 假企微，串行跑更稳（窗口状态本身已经
-/// 跟着 `AppState` 走了，不再是进程级单例，所以这里只是压并发、不是隔离状态）。
-static TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 struct TempDb {
     dir: PathBuf,
@@ -476,7 +473,6 @@ async fn event_titles(state: &AppState) -> Vec<String> {
 /// 检出落库（阈值 + 类别去重），`ai_end` 清空窗口态。
 #[tokio::test]
 async fn client_relayed_point_ai_starts_window_and_records_hits() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp) = test_state("client").await;
     let task_code = seed_ai_route(
         &state,
@@ -584,7 +580,6 @@ async fn client_relayed_point_ai_starts_window_and_records_hits() {
 /// 类别只保留该场景真实存在的。
 #[tokio::test]
 async fn unknown_scene_falls_back_to_keyword_and_filters_labels() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp) = test_state("client").await;
     let task_code = seed_ai_route(
         &state,
@@ -616,7 +611,6 @@ async fn unknown_scene_falls_back_to_keyword_and_filters_labels() {
 /// 但「任务被取消/提前结束」只有平台知道，不发就会一直占着 NPU。
 #[tokio::test]
 async fn terminal_task_sends_ai_stop_to_device() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp) = test_state("client").await;
     let task_code = seed_ai_route(
         &state,
@@ -690,7 +684,6 @@ async fn terminal_task_sends_ai_stop_to_device() {
 /// 长停留窗口不再靠「30 s 截断」防误报，改成靠阶段收口，这条是它的回归保护。
 #[tokio::test]
 async fn leaving_the_point_closes_window_immediately() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp) = test_state("client").await;
     let task_code = seed_ai_route(
         &state,
@@ -773,7 +766,6 @@ async fn leaving_the_point_closes_window_immediately() {
 /// 否则两条链路会各开一次窗口、各写一条告警。
 #[tokio::test]
 async fn server_mode_ignores_client_point_request() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp) = test_state("server").await;
     let task_code = seed_ai_route(
         &state,
@@ -796,7 +788,6 @@ async fn server_mode_ignores_client_point_request() {
 /// `auto` + 没配 `ROBODOG_BACKPACK_URL`（正式环境形态）→ 客户端代调
 #[tokio::test]
 async fn auto_mode_without_base_url_delegates_to_client() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp) = test_state("auto").await;
     let task_code = seed_ai_route(
         &state,
@@ -820,7 +811,6 @@ async fn auto_mode_without_base_url_delegates_to_client() {
 /// 客户端掉线时窗口不能被永久占住（否则下次到点会被判成「这个点已在识别」而跳过）
 #[tokio::test]
 async fn window_is_cleared_when_client_never_reports_end() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp) = test_state("client").await;
     // 这个点 dwell=0 → 窗口 12s，看门狗在 22s 后清窗口；测试里不想等那么久，
     // 直接验证「没有 ai_end 时窗口仍在」+「stop 能清掉」这条兜底路径。
@@ -848,7 +838,6 @@ async fn window_is_cleared_when_client_never_reports_end() {
 /// 任务时间线同步留痕。
 #[tokio::test]
 async fn count_mismatch_alert_is_recorded_once() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp) = test_state("client").await;
     let task_code = seed_ai_route(
         &state,
@@ -958,7 +947,6 @@ async fn count_mismatch_alert_is_recorded_once() {
 /// 一条企业微信回执，**不落告警、不建工单**（正常结论不该进处置列表）。
 #[tokio::test]
 async fn matched_count_notifies_wecom_without_alert_or_work_order() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp, rx) = test_state_with_wecom("client", true).await;
     let mut rx = rx.expect("开了企微就该有消费端");
     let task_code = seed_ai_route(
@@ -1041,7 +1029,6 @@ async fn matched_count_notifies_wecom_without_alert_or_work_order() {
 /// 没勾「数量一致也通知」时，`ai_count` 一律忽略（默认行为不变：只报不一致）。
 #[tokio::test]
 async fn matched_count_stays_quiet_without_the_waypoint_switch() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp, rx) = test_state_with_wecom("client", true).await;
     let mut rx = rx.expect("开了企微就该有消费端");
     let task_code = seed_ai_route(
@@ -1088,7 +1075,6 @@ async fn matched_count_stays_quiet_without_the_waypoint_switch() {
 /// 只进任务时间线留痕，**不落告警、不建工单、不推企业微信**。
 #[tokio::test]
 async fn count_task_detections_stay_out_of_alerts_and_wecom() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp, mut rx) = test_state_with_wecom("client", true).await;
     let rx = rx.as_mut().expect("开了企微就该有入队接收端");
     let task_code = seed_ai_route(
@@ -1177,7 +1163,6 @@ async fn count_task_detections_stay_out_of_alerts_and_wecom() {
 /// 也要落数量告警；存在性任务同等情形只算「没找到」，不告警。
 #[tokio::test]
 async fn count_task_reports_mismatch_when_window_expires_without_hits() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp) = test_state("client").await;
     let task_code = seed_ai_route(
         &state,
@@ -1243,7 +1228,6 @@ async fn count_task_reports_mismatch_when_window_expires_without_hits() {
 /// 关窗后的宽限期就是为这条缝加的：结论按板端给的 `foundCount` 落，不再凭空写 0。
 #[tokio::test]
 async fn late_count_alert_after_leaving_point_is_not_recorded_as_zero() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp) = test_state("client").await;
     let task_code = seed_ai_route(
         &state,
@@ -1346,7 +1330,6 @@ async fn late_count_alert_after_leaving_point_is_not_recorded_as_zero() {
 /// 存在性任务：① 到期没找到不告警；② 误收到数量告警也不落库（不判数量）。
 #[tokio::test]
 async fn exist_task_never_judges_quantity() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp) = test_state("client").await;
     let task_code = seed_ai_route(
         &state,
@@ -1475,7 +1458,6 @@ fn ai_count(window_id: &str, task_code: &str) -> Value {
 /// 告警，缺了只能靠 `count` + `expectCount`。
 #[tokio::test]
 async fn exist_with_alert_when_missing_reports_when_nothing_found() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp) = test_state("client").await;
     let task_code = seed_ai_route(
         &state,
@@ -1544,7 +1526,6 @@ async fn exist_with_alert_when_missing_reports_when_nothing_found() {
 /// 没打开 `alertWhenMissing` 时，`exist` 到期没找到**不**告警（默认行为不变）。
 #[tokio::test]
 async fn exist_without_alert_when_missing_stays_quiet() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp) = test_state("client").await;
     let task_code = seed_ai_route(
         &state,
@@ -1589,7 +1570,6 @@ async fn exist_without_alert_when_missing_stays_quiet() {
 /// 被任务结束/新航点打断（`expired=false`）时不算「未检出」：狗可能还没看够。
 #[tokio::test]
 async fn interrupted_window_does_not_report_missing() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp) = test_state("client").await;
     let task_code = seed_ai_route(
         &state,
@@ -1639,7 +1619,6 @@ async fn interrupted_window_does_not_report_missing() {
 /// 窗口永远差几秒到期，「AI 识别未检出」一次都没报出来。
 #[tokio::test]
 async fn leaving_the_point_after_full_dwell_reports_missing() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp) = test_state("client").await;
     let task_code = seed_ai_route(
         &state,
@@ -1733,7 +1712,6 @@ async fn leaving_the_point_after_full_dwell_reports_missing() {
 /// 没停够 `dwell` 就走了（任务被中止 / 狗提前离开）：狗还没看够，不能报「未检出」。
 #[tokio::test]
 async fn leaving_the_point_early_stays_quiet() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp) = test_state("client").await;
     let task_code = seed_ai_route(
         &state,
@@ -1786,7 +1764,6 @@ async fn leaving_the_point_early_stays_quiet() {
 /// 标题一变就新建一张单，一轮巡检攒一张。现在按 `dedup_key` 比。
 #[tokio::test]
 async fn same_ai_problem_across_patrols_reuses_one_work_order() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp) = test_state("client").await;
     let task_code = seed_ai_route(
         &state,
@@ -1865,7 +1842,6 @@ async fn same_ai_problem_across_patrols_reuses_one_work_order() {
 /// 告警正文（DB）里也留一份路径给现场 ssh 复核，**但群卡片正文不带**（图就在后面）。
 #[tokio::test]
 async fn hit_alert_carries_the_relayed_evidence_image() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp, mut rx) = test_state_with_wecom("client", true).await;
     let rx = rx.as_mut().expect("开了企微就该有入队接收端");
     let task_code = seed_ai_route(
@@ -1935,7 +1911,6 @@ async fn hit_alert_carries_the_relayed_evidence_image() {
 /// 服务端这时**只补一张 `msgtype=image`**，不重发卡片、不新建告警。
 #[tokio::test]
 async fn late_evidence_is_pushed_as_an_image_only_message() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp, mut rx) = test_state_with_wecom("client", true).await;
     let rx = rx.as_mut().expect("开了企微就该有入队接收端");
     let task_code = seed_ai_route(
@@ -2019,7 +1994,6 @@ async fn late_evidence_is_pushed_as_an_image_only_message() {
 /// ——2026-11-18 21:34 办公室巡检 pt1「Trash over flow」卡片发了、图没发。
 #[tokio::test]
 async fn late_evidence_after_window_closed_is_still_pushed() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp, mut rx) = test_state_with_wecom("client", true).await;
     let rx = rx.as_mut().expect("开了企微就该有入队接收端");
     let task_code = seed_ai_route(
@@ -2180,7 +2154,6 @@ async fn next_alert_notice(
 /// 时间维度由 `notify::tests::ai_hit_window_lets_the_next_round_through` 钉住。
 #[tokio::test]
 async fn restart_after_cancel_still_pushes_the_next_round() {
-    let _serial = TEST_LOCK.lock().await;
     let (state, _temp, mut rx) = test_state_with_wecom("client", true).await;
     let rx = rx.as_mut().expect("开了企微就该有入队接收端");
     let task_code = seed_ai_route(
@@ -2297,7 +2270,6 @@ async fn restart_after_cancel_still_pushes_the_next_round() {
 /// 走真的 `Notifier::enqueue → 消费端 → deliver → msgtype=image` 链路。
 #[tokio::test]
 async fn pushed_evidence_image_triggers_board_cleanup() {
-    let _serial = TEST_LOCK.lock().await;
     let (wecom_port, hits) = spawn_fake_wecom(false).await;
     let (state, _temp) =
         state_with_live_wecom("client", format!("http://127.0.0.1:{wecom_port}/send")).await;
@@ -2351,7 +2323,6 @@ async fn pushed_evidence_image_triggers_board_cleanup() {
 /// 那种情况下客户端收尾时还会扫一次盘补图（`ai_evidence`），删早了那张图就没了。
 #[tokio::test]
 async fn alert_without_image_keeps_the_board_evidence() {
-    let _serial = TEST_LOCK.lock().await;
     let (wecom_port, hits) = spawn_fake_wecom(false).await;
     let (state, _temp) =
         state_with_live_wecom("client", format!("http://127.0.0.1:{wecom_port}/send")).await;
@@ -2391,7 +2362,6 @@ async fn alert_without_image_keeps_the_board_evidence() {
 /// 反例：图片那条被企微拒了（`errcode 93000`）→ 图没进群，板端存证必须留着，能人工补推。
 #[tokio::test]
 async fn rejected_evidence_image_keeps_the_board_evidence() {
-    let _serial = TEST_LOCK.lock().await;
     let (wecom_port, hits) = spawn_fake_wecom(true).await;
     let (state, _temp) =
         state_with_live_wecom("client", format!("http://127.0.0.1:{wecom_port}/send")).await;
