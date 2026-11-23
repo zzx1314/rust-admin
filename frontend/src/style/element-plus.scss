@@ -1,11 +1,13 @@
+/* 表单标签：跟随正文字号，只用 500 权重区分（中文 700 会落到 Bold 字形，标签比数据还抢眼） */
 .el-form-item__label {
-  font-size: 15px !important;
-  font-weight: 700;
+  font-size: var(--dog-font-body, 14px);
+  font-weight: 500;
 }
 
+/* 面包屑属于导航，不能比内容标题还大，统一到正文字号 */
 .el-breadcrumb__inner,
 .el-breadcrumb__inner a {
-  font-size: 17px !important;
+  font-size: var(--dog-font-body, 14px) !important;
   font-weight: 400 !important;
 }
 
@@ -17,8 +19,16 @@
   z-index: 9999 !important;
 }
 
+/*
+ * Element Plus 基准字号：保持与官方默认一致的 14px。
+ * 输入框、按钮、下拉、表格、标签都取自这个变量；需要整体放大就只改这一行
+ * （15px 会让「按 14px 设计」的固定列宽逼近截断，见 dog 数据页的列宽约定）。
+ *
+ * ⚠️ main.ts 里 element-plus/dist/index.css 在本文件之后加载，:root 同权重时后者胜出，
+ * 所以改这个值必须带 !important，否则看起来改了其实没生效。
+ */
 :root {
-  --el-font-size-base: 15px !important;
+  --el-font-size-base: 14px !important;
 }
 
 /* 重置 el-button 中 icon 的 margin */
@@ -192,8 +202,4 @@
   ::-webkit-scrollbar-thumb:hover {
     background: rgb(199 201 203); /* 滑块hover颜色 */
   }
-}
-
-.el-table--default {
-  font-size: 15px !important;
 }

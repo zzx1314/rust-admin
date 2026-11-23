@@ -162,9 +162,9 @@ const accentStyle = computed(() =>
 .dog-stat-card__label {
   overflow: hidden;
   text-overflow: ellipsis;
-  font-size: 14px;
+  font-size: var(--dog-font-body);
   font-weight: 500;
-  line-height: 1.5;
+  line-height: var(--dog-line-body);
   color: var(--dog-text-secondary);
   white-space: nowrap;
 }
@@ -194,7 +194,7 @@ const accentStyle = computed(() =>
   align-items: baseline;
   min-width: 0;
   margin: 0;
-  font-size: 26px;
+  font-size: var(--dog-font-display);
   font-weight: 700;
   line-height: 1.15;
   color: var(--dog-text-primary);
@@ -203,7 +203,7 @@ const accentStyle = computed(() =>
 .dog-stat-card__unit {
   margin-left: 4px;
   font-family: inherit;
-  font-size: 14px;
+  font-size: var(--dog-font-body);
   font-weight: 500;
   color: var(--dog-text-muted);
 }
@@ -220,8 +220,8 @@ const accentStyle = computed(() =>
   flex-wrap: wrap;
   gap: var(--dog-space-2);
   align-items: center;
-  font-size: 12px;
-  line-height: 1.6;
+  font-size: var(--dog-font-xs);
+  line-height: var(--dog-line-body);
   color: var(--dog-text-muted);
 }
 

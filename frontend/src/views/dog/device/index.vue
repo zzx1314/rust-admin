@@ -318,7 +318,7 @@ const {
             <el-option label="返回起点" value="return_to_start" />
             <el-option label="返回充电点" value="return_to_charge" />
           </el-select>
-          <div class="text-muted" style="font-size: 12px; line-height: 1.5">
+          <div class="text-hint">
             默认跟随路线：闭环路线跑完自动返回起点。选「原地待命」会停在最后一个航点。
           </div>
         </el-form-item>
@@ -465,8 +465,8 @@ const {
               </el-tag>
               <span
                 v-if="mediaSyncPolling"
-                class="text-muted"
-                style="margin-left: 8px; font-size: 12px"
+                class="text-hint"
+                style="margin-left: var(--dog-space-2)"
                 >自动刷新中…</span
               >
             </el-descriptions-item>
@@ -518,8 +518,16 @@ const {
 </template>
 
 <style scoped lang="scss">
+/* 次要文本：占位色 #a8abb2 只有 2.3:1，改用 --dog-text-muted（白底 5.33:1） */
 .text-muted {
-  color: var(--el-text-color-placeholder);
+  color: var(--dog-text-muted);
+}
+
+/* 12px 提示：字号走令牌，颜色同 .text-muted */
+.text-hint {
+  font-size: var(--dog-font-xs);
+  line-height: var(--dog-line-body);
+  color: var(--dog-text-muted);
 }
 
 .assign-summary {
@@ -529,7 +537,7 @@ const {
 
 /* 「更多」菜单里的分组标题（不可点击） */
 .menu-group {
-  font-size: 12px;
-  color: var(--el-text-color-placeholder);
+  font-size: var(--dog-font-xs);
+  color: var(--dog-text-muted);
 }
 </style>

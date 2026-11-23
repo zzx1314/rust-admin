@@ -141,7 +141,7 @@ export function useDogDevice() {
         row.parkName || row.parkCode ? (
           <span>{row.parkName || row.parkCode}</span>
         ) : (
-          <span class="text-xs text-gray-400">未关联</span>
+          <span class="dog-placeholder">未关联</span>
         )
     },
     {
@@ -158,7 +158,7 @@ export function useDogDevice() {
             ))}
           </div>
         ) : (
-          <span class="text-xs text-gray-400">未分配</span>
+          <span class="dog-placeholder">未分配</span>
         )
     },
     { label: "设备 IP", prop: "deviceIp", width: 140 },

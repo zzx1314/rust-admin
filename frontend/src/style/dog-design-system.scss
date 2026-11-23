@@ -5,7 +5,7 @@
  * 落地时以 Element Plus 为主题底座，只新增令牌与少量全局修饰类，不改动组件内部实现。
  *
  * 约定：
- * - 颜色、圆角、间距、动效一律走令牌，页面里不要再写死十六进制色值；
+ * - 字号、行高、颜色、圆角、间距、动效一律走令牌，页面里不要再写死十六进制色值或 px 字号；
  * - 深色模式只覆盖「语义差值」，不要重复定义整套变量；
  * - 状态色同时给出前景色与底色，保证文字对比度 ≥ 4.5:1。
  */
@@ -15,6 +15,23 @@
   --dog-font-mono:
     ui-monospace, "SFMono-Regular", "JetBrains Mono", "Cascadia Code", consolas,
     monospace;
+
+  /*
+   * 字号阶梯：全站只允许这 7 档，页面里不要再写死 px。
+   * body 与 Element Plus 基准字号（--el-font-size-base）保持一致，
+   * 否则裸 <span>（16px）会和 label / input / 表格（14px）在同一行里基线不齐。
+   */
+  --dog-font-display: 26px; /* 指标数字 */
+  --dog-font-h1: 22px; /* 页面标题 */
+  --dog-font-h2: 18px; /* 分区标题 / 小屏页面标题 */
+  --dog-font-title: 16px; /* 卡片、表格栏标题 */
+  --dog-font-body: 14px; /* 正文、表格、表单 */
+  --dog-font-sm: 13px; /* 辅助说明 */
+  --dog-font-xs: 12px; /* 字号下限，且必须保证对比度 ≥ 4.5:1 */
+
+  /* 行高：中文正文 1.6，标题收紧 */
+  --dog-line-tight: 1.35;
+  --dog-line-body: 1.6;
 
   /* 圆角与间距 */
   --dog-radius-sm: 6px;
@@ -58,7 +75,9 @@
   /* 文本 */
   --dog-text-primary: #0f172a;
   --dog-text-secondary: #475569;
-  --dog-text-muted: #64748b;
+
+  /* 12–13px 小字会落在页面底色上，#64748b 只有 4.4:1，压深一档到 4.93:1 */
+  --dog-text-muted: #5f6c80;
 
   /* 强调色与焦点环 */
   --dog-accent: #2563eb;
@@ -114,6 +133,7 @@ html.dark {
   box-sizing: border-box;
   min-width: 0;
   padding: var(--dog-space-4);
+  font-size: var(--dog-font-body);
   background: var(--dog-surface-card);
   border: 1px solid var(--dog-border);
   border-radius: var(--dog-radius-lg);
@@ -131,17 +151,36 @@ html.dark {
 
 .dog-card__title {
   margin: 0;
-  font-size: 15px;
+  font-size: var(--dog-font-title);
   font-weight: 600;
-  line-height: 1.5;
+  line-height: var(--dog-line-tight);
   color: var(--dog-text-primary);
 }
 
 .dog-card__hint {
   margin: 2px 0 0;
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: var(--dog-font-sm);
+  line-height: var(--dog-line-body);
   color: var(--dog-text-muted);
+}
+
+/* 表格栏标题（PureTableBar 的 <p>）：与卡片标题同层级，不再靠 Tailwind 的 1em 继承 */
+.dog-bar-title {
+  font-size: var(--dog-font-title);
+  font-weight: 600;
+  line-height: var(--dog-line-tight);
+  color: var(--dog-text-primary);
+}
+
+/* 表格里的占位文案（未关联 / 未分配 / 缺失）：12px 下限 + 对比度 ≥ 4.5:1 */
+.dog-placeholder {
+  font-size: var(--dog-font-xs);
+  color: var(--dog-text-muted);
+}
+
+.dog-placeholder--danger {
+  font-weight: 500;
+  color: var(--dog-status-fault);
 }
 
 /* 数据 / 编号类文本：等宽 + 等宽数字，列对齐更稳定 */
@@ -190,8 +229,15 @@ html.dark {
   color: var(--dog-text-secondary);
 }
 
-.el-table .cell {
-  line-height: 1.5;
+/*
+ * 表格行高交给 Element Plus 的 .el-table .cell（14px 字号 → 23px 行高，约 1.64，中文更舒展）。
+ * 这里不要再覆盖：本文件在 element-plus/dist/index.css 之前加载，同权重写一条 line-height 也压不住它。
+ */
+
+/* 裸文本跟随正文尺寸：不让 16px 的 <span> 和 14px 的 label / 表格混排 */
+body {
+  font-size: var(--dog-font-body);
+  line-height: var(--dog-line-body);
 }
 
 .el-dialog,

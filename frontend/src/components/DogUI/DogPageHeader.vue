@@ -57,7 +57,7 @@ withDefaults(
 
 .dog-page-header__eyebrow {
   margin: 0 0 2px;
-  font-size: 12px;
+  font-size: var(--dog-font-xs);
   font-weight: 600;
   line-height: 1.6;
   color: var(--dog-accent);
@@ -67,9 +67,9 @@ withDefaults(
 
 .dog-page-header__title {
   margin: 0;
-  font-size: 22px;
+  font-size: var(--dog-font-h1);
   font-weight: 700;
-  line-height: 1.35;
+  line-height: var(--dog-line-tight);
   color: var(--dog-text-primary);
   text-wrap: balance;
 }
@@ -77,8 +77,8 @@ withDefaults(
 .dog-page-header__desc {
   max-width: 72ch;
   margin: 4px 0 0;
-  font-size: 13px;
-  line-height: 1.6;
+  font-size: var(--dog-font-sm);
+  line-height: var(--dog-line-body);
   color: var(--dog-text-muted);
   text-wrap: pretty;
 }
@@ -98,7 +98,7 @@ withDefaults(
 
 @media (width <= 640px) {
   .dog-page-header__title {
-    font-size: 19px;
+    font-size: var(--dog-font-h2);
   }
 
   .dog-page-header__aside {

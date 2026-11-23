@@ -268,7 +268,7 @@ export default defineComponent({
             {slots?.title ? (
               slots.title()
             ) : (
-              <p class="font-bold truncate">{props.title}</p>
+              <p class="truncate dog-bar-title">{props.title}</p>
             )}
             <div class="flex items-center justify-around">
               {slots?.buttons ? (

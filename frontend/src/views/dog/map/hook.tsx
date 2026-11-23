@@ -75,7 +75,7 @@ export function useDogMap() {
         row.parkName || row.parkCode ? (
           <span>{row.parkName || row.parkCode}</span>
         ) : (
-          <span class="text-xs text-gray-400">未关联</span>
+          <span class="dog-placeholder">未关联</span>
         )
     },
     {
@@ -86,7 +86,7 @@ export function useDogMap() {
         row.deviceCode ? (
           <span class="font-mono">{row.deviceCode}</span>
         ) : (
-          <span class="text-xs text-gray-400">手工上传</span>
+          <span class="dog-placeholder">手工上传</span>
         )
     },
     {
@@ -101,7 +101,7 @@ export function useDogMap() {
             {codes.length > 2 ? ` +${codes.length - 2}` : ""}
           </span>
         ) : (
-          <span class="text-xs text-gray-400">未分享</span>
+          <span class="dog-placeholder">未分享</span>
         );
       }
     },
@@ -138,7 +138,7 @@ export function useDogMap() {
             {row.mapWidth}×{row.mapHeight}
           </span>
         ) : (
-          <span class="text-xs text-gray-400">-</span>
+          <span class="dog-placeholder">-</span>
         )
     },
     {
@@ -151,7 +151,7 @@ export function useDogMap() {
             {String(row.mapHash).slice(0, 12)}…
           </span>
         ) : (
-          <span class="text-xs text-red-400">缺失</span>
+          <span class="dog-placeholder dog-placeholder--danger">缺失</span>
         )
     },
     { label: "发布时间", prop: "publishTime", width: 170 },

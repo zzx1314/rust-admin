@@ -686,15 +686,15 @@ defineExpose({ open });
     align-items: center;
 
     .label {
-      font-size: 13px;
-      color: var(--el-text-color-secondary);
+      font-size: var(--dog-font-sm);
+      color: var(--dog-text-secondary);
     }
 
     .value {
       width: 46px;
-      font-family: var(--el-font-family-mono, monospace);
-      font-size: 12px;
-      color: var(--el-text-color-secondary);
+      font-family: var(--dog-font-mono);
+      font-size: var(--dog-font-xs);
+      color: var(--dog-text-secondary);
     }
   }
 
@@ -707,8 +707,8 @@ defineExpose({ open });
   display: flex;
   flex-wrap: wrap;
   gap: 16px;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
+  font-size: var(--dog-font-sm);
+  color: var(--dog-text-secondary);
 
   .dirty {
     font-weight: 600;

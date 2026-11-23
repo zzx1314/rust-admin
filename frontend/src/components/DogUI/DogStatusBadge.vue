@@ -115,7 +115,7 @@ const isLivePulse = computed(
   align-items: center;
   max-width: 100%;
   padding: 2px 10px;
-  font-size: 13px;
+  font-size: var(--dog-font-sm);
   font-weight: 500;
   line-height: 20px;
   color: var(--dog-badge-fg);
@@ -128,7 +128,7 @@ const isLivePulse = computed(
 .dog-badge--small {
   gap: 4px;
   padding: 0 8px;
-  font-size: 12px;
+  font-size: var(--dog-font-xs);
   line-height: 18px;
 }
 

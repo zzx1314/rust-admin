@@ -170,10 +170,10 @@ const {
 
 <style scoped>
 .media-preview {
-  min-height: 220px;
   display: flex;
   align-items: center;
   justify-content: center;
+  min-height: 220px;
 }
 
 .media-preview img {

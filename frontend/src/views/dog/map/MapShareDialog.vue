@@ -176,7 +176,8 @@ defineExpose({ open });
 }
 
 .share-tip {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
+  font-size: var(--dog-font-sm);
+  line-height: var(--dog-line-body);
+  color: var(--dog-text-secondary);
 }
 </style>
