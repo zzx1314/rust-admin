@@ -54,6 +54,11 @@ pub struct AppState {
     /// 以前是 `ai_patrol` 模块里的进程级 `static`：所有测试共用同一个窗口、
     /// 只能靠串行 + 不同任务号避免串台，也没法在同一个进程里跑两份状态。
     pub ai_patrol: Arc<crate::ai_patrol::AiPatrol>,
+    /// 进程内可变缓存（中台配置 / 媒体配置 / 等待计次）。
+    ///
+    /// 以前这些是各自模块里的 `static`，集成测试共用一个进程会互相污染；
+    /// 新加缓存请加进 `Caches`，不要写模块级 `static`。
+    pub caches: Arc<crate::cache::Caches>,
 }
 
 impl AppState {

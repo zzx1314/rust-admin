@@ -29,7 +29,7 @@ use crate::error::AppError;
 use crate::models::Task;
 use chrono::{DateTime, Datelike, Days, Local, NaiveTime, Timelike};
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
@@ -64,8 +64,48 @@ const WAIT_STATE_SWEEP_AT: usize = 64;
 /// 只放内存：进程重启后最多多写一条「等待中」事件，不影响正确性；反过来落库
 /// 就要给 `task_events` 加列，为一条提示性事件改表不值得。key 用 `task_code`
 /// 而不是自增 id，跨库/重建的场景也不会串台。
-static WAIT_STATES: LazyLock<Mutex<HashMap<String, WaitState>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+///
+/// 挂在 `AppState` 上（见 [`crate::cache::Caches`]），不再是模块级 `static`：
+/// 以前集成测试共用一张表，只能靠「每个用例用不同任务号」避免互相影响。
+#[derive(Default)]
+pub struct WaitStates {
+    inner: Mutex<HashMap<String, WaitState>>,
+}
+
+impl WaitStates {
+    /// 计次 + 节流：`Some(attempts)` 表示本轮要落库，`None` 表示还没到刷新周期。
+    fn note(&self, task_code: &str, window_key: &str) -> Option<u32> {
+        let now = Instant::now();
+        let mut states = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if states.len() > WAIT_STATE_SWEEP_AT {
+            states.retain(|_, state| {
+                now.saturating_duration_since(state.written_at) < WAIT_STATE_TTL
+            });
+        }
+        let state = states.entry(task_code.to_string()).or_insert(WaitState {
+            window: String::new(),
+            attempts: 0,
+            written_at: now,
+        });
+        // 首次 / 换窗口（比如第二天同一时段）：重新计次，并且立刻写一条
+        if state.window != window_key {
+            state.window = window_key.to_string();
+            state.attempts = 0;
+            state.written_at = now
+                .checked_sub(Duration::from_secs(WAIT_REFRESH_SECS))
+                .unwrap_or(now);
+        }
+        state.attempts += 1;
+        if now.duration_since(state.written_at).as_secs() < WAIT_REFRESH_SECS {
+            return None;
+        }
+        state.written_at = now;
+        Some(state.attempts)
+    }
+}
 
 struct WaitState {
     /// 当前窗口标识（`2026-11-17 16:00-17:00`）；换窗口就重新计次
@@ -538,7 +578,7 @@ async fn report_waiting(
         return Ok(());
     };
     let key = window_key(&window, now);
-    let Some(attempts) = note_attempt(&task.task_code, &key) else {
+    let Some(attempts) = state.caches.wait_states.note(&task.task_code, &key) else {
         return Ok(());
     };
     let remaining = window_instances(&window, now)
@@ -592,36 +632,6 @@ async fn report_waiting(
         "计划任务到点未下发，等待设备就绪：{reason}"
     );
     Ok(())
-}
-
-/// 计次 + 节流：`Some(attempts)` 表示本轮要落库，`None` 表示还没到刷新周期。
-fn note_attempt(task_code: &str, window_key: &str) -> Option<u32> {
-    let now = Instant::now();
-    let mut states = WAIT_STATES
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    if states.len() > WAIT_STATE_SWEEP_AT {
-        states.retain(|_, state| now.saturating_duration_since(state.written_at) < WAIT_STATE_TTL);
-    }
-    let state = states.entry(task_code.to_string()).or_insert(WaitState {
-        window: String::new(),
-        attempts: 0,
-        written_at: now,
-    });
-    // 首次 / 换窗口（比如第二天同一时段）：重新计次，并且立刻写一条
-    if state.window != window_key {
-        state.window = window_key.to_string();
-        state.attempts = 0;
-        state.written_at = now
-            .checked_sub(Duration::from_secs(WAIT_REFRESH_SECS))
-            .unwrap_or(now);
-    }
-    state.attempts += 1;
-    if now.duration_since(state.written_at).as_secs() < WAIT_REFRESH_SECS {
-        return None;
-    }
-    state.written_at = now;
-    Some(state.attempts)
 }
 
 /// 窗口标识：`2026-11-17 16:00-17:00`（跨零点窗口按起始日算）
@@ -974,17 +984,18 @@ mod tests {
 
     #[test]
     fn wait_state_throttles_but_counts_every_attempt() {
-        // 用独立的任务号：`WAIT_STATES` 是进程级状态，测试之间不能串台
+        // 每个用例自己一份（挂在 `AppState` 上以后就是这样），不必再挑任务号避串台
+        let states = WaitStates::default();
         let code = "TK-UNIT-WAIT";
         let window = "2026-11-17 16:00-17:00";
         // 首次一定落库，并记 1 次
-        assert_eq!(note_attempt(code, window), Some(1));
+        assert_eq!(states.note(code, window), Some(1));
         // 30s 一轮的后续尝试只攒着，不刷事件
         for _ in 0..5 {
-            assert_eq!(note_attempt(code, window), None);
+            assert_eq!(states.note(code, window), None);
         }
         // 换窗口（第二天同一时段）→ 立刻落库并重新计次
-        assert_eq!(note_attempt(code, "2026-11-18 16:00-17:00"), Some(1));
+        assert_eq!(states.note(code, "2026-11-18 16:00-17:00"), Some(1));
     }
 
     #[test]

@@ -211,6 +211,7 @@ async fn state_with_point_ai(agent: Option<String>, point_ai: &str, dir: PathBuf
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
         ai_patrol: Default::default(),
+        caches: Default::default(),
     }
 }
 

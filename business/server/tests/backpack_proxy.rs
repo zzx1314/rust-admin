@@ -108,6 +108,7 @@ async fn state_with_browser(
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
         ai_patrol: Default::default(),
+        caches: Default::default(),
     }
 }
 

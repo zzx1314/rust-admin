@@ -728,7 +728,8 @@ impl AiPatrol {
         let scene_name = task_name.clone();
         // 板端媒体目录 / 固定帧数：中台参数配置是唯一真源（带 60s 缓存），
         // 客户端原样转给板端 Agent 决定「存哪、存几张」，「同步媒体」按同一目录回传。
-        let media = crate::zentai::media_capture_config(&state.config).await;
+        let media =
+            crate::zentai::media_capture_config(&state.config, &state.caches.media_config).await;
         let body = json!({
             "windowId": window_id,
             "action": if was_running { "config" } else { "start" },
@@ -1275,9 +1276,10 @@ async fn run_window(
     //    数量与 expect_count 不符就在 SSE 的 plan_hit 里带 count_alert。
     //    `capture_enabled` 是航点自动采集总开关（中台 `media_capture_enabled`，默认关）：
     //    直连模式以前不带媒体参数，板端按自己的 `MEDIA_DATA_DIR` 默默攒图，这条一并收口。
-    let capture_enabled = crate::zentai::media_capture_config(&state.config)
-        .await
-        .enabled;
+    let capture_enabled =
+        crate::zentai::media_capture_config(&state.config, &state.caches.media_config)
+            .await
+            .enabled;
     let body = json!({
         "task": task_name,
         "labels": if labels.is_empty() {

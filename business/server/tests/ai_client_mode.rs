@@ -142,6 +142,7 @@ async fn test_state_with_wecom(
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
         ai_patrol: Default::default(),
+        caches: Default::default(),
     };
     (state, temp, rx)
 }
@@ -194,6 +195,7 @@ async fn state_with_live_wecom(point_ai: &str, webhook: String) -> (AppState, Te
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
         ai_patrol: Default::default(),
+        caches: Default::default(),
     };
     robodog_ops_server::notify::spawn(state.notify(), rx.expect("开了企微就该有消费端"));
     (state, temp)
@@ -2121,6 +2123,32 @@ fn task_progress(task_code: &str, status: &str, stage: &str) -> Value {
     })
 }
 
+/// 等平台把某个状态**真正写进库**再继续。
+///
+/// `gateway::handle_task_progress` 的顺序是「先让 `ai_patrol` 处理（可能立刻下发
+/// `ai_stop`）、再 `UPDATE tasks`」。所以测试收到 `ai_stop` 时，那条 UPDATE 可能还在
+/// 路上：这时直接改库，会被它覆盖回「异常」，后续告警就被判成「不在执行计划期间」
+/// 而不进群 —— 4 路并行跑时约 1/3 概率命中（2026-11 本机复现，单跑从不失败）。
+async fn wait_for_task_status(state: &AppState, task_code: &str, expected: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT task_status FROM tasks WHERE task_code = ?1")
+                .bind(task_code)
+                .fetch_optional(&state.db)
+                .await
+                .expect("查任务状态失败");
+        if status.as_deref() == Some(expected) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "等任务 {task_code} 变成「{expected}」超时，当前 {status:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// 取下一条**告警**消息（取消任务本身会先入队一条 `task:` 任务异常通知，跳过）
 async fn next_alert_notice(
     rx: &mut tokio::sync::mpsc::Receiver<robodog_ops_server::notify::Notice>,
@@ -2197,6 +2225,10 @@ async fn restart_after_cancel_still_pushes_the_next_round() {
     next_msg(&mut ws, "ai_stop").await;
 
     // ③ 重新下发（`push_task_dispatch` 会把任务切回执行中）
+    //
+    // 先等平台把「异常」落库：`ai_stop` 是在 `UPDATE tasks` **之前**发的（见
+    // `gateway::handle_task_progress` 的顺序），不等就可能被那条 UPDATE 覆盖回去。
+    wait_for_task_status(&state, &task_code, "异常").await;
     sqlx::query("UPDATE tasks SET task_status = '执行中', progress = 0 WHERE task_code = ?1")
         .bind(&task_code)
         .execute(&state.db)

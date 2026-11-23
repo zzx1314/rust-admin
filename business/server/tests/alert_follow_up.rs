@@ -107,6 +107,7 @@ async fn build_state(webhook: Option<&str>) -> (AppState, Option<mpsc::Receiver<
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
         ai_patrol: Default::default(),
+        caches: Default::default(),
     };
     (state, rx, temp)
 }

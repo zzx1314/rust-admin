@@ -99,6 +99,7 @@ async fn build_state() -> (AppState, mpsc::Receiver<Notice>, TempDb) {
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
         ai_patrol: Default::default(),
+        caches: Default::default(),
     };
     (state, rx.expect("部署开关开着时应有消费端"), temp)
 }

@@ -57,6 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         notifier,
         agent_tunnel: Default::default(),
         ai_patrol: Default::default(),
+        caches: Default::default(),
     };
     // 反向控制信道：配置了中台 WS 地址时主动拨出，内网部署靠它接收中台指令
     control_plane::spawn(state.clone());

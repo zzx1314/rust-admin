@@ -52,41 +52,68 @@ impl Default for MediaCaptureConfig {
     }
 }
 
-static MEDIA_CONFIG_CACHE: OnceLock<Mutex<Option<(Instant, MediaCaptureConfig)>>> = OnceLock::new();
+/// 「一次成功取值」的缓存条目：取值时刻 + 是哪个中台给的 + 值本身。
+type MediaConfigSlot = Option<(Instant, String, MediaCaptureConfig)>;
 
-fn media_config_cache() -> &'static Mutex<Option<(Instant, MediaCaptureConfig)>> {
-    MEDIA_CONFIG_CACHE.get_or_init(|| Mutex::new(None))
+/// 中台媒体采集配置的缓存（60s TTL）。
+///
+/// 挂在 `AppState` 上（见 [`crate::cache::Caches`]），不再是模块级 `static`。
+/// **按中台地址分键**：以前是一个裸 `Option`，同一进程里换了中台地址
+/// （多环境部署、集成测试里的假中台）会读到上一个地址的配置。
+#[derive(Default)]
+pub struct MediaConfigCache {
+    slot: std::sync::Mutex<MediaConfigSlot>,
+}
+
+impl MediaConfigCache {
+    /// 命中且未过期（且是同一个中台）就返回缓存值。
+    fn get(&self, base: &str) -> Option<MediaCaptureConfig> {
+        let guard = self
+            .slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard
+            .as_ref()
+            .filter(|(at, cached_base, _)| cached_base == base && at.elapsed() < MEDIA_CONFIG_TTL)
+            .map(|(_, _, value)| value.clone())
+    }
+
+    fn put(&self, base: &str, value: &MediaCaptureConfig) {
+        let mut guard = self
+            .slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = Some((Instant::now(), base.to_string(), value.clone()));
+    }
 }
 
 /// 取一次板端媒体配置（带 60s 缓存）。
 ///
 /// 失败时沿用上一次成功的值（实在没有就用默认值）并只打 WARN：中台不可达
 /// **不能**让航点 AI 识别停下来，板端仍然按默认目录写图。
-pub async fn media_capture_config(config: &Config) -> MediaCaptureConfig {
-    if let Some((at, value)) = media_config_cache().lock().await.as_ref()
-        && at.elapsed() < MEDIA_CONFIG_TTL
-    {
-        return value.clone();
+pub async fn media_capture_config(config: &Config, cache: &MediaConfigCache) -> MediaCaptureConfig {
+    // 没配中台地址时不必进缓存：`zentai_base` 每次都失败，缓存只会把「默认值」
+    // 记下来，等地址配好还要再等一个 TTL。
+    let Ok(base) = zentai_base(config) else {
+        return MediaCaptureConfig::default();
+    };
+    if let Some(value) = cache.get(&base) {
+        return value;
     }
     match fetch_media_capture_config(config).await {
         Ok(value) => {
-            *media_config_cache().lock().await = Some((Instant::now(), value.clone()));
+            cache.put(&base, &value);
             value
         }
         Err(error) => {
-            let cached = media_config_cache()
-                .lock()
-                .await
-                .as_ref()
-                .map(|(_, value)| value.clone());
-            let value = cached.unwrap_or_default();
+            let value = cache.get(&base).unwrap_or_default();
             // 失败也记时间戳：中台不可达时不要每个航点都刷一条 WARN + 一次超时，
             // 一个 TTL 内沿用上次的值（没有就默认值），下一个 TTL 再试。
             warn!(
                 "读取中台媒体配置失败，沿用 {}（一个 TTL 后重试）: {error}",
                 value.picture_dir
             );
-            *media_config_cache().lock().await = Some((Instant::now(), value.clone()));
+            cache.put(&base, &value);
             value
         }
     }
@@ -684,7 +711,7 @@ pub async fn user_can_access_device(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_capture_switch;
+    use super::{MediaCaptureConfig, MediaConfigCache, parse_capture_switch};
     use serde_json::json;
 
     /// 采集总开关的宽容解析：只有**明确开启**才算开，缺省 / 写坏一律关，
@@ -705,5 +732,28 @@ mod tests {
         assert!(!parse_capture_switch(Some(&json!("off"))));
         assert!(!parse_capture_switch(Some(&json!("garbage"))));
         assert!(!parse_capture_switch(Some(&json!(null))));
+    }
+
+    /// 缓存按中台地址分键：换了地址不能沿用上一个地址的配置。
+    ///
+    /// 以前这里是个裸 `Option`（模块级 static），集成测试里的假中台换了端口
+    /// 还会命中上一个用例的值 —— 60s TTL 内怎么都刷不过来。
+    #[test]
+    fn media_config_cache_is_keyed_by_zentai_base() {
+        let cache = MediaConfigCache::default();
+        let mut value = MediaCaptureConfig::default();
+        value.enabled = true;
+        cache.put("http://10.0.0.1:3007", &value);
+
+        assert!(
+            cache
+                .get("http://10.0.0.1:3007")
+                .is_some_and(|cached| cached.enabled),
+            "同一个中台应命中缓存"
+        );
+        assert!(
+            cache.get("http://10.0.0.2:3007").is_none(),
+            "换了中台地址必须重新取，不能读上一个地址的配置"
+        );
     }
 }

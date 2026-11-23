@@ -99,6 +99,7 @@ async fn test_state() -> (AppState, TempDb) {
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
         ai_patrol: Default::default(),
+        caches: Default::default(),
     };
     (state, temp)
 }

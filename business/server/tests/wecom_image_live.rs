@@ -103,6 +103,7 @@ async fn push_real_alert_card_with_evidence_image() {
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
         ai_patrol: Default::default(),
+        caches: Default::default(),
     };
     notify::spawn(state.notify(), rx.expect("部署开关开着时应有消费端"));
 

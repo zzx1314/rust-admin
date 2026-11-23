@@ -100,6 +100,7 @@ async fn test_state_with_token(service_token: Option<&str>) -> (AppState, TempDb
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
         ai_patrol: Default::default(),
+        caches: Default::default(),
     };
     (state, db_dir)
 }
@@ -1469,6 +1470,7 @@ mod control_plane_channel {
             notifier: robodog_ops_server::notify::Notifier::disabled(),
             agent_tunnel: Default::default(),
             ai_patrol: Default::default(),
+            caches: Default::default(),
         };
         (state, db_dir)
     }
@@ -3268,6 +3270,7 @@ async fn ingest_refresh_overwrites_existing_map_only_when_content_changes() {
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
         ai_patrol: Default::default(),
+        caches: Default::default(),
     };
     let app = build_router(state.clone());
     let token = login(&app).await;
@@ -4530,10 +4533,7 @@ async fn alert_ignore_fault_codes_setting_is_validated() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "非数字项应拒绝: {body}");
     assert!(
-        body["msg"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("RS"),
+        body["msg"].as_str().unwrap_or_default().contains("RS"),
         "错误提示要点出哪一项不认识: {body}"
     );
 

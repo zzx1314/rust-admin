@@ -14,6 +14,7 @@ pub mod alert_flow;
 pub mod app;
 pub mod auth;
 pub mod backpack;
+pub mod cache;
 pub mod config;
 pub mod control_plane;
 pub mod coords;
