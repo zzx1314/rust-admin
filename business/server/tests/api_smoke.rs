@@ -4555,3 +4555,145 @@ async fn alert_ignore_fault_codes_setting_is_validated() {
     .await;
     assert_eq!(status, StatusCode::OK);
 }
+
+/// 建计划时执行状态必须校验。
+///
+/// 以前 `create_task_core` 把请求体里的 `taskStatus` 原样写库（发布状态有校验、执行状态
+/// 没有），写坏一个值之后网关、AI 识别、看门狗里所有 `matches!(task_status, …)`
+/// 都会静默走「非终态」分支，任务永远收不了口。
+#[tokio::test]
+async fn task_creation_rejects_unknown_execution_status() {
+    let (state, _db) = test_state().await;
+    let app = build_router(state);
+    let token = login(&app).await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/tasks")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(
+                    r#"{"taskName":"状态写坏的计划","taskStatus":"跑完了"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert!(
+        body["msg"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("无效的任务状态"),
+        "应明确说状态不合法: {body}"
+    );
+
+    // 合法状态仍然放行（默认「待执行」）
+    let response = app
+        .oneshot(
+            Request::post("/api/tasks")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(r#"{"taskName":"正常计划"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["data"]["taskStatus"], "待执行");
+}
+
+/// 并发建计划不能拿到重复的 `taskCode`。
+///
+/// `task_code` 是 `UNIQUE`，以前靠 `SELECT COALESCE(MAX(id),0)+1` 先读后写，
+/// 池子里 8 条连接同时进来就会撞唯一键（返回 500 且把 SQLite 原文回给前端）。
+/// 现在走 `ids::next_id` 的原子分配，这里从 HTTP 层压一遍。
+#[tokio::test]
+async fn concurrent_task_creation_never_reuses_a_task_code() {
+    let (state, _db) = test_state().await;
+    let app = build_router(state);
+    let token = login(&app).await;
+
+    let mut handles = Vec::new();
+    for index in 0..8 {
+        let app = app.clone();
+        let token = token.clone();
+        handles.push(tokio::spawn(async move {
+            let response = app
+                .oneshot(
+                    Request::post("/api/tasks")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::from(format!(r#"{{"taskName":"并发计划-{index}"}}"#)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = json_body(response).await;
+            (status, body)
+        }));
+    }
+
+    let mut codes = Vec::new();
+    for handle in handles {
+        let (status, body) = handle.await.unwrap();
+        assert_eq!(status, StatusCode::OK, "建计划失败: {body}");
+        codes.push(
+            body["data"]["taskCode"]
+                .as_str()
+                .expect("响应缺少 taskCode")
+                .to_string(),
+        );
+    }
+    codes.sort();
+    codes.dedup();
+    assert_eq!(codes.len(), 8, "并发建单出现了重复编号: {codes:?}");
+}
+
+/// 唯一键冲突按 400 回，且**不能**把 SQLite 原文甩给前端。
+///
+/// 以前 `From<sqlx::Error>` 直接把 `error.to_string()` 塞进 `AppError::Internal`，
+/// `IntoResponse` 又原样当 `msg` 返回 —— 浏览器能看到
+/// `UNIQUE constraint failed: parks.park_code`（等于泄露库结构）。
+/// 现在唯一键冲突是可预期的并发结果，给一句能指导操作的话。
+#[tokio::test]
+async fn duplicate_code_reports_a_readable_error_instead_of_sql_text() {
+    let (state, _db) = test_state().await;
+    let app = build_router(state);
+    let token = login(&app).await;
+
+    let body = r#"{"parkName":"重复编号园区","parkCode":"PK-DUP-1"}"#;
+    let create = |body: &'static str| {
+        let app = app.clone();
+        let token = token.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::post("/api/parks")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            (response.status(), json_body(response).await)
+        }
+    };
+
+    let (status, created) = create(body).await;
+    assert_eq!(status, StatusCode::OK, "首次创建应成功: {created}");
+
+    let (status, duplicated) = create(r#"{"parkName":"另一个园区","parkCode":"PK-DUP-1"}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{duplicated}");
+    let message = duplicated["msg"].as_str().unwrap_or_default();
+    assert!(
+        !message.contains("UNIQUE") && !message.contains("constraint"),
+        "响应里不该出现 SQLite 原文: {message}"
+    );
+    assert!(message.contains("编号"), "应说明是编号占用: {message}");
+}

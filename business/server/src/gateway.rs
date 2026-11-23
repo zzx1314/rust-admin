@@ -1683,11 +1683,11 @@ async fn handle_task_progress(
         return;
     }
 
-    let valid_statuses = ["待执行", "执行中", "已完成", "异常", "已暂停"];
-    let status = if valid_statuses.contains(&payload.status.as_str()) {
-        &payload.status
+    // 执行状态的合法集合只在 `status` 里配一份（以前这里、网关、ai_patrol 各一份，还抄歪了）
+    let status = if crate::status::is_valid(&payload.status) {
+        payload.status.as_str()
     } else {
-        "执行中"
+        crate::status::RUNNING
     };
 
     // 航点到点 AI 识别：走到带「AI 识别」动作的航点时开识别窗口，终态时关窗口。

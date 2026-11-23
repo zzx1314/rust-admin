@@ -88,9 +88,7 @@ pub async fn create_staff(
     if name.is_empty() {
         return Err(AppError::BadRequest("责任人姓名不能为空".to_string()));
     }
-    let next_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM staff")
-        .fetch_one(&state.db)
-        .await?;
+    let next_id = crate::ids::next_id(&state.db, "staff", "staff").await?;
     let staff_code = payload
         .staff_code
         .filter(|value| !value.trim().is_empty())
@@ -413,12 +411,10 @@ pub async fn import_staff(
     }))
 }
 
-/// 导入时给新责任人分配的编号：跟着 `MAX(id)+1` 走（与手动新增一致），
+/// 导入时给新责任人分配的编号：跟着分配器走（与手动新增一致），
 /// 遇到已被手填占用的编号就往后顺延。
 async fn allocate_staff_code(state: &AppState) -> Result<String, AppError> {
-    let mut next: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM staff")
-        .fetch_one(&state.db)
-        .await?;
+    let mut next = crate::ids::next_id(&state.db, "staff", "staff").await?;
     loop {
         let code = format!("EMP-{next:02}");
         let taken: Option<i64> = sqlx::query_scalar("SELECT id FROM staff WHERE staff_code = ?1")
@@ -840,9 +836,7 @@ pub async fn create_shift(
 
     ensure_slot_free(&state, &shift_date, &slot, &owner_name, None).await?;
 
-    let next_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM shifts")
-        .fetch_one(&state.db)
-        .await?;
+    let next_id = crate::ids::next_id(&state.db, "shifts", "shifts").await?;
     let shift_code = format!("SH-{next_id:03}");
     let timestamp = now();
     let result = sqlx::query(
@@ -974,9 +968,7 @@ pub async fn duplicate_shift(
     // 同一个人同一天同一班次只能一条：拖重了就直接说清是谁冲突
     ensure_slot_free(&state, &shift_date, &slot, &source.owner_name, None).await?;
 
-    let next_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM shifts")
-        .fetch_one(&state.db)
-        .await?;
+    let next_id = crate::ids::next_id(&state.db, "shifts", "shifts").await?;
     let timestamp = now();
     let result = sqlx::query(
         "INSERT INTO shifts (shift_code, shift_date, slot, time_range, staff_id, owner_name,
@@ -1072,9 +1064,6 @@ pub async fn copy_shifts(
         .await?;
 
     let mut tx = state.db.begin().await?;
-    let mut next_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM shifts")
-        .fetch_one(&mut *tx)
-        .await?;
     let timestamp = now();
     let mut created = 0_i64;
     let mut replaced = 0_i64;
@@ -1120,13 +1109,16 @@ pub async fn copy_shifts(
             replaced += delete_slot(&mut tx, &target_date, &source.slot, &claims).await?;
         }
 
+        // 取号也走事务里的同一条连接：用池子取号会拿另一条连接，
+        // 事务已持有写锁时直接 `SQLITE_BUSY`。
+        let shift_code = crate::ids::next_id_on(&mut tx, "shifts", "shifts").await?;
         sqlx::query(
             "INSERT INTO shifts (shift_code, shift_date, slot, time_range, staff_id, owner_name,
                 park_id, zone_id, task_id, task_name, status, note, created_at, updated_at,
                 created_by)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?14)",
         )
-        .bind(format!("SH-{next_id:03}"))
+        .bind(format!("SH-{shift_code:03}"))
         .bind(&target_date)
         .bind(&source.slot)
         .bind(&source.time_range)
@@ -1148,7 +1140,6 @@ pub async fn copy_shifts(
         .bind(claims.sub)
         .execute(&mut *tx)
         .await?;
-        next_id += 1;
         created += 1;
     }
 

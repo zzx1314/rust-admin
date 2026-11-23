@@ -1874,9 +1874,7 @@ async fn insert_alert(
     content: &str,
     dedup_key: &str,
 ) -> Result<String, sqlx::Error> {
-    let next_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM alerts")
-        .fetch_one(db)
-        .await?;
+    let next_id = crate::ids::next_id(db, "alerts", "alerts").await?;
     let timestamp = now();
     let alert_code = format!("AL-{next_id:03}");
     sqlx::query(
@@ -1930,7 +1928,7 @@ async fn insert_task_event(
 /* ------------------------------- 纯函数 ------------------------------- */
 
 fn is_terminal_status(status: &str) -> bool {
-    matches!(status, "已完成" | "异常" | "已取消" | "已暂停")
+    crate::status::is_terminal(status)
 }
 
 fn is_arrival_stage(stage: &str) -> bool {

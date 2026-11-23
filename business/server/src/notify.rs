@@ -505,6 +505,22 @@ impl RateGate {
         }
     }
 
+    /// 取一个额度；额度用尽则等到下一个窗口。
+    ///
+    /// **在发送前调用**（每条消息一取）：企业微信按消息条数限流，
+    /// 所以「@所有人 / @责任人」的 text、markdown 卡片、证据图各占一个额度。
+    async fn acquire(&mut self) {
+        loop {
+            let at = Instant::now();
+            if self.allow(at) {
+                return;
+            }
+            let wait = self.wait_time(at);
+            debug!("wecom: 触发本地限流，等待 {wait:?}");
+            tokio::time::sleep(wait).await;
+        }
+    }
+
     /// 距离下一个窗口还要等多久。
     fn wait_time(&self, at: Instant) -> Duration {
         self.window
@@ -841,31 +857,23 @@ async fn run_consumer(state: AppState, mut rx: mpsc::Receiver<Notice>) {
                     debug!(key = %notice.dedupe_key, "wecom: 未配置 webhook，丢弃");
                     continue;
                 };
-                // @所有人 / @具体责任人都要多发一条 text，企业微信按「消息条数」限流，
-                // 所以占两个额度；带证据图的话再加一条 image 消息
-                let cost = if notice.mention_all || !notice.mentions.is_empty() {
-                    2
-                } else {
-                    1
-                } + u32::from(notice.image.is_some());
-                for _ in 0..cost {
-                    while !gate.allow(Instant::now()) {
-                        let wait = gate.wait_time(Instant::now());
-                        debug!("wecom: 触发本地限流，等待 {wait:?}");
-                        tokio::time::sleep(wait).await;
-                    }
-                }
+                // 额度在**真正发送的那一刻**才可取（`RateGate::acquire`），
+                // 不再在这里预扣：预扣会让被拒绝（errcode≠0）/ 因去重没发出去的消息
+                // 白占额度，而降级汇总又另建了一把 gate，两边各算各的。
                 deliver(&state, &client, &url, &notice, &mut gate).await;
+                continue;
             }
             _ = ticker.tick() => {
-                flush_overflow(&state).await;
+                flush_overflow(&state, &client, &mut gate).await;
             }
         }
     }
 }
 
 /// 队列满丢掉的条数汇总成一条，避免"静默丢消息"。
-async fn flush_overflow(state: &AppState) {
+///
+/// 走**同一把** `gate`：汇总也是一条企业微信消息，另建限流器会让它绕开额度。
+async fn flush_overflow(state: &AppState, client: &reqwest::Client, gate: &mut RateGate) {
     let dropped = state.notifier.shared.dropped.swap(0, Ordering::Relaxed);
     if dropped == 0 {
         return;
@@ -891,14 +899,7 @@ async fn flush_overflow(state: &AppState) {
     let Some(url) = state.notifier.webhook() else {
         return;
     };
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-    else {
-        return;
-    };
-    let mut gate = RateGate::new(RATE_PER_MIN, Duration::from_secs(60));
-    deliver(state, &client, &url, &notice, &mut gate).await;
+    deliver(state, client, &url, &notice, gate).await;
 }
 
 /// 发送一条（含重试与落库）。
@@ -912,7 +913,7 @@ async fn deliver(
     // 只补发图（卡片早就发过了）：发完就返回，不要重发卡片也不要写 notifications
     if notice.image_only {
         if let Some(image) = &notice.image
-            && send_image(client, url, image).await
+            && send_image(client, url, gate, image).await
         {
             // 图真的进群了，板端这一轮存证可以删了
             dispatch_evidence_cleanup(state, notice).await;
@@ -930,6 +931,7 @@ async fn deliver(
                 "mentioned_list": ["@all"],
             }
         });
+        gate.acquire().await;
         match post(client, url, &body).await {
             Ok(()) => {}
             Err(failure) => warn!("wecom: @所有人消息发送失败: {}", failure.message),
@@ -944,6 +946,7 @@ async fn deliver(
                 "mentioned_mobile_list": notice.mentions,
             }
         });
+        gate.acquire().await;
         match post(client, url, &body).await {
             Ok(()) => {}
             Err(failure) => warn!("wecom: @责任人消息发送失败: {}", failure.message),
@@ -955,6 +958,7 @@ async fn deliver(
     let mut last_error = String::new();
     for round in 0..3 {
         attempts += 1;
+        gate.acquire().await;
         match post(client, url, &body).await {
             Ok(()) => {
                 record(state, notice, &payload, "sent", attempts, None).await;
@@ -962,7 +966,7 @@ async fn deliver(
                 // 图片排在正文之后：群里先看到卡片再看图（发送顺序 = 消息顺序）。
                 // 失败只打日志——正文已经送到了，不能因一张图把告警判失败。
                 if let Some(image) = &notice.image
-                    && send_image(client, url, image).await
+                    && send_image(client, url, gate, image).await
                 {
                     // 企业微信确认收到图之后才删板端存证：删了不可逆
                     dispatch_evidence_cleanup(state, notice).await;
@@ -1016,11 +1020,17 @@ enum FailureKind {
 /// 字节的 md5，原图 ≤ 2MB 且只有 JPG/PNG。这些校验在 [`evidence_image`] 里已经做完，
 /// 到这里就是黑盒发送。
 /// 返回**企业微信是否真的收了**：调用方据此决定要不要删板端存证（删了不可逆）。
-async fn send_image(client: &reqwest::Client, url: &str, image: &NoticeImage) -> bool {
+async fn send_image(
+    client: &reqwest::Client,
+    url: &str,
+    gate: &mut RateGate,
+    image: &NoticeImage,
+) -> bool {
     let body = json!({
         "msgtype": "image",
         "image": { "base64": image.base64, "md5": image.md5 }
     });
+    gate.acquire().await;
     match post(client, url, &body).await {
         Ok(()) => {
             debug!(bytes = image.bytes, "wecom: 证据图推送成功");

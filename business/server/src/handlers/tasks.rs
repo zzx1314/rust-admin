@@ -9,7 +9,7 @@ use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use serde_json::{Value, json};
-use sqlx::{QueryBuilder, SqlitePool};
+use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 use tracing::{debug, info, warn};
 
 /// 任务行 + 关联名称的公共列清单（服务端各处 SELECT 与集成测试共用，避免漏列）
@@ -134,21 +134,20 @@ pub async fn task_stats(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
-    let filter_clause = if claims.is_admin {
-        String::new()
-    } else {
-        format!(" WHERE created_by = {}", claims.sub)
-    };
-    let sql =
-        format!("SELECT task_status, COUNT(*) FROM tasks{filter_clause} GROUP BY task_status");
-    let rows: Vec<(String, i64)> = sqlx::query_as(&sql).fetch_all(&state.db).await?;
+    // 不过滤 / 按创建人过滤共用一个查询，用绑定参数而不是把 id 拼进 SQL
+    let mut builder = QueryBuilder::<Sqlite>::new("SELECT task_status, COUNT(*) FROM tasks");
+    if !claims.is_admin {
+        builder.push(" WHERE created_by = ").push_bind(claims.sub);
+    }
+    builder.push(" GROUP BY task_status");
+    let rows: Vec<(String, i64)> = builder.build_query_as().fetch_all(&state.db).await?;
     let total: i64 = rows.iter().map(|(_, count)| count).sum();
     let mut counts = serde_json::Map::new();
     for (status, count) in rows {
         counts.insert(status, json!(count));
     }
     let done = counts
-        .get("已完成")
+        .get(crate::status::DONE)
         .and_then(Value::as_i64)
         .unwrap_or_default();
     let rate = if total == 0 {
@@ -212,9 +211,8 @@ pub async fn create_task_core(
         payload.park_id,
     )
     .await?;
-    let next_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM tasks")
-        .fetch_one(&state.db)
-        .await?;
+    // 编号走原子分配器（见 `ids` 模块）：`MAX(id)+1` 并发下会拿重号
+    let next_id = crate::ids::next_id(&state.db, "tasks", "tasks").await?;
     let task_code = payload
         .task_code
         .filter(|value| !value.trim().is_empty())
@@ -224,6 +222,16 @@ pub async fn create_task_core(
     let light_night_only = payload.light_night_only.unwrap_or(false);
     // 计划发布状态：只有「已发布」的计划才会被自动执行（`schedule::is_published`）
     let publish_status = normalize_publish_status(payload.publish_status.clone())?;
+    // 执行状态：以前直接把请求里的字符串写库，写坏一个值之后所有
+    // `matches!(task_status, …)` 都会静默走「非终态」分支，这里挡在建单之前
+    let task_status = payload
+        .task_status
+        .unwrap_or_else(|| crate::status::PENDING.to_string());
+    if !crate::status::is_valid(&task_status) {
+        return Err(AppError::BadRequest(format!(
+            "无效的任务状态：{task_status}"
+        )));
+    }
     let timestamp = now();
     let published_at = (publish_status == crate::schedule::PUBLISHED).then(|| timestamp.clone());
     let result = sqlx::query(
@@ -247,7 +255,7 @@ pub async fn create_task_core(
     .bind(plan_start)
     .bind(plan_end)
     .bind(schedule_days)
-    .bind(payload.task_status.unwrap_or_else(|| "待执行".to_string()))
+    .bind(task_status)
     .bind(payload.progress.unwrap_or(0))
     .bind(payload.dispatch_policy)
     .bind(payload.description)
@@ -344,7 +352,11 @@ pub async fn create_task_core(
 /// 此时发 `task_control resume` 毫无意义（客户端没有执行上下文，只会回一条
 /// 「执行中 / 0%」然后彻底静默）。
 fn resumable(task: &Task) -> bool {
-    task.robot_task_id.is_some() && matches!(task.task_status.as_str(), "执行中" | "已暂停")
+    task.robot_task_id.is_some()
+        && matches!(
+            task.task_status.as_str(),
+            crate::status::RUNNING | crate::status::PAUSED
+        )
 }
 
 /// 组装载荷并真正下发给设备，成功后把任务 / 设备切到执行态。
@@ -442,7 +454,7 @@ pub(crate) async fn push_task_dispatch(
 
 /// 下发任务；设备不在线时返回可读错误，绝不把状态单独改成「执行中」。
 async fn dispatch_task_or_error(state: &AppState, task: &Task) -> Result<(), AppError> {
-    if task.task_status == "已完成" {
+    if task.task_status == crate::status::DONE {
         return Err(AppError::BadRequest(format!(
             "任务 {} 已完成，如需重跑请新建任务",
             task.task_code
@@ -572,7 +584,10 @@ pub async fn unpublish_task(
             task.task_code
         )));
     }
-    if matches!(task.task_status.as_str(), "执行中" | "已暂停") {
+    if matches!(
+        task.task_status.as_str(),
+        crate::status::RUNNING | crate::status::PAUSED
+    ) {
         return Err(AppError::BadRequest(format!(
             "计划 {} 正在执行（{}），请先暂停并取消后再撤回",
             task.task_code, task.task_status
@@ -607,13 +622,17 @@ pub async fn update_task(
     let existing = fetch_task(&state, id).await?;
     super::parks::ensure_owner(&existing, &claims)?;
     // 只有尚未下发的任务允许编辑，避免执行中的任务被改到一半
-    if existing.task_status != "待执行" {
+    if existing.task_status != crate::status::PENDING {
         return Err(AppError::BadRequest(format!(
             "任务 {} 当前状态为「{}」，仅「待执行」的任务可以修改",
             existing.task_code, existing.task_status
         )));
     }
+    // 状态同样要校验：请求体里来别的字符串会写进库，破坏后续所有终态判断
     let status = payload.task_status.unwrap_or(existing.task_status);
+    if !crate::status::is_valid(&status) {
+        return Err(AppError::BadRequest(format!("无效的任务状态：{status}")));
+    }
     let progress = payload.progress.unwrap_or(existing.progress);
     let device_id = payload.device_id.or(existing.device_id);
     let park_id = payload.park_id.or(existing.park_id);
@@ -727,14 +746,13 @@ pub async fn update_task_status(
 ) -> Result<Json<ApiResponse<Task>>, AppError> {
     let existing = fetch_task(&state, id).await?;
     super::parks::ensure_owner(&existing, &claims)?;
-    let valid = ["待执行", "执行中", "已完成", "异常", "已暂停"];
-    if !valid.contains(&payload.task_status.as_str()) {
+    if !crate::status::is_valid(&payload.task_status) {
         return Err(AppError::BadRequest("无效的任务状态".to_string()));
     }
 
     // 「执行中」= 现在就跑：本体从未受理过这条任务时必须走真正的 task_dispatch。
     // 只改状态 + 发 resume 会让客户端在没有执行上下文时假报「执行中」，任务永久卡住。
-    if payload.task_status == "执行中" && !resumable(&existing) {
+    if payload.task_status == crate::status::RUNNING && !resumable(&existing) {
         dispatch_task_or_error(&state, &existing).await?;
         return Ok(ApiResponse::ok(fetch_task(&state, id).await?));
     }
@@ -742,8 +760,8 @@ pub async fn update_task_status(
     let progress = payload
         .progress
         .unwrap_or(match payload.task_status.as_str() {
-            "已完成" => 100,
-            "待执行" => 0,
+            crate::status::DONE => 100,
+            crate::status::PENDING => 0,
             _ => existing.progress,
         });
     sqlx::query("UPDATE tasks SET task_status = ?1, progress = ?2, updated_at = ?3 WHERE id = ?4")
@@ -778,7 +796,7 @@ pub async fn update_task_status(
 fn control_action(task_status: &str) -> Option<&'static str> {
     match task_status {
         "已暂停" => Some("pause"),
-        "执行中" => Some("resume"),
+        crate::status::RUNNING => Some("resume"),
         "已完成" | "异常" => Some("cancel"),
         _ => None,
     }

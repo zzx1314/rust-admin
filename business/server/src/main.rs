@@ -82,6 +82,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         listener,
         router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await?;
     Ok(())
+}
+
+/// 等 SIGINT / SIGTERM（Ctrl-C / systemd restart）。
+///
+/// 以前直接 `serve(..).await`，`systemctl restart` 会把正在跑的请求硬切：
+/// 告警推送落库（`notifications`）、任务状态与 `task_events` 写入都可能只写一半。
+/// `serve` 退出后进程才结束，后台任务（看门狗 / 调度 / 推送）跟着结束，
+/// 所以这里只需要保证 HTTP 侧把在途请求做完。
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            // 注册不上信号就只等 Ctrl-C，别让整个进程因此启动失败
+            Err(error) => {
+                tracing::warn!("注册 SIGTERM 监听失败，只能靠 SIGINT 退出: {error}");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {}
+        () = terminate => {}
+    }
+    tracing::info!("收到退出信号，等待在途请求处理完成后退出");
 }

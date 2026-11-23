@@ -25,11 +25,28 @@ pub enum AppError {
     Internal(String),
 }
 
+/// 数据库错误 → 对外错误。
+///
+/// **原始错误只进日志**：`sqlx` / `SQLite` 的英文原文（`no such column: xxx`、
+/// `UNIQUE constraint failed: tasks.task_code`、连接池超时…）不该出现在接口响应里，
+/// `IntoResponse` 会把 `Internal` 的文案直接回给前端，以前等于把库结构泄露给浏览器。
+/// 需要对外说明的场合请显式写中文文案（`Internal("…")` / `Upstream("…")`）。
 impl From<sqlx::Error> for AppError {
     fn from(error: sqlx::Error) -> Self {
         match error {
             sqlx::Error::RowNotFound => Self::NotFound("记录不存在".to_string()),
-            other => Self::Internal(other.to_string()),
+            // 唯一键冲突是**可预期的并发结果**（编号被手填占用、两个请求同时建单、
+            // 账号已经绑过责任人…），按 400 让调用方自己改，而不是 500「服务器错误」。
+            // 注意文案不能只说「编号」：unique 约束还有 `users.username`、
+            // `staff.user_id`、`devices.device_id` 这些不是编号的列。
+            sqlx::Error::Database(database) if database.is_unique_violation() => {
+                tracing::warn!(error = %database, "database unique violation");
+                Self::BadRequest("记录已存在（编号或唯一绑定重复），请检查后重试".to_string())
+            }
+            other => {
+                tracing::error!(error = %other, "database error");
+                Self::Internal("数据库操作失败".to_string())
+            }
         }
     }
 }

@@ -77,9 +77,7 @@ pub async fn create_route(
     if payload.route_name.trim().is_empty() {
         return Err(AppError::BadRequest("路线名称不能为空".to_string()));
     }
-    let next_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM routes")
-        .fetch_one(&state.db)
-        .await?;
+    let next_id = crate::ids::next_id(&state.db, "routes", "routes").await?;
     let route_code = payload
         .route_code
         .filter(|value| !value.trim().is_empty())

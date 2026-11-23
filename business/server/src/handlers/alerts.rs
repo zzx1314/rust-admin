@@ -78,9 +78,7 @@ pub async fn create_alert(
     if payload.content.trim().is_empty() {
         return Err(AppError::BadRequest("告警内容不能为空".to_string()));
     }
-    let next_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM alerts")
-        .fetch_one(&state.db)
-        .await?;
+    let next_id = crate::ids::next_id(&state.db, "alerts", "alerts").await?;
     let alert_code = payload
         .alert_code
         .filter(|value| !value.trim().is_empty())

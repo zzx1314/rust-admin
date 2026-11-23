@@ -256,9 +256,7 @@ pub(crate) async fn create_order_core(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "手动创建".to_string());
 
-    let next_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM work_orders")
-        .fetch_one(&state.db)
-        .await?;
+    let next_id = crate::ids::next_id(&state.db, "work_orders", "work_orders").await?;
     let order_code = format!("WO-{}-{next_id:02}", chrono::Local::now().format("%m%d"));
     let timestamp = now();
     let status = "待接单";

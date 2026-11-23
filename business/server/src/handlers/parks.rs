@@ -73,9 +73,7 @@ pub async fn create_park(
     if payload.park_name.trim().is_empty() {
         return Err(AppError::BadRequest("园区名称不能为空".to_string()));
     }
-    let next_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM parks")
-        .fetch_one(&state.db)
-        .await?;
+    let next_id = crate::ids::next_id(&state.db, "parks", "parks").await?;
     let park_code = payload
         .park_code
         .filter(|value| !value.trim().is_empty())

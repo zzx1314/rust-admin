@@ -50,6 +50,15 @@ pub const PUBLISHED: &str = "已发布";
 /// 当年就是这么把事件流刷爆的。
 const WAIT_REFRESH_SECS: u64 = 300;
 
+/// 计次表的保留时长。
+///
+/// `WAIT_STATES` 以 `task_code` 为键、**只增不删**：建计划 / 删计划 / 改编号都会留下
+/// 一条永不过期的记录，进程长期不重启时是一条慢性泄漏。超过保留期（一天没动过）
+/// 的计划不必再记——下一个窗口重新计次就行。
+const WAIT_STATE_TTL: Duration = Duration::from_hours(24);
+/// 计次表超过这个条数才做一次清扫（保持热路径只有一次查表）。
+const WAIT_STATE_SWEEP_AT: usize = 64;
+
 /// 每个任务在当前窗口里的重试计数 / 上次落库时间。
 ///
 /// 只放内存：进程重启后最多多写一条「等待中」事件，不影响正确性；反过来落库
@@ -591,6 +600,9 @@ fn note_attempt(task_code: &str, window_key: &str) -> Option<u32> {
     let mut states = WAIT_STATES
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
+    if states.len() > WAIT_STATE_SWEEP_AT {
+        states.retain(|_, state| now.saturating_duration_since(state.written_at) < WAIT_STATE_TTL);
+    }
     let state = states.entry(task_code.to_string()).or_insert(WaitState {
         window: String::new(),
         attempts: 0,
