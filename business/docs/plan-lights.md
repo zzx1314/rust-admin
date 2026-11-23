@@ -67,7 +67,7 @@ client（与 Agent 同机）
 | `business/server/migrations/030_task_light_night_only.sql` | `tasks.light_night_only`（默认 0） |
 | `business/server/src/dispatch.rs` + `gateway_types.rs` | 载荷 `lightNightOnly`（总是下发，`false` 也发） |
 | `business/client/src/lights.rs` | 解析动作 / 到点开灯 / 离开关灯 / 去重；`lightNightOnly` 透传 |
-| `business/client/src/main.rs` | 5009 到点、离开、终态、取消、本地收尾的挂钩 |
+| `business/client/src/session.rs` / `pump.rs` / `handlers/task.rs` | 5009 到点、离开、终态、取消、本地收尾的挂钩 |
 | `business/web/src/views/routes/index.vue` | 航点动作两个复选框 + 动作卡片「灯光：…」 |
 | `business/web/src/views/tasks/index.vue` | 计划「仅夜间自动开灯」 |
 | `deploy/backpack-sim/mock_agent.py` | 模拟 `/api/lights`（`SIM_NIGHT=1/0` 可钉死白天/夜间） |

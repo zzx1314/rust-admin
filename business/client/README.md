@@ -1013,7 +1013,7 @@ ssh root@192.168.41.246 'mv /tmp/rdc.new /opt/robodog/client/robodog-device-clie
 - 同一时期若还夹着「本体软件急停已触发」：那条门禁（`motion_block_reason`）在
   「下发地图」的**总线门禁**里、先于上面这条执行，说明本体当时确实报过急停，
   与本 bug 无关（见 `deploy/robodog-body.md` §10）。
-- 回归用例：`cargo test map_push_guard`（`business/client/src/main.rs` 的
+- 回归用例：`cargo test map_push_guard`（`business/client/src/maps.rs` 的
   `map_push_guard_tests`）。
 
 ## 与 REST API 的联动

@@ -354,7 +354,8 @@ robodog-ops-server (ws://server:3100/ws/device)     智航 Pro (ws://192.168.168
 | 网关心跳 5s、请求超时 8s、绑定超时 10s | `business/client/src/zhpro/client.rs`（`GATEWAY_HEARTBEAT` / `REQUEST_TIMEOUT` / `BIND_TIMEOUT`） |
 | 端地址推导（裸 IP / `ws://ip:10010` / 带 path 均可） | `client.rs::endpoint_urls` / `host_base` |
 | 遥控看门狗（1s 无新帧自动停车） | `business/client/src/zhpro/teleop.rs` |
-| 业务服务注册 / 心跳 / 任务编排 | `business/client/src/main.rs` |
+| 业务服务注册 / 心跳 / 定时器主循环 | `business/client/src/session.rs`（`main.rs` 只做进程装配） |
+| 业务下行消息分发 / 任务编排 | `business/client/src/handlers/`（`mod.rs` 分发 + `task` / `control` / `command`） |
 | 地图包下载与回传 | `business/client/src/mapupload.rs`（文件服务默认端口 12000） |
 | 默认地图根目录 | `config.rs` → `/ota/alg_data/map`（`zhpro/mapping.rs` 转导出） |
 | 配置解析（CLI / 环境变量 / TOML 三层） | `business/client/src/config.rs`，模板 `client.toml.example` |

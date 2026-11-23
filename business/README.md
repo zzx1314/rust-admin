@@ -32,8 +32,17 @@ business/
 │   ├── seed/routes.json           # 演示路线（航点/航段/动作）
 │   └── data/robodog.db            # 运行时生成，删除后自动重建并重新播种
 ├── client/                        # 设备客户端：业务协议 + 智航 Pro 本体驱动
-│   ├── src/main.rs                # 双后端连接、任务分派、状态上报
-│   ├── src/ai_patrol.rs           # 航点 AI 识别：本地调板端 Agent、回传检出
+│   ├── src/main.rs                # 只做进程装配（配置 → 日志 → 连本体 → 连业务）
+│   ├── src/session.rs             # 业务连接主循环：注册/心跳/进度/事件定时器
+│   ├── src/body.rs                # 本体链路：建链、断线原地重连、一次性建图
+│   ├── src/pump.rs                # 本体推送泵：5009/1315/4001 分发与状态帧处理
+│   ├── src/handlers/              # 下行消息：mod.rs 分发 + task/control/command 三个业务分支
+│   ├── src/wire.rs                # 业务 WS 线协议（信封 / 心跳 / 进度 / 事件 / 发送）
+│   ├── src/state.rs               # 运行时状态与运动门禁（RobotState / ActiveTask）
+│   ├── src/maps.rs                # 地图推送/回读、增量同步、中台上传
+│   ├── src/locate.rs              # 定位门禁：载图定位、初始位姿、地图匹配
+│   ├── src/report.rs              # 上报合流与限频（事件去重 / 进度降频）
+│   ├── src/ai_patrol/             # 航点 AI 识别：mod / window / evidence / agent（+ tests）
 │   ├── src/dispatch.rs            # 业务载荷 → FlightPlan
 │   └── src/zhpro/                 # 智航 Pro 协议层、建图、地图管理、航线执行
 └── web/                           # 独立 Vue 3 控制台

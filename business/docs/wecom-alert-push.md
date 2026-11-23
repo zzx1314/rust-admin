@@ -142,10 +142,10 @@
 | `notify.rs` `alert_created_with_image()` | 同上，额外把证据图作为**第二条**消息发（`msgtype=image`）；开关 `wecom_alert_image` |
 | `notify.rs` `evidence_image()` / `NoticeImage` | 证据图校验（base64 / ≤2MB / JPG-PNG）+ 算 md5（**base64 之前**的字节） |
 | `notify.rs` `send_image()` | 卡片发成功后再发图片；失败只打 WARN（正文已送达） |
-| `client/src/ai_patrol.rs` `evidence_image_base64()` | 客户端从板端磁盘读数量告警的证据图 → `ai_alert.evidenceImage`（平台读不到那个文件系统） |
-| `client/src/ai_patrol.rs` `window_evidence()` / `newest_evidence_file()` | 实时检出：扫 `<jobs_dir>/<plan>/pt<n>/` 取本轮最新命中帧（退路）+ 窗口收尾时补扫 |
-| `client/src/ai_patrol.rs` `plan_hit_evidence()` / `send_detect()` | 实时检出：挂起命中 → `plan_hit.evidence` 一到就读图带 `ai_detect.evidenceImage` 上报 |
-| `client/src/ai_patrol.rs` `Leftover` / `send_evidence()` | 卡片已发、图晚到：停识别扫到图后补一条 `ai_evidence` |
+| `client/src/ai_patrol/evidence.rs` `evidence_image_base64()` | 客户端从板端磁盘读数量告警的证据图 → `ai_alert.evidenceImage`（平台读不到那个文件系统） |
+| `client/src/ai_patrol/{window,evidence}.rs` `window_evidence()` / `newest_evidence_file()` | 实时检出：扫 `<jobs_dir>/<plan>/pt<n>/` 取本轮最新命中帧（退路）+ 窗口收尾时补扫 |
+| `client/src/ai_patrol/{evidence,agent}.rs` `plan_hit_evidence()` / `send_detect()` | 实时检出：挂起命中 → `plan_hit.evidence` 一到就读图带 `ai_detect.evidenceImage` 上报 |
+| `client/src/ai_patrol/window.rs` `Leftover` + `client/src/ai_patrol/agent.rs` `send_evidence()` | 卡片已发、图晚到：停识别扫到图后补一条 `ai_evidence` |
 | `server/src/ai_patrol.rs` `on_client_evidence()` | `ai_evidence` 入口：本窗口还没带过图的那条告警 → `notify::alert_evidence` |
 | `notify.rs` `alert_evidence()` / `Notice.image_only` | 只补一张 `msgtype=image`（不重发卡片、不写 notifications） |
 | `notify.rs` `count_matched()` | **数量核对一致**的回执：只推群，**不落告警、不建工单**（`ref_type=count`，不走 `alert_flow`）；航点动作 `notifyWhenCountOk` 才开 |

@@ -833,11 +833,8 @@ impl Config {
             .or(file.ai.enabled)
             .unwrap_or(true);
         let env_jobs_dir = env.get_string(ENV_AI_JOBS_DIR);
-        let ai_jobs_dir = pick_string([
-            env_jobs_dir.as_deref(),
-            file.ai.jobs_dir.as_deref(),
-        ])
-        .map(str::to_string);
+        let ai_jobs_dir =
+            pick_string([env_jobs_dir.as_deref(), file.ai.jobs_dir.as_deref()]).map(str::to_string);
 
         let api_base = pick_string([
             cli.api_base.as_deref(),

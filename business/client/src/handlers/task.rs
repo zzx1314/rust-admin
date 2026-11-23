@@ -1,0 +1,521 @@
+//! 任务下发：按 `task_dispatch` 载荷建图 / 巡检 / 回充。
+
+use crate::ai_patrol::AiPatrol;
+use crate::ai_patrol::parse_ai_points;
+use crate::dispatch;
+use crate::lights;
+use crate::locate::LOCATE_ATTEMPTS;
+use crate::locate::ensure_localized;
+use crate::locate::parse_initial_pose;
+use crate::maps::clear_local_runner;
+use crate::report::report_progress;
+use crate::state::ActiveTask;
+use crate::state::RobotState;
+use crate::state::Shared;
+use crate::state::clear_active_task;
+use crate::wire::WsMessage;
+use crate::zhpro;
+use crate::zhpro::client::ZhProClient;
+use crate::zhpro::mapping::MappingSession;
+use crate::zhpro::route::RouteRunner;
+use dispatch::TaskMode;
+use dispatch::parse_flight_plan;
+use dispatch::parse_map_binding;
+use lights::PointLights;
+use lights::parse_light_points;
+use robodog_device_client::config::Config;
+use robodog_device_client::config::RoadNetworkMode;
+use serde_json::Value;
+use serde_json::json;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tracing::error;
+use tracing::info;
+use tracing::warn;
+use zhpro::mapping::MapManager;
+use zhpro::route::Control;
+
+use zhpro::protocol::*;
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn dispatch(
+    config: &Config,
+    msg: WsMessage,
+    out_tx: &mpsc::Sender<WsMessage>,
+    state: &Shared<RobotState>,
+    active: &Shared<Option<ActiveTask>>,
+    zhpro: &Option<Arc<ZhProClient>>,
+    local_runner: &Shared<Option<Arc<RouteRunner>>>,
+    local_mapping: &Shared<Option<Arc<MappingSession>>>,
+    ai: &Arc<AiPatrol>,
+    lights: &Arc<PointLights>,
+) {
+    let task_code = msg.payload["taskCode"].as_str().unwrap_or("").to_string();
+    let task_name = msg.payload["taskName"]
+        .as_str()
+        .unwrap_or("未命名任务")
+        .to_string();
+    let task_type = msg.payload["taskType"].as_str().unwrap_or("巡检");
+    let mode = TaskMode::parse(task_type);
+    info!("收到任务: [{task_code}] {task_name} 类型={task_type} 模式={mode:?}");
+    // 排障最有用的一行：把业务侧下发的整份任务载荷原样打出来（含 routeData.points /
+    // map / initialPose）。整条链路的信息默认可见：服务端 `task_dispatch 下发载荷`
+    // → 客户端这行 → 客户端的 `5000` 完整帧 → 本体的 `5001` / `5009`。
+    // （模拟模式下同样会打，用来核对 map / routeData 是否与平台一致）
+    info!("task_dispatch 载荷: {}", msg.payload);
+
+    // 本条路线里带「AI 识别」动作的航点：到点由 5009 的 detail_index 查表触发
+    let ai_points = parse_ai_points(&msg.payload["routeData"]);
+    if !ai_points.is_empty() {
+        info!(
+            "任务 {task_code} 含 {} 个 AI 识别航点: {:?}",
+            ai_points.len(),
+            ai_points
+                .iter()
+                .map(|point| (point.index, point.name.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+    // 航点灯光（与 AI 动作分开：有点只开灯不识别）+ 计划级「仅夜间自动开灯」
+    let light_points = parse_light_points(&msg.payload["routeData"]);
+    if !light_points.is_empty() {
+        info!(
+            "任务 {task_code} 含 {} 个灯光航点: {:?}",
+            light_points.len(),
+            light_points
+                .iter()
+                .map(|point| (point.index, point.fill, point.led))
+                .collect::<Vec<_>>()
+        );
+    }
+    // 老平台不发 `lightNightOnly`：按「到点就开」跑（历史行为=不开灯）
+    let light_night_only = msg.payload["lightNightOnly"].as_bool().unwrap_or(false);
+    *active.lock().await = Some(ActiveTask {
+        task_code: task_code.clone(),
+        task_name: task_name.clone(),
+        nav_task_id: None,
+        stage: None,
+        point_index: None,
+        ai_points,
+        light_points,
+        light_night_only,
+    });
+    state.lock().await.current_task = Some(task_name.clone());
+
+    let Some(client) = zhpro.clone() else {
+        warn!("未连接本体，任务仅记录不执行");
+        report_progress(
+            out_tx,
+            &task_code,
+            "异常",
+            0,
+            Some("未连接机器人本体".to_string()),
+            None,
+            None,
+            None,
+        )
+        .await;
+        return;
+    };
+
+    // 官方 App 在 sdk_node 未就绪 / 急停未解除 / 控制权被外部抢占 /
+    // 未站立时不会创建任务；这里在发 5000 之前统一拦掉，避免
+    // “5000 受理但本体不执行，最后等 600s 超时”。
+    //
+    // 客户端刚启动/刚重连时，平台会立刻补发 pending 任务，而第一条
+    // 1315 可能还没到；先等最多 3s，避免把“初始化中”误判成“离线”。
+    if !state.lock().await.body_status_fresh() {
+        for _ in 0..15 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if state.lock().await.body_status_fresh() {
+                break;
+            }
+        }
+    }
+    let task_block = state.lock().await.motion_block_reason(true);
+    if let Some(reason) = task_block {
+        warn!("任务 {task_code} 拒绝下发: {reason}");
+        report_progress(
+            out_tx,
+            &task_code,
+            "异常",
+            0,
+            Some(reason),
+            None,
+            None,
+            None,
+        )
+        .await;
+        clear_active_task(active, state).await;
+        return;
+    }
+
+    match mode {
+        TaskMode::Mapping => {
+            let session = Arc::new(MappingSession::new(client.clone()));
+            *local_mapping.lock().await = Some(session.clone());
+            let kind = match config.map_kind.as_str() {
+                "indoor" => zhpro::protocol::MappingType::Indoor,
+                _ => zhpro::protocol::MappingType::Outdoor,
+            };
+            match session.start(&task_name, kind).await {
+                Ok(task_id) => {
+                    report_progress(
+                        out_tx,
+                        &task_code,
+                        "执行中",
+                        0,
+                        Some("建图任务已下发".to_string()),
+                        Some("mapping.preparing".to_string()),
+                        Some(task_id),
+                        None,
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    error!("建图任务下发失败: {e}");
+                    report_progress(
+                        out_tx,
+                        &task_code,
+                        "异常",
+                        0,
+                        Some(format!("建图任务下发失败: {e}")),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                    // 建图没起来：别留着「正在建图」的占位，否则进度定时器会拿它刷假状态
+                    *local_mapping.lock().await = None;
+                    clear_active_task(active, state).await;
+                }
+            }
+        }
+
+        TaskMode::ReturnToCharge => {
+            let binding = parse_map_binding(&msg.payload);
+            // 5014 的 `map_id` 是本体目录名（4013 `path` 最后一段），不是业务 ID
+            let manager = MapManager::new(client.clone());
+            let robot_map = match manager
+                .resolve(&[&binding.map_dir, &binding.map_path, &binding.map_id])
+                .await
+            {
+                Ok(map) => map,
+                Err(e) => {
+                    warn!("任务 {task_code} 的地图不在本体上，拒绝返充: {e}");
+                    report_progress(out_tx, &task_code, "异常", 0, Some(e), None, None, None).await;
+                    clear_active_task(active, state).await;
+                    return;
+                }
+            };
+            match client
+                .call(T_RETURN_TO_CHARGE, json!({ "map_id": robot_map.map_id }))
+                .await
+            {
+                Ok(data) => {
+                    let robot_task = data
+                        .get("task_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    if let Some(a) = active.lock().await.as_mut() {
+                        a.nav_task_id = robot_task.clone();
+                    }
+                    report_progress(
+                        out_tx,
+                        &task_code,
+                        "执行中",
+                        0,
+                        Some("返回充电点任务已受理".to_string()),
+                        Some("return_to_charge.preparing".to_string()),
+                        robot_task,
+                        None,
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    report_progress(
+                        out_tx,
+                        &task_code,
+                        "异常",
+                        0,
+                        Some(format!("返回充电点失败: {e}")),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                }
+            }
+        }
+
+        TaskMode::Recharge | TaskMode::Undock => {
+            let kind = if mode == TaskMode::Recharge {
+                TaskKind::Recharge
+            } else {
+                TaskKind::Undock
+            };
+            let data = json!({
+                "kind": kind.code(),
+                "name": task_name,
+                "schedule": 0,
+                "execute_at": now_ms().to_string(),
+                "priority": 0,
+                "record": false,
+                "params": Value::Null
+            });
+            match client.call(T_TASK_CREATE, data).await {
+                Ok(reply) => {
+                    let robot_task = reply
+                        .get("task_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    if let Some(a) = active.lock().await.as_mut() {
+                        a.nav_task_id = robot_task.clone();
+                    }
+                    report_progress(
+                        out_tx,
+                        &task_code,
+                        "执行中",
+                        0,
+                        Some(format!("{}任务已受理", kind.as_str())),
+                        None,
+                        robot_task,
+                        None,
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    report_progress(
+                        out_tx,
+                        &task_code,
+                        "异常",
+                        0,
+                        Some(format!("任务下发失败: {e}")),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                }
+            }
+        }
+
+        TaskMode::Route => {
+            let Some(mut plan) = parse_flight_plan(&msg.payload, &config.map_root) else {
+                warn!("任务 {task_code} 缺少可执行的航点数据");
+                report_progress(
+                    out_tx,
+                    &task_code,
+                    "异常",
+                    0,
+                    Some("任务缺少航点数据（routeData.points 为空）".to_string()),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+                clear_active_task(active, state).await;
+                return;
+            };
+            info!(
+                "航线计划: {} 个航点, 地图={} (路径 {}), 结束动作={}",
+                plan.waypoints.len(),
+                plan.map_id,
+                plan.map_path,
+                plan.end_task_label()
+            );
+            // 注意：**不要**在这里把 `active_map` 改成计划里的地图。那个字段表示
+            // 「本体当前真的载着哪张图」，是定位守卫判断「要不要重新载图」的依据；
+            // 提前写进去会让守卫误以为已载好，从而跳过自动重定位。
+            // 定位成功后由 `ensure_localized` 写回。
+
+            // 上一轮遗留的本体任务必须先收尾：本体对「已有一个未结束任务」回
+            // 13897 resource conflict (capability busy)，而任务被暂停（5004）后
+            // 不会自动结束——平台直接重新下发时第一个 5000 必然被拒。
+            if let Some(previous) = local_runner.lock().await.take() {
+                let had_robot_task = previous.current_nav_task().await.is_some();
+                match previous.control(Control::Cancel).await {
+                    Ok(()) => {
+                        if had_robot_task {
+                            info!(
+                                "任务 {task_code}：已 5002 取消上一轮本体导航任务，等本体释放导航能力"
+                            );
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
+                    }
+                    Err(e) => warn!("取消上一轮本体导航任务失败: {e}"),
+                }
+            }
+
+            // 前置校验：业务 `mapId` 不是本体目录名，必须用 4013 列表解析出真实目录。
+            // 对不上就不发 5000——否则本体只会回 13898 missing map.yaml。
+            let manager = MapManager::new(client.clone());
+            let robot_map = match manager.resolve(&[&plan.map_path, &plan.map_id]).await {
+                Ok(map) => map,
+                Err(e) => {
+                    warn!("任务 {task_code} 的地图不在本体上，拒绝下发: {e}");
+                    report_progress(out_tx, &task_code, "异常", 0, Some(e), None, None, None).await;
+                    clear_active_task(active, state).await;
+                    return;
+                }
+            };
+            info!(
+                "机器人地图就绪: {} 目录={} 路网={} 回充点={}",
+                plan.map_id, robot_map.map_id, robot_map.route_exist, robot_map.charge_point_exist
+            );
+            if plan.end_task() == zhpro::route::EndTask::ReturnToCharge
+                && !robot_map.charge_point_exist
+            {
+                // 官方 App 在 charge_point_exist=false 时直接置灰返充入口；
+                // 这里提前失败，避免跑完整条航线才在 5014 收到 0x3672。
+                warn!("任务 {task_code} 拒绝下发：地图未设置回充点");
+                report_progress(
+                    out_tx,
+                    &task_code,
+                    "异常",
+                    0,
+                    Some(
+                        "该地图未设置回充点（charge_point_exist=false），无法返航充电；\
+                                 请先在本体设置回充点（4018）或把结束动作改为「原地」"
+                            .to_string(),
+                    ),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+                clear_active_task(active, state).await;
+                return;
+            }
+            // 用本体上报的真实目录路径（L2/M1 地图根不同，不能靠平台拼）
+            plan.map_path = robot_map.path.clone();
+
+            // 对齐官方 cruise_mode：只有整条路线都走「沿道路」且本体地图
+            // 有 map.geojson 时才用路网（map_type=3）；否则一律 2D 栅格（1）。
+            // 不能只看服务端 mapType：服务端可能按 road_count 给了 3，
+            // 但这条路线实际是自由导航。`--road-network on/off` 可强制。
+            let target_map_type = config
+                .road_network
+                .map_type(plan.road_network, robot_map.route_exist);
+            info!(
+                "地图类型：本体能力 map_type={target_map_type}（导航枚举 1/3）→ 巡检 \
+                         5000 kind=4 会发 {}（0=2D 栅格 / 1=路网）（road_network 策略={}，\
+                         航线全沿道路={}，本体 map.geojson={}）",
+                if target_map_type == 3 { 1 } else { 0 },
+                config.road_network.as_str(),
+                plan.road_network,
+                robot_map.route_exist
+            );
+            if config.road_network == RoadNetworkMode::Auto
+                && plan.road_network
+                && !robot_map.route_exist
+                && target_map_type == 1
+            {
+                warn!("航线请求路网导航，但本体地图没有 map.geojson，回退 2D 栅格");
+            }
+            if plan.map_type != target_map_type {
+                info!(
+                    "5000 地图类型: 服务端下发 {} → 实际按本体能力用 {target_map_type}",
+                    plan.map_type
+                );
+                plan.map_type = target_map_type;
+            }
+
+            // 官方链路是「1204 取控制权 → 1302 cmd=62 切导航模式 → 选图/定位 → 建任务」。
+            // 巡检（kind=4）由本体自己走 `load_localization_map` + `capture_origin_pose`，
+            // 这里保留一次起步前定位守卫：地图不在本体上 / 载的不是这张图 / 定位丢失时
+            // **自动**载图重定位，无需人工点「重新定位」。
+            if let Err(e) = zhpro::teleop::enter_navigation_mode(&client).await {
+                warn!("任务 {task_code} 切导航模式失败（继续尝试，但本体可能拒任务）: {e}");
+            }
+            let map_path = plan.resolve_map_path(&config.map_root);
+            let initial_pose = parse_initial_pose(msg.payload.get("initialPose"));
+            match ensure_localized(&client, state, &plan.map_id, &map_path, initial_pose).await {
+                Ok((status, loaded)) => info!(
+                    "定位已就绪（status={status}，本次{}载图重定位），开始下发巡检任务\
+                             （5000 kind=4：航点与到点动作由本体 nav_paths 里的路径执行）",
+                    if loaded { "" } else { "未" }
+                ),
+                Err(e) => {
+                    warn!("任务 {task_code} 定位未就绪，拒绝下发: {e}");
+                    report_progress(
+                        out_tx,
+                        &task_code,
+                        "异常",
+                        0,
+                        Some(format!(
+                            "定位未就绪：{e}（已自动重定位 {LOCATE_ATTEMPTS} 次）。\
+                                     请远程接管把设备移回地图覆盖范围，或下发「重新定位」\
+                                     并给出初始位姿后重试"
+                        )),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                    clear_active_task(active, state).await;
+                    return;
+                }
+            }
+
+            // 软件急停 / sdk_node / ctrl_source / 卧倒姿态已由上面的
+            // `motion_block_reason(true)` 统一拦过，这里不再重复检查
+            let runner = Arc::new(RouteRunner::new(client.clone()));
+            // 巡检下发前用它和 min_recharge_battery 做低电守卫（双电池取较低那节）；
+            // 先取出来再 await，避免把 state 的锁带过 await 点
+            let battery_percent = state.lock().await.battery_min;
+            runner.set_battery_percent(battery_percent).await;
+            runner
+                .set_patrol_options(&config.patrol_path_prefix, config.min_recharge_battery)
+                .await;
+            // 巡检的总点数 = 路径点数（本体按 nav_paths 里的点算，不做「闭环补点」）
+            let total_points = plan.waypoints.len() as i64;
+            runner.prepare(plan).await;
+            *local_runner.lock().await = Some(runner.clone());
+
+            let out = out_tx.clone();
+            let code = task_code.clone();
+            let state = state.clone();
+            let active = active.clone();
+            let runner_slot = local_runner.clone();
+            let ai = ai.clone();
+            let lights = lights.clone();
+            tokio::spawn(async move {
+                let outcome = runner.run().await;
+                let (status, message) = match outcome {
+                    Ok(o) if o.success => (
+                        "已完成",
+                        format!(
+                            "{}（{}/{} 航点）",
+                            o.message, o.completed_points, o.total_points
+                        ),
+                    ),
+                    Ok(o) => ("异常", format!("{}（{}）", o.message, o.skipped)),
+                    Err(e) => ("异常", format!("执行失败: {e}")),
+                };
+                report_progress(
+                    &out,
+                    &code,
+                    status,
+                    100,
+                    Some(message),
+                    None,
+                    None,
+                    Some(total_points),
+                )
+                .await;
+                // 本地跑的路子同样要在任务收尾时清掉整个计划的板端存证
+                ai.finish_plan(&code, "本地任务结束").await;
+                // 本地跑不一定会走到 5009 的「离开航点」，这里直接收灯
+                lights.leave("本地任务结束").await;
+                // 收尾必须把槽位里的 runner 摘掉：业务侧的下发地图 / 继续任务等
+                // 门禁都看这个槽位，残留的 runner 会让设备在任务早已结束（甚至
+                // 取消）之后仍报「设备正在执行任务」（2026-11-19 现场事故）。
+                clear_local_runner(&runner_slot, &runner).await;
+                *active.lock().await = None;
+                state.lock().await.current_task = None;
+            });
+        }
+    }
+}

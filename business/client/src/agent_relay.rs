@@ -21,7 +21,7 @@
 //!   平台侧自然显示「不可达」，不会把请求堆到黑洞里；
 //! - **事件只转检测类**：遥测 / 按键 / 语音暂时没人消费，原样转发只白烧上行带宽。
 
-use crate::{WsMessage, send};
+use crate::wire::{WsMessage, send};
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
