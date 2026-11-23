@@ -11,10 +11,18 @@ import type {
 import qs from "qs";
 import { stringify } from "qs";
 import NProgress from "../progress";
-import { getToken, formatToken } from "@/utils/auth";
+import { getToken, formatToken, updateTokenSilently } from "@/utils/auth";
+import { markSessionActivity } from "@/utils/sessionActivity";
 import type { UserResult } from "@/api/user";
 import { message } from "@/utils/message";
 import { useUserStoreHook } from "@/store/modules/user";
+
+/** 刷新令牌接口（与 `src/api/user.ts` 的 `urls.refreshToken` 保持一致） */
+const REFRESH_TOKEN_PATH = "/api/token/refresh/";
+/** 刷新失败时的重试次数（只针对网络抖动/5xx，401 直接判死） */
+const REFRESH_MAX_RETRY = 2;
+/** 重试退避基数（毫秒） */
+const REFRESH_RETRY_DELAY_MS = 400;
 
 // 默认 Axios 配置
 const defaultConfig: AxiosRequestConfig = {
@@ -46,20 +54,77 @@ class PureHttp {
     this.httpInterceptorsResponse();
   }
 
-  /** token过期挂起请求队列 */
-  private static requests: Array<{
-    resolve: (value?: any) => void;
-    reject: (reason?: any) => void;
-    config: PureHttpRequestConfig;
-  }> = [];
-  /** 防止重复刷新 token */
-  private static isRefreshing = false;
+  /** 进行中的刷新请求（单飞：并发 401 只真正刷新一次，其余等待同一个 Promise） */
+  private static tokenRefreshPromise: Promise<string> | null = null;
 
   /** 初始化配置对象 */
   private static initConfig: PureHttpRequestConfig = {};
 
   /** 保存当前`Axios`实例对象 */
   private static axiosInstance: AxiosInstance = Axios.create(defaultConfig);
+
+  /**
+   * 刷新 `access token`（连同 `refresh token` 一起换新，后端会 rotate）。
+   *
+   * 单飞：并发调用共享同一个请求——后端的 refresh 是一次性的，两个标签页/多个并发
+   * 401 各拿旧 refresh 去换，后到的那个必然 401 被踢下线。
+   * 失败不会缓存，下次调用会重新尝试。
+   */
+  public static refreshAccessToken(): Promise<string> {
+    if (!PureHttp.tokenRefreshPromise) {
+      PureHttp.tokenRefreshPromise = PureHttp.requestNewToken().finally(() => {
+        PureHttp.tokenRefreshPromise = null;
+      });
+    }
+    return PureHttp.tokenRefreshPromise;
+  }
+
+  /**
+   * 真实发起一次刷新。
+   *
+   * - 网络抖动 / 5xx：退避重试 `REFRESH_MAX_RETRY` 次（以前一次失败就直接把人踢了）；
+   * - 401 / 403：refresh 本身已失效（被顶号、超过 7 天、服务重启丢了内存会话），重试无意义。
+   */
+  private static async requestNewToken(): Promise<string> {
+    const refreshToken = getToken()?.refreshToken;
+    if (!refreshToken) throw new Error("本地没有 refreshToken，无法续期");
+
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= REFRESH_MAX_RETRY; attempt++) {
+      try {
+        const body = (await PureHttp.axiosInstance.get(
+          `${REFRESH_TOKEN_PATH}${refreshToken}`,
+          { skipAuthRefresh: true } as PureHttpRequestConfig
+        )) as unknown as {
+          accessToken?: string;
+          refreshToken?: string;
+          expiresIn?: number;
+        };
+
+        if (!body?.accessToken) {
+          throw new Error("刷新接口没有返回 accessToken");
+        }
+        updateTokenSilently({
+          accessToken: body.accessToken,
+          refreshToken: body.refreshToken ?? refreshToken,
+          expiresIn: Number(body.expiresIn) || 0
+        });
+        markSessionActivity();
+        return body.accessToken;
+      } catch (error) {
+        lastError = error;
+        const status = (error as { response?: { status?: number } })?.response
+          ?.status;
+        if (status === 401 || status === 403) throw error;
+        if (attempt < REFRESH_MAX_RETRY) {
+          await new Promise(resolve =>
+            setTimeout(resolve, REFRESH_RETRY_DELAY_MS * (attempt + 1))
+          );
+        }
+      }
+    }
+    throw lastError ?? new Error("刷新 token 失败");
+  }
 
   /** 请求拦截 */
   private httpInterceptorsRequest(): void {
@@ -109,6 +174,8 @@ class PureHttp {
     instance.interceptors.response.use(
       (response: PureHttpResponse) => {
         NProgress.done();
+        /** 前台页面的接口流量也算「还在用」，否则轮询/看视频的页面会被当成空闲 */
+        markSessionActivity();
         return response.data; // 统一返回 response.data
       },
       async (error: any) => {
@@ -126,45 +193,26 @@ class PureHttp {
         const needRefresh =
           response.status === 401 && !config._retry && !isLoginRequest;
 
-        if (needRefresh && !config._retry) {
+        if (needRefresh) {
           config._retry = true;
-
-          const retryRequest = new Promise((resolve, reject) => {
-            PureHttp.requests.push({ resolve, reject, config });
-          });
-
-          if (!PureHttp.isRefreshing) {
-            PureHttp.isRefreshing = true;
-            try {
-              const tokenData = getToken();
-              const res = await useUserStoreHook().handRefreshToken(
-                tokenData.refreshToken
-              );
-              const newAccessToken = res.accessToken;
-
-              // 重放所有挂起请求，返回 response.data
-              PureHttp.requests.forEach(req => {
-                req.config.headers["Authorization"] =
-                  formatToken(newAccessToken);
-                PureHttp.axiosInstance(req.config)
-                  .then(resp => req.resolve(resp))
-                  .catch(req.reject);
-              });
-              PureHttp.requests = [];
-            } catch (e) {
-              // token刷新失败，拒绝所有挂起请求
-              PureHttp.requests.forEach(req => req.reject(e));
-              PureHttp.requests = [];
-              message("登录已过期，请重新登录", { type: "error" });
-              useUserStoreHook().logOut();
-              return Promise.reject(e);
-            } finally {
-              PureHttp.isRefreshing = false;
-            }
+          let accessToken: string;
+          try {
+            /**
+             * 单飞刷新：同一时刻的多个 401 只会真正调一次刷新接口，
+             * 之前那套「挂起队列」在重放之后到达的 401 会永远没有 resolve，
+             * 页面表现为卡住而不是重试。
+             */
+            accessToken = await PureHttp.refreshAccessToken();
+          } catch (e) {
+            message("登录已过期，请重新登录", { type: "error" });
+            useUserStoreHook().logOut();
+            return Promise.reject(e);
           }
 
-          // 当前请求挂起
-          return retryRequest;
+          config.headers = config.headers ?? {};
+          config.headers["Authorization"] = formatToken(accessToken);
+          // 重放一次；若重放仍然 401，`_retry` 已置位，会走到下面的登出分支
+          return PureHttp.axiosInstance(config);
         }
 
         // 处理其他错误
@@ -664,3 +712,10 @@ class PureHttp {
 }
 
 export const http = new PureHttp();
+
+/**
+ * 刷新会话令牌（单飞、失败重试、成功后自己落盘），
+ * 供拦截器之外的调用方（如 `useSessionTimeout` 的定时保活）使用。
+ */
+export const refreshAccessToken = (): Promise<string> =>
+  PureHttp.refreshAccessToken();

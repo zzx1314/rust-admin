@@ -6,11 +6,11 @@ import {
   routerArrays,
   storageSession
 } from "../utils";
-import { type UserResult, getLogin, refreshTokenApi } from "@/api/user";
+import { type UserResult, getLogin } from "@/api/user";
 import { useMultiTagsStoreHook } from "./multiTags";
-import { type DataInfo, setToken, TokenKey, userKey } from "@/utils/auth";
+import { type DataInfo, setToken, userKey } from "@/utils/auth";
+import { refreshAccessToken } from "@/utils/http";
 
-import Cookies from "js-cookie";
 import aesUtils from "@/utils/aes";
 import { refreshConfig } from "@/config";
 
@@ -101,28 +101,20 @@ export const useUserStore = defineStore("pure-user", {
       useMultiTagsStoreHook().handleTags("equal", [...routerArrays]);
       router.push("/login");
     },
-    /** 刷新`token` */
-    async handRefreshToken(refreshToken: string) {
-      const res = await refreshTokenApi(refreshToken);
-
-      if (!res) throw new Error("refresh token failed");
+    /**
+     * 刷新`token`。
+     *
+     * 实际刷新交给 `PureHttp.refreshAccessToken()`（单飞 + 失败重试 + 自己落盘），
+     * 这样定时保活、401 重放、手动调用共用同一次刷新，不会把一次性的 refresh 撞掉。
+     */
+    async handRefreshToken() {
+      const accessToken = await refreshAccessToken();
       const userInfo = storageSession().getItem<DataInfo<number>>(userKey);
-      userInfo.accessToken = res.accessToken;
-      userInfo.refreshToken = res.refreshToken;
-      // 同步更新过期时间，防止 checkTimer 误判为已过期
-      const newExpires = Date.now() + res.expiresIn * 1000;
-      userInfo.expires = newExpires;
-      storageSession().setItem(userKey, userInfo);
-      // 同步更新 cookie
-      const cookieString = JSON.stringify({
-        accessToken: res.accessToken,
-        expires: newExpires,
-        refreshToken: res.refreshToken
-      });
-      Cookies.set(TokenKey, cookieString, {
-        expires: res.expiresIn / 86400
-      });
-      return res;
+      return {
+        accessToken,
+        refreshToken: userInfo?.refreshToken ?? "",
+        expiresIn: 0
+      };
     }
   }
 });

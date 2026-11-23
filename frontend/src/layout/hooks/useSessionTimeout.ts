@@ -1,10 +1,20 @@
 import { onMounted, onUnmounted, ref } from "vue";
 import { getSafePolicy } from "@/api/system";
 import { getToken } from "@/utils/auth";
+import { refreshAccessToken } from "@/utils/http";
+import {
+  markSessionActivity,
+  onSessionActivity
+} from "@/utils/sessionActivity";
 import { useUserStoreHook } from "@/store/modules/user";
 import { message } from "@/utils/message";
 import { SUCCESS } from "@/api/base";
 
+/**
+ * 会被算作「用户还在用」的浏览器事件。
+ * 注意接口流量也算（见 `utils/sessionActivity`），否则挂在实时视频/轮询页面上不动
+ * 鼠标会被当成空闲。
+ */
 const ACTIVITY_EVENTS = [
   "mousedown",
   "mousemove",
@@ -14,46 +24,125 @@ const ACTIVITY_EVENTS = [
   "click"
 ];
 
+/** 退出前多久先提醒（毫秒） */
+const WARN_AHEAD_MS = 60 * 1000;
+/** access token 距离过期多久开始主动续期（上限，毫秒） */
+const KEEP_ALIVE_AHEAD_MS = 2 * 60 * 1000;
+/** 主动续期检查间隔（毫秒） */
+const KEEP_ALIVE_INTERVAL_MS = 30 * 1000;
+
+/**
+ * 会话管理：
+ *
+ * 1. **空闲登出**：`sysOvertime` 内既没有 DOM 交互也没有前台接口请求 → 退回登录页；
+ * 2. **主动续期**：access token 快到期时先换一对新令牌，不再等第一个 401
+ *    （后端 access token 是**绝对过期**的，`validate_token` 不做滑动续期）。
+ *
+ * 两者都需要「活动」信号，所以 DOM 事件统一走 `markSessionActivity()` 打点。
+ */
 export function useSessionTimeout() {
   const timeoutMs = ref(0);
-  let activityTimer: ReturnType<typeof setTimeout> | null = null;
+  let logoutTimer: ReturnType<typeof setTimeout> | null = null;
+  let warnTimer: ReturnType<typeof setTimeout> | null = null;
+  let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
+  let unsubscribeActivity: (() => void) | null = null;
+  let keepAliveRunning = false;
 
-  const clearActivityTimer = () => {
-    if (activityTimer) {
-      clearTimeout(activityTimer);
-      activityTimer = null;
+  const clearIdleTimers = () => {
+    if (warnTimer) {
+      clearTimeout(warnTimer);
+      warnTimer = null;
+    }
+    if (logoutTimer) {
+      clearTimeout(logoutTimer);
+      logoutTimer = null;
     }
   };
 
+  const stopTimers = () => {
+    clearIdleTimers();
+    if (keepAliveTimer) {
+      clearInterval(keepAliveTimer);
+      keepAliveTimer = null;
+    }
+    ACTIVITY_EVENTS.forEach(event => {
+      document.removeEventListener(event, markSessionActivity);
+    });
+    document.removeEventListener("visibilitychange", handleVisibilityChange);
+    unsubscribeActivity?.();
+    unsubscribeActivity = null;
+  };
+
   const logout = () => {
-    clearActivityTimer();
+    stopTimers();
     message("会话已过期，请重新登录", { type: "warning" });
     useUserStoreHook().logOut();
   };
 
+  /** 重置空闲倒计时（有任何活动就调用） */
   const resetActivityTimer = () => {
     if (timeoutMs.value <= 0) return;
-    clearActivityTimer();
-    activityTimer = setTimeout(() => {
-      logout();
-    }, timeoutMs.value);
+    clearIdleTimers();
+    // 超时时间本身很短时，提醒点最多取一半，避免「刚提醒就退出」
+    const warnAhead = Math.min(WARN_AHEAD_MS, Math.floor(timeoutMs.value / 2));
+    if (timeoutMs.value > warnAhead) {
+      warnTimer = setTimeout(() => {
+        message(
+          `长时间未操作，${Math.round(warnAhead / 1000)} 秒后将自动退出`,
+          { type: "warning" }
+        );
+      }, timeoutMs.value - warnAhead);
+    }
+    logoutTimer = setTimeout(logout, timeoutMs.value);
   };
 
-  const startTimer = () => {
+  /**
+   * 主动续期：access token 剩余时间不足就提前换新。
+   * 刷新失败**不直接踢人**（网络抖动/服务重启瞬间很常见），交给 401 拦截器兜底判断。
+   */
+  const keepAlive = async () => {
+    if (keepAliveRunning) return;
+    const tokenData = getToken();
+    const expires = Number(tokenData?.expires ?? 0);
+    if (!expires || !tokenData?.refreshToken) return;
+    const ttl = timeoutMs.value > 0 ? timeoutMs.value : KEEP_ALIVE_AHEAD_MS * 8;
+    const ahead = Math.min(
+      KEEP_ALIVE_AHEAD_MS,
+      Math.max(KEEP_ALIVE_INTERVAL_MS, Math.floor(ttl / 5))
+    );
+    if (expires - Date.now() > ahead) return;
+
+    keepAliveRunning = true;
+    try {
+      await refreshAccessToken();
+    } catch {
+      // 交给 http 拦截器：下一次请求 401 时还会再试（那里有退避重试），仍失败才登出
+    } finally {
+      keepAliveRunning = false;
+    }
+  };
+
+  /** 切回前台立刻检查一次（后台标签页的定时器会被浏览器节流） */
+  function handleVisibilityChange() {
+    if (document.visibilityState !== "visible") return;
+    void keepAlive();
+  }
+
+  const startTimers = () => {
     if (timeoutMs.value <= 0) return;
 
     ACTIVITY_EVENTS.forEach(event => {
-      document.addEventListener(event, resetActivityTimer, { passive: true });
+      document.addEventListener(event, markSessionActivity, { passive: true });
     });
+    unsubscribeActivity = onSessionActivity(resetActivityTimer);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    keepAliveTimer = setInterval(
+      () => void keepAlive(),
+      KEEP_ALIVE_INTERVAL_MS
+    );
 
     resetActivityTimer();
-  };
-
-  const stopTimer = () => {
-    clearActivityTimer();
-    ACTIVITY_EVENTS.forEach(event => {
-      document.removeEventListener(event, resetActivityTimer);
-    });
+    void keepAlive();
   };
 
   onMounted(async () => {
@@ -74,7 +163,7 @@ export function useSessionTimeout() {
       }
       if (!isNaN(seconds) && seconds > 0) {
         timeoutMs.value = seconds * 1000;
-        startTimer();
+        startTimers();
       }
     } catch {
       // Ignore — timer simply won't start
@@ -82,6 +171,6 @@ export function useSessionTimeout() {
   });
 
   onUnmounted(() => {
-    stopTimer();
+    stopTimers();
   });
 }

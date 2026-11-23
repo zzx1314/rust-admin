@@ -44,6 +44,72 @@ export function getToken(): DataInfo<number> {
 }
 
 /**
+ * 后端返回的过期时间形如 `2026-11-22 10:00:00`（北京时间、没有时区后缀）。
+ * Safari 不认这种格式的 `new Date()`，会得到 `NaN`，进而让 cookie 退化成「关浏览器
+ * 就没了」的会话 cookie，所以这里手动拆字段。解析不出来时返回 0（= 会话 cookie）。
+ */
+function expiresToMillis(value: number | string | Date): number {
+  if (typeof value === "number") return value;
+  if (value instanceof Date) return value.getTime();
+  const matched = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(
+    String(value).trim()
+  );
+  if (matched) {
+    const [, year, month, day, hour, minute, second] = matched;
+    // 后端固定用北京时间（UTC+8）格式化，显式带时区才不会受浏览器所在时区影响
+    const parsed = Date.parse(
+      `${year}-${month}-${day}T${hour}:${minute}:${second}+08:00`
+    );
+    if (!Number.isNaN(parsed)) return parsed;
+    // 兜底：按本地时区拆字段（极老的浏览器不认带偏移的 ISO 8601）
+    return new Date(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute),
+      Number(second)
+    ).getTime();
+  }
+  const parsed = new Date(value).getTime();
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+/**
+ * 无感刷新之后同步本地令牌（`sessionStorage` 的 `user-info` + `TokenKey` cookie）。
+ * 只改令牌相关字段，不碰头像/角色等用户信息；`expiresIn` 单位为秒。
+ *
+ * 返回新的过期时间戳（毫秒）。
+ */
+export function updateTokenSilently(data: {
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
+}): number {
+  const newExpires = Date.now() + Math.max(0, data.expiresIn) * 1000;
+  const userInfo = storageSession().getItem<DataInfo<number>>(userKey);
+  if (userInfo) {
+    storageSession().setItem(userKey, {
+      ...userInfo,
+      accessToken: data.accessToken,
+      refreshToken: data.refreshToken,
+      expires: newExpires
+    });
+  }
+  const cookieString = JSON.stringify({
+    accessToken: data.accessToken,
+    expires: newExpires,
+    refreshToken: data.refreshToken
+  });
+  Cookies.set(
+    TokenKey,
+    cookieString,
+    data.expiresIn > 0 ? { expires: data.expiresIn / 86400 } : undefined
+  );
+  return newExpires;
+}
+
+/**
  * @description 设置`token`以及一些必要信息并采用无感刷新`token`方案
  * 无感刷新：后端返回`accessToken`（访问接口使用的`token`）、`refreshToken`（用于调用刷新`accessToken`的接口时所需的`token`，`refreshToken`的过期时间（比如30天）应大于`accessToken`的过期时间（比如2小时））、`expires`（`accessToken`的过期时间）
  * 将`accessToken`、`expires`、`refreshToken`这三条信息放在key值为authorized-token的cookie里（过期自动销毁）
@@ -53,7 +119,7 @@ export function setToken(data: DataInfo<Date | string>) {
   let expires = 0;
   const { accessToken, refreshToken } = data;
   const { isRemembered, loginDay } = useUserStoreHook();
-  expires = new Date(data.expires).getTime(); // 如果后端直接设置时间戳，将此处代码改为expires = data.expires，然后把上面的DataInfo<Date>改成DataInfo<number>即可
+  expires = expiresToMillis(data.expires as number | string | Date); // 后端返回 "YYYY-MM-DD HH:mm:ss"（北京时间）
   const cookieString = JSON.stringify({ accessToken, expires, refreshToken });
 
   expires > 0
