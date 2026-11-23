@@ -172,6 +172,40 @@ def main():
     check("没有写 GPIO", not SH_CALLS, str(SH_CALLS))
     control.CAM_TRIGGER_GPIO = -1
 
+    print("10) 计划里自定义夜间时段（板端默认 18:00-06:00 不动）")
+    config.LIGHT_NIGHT_START = "18:00"
+    config.LIGHT_NIGHT_END = "06:00"
+    check("自定义 20:00-23:00：20:00 算夜间", control.is_night(at(20, 0), "20:00", "23:00"))
+    check("自定义 20:00-23:00：23:00 不算（右开）",
+          not control.is_night(at(23, 0), "20:00", "23:00"))
+    check("自定义 20:00-23:00：18:30 不算（板端默认算夜间，说明确实是自定义在起作用）",
+          control.is_night(at(18, 30)) and not control.is_night(at(18, 30), "20:00", "23:00"))
+    check("自定义跨零点 22:00-02:00：01:00 算夜间",
+          control.is_night(at(1, 0), "22:00", "02:00"))
+    check("自定义时段不合法 → 退回板端默认",
+          control.is_night(at(19, 0), "晚上", "23:00"))
+    reset()
+    r = control.lights_apply(True, True, True, "计划 P9 航点 0", now=at(18, 30),
+                             night_start="19:00", night_end="23:00")
+    check("18:30 不在计划时段内 → skipped=daytime", r.get("skipped") == "daytime", str(r))
+    check("跳过时没有写 GPIO", not SH_CALLS, str(SH_CALLS))
+    r = control.lights_apply(True, True, True, "计划 P9 航点 0", now=at(19, 30),
+                             night_start="19:00", night_end="23:00")
+    check("19:30 在计划时段内 → 真的开灯", r.get("ok") is True and r.get("skipped") is None,
+          str(r))
+    status = control.lights_status()
+    check("状态里的夜间窗 = 计划时段",
+          status["night_window"]["start"] == "19:00"
+          and status["night_window"]["end"] == "23:00", str(status["night_window"]))
+    check("状态里单独露出计划时段",
+          status["plan_night_window"] == {"start": "19:00", "end": "23:00"},
+          str(status["plan_night_window"]))
+    check("状态里的 night 按计划时段（而不是板端默认）算",
+          status["night"] is control.is_night(None, "19:00", "23:00"),
+          str(status["night"]))
+    control.lights_off("自检清理")
+    check("关灯后计划时段清空", control.lights_status()["plan_night_window"] is None)
+
     print()
     if failures:
         print("FAILED: %d 项（%s）" % (len(failures), "; ".join(failures)))

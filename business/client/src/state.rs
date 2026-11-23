@@ -2,6 +2,8 @@
 
 use crate::ai_patrol::AiPoint;
 use crate::lights::LightPoint;
+use crate::lights::NightWindow;
+use crate::lights::light_point_at;
 use crate::wire::HeartbeatPayload;
 use rand::Rng;
 use serde_json::Value;
@@ -358,6 +360,31 @@ pub(crate) struct ActiveTask {
     /// 计划级「仅夜间自动开灯」（`tasks.light_night_only` → 载荷 `lightNightOnly`）：
     /// 为 true 时把 `nightOnly` 交给板端按本地时间窗判，白天到达不开灯
     pub(crate) light_night_only: bool,
+    /// 计划级「自动开灯」（`tasks.light_fill` / `light_led` → 载荷 `lightFill` / `lightLed`）：
+    /// `Some` = **以计划为准**，航点动作里的到点开 / 离开关全不生效，任务一开始就开、
+    /// 终态 / 取消才关。下标固定 `PLAN_LIGHT_INDEX`（不是真航点）。
+    pub(crate) plan_lights: Option<LightPoint>,
+    /// 计划里自定义的「仅夜间」时段（`lightNightStart` / `lightNightEnd`）：
+    /// **只搬运给板端判夜**，客户端自己不算时间；`None` = 板端默认。
+    pub(crate) light_window: Option<NightWindow>,
+}
+
+impl ActiveTask {
+    /// 到了 `index` 这个航点要开哪几盏灯。
+    ///
+    /// **计划级自动开灯优先**：配了计划灯就忽略航点动作（包括「这个点没配灯」），
+    /// 这样 5009 里的航点切换（到点 / 离开）都不会把灯翻来翻去。
+    pub(crate) fn light_at(&self, index: i64) -> Option<LightPoint> {
+        if let Some(plan) = self.plan_lights.as_ref() {
+            return Some(plan.clone());
+        }
+        light_point_at(&self.light_points, index).cloned()
+    }
+
+    /// 是不是按计划开灯（全程开、不跟航点动作）
+    pub(crate) fn plan_lighting(&self) -> bool {
+        self.plan_lights.is_some()
+    }
 }
 
 pub(crate) type Shared<T> = Arc<Mutex<T>>;
@@ -400,4 +427,66 @@ pub(crate) async fn clear_active_task_if(
     let mut st = state.lock().await;
     st.current_task = None;
     true
+}
+
+/// 把本体任务号补进 `active`（只在「还是这条任务、且尚未绑定」时写一次）。
+///
+/// 巡检（`TaskMode::Route`）的 5000 是客户端 `RouteRunner` 自己发的，本体任务号只存在于
+/// runner 里，`ActiveTask.nav_task_id` 一直是 `None`。而 5009 的跟随（航点 AI、航点灯光、
+/// 阶段 / 终态上报）都以 `active.nav_task_id` 为前提：以前靠 `task_type == "patrol"` 兜底
+/// 绑定，改成「必须已绑定」之后兜底没了，每一帧都在 `bound_id?` 处返回——表现就是
+/// 「计划勾了自动开灯，到点也不开灯」「AI 识别不触发」（2026-11-23 19:35 现场）。
+///
+/// 为什么从 runner 取而不是从 5009 的 `current_task` 猜：`current_task` 可能是上一轮
+/// 还没交还的任务，猜错就会把整条任务绑到别人的 `task_id` 上（且不会自我纠正）。
+pub(crate) async fn bind_nav_task(
+    active: &Shared<Option<ActiveTask>>,
+    task_code: &str,
+    nav_task_id: &str,
+) -> bool {
+    let mut guard = active.lock().await;
+    let Some(task) = guard.as_mut() else {
+        return false;
+    };
+    if task.task_code != task_code || task.nav_task_id.is_some() {
+        return false;
+    }
+    task.nav_task_id = Some(nav_task_id.to_string());
+    true
+}
+
+#[cfg(test)]
+mod active_task_light_tests {
+    use super::*;
+    use crate::lights::PLAN_LIGHT_INDEX;
+
+    fn light(index: i64, fill: bool, led: bool) -> LightPoint {
+        LightPoint { index, fill, led }
+    }
+
+    /// **计划级自动开灯优先**：配了计划灯就忽略航点动作（到点开 / 离开关都不做）。
+    ///
+    /// 现场要求「计划里配了自动开灯，航点上的开灯关灯不生效，以计划为准」——灯从任务
+    /// 开始亮到结束，不在每个航点上翻一遍。
+    #[test]
+    fn plan_lights_override_waypoint_actions() {
+        let plan = light(PLAN_LIGHT_INDEX, false, true);
+        let mut task = ActiveTask {
+            light_points: vec![light(0, true, false), light(2, false, false)],
+            plan_lights: Some(plan.clone()),
+            ..ActiveTask::default()
+        };
+
+        assert!(task.plan_lighting());
+        // 航点 0 自己配了补光灯，但以计划为准（只开 LED）
+        assert_eq!(task.light_at(0), Some(plan.clone()));
+        // 没配灯的航点也返回计划灯：5009 的「到达无灯光动作的航点 → 关灯」不会触发
+        assert_eq!(task.light_at(3), Some(plan));
+
+        // 没配计划灯 → 回到航点动作（老行为）
+        task.plan_lights = None;
+        assert!(!task.plan_lighting());
+        assert_eq!(task.light_at(0), Some(light(0, true, false)));
+        assert_eq!(task.light_at(1), None);
+    }
 }

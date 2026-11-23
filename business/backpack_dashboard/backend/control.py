@@ -38,6 +38,8 @@ _STATE = {
     "night_only": False,
     "on_since": None,
     "source": "",
+    # 计划里自定义的夜间时段（最近一次 `POST /api/lights` 带下来的）；None = 用板端默认
+    "plan_window": None,
 }
 
 
@@ -71,28 +73,52 @@ def _hhmm_minutes(text):
     return None
 
 
-def night_window():
-    """夜间时间窗（读 `config` 而不是模块常量：自检脚本会临时改配置）。"""
-    start = _hhmm_minutes(getattr(config, "LIGHT_NIGHT_START", "18:00"))
-    end = _hhmm_minutes(getattr(config, "LIGHT_NIGHT_END", "06:00"))
+def night_window(start=None, end=None):
+    """夜间时间窗。
+
+    不带参数时读 `config`（`LIGHT_NIGHT_START`/`LIGHT_NIGHT_END`，板端默认，
+    改的是所有计划的兜底值）；带 `start`/`end` 时用计划里自定义的时段
+    （客户端随 `POST /api/lights` 的 `nightStart`/`nightEnd` 传下来）。
+    读 `config` 而不是模块常量：自检脚本会临时改配置。
+    """
+    if start is None and end is None:
+        start = getattr(config, "LIGHT_NIGHT_START", "18:00")
+        end = getattr(config, "LIGHT_NIGHT_END", "06:00")
+    start_minutes = _hhmm_minutes(start)
+    end_minutes = _hhmm_minutes(end)
     # 起点 == 终点视为「没有夜间窗」：把「仅夜间」退化成「到点就开」，
     # 现场临时要白天也开灯时的开关，不用改代码。
-    enabled = start is not None and end is not None and start != end
+    enabled = start_minutes is not None and end_minutes is not None and start_minutes != end_minutes
     return {
-        "start": getattr(config, "LIGHT_NIGHT_START", ""),
-        "end": getattr(config, "LIGHT_NIGHT_END", ""),
+        "start": start or "",
+        "end": end or "",
         "enabled": enabled,
     }
 
 
-def is_night(now=None):
-    """当前是否落在夜间时间窗内（`LIGHT_NIGHT_START` ~ `LIGHT_NIGHT_END`）。
+def is_night(now=None, start=None, end=None):
+    """当前是否落在夜间时间窗内。
+
+    `start`/`end` 不传 = 板端配置的默认窗（`LIGHT_NIGHT_START` ~ `LIGHT_NIGHT_END`，
+    18:00-06:00）；传了 = 计划里自定义的时段（客户端从计划带下来）。
+    **判定永远在板端**：平台/客户端只把「几点到几点算夜间」交给这里，不自己算。
 
     窗口可以跨零点（默认 18:00-06:00）。未配置 / 非法 / 起止相同 → 一律 False
     （等于「白天」），配合 `night_only` 时就是「不自动开灯」。
     """
-    start = _hhmm_minutes(getattr(config, "LIGHT_NIGHT_START", "18:00"))
-    end = _hhmm_minutes(getattr(config, "LIGHT_NIGHT_END", "06:00"))
+    if start is not None or end is not None:
+        start = _hhmm_minutes(start)
+        end = _hhmm_minutes(end)
+        if start is None or end is None:
+            # 自定义时段不完整/格式不对：退回板端默认，别把「仅夜间」变成「永远不开」
+            _log("计划夜间时段不合法（%r / %r），退回板端默认 %s-%s" % (
+                start, end, getattr(config, "LIGHT_NIGHT_START", ""),
+                getattr(config, "LIGHT_NIGHT_END", "")))
+            start = _hhmm_minutes(getattr(config, "LIGHT_NIGHT_START", "18:00"))
+            end = _hhmm_minutes(getattr(config, "LIGHT_NIGHT_END", "06:00"))
+    else:
+        start = _hhmm_minutes(getattr(config, "LIGHT_NIGHT_START", "18:00"))
+        end = _hhmm_minutes(getattr(config, "LIGHT_NIGHT_END", "06:00"))
     if start is None or end is None or start == end:
         return False
     current = now or dt.datetime.now()
@@ -242,8 +268,16 @@ def _watchdog_tick(now=None):
 
 
 def lights_status():
-    """当前灯光状态（`GET /api/lights`；Dashboard 也用它显示计划灯）。"""
-    window = night_window()
+    """当前灯光状态（`GET /api/lights`；Dashboard 也用它显示计划灯）。
+
+    `night_window` / `night` 反映**当前生效**的窗口：计划带了自己的时段就用它，
+    否则用板端默认；`plan_night_window` 单独把计划时段露出来（排查用）。
+    """
+    with _LOCK:
+        plan_window = _STATE.get("plan_window")
+    plan_start = (plan_window or {}).get("start")
+    plan_end = (plan_window or {}).get("end")
+    window = night_window(plan_start, plan_end)
     with _LOCK:
         proc = _LED_PROC
         led_running = proc is not None and proc.poll() is None
@@ -256,8 +290,9 @@ def lights_status():
             "source": _STATE["source"],
             "on_secs": round(time.monotonic() - since, 1) if since else None,
             "max_on_secs": max(0, int(getattr(config, "LIGHT_MAX_ON_SECS", 900))),
-            "night": is_night(),
+            "night": is_night(None, plan_start, plan_end),
             "night_window": window,
+            "plan_night_window": plan_window,
             "fill_gpio": FILL_LIGHT_GPIO,
             "led_bin": LED_TEST_BIN,
             "led_bin_exists": os.path.exists(LED_TEST_BIN),
@@ -267,18 +302,27 @@ def lights_status():
     return status
 
 
-def lights_apply(fill=None, led=None, night_only=False, source="plan", now=None):
+def lights_apply(fill=None, led=None, night_only=False, source="plan", now=None,
+                 night_start=None, night_end=None):
     """按航点动作开灯。`fill` / `led` 为 None 表示「这次不动这盏灯」。
 
     `night_only=True`（计划勾了「仅夜间自动开灯」）且当前不在夜间窗内 → **什么都不做**
     并返回 `skipped="daytime"`。注意是「跳过」而不是「关灯」：白天把上一轮手动开的灯
     顺手关掉会很突然，而且这个航点本来就没要求开灯。
+
+    `night_start` / `night_end`（计划里自定义的夜间时段）非空时用它判夜间，
+    否则用板端默认（`LIGHT_NIGHT_START`/`LIGHT_NIGHT_END`）。
     """
-    night = is_night(now)
+    with _LOCK:
+        _STATE["plan_window"] = (
+            {"start": night_start, "end": night_end}
+            if (night_start or night_end) else None
+        )
+    night = is_night(now, night_start, night_end)
     if night_only and not night:
+        window = night_window(night_start, night_end)
         _log("跳过开灯（%s）：当前不在夜间时段 %s-%s" % (
-            source, getattr(config, "LIGHT_NIGHT_START", ""),
-            getattr(config, "LIGHT_NIGHT_END", "")))
+            source, window["start"], window["end"]))
         return {"ok": True, "night": night, "skipped": "daytime",
                 "detail": "当前不在夜间时段，跳过开灯", "status": lights_status()}
 
@@ -327,7 +371,8 @@ def lights_off(reason="计划结束"):
         "led": led_off(),
     }
     with _LOCK:
-        _STATE.update(managed=False, night_only=False, source="off", on_since=None)
+        _STATE.update(managed=False, night_only=False, source="off", on_since=None,
+                      plan_window=None)
     _log("关灯（%s）" % reason)
     return {
         "ok": True,

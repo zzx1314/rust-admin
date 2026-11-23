@@ -17,7 +17,8 @@ import {
   TASK_LEVELS,
   TASK_STATUSES,
   TASK_TYPES,
-  endActionLabel
+  endActionLabel,
+  planLightSummary
 } from "@/utils/constants";
 import { parseRouteData } from "@/utils/format";
 
@@ -49,10 +50,24 @@ const taskForm = reactive({
   /** 结束动作（返航开关）：空 = 跟随路线（闭环自动返航） */
   endTask: "",
   /**
-   * 计划级「仅夜间自动开灯」：勾上后航点动作里的补光灯 / LED 只在夜间时段开。
-   * 夜间判定在板端（`LIGHT_NIGHT_START`/`LIGHT_NIGHT_END`，默认 18:00-06:00）。
+   * 计划级「自动开灯」：勾了哪盏，整个计划期间就开哪盏。
+   *
+   * 勾上后**以计划为准**：路线里航点动作的「到点开灯 / 离开关灯」全部不生效
+   * （灯从任务开始亮到终态 / 取消）。两盏都不勾 = 沿用航点动作的老行为。
+   */
+  lightFill: false,
+  lightLed: false,
+  /**
+   * 计划级「仅夜间自动开灯」：自动开灯只在板端夜间时段生效。
+   * 夜间判定在板端（板子本地时间）。
    */
   lightNightOnly: false,
+  /**
+   * 自定义夜间时段（`HH:MM`，可跨零点）；两个都留空 = 用板端默认（18:00-06:00）。
+   * 平台只存时段，判夜仍在板端。
+   */
+  lightNightStart: "" as string | null,
+  lightNightEnd: "" as string | null,
   level: "常规",
   parkId: 1,
   zoneId: null as number | null,
@@ -217,10 +232,15 @@ function scheduleSummary(task: Task): string {
 
 /** 表单提交体：时间 / 执行日由选择器产出，后端再校验一次 */
 function formPayload() {
+  const nightOnly = taskForm.lightNightOnly;
   return {
     ...taskForm,
     // 空数组 = 每天：这里必须送空串（`null` 表示「保持原值」，清不掉已选的执行日）
-    scheduleDays: taskForm.scheduleDays.join(",")
+    scheduleDays: taskForm.scheduleDays.join(","),
+    // 没勾「仅夜间」= 时段没意义：送空串把旧时段清掉（服务端：空串 = 回板端默认）。
+    // `el-time-select` 清空时给 null，这里统一成空串（`null` 表示「保持原值」，清不掉）。
+    lightNightStart: nightOnly ? (taskForm.lightNightStart ?? "") : "",
+    lightNightEnd: nightOnly ? (taskForm.lightNightEnd ?? "") : ""
   };
 }
 
@@ -362,7 +382,11 @@ function openCreate() {
     taskType: "定时巡检",
     executeMode: "周期任务",
     endTask: "",
+    lightFill: false,
+    lightLed: false,
     lightNightOnly: false,
+    lightNightStart: "",
+    lightNightEnd: "",
     level: "常规",
     parkId,
     zoneId: zones.value.find(zone => zone.parkId === parkId)?.id ?? null,
@@ -390,7 +414,11 @@ function openEdit(task: Task) {
     taskType: task.taskType ?? "定时巡检",
     executeMode: task.executeMode ?? "周期任务",
     endTask: task.endTask ?? "",
+    lightFill: task.lightFill === true,
+    lightLed: task.lightLed === true,
     lightNightOnly: task.lightNightOnly === true,
+    lightNightStart: task.lightNightStart ?? "",
+    lightNightEnd: task.lightNightEnd ?? "",
     level: task.level ?? "常规",
     parkId: task.parkId ?? parks.value[0]?.id ?? 1,
     zoneId: task.zoneId ?? null,
@@ -1013,17 +1041,58 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="field">
-          <label>夜间开灯（补光灯 / LED）</label>
-          <label
-            class="chk"
-            title="只影响路线里勾了「开补光灯 / 开 LED」的航点动作：勾上后白天到达不开灯"
+          <label>自动开灯（补光灯 / LED）</label>
+          <div style="display: flex; gap: 16px; align-items: center">
+            <label
+              class="chk"
+              title="整个计划期间打开背包补光灯（任务开始就开，终态 / 取消才关）"
+            >
+              <input v-model="taskForm.lightFill" type="checkbox" />
+              补光灯
+            </label>
+            <label
+              class="chk"
+              title="整个计划期间打开 LED 灯带（任务开始就开，终态 / 取消才关）"
+            >
+              <input v-model="taskForm.lightLed" type="checkbox" />
+              LED 灯带
+            </label>
+            <label
+              class="chk"
+              title="只在板端夜间时段开（默认 18:00-06:00，板子本地时间）；白天派单直接跳过开灯"
+            >
+              <input v-model="taskForm.lightNightOnly" type="checkbox" />
+              仅夜间
+            </label>
+          </div>
+          <div
+            v-if="taskForm.lightNightOnly"
+            class="time-range"
+            style="margin-top: 8px; align-items: center"
           >
-            <input v-model="taskForm.lightNightOnly" type="checkbox" />
-            仅夜间自动开灯
-          </label>
+            <span class="muted" style="margin-right: 4px">夜间时段</span>
+            <el-time-select
+              v-model="taskForm.lightNightStart"
+              start="00:00"
+              step="00:05"
+              end="23:55"
+              placeholder="板端默认 18:00"
+              clearable
+            />
+            <span class="time-sep">-</span>
+            <el-time-select
+              v-model="taskForm.lightNightEnd"
+              start="00:05"
+              step="00:05"
+              end="23:59"
+              placeholder="板端默认 06:00"
+              clearable
+            />
+            <span class="rt-hint" style="margin: 0">留空 = 板端默认；可跨零点，判夜在板端</span>
+          </div>
           <div class="rt-hint" style="margin: 4px 0 0">
-            航点动作里要勾「开补光灯 / 开 LED」才有效；夜间时段由板端判（默认 18:00-06:00），
-            白天到达直接跳过，离开航点与任务结束时都会关灯。
+            勾了任意一盏就<b>以计划为准</b>：路线里航点动作的「到点开灯 / 离开关灯」不再生效，
+            灯从任务开始一直亮到任务结束（终态 / 取消）。两盏都不勾 = 沿用航点动作的老行为。
           </div>
         </div>
         <div class="field">
@@ -1193,8 +1262,8 @@ onBeforeUnmount(() => {
           <span>跑完去哪</span><b>{{ endActionLabel(detailTask.endTask, detailRoute?.loopMode) }}</b>
         </div>
         <div class="kv">
-          <span>夜间开灯</span>
-          <b>{{ detailTask.lightNightOnly ? "仅夜间自动开灯" : "不限时段（白天也开）" }}</b>
+          <span>自动开灯</span>
+          <b>{{ planLightSummary(detailTask) }}</b>
         </div>
         <div class="kv"><span>执行设备</span><b class="mono">{{ detailTask.deviceCode }}</b></div>
         <div class="kv">

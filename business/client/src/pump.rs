@@ -5,7 +5,6 @@ use crate::ai_patrol::ai_point_at;
 use crate::ai_patrol::is_arrival_stage;
 use crate::ai_patrol::is_point_stage;
 use crate::lights::PointLights;
-use crate::lights::light_point_at;
 use crate::maps::send_map_saved_event;
 use crate::maps::upload_mapping_to_zentai;
 use crate::mapupload::UploadOutcome;
@@ -559,8 +558,6 @@ pub(crate) async fn handle_status_frame(
     // 识别失败只打日志，绝不影响巡检本身。
     if task.is_terminal() {
         ai.stop("任务终态").await;
-        // 灯光：跑完 / 失败 / 取消都要收——灯亮着没人管就是白耗电
-        lights.leave("任务终态").await;
         // 任务跑完了（成功 / 失败 / 取消都一样）：整个计划的板端存证都没用了。
         // 只靠「推过图就删这个航点」（`ai_cleanup`）清不干净——数量任务的检出不建单
         // 不推群、一个都没命中的航点只留一份 result.json，它们等不到 `ai_cleanup`。
@@ -571,41 +568,79 @@ pub(crate) async fn handle_status_frame(
             .map(|task| task.task_code.clone());
         if let Some(plan_id) = plan_id {
             ai.finish_plan(&plan_id, "任务终态").await;
+            // 灯光：跑完 / 失败 / 取消都要收（灯亮着没人管就是白耗电）；
+            // `finish_task` 同时把这条任务标成已收尾，迟到的「到点开灯」不许再把灯点亮。
+            lights.finish_task(&plan_id, "任务终态").await;
+        } else {
+            lights.leave("任务终态").await;
         }
-    } else if is_arrival_stage(&task.stage) {
-        let current = active.lock().await.clone();
-        if let (Some(current), Some(index)) = (current, index) {
-            // 灯光先开：AI 要亮着灯看，顺序反了前几帧还是黑的（补光灯从写 GPIO
-            // 到真正亮起来只要几十毫秒，但识别窗口开得比这快）。开灯放到后台——
-            // `POST /api/lights` 里有几次 GPIO shell 调用，不能让 5009 处理链路等它
-            match light_point_at(&current.light_points, index) {
-                Some(point) => {
-                    let lights = lights.clone();
-                    let task_code = current.task_code.clone();
-                    let point = point.clone();
-                    let night_only = current.light_night_only;
-                    tokio::spawn(async move {
-                        lights.point_arrived(&task_code, &point, night_only).await;
-                    });
+    } else {
+        // 计划级自动开灯（`lightFill` / `lightLed`）：**全程开**，不跟航点动作。
+        // 一旦 5009 里出现这条任务就开（不等第一个航点），离开航点也不关；
+        // 5009 每 500ms 一帧，`PointLights` 按 `(taskCode, PLAN_LIGHT_INDEX)` 去重。
+        if let Some(plan) = active.lock().await.as_ref().and_then(|task| {
+            task.plan_lights.clone().map(|point| {
+                (
+                    task.task_code.clone(),
+                    point,
+                    task.light_night_only,
+                    task.light_window.clone(),
+                )
+            })
+        }) {
+            let (task_code, point, night_only, window) = plan;
+            let lights = lights.clone();
+            tokio::spawn(async move {
+                lights
+                    .point_arrived(&task_code, &point, night_only, window.as_ref())
+                    .await;
+            });
+        }
+        if is_arrival_stage(&task.stage) {
+            let current = active.lock().await.clone();
+            if let (Some(current), Some(index)) = (current, index) {
+                // 灯光先开：AI 要亮着灯看，顺序反了前几帧还是黑的（补光灯从写 GPIO
+                // 到真正亮起来只要几十毫秒，但识别窗口开得比这快）。开灯放到后台——
+                // `POST /api/lights` 里有几次 GPIO shell 调用，不能让 5009 处理链路等它
+                match current.light_at(index) {
+                    Some(point) => {
+                        let lights = lights.clone();
+                        let task_code = current.task_code.clone();
+                        let night_only = current.light_night_only;
+                        let window = current.light_window.clone();
+                        tokio::spawn(async move {
+                            lights
+                                .point_arrived(&task_code, &point, night_only, window.as_ref())
+                                .await;
+                        });
+                    }
+                    // 这个点没配灯：上一个点的灯别继续亮着（狗已经走了）
+                    None => lights.leave("到达无灯光动作的航点").await,
                 }
-                // 这个点没配灯：上一个点的灯别继续亮着（狗已经走了）
-                None => lights.leave("到达无灯光动作的航点").await,
+                match ai_point_at(&current.ai_points, index) {
+                    Some(point) => {
+                        ai.point_arrived(out_tx, &current.task_code.clone(), point)
+                            .await
+                    }
+                    // 这个点没有 AI 动作：上一个点的窗口别继续跑（画面已经变了）
+                    None => ai.stop("到达无 AI 动作的航点").await,
+                }
             }
-            match ai_point_at(&current.ai_points, index) {
-                Some(point) => {
-                    ai.point_arrived(out_tx, &current.task_code.clone(), point)
-                        .await
-                }
-                // 这个点没有 AI 动作：上一个点的窗口别继续跑（画面已经变了）
-                None => ai.stop("到达无 AI 动作的航点").await,
+        } else if !is_point_stage(&task.stage) {
+            // 狗已经离开航点（前往下一点 / 返航 / 别的任务阶段）：窗口时长跟着停留时间走，
+            // 收口交给这里，别让相机把路过的东西当成这个点的目标
+            ai.stop("已离开航点").await;
+            // 灯同一个道理：录像/识别已经结束，补光灯没必要一路亮到下一个点。
+            // **但计划灯除外**：它就是要全程亮着，这里关掉等于「离开第一个点就灭」。
+            let plan_lighting = active
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|task| task.plan_lighting());
+            if !plan_lighting {
+                lights.leave("已离开航点").await;
             }
         }
-    } else if !is_point_stage(&task.stage) {
-        // 狗已经离开航点（前往下一点 / 返航 / 别的任务阶段）：窗口时长跟着停留时间走，
-        // 收口交给这里，别让相机把路过的东西当成这个点的目标
-        ai.stop("已离开航点").await;
-        // 灯同一个道理：录像/识别已经结束，补光灯没必要一路亮到下一个点
-        lights.leave("已离开航点").await;
     }
 
     // 离散事件（去重后只报一次）
@@ -782,6 +817,12 @@ mod tests {
             }
         }
 
+        /// 打开航点灯光（指向一个假 Agent）：用来断言「什么时候开、什么时候关」
+        fn with_lights(mut self, agent: String) -> Self {
+            self.lights = Arc::new(PointLights::new(agent, true));
+            self
+        }
+
         async fn feed(&mut self, frame: &StatusFrame) -> Option<TerminalCleanup> {
             handle_status_frame(
                 frame,
@@ -815,6 +856,51 @@ mod tests {
             nav_task_id: nav_task_id.map(str::to_string),
             ..ActiveTask::default()
         }
+    }
+
+    /// 假 Agent：记录每一次 `/api/lights` 与 `/api/lights/off`
+    type LightCalls = Arc<Mutex<Vec<String>>>;
+
+    async fn spawn_lights_agent(calls: LightCalls) -> String {
+        let app = axum::Router::new()
+            .route(
+                "/api/lights",
+                axum::routing::post(
+                    |axum::extract::State(calls): axum::extract::State<LightCalls>| async move {
+                        calls.lock().await.push("on".to_string());
+                        axum::Json(json!({"ok": true, "applied": {"fill": true, "led": true}}))
+                    },
+                ),
+            )
+            .route(
+                "/api/lights/off",
+                axum::routing::post(
+                    |axum::extract::State(calls): axum::extract::State<LightCalls>| async move {
+                        calls.lock().await.push("off".to_string());
+                        axum::Json(json!({"ok": true}))
+                    },
+                ),
+            )
+            .with_state(calls);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("绑定假 Agent 失败");
+        let port = listener.local_addr().expect("取端口失败").port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// 开灯是 `tokio::spawn` 出去的：等它落地再断言，最多等 1s。
+    async fn wait_lights(calls: &LightCalls, expected: usize) -> Vec<String> {
+        for _ in 0..100 {
+            if calls.lock().await.len() >= expected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        calls.lock().await.clone()
     }
 
     fn frame(current: Value, pending: Value, terminals: Value) -> StatusFrame {
@@ -864,6 +950,13 @@ mod tests {
         })
     }
 
+    /// 带航点下标的 5009 任务帧（航点动作 / 计划灯的到点判定都看 `detail_index`）
+    fn task_at(id: &str, lifecycle: &str, stage: &str, index: i64) -> Value {
+        let mut value = task(id, "patrol", lifecycle, stage);
+        value["last_event"]["data"] = json!({ "index": index });
+        value
+    }
+
     /// 刚下发（5000 还没回、没有 nav_task_id）时，上一轮留在
     /// `recent_terminal_tasks` 里的终态**不能**算到这条新任务头上。
     ///
@@ -888,6 +981,41 @@ mod tests {
             h.active.lock().await.is_some(),
             "新任务的上下文不能被上一轮的终态清掉"
         );
+    }
+
+    /// 巡检（`TaskMode::Route`）的本体任务号只存在于本地 runner 里；拿到后必须补进
+    /// `active.nav_task_id`，否则 5009 的跟随整条链路（航点 AI / 航点灯光 / 阶段上报）
+    /// 都在 `bound_id?` 处静默返回——现场看到的就是「计划勾了自动开灯，到点灯不亮」。
+    #[tokio::test]
+    async fn route_task_must_bind_the_runner_task_id_before_5009_is_followed() {
+        use crate::state::bind_nav_task;
+
+        let mut h = Harness::new(active_task("TK-1", None));
+        let frame = frame(
+            task("robot-1", "patrol", "running", "patrol.point_arrived"),
+            Value::Null,
+            json!([]),
+        );
+        // 没绑定：不跟随（这是为了不把上一轮的终态/进度算到新任务上）
+        h.feed(&frame).await;
+        assert!(
+            h.drain_progress().is_empty(),
+            "没绑定本体任务号时不该跟随 5009"
+        );
+
+        // 只有「还是这条任务且尚未绑定」才写得进去
+        assert!(!bind_nav_task(&h.active, "TK-2", "robot-9").await);
+        assert!(bind_nav_task(&h.active, "TK-1", "robot-1").await);
+        assert!(
+            !bind_nav_task(&h.active, "TK-1", "robot-2").await,
+            "已绑定的任务号不能被后来的帧改掉"
+        );
+
+        // 绑定之后：到点帧必须能翻译成业务进度（灯光 / AI 挂在这条路径上）
+        h.feed(&frame).await;
+        let sent = h.drain_progress();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(sent[0]["message"], "已到达航点");
     }
 
     /// `pending_task` 是「已受理、等旧任务停稳 / 释放资源」：必须能跟随、能上报，
@@ -971,5 +1099,110 @@ mod tests {
         );
         // 清理通道没有收尾残留（保证没有「已完成」之类的误报）
         drop(guard);
+    }
+
+    /// 计划级自动开灯：整个任务期间只开一次、航点切换不关，终态才关。
+    ///
+    /// 现场要求「计划里配了自动开灯，航点上的开灯关灯不生效，以计划为准」——
+    /// 所以哪怕这个航点的动作写着 `lightLed: false`，也不能把计划灯盖掉。
+    #[tokio::test]
+    async fn plan_lights_stay_on_for_the_whole_task() {
+        use crate::lights::LightPoint;
+        use crate::lights::PLAN_LIGHT_INDEX;
+
+        let calls: LightCalls = Arc::new(Mutex::new(Vec::new()));
+        let agent = spawn_lights_agent(calls.clone()).await;
+        let mut h = Harness::new(active_task("TK-1", Some("robot-1"))).with_lights(agent);
+        {
+            let mut guard = h.active.lock().await;
+            let task = guard.as_mut().unwrap();
+            task.plan_lights = Some(LightPoint {
+                index: PLAN_LIGHT_INDEX,
+                fill: true,
+                led: true,
+            });
+            // 航点动作里只配了 LED：计划模式下必须被忽略
+            task.light_points = vec![LightPoint {
+                index: 0,
+                fill: false,
+                led: true,
+            }];
+        }
+
+        // 任务刚起来（还在导航）：计划灯立刻亮，不等第一个航点
+        h.feed(&frame(
+            task("robot-1", "patrol", "running", "patrol.navigating"),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        assert_eq!(wait_lights(&calls, 1).await, vec!["on".to_string()]);
+
+        // 到点 / 离开航点：一站都不许关（5009 每 500ms 一帧也只发一次开灯）
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.point_arrived", 0),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.navigating", 0),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        assert_eq!(
+            wait_lights(&calls, 1).await,
+            vec!["on".to_string()],
+            "计划灯不能在航点切换时关掉"
+        );
+
+        // 终态：关灯
+        h.feed(&frame(
+            task("robot-1", "patrol", "success", "patrol.completed"),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        assert_eq!(
+            wait_lights(&calls, 2).await,
+            vec!["on".to_string(), "off".to_string()],
+            "计划灯只在终态关"
+        );
+    }
+
+    /// 没配计划灯（老计划）：还是「到点开、离开关」，航点动作照旧生效。
+    #[tokio::test]
+    async fn waypoint_lights_without_plan_still_flip_per_point() {
+        use crate::lights::LightPoint;
+
+        let calls: LightCalls = Arc::new(Mutex::new(Vec::new()));
+        let agent = spawn_lights_agent(calls.clone()).await;
+        let mut h = Harness::new(active_task("TK-1", Some("robot-1"))).with_lights(agent);
+        h.active.lock().await.as_mut().unwrap().light_points = vec![LightPoint {
+            index: 0,
+            fill: true,
+            led: false,
+        }];
+
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.point_arrived", 0),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        assert_eq!(wait_lights(&calls, 1).await, vec!["on".to_string()]);
+
+        // 离开航点：关灯（这条路径不能被计划模式的新增分支带坏）
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.navigating", 0),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        assert_eq!(
+            wait_lights(&calls, 2).await,
+            vec!["on".to_string(), "off".to_string()]
+        );
     }
 }

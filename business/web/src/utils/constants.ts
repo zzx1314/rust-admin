@@ -143,6 +143,37 @@ export function endActionLabel(value?: string | null, loopMode?: string | null) 
   if (found && found.value) return found.label;
   return loopMode === "闭环" ? "跟随路线（闭环 → 返回起点）" : "跟随路线（原地待命）";
 }
+/**
+ * 计划灯的可读摘要（计划详情 / 列表用）。
+ *
+ * **以计划为准**：计划里勾了任意一盏（`lightFill` / `lightLed`）就忽略路线航点动作里的
+ * 「到点开灯 / 离开关灯」，灯从任务开始亮到终态 / 取消；`lightNightOnly` 只是把它限制在
+ * 板端夜间时间窗内（默认 18:00-06:00，板子本地时间）。两盏都不勾 = 沿用航点动作。
+ */
+export function planLightSummary(task: {
+  lightFill?: boolean | null;
+  lightLed?: boolean | null;
+  lightNightOnly?: boolean | null;
+  lightNightStart?: string | null;
+  lightNightEnd?: string | null;
+}) {
+  const lights = [
+    task.lightFill ? "补光灯" : "",
+    task.lightLed ? "LED 灯带" : ""
+  ].filter(Boolean);
+  // 计划里没配时段 = 板端默认（18:00-06:00）
+  const window =
+    task.lightNightOnly && task.lightNightStart && task.lightNightEnd
+      ? `，仅夜间 ${task.lightNightStart}-${task.lightNightEnd}`
+      : task.lightNightOnly
+        ? "，仅夜间"
+        : "";
+  if (!lights.length) {
+    return `按航点动作${window}`;
+  }
+  return `${lights.join(" + ")}（全程${window}）`;
+}
+
 export const TASK_LEVELS = ["常规", "重要", "紧急"];
 export const DISPATCH_POLICIES = ["按路线顺序执行", "跳过非必经点", "仅执行采集动作"];
 export const TASK_STATUSES = ["待执行", "执行中", "已暂停", "已完成", "异常"];

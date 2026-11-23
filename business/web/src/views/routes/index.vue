@@ -211,6 +211,7 @@ function actionCheckTypeLabel(action: {
 }
 
 /** 动作卡片上的灯光文案：没配灯返回空串（不占一行） */
+/** 动作卡片上的灯光标签：只表示「航点动作要求开哪几盏」（计划级自动开灯会覆盖它） */
 function actionLightLabel(action: { lightFill?: boolean; lightLed?: boolean }) {
   const lights = [
     action.lightFill ? "补光灯" : "",
@@ -2207,7 +2208,9 @@ onBeforeUnmount(() => {
               </label>
             </div>
             <div class="rt-hint" style="margin: 4px 0 0">
-              计划里勾了<b>「仅夜间自动开灯」</b>时，只有夜间时段（板端默认 18:00-06:00）到达该航点才真的开灯，
+              <b>计划里配了「自动开灯」时以计划为准</b>：这里的到点开灯 / 离开关灯都不生效，
+              灯从任务开始一直亮到结束。计划里没配才按这里走——
+              而计划勾了「仅夜间」时，只有夜间时段（板端默认 18:00-06:00）到达该航点才真的开灯，
               白天到达由板端直接跳过；补光灯与 LED 各自独立配置。
             </div>
           </div>

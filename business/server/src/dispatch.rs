@@ -187,6 +187,12 @@ pub async fn build_dispatch_payload(
         end_task_mode: end_task_mode.map(str::to_string),
         // 计划级「仅夜间自动开灯」：客户端原样转给板端 Agent，判定在板端
         light_night_only: task.light_night_only,
+        // 计划级「自动开灯」：配了就以计划为准（全程开、忽略航点动作），总是下发
+        light_fill: task.light_fill,
+        light_led: task.light_led,
+        // 计划里自定义的夜间时段：只有两个都有才带（缺省 = 板端默认）
+        light_night_start: task.light_night_start.clone(),
+        light_night_end: task.light_night_end.clone(),
     })
 }
 
@@ -384,6 +390,10 @@ mod tests {
             execute_mode: Some("返航".to_string()),
             end_task: Some("none".to_string()),
             light_night_only: false,
+            light_fill: false,
+            light_led: false,
+            light_night_start: None,
+            light_night_end: None,
             level: None,
             device_id: None,
             device_code: None,

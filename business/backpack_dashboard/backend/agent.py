@@ -634,14 +634,22 @@ async def lights_status():
     return JSONResponse(control.lights_status(), headers={"Cache-Control": "no-store"})
 
 
+def _text_or_none(value):
+    """空串 / None → None（计划里没配夜间时段时客户端会传空串）。"""
+    text = str(value or "").strip()
+    return text or None
+
+
 @app.post("/api/lights")
 async def lights_on(request: Request):
-    """[航点动作] 开灯：`{"fill":true,"led":true,"nightOnly":false}`。
+    """[航点动作 / 计划灯] 开灯：`{"fill":true,"led":true,"nightOnly":false,\
+"nightStart":"19:00","nightEnd":"06:00"}`。
 
-    由设备客户端在到达带「开补光灯 / 开 LED」动作的航点时调用（客户端与 Agent 同机，
-    平台够不到板端）。`nightOnly` = 计划勾了「仅夜间自动开灯」：交给**板端**按
-    `LIGHT_NIGHT_START`/`LIGHT_NIGHT_END` 判定，白天到达时什么都不做，返回
-    `skipped=daytime`（客户端据此不记「已开灯」，离开航点时也不用发关灯）。
+    由设备客户端在到达带「开补光灯 / 开 LED」动作的航点时（或计划灯在任务开始时）调用
+    （客户端与 Agent 同机，平台够不到板端）。`nightOnly` = 计划勾了「仅夜间」：交给
+    **板端**判定，白天什么都不做，返回 `skipped=daytime`（客户端据此不记「已开灯」，
+    离开航点时也不用发关灯）。`nightStart`/`nightEnd` = 计划里自定义的夜间时段，
+    不传就用板端默认（`LIGHT_NIGHT_START`/`LIGHT_NIGHT_END`）。
     """
     b = await _detect_body(request)
     source = "计划 %s 航点 %s" % (b.get("planId") or b.get("taskCode") or "—",
@@ -649,7 +657,8 @@ async def lights_on(request: Request):
     r = await asyncio.to_thread(
         control.lights_apply,
         _tri_state(b.get("fill")), _tri_state(b.get("led")),
-        bool(b.get("nightOnly")), source)
+        bool(b.get("nightOnly")), source, None,
+        _text_or_none(b.get("nightStart")), _text_or_none(b.get("nightEnd")))
     # 硬件不可用（补光灯 GPIO 被禁用 / LED 程序缺失）也算「请求受理了」：LED 可能
     # 已经点亮，客户端要记下这一轮才能离开航点时关回来。结论看 `ok` / `errors`。
     return JSONResponse(r)

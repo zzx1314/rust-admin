@@ -344,8 +344,16 @@ async fn route_list_is_ordered_by_recent_update() {
         .iter()
         .map(|route| route["id"].as_i64().expect("路线缺少 id"))
         .collect();
-    assert_eq!(ids.first().copied(), Some(new_id), "最新更新的路线应排第一: {ids:?}");
-    assert_eq!(ids.last().copied(), Some(old_id), "最久未动的路线应排最后: {ids:?}");
+    assert_eq!(
+        ids.first().copied(),
+        Some(new_id),
+        "最新更新的路线应排第一: {ids:?}"
+    );
+    assert_eq!(
+        ids.last().copied(),
+        Some(old_id),
+        "最久未动的路线应排最后: {ids:?}"
+    );
 }
 
 #[tokio::test]
@@ -2940,6 +2948,258 @@ async fn task_light_night_only_reaches_dispatch_payload() {
     assert_eq!(response.status(), StatusCode::OK);
     let task = fetch_task_row(&pool, task_id).await;
     assert!(!task.light_night_only, "取消勾选也要生效");
+}
+
+/// 计划级「自动开灯」：勾了就**以计划为准**，航点动作里的到点开灯 / 离开关灯不再生效。
+///
+/// 服务端只负责落库 + 下发 `lightFill` / `lightLed`（怎么开、什么时候关由客户端的
+/// `ActiveTask::light_at` 一处收口）；这里断言的是「能存住、能改、总是下发」，因为
+/// 老客户端忽略这两个字段时会退回按航点动作走（航点动作仍留在 `routeData` 里）。
+#[tokio::test]
+async fn plan_lights_reach_dispatch_payload_and_default_to_waypoint_actions() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let map_id = insert_real_map(&pool).await;
+    let route_id = insert_dispatchable_route(&pool, &map_id).await;
+    let device_pk = bound_device_pk(&pool).await;
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+
+    async fn send(
+        app: &axum::Router,
+        token: &str,
+        method: &str,
+        uri: String,
+        body: String,
+    ) -> Value {
+        let request = match method {
+            "POST" => Request::post(uri),
+            _ => Request::put(uri),
+        };
+        let response = app
+            .clone()
+            .oneshot(
+                request
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "请求应成功");
+        json_body(response).await
+    }
+
+    // 1) 只勾补光灯：另一盏灯必须是 false（别替现场「顺手全开」）
+    let body = send(
+        &app,
+        &token,
+        "POST",
+        "/api/tasks".to_string(),
+        format!(
+            r#"{{"taskName":"计划自动开灯","deviceId":{device_pk},"parkId":1,
+                "routeId":{route_id},"lightFill":true}}"#
+        ),
+    )
+    .await;
+    assert_eq!(body["data"]["lightFill"], true, "回执要带回来: {body}");
+    assert_eq!(body["data"]["lightLed"], false);
+    let task_id = body["data"]["id"].as_i64().expect("应返回任务 id");
+    let task = fetch_task_row(&pool, task_id).await;
+    assert!(task.light_fill && !task.light_led);
+    let payload = robodog_ops_server::dispatch::build_dispatch_payload(&pool, &task)
+        .await
+        .expect("应能组装载荷");
+    assert!(
+        payload.light_fill && !payload.light_led,
+        "计划灯必须原样下发：客户端据此忽略航点动作"
+    );
+
+    // 2) 不传：两盏都 false → 保持「按航点动作」的老行为
+    let body = send(
+        &app,
+        &token,
+        "POST",
+        "/api/tasks".to_string(),
+        format!(
+            r#"{{"taskName":"航点动作开灯","deviceId":{device_pk},"parkId":1,
+                "routeId":{route_id}}}"#
+        ),
+    )
+    .await;
+    assert_eq!(body["data"]["lightFill"], false);
+    assert_eq!(body["data"]["lightLed"], false);
+    let waypoint_task_id = body["data"]["id"].as_i64().expect("应返回任务 id");
+    let task = fetch_task_row(&pool, waypoint_task_id).await;
+    assert!(!task.light_fill && !task.light_led, "默认不能给计划灯");
+
+    // 3) 编辑：显式关掉补光灯、打开 LED，两盏要各自生效
+    send(
+        &app,
+        &token,
+        "PUT",
+        format!("/api/tasks/{task_id}"),
+        r#"{"taskName":"计划自动开灯","lightFill":false,"lightLed":true}"#.to_string(),
+    )
+    .await;
+    let task = fetch_task_row(&pool, task_id).await;
+    assert!(!task.light_fill && task.light_led, "编辑后要以请求为准");
+
+    // 4) 只传一个字段：另一个保持原值（前端只发改动的那个也不至于被清掉）
+    send(
+        &app,
+        &token,
+        "PUT",
+        format!("/api/tasks/{task_id}"),
+        r#"{"taskName":"计划自动开灯","lightFill":true}"#.to_string(),
+    )
+    .await;
+    let task = fetch_task_row(&pool, task_id).await;
+    assert!(task.light_fill && task.light_led, "没传的那盏保持原值");
+    let payload = robodog_ops_server::dispatch::build_dispatch_payload(&pool, &task)
+        .await
+        .unwrap();
+    assert!(payload.light_fill && payload.light_led);
+}
+
+/// 计划里自定义「仅夜间」的时段：能存、能改、能清回板端默认，并原样进下发载荷。
+///
+/// 判夜仍在板端（客户端只把 `nightStart`/`nightEnd` 转下去），所以这里只验
+/// 「存得住 + 会下发 + 非法值 400」。
+#[tokio::test]
+async fn plan_night_window_is_configurable_and_reaches_dispatch_payload() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let map_id = insert_real_map(&pool).await;
+    let route_id = insert_dispatchable_route(&pool, &map_id).await;
+    let device_pk = bound_device_pk(&pool).await;
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+
+    async fn send(
+        app: &axum::Router,
+        token: &str,
+        method: &str,
+        uri: String,
+        body: String,
+    ) -> (StatusCode, Value) {
+        let request = match method {
+            "POST" => Request::post(uri),
+            _ => Request::put(uri),
+        };
+        let response = app
+            .clone()
+            .oneshot(
+                request
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        (status, json_body(response).await)
+    }
+
+    // 1) 建计划：自定义 19:00-06:00（跨零点）
+    let (status, body) = send(
+        &app,
+        &token,
+        "POST",
+        "/api/tasks".to_string(),
+        format!(
+            r#"{{"taskName":"夜巡 19-6","deviceId":{device_pk},"parkId":1,
+                "routeId":{route_id},"lightNightOnly":true,"lightFill":true,
+                "lightNightStart":"19:00","lightNightEnd":"06:00"}}"#
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["lightNightStart"], "19:00", "{body}");
+    assert_eq!(body["data"]["lightNightEnd"], "06:00", "{body}");
+    let task_id = body["data"]["id"].as_i64().expect("应返回任务 id");
+    let task = fetch_task_row(&pool, task_id).await;
+    assert_eq!(task.light_night_start.as_deref(), Some("19:00"));
+    assert_eq!(task.light_night_end.as_deref(), Some("06:00"));
+    let payload = robodog_ops_server::dispatch::build_dispatch_payload(&pool, &task)
+        .await
+        .expect("应能组装载荷");
+    assert_eq!(payload.light_night_start.as_deref(), Some("19:00"));
+    assert_eq!(payload.light_night_end.as_deref(), Some("06:00"));
+
+    // 2) 只给一半 / 起止相同 / 格式不对 → 400（静默退默认最难查）
+    for bad in [
+        r#""lightNightStart":"19:00""#,
+        r#""lightNightEnd":"06:00""#,
+        r#""lightNightStart":"18:00","lightNightEnd":"18:00""#,
+        r#""lightNightStart":"晚上七点","lightNightEnd":"06:00""#,
+    ] {
+        let (status, body) = send(
+            &app,
+            &token,
+            "POST",
+            "/api/tasks".to_string(),
+            format!(
+                r#"{{"taskName":"坏时段","deviceId":{device_pk},"parkId":1,
+                    "routeId":{route_id},{bad}}}"#
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad} → {body}");
+        assert!(
+            body["msg"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("夜间时段"),
+            "{bad} 的错误信息要说明夜间时段: {body}"
+        );
+    }
+
+    // 3) 编辑只传一个字段：其余保持原值（前端只想改结束时间也能用）
+    let (status, _) = send(
+        &app,
+        &token,
+        "PUT",
+        format!("/api/tasks/{task_id}"),
+        r#"{"taskName":"夜巡 19-6","lightNightStart":"20:00","lightNightEnd":"05:00"}"#.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let task = fetch_task_row(&pool, task_id).await;
+    assert_eq!(task.light_night_start.as_deref(), Some("20:00"));
+
+    // 4) 编辑不传这两个字段：保持原值
+    let (status, _) = send(
+        &app,
+        &token,
+        "PUT",
+        format!("/api/tasks/{task_id}"),
+        r#"{"taskName":"夜巡 20-5"}"#.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let task = fetch_task_row(&pool, task_id).await;
+    assert_eq!(task.light_night_start.as_deref(), Some("20:00"));
+    assert_eq!(task.light_night_end.as_deref(), Some("05:00"));
+
+    // 5) 传空串 = 清回板端默认（载荷里就不带这两个字段了）
+    let (status, _) = send(
+        &app,
+        &token,
+        "PUT",
+        format!("/api/tasks/{task_id}"),
+        r#"{"taskName":"夜巡 默认时段","lightNightStart":"","lightNightEnd":""}"#.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let task = fetch_task_row(&pool, task_id).await;
+    assert!(task.light_night_start.is_none() && task.light_night_end.is_none());
+    let payload = robodog_ops_server::dispatch::build_dispatch_payload(&pool, &task)
+        .await
+        .unwrap();
+    assert!(payload.light_night_start.is_none() && payload.light_night_end.is_none());
 }
 
 /// 中台重复导入的包按「同名 zip」认回本体目录名，且可重复执行。

@@ -200,6 +200,15 @@ pub struct Task {
     /// 板端夜间时间窗内生效（`LIGHT_NIGHT_START`/`LIGHT_NIGHT_END`，默认 18:00-06:00）。
     /// 见迁移 030。
     pub light_night_only: bool,
+    /// 计划级「自动开灯」的两盏灯：任一为真就以计划为准（见迁移 032）。
+    ///
+    /// `true` = 航点动作里的 `lightFill` / `lightLed` 不再生效，任务开始→终态全程开灯。
+    pub light_fill: bool,
+    pub light_led: bool,
+    /// 计划级「仅夜间」的自定义时段（`HH:MM`，可跨零点；见迁移 033）。
+    /// 都为空 = 用板端默认（`LIGHT_NIGHT_START`/`LIGHT_NIGHT_END`）。
+    pub light_night_start: Option<String>,
+    pub light_night_end: Option<String>,
     pub level: Option<String>,
     pub device_id: Option<i64>,
     pub device_code: Option<String>,
@@ -254,6 +263,10 @@ pub struct TaskRow {
     pub execute_mode: Option<String>,
     pub end_task: Option<String>,
     pub light_night_only: bool,
+    pub light_fill: bool,
+    pub light_led: bool,
+    pub light_night_start: Option<String>,
+    pub light_night_end: Option<String>,
     pub level: Option<String>,
     pub device_id: Option<i64>,
     pub device_code: Option<String>,
@@ -292,6 +305,10 @@ impl From<TaskRow> for Task {
             execute_mode: row.execute_mode,
             end_task: row.end_task,
             light_night_only: row.light_night_only,
+            light_fill: row.light_fill,
+            light_led: row.light_led,
+            light_night_start: row.light_night_start,
+            light_night_end: row.light_night_end,
             level: row.level,
             device_id: row.device_id,
             device_code: row.device_code,
@@ -493,9 +510,18 @@ pub struct TaskRequest {
     /// 缺省 = 跟随路线；更新时显式传 null 表示改回「跟随路线」。
     #[serde(default, deserialize_with = "double_option")]
     pub end_task: Option<Option<String>>,
-    /// 计划级「仅夜间自动开灯」：`true` 时航点上的补光灯 / LED 只在夜间时段开。
-    /// 缺省 / `null` = 不勾（到点就开）；老调用方不发这个字段，行为不变。
+    /// 计划级「仅夜间自动开灯」：`true` 时计划灯的「自动开灯」只在夜间时段生效。
+    /// 缺省 / `null` = 保持原值（新建时 = 不勾）；老调用方不发这个字段，行为不变。
     pub light_night_only: Option<bool>,
+    /// 计划级「自动开灯」：`lightFill` / `lightLed` 任选一盏。配了就**以计划为准**，
+    /// 航点动作里的到点开灯 / 离开关灯全不生效（全程开、终态关）。缺省保持原值。
+    pub light_fill: Option<bool>,
+    pub light_led: Option<bool>,
+    /// 计划级「仅夜间」的自定义时段（`HH:MM`，允许跨零点）。**要么都给、要么都不给**：
+    /// 只给一个 / 格式不对 / 起止相同都会 400（静默退默认会让现场以为改了没生效）。
+    /// 更新时传空串 = 清回板端默认。
+    pub light_night_start: Option<String>,
+    pub light_night_end: Option<String>,
     pub level: Option<String>,
     pub device_id: Option<i64>,
     pub park_id: Option<i64>,

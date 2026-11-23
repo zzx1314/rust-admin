@@ -710,17 +710,19 @@ python3 backend/tools/plan_count_selftest.py
 
 ### ⑤ 航点灯光（补光灯 / LED）
 
-业务平台的航点动作可选「开补光灯」（`lightFill`）/「开 LED 灯带」（`lightLed`），
-计划上还有「仅夜间自动开灯」（`lightNightOnly`）。设备客户端到点时调板端：
+计划上可以配「自动开灯（补光灯 / LED）+ 仅夜间」（`lightFill` / `lightLed` /
+`lightNightOnly`）：**以计划为准**时客户端在任务一开始就调板端（`pointIndex=-1`，
+全程不跟航点动作），终态 / 取消才关。计划没配时走老的航点动作（「到点开灯」），
+到点调、离开关。
 
 | 接口 | 入参 | 说明 |
 |---|---|---|
-| `POST /api/lights` | `fill`、`led`、`nightOnly`、`taskCode`、`pointIndex` | 到点开灯；`nightOnly` 且不在夜间窗内 → `skipped=daytime`，**什么都不做** |
-| `POST /api/lights/off` | `reason` | 离开航点 / 任务终态 / 取消 / 看门狗 |
-| `GET /api/lights` | — | 状态：`fill`/`led`/`managed`/`night`/`night_window`/`fill_available` |
+| `POST /api/lights` | `fill`、`led`、`nightOnly`、`taskCode`、`pointIndex`、可选 `nightStart`/`nightEnd` | 开灯（计划灯 `pointIndex=-1`，航点模式是真实下标）；`nightOnly` 且不在夜间窗内 → `skipped=daytime`，**什么都不做**；`nightStart`/`nightEnd`（计划里自定义的时段，`HH:MM`）不传就用板端默认 |
+| `POST /api/lights/off` | `reason` | 离开航点（航点模式）/ 任务终态 / 取消 / 看门狗 |
+| `GET /api/lights` | — | 状态：`fill`/`led`/`managed`/`night`/`night_window`（当前生效的窗）/`plan_night_window`（计划自定义时段，`null`=板端默认）/`fill_available` |
 
-夜间窗在板端判：`LIGHT_NIGHT_START` / `LIGHT_NIGHT_END`（默认 18:00-06:00，允许跨零点，
-**起止相同 = 关闭夜间判定**）。计划灯有看门狗（`LIGHT_MAX_ON_SECS`，默认 900s）；
+夜间窗在板端判：计划里带了自己的时段就用它，否则用 `LIGHT_NIGHT_START` /
+`LIGHT_NIGHT_END`（默认 18:00-06:00，允许跨零点，**起止相同 = 关闭夜间判定**）。计划灯有看门狗（`LIGHT_MAX_ON_SECS`，默认 900s）；
 手动按钮（`/api/filllight`、`/api/led/blink`）开的灯不吃看门狗。
 LED 只有厂商的 `test_rgbrun`（循环闪烁），所以「开」= 拉起进程、「关」= 按进程组杀掉，
 手动与计划共用同一个进程句柄。

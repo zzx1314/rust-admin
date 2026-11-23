@@ -144,6 +144,22 @@ pub(crate) async fn clear_local_runner(
     }
 }
 
+/// 槽位里现在是不是这一轮 runner。
+///
+/// 同一个 `task_code` 可能被反复下发（现场就是反复点「开始执行」），所以判断
+/// 「这条任务还在跑」一律按 `Arc` 身份比，**不比 `task_code`**——否则上一轮的任务号
+/// 会被绑到新一轮上（5009 每帧都会 `task.task_id != bound_id`，航点 AI / 灯光全哑）。
+pub(crate) async fn is_current_runner(
+    local_runner: &Shared<Option<Arc<RouteRunner>>>,
+    runner: &Arc<RouteRunner>,
+) -> bool {
+    local_runner
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, runner))
+}
+
 /// 「下发地图」的忙碌门禁：只有**真的在跑**的任务 / 建图才拒绝。
 ///
 /// 不要退回去看 `local_runner.lock().await.is_some()`：槽位里可能残留着上一轮的
@@ -359,7 +375,7 @@ pub(crate) async fn sync_maps_from_robot(
 
 #[cfg(test)]
 mod map_push_guard_tests {
-    use super::{clear_local_runner, map_push_block};
+    use super::{clear_local_runner, is_current_runner, map_push_block};
     use crate::mock_body;
     use crate::zhpro::client::ZhProClient;
     use crate::zhpro::mapping::MappingSession;
@@ -432,5 +448,27 @@ mod map_push_guard_tests {
 
         clear_local_runner(&slot, &current).await;
         assert!(slot.lock().await.is_none(), "自己收尾时必须摘掉槽位");
+    }
+
+    /// 绑定本体任务号前先问「槽位里还是不是这一轮 runner」：
+    /// 同一个 taskCode 被反复下发时，上一轮的任务号绝不能写给新一轮。
+    #[tokio::test]
+    async fn is_current_runner_matches_by_identity_not_task_code() {
+        let client = client().await;
+        let previous = Arc::new(RouteRunner::new(client.clone()));
+        let current = Arc::new(RouteRunner::new(client));
+        let slot: RunnerSlot = Arc::new(Mutex::new(Some(current.clone())));
+
+        assert!(is_current_runner(&slot, &current).await);
+        assert!(
+            !is_current_runner(&slot, &previous).await,
+            "上一轮的 runner 不许被当成当前任务"
+        );
+
+        clear_local_runner(&slot, &current).await;
+        assert!(
+            !is_current_runner(&slot, &current).await,
+            "槽位清空后谁都不是"
+        );
     }
 }

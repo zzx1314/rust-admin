@@ -188,7 +188,7 @@ pub(crate) async fn run_client(
     ));
     if config.ai_enabled {
         info!(
-            "航点灯光已启用：板端 Agent = {}（航点动作 lightFill/lightLed，计划 lightNightOnly）",
+            "航点灯光已启用：板端 Agent = {}（计划自动开灯 lightFill/lightLed 优先，没配才按航点动作；夜间 lightNightOnly）",
             lights.agent()
         );
     }

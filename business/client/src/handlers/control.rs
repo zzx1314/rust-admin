@@ -102,8 +102,13 @@ pub(crate) async fn apply(
         }
         // 任务取消：识别窗口没有继续的意义（Agent 单路，别占着）
         ai.stop("任务已取消").await;
-        // 灯光也是：取消后狗不再跑这条路线，灯必须当场收掉
-        lights.leave("任务已取消").await;
+        // 灯光也是：取消后狗不再跑这条路线，灯必须当场收掉；
+        // 同时标成已收尾，防止排队的「到点开灯」在取消后又把灯点亮。
+        if task_code.is_empty() {
+            lights.leave("任务已取消").await;
+        } else {
+            lights.finish_task(task_code, "任务已取消").await;
+        }
         // 取消也是计划收尾：板端整个计划目录都不需要了（理由同终态那条）
         ai.finish_plan(task_code, "任务已取消").await;
         // 只清自己那条：平台可能「先取消旧任务、再下发新任务」，取消的收尾

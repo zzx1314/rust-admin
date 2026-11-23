@@ -25,12 +25,51 @@ use reqwest::Client;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 /// 板端开/关灯只是几次 GPIO 写 + 一次进程启停（同机 HTTP，毫秒级）。给 5s 是为了
 /// 板子忙时留余量，又不能让一次卡死把 5009 处理链路拖太久。
 const LIGHT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 同一条任务同一个点最多每隔这么久重发一次开灯请求。
+///
+/// 为什么需要重发：板端看门狗 `LIGHT_MAX_ON_SECS`（默认 900s）会在客户端失联时把关不掉的
+/// 灯关掉——计划灯要全程亮着，一次夜间巡检往往超过 15 分钟，只在开始时发一次就会被看门狗
+/// 掐掉。300s 既早于看门狗、又远低于 5009 的 500ms 帧率（不做节流就是每帧一条 HTTP）。
+const LIGHT_REFRESH_AFTER: Duration = Duration::from_secs(300);
+
+/// 计划里自定义的「仅夜间」时段（`lightNightStart` / `lightNightEnd`，`HH:MM`，可跨零点）。
+///
+/// 客户端**只搬运**，判夜仍在板端（`control.is_night`，板子本地时间）：
+/// 平台/客户端与板子可能不同时区、时钟也可能不准，判据只能有一处。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NightWindow {
+    pub start: String,
+    pub end: String,
+}
+
+impl NightWindow {
+    /// 从下发载荷解析：两个都非空才有效（只给一半服务端就 400 了，这里只做兜底）。
+    pub fn from_payload(payload: &Value) -> Option<Self> {
+        let start = payload.get("lightNightStart")?.as_str()?.trim();
+        let end = payload.get("lightNightEnd")?.as_str()?.trim();
+        if start.is_empty() || end.is_empty() {
+            return None;
+        }
+        Some(Self {
+            start: start.to_string(),
+            end: end.to_string(),
+        })
+    }
+}
+
+/// 计划级自动开灯用的「伪航点下标」。
+///
+/// 计划灯不挂在某个航点上（全程开），交给 `PointLights::point_arrived` 的去重键
+/// `(taskCode, pointIndex)` 时必须是个固定的负数，才能做到「一条任务只发一次开灯」。
+pub const PLAN_LIGHT_INDEX: i64 = -1;
 
 /// 路线里一个航点的灯光配置（只有至少要求开一盏灯的点才进结果）
 #[derive(Debug, Clone, PartialEq)]
@@ -99,6 +138,17 @@ pub struct PointLights {
     /// 如果和紧随其后的「离开航点关灯」交错，会出现「关灯请求先到、开灯后到」→
     /// 灯一直亮到下一个点。这把锁保证两者排好队（`tokio::Mutex` 是 FIFO 的）。
     gate: Mutex<()>,
+    /// 上一次发开灯请求的时刻（成功 / 白天跳过 / 失败都算）：配合
+    /// [`LIGHT_REFRESH_AFTER`] 做节流 + 看门狗前刷新。
+    last_try: Mutex<Option<Instant>>,
+    /// 重发间隔（默认 [`LIGHT_REFRESH_AFTER`]；测试里改成 0 验证「会刷新」）
+    refresh_after: Duration,
+    /// 已经收尾的任务号（终态 / 取消 / 本地收尾）。
+    ///
+    /// 5009 的到点帧与终态帧可能只差一帧，而开灯是 `tokio::spawn` 出去的：不挡住的话，
+    /// 排在看门狗送关灯请求后面那个 `point_arrived` 会把灯重新点亮——任务结束后灯一直亮到
+    /// 板端看门狗超时（2026-11-23 加计划灯时的回归用例抓到）。
+    finished: Mutex<Option<String>>,
 }
 
 impl PointLights {
@@ -113,6 +163,9 @@ impl PointLights {
             active: Mutex::new(None),
             requested: Mutex::new(None),
             gate: Mutex::new(()),
+            last_try: Mutex::new(None),
+            refresh_after: LIGHT_REFRESH_AFTER,
+            finished: Mutex::new(None),
         }
     }
 
@@ -120,40 +173,93 @@ impl PointLights {
         &self.agent
     }
 
+    /// 新任务开始：清掉上一轮的「已收尾 / 已请求 / 已点亮」痕迹。
+    ///
+    /// 同一个 `taskCode` 会被反复下发（现场反复点「开始执行」），不清就会出现
+    /// 「新一轮的计划灯永远不亮」：`requested` 还停在 `(code, -1)`，`finished` 还记着
+    /// 这条任务已收尾。
+    pub async fn start_task(&self, task_code: &str) {
+        let _gate = self.gate.lock().await;
+        *self.active.lock().await = None;
+        *self.requested.lock().await = None;
+        *self.last_try.lock().await = None;
+        let mut finished = self.finished.lock().await;
+        if finished.as_deref() == Some(task_code) {
+            *finished = None;
+        }
+    }
+
+    /// 任务收尾（终态 / 取消 / 本地收尾）：此后迟到的「到点开灯」一律忽略，再关灯。
+    pub async fn finish_task(&self, task_code: &str, reason: &str) {
+        *self.finished.lock().await = Some(task_code.to_string());
+        *self.last_try.lock().await = None;
+        self.leave(reason).await;
+    }
+
     /// 到点开灯（5009 `patrol.point_arrived` / `patrol.waiting`）。
     ///
     /// `night_only` = 计划勾了「仅夜间自动开灯」，交给板端按本地时间窗判定：
     /// 白天的返回值是 `skipped="daytime"`，此时**不记活跃态**（本来就没开灯，
-    /// 离开航点时也不需要发关灯）。
-    pub async fn point_arrived(&self, task_code: &str, point: &LightPoint, night_only: bool) {
+    /// 离开航点时也不需要发关灯）。`window` = 计划里自定义的夜间时段（不传 = 板端默认）。
+    pub async fn point_arrived(
+        &self,
+        task_code: &str,
+        point: &LightPoint,
+        night_only: bool,
+        window: Option<&NightWindow>,
+    ) {
         if !self.enabled || (!point.fill && !point.led) {
             return;
         }
         let _gate = self.gate.lock().await;
+        if self
+            .finished
+            .lock()
+            .await
+            .as_deref()
+            .is_some_and(|finished| finished == task_code)
         {
-            let active = self.active.lock().await;
-            if active.as_ref() == Some(&(task_code.to_string(), point.index)) {
-                return;
-            }
-            let mut requested = self.requested.lock().await;
-            if requested.as_ref() == Some(&(task_code.to_string(), point.index)) {
-                return;
-            }
-            *requested = Some((task_code.to_string(), point.index));
+            return;
         }
+        {
+            let requested = self.requested.lock().await;
+            let same = requested
+                .as_ref()
+                .is_some_and(|(code, index)| code == task_code && *index == point.index);
+            drop(requested);
+            if same {
+                let fresh = self
+                    .last_try
+                    .lock()
+                    .await
+                    .is_some_and(|at| at.elapsed() < self.refresh_after);
+                if fresh {
+                    return;
+                }
+            }
+        }
+        *self.requested.lock().await = Some((task_code.to_string(), point.index));
+        *self.last_try.lock().await = Some(Instant::now());
 
-        let body = json!({
+        let mut body = json!({
             "fill": point.fill,
             "led": point.led,
             "nightOnly": night_only,
             "taskCode": task_code,
             "pointIndex": point.index,
         });
+        // 计划里自定义了夜间时段就带上，板端按它判夜；不带 = 板端默认（18:00-06:00）
+        if let Some(window) = window {
+            body["nightStart"] = json!(window.start);
+            body["nightEnd"] = json!(window.end);
+        }
         match self.post("/api/lights", body).await {
             Ok(value) if value.get("skipped").and_then(Value::as_str) == Some("daytime") => {
                 info!(
-                    "航点灯光：任务 {task_code} 航点 {} 在白天到达，跳过开灯（计划仅夜间自动开灯）",
-                    point.index
+                    "航点灯光：任务 {task_code} 航点 {} 在白天到达，跳过开灯（仅夜间自动开灯）；\
+                     {}s 后才会再试",
+                    point.index,
+                    self.refresh_after.as_secs()
                 );
                 *self.active.lock().await = None;
             }
@@ -196,6 +302,7 @@ impl PointLights {
                 );
                 // 允许下一个点到点再试（Agent 可能只是刚重启）
                 *self.requested.lock().await = None;
+                *self.last_try.lock().await = None;
             }
         }
     }
@@ -358,9 +465,13 @@ mod tests {
         .await;
         let lights = PointLights::new(agent, true);
 
-        lights.point_arrived("TK-1", &light_point(2), true).await;
+        lights
+            .point_arrived("TK-1", &light_point(2), true, None)
+            .await;
         // 5009 每 500ms 一帧：同一点不能反复发请求
-        lights.point_arrived("TK-1", &light_point(2), true).await;
+        lights
+            .point_arrived("TK-1", &light_point(2), true, None)
+            .await;
         let seen = calls.lock().await.clone();
         assert_eq!(seen.len(), 1, "{seen:?}");
         assert_eq!(seen[0].0, "on");
@@ -389,7 +500,9 @@ mod tests {
         .await;
         let lights = PointLights::new(agent, true);
 
-        lights.point_arrived("TK-1", &light_point(0), true).await;
+        lights
+            .point_arrived("TK-1", &light_point(0), true, None)
+            .await;
         assert_eq!(calls.lock().await.len(), 1);
         // 板端说「白天跳过」= 灯没开：离开航点不该再发关灯（否则会顺手关掉
         // 操作员手动开的灯）
@@ -402,7 +515,9 @@ mod tests {
         let calls: Calls = Arc::new(Mutex::new(Vec::new()));
         let agent = spawn_agent(calls.clone(), json!({"ok": true})).await;
         let lights = PointLights::new(agent, false);
-        lights.point_arrived("TK-1", &light_point(0), false).await;
+        lights
+            .point_arrived("TK-1", &light_point(0), false, None)
+            .await;
         lights.leave("已离开航点").await;
         assert!(calls.lock().await.is_empty());
     }
@@ -423,7 +538,7 @@ mod tests {
             fill: true,
             led: false,
         };
-        lights.point_arrived("TK-1", &point, false).await;
+        lights.point_arrived("TK-1", &point, false, None).await;
         lights.leave("已离开航点").await;
         // 没有灯亮过 → 不该白发一条关灯（会把操作员手动开的灯关掉）
         assert_eq!(calls.lock().await.len(), 1, "{:?}", calls.lock().await);
@@ -440,17 +555,128 @@ mod tests {
         )
         .await;
         let lights = PointLights::new(agent, true);
-        lights.point_arrived("TK-1", &light_point(1), false).await;
+        lights
+            .point_arrived("TK-1", &light_point(1), false, None)
+            .await;
         lights.leave("已离开航点").await;
         let seen = calls.lock().await.clone();
         assert_eq!(seen.len(), 2, "{seen:?}");
         assert_eq!(seen[1].0, "off", "LED 亮了就必须在离开航点时关掉");
     }
 
+    /// 计划里自定义的夜间时段要原样带到板端（判夜在板端，客户端只搬运）。
+    #[tokio::test]
+    async fn custom_night_window_is_forwarded_to_the_agent() {
+        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        let agent = spawn_agent(calls.clone(), json!({"ok": true, "night": true})).await;
+        let lights = PointLights::new(agent, true);
+        let window = NightWindow {
+            start: "19:00".to_string(),
+            end: "06:00".to_string(),
+        };
+
+        lights
+            .point_arrived("TK-1", &light_point(0), true, Some(&window))
+            .await;
+        // 没配时段：请求里不能出现这两个键（板端会用默认 18:00-06:00）
+        lights
+            .point_arrived("TK-2", &light_point(0), true, None)
+            .await;
+
+        let seen = calls.lock().await.clone();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert_eq!(seen[0].1["nightStart"], "19:00");
+        assert_eq!(seen[0].1["nightEnd"], "06:00");
+        assert!(seen[1].1.get("nightStart").is_none(), "{:?}", seen[1].1);
+        assert!(seen[1].1.get("nightEnd").is_none(), "{:?}", seen[1].1);
+    }
+
+    /// 载荷里的时段解析：两个都非空才生效（只给一半服务端就 400 了，这里兜底）。
+    #[test]
+    fn night_window_parses_only_when_both_ends_are_present() {
+        assert_eq!(
+            NightWindow::from_payload(&json!({"lightNightStart":"19:00","lightNightEnd":"06:00"})),
+            Some(NightWindow {
+                start: "19:00".to_string(),
+                end: "06:00".to_string()
+            })
+        );
+        assert_eq!(
+            NightWindow::from_payload(&json!({"lightNightStart":"19:00","lightNightEnd":""})),
+            None
+        );
+        assert_eq!(
+            NightWindow::from_payload(&json!({"lightNightStart":"19:00"})),
+            None
+        );
+        assert_eq!(NightWindow::from_payload(&json!({})), None);
+    }
+
+    /// 终态关灯之后，排队中的「到点开灯」不能再把灯点亮（否则灯会一直亮到看门狗）。
+    /// 5009 的到点帧和终态帧只差一帧，开灯又是 spawn 出去的，这条必须挡住。
+    /// 计划灯要全程亮着：板端看门狗（`LIGHT_MAX_ON_SECS`，默认 900s）会关掉没人管的灯，
+    /// 一次夜间巡检往往超过 15 分钟，所以同一 (任务, 航点) 到期后必须重发一次。
+    #[tokio::test]
+    async fn plan_light_is_refreshed_before_the_board_watchdog() {
+        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        let agent = spawn_agent(
+            calls.clone(),
+            json!({"ok": true, "applied": {"fill": true, "led": true}}),
+        )
+        .await;
+        let mut lights = PointLights::new(agent, true);
+        // 间隔改成 0 = 「已经过了默认的 300s」
+        lights.refresh_after = Duration::from_millis(0);
+        let point = light_point(PLAN_LIGHT_INDEX);
+
+        lights.point_arrived("TK-1", &point, false, None).await;
+        lights.point_arrived("TK-1", &point, false, None).await;
+        let seen = calls.lock().await.clone();
+        assert_eq!(
+            seen.len(),
+            2,
+            "到期后必须重发，否则看门狗把计划灯关掉: {seen:?}"
+        );
+        assert!(seen.iter().all(|(kind, _)| kind == "on"));
+    }
+
+    #[tokio::test]
+    async fn late_point_arrived_after_finish_is_dropped() {
+        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        let agent = spawn_agent(
+            calls.clone(),
+            json!({"ok": true, "applied": {"fill": true, "led": true}}),
+        )
+        .await;
+        let lights = PointLights::new(agent, true);
+
+        lights.finish_task("TK-1", "任务终态").await;
+        // 终态之后迟到的到点帧：不许再开灯
+        lights
+            .point_arrived("TK-1", &light_point(PLAN_LIGHT_INDEX), false, None)
+            .await;
+        assert!(
+            calls.lock().await.is_empty(),
+            "任务收尾后不许再开灯: {:?}",
+            calls.lock().await
+        );
+
+        // 同名任务重新下发（现场反复点「开始执行」）：清理之后能重新点亮
+        lights.start_task("TK-1").await;
+        lights
+            .point_arrived("TK-1", &light_point(PLAN_LIGHT_INDEX), false, None)
+            .await;
+        let seen = calls.lock().await.clone();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].0, "on");
+    }
+
     #[tokio::test]
     async fn unreachable_agent_is_skipped_without_panicking() {
         let lights = PointLights::new("http://127.0.0.1:1", true);
-        lights.point_arrived("TK-1", &light_point(0), false).await;
+        lights
+            .point_arrived("TK-1", &light_point(0), false, None)
+            .await;
         lights.leave("已离开航点").await;
     }
 }

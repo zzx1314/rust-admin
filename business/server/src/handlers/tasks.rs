@@ -14,7 +14,8 @@ use tracing::{debug, info, warn};
 
 /// 任务行 + 关联名称的公共列清单（服务端各处 SELECT 与集成测试共用，避免漏列）
 pub const TASK_SELECT: &str = "SELECT t.id, t.task_code, t.task_name, t.task_type, t.execute_mode,
-    t.end_task, t.light_night_only,
+    t.end_task, t.light_night_only, t.light_fill, t.light_led,
+    t.light_night_start, t.light_night_end,
     t.level, t.device_id, d.device_id AS device_code, t.park_id, p.park_name, t.zone_id,
     z.zone_name, t.route_id, r.route_code, r.route_name, t.plan_start, t.plan_end,
     t.schedule_days, t.last_dispatched_on, t.publish_status, t.published_at,
@@ -25,6 +26,44 @@ pub const TASK_SELECT: &str = "SELECT t.id, t.task_code, t.task_name, t.task_typ
     LEFT JOIN parks p ON p.id = t.park_id
     LEFT JOIN zones z ON z.id = t.zone_id
     LEFT JOIN routes r ON r.id = t.route_id";
+
+/// 计划「仅夜间」自定义时段的归一化与校验。
+///
+/// 返回 `(None, None)` = 用板端默认（`LIGHT_NIGHT_START`/`LIGHT_NIGHT_END`）。
+/// 只给一个 / 格式不对 / 起止相同都直接 400：静默退默认会让现场改完时段发现没生效，
+/// 而板上日志里只有一句「当前不在夜间时段」。
+fn normalize_light_night_window(
+    start: Option<String>,
+    end: Option<String>,
+) -> Result<(Option<String>, Option<String>), AppError> {
+    let normalize = |value: Option<String>| {
+        crate::schedule::normalize_clock(value).filter(|text| !text.trim().is_empty())
+    };
+    match (normalize(start), normalize(end)) {
+        (None, None) => Ok((None, None)),
+        (Some(start), Some(end)) => {
+            let invalid = || {
+                AppError::BadRequest(
+                    "夜间时段格式不合法：应为 HH:MM（例如 19:00 / 06:00）".to_string(),
+                )
+            };
+            if crate::schedule::parse_hhmm(&start).is_none()
+                || crate::schedule::parse_hhmm(&end).is_none()
+            {
+                return Err(invalid());
+            }
+            if start == end {
+                return Err(AppError::BadRequest(
+                    "夜间时段的开始与结束时间不能相同；不勾「仅夜间」即按板端默认时段".to_string(),
+                ));
+            }
+            Ok((Some(start), Some(end)))
+        }
+        _ => Err(AppError::BadRequest(
+            "夜间时段要同时给开始和结束（HH:MM）；都用板端默认就别传这两个字段".to_string(),
+        )),
+    }
+}
 
 /// 发布状态入库前的归一化与校验。
 ///
@@ -223,6 +262,12 @@ pub async fn create_task_core(
     let end_task = normalize_task_end_task(payload.end_task.flatten())?;
     // 计划级「仅夜间自动开灯」：只有航点动作里配了 lightFill / lightLed 才起作用
     let light_night_only = payload.light_night_only.unwrap_or(false);
+    // 计划级「自动开灯」：配了就**以计划为准**（航点动作的到点开/离开关全部忽略）
+    let light_fill = payload.light_fill.unwrap_or(false);
+    let light_led = payload.light_led.unwrap_or(false);
+    // 计划级「仅夜间」的自定义时段：空 = 用板端默认
+    let (light_night_start, light_night_end) =
+        normalize_light_night_window(payload.light_night_start, payload.light_night_end)?;
     // 计划发布状态：只有「已发布」的计划才会被自动执行（`schedule::is_published`）
     let publish_status = normalize_publish_status(payload.publish_status.clone())?;
     // 执行状态：以前直接把请求里的字符串写库，写坏一个值之后所有
@@ -241,9 +286,10 @@ pub async fn create_task_core(
         "INSERT INTO tasks (task_code, task_name, task_type, execute_mode, end_task, level, device_id,
             park_id, zone_id, route_id, plan_start, plan_end, schedule_days, task_status, progress,
             dispatch_policy, description, created_at, updated_at, created_by,
-            progress_updated_at, publish_status, published_at, light_night_only)
+            progress_updated_at, publish_status, published_at, light_night_only,
+            light_fill, light_led, light_night_start, light_night_end)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-            ?17, ?18, ?19, ?20, ?18, ?21, ?22, ?23)",
+            ?17, ?18, ?19, ?20, ?18, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
     )
     .bind(&task_code)
     .bind(payload.task_name.trim())
@@ -268,6 +314,10 @@ pub async fn create_task_core(
     .bind(&publish_status)
     .bind(&published_at)
     .bind(light_night_only)
+    .bind(light_fill)
+    .bind(light_led)
+    .bind(&light_night_start)
+    .bind(&light_night_end)
     .execute(&state.db)
     .await?;
     let id = result.last_insert_rowid();
@@ -662,6 +712,19 @@ pub async fn update_task(
     let light_night_only = payload
         .light_night_only
         .unwrap_or(existing.light_night_only);
+    // 计划级自动开灯（补光灯 / LED）：同样缺省保持原值；配了就忽略航点动作
+    let light_fill = payload.light_fill.unwrap_or(existing.light_fill);
+    let light_led = payload.light_led.unwrap_or(existing.light_led);
+    // 仅夜间时段：两个字段都不传 = 保持原值；都传（含空串）= 以请求为准（空串 = 回默认）
+    let (light_night_start, light_night_end) =
+        if payload.light_night_start.is_none() && payload.light_night_end.is_none() {
+            (
+                existing.light_night_start.clone(),
+                existing.light_night_end.clone(),
+            )
+        } else {
+            normalize_light_night_window(payload.light_night_start, payload.light_night_end)?
+        };
     let schedule_days = match payload.schedule_days.as_deref() {
         // 显式传了就以请求为准（空字符串 = 取消周期日 = 每天）
         Some(raw) => crate::schedule::normalize_days(Some(raw)),
@@ -691,7 +754,9 @@ pub async fn update_task(
             level = ?5, device_id = ?6, park_id = ?7, zone_id = ?8, route_id = ?9,
             plan_start = ?10, plan_end = ?11, schedule_days = ?12, task_status = ?13,
             progress = ?14, dispatch_policy = ?15, description = ?16, updated_at = ?17,
-            publish_status = ?19, published_at = ?20, light_night_only = ?21
+            publish_status = ?19, published_at = ?20, light_night_only = ?21,
+            light_fill = ?22, light_led = ?23,
+            light_night_start = ?24, light_night_end = ?25
          WHERE id = ?18",
     )
     .bind(&task_name)
@@ -715,6 +780,10 @@ pub async fn update_task(
     .bind(&publish_status)
     .bind(&published_at)
     .bind(light_night_only)
+    .bind(light_fill)
+    .bind(light_led)
+    .bind(&light_night_start)
+    .bind(&light_night_end)
     .execute(&state.db)
     .await?;
     record_event(

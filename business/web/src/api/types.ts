@@ -140,12 +140,23 @@ export interface Task {
    */
   endTask: string | null;
   /**
-   * 计划级「仅夜间自动开灯」：`true` = 航点动作上的补光灯 / LED 只在夜间时段开。
+   * 计划级「自动开灯」的两盏灯：勾了就**以计划为准**——航点动作的到点开灯 / 离开关灯
+   * 不再生效，灯从任务开始亮到终态 / 取消。两盏都不勾 = 沿用航点动作。
+   */
+  lightFill: boolean;
+  lightLed: boolean;
+  /**
+   * 计划级「仅夜间自动开灯」：`true` = 上面那两盏灯只在夜间时段开。
    *
-   * 夜间判定在**板端**（`LIGHT_NIGHT_START` / `LIGHT_NIGHT_END`，默认 18:00-06:00，
-   * 板子本地时间），平台/客户端只把开关转下去。`false` = 到点就开。
+   * 夜间判定在**板端**（板子本地时间），平台/客户端只把开关和时段转下去。
    */
   lightNightOnly: boolean;
+  /**
+   * 计划里自定义的夜间时段（`HH:MM`，可跨零点）；两个都为 `null` = 用板端默认
+   * （`LIGHT_NIGHT_START` / `LIGHT_NIGHT_END`，默认 18:00-06:00）。
+   */
+  lightNightStart: string | null;
+  lightNightEnd: string | null;
   level: string | null;
   deviceId: number | null;
   deviceCode: string | null;

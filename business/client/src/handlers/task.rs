@@ -8,10 +8,12 @@ use crate::locate::LOCATE_ATTEMPTS;
 use crate::locate::ensure_localized;
 use crate::locate::parse_initial_pose;
 use crate::maps::clear_local_runner;
+use crate::maps::is_current_runner;
 use crate::report::report_progress;
 use crate::state::ActiveTask;
 use crate::state::RobotState;
 use crate::state::Shared;
+use crate::state::bind_nav_task;
 use crate::state::clear_active_task;
 use crate::state::clear_active_task_if;
 use crate::wire::WsMessage;
@@ -110,9 +112,26 @@ pub(crate) async fn dispatch(
                 .collect::<Vec<_>>()
         );
     }
-    // 航点灯光（与 AI 动作分开：有点只开灯不识别）+ 计划级「仅夜间自动开灯」
+    // 航点灯光（与 AI 动作分开：有点只开灯不识别）+ 计划级「自动开灯 / 仅夜间」
     let light_points = parse_light_points(&msg.payload["routeData"]);
-    if !light_points.is_empty() {
+    // 计划级自动开灯：配了就**以计划为准**。航点动作里的到点开灯 / 离开关灯全不生效
+    // （现场要的是「整个计划期间灯亮着」，不是每个点翻一遍），夜间限制仍交给板端。
+    let plan_fill = msg.payload["lightFill"].as_bool().unwrap_or(false);
+    let plan_led = msg.payload["lightLed"].as_bool().unwrap_or(false);
+    let plan_lights = (plan_fill || plan_led).then_some(lights::LightPoint {
+        index: lights::PLAN_LIGHT_INDEX,
+        fill: plan_fill,
+        led: plan_led,
+    });
+    if let Some(plan) = plan_lights.as_ref() {
+        info!(
+            "任务 {task_code} 计划级自动开灯（补光={} LED={}）：以计划为准，航点动作里的 \
+             开灯 / 关灯不生效（{} 个灯光航点被忽略）",
+            plan.fill,
+            plan.led,
+            light_points.len()
+        );
+    } else if !light_points.is_empty() {
         info!(
             "任务 {task_code} 含 {} 个灯光航点: {:?}",
             light_points.len(),
@@ -124,6 +143,14 @@ pub(crate) async fn dispatch(
     }
     // 老平台不发 `lightNightOnly`：按「到点就开」跑（历史行为=不开灯）
     let light_night_only = msg.payload["lightNightOnly"].as_bool().unwrap_or(false);
+    // 计划里自定义的夜间时段（HH:MM）：只搬运给板端判夜，客户端不自己算
+    let light_window = lights::NightWindow::from_payload(&msg.payload);
+    if let Some(window) = light_window.as_ref() {
+        info!(
+            "任务 {task_code} 夜间时段：{}-{}（板端按板子本地时间判定）",
+            window.start, window.end
+        );
+    }
     *active.lock().await = Some(ActiveTask {
         task_code: task_code.clone(),
         task_name: task_name.clone(),
@@ -133,8 +160,12 @@ pub(crate) async fn dispatch(
         ai_points,
         light_points,
         light_night_only,
+        plan_lights,
+        light_window,
     });
     state.lock().await.current_task = Some(task_name.clone());
+    // 新任务开始：清掉上一轮同 taskCode 的「已请求 / 已收尾」痕迹，否则计划灯不亮
+    lights.start_task(&task_code).await;
 
     let Some(client) = zhpro.clone() else {
         warn!("未连接本体，任务仅记录不执行");
@@ -507,6 +538,37 @@ pub(crate) async fn dispatch(
             runner.prepare(plan).await;
             *local_runner.lock().await = Some(runner.clone());
 
+            // 把 runner 拿到的本体任务号补进 `active`：5009 的跟随（航点 AI / 航点灯光 /
+            // 阶段与终态上报）都要求先有 `nav_task_id`，而巡检的 5000 是 runner 自己
+            // 发的（见 `state::bind_nav_task`）。**不能**再靠 5009 的 `current_task` 猜
+            // ——那可能是上一轮还没交还的任务。200ms 一轮，跑到就退出。
+            {
+                let watcher_runner = runner.clone();
+                let slot = local_runner.clone();
+                let active = active.clone();
+                let code = task_code.clone();
+                tokio::spawn(async move {
+                    for _ in 0..300 {
+                        // 任务已经收尾（runner 被摘掉）或已被新一轮替换：不再等。
+                        // 同一个 taskCode 会被反复下发（现场反复点「开始执行」），只比
+                        // taskCode 会把上一轮的任务号绑到新一轮上。
+                        if !is_current_runner(&slot, &watcher_runner).await {
+                            return;
+                        }
+                        if let Some(id) = watcher_runner.current_nav_task().await {
+                            if bind_nav_task(&active, &code, &id).await {
+                                info!(
+                                    "任务 {code} 绑定本体任务号 {id}：5009 的航点 AI / 航点灯光从此生效"
+                                );
+                            }
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                    warn!("任务 {code} 60s 内没有拿到本体任务号：5009 不会跟随这条任务");
+                });
+            }
+
             let out = out_tx.clone();
             let code = task_code.clone();
             let state = state.clone();
@@ -541,7 +603,7 @@ pub(crate) async fn dispatch(
                 // 本地跑的路子同样要在任务收尾时清掉整个计划的板端存证
                 ai.finish_plan(&code, "本地任务结束").await;
                 // 本地跑不一定会走到 5009 的「离开航点」，这里直接收灯
-                lights.leave("本地任务结束").await;
+                lights.finish_task(&code, "本地任务结束").await;
                 // 收尾必须把槽位里的 runner 摘掉：业务侧的下发地图 / 继续任务等
                 // 门禁都看这个槽位，残留的 runner 会让设备在任务早已结束（甚至
                 // 取消）之后仍报「设备正在执行任务」（2026-11-19 现场事故）。

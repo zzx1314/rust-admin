@@ -428,6 +428,25 @@ pub struct TaskDispatchPayload {
     /// 客户端只把 `nightOnly` 转给板端 Agent，不自己判夜间（平台/板子可能不同时区）。
     /// 总是下发（`false` 也发）：老客户端忽略未知字段，语义比「缺省 = true」安全。
     pub light_night_only: bool,
+    /// 计划级「自动开灯」的两盏灯（`tasks.light_fill` / `light_led`）。
+    ///
+    /// 任一个为 `true` 就**以计划为准**：航点动作里的到点开灯 / 离开关灯全部不生效，
+    /// 任务开始就开、终态 / 取消才关（`nightOnly` 仍然生效）。两个都 `false` = 老行为
+    /// （按航点动作走）。
+    ///
+    /// 总是下发：老客户端忽略这两个未知字段，退回「按航点动作」，所以升级服务端不会
+    /// 让现场突然不开灯（航点动作仍然留在 `routeData` 里）。
+    pub light_fill: bool,
+    pub light_led: bool,
+    /// 计划里自定义的「仅夜间」时段（`HH:MM`，允许跨零点，板端本地时间）。
+    ///
+    /// 两个都有才下发；缺省 = 用板端默认（`LIGHT_NIGHT_START`/`LIGHT_NIGHT_END`，
+    /// 18:00-06:00）。客户端原样转给板端 `POST /api/lights` 的 `nightStart`/`nightEnd`，
+    /// **判夜仍然只在板端**——平台/客户端只搬运「几点到几点算夜间」。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_night_start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_night_end: Option<String>,
 }
 
 /// 下发载荷中的地图绑定

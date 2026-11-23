@@ -151,8 +151,12 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
   `/api/lights/off`）共用。`LED_TEST_BIN` 只有「循环闪烁」没有常亮接口，所以「LED 开」
   = 拉起进程、「关」= 按进程组杀掉（`start_new_session=True`，厂商程序可能 fork）；
   手动与计划必须共用 `_LED_PROC`，否则计划结束时杀不掉手动拉起的那一个。
-  「仅夜间自动开灯」的夜间判定**只在板端**（`control.is_night`，`LIGHT_NIGHT_START` /
-  `LIGHT_NIGHT_END` 默认 18:00-06:00，允许跨零点，起止相同 = 关闭）：白天到达返回
+  计划级「自动开灯」（`tasks.light_fill` / `light_led`）由客户端在任务一开始就调一次
+  `/api/lights`（`pointIndex=-1`），全程不关，终态 / 取消才 `/api/lights/off`；计划没配
+  才走航点动作的「到点开、离开关」。
+  「仅夜间」的夜间判定**只在板端**（`control.is_night`，默认窗 `LIGHT_NIGHT_START` /
+  `LIGHT_NIGHT_END` = 18:00-06:00；计划里自定义的 `nightStart`/`nightEnd` 优先，
+  允许跨零点，起止相同 = 关闭）：白天返回
   `skipped=daytime` 且**什么都不做**（不写 GPIO、不拉进程、不记「已开灯」——否则离开
   航点时会把操作员手动开的灯顺手关掉）。计划灯有看门狗（`LIGHT_MAX_ON_SECS` 默认
   900s），客户端掉线 / 被 kill 时兜底关灯；手动开的灯不进看门狗。
