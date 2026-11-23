@@ -6,6 +6,8 @@ use crate::report::report_progress;
 use crate::state::ActiveTask;
 use crate::state::RobotState;
 use crate::state::Shared;
+use crate::state::clear_active_task;
+use crate::state::clear_active_task_if;
 use crate::wire::WsMessage;
 use crate::zhpro;
 use crate::zhpro::mapping::MappingSession;
@@ -104,8 +106,13 @@ pub(crate) async fn apply(
         lights.leave("任务已取消").await;
         // 取消也是计划收尾：板端整个计划目录都不需要了（理由同终态那条）
         ai.finish_plan(task_code, "任务已取消").await;
-        *active.lock().await = None;
-        state.lock().await.current_task = None;
+        // 只清自己那条：平台可能「先取消旧任务、再下发新任务」，取消的收尾
+        // 晚到时把新任务的上下文清掉，平台就再也收不到这条新任务的进度了。
+        if task_code.is_empty() {
+            clear_active_task(active, state).await;
+        } else {
+            clear_active_task_if(active, state, task_code).await;
+        }
     }
     let status = match control {
         Control::Pause => "已暂停",

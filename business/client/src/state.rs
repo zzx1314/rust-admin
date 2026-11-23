@@ -374,3 +374,30 @@ pub(crate) async fn clear_active_task(
     *active.lock().await = None;
     state.lock().await.current_task = None;
 }
+
+/// 只在当前上下文仍是 `task_code` 时才复位。
+///
+/// 上一轮的收尾是**异步**的（本地 runner 的 `tokio::spawn`、建图 4001、任务取消），
+/// 收尾跑到时 `active` 里可能已经换成了新下发的任务。无条件 `*active = None`
+/// 会把新任务的上下文清掉，后果是：5009 不再跟随（`handle_status_frame` 找不到
+/// 绑定的 `nav_task_id`）、5s 进度定时器停报、AI 窗口/航点灯光全部失效——
+/// 平台看到的是「任务已下发但没有任何进度」，而狗其实已经在跑。
+/// 所以收尾一律按自己的 `task_code` 比对，不是自己的就不许动。
+pub(crate) async fn clear_active_task_if(
+    active: &Shared<Option<ActiveTask>>,
+    state: &Shared<RobotState>,
+    task_code: &str,
+) -> bool {
+    let mut guard = active.lock().await;
+    let ours = guard
+        .as_ref()
+        .is_some_and(|task| task.task_code == task_code);
+    if !ours {
+        return false;
+    }
+    *guard = None;
+    drop(guard);
+    let mut st = state.lock().await;
+    st.current_task = None;
+    true
+}

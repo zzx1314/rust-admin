@@ -277,6 +277,21 @@ pub const BUSY_BACKOFF: Duration = Duration::from_secs(5);
 /// 不等就会拿到 13897。
 pub const IDLE_WAIT: Duration = Duration::from_secs(15);
 
+/// 任务被本体排进 `pending_task`（已受理、等旧任务停稳 / 释放资源）后，
+/// 多久还没真正驱动底盘就判失败。
+///
+/// 这不是「跑得慢」：pending 期间底盘根本没被驱动（尾巴灯不会变成任务色、狗不动），
+/// 而平台因为已经收到「执行中」会一直干等。60s 足够覆盖本体换任务的停稳时间，
+/// 又不会让现场对着一条永远不会开始的任务等到 180s/点 的截止时间。
+pub const PENDING_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 终态帧到「本体真的把导航能力放开」之间的容忍窗口。
+///
+/// 5009 的终态由算法侧给出，`dog_task` 把 `task_state` 改回 `idle` 往往晚几百毫秒
+/// 到几秒。不等这个窗口就发 5002，会对每条正常结束的任务都补一刀（纯噪声，
+/// 还可能把已完成的任务在本体记录里改成取消）。
+pub const TERMINAL_SETTLE: Duration = Duration::from_secs(5);
+
 /// 5000 `params.speed_limit` 缺省线速度（航线没配速度时用）
 const DEFAULT_SPEED_LIMIT: f64 = 1.2;
 
@@ -783,6 +798,10 @@ impl RouteRunner {
         // 官方实测约 80 s/点（vx≈0.5），这里按 180 s/点 给足余量
         let deadline = tokio::time::Instant::now() + Duration::from_secs(180 * total.max(1) as u64);
         let mut gate = super::status::SeqGate::default();
+        // 任务被本体排进 `pending_task`（已受理、等旧任务停稳 / 释放资源）后多久
+        // 还没真正驱动底盘就判失败。这不是「跑得慢」，是那条 5000 根本没生效：
+        // 尾巴灯不会变成任务色，平台却一直显示执行中。
+        let mut pending_since: Option<tokio::time::Instant> = None;
         loop {
             if self.is_cancelled() {
                 return Err("任务已取消".to_string());
@@ -812,6 +831,27 @@ impl RouteRunner {
             let Some(task) = frame.task_for(&task_id) else {
                 continue;
             };
+            // 只认「还在排队」：current_task 里已经是这条任务就不算 pending
+            let pending = frame
+                .current
+                .as_ref()
+                .is_none_or(|current| current.task_id != task_id)
+                && frame
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.task_id == task_id);
+            if pending {
+                let since = *pending_since.get_or_insert_with(tokio::time::Instant::now);
+                if since.elapsed() > PENDING_TIMEOUT {
+                    return Err(format!(
+                        "任务在 pending_task 排队超过 {}s 仍未启动（本体上还有一条没结束的任务 / \
+                         导航能力没释放），任务未真正执行",
+                        PENDING_TIMEOUT.as_secs()
+                    ));
+                }
+            } else {
+                pending_since = None;
+            }
             // 巡检 `last_arrived_point.index` 从 0 开始；`point_completed` 时才算本点作业做完，
             // 这里用它推进度（至少到点就记 1，避免拍照失败时进度卡住）
             if let Some(index) = task.detail_index.filter(|index| *index >= 0) {
@@ -824,6 +864,10 @@ impl RouteRunner {
             if task.is_terminal() {
                 let threshold = *self.min_recharge_battery.lock().await;
                 let battery = *self.battery_percent.lock().await;
+                // 终态后「本体有没有真的把导航能力放掉」由 5009 pump 统一兜
+                // （`release_nav_capability`：不是 idle 就补 5002 + 等 idle）。
+                // 这里只在成功时摘掉 task_id；失败路径保留它，让外层 `abort_task`
+                // 能用真实 id 发 5002。
                 let result =
                     terminal_result(task).map_err(|e| explain_patrol_error(&e, threshold, battery));
                 if result.is_ok() {
@@ -850,27 +894,8 @@ impl RouteRunner {
     /// 这期间发下一条 `5000` 依旧被回 13897——这就是「逐点下发从第 2 个点开始全 busy」
     /// 的直接原因。
     async fn wait_body_idle(&self, max_wait: Duration) {
-        let mut rx = self.client.subscribe();
-        let deadline = tokio::time::Instant::now() + max_wait;
-        loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                warn!("等待本体释放导航能力超时（{}s）", max_wait.as_secs());
-                return;
-            }
-            let env = match tokio::time::timeout(remaining, rx.recv()).await {
-                Ok(Ok(env)) => env,
-                _ => return,
-            };
-            if env.head.msg_type != T_TASK_STATUS {
-                continue;
-            }
-            let Some(frame) = super::status::StatusFrame::parse(&env.data) else {
-                continue;
-            };
-            if frame.robot_task_state == "idle" && frame.current.is_none() {
-                return;
-            }
+        if !wait_body_idle(&self.client, max_wait).await {
+            warn!("等待本体释放导航能力超时（{}s）", max_wait.as_secs());
         }
     }
 
@@ -917,6 +942,79 @@ impl RouteRunner {
             }
             Err(e) => warn!("设置避障等级失败: {e}"),
         }
+    }
+}
+
+/// 等本体导航能力回到 idle：`robot.task_state == idle` **且**没有 current / pending。
+///
+/// `pending_task` 也是「本体没空闲」：它是已受理、等旧任务停稳的任务。只看
+/// `current_task` 会把「能力被 pending 占着」当成 idle，紧接着的 5000 就被回 13897。
+///
+/// 返回 `true` = 在 `max_wait` 内真的回到 idle；`false` = 超时（调用方决定要不要 WARN）。
+pub async fn wait_body_idle(client: &ZhProClient, max_wait: Duration) -> bool {
+    let mut rx = client.subscribe();
+    let deadline = tokio::time::Instant::now() + max_wait;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        let env = match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(env)) => env,
+            _ => return false,
+        };
+        if env.head.msg_type != T_TASK_STATUS {
+            continue;
+        }
+        let Some(frame) = super::status::StatusFrame::parse(&env.data) else {
+            continue;
+        };
+        if frame.robot_task_state == "idle" && frame.current.is_none() && frame.pending.is_none() {
+            return true;
+        }
+    }
+}
+
+/// 终态后确认本体真的把导航能力放掉。
+///
+/// `task_state == "idle"` 说明本体自己收尾完了，什么都不用发；否则补一条 `5002`
+/// （对已结束的任务，固件通常回 `13896 task not found`，视为已收尾），再等
+/// `5009` 回到 idle。等不到只 WARN，不影响已经判定的任务终态——但日志里必须留下
+/// 「本体没释放」，因为下一次 `5000` 会被 13897 拒，而且狗体尾巴灯会一直停在
+/// 「任务 / SDK 控制」状态，物理遥控器接管不了。
+///
+/// 调用点是 5009 pump（所有任务类型都经过）和 [`RouteRunner`] 自己的终态收尾；
+/// 两处对同一个 `task_id` 都是幂等的（第二条 5002 只会拿到 13896）。
+pub async fn release_nav_capability(client: &ZhProClient, task_id: &str, task_state: &str) {
+    if task_state.is_empty() || task_state == "idle" {
+        return;
+    }
+    // 先给 dog_task 一个自己收尾的窗口（见 [`TERMINAL_SETTLE`]）：绝大多数任务
+    // 几百毫秒内就回 idle 了，这时什么都不用发。
+    if wait_body_idle(client, TERMINAL_SETTLE).await {
+        return;
+    }
+    warn!(
+        "任务 {task_id} 已终态，但 {}s 后本体 task_state 仍不是 idle（导航能力未释放）：\
+         补 5002 收尾，避免下一条 5000 被 13897 拒 / 尾巴灯停在任务态",
+        TERMINAL_SETTLE.as_secs()
+    );
+    match client
+        .call(T_TASK_CANCEL, json!({ "task_id": task_id }))
+        .await
+    {
+        Ok(_) => info!("已 5002 收尾终态任务 {task_id}，等本体释放导航能力"),
+        Err(e) if is_task_not_found(&e) => {
+            debug!("终态任务 {task_id} 在本体上已不存在（13896），视为已收尾")
+        }
+        Err(e) => warn!("终态任务 {task_id} 的 5002 收尾失败: {e}"),
+    }
+    if !wait_body_idle(client, IDLE_WAIT).await {
+        warn!(
+            "终态任务 {task_id} 补 5002 后 {}s 内本体仍未回到 idle：下一条任务很可能被 \
+             13897 拒；需要在本体取消残留任务或重启本体算法节点",
+            IDLE_WAIT.as_secs()
+        );
     }
 }
 

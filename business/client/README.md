@@ -740,7 +740,19 @@ M1 文件根 `/ota/alg_data`；文档 §2.2.4.1「4013 地图列表」明确单�
      → photographing → point_completed → completed → returning
 7. 到点停留/拍照、返程全部由本体 ALG 执行，客户端不再逐点作业
    （拍照失败码 14005 会落在巡检记录里，不影响导航与整体成功）
-```
+8. 终态后**确认本体真的把导航能力放掉了**（2026-11-21 补，在 5009 pump 里统一做，
+   不是 runner）：终态帧里 `robot.task_state` 不是 `idle` 就后台补一条 `5002`
+   （已结束的任务通常回 `13896 task not found`，视为已收尾）再等 `5009` 回 idle。
+   以前只在失败路径 `abort_task`，成功路径什么都不发，残留的 `task_state=running` 会让：
+   ① 下一条 `5000` 直接回 `13897 capability busy`（任务起不来、尾巴灯不变任务色）；
+   ② 狗体一直停在「任务 / SDK 控制」状态，物理遥控器接不回来。
+   日志里对应 `任务 … 已终态，但本体 task_state=…（导航能力未释放）`。
+   **必须 spawn 到后台**：`5002 + 等 idle` 最长 15s，卡在 5009 处理链路上会把 1315
+   心跳一起堵住（平台会把设备判离线）。
+
+> `pending_task`（已受理、等旧任务停稳 / 释放资源）现在也会被跟随并上报：
+> 只查 `current_task` 时它完全不可见，平台一直显示「执行中」而底盘根本没被驱动。
+> 排队超过 `PENDING_TIMEOUT`（60s）直接判「任务未真正执行」，不必等到 180s/点 的截止时间。
 
 可调项：`--patrol-path-prefix`（默认 `平台`，本体路径名 = `<前缀>-<task_code>`）、
 `--min-recharge-battery`（默认 25）。
@@ -999,6 +1011,25 @@ ssh root@192.168.41.246 'mv /tmp/rdc.new /opt/robodog/client/robodog-device-clie
 
 平台侧对应约束：远程接管期间**不下发任务**（本体在通用/手动模式下，导航能力被判给手动控制），
 服务端 `dispatch_task` 会直接返回 400 而不是让本体拒五次。
+
+### 尾巴灯与「控制权归谁」（2026-11-21 现场问题）
+
+现场三类反馈（任务完成后尾巴灯还是任务色 / 灯变回来了但平台和遥控器都控不了 /
+下发后狗没进入任务状态）指向同一条链：**本体侧的导航能力 / 控制权没跟着平台任务收尾**。
+客户端能做的、也已经补上的部分：
+
+| 现象 | 客户端侧根因 | 现状 |
+| --- | --- | --- |
+| 任务完成后尾巴灯停住、遥控器接不回来 | 成功终态不 `5002`、`robot.task_state` 一直 running | 5009 pump 在终态帧上按 `task_state` 补 `5002` + 等 idle（见上面第 8 步） |
+| 平台显示已完成、狗其实没起步 | 刚下发（`nav_task_id` 还空）时把 `recent_terminal_tasks` 里上一轮的终态当成本单上报 | 只跟随 `5001` 返回的 `task_id`，不再按 `type == patrol` 兜底（回归：`pump::tests::stale_terminal_is_not_attributed_to_a_fresh_dispatch`） |
+| 下发后没有任何进度 | 任务落在 `pending_task`（等旧任务停稳），以前只查 `current_task` | `pending_task` 也跟随上报 + 60s 超时判「未真正执行」 |
+| 新任务进度被清空 | 上一轮收尾（runner / 建图 / 取消）无条件 `*active = None` | 一律按自己的 `task_code` 清（`clear_active_task_if`） |
+
+灯色语义以厂商手册为准（同系列手册：**蓝＝开机完成/普通遥控模式，绿＝SDK 控制模式**，
+即「外部程序（我们的客户端）握着控制权」）。所以绿灯常亮更像是「SDK 还占着」，不是「任务在跑」。
+如果收尾后长时间仍不回落，按 `deploy/robodog-body.md` §5 查：`.246` 客户端日志里的
+`本体 task_state / ctrl_source / mode`、`.1` 的 `dog_task` 是否健康（`ctrl_source=3` 也可能是
+本体自己占着导航能力，不是遥控器）。
 
 ### 「设备正在执行任务，请先暂停/结束任务后再下发地图」但平台显示没任务
 

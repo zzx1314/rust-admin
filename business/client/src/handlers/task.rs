@@ -13,6 +13,7 @@ use crate::state::ActiveTask;
 use crate::state::RobotState;
 use crate::state::Shared;
 use crate::state::clear_active_task;
+use crate::state::clear_active_task_if;
 use crate::wire::WsMessage;
 use crate::zhpro;
 use crate::zhpro::client::ZhProClient;
@@ -37,6 +38,38 @@ use zhpro::mapping::MapManager;
 use zhpro::route::Control;
 
 use zhpro::protocol::*;
+
+/// `ctrl_source = 3` 的等待窗口与轮询步长（见 [`wait_only_ctrl_preempt`]）
+const CTRL_PREEMPT_GRACE: Duration = Duration::from_secs(5);
+const CTRL_PREEMPT_GRACE_STEP: Duration = Duration::from_millis(500);
+
+/// `ctrl_source = 3` 常常只是「上一轮本体任务刚结束、导航能力还没交回来」的瞬时状态：
+/// 官方 App 里任务被本体接手后也会报 `3`（见 `deploy/robodog-body.md` §7.5），
+/// 而平台台账（心跳 10s 一次）可能还停在上一次的 `1/2`，于是「平台已经派单、
+/// 客户端当场拒单」——现场看到的就是「任务下发后狗永远不进任务状态」。
+///
+/// 所以这里给一个短窗口（[`CTRL_PREEMPT_GRACE`]）等它回落，其余门禁照旧即时拒绝。
+/// 真的被物理遥控器占着时也只是晚几秒拒，不会在 `ctrl_source=3` 期间下发任何东西。
+async fn wait_only_ctrl_preempt(state: &Shared<RobotState>) -> Option<String> {
+    let mut block = state.lock().await.motion_block_reason(true);
+    block.as_ref()?;
+    let only_ctrl_preempt = |guard: &RobotState| {
+        guard.ctrl_source == Some(3) && guard.motion_block_reason_with(true, true).is_none()
+    };
+    let started = std::time::Instant::now();
+    while started.elapsed() < CTRL_PREEMPT_GRACE {
+        if !only_ctrl_preempt(&*state.lock().await) {
+            break;
+        }
+        tokio::time::sleep(CTRL_PREEMPT_GRACE_STEP).await;
+        block = state.lock().await.motion_block_reason(true);
+        if block.is_none() {
+            info!("ctrl_source 已回落，任务继续下发");
+            return None;
+        }
+    }
+    block
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch(
@@ -133,7 +166,7 @@ pub(crate) async fn dispatch(
             }
         }
     }
-    let task_block = state.lock().await.motion_block_reason(true);
+    let task_block = wait_only_ctrl_preempt(state).await;
     if let Some(reason) = task_block {
         warn!("任务 {task_code} 拒绝下发: {reason}");
         report_progress(
@@ -513,8 +546,11 @@ pub(crate) async fn dispatch(
                 // 门禁都看这个槽位，残留的 runner 会让设备在任务早已结束（甚至
                 // 取消）之后仍报「设备正在执行任务」（2026-11-19 现场事故）。
                 clear_local_runner(&runner_slot, &runner).await;
-                *active.lock().await = None;
-                state.lock().await.current_task = None;
+                // 同理，`active` 也只能摘「自己这一份」：上一轮 runner 的收尾是异步的，
+                // 跑到这里时平台可能已经下发了新任务；无条件 `*active = None` 会把新
+                // 任务的上下文清掉（5009 不再跟随、进度定时器停报、AI/灯光全失效），
+                // 平台看到的是「已下发但没有进度」，狗其实已经在跑。
+                clear_active_task_if(&active, &state, &code).await;
             });
         }
     }

@@ -16,6 +16,7 @@ use crate::report::send_deduped_event;
 use crate::state::ActiveTask;
 use crate::state::RobotState;
 use crate::state::Shared;
+use crate::state::clear_active_task_if;
 use crate::wire::DeviceEventPayload;
 use crate::wire::TaskProgressPayload;
 use crate::wire::WsMessage;
@@ -153,7 +154,7 @@ pub(crate) fn spawn_zhpro_pump(
                         last_task_log = None;
                     }
                     let frame = accepted.frame.clone();
-                    handle_status_frame(
+                    let cleanup = handle_status_frame(
                         &frame,
                         &out_tx,
                         &state,
@@ -164,6 +165,19 @@ pub(crate) fn spawn_zhpro_pump(
                         &lights,
                     )
                     .await;
+                    // 终态后本体没释放导航能力：后台补 5002 + 等 idle。
+                    // 必须 spawn —— 它最长 15s，不能堵住 5009/1315 的处理链路。
+                    if let Some(cleanup) = cleanup {
+                        let client = client.clone();
+                        tokio::spawn(async move {
+                            crate::zhpro::route::release_nav_capability(
+                                &client,
+                                &cleanup.task_id,
+                                &cleanup.task_state,
+                            )
+                            .await;
+                        });
+                    }
                 }
                 T_ROBOT_STATUS => {
                     // 1315 里的运动状态 / 机器模式 / 控制源变化要留痕：
@@ -332,8 +346,9 @@ pub(crate) fn spawn_zhpro_pump(
                         send_map_saved_event(&out_tx, true, &saved.message, map_hint.clone()).await;
                         info!("建图任务 {task_code} 收尾: {message}");
                         *local_mapping.lock().await = None;
-                        *active.lock().await = None;
-                        state.lock().await.current_task = None;
+                        // 建图收尾可能晚于「新任务下发」：只清自己那条（见
+                        // `clear_active_task_if`），否则会把新任务的上下文清掉
+                        clear_active_task_if(&active, &state, &task_code).await;
                     } else {
                         let message = format!("建图保存失败: {}", saved.message);
                         report_progress(
@@ -349,8 +364,7 @@ pub(crate) fn spawn_zhpro_pump(
                         .await;
                         send_map_saved_event(&out_tx, false, &saved.message, None).await;
                         *local_mapping.lock().await = None;
-                        *active.lock().await = None;
-                        state.lock().await.current_task = None;
+                        clear_active_task_if(&active, &state, &task_code).await;
                     }
                 }
                 T_FAULT_CODE => {
@@ -432,6 +446,16 @@ pub(crate) fn spawn_zhpro_pump(
 }
 
 /// 把 5009 快照翻译成业务侧进度
+/// 终态任务的收尾请求：本体还占着导航能力时，由 pump 在后台补 `5002` 并等 idle。
+///
+/// 不能在这里同步做：`5002 + 等 idle` 最长 15s，卡在 5009 处理链路上会让 1315
+/// 心跳一起停摆（平台会把设备判离线）。所以只返回「要清谁」，由 [`spawn_zhpro_pump`]
+/// 抛到后台任务里执行。
+pub(crate) struct TerminalCleanup {
+    pub(crate) task_id: String,
+    pub(crate) task_state: String,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_status_frame(
     frame: &StatusFrame,
@@ -442,51 +466,52 @@ pub(crate) async fn handle_status_frame(
     reporter: &mut ProgressReporter,
     ai: &Arc<AiPatrol>,
     lights: &Arc<PointLights>,
-) {
+) -> Option<TerminalCleanup> {
     // 文档 §2.6.10 第 5 条：即时终态可能已经在 `current_task` 里被回收，只留在
     // `recent_terminal_tasks` 里（最多 3 条 / 约 30s）。两处都要识别，否则
     // 「已建链但终态帧丢了/断开重连期间到终态」时业务侧永远收不到终态，
     // 只能等看门狗把一条成功的任务判成「异常」。
+    //
+    // **只跟随已经用 5001 的 `task_id` 绑定过的那条任务**。以前 `nav_task_id` 为空时
+    // 用 `task.task_type == "patrol"` 兜底，于是「刚下发、5000 还没回」的那几帧会把
+    // `recent_terminal_tasks` 里上一轮的终态当成这条新任务的终态上报：
+    // 平台立刻显示「已完成」，而狗还没起步；之后 runner 再报「执行中」也会被服务端
+    // 的「终态不可回退」挡掉（`handle_task_progress`），整条任务在平台上就废了。
+    // 5009 一定在 5001 之后才可能带这条任务，所以不需要任何兜底匹配。
     let bound_id = {
         let guard = active.lock().await;
         guard.as_ref().and_then(|a| a.nav_task_id.clone())
     };
-    let task = match frame.current.as_ref() {
-        Some(task) => task.clone(),
-        None => {
-            // 没有 current_task 时只认「本端已绑定的那个 nav_task_id」的终态，
-            // 别人的历史终态一律忽略。
-            let Some(id) = bound_id.as_deref() else {
-                return;
-            };
-            let Some(task) = frame.terminals.iter().find(|t| t.task_id == id) else {
-                return;
-            };
-            task.clone()
-        }
-    };
-
-    // 只跟随我们下发的那个任务
-    let bound = {
-        let guard = active.lock().await;
-        match guard.as_ref() {
-            Some(a) => match &a.nav_task_id {
-                Some(id) => *id == task.task_id,
-                // 尚未绑定（刚下发）时用类型相近判定
-                None => a.task_code == task.name || task.task_type == "patrol",
-            },
-            None => false,
-        }
-    };
-    if !bound {
-        return;
+    let bound_id = bound_id?;
+    // `task_for` 依次查 current_task / pending_task / recent_terminal_tasks。
+    // **pending_task 必须认**：文档 §2.6.10 里它是「已受理但等待旧任务停稳 / 资源释放」，
+    // 这时底盘还没被驱动（尾巴灯还是非任务色），只查 current_task 会让平台完全
+    // 看不到「任务卡在排队」，一直以为执行中。
+    let task = frame.task_for(&bound_id).cloned()?;
+    if task.task_id != bound_id {
+        return None;
+    }
+    let pending = frame
+        .current
+        .as_ref()
+        .is_none_or(|current| current.task_id != task.task_id)
+        && frame
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.task_id == task.task_id);
+    if pending {
+        info!(
+            "5009 任务在 pending_task（已受理、等旧任务停稳/资源释放，底盘未驱动）: id={} \
+             name={} stage={} task_state={}",
+            task.task_id, task.name, task.stage, frame.robot_task_state
+        );
     }
 
     // 终态上报幂等：同一条任务同一个 lifecycle 只报一次。
     // 后面每一帧心跳都会带同一个终态（current_task 一次 + recent_terminal_tasks 多次），
     // 不去重就是每 500ms 往业务库推一条「已完成」。
     if task.is_terminal() && !monitor.lock().await.take_terminal(&task) {
-        return;
+        return None;
     }
 
     {
@@ -605,20 +630,59 @@ pub(crate) async fn handle_status_frame(
 
     // 终态：清空占用
     if task.is_terminal() {
-        if let Some(lo) = task.detail_index {
-            let _ = lo;
-        }
+        // 现场对账最重要的一行：终态时本体到底把导航能力放掉了没有。
+        // `task_state` 不是 idle 就是「本体还占着任务/SDK 控制」——下一单 5000 会回
+        // 13897 capability busy，尾巴灯也会一直停在任务/SDK 控制色，物理遥控器进不来。
+        let body = {
+            let st = state.lock().await;
+            (
+                frame.robot_task_state.clone(),
+                st.ctrl_source,
+                st.robot_mode.clone(),
+            )
+        };
         let mut guard = active.lock().await;
         if let Some(a) = guard.as_ref() {
             info!(
-                "任务 {} [{}] 进入终态: {}",
-                a.task_code, a.task_name, task.lifecycle
+                "任务 {} [{}] 进入终态: {}（本体 task_state={} ctrl_source={} mode={}）",
+                a.task_code,
+                a.task_name,
+                task.lifecycle,
+                if body.0.is_empty() {
+                    "—"
+                } else {
+                    body.0.as_str()
+                },
+                body.1
+                    .map(|source| source.to_string())
+                    .unwrap_or_else(|| "—".to_string()),
+                body.2.as_deref().unwrap_or("—")
             );
         }
-        *guard = None;
-        let mut st = state.lock().await;
-        st.current_task = None;
+        // 收尾是异步的：期间可能已经换成了新下发的任务。只有 active 还绑着这条任务
+        // 的 `task_id` 时才清，否则会把新任务的上下文一起清掉（平台就再看不到进度）。
+        let ours = guard
+            .as_ref()
+            .and_then(|a| a.nav_task_id.as_deref())
+            .is_some_and(|id| id == task.task_id);
+        if ours {
+            *guard = None;
+        }
+        drop(guard);
+        if ours {
+            state.lock().await.current_task = None;
+        }
+        // 本体还占着导航能力（典型是被 5004 暂停过 / 返航刚结束 / 任务被替换）：
+        // 交给后台补 5002 再等 idle。不清的话下一条 5000 会被 13897 拒，
+        // 狗体也会一直停在「任务 / SDK 控制」状态，物理遥控器接不回来。
+        if !body.0.is_empty() && body.0 != "idle" && ours {
+            return Some(TerminalCleanup {
+                task_id: task.task_id.clone(),
+                task_state: body.0.clone(),
+            });
+        }
     }
+    None
 }
 
 /// 5009 `stage` → 业务任务状态
@@ -662,4 +726,250 @@ pub(crate) fn classify_stage(task: &TaskSnapshot) -> (&'static str, String) {
         other => other.to_string(),
     };
     ("执行中", message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai_patrol::AiPatrol;
+    use crate::lights::PointLights;
+    use crate::state::ActiveTask;
+    use robodog_device_client::config::CliArgs;
+    use robodog_device_client::config::EnvConfig;
+    use robodog_device_client::config::FileConfig;
+    use serde_json::json;
+
+    fn test_config() -> Config {
+        Config::resolve(
+            &FileConfig::default(),
+            &EnvConfig::default(),
+            &CliArgs {
+                device_id: Some("TEST-DEVICE".to_string()),
+                ..CliArgs::default()
+            },
+            None,
+        )
+        .expect("测试配置应能解析")
+    }
+
+    struct Harness {
+        out_rx: mpsc::Receiver<WsMessage>,
+        out_tx: mpsc::Sender<WsMessage>,
+        state: Shared<RobotState>,
+        active: Shared<Option<ActiveTask>>,
+        monitor: Arc<Mutex<TaskMonitor>>,
+        reporter: ProgressReporter,
+        ai: Arc<AiPatrol>,
+        lights: Arc<PointLights>,
+    }
+
+    impl Harness {
+        fn new(active_task: ActiveTask) -> Self {
+            let (out_tx, out_rx) = mpsc::channel(16);
+            let mut state = RobotState::new(&test_config());
+            state.mode = "robot";
+            let state: Shared<RobotState> = Arc::new(Mutex::new(state));
+            let active: Shared<Option<ActiveTask>> = Arc::new(Mutex::new(Some(active_task)));
+            Self {
+                out_rx,
+                out_tx,
+                state,
+                active,
+                monitor: Arc::new(Mutex::new(TaskMonitor::default())),
+                reporter: ProgressReporter::default(),
+                ai: Arc::new(AiPatrol::with_jobs_dir("http://127.0.0.1:1", false, None)),
+                lights: Arc::new(PointLights::new("http://127.0.0.1:1", false)),
+            }
+        }
+
+        async fn feed(&mut self, frame: &StatusFrame) -> Option<TerminalCleanup> {
+            handle_status_frame(
+                frame,
+                &self.out_tx,
+                &self.state,
+                &self.active,
+                &self.monitor,
+                &mut self.reporter,
+                &self.ai,
+                &self.lights,
+            )
+            .await
+        }
+
+        /// 取出所有发往平台的 `task_progress` 载荷（Value，方便按字段断言）
+        fn drain_progress(&mut self) -> Vec<serde_json::Value> {
+            let mut sent = Vec::new();
+            while let Ok(msg) = self.out_rx.try_recv() {
+                if msg.msg_type == "task_progress" {
+                    sent.push(msg.payload);
+                }
+            }
+            sent
+        }
+    }
+
+    fn active_task(code: &str, nav_task_id: Option<&str>) -> ActiveTask {
+        ActiveTask {
+            task_code: code.to_string(),
+            task_name: "A区巡检".to_string(),
+            nav_task_id: nav_task_id.map(str::to_string),
+            ..ActiveTask::default()
+        }
+    }
+
+    fn frame(current: Value, pending: Value, terminals: Value) -> StatusFrame {
+        frame_with_task_state(current, pending, terminals, None)
+    }
+
+    /// `task_state = None` 时按「有 current 就 running、否则 idle」推
+    fn frame_with_task_state(
+        current: Value,
+        pending: Value,
+        terminals: Value,
+        task_state: Option<&str>,
+    ) -> StatusFrame {
+        let task_state = task_state.map(str::to_string).unwrap_or_else(|| {
+            if current.is_null() {
+                "idle".to_string()
+            } else {
+                "running".to_string()
+            }
+        });
+        StatusFrame::parse(&json!({
+            "schema_version": 2,
+            "boot_id": "boot-a",
+            "snapshot_seq": 1,
+            "revision": 1,
+            "reason": "heartbeat",
+            "robot": {
+                "task_state": task_state,
+                "loc_state": { "status": 100, "fresh": true }
+            },
+            "current_task": current,
+            "pending_task": pending,
+            "recent_terminal_tasks": terminals
+        }))
+        .expect("5009 v2 帧要能解析")
+    }
+
+    fn task(id: &str, kind: &str, lifecycle: &str, stage: &str) -> Value {
+        json!({
+            "task_id": id,
+            "type": kind,
+            "name": "A区巡检",
+            "lifecycle": lifecycle,
+            "stage": stage,
+            "progress": 100.0,
+            "last_event": { "seq": 1, "type": stage },
+        })
+    }
+
+    /// 刚下发（5000 还没回、没有 nav_task_id）时，上一轮留在
+    /// `recent_terminal_tasks` 里的终态**不能**算到这条新任务头上。
+    ///
+    /// 旧逻辑用 `task_type == "patrol"` 兜底，会把平台侧的新任务立刻上报成
+    /// 「已完成」；服务端 `task_status` 不可回退，之后 runner 报「执行中」也写不进去，
+    /// 平台就永远停在「已完成」（狗其实才刚要起步）。
+    #[tokio::test]
+    async fn stale_terminal_is_not_attributed_to_a_fresh_dispatch() {
+        let mut h = Harness::new(active_task("TK-NEW", None));
+        let frame = frame(
+            Value::Null,
+            Value::Null,
+            json!([task("robot-old", "patrol", "success", "patrol.completed")]),
+        );
+        h.feed(&frame).await;
+
+        assert!(
+            h.drain_progress().is_empty(),
+            "没有绑定 task_id 时不许上报任何进度/终态"
+        );
+        assert!(
+            h.active.lock().await.is_some(),
+            "新任务的上下文不能被上一轮的终态清掉"
+        );
+    }
+
+    /// `pending_task` 是「已受理、等旧任务停稳 / 释放资源」：必须能跟随、能上报，
+    /// 否则平台只看到「执行中」，而狗其实还没被驱动（尾巴灯也不是任务色）。
+    #[tokio::test]
+    async fn pending_task_is_reported_while_the_body_is_still_busy() {
+        let mut h = Harness::new(active_task("TK-1", Some("robot-1")));
+        let frame = frame(
+            Value::Null,
+            task("robot-1", "patrol", "pending", "patrol.preparing"),
+            json!([]),
+        );
+        h.feed(&frame).await;
+
+        let sent = h.drain_progress();
+        assert_eq!(sent.len(), 1, "pending 也要上报一次进度: {sent:?}");
+        assert_eq!(sent[0]["taskCode"], "TK-1");
+        assert_eq!(sent[0]["robotTaskId"], "robot-1");
+        assert_eq!(sent[0]["status"], "执行中");
+        // 底盘还没动，不能报「已完成」
+        assert!(
+            h.active.lock().await.is_some(),
+            "pending 不是终态，任务上下文必须保留"
+        );
+    }
+
+    /// 终态但本体 `task_state` 还不是 idle：必须把「要给它补 5002」这件事交出去，
+    /// 否则导航能力一直被占着（下一条 5000 回 13897，狗体停在任务/SDK 控制态）。
+    #[tokio::test]
+    async fn terminal_with_capability_still_busy_asks_for_cleanup() {
+        let mut h = Harness::new(active_task("TK-1", Some("robot-1")));
+        let frame = frame_with_task_state(
+            task("robot-1", "patrol", "success", "patrol.completed"),
+            Value::Null,
+            json!([]),
+            Some("running"),
+        );
+        let cleanup = h.feed(&frame).await;
+        let cleanup = cleanup.expect("本体没释放导航能力时必须请求收尾");
+        assert_eq!(cleanup.task_id, "robot-1");
+        assert_eq!(cleanup.task_state, "running");
+        // 上报仍然是「已完成」（任务本身成功了），收尾只影响本体状态
+        let sent = h.drain_progress();
+        assert_eq!(
+            sent.last().map(|p| p["status"].clone()),
+            Some(json!("已完成"))
+        );
+    }
+
+    /// 本体自己已经回到 idle：不要再发 5002（对已结束的任务只会有 13896 噪声）
+    #[tokio::test]
+    async fn terminal_with_idle_capability_needs_no_cleanup() {
+        let mut h = Harness::new(active_task("TK-1", Some("robot-1")));
+        let frame = frame_with_task_state(
+            task("robot-1", "patrol", "success", "patrol.completed"),
+            Value::Null,
+            json!([]),
+            Some("idle"),
+        );
+        assert!(h.feed(&frame).await.is_none(), "idle 时不该再补 5002");
+    }
+
+    /// 终态只清「自己那条」：如果 active 已经换成新任务（旧任务的终态帧晚到），
+    /// 不能把新任务的上下文清掉。
+    #[tokio::test]
+    async fn terminal_of_another_task_does_not_clear_the_current_one() {
+        let mut h = Harness::new(active_task("TK-NEW", Some("robot-new")));
+        let frame = frame(
+            Value::Null,
+            Value::Null,
+            json!([task("robot-old", "patrol", "success", "patrol.completed")]),
+        );
+        h.feed(&frame).await;
+
+        assert!(h.drain_progress().is_empty(), "别人的终态不许上报");
+        let guard = h.active.lock().await;
+        assert_eq!(
+            guard.as_ref().map(|task| task.task_code.as_str()),
+            Some("TK-NEW"),
+            "新任务上下文不能被旧任务的终态清掉"
+        );
+        // 清理通道没有收尾残留（保证没有「已完成」之类的误报）
+        drop(guard);
+    }
 }
