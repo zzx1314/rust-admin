@@ -225,6 +225,9 @@ pub fn parse_pgm_raster(bytes: &[u8]) -> Result<PgmRaster, AppError> {
 /// `model.pgm` / `map.pgm`。根目录的原始地图条目原样保留，平台编辑不会污染
 /// 本体上的建图原始数据。除被编辑的 PGM 外，其余条目（yaml、自定义标注等）
 /// 按原顺序原样复制，因此分辨率 / 原点 / negate 等元数据保持不变。
+///
+/// `erase_value` 只是兜底：每笔优先用 `stroke.value`（同一次编辑允许混着擦成
+/// 可通行 254 / 未知 205）。
 pub fn rewrite_map_package(
     bytes: &[u8],
     strokes: &[MapEditStroke],
@@ -285,6 +288,8 @@ pub fn rewrite_map_package(
 }
 
 /// 把橡皮擦笔画刷进像素缓冲区，返回实际被改写的像素数。
+///
+/// 每笔写入自己的 `stroke.value`，缺省时用 `erase_value`。
 pub fn apply_erase_strokes(
     pixels: &mut [u8],
     width: u32,
@@ -306,6 +311,9 @@ pub fn apply_erase_strokes(
         if !radius.is_finite() {
             return Err(AppError::BadRequest("笔刷半径无效".to_string()));
         }
+        // 值跟着笔画走：同一批里可能既擦成可通行（254）又擦成未知（205）。
+        // 没有 `value` 的老客户端回退到请求级 `eraseValue`。
+        let value = stroke.value.unwrap_or(erase_value);
         for point in &stroke.points {
             if !point.x.is_finite() || !point.y.is_finite() {
                 return Err(AppError::BadRequest("笔画坐标无效".to_string()));
@@ -318,7 +326,7 @@ pub fn apply_erase_strokes(
             height,
             &stroke.points[0],
             radius,
-            erase_value,
+            value,
         );
         for pair in stroke.points.windows(2) {
             changed += stamp_segment(
@@ -328,7 +336,7 @@ pub fn apply_erase_strokes(
                 &pair[0],
                 &pair[1],
                 radius,
-                erase_value,
+                value,
             );
         }
     }
@@ -664,6 +672,7 @@ mod tests {
         let strokes = vec![MapEditStroke {
             points: vec![MapEditPoint { x: 0.5, y: 0.5 }],
             radius: Some(0.6),
+            value: None,
         }];
         let (edited, changed) = rewrite_map_package(&zip, &strokes, 254).unwrap();
         assert_eq!(changed, 1);
@@ -715,11 +724,13 @@ mod tests {
             MapEditStroke {
                 points: vec![MapEditPoint { x: 4.5, y: 4.5 }],
                 radius: Some(0.6),
+                value: None,
             },
             // 右上角噪点：半径放大到 2 验证边界裁剪（不能越界 panic）
             MapEditStroke {
                 points: vec![MapEditPoint { x: 7.5, y: 0.5 }],
                 radius: Some(2.0),
+                value: None,
             },
         ];
         let (edited, changed) = rewrite_map_package(&zip, &strokes, 254).unwrap();
@@ -745,6 +756,28 @@ mod tests {
     }
 
     #[test]
+    fn applies_per_stroke_value_so_mixed_edits_keep_their_own_gray() {
+        // 8x1 全是障碍（0）：左半擦成可通行（254）、右半擦成未知（205）。
+        // 请求级默认值故意给 254，只有笔画自带的值生效才算对。
+        let mut pixels = vec![0u8; 8];
+        let strokes = vec![
+            MapEditStroke {
+                points: vec![MapEditPoint { x: 1.5, y: 0.5 }],
+                radius: Some(0.6),
+                value: Some(254),
+            },
+            MapEditStroke {
+                points: vec![MapEditPoint { x: 6.5, y: 0.5 }],
+                radius: Some(0.6),
+                value: Some(205),
+            },
+        ];
+        apply_erase_strokes(&mut pixels, 8, 1, &strokes, 254).unwrap();
+        assert_eq!(pixels[1], 254, "第一笔必须写成可通行");
+        assert_eq!(pixels[6], 205, "第二笔必须写成未知");
+    }
+
+    #[test]
     fn erases_along_segment_between_samples() {
         let mut pixels = vec![0u8; 20 * 10];
         let strokes = vec![MapEditStroke {
@@ -753,6 +786,7 @@ mod tests {
                 MapEditPoint { x: 18.0, y: 5.0 },
             ],
             radius: Some(1.0),
+            value: None,
         }];
         apply_erase_strokes(&mut pixels, 20, 10, &strokes, 205).unwrap();
         // 中间没有采样点的像素也必须被插值补上

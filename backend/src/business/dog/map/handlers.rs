@@ -144,7 +144,8 @@ pub async fn get_map_image_handler(
 ///
 /// 包内有 `map_edit/` 时改写 `map_edit/map.pgm`（遥控器编辑后的地图），根目录
 /// 的原始 `map.pgm` 不动；没有编辑目录时才回退到 `model.pgm` / `map.pgm`。
-/// 请求体：`{ strokes: [{ points: [{x,y}], radius }], eraseValue: 254 }`，
+/// 请求体：`{ strokes: [{ points: [{x,y}], radius, value }], eraseValue: 254 }`，
+/// `value` 是这一笔自己的灰度值（254 可通行 / 205 未知，缺省回退 `eraseValue`），
 /// 坐标是栅格像素坐标；返回改写后的 PNG 与新的 `mapHash`。
 pub async fn edit_map_handler(
     State(state): State<AppState>,

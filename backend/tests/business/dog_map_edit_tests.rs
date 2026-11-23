@@ -170,6 +170,7 @@ fn center_stroke(radius: f64) -> MapEditRequest {
         strokes: vec![MapEditStroke {
             points: vec![MapEditPoint { x: 4.5, y: 4.5 }],
             radius: Some(radius),
+            value: None,
         }],
         erase_value: None,
     }
@@ -292,6 +293,7 @@ async fn erase_supports_unknown_value_and_multiple_strokes() {
             MapEditStroke {
                 points: vec![MapEditPoint { x: 4.5, y: 4.5 }],
                 radius: Some(1.0),
+                value: None,
             },
             MapEditStroke {
                 points: vec![
@@ -299,6 +301,7 @@ async fn erase_supports_unknown_value_and_multiple_strokes() {
                     MapEditPoint { x: 7.5, y: 7.5 },
                 ],
                 radius: Some(0.6),
+                value: None,
             },
         ],
         erase_value: Some(205),
@@ -324,6 +327,50 @@ async fn erase_supports_unknown_value_and_multiple_strokes() {
     let raster = parse_pgm_raster(&pgm).unwrap();
     assert_eq!(raster.pixels[NOISE_INDEX], 205);
     assert_eq!(raster.pixels[(7 * WIDTH) as usize + 3], 205);
+}
+
+#[tokio::test]
+async fn erase_keeps_per_stroke_value_in_one_save() {
+    let fixture = fixture("草稿").await;
+    let scope = DataScope::new(1, true);
+
+    // 先擦成可通行（中心噪点），再擦成未知（左上角原本可通行的像素）。
+    // 两笔分属于同一个请求：值必须跟着笔画走，不能被请求级 `eraseValue` 覆盖。
+    let request = MapEditRequest {
+        strokes: vec![
+            MapEditStroke {
+                points: vec![MapEditPoint { x: 4.5, y: 4.5 }],
+                radius: Some(0.6),
+                value: Some(254),
+            },
+            MapEditStroke {
+                points: vec![MapEditPoint { x: 0.5, y: 0.5 }],
+                radius: Some(0.6),
+                value: Some(205),
+            },
+        ],
+        erase_value: None,
+    };
+    fixture
+        .state
+        .dog_map_service
+        .erase(fixture.map_id, request, &fixture.state.upload_dir, &scope)
+        .await
+        .expect("erase must succeed");
+
+    let map = fixture
+        .state
+        .dog_map_service
+        .get_by_id(fixture.map_id, &scope)
+        .await
+        .unwrap();
+    let bytes = std::fs::read(fixture.state.upload_dir.join(map.file_path.unwrap())).unwrap();
+    let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+    let mut pgm = Vec::new();
+    std::io::Read::read_to_end(&mut archive.by_name("map/model.pgm").unwrap(), &mut pgm).unwrap();
+    let raster = parse_pgm_raster(&pgm).unwrap();
+    assert_eq!(raster.pixels[NOISE_INDEX], 254, "第一笔是擦成可通行");
+    assert_eq!(raster.pixels[0], 205, "第二笔是擦成未知");
 }
 
 #[tokio::test]

@@ -6,9 +6,9 @@
  * 编辑后的地图）转成 PNG，没有编辑版时才用 model.pgm / map.pgm，
  * 这里按栅格原始像素尺寸画到 canvas 上，支持缩放、拖动浏览。
  *
- * 编辑：橡皮擦按栅格像素坐标记录笔画，提交 `POST /api/dogMap/{id}/edit`，
- * 后端把编辑版栅格的这些像素改写为 254（可通行，默认）或 205（未知）并重算
- * map_hash；根目录的建图原始 map.pgm 不会被改。
+ * 编辑：橡皮擦按栅格像素坐标记录笔画，每一笔都记下自己的擦除值（254 = 可通行，
+ * 默认；205 = 未知），提交 `POST /api/dogMap/{id}/edit`。后端按笔画把这些像素
+ * 改写为对应灰度值并重算 map_hash；根目录的建图原始 map.pgm 不会被改。
  * 已发布 / 已归档版本不可编辑，需要先派生新版本。
  */
 import { computed, nextTick, ref } from "vue";
@@ -92,11 +92,6 @@ const pushTargets = computed<string[]>(() => {
   return codes;
 });
 const canPush = computed(() => pushTargets.value.length > 0);
-const brushColor = computed(() =>
-  eraseValue.value === 254
-    ? "#ffffff"
-    : `rgb(${eraseValue.value},${eraseValue.value},${eraseValue.value})`
-);
 const brushStyle = computed(() => {
   const size = brushRadius.value * 2 * zoom.value;
   return {
@@ -194,6 +189,11 @@ function drawBase(
   });
 }
 
+/** 灰度值 → 画布颜色（PNG 是灰度图，直接按同值上色即可）。 */
+function valueColor(value: number) {
+  return `rgb(${value},${value},${value})`;
+}
+
 /** 重绘：底图 + 回放未保存的笔画。 */
 function render() {
   const canvas = canvasRef.value;
@@ -207,10 +207,9 @@ function render() {
 
 function paintStroke(context: CanvasRenderingContext2D, stroke: MapEditStroke) {
   const radius = stroke.radius ?? brushRadius.value;
-  const color =
-    eraseValue.value === 254
-      ? "#ffffff"
-      : `rgb(${eraseValue.value},${eraseValue.value},${eraseValue.value})`;
+  // 颜色必须跟着笔画自己记录的值走：先擦成可通行、再切到未知并撤销时，
+  // 早先那几笔不能被当前选中的值重新上色（否则可通行区域会变成未知）。
+  const color = valueColor(stroke.value ?? eraseValue.value);
   context.save();
   context.fillStyle = color;
   context.strokeStyle = color;
@@ -295,7 +294,9 @@ function onPointerDown(event: PointerEvent) {
   const point = toPixel(event);
   currentStroke = {
     points: [point],
-    radius: brushRadius.value
+    radius: brushRadius.value,
+    // 值在落笔时就固定，之后切换「可通行 / 未知」不影响这一笔
+    value: eraseValue.value
   };
   strokes.push(currentStroke);
   dirty.value = true;
@@ -315,11 +316,12 @@ function onPointerMove(event: PointerEvent) {
   };
   currentStroke.points.push(next);
   if (ctx) {
-    // 只补画新增的一段，避免每次重绘整张图
+    // 只补画新增的一段，避免每次重绘整张图；颜色用笔画自己的值
     const radius = currentStroke.radius ?? brushRadius.value;
+    const color = valueColor(currentStroke.value ?? eraseValue.value);
     ctx.save();
-    ctx.fillStyle = brushColor.value;
-    ctx.strokeStyle = brushColor.value;
+    ctx.fillStyle = color;
+    ctx.strokeStyle = color;
     ctx.lineWidth = radius * 2;
     ctx.lineCap = "round";
     ctx.beginPath();

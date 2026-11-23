@@ -62,13 +62,20 @@ export type MapImageResult = {
 export type MapEditStroke = {
   points: Array<{ x: number; y: number }>;
   radius?: number;
+  /**
+   * 本笔画写入的灰度值（254 = 可通行、205 = 未知）。
+   * 一次编辑里可以既擦成可通行又擦成未知，所以值跟着笔画走；
+   * 省略时后端回退到请求体的 `eraseValue`（老客户端）。
+   */
+  value?: number;
 };
 
 /**
  * 保存橡皮擦编辑：后端改写包内编辑版栅格（优先 `map_edit/map.pgm`，没有时才用
  * `model.pgm` / `map.pgm`）并重算 `map_hash`，根目录原始地图不动。
  *
- * `eraseValue`：254 = 可通行（默认，擦掉噪点），205 = 未知。
+ * `eraseValue`：254 = 可通行（默认，擦掉噪点），205 = 未知；只作兜底——
+ * 笔画自带 `value` 时以笔画为准（同一次编辑允许两种值混用）。
  * 只有草稿 / 部分标定版本可编辑，已发布版本需先派生新版本。
  */
 export const dogMapErase = (

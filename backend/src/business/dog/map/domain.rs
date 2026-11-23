@@ -235,8 +235,9 @@ pub struct MapVO {
 /// 地图擦除（橡皮擦）请求。
 ///
 /// 前端在预览画布上按栅格像素坐标记录笔画，提交后由服务端把编辑版栅格
-/// （`map_edit/map.pgm`，没有时才用 `model.pgm`）里对应区域改写为 `eraseValue`
-/// （默认 254 = 自由空间，用来擦掉孤立噪点）。
+/// （`map_edit/map.pgm`，没有时才用 `model.pgm`）里对应区域改写为各自的
+/// `stroke.value`（缺省回退到 `erase_value`；默认 254 = 自由空间）。
+/// 每一笔都带自己的值，是因为一次编辑里可能既擦成可通行又擦成未知。
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MapEditRequest {
@@ -246,11 +247,17 @@ pub struct MapEditRequest {
 }
 
 /// 一笔连续擦除（画笔半径单位：栅格像素）。
+///
+/// `value` 是这一笔自己写入的灰度值（`254` = 可通行、`205` = 未知）。
+/// 同一次编辑里允许混着画（先擦成可通行、再擦成未知），所以值必须跟着笔画走；
+/// 请求体里的 `erase_value` 只作为老客户端（不带 `value`）的兜底默认值。
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MapEditStroke {
     pub points: Vec<MapEditPoint>,
     pub radius: Option<f64>,
+    /// 本笔画写入的灰度值；缺省时用请求体的 `eraseValue`。
+    pub value: Option<u8>,
 }
 
 /// 栅格像素坐标（左上角为原点，`x` 向右、`y` 向下）。
