@@ -218,6 +218,97 @@ async fn shared_map_is_visible_to_the_target_device_user_and_filterable() {
 }
 
 #[tokio::test]
+async fn every_user_assigned_to_the_same_dog_sees_its_maps() {
+    let state = test_state().await;
+    let admin = DataScope::new(1, true);
+    // 一台狗绑定多个人：地图回传时只记一个归属人（业务平台取第一个用户），
+    // 后绑定的人也必须能看到狗体里的地图。
+    let owner = 9101;
+    let co_user = 9102;
+    let stranger = 9103;
+
+    let device = state
+        .dog_device_service
+        .create(device_request("RD-100"), &admin)
+        .await
+        .expect("device must be created");
+    state
+        .dog_device_service
+        .assign_users(AssignUsersRequest {
+            device_ids: vec![device.id],
+            user_ids: vec![owner, co_user],
+            mode: Some("replace".to_string()),
+        })
+        .await
+        .expect("assign must work");
+
+    let map = state
+        .dog_map_service
+        .create(
+            map_request("狗体地图", Some("RD-100")),
+            &DataScope::new(owner, false),
+        )
+        .await
+        .expect("map must be created");
+    assert_eq!(map.user_id, owner);
+
+    // 归属人：一直可见
+    assert_eq!(
+        state
+            .dog_map_service
+            .list_page(page_query(None), &DataScope::new(owner, false))
+            .await
+            .expect("list must work")
+            .total,
+        1
+    );
+
+    // 后绑定的用户：未分享也应该能看到这张图
+    let co_scope = DataScope::new(co_user, false);
+    let visible = state
+        .dog_map_service
+        .get_by_id(map.id, &co_scope)
+        .await
+        .expect("co-assigned user must read the dog map");
+    assert_eq!(visible.id, map.id);
+    let listed = state
+        .dog_map_service
+        .list_page(page_query(None), &co_scope)
+        .await
+        .expect("list must work");
+    assert_eq!(listed.total, 1);
+    assert_eq!(listed.records[0].id, map.id);
+
+    // 仍然不是可编辑的：写操作只认归属人
+    assert!(
+        state
+            .dog_map_service
+            .update(map.id, rename("别人改名"), &co_scope)
+            .await
+            .is_err()
+    );
+
+    // 没绑这台狗的人照旧看不到
+    let stranger_scope = DataScope::new(stranger, false);
+    assert!(
+        state
+            .dog_map_service
+            .get_by_id(map.id, &stranger_scope)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        state
+            .dog_map_service
+            .list_page(page_query(None), &stranger_scope)
+            .await
+            .expect("list must work")
+            .total,
+        0
+    );
+}
+
+#[tokio::test]
 async fn share_is_idempotent_and_replace_clears_it() {
     let state = test_state().await;
     let admin = DataScope::new(1, true);

@@ -1,5 +1,5 @@
 use crate::app::AppState;
-use crate::auth::Claims;
+use crate::auth::{self, Claims};
 use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::gateway;
@@ -72,6 +72,8 @@ pub async fn list_maps(
         builder.push(" AND m.source = ").push_bind(source);
     }
     // 地图跟着设备走：设备在中台分配给谁，谁就能看到这张图。
+    // 一台狗可以绑定多个人：`owner_user_id` 只记回传时的第一个归属人，
+    // 其他人得靠「设备分配关系」兜住，否则后绑定的人地图列表里一张都看不到。
     // 管理员可看全部，也可用 ownerUserId 指定某个用户；其他人只看自己（含归属未知的历史行）。
     if let Some(Extension(claims)) = claims {
         if claims.is_admin {
@@ -79,10 +81,32 @@ pub async fn list_maps(
                 builder.push(" AND m.owner_user_id = ").push_bind(owner);
             }
         } else if let Some(zentai_user_id) = claims.zentai_user_id {
+            // 中台不可达 / 未配置时不放行全量：退回「只看自己」的老口径。
+            let device_codes = auth::allowed_device_codes(&state, &claims)
+                .await
+                .ok()
+                .flatten()
+                .map(|codes| {
+                    let mut codes: Vec<String> = codes.into_iter().collect();
+                    codes.sort();
+                    codes
+                })
+                .unwrap_or_default();
             builder
                 .push(" AND (m.owner_user_id = ")
                 .push_bind(zentai_user_id)
-                .push(" OR m.owner_user_id IS NULL)");
+                .push(" OR m.owner_user_id IS NULL");
+            if !device_codes.is_empty() {
+                builder.push(" OR m.device_code IN (");
+                for (index, code) in device_codes.iter().enumerate() {
+                    if index > 0 {
+                        builder.push(", ");
+                    }
+                    builder.push_bind(code.clone());
+                }
+                builder.push(")");
+            }
+            builder.push(")");
         } else {
             builder.push(" AND m.owner_user_id IS NULL");
         }
@@ -283,6 +307,8 @@ pub async fn list_backend_maps(
             .push_bind(park_code.trim().to_string());
     }
     // 业务用户只能看到自己名下机器狗采集的地图（含共享给自己管辖设备的图）；
+    // 同一台狗绑定多个人时，`d.user_id` 只记第一个归属人，所以还要放行
+    // 「上报设备分配给了我」的图，否则后绑定的人在导入列表里看不到本狗的地图。
     // 中台管理员可看全部，也可用 ownerUserId 指定查看某个用户的地图。
     let owner_filter = if claims.is_admin {
         query.owner_user_id
@@ -295,7 +321,13 @@ pub async fn list_backend_maps(
                 .push(" AND (d.user_id = ")
                 .push_bind(owner)
                 .push(
-                    " OR d.id IN (SELECT s.map_id FROM dog_map_share s \
+                    " OR d.device_code IN (SELECT dev.device_id FROM dog_device dev \
+                     JOIN dog_user_device ud ON ud.device_id = dev.id AND ud.is_deleted = 0 \
+                     WHERE dev.is_deleted = 0 AND ud.user_id = ",
+                )
+                .push_bind(owner)
+                .push(
+                    ") OR d.id IN (SELECT s.map_id FROM dog_map_share s \
                      JOIN dog_device dev ON dev.device_id = s.device_code AND dev.is_deleted = 0 \
                      JOIN dog_user_device ud ON ud.device_id = dev.id AND ud.is_deleted = 0 \
                      WHERE s.is_deleted = 0 AND ud.user_id = ",

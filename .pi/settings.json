@@ -1,0 +1,9 @@
+{
+  "skills": [
+    "!**/rust-skills/commands/**",
+    "!**/rust-skills/agents/**"
+  ],
+  "prompts": [
+    "../.agents/skills/rust-skills/commands"
+  ]
+}

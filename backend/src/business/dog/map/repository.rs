@@ -57,7 +57,7 @@ impl SeaOrmDogMapRepository {
         query.one(&*self.conn).await
     }
 
-    /// 读接口的可见范围：自己的地图 + 分享给自己管辖设备的其他地图。
+    /// 读接口的可见范围：自己的地图 + 自己管辖设备上报的地图 + 分享给自己管辖设备的其他地图。
     ///
     /// 写接口（改 / 删 / 发版 / 擦除 / 覆盖地图包）仍然只认 [`Self::find_by_id`]，
     /// 分享出去的地图不因此变成别人可编辑的。
@@ -75,18 +75,26 @@ impl SeaOrmDogMapRepository {
             return Ok(None);
         };
         if let Some(owner) = scope.owner_filter()
-            && map.user_id != owner
-            && !self.is_shared_to_user(map.id, owner).await?
+            && !self.is_visible_to_user(&map, owner).await?
         {
             return Ok(None);
         }
         Ok(Some(map))
     }
 
-    /// 普通用户的可见条件：自己的地图，或分享给了分配给自己的设备的地图。
+    /// 普通用户的可见条件：自己的地图，自己管辖设备上报的地图，
+    /// 或分享给了分配给自己的设备的地图。
+    ///
+    /// 「自己管辖设备上报的地图」这一条不能少：地图的 `user_id` 只记一个归属人
+    /// （业务平台回传时取第一个被分配的用户），同一台狗绑定多个人时，其他人在
+    /// 地图列表里会一张都看不到。地图跟着设备走，绑定关系才是一等公民。
     async fn visibility_condition(&self, owner: i64) -> Result<Condition, sea_orm::DbErr> {
-        let shared = self.find_shared_map_ids_for_user(owner).await?;
         let mut condition = Condition::any().add(MapColumn::UserId.eq(owner));
+        let device_codes = self.find_assigned_device_codes(owner).await?;
+        if !device_codes.is_empty() {
+            condition = condition.add(MapColumn::DeviceCode.is_in(device_codes));
+        }
+        let shared = self.find_shared_map_ids_for_user(owner).await?;
         if !shared.is_empty() {
             condition = condition.add(MapColumn::Id.is_in(shared));
         }
@@ -523,6 +531,62 @@ impl SeaOrmDogMapRepository {
             .iter()
             .filter_map(|row| row.try_get::<i64>("", "map_id").ok())
             .collect())
+    }
+
+    /// 这张地图对 `user_id` 是否可见：
+    /// 自己的图 / 自己管辖设备上报的图 / 分享给自己管辖设备的图。
+    async fn is_visible_to_user(&self, map: &Map, user_id: i64) -> Result<bool, sea_orm::DbErr> {
+        if map.user_id == user_id {
+            return Ok(true);
+        }
+        if let Some(device_code) = map.device_code.as_deref()
+            && self
+                .is_device_assigned_to_user(device_code, user_id)
+                .await?
+        {
+            return Ok(true);
+        }
+        self.is_shared_to_user(map.id, user_id).await
+    }
+
+    /// 分配给该用户的设备编号（地图跟着设备走：同一台狗绑定多人时，每个绑定人都能看图）。
+    async fn find_assigned_device_codes(
+        &self,
+        user_id: i64,
+    ) -> Result<Vec<String>, sea_orm::DbErr> {
+        let rows = self
+            .conn
+            .query_all(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "SELECT DISTINCT d.device_id AS device_code FROM dog_device d \
+                 JOIN dog_user_device ud ON ud.device_id = d.id AND ud.is_deleted = 0 \
+                 WHERE d.is_deleted = 0 AND ud.user_id = ?1",
+                [user_id.into()],
+            ))
+            .await?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| row.try_get::<String>("", "device_code").ok())
+            .collect())
+    }
+
+    /// 这台设备是否分配给了 `user_id`。
+    async fn is_device_assigned_to_user(
+        &self,
+        device_code: &str,
+        user_id: i64,
+    ) -> Result<bool, sea_orm::DbErr> {
+        let row = self
+            .conn
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "SELECT 1 FROM dog_device d \
+                 JOIN dog_user_device ud ON ud.device_id = d.id AND ud.is_deleted = 0 \
+                 WHERE d.is_deleted = 0 AND d.device_id = ?1 AND ud.user_id = ?2 LIMIT 1",
+                [device_code.into(), user_id.into()],
+            ))
+            .await?;
+        Ok(row.is_some())
     }
 
     /// 这张地图是否分享给了分配给 `user_id` 的设备。
