@@ -241,12 +241,11 @@ async fn fetch_park(state: &AppState, id: i64) -> Result<Park, AppError> {
 /// 地图先跟设备、再跟园区：设备刚回传的地图 `park_id IS NULL`，建档时被选中的那张
 /// 在这里被「认领」到本园区。
 ///
-/// 已经属于**其他园区**的地图分两种：
-/// - 同一张图被第二个园区选中 → 允许「改归属」（设备先绑错了园区、或老图绑错园区时，
-///   现场必须有路可走，否则园区里永远看不到任何可选的地图），前提是调用者对这张图的
-///   采集设备有权限，见 [`ensure_map_reclaimable`]；旧园区的当前基线会被清回「待标定」。
-/// - 历史 / 演示地图（没有 `device_code`、没有上传人）→ 只有管理员能动，
-///   免得把演示园区的基线抢走。
+/// **不同园区可以绑定同一张地图基线**（`parks.map_version_id` 各指各的，
+/// `map_versions.park_id` 只记采集 / 主归属园区，不再独占）：同一张图被第二个园区选中
+/// 时不改归属，只校验调用者对这张图有没有使用权，见 [`ensure_map_usable`]。
+/// 历史 / 演示地图（没有 `device_code`、没有上传人）只给管理员用，
+/// 免得随手把演示园区的基线挂到业务园区上。
 pub(crate) async fn resolve_park_map(
     state: &AppState,
     park_id: i64,
@@ -272,26 +271,9 @@ pub(crate) async fn resolve_park_map(
     .ok_or_else(|| AppError::BadRequest(format!("地图基线 {requested} 不存在")))?;
     match map.0 {
         Some(owner) if owner != park_id => {
-            ensure_map_reclaimable(state, claims, requested, map.2.as_deref(), map.3).await?;
-            let mut transaction = state.db.begin().await?;
-            // 旧园区的「当前基线」指着它：归属搬走后基线必须一起松开，
-            // 否则旧园区会一直显示一张已经属于别处的图。
-            sqlx::query(
-                "UPDATE parks SET map_version_id = NULL, map_status = '待标定', updated_at = ?1
-                 WHERE id = ?2 AND map_version_id = ?3",
-            )
-            .bind(now())
-            .bind(owner)
-            .bind(requested)
-            .execute(&mut *transaction)
-            .await?;
-            sqlx::query("UPDATE map_versions SET park_id = ?1 WHERE id = ?2")
-                .bind(park_id)
-                .bind(requested)
-                .execute(&mut *transaction)
-                .await?;
-            transaction.commit().await?;
-            tracing::info!("设备地图 {requested} 改归属园区 {owner} → {park_id}");
+            // 共用：归属不动，只确认这张图你可以用。
+            ensure_map_usable(state, claims, requested, map.2.as_deref(), map.3).await?;
+            tracing::info!("园区 {park_id} 共用设备地图 {requested}（原归属园区 {owner}）");
         }
         // 设备地图还没归属园区：绑定动作就是认领
         None => {
@@ -312,13 +294,13 @@ pub(crate) async fn resolve_park_map(
     Ok(Some((Some(requested.to_string()), status)))
 }
 
-/// 「把已归属别园区的设备地图改归属」的授权。
+/// 「把别的园区的设备地图绑到本园区」的授权。
 ///
-/// 能动的三种人：管理员；地图上传人本人（`owner_user_id`）；该地图采集设备在
+/// 能用的三种人：管理员；地图上传人本人（`owner_user_id`）；该地图采集设备在
 /// 当前账号的中台分配关系里（设备页「绑定园区」那批人）。
 /// 没有 `device_code` 也没有上传人的历史 / 演示地图一律只给管理员，
-/// 否则任何运营账号都能把演示园区的基线搬到自己名下。
-async fn ensure_map_reclaimable(
+/// 否则任何运营账号都能把演示园区的基线挂到自己园区上。
+async fn ensure_map_usable(
     state: &AppState,
     claims: &Claims,
     map_id: &str,
@@ -335,7 +317,7 @@ async fn ensure_map_reclaimable(
     }
     let denied = || {
         AppError::BadRequest(format!(
-            "地图基线 {map_id} 属于其他园区，且采集设备不在你的管辖范围内，无法改归属"
+            "地图基线 {map_id} 属于其他园区，且采集设备不在你的管辖范围内，无法绑定"
         ))
     };
     let Some(device_code) = device_code.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -346,7 +328,7 @@ async fn ensure_map_reclaimable(
     let allowed = match auth::allowed_device_codes(state, claims).await {
         Ok(allowed) => allowed,
         Err(error) => {
-            tracing::warn!("校验设备 {device_code} 的分配关系失败，按无权改归属处理: {error}");
+            tracing::warn!("校验设备 {device_code} 的分配关系失败，按无权处理: {error}");
             return Err(denied());
         }
     };

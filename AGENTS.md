@@ -280,16 +280,19 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 路径点只有 `type/tasks`），所以「差 0.3 m 就收尾」做不到——长期解是向厂商要巡检容差，
 停车点与巡检点解耦的设计见 `business/docs/waypoint-clearance.md`。
 
-**园区的「地图基线绑定」下拉不能只列「未归属园区」的设备地图**（2026-11-24 现场：设备在
+**不同园区可以共用同一张地图基线**，绑定的唯一真相是 `parks.map_version_id`；
+`map_versions.park_id` 只记「采集 / 主归属园区」，**不独占**（2026-11-24 现场：设备在
 业务平台绑的是 `test` 园区，回传的图全被它认领，广汇产业园二期编辑时下拉里一张图都没有，
-看着像「没有绑定入口」）。`business/web/src/views/parks/index.vue` 的 `deviceMapOptions`
-原来只认 `park_id IS NULL`，而设备一绑园区新图就直接落那个园区，所以现场再没有可选项；
-现在多了 `otherParkMapOptions`（只列带 `deviceCode` 的图，标签「当前归属其他园区（选中即
-改归属）」），服务端 `handlers/parks.rs::resolve_park_map` 对「已归属别园区」的图放行改归属，
-授权在 `ensure_map_reclaimable`（管理员 / 上传人本人 / 采集设备在当前账号的中台分配关系里），
-同时把旧园区指向它的 `map_version_id` 清回「待标定」。**别把授权放宽成「看得见就能搬」**：
-没有 `device_code`、没有上传人的演示地图只给管理员。回归：
-`api_smoke::editing_park_reclaims_device_map_from_another_park` /
+看着像「没有绑定入口」）。`business/web/src/views/parks/index.vue` 的 `otherParkMapOptions`
+把「别的园区在用的设备地图」也列出来（只列带 `deviceCode` 的图，标签「其他园区在用
+（可共用同一张，不改归属）」）；服务端 `handlers/parks.rs::resolve_park_map` 对「已归属别
+园区」的图只校验使用权（`ensure_map_usable`：管理员 / 上传人本人 / 采集设备在当前账号的
+中台分配关系里）——**不搬归属，也不清旧园区基线**。两条附带约束别丢：① `routes.rs::
+resolve_route_map` 同样要放行「别园区的图」（否则园区能绑图却编不了路线），不指定版本时
+优先用园区当前基线（可能是共用的）；② `GET /parks/{id}/maps` 要带上共用基线。
+**别把授权放宽成「看得见就能挂」**：没有 `device_code`、没有上传人的演示地图只给管理员。
+回归：`api_smoke::parks_can_share_the_same_map_baseline` /
+`api_smoke::route_can_use_a_map_shared_with_another_park` /
 `api_smoke::reclaiming_another_park_map_requires_device_access`。
 
 「返回起点」回的是**起步时本体 `capture_origin_pose` 采的起点位姿**，不是地图原点。载图

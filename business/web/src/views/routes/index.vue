@@ -407,11 +407,8 @@ const zonesOfForm = computed(() =>
   zones.value.filter(zone => zone.parkId === routeForm.parkId)
 );
 
-const mapsOfForm = computed(() =>
-  maps.value.filter(
-    item => item.parkId === routeForm.parkId && item.status !== "已归档"
-  )
-);
+/** 园区可用的地图基线（含共用的）：归属本园区的 + 园区当前基线。见 `mapsOfPark`。 */
+const mapsOfForm = computed(() => mapsOfPark(routeForm.parkId));
 
 const draftMap = computed(() =>
   maps.value.find(item => item.id === draft.value?.mapVersionId) ?? null
@@ -485,11 +482,25 @@ async function loadRaster(mapId: string | null) {
   }
 }
 
+/**
+ * 园区可用的地图基线：归属本园区的 + 园区当前基线。
+ *
+ * 不同园区可以共用同一张地图基线——这时基线图的 `parkId` 指向的是别的园区，
+ * 只按 `item.parkId === parkId` 筛会把新建路线的版本下拉变空，路线就编不下去了。
+ */
 function mapsOfPark(parkId: number | null) {
   if (!parkId) return [];
-  return maps.value.filter(
-    item => item.parkId === parkId && item.status !== "已归档"
+  const baselineId = parks.value.find(park => park.id === parkId)?.mapVersionId ?? null;
+  const baseline = baselineId
+    ? (maps.value.find(map => map.id === baselineId && map.status !== "已归档") ?? null)
+    : null;
+  const own = maps.value.filter(
+    item =>
+      item.parkId === parkId &&
+      item.status !== "已归档" &&
+      item.id !== baseline?.id
   );
+  return baseline ? [baseline, ...own] : own;
 }
 
 /** 有可用地图基线（且至少有一张未归档地图）的园区，空状态下用来给出可行引导 */

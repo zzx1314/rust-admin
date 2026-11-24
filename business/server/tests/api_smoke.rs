@@ -620,9 +620,10 @@ async fn creating_park_adopts_unbound_device_map() {
 ///
 /// 2026-11-24 现场：设备在业务平台绑的是 test 园区，回传的图全被 test 认领；
 /// 广汇产业园二期编辑时下拉里一张图都没有（`deviceMapOptions` 只列 `park_id IS NULL`）。
-/// 现在允许选中「已归属别园区」的设备地图，保存即改归属，旧园区基线一起松开。
+/// 现在**不同园区可以绑定同一张地图基线**：保存只写本园区的基线，
+/// `map_versions.park_id`（采集 / 主归属园区）和旧园区的基线都不动。
 #[tokio::test]
-async fn editing_park_reclaims_device_map_from_another_park() {
+async fn parks_can_share_the_same_map_baseline() {
     let (state, _db) = test_state().await;
     let pool = state.db.clone();
     sqlx::query(
@@ -646,6 +647,7 @@ async fn editing_park_reclaims_device_map_from_another_park() {
     let app = build_router(state);
     let token = login(&app).await;
     let response = app
+        .clone()
         .oneshot(
             Request::put("/api/parks/2")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
@@ -661,7 +663,7 @@ async fn editing_park_reclaims_device_map_from_another_park() {
     let body = json_body(response).await;
     assert_eq!(
         body["data"]["mapVersionId"], "RD-002@history-0715",
-        "编辑园区时应能把别园区的设备地图改归属过来: {body}"
+        "编辑园区时应能绑定其他园区在用的设备地图: {body}"
     );
 
     let owner: Option<i64> = sqlx::query_scalar("SELECT park_id FROM map_versions WHERE id = ?1")
@@ -669,18 +671,41 @@ async fn editing_park_reclaims_device_map_from_another_park() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(owner, Some(2), "地图应改归属到新园区");
+    assert_eq!(owner, Some(1), "共用时不该把地图归属搬走");
 
     let (old_baseline, old_status): (Option<String>, String) =
         sqlx::query_as("SELECT map_version_id, map_status FROM parks WHERE id = 1")
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(old_baseline, None, "旧园区的当前基线必须跟着松开");
-    assert_eq!(old_status, "待标定");
+    assert_eq!(
+        old_baseline.as_deref(),
+        Some("RD-002@history-0715"),
+        "原园区的基线不该被共用方拖走"
+    );
+    assert_eq!(old_status, "部分标定");
+
+    // 园区可用地图接口要把共用的基线算进去（新建路线的版本下拉靠它）
+    let maps = app
+        .oneshot(
+            Request::get("/api/parks/2/maps")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(maps.status(), StatusCode::OK);
+    let maps = json_body(maps).await;
+    assert!(
+        maps["data"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["id"] == "RD-002@history-0715")),
+        "园区可用地图应包含共用的基线: {maps}"
+    );
 }
 
-/// 改归属不能变成「谁都能抢图」：本运营账号对采集设备没有权限时拒绝。
+/// 共用不能变成「谁都能挂图」：本运营账号对采集设备没有权限时拒绝。
 #[tokio::test]
 async fn reclaiming_another_park_map_requires_device_access() {
     let (state, _db) = test_state().await;
@@ -744,7 +769,7 @@ async fn reclaiming_another_park_map_requires_device_access() {
     let body = json_body(response).await;
     let msg = body["msg"].as_str().unwrap_or_default();
     assert!(
-        msg.contains("无法改归属"),
+        msg.contains("无法绑定"),
         "错误提示应说清楚为什么拒绝: {msg}"
     );
 
@@ -754,6 +779,75 @@ async fn reclaiming_another_park_map_requires_device_access() {
         .await
         .unwrap();
     assert_eq!(owner, Some(1), "被拒绝时地图归属不许变");
+}
+
+/// 路线跟着园区共用同一张地图：别园区的图也能为它编路线（以前直接 400）。
+#[tokio::test]
+async fn route_can_use_a_map_shared_with_another_park() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    sqlx::query(
+        "INSERT INTO map_versions
+            (id, park_id, device_code, map_name, version, status, created_at, source, source_ref)
+         VALUES ('RD-002@history-0715', 1, 'RD-002', 'RD-002@history-0715', 'v1.0',
+            '部分标定', '2026-01-01 00:00:00', 'robot-mapping',
+            '/ota/alg_data/map/history_map/0715')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE parks SET map_version_id = 'RD-002@history-0715', map_status = '部分标定'
+         WHERE id = 2",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = build_router(state);
+    let token = login(&app).await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/routes")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"routeName":"共用基线路线","parkId":2,"mapVersionId":"RD-002@history-0715"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "共用地图应能编路线");
+    let body = json_body(response).await;
+    assert_eq!(body["data"]["mapVersionId"], "RD-002@history-0715");
+    assert_eq!(body["data"]["parkId"], 2, "路线园区的基线来自共用图");
+
+    let owner: Option<i64> = sqlx::query_scalar("SELECT park_id FROM map_versions WHERE id = ?1")
+        .bind("RD-002@history-0715")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(owner, Some(1), "编路线也不该把地图归属搬走");
+
+    // 不指定地图时按园区当前基线自动选（共用基线同样生效）
+    let auto = app
+        .oneshot(
+            Request::post("/api/routes")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"routeName":"自动取基线","parkId":2}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(auto.status(), StatusCode::OK);
+    let auto = json_body(auto).await;
+    assert_eq!(
+        auto["data"]["mapVersionId"], "RD-002@history-0715",
+        "未指定版本时应按园区当前基线（共用的）自动选: {auto}"
+    );
 }
 
 #[tokio::test]

@@ -145,12 +145,16 @@ pub async fn list_maps(
     Ok(ApiResponse::ok(maps))
 }
 
+/// 园区可用的地图基线：归属本园区的 + **当前基线**（可能是别的园区的图，见
+/// `parks.rs::resolve_park_map`：不同园区可共用同一张地图）。
 pub async fn list_park_maps(
     State(state): State<AppState>,
     Path(park_id): Path<i64>,
 ) -> Result<Json<ApiResponse<Vec<MapVersion>>>, AppError> {
     let sql = format!(
-        "{MAP_SELECT} WHERE m.park_id = ?1 ORDER BY m.published_at DESC, m.created_at DESC"
+        "{MAP_SELECT} WHERE m.park_id = ?1
+            OR m.id = (SELECT bp.map_version_id FROM parks bp WHERE bp.id = ?1)
+         ORDER BY m.published_at DESC, m.created_at DESC"
     );
     let maps = sqlx::query_as::<_, MapVersion>(&sql)
         .bind(park_id)

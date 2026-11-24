@@ -667,24 +667,23 @@ async fn resolve_route_map(
                     .await?;
                 tracing::info!("设备地图 {} 已归属园区 {park_id}（路线引用）", row.0);
             }
-            (Some(park_id), Some(owner)) if owner != park_id => {
-                return Err(AppError::BadRequest(
-                    "地图基线不属于该园区，无法创建路线".to_string(),
-                ));
-            }
             (None, None) => {
                 return Err(AppError::BadRequest(
                     "该地图尚未归属园区，请先创建园区并绑定地图".to_string(),
                 ));
             }
+            // 其余情况（包括「已归属其他园区」）都允许：不同园区可以共用同一张地图基线，
+            // 归属（`map_versions.park_id`）表示采集 / 主归属园区，不阻止其他园区引用。
             _ => {}
         }
         // 路线需要一个确定的园区：园区未知时用地图自己的归属反推
-        let park_id = park_id.or(row.1);
-        let Some(park_id) = park_id else {
-            return Err(AppError::BadRequest(
-                "该地图尚未归属园区，请先创建园区并绑定地图".to_string(),
-            ));
+        let park_id = match park_id.or(row.1) {
+            Some(park_id) => park_id,
+            None => {
+                return Err(AppError::BadRequest(
+                    "该地图尚未归属园区，请先创建园区并绑定地图".to_string(),
+                ));
+            }
         };
         return Ok(Some((row.0, park_id)));
     }
@@ -692,15 +691,31 @@ async fn resolve_route_map(
     let Some(park_id) = park_id else {
         return Ok(None);
     };
-    let active = sqlx::query_as::<_, (String, i64)>(
-        "SELECT id, park_id FROM map_versions
+    // 优先用园区当前基线（可能和其他园区共用同一张图），再用归属本园区的最新可用图。
+    let bound: Option<Option<String>> =
+        sqlx::query_scalar("SELECT map_version_id FROM parks WHERE id = ?1")
+            .bind(park_id)
+            .fetch_optional(&state.db)
+            .await?;
+    if let Some(Some(map_id)) = bound {
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM map_versions WHERE id = ?1")
+                .bind(&map_id)
+                .fetch_optional(&state.db)
+                .await?;
+        if matches!(status.as_deref(), Some(status) if status != "已归档") {
+            return Ok(Some((map_id, park_id)));
+        }
+    }
+    let active = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM map_versions
          WHERE park_id = ?1 AND status IN ('已发布', '部分标定')
          ORDER BY published_at DESC, created_at DESC LIMIT 1",
     )
     .bind(park_id)
     .fetch_optional(&state.db)
     .await?;
-    Ok(active)
+    Ok(active.map(|map_id| (map_id, park_id)))
 }
 
 #[cfg(test)]

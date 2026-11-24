@@ -185,6 +185,9 @@ ROS `model.pgm` 包）时才退回 `model.pgm` / `map.pgm`。编辑只改写编�
   `devices.device_id`），同样由业务平台随 `mapInfo.deviceCode` 写入，中台不建外键、
   也不校验设备是否存在。前端地图列表显示该编号，`deviceCode` 查询参数按模糊匹配过滤；
   手工上传的地图为空（列表显示「手工上传」），派生新版本时自动继承。
+- 这两个字段只代表「采集 / **主归属**园区」：业务平台允许**多个园区把同一张地图绑为
+  各自基线**（`parks.map_version_id` 各指各的，`map_versions.park_id` 仍是那张图的主
+  归属），所以中台看到 `parkCode` 不要当成「只能属于这一个园区」。
 - 业务平台拉取地图（`business/server` 的 `/api/map-versions/backend`）时可按 `parkCode` 过滤，
   导入业务库时未指定园区也能按 `parkCode` 自动回填。
 - 编号对照：业务库 `map_versions.id` 是 `ROS-MAP-<首次入库时的 dog_map.id>@版本`，
