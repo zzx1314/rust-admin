@@ -661,8 +661,7 @@ onMounted(load);
                 {{ map.mapName }} · {{ map.id }} · {{ map.status }} ·
                 {{ map.sourceId ? `中台 #${map.sourceId}` : "无中台记录" }} ·
                 {{ map.deviceCode ? `设备 ${map.deviceCode}` : "设备未知" }} ·
-                {{ map.ownerUsername ? `归属 ${map.ownerUsername}` : "归属未知" }} ·
-                {{ map.sourceRef || "未登记本体路径" }}
+                {{ map.ownerUsername ? `归属 ${map.ownerUsername}` : "归属未知" }}
               </option>
             </optgroup>
             <optgroup
@@ -673,8 +672,7 @@ onMounted(load);
                 {{ map.mapName }} · {{ map.id }} · {{ map.status }} ·
                 {{ map.parkName ? `归属 ${map.parkName}` : "归属其他园区" }} ·
                 {{ map.deviceCode ? `设备 ${map.deviceCode}` : "设备未知" }} ·
-                {{ map.ownerUsername ? `上传人 ${map.ownerUsername}` : "上传人未知" }} ·
-                {{ map.sourceRef || "未登记本体路径" }}
+                {{ map.ownerUsername ? `上传人 ${map.ownerUsername}` : "上传人未知" }}
               </option>
             </optgroup>
             <optgroup
