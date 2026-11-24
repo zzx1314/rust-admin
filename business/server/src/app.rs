@@ -145,6 +145,20 @@ pub fn build_router(state: AppState) -> Router {
             "/tasks/{id}/recordings",
             get(crate::recordings::list_task_recordings),
         )
+        // 航点拍照（路线动作「可见光拍照」）回传：设备客户端上传 jpg
+        .route(
+            "/photos/ingest",
+            post(crate::photos::ingest_photo).layer(DefaultBodyLimit::max(
+                crate::photos::PHOTO_MAX_BYTES + 1024 * 1024,
+            )),
+        )
+        // 原图（前端取 blob 后挂 <img> / 下载；?download=1 走附件下载）
+        .route("/photos/{id}/file", get(crate::photos::download_photo))
+        .route(
+            "/photos/{id}",
+            axum::routing::delete(crate::photos::delete_photo),
+        )
+        .route("/tasks/{id}/photos", get(crate::photos::list_task_photos))
         .route("/map-versions/{id}", get(maps::get_map))
         .route("/map-versions/{id}/raster", get(maps::map_raster))
         .route("/map-versions/{id}/refs", get(maps::map_refs))

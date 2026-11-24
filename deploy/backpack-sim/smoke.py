@@ -9,6 +9,7 @@
 [5] AI 启停走隧道        POST /api/backpack/detect/start|stop 真的改了 Agent 运行态
 [6] 计划灯光            /api/lights 开关补光/LED，off 能收回去（SIM_NIGHT=0 时验证白天跳过）
 [7] 语音播报            /api/speak 起一条 → status 能看到 → /api/speak/stop 收回去
+[8] 航点拍照            /api/photo 抓一张 → list 能看到 → delete 收回到空
 ```
 
 为什么值得单独跑：这五条里有三条（隧道、中继按需起流、证据图落盘）**只在有人看/有任务
@@ -356,6 +357,53 @@ def check_speak():
     return True
 
 
+def check_photo():
+    """[8] 航点拍照：客户端到点抓拍 / 回传前取清单 / 传完删板端文件。"""
+    print("[8] 航点拍照：/api/photo 抓一张 + list + delete")
+    try:
+        status = get_json(AGENT + "/api/photo/status")
+        report("GET /api/photo/status", "allowed_cameras" in status and "pending" in status,
+               "pending=%s cameras=%s" % (status.get("pending"),
+                                          ",".join(status.get("allowed_cameras") or [])))
+    except Exception as error:  # noqa: BLE001
+        report("GET /api/photo/status", False, str(error))
+        return False
+
+    try:
+        captured = post_json(AGENT + "/api/photo", {
+            "planId": "TK-SMOKE-PHOTO",
+            "pointIndex": 1,
+            "pointName": "P2",
+            "camera": "dogcam",
+            "frames": 1,
+        })
+        files = captured.get("files") or []
+        report("POST /api/photo", bool(captured.get("ok")) and len(files) == 1,
+               "camera=%s files=%s" % (captured.get("camera"), len(files)))
+        if not files:
+            return False
+        listed = get_json(AGENT + "/api/photo/list?planId=TK-SMOKE-PHOTO").get("files") or []
+        report("GET /api/photo/list", any(item["name"] == files[0]["name"] for item in listed),
+               "pending=%d" % len(listed))
+        # 图要能被平台 ingest 收下：文件头必须是 JPEG 的 SOI
+        with open(files[0]["path"], "rb") as handle:
+            magic = handle.read(3)
+        report("照片是 JPEG（平台按 SOI 头校验）", magic == b"\xff\xd8\xff", str(magic))
+        removed = post_json(AGENT + "/api/photo/delete", {"names": [files[0]["name"]]})
+        left = get_json(AGENT + "/api/photo/list?planId=TK-SMOKE-PHOTO").get("files") or []
+        report("delete 后清单为空",
+               bool(removed.get("ok")) and not left, "left=%d" % len(left))
+        # 相机白名单：配错了要当场报错，而不是拍一张黑图
+        try:
+            post_json(AGENT + "/api/photo", {"planId": "TK-SMOKE-PHOTO", "camera": "cam9"})
+            report("未知相机被拒绝", False, "cam9 不该被受理")
+        except urllib.error.HTTPError as error:
+            report("未知相机被拒绝（HTTP 400）", error.code == 400, "HTTP %s" % error.code)
+    except Exception as error:  # noqa: BLE001
+        report("POST /api/photo|/api/photo/delete", False, str(error))
+    return True
+
+
 def main():
     print()
     print("backpack-sim 冒烟自测：agent=%s platform=%s stream=%s" % (AGENT, PLATFORM, STREAM))
@@ -374,6 +422,7 @@ def main():
     check_ai(token)
     check_lights()
     check_speak()
+    check_photo()
     print()
     ok = all(checks)
     print("结果：%s（%d/%d 通过）" % ("全部通过" if ok else "有链路没通",

@@ -2,6 +2,7 @@
 
 use crate::ai_patrol::AiPatrol;
 use crate::lights;
+use crate::photo::Photographer;
 use crate::record::Recorder;
 use crate::report::report_progress;
 use crate::speak::Speaker;
@@ -34,6 +35,7 @@ pub(crate) async fn apply(
     lights: &Arc<PointLights>,
     recorder: &Arc<Recorder>,
     speaker: &Arc<Speaker>,
+    photographer: &Arc<Photographer>,
 ) {
     let action = msg.payload["action"].as_str().unwrap_or("unknown");
     let task_code = msg.payload["taskCode"].as_str().unwrap_or("");
@@ -120,6 +122,8 @@ pub(crate) async fn apply(
         recorder.finish_task(task_code, "任务已取消").await;
         // 语音播报：取消后不能还在原地喊（循环播报的看门狗只是兜底）。
         speaker.finish_task(task_code, "任务已取消").await;
+        // 照片：取消后不再抓拍，已拍到的照样回传（现场正是要回看取消前发生了什么）。
+        photographer.finish_task(task_code, "任务已取消").await;
         // 只清自己那条：平台可能「先取消旧任务、再下发新任务」，取消的收尾
         // 晚到时把新任务的上下文清掉，平台就再也收不到这条新任务的进度了。
         if task_code.is_empty() {

@@ -9,6 +9,8 @@ use crate::locate::ensure_localized;
 use crate::locate::parse_initial_pose;
 use crate::maps::clear_local_runner;
 use crate::maps::is_current_runner;
+use crate::photo::Photographer;
+use crate::photo::parse_photo_plan;
 use crate::record::{Recorder, parse_record_plan};
 use crate::report::report_progress;
 use crate::speak::Speaker;
@@ -90,6 +92,7 @@ pub(crate) async fn dispatch(
     lights: &Arc<PointLights>,
     recorder: &Arc<Recorder>,
     speaker: &Arc<Speaker>,
+    photographer: &Arc<Photographer>,
 ) {
     let task_code = msg.payload["taskCode"].as_str().unwrap_or("").to_string();
     let task_name = msg.payload["taskName"]
@@ -178,6 +181,12 @@ pub(crate) async fn dispatch(
         );
     }
     speaker.start_task(&task_code, speak_plan).await;
+    // 航点「可见光拍照」：到点由客户端调板端 Agent 抓 JPEG，任务终态回传平台。
+    let photo_plan = parse_photo_plan(&msg.payload["routeData"]);
+    if !photo_plan.is_empty() {
+        info!("任务 {task_code} 含 {} 个拍照航点", photo_plan.points.len());
+    }
+    photographer.start_task(&task_code, photo_plan).await;
     *active.lock().await = Some(ActiveTask {
         task_code: task_code.clone(),
         task_name: task_name.clone(),
@@ -604,6 +613,7 @@ pub(crate) async fn dispatch(
             let ai = ai.clone();
             let lights = lights.clone();
             let speaker = speaker.clone();
+            let photographer = photographer.clone();
             tokio::spawn(async move {
                 let outcome = runner.run().await;
                 let (status, message) = match outcome {
@@ -634,6 +644,8 @@ pub(crate) async fn dispatch(
                 lights.finish_task(&code, "本地任务结束").await;
                 // 语音播报同理：循环播报不能跟着狗回家
                 speaker.finish_task(&code, "本地任务结束").await;
+                // 照片：停拍 + 回传（本地跑不一定会走到 5009 的终态帧）
+                photographer.finish_task(&code, "本地任务结束").await;
                 // 收尾必须把槽位里的 runner 摘掉：业务侧的下发地图 / 继续任务等
                 // 门禁都看这个槽位，残留的 runner 会让设备在任务早已结束（甚至
                 // 取消）之后仍报「设备正在执行任务」（2026-11-19 现场事故）。

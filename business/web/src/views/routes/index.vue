@@ -34,6 +34,8 @@ import {
   DEVICE_MODELS,
   FAIL_MODES,
   LEG_MODES,
+  PHOTO_CAMERAS,
+  PHOTO_MAX_FRAMES,
   SPEAK_LEG_DEFAULT_SECS,
   SPEAK_MAX_CHARS,
   SPEAK_MAX_LEN,
@@ -200,7 +202,21 @@ const actionForm = reactive({
    *
    * `0` = 只播一次；`>0` = 循环播这么久（航点离开 / 航段结束 / 终态会提前停）。
    */
-  speakSeconds: 0
+  speakSeconds: 0,
+  /**
+   * 「可见光拍照」：抓拍源（板端 `/api/photo` 的 `camera`）。
+   *
+   * `dogcam` = 机器狗前置可见光（默认，走当前分辨率档位）；`cam0~cam3` = 背包四路
+   * USB；`dog-ipcam` = 红外。板端从本机 mediamtx 抓 JPEG。
+   */
+  photoCamera: "dogcam",
+  /**
+   * 「可见光拍照」：这个航点抓几张（1~5）。
+   *
+   * 多帧按板端 `PHOTO_FPS`（默认 2fps）拉开，用来避开运动模糊；
+   * 张数越多上传越慢，一般 1 张够用。
+   */
+  photoFrames: 1
 });
 
 /** 当前动作是不是录像类（点上的「录像采集」/ 段上的「全程录像」） */
@@ -269,6 +285,41 @@ function actionSpeakLabel(action: {
   if (!text) return "";
   const seconds = Math.max(0, Math.min(SPEAK_MAX_SECS, Number(action.speakSeconds) || 0));
   return seconds > 0 ? `播报「${text}」· 循环 ${seconds} 秒` : `播报「${text}」· 单次`;
+}
+
+/**
+ * 当前动作是不是「拍照」（航点动作「可见光拍照」）。
+ *
+ * 与客户端 `photo.rs::is_photo_action` 同规则：含「拍照 / 抓拍」，但**录像不算**
+ * （录像有自己的「录像采集」动作，别的字段）。
+ */
+const isPhotoAction = computed(
+  () =>
+    (String(actionForm.type).includes("拍照") || String(actionForm.type).includes("抓拍")) &&
+    !String(actionForm.type).includes("录像")
+);
+
+/** 抓拍源的展示名（`dogcam` → 「机器狗前置（可见光）」） */
+function photoCameraLabel(value?: string | null) {
+  const camera = value || "dogcam";
+  return PHOTO_CAMERAS.find(item => item.value === camera)?.label ?? camera;
+}
+
+/** 拍照参数文案：「机器狗前置（可见光） · 2 张」 */
+function photoParamLabel(camera?: string | null, frames?: number | null) {
+  const count = Math.min(PHOTO_MAX_FRAMES, Math.max(1, Number(frames) || 1));
+  return `${photoCameraLabel(camera)} · ${count} 张`;
+}
+
+/** 动作卡片上的拍照文案：没配返回空串（不占一行） */
+function actionPhotoLabel(action: {
+  type?: string;
+  photoCamera?: string;
+  photoFrames?: number;
+}) {
+  const type = String(action?.type ?? "");
+  if (!type.includes("拍照") || type.includes("录像")) return "";
+  return photoParamLabel(action.photoCamera, action.photoFrames);
 }
 
 /** 背包 AI 模型目录（场景 + 类别）：仅在配「AI 识别」动作时按需加载 */
@@ -1213,7 +1264,9 @@ function openActionDialog(kind: "point" | "leg", index: number | null = null) {
       recordSegmentSeconds: Number(existing.recordSegmentSeconds) || 300,
       // 老数据只有动作库占位 `param`（「安全提示语音 01」），别把它当成话术回填
       speakText: existing.speakText ?? "",
-      speakSeconds: Number(existing.speakSeconds) || 0
+      speakSeconds: Number(existing.speakSeconds) || 0,
+      photoCamera: existing.photoCamera ?? "dogcam",
+      photoFrames: Number(existing.photoFrames) || 1
     });
     actionEditIndex.value = index;
     if (actionForm.type === "AI 识别") void aiCatalog.load();
@@ -1243,7 +1296,9 @@ function openActionDialog(kind: "point" | "leg", index: number | null = null) {
     speakText: "",
     // 行进任务本来就是「行进中持续执行」：默认循环播一段，离开航段会提前停；
     // 航点动作默认只播一次（操作员要循环就自己填时长）
-    speakSeconds: kind === "leg" ? SPEAK_LEG_DEFAULT_SECS : 0
+    speakSeconds: kind === "leg" ? SPEAK_LEG_DEFAULT_SECS : 0,
+    photoCamera: "dogcam",
+    photoFrames: 1
   });
   actionEditIndex.value = null;
   actionDialog.value = true;
@@ -1267,6 +1322,8 @@ function syncActionDefaults() {
   actionForm.recordSegmentSeconds = 300;
   actionForm.speakText = "";
   actionForm.speakSeconds = actionKind.value === "leg" ? SPEAK_LEG_DEFAULT_SECS : 0;
+  actionForm.photoCamera = "dogcam";
+  actionForm.photoFrames = 1;
   if (actionForm.type === "AI 识别") void aiCatalog.load();
 }
 
@@ -1310,6 +1367,8 @@ function saveAction() {
     ElMessage.error("「检测数量是否正确」必须填写检查目标数量");
     return;
   }
+  // 可见光拍照：参数就是「哪一路 + 几张」（列表 / 卡片都读 param）
+  const photo = isPhotoAction.value && actionKind.value === "point";
   // 语音播报：内容必须能过板端 TTS 的白名单（越界字被板端丢掉就成了半句话）
   const speak = isSpeakAction.value;
   const speakText = speak ? normalizeSpeakText(actionForm.speakText) : null;
@@ -1322,13 +1381,15 @@ function saveAction() {
   const ai = isAiAction.value;
   const action = {
     type: actionForm.type,
-    // 语音播报的「执行参数」就是话术本身（卡片 / 列表都读 param）
+    // 语音播报的「执行参数」就是话术本身；拍照是「哪一路 + 几张」（卡片 / 列表都读 param）
     param:
       speak && speakText
         ? speakText.text
-        : ai && aiParamAuto.value
-          ? composeAiParam()
-          : actionForm.param,
+        : photo
+          ? photoParamLabel(actionForm.photoCamera, actionForm.photoFrames)
+          : ai && aiParamAuto.value
+            ? composeAiParam()
+            : actionForm.param,
     ...(actionKind.value === "point"
       ? {
           trigger: actionForm.trigger,
@@ -1356,6 +1417,16 @@ function saveAction() {
       : {}),
     ...(actionKind.value === "leg" && isTaskRecordAction.value
       ? { recordSegmentSeconds: clampSeconds(actionForm.recordSegmentSeconds, 30, 1800, 300) }
+      : {}),
+    // 可见光拍照：抓拍源 + 张数（老数据没有这两个字段 → 板端按 dogcam / 1 张）
+    ...(photo
+      ? {
+          photoCamera: actionForm.photoCamera || "dogcam",
+          photoFrames: Math.min(
+            PHOTO_MAX_FRAMES,
+            Math.max(1, Math.round(Number(actionForm.photoFrames) || 1))
+          )
+        }
       : {}),
     // 语音播报：内容 + 循环时长（0 = 单次）。没有这个字段的旧动作不会念出任何东西
     ...(speak ? { speakText: speakText?.text ?? "" } : {}),
@@ -2077,6 +2148,9 @@ onBeforeUnmount(() => {
                     <div v-if="actionSpeakLabel(action)">
                       语音：<b>{{ actionSpeakLabel(action) }}</b>
                     </div>
+                    <div v-if="actionPhotoLabel(action)">
+                      拍照：<b>{{ actionPhotoLabel(action) }}</b>
+                    </div>
                   </div>
                 </div>
                 <div v-if="!pointActions.length" class="empty-box" style="padding: 16px 0">
@@ -2431,6 +2505,35 @@ onBeforeUnmount(() => {
             />
             <div class="rt-hint" style="margin: 4px 0 0">
               到达航点后录这么久；中途离开航点会提前收尾（3~300 秒，默认 15 秒）。
+            </div>
+          </div>
+
+          <!-- 可见光拍照：抓拍源 + 张数（板端 Agent 从本机 mediamtx 抓 JPEG） -->
+          <div v-if="isPhotoAction" class="field">
+            <label>抓拍相机</label>
+            <select v-model="actionForm.photoCamera" class="select">
+              <option v-for="camera in PHOTO_CAMERAS" :key="camera.value" :value="camera.value">
+                {{ camera.label }}
+              </option>
+            </select>
+            <div class="rt-hint" style="margin: 4px 0 0">
+              到点由板端从本机 mediamtx 抓一张 JPEG（不经本体，也不占 NPU）。
+            </div>
+          </div>
+          <div v-if="isPhotoAction" class="field">
+            <label>抓拍张数</label>
+            <input
+              v-model.number="actionForm.photoFrames"
+              class="input mono"
+              type="number"
+              min="1"
+              :max="PHOTO_MAX_FRAMES"
+              step="1"
+              title="多帧按板端 2fps 拉开，用来避开运动模糊"
+            />
+            <div class="rt-hint" style="margin: 4px 0 0">
+              1~{{ PHOTO_MAX_FRAMES }} 张（默认 1）；多帧按 2fps 拉开，照片在任务结束后
+              回传到平台「任务照片」。
             </div>
           </div>
 

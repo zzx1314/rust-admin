@@ -157,7 +157,10 @@ curl -s -XPOST 127.0.0.1:8000/api/sim/flush                                     
    任何二进制），再用 `ffprobe rtsp://127.0.0.1:8554/bp_<stream>` 确认 relay 真推上去了
    （这一步才会触发 `video_start` → relay 起 ffmpeg）；只连上但没二进制分片＝没通；
 4. **航点 AI**：`detect/start(plan_id)` → SSE `plan_hit` → 证据图落盘且是 JPG/PNG ≤2MB；
-5. **AI 启停经平台隧道**下发，并回读 Agent 运行态确认真改了。
+5. **AI 启停经平台隧道**下发，并回读 Agent 运行态确认真改了；
+6. **计划灯光** `/api/lights`（开 / 关 / 仅夜间白天跳过）；
+7. **语音播报** `/api/speak`（起一条 → status → stop 收回）；
+8. **航点拍照** `/api/photo`（抓一张 → list → JPEG 头 → delete → 未知相机被拒）。
 
 ## 能验 / 不能验
 

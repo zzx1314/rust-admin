@@ -63,6 +63,12 @@
                                  "scope":"point|leg"}；内容只认中文汉字+中文标点+数字
                                  （≤30 字），TTS 在云端，需联网 + asr
 - POST /api/speak/stop        -> [航点/航段] 停止播报 {"reason":"已离开航点"}（回到 voice）
+- GET  /api/photo/status      -> 航点拍照运行态（目录 / 剩余空间 / 待回传张数 / 最近一次）
+- POST /api/photo             -> [航点] 抓拍照片 {"planId","pointIndex","pointName",
+                                 "camera":"dogcam|cam0..cam3","frames":1}；
+                                 ffmpeg 从本机 mediamtx 抓 JPEG，落 PHOTO_DIR/<计划>/pt<n>/
+- GET  /api/photo/list        -> 待回传的照片清单（?planId= 只列该计划）
+- POST /api/photo/delete      -> 上传成功后删板端照片 {"names":["<planId>/pt<n>/<文件>.jpg"]}
 """
 import os
 import json
@@ -85,6 +91,7 @@ import relay
 import buttons
 import location
 import detect
+import photo
 import record
 import speak
 
@@ -175,6 +182,8 @@ async def lifespan(app: FastAPI):
     detect.manager.set_publisher(broadcaster.publish)
     # 航点 / 航段录像：只在客户端调用时才起 ffmpeg；这里先清一次超期残留
     record.start_sweeper()
+    # 航点拍照：同上，只清超期没传走的照片
+    photo.start_sweeper()
     yield
     try:
         # 播报是挂在 ASR 上的外部状态，退出前显式 stop 回到 voice 模式
@@ -782,6 +791,45 @@ async def speak_stop(request: Request):
     """[航点 / 航段] 停止播报：离开航点、任务终态 / 取消、看门狗超时。"""
     b = await _detect_body(request)
     r = await asyncio.to_thread(speak.stop, str(b.get("reason") or "计划结束"))
+    return JSONResponse(r, status_code=200 if r.get("ok") else 400)
+
+
+@app.get("/api/photo/status")
+async def photo_status():
+    """航点拍照运行态：目录 / 剩余空间 / 待回传张数 / 每一路可抓的相机。"""
+    return JSONResponse(photo.status(), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/photo")
+async def photo_capture(request: Request):
+    """[航点] 抓拍一张（或多张）照片。
+
+    由设备客户端在到达带「可见光拍照」动作的航点时调用（客户端与 Agent 同机）。
+    `camera` 选流：`dogcam`（机器狗前置可见光，默认）/ `cam0`~`cam3`（背包 USB）/
+    `dog-ipcam`（红外）；`frames` 1~`PHOTO_MAX_FRAMES`（多帧按 `PHOTO_FPS` 拉开）。
+    抓拍失败（流没在推 / ffmpeg 缺失 / 磁盘不足）回 400 + 可读原因，客户端只记日志。
+    """
+    b = await _detect_body(request)
+    r = await asyncio.to_thread(photo.capture, b)
+    return JSONResponse(r, status_code=200 if r.get("ok") else 400)
+
+
+@app.get("/api/photo/list")
+async def photo_list(planId: str = ""):
+    """待回传的照片清单（客户端上传前调用）。
+
+    每条含 `name`（`<planId>/pt<n>/<文件名>.jpg`，删除时原样回传）、`planId`、
+    `pointIndex`、`camera`、`size`、`capturedAt`。
+    """
+    return JSONResponse({"files": photo.list_files(planId or None)},
+                        headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/photo/delete")
+async def photo_delete(request: Request):
+    """上传成功后删板端照片（只认 `<planId>/pt<n>/<文件名>.jpg` 这种形状）。"""
+    b = await _detect_body(request)
+    r = await asyncio.to_thread(photo.delete, b)
     return JSONResponse(r, status_code=200 if r.get("ok") else 400)
 
 

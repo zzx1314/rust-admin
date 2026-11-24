@@ -488,6 +488,11 @@ pub async fn sweep(state: &AppState) -> Result<SweepReport, AppError> {
     if let Err(error) = crate::recordings::sweep_expired(state).await {
         warn!("巡检录像超期清理失败: {error}");
     }
+    // 航点照片留存：同一处顺手收（`photo_keep_days = 0` 时是空操作）。
+    // 照片是巡检报告的证据，默认留得比录像久（90 天 vs 30 天）。
+    if let Err(error) = crate::photos::sweep_expired(state).await {
+        warn!("航点照片超期清理失败: {error}");
+    }
 
     let pending: Vec<Task> = sqlx::query_as::<_, crate::models::TaskRow>(&format!(
         "{} WHERE t.task_status = '待执行' AND t.execute_mode = ?1 AND t.publish_status = ?2 \

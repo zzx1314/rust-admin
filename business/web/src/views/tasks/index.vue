@@ -2,7 +2,16 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { deviceApi, mapApi, parkApi, recordingApi, routeApi, taskApi, zoneApi } from "@/api/ops";
+import {
+  deviceApi,
+  mapApi,
+  parkApi,
+  photoApi,
+  recordingApi,
+  routeApi,
+  taskApi,
+  zoneApi
+} from "@/api/ops";
 import type {
   Device,
   MapVersion,
@@ -10,6 +19,7 @@ import type {
   Route,
   Task,
   TaskEvent,
+  TaskPhoto,
   TaskRecording,
   Zone
 } from "@/api/types";
@@ -120,6 +130,23 @@ const recordingDialog = ref(false);
 const recordingPlaying = ref<TaskRecording | null>(null);
 const recordingUrl = ref("");
 const recordingLoading = ref(false);
+/**
+ * 任务照片（航点动作「可见光拍照」）。
+ *
+ * 照片要带 Bearer 取字节（`<img src>` 带不上头），所以列表拿到后按需取 Blob；
+ * 为了不让 4G 上的操作员一开详情就拉十几张图：**先只取前
+ * `PHOTO_THUMBS` 张缩略图**，其余点「加载全部」再取。
+ */
+const detailPhotos = ref<TaskPhoto[]>([]);
+/** id → objectURL（缩略图 / 查看大图共用一份，别重复取） */
+const photoUrls = reactive(new Map<number, string>());
+const photoLoading = ref(false);
+const photoDialog = ref(false);
+const photoViewing = ref<TaskPhoto | null>(null);
+/** 一次自动取几张缩略图（后面的等操作员点按钮） */
+const PHOTO_THUMBS = 8;
+/** 已经发起过缩略图加载的张数（避免重复请求） */
+const photoRequested = ref(0);
 /** 实时监控弹窗（只看视频 + 地图，不打开整个详情） */
 const monitorVisible = ref(false);
 const monitorTaskId = ref<number | null>(null);
@@ -499,13 +526,15 @@ async function saveTask() {
 async function openDetail(task: Task) {
   detailTask.value = task;
   detailEvents.value = [];
+  detailPhotos.value = [];
+  revokeAllPhotoUrls();
   detailVisible.value = true;
   await refreshDetail(task.id);
 }
 
-/** 拉取详情（任务行 + 事件流 + 录像）；任务已被删除时关掉弹窗 */
+/** 拉取详情（任务行 + 事件流 + 录像 + 照片）；任务已被删除时关掉弹窗 */
 async function refreshDetail(taskId: number) {
-  const [, recordings] = await Promise.all([
+  const [, recordings, photos] = await Promise.all([
     taskApi.events(taskId).catch(() => {
       // 事件流取不到不影响详情主体（例如旧任务没有事件记录）
       detailEvents.value = [];
@@ -513,9 +542,131 @@ async function refreshDetail(taskId: number) {
     recordingApi.list(taskId).catch(() => {
       // 旧任务没有录像 / 服务端还没升级：当作没有，不打扰操作员
       detailRecordings.value = [];
+    }),
+    photoApi.list(taskId).catch(() => {
+      // 同上：没有照片 / 服务端还没升级都当作没有
+      detailPhotos.value = [];
     })
   ]);
   if (Array.isArray(recordings)) detailRecordings.value = recordings;
+  if (Array.isArray(photos)) {
+    const before = detailPhotos.value.map(photo => photo.id).join(",");
+    detailPhotos.value = photos;
+    // 换任务 / 新照片回传：重新按需取缩略图
+    if (before !== photos.map(photo => photo.id).join(",")) {
+      photoRequested.value = 0;
+      void loadPhotoThumbs();
+    }
+  }
+}
+
+/** 照片标注：「航点3 · P3 · 前置」 */
+function photoLabel(item: TaskPhoto) {
+  const name = item.pointName?.trim();
+  const camera = {
+    dogcam: "前置",
+    dogcam720: "前置",
+    "dog-ipcam": "红外",
+    cam0: "左前",
+    cam1: "右前",
+    cam2: "右后",
+    cam3: "左后"
+  }[item.camera] ?? item.camera;
+  return `航点${item.pointIndex + 1}${name ? ` · ${name}` : ""} · ${camera}`;
+}
+
+/** 取一张照片的字节（带 Bearer），缓存成 objectURL；失败返回空串 */
+async function ensurePhotoUrl(item: TaskPhoto) {
+  const cached = photoUrls.get(item.id);
+  if (cached) return cached;
+  const blob = await photoApi.blob(item.id);
+  const url = URL.createObjectURL(blob);
+  photoUrls.set(item.id, url);
+  return url;
+}
+
+/** 按需取缩略图：默认只取前 `PHOTO_THUMBS` 张（4G 上别一次拉几十张） */
+async function loadPhotoThumbs(force = false) {
+  if (photoLoading.value) return;
+  const limit = force ? detailPhotos.value.length : Math.min(PHOTO_THUMBS, detailPhotos.value.length);
+  const pending = detailPhotos.value.slice(photoRequested.value, limit);
+  if (!pending.length) return;
+  photoLoading.value = true;
+  try {
+    for (const item of pending) {
+      await ensurePhotoUrl(item).catch(() => "");
+      photoRequested.value = Math.max(photoRequested.value, detailPhotos.value.indexOf(item) + 1);
+    }
+  } finally {
+    photoLoading.value = false;
+  }
+}
+
+/** 点开大图（同一张图用同一份 Blob，别为了看图再下一次） */
+async function openPhoto(item: TaskPhoto) {
+  photoViewing.value = item;
+  photoDialog.value = true;
+  try {
+    await ensurePhotoUrl(item);
+  } catch {
+    // http.ts 已经弹过错误提示（弱网 / 文件被清理）：别让弹窗停在「正在取照片…」
+    photoDialog.value = false;
+    photoViewing.value = null;
+  }
+}
+
+function closePhotoDialog() {
+  photoViewing.value = null;
+}
+
+/** 下载原图：Blob → `<a download>`，文件名带航点与相机，方便归档 */
+async function downloadPhoto(item: TaskPhoto) {
+  let blob: Blob;
+  try {
+    blob = await photoApi.blob(item.id);
+  } catch {
+    return; // http.ts 已经弹过提示（弱网 / 文件被清理）
+  }
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  const suffix = item.fileName.replace(/^.*\./, "");
+  // 文件名里不能有路径分隔符与 Windows 保留字符：统一换成下划线
+  link.download = `${item.taskCode}-${photoLabel(item)}.${suffix || "jpg"}`.replace(
+    /[\\/:*?"<>|]/g,
+    "_"
+  );
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+
+async function removePhoto(item: TaskPhoto) {
+  try {
+    await ElMessageBox.confirm(
+      `删除这张照片（${photoLabel(item)}，${recordingSize(item.fileSize)}）？平台侧删除不可恢复。`,
+      "删除照片",
+      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" }
+    );
+  } catch {
+    return;
+  }
+  await photoApi.remove(item.id);
+  revokePhotoUrl(item.id);
+  detailPhotos.value = detailPhotos.value.filter(photo => photo.id !== item.id);
+  ElMessage.success("照片已删除");
+}
+
+function revokePhotoUrl(id: number) {
+  const url = photoUrls.get(id);
+  if (url) {
+    URL.revokeObjectURL(url);
+    photoUrls.delete(id);
+  }
+}
+
+/** 关详情 / 换任务：所有 objectURL 一起释放（一次巡检几十张，不释放会一直占内存） */
+function revokeAllPhotoUrls() {
+  for (const [id] of photoUrls) revokePhotoUrl(id);
+  photoRequested.value = 0;
 }
 
 /** 录像的大小（服务端回的是字节数） */
@@ -1331,6 +1482,7 @@ onBeforeUnmount(() => {
       width="min(1080px, 94vw)"
       top="5vh"
       destroy-on-close
+      @closed="revokeAllPhotoUrls"
     >
       <template v-if="detailTask">
         <div class="live-hint" style="margin-bottom: 10px">
@@ -1436,6 +1588,69 @@ onBeforeUnmount(() => {
         </div>
         <div v-else class="empty-box" style="padding: 16px 0">
           暂无录像。路线里给航点配「录像采集」或在航段配「全程录像」，任务跑完会出现在这里。
+        </div>
+
+        <div class="rt-sec-title" style="margin-top: 18px">
+          <span>任务照片（{{ detailPhotos.length }}）</span><AppIcon name="camera" />
+        </div>
+        <template v-if="detailPhotos.length">
+          <div
+            style="
+              display: grid;
+              grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+              gap: 8px;
+            "
+          >
+            <div
+              v-for="item in detailPhotos"
+              :key="item.id"
+              style="
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+                overflow: hidden;
+                background: #0f172a;
+                cursor: zoom-in;
+              "
+              :title="`${photoLabel(item)} · ${recordingSize(item.fileSize)} · ${(item.capturedAt || item.createdAt).slice(5, 16)}`"
+              @click="openPhoto(item)"
+            >
+              <img
+                v-if="photoUrls.get(item.id)"
+                :src="photoUrls.get(item.id)"
+                alt=""
+                style="width: 100%; height: 96px; object-fit: cover; display: block"
+              />
+              <div
+                v-else
+                style="height: 96px; display: flex; align-items: center; justify-content: center; color: #94a3b8; font-size: 11.5px"
+              >
+                点开加载
+              </div>
+              <div
+                class="mono muted"
+                style="font-size: 10.5px; padding: 3px 6px; background: #111827; color: #cbd5e1"
+              >
+                {{ photoLabel(item) }}
+              </div>
+            </div>
+          </div>
+          <div style="display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap">
+            <button
+              v-if="photoRequested < detailPhotos.length"
+              class="btn sm"
+              :disabled="photoLoading"
+              @click="loadPhotoThumbs(true)"
+            >
+              <AppIcon name="camera" />{{ photoLoading ? "加载中…" : `加载全部（还有 ${detailPhotos.length - photoRequested} 张）` }}
+            </button>
+            <span class="rt-hint" style="margin: 0">
+              点开看大图 / 下载。照片是<b>背包相机</b>在到点那一刻抓的（航点动作「可见光拍照」的
+              抓拍源可选机器狗前置 / 背包四路 / 红外）。
+            </span>
+          </div>
+        </template>
+        <div v-else class="empty-box" style="padding: 16px 0">
+          暂无照片。路线里给航点配「可见光拍照」，任务跑到该点（或任务结束后）会出现在这里。
         </div>
 
         <div class="rt-sec-title" style="margin-top: 18px">
@@ -1546,6 +1761,46 @@ onBeforeUnmount(() => {
         <button class="btn" @click="recordingDialog = false">
           <AppIcon name="close" />关闭
         </button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="photoDialog"
+      :title="photoViewing ? photoLabel(photoViewing) : '任务照片'"
+      width="min(960px, 94vw)"
+      top="6vh"
+      destroy-on-close
+      @closed="closePhotoDialog"
+    >
+      <div v-if="photoViewing" class="rt-hint" style="margin-bottom: 8px">
+        {{ recordingSize(photoViewing.fileSize) }} ·
+        {{ (photoViewing.capturedAt || photoViewing.createdAt).slice(0, 19) }}
+      </div>
+      <img
+        v-if="photoViewing && photoUrls.get(photoViewing.id)"
+        :src="photoUrls.get(photoViewing.id)"
+        alt=""
+        style="width: 100%; max-height: 68vh; object-fit: contain; background: #000; border-radius: 8px"
+      />
+      <div v-else class="empty-box" style="padding: 40px 0">正在取照片…</div>
+      <template #footer>
+        <button
+          v-if="photoViewing"
+          class="btn"
+          title="下载原图"
+          @click="downloadPhoto(photoViewing)"
+        >
+          <AppIcon name="download" />下载
+        </button>
+        <button
+          v-if="photoViewing"
+          class="btn ghost"
+          title="删除这张照片"
+          @click="removePhoto(photoViewing).then(() => (photoDialog = false))"
+        >
+          <AppIcon name="trash" />删除
+        </button>
+        <button class="btn" @click="photoDialog = false"><AppIcon name="close" />关闭</button>
       </template>
     </el-dialog>
 

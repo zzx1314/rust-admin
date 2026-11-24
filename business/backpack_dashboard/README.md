@@ -751,5 +751,24 @@ FIFO 命令注入的护栏。循环播报有看门狗（`SPEAK_MAX_SECS`，默�
 **现场自检**（不需要板子 / 聆思 / 网络）：`python3 backend/tools/speak_selftest.py`
 （内容净化 / 幂等 / 循环看门狗 / 单次收尾 / 换播报先停旧的 / stop 幂等）。
 
+### ⑦ 航点拍照（航点动作「可见光拍照」）
+
+到点让板子抓一张（或多张）JPEG，任务结束后随客户端回传平台。板端只负责抓图与落盘：
+
+| 接口 | 入参 | 说明 |
+|---|---|---|
+| `POST /api/photo` | `planId`、`pointIndex`、`pointName`、`camera`、`frames` | 抓拍；`camera` = `dogcam`（机器狗前置）/ `cam0`~`cam3`（背包 USB）/ `dog-ipcam`（红外）；`frames` 1~5，多帧按 `PHOTO_FPS` 拉开 |
+| `GET /api/photo/list` | 可选 `?planId=` | 待回传清单（`name` = `<planId>/pt<n>/<文件>.jpg`，上传成功后原样回传给 delete） |
+| `POST /api/photo/delete` | `names` | 上传成功后删板端文件；删空后连 `points.json` 与计划目录一起收掉 |
+| `GET /api/photo/status` | — | 目录 / 剩余空间 / 待回传张数 / 可抓相机 / 最近一次 |
+
+落盘 `PHOTO_DIR/<计划>/pt<航点>/`（默认 `/media/media-data/photo`），
+与 AI 存证（`detect_jobs/` + `MEDIA_DATA_DIR`）**分开**：那边是训练图 / 告警证据。
+没传走的按 `PHOTO_RETENTION_HOURS`（默认 72h）清；剩余空间低于 `PHOTO_MIN_FREE_MB`
+就不抓。抓拍失败（流没在推 / ffmpeg 缺失）只回 `ok=false`，绝不影响巡检。
+
+**现场自检**（不需要相机 / ffmpeg）：`python3 backend/tools/photo_selftest.py`
+（抓拍 / 多帧 / 清单 / 删除 / 路径白名单 / 空目录收口 / 超期清盘）。
+
 ### 部署到板端需同步的新增/改动文件
-`backend/config.py`、`relay.py`、`detect.py`、`osd.py`、`agent.py`、**新增 `evidence.py` / `speak.py`**、`frontend/index.html`、`static/app.js`、`static/style.css`、`mediamtx/mediamtx.yml`；并在 snap 配置加 `dogcam720` path。重启 agent。
+`backend/config.py`、`relay.py`、`detect.py`、`osd.py`、`agent.py`、**新增 `evidence.py` / `speak.py` / `photo.py`**、`frontend/index.html`、`static/app.js`、`static/style.css`、`mediamtx/mediamtx.yml`；并在 snap 配置加 `dogcam720` path。重启 agent。

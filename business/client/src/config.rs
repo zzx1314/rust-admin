@@ -103,6 +103,8 @@ pub const ENV_AI_ENABLED: &str = "ROBODOG_AI_ENABLED";
 pub const ENV_RECORD_ENABLED: &str = "ROBODOG_RECORD_ENABLED";
 /// 航点 / 航段语音播报总开关（`0` / `false` 关闭）。播报也走板端 Agent，默认开。
 pub const ENV_SPEAK_ENABLED: &str = "ROBODOG_SPEAK_ENABLED";
+/// 航点拍照总开关（`0` / `false` 关闭）。拍照也走板端 Agent，默认开。
+pub const ENV_PHOTO_ENABLED: &str = "ROBODOG_PHOTO_ENABLED";
 /// 航点 AI 识别：板端存证根目录（`detect_jobs`），命中帧在这里，检出告警靠它发证据图
 pub const ENV_AI_JOBS_DIR: &str = "ROBODOG_AI_JOBS_DIR";
 
@@ -427,6 +429,8 @@ pub struct CliArgs {
     pub record_enabled: Option<bool>,
     /// `--no-speak` → `Some(false)`
     pub speak_enabled: Option<bool>,
+    /// `--no-photo` → `Some(false)`
+    pub photo_enabled: Option<bool>,
     pub api_username: Option<String>,
     pub api_password: Option<String>,
     /// 打印脱敏后的生效配置后退出
@@ -479,6 +483,7 @@ impl CliArgs {
             ai_enabled: args.contains("--no-ai").then_some(false),
             record_enabled: args.contains("--no-record").then_some(false),
             speak_enabled: args.contains("--no-speak").then_some(false),
+            photo_enabled: args.contains("--no-photo").then_some(false),
             api_username: opt(&mut args, "--api-username")?,
             api_password: opt(&mut args, "--api-password")?,
             print_config: args.contains("--print-config"),
@@ -559,6 +564,7 @@ pub fn print_help() {
   --no-ai                关闭航点 AI 识别（到点不再本地开识别）
   --no-record            关闭航点 / 航段录像（到点不再调板端 Agent 录 mp4）
   --no-speak             关闭航点 / 航段语音播报（到点不再调板端 Agent 播音）
+  --no-photo             关闭航点拍照（到点不再调板端 Agent 抓拍照片）
   --api-base <URL>       业务服务 REST 地址 (默认由 --server 推导)
   --api-username <账号>  业务服务登录账号 (默认: {DEFAULT_API_USERNAME})
   --api-password <密码>  业务服务登录密码 (默认: {DEFAULT_API_PASSWORD}，线上必须覆盖)
@@ -625,6 +631,9 @@ pub struct Config {
     /// 航点 / 航段语音播报总开关（`--no-speak` / `ROBODOG_SPEAK_ENABLED=0`）：
     /// 关掉后不再调板端 `/api/speak*`（现场「别在夜里喊」/ 静默试跑时用）。
     pub speak_enabled: bool,
+    /// 航点拍照总开关（`--no-photo` / `ROBODOG_PHOTO_ENABLED=0`）：
+    /// 关掉后不再调板端 `/api/photo*`，也不会回传照片。
+    pub photo_enabled: bool,
     /// 业务服务 REST 基地址（默认由 server_url 推导）
     pub api_base: Option<String>,
     /// 业务服务登录账号
@@ -860,6 +869,11 @@ impl Config {
             .speak_enabled
             .or_else(|| env.get(ENV_SPEAK_ENABLED).map(parse_bool))
             .unwrap_or(true);
+        // 拍照：流没推 / 只想跑导航时单独关（不影响 AI、录像、播报）
+        let photo_enabled = cli
+            .photo_enabled
+            .or_else(|| env.get(ENV_PHOTO_ENABLED).map(parse_bool))
+            .unwrap_or(true);
         let env_jobs_dir = env.get_string(ENV_AI_JOBS_DIR);
         let ai_jobs_dir =
             pick_string([env_jobs_dir.as_deref(), file.ai.jobs_dir.as_deref()]).map(str::to_string);
@@ -919,6 +933,7 @@ impl Config {
             ai_enabled,
             record_enabled,
             speak_enabled,
+            photo_enabled,
             api_base,
             api_username,
             api_password,
@@ -972,6 +987,7 @@ ai.jobs_dir             = {ai_jobs_dir}
 ai.enabled              = {ai_enabled}
 record.enabled          = {record_enabled}
 speak.enabled           = {speak_enabled}
+photo.enabled           = {photo_enabled}
 api.base                = {api_base}
 api.username            = {api_username}
 api.password            = {api_password}
@@ -1012,6 +1028,7 @@ log.filter              = {log_filter}",
             ai_enabled = self.ai_enabled,
             record_enabled = self.record_enabled,
             speak_enabled = self.speak_enabled,
+            photo_enabled = self.photo_enabled,
             api_base = self.api_base.as_deref().unwrap_or("（按 server.url 推导）"),
             api_username = self.api_username,
             api_password = mask(&self.api_password),

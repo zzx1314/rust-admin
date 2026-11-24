@@ -4,6 +4,7 @@ use crate::agent_relay;
 use crate::ai_patrol::AiPatrol;
 use crate::ai_patrol::AiStart;
 use crate::lights::PointLights;
+use crate::photo::Photographer;
 use crate::record::Recorder;
 use crate::report::clear_teleop_blocked;
 use crate::report::notify_teleop_blocked;
@@ -46,6 +47,7 @@ pub(crate) async fn handle_server_message(
     lights: &Arc<PointLights>,
     recorder: &Arc<Recorder>,
     speaker: &Arc<Speaker>,
+    photographer: &Arc<Photographer>,
     relay: &Arc<AgentRelay>,
 ) {
     match msg.msg_type.as_str() {
@@ -150,6 +152,7 @@ pub(crate) async fn handle_server_message(
                 lights,
                 recorder,
                 speaker,
+                photographer,
             )
             .await
         }
@@ -166,6 +169,7 @@ pub(crate) async fn handle_server_message(
                 lights,
                 recorder,
                 speaker,
+                photographer,
             )
             .await
         }

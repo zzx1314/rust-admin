@@ -25,6 +25,7 @@ import type {
   Staff,
   StaffImportResult,
   TaskEvent,
+  TaskPhoto,
   TaskRecording,
   UserInfo,
   WorkOrder,
@@ -193,6 +194,17 @@ export const recordingApi = {
    */
   blob: (id: number) => getBlob(`/recordings/${id}/file`),
   remove: (id: number) => del<boolean>(`/recordings/${id}`)
+};
+
+/** 航点照片：任务详情里看「可见光拍照」拍到的图 */
+export const photoApi = {
+  list: (taskId: number) => get<TaskPhoto[]>(`/tasks/${taskId}/photos`),
+  /**
+   * 取照片字节（带 Bearer，所以不能直接给 `<img src>` 用）。
+   * 调用方拿到 Blob 后 `URL.createObjectURL` 显示 / 下载，用完记得 revoke。
+   */
+  blob: (id: number) => getBlob(`/photos/${id}/file`),
+  remove: (id: number) => del<boolean>(`/photos/${id}`)
 };
 
 export const routeApi = {

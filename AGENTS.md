@@ -187,6 +187,23 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 `python3 business/backpack_dashboard/backend/tools/record_selftest.py`、
 `client record::tests`、`cargo test --test recordings`。
 
+**航点拍照（航点动作「可见光拍照」）**：字段 `photoCamera`（`dogcam` 机器狗前置 /
+`cam0`~`cam3` 背包四路 / `dog-ipcam` 红外，默认 `dogcam`）+ `photoFrames`（1~5，默认 1，
+多帧按 2fps 拉开）。到点由**设备客户端**调板端 `POST /api/photo`（`client/src/photo.rs`
+→ `backend/photo.py`，ffmpeg 从本机 mediamtx 抓 JPEG），任务终态 / 取消 / 客户端启动
+再把板端积压的图回传平台（`POST /api/photos/ingest`，sha256 去重，**上传成功才**回调
+`/api/photo/delete` 删板端文件），任务详情「任务照片」缩略图 / 大图 / 下载 / 删除。
+**照片不走本体的相机**：本体 `tasks=[1]` 走的是上装 `/capture_image`，服务没起就
+`14005` 失败，而且 5010/5011 记录查询本体没实现（拿不到 `image_path`）；背包相机本来就在
+跑（实时视频 / AI 抽帧同一路），抓图不依赖新协议，本体侧行为保持不变。
+三条红线：**抓拍失败绝不影响巡检**（流没推 / ffmpeg 缺失 / 磁盘满都只记日志，老 Agent 404
+只试一次）、**到点同步抓且同一航点只拍一次**（停留只有几秒，晚了拍到的是下一段路）、
+**照片不进中台「媒体资源」**（那边是训练图；这里是任务结果，与录像同一理由）。
+留存：平台 `photo_keep_days`（默认 90 天）/ 板端 `PHOTO_RETENTION_HOURS`（72h）。
+改这块先读 `business/docs/waypoint-photo.md`，回归
+`python3 business/backpack_dashboard/backend/tools/photo_selftest.py`、
+`client photo::tests` + `cargo test waypoint_photo`、`cargo test --test photos`（业务平台）。
+
 **语音播报（航点动作 / 行进任务）**：路线编辑器里两类动作都叫「语音播报」，字段
 `speakText` / `speakSeconds`（`0` = 只说一次，`>0` = 循环播这么久）。航点动作 = 到点播报；
 行进任务 = **进入该航段（到达起点航点）时**开始播（`legs[i]` 起点是航点 i，`returnLeg`

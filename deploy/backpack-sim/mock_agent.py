@@ -59,6 +59,7 @@ curl -s -XPOST 127.0.0.1:8000/api/sim/emit  -d '{"type":"telemetry","battery":88
 curl -s 127.0.0.1:8000/api/lights          # 计划灯光（补光 / LED / 是否夜间）
 curl -s -XPOST 127.0.0.1:8000/api/lights/off -d '{"reason":"manual"}'
 curl -s 127.0.0.1:8000/api/speak/status   # 语音播报（计划到点 / 进段时客户端调的 /api/speak）
+curl -s 127.0.0.1:8000/api/photo/status   # 航点拍照（到点抓 JPEG → 客户端回传平台）
 ```
 """
 
@@ -69,6 +70,7 @@ import random
 import subprocess
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -83,6 +85,17 @@ MEDIA_DIR = os.path.abspath(
     os.environ.get("SIM_MEDIA_DIR", os.path.join(HERE, "data", "media-data", "picture"))
 )
 PLAN_SAVE_FRAMES = max(1, min(10, int(os.environ.get("SIM_PLAN_SAVE_FRAMES", "3"))))
+# 航点拍照（真板子是 /media/media-data/photo）：客户端上传成功后删，这里落到仓库 data/
+PHOTO_DIR = os.path.abspath(
+    os.environ.get("SIM_PHOTO_DIR", os.path.join(HERE, "data", "photo"))
+)
+# 假照片：只要 JPEG 的 SOI 头（平台 ingest 就按这个头判，不需要真图）
+FAKE_JPEG = (
+    b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+    b"\xff\xdb\x00C\x00" + b"\x08" * 64 + b"\xff\xc9\x00\x0b\x08\x00\x01\x00\x01"
+    b"\x01\x01\x11\x00\xff\xcc\x00\x06\x00\x10\x10\x05\xff\xda\x00\x08\x01"
+    b"\x01\x00\x00?\x00\xd2\xcf\x20\xff\xd9"
+)
 RELAY_RUNNING = os.environ.get("SIM_RELAY_RUNNING", "1") == "1"
 PLAN_HIT_DELAY = float(os.environ.get("SIM_PLAN_HIT_DELAY", "4.5"))
 COUNT_RESULT = os.environ.get("SIM_COUNT_RESULT", "ok").strip().lower()
@@ -210,6 +223,8 @@ class State:
         self.speak = {"active": False, "text": "", "loop": False,
                       "seconds": 0, "plan_id": "", "point_index": -1,
                       "scope": "", "words": 0, "stops": 0}
+        # 航点拍照（客户端在 5009 到点那一帧调的 /api/photo）
+        self.photos = {}
         self.seen_events = 0
 
     # ---- 事件 ----
@@ -315,6 +330,46 @@ class State:
             "sim": True,
         })
         return lights
+
+    def photo_status(self):
+        """航点拍照快照（GET /api/photo/status）——字段与板端 `photo.status` 对齐。"""
+        files = self.photo_list()
+        return {
+            "dir": PHOTO_DIR,
+            "free_mb": 4096,
+            "pending": len(files),
+            "pending_bytes": sum(item["size"] for item in files),
+            "sessions": sorted({item["planId"] for item in files})[:50],
+            "allowed_cameras": ["cam0", "cam1", "cam2", "cam3", "dogcam", "dogcam720"],
+            "max_frames": 5,
+            "quality": "2",
+            "last": self.photos.get("__last__") or {"at": None, "files": [], "error": ""},
+            "retention_hours": 72,
+            "sim": True,
+        }
+
+    def photo_list(self, plan_id=None):
+        """内存清单（按 name 排序）：返回给客户端的字段与真板端 `photo.list_files` 一致。"""
+        with self.lock:
+            items = list(self.photos.items())
+        files = []
+        for name, meta in sorted(items):
+            if name.startswith("__"):
+                continue
+            if plan_id and meta["planId"] != plan_id:
+                continue
+            path = os.path.join(PHOTO_DIR, *name.split("/"))
+            files.append({
+                "name": name,
+                "path": path,
+                "planId": meta["planId"],
+                "pointIndex": meta["pointIndex"],
+                "pointName": meta.get("pointName") or "",
+                "camera": meta["camera"],
+                "size": meta["size"],
+                "capturedAt": meta["capturedAt"],
+            })
+        return files
 
     def speak_status(self):
         """语音播报快照（GET /api/speak/status）——字段与板端 `speak.status` 对齐。"""
@@ -639,6 +694,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.json(STATE.lights_status())
         if path == "/api/speak/status":
             return self.json(STATE.speak_status())
+        if path == "/api/photo/status":
+            return self.json(STATE.photo_status())
+        if path == "/api/photo/list":
+            query = self.path.split("?", 1)[1] if "?" in self.path else ""
+            plan_id = ""
+            for part in query.split("&"):
+                if part.startswith("planId="):
+                    plan_id = urllib.parse.unquote(part.split("=", 1)[1])
+            return self.json({"files": STATE.photo_list(plan_id or None)})
         if path == "/api/events":
             return self.sse()
         if path == "/api/sim/state":
@@ -649,6 +713,7 @@ class Handler(BaseHTTPRequestHandler):
                 "relay": STATE.relay,
                 "lights": STATE.lights,
                 "speak": STATE.speak,
+                "photo": STATE.photo_status(),
                 "events": STATE.seen_events,
             })
         if path == "/":
@@ -738,6 +803,100 @@ class Handler(BaseHTTPRequestHandler):
                 STATE.speak["words"] += 1
             return self.json({"ok": True, "changed": True, "cmd": text,
                               "speak": STATE.speak_status()})
+        # 航点拍照（客户端在 5009 到点那一帧调；字段与真板端同一份）
+        if path == "/api/photo":
+            plan_id = str(body.get("planId") or body.get("taskCode") or "")
+            if not plan_id or "/" in plan_id or ".." in plan_id:
+                return self.json({"ok": False, "error": "planId 不合法"}, 400)
+            point_index = int(body.get("pointIndex") or 0)
+            camera = str(body.get("camera") or "dogcam")
+            frames = max(1, min(5, int(body.get("frames") or 1)))
+            point_name = str(body.get("pointName") or "")
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+            folder = os.path.join(PHOTO_DIR, plan_id, "pt%d" % point_index)
+            os.makedirs(folder, exist_ok=True)
+            files = []
+            with STATE.lock:
+                for index in range(frames):
+                    name = "%s-%s%s.jpg" % (
+                        stamp, camera, "" if frames == 1 else "-%03d" % (index + 1)
+                    )
+                    path = os.path.join(folder, name)
+                    with open(path, "wb") as handle:
+                        handle.write(FAKE_JPEG)
+                    relative = "%s/pt%d/%s" % (plan_id, point_index, name)
+                    STATE.photos[relative] = {
+                        "planId": plan_id,
+                        "pointIndex": point_index,
+                        "pointName": point_name,
+                        "camera": camera,
+                        "size": len(FAKE_JPEG),
+                        "capturedAt": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                    }
+                    files.append({
+                        "name": relative,
+                        "path": path,
+                        "planId": plan_id,
+                        "pointIndex": point_index,
+                        "camera": camera,
+                        "size": len(FAKE_JPEG),
+                        "capturedAt": STATE.photos[relative]["capturedAt"],
+                    })
+                STATE.photos["__last__"] = {
+                    "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                    "camera": camera,
+                    "files": [item["name"] for item in files],
+                    "error": "",
+                }
+            if point_name:
+                # 与真板端一样写 points.json：客户端重启后回传也能带上航点名
+                points_file = os.path.join(PHOTO_DIR, plan_id, "points.json")
+                known = {}
+                try:
+                    with open(points_file) as handle:
+                        known = json.load(handle)
+                except (OSError, ValueError):
+                    known = {}
+                known[str(point_index)] = point_name
+                with open(points_file, "w") as handle:
+                    json.dump(known, handle, ensure_ascii=False)
+            return self.json({"ok": True, "planId": plan_id, "pointIndex": point_index,
+                              "camera": camera, "files": files, "error": ""})
+        if path == "/api/photo/delete":
+            names = body.get("names") or []
+            if isinstance(names, str):
+                names = [names]
+            deleted = []
+            errors = []
+            with STATE.lock:
+                for name in names:
+                    name = str(name or "").strip("/")
+                    parts = name.split("/")
+                    if len(parts) != 3 or parts[1][:2] != "pt" or "../" in name:
+                        errors.append("%s: 路径不合法" % name)
+                        continue
+                    STATE.photos.pop(name, None)
+                    target = os.path.join(PHOTO_DIR, *parts)
+                    try:
+                        os.remove(target)
+                    except OSError:
+                        pass
+                    deleted.append(name)
+                    # 空目录（含 points.json 的收口）与真板端一致
+                    point_dir = os.path.dirname(target)
+                    plan_dir = os.path.dirname(point_dir)
+                    try:
+                        os.rmdir(point_dir)
+                    except OSError:
+                        pass
+                    try:
+                        if os.listdir(plan_dir) == ["points.json"]:
+                            os.remove(os.path.join(plan_dir, "points.json"))
+                        os.rmdir(plan_dir)
+                    except OSError:
+                        pass
+            return self.json({"ok": not errors, "deleted": deleted, "errors": errors})
+
         if path == "/api/speak/stop":
             reason = str(body.get("reason") or "计划结束")
             with STATE.lock:

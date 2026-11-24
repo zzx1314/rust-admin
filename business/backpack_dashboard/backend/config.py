@@ -219,6 +219,30 @@ RECORD_TRANSCODE = os.getenv("RECORD_TRANSCODE", "0")
 # 别只看 `journalctl -u backpack-agent`（那边只有「录像开始/结束」两行）
 RECORD_LOG = os.getenv("RECORD_LOG", "/tmp/record_ffmpeg.log")
 
+# ---- 航点拍照（路线动作「可见光拍照」，客户端触发，见 photo.py）----
+# 客户端在 5009 到点那一帧调 `/api/photo`，ffmpeg 从本机 mediamtx 抓 1~N 张 JPEG。
+# 落盘根目录（SSD，别指 eMMC）；客户端上传成功就删，没传走的按下列小时数清掉。
+# 与 AI 存证的 `MEDIA_DATA_DIR` / `detect_jobs` 分开：那边是训练图与告警证据。
+PHOTO_DIR = os.getenv("PHOTO_DIR", "/media/media-data/photo")
+# 路线动作没配 `photoCamera` 时的默认源（dogcam = 机器狗前置可见光）
+PHOTO_SOURCE_CAM = os.getenv("PHOTO_SOURCE_CAM", "dogcam")
+# 拉流走本机 mediamtx（与录像 / AI 抽帧一致，不碰 v4l2）
+PHOTO_RTSP_HOST = os.getenv("PHOTO_RTSP_HOST", "127.0.0.1")
+# 单次最多抓几张（路线动作 `photoFrames` 会被夹到这个上限）
+PHOTO_MAX_FRAMES = max(1, min(10, int(os.getenv("PHOTO_MAX_FRAMES", "5"))))
+# 多帧时的采样帧率：连着抓 N 帧等于同一张图，按 2fps 拉开（3 张 ≈ 1.5s）
+PHOTO_FPS = os.getenv("PHOTO_FPS", "2")
+# ffmpeg 的 JPEG 质量（-q:v，2 最好 31 最差；2 下 1080P 约 300~600KB）
+PHOTO_QUALITY = os.getenv("PHOTO_QUALITY", "2")
+# 抓拍超时（秒）：等的是 RTSP 起流 + 解码首帧，15s 足够；超时就当失败，别拖住 5009
+PHOTO_TIMEOUT_SECS = int(os.getenv("PHOTO_TIMEOUT_SECS", "15"))
+# 剩余空间低于这个值就不抓（照片不大，但也不能把 SSD 写满）
+PHOTO_MIN_FREE_MB = int(os.getenv("PHOTO_MIN_FREE_MB", "128"))
+# 没传走的照片保留多久（小时）：客户端上传成功会立刻删
+PHOTO_RETENTION_HOURS = int(os.getenv("PHOTO_RETENTION_HOURS", "72"))
+# ffmpeg 的 stderr 落这里（追加）：「拍出来是黑的 / 抓不到」先看它
+PHOTO_LOG = os.getenv("PHOTO_LOG", "/tmp/photo_ffmpeg.log")
+
 # ---- 航点 / 航段语音播报（聆思 TTS，客户端触发，见 speak.py）----
 # 巡检路线里的「语音播报」（航点动作 / 行进任务）由设备客户端在 5009 状态机上
 # 调 `/api/speak`，Agent 只往聆思命令 FIFO 写 `call 0|1 <内容>`。

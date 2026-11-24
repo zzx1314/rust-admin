@@ -11,6 +11,7 @@ use crate::handlers::handle_server_message;
 use crate::lights::PointLights;
 use crate::maps::MapSyncRunning;
 use crate::maps::sync_maps_from_robot;
+use crate::photo::Photographer;
 use crate::record::Recorder;
 use crate::report::ProgressReporter;
 use crate::report::progress_pct;
@@ -213,6 +214,23 @@ pub(crate) async fn run_client(
         info!("航点 / 航段录像已关闭（--no-record / ROBODOG_RECORD_ENABLED=0）");
     }
 
+    // 航点拍照：到点抓一张（`photo` 模块），任务收尾回传平台。
+    // 与 AI / 录像 / 播报共用板端 Agent，但开关独立（`--no-photo`）。
+    let photographer = Arc::new(Photographer::new(
+        Arc::new(config.clone()),
+        config.photo_enabled,
+    ));
+    if config.photo_enabled {
+        info!(
+            "航点拍照已启用：板端 Agent = {}（到点抓 JPEG，任务终态回传平台）",
+            photographer.agent()
+        );
+        // 上次没传完的照片（断网 / 客户端重启）：连上平台之后由这里补传
+        photographer.sync_pending();
+    } else {
+        info!("航点拍照已关闭（--no-photo / ROBODOG_PHOTO_ENABLED=0）");
+    }
+
     // 航点 / 航段语音播报：起停同样在 5009 状态机上（`speak` 模块），
     // 与 AI / 录像共用板端 Agent，但开关独立（`--no-speak`）。
     let speaker = Arc::new(Speaker::new(
@@ -245,6 +263,7 @@ pub(crate) async fn run_client(
         lights: lights.clone(),
         recorder: recorder.clone(),
         speaker: speaker.clone(),
+        photographer: photographer.clone(),
         out_tx: out_tx.clone(),
         state: state.clone(),
         active: active.clone(),
@@ -346,6 +365,7 @@ pub(crate) async fn run_client(
                             &lights,
                             &recorder,
                             &speaker,
+                            &photographer,
                             &relay,
                         ).await;
                     }

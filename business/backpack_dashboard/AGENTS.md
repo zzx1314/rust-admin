@@ -45,6 +45,7 @@ backend/
 ├── control.py        LED 闪烁 / 补光开关
 ├── record.py         航点 / 航段录像（ffmpeg 从本机 mediamtx 拉 dogcam，落 mp4 + 边车）
 ├── speak.py          航点 / 航段语音播报（聆思 TTS：call 0/1 <内容> / call stop）
+├── photo.py          航点拍照（ffmpeg 从本机 mediamtx 抓 JPEG，客户端到点触发）
 ├── buttons.py        SOS/STOP evdev 监听
 ├── cjk_font.py       画框中文字模（由 backend/tools/gen_cjk_font.py 生成）
 ├── start.sh          板端启动：camera-init → 复用 snap mediamtx → Agent
@@ -81,6 +82,9 @@ python3 business/backpack_dashboard/backend/tools/record_selftest.py
 
 # 语音播报自检（内容净化 / 幂等 / 循环看门狗 / 收尾，改 speak.py 后必跑；不需要聆思小板）
 python3 business/backpack_dashboard/backend/tools/speak_selftest.py
+
+# 航点拍照自检（抓拍 / 多帧 / 清单 / 删除 / 路径白名单 / 超期清盘，改 photo.py 后必跑）
+python3 business/backpack_dashboard/backend/tools/photo_selftest.py
 
 # 本地接口链路（模拟 Agent，不需要板子）
 cd deploy/backpack-sim && python3 run.py up && python3 run.py smoke
@@ -186,6 +190,40 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
 - 手工验：`curl -XPOST 127.0.0.1:8000/api/speak -d '{"text":"请避让","loop":false}'`；
   用 `deploy/backpack-sim` 时假 Agent 同样实现这三个接口（`/api/sim/state` 的 `speak`）。
 - 完整链路（平台编辑器 → 客户端 → 板端）见 `business/docs/plan-speech.md`。
+
+## 航点拍照（航点动作「可见光拍照」）
+
+板端只负责「按客户端的指令抓一张图 + 落盘」：`POST /api/photo`、`GET /api/photo/list`、
+`POST /api/photo/delete`、`GET /api/photo/status`，实现在 `backend/photo.py`，
+客户端在 `business/client/src/photo.rs`（同机 `127.0.0.1:8000` 调用，**不经平台隧道**）。
+起停时机在 5009（到点抓拍、任务终态回传），平台只下发路线动作。
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `PHOTO_DIR` | `/media/media-data/photo` | 落盘根目录（SSD；不要指到 eMMC） |
+| `PHOTO_SOURCE_CAM` | `dogcam` | 路线动作没配 `photoCamera` 时的默认源 |
+| `PHOTO_RTSP_HOST` | `127.0.0.1` | 本机 mediamtx（与录像 / AI 抽帧一致，不碰 v4l2） |
+| `PHOTO_MAX_FRAMES` | `5` | 单次最多抓几张（路线动作的张数被夹到这个上限） |
+| `PHOTO_FPS` | `2` | 多帧时的采样帧率（连着抓 N 帧是同一张图） |
+| `PHOTO_QUALITY` | `2` | ffmpeg `-q:v`（2 最好，1080P 约 300~600KB） |
+| `PHOTO_TIMEOUT_SECS` | `15` | 抓拍超时（等 RTSP 起流 + 解码首帧），超时即失败 |
+| `PHOTO_MIN_FREE_MB` | `128` | 剩余空间低于它就不抓 |
+| `PHOTO_RETENTION_HOURS` | `72` | 没传走的照片保留多久 |
+| `PHOTO_LOG` | `/tmp/photo_ffmpeg.log` | ffmpeg 的 stderr（追加）。「拍出来是黑的」先看它 |
+
+约定：
+
+- **相机白名单**：`allowed_cameras()` = `config.CAMERAS` 的 key（cam0~3 / dogcam）
+  ∪ `dogcam720` / `dog-ipcam`。配错相机直接 400 + 可选项，别让现场以为在拍。
+- **文件名即元数据**：`<时间戳>-<相机>[-序号].jpg`，`list_files` 从文件名反解相机；
+  航点名记在 `<计划>/points.json`（客户端重启后回传也能带上名字）。
+- **抓拍失败绝不影响巡检**：流没在推 / ffmpeg 缺失 / 磁盘不足都回 `ok=false + error`；
+  客户端只打日志、任务照跑（5009 每 500ms 一帧，不能重试风暴）。
+- **不碰 AI 存证目录**：`detect_jobs/` + `MEDIA_DATA_DIR` 是训练图 / 告警证据，
+  这里是巡检结果照片（`PHOTO_DIR`），留存与消费方都不一样。
+- **`delete` 只认 `<planId>/pt<n>/<文件名>.jpg`**：路径穿越、非 jpg 一律拒绝；
+  文件删空后连 `points.json` 与计划目录一起收掉。
+- 完整链路见 `business/docs/waypoint-photo.md`。
 
 ## 代码约定
 

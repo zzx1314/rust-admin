@@ -289,6 +289,24 @@ export interface RoutePointAction {
    *   取消**时客户端会提前 `call stop`（循环里狗走了不能还在原地喊）。
    */
   speakSeconds?: number;
+  /**
+   * 「可见光拍照」专用：抓拍源。
+   *
+   * - `dogcam`（默认）= 机器狗前置可见光（走当前分辨率档位）；
+   * - `cam0`~`cam3` = 背包四路 USB 相机（左前 / 右前 / 右后 / 左后）；
+   * - `dog-ipcam` = 红外。
+   *
+   * 板端 Agent 从本机 mediamtx 抓 JPEG（不碰 v4l2）；不配就用板端
+   * `PHOTO_SOURCE_CAM`（默认 dogcam）。
+   */
+  photoCamera?: string;
+  /**
+   * 「可见光拍照」专用：这个航点抓几张（1~5，默认 1）。
+   *
+   * 多帧按板端 `PHOTO_FPS`（默认 2fps）拉开，用来避开运动模糊；
+   * 张数越多上传越慢，一般 1 张够用。
+   */
+  photoFrames?: number;
 }
 
 /**
@@ -312,6 +330,30 @@ export interface TaskRecording {
   durationSec: number;
   startedAt: string | null;
   endedAt: string | null;
+  createdAt: string;
+}
+
+/**
+ * 航点照片（路线动作「可见光拍照」）。
+ *
+ * 板端 Agent 抓 JPEG → 设备客户端回传 → 任务详情「任务照片」查看 / 下载 /
+ * 批量导出。照片**不进中台「媒体资源」**：那边是 AI 存证的训练图，
+ * 留存量级与消费方都不一样（与录像同一条理由）。
+ */
+export interface TaskPhoto {
+  id: number;
+  taskId: number | null;
+  taskCode: string;
+  deviceCode: string;
+  planId: string | null;
+  pointIndex: number;
+  pointName: string | null;
+  /** 抓拍源：`dogcam` / `cam0`~`cam3` / `dog-ipcam` */
+  camera: string;
+  fileName: string;
+  fileSize: number;
+  /** 板端抓拍时刻（板子本地时间） */
+  capturedAt: string | null;
   createdAt: string;
 }
 

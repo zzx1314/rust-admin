@@ -8,6 +8,7 @@ use crate::lights::PointLights;
 use crate::maps::send_map_saved_event;
 use crate::maps::upload_mapping_to_zentai;
 use crate::mapupload::UploadOutcome;
+use crate::photo::Photographer;
 use crate::record::Recorder;
 use crate::report::EventDedup;
 use crate::report::ProgressReporter;
@@ -56,6 +57,7 @@ pub(crate) fn spawn_zhpro_pump(
     lights: Arc<PointLights>,
     recorder: Arc<Recorder>,
     speaker: Arc<Speaker>,
+    photographer: Arc<Photographer>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut rx = client.subscribe();
@@ -168,6 +170,7 @@ pub(crate) fn spawn_zhpro_pump(
                         &lights,
                         &recorder,
                         &speaker,
+                        &photographer,
                     )
                     .await;
                     // 终态后本体没释放导航能力：后台补 5002 + 等 idle。
@@ -478,6 +481,7 @@ pub(crate) async fn handle_status_frame(
     lights: &Arc<PointLights>,
     recorder: &Arc<Recorder>,
     speaker: &Arc<Speaker>,
+    photographer: &Arc<Photographer>,
 ) -> Option<TerminalCleanup> {
     // 文档 §2.6.10 第 5 条：即时终态可能已经在 `current_task` 里被回收，只留在
     // `recent_terminal_tasks` 里（最多 3 条 / 约 30s）。两处都要识别，否则
@@ -589,9 +593,12 @@ pub(crate) async fn handle_status_frame(
             recorder.finish_task(&plan_id, "任务终态").await;
             // 语音播报：循环播报不能跟着狗回家，终态当场收口（板端看门狗只是兜底）。
             speaker.finish_task(&plan_id, "任务终态").await;
+            // 航点照片：停拍 + 把板端积压的图回传平台（回传在后台跑，弱网下要几分钟）。
+            photographer.finish_task(&plan_id, "任务终态").await;
         } else {
             lights.leave("任务终态").await;
             speaker.finish_task("", "任务终态").await;
+            photographer.finish_task("", "任务终态").await;
         }
     } else {
         // 计划级自动开灯（`lightFill` / `lightLed`）：**全程开**，不跟航点动作。
@@ -649,10 +656,8 @@ pub(crate) async fn handle_status_frame(
                 // 航点录像：这个点配了「录像采集」就开录（`Recorder` 自己查路线配置，
                 // 同一个点重复调用只起一次），离开航点时由下面那段收口。
                 recorder.point_arrived(&current.task_code, index).await;
-                // 语音播报：这个点配了「语音播报」（航点动作）或从这里出发的航段配了播报，
-                // 就播一条。**串行 await**（不像开灯那样 spawn）：与下面「离开航点停播」
-                // 必须严格有序，否则 stop 可能抢在 start 前面把新播报掐掉。
-                speaker.point_arrived(&current.task_code, index).await;
+                // AI 识别必须**最早**开窗：狗在这个点只停「停留时长」那么久，
+                // 抓拍（0.5~2s）和播报（asr 拉起可能 2s）排在前面会把可用帧吃掉。
                 match ai_point_at(&current.ai_points, index) {
                     Some(point) => {
                         ai.point_arrived(out_tx, &current.task_code.clone(), point)
@@ -661,6 +666,12 @@ pub(crate) async fn handle_status_frame(
                     // 这个点没有 AI 动作：上一个点的窗口别继续跑（画面已经变了）
                     None => ai.stop("到达无 AI 动作的航点").await,
                 }
+                // 航点拍照：这个点配了「可见光拍照」就抓一张（同步等：狗可能马上就走）
+                photographer.point_arrived(&current.task_code, index).await;
+                // 语音播报：这个点配了「语音播报」（航点动作）或从这里出发的航段配了播报，
+                // 就播一条。**串行 await**（不像开灯那样 spawn）：与下面「离开航点停播」
+                // 必须严格有序，否则 stop 可能抢在 start 前面把新播报掐掉。
+                speaker.point_arrived(&current.task_code, index).await;
             }
         } else if !is_point_stage(&task.stage) {
             // 狗已经离开航点（前往下一点 / 返航 / 别的任务阶段）：窗口时长跟着停留时间走，
@@ -808,6 +819,7 @@ mod tests {
     use super::*;
     use crate::ai_patrol::AiPatrol;
     use crate::lights::PointLights;
+    use crate::photo::Photographer;
     use crate::record::Recorder;
     use crate::speak::Speaker;
     use crate::state::ActiveTask;
@@ -840,6 +852,7 @@ mod tests {
         lights: Arc<PointLights>,
         recorder: Arc<Recorder>,
         speaker: Arc<Speaker>,
+        photographer: Arc<Photographer>,
     }
 
     impl Harness {
@@ -860,6 +873,7 @@ mod tests {
                 lights: Arc::new(PointLights::new("http://127.0.0.1:1", false)),
                 recorder: Arc::new(Recorder::new(Arc::new(test_config()), false)),
                 speaker: Arc::new(Speaker::new("http://127.0.0.1:1", false)),
+                photographer: Arc::new(Photographer::new(Arc::new(test_config()), false)),
             }
         }
 
@@ -875,6 +889,14 @@ mod tests {
             self
         }
 
+        /// 打开航点拍照（指向一个假 Agent）：用来断言到点抓拍的时机
+        fn with_photographer(mut self, agent: String) -> Self {
+            let mut config = test_config();
+            config.ai_agent_url = agent;
+            self.photographer = Arc::new(Photographer::new(Arc::new(config), true));
+            self
+        }
+
         async fn feed(&mut self, frame: &StatusFrame) -> Option<TerminalCleanup> {
             handle_status_frame(
                 frame,
@@ -887,6 +909,7 @@ mod tests {
                 &self.lights,
                 &self.recorder,
                 &self.speaker,
+                &self.photographer,
             )
             .await
         }
@@ -1307,6 +1330,100 @@ mod tests {
             wait_lights(&calls, 2).await,
             vec!["on".to_string(), "off".to_string()]
         );
+    }
+
+    /// 航点拍照跟着 5009 走：到点抓一张（重复帧不重抓），没配拍照的点不发请求。
+    #[tokio::test]
+    async fn waypoint_photo_is_captured_on_arrival_only_once() {
+        use crate::photo::{PhotoPlan, PhotoPoint};
+
+        let calls: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let agent = spawn_photo_agent(calls.clone()).await;
+        let mut h = Harness::new(active_task("TK-1", Some("robot-1"))).with_photographer(agent);
+        h.photographer
+            .start_task(
+                "TK-1",
+                PhotoPlan {
+                    points: vec![PhotoPoint {
+                        index: 0,
+                        name: "P1".to_string(),
+                        camera: "dogcam".to_string(),
+                        frames: 1,
+                    }],
+                },
+            )
+            .await;
+
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.point_arrived", 0),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.waiting", 0),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        // 没有拍照动作的点：不发请求
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.point_arrived", 1),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+
+        let calls = wait_photo_calls(&calls, 1).await;
+        let captures: Vec<&Value> = calls
+            .iter()
+            .filter(|call| call["path"] == "photo")
+            .collect();
+        assert_eq!(captures.len(), 1, "同一个点只抓一次：{calls:?}");
+        assert_eq!(captures[0]["body"]["planId"], "TK-1");
+        assert_eq!(captures[0]["body"]["pointIndex"], 0);
+    }
+
+    /// 假 Agent：记录每一次 `/api/photo`（`capture:<航点>`）
+    type PhotoCalls = Arc<Mutex<Vec<Value>>>;
+
+    async fn spawn_photo_agent(calls: PhotoCalls) -> String {
+        let app = axum::Router::new()
+            .route(
+                "/api/photo",
+                axum::routing::post(
+                    |axum::extract::State(calls): axum::extract::State<PhotoCalls>,
+                     axum::Json(body): axum::Json<serde_json::Value>| async move {
+                        let point = body["pointIndex"].as_i64().unwrap_or(-1);
+                        calls
+                            .lock()
+                            .await
+                            .push(json!({"path": "photo", "body": body}));
+                        axum::Json(
+                            json!({"ok": true, "files": [{"name": format!("pt{point}.jpg")}]}),
+                        )
+                    },
+                ),
+            )
+            .with_state(calls);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("绑定假 Agent 失败");
+        let port = listener.local_addr().expect("取端口失败").port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    async fn wait_photo_calls(calls: &PhotoCalls, expected: usize) -> Vec<Value> {
+        for _ in 0..100 {
+            if calls.lock().await.len() >= expected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        calls.lock().await.clone()
     }
 
     /// 语音播报跟着 5009 走：到点播一次（重复帧不重播），离开航点停循环播报，

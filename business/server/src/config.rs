@@ -53,6 +53,16 @@ pub struct Config {
     /// 一次全程录像按 5 分钟切片，一天几十段很常见；不清理会把磁盘写满，
     /// 而录像的用途基本是「最近几轮巡检回看」。
     pub recording_keep_days: i64,
+    /// 航点拍照（路线动作「可见光拍照」）落盘根目录。
+    ///
+    /// 设备客户端把板端 JPEG 回传到这里，任务详情直接看 / 下载。
+    /// 默认 `<data>/photos`；单张几百 KB，比录像轻得多。
+    pub photo_dir: PathBuf,
+    /// 照片保留天数（`0` = 永不自动清理）。
+    ///
+    /// 照片是巡检报告的主要证据，通常比录像留得久（默认 90 天）；
+    /// 超期的行与文件由 `schedule::sweep` 每分钟顺手收掉。
+    pub photo_keep_days: i64,
     /// 中台调用业务平台内部接口的服务令牌；为空时内部触发接口拒绝请求。
     pub service_token: Option<String>,
     /// 反向控制信道的中台地址（`ws://` / `wss://`）。
@@ -178,6 +188,8 @@ struct ServerFile {
     ingest_dir: Option<String>,
     recording_dir: Option<String>,
     recording_keep_days: Option<i64>,
+    photo_dir: Option<String>,
+    photo_keep_days: Option<i64>,
     device_timeout_secs: Option<i64>,
     task_timeout_secs: Option<i64>,
     task_stuck_secs: Option<i64>,
@@ -359,6 +371,16 @@ impl Config {
                 .and_then(|value| value.trim().parse().ok())
                 .or(file.recording_keep_days)
                 .unwrap_or(30)
+                .max(0),
+            photo_dir: path(
+                "ROBODOG_PHOTO_DIR",
+                file.photo_dir,
+                base_dir_default.join("data/photos"),
+            ),
+            photo_keep_days: env_text(&env, "ROBODOG_PHOTO_KEEP_DAYS")
+                .and_then(|value| value.trim().parse().ok())
+                .or(file.photo_keep_days)
+                .unwrap_or(90)
                 .max(0),
             service_token: env_text(&env, "ROBODOG_SERVICE_TOKEN")
                 .or_else(|| file.zentai.service_token.and_then(clean)),

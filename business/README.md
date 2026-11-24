@@ -762,6 +762,47 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
   `business/backpack_dashboard/AGENTS.md`「录像」一节；客户端可用 `--no-record`
   或 `ROBODOG_RECORD_ENABLED=0` 整体关掉。
 
+## 航点拍照（航点动作「可见光拍照」）
+
+路线编辑器里给航点配「可见光拍照」，跑到该点由**板端相机**抓一张（或多张）JPEG，
+任务结束后回传到平台，任务详情「任务照片」里看 / 下载 / 删除。动作字段：
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `photoCamera` | `dogcam` | 抓拍源：`dogcam` 机器狗前置可见光 / `cam0`~`cam3` 背包四路 USB / `dog-ipcam` 红外 |
+| `photoFrames` | `1` | 抓几张（1~5）；多帧按板端 2fps 拉开，避开运动模糊 |
+
+链路：
+
+```text
+到点（5009 patrol.point_arrived / waiting）→ 客户端 POST 板端 /api/photo
+  → 板端 ffmpeg 从本机 mediamtx 抓 JPEG → PHOTO_DIR/<计划>/pt<n>/
+    → 任务终态 / 取消 / 客户端启动：GET /api/photo/list
+      → POST 平台 /api/photos/ingest（multipart，sha256 去重）
+        → 落 <photo_dir>/<设备>/<任务>/pt<n>/ + 一条 task_photos
+          → 上传成功才 POST /api/photo/delete 删板端文件
+            → 任务详情「任务照片」（缩略图按需加载 / 大图 / 下载）
+```
+
+要点：
+
+- **为什么不用本体的相机**：本体 `tasks=[1]` 走的是上装 `/capture_image`，服务没起就
+  `14005` 直接失败，而且本体没实现 5010/5011 记录查询（拿不到 `image_path`）。
+  背包相机本来就在跑（实时视频 / AI 抽帧同一路），抓图不依赖任何新协议；
+  本体侧行为保持不变。
+- **到点同步抓**：停留只有几秒，晚一拍拍到的是下一段路；单次抓拍实测 0.5~2s，
+  客户端 12s 超时兜底，同一航点只拍一次（5009 每 500ms 一帧）。
+- **失败不影响巡检**：流没在推 / ffmpeg 缺失 / 磁盘不足只记日志；
+  老版本 Agent（404）本轮不再试。
+- **回传成功才删板端文件**：失败留在板端，下一轮任务 / 重启接着传
+  （`--no-photo` / `ROBODOG_PHOTO_ENABLED=0` 可整体关掉）。
+- **留存**：平台 `photo_keep_days`（默认 90 天，`0` = 不清理）；板端
+  `PHOTO_RETENTION_HOURS`（默认 72h）兜没传走的。
+- **不进中台「媒体资源」**：那边是 AI 存证的训练图（sha256 去重、批量导出），
+  巡检照片是任务结果（与录像同一理由）。
+- 设计 / 代码地图 / 排查：`business/docs/waypoint-photo.md`；
+  板端参数见 `business/backpack_dashboard/AGENTS.md`「航点拍照」一节。
+
 ## 巡检语音播报（航点动作 / 行进任务）
 
 路线编辑器里可以配「语音播报」：航点动作 = **到点播报**，行进任务 = **进入该航段时播报**

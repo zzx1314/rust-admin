@@ -17,7 +17,8 @@ export const ACTION_LIB: Record<string, ActionMeta> = {
   可见光拍照: {
     icon: "camera",
     tone: "blue",
-    param: "1080P / 广角 / 单帧",
+    // 真正拍的是哪一路、拍几张，由 `photoCamera` / `photoFrames` 决定（保存时同步到 param）
+    param: "背包相机 · 到点单帧",
     trigger: "到达即执行",
     threshold: "—",
     kind: "point"
@@ -142,6 +143,24 @@ export const SPEAK_MAX_LEN = 40;
 export const SPEAK_MAX_SECS = 600;
 /** 航段播报默认循环时长（秒）：离开航段 / 终态会提前停 */
 export const SPEAK_LEG_DEFAULT_SECS = 120;
+
+/**
+ * 航点拍照的抓拍源（航点动作「可见光拍照」→ 板端 `/api/photo` 的 `camera`）。
+ *
+ * 板端从本机 mediamtx 抓 JPEG，可选范围由 `backend/photo.py::allowed_cameras()` 决定；
+ * `dogcam` 会按当前分辨率档位自动选流（与实时视频同一路）。
+ */
+export const PHOTO_CAMERAS = [
+  { value: "dogcam", label: "机器狗前置（可见光）" },
+  { value: "cam0", label: "背包相机 · 左前" },
+  { value: "cam1", label: "背包相机 · 右前" },
+  { value: "cam2", label: "背包相机 · 右后" },
+  { value: "cam3", label: "背包相机 · 左后" },
+  { value: "dog-ipcam", label: "红外相机" }
+];
+
+/** 航点一次最多抓几张（与板端 `PHOTO_MAX_FRAMES` / 客户端 `photo.rs` 一致） */
+export const PHOTO_MAX_FRAMES = 5;
 
 export const TRIGGERS = ["到达即执行", "停留后执行", "条件触发", "定时执行"];
 export const FAIL_MODES = ["跳过继续", "重试 1 次", "重试 2 次", "中止路线", "人工接管"];
