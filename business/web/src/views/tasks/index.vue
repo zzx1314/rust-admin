@@ -996,7 +996,7 @@ onBeforeUnmount(() => {
 
     <el-dialog
       v-model="taskDialog"
-      :title="isEditing ? '编辑巡检任务' : '新建巡检任务'"
+      :title="isEditing ? '编辑巡检计划' : '新建巡检计划'"
       width="680px"
     >
       <div class="form-grid">
