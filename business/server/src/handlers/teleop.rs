@@ -55,7 +55,7 @@ const BODY_ACTIONS: [(&str, &str); 11] = [
 ];
 
 /// 允许通过 `/command` 下发的业务指令
-const BUSINESS_COMMANDS: [&str; 11] = [
+const BUSINESS_COMMANDS: [&str; 13] = [
     "开始巡检",
     "暂停任务",
     "继续任务",
@@ -73,6 +73,11 @@ const BUSINESS_COMMANDS: [&str; 11] = [
     // 逐张回传中台「媒体资源」（见 handlers::media::ingest_media）。
     // 参数（`pictureDir` / `frames`）由中台按「参数配置」页组装，这里原样透传给客户端。
     "同步媒体",
+    // 「呼叫」/「停止呼叫」：任务详情页的人工喊话（平台 → 客户端 → 板端 `/api/speak/call`）。
+    // 参数 `text` / `loop` / `seconds` 由 `handlers::tasks::call_task` 组装；
+    // 它不属于任何计划，不去重（同一句话可以再喊一遍）。
+    "呼叫",
+    "停止呼叫",
 ];
 
 fn invalid(message: impl Into<String>) -> AppError {

@@ -144,6 +144,19 @@ def main():
     failures += not check("状态不是播报中", speak.status()["active"] is False)
     ASR["ok"] = True
 
+    # 8) 手动「呼叫」：同一句话再喊一遍必须真的再写一条 FIFO
+    print("[8] 手动呼叫不去重")
+    CMDS.clear()
+    speak.start({"text": "请避让", "manual": True, "planId": "TK-5"})
+    speak.start({"text": "请避让", "manual": True, "planId": "TK-5"})
+    failures += not check(
+        "两次同文本各一条 call（中间夹一次 call stop）",
+        CMDS[:3] == ["call 0 请避让", "call stop", "call 0 请避让"],
+        CMDS,
+    )
+    failures += not check("手动呼叫 scope 记为 call", speak.status()["scope"] == "call")
+    speak.stop("测试收尾")
+
     print()
     if failures:
         print("失败 %d 项" % failures)

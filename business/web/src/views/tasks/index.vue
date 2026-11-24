@@ -41,6 +41,7 @@ import {
 } from "@/utils/constants";
 import { parseRouteData } from "@/utils/format";
 import { apiBaseUrl } from "@/utils/runtime";
+import { normalizeSpeakText } from "@/utils/speak";
 
 const router = useRouter();
 const tasks = ref<Task[]>([]);
@@ -561,6 +562,59 @@ async function refreshDetail(taskId: number) {
       photoRequested.value = 0;
       void loadPhotoThumbs();
     }
+  }
+}
+
+// ---------------- 远程呼叫（人工喊话） ----------------
+//
+// 链路：本页 → `POST /tasks/{id}/call` → 设备客户端 → 板端 `/api/speak/call`
+// → 聆思 FIFO 的 `call 0|1 <内容>`（见 `backpack_dashboard/backend/speak.py`）。
+// 与路线里的「语音播报」区别只有两点：**不去重**（同一句话可以再喊一遍）、内容现填。
+
+const callText = ref("");
+/** 循环秒数：0 = 只说一遍；> 0 = 循环播这么久（板端上限 600s） */
+const callLoopSeconds = ref(0);
+const callBusy = ref(false);
+
+/**
+ * 下发一次呼叫；内容校验与路线编辑器同一份（`@/utils/speak`）。
+ * 板端只会默默丢字符 + 截断，所以这里先把不合规的内容当场报出来。
+ * 设备客户端不在线时服务端直接报错（不会假成功）。
+ */
+async function sendCall() {
+  const task = detailTask.value;
+  if (!task) return;
+  const { text, error } = normalizeSpeakText(callText.value);
+  if (!text) {
+    ElMessage.warning(error || "呼叫内容不能为空");
+    return;
+  }
+  callText.value = text;
+  callBusy.value = true;
+  try {
+    await taskApi.call(task.id, text, callLoopSeconds.value);
+    ElMessage.success(
+      callLoopSeconds.value > 0
+        ? `已呼叫：${text}（循环 ${callLoopSeconds.value}s，别忘了点「停止」）`
+        : `已呼叫：${text}`
+    );
+    // 服务端写了一条 `call` 任务事件：刷新后详情里能看到“谁在什么时候喊了什么”
+    void refreshDetail(task.id);
+  } finally {
+    callBusy.value = false;
+  }
+}
+
+/** 停止呼叫（板端单通道，航点上正在循环的播报也会一起停——这正是操作员要的） */
+async function stopCall() {
+  const task = detailTask.value;
+  if (!task) return;
+  callBusy.value = true;
+  try {
+    await taskApi.callStop(task.id);
+    ElMessage.info("已下发「停止呼叫」");
+  } finally {
+    callBusy.value = false;
   }
 }
 
@@ -1562,6 +1616,37 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="rt-sec-title" style="margin-top: 18px">
+          <span>远程呼叫（喊话）</span><AppIcon name="sound" />
+        </div>
+        <div class="call-row">
+          <input
+            v-model="callText"
+            class="input"
+            maxlength="40"
+            placeholder="要狗喊的话，例如：设备巡检，请勿靠近"
+            @keyup.enter="sendCall"
+          />
+          <select v-model.number="callLoopSeconds" class="select" style="max-width: 128px">
+            <option :value="0">只说一遍</option>
+            <option :value="15">循环 15 秒</option>
+            <option :value="30">循环 30 秒</option>
+            <option :value="60">循环 1 分钟</option>
+            <option :value="120">循环 2 分钟</option>
+          </select>
+          <button class="btn sm" :disabled="callBusy || !callText.trim()" @click="sendCall">
+            <AppIcon name="send" />呼叫
+          </button>
+          <button class="btn sm ghost" :disabled="callBusy" @click="stopCall">
+            <AppIcon name="close" />停止呼叫
+          </button>
+        </div>
+        <div class="muted" style="font-size: 11px; margin-top: 4px; line-height: 1.6">
+          狗用聆思 TTS 播报（云端合成，需要背包联网 + asr）：只认中文汉字、中文标点与数字
+          （≤30 字，空格会被去掉）。循环播报会占住语音通道，走之前记得点「停止呼叫」；
+          板端看门狗最多 600 秒兜底。
+        </div>
+
+        <div class="rt-sec-title" style="margin-top: 18px">
           <span>下发后的航点执行序列</span><AppIcon name="route" />
         </div>
         <div v-if="detailSequence.length" class="act-kv" style="font-size: 11.5px; gap: 7px">
@@ -1976,5 +2061,22 @@ onBeforeUnmount(() => {
 }
 .weekday-chip:disabled {
   cursor: not-allowed;
+}
+
+/* 远程呼叫：输入框 + 时长下拉 + 呼叫 / 停止，窄屏自动换行 */
+.call-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.call-row .input {
+  flex: 1 1 240px;
+  min-width: 0;
+  height: 32px;
+  font-size: 12px;
+}
+.call-row .btn {
+  flex: 0 0 auto;
 }
 </style>

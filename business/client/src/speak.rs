@@ -11,6 +11,10 @@
 //! 闭环返航段（returnLeg）→ 起点 = 最后一个航点
 //! ```
 //!
+//! 另外还有一条**手动**通路：任务详情页的「呼叫」（平台 `POST /tasks/{id}/call`
+//! → 设备指令 `呼叫` → [`manual_call`] → 板端 `/api/speak/call`）。
+//! 它不属于任何计划，不去重（同一句话可以再喊一遍），停止同样走 `/api/speak/stop`。
+//!
 //! 三条约定（改这块先看）：
 //!
 //! 1. **一次只播一条**：板端 FIFO 是单通道，新播报会打断旧播报，所以「到点播报」
@@ -493,26 +497,93 @@ impl Speaker {
     }
 
     async fn post(&self, path: &str, body: Value) -> Result<Value, String> {
-        let response = self
-            .client
-            .post(format!("{}{path}", self.agent))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|error| format!("{path}: {error}"))?;
-        let status = response.status();
-        let text = response
-            .text()
-            .await
-            .map_err(|error| format!("{path}: {error}"))?;
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err("板端 Agent 没有播报接口（旧版本）".to_string());
-        }
-        if !status.is_success() {
-            return Err(format!("{path} HTTP {status}: {text}"));
-        }
-        serde_json::from_str(&text).map_err(|error| format!("{path} 响应不是 JSON: {error}"))
+        post_agent(&self.client, &self.agent, path, body).await
     }
+}
+
+/// 调一次板端 Agent 并解析 JSON（`Speaker` 与手动「呼叫」共用）。
+///
+/// 404 单独翻译成「没有播报接口」：老版本 Agent 靠这句话进入 `unsupported`，
+/// 不要改成别的措辞。
+async fn post_agent(
+    client: &Client,
+    agent: &str,
+    path: &str,
+    body: Value,
+) -> Result<Value, String> {
+    let agent = agent.trim_end_matches('/');
+    let response = client
+        .post(format!("{agent}{path}"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| format!("{path}: {error}"))?;
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|error| format!("{path}: {error}"))?;
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err("板端 Agent 没有播报接口（旧版本）".to_string());
+    }
+    if !status.is_success() {
+        return Err(format!("{path} HTTP {status}: {text}"));
+    }
+    serde_json::from_str(&text).map_err(|error| format!("{path} 响应不是 JSON: {error}"))
+}
+
+/// 手动「呼叫」（任务详情页喊话）：平台 → 设备客户端 → 板端 Agent `/api/speak/call`。
+///
+/// 与航点播报的区别：**不去重**（同一句话再喊一遍是真的要再喊），其余同一套内容
+/// 白名单与看门狗。内容净化后为空直接报错，不白写一条 FIFO。
+pub async fn manual_call(
+    agent: &str,
+    text: &str,
+    looping: bool,
+    seconds: u32,
+) -> Result<String, String> {
+    let Some(text) = sanitize_text(text) else {
+        return Err("呼叫内容不能为空（只支持中文汉字、中文标点与数字）".to_string());
+    };
+    let body = json!({
+        "text": text,
+        "loop": looping,
+        "seconds": seconds.min(MAX_SPEAK_SECS),
+        "manual": true,
+    });
+    let client = Client::builder()
+        .timeout(AGENT_TIMEOUT)
+        .build()
+        .map_err(|error| format!("建 HTTP 客户端失败: {error}"))?;
+    post_agent(&client, agent, "/api/speak/call", body).await?;
+    info!(
+        "呼叫：{}{}",
+        text,
+        if looping {
+            format!("（循环 {}s）", seconds)
+        } else {
+            "（单次）".to_string()
+        }
+    );
+    Ok(format!("已呼叫：{text}"))
+}
+
+/// 手动停止呼叫（循环播报收尾 / 人工掐断）。与航点播报共用 `/api/speak/stop`，
+/// 所以任务里的循环播报也会一起停 —— 那正是操作员按下「停止」时期望的结果。
+pub async fn manual_stop(agent: &str, reason: &str) -> Result<String, String> {
+    let client = Client::builder()
+        .timeout(AGENT_TIMEOUT)
+        .build()
+        .map_err(|error| format!("建 HTTP 客户端失败: {error}"))?;
+    post_agent(
+        &client,
+        agent,
+        "/api/speak/stop",
+        json!({ "reason": reason }),
+    )
+    .await?;
+    info!("呼叫：已停止（{reason}）");
+    Ok("已停止呼叫".to_string())
 }
 
 /// 这个航点要播什么：航点动作优先，没配才用从这里出发的航段动作。
@@ -563,6 +634,18 @@ mod tests {
                             .lock()
                             .await
                             .push(json!({"path": "stop", "body": body}));
+                        Json(json!({"ok": true}))
+                    },
+                ),
+            )
+            .route(
+                "/api/speak/call",
+                post(
+                    |State(calls): State<Calls>, Json(body): Json<Value>| async move {
+                        calls
+                            .lock()
+                            .await
+                            .push(json!({"path": "call", "body": body}));
                         Json(json!({"ok": true}))
                     },
                 ),
@@ -802,6 +885,29 @@ mod tests {
             .filter(|call| call["path"] == "speak")
             .collect();
         assert_eq!(speaks.len(), 2, "重新下发要重新播：{calls:?}");
+    }
+
+    /// 手动「呼叫」：不去重（同一句话能再喊一遍）、`manual=true`、内容先净化
+    #[tokio::test]
+    async fn manual_call_is_not_deduped_and_marks_itself_manual() {
+        let calls: Calls = Default::default();
+        let agent = spawn_agent(calls.clone()).await;
+
+        let note = manual_call(&agent, " 请 避 让 ", false, 0).await.expect("呼叫失败");
+        assert_eq!(note, "已呼叫：请避让");
+        manual_call(&agent, "请 避让", true, 30).await.expect("呼叫失败");
+
+        let calls = calls.lock().await.clone();
+        let speaks: Vec<&Value> = calls.iter().filter(|call| call["path"] == "call").collect();
+        assert_eq!(speaks.len(), 2, "两次呼叫必须各发一次（不去重）：{calls:?}");
+        assert_eq!(speaks[0]["body"]["text"], "请避让");
+        assert_eq!(speaks[0]["body"]["manual"], true);
+        assert_eq!(speaks[0]["body"]["loop"], false);
+        assert_eq!(speaks[1]["body"]["loop"], true);
+        assert_eq!(speaks[1]["body"]["seconds"], 30);
+
+        // 全是白名单之外的字符：当场报错，不白写一条 FIFO
+        assert!(manual_call(&agent, "ABC", false, 0).await.is_err());
     }
 
     /// 老版本 Agent（没有 /api/speak）：只记一次 unsupported，本轮不再试

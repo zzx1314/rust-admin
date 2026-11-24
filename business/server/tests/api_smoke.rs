@@ -1575,6 +1575,128 @@ async fn locate_device_dispatches_relocalize_with_pose() {
     assert_eq!(frame.payload["params"]["params"]["pose"]["heading"], 90.0);
 }
 
+/// 「任务详情 → 呼叫（喊话）」：平台 → 设备指令 `呼叫` → 客户端 → 板端 `/api/speak/call`。
+///
+/// 三条契约：
+/// 1. 设备不在线 → 400「未送达」（不能假成功）；
+/// 2. 设备在线 → WS 下发 `呼叫`，参数带 `text` / `loop` / `seconds`；
+/// 3. 事件流里留一条 `call`（操作员回溯「谁在什么时候喊了什么」）。
+#[tokio::test]
+async fn task_call_dispatches_speak_to_the_device() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+    let device_pk = bound_device_pk(&pool).await;
+    let device_code: String = sqlx::query_scalar("SELECT device_id FROM devices WHERE id = ?1")
+        .bind(device_pk)
+        .fetch_one(&pool)
+        .await
+        .expect("演示设备应有编号");
+    let stamp = db::now();
+    let task_id: i64 = sqlx::query_scalar(
+        "INSERT INTO tasks (task_code, task_name, task_type, execute_mode, device_id,
+            task_status, progress, created_at, updated_at)
+         VALUES ('TK-CALL-1', '呼叫测试', '巡检任务', '立即执行', ?1, '执行中', 10, ?2, ?2)
+         RETURNING id",
+    )
+    .bind(device_pk)
+    .bind(&stamp)
+    .fetch_one(&pool)
+    .await
+    .expect("插入测试任务失败");
+
+    // 1) 设备客户端不在线：先报未送达，别让人以为喊了
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/tasks/{task_id}/call"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(r#"{"text":"设备巡检，请勿靠近"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert!(
+        body["msg"].as_str().unwrap_or_default().contains("未送达"),
+        "离线设备必须报未送达，实际：{}",
+        body["msg"]
+    );
+
+    // 2) 空内容：当场拒，不白下发一条
+    let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+    state
+        .device_connections
+        .write()
+        .await
+        .insert(device_code.clone(), tx);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/tasks/{task_id}/call"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(r#"{"text":"   "}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "空内容要拒");
+
+    // 3) 在线：循环喊 30s 的呼叫要原样落到设备指令里
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/tasks/{task_id}/call"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(
+                    r#"{"text":"设备巡检请避让","loop":true,"seconds":30}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let frame = rx.recv().await.expect("应收到下发的指令帧");
+    assert_eq!(frame.cmd_type, "remote_command");
+    assert_eq!(frame.payload["command"], "呼叫");
+    assert_eq!(frame.payload["params"]["params"]["text"], "设备巡检请避让");
+    assert_eq!(frame.payload["params"]["params"]["loop"], true);
+    assert_eq!(frame.payload["params"]["params"]["seconds"], 30);
+
+    // 4) 停止呼叫：同一条设备指令通道
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/tasks/{task_id}/call/stop"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let frame = rx.recv().await.expect("应收到停止指令帧");
+    assert_eq!(frame.payload["command"], "停止呼叫");
+
+    // 5) 任务事件流里能看到这条呼叫
+    let title: Option<String> = sqlx::query_scalar(
+        "SELECT title FROM task_events WHERE task_id = ?1 AND event_type = 'call' LIMIT 1",
+    )
+    .bind(task_id)
+    .fetch_optional(&pool)
+    .await
+    .expect("查询任务事件失败");
+    assert!(
+        title.as_deref().unwrap_or_default().contains("呼叫"),
+        "事件流应留一条呼叫痕迹，实际：{title:?}"
+    );
+}
+
 /// 重新定位的入参校验：坐标必须成对出现，heading 缺省按 0 度
 #[test]
 fn locate_request_requires_paired_coordinates() {

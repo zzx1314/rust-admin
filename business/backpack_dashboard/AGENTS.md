@@ -159,10 +159,13 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
 
 ## 语音播报（航点「语音播报」/ 航段「语音播报」）
 
-板端只负责「按客户端的指令说话」：`POST /api/speak`、`POST /api/speak/stop`、
-`GET /api/speak/status`，实现在 `backend/speak.py`，客户端在
+板端只负责「按客户端的指令说话」：`POST /api/speak`、`POST /api/speak/call`、
+`POST /api/speak/stop`、`GET /api/speak/status`，实现在 `backend/speak.py`，客户端在
 `business/client/src/speak.rs`（同机 `127.0.0.1:8000` 调用，**不经平台隧道**）。
 起停时机同样在 5009（到点 / 进段 / 离开 / 终态），平台只下发路线动作。
+
+另有一个**人工「呼叫」**（任务详情页喊话）：平台 `POST /tasks/{id}/call` → 设备指令 `呼叫`
+→ 客户端 `manual_call` → 这里 `POST /api/speak/call`，**不走 5009**、也不靠计划。
 
 | 环境变量 | 默认 | 说明 |
 |---|---|---|
@@ -173,6 +176,7 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
 | 接口 | 命令 | 语义 |
 |---|---|---|
 | `/api/speak` `{text, loop, seconds}` | `call 0 <内容>` / `call 1 <内容>` | 单次 / 循环；同一 `(planId, scope, pointIndex)` + 同文本重复请求幂等 |
+| `/api/speak/call` `{text, loop, seconds}` | 同上 | 人工呼叫（`manual=true`）：同一句话可重复喊（**不幂等**），循环缺省 30s |
 | `/api/speak/stop` `{reason}` | `call stop` | 停止并回到 voice 模式（没有在播时什么都不写） |
 
 约定：

@@ -5,6 +5,7 @@ use crate::locate::parse_initial_pose;
 use crate::maps::push_map_to_body;
 use crate::maps::sync_maps_from_robot;
 use crate::media_sync;
+use crate::speak;
 use crate::state::ActiveTask;
 use crate::state::RobotState;
 use crate::state::Shared;
@@ -104,6 +105,51 @@ pub(crate) async fn handle(
         // 任务置异常、窗口内失败后交 systemd 兜底）
         if body_reconnect.try_send(()).is_err() {
             warn!("本体重连请求未入队（已有一次重连在进行中）");
+        }
+        return;
+    }
+
+    // 「呼叫」/「停止呼叫」：任务详情页的人工喊话。只跟同机的板端 Agent 说话
+    // （`127.0.0.1:8000`），不碰本体，所以放在本体门禁之前 —— 本体没连（关机 /
+    // 断链）时现场依然要能喊话。失败只回 command_result，绝不抛错打断主循环。
+    if matches!(command, "呼叫" | "停止呼叫") {
+        // 服务端把附加参数包在 `params.params`（同「重新定位」），兼容平铺写法
+        let outer = msg.payload.get("params");
+        let params = outer.and_then(|p| p.get("params")).or(outer);
+        let result: Result<String, String> = if command == "停止呼叫" {
+            speak::manual_stop(&config.ai_agent_url, "平台手动停止").await
+        } else {
+            let text = params
+                .and_then(|p| p.get("text"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let looping = params
+                .and_then(|p| p.get("loop"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let seconds = params
+                .and_then(|p| p.get("seconds"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as u32;
+            speak::manual_call(&config.ai_agent_url, text, looping, seconds).await
+        };
+        send_command_result(out_tx, &msg, command, &result).await;
+        match result {
+            Ok(note) => info!("指令 {command} 执行: {note}"),
+            Err(error) => {
+                warn!("指令 {command} 执行失败: {error}");
+                let event = DeviceEventPayload {
+                    event_type: "error".to_string(),
+                    message: format!("指令 {command} 执行失败: {error}"),
+                    data: None,
+                };
+                send(
+                    out_tx,
+                    "event",
+                    serde_json::to_value(event).unwrap_or_default(),
+                )
+                .await;
+            }
         }
         return;
     }

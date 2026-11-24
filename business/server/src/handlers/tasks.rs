@@ -757,6 +757,117 @@ pub async fn unpublish_task(
     Ok(ApiResponse::ok(fetch_task(&state, id).await?))
 }
 
+/// 「呼叫」的内容上限（字符数）：板端 `SPEAK_MAX_CHARS=30` / `SPEAK_MAX_LEN=40`，
+/// 这里先按 40 拦一道，别让粘进来的长文本在板端被截成只剩尾巴。
+const CALL_MAX_CHARS: usize = 40;
+
+/// 呼叫做完之后的公共收尾：取任务绑定的设备（不绑设备 / 设备不在线都给可读原因）。
+async fn call_device(state: &AppState, task: &Task) -> Result<crate::models::Device, AppError> {
+    let Some(code) = task.device_code.as_deref().filter(|code| !code.is_empty()) else {
+        return Err(AppError::BadRequest(format!(
+            "任务 {} 未绑定执行设备，无法呼叫",
+            task.task_code
+        )));
+    };
+    super::devices::fetch_device_by_code(state, code).await
+}
+
+fn ensure_delivered(result: &Value, device_code: &str, action: &str) -> Result<(), AppError> {
+    if result.get("wsDelivered").and_then(Value::as_bool) == Some(false) {
+        return Err(AppError::BadRequest(format!(
+            "设备 {device_code} 未在线（设备客户端未连接），{action}未送达"
+        )));
+    }
+    Ok(())
+}
+
+/// `POST /tasks/{id}/call` —— 任务详情页的「呼叫」（人工喊话）。
+///
+/// 链路：平台 → 设备指令 `呼叫` → 设备客户端 → 板端 `/api/speak/call` → 聆思 FIFO
+/// （`call 0|1 <内容>`，见 `backpack_dashboard/backend/speak.py`）。
+///
+/// 与航点播报的区别只有两点：**不去重**（同一句话可以再喊一遍）、内容由人现填。
+/// 呼叫不属于运动指令，本体没连也应该能喊，所以服务端不过本体健康门禁，
+/// 客户端也把它放在本体门禁之前。
+pub async fn call_task(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
+    Json(payload): Json<crate::models::CallRequest>,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let task = fetch_task(&state, id).await?;
+    super::parks::ensure_owner(&task, &claims)?;
+    let text = payload.text.trim().to_string();
+    if text.is_empty() {
+        return Err(AppError::BadRequest("呼叫内容不能为空".to_string()));
+    }
+    if text.chars().count() > CALL_MAX_CHARS {
+        return Err(AppError::BadRequest(format!(
+            "呼叫内容过长（{} 字）：板端最多 {CALL_MAX_CHARS} 字（中文 ≤30）",
+            text.chars().count()
+        )));
+    }
+    // 循环播报时长：默认 30s，夹在 5~600s（板端 SPEAK_MAX_SECS 会再兜一次）
+    let seconds = payload.seconds.unwrap_or(30).clamp(5, 600);
+    let device = call_device(&state, &task).await?;
+    let result = super::devices::push_command(
+        &state,
+        &device,
+        "呼叫",
+        Some(json!({
+            "text": text,
+            "loop": payload.r#loop,
+            "seconds": seconds,
+        })),
+        Some(&claims.username),
+    )
+    .await?;
+    ensure_delivered(&result, &device.device_id, "呼叫")?;
+    // 详情页的事件流是操作员回溯“这轮谁喊了什么”的唯一痕迹；写失败不影响呼叫本身
+    let _ = record_event(
+        &state,
+        "call",
+        format!("已向 {} 下发呼叫", device.device_id),
+        format!(
+            "呼叫内容：{text}（{}）",
+            if payload.r#loop {
+                format!("循环 {seconds}s")
+            } else {
+                "单次".to_string()
+            }
+        ),
+        task.device_id,
+        Some(id),
+    )
+    .await;
+    info!("task {} 呼叫已下发：{text}", task.task_code);
+    Ok(ApiResponse::ok(result))
+}
+
+/// `POST /tasks/{id}/call/stop` —— 停止呼叫（循环播报收尾 / 人工掐断）。
+///
+/// 板端 `/api/speak/stop` 是全局单通道，所以这也会停掉该设备上正在循环的航点播报——
+/// 操作员按下「停止」时期望的正是“别喊了”。
+pub async fn stop_call_task(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Extension(claims): Extension<Claims>,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let task = fetch_task(&state, id).await?;
+    super::parks::ensure_owner(&task, &claims)?;
+    let device = call_device(&state, &task).await?;
+    let result = super::devices::push_command(
+        &state,
+        &device,
+        "停止呼叫",
+        None,
+        Some(&claims.username),
+    )
+    .await?;
+    ensure_delivered(&result, &device.device_id, "停止呼叫")?;
+    Ok(ApiResponse::ok(result))
+}
+
 pub async fn update_task(
     State(state): State<AppState>,
     Path(id): Path<i64>,

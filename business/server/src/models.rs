@@ -671,6 +671,21 @@ pub struct CommandRequest {
     pub command: String,
 }
 
+/// 任务详情页的「呼叫」（人工喊话）。
+///
+/// `text` 会经设备客户端与板端 Agent 两层白名单净化（去空白、只留中文汉字 + 中文标点
+/// + 数字、中文 ≤30 字）；这里只拦掉“空内容”与明显超长，给出可读原因。
+/// `loop` 为真时按 `dial_seconds` 循环播报（默认 30s，上限 `SPEAK_MAX_SECS`）。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallRequest {
+    pub text: String,
+    /// 字段名 `loop` 是 Rust 关键字，只能改个名再靠 `rename_all` / `rename` 映射
+    #[serde(default, rename = "loop")]
+    pub r#loop: bool,
+    pub seconds: Option<i64>,
+}
+
 /// 重新定位（载图 + 可选的初始位姿）。
 ///
 /// - 全部字段缺省：用机器人当前已载入的地图，下零位姿（SLAM 读上一份位姿文件完整重定位）

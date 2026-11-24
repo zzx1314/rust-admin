@@ -6,10 +6,15 @@
 路线「航点动作 → 语音播报」→ 客户端到点      POST /api/speak {text, loop, seconds}
 路线「行进任务 → 语音播报」→ 客户端进段      POST /api/speak {text, loop:true}
                             离开航段 / 终态  POST /api/speak/stop
+计划详情页「远程呼叫」→ 客户端代调        POST /api/speak/call {text, loop, seconds}
+                            人工停止       POST /api/speak/stop
 ```
 
 - **谁触发**：设备客户端（与 Agent 同机，`127.0.0.1:8000`）。平台/浏览器不直接调：
   播报属于任务执行的一部分，起停时机只有 5009 的状态机知道。
+- **手动「呼叫」**（`manual=true`，`/api/speak/call`）：操作员在执行任务详情页
+  喊一句话，**不做幂等**（同一句话可以再喊一遍），内容仍走同一份白名单净化；
+  循环时长缺省值压到 30s（计划播报仍按 `SPEAK_MAX_SECS` 兜底）。
 - **通道**：聆思 asr 服务的命令 FIFO（`config.LINGS_CMD_FIFO`，默认
   `/tmp/voice_assistant_cmd`），与 Dashboard 的「开始播报」按钮同一条：
   `call 0 <内容>` 单次、`call 1 <内容>` 循环、`call stop` 停止并回到 voice 模式。
@@ -157,8 +162,9 @@ def start(body):
     `body`：
     - `text`  播报内容（必填，会被 `normalize` 净化）；
     - `loop`  `true` = 循环播报（`call 1`），`false` = 单次（`call 0`）；
-    - `seconds` 循环播报最多播多久（0 = `SPEAK_MAX_SECS`）；单次忽略；
-    - `planId` / `pointIndex` / `scope`（`point`|`leg`）只用于幂等键与日志。
+    - `seconds` 循环播报最多播多久（0 = `SPEAK_MAX_SECS`，手动呼叫 0 = 30s）；单次忽略；
+    - `planId` / `pointIndex` / `scope`（`point`|`leg`）只用于幂等键与日志；
+    - `manual` **手动「呼叫」**（任务详情页喊话）：不做幂等、`scope` 记为 `call`。
 
     幂等：同一 `(planId, scope, pointIndex)` 的同一条文本重复请求直接返回
     （客户端跟着 5009 每 500ms 一帧，不去重会一直重播）。
@@ -167,13 +173,21 @@ def start(body):
     if error:
         return {"ok": False, "error": error, "speak": status()}
     loop = bool(body.get("loop"))
+    # 手动「呼叫」（任务详情页喊话）与计划播报走同一套实现，区别只在幂等键与默认时长：
+    # 操作员连点两次就是要再喊一遍，不能像 5009 那样被去重吞掉。
+    manual = bool(body.get("manual"))
     seconds = _int(body.get("seconds"), 0, 0, config.SPEAK_MAX_SECS)
     if loop and seconds <= 0:
-        seconds = config.SPEAK_MAX_SECS
+        # 手动呼叫默认只喊 30s（点一下别在园区里喊十分钟；要更久就显式传 seconds）
+        seconds = min(config.SPEAK_MAX_SECS, 30) if manual else config.SPEAK_MAX_SECS
     plan_id = _safe_log_text(body.get("planId") or body.get("taskCode") or "")
-    point_index = _int(body.get("pointIndex"), -1, -1)
-    scope = "leg" if str(body.get("scope") or "").strip() == "leg" else "point"
-    key = "%s|%s|%d" % (plan_id, scope, point_index)
+    point_index = -1 if manual else _int(body.get("pointIndex"), -1, -1)
+    if manual:
+        scope = "call"
+        key = "call|%.6f" % time.time()
+    else:
+        scope = "leg" if str(body.get("scope") or "").strip() == "leg" else "point"
+        key = "%s|%s|%d" % (plan_id, scope, point_index)
 
     with _LOCK:
         if (

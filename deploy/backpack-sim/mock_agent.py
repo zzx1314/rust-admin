@@ -64,6 +64,7 @@ curl -s -XPOST 127.0.0.1:8000/api/sim/emit  -d '{"type":"telemetry","battery":88
 curl -s 127.0.0.1:8000/api/lights          # 计划灯光（补光 / LED / 是否夜间）
 curl -s -XPOST 127.0.0.1:8000/api/lights/off -d '{"reason":"manual"}'
 curl -s 127.0.0.1:8000/api/speak/status   # 语音播报（计划到点 / 进段时客户端调的 /api/speak）
+curl -s -XPOST 127.0.0.1:8000/api/speak/call -d '{"text":"请避让"}'  # 任务详情页的人工「呼叫」
 curl -s 127.0.0.1:8000/api/photo/status   # 航点拍照（到点抓 JPEG → 客户端回传平台）
 ```
 """
@@ -249,10 +250,10 @@ class State:
         self.lights = {"fill": False, "led": False, "managed": False,
                        "night_only": False, "source": "", "applied": 0,
                        "off": 0, "skipped": 0}
-        # 语音播报（客户端在 5009 到点 / 进段时调的 /api/speak）
+        # 语音播报（客户端在 5009 到点 / 进段时调的 /api/speak）+ 人工呼叫
         self.speak = {"active": False, "text": "", "loop": False,
                       "seconds": 0, "plan_id": "", "point_index": -1,
-                      "scope": "", "words": 0, "stops": 0}
+                      "scope": "", "manual": False, "words": 0, "stops": 0}
         # 航点拍照（客户端在 5009 到点那一帧调的 /api/photo）
         self.photos = {}
         self.seen_events = 0
@@ -850,11 +851,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.json({"ok": True, "reason": reason,
                               "status": STATE.lights_status()})
 
-        # 语音播报（客户端在 5009 到点 / 进段时调；字段与真板端同一份）
-        if path == "/api/speak":
+        # 语音播报 / 人工「呼叫」（客户端在 5009 到点 / 进段时调 `/api/speak`；
+        # 任务详情页的喊话走 `/api/speak/call`，不去重，字段与真板端同一份）
+        if path in ("/api/speak", "/api/speak/call"):
             text = "".join(str(body.get("text") or "").split())
             if not text:
                 return self.json({"ok": False, "error": "播报内容不能为空"}, 400)
+            manual = path == "/api/speak/call"
             with STATE.lock:
                 STATE.speak.update({
                     "active": True,
@@ -866,7 +869,8 @@ class Handler(BaseHTTPRequestHandler):
                     "point_index": -1
                     if body.get("pointIndex") is None
                     else int(body.get("pointIndex")),
-                    "scope": str(body.get("scope") or "point"),
+                    "scope": "call" if manual else str(body.get("scope") or "point"),
+                    "manual": manual,
                 })
                 STATE.speak["words"] += 1
             return self.json({"ok": True, "changed": True, "cmd": text,

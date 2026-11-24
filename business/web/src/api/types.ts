@@ -113,6 +113,17 @@ export interface TeleopAxes {
   speed?: number;
 }
 
+/** 设备指令下发结果（`POST /devices/{id}/command` 与任务详情的「呼叫」共用） */
+export interface DeviceCommandResult {
+  deviceId: string;
+  command: string;
+  dispatchedAt: string;
+  /** `false` = 设备客户端没连上（指令没送达，不要当成功） */
+  wsDelivered: boolean;
+  teleopHolder?: string | null;
+  forced?: boolean;
+}
+
 /** 本体动作机器码（协议 1302 有对应 cmd 码值的动作） */
 export type DeviceAction =
   | "stand_up"

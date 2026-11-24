@@ -64,6 +64,9 @@
                                  "scope":"point|leg"}；内容只认中文汉字+中文标点+数字
                                  （≤30 字），TTS 在云端，需联网 + asr
 - POST /api/speak/stop        -> [航点/航段] 停止播报 {"reason":"已离开航点"}（回到 voice）
+- POST /api/speak/call        -> [任务详情] 手动呼叫（喊话）{"text":"请避让","loop":false,
+                                 "seconds":0}；与航点播报同一套白名单，不去重，
+                                 循环缺省 30s
 - GET  /api/photo/status      -> 航点拍照运行态（目录 / 剩余空间 / 待回传张数 / 最近一次）
 - POST /api/photo             -> [航点] 抓拍照片 {"planId","pointIndex","pointName",
                                  "camera":"dogcam|cam0..cam3","frames":1}；
@@ -799,9 +802,24 @@ async def speak_start(request: Request):
 
 @app.post("/api/speak/stop")
 async def speak_stop(request: Request):
-    """[航点 / 航段] 停止播报：离开航点、任务终态 / 取消、看门狗超时。"""
+    """[航点 / 航段] 停止播报：离开航点、任务终态 / 取消、看门狗超时、人工「停止呼叫」。"""
     b = await _detect_body(request)
     r = await asyncio.to_thread(speak.stop, str(b.get("reason") or "计划结束"))
+    return JSONResponse(r, status_code=200 if r.get("ok") else 400)
+
+
+@app.post("/api/speak/call")
+async def speak_call(request: Request):
+    """[任务详情] 手动「呼叫」：操作员在执行中的任务详情页喊一句话。
+
+    与航点播报同一套实现（同一份内容白名单、同一个看门狗），区别只是**不去重**：
+    同一句话再喊一遍是真的要再喊，不能像 5009 那样被幂等吃掉。
+    循环播报不传 `seconds` 时默认 30s（计划播报仍按 `SPEAK_MAX_SECS` 兜底）；
+    停止走 `/api/speak/stop`。
+    """
+    b = await _detect_body(request)
+    b = dict(b, manual=True)
+    r = await asyncio.to_thread(speak.start, b)
     return JSONResponse(r, status_code=200 if r.get("ok") else 400)
 
 

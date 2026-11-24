@@ -52,6 +52,33 @@
 - **顺序敏感**：客户端对播报是**串行 await**（不像开灯那样 spawn），
   否则「离开航点停播」可能抢在「到点开播」前面落地，把新播报掐掉。
 
+## 2.1 手动「呼叫」（任务详情页喊话）
+
+除了路线里的自动播报，**任务详情页**还有一个「远程呼叫」：操作员在计划执行过程中填一句话，
+狗当场用 TTS 喊出来（现场疏导、通知撤离、找人）。
+
+```text
+web 任务详情「呼叫」
+  → POST /api/tasks/{id}/call {text, loop, seconds}     （server/src/handlers/tasks.rs::call_task）
+    → 设备指令 `呼叫`（ws：push_command，参数 params.params.{text,loop,seconds}）
+      → 设备客户端（client/src/handlers/command.rs → speak::manual_call）
+        → 板端 POST /api/speak/call {text, loop, seconds, manual:true}
+          → speak.py::start（同一套净化 / 同一个看门狗，**不做幂等**）
+输出「停止」→ POST /api/tasks/{id}/call/stop → 设备指令 `停止呼叫` → 板端 /api/speak/stop
+```
+
+- **不去重**：航点播报的幂等是为了 5009 每 500ms 一帧不重播；人工呼叫正好相反——
+  同一句话再点一次就是要再喊一遍（板端 `manual=true` 用时间戳做幂等键）。
+- **循环默认 30s**：平台把 `seconds` 夹在 5~600；不传时默认 30（板端对 `manual` 也是 30），
+  免得点一下就在园区里喊十分钟。要停就点「停止呼叫」——板端 FIFO 单通道，
+  所以这也会停掉该设备上正在循环的航点播报，那正是操作员想要的。
+- **不看本体门禁**：呼叫只跟板端 Agent 说话（客户端与它同机），本体关机 / 断链也要能喊，
+  所以服务端不过 `ensure_ready`、客户端把它放在本体门禁之前。
+- **设备不在线要显式失败**：`wsDelivered=false` 时服务端直接 400「未送达」，
+  不会留下一条假的「已下发」。
+- **留痕**：每次呼叫写一条 `task_events(event_type='call')`，任务详情的事件流里能看到
+  “谁在什么时候喊了什么”。
+
 ## 3. 内容限制（板端固件）
 
 | 规则 | 值 | 在哪实现 |
@@ -72,15 +99,17 @@
 | 位置 | 内容 |
 |---|---|
 | `web/src/utils/constants.ts` | `SPEAK_PRESETS`（常用话术）、`SPEAK_MAX_*`、`SPEAK_LEG_DEFAULT_SECS` |
-| `web/src/views/routes/index.vue` | `isSpeakAction`、`normalizeSpeakText`、`actionSpeakLabel`、对话框「播报内容 / 循环播报时长」 |
-| `web/src/api/types.ts` | `RoutePointAction.speakText` / `speakSeconds` |
-| `client/src/speak.rs` | `parse_speak_plan`、`sanitize_text`、`Speaker::{start_task, point_arrived, leave_point, finish_task}` |
+| `web/src/utils/speak.ts` | `normalizeSpeakText`（路线编辑器与任务详情「呼叫」共用同一份净化/校验） |
+| `web/src/views/routes/index.vue` | `isSpeakAction`、`actionSpeakLabel`、对话框「播报内容 / 循环播报时长」 |
+| `web/src/views/tasks/index.vue` | 任务详情「远程呼叫（喊话）」`sendCall` / `stopCall` |
+| `web/src/api/types.ts` | `RoutePointAction.speakText` / `speakSeconds`、`DeviceCommandResult` |
+| `client/src/speak.rs` | `parse_speak_plan`、`sanitize_text`、`Speaker::{start_task, point_arrived, leave_point, finish_task}`、`manual_call` / `manual_stop` |
 | `client/src/pump.rs` | 5009 到点 / 离开 / 终态三处调用（与 AI、灯光、录像同一处收口） |
-| `client/src/handlers/{task,control}.rs` | 下发时 `start_task`、本地任务收尾 / 取消时 `finish_task` |
+| `client/src/handlers/command.rs` | 下发时 `start_task`、本地任务收尾 / 取消时 `finish_task`；`呼叫` / `停止呼叫` 指令 |
 | `client/src/config.rs` | `--no-speak` / `ROBODOG_SPEAK_ENABLED=0` |
-| `backpack_dashboard/backend/speak.py` | `normalize` / `start` / `stop` / `status` + 看门狗 |
-| `backpack_dashboard/backend/agent.py` | `POST /api/speak`、`POST /api/speak/stop`、`GET /api/speak/status` |
-| `deploy/backpack-sim/mock_agent.py` | 同三个接口的模拟实现（`/api/sim/state` 里也能看到） |
+| `backpack_dashboard/backend/speak.py` | `normalize` / `start` / `stop` / `status` + 看门狗（`manual=true` = 人工呼叫） |
+| `backpack_dashboard/backend/agent.py` | `POST /api/speak`、`POST /api/speak/call`、`POST /api/speak/stop`、`GET /api/speak/status` |
+| `deploy/backpack-sim/mock_agent.py` | 同四个接口的模拟实现（`/api/sim/state` 里也能看到） |
 
 ## 5. 现场排查
 
@@ -92,6 +121,7 @@
 | 一直在喊 | 客户端没发 stop（客户端被 kill / 掉线）；等 `SPEAK_MAX_SECS` 看门狗，或 `curl -XPOST :8000/api/speak/stop -d '{"reason":"manual"}'` |
 | 播报卡在 call 模式（唤不醒） | 同上：单次播报会在估时后自动 `call stop`；手工 `POST /api/speak/stop` 立即恢复 |
 | 老平台 / 老板子 | 板端 Agent 没升级时客户端记 `unsupported`（一轮任务只试一次），升级 `backpack-agent` 后自动恢复 |
+| 详情页点了「呼叫」没反应 | 报「未送达」= 设备客户端没连（看业务平台设备在线状态）；报「内容不能为空/只支持中文…」= 文案里有英文/空格，改完再点；接口 200 但没声音按上面「到点没声音」查 |
 
 手工验接口（板端同机）：
 
@@ -100,6 +130,8 @@ curl -s 127.0.0.1:8000/api/speak/status
 curl -s -XPOST 127.0.0.1:8000/api/speak \
   -H 'Content-Type: application/json' \
   -d '{"text":"巡检中，请注意避让","loop":true,"seconds":30,"planId":"TK-1","pointIndex":0}'
+curl -s -XPOST 127.0.0.1:8000/api/speak/call -H 'Content-Type: application/json' \
+  -d '{"text":"请避让","loop":false}'
 curl -s -XPOST 127.0.0.1:8000/api/speak/stop -d '{"reason":"manual"}'
 ```
 
@@ -109,8 +141,11 @@ curl -s -XPOST 127.0.0.1:8000/api/speak/stop -d '{"reason":"manual"}'
 # 板端：内容净化 / 幂等 / 循环看门狗 / 收尾（不需要板子、聆思、网络）
 python3 business/backpack_dashboard/backend/tools/speak_selftest.py
 
-# 客户端：路线解析 / 到点播报 / 离开停播 / 终态收口 / 老 Agent 退让
+# 客户端：路线解析 / 到点播报 / 离开停播 / 终态收口 / 老 Agent 退让 / 手动呼叫不去重
 cd business/client && cargo test speak:: && cargo test waypoint_speech
+
+# 业务平台：呼叫下发到设备的契约（离线报未送达 / 参数透传 / 事件留痕）
+cd business/server && cargo test --test api_smoke task_call_dispatches_speak_to_the_device
 
 # 平台编辑器：类型 + 构建
 cd business/web && pnpm build

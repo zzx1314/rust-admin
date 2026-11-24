@@ -5,6 +5,7 @@ import type {
   BackendMap,
   DashboardSummary,
   Device,
+  DeviceCommandResult,
   LoginResponse,
   MapRaster,
   NotificationRecord,
@@ -182,7 +183,22 @@ export const taskApi = {
    */
   publish: (id: number) => post<Task>(`/tasks/${id}/publish`),
   /** 撤回成草稿：停止自动下发（执行中 / 已暂停的要先暂停并取消） */
-  unpublish: (id: number) => post<Task>(`/tasks/${id}/unpublish`)
+  unpublish: (id: number) => post<Task>(`/tasks/${id}/unpublish`),
+  /**
+   * 「呼叫」（人工喊话）：设备客户端转板端 `/api/speak/call`，狗用聆思 TTS 喊出来。
+   *
+   * `text` 只认中文汉字 + 中文标点 + 数字（板端固件限制，中文 ≤30 字）；
+   * `loopSeconds > 0` 时循环播这么久，要停就调 `callStop`。
+   * 设备客户端不在线时接口直接报错（不会留下一条假的「已下发」）。
+   */
+  call: (id: number, text: string, loopSeconds = 0) =>
+    post<DeviceCommandResult>(`/tasks/${id}/call`, {
+      text,
+      loop: loopSeconds > 0,
+      seconds: loopSeconds
+    }),
+  /** 停止呼叫（循环播报收尾；板端单通道，航点循环播报也会一起停） */
+  callStop: (id: number) => post<DeviceCommandResult>(`/tasks/${id}/call/stop`)
 };
 
 /** 巡检录像：任务详情里回看「录像采集 / 全程录像」 */

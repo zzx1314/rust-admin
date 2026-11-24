@@ -39,11 +39,11 @@ import {
   RETIRED_ACTIONS,
   SPEAK_LEG_DEFAULT_SECS,
   SPEAK_MAX_CHARS,
-  SPEAK_MAX_LEN,
   SPEAK_MAX_SECS,
   SPEAK_PRESETS,
   TRIGGERS
 } from "@/utils/constants";
+import { normalizeSpeakText } from "@/utils/speak";
 import {
   cloneRouteData,
   computeRouteMetrics,
@@ -240,36 +240,8 @@ const isSpeakAction = computed(
 );
 
 /**
- * 净化 + 校验播报内容（与板端 `speak.py` / 客户端 `speak.rs` 同一份规则）。
- *
- * 返回 `{ text, error }`：`error` 非空时不允许保存——播报是「说给人听」的，
- * 越界字符被板端丢掉会变成半句话，宁可让操作员当场改。
+ * 选了常用话术：直接填进输入框（还允许继续手改）
  */
-function normalizeSpeakText(raw: string) {
-  const compact = String(raw ?? "").replace(/\s+/g, "");
-  if (!compact) return { text: "", error: "播报内容不能为空" };
-  const allowedPunctuations = "，。！？、；：（）《》〈〉「」『』【】…—·";
-  const bad = Array.from(compact).filter(ch => {
-    const chinese = /[\u4e00-\u9fff]/.test(ch);
-    return !(chinese || /[0-9]/.test(ch) || allowedPunctuations.includes(ch));
-  });
-  if (bad.length) {
-    return {
-      text: "",
-      error: `只支持中文汉字、中文标点与数字（不支持：${Array.from(new Set(bad)).slice(0, 6).join("")}）`
-    };
-  }
-  const chinese = (compact.match(/[\u4e00-\u9fff]/g) ?? []).length;
-  if (chinese > SPEAK_MAX_CHARS) {
-    return { text: "", error: `中文汉字不能超过 ${SPEAK_MAX_CHARS} 个（当前 ${chinese} 个）` };
-  }
-  if (compact.length > SPEAK_MAX_LEN) {
-    return { text: "", error: `总长度不能超过 ${SPEAK_MAX_LEN} 个字符` };
-  }
-  return { text: compact, error: "" };
-}
-
-/** 选了常用话术：直接填进输入框（还允许继续手改） */
 function pickSpeakPreset(event: Event) {
   const value = (event.target as HTMLSelectElement | null)?.value ?? "";
   if (value) actionForm.speakText = value;

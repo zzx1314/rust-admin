@@ -214,8 +214,15 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 中文 ≤30 字（编辑器保存时硬拦，板端只丢字符+截断，绝不因为一句话让任务跑不起来）；
 这份白名单同时是 FIFO 的注入护栏。三条红线：**播报失败绝不影响巡检**（断网/asr 挂了
 只打日志）、**循环播报必须收尾**（客户端离开即 stop，板端 `SPEAK_MAX_SECS` 兜底）、
-**一次只播一条**（FIFO 单通道，航点播报优先于同点的航段播报）。改这块先读
-`business/docs/plan-speech.md`，回归 `python3 business/backpack_dashboard/backend/tools/speak_selftest.py`、
+**一次只播一条**（FIFO 单通道，航点播报优先于同点的航段播报）。
+**任务详情页还有一个人工「呼叫」（喊话）**：`POST /tasks/{id}/call {text,loop,seconds}` →
+设备指令 `呼叫` → 客户端 `speak::manual_call` → 板端 `POST /api/speak/call`
+（`manual=true`，**不做幂等**：同一句话再点一次就是再喊一遍；循环默认 30s、上限 600s，
+`/tasks/{id}/call/stop` 停，板端单通道所以航点循环播报也会一起停）。
+呼叫不属运动指令，本体没连也要能喊：服务端不过 `ensure_ready`、客户端放在本体门禁之前；
+设备不在线直接 400「未送达」，每次呼叫写一条 `task_events(event_type='call')` 留痕。
+前端校验与路线编辑器共用 `business/web/src/utils/speak.ts::normalizeSpeakText`（别再抄一份白名单）。
+改这块先读 `business/docs/plan-speech.md`（§2.1），回归 `python3 business/backpack_dashboard/backend/tools/speak_selftest.py`、
 `client speak::tests`、`client pump::tests::waypoint_speech_fires_on_arrival_and_stops_on_leave`。
 
 **航点采集默认是关的**：`media_capture_enabled`（迁移 34 预置 `0`）是自动采集的

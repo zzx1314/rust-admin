@@ -216,6 +216,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tasks/{id}/publish", post(tasks::publish_task))
         .route("/tasks/{id}/unpublish", post(tasks::unpublish_task))
         .route("/tasks/{id}/events", get(tasks::list_task_events))
+        // 任务详情页的「呼叫」（人工喊话）：下发 `呼叫` / `停止呼叫` 给设备客户端
+        .route("/tasks/{id}/call", post(tasks::call_task))
+        .route("/tasks/{id}/call/stop", post(tasks::stop_call_task))
         .route(
             "/routes",
             get(routes::list_routes).post(routes::create_route),
