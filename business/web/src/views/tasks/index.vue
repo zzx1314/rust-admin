@@ -40,6 +40,7 @@ import {
   planLightSummary
 } from "@/utils/constants";
 import { parseRouteData } from "@/utils/format";
+import { apiBaseUrl } from "@/utils/runtime";
 
 const router = useRouter();
 const tasks = ref<Task[]>([]);
@@ -690,25 +691,37 @@ function recordingLabel(item: TaskRecording) {
   return `航点${item.pointIndex + 1}${name ? ` · ${name}` : ""} 录像`;
 }
 
+/** 关弹窗：播放地址带 `?pt=` 令牌，留着没用 */
 function revokeRecordingUrl() {
-  if (recordingUrl.value) {
-    URL.revokeObjectURL(recordingUrl.value);
-    recordingUrl.value = "";
-  }
+  recordingUrl.value = "";
 }
 
-/** 播放一段录像：先取字节（接口要 Bearer，`<video src>` 带不上头） */
+/** `<video>` 自己报错：文件被清理 / 超出留存期 / 令牌过期 */
+function onRecordingError() {
+  ElMessage.error("这段录像打不开：文件可能已被清理或超出留存期");
+}
+
+/**
+ * 播放一段录像：先换一个只对这一条有效的 `?pt=` 令牌，再把地址交给 `<video>`。
+ *
+ * 以前是先把整段（37~64MB）取成 Blob 再 `createObjectURL`：弱网下要等几十秒到几分钟、
+ * axios 还有 120s 硬超时，现场看到的就是「点了一点反应都没有」。直连 Range 流是秒开，
+ * 还能拖进度条；令牌 10 分钟过期，过期后重点一次即可。
+ */
 async function playRecording(item: TaskRecording) {
-  recordingLoading.value = true;
+  revokeRecordingUrl();
   recordingPlaying.value = item;
   recordingDialog.value = true;
-  revokeRecordingUrl();
+  // 只覆盖「换令牌」这一小步：真正的拉流交给浏览器，边下边播
+  recordingLoading.value = true;
   try {
-    const blob = await recordingApi.blob(item.id);
-    recordingUrl.value = URL.createObjectURL(blob);
+    const link = await recordingApi.play(item.id);
+    recordingUrl.value =
+      `${apiBaseUrl()}/recordings/${item.id}/file?pt=` + encodeURIComponent(link.token);
   } catch {
-    // http.ts 已经弹过错误提示（弱网 / 文件被清理）
+    // http.ts 已经弹过错误提示（弱网 / 文件被清理 / 计划已被删且无权限）
     recordingDialog.value = false;
+    recordingPlaying.value = null;
   } finally {
     recordingLoading.value = false;
   }
@@ -1743,7 +1756,7 @@ onBeforeUnmount(() => {
         class="empty-box"
         style="padding: 40px 0"
       >
-        正在取回录像…（全程录像按切片回传，单段几 MB～几十 MB）
+        正在打开录像…
       </div>
       <video
         v-else-if="recordingUrl"
@@ -1751,7 +1764,9 @@ onBeforeUnmount(() => {
         controls
         autoplay
         playsinline
+        preload="metadata"
         style="width: 100%; border-radius: 8px; background: #000"
+        @error="onRecordingError"
       />
       <template #footer>
         <button class="btn" @click="recordingDialog = false">

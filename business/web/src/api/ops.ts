@@ -189,10 +189,13 @@ export const taskApi = {
 export const recordingApi = {
   list: (taskId: number) => get<TaskRecording[]>(`/tasks/${taskId}/recordings`),
   /**
-   * 取录像字节（带 Bearer，所以不能直接给 `<video src>` 用）。
-   * 调用方拿到 Blob 后 `URL.createObjectURL` 播放，用完记得 revoke。
+   * 换一个**只对这一条**有效、10 分钟过期的播放令牌。
+   *
+   * `<video src>` 带不上 `Authorization`，所以播放地址是
+   * `${apiBaseUrl()}/recordings/${id}/file?pt=<token>`，让浏览器自己按 Range 拉流——
+   * 不再把 37~64MB 先整段取成 Blob（弱网下几分钟、还会撞 120s 超时）。
    */
-  blob: (id: number) => getBlob(`/recordings/${id}/file`),
+  play: (id: number) => get<{ token: string; expiresAt: number }>(`/recordings/${id}/play`),
   remove: (id: number) => del<boolean>(`/recordings/${id}`)
 };
 

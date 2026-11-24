@@ -132,11 +132,8 @@ pub fn build_router(state: AppState) -> Router {
                 crate::recordings::RECORDING_MAX_BYTES + 1024 * 1024,
             )),
         )
-        // 播放 / 下载（支持 Range）：前端先按 id 换 blob，再挂到 <video> 上
-        .route(
-            "/recordings/{id}/file",
-            get(crate::recordings::download_recording),
-        )
+        // 播放凭证：`<video src>` 带不上 Bearer，先换一个只对这条录像有效的 `?pt=` 令牌
+        .route("/recordings/{id}/play", get(crate::recordings::play_link))
         .route(
             "/recordings/{id}",
             axum::routing::delete(crate::recordings::delete_recording),
@@ -344,6 +341,12 @@ pub fn build_router(state: AppState) -> Router {
     let public = Router::new()
         .route("/auth/login", post(login_handler))
         .route("/health", get(health))
+        // 录像播放 / 下载（支持 Range）：`<video src>` 带不上 Authorization，所以不进
+        // 统一鉴权层——handler 自己认 Bearer 或 `?pt=` 播放令牌（见 recordings.rs）。
+        .route(
+            "/recordings/{id}/file",
+            get(crate::recordings::download_recording),
+        )
         // 中台内部接口：由共享服务令牌鉴权，不使用业务 JWT
         .route(
             "/zentai/devices/{device_id}/sync-maps",

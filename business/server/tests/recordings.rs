@@ -365,3 +365,154 @@ async fn recording_ingest_rejects_other_devices_and_non_mp4() {
         .unwrap_or(0);
     assert_eq!(leftovers, 0, "失败的上传不该留残片");
 }
+
+/// 播放令牌：`<video src>` 带不上 Bearer，用 `?pt=` 直接按 Range 拉流，
+/// 而且只对「换令牌的那一段」有效（拿 A 段的令牌放 B 段必须 401）。
+#[tokio::test]
+async fn play_token_streams_without_bearer_and_is_scoped_to_one_recording() {
+    let (state, _temp) = test_state().await;
+    let (_, task_code) = insert_task(&state, "DOG-REC-1").await;
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+
+    let body = json_body(
+        ingest(
+            &app,
+            &token,
+            "task-1.mp4",
+            &fake_mp4(7),
+            &meta(&task_code, "DOG-REC-1", "task", -1, 30.0),
+        )
+        .await,
+    )
+    .await;
+    let first = body["data"]["recording"]["id"].as_i64().expect("缺少 id");
+    let body = json_body(
+        ingest(
+            &app,
+            &token,
+            "pt0-1.mp4",
+            &fake_mp4(8),
+            &meta(&task_code, "DOG-REC-1", "point", 0, 15.0),
+        )
+        .await,
+    )
+    .await;
+    let second = body["data"]["recording"]["id"].as_i64().expect("缺少 id");
+
+    // 换令牌（走 Bearer）
+    let request = Request::get(format!("/api/recordings/{first}/play"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    let play = body["data"]["token"].as_str().expect("缺少播放令牌").to_string();
+    assert!(
+        body["data"]["expiresAt"].as_i64().unwrap_or(0) > 0,
+        "要回过期时间：{body}"
+    );
+
+    // 不带任何请求头，只用 `?pt=`：200 + 正确的 content-type
+    let request = Request::get(format!("/api/recordings/{first}/file?pt={play}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "令牌应能直接播");
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "video/mp4");
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(bytes.len(), fake_mp4(7).len());
+
+    // Range 也要能用（播放器拖进度条）
+    let request = Request::get(format!("/api/recordings/{first}/file?pt={play}"))
+        .header(header::RANGE, "bytes=4-7")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+
+    // 拿第一段的令牌去放第二段：拒
+    let request = Request::get(format!("/api/recordings/{second}/file?pt={play}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "令牌不该跨录像通用");
+
+    // 没有令牌也没有 Bearer：拒
+    let request = Request::get(format!("/api/recordings/{first}/file"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // 改一个字符（签名失效）：拒
+    let mut tampered = play.clone();
+    let last = tampered.pop().unwrap();
+    tampered.push(if last == 'a' { 'b' } else { 'a' });
+    let request = Request::get(format!("/api/recordings/{first}/file?pt={tampered}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// 计划被删之后录像还在：列表 / 播放 / 删除都不能因为「任务不存在」变 404，
+/// 否则这些行是既看不到又删不掉的孤儿（2026-11-24 现场 TK-1124-17）。
+#[tokio::test]
+async fn orphan_recording_survives_plan_deletion() {
+    let (state, _temp) = test_state().await;
+    let (task_id, task_code) = insert_task(&state, "DOG-REC-1").await;
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+
+    let body = json_body(
+        ingest(
+            &app,
+            &token,
+            "task-1.mp4",
+            &fake_mp4(9),
+            &meta(&task_code, "DOG-REC-1", "task", -1, 60.0),
+        )
+        .await,
+    )
+    .await;
+    let recording_id = body["data"]["recording"]["id"].as_i64().expect("缺少 id");
+
+    // 计划被删（只删 tasks / task_events，录像行留在原地）
+    sqlx::query("DELETE FROM tasks WHERE id = ?1")
+        .bind(task_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let request = Request::get(format!("/api/tasks/{task_id}/recordings"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "孤儿录像要还能列出来");
+    let body = json_body(response).await;
+    assert_eq!(body["data"].as_array().map(Vec::len), Some(1), "{body}");
+
+    let request = Request::get(format!("/api/recordings/{recording_id}/play"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "孤儿录像要还能播");
+
+    let request = Request::delete(format!("/api/recordings/{recording_id}"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "孤儿录像要还能删");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_recordings")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}

@@ -183,7 +183,8 @@ GET    /api/tasks/{id}            PUT    /api/tasks/{id}       DELETE /api/tasks
 GET    /api/tasks/{id}/events      # 任务事件流（进度 / 定位异常 / 指令留痕）
 GET    /api/tasks/{id}/recordings  # 任务录像（航点录像 / 全程录像切片）
 POST   /api/recordings/ingest      # 设备客户端回传 mp4（multipart：file + meta）
-GET    /api/recordings/{id}/file   # 播放 / 下载（支持 Range）
+GET    /api/recordings/{id}/play   # 换一个只对这一条有效的 `?pt=` 播放令牌（10 分钟）
+GET    /api/recordings/{id}/file   # 播放 / 下载（支持 Range；Bearer 或 `?pt=` 二选一）
 DELETE /api/recordings/{id}        # 删除录像（文件 + 记录）
 PUT    /api/tasks/{id}/status
 POST   /api/tasks/{id}/dispatch     # 立即下发 / 重新下发（人工覆盖，不受发布状态限制）
@@ -758,8 +759,14 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
         → 任务终态 / 客户端启动：GET /api/record/list → POST /api/recordings/ingest（multipart）
           → 平台落盘 <recording_dir>/<设备>/<任务号>/…mp4 + 一条 task_recordings
             → 上传成功才回调 /api/record/delete 删板端文件
-              → 任务详情「任务录像」播放 / 下载（GET /api/recordings/{id}/file，支持 Range）
+              → 任务详情「任务录像」播放 / 下载（`<video src>` 直连 Range 流）
 ```
+
+播放为什么不走 Blob：`<video src>` 带不上 `Authorization`，所以前端先调
+`GET /api/recordings/{id}/play` 换一个**只对这一条有效、10 分钟过期**的 `?pt=` 令牌，
+再把这个地址交给 `<video>`（后端 Range 流，秒开、可拖进度条）。以前是「整段 37~64MB
+先取成 Blob 再 `createObjectURL`」：弱网下几十秒到几分钟只有一行「正在取回录像…」，
+axios 还有 120s 硬超时，现场表现就是「点回放没反应」（2026-11-24 修）。
 
 要点：
 
@@ -776,6 +783,11 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
   上传；Agent 不对外提供 mp4 下载（公网平台够不到板端）。
 - **平台侧留存**：`recording_keep_days`（默认 30，`0` = 不清理）由 `schedule::sweep`
   每分钟顺手清超期的行 + 文件；平台只存**相对路径**，接口从不回绝对目录。
+- **计划删了，已录的片子还在**：`task_recordings` 不跟 `tasks` 级联删，所以删计划后
+  那几行会变成「孤儿」。可见性判定先按任务归属，任务已不存在就退到录像自己的园区
+  （`ensure_recording_visible`），列表 / 播放 / 删除都还能用——否则它们会变成
+  谁都打不开也删不掉的 404（2026-11-24 `TK-1124-17` 现场，6 段全锁死）。
+  超期后两条路都会把它们清掉（`sweep_expired`）。
 - **为什么不进中台「媒体资源」**：那边是 AI 存证**训练图**（JPG/PNG、按 sha256 去重、
   打包导出），视频是任务执行结果，体积 / 留存 / 使用方式都不同。
 - 板端目录 / 开关：`[backpack]` 之外的 `RECORD_*` 环境变量见

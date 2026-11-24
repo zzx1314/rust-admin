@@ -309,6 +309,30 @@ pub async fn require_auth(
     Ok(next.run(request).await)
 }
 
+/// 从 `Authorization: Bearer …` 自己解出 claims。
+///
+/// 给「不在统一鉴权层里」的端点用：录像文件下载路由要允许 `?pt=` 播放令牌，
+/// 所以它挂在 public 路由器上，带 Bearer 的老请求得在这里补一次解析。
+pub fn claims_from_header(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<Claims, AppError> {
+    let raw = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| AppError::Unauthorized("请先登录".to_string()))?;
+    let token = raw
+        .strip_prefix("Bearer ")
+        .or_else(|| raw.strip_prefix("bearer "))
+        .ok_or_else(|| AppError::Unauthorized("登录凭证格式错误".to_string()))?;
+    let decoded = decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(state.config.jwt_secret.as_bytes()),
+        &Validation::default(),
+    )?;
+    Ok(decoded.claims)
+}
+
 /// 从 `?token=…` 取令牌（仅 WebSocket 端点使用，允许 URL 编码）
 fn token_from_query(query: Option<&str>) -> Option<String> {
     query?
