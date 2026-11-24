@@ -5344,3 +5344,107 @@ async fn duplicate_code_reports_a_readable_error_instead_of_sql_text() {
     );
     assert!(message.contains("编号"), "应说明是编号占用: {message}");
 }
+
+/// 中台发布地图后，业务库的状态要跟着走（园区基线徽章一起收敛）。
+///
+/// 2026-11-24 现场：中台点了「发布」，中台 `dog_map.map_status` 已是 `已发布`，
+/// 业务平台还一直显示入库时的「部分标定」，园区基线徽章也是部分标定。
+#[tokio::test]
+async fn map_status_syncs_from_zentai() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    sqlx::query(
+        "INSERT INTO map_versions
+            (id, park_id, device_code, map_name, version, status, created_at, source,
+             source_id, source_ref)
+         VALUES ('ROS-MAP-1795402650069@v1.0', 1, 'RD-002', '2026_11_23_10_49_02', 'v1.0',
+            '部分标定', '2026-01-01 00:00:00', 'robot-mapping', '1795402650069',
+            '/ota/alg_data/map/history_map/2026_11_23_10_49_02')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // 业务库自己归档的历史图：中台还标着已发布，同步不能把它复活
+    sqlx::query(
+        "INSERT INTO map_versions
+            (id, park_id, device_code, map_name, version, status, created_at, source,
+             source_id, source_ref)
+         VALUES ('ROS-MAP-1794473226125@v1.0', 1, 'RD-002', '2026_11_10_16_15_06', 'v1.0',
+            '已归档', '2026-01-01 00:00:00', 'robot-mapping', '1794473226125',
+            '/ota/alg_data/map/history_map/2026_11_10_16_15_06')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE parks SET map_version_id = 'ROS-MAP-1795402650069@v1.0', map_status = '部分标定'
+         WHERE id = 1",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // 假中台库：同一张图已经发布
+    let zentai_path = state.config.backend_db_path.clone();
+    let zentai = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&zentai_path)
+                .create_if_missing(true),
+        )
+        .await
+        .expect("创建假中台库失败");
+    sqlx::query(
+        "CREATE TABLE dog_map (
+            id INTEGER PRIMARY KEY,
+            map_status TEXT,
+            is_deleted INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(&zentai)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO dog_map (id, map_status) VALUES (1795402650069, '已发布')")
+        .execute(&zentai)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO dog_map (id, map_status) VALUES (1794473226125, '已发布')")
+        .execute(&zentai)
+        .await
+        .unwrap();
+    zentai.close().await;
+
+    let changed = robodog_ops_server::handlers::maps::sync_map_statuses(&state)
+        .await
+        .expect("状态同步不应失败");
+    assert_eq!(changed, 1, "应同步 1 张地图");
+
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM map_versions WHERE id = 'ROS-MAP-1795402650069@v1.0'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "已发布", "中台发布后业务库应显示已发布");
+
+    let park_status: String = sqlx::query_scalar("SELECT map_status FROM parks WHERE id = 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(park_status, "已标定", "园区基线徽章应跟着变成已标定");
+
+    let archived: String = sqlx::query_scalar(
+        "SELECT status FROM map_versions WHERE id = 'ROS-MAP-1794473226125@v1.0'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(archived, "已归档", "业务侧归档的图不许被中台状态复活");
+
+    // 幂等：再同步一次不该再改动任何行
+    let again = robodog_ops_server::handlers::maps::sync_map_statuses(&state)
+        .await
+        .expect("重复同步不应失败");
+    assert_eq!(again, 0);
+}

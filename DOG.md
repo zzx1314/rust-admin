@@ -190,6 +190,10 @@ ROS `model.pgm` 包）时才退回 `model.pgm` / `map.pgm`。编辑只改写编�
   归属），所以中台看到 `parkCode` 不要当成「只能属于这一个园区」。
 - 业务平台拉取地图（`business/server` 的 `/api/map-versions/backend`）时可按 `parkCode` 过滤，
   导入业务库时未指定园区也能按 `parkCode` 自动回填。
+- **发布语义**：`POST /api/dogMap/{id}/publish` 把「草稿 / 部分标定」一律推进为「已发布」
+  并写 `publish_time`（「部分标定」只是入库时的标定完整度，发布 = 人工确认可用）。
+  业务平台会通过 `sync_map_statuses` 跟随这个状态（启动 + 30s 扫描 + 地图列表 10s 节流），
+  所以中台发布后业务平台显示「已发布」、园区基线显示「已标定」。
 - 编号对照：业务库 `map_versions.id` 是 `ROS-MAP-<首次入库时的 dog_map.id>@版本`，
   地图在中台删掉后重传时业务编号不变、中台新 id 写回 `map_versions.source_id`。
   因此**两边对图看 `source_id` / 地图名称 / 设备编号**，不看业务编号里的数字；

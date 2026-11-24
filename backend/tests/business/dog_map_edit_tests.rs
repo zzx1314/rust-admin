@@ -283,6 +283,47 @@ async fn erase_targets_map_edit_and_preserves_original_map() {
     );
 }
 
+/// 发布把「部分标定」也推进为「已发布」。
+///
+/// 2026-11-24 现场：中台点了「发布」，页面还是「部分标定」，业务平台也不跟。
+/// 现在发布 = 人工确认「这张图可以当基线用」，草稿 / 部分标定都变已发布
+/// （业务平台由 `business/` 的 `sync_map_statuses` 跟随）。
+#[tokio::test]
+async fn publish_partial_map_marks_it_published() {
+    let fixture = fixture("部分标定").await;
+    let scope = DataScope::new(1, true);
+
+    let published = fixture
+        .state
+        .dog_map_service
+        .publish(fixture.map_id, &scope)
+        .await
+        .expect("部分标定版本应允许发布");
+    assert_eq!(published.map_status, "已发布");
+    assert!(published.publish_time.is_some(), "发布要记录发布时间");
+
+    // 发布后按不可变处理：橡皮擦必须拒绝（与「已发布」同一套规则）
+    let error = fixture
+        .state
+        .dog_map_service
+        .erase(
+            fixture.map_id,
+            MapEditRequest {
+                strokes: vec![MapEditStroke {
+                    points: vec![MapEditPoint { x: 4.5, y: 4.5 }],
+                    radius: Some(1.0),
+                    value: None,
+                }],
+                erase_value: None,
+            },
+            &fixture.state.upload_dir,
+            &scope,
+        )
+        .await
+        .expect_err("已发布的版本不可直接编辑");
+    assert!(format!("{error:?}").contains("已发布"), "{error:?}");
+}
+
 #[tokio::test]
 async fn erase_supports_unknown_value_and_multiple_strokes() {
     let fixture = fixture("部分标定").await;

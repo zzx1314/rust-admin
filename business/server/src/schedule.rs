@@ -460,6 +460,11 @@ pub fn spawn(state: AppState) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(TICK_SECS));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // 启动那一轮任务扫描不跑（见下行），但地图状态可以立刻对齐一次：
+        // 中台发布后的状态同步纯展示用，跑早了不会把任务误标成「窗口未执行」。
+        if let Err(error) = crate::handlers::maps::sync_map_statuses(&state).await {
+            warn!("地图状态同步失败: {error}");
+        }
         // 启动那一下不扫：进程刚起来时设备还没注册，白白把任务标成「窗口未执行」
         ticker.tick().await;
         loop {
@@ -492,6 +497,11 @@ pub async fn sweep(state: &AppState) -> Result<SweepReport, AppError> {
     // 照片是巡检报告的证据，默认留得比录像久（90 天 vs 30 天）。
     if let Err(error) = crate::photos::sweep_expired(state).await {
         warn!("航点照片超期清理失败: {error}");
+    }
+    // 地图状态：中台才是主库，发布 / 归档后得把 `map_versions.status` 拉回来，
+    // 否则业务平台一直显示入库时的「部分标定」。同步失败不能让计划调度停摆。
+    if let Err(error) = crate::handlers::maps::sync_map_statuses(state).await {
+        warn!("地图状态同步失败: {error}");
     }
 
     let pending: Vec<Task> = sqlx::query_as::<_, crate::models::TaskRow>(&format!(

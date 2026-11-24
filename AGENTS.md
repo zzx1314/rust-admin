@@ -295,6 +295,20 @@ resolve_route_map` 同样要放行「别园区的图」（否则园区能绑图�
 `api_smoke::route_can_use_a_map_shared_with_another_park` /
 `api_smoke::reclaiming_another_park_map_requires_device_access`。
 
+**中台「发布」= 已发布，业务平台跟着同步**（2026-11-24 起）。以前 `dog_map` 发布对
+「部分标定」的图只记 `publish_time`、状态不变，现场点了发布看到页面还是部分标定，
+以为没生效；现在 `backend/src/business/dog/map/service.rs::publish` 把草稿 / 部分标定
+一律推进成「已发布」。「部分标定」只保留为**入库时的标定完整度**（机器人回传默认值），
+发布即人工确认。业务库 `map_versions.status` 是入库快照，靠
+`business/server/src/handlers/maps/mod.rs::sync_map_statuses` 从 `dog_map.map_status`
+拉回（启动一次 + `schedule::sweep` 每 30s + `GET /api/maps` 顺手拉但 10s 节流，
+节流器在 `Caches::map_status_sync`），园区 `map_status` 一起收敛
+（已发布→已标定 / 部分标定→部分标定 / 其余→待标定）。该函数只同步状态，
+**不动 `park_id` / `owner_user_id`**（否则会把共用同一张图的园区基线拧坏），
+也**不会复活业务侧已归档的行**（`UPDATE ... AND status <> '已归档'`）。
+回归：`dog_map_edit_tests::publish_partial_map_marks_it_published`、
+`api_smoke::map_status_syncs_from_zentai`。
+
 「返回起点」回的是**起步时本体 `capture_origin_pose` 采的起点位姿**，不是地图原点。载图
 定位（`4030 op=1`）的 `initial_pose` **缺省必须发零四元数**（`Pose::unspecified()`）：协议
 §2.4.1 里只有四元数全零才表示「读上一份位姿文件做完整重定位」，而 `Pose::default()` 的单位

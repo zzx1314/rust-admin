@@ -88,7 +88,7 @@ const beforeUpload = (uploadFile: UploadFile) => {
 
 const handlePublish = row => {
   ElMessageBox.confirm(
-    `发布后该版本状态将变为已发布，并记录发布时间。是否继续？`,
+    `发布后该版本状态将变为「已发布」，并记录发布时间。是否继续？`,
     "发布地图基线",
     { type: "warning", confirmButtonText: "发布", cancelButtonText: "取消" }
   )

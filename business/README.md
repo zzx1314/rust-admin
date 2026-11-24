@@ -397,6 +397,13 @@ GET    /api/zentai/devices/{deviceId}/runtime     # 中台读取设备运行态�
 `GET /api/map-versions` 对非管理员按「中台设备绑定人」过滤（`owner_user_id`），
 所以每个人只会看到自己设备采的图；支持 `deviceCode` / `unbound=true` / `ownerUserId` 过滤。
 
+**地图状态跟着中台走**：`map_versions.status` 是入库时的快照（机器人回传一律
+「部分标定」），中台「发布」后是「已发布」。`handlers/maps/mod.rs::sync_map_statuses`
+按时把 `dog_map.map_status` 拉回来（启动一次、`schedule::sweep` 每 30s、
+`GET /api/maps` 顺手拉一次但 10s 节流），园区 `map_status` 一起收敛
+（已发布 → 已标定 / 部分标定 → 部分标定 / 其余 → 待标定）。同步只改状态，
+不动 `park_id` / `owner_user_id`。
+
 ## 地图同步：自动、手动与定时轮询
 
 业务库 `map_versions.source_ref` 保存机器人本体地图绝对路径，ingest 写库前按

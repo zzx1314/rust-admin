@@ -488,6 +488,7 @@ mod tests {
                 "media_sha_index_repair",
                 "add_media_capture_switch",
                 "add_map_share",
+                "publish_partial_maps",
             ]
         );
         assert_eq!(migrations[0].name(), "p_sys_tables_from_file");

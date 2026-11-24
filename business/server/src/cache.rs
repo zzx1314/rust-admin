@@ -20,4 +20,30 @@ pub struct Caches {
     pub media_config: crate::zentai::MediaConfigCache,
     /// 计划「到点未下发」事件的计次与节流
     pub wait_states: crate::schedule::WaitStates,
+    /// 地图状态从中台拉回的节流（`GET /api/maps` 顺手拉一次）
+    pub map_status_sync: MapStatusSync,
+}
+
+/// 让「中台发布后立刻能在业务平台看到已发布」不用等 30s 的调度扫描。
+///
+/// 只做节流，不存状态：即使进程重启丢了，也只是多拉一次（幂等）。
+#[derive(Default)]
+pub struct MapStatusSync(std::sync::Mutex<Option<std::time::Instant>>);
+
+impl MapStatusSync {
+    /// 距上次同步是否已经超过 `interval`；返回 `true` 时调用方负责去做同步
+    pub fn due(&self, interval: std::time::Duration) -> bool {
+        // 锁中毒（其它线程 panic）时保守地不同步，不能让一次地图列表请求 500
+        let Ok(mut last) = self.0.lock() else {
+            return false;
+        };
+        let now = std::time::Instant::now();
+        match *last {
+            Some(at) if now.duration_since(at) < interval => false,
+            _ => {
+                *last = Some(now);
+                true
+            }
+        }
+    }
 }

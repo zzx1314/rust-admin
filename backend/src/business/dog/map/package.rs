@@ -320,24 +320,9 @@ pub fn apply_erase_strokes(
             }
         }
 
-        changed += stamp(
-            pixels,
-            width,
-            height,
-            &stroke.points[0],
-            radius,
-            value,
-        );
+        changed += stamp(pixels, width, height, &stroke.points[0], radius, value);
         for pair in stroke.points.windows(2) {
-            changed += stamp_segment(
-                pixels,
-                width,
-                height,
-                &pair[0],
-                &pair[1],
-                radius,
-                value,
-            );
+            changed += stamp_segment(pixels, width, height, &pair[0], &pair[1], radius, value);
         }
     }
     Ok(changed)

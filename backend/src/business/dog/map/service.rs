@@ -180,8 +180,13 @@ impl DogMapService {
             .map_err(AppError::DatabaseError)
     }
 
-    /// 发布地图版本：把状态推进到「已发布」/「部分标定」并记录发布时间。
+    /// 发布地图版本：把状态推进到「已发布」并记录发布时间。
     ///
+    /// 「部分标定」只是**入库时的标定完整度**，发布是人工确认「这张图可以当基线用」，
+    /// 所以草稿 / 部分标定发布后都是「已发布」（2026-11-24 起；以前部分标定发布会
+    /// 保留部分标定，现场点了发布看到页面还是部分标定，以为发布没生效）。
+    /// 完整度信息仍保留在 `publish_time` 与发布前的历史状态里，
+    /// 需要重新标定就「新版本」派生。
     /// 已发布版本视为不可变；归档由发布新版本或人工操作完成。
     pub async fn publish(&self, id: i64, scope: &DataScope) -> Result<DogMap, AppError> {
         let map = self.get_owned_by_id(id, scope).await?;
@@ -197,13 +202,13 @@ impl DogMapService {
             )));
         }
 
-        let status = if map.map_status == MAP_STATUS_PARTIAL {
-            MAP_STATUS_PARTIAL
-        } else {
-            MAP_STATUS_PUBLISHED
-        };
         self.repo
-            .update_status(id, status, Some(format_datetime(chrono::Utc::now())), scope)
+            .update_status(
+                id,
+                MAP_STATUS_PUBLISHED,
+                Some(format_datetime(chrono::Utc::now())),
+                scope,
+            )
             .await
             .map_err(AppError::DatabaseError)?
             .ok_or_else(|| AppError::NotFound(format!("Map with id {} not found", id)))

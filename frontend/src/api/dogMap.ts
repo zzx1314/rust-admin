@@ -35,7 +35,7 @@ export const dogMapUpload = (formData: FormData) =>
   http.uploadFile<Result>(dogMapUrls.upload, formData);
 export const dogMapUpdate = (id: string | number, param?: object) =>
   http.axiosPut<Result>(dogMapUrls.update + id, param);
-/** 发布地图版本：状态推进为已发布 / 部分标定并记录发布时间。 */
+/** 发布地图版本：状态推进为已发布并记录发布时间（草稿 / 部分标定都变已发布）。 */
 export const dogMapPublish = (id: string | number) =>
   http.axiosPostRequest<Result>(dogMapUrls.publish + id + "/publish", {});
 /** 派生并发布下一个不可变版本。 */

@@ -399,7 +399,15 @@ export function useDogMap() {
   function publishMap(row) {
     dogMapPublish(row.id).then(res => {
       if (res.code === SUCCESS) {
-        message(`已发布 ${row.mapVersion || "地图"}`, { type: "success" });
+        // 发布后状态应为「已发布」（业务平台会跟着同步）。仍保留状态回显：
+        // 万一服务端返回的不是已发布，页面不至于给人「发布没生效」的错觉。
+        const status = res.data?.mapStatus ?? "已发布";
+        message(
+          status === "已发布"
+            ? `已发布 ${row.mapVersion || "地图"}`
+            : `已发布 ${row.mapVersion || "地图"}，状态仍为「${status}」`,
+          { type: "success" }
+        );
         onSearch();
       } else {
         message(res.msg, { type: "error" });

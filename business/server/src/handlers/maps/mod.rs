@@ -67,6 +67,16 @@ pub async fn list_maps(
     Query(query): Query<MapQuery>,
     claims: Option<Extension<Claims>>,
 ) -> Result<Json<ApiResponse<Vec<MapVersion>>>, AppError> {
+    // 中台刚「发布」的地图要立刻在业务平台显示为已发布：列表接口顺手拉一次
+    // （节流 10s）。后台扫描也会拉，但只靠它要等最多 30s，现场会以为没生效。
+    if state
+        .caches
+        .map_status_sync
+        .due(std::time::Duration::from_secs(10))
+        && let Err(error) = sync_map_statuses(&state).await
+    {
+        tracing::warn!("地图状态同步失败: {error}");
+    }
     let mut builder = QueryBuilder::<sqlx::Sqlite>::new(MAP_SELECT);
     builder.push(" WHERE 1 = 1");
     if let Some(park_id) = query.park_id {
@@ -162,6 +172,68 @@ pub async fn list_park_maps(
         .await?;
     Ok(ApiResponse::ok(maps))
 }
+/// 中台「发布」后把地图状态同步回业务库：`dog_map.map_status` → `map_versions.status`。
+///
+/// 中台才是地图主库；业务库这行是入库时的快照（机器人回传一律 `部分标定`）。
+/// 不同步的话，中台已经发布（`已发布`）业务平台还显示「部分标定」，园区基线的
+/// 徽章也一直停在部分标定（2026-11-24 现场）。园区当前基线的展示状态一起收敛：
+/// `已发布 → 已标定`、`部分标定 → 部分标定`、其余 → `待标定`。
+///
+/// 由后台扫描（`schedule::sweep`，30s）与启动时各调一次；失败只记日志，
+/// 中台库读不到不影响业务平台其他功能。
+///
+/// 只同步状态，不动 `park_id` / `owner_user_id`：中台那边改园区归属也不应该
+/// 把地图从园区基线里抢走（园区可以共用同一张图）。
+pub async fn sync_map_statuses(state: &AppState) -> Result<usize, AppError> {
+    // 没配 / 没有中台库（本地开发、集成测试）时什么都不做
+    if !state.config.backend_db_path.is_file() {
+        return Ok(0);
+    }
+    let backend = backend_pool(state).await?;
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT CAST(d.id AS TEXT), d.map_status FROM dog_map d
+         WHERE d.is_deleted = 0 AND d.map_status IS NOT NULL AND d.map_status <> ''",
+    )
+    .fetch_all(&backend)
+    .await?;
+    backend.close().await;
+
+    let mut changed = 0u64;
+    for (source_id, status) in rows {
+        let status = status.trim();
+        // 只认中台的状态词表，脏值不往业务库里写
+        if !matches!(status, "草稿" | "部分标定" | "已发布" | "已归档") {
+            continue;
+        }
+        let result = sqlx::query(
+            // 业务库自己归档的（`publish_map` 会把同园区旧基线归档）不许被中台的状态复活：
+            // 归档是业务侧的退役动作，同步只负责把发布 / 恢复带回业务库。
+            "UPDATE map_versions SET status = ?1
+             WHERE source_id = ?2 AND status <> ?1 AND status <> '已归档'",
+        )
+        .bind(status)
+        .bind(&source_id)
+        .execute(&state.db)
+        .await?;
+        changed += result.rows_affected();
+    }
+    if changed > 0 {
+        // 两张表都要改的时候写成两条：值不重复用同一段 CASE，免得改词表时漏一处
+        const BASELINE_STATUS: &str = "CASE
+             WHEN (SELECT status FROM map_versions WHERE id = parks.map_version_id) = '已发布' THEN '已标定'
+             WHEN (SELECT status FROM map_versions WHERE id = parks.map_version_id) = '部分标定' THEN '部分标定'
+             ELSE '待标定' END";
+        sqlx::query(&format!(
+            "UPDATE parks SET map_status = {BASELINE_STATUS}
+             WHERE map_version_id IS NOT NULL AND map_status <> {BASELINE_STATUS}"
+        ))
+        .execute(&state.db)
+        .await?;
+        tracing::info!("地图状态已从中台同步：{changed} 行");
+    }
+    Ok(changed as usize)
+}
+
 pub async fn get_map(
     State(state): State<AppState>,
     Path(id): Path<String>,
