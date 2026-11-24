@@ -57,6 +57,12 @@
 - POST /api/record/stop       -> [航点/航段] 停止录像 {"planId","scope","pointIndex","reason"}
 - GET  /api/record/list       -> 待回传的录像清单（?planId= 只列该计划）
 - POST /api/record/delete     -> 上传成功后删板端文件 {"names":["<planId>/<file>.mp4"]}
+- GET  /api/speak/status      -> 语音播报运行态（当前内容 / 循环 / 已播秒数，不含硬件细节）
+- POST /api/speak             -> [航点/航段] 开始播报 {"text":"请避让","loop":false,
+                                 "seconds":0,"planId":"TK-1","pointIndex":3,
+                                 "scope":"point|leg"}；内容只认中文汉字+中文标点+数字
+                                 （≤30 字），TTS 在云端，需联网 + asr
+- POST /api/speak/stop        -> [航点/航段] 停止播报 {"reason":"已离开航点"}（回到 voice）
 """
 import os
 import json
@@ -80,6 +86,7 @@ import buttons
 import location
 import detect
 import record
+import speak
 
 FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
 
@@ -169,6 +176,11 @@ async def lifespan(app: FastAPI):
     # 航点 / 航段录像：只在客户端调用时才起 ffmpeg；这里先清一次超期残留
     record.start_sweeper()
     yield
+    try:
+        # 播报是挂在 ASR 上的外部状态，退出前显式 stop 回到 voice 模式
+        speak.stop("Agent 退出")
+    except Exception:
+        pass
     try:
         record.stop_all("Agent 退出")
     except Exception:
@@ -739,6 +751,37 @@ async def record_delete(request: Request):
     """上传成功后删板端文件（只认 `<planId>/<文件名>.mp4` 这种形状）。"""
     b = await _detect_body(request)
     r = await asyncio.to_thread(record.delete, b)
+    return JSONResponse(r, status_code=200 if r.get("ok") else 400)
+
+
+@app.get("/api/speak/status")
+async def speak_status():
+    """语音播报运行态：当前内容 / 是否循环 / 已播秒数（内容已净化后的文本）。"""
+    return JSONResponse(speak.status(), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/speak")
+async def speak_start(request: Request):
+    """[航点 / 航段] 开始播报（设备客户端在到达航点 / 进入航段时调用）。
+
+    - `loop=false`：单次播报（`call 0 <内容>`），说完 Agent 主动 `call stop` 回到
+      voice 模式（一直留在 call 模式会占网络、也听不到唤醒词）；
+    - `loop=true`：循环播报（`call 1 <内容>`），由客户端在「离开航点 / 任务终态」
+      发 `/api/speak/stop`，最长 `seconds`（0 = `SPEAK_MAX_SECS`）后由看门狗兜底。
+
+    同一 `(planId, scope, pointIndex)` 的同一条文本重复请求是幂等的（客户端跟着
+    5009 每 500ms 一帧推进度，不去重会一直重播）。内容不合法 → 400 + 可读原因。
+    """
+    b = await _detect_body(request)
+    r = await asyncio.to_thread(speak.start, b)
+    return JSONResponse(r, status_code=200 if r.get("ok") else 400)
+
+
+@app.post("/api/speak/stop")
+async def speak_stop(request: Request):
+    """[航点 / 航段] 停止播报：离开航点、任务终态 / 取消、看门狗超时。"""
+    b = await _detect_body(request)
+    r = await asyncio.to_thread(speak.stop, str(b.get("reason") or "计划结束"))
     return JSONResponse(r, status_code=200 if r.get("ok") else 400)
 
 

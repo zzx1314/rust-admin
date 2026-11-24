@@ -730,5 +730,26 @@ LED 只有厂商的 `test_rgbrun`（循环闪烁），所以「开」= 拉起进
 **现场自检**（不需要板子）：`python3 backend/tools/lights_selftest.py`
 （时间窗边界 / 白天跳过 / GPIO 写值 / LED 进程 / 看门狗 / GPIO 被禁用时 LED 照开）。
 
+### ⑥ 语音播报（航点「语音播报」/ 航段「语音播报」）
+
+巡检到点 / 进入航段时让板子说一句话。命令行客户端在 5009 状态机上起停，
+板端只负责把话交给聆思 TTS（与 Dashboard 的「开始播报」按钮同一条 FIFO 通道）：
+`call 0 <内容>` 单次、`call 1 <内容>` 循环、`call stop` 回到 voice。
+
+| 接口 | 入参 | 说明 |
+|---|---|---|
+| `POST /api/speak` | `text`、`loop`、`seconds`、`planId`、`pointIndex`、`scope`（`point`/`leg`） | 开始播报；同一 `(planId, scope, pointIndex)` + 同文本重复请求幂等；内容会先净化（去空格、丢非法字符、截断） |
+| `POST /api/speak/stop` | `reason` | 停止并回到 voice（离开航点 / 航段 / 终态 / 取消 / 看门狗）；没有在播时什么都不写 |
+| `GET /api/speak/status` | — | 当前内容 / 是否循环 / 已播秒数 / 上限（`SPEAK_MAX_*`） |
+
+**TTS 在云端**：`POST /api/speak` 会先 `ensure_asr()`，没联网 / asr 起不来就回
+`ok=false`，客户端只记日志、巡检照跑。内容限制（板端固件）：不能有空格，
+只认中文汉字 + 中文标点 + 数字，中文 ≤30 字、总长 ≤40；这份白名单同时是
+FIFO 命令注入的护栏。循环播报有看门狗（`SPEAK_MAX_SECS`，默认 600s），
+单次播报说完会自动 `call stop` 回 voice（别让板子一直占着 call 模式）。
+
+**现场自检**（不需要板子 / 聆思 / 网络）：`python3 backend/tools/speak_selftest.py`
+（内容净化 / 幂等 / 循环看门狗 / 单次收尾 / 换播报先停旧的 / stop 幂等）。
+
 ### 部署到板端需同步的新增/改动文件
-`backend/config.py`、`relay.py`、`detect.py`、`osd.py`、`agent.py`、**新增 `evidence.py`**、`frontend/index.html`、`static/app.js`、`static/style.css`、`mediamtx/mediamtx.yml`；并在 snap 配置加 `dogcam720` path。重启 agent。
+`backend/config.py`、`relay.py`、`detect.py`、`osd.py`、`agent.py`、**新增 `evidence.py` / `speak.py`**、`frontend/index.html`、`static/app.js`、`static/style.css`、`mediamtx/mediamtx.yml`；并在 snap 配置加 `dogcam720` path。重启 agent。

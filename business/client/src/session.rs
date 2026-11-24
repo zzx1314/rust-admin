@@ -14,6 +14,7 @@ use crate::maps::sync_maps_from_robot;
 use crate::record::Recorder;
 use crate::report::ProgressReporter;
 use crate::report::progress_pct;
+use crate::speak::Speaker;
 use crate::state::ActiveTask;
 use crate::state::RobotState;
 use crate::state::Shared;
@@ -212,6 +213,21 @@ pub(crate) async fn run_client(
         info!("航点 / 航段录像已关闭（--no-record / ROBODOG_RECORD_ENABLED=0）");
     }
 
+    // 航点 / 航段语音播报：起停同样在 5009 状态机上（`speak` 模块），
+    // 与 AI / 录像共用板端 Agent，但开关独立（`--no-speak`）。
+    let speaker = Arc::new(Speaker::new(
+        config.ai_agent_url.clone(),
+        config.speak_enabled,
+    ));
+    if config.speak_enabled {
+        info!(
+            "航点 / 航段语音播报已启用：板端 Agent = {}（到点按路线动作播报，离开航点 / 终态收口）",
+            speaker.agent()
+        );
+    } else {
+        info!("航点 / 航段语音播报已关闭（--no-speak / ROBODOG_SPEAK_ENABLED=0）");
+    }
+
     // 启动时兜一把残留：`detect_jobs` 下的计划目录本该在任务结束时删（`finish_plan`），
     // 但客户端被 kill / 断电时收尾没跑到，那些目录就永远留在板子上。这里只清「早就
     // 该走了」的（`STALE_PLAN_AGE`），不碰正在跑的和刚跑完的。
@@ -228,6 +244,7 @@ pub(crate) async fn run_client(
         ai: ai.clone(),
         lights: lights.clone(),
         recorder: recorder.clone(),
+        speaker: speaker.clone(),
         out_tx: out_tx.clone(),
         state: state.clone(),
         active: active.clone(),
@@ -328,6 +345,7 @@ pub(crate) async fn run_client(
                             &ai,
                             &lights,
                             &recorder,
+                            &speaker,
                             &relay,
                         ).await;
                     }

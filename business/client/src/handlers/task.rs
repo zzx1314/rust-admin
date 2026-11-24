@@ -11,6 +11,8 @@ use crate::maps::clear_local_runner;
 use crate::maps::is_current_runner;
 use crate::record::{Recorder, parse_record_plan};
 use crate::report::report_progress;
+use crate::speak::Speaker;
+use crate::speak::parse_speak_plan;
 use crate::state::ActiveTask;
 use crate::state::RobotState;
 use crate::state::Shared;
@@ -87,6 +89,7 @@ pub(crate) async fn dispatch(
     ai: &Arc<AiPatrol>,
     lights: &Arc<PointLights>,
     recorder: &Arc<Recorder>,
+    speaker: &Arc<Speaker>,
 ) {
     let task_code = msg.payload["taskCode"].as_str().unwrap_or("").to_string();
     let task_name = msg.payload["taskName"]
@@ -164,6 +167,17 @@ pub(crate) async fn dispatch(
         );
     }
     recorder.start_task(&task_code, record_plan).await;
+    // 航点「语音播报」+ 航段「语音播报」：与 AI / 灯光 / 录像同源（路线动作），
+    // 起停时机同样在 5009 上（到点 / 离开 / 终态），见 `speak` 模块。
+    let speak_plan = parse_speak_plan(&msg.payload["routeData"]);
+    if !speak_plan.is_empty() {
+        info!(
+            "任务 {task_code} 含 {} 个播报航点，{} 个播报航段",
+            speak_plan.points.len(),
+            speak_plan.legs.len()
+        );
+    }
+    speaker.start_task(&task_code, speak_plan).await;
     *active.lock().await = Some(ActiveTask {
         task_code: task_code.clone(),
         task_name: task_name.clone(),
@@ -589,6 +603,7 @@ pub(crate) async fn dispatch(
             let runner_slot = local_runner.clone();
             let ai = ai.clone();
             let lights = lights.clone();
+            let speaker = speaker.clone();
             tokio::spawn(async move {
                 let outcome = runner.run().await;
                 let (status, message) = match outcome {
@@ -617,6 +632,8 @@ pub(crate) async fn dispatch(
                 ai.finish_plan(&code, "本地任务结束").await;
                 // 本地跑不一定会走到 5009 的「离开航点」，这里直接收灯
                 lights.finish_task(&code, "本地任务结束").await;
+                // 语音播报同理：循环播报不能跟着狗回家
+                speaker.finish_task(&code, "本地任务结束").await;
                 // 收尾必须把槽位里的 runner 摘掉：业务侧的下发地图 / 继续任务等
                 // 门禁都看这个槽位，残留的 runner 会让设备在任务早已结束（甚至
                 // 取消）之后仍报「设备正在执行任务」（2026-11-19 现场事故）。

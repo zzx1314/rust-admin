@@ -7,6 +7,7 @@ use crate::mapupload::UploadOutcome;
 use crate::pump::spawn_zhpro_pump;
 use crate::record::Recorder;
 use crate::report::report_progress;
+use crate::speak::Speaker;
 use crate::state::ActiveTask;
 use crate::state::RobotState;
 use crate::state::Shared;
@@ -204,6 +205,7 @@ pub(crate) struct BodyContext {
     pub(crate) ai: Arc<AiPatrol>,
     pub(crate) lights: Arc<PointLights>,
     pub(crate) recorder: Arc<Recorder>,
+    pub(crate) speaker: Arc<Speaker>,
     pub(crate) out_tx: mpsc::Sender<WsMessage>,
     pub(crate) state: Shared<RobotState>,
     pub(crate) active: Shared<Option<ActiveTask>>,
@@ -254,6 +256,7 @@ impl BodyLink {
             ctx.ai.clone(),
             ctx.lights.clone(),
             ctx.recorder.clone(),
+            ctx.speaker.clone(),
         ));
         // 摇杆重发（50Hz）：浏览器 ~10Hz 的离散帧需要在本体侧连续化，否则看着像点动
         self.republisher = Some(teleop::spawn_republisher(

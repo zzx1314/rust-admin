@@ -34,6 +34,11 @@ import {
   DEVICE_MODELS,
   FAIL_MODES,
   LEG_MODES,
+  SPEAK_LEG_DEFAULT_SECS,
+  SPEAK_MAX_CHARS,
+  SPEAK_MAX_LEN,
+  SPEAK_MAX_SECS,
+  SPEAK_PRESETS,
   TRIGGERS
 } from "@/utils/constants";
 import {
@@ -182,7 +187,20 @@ const actionForm = reactive({
    *
    * 全程录像跨航点一直录到任务终态，按这个长度切 mp4 逐段回传（弱网断一段只重传一段）。
    */
-  recordSegmentSeconds: 300
+  recordSegmentSeconds: 300,
+  /**
+   * 「语音播报」：真正被念出来的话术。
+   *
+   * 板端 TTS 只认中文汉字 + 中文标点 + 数字（无空格，中文 ≤30 字），
+   * 保存时写进动作的 `speakText`，同时把 `param` 同步成它（动作卡片上就能看到内容）。
+   */
+  speakText: "",
+  /**
+   * 「语音播报」：循环播报时长（秒）。
+   *
+   * `0` = 只播一次；`>0` = 循环播这么久（航点离开 / 航段结束 / 终态会提前停）。
+   */
+  speakSeconds: 0
 });
 
 /** 当前动作是不是录像类（点上的「录像采集」/ 段上的「全程录像」） */
@@ -191,6 +209,67 @@ const isRecordAction = computed(() => String(actionForm.type).includes("录像")
 const isTaskRecordAction = computed(
   () => isRecordAction.value && actionKind.value === "leg"
 );
+
+/**
+ * 当前动作是不是「语音播报」（航点动作 / 行进任务都算）。
+ *
+ * 与后端 `client/src/speak.rs::is_speak_action` 同规则：类型名含「语音/播报」，
+ * 但「静默通行」这类反义动作不算。
+ */
+const isSpeakAction = computed(
+  () =>
+    String(actionForm.type).includes("播报") &&
+    !String(actionForm.type).includes("静默")
+);
+
+/**
+ * 净化 + 校验播报内容（与板端 `speak.py` / 客户端 `speak.rs` 同一份规则）。
+ *
+ * 返回 `{ text, error }`：`error` 非空时不允许保存——播报是「说给人听」的，
+ * 越界字符被板端丢掉会变成半句话，宁可让操作员当场改。
+ */
+function normalizeSpeakText(raw: string) {
+  const compact = String(raw ?? "").replace(/\s+/g, "");
+  if (!compact) return { text: "", error: "播报内容不能为空" };
+  const allowedPunctuations = "，。！？、；：（）《》〈〉「」『』【】…—·";
+  const bad = Array.from(compact).filter(ch => {
+    const chinese = /[\u4e00-\u9fff]/.test(ch);
+    return !(chinese || /[0-9]/.test(ch) || allowedPunctuations.includes(ch));
+  });
+  if (bad.length) {
+    return {
+      text: "",
+      error: `只支持中文汉字、中文标点与数字（不支持：${Array.from(new Set(bad)).slice(0, 6).join("")}）`
+    };
+  }
+  const chinese = (compact.match(/[\u4e00-\u9fff]/g) ?? []).length;
+  if (chinese > SPEAK_MAX_CHARS) {
+    return { text: "", error: `中文汉字不能超过 ${SPEAK_MAX_CHARS} 个（当前 ${chinese} 个）` };
+  }
+  if (compact.length > SPEAK_MAX_LEN) {
+    return { text: "", error: `总长度不能超过 ${SPEAK_MAX_LEN} 个字符` };
+  }
+  return { text: compact, error: "" };
+}
+
+/** 选了常用话术：直接填进输入框（还允许继续手改） */
+function pickSpeakPreset(event: Event) {
+  const value = (event.target as HTMLSelectElement | null)?.value ?? "";
+  if (value) actionForm.speakText = value;
+}
+
+/** 动作卡片上的播报文案：没配内容返回空串（不占一行） */
+function actionSpeakLabel(action: {
+  speakText?: string;
+  speakSeconds?: number;
+  param?: string;
+}) {
+  const raw = action.speakText ?? "";
+  const { text } = normalizeSpeakText(raw);
+  if (!text) return "";
+  const seconds = Math.max(0, Math.min(SPEAK_MAX_SECS, Number(action.speakSeconds) || 0));
+  return seconds > 0 ? `播报「${text}」· 循环 ${seconds} 秒` : `播报「${text}」· 单次`;
+}
 
 /** 背包 AI 模型目录（场景 + 类别）：仅在配「AI 识别」动作时按需加载 */
 const aiCatalog = useAiCatalog();
@@ -445,7 +524,8 @@ function actionMeta(type: string) {
 
 function actionOptions(kind: "point" | "leg") {
   return Object.entries(ACTION_LIB)
-    .filter(([, meta]) => meta.kind === kind)
+    // `both` 的动作两侧都能配（语音播报：航点到点播 / 航段行进中播）
+    .filter(([, meta]) => meta.kind === kind || meta.kind === "both")
     .map(([name]) => name);
 }
 
@@ -1130,7 +1210,10 @@ function openActionDialog(kind: "point" | "leg", index: number | null = null) {
       lightFill: existing.lightFill === true,
       lightLed: existing.lightLed === true,
       recordSeconds: Number(existing.recordSeconds) || 15,
-      recordSegmentSeconds: Number(existing.recordSegmentSeconds) || 300
+      recordSegmentSeconds: Number(existing.recordSegmentSeconds) || 300,
+      // 老数据只有动作库占位 `param`（「安全提示语音 01」），别把它当成话术回填
+      speakText: existing.speakText ?? "",
+      speakSeconds: Number(existing.speakSeconds) || 0
     });
     actionEditIndex.value = index;
     if (actionForm.type === "AI 识别") void aiCatalog.load();
@@ -1156,7 +1239,11 @@ function openActionDialog(kind: "point" | "leg", index: number | null = null) {
     lightFill: false,
     lightLed: false,
     recordSeconds: 15,
-    recordSegmentSeconds: 300
+    recordSegmentSeconds: 300,
+    speakText: "",
+    // 行进任务本来就是「行进中持续执行」：默认循环播一段，离开航段会提前停；
+    // 航点动作默认只播一次（操作员要循环就自己填时长）
+    speakSeconds: kind === "leg" ? SPEAK_LEG_DEFAULT_SECS : 0
   });
   actionEditIndex.value = null;
   actionDialog.value = true;
@@ -1178,6 +1265,8 @@ function syncActionDefaults() {
   actionForm.lightLed = false;
   actionForm.recordSeconds = 15;
   actionForm.recordSegmentSeconds = 300;
+  actionForm.speakText = "";
+  actionForm.speakSeconds = actionKind.value === "leg" ? SPEAK_LEG_DEFAULT_SECS : 0;
   if (actionForm.type === "AI 识别") void aiCatalog.load();
 }
 
@@ -1221,12 +1310,25 @@ function saveAction() {
     ElMessage.error("「检测数量是否正确」必须填写检查目标数量");
     return;
   }
+  // 语音播报：内容必须能过板端 TTS 的白名单（越界字被板端丢掉就成了半句话）
+  const speak = isSpeakAction.value;
+  const speakText = speak ? normalizeSpeakText(actionForm.speakText) : null;
+  if (speakText?.error) {
+    ElMessage.error(speakText.error);
+    return;
+  }
   snapshot();
   // AI 识别：场景 / 类别来自实时视频模型目录，阈值走滑杆（后端按 `threshold` 解析置信度）
   const ai = isAiAction.value;
   const action = {
     type: actionForm.type,
-    param: ai && aiParamAuto.value ? composeAiParam() : actionForm.param,
+    // 语音播报的「执行参数」就是话术本身（卡片 / 列表都读 param）
+    param:
+      speak && speakText
+        ? speakText.text
+        : ai && aiParamAuto.value
+          ? composeAiParam()
+          : actionForm.param,
     ...(actionKind.value === "point"
       ? {
           trigger: actionForm.trigger,
@@ -1254,7 +1356,14 @@ function saveAction() {
       : {}),
     ...(actionKind.value === "leg" && isTaskRecordAction.value
       ? { recordSegmentSeconds: clampSeconds(actionForm.recordSegmentSeconds, 30, 1800, 300) }
-      : {})
+      : {}),
+    // 语音播报：内容 + 循环时长（0 = 单次）。没有这个字段的旧动作不会念出任何东西
+    ...(speak ? { speakText: speakText?.text ?? "" } : {}),
+    ...(speak && actionForm.speakSeconds > 0
+      ? { speakSeconds: Math.min(SPEAK_MAX_SECS, Math.round(Number(actionForm.speakSeconds))) }
+      : speak
+        ? { speakSeconds: 0 }
+        : {})
   };
   // 修改：整条替换回原位置（顺序不变，撤销栈里是一条快照）
   const editIndex = actionEditIndex.value;
@@ -1965,6 +2074,9 @@ onBeforeUnmount(() => {
                     <div v-if="isRecordActionOf(action)">
                       录像：<b>{{ actionRecordLabel(action) }}</b>
                     </div>
+                    <div v-if="actionSpeakLabel(action)">
+                      语音：<b>{{ actionSpeakLabel(action) }}</b>
+                    </div>
                   </div>
                 </div>
                 <div v-if="!pointActions.length" class="empty-box" style="padding: 16px 0">
@@ -2033,6 +2145,9 @@ onBeforeUnmount(() => {
                     <div>类型：<b>行进过程中持续执行</b></div>
                     <div v-if="isRecordActionOf(action)">
                       录像：<b>{{ actionRecordLabel(action) }}</b>
+                    </div>
+                    <div v-if="actionSpeakLabel(action)">
+                      语音：<b>{{ actionSpeakLabel(action) }}</b>
                     </div>
                   </div>
                 </div>
@@ -2234,7 +2349,7 @@ onBeforeUnmount(() => {
           />
         </div>
 
-        <div class="field" style="grid-column: 1 / -1">
+        <div v-if="!isSpeakAction" class="field" style="grid-column: 1 / -1">
           <label>
             执行参数
             <span v-if="aiParamAuto" class="muted">（由所选场景与类别自动生成）</span>
@@ -2319,6 +2434,52 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
+          <!-- 语音播报：话术 + 循环时长（板端聆思 TTS，客户端到点调 /api/speak） -->
+          <div v-if="isSpeakAction" class="field" style="grid-column: 1 / -1">
+            <label>播报内容 <em>*</em></label>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap">
+              <select
+                class="select"
+                style="max-width: 220px"
+                title="常用话术；选完可以在下面的输入框里改"
+                @change="pickSpeakPreset"
+              >
+                <option value="">选择常用话术…</option>
+                <option v-for="preset in SPEAK_PRESETS" :key="preset" :value="preset">
+                  {{ preset }}
+                </option>
+              </select>
+              <input
+                v-model="actionForm.speakText"
+                class="input"
+                style="flex: 1; min-width: 220px"
+                :placeholder="SPEAK_PRESETS[0]"
+                maxlength="40"
+              />
+            </div>
+            <div class="rt-hint" style="margin: 4px 0 0">
+              到达航点时由板端 TTS 念出来（需要背包联网）。<b>不能有空格</b>，
+              只支持中文汉字、中文标点与数字，中文 ≤{{ SPEAK_MAX_CHARS }} 字。
+              没填内容就不播报。
+            </div>
+          </div>
+          <div v-if="isSpeakAction" class="field">
+            <label>循环播报时长（秒）</label>
+            <input
+              v-model.number="actionForm.speakSeconds"
+              class="input mono"
+              type="number"
+              min="0"
+              :max="SPEAK_MAX_SECS"
+              step="10"
+              title="0 = 只说一次；>0 = 循环播这么久"
+            />
+            <div class="rt-hint" style="margin: 4px 0 0">
+              0 = 只说一次；填秒数 = 循环播报（板端到点自动停，离开航点会提前停，上限
+              {{ SPEAK_MAX_SECS }} 秒）。
+            </div>
+          </div>
+
           <!-- 航点灯光：补光灯 / LED 灯带（与 AI 识别无关，不配 AI 也能只开灯） -->
           <div class="field" style="grid-column: 1 / -1">
             <label>
@@ -2372,6 +2533,47 @@ onBeforeUnmount(() => {
           <div class="rt-hint" style="margin: 4px 0 0">
             全程录像从任务开始一直录到终态 / 取消，按这个长度切 mp4 逐段回传
             （30~1800 秒，默认 300 秒；4G 上一段越短越不怕断网）。
+          </div>
+        </div>
+        <div v-else-if="isSpeakAction" class="field" style="grid-column: 1 / -1">
+          <label>播报内容 <em>*</em></label>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap">
+            <select
+              class="select"
+              style="max-width: 220px"
+              title="常用话术；选完可以在下面的输入框里改"
+              @change="pickSpeakPreset"
+            >
+              <option value="">选择常用话术…</option>
+              <option v-for="preset in SPEAK_PRESETS" :key="preset" :value="preset">
+                {{ preset }}
+              </option>
+            </select>
+            <input
+              v-model="actionForm.speakText"
+              class="input"
+              style="flex: 1; min-width: 220px"
+              :placeholder="SPEAK_PRESETS[0]"
+              maxlength="40"
+            />
+          </div>
+          <div class="field" style="margin-top: 10px">
+            <label>循环播报时长（秒）</label>
+            <input
+              v-model.number="actionForm.speakSeconds"
+              class="input mono"
+              style="max-width: 140px"
+              type="number"
+              min="0"
+              :max="SPEAK_MAX_SECS"
+              step="30"
+              title="0 = 进入航段只说一次；>0 = 行进中循环播这么久"
+            />
+          </div>
+          <div class="rt-hint" style="margin: 4px 0 0">
+            进入这个航段（= 到达起点航点）时开始播，离开航段 / 任务终态 / 取消时停
+            （循环时长只是上限，提前离开会提前停）。板端 TTS 需联网，
+            <b>不能有空格</b>，只支持中文汉字、中文标点与数字，中文 ≤{{ SPEAK_MAX_CHARS }} 字。
           </div>
         </div>
         <div v-else class="field" style="grid-column: 1 / -1">

@@ -44,6 +44,7 @@ backend/
 ├── telemetry.py      SHT4x/4G/WiFi/环境/SSD/风扇/聆思 采集
 ├── control.py        LED 闪烁 / 补光开关
 ├── record.py         航点 / 航段录像（ffmpeg 从本机 mediamtx 拉 dogcam，落 mp4 + 边车）
+├── speak.py          航点 / 航段语音播报（聆思 TTS：call 0/1 <内容> / call stop）
 ├── buttons.py        SOS/STOP evdev 监听
 ├── cjk_font.py       画框中文字模（由 backend/tools/gen_cjk_font.py 生成）
 ├── start.sh          板端启动：camera-init → 复用 snap mediamtx → Agent
@@ -77,6 +78,9 @@ python3 business/backpack_dashboard/backend/tools/lights_selftest.py
 
 # 录像状态机自检（起停 / 幂等 / 清单 / 删除 / 超期清盘，改 record.py 后必跑；不需要相机）
 python3 business/backpack_dashboard/backend/tools/record_selftest.py
+
+# 语音播报自检（内容净化 / 幂等 / 循环看门狗 / 收尾，改 speak.py 后必跑；不需要聆思小板）
+python3 business/backpack_dashboard/backend/tools/speak_selftest.py
 
 # 本地接口链路（模拟 Agent，不需要板子）
 cd deploy/backpack-sim && python3 run.py up && python3 run.py smoke
@@ -146,6 +150,42 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
   边车再返回（`job.finished`），所以「停 → list」是安全的。
 - **`delete` 只认 `<planId>/<文件名>.mp4`**：路径穿越、`..`、非 mp4 一律拒绝。
 - 录像源 URL 可能含账号密码（`DOG_RTSP_URL`），**不进接口、不进日志**。
+
+## 语音播报（航点「语音播报」/ 航段「语音播报」）
+
+板端只负责「按客户端的指令说话」：`POST /api/speak`、`POST /api/speak/stop`、
+`GET /api/speak/status`，实现在 `backend/speak.py`，客户端在
+`business/client/src/speak.rs`（同机 `127.0.0.1:8000` 调用，**不经平台隧道**）。
+起停时机同样在 5009（到点 / 进段 / 离开 / 终态），平台只下发路线动作。
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `SPEAK_MAX_CHARS` | `30` | 中文汉字上限（板端固件限制，同时也是 FIFO 注入护栏） |
+| `SPEAK_MAX_LEN` | `40` | 总字符上限 |
+| `SPEAK_MAX_SECS` | `600` | 循环播报看门狗：客户端掉线/被杀时到点自动 `call stop` |
+
+| 接口 | 命令 | 语义 |
+|---|---|---|
+| `/api/speak` `{text, loop, seconds}` | `call 0 <内容>` / `call 1 <内容>` | 单次 / 循环；同一 `(planId, scope, pointIndex)` + 同文本重复请求幂等 |
+| `/api/speak/stop` `{reason}` | `call stop` | 停止并回到 voice 模式（没有在播时什么都不写） |
+
+约定：
+
+- **TTS 在云端**：`start` 会先 `telemetry.ensure_asr()`；断网 / asr 起不来回
+  `ok=false + error`，**绝不影响巡检**（客户端只打日志）。这也是为什么播报失败
+  不能做成 5xx 重试风暴 —— 5009 每 500ms 一帧。
+- **内容白名单**（`normalize`）：去所有空白 → 只留中文汉字 / 中文标点 / 数字 →
+  按 `SPEAK_MAX_CHARS` / `SPEAK_MAX_LEN` 截断。白名单之外的字符**丢掉并计数**
+  （日志「内容已净化：丢弃 N 个不支持的字符」），不报错 —— 现场配歪了也不能让任务停。
+  ⚠️ 这份白名单同时是**命令注入护栏**（`_write_lingsi_cmd` 走 shell `echo`）。
+- **说了就要收**：单次播报按 `0.4 × 字数 + 3s` 估时后主动 `call stop` 回到 voice；
+  循环播报由客户端在离开航点 / 终态发 stop，看门狗兜底。**不要**让板子长期停在
+  call 模式（唤醒词会失效）。
+- **一次只播一条**：FIFO 单通道，`start` 里会先 `call stop` 掉上一条再起新的；
+  新的 `start` 会让上一条的定时器作废（`_STATE["token"]`）。
+- 手工验：`curl -XPOST 127.0.0.1:8000/api/speak -d '{"text":"请避让","loop":false}'`；
+  用 `deploy/backpack-sim` 时假 Agent 同样实现这三个接口（`/api/sim/state` 的 `speak`）。
+- 完整链路（平台编辑器 → 客户端 → 板端）见 `business/docs/plan-speech.md`。
 
 ## 代码约定
 

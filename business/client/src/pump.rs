@@ -13,6 +13,7 @@ use crate::report::EventDedup;
 use crate::report::ProgressReporter;
 use crate::report::report_progress;
 use crate::report::send_deduped_event;
+use crate::speak::Speaker;
 use crate::state::ActiveTask;
 use crate::state::RobotState;
 use crate::state::Shared;
@@ -54,6 +55,7 @@ pub(crate) fn spawn_zhpro_pump(
     ai: Arc<AiPatrol>,
     lights: Arc<PointLights>,
     recorder: Arc<Recorder>,
+    speaker: Arc<Speaker>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut rx = client.subscribe();
@@ -165,6 +167,7 @@ pub(crate) fn spawn_zhpro_pump(
                         &ai,
                         &lights,
                         &recorder,
+                        &speaker,
                     )
                     .await;
                     // 终态后本体没释放导航能力：后台补 5002 + 等 idle。
@@ -474,6 +477,7 @@ pub(crate) async fn handle_status_frame(
     ai: &Arc<AiPatrol>,
     lights: &Arc<PointLights>,
     recorder: &Arc<Recorder>,
+    speaker: &Arc<Speaker>,
 ) -> Option<TerminalCleanup> {
     // 文档 §2.6.10 第 5 条：即时终态可能已经在 `current_task` 里被回收，只留在
     // `recent_terminal_tasks` 里（最多 3 条 / 约 30s）。两处都要识别，否则
@@ -583,8 +587,11 @@ pub(crate) async fn handle_status_frame(
             // 录像：停掉航点 / 全程两路 ffmpeg，并把板端积压的 mp4 回传平台
             // （回传在后台跑，弱网下可能要几分钟；失败的文件留在板端等下一轮）。
             recorder.finish_task(&plan_id, "任务终态").await;
+            // 语音播报：循环播报不能跟着狗回家，终态当场收口（板端看门狗只是兜底）。
+            speaker.finish_task(&plan_id, "任务终态").await;
         } else {
             lights.leave("任务终态").await;
+            speaker.finish_task("", "任务终态").await;
         }
     } else {
         // 计划级自动开灯（`lightFill` / `lightLed`）：**全程开**，不跟航点动作。
@@ -642,6 +649,10 @@ pub(crate) async fn handle_status_frame(
                 // 航点录像：这个点配了「录像采集」就开录（`Recorder` 自己查路线配置，
                 // 同一个点重复调用只起一次），离开航点时由下面那段收口。
                 recorder.point_arrived(&current.task_code, index).await;
+                // 语音播报：这个点配了「语音播报」（航点动作）或从这里出发的航段配了播报，
+                // 就播一条。**串行 await**（不像开灯那样 spawn）：与下面「离开航点停播」
+                // 必须严格有序，否则 stop 可能抢在 start 前面把新播报掐掉。
+                speaker.point_arrived(&current.task_code, index).await;
                 match ai_point_at(&current.ai_points, index) {
                     Some(point) => {
                         ai.point_arrived(out_tx, &current.task_code.clone(), point)
@@ -667,6 +678,8 @@ pub(crate) async fn handle_status_frame(
             }
             // 航点录像跟着「离开航点」收口：全程录像不在这里停（它跟任务）。
             recorder.leave_point("已离开航点").await;
+            // 语音播报同理：循环播报只在「还在这个航点上」时有意义。
+            speaker.leave_point("已离开航点").await;
         }
     }
 
@@ -796,6 +809,7 @@ mod tests {
     use crate::ai_patrol::AiPatrol;
     use crate::lights::PointLights;
     use crate::record::Recorder;
+    use crate::speak::Speaker;
     use crate::state::ActiveTask;
     use robodog_device_client::config::CliArgs;
     use robodog_device_client::config::EnvConfig;
@@ -825,6 +839,7 @@ mod tests {
         ai: Arc<AiPatrol>,
         lights: Arc<PointLights>,
         recorder: Arc<Recorder>,
+        speaker: Arc<Speaker>,
     }
 
     impl Harness {
@@ -844,12 +859,19 @@ mod tests {
                 ai: Arc::new(AiPatrol::with_jobs_dir("http://127.0.0.1:1", false, None)),
                 lights: Arc::new(PointLights::new("http://127.0.0.1:1", false)),
                 recorder: Arc::new(Recorder::new(Arc::new(test_config()), false)),
+                speaker: Arc::new(Speaker::new("http://127.0.0.1:1", false)),
             }
         }
 
         /// 打开航点灯光（指向一个假 Agent）：用来断言「什么时候开、什么时候关」
         fn with_lights(mut self, agent: String) -> Self {
             self.lights = Arc::new(PointLights::new(agent, true));
+            self
+        }
+
+        /// 打开语音播报（指向一个假 Agent）：用来断言到点播报 / 离开停播的时机
+        fn with_speaker(mut self, agent: String) -> Self {
+            self.speaker = Arc::new(Speaker::new(agent, true));
             self
         }
 
@@ -864,6 +886,7 @@ mod tests {
                 &self.ai,
                 &self.lights,
                 &self.recorder,
+                &self.speaker,
             )
             .await
         }
@@ -921,6 +944,55 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         format!("http://127.0.0.1:{port}")
+    }
+
+    /// 假 Agent：记录每一次 `/api/speak`（`say:<内容>`）与 `/api/speak/stop`（`stop`）。
+    /// 语音播报是串行 await 的，但还是等一拍再断言，避免测试机调度抖动。
+    type SpeakCalls = Arc<Mutex<Vec<String>>>;
+
+    async fn spawn_speak_agent(calls: SpeakCalls) -> String {
+        let app = axum::Router::new()
+            .route(
+                "/api/speak",
+                axum::routing::post(
+                    |axum::extract::State(calls): axum::extract::State<SpeakCalls>,
+                     axum::Json(body): axum::Json<serde_json::Value>| async move {
+                        calls
+                            .lock()
+                            .await
+                            .push(format!("say:{}", body["text"].as_str().unwrap_or("")));
+                        axum::Json(json!({"ok": true}))
+                    },
+                ),
+            )
+            .route(
+                "/api/speak/stop",
+                axum::routing::post(
+                    |axum::extract::State(calls): axum::extract::State<SpeakCalls>| async move {
+                        calls.lock().await.push("stop".to_string());
+                        axum::Json(json!({"ok": true}))
+                    },
+                ),
+            )
+            .with_state(calls);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("绑定假 Agent 失败");
+        let port = listener.local_addr().expect("取端口失败").port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    async fn wait_speak(calls: &SpeakCalls, expected: usize) -> Vec<String> {
+        for _ in 0..100 {
+            if calls.lock().await.len() >= expected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        calls.lock().await.clone()
     }
 
     /// 开灯是 `tokio::spawn` 出去的：等它落地再断言，最多等 1s。
@@ -1234,6 +1306,65 @@ mod tests {
         assert_eq!(
             wait_lights(&calls, 2).await,
             vec!["on".to_string(), "off".to_string()]
+        );
+    }
+
+    /// 语音播报跟着 5009 走：到点播一次（重复帧不重播），离开航点停循环播报，
+    /// 终态再兜一次收口。这条链路与灯光 / 录像同源，但时序要求更严（stop 不能抢在
+    /// start 前面），所以这里用真实 5009 帧驱动一遍。
+    #[tokio::test]
+    async fn waypoint_speech_fires_on_arrival_and_stops_on_leave() {
+        use crate::speak::{SpeakPlan, SpeakPoint};
+
+        let calls: SpeakCalls = Arc::new(Mutex::new(Vec::new()));
+        let agent = spawn_speak_agent(calls.clone()).await;
+        let mut h = Harness::new(active_task("TK-1", Some("robot-1"))).with_speaker(agent);
+        h.speaker
+            .start_task(
+                "TK-1",
+                SpeakPlan {
+                    points: vec![SpeakPoint {
+                        index: 0,
+                        name: "P1".to_string(),
+                        text: "前方作业，请勿靠近".to_string(),
+                        // 循环播报：离开航点必须发 stop，否则狗走了还在喊
+                        seconds: 30,
+                    }],
+                    legs: vec![],
+                },
+            )
+            .await;
+
+        // 到点 + 5009 的重复帧：只播一次
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.point_arrived", 0),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.waiting", 0),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        assert_eq!(
+            wait_speak(&calls, 1).await,
+            vec!["say:前方作业，请勿靠近".to_string()],
+            "同一个航点的重复帧不能重播"
+        );
+
+        // 离开航点：循环播报收口
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.navigating", 0),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        assert_eq!(
+            wait_speak(&calls, 2).await,
+            vec!["say:前方作业，请勿靠近".to_string(), "stop".to_string()],
+            "离开航点要停循环播报"
         );
     }
 }

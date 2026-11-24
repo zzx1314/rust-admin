@@ -8,6 +8,7 @@
 [4] 航点 AI 计划         detect/start(plan_id) → SSE plan_hit + 证据图落盘
 [5] AI 启停走隧道        POST /api/backpack/detect/start|stop 真的改了 Agent 运行态
 [6] 计划灯光            /api/lights 开关补光/LED，off 能收回去（SIM_NIGHT=0 时验证白天跳过）
+[7] 语音播报            /api/speak 起一条 → status 能看到 → /api/speak/stop 收回去
 ```
 
 为什么值得单独跑：这五条里有三条（隧道、中继按需起流、证据图落盘）**只在有人看/有任务
@@ -313,6 +314,48 @@ def check_lights():
     return True
 
 
+def check_speak():
+    """[7] 语音播报：客户端到点 / 进段时打的三个接口（开始 / 状态 / 停止）。"""
+    print("[7] 语音播报：/api/speak 起一条 + status + stop")
+    try:
+        status = get_json(AGENT + "/api/speak/status")
+        report("GET /api/speak/status", "active" in status and "max_chars" in status,
+               "active=%s max_chars=%s" % (status.get("active"), status.get("max_chars")))
+    except Exception as error:  # noqa: BLE001
+        report("GET /api/speak/status", False, str(error))
+        return False
+
+    try:
+        started = post_json(AGENT + "/api/speak", {
+            "text": "巡检中，请注意避让",
+            "loop": True,
+            "seconds": 30,
+            "planId": "TK-SMOKE-SPEAK",
+            "pointIndex": 0,
+            "scope": "point",
+        })
+        report("POST /api/speak", bool(started.get("ok")),
+               "cmd=%s" % started.get("cmd"))
+        live = get_json(AGENT + "/api/speak/status")
+        report("播报中 status.active=true",
+               live.get("active") is True and live.get("text") == "巡检中，请注意避让",
+               "active=%s text=%s" % (live.get("active"), live.get("text")))
+        stopped = post_json(AGENT + "/api/speak/stop", {"reason": "smoke"})
+        after = get_json(AGENT + "/api/speak/status")
+        report("stop 后回到空闲",
+               bool(stopped.get("ok")) and after.get("active") is False,
+               "changed=%s active=%s" % (stopped.get("changed"), after.get("active")))
+        # 内容不合法要被挡住（板端白名单：不能有空格 / 只认中文与数字）
+        try:
+            post_json(AGENT + "/api/speak", {"text": "   "})
+            report("空内容被拒绝（HTTP 400）", False, "空内容不该被受理")
+        except urllib.error.HTTPError as error:
+            report("空内容被拒绝（HTTP 400）", error.code == 400, "HTTP %s" % error.code)
+    except Exception as error:  # noqa: BLE001
+        report("POST /api/speak|/api/speak/stop", False, str(error))
+    return True
+
+
 def main():
     print()
     print("backpack-sim 冒烟自测：agent=%s platform=%s stream=%s" % (AGENT, PLATFORM, STREAM))
@@ -330,6 +373,7 @@ def main():
     check_video(token)
     check_ai(token)
     check_lights()
+    check_speak()
     print()
     ok = all(checks)
     print("结果：%s（%d/%d 通过）" % ("全部通过" if ok else "有链路没通",

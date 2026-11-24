@@ -66,6 +66,7 @@ mod pump;
 mod record;
 mod report;
 mod session;
+mod speak;
 mod state;
 mod wire;
 mod zhpro;

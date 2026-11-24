@@ -762,6 +762,34 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
   `business/backpack_dashboard/AGENTS.md`「录像」一节；客户端可用 `--no-record`
   或 `ROBODOG_RECORD_ENABLED=0` 整体关掉。
 
+## 巡检语音播报（航点动作 / 行进任务）
+
+路线编辑器里可以配「语音播报」：航点动作 = **到点播报**，行进任务 = **进入该航段时播报**
+（离开航段 / 终态 / 取消停）。话术与时长都在动作上（`speakText` / `speakSeconds`，
+`0` = 只说一次，`>0` = 循环播这么久）。链路：
+
+```text
+路线动作 speakText / speakSeconds → task_dispatch 的 routeData（原样下发）
+  → 设备客户端在 5009 状态机上起停（`client/src/speak.rs`）
+    → 板端 Agent POST /api/speak|/api/speak/stop（`backend/speak.py`）
+      → 聆思 TTS：call 0 <内容> 单次 / call 1 <内容> 循环 / call stop 回到 voice
+```
+
+要点：
+
+- **TTS 在云端**：需要背包联网 + 板端 `asr` 服务（Agent 会先 `ensure_asr()`）。
+  断网 / asr 起不来的播报一律跳过，只打一行日志，**巡检继续**。
+- **内容限制来自板端固件**：不能有空格，只认中文汉字 + 中文标点 + 数字，
+  中文 ≤30 字、总长 ≤40。编辑器保存时硬拦，板端运行期只做「丢非法字符 + 截断」。
+- **循环播报一定要收尾**：客户端在离开航点 / 离开航段 / 终态 / 取消发 `stop`；
+  客户端掉线时由板端看门狗（`SPEAK_MAX_SECS`，默认 600s）兜底。
+- **一次只播一条**：板端 FIFO 单通道，新播报会打断旧的（Agent 每次先 `stop` 再起）。
+  同一个点既有航点播报又有航段播报时，**航点优先**。
+- 开关：客户端 `--no-speak` / `ROBODOG_SPEAK_ENABLED=0`；板端参数
+  `SPEAK_MAX_CHARS` / `SPEAK_MAX_LEN` / `SPEAK_MAX_SECS`。
+- 设计、代码地图与排查见 `business/docs/plan-speech.md`；板端行为见
+  `business/backpack_dashboard/AGENTS.md`「语音播报」一节。
+
 ## 路线数据模型
 
 路线保存在 `routes.route_data`（JSON），结构为：

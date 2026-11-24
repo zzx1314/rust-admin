@@ -4,7 +4,13 @@ export interface ActionMeta {
   param: string;
   trigger?: string;
   threshold?: string;
-  kind: "point" | "leg";
+  /**
+   * 能挂在哪儿：`point` = 航点动作，`leg` = 行进任务（两点之间移动期间）。
+   *
+   * `both` = 两边都能配（「语音播报」既可以是到点播报，也可以是行进中播报；
+   * 挂在哪一侧决定了触发时机，见 `business/docs/plan-speech.md`）。
+   */
+  kind: "point" | "leg" | "both";
 }
 
 export const ACTION_LIB: Record<string, ActionMeta> = {
@@ -43,10 +49,12 @@ export const ACTION_LIB: Record<string, ActionMeta> = {
   语音播报: {
     icon: "sound",
     tone: "gray",
-    param: "安全提示语音 01",
+    // `param` 只是动作库占位：真正被念出来的是动作上的 `speakText`（见 SPEAK_PRESETS）
+    param: "安全提示语音",
     trigger: "到达即执行",
     threshold: "—",
-    kind: "point"
+    // 航点动作 = 到点播报；行进任务 = 进入该航段时播报（见 business/docs/plan-speech.md）
+    kind: "both"
   },
   录像采集: {
     icon: "video",
@@ -111,6 +119,29 @@ export const ACTION_LIB: Record<string, ActionMeta> = {
     kind: "leg"
   }
 };
+
+/**
+ * 语音播报话术预设（航点动作 / 行进任务共用）。
+ *
+ * 板端聆思 TTS 的固件限制：不能有空格，只认**中文汉字 + 中文标点 + 数字**，
+ * 中文 ≤30 字、总长 ≤40。预设都按这份规则写好，现场改文案时也别越界
+ * （越界部分会被板端丢掉，播出来就不完整了）。
+ */
+export const SPEAK_PRESETS = [
+  "巡检中，请注意避让",
+  "前方作业，请勿靠近",
+  "设备巡检，请勿围观",
+  "请注意安全，保持距离",
+  "巡检结束，感谢配合"
+];
+
+/** 播报文本上限（与板端 `SPEAK_MAX_CHARS` / `SPEAK_MAX_LEN`、客户端 `speak.rs` 一致） */
+export const SPEAK_MAX_CHARS = 30;
+export const SPEAK_MAX_LEN = 40;
+/** 循环播报时长上限（秒，与板端 `SPEAK_MAX_SECS` 一致） */
+export const SPEAK_MAX_SECS = 600;
+/** 航段播报默认循环时长（秒）：离开航段 / 终态会提前停 */
+export const SPEAK_LEG_DEFAULT_SECS = 120;
 
 export const TRIGGERS = ["到达即执行", "停留后执行", "条件触发", "定时执行"];
 export const FAIL_MODES = ["跳过继续", "重试 1 次", "重试 2 次", "中止路线", "人工接管"];

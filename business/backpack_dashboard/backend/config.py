@@ -219,6 +219,19 @@ RECORD_TRANSCODE = os.getenv("RECORD_TRANSCODE", "0")
 # 别只看 `journalctl -u backpack-agent`（那边只有「录像开始/结束」两行）
 RECORD_LOG = os.getenv("RECORD_LOG", "/tmp/record_ffmpeg.log")
 
+# ---- 航点 / 航段语音播报（聆思 TTS，客户端触发，见 speak.py）----
+# 巡检路线里的「语音播报」（航点动作 / 行进任务）由设备客户端在 5009 状态机上
+# 调 `/api/speak`，Agent 只往聆思命令 FIFO 写 `call 0|1 <内容>`。
+# ⚠️ TTS 在云端合成：**必须联网**（Agent 会先 ensure_asr），断网时播报直接跳过。
+# 内容受板端固件限制：不能有空格，只认中文汉字 + 中文标点 + 数字。
+# 下面两个上限同时也是命令注入的护栏（FIFO 走 shell echo，只白名单放行）；
+# 平台路线编辑器按同一份规则校验，Agent 再兜一次（老数据 / 手工调接口）。
+SPEAK_MAX_CHARS = int(os.getenv("SPEAK_MAX_CHARS", "30"))   # 中文汉字上限
+SPEAK_MAX_LEN = int(os.getenv("SPEAK_MAX_LEN", "40"))       # 总字符上限
+# 循环播报的看门狗（秒）：客户端掉线 / 被 kill 时到点自动 `call stop`，
+# 不能一直喊。单次播报不看它（按文本长度估时后主动回到 voice）。
+SPEAK_MAX_SECS = int(os.getenv("SPEAK_MAX_SECS", "600"))
+
 # 板端本地画框：把框烧进视频再推一条 preview 流，浏览器只播带框视频、不再叠 SVG。
 # 设为 0 可随时回退到「浏览器画框」，便于两种方案对照测试。
 DETECT_OSD_ENABLED = os.getenv("DETECT_OSD_ENABLED", "1") == "1"

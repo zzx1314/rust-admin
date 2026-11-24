@@ -58,6 +58,7 @@ curl -s 127.0.0.1:8000/api/sim/relay -d '{"running":false}'
 curl -s -XPOST 127.0.0.1:8000/api/sim/emit  -d '{"type":"telemetry","battery":88}'
 curl -s 127.0.0.1:8000/api/lights          # 计划灯光（补光 / LED / 是否夜间）
 curl -s -XPOST 127.0.0.1:8000/api/lights/off -d '{"reason":"manual"}'
+curl -s 127.0.0.1:8000/api/speak/status   # 语音播报（计划到点 / 进段时客户端调的 /api/speak）
 ```
 """
 
@@ -205,6 +206,10 @@ class State:
         self.lights = {"fill": False, "led": False, "managed": False,
                        "night_only": False, "source": "", "applied": 0,
                        "off": 0, "skipped": 0}
+        # 语音播报（客户端在 5009 到点 / 进段时调的 /api/speak）
+        self.speak = {"active": False, "text": "", "loop": False,
+                      "seconds": 0, "plan_id": "", "point_index": -1,
+                      "scope": "", "words": 0, "stops": 0}
         self.seen_events = 0
 
     # ---- 事件 ----
@@ -310,6 +315,15 @@ class State:
             "sim": True,
         })
         return lights
+
+    def speak_status(self):
+        """语音播报快照（GET /api/speak/status）——字段与板端 `speak.status` 对齐。"""
+        with self.lock:
+            speak = dict(self.speak)
+        speak["max_chars"] = 30
+        speak["max_secs"] = 600
+        speak["sim"] = True
+        return speak
 
     def detect_state_event(self):
         snapshot = self.status()
@@ -623,6 +637,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.json(STATE.status())
         if path == "/api/lights":
             return self.json(STATE.lights_status())
+        if path == "/api/speak/status":
+            return self.json(STATE.speak_status())
         if path == "/api/events":
             return self.sse()
         if path == "/api/sim/state":
@@ -632,6 +648,7 @@ class Handler(BaseHTTPRequestHandler):
                 "subscribers": len(STATE.subscribers),
                 "relay": STATE.relay,
                 "lights": STATE.lights,
+                "speak": STATE.speak,
                 "events": STATE.seen_events,
             })
         if path == "/":
@@ -699,6 +716,39 @@ class Handler(BaseHTTPRequestHandler):
                 STATE.lights["off"] += 1
             return self.json({"ok": True, "reason": reason,
                               "status": STATE.lights_status()})
+
+        # 语音播报（客户端在 5009 到点 / 进段时调；字段与真板端同一份）
+        if path == "/api/speak":
+            text = "".join(str(body.get("text") or "").split())
+            if not text:
+                return self.json({"ok": False, "error": "播报内容不能为空"}, 400)
+            with STATE.lock:
+                STATE.speak.update({
+                    "active": True,
+                    "text": text,
+                    "loop": bool(body.get("loop")),
+                    "seconds": int(body.get("seconds") or 0),
+                    "plan_id": str(body.get("planId") or body.get("taskCode") or ""),
+                    # `0 or -1` 会变成 -1：航点下标要单独判 None
+                    "point_index": -1
+                    if body.get("pointIndex") is None
+                    else int(body.get("pointIndex")),
+                    "scope": str(body.get("scope") or "point"),
+                })
+                STATE.speak["words"] += 1
+            return self.json({"ok": True, "changed": True, "cmd": text,
+                              "speak": STATE.speak_status()})
+        if path == "/api/speak/stop":
+            reason = str(body.get("reason") or "计划结束")
+            with STATE.lock:
+                changed = STATE.speak["active"]
+                STATE.speak.update({"active": False, "text": "", "loop": False,
+                                    "seconds": 0, "plan_id": "", "point_index": -1,
+                                    "scope": ""})
+                if changed:
+                    STATE.speak["stops"] += 1
+            return self.json({"ok": True, "changed": changed, "reason": reason,
+                              "speak": STATE.speak_status()})
 
         # 模拟专用
         if path == "/api/sim/relay":

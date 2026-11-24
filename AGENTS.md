@@ -187,6 +187,20 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 `python3 business/backpack_dashboard/backend/tools/record_selftest.py`、
 `client record::tests`、`cargo test --test recordings`。
 
+**语音播报（航点动作 / 行进任务）**：路线编辑器里两类动作都叫「语音播报」，字段
+`speakText` / `speakSeconds`（`0` = 只说一次，`>0` = 循环播这么久）。航点动作 = 到点播报；
+行进任务 = **进入该航段（到达起点航点）时**开始播（`legs[i]` 起点是航点 i，`returnLeg`
+起点是最后一个点）。起停同录像一样**只在设备客户端**（`client/src/speak.rs`）按 5009
+决定：到点/进段起，离开航点/航段/终态/取消停；板端 Agent `POST /api/speak|/api/speak/stop`
+（`backend/speak.py`）往聆思命令 FIFO 写 `call 0|1 <内容>` / `call stop`，**TTS 在云端
+（必须联网 + asr）**。内容受板端固件限制：不能有空格、只认中文汉字 + 中文标点 + 数字、
+中文 ≤30 字（编辑器保存时硬拦，板端只丢字符+截断，绝不因为一句话让任务跑不起来）；
+这份白名单同时是 FIFO 的注入护栏。三条红线：**播报失败绝不影响巡检**（断网/asr 挂了
+只打日志）、**循环播报必须收尾**（客户端离开即 stop，板端 `SPEAK_MAX_SECS` 兜底）、
+**一次只播一条**（FIFO 单通道，航点播报优先于同点的航段播报）。改这块先读
+`business/docs/plan-speech.md`，回归 `python3 business/backpack_dashboard/backend/tools/speak_selftest.py`、
+`client speak::tests`、`client pump::tests::waypoint_speech_fires_on_arrival_and_stops_on_leave`。
+
 **航点采集默认是关的**：`media_capture_enabled`（迁移 34 预置 `0`）是自动采集的
 总开关，关着时板端只写 `detect_jobs/…` 告警证据图（企业微信配图、数量核对照旧），
 不再往媒体归档目录攒训练图；开关随 `ai_start` 的 `captureEnabled` 下发（客户端
