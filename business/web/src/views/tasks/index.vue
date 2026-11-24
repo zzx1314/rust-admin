@@ -1040,59 +1040,61 @@ onBeforeUnmount(() => {
             需要人再去处理；「返回充电点」要求地图已设置回充点。
           </div>
         </div>
-        <div class="field">
+        <div class="field" style="grid-column: 1 / -1">
           <label>自动开灯（补光灯 / LED）</label>
-          <div style="display: flex; gap: 16px; align-items: center">
-            <label
-              class="chk"
-              title="整个计划期间打开背包补光灯（任务开始就开，终态 / 取消才关）"
-            >
-              <input v-model="taskForm.lightFill" type="checkbox" />
-              补光灯
-            </label>
-            <label
-              class="chk"
-              title="整个计划期间打开 LED 灯带（任务开始就开，终态 / 取消才关）"
-            >
-              <input v-model="taskForm.lightLed" type="checkbox" />
-              LED 灯带
-            </label>
-            <label
-              class="chk"
-              title="只在板端夜间时段开（默认 18:00-06:00，板子本地时间）；白天派单直接跳过开灯"
-            >
-              <input v-model="taskForm.lightNightOnly" type="checkbox" />
-              仅夜间
-            </label>
-          </div>
-          <div
-            v-if="taskForm.lightNightOnly"
-            class="time-range"
-            style="margin-top: 8px; align-items: center"
-          >
-            <span class="muted" style="margin-right: 4px">夜间时段</span>
-            <el-time-select
-              v-model="taskForm.lightNightStart"
-              start="00:00"
-              step="00:05"
-              end="23:55"
-              placeholder="板端默认 18:00"
-              clearable
-            />
-            <span class="time-sep">-</span>
-            <el-time-select
-              v-model="taskForm.lightNightEnd"
-              start="00:05"
-              step="00:05"
-              end="23:59"
-              placeholder="板端默认 06:00"
-              clearable
-            />
-            <span class="rt-hint" style="margin: 0">留空 = 板端默认；可跨零点，判夜在板端</span>
-          </div>
-          <div class="rt-hint" style="margin: 4px 0 0">
-            勾了任意一盏就<b>以计划为准</b>：路线里航点动作的「到点开灯 / 离开关灯」不再生效，
-            灯从任务开始一直亮到任务结束（终态 / 取消）。两盏都不勾 = 沿用航点动作的老行为。
+          <div class="light-card">
+            <div class="light-switches">
+              <label
+                class="chk"
+                title="整个计划期间打开背包补光灯（任务开始就开，终态 / 取消才关）"
+              >
+                <input v-model="taskForm.lightFill" type="checkbox" />
+                补光灯
+              </label>
+              <label
+                class="chk"
+                title="整个计划期间打开 LED 灯带（任务开始就开，终态 / 取消才关）"
+              >
+                <input v-model="taskForm.lightLed" type="checkbox" />
+                LED 灯带
+              </label>
+              <label
+                class="chk"
+                title="只在板端夜间时段开（默认 18:00-06:00，板子本地时间）；白天派单直接跳过开灯"
+              >
+                <input v-model="taskForm.lightNightOnly" type="checkbox" />
+                仅夜间
+              </label>
+            </div>
+            <div v-if="taskForm.lightNightOnly" class="light-night">
+              <span class="light-night-label">夜间时段</span>
+              <div class="light-night-times">
+                <el-time-select
+                  v-model="taskForm.lightNightStart"
+                  start="00:00"
+                  step="00:05"
+                  end="23:55"
+                  placeholder="18:00"
+                  clearable
+                />
+                <span class="time-sep">-</span>
+                <el-time-select
+                  v-model="taskForm.lightNightEnd"
+                  start="00:05"
+                  step="00:05"
+                  end="23:59"
+                  placeholder="06:00"
+                  clearable
+                />
+              </div>
+              <p class="light-night-tip">
+                留空 = 板端默认 18:00 - 06:00 · 可跨零点（如 22:00 - 06:00）· 判夜在板端本地时间
+              </p>
+            </div>
+            <p class="light-note">
+              勾了任意一盏就<b>以计划为准</b>：路线里航点动作的「到点开灯 / 离开关灯」不再生效，
+              灯从任务开始一直亮到任务结束（终态 / 取消）。两盏都不勾 = 沿用航点动作的老行为。
+            </p>
           </div>
         </div>
         <div class="field">
@@ -1427,6 +1429,74 @@ onBeforeUnmount(() => {
 .task-live-dialog :deep(.el-dialog__body) {
   max-height: 76vh;
   overflow: auto;
+}
+
+/* 自动开灯：卡片式布局，勾选框一行、夜间时段单独一块，
+   避免「夜间时段 + 两颗时间选择器 + 说明」挤在半列宽度里换行 */
+.light-card {
+  border: 1px solid var(--line, #e2e8f0);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--bg-1, #fff);
+}
+.light-switches {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 20px;
+}
+.light-switches .chk {
+  white-space: nowrap;
+}
+.light-night {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid #eef2f7;
+  border-radius: 9px;
+  background: #f8fafc;
+}
+.light-night-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-2, #475569);
+  white-space: nowrap;
+}
+.light-night-times {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.light-night-times :deep(.el-select) {
+  width: 124px;
+  flex: 0 0 124px;
+}
+.light-night-tip {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--text-3, #94a3b8);
+}
+.light-note {
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px dashed #eef2f7;
+  font-size: 10.5px;
+  line-height: 1.7;
+  color: var(--text-3, #64748b);
+}
+@media (max-width: 640px) {
+  .light-night {
+    grid-template-columns: 1fr;
+  }
+  .light-night-times :deep(.el-select) {
+    width: 100%;
+    flex: 1 1 0;
+  }
 }
 
 /* 计划时间段：两颗时间选择器 + 分隔符。用选择器而不是输入框，
