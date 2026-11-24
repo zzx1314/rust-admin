@@ -285,7 +285,21 @@ pub async fn validate_route(
         )
     };
 
-    let items = vec![
+    // 航点净空（离最近障碍）：只有能解出地图栅格的路线才有结果，解不出就跳过这一项。
+    // 「原地待命」的停车位就是最后一个航点，所以终点单独一项——2026-11-14 现场：
+    // 终点离墙 0.3 m，本体反复报 `13377 无有效绕障轨迹`，任务永远到不了终态。
+    let clearances = match super::maps::field_for_map(
+        &state.db,
+        &state.config.backend_db_path,
+        route.map_version_id.as_deref(),
+    )
+    .await
+    {
+        Some(field) => super::maps::point_clearances(&field, &data),
+        None => Vec::new(),
+    };
+
+    let mut items = vec![
         validation_item(
             points.len() >= 2,
             format!("航点数量 {} 个", points.len()),
@@ -365,6 +379,7 @@ pub async fn validate_route(
             },
         ),
     ];
+    items.extend(clearance_items(&clearances));
     let passed = items.iter().filter(|item| item["ok"] == true).count();
 
     Ok(ApiResponse::ok(json!({
@@ -413,6 +428,48 @@ pub async fn publish_route(
             "第 {index} 个航点 ({x:.2}, {y:.2}) 超出地图范围，不能发布"
         )));
     }
+    // 净空守卫：先把「点落在障碍上」这种谁都跑不了的情况拦在发布前（实测净空
+    // <0.15 m 就是「目标被障碍物占据」，任何结束动作都规划不过去）；
+    // 终点净空不足但还没到不可规划的程度时**只留痕不拦**——同一条路线也可能配
+    // 「返回起点」，真正的硬拦点在下发前（客户端对「只剩最后一个点 + 反复规划失败」
+    // 会提前报异常，见 `business/client/src/zhpro/route.rs`）。
+    let mut clearance_note: Option<String> = None;
+    if let Some(field) = super::maps::field_for_map(
+        &state.db,
+        &state.config.backend_db_path,
+        route.map_version_id.as_deref(),
+    )
+    .await
+    {
+        let clearances = super::maps::point_clearances(&field, &data);
+        if let Some(point) = clearances
+            .iter()
+            .find(|point| point.clearance_m < super::maps::MIN_FREE_CLEARANCE_M)
+        {
+            return Err(AppError::BadRequest(format!(
+                "第 {} 个航点 ({:.2}, {:.2}) 落在障碍物上（离最近障碍 {:.2} m），\
+                 本体规划不到该点，不能发布；请先在编辑器里把它挪到空地上",
+                point.index, point.x, point.y, point.clearance_m
+            )));
+        }
+        if let Some(last) = clearances
+            .last()
+            .filter(|point| point.clearance_m < super::maps::MIN_STOP_CLEARANCE_M)
+        {
+            clearance_note = Some(format!(
+                "注意：终点 P{} 距最近障碍仅 {:.2} m（建议 ≥{:.1} m），\
+                 「原地待命」的停车位就是这个点，本体可能停不进去",
+                last.index,
+                last.clearance_m,
+                super::maps::MIN_STOP_CLEARANCE_M
+            ));
+            tracing::warn!(
+                "路线 {} 发布：{}",
+                route.route_code,
+                clearance_note.as_deref().unwrap_or_default()
+            );
+        }
+    }
     let version = bump_version(&route.version);
     let timestamp = now();
     sqlx::query(
@@ -430,7 +487,10 @@ pub async fn publish_route(
          VALUES ('route', ?1, ?2, NULL, NULL, ?3)",
     )
     .bind(format!("{} 已发布为 {}", route.route_code, version))
-    .bind(format!("路线：{}", route.route_name))
+    .bind(match clearance_note.as_deref() {
+        Some(note) => format!("路线：{}（{note}）", route.route_name),
+        None => format!("路线：{}", route.route_name),
+    })
     .bind(&timestamp)
     .execute(&state.db)
     .await?;
@@ -488,6 +548,55 @@ fn empty_route_data(loop_mode: &str) -> Value {
 
 fn validation_item(ok: bool, title: String, description: String) -> Value {
     json!({"ok": ok, "title": title, "description": description})
+}
+
+/// 净空相关的校验项（只有能解出地图栅格时才有）。
+///
+/// 两个口径分开报，因为处置方式不同：
+/// - **终点停靠净空**：`endTaskMode = none`（原地待命）时最后一个航点就是停车位，本体
+///   `end_task = 0` 要求它自己能站住；
+/// - **航点净空**：中途点贴障碍同样规划不过去（`13377` 不只发生在终点）。
+fn clearance_items(clearances: &[super::maps::PointClearance]) -> Vec<Value> {
+    let Some(last) = clearances.last() else {
+        return Vec::new();
+    };
+    let min = super::maps::MIN_STOP_CLEARANCE_M;
+    let stop_ok = last.clearance_m >= min;
+    let stop_description = if stop_ok {
+        format!(
+            "终点 P{} ({:.2}, {:.2}) 离最近障碍 {:.2} m，可原地停靠",
+            last.index, last.x, last.y, last.clearance_m
+        )
+    } else {
+        format!(
+            "终点 P{} ({:.2}, {:.2}) 离最近障碍只有 {:.2} m（建议 ≥{min:.1} m）：\
+             「原地待命」的停车位就是这个点，本体规划器会把它判成被占据，现场表现为反复\
+             `13377 无有效绕障轨迹`、任务永远到不了终态。请把终点往空旷处挪 ≥{min:.1} m，\
+             或把结束动作改成「返回起点」",
+            last.index, last.x, last.y, last.clearance_m
+        )
+    };
+    let tightest = clearances
+        .iter()
+        .min_by(|a, b| a.clearance_m.total_cmp(&b.clearance_m))
+        .unwrap_or(last);
+    let points_ok = tightest.clearance_m >= min;
+    let points_description = if points_ok {
+        format!(
+            "最紧的航点 P{} 离最近障碍 {:.2} m",
+            tightest.index, tightest.clearance_m
+        )
+    } else {
+        format!(
+            "航点 P{} ({:.2}, {:.2}) 离最近障碍 {:.2} m（建议 ≥{min:.1} m），\
+             本体可能规划不出绕障轨迹",
+            tightest.index, tightest.x, tightest.y, tightest.clearance_m
+        )
+    };
+    vec![
+        validation_item(stop_ok, "终点停靠净空".to_string(), stop_description),
+        validation_item(points_ok, "航点净空".to_string(), points_description),
+    ]
 }
 
 fn bump_version(version: &str) -> String {
@@ -588,6 +697,57 @@ async fn resolve_route_map(
 #[cfg(test)]
 mod tests {
     use super::bump_version;
+    use super::clearance_items;
+    use crate::handlers::maps::PointClearance;
+
+    fn point(index: usize, clearance_m: f64) -> PointClearance {
+        PointClearance {
+            index,
+            x: 1.0,
+            y: 2.0,
+            clearance_m,
+        }
+    }
+
+    /// 终点就是「原地待命」的停车位：净空不足时必须体检不通过，且文案要说清楚原因
+    #[test]
+    fn tight_parking_spot_fails_the_end_point_item() {
+        let items = clearance_items(&[point(1, 2.0), point(2, 0.32)]);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["title"], "终点停靠净空");
+        assert_eq!(items[0]["ok"], false);
+        assert!(
+            items[0]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("13377"),
+            "文案要给出本体侧的现场现象"
+        );
+        // 0.32 m 也是最紧的那个航点，所以第二项一并不过
+        assert_eq!(items[1]["ok"], false);
+    }
+
+    #[test]
+    fn roomy_route_passes_both_items() {
+        let items = clearance_items(&[point(1, 1.6), point(2, 0.9)]);
+        assert_eq!(items[0]["ok"], true);
+        assert_eq!(items[1]["ok"], true);
+    }
+
+    /// 中间点贴障碍也要报：`13377` 不只发生在终点
+    #[test]
+    fn tight_middle_point_is_reported_too() {
+        let items = clearance_items(&[point(1, 0.2), point(2, 1.5)]);
+        assert_eq!(items[0]["title"], "终点停靠净空");
+        assert_eq!(items[0]["ok"], true, "终点本身够宽裕");
+        assert_eq!(items[1]["title"], "航点净空");
+        assert_eq!(items[1]["ok"], false);
+    }
+
+    #[test]
+    fn empty_points_produce_no_items() {
+        assert!(clearance_items(&[]).is_empty());
+    }
 
     #[test]
     fn bumps_minor_version() {

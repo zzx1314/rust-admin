@@ -292,6 +292,27 @@ pub const PENDING_TIMEOUT: Duration = Duration::from_secs(60);
 /// 还可能把已完成的任务在本体记录里改成取消）。
 pub const TERMINAL_SETTLE: Duration = Duration::from_secs(5);
 
+/// 「只剩最后一个航点没到」持续这么久，才开始怀疑终点本身进不去。
+///
+/// 与 180 s/点 的总超时分开：那是「跑得慢」，这是「根本到不了」。150 s 足够覆盖
+/// 一条长航段（0.5 m/s 能跑 75 m），又不至于让现场对着一条挂住的任务干等到总超时
+/// （5 个点就是 15 分钟）。
+pub const FINAL_POINT_STALL_WINDOW: Duration = Duration::from_secs(150);
+
+/// 窗口内至少出现这么多次规划类故障才判「终点进不去」。
+/// `4021` 是**周期性重推**（同一故障每 5s 一条，实测），所以计次数是有效的。
+pub const FINAL_POINT_STALL_FAULTS: usize = 3;
+
+/// 指向「规划不出到目标的轨迹」的故障码（全文见 `deploy/robodog-body.md` §10.8）：
+///
+/// - `13377` 无有效绕障轨迹，搜索失败，等待中；
+/// - `13446` 全局规划失败，起点/目标被障碍物占据；
+/// - `13440` 导航指令非法（常与 `13446` 成对出现）。
+///
+/// 定位类（`13120` / `13136` / `13381`）与传感器类（`12672` / `13504`）**不算**：
+/// 它们要给的是「修定位/修传感器」，报成「终点被占」会把现场带偏。
+pub const PLANNING_FAULT_CODES: [i64; 3] = [13377, 13446, 13440];
+
 /// 5000 `params.speed_limit` 缺省线速度（航线没配速度时用）
 const DEFAULT_SPEED_LIMIT: f64 = 1.2;
 
@@ -324,6 +345,57 @@ fn wait_task_count(dwell: i64) -> usize {
         );
     }
     capped as usize
+}
+
+/// 终点卡死判定：**只剩最后一个航点没到**、而本体在反复报规划类故障时，返回一句人能看懂的原因。
+///
+/// 现场背景（2026-11-14）：`endTaskMode = none`（原地待命）时最后一个航点就是停车位，
+/// 终点离墙 0.3 m 本体就永远进不去——`13377 无有效绕障轨迹` / `13446 目标被障碍物占据`
+/// 会一直重推，5009 却停在「前往 P{n}」，既不终态也不报错。以前只能等 180 s/点 的总超时
+/// （5 个点 15 分钟），现场看起来就是「任务挂住了、灯也不灭」。
+///
+/// 只认「只剩最后一个点」：
+/// - 中途点卡住时 `last_arrived` 更小，不归这条管（那是另一个问题）；
+/// - 「返回起点 / 返回充电点」时最后一个点已经到过，不会误判。
+pub fn final_point_stall_reason(
+    total: usize,
+    last_arrived: Option<i64>,
+    elapsed: Duration,
+    faults: &[i64],
+) -> Option<String> {
+    if total < 2 || elapsed < FINAL_POINT_STALL_WINDOW {
+        return None;
+    }
+    // 0 基：已到达第 total-1 个点 = 只剩最后一个点没到
+    if last_arrived != Some(total as i64 - 2) {
+        return None;
+    }
+    let count = faults
+        .iter()
+        .filter(|code| PLANNING_FAULT_CODES.contains(code))
+        .count();
+    if count < FINAL_POINT_STALL_FAULTS {
+        return None;
+    }
+    let mut codes: Vec<i64> = faults
+        .iter()
+        .copied()
+        .filter(|code| PLANNING_FAULT_CODES.contains(code))
+        .collect();
+    codes.sort_unstable();
+    codes.dedup();
+    let codes: Vec<String> = codes.into_iter().map(|code| code.to_string()).collect();
+    Some(format!(
+        "终点（第 {total} 个航点）进不去：本体在「已到达 P{}」之后 {}s 内连续 {count} 次报规划失败\
+         （code={}，即「无有效绕障轨迹 / 全局规划失败-目标被障碍物占据」）。\
+         「原地待命」的停车位就是最后一个航点，它离障碍物太近（净空 <0.5 m 时规划器会直接放弃）\
+         就会是这个现象。请把终点往空旷处挪 0.5 m 以上、或清走终点周围的障碍物后再下发；\
+         本次已完成前 {} 个航点",
+        total - 1,
+        elapsed.as_secs(),
+        codes.join(" / "),
+        total - 1,
+    ))
 }
 
 /// 5000 `params.speed_limit.vz`：**角速度上限**，单位 rad/s
@@ -802,6 +874,8 @@ impl RouteRunner {
         // 还没真正驱动底盘就判失败。这不是「跑得慢」，是那条 5000 根本没生效：
         // 尾巴灯不会变成任务色，平台却一直显示执行中。
         let mut pending_since: Option<tokio::time::Instant> = None;
+        // 「只剩最后一个点」的起点：用来判终点是不是根本进不去（见 [`final_point_stall_reason`]）
+        let mut final_point_since: Option<tokio::time::Instant> = None;
         loop {
             if self.is_cancelled() {
                 return Err("任务已取消".to_string());
@@ -860,6 +934,23 @@ impl RouteRunner {
                 if done > *completed && done <= total {
                     *completed = done;
                 }
+            }
+            // 终点卡死：只剩最后一个航点没到，而本体在反复报「规划不出到目标的轨迹」。
+            // 不能等 180 s/点 的总超时：那时现场已经对着「执行中」干等十几分钟了。
+            if total >= 2 && task.detail_index == Some(total as i64 - 2) {
+                let since = *final_point_since.get_or_insert_with(tokio::time::Instant::now);
+                let faults = self
+                    .client
+                    .recent_fault_codes(FINAL_POINT_STALL_WINDOW)
+                    .await;
+                if let Some(reason) =
+                    final_point_stall_reason(total, task.detail_index, since.elapsed(), &faults)
+                {
+                    warn!("巡检任务 {task_id} 判定终点不可达: {reason}");
+                    return Err(reason);
+                }
+            } else {
+                final_point_since = None;
             }
             if task.is_terminal() {
                 let threshold = *self.min_recharge_battery.lock().await;
@@ -1335,5 +1426,45 @@ mod tests {
         assert!(!is_capability_busy(
             "5001 响应失败: code=13898 map not found or invalid"
         ));
+    }
+
+    /// 只剩最后一个点 + 反复规划失败 → 立刻给「终点进不去」的结论
+    #[test]
+    fn final_point_stall_needs_last_point_and_planning_faults() {
+        let window = FINAL_POINT_STALL_WINDOW;
+        let faults = [13377, 13377, 13446];
+        // 5 个点，已到达第 4 个（0 基 3）→ 只剩最后一个
+        let reason = final_point_stall_reason(5, Some(3), window, &faults).expect("应判终点不可达");
+        assert!(
+            reason.contains("13377") && reason.contains("13446"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("原地待命"),
+            "文案要说明停车位语义: {reason}"
+        );
+        assert!(reason.contains("0.5 m"), "文案要给出可执行的改法: {reason}");
+
+        // 已到达的点更靠前（还在中途）→ 不归这条管
+        assert!(final_point_stall_reason(5, Some(2), window, &faults).is_none());
+        // 故障次数不够
+        assert!(final_point_stall_reason(5, Some(3), window, &[13377, 13377]).is_none());
+        // 时间没到窗口
+        assert!(
+            final_point_stall_reason(5, Some(3), window - Duration::from_secs(1), &faults)
+                .is_none()
+        );
+        // 只有定位类故障：要说的是「修定位」，不能被报成「终点被障碍占据」
+        assert!(final_point_stall_reason(5, Some(3), window, &[13120, 13136, 13381]).is_none());
+        // 单点航线没有「只剩最后一个点」这回事
+        assert!(final_point_stall_reason(1, Some(-1), window, &faults).is_none());
+    }
+
+    /// 返回起点 / 充电的任务到过最后一个点后不会再命中（`last_arrived` 已经是 total-1）
+    #[test]
+    fn final_point_stall_ignores_return_leg() {
+        let window = FINAL_POINT_STALL_WINDOW;
+        let faults = [13377, 13446, 13377];
+        assert!(final_point_stall_reason(3, Some(2), window, &faults).is_none());
     }
 }

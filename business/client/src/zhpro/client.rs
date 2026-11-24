@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -226,6 +226,11 @@ pub struct ZhProClient {
     request_timeout: Duration,
     /// 本体链路是否已断（control / bulkdata 任一读循环结束即置 true）
     link_down: watch::Receiver<bool>,
+    /// 最近收到的本体故障码（`4021`）与到达时刻。
+    ///
+    /// 只有航线执行引擎用：巡检卡在最后一个航点时，要能区分「跑得慢」和
+    /// 「规划器根本进不去」（`13377` / `13446`），见 `route.rs` 的终点卡死判定。
+    recent_faults: Arc<Mutex<Vec<(i64, Instant)>>>,
 }
 
 impl ZhProClient {
@@ -385,6 +390,7 @@ impl ZhProClient {
             control_owned: Arc::new(Mutex::new(false)),
             request_timeout: REQUEST_TIMEOUT,
             link_down: link_rx,
+            recent_faults: Arc::new(Mutex::new(Vec::new())),
         };
 
         client.spawn_gateway_heartbeat();
@@ -481,6 +487,39 @@ impl ZhProClient {
 
     pub fn subscribe(&self) -> PushReceiver {
         self.pushes.subscribe()
+    }
+
+    /// `4021` 故障码保留窗口：现场一条故障每 5s 重推一次（`report.rs` 有去重，
+    /// 这里要留原样），10 分钟足够覆盖「卡在最后一个点」那几百秒。
+    const FAULT_LOG_WINDOW: Duration = Duration::from_secs(600);
+    /// 故障日志条数上限：4021 是周期性重推，不封顶会一直涨
+    const FAULT_LOG_LIMIT: usize = 256;
+
+    /// 记一条本体故障码（`4021` 的 `code`）。
+    ///
+    /// 航线执行引擎靠它区分「跑得慢」与「规划器根本进不去」，见
+    /// `route.rs::final_point_stall_reason`。只留码值，不留全文：
+    /// 平台侧的告警/工单由 `report.rs` 负责，这里纯粹是本地判定用。
+    pub async fn note_fault(&self, code: i64) {
+        let now = Instant::now();
+        let mut guard = self.recent_faults.lock().await;
+        guard.push((code, now));
+        guard.retain(|(_, at)| now.duration_since(*at) <= Self::FAULT_LOG_WINDOW);
+        if guard.len() > Self::FAULT_LOG_LIMIT {
+            let excess = guard.len() - Self::FAULT_LOG_LIMIT;
+            guard.drain(..excess);
+        }
+    }
+
+    /// `window` 内收到过的故障码（按到达顺序）
+    pub async fn recent_fault_codes(&self, window: Duration) -> Vec<i64> {
+        let now = Instant::now();
+        let guard = self.recent_faults.lock().await;
+        guard
+            .iter()
+            .filter(|(_, at)| now.duration_since(*at) <= window)
+            .map(|(code, _)| *code)
+            .collect()
     }
 
     pub async fn session(&self) -> SessionInfo {
@@ -868,6 +907,36 @@ pub fn endpoint_urls(host: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 故障日志：只留码值、按窗口过滤（原点卡死判定与 4021 重推都依赖它）
+    #[tokio::test]
+    async fn fault_log_keeps_recent_codes_only() {
+        let host = crate::mock_body::start(0, Duration::from_millis(100), vec![], true)
+            .await
+            .expect("假本体启动失败");
+        let client = ZhProClient::connect(&host).await.expect("连接假本体失败");
+        assert!(
+            client
+                .recent_fault_codes(Duration::from_secs(60))
+                .await
+                .is_empty()
+        );
+        client.note_fault(13377).await;
+        client.note_fault(13377).await;
+        client.note_fault(13446).await;
+        assert_eq!(
+            client.recent_fault_codes(Duration::from_secs(60)).await,
+            vec![13377, 13377, 13446],
+            "同一故障的重推要各自计数（现场 4021 每 5s 重推一条）"
+        );
+        // 只有「窗口内」的算数：0 秒窗口什么都看不到
+        assert!(
+            client
+                .recent_fault_codes(Duration::from_secs(0))
+                .await
+                .is_empty()
+        );
+    }
 
     /// 协议 §2.1：「客户端应先校验 head.type 和 msg_id」。
     ///

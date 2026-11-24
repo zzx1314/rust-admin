@@ -448,6 +448,9 @@ pub(crate) async fn push_task_dispatch(
             task.task_code, map.map_id, map.map_dir
         );
     }
+    // 「原地待命」的停车位就是最后一个航点：净空不足时先在时间线留一行，
+    // 别等客户端卡在最后一个点 150 s 才让现场知道终点可能停不进去。
+    warn_parking_clearance(state, task).await;
 
     // **先置执行态再下发**：客户端拒单（未连接本体 / 地图不在本体 / 定位未就绪）
     // 往往在几毫秒内就回报。以前是发完再 UPDATE，异常会被这条 UPDATE 盖回
@@ -503,6 +506,94 @@ pub(crate) async fn push_task_dispatch(
 
     // updated_at 已刷新，任务看门狗从这里开始计时
     Ok(Some(device_code))
+}
+
+/// 「原地待命」终点净空提醒（不改任务状态，只写一行 `task_events`）。
+///
+/// 语义：`endTaskMode = none`（含跟随路线 + 往返/单向）时本体 `end_task = 0`，也就是
+/// **停在最后一个航点**。终点离障碍 <0.5 m 时规划器会把目标判成被占据
+/// （`13377`/`13446`，判据见 `deploy/robodog-body.md` §10.8），任务会卡在
+/// 「前往 P{n}」。这里不拦——现场可能就是想先跑一遍——但要让时间线先说话。
+///
+/// 阈值、距离场实现见 `handlers/maps/clearance.rs`；客户端侧的兜底见
+/// `business/client/src/zhpro/route.rs::final_point_stall_reason`。
+async fn warn_parking_clearance(state: &AppState, task: &Task) {
+    let Some(route_id) = task.route_id else {
+        return;
+    };
+    let (end_task, explicit) = crate::dispatch::resolve_task_end(task);
+    if end_task != "none" {
+        return;
+    }
+    let row: Option<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT route_data, loop_mode FROM routes WHERE id = ?1")
+            .bind(route_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+    let Some((route_data, loop_mode)) = row else {
+        return;
+    };
+    // 跟随路线 + 闭环：客户端仍会返航回起点（`patrol_end_task` 的闭环兜底），
+    // 最后一点不是停车位，不用提醒。
+    if explicit.is_none() && loop_mode.as_deref() == Some("闭环") {
+        return;
+    }
+    let Some(data) = route_data.and_then(|raw| serde_json::from_str::<Value>(&raw).ok()) else {
+        return;
+    };
+    let map_id: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM map_versions WHERE id = COALESCE(
+            (SELECT map_version_id FROM routes WHERE id = ?1),
+            (SELECT map_version_id FROM parks WHERE id = ?2))",
+    )
+    .bind(route_id)
+    .bind(task.park_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let Some(field) =
+        super::maps::field_for_map(&state.db, &state.config.backend_db_path, map_id.as_deref())
+            .await
+    else {
+        return;
+    };
+    let clearances = super::maps::point_clearances(&field, &data);
+    let Some(last) = clearances
+        .last()
+        .filter(|point| point.clearance_m < super::maps::MIN_STOP_CLEARANCE_M)
+    else {
+        return;
+    };
+    let message = format!(
+        "终点 P{} ({:.2}, {:.2}) 离最近障碍仅 {:.2} m（建议 ≥{:.1} m）：\
+         本次结束动作是「原地待命」，停车位就是这个点，本体可能停不进去\
+         （现场表现为反复报「无有效绕障轨迹」、任务停在前往最后一个点）",
+        last.index,
+        last.x,
+        last.y,
+        last.clearance_m,
+        super::maps::MIN_STOP_CLEARANCE_M
+    );
+    warn!("任务 {} 终点净空不足: {message}", task.task_code);
+    let timestamp = now();
+    sqlx::query(
+        "INSERT INTO task_events (event_type, title, description, device_id, task_id, created_at)
+         VALUES ('dispatch', ?1, ?2, ?3, ?4, ?5)",
+    )
+    .bind(format!(
+        "{} 终点净空不足，原地待命可能停不进去",
+        task.task_code
+    ))
+    .bind(message)
+    .bind(task.device_id)
+    .bind(task.id)
+    .bind(&timestamp)
+    .execute(&state.db)
+    .await
+    .ok();
 }
 
 /// 下发任务；设备不在线时返回可读错误，绝不把状态单独改成「执行中」。

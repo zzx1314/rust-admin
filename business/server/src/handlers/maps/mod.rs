@@ -24,6 +24,7 @@ use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::str::FromStr;
 mod backend;
+mod clearance;
 mod import;
 mod package;
 mod push;
@@ -33,6 +34,10 @@ mod tests;
 
 // 路由（`app.rs`）与其它模块用的入口
 pub use backend::{list_backend_maps, list_synced_sources};
+// 净空计算：路线校验 / 发布守卫与任务下发共用（见 `clearance.rs` 模块头）
+pub(crate) use clearance::{
+    MIN_FREE_CLEARANCE_M, MIN_STOP_CLEARANCE_M, PointClearance, field_for_map, point_clearances,
+};
 pub use import::import_backend_map;
 pub use package::map_package;
 pub use push::{PushMapRequest, apply_push_map};

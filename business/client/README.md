@@ -412,6 +412,11 @@ jq -c 'select(.dir=="recv" and .frame.head.type==4013)' /tmp/frames.jsonl
 - 最终下发到巡检 `5000 kind=4` 的 `params.end_task` 数字枚举：
   `endTaskMode`（或 `endTask`）显式给了就用它；否则 `loop_mode == "闭环"` → `1`（返回起点），
   其余 → `0`（原地待命）。详见 `src/zhpro/route.rs::patrol_end_task`。
+  ⚠️ `0`（原地待命）意味着**最后一个航点就是停车位姿**：终点贴障碍（净空 <0.5 m）时
+  本体规划器会把目标判成被占据（`13377` / `13446`），5009 停在「前往 P{n}」永远不终态。
+  客户端对此有兜底：只剩最后一个点没到且 150 s 内 `4021` 报了 ≥3 次规划类故障，就
+  提前以一句可执行的原因结束任务（`src/zhpro/route.rs::final_point_stall_reason`），
+  不再干等 `180 s/点` 的总超时。判据与平台侧校验见 `business/docs/waypoint-clearance.md`。
 - `avoidLevel`：10 关闭 / 20 仅急停 / 30 感知 / 40 全避障。任务级生效，
   进入 STANDBY 后本体自动恢复 40。
 - `routeData.legs[].mode` / `map_type`：**默认一律下发 `1`（2D 栅格）**，与协议文档的

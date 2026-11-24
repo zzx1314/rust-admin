@@ -375,6 +375,11 @@ pub(crate) fn spawn_zhpro_pump(
                                 .unwrap_or("未知故障");
                             let severity =
                                 item.get("severity").and_then(Value::as_i64).unwrap_or(0);
+                            // 码值同时记进客户端本地故障日志：航线执行引擎要靠它判断
+                            // 「卡在最后一个点」是跑得慢还是规划器根本进不去（route.rs）。
+                            if let Some(code) = item.get("code").and_then(Value::as_i64) {
+                                client.note_fault(code).await;
+                            }
                             // 码值必须落到事件文案里：平台 task_events 只存 description，
                             // 没有 code/severity 时没法对着本体文档 / 厂家排查。
                             let message = match item.get("code").and_then(Value::as_i64) {

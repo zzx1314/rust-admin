@@ -126,6 +126,11 @@ export const EXECUTE_MODES = ["周期任务", "临时下发", "立即执行"];
  *
  * 值对应后端 `tasks.end_task` / 载荷 `endTaskMode`；空串 = 跟随路线，
  * 此时闭环路线仍按老行为「返航回起点」。巡检本体侧对应 `5000 kind=4` 的 `params.end_task`。
+ *
+ * ⚠️「原地待命」的**停车位就是路线的最后一个航点**（本体 `end_task=0` 停在最后一点），
+ * 所以最后一个点必须留出 ≥0.5 m 净空：本体规划器把贴障碍的目标判成被占据
+ * （`13377 无有效绕障轨迹`），任务会卡在「前往 P{n}」永远不终态。
+ * 校验/发布时由服务端算净空（`business/server/src/handlers/maps/clearance.rs`）。
  */
 export const END_ACTIONS = [
   { value: "", label: "跟随路线（由路线闭环方式决定）" },
