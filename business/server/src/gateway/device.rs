@@ -89,6 +89,18 @@ pub(crate) async fn handle_register(
     fetch_device_by_code(db, device_id).await
 }
 
+/// 归一化信号来源：只认 `wifi` / `cellular`，其余（老客户端 / 写错）存 NULL
+///
+/// 老客户端只带 `signal` 不带来源，写入时 `signal_source` 会跟着置空 ——
+/// 宁可页面不标「WiFi / 4G」，也不要让旧标签配新数值。
+fn signal_source_of(raw: Option<&str>) -> Option<&'static str> {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("wifi") => Some("wifi"),
+        Some("cellular") => Some("cellular"),
+        _ => None,
+    }
+}
+
 /// 把业务平台的设备行同步到中台台账（失败只记日志）。
 pub(crate) async fn sync_device_to_zentai(
     config: &crate::config::Config,
@@ -398,15 +410,18 @@ pub(crate) async fn handle_heartbeat(
         .execute(db)
         .await;
     }
-    // WiFi 信号（板端 `nmcli` 的 SIGNAL 0-100）：页面「设备管理」的「信号」列
+    // 联网信号（板端 WiFi SIGNAL / 4G CSQ 折算，0-100）：页面「设备管理」的「信号」列
     //
-    // 只认真实上报的值：没连 WiFi / 老客户端不带该字段时保持库里原值，
+    // 只认真实上报的值：没连 WiFi 也没拿到 4G IP / 老客户端不带该字段时保持库里原值，
     // 不要退回 0（那会显示成「信号极差」把排查方向带偏）。
     if let Some(signal) = payload.signal {
+        let source = signal_source_of(payload.signal_source.as_deref());
         let _ = sqlx::query(
-            "UPDATE devices SET signal = ?1, updated_at = ?2 WHERE device_id = ?3",
+            "UPDATE devices SET signal = ?1, signal_source = ?2, updated_at = ?3
+               WHERE device_id = ?4",
         )
         .bind(signal.clamp(0, 100))
+        .bind(source)
         .bind(&timestamp_clone)
         .bind(&device_id_clone)
         .execute(db)

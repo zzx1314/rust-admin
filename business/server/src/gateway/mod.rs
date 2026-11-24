@@ -488,6 +488,7 @@ async fn on_heartbeat(ctx: &ConnectionCtx<'_>, device_id: Option<&str>, payload:
         estop_software: None,
         sdk_node_available: None,
         signal: None,
+        signal_source: None,
     });
     handle_heartbeat(state, device, &payload).await;
     // 本体就绪后才补发待执行任务：注册时通常还没连上本体，

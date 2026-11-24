@@ -9,6 +9,7 @@
 - *    /api/whep/*            -> WHEP 信令同源代理（OPTIONS/POST/PATCH/DELETE，媒体仍直连）
 - GET  /api/temp              -> 温湿度
 - GET  /api/wifi              -> WiFi 扫描（总数/名称/信号）+ 当前连接（SSID/信号/IP）
+- GET  /api/network           -> 当前联网信号（WiFi 优先，未连 WiFi 退 4G CSQ；客户端心跳 signal 的来源）
 - GET  /api/4g                -> 4G 状态（服务/网卡/AT/SIM/信号/IP/DNS/流量）
 - GET  /api/env               -> 环境信息（IP/核心温度/SSD/系统/SN）
 - GET  /api/ssd               -> SSD 容量&温度
@@ -370,6 +371,16 @@ async def temp():
 @app.get("/api/wifi")
 async def wifi():
     return JSONResponse(telemetry.get_wifi())
+
+
+@app.get("/api/network")
+async def network():
+    """当前联网信号（WiFi 优先，未连 WiFi 退回 4G CSQ）。
+
+    读的是 5s 遥测快照的缓存，不额外扫 WiFi / 不碰 AT 串口：设备客户端每 30s
+    调一次，随心跳 `signal` / `signalSource` 上报给业务平台。
+    """
+    return JSONResponse(telemetry.network_signal())
 
 
 @app.get("/api/4g")

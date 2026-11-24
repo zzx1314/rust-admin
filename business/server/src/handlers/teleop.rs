@@ -621,6 +621,7 @@ mod tests {
             status: "在线待命".to_string(),
             battery: 80,
             signal: 0,
+            signal_source: None,
             temperature: 30.0,
             runtime_minutes: 0,
             odometer: 0.0,

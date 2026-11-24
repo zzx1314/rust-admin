@@ -852,10 +852,10 @@ ssh root@192.168.41.246 'mv /tmp/rdc.new /opt/robodog/client/robodog-device-clie
 { "deviceId": "0202222672400230", "secret": null,
   "model": "ZSL-2-Ultra", "firmware": "Hermes_M_v0.3.2" }
 
-// heartbeat（model 仅在取到本体 1201 的 type 时才带；signal 见下）
+// heartbeat（model 仅在取到本体 1201 的 type 时才带；signal / signalSource 见下）
 { "battery": 86, "firmware": "Hermes_M_v0.3.2", "model": "ZSL-2-Ultra",
   "bodyOnline": true, "mode": "robot", "charging": false, "robotMode": "remote",
-  "signal": 66 }
+  "signal": 66, "signalSource": "wifi" }
 ```
 
 - `model` 取本体 `1201` 的 `type`；本体没在 `device_json_path` 配型号时用 `robot.model` / `--model` 兜底，两者都空则不报该字段。
@@ -866,11 +866,14 @@ ssh root@192.168.41.246 'mv /tmp/rdc.new /opt/robodog/client/robodog-device-clie
   由 systemd `Restart=always` 带退避重启，不会带着模拟数据冒充真机。
 - `robotMode`：取本体 `1315` 的 `mode`（协议里的 MachineStatus，实测 `remote`），
   业务平台「工作模式」列直接展示；`1235/machine_status` 若存在也兼容。
-- `signal`：**WiFi 信号强度 0-100**，来源是**背包板子自己**（`src/wifi.rs`：每 30s 读
-  同机 Agent 的 `GET /api/wifi`，取 `current.signal`，与 `nmcli` 的 SIGNAL 同口径），
-  业务平台「设备管理 / 信号」列按 80 / 60 / 40 分 优 / 良 / 中 / 差。
-  智航 `1315` 里没有 rssi/csq 指标，所以**不从本体取**；没连 WiFi、Agent 不可达、
-  老 Agent 没有 `current` 段时**不带这个字段**（页面显示 `—`），不要用配置值或 0 冒充。
+- `signal` / `signalSource`：**联网信号强度 0-100 + 来源（`wifi` / `cellular`）**。
+  来源是**背包板子自己**（`src/signal.rs`：每 30s 读同机 Agent 的 `GET /api/network`，
+  板端已把「WiFi 优先、没连 WiFi 退 4G」统一好：WiFi 用 `nmcli` 的 SIGNAL，
+  4G 用 `AT+CSQ` 按 −113~−51 dBm 线性折算）。业务平台「设备管理 / 信号」列按
+  80 / 60 / 40 分 优 / 良 / 中 / 差，并标明 `WiFi` / `4G`。
+  智航 `1315` 里没有 rssi/csq 指标，所以**不从本体取**；没连网（WiFi 和 4G 都没数据连接）、
+  Agent 不可达时**不带这两个字段**（页面显示 `—`），不要用配置值或 0 冒充。
+  老 Agent（没有 `/api/network`）只退回 `/api/wifi` 报 WiFi，不做 4G 兜底。
   与 `--no-ai` 共用开关（Agent 地址也是 `[ai] agent_url`）。
   > 升级注意：配置解析是 `deny_unknown_fields`，老机器的 `/etc/robodog/client.toml`
   > 里如果还留着历史配置 `[simulation] signal = 4`，新客户端会启动失败并提示

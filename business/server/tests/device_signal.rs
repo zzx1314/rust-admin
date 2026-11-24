@@ -2,13 +2,15 @@
 //!
 //! 现场背景：`devices.signal` 曾经是**配置里的假值**（模拟信号 0~4），页面显示的是
 //! 拍脑袋的数字，2026-11-11 直接摘掉了这一列。现在信号有了真实来源——板端 Agent
-//! 的 `/api/wifi.current.signal`（`nmcli` SIGNAL 0-100），由同机的设备客户端随心跳
-//! `signal` 上报，平台「设备管理」按 优/良/中/差 展示。
+//! 的 `/api/network`（WiFi 的 `nmcli` SIGNAL 优先，没连 WiFi 时用 4G 的 `AT+CSQ` 折算，
+//! 都是 0-100），由同机的设备客户端随心跳 `signal` / `signalSource` 上报，
+//! 平台「设备管理」按 优/良/中/差 + WiFi / 4G 展示。
 //!
-//! 这个用例守三条：
-//! 1. 心跳带 `signal` → 落库并能从 `GET /api/devices` 读回；
-//! 2. 心跳**不带** `signal`（老客户端 / 没连 WiFi）→ 保留库里原值，不刷成 0；
-//! 3. 越界值夹到 0~100（板端 nmcli 偶尔会给负数 / 100+）。
+//! 这个用例守四条：
+//! 1. 心跳带 `signal` + `signalSource` → 落库并能从 `GET /api/devices` 读回；
+//! 2. 心跳**不带** `signal`（老客户端 / 没连网）→ 保留库里原值，不刷成 0；
+//! 3. 越界值夹到 0~100（nmcli 偶尔给负数 / 100+）；
+//! 4. 不认识的来源（写错 / 老客户端只带 `signal`）→ `signal_source` 置空，不瞎标。
 
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
@@ -164,8 +166,8 @@ async fn register_device(port: u16) -> DeviceWs {
     ws
 }
 
-/// 上报一帧心跳（`signal` 由调用方决定是否带，模拟老客户端不报信号）
-async fn heartbeat_with_signal(ws: &mut DeviceWs, signal: Option<i64>) {
+/// 上报一帧心跳（`signal` / `source` 由调用方决定是否带，模拟老客户端不报信号）
+async fn heartbeat_with_signal(ws: &mut DeviceWs, signal: Option<i64>, source: Option<&str>) {
     let mut payload = json!({
         "battery": 80,
         "bodyOnline": true,
@@ -174,6 +176,9 @@ async fn heartbeat_with_signal(ws: &mut DeviceWs, signal: Option<i64>) {
     });
     if let Some(signal) = signal {
         payload["signal"] = json!(signal);
+    }
+    if let Some(source) = source {
+        payload["signalSource"] = json!(source);
     }
     ws.send(Message::Text(
         json!({
@@ -189,8 +194,8 @@ async fn heartbeat_with_signal(ws: &mut DeviceWs, signal: Option<i64>) {
     next_msg(ws, "heartbeat_ack").await;
 }
 
-async fn signal_of(state: &AppState) -> i64 {
-    sqlx::query_scalar("SELECT signal FROM devices WHERE device_id = ?1")
+async fn signal_of(state: &AppState) -> (i64, Option<String>) {
+    sqlx::query_as("SELECT signal, signal_source FROM devices WHERE device_id = ?1")
         .bind(DEVICE_CODE)
         .fetch_one(&state.db)
         .await
@@ -224,9 +229,8 @@ async fn signal_from_api(port: u16) -> Value {
         .expect("设备列表应是数组")
         .iter()
         .find(|device| device["deviceId"] == DEVICE_CODE)
-        .and_then(|device| device.get("signal"))
         .cloned()
-        .expect("设备列表缺少 signal 字段")
+        .expect("设备列表里应有该设备")
 }
 
 #[tokio::test]
@@ -235,17 +239,42 @@ async fn heartbeat_signal_lands_in_the_device_ledger() {
     let port = spawn_server(state.clone()).await;
     let mut ws = register_device(port).await;
 
-    heartbeat_with_signal(&mut ws, Some(72)).await;
-    assert_eq!(signal_of(&state).await, 72, "板端 WiFi 信号应随心跳落库");
-    assert_eq!(signal_from_api(port).await, json!(72), "设备列表应带 signal");
+    // WiFi：72 → 良
+    heartbeat_with_signal(&mut ws, Some(72), Some("wifi")).await;
+    assert_eq!(
+        signal_of(&state).await,
+        (72, Some("wifi".to_string())),
+        "板端 WiFi 信号应随心跳落库"
+    );
+    let device = signal_from_api(port).await;
+    assert_eq!(device["signal"], json!(72), "设备列表应带 signal");
+    assert_eq!(device["signalSource"], json!("wifi"), "设备列表应带来源");
 
-    // 没连 WiFi / 老客户端：不带 signal，库里保留上一次的真实值（不能刷成 0）
-    heartbeat_with_signal(&mut ws, None).await;
-    assert_eq!(signal_of(&state).await, 72);
+    // 未连 WiFi → 板端退 4G：45 → 中
+    heartbeat_with_signal(&mut ws, Some(45), Some("cellular")).await;
+    assert_eq!(
+        signal_of(&state).await,
+        (45, Some("cellular".to_string()))
+    );
+
+    // 没连网 / 老客户端：不带 signal，库里保留上一次的真实值（不刷成 0）
+    heartbeat_with_signal(&mut ws, None, None).await;
+    assert_eq!(
+        signal_of(&state).await,
+        (45, Some("cellular".to_string()))
+    );
+
+    // 老客户端只带 signal 不带来源：来源置空（不让旧标签配新数值）
+    heartbeat_with_signal(&mut ws, Some(61), None).await;
+    assert_eq!(signal_of(&state).await, (61, None));
+
+    // 不认识的来源不瞎标
+    heartbeat_with_signal(&mut ws, Some(70), Some("satellite")).await;
+    assert_eq!(signal_of(&state).await, (70, None));
 
     // 越界值夹到 0~100（nmcli 偶尔给负数或 100+）
-    heartbeat_with_signal(&mut ws, Some(130)).await;
-    assert_eq!(signal_of(&state).await, 100);
-    heartbeat_with_signal(&mut ws, Some(-3)).await;
-    assert_eq!(signal_of(&state).await, 0);
+    heartbeat_with_signal(&mut ws, Some(130), Some("wifi")).await;
+    assert_eq!(signal_of(&state).await, (100, Some("wifi".to_string())));
+    heartbeat_with_signal(&mut ws, Some(-3), Some("wifi")).await;
+    assert_eq!(signal_of(&state).await, (0, Some("wifi".to_string())));
 }

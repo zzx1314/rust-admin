@@ -42,7 +42,8 @@ backend/
 ├── relay.py          dogcam 归一化/转发（本体 RTSP → mediamtx）
 ├── stream.py         4 路 USB ffmpeg 推流编排（h264_rkmpp → libx264 回退）
 ├── telemetry.py      SHT4x/4G/WiFi/环境/SSD/风扇/聆思 采集
-│                     （`/api/wifi` 的 `current` 段是设备客户端心跳 `signal` 的来源）
+│                     （`/api/network` 把 WiFi SIGNAL / 4G CSQ 统一成 0-100，是
+│                      设备客户端心跳 `signal` + `signalSource` 的来源）
 ├── control.py        LED 闪烁 / 补光开关
 ├── record.py         航点 / 航段录像（ffmpeg 从本机 mediamtx 拉 dogcam，落 mp4 + 边车）
 ├── speak.py          航点 / 航段语音播报（聆思 TTS：call 0/1 <内容> / call stop）

@@ -338,9 +338,10 @@ impl RobotState {
             motion_status: self.motion_status.clone(),
             estop_software: self.estop_software,
             sdk_node_available: self.sdk_node_available,
-            // 由 `session` 从板端 WiFi 探针填（`crate::wifi`）：状态里没有这个字段，
+            // 由 `session` 从板端联网信号探针填（`crate::signal`）：状态里没有这个字段，
             // 因为信号来自背包板子而不是本体
             signal: None,
+            signal_source: None,
         }
     }
 }

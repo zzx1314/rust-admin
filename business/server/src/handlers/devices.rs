@@ -14,7 +14,7 @@ use sqlx::{QueryBuilder, SqlitePool};
 use tracing::info;
 
 pub(crate) const DEVICE_SELECT: &str = "SELECT d.id, d.device_id, d.model, d.park_id, p.park_name,
-    d.zone_id, z.zone_name, d.status, d.battery, d.signal, d.temperature, d.runtime_minutes,
+    d.zone_id, z.zone_name, d.status, d.battery, d.signal, d.signal_source, d.temperature, d.runtime_minutes,
     d.odometer, d.position, d.current_task_name, d.last_heartbeat, d.firmware, d.device_ip,
     d.teleop_holder, d.teleop_at, COALESCE(d.teleop_force, 0) AS teleop_force,
     COALESCE(d.body_online, 0) AS body_online, d.run_mode,

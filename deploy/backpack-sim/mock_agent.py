@@ -16,7 +16,8 @@ USB 相机 / RKNN。板子连不上时，背包页、航点 AI、企业微信证
 ```text
 GET  /api/cameras           六路源（cam0~cam3 + dogcam + infrared）
 GET  /api/relay/status      狗前置链路状态
-GET  /api/wifi              WiFi 扫描 + 当前连接（SSID / 信号 / IP，客户端报心跳 `signal`）
+GET  /api/wifi              WiFi 扫描 + 当前连接（SSID / 信号 / IP）
+GET  /api/network           当前联网信号（WiFi 优先，未连 WiFi 退 4G CSQ；客户端心跳 `signal` 的来源）
 GET  /api/detect/tasks      模型包目录（消防通道 / 环境卫生）
 GET  /api/detect/status     运行态 + osd
 POST /api/detect/start      {task,labels,conf,cams,fps,plan_id,point_index,check_type,expect_count}
@@ -50,7 +51,9 @@ GET  /api/events            SSE：detect / plan_hit / detect_state / detect_erro
 | `SIM_LATE_EVIDENCE` | `0` | 设 1 时图**不在 `plan_hit` 里给**，只在 `stop` 时由 `ai_evidence` 补（复现「卡片先发、图晚到」） |
 | `SIM_TICK` | `1.2` | 普通（非计划）识别的检出节拍（秒） |
 | `SIM_NIGHT` | 空 | 计划灯光的「现在算不算夜间」：`1` / `0` 钉死，空 = 按本地时间窗（`LIGHT_NIGHT_START`/`LIGHT_NIGHT_END`，与板端同规则） |
-| `SIM_WIFI_SIGNAL` | `66` | `/api/wifi` 的当前连接信号（0-100）；设备客户端随心跳上报，平台「设备管理」的「信号」列靠它验，`0` = 没连 WiFi |
+| `SIM_WIFI_SIGNAL` | `66` | `/api/network` 的 WiFi 信号（0-100）；设备客户端随心跳上报，平台「设备管理」的「信号」列靠它验，`0` = 没连 WiFi（自动退 4G） |
+| `SIM_4G_DBM` | `-85` | 4G 的 RSSI（dBm），`SIM_WIFI_SIGNAL=0` 时按 CSQ 折算成 0-100 上报（`-85` → 45「中」） |
+| `SIM_4G_IP` | `10.64.3.21` | 4G 拨号拿到的 IP；设成空 = 4G 也没连，`/api/network` 返回 `signal=null` |
 
 控制接口（只在本模拟里有，真 Agent 没有）：
 
@@ -109,10 +112,18 @@ TICK = float(os.environ.get("SIM_TICK", "1.2"))
 SIM_NIGHT = os.environ.get("SIM_NIGHT", "").strip()
 LIGHT_NIGHT_START = os.environ.get("LIGHT_NIGHT_START", "18:00")
 LIGHT_NIGHT_END = os.environ.get("LIGHT_NIGHT_END", "06:00")
-# WiFi 信号（板端 `/api/wifi.current.signal`，0-100）：设备客户端读它跳心跳 `signal`
-# 上报，业务平台「设备管理」的「信号」列靠这个验。`0` = 模拟没连 WiFi。
+# WiFi 信号（板端 `/api/wifi.current.signal`，0-100）：`0` = 模拟没连 WiFi。
 WIFI_SIGNAL = max(0, min(100, int(os.environ.get("SIM_WIFI_SIGNAL", "66"))))
 WIFI_SSID = os.environ.get("SIM_WIFI_SSID", "POE-2.4G")
+# 4G 信号（只在这两个都验「WiFi 没连 → 退 4G」时生效）：
+# `SIM_4G_DBM` 是 AT+CSQ 折算出的 RSSI，`SIM_4G_IP` 空 = 4G 没有数据连接。
+SIM_4G_DBM = int(os.environ.get("SIM_4G_DBM", "-85"))
+SIM_4G_IP = os.environ.get("SIM_4G_IP", "10.64.3.21").strip()
+
+
+def dbm_to_signal_pct(dbm):
+    """与板端 `telemetry.dbm_to_signal_pct` 同口径：CSQ 0-31 → -113 ~ -51 dBm → 0-100。"""
+    return max(0, min(100, int(round((float(dbm) + 113) * 100 / 62))))
 
 
 def wifi_quality(signal):
@@ -709,6 +720,24 @@ class Handler(BaseHTTPRequestHandler):
             })
         if path == "/api/detect/status":
             return self.json(STATE.status())
+        if path == "/api/network":
+            # 板端 `telemetry.network_signal()` 的契约：WiFi 优先，没连 WiFi 退 4G CSQ。
+            # 设备客户端只取 `source` + `signal`，随心跳 `signal` / `signalSource` 上报。
+            if WIFI_SIGNAL > 0:
+                return self.json({
+                    "source": "wifi", "signal": WIFI_SIGNAL,
+                    "quality": wifi_quality(WIFI_SIGNAL),
+                    "ssid": WIFI_SSID, "ip": "192.168.41.246", "rssi_dbm": None,
+                })
+            if SIM_4G_IP:
+                pct = dbm_to_signal_pct(SIM_4G_DBM)
+                return self.json({
+                    "source": "cellular", "signal": pct,
+                    "quality": wifi_quality(pct),
+                    "ssid": None, "ip": SIM_4G_IP, "rssi_dbm": SIM_4G_DBM,
+                })
+            return self.json({"source": None, "signal": None, "quality": "未知",
+                              "ssid": None, "ip": None, "rssi_dbm": None})
         if path == "/api/wifi":
             # 板端 `telemetry.get_wifi()` 的契约：扫描列表 + 当前连接。
             # 设备客户端只取 `current.signal`（0-100）随心跳上报。

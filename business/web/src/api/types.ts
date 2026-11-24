@@ -64,8 +64,10 @@ export interface Device {
   zoneName: string | null;
   status: string;
   battery: number;
-  /** WiFi 信号强度（0-100，板端 nmcli SIGNAL，客户端随心跳上报）：0 = 未上报 */
+  /** 联网信号强度（0-100，板端 WiFi SIGNAL / 4G CSQ 折算，客户端随心跳上报）：0 = 未上报 */
   signal: number;
+  /** 信号来源：wifi / cellular（4G）/ null（老客户端或没连网） */
+  signalSource: "wifi" | "cellular" | null;
   temperature: number;
   runtimeMinutes: number;
   odometer: number;

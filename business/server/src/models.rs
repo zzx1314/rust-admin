@@ -144,9 +144,11 @@ pub struct Device {
     pub zone_name: Option<String>,
     pub status: String,
     pub battery: i64,
-    /// WiFi 信号强度（0-100）：板端 `nmcli` SIGNAL，客户端随心跳上报；
-    /// 0 = 没连 WiFi / 老客户端从未报过（页面显示 `—`）
+    /// 联网信号强度（0-100）：板端 WiFi SIGNAL / 4G CSQ 折算，客户端随心跳上报；
+    /// 0 = 从未报过（页面显示 `—`）
     pub signal: i64,
+    /// 信号来源：`wifi` / `cellular`（4G）；NULL = 老客户端 / 没连网
+    pub signal_source: Option<String>,
     pub temperature: f64,
     pub runtime_minutes: i64,
     pub odometer: f64,

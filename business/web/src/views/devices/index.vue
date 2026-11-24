@@ -11,7 +11,14 @@ import StatusBadge from "@/components/StatusBadge.vue";
 import ProgressBar from "@/components/ProgressBar.vue";
 import DeviceDrawer from "@/components/DeviceDrawer.vue";
 import { DEVICE_MODELS, DEVICE_STATUSES } from "@/utils/constants";
-import { downloadCsv, isLocReady, locStatusMeta, timeOnly, wifiMeta } from "@/utils/format";
+import {
+  downloadCsv,
+  isLocReady,
+  locStatusMeta,
+  signalMeta,
+  signalSourceLabel,
+  timeOnly
+} from "@/utils/format";
 
 const route = useRoute();
 const devices = ref<Device[]>([]);
@@ -274,7 +281,7 @@ async function batchDispatch() {
 
 function exportDevices() {
   downloadCsv("robodog-devices.csv", [
-    ["设备编号", "型号", "园区", "区域", "状态", "工作模式", "本体在线", "电量", "WiFi信号", "当前任务", "最后心跳"],
+    ["设备编号", "型号", "园区", "区域", "状态", "工作模式", "本体在线", "电量", "信号", "当前任务", "最后心跳"],
     ...filteredDevices.value.map(device => [
       device.deviceId,
       device.model,
@@ -284,7 +291,9 @@ function exportDevices() {
       device.robotMode ? robotModeLabel(device.robotMode) : "—",
       device.bodyOnline ? "是" : "否",
       device.bodyOnline ? device.battery : "—",
-      device.signal > 0 ? `${device.signal}（${wifiMeta(device.signal).label}）` : "—",
+      device.signal > 0
+        ? `${signalSourceLabel(device.signalSource)} ${device.signal}（${signalMeta(device.signal).label}）`.trim()
+        : "—",
       device.currentTaskName,
       device.lastHeartbeat
     ])
@@ -517,18 +526,23 @@ onBeforeUnmount(() => {
                   v-if="device.signal > 0"
                   class="cell-main"
                   style="display: inline-flex; align-items: center; gap: 5px"
-                  :title="`WiFi 信号 ${device.signal}/100（板端 nmcli SIGNAL，客户端随心跳上报）`"
+                  :title="`${signalSourceLabel(device.signalSource) || '联网'} ${
+                    device.signal
+                  }/100（板端 WiFi SIGNAL 优先、未连 WiFi 时用 4G 的 CSQ 折算，客户端随心跳上报）`"
                 >
                   <AppIcon name="wifi" />
-                  <span class="badge" :class="wifiMeta(device.signal).tone">
-                    <i />{{ wifiMeta(device.signal).label }}
+                  <span v-if="device.signalSource" class="mono muted">
+                    {{ signalSourceLabel(device.signalSource) }}
+                  </span>
+                  <span class="badge" :class="signalMeta(device.signal).tone">
+                    <i />{{ signalMeta(device.signal).label }}
                   </span>
                   <span class="mono muted">{{ device.signal }}</span>
                 </span>
                 <span
                   v-else
                   class="mono muted"
-                  title="板端未连 WiFi / 客户端未上报（不伪造信号值）"
+                  title="板端未连网（WiFi / 4G 都拿不到）/ 客户端未上报（不伪造信号值）"
                 >
                   —
                 </span>

@@ -15,8 +15,9 @@ import {
   isLocReady,
   locStatusMeta,
   motionStatusLabel,
-  timeOnly,
-  wifiMeta
+  signalMeta,
+  signalSourceLabel,
+  timeOnly
 } from "@/utils/format";
 
 const props = defineProps<{ device: Device | null; open: boolean }>();
@@ -473,14 +474,19 @@ async function emergencyStop() {
             <b>{{ device.odometer.toFixed(1) }}<small> km</small></b>
           </div>
           <div class="metric">
-            <span><AppIcon name="wifi" />WiFi 信号</span>
+            <span><AppIcon name="wifi" />联网信号</span>
             <b
               v-if="device.signal > 0"
-              :title="`板端 nmcli SIGNAL ${device.signal}/100（客户端随心跳上报）`"
+              :title="`板端 ${signalSourceLabel(device.signalSource) || '联网'} 信号 ${
+                device.signal
+              }/100（WiFi 优先，未连 WiFi 时用 4G 的 CSQ 折算）`"
             >
-              {{ device.signal }}<small> /100 · {{ wifiMeta(device.signal).label }}</small>
+              {{ device.signal }}<small>
+                /100 · {{ signalMeta(device.signal).label }} ·
+                {{ signalSourceLabel(device.signalSource) || "未知来源" }}</small
+              >
             </b>
-            <b v-else class="muted" title="板端未连 WiFi / 客户端未上报">—</b>
+            <b v-else class="muted" title="板端未连网 / 客户端未上报">—</b>
           </div>
         </div>
 
@@ -509,11 +515,12 @@ async function emergencyStop() {
         <div class="kv"><span>设备编号</span><b class="mono">{{ device.deviceId }}</b></div>
         <div class="kv"><span>设备型号</span><b>{{ device.model }}</b></div>
         <div class="kv">
-          <span>WiFi 信号</span>
+          <span>联网信号</span>
           <b v-if="device.signal > 0">
-            {{ device.signal }}/100 · {{ wifiMeta(device.signal).label }}
+            {{ signalSourceLabel(device.signalSource) || "未知来源" }} · {{ device.signal }}/100 ·
+            {{ signalMeta(device.signal).label }}
           </b>
-          <b v-else class="mono muted">—（未连 WiFi / 未上报）</b>
+          <b v-else class="mono muted">—（WiFi / 4G 都未连上或未上报）</b>
         </div>
         <div class="kv"><span>所属园区</span><b>{{ device.parkName || "未绑定" }}</b></div>
         <div class="kv"><span>当前区域</span><b>{{ device.zoneName || "—" }}</b></div>

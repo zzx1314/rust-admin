@@ -79,10 +79,11 @@ cd business/web && pnpm dev      # → http://127.0.0.1:5273，/api 已代理到
 | mediamtx（7 条 path） | 官方二进制 + `mediamtx.yml` | ✅ RTSP/WHEP 行为一致，源全当 publisher |
 | 4 路 USB 相机 / 本体前置 | `fake_cams.py`（ffmpeg `testsrc2`） | ⚠️ 只有彩条 |
 | Wi-Fi / 4G 双出口 | 无 | ❌ `RELAY_ROUTE_POLL=0`，没有出口切换 |
-| WiFi 信号（设备管理「信号」列） | `mock_agent.py` 的 `/api/wifi`（`SIM_WIFI_SIGNAL`，默认 66） | ✅ 客户端真的会读它并随心跳上报，平台显示「良」 |
+| 联网信号（设备管理「信号」列） | `mock_agent.py` 的 `/api/network`（`SIM_WIFI_SIGNAL` 默认 66；设 0 则用 `SIM_4G_DBM` 折算 4G） | ✅ 客户端真的会读它并随心跳上报，平台显示「WiFi 良」/「4G 中」 |
 
 `mock_agent.py` 实现的是平台/客户端真正会调的那一份契约：
 `/api/cameras`、`/api/relay/status`、`/api/wifi`（含 `current` 当前连接）、
+`/api/network`（WiFi 优先、未连 WiFi 退 4G 的统一信号）、
 `/api/detect/tasks|status|start|stop|config`、
 `/api/detect/plan/clear`、`/api/events`（SSE：`detect` / `plan_hit` / `detect_state`），
 外加 CORS（直连模式浏览器要用）。字段定义见

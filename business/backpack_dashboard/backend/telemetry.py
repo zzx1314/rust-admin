@@ -169,6 +169,47 @@ def get_wifi():
     return {"iface": iface, "total": len(nets), "networks": nets, "current": current}
 
 
+# ---------------- 联网信号（WiFi / 4G 统一口径） ----------------
+
+def dbm_to_signal_pct(dbm):
+    """CSQ/RSSI(dBm) → 0-100 百分比，与 nmcli 的 SIGNAL 同口径。
+
+    GSM/4G 的 CSQ 取值 0-31 对应 -113 ~ -51 dBm：
+    `-113dBm = 0`，`-51dBm = 100`，中间线性。
+    """
+    if dbm is None:
+        return None
+    return max(0, min(100, int(round((float(dbm) + 113) * 100 / 62))))
+
+
+def network_signal(snap=None):
+    """当前联网信号：**WiFi 优先，未连 WiFi 时退回 4G CSQ**。
+
+    设备客户端（`business/client/src/signal.rs`）随心跳把它上报给业务平台，
+    「设备管理」的「信号」列就是这个值（0-100，优/良/中/差 80/60/40 分档）。
+
+    只用**遥测快照**（5s 一轮）：不额外跑 `nmcli` 扫描、不读 AT 串口，
+    客户端 30s 一次调用不会和板端识别 / 定位抢资源。
+    没连 WiFi 也没拿到 4G IP（或模组没回 CSQ）时 `source=None + signal=None`：
+    宁可显示 `—`，也不要报一个假数字。
+    """
+    snap = snap or cached_snapshot() or {}
+    wifi = (snap.get("wifi") or {}).get("current") or {}
+    if wifi.get("connected") and wifi.get("signal") is not None:
+        return {"source": "wifi", "signal": wifi.get("signal"),
+                "quality": _signal_label(wifi.get("signal")),
+                "ssid": wifi.get("ssid"), "ip": wifi.get("ip"),
+                "rssi_dbm": None}
+    g4 = snap.get("g4") or {}
+    pct = dbm_to_signal_pct(g4.get("rssi_dbm"))
+    if pct is not None and g4.get("ip"):
+        return {"source": "cellular", "signal": pct,
+                "quality": _signal_label(pct), "ssid": None,
+                "ip": g4.get("ip"), "rssi_dbm": g4.get("rssi_dbm")}
+    return {"source": None, "signal": None, "quality": "未知",
+            "ssid": None, "ip": None, "rssi_dbm": None}
+
+
 # ---------------- 4G 模块 (AT) ----------------
 def at_cmd(cmd, dev=MODEM_DEV, read_timeout=1.2):
     """镜像 yd_test_v4.0.sh 的 send_at：cat 端口后台读 + printf 写 + 定时 kill。

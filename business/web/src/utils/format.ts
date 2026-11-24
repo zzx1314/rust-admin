@@ -318,16 +318,23 @@ export function initials(name?: string | null): string {
 }
 
 /**
- * WiFi 信号（0-100，与板端 `nmcli` 的 SIGNAL 同口径）→ 优/良/中/差。
+ * 联网信号（0-100，板端 WiFi 的 `nmcli` SIGNAL / 4G 的 CSQ 折算）→ 优/良/中/差。
  *
- * 值来自**背包板子自己**：设备客户端读板端 `/api/wifi` 的 `current.signal`
- * 后随心跳上报（本体 1315 里没有 rssi/csq 指标）。`<= 0` 表示没连 WiFi /
+ * 值来自**背包板子自己**：设备客户端读板端 `/api/network`（WiFi 优先，没连 WiFi
+ * 退回 4G）后随心跳上报（本体 1315 里没有 rssi/csq 指标）。`<= 0` 表示没连网 /
  * 老客户端未上报，页面显示 `—`（不伪造）。
  */
-export function wifiMeta(signal?: number | null): { label: string; tone: string } {
+export function signalMeta(signal?: number | null): { label: string; tone: string } {
   const value = signal ?? 0;
   if (value >= 80) return { label: "优", tone: "ok" };
   if (value >= 60) return { label: "良", tone: "info" };
   if (value >= 40) return { label: "中", tone: "warn" };
   return { label: "差", tone: "danger" };
+}
+
+/** 信号来源 → 页面短标签：wifi → WiFi，cellular → 4G */
+export function signalSourceLabel(source?: string | null): string {
+  if (source === "wifi") return "WiFi";
+  if (source === "cellular") return "4G";
+  return "";
 }
