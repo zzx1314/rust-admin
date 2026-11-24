@@ -8,6 +8,7 @@ use crate::lights::PointLights;
 use crate::maps::send_map_saved_event;
 use crate::maps::upload_mapping_to_zentai;
 use crate::mapupload::UploadOutcome;
+use crate::record::Recorder;
 use crate::report::EventDedup;
 use crate::report::ProgressReporter;
 use crate::report::report_progress;
@@ -52,6 +53,7 @@ pub(crate) fn spawn_zhpro_pump(
     config: Arc<Config>,
     ai: Arc<AiPatrol>,
     lights: Arc<PointLights>,
+    recorder: Arc<Recorder>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut rx = client.subscribe();
@@ -162,6 +164,7 @@ pub(crate) fn spawn_zhpro_pump(
                         &mut progress_reporter,
                         &ai,
                         &lights,
+                        &recorder,
                     )
                     .await;
                     // 终态后本体没释放导航能力：后台补 5002 + 等 idle。
@@ -470,6 +473,7 @@ pub(crate) async fn handle_status_frame(
     reporter: &mut ProgressReporter,
     ai: &Arc<AiPatrol>,
     lights: &Arc<PointLights>,
+    recorder: &Arc<Recorder>,
 ) -> Option<TerminalCleanup> {
     // 文档 §2.6.10 第 5 条：即时终态可能已经在 `current_task` 里被回收，只留在
     // `recent_terminal_tasks` 里（最多 3 条 / 约 30s）。两处都要识别，否则
@@ -576,6 +580,9 @@ pub(crate) async fn handle_status_frame(
             // 灯光：跑完 / 失败 / 取消都要收（灯亮着没人管就是白耗电）；
             // `finish_task` 同时把这条任务标成已收尾，迟到的「到点开灯」不许再把灯点亮。
             lights.finish_task(&plan_id, "任务终态").await;
+            // 录像：停掉航点 / 全程两路 ffmpeg，并把板端积压的 mp4 回传平台
+            // （回传在后台跑，弱网下可能要几分钟；失败的文件留在板端等下一轮）。
+            recorder.finish_task(&plan_id, "任务终态").await;
         } else {
             lights.leave("任务终态").await;
         }
@@ -601,6 +608,16 @@ pub(crate) async fn handle_status_frame(
                     .await;
             });
         }
+        // 全程录像：5009 一出现这条任务就起（不等到第一个航点），跨点一直录到终态。
+        // 幂等由 `Recorder` 的 `task_active` 兜（5009 每 500ms 一帧）。
+        if let Some(task_code) = active
+            .lock()
+            .await
+            .as_ref()
+            .map(|task| task.task_code.clone())
+        {
+            recorder.task_running(&task_code).await;
+        }
         if is_arrival_stage(&task.stage) {
             let current = active.lock().await.clone();
             if let (Some(current), Some(index)) = (current, index) {
@@ -622,6 +639,9 @@ pub(crate) async fn handle_status_frame(
                     // 这个点没配灯：上一个点的灯别继续亮着（狗已经走了）
                     None => lights.leave("到达无灯光动作的航点").await,
                 }
+                // 航点录像：这个点配了「录像采集」就开录（`Recorder` 自己查路线配置，
+                // 同一个点重复调用只起一次），离开航点时由下面那段收口。
+                recorder.point_arrived(&current.task_code, index).await;
                 match ai_point_at(&current.ai_points, index) {
                     Some(point) => {
                         ai.point_arrived(out_tx, &current.task_code.clone(), point)
@@ -645,6 +665,8 @@ pub(crate) async fn handle_status_frame(
             if !plan_lighting {
                 lights.leave("已离开航点").await;
             }
+            // 航点录像跟着「离开航点」收口：全程录像不在这里停（它跟任务）。
+            recorder.leave_point("已离开航点").await;
         }
     }
 
@@ -773,6 +795,7 @@ mod tests {
     use super::*;
     use crate::ai_patrol::AiPatrol;
     use crate::lights::PointLights;
+    use crate::record::Recorder;
     use crate::state::ActiveTask;
     use robodog_device_client::config::CliArgs;
     use robodog_device_client::config::EnvConfig;
@@ -801,6 +824,7 @@ mod tests {
         reporter: ProgressReporter,
         ai: Arc<AiPatrol>,
         lights: Arc<PointLights>,
+        recorder: Arc<Recorder>,
     }
 
     impl Harness {
@@ -819,6 +843,7 @@ mod tests {
                 reporter: ProgressReporter::default(),
                 ai: Arc::new(AiPatrol::with_jobs_dir("http://127.0.0.1:1", false, None)),
                 lights: Arc::new(PointLights::new("http://127.0.0.1:1", false)),
+                recorder: Arc::new(Recorder::new(Arc::new(test_config()), false)),
             }
         }
 
@@ -838,6 +863,7 @@ mod tests {
                 &mut self.reporter,
                 &self.ai,
                 &self.lights,
+                &self.recorder,
             )
             .await
         }

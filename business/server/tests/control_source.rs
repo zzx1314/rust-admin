@@ -57,6 +57,8 @@ async fn test_state() -> (AppState, TempDb) {
         zentai_username: None,
         zentai_password: None,
         ingest_dir: dir.join("map_ingest"),
+        recording_dir: dir.join("recordings"),
+        recording_keep_days: 30,
         service_token: Some("test-service-token".to_string()),
         zentai_ws_url: None,
         device_timeout_secs: 90,

@@ -4,6 +4,7 @@ use crate::agent_relay;
 use crate::ai_patrol::AiPatrol;
 use crate::ai_patrol::AiStart;
 use crate::lights::PointLights;
+use crate::record::Recorder;
 use crate::report::clear_teleop_blocked;
 use crate::report::notify_teleop_blocked;
 use crate::state::ActiveTask;
@@ -42,6 +43,7 @@ pub(crate) async fn handle_server_message(
     body_reconnect: &mpsc::Sender<()>,
     ai: &Arc<AiPatrol>,
     lights: &Arc<PointLights>,
+    recorder: &Arc<Recorder>,
     relay: &Arc<AgentRelay>,
 ) {
     match msg.msg_type.as_str() {
@@ -144,6 +146,7 @@ pub(crate) async fn handle_server_message(
                 local_mapping,
                 ai,
                 lights,
+                recorder,
             )
             .await
         }
@@ -158,6 +161,7 @@ pub(crate) async fn handle_server_message(
                 local_mapping,
                 ai,
                 lights,
+                recorder,
             )
             .await
         }

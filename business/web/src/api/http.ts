@@ -90,6 +90,20 @@ export function download(url: string, filename: string) {
     });
 }
 
+/**
+ * 取二进制内容（录像播放）：返回 `Blob`，调用方自己 `createObjectURL`。
+ *
+ * 录像接口要 Bearer 鉴权，`<video src="/api/recordings/1/file">` 带不上头，
+ * 所以前端先取成 Blob 再挂给播放器。全程录像按 5 分钟切片，单段几 MB～几十 MB，
+ * 超时放宽到 2 分钟（弱网下多等一会儿，别报「请求失败」）。
+ */
+export function getBlob(url: string) {
+  return service.get<unknown, Blob>(url, {
+    responseType: "blob",
+    timeout: 120000
+  });
+}
+
 /** 上传文件（multipart）：boundary 由 axios 自己生成，调用方不要手写 Content-Type */
 export function upload<T>(url: string, form: FormData, timeoutMs?: number) {
   return service.post<unknown, T>(url, form, timeoutMs ? { timeout: timeoutMs } : undefined);

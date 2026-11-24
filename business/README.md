@@ -181,6 +181,10 @@ GET    /api/tasks                 POST   /api/tasks
 GET    /api/tasks/stats
 GET    /api/tasks/{id}            PUT    /api/tasks/{id}       DELETE /api/tasks/{id}
 GET    /api/tasks/{id}/events      # 任务事件流（进度 / 定位异常 / 指令留痕）
+GET    /api/tasks/{id}/recordings  # 任务录像（航点录像 / 全程录像切片）
+POST   /api/recordings/ingest      # 设备客户端回传 mp4（multipart：file + meta）
+GET    /api/recordings/{id}/file   # 播放 / 下载（支持 Range）
+DELETE /api/recordings/{id}        # 删除录像（文件 + 记录）
 PUT    /api/tasks/{id}/status
 POST   /api/tasks/{id}/dispatch     # 立即下发 / 重新下发（人工覆盖，不受发布状态限制）
 POST   /api/tasks/{id}/publish      # 发布计划（此后才到点自动执行）
@@ -714,6 +718,49 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
   设备页通过 `GET /api/dogDevice/{id}/mediaSyncStatus` 轮询；pending 超过 10 分钟
   没有回报就显示「无回报」，允许重新下发（同一 `requestId` 在跑时不会重复下发）。
 
+## 巡检录像（航点「录像采集」/ 航段「全程录像」）
+
+路线编辑器里有两类录像动作：
+
+| 动作 | 挂在哪 | 参数 | 行为 |
+|---|---|---|---|
+| 录像采集 | 航点动作 | `recordSeconds`（3~300，默认 15） | 到点开录，**离开航点就停**（不足时长也提前收尾） |
+| 全程录像 | 行进任务（`legs[].actions`） | `recordSegmentSeconds`（30~1800，默认 300） | 任务一开始就录，跨航点一直录到终态 / 取消，按切片长度分段 |
+
+链路（录像本身在板端，平台只管存与回放）：
+
+```text
+路线动作 → task_dispatch 的 routeData（原样下发）
+  → 设备客户端在 5009 状态机上起停（`client/src/record.rs`）
+    → 板端 Agent POST /api/record/start|stop（`backpack_dashboard/backend/record.py`）
+      → ffmpeg 从本机 mediamtx 的 dogcam 拉流（-c copy，不重编码）→ RECORD_DIR/<计划>/<pt?-时间戳>.mp4
+        → 任务终态 / 客户端启动：GET /api/record/list → POST /api/recordings/ingest（multipart）
+          → 平台落盘 <recording_dir>/<设备>/<任务号>/…mp4 + 一条 task_recordings
+            → 上传成功才回调 /api/record/delete 删板端文件
+              → 任务详情「任务录像」播放 / 下载（GET /api/recordings/{id}/file，支持 Range）
+```
+
+要点：
+
+- **起停时机跟 5009**：航点录像在 `patrol.point_arrived` / `patrol.waiting` 起，
+  离开航点（`patrol.navigating` 等）停；全程录像在这条任务的第一个非终态帧起，
+  终态 / 取消 / 本地收尾停。和航点 AI、灯光同一套收口规则（见 `AGENTS.md`）。
+- **幂等**：5009 每 500ms 一帧，客户端按「(任务, 航点) 正在录 / 全程已在录」去重；
+  Agent 侧同一 `planId+scope+pointIndex` 重复 start 返回同一个任务。
+- **失败不影响巡检**：板端没升级（404）/ 磁盘不足 / ffmpeg 起不来都只打日志，
+  客户端记为 `unsupported`，本轮不再尝试；到点、上报、AI、灯光全部照旧。
+- **全程录像切片**：4G 上一次传几百 MB 必然断，所以按 `RECORD_SEGMENT_SECS`（板端）
+  切 mp4，客户端逐段上传；任何一段失败只影响那一段（失败的文件留 72h 等下一次）。
+- **谁读板端磁盘**：客户端与 Agent 同机，`/api/record/list` 回绝对路径，客户端直接读文件
+  上传；Agent 不对外提供 mp4 下载（公网平台够不到板端）。
+- **平台侧留存**：`recording_keep_days`（默认 30，`0` = 不清理）由 `schedule::sweep`
+  每分钟顺手清超期的行 + 文件；平台只存**相对路径**，接口从不回绝对目录。
+- **为什么不进中台「媒体资源」**：那边是 AI 存证**训练图**（JPG/PNG、按 sha256 去重、
+  打包导出），视频是任务执行结果，体积 / 留存 / 使用方式都不同。
+- 板端目录 / 开关：`[backpack]` 之外的 `RECORD_*` 环境变量见
+  `business/backpack_dashboard/AGENTS.md`「录像」一节；客户端可用 `--no-record`
+  或 `ROBODOG_RECORD_ENABLED=0` 整体关掉。
+
 ## 路线数据模型
 
 路线保存在 `routes.route_data`（JSON），结构为：
@@ -726,11 +773,14 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
     { "name": "配电柜测温点", "x": 212, "y": 294, "dwell": 15, "radius": 0.3,
       "must": true, "heading": 90, "onFail": "重试 2 次",
       "actions": [{ "type": "红外测温", "param": "云台 P90", "trigger": "停留后执行",
-                    "threshold": "> 65℃ 生成告警", "retry": 2 }] }
+                    "threshold": "> 65℃ 生成告警", "retry": 2 },
+                  { "type": "录像采集", "param": "1080P / 25fps / 15s",
+                    "recordSeconds": 15 }] }
   ],
   "legs": [
     { "mode": "沿道路", "speed": 1.2, "avoid": "标准",
-      "actions": [{ "type": "全程录像", "param": "1080P / 25fps / 连续" }] }
+      "actions": [{ "type": "全程录像", "param": "1080P / 25fps / 连续",
+                    "recordSegmentSeconds": 300 }] }
   ],
   "returnLeg": { "mode": "沿道路", "speed": 1.5, "avoid": "标准", "actions": [] }
 }
@@ -738,6 +788,10 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 
 后端在保存时重新计算 `point_count`、`distance_m`、`duration_s`、`battery_pct`，
 校验与发布接口直接读取该 JSON。
+
+录像动作的两个参数字段（`recordSeconds` / `recordSegmentSeconds`）只是**记录配的时长**，
+真正起停由客户端按 5009 状态机调板端 Agent，见上文「巡检录像」。老数据没有这两个字段时
+客户端从 `param` 文本里读秒数（默认航点 15s / 切片 300s）。
 
 控制台「路线编排 → 属性配置」里，已配置的航点动作和行进任务卡片上都有**修改**按钮：
 点开复用同一个动作表单（类型 / 执行参数 / 场景与类别 / 检测类型与数量 / 触发时机 /
@@ -1101,6 +1155,8 @@ service_token = "change-me"
 | `ROBODOG_ZENTAI_USER` | 空 | **兼容模式**用：没有共享令牌时才需要中台账号（登录换 JWT）。只配令牌时可删 |
 | `ROBODOG_ZENTAI_PASSWORD` | 空 | 兼容模式用的中台账号密码（明文，服务端 AES 加密后提交；建议改用共享令牌） |
 | `ROBODOG_INGEST_DIR` | `server/data/map_ingest` | 回传地图包的本地留档目录 |
+| `ROBODOG_RECORDING_DIR` | `server/data/recordings` | 巡检录像（航点 / 全程）落盘目录。视频比图大得多，正式机建议指到大盘 |
+| `ROBODOG_RECORDING_KEEP_DAYS` | `30` | 录像保留天数（`0` = 不自动清理）；超期的行 + 文件由计划扫描每分钟收掉 |
 | `ROBODOG_SERVICE_TOKEN` | 空 | 与中台之间的共享服务令牌：调中台内部接口 `/api/dogInternal/*`、反向控制信道握手。需与中台 `APP_DOG__BUSINESS_API_TOKEN` 一致 |
 | `ROBODOG_ZENTAI_WS_URL` | 空 | 反向控制信道的中台地址，如 `ws://10.0.0.8:3000`。与 `ROBODOG_SERVICE_TOKEN` 同时具备才建立信道；为空时走「中台直连 HTTP」 |
 | `ROBODOG_SERVER_CONFIG` | 空 | 指定配置文件路径；不设置时读取当前目录的 `server.toml`（不存在则只用环境变量） |

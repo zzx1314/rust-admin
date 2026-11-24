@@ -11,6 +11,7 @@ use crate::handlers::handle_server_message;
 use crate::lights::PointLights;
 use crate::maps::MapSyncRunning;
 use crate::maps::sync_maps_from_robot;
+use crate::record::Recorder;
 use crate::report::ProgressReporter;
 use crate::report::progress_pct;
 use crate::state::ActiveTask;
@@ -193,6 +194,24 @@ pub(crate) async fn run_client(
         );
     }
 
+    // 航点 / 航段录像：起停都在 5009 状态机上（`record` 模块），这里只建运行态。
+    // 与 AI / 灯光共用同一个板端 Agent 地址，但开关独立（`--no-record`）。
+    let recorder = Arc::new(Recorder::new(
+        Arc::new(config.clone()),
+        config.record_enabled,
+    ));
+    if config.record_enabled {
+        info!(
+            "航点 / 航段录像已启用：板端 Agent = {}（到点按路线动作起 ffmpeg，任务终态回传平台）",
+            recorder.agent()
+        );
+        // 上次没传完的录像（断网 / 客户端重启）：连上平台之后由这里补传，
+        // 不必等下一轮任务。板端文件上传成功才删，失败留着下次再试。
+        recorder.sync_pending();
+    } else {
+        info!("航点 / 航段录像已关闭（--no-record / ROBODOG_RECORD_ENABLED=0）");
+    }
+
     // 启动时兜一把残留：`detect_jobs` 下的计划目录本该在任务结束时删（`finish_plan`），
     // 但客户端被 kill / 断电时收尾没跑到，那些目录就永远留在板子上。这里只清「早就
     // 该走了」的（`STALE_PLAN_AGE`），不碰正在跑的和刚跑完的。
@@ -208,6 +227,7 @@ pub(crate) async fn run_client(
         config: Arc::new(config.clone()),
         ai: ai.clone(),
         lights: lights.clone(),
+        recorder: recorder.clone(),
         out_tx: out_tx.clone(),
         state: state.clone(),
         active: active.clone(),
@@ -307,6 +327,7 @@ pub(crate) async fn run_client(
                             &body_reconnect_tx,
                             &ai,
                             &lights,
+                            &recorder,
                             &relay,
                         ).await;
                     }

@@ -43,6 +43,7 @@ backend/
 ├── stream.py         4 路 USB ffmpeg 推流编排（h264_rkmpp → libx264 回退）
 ├── telemetry.py      SHT4x/4G/WiFi/环境/SSD/风扇/聆思 采集
 ├── control.py        LED 闪烁 / 补光开关
+├── record.py         航点 / 航段录像（ffmpeg 从本机 mediamtx 拉 dogcam，落 mp4 + 边车）
 ├── buttons.py        SOS/STOP evdev 监听
 ├── cjk_font.py       画框中文字模（由 backend/tools/gen_cjk_font.py 生成）
 ├── start.sh          板端启动：camera-init → 复用 snap mediamtx → Agent
@@ -73,6 +74,9 @@ python3 business/backpack_dashboard/backend/tools/plan_count_selftest.py
 
 # 计划灯光自检（夜间时间窗 / 白天跳过 / GPIO+LED / 看门狗，改 control.py 后必跑）
 python3 business/backpack_dashboard/backend/tools/lights_selftest.py
+
+# 录像状态机自检（起停 / 幂等 / 清单 / 删除 / 超期清盘，改 record.py 后必跑；不需要相机）
+python3 business/backpack_dashboard/backend/tools/record_selftest.py
 
 # 本地接口链路（模拟 Agent，不需要板子）
 cd deploy/backpack-sim && python3 run.py up && python3 run.py smoke
@@ -110,6 +114,38 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
 ```
 
 重启顺序：`camera-init` → `backpack-agent` → `backpack-relay`（见 `deploy/backpack-246.md` §7）。
+
+## 录像（航点「录像采集」/ 航段「全程录像」）
+
+板端只负责「按客户端的指令起停 ffmpeg」和「落盘」，起停时机全在设备客户端
+（5009 状态机）：`POST /api/record/start|stop`、`GET /api/record/list|status`、
+`POST /api/record/delete`，实现在 `backend/record.py`，客户端在
+`business/client/src/record.rs`（同机 `127.0.0.1:8000` 调用，**不经平台隧道**）。
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `RECORD_DIR` | `/media/media-data/record` | 落盘根目录（SSD；不要指到 eMMC） |
+| `RECORD_SOURCE_CAM` | `dogcam` | 录像源：逻辑摄像头名，`dogcam` 按当前档位选 `dogcam`/`dogcam720` |
+| `RECORD_RTSP_HOST` | `127.0.0.1` | 本机 mediamtx |
+| `RECORD_POINT_DEFAULT_SECS` / `RECORD_POINT_MAX_SECS` | `15` / `300` | 航点录像默认 / 上限（路线动作可覆盖） |
+| `RECORD_SEGMENT_SECS` | `300` | 全程录像切片长度（一段一个 mp4，逐段回传） |
+| `RECORD_TASK_MAX_SECS` | `7200` | 全程录像兜底上限（客户端被杀时防跑飞） |
+| `RECORD_RETENTION_HOURS` | `72` | 没传走的录像保留多久 |
+| `RECORD_MIN_FREE_MB` | `512` | 剩余空间低于它不开新录像（写满会连 AI 存证一起丢） |
+| `RECORD_TRANSCODE` | `0` | `1` = 重编码（源不是 H264 时）；默认 `-c copy` 不抢 MPP |
+| `RECORD_LOG` | `/tmp/record_ffmpeg.log` | ffmpeg 的 stderr（追加）。「录像没文件」先看它 |
+
+约定：
+
+- **不重编码**：源已经是 H264，`-c copy` 封装成 mp4，不与实时视频抢 MPP；
+  `-movflags +faststart` 让浏览器边下边播。
+- **文件名 + 边车**：`RECORD_DIR/<planId>/<pt<n>|task>-<时间戳>.mp4`，停下时写同名
+  `.json`（planId / scope / pointIndex / 起止时间 / 时长）。客户端按边车拼回传元数据，
+  传成功才调 `/api/record/delete` 删文件。
+- **`list` 不返回正在录的文件**：客户端可能传半截 mp4；`stop` 会等 ffmpeg 写完
+  边车再返回（`job.finished`），所以「停 → list」是安全的。
+- **`delete` 只认 `<planId>/<文件名>.mp4`**：路径穿越、`..`、非 mp4 一律拒绝。
+- 录像源 URL 可能含账号密码（`DOG_RTSP_URL`），**不进接口、不进日志**。
 
 ## 代码约定
 

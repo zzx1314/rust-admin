@@ -259,6 +259,44 @@ export interface RoutePointAction {
    * 同上：离开航点 / 任务结束时关；计划「仅夜间自动开灯」勾上时只在夜间开。
    */
   lightLed?: boolean;
+  /**
+   * 「录像采集」专用：这个航点录多久（秒，3~300，默认 15）。
+   *
+   * 板端 Agent 到点起 ffmpeg（本机 mediamtx 的 dogcam），离开航点就停；
+   * 老数据没有这个字段时服务端/客户端从 `param` 文本里读（「1080P / 25fps / 15s」）。
+   */
+  recordSeconds?: number;
+  /**
+   * 「全程录像」专用：板端切片长度（秒，30~1800，默认 300）。
+   *
+   * 全程录像跨航点一直录到任务终态；按这个长度切 mp4，客户端逐段回传到平台，
+   * 弱网断一段只重传一段。
+   */
+  recordSegmentSeconds?: number;
+}
+
+/**
+ * 巡检录像（航点「录像采集」/ 航段「全程录像」）。
+ *
+ * 板端 Agent 落 mp4 → 设备客户端回传 → 任务详情「任务录像」播放 / 下载。
+ * `scope = "point"` 是航点录像（`pointIndex` 有值），`"task"` 是全程切片（`pointIndex = -1`）。
+ */
+export interface TaskRecording {
+  id: number;
+  taskId: number | null;
+  taskCode: string;
+  deviceCode: string;
+  planId: string | null;
+  pointIndex: number;
+  pointName: string | null;
+  scope: "point" | "task";
+  fileName: string;
+  fileSize: number;
+  /** 录像时长（秒） */
+  durationSec: number;
+  startedAt: string | null;
+  endedAt: string | null;
+  createdAt: string;
 }
 
 /** AI 识别的两类任务：检测是否存在 / 检测数量是否正确 */

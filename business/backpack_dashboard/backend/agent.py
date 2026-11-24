@@ -50,6 +50,13 @@
                                  "planId":"TK-..","pointIndex":3}；
                                  `nightOnly` 且不在夜间窗内 → 跳过（返回 skipped=daytime）
 - POST /api/lights/off        -> [航点/计划] 关灯 {"reason":"已离开航点"}
+- GET  /api/record/status     -> 录像运行态（正在录的 job / 目录 / 剩余空间，不含源 URL）
+- POST /api/record/start      -> [航点/航段] 开始录像 {"planId","scope":"point|task",
+                                 "pointIndex","pointName","seconds","segmentSeconds"}；
+                                 航点录像到点自动停，全程录像切片落盘直到 /api/record/stop
+- POST /api/record/stop       -> [航点/航段] 停止录像 {"planId","scope","pointIndex","reason"}
+- GET  /api/record/list       -> 待回传的录像清单（?planId= 只列该计划）
+- POST /api/record/delete     -> 上传成功后删板端文件 {"names":["<planId>/<file>.mp4"]}
 """
 import os
 import json
@@ -72,6 +79,7 @@ import relay
 import buttons
 import location
 import detect
+import record
 
 FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
 
@@ -158,7 +166,13 @@ async def lifespan(app: FastAPI):
     button_loop()
     # 检测管理器只注入 SSE 发布函数，不启动任何进程/线程（默认关闭）
     detect.manager.set_publisher(broadcaster.publish)
+    # 航点 / 航段录像：只在客户端调用时才起 ffmpeg；这里先清一次超期残留
+    record.start_sweeper()
     yield
+    try:
+        record.stop_all("Agent 退出")
+    except Exception:
+        pass
     try:
         detect.manager.stop()
     except Exception:
@@ -670,6 +684,62 @@ async def lights_off(request: Request):
     b = await _detect_body(request)
     r = await asyncio.to_thread(control.lights_off, str(b.get("reason") or "计划结束"))
     return JSONResponse(r)
+
+
+@app.get("/api/record/status")
+async def record_status():
+    """录像运行态：正在录的 job、落盘目录、当前源与剩余空间。
+
+    源 URL 含账号密码，**不返回**（只给逻辑摄像头名）。
+    """
+    return JSONResponse(record.status(), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/record/start")
+async def record_start(request: Request):
+    """[航点 / 航段] 开始录像。
+
+    - `scope="point"`：到点录 `seconds` 秒自动停（路线动作里的「录像采集」）；
+    - `scope="task"`：全程录像，按 `RECORD_SEGMENT_SECS` 切片，客户端在任务终态调
+      `/api/record/stop`。
+
+    同一计划同一航点重复调用是幂等的（客户端跟着 5009 每 500ms 一帧推进度，
+    不做去重会不停起 ffmpeg）。起不来时回 400 + 可读原因（磁盘不足 / 目录不可写）。
+    """
+    b = await _detect_body(request)
+    r = await asyncio.to_thread(record.start, b)
+    return JSONResponse(r, status_code=200 if r.get("ok") else 400)
+
+
+@app.post("/api/record/stop")
+async def record_stop(request: Request):
+    """[航点 / 航段] 停止录像：离开航点、任务终态、任务取消。
+
+    同步等 ffmpeg 写完 mp4 + 边车再返回，客户端紧接着的 `/api/record/list`
+    才能看到完整文件。
+    """
+    b = await _detect_body(request)
+    r = await asyncio.to_thread(record.stop, b)
+    return JSONResponse(r, status_code=200 if r.get("ok") else 400)
+
+
+@app.get("/api/record/list")
+async def record_list(planId: str = ""):
+    """待回传的录像清单（客户端上传前调用）。
+
+    每条含 `name`（`<planId>/<文件名>`，删除时原样回传）、`scope`、`pointIndex`、
+    起止时间与时长。正在录的文件不返回，避免传半截 mp4。
+    """
+    return JSONResponse({"files": record.list_files(planId or None)},
+                        headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/record/delete")
+async def record_delete(request: Request):
+    """上传成功后删板端文件（只认 `<planId>/<文件名>.mp4` 这种形状）。"""
+    b = await _detect_body(request)
+    r = await asyncio.to_thread(record.delete, b)
+    return JSONResponse(r, status_code=200 if r.get("ok") else 400)
 
 
 @app.get("/api/events")

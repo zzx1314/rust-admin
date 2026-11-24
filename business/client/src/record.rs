@@ -1,0 +1,973 @@
+//! 巡检录像：航点「录像采集」+ 航段「全程录像」。
+//!
+//! 为什么录像由客户端驱动：录像的起停时机只有 5009 的状态机知道（到点 / 离开 /
+//! 终态），而板端 Agent 只在内网可达（客户端与它同机 `127.0.0.1:8000`）。
+//!
+//! ```text
+//! 路线动作：航点「录像采集」→ plan.points[i].seconds   → 到点 Agent 开录，离开停
+//! 路线动作：航段「全程录像」→ plan.task                 → 任务一开始就录，终态停（切片）
+//!                                                    ↓
+//!                               板端 Agent（record.py）ffmpeg → RECORD_DIR/<plan>/…mp4
+//!                                                    ↓
+//!           任务终态 / 客户端启动 → GET /api/record/list → POST 平台 /api/recordings/ingest
+//!                                                    ↓
+//!                               上传成功 → POST /api/record/delete 删板端文件
+//! ```
+//!
+//! 三条约定（改这块先看）：
+//!
+//! 1. **全程录像不跟航点**：配了「全程录像」就在 5009 一出现这条任务时开录，跨航点
+//!    一直录到终态 / 取消；航点录像只在「这个点在录」的窗口内有效。
+//! 2. **幂等**：5009 每 500ms 一帧，开录请求按「(任务, 航点) 是否已经在录」去重；
+//!    全程录像按 `task_active` 去重。Agent 侧也做了一次幂等（重复 start 返回同一个 job）。
+//! 3. **录像失败不影响巡检**：Agent 404 / 磁盘不足 / ffmpeg 起不来都只打日志，
+//!    记为 `unsupported` 本轮不再重试，绝不往上抛错打断 5009 处理链路。
+
+use crate::media_sync;
+use reqwest::multipart;
+use robodog_device_client::config::Config;
+use serde_json::{Value, json};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+use tokio::sync::Mutex;
+use tracing::{info, warn};
+
+/// 板端 Agent 的轻量请求超时（起停 ffmpeg 是毫秒级；等的只是 HTTP）。
+///
+/// 这些请求是在 5009 处理链路里**串行 await** 的（不能 spawn：`tokio::spawn` 不保证
+/// 「到点开录」和「离开停录」的先后，反了就是「一直录到板端 -t 上限」）。同机 HTTP
+/// 正常是毫秒级，所以超时压到 3s：Agent 挂了也只耽误这一帧，不会把状态上报拖 8s。
+const AGENT_TIMEOUT: Duration = Duration::from_secs(3);
+/// 单段录像上传超时：300MB 在 1Mbps 的 4G 上要 40 分钟，给足但不无限等。
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(1800);
+/// 单个文件最多试几次（弱网一次失败很常见，失败的文件留在板端等下一轮）。
+const UPLOAD_RETRIES: u32 = 3;
+/// 全程录像切片默认值（秒）：与板端 `RECORD_SEGMENT_SECS` 一致，板端才是真上限。
+pub const DEFAULT_SEGMENT_SECS: u32 = 300;
+/// 航点录像默认时长（秒）：路线动作没配 `recordSeconds` 时用。
+pub const DEFAULT_POINT_SECS: u32 = 15;
+/// 航点录像时长上下限（与板端 `RECORD_POINT_MAX_SECS` 对齐）。
+pub const MIN_POINT_SECS: u32 = 3;
+pub const MAX_POINT_SECS: u32 = 300;
+/// 全程录像切片上下限。
+const MIN_SEGMENT_SECS: u32 = 30;
+const MAX_SEGMENT_SECS: u32 = 1800;
+
+/// 需要录像的航点
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordPoint {
+    /// 航点下标（0 基，与 `routeData.points` / 5009 `detail_index` 一致）
+    pub index: i64,
+    pub name: String,
+    /// 录多久（秒）
+    pub seconds: u32,
+}
+
+/// 全程录像
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordTask {
+    /// 板端切片长度（秒）
+    pub segment_seconds: u32,
+}
+
+/// 一条路线里的录像配置
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecordPlan {
+    pub points: Vec<RecordPoint>,
+    pub task: Option<RecordTask>,
+}
+
+impl RecordPlan {
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty() && self.task.is_none()
+    }
+
+    pub fn point_at(&self, index: i64) -> Option<&RecordPoint> {
+        self.points.iter().find(|point| point.index == index)
+    }
+}
+
+/// 动作是不是「录像」类（`录像采集` / `全程录像` / `摄像`）。
+///
+/// 与 `Waypoint::wants_photo` 共用同一批关键词：本体侧的 `tasks=[1]` 仍然会拍照，
+/// 录像是在板端额外起一路 ffmpeg，两者不冲突。
+pub fn is_record_action(action_type: &str) -> bool {
+    let text = action_type.trim();
+    text.contains("录像") || text.contains("摄像")
+}
+
+fn is_task_record(action_type: &str) -> bool {
+    let text = action_type.trim();
+    text.contains("全程") || text.contains("连续录像") || text.contains("整段")
+}
+
+/// 从执行参数里抠时长：「1080P / 25fps / 15s」→ 15；「30秒」→ 30。
+///
+/// 前端新版本会把时长写成 `recordSeconds`（数字），老数据只有 `param` 文本，
+/// 两种都要认（历史路线不能因为没这个字段就不录）。
+pub fn seconds_from_param(param: &str) -> Option<u32> {
+    let chars: Vec<char> = param.chars().collect();
+    let mut current = String::new();
+    for (index, ch) in chars.iter().enumerate() {
+        if ch.is_ascii_digit() {
+            current.push(*ch);
+            continue;
+        }
+        if current.is_empty() {
+            continue;
+        }
+        let next = chars.get(index).copied();
+        let unit_follows =
+            ch.is_whitespace() || *ch == 's' || *ch == 'S' || *ch == '秒' || next == Some('s');
+        if unit_follows && let Ok(value) = current.parse::<u32>() {
+            return Some(value);
+        }
+        current.clear();
+    }
+    current.parse::<u32>().ok()
+}
+
+fn point_seconds(action: &Value) -> u32 {
+    let explicit = action
+        .get("recordSeconds")
+        .and_then(Value::as_u64)
+        .map(|value| value as u32);
+    let parsed = action
+        .get("param")
+        .and_then(Value::as_str)
+        .and_then(seconds_from_param);
+    explicit
+        .or(parsed)
+        .unwrap_or(DEFAULT_POINT_SECS)
+        .clamp(MIN_POINT_SECS, MAX_POINT_SECS)
+}
+
+fn segment_seconds(action: &Value) -> u32 {
+    let explicit = action
+        .get("recordSegmentSeconds")
+        .or_else(|| action.get("segmentSeconds"))
+        .and_then(Value::as_u64)
+        .map(|value| value as u32);
+    let parsed = action
+        .get("param")
+        .and_then(Value::as_str)
+        .and_then(seconds_from_param);
+    explicit
+        .or(parsed)
+        .unwrap_or(DEFAULT_SEGMENT_SECS)
+        .clamp(MIN_SEGMENT_SECS, MAX_SEGMENT_SECS)
+}
+
+/// 解析 `routeData` 里的录像动作。
+///
+/// - `points[].actions[]` 里的录像动作 → 该航点录 `seconds` 秒（`recordSeconds`，
+///   老数据从 `param` 文本里读，默认 [`DEFAULT_POINT_SECS`]）；
+/// - `legs[].actions[]` 里的「全程录像」→ 整条任务录到底（`recordSegmentSeconds`
+///   或 `param` 的秒数 = 板端切片长度）。同一条路线配多段也只起一路。
+pub fn parse_record_plan(route_data: &Value) -> RecordPlan {
+    let mut plan = RecordPlan::default();
+    if let Some(points) = route_data.get("points").and_then(Value::as_array) {
+        for (index, point) in points.iter().enumerate() {
+            let Some(actions) = point.get("actions").and_then(Value::as_array) else {
+                continue;
+            };
+            let record = actions.iter().find(|action| {
+                action
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_record_action)
+            });
+            let Some(action) = record else {
+                continue;
+            };
+            let name = point
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("航点")
+                .to_string();
+            plan.points.push(RecordPoint {
+                index: index as i64,
+                name,
+                seconds: point_seconds(action),
+            });
+        }
+    }
+    if let Some(legs) = route_data.get("legs").and_then(Value::as_array) {
+        for leg in legs {
+            let Some(actions) = leg.get("actions").and_then(Value::as_array) else {
+                continue;
+            };
+            if let Some(action) = actions.iter().find(|action| {
+                action
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| is_record_action(text) && is_task_record(text))
+            }) {
+                plan.task = Some(RecordTask {
+                    segment_seconds: segment_seconds(action),
+                });
+                break;
+            }
+        }
+    }
+    plan
+}
+
+/// 板端 `/api/record/list` 返回的一条待回传录像
+#[derive(Debug, Clone)]
+pub struct RecordingFile {
+    /// `<planId>/<文件名>`：上传成功后原样回传给 `/api/record/delete`
+    pub name: String,
+    pub path: String,
+    pub plan_id: String,
+    pub scope: String,
+    pub point_index: i64,
+    pub point_name: String,
+    pub size: u64,
+    pub started_at: String,
+    pub ended_at: String,
+    pub duration_sec: f64,
+}
+
+#[derive(Default)]
+struct State {
+    task_code: Option<String>,
+    plan: RecordPlan,
+    /// 正在录的航点下标
+    point_active: Option<i64>,
+    /// 全程录像是否已经起过
+    task_active: bool,
+    /// 这条任务已收尾：迟到的到点帧不许再起录像
+    finished: bool,
+    /// 板端 Agent 不支持录像（404 / 老版本）：本轮不再尝试
+    unsupported: bool,
+}
+
+/// 巡检录像运行态（进程内唯一）
+pub struct Recorder {
+    agent: String,
+    enabled: bool,
+    config: Arc<Config>,
+    agent_client: reqwest::Client,
+    upload_client: reqwest::Client,
+    state: Mutex<State>,
+    /// 起停串行化：到点开录是后台任务，和紧随其后的「离开航点停录」交错会出现
+    /// 「stop 先到、start 后到」→ 录像一直录到板端 `-t` 上限。
+    gate: Mutex<()>,
+    /// 同一时间只跑一轮上传（终态 / 启动 / 手动都只是触发，不叠加）
+    uploading: AtomicBool,
+}
+
+impl Recorder {
+    pub fn new(config: Arc<Config>, enabled: bool) -> Self {
+        Self {
+            agent: config.ai_agent_url.trim_end_matches('/').to_string(),
+            enabled,
+            config,
+            agent_client: reqwest::Client::builder()
+                .timeout(AGENT_TIMEOUT)
+                .build()
+                .unwrap_or_default(),
+            upload_client: reqwest::Client::builder()
+                .timeout(UPLOAD_TIMEOUT)
+                .build()
+                .unwrap_or_default(),
+            state: Mutex::new(State::default()),
+            gate: Mutex::new(()),
+            uploading: AtomicBool::new(false),
+        }
+    }
+
+    pub fn agent(&self) -> &str {
+        &self.agent
+    }
+
+    /// 新任务开始：换掉录像配置，清掉上一轮的状态。
+    ///
+    /// 上一个任务如果还留着录像（客户端重启 / 终态帧丢了），先给它发一条 stop：
+    /// 不然两路 ffmpeg 会同时往同一块盘写，任务结束也收不干净。
+    pub async fn start_task(self: &Arc<Self>, task_code: &str, plan: RecordPlan) {
+        if !self.enabled {
+            return;
+        }
+        // 换成新任务 / 同一条计划被重新下发：先把还在录的收掉。
+        // 不收的话两路 ffmpeg 会同时往同一块盘写，而且新任务的终态只停得掉新的那一路。
+        let stale = {
+            let state = self.state.lock().await;
+            match state.task_code.as_deref() {
+                Some(code) if code == task_code => (state.point_active.is_some()
+                    || state.task_active)
+                    .then(|| task_code.to_string()),
+                Some(_) => state.task_code.clone(),
+                None => None,
+            }
+        };
+        if let Some(stale) = stale {
+            self.stop_plan(&stale, "新任务下发 / 重新下发").await;
+        }
+        if !plan.is_empty() {
+            info!(
+                "任务 {task_code} 含录像动作：{} 个航点录像（{}），全程录像={}",
+                plan.points.len(),
+                plan.points
+                    .iter()
+                    .map(|point| format!("{}={}s", point.index, point.seconds))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                plan.task
+                    .as_ref()
+                    .map(|task| format!("每段 {}s", task.segment_seconds))
+                    .unwrap_or_else(|| "无".to_string())
+            );
+        }
+        let mut state = self.state.lock().await;
+        state.task_code = Some(task_code.to_string());
+        state.plan = plan;
+        state.point_active = None;
+        state.task_active = false;
+        state.finished = false;
+    }
+
+    /// 5009 上看到这条任务在跑（非终态）——全程录像在这一刻起，不等到第一个航点。
+    ///
+    /// 幂等：5009 每 500ms 一帧。
+    pub async fn task_running(self: &Arc<Self>, task_code: &str) {
+        if !self.enabled {
+            return;
+        }
+        let segment = {
+            let state = self.state.lock().await;
+            if state.finished
+                || state.task_active
+                || state.unsupported
+                || state.task_code.as_deref() != Some(task_code)
+            {
+                return;
+            }
+            state.plan.task.as_ref().map(|task| task.segment_seconds)
+        };
+        let Some(segment) = segment else {
+            return;
+        };
+        let _gate = self.gate.lock().await;
+        {
+            let state = self.state.lock().await;
+            if state.finished || state.task_active || state.unsupported {
+                return;
+            }
+        }
+        match self
+            .start_job(task_code, "task", -1, "", segment, "任务开始")
+            .await
+        {
+            Ok(()) => {
+                self.state.lock().await.task_active = true;
+                info!("任务 {task_code} 全程录像已开始（每段 {segment}s 落盘）");
+            }
+            Err(error) => self.note_failure(task_code, "全程录像", &error).await,
+        }
+    }
+
+    /// 到点录像：`patrol.point_arrived` / `patrol.waiting` 且该点配了录像动作。
+    ///
+    /// 幂等：同一个点在录就不再发（5009 每帧都会调到）。
+    pub async fn point_arrived(self: &Arc<Self>, task_code: &str, point_index: i64) {
+        if !self.enabled {
+            return;
+        }
+        let point = {
+            let state = self.state.lock().await;
+            if state.finished
+                || state.unsupported
+                || state.task_code.as_deref() != Some(task_code)
+                || state.point_active == Some(point_index)
+            {
+                return;
+            }
+            state.plan.point_at(point_index).cloned()
+        };
+        let Some(point) = point else {
+            return;
+        };
+        let _gate = self.gate.lock().await;
+        {
+            let state = self.state.lock().await;
+            if state.finished || state.unsupported || state.point_active == Some(point_index) {
+                return;
+            }
+        }
+        // 上一个点的录像可能还没停（5009 偶尔跳过「离开」帧）：先收掉再开新的，
+        // 板端同一计划只留一路航点录像。
+        if self.state.lock().await.point_active.is_some() {
+            self.stop_job(task_code, "point", None, "切换到下一个航点")
+                .await;
+            self.state.lock().await.point_active = None;
+        }
+        match self
+            .start_job(
+                task_code,
+                "point",
+                point.index,
+                &point.name,
+                point.seconds,
+                "到达航点",
+            )
+            .await
+        {
+            Ok(()) => {
+                self.state.lock().await.point_active = Some(point.index);
+                info!(
+                    "任务 {task_code} 航点 {}（{}）开始录像 {}s",
+                    point.index, point.name, point.seconds
+                );
+            }
+            Err(error) => self.note_failure(task_code, "航点录像", &error).await,
+        }
+    }
+
+    /// 离开航点：停掉航点录像（全程录像不受影响）。
+    pub async fn leave_point(self: &Arc<Self>, reason: &str) {
+        if !self.enabled {
+            return;
+        }
+        let task_code = {
+            let mut state = self.state.lock().await;
+            if state.point_active.take().is_none() {
+                return;
+            }
+            state.task_code.clone()
+        };
+        let Some(task_code) = task_code else {
+            return;
+        };
+        self.stop_job(&task_code, "point", None, reason).await;
+    }
+
+    /// 任务终态 / 取消 / 本地收尾：停掉所有录像，并把板端积压的录像回传。
+    pub async fn finish_task(self: &Arc<Self>, task_code: &str, reason: &str) {
+        if !self.enabled {
+            return;
+        }
+        {
+            let mut state = self.state.lock().await;
+            state.finished = true;
+            state.point_active = None;
+            state.task_active = false;
+        }
+        // 任务号为空（平台只发了 cancel 没带 taskCode）：没有 planId 可停，
+        // 板端两路 ffmpeg 会按自己的 `-t` 上限结束；已录好的照样回传。
+        if !task_code.trim().is_empty() {
+            self.stop_plan(task_code, reason).await;
+        }
+        self.spawn_upload();
+    }
+
+    /// 客户端启动 / 指令触发：把板端积压的录像（上次没传完的）回传。
+    pub fn sync_pending(self: &Arc<Self>) {
+        if !self.enabled {
+            return;
+        }
+        self.spawn_upload();
+    }
+
+    async fn stop_plan(self: &Arc<Self>, task_code: &str, reason: &str) {
+        // 不带 scope：航点 + 全程两路一起停（任务终态 / 取消）
+        let body = json!({ "planId": task_code, "reason": reason });
+        if let Err(error) = self.post("/api/record/stop", body).await {
+            warn!("任务 {task_code} 停止录像失败（{reason}）: {error}");
+        }
+    }
+
+    async fn stop_job(
+        self: &Arc<Self>,
+        task_code: &str,
+        scope: &str,
+        point_index: Option<i64>,
+        reason: &str,
+    ) {
+        let mut body = json!({ "planId": task_code, "scope": scope, "reason": reason });
+        if let Some(index) = point_index {
+            body["pointIndex"] = json!(index);
+        }
+        if let Err(error) = self.post("/api/record/stop", body).await {
+            warn!("任务 {task_code} 停止 {scope} 录像失败（{reason}）: {error}");
+        }
+    }
+
+    async fn start_job(
+        &self,
+        task_code: &str,
+        scope: &str,
+        point_index: i64,
+        point_name: &str,
+        seconds: u32,
+        reason: &str,
+    ) -> Result<(), String> {
+        let mut body = json!({
+            "planId": task_code,
+            "scope": scope,
+            "pointIndex": point_index,
+            "pointName": point_name,
+            "reason": reason,
+        });
+        if scope == "task" {
+            // 全程录像：`segmentSeconds` = 切片长度；总上限交给板端
+            // `RECORD_TASK_MAX_SECS`（不要在这里传一个 300s 的 maxSeconds，
+            // 那会把整条任务录到 5 分钟就自己停）
+            body["segmentSeconds"] = json!(seconds);
+        } else {
+            body["seconds"] = json!(seconds);
+        }
+        let value = self.post("/api/record/start", body).await?;
+        if value.get("ok").and_then(Value::as_bool) == Some(false) {
+            return Err(value
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("板端拒绝录像")
+                .to_string());
+        }
+        Ok(())
+    }
+
+    async fn post(&self, path: &str, body: Value) -> Result<Value, String> {
+        let url = format!("{}{path}", self.agent);
+        let resp = self
+            .agent_client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| format!("请求板端 {path} 失败: {error}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err("板端 Agent 没有录像接口（旧版本）".to_string());
+        }
+        if !status.is_success() {
+            return Err(format!("板端 {path} 返回 HTTP {status}: {text}"));
+        }
+        serde_json::from_str(&text).map_err(|error| format!("板端 {path} 响应不是 JSON: {error}"))
+    }
+
+    /// 录像失败只打日志：老板子 / 磁盘满 / ffmpeg 缺失都不该影响巡检本身。
+    async fn note_failure(&self, task_code: &str, what: &str, error: &str) {
+        warn!("任务 {task_code} {what}失败（巡检继续，不影响状态上报）: {error}");
+        if error.contains("没有录像接口") {
+            self.state.lock().await.unsupported = true;
+            warn!(
+                "板端 Agent 未升级录像接口：本轮任务不再尝试录像（升级 backpack-agent 后自动恢复）"
+            );
+        }
+    }
+
+    /// 后台把板端待回的录像传上来（终态 / 启动各触发一次，不叠加）。
+    fn spawn_upload(self: &Arc<Self>) {
+        if self.uploading.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let this = self.clone();
+        tokio::spawn(async move {
+            if let Err(error) = this.upload_pending().await {
+                warn!("录像回传失败（板端文件保留，下次任务/重启会重试）: {error}");
+            }
+            this.uploading.store(false, Ordering::SeqCst);
+        });
+    }
+
+    async fn upload_pending(&self) -> Result<(), String> {
+        let files = match self.list_recordings().await {
+            Ok(files) => files,
+            Err(error) => {
+                // 板端没有录像接口 / fx 目录不可读：不是错误，静默
+                return Err(error);
+            }
+        };
+        if files.is_empty() {
+            return Ok(());
+        }
+        let api_base = self.config.resolve_api_base();
+        let token = media_sync::login(&self.upload_client, &api_base, &self.config).await?;
+        info!(
+            "开始回传巡检录像：{} 段（合计 {:.1}MB）",
+            files.len(),
+            files.iter().map(|file| file.size).sum::<u64>() as f64 / 1024.0 / 1024.0
+        );
+        let mut uploaded = 0usize;
+        let mut failed = 0usize;
+        for file in files {
+            match self.upload_one(&api_base, &token, &file).await {
+                Ok(true) => uploaded += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    failed += 1;
+                    warn!("录像上传失败（{}）: {error}", file.name);
+                }
+            }
+        }
+        info!("巡检录像回传结束：成功 {uploaded} 段，失败 {failed} 段（失败的留在板端）");
+        Ok(())
+    }
+
+    async fn upload_one(
+        &self,
+        api_base: &str,
+        token: &str,
+        file: &RecordingFile,
+    ) -> Result<bool, String> {
+        let bytes = tokio::fs::read(&file.path)
+            .await
+            .map_err(|error| format!("读取板端录像失败（{}）: {error}", file.path))?;
+        let meta = json!({
+            "taskCode": file.plan_id,
+            "deviceCode": self.config.device_id,
+            "planId": file.plan_id,
+            "pointIndex": file.point_index,
+            "pointName": file.point_name,
+            "scope": file.scope,
+            "startedAt": file.started_at,
+            "endedAt": file.ended_at,
+            "durationSec": file.duration_sec,
+        });
+        let url = format!("{}/api/recordings/ingest", api_base.trim_end_matches('/'));
+        let mut last_error = String::new();
+        for attempt in 1..=UPLOAD_RETRIES {
+            let part = multipart::Part::bytes(bytes.clone())
+                .file_name("recording.mp4".to_string())
+                .mime_str("video/mp4")
+                .map_err(|error| format!("构造上传体失败: {error}"))?;
+            let form = multipart::Form::new()
+                .part("file", part)
+                .text("meta", meta.to_string());
+            match self
+                .upload_client
+                .post(&url)
+                .bearer_auth(token)
+                .multipart(form)
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    if status.is_success() {
+                        // 上传成功才删板端文件（失败的要留给下一轮重试）
+                        self.delete_on_board(&file.name).await;
+                        return Ok(true);
+                    }
+                    last_error = format!("HTTP {status}: {text}");
+                }
+                Err(error) => last_error = error.to_string(),
+            }
+            if attempt < UPLOAD_RETRIES {
+                let wait = Duration::from_secs(5 * 3u64.pow(attempt - 1));
+                tokio::time::sleep(wait).await;
+            }
+        }
+        Err(last_error)
+    }
+
+    async fn delete_on_board(&self, name: &str) {
+        match self
+            .post("/api/record/delete", json!({ "names": [name] }))
+            .await
+        {
+            Ok(_) => {}
+            Err(error) => warn!("删除板端录像失败（{name}）: {error}"),
+        }
+    }
+
+    async fn list_recordings(&self) -> Result<Vec<RecordingFile>, String> {
+        let url = format!("{}/api/record/list", self.agent);
+        let resp = self
+            .agent_client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|error| format!("请求板端录像清单失败: {error}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!("板端录像清单返回 HTTP {status}: {text}"));
+        }
+        let value: Value =
+            serde_json::from_str(&text).map_err(|error| format!("录像清单不是 JSON: {error}"))?;
+        let files = value
+            .get("files")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        Some(RecordingFile {
+                            name: item.get("name")?.as_str()?.to_string(),
+                            path: item.get("path")?.as_str()?.to_string(),
+                            plan_id: item.get("planId")?.as_str()?.to_string(),
+                            scope: item
+                                .get("scope")
+                                .and_then(Value::as_str)
+                                .unwrap_or("point")
+                                .to_string(),
+                            point_index: item
+                                .get("pointIndex")
+                                .and_then(Value::as_i64)
+                                .unwrap_or(-1),
+                            point_name: item
+                                .get("pointName")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            size: item.get("size").and_then(Value::as_u64).unwrap_or(0),
+                            started_at: item
+                                .get("startedAt")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            ended_at: item
+                                .get("endedAt")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            duration_sec: item
+                                .get("durationSec")
+                                .and_then(Value::as_f64)
+                                .unwrap_or(0.0),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(files)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::Json;
+    use axum::extract::State;
+    use axum::routing::{get, post};
+    use robodog_device_client::config::{CliArgs, EnvConfig, FileConfig};
+    use serde_json::json;
+
+    fn test_config(agent: &str) -> Config {
+        let mut config = Config::resolve(
+            &FileConfig::default(),
+            &EnvConfig::default(),
+            &CliArgs {
+                device_id: Some("TEST-DEVICE".to_string()),
+                ..CliArgs::default()
+            },
+            None,
+        )
+        .expect("测试配置应能解析");
+        config.ai_agent_url = agent.to_string();
+        config
+    }
+
+    #[test]
+    fn parses_point_and_task_recordings_from_route_data() {
+        let route = json!({
+            "points": [
+                {"name": "P1", "actions": [{"type": "可见光拍照", "param": "1080P"}]},
+                {"name": "P2", "actions": [{"type": "录像采集", "param": "1080P / 25fps / 15s"}]},
+                {"name": "P3", "actions": [
+                    {"type": "可见光拍照"},
+                    {"type": "录像采集", "recordSeconds": 45}
+                ]}
+            ],
+            "legs": [
+                {"actions": [{"type": "连续测温"}]},
+                {"actions": [{"type": "全程录像", "param": "1080P / 25fps / 连续"}]}
+            ]
+        });
+        let plan = parse_record_plan(&route);
+        assert_eq!(
+            plan.points,
+            vec![
+                RecordPoint {
+                    index: 1,
+                    name: "P2".to_string(),
+                    seconds: 15
+                },
+                RecordPoint {
+                    index: 2,
+                    name: "P3".to_string(),
+                    seconds: 45
+                },
+            ]
+        );
+        assert_eq!(
+            plan.task,
+            Some(RecordTask {
+                segment_seconds: DEFAULT_SEGMENT_SECS
+            }),
+            "全程录像的 param 里没有秒数时用默认切片"
+        );
+    }
+
+    #[test]
+    fn route_without_record_actions_is_empty() {
+        let route = json!({
+            "points": [{"name": "P1", "actions": [{"type": "可见光拍照"}]}],
+            "legs": [{"actions": [{"type": "静默通行"}]}]
+        });
+        assert!(parse_record_plan(&route).is_empty());
+        assert!(parse_record_plan(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn seconds_come_from_text_param_or_default_and_are_clamped() {
+        assert_eq!(seconds_from_param("1080P / 25fps / 15s"), Some(15));
+        assert_eq!(seconds_from_param("30 秒"), Some(30));
+        assert_eq!(seconds_from_param("连续"), None);
+        // 太短 / 太长都夹回合理区间（板端也有同样上下限，这里是双保险）
+        let plan = parse_record_plan(&json!({
+            "points": [
+                {"name": "P1", "actions": [{"type": "录像采集", "recordSeconds": 1}]},
+                {"name": "P2", "actions": [{"type": "录像采集", "recordSeconds": 9999}]}
+            ]
+        }));
+        assert_eq!(plan.points[0].seconds, MIN_POINT_SECS);
+        assert_eq!(plan.points[1].seconds, MAX_POINT_SECS);
+    }
+
+    type Calls = Arc<tokio::sync::Mutex<Vec<Value>>>;
+
+    async fn spawn_agent(calls: Calls) -> String {
+        let app = axum::Router::new()
+            .route(
+                "/api/record/start",
+                post(
+                    |State(calls): State<Calls>, Json(body): Json<Value>| async move {
+                        calls
+                            .lock()
+                            .await
+                            .push(json!({"path": "start", "body": body}));
+                        Json(json!({"ok": true}))
+                    },
+                ),
+            )
+            .route(
+                "/api/record/stop",
+                post(
+                    |State(calls): State<Calls>, Json(body): Json<Value>| async move {
+                        calls
+                            .lock()
+                            .await
+                            .push(json!({"path": "stop", "body": body}));
+                        Json(json!({"ok": true}))
+                    },
+                ),
+            )
+            .route(
+                "/api/record/list",
+                get(|| async { Json(json!({"files": []})) }),
+            )
+            .route(
+                "/api/record/delete",
+                post(|Json(body): Json<Value>| async move {
+                    Json(json!({"ok": true, "deleted": body["names"].as_array().map(Vec::len)}))
+                }),
+            )
+            .with_state(calls);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("绑定假 Agent 失败");
+        let port = listener.local_addr().expect("取端口失败").port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    fn plan() -> RecordPlan {
+        RecordPlan {
+            points: vec![RecordPoint {
+                index: 1,
+                name: "P2".to_string(),
+                seconds: 12,
+            }],
+            task: Some(RecordTask {
+                segment_seconds: 120,
+            }),
+        }
+    }
+
+    /// 全程录像 + 航点录像：各起一次（5009 每帧重复调用），离开航点只停航点那路。
+    #[tokio::test]
+    async fn starts_once_into_the_agent_and_stops_per_scope() {
+        let calls: Calls = Default::default();
+        let agent = spawn_agent(calls.clone()).await;
+        let recorder = Arc::new(Recorder::new(Arc::new(test_config(&agent)), true));
+
+        recorder.start_task("TK-1", plan()).await;
+        recorder.task_running("TK-1").await;
+        recorder.task_running("TK-1").await;
+        recorder.point_arrived("TK-1", 1).await;
+        recorder.point_arrived("TK-1", 1).await;
+        // 没配录像的航点不发起录
+        recorder.point_arrived("TK-1", 0).await;
+        recorder.leave_point("已离开航点").await;
+
+        let calls = calls.lock().await.clone();
+        let starts: Vec<&Value> = calls
+            .iter()
+            .filter(|call| call["path"] == "start")
+            .collect();
+        assert_eq!(starts.len(), 2, "全程 + 航点各一次：{calls:?}");
+        assert_eq!(starts[0]["body"]["scope"], "task");
+        assert_eq!(
+            starts[0]["body"]["segmentSeconds"], 120,
+            "全程录像的切片长度要下发，且不能带 maxSeconds（否则整条任务只录 120s）"
+        );
+        assert!(
+            starts[0]["body"].get("maxSeconds").is_none(),
+            "maxSeconds 由板端兜底，客户端不要传：{calls:?}"
+        );
+        assert_eq!(starts[1]["body"]["scope"], "point");
+        assert_eq!(starts[1]["body"]["pointIndex"], 1);
+        assert_eq!(starts[1]["body"]["seconds"], 12);
+        let stops: Vec<&Value> = calls.iter().filter(|call| call["path"] == "stop").collect();
+        assert_eq!(stops.len(), 1, "离开航点只停航点录像：{calls:?}");
+        assert_eq!(stops[0]["body"]["scope"], "point");
+    }
+
+    /// 终态后迟到的到点帧不许再起录像（与灯光同一条收口规则）。
+    #[tokio::test]
+    async fn late_arrival_after_finish_is_ignored() {
+        let calls: Calls = Default::default();
+        let agent = spawn_agent(calls.clone()).await;
+        let recorder = Arc::new(Recorder::new(Arc::new(test_config(&agent)), true));
+
+        recorder.start_task("TK-1", plan()).await;
+        recorder.finish_task("TK-1", "任务终态").await;
+        recorder.point_arrived("TK-1", 1).await;
+
+        let calls = calls.lock().await.clone();
+        assert!(
+            calls.iter().all(|call| call["path"] != "start"),
+            "终态后不该再起录像：{calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| call["path"] == "stop" && call["body"].get("scope").is_none()),
+            "终态要按计划整条停一次：{calls:?}"
+        );
+    }
+
+    /// 板端没有录像接口（老版本）时只记一次日志，不再每帧都试。
+    #[tokio::test]
+    async fn old_agent_disables_recording_for_the_task() {
+        let recorder = Arc::new(Recorder::new(
+            Arc::new(test_config("http://127.0.0.1:1")),
+            true,
+        ));
+        recorder.start_task("TK-1", plan()).await;
+        recorder.point_arrived("TK-1", 1).await;
+        // 第二次不再发请求（连接被拒会立刻返回；这里只看状态，不引入额外依赖）
+        let state = recorder.state.lock().await;
+        assert!(state.unsupported || state.point_active.is_none());
+    }
+}

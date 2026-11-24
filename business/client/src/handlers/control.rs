@@ -2,6 +2,7 @@
 
 use crate::ai_patrol::AiPatrol;
 use crate::lights;
+use crate::record::Recorder;
 use crate::report::report_progress;
 use crate::state::ActiveTask;
 use crate::state::RobotState;
@@ -30,6 +31,7 @@ pub(crate) async fn apply(
     local_mapping: &Shared<Option<Arc<MappingSession>>>,
     ai: &Arc<AiPatrol>,
     lights: &Arc<PointLights>,
+    recorder: &Arc<Recorder>,
 ) {
     let action = msg.payload["action"].as_str().unwrap_or("unknown");
     let task_code = msg.payload["taskCode"].as_str().unwrap_or("");
@@ -111,6 +113,9 @@ pub(crate) async fn apply(
         }
         // 取消也是计划收尾：板端整个计划目录都不需要了（理由同终态那条）
         ai.finish_plan(task_code, "任务已取消").await;
+        // 录像同理：取消后不该继续录（ffmpeg 空转到 `-t` 上限只是白占 SSD），
+        // 已经录好的那段照样回传 —— 现场常常正是要回看「取消前发生了什么」。
+        recorder.finish_task(task_code, "任务已取消").await;
         // 只清自己那条：平台可能「先取消旧任务、再下发新任务」，取消的收尾
         // 晚到时把新任务的上下文清掉，平台就再也收不到这条新任务的进度了。
         if task_code.is_empty() {

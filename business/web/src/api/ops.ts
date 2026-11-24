@@ -1,4 +1,4 @@
-import { del, download, get, post, put, upload } from "./http";
+import { del, download, get, getBlob, post, put, upload } from "./http";
 import type {
   AccountOption,
   Alert,
@@ -25,6 +25,7 @@ import type {
   Staff,
   StaffImportResult,
   TaskEvent,
+  TaskRecording,
   UserInfo,
   WorkOrder,
   WorkOrderDetail,
@@ -181,6 +182,17 @@ export const taskApi = {
   publish: (id: number) => post<Task>(`/tasks/${id}/publish`),
   /** 撤回成草稿：停止自动下发（执行中 / 已暂停的要先暂停并取消） */
   unpublish: (id: number) => post<Task>(`/tasks/${id}/unpublish`)
+};
+
+/** 巡检录像：任务详情里回看「录像采集 / 全程录像」 */
+export const recordingApi = {
+  list: (taskId: number) => get<TaskRecording[]>(`/tasks/${taskId}/recordings`),
+  /**
+   * 取录像字节（带 Bearer，所以不能直接给 `<video src>` 用）。
+   * 调用方拿到 Blob 后 `URL.createObjectURL` 播放，用完记得 revoke。
+   */
+  blob: (id: number) => getBlob(`/recordings/${id}/file`),
+  remove: (id: number) => del<boolean>(`/recordings/${id}`)
 };
 
 export const routeApi = {

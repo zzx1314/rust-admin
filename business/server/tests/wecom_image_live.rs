@@ -34,6 +34,8 @@ fn test_config(dir: &Path, webhook: String) -> Config {
         zentai_username: None,
         zentai_password: None,
         ingest_dir: dir.join("map_ingest"),
+        recording_dir: dir.join("recordings"),
+        recording_keep_days: 30,
         service_token: None,
         zentai_ws_url: None,
         device_timeout_secs: 90,

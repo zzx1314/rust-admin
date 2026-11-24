@@ -41,6 +41,12 @@ pub struct WaypointAction {
     pub threshold: String,
     #[serde(default)]
     pub retry: i64,
+    /// 「录像采集」：这个航点录多久（秒）。路线编辑器写 `recordSeconds`。
+    ///
+    /// 两处用途：客户端到点让板端起 ffmpeg 录这么久；**同时**把本体路径点的
+    /// 等待任务拉长到至少这么久——否则狗到点拍完照就走，录不到画面。
+    #[serde(default)]
+    pub record_seconds: Option<u32>,
 }
 
 /// 巡检航点
@@ -82,6 +88,19 @@ fn default_radius() -> f64 {
 impl Waypoint {
     pub fn pose(&self) -> Pose {
         Pose::new(self.x, self.y, self.heading.to_radians())
+    }
+
+    /// 这个点要录多久（秒）：取第一条录像动作的 `recordSeconds`，老数据从 `param` 文本里读
+    pub fn record_seconds(&self) -> Option<u32> {
+        self.actions
+            .iter()
+            .filter(|action| crate::record::is_record_action(&action.action_type))
+            .find_map(|action| {
+                action
+                    .record_seconds
+                    .or_else(|| crate::record::seconds_from_param(&action.param))
+            })
+            .map(|seconds| seconds.clamp(3, 300))
     }
 
     /// 是否需要在点上执行拍照：动作名包含「拍照 / 摄像 / 录像」或显式 `capture`
@@ -513,7 +532,14 @@ fn point_path_tasks(point: &Waypoint) -> (u8, Vec<u8>) {
         return (0, Vec::new());
     }
     let mut tasks = Vec::new();
-    let waits = wait_task_count(point.dwell);
+    // 录像点必须让狗留在点上：本体只有「固定 2 s 的等待任务」，所以按
+    // 「停留时长」和「录制时长」里更长的那个展开。只配了录像没配停留时，
+    // 不这么做就是「到点拍张照就走」，板端只录到 1~2 秒。
+    let dwell = point
+        .record_seconds()
+        .map(|seconds| point.dwell.max(i64::from(seconds)))
+        .unwrap_or(point.dwell);
+    let waits = wait_task_count(dwell);
     if waits > 0 {
         tasks.extend(std::iter::repeat_n(0, waits)); // 等待（本体每次固定 2 s）
     }
@@ -1398,6 +1424,42 @@ mod tests {
         assert_eq!(EndTask::parse(Some("返回充电")), EndTask::ReturnToCharge);
         assert_eq!(EndTask::parse(Some("返回起点")), EndTask::ReturnToStart);
         assert_eq!(EndTask::parse(None), EndTask::None);
+    }
+
+    /// 只配「录像采集」不配停留：本体也得在点上等够录制时长，否则狗到点就走。
+    #[test]
+    fn recording_point_stays_long_enough_for_the_clip() {
+        let mut point = Waypoint {
+            actions: vec![WaypointAction {
+                action_type: "录像采集".to_string(),
+                record_seconds: Some(15),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let (kind, tasks) = point_path_tasks(&point);
+        assert_eq!(kind, 1, "有作业动作 → 作业点");
+        assert_eq!(
+            tasks.iter().filter(|task| **task == 0).count(),
+            8,
+            "15s 按 2s 粒度向上取整 = 8 个等待任务：{tasks:?}"
+        );
+        assert_eq!(
+            tasks.last().copied(),
+            Some(1),
+            "等待之后仍要拍照：{tasks:?}"
+        );
+
+        // 老数据没有 recordSeconds：从 param 文本里读
+        point.actions[0].record_seconds = None;
+        point.actions[0].param = "1080P / 25fps / 6s".to_string();
+        let (_, tasks) = point_path_tasks(&point);
+        assert_eq!(tasks.iter().filter(|task| **task == 0).count(), 3);
+
+        // 用户自己配了更长的停留：以停留为准
+        point.dwell = 30;
+        let (_, tasks) = point_path_tasks(&point);
+        assert_eq!(tasks.iter().filter(|task| **task == 0).count(), 15);
     }
 
     #[test]

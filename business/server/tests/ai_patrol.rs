@@ -62,6 +62,8 @@ fn config_with(dir: &std::path::Path, backpack_base_url: Option<String>) -> Conf
         zentai_username: None,
         zentai_password: None,
         ingest_dir: dir.join("map_ingest"),
+        recording_dir: dir.join("recordings"),
+        recording_keep_days: 30,
         service_token: None,
         zentai_ws_url: None,
         device_timeout_secs: 90,

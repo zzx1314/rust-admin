@@ -169,6 +169,24 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 `business/backpack_dashboard/AGENTS.md` 的「存证目录」一节与
 `DOG.md` §2/§3。
 
+**航点「录像采集」/ 航段「全程录像」**（2026-11-24 起可用）：两类录像动作都在路线
+编辑器里配（航点动作 `recordSeconds` 3~300 默认 15；行进任务 `recordSegmentSeconds`
+30~1800 默认 300 切片），起停时机**只在设备客户端**（`client/src/record.rs`）按 5009
+状态机决定：航点录像到点起、离开停；全程录像在这条任务第一个非终态帧起、终态/取消停。
+板端 Agent `POST /api/record/start|stop` 用 ffmpeg 从本机 mediamtx 的 dogcam 拉流，
+`-c copy` 封装 mp4（不重编码、不抢 MPP），落 `RECORD_DIR/<计划>/`，停下写同名边车；
+任务终态/客户端启动时客户端读 `/api/record/list` 逐段回传
+`POST /api/recordings/ingest`（multipart，sha256 去重），**上传成功才**回调
+`/api/record/delete` 删板端文件。平台侧落 `task_recordings` + `<recording_dir>/<设备>/<任务>/`，
+任务详情「任务录像」播放/下载（`GET /api/recordings/{id}/file` 支持 Range），
+超期由 `schedule::sweep` → `recordings::sweep_expired` 按 `recording_keep_days` 清。
+三条红线：**录像失败绝不影响巡检**（Agent 404/磁盘满都只记 `unsupported`，不抛错）；
+**5009 幂等**（每帧都会调用，按「任务+航点/全程已起」去重，Agent 侧也幂等）；
+**视频不进中台「媒体资源」**（那边是训练图：JPG/PNG、sha256 去重、批量导出）。
+改板端先读 `business/backpack_dashboard/AGENTS.md`「录像」一节，回归
+`python3 business/backpack_dashboard/backend/tools/record_selftest.py`、
+`client record::tests`、`cargo test --test recordings`。
+
 **航点采集默认是关的**：`media_capture_enabled`（迁移 34 预置 `0`）是自动采集的
 总开关，关着时板端只写 `detect_jobs/…` 告警证据图（企业微信配图、数量核对照旧），
 不再往媒体归档目录攒训练图；开关随 `ai_start` 的 `captureEnabled` 下发（客户端

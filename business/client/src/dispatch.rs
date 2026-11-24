@@ -142,6 +142,10 @@ pub fn parse_flight_plan(payload: &Value, map_root: &str) -> Option<FlightPlan> 
                                 .unwrap_or_default()
                                 .to_string(),
                             retry: action.get("retry").and_then(Value::as_i64).unwrap_or(1),
+                            record_seconds: action
+                                .get("recordSeconds")
+                                .and_then(Value::as_u64)
+                                .map(|value| value as u32),
                         })
                         .collect()
                 })

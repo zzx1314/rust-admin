@@ -169,8 +169,28 @@ const actionForm = reactive({
    */
   lightFill: false,
   /** 到点开 LED 灯带（板端拉起厂商 `test_rgbrun`，循环闪烁） */
-  lightLed: false
+  lightLed: false,
+  /**
+   * 「录像采集」：这个航点录多久（秒）。
+   *
+   * 客户端到点调板端 Agent 起 ffmpeg（本机 mediamtx 的 dogcam），离开航点就停；
+   * 录完的 mp4 由客户端回传平台，任务详情里可回放。
+   */
+  recordSeconds: 15,
+  /**
+   * 「全程录像」：板端切片长度（秒）。
+   *
+   * 全程录像跨航点一直录到任务终态，按这个长度切 mp4 逐段回传（弱网断一段只重传一段）。
+   */
+  recordSegmentSeconds: 300
 });
+
+/** 当前动作是不是录像类（点上的「录像采集」/ 段上的「全程录像」） */
+const isRecordAction = computed(() => String(actionForm.type).includes("录像"));
+/** 航段上的「全程录像」跟航点上的「录像采集」参数不同：一个录多久、一个切多长 */
+const isTaskRecordAction = computed(
+  () => isRecordAction.value && actionKind.value === "leg"
+);
 
 /** 背包 AI 模型目录（场景 + 类别）：仅在配「AI 识别」动作时按需加载 */
 const aiCatalog = useAiCatalog();
@@ -189,6 +209,30 @@ const aiParamAuto = computed(
 function isAiActionOf(action: { type?: string } | null | undefined) {
   const kind = String(action?.type ?? "");
   return kind.toUpperCase().includes("AI") || kind.includes("识别");
+}
+
+/** 秒数夹回区间：录像时长前后端都卡一遍，现场改坏也不会下发一个跑飞的 ffmpeg */
+function clampSeconds(value: unknown, min: number, max: number, fallback: number) {
+  const number = Math.round(Number(value));
+  if (!Number.isFinite(number) || number <= 0) return fallback;
+  return Math.min(max, Math.max(min, number));
+}
+
+/** 动作是不是录像类（航点「录像采集」/ 航段「全程录像」） */
+function isRecordActionOf(action: { type?: string } | null | undefined) {
+  return String(action?.type ?? "").includes("录像");
+}
+
+/** 动作卡片上的录像参数（老数据没字段时按默认值展示） */
+function actionRecordLabel(action: {
+  type?: string;
+  recordSeconds?: number;
+  recordSegmentSeconds?: number;
+}) {
+  if (String(action?.type ?? "").includes("全程")) {
+    return `全程录像 · 每段 ${clampSeconds(action?.recordSegmentSeconds, 30, 1800, 300)} 秒`;
+  }
+  return `航点录像 · ${clampSeconds(action?.recordSeconds ?? 15, 3, 300, 15)} 秒`;
 }
 
 /** 动作卡片上的任务类型文案：老数据没 `checkType` 时按有无 `expectCount` 推断 */
@@ -1047,7 +1091,9 @@ function openActionDialog(kind: "point" | "leg", index: number | null = null) {
       alertWhenMissing: existing.alertWhenMissing === true,
       notifyWhenCountOk: existing.notifyWhenCountOk === true,
       lightFill: existing.lightFill === true,
-      lightLed: existing.lightLed === true
+      lightLed: existing.lightLed === true,
+      recordSeconds: Number(existing.recordSeconds) || 15,
+      recordSegmentSeconds: Number(existing.recordSegmentSeconds) || 300
     });
     actionEditIndex.value = index;
     if (actionForm.type === "AI 识别") void aiCatalog.load();
@@ -1071,7 +1117,9 @@ function openActionDialog(kind: "point" | "leg", index: number | null = null) {
     alertWhenMissing: false,
     notifyWhenCountOk: false,
     lightFill: false,
-    lightLed: false
+    lightLed: false,
+    recordSeconds: 15,
+    recordSegmentSeconds: 300
   });
   actionEditIndex.value = null;
   actionDialog.value = true;
@@ -1091,6 +1139,8 @@ function syncActionDefaults() {
   actionForm.notifyWhenCountOk = false;
   actionForm.lightFill = false;
   actionForm.lightLed = false;
+  actionForm.recordSeconds = 15;
+  actionForm.recordSegmentSeconds = 300;
   if (actionForm.type === "AI 识别") void aiCatalog.load();
 }
 
@@ -1160,7 +1210,14 @@ function saveAction() {
     ...(ai && !countTask && actionForm.alertWhenMissing ? { alertWhenMissing: true } : {}),
     // 灯光只挂在航点动作上（行进任务没有「到点」，也就没有开灯时机）
     ...(actionKind.value === "point" && actionForm.lightFill ? { lightFill: true } : {}),
-    ...(actionKind.value === "point" && actionForm.lightLed ? { lightLed: true } : {})
+    ...(actionKind.value === "point" && actionForm.lightLed ? { lightLed: true } : {}),
+    // 录像时长：航点录像写秒数，全程录像写切片长度（板端同样有上下限，这里是入口校验）
+    ...(actionKind.value === "point" && isRecordAction.value
+      ? { recordSeconds: clampSeconds(actionForm.recordSeconds, 3, 300, 15) }
+      : {}),
+    ...(actionKind.value === "leg" && isTaskRecordAction.value
+      ? { recordSegmentSeconds: clampSeconds(actionForm.recordSegmentSeconds, 30, 1800, 300) }
+      : {})
   };
   // 修改：整条替换回原位置（顺序不变，撤销栈里是一条快照）
   const editIndex = actionEditIndex.value;
@@ -1856,6 +1913,9 @@ onBeforeUnmount(() => {
                     <div v-if="actionLightLabel(action)">
                       灯光：<b>{{ actionLightLabel(action) }}</b>
                     </div>
+                    <div v-if="isRecordActionOf(action)">
+                      录像：<b>{{ actionRecordLabel(action) }}</b>
+                    </div>
                   </div>
                 </div>
                 <div v-if="!pointActions.length" class="empty-box" style="padding: 16px 0">
@@ -1922,6 +1982,9 @@ onBeforeUnmount(() => {
                   <div class="act-kv">
                     <div>参数：<b>{{ action.param || "—" }}</b></div>
                     <div>类型：<b>行进过程中持续执行</b></div>
+                    <div v-if="isRecordActionOf(action)">
+                      录像：<b>{{ actionRecordLabel(action) }}</b>
+                    </div>
                   </div>
                 </div>
                 <div v-if="!legActions.length" class="empty-box" style="padding: 16px 0">
@@ -2191,6 +2254,22 @@ onBeforeUnmount(() => {
               未找到目标也告警
             </label>
           </div>
+          <!-- 录像：航点录多久 / 全程录像切多长（板端 ffmpeg，客户端到点起停） -->
+          <div v-if="isRecordAction && actionKind === 'point'" class="field">
+            <label>录制时长（秒）</label>
+            <input
+              v-model.number="actionForm.recordSeconds"
+              class="input mono"
+              type="number"
+              min="3"
+              max="300"
+              step="1"
+            />
+            <div class="rt-hint" style="margin: 4px 0 0">
+              到达航点后录这么久；中途离开航点会提前收尾（3~300 秒，默认 15 秒）。
+            </div>
+          </div>
+
           <!-- 航点灯光：补光灯 / LED 灯带（与 AI 识别无关，不配 AI 也能只开灯） -->
           <div class="field" style="grid-column: 1 / -1">
             <label>
@@ -2231,6 +2310,21 @@ onBeforeUnmount(() => {
             不额外占用停留时长。模型目录读不到时可以手填场景关键词，后端仍有关键词兜底。
           </div>
         </template>
+        <div v-else-if="isTaskRecordAction" class="field" style="grid-column: 1 / -1">
+          <label>切片长度（秒）</label>
+          <input
+            v-model.number="actionForm.recordSegmentSeconds"
+            class="input mono"
+            type="number"
+            min="30"
+            max="1800"
+            step="30"
+          />
+          <div class="rt-hint" style="margin: 4px 0 0">
+            全程录像从任务开始一直录到终态 / 取消，按这个长度切 mp4 逐段回传
+            （30~1800 秒，默认 300 秒；4G 上一段越短越不怕断网）。
+          </div>
+        </div>
         <div v-else class="field" style="grid-column: 1 / -1">
           <div class="rt-hint" style="margin: 0">该动作在两航点之间移动过程中持续执行，不占用停留时长。</div>
         </div>

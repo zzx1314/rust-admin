@@ -22,6 +22,10 @@ tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 base64 = "0.22"
+# 录像回传按内容 sha256 去重（弱网重传同一段不新增行）
+sha2 = "0.10"
+# 录像播放：按 Range 流式回字节，不把整个 mp4 读进内存
+tokio-util = { version = "0.7", features = ["io"] }
 # 企业微信图片消息要「原图字节的 md5」（base64 之前）
 md-5 = "0.10"
 zip = { version = "2", default-features = false, features = ["deflate"] }

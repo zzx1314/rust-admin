@@ -23,6 +23,12 @@ port = 3100
 # 建图回传的本地留档目录（默认 data/map_ingest）
 # ingest_dir = "data/map_ingest"
 
+# 巡检录像（航点「录像采集」/ 航段「全程录像」）落盘目录（默认 data/recordings）。
+# 视频比图大得多，正式机建议指到大盘（如 /var/lib/robodog/recordings）。
+# recording_dir = "data/recordings"
+# 录像保留天数（默认 30，0 = 不自动清理）：超期的行 + 文件由计划扫描每分钟收掉。
+# recording_keep_days = 30
+
 # Token 有效期（小时，默认 24）
 # jwt_ttl_hours = 24
 

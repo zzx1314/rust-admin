@@ -9,6 +9,7 @@ use crate::locate::ensure_localized;
 use crate::locate::parse_initial_pose;
 use crate::maps::clear_local_runner;
 use crate::maps::is_current_runner;
+use crate::record::{Recorder, parse_record_plan};
 use crate::report::report_progress;
 use crate::state::ActiveTask;
 use crate::state::RobotState;
@@ -85,6 +86,7 @@ pub(crate) async fn dispatch(
     local_mapping: &Shared<Option<Arc<MappingSession>>>,
     ai: &Arc<AiPatrol>,
     lights: &Arc<PointLights>,
+    recorder: &Arc<Recorder>,
 ) {
     let task_code = msg.payload["taskCode"].as_str().unwrap_or("").to_string();
     let task_name = msg.payload["taskName"]
@@ -151,6 +153,17 @@ pub(crate) async fn dispatch(
             window.start, window.end
         );
     }
+    // 航点「录像采集」+ 航段「全程录像」：与 AI / 灯光同源（路线动作），
+    // 但起停时机在 5009 上（到点 / 离开 / 终态），见 `record` 模块。
+    let record_plan = parse_record_plan(&msg.payload["routeData"]);
+    if !record_plan.is_empty() {
+        info!(
+            "任务 {task_code} 含 {} 个录像航点，全程录像={}",
+            record_plan.points.len(),
+            record_plan.task.is_some()
+        );
+    }
+    recorder.start_task(&task_code, record_plan).await;
     *active.lock().await = Some(ActiveTask {
         task_code: task_code.clone(),
         task_name: task_name.clone(),

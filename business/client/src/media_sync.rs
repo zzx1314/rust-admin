@@ -656,7 +656,8 @@ async fn upload_batch(
         .collect())
 }
 
-async fn login(
+/// 登录业务平台换 JWT（媒体回传 / 录像回传共用）。
+pub(crate) async fn login(
     client: &reqwest::Client,
     api_base: &str,
     config: &Config,

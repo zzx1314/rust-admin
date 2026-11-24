@@ -2,8 +2,17 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { deviceApi, mapApi, parkApi, routeApi, taskApi, zoneApi } from "@/api/ops";
-import type { Device, MapVersion, Park, Route, Task, TaskEvent, Zone } from "@/api/types";
+import { deviceApi, mapApi, parkApi, recordingApi, routeApi, taskApi, zoneApi } from "@/api/ops";
+import type {
+  Device,
+  MapVersion,
+  Park,
+  Route,
+  Task,
+  TaskEvent,
+  TaskRecording,
+  Zone
+} from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import AppIcon from "@/components/AppIcon.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
@@ -100,6 +109,17 @@ const detailVisible = ref(false);
 const detailTask = ref<Task | null>(null);
 /** 任务事件流：定位未就绪、下发失败等可读原因都在这里 */
 const detailEvents = ref<TaskEvent[]>([]);
+/**
+ * 任务录像（航点「录像采集」/ 航段「全程录像」）。
+ *
+ * 板端录完 → 客户端回传 → 这里列出来回看。录像比图大得多，按需播放：
+ * 点「播放」才取字节（带 Bearer），播放完/关弹窗立刻 revoke object URL。
+ */
+const detailRecordings = ref<TaskRecording[]>([]);
+const recordingDialog = ref(false);
+const recordingPlaying = ref<TaskRecording | null>(null);
+const recordingUrl = ref("");
+const recordingLoading = ref(false);
 /** 实时监控弹窗（只看视频 + 地图，不打开整个详情） */
 const monitorVisible = ref(false);
 const monitorTaskId = ref<number | null>(null);
@@ -483,13 +503,84 @@ async function openDetail(task: Task) {
   await refreshDetail(task.id);
 }
 
-/** 拉取详情（任务行 + 事件流）；任务已被删除时关掉弹窗 */
+/** 拉取详情（任务行 + 事件流 + 录像）；任务已被删除时关掉弹窗 */
 async function refreshDetail(taskId: number) {
-  try {
-    detailEvents.value = await taskApi.events(taskId);
-  } catch {
-    // 事件流取不到不影响详情主体（例如旧任务没有事件记录）
+  const [, recordings] = await Promise.all([
+    taskApi.events(taskId).catch(() => {
+      // 事件流取不到不影响详情主体（例如旧任务没有事件记录）
+      detailEvents.value = [];
+    }),
+    recordingApi.list(taskId).catch(() => {
+      // 旧任务没有录像 / 服务端还没升级：当作没有，不打扰操作员
+      detailRecordings.value = [];
+    })
+  ]);
+  if (Array.isArray(recordings)) detailRecordings.value = recordings;
+}
+
+/** 录像的大小（服务端回的是字节数） */
+function recordingSize(bytes: number) {
+  if (!bytes) return "—";
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function recordingDuration(seconds: number) {
+  if (!seconds) return "—";
+  const total = Math.round(seconds);
+  const minutes = Math.floor(total / 60);
+  return minutes ? `${minutes}分${total % 60}秒` : `${total}秒`;
+}
+
+/** 「全程录像」/「航点3 · P3」 */
+function recordingLabel(item: TaskRecording) {
+  if (item.scope === "task") return "全程录像";
+  const name = item.pointName?.trim();
+  return `航点${item.pointIndex + 1}${name ? ` · ${name}` : ""} 录像`;
+}
+
+function revokeRecordingUrl() {
+  if (recordingUrl.value) {
+    URL.revokeObjectURL(recordingUrl.value);
+    recordingUrl.value = "";
   }
+}
+
+/** 播放一段录像：先取字节（接口要 Bearer，`<video src>` 带不上头） */
+async function playRecording(item: TaskRecording) {
+  recordingLoading.value = true;
+  recordingPlaying.value = item;
+  recordingDialog.value = true;
+  revokeRecordingUrl();
+  try {
+    const blob = await recordingApi.blob(item.id);
+    recordingUrl.value = URL.createObjectURL(blob);
+  } catch {
+    // http.ts 已经弹过错误提示（弱网 / 文件被清理）
+    recordingDialog.value = false;
+  } finally {
+    recordingLoading.value = false;
+  }
+}
+
+function closeRecordingDialog() {
+  revokeRecordingUrl();
+  recordingPlaying.value = null;
+}
+
+async function removeRecording(item: TaskRecording) {
+  try {
+    await ElMessageBox.confirm(
+      `删除${recordingLabel(item)}（${recordingSize(item.fileSize)}）？板端文件已回传后删除，平台侧删除不可恢复。`,
+      "删除录像",
+      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" }
+    );
+  } catch {
+    return;
+  }
+  await recordingApi.remove(item.id);
+  detailRecordings.value = detailRecordings.value.filter(record => record.id !== item.id);
+  ElMessage.success("录像已删除");
 }
 
 function editFromDetail() {
@@ -669,6 +760,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.clearInterval(refreshTimer);
+  revokeRecordingUrl();
 });</script>
 
 <template>
@@ -1319,6 +1411,34 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="rt-sec-title" style="margin-top: 18px">
+          <span>任务录像（{{ detailRecordings.length }}）</span><AppIcon name="video" />
+        </div>
+        <div v-if="detailRecordings.length" class="act-kv" style="font-size: 11.5px; gap: 7px">
+          <div
+            v-for="item in detailRecordings"
+            :key="item.id"
+            style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap"
+          >
+            <b>{{ recordingLabel(item) }}</b>
+            <span class="mono muted">
+              {{ recordingDuration(item.durationSec) }} · {{ recordingSize(item.fileSize) }}
+            </span>
+            <span class="mono muted">
+              {{ (item.startedAt || item.createdAt).slice(5, 16) }}
+            </span>
+            <button class="btn sm" @click="playRecording(item)">
+              <AppIcon name="play" />播放
+            </button>
+            <button class="btn sm ghost" title="删除这条录像" @click="removeRecording(item)">
+              <AppIcon name="trash" />
+            </button>
+          </div>
+        </div>
+        <div v-else class="empty-box" style="padding: 16px 0">
+          暂无录像。路线里给航点配「录像采集」或在航段配「全程录像」，任务跑完会出现在这里。
+        </div>
+
+        <div class="rt-sec-title" style="margin-top: 18px">
           <span>任务事件</span><AppIcon name="clock" />
         </div>
         <div v-if="detailEvents.length" class="act-kv" style="font-size: 11.5px; gap: 7px">
@@ -1395,6 +1515,40 @@ onBeforeUnmount(() => {
         </div>
       </template>
     </el-dialog>
+    <el-dialog
+      v-model="recordingDialog"
+      title="录像回放"
+      width="min(860px, 94vw)"
+      destroy-on-close
+      @closed="closeRecordingDialog"
+    >
+      <div v-if="recordingPlaying" class="rt-hint" style="margin-bottom: 8px">
+        {{ recordingLabel(recordingPlaying) }} ·
+        {{ recordingDuration(recordingPlaying.durationSec) }} ·
+        {{ recordingSize(recordingPlaying.fileSize) }}
+      </div>
+      <div
+        v-if="recordingLoading"
+        class="empty-box"
+        style="padding: 40px 0"
+      >
+        正在取回录像…（全程录像按切片回传，单段几 MB～几十 MB）
+      </div>
+      <video
+        v-else-if="recordingUrl"
+        :src="recordingUrl"
+        controls
+        autoplay
+        playsinline
+        style="width: 100%; border-radius: 8px; background: #000"
+      />
+      <template #footer>
+        <button class="btn" @click="recordingDialog = false">
+          <AppIcon name="close" />关闭
+        </button>
+      </template>
+    </el-dialog>
+
     <el-dialog
       v-model="monitorVisible"
       class="task-live-dialog"

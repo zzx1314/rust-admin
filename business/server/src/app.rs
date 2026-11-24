@@ -125,6 +125,26 @@ pub fn build_router(state: AppState) -> Router {
             "/media/ingest",
             post(media::ingest_media).layer(DefaultBodyLimit::max(MEDIA_UPLOAD_LIMIT)),
         )
+        // 巡检录像（航点「录像采集」/ 航段「全程录像」）回传：设备客户端上传 mp4
+        .route(
+            "/recordings/ingest",
+            post(crate::recordings::ingest_recording).layer(DefaultBodyLimit::max(
+                crate::recordings::RECORDING_MAX_BYTES + 1024 * 1024,
+            )),
+        )
+        // 播放 / 下载（支持 Range）：前端先按 id 换 blob，再挂到 <video> 上
+        .route(
+            "/recordings/{id}/file",
+            get(crate::recordings::download_recording),
+        )
+        .route(
+            "/recordings/{id}",
+            axum::routing::delete(crate::recordings::delete_recording),
+        )
+        .route(
+            "/tasks/{id}/recordings",
+            get(crate::recordings::list_task_recordings),
+        )
         .route("/map-versions/{id}", get(maps::get_map))
         .route("/map-versions/{id}/raster", get(maps::map_raster))
         .route("/map-versions/{id}/refs", get(maps::map_refs))

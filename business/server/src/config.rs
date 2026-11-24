@@ -43,6 +43,16 @@ pub struct Config {
     pub zentai_password: Option<String>,
     /// 自动上传的地图包本地暂存目录
     pub ingest_dir: PathBuf,
+    /// 巡检录像（航点「录像采集」/ 航段「全程录像」）落盘根目录。
+    ///
+    /// 设备客户端把板端 mp4 回传到这里，任务详情直接播放 / 下载。
+    /// 默认 `<data>/recordings`；视频比图大得多，正式机要指到大盘。
+    pub recording_dir: PathBuf,
+    /// 录像保留天数（`0` = 永不自动清理）：超期的行与文件由定时任务收掉。
+    ///
+    /// 一次全程录像按 5 分钟切片，一天几十段很常见；不清理会把磁盘写满，
+    /// 而录像的用途基本是「最近几轮巡检回看」。
+    pub recording_keep_days: i64,
     /// 中台调用业务平台内部接口的服务令牌；为空时内部触发接口拒绝请求。
     pub service_token: Option<String>,
     /// 反向控制信道的中台地址（`ws://` / `wss://`）。
@@ -166,6 +176,8 @@ struct ServerFile {
     web_dist: Option<String>,
     backend_db: Option<String>,
     ingest_dir: Option<String>,
+    recording_dir: Option<String>,
+    recording_keep_days: Option<i64>,
     device_timeout_secs: Option<i64>,
     task_timeout_secs: Option<i64>,
     task_stuck_secs: Option<i64>,
@@ -338,6 +350,16 @@ impl Config {
                 file.ingest_dir,
                 base_dir_default.join("data/map_ingest"),
             ),
+            recording_dir: path(
+                "ROBODOG_RECORDING_DIR",
+                file.recording_dir,
+                base_dir_default.join("data/recordings"),
+            ),
+            recording_keep_days: env_text(&env, "ROBODOG_RECORDING_KEEP_DAYS")
+                .and_then(|value| value.trim().parse().ok())
+                .or(file.recording_keep_days)
+                .unwrap_or(30)
+                .max(0),
             service_token: env_text(&env, "ROBODOG_SERVICE_TOKEN")
                 .or_else(|| file.zentai.service_token.and_then(clean)),
             zentai_ws_url: url("ROBODOG_ZENTAI_WS_URL", file.zentai.ws_url),

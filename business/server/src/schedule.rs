@@ -483,6 +483,11 @@ pub async fn sweep(state: &AppState) -> Result<SweepReport, AppError> {
     let now = Local::now();
     let mut report = SweepReport::default();
     rearm_finished(state, now, &mut report).await?;
+    // 录像留存：超期的行 + 文件一起收（`recording_keep_days = 0` 时是空操作）。
+    // 放在这里而不是新开一个循环：清理失败绝不能影响到点下发。
+    if let Err(error) = crate::recordings::sweep_expired(state).await {
+        warn!("巡检录像超期清理失败: {error}");
+    }
 
     let pending: Vec<Task> = sqlx::query_as::<_, crate::models::TaskRow>(&format!(
         "{} WHERE t.task_status = '待执行' AND t.execute_mode = ?1 AND t.publish_status = ?2 \

@@ -30,6 +30,7 @@ pub mod ingest;
 pub mod mapdir;
 pub mod models;
 pub mod notify;
+pub mod recordings;
 pub mod schedule;
 pub mod seed;
 pub mod staff_import;

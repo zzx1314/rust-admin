@@ -191,6 +191,34 @@ MEDIA_DATA_DIR = os.getenv("MEDIA_DATA_DIR", "/media/media-data/picture")
 # 帧数越多，中台「媒体资源」里一次巡检的证据越全，但板端多跑几次画框 + 上传。
 DETECT_PLAN_SAVE_FRAMES = max(1, min(10, int(os.getenv("DETECT_PLAN_SAVE_FRAMES", "3"))))
 
+# ---- 航点录像 / 航段全程录像（客户端触发，见 record.py）----
+# 巡检路线里的「录像采集」（航点动作）与「全程录像」（行进任务）都由设备客户端
+# 在 5009 状态机上起停，Agent 只负责 ffmpeg 落盘。
+# 落盘根目录：客户端传完就删；没传走的按 RECORD_RETENTION_HOURS 清掉。
+# 默认与 AI 存证同在 /media（SSD），不要指到 eMMC。
+RECORD_DIR = os.getenv("RECORD_DIR", "/media/media-data/record")
+# 录像源：逻辑摄像头名（默认机器狗前置 dogcam，与 AI 抽帧同一路）。
+# 也可以填 cam0~cam3 录背包自己的一路；dogcam 会按当前档位自动选 dogcam/dogcam720。
+RECORD_SOURCE_CAM = os.getenv("RECORD_SOURCE_CAM", "dogcam")
+# 拉流地址走本机 mediamtx（与 detect.py 的旁路一致，不碰 v4l2）
+RECORD_RTSP_HOST = os.getenv("RECORD_RTSP_HOST", "127.0.0.1")
+# 航点录像默认时长 / 上限（秒）。路线动作里可以按点配（`recordSeconds`）
+RECORD_POINT_DEFAULT_SECS = int(os.getenv("RECORD_POINT_DEFAULT_SECS", "15"))
+RECORD_POINT_MAX_SECS = int(os.getenv("RECORD_POINT_MAX_SECS", "300"))
+# 全程录像切片长度（秒）：一段一个 mp4，客户端逐段回传，弱网断一段只重传一段
+RECORD_SEGMENT_SECS = int(os.getenv("RECORD_SEGMENT_SECS", "300"))
+# 全程录像的兜底上限（秒）：客户端本该在任务终态发 stop，这里防「客户端被杀」跑飞
+RECORD_TASK_MAX_SECS = int(os.getenv("RECORD_TASK_MAX_SECS", "7200"))
+# 板端保留多久（小时）：上传成功会立刻删，这只是断电/长期断网的兜底
+RECORD_RETENTION_HOURS = int(os.getenv("RECORD_RETENTION_HOURS", "72"))
+# 剩余空间低于这个值就不开新录像（写满 SSD 会连 AI 存证一起丢）
+RECORD_MIN_FREE_MB = int(os.getenv("RECORD_MIN_FREE_MB", "512"))
+# 1 = 重编码（源不是 H264 / 需要统一规格时）；默认只封装（-c copy，不抢 MPP）
+RECORD_TRANSCODE = os.getenv("RECORD_TRANSCODE", "0")
+# ffmpeg 的 stderr 落这里（追加）：现场「录像没文件 / 起流很快掉」先看它，
+# 别只看 `journalctl -u backpack-agent`（那边只有「录像开始/结束」两行）
+RECORD_LOG = os.getenv("RECORD_LOG", "/tmp/record_ffmpeg.log")
+
 # 板端本地画框：把框烧进视频再推一条 preview 流，浏览器只播带框视频、不再叠 SVG。
 # 设为 0 可随时回退到「浏览器画框」，便于两种方案对照测试。
 DETECT_OSD_ENABLED = os.getenv("DETECT_OSD_ENABLED", "1") == "1"

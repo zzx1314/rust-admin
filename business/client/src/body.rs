@@ -5,6 +5,7 @@ use crate::lights::PointLights;
 use crate::maps::upload_mapping_to_zentai;
 use crate::mapupload::UploadOutcome;
 use crate::pump::spawn_zhpro_pump;
+use crate::record::Recorder;
 use crate::report::report_progress;
 use crate::state::ActiveTask;
 use crate::state::RobotState;
@@ -202,6 +203,7 @@ pub(crate) struct BodyContext {
     pub(crate) config: Arc<Config>,
     pub(crate) ai: Arc<AiPatrol>,
     pub(crate) lights: Arc<PointLights>,
+    pub(crate) recorder: Arc<Recorder>,
     pub(crate) out_tx: mpsc::Sender<WsMessage>,
     pub(crate) state: Shared<RobotState>,
     pub(crate) active: Shared<Option<ActiveTask>>,
@@ -251,6 +253,7 @@ impl BodyLink {
             ctx.config.clone(),
             ctx.ai.clone(),
             ctx.lights.clone(),
+            ctx.recorder.clone(),
         ));
         // 摇杆重发（50Hz）：浏览器 ~10Hz 的离散帧需要在本体侧连续化，否则看着像点动
         self.republisher = Some(teleop::spawn_republisher(
