@@ -4,7 +4,8 @@ use crate::business::dog::map::domain::{
     MapShareVO, MapVO, ShareMapRequest, UpdateMapRequest, UploadMapRequest, is_valid_map_status,
 };
 use crate::business::dog::map::package::{
-    MAX_EDIT_POINTS, MAX_EDIT_STROKES, parse_map_package, rewrite_map_package, sha256_hex,
+    MAX_EDIT_POINTS, MAX_EDIT_STROKES, normalize_erase_value, parse_map_package,
+    rewrite_map_package, sha256_hex,
 };
 use crate::business::dog::map::repository::SeaOrmDogMapRepository;
 use crate::common::data_scope::DataScope;
@@ -695,11 +696,19 @@ fn validate_edit_request(req: &MapEditRequest) -> Result<&[MapEditStroke], AppEr
         )));
     }
     for stroke in &req.strokes {
+        // 灰度值先拦一道：只允许 254 / 128（旧的 205 归一成 128），
+        // 否则「未知」又会被写成 205——本体按 free_thresh: 0.2 会当成可通行。
+        if let Some(value) = stroke.value {
+            normalize_erase_value(value)?;
+        }
         if let Some(radius) = stroke.radius
             && !radius.is_finite()
         {
             return Err(AppError::BadRequest("笔刷半径无效".to_string()));
         }
+    }
+    if let Some(value) = req.erase_value {
+        normalize_erase_value(value)?;
     }
     Ok(&req.strokes)
 }

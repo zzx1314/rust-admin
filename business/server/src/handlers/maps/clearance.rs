@@ -35,6 +35,51 @@ pub(crate) const MIN_FREE_CLEARANCE_M: f64 = 0.15;
 /// 掐到 60 m 免得消息里出现 `inf`。
 const MAX_CLEARANCE_M: f64 = 60.0;
 
+/// 航段里允许的最长连续「占据」长度（米）。超过就拒绝发布。
+///
+/// 墙线一般 1~2 像素（0.05~0.10 m），直连航点偶尔切到墙角是正常的（本体自己会绕），
+/// 但连续 0.5 m 的占据就意味着这条线是从障碍物里穿过去的。
+pub(crate) const MAX_LEG_OCCUPIED_RUN_M: f64 = 0.5;
+
+/// 航段里允许的最长连续「未知/不可通行」长度（米）。超过就拒绝发布。
+///
+/// 2026-11-24 广汇二期 `TK-1124-17`：RT-011 最后一段是 55 m 直线，其中 39.8 m
+/// 连续落在平台标的「未知」区（205），本体把这值当可通行，狗直接开了进去，最后
+/// 报 `13377 无有效绕障轨迹`。墙边 / 路口零星几格未知不该拦（现场地图动辄大半是
+/// unknown），但一整段穿过去一定是「没沿着可走区域画」。
+pub(crate) const MAX_LEG_UNKNOWN_RUN_M: f64 = 5.0;
+
+/// 航段允许走出地图范围的长度（米）。只容忍边界取整的零星采样点；
+/// 真正的「飞出图外」远大于这个值（端点在图外有 `coords::points_outside` 单独拦）。
+pub(crate) const MAX_LEG_OUTSIDE_M: f64 = 0.5;
+
+/// 栅格灰度的通行性（口径与本体 `map.yaml` 的 trinary 判定对齐）：
+///
+/// | 灰度 | 含义 | 本体 |
+/// |---|---|---|
+/// | `0..=99` | 占据 | 规划不过去 |
+/// | `100..=205` | 未知 / 不可通行 | 128 = ROS 的未知；205 = 平台「未知」画笔 |
+/// | `206..=255` | 可通行 | 自由空间 |
+///
+/// 本体按 `p = (255 - v) / 255`（`free_thresh: 0.2`）判定，**`v > 204` 才算 free**；
+/// 205 刚好在自由一侧，所以平台用 205 画的「未知/禁行」本体并不会避开。
+/// 这里把 205 也算成未知，是为了让平台自己把这种「本该禁行」的航段报出来，
+/// 而不是当成空地放行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CellKind {
+    Occupied,
+    Unknown,
+    Free,
+}
+
+pub(crate) fn classify(value: u8) -> CellKind {
+    match value {
+        0..=99 => CellKind::Occupied,
+        100..=205 => CellKind::Unknown,
+        _ => CellKind::Free,
+    }
+}
+
 /// 一张地图的净空距离场
 pub(crate) struct ClearanceField {
     resolution: f64,
@@ -44,6 +89,10 @@ pub(crate) struct ClearanceField {
     height: usize,
     /// 每个栅格到最近障碍的距离（米），行 0 = 图像顶部（与 PGM 存法一致）
     dist_m: Vec<f32>,
+    /// 原始灰度，行 0 = 图像顶部；航段校验要看占据 / 未知 / 自由（与 `dist_m` 同序）
+    values: Vec<u8>,
+    /// 整张图一个占据格都没有（全 free / 全 unknown）：净空没有意义，但航段仍要看未知
+    has_obstacles: bool,
 }
 
 impl ClearanceField {
@@ -62,9 +111,18 @@ impl ClearanceField {
     }
 
     /// 该点离最近障碍的距离（米）。图外返回 `None`（图外的点由
-    /// [`crate::coords::points_outside`] 单独拦，不要在这里重复报）。
+    /// [`crate::coords::points_outside`] 单独拦，不要在这里重复报）；
+    /// 整张图没有占据格时也返回 `None`（没有净空可言）。
     pub(crate) fn clearance_m(&self, x: f64, y: f64) -> Option<f64> {
+        if !self.has_obstacles {
+            return None;
+        }
         self.cell(x, y).map(|index| f64::from(self.dist_m[index]))
+    }
+
+    /// 该点的栅格灰度（图外返回 `None`）
+    fn value_at(&self, x: f64, y: f64) -> Option<u8> {
+        self.cell(x, y).map(|index| self.values[index])
     }
 }
 
@@ -87,8 +145,7 @@ pub(crate) fn point_clearances(field: &ClearanceField, data: &Value) -> Vec<Poin
                 .iter()
                 .enumerate()
                 .filter_map(|(index, point)| {
-                    let x = point.get("x").and_then(Value::as_f64)?;
-                    let y = point.get("y").and_then(Value::as_f64)?;
+                    let (x, y) = point_xy(point)?;
                     let clearance_m = field.clearance_m(x, y)?;
                     Some(PointClearance {
                         index: index + 1,
@@ -100,6 +157,129 @@ pub(crate) fn point_clearances(field: &ClearanceField, data: &Value) -> Vec<Poin
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// 平台「未知」画笔的旧值（205）：本体按 `free_thresh: 0.2` 会把它当成可通行，
+/// 单独统计一段长度，文案里好告诉运维「这片禁行是 205 画的，本体没拦住」。
+const LEGACY_UNKNOWN_PAINT: u8 = 205;
+
+/// 一个航段穿过栅格的情况（`route_data.points` 两两直连）
+#[derive(Debug, Clone)]
+pub(crate) struct LegCrossing {
+    /// 起点航点号（从 1 开始，与校验文案一致）
+    pub from_index: usize,
+    pub to_index: usize,
+    pub length_m: f64,
+    /// 落在占据格的累计长度（米）
+    pub occupied_m: f64,
+    /// 落在未知/不可通行区的累计长度（米）
+    pub unknown_m: f64,
+    /// 其中由旧「未知 205」画笔造成的长度（米，已含在 `unknown_m` 里）
+    pub legacy_205_m: f64,
+    /// 航段走出地图范围的累计长度（米）
+    pub outside_m: f64,
+    pub longest_occupied_run_m: f64,
+    pub longest_unknown_run_m: f64,
+}
+
+impl LegCrossing {
+    fn new(from_index: usize, length_m: f64) -> Self {
+        Self {
+            from_index,
+            to_index: from_index + 1,
+            length_m,
+            occupied_m: 0.0,
+            unknown_m: 0.0,
+            legacy_205_m: 0.0,
+            outside_m: 0.0,
+            longest_occupied_run_m: 0.0,
+            longest_unknown_run_m: 0.0,
+        }
+    }
+}
+
+/// 逐段采样栅格：算出每段穿过多少占据 / 未知 / 图外的长度。
+///
+/// 只检查平台**实际下发**的相邻航点（`P1→P2→…→Pn`）；返航段由本体按 `end_task`
+/// 自己规划，平台不下发那一段，检查它只会误报。
+pub(crate) fn leg_crossings(field: &ClearanceField, data: &Value) -> Vec<LegCrossing> {
+    let Some(points) = data.get("points").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    // 保留原始下标：某个点缺坐标时只跳过那一段，别让后面的 `第 N→N+1 段` 整体前移
+    points
+        .windows(2)
+        .enumerate()
+        .filter_map(|(index, pair)| {
+            let from = point_xy(&pair[0])?;
+            let to = point_xy(&pair[1])?;
+            Some(leg_crossing(field, index + 1, from, to))
+        })
+        .collect()
+}
+
+fn point_xy(point: &Value) -> Option<(f64, f64)> {
+    let x = point.get("x").and_then(Value::as_f64)?;
+    let y = point.get("y").and_then(Value::as_f64)?;
+    Some((x, y))
+}
+
+fn leg_crossing(
+    field: &ClearanceField,
+    from_index: usize,
+    from: (f64, f64),
+    to: (f64, f64),
+) -> LegCrossing {
+    let length = (to.0 - from.0).hypot(to.1 - from.1);
+    let mut crossing = LegCrossing::new(from_index, length);
+    if length <= f64::EPSILON {
+        return crossing;
+    }
+    // 半个栅格一步：墙线一般 1~2 像素，步长取整格会漏掉；上限只是防病态坐标
+    let step = (field.resolution * 0.5).max(1e-6);
+    let samples = ((length / step).ceil() as usize).clamp(1, 50_000);
+    let seg_m = length / samples as f64;
+    let mut current: Option<CellKind> = None;
+    let mut run_m = 0.0_f64;
+    for index in 0..samples {
+        let t = (index as f64 + 0.5) / samples as f64;
+        let (x, y) = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+        let (kind, legacy) = match field.value_at(x, y) {
+            Some(value) => (Some(classify(value)), value == LEGACY_UNKNOWN_PAINT),
+            None => (None, false),
+        };
+        match kind {
+            Some(CellKind::Occupied) => crossing.occupied_m += seg_m,
+            Some(CellKind::Unknown) => {
+                crossing.unknown_m += seg_m;
+                if legacy {
+                    crossing.legacy_205_m += seg_m;
+                }
+            }
+            Some(CellKind::Free) => {}
+            None => crossing.outside_m += seg_m,
+        }
+        if kind != current {
+            close_run(current, run_m, &mut crossing);
+            current = kind;
+            run_m = 0.0;
+        }
+        run_m += seg_m;
+    }
+    close_run(current, run_m, &mut crossing);
+    crossing
+}
+
+fn close_run(kind: Option<CellKind>, run_m: f64, crossing: &mut LegCrossing) {
+    match kind {
+        Some(CellKind::Occupied) if run_m > crossing.longest_occupied_run_m => {
+            crossing.longest_occupied_run_m = run_m;
+        }
+        Some(CellKind::Unknown) if run_m > crossing.longest_unknown_run_m => {
+            crossing.longest_unknown_run_m = run_m;
+        }
+        _ => {}
+    }
 }
 
 /// 净空距离场缓存：`map_id|file_path → ClearanceField`
@@ -185,17 +365,20 @@ fn field_from_raster(raster: &RosRaster, frame: &MapFrame) -> Option<ClearanceFi
         return None;
     }
     let occupied: Vec<bool> = raster.pixels.iter().map(|value| *value < 100).collect();
-    if occupied.iter().all(|value| !*value) {
-        // 一个占据格都没有（全 unknown / 新建图）：算不出净空，当成「没有信息」
-        return None;
-    }
-    let dist_sq = squared_edt(&occupied, width, height);
+    let has_obstacles = occupied.iter().any(|value| *value);
     let resolution = frame.resolution;
-    let max_sq = (MAX_CLEARANCE_M / resolution).powi(2);
-    let dist_m = dist_sq
-        .into_iter()
-        .map(|value| value.min(max_sq).sqrt() as f32 * resolution as f32)
-        .collect();
+    // 一个占据格都没有（全 unknown / 新建图）：不算 EDT，只留下栅格供航段校验；
+    // `clearance_m` 会返回 None，调用方据此跳过净空项。
+    let dist_m = if has_obstacles {
+        let dist_sq = squared_edt(&occupied, width, height);
+        let max_sq = (MAX_CLEARANCE_M / resolution).powi(2);
+        dist_sq
+            .into_iter()
+            .map(|value| value.min(max_sq).sqrt() as f32 * resolution as f32)
+            .collect()
+    } else {
+        vec![MAX_CLEARANCE_M as f32; width * height]
+    };
     Some(ClearanceField {
         resolution,
         origin_x: frame.origin_x,
@@ -203,6 +386,8 @@ fn field_from_raster(raster: &RosRaster, frame: &MapFrame) -> Option<ClearanceFi
         width,
         height,
         dist_m,
+        values: raster.pixels.clone(),
+        has_obstacles,
     })
 }
 
@@ -351,7 +536,8 @@ mod tests {
 
     #[test]
     fn unknown_cells_are_not_obstacles() {
-        // 全 unknown（128）：没有占据格 → 判不出净空，返回 None 让调用方跳过校验项
+        // 全 unknown（128）：没有占据格 → 没有净空可言，`clearance_m` 返回 None
+        // 让调用方跳过净空项；但字段仍然保留灰度，航段校验还要用它。
         let mut pixels = vec![128_u8; 100];
         pixels[0] = 128;
         let raster = RosRaster {
@@ -359,7 +545,96 @@ mod tests {
             height: 10,
             pixels,
         };
-        assert!(field_from_raster(&raster, &frame(10, 10)).is_none());
+        let field = field_from_raster(&raster, &frame(10, 10)).expect("field");
+        let (x, y) = map_xy(0, 0, 10);
+        assert!(field.clearance_m(x, y).is_none());
+    }
+
+    /// 40×10 的栅格，把 `cols` 这些列改成 `value`（其余 254）
+    fn raster_with_band(cols: std::ops::Range<u32>, value: u8) -> RosRaster {
+        let mut pixels = vec![254_u8; 40 * 10];
+        for row in 0..10 {
+            for col in cols.clone() {
+                pixels[(row * 40 + col) as usize] = value;
+            }
+        }
+        RosRaster {
+            width: 40,
+            height: 10,
+            pixels,
+        }
+    }
+
+    fn straight_leg(field: &ClearanceField) -> Vec<LegCrossing> {
+        let (x0, y0) = map_xy(0, 5, 10);
+        let (x1, _) = map_xy(39, 5, 10);
+        let data = json!({"points": [{"x": x0, "y": y0}, {"x": x1, "y": y0}]});
+        leg_crossings(field, &data)
+    }
+
+    /// 航段里连续 20 列（≈1 m）的 205：既是未知，也要单独记下「旧画笔」长度
+    #[test]
+    fn leg_crossing_measures_unknown_and_legacy_205() {
+        let field =
+            field_from_raster(&raster_with_band(10..30, 205), &frame(40, 10)).expect("field");
+        let crossings = straight_leg(&field);
+        assert_eq!(crossings.len(), 1);
+        let hit = &crossings[0];
+        assert_eq!(hit.from_index, 1);
+        assert_eq!(hit.to_index, 2);
+        assert!((hit.length_m - 39.0 * RES).abs() < 1e-6);
+        assert!(hit.occupied_m.abs() < 1e-6, "205 不是障碍");
+        assert!(
+            (hit.unknown_m - 20.0 * RES).abs() < 0.06,
+            "未知长度应≈1 m，实际 {}",
+            hit.unknown_m
+        );
+        assert!(
+            (hit.legacy_205_m - hit.unknown_m).abs() < 1e-6,
+            "这段未知全是 205 画的"
+        );
+        assert!(hit.longest_unknown_run_m >= 0.9);
+        assert!(hit.outside_m.abs() < 1e-6);
+    }
+
+    /// 128 也是未知（ROS 语义），但不计入 legacy_205
+    #[test]
+    fn leg_crossing_counts_128_as_unknown_without_legacy_hint() {
+        let field =
+            field_from_raster(&raster_with_band(10..30, 128), &frame(40, 10)).expect("field");
+        let hit = &straight_leg(&field)[0];
+        assert!(hit.unknown_m > 0.9);
+        assert!(hit.legacy_205_m.abs() < 1e-6);
+    }
+
+    /// 中间 4 列（0.2 m）障碍：只报 0.2 m 连续占据，不要按整段长度算
+    #[test]
+    fn leg_crossing_measures_longest_occupied_run() {
+        let field = field_from_raster(&raster_with_band(18..24, 0), &frame(40, 10)).expect("field");
+        let hit = &straight_leg(&field)[0];
+        assert!(
+            (hit.longest_occupied_run_m - 6.0 * RES).abs() < 0.06,
+            "连续占据应≈0.2 m，实际 {}",
+            hit.longest_occupied_run_m
+        );
+        assert!(
+            hit.occupied_m > 0.25,
+            "累计占据应≈0.3 m，实际 {}",
+            hit.occupied_m
+        );
+        assert!(hit.unknown_m.abs() < 1e-6);
+    }
+
+    /// 零长度航段（两个航点重合）不报错、全 0
+    #[test]
+    fn zero_length_leg_has_no_crossings() {
+        let field = field_from_raster(&raster_with_band(10..30, 0), &frame(40, 10)).expect("field");
+        let (x, y) = map_xy(35, 5, 10);
+        let data = json!({"points": [{"x": x, "y": y}, {"x": x, "y": y}]});
+        let hit = &leg_crossings(&field, &data)[0];
+        assert_eq!(hit.length_m, 0.0);
+        assert_eq!(hit.occupied_m, 0.0);
+        assert_eq!(hit.unknown_m, 0.0);
     }
 
     #[test]

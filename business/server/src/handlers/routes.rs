@@ -297,16 +297,23 @@ pub async fn validate_route(
     // 航点净空（离最近障碍）：只有能解出地图栅格的路线才有结果，解不出就跳过这一项。
     // 「原地待命」的停车位就是最后一个航点，所以终点单独一项——2026-11-14 现场：
     // 终点离墙 0.3 m，本体反复报 `13377 无有效绕障轨迹`，任务永远到不了终态。
-    let clearances = match super::maps::field_for_map(
+    // 同一张栅格也拿来查「航段是否穿障碍 / 穿未知」：平台下发的是**相邻航点直连**，
+    // 两个点各自干净不代表中间能走（2026-11-24 广汇二期 RT-011 最后一段 55 m
+    // 有 39.8 m 横穿平台标的未知区）。
+    let field = super::maps::field_for_map(
         &state.db,
         &state.config.backend_db_path,
         route.map_version_id.as_deref(),
     )
-    .await
-    {
-        Some(field) => super::maps::point_clearances(&field, &data),
-        None => Vec::new(),
-    };
+    .await;
+    let clearances = field
+        .as_deref()
+        .map(|field| super::maps::point_clearances(field, &data))
+        .unwrap_or_default();
+    let crossings = field
+        .as_deref()
+        .map(|field| super::maps::leg_crossings(field, &data))
+        .unwrap_or_default();
 
     let mut items = vec![
         validation_item(
@@ -389,6 +396,10 @@ pub async fn validate_route(
         ),
     ];
     items.extend(clearance_items(&clearances));
+    // 解不出栅格（没有地图包）时不出航段项，避免“没图也体检通过”的假象
+    if field.is_some() {
+        items.extend(leg_items(&crossings));
+    }
     let passed = items.iter().filter(|item| item["ok"] == true).count();
 
     Ok(ApiResponse::ok(json!({
@@ -437,12 +448,14 @@ pub async fn publish_route(
             "第 {index} 个航点 ({x:.2}, {y:.2}) 超出地图范围，不能发布"
         )));
     }
-    // 净空守卫：先把「点落在障碍上」这种谁都跑不了的情况拦在发布前（实测净空
-    // <0.15 m 就是「目标被障碍物占据」，任何结束动作都规划不过去）；
+    // 净空 / 航段守卫：先把「点落在障碍上」「航段横穿障碍 / 未知区」这种谁都跑不了
+    // 的情况拦在发布前（实测净空 <0.15 m 就是「目标被障碍物占据」，任何结束动作都
+    // 规划不过去；航段直连穿墙 / 穿未知是 2026-11-24 广汇二期 `TK-1124-17` 的现场
+    // 事故：55 m 直线里有 39.8 m 落在平台标的「未知」区，本体直接开了进去）。
     // 终点净空不足但还没到不可规划的程度时**只留痕不拦**——同一条路线也可能配
     // 「返回起点」，真正的硬拦点在下发前（客户端对「只剩最后一个点 + 反复规划失败」
     // 会提前报异常，见 `business/client/src/zhpro/route.rs`）。
-    let mut clearance_note: Option<String> = None;
+    let mut notes: Vec<String> = Vec::new();
     if let Some(field) = super::maps::field_for_map(
         &state.db,
         &state.config.backend_db_path,
@@ -465,8 +478,8 @@ pub async fn publish_route(
             .last()
             .filter(|point| point.clearance_m < super::maps::MIN_STOP_CLEARANCE_M)
         {
-            clearance_note = Some(format!(
-                "注意：终点 P{} 距最近障碍仅 {:.2} m（建议 ≥{:.1} m），\
+            notes.push(format!(
+                "终点 P{} 距最近障碍仅 {:.2} m（建议 ≥{:.1} m），\
                  「原地待命」的停车位就是这个点，本体可能停不进去",
                 last.index,
                 last.clearance_m,
@@ -475,8 +488,57 @@ pub async fn publish_route(
             tracing::warn!(
                 "路线 {} 发布：{}",
                 route.route_code,
-                clearance_note.as_deref().unwrap_or_default()
+                notes.last().map(String::as_str).unwrap_or_default()
             );
+        }
+        // 航段栅格守卫：直连航点中间穿障碍 / 穿未知区，两个端点各自干净也会被放过。
+        let crossings = super::maps::leg_crossings(&field, &data);
+        if let Some(hit) = crossings
+            .iter()
+            .find(|hit| hit.outside_m >= super::maps::MAX_LEG_OUTSIDE_M)
+        {
+            return Err(AppError::BadRequest(format!(
+                "第 {}→{} 段有 {:.1} m 走出地图范围，不能发布；请把航点收回地图内",
+                hit.from_index, hit.to_index, hit.outside_m
+            )));
+        }
+        if let Some(hit) = crossings
+            .iter()
+            .find(|hit| hit.longest_occupied_run_m >= super::maps::MAX_LEG_OCCUPIED_RUN_M)
+        {
+            return Err(AppError::BadRequest(format!(
+                "第 {}→{} 段（{:.1} m）直连穿过障碍物（连续 {:.2} m）；本体规划不过去\
+                 （`13377` / `13446`），请在编辑器里加中间航点绕开",
+                hit.from_index, hit.to_index, hit.length_m, hit.longest_occupied_run_m
+            )));
+        }
+        if let Some(hit) = crossings
+            .iter()
+            .find(|hit| hit.longest_unknown_run_m >= super::maps::MAX_LEG_UNKNOWN_RUN_M)
+        {
+            let legacy = if hit.legacy_205_m > 0.0 {
+                format!(
+                    "（其中 {:.1} m 是「擦成未知 (205)」画的：本体按 map.yaml 的 free_thresh=0.2\
+                     会把这个值当成可通行）",
+                    hit.legacy_205_m
+                )
+            } else {
+                String::new()
+            };
+            return Err(AppError::BadRequest(format!(
+                "第 {}→{} 段（{:.1} m）有 {:.1} m 连续落在未知/不可通行区域{legacy}；\
+                 本体不会自己避开，请沿可通行区域加中间航点",
+                hit.from_index, hit.to_index, hit.length_m, hit.longest_unknown_run_m
+            )));
+        }
+        for hit in crossings
+            .iter()
+            .filter(|hit| hit.occupied_m > 0.0 || hit.unknown_m > 0.0)
+        {
+            notes.push(format!(
+                "第 {}→{} 段穿障碍 {:.2} m / 穿未知 {:.1} m（未超过拦截阈值，仅留痕）",
+                hit.from_index, hit.to_index, hit.occupied_m, hit.unknown_m
+            ));
         }
     }
     let version = bump_version(&route.version);
@@ -496,9 +558,10 @@ pub async fn publish_route(
          VALUES ('route', ?1, ?2, NULL, NULL, ?3)",
     )
     .bind(format!("{} 已发布为 {}", route.route_code, version))
-    .bind(match clearance_note.as_deref() {
-        Some(note) => format!("路线：{}（{note}）", route.route_name),
-        None => format!("路线：{}", route.route_name),
+    .bind(if notes.is_empty() {
+        format!("路线：{}", route.route_name)
+    } else {
+        format!("路线：{}（{}）", route.route_name, notes.join("；"))
     })
     .bind(&timestamp)
     .execute(&state.db)
@@ -605,6 +668,82 @@ fn clearance_items(clearances: &[super::maps::PointClearance]) -> Vec<Value> {
     vec![
         validation_item(stop_ok, "终点停靠净空".to_string(), stop_description),
         validation_item(points_ok, "航点净空".to_string(), points_description),
+    ]
+}
+
+/// 航段穿越栅格的校验项（只有能解出地图栅格时才有）。
+///
+/// 平台下发的是相邻航点**直连**（5000 kind=4 每段由一个 navigation 子任务规划），
+/// 所以「两个航点各自净空达标」不等于「中间能走」。2026-11-24 广汇二期
+/// `TK-1124-17`：RT-011 的 P6→P7 是 55 m 直线，其中 39.8 m 落在平台标的
+/// 「未知/不可通行」区（205），本体把这个值当可通行，狗直接开了进去，最后
+/// `13377 无有效绕障轨迹`。发布时的硬阈值在 `publish_route`：连续占据
+/// ≥ [`MAX_LEG_OCCUPIED_RUN_M`]、连续未知 ≥ [`MAX_LEG_UNKNOWN_RUN_M`] 直接拒。
+fn leg_items(crossings: &[super::maps::LegCrossing]) -> Vec<Value> {
+    let occupied = crossings
+        .iter()
+        .filter(|hit| hit.occupied_m > 0.0)
+        .max_by(|a, b| {
+            a.longest_occupied_run_m
+                .total_cmp(&b.longest_occupied_run_m)
+        });
+    let outside = crossings.iter().find(|hit| hit.outside_m > 0.0);
+    let occupied_ok = occupied.is_none() && outside.is_none();
+    let mut occupied_description = match occupied {
+        Some(hit) => format!(
+            "第 {}→{} 段（{:.1} m）有 {:.2} m 落在障碍物上（最长连续 {:.2} m），\
+             本体规划器过不去（13377 / 13446）；请加中间航点绕开",
+            hit.from_index, hit.to_index, hit.length_m, hit.occupied_m, hit.longest_occupied_run_m
+        ),
+        None => "所有航段都避开了障碍物".to_string(),
+    };
+    if let Some(hit) = outside {
+        occupied_description.push_str(&format!(
+            "；第 {}→{} 段有 {:.1} m 走出地图范围",
+            hit.from_index, hit.to_index, hit.outside_m
+        ));
+    }
+
+    let unknown = crossings
+        .iter()
+        .filter(|hit| hit.unknown_m > 0.0)
+        .max_by(|a, b| a.longest_unknown_run_m.total_cmp(&b.longest_unknown_run_m));
+    let unknown_ok = unknown.is_none();
+    let unknown_description = match unknown {
+        Some(hit) => {
+            let legacy = if hit.legacy_205_m > 0.0 {
+                format!(
+                    "；其中 {:.1} m 是「擦成未知 (205)」画的：本体按 map.yaml 的\
+                     free_thresh=0.2 会把这个值当成可通行，只能靠路线绕开（或改用 128 / 禁区）",
+                    hit.legacy_205_m
+                )
+            } else {
+                String::new()
+            };
+            format!(
+                "第 {}→{} 段（{:.1} m）有 {:.1} m 在未知/不可通行区（最长连续 {:.1} m）{legacy}；\
+                 请沿可通行区域加中间航点",
+                hit.from_index,
+                hit.to_index,
+                hit.length_m,
+                hit.unknown_m,
+                hit.longest_unknown_run_m
+            )
+        }
+        None => "所有航段都在可通行区域内".to_string(),
+    };
+
+    vec![
+        validation_item(
+            occupied_ok,
+            "航段穿越障碍".to_string(),
+            occupied_description,
+        ),
+        validation_item(
+            unknown_ok,
+            "航段穿越未知区域".to_string(),
+            unknown_description,
+        ),
     ]
 }
 

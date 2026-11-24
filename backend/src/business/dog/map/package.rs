@@ -45,6 +45,39 @@ pub const MAX_ERASE_RADIUS: f64 = 500.0;
 pub const MAX_EDIT_STROKES: usize = 2_000;
 pub const MAX_EDIT_POINTS: usize = 200_000;
 
+/// 橡皮擦写入「可通行」的灰度值（也是 ROS `map_saver` 的自由空间值）。
+pub const ERASE_FREE: u8 = 254;
+/// 橡皮擦写入「未知 / 不可通行」的灰度值。
+///
+/// **必须是 128，不能是 205**：本体按地图包的 `map.yaml` 做 trinary 判定
+/// （`p = (255 - v) / 255`，`free_thresh: 0.2 / occupied_thresh: 0.5`）：
+///
+/// - `128 → p = 0.498` → 未知，规划器不走；
+/// - `205 → p = 0.1961` → **可通行**（只有 `v > 204` 才算 free）。
+///
+/// ROS `map_saver` 把未知写成 205，是因为它的默认 `free_thresh` 是 `0.196`；
+/// 我们这张图的 yaml 是 `0.2`，差 0.004 就把 205 翻到了自由一侧。
+/// 2026-11-24 广汇二期 `TK-1124-17` 就是现场用「擦成未知 (205)」标了一大片
+/// 不可通行区，本体照直穿过去、最后报 `13377 无有效绕障轨迹`。
+pub const ERASE_UNKNOWN: u8 = 128;
+/// 旧版前端写过的「未知」值。
+///
+/// 读进来时归一到 [`ERASE_UNKNOWN`]（见 [`normalize_erase_value`]），不再原样写回，
+/// 否则旧页面缓存 / 旧客户端还会继续把 205（本体眼里的可通行）写进地图。
+pub const LEGACY_ERASE_UNKNOWN: u8 = 205;
+
+/// 橡皮擦灰度值规整：只允许「可通行 254 / 未知 128」，旧的 205 转成 128。
+pub fn normalize_erase_value(value: u8) -> Result<u8, AppError> {
+    match value {
+        ERASE_FREE | ERASE_UNKNOWN => Ok(value),
+        LEGACY_ERASE_UNKNOWN => Ok(ERASE_UNKNOWN),
+        other => Err(AppError::BadRequest(format!(
+            "橡皮擦只能写 {ERASE_FREE}（可通行）或 {ERASE_UNKNOWN}（未知），收到 {other}；\
+             205 是旧版「未知」值（本体按 map.yaml 会当成可通行），请改用 {ERASE_UNKNOWN}"
+        ))),
+    }
+}
+
 /// 解析地图包 zip：找出栅格 PGM 与 YAML，把栅格地图转成 PNG。
 ///
 /// 选择顺序：`map_edit/` 下的条目 → `model.pgm` → 第一个 `*.pgm`。
@@ -104,7 +137,11 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
-/// 可编辑的栅格：统一归一化成 8 位灰度（0 = 占据，205 = 未知，254 = 自由）。
+/// 可编辑的栅格：统一归一化成 8 位灰度（0 = 占据，128 = 未知，254 = 自由）。
+///
+/// 注意：平台早期把「未知」写成 205，那是 ROS `map_saver` 配合
+/// `free_thresh: 0.196` 的约定；本体这张图的 yaml 是 `0.2`，205 会被判成可通行。
+/// 现在统一 `128 = 未知`（见 [`ERASE_UNKNOWN`]），205 只作为读入兼容。
 ///
 /// ROS `map_saver` 产出的是 8 位 `P5`，这里额外兼容 `P2`（ASCII）与 16 位
 /// `P5`：16 位在首次编辑时按比例缩放到 8 位（`occupied_thresh` 是比例阈值，
@@ -227,7 +264,7 @@ pub fn parse_pgm_raster(bytes: &[u8]) -> Result<PgmRaster, AppError> {
 /// 按原顺序原样复制，因此分辨率 / 原点 / negate 等元数据保持不变。
 ///
 /// `erase_value` 只是兜底：每笔优先用 `stroke.value`（同一次编辑允许混着擦成
-/// 可通行 254 / 未知 205）。
+/// 可通行 254 / 未知 128；旧的 205 会被归一成 128）。
 pub fn rewrite_map_package(
     bytes: &[u8],
     strokes: &[MapEditStroke],
@@ -289,7 +326,8 @@ pub fn rewrite_map_package(
 
 /// 把橡皮擦笔画刷进像素缓冲区，返回实际被改写的像素数。
 ///
-/// 每笔写入自己的 `stroke.value`，缺省时用 `erase_value`。
+/// 每笔写入自己的 `stroke.value`，缺省时用 `erase_value`。两个值都会先过
+/// [`normalize_erase_value`]：旧的 205 归一成 128（本体眼里的未知），其它值直接拒绝。
 pub fn apply_erase_strokes(
     pixels: &mut [u8],
     width: u32,
@@ -302,6 +340,7 @@ pub fn apply_erase_strokes(
             "栅格像素数量与尺寸不一致".to_string(),
         ));
     }
+    let erase_value = normalize_erase_value(erase_value)?;
     let mut changed = 0usize;
     for stroke in strokes {
         if stroke.points.is_empty() {
@@ -311,9 +350,11 @@ pub fn apply_erase_strokes(
         if !radius.is_finite() {
             return Err(AppError::BadRequest("笔刷半径无效".to_string()));
         }
-        // 值跟着笔画走：同一批里可能既擦成可通行（254）又擦成未知（205）。
+        // 值跟着笔画走：同一批里可能既擦成可通行（254）又擦成未知（128）。
         // 没有 `value` 的老客户端回退到请求级 `eraseValue`。
-        let value = stroke.value.unwrap_or(erase_value);
+        let value = stroke
+            .value
+            .map_or(Ok(erase_value), normalize_erase_value)?;
         for point in &stroke.points {
             if !point.x.is_finite() || !point.y.is_finite() {
                 return Err(AppError::BadRequest("笔画坐标无效".to_string()));
@@ -742,7 +783,7 @@ mod tests {
 
     #[test]
     fn applies_per_stroke_value_so_mixed_edits_keep_their_own_gray() {
-        // 8x1 全是障碍（0）：左半擦成可通行（254）、右半擦成未知（205）。
+        // 8x1 全是障碍（0）：左半擦成可通行（254）、右半擦成未知（128）。
         // 请求级默认值故意给 254，只有笔画自带的值生效才算对。
         let mut pixels = vec![0u8; 8];
         let strokes = vec![
@@ -754,12 +795,54 @@ mod tests {
             MapEditStroke {
                 points: vec![MapEditPoint { x: 6.5, y: 0.5 }],
                 radius: Some(0.6),
-                value: Some(205),
+                value: Some(128),
             },
         ];
         apply_erase_strokes(&mut pixels, 8, 1, &strokes, 254).unwrap();
         assert_eq!(pixels[1], 254, "第一笔必须写成可通行");
-        assert_eq!(pixels[6], 205, "第二笔必须写成未知");
+        assert_eq!(pixels[6], 128, "第二笔必须写成未知");
+    }
+
+    /// 旧前端还在写「未知 205」：必须归一到 128，否则本体按 `free_thresh: 0.2`
+    /// 会把它当成可通行（见 `ERASE_UNKNOWN` 的文档）。
+    #[test]
+    fn legacy_unknown_205_is_rewritten_as_128() {
+        let mut pixels = vec![0u8; 4];
+        let strokes = vec![MapEditStroke {
+            points: vec![MapEditPoint { x: 2.0, y: 0.5 }],
+            radius: Some(1.0),
+            value: Some(LEGACY_ERASE_UNKNOWN),
+        }];
+        apply_erase_strokes(&mut pixels, 4, 1, &strokes, ERASE_FREE).unwrap();
+        assert_eq!(pixels[2], ERASE_UNKNOWN, "205 必须落盘成 128");
+
+        // 请求级 eraseValue 是 205（更老的客户端）时同样归一
+        let mut pixels = vec![0u8; 4];
+        apply_erase_strokes(
+            &mut pixels,
+            4,
+            1,
+            &[MapEditStroke {
+                points: vec![MapEditPoint { x: 2.0, y: 0.5 }],
+                radius: Some(1.0),
+                value: None,
+            }],
+            LEGACY_ERASE_UNKNOWN,
+        )
+        .unwrap();
+        assert_eq!(pixels[2], ERASE_UNKNOWN);
+    }
+
+    /// 只允许 254 / 128（+ 旧的 205）：别再造出第三种灰度让本体和平台各说各话。
+    #[test]
+    fn rejects_unsupported_erase_values() {
+        let mut pixels = vec![0u8; 4];
+        let strokes = vec![MapEditStroke {
+            points: vec![MapEditPoint { x: 2.0, y: 0.5 }],
+            radius: Some(1.0),
+            value: Some(160),
+        }];
+        assert!(apply_erase_strokes(&mut pixels, 4, 1, &strokes, ERASE_FREE).is_err());
     }
 
     #[test]
@@ -773,10 +856,10 @@ mod tests {
             radius: Some(1.0),
             value: None,
         }];
-        apply_erase_strokes(&mut pixels, 20, 10, &strokes, 205).unwrap();
+        apply_erase_strokes(&mut pixels, 20, 10, &strokes, ERASE_UNKNOWN).unwrap();
         // 中间没有采样点的像素也必须被插值补上
         for x in 2..=18 {
-            assert_eq!(pixels[5 * 20 + x], 205, "x={x} 未被擦除");
+            assert_eq!(pixels[5 * 20 + x], ERASE_UNKNOWN, "x={x} 未被擦除");
         }
         assert_eq!(pixels[0], 0);
     }

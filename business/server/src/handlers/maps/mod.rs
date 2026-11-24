@@ -34,9 +34,11 @@ mod tests;
 
 // 路由（`app.rs`）与其它模块用的入口
 pub use backend::{list_backend_maps, list_synced_sources};
-// 净空计算：路线校验 / 发布守卫与任务下发共用（见 `clearance.rs` 模块头）
+// 净空 / 航段穿越：路线校验、发布守卫与任务下发共用（见 `clearance.rs` 模块头）
 pub(crate) use clearance::{
-    MIN_FREE_CLEARANCE_M, MIN_STOP_CLEARANCE_M, PointClearance, field_for_map, point_clearances,
+    LegCrossing, MAX_LEG_OCCUPIED_RUN_M, MAX_LEG_OUTSIDE_M, MAX_LEG_UNKNOWN_RUN_M,
+    MIN_FREE_CLEARANCE_M, MIN_STOP_CLEARANCE_M, PointClearance, field_for_map, leg_crossings,
+    point_clearances,
 };
 pub use import::import_backend_map;
 pub use package::map_package;

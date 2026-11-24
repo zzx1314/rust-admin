@@ -114,3 +114,81 @@ cd business/client && cargo test --bins final_point fault_log
 - `zhpro::route::tests::final_point_stall_*`：只剩最后一点 + 3 次规划故障才判；
   中途点 / 故障次数不够 / 窗口没到 / 只有定位类故障 / 单点航线 / 返程任务都不误判；
 - `zhpro::client::tests::fault_log_keeps_recent_codes_only`：同一故障重推各自计数。
+
+## 8. 航段穿越（直连）与「未知 205」的语义（2026-11-24 追加）
+
+### 8.1 事故：两个航点都干净，中间却横穿 40 m 不可通行区
+
+`TK-1124-17`「广汇二期-test1」/ 路线 `RT-011` v0.4 / 地图
+`ROS-MAP-1795402650069@v1.0`（本体目录 `2026_11_23_10_49_02`）：
+
+- P6 `(60.839, 9.575)` → P7 `(6.586, 1.538)` 是 **55 m 直线**；
+- 按 `map_edit/map.pgm` 采样，其中 **39.8 m（72.6%）** 落在平台标的「未知/不可通行」区；
+- 两个端点净空分别是 2.13 m / 1.42 m，逐点校验全部通过 → 路线正常发布；
+- 16:03:58 本体开始走这一段，16:04:08 报 `13377 无有效绕障轨迹`，操作员随后暂停、
+  遥控器接管、16:06:39 取消（6/7，85%）。
+
+**平台下发的是相邻航点直连**（每条线段由本体一个 navigation 子任务自己规划），
+所以「每个航点净空达标」不等于「中间能走」。以前只逐点算净空，航段完全没看。
+
+### 8.2 判据
+
+`business/server/src/handlers/maps/clearance.rs`：
+
+| 项 | 阈值 | 处置 |
+| --- | --- | --- |
+| 连续 **占据**（`v < 100`） | ≥ `MAX_LEG_OCCUPIED_RUN_M` = **0.5 m** | 发布 400 拒绝 |
+| 连续 **未知/不可通行**（`100..=205`） | ≥ `MAX_LEG_UNKNOWN_RUN_M` = **5.0 m** | 发布 400 拒绝 |
+| 短距离（墙边、路口零星几格） | 低于上面阈值 | 校验项报警 + 发布事件留痕，不拦 |
+| 航段走出地图范围 | 任意 | 发布 400 拒绝 |
+
+为什么未知要单独算阈值：现场地图大半是 unknown，把未知当障碍会让所有路线都发布不了
+（净空那套「只认占据格」也是这个理由）；但**一整段连续穿过去**一定是没沿着可走区域画。
+
+只检查平台**实际下发**的相邻航点（`P1→P2→…`），返航段由本体按 `end_task` 自己规划，
+平台不下发那一段，所以不查（查了只会误报）。
+
+### 8.3 为什么刷成 205 不叫「不可通行」
+
+本体按地图包 `map.yaml` 做 trinary 判定：`p = (255-v)/255`，
+`free_thresh: 0.2 / occupied_thresh: 0.5`。
+
+| 灰度 | p | 本体判定 |
+| --- | --- | --- |
+| 0 | 1.000 | 占据 |
+| **128** | **0.498** | **未知（规划器不走）** |
+| **205** | **0.1961** | **自由（`v > 204` 就算 free）** |
+| 254 / 255 | ≈0 | 自由 |
+
+205 是 ROS `map_saver` 配 `free_thresh: 0.196` 的约定；我们的 yaml 是 `0.2`，差 0.004
+就翻到了自由一侧。所以在平台/遥控器上「擦成未知 (205)」标出来的禁行区，**本体一直当
+可通行**——事故里狗就是这么开进去的。
+
+已于 2026-11-24 改掉：
+
+- 中台橡皮擦只写 **254（可通行）/ 128（未知）**，旧的 205 提交后归一到 128
+  （`backend/src/business/dog/map/package.rs`：`ERASE_FREE` / `ERASE_UNKNOWN` /
+  `normalize_erase_value`），其它灰度值直接 400；
+- 前端画笔改成「擦成未知 (128)」（`frontend/src/views/dog/map/MapEditorDialog.vue`）；
+- 存量包用 `business/tools/map_unknown_value.py` 把 205 批量改成 128（干跑 → `--apply`），
+  再走「修改 / 派生版本 → 上传 → 发布 → 下发地图 → 4030 载图」；
+- 平台校验把 205 也算未知，所以即使有人还在用旧值，发布时也能看到报警/拦截。
+
+> 注意：地图包里的**原始建图** `map.pgm` 用的是 `0/128/255`，128 本来就是它的未知值；
+> 205 只出现在 `map_edit/`（平台 / 遥控器编辑版）。改 205→128 是在向原始约定靠拢。
+
+### 8.4 回归
+
+```bash
+cd business/server && cargo test --lib handlers::maps::clearance
+cd business/server && cargo test --test route_clearance
+cd backend && cargo test --lib business::dog::map
+```
+
+- `handlers::maps::clearance::tests::leg_crossing_*`：未知/205 长度、最长连续段、
+  128 与 205 的区分、零长度航段；
+- `tests/route_clearance.rs`（黑盒）：12 m×2 m 的合成地图，横穿 7 m 未知区 →
+  「航段穿越未知区域」不通过、发布 400 且文案点出「205 本体当可通行」；
+  横穿 2 m 未知 → 报警但可发布、发布事件留痕；横穿 0.6 m 障碍 → 发布 400；
+- `business::dog::map::package::tests::legacy_unknown_205_is_rewritten_as_128` /
+  `rejects_unsupported_erase_values`：旧值归一、非法灰度拒绝。

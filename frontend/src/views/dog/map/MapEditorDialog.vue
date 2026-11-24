@@ -7,9 +7,14 @@
  * 这里按栅格原始像素尺寸画到 canvas 上，支持缩放、拖动浏览。
  *
  * 编辑：橡皮擦按栅格像素坐标记录笔画，每一笔都记下自己的擦除值（254 = 可通行，
- * 默认；205 = 未知），提交 `POST /api/dogMap/{id}/edit`。后端按笔画把这些像素
+ * 默认；128 = 未知），提交 `POST /api/dogMap/{id}/edit`。后端按笔画把这些像素
  * 改写为对应灰度值并重算 map_hash；根目录的建图原始 map.pgm 不会被改。
  * 已发布 / 已归档版本不可编辑，需要先派生新版本。
+ *
+ * ⚠️ 「未知」必须写 128，不能写 205：本体 `map.yaml` 是 `free_thresh: 0.2`，
+ * `205 → p=0.1961 < 0.2` 会被判成**可通行**（205 是 ROS map_saver 配
+ * `free_thresh: 0.196` 的旧约定）。2026-11-24 广汇二期就是这个坑：现场把
+ * 一片不可通行区擦成 205，本体直接穿了过去。
  */
 import { computed, nextTick, ref } from "vue";
 import { ElMessageBox } from "element-plus";
@@ -509,15 +514,18 @@ defineExpose({ open });
           </el-radio-button>
         </el-radio-group>
 
-        <el-tooltip content="擦除后写入的灰度值" placement="top">
+        <el-tooltip
+          content="254 = 可通行（擦掉噪点）；128 = 未知/不可通行（本体规划器不会走）"
+          placement="top"
+        >
           <el-select
             v-model="eraseValue"
             size="small"
-            style="width: 140px"
+            style="width: 150px"
             :disabled="!canEdit"
           >
             <el-option label="擦成可通行 (254)" :value="254" />
-            <el-option label="擦成未知 (205)" :value="205" />
+            <el-option label="擦成未知 (128)" :value="128" />
           </el-select>
         </el-tooltip>
 

@@ -238,17 +238,19 @@ pub struct MapVO {
 /// （`map_edit/map.pgm`，没有时才用 `model.pgm`）里对应区域改写为各自的
 /// `stroke.value`（缺省回退到 `erase_value`；默认 254 = 自由空间）。
 /// 每一笔都带自己的值，是因为一次编辑里可能既擦成可通行又擦成未知。
+/// 灰度值只能是 `254`（可通行）或 `128`（未知）；旧的 `205` 会被归一成 `128`
+/// ——本体按 `map.yaml` 的 `free_thresh: 0.2` 会把 205 当成可通行。
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MapEditRequest {
     pub strokes: Vec<MapEditStroke>,
-    /// 擦除后写入的灰度值：`254` = 可通行（默认）、`205` = 未知。
+    /// 擦除后写入的灰度值：`254` = 可通行（默认）、`128` = 未知。
     pub erase_value: Option<u8>,
 }
 
 /// 一笔连续擦除（画笔半径单位：栅格像素）。
 ///
-/// `value` 是这一笔自己写入的灰度值（`254` = 可通行、`205` = 未知）。
+/// `value` 是这一笔自己写入的灰度值（`254` = 可通行、`128` = 未知）。
 /// 同一次编辑里允许混着画（先擦成可通行、再擦成未知），所以值必须跟着笔画走；
 /// 请求体里的 `erase_value` 只作为老客户端（不带 `value`）的兜底默认值。
 #[derive(Debug, Deserialize, Clone)]

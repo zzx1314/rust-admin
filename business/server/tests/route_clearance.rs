@@ -42,21 +42,32 @@ fn temp_dir() -> TempDir {
     TempDir(dir)
 }
 
-/// 写一张「一堵墙」的 PGM 地图包，返回给 `map_versions.file_path` 用的相对路径
-fn write_map_package(backend_db: &Path) -> String {
-    let relative = "maps/clearance-test.zip";
+/// 写一张「按矩形补丁上色」的 PGM 地图包，返回给 `map_versions.file_path` 用的相对路径。
+/// 基底 = 254（可通行），`patches` 是 `(col0, row0, col1, row1, value)`（左闭右开，row 从顶部数）。
+fn write_patched_map(
+    backend_db: &Path,
+    name: &str,
+    cols: u32,
+    rows: u32,
+    patches: &[(u32, u32, u32, u32, u8)],
+) -> String {
+    let relative = format!("maps/{name}.zip");
     let path = backend_db
         .parent()
         .expect("backend.db 应有父目录")
         .join("device_uploads")
-        .join(relative);
+        .join(&relative);
     std::fs::create_dir_all(path.parent().unwrap()).expect("创建地图目录失败");
 
-    let mut pixels = vec![254_u8; (MAP_CELLS * MAP_CELLS) as usize];
-    for row in 0..MAP_CELLS {
-        pixels[(row * MAP_CELLS + WALL_COL) as usize] = 0;
+    let mut pixels = vec![254_u8; (cols * rows) as usize];
+    for (col0, row0, col1, row1, value) in patches {
+        for row in *row0..(*row1).min(rows) {
+            for col in *col0..(*col1).min(cols) {
+                pixels[(row * cols + col) as usize] = *value;
+            }
+        }
     }
-    let mut pgm = format!("P5\n{MAP_CELLS} {MAP_CELLS}\n255\n").into_bytes();
+    let mut pgm = format!("P5\n{cols} {rows}\n255\n").into_bytes();
     pgm.extend_from_slice(&pixels);
 
     let file = std::fs::File::create(&path).expect("创建地图包失败");
@@ -65,7 +76,18 @@ fn write_map_package(backend_db: &Path) -> String {
         .expect("写入 zip 失败");
     zip.write_all(&pgm).expect("写入 PGM 失败");
     zip.finish().expect("收尾 zip 失败");
-    relative.to_string()
+    relative
+}
+
+/// 写一张「一堵墙」的 PGM 地图包，返回给 `map_versions.file_path` 用的相对路径
+fn write_map_package(backend_db: &Path) -> String {
+    write_patched_map(
+        backend_db,
+        "clearance-test",
+        MAP_CELLS,
+        MAP_CELLS,
+        &[(WALL_COL, 0, WALL_COL + 1, MAP_CELLS, 0)],
+    )
 }
 
 async fn test_state() -> (AppState, TempDir) {
@@ -122,8 +144,13 @@ async fn test_state() -> (AppState, TempDir) {
     (state, dir)
 }
 
-async fn insert_real_map(pool: &sqlx::SqlitePool, file_path: &str) -> String {
-    let map_id = "CLEARANCE-MAP@v1.0";
+async fn insert_map(
+    pool: &sqlx::SqlitePool,
+    map_id: &str,
+    file_path: &str,
+    cols: u32,
+    rows: u32,
+) -> String {
     sqlx::query(
         "INSERT INTO map_versions (id, park_id, map_name, version, frame_id, crs, origin,
             resolution, status, map_width, map_height, file_path, source, created_at)
@@ -132,8 +159,8 @@ async fn insert_real_map(pool: &sqlx::SqlitePool, file_path: &str) -> String {
             '2026-11-01 00:00:00')",
     )
     .bind(map_id)
-    .bind(i64::from(MAP_CELLS))
-    .bind(i64::from(MAP_CELLS))
+    .bind(i64::from(cols))
+    .bind(i64::from(rows))
     .bind(file_path)
     .execute(pool)
     .await
@@ -141,17 +168,32 @@ async fn insert_real_map(pool: &sqlx::SqlitePool, file_path: &str) -> String {
     map_id.to_string()
 }
 
+async fn insert_real_map(pool: &sqlx::SqlitePool, file_path: &str) -> String {
+    insert_map(pool, "CLEARANCE-MAP@v1.0", file_path, MAP_CELLS, MAP_CELLS).await
+}
+
 /// 两点路线：起点离墙 0.5 m，终点离墙 `last_gap_m`（米）
 async fn insert_route(pool: &sqlx::SqlitePool, code: &str, map_id: &str, last_gap_m: f64) -> i64 {
     // 墙在 x = 0.0：终点放在 x = -last_gap_m
+    insert_route_points(pool, code, map_id, (-0.5, 0.0), (-last_gap_m, 0.0)).await
+}
+
+/// 两点路线（起终点任意），用于航段穿越回归
+async fn insert_route_points(
+    pool: &sqlx::SqlitePool,
+    code: &str,
+    map_id: &str,
+    from: (f64, f64),
+    to: (f64, f64),
+) -> i64 {
     let data = serde_json::json!({
         "schemaVersion": 3,
         "coordFrame": "map",
         "loop": "往返",
         "points": [
-            {"name": "P1", "x": -0.5, "y": 0.0, "dwell": 0, "radius": 0.3, "must": true,
+            {"name": "P1", "x": from.0, "y": from.1, "dwell": 0, "radius": 0.3, "must": true,
              "heading": 0, "onFail": "跳过继续", "actions": []},
-            {"name": "P2", "x": -last_gap_m, "y": 0.0, "dwell": 5, "radius": 0.3, "must": true,
+            {"name": "P2", "x": to.0, "y": to.1, "dwell": 5, "radius": 0.3, "must": true,
              "heading": 90, "onFail": "跳过继续", "actions": []}
         ],
         "legs": [{"mode": "沿道路", "speed": 1.2, "avoid": "标准", "actions": []}],
@@ -324,4 +366,135 @@ async fn missing_map_package_skips_clearance_instead_of_failing() {
 
     let (status, body) = publish(&app, &token, route_id).await;
     assert_eq!(status, StatusCode::OK, "净空算不出来时不能拦发布: {body}");
+}
+
+/// 2026-11-24 广汇二期 `TK-1124-17` 的缩影：
+/// 55 m 直线航段里有一大段落在平台标的「未知 205」区。两个航点各自干净，
+/// 平台以前完全看不出来，本体又把这个值当成可通行 → 狗直接开了进去。
+#[tokio::test]
+async fn long_unknown_leg_blocks_publish_with_actionable_message() {
+    let (state, _dir) = test_state().await;
+    let pool = state.db.clone();
+    // 12 m × 2 m，0.0..7.0 m 是「未知 205」（140 列）
+    let file_path = write_patched_map(
+        &state.config.backend_db_path,
+        "unknown-band",
+        240,
+        40,
+        &[(20, 0, 160, 40, 205)],
+    );
+    let map_id = insert_map(&pool, "UNKNOWN-MAP@v1.0", &file_path, 240, 40).await;
+    let route_id =
+        insert_route_points(&pool, "RT-UNKNOWN", &map_id, (-0.8, 0.0), (10.9, 0.0)).await;
+
+    let app = build_router(state);
+    let token = login(&app).await;
+
+    let validation = validate(&app, &token, route_id).await;
+    let unknown = item(&validation, "航段穿越未知区域");
+    assert_eq!(
+        unknown["ok"], false,
+        "航段穿过未知区必须体检不通过: {validation}"
+    );
+    let description = unknown["description"].as_str().unwrap_or_default();
+    assert!(
+        description.contains("205"),
+        "文案要点出「205 本体当可通行」这个坑: {description}"
+    );
+    assert_eq!(
+        item(&validation, "航段穿越障碍")["ok"],
+        true,
+        "205 不是障碍，障碍项不该跟着报错"
+    );
+
+    let (status, body) = publish(&app, &token, route_id).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "横穿未知区的航段不能发布: {body}"
+    );
+    let message = body["msg"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("未知") && message.contains("205"),
+        "拒绝原因要能让运维一眼看懂: {message}"
+    );
+    assert!(message.contains("1→2"), "拒绝原因要指出是哪一段: {message}");
+}
+
+/// 短距离路过未知区（< 5 m）：体检项报警，但不拦发布（现场地图大半是 unknown，
+/// 一律硬拦会让正常路线全发不出去），只在发布事件里留痕。
+#[tokio::test]
+async fn short_unknown_leg_is_reported_but_still_publishable() {
+    let (state, _dir) = test_state().await;
+    let pool = state.db.clone();
+    // 0.0..2.0 m 是未知 128（40 列）
+    let file_path = write_patched_map(
+        &state.config.backend_db_path,
+        "unknown-sliver",
+        240,
+        40,
+        &[(20, 0, 60, 40, 128)],
+    );
+    let map_id = insert_map(&pool, "UNKNOWN-SLIVER@v1.0", &file_path, 240, 40).await;
+    let route_id = insert_route_points(&pool, "RT-SLIVER", &map_id, (-0.8, 0.0), (10.9, 0.0)).await;
+
+    let app = build_router(state);
+    let token = login(&app).await;
+
+    let validation = validate(&app, &token, route_id).await;
+    assert_eq!(
+        item(&validation, "航段穿越未知区域")["ok"],
+        false,
+        "路过未知区就要提醒: {validation}"
+    );
+
+    let (status, body) = publish(&app, &token, route_id).await;
+    assert_eq!(status, StatusCode::OK, "短距离未知不能拦发布: {body}");
+
+    let note: Option<String> = sqlx::query_scalar(
+        "SELECT description FROM task_events WHERE event_type = 'route' ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
+    let note = note.unwrap_or_default();
+    assert!(
+        note.contains("穿未知"),
+        "未到拦截阈值的也要在发布事件里留痕: {note}"
+    );
+}
+
+/// 航段从障碍物里穿过去（连续 ≥ 0.5 m）：发布直接拒
+#[tokio::test]
+async fn leg_through_obstacle_blocks_publish() {
+    let (state, _dir) = test_state().await;
+    let pool = state.db.clone();
+    // 2.0..2.6 m 是一堵 0.6 m 厚的墙
+    let file_path = write_patched_map(
+        &state.config.backend_db_path,
+        "thick-wall",
+        240,
+        40,
+        &[(60, 0, 72, 40, 0)],
+    );
+    let map_id = insert_map(&pool, "THICK-WALL@v1.0", &file_path, 240, 40).await;
+    let route_id = insert_route_points(&pool, "RT-WALL", &map_id, (-0.8, 0.0), (10.9, 0.0)).await;
+
+    let app = build_router(state);
+    let token = login(&app).await;
+
+    let validation = validate(&app, &token, route_id).await;
+    assert_eq!(
+        item(&validation, "航段穿越障碍")["ok"],
+        false,
+        "穿墙航段必须体检不通过: {validation}"
+    );
+
+    let (status, body) = publish(&app, &token, route_id).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "穿墙航段不能发布: {body}");
+    let message = body["msg"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("障碍"),
+        "拒绝原因要说明是穿障碍: {message}"
+    );
 }
