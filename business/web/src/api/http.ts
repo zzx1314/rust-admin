@@ -13,6 +13,62 @@ export const tokenStorage = {
   }
 };
 
+/** JWT 的 `exp`（秒）；不是合法 JWT 时返回 `null` */
+function tokenExp(token: string): number | null {
+  const payload = token.split(".")[1];
+  if (!payload) return null;
+  try {
+    const base64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+    const claims = JSON.parse(atob(padded)) as { exp?: unknown };
+    return typeof claims.exp === "number" ? claims.exp : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 本地判断令牌是否已过期（不再向服务端问一次）。
+ *
+ * 路由守卫只看「有没有令牌」，过期令牌照样能进控制台：页面挂载后
+ * `auth/me`、`dashboard/summary` 一起回 401，用户看到的是「刚进控制台就被踢回
+ * 登录页，还弹一句『请先登录』」——他明明就站在登录页上。所以在 store 初始化时就把过期
+ * 令牌丢掉，直接当作「未登录」。解析不出来也当过期：宁可让用户重登一次。
+ */
+export function tokenExpired(token: string | null | undefined): boolean {
+  if (!token) return true;
+  const exp = tokenExp(token);
+  if (exp === null) return true;
+  return exp * 1000 <= Date.now();
+}
+
+/** 是否已经站在登录页上（含「现场入口」模式下的子路径） */
+function onLoginPage() {
+  return window.location.pathname.replace(/\/+$/, "") === "/login";
+}
+
+/** 是否是登录接口本身（它的 401 是「密码错」，不走登出 / 换页那一套） */
+function isLoginRequest(config: { url?: string } | undefined) {
+  return (config?.url ?? "").replace(/\/+$/, "").endsWith("/auth/login");
+}
+
+/** 同一批并行请求一起 401 时只跳转一次 */
+let lastUnauthorizedAt = 0;
+
+/** 跳登录页前留个记号：登录页挂载时提示一次「登录已过期」（硬跳转会清掉内存里的 ElMessage） */
+export const SESSION_EXPIRED_KEY = "robodog_session_expired";
+
+function handleUnauthorized() {
+  tokenStorage.clear();
+  // 已经在登录页上：用户本来就要重新登录，不要再弹「请先登录」
+  if (onLoginPage()) return;
+  const now = Date.now();
+  if (now - lastUnauthorizedAt < 3000) return;
+  lastUnauthorizedAt = now;
+  sessionStorage.setItem(SESSION_EXPIRED_KEY, "1");
+  window.location.href = "/login";
+}
+
 const service = axios.create({
   // 默认同源 /api；「现场入口」模式下由 /runtime-config.js 覆盖成云端地址
   baseURL: apiBaseUrl(),
@@ -40,11 +96,12 @@ service.interceptors.response.use(
     return response.data;
   },
   async error => {
-    if (error.response?.status === 401) {
-      tokenStorage.clear();
-      if (window.location.pathname !== "/login") {
-        window.location.href = "/login";
-      }
+    // 登录接口的 401 是「账号或密码错误」，要把后端说的原因照原样给用户看；
+    // 其它接口的 401 是「令牌没了 / 过期了」，统一一句「登录已过期，请重新登录」——
+    // 不能把服务端的「请先登录」原样弹出来：用户可能就站在登录页上。
+    if (error.response?.status === 401 && !isLoginRequest(error.config)) {
+      handleUnauthorized();
+      return Promise.reject(error);
     }
     // 5xx 且响应体不是我们的 JSON（没有 msg）时，基本都是「后端没起来 / 端口不通」：
     // 用 vite 代理时上游连不上会退化成 500，axios 只能给出

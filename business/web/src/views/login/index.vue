@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
+import { SESSION_EXPIRED_KEY } from "@/api/http";
 import { useAuthStore } from "@/stores/auth";
 import AppIcon from "@/components/AppIcon.vue";
 
@@ -12,6 +13,13 @@ const route = useRoute();
 const username = ref("");
 const password = ref("");
 const loading = ref(false);
+
+// 令牌过期被拦回来时（`http.ts` 硬跳转），在这里补一句原因；只提示一次
+onMounted(() => {
+  if (sessionStorage.getItem(SESSION_EXPIRED_KEY) !== "1") return;
+  sessionStorage.removeItem(SESSION_EXPIRED_KEY);
+  ElMessage.warning("登录已过期，请重新登录");
+});
 
 async function submit() {
   if (!username.value.trim() || !password.value) {

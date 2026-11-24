@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { authApi } from "@/api/ops";
-import { tokenStorage } from "@/api/http";
+import { tokenExpired, tokenStorage } from "@/api/http";
 import type { UserInfo } from "@/api/types";
 
 const USER_KEY = "robodog_user";
@@ -16,8 +16,12 @@ function readUser(): UserInfo | null {
 }
 
 export const useAuthStore = defineStore("auth", () => {
-  const token = ref(tokenStorage.get() || "");
-  const user = ref<UserInfo | null>(readUser());
+  // 过期令牌不能当「已登录」：路由守卫只看令牌是否存在，留着它会让用户
+  // 先闪进控制台、再被几个 401 一起踢回登录页（还带一句『请先登录』的提示）。
+  const stored = tokenStorage.get();
+  if (stored && tokenExpired(stored)) tokenStorage.clear();
+  const token = ref(stored && !tokenExpired(stored) ? stored : "");
+  const user = ref<UserInfo | null>(token.value ? readUser() : null);
   const isLoggedIn = computed(() => Boolean(token.value));
 
   async function login(username: string, password: string) {
