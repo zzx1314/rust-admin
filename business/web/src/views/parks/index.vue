@@ -116,6 +116,8 @@ const deviceMapOptions = computed(() =>
  * 不同园区可以共用同一张地图基线：设备先绑了别的园区（或老图绑错园区）时，
  * 本园区也能直接选它，保存只写 `parks.map_version_id`，**不改变图的归属园区**。
  * 只列带 `deviceCode` 的机器人地图：演示 / 历史地图没有采集设备，不该被挂到业务园区上。
+ * 选项里不再展示「归属园区 / 上传人」——一张图可以同时被多个园区当基线，
+ * 写个单一归属只会误导人（详见 `resolve_park_map`）。
  */
 const otherParkMapOptions = computed(() => {
   const parkId = editingPark.value?.id;
@@ -660,19 +662,17 @@ onMounted(load);
               <option v-for="map in deviceMapOptions" :key="map.id" :value="map.id">
                 {{ map.mapName }} · {{ map.id }} · {{ map.status }} ·
                 {{ map.sourceId ? `中台 #${map.sourceId}` : "无中台记录" }} ·
-                {{ map.deviceCode ? `设备 ${map.deviceCode}` : "设备未知" }} ·
-                {{ map.ownerUsername ? `归属 ${map.ownerUsername}` : "归属未知" }}
+                {{ map.deviceCode ? `设备 ${map.deviceCode}` : "设备未知" }}
               </option>
             </optgroup>
             <optgroup
               v-if="otherParkMapOptions.length"
-              label="我的设备地图 · 其他园区在用（可共用同一张，不改归属）"
+              label="我的设备地图 · 已有其他园区在用（可共用同一张）"
             >
               <option v-for="map in otherParkMapOptions" :key="map.id" :value="map.id">
                 {{ map.mapName }} · {{ map.id }} · {{ map.status }} ·
-                {{ map.parkName ? `归属 ${map.parkName}` : "归属其他园区" }} ·
-                {{ map.deviceCode ? `设备 ${map.deviceCode}` : "设备未知" }} ·
-                {{ map.ownerUsername ? `上传人 ${map.ownerUsername}` : "上传人未知" }}
+                {{ map.sourceId ? `中台 #${map.sourceId}` : "无中台记录" }} ·
+                {{ map.deviceCode ? `设备 ${map.deviceCode}` : "设备未知" }}
               </option>
             </optgroup>
             <optgroup
@@ -685,8 +685,6 @@ onMounted(load);
                 :value="`backend:${map.id}`"
               >
                 {{ map.mapName }} · {{ map.mapStatus || "草稿" }}
-                {{ map.ownerUsername ? `· 归属 ${map.ownerUsername}` : "" }}
-                {{ map.parkName ? `· 园区 ${map.parkName}` : "· 未关联园区" }}
                 {{ map.fileName ? `· ${map.fileName}` : "" }}
                 {{ map.fileSize ? `· ${(map.fileSize / 1024).toFixed(0)} KB` : "" }}
               </option>
