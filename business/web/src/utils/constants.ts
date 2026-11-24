@@ -65,30 +65,6 @@ export const ACTION_LIB: Record<string, ActionMeta> = {
     threshold: "—",
     kind: "point"
   },
-  气体检测: {
-    icon: "activity",
-    tone: "teal",
-    param: "CO / H2S / O2",
-    trigger: "停留后执行",
-    threshold: "CO > 30ppm 告警",
-    kind: "point"
-  },
-  设备自检: {
-    icon: "cpu",
-    tone: "gray",
-    param: "全传感器自检",
-    trigger: "到达即执行",
-    threshold: "—",
-    kind: "point"
-  },
-  等待: {
-    icon: "clock",
-    tone: "gray",
-    param: "等待 10s",
-    trigger: "停留后执行",
-    threshold: "—",
-    kind: "point"
-  },
   全程录像: {
     icon: "video",
     tone: "blue",
@@ -99,18 +75,6 @@ export const ACTION_LIB: Record<string, ActionMeta> = {
     icon: "thermo",
     tone: "orange",
     param: "每 2s 采样一次",
-    kind: "leg"
-  },
-  周界扫描: {
-    icon: "scan",
-    tone: "purple",
-    param: "侧向 120° 扫描",
-    kind: "leg"
-  },
-  气体巡检: {
-    icon: "activity",
-    tone: "teal",
-    param: "持续采样浓度",
     kind: "leg"
   },
   静默通行: {
@@ -161,6 +125,54 @@ export const PHOTO_CAMERAS = [
 
 /** 航点一次最多抓几张（与板端 `PHOTO_MAX_FRAMES` / 客户端 `photo.rs` 一致） */
 export const PHOTO_MAX_FRAMES = 5;
+
+/**
+ * 已下线的动作类型（新建动作时**不再提供**）。
+ *
+ * 老路线里可能还存着这些动作（它们是纯描述、没有执行逻辑，删掉不影响任务），
+ * 所以只是从「可选清单」里拿掉：
+ * - 新建动作看不到它们；
+ * - **修改已有动作时**由 `actionOptions()` 把当前这一条补回下拉，避免 v-model
+ *   找不到选项、类型显示成空白导致动作改不动。
+ */
+export const RETIRED_ACTIONS: Record<string, ActionMeta> = {
+  气体检测: {
+    icon: "activity",
+    tone: "teal",
+    param: "CO / H2S / O2",
+    trigger: "停留后执行",
+    threshold: "CO > 30ppm 告警",
+    kind: "point"
+  },
+  设备自检: {
+    icon: "cpu",
+    tone: "gray",
+    param: "全传感器自检",
+    trigger: "到达即执行",
+    threshold: "—",
+    kind: "point"
+  },
+  等待: {
+    icon: "clock",
+    tone: "gray",
+    param: "等待 10s",
+    trigger: "停留后执行",
+    threshold: "—",
+    kind: "point"
+  },
+  周界扫描: {
+    icon: "scan",
+    tone: "purple",
+    param: "侧向 120° 扫描",
+    kind: "leg"
+  },
+  气体巡检: {
+    icon: "activity",
+    tone: "teal",
+    param: "持续采样浓度",
+    kind: "leg"
+  }
+};
 
 export const TRIGGERS = ["到达即执行", "停留后执行", "条件触发", "定时执行"];
 export const FAIL_MODES = ["跳过继续", "重试 1 次", "重试 2 次", "中止路线", "人工接管"];

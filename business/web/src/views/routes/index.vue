@@ -36,6 +36,7 @@ import {
   LEG_MODES,
   PHOTO_CAMERAS,
   PHOTO_MAX_FRAMES,
+  RETIRED_ACTIONS,
   SPEAK_LEG_DEFAULT_SECS,
   SPEAK_MAX_CHARS,
   SPEAK_MAX_LEN,
@@ -564,7 +565,9 @@ const draftZoneName = computed(
 
 function actionMeta(type: string) {
   return (
-    ACTION_LIB[type] || {
+    ACTION_LIB[type] ||
+    // 已下线的动作（气体检测 / 等待 / 周界扫描 …）：老路线里还存着，卡片照样要有图标
+    RETIRED_ACTIONS[type] || {
       icon: "cpu",
       tone: "gray",
       param: "—",
@@ -573,11 +576,35 @@ function actionMeta(type: string) {
   );
 }
 
+/**
+ * 新建动作时的默认类型。
+ *
+ * **不能拿 `actionOptions(kind)[0]`**：「语音播报」是 `both`（两侧都能挂），
+ * 按对象插入顺序它会排在航段列表最前面，新建行进任务就默认变成播报了 ——
+ * 现场想要的默认还是「全程录像」。
+ */
+const DEFAULT_ACTION: Record<"point" | "leg", string> = {
+  point: "可见光拍照",
+  leg: "全程录像"
+};
+
 function actionOptions(kind: "point" | "leg") {
-  return Object.entries(ACTION_LIB)
+  const names = Object.entries(ACTION_LIB)
     // `both` 的动作两侧都能配（语音播报：航点到点播 / 航段行进中播）
     .filter(([, meta]) => meta.kind === kind || meta.kind === "both")
     .map(([name]) => name);
+  // 正在修改的是一条**已下线**的动作（老路线）：把它留在下拉里，
+  // 否则 `<select v-model>` 找不到选项会显示空白，操作员以为动作坏了
+  const current = actionForm.type;
+  const retired = current ? RETIRED_ACTIONS[current] : undefined;
+  if (
+    retired &&
+    (retired.kind === kind || retired.kind === "both") &&
+    !names.includes(current)
+  ) {
+    names.push(current);
+  }
+  return names;
 }
 
 async function load(selectZoneId?: number) {
@@ -1273,8 +1300,9 @@ function openActionDialog(kind: "point" | "leg", index: number | null = null) {
     actionDialog.value = true;
     return;
   }
-  // 新建：按动作类型带默认参数
-  const type = actionOptions(kind)[0];
+  // 新建：按动作类型带默认参数（默认类型见 DEFAULT_ACTION，不要用列表第一个）
+  const options = actionOptions(kind);
+  const type = options.includes(DEFAULT_ACTION[kind]) ? DEFAULT_ACTION[kind] : options[0];
   const meta = actionMeta(type);
   Object.assign(actionForm, {
     type,
@@ -1704,18 +1732,27 @@ onBeforeUnmount(() => {
       <div>
         <div class="rp">
           <div class="rt-toolbar">
-            <button class="rt-tool" :class="{ on: mode === 'add' }" @click="mode = 'add'">
+            <button
+              class="rt-tool ink"
+              :class="{ on: mode === 'add' }"
+              @click="mode = 'add'"
+            >
               <AppIcon name="plus" />添加航点
             </button>
             <button class="rt-tool" :class="{ on: mode === 'select' }" @click="mode = 'select'">
               <AppIcon name="eye" />选择
             </button>
-            <button class="rt-tool" :class="{ on: snap }" title="吸附到园区道路" @click="snap = !snap">
+            <button
+              class="rt-tool ink"
+              :class="{ on: snap }"
+              title="吸附到园区道路"
+              @click="snap = !snap"
+            >
               <AppIcon name="magnet" />道路吸附
             </button>
             <button
               v-if="hasRaster"
-              class="rt-tool"
+              class="rt-tool ink"
               :class="{ on: rasterVisible }"
               :disabled="!raster"
               title="显示 ROS model.pgm 栅格底图"
@@ -2232,7 +2269,7 @@ onBeforeUnmount(() => {
                   <AppIcon name="plus" />添加行进任务
                 </button>
                 <div class="rt-hint">
-                  段任务在两点之间移动期间持续执行（如全程录像、连续测温、周界扫描），与航点瞬时动作互补。
+                  段任务在两点之间移动期间持续执行（如全程录像、连续测温、语音播报），与航点瞬时动作互补。
                 </div>
               </template>
               <div v-else class="empty-box">请在画布中点选一段航段</div>
