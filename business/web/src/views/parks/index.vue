@@ -110,6 +110,26 @@ const deviceMapOptions = computed(() =>
   maps.value.filter(item => !item.parkId && item.status !== "已归档")
 );
 
+/**
+ * 已归属**其他园区**的设备地图。
+ *
+ * 设备先绑了别的园区（或老图绑错园区）时，新园区里会一张可选的图都没有——
+ * 现场只能干看着「地图基线绑定」空着。这里把它们也列出来，保存即改归属
+ * （服务端 `resolve_park_map` 会校验采集设备是否在当前账号的管辖范围内，
+ * 并把旧园区的当前基线清回「待标定」）。
+ * 只列带 `deviceCode` 的机器人地图：演示 / 历史地图没有采集设备，不该被抢。
+ */
+const otherParkMapOptions = computed(() => {
+  const parkId = editingPark.value?.id;
+  return maps.value.filter(
+    item =>
+      Boolean(item.deviceCode) &&
+      item.parkId != null &&
+      item.parkId !== parkId &&
+      item.status !== "已归档"
+  );
+});
+
 const availableBackendMaps = computed(() => {
   const parkId = editingPark.value?.id;
   const parkCode = editingPark.value?.parkCode ?? parkForm.parkCode;
@@ -648,6 +668,18 @@ onMounted(load);
               </option>
             </optgroup>
             <optgroup
+              v-if="otherParkMapOptions.length"
+              label="我的设备地图 · 当前归属其他园区（选中即改归属）"
+            >
+              <option v-for="map in otherParkMapOptions" :key="map.id" :value="map.id">
+                {{ map.mapName }} · {{ map.id }} · {{ map.status }} ·
+                {{ map.parkName ? `当前归属 ${map.parkName}` : "当前归属其他园区" }} ·
+                {{ map.deviceCode ? `设备 ${map.deviceCode}` : "设备未知" }} ·
+                {{ map.ownerUsername ? `上传人 ${map.ownerUsername}` : "上传人未知" }} ·
+                {{ map.sourceRef || "未登记本体路径" }}
+              </option>
+            </optgroup>
+            <optgroup
               v-if="availableBackendMaps.length"
               label="backend 地图库 · ROS / 激光雷达地图"
             >
@@ -668,7 +700,7 @@ onMounted(load);
         <div class="field" style="grid-column: 1 / -1">
           <div class="rt-hint" style="margin: 0">
             建档时必须确定坐标系（原点 / 分辨率 / CRS / 楼层），并登记地图基线状态。只有「已发布」的地图版本才允许创建巡检路线；建图完成后再发布不可变版本。<br />
-            地图只跟设备有关系：机器人建图回传的地图先入库为「设备地图」（未归属园区），设备绑定人在这里挑一张即绑定为本园区基线；也可以选「backend 地图库」中的 ROS 地图，保存园区时会导入到本业务库。
+            地图只跟设备有关系：机器人建图回传的地图先入库为「设备地图」（未归属园区），设备绑定人在这里挑一张即绑定为本园区基线；已经归属别的园区的设备地图也能选，保存即改归属（旧园区的基线会被清空）。也可以选「backend 地图库」中的 ROS 地图，保存园区时会导入到本业务库。
           </div>
         </div>
         <div class="field">

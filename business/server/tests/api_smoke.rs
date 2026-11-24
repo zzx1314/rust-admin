@@ -616,6 +616,146 @@ async fn creating_park_adopts_unbound_device_map() {
     assert_eq!(owner, Some(park_id), "被选中的设备地图应认领到新园区");
 }
 
+/// 「设备先绑了别的园区 → 新园区编辑时看不到任何可选地图」的回归。
+///
+/// 2026-11-24 现场：设备在业务平台绑的是 test 园区，回传的图全被 test 认领；
+/// 广汇产业园二期编辑时下拉里一张图都没有（`deviceMapOptions` 只列 `park_id IS NULL`）。
+/// 现在允许选中「已归属别园区」的设备地图，保存即改归属，旧园区基线一起松开。
+#[tokio::test]
+async fn editing_park_reclaims_device_map_from_another_park() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    sqlx::query(
+        "INSERT INTO map_versions
+            (id, park_id, device_code, map_name, version, status, created_at, source, source_ref)
+         VALUES ('RD-002@history-0715', 1, 'RD-002', 'RD-002@history-0715', 'v1.0',
+            '部分标定', '2026-01-01 00:00:00', 'robot-mapping',
+            '/ota/alg_data/map/history_map/0715')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE parks SET map_version_id = 'RD-002@history-0715', map_status = '部分标定'
+         WHERE id = 1",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = build_router(state);
+    let token = login(&app).await;
+    let response = app
+        .oneshot(
+            Request::put("/api/parks/2")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"parkName":"临港物流基地","area":2.4,"mapVersionId":"RD-002@history-0715"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(
+        body["data"]["mapVersionId"], "RD-002@history-0715",
+        "编辑园区时应能把别园区的设备地图改归属过来: {body}"
+    );
+
+    let owner: Option<i64> = sqlx::query_scalar("SELECT park_id FROM map_versions WHERE id = ?1")
+        .bind("RD-002@history-0715")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(owner, Some(2), "地图应改归属到新园区");
+
+    let (old_baseline, old_status): (Option<String>, String) =
+        sqlx::query_as("SELECT map_version_id, map_status FROM parks WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(old_baseline, None, "旧园区的当前基线必须跟着松开");
+    assert_eq!(old_status, "待标定");
+}
+
+/// 改归属不能变成「谁都能抢图」：本运营账号对采集设备没有权限时拒绝。
+#[tokio::test]
+async fn reclaiming_another_park_map_requires_device_access() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let password_hash = bcrypt::hash("operator123", bcrypt::DEFAULT_COST).unwrap();
+    sqlx::query(
+        "INSERT INTO users (username, password_hash, display_name, role, created_at)
+         VALUES ('operator', ?1, '运营', 'operator', ?2)",
+    )
+    .bind(password_hash)
+    .bind(robodog_ops_server::db::now())
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO map_versions
+            (id, park_id, device_code, map_name, version, status, created_at, source, source_ref)
+         VALUES ('RD-002@history-0715', 1, 'RD-002', 'RD-002@history-0715', 'v1.0',
+            '部分标定', '2026-01-01 00:00:00', 'robot-mapping',
+            '/ota/alg_data/map/history_map/0715')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = build_router(state);
+    let token = login_as(&app, "operator", "operator123").await;
+    // 自己的园区（`created_by` 是本账号，写权限没问题）
+    let created = app
+        .clone()
+        .oneshot(
+            Request::post("/api/parks")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"parkName":"运营园区","area":1.0}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = json_body(created).await;
+    let park_id = created["data"]["id"].as_i64().expect("园区应有 id");
+
+    let response = app
+        .oneshot(
+            Request::put(format!("/api/parks/{park_id}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"parkName":"运营园区","area":1.0,"mapVersionId":"RD-002@history-0715"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "没有设备权限的账号不该能改别人的地图归属"
+    );
+    let body = json_body(response).await;
+    let msg = body["msg"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("无法改归属"),
+        "错误提示应说清楚为什么拒绝: {msg}"
+    );
+
+    let owner: Option<i64> = sqlx::query_scalar("SELECT park_id FROM map_versions WHERE id = ?1")
+        .bind("RD-002@history-0715")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(owner, Some(1), "被拒绝时地图归属不许变");
+}
+
 #[tokio::test]
 async fn legacy_robot_maps_get_device_code_from_zentai() {
     // 迁移 015 之前入库的机器人地图没有 device_code，启动时按中台 dog_map 回填，
