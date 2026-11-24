@@ -45,14 +45,13 @@ ROS `map_saver` 把未知写成 205，是因为它的默认 `free_thresh` 是 `0
 `map.quadtree.bin` 的 mtime 应该在你 4030 载图之后刷新——那说明导航真的用了新栅格。
 """
 
-from __future__ import annotations
-
 import argparse
 import hashlib
 import os
 import shutil
 import sys
 import zipfile
+from typing import Dict, List, Optional, Tuple
 
 # 平台约定：0..=99 占据，100..=205 未知，206..=255 自由（见 clearance.rs）
 OLD_UNKNOWN = 205
@@ -73,7 +72,7 @@ class Pgm:
         return header + bytes(self.pixels)
 
 
-def _tokens(data: bytes, count: int):
+def _tokens(data: bytes, count: int) -> Tuple[List[bytes], int]:
     """从 PGM 头里取 count 个 token，跳过 # 注释。返回 (tokens, data_start)。"""
     tokens: list[bytes] = []
     i = 0
@@ -128,9 +127,9 @@ def parse_pgm(data: bytes) -> Pgm:
     return Pgm(width, height, pixels)
 
 
-def parse_yaml(text: str) -> dict[str, object]:
+def parse_yaml(text: str) -> Dict[str, object]:
     """只取我们关心的四个字段（map.yaml 是扁平的，不用 yaml 依赖）。"""
-    out: dict[str, object] = {}
+    out = {}  # type: Dict[str, object]
     for line in text.splitlines():
         line = line.split("#", 1)[0].strip()
         if not line or ":" not in line:
@@ -166,7 +165,7 @@ def classify(value: int, free_thresh: float, occupied_thresh: float) -> str:
     return "未知"
 
 
-def pick_entries(names: list[str], entry: str | None, all_pgm: bool) -> list[str]:
+def pick_entries(names: List[str], entry: Optional[str], all_pgm: bool) -> List[str]:
     pgms = [n for n in names if n.lower().endswith(".pgm") and not n.lower().endswith(".pgm.zst")]
     if entry:
         if entry not in pgms:
@@ -182,7 +181,7 @@ def pick_entries(names: list[str], entry: str | None, all_pgm: bool) -> list[str
     return prefer[:1] or pgms[:1]
 
 
-def convert(archive: zipfile.ZipFile, names: list[str], src: int, dst: int):
+def convert(archive: zipfile.ZipFile, names: List[str], src: int, dst: int):
     """返回 {entry: (new_pgm_bytes, changed, bbox, width, height)}。"""
     result = {}
     for name in names:
