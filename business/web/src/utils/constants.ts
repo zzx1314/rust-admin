@@ -71,6 +71,16 @@ export const ACTION_LIB: Record<string, ActionMeta> = {
     param: "1080P / 25fps / 连续",
     kind: "leg"
   },
+  补光: {
+    icon: "charge",
+    tone: "orange",
+    // 真正开哪几盏灯由动作上的 `lightFill` / `lightLed` 决定（param 只是动作卡片上的占位）
+    param: "开补光灯 / LED 灯带",
+    trigger: "到达即执行",
+    threshold: "—",
+    // 航点 = 到点开、离开关；航段 = 进段开、走完这一段关（见 business/docs/plan-lights.md）
+    kind: "both"
+  },
   连续测温: {
     icon: "thermo",
     tone: "orange",

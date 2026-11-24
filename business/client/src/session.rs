@@ -183,15 +183,16 @@ pub(crate) async fn run_client(
         info!("航点 AI 识别已关闭（--no-ai / ROBODOG_AI_ENABLED=0）");
     }
 
-    // 航点灯光（补光灯 / LED）：与 AI 同一个板端 Agent、同一个总开关（`--no-ai`）。
-    // 到点由 5009 `detail_index` 查路线动作，离开航点/任务结束关灯；夜间判定在板端。
+    // 航点 / 航段灯光（补光灯 / LED）：与 AI 同一个板端 Agent、同一个总开关（`--no-ai`）。
+    // 到点 / 进段由 5009 `detail_index` 查路线动作：航点灯离开航点关，航段灯走完这一段关；
+    // 夜间判定在板端。
     let lights = Arc::new(PointLights::new(
         config.ai_agent_url.clone(),
         config.ai_enabled,
     ));
     if config.ai_enabled {
         info!(
-            "航点灯光已启用：板端 Agent = {}（计划自动开灯 lightFill/lightLed 优先，没配才按航点动作；夜间 lightNightOnly）",
+            "灯光已启用：板端 Agent = {}（计划自动开灯 lightFill/lightLed 优先，没配才按航点 / 航段动作；夜间 lightNightOnly）",
             lights.agent()
         );
     }

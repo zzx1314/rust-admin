@@ -354,8 +354,9 @@ pub(crate) struct ActiveTask {
     pub(crate) point_index: Option<i64>,
     /// 本条路线里带「AI 识别」动作的航点（到点时按 `detail_index` 查）
     pub(crate) ai_points: Vec<AiPoint>,
-    /// 本条路线里带「开补光灯 / 开 LED」动作的航点（与 `ai_points` 分开：
-    /// 有点只开灯不识别）
+    /// 本条路线里带「开补光灯 / 开 LED」动作的航点**和航段**（与 `ai_points` 分开：
+    /// 有点只开灯不识别）。航段灯用起点航点下标 + `LightScope::Leg`，
+    /// 同一个下标两处都配时航点动作优先（见 `lights::light_point_at`）
     pub(crate) light_points: Vec<LightPoint>,
     /// 计划级「仅夜间自动开灯」（`tasks.light_night_only` → 载荷 `lightNightOnly`）：
     /// 为 true 时把 `nightOnly` 交给板端按本地时间窗判，白天到达不开灯
@@ -372,8 +373,10 @@ pub(crate) struct ActiveTask {
 impl ActiveTask {
     /// 到了 `index` 这个航点要开哪几盏灯。
     ///
-    /// **计划级自动开灯优先**：配了计划灯就忽略航点动作（包括「这个点没配灯」），
+    /// **计划级自动开灯优先**：配了计划灯就忽略航点 / 航段动作（包括「这个点没配灯」），
     /// 这样 5009 里的航点切换（到点 / 离开）都不会把灯翻来翻去。
+    /// 没配计划灯时：航点动作优先，没配才用「从这里出发的航段」的灯
+    /// （`light_at` 返回的 `scope` 决定离开航点时要不要关，见 `PointLights::leave_point`）。
     pub(crate) fn light_at(&self, index: i64) -> Option<LightPoint> {
         if let Some(plan) = self.plan_lights.as_ref() {
             return Some(plan.clone());
@@ -458,10 +461,25 @@ pub(crate) async fn bind_nav_task(
 #[cfg(test)]
 mod active_task_light_tests {
     use super::*;
+    use crate::lights::LightScope;
     use crate::lights::PLAN_LIGHT_INDEX;
 
     fn light(index: i64, fill: bool, led: bool) -> LightPoint {
-        LightPoint { index, fill, led }
+        LightPoint {
+            index,
+            scope: LightScope::Point,
+            fill,
+            led,
+        }
+    }
+
+    fn leg_light(index: i64, fill: bool, led: bool) -> LightPoint {
+        LightPoint {
+            index,
+            scope: LightScope::Leg,
+            fill,
+            led,
+        }
     }
 
     /// **计划级自动开灯优先**：配了计划灯就忽略航点动作（到点开 / 离开关都不做）。
@@ -488,5 +506,30 @@ mod active_task_light_tests {
         assert!(!task.plan_lighting());
         assert_eq!(task.light_at(0), Some(light(0, true, false)));
         assert_eq!(task.light_at(1), None);
+    }
+
+    /// 航段灯：这个点没配航点灯时，「从这里出发的航段」的灯就是这个点的灯；
+    /// 两处都配时**航点动作优先**（与语音播报同一条规则）。
+    #[test]
+    fn leg_lights_apply_at_the_leg_start_with_point_priority() {
+        let mut task = ActiveTask {
+            light_points: vec![
+                light(0, true, false),
+                leg_light(0, false, true),
+                leg_light(2, true, true),
+            ],
+            ..ActiveTask::default()
+        };
+
+        // P1 上既有航点灯又有航段灯 → 航点优先（走起来就关，航段那盏不生效）
+        assert_eq!(task.light_at(0), Some(light(0, true, false)));
+        // P3 只有航段灯（返程段）→ 用航段的，`scope` 让 5009 离开航点时不关
+        assert_eq!(task.light_at(2), Some(leg_light(2, true, true)));
+        // 什么都没配的点：不用开灯
+        assert_eq!(task.light_at(1), None);
+
+        // 计划灯仍然压倒两者
+        task.plan_lights = Some(light(PLAN_LIGHT_INDEX, true, true));
+        assert_eq!(task.light_at(2), Some(light(PLAN_LIGHT_INDEX, true, true)));
     }
 }

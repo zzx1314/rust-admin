@@ -678,14 +678,22 @@ pub(crate) async fn handle_status_frame(
             // 收口交给这里，别让相机把路过的东西当成这个点的目标
             ai.stop("已离开航点").await;
             // 灯同一个道理：录像/识别已经结束，补光灯没必要一路亮到下一个点。
-            // **但计划灯除外**：它就是要全程亮着，这里关掉等于「离开第一个点就灭」。
+            // **但计划灯除外**：它就是要全程亮着，这里关掉等于「离开第一个点就灭」；
+            // **航段灯也除外**：离开航点正是航段的开始，航段灯要亮着走完这一段
+            // （`leave_point` 只收航点动作开的灯，航段灯等下一个点接手）。
             let plan_lighting = active
                 .lock()
                 .await
                 .as_ref()
                 .is_some_and(|task| task.plan_lighting());
             if !plan_lighting {
-                lights.leave("已离开航点").await;
+                lights.leave_point("已离开航点").await;
+                // 航段灯：这一段路上没有新的「到点」帧，板端看门狗（默认 900s）只认
+                // 最近一次请求 → 按 `LIGHT_REFRESH_AFTER` 原地重发一次（航点灯已经关了，
+                // 这里什么都不发）。和到点开灯一样放后台：Agent 不可达时一次要等 5s，
+                // 不能让 5009 处理链路跟着卡（先后由 `PointLights` 的 gate 保证）。
+                let lights = lights.clone();
+                tokio::spawn(async move { lights.keep_alive().await });
             }
             // 航点录像跟着「离开航点」收口：全程录像不在这里停（它跟任务）。
             recorder.leave_point("已离开航点").await;
@@ -1234,6 +1242,7 @@ mod tests {
     #[tokio::test]
     async fn plan_lights_stay_on_for_the_whole_task() {
         use crate::lights::LightPoint;
+        use crate::lights::LightScope;
         use crate::lights::PLAN_LIGHT_INDEX;
 
         let calls: LightCalls = Arc::new(Mutex::new(Vec::new()));
@@ -1244,12 +1253,14 @@ mod tests {
             let task = guard.as_mut().unwrap();
             task.plan_lights = Some(LightPoint {
                 index: PLAN_LIGHT_INDEX,
+                scope: LightScope::Point,
                 fill: true,
                 led: true,
             });
             // 航点动作里只配了 LED：计划模式下必须被忽略
             task.light_points = vec![LightPoint {
                 index: 0,
+                scope: LightScope::Point,
                 fill: false,
                 led: true,
             }];
@@ -1301,12 +1312,14 @@ mod tests {
     #[tokio::test]
     async fn waypoint_lights_without_plan_still_flip_per_point() {
         use crate::lights::LightPoint;
+        use crate::lights::LightScope;
 
         let calls: LightCalls = Arc::new(Mutex::new(Vec::new()));
         let agent = spawn_lights_agent(calls.clone()).await;
         let mut h = Harness::new(active_task("TK-1", Some("robot-1"))).with_lights(agent);
         h.active.lock().await.as_mut().unwrap().light_points = vec![LightPoint {
             index: 0,
+            scope: LightScope::Point,
             fill: true,
             led: false,
         }];
@@ -1329,6 +1342,63 @@ mod tests {
         assert_eq!(
             wait_lights(&calls, 2).await,
             vec!["on".to_string(), "off".to_string()]
+        );
+    }
+
+    /// 航段灯光（行进任务上的「开灯」）：**进段开、走完这一段才关**。
+    ///
+    /// 离开起点航点正是航段的开始，那时候关灯等于「点了就灭」；到下一个点（那边没配灯）
+    /// 才收灯。这是现场提的诉求：夜里要狗亮着灯走完整段走廊。
+    #[tokio::test]
+    async fn leg_lights_stay_on_until_the_next_point() {
+        use crate::lights::LightPoint;
+        use crate::lights::LightScope;
+
+        let calls: LightCalls = Arc::new(Mutex::new(Vec::new()));
+        let agent = spawn_lights_agent(calls.clone()).await;
+        let mut h = Harness::new(active_task("TK-1", Some("robot-1"))).with_lights(agent);
+        // legs[0] 从 P1（下标 0）出发：只有这一段配了灯
+        h.active.lock().await.as_mut().unwrap().light_points = vec![LightPoint {
+            index: 0,
+            scope: LightScope::Leg,
+            fill: true,
+            led: true,
+        }];
+
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.point_arrived", 0),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        assert_eq!(wait_lights(&calls, 1).await, vec!["on".to_string()]);
+
+        // 起步走过这一段：一路都不许关（5009 每 500ms 一帧）
+        for _ in 0..3 {
+            h.feed(&frame(
+                task_at("robot-1", "running", "patrol.navigating", 0),
+                Value::Null,
+                json!([]),
+            ))
+            .await;
+        }
+        assert_eq!(
+            wait_lights(&calls, 1).await,
+            vec!["on".to_string()],
+            "航段灯不能在行进途中关掉"
+        );
+
+        // 走到下一个点（P2 没配灯）：这时候才收灯
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.point_arrived", 1),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        assert_eq!(
+            wait_lights(&calls, 2).await,
+            vec!["on".to_string(), "off".to_string()],
+            "走完这一段要关灯"
         );
     }
 

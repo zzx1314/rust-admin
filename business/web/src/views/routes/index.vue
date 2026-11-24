@@ -385,14 +385,21 @@ function actionCheckTypeLabel(action: {
   return action.alertWhenMissing ? "是否存在（找不到也告警）" : "是否存在";
 }
 
-/** 动作卡片上的灯光文案：没配灯返回空串（不占一行） */
-/** 动作卡片上的灯光标签：只表示「航点动作要求开哪几盏」（计划级自动开灯会覆盖它） */
-function actionLightLabel(action: { lightFill?: boolean; lightLed?: boolean }) {
+/** 动作卡片上的灯光文案：没配灯返回空串（不占一行）
+ *
+ * 航点动作 = 「到点开…」（离开航点关）；航段动作 = 「整段开…」（走完这一段关）。
+ * 计划里配了「自动开灯」时这两处都会被忽略，灯从任务开始亮到结束。
+ */
+function actionLightLabel(
+  action: { lightFill?: boolean; lightLed?: boolean },
+  kind: "point" | "leg" = "point"
+) {
   const lights = [
     action.lightFill ? "补光灯" : "",
     action.lightLed ? "LED" : ""
   ].filter(Boolean);
-  return lights.length ? `到点开${lights.join(" + ")}` : "";
+  if (!lights.length) return "";
+  return `${kind === "leg" ? "整段开" : "到点开"}${lights.join(" + ")}`;
 }
 
 const filteredRoutes = computed(() => {
@@ -1447,9 +1454,10 @@ function saveAction() {
     ...(countTask && actionForm.notifyWhenCountOk ? { notifyWhenCountOk: true } : {}),
     // 「未检出也告警」只对存在性任务有意义（数量任务自带「0 ≠ N」告警）
     ...(ai && !countTask && actionForm.alertWhenMissing ? { alertWhenMissing: true } : {}),
-    // 灯光只挂在航点动作上（行进任务没有「到点」，也就没有开灯时机）
-    ...(actionKind.value === "point" && actionForm.lightFill ? { lightFill: true } : {}),
-    ...(actionKind.value === "point" && actionForm.lightLed ? { lightLed: true } : {}),
+    // 灯光：航点动作 = 到点开 / 离开航点关；航段动作 = 进段开 / 走完这一段关
+    // （客户端的灯怎么收口见 `client/src/lights.rs` 的 `leave_point` / `keep_alive`）
+    ...(actionForm.lightFill ? { lightFill: true } : {}),
+    ...(actionForm.lightLed ? { lightLed: true } : {}),
     // 录像时长：航点录像写秒数，全程录像写切片长度（板端同样有上下限，这里是入口校验）
     ...(actionKind.value === "point" && isRecordAction.value
       ? { recordSeconds: clampSeconds(actionForm.recordSeconds, 3, 300, 15) }
@@ -2268,6 +2276,9 @@ onBeforeUnmount(() => {
                     <div v-if="isRecordActionOf(action)">
                       录像：<b>{{ actionRecordLabel(action) }}</b>
                     </div>
+                    <div v-if="actionLightLabel(action, 'leg')">
+                      灯光：<b>{{ actionLightLabel(action, 'leg') }}</b>
+                    </div>
                     <div v-if="actionSpeakLabel(action)">
                       语音：<b>{{ actionSpeakLabel(action) }}</b>
                     </div>
@@ -2729,6 +2740,30 @@ onBeforeUnmount(() => {
         </div>
         <div v-else class="field" style="grid-column: 1 / -1">
           <div class="rt-hint" style="margin: 0">该动作在两航点之间移动过程中持续执行，不占用停留时长。</div>
+        </div>
+        <!-- 航段灯光：与航点动作同一对开关，但时机是「进段开 / 走完这一段关」 -->
+        <div v-if="actionKind === 'leg'" class="field" style="grid-column: 1 / -1">
+          <label>
+            航段开灯
+            <span class="muted">（背包板上的补光灯 / LED 灯带，进入这段就开，走完这一段才关）</span>
+          </label>
+          <div style="display: flex; gap: 18px; flex-wrap: wrap">
+            <label class="chk" title="板端拉高补光灯 GPIO；与摄像头触发脚同号或 FILL_LIGHT_GPIO=-1 时板端会拒绝，日志里有原因">
+              <input v-model="actionForm.lightFill" type="checkbox" />
+              开补光灯
+            </label>
+            <label class="chk" title="板端拉起厂商 LED 程序（循环闪烁，没有常亮接口）">
+              <input v-model="actionForm.lightLed" type="checkbox" />
+              开 LED 灯带
+            </label>
+          </div>
+          <div class="rt-hint" style="margin: 4px 0 0">
+            进入这个航段（= 到达起点航点）时开，到达下一个航点（这一段走完）才关——
+            离开起点航点不会关，中途由客户端定时续命，不会走到一半被板端看门狗灭灯。
+            同一个点既配了航点动作开灯又配了航段开灯时<b>以航点动作为准</b>；
+            <b>计划里配了「自动开灯」时以计划为准</b>（这里的开关不生效）。
+            计划勾了「仅夜间」时只有夜间时段才真的开（板端判定，白天直接跳过）。
+          </div>
         </div>
       </div>
       <template #footer>

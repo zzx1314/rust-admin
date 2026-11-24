@@ -1,14 +1,16 @@
 # 计划灯光（补光灯 / LED）：配置、链路与排查
 
 板子 `.246` 上的两盏灯（背包板补光灯 GPIO、LED 灯带）可以随计划自动开关，
-**两种模式二选一**：
+**三种触发方式（计划级优先，其次航点，最后航段）**：
 
 - **计划级自动开灯**（`tasks.light_fill` / `light_led`，迁移 032）——推荐，现场默认：
-  计划里勾了哪盏，整个计划期间就开哪盏，**航点动作里的到点开灯 / 离开关灯不生效**；
+  计划里勾了哪盏，整个计划期间就开哪盏，**航点 / 航段动作里的开灯关灯不生效**；
 - **航点动作**（`routes.route_data.points[].actions[].lightFill/lightLed`）——老行为：
-  到这个点开、离开关。
+  到这个点开、离开关；
+- **航段动作**（`routes.route_data.legs[].actions[].lightFill/lightLed`，含 `returnLeg`）——
+  进段开、**走完这一段才关**：夜里让狗亮着灯走完整段路（离开起点航点不关灯）。
 
-计划级「仅夜间」（`tasks.light_night_only`，迁移 030）对两种模式都生效，判定在**板端**。
+计划级「仅夜间」（`tasks.light_night_only`，迁移 030）对三种模式都生效，判定在**板端**。
 
 ```text
 计划（tasks）
@@ -18,8 +20,10 @@
         ▼
 client（与 Agent 同机）  ActiveTask::light_at 一处收口
 ├─ 有计划灯：任务一开始就开（5009 里出现这条任务），全程不跟航点，终态 / 取消才关
-└─ 没计划灯：5009 patrol.point_arrived / patrol.waiting（detail_index）查航点动作
-        │  POST {fill, led, nightOnly, taskCode, pointIndex}
+├─ 没计划灯、这个点有航点动作：到点开（scope=point），离开航点就关
+└─ 没计划灯、只有从这里出发的航段动作：进段开（scope=leg），走完这一段才关,
+   途中按 LIGHT_REFRESH_AFTER 重发（看门狗续命）
+        │  POST {fill, led, nightOnly, taskCode, pointIndex, scope}
         ▼
 板端 Agent :8000
   POST /api/lights      → control.lights_apply（nightOnly 且白天 → skipped=daytime）
@@ -34,17 +38,21 @@ client（与 Agent 同机）  ActiveTask::light_at 一处收口
 | 灯由**客户端**调，平台不直接调 Agent | 业务平台在公网，Agent 只在内网（与航点 AI 同一条理由，见 `ai_patrol.rs` 模块注释） |
 | 夜间判定在**板端** | 平台/客户端与板子可能不同时区、时钟也可能不准。判据只有 `control.is_night` 一处；灯亮了却不知道为什么亮最难查 |
 | 计划级开关只下发布尔值 | 客户端只搬运 `nightOnly` / 两盏灯的开关，不自己算时间，避免「两地各说一套」 |
-| **计划优先**（配了计划灯就忽略航点动作） | 巡检要的是「这一趟亮着」，不是每个航点翻一遍；两层同时生效时现场分不清「灯为什么不亮／为什么灭了」（2026-11-23 现场要求：以计划为准） |
+| **计划优先**（配了计划灯就忽略航点 / 航段动作） | 巡检要的是「这一趟亮着」，不是每个航点翻一遍；两层同时生效时现场分不清「灯为什么不亮／为什么灭了」（2026-11-23 现场要求：以计划为准） |
 | 计划灯全程开、到点模式到点开 | 计划灯不等第一个航点（导航期间也是黑的就没意义），航点模式与 AI 窗口同一条收口规则（阶段不再是 `patrol.point_*`），不额外引入状态机 |
+| 航段灯**不**跟航点一起关 | 离开起点航点正是航段的开始，在那里关灯等于「点了就灭」。航段灯亮完整段是现场要的效果（夜里走完一段走廊 / 一段无灯通道）；收口交给下一个航点的到点判定（那边配了灯就覆掉，没配就 `leave`） |
+| 去重键带 `LightScope` | 航段下标 = 起点航点下标，光看 `index` 会让「航点 3 的灯」和「从 P3 出发的航段灯」互相顶掉（一个把另一个的开灯记录 / 活跃态擦了，灯乱闪） |
+| 同一处既配航点灯又配航段灯 → **航点优先** | 与语音播报同一条规则（板端一次只认一份开灯参数）。现场的预期是「到点那盏」；要走一整段都亮着，就只配在航段上 |
+| 行进途中重发（`keep_alive`） | 板端看门狗（`LIGHT_MAX_ON_SECS`，默认 900s）只认最近一次请求；航段上没有新的「到点」帧，不重发就会走到一半黑掉 |
 | 看门狗在板端 | 客户端掉线 / 被 kill / 断电重启时，灯不能一直亮着（4G 背包耗电扛不住） |
 
 ## 2. 配置在哪
 
 - **计划 → 自动开灯**（计划表单 → 「自动开灯（补光灯 / LED）」）：
   `lightFill` / `lightLed` 两个复选框 + 「仅夜间」+ **可选的夜间时段**。
-  **任勾一盏就以计划为准**：航点动作里的到点开灯 / 离开关灯全部不生效，灯从任务开始
+  **任勾一盏就以计划为准**：航点 / 航段动作里的开灯、关灯全部不生效，灯从任务开始
   一直亮到终态 / 取消；「仅夜间」勾上时只在板端夜间窗内开（白天派单直接跳过）。
-  两盏都不勾 = 沿用下面的航点动作（老计划 / 老平台行为不变）。
+  两盏都不勾 = 沿用下面的航点 / 航段动作（老计划 / 老平台行为不变）。
 - **夜间时段**（计划表单 → 「仅夜间」下面的两个时间框，`tasks.light_night_start` /
   `light_night_end`，迁移 033）：`HH:MM`，允许跨零点（`19:00 - 06:00`）。
   **留空 = 用板端默认**（`LIGHT_NIGHT_START` / `LIGHT_NIGHT_END`，18:00-06:00）。
@@ -55,6 +63,11 @@ client（与 Agent 同机）  ActiveTask::light_at 一处收口
 - **航点动作**（路线编辑器 → 点动作 → 「到点开灯」）：`lightFill` / `lightLed` 两个
   复选框，与动作类型（AI 识别、可见光拍照…）无关——不配 AI 也能只开灯。多个动作合并
   为「或」（任一要求开灯就开）。**计划里配了自动开灯时这两个勾不起作用**（界面上有提示）。
+- **航段动作**（路线编辑器 → 行进任务 → 「航段开灯」）：同样是那两个复选框，但时机是
+  **进段开、走完这一段关**（进入该航段 = 到达起点航点；航段走完 = 到达下一个航点）。
+  想「只开灯不干别的」就在航段上选动作类型「补光」（`补光` 只是动作卡片上的名字，
+  真正开哪几盏灯看这两个勾）。同一处既配了航点到点开灯又配了航段开灯时**航点优先**；
+  **计划里配了自动开灯时一律以计划为准**。
 - **板端时间窗**（`backend/config.py`）：`LIGHT_NIGHT_START` / `LIGHT_NIGHT_END`
   默认 `18:00` / `06:00`，**板端本地时间**，允许跨零点；**起止相同 = 关闭夜间判定**
   （退化成「到点就开」，现场临时要白天也开灯时用）。`LIGHT_MAX_ON_SECS`（默认 900s）
@@ -69,13 +82,18 @@ client（与 Agent 同机）  ActiveTask::light_at 一处收口
   进程、「关」= 按进程组 `SIGTERM`。进程句柄 `_LED_PROC` 由 `control.py` 持有，
   **手动按钮（`/api/led/blink`）与计划共用**，否则计划结束时杀不掉手动拉起的那一个。
 - 开灯时机：**计划灯** = 5009 里一出现这条任务就开（不用等第一个航点），
-  `PointLights` 按 `(taskCode, PLAN_LIGHT_INDEX=-1)` 去重，一条任务只发一次，
+  `PointLights` 按 `(taskCode, Point, PLAN_LIGHT_INDEX=-1)` 去重，一条任务只发一次，
   但每 `LIGHT_REFRESH_AFTER`（300s）重发一次——板端看门狗（`LIGHT_MAX_ON_SECS`，
   默认 900s）只认最近一次请求，不刷新的话 15 分钟后的长航次会被它关灯；
-  **航点模式的灯** = 到达该航点（`light_at(detail_index)` 命中）时开。
+  **航点模式的灯** = 到达该航点（`light_at(detail_index)` 命中航点动作）时开；
+  **航段模式的灯** = 到达该航段起点航点时开（`light_at` 命中 `legs[起点]` / `returnLeg`），
+  行进途中由 `PointLights::keep_alive` 按同一个间隔重发（这段路上没有新的到点帧）。
 - 关灯时机：**计划灯** = 任务终态 / 取消 / 本地跑收尾（航点切换不关）；
-  **航点模式** = 离开航点 / 到达无灯光动作的航点 / 终态 / 取消 / 本地跑收尾；
-  两种情况都有板端看门狗超时兜底。客户端 `PointLights::leave` 只在**自己真的开过灯**
+  **航点模式** = 离开航点（`leave_point` 只收 scope=point 的灯）/ 到达无灯光动作的航点 /
+  终态 / 取消 / 本地跑收尾；
+  **航段模式** = 到达下一个航点（那边配了灯就覆掉，没配就走 `leave`）/ 终态 / 取消 /
+  本地跑收尾，**行进途中不关**；
+  三种情况都有板端看门狗超时兜底。客户端 `PointLights::leave` 只在**自己真的开过灯**
   时才发 `off`（白天跳过、Agent 不可用都不发），以免顺手关掉操作员手动开的灯。
 - 收尾用 `PointLights::finish_task(taskCode, reason)`：它会把这条任务标成「已收尾」，
   迟到的「到点开灯」（5009 到点帧与终态帧只差一帧，开灯又是 spawn 出去的）不会把灯
@@ -93,10 +111,11 @@ client（与 Agent 同机）  ActiveTask::light_at 一处收口
 | `business/server/migrations/032_task_plan_lights.sql` | `tasks.light_fill` / `light_led`（默认 0；回填已勾「仅夜间」的计划为两盏都开） |
 | `business/server/migrations/033_task_light_night_window.sql` | `tasks.light_night_start` / `light_night_end`（NULL = 板端默认） |
 | `business/server/src/dispatch.rs` + `gateway_types.rs` | 载荷 `lightNightOnly` / `lightFill` / `lightLed`（都总是下发） |
-| `business/client/src/state.rs` | `ActiveTask::light_at`（计划灯优先）、`bind_nav_task`（巡检任务号绑定） |
-| `business/client/src/lights.rs` | 解析动作 / 到点开灯 / 离开关灯 / 去重 / `start_task` / `finish_task`；`lightNightOnly` 与 `NightWindow`（`nightStart`/`nightEnd`）透传 |
-| `business/client/src/session.rs` / `pump.rs` / `handlers/task.rs` | 5009 到点、离开、终态、取消、本地收尾的挂钩 |
-| `business/web/src/views/routes/index.vue` | 航点动作两个复选框 + 动作卡片「灯光：…」+ 「计划优先」提示 |
+| `business/client/src/state.rs` | `ActiveTask::light_at`（计划灯优先 → 航点动作 → 该点出发的航段）、`bind_nav_task`（巡检任务号绑定） |
+| `business/client/src/lights.rs` | `LightScope`（航点 / 航段）/ 解析动作 / 到点与进段开灯 / `leave_point`（只收航点灯）/ `keep_alive`（航段灯途中续命）/ 去重 / `start_task` / `finish_task`；`lightNightOnly` 与 `NightWindow`（`nightStart`/`nightEnd`）透传 |
+| `business/client/src/session.rs` / `pump.rs` / `handlers/task.rs` | 5009 到点、离开（`leave_point` + `keep_alive`）、终态、取消、本地收尾的挂钩 |
+| `business/web/src/views/routes/index.vue` | 航点动作「到点开灯」+ 行进任务「航段开灯」两个复选框 + 动作卡片「灯光：到点开…/整段开…」+ 「计划优先」提示 |
+| `business/web/src/utils/constants.ts` | 动作库里的 `补光`（`kind: "both"`）：只开灯不干别的时用它，两侧都能挂 |
 | `business/web/src/views/tasks/index.vue` | 计划「自动开灯（补光灯 / LED）+ 仅夜间」；详情页摘要 `planLightSummary` |
 | `deploy/backpack-sim/mock_agent.py` | 模拟 `/api/lights`（`SIM_NIGHT=1/0` 可钉死白天/夜间） |
 
@@ -119,8 +138,8 @@ client（与 Agent 同机）  ActiveTask::light_at 一处收口
    - 客户端日志应有 `任务 TK-… 计划级自动开灯（补光=true LED=true）：以计划为准…`；
      没有这一行 = 服务端没下发 `lightFill`/`lightLed`（计划没勾 / 老服务端），看
      `task_dispatch 载荷` 里的这两个字段；
-   - 计划没勾时反而是航点动作生效，日志是 `含 N 个灯光航点`；
-   - 两种模式都受「仅夜间」限制（见下一条）；
+   - 计划没勾时反而是航点 / 航段动作生效，日志分别是 `含 N 个灯光航点，M 个灯光航段`；
+   - 三种模式都受「仅夜间」限制（见下一条）；
    - 自定义时段在计划里配了时，日志有 `任务 TK-… 夜间时段：19:00-06:00（板端按板子本地
      时间判定）`；板端 `GET /api/lights` 的 `night_window` 应是计划时段、`plan_night_window`
      单独露出它（`null` = 用板端默认）。`night_window` 还是 18:00-06:00 而计划里配了
@@ -131,6 +150,10 @@ client（与 Agent 同机）  ActiveTask::light_at 一处收口
    要白天也开：计划取消勾选，或把 `LIGHT_NIGHT_START`/`LIGHT_NIGHT_END` 设成相同值。
 4. 灯一直亮着：先看客户端有没有收到任务终态/取消（阶段卡在 `patrol.point_*` 就不会
    发 `off`）；最迟 `LIGHT_MAX_ON_SECS` 后板端看门狗会关。手动按钮开的灯本来就不看门狗。
+   配了**航段灯**时「走到下一个点还不灭」先查两件事：① 下一个点自己配了航点灯
+   （那边用新参数覆掉，属正常）；② 那个点的阶段帧是不是一直没来（`patrol.point_arrived`
+   丢了就没人接手，等到终态才关）。日志里能看到 `已开灯（… scope=leg）` 与
+   `关灯（到达无灯光动作的航点）`。
 5. LED 关了但还在闪：`test_rgbrun` 自己 fork 了子进程。`led_off` 用进程组杀，
    若厂商程序改过（不再继承进程组），需要在板端 `pkill -f test_rgbrun` 兜底。
 
@@ -138,9 +161,10 @@ client（与 Agent 同机）  ActiveTask::light_at 一处收口
 
 ```bash
 python3 business/backpack_dashboard/backend/tools/lights_selftest.py
-cd business/client && cargo test lights::            # 解析 / 开灯去重 / 白天跳过 / 关灯
-cd business/client && cargo test pump::tests         # 5009 跟随 + 计划灯全程开 / 航点模式照旧
+cd business/client && cargo test lights::            # 解析（航点 + 航段）/ 开灯去重 / 白天跳过 / 关灯 / 航段灯不跟离开航点关
+cd business/client && cargo test pump::tests         # 5009 跟随 + 计划灯全程开 / 航点模式照旧 / 航段灯亮完整段
 cd business/client && cargo test lights::            # 收尾后迟到的开灯不能点亮（finish_task）
+cd business/client && cargo test active_task_light   # light_at 优先级：计划灯 → 航点 → 航段
 cd business/server && cargo test --test api_smoke plan_lights
 cd business/server && cargo test --test api_smoke night_window
 cd business/server && cargo test --test api_smoke task_light_night_only

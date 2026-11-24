@@ -1723,16 +1723,21 @@ AI 可对除红外外的五路开启，画框方式二选一：
   时调板端 Agent `POST /api/lights`，**离开航点 / 到达无灯光动作的航点 / 任务终态 /
   任务取消**时调 `POST /api/lights/off` 关灯；Agent 自己还有看门狗
   （`LIGHT_MAX_ON_SECS`，默认 900 s），客户端掉线或被 kill 时兜底关灯。
+  **航段动作也有同一对开关（「航段开灯」）**：进段开、**走完这一段才关**（离开起点
+  航点正是航段的开始，在那里关灯等于点了就灭），行进途中由客户端按 `LIGHT_REFRESH_AFTER`
+  重发续命，不会走到一半被看门狗灭灯；同一个点既配了航点灯又配了航段灯时航点优先。
+  只开灯不干别的就用动作类型「补光」（两侧都能挂）。
   **计划里配了「自动开灯（补光灯 / LED）」（`tasks.light_fill` / `light_led`，迁移 032）
-  时以计划为准**：航点动作里的到点开灯 / 离开关灯全部不生效，灯从任务开始一直亮到
+  时以计划为准**：航点 / 航段动作里的开灯、关灯全部不生效，灯从任务开始一直亮到
   终态 / 取消（现场要求「计划配了开灯，航点上的开关就不作数」）。两盏都不勾才回到
-  上面的航点动作行为。计划勾了「仅夜间」（`tasks.light_night_only`，迁移 030）时，
-  两种模式都只把 `nightOnly` 转给板端，由**板端按本地时间窗**（计划里可自定义
+  上面的航点 / 航段动作行为。计划勾了「仅夜间」（`tasks.light_night_only`，迁移 030）时，
+  **三种模式**都只把 `nightOnly` 转给板端，由**板端按本地时间窗**（计划里可自定义
   `lightNightStart`/`lightNightEnd`，留空用板端默认 `LIGHT_NIGHT_START`/`LIGHT_NIGHT_END`
   = 18:00-06:00）判定——白天板端直接跳过、不开灯，平台不参与算夜间（两地时区/时钟
   不一致时白天开灯最难查）。
   回归：`backend/tools/lights_selftest.py`（时间窗 / 白天跳过 / 看门狗）、
-  `client lights::tests::*`、`client pump::tests::*`（计划灯全程开 / 收尾后迟到开灯被丢弃）、
+  `client lights::tests::*`（含航段灯 `leg_lights_stay_on_when_leaving_the_start_point`）、
+  `client pump::tests::*`（计划灯全程开 / 航点模式照旧 / 航段灯亮完整段 / 收尾后迟到开灯被丢弃）、
   `api_smoke::task_light_night_only_reaches_dispatch_payload`、
   `api_smoke::plan_lights_reach_dispatch_payload_and_default_to_waypoint_actions`。
   设计与踩坑见 [`docs/plan-lights.md`](docs/plan-lights.md)。

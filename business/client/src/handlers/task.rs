@@ -50,6 +50,11 @@ use zhpro::protocol::*;
 const CTRL_PREEMPT_GRACE: Duration = Duration::from_secs(5);
 const CTRL_PREEMPT_GRACE_STEP: Duration = Duration::from_millis(500);
 
+/// 只为了日志好看：数一数航点灯 / 航段灯各有多少个（同一份 `light_points` 里的两种 scope）
+fn count_light_scope(points: &[lights::LightPoint], scope: lights::LightScope) -> usize {
+    points.iter().filter(|point| point.scope == scope).count()
+}
+
 /// `ctrl_source = 3` 常常只是「上一轮本体任务刚结束、导航能力还没交回来」的瞬时状态：
 /// 官方 App 里任务被本体接手后也会报 `3`（见 `deploy/robodog-body.md` §7.5），
 /// 而平台台账（心跳 10s 一次）可能还停在上一次的 `1/2`，于是「平台已经派单、
@@ -120,32 +125,37 @@ pub(crate) async fn dispatch(
                 .collect::<Vec<_>>()
         );
     }
-    // 航点灯光（与 AI 动作分开：有点只开灯不识别）+ 计划级「自动开灯 / 仅夜间」
+    // 灯光（与 AI 动作分开：有点只开灯不识别）+ 计划级「自动开灯 / 仅夜间」。
+    // 同一份列表里有航点灯（scope=Point，离开航点关）和航段灯（scope=Leg，亮完整段），
+    // 用起点航点下标索引，详见 `lights::parse_light_points`。
     let light_points = parse_light_points(&msg.payload["routeData"]);
-    // 计划级自动开灯：配了就**以计划为准**。航点动作里的到点开灯 / 离开关灯全不生效
+    // 计划级自动开灯：配了就**以计划为准**。航点 / 航段动作里的开灯、关灯全不生效
     // （现场要的是「整个计划期间灯亮着」，不是每个点翻一遍），夜间限制仍交给板端。
     let plan_fill = msg.payload["lightFill"].as_bool().unwrap_or(false);
     let plan_led = msg.payload["lightLed"].as_bool().unwrap_or(false);
     let plan_lights = (plan_fill || plan_led).then_some(lights::LightPoint {
         index: lights::PLAN_LIGHT_INDEX,
+        scope: lights::LightScope::Point,
         fill: plan_fill,
         led: plan_led,
     });
     if let Some(plan) = plan_lights.as_ref() {
         info!(
-            "任务 {task_code} 计划级自动开灯（补光={} LED={}）：以计划为准，航点动作里的 \
-             开灯 / 关灯不生效（{} 个灯光航点被忽略）",
+            "任务 {task_code} 计划级自动开灯（补光={} LED={}）：以计划为准，航点 / 航段动作里的 \
+             开灯 / 关灯不生效（{} 个灯光航点 + {} 个灯光航段被忽略）",
             plan.fill,
             plan.led,
-            light_points.len()
+            count_light_scope(&light_points, lights::LightScope::Point),
+            count_light_scope(&light_points, lights::LightScope::Leg)
         );
     } else if !light_points.is_empty() {
         info!(
-            "任务 {task_code} 含 {} 个灯光航点: {:?}",
-            light_points.len(),
+            "任务 {task_code} 含 {} 个灯光航点，{} 个灯光航段: {:?}",
+            count_light_scope(&light_points, lights::LightScope::Point),
+            count_light_scope(&light_points, lights::LightScope::Leg),
             light_points
                 .iter()
-                .map(|point| (point.index, point.fill, point.led))
+                .map(|point| (point.scope.label(), point.index, point.fill, point.led))
                 .collect::<Vec<_>>()
         );
     }
