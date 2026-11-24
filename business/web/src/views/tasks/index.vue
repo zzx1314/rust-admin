@@ -535,7 +535,7 @@ async function openDetail(task: Task) {
 
 /** 拉取详情（任务行 + 事件流 + 录像 + 照片）；任务已被删除时关掉弹窗 */
 async function refreshDetail(taskId: number) {
-  const [, recordings, photos] = await Promise.all([
+  const [events, recordings, photos] = await Promise.all([
     taskApi.events(taskId).catch(() => {
       // 事件流取不到不影响详情主体（例如旧任务没有事件记录）
       detailEvents.value = [];
@@ -549,6 +549,9 @@ async function refreshDetail(taskId: number) {
       detailPhotos.value = [];
     })
   ]);
+  // 成功分支必须显式回填：`.catch` 里只处理失败，结果值不会自己落到 ref 上
+  // （加录像/照片时把它写成了 `const [, recordings, photos]`，任务事件整段空了）
+  if (Array.isArray(events)) detailEvents.value = events;
   if (Array.isArray(recordings)) detailRecordings.value = recordings;
   if (Array.isArray(photos)) {
     const before = detailPhotos.value.map(photo => photo.id).join(",");
