@@ -14,6 +14,7 @@ import {
 } from "@/api/ops";
 import type {
   Device,
+  DevicePhoneStatus,
   MapVersion,
   Park,
   Route,
@@ -529,6 +530,9 @@ async function openDetail(task: Task) {
   detailTask.value = task;
   detailEvents.value = [];
   detailPhotos.value = [];
+  // 换任务就重查通话态（别把上一条任务的「通话中」带过来）
+  phoneStatus.value = null;
+  phoneStatusAt = 0;
   revokeAllPhotoUrls();
   detailVisible.value = true;
   await refreshDetail(task.id);
@@ -563,6 +567,9 @@ async function refreshDetail(taskId: number) {
       void loadPhotoThumbs();
     }
   }
+  // 通话态走隧道（10s 节流）：读不到不影响详情主体
+  const device = deviceOf(detailTask.value);
+  if (device) void refreshPhoneStatus(device.id);
 }
 
 // ---------------- 远程呼叫（人工喊话） ----------------
@@ -615,6 +622,104 @@ async function stopCall() {
     ElMessage.info("已下发「停止呼叫」");
   } finally {
     callBusy.value = false;
+  }
+}
+
+// ---------------- 电话（对讲） ----------------
+//
+// 板端 ⇄ 同网段 PC 的双向对讲（音频是局域网 UDP，**不经平台**）：
+// 本页 → `POST /devices/{id}/phone` → 设备指令 `电话` → 客户端 → 板端 `/api/phone`
+// → FIFO 的 `phone <对端IP> <端口>`；PC 端要跑 `pc_tools/voice_call_pc.py`。
+// 通话态经设备客户端隧道读板端 `/api/phone/status`（`GET /devices/{id}/phone`）。
+
+/** 通话态；`null` = 还没查过 */
+const phoneStatus = ref<DevicePhoneStatus | null>(null);
+const phonePeer = ref("");
+const phonePort = ref(5000);
+const phoneBusy = ref(false);
+/** 通话态查询节流（详情每 5s 刷一次，隧道请求没必要跟着这么密） */
+let phoneStatusAt = 0;
+const PHONE_STATUS_MS = 10_000;
+
+async function refreshPhoneStatus(deviceId: number, force = false) {
+  const now = Date.now();
+  if (!force && now - phoneStatusAt < PHONE_STATUS_MS) return;
+  phoneStatusAt = now;
+  try {
+    phoneStatus.value = await deviceApi.phoneStatus(deviceId);
+  } catch {
+    // 隧道读不到不影响详情主体：页面把「通话中」降级成「不可查」
+    phoneStatus.value = {
+      reachable: false,
+      active: false,
+      peer: null,
+      peerPort: null,
+      localPort: null,
+      interfaces: [],
+      script: null,
+      reason: "读取通话状态失败"
+    };
+  }
+}
+
+/** 板端在哪个网段：优先厂商内网 `eth0`（192.168.234.x），否则取第一张有 IPv4 的网卡 */
+const phoneBoardIp = computed(() => {
+  const list = phoneStatus.value?.interfaces ?? [];
+  return (list.find(item => item.name === "eth0") ?? list[0])?.ip ?? "";
+});
+
+/** PC 端脚本下载地址（走板端 Agent，与 PC 同一局域网才能下载） */
+const phoneScriptUrl = computed(() => {
+  const ip = phoneBoardIp.value;
+  if (!ip) return "";
+  return `http://${ip}:8000${phoneStatus.value?.script ?? "/api/lingsi/voice_call_pc.py"}`;
+});
+
+/**
+ * PC 端要跑的命修。
+ *
+ * `--peer` 是板子地址；`--peer-port` 是**板端**监听端口（固定 5000，见
+ * `phone.py::LOCAL_PORT`）；`--local-port` 是 PC 自己的端口，必须与页面上填的
+ * 「端口」一致 —— 板端 `phone <ip> <端口>` 往那里发。
+ */
+const phonePcCommand = computed(() => {
+  const ip = phoneBoardIp.value || "<板端IP>";
+  const peerPort = phoneStatus.value?.localPort ?? 5000;
+  const localPort = phonePort.value || 5000;
+  return `python voice_call_pc.py --peer ${ip} --peer-port ${peerPort} --local-port ${localPort}`;
+});
+
+async function startPhoneCall() {
+  const device = deviceOf(detailTask.value);
+  if (!device) {
+    ElMessage.warning("任务未绑定执行设备，无法通话");
+    return;
+  }
+  const peer = phonePeer.value.trim();
+  if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(peer)) {
+    ElMessage.warning("对端 IP 只支持 IPv4 点分十进制，例如 192.168.234.101");
+    return;
+  }
+  phoneBusy.value = true;
+  try {
+    await deviceApi.phoneStart(device.id, peer, Number(phonePort.value) || 5000);
+    ElMessage.success(`已发起通话：对端 ${peer}:${phonePort.value}（PC 那边要在跑脚本）`);
+    await refreshPhoneStatus(device.id, true);
+  } finally {
+    phoneBusy.value = false;
+  }
+}
+
+async function hangUpPhone() {
+  const device = deviceOf(detailTask.value);
+  if (!device) return;
+  phoneBusy.value = true;
+  try {
+    await deviceApi.phoneStop(device.id);
+    ElMessage.info("已下发「挂断电话」");
+    await refreshPhoneStatus(device.id, true);
+  } finally {
+    phoneBusy.value = false;
   }
 }
 
@@ -1644,6 +1749,58 @@ onBeforeUnmount(() => {
           狗用聆思 TTS 播报（云端合成，需要背包联网 + asr）：只认中文汉字、中文标点与数字
           （≤30 字，空格会被去掉）。循环播报会占住语音通道，走之前记得点「停止呼叫」；
           板端看门狗最多 600 秒兜底。
+        </div>
+
+        <div class="call-row" style="margin-top: 10px">
+          <span class="muted" style="font-size: 11.5px">电话（对讲）</span>
+          <input
+            v-model="phonePeer"
+            class="input"
+            placeholder="对端 PC 的 IPv4，例如 192.168.234.101"
+            style="max-width: 220px"
+          />
+          <input
+            v-model.number="phonePort"
+            class="input"
+            type="number"
+            min="1"
+            max="65535"
+            style="max-width: 96px"
+          />
+          <button
+            class="btn sm"
+            :disabled="phoneBusy || !phonePeer.trim()"
+            @click="startPhoneCall"
+          >
+            <AppIcon name="sound" />发起通话
+          </button>
+          <button class="btn sm ghost" :disabled="phoneBusy" @click="hangUpPhone">
+            <AppIcon name="close" />挂断
+          </button>
+          <span
+            v-if="phoneStatus"
+            class="muted mono"
+            style="font-size: 11.5px"
+            :style="{ color: phoneStatus.active ? '#15803d' : undefined }"
+          >
+            <template v-if="!phoneStatus.reachable">
+              通话态不可查（{{ phoneStatus.reason || "设备离线或客户端未在线" }}）
+            </template>
+            <template v-else-if="phoneStatus.active">
+              通话中：对端 {{ phoneStatus.peer }}:{{ phoneStatus.peerPort }}
+            </template>
+            <template v-else>当前未通话</template>
+          </span>
+        </div>
+        <div class="muted" style="font-size: 11px; margin-top: 4px; line-height: 1.6">
+          双向对讲走<strong>局域网 UDP</strong>（不经平台）：PC 必须与板子同网段
+          （板端 {{ phoneBoardIp || "网卡未上报" }}），并在 PC 上跑
+          <code>{{ phonePcCommand }}</code>（先 <code>pip install sounddevice</code>）；
+          <a v-if="phoneScriptUrl" :href="phoneScriptUrl" target="_blank" rel="noreferrer">
+            下载 voice_call_pc.py
+          </a>
+          <span v-else>脚本在板端 `pc_tools/voice_call_pc.py`</span>。
+          进电话模式会打断正在循环的播报。
         </div>
 
         <div class="rt-sec-title" style="margin-top: 18px">

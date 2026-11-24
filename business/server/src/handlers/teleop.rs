@@ -55,7 +55,7 @@ const BODY_ACTIONS: [(&str, &str); 11] = [
 ];
 
 /// 允许通过 `/command` 下发的业务指令
-const BUSINESS_COMMANDS: [&str; 13] = [
+const BUSINESS_COMMANDS: [&str; 15] = [
     "开始巡检",
     "暂停任务",
     "继续任务",
@@ -78,6 +78,11 @@ const BUSINESS_COMMANDS: [&str; 13] = [
     // 它不属于任何计划，不去重（同一句话可以再喊一遍）。
     "呼叫",
     "停止呼叫",
+    // 「电话」/「挂断电话」：板端 ⇄ 同网段 PC 的双向对讲（`POST /devices/{id}/phone`）。
+    // 参数 `peer` / `peerPort` 由 `handlers::devices::phone_start` 校验后组装；
+    // 音频是局域网 UDP 直连，平台只下发起停。
+    "电话",
+    "挂断电话",
 ];
 
 fn invalid(message: impl Into<String>) -> AppError {

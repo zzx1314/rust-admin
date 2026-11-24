@@ -772,15 +772,6 @@ async fn call_device(state: &AppState, task: &Task) -> Result<crate::models::Dev
     super::devices::fetch_device_by_code(state, code).await
 }
 
-fn ensure_delivered(result: &Value, device_code: &str, action: &str) -> Result<(), AppError> {
-    if result.get("wsDelivered").and_then(Value::as_bool) == Some(false) {
-        return Err(AppError::BadRequest(format!(
-            "设备 {device_code} 未在线（设备客户端未连接），{action}未送达"
-        )));
-    }
-    Ok(())
-}
-
 /// `POST /tasks/{id}/call` —— 任务详情页的「呼叫」（人工喊话）。
 ///
 /// 链路：平台 → 设备指令 `呼叫` → 设备客户端 → 板端 `/api/speak/call` → 聆思 FIFO
@@ -822,7 +813,7 @@ pub async fn call_task(
         Some(&claims.username),
     )
     .await?;
-    ensure_delivered(&result, &device.device_id, "呼叫")?;
+    super::devices::ensure_ws_delivered(&result, &device.device_id, "呼叫")?;
     // 详情页的事件流是操作员回溯“这轮谁喊了什么”的唯一痕迹；写失败不影响呼叫本身
     let _ = record_event(
         &state,
@@ -864,7 +855,7 @@ pub async fn stop_call_task(
         Some(&claims.username),
     )
     .await?;
-    ensure_delivered(&result, &device.device_id, "停止呼叫")?;
+    super::devices::ensure_ws_delivered(&result, &device.device_id, "停止呼叫")?;
     Ok(ApiResponse::ok(result))
 }
 

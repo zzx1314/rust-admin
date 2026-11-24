@@ -4,7 +4,7 @@ use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::gateway;
 use crate::models::{
-    BindParkRequest, CommandRequest, Device, DeviceQuery, DeviceRequest, LocateRequest,
+    BindParkRequest, CommandRequest, Device, DeviceQuery, DeviceRequest, LocateRequest, PhoneRequest,
 };
 use crate::zentai;
 use axum::Json;
@@ -573,6 +573,146 @@ pub async fn locate_device(
         )));
     }
     Ok(ApiResponse::ok(result))
+}
+
+/// 对端 IP 白名单：与 `client/src/phone.rs::normalize_peer`、板端
+/// `backpack_dashboard/backend/phone.py::normalize_peer` 同一份规则。
+///
+/// 板端把 `电话` 指令写成 shell `echo "phone <ip> <port>"`（FIFO 那条路），
+/// 所以界面输入的对端地址必须严到「四段十进制 + 1~65535 端口」；这一层先把
+/// 明显不是 IP 的东西拦在 API 边界，不至于靠客户端/板端兜底。
+pub(crate) fn validate_peer_ip(peer: &str) -> Result<String, AppError> {
+    // 不做 trim：这条命令最终拼进 shell 的 `echo "phone <ip> <port>"`，
+    // 带空白 / 换行的输入一律当非法（客户端与板端也是同一份规则）。
+    let text = peer;
+    let parts: Vec<&str> = text.split('.').collect();
+    let ok = parts.len() == 4
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part.len() <= 3
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && part.parse::<u16>().is_ok_and(|value| value <= 255)
+        })
+        && parts.iter().any(|part| part.parse::<u16>().unwrap_or_default() > 0);
+    if !ok {
+        return Err(AppError::BadRequest(format!(
+            "对端 IP 不合法（{text:?}）：只支持 IPv4 点分十进制（不能有空格/换行），例如 192.168.234.101"
+        )));
+    }
+    Ok(text.to_string())
+}
+
+pub(crate) fn validate_peer_port(port: i64) -> Result<u16, AppError> {
+    if !(1..=65535).contains(&port) {
+        return Err(AppError::BadRequest(format!(
+            "对端端口不合法（{port}）：需要 1~65535"
+        )));
+    }
+    Ok(port as u16)
+}
+
+/// `wsDelivered=false` 必须冒泡成错误：指令没送达设备，不能记成「已下发」。
+pub(crate) fn ensure_ws_delivered(
+    result: &Value,
+    device_code: &str,
+    action: &str,
+) -> Result<(), AppError> {
+    if result.get("wsDelivered").and_then(Value::as_bool) == Some(false) {
+        return Err(AppError::BadRequest(format!(
+            "设备 {device_code} 未在线（设备客户端未连接），{action}未送达"
+        )));
+    }
+    Ok(())
+}
+
+/// `POST /devices/{id}/phone` —— 发起「模拟电话」（板端 ⇄ 同网段 PC 的对讲）。
+///
+/// 音频**不经平台**：板子把麦克风 PCM（16kHz/S16/20ms）直接 UDP 打到对端 PC，
+/// 所以 PC 必须和板子同网段并跑 `pc_tools/voice_call_pc.py`。平台只负责下发
+/// `电话` / `挂断电话`，以及从隧道读回通话态给页面显示。
+pub async fn phone_start(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path(id): Path<i64>,
+    Json(payload): Json<PhoneRequest>,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let device = fetch_device(&state, id).await?;
+    auth::ensure_device_access(&state, &claims, &device.device_id).await?;
+    let peer = validate_peer_ip(&payload.peer)?;
+    let port = validate_peer_port(payload.peer_port)?;
+    let result = push_command(
+        &state,
+        &device,
+        "电话",
+        Some(json!({ "peer": peer, "peerPort": port })),
+        Some(&claims.username),
+    )
+    .await?;
+    ensure_ws_delivered(&result, &device.device_id, "发起通话")?;
+    info!("设备 {} 发起电话：对端 {peer}:{port}", device.device_id);
+    Ok(ApiResponse::ok(result))
+}
+
+/// `POST /devices/{id}/phone/stop` —— 挂断（板端 `phone stop` 回到 voice 模式）。
+pub async fn phone_stop(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path(id): Path<i64>,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let device = fetch_device(&state, id).await?;
+    auth::ensure_device_access(&state, &claims, &device.device_id).await?;
+    let result = push_command(
+        &state,
+        &device,
+        "挂断电话",
+        None,
+        Some(&claims.username),
+    )
+    .await?;
+    ensure_ws_delivered(&result, &device.device_id, "挂断")?;
+    Ok(ApiResponse::ok(result))
+}
+
+/// `GET /devices/{id}/phone` —— 通话运行态（经设备客户端隧道读板端 `/api/phone/status`）。
+///
+/// 读不到就回 `reachable=false` + 可读原因（设备离线 / 客户端没登记隧道 / Agent 旧版本），
+/// 页面据此把「通话中」降级成「不可查」，而不是报一个 500 让人以为呼叫挂了。
+pub async fn phone_status(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path(id): Path<i64>,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let device = fetch_device(&state, id).await?;
+    auth::ensure_device_access(&state, &claims, &device.device_id).await?;
+    let prefer = Some(device.device_id.as_str());
+    let reply = state
+        .agent_tunnel
+        .get(
+            prefer,
+            &state.device_connections,
+            "/api/phone/status",
+            std::time::Duration::from_secs(4),
+        )
+        .await;
+    let body = match reply {
+        Ok(value) => json!({
+            "reachable": true,
+            "active": value.get("active").and_then(Value::as_bool).unwrap_or(false),
+            "peer": value.get("peer"),
+            "peerPort": value.get("peerPort"),
+            "localPort": value.get("localPort"),
+            "mode": value.get("mode"),
+            "interfaces": value.get("interfaces").cloned().unwrap_or_else(|| json!([])),
+            "script": value.get("script"),
+        }),
+        Err(error) => json!({
+            "reachable": false,
+            "active": false,
+            "reason": error,
+            "interfaces": [],
+        }),
+    };
+    Ok(ApiResponse::ok(body))
 }
 
 /// 设备事件流（最近 N 条）。

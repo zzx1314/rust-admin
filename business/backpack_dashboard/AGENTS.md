@@ -47,6 +47,7 @@ backend/
 ├── control.py        LED 闪烁 / 补光开关
 ├── record.py         航点 / 航段录像（ffmpeg 从本机 mediamtx 拉 dogcam，落 mp4 + 边车）
 ├── speak.py          航点 / 航段语音播报（聆思 TTS：call 0/1 <内容> / call stop）
+├── phone.py          模拟电话（板端 ⇄ 同网段 PC 的 UDP 双向对讲：phone <ip> <port> / phone stop）
 ├── photo.py          航点拍照（ffmpeg 从本机 mediamtx 抓 JPEG，客户端到点触发）
 ├── buttons.py        SOS/STOP evdev 监听
 ├── cjk_font.py       画框中文字模（由 backend/tools/gen_cjk_font.py 生成）
@@ -84,6 +85,9 @@ python3 business/backpack_dashboard/backend/tools/record_selftest.py
 
 # 语音播报自检（内容净化 / 幂等 / 循环看门狗 / 收尾，改 speak.py 后必跑；不需要聆思小板）
 python3 business/backpack_dashboard/backend/tools/speak_selftest.py
+
+# 模拟电话自检（IPv4/端口白名单含注入 / asr 门禁 / 先收播报 / 挂断幂等，改 phone.py 后必跑）
+python3 business/backpack_dashboard/backend/tools/phone_selftest.py
 
 # 航点拍照自检（抓拍 / 多帧 / 清单 / 删除 / 路径白名单 / 超期清盘，改 photo.py 后必跑）
 python3 business/backpack_dashboard/backend/tools/photo_selftest.py
@@ -196,6 +200,26 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
 - 手工验：`curl -XPOST 127.0.0.1:8000/api/speak -d '{"text":"请避让","loop":false}'`；
   用 `deploy/backpack-sim` 时假 Agent 同样实现这三个接口（`/api/sim/state` 的 `speak`）。
 - 完整链路（平台编辑器 → 客户端 → 板端）见 `business/docs/plan-speech.md`。
+
+## 电话（对讲）
+
+`phone.py`：把「和现场的人说话」落地为聆思 FIFO 的两条命令，音频是**局域网 UDP 直连**，
+不经平台也不经中继：
+
+| 接口 | 命令 | 语义 |
+|---|---|---|
+| `POST /api/phone` `{peer, peerPort}` | `phone <对端IP> <端口>` | 发起通话（先进 `speak.stop` 收播报，再 `ensure_asr()`） |
+| `POST /api/phone/stop` `{reason}` | `phone stop` | 挂断回 voice 模式（不在通话中时幂等） |
+| `GET /api/phone/status` | — | 通话态 + 板端 IPv4 网卡（页面据此拼 PC 端命令） |
+
+- **板端固定监听 5000**（`phone.LOCAL_PORT`）：`phone <ip> <端口>` 里的端口是对端 PC 的，
+  PC 端命令是 `python voice_call_pc.py --peer <板端IP> --peer-port 5000 --local-port <同一端口>`
+  （脚本在 `backend/pc_tools/`，`GET /api/lingsi/voice_call_pc.py` 可下载）。
+- ⚠️ **对端地址必须白名单校验**（`normalize_peer`：点分十进制 IPv4 + 1~65535）：
+  这条命令同样进 shell `echo`，对端地址来自界面输入。平台 / 客户端 / 板端三层都校验。
+- **FIFO 单通道**：进电话模式会打断播报，所以 `start` 先 `speak.stop()`，
+  否则客户端以为循环播报还在响。
+- 完整链路 / 现场排查见 `business/docs/phone-intercom.md`。
 
 ## 航点拍照（航点动作「可见光拍照」）
 

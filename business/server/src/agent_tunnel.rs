@@ -33,11 +33,16 @@ use tokio::sync::{Mutex, RwLock, broadcast, oneshot};
 use tracing::{debug, info, warn};
 
 /// 允许经隧道转发的 Agent 只读接口
-pub const GET_PATHS: [&str; 4] = [
+///
+/// 只放行背包页与「电话（对讲）」真正要用的：板端 Agent 没有鉴权，多放一条就是多一条
+/// 内网 HTTP 能力。新增前先问：这个接口只读吗？页面真的消费吗？
+pub const GET_PATHS: [&str; 5] = [
     "/api/cameras",
     "/api/relay/status",
     "/api/detect/tasks",
     "/api/detect/status",
+    // 电话运行态（`phone.py::status`）：对端 IP/端口 + 板端 IPv4 网卡，只读
+    "/api/phone/status",
 ];
 
 /// 允许经隧道转发的 AI 启停动作（对应 `/api/detect/{action}`）
@@ -263,8 +268,9 @@ mod tests {
     #[test]
     fn whitelists_are_narrow_on_purpose() {
         // Agent 无鉴权：多放一条就是多一条内网 HTTP 能力
-        assert_eq!(GET_PATHS.len(), 4);
+        assert_eq!(GET_PATHS.len(), 5);
         assert!(GET_PATHS.contains(&"/api/detect/status"));
+        assert!(GET_PATHS.contains(&"/api/phone/status"));
         assert!(!GET_PATHS.contains(&"/api/whep/dogcam"));
         assert_eq!(ACTIONS, ["start", "stop", "config"]);
     }

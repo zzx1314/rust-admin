@@ -618,7 +618,12 @@ def system_info():
     return {"uname": uname, "uptime": uptime, "mem_total_bytes": mem}
 
 
-def get_env():
+def get_interfaces():
+    """本机 IPv4 网卡（`[{name, ip}]`，跳过 `lo`）。
+
+    电话对讲要用：页面得告诉操作员「板子在哪个网段」（PC 必须与之同网段），
+    Wi-Fi 掉线时 `wlp4s0` 会直接不出现，也是一种现场诊断信号。
+    """
     interfaces = []
     try:
         data = json.loads(run(["ip", "-json", "addr"]))
@@ -632,6 +637,11 @@ def get_env():
                 interfaces.append({"name": name, "ip": ips[0]})
     except Exception:
         pass
+    return interfaces
+
+
+def get_env():
+    interfaces = get_interfaces()
     return {"interfaces": interfaces, "core_temp_c": core_temp(),
             "ssd": ssd_info(), "system": system_info(), "sn": get_sn()}
 
@@ -674,6 +684,20 @@ def _parse_mode(raw):
 
 def _read_lingsi_cmd():
     """兼容旧逻辑：返回 call/voice/phone/None（供 run_lingsi_test 等使用）。"""
+    return _parse_mode(_read_last_cmd())
+
+
+def last_lingsi_cmd():
+    """最近一次写入的聆思原始命令（`phone <ip> <port>` / `call 0 <内容>` / `voice`）。
+
+    对外公开的薄封装：`phone.py` 等模块要读回来判断当前会话，不要在模块间
+    直接用下划线的 `_read_last_cmd`。
+    """
+    return _read_last_cmd()
+
+
+def last_lingsi_mode():
+    """当前聆思模式：`call` / `voice` / `phone` / `None`。"""
     return _parse_mode(_read_last_cmd())
 
 

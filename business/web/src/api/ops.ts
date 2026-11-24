@@ -6,6 +6,7 @@ import type {
   DashboardSummary,
   Device,
   DeviceCommandResult,
+  DevicePhoneStatus,
   LoginResponse,
   MapRaster,
   NotificationRecord,
@@ -159,7 +160,18 @@ export const deviceApi = {
       wsDelivered: boolean;
       /** 急停 / 解除急停：服务端会把 1315 `estop.software` 回读结果校验一遍 */
       verify?: { field: string; expect: boolean; timeoutSec: number };
-    }>(`/devices/${id}/action`, { action })
+    }>(`/devices/${id}/action`, { action }),
+
+  // ── 模拟电话（对讲）──────────────────────────────────────
+  // 板端 ⇄ 同网段 PC 的双向对讲：音频是局域网 UDP 直连（16kHz/S16/20ms），
+  // 平台只下发起停、并从隧道读回通话态。PC 必须与板子同网段并跑
+  // `voice_call_pc.py`（板端 `:8000/api/lingsi/voice_call_pc.py` 可下载）。
+  phoneStatus: (id: number) => get<DevicePhoneStatus>(`/devices/${id}/phone`),
+  /** 发起通话：`peer` 是对端 PC 的 IPv4，`peerPort` 是它的 UDP 端口（板端固定 5000） */
+  phoneStart: (id: number, peer: string, peerPort: number) =>
+    post<DeviceCommandResult>(`/devices/${id}/phone`, { peer, peerPort }),
+  /** 挂断（板端 `phone stop` 回到 voice 模式，不在通话中时幂等） */
+  phoneStop: (id: number) => post<DeviceCommandResult>(`/devices/${id}/phone/stop`)
 };
 
 export const taskApi = {

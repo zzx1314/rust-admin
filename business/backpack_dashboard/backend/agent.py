@@ -67,6 +67,10 @@
 - POST /api/speak/call        -> [任务详情] 手动呼叫（喊话）{"text":"请避让","loop":false,
                                  "seconds":0}；与航点播报同一套白名单，不去重，
                                  循环缺省 30s
+- GET  /api/phone/status      -> 模拟电话运行态（对端 IP/端口 + 板端 IPv4 网卡）
+- POST /api/phone             -> 发起通话 {"peer":"192.168.234.101","peerPort":5000}
+                                 （严格 IPv4/端口校验，写 `phone <ip> <port>`）
+- POST /api/phone/stop        -> 挂断 {"reason":"挂断"}（写 `phone stop`，回到 voice）
 - GET  /api/photo/status      -> 航点拍照运行态（目录 / 剩余空间 / 待回传张数 / 最近一次）
 - POST /api/photo             -> [航点] 抓拍照片 {"planId","pointIndex","pointName",
                                  "camera":"dogcam|cam0..cam3","frames":1}；
@@ -96,6 +100,7 @@ import buttons
 import location
 import detect
 import photo
+import phone
 import record
 import speak
 
@@ -451,6 +456,37 @@ async def lingsi_pc_script():
         return JSONResponse({"ok": False, "error": "脚本未部署到 pc_tools/"}, status_code=404)
     return FileResponse(PC_SCRIPT, filename="voice_call_pc.py",
                         media_type="text/plain; charset=utf-8")
+
+
+@app.get("/api/phone/status")
+async def phone_status():
+    """模拟电话运行态：对端 IP/端口 + 板端 IPv4 网卡 + PC 端脚本路径。
+
+    平台靠它告诉操作员「板子在哪个网段」并拼出 PC 端命令；音频本身是
+    PC ⇄ 板子的局域网 UDP 直连，不经过平台。
+    """
+    return JSONResponse(phone.status(), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/phone")
+async def phone_start(request: Request):
+    """发起通话：写聆思 FIFO `phone <对端IP> <对端端口>`。
+
+    对端 IP / 端口严格校验（点分十进制 IPv4 + 1~65535）——这条命令进的是
+    shell `echo`，对端地址来自界面输入，不做白名单就是命令注入。
+    FIFO 单通道，所以进电话模式前会先把正在循环的播报收掉。
+    """
+    b = await _detect_body(request)
+    r = await asyncio.to_thread(phone.start, b)
+    return JSONResponse(r, status_code=200 if r.get("ok") else 400)
+
+
+@app.post("/api/phone/stop")
+async def phone_stop(request: Request):
+    """挂断：写 `phone stop` 回到 voice 模式（不在通话中时幂等）。"""
+    b = await _detect_body(request)
+    r = await asyncio.to_thread(phone.stop, str(b.get("reason") or "挂断"))
+    return JSONResponse(r, status_code=200 if r.get("ok") else 400)
 
 
 @app.get("/api/asr")

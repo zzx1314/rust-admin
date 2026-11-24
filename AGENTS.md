@@ -225,6 +225,16 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 改这块先读 `business/docs/plan-speech.md`（§2.1），回归 `python3 business/backpack_dashboard/backend/tools/speak_selftest.py`、
 `client speak::tests`、`client pump::tests::waypoint_speech_fires_on_arrival_and_stops_on_leave`。
 
+**电话（对讲）是另一条链路**（双向实时语音，不是 TTS）：任务详情「电话（对讲）」填对端
+PC 的 IPv4 + 端口 → `POST /devices/{id}/phone` → 设备指令 `电话` → 客户端 `phone::start`
+→ 板端 `/api/phone` → 聆思 FIFO `phone <ip> <port>` → asr/voice_call 把麦克风 PCM
+（16kHz/S16/20ms）**UDP 直发对端 PC**，所以 PC 必须与板子同网段并跑
+`pc_tools/voice_call_pc.py`（页面给下载链接与拼好的命令）；平台不中继音频。
+三条红线：**地址三层白名单**（IPv4 + 1~65535，板端那条命令进的是 shell `echo`）、
+**进电话模式先收播报**（FIFO 单通道）、**失败不影响任务**。改这块先读
+`business/docs/phone-intercom.md`，回归 `python3 business/backpack_dashboard/backend/tools/phone_selftest.py`、
+`client phone::tests`、`cargo test --test api_smoke phone_dispatch`。
+
 **航点采集默认是关的**：`media_capture_enabled`（迁移 34 预置 `0`）是自动采集的
 总开关，关着时板端只写 `detect_jobs/…` 告警证据图（企业微信配图、数量核对照旧），
 不再往媒体归档目录攒训练图；开关随 `ai_start` 的 `captureEnabled` 下发（客户端

@@ -65,6 +65,8 @@ curl -s 127.0.0.1:8000/api/lights          # 计划灯光（补光 / LED / 是�
 curl -s -XPOST 127.0.0.1:8000/api/lights/off -d '{"reason":"manual"}'
 curl -s 127.0.0.1:8000/api/speak/status   # 语音播报（计划到点 / 进段时客户端调的 /api/speak）
 curl -s -XPOST 127.0.0.1:8000/api/speak/call -d '{"text":"请避让"}'  # 任务详情页的人工「呼叫」
+curl -s -XPOST 127.0.0.1:8000/api/phone -d '{"peer":"192.168.234.101","peerPort":5000}'  # 电话（对讲）
+curl -s -XPOST 127.0.0.1:8000/api/phone/stop -d '{}'                 # 挂断
 curl -s 127.0.0.1:8000/api/photo/status   # 航点拍照（到点抓 JPEG → 客户端回传平台）
 ```
 """
@@ -256,6 +258,9 @@ class State:
                       "scope": "", "manual": False, "words": 0, "stops": 0}
         # 航点拍照（客户端在 5009 到点那一帧调的 /api/photo）
         self.photos = {}
+        # 模拟电话（平台任务详情「电话」/ 板端 Dashboard 的 phone 模式）
+        self.phone = {"active": False, "peer": None, "peerPort": None,
+                      "calls": 0, "hangups": 0}
         self.seen_events = 0
 
     # ---- 事件 ----
@@ -410,6 +415,20 @@ class State:
         speak["max_secs"] = 600
         speak["sim"] = True
         return speak
+
+    def phone_status(self):
+        """电话运行态（GET /api/phone/status）——字段与板端 `phone.status` 对齐。"""
+        with self.lock:
+            snapshot = dict(self.phone)
+        snapshot.update({
+            "localPort": 5000,
+            "mode": "phone" if snapshot["active"] else "voice",
+            "interfaces": [{"name": "eth0", "ip": "192.168.234.200"},
+                           {"name": "wlan0", "ip": "192.168.41.246"}],
+            "script": "/api/lingsi/voice_call_pc.py",
+            "sim": True,
+        })
+        return snapshot
 
     def detect_state_event(self):
         snapshot = self.status()
@@ -763,6 +782,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.json(STATE.lights_status())
         if path == "/api/speak/status":
             return self.json(STATE.speak_status())
+        if path == "/api/phone/status":
+            return self.json(STATE.phone_status())
         if path == "/api/photo/status":
             return self.json(STATE.photo_status())
         if path == "/api/photo/list":
@@ -782,6 +803,7 @@ class Handler(BaseHTTPRequestHandler):
                 "relay": STATE.relay,
                 "lights": STATE.lights,
                 "speak": STATE.speak,
+                "phone": STATE.phone_status(),
                 "photo": STATE.photo_status(),
                 "events": STATE.seen_events,
             })
@@ -980,6 +1002,41 @@ class Handler(BaseHTTPRequestHandler):
                     STATE.speak["stops"] += 1
             return self.json({"ok": True, "changed": changed, "reason": reason,
                               "speak": STATE.speak_status()})
+
+        # 电话（对讲）：平台任务详情「发起通话 / 挂断」→ 客户端 → 这里
+        if path == "/api/phone":
+            peer = str(body.get("peer") or body.get("ip") or "").strip()
+            port = body.get("peerPort", body.get("port"))
+            parts = peer.split(".")
+            valid = (len(parts) == 4 and all(p.isdigit() and len(p) <= 3
+                                            and int(p) <= 255 for p in parts)
+                     and any(int(p) > 0 for p in parts))
+            if not valid:
+                return self.json({"ok": False, "error": "对端 IP 不合法"}, 400)
+            try:
+                port_no = int(str(port).strip())
+            except (TypeError, ValueError):
+                return self.json({"ok": False, "error": "对端端口需要是 1~65535 的整数"}, 400)
+            if not 1 <= port_no <= 65535:
+                return self.json({"ok": False, "error": "对端端口需要是 1~65535 的整数"}, 400)
+            with STATE.lock:
+                STATE.phone.update({"active": True, "peer": peer, "peerPort": port_no})
+                STATE.phone["calls"] += 1
+                # FIFO 单通道：进电话模式会打断播报
+                STATE.speak.update({"active": False, "text": "", "loop": False,
+                                    "seconds": 0, "plan_id": "", "point_index": -1,
+                                    "scope": ""})
+            return self.json({"ok": True, "cmd": "phone %s %d" % (peer, port_no),
+                              "phone": STATE.phone_status()})
+        if path == "/api/phone/stop":
+            reason = str(body.get("reason") or "挂断")
+            with STATE.lock:
+                changed = STATE.phone["active"]
+                STATE.phone.update({"active": False, "peer": None, "peerPort": None})
+                if changed:
+                    STATE.phone["hangups"] += 1
+            return self.json({"ok": True, "changed": changed, "reason": reason,
+                              "phone": STATE.phone_status()})
 
         # 模拟专用
         if path == "/api/sim/relay":

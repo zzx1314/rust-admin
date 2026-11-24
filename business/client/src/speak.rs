@@ -497,19 +497,20 @@ impl Speaker {
     }
 
     async fn post(&self, path: &str, body: Value) -> Result<Value, String> {
-        post_agent(&self.client, &self.agent, path, body).await
+        post_agent(&self.client, &self.agent, path, body, "播报").await
     }
 }
 
-/// 调一次板端 Agent 并解析 JSON（`Speaker` 与手动「呼叫」共用）。
+/// 调一次板端 Agent 并解析 JSON（`Speaker`、手动「呼叫」与 [`crate::phone`] 共用）。
 ///
-/// 404 单独翻译成「没有播报接口」：老版本 Agent 靠这句话进入 `unsupported`，
-/// 不要改成别的措辞。
-async fn post_agent(
+/// `interface` 只用于 404 的文案（`播报` / `电话`）。**播报传的必须是「播报」**：
+/// 老版本 Agent 靠「没有播报接口」这句话进入 `unsupported`，不要改这个措辞。
+pub(crate) async fn post_agent(
     client: &Client,
     agent: &str,
     path: &str,
     body: Value,
+    interface: &str,
 ) -> Result<Value, String> {
     let agent = agent.trim_end_matches('/');
     let response = client
@@ -524,7 +525,7 @@ async fn post_agent(
         .await
         .map_err(|error| format!("{path}: {error}"))?;
     if status == reqwest::StatusCode::NOT_FOUND {
-        return Err("板端 Agent 没有播报接口（旧版本）".to_string());
+        return Err(format!("板端 Agent 没有{interface}接口（旧版本）"));
     }
     if !status.is_success() {
         return Err(format!("{path} HTTP {status}: {text}"));
@@ -555,7 +556,7 @@ pub async fn manual_call(
         .timeout(AGENT_TIMEOUT)
         .build()
         .map_err(|error| format!("建 HTTP 客户端失败: {error}"))?;
-    post_agent(&client, agent, "/api/speak/call", body).await?;
+    post_agent(&client, agent, "/api/speak/call", body, "播报").await?;
     info!(
         "呼叫：{}{}",
         text,
@@ -580,6 +581,7 @@ pub async fn manual_stop(agent: &str, reason: &str) -> Result<String, String> {
         agent,
         "/api/speak/stop",
         json!({ "reason": reason }),
+        "播报",
     )
     .await?;
     info!("呼叫：已停止（{reason}）");

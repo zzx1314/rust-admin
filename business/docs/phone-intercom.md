@@ -1,0 +1,88 @@
+# 电话（对讲）：板端 ⇄ 现场 PC 的双向通话
+
+「让狗和现场的人说话」这件事的完整说明。和「语音播报 / 呼叫」（单向 TTS）不同，
+电话是**双向实时语音**，音频走**局域网 UDP**，不经过平台。
+
+| 在哪 | 文件 | 职责 |
+|---|---|---|
+| 平台页面 | `business/web/src/views/tasks/index.vue`（「远程呼叫 → 电话（对讲）」） | 填对端 IP/端口、发起 / 挂断、显示通话态与 PC 端命令 |
+| 业务平台 | `business/server/src/handlers/devices.rs::phone_start / phone_stop / phone_status` | 校验对端、下发 `电话` / `挂断电话`、经隧道读通话态 |
+| 设备客户端 | `business/client/src/phone.rs` | 代调板端 `/api/phone`（与 Agent 同机），再过一遍地址白名单 |
+| 板端 Agent | `business/backpack_dashboard/backend/phone.py` | 校验 + 写聆思 FIFO `phone <对端IP> <端口>` / `phone stop` |
+| PC 端 | `business/backpack_dashboard/backend/pc_tools/voice_call_pc.py` | 声卡采集/播放 + 12 字节极简 RTP（板端 `:8000/api/lingsi/voice_call_pc.py` 可下载） |
+
+---
+
+## 1. 链路
+
+```text
+任务详情「电话（对讲）」 填 对端PC IP + 端口
+  → POST /devices/{id}/phone {peer, peerPort}            （平台校验 IPv4 / 1~65535）
+    → 设备指令 `电话`（WS，params.params.{peer,peerPort}）
+      → 设备客户端 phone::start → POST 板端 /api/phone
+        → phone.py：先 speak.stop（FIFO 单通道，先收播报）→ ensure_asr()
+          → `phone <对端IP> <端口>`
+            → asr/voice_call 把麦克风 PCM（16000Hz / 单声道 / S16_LE / 20ms）
+              **UDP 直发对端 PC 的该端口**；同时接收对端 PCM 播放
+挂断：POST /devices/{id}/phone/stop → 设备指令 `挂断电话` → /api/phone/stop → `phone stop`
+通话态：GET /devices/{id}/phone → 设备客户端隧道 → 板端 /api/phone/status
+```
+
+- **板端固定监听 5000**（`phone.py::LOCAL_PORT`）。所以：
+  - `phone <IP> <端口>` 里的端口是**对端 PC** 的端口；
+  - PC 端命令是 `python voice_call_pc.py --peer <板端IP> --peer-port 5000 --local-port <同一端口>`。
+- **PC 必须和板子同网段**（现场 `192.168.234.x` eth0 / `192.168.41.x` Wi-Fi）。
+  「跨公网打电话」不成立——平台只下发起停，不中继音频。
+- 页面会展示板端网卡（`/api/phone/status` 的 `interfaces`），优先 `eth0`，
+  并拼好 PC 端命令与脚本下载链接（`http://<板端IP>:8000/api/lingsi/voice_call_pc.py`）。
+
+## 2. 三条红线
+
+1. **地址必须白名单校验**：板端这条命令最终是 `echo "phone <ip> <port>" > FIFO`（shell）。
+   平台 / 客户端 / 板端三层都只认「点分十进制 IPv4 + 1~65535」，其它一律 400。
+   要「支持域名」之前先想清楚这一点。回归：`phone_selftest.py` 的注入用例、
+   `client phone::tests::peer_must_be_a_plain_ipv4_with_a_real_port`、
+   `api_smoke::phone_dispatch_validates_peer_and_reaches_the_device`。
+2. **进电话模式先收播报**：FIFO 单通道，电话进来会打断播报；`phone.start` 先调
+   `speak.stop()`，否则客户端以为循环播报还在响（离开航点时会多写一次 stop 无所谓）。
+3. **失败只提示，不影响任务**：asr 起不来 / FIFO 写不进去 / 对端没跑脚本，
+   都只回 `ok=false + error`；客户端只回执 `command_result` + 一条设备事件。
+
+## 3. 现场排查
+
+| 现象 | 先看什么 |
+|---|---|
+| 页面报「未送达」 | 设备客户端不在线（业务平台设备列表 / `journalctl -u robodog-device-client`） |
+| 页面报「asr 服务未启动」 | 板端 `systemctl status asr`；电话模式靠它读写 FIFO |
+| 点「发起通话」成功但没声音 | PC 有没有跑脚本、防火墙放不放 UDP 入站、两边是不是同网段（`ip route get <对端IP>`）；板端日志 `journalctl -u backpack-agent \| grep '\[phone\]'` 里应有「通话中：对端 x:y」 |
+| 页面「通话态不可查」 | 设备客户端没登记 Agent 隧道（板端 `:8000` 不通 / 旧客户端）；通话本身可能仍然正常 |
+| 说完一句就被打断 | 板端 FIFO 单通道：同一条通道上还有播报/唤醒词在抢；确认没有循环播报在跑 |
+| 声音断续 | 4G/Wi-Fi 抖动 + 20ms 帧无重传。优先走厂商内网 eth0（`192.168.234.x`） |
+
+手工验（板端同机）：
+
+```bash
+curl -s 127.0.0.1:8000/api/phone/status
+curl -s -XPOST 127.0.0.1:8000/api/phone -H 'Content-Type: application/json' \
+  -d '{"peer":"192.168.234.101","peerPort":5000}'
+curl -s -XPOST 127.0.0.1:8000/api/phone/stop -d '{"reason":"manual"}'
+# PC 端（同网段）：
+pip install sounddevice
+python voice_call_pc.py --peer 192.168.234.200 --peer-port 5000 --local-port 5000
+```
+
+## 4. 回归
+
+```bash
+# 板端：IPv4/端口白名单（含注入）、asr 门禁、先收播报、挂断幂等
+python3 business/backpack_dashboard/backend/tools/phone_selftest.py
+
+# 客户端：地址白名单 / 起停代调 / 板端拒绝要冒泡成错误
+cd business/client && cargo test phone::
+
+# 业务平台：校验 + WS 下发 + 通话态不可达不报 500
+cd business/server && cargo test --test api_smoke phone_dispatch
+
+# 页面：类型 + 构建
+cd business/web && pnpm build
+```
