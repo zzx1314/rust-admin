@@ -69,6 +69,7 @@ mod report;
 mod session;
 mod speak;
 mod state;
+mod wifi;
 mod wire;
 mod zhpro;
 

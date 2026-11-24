@@ -80,6 +80,10 @@ pub struct HeartbeatPayload {
     pub estop_software: Option<bool>,
     /// 1207 `modules[]` 的 `sdk_node`：本体算法节点是否就绪
     pub sdk_node_available: Option<bool>,
+    /// WiFi 信号强度（0-100）：**板端** `nmcli` 的 SIGNAL，由客户端读板端
+    /// `/api/wifi` 带上来。智航 1315 里没有任何 rssi/csq 指标，所以这个值不能
+    /// 从本体拿；老客户端 / 没连 WiFi 时不带该字段（库里保留原值）。
+    pub signal: Option<i64>,
 }
 
 /// 服务端 → 客户端：心跳确认

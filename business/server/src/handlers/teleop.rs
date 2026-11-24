@@ -620,6 +620,7 @@ mod tests {
             zone_name: None,
             status: "在线待命".to_string(),
             battery: 80,
+            signal: 0,
             temperature: 30.0,
             runtime_minutes: 0,
             odometer: 0.0,

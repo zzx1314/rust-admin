@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { deviceApi, parkApi, zoneApi } from "@/api/ops";
@@ -11,7 +11,7 @@ import StatusBadge from "@/components/StatusBadge.vue";
 import ProgressBar from "@/components/ProgressBar.vue";
 import DeviceDrawer from "@/components/DeviceDrawer.vue";
 import { DEVICE_MODELS, DEVICE_STATUSES } from "@/utils/constants";
-import { downloadCsv, isLocReady, locStatusMeta, timeOnly } from "@/utils/format";
+import { downloadCsv, isLocReady, locStatusMeta, timeOnly, wifiMeta } from "@/utils/format";
 
 const route = useRoute();
 const devices = ref<Device[]>([]);
@@ -121,6 +121,31 @@ async function load() {
   parks.value = parkList;
   zones.value = zoneList;
 }
+
+/**
+ * 列表自动刷新：心跳 10s 一次，跟它同频就能看到电量 / 状态 / WiFi 信号的变化。
+ *
+ * 只拉设备列表 + 统计（园区 / 区域下拉不会变，不必每次都拉）；
+ * 页面在后台（`hidden`）时暂停，避免长期挂着白耗接口。
+ */
+async function refreshLive() {
+  try {
+    const [deviceList, statsData] = await Promise.all([deviceApi.list(), deviceApi.stats()]);
+    devices.value = deviceList;
+    stats.value = statsData;
+    // 抽屉开着时换成新对象，抽屉里的电量 / 信号跟着走
+    if (activeDevice.value) {
+      const current = deviceList.find(item => item.id === activeDevice.value?.id);
+      if (current) activeDevice.value = current;
+    }
+  } catch {
+    // 静默失败：下一轮再来，不弹 toast 打扰操作
+  }
+}
+
+/** 自动刷新定时器（10s，与客户端心跳间隔一致） */
+const AUTO_REFRESH_MS = 10_000;
+let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
 
 function openDrawer(device: Device) {
   activeDevice.value = device;
@@ -249,7 +274,7 @@ async function batchDispatch() {
 
 function exportDevices() {
   downloadCsv("robodog-devices.csv", [
-    ["设备编号", "型号", "园区", "区域", "状态", "工作模式", "本体在线", "电量", "当前任务", "最后心跳"],
+    ["设备编号", "型号", "园区", "区域", "状态", "工作模式", "本体在线", "电量", "WiFi信号", "当前任务", "最后心跳"],
     ...filteredDevices.value.map(device => [
       device.deviceId,
       device.model,
@@ -259,6 +284,7 @@ function exportDevices() {
       device.robotMode ? robotModeLabel(device.robotMode) : "—",
       device.bodyOnline ? "是" : "否",
       device.bodyOnline ? device.battery : "—",
+      device.signal > 0 ? `${device.signal}（${wifiMeta(device.signal).label}）` : "—",
       device.currentTaskName,
       device.lastHeartbeat
     ])
@@ -334,7 +360,19 @@ async function unbind(device: Device) {
   ElMessage.success("已解除园区绑定");
 }
 
-onMounted(load);
+onMounted(async () => {
+  await load();
+  autoRefreshTimer = setInterval(() => {
+    if (document.visibilityState === "visible") void refreshLive();
+  }, AUTO_REFRESH_MS);
+});
+
+onBeforeUnmount(() => {
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer);
+    autoRefreshTimer = null;
+  }
+});
 </script>
 
 <template>
@@ -396,7 +434,9 @@ onMounted(load);
             共 {{ stats.total }} 台设备 · 当前展示 {{ filteredDevices.length }} 台
           </span>
         </div>
-        <span class="live-chip"><i />心跳实时同步</span>
+        <span class="live-chip" title="每 10s 自动刷新（页面在后台时暂停）：电量 / 状态 / WiFi 信号随心跳更新"
+          ><i />心跳实时同步</span
+        >
       </div>
       <div class="table-wrap">
         <table class="table">
@@ -406,6 +446,7 @@ onMounted(load);
               <th>所属园区 / 区域</th>
               <th>运行状态</th>
               <th>电量</th>
+              <th>信号</th>
               <th>当前任务</th>
               <th>工作模式</th>
               <th>最后心跳</th>
@@ -470,6 +511,27 @@ onMounted(load);
                   <div v-if="device.charging" class="cell-sub" style="color: #0d9488">充电中</div>
                 </template>
                 <span v-else class="mono muted" title="本体未上报，不展示模拟值">—</span>
+              </td>
+              <td>
+                <span
+                  v-if="device.signal > 0"
+                  class="cell-main"
+                  style="display: inline-flex; align-items: center; gap: 5px"
+                  :title="`WiFi 信号 ${device.signal}/100（板端 nmcli SIGNAL，客户端随心跳上报）`"
+                >
+                  <AppIcon name="wifi" />
+                  <span class="badge" :class="wifiMeta(device.signal).tone">
+                    <i />{{ wifiMeta(device.signal).label }}
+                  </span>
+                  <span class="mono muted">{{ device.signal }}</span>
+                </span>
+                <span
+                  v-else
+                  class="mono muted"
+                  title="板端未连 WiFi / 客户端未上报（不伪造信号值）"
+                >
+                  —
+                </span>
               </td>
               <td><div class="cell-main" style="font-weight: 500">{{ device.currentTaskName }}</div></td>
               <td>

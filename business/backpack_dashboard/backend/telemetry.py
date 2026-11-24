@@ -96,30 +96,77 @@ def _signal_label(s):
     return "差"
 
 
+def _nmcli_split(line):
+    """terse 模式（-t）按未转义的 `:` 切字段。
+
+    SSID 里的 `:` 会被 nmcli 转义成 `\\:`，老实现直接 `line.split(":")` 会把
+    带冒号的 SSID 切碎（`signal` 取到的是 SSID 的后半段，整行解析错位）。
+    """
+    parts, buf, escape = [], [], False
+    for ch in line:
+        if escape:
+            buf.append(ch)
+            escape = False
+        elif ch == "\\":
+            escape = True
+        elif ch == ":":
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    parts.append("".join(buf))
+    return parts
+
+
+def _wifi_ip(iface):
+    """当前 WiFi 的 IPv4 地址（没连上就返回 None）。
+
+    `nmcli -t -f IP4.ADDRESS device show <iface>` 形如 `IP4.ADDRESS[1]:192.168.1.23/24`。
+    """
+    out = run(["nmcli", "-t", "-f", "IP4.ADDRESS", "device", "show", iface], timeout=6)
+    for line in out.splitlines():
+        if not line.startswith("IP4.ADDRESS") or ":" not in line:
+            continue
+        value = line.split(":", 1)[1].strip()
+        if value:
+            return value.split("/", 1)[0]
+    return None
+
+
 def get_wifi():
     iface = WIFI_IFACE or detect_wifi_iface()
-    out = run(["nmcli", "-t", "-f", "SSID,SIGNAL,SECURITY", "dev", "wifi",
+    out = run(["nmcli", "-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "dev", "wifi",
                "list", "ifname", iface], timeout=25)
     nets = []
     seen = set()
+    # 当前连接（`IN-USE` 为 `*` 的那一条）：设备客户端靠它上报信号强弱，
+    # 平台「设备管理」显示的就是这个值（0-100，与 nmcli SIGNAL 同口径）。
+    current = {"connected": False, "ssid": None, "signal": None,
+               "quality": "未知", "ip": None}
     for line in out.splitlines():
         if not line.strip():
             continue
-        parts = line.split(":")
-        ssid = parts[0] if len(parts) > 0 else ""
-        sig = parts[1] if len(parts) > 1 else ""
-        sec = parts[2] if len(parts) > 2 else ""
-        if ssid in seen:
-            continue
-        seen.add(ssid)
+        parts = _nmcli_split(line)
+        in_use = parts[0].strip() if len(parts) > 0 else ""
+        ssid = parts[1] if len(parts) > 1 else ""
+        sig = parts[2] if len(parts) > 2 else ""
+        sec = parts[3] if len(parts) > 3 else ""
         try:
             s = int(sig)
         except Exception:
             s = None
+        if in_use == "*" and ssid:
+            current.update(connected=True, ssid=ssid, signal=s,
+                           quality=_signal_label(s), security=sec)
+        if ssid in seen:
+            continue
+        seen.add(ssid)
         nets.append({"ssid": ssid, "signal": s,
                      "quality": _signal_label(s), "security": sec})
     nets.sort(key=lambda x: (x["signal"] is None, -(x["signal"] or 0)))
-    return {"iface": iface, "total": len(nets), "networks": nets}
+    if current["connected"]:
+        current["ip"] = _wifi_ip(iface)
+    return {"iface": iface, "total": len(nets), "networks": nets, "current": current}
 
 
 # ---------------- 4G 模块 (AT) ----------------
@@ -773,7 +820,9 @@ def _empty_snapshot():
     """结构完整的空快照，保证任何时刻推给前端都不会渲染报错。"""
     return {
         "temp": {"raw": None, "error": "采集中"},
-        "wifi": {"total": 0, "networks": []},
+        "wifi": {"total": 0, "networks": [],
+                 "current": {"connected": False, "ssid": None, "signal": None,
+                             "quality": "未知", "ip": None}},
         "g4": {"lines": ["采集中…"]},
         "env": {"interfaces": [], "sn": {"sn": None, "status": "error"}},
         "fan": {"status": "normal"},
@@ -803,7 +852,10 @@ def snapshot():
     try:
         items = (
             ("temp",   get_temp_humidity, {"raw": None, "error": "采集异常"}),
-            ("wifi",   get_wifi,          {"total": 0, "networks": []}),
+            ("wifi",   get_wifi,          {"total": 0, "networks": [],
+                                            "current": {"connected": False, "ssid": None,
+                                                        "signal": None, "quality": "未知",
+                                                        "ip": None}}),
             ("g4",     get_4g,            {"lines": ["4G 采集异常"]}),
             ("env",    get_env,           {"interfaces": [], "sn": {"sn": None, "status": "error"}}),
             ("fan",    get_fan,           {"status": "normal"}),

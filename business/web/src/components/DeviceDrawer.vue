@@ -15,7 +15,8 @@ import {
   isLocReady,
   locStatusMeta,
   motionStatusLabel,
-  timeOnly
+  timeOnly,
+  wifiMeta
 } from "@/utils/format";
 
 const props = defineProps<{ device: Device | null; open: boolean }>();
@@ -471,6 +472,16 @@ async function emergencyStop() {
             <span><AppIcon name="pin" />累计里程</span>
             <b>{{ device.odometer.toFixed(1) }}<small> km</small></b>
           </div>
+          <div class="metric">
+            <span><AppIcon name="wifi" />WiFi 信号</span>
+            <b
+              v-if="device.signal > 0"
+              :title="`板端 nmcli SIGNAL ${device.signal}/100（客户端随心跳上报）`"
+            >
+              {{ device.signal }}<small> /100 · {{ wifiMeta(device.signal).label }}</small>
+            </b>
+            <b v-else class="muted" title="板端未连 WiFi / 客户端未上报">—</b>
+          </div>
         </div>
 
         <div v-if="healthIssue || controlIssue" class="loc-alert">
@@ -497,6 +508,13 @@ async function emergencyStop() {
         <div class="card-title" style="margin-bottom: 10px"><AppIcon name="list" />设备档案</div>
         <div class="kv"><span>设备编号</span><b class="mono">{{ device.deviceId }}</b></div>
         <div class="kv"><span>设备型号</span><b>{{ device.model }}</b></div>
+        <div class="kv">
+          <span>WiFi 信号</span>
+          <b v-if="device.signal > 0">
+            {{ device.signal }}/100 · {{ wifiMeta(device.signal).label }}
+          </b>
+          <b v-else class="mono muted">—（未连 WiFi / 未上报）</b>
+        </div>
         <div class="kv"><span>所属园区</span><b>{{ device.parkName || "未绑定" }}</b></div>
         <div class="kv"><span>当前区域</span><b>{{ device.zoneName || "—" }}</b></div>
         <div class="kv"><span>实时位置</span><b class="mono">{{ device.position }}</b></div>

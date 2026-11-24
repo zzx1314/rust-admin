@@ -8,7 +8,7 @@
 - GET  /api/relay/status      -> 机器狗前置 relay 运行状态（不含源 URL）
 - *    /api/whep/*            -> WHEP 信令同源代理（OPTIONS/POST/PATCH/DELETE，媒体仍直连）
 - GET  /api/temp              -> 温湿度
-- GET  /api/wifi              -> WiFi 扫描（总数/名称/信号）
+- GET  /api/wifi              -> WiFi 扫描（总数/名称/信号）+ 当前连接（SSID/信号/IP）
 - GET  /api/4g                -> 4G 状态（服务/网卡/AT/SIM/信号/IP/DNS/流量）
 - GET  /api/env               -> 环境信息（IP/核心温度/SSD/系统/SN）
 - GET  /api/ssd               -> SSD 容量&温度

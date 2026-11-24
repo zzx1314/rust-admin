@@ -62,6 +62,12 @@ pub(crate) struct HeartbeatPayload {
     /// 1207 模块可用性：本体 SDK 节点是否就绪；false 时所有运动/导航指令都会被拒
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) sdk_node_available: Option<bool>,
+    /// WiFi 信号强度（0-100，板端 `nmcli` 的 SIGNAL，见 [`crate::wifi`]）
+    ///
+    /// 本体协议里没有信号指标，这个值来自背包板子自己；没连 WiFi / 读不到时不带该字段
+    /// （平台显示 `—`），**不要**用配置值或 0 冒充。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) signal: Option<i64>,
 }
 
 /// 任务进度上报

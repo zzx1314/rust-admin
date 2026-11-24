@@ -325,6 +325,7 @@ GET    /api/zentai/devices/{deviceId}/runtime     # 中台读取设备运行态�
 | 页面字段 | 数据来源 | 说明 |
 | --- | --- | --- |
 | 电量 / 温度 / 里程 / 充电状态 / 工作模式 | 本体 `1315 kRobotStatus` 上报 | 客户端只取这个报文，见下表；`bodyOnline = true` 时才是真实值 |
+| 信号（WiFi） | **背包板子自己** | 客户端读板端 Agent `GET /api/wifi` 的 `current.signal`（`nmcli` SIGNAL 0-100）→ 心跳 `signal`；没连 WiFi / 读不到就不带该字段，页面显示 `—` |
 | 运行状态 | 服务端派生 | 注册 → 待绑定/在线待命；`charging` → 充电中；任务进度 → 执行任务 |
 | 最后心跳 | 服务端收到心跳的时间 | `POST /api/devices/refresh` 是**探活**（查活跃连接），不再改写它 |
 
@@ -339,8 +340,12 @@ GET    /api/zentai/devices/{deviceId}/runtime     # 中台读取设备运行态�
 | `mode`（协议里的 **MachineStatus**，字符串，实测 `remote`） | 工作模式 → `devices.robot_mode`，前端映射成 遥控/自动/手动… |
 
 `1315` 里没有的：信号强度、型号、固件版本。型号取 `1201.type`，固件取客户端配置。
-**「信号」这一列已删除**：协议 39 个字段里没有任何 rssi/csq/wifi/lte 指标，
-`devices.signal` 变成历史列（客户端不再上报、接口不再返回、页面不再展示）。
+**信号不再来自本体，但也不是编的**：协议 39 个字段里没有任何 rssi/csq/wifi/lte 指标，
+所以 `devices.signal` 的历史列改由「设备客户端读背包板子的 WiFi 信号」填充 ——
+客户端调同机 Agent 的 `GET /api/wifi`，取 `current.signal`（`nmcli` 的 SIGNAL 0-100）
+随心跳的 `signal` 字段上报（见 `business/client/src/wifi.rs`），页面按 80/60/40 分
+优/良/中/差。**没连 WiFi、Agent 没起、老客户端不带该字段时保留库里原值，显示 `—`**：
+宁可空着，也不要拿假数字误导「是不是信号差导致掉线」的排查。
 充电状态以前是按「电量 ≤ 10% 就判充电中」猜的，现在以本体上报为准
 （未绑定园区的设备始终是「待绑定」，执行中的设备不会被心跳改状态）。
 

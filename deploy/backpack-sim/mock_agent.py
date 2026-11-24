@@ -16,6 +16,7 @@ USB 相机 / RKNN。板子连不上时，背包页、航点 AI、企业微信证
 ```text
 GET  /api/cameras           六路源（cam0~cam3 + dogcam + infrared）
 GET  /api/relay/status      狗前置链路状态
+GET  /api/wifi              WiFi 扫描 + 当前连接（SSID / 信号 / IP，客户端报心跳 `signal`）
 GET  /api/detect/tasks      模型包目录（消防通道 / 环境卫生）
 GET  /api/detect/status     运行态 + osd
 POST /api/detect/start      {task,labels,conf,cams,fps,plan_id,point_index,check_type,expect_count}
@@ -49,6 +50,7 @@ GET  /api/events            SSE：detect / plan_hit / detect_state / detect_erro
 | `SIM_LATE_EVIDENCE` | `0` | 设 1 时图**不在 `plan_hit` 里给**，只在 `stop` 时由 `ai_evidence` 补（复现「卡片先发、图晚到」） |
 | `SIM_TICK` | `1.2` | 普通（非计划）识别的检出节拍（秒） |
 | `SIM_NIGHT` | 空 | 计划灯光的「现在算不算夜间」：`1` / `0` 钉死，空 = 按本地时间窗（`LIGHT_NIGHT_START`/`LIGHT_NIGHT_END`，与板端同规则） |
+| `SIM_WIFI_SIGNAL` | `66` | `/api/wifi` 的当前连接信号（0-100）；设备客户端随心跳上报，平台「设备管理」的「信号」列靠它验，`0` = 没连 WiFi |
 
 控制接口（只在本模拟里有，真 Agent 没有）：
 
@@ -107,6 +109,23 @@ TICK = float(os.environ.get("SIM_TICK", "1.2"))
 SIM_NIGHT = os.environ.get("SIM_NIGHT", "").strip()
 LIGHT_NIGHT_START = os.environ.get("LIGHT_NIGHT_START", "18:00")
 LIGHT_NIGHT_END = os.environ.get("LIGHT_NIGHT_END", "06:00")
+# WiFi 信号（板端 `/api/wifi.current.signal`，0-100）：设备客户端读它跳心跳 `signal`
+# 上报，业务平台「设备管理」的「信号」列靠这个验。`0` = 模拟没连 WiFi。
+WIFI_SIGNAL = max(0, min(100, int(os.environ.get("SIM_WIFI_SIGNAL", "66"))))
+WIFI_SSID = os.environ.get("SIM_WIFI_SSID", "POE-2.4G")
+
+
+def wifi_quality(signal):
+    """与板端 `telemetry._signal_label` 同分档（80 / 60 / 40）。"""
+    if signal is None:
+        return "未知"
+    if signal >= 80:
+        return "优"
+    if signal >= 60:
+        return "良"
+    if signal >= 40:
+        return "中"
+    return "差"
 
 # 与真板子一致的六路源（cam0~cam3 由 Agent 推给 mediamtx，dogcam 是本体前置）
 CAMERAS = {
@@ -690,6 +709,26 @@ class Handler(BaseHTTPRequestHandler):
             })
         if path == "/api/detect/status":
             return self.json(STATE.status())
+        if path == "/api/wifi":
+            # 板端 `telemetry.get_wifi()` 的契约：扫描列表 + 当前连接。
+            # 设备客户端只取 `current.signal`（0-100）随心跳上报。
+            connected = WIFI_SIGNAL > 0
+            return self.json({
+                "iface": "wlan0",
+                "total": 2,
+                "networks": [
+                    {"ssid": WIFI_SSID, "signal": WIFI_SIGNAL or None,
+                     "quality": wifi_quality(WIFI_SIGNAL or None), "security": "WPA2"},
+                    {"ssid": "邻居家WiFi", "signal": 32, "quality": "差", "security": "WPA2"},
+                ],
+                "current": {
+                    "connected": connected,
+                    "ssid": WIFI_SSID if connected else None,
+                    "signal": WIFI_SIGNAL or None,
+                    "quality": wifi_quality(WIFI_SIGNAL or None),
+                    "ip": "192.168.41.246" if connected else None,
+                },
+            })
         if path == "/api/lights":
             return self.json(STATE.lights_status())
         if path == "/api/speak/status":

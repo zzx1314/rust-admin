@@ -20,6 +20,7 @@ use crate::state::ActiveTask;
 use crate::state::RobotState;
 use crate::state::Shared;
 use crate::state::clear_active_task;
+use crate::wifi::WifiProbe;
 use crate::wire::DeviceEventPayload;
 use crate::wire::TaskProgressPayload;
 use crate::wire::WsMessage;
@@ -247,6 +248,20 @@ pub(crate) async fn run_client(
         info!("航点 / 航段语音播报已关闭（--no-speak / ROBODOG_SPEAK_ENABLED=0）");
     }
 
+    // 板端 WiFi 信号：客户端与 Agent 同机，信号强弱只有板子自己知道（本体 1315 没有
+    // rssi）。这里起一个 30s 轮询，随心跳 `signal` 上报，业务平台「设备管理」展示。
+    // 与 AI 共用一个开关（`--no-ai` = 不要板端 Agent 代调）。
+    let wifi = WifiProbe::new(config.ai_agent_url.clone());
+    if config.ai_enabled {
+        wifi.spawn();
+        info!(
+            "WiFi 信号上报已启用：板端 Agent = {}（读 /api/wifi 的当前连接）",
+            wifi.agent()
+        );
+    } else {
+        info!("WiFi 信号上报已关闭（--no-ai / ROBODOG_AI_ENABLED=0）");
+    }
+
     // 启动时兜一把残留：`detect_jobs` 下的计划目录本该在任务结束时删（`finish_plan`），
     // 但客户端被 kill / 断电时收尾没跑到，那些目录就永远留在板子上。这里只清「早就
     // 该走了」的（`STALE_PLAN_AGE`），不碰正在跑的和刚跑完的。
@@ -400,8 +415,10 @@ pub(crate) async fn run_client(
                 if !guard.body_status_fresh() {
                     guard.tick(running);
                 }
-                let hb = guard.heartbeat();
+                let mut hb = guard.heartbeat();
                 drop(guard);
+                // 信号来自背包板子（`wifi` 探针）：读不到就不带这个字段，页面显示 `—`
+                hb.signal = wifi.signal();
                 send(&out_tx, "heartbeat", serde_json::to_value(hb).unwrap_or_default()).await;
             }
 

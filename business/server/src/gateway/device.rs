@@ -49,7 +49,7 @@ pub(crate) async fn handle_register(
             "INSERT INTO devices (device_id, model, park_id, zone_id, status, battery, signal,
                 temperature, runtime_minutes, odometer, position, current_task_name,
                 last_heartbeat, firmware, device_ip, created_at, updated_at)
-             VALUES (?1, ?2, NULL, NULL, '待绑定', 100, 4, 32.0, 0, 0, NULL, '—',
+             VALUES (?1, ?2, NULL, NULL, '待绑定', 100, 0, 32.0, 0, 0, NULL, '—',
                 ?3, ?4, ?5, ?3, ?3)",
         )
         .bind(device_id)
@@ -393,6 +393,20 @@ pub(crate) async fn handle_heartbeat(
             "UPDATE devices SET runtime_minutes = ?1, updated_at = ?2 WHERE device_id = ?3",
         )
         .bind(r)
+        .bind(&timestamp_clone)
+        .bind(&device_id_clone)
+        .execute(db)
+        .await;
+    }
+    // WiFi 信号（板端 `nmcli` 的 SIGNAL 0-100）：页面「设备管理」的「信号」列
+    //
+    // 只认真实上报的值：没连 WiFi / 老客户端不带该字段时保持库里原值，
+    // 不要退回 0（那会显示成「信号极差」把排查方向带偏）。
+    if let Some(signal) = payload.signal {
+        let _ = sqlx::query(
+            "UPDATE devices SET signal = ?1, updated_at = ?2 WHERE device_id = ?3",
+        )
+        .bind(signal.clamp(0, 100))
         .bind(&timestamp_clone)
         .bind(&device_id_clone)
         .execute(db)

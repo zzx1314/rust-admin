@@ -314,7 +314,6 @@ impl RobotState {
         let mut rng = rand::thread_rng();
         let drain = if running { 1 } else { 0 };
         self.battery = (self.battery - drain).clamp(0, 100);
-        // 信号强度没有真实数据源：保持配置值，不再随机漂移（否则页面显示的是假数据）
         self.temperature = (self.temperature + rng.gen_range(-0.1..0.3)).clamp(20.0, 65.0);
         self.runtime_minutes += 1;
     }
@@ -339,6 +338,9 @@ impl RobotState {
             motion_status: self.motion_status.clone(),
             estop_software: self.estop_software,
             sdk_node_available: self.sdk_node_available,
+            // 由 `session` 从板端 WiFi 探针填（`crate::wifi`）：状态里没有这个字段，
+            // 因为信号来自背包板子而不是本体
+            signal: None,
         }
     }
 }

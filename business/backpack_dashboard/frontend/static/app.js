@@ -340,7 +340,17 @@ function updateWifi(w) {
     `<span class="sec">${n.security || ''}</span></div>`
   ).join('');
 
-  let html = rows || '<div class="note">无</div>';
+  // 当前连接（板端 nmcli SIGNAL，0-100）：设备客户端把它作为心跳 `signal`
+  // 上报，业务平台「设备管理」显示的就是这个强弱。
+  const cur = w.current || {};
+  const head = cur.connected
+    ? `<div class="row cur" title="当前连接：${cur.ip || 'IP 未知'}（0-100，与 nmcli SIGNAL 同口径）">` +
+      `<span class="ssid">已连接：${escHtml(cur.ssid || '(隐藏)')}</span>` +
+      `<span class="sig sig-${escHtml(cur.quality || '')}">${cur.signal ?? '?'} ${escHtml(cur.quality || '')}</span>` +
+      `<span class="sec">${escHtml(cur.ip || '')}</span></div>`
+    : '<div class="note">未连接 WiFi（无 wlan 或已断开）</div>';
+
+  let html = head + (rows || '<div class="note">无</div>');
   // 多于 5 条时才显示折叠/展开入口
   if (networks.length > WIFI_COLLAPSED_LIMIT) {
     const label = wifiExpanded ? '收起' : `查看全部 (${networks.length})`;

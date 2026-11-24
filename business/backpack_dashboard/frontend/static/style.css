@@ -110,6 +110,7 @@ body.detect-on:not(.osd-on) .video-card.no-overlay::after {
   border-bottom: 1px dashed var(--line);
 }
 .list .ssid { flex: 1; }
+.list .row.cur { border-bottom: 1px solid var(--line); font-weight: 600; }
 .sig { font-weight: 600; }
 .sig-优 { color: var(--ok); }
 .sig-良 { color: #65a30d; }
