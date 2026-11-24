@@ -192,6 +192,7 @@ POST   /api/tasks/{id}/unpublish    # 撤回为草稿（停止自动下发）
 
 GET    /api/routes                POST   /api/routes
 GET    /api/routes/{id}           PUT    /api/routes/{id}      DELETE /api/routes/{id}
+                                  # 只删没人引用的模板：被巡检计划引用 → 400，提示先换绑
 POST   /api/routes/{id}/validate
 POST   /api/routes/{id}/publish
 POST   /api/routes/{id}/optimize

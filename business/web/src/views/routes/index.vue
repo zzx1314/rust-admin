@@ -1004,6 +1004,43 @@ async function createRoute() {
   ElMessage.success(`路线 ${created.routeCode} 已创建，请点击画布添加航点`);
 }
 
+/**
+ * 删除「没人引用」的路线模板。
+ *
+ * 被巡检计划引用的模板不许删（后端也会拦）：以前删掉会把那些计划的 `route_id`
+ * 置空，计划名字还在、点开却没有航点，等下发了才发现。要删先把计划换绑。
+ */
+async function deleteRoute(route: Route) {
+  if (route.usedTaskCount > 0) {
+    ElMessage.warning(
+      `「${route.routeName}」被 ${route.usedTaskCount} 个巡检计划引用，请先在计划里换绑路线再删除`
+    );
+    return;
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确定删除路线模板「${route.routeName}」吗？删除后不可恢复。`,
+      "删除路线模板",
+      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" }
+    );
+  } catch {
+    return; // 点了取消
+  }
+  const deletingCurrent = currentId.value === route.id;
+  // 等在防抖窗口里的自动保存先停掉：否则那次 PUT 会打到刚删掉的行上（404）
+  window.clearTimeout(autoSaveTimer);
+  autoSaveTimer = 0;
+  await routeApi.remove(route.id);
+  ElMessage.success(`路线模板「${route.routeName}」已删除`);
+  if (deletingCurrent) {
+    stopSimulation();
+    currentId.value = null;
+    draft.value = null;
+  }
+  // 重新拉列表：删的是当前路线时 load() 会自动选中第一条，一条都不剩就回到空状态
+  await load();
+}
+
 function openBaseDialog() {
   if (!draft.value) return;
   Object.assign(routeForm, {
@@ -1451,6 +1488,18 @@ onBeforeUnmount(() => {
               <div style="display: flex; align-items: center; gap: 6px; margin-top: 8px">
                 <StatusBadge :status="route.status" />
                 <span class="tag">{{ route.version }}</span>
+                <button
+                  class="rt-del"
+                  :class="{ blocked: route.usedTaskCount > 0 }"
+                  :title="
+                    route.usedTaskCount > 0
+                      ? `被 ${route.usedTaskCount} 个巡检计划引用，不能删除`
+                      : '删除路线模板'
+                  "
+                  @click.stop="deleteRoute(route)"
+                >
+                  <AppIcon name="trash" />
+                </button>
               </div>
               <div class="rt-meta">
                 <span><AppIcon name="waypoint" />{{ route.pointCount }} 点</span>

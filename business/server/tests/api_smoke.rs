@@ -358,6 +358,96 @@ async fn route_list_is_ordered_by_recent_update() {
     );
 }
 
+/// 路线模板只删「没人引用」的：被巡检计划引用的模板必须拒删。
+///
+/// 以前 `DELETE /routes/{id}` 会先把引用它的任务 `route_id` 置空再删模板，等于把
+/// 巡检计划静默改成「临时路径」——计划名字还在、点开没有航点，下发时才暴露。
+#[tokio::test]
+async fn only_unreferenced_route_templates_can_be_deleted() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    let map_id = insert_real_map(&pool).await;
+    let used_route = insert_dispatchable_route(&pool, &map_id).await;
+    let free_route = insert_route(
+        &pool,
+        "RT-FREE-1",
+        &map_id,
+        serde_json::json!({
+            "schemaVersion": 3,
+            "coordFrame": "map",
+            "loop": "往返",
+            "points": [],
+            "legs": [],
+            "returnLeg": null
+        }),
+    )
+    .await;
+    let device_pk = bound_device_pk(&pool).await;
+    let task_id: i64 = sqlx::query_scalar(
+        "INSERT INTO tasks (task_code, task_name, device_id, park_id, route_id, task_status,
+            progress, created_at, updated_at, created_by)
+         VALUES ('TK-ROUTE-DEL', '引用路线模板的计划', ?1, 1, ?2, '待执行', 0,
+            '2026-11-12 00:00:00', '2026-11-12 00:00:00', 1)
+         RETURNING id",
+    )
+    .bind(device_pk)
+    .bind(used_route)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let app = build_router(state);
+    let token = login(&app).await;
+
+    // 被引用 → 400，模板和计划的绑定都不能动
+    let response = app
+        .clone()
+        .oneshot(
+            Request::delete(format!("/api/routes/{used_route}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    let msg = body["msg"].as_str().unwrap_or_default();
+    assert!(msg.contains("巡检计划引用"), "提示应说明被计划引用: {msg}");
+    let still_there: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM routes WHERE id = ?1")
+        .bind(used_route)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(still_there, 1, "被引用的模板不能被删掉");
+    let bound: Option<i64> = sqlx::query_scalar("SELECT route_id FROM tasks WHERE id = ?1")
+        .bind(task_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(bound, Some(used_route), "拒删时不能把计划的路线置空");
+
+    // 没有引用的模板 → 正常删除
+    let response = app
+        .oneshot(
+            Request::delete(format!("/api/routes/{free_route}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["data"], true);
+    let gone: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM routes WHERE id = ?1")
+        .bind(free_route)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(gone, 0, "没有引用的模板应被删掉");
+}
+
 #[tokio::test]
 async fn synced_sources_drops_maps_deleted_in_zentai() {
     // 假中台：只认 dog_map.id = 1 仍存在（另一张已被软删除）

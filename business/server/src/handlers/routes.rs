@@ -198,10 +198,19 @@ pub async fn delete_route(
 ) -> Result<Json<ApiResponse<bool>>, AppError> {
     let route = fetch_route(&state, id).await?;
     super::parks::ensure_owner(&route, &claims)?;
-    sqlx::query("UPDATE tasks SET route_id = NULL WHERE route_id = ?1")
+    // 只删「没有人引用」的模板。以前这里会把引用它的计划 `route_id` 置空，相当于
+    // 静默把巡检计划改成「临时路径」——计划还叫原来那个名字、编辑器里打开却没有航点，
+    // 下发时才会发现。要删就先在计划里换绑（或删掉那些计划）。
+    let used: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE route_id = ?1")
         .bind(id)
-        .execute(&state.db)
+        .fetch_one(&state.db)
         .await?;
+    if used > 0 {
+        return Err(AppError::BadRequest(format!(
+            "路线模板「{}」被 {used} 个巡检计划引用，请先在这些计划里换绑路线或删除计划",
+            route.route_name
+        )));
+    }
     let result = sqlx::query("DELETE FROM routes WHERE id = ?1")
         .bind(id)
         .execute(&state.db)
