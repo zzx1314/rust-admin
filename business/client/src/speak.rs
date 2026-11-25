@@ -895,9 +895,13 @@ mod tests {
         let calls: Calls = Default::default();
         let agent = spawn_agent(calls.clone()).await;
 
-        let note = manual_call(&agent, " 请 避 让 ", false, 0).await.expect("呼叫失败");
+        let note = manual_call(&agent, " 请 避 让 ", false, 0)
+            .await
+            .expect("呼叫失败");
         assert_eq!(note, "已呼叫：请避让");
-        manual_call(&agent, "请 避让", true, 30).await.expect("呼叫失败");
+        manual_call(&agent, "请 避让", true, 30)
+            .await
+            .expect("呼叫失败");
 
         let calls = calls.lock().await.clone();
         let speaks: Vec<&Value> = calls.iter().filter(|call| call["path"] == "call").collect();

@@ -46,7 +46,9 @@ pub fn normalize_peer(peer: &str, port: u64) -> Result<(String, u16), String> {
                 && part.bytes().all(|byte| byte.is_ascii_digit())
                 && part.parse::<u16>().is_ok_and(|value| value <= 255)
         })
-        && parts.iter().any(|part| part.parse::<u16>().unwrap_or_default() > 0);
+        && parts
+            .iter()
+            .any(|part| part.parse::<u16>().unwrap_or_default() > 0);
     if !ipv4 {
         return Err(format!(
             "对端 IP 不合法（{text:?}）：只支持 IPv4 点分十进制（不能有空格/换行），例如 192.168.234.101"
@@ -130,7 +132,10 @@ mod tests {
                 "/api/phone",
                 post(
                     |State(calls): State<Calls>, Json(body): Json<Value>| async move {
-                        calls.lock().await.push(serde_json::json!({"path": "start", "body": body}));
+                        calls
+                            .lock()
+                            .await
+                            .push(serde_json::json!({"path": "start", "body": body}));
                         Json(serde_json::json!({"ok": true}))
                     },
                 ),
@@ -139,7 +144,10 @@ mod tests {
                 "/api/phone/stop",
                 post(
                     |State(calls): State<Calls>, Json(body): Json<Value>| async move {
-                        calls.lock().await.push(serde_json::json!({"path": "stop", "body": body}));
+                        calls
+                            .lock()
+                            .await
+                            .push(serde_json::json!({"path": "stop", "body": body}));
                         Json(serde_json::json!({"ok": true, "changed": true}))
                     },
                 ),
@@ -210,16 +218,15 @@ mod tests {
     /// 板端返回 ok=false（asr 没起 / FIFO 不可用）时要冒泡成错误，不能当成功
     #[tokio::test]
     async fn board_rejection_is_an_error() {
-        let app = Router::new()
-            .route(
-                "/api/phone",
-                post(|Json(_body): Json<Value>| async move {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"ok": false, "error": "asr 服务未启动"})),
-                    )
-                }),
-            );
+        let app = Router::new().route(
+            "/api/phone",
+            post(|Json(_body): Json<Value>| async move {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"ok": false, "error": "asr 服务未启动"})),
+                )
+            }),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {

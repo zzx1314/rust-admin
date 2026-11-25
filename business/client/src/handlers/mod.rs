@@ -4,6 +4,7 @@ use crate::agent_relay;
 use crate::ai_patrol::AiPatrol;
 use crate::ai_patrol::AiStart;
 use crate::lights::PointLights;
+use crate::phone_relay::PhoneRelay;
 use crate::photo::Photographer;
 use crate::record::Recorder;
 use crate::report::clear_teleop_blocked;
@@ -49,6 +50,7 @@ pub(crate) async fn handle_server_message(
     speaker: &Arc<Speaker>,
     photographer: &Arc<Photographer>,
     relay: &Arc<AgentRelay>,
+    phone_relay: &Arc<PhoneRelay>,
 ) {
     match msg.msg_type.as_str() {
         "register_ack" => {
@@ -71,6 +73,79 @@ pub(crate) async fn handle_server_message(
                     "设备注册失败: {}",
                     msg.payload["message"].as_str().unwrap_or("未知错误")
                 );
+            }
+        }
+
+        // ── 网页对讲（平台 ⇄ 浏览器音频，经本进程当「板端 UDP 对端」）──
+        // 平台在浏览器连上 `/api/devices/{id}/audio/ws` 时下发 start；浏览器关页 / 断网 /
+        // 被接管时下发 stop。音频帧双向都是 `phone_audio`（base64 的裸 PCM）。
+        "phone_stream" => {
+            let action = msg.payload["action"].as_str().unwrap_or("");
+            match action {
+                "start" if !config.ai_enabled => {
+                    // 总开关（`--no-ai`）= 不代调板端 Agent：说清楚为什么连不上，
+                    // 别让页面一直停在「等待板端接通」
+                    crate::wire::send(
+                        out_tx,
+                        "phone_stream",
+                        serde_json::json!({
+                            "state": "error",
+                            "error": "网页对讲已关闭（客户端 --no-ai / ROBODOG_AI_ENABLED=0）",
+                        }),
+                    )
+                    .await;
+                }
+                "start" => {
+                    // 重复 start（平台重连 / 页面刷新）不重建 socket，否则正在说话的那路会被掐断
+                    let already = phone_relay.active().await;
+                    match phone_relay.start().await {
+                        Ok(local_port) => {
+                            if already {
+                                info!("对讲：已在通话中（本机 UDP {local_port}），忽略重复 start");
+                            }
+                            crate::wire::send(
+                                out_tx,
+                                "phone_stream",
+                                serde_json::json!({
+                                    "state": "started",
+                                    "localPort": local_port,
+                                    "codec": "pcm16",
+                                    "rate": 16000,
+                                }),
+                            )
+                            .await;
+                        }
+                        Err(error) => {
+                            warn!("对讲：启动失败（{error}）");
+                            crate::wire::send(
+                                out_tx,
+                                "phone_stream",
+                                serde_json::json!({ "state": "error", "error": error }),
+                            )
+                            .await;
+                        }
+                    }
+                }
+                "stop" => {
+                    let reason = msg.payload["reason"]
+                        .as_str()
+                        .unwrap_or("平台挂断")
+                        .to_string();
+                    phone_relay.stop(&reason).await;
+                    crate::wire::send(
+                        out_tx,
+                        "phone_stream",
+                        serde_json::json!({ "state": "stopped", "reason": reason }),
+                    )
+                    .await;
+                }
+                other => warn!("对讲：未知动作 {other}"),
+            }
+        }
+        "phone_audio" => {
+            let data = msg.payload["data"].as_str().unwrap_or("");
+            if let Err(error) = phone_relay.push_uplink(data).await {
+                warn!("对讲：上行音频被丢弃（{error}）");
             }
         }
 

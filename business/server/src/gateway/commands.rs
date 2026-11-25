@@ -240,6 +240,28 @@ pub async fn is_device_connected(connections: &DeviceConnections, device_id: &st
     connections.read().await.contains_key(device_id)
 }
 
+/// 向指定设备发送任意类型的消息（音频帧 / 流控制）。
+///
+/// 与 [`send_command_to_device`] 的区别：这里不包 `remote_command` 外壳，
+/// `msg_type` 原样下发（对应客户端 `handlers::handle_server_message` 的分支）。
+/// 目前只给网页对讲用（`phone_stream` / `phone_audio`）。
+pub async fn send_to_device(
+    connections: &DeviceConnections,
+    device_id: &str,
+    msg_type: &str,
+    payload: Value,
+) -> bool {
+    let map = connections.read().await;
+    let Some(tx) = map.get(device_id) else {
+        return false;
+    };
+    tx.send(PendingCommand {
+        cmd_type: msg_type.to_string(),
+        payload,
+    })
+    .is_ok()
+}
+
 pub async fn send_command_to_device(
     connections: &DeviceConnections,
     device_id: &str,

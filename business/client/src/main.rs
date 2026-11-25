@@ -62,8 +62,9 @@ mod mapupload;
 mod media_sync;
 /// 联调用「假本体」：`--robot mock` 时在进程内起一个智航 Pro 网关模拟器
 mod mock_body;
-mod photo;
 mod phone;
+mod phone_relay;
+mod photo;
 mod pump;
 mod record;
 mod report;

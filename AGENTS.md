@@ -231,9 +231,17 @@ PC 的 IPv4 + 端口 → `POST /devices/{id}/phone` → 设备指令 `电话` �
 （16kHz/S16/20ms）**UDP 直发对端 PC**，所以 PC 必须与板子同网段并跑
 `pc_tools/voice_call_pc.py`（页面给下载链接与拼好的命令）；平台不中继音频。
 三条红线：**地址三层白名单**（IPv4 + 1~65535，板端那条命令进的是 shell `echo`）、
-**进电话模式先收播报**（FIFO 单通道）、**失败不影响任务**。改这块先读
-`business/docs/phone-intercom.md`，回归 `python3 business/backpack_dashboard/backend/tools/phone_selftest.py`、
-`client phone::tests`、`cargo test --test api_smoke phone_dispatch`。
+**进电话模式先收播报**（FIFO 单通道）、**失败不影响任务**。
+**公网浏览器还有一个「网页直连」模式（不用填 IP）**：浏览器 WS
+`/api/devices/{id}/audio/ws?token=…` → 平台 `phone_audio.rs` → 设备 WS → 客户端
+`phone_relay.rs` 当**本机 UDP 对端**（`phone 127.0.0.1:<port>`）→ 板端 5000；音频是
+裸 PCM16@16k/20ms（640B），浏览器侧两个 AudioWorklet 做 48k⇄16k 与抖动缓冲。
+**一次只允许一路**（第二个页面接管、先来的收到「已被接管」）、**平台不落库不混音**、
+收尾必发 `phone_stream stop`（否则板子停在 phone 模式）。带宽 256kbps/方向，4G 上与
+视频中继抢带宽；板端一行都不用改。改这块先读 `business/docs/phone-intercom.md`（§5），回归
+`python3 business/backpack_dashboard/backend/tools/phone_selftest.py`、
+`client phone::tests`、`client phone_relay::tests`、`cargo test --test api_smoke phone_dispatch`、
+`cargo test phone_audio::`。
 
 **航点采集默认是关的**：`media_capture_enabled`（迁移 34 预置 `0`）是自动采集的
 总开关，关着时板端只写 `detect_jobs/…` 告警证据图（企业微信配图、数量核对照旧），

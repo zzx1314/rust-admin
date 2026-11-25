@@ -10,6 +10,7 @@
 | 设备客户端 | `business/client/src/phone.rs` | 代调板端 `/api/phone`（与 Agent 同机），再过一遍地址白名单 |
 | 板端 Agent | `business/backpack_dashboard/backend/phone.py` | 校验 + 写聆思 FIFO `phone <对端IP> <端口>` / `phone stop` |
 | PC 端 | `business/backpack_dashboard/backend/pc_tools/voice_call_pc.py` | 声卡采集/播放 + 12 字节极简 RTP（板端 `:8000/api/lingsi/voice_call_pc.py` 可下载） |
+| 网页直连 | `business/web/src/composables/usePhoneCall.ts` + `business/server/src/phone_audio.rs` + `business/client/src/phone_relay.rs` | 浏览器 ⇄ 板端音频经设备 WS 中继（**不需要填 IP**，公网也能用） |
 
 ---
 
@@ -86,3 +87,57 @@ cd business/server && cargo test --test api_smoke phone_dispatch
 # 页面：类型 + 构建
 cd business/web && pnpm build
 ```
+
+## 5. 网页直连对讲（公网浏览器，不用填 IP）
+
+上面那套「PC 脚本」要求对端在板子同网段。**公网浏览器**怎么办：让设备客户端
+（与板端同机，`127.0.0.1` 一定通）当那个「UDP 对端」，音频借已有的设备 WS 中继。
+
+```text
+浏览器 ──WS /api/devices/{id}/audio/ws?token=…──▶ 平台(phone_audio.rs) ──设备 WS──▶ 客户端
+       ◀──────── 二进制 PCM16@16k / 20ms（640B） ─────────────────────────────
+                                                       客户端 ──UDP 127.0.0.1:5000──▶ 板端
+```
+
+1. 浏览器连上 WS → 平台给客户端下发 `phone_stream {action:"start"}`；
+2. 客户端 `bind 127.0.0.1:0` 拿到端口，调板端 `/api/phone {peer:"127.0.0.1", peerPort}`，
+   板子从此以为在跟一台本机 PC 通话（**板端一行代码都不用改**）；
+3. 板端 UDP 帧（12B 头 + 640B PCM）→ 客户端剥头 → `phone_audio{base64}` → 平台 →
+   二进制帧给浏览器 → AudioWorklet 抖动缓冲 + 16k→48k 播放；
+4. 浏览器麦克风 48k → AudioWorklet 降到 16k → 二进制帧 → 平台 → 客户端补 12B 头 →
+   UDP 板端 5000；
+5. 挂断 / 关页面 / 换任务 / 断网 → 平台下发 `phone_stream {action:"stop"}` → 客户端
+   `phone stop` + 收 socket。
+
+要点：
+
+- **一次只允许一路**：板端 FIFO / UDP 都是单通道。同一设备第二个浏览器会话会接管，
+  先来的那条收到「另一个页面接管了这次通话」并挂断（`PhoneAudioHub::attach`）。
+- **只搬字节，不落库不混音**：平台不留任何通话内容；两端都不做编码（裸 PCM）。
+- **带宽**：16k × 16bit = 256kbps/方向。板端上行是 4G 上最贵的那一段，和视频中继抢
+  带宽；长时间通话建议先把实时视频停掉。要省带宽先加 Opus/μ-law 编码（协议里已有
+  `codec` 字段，别偷偷改字节语义）。
+- **建议戴耳机**：浏览器 AEC 只能压掉一部分回授，外放 + 大音量会啸叫。
+- **收尾是硬要求**：`onDetailClosed` / 切任务 / `onBeforeUnmount` 都会 `stop()`；
+  客户端侧 `recv_loop` 在平台连接断开时也会自己 `phone stop`（板子不会停在 phone 模式）。
+- 与「现场 PC」模式**互斥**：两种方式都是同一路 FIFO/UDP，谁后到谁生效。
+- 排查：页面状态一直「等待板端接通」→ 客户端日志 `journalctl -u robodog-device-client |
+  grep 对讲`（应有「本机 UDP 对端 127.0.0.1:x」）；「通话中（没有音频到达）」→ 板端
+  `journalctl -u backpack-agent | grep '\[phone\]'`，看 asr 是否真的在跑。
+
+## 6. 回归（网页直连）
+
+```bash
+# 平台：会话表 / 一次一路 / 坏 base64 不炸
+cd business/server && cargo test phone_audio::
+
+# 客户端：RTP 头形态与 20ms 帧长、未通话时上行要报错
+cd business/client && cargo test phone_relay::
+
+# 页面：类型 + 构建
+cd business/web && pnpm build
+```
+
+真机验证（会短暂让板端进 phone 模式，但无人出声）：用 `websocket-client` 连
+`/api/devices/{id}/audio/ws?token=…`，应收到 `{"type":"phone_state","state":"started"}`，
+关掉连接后板端 `/api/phone/status` 的 `active` 回到 false。

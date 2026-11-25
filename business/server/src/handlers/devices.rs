@@ -4,7 +4,8 @@ use crate::db::now;
 use crate::error::{ApiResponse, AppError};
 use crate::gateway;
 use crate::models::{
-    BindParkRequest, CommandRequest, Device, DeviceQuery, DeviceRequest, LocateRequest, PhoneRequest,
+    BindParkRequest, CommandRequest, Device, DeviceQuery, DeviceRequest, LocateRequest,
+    PhoneRequest,
 };
 use crate::zentai;
 use axum::Json;
@@ -593,7 +594,9 @@ pub(crate) fn validate_peer_ip(peer: &str) -> Result<String, AppError> {
                 && part.bytes().all(|byte| byte.is_ascii_digit())
                 && part.parse::<u16>().is_ok_and(|value| value <= 255)
         })
-        && parts.iter().any(|part| part.parse::<u16>().unwrap_or_default() > 0);
+        && parts
+            .iter()
+            .any(|part| part.parse::<u16>().unwrap_or_default() > 0);
     if !ok {
         return Err(AppError::BadRequest(format!(
             "对端 IP 不合法（{text:?}）：只支持 IPv4 点分十进制（不能有空格/换行），例如 192.168.234.101"
@@ -661,14 +664,7 @@ pub async fn phone_stop(
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     let device = fetch_device(&state, id).await?;
     auth::ensure_device_access(&state, &claims, &device.device_id).await?;
-    let result = push_command(
-        &state,
-        &device,
-        "挂断电话",
-        None,
-        Some(&claims.username),
-    )
-    .await?;
+    let result = push_command(&state, &device, "挂断电话", None, Some(&claims.username)).await?;
     ensure_ws_delivered(&result, &device.device_id, "挂断")?;
     Ok(ApiResponse::ok(result))
 }
@@ -949,7 +945,7 @@ async fn sync_device_to_zentai(state: &AppState, device: &Device, claims: &Claim
     zentai::try_upsert_device(&state.config, &payload).await;
 }
 
-async fn fetch_device(state: &AppState, id: i64) -> Result<Device, AppError> {
+pub(crate) async fn fetch_device(state: &AppState, id: i64) -> Result<Device, AppError> {
     let sql = format!("{DEVICE_SELECT} WHERE d.id = ?1");
     sqlx::query_as::<_, Device>(&sql)
         .bind(id)

@@ -306,8 +306,9 @@ mod tests {
     #[test]
     fn whitelists_match_the_server_side_tunnel() {
         // 两端白名单必须一致：服务端放行、客户端拒绝会出现「请求发出去了却回不来」
-        assert_eq!(GET_PATHS.len(), 4);
+        assert_eq!(GET_PATHS.len(), 5);
         assert!(GET_PATHS.contains(&"/api/detect/tasks"));
+        assert!(GET_PATHS.contains(&"/api/phone/status"));
         assert!(!GET_PATHS.contains(&"/api/control/led"));
         assert_eq!(ACTIONS, ["start", "stop", "config"]);
         assert!(FORWARDED_EVENTS.contains(&"detect"));

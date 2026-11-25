@@ -847,14 +847,9 @@ pub async fn stop_call_task(
     let task = fetch_task(&state, id).await?;
     super::parks::ensure_owner(&task, &claims)?;
     let device = call_device(&state, &task).await?;
-    let result = super::devices::push_command(
-        &state,
-        &device,
-        "停止呼叫",
-        None,
-        Some(&claims.username),
-    )
-    .await?;
+    let result =
+        super::devices::push_command(&state, &device, "停止呼叫", None, Some(&claims.username))
+            .await?;
     super::devices::ensure_ws_delivered(&result, &device.device_id, "停止呼叫")?;
     Ok(ApiResponse::ok(result))
 }

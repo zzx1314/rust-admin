@@ -15,12 +15,12 @@ use crate::photo::Photographer;
 use crate::record::Recorder;
 use crate::report::ProgressReporter;
 use crate::report::progress_pct;
+use crate::signal::SignalProbe;
 use crate::speak::Speaker;
 use crate::state::ActiveTask;
 use crate::state::RobotState;
 use crate::state::Shared;
 use crate::state::clear_active_task;
-use crate::signal::SignalProbe;
 use crate::wire::DeviceEventPayload;
 use crate::wire::TaskProgressPayload;
 use crate::wire::WsMessage;
@@ -248,6 +248,21 @@ pub(crate) async fn run_client(
         info!("航点 / 航段语音播报已关闭（--no-speak / ROBODOG_SPEAK_ENABLED=0）");
     }
 
+    // 网页对讲中继：平台把浏览器的音频丢上来，这里转成板端 UDP（见 `phone_relay`）。
+    // 与 AI / 播报共用 `[ai] agent_url`；总开关也跟 `--no-ai` 走（都靠板端 Agent）。
+    let phone_relay = Arc::new(crate::phone_relay::PhoneRelay::new(
+        config.ai_agent_url.clone(),
+        out_tx.clone(),
+    ));
+    if config.ai_enabled {
+        info!(
+            "网页对讲已启用：板端 Agent = {}（浏览器 ⇄ 板端音频经本进程当 UDP 对端）",
+            phone_relay.agent()
+        );
+    } else {
+        info!("网页对讲已关闭（--no-ai / ROBODOG_AI_ENABLED=0）");
+    }
+
     // 板端联网信号：客户端与 Agent 同机，信号强弱只有板子自己知道（本体 1315 没有
     // rssi）。板端 `/api/network` 已把「WiFi 优先、没连 WiFi 退 4G CSQ」统一好，
     // 这里起一个 30s 轮询，随心跳 `signal` / `signalSource` 上报，业务平台「设备管理」展示。
@@ -384,6 +399,7 @@ pub(crate) async fn run_client(
                             &speaker,
                             &photographer,
                             &relay,
+                            &phone_relay,
                         ).await;
                     }
                     Some(Ok(Message::Ping(data))) => {

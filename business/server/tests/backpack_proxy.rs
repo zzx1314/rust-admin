@@ -111,6 +111,7 @@ async fn state_with_browser(
         command_results: gateway::new_command_result_waiters(),
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
+        phone_audio: Default::default(),
         ai_patrol: Default::default(),
         caches: Default::default(),
     }

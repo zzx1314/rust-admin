@@ -9,6 +9,7 @@ use crate::handlers::{
     service, settings, tasks, teleop, workorders, zones,
 };
 use crate::notify::Notifier;
+use crate::phone_audio;
 use crate::video::{self, VideoHub};
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::HeaderValue;
@@ -49,6 +50,8 @@ pub struct AppState {
     pub notifier: Notifier,
     /// 板端 Agent 隧道（平台与背包/浏览器都不同网段时，`/api/backpack/*` 走设备客户端）
     pub agent_tunnel: Arc<crate::agent_tunnel::AgentTunnel>,
+    /// 网页对讲中继（浏览器 ⇄ 板端音频，经设备客户端；见 `phone_audio.rs`）
+    pub phone_audio: Arc<crate::phone_audio::PhoneAudioHub>,
     /// 航点 AI 识别窗口状态（一份实例 = 一路推理，板端只有一个推理进程）
     ///
     /// 以前是 `ai_patrol` 模块里的进程级 `static`：所有测试共用同一个窗口、
@@ -200,6 +203,8 @@ pub fn build_router(state: AppState) -> Router {
             get(devices::phone_status).post(devices::phone_start),
         )
         .route("/devices/{id}/phone/stop", post(devices::phone_stop))
+        // 网页对讲：浏览器 WS（音频经设备客户端中继，公网浏览器也能直连板子）
+        .route("/devices/{id}/audio/ws", get(phone_audio::browser_ws))
         .route("/devices/{id}/teleop", post(teleop::send_teleop))
         .route("/devices/{id}/teleop/take", post(teleop::take_over))
         .route("/devices/{id}/teleop/release", post(teleop::release))

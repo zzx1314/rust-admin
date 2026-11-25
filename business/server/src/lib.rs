@@ -30,6 +30,7 @@ pub mod ingest;
 pub mod mapdir;
 pub mod models;
 pub mod notify;
+pub mod phone_audio;
 pub mod photos;
 pub mod recordings;
 pub mod schedule;

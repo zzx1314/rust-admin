@@ -56,6 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         video_hub: Default::default(),
         notifier,
         agent_tunnel: Default::default(),
+        phone_audio: Default::default(),
         ai_patrol: Default::default(),
         caches: Default::default(),
     };

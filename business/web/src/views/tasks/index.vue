@@ -43,6 +43,7 @@ import {
 import { parseRouteData } from "@/utils/format";
 import { apiBaseUrl } from "@/utils/runtime";
 import { normalizeSpeakText } from "@/utils/speak";
+import { usePhoneCall } from "@/composables/usePhoneCall";
 
 const router = useRouter();
 const tasks = ref<Task[]>([]);
@@ -533,6 +534,7 @@ async function openDetail(task: Task) {
   // 换任务就重查通话态（别把上一条任务的「通话中」带过来）
   phoneStatus.value = null;
   phoneStatusAt = 0;
+  void stopWebPhone("切换任务");
   revokeAllPhotoUrls();
   detailVisible.value = true;
   await refreshDetail(task.id);
@@ -631,6 +633,35 @@ async function stopCall() {
 // 本页 → `POST /devices/{id}/phone` → 设备指令 `电话` → 客户端 → 板端 `/api/phone`
 // → FIFO 的 `phone <对端IP> <端口>`；PC 端要跑 `pc_tools/voice_call_pc.py`。
 // 通话态经设备客户端隧道读板端 `/api/phone/status`（`GET /devices/{id}/phone`）。
+
+/**
+ * 网页直连对讲：音频经设备客户端中继（浏览器发不了裸 UDP），不需要填 IP。
+ * 与下面的「现场 PC」模式互斥 —— 板端 FIFO / UDP 都只有一路。
+ */
+const {
+  active: webPhoneActive,
+  connecting: webPhoneConnecting,
+  muted: webPhoneMuted,
+  status: webPhoneStatus,
+  error: webPhoneError,
+  stats: webPhoneStats,
+  start: startWebPhone,
+  stop: stopWebPhone,
+  setMuted: setWebPhoneMuted
+} = usePhoneCall();
+
+async function toggleWebPhone() {
+  const device = deviceOf(detailTask.value);
+  if (!device) {
+    ElMessage.warning("任务未绑定执行设备，无法通话");
+    return;
+  }
+  if (webPhoneActive.value || webPhoneConnecting.value) {
+    await stopWebPhone("挂断");
+    return;
+  }
+  await startWebPhone({ deviceId: device.id });
+}
 
 /** 通话态；`null` = 还没查过 */
 const phoneStatus = ref<DevicePhoneStatus | null>(null);
@@ -824,6 +855,15 @@ function revokePhotoUrl(id: number) {
     URL.revokeObjectURL(url);
     photoUrls.delete(id);
   }
+}
+
+/**
+ * 关详情：先收掉网页对讲（板端 FIFO 单通道，不收会让狗一直停在 phone 模式），
+ * 再释放照片的 objectURL。
+ */
+function onDetailClosed() {
+  void stopWebPhone("关闭详情");
+  revokeAllPhotoUrls();
 }
 
 /** 关详情 / 换任务：所有 objectURL 一起释放（一次巡检几十张，不释放会一直占内存） */
@@ -1653,7 +1693,7 @@ onBeforeUnmount(() => {
       width="min(1080px, 94vw)"
       top="5vh"
       destroy-on-close
-      @closed="revokeAllPhotoUrls"
+      @closed="onDetailClosed"
     >
       <template v-if="detailTask">
         <div class="live-hint" style="margin-bottom: 10px">
@@ -1751,8 +1791,47 @@ onBeforeUnmount(() => {
           板端看门狗最多 600 秒兜底。
         </div>
 
-        <div class="call-row" style="margin-top: 10px">
+        <div class="call-row" style="margin-top: 10px; align-items: center">
           <span class="muted" style="font-size: 11.5px">电话（对讲）</span>
+          <button
+            class="btn sm"
+            :disabled="webPhoneConnecting || phoneBusy"
+            @click="toggleWebPhone"
+          >
+            <AppIcon :name="webPhoneActive ? 'close' : 'sound'" />
+            {{ webPhoneActive || webPhoneConnecting ? "挂断" : "网页直连通话" }}
+          </button>
+          <label
+            v-if="webPhoneActive"
+            class="muted"
+            style="font-size: 11.5px; display: inline-flex; align-items: center; gap: 4px"
+          >
+            <input
+              type="checkbox"
+              :checked="webPhoneMuted"
+              @change="setWebPhoneMuted(($event.target as HTMLInputElement).checked)"
+            />静音
+          </label>
+          <span
+            class="mono muted"
+            style="font-size: 11.5px"
+            :style="{ color: webPhoneActive ? '#15803d' : undefined }"
+          >
+            {{ webPhoneStatus }}
+            <template v-if="webPhoneActive">
+              · 收 {{ webPhoneStats.rx }} / 发 {{ webPhoneStats.tx }}
+            </template>
+          </span>
+        </div>
+        <div class="muted" style="font-size: 11px; margin-top: 4px; line-height: 1.6">
+          <strong>网页直连</strong>不需要填 IP：音频经设备客户端中继（板端 UDP → 客户端 →
+          平台 → 浏览器），公网也能用；占用约 256kbps 上行。<strong>建议戴耳机</strong>
+          （外放会啸叫），并避开正在跑视频中继的时候不要长时间占用。
+          <span v-if="webPhoneError" style="color: #b91c1c">· {{ webPhoneError }}</span>
+        </div>
+
+        <div class="call-row" style="margin-top: 10px">
+          <span class="muted" style="font-size: 11.5px">电话（现场 PC）</span>
           <input
             v-model="phonePeer"
             class="input"

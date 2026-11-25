@@ -103,6 +103,7 @@ async fn test_state_with_token(service_token: Option<&str>) -> (AppState, TempDb
         command_results: gateway::new_command_result_waiters(),
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
+        phone_audio: Default::default(),
         ai_patrol: Default::default(),
         caches: Default::default(),
     };
@@ -1804,7 +1805,10 @@ async fn phone_dispatch_validates_peer_and_reaches_the_device() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = json_body(response).await;
-    assert_eq!(body["data"]["reachable"], false, "未登记隧道应报不可达：{body}");
+    assert_eq!(
+        body["data"]["reachable"], false,
+        "未登记隧道应报不可达：{body}"
+    );
     assert_eq!(body["data"]["active"], false);
 }
 
@@ -2087,6 +2091,7 @@ mod control_plane_channel {
             video_hub: state.video_hub,
             notifier: robodog_ops_server::notify::Notifier::disabled(),
             agent_tunnel: Default::default(),
+            phone_audio: Default::default(),
             ai_patrol: Default::default(),
             caches: Default::default(),
         };
@@ -4146,6 +4151,7 @@ async fn ingest_refresh_overwrites_existing_map_only_when_content_changes() {
         command_results: state.command_results,
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
+        phone_audio: Default::default(),
         ai_patrol: Default::default(),
         caches: Default::default(),
     };

@@ -142,6 +142,7 @@ async fn test_state_with_wecom(
         command_results: gateway::new_command_result_waiters(),
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
+        phone_audio: Default::default(),
         ai_patrol: Default::default(),
         caches: Default::default(),
     };
@@ -195,6 +196,7 @@ async fn state_with_live_wecom(point_ai: &str, webhook: String) -> (AppState, Te
         command_results: gateway::new_command_result_waiters(),
         video_hub: Default::default(),
         agent_tunnel: Default::default(),
+        phone_audio: Default::default(),
         ai_patrol: Default::default(),
         caches: Default::default(),
     };

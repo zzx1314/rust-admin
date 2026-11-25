@@ -339,6 +339,23 @@ async fn route_message(
                 on_device_event(ctx, device, message.payload).await;
             }
         }
+        // ── 网页对讲（`phone_audio.rs`）──────────────────────
+        // 客户端把板端 UDP 的 PCM 转成 base64 传上来，平台只做转发（不落库、
+        // 不混音）；状态（started / error / stopped）一并转给正在通话的浏览器。
+        "phone_audio" => {
+            if let Some(device) = registered(device_id.as_deref(), "phone_audio") {
+                ctx.state
+                    .phone_audio
+                    .publish_audio(device, &message.payload);
+            }
+        }
+        "phone_stream" => {
+            if let Some(device) = registered(device_id.as_deref(), "phone_stream") {
+                ctx.state
+                    .phone_audio
+                    .publish_state(device, &message.payload);
+            }
+        }
         // 响应服务端 ping，不做处理
         "pong" => {}
         "teleop_state" => {
