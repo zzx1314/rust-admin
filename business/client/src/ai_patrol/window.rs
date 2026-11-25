@@ -3,14 +3,34 @@
 use super::*;
 
 impl AiPatrol {
-    /// 窗口主流程：启停 Agent → 收 SSE → 逐类别上报 → 收尾
+    /// 窗口主流程：到点先让板端**预热** → 等本体停稳 → 登记计划 + 收 SSE → 收尾。
+    ///
+    /// 为什么拆两段（2026-11-25 现场）：5009 的 `patrol.point_arrived` 只是位置到了，
+    /// 本体还要原地转到 `heading` 才进 `patrol.waiting`（实测 2~3s）。那几秒画面在转：
+    ///
+    /// - 提前开窗的好处是能把板端起模型（~1s）+ 抓帧/画框 OSD（~2s）与转身**重叠**，
+    ///   停稳就能出框；
+    /// - 但转身帧不能进结论（无效帧 + 转动扫过的瞬时命中会被算成数量结论）。
+    ///
+    /// 所以第一段不带计划（`plan_id` 不传：板端不计数量、不写存证），停稳后再用
+    /// `/api/detect/config` 把计划热更新下去，才开始读 SSE。老本体不报 `waiting` 时
+    /// 由 [`WAITING_GRACE`] 兜底（退回“到点就开始算”）。
     pub(crate) async fn run_window(
         self: Arc<Self>,
         out_tx: mpsc::Sender<WsMessage>,
         start: AiStart,
         cancel: Arc<Notify>,
     ) {
-        let body = json!({
+        // 第一段：识别参数（场景 / 类别 / 阈值 / 相机 / 帧率），**不带计划**
+        let preheat = json!({
+            "task": start.task,
+            "labels": if start.labels.is_empty() { Value::Null } else { json!(start.labels) },
+            "conf": start.conf,
+            "cams": [start.cam],
+            "fps": start.fps,
+        });
+        // 第二段：停稳后补下去的计划参数（存证目录 / 数量核对 / 自动采集开关）
+        let plan = json!({
             "task": start.task,
             "labels": if start.labels.is_empty() { Value::Null } else { json!(start.labels) },
             "conf": start.conf,
@@ -34,11 +54,9 @@ impl AiPatrol {
         } else {
             "/api/detect/start"
         };
-        // 证据图的「新鲜度」基准就是本轮窗口开始（板端写完图再发 SSE，留余量）
-        let since = SystemTime::now() - EVIDENCE_MTIME_SLACK;
-        match self.post_json(path, &body).await {
+        match self.post_json(path, &preheat).await {
             Ok(_) => info!(
-                "航点 AI 识别开始：场景={} 类别={} 阈值={:.2} 相机={} 窗口={}s",
+                "航点 AI 识别预热：场景={} 类别={} 阈值={:.2} 相机={} 窗口={}s（等本体停稳再计数）",
                 start.task,
                 if start.labels.is_empty() {
                     "全部".to_string()
@@ -62,12 +80,30 @@ impl AiPatrol {
                     0,
                     false,
                     Leftover::default(),
-                    since,
+                    SystemTime::now() - EVIDENCE_MTIME_SLACK,
                 )
                 .await;
                 return;
             }
         }
+
+        // 等本体真正停稳（本体转完身）：这之前画面在转，不读 SSE、不计数量。
+        // 等不到（老本体不报 `waiting`）就按老行为继续，不能把识别整条弄丢。
+        if !self.wait_settled(&start.task_code, start.point_index).await {
+            debug!(
+                "航点 AI 识别：任务 {} 航点 {} 没等到停稳事件（{}s），按老行为开始计数",
+                start.task_code,
+                start.point_index,
+                self.settle_grace.as_secs()
+            );
+        }
+        // 计划登记（存证 / 数量核对）从**停稳这一刻**开始算：转身期的命中不进结论
+        if let Err(error) = self.post_json("/api/detect/config", &plan).await {
+            warn!("航点 AI 识别：停稳后登记航点计划失败（存证 / 数量核对可能缺失）: {error}");
+        }
+        // 证据图的「新鲜度」基准同是整个窗口开始（板端写完图再发 SSE，留余量）；
+        // 停稳之后才开始收事件，所以用此刻而不是预热那一刻。
+        let since = SystemTime::now() - EVIDENCE_MTIME_SLACK;
 
         let (hits, stopped_early, leftover) = self.consume(&out_tx, &start, &cancel, since).await;
         let reason = if stopped_early {

@@ -296,6 +296,28 @@ B. client（正式环境：平台在公网、Agent 只在内网，服务端连�
 > 设备客户端本来就跑在同一块板子上（`.246`，见 `deploy/README.md`），由它代调即可。
 > `auto` 会按「有没有配 `ROBODOG_BACKPACK_URL`」自动选，配错也不会两条链路各写一条告警。
 
+**B 的窗口分两段：到点预热 + 停稳才开始计数**（2026-11-25 现场排查）：
+5009 的 `patrol.point_arrived` 只表示位置到了，本体随后还要原地转到路线里配的
+`heading` 才进 `patrol.waiting`，实测这段恒定 **2~3 s**（`TK-1125-19` 15:31 那次：
+15:31:40.39 到点 → 15:31:43.36 才 `waiting`；当天每个航点都一样）。那几秒画面在转：
+推理出来基本是无效帧，**转动扫过的瞬时命中还会被算进数量结论**。所以：
+
+1. 到点照旧立刻开窗，但 `/api/detect/start` **不带计划**——只把模型 / 抓帧 / 画框 OSD
+   预热起来，正好和本体转身重叠（这段本来就要 1 s + 2 s）；
+2. 收到停稳信号（`mark_settled`：`patrol.waiting`；兜底是阶段越过到点
+   `photographing` / `point_completed`、或 `WAITING_GRACE`=5 s）后，才用
+   `/api/detect/config` 带 `planId` / 数量核对 / 存储证登记计划，**并开始读 SSE**。
+
+也就是说既拿到「停稳就能出框」，又保证转身期的帧不进结论。老本体不报 `waiting` 时
+兜底 5 s 后按老行为继续（`client/src/ai_patrol/window.rs::run_window`、
+`mod.rs::mark_settled` / `wait_settled`）。
+
+> 顺带记下同一链路的固有延迟（不作为 bug，别再重复查）：`ai_point` 上报 → 平台回
+> `ai_start` 约 **0.24 s**（4G 上行）；板端 `POST /api/detect/start` 要等 RKNN serve 打印
+> `READY`（模型加载）约 **1 s**；起来到第一帧推理还要 **2 s 上下**（抓帧 ffmpeg + 板端
+> 画框 OSD 流水线各起一遍）。所以「到点 → 群里/浏览器出现框」本身就是 3~4 s，
+> 与识别窗口是否提前无关。
+
 **「哪个航点」只认 `waypointIndex`，不要用 `pointIndex`**（2026-11-17 现场事故）：
 
 | 字段 | 语义 | 谁填 |

@@ -121,7 +121,14 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 航点 AI 识别的「谁去调板端 Agent」由 `ROBODOG_POINT_AI`（`[backpack] point_ai`，默认
 `auto`）决定：配了 `ROBODOG_BACKPACK_URL` 就服务端直连，否则由现场设备客户端代调
 （客户端与背包 Agent 同在 `.246`，走 `127.0.0.1:8000`；消息为 `ai_point` / `ai_start` /
-`ai_detect` / `ai_alert`（数量核对不一致）/ `ai_count`（数量核对一致回执，见下）/ `ai_end` / `ai_stop`）。航点动作的 `checkType`
+`ai_detect` / `ai_alert`（数量核对不一致）/ `ai_count`（数量核对一致回执，见下）/ `ai_end` / `ai_stop`）。
+**客户端代调时窗口分两段（2026-11-25 起）**：`patrol.point_arrived` 只是位置到了，本体
+还要原地转 ~3s 才 `patrol.waiting`，那几秒画面在转（无效帧 + 转动扫过的命中会污染数量
+结论）。所以 `AiPatrol::run_window` 先在到点就 `/api/detect/start` **预热**（RKNN 模型 /
+抓帧 / 画框 OSD 与转身重叠，不占额外时间，**不带 `plan_id`**），收到 `mark_settled`
+（`waiting`，兜底是「阶段越过到点」与 `WAITING_GRACE`=5s）后再 `/api/detect/config`
+带计划、才开始读 SSE 计数。别把计划挪回预热那一步，也别把预热带去掉（去掉就慢 3s）。
+航点动作的 `checkType`
 分两类任务：`exist` 检测是否存在 / `count` 检测数量是否正确（后者带 `expectCount`，
 不一致含「一个都没找到」都告警，且要「看满了」——客户端 `ai_end.expired`，或狗在这个点
 停满 `dwell` 之后离开（平台先收到「已离开航点」关窗也算，窗口时长是 `dwell+8`，只认 `expired`

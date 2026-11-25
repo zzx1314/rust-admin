@@ -78,6 +78,24 @@ const STALE_PLAN_AGE: Duration = Duration::from_secs(3 * 24 * 3600);
 const ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 /// SSE 单条缓冲上限：Agent 事件每条几十字节，超过说明流里没有 `\n\n`，丢弃重来
 const SSE_BUF_LIMIT: usize = 64 * 1024;
+/// 到点后最多等这么久「真正停稳」（5009 `patrol.waiting`）。
+///
+/// 5009 的 `patrol.point_arrived` 只是「位置到了」：本体随后还要原地转到路线里配的
+/// `heading` 才进 `patrol.waiting`（= 真正开始停留）。现场实测这段恒定 **2~3 s**
+/// （2026-11-25 15:31 广汇二期 `gh-test2` / `TK-1125-19`：15:31:40.39 到点 →
+/// 15:31:43.36 才 `waiting`，当天每个航点都一样），那几秒画面在转：推理出来基本是
+/// 无效帧，还会误检（数量任务更麻烦：转动扫过的瞬时命中会被算进结论）。
+///
+/// 所以窗口分两步（见 `run_window`）：
+///
+/// 1. 到点就来——板端先**预热**（RKNN 模型 / 抓帧 / 画框 OSD 都在这 3s 里起来，
+///    不占额外时间），但不登记航点计划；
+/// 2. **停稳后才开始算**：此时才把计划（`plan_id` / 数量核对 / 存证）热更新给板端、
+///    才开始读 SSE —— 转身那几秒的帧不进结论。
+///
+/// 老本体 / 某些场景不报 `waiting` 时由这个 grace 兜底（退回“到点就开始算”），
+/// 另有一条更早的放行：本体阶段越过到点（`photographing` / `point_completed`）。
+const WAITING_GRACE: Duration = Duration::from_secs(5);
 
 /// 路线里一个航点的「AI 识别」动作（来自 `task_dispatch.routeData.points[]`）
 #[derive(Debug, Clone, PartialEq)]
@@ -375,6 +393,12 @@ struct Window {
 /// 待清理的板端存证目标：（计划 id, 航点下标）
 type CleanupTarget = (String, i64);
 
+/// 「本体在这个点上已经停稳了」（5009 `patrol.waiting` / 过了到点阶段）。
+///
+/// 窗口在**到点**就开了（板端提前预热，见 [`WAITING_GRACE`]），但**计数/上报要等停稳**：
+/// 存成（任务, 航点）是为了只认当前这个点（上一个点的标记不能用）。
+type SettledPoint = (String, i64);
+
 /// 航点 AI 识别运行态
 pub struct AiPatrol {
     /// 板端 Agent 基地址（默认 `http://127.0.0.1:8000`）
@@ -387,6 +411,13 @@ pub struct AiPatrol {
     /// 已经为哪个 (任务, 航点) 发过 `ai_point`：5009 每 500ms 一帧，
     /// 没有这个去重就会把同一个点请求几十次。窗口建立或换点/结束时清掉。
     requested: Mutex<Option<(String, i64)>>,
+    /// 本体已经在这个点停稳过（`patrol.waiting` / 阶段越过到点）：
+    ///
+    /// 窗口在到点就开了（板端提前预热），但计数/上报要等停稳 —— 见
+    /// [`WAITING_GRACE`] 与 [`AiPatrol::wait_settled`]。
+    settled: Mutex<Option<SettledPoint>>,
+    /// 等停稳的兜底时长（生产是 [`WAITING_GRACE`]，测试里调小）
+    settle_grace: Duration,
     /// 板端存证根目录（`detect_jobs`）：检出告警要的证据图从这里读。
     ///
     /// 三类来源，优先级从高到低：显式配置（`[ai] jobs_dir` / `ROBODOG_AI_JOBS_DIR`）→
@@ -449,6 +480,14 @@ impl AiPatrol {
                 .unwrap_or_else(|_| reqwest::Client::new()),
             window: Mutex::new(None),
             requested: Mutex::new(None),
+            settled: Mutex::new(None),
+            // 单测里「等停稳」不拖时间（每窗 5s 会把测试拖成分钟级）：要验这个行为的
+            // 用例自己 `set_settle_grace`；生产走 `WAITING_GRACE`（实测转身 2~3s，留 5s 余量）。
+            settle_grace: if cfg!(test) {
+                Duration::ZERO
+            } else {
+                WAITING_GRACE
+            },
             jobs_dir_pinned: jobs_dir.is_some(),
             jobs_dir: Mutex::new(jobs_dir),
             pending_cleanup: Mutex::new(Vec::new()),
@@ -464,6 +503,58 @@ impl AiPatrol {
     #[cfg(test)]
     async fn status_active(&self) -> bool {
         self.window.lock().await.is_some()
+    }
+
+    /// 调小「等停稳」的兜底时长（只给测试：真机上是 [`WAITING_GRACE`]）
+    #[cfg(test)]
+    pub(crate) fn set_settle_grace(&mut self, grace: Duration) {
+        self.settle_grace = grace;
+    }
+
+    /// 5009 报「本体已经在这个点上停稳」（`patrol.waiting`，或阶段已越过到点）。
+    ///
+    /// 窗口在到点就开了（板端借此提前预热模型/抓帧/画框），但**计数与上报要等这里**：
+    /// `patrol.point_arrived` 之后本体还要原地转到路线里配的 `heading`，实测 2~3s，
+    /// 那几秒画面在转 —— 转身期的帧既没信息量又容易误检（见 [`WAITING_GRACE`]）。
+    ///
+    /// 只记「哪个点」：`run_window` 拿它对上自己这一窗才放行，上一个点的标记不会串。
+    pub async fn mark_settled(&self, task_code: &str, point_index: i64) {
+        if !self.enabled {
+            return;
+        }
+        let mut guard = self.settled.lock().await;
+        // `patrol.waiting` 在整个停留期间持续上报（500ms 一帧）：重复写同一个值没有意义
+        if guard
+            .as_ref()
+            .is_some_and(|(code, index)| code == task_code && *index == point_index)
+        {
+            return;
+        }
+        debug!("航点 AI 识别：任务 {task_code} 航点 {point_index} 已停稳，开始计数/上报");
+        *guard = Some((task_code.to_string(), point_index));
+    }
+
+    /// 等本体停稳（最多 `settle_grace`）。返回是否真的等到了。
+    ///
+    /// 100ms 一次查标记，不用 `Notify`：标记可能在窗口建起来**之前**就写下了
+    /// （`waiting` 事件比平台往返快的时候），查标记天然没有丢唤醒的问题。
+    async fn wait_settled(&self, task_code: &str, point_index: i64) -> bool {
+        let deadline = Instant::now() + self.settle_grace;
+        loop {
+            if self
+                .settled
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|(code, index)| code == task_code && *index == point_index)
+            {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// 到点：探测 Agent → 上报 `ai_point`，等平台用同一套规则算好参数再回 `ai_start`。
@@ -586,6 +677,8 @@ impl AiPatrol {
 
     /// 停掉当前窗口（任务终态 / 暂停 / 取消时由主循环调用）
     pub async fn stop(&self, reason: &str) {
+        // 停稳标记只是「计数器放行」用的，窗口关了就没意义（下个点会重新写）
+        self.settled.lock().await.take();
         let taken = self.window.lock().await.take();
         if let Some(window) = taken {
             info!("航点 AI 识别窗口关闭（{reason}）：窗口 {}", window.id);

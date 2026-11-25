@@ -650,6 +650,12 @@ pub(crate) async fn handle_status_frame(
                 recorder.point_arrived(&current.task_code, index).await;
                 // AI 识别必须**最早**开窗：狗在这个点只停「停留时长」那么久，
                 // 抓拍（0.5~2s）和播报（asr 拉起可能 2s）排在前面会把可用帧吃掉。
+                //
+                // 但「到点」不等于「能开始算」：`patrol.point_arrived` 只是位置到了，
+                // 本体还要原地转到路线里配的 `heading` 才进 `patrol.waiting`
+                // （现场实测恒定 2~3s）。所以到点只让板端**预热**（模型 + 抓帧 +
+                // 画框与转身重叠），`mark_settled`（下面的 `waiting` 帧）之后才开始
+                // 计数/上报 —— 转身帧既无信息量又易误检（见 `AiPatrol::run_window`）。
                 match ai_point_at(&current.ai_points, index) {
                     Some(point) => {
                         ai.point_arrived(out_tx, &current.task_code.clone(), point)
@@ -657,6 +663,9 @@ pub(crate) async fn handle_status_frame(
                     }
                     // 这个点没有 AI 动作：上一个点的窗口别继续跑（画面已经变了）
                     None => ai.stop("到达无 AI 动作的航点").await,
+                }
+                if task.stage == "patrol.waiting" {
+                    ai.mark_settled(&current.task_code, index).await;
                 }
                 // 航点拍照：这个点配了「可见光拍照」就抓一张（同步等：狗可能马上就走）
                 photographer.point_arrived(&current.task_code, index).await;
@@ -666,6 +675,16 @@ pub(crate) async fn handle_status_frame(
                 // （不像开灯那样 spawn）：与下面「离开航点停播 / 起步开播」必须严格有序，
                 // 否则 stop 可能抢在 start 前面把新播报掐掉。
                 speaker.point_arrived(&current.task_code, index).await;
+            }
+        } else if is_point_stage(&task.stage) {
+            // 已经越过到点阶段（`photographing` / `point_completed`）但没等到
+            // `patrol.waiting`：老本体 / `dwell=0` 的航点会这样，说明到点后的
+            // 转身、对位已经做完（或者根本不做）—— AI 可以开始计数了。
+            let current = active.lock().await.clone();
+            if let Some(current) = current
+                && let Some(index) = current.point_index
+            {
+                ai.mark_settled(&current.task_code, index).await;
             }
         } else if !is_point_stage(&task.stage) {
             // 狗已经离开航点（前往下一点 / 返航 / 别的任务阶段）：窗口时长跟着停留时间走，

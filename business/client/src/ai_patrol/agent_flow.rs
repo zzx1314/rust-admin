@@ -231,6 +231,92 @@ async fn drain_until_end(
     }
 }
 
+/// 到点不是马上开始计数：`patrol.point_arrived` 之后本体还要原地转身对准 heading
+/// （现场实测 2~3s），那几秒画面在转。板端可以先预热（`/api/detect/start`），
+/// 但**计划登记 + 读 SSE**要等 `patrol.waiting`（`mark_settled`）。
+#[tokio::test]
+async fn window_waits_for_the_body_to_settle_before_counting() {
+    let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+    let agent = spawn_agent(calls.clone()).await;
+    let mut patrol = AiPatrol::new(agent, true);
+    patrol.set_settle_grace(Duration::from_millis(300));
+    let ai = Arc::new(patrol);
+    let (tx, mut rx) = mpsc::channel(16);
+
+    ai.start(&tx, start_payload(3, false)).await;
+    // 预热已经打下去（模型 / 抓帧 / 画框与转身重叠），但计划还没登记
+    let kinds = || {
+        let calls = calls.clone();
+        async move {
+            calls
+                .lock()
+                .await
+                .iter()
+                .map(|(kind, _)| kind.clone())
+                .collect::<Vec<String>>()
+        }
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline && kinds().await.is_empty() {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(kinds().await, ["start"], "到点先预热，不带计划");
+
+    // 转身还没结束：既不能登记计划，也不能把检出报出去
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert_eq!(kinds().await, ["start"], "停稳前不该登记航点计划");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), rx.recv())
+            .await
+            .is_err(),
+        "停稳前不该上报检出 / 收尾"
+    );
+
+    // 停稳了（`patrol.waiting`）：注册计划 + 开始收事件
+    ai.mark_settled("TK-1", 0).await;
+    let messages = drain_until_end(&mut rx, Duration::from_secs(5)).await;
+    assert!(
+        messages.iter().any(|(kind, _)| kind == "ai_detect"),
+        "停稳后要正常上报检出: {messages:?}"
+    );
+    let registered = calls
+        .lock()
+        .await
+        .iter()
+        .find(|(kind, _)| kind == "config")
+        .map(|(_, body)| body.clone())
+        .expect("停稳后要用 /api/detect/config 登记计划");
+    assert_eq!(registered["plan_id"], "TK-1");
+    assert_eq!(registered["point_index"], 0);
+}
+
+/// 老本体 / `dwell=0` 的航点可能压根不报 `patrol.waiting`：兜底 grace 到期要按
+/// **老行为**开始计数（先预热、再登记计划、再收事件），不能让识别整条消失。
+#[tokio::test]
+async fn settle_grace_falls_back_to_the_old_behaviour() {
+    let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+    let agent = spawn_agent(calls.clone()).await;
+    let mut patrol = AiPatrol::new(agent, true);
+    patrol.set_settle_grace(Duration::from_millis(120));
+    let ai = Arc::new(patrol);
+    let (tx, mut rx) = mpsc::channel(16);
+
+    ai.start(&tx, start_payload(3, false)).await;
+    let messages = drain_until_end(&mut rx, Duration::from_secs(5)).await;
+    assert!(messages.iter().any(|(kind, _)| kind == "ai_detect"));
+    let kinds: Vec<String> = calls
+        .lock()
+        .await
+        .iter()
+        .map(|(kind, _)| kind.clone())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["start", "config", "stop"],
+        "预热 → 停稳（兜底）后登记计划 → 收尾停识别"
+    );
+}
+
 #[tokio::test]
 async fn point_arrived_reports_agent_catalog_to_platform() {
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
@@ -319,16 +405,17 @@ async fn window_starts_agent_streams_hits_and_stops_it() {
     );
     assert_eq!(end["expired"], true, "正常到期要标 expired=true: {end}");
 
-    // 窗口结束后要把 Agent 停掉（否则 NPU 一直占着）
+    // 窗口结束后要把 Agent 停掉（否则 NPU 一直占着）。顺序：
+    // `start`（到点预热，**不带计划**）→ `config`（停稳后登记计划）→ `stop`。
     let kinds: Vec<String> = calls
         .lock()
         .await
         .iter()
         .map(|(kind, _)| kind.clone())
         .collect();
-    assert_eq!(kinds, ["start", "stop"]);
+    assert_eq!(kinds, ["start", "config", "stop"]);
 
-    // 计划参数（计划 id / 航点下标 / 检查目标数量）必须透传给板端
+    // 预热那一步不能带计划：转身期的命中不能进数量核对 / 不能写存证
     let started = calls
         .lock()
         .await
@@ -336,9 +423,22 @@ async fn window_starts_agent_streams_hits_and_stops_it() {
         .find(|(kind, _)| kind == "start")
         .map(|(_, body)| body.clone())
         .expect("应调用 /api/detect/start");
-    assert_eq!(started["plan_id"], "TK-1");
-    assert_eq!(started["point_index"], 0);
-    assert_eq!(started["expect_count"], 3);
+    assert!(
+        started.get("plan_id").is_none(),
+        "预热阶段不能带 plan_id: {started}"
+    );
+
+    // 计划参数（计划 id / 航点下标 / 检查目标数量）在停稳后那份 config 里透传给板端
+    let registered = calls
+        .lock()
+        .await
+        .iter()
+        .find(|(kind, _)| kind == "config")
+        .map(|(_, body)| body.clone())
+        .expect("停稳后应调用 /api/detect/config");
+    assert_eq!(registered["plan_id"], "TK-1");
+    assert_eq!(registered["point_index"], 0);
+    assert_eq!(registered["expect_count"], 3);
     assert!(!ai.status_active().await, "窗口结束后不该还挂着窗口");
 }
 
@@ -704,7 +804,7 @@ async fn running_agent_is_hot_updated_and_left_alone() {
     let messages = drain_until_end(&mut rx, Duration::from_secs(5)).await;
     assert!(messages.iter().any(|(kind, _)| kind == "ai_detect"));
 
-    // 操作员手动开着识别：只热更新，窗口结束不停人家的会话
+    // 操作员手动开着识别：只热更新（预热改写参数 → 停稳后带上计划），窗口结束不停人家的会话
     let kinds: Vec<String> = calls
         .lock()
         .await
@@ -713,18 +813,19 @@ async fn running_agent_is_hot_updated_and_left_alone() {
         .collect();
     assert_eq!(
         kinds,
-        ["config", "plan/clear"],
+        ["config", "config", "plan/clear"],
         "识别留着时必须把计划摘掉，否则后续命中会继续写这个航点的存证"
     );
-    let configured = calls
+    let registered = calls
         .lock()
         .await
         .iter()
-        .find(|(kind, _)| kind == "config")
+        .filter(|(kind, _)| kind == "config")
         .map(|(_, body)| body.clone())
-        .expect("应调用 /api/detect/config");
-    assert_eq!(configured["plan_id"], "TK-1");
-    assert_eq!(configured["expect_count"], 3);
+        .find(|body| body.get("plan_id").is_some())
+        .expect("停稳后应带计划热更新一次");
+    assert_eq!(registered["plan_id"], "TK-1");
+    assert_eq!(registered["expect_count"], 3);
 }
 
 #[tokio::test]
