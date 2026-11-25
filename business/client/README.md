@@ -129,6 +129,39 @@ journalctl -u robodog-device-client -f
 > 首次注册会在业务库自动建档为「待绑定」，还需要在控制台设备管理里把该设备绑定到园区，
 > 否则心跳/任务不推进、建图也不会回传中台。
 
+### 升级客户端（只换二进制，不动配置）
+
+改完 `business/client/src/**` 后升级现场那台 `.246`。**不在现场同网段**时走它上面的
+frpc 反向隧道（公网 frps `:8090` → `.246:22`，见 [`../../deploy/backpack-246.md`](../../deploy/backpack-246.md)
+与 [`../../deploy/backpack-246-frpc/`](../../deploy/backpack-246-frpc/)）：把下面的
+`root@192.168.41.246` 换成 `-p 3006 root@39.107.55.13` 即可（`scp` 用 `-P 3006`）。
+
+```bash
+cd business/client
+./deploy/build-aarch64.sh            # 交叉编译 + 校验 GLIBC ≤ 2.35
+scp -P 3006 target/aarch64-unknown-linux-gnu/release/robodog-device-client \
+    root@39.107.55.13:/tmp/rdc.new
+ssh -p 3006 root@39.107.55.13 '
+  set -e
+  chmod +x /tmp/rdc.new && /tmp/rdc.new --help >/dev/null   # 在目标机上先验能跑
+  cp -p /opt/robodog/client/robodog-device-client \
+        /opt/robodog/client/robodog-device-client.bak-$(date +%Y%m%d-%H%M%S)
+  mv /tmp/rdc.new /opt/robodog/client/robodog-device-client
+  systemctl restart robodog-device-client
+  sleep 6; systemctl is-active robodog-device-client
+  journalctl -u robodog-device-client -n 20 --no-pager | grep -E "注册成功|语音播报|已连接"'
+```
+
+要点：
+
+- **先看有没有任务在跑**（`journalctl -u robodog-device-client --since '20 min ago' | grep 收到任务`）：
+  重启会打断正在执行的计划；
+- **留备份**（`.bak-<时间戳>`，现场惯例），回滚就是把 `.bak-*` 拷回去再 restart；
+- 判断「装的是不是新版本」看启动那几行日志（例如语音播报那行的措辞、各模块
+  `已启用` 文案都会随版本变），`--help` 里的参数说明也算一个便宜的对账点；
+- `/etc/robodog/client.toml` 不动：配置解析是 `deny_unknown_fields`，**降级**回老二进制时
+  先删掉它不认识的段/行（否则起不来，报 `unknown field`）。
+
 ## 离线联调：假本体（`--robot mock`）
 
 `--robot sim` 只回心跳，拿到 `client` 那一步就 return 了，**5000 之类的报文一条都不会生成**。
