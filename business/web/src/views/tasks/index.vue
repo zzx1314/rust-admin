@@ -1840,7 +1840,12 @@ onBeforeUnmount(() => {
           >
             {{ webPhoneStatus }}
             <template v-if="webPhoneActive">
-              · 收 {{ webPhoneStats.rx }} / 发 {{ webPhoneStats.tx }}
+              · 收 {{ webPhoneStats.rx }} / 发 {{ webPhoneStats.tx }} · 积压
+              {{ webPhoneStats.backlog }}ms · 欠载 {{ webPhoneStats.underruns }}ms<template
+                v-if="webPhoneStats.drops > 0"
+              >
+                · <span style="color: #b91c1c">丢 {{ webPhoneStats.drops }} 帧（帧长不是 640B）</span></template
+              >
             </template>
           </span>
         </div>

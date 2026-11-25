@@ -76,7 +76,7 @@ class PhonePlayer extends AudioWorkletProcessor {
     // 欠载统计：数据不够、只能出静音的渲染块数（每秒回给主线程算成 ms）
     this.starvedBlocks = 0;
     this.quantum = 128;          // 渲染量子，首次 process 时按实际值覆盖
-    this.reportedAt = 0;
+    this.blocks = 0;             // 已跑过的渲染块数，用来「每秒回报一次」
     this.port.onmessage = (event) => {
       const data = event.data || {};
       if (data.mute !== undefined) this.muted = !!data.mute;
@@ -97,10 +97,12 @@ class PhonePlayer extends AudioWorkletProcessor {
     if (this.tail - this.head > limit) this.head = this.tail - limit;
   }
   // 每秒一次把「欠载 / 积压」回给主线程：不然页面只能盯着「收 N 帧」猜为什么卡
+  // （用渲染块计数当计时器，不依赖 currentTime 这种宿主全局）
   report(quantum) {
     if (quantum) this.quantum = quantum;
-    if (currentTime - this.reportedAt < 1) return;
-    this.reportedAt = currentTime;
+    this.blocks += 1;
+    const perSecond = Math.max(1, Math.round(sampleRate / this.quantum));
+    if (this.blocks % perSecond !== 0) return;
     this.port.postMessage({
       type: "stats",
       starvedMs: Math.round((this.starvedBlocks * this.quantum * 1000) / sampleRate),
