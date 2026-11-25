@@ -26,6 +26,15 @@ base64 = "0.22"
 sha2 = "0.10"
 # 录像播放：按 Range 流式回字节，不把整个 mp4 读进内存
 tokio-util = { version = "0.7", features = ["io"] }
+# HTTPS 监听（`tls.rs`）：自签证书即可 —— 浏览器只在安全上下文里开放 AudioWorklet
+# 与麦克风（网页对讲），而目标机 443 已被厂商 OTA 的 nginx 占用，所以另起一个端口。
+hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
+# `tower::service_fn` + `hyper::Request<Incoming>`：给 TLS 连接注入 ConnectInfo
+tower = { version = "0.5", features = ["util"] }
+hyper = { version = "1", features = ["server", "http1"] }
+# 只用 ring 提供密码学实现：默认的 aws-lc-rs 要现编 C 代码，离线/交叉编译都会卡
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = "2"
 # 企业微信图片消息要「原图字节的 md5」（base64 之前）
 md-5 = "0.10"
 zip = { version = "2", default-features = false, features = ["deflate"] }

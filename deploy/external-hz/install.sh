@@ -91,6 +91,38 @@ printf 'RTSP 推流地址（板端 .246 的 /etc/robodog/relay.env）：\nRELAY_
   "$PUBLISH_PASS" "$PUBLIC_HOST" > "$BASE/mediamtx-publish-url.txt"
 chmod 0600 "$BASE/mediamtx-publish-url.txt"
 
+# ---------------------------------------------------------------- HTTPS 证书（自签）
+# 浏览器只在安全上下文（https / localhost / 手动加白的源）里开放麦克风与 AudioWorklet，
+# 网页对讲必须 https；443 被厂商 OTA 的 nginx 占着，所以业务平台另起 3443（见 server.toml）。
+# 证书**带 IP SAN**（Chrome 早就不看 CN），并把自己作成 CA：导入到操作系统的
+# 「受信任的根证书颁发机构」后浏览器不再报警（证书放在 $BASE/tls/server.crt）。
+TLS_DIR=$BASE/tls
+mkdir -p "$TLS_DIR"
+if [[ ! -s "$TLS_DIR/server.crt" || ! -s "$TLS_DIR/server.key" ]]; then
+  info "生成自签证书（CN=$PUBLIC_HOST，含 IP SAN，10 年）"
+  cat > "$TLS_DIR/openssl.cnf" <<EOF
+[req]
+distinguished_name = dn
+x509_extensions = v3
+prompt = no
+
+[dn]
+O = RoboDog
+CN = $PUBLIC_HOST
+
+[v3]
+subjectAltName = IP:$PUBLIC_HOST, IP:127.0.0.1, DNS:localhost
+basicConstraints = critical, CA:TRUE
+keyUsage = critical, digitalSignature, keyEncipherment, keyCertSign
+extendedKeyUsage = serverAuth
+EOF
+  ( umask 077; openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+      -config "$TLS_DIR/openssl.cnf" \
+      -keyout "$TLS_DIR/server.key" -out "$TLS_DIR/server.crt" >/dev/null 2>&1 )
+fi
+chmod 0644 "$TLS_DIR/server.crt"
+chmod 0600 "$TLS_DIR/server.key"
+
 # ---------------------------------------------------------------- 密钥
 # 服务令牌两边必须一致；已存在就沿用，避免升级后两边不匹配。
 TOKEN=""
@@ -158,6 +190,12 @@ for port in 3007 3008; do
 done
 curl -s --max-time 5 http://127.0.0.1:3008/api/health || true
 echo
+# HTTPS（自签）：本机不看证书，只看端口能不能握手、页面能不能出来
+https_code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "https://127.0.0.1:3443/" || true)"
+printf '  https://127.0.0.1:3443 / → HTTP %s\n' "${https_code:-无响应}"
+if [[ "${https_code}" != "200" ]]; then
+  warn "HTTPS 没起来：journalctl -u rust-admin-robodog | grep -i tls / HTTPS（证书路径见 server.toml）"
+fi
 # mediamtx 控制 API 只绑回环：能列出 path 就说明 SFU 起来了
 paths="$(curl -s --max-time 5 http://127.0.0.1:9997/v3/paths/list || true)"
 if [[ -n "$paths" ]]; then
@@ -166,6 +204,10 @@ else
   printf '  mediamtx :9997/v3/paths/list → 无响应（看 journalctl -u mediamtx）\n'
 fi
 info "完成。中台 http://<本机IP>:3007 ，业务平台/设备网关 :3008"
+info "业务平台 HTTPS（自签，操作员用这个：网页对讲/麦克风需要安全上下文）：https://$PUBLIC_HOST:3443"
+info "  首次打开浏览器会提示「不安全」→ 继续前往即可；想不再提示：把 $BASE/tls/server.crt 导入到"
+info "  Windows「受信任的根证书颁发机构」/ macOS 钥匙串（设「始终信任」）/ Android「安装 CA 证书」"
+warn "阿里云安全组需要额外放通：TCP 3443（业务平台 HTTPS，浏览器网页对讲必需）"
 info "WebRTC 出口（mediamtx）：板端推 rtsp://<本机IP>:8554/bp_<stream>，浏览器 WHEP 走 /api/backpack/whep/<stream>"
 warn "阿里云安全组需要放通：TCP 8554（板端推流）、UDP 8189（WebRTC 媒体）、可选 TCP 8189（ICE-TCP 回退）"
 info "板端推流口令在 $BASE/mediamtx-publish-url.txt（顺手改掉现场 .246 的 relay.env 后重启 backpack-relay）"

@@ -76,6 +76,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let router = build_router(state);
 
+    // HTTPS（自签证书即可）：浏览器只在安全上下文里开放麦克风 / AudioWorklet（网页对讲）。
+    // 设备客户端仍走明文 `:port`（`ws://`），不用上塔改配置；这里起不来只记 warning。
+    if let Err(error) = robodog_ops_server::tls::spawn(
+        router.clone(),
+        config.https_port,
+        config.tls_cert.as_deref(),
+        config.tls_key.as_deref(),
+    )
+    .await
+    {
+        tracing::warn!("HTTPS 未启动：{error}");
+    }
+
     let address = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&address).await?;
     tracing::info!(address = %address, database = %config.database_path.display(), "robodog ops server started");

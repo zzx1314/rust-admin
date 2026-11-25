@@ -57,6 +57,23 @@
    平台会话结束/超时/被接管下发 stop；客户端 `recv_loop` 发现平台连接断了也自己收口。
 3. **平台不落库、不混音**：只搬字节，通话内容平台留不下。
 
+## 2.5 必须用 https 打开（否则按钮是灰的）
+
+浏览器只在**安全上下文**里开放 `AudioWorklet` 与 `navigator.mediaDevices.getUserMedia`：
+`https://`、`http://localhost`，或被浏览器手动加白的 http 源。用
+`http://39.107.55.13:3008` 这种明文 IP 打开时两者都是 `undefined`，点「网页直连通话」
+会抛 `Cannot read properties of undefined (reading 'addModule')`。
+
+页面现在会**提前拦**：按钮置灰 + 一行提示 + 开启办法（不再抛 JS 错）。三种解法：
+
+| 办法 | 适合 | 代价 |
+|---|---|---|
+| **给控制台配 https**（域名 + 证书，反代或服务端 TLS） | 长期、团队 | 需要域名与证书 |
+| Chrome / Edge：`chrome://flags/#unsafely-treat-insecure-origin-as-secure` 填该源 → Enabled → 重启 | 临时、单台机器 | 每个浏览器 profile 都要手动设一次 |
+| Firefox：`about:config` 把 `media.devices.insecure.enabled`、`media.getusermedia.insecure.enabled` 设为 true | 临时、单台机器 | 同上 |
+
+注意「现场入口」（`deploy/site-console`，:8080）也是 http，同样受限。
+
 ## 3. 带宽与音质
 
 | 项 | 值 |

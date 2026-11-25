@@ -675,7 +675,8 @@ pub struct CommandRequest {
 ///
 /// `text` 会经设备客户端与板端 Agent 两层白名单净化（去空白、只留中文汉字 + 中文标点
 /// + 数字、中文 ≤30 字）；这里只拦掉“空内容”与明显超长，给出可读原因。
-/// `loop` 为真时按 `dial_seconds` 循环播报（默认 30s，上限 `SPEAK_MAX_SECS`）。
+///
+/// `loop` 为真时按 `seconds` 循环播报（默认 30s，上限 `SPEAK_MAX_SECS`）。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CallRequest {

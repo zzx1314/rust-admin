@@ -37,6 +37,7 @@ pub mod schedule;
 pub mod seed;
 pub mod staff_import;
 pub mod status;
+pub mod tls;
 pub mod video;
 pub mod whep;
 pub mod xlsx;

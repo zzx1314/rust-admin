@@ -236,6 +236,9 @@ AudioWorklet 做 48k⇄16k 与抖动缓冲。**不需要填 IP、公网可用；
 **平台不落库不混音**、**收尾必发 `phone_stream stop`**（否则板子停在 phone 模式）；
 地址白名单（IPv4 + 1~65535，板端那条命令进的是 shell `echo`）在客户端与板端各校验一次。
 带宽 256kbps/方向，4G 上与视频中继抢带宽；建议戴耳机（外放会啸叫）。
+⚠️ **必须 https（或浏览器白名单）**：`AudioWorklet` 与 `getUserMedia` 只在安全上下文可用，
+`http://<IP>:3008` 打开时点按钮会报 `Cannot read properties of undefined (reading 'addModule')`；
+页面已提前拦（按钮置灰 + 给开启办法），根治是给控制台配 https。
 改这块先读 `business/docs/phone-intercom.md`，回归
 `python3 business/backpack_dashboard/backend/tools/phone_selftest.py`、
 `client phone::tests`、`client phone_relay::tests`、`cargo test phone_audio::`。

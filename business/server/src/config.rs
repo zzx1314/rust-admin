@@ -29,6 +29,16 @@ pub const WECOM_WEBHOOK_ENV: &str = "ROBODOG_WECOM_WEBHOOK";
 #[derive(Clone, Debug)]
 pub struct Config {
     pub port: u16,
+    /// HTTPS 监听端口（`0` = 关闭）。
+    ///
+    /// 浏览器只在安全上下文（https / localhost / 手动加白的源）里开放
+    /// `AudioWorklet` 与麦克风 —— 网页对讲的两个前提；而目标机 443 被厂商 OTA 的
+    /// nginx 占着，所以另起一个端口（部署默认 3443）。设备客户端仍走明文 :3008。
+    pub https_port: u16,
+    /// HTTPS 证书（PEM；自签即可）。与 `tls_key` 同时配置才生效。
+    pub tls_cert: Option<PathBuf>,
+    /// HTTPS 私钥（PEM，PKCS#8 / RSA 均可）。
+    pub tls_key: Option<PathBuf>,
     pub database_path: PathBuf,
     pub jwt_secret: String,
     pub jwt_ttl_hours: i64,
@@ -180,6 +190,9 @@ pub enum ConfigError {
 #[serde(default, deny_unknown_fields)]
 struct ServerFile {
     port: Option<u16>,
+    https_port: Option<u16>,
+    tls_cert: Option<String>,
+    tls_key: Option<String>,
     database: Option<String>,
     jwt_secret: Option<String>,
     jwt_ttl_hours: Option<i64>,
@@ -302,6 +315,18 @@ impl Config {
                 None => file_path(from_file, base_dir.as_deref(), default),
             }
         };
+        // 可选路径（证书 / 私钥）：环境变量优先，相对路径按配置文件所在目录解析
+        let path_opt = |name: &str, from_file: Option<String>| -> Option<PathBuf> {
+            let value = match env_text(&env, name) {
+                Some(value) => value,
+                None => from_file.and_then(clean)?,
+            };
+            let path = PathBuf::from(value);
+            match base_dir.as_deref() {
+                Some(dir) if path.is_relative() => Some(dir.join(path)),
+                _ => Some(path),
+            }
+        };
         let url = |name: &str, from_file: Option<String>| -> Option<String> {
             env_text(&env, name)
                 .or_else(|| from_file.and_then(clean))
@@ -313,6 +338,13 @@ impl Config {
                 .and_then(|value| value.parse().ok())
                 .or(file.port)
                 .unwrap_or(3100),
+            // 默认关闭：开发机 / 测试不引入证书依赖，正式部署在 server.toml 里开
+            https_port: env_text(&env, "ROBODOG_HTTPS_PORT")
+                .and_then(|value| value.parse().ok())
+                .or(file.https_port)
+                .unwrap_or(0),
+            tls_cert: path_opt("ROBODOG_TLS_CERT", file.tls_cert),
+            tls_key: path_opt("ROBODOG_TLS_KEY", file.tls_key),
             database_path: path(
                 "ROBODOG_DB",
                 file.database,
@@ -680,6 +712,43 @@ mod tests {
         );
         assert_eq!(config.service_token.as_deref(), Some("from-file"));
         assert!(config.control_channel_ready());
+    }
+
+    /// HTTPS：默认关闭（开发/测试不引入证书依赖）；文件里开了就按端口 + 证书路径生效，
+    /// 相对路径按配置文件所在目录解析（与其它路径字段一致）。
+    #[test]
+    fn https_is_off_by_default_and_configured_from_file() {
+        let plain = Config::merge(None, None, no_env);
+        assert_eq!(plain.https_port, 0, "默认不开 HTTPS");
+        assert!(plain.tls_cert.is_none());
+
+        let file = parse(
+            r#"
+            https_port = 3443
+            tls_cert = "../tls/server.crt"
+            tls_key = "../tls/server.key"
+            "#,
+        );
+        let config = Config::merge(
+            Some(file),
+            Some(PathBuf::from("/opt/hz/rust-admin/robodog")),
+            no_env,
+        );
+        assert_eq!(config.https_port, 3443);
+        let cert = config.tls_cert.as_deref().expect("证书路径应解析出来");
+        assert!(cert.is_absolute(), "相对路径要按配置文件目录展开：{cert:?}");
+        assert!(cert.ends_with("tls/server.crt"), "{cert:?}");
+        // 环境变量优先（临时换证书 / 关掉 HTTPS 不用改文件）
+        let env = |name: &str| match name {
+            "ROBODOG_HTTPS_PORT" => Some("0".to_string()),
+            _ => None,
+        };
+        let config = Config::merge(
+            Some(parse("https_port = 3443")),
+            Some(PathBuf::from("/opt/hz/rust-admin/robodog")),
+            env,
+        );
+        assert_eq!(config.https_port, 0, "ROBODOG_HTTPS_PORT 覆盖文件");
     }
 
     #[test]

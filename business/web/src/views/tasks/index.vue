@@ -42,7 +42,7 @@ import {
 import { parseRouteData } from "@/utils/format";
 import { apiBaseUrl } from "@/utils/runtime";
 import { normalizeSpeakText } from "@/utils/speak";
-import { usePhoneCall } from "@/composables/usePhoneCall";
+import { phoneCallSupport, usePhoneCall } from "@/composables/usePhoneCall";
 
 const router = useRouter();
 const tasks = ref<Task[]>([]);
@@ -630,6 +630,14 @@ async function stopCall() {
  * 网页直连对讲：音频经设备客户端中继（浏览器发不了裸 UDP），不需要填 IP。
  * 板端 FIFO / UDP 只有一路，所以同一时间只能有一个页面在说话。
  */
+/**
+ * 网页对讲依赖 AudioWorklet + 麦克风，两者都只在安全上下文（https / localhost /
+ * 浏览器白名单）可用。http + 明文 IP 打开时按钮要禁用并给出开启办法，否则一点就报
+ * 「Cannot read properties of undefined (reading 'addModule')」。
+ */
+const callSupport = phoneCallSupport();
+const pageOrigin = typeof location === "undefined" ? "" : location.origin;
+
 const {
   active: webPhoneActive,
   connecting: webPhoneConnecting,
@@ -1696,7 +1704,8 @@ onBeforeUnmount(() => {
           <span class="muted" style="font-size: 11.5px">电话（对讲）</span>
           <button
             class="btn sm"
-            :disabled="webPhoneConnecting"
+            :disabled="webPhoneConnecting || !callSupport.ok"
+            :title="callSupport.ok ? '' : callSupport.reason"
             @click="toggleWebPhone"
           >
             <AppIcon :name="webPhoneActive ? 'close' : 'sound'" />
@@ -1729,6 +1738,24 @@ onBeforeUnmount(() => {
           平台 → 浏览器），公网也能用；占用约 256kbps 上行。<strong>建议戴耳机</strong>
           （外放会啸叫），并避开正在跑视频中继的时候不要长时间占用。
           <span v-if="webPhoneError" style="color: #b91c1c">· {{ webPhoneError }}</span>
+        </div>
+        <div
+          v-if="!callSupport.ok"
+          class="muted"
+          style="font-size: 11px; margin-top: 4px; line-height: 1.7; color: #b45309"
+        >
+          ⚠ {{ callSupport.reason }}。
+          <template v-if="callSupport.insecure">
+            <br />
+            · Chrome / Edge：地址栏打开
+            <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code>，把
+            <code>{{ pageOrigin }}</code> 填进去并设为 Enabled，重启浏览器；
+            <br />
+            · Firefox：<code>about:config</code> 里把 <code>media.devices.insecure.enabled</code>
+            与 <code>media.getusermedia.insecure.enabled</code> 设为 true；
+            <br />
+            · 长期方案：给控制台配 https（域名 + 证书），一次配好所有操作员都能直接用。
+          </template>
         </div>
 
         <div class="rt-sec-title" style="margin-top: 18px">

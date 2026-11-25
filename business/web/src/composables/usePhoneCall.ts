@@ -121,6 +121,44 @@ registerProcessor("phone-recorder", PhoneRecorder);
 registerProcessor("phone-player", PhonePlayer);
 `;
 
+/**
+ * 浏览器能不能做网页对讲。
+ *
+ * `AudioWorklet` 与 `navigator.mediaDevices.getUserMedia` 都**只在安全上下文**可用：
+ * `https://` / `http://localhost` / 被浏览器手动加白的 http 源。用
+ * `http://39.107.55.13:3008` 这种明文 IP 打开时两者都是 undefined —— 直接点会炸成
+ * 「Cannot read properties of undefined (reading 'addModule')」，所以要提前拦。
+ */
+export function phoneCallSupport(): {
+  ok: boolean;
+  reason: string;
+  /** 是「页面不是安全上下文」（能靠 https / 浏览器白名单解决），而不是浏览器太旧 */
+  insecure: boolean;
+} {
+  const secure = typeof window !== "undefined" && window.isSecureContext;
+  const hasWorklet =
+    typeof AudioContext !== "undefined" &&
+    typeof (AudioContext.prototype as { audioWorklet?: unknown }).audioWorklet !== "undefined";
+  const hasMic = !!navigator.mediaDevices?.getUserMedia;
+  if (secure && hasWorklet && hasMic) {
+    return { ok: true, reason: "", insecure: false };
+  }
+  if (!secure) {
+    return {
+      ok: false,
+      insecure: true,
+      reason:
+        `当前页面是 http（${location.host}），浏览器只在 https 下开放麦克风和 AudioWorklet。` +
+        `请用 https 访问，或在浏览器里把 ${location.origin} 加入「当作安全来源」白名单后重开页面`
+    };
+  }
+  return {
+    ok: false,
+    insecure: false,
+    reason: "当前浏览器不支持网页对讲（需要 AudioWorklet + 麦克风权限），建议用较新的 Chrome / Edge"
+  };
+}
+
 export interface PhoneCallOptions {
   /** 设备主键（`devices.id`） */
   deviceId: number;
@@ -198,6 +236,15 @@ export function usePhoneCall() {
    */
   async function start({ deviceId }: PhoneCallOptions) {
     if (active.value || connecting.value) return;
+    // 不安全上下文（http + 非 localhost）下 AudioWorklet / getUserMedia 都不存在，
+    // 先给一句人话，别让页面抛「Cannot read properties of undefined」
+    const support = phoneCallSupport();
+    if (!support.ok) {
+      connecting.value = false;
+      error.value = support.reason;
+      status.value = support.insecure ? "需要 https" : "浏览器不支持";
+      return;
+    }
     connecting.value = true;
     error.value = "";
     status.value = "连接中…";
@@ -206,6 +253,11 @@ export function usePhoneCall() {
       if (!token) throw new Error("登录已过期，请重新登录");
 
       context = new AudioContext();
+      if (!context.audioWorklet) {
+        throw new Error(
+          "浏览器没有开放 AudioWorklet（需要 https 或把本站加入「当作安全来源」白名单）"
+        );
+      }
       workletUrl = URL.createObjectURL(
         new Blob([WORKLET_SOURCE], { type: "application/javascript" })
       );
