@@ -135,28 +135,41 @@ export function phoneCallSupport(): {
   /** 是「页面不是安全上下文」（能靠 https / 浏览器白名单解决），而不是浏览器太旧 */
   insecure: boolean;
 } {
-  const secure = typeof window !== "undefined" && window.isSecureContext;
-  const hasWorklet =
-    typeof AudioContext !== "undefined" &&
-    typeof (AudioContext.prototype as { audioWorklet?: unknown }).audioWorklet !== "undefined";
-  const hasMic = !!navigator.mediaDevices?.getUserMedia;
-  if (secure && hasWorklet && hasMic) {
-    return { ok: true, reason: "", insecure: false };
-  }
-  if (!secure) {
+  // ⚠️ 不要碰 `AudioContext.prototype.audioWorklet`：它是 `BaseAudioContext` 上的
+  // **accessor**，在原型对象上读会抛 `TypeError: Illegal invocation`（我们踩过：
+  // 计划管理页在 setup 阶段直接白屏）。用 `typeof AudioWorkletNode` 判断：
+  // 它是 `[SecureContext]` 暴露的全局构造器，不安全上下文里根本不存在。
+  try {
+    const secure = typeof window !== "undefined" && window.isSecureContext === true;
+    const hasWorklet = typeof AudioWorkletNode !== "undefined";
+    const hasMic = !!navigator?.mediaDevices?.getUserMedia;
+    if (secure && hasWorklet && hasMic) {
+      return { ok: true, reason: "", insecure: false };
+    }
+    if (!secure) {
+      const host = typeof location === "undefined" ? "" : location.host;
+      const origin = typeof location === "undefined" ? "" : location.origin;
+      return {
+        ok: false,
+        insecure: true,
+        reason:
+          `当前页面是 http（${host}），浏览器只在 https 下开放麦克风与 AudioWorklet。` +
+          `请用 https 访问，或把 ${origin} 加入浏览器「当作安全来源」白名单后重开页面`
+      };
+    }
     return {
       ok: false,
-      insecure: true,
-      reason:
-        `当前页面是 http（${location.host}），浏览器只在 https 下开放麦克风和 AudioWorklet。` +
-        `请用 https 访问，或在浏览器里把 ${location.origin} 加入「当作安全来源」白名单后重开页面`
+      insecure: false,
+      reason: "当前浏览器不支持网页对讲（需要 AudioWorklet + 麦克风权限），建议用较新的 Chrome / Edge"
+    };
+  } catch (cause) {
+    // 再兜一层：这段代码跑在页面 setup 里，任何异常都会让整个计划管理页白屏
+    return {
+      ok: false,
+      insecure: false,
+      reason: `无法检测浏览器能力（${cause instanceof Error ? cause.message : String(cause)}）`
     };
   }
-  return {
-    ok: false,
-    insecure: false,
-    reason: "当前浏览器不支持网页对讲（需要 AudioWorklet + 麦克风权限），建议用较新的 Chrome / Edge"
-  };
 }
 
 export interface PhoneCallOptions {
