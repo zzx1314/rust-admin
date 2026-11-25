@@ -56,17 +56,27 @@ const DEVICE_STATUS_TAG_TYPE: Record<
 export const MEDIA_SYNC_COMMAND = "同步媒体";
 
 /**
+ * 「回传录像」：把板端 `RECORD_DIR` 里攺着的巡检录像按需回传到业务平台的
+ * 「任务录像」。与「同步媒体」同一套长任务回执（进度 / 结论）。
+ */
+export const RECORD_SYNC_COMMAND = "回传录像";
+
+/**
  * 设备页「更多 → 下发指令」里暴露的指令。
  *
- * **只留「同步媒体」**：巡检启停、召回充电、远程接管/释放这些动作都在业务平台
+ * **只留长任务**：巡检启停、召回充电、远程接管/释放这些动作都在业务平台
  * （现场控制台 / 遥控台）做，中台这边重复放一份容易两头操作打架。中台只保留
- * 自己独有的那条——把板端 `/media/media-data/picture` 里的航点 AI 存证图回传到
- * 「媒体资源」（目录/帧数在「参数配置」页维护，见 media_picture_dir / media_frames）。
+ * 自己独有的两条：
+ *
+ * - 「同步媒体」：把板端 `/media/media-data/picture` 的航点 AI 存证图回传到
+ *   「媒体资源」（目录/帧数在「参数配置」页维护，见 media_picture_dir / media_frames）；
+ * - 「回传录像」：把板端攺着的巡检录像（任务终态**不再自动回传**）回传到业务平台
+ *   「任务录像」，要哪一轮就点哪一轮。
  *
  * 后端白名单（`backend/.../device/handlers.rs::ALLOWED_COMMANDS`）没有跟着收窄：
  * 接口保持兼容，老页面 / 脚本仍可调，只是中台页面不再展示。
  */
-export const DEVICE_COMMANDS = [MEDIA_SYNC_COMMAND];
+export const DEVICE_COMMANDS = [MEDIA_SYNC_COMMAND, RECORD_SYNC_COMMAND];
 
 /**
  * 幂等键：一次用户操作一个值，失败重试时复用同一个值，
@@ -240,12 +250,14 @@ export function useDogDevice() {
   const runtimeDevice = ref<DogDevice | null>(null);
   const runtimeData = ref<Record<string, any> | null>(null);
 
-  /** 「同步媒体」进度 / 结论：下发只回「已下发」，真实状态要靠轮询 */
+  /** 长任务（「同步媒体」/「回传录像」）进度与结论：下发只回「已下发」，真实状态靠轮询 */
   const mediaSyncVisible = ref(false);
   const mediaSyncLoading = ref(false);
   const mediaSyncDevice = ref<DogDevice | null>(null);
   const mediaSyncStatus = ref<Record<string, any> | null>(null);
   const mediaSyncPolling = ref(false);
+  /** 当前看的是哪一条长任务（决定弹窗文案与查询的 `?action=`） */
+  const mediaSyncAction = ref<string>(MEDIA_SYNC_COMMAND);
   let mediaSyncTimer: ReturnType<typeof setTimeout> | null = null;
 
   async function onSearch() {
@@ -443,10 +455,12 @@ export function useDogDevice() {
       if (res.code === SUCCESS) {
         message(`指令「${command}」已下发`, { type: "success" });
         onSearch();
-        // 「同步媒体」是长任务：下发成功只代表客户端收到了，图片要一张张传。
-        // 直接把同步进度弹窗打开，让人看到扫了几张 / 传了几张 / 目录清没清。
+        // 长任务（「同步媒体」/「回传录像」）：下发成功只代表客户端收到了，
+        // 图片要一张张 / 录像要一段段传。直接把状态弹窗打开，让人看到进度与结论。
         if (command === MEDIA_SYNC_COMMAND) {
           openMediaSync(row);
+        } else if (command === RECORD_SYNC_COMMAND) {
+          openMediaSync(row, RECORD_SYNC_COMMAND);
         }
       } else {
         message(res.msg || "下发失败", { type: "error" });
@@ -502,9 +516,10 @@ export function useDogDevice() {
     }
   }
 
-  function openMediaSync(row: DogDevice | null) {
+  function openMediaSync(row: DogDevice | null, action: string = MEDIA_SYNC_COMMAND) {
     if (!row) return;
     mediaSyncDevice.value = row;
+    mediaSyncAction.value = action;
     mediaSyncStatus.value = null;
     mediaSyncVisible.value = true;
     startMediaSyncPolling();
@@ -531,7 +546,7 @@ export function useDogDevice() {
     if (!device) return;
     mediaSyncLoading.value = true;
     try {
-      const res = await dogDeviceMediaSyncStatus(device.id);
+      const res = await dogDeviceMediaSyncStatus(device.id, mediaSyncAction.value);
       if (res.code === SUCCESS) {
         mediaSyncStatus.value = res.data ?? null;
       } else {
@@ -609,6 +624,9 @@ export function useDogDevice() {
       case "media":
         openMediaSync(row);
         break;
+      case "records":
+        openMediaSync(row, RECORD_SYNC_COMMAND);
+        break;
     }
   }
 
@@ -669,6 +687,7 @@ export function useDogDevice() {
     mediaSyncVisible,
     mediaSyncLoading,
     mediaSyncDevice,
+    mediaSyncAction,
     mediaSyncStatus,
     mediaSyncPolling,
     onSearch,

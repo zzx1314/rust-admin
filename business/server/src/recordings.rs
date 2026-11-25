@@ -137,7 +137,11 @@ struct IngestMeta {
     started_at: Option<String>,
     #[serde(default)]
     ended_at: Option<String>,
-    #[serde(default)]
+    /// 客户端发的是 `durationSec`（板端边车同名）。
+    ///
+    /// ⚠️ 不能用 `rename_all = "camelCase"` 派生：`duration_s` 会变成 `durationS`，
+    /// 与客户端对不上，于是入库永远 0（任务详情「时长」一直显示 `—`）。
+    #[serde(default, rename = "durationSec", alias = "durationS")]
     duration_s: Option<f64>,
 }
 

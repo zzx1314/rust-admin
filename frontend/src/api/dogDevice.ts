@@ -135,10 +135,16 @@ export const dogDeviceRuntime = (id: string | number) =>
   http.axiosGetRequest<Result>(`/api/dogDevice/${id}/runtime`, {});
 
 /**
- * 最近一次「同步媒体」的状态（只读）。
+ * 最近一次长任务（「同步媒体」/「回传录像」）的状态（只读）。
  *
- * `同步媒体` 是长任务：下发接口只回「已下发」，扫了几张 / 传了几张 / 板端目录
+ * 两条都是长任务：下发接口只回「已下发」，扫了多少 / 传了多少 / 板端目录
  * 清没清由设备客户端异步回报。设备页用它轮询，`status=pending` 表示还在跑。
+ * `action` 缺省是「同步媒体」（保持老页面兼容）。
  */
-export const dogDeviceMediaSyncStatus = (id: string | number) =>
-  http.axiosGetRequest<Result>(`/api/dogDevice/${id}/mediaSyncStatus`, {});
+export const dogDeviceMediaSyncStatus = (
+  id: string | number,
+  action?: string
+) =>
+  http.axiosGetRequest<Result>(`/api/dogDevice/${id}/mediaSyncStatus`,
+    action && action !== "同步媒体" ? { action } : {}
+  );

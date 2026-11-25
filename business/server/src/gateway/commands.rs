@@ -21,17 +21,27 @@ pub struct CommandResult {
 pub type CommandResultWaiters = Arc<Mutex<HashMap<String, oneshot::Sender<CommandResult>>>>;
 pub type CommandResultReceiver = oneshot::Receiver<CommandResult>;
 
-/// 「同步媒体」进度文案：中台设备页直接展示 `message`，所以这里把
-/// 「已传 / 总数 / 第几个包」拼成一句人看得懂的话。
-pub(crate) fn media_sync_progress_text(
-    payload: &crate::gateway_types::CommandProgressPayload,
-) -> String {
+/// 长任务（目前是「同步媒体」与「回传录像」）的进度文案。
+///
+/// 中台设备页直接展示 `message`，所以这里把「已传 / 总数 / 第几个包」拼成一句
+/// 人看得懂的话；单位按指令区分（图片论「张」、录像论「段」）。
+pub(crate) fn long_task_progress_text(payload: &crate::gateway_types::CommandProgressPayload) -> String {
     let total = payload.total;
     let uploaded = payload.uploaded;
-    let mut text = if total > 0 {
-        format!("同步中：已上传 {uploaded}/{total} 张")
+    let unit = if payload.command == "回传录像" {
+        "段"
     } else {
-        format!("同步中：已上传 {uploaded} 张")
+        "张"
+    };
+    let verb = if payload.command == "回传录像" {
+        "回传中"
+    } else {
+        "同步中"
+    };
+    let mut text = if total > 0 {
+        format!("{verb}：已上传 {uploaded}/{total} {unit}")
+    } else {
+        format!("{verb}：已上传 {uploaded} {unit}")
     };
     if payload.batches_total > 0 {
         text.push_str(&format!(
@@ -40,19 +50,21 @@ pub(crate) fn media_sync_progress_text(
         ));
     }
     if payload.failed > 0 {
-        text.push_str(&format!("，失败 {} 张", payload.failed));
+        text.push_str(&format!("，失败 {} {unit}", payload.failed));
     }
     text
 }
 
-/// 把「同步媒体」的最终结果回报给中台审计（异步后台跑，不堵 WS 循环）。
-pub(crate) fn report_media_sync_to_zentai(
+/// 把长任务（「同步媒体」/「回传录像」）的最终结果回报给中台审计
+/// （异步后台跑，不堵 WS 循环）。`action` 让中台能核对「这条回执属于哪条指令」。
+pub(crate) fn report_long_task_to_zentai(
     state: &AppState,
     device_id: &str,
     payload: &crate::gateway_types::CommandResultPayload,
 ) {
     let body = json!({
         "deviceCode": device_id,
+        "action": payload.command.as_str(),
         "requestId": payload.request_id.trim(),
         "status": if payload.ok { "succeeded" } else { "failed" },
         "message": payload.message.as_str(),
@@ -62,6 +74,29 @@ pub(crate) fn report_media_sync_to_zentai(
     tokio::spawn(async move {
         crate::zentai::try_report_media_sync(&config, body).await;
     });
+}
+
+/// 长任务回报的进度体（`command_progress` → 中台审计）。
+pub(crate) fn long_task_progress_body(
+    device_id: &str,
+    payload: &crate::gateway_types::CommandProgressPayload,
+) -> Value {
+    json!({
+        "deviceCode": device_id,
+        "action": payload.command.as_str(),
+        "requestId": payload.request_id.trim(),
+        "status": "running",
+        "message": long_task_progress_text(payload),
+        // 结构化进度也存一份（审计的 result 字段）：页面想画进度条时不用去解析中文文案
+        "detail": {
+            "running": true,
+            "uploaded": payload.uploaded,
+            "failed": payload.failed,
+            "total": payload.total,
+            "batchesDone": payload.batches_done,
+            "batchesTotal": payload.batches_total,
+        },
+    })
 }
 
 pub fn new_command_result_waiters() -> CommandResultWaiters {
@@ -337,4 +372,53 @@ pub async fn get_online_devices(connections: &DeviceConnections) -> Vec<String> 
 pub async fn is_device_online(connections: &DeviceConnections, device_id: &str) -> bool {
     let map = connections.read().await;
     map.contains_key(device_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn progress(command: &str, uploaded: u64, failed: u64, total: u64) -> Value {
+        json!({
+            "requestId": "req-1",
+            "command": command,
+            "uploaded": uploaded,
+            "failed": failed,
+            "total": total,
+        })
+    }
+
+    /// 长任务进度文案：录像论「段」、图片论「张」，别把两种单位混着写。
+    #[test]
+    fn long_task_progress_text_uses_the_right_unit() {
+        let record = serde_json::from_value::<crate::gateway_types::CommandProgressPayload>(
+            progress("回传录像", 2, 1, 5),
+        )
+        .expect("进度应能解析");
+        let text = long_task_progress_text(&record);
+        assert!(text.contains("回传中：已上传 2/5 段"), "{text}");
+        assert!(text.contains("失败 1 段"), "{text}");
+
+        let media = serde_json::from_value::<crate::gateway_types::CommandProgressPayload>(
+            progress("同步媒体", 8, 0, 24),
+        )
+        .expect("进度应能解析");
+        let text = long_task_progress_text(&media);
+        assert!(text.contains("同步中：已上传 8/24 张"), "{text}");
+    }
+
+    /// 进度回写中台要带指令名：中台按它核对这条回执属于哪一条审计。
+    #[test]
+    fn long_task_progress_body_carries_the_action() {
+        let payload = serde_json::from_value::<crate::gateway_types::CommandProgressPayload>(
+            progress("回传录像", 1, 0, 3),
+        )
+        .expect("进度应能解析");
+        let body = long_task_progress_body("DOG-1", &payload);
+        assert_eq!(body["action"], "回传录像");
+        assert_eq!(body["status"], "running");
+        assert_eq!(body["detail"]["uploaded"], 1);
+        assert_eq!(body["detail"]["total"], 3);
+    }
 }

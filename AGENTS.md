@@ -174,10 +174,13 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 30~1800 默认 300 切片），起停时机**只在设备客户端**（`client/src/record.rs`）按 5009
 状态机决定：航点录像到点起、离开停；全程录像在这条任务第一个非终态帧起、终态/取消停。
 板端 Agent `POST /api/record/start|stop` 用 ffmpeg 从本机 mediamtx 的 dogcam 拉流，
-`-c copy` 封装 mp4（不重编码、不抢 MPP），落 `RECORD_DIR/<计划>/`，停下写同名边车；
-任务终态/客户端启动时客户端读 `/api/record/list` 逐段回传
-`POST /api/recordings/ingest`（multipart，sha256 去重），**上传成功才**回调
-`/api/record/delete` 删板端文件。平台侧落 `task_recordings` + `<recording_dir>/<设备>/<任务>/`，
+`-c copy` 封装 mp4（不重编码、不抢 MPP），落 `RECORD_DIR/<计划>/`，停下写同名边车。
+**回传是「平台按需」的（2026-11-25 起）**：任务终态 / 取消 / 客户端启动都**只留在
+板端**（`RECORD_DIR/<计划>/`），平台下发指令 `回传录像` 才由客户端读
+`/api/record/list` 逐段回传 `POST /api/recordings/ingest`（multipart，sha256 去重），
+**上传成功才**回调 `/api/record/delete` 删板端文件；进度/结论走与「同步媒体」同一套
+`command_progress` / `command_result`（中台设备页「录像回传状态」）。原因：现场主用
+4G，一场巡检几百 MB，终态就传会和下一轮的地图/状态上报抢带宽、而那会儿多半没人看。
 任务详情「任务录像」播放/下载（`GET /api/recordings/{id}/file` 支持 Range），
 超期由 `schedule::sweep` → `recordings::sweep_expired` 按 `recording_keep_days` 清。
 三条红线：**录像失败绝不影响巡检**（Agent 404/磁盘满都只记 `unsupported`，不抛错）；

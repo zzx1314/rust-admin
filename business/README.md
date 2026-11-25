@@ -756,7 +756,8 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
   → 设备客户端在 5009 状态机上起停（`client/src/record.rs`）
     → 板端 Agent POST /api/record/start|stop（`backpack_dashboard/backend/record.py`）
       → ffmpeg 从本机 mediamtx 的 dogcam 拉流（-c copy，不重编码）→ RECORD_DIR/<计划>/<pt?-时间戳>.mp4
-        → 任务终态 / 客户端启动：GET /api/record/list → POST /api/recordings/ingest（multipart）
+        （**就攒在这里，任务终态 / 客户端启动都不自动回传**）
+        → 平台下发指令「回传录像」：GET /api/record/list → POST /api/recordings/ingest（multipart）
           → 平台落盘 <recording_dir>/<设备>/<任务号>/…mp4 + 一条 task_recordings
             → 上传成功才回调 /api/record/delete 删板端文件
               → 任务详情「任务录像」播放 / 下载（`<video src>` 直连 Range 流）
@@ -779,6 +780,14 @@ axios 还有 120s 硬超时，现场表现就是「点回放没反应」（2026-
   客户端记为 `unsupported`，本轮不再尝试；到点、上报、AI、灯光全部照旧。
 - **全程录像切片**：4G 上一次传几百 MB 必然断，所以按 `RECORD_SEGMENT_SECS`（板端）
   切 mp4，客户端逐段上传；任何一段失败只影响那一段（失败的文件留 72h 等下一次）。
+- **回传是平台按需的**（2026-11-25 起）：任务终态 / 取消 / 客户端启动都**不再自动上传**，
+  mp4 就攒在板端 `RECORD_DIR/<计划>/`，等设备指令「回传录像」再传（中台设备页
+  「下发指令 → 回传录像」，进度 / 结论看「录像回传状态」）。理由：现场主用 4G，
+  一场巡检几百 MB，终态就传会和下一轮的地图 / 状态上报抢带宽，而那时多半没人看录像。
+  同一时间只跑一轮（重复下发回「上一轮还在跑」）；**上传成功才删**板端文件，失败的留到
+  下一次（计划已被删掉的那种会一直失败，只能手工清板端目录）。
+  ⚠️ 板端只保留 `RECORD_RETENTION_HOURS`（默认 **72 小时**）：超过就由 `sweep()` 清掉，
+  所以「想看再传」要在 72 小时内点（要放宽就改板端这个环境变量）。
 - **谁读板端磁盘**：客户端与 Agent 同机，`/api/record/list` 回绝对路径，客户端直接读文件
   上传；Agent 不对外提供 mp4 下载（公网平台够不到板端）。
 - **平台侧留存**：`recording_keep_days`（默认 30，`0` = 不清理）由 `schedule::sweep`

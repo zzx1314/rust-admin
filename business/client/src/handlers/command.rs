@@ -5,6 +5,7 @@ use crate::locate::parse_initial_pose;
 use crate::maps::push_map_to_body;
 use crate::maps::sync_maps_from_robot;
 use crate::media_sync;
+use crate::record::Recorder;
 use crate::speak;
 use crate::state::ActiveTask;
 use crate::state::RobotState;
@@ -45,6 +46,7 @@ pub(crate) async fn handle(
     local_mapping: &Shared<Option<Arc<MappingSession>>>,
     teleop: &SharedTeleop,
     body_reconnect: &mpsc::Sender<()>,
+    recorder: &Arc<Recorder>,
 ) {
     let command = msg.payload["command"].as_str().unwrap_or("unknown");
     info!("收到远程指令: {command}");
@@ -179,6 +181,71 @@ pub(crate) async fn handle(
                 "failed": summary.failed,
                 "deleted": summary.deleted,
                 "remaining": summary.remaining,
+            }),
+            Err(_) => json!({}),
+        };
+        send_command_result_with(out_tx, &msg, command, &result, extra).await;
+        match result {
+            Ok(note) => info!("指令 {command} 执行: {note}"),
+            Err(error) => {
+                warn!("指令 {command} 执行失败: {error}");
+                let event = DeviceEventPayload {
+                    event_type: "error".to_string(),
+                    message: format!("指令 {command} 执行失败: {error}"),
+                    data: None,
+                };
+                send(
+                    out_tx,
+                    "event",
+                    serde_json::to_value(event).unwrap_or_default(),
+                )
+                .await;
+            }
+        }
+        return;
+    }
+
+    // 「回传录像」：与「同步媒体」同一类长任务——只动板子自己的磁盘与上行网络，
+    // 不碰本体，所以同样放在本体门禁之前。
+    //
+    // **录像不再自动回传**（任务终态 / 客户端启动都不传），只有这条指令会调：
+    // 平台要哪一轮就点哪一轮，录像攒在板端 `RECORD_DIR/<计划>/`。
+    if command == "回传录像" {
+        let progress_tx = out_tx.clone();
+        let progress_request_id = command_request_id(&msg);
+        let progress = move |p: crate::record::SyncProgress| {
+            let Some(request_id) = progress_request_id.clone() else {
+                return;
+            };
+            let _ = progress_tx.try_send(WsMessage {
+                msg_type: "command_progress".to_string(),
+                ts: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                payload: json!({
+                    "requestId": request_id,
+                    "command": "回传录像",
+                    "uploaded": p.uploaded,
+                    "failed": p.failed,
+                    "total": p.total,
+                    "remaining": p.remaining,
+                }),
+            });
+        };
+        let summary = recorder.sync_all(Some(&progress)).await;
+        let result: Result<String, String> = match &summary {
+            Ok(summary) => Ok(summary.to_string()),
+            Err(error) => Err(error.clone()),
+        };
+        let extra = match &summary {
+            Ok(summary) => json!({
+                "drained": summary.drained(),
+                "nothingToDo": summary.nothing_to_do(),
+                "scanned": summary.scanned,
+                "uploaded": summary.uploaded,
+                "existing": summary.existing,
+                "failed": summary.failed,
+                "deleted": summary.deleted,
+                "remaining": summary.remaining,
+                "totalBytes": summary.total_bytes,
             }),
             Err(_) => json!({}),
         };

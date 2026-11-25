@@ -261,6 +261,7 @@ pub(crate) async fn handle_server_message(
                 local_mapping,
                 teleop,
                 body_reconnect,
+                recorder,
             )
             .await
         }

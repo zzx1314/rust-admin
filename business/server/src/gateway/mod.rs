@@ -666,15 +666,15 @@ async fn on_command_result(ctx: &ConnectionCtx<'_>, device: &str, payload: Value
         )
         .await;
     }
-    // 「同步媒体」是长任务：中台下发时只拿到「已送达」，真实进度/结论由这里回写中台审计
-    // （否则设备页只能猜）。
-    if payload.command == "同步媒体" {
-        report_media_sync_to_zentai(state, device, &payload);
+    // 长任务（「同步媒体」/「回传录像」）：中台下发时只拿到「已送达」，真实进度/结论
+    // 由这里回写中台审计（否则设备页只能猜）。
+    if matches!(payload.command.as_str(), "同步媒体" | "回传录像") {
+        report_long_task_to_zentai(state, device, &payload);
     }
     send_msg(ctx.tx, "command_result_ack", json!({"received": true})).await;
 }
 
-/// `command_progress`：长任务进度（目前只有「同步媒体」）。
+/// `command_progress`：长任务进度（「同步媒体」/「回传录像」）。
 ///
 /// 只回写中台审计，不动 `command_results` 等待表 —— 等待表只关心「最终结论」。
 fn on_command_progress(ctx: &ConnectionCtx<'_>, device: &str, payload: Value) {
@@ -684,24 +684,10 @@ fn on_command_progress(ctx: &ConnectionCtx<'_>, device: &str, payload: Value) {
         warn!("设备 {device} 的 command_progress 缺少 requestId");
         return;
     }
-    if payload.command != "同步媒体" {
+    if !matches!(payload.command.as_str(), "同步媒体" | "回传录像") {
         return;
     }
-    let body = json!({
-        "deviceCode": device,
-        "requestId": payload.request_id.trim(),
-        "status": "running",
-        "message": media_sync_progress_text(&payload),
-        // 结构化进度也存一份（审计的 result 字段）：页面想画进度条时不用去解析中文文案
-        "detail": {
-            "running": true,
-            "uploaded": payload.uploaded,
-            "failed": payload.failed,
-            "total": payload.total,
-            "batchesDone": payload.batches_done,
-            "batchesTotal": payload.batches_total,
-        },
-    });
+    let body = long_task_progress_body(device, &payload);
     let config = ctx.state.config.clone();
     tokio::spawn(async move {
         crate::zentai::try_report_media_sync(&config, body).await;

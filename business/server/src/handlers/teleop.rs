@@ -55,7 +55,7 @@ const BODY_ACTIONS: [(&str, &str); 11] = [
 ];
 
 /// 允许通过 `/command` 下发的业务指令
-const BUSINESS_COMMANDS: [&str; 13] = [
+const BUSINESS_COMMANDS: [&str; 14] = [
     "开始巡检",
     "暂停任务",
     "继续任务",
@@ -78,6 +78,10 @@ const BUSINESS_COMMANDS: [&str; 13] = [
     // 它不属于任何计划，不去重（同一句话可以再喊一遍）。
     "呼叫",
     "停止呼叫",
+    // 「回传录像」：把板端 `RECORD_DIR` 里攒着的巡检录像按需回传平台
+    // （2026-11-25 起录像**不再自动回传**，任务终态/客户端启动都只留在板端）。
+    // 与「同步媒体」同一套进度/结论回执（`command_progress` / `command_result`）。
+    "回传录像",
 ];
 
 fn invalid(message: impl Into<String>) -> AppError {
@@ -794,6 +798,15 @@ mod tests {
     fn rejects_unknown_business_command() {
         assert!(normalize_command("起飞").is_err());
         assert_eq!(normalize_command("开始巡检").unwrap(), "开始巡检");
+    }
+
+    /// 录像不再自动回传（2026-11-25）：平台必须能下发「回传录像」，
+    /// 否则板端攺的 mp4 永远上不来（任务终态/客户端启动都不再上传）。
+    #[test]
+    fn allows_record_sync_command_only_by_its_canonical_name() {
+        assert_eq!(normalize_command("回传录像").unwrap(), "回传录像");
+        assert!(normalize_command("回传视频").is_err());
+        assert!(normalize_command("同步录像").is_err());
     }
 
     /// 协议 1302 里没有「位姿复位」，这个动作不应该再被受理

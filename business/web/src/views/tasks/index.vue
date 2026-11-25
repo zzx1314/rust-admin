@@ -533,6 +533,7 @@ async function openDetail(task: Task) {
   detailTask.value = task;
   detailEvents.value = [];
   detailPhotos.value = [];
+  stopRecordingPullPoll();
   void stopWebPhone("切换任务");
   revokeAllPhotoUrls();
   detailVisible.value = true;
@@ -846,6 +847,69 @@ function closeRecordingDialog() {
   recordingPlaying.value = null;
 }
 
+/* ---------------- 按需回传板端录像 ---------------- */
+
+/** 「回传录像」下发后轮询详情列表的定时器（传上来一段就多一行） */
+let recordingPullTimer = 0;
+const pullingRecordings = ref(false);
+
+function stopRecordingPullPoll() {
+  if (recordingPullTimer) {
+    window.clearInterval(recordingPullTimer);
+    recordingPullTimer = 0;
+  }
+}
+
+/**
+ * 让设备把板端攺着的录像回传上来。
+ *
+ * 2026-11-25 起录像**不再自动回传**（任务终态 / 客户端启动都只留在板端
+ * `RECORD_DIR`），要看录像就点一下这个：下发给设备执行 `回传录像`，板端从自己的
+ * 目录里逐段上传，**传成功才删板端文件**。
+ *
+ * 这是长任务（4G 上一段几分钟，几百 MB 要几十分钟），下发接口只回「已下发」，
+ * 所以这里轻量轮询录像列表（只拉 /recordings，不整页刷新），传上来一段就多一行。
+ */
+async function pullRecordings() {
+  const task = detailTask.value;
+  if (!task) return;
+  const device = deviceOf(task);
+  if (!device) {
+    ElMessage.warning("这条任务没有绑定设备，无法回传录像");
+    return;
+  }
+  pullingRecordings.value = true;
+  try {
+    const res = await deviceApi.command(device.id, "回传录像");
+    if (!res.wsDelivered) {
+      ElMessage.warning(`${device.deviceId} 未连接，回传指令沒有送达`);
+      return;
+    }
+    ElMessage.success(
+      "已下发「回传录像」：板端开始上传，录像会陆续出现在列表里（大文件可能要几分钟）"
+    );
+    // 轮询录像列表：10s 一次、最多 6 分钟（够 4G 传完一两段；不够就再点一次）
+    stopRecordingPullPoll();
+    let tries = 0;
+    recordingPullTimer = window.setInterval(() => {
+      tries += 1;
+      const taskId = detailTask.value?.id;
+      if (!detailVisible.value || !taskId || tries > 36) {
+        stopRecordingPullPoll();
+        return;
+      }
+      void recordingApi
+        .list(taskId)
+        .then(list => {
+          if (Array.isArray(list)) detailRecordings.value = list;
+        })
+        .catch(() => undefined);
+    }, 10000);
+  } finally {
+    pullingRecordings.value = false;
+  }
+}
+
 async function removeRecording(item: TaskRecording) {
   try {
     await ElMessageBox.confirm(
@@ -1048,6 +1112,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.clearInterval(refreshTimer);
+  stopRecordingPullPoll();
   revokeRecordingUrl();
 });</script>
 
@@ -1819,6 +1884,15 @@ onBeforeUnmount(() => {
 
         <div class="rt-sec-title" style="margin-top: 18px">
           <span>任务录像（{{ detailRecordings.length }}）</span><AppIcon name="video" />
+          <button
+            class="btn sm"
+            style="margin-left: auto"
+            :disabled="pullingRecordings"
+            title="让设备把板端攒着的录像回传上来（录像不再自动回传，需要时点一下）"
+            @click="pullRecordings"
+          >
+            <AppIcon name="download" />{{ pullingRecordings ? "下发中…" : "回传板端录像" }}
+          </button>
         </div>
         <div v-if="detailRecordings.length" class="act-kv" style="font-size: 11.5px; gap: 7px">
           <div
@@ -1842,7 +1916,8 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div v-else class="empty-box" style="padding: 16px 0">
-          暂无录像。路线里给航点配「录像采集」或在航段配「全程录像」，任务跑完会出现在这里。
+          暂无录像。路线里给航点配「录像采集」或在航段配「全程录像」，任务跑完会攒在板端；
+          点上面「回传板端录像」让设备传上来。
         </div>
 
         <div class="rt-sec-title" style="margin-top: 18px">

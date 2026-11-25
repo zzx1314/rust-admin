@@ -24,11 +24,21 @@ const PUSH_MAP_TIMEOUT: Duration = Duration::from_secs(65);
 /// 「同步媒体」：异步长任务，中台下发后审计停在 pending，等客户端回报结论。
 /// 超过这么久还没结论，就当这轮丢了（客户端崩溃 / 断网），允许重新下发。
 const MEDIA_SYNC_ACTION: &str = "同步媒体";
+/// 「回传录像」：同一类长任务。2026-11-25 起录像不再自动回传，
+/// 板端把 mp4 攺在 `RECORD_DIR`，由中台/业务平台下发这条指令才传。
+const RECORD_SYNC_ACTION: &str = "回传录像";
+/// 长任务指令（下发后审计停在 pending，等客户端异步回报进度与结论）。
+const LONG_TASK_ACTIONS: [&str; 2] = [MEDIA_SYNC_ACTION, RECORD_SYNC_ACTION];
 const MEDIA_SYNC_STALE_SECS: i64 = 600;
+
+/// 这条指令是不是「长任务」（下发后审计停在 pending，等客户端异步回报进度与结论）。
+pub fn is_long_task_action(action: &str) -> bool {
+    LONG_TASK_ACTIONS.contains(&action)
+}
 
 /// 允许从中台发起的设备指令白名单（与业务平台 `teleop::BUSINESS_COMMANDS` 对齐）。
 /// 「同步地图」有独立入口 `syncMaps`，这里不重复暴露。
-const ALLOWED_COMMANDS: [&str; 7] = [
+const ALLOWED_COMMANDS: [&str; 8] = [
     "开始巡检",
     "暂停任务",
     "继续任务",
@@ -37,11 +47,21 @@ const ALLOWED_COMMANDS: [&str; 7] = [
     "释放接管",
     // 把板端 `/media/media-data/picture` 里的 AI 存证图回传到中台「媒体资源」
     "同步媒体",
+    // 把板端 `RECORD_DIR` 里攺着的巡检录像回传到业务平台「任务录像」
+    // （录像不再自动回传，这条是按需触发）
+    "回传录像",
 ];
 
 #[derive(serde::Deserialize)]
 pub struct IdParam {
     pub id: i64,
+}
+
+/// `?action=回传录像`：看哪一条长任务的状态（缺省走「同步媒体」，保持老页面兼容）。
+#[derive(serde::Deserialize)]
+pub struct LongTaskStatusQuery {
+    #[serde(default)]
+    pub action: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -349,10 +369,10 @@ pub(crate) async fn forward(
     request_id: &str,
     body: Value,
 ) -> Result<Value, AppError> {
-    // 已经有一轮「同步媒体」在跑：不重复下发（重复下发会让板端同时跑两轮扫描），
-    // 直接把「同步中」回给页面。超过 `MEDIA_SYNC_STALE_SECS` 没结论就当丢了，
-    // 走原来的「复用审计 + 重新下发」。
-    if action == MEDIA_SYNC_ACTION
+    // 已经有一轮长任务在跑（「同步媒体」/「回传录像」）：不重复下发（重复下发会让
+    // 板端同时跑两轮扫描 / 上传，还抢同一条上行带宽），直接把「进行中」回给页面。
+    // 超过 `MEDIA_SYNC_STALE_SECS` 没结论就当丢了，走原来的「复用审计 + 重新下发」。
+    if is_long_task_action(action)
         && let Some(previous) = state.dog_device_service.find_command(request_id).await?
         && previous.status == audit::STATUS_PENDING
         && !audit_is_stale(&previous)
@@ -387,11 +407,12 @@ pub(crate) async fn forward(
 
     match outcome {
         Ok(data) => {
-            // 「同步媒体」是长任务：下发成功只代表设备客户端收到了，图片要一张张
-            // 传上来（4G 上一轮几十张可能跑几分钟）。真实结论由客户端异步回报
-            // （→ 业务平台 → `POST /api/dogInternal/media/sync-status`），
-            // 所以审计**停在 pending**，设备页显示「同步中」而不是假的「已完成」。
-            if action == MEDIA_SYNC_ACTION
+            // 长任务（「同步媒体」/「回传录像」）：下发成功只代表设备客户端收到了，
+            // 图片要一张张 / 录像要一段段传上来（4G 上一轮可能跑几分钟到几十分钟）。
+            // 真实结论由客户端异步回报（→ 业务平台 →
+            // `POST /api/dogInternal/media/sync-status`），所以审计**停在 pending**，
+            // 设备页显示「进行中」而不是假的「已完成」。
+            if is_long_task_action(action)
                 && data
                     .get("wsDelivered")
                     .and_then(Value::as_bool)
@@ -403,7 +424,11 @@ pub(crate) async fn forward(
                         request_id,
                         None,
                         Some(&data.to_string()),
-                        Some("已下发，等待设备客户端回传同步结果"),
+                        Some(if action == RECORD_SYNC_ACTION {
+                            "已下发，等待设备客户端回传录像"
+                        } else {
+                            "已下发，等待设备客户端回传同步结果"
+                        }),
                     )
                     .await
                     .ok();
@@ -605,10 +630,10 @@ pub async fn device_runtime_handler(
     Ok(Json(ApiResponse::ok(data)))
 }
 
-/// `GET /api/dogDevice/{id}/mediaSyncStatus` — 最近一次「同步媒体」的状态。
+/// `GET /api/dogDevice/{id}/mediaSyncStatus` — 最近一次长任务的「同步媒体」/「回传录像」状态。
 ///
-/// 「同步媒体」是长任务（扫板端目录 → 逐个压缩包传中台），下发接口只回
-/// 「已下发」。设备页靠这个查询看进度与结论：
+/// 两条都是长任务（扫板端目录 → 传平台），下发接口只回「已下发」。
+/// 设备页靠这个查询看进度与结论，`?action=` 选看哪一条（缺省 = 「同步媒体」）：
 ///
 /// - `pending`：还在跑（`message` 里带「已上传 8/24 张」这种进度）；
 /// - `succeeded`：客户端回报的真结论（扫了几张、传了几张、目录是否清空）；
@@ -618,14 +643,26 @@ pub async fn media_sync_status_handler(
     State(state): State<AppState>,
     Extension(user): Extension<RequestUser>,
     Path(params): Path<IdParam>,
+    Query(query): Query<LongTaskStatusQuery>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let action = query
+        .action
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(MEDIA_SYNC_ACTION);
+    if !LONG_TASK_ACTIONS.contains(&action) {
+        return Err(AppError::BadRequest(format!(
+            "不支持的长任务指令：{action}"
+        )));
+    }
     let device = state
         .dog_device_service
         .get(params.id, &user.data_scope())
         .await?;
     let latest = state
         .dog_device_service
-        .latest_command(&device.device_id, MEDIA_SYNC_ACTION)
+        .latest_command(&device.device_id, action)
         .await?;
     let Some(record) = latest else {
         return Ok(Json(ApiResponse::ok(Value::Null)));
@@ -633,6 +670,7 @@ pub async fn media_sync_status_handler(
     let stale = record.status == audit::STATUS_PENDING && audit_is_stale(&record);
     Ok(Json(ApiResponse::ok(json!({
         "deviceId": device.device_id,
+        "action": action,
         "requestId": record.request_id,
         "status": record.status,
         // 等太久还没结论：页面刷成「没有回报」而不是一直转圈

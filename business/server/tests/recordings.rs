@@ -281,6 +281,19 @@ async fn recording_round_trip_dedupes_and_streams_ranges() {
             .any(|row| row["scope"] == "task" && row["pointIndex"] == -1),
         "全程录像要出现在任务录像里：{body}"
     );
+    // 时长要真落库：客户端 meta 里发的是 `durationSec`（板端边车同名）。
+    // 以前 `IngestMeta` 用 camelCase 派生成了 `durationS`，一直匹配不上，
+    // 入库恒为 0，任务详情「时长」显示 `—`。
+    let point = rows
+        .iter()
+        .find(|row| row["scope"] == "point")
+        .expect("应该有航点录像");
+    assert_eq!(point["durationSec"], 12.5, "durationSec 要入库：{body}");
+    let task = rows
+        .iter()
+        .find(|row| row["scope"] == "task")
+        .expect("应该有全程录像");
+    assert_eq!(task["durationSec"], 300.0, "全程录像时长也要入库：{body}");
 
     // 5) 整段下载
     let request = Request::get(format!("/api/recordings/{recording_id}/file"))

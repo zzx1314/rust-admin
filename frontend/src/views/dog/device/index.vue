@@ -41,6 +41,7 @@ const {
   mediaSyncVisible,
   mediaSyncLoading,
   mediaSyncDevice,
+  mediaSyncAction,
   mediaSyncStatus,
   mediaSyncPolling,
   onSearch,
@@ -147,6 +148,9 @@ const {
                       >
                       <el-dropdown-item command="media"
                         >媒体同步状态</el-dropdown-item
+                      >
+                      <el-dropdown-item command="records"
+                        >录像回传状态</el-dropdown-item
                       >
                       <el-dropdown-item divided disabled class="menu-group">
                         下发指令
@@ -423,11 +427,12 @@ const {
       </div>
     </el-drawer>
 
-    <!-- 「同步媒体」进度 / 结论：下发只回「已下发」，扫了几张、传了几张靠这里看 -->
+    <!-- 长任务（「同步媒体」/「回传录像」）进度 / 结论：下发只回「已下发」，
+         扫了多少、传了多少靠这里看 -->
     <el-dialog
       v-model="mediaSyncVisible"
       width="560px"
-      :title="`媒体同步 · ${mediaSyncDevice?.deviceName || mediaSyncDevice?.deviceId || ''}`"
+      :title="`${mediaSyncAction} · ${mediaSyncDevice?.deviceName || mediaSyncDevice?.deviceId || ''}`"
       @closed="stopMediaSyncPolling"
     >
       <div v-loading="mediaSyncLoading && !mediaSyncStatus">
@@ -435,8 +440,12 @@ const {
           v-if="!mediaSyncStatus"
           type="info"
           :closable="false"
-          title="这台设备还没有「同步媒体」记录"
-          description="在「下发指令」里点「同步媒体」，板端会把 /media/media-data/picture 下的存证图回传到媒体资源。"
+          :title="`这台设备还没有「${mediaSyncAction}」记录`"
+          :description="
+            mediaSyncAction === '回传录像'
+              ? '在「下发指令」里点「回传录像」，板端会把 RECORD_DIR 里攒着的巡检录像回传到业务平台「任务录像」（录像不再自动回传）。'
+              : '在「下发指令」里点「同步媒体」，板端会把 /media/media-data/picture 下的存证图回传到媒体资源。'
+          "
         />
         <template v-else>
           <el-descriptions :column="1" border>
@@ -486,7 +495,7 @@ const {
             type="warning"
             :closable="false"
             title="设备超过 10 分钟没有回报"
-            description="可能是客户端掉线或同步卡住：先看设备是否在线，必要时重新点一次「同步媒体」。"
+            :description="`可能是客户端掉线或任务卡住：先看设备是否在线，必要时重新点一次「${mediaSyncAction}」。`"
           />
           <el-alert
             v-else-if="
@@ -497,8 +506,12 @@ const {
             style="margin-top: 12px"
             type="info"
             :closable="false"
-            :title="`板端还有 ${mediaSyncStatus.result.remaining} 张未回传`"
-            description="单轮上限 200 张，再点一次「同步媒体」把剩下的传完。"
+            :title="
+              mediaSyncAction === '回传录像'
+                ? `板端还有 ${mediaSyncStatus.result.remaining} 段未回传`
+                : `板端还有 ${mediaSyncStatus.result.remaining} 张未回传`
+            "
+            :description="`再点一次「${mediaSyncAction}」把剩下的传完。`"
           />
         </template>
       </div>

@@ -206,12 +206,9 @@ pub(crate) async fn run_client(
     ));
     if config.record_enabled {
         info!(
-            "航点 / 航段录像已启用：板端 Agent = {}（到点按路线动作起 ffmpeg，任务终态回传平台）",
+            "航点 / 航段录像已启用：板端 Agent = {}（到点按路线动作起 ffmpeg，录像留在板端，等平台下发「回传录像」再传）",
             recorder.agent()
         );
-        // 上次没传完的录像（断网 / 客户端重启）：连上平台之后由这里补传，
-        // 不必等下一轮任务。板端文件上传成功才删，失败留着下次再试。
-        recorder.sync_pending();
     } else {
         info!("航点 / 航段录像已关闭（--no-record / ROBODOG_RECORD_ENABLED=0）");
     }

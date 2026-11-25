@@ -9,10 +9,16 @@
 //!                                                    ↓
 //!                               板端 Agent（record.py）ffmpeg → RECORD_DIR/<plan>/…mp4
 //!                                                    ↓
-//!           任务终态 / 客户端启动 → GET /api/record/list → POST 平台 /api/recordings/ingest
+//!        平台下发「回传录像」→ GET /api/record/list → POST 平台 /api/recordings/ingest
 //!                                                    ↓
 //!                               上传成功 → POST /api/record/delete 删板端文件
 //! ```
+//!
+//! **回传是「平台按需」的（2026-11-25 起）**：任务终态 / 取消 / 客户端启动都**不再**
+//! 自动往平台传，录像就攒在板端 `RECORD_DIR/<计划>/` 里，等平台下发 `回传录像`
+//! 指令再传（与「同步媒体」同一套 `command_progress` / `command_result` 回执）。
+//! 原因：现场主用 4G，一条计划动辄几百 MB，任务一结束就抢带宽会把下一轮巡检的
+//! 地图 / 状态上报挤掉；而且那会儿多半没人看录像。
 //!
 //! 三条约定（改这块先看）：
 //!
@@ -230,6 +236,91 @@ pub struct RecordingFile {
     pub duration_sec: f64,
 }
 
+/// 一段录像的上传结果（平台按 sha256 去重，`Existing` 也算成功）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UploadOutcome {
+    /// 平台新入库
+    Created,
+    /// 平台已有这一段（重传 / 之前传过但没删板端文件）
+    Existing,
+}
+
+/// 一轮「回传录像」的结果（`Display` 直接作为指令回执文案给设备页看）。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SyncSummary {
+    /// 本轮扫描到的板端录像段数
+    pub scanned: usize,
+    /// 上传成功的段数（含「平台已有」）
+    pub uploaded: usize,
+    /// 其中平台早就有了（sha256 命中）的段数
+    pub existing: usize,
+    /// 失败段数（文件留在板端，再点一次会重试）
+    pub failed: usize,
+    /// 上传成功后删掉的板端文件数
+    pub deleted: usize,
+    /// 本轮结束后板端还剩多少段
+    pub remaining: usize,
+    pub total_bytes: u64,
+    pub errors: Vec<String>,
+}
+
+impl SyncSummary {
+    /// 板端录像目录是否已经清空（设备页据此显示「完成」还是「还有剩余」）。
+    pub fn drained(&self) -> bool {
+        self.remaining == 0
+    }
+
+    /// 是否什么都不用传（板端本来就没攒到录像）。
+    pub fn nothing_to_do(&self) -> bool {
+        self.scanned == 0 && self.failed == 0
+    }
+}
+
+impl std::fmt::Display for SyncSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.nothing_to_do() {
+            return write!(f, "板端录像目录没有待回传的录像");
+        }
+        write!(
+            f,
+            "录像回传完成：扫描 {} 段（合计 {:.1}MB），上传成功 {}（新增 {} / 平台已有 {}），失败 {}，已删除板端文件 {}",
+            self.scanned,
+            self.total_bytes as f64 / 1024.0 / 1024.0,
+            self.uploaded,
+            self.uploaded.saturating_sub(self.existing),
+            self.existing,
+            self.failed,
+            self.deleted
+        )?;
+        if self.drained() {
+            write!(f, "；板端录像已清空")?;
+        } else {
+            write!(
+                f,
+                "；板端仍有 {} 段未回传，请再点一次「回传录像」",
+                self.remaining
+            )?;
+        }
+        if !self.errors.is_empty() {
+            write!(f, "；前几条错误：{}", self.errors.join(" | "))?;
+        }
+        Ok(())
+    }
+}
+
+/// 一轮回传的进度（每传完一段上报一次，供设备页显示「回传中 3/12 段」）。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SyncProgress {
+    pub uploaded: usize,
+    pub failed: usize,
+    pub total: usize,
+    pub remaining: usize,
+}
+
+/// 进度回调。回传是长任务（4G 下一段几分钟），没法等 `command_result`
+/// 才知道进展，所以每传完一段就回调一次。
+pub type ProgressFn<'a> = &'a (dyn Fn(SyncProgress) + Send + Sync);
+
 #[derive(Default)]
 struct State {
     task_code: Option<String>,
@@ -444,7 +535,11 @@ impl Recorder {
         self.stop_job(&task_code, "point", None, reason).await;
     }
 
-    /// 任务终态 / 取消 / 本地收尾：停掉所有录像，并把板端积压的录像回传。
+    /// 任务终态 / 取消 / 本地收尾：**只停录像，不回传**。
+    ///
+    /// 录像留在板端 `RECORD_DIR/<计划>/`，等平台下发「回传录像」指令再传
+    /// （见 [`Recorder::sync_all`]）。以前这里会顺手 `spawn_upload()`：现场 4G 上
+    /// 一场巡检刚结束就开始传几百 MB，跟下一轮的地图 / 状态上报抢带宽。
     pub async fn finish_task(self: &Arc<Self>, task_code: &str, reason: &str) {
         if !self.enabled {
             return;
@@ -456,19 +551,10 @@ impl Recorder {
             state.task_active = false;
         }
         // 任务号为空（平台只发了 cancel 没带 taskCode）：没有 planId 可停，
-        // 板端两路 ffmpeg 会按自己的 `-t` 上限结束；已录好的照样回传。
+        // 板端两路 ffmpeg 会按自己的 `-t` 上限结束；录好的文件留在板端等平台要。
         if !task_code.trim().is_empty() {
             self.stop_plan(task_code, reason).await;
         }
-        self.spawn_upload();
-    }
-
-    /// 客户端启动 / 指令触发：把板端积压的录像（上次没传完的）回传。
-    pub fn sync_pending(self: &Arc<Self>) {
-        if !self.enabled {
-            return;
-        }
-        self.spawn_upload();
     }
 
     async fn stop_plan(self: &Arc<Self>, task_code: &str, reason: &str) {
@@ -561,52 +647,90 @@ impl Recorder {
         }
     }
 
-    /// 后台把板端待回的录像传上来（终态 / 启动各触发一次，不叠加）。
-    fn spawn_upload(self: &Arc<Self>) {
-        if self.uploading.swap(true, Ordering::SeqCst) {
-            return;
+    /// 平台下发「回传录像」：把板端积压的录像（`RECORD_DIR`）按需回传。
+    ///
+    /// 与「同步媒体」同一套语义：一轮把清单里的段全部传一遍，**上传成功才删板端
+    /// 文件**（失败的留着，下次再点一次「回传录像」）。不主动跑：任务终态 / 客户端
+    /// 启动都不再调用它，只有平台指令（`handlers::command`）会调。
+    pub async fn sync_all(
+        self: &Arc<Self>,
+        progress: Option<ProgressFn<'_>>,
+    ) -> Result<SyncSummary, String> {
+        if !self.enabled {
+            return Err("录像未启用（--no-record / ROBODOG_RECORD_ENABLED=0）".to_string());
         }
-        let this = self.clone();
-        tokio::spawn(async move {
-            if let Err(error) = this.upload_pending().await {
-                warn!("录像回传失败（板端文件保留，下次任务/重启会重试）: {error}");
-            }
-            this.uploading.store(false, Ordering::SeqCst);
-        });
+        // 同一时间只跑一轮：重复下发不会让板端两份 ffmpeg + 两份上传抢带宽
+        if self.uploading.swap(true, Ordering::SeqCst) {
+            return Err("上一轮录像回传还在跑，请等它结束（进度见设备页状态）".to_string());
+        }
+        let outcome = self.run_sync(progress).await;
+        self.uploading.store(false, Ordering::SeqCst);
+        outcome
     }
 
-    async fn upload_pending(&self) -> Result<(), String> {
-        let files = match self.list_recordings().await {
-            Ok(files) => files,
-            Err(error) => {
-                // 板端没有录像接口 / fx 目录不可读：不是错误，静默
-                return Err(error);
-            }
-        };
+    async fn run_sync(&self, progress: Option<ProgressFn<'_>>) -> Result<SyncSummary, String> {
+        let files = self.list_recordings().await?;
+        let total = files.len();
+        let total_bytes: u64 = files.iter().map(|file| file.size).sum();
         if files.is_empty() {
-            return Ok(());
+            info!("回传录像：板端没有待回传的录像（{}）", self.agent);
+            return Ok(SyncSummary::default());
         }
         let api_base = self.config.resolve_api_base();
         let token = media_sync::login(&self.upload_client, &api_base, &self.config).await?;
         info!(
-            "开始回传巡检录像：{} 段（合计 {:.1}MB）",
-            files.len(),
-            files.iter().map(|file| file.size).sum::<u64>() as f64 / 1024.0 / 1024.0
+            "开始回传巡检录像：{total} 段（合计 {:.1}MB）",
+            total_bytes as f64 / 1024.0 / 1024.0
         );
-        let mut uploaded = 0usize;
-        let mut failed = 0usize;
-        for file in files {
-            match self.upload_one(&api_base, &token, &file).await {
-                Ok(true) => uploaded += 1,
-                Ok(false) => {}
+        // 第一帧进度：让设备页立刻看到总量（4G 上一段要几分钟）
+        if let Some(report) = progress {
+            report(SyncProgress {
+                total,
+                remaining: total,
+                ..Default::default()
+            });
+        }
+        let mut summary = SyncSummary {
+            scanned: total,
+            total_bytes,
+            ..Default::default()
+        };
+        for (index, file) in files.iter().enumerate() {
+            match self.upload_one(&api_base, &token, file).await {
+                Ok(UploadOutcome::Created) => {
+                    summary.uploaded += 1;
+                    summary.deleted += 1;
+                }
+                Ok(UploadOutcome::Existing) => {
+                    // 平台按 sha256 去重：这段早就传过，板端这份可以删
+                    summary.existing += 1;
+                    summary.deleted += 1;
+                }
                 Err(error) => {
-                    failed += 1;
+                    summary.failed += 1;
+                    if summary.errors.len() < 5 {
+                        summary.errors.push(format!("{}: {error}", file.name));
+                    }
                     warn!("录像上传失败（{}）: {error}", file.name);
                 }
             }
+            if let Some(report) = progress {
+                report(SyncProgress {
+                    total,
+                    uploaded: summary.uploaded,
+                    failed: summary.failed,
+                    remaining: total - (index + 1),
+                });
+            }
         }
-        info!("巡检录像回传结束：成功 {uploaded} 段，失败 {failed} 段（失败的留在板端）");
-        Ok(())
+        // 回读一次清单：剩余以板端实际文件为准（失败的 / 新录进来的都算）
+        summary.remaining = self
+            .list_recordings()
+            .await
+            .map(|rest| rest.len())
+            .unwrap_or(total - summary.deleted);
+        info!("巡检录像回传结束：{}；失败的留在板端", summary);
+        Ok(summary)
     }
 
     async fn upload_one(
@@ -614,7 +738,7 @@ impl Recorder {
         api_base: &str,
         token: &str,
         file: &RecordingFile,
-    ) -> Result<bool, String> {
+    ) -> Result<UploadOutcome, String> {
         let bytes = tokio::fs::read(&file.path)
             .await
             .map_err(|error| format!("读取板端录像失败（{}）: {error}", file.path))?;
@@ -651,9 +775,17 @@ impl Recorder {
                     let status = resp.status();
                     let text = resp.text().await.unwrap_or_default();
                     if status.is_success() {
-                        // 上传成功才删板端文件（失败的要留给下一轮重试）
+                        // 上传成功才删板端文件（失败的要留给 `回传录像` 再试一次）
+                        let created = serde_json::from_str::<Value>(&text)
+                            .ok()
+                            .and_then(|value| value.get("data")?.get("created")?.as_bool())
+                            .unwrap_or(true);
                         self.delete_on_board(&file.name).await;
-                        return Ok(true);
+                        return Ok(if created {
+                            UploadOutcome::Created
+                        } else {
+                            UploadOutcome::Existing
+                        });
                     }
                     last_error = format!("HTTP {status}: {text}");
                 }
@@ -862,7 +994,12 @@ mod tests {
             )
             .route(
                 "/api/record/list",
-                get(|| async { Json(json!({"files": []})) }),
+                get(
+                    |State(calls): State<Calls>| async move {
+                        calls.lock().await.push(json!({"path": "list"}));
+                        Json(json!({"files": []}))
+                    },
+                ),
             )
             .route(
                 "/api/record/delete",
@@ -969,5 +1106,199 @@ mod tests {
         // 第二次不再发请求（连接被拒会立刻返回；这里只看状态，不引入额外依赖）
         let state = recorder.state.lock().await;
         assert!(state.unsupported || state.point_active.is_none());
+    }
+
+    /// 任务终态**不再**主动回传：录像就留在板端，等平台下发「回传录像」。
+    ///
+    /// 回归点：以前终态会 `spawn_upload()`，现场 4G 上刚跑完就开始传几百 MB。
+    /// 这里用假 Agent 的 `/api/record/list` 计数（回传第一步就是列清单）。
+    #[tokio::test]
+    async fn finish_task_keeps_files_on_the_board_without_uploading() {
+        let calls: Calls = Default::default();
+        let agent = spawn_agent(calls.clone()).await;
+        let recorder = Arc::new(Recorder::new(Arc::new(test_config(&agent)), true));
+
+        recorder.start_task("TK-1", plan()).await;
+        recorder.finish_task("TK-1", "任务终态").await;
+        // 回传是 spawn 出去的：给一个宽裕的窗口，确认它确实没有发生
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let calls = calls.lock().await.clone();
+        assert!(
+            calls.iter().all(|call| call["path"] != "list"),
+            "终态不该列板端录像清单（回传只能由平台指令触发）：{calls:?}"
+        );
+    }
+
+    /// 「回传录像」：从板端清单逐段上传，成功才删板端文件，并把进度回调出去。
+    #[tokio::test]
+    async fn sync_all_uploads_then_deletes_and_reports_progress() {
+        // 板端真文件（客户端要读盘上传）
+        let dir = std::env::temp_dir().join(format!("rec-sync-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("建临时目录失败");
+        let path = dir.join("task-1.mp4");
+        std::fs::write(&path, b"fake-mp4-bytes").expect("写临时录像失败");
+
+        let agent_calls: Calls = Default::default();
+        let remaining: Calls = Default::default();
+        remaining.lock().await.push(json!({
+            "name": format!("TK-1/{}", path.file_name().unwrap().to_string_lossy()),
+            "path": path.to_string_lossy(),
+            "planId": "TK-1",
+            "scope": "task",
+            "pointIndex": -1,
+            "pointName": "",
+            "size": 14,
+            "startedAt": "2026-11-25 09:43:19",
+            "endedAt": "2026-11-25 09:51:22",
+            "durationSec": 100.6,
+        }));
+        let agent = spawn_sync_agent(agent_calls.clone(), remaining.clone()).await;
+        let platform_calls: Calls = Default::default();
+        let platform = spawn_platform(platform_calls.clone()).await;
+
+        let mut config = test_config(&agent);
+        config.api_base = Some(platform);
+        let recorder = Arc::new(Recorder::new(Arc::new(config), true));
+
+        let progress: Calls = Default::default();
+        let report = |p: SyncProgress| {
+            let progress = progress.clone();
+            tokio::spawn(async move {
+                progress
+                    .lock()
+                    .await
+                    .push(json!({"uploaded": p.uploaded, "total": p.total}));
+            });
+        };
+        let summary = recorder
+            .sync_all(Some(&report))
+            .await
+            .expect("回传应成功");
+        assert_eq!(summary.scanned, 1);
+        assert_eq!(summary.uploaded, 1, "一段应上传成功：{summary}");
+        assert_eq!(summary.existing, 0);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.deleted, 1, "上传成功要删板端文件：{summary}");
+        assert_eq!(summary.remaining, 0);
+        assert!(summary.drained());
+
+        let agent_calls = agent_calls.lock().await.clone();
+        let deletes: Vec<&Value> = agent_calls
+            .iter()
+            .filter(|call| call["path"] == "delete")
+            .collect();
+        assert_eq!(deletes.len(), 1, "删板端文件走 /api/record/delete：{agent_calls:?}");
+        assert_eq!(
+            deletes[0]["body"]["names"][0].as_str(),
+            Some(format!("TK-1/{}", path.file_name().unwrap().to_string_lossy()).as_str()),
+            "回传的 name 要原样带回板端"
+        );
+
+        let platform_calls = platform_calls.lock().await.clone();
+        assert!(
+            platform_calls.iter().any(|call| call["path"] == "ingest"),
+            "要打到平台 /api/recordings/ingest：{platform_calls:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let progress = progress.lock().await.clone();
+        assert!(
+            progress.iter().any(|p| p["total"] == 1 && p["uploaded"] == 0),
+            "开传前要先报一次总量：{progress:?}"
+        );
+        assert!(
+            progress.iter().any(|p| p["uploaded"] == 1),
+            "每传完一段要报进度：{progress:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 已启用时重复下发：第二轮直接拒绝（不让两份上传抢带宽）。
+    #[tokio::test]
+    async fn sync_all_refuses_to_run_twice() {
+        let recorder = Arc::new(Recorder::new(Arc::new(test_config("http://127.0.0.1:1")), true));
+        recorder.uploading.store(true, Ordering::SeqCst);
+        let error = recorder.sync_all(None).await.expect_err("第二轮应被拒绝");
+        assert!(error.contains("还在跑"), "{error}");
+        recorder.uploading.store(false, Ordering::SeqCst);
+        // 未启用的实例也不该跑
+        let disabled = Arc::new(Recorder::new(Arc::new(test_config("http://127.0.0.1:1")), false));
+        let error = disabled.sync_all(None).await.expect_err("未启用应拒绝");
+        assert!(error.contains("未启用"), "{error}");
+    }
+
+    /// 假 Agent：清单来自可变状态（/api/record/delete 会把条目摘掉）。
+    async fn spawn_sync_agent(calls: Calls, files: Calls) -> String {
+        let app = axum::Router::new()
+            .route(
+                "/api/record/list",
+                get(|State((_calls, files)): State<(Calls, Calls)>| async move {
+                    Json(json!({"files": files.lock().await.clone()}))
+                }),
+            )
+            .route(
+                "/api/record/delete",
+                post(
+                    |State((calls, files)): State<(Calls, Calls)>, Json(body): Json<Value>| async move {
+                        calls
+                            .lock()
+                            .await
+                            .push(json!({"path": "delete", "body": body.clone()}));
+                        let names: Vec<String> = body["names"]
+                            .as_array()
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .filter_map(|name| name.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let mut files = files.lock().await;
+                        files.retain(|file| {
+                            !names
+                                .iter()
+                                .any(|name| file["name"].as_str() == Some(name.as_str()))
+                        });
+                        Json(json!({"ok": true}))
+                    },
+                ),
+            )
+            .with_state((calls, files));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("绑定假 Agent 失败");
+        let port = listener.local_addr().expect("取端口失败").port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// 假平台：登录 + 录像入库（回 `created=true`）。
+    async fn spawn_platform(calls: Calls) -> String {
+        let app = axum::Router::new()
+            .route(
+                "/api/auth/login",
+                post(|| async { Json(json!({"code": 10200, "data": {"token": "t"}})) }),
+            )
+            .route(
+                "/api/recordings/ingest",
+                post(
+                    |State(calls): State<Calls>, _body: axum::body::Bytes| async move {
+                        calls.lock().await.push(json!({"path": "ingest"}));
+                        Json(json!({"code": 10200, "data": {"created": true}}))
+                    },
+                ),
+            )
+            .with_state(calls);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("绑定假平台失败");
+        let port = listener.local_addr().expect("取端口失败").port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://127.0.0.1:{port}")
     }
 }

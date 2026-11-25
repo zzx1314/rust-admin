@@ -278,10 +278,18 @@ pub async fn media_sync_status_handler(
     if !req.device_code.trim().is_empty() && record.device_code != req.device_code.trim() {
         return Err(AppError::BadRequest("设备编号与审计记录不一致".to_string()));
     }
-    if record.action != "同步媒体" {
+    if !crate::business::dog::device::handlers::is_long_task_action(&record.action) {
         return Err(AppError::BadRequest(format!(
-            "该 requestId 属于指令「{}」，不接受媒体同步状态回报",
+            "该 requestId 属于指令「{}」，不接受长任务状态回报",
             record.action
+        )));
+    }
+    // 回报里带了 `action` 就对一下：别把「同步媒体」的进度盖到「回传录像」的审计行上
+    if !req.action.trim().is_empty() && req.action.trim() != record.action {
+        return Err(AppError::BadRequest(format!(
+            "指令名不一致：审计是「{}」，回报是「{}」",
+            record.action,
+            req.action.trim()
         )));
     }
 
@@ -306,12 +314,15 @@ pub async fn media_sync_status_handler(
     }))))
 }
 
-/// 业务平台转来的「同步媒体」回报。
+/// 业务平台转来的长任务（「同步媒体」/「回传录像」）回报。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaSyncStatusRequest {
     #[serde(default)]
     pub device_code: String,
+    /// 指令名（「同步媒体」/「回传录像」）；老业务平台不带，按审计行自身核对
+    #[serde(default)]
+    pub action: String,
     pub request_id: String,
     /// running / succeeded / failed
     #[serde(default)]

@@ -391,6 +391,7 @@ async fn media_sync_dispatch_stays_pending_until_the_device_reports() {
         headers.clone(),
         Json(x_rust::business::dog::internal::MediaSyncStatusRequest {
             device_code: "RD-100".to_string(),
+            action: "同步媒体".to_string(),
             request_id: "req-media-1".to_string(),
             status: "running".to_string(),
             message: "同步中：已上传 8/24 张".to_string(),
@@ -420,6 +421,7 @@ async fn media_sync_dispatch_stays_pending_until_the_device_reports() {
         headers,
         Json(x_rust::business::dog::internal::MediaSyncStatusRequest {
             device_code: "RD-100".to_string(),
+            action: "同步媒体".to_string(),
             request_id: "req-media-1".to_string(),
             status: "succeeded".to_string(),
             message: "媒体回传完成：扫描 24 张，已删除板端文件 24".to_string(),
@@ -458,6 +460,7 @@ async fn media_sync_dispatch_stays_pending_until_the_device_reports() {
         headers,
         Json(x_rust::business::dog::internal::MediaSyncStatusRequest {
             device_code: "RD-100".to_string(),
+            action: "同步媒体".to_string(),
             request_id: "req-media-1".to_string(),
             status: "running".to_string(),
             message: "同步中：已上传 24/24 张（第 3/3 个压缩包）".to_string(),
@@ -486,6 +489,9 @@ async fn media_sync_dispatch_stays_pending_until_the_device_reports() {
         axum::extract::State(state.clone()),
         axum::Extension(admin()),
         AxumPath(IdParam { id: device_id }),
+        axum::extract::Query(
+            x_rust::business::dog::device::handlers::LongTaskStatusQuery { action: None },
+        ),
     )
     .await
     .expect("状态查询必须成功")
@@ -494,6 +500,147 @@ async fn media_sync_dispatch_stays_pending_until_the_device_reports() {
     assert_eq!(status["status"], audit::STATUS_SUCCEEDED);
     assert_eq!(status["stale"], false);
     assert_eq!(status["result"]["drained"], true);
+}
+
+/// 「回传录像」：录像不再自动回传（2026-11-25），中台点一下才传。
+///
+/// 与「同步媒体」同一套长任务语义：下发只回「已下发」（审计停在 pending），
+/// 跑着的时候同一个 requestId 不重复下发，进度/结论由设备异步回写。
+#[tokio::test]
+async fn record_sync_dispatch_stays_pending_until_the_device_reports() {
+    let (base, hits) = spawn_fake_business().await;
+    let state = test_state(&base).await;
+    let device_id = create_device(&state, "RD-100").await;
+
+    // 1) 白名单要放行，且只能停在 pending
+    let response = send_device_command_handler(
+        axum::extract::State(state.clone()),
+        axum::Extension(admin()),
+        AxumPath(IdParam { id: device_id }),
+        Json(command_request("回传录像", "req-record-1")),
+    )
+    .await
+    .expect("回传录像必须能下发")
+    .0
+    .data;
+    assert_eq!(
+        response["status"],
+        audit::STATUS_PENDING,
+        "录像回传是长任务，下发完成时审计必须停在 pending：{response}"
+    );
+    assert_eq!(response["awaitingDevice"], true);
+    assert_eq!(hits.command(), 1);
+
+    // 2) 跑着时再点一次：不重复下发
+    let again = send_device_command_handler(
+        axum::extract::State(state.clone()),
+        axum::Extension(admin()),
+        AxumPath(IdParam { id: device_id }),
+        Json(command_request("回传录像", "req-record-1")),
+    )
+    .await
+    .expect("重复点击必须成功")
+    .0
+    .data;
+    assert_eq!(again["duplicated"], true);
+    assert_eq!(hits.command(), 1, "上一轮还在跑，不能重复下发");
+
+    // 3) 设备回报进度：仍停在 pending，文案落库
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "x-service-token",
+        axum::http::HeaderValue::from_static("test-service-token"),
+    );
+    let acked = x_rust::business::dog::internal::media_sync_status_handler(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        Json(x_rust::business::dog::internal::MediaSyncStatusRequest {
+            device_code: "RD-100".to_string(),
+            action: "回传录像".to_string(),
+            request_id: "req-record-1".to_string(),
+            status: "running".to_string(),
+            message: "回传中：已上传 2/5 段".to_string(),
+            detail: None,
+        }),
+    )
+    .await
+    .expect("录像回传进度必须能回报")
+    .0
+    .data;
+    assert_eq!(acked["status"], "pending", "进度回报不改结论");
+
+    // 3.5) 指令名对不上要拒（别把「同步媒体」的进度盖到「回传录像」的审计上）
+    let mismatch = x_rust::business::dog::internal::media_sync_status_handler(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        Json(x_rust::business::dog::internal::MediaSyncStatusRequest {
+            device_code: "RD-100".to_string(),
+            action: "同步媒体".to_string(),
+            request_id: "req-record-1".to_string(),
+            status: "running".to_string(),
+            message: "同步中：已上传 8/24 张".to_string(),
+            detail: None,
+        }),
+    )
+    .await
+    .expect_err("指令名不一致必须拒");
+    assert!(
+        format!("{mismatch:?}").contains("回传录像"),
+        "错误信息要说明审计属于哪条指令：{mismatch:?}"
+    );
+
+    // 4) 结论：succeeded + 结构化 detail
+    let acked = x_rust::business::dog::internal::media_sync_status_handler(
+        axum::extract::State(state.clone()),
+        headers,
+        Json(x_rust::business::dog::internal::MediaSyncStatusRequest {
+            device_code: "RD-100".to_string(),
+            action: "回传录像".to_string(),
+            request_id: "req-record-1".to_string(),
+            status: "succeeded".to_string(),
+            message: "录像回传完成：扫描 5 段，已删除板端文件 5；板端录像已清空".to_string(),
+            detail: Some(json!({"drained": true, "uploaded": 5, "remaining": 0})),
+        }),
+    )
+    .await
+    .expect("结论回报必须成功")
+    .0
+    .data;
+    assert_eq!(acked["status"], "succeeded");
+
+    // 5) 设备页按 action 查：拿到的是回传录像这一条
+    let status = x_rust::business::dog::device::handlers::media_sync_status_handler(
+        axum::extract::State(state.clone()),
+        axum::Extension(admin()),
+        AxumPath(IdParam { id: device_id }),
+        axum::extract::Query(
+            x_rust::business::dog::device::handlers::LongTaskStatusQuery {
+                action: Some("回传录像".to_string()),
+            },
+        ),
+    )
+    .await
+    .expect("状态查询必须成功")
+    .0
+    .data;
+    assert_eq!(status["action"], "回传录像");
+    assert_eq!(status["status"], audit::STATUS_SUCCEEDED);
+    assert_eq!(status["result"]["drained"], true);
+
+    // 6) 缺省 action 仍然看「同步媒体」：这台设备没有同步记录 → null
+    let media = x_rust::business::dog::device::handlers::media_sync_status_handler(
+        axum::extract::State(state.clone()),
+        axum::Extension(admin()),
+        AxumPath(IdParam { id: device_id }),
+        axum::extract::Query(
+            x_rust::business::dog::device::handlers::LongTaskStatusQuery { action: None },
+        ),
+    )
+    .await
+    .expect("状态查询必须成功")
+    .0
+    .data;
+    assert!(media.is_null(), "两种长任务的状态不能串：{media}");
 }
 
 #[tokio::test]
