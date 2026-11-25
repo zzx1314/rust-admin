@@ -7,7 +7,8 @@
 //! 路线动作：航点「语音播报」→ plan.points[i] 的 speakText / speakSeconds
 //!                        → 到点 Agent `call 0|1 <内容>`，离开航点 stop
 //! 路线动作：航段「语音播报」→ plan.legs[i]（起点 = 航点 i）的 speakText
-//!                        → 进入该航段（= 到达 P{i+1}）时播，离开航段 / 终态 stop
+//!                        → 进入该航段（= 到达 P{i+1}）时播，**走完整段**（到达下一个
+//!                          航点）/ 终态 / 取消 stop；离开起点航点不停（那是这一段刚开始）
 //! 闭环返航段（returnLeg）→ 起点 = 最后一个航点
 //! ```
 //!
@@ -18,8 +19,9 @@
 //! 三条约定（改这块先看）：
 //!
 //! 1. **一次只播一条**：板端 FIFO 是单通道，新播报会打断旧播报，所以「到点播报」
-//!    不需要先发 stop——但**循环播报**必须在「离开航点 / 终态 / 取消」发 stop，
-//!    否则狗走了还在原地喊（板端看门狗 `SPEAK_MAX_SECS` 只是兜底）。
+//!    不需要先发 stop——但**循环播报**必须收口，否则狗走了还在喊（板端看门狗
+//!    `SPEAK_MAX_SECS` 只是兜底）。**收口时机看播报挂在哪儿**（`Scope`）：航点播报
+//!    离开航点停，航段播报要到下一个航点（= 这一段走完）/ 终态 / 取消才停。
 //! 2. **幂等**：5009 每 500ms 一帧，`point_arrived` 按「这条任务这个点已经播过」去重；
 //!    重新下发同一条计划（`start_task`）才会重新播。
 //! 3. **播报失败不影响巡检**：Agent 404 / 没联网 / asr 起不来都只打日志，
@@ -246,12 +248,34 @@ fn leg_speak(leg: &Value, index: i64) -> Option<SpeakLeg> {
     })
 }
 
+/// 播报挂在哪儿：决定**什么时候收口**（与灯光 / 录像同一套语义）。
+///
+/// - [`Scope::Point`]：航点动作 —— 到点播、**离开航点就停**；
+/// - [`Scope::Leg`]：航段动作 —— 进段播（= 到达起点航点）、**走完整段**（= 到达下一个
+///   航点 / 终态 / 取消）才停。离开起点航点正是航段的开始，那里**不能**停，
+///   否则配在 `legs[i]` 上的播报一秒都听不到（2026-11-25 现场「P2→P3 配了播报却不响」）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    Point,
+    Leg,
+}
+
+impl Scope {
+    /// 载荷里的 `scope` 字段（板端日志与排查文档都按它认）
+    fn as_str(self) -> &'static str {
+        match self {
+            Scope::Point => "point",
+            Scope::Leg => "leg",
+        }
+    }
+}
+
 /// 需要播报的内容（航点或航段，二选一：板端一次只播一条）
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Say {
     text: String,
     seconds: u32,
-    scope: &'static str,
+    scope: Scope,
 }
 
 impl Say {
@@ -264,10 +288,12 @@ impl Say {
 struct State {
     task_code: Option<String>,
     plan: SpeakPlan,
-    /// 这条任务已经播过的航点（5009 每 500ms 一帧，不去重会一直重播）
+    /// 这条任务已经播过的航点（5009 每 500ms 一帧，不去重会一直重播）。
+    /// 航段播报也记在这里：它的值是**起点航点**下标，靠它认出「到了下一个点」。
     spoken_point: Option<i64>,
-    /// 当前这条是循环播报：离开航点 / 终态要发 stop，否则狗走了还在喊
-    looping: bool,
+    /// 当前正在**循环**播报、且需要客户端收口的那条的归属（单次播报不记）。
+    /// 收口时机由它决定：`Point` 离开航点停，`Leg` 走完整段才停。
+    speaking: Option<Scope>,
     /// 这条任务已收尾：迟到的到点帧不许再开始播报
     finished: bool,
     /// 板端 Agent 没有播报接口（老版本）：本轮不再尝试
@@ -315,7 +341,9 @@ impl Speaker {
         let stale = {
             let state = self.state.lock().await;
             match state.task_code.as_deref() {
-                Some(code) if code == task_code => state.looping.then(|| code.to_string()),
+                Some(code) if code == task_code => {
+                    state.speaking.is_some().then(|| code.to_string())
+                }
                 Some(code) => Some(code.to_string()),
                 None => None,
             }
@@ -353,16 +381,30 @@ impl Speaker {
         state.task_code = Some(task_code.to_string());
         state.plan = plan;
         state.spoken_point = None;
-        state.looping = false;
+        state.speaking = None;
         state.finished = false;
     }
 
     /// 到点播报（5009 `patrol.point_arrived` / `patrol.waiting`）。
     ///
     /// 同一个点重复调用只播一次；这个点没有播报动作就什么都不做。
+    ///
+    /// 它同时是**航段播报的收口点**：到了新航点就意味着上一段走完了（见 [`Scope`]）。
     pub async fn point_arrived(self: &Arc<Self>, task_code: &str, point_index: i64) {
         if !self.enabled {
             return;
+        }
+        // 到了**新航点**：上一段的「航段播报」到此为止（这一段走完了）。
+        // 收口放在拿 `gate` 之前——`stop` 自己也要拿 gate，先进后出会自锁。
+        // 同一个点的重复帧不触发（`spoken_point` 还停在那一段的起点上）。
+        let leg_ended = {
+            let state = self.state.lock().await;
+            state.task_code.as_deref() == Some(task_code)
+                && state.speaking == Some(Scope::Leg)
+                && state.spoken_point != Some(point_index)
+        };
+        if leg_ended {
+            self.stop("到达航点，本航段播报结束").await;
         }
         let say = {
             let state = self.state.lock().await;
@@ -399,7 +441,7 @@ impl Speaker {
             "seconds": say.seconds,
             "planId": task_code,
             "pointIndex": point_index,
-            "scope": say.scope,
+            "scope": say.scope.as_str(),
         });
         match self.post("/api/speak", body).await {
             Ok(value) if value.get("ok").and_then(Value::as_bool) == Some(false) => {
@@ -408,14 +450,14 @@ impl Speaker {
                     .and_then(Value::as_str)
                     .unwrap_or("板端拒绝播报");
                 warn!("语音播报：任务 {task_code} 航点 {point_index} 未播（{error}）；巡检继续");
-                self.state.lock().await.looping = false;
+                self.state.lock().await.speaking = None;
             }
             Ok(_) => {
-                self.state.lock().await.looping = say.looping();
+                self.state.lock().await.speaking = say.looping().then_some(say.scope);
                 info!(
                     "语音播报：任务 {task_code} 航点 {point_index} 播报「{}」（{}{}）",
                     say.text,
-                    if say.scope == "leg" {
+                    if say.scope == Scope::Leg {
                         "航段"
                     } else {
                         "航点"
@@ -431,7 +473,7 @@ impl Speaker {
                 warn!(
                     "语音播报：任务 {task_code} 航点 {point_index} 调板端失败（{error}）；巡检继续"
                 );
-                self.state.lock().await.looping = false;
+                self.state.lock().await.speaking = None;
                 if error.contains("没有播报接口") {
                     let mut state = self.state.lock().await;
                     state.unsupported = true;
@@ -443,12 +485,15 @@ impl Speaker {
         }
     }
 
-    /// 离开航点：停掉循环播报（单次播报由板端自己说完就回到 voice）。
+    /// 离开航点：停掉**航点**的循环播报（单次播报由板端自己说完就回到 voice）。
+    ///
+    /// **航段播报在这里不能停**：离开起点航点正是航段的开始，停了就等于
+    /// 「腿上的播报一秒都不响」。它由 [`Self::point_arrived`] 在到达下一个航点时收口。
     pub async fn leave_point(&self, reason: &str) {
         if !self.enabled {
             return;
         }
-        if !self.state.lock().await.looping {
+        if self.state.lock().await.speaking != Some(Scope::Point) {
             return;
         }
         self.stop(reason).await;
@@ -459,7 +504,7 @@ impl Speaker {
     /// `task_code` 保持与 `Recorder` / `PointLights` 同一套签名（平台取消时可能不带任务号），
     /// 当前实现不强校验归属：终态 / 取消就是「这条路线不再播」，宁可多停一次也不留循环。
     ///
-    /// **`looping` 只能由 [`Self::stop`] 在锁内清**：这里先清掉的话，
+    /// **`speaking` 只能由 [`Self::stop`] 在锁内清**：这里先清掉的话，
     /// `stop` 会以为「本来就没在循环」而不发 `/api/speak/stop`，狗到家了还在喊
     /// （回归用例 `finish_stops_the_loop_and_late_arrivals_are_ignored`）。
     pub async fn finish_task(&self, _task_code: &str, reason: &str) {
@@ -475,15 +520,13 @@ impl Speaker {
     }
     async fn stop(&self, reason: &str) {
         let _gate = self.gate.lock().await;
-        let looping = {
+        let speaking = {
             let mut state = self.state.lock().await;
-            let looping = state.looping;
-            state.looping = false;
-            looping
+            state.speaking.take()
         };
         // 单次播报不用 stop：板端说完会自己 `call stop` 回到 voice。
         // 这里只在「循环播报真的起过」时收口，避免每个航点离开都写一条 FIFO。
-        if !looping || !self.enabled {
+        if speaking.is_none() || !self.enabled {
             return;
         }
         if let Err(error) = self
@@ -594,13 +637,13 @@ fn say_at(plan: &SpeakPlan, index: i64) -> Option<Say> {
         return Some(Say {
             text: point.text.clone(),
             seconds: point.seconds,
-            scope: "point",
+            scope: Scope::Point,
         });
     }
     plan.leg_at(index).map(|leg| Say {
         text: leg.text.clone(),
         seconds: leg.seconds,
-        scope: "leg",
+        scope: Scope::Leg,
     })
 }
 
@@ -785,6 +828,112 @@ mod tests {
         );
     }
 
+    /// 航段播报要从起点航点一直播到下一个航点：离开起点航点不能停
+    /// （2026-11-25 现场：P2→P3 配了播报，狗一出 P2 就静音，整段听不到）。
+    #[tokio::test]
+    async fn leg_speech_survives_the_departure_and_stops_at_the_next_point() {
+        let calls: Calls = Default::default();
+        let agent = spawn_agent(calls.clone()).await;
+        let speaker = Arc::new(Speaker::new(&agent, true));
+        let plan = parse_speak_plan(&json!({
+            "points": [
+                {"name": "P1", "actions": []},
+                {"name": "P2", "actions": []},
+                {"name": "P3", "actions": []}
+            ],
+            "legs": [
+                {"actions": []},
+                {"actions": [{"type": "语音播报", "speakText": "正在通过仓储区", "speakSeconds": 60}]}
+            ]
+        }));
+        assert_eq!(plan.legs.len(), 1, "legs[1] = P2→P3：{plan:?}");
+        speaker.start_task("TK-1", plan).await;
+
+        // 到达 P2 = 进入 P2→P3 航段；离开 P2 是这一段的开始，不能停
+        speaker.point_arrived("TK-1", 1).await;
+        speaker.leave_point("已离开航点").await;
+        let calls_after_leave = calls.lock().await.clone();
+        assert_eq!(
+            calls_after_leave
+                .iter()
+                .filter(|call| call["path"] == "speak")
+                .count(),
+            1,
+            "{calls_after_leave:?}"
+        );
+        assert!(
+            calls_after_leave.iter().all(|call| call["path"] != "stop"),
+            "航段播报不能跟着「离开起点航点」收掉：{calls_after_leave:?}"
+        );
+
+        // 到达 P3：这一段走完了 → 收口（这个点没配播报，所以只多一条 stop）
+        speaker.point_arrived("TK-1", 2).await;
+        let calls_now = calls.lock().await.clone();
+        let speaks: Vec<&Value> = calls_now
+            .iter()
+            .filter(|call| call["path"] == "speak")
+            .collect();
+        assert_eq!(speaks.len(), 1, "{calls_now:?}");
+        assert_eq!(speaks[0]["body"]["scope"], "leg");
+        assert_eq!(speaks[0]["body"]["loop"], true);
+        assert_eq!(speaks[0]["body"]["seconds"], 60);
+        assert_eq!(
+            calls_now
+                .iter()
+                .filter(|call| call["path"] == "stop")
+                .count(),
+            1,
+            "到达下一个航点要把航段播报收口：{calls_now:?}"
+        );
+
+        // 同一个点的重复帧 / 离开这个点：都不再发 stop
+        speaker.point_arrived("TK-1", 2).await;
+        speaker.leave_point("已离开航点").await;
+        assert_eq!(
+            calls
+                .lock()
+                .await
+                .iter()
+                .filter(|call| call["path"] == "stop")
+                .count(),
+            1
+        );
+    }
+
+    /// 航段播报结束的那个点自己也有航点播报：先停上一段，再播新的
+    #[tokio::test]
+    async fn leg_speech_is_stopped_before_the_next_point_speech() {
+        let calls: Calls = Default::default();
+        let agent = spawn_agent(calls.clone()).await;
+        let speaker = Arc::new(Speaker::new(&agent, true));
+        let plan = parse_speak_plan(&json!({
+            "points": [
+                {"name": "P1", "actions": []},
+                {"name": "P2", "actions": []},
+                {"name": "P3", "actions": [
+                    {"type": "语音播报", "speakText": "已到达第三个点", "speakSeconds": 0}
+                ]}
+            ],
+            "legs": [
+                {"actions": []},
+                {"actions": [{"type": "语音播报", "speakText": "正在通过仓储区"}]}
+            ]
+        }));
+        speaker.start_task("TK-1", plan).await;
+
+        speaker.point_arrived("TK-1", 1).await;
+        speaker.leave_point("已离开航点").await;
+        speaker.point_arrived("TK-1", 2).await;
+
+        let paths: Vec<String> = calls
+            .lock()
+            .await
+            .iter()
+            .map(|call| call["path"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(paths, vec!["speak", "stop", "speak"], "先收上一段再播新的");
+    }
+
     /// 航点循环播报：到点 call 一次（loop=true），离开航点停掉
     #[tokio::test]
     async fn looping_point_is_stopped_when_leaving() {
@@ -923,6 +1072,6 @@ mod tests {
         speaker.start_task("TK-1", parse_speak_plan(&route())).await;
         speaker.point_arrived("TK-1", 1).await;
         let state = speaker.state.lock().await;
-        assert!(state.unsupported || state.spoken_point.is_none() || !state.looping);
+        assert!(state.unsupported || state.spoken_point.is_none() || state.speaking.is_none());
     }
 }

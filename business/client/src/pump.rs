@@ -1554,4 +1554,84 @@ mod tests {
             "离开航点要停循环播报"
         );
     }
+
+    /// 航段播报：从起点航点开播，**走完整段**才收口（到下一个点 / 终态）。
+    ///
+    /// 现场事故（2026-11-25 gh-test「lrc」）：P2→P3 配了「语音播报」，狗一离开 P2
+    /// 就静音——因为「离开航点」把它当成航点播报收掉了，而离开起点航点正是航段的开始。
+    #[tokio::test]
+    async fn leg_speech_keeps_playing_until_the_next_point() {
+        use crate::speak::{SpeakLeg, SpeakPlan};
+
+        let calls: SpeakCalls = Arc::new(Mutex::new(Vec::new()));
+        let agent = spawn_speak_agent(calls.clone()).await;
+        let mut h = Harness::new(active_task("TK-1", Some("robot-1"))).with_speaker(agent);
+        h.speaker
+            .start_task(
+                "TK-1",
+                SpeakPlan {
+                    points: vec![],
+                    legs: vec![SpeakLeg {
+                        index: 1,
+                        text: "正在通过仓储区".to_string(),
+                        seconds: 60,
+                    }],
+                },
+            )
+            .await;
+
+        // 到达 P2 = 进入 P2→P3 航段
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.point_arrived", 1),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        assert_eq!(
+            wait_speak(&calls, 1).await,
+            vec!["say:正在通过仓储区".to_string()]
+        );
+
+        // 离开 P2（狗开始走这一段）：航段播报**不能**停
+        for _ in 0..2 {
+            h.feed(&frame(
+                task_at("robot-1", "running", "patrol.navigating", 1),
+                Value::Null,
+                json!([]),
+            ))
+            .await;
+        }
+        assert_eq!(
+            wait_speak(&calls, 1).await,
+            vec!["say:正在通过仓储区".to_string()],
+            "航段播报要跟着狗走完整段，不能一离开起点航点就停"
+        );
+
+        // 到达 P3：这一段走完了 → 收口（P3 没配播报，所以只多一条 stop）
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.point_arrived", 2),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        assert_eq!(
+            wait_speak(&calls, 2).await,
+            vec!["say:正在通过仓储区".to_string(), "stop".to_string()]
+        );
+
+        // 到达 P3 的重复帧、离开 P3：都不再发 stop
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.waiting", 2),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.navigating", 2),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        assert_eq!(wait_speak(&calls, 2).await.len(), 2, "停止只发一次");
+    }
 }
