@@ -190,7 +190,7 @@ Authorization: Bearer <access_token>
 | `/api/dogMap`                         | POST               | 新增，`mapName` 必填；`mapType`、`parkCode`、`parkName`、`deviceCode`、`remarks`、`mapVersion`、`frameId`、`crs`、`mapOrigin`、`resolution`、`floors`、`roadCount`、`nogoCount`、`mapStatus`（草稿 / 部分标定）可选                         |
 | `/api/dogMap/upload`                  | POST               | 上传 `.zip` 地图包（`multipart/form-data`）：`file` = 地图包，`mapInfo` = JSON 字符串，字段同新增；带 `id`（或 `mapId`）时原地覆盖已有地图的包与信息，否则新建；覆盖只允许草稿 / 部分标定的版本，已发布 / 已归档返回 400 并提示先派生新版本 |
 | `/api/dogMap/{id}/image`              | GET                | 返回地图包栅格图（PNG base64）与 `resolution` / `origin` / 宽高                                                                                                                                                                             |
-| `/api/dogMap/{id}/edit`               | POST               | 橡皮擦：按笔画改写编辑版栅格（优先 `map_edit/map.pgm`，没有时才用 `model.pgm` / `map.pgm`）的噪点，返回新 PNG、`mapHash` 与 `erasedPixels`。仅草稿 / 部分标定可编辑                                                                         |
+| `/api/dogMap/{id}/edit`               | POST               | 橡皮擦：按笔画改写编辑版栅格（优先 `map_edit/map.pgm`，没有时才用 `model.pgm` / `map.pgm`）的噪点，并把**擦成 254 的笔画**记进包内 `map_edit/edit_info.json`（遥控器保存地图按「根图 + 这些擦除圆」重算，不记就会被它一保存冲掉），返回新 PNG、`mapHash` 与 `erasedPixels`。仅草稿 / 部分标定可编辑                                                                         |
 | `/api/dogMap/{id}/push`               | POST               | 把编辑后的地图下发到狗体（本体）：`{ deviceCode?, requestId? }`，经业务平台 + 设备客户端写回本体并重新载图；`deviceCode` 缺省用上报设备，可选被分享的设备                                                                                   |
 | `/api/dogMap/{id}/share`              | POST               | 把地图分享给其他设备使用（不复制地图包、不新建地图）：`{ deviceCodes: ["RD-002"], mode: "append"\|"replace" }`；`replace` 以本次提交为准（空数组 = 清空分享）                                                                               |
 | `/api/dogMap/{id}/shares`             | GET                | 当前分享给了哪些设备：`[{ mapId, deviceCode, createTime }]`                                                                                                                                                                                 |
@@ -205,7 +205,7 @@ Authorization: Bearer <access_token>
 - 响应字段：`id`、`mapName`、`mapType`、`parkCode`、`parkName`、`deviceCode`、`sharedDeviceCodes`（分享给了哪些其他设备）、`mapData`、`userId`、`fileName`、`filePath`、`fileFormat`、`fileSize`、`remarks`、`mapVersion`、`frameId`、`crs`、`mapOrigin`、`resolution`、`floors`、`roadCount`、`nogoCount`、`mapStatus`、`mapHash`、`mapWidth`、`mapHeight`、`publishTime`、`createTime`、`updateTime`。
 - **上传即解析**：后端优先从地图包内 `map_edit/map.pgm` / `map_edit/map.yaml`（遥控器编辑后的地图）解析 `resolution`、`origin: [x, y, yaw]`、像素宽高；没有编辑版时才用 `model.pgm` / `model.yaml`。同时计算整个 `.zip` 的 SHA-256 写入 `mapHash`、`mapWidth`、`mapHeight`。前端表单里的 `resolution` / `mapOrigin` 只用于校验：与包内容不一致会返回 400，留空则由服务端解析结果回写。
 - **版本不可变**：版本一旦发布（`已发布`；未发布的 `部分标定` 也按不可变处理，避免刷掉现场正在用的包），`mapVersion`、`frameId`、`mapOrigin`、`resolution`、地图包不再允许修改；需要新坐标系时请上传新包或调用 `newVersion`。
-- **写回狗体**：`POST /api/dogMap/{id}/push`，请求体 `{ "deviceCode": "RD-201", "requestId": "可选幂等键" }`（`deviceCode` 缺省用地图上的 `deviceCode`，没有上报设备时用第一个被分享的设备；目标必须是上报设备或被分享的设备，否则 400）。中台把 `mapId` 发给业务平台，业务平台刷新自己的地图包副本后向设备下发「下发地图」指令；设备客户端从 `GET /api/map-versions/{id}/package` 拉包，**本体有 `map_edit/` 时写 `map_edit/map.pgm` + `map_edit/map.yaml`，根目录的建图原始地图保持不动**；没有 `map_edit/` 的老固件才写根目录 `map.pgm` / `map.yaml`。写完读回校验，最后 4030 重新载图，并由客户端上报 `commandResult`。业务平台等待真实执行结果（最长 60s）后才返回：成功时 `data.result.message` 是设备侧结果；急停 / 任务占用 / 写文件失败 / 未回执返回 4xx，中台审计记 `failed`。
+- **写回狗体**：`POST /api/dogMap/{id}/push`，请求体 `{ "deviceCode": "RD-201", "requestId": "可选幂等键" }`（`deviceCode` 缺省用地图上的 `deviceCode`，没有上报设备时用第一个被分享的设备；目标必须是上报设备或被分享的设备，否则 400）。中台把 `mapId` 发给业务平台，业务平台刷新自己的地图包副本后向设备下发「下发地图」指令；设备客户端从 `GET /api/map-versions/{id}/package` 拉包，**本体有 `map_edit/` 时写 `map_edit/map.pgm` + `map_edit/map.yaml`（并把包内 `map_edit/edit_info.json` 的擦除圆合并进本体的编辑记录，只追加不覆盖），根目录的建图原始地图保持不动**；没有 `map_edit/` 的老固件才写根目录 `map.pgm` / `map.yaml`。写完读回校验，最后 4030 重新载图，并由客户端上报 `commandResult`。业务平台等待真实执行结果（最长 60s）后才返回：成功时 `data.result.message` 是设备侧结果；急停 / 任务占用 / 写文件失败 / 未回执返回 4xx，中台审计记 `failed`。
 - **地图分享**：`POST /api/dogMap/{id}/share`，请求体
   `{ "deviceCodes": ["RD-002", "RD-003"], "mode": "replace" }`。分享不复制地图包，
   只是让同一张图也能被其他设备使用：分配给目标设备的中台用户能在地图列表里看到它（只读），
@@ -217,7 +217,9 @@ Authorization: Bearer <access_token>
   坐标是**栅格像素坐标**（左上角为原点，`x` 向右、`y` 向下，与 `/image` 返回的 `width` / `height` 同一坐标系）。
   `eraseValue` 是擦除后写入的灰度值：`254` = 可通行（默认，用来擦掉自由空间里的噪点）、`205` = 未知。
   服务端只改写包内编辑版 `map_edit/map.pgm`（没有 `map_edit/` 时才改 `model.pgm` /
-  `map.pgm`），根目录原始地图与 `model.yaml` 等其余条目原样保留，落盘为新包并回写
+  `map.pgm`），并把擦成 `254` 的笔画追加进 `map_edit/edit_info.json` 的 `erase_areas` /
+  `edit_ops`（遥控器保存地图时按「根图 + 这些擦除圆」重算，不记就会被它覆盖；擦成
+  `128`「未知」表达不了，只改栅格）；根目录原始地图与 `model.yaml` 等其余条目原样保留，落盘为新包并回写
   `filePath` / `mapHash` / 尺寸，旧包保留在磁盘上。仅 `草稿` / `部分标定` 可编辑，
   已发布 / 已归档返回 400（请先 `newVersion`）；单次最多 2000 笔 / 20 万个采样点。
 

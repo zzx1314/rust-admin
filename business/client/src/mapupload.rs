@@ -764,6 +764,7 @@ pub fn extract_robot_map_files(package: &[u8]) -> Result<Vec<(String, Vec<u8>)>,
     let mut pgm_fallback: Option<String> = None;
     let mut yaml_edit: Option<String> = None;
     let mut yaml_fallback: Option<String> = None;
+    let mut edit_info_edit: Option<String> = None;
     for index in 0..archive.len() {
         let Ok(entry) = archive.by_index(index) else {
             continue;
@@ -786,6 +787,8 @@ pub fn extract_robot_map_files(package: &[u8]) -> Result<Vec<(String, Vec<u8>)>,
             } else {
                 yaml_fallback.get_or_insert(name);
             }
+        } else if lower.rsplit('/').next() == Some("edit_info.json") && edited {
+            edit_info_edit.get_or_insert(name);
         }
     }
 
@@ -816,6 +819,19 @@ pub fn extract_robot_map_files(package: &[u8]) -> Result<Vec<(String, Vec<u8>)>,
             rewrite_yaml_image(&yaml).into_bytes(),
         ),
     ];
+    let mut files = files;
+    // 平台的橡皮擦笔画（后端已写进包内的 `map_edit/edit_info.json`）：
+    // 单拿出来交给 `push_map_to_robot` 与本体现有的编辑记录**合并**后写入，
+    // 不能像栅格那样直接覆盖——那是遥控器的编辑历史。
+    if let Some(name) = edit_info_edit {
+        let mut bytes = Vec::new();
+        if let Ok(mut entry) = archive.by_name(&name)
+            && entry.read_to_end(&mut bytes).is_ok()
+            && !bytes.is_empty()
+        {
+            files.push(("edit_info.json".to_string(), bytes));
+        }
+    }
     Ok(files)
 }
 
@@ -836,6 +852,144 @@ fn rewrite_yaml_image(yaml: &str) -> String {
         out = format!("image: map.pgm\n{out}");
     }
     out
+}
+
+/// 编辑记录里登记的擦除圆上限：防止反复下发把文件撑大（超了就停止追加）。
+const MAX_EDIT_INFO_CIRCLES: usize = 20_000;
+/// 编辑记录体积上限：超了就不写，保留本体原文件。
+const MAX_EDIT_INFO_BYTES: usize = 8 * 1024 * 1024;
+
+/// 擦除圆的去重键：保留两位小数后相同的圆视为同一条（同一笔反复下发不累积）。
+fn circle_key(x: f64, y: f64, r: f64) -> (i64, i64, i64) {
+    (
+        (x * 100.0).round() as i64,
+        (y * 100.0).round() as i64,
+        (r * 100.0).round() as i64,
+    )
+}
+
+fn circle_of(value: &Value) -> Option<(i64, i64, i64)> {
+    let x = value.get("x")?.as_f64()?;
+    let y = value.get("y")?.as_f64()?;
+    let r = value.get("r")?.as_f64()?;
+    Some(circle_key(x, y, r))
+}
+
+/// 把平台这次的擦除圆合并进本体的 `map_edit/edit_info.json`。
+///
+/// 遥控器的编辑记录结构（逆向自它自己写的文件）：
+/// `{ erase_areas: [{x,y,r}], forbidden_areas: [], fences: [], edit_ops: [{type,circles}] }`，
+/// 单位是栅格像素。它保存地图时按「根目录 `map.pgm` + 这些擦除圆」重算栅格，
+/// 所以平台的擦除必须记进来，否则它一保存就把平台的编辑整体冲掉
+/// （2026-11-25 现场 11:14 / 18:29 / 19:10 / 19:24 四次复现）。
+///
+/// 规则：
+/// - **追加不覆盖**：本体已有的圆（遥控器自己的）与 `fences` / `forbidden_areas`
+///   等平台不产生的字段一律原样保留；
+/// - 没有新增内容时原样返回本体字节（调用方会据此跳过写入）；
+/// - 本体那份解析不了 → 返回 `None`，保留原文件（宁可不同步也不能写坏它）。
+pub fn merge_edit_info(existing: Option<&[u8]>, incoming: &[u8]) -> Option<Vec<u8>> {
+    let incoming_value: Value = serde_json::from_slice(incoming).ok()?;
+    let incoming_object = incoming_value.as_object()?;
+    // 本体上还没有这份编辑记录（这张图没在遥控器里编辑过）：平台这次的擦除
+    // 也要建档，否则遥控器以后一保存照样把平台的编辑冲掉。
+    let creating = existing.is_none_or(|bytes| bytes.is_empty());
+    let base_value = match existing {
+        Some(bytes) if !bytes.is_empty() => {
+            let parsed: Value = serde_json::from_slice(bytes).ok()?;
+            if !parsed.is_object() {
+                return None;
+            }
+            parsed
+        }
+        _ => incoming_value.clone(),
+    };
+    let mut root = base_value.as_object()?.clone();
+    for key in ["erase_areas", "forbidden_areas", "fences", "edit_ops"] {
+        match root.get(key) {
+            None => {
+                root.insert(key.to_string(), Value::Array(Vec::new()));
+            }
+            Some(Value::Array(_)) => {}
+            // 结构对不上就不碰
+            Some(_) => return None,
+        }
+    }
+
+    let mut known: std::collections::HashSet<(i64, i64, i64)> = root
+        .get("erase_areas")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(circle_of).collect())
+        .unwrap_or_default();
+
+    let has_incoming = incoming_object
+        .get("erase_areas")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+        || incoming_object
+            .get("edit_ops")
+            .and_then(Value::as_array)
+            .is_some_and(|ops| !ops.is_empty());
+
+    let mut added: Vec<Value> = Vec::new();
+    for circle in incoming_object
+        .get("erase_areas")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        let Some(key) = circle_of(circle) else {
+            continue;
+        };
+        if known.contains(&key) {
+            continue;
+        }
+        if known.len() + added.len() >= MAX_EDIT_INFO_CIRCLES {
+            break;
+        }
+        known.insert(key);
+        added.push(circle.clone());
+    }
+
+    let existing_ops: std::collections::HashSet<String> = root
+        .get("edit_ops")
+        .and_then(Value::as_array)
+        .map(|ops| ops.iter().map(Value::to_string).collect())
+        .unwrap_or_default();
+    let mut new_ops: Vec<Value> = Vec::new();
+    for op in incoming_object
+        .get("edit_ops")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        if existing_ops.contains(&op.to_string()) {
+            continue;
+        }
+        new_ops.push(op.clone());
+    }
+
+    if added.is_empty() && new_ops.is_empty() {
+        if creating && has_incoming {
+            return serde_json::to_vec_pretty(&Value::Object(root.clone()))
+                .ok()
+                .filter(|bytes| bytes.len() <= MAX_EDIT_INFO_BYTES);
+        }
+        return existing.map(<[u8]>::to_vec);
+    }
+
+    if let Some(Value::Array(areas)) = root.get_mut("erase_areas") {
+        areas.extend(added);
+    }
+    if let Some(Value::Array(ops)) = root.get_mut("edit_ops") {
+        ops.extend(new_ops);
+    }
+
+    let merged = serde_json::to_vec_pretty(&Value::Object(root)).ok()?;
+    if merged.len() > MAX_EDIT_INFO_BYTES {
+        return None;
+    }
+    Some(merged)
 }
 
 /// 本体地图目录名合法性：只允许单段目录名，避免写到 `history_map` 之外。
@@ -997,6 +1151,27 @@ pub async fn push_map_to_robot(
     };
 
     let files = extract_robot_map_files(package)?;
+    // `edit_info.json` 不能像栅格那样直接覆盖：它是遥控器的编辑历史
+    // （它保存地图时按「根 map.pgm + 这些擦除圆」重算栅格）。这里把平台
+    // 这次的擦除圆追加进去，否则遥控器一保存就把平台的编辑整体冲掉。
+    let mut payloads: Vec<(String, Vec<u8>)> = Vec::new();
+    for (name, bytes) in files {
+        if name != "edit_info.json" {
+            payloads.push((name, bytes));
+            continue;
+        }
+        if !has_map_edit {
+            // 老固件没有 `map_edit/`：编辑记录没有落点，不往根目录塞
+            continue;
+        }
+        let rel = format!("{target_dir}/edit_info.json");
+        let existing = get_robot_file(http, file_base, &rel).await;
+        match merge_edit_info(existing.as_deref(), &bytes) {
+            Some(merged) => payloads.push((name, merged)),
+            None => warn!("本体 {rel} 无法解析，跳过编辑记录合并（保留原文件不动）"),
+        }
+    }
+    let files = payloads;
     let mut written: Vec<String> = Vec::new();
     let mut originals: Vec<(String, Option<Vec<u8>>)> = Vec::new();
     for (name, bytes) in &files {
@@ -1178,5 +1353,99 @@ mod tests {
         assert!(sanitize_map_dir("../..").is_err());
         // 多层路径只取最后一段，不能借此写穿 history_map
         assert_eq!(sanitize_map_dir("a/../b").unwrap(), "b");
+    }
+
+    /// 包里的 `map_edit/edit_info.json` 要一起取出来（交给 push 时合并）
+    #[test]
+    fn extract_carries_edit_info_from_map_edit() {
+        use std::io::Write;
+
+        let info = br#"{"erase_areas":[{"x":1.0,"y":2.0,"r":3.0}],"forbidden_areas":[],"fences":[],"edit_ops":[]}"#;
+        let mut buffer = Cursor::new(Vec::new());
+        {
+            let mut writer = ZipWriter::new(&mut buffer);
+            let options = SimpleFileOptions::default();
+            writer.start_file("map_edit/map.pgm", options).unwrap();
+            writer.write_all(b"P5\n2 2\n255\n\x00\xfe\xfe\xfe").unwrap();
+            writer.start_file("map_edit/map.yaml", options).unwrap();
+            writer.write_all(b"image: map.pgm\n").unwrap();
+            writer
+                .start_file("map_edit/edit_info.json", options)
+                .unwrap();
+            writer.write_all(info).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let files = extract_robot_map_files(&buffer.into_inner()).expect("package must parse");
+        let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["map.pgm", "map.yaml", "edit_info.json"]);
+        let (_, bytes) = files
+            .iter()
+            .find(|(name, _)| name == "edit_info.json")
+            .unwrap();
+        assert_eq!(bytes.as_slice(), info);
+    }
+
+    const REMOTE_EDIT_INFO: &[u8] = br#"{
+  "erase_areas": [{"x": 1.0, "y": 1.0, "r": 0.5}],
+  "forbidden_areas": [],
+  "fences": [{"id": "fence-1"}],
+  "edit_ops": [],
+  "extra": "keep-me"
+}"#;
+
+    #[test]
+    fn merge_edit_info_appends_circles_and_keeps_remote_fields() {
+        let incoming = br#"{
+  "erase_areas": [{"x": 2.0, "y": 2.0, "r": 1.0}, {"x": 3.0, "y": 3.0, "r": 1.0}],
+  "forbidden_areas": [],
+  "fences": [],
+  "edit_ops": [{"type": "erase", "circles": [{"x": 2.0, "y": 2.0, "r": 1.0}]}]
+}"#;
+        let merged = merge_edit_info(Some(REMOTE_EDIT_INFO), incoming).expect("must merge");
+        let value: Value = serde_json::from_slice(&merged).unwrap();
+        let areas = value["erase_areas"].as_array().unwrap();
+        assert_eq!(areas.len(), 3, "遥控器原有的 1 个圆 + 本次 2 个圆");
+        assert_eq!(areas[0]["x"], 1.0);
+        assert_eq!(areas[2]["y"], 3.0);
+        // 遥控器的围栏与未知字段原样保留
+        assert_eq!(value["fences"].as_array().unwrap().len(), 1);
+        assert_eq!(value["extra"], "keep-me");
+        assert_eq!(value["edit_ops"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn merge_edit_info_is_idempotent() {
+        let incoming = br#"{"erase_areas":[{"x":2.0,"y":2.0,"r":1.0}],"forbidden_areas":[],"fences":[],"edit_ops":[]}"#;
+        let first = merge_edit_info(Some(REMOTE_EDIT_INFO), incoming).expect("must merge");
+        let second = merge_edit_info(Some(&first), incoming).expect("must merge");
+        assert_eq!(first, second, "同一笔反复下发不能重复累积");
+    }
+
+    #[test]
+    fn merge_edit_info_creates_when_body_has_none() {
+        let incoming = br#"{"erase_areas":[{"x":2.0,"y":2.0,"r":1.0}],"forbidden_areas":[],"fences":[],"edit_ops":[]}"#;
+        let merged = merge_edit_info(None, incoming).expect("must create");
+        let value: Value = serde_json::from_slice(&merged).unwrap();
+        assert_eq!(value["erase_areas"].as_array().unwrap().len(), 1);
+        assert!(value["forbidden_areas"].as_array().unwrap().is_empty());
+    }
+
+    /// 本体那份读不懂时不能动它（宁可不同步也不能写坏遥控器的编辑记录）
+    #[test]
+    fn merge_edit_info_refuses_broken_body_file() {
+        let incoming = br#"{"erase_areas":[{"x":2.0,"y":2.0,"r":1.0}],"forbidden_areas":[],"fences":[],"edit_ops":[]}"#;
+        assert!(merge_edit_info(Some(b"{ not json"), incoming).is_none());
+        assert!(merge_edit_info(Some(b"[1,2,3]"), incoming).is_none());
+        // 字段结构对不上（erase_areas 不是数组）也不碰
+        assert!(merge_edit_info(Some(br#"{"erase_areas": 1}"#), incoming).is_none());
+    }
+
+    /// 没有新增内容时原样返回本体字节，避免每次下发都重写文件
+    #[test]
+    fn merge_edit_info_returns_body_bytes_when_nothing_new() {
+        let incoming = br#"{"erase_areas":[{"x":1.00,"y":1.001,"r":0.5}],"forbidden_areas":[],"fences":[],"edit_ops":[]}"#;
+        let merged = merge_edit_info(Some(REMOTE_EDIT_INFO), incoming).expect("must merge");
+        assert_eq!(merged, REMOTE_EDIT_INFO);
     }
 }

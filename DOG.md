@@ -120,6 +120,13 @@ ROS `model.pgm` 包）时才退回 `model.pgm` / `map.pgm`。编辑只改写编�
 按新包重算，旧包留在磁盘上。只有 `草稿` / `部分标定` 版本可编辑，
 已发布 / 已归档请先派生新版本。
 
+擦除的笔画还会**同时记进包内 `map_edit/edit_info.json`**（`erase_areas` 追加
+`{x,y,r}` + 一条 `edit_ops{type:"erase",circles}`，像素坐标）：遥控器保存地图时按
+「根目录 `map.pgm` + 这些擦除圆」重算栅格，不记的话它一保存就把平台的编辑整体冲掉。
+只登记**擦成可通行 254** 的笔画——遥控器的橡皮擦只有这一种落值，`擦成未知 128`
+表达不了（那类编辑只能靠栅格本身传达）。包内没有 `edit_info.json` 时，只有
+`map_edit/` 存在才补一份；根目录栅格（老固件）不建档。
+
 编辑完点「下发到狗体」（`POST /api/dogMap/{id}/push`，也可在地图列表「更多」里触发）
 才会真正写回机器人，链路：
 
@@ -132,7 +139,9 @@ ROS `model.pgm` 包）时才退回 `model.pgm` / `map.pgm`。编辑只改写编�
         ③ 下发「下发地图」指令（带 mapId / mapDir / packagePath / mapHash / requestId）
             → 设备客户端 GET /api/map-versions/{id}/package
             → 本体有 map_edit/ 就写 map_edit/map.pgm + map_edit/map.yaml，
-              没有才写根目录 map.pgm + map.yaml（读回校验）
+              并把包内 edit_info.json 的擦除圆**合并**进本体的编辑记录
+              （只追加、不覆盖遥控器自己的记录；解析不了就不写）；
+              没有 map_edit/ 的老固件才写根目录 map.pgm + map.yaml（读回校验）
             → 4030 重新载图
             → 客户端回 command_result（requestId + ok + message）
         ④ 业务平台等设备真实回执（最长 60s）后才返回：
@@ -141,7 +150,8 @@ ROS `model.pgm` 包）时才退回 `model.pgm` / `map.pgm`。编辑只改写编�
 ```
 
 设备必须在业务平台在线、本体上没有同名目录以外的猜测路径、且当前没有执行任务 /
-建图，否则直接报错而不是「静默下发」。有 `map_edit/` 时只覆盖编辑版，
+建图，否则直接报错而不是「静默下发」。有 `map_edit/` 时只覆盖编辑版（外加合并
+`edit_info.json` 的擦除圆），
 根目录的原始 `map.pgm` / `map.yaml` 保持不变；`map.pcd` / `map.geojson` /
 `nav_paths` 始终原样保留，不影响已有路线。
 

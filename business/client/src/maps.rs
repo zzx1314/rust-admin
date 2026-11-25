@@ -194,7 +194,8 @@ pub(crate) async fn map_push_block(
 /// 1. 设备当前没有执行任务 / 建图（避免改图与导航互相打架）；
 /// 2. 本体上确实存在该地图目录（不能凭名字造目录）；
 /// 3. 写完 `map_edit/map.pgm` / `map_edit/map.yaml`（有编辑目录时）或根目录
-///    `map.pgm` / `map.yaml`（老固件）后读回校验，内容一致才算成功；
+///    `map.pgm` / `map.yaml`（老固件）后读回校验，内容一致才算成功；包内若带
+///    `map_edit/edit_info.json`（中台橡皮擦的擦除圆），会与本体现有记录合并后写入；
 /// 4. 最后 4030 重新载图，让导航立刻用上新栅格。
 pub(crate) async fn push_map_to_body(
     config: &Config,

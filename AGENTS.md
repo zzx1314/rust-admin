@@ -387,6 +387,23 @@ resolve_route_map` 同样要放行「别园区的图」（否则园区能绑图�
 回归：`dog_map_edit_tests::publish_partial_map_marks_it_published`、
 `api_smoke::map_status_syncs_from_zentai`。
 
+**中台擦除的笔画要记进 `map_edit/edit_info.json`（2026-11-25 起）**：遥控器保存地图时
+是「根目录 `map.pgm` + `edit_info.json` 里的擦除圆」重算栅格——现场实测它的保存结果
+= 根图 `255→254` + 它自己 129 条 `{x,y,r}` 圆擦成 `254`，5,729,130 像素里只差 1,103 个
+（圆圈边界）。所以平台只改 `map_edit/map.pgm` 的话，遥控器一保存就把平台的编辑整体
+冲掉（11:14 / 18:29 / 19:10 / 19:24 四次现场）。现在链路：中台橡皮擦 →
+`package.rs::rewrite_map_package` 把**擦成 254** 的笔画转成 `{x,y,r}`（**像素坐标、
+左上原点、r 是像素半径**）**追加**进包内 `map_edit/edit_info.json` 的 `erase_areas`
+与一条 `edit_ops{type:"erase",circles}`；设备客户端
+`mapupload::push_map_to_robot` 先读本体现有文件、`merge_edit_info` 合并（去重、
+保留遥控器的 `fences`/`forbidden_areas`/未知字段）再上传。三条边界：**擦成未知 128
+不记**（遥控器的橡皮擦只会写 254，表达不了“未知”）；**根目录栅格不建档**（老固件没有
+`map_edit/`）；**合并失败绝不影响下发**（解析不了就保留原文件）。回归：
+`package::tests::erase_appends_circles_and_keeps_remote_edit_record` /
+`erase_to_unknown_is_not_recorded_as_ops` / `broken_edit_info_is_left_untouched`、
+`mapupload::tests::merge_edit_info_appends_circles_and_keeps_remote_fields` /
+`merge_edit_info_is_idempotent` / `merge_edit_info_refuses_broken_body_file`。
+
 「返回起点」回的是**起步时本体 `capture_origin_pose` 采的起点位姿**，不是地图原点。载图
 定位（`4030 op=1`）的 `initial_pose` **缺省必须发零四元数**（`Pose::unspecified()`）：协议
 §2.4.1 里只有四元数全零才表示「读上一份位姿文件做完整重定位」，而 `Pose::default()` 的单位

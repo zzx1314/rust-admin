@@ -313,7 +313,11 @@ jq -c 'select(.dir=="recv" and .frame.head.type==4013)' /tmp/frames.jsonl
 （遥控器编辑后的地图），把它转成本体命名的 `map.pgm` / `map.yaml`（yaml 的
 `image:` 改写成 `map.pgm`）。本体上存在 `map_edit/` 时写进
 `map/history_map/<目录>/map_edit/`，根目录的原始建图 `map.pgm` / `map.yaml`
-保持不动；没有 `map_edit/` 的老固件才退回根目录。写完读回逐字节校验后再发 4030
+保持不动；没有 `map_edit/` 的老固件才退回根目录。包内若带 `map_edit/edit_info.json`
+（中台橡皮擦写进去的擦除圆），客户端会把它与本体现有记录**合并**后写入
+（`merge_edit_info`：只追加新圆、保留遥控器的 `fences` / `forbidden_areas` / 未知字段，
+去重、超限或解析不了就不写）——遥控器保存地图是按「根 `map.pgm` + 这些擦除圆」重算的，
+不合并的话它一保存就把平台的编辑冲掉。写完读回逐字节校验后再发 4030
 重新载图。`map.pcd` / `map.geojson` / `nav_paths` 不动；任务 / 建图进行中、
 或本体上没有该地图目录时直接报错。现场固件的上传接口没有正式文档，客户端按
 「`POST /upload`（multipart）→ `PUT /files/<rel>` → `POST /files/<rel>`」三种形状
