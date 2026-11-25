@@ -28,6 +28,7 @@ import AppIcon from "@/components/AppIcon.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import ProgressBar from "@/components/ProgressBar.vue";
 import TaskLiveMonitor from "@/components/TaskLiveMonitor.vue";
+import FoldSection from "@/components/FoldSection.vue";
 import {
   DISPATCH_POLICIES,
   END_ACTIONS,
@@ -529,6 +530,43 @@ async function saveTask() {
   await load();
 }
 
+// ---------------- 详情分区折叠 ----------------
+//
+// 详情里 7 块内容（视频/地图、任务信息、呼叫、航点序列、录像、照片、事件）叠在一起
+// 太长，一开详情就要滚半天。每块标题可点折叠（`components/FoldSection.vue`），
+// 顶部再给一个「全部折叠 / 全部展开」。
+//
+// 默认只展开「视频/地图 + 呼叫 + 事件」：「任务信息」15 行静态字段最占地（一展开就是
+// 满满一屏，执行状态与进度在视频那一栏的 chip 里也有），序列 / 录像 / 照片 是翻旧账时
+// 才看的 —— 都默认收起。条数写在标题里（「任务照片（12）」），收起也不会把
+// 「有没有东西」藏起来。
+const FOLD_KEYS = ["live", "info", "call", "sequence", "recordings", "photos", "events"] as const;
+type FoldKey = (typeof FOLD_KEYS)[number];
+const foldOpen = reactive<Record<FoldKey, boolean>>({
+  live: true,
+  info: false,
+  call: true,
+  sequence: false,
+  recordings: false,
+  photos: false,
+  events: true
+});
+/** 全部收起时，顶部按钮换成「全部展开」 */
+const allFolded = computed(() => FOLD_KEYS.every(key => !foldOpen[key]));
+
+function toggleAllFolds() {
+  const next = allFolded.value;
+  for (const key of FOLD_KEYS) foldOpen[key] = next;
+}
+
+// 照片区默认收起：4G 上别为了看不见的缩略图先拉 8 张，展开时才取
+watch(
+  () => foldOpen.photos,
+  open => {
+    if (open && detailPhotos.value.length && photoRequested.value === 0) void loadPhotoThumbs();
+  }
+);
+
 async function openDetail(task: Task) {
   detailTask.value = task;
   detailEvents.value = [];
@@ -563,10 +601,11 @@ async function refreshDetail(taskId: number) {
   if (Array.isArray(photos)) {
     const before = detailPhotos.value.map(photo => photo.id).join(",");
     detailPhotos.value = photos;
-    // 换任务 / 新照片回传：重新按需取缩略图
+    // 换任务 / 新照片回传：重新按需取缩略图（照片区收起时先不取：展开那条 watch 再拉，
+    // 4G 上别为看不见的缩略图先掏带宽）
     if (before !== photos.map(photo => photo.id).join(",")) {
       photoRequested.value = 0;
-      void loadPhotoThumbs();
+      if (foldOpen.photos) void loadPhotoThumbs();
     }
   }
 }
@@ -1716,25 +1755,32 @@ onBeforeUnmount(() => {
       @closed="onDetailClosed"
     >
       <template v-if="detailTask">
-        <div class="live-hint" style="margin-bottom: 10px">
-          <i class="live-dot" />详情实时更新（每 {{ REFRESH_MS / 1000 }}s）
-          <template v-if="lastRefreshed"> · 上次 {{ lastRefreshed }}</template>
+        <div class="detail-bar">
+          <div class="live-hint">
+            <i class="live-dot" />详情实时更新（每 {{ REFRESH_MS / 1000 }}s）
+            <template v-if="lastRefreshed"> · 上次 {{ lastRefreshed }}</template>
+          </div>
+          <button
+            class="btn sm ghost"
+            :title="allFolded ? '展开全部内容' : '收起全部内容，一屏看完执行状态'"
+            @click="toggleAllFolds"
+          >
+            <AppIcon name="layers" />{{ allFolded ? "全部展开" : "全部折叠" }}
+          </button>
         </div>
 
-        <div class="rt-sec-title">
-          <span>实时视频 / 地图位置</span><AppIcon name="video" />
-        </div>
-        <TaskLiveMonitor
-          :task="detailTask"
-          :device="deviceOf(detailTask)"
-          :route="detailRoute"
-          :map="mapOf(detailTask)"
-          :refreshed-at="lastRefreshed"
-        />
+        <FoldSection v-model:open="foldOpen.live" title="实时视频 / 地图位置" icon="video">
+          <TaskLiveMonitor
+            :task="detailTask"
+            :device="deviceOf(detailTask)"
+            :route="detailRoute"
+            :map="mapOf(detailTask)"
+            :refreshed-at="lastRefreshed"
+          />
+        </FoldSection>
 
-        <div class="rt-sec-title" style="margin-top: 16px">
-          <span>任务信息</span><AppIcon name="task" />
-        </div>
+        <!-- 任务信息：15 行静态字段，全展开能占满满一屏 —— 默认收起，点标题展开 -->
+        <FoldSection v-model:open="foldOpen.info" title="任务信息" icon="task">
         <div class="kv"><span>任务名称</span><b>{{ detailTask.taskName }}</b></div>
         <div class="kv">
           <span>任务类型 / 模式</span><b>{{ detailTask.taskType }} / {{ detailTask.executeMode }}</b>
@@ -1780,9 +1826,9 @@ onBeforeUnmount(() => {
           <i :style="{ width: `${detailTask.progress}%` }" />
         </div>
 
-        <div class="rt-sec-title" style="margin-top: 18px">
-          <span>远程呼叫（喊话）</span><AppIcon name="sound" />
-        </div>
+        </FoldSection>
+
+        <FoldSection v-model:open="foldOpen.call" title="远程呼叫（喊话）" icon="sound">
         <div class="call-row">
           <input
             v-model="callText"
@@ -1874,9 +1920,9 @@ onBeforeUnmount(() => {
           </template>
         </div>
 
-        <div class="rt-sec-title" style="margin-top: 18px">
-          <span>下发后的航点执行序列</span><AppIcon name="route" />
-        </div>
+        </FoldSection>
+
+        <FoldSection v-model:open="foldOpen.sequence" title="下发后的航点执行序列" icon="route">
         <div v-if="detailSequence.length" class="act-kv" style="font-size: 11.5px; gap: 7px">
           <div v-for="step in detailSequence" :key="step.name">
             <b>{{ step.name }}</b> · {{ step.actions }}
@@ -1887,18 +1933,23 @@ onBeforeUnmount(() => {
           该任务使用临时路径，未绑定路线模板
         </div>
 
-        <div class="rt-sec-title" style="margin-top: 18px">
-          <span>任务录像（{{ detailRecordings.length }}）</span><AppIcon name="video" />
-          <button
-            class="btn sm"
-            style="margin-left: auto"
-            :disabled="pullingRecordings"
-            title="让设备把板端攒着的录像回传上来（录像不再自动回传，需要时点一下）"
-            @click="pullRecordings"
-          >
-            <AppIcon name="download" />{{ pullingRecordings ? "下发中…" : "回传板端录像" }}
-          </button>
-        </div>
+        </FoldSection>
+
+        <FoldSection
+          v-model:open="foldOpen.recordings"
+          :title="`任务录像（${detailRecordings.length}）`"
+          icon="video"
+        >
+          <template #actions>
+            <button
+              class="btn sm"
+              :disabled="pullingRecordings"
+              title="让设备把板端攒着的录像回传上来（录像不再自动回传，需要时点一下）"
+              @click="pullRecordings"
+            >
+              <AppIcon name="download" />{{ pullingRecordings ? "下发中…" : "回传板端录像" }}
+            </button>
+          </template>
         <div v-if="detailRecordings.length" class="act-kv" style="font-size: 11.5px; gap: 7px">
           <div
             v-for="item in detailRecordings"
@@ -1925,9 +1976,13 @@ onBeforeUnmount(() => {
           点上面「回传板端录像」让设备传上来。
         </div>
 
-        <div class="rt-sec-title" style="margin-top: 18px">
-          <span>任务照片（{{ detailPhotos.length }}）</span><AppIcon name="camera" />
-        </div>
+        </FoldSection>
+
+        <FoldSection
+          v-model:open="foldOpen.photos"
+          :title="`任务照片（${detailPhotos.length}）`"
+          icon="camera"
+        >
         <template v-if="detailPhotos.length">
           <div
             style="
@@ -1988,9 +2043,13 @@ onBeforeUnmount(() => {
           暂无照片。路线里给航点配「可见光拍照」，任务跑到该点（或任务结束后）会出现在这里。
         </div>
 
-        <div class="rt-sec-title" style="margin-top: 18px">
-          <span>任务事件（{{ detailEvents.length }}）</span><AppIcon name="clock" />
-        </div>
+        </FoldSection>
+
+        <FoldSection
+          v-model:open="foldOpen.events"
+          :title="`任务事件（${detailEvents.length}）`"
+          icon="clock"
+        >
         <!--
           事件流会一直堆（每轮下发 / 告警 / 呼叫留痕都写一条），撑开后把下面的
           操作按钮推到很远，点一次要滚半天。这里限高 + 内部滚动，标题里显示条数。
@@ -2006,6 +2065,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div v-else class="empty-box" style="padding: 16px 0">暂无事件记录</div>
+        </FoldSection>
 
         <div class="actions" style="margin-top: 16px">
           <button
@@ -2180,6 +2240,16 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* 详情顶部：实时更新提示 + 全部折叠（内容很长，先给个一键收起） */
+.detail-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
 /* 详情 / 监控内容较长（视频 + 地图 + 事件流）：弹窗主体自己滚动，
    标题栏固定，避免整页跟着滚、关闭按钮被顶出屏幕 */
 .task-live-dialog :deep(.el-dialog__body) {
