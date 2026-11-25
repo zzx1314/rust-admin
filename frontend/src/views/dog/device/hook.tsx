@@ -516,7 +516,10 @@ export function useDogDevice() {
     }
   }
 
-  function openMediaSync(row: DogDevice | null, action: string = MEDIA_SYNC_COMMAND) {
+  function openMediaSync(
+    row: DogDevice | null,
+    action: string = MEDIA_SYNC_COMMAND
+  ) {
     if (!row) return;
     mediaSyncDevice.value = row;
     mediaSyncAction.value = action;
@@ -546,7 +549,10 @@ export function useDogDevice() {
     if (!device) return;
     mediaSyncLoading.value = true;
     try {
-      const res = await dogDeviceMediaSyncStatus(device.id, mediaSyncAction.value);
+      const res = await dogDeviceMediaSyncStatus(
+        device.id,
+        mediaSyncAction.value
+      );
       if (res.code === SUCCESS) {
         mediaSyncStatus.value = res.data ?? null;
       } else {

@@ -535,12 +535,10 @@ pub async fn send_device_command_handler(
 
 /// 指令参数：设备侧需要的「板端事实」由中台补齐，前端只按按钮。
 ///
-/// 目前只有「同步媒体」需要：板端存证目录与固定帧数在「参数配置」页维护
-/// （`dog_config.media_picture_dir` / `media_frames`），现场改配置即可生效，
-/// 不必登板子改 `config.py`；配置缺失/写坏时回退到默认值，不影响指令下发。
-///
-/// `requestId` 也一并下发：客户端用它回传进度与最终结论
-/// （`command_progress` / `command_result` → 业务平台 → 本机内部接口）。
+/// 长任务（「同步媒体」/「回传录像」）都带 `requestId`：客户端用它回传进度与最终
+/// 结论（`command_progress` / `command_result` → 业务平台 → 本机内部接口）。
+/// 「同步媒体」另外还要板端存证目录与固定帧数（在「参数配置」页维护
+/// `dog_config.media_picture_dir` / `media_frames`），现场改配置即可生效。
 async fn command_params(
     state: &AppState,
     command: &str,
@@ -549,15 +547,22 @@ async fn command_params(
     request_id: &str,
 ) -> Value {
     let mut params = params.unwrap_or_else(|| json!({}));
-    if command != MEDIA_SYNC_ACTION {
+    if !is_long_task_action(command) {
         return params;
     }
-    let config =
-        crate::business::dog::media::service::load_capture_config(&state.dog_config_service).await;
-    params["pictureDir"] = json!(config.picture_dir);
-    params["frames"] = json!(config.frames);
+    // 长任务都要：客户端按 `requestId` 回传进度与最终结论（业务平台会把它包进
+    // `params.params`，设备客户端少认一层就整条回执发不出来）。
     params["operator"] = json!(operator);
     params["requestId"] = json!(request_id);
+    if command == MEDIA_SYNC_ACTION {
+        // 板端存证目录与每航点帧数只属于「同步媒体」：现场在「参数配置」页改，
+        // 不必登板子改 `config.py`；配置缺失/写坏时回退默认值，不影响指令下发。
+        let config =
+            crate::business::dog::media::service::load_capture_config(&state.dog_config_service)
+                .await;
+        params["pictureDir"] = json!(config.picture_dir);
+        params["frames"] = json!(config.frames);
+    }
     params
 }
 

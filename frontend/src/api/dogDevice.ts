@@ -145,6 +145,7 @@ export const dogDeviceMediaSyncStatus = (
   id: string | number,
   action?: string
 ) =>
-  http.axiosGetRequest<Result>(`/api/dogDevice/${id}/mediaSyncStatus`,
+  http.axiosGetRequest<Result>(
+    `/api/dogDevice/${id}/mediaSyncStatus`,
     action && action !== "同步媒体" ? { action } : {}
   );

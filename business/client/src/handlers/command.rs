@@ -210,63 +210,72 @@ pub(crate) async fn handle(
     //
     // **录像不再自动回传**（任务终态 / 客户端启动都不传），只有这条指令会调：
     // 平台要哪一轮就点哪一轮，录像攒在板端 `RECORD_DIR/<计划>/`。
+    //
+    // 必须 spawn 出去：一场巡检的录像可能几百 MB，4G 上要跑几十分钟，绝不能把
+    // 业务 WebSocket 的消息循环 await 死（后面的「暂停 / 取消 / 任务下发」会全堵住）。
     if command == "回传录像" {
+        let recorder = recorder.clone();
+        let task_out = out_tx.clone();
         let progress_tx = out_tx.clone();
         let progress_request_id = command_request_id(&msg);
-        let progress = move |p: crate::record::SyncProgress| {
-            let Some(request_id) = progress_request_id.clone() else {
-                return;
-            };
-            let _ = progress_tx.try_send(WsMessage {
-                msg_type: "command_progress".to_string(),
-                ts: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-                payload: json!({
-                    "requestId": request_id,
-                    "command": "回传录像",
-                    "uploaded": p.uploaded,
-                    "failed": p.failed,
-                    "total": p.total,
-                    "remaining": p.remaining,
-                }),
-            });
-        };
-        let summary = recorder.sync_all(Some(&progress)).await;
-        let result: Result<String, String> = match &summary {
-            Ok(summary) => Ok(summary.to_string()),
-            Err(error) => Err(error.clone()),
-        };
-        let extra = match &summary {
-            Ok(summary) => json!({
-                "drained": summary.drained(),
-                "nothingToDo": summary.nothing_to_do(),
-                "scanned": summary.scanned,
-                "uploaded": summary.uploaded,
-                "existing": summary.existing,
-                "failed": summary.failed,
-                "deleted": summary.deleted,
-                "remaining": summary.remaining,
-                "totalBytes": summary.total_bytes,
-            }),
-            Err(_) => json!({}),
-        };
-        send_command_result_with(out_tx, &msg, command, &result, extra).await;
-        match result {
-            Ok(note) => info!("指令 {command} 执行: {note}"),
-            Err(error) => {
-                warn!("指令 {command} 执行失败: {error}");
-                let event = DeviceEventPayload {
-                    event_type: "error".to_string(),
-                    message: format!("指令 {command} 执行失败: {error}"),
-                    data: None,
+        // 消息本身搬进后台任务：回执要按原 `requestId` / `msgId` 对回去
+        let item = msg;
+        tokio::spawn(async move {
+            let progress = move |p: crate::record::SyncProgress| {
+                let Some(request_id) = progress_request_id.clone() else {
+                    return;
                 };
-                send(
-                    out_tx,
-                    "event",
-                    serde_json::to_value(event).unwrap_or_default(),
-                )
-                .await;
+                let _ = progress_tx.try_send(WsMessage {
+                    msg_type: "command_progress".to_string(),
+                    ts: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                    payload: json!({
+                        "requestId": request_id,
+                        "command": "回传录像",
+                        "uploaded": p.uploaded,
+                        "failed": p.failed,
+                        "total": p.total,
+                        "remaining": p.remaining,
+                    }),
+                });
+            };
+            let summary = recorder.sync_all(Some(&progress)).await;
+            let result: Result<String, String> = match &summary {
+                Ok(summary) => Ok(summary.to_string()),
+                Err(error) => Err(error.clone()),
+            };
+            let extra = match &summary {
+                Ok(summary) => json!({
+                    "drained": summary.drained(),
+                    "nothingToDo": summary.nothing_to_do(),
+                    "scanned": summary.scanned,
+                    "uploaded": summary.uploaded,
+                    "existing": summary.existing,
+                    "failed": summary.failed,
+                    "deleted": summary.deleted,
+                    "remaining": summary.remaining,
+                    "totalBytes": summary.total_bytes,
+                }),
+                Err(_) => json!({}),
+            };
+            send_command_result_with(&task_out, &item, "回传录像", &result, extra).await;
+            match result {
+                Ok(note) => info!("指令 回传录像 执行: {note}"),
+                Err(error) => {
+                    warn!("指令 回传录像 执行失败: {error}");
+                    let event = DeviceEventPayload {
+                        event_type: "error".to_string(),
+                        message: format!("指令 回传录像 执行失败: {error}"),
+                        data: None,
+                    };
+                    send(
+                        &task_out,
+                        "event",
+                        serde_json::to_value(event).unwrap_or_default(),
+                    )
+                    .await;
+                }
             }
-        }
+        });
         return;
     }
 

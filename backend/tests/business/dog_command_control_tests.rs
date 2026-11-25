@@ -114,11 +114,21 @@ struct Hits {
     command: Arc<AtomicUsize>,
     task: Arc<AtomicUsize>,
     runtime: Arc<AtomicUsize>,
+    /// 最近一次 `/command` 收到的完整请求体（核对 params 有没有带上 requestId）
+    last_command: Arc<Mutex<Option<Value>>>,
 }
 
 impl Hits {
     fn command(&self) -> usize {
         self.command.load(Ordering::SeqCst)
+    }
+
+    fn last_command(&self) -> Value {
+        self.last_command
+            .lock()
+            .expect("锁中毒")
+            .clone()
+            .expect("还没收到指令")
     }
 
     fn task(&self) -> usize {
@@ -136,6 +146,7 @@ async fn spawn_fake_business() -> (String, Hits) {
     let command_hits = hits.command.clone();
     let task_hits = hits.task.clone();
     let runtime_hits = hits.runtime.clone();
+    let last_command = hits.last_command.clone();
 
     let app = Router::new()
         .route(
@@ -143,8 +154,10 @@ async fn spawn_fake_business() -> (String, Hits) {
             post(
                 move |AxumPath(code): AxumPath<String>, Json(body): Json<Value>| {
                     let counter = command_hits.clone();
+                    let last_body = last_command.clone();
                     async move {
                         counter.fetch_add(1, Ordering::SeqCst);
+                        *last_body.lock().expect("锁中毒") = Some(body.clone());
                         assert_eq!(code, "RD-100");
                         // 指令名由测试决定（召回充电 / 同步媒体…），业务平台原样回显
                         let command = body["command"].clone();
@@ -530,6 +543,12 @@ async fn record_sync_dispatch_stays_pending_until_the_device_reports() {
     );
     assert_eq!(response["awaitingDevice"], true);
     assert_eq!(hits.command(), 1);
+    // 长任务要带 requestId：客户端靠它回传进度与结论（业务平台会包进 `params.params`）
+    let delivered = hits.last_command();
+    assert_eq!(
+        delivered["params"]["requestId"], "req-record-1",
+        "回传录像也要下发 requestId，否则设备进度/结论回执发不出来：{delivered}"
+    );
 
     // 2) 跑着时再点一次：不重复下发
     let again = send_device_command_handler(
