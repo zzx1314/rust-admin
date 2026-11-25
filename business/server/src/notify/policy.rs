@@ -248,6 +248,17 @@ pub async fn alert_created_with_image(
         .dedup_key
         .as_deref()
         .is_some_and(|key| key.starts_with("ai:"));
+    // 低电量（`battery:`）在群里换个标题：值班的人扫一眼就知道是「该去充电了」，
+    // 不用点开卡片看正文（早上群里可能还挂着别的故障）。
+    let kind = if row
+        .dedup_key
+        .as_deref()
+        .is_some_and(|key| key.starts_with("battery:"))
+    {
+        "设备低电量告警"
+    } else {
+        "设备异常告警"
+    };
 
     let mut fields: Vec<(&'static str, String)> = Vec::with_capacity(9);
     fields.push((
@@ -326,19 +337,19 @@ pub async fn alert_created_with_image(
         },
         dedupe_window: ai_hit.then_some(AI_HIT_DEDUPE_WINDOW),
         title: if follow_up.is_some() {
-            "设备异常告警（跟单：数值有变化）".to_string()
+            format!("{kind}（跟单：数值有变化）")
         } else if repeat {
             match repeat_count {
-                Some(count) => format!("设备异常告警（跟单：同一问题第 {count} 次）"),
-                None => "设备异常告警（跟单：同一问题仍在办）".to_string(),
+                Some(count) => format!("{kind}（跟单：同一问题第 {count} 次）"),
+                None => format!("{kind}（跟单：同一问题仍在办）"),
             }
         } else if assignment
             .as_ref()
             .is_some_and(|assignment| assignment.work_order_code.is_some())
         {
-            "设备异常告警（已自动派单）".to_string()
+            format!("{kind}（已自动派单）")
         } else {
-            "设备异常告警".to_string()
+            kind.to_string()
         },
         fields,
         // 群里不带板端证据路径（见 [`without_evidence_path`]）；告警正文里照旧保留

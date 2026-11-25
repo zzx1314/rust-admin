@@ -265,6 +265,144 @@ pub async fn sweep_stale_devices(state: &AppState) -> Result<u64, AppError> {
 
     Ok(affected)
 }
+/// 低电量阈值（`settings.battery_threshold`，设置页「平台参数 → 低电量阈值」）。
+pub const BATTERY_THRESHOLD_SETTING: &str = "battery_threshold";
+/// 设置缺失 / 写坏时的阈值，与 `seed.rs` 的播种值一致。
+const DEFAULT_BATTERY_THRESHOLD: i64 = 20;
+/// 恢复余量：电量回到「阈值 + 5%」以上才把告警结案。
+///
+/// 没有余量时，电量在阈值上下抖 1% 就会「报警 → 结案 → 再报警」，
+/// 群里一天能刷出十几条，反而没人看。
+const BATTERY_RECOVER_MARGIN: i64 = 5;
+
+/// 读取低电量阈值（百分比）。非法值（空 / 非数字 / 越界）退回默认 20。
+pub async fn battery_threshold(db: &SqlitePool) -> i64 {
+    let raw: Option<String> =
+        sqlx::query_scalar("SELECT setting_value FROM settings WHERE setting_key = ?1")
+            .bind(BATTERY_THRESHOLD_SETTING)
+            .fetch_optional(db)
+            .await
+            .unwrap_or(None);
+    raw.and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|value| (1..=100).contains(value))
+        .unwrap_or(DEFAULT_BATTERY_THRESHOLD)
+}
+
+/// 这台设备当前有没有未处理的低电量告警（`AL-BAT-*`）。
+async fn open_low_battery_alert(db: &SqlitePool, device_id: &str) -> bool {
+    let hit: Option<i64> = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM alerts
+              WHERE status = '未处理' AND alert_code LIKE 'AL-BAT-%'
+                AND device_id = (SELECT id FROM devices WHERE device_id = ?1)
+         )",
+    )
+    .bind(device_id)
+    .fetch_optional(db)
+    .await
+    .unwrap_or(None);
+    hit.unwrap_or(0) != 0
+}
+
+/// 心跳电量 → 低电量告警（边沿触发 + 自动结案）。
+///
+/// 现场诉求：狗电量掉到阈值以下要在**企业微信群**里出现一条，值班的人安排回充。
+/// 这与「执行计划期间才推」的口径不同（见 [`crate::alert_flow::should_dispatch`]）：
+/// 狗闲置时电量掉光，下一次派单直接就因为电量不足失败了。
+///
+/// 四条口径：
+/// 1. **只在真的低电量时落一条**：已经有一条未处理的 `AL-BAT-*` 就不再新建 ——
+///    心跳 10s 一次，不能每帧一条；接入充电桩 / 电量回到阈值 + 余量以上自动结案。
+/// 2. **正在充电不算异常**：低电量本来就该在充电，顺手把未处理的告警结掉。
+/// 3. **本体掉线 / 模拟模式不判**：那时的电量是上一帧的残留或假数据（调用方先过滤）。
+/// 4. **没绑园区不报警**：还在建档的设备没有责任人可派，硬报只会变成群里的
+///    「未绑定设备」。
+pub(crate) async fn check_low_battery(
+    state: &crate::app::AppState,
+    device_id: &str,
+    battery: i64,
+    charging: Option<bool>,
+    timestamp: &str,
+) {
+    let db = &state.db;
+    let threshold = battery_threshold(db).await;
+    let open = open_low_battery_alert(db, device_id).await;
+
+    if charging == Some(true) {
+        if open {
+            resolve_low_battery_alert(db, device_id, timestamp).await;
+        }
+        return;
+    }
+    if open {
+        // 留恢复余量：刚过阈值就结案会让群里「报警 / 恢复」来回刷
+        if battery > threshold + BATTERY_RECOVER_MARGIN {
+            resolve_low_battery_alert(db, device_id, timestamp).await;
+        }
+        return;
+    }
+    if battery > threshold {
+        return;
+    }
+
+    // 园区由运营手动绑定；`park_id IS NULL` 时直接查不到，也就不会报警
+    let parked: Option<i64> = sqlx::query_scalar(
+        "SELECT park_id FROM devices WHERE device_id = ?1 AND park_id IS NOT NULL",
+    )
+    .bind(device_id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+    if parked.is_none() {
+        return;
+    }
+
+    // alert_code 唯一：带设备号 + 毫秒时间戳，同一台设备多轮低电量不会互相覆盖
+    let alert_code = format!(
+        "AL-BAT-{}-{}",
+        device_id,
+        chrono::Local::now().format("%Y%m%d%H%M%S%3f")
+    );
+    let content = format!(
+        "设备 {device_id} 电量 {battery}%（低电量阈值 {threshold}%）：请尽快安排回充，\
+         接入充电桩后告警自动结案"
+    );
+    let _ = sqlx::query(
+        "INSERT INTO alerts (alert_code, level, content, device_id, park_id, status,
+            occurred_at, created_at, dedup_key)
+         VALUES (?1, '警告', ?2,
+            (SELECT id FROM devices WHERE device_id = ?3),
+            (SELECT park_id FROM devices WHERE device_id = ?3),
+            '未处理', ?4, ?4, ?5)",
+    )
+    .bind(&alert_code)
+    .bind(&content)
+    .bind(device_id)
+    .bind(timestamp)
+    // 同一台设备的低电量 = 同一个问题（源码里已按「未处理就跳过」限流），
+    // 工单复用这张键，不会每轮巡检新建一张
+    .bind(format!("battery:{device_id}"))
+    .execute(db)
+    .await;
+    // 走统一出口。`alert_flow::should_dispatch` 对 `battery:` 键**不看**
+    // 「执行计划期间」：狗闲置时电量掉下去同样要建单 + 推群。
+    crate::notify::alert_created(&state.notify(), &alert_code).await;
+}
+
+/// 电量恢复 / 接入充电桩：自动把低电量告警结掉，避免告警中心长期挂着已恢复的条目。
+pub(crate) async fn resolve_low_battery_alert(db: &SqlitePool, device_id: &str, timestamp: &str) {
+    let _ = sqlx::query(
+        "UPDATE alerts SET status = '已处理', handled_at = ?1
+          WHERE status = '未处理' AND alert_code LIKE 'AL-BAT-%'
+            AND device_id = (SELECT id FROM devices WHERE device_id = ?2)",
+    )
+    .bind(timestamp)
+    .bind(device_id)
+    .execute(db)
+    .await;
+}
+
 /// 查询园区编码（用于 register_ack 下发与地图回传归属）
 pub(crate) async fn park_code_of(db: &SqlitePool, park_id: Option<i64>) -> Option<String> {
     let park_id = park_id?;
@@ -371,6 +509,18 @@ pub(crate) async fn handle_heartbeat(
                 .bind(&device_id_clone)
                 .execute(db)
                 .await;
+        // 低电量告警：模拟模式（假电量）与本体掉线（上一帧残留值）都不判，
+        // 否则群里会出现「电量 0%」这种设备页自己都显示成「—」的假告警。
+        if payload.mode.as_deref() != Some("sim") && payload.body_online != Some(false) {
+            check_low_battery(
+                state,
+                &device_id_clone,
+                b,
+                payload.charging,
+                &timestamp_clone,
+            )
+            .await;
+        }
     }
     if let Some(t) = payload.temperature {
         let _ = sqlx::query(

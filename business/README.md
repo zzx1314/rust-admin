@@ -991,6 +991,10 @@ axios 还有 120s 硬超时，现场表现就是「点回放没反应」（2026-
 以及任务被判「异常」——推到企业微信群机器人。掉线、控制权被抢、页面手动新建的告警
 **只落库不进群**（告警中心照常可见）。实现见 `server/src/notify.rs`，记录落 `notifications` 表。
 
+**低电量是唯一例外**：电量掉到「系统设置 → 低电量阈值」（`battery_threshold`，默认 20%）
+以下时，不管有没有计划在跑都会建单 + 推群（狗闲置时电量掉光，下一次派单直接失败）；
+接入充电桩或电量回到阈值 +5% 以上自动结案，一轮只报一条（`AL-BAT-*`，`battery:`）。
+
 > **本节是使用手册。改这个功能之前先读
 > [`docs/wecom-alert-push.md`](docs/wecom-alert-push.md)** —— 那里有架构图、
 > 代码地图、去重/限流参数、触发点清单、扩展点（多群路由 / 恢复通知 / 中台代发）、
@@ -1144,6 +1148,7 @@ SELECT created_at, status, level, ref_type, ref_id, attempts, last_error
 | 设备心跳超时掉线（`AL-HB-*`，`hb:`） | 无 | **只落库** |
 | 控制权被遥控器抢占（`AL-CTRL-*`，`ctrl:`） | 无 | **只落库** |
 | 页面手动新建（`POST /api/alerts`，未绑定设备也算） | 无 | **只落库** |
+| 低电量（`AL-BAT-*`，`battery:`） | 有无都行 | 建单 + 推群（**唯一例外**，见下） |
 
 「只落库」= 告警中心照常能看到、能筛选、能人工转工单，但**不自动建单、不进企业微信群**
 （`assignee` / `work_order_id` 也不回写）。这样夜里设备掉线或遥控器抢占不会往群里刷，
@@ -1152,6 +1157,10 @@ SELECT created_at, status, level, ref_type, ref_id, attempts, last_error
 开关：设置页「只为执行计划期间的告警建单 + 推群」（`notification.alert_only_in_task`，
 **缺行视为开启**）。关掉就退回老口径（所有告警都建单 + 推群）。
 回归用例：`server/tests/alert_in_task.rs`。
+
+**低电量为什么例外**（`alert_flow::always_dispatched_key`）：狗闲置时电量掉光，下一次
+派单会直接因为电量不足失败，等到「执行计划期间」再报就来不及了。所以 `battery:` 键
+直接走「建单 + 推群」，开关不影响它。
 
 ### 派单规则（打分取最高）
 

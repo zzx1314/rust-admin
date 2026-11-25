@@ -552,6 +552,15 @@ pub async fn message_ignored(db: &SqlitePool, message: &str) -> bool {
     }
 }
 
+/// 无论有没有计划在跑都要建单 + 推群的告警（按结构化 `dedup_key` 前缀）。
+///
+/// 目前只有低电量（`battery:`）：狗闲置时电量掉下去同样要人去充电 ——
+/// 等「执行计划期间」再报就来不及了（下一次派单会因为电量不足直接失败，
+/// 现场是狗在充电座旁边的走廊里趴着没人管）。
+pub fn always_dispatched_key(dedup_key: Option<&str>) -> bool {
+    dedup_key.is_some_and(|key| key.trim().starts_with("battery:"))
+}
+
 /// 这条告警是否应该派生「自动建工单 + 企业微信推送」。
 ///
 /// [`crate::notify::alert_created`] 的第一道门：只负责判「现在该不该动作」，
@@ -560,7 +569,21 @@ pub async fn should_dispatch(db: &SqlitePool, alert_code: &str) -> bool {
     if !only_in_task_enabled(db).await {
         return true;
     }
+    if alert_is_always_dispatched(db, alert_code).await {
+        return true;
+    }
     in_task_execution(db, alert_code).await
+}
+
+/// 告警行上的 `dedup_key` 是否属于「永远派单」那一类（见 [`always_dispatched_key`]）。
+async fn alert_is_always_dispatched(db: &SqlitePool, alert_code: &str) -> bool {
+    let key: Option<String> =
+        sqlx::query_scalar("SELECT dedup_key FROM alerts WHERE alert_code = ?1")
+            .bind(alert_code)
+            .fetch_optional(db)
+            .await
+            .unwrap_or(None);
+    always_dispatched_key(key.as_deref())
 }
 
 /// 告警落库那一刻，它绑定的设备上是否有 `执行中` 的任务。
@@ -979,5 +1002,25 @@ mod tests {
                 "时间不同步".to_string()
             ]
         );
+    }
+
+    /// 低电量（`battery:`）永远建单 + 推群；其余结构化键依旧看「执行计划期间」。
+    #[test]
+    fn only_battery_keys_bypass_the_in_task_gate() {
+        assert!(always_dispatched_key(Some("battery:RD-013")));
+        assert!(always_dispatched_key(Some(" battery:RD-013 ")));
+        for key in [
+            None,
+            Some(""),
+            Some("hb:RD-013"),
+            Some("ctrl:RD-013"),
+            Some("fault:RD-013:13382"),
+            Some("ai:RD-013:TK-1112-11:2:extinguisher"),
+            // 前缀必须真的一致，不能按「包含」匹配
+            Some("battery:RD-013:extra"),
+        ] {
+            let expected = key == Some("battery:RD-013:extra");
+            assert_eq!(always_dispatched_key(key), expected, "{key:?}");
+        }
     }
 }

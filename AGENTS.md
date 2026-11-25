@@ -431,6 +431,12 @@ resolve_route_map` 同样要放行「别园区的图」（否则园区能绑图�
 所以新加告警源时先想清楚它算不算「执行计划期间」；想绕过就先看 `notify::alert_created`
 的第一道门，不要在各调用点各自判断。回归用例：`business/server/tests/alert_in_task.rs`。
 
+**唯一的例外是低电量**（`battery:`，`gateway::check_low_battery` → `AL-BAT-*`）：狗闲置时
+电量掉到 `settings.battery_threshold`（默认 20%）以下也要建单 + 推群（否则下一次派单直接
+因电量不足失败），由 `alert_flow::always_dispatched_key` 放行。边沿触发：已有一条未处理
+就不再新建，充电 / 电量回到「阈值 + 5%」自动结案；模拟模式、本体掉线、没绑园区不判。
+回归用例：`business/server/tests/battery_alert.rs`。
+
 告警**证据图**（AI 识别**检出** / **数量核对不一致**时的板端抓拍）走企业微信
 `msgtype=image`，作为 markdown 卡片之后的**第二条**消息：板端图在
 `detect_jobs/<plan>/pt<n>/*.jpg`，平台读不到，所以由客户端（与 Agent 同机）读盘后上报 ——

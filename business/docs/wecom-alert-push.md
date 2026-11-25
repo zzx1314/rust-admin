@@ -52,8 +52,9 @@
 ```
                     ┌─ gateway.rs  设备事件 error/fault/obstacle
                     ├─ gateway.rs  心跳看门狗（设备掉线）
-  告警落库后的 5 处 ─┼─ gateway.rs  控制权抢占 AL-CTRL-*
-      调用点        ├─ ai_patrol.rs AI 识别检出
+  告警落库后的 6 处 ─┼─ gateway.rs  控制权抢占 AL-CTRL-*
+      调用点        ├─ gateway.rs  心跳低电量 AL-BAT-*（唯一不看「执行计划期间」的）
+                    ├─ ai_patrol.rs AI 识别检出
                     └─ handlers/alerts.rs 手动新建
                               │
                               ▼
@@ -183,6 +184,7 @@
 | 1 | 设备事件 `error` / `fault` / `obstacle` | `gateway.rs:1587` | `error`→严重，`fault` 看 `severity>=2` |
 | 2 | 心跳超时被置离线 | `gateway.rs:625` | 警告 |
 | 3 | `ctrl_source=3` 控制权被抢 | `gateway.rs:1363` | 警告 |
+| 3b | 心跳电量 ≤ `battery_threshold`（默认 20%） | `gateway.rs` `check_low_battery` | 警告（接入充电桩 / 回升到阈值 +5% 自动结案；**不看执行计划期间**） |
 | 4 | AI 识别检出 / 数量核对不一致 /**未检出** | `ai_patrol.rs` `record_hit` / `record_count_alert` / `record_missing_alert` | 警告（前两个带证据图） |
 | 4b | 数量核对**一致**（航点勾了 `notifyWhenCountOk`） | `ai_patrol.rs` `record_count_ok` → `notify::count_matched` | 提示（`bypass_min_level`：显式开关优先于全局级别过滤） |
 
@@ -245,6 +247,7 @@
 | 1 设备事件（没跑任务时） | 否 | 只落库 |
 | 2 心跳超时掉线 | 否 | 只落库 |
 | 3 控制权被抢占 | 否 | 只落库 |
+| 3b 低电量（`battery:`） | 有无都行 | **建单 + 推群**（唯一例外） |
 | 5 页面手动新建（含未绑设备） | 否 | 只落库 |
 
 「只落库」= 告警中心照常能看、能筛选、能人工转工单，但不自动建单、不进群，
@@ -253,6 +256,19 @@
 
 开关是 `notification.alert_only_in_task`（默认开）；关掉退回老口径。
 回归用例：`server/tests/alert_in_task.rs`（含开关关闭一侧）。
+
+#### 例外：低电量一定要进群
+
+`battery:` 键（`gateway::check_low_battery` 写的心跳低电量告警）由
+`alert_flow::always_dispatched_key` 直接放行，**不经过** `in_task_execution`：
+狗闲置时电量掉光，下一次派单会直接因为电量不足失败，等到「执行计划期间」再报就来不及了。
+
+- 阈值：`settings.battery_threshold`（设置页「平台参数 → 低电量阈值」，默认 20%，非法值退回 20）。
+- 边沿触发：已有一条未处理的 `AL-BAT-*` 就不再新建（心跳 10s 一帧，不能每帧一条）；
+  接入充电桩（`charging=true`）或电量回到「阈值 + 5%」以上自动结案。
+- 不判的情况：客户端 `mode=sim`（假电量）、`bodyOnline=false`（上一帧残留值）、设备还没绑园区
+  （没有责任人可派）。
+- 回归用例：`server/tests/battery_alert.rs`。
 
 ---
 

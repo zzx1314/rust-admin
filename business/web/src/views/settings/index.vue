@@ -125,7 +125,7 @@ const platformFields = [
   { key: "platform_name", label: "平台名称", type: "text" },
   { key: "refresh_interval", label: "数据刷新频率", type: "select", options: ["5", "10", "30", "60"], unit: "秒" },
   { key: "default_park_id", label: "默认地图园区", type: "park" },
-  { key: "battery_threshold", label: "低电量阈值", type: "number", unit: "%" },
+  { key: "battery_threshold", label: "低电量阈值（低于即推群）", type: "number", unit: "%" },
   { key: "task_timeout_minutes", label: "任务超时容忍", type: "number", unit: "分钟" },
   { key: "coordinate_system", label: "坐标系统", type: "select", options: COORDINATE_SYSTEMS }
 ];
@@ -136,7 +136,7 @@ const switches = [
   {
     key: "wecom_alert_push",
     title: "企业微信 · 设备异常告警",
-    desc: "执行计划期间（设备有执行中的任务）产生的告警推送到企业微信群；掉线、控制权抢占、页面手动新建的告警只落库，不进群"
+    desc: "执行计划期间（设备有执行中的任务）产生的告警推送到企业微信群；掉线、控制权抢占、页面手动新建的告警只落库，不进群（低电量例外：一次放电只推一条，充电后自动结案）"
   },
   {
     key: "wecom_alert_repeat_push",
@@ -161,7 +161,7 @@ const switches = [
   {
     key: "alert_only_in_task",
     title: "只为执行计划期间的告警建单 + 推群",
-    desc: "开启（默认）：只有设备正在执行任务时产生的告警才自动建工单、推到企业微信群；掉线、控制权抢占、手动新建等只落库（告警中心照常可见）。关闭则退回「所有告警都建单 + 推群」的老口径"
+    desc: "开启（默认）：只有设备正在执行任务时产生的告警才自动建工单、推到企业微信群；掉线、控制权抢占、手动新建等只落库（告警中心照常可见）。关闭则退回「所有告警都建单 + 推群」的老口径。低电量不受此开关影响，始终建单 + 推群"
   },
   { key: "low_battery_recharge", title: "低电量自动回充", desc: "电量低于 20% 时自动下发回充任务" },
   { key: "daily_report_mail", title: "巡检日报邮件", desc: "每日 18:00 发送运行日报至运维组邮箱" },
