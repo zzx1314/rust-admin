@@ -212,6 +212,9 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
 | `POST /api/phone/stop` `{reason}` | `phone stop` | 挂断回 voice 模式（不在通话中时幂等） |
 | `GET /api/phone/status` | — | 通话态 + 板端 IPv4 网卡（页面据此拼 PC 端命令） |
 
+- **平台侧入口只有「网页直连」**：设备客户端在本机 `bind 127.0.0.1:0` 当那个对端
+  （`phone 127.0.0.1:<port>`），音频经设备 WS 转到浏览器（见 `business/docs/phone-intercom.md`）。
+  平台**不再**提供「拨给现场某台 PC」的入口；下面的 PC 脚本只留给现场调试。
 - **板端固定监听 5000**（`phone.LOCAL_PORT`）：`phone <ip> <端口>` 里的端口是对端 PC 的，
   PC 端命令是 `python voice_call_pc.py --peer <板端IP> --peer-port 5000 --local-port <同一端口>`
   （脚本在 `backend/pc_tools/`，`GET /api/lingsi/voice_call_pc.py` 可下载）。

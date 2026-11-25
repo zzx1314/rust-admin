@@ -253,17 +253,11 @@ async fn heartbeat_signal_lands_in_the_device_ledger() {
 
     // 未连 WiFi → 板端退 4G：45 → 中
     heartbeat_with_signal(&mut ws, Some(45), Some("cellular")).await;
-    assert_eq!(
-        signal_of(&state).await,
-        (45, Some("cellular".to_string()))
-    );
+    assert_eq!(signal_of(&state).await, (45, Some("cellular".to_string())));
 
     // 没连网 / 老客户端：不带 signal，库里保留上一次的真实值（不刷成 0）
     heartbeat_with_signal(&mut ws, None, None).await;
-    assert_eq!(
-        signal_of(&state).await,
-        (45, Some("cellular".to_string()))
-    );
+    assert_eq!(signal_of(&state).await, (45, Some("cellular".to_string())));
 
     // 老客户端只带 signal 不带来源：来源置空（不让旧标签配新数值）
     heartbeat_with_signal(&mut ws, Some(61), None).await;

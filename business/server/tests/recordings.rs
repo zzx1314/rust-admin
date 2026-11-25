@@ -409,7 +409,10 @@ async fn play_token_streams_without_bearer_and_is_scoped_to_one_recording() {
     let response = app.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = json_body(response).await;
-    let play = body["data"]["token"].as_str().expect("缺少播放令牌").to_string();
+    let play = body["data"]["token"]
+        .as_str()
+        .expect("缺少播放令牌")
+        .to_string();
     assert!(
         body["data"]["expiresAt"].as_i64().unwrap_or(0) > 0,
         "要回过期时间：{body}"
@@ -440,7 +443,11 @@ async fn play_token_streams_without_bearer_and_is_scoped_to_one_recording() {
         .body(Body::empty())
         .unwrap();
     let response = app.clone().oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "令牌不该跨录像通用");
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "令牌不该跨录像通用"
+    );
 
     // 没有令牌也没有 Bearer：拒
     let request = Request::get(format!("/api/recordings/{first}/file"))

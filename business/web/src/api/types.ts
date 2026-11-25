@@ -124,28 +124,6 @@ export interface DeviceCommandResult {
   forced?: boolean;
 }
 
-/**
- * 电话（对讲）运行态：`GET /devices/{id}/phone`。
- *
- * 数据来自设备客户端隧道里的板端 `/api/phone/status`；`reachable=false` 表示
- * 读不到（设备离线 / 客户端未登记隧道 / Agent 旧版本），页面应把「通话中」降级成
- * 「不可查」，不能当成「没在通话」。
- */
-export interface DevicePhoneStatus {
-  reachable: boolean;
-  active: boolean;
-  /** 对端 PC 的 IPv4（通话中才有） */
-  peer: string | null;
-  peerPort: number | null;
-  /** 板端固定监听端口（5000）：PC 端脚本的 `--peer-port` */
-  localPort: number | null;
-  /** 板端 IPv4 网卡：页面据此拼出 PC 端命令 */
-  interfaces: Array<{ name: string; ip: string }>;
-  /** PC 端脚本在板端 Agent 上的路径 */
-  script: string | null;
-  /** `reachable=false` 时的可读原因 */
-  reason?: string;
-}
 
 /** 本体动作机器码（协议 1302 有对应 cmd 码值的动作） */
 export type DeviceAction =

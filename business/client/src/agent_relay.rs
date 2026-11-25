@@ -16,8 +16,7 @@
 //!
 //! 三条硬规则：
 //!
-//! - **白名单**：只转发 4 个背包页只读接口 + 电话运行态 + 3 个 AI 动作，
-//!   别把它变成通用出口；
+//! - **白名单**：只转发 4 个只读接口 + 3 个 AI 动作，别把它变成通用出口；
 //! - **连不上就不打招呼**：`agent_hello` 只在 `/api/cameras` 真的通时才发，
 //!   平台侧自然显示「不可达」，不会把请求堆到黑洞里；
 //! - **事件只转检测类**：遥测 / 按键 / 语音暂时没人消费，原样转发只白烧上行带宽。
@@ -30,13 +29,11 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 /// 允许转发的 Agent 只读接口（与服务端 `agent_tunnel.rs` 的白名单一一对应）
-const GET_PATHS: [&str; 5] = [
+const GET_PATHS: [&str; 4] = [
     "/api/cameras",
     "/api/relay/status",
     "/api/detect/tasks",
     "/api/detect/status",
-    // 电话（对讲）运行态：页面要显示「通话中 / 对端」与板端网段
-    "/api/phone/status",
 ];
 
 /// 允许转发的 AI 动作
@@ -306,9 +303,8 @@ mod tests {
     #[test]
     fn whitelists_match_the_server_side_tunnel() {
         // 两端白名单必须一致：服务端放行、客户端拒绝会出现「请求发出去了却回不来」
-        assert_eq!(GET_PATHS.len(), 5);
+        assert_eq!(GET_PATHS.len(), 4);
         assert!(GET_PATHS.contains(&"/api/detect/tasks"));
-        assert!(GET_PATHS.contains(&"/api/phone/status"));
         assert!(!GET_PATHS.contains(&"/api/control/led"));
         assert_eq!(ACTIONS, ["start", "stop", "config"]);
         assert!(FORWARDED_EVENTS.contains(&"detect"));

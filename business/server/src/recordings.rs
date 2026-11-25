@@ -678,7 +678,11 @@ async fn ensure_recording_visible(
 }
 
 /// 园区归属判定（录像 / 照片这类「任务结果」在计划删掉之后的兜底口径）。
-async fn ensure_park_owner(state: &AppState, claims: &Claims, park_id: i64) -> Result<(), AppError> {
+async fn ensure_park_owner(
+    state: &AppState,
+    claims: &Claims,
+    park_id: i64,
+) -> Result<(), AppError> {
     if claims.is_admin {
         return Ok(());
     }

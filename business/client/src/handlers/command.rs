@@ -5,7 +5,6 @@ use crate::locate::parse_initial_pose;
 use crate::maps::push_map_to_body;
 use crate::maps::sync_maps_from_robot;
 use crate::media_sync;
-use crate::phone;
 use crate::speak;
 use crate::state::ActiveTask;
 use crate::state::RobotState;
@@ -133,28 +132,6 @@ pub(crate) async fn handle(
                 .and_then(Value::as_u64)
                 .unwrap_or(0) as u32;
             speak::manual_call(&config.ai_agent_url, text, looping, seconds).await
-        };
-        finish_command(out_tx, &msg, command, result).await;
-        return;
-    }
-
-    // 「电话」/「挂断电话」：板端 ⇄ 同网段 PC 的双向对讲（音频是局域网 UDP，不经平台）。
-    // 与「呼叫」同一套理由放在本体门禁之前：只跟同机 Agent 说话，本体没连也要能打。
-    if matches!(command, "电话" | "挂断电话") {
-        let outer = msg.payload.get("params");
-        let params = outer.and_then(|p| p.get("params")).or(outer);
-        let result: Result<String, String> = if command == "挂断电话" {
-            phone::stop(&config.ai_agent_url, "平台手动挂断").await
-        } else {
-            let peer = params
-                .and_then(|p| p.get("peer"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let port = params
-                .and_then(|p| p.get("peerPort"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            phone::start(&config.ai_agent_url, peer, port).await
         };
         finish_command(out_tx, &msg, command, result).await;
         return;

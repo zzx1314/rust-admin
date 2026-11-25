@@ -1,26 +1,27 @@
-//! 模拟电话（phone 模式）：板端 ↔ 同网段 PC 的双向对讲
+//! 模拟电话（phone 模式）：板端 `voice_call` 会话的「对端」由谁来做
 //!
-//! 平台点「发起通话 / 挂断」时，走的还是这条已有信道：
+//! 平台**不再**向板子下发「拨给某台 PC」的指令：现在只有网页直连对讲，
+//! 由 [`crate::phone_relay`] 在本机当 UDP 对端（`127.0.0.1:<本机端口>`），
+//! 音频经设备 WS 转到浏览器。本模块只保留那次调用的落地：
 //!
 //! ```text
-//! 平台 POST /devices/{id}/phone ──设备指令 `电话`──▶ 本进程
-//!     ──HTTP──▶ 板端 127.0.0.1:8000/api/phone {peer, peerPort}
-//!         ──FIFO──▶ `phone <对端IP> <对端端口>`
-//! 平台 POST /devices/{id}/phone/stop ──`挂断电话`──▶ /api/phone/stop ──▶ `phone stop`
+//! phone_relay::PhoneRelay::start()
+//!   ──HTTP──▶ 板端 127.0.0.1:8000/api/phone {peer:"127.0.0.1", peerPort}
+//!       ──FIFO──▶ `phone <对端IP> <对端端口>`
+//! phone_relay::PhoneRelay::stop()
+//!   ──HTTP──▶ /api/phone/stop ──▶ `phone stop`（回 voice 模式）
 //! ```
 //!
-//! 为什么由客户端代调：Agent 只在板子内网（客户端与它同机 `127.0.0.1:8000`），
-//! 操作员在公网控制台上点按钮。**音频不经平台**：板子把麦克风 PCM（16kHz/S16/20ms）
-//! 直接 UDP 打到对端 PC，所以 PC 必须和板子同网段并跑 `pc_tools/voice_call_pc.py`。
+//! 板端仍然支持 `/api/lingsi/mode` 那条老的 phone 通道（板端 Dashboard / PC 端脚本
+//! `pc_tools/voice_call_pc.py` 现场调试用），但**平台侧不再有入口**。
 //!
 //! 三条约定（改这块先看）：
 //!
-//! 1. **对端地址再过一遍白名单**：平台已经校验，但设备指令可以被伪造，而板端那条命令
-//!    最终进的是 shell `echo` —— 只认 IPv4 点分十进制 + 1~65535，其它一律拒。
-//! 2. **失败只回 command_result**：电话是运维手段，不是巡检步骤，任何失败都不能影响
-//!    正在跑的任务（不抛错、不打断 5009 处理链路）。
-//! 3. **不碰本体**：`handlers::command` 把这两个指令放在本体门禁之前，本体关机
-//!    （or 断链）时也要能打电话找现场人。
+//! 1. **对端地址必须白名单校验**：板端那条命令最终进的是 shell `echo` —— 只认 IPv4
+//!    点分十进制 + 1~65535，其它一律拒（多一层总比少一层好）。
+//! 2. **失败只报错，不影响别的**：电话是运维手段，不是巡检步骤；调用方（对讲中继）
+//!    只把错误回给页面。
+//! 3. **不碰本体**：只跟同机 Agent 说话，本体关机 / 断链时照样能打电话找现场人。
 use crate::speak;
 use reqwest::Client;
 use serde_json::json;

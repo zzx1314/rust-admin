@@ -671,18 +671,6 @@ pub struct CommandRequest {
     pub command: String,
 }
 
-/// 发起「模拟电话」（板端 ⇄ 同网段 PC 的对讲）。
-///
-/// `peer` 是对端 PC 的 IPv4，`peer_port` 是 PC 侧的 UDP 端口（板端固定监听 5000）。
-/// 严格校验在 `handlers::devices::validate_peer_ip` / `validate_peer_port`：
-/// 这条命令最终以 shell `echo` 写进 FIFO，对端地址来自界面输入。
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PhoneRequest {
-    pub peer: String,
-    pub peer_port: i64,
-}
-
 /// 任务详情页的「呼叫」（人工喊话）。
 ///
 /// `text` 会经设备客户端与板端 Agent 两层白名单净化（去空白、只留中文汉字 + 中文标点

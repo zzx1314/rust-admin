@@ -197,12 +197,6 @@ pub fn build_router(state: AppState) -> Router {
             post(devices::bind_device).delete(devices::unbind_device),
         )
         .route("/devices/{id}/action", post(teleop::send_action))
-        // 模拟电话（对讲）：板端 ⇄ 同网段 PC，平台只下发起停 + 读运行态
-        .route(
-            "/devices/{id}/phone",
-            get(devices::phone_status).post(devices::phone_start),
-        )
-        .route("/devices/{id}/phone/stop", post(devices::phone_stop))
         // 网页对讲：浏览器 WS（音频经设备客户端中继，公网浏览器也能直连板子）
         .route("/devices/{id}/audio/ws", get(phone_audio::browser_ws))
         .route("/devices/{id}/teleop", post(teleop::send_teleop))
