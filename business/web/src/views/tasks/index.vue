@@ -42,9 +42,11 @@ import {
 import { parseRouteData } from "@/utils/format";
 import { apiBaseUrl } from "@/utils/runtime";
 import { normalizeSpeakText } from "@/utils/speak";
+import { useAuthStore } from "@/stores/auth";
 import { phoneCallSupport, usePhoneCall } from "@/composables/usePhoneCall";
 
 const router = useRouter();
+const auth = useAuthStore();
 const tasks = ref<Task[]>([]);
 const devices = ref<Device[]>([]);
 const parks = ref<Park[]>([]);
@@ -247,6 +249,7 @@ async function load() {
   } catch (error) {
     // 接口失败时也要把页面渲染出来（空数据 + 空状态），不能只剩一片空白
     console.error(error);
+    liveError.value = error instanceof Error ? error.message : "任务数据加载失败";
     ElMessage.error("任务数据加载失败，请稍后重试");
   } finally {
     loading.value = false;
@@ -974,6 +977,13 @@ function clickStatusBadge(status: string) {
 const REFRESH_MS = 5000;
 const lastRefreshed = ref("");
 const liveRefreshing = ref(false);
+/**
+ * 最近一次拉数据的失败原因（`""` = 正常）。
+ *
+ * 以前自动刷新失败是**静默**的（只在 console 里），页面就停在一份空列表上，
+ * 看着像「这台设备没有计划」——排查时极易误判（尤其 http/https 两个源各有一份登录态时）。
+ */
+const liveError = ref("");
 let refreshTimer = 0;
 
 function stampNow() {
@@ -1001,6 +1011,7 @@ async function refreshLive() {
     tasks.value = taskList;
     stats.value = statsData;
     devices.value = deviceList;
+    liveError.value = "";
     stampNow();
     // 监控弹窗里的任务被删了就直接关掉，避免停在一份过期数据上
     if (monitorVisible.value && monitorTaskId.value !== null) {
@@ -1020,8 +1031,10 @@ async function refreshLive() {
       detailTask.value = fresh;
       await refreshDetail(fresh.id);
     }
-  } catch {
-    // 自动刷新失败不弹错（避免网络抖动时刷屏），下次轮询会自己恢复
+  } catch (error) {
+    // 不弹窗刷屏，但要在页面上留痕：空列表 + 没有提示会被误判成「这里没有计划」
+    liveError.value =
+      error instanceof Error ? error.message : "网络异常或登录已失效";
   } finally {
     liveRefreshing.value = false;
   }
@@ -1047,6 +1060,28 @@ onBeforeUnmount(() => {
         </button>
       </template>
     </PageHeader>
+
+    <div
+      v-if="liveError"
+      class="card"
+      style="
+        margin-bottom: 10px;
+        padding: 10px 14px;
+        border-color: #fecaca;
+        background: #fef2f2;
+        color: #b91c1c;
+        font-size: 12.5px;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      "
+    >
+      <AppIcon name="warn" />
+      <span>
+        数据刷新失败：{{ liveError }}（页面显示的可能不是最新的；每
+        {{ REFRESH_MS / 1000 }}s 自动重试）
+      </span>
+    </div>
 
     <div class="stat-strip">
       <div
@@ -1100,6 +1135,17 @@ onBeforeUnmount(() => {
       <p>
         任务把巡检路线（或临时航点）下发给指定设备，按计划时间执行；<br />
         在下方看板里可以直接新建、下发和跟踪进度。
+      </p>
+      <p
+        v-if="auth.user && !auth.user.isAdmin"
+        class="rt-hint"
+        style="margin: 0 0 6px; line-height: 1.7"
+      >
+        当前账号 <b>{{ auth.user.username }}</b>（{{ auth.user.role }}）只能看到
+        <b>自己创建</b>的计划，管理员可见全部。<br />
+        如果别的地址（http / https）里能看到任务，多半是两边登录的账号不同 ——
+        浏览器按「源」分别保存登录状态，<code>http://…:3008</code> 与
+        <code>https://…:3443</code> 互不相通。
       </p>
       <p v-if="routesEmpty" class="rt-hint" style="margin: 0 0 4px">
         当前还没有巡检路线：可以先到「巡检任务」编排一条，或直接新建计划用

@@ -4,6 +4,12 @@ import { fileURLToPath, URL } from "node:url";
 
 export default defineConfig({
   plugins: [vue()],
+  define: {
+    // 构建时间写进产物：界面右下角的账号菜单里显示，排查「是不是旧缓存」时直接用
+    __APP_BUILD__: JSON.stringify(
+      new Date().toLocaleString("zh-CN", { hour12: false })
+    )
+  },
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url))

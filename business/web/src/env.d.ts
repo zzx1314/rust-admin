@@ -1,0 +1,4 @@
+/// <reference types="vite/client" />
+
+/** `vite.config.ts` 的 `define` 注入的构建时间 */
+declare const __APP_BUILD__: string;

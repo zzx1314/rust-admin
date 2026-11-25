@@ -31,6 +31,8 @@ let controlTimer = 0;
 
 const currentTitle = computed(() => (route.meta.title as string) || "总览驾驶舱");
 const displayName = computed(() => auth.user?.displayName || "管理员");
+/** 构建时间（vite `define` 注入）：确认页面是不是最新产物 */
+const buildTime = __APP_BUILD__;
 const roleName = computed(() =>
   auth.user?.role === "admin" ? "平台运维组 · 管理员" : auth.user?.role || "运维人员"
 );
@@ -363,6 +365,8 @@ watch(
           <div class="user-pop-head">
             <b>{{ displayName }}</b>
             <span>{{ auth.user?.username }} · {{ roleName }}</span>
+            <!-- 前端构建时间：排查「你看到的是不是旧缓存 / 旧包」时有用 -->
+            <span class="muted" style="font-size: 10.5px">前端构建：{{ buildTime }}</span>
           </div>
           <button @click="logout"><AppIcon name="close" />退出登录</button>
         </div>
