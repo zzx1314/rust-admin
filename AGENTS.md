@@ -243,6 +243,12 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 两端各有一个坑，⚠️别搞反：到点就开播 = 停留（AI 识别 / 拍照）先把 `speakSeconds` 吃掉，
 现场听到「人还没走话已经说完」（与航段补光灯同一个问题）；**离开起点航点就停** = 航段播报
 一秒都听不到（2026-11-25 gh-test `lrc` P2→P3 现场事故）。
+⚠️ **停播必须排在到点分支最前面**：它是本机一次 HTTP POST（毫秒级），而「可见光拍照」
+是同步 ffmpeg 抓图（现场 2.9s）。2026-11-25 `TK-1125-19` P3 视频里狗 1:56 停住、
+播报 2:01 才停，就是停播排在了拍照后面（回归
+`client pump::tests::speech_stop_goes_out_before_the_slow_photo_capture`）；「离开航点」那一侧
+同理，要排在 `recorder.leave_point`（板端等 ffmpeg 写完 moov，最长 8s）之前（回归
+`client pump::tests::leaving_stops_point_speech_before_the_slow_record_flush`）。
 板端 Agent `POST /api/speak|/api/speak/stop`
 （`backend/speak.py`）往聆思命令 FIFO 写 `call 0|1 <内容>` / `call stop`，**TTS 在云端
 （必须联网 + asr）**。内容受板端固件限制：不能有空格、只认中文汉字 + 中文标点 + 数字、

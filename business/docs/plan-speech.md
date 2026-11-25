@@ -63,6 +63,22 @@
   `call stop`——一直留在 call 模式既占网络，也让「小谷小谷」唤醒词失效。
 - **顺序敏感**：客户端对播报是**串行 await**（不像开灯那样 spawn），
   否则「离开航点停播」可能抢在「到点开播」前面落地，把新播报掐掉。
+- **停播排在到点分支的第一个**（2026-11-25 现场：`TK-1125-19` P3，视频里狗 1:56 停住、
+  播报 2:01 才停）。日志对得上：`15:33:25.39` 到点 →
+  `[photo] 航点 2/dogcam 抓拍 1 张（2.9s）` → `15:33:28.29` 才
+  `POST /api/speak/stop`——**停播被同步抓图挡在后面**（AI 探测的两次 HTTP 也在前面）。
+  播报只是本机一次 `POST /api/speak/stop`（毫秒级），所以 `pump.rs` 的到点分支里它现在
+  排第一：`speaker.point_arrived` → 灯光（后台）→ 录像 → AI → 拍照。
+  **离开航点那一侧同理**：`speaker.leave_point`（停点播报 / 起步播报）现在排在
+  `recorder.leave_point`（板端 `/api/record/stop` 要等 ffmpeg 写完 moov，最长 8s）之前，
+  否则「狗起步走了，点上那几句还在喊」（回归
+  `client pump::tests::leaving_stops_point_speech_before_the_slow_record_flush`）。
+  剩下的约 2s 是板端/云端 TTS 把当前那句播完的尾巴（`call stop` 之后仍会放出已合成的
+  音频），客户端这边没有更快的办法。回归：
+  `client pump::tests::speech_stop_goes_out_before_the_slow_photo_capture`。
+  唯一代价：同点还有「航点播报」要**开播**时，`POST /api/speak` 里的 `ensure_asr()`
+  （asr 没起来时约 2s）会把后面的 AI 预热推后——任务期间 asr 通常已在跑，且 AI 预热
+  本来有 3s 的转身余量兜着，可接受；真嫌慢就把 stop / start 拆成两次调用。
 
 ## 2.1 手动「呼叫」（任务详情页喊话）
 

@@ -625,6 +625,18 @@ pub(crate) async fn handle_status_frame(
         if is_arrival_stage(&task.stage) {
             let current = active.lock().await.clone();
             if let (Some(current), Some(index)) = (current, index) {
+                // 语音播报**必须排在到点分支的最前面**（2026-11-25 现场：狗在 P3 停住
+                // 5 秒后还在喊）。它只做两件事：把上一段的航段播报收掉（`/api/speak/stop`）、
+                // 起本点的航点播报（`/api/speak`），都是本机一次 HTTP POST，毫秒级；
+                // 而排在它前面的「可见光拍照」是**同步 ffmpeg 抓图，现场 2.9s**（日志
+                // `[photo] 航点 2/dogcam 抓拍 1 张（2.9s）`）—— 顺序反了，停播就晚 3 秒，
+                // 加上板端/云端 TTS 把当前句子播完的尾巴，现场听到的就是「停了还在喊」。
+                // **串行 await**（不像开灯那样 spawn）：与下面「离开航点停播 / 起步开播」
+                // 必须严格有序，否则 stop 可能抢在 start 前面把新播报掐掉。
+                // 航点动作的播报现在就播；**从这里出发的航段播报只记账**
+                // （`Speaker::point_arrived` 里按 scope 分流），等狗真的起步再播——
+                // 到点就播会让停留（AI 识别 / 拍照）先吃掉循环时长。
+                speaker.point_arrived(&current.task_code, index).await;
                 // 灯光：航点动作 / 计划灯现在开（AI 要亮着灯看，顺序反了前几帧还是黑的）。
                 // 开灯放到后台——`POST /api/lights` 里有几次 GPIO shell 调用，不能让
                 // 5009 处理链路等它。**航段灯例外**：`point_arrived` 收到 scope=leg 时
@@ -669,12 +681,6 @@ pub(crate) async fn handle_status_frame(
                 }
                 // 航点拍照：这个点配了「可见光拍照」就抓一张（同步等：狗可能马上就走）
                 photographer.point_arrived(&current.task_code, index).await;
-                // 语音播报：航点动作的播报现在就播；**从这里出发的航段播报只记账**
-                // （`Speaker::point_arrived` 里按 scope 分流），等狗真的起步再播——
-                // 到点就播会让停留（AI 识别 / 拍照）先吃掉循环时长。**串行 await**
-                // （不像开灯那样 spawn）：与下面「离开航点停播 / 起步开播」必须严格有序，
-                // 否则 stop 可能抢在 start 前面把新播报掐掉。
-                speaker.point_arrived(&current.task_code, index).await;
             }
         } else if is_point_stage(&task.stage) {
             // 已经越过到点阶段（`photographing` / `point_completed`）但没等到
@@ -690,6 +696,12 @@ pub(crate) async fn handle_status_frame(
             // 狗已经离开航点（前往下一点 / 返航 / 别的任务阶段）：窗口时长跟着停留时间走，
             // 收口交给这里，别让相机把路过的东西当成这个点的目标
             ai.stop("已离开航点").await;
+            // 语音播报同样排在最前面（与到点分支同一个理由）：停掉本点的航点播报、
+            // 起步的航段播报开始。它只是本机一两次 HTTP POST，而下面的
+            // `recorder.leave_point`（板端 `/api/record/stop` 要等 ffmpeg 写完 moov，
+            // 最长 8s）和 `leg_started` 都可能要几百毫秒到几秒 —— 排在后面就是
+            // 「狗起步走了，点上那几句还在喊」。
+            speaker.leave_point("已离开航点").await;
             // 灯同一个道理：录像/识别已经结束，补光灯没必要一路亮到下一个点。
             // **计划灯除外**：它就是要全程亮着，这里关掉等于「离开第一个点就灭」；
             // **航段灯同理但要反过来看**：到点只记了账、没点亮，离开航点正是它开灯的
@@ -734,8 +746,6 @@ pub(crate) async fn handle_status_frame(
             {
                 recorder.leg_started(&task_code).await;
             }
-            // 语音播报同理：循环播报只在「还在这个航点上」时有意义。
-            speaker.leave_point("已离开航点").await;
         }
     }
 
@@ -1662,6 +1672,249 @@ mod tests {
             wait_speak(&calls, 2).await,
             vec!["say:前方作业，请勿靠近".to_string(), "stop".to_string()],
             "离开航点要停循环播报"
+        );
+    }
+
+    /// 共享时间线：两个假 Agent（播报 / 拍照）按真实顺序各记一行，
+    /// 用来验「停播要排在同步抓图之前」这种跨模块的先后。
+    type Timeline = Arc<Mutex<Vec<String>>>;
+
+    async fn spawn_timeline_speak_agent(timeline: Timeline) -> String {
+        let app = axum::Router::new()
+            .route(
+                "/api/speak",
+                axum::routing::post(
+                    |axum::extract::State(timeline): axum::extract::State<Timeline>,
+                     axum::Json(_body): axum::Json<serde_json::Value>| async move {
+                        timeline.lock().await.push("speak:say".to_string());
+                        axum::Json(json!({"ok": true}))
+                    },
+                ),
+            )
+            .route(
+                "/api/speak/stop",
+                axum::routing::post(
+                    |axum::extract::State(timeline): axum::extract::State<Timeline>| async move {
+                        timeline.lock().await.push("speak:stop".to_string());
+                        axum::Json(json!({"ok": true}))
+                    },
+                ),
+            )
+            .with_state(timeline);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("绑定假 Agent 失败");
+        let port = listener.local_addr().expect("取端口失败").port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// 假 Agent：`/api/photo` 故意**慢**（真机 ffmpeg 抓图 2~3s），进出各记一行
+    async fn spawn_slow_photo_agent(timeline: Timeline, delay: Duration) -> String {
+        let app = axum::Router::new()
+            .route(
+                "/api/photo",
+                axum::routing::post(
+                    move |axum::extract::State(timeline): axum::extract::State<Timeline>| async move {
+                        timeline.lock().await.push("photo:start".to_string());
+                        tokio::time::sleep(delay).await;
+                        timeline.lock().await.push("photo:done".to_string());
+                        axum::Json(json!({"ok": true, "files": [{"name": "pt1.jpg"}]}))
+                    },
+                ),
+            )
+            .with_state(timeline);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("绑定假 Agent 失败");
+        let port = listener.local_addr().expect("取端口失败").port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// 假 Agent：`/api/record/stop` 故意**慢**（真机要等 ffmpeg 写完 moov，最长 8s），
+    /// 进出各记一行
+    async fn spawn_slow_timeline_record_agent(timeline: Timeline, delay: Duration) -> String {
+        let app = axum::Router::new()
+            .route(
+                "/api/record/start",
+                axum::routing::post(
+                    |axum::extract::State(timeline): axum::extract::State<Timeline>| async move {
+                        timeline.lock().await.push("record:start".to_string());
+                        axum::Json(json!({"ok": true}))
+                    },
+                ),
+            )
+            .route(
+                "/api/record/stop",
+                axum::routing::post(
+                    move |axum::extract::State(timeline): axum::extract::State<Timeline>| async move {
+                        timeline.lock().await.push("record:stop".to_string());
+                        tokio::time::sleep(delay).await;
+                        timeline.lock().await.push("record:done".to_string());
+                        axum::Json(json!({"ok": true, "stopped": 1}))
+                    },
+                ),
+            )
+            .with_state(timeline);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("绑定假 Agent 失败");
+        let port = listener.local_addr().expect("取端口失败").port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// 与到点同样的毛病在「离开航点」这一侧：点播报的收口排在
+    /// `recorder.leave_point`（板端 `/api/record/stop` 要等 ffmpeg 收尾）后面，
+    /// 就是「狗起步走了，点上那几句还在喊」。
+    #[tokio::test]
+    async fn leaving_stops_point_speech_before_the_slow_record_flush() {
+        use crate::record::{RecordPlan, RecordPoint};
+        use crate::speak::{SpeakPlan, SpeakPoint};
+
+        let timeline: Timeline = Arc::new(Mutex::new(Vec::new()));
+        let speak = spawn_timeline_speak_agent(timeline.clone()).await;
+        let record =
+            spawn_slow_timeline_record_agent(timeline.clone(), Duration::from_millis(300)).await;
+        let mut h = Harness::new(active_task("TK-1", Some("robot-1")))
+            .with_speaker(speak)
+            .with_recorder(record);
+        h.speaker
+            .start_task(
+                "TK-1",
+                SpeakPlan {
+                    points: vec![SpeakPoint {
+                        index: 1,
+                        name: "P2".to_string(),
+                        text: "前方作业，请勿靠近".to_string(),
+                        seconds: 60,
+                    }],
+                    legs: vec![],
+                },
+            )
+            .await;
+        h.recorder
+            .start_task(
+                "TK-1",
+                RecordPlan {
+                    points: vec![RecordPoint {
+                        index: 1,
+                        name: "P2".to_string(),
+                        seconds: 15,
+                        cameras: vec![],
+                    }],
+                    legs: vec![],
+                },
+            )
+            .await;
+
+        // 到点：开播 + 开录
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.point_arrived", 1),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        // 离开：先停播（毫秒级），再去停录（板端要等 ffmpeg 收尾）
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.navigating", 1),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let log = timeline.lock().await.clone();
+        assert_eq!(
+            log,
+            [
+                "speak:say",
+                "record:start",
+                "speak:stop",
+                "record:stop",
+                "record:done"
+            ],
+            "停播要排在停录之前（反过来就是狗走了还在喊）"
+        );
+    }
+
+    /// 现场回归（2026-11-25 gh-test2 / TK-1125-19，P3）：狗 1:56 停住，播报 2:01 才结束。
+    /// 日志对得上：`15:33:25.39` 到点 → `[photo] 航点 2/dogcam 抓拍 1 张（2.9s）`
+    /// → `15:33:28.29` 才 `POST /api/speak/stop`。**停播被同步抓图挡在后面**，
+    /// 所以到点分支里播报必须排第一（它只是本机一次 HTTP POST）。
+    #[tokio::test]
+    async fn speech_stop_goes_out_before_the_slow_photo_capture() {
+        use crate::photo::{PhotoPlan, PhotoPoint};
+        use crate::speak::{SpeakLeg, SpeakPlan};
+
+        let timeline: Timeline = Arc::new(Mutex::new(Vec::new()));
+        let speak = spawn_timeline_speak_agent(timeline.clone()).await;
+        let photo = spawn_slow_photo_agent(timeline.clone(), Duration::from_millis(300)).await;
+        let mut h = Harness::new(active_task("TK-1", Some("robot-1")))
+            .with_speaker(speak)
+            .with_photographer(photo);
+        h.speaker
+            .start_task(
+                "TK-1",
+                SpeakPlan {
+                    points: vec![],
+                    legs: vec![SpeakLeg {
+                        index: 1,
+                        text: "巡检中，请注意避让".to_string(),
+                        seconds: 120,
+                    }],
+                },
+            )
+            .await;
+        h.photographer
+            .start_task(
+                "TK-1",
+                PhotoPlan {
+                    points: vec![PhotoPoint {
+                        index: 2,
+                        name: "P3".to_string(),
+                        camera: "dogcam".to_string(),
+                        frames: 1,
+                    }],
+                },
+            )
+            .await;
+
+        // 到达 P2（这一段还没开始走：航段播报不播）
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.point_arrived", 1),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        // 起步（离开 P2）：航段播报开始
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.navigating", 1),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        // 到 P3：这一段走完 —— 先停播，再抓图
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.point_arrived", 2),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let log = timeline.lock().await.clone();
+        assert_eq!(
+            log,
+            ["speak:say", "speak:stop", "photo:start", "photo:done"],
+            "停播必须排在同步抓图之前（反过来就是狗停住了还在喊）"
         );
     }
 
