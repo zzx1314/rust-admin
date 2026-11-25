@@ -44,6 +44,7 @@ client（与 Agent 同机）  ActiveTask::light_at 一处收口
 | 计划灯全程开、到点模式到点开 | 计划灯不等第一个航点（导航期间也是黑的就没意义），航点模式与 AI 窗口同一条收口规则（阶段不再是 `patrol.point_*`），不额外引入状态机 |
 | 航段灯**到点不开**、起步才开 | 到点后这个航点还要跑 AI 识别 / 可见光拍照 / 停留，亮着的补光灯会把识别画面和存证图一起污染（2026-11-25 `gh-test`：P1 没配灯、航线 1-2 配了补光灯，P1 的航点任务还没跑完灯就亮了）。「进段」的现场语义是「狗真的开始走这一段」，不是「到点」；收口交给下一个航点（那边配了灯就覆掉，没配就 `leave`） |
 | 航段灯**不**跟航点一起关 | 离开起点航点正是航段真正开始的时刻：到点时只记了账、没点亮，此刻才点亮（而不是关掉）。航段灯亮完整段是现场要的效果（夜里走完一段走廊 / 一段无灯通道） |
+| LED 灯带与补光灯**同一套时机** | `lightFill` / `lightLed` 只是同一个 `LightPoint` 的两个字段，scope（航点 / 航段）决定时机，没有第二套时序。LED 走 `systemctl start/stop alarmlight`，所以「走完这一段」在下一个航点到点时 `stop`（SIGINT 熄灯，灯珠不会停在最后一帧），中间航点停留期间灯带是**灭**的；想整趟一直亮用计划里的「自动开灯」 |
 | 去重键带 `LightScope` | 航段下标 = 起点航点下标，光看 `index` 会让「航点 3 的灯」和「从 P3 出发的航段灯」互相顶掉（一个把另一个的开灯记录 / 活跃态擦了，灯乱闪） |
 | 同一处既配航点灯又配航段灯 → **航点优先** | 与语音播报同一条规则（板端一次只认一份开灯参数）。现场的预期是「到点那盏」；要走一整段都亮着，就只配在航段上 |
 | 行进途中重发（`keep_alive`） | 板端看门狗（`LIGHT_MAX_ON_SECS`，默认 900s）只认最近一次请求；航段上没有新的「到点」帧，不重发就会走到一半黑掉 |
@@ -185,6 +186,11 @@ client（与 Agent 同机）  ActiveTask::light_at 一处收口
    2026-11-25 `gh-test`（P1 没配灯 / 航线 1-2 配了补光灯，到 P1 灯就亮）就是旧版客户端
    「进段 = 到达起点航点」的时序，回归 `client pump::tests::leg_lights_start_when_the_dog_leaves_the_waypoint`、
    `client lights::tests::leg_lights_start_on_departure_not_on_arrival`。
+   **LED 灯带同理**（同一个 `PointLights`）：到点那一帧不许 `systemctl start alarmlight`
+   （板端日志里没有 `[lights] 已点亮 LED`），起步那一帧才有；回归
+   `client lights::tests::leg_led_waits_for_departure_like_the_fill_light`。
+   灯带在每个航点会「熄 → 起步再亮」一次（systemd start/stop 有秒级延迟），
+   要整趟不灭就把灯配到计划的「自动开灯」上。
 6. LED 关了但还在闪：`test_rgbrun` 自己 fork 了子进程。`led_off` 用进程组杀，
    若厂商程序改过（不再继承进程组），需要在板端 `pkill -f test_rgbrun` 兜底。
 

@@ -226,7 +226,8 @@ fn camera_list(cameras: &[String]) -> String {
 /// - `points[].actions[]` 里的录像动作 → 该航点录 `seconds` 秒（`recordSeconds`，
 ///   老数据从 `param` 文本里读，默认 [`DEFAULT_POINT_SECS`]）；
 /// - `legs[].actions[]` 里的「全程录像」→ 整条任务录到底（`recordSegmentSeconds`
-///   或 `param` 的秒数 = 板端切片长度）。同一条路线配多段也只起一路。
+///   或 `param` 的秒数 = 板端切片长度）。同一条路线配多段也只起**第一段**（切片 / 相机
+///   取那一份）：任务级作业没有「只录这一段」的语义，配多了只会在日志里报一行忽略提示。
 pub fn parse_record_plan(route_data: &Value) -> RecordPlan {
     let mut plan = RecordPlan::default();
     if let Some(points) = route_data.get("points").and_then(Value::as_array) {
@@ -257,7 +258,10 @@ pub fn parse_record_plan(route_data: &Value) -> RecordPlan {
         }
     }
     if let Some(legs) = route_data.get("legs").and_then(Value::as_array) {
-        for leg in legs {
+        // 配了多段「全程录像」时只认第一段：任务级录像的切片长度 / 相机是一份，
+        // 后面的段**不能静默丢掉**——现场会以为「这一段选了另一路相机」生效了。
+        let mut ignored: Vec<usize> = Vec::new();
+        for (leg_index, leg) in legs.iter().enumerate() {
             let Some(actions) = leg.get("actions").and_then(Value::as_array) else {
                 continue;
             };
@@ -267,12 +271,32 @@ pub fn parse_record_plan(route_data: &Value) -> RecordPlan {
                     .and_then(Value::as_str)
                     .is_some_and(|text| is_record_action(text) && is_task_record(text))
             }) {
+                if plan.task.is_some() {
+                    ignored.push(leg_index);
+                    continue;
+                }
                 plan.task = Some(RecordTask {
                     segment_seconds: segment_seconds(action),
                     cameras: cameras_from_action(action),
                 });
-                break;
             }
+        }
+        if !ignored.is_empty() {
+            let first = plan
+                .task
+                .as_ref()
+                .map(|task| format!("每段 {}s", task.segment_seconds))
+                .unwrap_or_default();
+            warn!(
+                "路线里配了 {} 段「全程录像」，只认第一段（{first}，相机={}）；\
+                 这些航段被忽略：{ignored:?}。全程录像是**任务级**的——\
+                 要一次录多路，就把相机勾在同一条动作上",
+                ignored.len() + 1,
+                plan.task
+                    .as_ref()
+                    .map(|task| camera_list(&task.cameras))
+                    .unwrap_or_default()
+            );
         }
     }
     plan
@@ -1068,6 +1092,24 @@ mod tests {
             }),
             "全程录像的 param 里没有秒数时用默认切片"
         );
+    }
+
+    /// 配了多段「全程录像」：只认第一段（任务级录像的切片 / 相机就一份），
+    /// 后面的段要**报一行日志**——不然现场会以为「这一段选了另一路相机」生效了。
+    #[test]
+    fn only_the_first_task_recording_segment_is_used() {
+        let plan = parse_record_plan(&json!({
+            "points": [{"name": "P1", "actions": []}],
+            "legs": [
+                {"actions": [{"type": "全程录像", "recordSegmentSeconds": 60,
+                             "recordCameras": ["cam0"]}]},
+                {"actions": [{"type": "全程录像", "recordSegmentSeconds": 600,
+                             "recordCameras": ["dogcam"]}]}
+            ]
+        }));
+        let task = plan.task.expect("应该有全程录像");
+        assert_eq!(task.segment_seconds, 60, "取第一段的切片长度");
+        assert_eq!(task.cameras, vec!["cam0".to_string()], "取第一段的相机");
     }
 
     /// 相机多选：去重、白名单、上限；兼容单个 `recordCamera` 字符串。

@@ -239,7 +239,7 @@ pub(crate) async fn run_client(
     ));
     if config.speak_enabled {
         info!(
-            "航点 / 航段语音播报已启用：板端 Agent = {}（航点播报：到点播、离开该点收；航段播报：进段播、到下一个航点 / 终态收）",
+            "航点 / 航段语音播报已启用：板端 Agent = {}（航点播报：到点播、离开该点收；航段播报：起步播、到下一个航点 / 终态收）",
             speaker.agent()
         );
     } else {

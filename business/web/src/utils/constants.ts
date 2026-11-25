@@ -54,7 +54,8 @@ export const ACTION_LIB: Record<string, ActionMeta> = {
     param: "安全提示语音",
     trigger: "到达即执行",
     threshold: "—",
-    // 航点动作 = 到点播报；行进任务 = 进入该航段时播报（见 business/docs/plan-speech.md）
+    // 航点动作 = 到点播报；行进任务 = 起步（离开起点航点）才播、走完这一段停
+    // （见 business/docs/plan-speech.md）
     kind: "both"
   },
   录像采集: {

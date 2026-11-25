@@ -4,8 +4,9 @@
 
 ```text
 路线「航点动作 → 语音播报」→ 客户端到点      POST /api/speak {text, loop, seconds}
-路线「行进任务 → 语音播报」→ 客户端进段      POST /api/speak {text, loop:true}
-                            离开航段 / 终态  POST /api/speak/stop
+                          离开该航点      POST /api/speak/stop
+路线「行进任务 → 语音播报」→ 客户端起步      POST /api/speak {text, loop:true}
+                            到达下一个航点 / 终态  POST /api/speak/stop
 计划详情页「远程呼叫」→ 客户端代调        POST /api/speak/call {text, loop, seconds}
                             人工停止       POST /api/speak/stop
 ```
@@ -157,7 +158,7 @@ def _expire(token, reason):
 
 
 def start(body):
-    """开始一条播报（客户端到点 / 进段时调用）。
+    """开始一条播报（客户端到点 / 起步时调用）。
 
     `body`：
     - `text`  播报内容（必填，会被 `normalize` 净化）；

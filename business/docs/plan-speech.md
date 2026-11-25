@@ -5,7 +5,7 @@
 | 在哪 | 文件 | 职责 |
 |---|---|---|
 | 平台编辑器 | `business/web/src/views/routes/index.vue`（`isSpeakAction` 一段） | 配话术 + 循环时长，按板端白名单校验 |
-| 设备客户端 | `business/client/src/speak.rs` | 跟 5009 状态机起停（到点 / 进段 / 走完整段 / 终态） |
+| 设备客户端 | `business/client/src/speak.rs` | 跟 5009 状态机起停（到点 / 起步 / 走完整段 / 终态） |
 | 板端 Agent | `business/backpack_dashboard/backend/speak.py` | 写聆思命令 FIFO（`call 0/1 <内容>` / `call stop`） |
 
 ---
@@ -15,12 +15,18 @@
 | 动作 | 挂在哪 | 字段 | 行为 |
 |---|---|---|---|
 | 语音播报 | 航点动作（`points[i].actions[]`） | `speakText` / `speakSeconds`（0~600） | 到达该航点播报；`speakSeconds > 0` 时循环播这么久 |
-| 语音播报 | 行进任务（`legs[i].actions[]`、`returnLeg.actions`） | `speakText` / `speakSeconds`（默认 120） | **进入该航段时**开始播（= 到达起点航点），**走完整段**（= 到达下一个航点）/ 终态 / 取消停 |
+| 语音播报 | 行进任务（`legs[i].actions[]`、`returnLeg.actions`） | `speakText` / `speakSeconds`（默认 120） | **起步（离开起点航点）才开播**，**走完整段**（= 到达下一个航点）/ 终态 / 取消停 |
 
-- **航段播报的收口点是「到达下一个航点」，不是「离开起点航点」**：离开起点航点正是这一段
-  刚开始，在那里 stop 等于「配了也一秒都听不到」（2026-11-25 现场 gh-test `lrc`：
-  P2→P3 配了航段播报，狗一出 P2 就静音）。代码里靠 `speak.rs::Scope` 区分：
-  `Point` 离开航点停、`Leg` 到下一个航点才停。
+- **航段播报的开播点是「离开起点航点」（起步），收口点是「到达下一个航点」**——
+  两端都不能搞错：
+  - 到点就开播 → 那时狗还在跑这个航点的任务（AI 识别 / 拍照 / 停留 10 s），
+    `speakSeconds` 先被停留吃掉一截，短的还没起步就喊完了，现场听着也是
+    「人还没走、话先说完」（与航段补光灯同一条理由，2026-11-25 `gh-test`）；
+  - 离开起点航点就 stop → 配了也一秒都听不到（2026-11-25 现场 gh-test `lrc`：
+    P2→P3 配了航段播报，狗一出 P2 就静音）。
+  代码里靠 `speak.rs::Scope` 区分：`Point` 到点开、离开停；`Leg` 起步开、到下一个
+  航点（或终态 / 取消）才停。到点帧只记一笔「站在这个航点上」（`State::spoken_point`），
+  起步帧（阶段不再是 `patrol.point_*`）才真正 `POST /api/speak`。
 
 - **航段的下标语义**：`legs[i]` 是 P(i+1) → P(i+2)，所以它的「起点航点下标」是 `i`；
   `returnLeg` 的起点是最后一个航点。客户端按这个映射把「航段播报」挂到到点事件上。
@@ -36,7 +42,7 @@
 路线动作 speakText / speakSeconds
   → task_dispatch 的 routeData（原样下发，服务端不加工）
     → 设备客户端（5009 状态机，`client/src/speak.rs`）
-        到点 / 进段: POST 板端 /api/speak {text, loop, seconds, planId, pointIndex, scope}
+        航点播报到点 / 航段播报起步（离开起点航点）: POST 板端 /api/speak {..., scope}
         航点播报离开航点 / 航段播报到达下一个航点 / 终态 / 取消: POST 板端 /api/speak/stop {reason}
       → 板端 Agent（`speak.py`）
         call 0 <内容>   单次播报（说完 Agent 主动 call stop 回到 voice）
@@ -50,8 +56,9 @@
 - **一次只播一条**：板端 FIFO 是单通道，新 `call` 会打断旧播报。所以 Agent 每次 start
   先显式 `call stop` 再起新的；客户端也不需要「并发播报」。
 - **为什么要收尾**：循环播报必须由客户端收口，否则狗走了还在原地喊。板端看门狗
-  （`SPEAK_MAX_SECS`，默认 600s）只是兜底（客户端被 kill / 掉线）。**什么时候收**看动作
-  挂在哪儿：航点播报 = 离开该航点；航段播报 = 到达下一个航点（这一段走完）/ 终态 / 取消。
+  （`SPEAK_MAX_SECS`，默认 600s）只是兜底（客户端被 kill / 掉线）。**什么时候起 / 收**
+  都看动作挂在哪儿：航点播报 = 到点起、离开该航点收；航段播报 = **起步起**、
+  到达下一个航点（这一段走完）/ 终态 / 取消收。
 - **单次播报也要回到 voice**：Agent 按文本长度估时（`0.4 × 字数 + 3s`）后主动
   `call stop`——一直留在 call 模式既占网络，也让「小谷小谷」唤醒词失效。
 - **顺序敏感**：客户端对播报是**串行 await**（不像开灯那样 spawn），
@@ -123,6 +130,7 @@ web 任务详情「呼叫」
 | 到点没声音 | `journalctl -u backpack-agent | grep '\[speak\]'`：有没有「单次播报 / 循环播报」这一行；没有 = 客户端没下发（看客户端日志 `语音播报：…`） |
 | 航段配了播报却不响 | 客户端日志里有没有 `scope=leg` 的那条 `语音播报：…`：有 = 板端没播（asr / 网络）；没有 = 客户端没解析到（看 `含 N 个播报航点，M 个播报航段`）或该点同时配了航点播报（航点优先） |
 | 航段播报刚响就被掐 | 以前是「离开起点航点就 stop」（2026-11-25 已修）。现在只有到达下一个航点 / 终态 / 取消才停；若现场仍被掐，先确认客户端版本，再看是不是 `speakSeconds` 到期（默认 120s，长航段可调大） |
+| 到点就响（人还没起步） | 旧版客户端「进入航段 = 到达起点航点」的时序：日志里到点那行是 `播报「…」（航段…）`。新版到点只记一笔 `到达航点 N，从这里出发的航段播报等离开航点再播`，起步后才有 `播报「…」（航段…）`；如果是 `（航点…）`，那是**航点动作**也配了播报（航点优先，属正常） |
 | 播报「半句话」 | 内容里有英文 / 特殊符号被板端丢掉了。看 Agent 日志「内容已净化：丢弃 N 个不支持的字符」，回编辑器改文案 |
 | 报「asr 未启动」 | 板端没网或 `systemctl status asr` 挂了；播报是云端 TTS，**断网就是不能播** |
 | 一直在喊 | 客户端没发 stop（客户端被 kill / 掉线）；等 `SPEAK_MAX_SECS` 看门狗，或 `curl -XPOST :8000/api/speak/stop -d '{"reason":"manual"}'` |
@@ -148,7 +156,7 @@ curl -s -XPOST 127.0.0.1:8000/api/speak/stop -d '{"reason":"manual"}'
 # 板端：内容净化 / 幂等 / 循环看门狗 / 收尾（不需要板子、聆思、网络）
 python3 business/backpack_dashboard/backend/tools/speak_selftest.py
 
-# 客户端：路线解析 / 到点播报 / 离开停播 / 终态收口 / 老 Agent 退让 / 手动呼叫不去重
+# 客户端：路线解析 / 到点播报 / 航段播报起步才开 / 离开停播 / 终态收口 / 老 Agent 退让 / 手动呼叫不去重
 cd business/client && cargo test speak:: && cargo test waypoint_speech
 
 # 业务平台：呼叫下发到设备的契约（离线报未送达 / 参数透传 / 事件留痕）

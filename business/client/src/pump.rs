@@ -622,13 +622,20 @@ pub(crate) async fn handle_status_frame(
                     .await;
             });
         }
-        // 全程录像：5009 一出现这条任务就起（不等到第一个航点），跨点一直录到终态。
+        // 全程录像：这条任务一跑起来就录（不等到第一个航点），跨点一直录到终态。
         // 幂等由 `Recorder` 的 `task_active` 兜（5009 每 500ms 一帧）。
-        if let Some(task_code) = active
-            .lock()
-            .await
-            .as_ref()
-            .map(|task| task.task_code.clone())
+        //
+        // **`pending_task`（已受理、底盘未驱动）不算「开始」**：那时狗还在排队等上一条
+        // 任务停稳 / 资源释放，录下来的是空画面（几分钱不算，4G 上几分钟的 mp4 不算轻），
+        // 而且会和上一条任务的全程录像同时写盘 / 抢 CPU；任务要是随后被取消，
+        // 板子上就多一段没人要的文件（回传是平台按需、超期才清）。
+        // 真正驱动起来（成为 `current_task`）那一帧再起，晚不了几秒。
+        if !pending
+            && let Some(task_code) = active
+                .lock()
+                .await
+                .as_ref()
+                .map(|task| task.task_code.clone())
         {
             recorder.task_running(&task_code).await;
         }
@@ -670,9 +677,11 @@ pub(crate) async fn handle_status_frame(
                 }
                 // 航点拍照：这个点配了「可见光拍照」就抓一张（同步等：狗可能马上就走）
                 photographer.point_arrived(&current.task_code, index).await;
-                // 语音播报：这个点配了「语音播报」（航点动作）或从这里出发的航段配了播报，
-                // 就播一条。**串行 await**（不像开灯那样 spawn）：与下面「离开航点停播」
-                // 必须严格有序，否则 stop 可能抢在 start 前面把新播报掐掉。
+                // 语音播报：航点动作的播报现在就播；**从这里出发的航段播报只记账**
+                // （`Speaker::point_arrived` 里按 scope 分流），等狗真的起步再播——
+                // 到点就播会让停留（AI 识别 / 拍照）先吃掉循环时长。**串行 await**
+                // （不像开灯那样 spawn）：与下面「离开航点停播 / 起步开播」必须严格有序，
+                // 否则 stop 可能抢在 start 前面把新播报掐掉。
                 speaker.point_arrived(&current.task_code, index).await;
             }
         } else if !is_point_stage(&task.stage) {
@@ -689,13 +698,21 @@ pub(crate) async fn handle_status_frame(
                 .as_ref()
                 .is_some_and(|task| task.plan_lighting());
             if !plan_lighting {
-                lights.leave_point("已离开航点").await;
-                // 航段灯：这一段路上没有新的「到点」帧，板端看门狗（默认 900s）只认
-                // 最近一次请求 → 按 `LIGHT_REFRESH_AFTER` 原地重发一次（航点灯已经关了，
-                // 待开的航段灯还没点亮时这里什么都不发）。和开灯一样放后台：Agent 不可达
-                // 时一次要等 5s，不能让 5009 处理链路跟着卡（先后由 `PointLights` 的 gate 保证）。
+                // 起步这一帧把两件事一起做（顺序不能反）：
+                // 1) `leave_point`：先把到点时记下的航段灯点亮（狗真的起步了），
+                //    再按 scope 收航点灯；
+                // 2) `keep_alive`：这一段路上没有新的「到点」帧，板端看门狗（默认 900s）
+                //    只认最近一次请求 → 按 `LIGHT_REFRESH_AFTER` 原地重发一次
+                //    （航点灯已经关了 / 待开的航段灯还没点亮时什么都不发）。
+                // **两个都放后台**：`POST /api/lights` 里有 GPIO 写 + `systemctl
+                // start/stop`（LED 灯带第一次启动还要 pkill 老进程 + 两次 is-active，
+                // 关灯要等 SIGINT 收尾），Agent 不可达时更要等满 5s，不能让 5009
+                // 处理链路跟着卡；先后由 `PointLights` 的 gate（FIFO）保证。
                 let lights = lights.clone();
-                tokio::spawn(async move { lights.keep_alive().await });
+                tokio::spawn(async move {
+                    lights.leave_point("已离开航点").await;
+                    lights.keep_alive().await;
+                });
             }
             // 航点录像跟着「离开航点」收口：全程录像不在这里停（它跟任务）。
             recorder.leave_point("已离开航点").await;
@@ -907,6 +924,14 @@ mod tests {
             self
         }
 
+        /// 打开录像（指向一个假 Agent）：用来断言「什么时候起录、什么时候停」
+        fn with_recorder(mut self, agent: String) -> Self {
+            let mut config = test_config();
+            config.ai_agent_url = agent;
+            self.recorder = Arc::new(Recorder::new(Arc::new(config), true));
+            self
+        }
+
         async fn feed(&mut self, frame: &StatusFrame) -> Option<TerminalCleanup> {
             handle_status_frame(
                 frame,
@@ -1019,6 +1044,54 @@ mod tests {
     }
 
     async fn wait_speak(calls: &SpeakCalls, expected: usize) -> Vec<String> {
+        for _ in 0..100 {
+            if calls.lock().await.len() >= expected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        calls.lock().await.clone()
+    }
+
+    /// 假 Agent：记录 `/api/record/start|stop` 的调用（`start:<scope>` / `stop`）
+    type RecordCalls = Arc<Mutex<Vec<String>>>;
+
+    async fn spawn_record_agent(calls: RecordCalls) -> String {
+        let app = axum::Router::new()
+            .route(
+                "/api/record/start",
+                axum::routing::post(
+                    |axum::extract::State(calls): axum::extract::State<RecordCalls>,
+                     axum::Json(body): axum::Json<serde_json::Value>| async move {
+                        calls.lock().await.push(format!(
+                            "start:{}",
+                            body["scope"].as_str().unwrap_or("point")
+                        ));
+                        axum::Json(json!({"ok": true}))
+                    },
+                ),
+            )
+            .route(
+                "/api/record/stop",
+                axum::routing::post(
+                    |axum::extract::State(calls): axum::extract::State<RecordCalls>| async move {
+                        calls.lock().await.push("stop".to_string());
+                        axum::Json(json!({"ok": true}))
+                    },
+                ),
+            )
+            .with_state(calls);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("绑定假 Agent 失败");
+        let port = listener.local_addr().expect("取端口失败").port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    async fn wait_records(calls: &RecordCalls, expected: usize) -> Vec<String> {
         for _ in 0..100 {
             if calls.lock().await.len() >= expected {
                 break;
@@ -1574,12 +1647,14 @@ mod tests {
         );
     }
 
-    /// 航段播报：从起点航点开播，**走完整段**才收口（到下一个点 / 终态）。
+    /// 航段播报：**起步行才开播**，**走完整段**才收口（到下一个点 / 终态）。
     ///
-    /// 现场事故（2026-11-25 gh-test「lrc」）：P2→P3 配了「语音播报」，狗一离开 P2
-    /// 就静音——因为「离开航点」把它当成航点播报收掉了，而离开起点航点正是航段的开始。
+    /// 两端都不能搞错：
+    /// - 到点就开播 = 循环时长先被停留 / AI 识别吃掉，人还没走话已经说完（与航段补光灯同一个问题）；
+    /// - 2026-11-25 gh-test「lrc」现场：P2→P3 配了「语音播报」，狗一离开 P2
+    ///   就静音——「离开航点」把它当成航点播报收掉了，而离开起点航点正是航段的开始。
     #[tokio::test]
-    async fn leg_speech_keeps_playing_until_the_next_point() {
+    async fn leg_speech_starts_on_departure_and_plays_until_the_next_point() {
         use crate::speak::{SpeakLeg, SpeakPlan};
 
         let calls: SpeakCalls = Arc::new(Mutex::new(Vec::new()));
@@ -1599,19 +1674,27 @@ mod tests {
             )
             .await;
 
-        // 到达 P2 = 进入 P2→P3 航段
+        // 到达 P2 = 进入 P2→P3 航段：**到点不播**（航点任务 / 停留还没跑完）
         h.feed(&frame(
             task_at("robot-1", "running", "patrol.point_arrived", 1),
             Value::Null,
             json!([]),
         ))
         .await;
-        assert_eq!(
-            wait_speak(&calls, 1).await,
-            vec!["say:正在通过仓储区".to_string()]
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.waiting", 1),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            calls.lock().await.is_empty(),
+            "到点不能开播: {:?}",
+            calls.lock().await
         );
 
-        // 离开 P2（狗开始走这一段）：航段播报**不能**停
+        // 离开 P2（狗开始走这一段）：航段播报现在开播，而且**不能**停
         for _ in 0..2 {
             h.feed(&frame(
                 task_at("robot-1", "running", "patrol.navigating", 1),
@@ -1623,7 +1706,7 @@ mod tests {
         assert_eq!(
             wait_speak(&calls, 1).await,
             vec!["say:正在通过仓储区".to_string()],
-            "航段播报要跟着狗走完整段，不能一离开起点航点就停"
+            "航段播报要跟着狗走完整段：起步开播、不能一离开起点航点就停"
         );
 
         // 到达 P3：这一段走完了 → 收口（P3 没配播报，所以只多一条 stop）
@@ -1652,5 +1735,135 @@ mod tests {
         ))
         .await;
         assert_eq!(wait_speak(&calls, 2).await.len(), 2, "停止只发一次");
+    }
+
+    /// 航点录像（「录像采集」）的时机：**到点起、离开停**。到点就是该录的时刻
+    /// （要录下这个点的作业），不去起步；导航途中不能提前起录。
+    #[tokio::test]
+    async fn waypoint_recording_starts_on_arrival_and_stops_when_leaving() {
+        use crate::record::{RecordPlan, RecordPoint};
+
+        let calls: RecordCalls = Arc::new(Mutex::new(Vec::new()));
+        let agent = spawn_record_agent(calls.clone()).await;
+        let mut h = Harness::new(active_task("TK-1", Some("robot-1"))).with_recorder(agent);
+        h.recorder
+            .start_task(
+                "TK-1",
+                RecordPlan {
+                    points: vec![RecordPoint {
+                        index: 0,
+                        name: "P1".to_string(),
+                        seconds: 15,
+                        cameras: vec![],
+                    }],
+                    task: None,
+                },
+            )
+            .await;
+
+        // 前往 P1 的路上：不该录
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.navigating", 0),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            calls.lock().await.is_empty(),
+            "导航途中不该起录: {:?}",
+            calls.lock().await
+        );
+
+        // 到点：开录（5009 每秒重复报 waiting 也只开一次）
+        for stage in ["patrol.point_arrived", "patrol.waiting", "patrol.waiting"] {
+            h.feed(&frame(
+                task_at("robot-1", "running", stage, 0),
+                Value::Null,
+                json!([]),
+            ))
+            .await;
+        }
+        assert_eq!(
+            wait_records(&calls, 1).await,
+            vec!["start:point".to_string()]
+        );
+
+        // 离开航点：停录（录不到下一段路，这是“航点录像”而非“全程录像”）
+        h.feed(&frame(
+            task_at("robot-1", "running", "patrol.navigating", 1),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        assert_eq!(
+            wait_records(&calls, 2).await,
+            vec!["start:point".to_string(), "stop".to_string()]
+        );
+    }
+
+    /// 全程录像：**`pending_task`（已受理、底盘未驱动）不算「开始」**。
+    ///
+    /// 旧行为是 5009 一出现这条任务就起录：排队等上一条任务停稳的几分钟全录成空画面，
+    /// 还会和上一条任务的全程录像同时写盘 / 抢 CPU；任务要是随后被取消，
+    /// 板子上就多一段没人要的文件（回传是平台按需、超期才清）。
+    #[tokio::test]
+    async fn task_recording_waits_until_the_body_actually_drives_the_task() {
+        use crate::record::{RecordPlan, RecordTask};
+
+        let calls: RecordCalls = Arc::new(Mutex::new(Vec::new()));
+        let agent = spawn_record_agent(calls.clone()).await;
+        let mut h = Harness::new(active_task("TK-1", Some("robot-1"))).with_recorder(agent);
+        h.recorder
+            .start_task(
+                "TK-1",
+                RecordPlan {
+                    points: vec![],
+                    task: Some(RecordTask {
+                        segment_seconds: 300,
+                        cameras: vec![],
+                    }),
+                },
+            )
+            .await;
+
+        // 已受理但还在排队（底盘未驱动）：不录
+        h.feed(&frame(
+            Value::Null,
+            task("robot-1", "patrol", "running", "patrol.navigating"),
+            json!([]),
+        ))
+        .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            calls.lock().await.is_empty(),
+            "排队期间不该起录: {:?}",
+            calls.lock().await
+        );
+
+        // 真的成为 current_task（开始驱动）：这一帧才起录，而且仍不等第一个航点
+        h.feed(&frame(
+            task("robot-1", "patrol", "running", "patrol.navigating"),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        assert_eq!(
+            wait_records(&calls, 1).await,
+            vec!["start:task".to_string()],
+            "全程录像跟着任务：不等第一个航点"
+        );
+
+        // 终态：停录（回传是平台按需，客户端不自己上传）
+        h.feed(&frame(
+            task("robot-1", "patrol", "success", "patrol.completed"),
+            Value::Null,
+            json!([]),
+        ))
+        .await;
+        assert_eq!(
+            wait_records(&calls, 2).await,
+            vec!["start:task".to_string(), "stop".to_string()]
+        );
     }
 }

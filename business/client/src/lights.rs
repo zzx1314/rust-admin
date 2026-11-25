@@ -1105,6 +1105,52 @@ mod tests {
         assert_eq!(seen[1].1["reason"], "到达无灯光动作的航点");
     }
 
+    /// **LED 灯带**（`lightLed`）与补光灯走同一条时机：航段动作里的 LED 也是起步才开、
+    /// 到下一个航点才关。板端 LED 是 `systemctl start/stop alarmlight`（没有常亮接口），
+    /// 所以这里还要确认：到点那一帧**一次都不许 start**（否则灯带在航点作业期间就爆闪），
+    /// 起步发的是 `{fill:false, led:true, scope:"leg"}`（不顺手拉补光灯 GPIO）。
+    #[tokio::test]
+    async fn leg_led_waits_for_departure_like_the_fill_light() {
+        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        let agent = spawn_agent(
+            calls.clone(),
+            json!({"ok": true, "applied": {"fill": false, "led": true}}),
+        )
+        .await;
+        let lights = PointLights::new(agent, true);
+        let leg = LightPoint {
+            index: 0,
+            scope: LightScope::Leg,
+            fill: false,
+            led: true,
+        };
+
+        // 到点（+ 反复的 waiting 帧）：不许 start alarmlight
+        for _ in 0..3 {
+            lights.point_arrived("TK-1", &leg, false, None).await;
+        }
+        assert!(
+            calls.lock().await.is_empty(),
+            "到点不能点亮 LED 灯带（航点任务还没跑完）: {:?}",
+            calls.lock().await
+        );
+
+        // 起步：灯带才 start，而且只开 LED（不能把补光灯 GPIO 一起拉高）
+        lights.leave_point("已离开航点").await;
+        let seen = calls.lock().await.clone();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].0, "on");
+        assert_eq!(seen[0].1["fill"], false);
+        assert_eq!(seen[0].1["led"], true);
+        assert_eq!(seen[0].1["scope"], "leg");
+
+        // 走完这一段：灯带走 `off`（板端 `systemctl stop` = SIGINT，灯珠不会停在最后一帧）
+        lights.leave("到达航点，上一段走完").await;
+        let seen = calls.lock().await.clone();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert_eq!(seen[1].0, "off");
+    }
+
     /// 连着两个航段都配了灯：到下一个点时**先把上一段的灯关掉**，
     /// 再记下一段（等它起步），不能把上一段的灯一直亮到下一个点任务做完。
     #[tokio::test]

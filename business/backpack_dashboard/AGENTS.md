@@ -175,7 +175,8 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
 板端只负责「按客户端的指令说话」：`POST /api/speak`、`POST /api/speak/call`、
 `POST /api/speak/stop`、`GET /api/speak/status`，实现在 `backend/speak.py`，客户端在
 `business/client/src/speak.rs`（同机 `127.0.0.1:8000` 调用，**不经平台隧道**）。
-起停时机同样在 5009（到点 / 进段 / 离开 / 终态），平台只下发路线动作。
+起停时机同样在 5009（航点播报 = 到点 / 离开，航段播报 = 起步 / 到达下一个航点），
+平台只下发路线动作——板端不要自己按时序猜。
 
 另有一个**人工「呼叫」**（任务详情页喊话）：平台 `POST /tasks/{id}/call` → 设备指令 `呼叫`
 → 客户端 `manual_call` → 这里 `POST /api/speak/call`，**不走 5009**、也不靠计划。
