@@ -185,7 +185,8 @@ pub(crate) async fn run_client(
     }
 
     // 航点 / 航段灯光（补光灯 / LED）：与 AI 同一个板端 Agent、同一个总开关（`--no-ai`）。
-    // 到点 / 进段由 5009 `detail_index` 查路线动作：航点灯离开航点关，航段灯走完这一段关；
+    // 到点由 5009 `detail_index` 查路线动作：航点灯到点开、离开关；航段灯到点只记账、
+    // 起步（离开航点）才开，走完这一段（下一个航点到点）关；
     // 夜间判定在板端。
     let lights = Arc::new(PointLights::new(
         config.ai_agent_url.clone(),

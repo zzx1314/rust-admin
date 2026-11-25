@@ -413,7 +413,7 @@ function actionCheckTypeLabel(action: {
 
 /** 动作卡片上的灯光文案：没配灯返回空串（不占一行）
  *
- * 航点动作 = 「到点开…」（离开航点关）；航段动作 = 「整段开…」（走完这一段关）。
+ * 航点动作 = 「到点开…」（离开航点关）；航段动作 = 「整段开…」（起步开、走完这一段关）。
  * 计划里配了「自动开灯」时这两处都会被忽略，灯从任务开始亮到结束。
  */
 function actionLightLabel(
@@ -1488,7 +1488,7 @@ function saveAction() {
     ...(countTask && actionForm.notifyWhenCountOk ? { notifyWhenCountOk: true } : {}),
     // 「未检出也告警」只对存在性任务有意义（数量任务自带「0 ≠ N」告警）
     ...(ai && !countTask && actionForm.alertWhenMissing ? { alertWhenMissing: true } : {}),
-    // 灯光：航点动作 = 到点开 / 离开航点关；航段动作 = 进段开 / 走完这一段关
+    // 灯光：航点动作 = 到点开 / 离开航点关；航段动作 = 起步开（离开起点航点）/ 走完这一段关
     // （客户端的灯怎么收口见 `client/src/lights.rs` 的 `leave_point` / `keep_alive`）
     ...(actionForm.lightFill ? { lightFill: true } : {}),
     ...(actionForm.lightLed ? { lightLed: true } : {}),
@@ -2823,11 +2823,11 @@ onBeforeUnmount(() => {
         <div v-else class="field" style="grid-column: 1 / -1">
           <div class="rt-hint" style="margin: 0">该动作在两航点之间移动过程中持续执行，不占用停留时长。</div>
         </div>
-        <!-- 航段灯光：与航点动作同一对开关，但时机是「进段开 / 走完这一段关」 -->
+        <!-- 航段灯光：与航点动作同一对开关，但时机是「起步开 / 走完这一段关」 -->
         <div v-if="actionKind === 'leg'" class="field" style="grid-column: 1 / -1">
           <label>
             航段开灯
-            <span class="muted">（背包板上的补光灯 / LED 灯带，进入这段就开，走完这一段才关）</span>
+            <span class="muted">（背包板上的补光灯 / LED 灯带，起步离开这个航点时开，走完这一段才关）</span>
           </label>
           <div style="display: flex; gap: 18px; flex-wrap: wrap">
             <label class="chk" title="板端拉高补光灯 GPIO；与摄像头触发脚同号或 FILL_LIGHT_GPIO=-1 时板端会拒绝，日志里有原因">
@@ -2840,8 +2840,9 @@ onBeforeUnmount(() => {
             </label>
           </div>
           <div class="rt-hint" style="margin: 4px 0 0">
-            进入这个航段（= 到达起点航点）时开，到达下一个航点（这一段走完）才关——
-            离开起点航点不会关，中途由客户端定时续命，不会走到一半被板端看门狗灭灯。
+            狗离开这个航点（航点任务跑完、真正起步）时开，到达下一个航点（这一段走完）才关——
+            到点那一刻不会开（这个航点还要跑 AI 识别 / 拍照 / 停留，亮灯会把画面和存证图污染）；
+            中途由客户端定时续命，不会走到一半被板端看门狗灭灯。
             同一个点既配了航点动作开灯又配了航段开灯时<b>以航点动作为准</b>；
             <b>计划里配了「自动开灯」时以计划为准</b>（这里的开关不生效）。
             计划勾了「仅夜间」时只有夜间时段才真的开（板端判定，白天直接跳过）。

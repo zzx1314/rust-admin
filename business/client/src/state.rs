@@ -379,7 +379,8 @@ impl ActiveTask {
     /// **计划级自动开灯优先**：配了计划灯就忽略航点 / 航段动作（包括「这个点没配灯」），
     /// 这样 5009 里的航点切换（到点 / 离开）都不会把灯翻来翻去。
     /// 没配计划灯时：航点动作优先，没配才用「从这里出发的航段」的灯
-    /// （`light_at` 返回的 `scope` 决定离开航点时要不要关，见 `PointLights::leave_point`）。
+    /// （`light_at` 返回的 `scope` 决定开关灯时机：航点灯到点开 / 离开关，
+    /// 航段灯到点只记账、**起步（离开航点）才开**，见 `PointLights::leave_point`）。
     pub(crate) fn light_at(&self, index: i64) -> Option<LightPoint> {
         if let Some(plan) = self.plan_lights.as_ref() {
             return Some(plan.clone());
@@ -526,7 +527,7 @@ mod active_task_light_tests {
 
         // P1 上既有航点灯又有航段灯 → 航点优先（走起来就关，航段那盏不生效）
         assert_eq!(task.light_at(0), Some(light(0, true, false)));
-        // P3 只有航段灯（返程段）→ 用航段的，`scope` 让 5009 离开航点时不关
+        // P3 只有航段灯（返程段）→ 用航段的：`scope` 让它在到点时只记账、起步才亮
         assert_eq!(task.light_at(2), Some(leg_light(2, true, true)));
         // 什么都没配的点：不用开灯
         assert_eq!(task.light_at(1), None);

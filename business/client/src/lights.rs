@@ -9,8 +9,10 @@
 //! 1. 航点动作（`routeData.points[].actions[]` 的 `lightFill` / `lightLed`）：
 //!    到该航点开哪几盏灯，**离开航点就关**。路线编辑器里和「AI 识别」动作并排配；
 //! 2. 航段动作（`routeData.legs[].actions[]` / `returnLeg.actions[]` 的同名两个字段）：
-//!    **进段开、走完这一段才关**——离开航点正是航段的开始，所以它不能跟航点灯一起关
-//!    （夜里让狗亮着灯走完整段走廊，是现场提这个需求的真实原因）；
+//!    **起步开（离开起点航点）、走完这一段才关**——夜里让狗亮着灯走完整段走廊，是现场
+//!    提这个需求的真实原因；而**到点那一刻不能开**：狗还要跑这个航点的任务（AI 识别 /
+//!    可见光拍照 / 停留），亮着的补光灯会把识别画面和存证图一起污染（2026-11-25
+//!    gh-test 现场：P1 没配灯、航线 1-2 配了灯，P1 的航点任务没跑完灯就亮了）；
 //! 3. 计划级「仅夜间自动开灯」（下发载荷 `lightNightOnly`，= `tasks.light_night_only`）：
 //!    勾上时把 `nightOnly=true` 交给板端，由**板端**按本地时间窗
 //!    （`LIGHT_NIGHT_START`/`LIGHT_NIGHT_END`，默认 18:00-06:00）判定白天还是夜间。
@@ -18,10 +20,12 @@
 //! 为什么夜间判定在板端：平台/客户端与板子可能不在同一时区，甚至平台时钟本身不准；
 //! 灯亮了却不知道为什么亮最难查。判据只有一处（`control.is_night`），客户端只传开关。
 //!
-//! 关灯时机（缺一个就是「灯一直亮着耗电」）：
-//! - 航点灯：离开航点（阶段不再是 `patrol.point_*`）—— 与 AI 窗口同一条收口规则；
-//! - 航段灯：走完这一段（= 到达下一个航点）由到点判定接手，交给
-//!   [`PointLights::leave`]；行进途中**不关**，只按 [`LIGHT_REFRESH_AFTER`] 重发；
+//! 开关灯时机（缺一个就是「灯一直亮着耗电」，早一步就是「污染识别」）：
+//! - 航点灯：到点开，离开航点（阶段不再是 `patrol.point_*`）关 —— 与 AI 窗口同一条
+//!   收口规则；
+//! - 航段灯：到点只记账（[`PointLights::pending`]），**离开航点（真正起步）才开**；
+//!   走完这一段（= 到达下一个航点）在那边收掉；行进途中**不关**，只按
+//!   [`LIGHT_REFRESH_AFTER`] 重发；
 //! - 到达一个没有灯光动作的航点（上一个点的灯 / 上一段的灯必须收掉）；
 //! - 任务终态 / 取消 / 本地任务收尾；
 //! - 板端看门狗（`LIGHT_MAX_ON_SECS`，默认 15 分钟）：客户端掉线 / 被 kill 时兜底。
@@ -76,11 +80,12 @@ impl NightWindow {
 /// `(taskCode, pointIndex)` 时必须是个固定的负数，才能做到「一条任务只发一次开灯」。
 pub const PLAN_LIGHT_INDEX: i64 = -1;
 
-/// 灯光动作挂在哪儿：决定**什么时候关灯**。
+/// 灯光动作挂在哪儿：决定**什么时候开关灯**。
 ///
 /// - [`LightScope::Point`]：航点动作（`points[].actions[]`）——到点开、**离开航点就关**；
 /// - [`LightScope::Leg`]：航段动作（`legs[].actions[]` / `returnLeg.actions[]`）——
-///   进段开、**走完这一段才关**（离开起点航点正是航段的开始，不能在那里关）。
+///   **离开起点航点（起步）才开**、走完这一段（到达下一个航点）才关。
+///   到点那一刻只记账不开灯：航点任务（AI 识别 / 拍照 / 停留）还没跑完。
 ///
 /// 去重键必须带上它：航段下标 = 起点航点下标，光看 `index` 会让「航点 3 的灯」和
 /// 「从 P3 出发的航段灯」互相顶掉（一个把另一个的开灯记录清掉，结果灯乱闪）。
@@ -128,7 +133,7 @@ pub struct LightPoint {
 /// 解析 `routeData` 里所有带灯光动作的航点 / 航段。
 ///
 /// - `points[].actions[]` 的 `lightFill` / `lightLed` → 该航点的灯（到点开、离开关）；
-/// - `legs[].actions[]` 同名两个字段 → 该航段的灯（进段开、出段关），下标用起点航点下标；
+/// - `legs[].actions[]` 同名两个字段 → 该航段的灯（起步开、走完这一段关），下标用起点航点下标；
 /// - `returnLeg.actions` 算在最后一个航点上（返程从那里出发，一路亮到任务结束）。
 ///
 /// 同一个航点（航段）可能有多个动作（「AI 识别」一个、「补光」一个），按**或**合并：
@@ -219,8 +224,9 @@ pub fn light_point_at(points: &[LightPoint], index: i64) -> Option<&LightPoint> 
         })
 }
 
-/// 当前点亮的灯：关灯时机（scope）与「行进途中重发」（`keep_alive`）都要知道
-/// 开的是哪个航点 / 航段、用什么参数开的。
+/// 点亮 / 待点亮的灯：开灯参数 + 归属（关灯时机与「行进途中重发」都要知道
+/// 开的是哪个航点 / 航段、用什么参数开的）。`active` 里是已经亮的，`pending` 里是
+/// 等狗起步（离开航点）才亮的航段灯。
 #[derive(Debug, Clone, PartialEq)]
 struct Lit {
     task_code: String,
@@ -237,6 +243,13 @@ pub struct PointLights {
     client: Client,
     /// 当前由计划点亮的灯：去重 + 判断离开航点要不要发关灯 + 航段灯途中重发
     active: Mutex<Option<Lit>>,
+    /// 到达航点时**还没开**的航段灯（等狗真的起步 = 离开航点再开）。
+    ///
+    /// 现场 2026-11-25（`gh-test`）：P1 的航点动作没配灯、航线 1-2 配了补光灯，
+    /// 狗到 P1 之后航点任务（AI 识别 / 停留 10 s）还没跑完灯就亮了——亮着的补光灯
+    /// 会把识别画面和存证图一起污染。所以航段灯在**到点**只记账，
+    /// 真正开灯在阶段离开 `patrol.point_*`（[`PointLights::leave_point`]）时。
+    pending: Mutex<Option<Lit>>,
     /// 已经为哪个 (任务号, scope, 下标) 发过开灯请求：5009 每 500ms 一帧，不去重会刷屏。
     /// **必须带 scope**：航段下标 = 起点航点下标，不分开会互相顶掉。
     requested: Mutex<Option<(String, LightScope, i64)>>,
@@ -267,6 +280,7 @@ impl PointLights {
                 .build()
                 .unwrap_or_default(),
             active: Mutex::new(None),
+            pending: Mutex::new(None),
             requested: Mutex::new(None),
             gate: Mutex::new(()),
             last_try: Mutex::new(None),
@@ -287,6 +301,7 @@ impl PointLights {
     pub async fn start_task(&self, task_code: &str) {
         let _gate = self.gate.lock().await;
         *self.active.lock().await = None;
+        *self.pending.lock().await = None;
         *self.requested.lock().await = None;
         *self.last_try.lock().await = None;
         let mut finished = self.finished.lock().await;
@@ -302,13 +317,80 @@ impl PointLights {
         self.leave(reason).await;
     }
 
-    /// 到点 / 进段开灯（5009 `patrol.point_arrived` / `patrol.waiting`）。
+    /// 到点（5009 `patrol.point_arrived` / `patrol.waiting`）。
     ///
-    /// `point.scope` 决定关灯时机（航点灯离开航点就关、航段灯要亮完整段）。
+    /// `point.scope` 决定开关灯时机：航点灯**现在就开**（离开航点关），航段灯只记账
+    /// （[`Self::defer_leg`]），等狗起步（[`Self::leave_point`]）再点亮。
     /// `night_only` = 计划勾了「仅夜间自动开灯」，交给板端按本地时间窗判定：
     /// 白天的返回值是 `skipped="daytime"`，此时**不记活跃态**（本来就没开灯，
     /// 离开航点时也不需要发关灯）。`window` = 计划里自定义的夜间时段（不传 = 板端默认）。
     pub async fn point_arrived(
+        &self,
+        task_code: &str,
+        point: &LightPoint,
+        night_only: bool,
+        window: Option<&NightWindow>,
+    ) {
+        if point.scope == LightScope::Leg {
+            self.defer_leg(task_code, point, night_only, window).await;
+            return;
+        }
+        // 这个点开的是航点灯：到点前记下的「从这里出发的航段灯」作废（航点优先），
+        // 不能留到起步时把航点灯的开关时机搞乱
+        *self.pending.lock().await = None;
+        self.light_now(task_code, point, night_only, window).await;
+    }
+
+    /// 航段灯到点：**只记账，不开灯**。
+    ///
+    /// 开灯等狗真的起步（阶段不再是 `patrol.point_*`，[`Self::leave_point`]）：
+    /// 到点后这个航点还要跑 AI 识别 / 拍照 / 停留，这时候把补光灯点亮会污染
+    /// 识别画面与存证图（2026-11-25 `gh-test` 现场问题）。
+    /// 5009 到点后每秒都在报 `patrol.waiting`，同一个点只记一次。
+    async fn defer_leg(
+        &self,
+        task_code: &str,
+        point: &LightPoint,
+        night_only: bool,
+        window: Option<&NightWindow>,
+    ) {
+        if !self.enabled || (!point.fill && !point.led) {
+            return;
+        }
+        if self
+            .finished
+            .lock()
+            .await
+            .as_deref()
+            .is_some_and(|finished| finished == task_code)
+        {
+            return;
+        }
+        let next = Lit {
+            task_code: task_code.to_string(),
+            point: point.clone(),
+            night_only,
+            window: window.cloned(),
+        };
+        // 5009 到点之后每秒都在报 `patrol.waiting`：同一个点只记账 + 打一行日志
+        let same = self.pending.lock().await.as_ref() == Some(&next);
+        // 到点 = 上一段走完了：上一段亮着的航段灯在这里收掉
+        // （`leave` 同时把待开记账清掉，所以先关灯再记账）
+        self.leave("到达航点，上一段走完").await;
+        *self.pending.lock().await = Some(next);
+        // 新的一段，给它重新计时（上一段的成功 / 失败时间不能把这一段也节流掉）
+        *self.last_try.lock().await = None;
+        if !same {
+            info!(
+                "航点灯光：任务 {task_code} 到达航点 {}，从这里出发的航段灯等离开航点再开\
+                 （补光={} LED={}）",
+                point.index, point.fill, point.led
+            );
+        }
+    }
+
+    /// 真正发开灯请求（去重 + 收尾守卫 + 记活跃态）。
+    async fn light_now(
         &self,
         task_code: &str,
         point: &LightPoint,
@@ -487,17 +569,42 @@ impl PointLights {
         }
     }
 
-    /// 离开航点：**只关航点动作开的灯**。
+    /// 离开航点（阶段不再是 `patrol.point_*`）：
     ///
-    /// 航段动作的灯要一路亮到这一段走完——离开起点航点正是航段的开始，在这里关掉
-    /// 就等于「灯点了一下就灭」。轮到下一个航点时，那边要么自己开灯（`point_arrived`
-    /// 用新参数覆掉），要么没配灯走 [`Self::leave`] 把上一段的灯收掉。
+    /// - 有**待开的航段灯**（到点只记账的那个）：现在才点亮 —— 狗真的起步了；
+    /// - 否则航点灯关掉（航段灯已经亮着的不动，这一段要亮到下一个航点）。
     pub async fn leave_point(&self, reason: &str) {
-        let scope = self.active.lock().await.as_ref().map(|lit| lit.point.scope);
-        if scope == Some(LightScope::Leg) {
+        let pending = self.pending.lock().await.clone();
+        let Some(lit) = pending else {
+            let scope = self.active.lock().await.as_ref().map(|lit| lit.point.scope);
+            if scope == Some(LightScope::Leg) {
+                return;
+            }
+            self.leave(reason).await;
+            return;
+        };
+        // 行进帧每 500ms 一帧：开灯成功 / 失败 / 白天跳过都按 `LIGHT_REFRESH_AFTER` 节流，
+        // 不然 Agent 挂了就是每帧一次 5s 超时（与 `keep_alive` 同一条理由）。
+        // 记账**留着**直到下一个航点：失败时还好趁路上重试，而不是整段都黑着。
+        if self
+            .last_try
+            .lock()
+            .await
+            .is_some_and(|at| at.elapsed() < self.refresh_after)
+        {
             return;
         }
-        self.leave(reason).await;
+        let Lit {
+            task_code,
+            point,
+            night_only,
+            window,
+        } = lit;
+        self.light_now(&task_code, &point, night_only, window.as_ref())
+            .await;
+        // `apply` 的失败分支会清掉 `last_try`（那是「下一个航点再试」的语义），
+        // 航段途中不能这样：重新记上，下个节流窗口再试
+        *self.last_try.lock().await = Some(Instant::now());
     }
 
     /// 关灯：走完一段 / 到达无灯光动作的航点 / 任务终态 / 取消 / 本地任务收尾。
@@ -507,6 +614,9 @@ impl PointLights {
     pub async fn leave(&self, reason: &str) {
         let _gate = self.gate.lock().await;
         *self.requested.lock().await = None;
+        // 待开的航段记账一起清掉：这一段已经不是「即将开始的航段」了
+        // （`defer_leg` 是「先 leave 再记账」，顺序不能反）
+        *self.pending.lock().await = None;
         let taken = self.active.lock().await.take();
         if taken.is_none() || !self.enabled {
             return;
@@ -951,10 +1061,54 @@ mod tests {
         lights.leave("已离开航点").await;
     }
 
-    /// 航段灯：进段开、**离开起点航点不关**（那正是航段的开始），
-    /// 走到下一个点由那边的到点判定接手。
+    /// 航段灯：**到点不开**（航点任务还没跑完），起步（离开起点航点）才点亮，
+    /// 走到下一个点由那边的到点判定收尾。
     #[tokio::test]
-    async fn leg_lights_stay_on_when_leaving_the_start_point() {
+    async fn leg_lights_start_on_departure_not_on_arrival() {
+        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        let agent = spawn_agent(
+            calls.clone(),
+            json!({"ok": true, "applied": {"fill": true, "led": true}}),
+        )
+        .await;
+        let lights = PointLights::new(agent, true);
+
+        // 到点（`patrol.point_arrived` + 反复的 `patrol.waiting`）：一帧请求都不许发
+        for _ in 0..3 {
+            lights
+                .point_arrived("TK-1", &leg_light_point(1), false, None)
+                .await;
+        }
+        assert!(
+            calls.lock().await.is_empty(),
+            "到点不能开航段灯（会污染航点上的 AI 识别 / 存证图）: {:?}",
+            calls.lock().await
+        );
+
+        // 狗起步了（阶段不再是 `patrol.point_*`）：航段灯现在才点亮
+        lights.leave_point("已离开航点").await;
+        let seen = calls.lock().await.clone();
+        assert_eq!(seen.len(), 1, "起步才开灯: {seen:?}");
+        assert_eq!(seen[0].0, "on");
+        assert_eq!(seen[0].1["scope"], "leg");
+        assert_eq!(seen[0].1["pointIndex"], 1);
+
+        // 行进途中反复调（5009 每 500ms 一帧）：不能关灯，也不能重复开灯
+        lights.leave_point("已离开航点").await;
+        assert_eq!(calls.lock().await.len(), 1, "{:?}", calls.lock().await);
+
+        // 走到下一个点、那边没配灯：交给 `leave` 收掉
+        lights.leave("到达无灯光动作的航点").await;
+        let seen = calls.lock().await.clone();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert_eq!(seen[1].0, "off");
+        assert_eq!(seen[1].1["reason"], "到达无灯光动作的航点");
+    }
+
+    /// 连着两个航段都配了灯：到下一个点时**先把上一段的灯关掉**，
+    /// 再记下一段（等它起步），不能把上一段的灯一直亮到下一个点任务做完。
+    #[tokio::test]
+    async fn next_leg_closes_the_previous_one_before_waiting_for_departure() {
         let calls: Calls = Arc::new(Mutex::new(Vec::new()));
         let agent = spawn_agent(
             calls.clone(),
@@ -964,20 +1118,52 @@ mod tests {
         let lights = PointLights::new(agent, true);
 
         lights
+            .point_arrived("TK-1", &leg_light_point(0), false, None)
+            .await;
+        lights.leave_point("已离开航点").await;
+        // 到达 P2（legs[1] 也配了灯）：上一段的灯在这里收，下一段等起步
+        lights
             .point_arrived("TK-1", &leg_light_point(1), false, None)
             .await;
-        // 狗起步了（离开航点）：航段灯必须继续亮着走完这一段
-        lights.leave_point("已离开航点").await;
-        let seen = calls.lock().await.clone();
-        assert_eq!(seen.len(), 1, "航段灯不能在离开起点航点时关掉: {seen:?}");
-        assert_eq!(seen[0].1["scope"], "leg");
-
-        // 走到下一个点、那边没配灯：交给 `leave` 收掉
-        lights.leave("到达无灯光动作的航点").await;
         let seen = calls.lock().await.clone();
         assert_eq!(seen.len(), 2, "{seen:?}");
-        assert_eq!(seen[1].0, "off");
-        assert_eq!(seen[1].1["reason"], "到达无灯光动作的航点");
+        assert_eq!(seen[0].0, "on");
+        assert_eq!(seen[0].1["pointIndex"], 0);
+        assert_eq!(seen[1].0, "off", "走完上一段要关灯: {seen:?}");
+
+        // 从 P2 起步：legs[1] 的灯亮
+        lights.leave_point("已离开航点").await;
+        let seen = calls.lock().await.clone();
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        assert_eq!(seen[2].0, "on");
+        assert_eq!(seen[2].1["pointIndex"], 1);
+    }
+
+    /// 同一个点既配了航点灯又配了航段灯（航点优先）：
+    /// 到点开航点灯，起步时关掉；不能把待开的航段记账漏到下一个点。
+    #[tokio::test]
+    async fn point_light_at_the_next_point_drops_the_pending_leg() {
+        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        let agent = spawn_agent(
+            calls.clone(),
+            json!({"ok": true, "applied": {"fill": true, "led": true}}),
+        )
+        .await;
+        let lights = PointLights::new(agent, true);
+
+        lights
+            .point_arrived("TK-1", &leg_light_point(0), false, None)
+            .await;
+        // 直接到达下一个点（那边配的是航点灯）：到点就开，账里的航段灯作废
+        lights
+            .point_arrived("TK-1", &light_point(1), false, None)
+            .await;
+        lights.leave_point("已离开航点").await;
+        let seen = calls.lock().await.clone();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert_eq!(seen[0].0, "on");
+        assert_eq!(seen[0].1["scope"], "point");
+        assert_eq!(seen[1].0, "off", "起步时关的是航点灯: {seen:?}");
     }
 
     /// 航点灯还是「离开航点就关」：`leave_point` 不能把两条路径拆错。
@@ -1016,6 +1202,7 @@ mod tests {
         lights
             .point_arrived("TK-1", &leg_light_point(3), true, None)
             .await;
+        // 起步才点亮（到点只记账）
         lights.leave_point("已离开航点").await;
         // 行进途中的两帧心跳：每帧一次重发（间隔改成了 0）
         lights.keep_alive().await;

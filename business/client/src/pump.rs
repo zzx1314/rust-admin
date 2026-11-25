@@ -635,9 +635,11 @@ pub(crate) async fn handle_status_frame(
         if is_arrival_stage(&task.stage) {
             let current = active.lock().await.clone();
             if let (Some(current), Some(index)) = (current, index) {
-                // 灯光先开：AI 要亮着灯看，顺序反了前几帧还是黑的（补光灯从写 GPIO
-                // 到真正亮起来只要几十毫秒，但识别窗口开得比这快）。开灯放到后台——
-                // `POST /api/lights` 里有几次 GPIO shell 调用，不能让 5009 处理链路等它
+                // 灯光：航点动作 / 计划灯现在开（AI 要亮着灯看，顺序反了前几帧还是黑的）。
+                // 开灯放到后台——`POST /api/lights` 里有几次 GPIO shell 调用，不能让
+                // 5009 处理链路等它。**航段灯例外**：`point_arrived` 收到 scope=leg 时
+                // 只记账不开灯，等狗真的起步（下面「离开航点」）才点亮——到点后这个
+                // 航点还要跑 AI 识别 / 拍照 / 停留，亮起来的补光灯会把画面和存证图污染。
                 match current.light_at(index) {
                     Some(point) => {
                         let lights = lights.clone();
@@ -678,9 +680,9 @@ pub(crate) async fn handle_status_frame(
             // 收口交给这里，别让相机把路过的东西当成这个点的目标
             ai.stop("已离开航点").await;
             // 灯同一个道理：录像/识别已经结束，补光灯没必要一路亮到下一个点。
-            // **但计划灯除外**：它就是要全程亮着，这里关掉等于「离开第一个点就灭」；
-            // **航段灯也除外**：离开航点正是航段的开始，航段灯要亮着走完这一段
-            // （`leave_point` 只收航点动作开的灯，航段灯等下一个点接手）。
+            // **计划灯除外**：它就是要全程亮着，这里关掉等于「离开第一个点就灭」；
+            // **航段灯同理但要反过来看**：到点只记了账、没点亮，离开航点正是它开灯的
+            // 时刻（`leave_point` 先把待开的航段灯点着，再按 scope 收航点灯）。
             let plan_lighting = active
                 .lock()
                 .await
@@ -690,8 +692,8 @@ pub(crate) async fn handle_status_frame(
                 lights.leave_point("已离开航点").await;
                 // 航段灯：这一段路上没有新的「到点」帧，板端看门狗（默认 900s）只认
                 // 最近一次请求 → 按 `LIGHT_REFRESH_AFTER` 原地重发一次（航点灯已经关了，
-                // 这里什么都不发）。和到点开灯一样放后台：Agent 不可达时一次要等 5s，
-                // 不能让 5009 处理链路跟着卡（先后由 `PointLights` 的 gate 保证）。
+                // 待开的航段灯还没点亮时这里什么都不发）。和开灯一样放后台：Agent 不可达
+                // 时一次要等 5s，不能让 5009 处理链路跟着卡（先后由 `PointLights` 的 gate 保证）。
                 let lights = lights.clone();
                 tokio::spawn(async move { lights.keep_alive().await });
             }
@@ -1345,12 +1347,14 @@ mod tests {
         );
     }
 
-    /// 航段灯光（行进任务上的「开灯」）：**进段开、走完这一段才关**。
+    /// 航段灯光（行进任务上的「开灯」）：**起步才开（离开起点航点）、走完这一段才关**。
     ///
-    /// 离开起点航点正是航段的开始，那时候关灯等于「点了就灭」；到下一个点（那边没配灯）
-    /// 才收灯。这是现场提的诉求：夜里要狗亮着灯走完整段走廊。
+    /// 2026-11-25 现场（`gh-test`）：P1 的航点动作没配灯、航线 1-2 配了补光灯，
+    /// 狗到 P1 之后航点任务（AI 识别 / 停留 10 s）还没跑完灯就亮了 —— 亮着的补光灯
+    /// 会把识别画面与存证图一起污染。航段灯必须等狗真的起步
+    /// （阶段离开 `patrol.point_*`）才点亮，到点那一刻只记账。
     #[tokio::test]
-    async fn leg_lights_stay_on_until_the_next_point() {
+    async fn leg_lights_start_when_the_dog_leaves_the_waypoint() {
         use crate::lights::LightPoint;
         use crate::lights::LightScope;
 
@@ -1365,15 +1369,30 @@ mod tests {
             led: true,
         }];
 
-        h.feed(&frame(
-            task_at("robot-1", "running", "patrol.point_arrived", 0),
-            Value::Null,
-            json!([]),
-        ))
-        .await;
-        assert_eq!(wait_lights(&calls, 1).await, vec!["on".to_string()]);
+        // 到点 + 这个点上的全部作业阶段（5009 每秒重复报）：一帧都不许开灯
+        for stage in [
+            "patrol.point_arrived",
+            "patrol.waiting",
+            "patrol.photographing",
+            "patrol.point_completed",
+        ] {
+            h.feed(&frame(
+                task_at("robot-1", "running", stage, 0),
+                Value::Null,
+                json!([]),
+            ))
+            .await;
+        }
+        // 到点帧可能已经把「到点开灯」的 spawn 发出去了：给后台任务一点时间
+        // （航段灯这条路径本来就不该发请求，等一下才能证明是「没发」而不是「还没轮到」）
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            calls.lock().await.is_empty(),
+            "航点任务还没跑完就开灯了: {:?}",
+            calls.lock().await
+        );
 
-        // 起步走过这一段：一路都不许关（5009 每 500ms 一帧）
+        // 起步走过这一段：现在才点亮，且一路不许关（5009 每 500ms 一帧）
         for _ in 0..3 {
             h.feed(&frame(
                 task_at("robot-1", "running", "patrol.navigating", 0),
@@ -1385,7 +1404,7 @@ mod tests {
         assert_eq!(
             wait_lights(&calls, 1).await,
             vec!["on".to_string()],
-            "航段灯不能在行进途中关掉"
+            "起步要开灯、行进途中不能关掉"
         );
 
         // 走到下一个点（P2 没配灯）：这时候才收灯

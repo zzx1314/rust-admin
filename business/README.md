@@ -1772,9 +1772,11 @@ AI 可对除红外外的五路开启，画框方式二选一：
   时调板端 Agent `POST /api/lights`，**离开航点 / 到达无灯光动作的航点 / 任务终态 /
   任务取消**时调 `POST /api/lights/off` 关灯；Agent 自己还有看门狗
   （`LIGHT_MAX_ON_SECS`，默认 900 s），客户端掉线或被 kill 时兜底关灯。
-  **航段动作也有同一对开关（「航段开灯」）**：进段开、**走完这一段才关**（离开起点
-  航点正是航段的开始，在那里关灯等于点了就灭），行进途中由客户端按 `LIGHT_REFRESH_AFTER`
-  重发续命，不会走到一半被看门狗灭灯；同一个点既配了航点灯又配了航段灯时航点优先。
+  **航段动作也有同一对开关（「航段开灯」）**：**起步开（离开起点航点）、走完这一段才关**。
+  到点那一刻不开——这个航点还要跑 AI 识别 / 可见光拍照 / 停留，亮着的补光灯会把画面
+  和存证图一起污染（2026-11-25 `gh-test`：P1 没配灯、航线 1-2 配了补光灯，P1 的航点
+  任务没跑完灯就亮了）；行进途中由客户端按 `LIGHT_REFRESH_AFTER` 重发续命，不会走到
+  一半被看门狗灭灯；同一个点既配了航点灯又配了航段灯时航点优先。
   只开灯不干别的就用动作类型「补光」（两侧都能挂）。
   **计划里配了「自动开灯（补光灯 / LED）」（`tasks.light_fill` / `light_led`，迁移 032）
   时以计划为准**：航点 / 航段动作里的开灯、关灯全部不生效，灯从任务开始一直亮到
@@ -1785,8 +1787,8 @@ AI 可对除红外外的五路开启，画框方式二选一：
   = 18:00-06:00）判定——白天板端直接跳过、不开灯，平台不参与算夜间（两地时区/时钟
   不一致时白天开灯最难查）。
   回归：`backend/tools/lights_selftest.py`（时间窗 / 白天跳过 / 看门狗）、
-  `client lights::tests::*`（含航段灯 `leg_lights_stay_on_when_leaving_the_start_point`）、
-  `client pump::tests::*`（计划灯全程开 / 航点模式照旧 / 航段灯亮完整段 / 收尾后迟到开灯被丢弃）、
+  `client lights::tests::*`（含航段灯 `leg_lights_start_on_departure_not_on_arrival`）、
+  `client pump::tests::*`（计划灯全程开 / 航点模式照旧 / 航段灯起步才开 / 收尾后迟到开灯被丢弃）、
   `api_smoke::task_light_night_only_reaches_dispatch_payload`、
   `api_smoke::plan_lights_reach_dispatch_payload_and_default_to_waypoint_actions`。
   设计与踩坑见 [`docs/plan-lights.md`](docs/plan-lights.md)。

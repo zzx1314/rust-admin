@@ -78,7 +78,7 @@ export const ACTION_LIB: Record<string, ActionMeta> = {
     param: "开补光灯 / LED 灯带",
     trigger: "到达即执行",
     threshold: "—",
-    // 航点 = 到点开、离开关；航段 = 进段开、走完这一段关（见 business/docs/plan-lights.md）
+    // 航点 = 到点开、离开关；航段 = 起步开（离开起点航点）、走完这一段关（见 business/docs/plan-lights.md）
     kind: "both"
   },
   连续测温: {
