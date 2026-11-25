@@ -358,6 +358,11 @@ class State:
             "night": sim_is_night(),
             "night_window": window,
             "fill_gpio": 46,
+            # 板端 LED 走 systemd（`systemctl start/stop alarmlight`）；模拟器没有 unit，
+            # 报 proc 保持字段形状与 `control.lights_status` 一致
+            "led_control": "proc",
+            "led_service": None,
+            "led_service_state": None,
             "led_bin": "sim/no-led",
             "led_bin_exists": True,
             "fill_available": True,

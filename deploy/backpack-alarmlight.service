@@ -1,0 +1,33 @@
+[Unit]
+# LED 灯带（72 颗 WS2812）—— 由背包 Agent 的「LED 爆闪」按钮 / 航点灯光
+# `lightLed` / 计划「自动开灯」用 `systemctl start|stop alarmlight` 启停。
+#
+# 为什么要有这个 unit（别再让 Agent 直接 Popen 二进制）：
+#   * 厂商程序是「跑起来就一直刷颜色」，退出前要自己写一帧全 0 + reset 才会熄灯；
+#     `alarmlight` 挂了 SIGINT/SIGTERM/SIGHUP/SIGQUIT，下面再配 KillSignal=SIGINT，
+#     `systemctl stop` 才是真正的「熄灯」（老逻辑发 SIGTERM = 默认终止，
+#     灯珠会停在最后一帧亮着）。
+#   * 进程归 systemd 管：Agent 重启不会留下继续抢 SPI 的孤儿进程，
+#     `systemctl status alarmlight` 一眼看清有没有人在刷。
+#
+# 部署（板端 /opt/xjpt/led/alarmlight，源码 alarmlight.c 同目录，厂商 test_blue_red.c 改的）：
+#   sudo cp deploy/backpack-alarmlight.service /etc/systemd/system/alarmlight.service
+#   sudo systemctl daemon-reload
+#   # 不要 enable：灯由 Agent 按需 start，开机自启等于一上电就一直爆闪
+#
+# 仓库 = 板端（`md5sum` 一致）；改这里要同步 scp 到板端并 daemon-reload。
+Description=for led auto active
+
+[Service]
+Type=simple
+ExecStart=/opt/xjpt/led/alarmlight
+Restart=on-failure
+
+# 关键配置：停止时发送 SIGINT 信号（相当于 Ctrl+C）
+KillMode=process
+KillSignal=SIGINT
+# 等待程序优雅退出（默认 90 秒，可根据需要调整）
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -88,7 +88,15 @@ MODEM_DEV = os.getenv("MODEM_DEV", "/dev/ttyUSB2")               # 4G(Quectel) A
 LOCATION_INTERVAL = int(os.getenv("LOCATION_INTERVAL", "60"))     # 定位采集周期(秒)
 WIFI_IFACE = os.getenv("WIFI_IFACE", "")                          # 空=自动探测
 FILL_LIGHT_GPIO = int(os.getenv("FILL_LIGHT_GPIO", "46"))         # 补光灯 GPIO（设为 -1 可禁用，例如该脚临时改作摄像头触发用）
-LED_TEST_BIN = os.getenv("LED_TEST_BIN", "/opt/xjpt/led/test_rgbrun")  # LED 灯带闪烁程序
+# ---- LED 灯带：**开关走 systemd unit**（`systemctl start/stop`）----
+# 板端 `alarmlight.service` = `/opt/xjpt/led/alarmlight`（72 颗灯珠红蓝 100ms 爆闪）。
+# 为什么不直接 Popen 厂商程序：它们要收到 SIGINT 才会在退出前把灯珠写成全 0 + reset，
+# 老逻辑按进程组发 SIGTERM 是默认终止 → 进程没了、**灯珠停在最后一帧一直亮着**；
+# 而且 Agent 重启不会带走 Popen 出来的子进程，孤儿进程会继续抢 SPI。详见 control.py。
+LED_SERVICE = os.getenv("LED_SERVICE", "alarmlight")      # 灯带的 systemd unit 名
+# auto（有 unit 就走 systemd，没有就退回直接跑二进制）| systemd | proc
+LED_CONTROL = os.getenv("LED_CONTROL", "auto")
+LED_TEST_BIN = os.getenv("LED_TEST_BIN", "/opt/xjpt/led/test_rgbrun")  # 兜底：没有 unit 时直接跑
 SSD_DEV = os.getenv("SSD_DEV", "/dev/nvme0n1")                    # SSD 设备
 
 # ---- 计划灯光（航点动作「开补光灯 / 开 LED」+ 计划「仅夜间自动开灯」）----

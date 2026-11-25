@@ -386,8 +386,16 @@ resolve_route_map` 同样要放行「别园区的图」（否则园区能绑图�
 转下去，白天到达板端直接 `skipped=daytime` 什么都不做（不写 GPIO、不拉进程、
 不记「已开灯」——否则离开航点会顺手关掉操作员手动开的灯）。**夜间时段也能按计划自定义**（`HH:MM`，可跨零点，留空 = 板端默认）：平台只存值，客户端随
 `POST /api/lights` 的 `nightStart`/`nightEnd` 交给板端，判定仍在板端。**别把判夜搬到平台/客户端**：
-两地时区或时钟不一致时，白天开灯现场无法解释。LED 只有厂商的 `test_rgbrun`（循环
-闪烁，无常亮接口），开关 = 拉起/按进程组杀掉，手动按钮与计划**共用同一个进程句柄**。
+两地时区或时钟不一致时，白天开灯现场无法解释。**LED 灯带走 systemd**：
+`systemctl start/stop alarmlight`（`LED_SERVICE`，板端
+`/etc/systemd/system/alarmlight.service` → `/opt/xjpt/led/alarmlight`，红蓝 100ms 爆闪；
+仓库副本 `deploy/backpack-alarmlight.service`，**不要 enable**）。别再改回「Agent 自己
+Popen 厂商二进制 + 杀进程」：厂商程序只在 **SIGINT** 里写「全 0 + reset」熄灯，发
+SIGTERM 是默认终止 —— 进程没了、**灯珠停在最后一帧一直亮着**（unit 里 `KillSignal=SIGINT`
+才是真正的关灯），而且 Agent 重启不会带走 Popen 出来的孤儿进程。没有 unit 的板子
+（开发机 / 模拟器）自动退回直接跑 `LED_TEST_BIN`，关灯也先 SIGINT。
+状态取 `systemctl is-active`（`led_control`/`led_service`/`led_service_state`），
+不做乐观写入；`systemctl start/stop` 幂等，客户端 300s 一次的重发不会出问题。
 计划灯有看门狗 `LIGHT_MAX_ON_SECS`（默认 900s），手动开的灯不看门狗。
 收尾必须用 `PointLights::finish_task`（标「已收尾」，迟到的到点开灯不许再把灯点亮），
 同名任务重发时 `start_task` 清痕迹；巡检的本体任务号靠 `state::bind_nav_task` 绑定，

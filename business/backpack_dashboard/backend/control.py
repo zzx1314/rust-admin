@@ -11,23 +11,40 @@
 （客户端掉线 / 任务被强杀 / 板子重启后不会一直亮着），手动开的灯不管——现场按了
 「补光 开」就是要求一直亮。
 
-LED 灯带只有厂商的 `test_rgbrun`（循环闪烁，没有常亮接口），所以「LED 开」= 拉起
-这个进程、「LED 关」= 杀掉它。进程句柄由本模块持有（`_LED_PROC`），手动按钮与计划
-共用，否则计划结束时杀不掉手动拉起来的那一个。
+LED 灯带没有「常亮」接口，厂商程序都是「跑起来就一直刷颜色」，所以「开」= 让程序跑、
+「关」= 让它停。**开关走 systemd unit**（`systemctl start/stop alarmlight`），
+不再由本模块 Popen 二进制：
+
+  1. 厂商程序要收到 **SIGINT** 才会在退出前写一帧「全 0 + reset」把灯珠熄掉；
+     老逻辑按进程组发 SIGTERM 是默认终止 —— 进程没了，**灯珠停在最后一帧亮着**；
+  2. `alarmlight.service` 里 `KillSignal=SIGINT` + `TimeoutStopSec=10`，`systemctl stop`
+     才是真正的「熄灯」，而且进程归 systemd 管（谁在跑 / 跑了几份 `systemctl status` 一看就知道）；
+  3. Agent 重启不会带走 Popen 出来的子进程（`start_new_session=True`），孤儿会继续抢 SPI；
+     unit 归 systemd 管，`Restart=on-failure` 还能自己拉起来。
+
+没有这个 unit 的板子（开发机 / 模拟器 / 老部署）自动退回「直接跑 `LED_TEST_BIN`」，
+但关灯改成**先 SIGINT 再退 SIGTERM/SIGKILL**，同样能熄灯。
+手动按钮与计划仍共用同一份状态，否则计划结束时收不掉手动拉起来的那一盏。
 """
 import datetime as dt
 import os
+import shutil
 import signal
 import subprocess
 import threading
 import time
 
 import config
-from config import CAM_TRIGGER_GPIO, FILL_LIGHT_GPIO, LED_TEST_BIN
+from config import (CAM_TRIGGER_GPIO, FILL_LIGHT_GPIO, LED_CONTROL, LED_SERVICE,
+                    LED_TEST_BIN)
 
 _LOCK = threading.RLock()
 _LED_PROC = None
 _WATCHDOG = None
+# `"systemd"` / `"proc"`：判定一次就缓存（unit 在 Agent 生命周期里不会凭空出现）
+_LED_MODE = None
+# 老版本 Agent 留下的厂家进程只需清一次
+_LEGACY_LED_CLEANED = False
 
 # 灯状态：`managed` = 这盏灯是计划点亮的（看门狗管），`on_since` = 最近一次点亮时刻
 # （单调时钟，不受改系统时间影响）。
@@ -129,8 +146,95 @@ def is_night(now=None, start=None, end=None):
 
 
 # ======================================================================
-# LED 灯带
+# LED 灯带：systemctl start/stop（首选） or 直接跑二进制（兜底）
 # ======================================================================
+def _systemctl(*args, timeout=15.0):
+    """跑一次 `systemctl`，返回 `(ok, 输出)`（stdout + stderr 合并）。
+
+    一律带超时：`systemctl` 卡在 dbus 上时不能把客户端的开灯 / 关灯请求拖死
+    （客户端 HTTP 超时短，卡住就变成「客户端以为失败、灯其实亮了」）。
+    """
+    try:
+        proc = subprocess.run(["systemctl"] + list(args), capture_output=True,
+                              text=True, timeout=timeout)
+    except Exception as e:
+        return False, str(e)
+    out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    return proc.returncode == 0, out
+
+
+def led_mode():
+    """LED 走哪条路：`"systemd"`（首选）或 `"proc"`（兜底）。
+
+    `LED_CONTROL=systemd|proc` 可强制指定；`auto`（默认）看板子上到底有没有这个
+    unit（`systemctl show -p LoadState` = `loaded`）。判定结果缓存：每次开灯都 fork
+    一个 systemctl 只为问「你的 unit 在不在」不值得。
+    """
+    global _LED_MODE
+    if _LED_MODE is not None:
+        return _LED_MODE
+    forced = str(LED_CONTROL or "auto").strip().lower()
+    if forced == "proc":
+        _LED_MODE = "proc"
+        return _LED_MODE
+    if forced == "systemd":
+        _LED_MODE = "systemd"
+        return _LED_MODE
+    usable = bool(LED_SERVICE) and os.path.isdir("/run/systemd/system") \
+        and shutil.which("systemctl") is not None
+    if usable:
+        ok, out = _systemctl("show", "-p", "LoadState", "--value", LED_SERVICE,
+                             timeout=5)
+        usable = ok and out.strip() == "loaded"
+    _LED_MODE = "systemd" if usable else "proc"
+    if _LED_MODE == "proc":
+        _log("没有 systemd unit `%s`，LED 退回直接运行 %s" % (LED_SERVICE, LED_TEST_BIN))
+    return _LED_MODE
+
+
+def _led_service_state():
+    """unit 的原始状态串：active / activating / inactive / failed / unknown。"""
+    ok, out = _systemctl("is-active", LED_SERVICE, timeout=5)
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    return lines[0] if lines else "unknown"
+
+
+def _led_service_active():
+    """unit 现在是不是活着的（`activating` / `reloading` 也算亮）。"""
+    return _led_service_state() in ("active", "activating", "reloading")
+
+
+def _legacy_led_procs():
+    """清掉老版本 Agent 留下的厂商进程（`LED_TEST_BIN`），整个生命周期只清一次。
+
+    老逻辑是 `Popen(..., start_new_session=True)`：Agent 重启带不走它，它就成了孤儿，
+    继续按自己的节奏抢 SPI。systemd 模式下留着它 = 两个写者抢同一条灯带，
+    「关灯」会被它覆盖回去。只按完整路径匹配，不会误杀别的进程。
+    """
+    global _LEGACY_LED_CLEANED
+    if _LEGACY_LED_CLEANED:
+        return
+    _LEGACY_LED_CLEANED = True
+    path = str(LED_TEST_BIN or "")
+    if not os.path.isabs(path):
+        # 相对路径 / 名字无法精确匹配，宁可不杀（`pkill -f` 会误伤同 substring 的进程）
+        return
+    try:
+        subprocess.run(["pkill", "-f", path], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=3)
+    except Exception:
+        pass
+
+
+def led_state():
+    """LED 现在到底亮没亮 —— 问 systemd / 问进程，不做「我以为」的乐观判断。"""
+    if led_mode() == "systemd":
+        return _led_service_active()
+    with _LOCK:
+        proc = _LED_PROC
+    return proc is not None and proc.poll() is None
+
+
 def _mark(field, value, managed=None, source=None):
     """更新灯状态。`managed` / `source` 不传表示「保持原值」。"""
     with _LOCK:
@@ -144,8 +248,31 @@ def _mark(field, value, managed=None, source=None):
 
 
 def led_on():
-    """点亮 LED 灯带（拉起厂商程序；它自己循环换色，没有常亮接口）。"""
+    """点亮 LED 灯带（systemd 模式：`systemctl start <unit>`）。"""
     global _LED_PROC
+    if led_mode() == "systemd":
+        _legacy_led_procs()
+        if _led_service_active():
+            _mark("led", True)
+            return {"ok": True, "action": "led", "state": "on",
+                    "detail": "LED 灯带已在运行（%s.service）" % LED_SERVICE}
+        ok, out = _systemctl("start", LED_SERVICE)
+        if not ok:
+            _mark("led", False)
+            return {"ok": False, "action": "led",
+                    "error": "systemctl start %s 失败：%s" % (LED_SERVICE, out or "未知原因")}
+        state = _led_service_state()
+        if state not in ("active", "activating", "reloading"):
+            _mark("led", False)
+            return {"ok": False, "action": "led",
+                    "error": "%s.service 已 start 但状态是 %s（查 systemctl status %s / "
+                             "journalctl -u %s）" % (LED_SERVICE, state, LED_SERVICE,
+                                                     LED_SERVICE)}
+        _mark("led", True)
+        return {"ok": True, "action": "led", "state": "on",
+                "detail": "已点亮 LED 灯带（%s.service）" % LED_SERVICE}
+
+    # ---- 兜底：板子上没有 unit（开发机 / 模拟器 / 老部署）就直接跑二进制 ----
     if not os.path.exists(LED_TEST_BIN):
         return {"ok": False, "action": "led",
                 "error": "未找到 %s，请确认 LED 灯带程序已部署" % LED_TEST_BIN}
@@ -166,32 +293,66 @@ def led_on():
             return {"ok": False, "action": "led", "error": "LED 灯带启动失败: %s" % e}
         _mark("led", True)
     return {"ok": True, "action": "led", "state": "on",
-            "detail": "已点亮 LED 灯带（厂商程序为循环闪烁）"}
+            "detail": "已点亮 LED 灯带（直接运行 %s）" % os.path.basename(LED_TEST_BIN)}
+
+
+def _stop_proc(proc):
+    """兜底模式关灯：SIGINT → 等 2s → SIGTERM → 等 1s → SIGKILL（都按进程组）。
+
+    **先 SIGINT** 是这段的关键：厂商程序只在 SIGINT 里写了「全 0 + reset」的收尾，
+    直接 SIGTERM 等于默认终止，灯珠会停在最后一帧亮着。
+    """
+    if proc is None or proc.poll() is not None:
+        return
+    for sig, wait in ((signal.SIGINT, 2), (signal.SIGTERM, 1)):
+        try:
+            os.killpg(os.getpgid(proc.pid), sig)
+        except Exception:
+            try:
+                proc.send_signal(sig)
+            except Exception:
+                pass
+        try:
+            proc.wait(timeout=wait)
+            return
+        except Exception:
+            continue
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
 
 
 def led_off():
-    """熄灭 LED 灯带（杀掉厂商程序；手动 / 计划共用同一个进程句柄）。"""
+    """熄灭 LED 灯带（systemd 模式：`systemctl stop <unit>`）。
+
+    unit 里 `KillSignal=SIGINT`，厂商程序收到后先写全 0 + reset 再退出 —— 这才是
+    真正的「熄灯」，不是把进程干掉、灯珠停在最后一帧。
+    """
     global _LED_PROC
+    if led_mode() == "systemd":
+        _legacy_led_procs()
+        # unit 的 TimeoutStopSec=10，留点余量；程序本身 100ms 内就退干净了
+        ok, out = _systemctl("stop", LED_SERVICE, timeout=20)
+        state = _led_service_state()
+        _mark("led", False)
+        if state in ("active", "activating", "reloading"):
+            return {"ok": False, "action": "led",
+                    "error": "systemctl stop %s 没停掉（状态 %s%s）" % (
+                        LED_SERVICE, state,
+                        "：" + out if out else "; 查 systemctl status " + LED_SERVICE)}
+        if not ok:
+            # 状态已经是 inactive/failed：目的达到了，只记日志，不把客户端搞成「关灯失败」
+            _log("systemctl stop %s 返回非零但已是 %s：%s" % (LED_SERVICE, state, out))
+        return {"ok": True, "action": "led", "state": "off"}
+
     with _LOCK:
         proc, _LED_PROC = _LED_PROC, None
         _mark("led", False)
-    if proc is None:
-        return {"ok": True, "action": "led", "state": "off"}
-    if proc.poll() is None:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except Exception:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-        try:
-            proc.wait(timeout=3)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+    _stop_proc(proc)
     return {"ok": True, "action": "led", "state": "off"}
 
 
@@ -201,7 +362,7 @@ def led_blink():
     if not result.get("ok"):
         return {"ok": False, "action": "blink", "error": result.get("error")}
     return {"ok": True, "action": "blink",
-            "detail": "已触发 LED 灯带闪烁（白/红/绿/蓝 循环）"}
+            "detail": result.get("detail") or "已触发 LED 灯带闪烁"}
 
 
 # ======================================================================
@@ -278,9 +439,18 @@ def lights_status():
     plan_start = (plan_window or {}).get("start")
     plan_end = (plan_window or {}).get("end")
     window = night_window(plan_start, plan_end)
-    with _LOCK:
-        proc = _LED_PROC
+    # LED 的真实状态：systemd 模式问 unit，兜底模式看进程（锁外用 systemctl，别把
+    # `_mark` / 计划开灯卡在 fork 上）
+    mode = led_mode()
+    service_state = None
+    if mode == "systemd":
+        service_state = _led_service_state()
+        led_running = service_state in ("active", "activating", "reloading")
+    else:
+        with _LOCK:
+            proc = _LED_PROC
         led_running = proc is not None and proc.poll() is None
+    with _LOCK:
         since = _STATE["on_since"]
         status = {
             "fill": _STATE["fill"],
@@ -294,6 +464,10 @@ def lights_status():
             "night_window": window,
             "plan_night_window": plan_window,
             "fill_gpio": FILL_LIGHT_GPIO,
+            # LED 走哪条路：systemd = `systemctl start/stop <led_service>`，proc = 直接跑二进制
+            "led_control": mode,
+            "led_service": LED_SERVICE if mode == "systemd" else None,
+            "led_service_state": service_state,
             "led_bin": LED_TEST_BIN,
             "led_bin_exists": os.path.exists(LED_TEST_BIN),
             "fill_available": FILL_LIGHT_GPIO >= 0
@@ -312,6 +486,9 @@ def lights_apply(fill=None, led=None, night_only=False, source="plan", now=None,
 
     `night_start` / `night_end`（计划里自定义的夜间时段）非空时用它判夜间，
     否则用板端默认（`LIGHT_NIGHT_START`/`LIGHT_NIGHT_END`）。
+
+    LED 的开关全部是幂等的（`systemctl start/stop` 打在已在跑的 unit 上是空操作），
+    所以客户端 300s 一次的重发 / 看门狗重入都不会出问题。
     """
     with _LOCK:
         _STATE["plan_window"] = (

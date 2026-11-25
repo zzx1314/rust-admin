@@ -141,7 +141,9 @@ backpack_dashboard/
 | ----------------- | -------------------------- | ----------------------------------------------------------------------- |
 | `MODEM_DEV`       | `/dev/ttyUSB2`             | 4G 模块 AT 口（已现场确认为 ttyUSB2）                                              |
 | `SHT4X_APP`       | `/opt/xjpt/wenshidu/sht4x_app` | 温湿度程序路径                                                                 |
-| `LED_TEST_BIN`    | `/opt/xjpt/led/test_rgbrun`    | LED 闪烁程序（手动按钮与计划灯光共用同一个进程句柄）                                |
+| `LED_SERVICE`     | `alarmlight`               | LED 灯带的 systemd unit，开关 = `systemctl start/stop <unit>`（unit 里 `KillSignal=SIGINT`，厂商程序收到才会熄灯；**不要 enable**） |
+| `LED_CONTROL`     | `auto`                     | `auto`（有 unit 走 systemd，没有就退回直接跑 `LED_TEST_BIN`）/ `systemd` / `proc` |
+| `LED_TEST_BIN`    | `/opt/xjpt/led/test_rgbrun`    | **仅兜底**：板子上没有 unit 时直接跑的闪烁程序（手动按钮与计划灯光共用同一个进程句柄） |
 | `BUTTON_MAP`      | SOS=639 / STOP=128         | **已用 evtest 实测**：code 639=未知键→SOS，code 128=KEY_STOP→STOP；若物理相反请交换两个环境变量 |
 | `FILL_LIGHT_GPIO` | `46`                       | 补光灯 GPIO；**设为 `-1` 可禁用**（该脚临时改作摄像头触发用时）                                 |
 | `CAM_TRIGGER_GPIO` | `-1`（未启用）                | 摄像头 2P 端子触发脚；**不可与 `FILL_LIGHT_GPIO` 同号**，同号时补光灯接口会直接拒绝执行 |
@@ -719,16 +721,19 @@ python3 backend/tools/plan_count_selftest.py
 |---|---|---|
 | `POST /api/lights` | `fill`、`led`、`nightOnly`、`taskCode`、`pointIndex`、可选 `nightStart`/`nightEnd` | 开灯（计划灯 `pointIndex=-1`，航点模式是真实下标）；`nightOnly` 且不在夜间窗内 → `skipped=daytime`，**什么都不做**；`nightStart`/`nightEnd`（计划里自定义的时段，`HH:MM`）不传就用板端默认 |
 | `POST /api/lights/off` | `reason` | 离开航点（航点模式）/ 任务终态 / 取消 / 看门狗 |
-| `GET /api/lights` | — | 状态：`fill`/`led`/`managed`/`night`/`night_window`（当前生效的窗）/`plan_night_window`（计划自定义时段，`null`=板端默认）/`fill_available` |
+| `GET /api/lights` | — | 状态：`fill`/`led`/`managed`/`night`/`night_window`（当前生效的窗）/`plan_night_window`（计划自定义时段，`null`=板端默认）/`fill_available`/`led_control`（`systemd`/`proc`）/`led_service`/`led_service_state` |
 
 夜间窗在板端判：计划里带了自己的时段就用它，否则用 `LIGHT_NIGHT_START` /
 `LIGHT_NIGHT_END`（默认 18:00-06:00，允许跨零点，**起止相同 = 关闭夜间判定**）。计划灯有看门狗（`LIGHT_MAX_ON_SECS`，默认 900s）；
 手动按钮（`/api/filllight`、`/api/led/blink`）开的灯不吃看门狗。
-LED 只有厂商的 `test_rgbrun`（循环闪烁），所以「开」= 拉起进程、「关」= 按进程组杀掉，
-手动与计划共用同一个进程句柄。
+LED 走 systemd：`systemctl start/stop alarmlight`（unit 里 `KillSignal=SIGINT`，厂商程序
+收到才会先写全 0 + reset 再退出 —— 发 SIGTERM 关灯 = 进程没了但灯珠停在最后一帧亮着）。
+没有 unit 的板子（开发机 / 模拟器）自动退回直接跑 `LED_TEST_BIN`，关灯也先 SIGINT。
+手动与计划共用同一套开关，`systemctl start/stop` 天然幂等。
 
 **现场自检**（不需要板子）：`python3 backend/tools/lights_selftest.py`
-（时间窗边界 / 白天跳过 / GPIO 写值 / LED 进程 / 看门狗 / GPIO 被禁用时 LED 照开）。
+（时间窗边界 / 白天跳过 / GPIO 写值 / LED 开关（含 `systemctl` 桩）/ 看门狗 /
+GPIO 被禁用时 LED 照开）。
 
 ### ⑥ 语音播报（航点「语音播报」/ 航段「语音播报」）
 

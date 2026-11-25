@@ -302,14 +302,22 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
   `_plan_flush` 要在停识别时把采样中的命中落盘（客户端靠「先停再扫」补图）。
   改这块先读 `official-app-parity.md` §5.6，并跑 `plan_count_selftest.py`
   （里面有「采集关闭：不写媒体归档、证据图照写」与「不传开关默认开」两条）。
-- **计划灯光（补光灯 / LED）只有一份状态**：`control.py` 的补光灯 GPIO + LED 进程句柄
+- **计划灯光（补光灯 / LED）只有一份状态**：`control.py` 的补光灯 GPIO + LED 开关
   被**手动按钮**（`/api/filllight`、`/api/led/blink`）和**计划**（`/api/lights`、
-  `/api/lights/off`）共用。`LED_TEST_BIN` 只有「循环闪烁」没有常亮接口，所以「LED 开」
-  = 拉起进程、「关」= 按进程组杀掉（`start_new_session=True`，厂商程序可能 fork）；
-  手动与计划必须共用 `_LED_PROC`，否则计划结束时杀不掉手动拉起的那一个。
+  `/api/lights/off`）共用。
+  **LED 走 systemd**：`systemctl start/stop alarmlight`（`LED_SERVICE`，板端 unit =
+  `/opt/xjpt/led/alarmlight`，72 颗灯珠红蓝 100ms 爆闪，**不要 enable**）。
+  为什么不 Popen 二进制：厂商程序只在 **SIGINT** 里写「全 0 + reset」熄灯，老逻辑发
+  SIGTERM 是默认终止 —— 进程没了、灯珠停在最后一帧亮着；unit 里 `KillSignal=SIGINT` +
+  `TimeoutStopSec=10` 才是真正的「关灯」，而且进程归 systemd 管、Agent 重启不会留下
+  继续抢 SPI 的孤儿。没有 unit 的板子自动退回「直接跑 `LED_TEST_BIN`」（`LED_CONTROL`
+  = `auto`/`systemd`/`proc` 可强制），兜底路径关灯也是**先 SIGINT** 再退 SIGTERM/SIGKILL。
+  状态里的 `led` 是问 `systemctl is-active` 得来的真实现状（`led_control` /
+  `led_service` / `led_service_state` 一并回报），不是乐观写入。
   计划级「自动开灯」（`tasks.light_fill` / `light_led`）由客户端在任务一开始就调一次
   `/api/lights`（`pointIndex=-1`），全程不关，终态 / 取消才 `/api/lights/off`；计划没配
-  才走航点动作的「到点开、离开关」。
+  才走航点动作的「到点开、离开关」。`systemctl start/stop` 天然幂等，客户端 300s
+  一次的重发 / 看门狗重入都不会出问题。
   「仅夜间」的夜间判定**只在板端**（`control.is_night`，默认窗 `LIGHT_NIGHT_START` /
   `LIGHT_NIGHT_END` = 18:00-06:00；计划里自定义的 `nightStart`/`nightEnd` 优先，
   允许跨零点，起止相同 = 关闭）：白天返回

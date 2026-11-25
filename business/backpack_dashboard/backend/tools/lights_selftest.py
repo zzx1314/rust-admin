@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""计划灯光自检：夜间时间窗 + 补光灯 GPIO + LED 进程 + 看门狗。
+"""计划灯光自检：夜间时间窗 + 补光灯 GPIO + LED 开关 + 看门狗。
 
-覆盖的四个行为（对应 `control.py`）：
+覆盖的行为（对应 `control.py`）：
 
 1. `is_night` 的边界与跨零点（默认 18:00-06:00，板端本地时间）；
-2. 计划勾了「仅夜间自动开灯」时，白天到点**什么都不做**（不写 GPIO、不拉 LED 进程）；
-3. 夜间到点开灯 = GPIO 拉高 + `test_rgbrun` 进程存活，`/api/lights/off` 把两者收掉；
-4. 看门狗：计划灯超过 `LIGHT_MAX_ON_SECS` 自动关（客户端掉线时兜底）。
+2. 计划勾了「仅夜间自动开灯」时，白天到点**什么都不做**（不写 GPIO、不碰 LED）；
+3. 夜间到点开灯 = GPIO 拉高 + LED 亮，`/api/lights/off` 把两者收掉；
+4. 看门狗：计划灯超过 `LIGHT_MAX_ON_SECS` 自动关（客户端掉线时兜底）；
+5. **LED 走 systemctl**：开 = `systemctl start <unit>`、关 = `systemctl stop <unit>`，
+   状态取 `systemctl is-active`（板端 `alarmlight.service`，`KillSignal=SIGINT` 才能真正熄灯）；
+6. 没有 unit 时的兜底：直接跑 `LED_TEST_BIN`，关灯先 SIGINT（厂商程序只在 SIGINT
+   里熄灯）再退 SIGTERM/SIGKILL。
 
 为什么单独一个工具：这条逻辑全是「配置 + 进程 + GPIO 文件」，现场排「灯为什么不亮 /
-为什么一直亮」时必须能脱离硬件单独跑。这里把 GPIO 写入换成记录桩、把 LED 程序换成
-一个 `sleep` 脚本，其余代码路径与板端完全一致。
+为什么一直亮」时必须能脱离硬件单独跑。这里把 GPIO 写入换成记录桩、把 systemctl 换成
+一个内存状态机、把 LED 程序换成一个 `sleep` 脚本，其余代码路径与板端完全一致。
 
 用法（开发机即可，不需要板子）：
 
@@ -52,10 +56,46 @@ def install_stubs():
     root = tempfile.mkdtemp(prefix="lights-selftest-")
     led = os.path.join(root, "fake_led.sh")
     with open(led, "w", encoding="utf-8") as f:
-        f.write("#!/bin/sh\nsleep 30\n")
+        f.write("#!/bin/sh\ntrap 'exit 0' INT TERM\nsleep 30\n")
     os.chmod(led, 0o755)
     control.LED_TEST_BIN = led
+    # 前 10 节验的是「板子上没有 unit」的兜底路径（开发机跑自检就是这种情况）
+    force_proc_mode()
     return root
+
+
+def force_proc_mode():
+    control.LED_CONTROL = "proc"
+    control._LED_MODE = None
+    control._LEGACY_LED_CLEANED = True   # 别在开发机上跑 pkill
+
+
+class FakeSystemd:
+    """`systemctl` 的内存替身：只实现 start / stop / is-active / show。"""
+
+    def __init__(self):
+        self.calls = []
+        self.state = "inactive"
+        self.fail_start = False
+        self.fail_stop = False
+
+    def systemctl(self, *args, timeout=15.0):
+        cmd = list(args)
+        self.calls.append(cmd)
+        if cmd[0] == "start":
+            if self.fail_start:
+                return False, "Job for alarmlight.service failed"
+            self.state = "active"
+            return True, ""
+        if cmd[0] == "stop":
+            if not self.fail_stop:
+                self.state = "inactive"
+            return not self.fail_stop, "" if not self.fail_stop else "Job failed"
+        if cmd[0] == "is-active":
+            return self.state == "active", self.state
+        if cmd[0] == "show":
+            return True, "loaded"
+        return True, ""
 
 
 def at(hh, mm=0):
@@ -205,6 +245,64 @@ def main():
           str(status["night"]))
     control.lights_off("自检清理")
     check("关灯后计划时段清空", control.lights_status()["plan_night_window"] is None)
+
+    print("11) 兜底模式：没有 unit 时直接跑二进制，关灯先 SIGINT")
+    force_proc_mode()
+    reset()
+    r = control.led_on()
+    check("led_on 拉起进程", r.get("ok") is True and control.led_state() is True, str(r))
+    check("状态里 led_control=proc", control.lights_status()["led_control"] == "proc")
+    r = control.led_off()
+    check("led_off 收掉进程", r.get("ok") is True and control.led_state() is False, str(r))
+
+    print("12) systemd 模式：开 = systemctl start，关 = systemctl stop")
+    fake = FakeSystemd()
+    control._systemctl = fake.systemctl
+    control.LED_CONTROL = "systemd"
+    control._LED_MODE = None
+    control.LED_SERVICE = "alarmlight"
+    reset()
+    check("led_mode 判定为 systemd", control.led_mode() == "systemd")
+    r = control.led_on()
+    check("led_on 成功", r.get("ok") is True, str(r))
+    check("真的调了 systemctl start alarmlight", ["start", "alarmlight"] in fake.calls,
+          str(fake.calls))
+    check("led_state 读 is-active = 亮", control.led_state() is True)
+    status = control.lights_status()
+    check("状态：led=true / led_control=systemd / led_service=alarmlight",
+          status["led"] is True and status["led_control"] == "systemd"
+          and status["led_service"] == "alarmlight"
+          and status["led_service_state"] == "active", str(status))
+    starts = [c for c in fake.calls if c and c[0] == "start"]
+    r = control.led_on()
+    check("重复开灯幂等（不再 start 一次，返回已在运行）",
+          r.get("ok") is True and "已在运行" in (r.get("detail") or "")
+          and len([c for c in fake.calls if c and c[0] == "start"]) == len(starts), str(r))
+    r = control.lights_apply(True, True, False, "计划 P7 航点 0", now=at(20, 0))
+    check("计划开灯也走 systemd", r.get("ok") is True and control.led_state() is True, str(r))
+    r = control.lights_off("已离开航点")
+    check("关灯成功", r.get("ok") is True, str(r))
+    check("真的调了 systemctl stop alarmlight", ["stop", "alarmlight"] in fake.calls,
+          str(fake.calls))
+    check("关灯后 led_state=false", control.led_state() is False)
+
+    print("13) systemd 模式：stop 没停掉 → 如实报错（不能假报已关）")
+    fake.fail_stop = True
+    control.led_on()
+    r = control.led_off()
+    check("led_off 返回失败", r.get("ok") is False, str(r))
+    check("错误里带 unit 名", "alarmlight" in (r.get("error") or ""), str(r.get("error")))
+    fake.fail_stop = False
+    control.led_off()
+
+    print("14) systemd 模式：start 失败 → 报错而不是乐观标亮")
+    fake.fail_start = True
+    r = control.led_on()
+    check("led_on 返回失败", r.get("ok") is False, str(r))
+    check("错误里带 systemctl 输出", "failed" in (r.get("error") or ""), str(r.get("error")))
+    check("状态里 led=false", control.lights_status()["led"] is False)
+    fake.fail_start = False
+    force_proc_mode()
 
     print()
     if failures:

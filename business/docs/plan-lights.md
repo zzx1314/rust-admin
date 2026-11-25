@@ -78,9 +78,17 @@ client（与 Agent 同机）  ActiveTask::light_at 一处收口
 - 补光灯：`/sys/class/gpio/gpio<FILL_LIGHT_GPIO>` 写 `1`/`0`（默认 GPIO 46）。
   `FILL_LIGHT_GPIO=-1` 或与 `CAM_TRIGGER_GPIO` 同号时**拒绝执行**并回错误——但不能因为
   补光灯不可用就不开 LED（`lights_apply` 会继续点 LED，返回 `ok=false` + `errors`）。
-- LED 灯带：厂商只提供 `test_rgbrun`（**循环闪烁，没有常亮接口**），所以「开」= 拉起
-  进程、「关」= 按进程组 `SIGTERM`。进程句柄 `_LED_PROC` 由 `control.py` 持有，
-  **手动按钮（`/api/led/blink`）与计划共用**，否则计划结束时杀不掉手动拉起的那一个。
+- LED 灯带：没有常亮接口，厂商程序都是「跑起来就一直刷颜色」，所以「开」= 让程序跑、
+  「关」= 让它停。**开关走 systemd unit**：`systemctl start/stop alarmlight`
+  （`LED_SERVICE`，板端 `/etc/systemd/system/alarmlight.service` →
+  `ExecStart=/opt/xjpt/led/alarmlight`，红蓝 100ms 爆闪；仓库副本
+  `deploy/backpack-alarmlight.service`）。为什么不用 `Popen` + 杀进程：厂商程序只在
+  **SIGINT** 里写「全 0 + reset」熄灯，老逻辑发 SIGTERM 是默认终止 —— 进程没了、灯珠停在
+  最后一帧一直亮着；unit 的 `KillSignal=SIGINT` + `TimeoutStopSec=10` 才是真正的关灯，
+  而且进程归 systemd 管，Agent 重启不会留下继续抢 SPI 的孤儿进程。
+  没有这个 unit 的板子（开发机 / 模拟器 / 老部署）自动退回直接跑 `LED_TEST_BIN`
+  （`LED_CONTROL=auto|systemd|proc`），兜底路径关灯也是先 SIGINT 再退 SIGTERM/SIGKILL。
+  ⚠️ unit **不要 `enable`**：灯由 Agent 按需 start，开机自启等于一上电就一直爆闪。
 - 开灯时机：**计划灯** = 5009 里一出现这条任务就开（不用等第一个航点），
   `PointLights` 按 `(taskCode, Point, PLAN_LIGHT_INDEX=-1)` 去重，一条任务只发一次，
   但每 `LIGHT_REFRESH_AFTER`（300s）重发一次——板端看门狗（`LIGHT_MAX_ON_SECS`，
@@ -104,9 +112,9 @@ client（与 Agent 同机）  ActiveTask::light_at 一处收口
 
 | 位置 | 作用 |
 | --- | --- |
-| `business/backpack_dashboard/backend/control.py` | `is_night` / `night_window` / `lights_apply` / `lights_off` / `lights_status` / 看门狗 |
+| `business/backpack_dashboard/backend/control.py` | `is_night` / `night_window` / `lights_apply` / `lights_off` / `lights_status` / 看门狗 / LED 的 `systemctl start|stop`（`led_mode` 判定 + `LED_TEST_BIN` 兜底） |
 | `business/backpack_dashboard/backend/agent.py` | `GET/POST /api/lights`、`POST /api/lights/off`；手动接口保持原样 |
-| `business/backpack_dashboard/backend/tools/lights_selftest.py` | 时间窗 / 白天跳过 / GPIO+LED / 看门狗 自检（不需要板子） |
+| `business/backpack_dashboard/backend/tools/lights_selftest.py` | 时间窗 / 白天跳过 / GPIO+LED / 看门狗 / `systemctl start|stop`（stub 的 systemd 状态机）自检（不需要板子） |
 | `business/server/migrations/030_task_light_night_only.sql` | `tasks.light_night_only`（默认 0） |
 | `business/server/migrations/032_task_plan_lights.sql` | `tasks.light_fill` / `light_led`（默认 0；回填已勾「仅夜间」的计划为两盏都开） |
 | `business/server/migrations/033_task_light_night_window.sql` | `tasks.light_night_start` / `light_night_end`（NULL = 板端默认） |
@@ -117,13 +125,23 @@ client（与 Agent 同机）  ActiveTask::light_at 一处收口
 | `business/web/src/views/routes/index.vue` | 航点动作「到点开灯」+ 行进任务「航段开灯」两个复选框 + 动作卡片「灯光：到点开…/整段开…」+ 「计划优先」提示 |
 | `business/web/src/utils/constants.ts` | 动作库里的 `补光`（`kind: "both"`）：只开灯不干别的时用它，两侧都能挂 |
 | `business/web/src/views/tasks/index.vue` | 计划「自动开灯（补光灯 / LED）+ 仅夜间」；详情页摘要 `planLightSummary` |
+| `deploy/backpack-alarmlight.service` | LED 灯带的 systemd unit（`ExecStart=/opt/xjpt/led/alarmlight`，`KillSignal=SIGINT`）；仓库 = 板端 |
 | `deploy/backpack-sim/mock_agent.py` | 模拟 `/api/lights`（`SIM_NIGHT=1/0` 可钉死白天/夜间） |
 
 ## 5. 现场排查
 
 1. 灯完全不亮：
    - `curl -s 127.0.0.1:8000/api/lights`：看 `fill_available`（GPIO 被禁/同号时为
-     false）、`led_bin_exists`、`night`、`night_window.enabled`；
+     false）、`led_control`（`systemd` = 走 `systemctl start/stop`，`proc` = 退回直接
+     跑 `LED_TEST_BIN`，后者再看 `led_bin_exists`）、`led_service_state`（unit 现在的
+     active/inactive/failed）、`night`、`night_window.enabled`；
+   - `systemctl status alarmlight` / `journalctl -u alarmlight -n 50`：unit 起不来（SPI
+     被占、`/dev/spidev1.0` 权限）就是这里的报错；⚠️ **接口报「已点亮」不代表灯珠亮**，
+     只代表 unit `active`（SPI 写失败程序会退出，`Restart=on-failure` 会反复重启，
+     `journalctl` 里能看见）；
+   - `pgrep -af 'test_rgbrun|alarmlight'`：**只能有一个写者**。老版本 Agent 留下的
+     `test_rgbrun` 孤儿会跟 unit 抢 SPI（新版 Agent 启动后第一次开关灯会自动 `pkill`
+     掉它），手动兜底：`pkill -f /opt/xjpt/led/test_rgbrun`；
    - `POST /api/lights` 手工打一发，看返回 `errors`；
    - 客户端日志 grep `航点灯光`：`开灯失败 / 关灯失败` 会带 Agent 的原因。
    - **先确认 5009 跟上了这条任务**：巡检的本体任务号由客户端的 `RouteRunner` 自己发

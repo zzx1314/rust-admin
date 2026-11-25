@@ -44,7 +44,7 @@
 - POST /api/lingsi/test       -> 触发聆思测试序列
 - POST /api/asr/start         -> 启动 asr 服务（后台触发 systemctl start）
 - POST /api/asr/stop          -> 关闭 asr 服务（后台触发 systemctl stop）
-- POST /api/led/blink         -> LED 灯带闪烁（手动按钮；与计划灯光共用同一个进程）
+- POST /api/led/blink         -> LED 灯带爆闪（手动按钮；与计划灯光共用同一套开关）
 - POST /api/filllight         -> 补光灯开关 {"state": true/false}（手动按钮）
 - GET  /api/lights            -> 灯光状态（补光/LED、是否计划点亮、当前是否夜间、夜间时间窗）
 - POST /api/lights            -> [航点] 开灯 {"fill":true,"led":true,"nightOnly":false,

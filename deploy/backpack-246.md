@@ -44,7 +44,8 @@ default via 192.168.234.1  dev eth0            metric 1000   # netplan 兜底
 | `backpack-agent.service` | 背包数据采集 Agent：FastAPI + 6 路流 + RKNN AI 识别（航点存证 `detect_jobs/`） | `8000` | `/opt/xjpt/backpack_dashboard/backend` → `python3 agent.py` | `business/backpack_dashboard/` |
 | `camera-init.service` | USB 相机初始化（`/opt/xjpt/camera/testc.sh`，启动前 sleep 8） | — | `backpack-agent` 的 `ExecStartPre` 也会重启它 | 不在仓库（厂商） |
 | `asr.service` | 聆思 USB 麦克风语音识别（`asr_usb_record`，腾讯云 ASR/TTS）；Agent 的「语音助手」页面在它上面发命令 | — | `WorkingDirectory=/opt/xjpt/lingsi`、`LD_LIBRARY_PATH=/opt/xjpt/lingsi/lib`、`ExecStart=/opt/xjpt/lingsi/asr_usb_record` | 不在仓库（厂商） |
-| `led_blue.service` | LED 灯带闪烁程序（`test_rgbrun`）；**当前 disabled**，Agent 的「LED 闪烁」按钮直接拉起同一个二进制 | — | `ExecStart=/opt/xjpt/led/test_rgbrun` | 不在仓库（厂商） |
+| `alarmlight.service` | **LED 灯带（72 颗 WS2812）红蓝 100ms 爆闪**：Agent 的「LED 爆闪」按钮与航点 / 计划灯光都靠 `systemctl start/stop alarmlight` 启停 | — | `ExecStart=/opt/xjpt/led/alarmlight`（unit 里 `KillSignal=SIGINT`、`TimeoutStopSec=10`；**disabled 是对的，别 enable**） | 仓库 `deploy/backpack-alarmlight.service` |
+| `led_blue.service` | 老的 LED 灯带闪烁程序（`test_rgbrun`，白/红/绿/蓝循环）；**当前 disabled，已被 `alarmlight` 取代**（`test_rgbrun` 只挂 SIGINT，Agent 老逻辑发 SIGTERM 关灯时灯珠会停在最后一帧亮着） | — | `ExecStart=/opt/xjpt/led/test_rgbrun` | 不在仓库（厂商） |
 | `backpack-relay.service` | **视频中继**：按需把本地 RTSP 推到平台 mediamtx（`RELAY_RTSP_URL`，浏览器 WHEP 看）；控制面走 `ws://39.107.55.13:3008/ws/device/video` | 无常驻端口（纯出站 WS） | `/usr/bin/python3 /opt/backpack-relay/relay_push.py` | `deploy/backpack-relay/` |
 | `robodog-device-client.service` | 设备客户端：连平台 `:3008` 做注册/心跳/任务，反代本体 `:10010`，转发 Agent 事件与 AI 证据图 | 无常驻端口（出站 WS） | `/opt/robodog/client/robodog-device-client --config /etc/robodog/client.toml` | `business/client/`（`build-aarch64.sh` 出包） |
 | `site-console.service` | 现场控制台门户：静态页 + 把 `/api` 转到平台，给同网段的浏览器用 | `8080` | `/opt/site-console` → `python3 serve.py` | `deploy/site-console/` |
@@ -90,7 +91,9 @@ default via 192.168.234.1  dev eth0            metric 1000   # netplan 兜底
 /opt/xjpt/lingsi/                         ← 聆思语音（asr.service；原 /root/lingsi/）
 ├── asr_usb_record                       语音识别主程序 + `lib/` + `asr.conf`（腾讯云密钥）
 └── device_selfcheck.sh                  厂商自检（已改为指向 /opt/xjpt/wenshidu）
-/opt/xjpt/led/test_rgbrun                ← LED 灯带闪烁（Agent 「LED」按钮 + led_blue.service；原 /root/led/）
+/opt/xjpt/led/test_rgbrun                ← LED 灯带闪烁（白/红/绿/蓝循环；**已弃用**，只剩 Agent 没 unit 时的兜底；原 /root/led/）
+/opt/xjpt/led/alarmlight (+ .c)          ← LED 灯带红蓝爆闪（`alarmlight.service` = Agent「LED 爆闪」/ 航点灯光；
+                                          收到 SIGINT/SIGTERM 会先写全 0 + reset 再退出，所以 `systemctl stop` 才是真熄灯）
 /opt/xjpt/LED/                           ← 厂商 LED 常亮服务源码/二进制（light_service、light_client；原 /root/LED/）
 /opt/xjpt/wenshidu/sht4x_app             ← 温湿度传感器（Agent `/api/temp`；原 /root/wenshidu/）
 /root/{LED,led,lingsi,wenshidu}          ← 已不存在（2026-11-20 搬进 /opt/xjpt 后软链也删了，见 §4.4）
@@ -102,7 +105,8 @@ default via 192.168.234.1  dev eth0            metric 1000   # netplan 兜底
 ├── robodog-device-client.service        客户端 unit（仓库：business/client/deploy/）
 ├── site-console.service                 控制台 unit
 ├── asr.service                         聆思语音 unit（WorkingDirectory=/opt/xjpt/lingsi）
-├── led_blue.service                    LED 闪烁 unit（disabled，ExecStart=/opt/xjpt/led/test_rgbrun）
+├── led_blue.service                    LED 闪烁 unit（disabled，已被 alarmlight 取代；ExecStart=/opt/xjpt/led/test_rgbrun）
+├── alarmlight.service                  LED 爆闪 unit（disabled；ExecStart=/opt/xjpt/led/alarmlight；KillSignal=SIGINT）
 ├── frpc.service                         外网 ssh 隧道 unit（仓库：deploy/backpack-246-frpc/）
 ├── 4g-connect.service                   厂商
 └── *.bak-*                              历史备份（逐个看过再删，见 §5）
@@ -293,7 +297,7 @@ ffmpeg 推流在、客户端日志 `ai.jobs_dir = /opt/xjpt/backpack_dashboard/b
 
 | 文件 | 改动 |
 | --- | --- |
-| `/etc/systemd/system/led_blue.service` | `ExecStart=/opt/xjpt/led/test_rgbrun` |
+| `/etc/systemd/system/led_blue.service` | `ExecStart=/opt/xjpt/led/test_rgbrun`（已被 `alarmlight.service` 取代，留在盘上备查） |
 | `/root/yd_test_v4.0.sh` | 厂商总自检脚本，11 处 `/root/led/`、`/root/wenshidu/` 全改成 `/opt/xjpt/…` |
 | `/opt/xjpt/lingsi/device_selfcheck.sh` | 2 处 `/root/wenshidu/sht4x_app` → `/opt/xjpt/wenshidu/sht4x_app` |
 | `/opt/xjpt/backpack_dashboard/backend/config.py` | `SHT4X_APP` / `LED_TEST_BIN` / `LINGS_PLAY_WAV` 三个默认值（仓库 `business/backpack_dashboard/backend/config.py` 同步改，两边 md5 一致）|
@@ -342,6 +346,49 @@ scp target/aarch64-unknown-linux-gnu/release/robodog-device-client \
 `ls -ld /root/{LED,led,lingsi,wenshidu}` 全部 `No such file`。
 > 若真要回滚到旧路径，需要**手动** `ln -s /opt/xjpt/<名字> /root/<名字>` 或改回引用——
 > 软链已经不在了。
+
+## 4.5 2026-11-25：LED 灯带改由 systemd 管（`alarmlight.service`）
+
+以前 Agent 自己 `Popen(/opt/xjpt/led/test_rgbrun)`，关灯 = 按进程组 `SIGTERM`。两个坑：
+
+1. **关灯不灭**：`test_rgbrun` 只在 SIGINT 里写「全 0 + reset」，SIGTERM 是默认终止 ——
+   进程没了，72 颗灯珠停在最后一帧亮着；
+2. **孤儿进程**：`Popen(..., start_new_session=True)` 的子进程不会随 Agent 退出，
+   `systemctl restart backpack-agent` 后它继续抢 SPI，再开灯就是两个写者。
+
+所以板端新增 `alarmlight.service`（`ExecStart=/opt/xjpt/led/alarmlight`，`alarmlight.c`
+由厂商 `test_blue_red.c` 改的：红蓝 100ms 爆闪 + **SIGINT/SIGTERM/SIGHUP/SIGQUIT
+都会先熄灯再退出**），unit 里再配 `KillSignal=SIGINT` / `KillMode=process` /
+`TimeoutStopSec=10`。Agent 改成：
+
+```bash
+systemctl start alarmlight    # 开（幂等，已在跑是空操作）
+systemctl stop  alarmlight    # 关（SIGINT → 程序先写全 0 + reset 再退）
+systemctl is-active alarmlight # /api/lights 的 led / led_service_state 就是问它
+```
+
+部署（仓库 → 板端）：
+
+```bash
+# 1) unit（仓库 deploy/backpack-alarmlight.service 与板端 /etc/systemd/system/alarmlight.service 同内容）
+scp deploy/backpack-alarmlight.service root@192.168.41.246:/etc/systemd/system/alarmlight.service
+ssh root@192.168.41.246 'systemctl daemon-reload'
+# 2) Agent 代码（control.py + config.py；⚠️ agent 不处理 SIGTERM，restart 要等 90s，视频断 1.5min）
+rsync -av business/backpack_dashboard/backend/{control.py,config.py} \
+  root@192.168.41.246:/opt/xjpt/backpack_dashboard/backend/
+ssh root@192.168.41.246 'systemctl restart backpack-agent'
+# 3) 验证
+ssh root@192.168.41.246 'curl -s 127.0.0.1:8000/api/lights | python3 -m json.tool'   # led_control=systemd
+curl -s -XPOST 127.0.0.1:8000/api/led/blink                                       # 灯红蓝爆闪
+systemctl is-active alarmlight                                                     # active
+curl -s -XPOST 127.0.0.1:8000/api/lights/off -H 'Content-Type: application/json' -d '{"reason":"manual"}'
+systemctl is-active alarmlight; pgrep -af 'test_rgbrun|alarmlight'                  # inactive，无进程
+```
+
+⚠️ **不要 `systemctl enable alarmlight`**：灯由 Agent 按需 start，enable 等于一上电就一直爆闪。
+`led_blue.service` 保留在盘上（已 disabled），它跑的是老 `test_rgbrun`，别再启。
+升级后第一次开关灯时，Agent 会自动 `pkill -f /opt/xjpt/led/test_rgbrun` 清掉
+老版本留下的孤儿进程（只按完整路径匹配）；现场也可手动清。
 
 ## 5. 备份文件现状与清理建议
 
