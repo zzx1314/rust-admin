@@ -100,7 +100,8 @@ def main():
         failures += not check("清单名是 plan/文件", item["name"].startswith("TK-1/"), item)
         failures += not check("边车写了时长", item["durationSec"] >= 1.0, item)
 
-    # 2) 全程录像：同一计划不同 scope 共存；切片长度按请求走（路线动作可配）
+    # 2) 旧版「全程录像」（scope=task）：老客户端还在用，继续兼容；
+    #    切片长度按请求走（路线动作可配）
     ARGS.clear()
     r = record.start({"planId": "TK-2", "scope": "task", "segmentSeconds": 120,
                       "maxSeconds": 60})
@@ -115,7 +116,38 @@ def main():
         args,
     )
 
-    # 2.1) 同一计划同时有全程 + 航点两路：各自只认自己的文件（前缀 + 相机）
+    # 2.0) 航段录像（2026-11-26 起的段级录像）：文件名带 leg<起点下标>，
+    #      切片长度按请求走，stop 按 scope+起点下标只收这一段。
+    ARGS.clear()
+    r = record.start({"planId": "TK-LEG", "scope": "leg", "pointIndex": 2,
+                      "pointName": "航段 3→4", "segmentSeconds": 90})
+    failures += not check("航段录像 start ok", r.get("ok") and r.get("created"), r)
+    args = ARGS[-1] if ARGS else []
+    failures += not check(
+        "航段录像按切片落盘",
+        "-segment_time" in args and args[args.index("-segment_time") + 1] == "90",
+        args,
+    )
+    failures += not check(
+        "航段文件名带起点下标",
+        any("/leg2-" in path for path in PROCS),
+        PROCS,
+    )
+    # 同计划再挂一条别的航段：停 2 号不能把 3 号一起停掉
+    record.start({"planId": "TK-LEG", "scope": "leg", "pointIndex": 3,
+                  "pointName": "航段 4→5", "segmentSeconds": 90})
+    stopped = record.stop({"planId": "TK-LEG", "scope": "leg", "pointIndex": 2,
+                           "reason": "到达下一个航点"})
+    failures += not check("航段 stop 只停这一段", stopped.get("stopped") == 1, stopped)
+    items = record.list_files("TK-LEG")
+    failures += not check("航段录像落到清单", len(items) == 1, items)
+    if items:
+        failures += not check("清单 scope=leg", items[0]["scope"] == "leg", items)
+        failures += not check("清单带起点下标", items[0]["pointIndex"] == 2, items)
+        failures += not check("清单带航段名", items[0]["pointName"] == "航段 3→4", items)
+    record.stop({"planId": "TK-LEG", "reason": "任务终态"})
+
+    # 2.1) 同一计划同时有全程（老 scope=task）+ 航点两路：各自只认自己的文件（前缀 + 相机）
     record.start({"planId": "TK-3", "scope": "task", "segmentSeconds": 60})
     record.start({"planId": "TK-3", "scope": "point", "pointIndex": 0, "seconds": 5})
     # 全程录像的第二段在航点录像开始之后才落盘（segment 切片就是这个时序）

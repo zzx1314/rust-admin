@@ -126,7 +126,7 @@ const detailTask = ref<Task | null>(null);
 /** 任务事件流：定位未就绪、下发失败等可读原因都在这里 */
 const detailEvents = ref<TaskEvent[]>([]);
 /**
- * 任务录像（航点「录像采集」/ 航段「全程录像」）。
+ * 任务录像（航点 / 航段「录像采集」）。
  *
  * 板端录完 → 客户端回传 → 这里列出来回看。录像比图大得多，按需播放：
  * 点「播放」才取字节（带 Bearer），播放完/关弹窗立刻 revoke object URL。
@@ -845,11 +845,16 @@ function recordingDuration(seconds: number) {
   return minutes ? `${minutes}分${total % 60}秒` : `${total}秒`;
 }
 
-/** 「全程录像」/「航点3 · P3」 */
+/** 「航段3→4」/「航点3 · P3」/ 旧数据的「全程录像」 */
 function recordingLabel(item: TaskRecording) {
-  // 多选相机时同一航点/整段会有多段录像，必须把相机标出来，否则看着像重复
+  // 多选相机时同一航点/同一段会有多段录像，必须把相机标出来，否则看着像重复
   const camera = item.camera ? ` · ${cameraName(item.camera)}` : "";
+  // `task` 是 2026-11-26 之前的老「全程录像」（整条任务一条流），只在老数据里出现
   if (item.scope === "task") return `全程录像${camera}`;
+  if (item.scope === "leg") {
+    const name = item.pointName?.trim() || `航段${item.pointIndex + 1}→${item.pointIndex + 2}`;
+    return `${name} 录像${camera}`;
+  }
   const name = item.pointName?.trim();
   return `航点${item.pointIndex + 1}${name ? ` · ${name}` : ""} 录像${camera}`;
 }
@@ -1981,7 +1986,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div v-else class="empty-box" style="padding: 16px 0">
-          暂无录像。路线里给航点配「录像采集」或在航段配「全程录像」，任务跑完会攒在板端；
+          暂无录像。路线里给航点 / 航段配「录像采集」，任务跑完会攒在板端；
           点上面「回传板端录像」让设备传上来。
         </div>
 

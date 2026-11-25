@@ -151,7 +151,7 @@ export function download(url: string, filename: string) {
  * 取二进制内容（录像播放）：返回 `Blob`，调用方自己 `createObjectURL`。
  *
  * 录像接口要 Bearer 鉴权，`<video src="/api/recordings/1/file">` 带不上头，
- * 所以前端先取成 Blob 再挂给播放器。全程录像按 5 分钟切片，单段几 MB～几十 MB，
+ * 所以前端先取成 Blob 再挂给播放器。航段录像按 5 分钟切片，单段几 MB～几十 MB，
  * 超时放宽到 2 分钟（弱网下多等一会儿，别报「请求失败」）。
  */
 export function getBlob(url: string) {

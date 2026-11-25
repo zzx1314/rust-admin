@@ -188,13 +188,14 @@ const actionForm = reactive({
    */
   recordSeconds: 15,
   /**
-   * 「全程录像」：板端切片长度（秒）。
+   * 航段「录像采集」：板端切片长度（秒）。
    *
-   * 全程录像跨航点一直录到任务终态，按这个长度切 mp4 逐段回传（弱网断一段只重传一段）。
+   * 从起步（离开起点航点）录到下一个航点，按这个长度切 mp4 逐段回传
+   * （弱网断一段只重传一段）。老数据的「全程录像」走同一份字段。
    */
   recordSegmentSeconds: 300,
   /**
-   * 「录像采集 / 全程录像」：录哪几路（可多选）。
+   * 「录像采集」（航点 / 航段都算）：录哪几路（可多选）。
    *
    * 选几路板端就起几个 ffmpeg（各自一个 mp4）：`dogcam` = 正前（机器狗前置），
    * `cam0`~`cam3` = 背包四路（左前 / 右前 / 右后 / 左后），`dog-ipcam` = 红外。
@@ -231,9 +232,9 @@ const actionForm = reactive({
   photoFrames: 1
 });
 
-/** 当前动作是不是录像类（点上的「录像采集」/ 段上的「全程录像」） */
+/** 当前动作是不是录像类（航点 / 航段都叫「录像采集」；老数据是「全程录像」） */
 const isRecordAction = computed(() => String(actionForm.type).includes("录像"));
-/** 航段上的「全程录像」跟航点上的「录像采集」参数不同：一个录多久、一个切多长 */
+/** 航段上的录像采集：与航点的参数不同——一个录多久（`recordSeconds`）、一个切多长（`recordSegmentSeconds`） */
 const isTaskRecordAction = computed(
   () => isRecordAction.value && actionKind.value === "leg"
 );
@@ -332,7 +333,7 @@ function clampSeconds(value: unknown, min: number, max: number, fallback: number
   return Math.min(max, Math.max(min, number));
 }
 
-/** 动作是不是录像类（航点「录像采集」/ 航段「全程录像」） */
+/** 动作是不是录像类（航点 / 航段「录像采集」；老数据「全程录像」也算） */
 function isRecordActionOf(action: { type?: string } | null | undefined) {
   return String(action?.type ?? "").includes("录像");
 }
@@ -354,15 +355,20 @@ function recordCamerasLabel(cameras?: string[] | null) {
 }
 
 /** 动作卡片上的录像参数（老数据没字段时按默认值展示） */
-function actionRecordLabel(action: {
-  type?: string;
-  recordSeconds?: number;
-  recordSegmentSeconds?: number;
-  recordCameras?: string[];
-}) {
+function actionRecordLabel(
+  action: {
+    type?: string;
+    recordSeconds?: number;
+    recordSegmentSeconds?: number;
+    recordCameras?: string[];
+  },
+  kind: "point" | "leg" = "point"
+) {
   const cameras = recordCamerasLabel(action?.recordCameras);
-  if (String(action?.type ?? "").includes("全程")) {
-    return `全程录像 · 每段 ${clampSeconds(action?.recordSegmentSeconds, 30, 1800, 300)} 秒 · ${cameras}`;
+  // 航段 = 起步录到下一个航点，按切片长度落盘；航点 = 到点录固定时长。
+  // 老数据里的「全程录像」也当航段处理（客户端已按段级语义解析）
+  if (kind === "leg" || String(action?.type ?? "").includes("全程")) {
+    return `航段录像 · 每段 ${clampSeconds(action?.recordSegmentSeconds, 30, 1800, 300)} 秒 · ${cameras}`;
   }
   return `航点录像 · ${clampSeconds(action?.recordSeconds ?? 15, 3, 300, 15)} 秒 · ${cameras}`;
 }
@@ -624,13 +630,13 @@ function actionMeta(type: string) {
 /**
  * 新建动作时的默认类型。
  *
- * **不能拿 `actionOptions(kind)[0]`**：「语音播报」是 `both`（两侧都能挂），
- * 按对象插入顺序它会排在航段列表最前面，新建行进任务就默认变成播报了 ——
- * 现场想要的默认还是「全程录像」。
+ * **不能拿 `actionOptions(kind)[0]`**：「语音播报」「录像采集」都是 `both`（两侧都能挂），
+ * 按对象插入顺序它们会排在航段列表最前面，新建行进任务就默认变成播报 / 录像 ——
+ * 现场想要的默认是「这一路录下来」，也就是段级「录像采集」。
  */
 const DEFAULT_ACTION: Record<"point" | "leg", string> = {
   point: "可见光拍照",
-  leg: "全程录像"
+  leg: "录像采集"
 };
 
 function actionOptions(kind: "point" | "leg") {
@@ -1493,7 +1499,7 @@ function saveAction() {
     // （客户端的灯怎么收口见 `client/src/lights.rs` 的 `leave_point` / `keep_alive`）
     ...(actionForm.lightFill ? { lightFill: true } : {}),
     ...(actionForm.lightLed ? { lightLed: true } : {}),
-    // 录像时长：航点录像写秒数，全程录像写切片长度（板端同样有上下限，这里是入口校验）
+    // 录像：航点录像写时长秒数，航段录像写切片长度（板端同样有上下限，这里是入口校验）
     ...(actionKind.value === "point" && isRecordAction.value
       ? { recordSeconds: clampSeconds(actionForm.recordSeconds, 3, 300, 15) }
       : {}),
@@ -2238,7 +2244,7 @@ onBeforeUnmount(() => {
                       灯光：<b>{{ actionLightLabel(action) }}</b>
                     </div>
                     <div v-if="isRecordActionOf(action)">
-                      录像：<b>{{ actionRecordLabel(action) }}</b>
+                      录像：<b>{{ actionRecordLabel(action, "point") }}</b>
                     </div>
                     <div v-if="actionSpeakLabel(action)">
                       语音：<b>{{ actionSpeakLabel(action) }}</b>
@@ -2313,7 +2319,7 @@ onBeforeUnmount(() => {
                     <div>参数：<b>{{ action.param || "—" }}</b></div>
                     <div>类型：<b>行进过程中持续执行</b></div>
                     <div v-if="isRecordActionOf(action)">
-                      录像：<b>{{ actionRecordLabel(action) }}</b>
+                      录像：<b>{{ actionRecordLabel(action, "leg") }}</b>
                     </div>
                     <div v-if="actionLightLabel(action, 'leg')">
                       灯光：<b>{{ actionLightLabel(action, 'leg') }}</b>
@@ -2330,7 +2336,7 @@ onBeforeUnmount(() => {
                   <AppIcon name="plus" />添加行进任务
                 </button>
                 <div class="rt-hint">
-                  段任务在两点之间移动期间持续执行（如全程录像、连续测温、语音播报），与航点瞬时动作互补。
+                  段任务在两点之间移动期间持续执行（如录像采集、连续测温、语音播报），与航点瞬时动作互补。
                 </div>
               </template>
               <div v-else class="empty-box">请在画布中点选一段航段</div>
@@ -2590,7 +2596,7 @@ onBeforeUnmount(() => {
               未找到目标也告警
             </label>
           </div>
-          <!-- 录像：航点录多久 / 全程录像切多长（板端 ffmpeg，客户端到点起停） -->
+          <!-- 录像：航点录多久 / 航段切多长（板端 ffmpeg，客户端到点 / 起步起停） -->
           <div v-if="isRecordAction && actionKind === 'point'" class="field">
             <label>录制时长（秒）</label>
             <input
@@ -2757,12 +2763,12 @@ onBeforeUnmount(() => {
             step="30"
           />
           <div class="rt-hint" style="margin: 4px 0 0">
-            全程录像是<b>任务级</b>的：配在哪个航段上都一样，任务真正开始（狗被驱动，
-            不是在排队等上一轮）就一直录到终态 / 取消，按这个长度切 mp4 逐段回传
-            （30~1800 秒，默认 300 秒；4G 上一段越短越不怕断网）。
-            <b>配了多段只认第一段</b>的切片与相机——要一次录多路就把相机勾在同一条动作上。
+            <b>只录这一段</b>：狗离开起点航点（航点任务跑完、真正起步）开始录，
+            到达下一个航点（这一段走完）就停——一段路一个（或几路）mp4，
+            按这个长度切片回传（30~1800 秒，默认 300 秒；4G 上一段越短越不怕断网）。
+            想在中间某段也录，就在那一段上也配一条「录像采集」。
           </div>
-          <!-- 录像源（全程录像）：与航点录像共用同一份 `recordCameras` 字段 -->
+          <!-- 录像源（航段录像）：与航点录像共用同一份 `recordCameras` 字段 -->
           <label style="margin-top: 12px">
             录像相机
             <span class="muted">（可多选，最多 {{ RECORD_MAX_CAMERAS }} 路）</span>
@@ -2778,7 +2784,7 @@ onBeforeUnmount(() => {
             </label>
           </div>
           <div class="rt-hint" style="margin: 4px 0 0">
-            整条任务按这几路同时录（每路自己切片、自己回传）。<b>不选 = 板端默认源（正前）</b>；
+            这一段按这几路同时录（每路自己切片、自己回传）。<b>不选 = 板端默认源（正前）</b>；
             路数越多板端占用越大，4G 专线上建议先只录正前。
           </div>
         </div>

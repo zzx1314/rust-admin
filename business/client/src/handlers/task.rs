@@ -169,14 +169,15 @@ pub(crate) async fn dispatch(
             window.start, window.end
         );
     }
-    // 航点「录像采集」+ 航段「全程录像」：与 AI / 灯光同源（路线动作），
-    // 但起停时机在 5009 上（到点 / 离开 / 终态），见 `record` 模块。
+    // 航点 / 航段「录像采集」：与 AI / 灯光同源（路线动作），
+    // 但起停时机在 5009 上（航点：到点 / 离开；航段：起步 / 下一个航点；终态兜底），
+    // 见 `record` 模块。
     let record_plan = parse_record_plan(&msg.payload["routeData"]);
     if !record_plan.is_empty() {
         info!(
-            "任务 {task_code} 含 {} 个录像航点，全程录像={}",
+            "任务 {task_code} 含 {} 个录像航点，{} 段录像航段",
             record_plan.points.len(),
-            record_plan.task.is_some()
+            record_plan.legs.len()
         );
     }
     recorder.start_task(&task_code, record_plan).await;

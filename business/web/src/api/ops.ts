@@ -202,7 +202,7 @@ export const taskApi = {
   callStop: (id: number) => post<DeviceCommandResult>(`/tasks/${id}/call/stop`)
 };
 
-/** 巡检录像：任务详情里回看「录像采集 / 全程录像」 */
+/** 巡检录像：任务详情里回看「录像采集」（航点 / 航段） */
 export const recordingApi = {
   list: (taskId: number) => get<TaskRecording[]>(`/tasks/${taskId}/recordings`),
   /**

@@ -181,7 +181,7 @@ GET    /api/tasks                 POST   /api/tasks
 GET    /api/tasks/stats
 GET    /api/tasks/{id}            PUT    /api/tasks/{id}       DELETE /api/tasks/{id}
 GET    /api/tasks/{id}/events      # 任务事件流（进度 / 定位异常 / 指令留痕）
-GET    /api/tasks/{id}/recordings  # 任务录像（航点录像 / 全程录像切片）
+GET    /api/tasks/{id}/recordings  # 任务录像（航点 / 航段录像，scope=point|leg）
 POST   /api/recordings/ingest      # 设备客户端回传 mp4（multipart：file + meta）
 GET    /api/recordings/{id}/play   # 换一个只对这一条有效的 `?pt=` 播放令牌（10 分钟）
 GET    /api/recordings/{id}/file   # 播放 / 下载（支持 Range；Bearer 或 `?pt=` 二选一）
@@ -740,14 +740,17 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
   设备页通过 `GET /api/dogDevice/{id}/mediaSyncStatus` 轮询；pending 超过 10 分钟
   没有回报就显示「无回报」，允许重新下发（同一 `requestId` 在跑时不会重复下发）。
 
-## 巡检录像（航点「录像采集」/ 航段「全程录像」）
+## 巡检录像（航点 / 航段「录像采集」）
 
-路线编辑器里有两类录像动作：
+路线编辑器里的录像动作都叫「录像采集」，挂在哪一侧决定录什么：
 
 | 动作 | 挂在哪 | 参数 | 行为 |
 |---|---|---|---|
 | 录像采集 | 航点动作 | `recordSeconds`（3~300，默认 15）+ `recordCameras` | 到点开录，**离开航点就停**（不足时长也提前收尾） |
-| 全程录像 | 行进任务（`legs[].actions`） | `recordSegmentSeconds`（30~1800，默认 300）+ `recordCameras` | 任务**真正驱动起来**（成为 current_task，不是排队中的 pending）就开录，跨航点一直录到终态 / 取消，按切片长度分段 |
+| 录像采集 | 行进任务（`legs[].actions` / `returnLeg`） | `recordSegmentSeconds`（30~1800，默认 300）+ `recordCameras` | **只录这一段**：起步（离开起点航点）开录，到达下一个航点停，按切片长度分段；每一段各录一份 |
+
+> 2026-11-26 之前航段上的动作叫「全程录像」，语义是**整条任务一条流**、且多段只认第一段。
+> 现在改成段级：老路线里的「全程录像」按同一套段级语义解析（编辑器里已下线，只在老数据里出现）。
 
 **录哪一路可以多选**（`recordCameras: ["dogcam","cam0"]`，2026-11-25 起）：
 `dogcam` = 正前（机器狗前置）、`cam0`~`cam3` = 背包四路 USB（左前 / 右前 / 右后 /
@@ -779,24 +782,29 @@ axios 还有 120s 硬超时，现场表现就是「点回放没反应」（2026-
 
 要点：
 
-- **起停时机跟 5009**：航点录像在 `patrol.point_arrived` / `patrol.waiting` 起，
-  离开航点（`patrol.navigating` 等）停（配的时长只是上限，停留短就提前收尾）；
-  全程录像在**这条任务成为 current_task（底盘真被驱动）**时起——`pending_task`
-  （已受理、等上一条任务停稳）期间不录，那几录下来是空画面还可能和上一条任务的
-  全程录像同时写盘；终态 / 取消 / 本地收尾停。和航点 AI、灯光同一套收口规则（见 `AGENTS.md`）。
-- **全程录像是任务级的**：只在航段上配得出来，但配在哪一段都等于「整条任务录」；
-  同一条路线配多段也只认**第一段**的切片长度与相机（其余段客户端日志会报一行忽略），
-  要一次录多路就把相机勾在同一条动作上。
+- **起停时机跟 5009**（与灯光 / 播报同一套「起步」语义）：
+  航点录像在 `patrol.point_arrived` / `patrol.waiting` 起，离开航点（`patrol.navigating`
+  等）停（配的时长只是上限，停留短就提前收尾）；
+  **航段录像到点不开**——到点后狗还在跑这个航点的作业，录下来大半是原地不动；
+  它要等**起步（离开起点航点）**才开，到**下一个航点**停（这一段走完），终态 / 取消兜底。
+  `pending_task`（已受理、等上一条任务停稳）不算起步，那时起录只会录到静止画面。
+  回归：`client pump::tests::leg_recording_starts_on_departure_and_stops_at_the_next_point`。
+- **每一段各录一份**：`legs[i]` 从 P{i+1} 出发、`returnLeg` 从最后一个点出发，
+  切片长度与相机各取各的（`client/src/record.rs::RecordPlan.legs`）；同一个点既有
+  出发段又有返航段时出发段优先（客户端日志会说明另一条被忽略）。
+  板端 `scope=leg`、`pointIndex` = **起点航点下标**，文件名 `leg<n>-…mp4`，
+  任务详情「任务录像」里显示成「航段 3→4 录像 · 相机」。
 - **多路相机**：`recordCameras` 里每一路是独立 job（key 带相机名），**停按时按
   plan+scope+point 收**，所以离开航点会把这一点的所有相机一起停；某一路上游没推流
   只丢那一路（回执 `errors` / `rejected`），其余照录。任务详情「任务录像」按
   `camera` 区分（老数据默认 `dogcam`）。
-- **幂等**：5009 每 500ms 一帧，客户端按「(任务, 航点) 正在录 / 全程已在录」去重；
+- **幂等**：5009 每 500ms 一帧，客户端按「(任务, 航点) / (任务, 航段起点) 正在录」去重；
   Agent 侧同一 `planId+scope+pointIndex` 重复 start 返回同一个任务。
 - **失败不影响巡检**：板端没升级（404）/ 磁盘不足 / ffmpeg 起不来都只打日志，
   客户端记为 `unsupported`，本轮不再尝试；到点、上报、AI、灯光全部照旧。
-- **全程录像切片**：4G 上一次传几百 MB 必然断，所以按 `RECORD_SEGMENT_SECS`（板端）
-  切 mp4，客户端逐段上传；任何一段失败只影响那一段（失败的文件留 72h 等下一次）。
+- **航段录像切片**：一段路可能十几分钟，4G 上一次传几百 MB 必然断，所以按
+  `recordSegmentSeconds`（路线动作可配，板端 `RECORD_SEGMENT_SECS` 兜底）切 mp4，
+  客户端逐段上传；任何一段失败只影响那一段（失败的文件留 72h 等下一次）。
 - **回传是平台按需的**（2026-11-25 起）：任务终态 / 取消 / 客户端启动都**不再自动上传**，
   mp4 就攒在板端 `RECORD_DIR/<计划>/`，等设备指令「回传录像」再传（中台设备页
   「下发指令 → 回传录像」，进度 / 结论看「录像回传状态」）。理由：现场主用 4G，
@@ -910,7 +918,7 @@ axios 还有 120s 硬超时，现场表现就是「点回放没反应」（2026-
   ],
   "legs": [
     { "mode": "沿道路", "speed": 1.2, "avoid": "标准",
-      "actions": [{ "type": "全程录像", "param": "1080P / 25fps / 连续",
+      "actions": [{ "type": "录像采集", "param": "1080P / 25fps / 连续",
                     "recordSegmentSeconds": 300 }] }
   ],
   "returnLeg": { "mode": "沿道路", "speed": 1.5, "avoid": "标准", "actions": [] }

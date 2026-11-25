@@ -169,18 +169,20 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 `business/backpack_dashboard/AGENTS.md` 的「存证目录」一节与
 `DOG.md` §2/§3。
 
-**航点「录像采集」/ 航段「全程录像」**（2026-11-24 起可用）：两类录像动作都在路线
-编辑器里配（航点动作 `recordSeconds` 3~300 默认 15；行进任务 `recordSegmentSeconds`
-30~1800 默认 300 切片；两者都带 `recordCameras` 多选相机，2026-11-25 起可用），
-起停时机**只在设备客户端**（`client/src/record.rs`）按 5009
-状态机决定：航点录像到点起、离开停（配的时长只是上限，停留短就提前收尾）；
-全程录像在**这条任务成为 `current_task`（底盘真被驱动）**时起、终态/取消停——
-`pending_task`（已受理、等上一条任务停稳）期间**不录**（录的是空画面，还会和上一条
-任务的全程录像同时写盘）；`task_running` 的调用点因此带 `!pending` 守卫，
-回归 `pump::tests::task_recording_waits_until_the_body_actually_drives_the_task`。
-**全程录像是任务级的**：配在哪个航段上都等于「整条任务录」，配多段只认第一段
-（切片与相机取第一份，其余段客户端 `warn` 一行），回归
-`record::tests::only_the_first_task_recording_segment_is_used`。
+**航点 / 航段「录像采集」**（航点 2026-11-24 起；航段 2026-11-26 起改成**段级**）：
+两类动作都在路线编辑器里配，都叫「录像采集」（航点动作 `recordSeconds` 3~300 默认 15；
+行进任务 `recordSegmentSeconds` 30~1800 默认 300 切片；都带 `recordCameras` 多选相机），
+起停时机**只在设备客户端**（`client/src/record.rs`）按 5009 状态机决定：
+**航点录像**到点起、离开停（配的时长只是上限，停留短就提前收尾）；
+**航段录像**是段级的——**起步（离开起点航点）才开**、**到达下一个航点**停
+（到点不开：那时狗还在跑这个点的作业，录下来大半是原地不动），
+`pending_task`（已受理、底盘未驱动）不算起步（`!pending` 守卫，结论同灯光 / 播报）；
+回归 `pump::tests::leg_recording_starts_on_departure_and_stops_at_the_next_point`。
+`legs[i]` 从 P{i+1} 出发、`returnLeg` 从最后一个点出发，**每一段各录一份**
+（切片与相机各取各的，`RecordPlan.legs`）；老路线里的动作名「全程录像」按**同一套段级
+语义**解析（不再有「整条任务一条流」），编辑器里它已下线到 `RETIRED_ACTIONS`
+（新建时只能选「录像采集」）。同一个点既有出发段又有返航段时**出发段优先**
+（客户端日志会说明另一条被忽略），回归 `record::tests::every_leg_keeps_its_own_segment_settings`。
 **录哪几路可选**：`dogcam` = 正前（机器狗前置）、`cam0`~`cam3` = 背包四路 USB
 （左前 / 右前 / 右后 / 左后）、`dog-ipcam` = 红外；**选几路就同时录几路**
 （板端每一路一个 ffmpeg + 一个 mp4，文件名带相机名）。不配 / 老数据 = 板端默认源
@@ -199,8 +201,10 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 `camera` 标明是哪一路），
 超期由 `schedule::sweep` → `recordings::sweep_expired` 按 `recording_keep_days` 清。
 三条红线：**录像失败绝不影响巡检**（Agent 404/磁盘满都只记 `unsupported`，不抛错）；
-**5009 幂等**（每帧都会调用，按「任务+航点/全程已起」去重，Agent 侧也幂等）；
+**5009 幂等**（每帧都会调用，按「任务+航点 / 任务+航段起点」去重，Agent 侧也幂等）；
 **视频不进中台「媒体资源」**（那边是训练图：JPG/PNG、sha256 去重、批量导出）。
+板端 `scope` = `point`（航点）/ `leg`（航段，`pointIndex` = **起点航点下标**）/
+`task`（旧版「全程录像」，只为兼容老客户端）；文件名 `pt<n>-…` / `leg<n>-…` / `task-…`。
 改板端先读 `business/backpack_dashboard/AGENTS.md`「录像」一节，回归
 `python3 business/backpack_dashboard/backend/tools/record_selftest.py`、
 `client record::tests`、`cargo test --test recordings`。

@@ -362,8 +362,11 @@ async fn save_recording(
         return Ok((existing, false));
     }
 
+    // `point` = 航点录像；`leg` = 航段录像（2026-11-26 起，段级）；
+    // `task` = 旧版「全程录像」（整条任务一条流），只为兼容还在跑的老客户端保留。
     let scope = match meta.scope.as_deref().map(str::trim) {
         Some("task") => "task",
+        Some("leg") => "leg",
         _ => "point",
     };
     // 相机名只保留字母数字与 `-` `_`（`dog-ipcam` 本来就带连字符）；空就是默认源
@@ -433,15 +436,22 @@ async fn save_recording(
         return Err(error.into());
     }
 
-    let label = if scope == "task" {
-        "全程录像".to_string()
-    } else {
-        meta.point_name
+    let label = match scope {
+        "task" => "全程录像".to_string(),
+        // 航段：客户端会把 `pointName` 填成「航段 3→4」/「返航段」
+        scope => meta
+            .point_name
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| format!("航点{}", point_index.max(0)))
+            .unwrap_or_else(|| {
+                if scope == "leg" {
+                    format!("航段{}→{}", point_index.max(0) + 1, point_index.max(0) + 2)
+                } else {
+                    format!("航点{}", point_index.max(0))
+                }
+            }),
     };
     info!(
         task = task_code,

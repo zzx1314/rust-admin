@@ -292,7 +292,7 @@ export function newLeg(speed: number): RouteLeg {
     mode: "沿道路",
     speed,
     avoid: "标准",
-    actions: [{ type: "全程录像", param: "1080P / 25fps / 连续" }]
+    actions: [{ type: "录像采集", param: "1080P / 25fps / 连续" }]
   };
 }
 

@@ -622,23 +622,6 @@ pub(crate) async fn handle_status_frame(
                     .await;
             });
         }
-        // 全程录像：这条任务一跑起来就录（不等到第一个航点），跨点一直录到终态。
-        // 幂等由 `Recorder` 的 `task_active` 兜（5009 每 500ms 一帧）。
-        //
-        // **`pending_task`（已受理、底盘未驱动）不算「开始」**：那时狗还在排队等上一条
-        // 任务停稳 / 资源释放，录下来的是空画面（几分钱不算，4G 上几分钟的 mp4 不算轻），
-        // 而且会和上一条任务的全程录像同时写盘 / 抢 CPU；任务要是随后被取消，
-        // 板子上就多一段没人要的文件（回传是平台按需、超期才清）。
-        // 真正驱动起来（成为 `current_task`）那一帧再起，晚不了几秒。
-        if !pending
-            && let Some(task_code) = active
-                .lock()
-                .await
-                .as_ref()
-                .map(|task| task.task_code.clone())
-        {
-            recorder.task_running(&task_code).await;
-        }
         if is_arrival_stage(&task.stage) {
             let current = active.lock().await.clone();
             if let (Some(current), Some(index)) = (current, index) {
@@ -714,8 +697,24 @@ pub(crate) async fn handle_status_frame(
                     lights.keep_alive().await;
                 });
             }
-            // 航点录像跟着「离开航点」收口：全程录像不在这里停（它跟任务）。
+            // 航点录像跟着「离开航点」收口；**航段录像在这里起步**——离开起点航点
+            // 才是这一段真正开始（到点时只记了「站在哪个航点」，没开录：
+            // 那时狗还在跑这个航点的作业，录下来大半是原地不动）。
+            // 本段到下一个航点在 `point_arrived` 里收口。
+            //
+            // **`pending_task`（已受理、底盘未驱动）不算起步**：那时狗还在排队等上一条
+            // 任务停稳 / 资源释放，起录只会录到静止画面，还会和上一条任务的录像
+            // 同时写盘 / 抢 CPU。真正驱动起来（成为 `current_task`）之后再起。
             recorder.leave_point("已离开航点").await;
+            if !pending
+                && let Some(task_code) = active
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map(|task| task.task_code.clone())
+            {
+                recorder.leg_started(&task_code).await;
+            }
             // 语音播报同理：循环播报只在「还在这个航点上」时有意义。
             speaker.leave_point("已离开航点").await;
         }
@@ -1756,7 +1755,7 @@ mod tests {
                         seconds: 15,
                         cameras: vec![],
                     }],
-                    task: None,
+                    legs: vec![],
                 },
             )
             .await;
@@ -1789,7 +1788,7 @@ mod tests {
             vec!["start:point".to_string()]
         );
 
-        // 离开航点：停录（录不到下一段路，这是“航点录像”而非“全程录像”）
+        // 离开航点：停掉**航点**录像（录不到下一段路；这一段由航段录像接手）
         h.feed(&frame(
             task_at("robot-1", "running", "patrol.navigating", 1),
             Value::Null,
@@ -1802,14 +1801,11 @@ mod tests {
         );
     }
 
-    /// 全程录像：**`pending_task`（已受理、底盘未驱动）不算「开始」**。
-    ///
-    /// 旧行为是 5009 一出现这条任务就起录：排队等上一条任务停稳的几分钟全录成空画面，
-    /// 还会和上一条任务的全程录像同时写盘 / 抢 CPU；任务要是随后被取消，
-    /// 板子上就多一段没人要的文件（回传是平台按需、超期才清）。
+    /// 航段录像（段级）：**到点不开录**（航点作业还没跑完）、**起步才开**、
+    /// 到下一个航点收；`pending_task`（已受理、底盘未驱动）不算起步。
     #[tokio::test]
-    async fn task_recording_waits_until_the_body_actually_drives_the_task() {
-        use crate::record::{RecordPlan, RecordTask};
+    async fn leg_recording_starts_on_departure_and_stops_at_the_next_point() {
+        use crate::record::{RecordLeg, RecordPlan};
 
         let calls: RecordCalls = Arc::new(Mutex::new(Vec::new()));
         let agent = spawn_record_agent(calls.clone()).await;
@@ -1819,15 +1815,17 @@ mod tests {
                 "TK-1",
                 RecordPlan {
                     points: vec![],
-                    task: Some(RecordTask {
-                        segment_seconds: 300,
+                    legs: vec![RecordLeg {
+                        index: 0,
+                        name: "航段 1→2".to_string(),
+                        segment_seconds: 120,
                         cameras: vec![],
-                    }),
+                    }],
                 },
             )
             .await;
 
-        // 已受理但还在排队（底盘未驱动）：不录
+        // 排队（pending_task，底盘未驱动）：不录
         h.feed(&frame(
             Value::Null,
             task("robot-1", "patrol", "running", "patrol.navigating"),
@@ -1841,29 +1839,51 @@ mod tests {
             calls.lock().await
         );
 
-        // 真的成为 current_task（开始驱动）：这一帧才起录，而且仍不等第一个航点
-        h.feed(&frame(
-            task("robot-1", "patrol", "running", "patrol.navigating"),
-            Value::Null,
-            json!([]),
-        ))
-        .await;
-        assert_eq!(
-            wait_records(&calls, 1).await,
-            vec!["start:task".to_string()],
-            "全程录像跟着任务：不等第一个航点"
+        // 到点 + 航点作业阶段：只记「站在哪个航点」，不开录
+        for stage in [
+            "patrol.point_arrived",
+            "patrol.waiting",
+            "patrol.point_completed",
+        ] {
+            h.feed(&frame(
+                task_at("robot-1", "running", stage, 0),
+                Value::Null,
+                json!([]),
+            ))
+            .await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            calls.lock().await.is_empty(),
+            "航点作业还没跑完就开录了: {:?}",
+            calls.lock().await
         );
 
-        // 终态：停录（回传是平台按需，客户端不自己上传）
+        // 起步（离开 P1）：这一段开始录（行进帧每 500ms 一帧，只起一次）
+        for _ in 0..2 {
+            h.feed(&frame(
+                task_at("robot-1", "running", "patrol.navigating", 0),
+                Value::Null,
+                json!([]),
+            ))
+            .await;
+        }
+        assert_eq!(
+            wait_records(&calls, 1).await,
+            vec!["start:leg".to_string()],
+            "起步才开录、而且只开一次"
+        );
+
+        // 到达下一个航点：这一段走完 → 收口（不是任务终态才停）
         h.feed(&frame(
-            task("robot-1", "patrol", "success", "patrol.completed"),
+            task_at("robot-1", "running", "patrol.point_arrived", 1),
             Value::Null,
             json!([]),
         ))
         .await;
         assert_eq!(
             wait_records(&calls, 2).await,
-            vec!["start:task".to_string(), "stop".to_string()]
+            vec!["start:leg".to_string(), "stop".to_string()]
         );
     }
 }

@@ -61,16 +61,11 @@ export const ACTION_LIB: Record<string, ActionMeta> = {
   录像采集: {
     icon: "video",
     tone: "blue",
-    param: "1080P / 25fps / 15s",
+    // 挂在航点上 = 到点录 N 秒；挂在航段上 = **这一段录**（起步开、到下一个航点停）
+    param: "1080P / 25fps · 点 15s / 段 300s 切片",
     trigger: "到达即执行",
     threshold: "—",
-    kind: "point"
-  },
-  全程录像: {
-    icon: "video",
-    tone: "blue",
-    param: "1080P / 25fps / 连续",
-    kind: "leg"
+    kind: "both"
   },
   补光: {
     icon: "charge",
@@ -138,7 +133,7 @@ export const PHOTO_CAMERAS = [
 export const PHOTO_MAX_FRAMES = 5;
 
 /**
- * 录像源相机（航点「录像采集」/ 航段「全程录像」→ 路线动作 `recordCameras`）。
+ * 录像源相机（航点 / 航段「录像采集」→ 路线动作 `recordCameras`）。
  *
  * **可多选**：选几路板端就起几个 ffmpeg（各自一个 mp4），回传到任务详情后按相机
  * 区分。可选范围与 `backend/record.py::allowed_cameras()`、
@@ -166,6 +161,15 @@ export const RECORD_MAX_CAMERAS = 4;
  *   找不到选项、类型显示成空白导致动作改不动。
  */
 export const RETIRED_ACTIONS: Record<string, ActionMeta> = {
+  // 2026-11-26 起航段录像改成「录像采集」（段级：起步开、到下一个航点停）。
+  // 老路线里存的还是「全程录像」这个名字，客户端按**同一套段级语义**解析，
+  // 这里只保留它的展示信息（新建时不再出现）。
+  全程录像: {
+    icon: "video",
+    tone: "blue",
+    param: "1080P / 25fps / 连续",
+    kind: "leg"
+  },
   气体检测: {
     icon: "activity",
     tone: "teal",

@@ -1,11 +1,13 @@
-//! 巡检录像：航点「录像采集」+ 航段「全程录像」。
+//! 巡检录像：航点「录像采集」+ 航段「录像采集」（段级）。
 //!
-//! 为什么录像由客户端驱动：录像的起停时机只有 5009 的状态机知道（到点 / 离开 /
+//! 为什么录像由客户端驱动：录像的起停时机只有 5009 的状态机知道（到点 / 起步 /
 //! 终态），而板端 Agent 只在内网可达（客户端与它同机 `127.0.0.1:8000`）。
 //!
 //! ```text
-//! 路线动作：航点「录像采集」→ plan.points[i].seconds   → 到点 Agent 开录，离开停
-//! 路线动作：航段「全程录像」→ plan.task                 → 任务一开始就录，终态停（切片）
+//! 路线动作：航点「录像采集」→ plan.points[i]  → 到点开录，离开该航点停
+//! 路线动作：航段「录像采集」→ plan.legs[i]    → **起步（离开起点航点）开录**，
+//!                                              到下一个航点（这一段走完）停
+//!              （老数据里的「全程录像」动作按同一套段级语义解释）
 //!                                                    ↓
 //!                               板端 Agent（record.py）ffmpeg → RECORD_DIR/<plan>/…mp4
 //!                                                    ↓
@@ -22,10 +24,10 @@
 //!
 //! 三条约定（改这块先看）：
 //!
-//! 1. **全程录像不跟航点**：配了「全程录像」就在 5009 一出现这条任务时开录，跨航点
-//!    一直录到终态 / 取消；航点录像只在「这个点在录」的窗口内有效。
-//! 2. **幂等**：5009 每 500ms 一帧，开录请求按「(任务, 航点) 是否已经在录」去重；
-//!    全程录像按 `task_active` 去重。Agent 侧也做了一次幂等（重复 start 返回同一个 job）。
+//! 1. **航段录像不跟航点录像抢**：两者是**两个 job**（板端 key 带 scope + 起点下标），
+//!    可以同时存在（这个点在录 + 这一段在录）；航段录像只在「起步 → 下一个航点」之间有效。
+//! 2. **幂等**：5009 每 500ms 一帧，开录请求按「(任务, 航点) / (任务, 航段) 是否已经在录」
+//!    去重。Agent 侧也做了一次幂等（重复 start 返回同一个 job）。
 //! 3. **录像失败不影响巡检**：Agent 404 / 磁盘不足 / ffmpeg 起不来都只打日志，
 //!    记为 `unsupported` 本轮不再重试，绝不往上抛错打断 5009 处理链路。
 
@@ -49,14 +51,14 @@ const AGENT_TIMEOUT: Duration = Duration::from_secs(3);
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(1800);
 /// 单个文件最多试几次（弱网一次失败很常见，失败的文件留在板端等下一轮）。
 const UPLOAD_RETRIES: u32 = 3;
-/// 全程录像切片默认值（秒）：与板端 `RECORD_SEGMENT_SECS` 一致，板端才是真上限。
+/// 航段录像切片默认值（秒）：与板端 `RECORD_SEGMENT_SECS` 一致，板端才是真上限。
 pub const DEFAULT_SEGMENT_SECS: u32 = 300;
 /// 航点录像默认时长（秒）：路线动作没配 `recordSeconds` 时用。
 pub const DEFAULT_POINT_SECS: u32 = 15;
 /// 航点录像时长上下限（与板端 `RECORD_POINT_MAX_SECS` 对齐）。
 pub const MIN_POINT_SECS: u32 = 3;
 pub const MAX_POINT_SECS: u32 = 300;
-/// 全程录像切片上下限。
+/// 航段录像切片上下限。
 const MIN_SEGMENT_SECS: u32 = 30;
 const MAX_SEGMENT_SECS: u32 = 1800;
 
@@ -81,12 +83,20 @@ pub struct RecordPoint {
     pub cameras: Vec<String>,
 }
 
-/// 全程录像
+/// 需要录像的航段（「录像采集」挂在行进任务上）
+///
+/// **段级**录像：狗离开起点航点（真起步）时开录，到达下一个航点（这一段走完）停。
+/// 不再有「全程录像」——要整趟都录，就把每个航段都配上（一个段一个 mp4，
+/// 文件名 / 回传都带段号，现场还能看出哪一段没录上）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecordTask {
-    /// 板端切片长度（秒）
+pub struct RecordLeg {
+    /// 起点航点下标（0 基）：`legs[i]` 从 P{i+1} 出发，`returnLeg` 从最后一个点出发
+    pub index: i64,
+    /// 展示名：`航段 3→4` / `返航段`（回传到平台当 `pointName`）
+    pub name: String,
+    /// 切片长度（秒）：一段路可能十几分钟，按这个长度切 mp4
     pub segment_seconds: u32,
-    /// 录哪几路（`recordCameras`）；空 = 板端默认源
+    /// 录哪几路（`recordCameras`）；空 = 板端默认源（`RECORD_SOURCE_CAM`）
     pub cameras: Vec<String>,
 }
 
@@ -94,31 +104,34 @@ pub struct RecordTask {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecordPlan {
     pub points: Vec<RecordPoint>,
-    pub task: Option<RecordTask>,
+    pub legs: Vec<RecordLeg>,
 }
 
 impl RecordPlan {
     pub fn is_empty(&self) -> bool {
-        self.points.is_empty() && self.task.is_none()
+        self.points.is_empty() && self.legs.is_empty()
     }
 
     pub fn point_at(&self, index: i64) -> Option<&RecordPoint> {
         self.points.iter().find(|point| point.index == index)
     }
+
+    /// 从 `index` 这个航点出发那一段（`legs[index]` / `returnLeg` 也归在最后一个点上）
+    pub fn leg_at(&self, index: i64) -> Option<&RecordLeg> {
+        self.legs.iter().find(|leg| leg.index == index)
+    }
 }
 
-/// 动作是不是「录像」类（`录像采集` / `全程录像` / `摄像`）。
+/// 动作是不是「录像」类（`录像采集` / `摄像`；老数据里的 `全程录像` 也算）。
 ///
 /// 与 `Waypoint::wants_photo` 共用同一批关键词：本体侧的 `tasks=[1]` 仍然会拍照，
 /// 录像是在板端额外起一路 ffmpeg，两者不冲突。
+///
+/// 挂在航点上 = 这个点录；挂在航段上 = **这一段录**（2026-11-26 起：原来的
+/// 「全程录像」按段级解释，不再整条任务一条流）。
 pub fn is_record_action(action_type: &str) -> bool {
     let text = action_type.trim();
     text.contains("录像") || text.contains("摄像")
-}
-
-fn is_task_record(action_type: &str) -> bool {
-    let text = action_type.trim();
-    text.contains("全程") || text.contains("连续录像") || text.contains("整段")
 }
 
 /// 从执行参数里抠时长：「1080P / 25fps / 15s」→ 15；「30秒」→ 30。
@@ -225,23 +238,17 @@ fn camera_list(cameras: &[String]) -> String {
 ///
 /// - `points[].actions[]` 里的录像动作 → 该航点录 `seconds` 秒（`recordSeconds`，
 ///   老数据从 `param` 文本里读，默认 [`DEFAULT_POINT_SECS`]）；
-/// - `legs[].actions[]` 里的「全程录像」→ 整条任务录到底（`recordSegmentSeconds`
-///   或 `param` 的秒数 = 板端切片长度）。同一条路线配多段也只起**第一段**（切片 / 相机
-///   取那一份）：任务级作业没有「只录这一段」的语义，配多了只会在日志里报一行忽略提示。
+/// - `legs[].actions[]` / `returnLeg.actions[]` 里的录像动作 → **这一段的录像**：
+///   起步（离开起点航点）开录、到达下一个航点停，`recordSegmentSeconds` 是切片长度
+///   （老数据从 `param` 读，默认 [`DEFAULT_SEGMENT_SECS`]）。
+///
+/// 「全程录像」（老动作名）也按段级解释：一条路线配多段就是每一段各录一份，
+/// 不再有「整趟任务一条流」——那样一段没录上、相机配错都看不出来。
 pub fn parse_record_plan(route_data: &Value) -> RecordPlan {
     let mut plan = RecordPlan::default();
     if let Some(points) = route_data.get("points").and_then(Value::as_array) {
         for (index, point) in points.iter().enumerate() {
-            let Some(actions) = point.get("actions").and_then(Value::as_array) else {
-                continue;
-            };
-            let record = actions.iter().find(|action| {
-                action
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .is_some_and(is_record_action)
-            });
-            let Some(action) = record else {
+            let Some(action) = record_action(point) else {
                 continue;
             };
             let name = point
@@ -257,49 +264,59 @@ pub fn parse_record_plan(route_data: &Value) -> RecordPlan {
             });
         }
     }
+    let point_count = route_data
+        .get("points")
+        .and_then(Value::as_array)
+        .map(|points| points.len())
+        .unwrap_or(0);
     if let Some(legs) = route_data.get("legs").and_then(Value::as_array) {
-        // 配了多段「全程录像」时只认第一段：任务级录像的切片长度 / 相机是一份，
-        // 后面的段**不能静默丢掉**——现场会以为「这一段选了另一路相机」生效了。
-        let mut ignored: Vec<usize> = Vec::new();
-        for (leg_index, leg) in legs.iter().enumerate() {
-            let Some(actions) = leg.get("actions").and_then(Value::as_array) else {
+        for (index, leg) in legs.iter().enumerate() {
+            let Some(action) = record_action(leg) else {
                 continue;
             };
-            if let Some(action) = actions.iter().find(|action| {
-                action
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .is_some_and(|text| is_record_action(text) && is_task_record(text))
-            }) {
-                if plan.task.is_some() {
-                    ignored.push(leg_index);
-                    continue;
-                }
-                plan.task = Some(RecordTask {
-                    segment_seconds: segment_seconds(action),
-                    cameras: cameras_from_action(action),
-                });
-            }
+            plan.legs.push(RecordLeg {
+                index: index as i64,
+                name: format!("航段 {}→{}", index + 1, index + 2),
+                segment_seconds: segment_seconds(action),
+                cameras: cameras_from_action(action),
+            });
         }
-        if !ignored.is_empty() {
-            let first = plan
-                .task
-                .as_ref()
-                .map(|task| format!("每段 {}s", task.segment_seconds))
-                .unwrap_or_default();
-            warn!(
-                "路线里配了 {} 段「全程录像」，只认第一段（{first}，相机={}）；\
-                 这些航段被忽略：{ignored:?}。全程录像是**任务级**的——\
-                 要一次录多路，就把相机勾在同一条动作上",
-                ignored.len() + 1,
-                plan.task
-                    .as_ref()
-                    .map(|task| camera_list(&task.cameras))
-                    .unwrap_or_default()
-            );
+    }
+    // 返航段（闭环）算在最后一个点上：起录点 = 最后一个航点
+    if let Some(action) = route_data.get("returnLeg").and_then(record_action) {
+        let index = point_count.saturating_sub(1) as i64;
+        // 正常数据里 `legs` 只有 n-1 段（`legs[i]` 从 P{i+1} 出发），最后一个点的段
+        // 就是返航段，不会撞号。撞号只可能是脏数据（legs 比 points 还多）——
+        // 撞了就**出发段优先**（`leg_at` 取第一个），返航段那条忽略，但要留一行日志，
+        // 别让现场以为「返航段配了录像」生效了。
+        match plan.legs.iter().find(|leg| leg.index == index) {
+            Some(existing) => warn!(
+                "航点 {index} 既配了「从这里出发的航段录像」（{}）又配了返航段录像，\
+                 只认前者；返航段那条被忽略",
+                existing.name
+            ),
+            None => plan.legs.push(RecordLeg {
+                index,
+                name: "返航段".to_string(),
+                segment_seconds: segment_seconds(action),
+                cameras: cameras_from_action(action),
+            }),
         }
     }
     plan
+}
+
+/// 这个航点 / 航段上第一个录像动作（「录像采集」/「全程录像」/「摄像」都算）
+fn record_action(node: &Value) -> Option<&Value> {
+    node.get("actions")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|action| {
+            action
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(is_record_action)
+        })
 }
 
 /// 板端 `/api/record/list` 返回的一条待回传录像
@@ -411,9 +428,12 @@ struct State {
     plan: RecordPlan,
     /// 正在录的航点下标
     point_active: Option<i64>,
-    /// 全程录像是否已经起过
-    task_active: bool,
-    /// 这条任务已收尾：迟到的到点帧不许再起录像
+    /// 正在录的航段（起点航点下标）
+    leg_active: Option<i64>,
+    /// 最近一次到达的航点下标：起步时按它查「从这里出发的航段」。
+    /// 行进途中 5009 的 `detail_index` 已经指向下一个点，现算会算错段。
+    last_point: Option<i64>,
+    /// 这条任务已收尾：迟到的到点 / 起步帧不许再起录像
     finished: bool,
     /// 板端 Agent 不支持录像（404 / 老版本）：本轮不再尝试
     unsupported: bool,
@@ -483,8 +503,8 @@ impl Recorder {
             let state = self.state.lock().await;
             match state.task_code.as_deref() {
                 Some(code) if code == task_code => (state.point_active.is_some()
-                    || state.task_active)
-                    .then(|| task_code.to_string()),
+                    || state.leg_active.is_some())
+                .then(|| task_code.to_string()),
                 Some(_) => state.task_code.clone(),
                 None => None,
             }
@@ -494,7 +514,7 @@ impl Recorder {
         }
         if !plan.is_empty() {
             info!(
-                "任务 {task_code} 含录像动作：{} 个航点录像（{}），全程录像={}",
+                "任务 {task_code} 含录像动作：{} 个航点录像（{}），{} 段航段录像（{}）",
                 plan.points.len(),
                 plan.points
                     .iter()
@@ -506,74 +526,90 @@ impl Recorder {
                     ))
                     .collect::<Vec<_>>()
                     .join(","),
-                plan.task
-                    .as_ref()
-                    .map(|task| format!(
-                        "每段 {}s，相机={}",
-                        task.segment_seconds,
-                        camera_list(&task.cameras)
+                plan.legs.len(),
+                plan.legs
+                    .iter()
+                    .map(|leg| format!(
+                        "{}@{}=每段{}s[{}]",
+                        leg.name,
+                        leg.index,
+                        leg.segment_seconds,
+                        camera_list(&leg.cameras)
                     ))
-                    .unwrap_or_else(|| "无".to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
             );
         }
         let mut state = self.state.lock().await;
         state.task_code = Some(task_code.to_string());
         state.plan = plan;
         state.point_active = None;
-        state.task_active = false;
+        state.leg_active = None;
+        state.last_point = None;
         state.finished = false;
     }
 
-    /// 5009 上看到这条任务在跑（非终态）——全程录像在这一刻起，不等到第一个航点。
+    /// 起步了（离开 `index` 这个航点，阶段不再是 `patrol.point_*`）：
+    /// **从这里出发的那一段开始录**。
     ///
-    /// 幂等：5009 每 500ms 一帧。
-    pub async fn task_running(self: &Arc<Self>, task_code: &str) {
+    /// 段级录像的起止与灯光 / 语音同一套语义：
+    /// - 到点只记「站在哪个航点」（[`Self::point_arrived`]），不开录 —— 到点后狗还在跑
+    ///   这个航点的作业，录下来的大半是原地不动；
+    /// - 起步（本方法）才开录；
+    /// - 到下一个航点在 `point_arrived` 里收口（这一段走完），终态 / 取消兜底。
+    ///
+    /// 幂等：行进帧每 500ms 一帧，同一个起点只开一次。
+    pub async fn leg_started(self: &Arc<Self>, task_code: &str) {
         if !self.enabled {
             return;
         }
-        let task = {
+        let leg = {
             let state = self.state.lock().await;
-            if state.finished
-                || state.task_active
-                || state.unsupported
-                || state.task_code.as_deref() != Some(task_code)
+            if state.finished || state.unsupported || state.task_code.as_deref() != Some(task_code)
             {
                 return;
             }
-            state.plan.task.clone()
+            let Some(index) = state.last_point else {
+                return;
+            };
+            if state.leg_active == Some(index) {
+                return;
+            }
+            state.plan.leg_at(index).cloned()
         };
-        let Some(task) = task else {
+        let Some(leg) = leg else {
             return;
         };
-        let segment = task.segment_seconds;
-        let cameras = task.cameras;
         let _gate = self.gate.lock().await;
         {
             let state = self.state.lock().await;
-            if state.finished || state.task_active || state.unsupported {
+            if state.finished || state.unsupported || state.leg_active == Some(leg.index) {
                 return;
             }
         }
         match self
             .start_job(JobRequest {
                 task_code,
-                scope: "task",
-                point_index: -1,
-                point_name: "",
-                seconds: segment,
-                cameras: &cameras,
-                reason: "任务开始",
+                scope: "leg",
+                point_index: leg.index,
+                point_name: &leg.name,
+                seconds: leg.segment_seconds,
+                cameras: &leg.cameras,
+                reason: "航段起步",
             })
             .await
         {
             Ok(()) => {
-                self.state.lock().await.task_active = true;
+                self.state.lock().await.leg_active = Some(leg.index);
                 info!(
-                    "任务 {task_code} 全程录像已开始（每段 {segment}s 落盘，相机={}）",
-                    camera_list(&cameras)
+                    "任务 {task_code} {}（从航点 {} 出发）开始录像：每段 {}s（相机={}）",
+                    leg.name,
+                    leg.index,
+                    leg.segment_seconds,
+                    camera_list(&leg.cameras)
                 );
             }
-            Err(error) => self.note_failure(task_code, "全程录像", &error).await,
+            Err(error) => self.note_failure(task_code, "航段录像", &error).await,
         }
     }
 
@@ -583,6 +619,25 @@ impl Recorder {
     pub async fn point_arrived(self: &Arc<Self>, task_code: &str, point_index: i64) {
         if !self.enabled {
             return;
+        }
+        // 到了**新航点**：上一段的录像到此为止（这一段走完了，别把下一段也录进去）。
+        let leg_ended = {
+            let mut state = self.state.lock().await;
+            if state.finished || state.unsupported || state.task_code.as_deref() != Some(task_code)
+            {
+                return;
+            }
+            // 「站在哪个航点」每次到点都要记（这个点没配录像也一样）：
+            // 起步时靠它查「从这里出发的航段」。
+            state.last_point = Some(point_index);
+            match state.leg_active {
+                Some(active) if active != point_index => state.leg_active.take(),
+                _ => None,
+            }
+        };
+        if let Some(active) = leg_ended {
+            self.stop_job(task_code, "leg", Some(active), "到达下一个航点")
+                .await;
         }
         let point = {
             let state = self.state.lock().await;
@@ -638,7 +693,10 @@ impl Recorder {
         }
     }
 
-    /// 离开航点：停掉航点录像（全程录像不受影响）。
+    /// 离开航点：停掉**航点**录像。
+    ///
+    /// **航段录像不在这里停**：离开起点航点正是这一段刚开始（它由
+    /// [`Self::leg_started`] 开、到下一个航点在 [`Self::point_arrived`] 收）。
     pub async fn leave_point(self: &Arc<Self>, reason: &str) {
         if !self.enabled {
             return;
@@ -669,17 +727,18 @@ impl Recorder {
             let mut state = self.state.lock().await;
             state.finished = true;
             state.point_active = None;
-            state.task_active = false;
+            state.leg_active = None;
+            state.last_point = None;
         }
         // 任务号为空（平台只发了 cancel 没带 taskCode）：没有 planId 可停，
-        // 板端两路 ffmpeg 会按自己的 `-t` 上限结束；录好的文件留在板端等平台要。
+        // 板端那几路 ffmpeg 会按自己的 `-t` 上限结束；录好的文件留在板端等平台要。
         if !task_code.trim().is_empty() {
             self.stop_plan(task_code, reason).await;
         }
     }
 
     async fn stop_plan(self: &Arc<Self>, task_code: &str, reason: &str) {
-        // 不带 scope：航点 + 全程两路一起停（任务终态 / 取消）
+        // 不带 scope：航点 + 航段两路一起停（任务终态 / 取消）
         let body = json!({ "planId": task_code, "reason": reason });
         if let Err(error) = self.post("/api/record/stop", body).await {
             warn!("任务 {task_code} 停止录像失败（{reason}）: {error}");
@@ -719,10 +778,10 @@ impl Recorder {
             "pointName": point_name,
             "reason": reason,
         });
-        if scope == "task" {
-            // 全程录像：`segmentSeconds` = 切片长度；总上限交给板端
-            // `RECORD_TASK_MAX_SECS`（不要在这里传一个 300s 的 maxSeconds，
-            // 那会把整条任务录到 5 分钟就自己停）
+        if scope == "leg" || scope == "task" {
+            // 航段录像：`segmentSeconds` = 切片长度（一段路可能十几分钟）；总上限交给
+            // 板端 `RECORD_TASK_MAX_SECS`（不要在这里传一个 300s 的 maxSeconds，
+            // 那会把一段长路录到 5 分钟就自己停）
             body["segmentSeconds"] = json!(seconds);
         } else {
             body["seconds"] = json!(seconds);
@@ -1085,31 +1144,88 @@ mod tests {
             ]
         );
         assert_eq!(
-            plan.task,
-            Some(RecordTask {
+            plan.legs,
+            vec![RecordLeg {
+                index: 1,
+                name: "航段 2→3".to_string(),
+                // 老动作「全程录像」的老 param 里没有秒数：用默认切片
                 segment_seconds: DEFAULT_SEGMENT_SECS,
                 cameras: vec![]
-            }),
-            "全程录像的 param 里没有秒数时用默认切片"
+            }],
+            "航段动作按段解析（legs[1] = P2→P3，起点下标 1）"
         );
     }
 
-    /// 配了多段「全程录像」：只认第一段（任务级录像的切片 / 相机就一份），
-    /// 后面的段要**报一行日志**——不然现场会以为「这一段选了另一路相机」生效了。
+    /// 段级录像：**每一段各录一份**，切片长度与相机各取各的（不再「只认第一段」）；
+    /// 返航段也算一段（起点 = 最后一个航点）。
     #[test]
-    fn only_the_first_task_recording_segment_is_used() {
+    fn every_leg_keeps_its_own_segment_settings() {
+        // 3 个航点 → 2 段（`legs.length = points.length - 1`），返航段落在最后一个点上
         let plan = parse_record_plan(&json!({
-            "points": [{"name": "P1", "actions": []}],
+            "points": [
+                {"name": "P1", "actions": []},
+                {"name": "P2", "actions": []},
+                {"name": "P3", "actions": []}
+            ],
             "legs": [
-                {"actions": [{"type": "全程录像", "recordSegmentSeconds": 60,
+                {"actions": [{"type": "录像采集", "recordSegmentSeconds": 60,
                              "recordCameras": ["cam0"]}]},
+                // 老数据里的动作名：同一套段级语义
                 {"actions": [{"type": "全程录像", "recordSegmentSeconds": 600,
                              "recordCameras": ["dogcam"]}]}
-            ]
+            ],
+            "returnLeg": {"actions": [{"type": "录像采集", "recordSegmentSeconds": 120}]}
         }));
-        let task = plan.task.expect("应该有全程录像");
-        assert_eq!(task.segment_seconds, 60, "取第一段的切片长度");
-        assert_eq!(task.cameras, vec!["cam0".to_string()], "取第一段的相机");
+        assert_eq!(
+            plan.legs,
+            vec![
+                RecordLeg {
+                    index: 0,
+                    name: "航段 1→2".to_string(),
+                    segment_seconds: 60,
+                    cameras: vec!["cam0".to_string()]
+                },
+                RecordLeg {
+                    index: 1,
+                    name: "航段 2→3".to_string(),
+                    segment_seconds: 600,
+                    cameras: vec!["dogcam".to_string()]
+                },
+                RecordLeg {
+                    index: 2,
+                    name: "返航段".to_string(),
+                    segment_seconds: 120,
+                    cameras: vec![]
+                },
+            ]
+        );
+        assert_eq!(
+            plan.leg_at(2).map(|leg| leg.name.as_str()),
+            Some("返航段"),
+            "最后一个点那段就是返航段"
+        );
+        assert_eq!(
+            plan.leg_at(1).map(|leg| leg.segment_seconds),
+            Some(600),
+            "每段各取各的切片长度（不再只认第一段）"
+        );
+    }
+
+    /// 脏数据（`legs` 比 `points` 还多，出发段和返航段撞了同一个起点）：
+    /// **出发段优先**，返航段那条不重复记账（客户端日志会说明被忽略）。
+    #[test]
+    fn start_leg_wins_over_the_return_leg_on_the_same_point() {
+        let plan = parse_record_plan(&json!({
+            "points": [{"name": "P1", "actions": []}, {"name": "P2", "actions": []}],
+            "legs": [
+                {"actions": []},
+                {"actions": [{"type": "录像采集", "recordSegmentSeconds": 60}]}
+            ],
+            "returnLeg": {"actions": [{"type": "录像采集", "recordSegmentSeconds": 600}]}
+        }));
+        assert_eq!(plan.legs.len(), 1, "同一个起点只记一段：{:?}", plan.legs);
+        assert_eq!(plan.legs[0].name, "航段 2→3");
+        assert_eq!(plan.legs[0].segment_seconds, 60);
     }
 
     /// 相机多选：去重、白名单、上限；兼容单个 `recordCamera` 字符串。
@@ -1140,8 +1256,9 @@ mod tests {
             plan.points[2].cameras
         );
         assert_eq!(
-            plan.task.expect("应该有全程录像").cameras,
-            vec!["dog-ipcam".to_string(), "cam1".to_string()]
+            plan.legs[0].cameras,
+            vec!["dog-ipcam".to_string(), "cam1".to_string()],
+            "航段的相机与航点同一套过滤规则"
         );
     }
 
@@ -1231,14 +1348,17 @@ mod tests {
                 seconds: 12,
                 cameras: vec!["cam0".to_string(), "dogcam".to_string()],
             }],
-            task: Some(RecordTask {
+            legs: vec![RecordLeg {
+                index: 1,
+                name: "航段 2→3".to_string(),
                 segment_seconds: 120,
                 cameras: vec!["cam1".to_string()],
-            }),
+            }],
         }
     }
 
-    /// 全程录像 + 航点录像：各起一次（5009 每帧重复调用），离开航点只停航点那路。
+    /// 航点录像 + 航段录像：各起一次（5009 每帧重复调用），离开航点只停航点那路，
+    /// 航段要等到下一个航点才收口。
     #[tokio::test]
     async fn starts_once_into_the_agent_and_stops_per_scope() {
         let calls: Calls = Default::default();
@@ -1246,46 +1366,67 @@ mod tests {
         let recorder = Arc::new(Recorder::new(Arc::new(test_config(&agent)), true));
 
         recorder.start_task("TK-1", plan()).await;
-        recorder.task_running("TK-1").await;
-        recorder.task_running("TK-1").await;
-        recorder.point_arrived("TK-1", 1).await;
-        recorder.point_arrived("TK-1", 1).await;
-        // 没配录像的航点不发起录
+        // 没配录像的航点：到点也不起录
         recorder.point_arrived("TK-1", 0).await;
+        recorder.point_arrived("TK-1", 1).await;
+        recorder.point_arrived("TK-1", 1).await;
         recorder.leave_point("已离开航点").await;
+        // 起步：这一段开始录（行进帧每 500ms 一帧，只起一次）
+        recorder.leg_started("TK-1").await;
+        recorder.leg_started("TK-1").await;
 
-        let calls = calls.lock().await.clone();
-        let starts: Vec<&Value> = calls
+        let calls_now = calls.lock().await.clone();
+        let starts: Vec<&Value> = calls_now
             .iter()
             .filter(|call| call["path"] == "start")
             .collect();
-        assert_eq!(starts.len(), 2, "全程 + 航点各一次：{calls:?}");
-        assert_eq!(starts[0]["body"]["scope"], "task");
-        assert_eq!(
-            starts[0]["body"]["segmentSeconds"], 120,
-            "全程录像的切片长度要下发，且不能带 maxSeconds（否则整条任务只录 120s）"
-        );
-        assert!(
-            starts[0]["body"].get("maxSeconds").is_none(),
-            "maxSeconds 由板端兜底，客户端不要传：{calls:?}"
-        );
-        assert_eq!(starts[1]["body"]["scope"], "point");
-        assert_eq!(starts[1]["body"]["pointIndex"], 1);
-        assert_eq!(starts[1]["body"]["seconds"], 12);
-        // 多选相机要原样下发（板端每一路一个 ffmpeg）
+        assert_eq!(starts.len(), 2, "航点 + 航段各一次：{calls_now:?}");
+        assert_eq!(starts[0]["body"]["scope"], "point");
+        assert_eq!(starts[0]["body"]["pointIndex"], 1);
+        assert_eq!(starts[0]["body"]["seconds"], 12);
         assert_eq!(
             starts[0]["body"]["cameras"],
-            json!(["cam1"]),
-            "全程录像的相机要下发：{calls:?}"
+            json!(["cam0", "dogcam"]),
+            "航点录像的相机要下发：{calls_now:?}"
+        );
+        assert_eq!(starts[1]["body"]["scope"], "leg");
+        assert_eq!(
+            starts[1]["body"]["pointIndex"], 1,
+            "航段的 pointIndex = 起点航点下标"
+        );
+        assert_eq!(starts[1]["body"]["pointName"], "航段 2→3");
+        assert_eq!(
+            starts[1]["body"]["segmentSeconds"], 120,
+            "航段录像的切片长度要下发，且不能带 maxSeconds（否则一段长路只录 120s）"
+        );
+        assert!(
+            starts[1]["body"].get("maxSeconds").is_none(),
+            "maxSeconds 由板端兜底，客户端不要传：{calls_now:?}"
         );
         assert_eq!(
             starts[1]["body"]["cameras"],
-            json!(["cam0", "dogcam"]),
-            "航点录像的相机要下发：{calls:?}"
+            json!(["cam1"]),
+            "航段录像的相机要下发：{calls_now:?}"
         );
-        let stops: Vec<&Value> = calls.iter().filter(|call| call["path"] == "stop").collect();
-        assert_eq!(stops.len(), 1, "离开航点只停航点录像：{calls:?}");
+
+        // 走完这一段：到下一个航点才收（离开起点航点时不能停，那时这一段刚开始）
+        recorder.point_arrived("TK-1", 2).await;
+        let calls_now = calls.lock().await.clone();
+        let stops: Vec<&Value> = calls_now
+            .iter()
+            .filter(|call| call["path"] == "stop")
+            .collect();
+        assert_eq!(
+            stops.len(),
+            2,
+            "离开航点停航点录像、到下一个点停航段录像：{calls_now:?}"
+        );
         assert_eq!(stops[0]["body"]["scope"], "point");
+        assert_eq!(stops[1]["body"]["scope"], "leg");
+        assert_eq!(
+            stops[1]["body"]["pointIndex"], 1,
+            "收口要带起点下标，不能把别的段的录像停掉：{calls_now:?}"
+        );
     }
 
     /// 终态后迟到的到点帧不许再起录像（与灯光同一条收口规则）。

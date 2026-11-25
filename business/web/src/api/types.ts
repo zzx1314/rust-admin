@@ -289,7 +289,7 @@ export interface RoutePointAction {
    */
   recordSeconds?: number;
   /**
-   * 「录像采集 / 全程录像」专用：录哪几路（可多选）。
+   * 「录像采集」（航点 / 航段都算）专用：录哪几路（可多选）。
    *
    * 可选 `dogcam`（正前 / 机器狗前置）、`cam0`~`cam3`（背包四路 USB：左前 / 右前 /
    * 右后 / 左后）、`dog-ipcam`（红外）。板端**每一路一个 ffmpeg + 一个 mp4**，
@@ -297,14 +297,13 @@ export interface RoutePointAction {
    */
   recordCameras?: string[];
   /**
-   * 「全程录像」专用：板端切片长度（秒，30~1800，默认 300）。
+   * 航段「录像采集」专用：板端切片长度（秒，30~1800，默认 300）。
    *
-   * 全程录像跨航点一直录到任务终态；按这个长度切 mp4，客户端逐段回传到平台，
-   * 弱网断一段只重传一段。
+   * 航段录像是**段级**的：起步（离开起点航点）开录、到达下一个航点停；
+   * 一段路可能十几分钟，按这个长度切 mp4，客户端逐段回传到平台，
+   * 弱网断一段只重传一段。老数据里的「全程录像」动作走同一份字段、同一套段级语义。
    *
-   * 这是**任务级**参数：配在哪个航段上都等于「整条任务录」，配了多段只认第一段
-   * （切片与相机都取第一份）；另，任务在 5009 里排队（`pending_task`，底盘未驱动）
-   * 期间不起录，真正驱动起来才开始。
+   * （2026-11-26 之前它是「整条任务一条流」，且多段只认第一段——已废弃。）
    */
   recordSegmentSeconds?: number;
   /**
@@ -348,10 +347,12 @@ export interface RoutePointAction {
 }
 
 /**
- * 巡检录像（航点「录像采集」/ 航段「全程录像」）。
+ * 巡检录像（航点 / 航段「录像采集」）。
  *
  * 板端 Agent 落 mp4 → 设备客户端回传 → 任务详情「任务录像」播放 / 下载。
- * `scope = "point"` 是航点录像（`pointIndex` 有值），`"task"` 是全程切片（`pointIndex = -1`）。
+ * `scope = "point"` 是航点录像（`pointIndex` = 航点下标）；
+ * `"leg"` 是航段录像（`pointIndex` = **起点航点下标**，`pointName` 形如「航段 3→4」）；
+ * `"task"` 是 2026-11-26 之前的老「全程录像」（整条任务一条流，只在老数据里出现）。
  */
 export interface TaskRecording {
   id: number;
@@ -362,9 +363,10 @@ export interface TaskRecording {
   pointIndex: number;
   pointName: string | null;
   /**
-   * `point`（航点录像）/ `task`（航段全程录像）
+   * `point` = 航点录像；`leg` = 航段录像（段级：起步 → 下一个航点）；
+   * `task` = 老「全程录像」（整条任务一条流，仅老数据）
    */
-  scope: "point" | "task";
+  scope: "point" | "leg" | "task";
   /**
    * 录像源相机（`dogcam` / `cam0`~`cam3` / `dog-ipcam`）。
    *

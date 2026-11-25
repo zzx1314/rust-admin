@@ -237,6 +237,42 @@ fn meta_with_camera(
     value
 }
 
+/// 航段录像（2026-11-26 起的段级录像）：`scope=leg` 原样入库，`pointIndex` 是
+/// **起点航点下标**、`pointName` 是「航段 3→4」；旧版 `task`（整条任务一条流）仍兼容。
+#[tokio::test]
+async fn leg_recordings_keep_their_scope_and_start_point() {
+    let (state, _temp) = test_state().await;
+    let (task_id, task_code) = insert_task(&state, "DOG-REC-LEG").await;
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+
+    let mut meta = meta(&task_code, "DOG-REC-LEG", "leg", 2, 95.0);
+    meta["pointName"] = serde_json::json!("航段 3→4");
+    let response = ingest(&app, &token, "leg2-dogcam-1.mp4", &fake_mp4(21), &meta).await;
+    assert_eq!(response.status(), StatusCode::OK, "航段录像回传应成功");
+    let body = json_body(response).await;
+    assert_eq!(body["data"]["created"], true);
+
+    let request = Request::get(format!("/api/tasks/{task_id}/recordings"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    let rows = body["data"].as_array().expect("列表应为数组");
+    let leg = rows
+        .iter()
+        .find(|row| row["scope"] == "leg")
+        .unwrap_or_else(|| panic!("应该有航段录像：{body}"));
+    assert_eq!(
+        leg["pointIndex"], 2,
+        "航段的 pointIndex 是起点航点下标（`legs[2]` = P3→P4）：{body}"
+    );
+    assert_eq!(leg["pointName"], "航段 3→4");
+    assert_eq!(leg["durationSec"], 95.0, "航段时长要入库：{body}");
+}
+
 #[tokio::test]
 async fn recording_round_trip_dedupes_and_streams_ranges() {
     let (state, _temp) = test_state().await;

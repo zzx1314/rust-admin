@@ -1,12 +1,17 @@
-"""航点录像 / 航段全程录像（板端落盘，客户端触发）
+"""航点录像 / 航段录像（板端落盘，客户端触发）
 
 巡检路线里的两个录像动作最终都在这里落地：
 
 ```text
 路线「航点动作 → 录像采集」  → 客户端到点 POST /api/record/start {scope:"point", seconds:15}
-路线「行进任务 → 全程录像」  → 客户端随任务 POST /api/record/start {scope:"task"}
-                               任务终态/取消  POST /api/record/stop
+                               离开该航点  POST /api/record/stop {scope:"point"}
+路线「行进任务 → 录像采集」  → 客户端起步 POST /api/record/start {scope:"leg", segmentSeconds:300}
+                               到下一个航点 POST /api/record/stop {scope:"leg", pointIndex:N}
+                               任务终态/取消 POST /api/record/stop（不带 scope，全停）
 ```
+
+> `scope="task"`（旧版「全程录像」：整条任务一条流）**已不用**，只为兼容老客户端保留：
+> 现在航段动作按**段级**录（起步开、下一个航点停），一段一个 mp4。
 
 - **谁触发**：设备客户端（与 Agent 同机，`127.0.0.1:8000`）。平台/浏览器不直接调：
   录像属于任务执行的一部分，起停时机只有 5009 的状态机知道。
@@ -23,9 +28,9 @@
   （planId / 航点 / 范围 / 相机 / 起止时间 / 时长）。客户端传完调 `/api/record/delete` 删。
   断电/断网没传走的由 `sweep()` 按 `RECORD_RETENTION_HOURS` 清掉，不会写满 SSD。
 
-为什么要切片：全程录像一跑可能几十分钟，4G 上一次传几百 MB 必然断。`scope=task`
-用 ffmpeg 的 segment 每 `RECORD_SEGMENT_SECS`（默认 300s）切一段，客户端逐段落盘后
-一段一段传；任何一段失败只影响那一段。
+为什么要切片：一段路 / 一趟任务可能几十分钟，4G 上一次传几百 MB 必然断。`scope=leg`
+（以及兼容保留的老 `scope=task`）用 ffmpeg 的 segment 每 `RECORD_SEGMENT_SECS`
+（默认 300s，路线动作可配）切一段，客户端逐段落盘后一段一段传；任何一段失败只影响那一段。
 """
 import json
 import os
@@ -175,9 +180,10 @@ def _ffmpeg_cmd(path_template, scope, seconds, segment_seconds, source):
     """构造一路 ffmpeg 命令。
 
     - `scope=point`：`-t seconds` 自动停，一个 mp4；
-    - `scope=task`：`-f segment` 按 `segment_seconds` 切段（路线动作里的
+    - `scope=leg` / `task`（老）：`-f segment` 按 `segment_seconds` 切段（路线动作里的
       `recordSegmentSeconds`，缺省 `RECORD_SEGMENT_SECS`），总时长上限
       `RECORD_TASK_MAX_SECS`（客户端一定会发 stop，这里只是防跑飞）。
+      `leg` = 一段路（起步 → 下一个航点），`task` = 旧版「整条任务一条流」。
     """
     cmd = [
         _ffmpeg_bin(), "-hide_banner", "-loglevel", "warning", "-nostdin",
@@ -191,7 +197,7 @@ def _ffmpeg_cmd(path_template, scope, seconds, segment_seconds, source):
     else:
         # 源已是 H264：只封装，不重编码（省 CPU / 不抢 MPP）
         cmd += ["-c", "copy", "-an"]
-    if scope == "task":
+    if scope in ("leg", "task"):
         cmd += [
             "-f", "segment",
             "-segment_time", str(segment_seconds),
@@ -319,34 +325,38 @@ def _watch(job):
     try:
         job.proc.wait()
     finally:
-        reason = "到点自动停" if job.scope == "point" else "任务结束"
+        reason = "到点自动停" if job.scope == "point" else "到上限自动停"
         _finalize(job, reason)
 
 
 def start(body):
     """开始一段录像（幂等：同一计划同一航点同一路相机重复调用返回正在跑的那一路）。
 
-    `body`：`{planId, scope: "point"|"task", pointIndex, pointName, seconds,
+    `body`：`{planId, scope: "point"|"leg"|"task", pointIndex, pointName, seconds,
     segmentSeconds, cameras: ["cam0", "dogcam"], camera}`。
 
-    `seconds` 只对 `point` 有意义（上限 `RECORD_POINT_MAX_SECS`）。
+    `seconds` 只对 `point` 有意义（上限 `RECORD_POINT_MAX_SECS`）；`leg` / `task`
+    只看 `segmentSeconds`（切片长度，总上限 `RECORD_TASK_MAX_SECS`）。
+    `pointIndex` 在 `leg` 下是**起点航点下标**（`legs[i]` 从 P{i+1} 出发）。
     `cameras` 是多选：**每一路一个独立 ffmpeg + 一个独立 mp4**，任何一路起不来
     只丢那一路（回执里带 `errors`），其余照录；不配就退到 `RECORD_SOURCE_CAM`。
     """
     plan_id = _safe_name(body.get("planId"))
     if not plan_id:
         return {"ok": False, "error": "planId 缺失或不合法（只认字母数字汉字 - _）"}
-    scope = "task" if str(body.get("scope") or "").lower() == "task" else "point"
+    scope = str(body.get("scope") or "").strip().lower()
+    if scope not in ("point", "leg", "task"):
+        scope = "point"
     point_index = _int(body.get("pointIndex"), -1, -1)
-    if scope == "point" and point_index < 0:
-        return {"ok": False, "error": "航点录像必须带 pointIndex"}
+    if scope in ("point", "leg") and point_index < 0:
+        return {"ok": False, "error": "航点 / 航段录像必须带 pointIndex（航段用起点航点下标）"}
     point_name = str(body.get("pointName") or "")[:60]
     if scope == "point":
         seconds = _int(body.get("seconds"), config.RECORD_POINT_DEFAULT_SECS,
                        3, config.RECORD_POINT_MAX_SECS)
         segment_seconds = seconds
     else:
-        # 全程录像：`segmentSeconds` 是切片长度（路线动作可配），`maxSeconds` 是兜底总上限
+        # 航段 / 全程（老）：`segmentSeconds` 是切片长度（路线动作可配），`maxSeconds` 是兜底总上限
         segment_seconds = _int(body.get("segmentSeconds"), config.RECORD_SEGMENT_SECS,
                                10, config.RECORD_TASK_MAX_SECS)
         seconds = _int(body.get("maxSeconds"), config.RECORD_TASK_MAX_SECS,
@@ -374,7 +384,12 @@ def start(body):
             return {"ok": False, "error": "创建录像目录失败: %s" % error}
 
         stamp = _now_stamp()
-        kind = "pt%d" % point_index if scope == "point" else "task"
+        if scope == "point":
+            kind = "pt%d" % point_index
+        elif scope == "leg":
+            kind = "leg%d" % point_index
+        else:
+            kind = "task"
         # 一次快照：本轮所有相机的文件都在它之后落盘（各相机靠文件名前缀区分）
         try:
             before = set(os.listdir(out_dir))
@@ -540,6 +555,15 @@ def status():
     }
 
 
+def _scope_of_file(name):
+    """边车丢了时按文件名推范围：`leg12-…` = 航段、`task-…` = 老全程、其余 = 航点。"""
+    if name.startswith("task-"):
+        return "task"
+    if re.match(r"^leg\d+-", name):
+        return "leg"
+    return "point"
+
+
 def list_files(plan_id=None):
     """待回传的录像清单（客户端上传前调用，成功后按返回的 `name` 删除）。
 
@@ -591,7 +615,7 @@ def list_files(plan_id=None):
                 "name": "%s/%s" % (plan, name),
                 "path": path,
                 "planId": meta.get("planId") or plan,
-                "scope": meta.get("scope") or ("task" if name.startswith("task-") else "point"),
+                "scope": meta.get("scope") or _scope_of_file(name),
                 "pointIndex": meta.get("pointIndex", -1),
                 "pointName": meta.get("pointName") or "",
                 # 相机名：边车里有就用它（老文件没有 → 解析不出来就退到默认源）

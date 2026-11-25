@@ -129,7 +129,7 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
 
 重启顺序：`camera-init` → `backpack-agent` → `backpack-relay`（见 `deploy/backpack-246.md` §7）。
 
-## 录像（航点「录像采集」/ 航段「全程录像」）
+## 录像（航点 / 航段「录像采集」）
 
 板端只负责「按客户端的指令起停 ffmpeg」和「落盘」，起停时机全在设备客户端
 （5009 状态机）：`POST /api/record/start|stop`、`GET /api/record/list|status`、
@@ -143,8 +143,8 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
 | `RECORD_MAX_CAMERAS` | `4` | 一次最多同时录几路（路线动作多选；超出只丢多的几路） |
 | `RECORD_RTSP_HOST` | `127.0.0.1` | 本机 mediamtx |
 | `RECORD_POINT_DEFAULT_SECS` / `RECORD_POINT_MAX_SECS` | `15` / `300` | 航点录像默认 / 上限（路线动作可覆盖） |
-| `RECORD_SEGMENT_SECS` | `300` | 全程录像切片长度（一段一个 mp4，逐段回传） |
-| `RECORD_TASK_MAX_SECS` | `7200` | 全程录像兜底上限（客户端被杀时防跑飞） |
+| `RECORD_SEGMENT_SECS` | `300` | 航段录像切片长度（一段路一个 mp4，逐段回传） |
+| `RECORD_TASK_MAX_SECS` | `7200` | 航段 / 老全程录像的兜底上限（客户端被杀时防跑飞） |
 | `RECORD_RETENTION_HOURS` | `72` | 没传走的录像保留多久 |
 | `RECORD_MIN_FREE_MB` | `512` | 剩余空间低于它不开新录像（写满会连 AI 存证一起丢） |
 | `RECORD_TRANSCODE` | `0` | `1` = 重编码（源不是 H264 时）；默认 `-c copy` 不抢 MPP |
@@ -161,8 +161,12 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
   （回执 `errors`）——**绝不让一路的失败拖垮整条录像**。
 - **不重编码**：源已经是 H264，`-c copy` 封装成 mp4，不与实时视频抢 MPP；
   `-movflags +faststart` 让浏览器边下边播。多路也是 `-c copy`，只多几路拉流 + 封装。
-- **文件名 + 边车**：`RECORD_DIR/<planId>/<pt<n>|task>-<相机>-<时间戳>.mp4`，停下时
-  写同名 `.json`（planId / scope / pointIndex / camera / 起止时间 / 时长）。客户端按
+- **范围（`scope`）**：`point` = 航点录像（`-t seconds` 一个 mp4）、`leg` = 航段录像
+  （起步开、到下一个航点停，`-f segment` 按 `segmentSeconds` 切；`pointIndex` 是
+  **起点航点下标**）、`task` = 旧版「全程录像」（整条任务一条流，只为兼容老客户端保留）。
+  `stop` 带 `scope` / `pointIndex` 时只停那一段，不带就停该计划全部。
+- **文件名 + 边车**：`RECORD_DIR/<planId>/<pt<n>|leg<n>|task>-<相机>-<时间戳>.mp4`，停下时
+  写同名 `.json`（planId / scope / pointIndex / pointName / camera / 起止时间 / 时长）。客户端按
   边车拼回传元数据（含 `camera`），传成功才调 `/api/record/delete` 删文件。
   老文件（没有相机段的文件名 / 边车没 `camera`）回执里按 `RECORD_SOURCE_CAM` 兑底。
 - **`list` 不返回正在录的文件**：客户端可能传半截 mp4；`stop` 会等 ffmpeg 写完
