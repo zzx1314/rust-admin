@@ -180,8 +180,9 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 回归 `pump::tests::leg_recording_starts_on_departure_and_stops_at_the_next_point`。
 `legs[i]` 从 P{i+1} 出发、`returnLeg` 从最后一个点出发，**每一段各录一份**
 （切片与相机各取各的，`RecordPlan.legs`）；老路线里的动作名「全程录像」按**同一套段级
-语义**解析（不再有「整条任务一条流」），编辑器里它已下线到 `RETIRED_ACTIONS`
-（新建时只能选「录像采集」）。同一个点既有出发段又有返航段时**出发段优先**
+语义**解析（不再有「整条任务一条流」），编辑器里它已**彻底从动作下拉移除**：
+`RETIRED_ACTIONS` 只留给老动作卡片显示图标，`RETIRED_ACTION_REPLACEMENTS`
+把它映射成「录像采集」（老数据点「修改」就按录像采集打开、保存即改名）。同一个点既有出发段又有返航段时**出发段优先**
 （客户端日志会说明另一条被忽略），回归 `record::tests::every_leg_keeps_its_own_segment_settings`。
 **录哪几路可选**：`dogcam` = 正前（机器狗前置）、`cam0`~`cam3` = 背包四路 USB
 （左前 / 右前 / 右后 / 左后）、`dog-ipcam` = 红外；**选几路就同时录几路**

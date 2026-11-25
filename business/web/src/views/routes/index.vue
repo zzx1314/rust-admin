@@ -38,6 +38,7 @@ import {
   PHOTO_MAX_FRAMES,
   RECORD_CAMERAS,
   RECORD_MAX_CAMERAS,
+  RETIRED_ACTION_REPLACEMENTS,
   RETIRED_ACTIONS,
   SPEAK_LEG_DEFAULT_SECS,
   SPEAK_MAX_CHARS,
@@ -645,11 +646,14 @@ function actionOptions(kind: "point" | "leg") {
     .filter(([, meta]) => meta.kind === kind || meta.kind === "both")
     .map(([name]) => name);
   // 正在修改的是一条**已下线**的动作（老路线）：把它留在下拉里，
-  // 否则 `<select v-model>` 找不到选项会显示空白，操作员以为动作坏了
+  // 否则 `<select v-model>` 找不到选项会显示空白，操作员以为动作坏了。
+  // 有替代动作的（全程录像 → 录像采集）不补回：`openActionDialog` 已经把它
+  // 换成替代动作打开，下拉里不该再出现老名字。
   const current = actionForm.type;
   const retired = current ? RETIRED_ACTIONS[current] : undefined;
   if (
     retired &&
+    !RETIRED_ACTION_REPLACEMENTS[current] &&
     (retired.kind === kind || retired.kind === "both") &&
     !names.includes(current)
   ) {
@@ -1320,9 +1324,11 @@ function openActionDialog(kind: "point" | "leg", index: number | null = null) {
       ? null
       : (kind === "point" ? selectedPoint.value : selectedLeg.value)?.actions[index] ?? null;
   if (existing) {
-    // 修改：把已存的参数整套回填，参数 / 场景 / 类别 / 数量都能在原值上改
+    // 修改：把已存的参数整套回填，参数 / 场景 / 类别 / 数量都能在原值上改。
+    // 已下线但**有替代动作**的（老「全程录像」）直接按替代动作打开：
+    // 下拉里没有老名字，参数两边同一份字段，保存即换成新动作名。
     Object.assign(actionForm, {
-      type: existing.type,
+      type: RETIRED_ACTION_REPLACEMENTS[existing.type] ?? existing.type,
       param: existing.param ?? "",
       trigger: existing.trigger ?? "到达即执行",
       threshold: existing.threshold ?? "—",
