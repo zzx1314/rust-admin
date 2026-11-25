@@ -73,32 +73,53 @@ class PhonePlayer extends AudioWorkletProcessor {
     this.tail = 0;               // 写指针（单调递增）
     this.phase = 0;
     this.muted = false;
-    this.underrun = 0;
+    // 欠载统计：数据不够、只能出静音的渲染块数（每秒回给主线程算成 ms）
+    this.starvedBlocks = 0;
+    this.quantum = 128;          // 渲染量子，首次 process 时按实际值覆盖
+    this.reportedAt = 0;
     this.port.onmessage = (event) => {
       const data = event.data || {};
       if (data.mute !== undefined) this.muted = !!data.mute;
-      if (data.samples) this.push(new Float32Array(data.samples));
+      if (data.samples) this.push(data.samples);
     };
   }
-  push(samples) {
-    for (let i = 0; i < samples.length; i += 1) {
-      this.buf[this.tail % this.cap] = samples[i];
+  // ⚠️ 必须自己把 Int16 的 **数值** 归一化到 [-1,1]：Web Audio 的 output 是
+  // Float32 归一化信号，|x|>1 会被渲染器硬钳到 ±1 —— 满幅方波听起来就是
+  // 「对讲机嗡嗡」。也别指望 \`new Float32Array(int16Array)\`：它是逐元素赋值
+  // （30000 还是 30000），不会除以 32768。
+  push(pcm) {
+    for (let i = 0; i < pcm.length; i += 1) {
+      this.buf[this.tail % this.cap] = pcm[i] / 32768;
       this.tail += 1;
     }
-    // 积压超过 300ms：丢最旧的，把延迟压回来
-    const limit = Math.floor(sampleRate * 0.3);
+    // 积压超过 300ms：丢最旧的，把延迟压回来（limit 是 16k 采样数，别用 sampleRate）
+    const limit = Math.floor(this.cap * 0.3);
     if (this.tail - this.head > limit) this.head = this.tail - limit;
+  }
+  // 每秒一次把「欠载 / 积压」回给主线程：不然页面只能盯着「收 N 帧」猜为什么卡
+  report(quantum) {
+    if (quantum) this.quantum = quantum;
+    if (currentTime - this.reportedAt < 1) return;
+    this.reportedAt = currentTime;
+    this.port.postMessage({
+      type: "stats",
+      starvedMs: Math.round((this.starvedBlocks * this.quantum * 1000) / sampleRate),
+      backlogMs: Math.round(((this.tail - this.head) / 16000) * 1000)
+    });
   }
   process(_inputs, outputs) {
     const out = outputs[0] && outputs[0][0];
     if (!out) return true;
     const primed = this.tail - this.head >= ${JITTER_PRIME_FRAMES * 320};
     if (!primed || this.muted) {
-      this.underrun += 1;
+      // 自己按的「静音」不算欠载（那是有意的静默），数据不够才算
+      if (!this.muted) this.starvedBlocks += 1;
       out.fill(0);
+      this.report(out.length);
       return true;
     }
     const step = 16000 / sampleRate;
+    let starved = false;
     for (let i = 0; i < out.length; i += 1) {
       this.phase += step;
       while (this.phase >= 1) {
@@ -107,13 +128,15 @@ class PhonePlayer extends AudioWorkletProcessor {
       }
       if (this.tail - this.head < 2) {
         out[i] = 0;
-        this.underrun += 1;
+        starved = true;
         continue;
       }
       const a = this.buf[this.head % this.cap];
       const b = this.buf[(this.head + 1) % this.cap];
       out[i] = a + (b - a) * this.phase;
     }
+    if (starved) this.starvedBlocks += 1;
+    this.report(out.length);
     return true;
   }
 }
@@ -183,7 +206,9 @@ export function usePhoneCall() {
   const muted = ref(false);
   const status = ref("未开始");
   const error = ref("");
-  const stats = reactive({ rx: 0, tx: 0, underruns: 0 });
+  // `underruns` = 播放欠载的毫秒数（worklet 每秒回报）；`drops` = 因帧长不符被整条丢弃的下行帧
+  // （板端不是 640B/20ms 时的唯一痕迹）；`backlog` = 播放缓冲积压（ms，≈ 端到端延迟）
+  const stats = reactive({ rx: 0, tx: 0, underruns: 0, drops: 0, backlog: 0 });
 
   let socket: WebSocket | null = null;
   let context: AudioContext | null = null;
@@ -201,6 +226,8 @@ export function usePhoneCall() {
     stats.rx = 0;
     stats.tx = 0;
     stats.underruns = 0;
+    stats.drops = 0;
+    stats.backlog = 0;
   }
 
   function teardown() {
@@ -283,6 +310,15 @@ export function usePhoneCall() {
         outputChannelCount: [1]
       });
       player.connect(context.destination);
+      // 播放侧每秒回报一次欠载 / 积压（worklet 自己数的，主线程拿不到）
+      player.port.onmessage = event => {
+        const data = event.data as
+          | { type?: string; starvedMs?: number; backlogMs?: number }
+          | undefined;
+        if (!data || data.type !== "stats") return;
+        if (typeof data.starvedMs === "number") stats.underruns = data.starvedMs;
+        if (typeof data.backlogMs === "number") stats.backlog = data.backlogMs;
+      };
 
       mic = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -344,8 +380,13 @@ export function usePhoneCall() {
         }
         if (!(message.data instanceof ArrayBuffer)) return;
         const bytes = new Uint8Array(message.data);
-        if (bytes.byteLength < FRAME_BYTES) return;
-        // Int16Array 需要偶数长度与 2 字节对齐
+        // 板端固定 20ms@16k = 640B：短于这个长度没法按 2 字节对齐出一帧完整 PCM，
+        // 整条丢弃**并计数**（以前是静默丢，板端换成 10ms/8k 时表现为「没声音」且查不出）
+        if (bytes.byteLength < FRAME_BYTES) {
+          stats.drops += 1;
+          return;
+        }
+        // Int16Array 需要偶数长度与 2 字节对齐（奇数长度截掉尾部半个采样）
         const samples = new Int16Array(
           bytes.buffer,
           bytes.byteOffset,
@@ -371,8 +412,10 @@ export function usePhoneCall() {
       };
 
       reportTimer = window.setInterval(() => {
-        if (framesSinceReport === 0) {
-          status.value = active.value ? "通话中（没有音频到达）" : status.value;
+        if (framesSinceReport === 0 && active.value) {
+          status.value = stats.drops > 0
+            ? `通话中（帧长不是 640B，已丢 ${stats.drops} 条）`
+            : "通话中（没有音频到达）";
         }
         framesSinceReport = 0;
       }, 5000);
