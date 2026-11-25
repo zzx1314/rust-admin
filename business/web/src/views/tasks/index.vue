@@ -706,19 +706,26 @@ async function toggleWebPhone() {
   await startWebPhone({ deviceId: device.id });
 }
 
+/** 相机短名（照片 / 录像列表共用）：`cam0` → 「左前」 */
+function cameraName(value?: string | null) {
+  const camera = String(value ?? "").trim();
+  return (
+    {
+      dogcam: "前置",
+      dogcam720: "前置",
+      "dog-ipcam": "红外",
+      cam0: "左前",
+      cam1: "右前",
+      cam2: "右后",
+      cam3: "左后"
+    }[camera] ?? camera
+  );
+}
+
 /** 照片标注：「航点3 · P3 · 前置」 */
 function photoLabel(item: TaskPhoto) {
   const name = item.pointName?.trim();
-  const camera = {
-    dogcam: "前置",
-    dogcam720: "前置",
-    "dog-ipcam": "红外",
-    cam0: "左前",
-    cam1: "右前",
-    cam2: "右后",
-    cam3: "左后"
-  }[item.camera] ?? item.camera;
-  return `航点${item.pointIndex + 1}${name ? ` · ${name}` : ""} · ${camera}`;
+  return `航点${item.pointIndex + 1}${name ? ` · ${name}` : ""} · ${cameraName(item.camera)}`;
 }
 
 /** 取一张照片的字节（带 Bearer），缓存成 objectURL；失败返回空串 */
@@ -840,9 +847,11 @@ function recordingDuration(seconds: number) {
 
 /** 「全程录像」/「航点3 · P3」 */
 function recordingLabel(item: TaskRecording) {
-  if (item.scope === "task") return "全程录像";
+  // 多选相机时同一航点/整段会有多段录像，必须把相机标出来，否则看着像重复
+  const camera = item.camera ? ` · ${cameraName(item.camera)}` : "";
+  if (item.scope === "task") return `全程录像${camera}`;
   const name = item.pointName?.trim();
-  return `航点${item.pointIndex + 1}${name ? ` · ${name}` : ""} 录像`;
+  return `航点${item.pointIndex + 1}${name ? ` · ${name}` : ""} 录像${camera}`;
 }
 
 /** 关弹窗：播放地址带 `?pt=` 令牌，留着没用 */

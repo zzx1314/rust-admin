@@ -45,7 +45,7 @@ backend/
 │                     （`/api/network` 把 WiFi SIGNAL / 4G CSQ 统一成 0-100，是
 │                      设备客户端心跳 `signal` + `signalSource` 的来源）
 ├── control.py        LED 闪烁 / 补光开关
-├── record.py         航点 / 航段录像（ffmpeg 从本机 mediamtx 拉 dogcam，落 mp4 + 边车）
+├── record.py         航点 / 航段录像（ffmpeg 从本机 mediamtx 拉流，可多路相机，落 mp4 + 边车）
 ├── speak.py          航点 / 航段语音播报（聆思 TTS：call 0/1 <内容> / call stop）
 ├── phone.py          模拟电话（板端 ⇄ 同网段 PC 的 UDP 双向对讲：phone <ip> <port> / phone stop）
 ├── photo.py          航点拍照（ffmpeg 从本机 mediamtx 抓 JPEG，客户端到点触发）
@@ -139,7 +139,8 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
 | 环境变量 | 默认 | 说明 |
 |---|---|---|
 | `RECORD_DIR` | `/media/media-data/record` | 落盘根目录（SSD；不要指到 eMMC） |
-| `RECORD_SOURCE_CAM` | `dogcam` | 录像源：逻辑摄像头名，`dogcam` 按当前档位选 `dogcam`/`dogcam720` |
+| `RECORD_SOURCE_CAM` | `dogcam` | **默认**录像源（路线动作没配 `recordCameras` 时用），`dogcam` 按当前档位选 `dogcam`/`dogcam720` |
+| `RECORD_MAX_CAMERAS` | `4` | 一次最多同时录几路（路线动作多选；超出只丢多的几路） |
 | `RECORD_RTSP_HOST` | `127.0.0.1` | 本机 mediamtx |
 | `RECORD_POINT_DEFAULT_SECS` / `RECORD_POINT_MAX_SECS` | `15` / `300` | 航点录像默认 / 上限（路线动作可覆盖） |
 | `RECORD_SEGMENT_SECS` | `300` | 全程录像切片长度（一段一个 mp4，逐段回传） |
@@ -151,11 +152,19 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
 
 约定：
 
+- **多路相机**：`POST /api/record/start` 的 `cameras: ["dogcam","cam0",…]`（也认单个
+  `camera`）——**每一路一个独立 ffmpeg + 一个独立 mp4**，job key 是
+  `<plan>|<scope>|<point>|<cam>`；`stop` 仍按 plan+scope+point 收，所以离开航点会把
+  这一点的所有相机一起停。可选相机与 `photo.py::allowed_cameras()` 同一份
+  （`dogcam` / `cam0`~`cam3` / `dog-ipcam`，`dogcam` = 正前 = 机器狗前置）。
+  不认识的名字只丢那一路（回执 `rejected`），上游没推流的那一路起不来也只丢它
+  （回执 `errors`）——**绝不让一路的失败拖垮整条录像**。
 - **不重编码**：源已经是 H264，`-c copy` 封装成 mp4，不与实时视频抢 MPP；
-  `-movflags +faststart` 让浏览器边下边播。
-- **文件名 + 边车**：`RECORD_DIR/<planId>/<pt<n>|task>-<时间戳>.mp4`，停下时写同名
-  `.json`（planId / scope / pointIndex / 起止时间 / 时长）。客户端按边车拼回传元数据，
-  传成功才调 `/api/record/delete` 删文件。
+  `-movflags +faststart` 让浏览器边下边播。多路也是 `-c copy`，只多几路拉流 + 封装。
+- **文件名 + 边车**：`RECORD_DIR/<planId>/<pt<n>|task>-<相机>-<时间戳>.mp4`，停下时
+  写同名 `.json`（planId / scope / pointIndex / camera / 起止时间 / 时长）。客户端按
+  边车拼回传元数据（含 `camera`），传成功才调 `/api/record/delete` 删文件。
+  老文件（没有相机段的文件名 / 边车没 `camera`）回执里按 `RECORD_SOURCE_CAM` 兑底。
 - **`list` 不返回正在录的文件**：客户端可能传半截 mp4；`stop` 会等 ffmpeg 写完
   边车再返回（`job.finished`），所以「停 → list」是安全的。
 - **`delete` 只认 `<planId>/<文件名>.mp4`**：路径穿越、`..`、非 mp4 一律拒绝。

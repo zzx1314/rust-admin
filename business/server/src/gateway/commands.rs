@@ -25,7 +25,9 @@ pub type CommandResultReceiver = oneshot::Receiver<CommandResult>;
 ///
 /// 中台设备页直接展示 `message`，所以这里把「已传 / 总数 / 第几个包」拼成一句
 /// 人看得懂的话；单位按指令区分（图片论「张」、录像论「段」）。
-pub(crate) fn long_task_progress_text(payload: &crate::gateway_types::CommandProgressPayload) -> String {
+pub(crate) fn long_task_progress_text(
+    payload: &crate::gateway_types::CommandProgressPayload,
+) -> String {
     let total = payload.total;
     let uploaded = payload.uploaded;
     let unit = if payload.command == "回传录像" {

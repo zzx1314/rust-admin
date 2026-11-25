@@ -71,7 +71,11 @@ pub fn acceptor(cert_path: &Path, key_path: &Path) -> Result<TlsAcceptor, String
 ///
 /// 返回 `Err` 只有一种情况：监听 socket 本身出错（进程该重启了）。单条连接的错误
 /// （浏览器中途关页、证书告警没点继续）只记 debug，不打断监听。
-pub async fn serve(router: Router, listener: TcpListener, acceptor: TlsAcceptor) -> std::io::Result<()> {
+pub async fn serve(
+    router: Router,
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+) -> std::io::Result<()> {
     let local = listener.local_addr()?;
     info!(address = %format!("https://{local}"), "HTTPS 监听已启动（自签证书即可，浏览器首次会提示不安全）");
     loop {

@@ -208,7 +208,19 @@ async fn ingest(
 }
 
 fn meta(task_code: &str, device: &str, scope: &str, point: i64, duration: f64) -> Value {
-    serde_json::json!({
+    // 老客户端不带 `camera`：板端只可能录默认源，入库按 dogcam 算
+    meta_with_camera(task_code, device, scope, point, duration, None)
+}
+
+fn meta_with_camera(
+    task_code: &str,
+    device: &str,
+    scope: &str,
+    point: i64,
+    duration: f64,
+    camera: Option<&str>,
+) -> Value {
+    let mut value = serde_json::json!({
         "taskCode": task_code,
         "deviceCode": device,
         "planId": task_code,
@@ -218,7 +230,11 @@ fn meta(task_code: &str, device: &str, scope: &str, point: i64, duration: f64) -
         "startedAt": "2026-11-23 09:10:00",
         "endedAt": "2026-11-23 09:10:12",
         "durationSec": duration,
-    })
+    });
+    if let Some(camera) = camera {
+        value["camera"] = serde_json::json!(camera);
+    }
+    value
 }
 
 #[tokio::test]
@@ -228,27 +244,31 @@ async fn recording_round_trip_dedupes_and_streams_ranges() {
     let app = build_router(state.clone());
     let token = login(&app).await;
 
-    // 1) 航点录像回传
+    // 1) 航点录像回传（多选相机里的「左前」这一路）
     let response = ingest(
         &app,
         &token,
-        "pt0-1.mp4",
+        "pt0-cam0-1.mp4",
         &fake_mp4(1),
-        &meta(&task_code, "DOG-REC-1", "point", 0, 12.5),
+        &meta_with_camera(&task_code, "DOG-REC-1", "point", 0, 12.5, Some("cam0")),
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK, "回传应成功");
     let body = json_body(response).await;
     assert_eq!(body["data"]["created"], true);
     let recording_id = body["data"]["recording"]["id"].as_i64().expect("缺少 id");
+    assert_eq!(
+        body["data"]["recording"]["camera"], "cam0",
+        "相机要入库存下来（同一航点多路录像靠它区分）：{body}"
+    );
 
     // 2) 同一段重传：sha256 命中，不新增行
     let response = ingest(
         &app,
         &token,
-        "pt0-1.mp4",
+        "pt0-cam0-1.mp4",
         &fake_mp4(1),
-        &meta(&task_code, "DOG-REC-1", "point", 0, 12.5),
+        &meta_with_camera(&task_code, "DOG-REC-1", "point", 0, 12.5, Some("cam0")),
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -289,11 +309,16 @@ async fn recording_round_trip_dedupes_and_streams_ranges() {
         .find(|row| row["scope"] == "point")
         .expect("应该有航点录像");
     assert_eq!(point["durationSec"], 12.5, "durationSec 要入库：{body}");
+    assert_eq!(point["camera"], "cam0", "列表要带相机：{body}");
     let task = rows
         .iter()
         .find(|row| row["scope"] == "task")
         .expect("应该有全程录像");
     assert_eq!(task["durationSec"], 300.0, "全程录像时长也要入库：{body}");
+    assert_eq!(
+        task["camera"], "dogcam",
+        "老客户端没传 camera 时按默认源入库：{body}"
+    );
 
     // 5) 整段下载
     let request = Request::get(format!("/api/recordings/{recording_id}/file"))

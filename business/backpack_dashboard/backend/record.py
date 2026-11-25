@@ -10,12 +10,17 @@
 
 - **谁触发**：设备客户端（与 Agent 同机，`127.0.0.1:8000`）。平台/浏览器不直接调：
   录像属于任务执行的一部分，起停时机只有 5009 的状态机知道。
-- **源**：本机 mediamtx 上的机器狗前置（`relay.dogcam_stream()`，默认 `dogcam`），
-  与 AI 抽帧同一路、同一套地址解析；**不碰 v4l2**，也不影响实时视频。
+- **源**：本机 mediamtx 上的流，路线动作里按需选（`cameras: [...]`，多选 = 多路
+  同时录）。可选 `dogcam`（机器狗前置 / 正前，按当前档位选 `dogcam`/`dogcam720`）、
+  `cam0`~`cam3`（背包四路 USB：左前 / 右前 / 右后 / 左后）、`dog-ipcam`（红外），
+  与航点拍照同一份相机名；不配就退到 `RECORD_SOURCE_CAM`（默认 `dogcam`）。
+  **不碰 v4l2**，也不影响实时视频与 AI 抽帧。
+- **多路**：每一路一个独立 ffmpeg 进程（`-c copy`，互不影响），文件名带相机名，
+  任何一路起不来只丢那一路，其余照录。
 - **编码**：`-c copy` 直接封装 H264（源已经是 H264），不重编码 —— RK3576 上多一路
   编码会跟实时流抢 MPP；只有确实没有关键帧时才由 `RECORD_TRANSCODE=1` 兜底。
-- **落盘**：`RECORD_DIR/<planId>/<kind>-<时间戳>.mp4` + 同名 `.json` 边车
-  （planId / 航点 / 范围 / 起止时间 / 时长）。客户端传完调 `/api/record/delete` 删。
+- **落盘**：`RECORD_DIR/<planId>/<kind>-<相机>-<时间戳>.mp4` + 同名 `.json` 边车
+  （planId / 航点 / 范围 / 相机 / 起止时间 / 时长）。客户端传完调 `/api/record/delete` 删。
   断电/断网没传走的由 `sweep()` 按 `RECORD_RETENTION_HOURS` 清掉，不会写满 SSD。
 
 为什么要切片：全程录像一跑可能几十分钟，4G 上一次传几百 MB 必然断。`scope=task`
@@ -40,7 +45,7 @@ _SAFE_NAME = re.compile(r"^[0-9A-Za-z_\-\u4e00-\u9fff]+$")
 _SCRUB = ("cmd",)
 
 _LOCK = threading.RLock()
-# job key -> _Job；key = "<planId>|<scope>|<pointIndex>"
+# job key -> _Job；key = "<planId>|<scope>|<pointIndex>|<camera>"（每一路一个 job）
 _JOBS = {}
 # 已经在收尾（ffmpeg 退出但边车还没写）的文件名：`list` 不返回它们，避免传半截
 _FINALIZING = set()
@@ -55,8 +60,8 @@ def _ffmpeg_bin():
     return os.getenv("FFMPEG_BIN", "ffmpeg")
 
 
-def _job_key(plan_id, scope, point_index):
-    return "%s|%s|%d" % (plan_id, scope, point_index)
+def _job_key(plan_id, scope, point_index, camera):
+    return "%s|%s|%d|%s" % (plan_id, scope, point_index, camera)
 
 
 def _safe_name(value):
@@ -78,17 +83,75 @@ def _int(value, default=0, low=0, high=None):
     return number
 
 
-def source_url():
-    """录像源：本机 mediamtx 上的前置流（与 AI 抽帧同一套解析）。
+def allowed_cameras():
+    """可录的流：背包四路 + 机器狗前置（含 720p 档）+ 红外。
+
+    与 `photo.py::allowed_cameras` 同一份口径（路线编辑器也用这套相机名），
+    改这里记得同步那边。
+    """
+    names = set(getattr(config, "CAMERAS", {}).keys())
+    names.update({"dogcam", "dogcam720", "dog-ipcam"})
+    return names
+
+
+def stream_of(camera):
+    """路线动作里的相机名 → mediamtx 上的 path（`dogcam` 按当前档位选流）。"""
+    cam = str(camera or config.RECORD_SOURCE_CAM or "dogcam").strip()
+    if cam not in allowed_cameras():
+        return None
+    if cam == "dogcam":
+        # 与航点拍照 / AI 抽帧同一套解析：1080p60 档直接用 dogcam，
+        # 720p30 档用 relay 推上来的 dogcam720
+        return relay.dogcam_stream()
+    return cam
+
+
+def source_url(camera=None):
+    """单路录像源：本机 mediamtx 上的流（与 AI 抽帧同一套解析）。
 
     源 URL 可能含账号密码（`DOG_RTSP_URL`），只用于 ffmpeg 参数，**不进接口/日志**。
+    相机名不认识时返回 None（调用方据此拒绝这一路）。
     """
-    cam = (config.RECORD_SOURCE_CAM or "dogcam").strip()
-    if cam == "dogcam":
-        stream = relay.dogcam_stream()
-    else:
-        stream = cam
+    stream = stream_of(camera or config.RECORD_SOURCE_CAM)
+    if not stream:
+        return None
     return "rtsp://%s:%d/%s" % (config.RECORD_RTSP_HOST, config.RTSP_PORT, stream)
+
+
+def cameras_of(body):
+    """请求里的相机列表：`cameras: [...]`，兼容单个 `camera`；去重 + 白名单 + 截断。
+
+    返回 `(picked, rejected)`：不认识的相机名只丢这一路，并在回执里带上，
+    不能让一个打字错误把整条录像废掉（现场改配置比改任务容易）。
+    一个都没给 / 全都不认识时退到 `RECORD_SOURCE_CAM`（默认 dogcam）。
+    """
+    raw = body.get("cameras")
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list) or not raw:
+        single = body.get("camera")
+        raw = [single] if single else []
+    allowed = allowed_cameras()
+    picked = []
+    rejected = []
+    for item in raw:
+        cam = str(item or "").strip()
+        if not cam:
+            continue
+        if cam not in allowed:
+            rejected.append(cam)
+            continue
+        if cam in picked:
+            continue
+        picked.append(cam)
+    if not picked:
+        fallback = str(config.RECORD_SOURCE_CAM or "dogcam").strip()
+        picked = [fallback if fallback in allowed else "dogcam"]
+    max_cams = max(1, int(getattr(config, "RECORD_MAX_CAMERAS", 4)))
+    if len(picked) > max_cams:
+        rejected.extend(picked[max_cams:])
+        picked = picked[:max_cams]
+    return picked, rejected
 
 
 def _plan_dir(plan_id):
@@ -108,8 +171,8 @@ def _disk_free_mb():
             return -1
 
 
-def _ffmpeg_cmd(path_template, scope, seconds, segment_seconds):
-    """构造 ffmpeg 命令。
+def _ffmpeg_cmd(path_template, scope, seconds, segment_seconds, source):
+    """构造一路 ffmpeg 命令。
 
     - `scope=point`：`-t seconds` 自动停，一个 mp4；
     - `scope=task`：`-f segment` 按 `segment_seconds` 切段（路线动作里的
@@ -119,7 +182,7 @@ def _ffmpeg_cmd(path_template, scope, seconds, segment_seconds):
     cmd = [
         _ffmpeg_bin(), "-hide_banner", "-loglevel", "warning", "-nostdin",
         # 4G / 弱网下 TCP 比 UDP 稳；实时视频那条路也是 TCP
-        "-rtsp_transport", "tcp", "-i", source_url(),
+        "-rtsp_transport", "tcp", "-i", source,
         "-t", str(seconds),
     ]
     if os.getenv("RECORD_TRANSCODE", "0") == "1":
@@ -145,13 +208,14 @@ def _ffmpeg_cmd(path_template, scope, seconds, segment_seconds):
 
 
 class _Job:
-    def __init__(self, key, plan_id, scope, point_index, point_name,
+    def __init__(self, key, plan_id, scope, point_index, point_name, camera,
                  path_template, prefix, before, started_at, cmd):
         self.key = key
         self.plan_id = plan_id
         self.scope = scope
         self.point_index = point_index
         self.point_name = point_name
+        self.camera = camera
         self.path_template = path_template
         # 本路录像的文件名前缀（`pt<n>-` / `task-`）：同一计划可能同时有全程 + 航点两路，
         # 只按「开始后新出现的文件」认会互相抢对方的片段
@@ -173,6 +237,7 @@ class _Job:
             "scope": self.scope,
             "pointIndex": self.point_index,
             "pointName": self.point_name,
+            "camera": self.camera,
             "startedAt": _fmt(self.started_at),
             "seconds": round(time.time() - self.started_ts, 1),
             "running": self.proc is not None and self.proc.poll() is None,
@@ -228,6 +293,7 @@ def _finalize(job, reason):
             "scope": job.scope,
             "pointIndex": job.point_index,
             "pointName": job.point_name,
+            "camera": job.camera,
             "startedAt": _fmt(job.started_at),
             "endedAt": _fmt(job.stopped_at),
             "durationSec": round(duration, 1),
@@ -244,8 +310,9 @@ def _finalize(job, reason):
         _FINALIZING.difference_update(os.path.basename(path) for path in job.files)
         _JOBS.pop(job.key, None)
         job.finished.set()
-    _log("录像结束 plan=%s scope=%s point=%s 时长=%.1fs 文件=%d 原因=%s"
-         % (job.plan_id, job.scope, job.point_index, duration, len(job.files), reason))
+    _log("录像结束 plan=%s scope=%s point=%s cam=%s 时长=%.1fs 文件=%d 原因=%s"
+         % (job.plan_id, job.scope, job.point_index, job.camera, duration,
+            len(job.files), reason))
 
 
 def _watch(job):
@@ -257,10 +324,14 @@ def _watch(job):
 
 
 def start(body):
-    """开始一段录像（幂等：同一计划同一航点重复调用返回正在跑的那一个）。
+    """开始一段录像（幂等：同一计划同一航点同一路相机重复调用返回正在跑的那一路）。
 
     `body`：`{planId, scope: "point"|"task", pointIndex, pointName, seconds,
-    segmentSeconds}`。`seconds` 只对 `point` 有意义（上限 `RECORD_POINT_MAX_SECS`）。
+    segmentSeconds, cameras: ["cam0", "dogcam"], camera}`。
+
+    `seconds` 只对 `point` 有意义（上限 `RECORD_POINT_MAX_SECS`）。
+    `cameras` 是多选：**每一路一个独立 ffmpeg + 一个独立 mp4**，任何一路起不来
+    只丢那一路（回执里带 `errors`），其余照录；不配就退到 `RECORD_SOURCE_CAM`。
     """
     plan_id = _safe_name(body.get("planId"))
     if not plan_id:
@@ -280,13 +351,13 @@ def start(body):
                                10, config.RECORD_TASK_MAX_SECS)
         seconds = _int(body.get("maxSeconds"), config.RECORD_TASK_MAX_SECS,
                        30, config.RECORD_TASK_MAX_SECS)
+    cameras, rejected = cameras_of(body)
 
-    key = _job_key(plan_id, scope, point_index)
+    started = []
+    skipped = []
+    errors = []
+    jobs = []
     with _LOCK:
-        existing = _JOBS.get(key)
-        if existing is not None and existing.proc is not None and existing.proc.poll() is None:
-            return {"ok": True, "created": False, "job": existing.status()}
-
         # 磁盘护栏：宁可这段不录，也不要把 SSD 写满（写满会连 AI 存证一起丢）
         free = _disk_free_mb()
         if free >= 0 and free < config.RECORD_MIN_FREE_MB:
@@ -304,52 +375,87 @@ def start(body):
 
         stamp = _now_stamp()
         kind = "pt%d" % point_index if scope == "point" else "task"
-        template = os.path.join(out_dir, "%s-%s.mp4" % (kind, stamp))
-        suffix = 0
-        while os.path.exists(template) and suffix < 50:
-            suffix += 1
-            template = os.path.join(out_dir, "%s-%s-%d.mp4" % (kind, stamp, suffix))
+        # 一次快照：本轮所有相机的文件都在它之后落盘（各相机靠文件名前缀区分）
         try:
             before = set(os.listdir(out_dir))
         except OSError:
             before = set()
 
-        cmd = _ffmpeg_cmd(template, scope, seconds, segment_seconds)
-        job = _Job(key, plan_id, scope, point_index, point_name,
-                   template, kind + "-", before, time.time(), cmd)
-        try:
-            log = open(config.RECORD_LOG, "ab")
-        except OSError:
-            log = subprocess.DEVNULL
-        try:
-            job.proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                # stderr 落日志：起流失败（源没有、鉴权错、编码不支持）只有这里看得到
-                stderr=log,
-                # 独立进程组：stop 时按组杀，ffmpeg 的子进程不会漏
-                start_new_session=True,
-            )
-        except OSError as error:
-            return {"ok": False, "error": "启动 ffmpeg 失败: %s" % error}
-        finally:
-            if log is not subprocess.DEVNULL:
-                log.close()
-        # 源不可用 / 参数不支持时 ffmpeg 会立刻退出：这种情况直接报错，
-        # 让客户端记一条可读原因，而不是「开始录了但一直没文件」。
-        time.sleep(0.05)
-        if job.proc.poll() is not None:
-            return {
-                "ok": False,
-                "error": "ffmpeg 启动后立即退出（录像源不可用？见 %s）" % config.RECORD_LOG,
-            }
-        _JOBS[key] = job
-        threading.Thread(target=_watch, args=(job,), daemon=True).start()
-    _log("录像开始 plan=%s scope=%s point=%s 时长=%ss 切片=%ss -> %s"
-         % (plan_id, scope, point_index, seconds, segment_seconds,
-            os.path.basename(template)))
-    return {"ok": True, "created": True, "job": job.status()}
+        for cam in cameras:
+            source = source_url(cam)
+            if not source:
+                errors.append("%s: 不支持的相机" % cam)
+                continue
+            key = _job_key(plan_id, scope, point_index, cam)
+            existing = _JOBS.get(key)
+            if (existing is not None and existing.proc is not None
+                    and existing.proc.poll() is None):
+                skipped.append(cam)
+                jobs.append(existing.status())
+                continue
+
+            template = os.path.join(out_dir, "%s-%s-%s.mp4" % (kind, cam, stamp))
+            suffix = 0
+            while os.path.exists(template) and suffix < 50:
+                suffix += 1
+                template = os.path.join(
+                    out_dir, "%s-%s-%s-%d.mp4" % (kind, cam, stamp, suffix))
+            cmd = _ffmpeg_cmd(template, scope, seconds, segment_seconds, source)
+            job = _Job(key, plan_id, scope, point_index, point_name, cam,
+                       template, "%s-%s-" % (kind, cam), before, time.time(), cmd)
+            try:
+                log = open(config.RECORD_LOG, "ab")
+            except OSError:
+                log = subprocess.DEVNULL
+            try:
+                job.proc = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    # stderr 落日志：起流失败（源没有、鉴权错、编码不支持）只有这里看得到
+                    stderr=log,
+                    # 独立进程组：stop 时按组杀，ffmpeg 的子进程不会漏
+                    start_new_session=True,
+                )
+            except OSError as error:
+                errors.append("%s: 启动 ffmpeg 失败: %s" % (cam, error))
+                continue
+            finally:
+                if log is not subprocess.DEVNULL:
+                    log.close()
+            # 源不可用 / 参数不支持时 ffmpeg 会立刻退出：记一条可读原因，
+            # 而不是「开始录了但一直没文件」。只丢这一路，别的相机照录。
+            time.sleep(0.05)
+            if job.proc.poll() is not None:
+                errors.append(
+                    "%s: ffmpeg 启动后立即退出（相机没在推流？见 %s）"
+                    % (cam, config.RECORD_LOG))
+                continue
+            _JOBS[key] = job
+            threading.Thread(target=_watch, args=(job,), daemon=True).start()
+            started.append(cam)
+            jobs.append(job.status())
+
+    if started:
+        _log("录像开始 plan=%s scope=%s point=%s 相机=%s 时长=%ss 切片=%ss"
+             % (plan_id, scope, point_index, ",".join(started), seconds, segment_seconds))
+    if errors:
+        _log("录像部分相机没起来 plan=%s: %s" % (plan_id, " | ".join(errors)))
+    if not started and not skipped:
+        return {
+            "ok": False,
+            "error": "; ".join(errors) or "没有可用的录像源",
+            "cameras": cameras,
+            "rejected": rejected,
+        }
+    return {
+        "ok": True,
+        "created": bool(started),
+        "cameras": started or cameras,
+        "rejected": rejected,
+        "jobs": jobs,
+        "errors": errors[:5],
+    }
 
 
 def _terminate(job, reason):
@@ -424,6 +530,8 @@ def status():
         "enabled": True,
         "dir": config.RECORD_DIR,
         "source": config.RECORD_SOURCE_CAM,
+        "cameras": sorted(allowed_cameras()),
+        "maxCameras": max(1, int(getattr(config, "RECORD_MAX_CAMERAS", 4))),
         "segmentSecs": config.RECORD_SEGMENT_SECS,
         "pointDefaultSecs": config.RECORD_POINT_DEFAULT_SECS,
         "pointMaxSecs": config.RECORD_POINT_MAX_SECS,
@@ -486,6 +594,8 @@ def list_files(plan_id=None):
                 "scope": meta.get("scope") or ("task" if name.startswith("task-") else "point"),
                 "pointIndex": meta.get("pointIndex", -1),
                 "pointName": meta.get("pointName") or "",
+                # 相机名：边车里有就用它（老文件没有 → 解析不出来就退到默认源）
+                "camera": meta.get("camera") or config.RECORD_SOURCE_CAM,
                 "size": size,
                 "startedAt": meta.get("startedAt") or "",
                 "endedAt": meta.get("endedAt") or "",

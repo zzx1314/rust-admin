@@ -741,8 +741,10 @@ mod tests {
     #[test]
     fn media_config_cache_is_keyed_by_zentai_base() {
         let cache = MediaConfigCache::default();
-        let mut value = MediaCaptureConfig::default();
-        value.enabled = true;
+        let value = MediaCaptureConfig {
+            enabled: true,
+            ..Default::default()
+        };
         cache.put("http://10.0.0.1:3007", &value);
 
         assert!(

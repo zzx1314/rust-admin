@@ -53,8 +53,10 @@
 - POST /api/lights/off        -> [航点/计划] 关灯 {"reason":"已离开航点"}
 - GET  /api/record/status     -> 录像运行态（正在录的 job / 目录 / 剩余空间，不含源 URL）
 - POST /api/record/start      -> [航点/航段] 开始录像 {"planId","scope":"point|task",
-                                 "pointIndex","pointName","seconds","segmentSeconds"}；
-                                 航点录像到点自动停，全程录像切片落盘直到 /api/record/stop
+                                 "pointIndex","pointName","seconds","segmentSeconds",
+                                 "cameras":["dogcam","cam0"]}；
+                                 航点录像到点自动停，全程录像切片落盘直到 /api/record/stop；
+                                 多选相机时每一路一个 ffmpeg + 一个 mp4
 - POST /api/record/stop       -> [航点/航段] 停止录像 {"planId","scope","pointIndex","reason"}
 - GET  /api/record/list       -> 待回传的录像清单（?planId= 只列该计划）
 - POST /api/record/delete     -> 上传成功后删板端文件 {"names":["<planId>/<file>.mp4"]}
@@ -772,10 +774,12 @@ async def record_start(request: Request):
 
     - `scope="point"`：到点录 `seconds` 秒自动停（路线动作里的「录像采集」）；
     - `scope="task"`：全程录像，按 `RECORD_SEGMENT_SECS` 切片，客户端在任务终态调
-      `/api/record/stop`。
+      `/api/record/stop`；
+    - `cameras: ["dogcam","cam0"]`：多选相机时每一路一个 ffmpeg（各自一个 mp4），
+      某一路上游没推流只丢那一路（回执 `errors`），不配就用 `RECORD_SOURCE_CAM`。
 
-    同一计划同一航点重复调用是幂等的（客户端跟着 5009 每 500ms 一帧推进度，
-    不做去重会不停起 ffmpeg）。起不来时回 400 + 可读原因（磁盘不足 / 目录不可写）。
+    同一计划同一航点同一相机重复调用是幂等的（客户端跟着 5009 每 500ms 一帧推进度，
+    不做去重会不停起 ffmpeg）。一路都起不来时回 400 + 可读原因（磁盘不足 / 目录不可写）。
     """
     b = await _detect_body(request)
     r = await asyncio.to_thread(record.start, b)

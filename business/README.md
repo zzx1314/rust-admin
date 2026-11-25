@@ -746,8 +746,15 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 
 | 动作 | 挂在哪 | 参数 | 行为 |
 |---|---|---|---|
-| 录像采集 | 航点动作 | `recordSeconds`（3~300，默认 15） | 到点开录，**离开航点就停**（不足时长也提前收尾） |
-| 全程录像 | 行进任务（`legs[].actions`） | `recordSegmentSeconds`（30~1800，默认 300） | 任务一开始就录，跨航点一直录到终态 / 取消，按切片长度分段 |
+| 录像采集 | 航点动作 | `recordSeconds`（3~300，默认 15）+ `recordCameras` | 到点开录，**离开航点就停**（不足时长也提前收尾） |
+| 全程录像 | 行进任务（`legs[].actions`） | `recordSegmentSeconds`（30~1800，默认 300）+ `recordCameras` | 任务一开始就录，跨航点一直录到终态 / 取消，按切片长度分段 |
+
+**录哪一路可以多选**（`recordCameras: ["dogcam","cam0"]`，2026-11-25 起）：
+`dogcam` = 正前（机器狗前置）、`cam0`~`cam3` = 背包四路 USB（左前 / 右前 / 右后 /
+左后）、`dog-ipcam` = 红外；**选几路就同时录几路**（每路一个 ffmpeg + 一个 mp4）。
+不配 / 老数据 = 板端默认源（`RECORD_SOURCE_CAM`，默认 dogcam）；超过
+`RECORD_MAX_CAMERAS`（默认 4）只录前几路并在回执里说明。相机名与航点拍照同一份，
+板端不认识的名字只丢那一路，**不会整条录像失败**。
 
 链路（录像本身在板端，平台只管存与回放）：
 
@@ -755,10 +762,11 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 路线动作 → task_dispatch 的 routeData（原样下发）
   → 设备客户端在 5009 状态机上起停（`client/src/record.rs`）
     → 板端 Agent POST /api/record/start|stop（`backpack_dashboard/backend/record.py`）
-      → ffmpeg 从本机 mediamtx 的 dogcam 拉流（-c copy，不重编码）→ RECORD_DIR/<计划>/<pt?-时间戳>.mp4
+      → 每选一路一个 ffmpeg，从本机 mediamtx 对应流拉流（-c copy，不重编码）
+        → RECORD_DIR/<计划>/<pt?-相机-时间戳>.mp4（文件名带相机名）
         （**就攒在这里，任务终态 / 客户端启动都不自动回传**）
         → 平台下发指令「回传录像」：GET /api/record/list → POST /api/recordings/ingest（multipart）
-          → 平台落盘 <recording_dir>/<设备>/<任务号>/…mp4 + 一条 task_recordings
+          → 平台落盘 <recording_dir>/<设备>/<任务号>/…mp4 + 一条 task_recordings（带 camera）
             → 上传成功才回调 /api/record/delete 删板端文件
               → 任务详情「任务录像」播放 / 下载（`<video src>` 直连 Range 流）
 ```
@@ -774,6 +782,10 @@ axios 还有 120s 硬超时，现场表现就是「点回放没反应」（2026-
 - **起停时机跟 5009**：航点录像在 `patrol.point_arrived` / `patrol.waiting` 起，
   离开航点（`patrol.navigating` 等）停；全程录像在这条任务的第一个非终态帧起，
   终态 / 取消 / 本地收尾停。和航点 AI、灯光同一套收口规则（见 `AGENTS.md`）。
+- **多路相机**：`recordCameras` 里每一路是独立 job（key 带相机名），**停按时按
+  plan+scope+point 收**，所以离开航点会把这一点的所有相机一起停；某一路上游没推流
+  只丢那一路（回执 `errors` / `rejected`），其余照录。任务详情「任务录像」按
+  `camera` 区分（老数据默认 `dogcam`）。
 - **幂等**：5009 每 500ms 一帧，客户端按「(任务, 航点) 正在录 / 全程已在录」去重；
   Agent 侧同一 `planId+scope+pointIndex` 重复 start 返回同一个任务。
 - **失败不影响巡检**：板端没升级（404）/ 磁盘不足 / ffmpeg 起不来都只打日志，

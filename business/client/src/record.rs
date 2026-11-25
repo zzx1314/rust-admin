@@ -60,6 +60,15 @@ pub const MAX_POINT_SECS: u32 = 300;
 const MIN_SEGMENT_SECS: u32 = 30;
 const MAX_SEGMENT_SECS: u32 = 1800;
 
+/// 路线动作里可选的录像相机（与板端 `record.py::allowed_cameras`、
+/// 前端 `utils/constants.ts::RECORD_CAMERAS` 同一份口径）。
+///
+/// `dogcam` = 机器狗前置（正前），`cam0`~`cam3` = 背包四路 USB
+/// （左前 / 右前 / 右后 / 左后），`dog-ipcam` = 红外。
+pub const RECORD_CAMERAS: [&str; 6] = ["dogcam", "cam0", "cam1", "cam2", "cam3", "dog-ipcam"];
+/// 一次最多录几路（板端 `RECORD_MAX_CAMERAS` 还会再截一次，这里是入口校验）
+pub const MAX_CAMERAS: usize = 4;
+
 /// 需要录像的航点
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordPoint {
@@ -68,6 +77,8 @@ pub struct RecordPoint {
     pub name: String,
     /// 录多久（秒）
     pub seconds: u32,
+    /// 录哪几路（`recordCameras`）；空 = 板端默认源（`RECORD_SOURCE_CAM`）
+    pub cameras: Vec<String>,
 }
 
 /// 全程录像
@@ -75,6 +86,8 @@ pub struct RecordPoint {
 pub struct RecordTask {
     /// 板端切片长度（秒）
     pub segment_seconds: u32,
+    /// 录哪几路（`recordCameras`）；空 = 板端默认源
+    pub cameras: Vec<String>,
 }
 
 /// 一条路线里的录像配置
@@ -165,6 +178,49 @@ fn segment_seconds(action: &Value) -> u32 {
         .clamp(MIN_SEGMENT_SECS, MAX_SEGMENT_SECS)
 }
 
+/// 路线动作里选的要录的相机（`recordCameras: ["cam0","dogcam"]`）。
+///
+/// 兼容两种写法：数组（前端多选）与单个字符串 `recordCamera`（手工改的路线）。
+/// 不认识的相机名直接丢（板端也会再挡一次），全丢了就返回空——
+/// 空表示「用板端默认源」，历史路线（没这个字段）行为不变。
+fn cameras_from_action(action: &Value) -> Vec<String> {
+    let mut picked: Vec<String> = Vec::new();
+    if let Some(items) = action.get("recordCameras").and_then(Value::as_array) {
+        for item in items {
+            if let Some(camera) = item.as_str() {
+                push_camera(&mut picked, camera);
+            }
+        }
+    }
+    if picked.is_empty()
+        && let Some(camera) = action.get("recordCamera").and_then(Value::as_str)
+    {
+        push_camera(&mut picked, camera);
+    }
+    picked
+}
+
+fn push_camera(picked: &mut Vec<String>, camera: &str) {
+    let camera = camera.trim();
+    if camera.is_empty()
+        || picked.iter().any(|item| item == camera)
+        || !RECORD_CAMERAS.contains(&camera)
+        || picked.len() >= MAX_CAMERAS
+    {
+        return;
+    }
+    picked.push(camera.to_string());
+}
+
+/// 日志用：`["cam0","cam1"]` → `cam0,cam1`；空列表表示板端默认源。
+fn camera_list(cameras: &[String]) -> String {
+    if cameras.is_empty() {
+        "板端默认".to_string()
+    } else {
+        cameras.join(",")
+    }
+}
+
 /// 解析 `routeData` 里的录像动作。
 ///
 /// - `points[].actions[]` 里的录像动作 → 该航点录 `seconds` 秒（`recordSeconds`，
@@ -196,6 +252,7 @@ pub fn parse_record_plan(route_data: &Value) -> RecordPlan {
                 index: index as i64,
                 name,
                 seconds: point_seconds(action),
+                cameras: cameras_from_action(action),
             });
         }
     }
@@ -212,6 +269,7 @@ pub fn parse_record_plan(route_data: &Value) -> RecordPlan {
             }) {
                 plan.task = Some(RecordTask {
                     segment_seconds: segment_seconds(action),
+                    cameras: cameras_from_action(action),
                 });
                 break;
             }
@@ -231,6 +289,8 @@ pub struct RecordingFile {
     pub point_index: i64,
     pub point_name: String,
     pub size: u64,
+    /// 录像源相机（板端边车里的 `camera`；老文件没有这个字段时按 `dogcam`）
+    pub camera: String,
     pub started_at: String,
     pub ended_at: String,
     pub duration_sec: f64,
@@ -350,6 +410,17 @@ pub struct Recorder {
     uploading: AtomicBool,
 }
 
+/// 起一路录像的参数（相机 / 时长 / 原因都属于「这一次请求」，整包传省得参数一长串）
+struct JobRequest<'a> {
+    task_code: &'a str,
+    scope: &'a str,
+    point_index: i64,
+    point_name: &'a str,
+    seconds: u32,
+    cameras: &'a [String],
+    reason: &'a str,
+}
+
 impl Recorder {
     pub fn new(config: Arc<Config>, enabled: bool) -> Self {
         Self {
@@ -403,12 +474,21 @@ impl Recorder {
                 plan.points.len(),
                 plan.points
                     .iter()
-                    .map(|point| format!("{}={}s", point.index, point.seconds))
+                    .map(|point| format!(
+                        "{}={}s[{}]",
+                        point.index,
+                        point.seconds,
+                        camera_list(&point.cameras)
+                    ))
                     .collect::<Vec<_>>()
                     .join(","),
                 plan.task
                     .as_ref()
-                    .map(|task| format!("每段 {}s", task.segment_seconds))
+                    .map(|task| format!(
+                        "每段 {}s，相机={}",
+                        task.segment_seconds,
+                        camera_list(&task.cameras)
+                    ))
                     .unwrap_or_else(|| "无".to_string())
             );
         }
@@ -427,7 +507,7 @@ impl Recorder {
         if !self.enabled {
             return;
         }
-        let segment = {
+        let task = {
             let state = self.state.lock().await;
             if state.finished
                 || state.task_active
@@ -436,11 +516,13 @@ impl Recorder {
             {
                 return;
             }
-            state.plan.task.as_ref().map(|task| task.segment_seconds)
+            state.plan.task.clone()
         };
-        let Some(segment) = segment else {
+        let Some(task) = task else {
             return;
         };
+        let segment = task.segment_seconds;
+        let cameras = task.cameras;
         let _gate = self.gate.lock().await;
         {
             let state = self.state.lock().await;
@@ -449,12 +531,23 @@ impl Recorder {
             }
         }
         match self
-            .start_job(task_code, "task", -1, "", segment, "任务开始")
+            .start_job(JobRequest {
+                task_code,
+                scope: "task",
+                point_index: -1,
+                point_name: "",
+                seconds: segment,
+                cameras: &cameras,
+                reason: "任务开始",
+            })
             .await
         {
             Ok(()) => {
                 self.state.lock().await.task_active = true;
-                info!("任务 {task_code} 全程录像已开始（每段 {segment}s 落盘）");
+                info!(
+                    "任务 {task_code} 全程录像已开始（每段 {segment}s 落盘，相机={}）",
+                    camera_list(&cameras)
+                );
             }
             Err(error) => self.note_failure(task_code, "全程录像", &error).await,
         }
@@ -496,21 +589,25 @@ impl Recorder {
             self.state.lock().await.point_active = None;
         }
         match self
-            .start_job(
+            .start_job(JobRequest {
                 task_code,
-                "point",
-                point.index,
-                &point.name,
-                point.seconds,
-                "到达航点",
-            )
+                scope: "point",
+                point_index: point.index,
+                point_name: &point.name,
+                seconds: point.seconds,
+                cameras: &point.cameras,
+                reason: "到达航点",
+            })
             .await
         {
             Ok(()) => {
                 self.state.lock().await.point_active = Some(point.index);
                 info!(
-                    "任务 {task_code} 航点 {}（{}）开始录像 {}s",
-                    point.index, point.name, point.seconds
+                    "任务 {task_code} 航点 {}（{}）开始录像 {}s（相机={}）",
+                    point.index,
+                    point.name,
+                    point.seconds,
+                    camera_list(&point.cameras)
                 );
             }
             Err(error) => self.note_failure(task_code, "航点录像", &error).await,
@@ -581,15 +678,16 @@ impl Recorder {
         }
     }
 
-    async fn start_job(
-        &self,
-        task_code: &str,
-        scope: &str,
-        point_index: i64,
-        point_name: &str,
-        seconds: u32,
-        reason: &str,
-    ) -> Result<(), String> {
+    async fn start_job(&self, job: JobRequest<'_>) -> Result<(), String> {
+        let JobRequest {
+            task_code,
+            scope,
+            point_index,
+            point_name,
+            seconds,
+            cameras,
+            reason,
+        } = job;
         let mut body = json!({
             "planId": task_code,
             "scope": scope,
@@ -605,6 +703,11 @@ impl Recorder {
         } else {
             body["seconds"] = json!(seconds);
         }
+        // 多选相机：不传就是板端默认源（历史路线行为不变）。
+        // 板端每一路一个 ffmpeg，起不来的那一路只回 `errors`，不会整条失败。
+        if !cameras.is_empty() {
+            body["cameras"] = json!(cameras);
+        }
         let value = self.post("/api/record/start", body).await?;
         if value.get("ok").and_then(Value::as_bool) == Some(false) {
             return Err(value
@@ -612,6 +715,22 @@ impl Recorder {
                 .and_then(Value::as_str)
                 .unwrap_or("板端拒绝录像")
                 .to_string());
+        }
+        // 部分相机没起来：只记日志（其余几路照录，不能让巡检中断）
+        for key in ["errors", "rejected"] {
+            let Some(items) = value.get(key).and_then(Value::as_array) else {
+                continue;
+            };
+            if !items.is_empty() {
+                warn!(
+                    "任务 {task_code} {scope} 录像有相机没起录（{key}）：{}",
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
         }
         Ok(())
     }
@@ -749,6 +868,7 @@ impl Recorder {
             "pointIndex": file.point_index,
             "pointName": file.point_name,
             "scope": file.scope,
+            "camera": file.camera,
             "startedAt": file.started_at,
             "endedAt": file.ended_at,
             "durationSec": file.duration_sec,
@@ -850,6 +970,13 @@ impl Recorder {
                                 .unwrap_or_default()
                                 .to_string(),
                             size: item.get("size").and_then(Value::as_u64).unwrap_or(0),
+                            // 老板子没有 `camera`：那些录像只可能是默认源 dogcam
+                            camera: item
+                                .get("camera")
+                                .and_then(Value::as_str)
+                                .filter(|camera| !camera.is_empty())
+                                .unwrap_or("dogcam")
+                                .to_string(),
                             started_at: item
                                 .get("startedAt")
                                 .and_then(Value::as_str)
@@ -905,7 +1032,8 @@ mod tests {
                 {"name": "P2", "actions": [{"type": "录像采集", "param": "1080P / 25fps / 15s"}]},
                 {"name": "P3", "actions": [
                     {"type": "可见光拍照"},
-                    {"type": "录像采集", "recordSeconds": 45}
+                    {"type": "录像采集", "recordSeconds": 45,
+                     "recordCameras": ["cam0", "cam1", "dogcam"]}
                 ]}
             ],
             "legs": [
@@ -920,21 +1048,58 @@ mod tests {
                 RecordPoint {
                     index: 1,
                     name: "P2".to_string(),
-                    seconds: 15
+                    seconds: 15,
+                    // 老数据没有 recordCameras：空 = 板端默认源
+                    cameras: vec![]
                 },
                 RecordPoint {
                     index: 2,
                     name: "P3".to_string(),
-                    seconds: 45
+                    seconds: 45,
+                    cameras: vec!["cam0".to_string(), "cam1".to_string(), "dogcam".to_string()]
                 },
             ]
         );
         assert_eq!(
             plan.task,
             Some(RecordTask {
-                segment_seconds: DEFAULT_SEGMENT_SECS
+                segment_seconds: DEFAULT_SEGMENT_SECS,
+                cameras: vec![]
             }),
             "全程录像的 param 里没有秒数时用默认切片"
+        );
+    }
+
+    /// 相机多选：去重、白名单、上限；兼容单个 `recordCamera` 字符串。
+    ///
+    /// 不认识的相机名直接丢，全丢完就退到「板端默认源」——否则路线里一个打字
+    /// 错误会让整条录像静默消失（现场应该只是少录一路）。
+    #[test]
+    fn cameras_are_filtered_deduped_and_capped() {
+        let plan = parse_record_plan(&json!({
+            "points": [
+                {"name": "P1", "actions": [{"type": "录像采集",
+                    "recordCameras": ["cam0", "cam0", "cam9", "cam1", "cam2", "cam3", "dogcam"]}]},
+                {"name": "P2", "actions": [{"type": "录像采集", "recordCamera": "cam2"}]},
+                {"name": "P3", "actions": [{"type": "录像采集", "recordCameras": ["nope"]}]}
+            ],
+            "legs": [{"actions": [{"type": "全程录像", "recordCameras": ["dog-ipcam", "cam1"]}]}]
+        }));
+        assert_eq!(
+            plan.points[0].cameras,
+            vec!["cam0", "cam1", "cam2", "cam3"],
+            "去重 + 丢不认识的 + 截到上限：{:?}",
+            plan.points[0].cameras
+        );
+        assert_eq!(plan.points[1].cameras, vec!["cam2".to_string()]);
+        assert!(
+            plan.points[2].cameras.is_empty(),
+            "全是不认识的相机时退到板端默认源：{:?}",
+            plan.points[2].cameras
+        );
+        assert_eq!(
+            plan.task.expect("应该有全程录像").cameras,
+            vec!["dog-ipcam".to_string(), "cam1".to_string()]
         );
     }
 
@@ -994,12 +1159,10 @@ mod tests {
             )
             .route(
                 "/api/record/list",
-                get(
-                    |State(calls): State<Calls>| async move {
-                        calls.lock().await.push(json!({"path": "list"}));
-                        Json(json!({"files": []}))
-                    },
-                ),
+                get(|State(calls): State<Calls>| async move {
+                    calls.lock().await.push(json!({"path": "list"}));
+                    Json(json!({"files": []}))
+                }),
             )
             .route(
                 "/api/record/delete",
@@ -1024,9 +1187,11 @@ mod tests {
                 index: 1,
                 name: "P2".to_string(),
                 seconds: 12,
+                cameras: vec!["cam0".to_string(), "dogcam".to_string()],
             }],
             task: Some(RecordTask {
                 segment_seconds: 120,
+                cameras: vec!["cam1".to_string()],
             }),
         }
     }
@@ -1065,6 +1230,17 @@ mod tests {
         assert_eq!(starts[1]["body"]["scope"], "point");
         assert_eq!(starts[1]["body"]["pointIndex"], 1);
         assert_eq!(starts[1]["body"]["seconds"], 12);
+        // 多选相机要原样下发（板端每一路一个 ffmpeg）
+        assert_eq!(
+            starts[0]["body"]["cameras"],
+            json!(["cam1"]),
+            "全程录像的相机要下发：{calls:?}"
+        );
+        assert_eq!(
+            starts[1]["body"]["cameras"],
+            json!(["cam0", "dogcam"]),
+            "航点录像的相机要下发：{calls:?}"
+        );
         let stops: Vec<&Value> = calls.iter().filter(|call| call["path"] == "stop").collect();
         assert_eq!(stops.len(), 1, "离开航点只停航点录像：{calls:?}");
         assert_eq!(stops[0]["body"]["scope"], "point");
@@ -1171,10 +1347,7 @@ mod tests {
                     .push(json!({"uploaded": p.uploaded, "total": p.total}));
             });
         };
-        let summary = recorder
-            .sync_all(Some(&report))
-            .await
-            .expect("回传应成功");
+        let summary = recorder.sync_all(Some(&report)).await.expect("回传应成功");
         assert_eq!(summary.scanned, 1);
         assert_eq!(summary.uploaded, 1, "一段应上传成功：{summary}");
         assert_eq!(summary.existing, 0);
@@ -1188,7 +1361,11 @@ mod tests {
             .iter()
             .filter(|call| call["path"] == "delete")
             .collect();
-        assert_eq!(deletes.len(), 1, "删板端文件走 /api/record/delete：{agent_calls:?}");
+        assert_eq!(
+            deletes.len(),
+            1,
+            "删板端文件走 /api/record/delete：{agent_calls:?}"
+        );
         assert_eq!(
             deletes[0]["body"]["names"][0].as_str(),
             Some(format!("TK-1/{}", path.file_name().unwrap().to_string_lossy()).as_str()),
@@ -1203,7 +1380,9 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let progress = progress.lock().await.clone();
         assert!(
-            progress.iter().any(|p| p["total"] == 1 && p["uploaded"] == 0),
+            progress
+                .iter()
+                .any(|p| p["total"] == 1 && p["uploaded"] == 0),
             "开传前要先报一次总量：{progress:?}"
         );
         assert!(
@@ -1217,13 +1396,19 @@ mod tests {
     /// 已启用时重复下发：第二轮直接拒绝（不让两份上传抢带宽）。
     #[tokio::test]
     async fn sync_all_refuses_to_run_twice() {
-        let recorder = Arc::new(Recorder::new(Arc::new(test_config("http://127.0.0.1:1")), true));
+        let recorder = Arc::new(Recorder::new(
+            Arc::new(test_config("http://127.0.0.1:1")),
+            true,
+        ));
         recorder.uploading.store(true, Ordering::SeqCst);
         let error = recorder.sync_all(None).await.expect_err("第二轮应被拒绝");
         assert!(error.contains("还在跑"), "{error}");
         recorder.uploading.store(false, Ordering::SeqCst);
         // 未启用的实例也不该跑
-        let disabled = Arc::new(Recorder::new(Arc::new(test_config("http://127.0.0.1:1")), false));
+        let disabled = Arc::new(Recorder::new(
+            Arc::new(test_config("http://127.0.0.1:1")),
+            false,
+        ));
         let error = disabled.sync_all(None).await.expect_err("未启用应拒绝");
         assert!(error.contains("未启用"), "{error}");
     }

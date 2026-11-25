@@ -36,6 +36,8 @@ import {
   LEG_MODES,
   PHOTO_CAMERAS,
   PHOTO_MAX_FRAMES,
+  RECORD_CAMERAS,
+  RECORD_MAX_CAMERAS,
   RETIRED_ACTIONS,
   SPEAK_LEG_DEFAULT_SECS,
   SPEAK_MAX_CHARS,
@@ -192,6 +194,14 @@ const actionForm = reactive({
    */
   recordSegmentSeconds: 300,
   /**
+   * 「录像采集 / 全程录像」：录哪几路（可多选）。
+   *
+   * 选几路板端就起几个 ffmpeg（各自一个 mp4）：`dogcam` = 正前（机器狗前置），
+   * `cam0`~`cam3` = 背包四路（左前 / 右前 / 右后 / 左后），`dog-ipcam` = 红外。
+   * 新建动作默认只录正前；老数据没这个字段时客户端按板端默认源（dogcam）录。
+   */
+  recordCameras: ["dogcam"] as string[],
+  /**
    * 「语音播报」：真正被念出来的话术。
    *
    * 板端 TTS 只认中文汉字 + 中文标点 + 数字（无空格，中文 ≤30 字），
@@ -326,16 +336,60 @@ function isRecordActionOf(action: { type?: string } | null | undefined) {
   return String(action?.type ?? "").includes("录像");
 }
 
+/** 相机短名（录像卡片上用）：「正前 / 左前 / 右前 / 右后 / 左后 / 红外」 */
+function recordCameraLabel(value?: string | null) {
+  const camera = String(value ?? "").trim();
+  const found = RECORD_CAMERAS.find(item => item.value === camera);
+  if (!found) return camera || "正前";
+  // 去掉括号里的说明（卡片一行放得下）
+  return found.label.replace(/（.*?）/g, "");
+}
+
+/** 多路相机的展示名：`dogcam,cam0` → 「正前+左前」；空 = 板端默认源 */
+function recordCamerasLabel(cameras?: string[] | null) {
+  const list = Array.isArray(cameras) ? cameras.filter(Boolean) : [];
+  if (!list.length) return "正前";
+  return list.map(recordCameraLabel).join("+");
+}
+
 /** 动作卡片上的录像参数（老数据没字段时按默认值展示） */
 function actionRecordLabel(action: {
   type?: string;
   recordSeconds?: number;
   recordSegmentSeconds?: number;
+  recordCameras?: string[];
 }) {
+  const cameras = recordCamerasLabel(action?.recordCameras);
   if (String(action?.type ?? "").includes("全程")) {
-    return `全程录像 · 每段 ${clampSeconds(action?.recordSegmentSeconds, 30, 1800, 300)} 秒`;
+    return `全程录像 · 每段 ${clampSeconds(action?.recordSegmentSeconds, 30, 1800, 300)} 秒 · ${cameras}`;
   }
-  return `航点录像 · ${clampSeconds(action?.recordSeconds ?? 15, 3, 300, 15)} 秒`;
+  return `航点录像 · ${clampSeconds(action?.recordSeconds ?? 15, 3, 300, 15)} 秒 · ${cameras}`;
+}
+
+/**
+ * 多选相机：勾上 / 取消勾选，超过上限就挡回去（与板端 / 客户端同一上限）。
+ *
+ * 不用 `v-model` 直接绑数组：超限时静默丢最后一个会让人以为按钮坏了。
+ */
+function toggleRecordCamera(value: string, checked: boolean) {
+  const picked = actionForm.recordCameras;
+  if (checked) {
+    if (picked.includes(value)) return;
+    if (picked.length >= RECORD_MAX_CAMERAS) {
+      ElMessage.warning(`最多同时录 ${RECORD_MAX_CAMERAS} 路，先取消一路再选`);
+      return;
+    }
+    picked.push(value);
+  } else {
+    const index = picked.indexOf(value);
+    if (index >= 0) picked.splice(index, 1);
+  }
+}
+
+/** 模板里的复选框事件 → `toggleRecordCamera`（不在模板里写 TS 断言） */
+function onRecordCameraChange(value: string, event: Event) {
+  const target = event.target as HTMLInputElement | null;
+  toggleRecordCamera(value, !!target?.checked);
 }
 
 /** 动作卡片上的任务类型文案：老数据没 `checkType` 时按有无 `expectCount` 推断 */
@@ -1279,6 +1333,12 @@ function openActionDialog(kind: "point" | "leg", index: number | null = null) {
       lightLed: existing.lightLed === true,
       recordSeconds: Number(existing.recordSeconds) || 15,
       recordSegmentSeconds: Number(existing.recordSegmentSeconds) || 300,
+      // 老数据没有 recordCameras：留空 = 板端默认源（历史路线行为不变）
+      recordCameras: Array.isArray(existing.recordCameras)
+        ? existing.recordCameras.filter((camera: string) =>
+            RECORD_CAMERAS.some(item => item.value === camera)
+          )
+        : [],
       // 老数据只有动作库占位 `param`（「安全提示语音 01」），别把它当成话术回填
       speakText: existing.speakText ?? "",
       speakSeconds: Number(existing.speakSeconds) || 0,
@@ -1311,6 +1371,7 @@ function openActionDialog(kind: "point" | "leg", index: number | null = null) {
     lightLed: false,
     recordSeconds: 15,
     recordSegmentSeconds: 300,
+    recordCameras: ["dogcam"],
     speakText: "",
     // 行进任务本来就是「行进中持续执行」：默认循环播一段，离开航段会提前停；
     // 航点动作默认只播一次（操作员要循环就自己填时长）
@@ -1338,6 +1399,7 @@ function syncActionDefaults() {
   actionForm.lightLed = false;
   actionForm.recordSeconds = 15;
   actionForm.recordSegmentSeconds = 300;
+  actionForm.recordCameras = ["dogcam"];
   actionForm.speakText = "";
   actionForm.speakSeconds = actionKind.value === "leg" ? SPEAK_LEG_DEFAULT_SECS : 0;
   actionForm.photoCamera = "dogcam";
@@ -1436,6 +1498,10 @@ function saveAction() {
       : {}),
     ...(actionKind.value === "leg" && isTaskRecordAction.value
       ? { recordSegmentSeconds: clampSeconds(actionForm.recordSegmentSeconds, 30, 1800, 300) }
+      : {}),
+    // 录像源：可多选（选几路板端起几个 ffmpeg）。空 = 板端默认源 dogcam
+    ...(isRecordAction.value && actionForm.recordCameras.length
+      ? { recordCameras: [...actionForm.recordCameras].slice(0, RECORD_MAX_CAMERAS) }
       : {}),
     // 可见光拍照：抓拍源 + 张数（老数据没有这两个字段 → 板端按 dogcam / 1 张）
     ...(photo
@@ -2538,6 +2604,31 @@ onBeforeUnmount(() => {
               到达航点后录这么久；中途离开航点会提前收尾（3~300 秒，默认 15 秒）。
             </div>
           </div>
+          <!-- 录像源：可多选（每选一路板端起一个 ffmpeg），正前 = 机器狗前置 -->
+          <div
+            v-if="isRecordAction && actionKind === 'point'"
+            class="field"
+            style="grid-column: 1 / -1"
+          >
+            <label>
+              录像相机
+              <span class="muted">（可多选，最多 {{ RECORD_MAX_CAMERAS }} 路）</span>
+            </label>
+            <div style="display: flex; gap: 16px; flex-wrap: wrap">
+              <label v-for="camera in RECORD_CAMERAS" :key="camera.value" class="chk">
+                <input
+                  type="checkbox"
+                  :checked="actionForm.recordCameras.includes(camera.value)"
+                  @change="onRecordCameraChange(camera.value, $event)"
+                />
+                {{ camera.label }}
+              </label>
+            </div>
+            <div class="rt-hint" style="margin: 4px 0 0">
+              每选一路板端就多起一个 ffmpeg（互不影响），回传后在任务详情「任务录像」里按相机区分。
+              <b>不选 = 板端默认源（正前）</b>；4G 上多一路就多占一份上行。
+            </div>
+          </div>
 
           <!-- 可见光拍照：抓拍源 + 张数（板端 Agent 从本机 mediamtx 抓 JPEG） -->
           <div v-if="isPhotoAction" class="field">
@@ -2667,6 +2758,25 @@ onBeforeUnmount(() => {
           <div class="rt-hint" style="margin: 4px 0 0">
             全程录像从任务开始一直录到终态 / 取消，按这个长度切 mp4 逐段回传
             （30~1800 秒，默认 300 秒；4G 上一段越短越不怕断网）。
+          </div>
+          <!-- 录像源（全程录像）：与航点录像共用同一份 `recordCameras` 字段 -->
+          <label style="margin-top: 12px">
+            录像相机
+            <span class="muted">（可多选，最多 {{ RECORD_MAX_CAMERAS }} 路）</span>
+          </label>
+          <div style="display: flex; gap: 16px; flex-wrap: wrap">
+            <label v-for="camera in RECORD_CAMERAS" :key="camera.value" class="chk">
+              <input
+                type="checkbox"
+                :checked="actionForm.recordCameras.includes(camera.value)"
+                @change="onRecordCameraChange(camera.value, $event)"
+              />
+              {{ camera.label }}
+            </label>
+          </div>
+          <div class="rt-hint" style="margin: 4px 0 0">
+            整条任务按这几路同时录（每路自己切片、自己回传）。<b>不选 = 板端默认源（正前）</b>；
+            路数越多板端占用越大，4G 专线上建议先只录正前。
           </div>
         </div>
         <div v-else-if="isSpeakAction" class="field" style="grid-column: 1 / -1">

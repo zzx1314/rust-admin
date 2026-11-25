@@ -198,8 +198,12 @@ DETECT_PLAN_SAVE_FRAMES = max(1, min(10, int(os.getenv("DETECT_PLAN_SAVE_FRAMES"
 # 默认与 AI 存证同在 /media（SSD），不要指到 eMMC。
 RECORD_DIR = os.getenv("RECORD_DIR", "/media/media-data/record")
 # 录像源：逻辑摄像头名（默认机器狗前置 dogcam，与 AI 抽帧同一路）。
-# 也可以填 cam0~cam3 录背包自己的一路；dogcam 会按当前档位自动选 dogcam/dogcam720。
+# 路线动作里可以按航点 / 航段多选（`recordCameras`）：cam0~cam3 录背包四路、
+# dog-ipcam 录红外；**没配时才用这个值**。dogcam 会按当前档位自动选 dogcam/dogcam720。
 RECORD_SOURCE_CAM = os.getenv("RECORD_SOURCE_CAM", "dogcam")
+# 一次最多录几路（多选）：每一路一个 ffmpeg + 一个 mp4，路数越多上行占用越大。
+# 超出部分板端只丢多的几路并在回执里说明，不会整条录像失败。
+RECORD_MAX_CAMERAS = max(1, int(os.getenv("RECORD_MAX_CAMERAS", "4")))
 # 拉流地址走本机 mediamtx（与 detect.py 的旁路一致，不碰 v4l2）
 RECORD_RTSP_HOST = os.getenv("RECORD_RTSP_HOST", "127.0.0.1")
 # 航点录像默认时长 / 上限（秒）。路线动作里可以按点配（`recordSeconds`）

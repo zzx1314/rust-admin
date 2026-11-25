@@ -171,9 +171,16 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 
 **航点「录像采集」/ 航段「全程录像」**（2026-11-24 起可用）：两类录像动作都在路线
 编辑器里配（航点动作 `recordSeconds` 3~300 默认 15；行进任务 `recordSegmentSeconds`
-30~1800 默认 300 切片），起停时机**只在设备客户端**（`client/src/record.rs`）按 5009
+30~1800 默认 300 切片；两者都带 `recordCameras` 多选相机，2026-11-25 起可用），
+起停时机**只在设备客户端**（`client/src/record.rs`）按 5009
 状态机决定：航点录像到点起、离开停；全程录像在这条任务第一个非终态帧起、终态/取消停。
-板端 Agent `POST /api/record/start|stop` 用 ffmpeg 从本机 mediamtx 的 dogcam 拉流，
+**录哪几路可选**：`dogcam` = 正前（机器狗前置）、`cam0`~`cam3` = 背包四路 USB
+（左前 / 右前 / 右后 / 左后）、`dog-ipcam` = 红外；**选几路就同时录几路**
+（板端每一路一个 ffmpeg + 一个 mp4，文件名带相机名）。不配 / 老数据 = 板端默认源
+（`RECORD_SOURCE_CAM`，默认 `dogcam`）；上限 `RECORD_MAX_CAMERAS`（默认 4）。
+某一路上游没推流 / 相机名写错**只丢那一路**（回执 `errors` / `rejected`），
+其余照录 —— 不能让一路的问题把整条录像废掉。
+板端 Agent `POST /api/record/start|stop` 用 ffmpeg 从本机 mediamtx 拉对应流，
 `-c copy` 封装 mp4（不重编码、不抢 MPP），落 `RECORD_DIR/<计划>/`，停下写同名边车。
 **回传是「平台按需」的（2026-11-25 起）**：任务终态 / 取消 / 客户端启动都**只留在
 板端**（`RECORD_DIR/<计划>/`），平台下发指令 `回传录像` 才由客户端读
@@ -181,7 +188,8 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 **上传成功才**回调 `/api/record/delete` 删板端文件；进度/结论走与「同步媒体」同一套
 `command_progress` / `command_result`（中台设备页「录像回传状态」）。原因：现场主用
 4G，一场巡检几百 MB，终态就传会和下一轮的地图/状态上报抢带宽、而那会儿多半没人看。
-任务详情「任务录像」播放/下载（`GET /api/recordings/{id}/file` 支持 Range），
+任务详情「任务录像」播放/下载（`GET /api/recordings/{id}/file` 支持 Range，列表带
+`camera` 标明是哪一路），
 超期由 `schedule::sweep` → `recordings::sweep_expired` 按 `recording_keep_days` 清。
 三条红线：**录像失败绝不影响巡检**（Agent 404/磁盘满都只记 `unsupported`，不抛错）；
 **5009 幂等**（每帧都会调用，按「任务+航点/全程已起」去重，Agent 侧也幂等）；

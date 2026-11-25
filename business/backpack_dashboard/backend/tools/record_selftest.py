@@ -115,24 +115,83 @@ def main():
         args,
     )
 
-    # 2.1) 同一计划同时有全程 + 航点两路：各自只认自己的文件
+    # 2.1) 同一计划同时有全程 + 航点两路：各自只认自己的文件（前缀 + 相机）
     record.start({"planId": "TK-3", "scope": "task", "segmentSeconds": 60})
     record.start({"planId": "TK-3", "scope": "point", "pointIndex": 0, "seconds": 5})
     # 全程录像的第二段在航点录像开始之后才落盘（segment 切片就是这个时序）
-    with open(os.path.join(tmp, "TK-3",
-                           "task-%s.mp4" % time.strftime("%Y%m%d-%H%M%S")), "wb") as handle:
+    with open(os.path.join(tmp, "TK-3", "task-dogcam-20991231-000000.mp4"), "wb") as handle:
         handle.write(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 128)
     record.stop({"planId": "TK-3", "scope": "point", "reason": "离开航点"})
     names = [item["name"] for item in record.list_files("TK-3")]
     failures += not check(
         "航点录像只收自己的片段",
+        # 全程那一轮的片段此刻还在录，`list` 不会返回未收尾的文件（避免传半截）
         len(names) == 1 and "/pt0-" in names[0],
         names,
     )
     record.stop({"planId": "TK-3", "reason": "任务终态"})
-    failures += not check("全程录像收尾后两路都在",
-                          len(record.list_files("TK-3")) == 2,
+    failures += not check("全程录像收尾后都在",
+                          len(record.list_files("TK-3")) == 3,
                           record.list_files("TK-3"))
+
+    # 2.2) 多选相机：同一航点同时录 3 路（左前 / 右前 / 正前）
+    ARGS.clear()
+    r = record.start({"planId": "TK-4", "scope": "point", "pointIndex": 1,
+                      "seconds": 5, "cameras": ["cam0", "cam1", "dogcam"]})
+    failures += not check("多路 start ok", r.get("ok") and r.get("created"), r)
+    failures += not check("多路起了 3 个 job", len(record.status()["jobs"]) == 3,
+                          record.status()["jobs"])
+    sources = [args[args.index("-i") + 1] for args in ARGS]
+    failures += not check(
+        "每路各拉各的流",
+        sorted(url.rsplit("/", 1)[-1] for url in sources) == ["cam0", "cam1", "dogcam"],
+        sources,
+    )
+    failures += not check(
+        "三路输出文件名各不相同",
+        len({args[-1] for args in ARGS}) == 3,
+        [args[-1] for args in ARGS],
+    )
+    again = record.start({"planId": "TK-4", "scope": "point", "pointIndex": 1,
+                          "seconds": 5, "cameras": ["cam0", "cam1", "dogcam"]})
+    failures += not check("多路重复 start 幂等", again.get("created") is False, again)
+    failures += not check("幂等时不起新 ffmpeg", len(ARGS) == 3, len(ARGS))
+    record.stop({"planId": "TK-4", "scope": "point", "pointIndex": 1,
+                 "reason": "离开航点"})
+    multi = record.list_files("TK-4")
+    failures += not check("多路停止后 3 段都在", len(multi) == 3, multi)
+    failures += not check(
+        "每段的边车都记了相机",
+        sorted(item["camera"] for item in multi) == ["cam0", "cam1", "dogcam"],
+        [(item["name"], item["camera"]) for item in multi],
+    )
+    failures += not check(
+        "文件名带相机名（回传后能分清哪一路）",
+        all("-%s-" % item["camera"] in item["name"] for item in multi),
+        [item["name"] for item in multi],
+    )
+
+    # 2.3) 相机名写错只丢那一路；超出上限截断（不能整条录像失败）
+    ARGS.clear()
+    r = record.start({"planId": "TK-5", "scope": "point", "pointIndex": 0,
+                      "cameras": ["cam9", "cam0"]})
+    failures += not check("坏相机名不影响好的一路", r.get("ok"), r)
+    failures += not check("坏相机名进 rejected", "cam9" in (r.get("rejected") or []), r)
+    failures += not check("只起了 1 路", len(ARGS) == 1, ARGS)
+    record.stop({"planId": "TK-5", "reason": "清理"})
+    ARGS.clear()
+    too_many = ["cam0", "cam1", "cam2", "cam3", "dogcam", "dog-ipcam"]
+    r = record.start({"planId": "TK-6", "scope": "point", "pointIndex": 0,
+                      "cameras": too_many})
+    cap = max(1, int(getattr(config, "RECORD_MAX_CAMERAS", 4)))
+    failures += not check("超上限只起 %d 路" % cap, len(ARGS) == cap, len(ARGS))
+    failures += not check("超出的进 rejected", len(r.get("rejected") or []) == len(too_many) - cap, r)
+    record.stop({"planId": "TK-6", "reason": "清理"})
+    # 不传相机时退到 RECORD_SOURCE_CAM（历史路线行为不变）
+    ARGS.clear()
+    record.start({"planId": "TK-7", "scope": "point", "pointIndex": 0})
+    failures += not check("不配相机仍录默认源", len(ARGS) == 1, ARGS)
+    record.stop({"planId": "TK-7", "reason": "清理"})
 
     # 3) 删除：只认 plan/文件名，越界一律拒绝
     name = files[0]["name"] if files else ""

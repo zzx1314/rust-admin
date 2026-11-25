@@ -3,12 +3,12 @@
 //! 链路（录像本身在板端，平台只管存与看）：
 //!
 //! ```text
-//! 路线动作「录像采集 / 全程录像」
+//! 路线动作「录像采集 / 全程录像」（可多选相机 `recordCameras`）
 //!   → 设备客户端在 5009 状态机起停时机调板端 Agent（/api/record/*）
-//!     → Agent 用 ffmpeg 从本机 mediamtx 的 dogcam 拉流落 mp4
+//!     → Agent 每一路一个 ffmpeg，从本机 mediamtx 拉流落 mp4（文件名带相机名）
 //!       → 客户端 POST /api/recordings/ingest（本模块，multipart：file + meta）
 //!         → 落盘 <recording_dir>/<设备>/<任务号>/…mp4 + 一条 task_recordings
-//!           → 任务详情「任务录像」直接播放 / 下载
+//!           → 任务详情「任务录像」直接播放 / 下载（按相机区分）
 //! ```
 //!
 //! 为什么不上中台「媒体资源」：那边是 AI 存证**训练图**（JPG/PNG、sha256 去重、
@@ -73,6 +73,11 @@ pub struct TaskRecording {
     pub point_name: Option<String>,
     /// `point`（航点录像）/ `task`（航段全程录像）
     pub scope: String,
+    /// 录像源相机（`dogcam` / `cam0`~`cam3` / `dog-ipcam`）。
+    ///
+    /// 老客户端（板端还没升级多路录像）不传 `camera`，入库按 `dogcam` 算——
+    /// 那时候板端只可能录默认源。
+    pub camera: String,
     pub file_name: String,
     pub file_size: i64,
     pub duration_sec: f64,
@@ -133,6 +138,9 @@ struct IngestMeta {
     point_name: Option<String>,
     #[serde(default)]
     scope: Option<String>,
+    /// 录像源相机（`cameras` 多选时每路一条记录，各带自己的相机名）
+    #[serde(default)]
+    camera: Option<String>,
     #[serde(default)]
     started_at: Option<String>,
     #[serde(default)]
@@ -146,15 +154,15 @@ struct IngestMeta {
 }
 
 const RECORDING_SELECT: &str = "SELECT id, task_id, task_code, device_code, plan_id, point_index, \
-     point_name, scope, file_name, file_size, duration_s AS duration_sec, started_at, ended_at, \
-     created_at FROM task_recordings";
+     point_name, scope, camera, file_name, file_size, duration_s AS duration_sec, started_at, \
+     ended_at, created_at FROM task_recordings";
 
 /// `POST /api/recordings/ingest` — 设备客户端回传一段录像。
 ///
 /// multipart 两个字段：
 ///
 /// - `file`：`.mp4`（≤ [`RECORDING_MAX_BYTES`]）；
-/// - `meta`：`{taskCode, deviceCode, planId, pointIndex, pointName, scope, startedAt,
+/// - `meta`：`{taskCode, deviceCode, planId, pointIndex, pointName, scope, camera, startedAt,
 ///   endedAt, durationSec}`（客户端从板端边车 `/api/record/list` 里拿）。
 ///
 /// 回 `{ created, recording }`：`created=false` 表示这段之前传过（sha256 命中）。
@@ -358,6 +366,11 @@ async fn save_recording(
         Some("task") => "task",
         _ => "point",
     };
+    // 相机名只保留字母数字与 `-` `_`（`dog-ipcam` 本来就带连字符）；空就是默认源
+    let camera = match meta.camera.as_deref().map(str::trim) {
+        Some(camera) if !camera.is_empty() => safe_component(camera),
+        _ => "dogcam".to_string(),
+    };
     let point_index = meta.point_index.unwrap_or(-1).max(-1);
     let device_dir = safe_component(if device_code.is_empty() {
         "unknown"
@@ -390,9 +403,9 @@ async fn save_recording(
     let created_at = now();
     let result = sqlx::query(
         "INSERT INTO task_recordings (task_id, task_code, device_id, park_id, device_code, plan_id,
-            point_index, point_name, scope, file_name, file_path, file_size, duration_s,
+            point_index, point_name, scope, camera, file_name, file_path, file_size, duration_s,
             started_at, ended_at, sha256, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
     )
     .bind(task_id)
     .bind(task_code)
@@ -403,6 +416,7 @@ async fn save_recording(
     .bind(point_index)
     .bind(&meta.point_name)
     .bind(scope)
+    .bind(&camera)
     .bind(&file_name)
     .bind(&relative)
     .bind(file.size as i64)
@@ -434,6 +448,7 @@ async fn save_recording(
         device = %device_code,
         scope,
         point = point_index,
+        camera = %camera,
         size = file.size,
         file = %file.name,
         "巡检录像已入库（{label}）"
@@ -443,7 +458,7 @@ async fn save_recording(
          VALUES ('recording', '录像回传', ?1, ?2, ?3, ?4)",
     )
     .bind(format!(
-        "{label} · {:.1}s · {:.1}MB",
+        "{label} · {camera} · {:.1}s · {:.1}MB",
         duration,
         file.size as f64 / 1024.0 / 1024.0
     ))

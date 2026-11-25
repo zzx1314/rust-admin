@@ -137,6 +137,25 @@ export const PHOTO_CAMERAS = [
 export const PHOTO_MAX_FRAMES = 5;
 
 /**
+ * 录像源相机（航点「录像采集」/ 航段「全程录像」→ 路线动作 `recordCameras`）。
+ *
+ * **可多选**：选几路板端就起几个 ffmpeg（各自一个 mp4），回传到任务详情后按相机
+ * 区分。可选范围与 `backend/record.py::allowed_cameras()`、
+ * `client/src/record.rs::RECORD_CAMERAS` 是同一份（改这里记得同步两边）。
+ */
+export const RECORD_CAMERAS = [
+  { value: "dogcam", label: "正前（机器狗前置）" },
+  { value: "cam0", label: "左前（背包）" },
+  { value: "cam1", label: "右前（背包）" },
+  { value: "cam2", label: "右后（背包）" },
+  { value: "cam3", label: "左后（背包）" },
+  { value: "dog-ipcam", label: "红外相机" }
+];
+
+/** 一次最多录几路（与客户端 `record.rs::MAX_CAMERAS` / 板端 `RECORD_MAX_CAMERAS` 一致） */
+export const RECORD_MAX_CAMERAS = 4;
+
+/**
  * 已下线的动作类型（新建动作时**不再提供**）。
  *
  * 老路线里可能还存着这些动作（它们是纯描述、没有执行逻辑，删掉不影响任务），

@@ -28,8 +28,6 @@ use tokio::net::TcpListener;
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
-/// 每个用例有自己的 `AppState`（也就有自己的 AI 窗口），但都会起假 Agent / 真端口，
-
 struct TempDb {
     dir: PathBuf,
 }

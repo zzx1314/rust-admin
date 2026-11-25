@@ -27,8 +27,6 @@ use tokio_tungstenite::tungstenite::Message;
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
-/// 这些用例会起真实的 axum + WS + 假企微，串行跑更稳（窗口状态本身已经
-
 struct TempDb {
     dir: PathBuf,
 }

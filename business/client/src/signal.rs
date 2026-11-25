@@ -113,7 +113,10 @@ impl SignalProbe {
                 };
             }
             Ok(response) => {
-                debug!("板端没有 /api/network（{}），退回 /api/wifi", response.status());
+                debug!(
+                    "板端没有 /api/network（{}），退回 /api/wifi",
+                    response.status()
+                );
             }
             Err(error) => {
                 debug!("板端 /api/network 不可达（信号暂不上报）: {error}");
@@ -122,20 +125,16 @@ impl SignalProbe {
         }
         // 老 Agent（只升级了客户端）：只能报 WiFi，4G 不猜
         let url = format!("{}/api/wifi", self.agent);
-        match self
-            .client
-            .get(&url)
-            .timeout(LEGACY_TIMEOUT)
-            .send()
-            .await
-        {
-            Ok(response) if response.status().is_success() => match response.json::<Value>().await {
-                Ok(value) => parse_wifi(&value),
-                Err(error) => {
-                    debug!("板端 /api/wifi 响应不是合法 JSON: {error}");
-                    None
+        match self.client.get(&url).timeout(LEGACY_TIMEOUT).send().await {
+            Ok(response) if response.status().is_success() => {
+                match response.json::<Value>().await {
+                    Ok(value) => parse_wifi(&value),
+                    Err(error) => {
+                        debug!("板端 /api/wifi 响应不是合法 JSON: {error}");
+                        None
+                    }
                 }
-            },
+            }
             Ok(response) => {
                 debug!("板端 /api/wifi 返回 {}（信号暂不上报）", response.status());
                 None

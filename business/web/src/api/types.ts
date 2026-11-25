@@ -288,6 +288,14 @@ export interface RoutePointAction {
    */
   recordSeconds?: number;
   /**
+   * 「录像采集 / 全程录像」专用：录哪几路（可多选）。
+   *
+   * 可选 `dogcam`（正前 / 机器狗前置）、`cam0`~`cam3`（背包四路 USB：左前 / 右前 /
+   * 右后 / 左后）、`dog-ipcam`（红外）。板端**每一路一个 ffmpeg + 一个 mp4**，
+   * 回传后任务详情里按相机区分。不配（空）/ 老数据 = 板端默认源（`dogcam`）。
+   */
+  recordCameras?: string[];
+  /**
    * 「全程录像」专用：板端切片长度（秒，30~1800，默认 300）。
    *
    * 全程录像跨航点一直录到任务终态；按这个长度切 mp4，客户端逐段回传到平台，
@@ -344,7 +352,16 @@ export interface TaskRecording {
   planId: string | null;
   pointIndex: number;
   pointName: string | null;
+  /**
+   * `point`（航点录像）/ `task`（航段全程录像）
+   */
   scope: "point" | "task";
+  /**
+   * 录像源相机（`dogcam` / `cam0`~`cam3` / `dog-ipcam`）。
+   *
+   * 多选录像时同一航点会有多段，各带自己的相机名；老数据默认 `dogcam`。
+   */
+  camera: string;
   fileName: string;
   fileSize: number;
   /** 录像时长（秒） */
