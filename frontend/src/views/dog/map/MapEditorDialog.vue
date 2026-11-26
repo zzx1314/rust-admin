@@ -6,15 +6,15 @@
  * 编辑后的地图）转成 PNG，没有编辑版时才用 model.pgm / map.pgm，
  * 这里按栅格原始像素尺寸画到 canvas 上，支持缩放、拖动浏览。
  *
- * 编辑：橡皮擦按栅格像素坐标记录笔画，每一笔都记下自己的擦除值（254 = 可通行，
- * 默认；128 = 未知），提交 `POST /api/dogMap/{id}/edit`。后端按笔画把这些像素
- * 改写为对应灰度值并重算 map_hash；根目录的建图原始 map.pgm 不会被改。
+ * 编辑：橡皮擦按栅格像素坐标记录笔画，每一笔写入 254（可通行）并提交
+ * `POST /api/dogMap/{id}/edit`。后端按笔画把这些像素改写为 254 并重算
+ * map_hash；根目录的建图原始 map.pgm 不会被改。
  * 已发布 / 已归档版本不可编辑，需要先派生新版本。
  *
- * ⚠️ 「未知」必须写 128，不能写 205：本体 `map.yaml` 是 `free_thresh: 0.2`，
- * `205 → p=0.1961 < 0.2` 会被判成**可通行**（205 是 ROS map_saver 配
- * `free_thresh: 0.196` 的旧约定）。2026-11-24 广汇二期就是这个坑：现场把
- * 一片不可通行区擦成 205，本体直接穿了过去。
+ * 擦除值只有 **254（可通行）** 一种，与遥控器保持一致：遥控器的橡皮擦只会写 254，
+ * 保存时按「根图 + 擦除圆」重算栅格，根本表达不了「未知」——平台这边能擦成 128 的话，
+ * 现场在遥控器上一保存就被整体冲掉。要标禁行请用「禁止区域」（栅格刷成 0）。
+ * 接口仍接受 `128` 与旧 `205`（历史客户端 / 脚本），但本页面不再提供。
  */
 import { computed, nextTick, ref } from "vue";
 import { ElMessageBox } from "element-plus";
@@ -60,7 +60,10 @@ const meta = ref({
 });
 const tool = ref<Tool>("pan");
 const brushRadius = ref(8);
-const eraseValue = ref(254);
+/** 橡皮擦写入的灰度值：只擦成可通行，与遥控器一致（不再提供「擦成未知 128」）。 */
+const ERASE_VALUE = 254;
+/** 画布上的擦除颜色：PNG 是灰度图，按同值上色即可。 */
+const ERASE_COLOR = `rgb(${ERASE_VALUE},${ERASE_VALUE},${ERASE_VALUE})`;
 const zoom = ref(1);
 const dirty = ref(false);
 const cursor = ref({ x: 0, y: 0, visible: false });
@@ -148,7 +151,6 @@ function resetState() {
   tool.value = "pan";
   zoom.value = 1;
   brushRadius.value = 8;
-  eraseValue.value = 254;
   cursor.value.visible = false;
 }
 
@@ -229,11 +231,6 @@ function drawBase(
   });
 }
 
-/** 灰度值 → 画布颜色（PNG 是灰度图，直接按同值上色即可）。 */
-function valueColor(value: number) {
-  return `rgb(${value},${value},${value})`;
-}
-
 /** 重绘：底图 + 回放未保存的笔画。 */
 function render() {
   const canvas = canvasRef.value;
@@ -285,12 +282,9 @@ function paintForbiddenAreas(context: CanvasRenderingContext2D) {
 
 function paintStroke(context: CanvasRenderingContext2D, stroke: MapEditStroke) {
   const radius = stroke.radius ?? brushRadius.value;
-  // 颜色必须跟着笔画自己记录的值走：先擦成可通行、再切到未知并撤销时，
-  // 早先那几笔不能被当前选中的值重新上色（否则可通行区域会变成未知）。
-  const color = valueColor(stroke.value ?? eraseValue.value);
   context.save();
-  context.fillStyle = color;
-  context.strokeStyle = color;
+  context.fillStyle = ERASE_COLOR;
+  context.strokeStyle = ERASE_COLOR;
   context.lineWidth = radius * 2;
   context.lineCap = "round";
   context.lineJoin = "round";
@@ -384,12 +378,7 @@ function onPointerDown(event: PointerEvent) {
   canvas.setPointerCapture(event.pointerId);
   drawing = true;
   const point = toPixel(event);
-  currentStroke = {
-    points: [point],
-    radius: brushRadius.value,
-    // 值在落笔时就固定，之后切换「可通行 / 未知」不影响这一笔
-    value: eraseValue.value
-  };
+  currentStroke = { points: [point], radius: brushRadius.value };
   strokes.push(currentStroke);
   dirty.value = true;
   if (ctx) paintStroke(ctx, currentStroke);
@@ -421,12 +410,11 @@ function onPointerMove(event: PointerEvent) {
   };
   currentStroke.points.push(next);
   if (ctx) {
-    // 只补画新增的一段，避免每次重绘整张图；颜色用笔画自己的值
+    // 只补画新增的一段，避免每次重绘整张图
     const radius = currentStroke.radius ?? brushRadius.value;
-    const color = valueColor(currentStroke.value ?? eraseValue.value);
     ctx.save();
-    ctx.fillStyle = color;
-    ctx.strokeStyle = color;
+    ctx.fillStyle = ERASE_COLOR;
+    ctx.strokeStyle = ERASE_COLOR;
     ctx.lineWidth = radius * 2;
     ctx.lineCap = "round";
     ctx.beginPath();
@@ -540,11 +528,7 @@ async function save() {
     let latest: any = null;
 
     if (strokes.length) {
-      const { code, msg, data } = await dogMapErase(
-        row.id,
-        strokes,
-        eraseValue.value
-      );
+      const { code, msg, data } = await dogMapErase(row.id, strokes);
       if (code !== SUCCESS || !data) {
         message(msg || "保存失败", { type: "error" });
         return;
@@ -700,18 +684,11 @@ defineExpose({ open });
         </el-tooltip>
 
         <el-tooltip
-          content="254 = 可通行（擦掉噪点）；128 = 未知/不可通行（本体规划器不会走）"
+          v-if="tool === 'eraser'"
+          content="橡皮擦只把像素擦成可通行 (254)，与遥控器一致；要标禁行请用「禁止区域」。"
           placement="top"
         >
-          <el-select
-            v-model="eraseValue"
-            size="small"
-            style="width: 150px"
-            :disabled="!canEdit"
-          >
-            <el-option label="擦成可通行 (254)" :value="254" />
-            <el-option label="擦成未知 (128)" :value="128" />
-          </el-select>
+          <span class="erase-hint">擦成可通行 (254)</span>
         </el-tooltip>
 
         <div class="brush-size">
@@ -909,6 +886,12 @@ defineExpose({ open });
   .forbidden-hint {
     font-size: var(--dog-font-sm);
     color: var(--el-color-danger);
+    white-space: nowrap;
+  }
+
+  .erase-hint {
+    font-size: var(--dog-font-sm);
+    color: var(--dog-text-secondary);
     white-space: nowrap;
   }
 

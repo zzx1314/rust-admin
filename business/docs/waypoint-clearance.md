@@ -170,6 +170,9 @@ cd business/client && cargo test --bins final_point fault_log
   （`backend/src/business/dog/map/package.rs`：`ERASE_FREE` / `ERASE_UNKNOWN` /
   `normalize_erase_value`），其它灰度值直接 400；
 - 前端画笔改成「擦成未知 (128)」（`frontend/src/views/dog/map/MapEditorDialog.vue`）；
+  **2026-11-26 起又把这个选项去掉**：平台橡皮擦只写 254，与遥控器一致（遥控器保存时按
+  「根图 + 擦除圆」重算，表达不了未知，两边口径不同就会被它冲掉），要标禁行用
+  「禁止区域」（栅格刷成 `0`）；接口仍接受 `128` / 旧 `205`；
 - 存量包用 `business/tools/map_unknown_value.py` 把 205 批量改成 128（干跑 → `--apply`），
   再走「修改 / 派生版本 → 上传 → 发布 → 下发地图 → 4030 载图」；
 - 平台校验把 205 也算未知，所以即使有人还在用旧值，发布时也能看到报警/拦截。

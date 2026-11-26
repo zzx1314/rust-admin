@@ -404,7 +404,9 @@ resolve_route_map` 同样要放行「别园区的图」（否则园区能绑图�
 `mapupload::push_map_to_robot` 先读本体现有文件、`merge_edit_info` 合并（去重、
 保留遥控器的 `fences`/`forbidden_areas`/未知字段）再上传。三条边界：**擦成未知 128
 不记**（遥控器的橡皮擦只会写 254，表达不了“未知”）；**根目录栅格不建档**（老固件没有
-`map_edit/`）；**合并失败绝不影响下发**（解析不了就保留原文件）。回归：
+`map_edit/`）；**合并失败绝不影响下发**（解析不了就保留原文件）。前端自 2026-11-26 起
+**不再提供「擦成未知」**，橡皮擦只写 254（与遥控器一致，要标禁行用「禁止区域」），
+接口保留 128 / 旧 205 兼容。回归：
 `package::tests::erase_appends_circles_and_keeps_remote_edit_record` /
 `erase_to_unknown_is_not_recorded_as_ops` / `broken_edit_info_is_left_untouched`、
 `mapupload::tests::merge_edit_info_appends_circles_and_keeps_remote_fields` /

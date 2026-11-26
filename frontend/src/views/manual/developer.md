@@ -217,7 +217,9 @@ Authorization: Bearer <access_token>
 - **橡皮擦**：`POST /api/dogMap/{id}/edit` 的请求体为
   `{ "strokes": [{ "points": [{ "x": 120.5, "y": 88 }], "radius": 6 }], "eraseValue": 254 }`，
   坐标是**栅格像素坐标**（左上角为原点，`x` 向右、`y` 向下，与 `/image` 返回的 `width` / `height` 同一坐标系）。
-  `eraseValue` 是擦除后写入的灰度值：`254` = 可通行（默认，用来擦掉自由空间里的噪点）、`205` = 未知。
+  `eraseValue` 是擦除后写入的灰度值：`254` = 可通行（默认，用来擦掉自由空间里的噪点）、
+  `128` = 未知（旧的 `205` 由服务端归一成 `128`）。平台页面只传 `254`（与遥控器一致，
+  遥控器橡皮擦只写 254），`128` / `205` 仅为历史客户端保留。
   服务端只改写包内编辑版 `map_edit/map.pgm`（没有 `map_edit/` 时才改 `model.pgm` /
   `map.pgm`），并把擦成 `254` 的笔画追加进 `map_edit/edit_info.json` 的 `erase_areas` /
   `edit_ops`（遥控器保存地图时按「根图 + 这些擦除圆」重算，不记就会被它覆盖；擦成
