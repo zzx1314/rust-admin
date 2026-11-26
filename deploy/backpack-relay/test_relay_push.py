@@ -865,6 +865,42 @@ def test_rtsp_publish_plan_appends_stream_and_keeps_credentials() -> None:
         relay.RTSP_PUSH = real
 
 
+
+def test_wss_without_ca_returns_no_context_and_warns(capsys=None) -> None:
+    """平台只开 https 入口（2026-11-26 起 3008 关闭）时控制信道是 wss://：
+    没配 `RELAY_PLATFORM_CA` 就是 `CERTIFICATE_VERIFY_FAILED`，现场表现为「实时视频
+    一直起不来」，所以这里要保证它至少**说清楚**怎么配。"""
+    real_platform = relay.PLATFORM
+    real_ca = os.environ.pop("RELAY_PLATFORM_CA", None)
+    try:
+        relay.PLATFORM = "https://39.107.55.13:3443"
+        assert relay.endpoint() == "wss://39.107.55.13:3443/ws/device/video", relay.endpoint()
+        assert relay.platform_ssl() is None, "没配 CA 时不能返回上下文（会静默校验失败）"
+        os.environ["RELAY_PLATFORM_CA"] = "/nonexistent/platform.crt"
+        assert relay.platform_ssl() is None, "CA 文件不存在时同样要退回 None"
+    finally:
+        relay.PLATFORM = real_platform
+        os.environ.pop("RELAY_PLATFORM_CA", None)
+        if real_ca is not None:
+            os.environ["RELAY_PLATFORM_CA"] = real_ca
+
+
+def test_plain_ws_never_builds_ssl_context() -> None:
+    """明文入口（老部署 / 内网）行为不变：`ws://` 不碰 ssl。"""
+    real_platform = relay.PLATFORM
+    real_ca = os.environ.pop("RELAY_PLATFORM_CA", None)
+    try:
+        relay.PLATFORM = "http://127.0.0.1:3008"
+        assert relay.endpoint() == "ws://127.0.0.1:3008/ws/device/video"
+        os.environ["RELAY_PLATFORM_CA"] = "/etc/robodog/platform.crt"
+        assert relay.platform_ssl() is None, "ws:// 不需要也不该建 SSL 上下文"
+    finally:
+        relay.PLATFORM = real_platform
+        os.environ.pop("RELAY_PLATFORM_CA", None)
+        if real_ca is not None:
+            os.environ["RELAY_PLATFORM_CA"] = real_ca
+
+
 def main() -> int:
     tests = [value for name, value in sorted(globals().items()) if name.startswith("test_")]
     failed = 0

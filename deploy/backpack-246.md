@@ -460,6 +460,74 @@ systemctl is-active alarmlight; pgrep -af 'test_rgbrun|alarmlight'              
 `cargo test record::`。回滚：把上表两个 `.bak` 拷回去 + `systemctl restart backpack-agent`
 （客户端回滚后 `discarded` 只烂在回执里，不影响任何行为）。
 
+## 4.8 2026-11-26 晚：公网只留 https（3008 关闭）→ 设备改走 `wss://…:3443` + 钉证书
+
+**起因**：现场把业务平台的公网明文端口 `3008` 关了，只开 <https://39.107.55.13:3443>。
+结果板子从 **18:05:36** 起在平台上一直`离线`（`devices.last_heartbeat` 不再更新），
+客户端日志一直是：
+
+```
+WARN 业务连接断开 (IO error: Connection timed out (os error 110))，1s 后原地重连
+INFO 正在连接业务服务: ws://39.107.55.13:3008/ws/device
+```
+
+平台侧一切正常（`robodog-ops-server` 在 `0.0.0.0:3008` 监听、本机 `curl 127.0.0.1:3008`
+= 200、iptables 无拦截）——**只是安全组把 3008 关了**。
+
+| 对象 | 改成什么 | 备份 |
+| --- | --- | --- |
+| `business/client/src/tls.rs`（新增） | `server.tls_ca` 读 PEM → **钉死那张证书**（逐字节比）+ `WebPkiServerVerifier` 标准链兑底；同一份 `rustls::ClientConfig` 同时给设备 WS（`connect_async_tls_with_config` + `Connector::Rustls`）和回传 HTTP（`reqwest::ClientBuilder::use_preconfigured_tls`） | — |
+| `business/client/src/config.rs` | 新增 `[server] tls_ca` / `ROBODOG_SERVER_TLS_CA`；`--print-config` 多一行 `server.tls_ca` | — |
+| `record.rs` / `photo.rs` / `media_sync.rs` / `mapupload.rs` | 平台侧 HTTP 客户端一律走 `tls::http_builder()`（本地 Agent 客户端不动） | — |
+| `/etc/robodog/client.toml` | `url = "wss://39.107.55.13:3443"` + `tls_ca = "/etc/robodog/platform.crt"` | `client.toml.bak-20261126-200513` |
+| `/etc/robodog/platform.crt` | 平台 `/opt/hz/rust-admin/tls/server.crt` 原样拷过去（`sha256 14:0C:3B:74…`，与 3443 实际出示的那张指纹一致，别拷错） | — |
+| `/opt/robodog/client/robodog-device-client` | 新二进制（`md5 b77c5957…`）；**先传 `/tmp` 再 `install`**（直接覆盖会 ETXTBSY） | `robodog-device-client.bak-20261126-2006xx` |
+
+⚠️ **坑：那张证书不能当普通根用**。平台的 `server.crt` 是**同一张证书既当 CA 又当
+leaf**（`basicConstraints=critical,CA:TRUE` + `subjectAltName=IP:39.107.55.13` +
+`serverAuth`）。把它塞进 `RootCertStore` 后握手报：
+
+```
+IO error: invalid peer certificate: Other(OtherError(CaUsedAsEndEntity))
+```
+
+所以不能只 `add_root_certificate`：现在做的是**证书钉死**（出示的证书与
+`server.tls_ca` 里那张逐字节相同就放行），同时保留 webpki 根 + 标准链校验。
+⛔ 也别用 `danger_accept_invalid_certs` / 「跳过校验」：设备令牌就走这条 WS。
+回归：`cargo test tls::`（含 `ca_used_as_end_entity_is_accepted_only_when_pinned`）。
+
+另外：`wss://` 之后 `resolve_api_base()` 推出 `https://39.107.55.13:3443`，回传录像 /
+同步媒体 / 照片 / 地图上传全走 https，所以**这四处**的 reqwest 客户端必须共享同一份
+信任库（`tls::http_builder()`），否则就会出现「WS 连上了但回传 500 / 一直重试」。
+
+同一次改动还带上了两个「跟着 3008 一起断」的东西（同一个根因：平台地址写死在
+`http://…:3008`）：
+
+| 对象 | 改成什么 | 备份 |
+| --- | --- | --- |
+| `deploy/backpack-relay/relay_push.py` | 新增 `RELAY_PLATFORM_CA`：`wss://` 时用 `ssl.create_default_context(cafile=…)` 钉住自签证书（Python 的 ssl 不受 webpki 那套 `CA:TRUE` 限制，`cafile` 就够）；`RELAY_PLATFORM` 默认改 `https://…:3443` | 板端 `relay_push.py.bak-20261126-2008xx` |
+| `/etc/systemd/system/backpack-relay.service` | `RELAY_PLATFORM=https://39.107.55.13:3443` + `RELAY_PLATFORM_CA=/etc/robodog/platform.crt`（仓库 unit 同步） | `backpack-relay.service.bak-20261126-2008xx` |
+| `/etc/systemd/system/site-console.service` | `CONSOLE_API_BASE=https://39.107.55.13:3443/api`（现场看板原来反代 `:3008/api`），`videoWsBase` 随之变 `wss://…:3443` | `site-console.service.bak-20261126-2009xx` |
+
+⚠️ 现场看板（板端 `:8080`）改成 https 之后，**浏览器首次要先把
+<https://39.107.55.13:3443> 打开并接受自签证书**，否则看板里的 fetch 全部失败（浏览器
+不信任证书，跟服务端配置无关）。
+
+实测（2026-11-26 20:06 ~ 20:09）：
+
+```
+INFO 平台证书已钉为信任根: /etc/robodog/platform.crt
+INFO 正在连接业务服务: wss://39.107.55.13:3443/ws/device
+INFO 设备注册成功: 0202222672400230（园区 12）
+# 平台库：status=在线待命  last_heartbeat 20:07:09  body_online=1
+# 板端 curl --cacert /etc/robodog/platform.crt https://39.107.55.13:3443/api/health → 200
+# 中继：平台下发中继档位 / 平台有观看者，开始拉流 / 起流 2.5s 后出首帧（wss 控制信道通）
+```
+
+回滚：`client.toml.bak-*` 拷回去 + 旧二进制 + `systemctl restart robodog-device-client`
+（前提是 3008 重新开）。平台换证书（重新生成 `tls/server.crt`）后要重新拷一次到板上，
+否则启动直接报「读不到 / 令牌不匹配」级别的错误（这是故意的，比默默连不上好查）。
+
 ## 5. 备份文件现状与清理建议
 
 | 位置 | 数量 / 体积 | 说明 |

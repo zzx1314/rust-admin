@@ -39,7 +39,8 @@
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `RELAY_PLATFORM` | `http://39.107.55.13:3008` | 平台基址，自动转成 `ws://…/ws/device/video` |
+| `RELAY_PLATFORM` | `https://39.107.55.13:3443` | 平台基址，自动转成 `ws://…` / `wss://…/ws/device/video`（**公网明文 3008 从 2026-11-26 起已关闭，现场用 https 3443**） |
+| `RELAY_PLATFORM_CA` | — | `wss://` 专用：平台自签证书的 PEM 路径（板端 `/etc/robodog/platform.crt`）。不配就是系统根证书 → 自签必然校验失败，日志会直说 |
 | `RELAY_STREAMS` | `cam0,cam1,cam2,cam3,dogcam,dog-ipcam,preview` | 要中继的 mediamtx path |
 | `RELAY_RTSP_BASE` | `rtsp://127.0.0.1:8554` | 本地 mediamtx |
 | `RELAY_OUTPUT` | — | **已删除**。媒体只有 RTSP → 平台 mediamtx 一条路（浏览器 WebRTC） |
@@ -135,6 +136,7 @@ import os
 import re
 import signal
 import socket
+import ssl
 import subprocess
 import sys
 import time
@@ -144,7 +146,7 @@ from datetime import datetime, timezone
 # `websockets` 只在真正连平台时用（`stream_worker` 里局部导入）：档位状态机
 # （`test_relay_push.py`）不需要它，导入模块时不强制装好依赖。
 
-PLATFORM = os.environ.get("RELAY_PLATFORM", "http://39.107.55.13:3008").rstrip("/")
+PLATFORM = os.environ.get("RELAY_PLATFORM", "https://39.107.55.13:3443").rstrip("/")
 STREAMS = [
     item.strip()
     for item in os.environ.get(
@@ -909,6 +911,31 @@ def endpoint() -> str:
     elif base.startswith("http://"):
         base = "ws://" + base[len("http://") :]
     return f"{base}/ws/device/video"
+
+
+def platform_ssl():
+    """`wss://` 时的 TLS 上下文：用 `RELAY_PLATFORM_CA` 钉住平台自签证书。
+
+    ⚠️ 平台只开 https 入口（公网 3008 关掉，2026-11-26 起）时这条控制信道也是 `wss://`，
+    而平台证书是自签的：不配 CA 就是 `CERTIFICATE_VERIFY_FAILED`，现场表现为「实时视频
+    一直起不来、日志里一条连不上」。
+
+    Python 的 `ssl` 比 rustls/webpki 宽松：自签证书（哪怕 `CA:TRUE`）直接 `cafile` 就能
+    当信任锚，所以这边不需要客户端那套「证书钉死」。
+    """
+    if not endpoint().startswith("wss://"):
+        return None
+    ca = os.environ.get("RELAY_PLATFORM_CA", "").strip()
+    if not ca:
+        log(
+            "⚠️ 平台是 wss:// 但没配 RELAY_PLATFORM_CA：自签证书会校验失败"
+            "（把平台 tls/server.crt 拷到板端，例如 /etc/robodog/platform.crt）"
+        )
+        return None
+    if not os.path.exists(ca):
+        log(f"⚠️ RELAY_PLATFORM_CA 指向的文件不存在: {ca}")
+        return None
+    return ssl.create_default_context(cafile=ca)
 
 
 def log(message: str) -> None:
@@ -1939,6 +1966,8 @@ async def stream_worker(stream: str) -> None:
                 ping_timeout=10,
                 max_size=None,
                 open_timeout=10,
+                # wss://（平台只开 https 入口）时钉住自签证书，见 `platform_ssl()`
+                ssl=platform_ssl(),
             ) as ws:
                 _connections[stream] = ws
                 log(

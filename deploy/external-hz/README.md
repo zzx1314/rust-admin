@@ -17,7 +17,13 @@
 > 可选 `8189/tcp`（ICE-TCP 回退）。8554 / 8189 都是对 `0.0.0.0/0` 开：板端走 4G，
 > 出口 IP 不固定，靠 mediamtx 的 Basic 口令保护（见 `mediamtx/mediamtx.yml`）。
 >
-> WHEP **信令**不占新端口：浏览器打的是业务平台 `/api/backpack/whep/*`（3008），
+> ⚠️ **2026-11-26 起公网只开 https `3443`**（`3008/tcp` 已关闭）：浏览器用
+> <https://39.107.55.13:3443>，设备客户端必须连 `wss://39.107.55.13:3443`，并且因为
+> 平台证书是自签的，要配 `server.tls_ca` 把那张证书钉住（详见 `deploy/backpack-246.md`
+> §4.8 与 `business/client/src/tls.rs`）。**只关 3008 不开 3443 / 不给客户端配证书 =
+> 所有机器人上线即离线**（2026-11-26 18:05 就是这么掉的）。
+>
+> WHEP **信令**不占新端口：浏览器打的是业务平台 `/api/backpack/whep/*`（3008 或 3443），
 > 由 Rust 进程反代到只绑回环的 mediamtx `127.0.0.1:8889`。
 
 ## 目标机环境与构建方式
@@ -115,19 +121,26 @@ systemctl restart rust-admin-zentai        # 会话存内存：重启后需重�
 
 ## 机器狗客户端
 
-现场机器人上的 `business/client/client.toml` 指向外网地址：
+现场机器人上的 `business/client/client.toml` 指向外网地址。**2026-11-26 起公网明文
+`3008` 已关闭，只留 https `3443`**，所以设备走 `wss://`，并把平台自签证书钉住：
 
 ```toml
 [server]
-url = "ws://39.107.55.13:3008"
+url = "wss://39.107.55.13:3443"
+tls_ca = "/etc/robodog/platform.crt"    # 平台 /opt/hz/rust-admin/tls/server.crt 拷过来
 ```
 
 `[robot] host` 仍是机器狗自己的内网地址（默认 `192.168.234.234`），不受影响。
-也可以只用命令行覆盖、不改文件：
+也可以只用命令行 / 环境变量覆盖、不改文件：
 
 ```bash
-cargo run -- --server ws://39.107.55.13:3008      # 其余参数按现场需要
+ROBODOG_SERVER_TLS_CA=/etc/robodog/platform.crt \
+  cargo run -- --server wss://39.107.55.13:3443      # 其余参数按现场需要
 ```
+
+⚠️ **没有「跳过证书校验」这个开关**（故意的：设备令牌就走这条 WS）。平台换证书
+（重新生成 `tls/server.crt`）就把新文件再拷一次到板端 `/etc/robodog/platform.crt` 并
+`systemctl restart robodog-device-client`；没换就不用动。
 
 ## 已验证（2026-11-12 首次上线）
 

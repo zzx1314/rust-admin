@@ -7,7 +7,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-Environment=RELAY_PLATFORM=http://39.107.55.13:3008
+Environment=RELAY_PLATFORM=https://39.107.55.13:3443
+# 公网明文 3008 从 2026-11-26 起已关闭，平台只开 https 3443：控制信道走 wss://，
+# 而平台证书是自签的 —— 不配 CA 就是 CERTIFICATE_VERIFY_FAILED。
+# 证书板端已有（设备客户端也用它）：/etc/robodog/platform.crt
+Environment=RELAY_PLATFORM_CA=/etc/robodog/platform.crt
 Environment=RELAY_STREAMS=cam0,cam1,cam2,cam3,dogcam,dog-ipcam,preview
 Environment=RELAY_RTSP_BASE=rtsp://127.0.0.1:8554
 # 输出档位：light（默认，缩到 720p20 / 1.2Mbps，平台公网出口小也能看）

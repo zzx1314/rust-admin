@@ -687,12 +687,17 @@ cd ../backend && APP_SERVER__STATIC_DIR=../frontend/dist ./run.sh
 `pages_are_not_redirected_without_an_https_public_url`。
 
 外网正式环境：`root@39.107.55.13`，安装目录 `/opt/hz/rust-admin`，
-中台 <http://39.107.55.13:3007>（3000 被本机 frps 占用）、业务平台/设备网关
-<http://39.107.55.13:3008>。一键发布：
+中台 <http://39.107.55.13:3007>（3000 被本机 frps 占用）、业务平台
+<https://39.107.55.13:3443>（**公网明文 `3008` 从 2026-11-26 起已关闭**）。一键发布：
 
 ```bash
 ./deploy/external-hz/push.sh          # 打包 + 上传 + 安装重启
 ```
+
+⚠️ 设备客户端随之改成 `wss://39.107.55.13:3443` + `server.tls_ca`（平台证书是自签的，
+必须钉住；客户端 `src/tls.rs` 做的是「钉死那张证书 + webpki 标准链兜底」）。只关 3008
+而不给客户端配证书 = 所有机器人上线即离线（2026-11-26 18:05 现场就是这么掉的）。
+细节：`deploy/external-hz/README.md`、`deploy/backpack-246.md` §4.8。
 
 注意事项与目标机约束（CentOS 7 / glibc 2.17 / systemd 219、musl 静态构建、
 systemd unit 写法、安全组端口）见 `deploy/external-hz/README.md`。
