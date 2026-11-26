@@ -205,6 +205,12 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 每帧重试（`Recorder.failed`）。
 板端 Agent `POST /api/record/start|stop` 用 ffmpeg 从本机 mediamtx 拉对应流，
 `-c copy` 封装 mp4（不重编码、不抢 MPP），落 `RECORD_DIR/<计划>/`，停下写同名边车。
+⚠️ **mp4 必须 `use_editlist=0`**（航段切片走 `-segment_format_options
+"movflags=+faststart:use_editlist=0"`）：ffmpeg 要等源的关键帧才开始写第一帧，
+那几秒偏移会被 mov 封装器写成**空 edit**，导致 `mvhd.duration` 比画面长（现场
+`leg3-cam1-20261126-144815-000.mp4` 65.35s vs 52.4s）——播放器按 mvhd 画进度条，
+**最后几秒只有进度条没有画面**。边车 `durationSec` 同样以文件的 `mvhd` 为准。
+回归 `python3 business/backpack_dashboard/backend/tools/record_selftest.py`。
 **回传是「平台按需」的（2026-11-25 起）**：任务终态 / 取消 / 客户端启动都**只留在
 板端**（`RECORD_DIR/<计划>/`），平台下发指令 `回传录像` 才由客户端读
 `/api/record/list` 逐段回传 `POST /api/recordings/ingest`（multipart，sha256 去重），

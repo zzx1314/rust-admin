@@ -794,9 +794,16 @@ axios 还有 120s 硬超时，现场表现就是「点回放没反应」（2026-
 - **航段切片每片一个文件**：`-f segment` 的模板必须带片段序号（`leg0-cam1-<时间戳>-000.mp4`
   / `-001.mp4`…）。只用开始时间戳命名时每片都写同一个文件、**后一片覆盖前一片**，
   一段 8 分钟的航段最后只剩最后几秒（2026-11-26 现场 `leg0-cam1-20261126-110421.mp4`）。
-  边车写的是**这一片**的时长（ffmpeg `-segment_list` 的 csv 给出，`-segment_time` 是按
-  关键帧就近切），不是整个航段的时长——否则「任务录像」里每片都显示成 8 分钟。
-  回归：`python3 business/backpack_dashboard/backend/tools/record_selftest.py`（含真 ffmpeg 切片）。
+  边车写的是**这一片**的时长，不是整个航段的时长——否则「任务录像」里每片都显示成
+  8 分钟。回归：`python3 business/backpack_dashboard/backend/tools/record_selftest.py`
+  （含真 ffmpeg 切片）。
+- **mp4 必须关掉 edit list**（`use_editlist=0`；航段切片走
+  `-segment_format_options "movflags=+faststart:use_editlist=0"`）：ffmpeg 要等源的关键帧
+  才开始写第一帧，那几秒偏移会被 mov 封装器写成**空 edit**，`mvhd.duration` 就比画面长
+  （2026-11-26 `leg3-cam1-20261126-144815-000.mp4`：65.35s vs 52.4s）。播放器按 mvhd
+  画进度条、按第一帧开播，**最后几秒只有进度条没有画面**（Chrome 则反过来在片头空着）。
+  边车 `durationSec` 同改以文件自己的 `mvhd` 为准（`record._mp4_duration`），
+  不再用 job 墙钟 / csv 窗口，否则「任务录像」显示的时长比能播的长一截。
 - **每一段各录一份**：`legs[i]` 从 P{i+1} 出发、`returnLeg` 从最后一个点出发，
   切片长度与相机各取各的（`client/src/record.rs::RecordPlan.legs`）；同一个点既有
   出发段又有返航段时出发段优先（客户端日志会说明另一条被忽略）。

@@ -164,6 +164,16 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
   一个相机都没点（历史路线 / 老客户端）才退到默认源。
 - **不重编码**：源已经是 H264，`-c copy` 封装成 mp4，不与实时视频抢 MPP；
   `-movflags +faststart` 让浏览器边下边播。多路也是 `-c copy`，只多几路拉流 + 封装。
+- ⚠️ **必须关掉 edit list**（`use_editlist=0`，航点单文件 `-use_editlist 0`；航段切片走
+  `-segment_format_options "movflags=+faststart:use_editlist=0"`，多个选项用 `:` 分隔）：
+  ffmpeg 从 RTSP 拉流时第一帧的 DTS 不是 0（要等源的下一个关键帧：`dogcam` ~2s、
+  `cam0`~`cam3` **8~13s**），mov 封装器会把这段偏移写成**空 edit**，于是
+  `mvhd.duration = 画面 + 偏移`。现场 `leg3-cam1-20261126-144815-000.mp4` 的 `mvhd`
+  65.35s 而真正能解的只有 52.4s：播放器按 `mvhd` 画进度条、按第一帧开播，**最后那段
+  偏移只有进度条没有画面**（现场原话「后面几秒不能播放」，而 Chrome 反而会在片头空
+  十几秒——同一个空 edit）。别用 `-copyinkf` 硬补片头：关键帧之前的 P 帧解不出来。
+  边车的 `durationSec` 也改成读文件自己的 `mvhd`（`_mp4_duration`）：job 墙钟会把等
+  关键帧那十几秒算进去，平台就写成 65.4s 而实际只有 52.4s。
 - **范围（`scope`）**：`point` = 航点录像（`-t seconds` 一个 mp4）、`leg` = 航段录像
   （起步开、到下一个航点停，`-f segment` 按 `segmentSeconds` 切；`pointIndex` 是
   **起点航点下标**）、`task` = 旧版「全程录像」（整条任务一条流，只为兼容老客户端保留）。
@@ -175,8 +185,9 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
 - ⚠️ **切片模板必须带 `%03d`**（`leg0-cam1-20261126-110421-000.mp4`…）：只靠开始时间戳
   时 segment 每片都写同一个文件、后一片把前一片**覆盖**掉（2026-11-26 现场：航段
   8 分钟只剩最后几秒）。也**别再加 `-strftime 1`**：时间戳已经在模板里，它还会把
-  `%03d` 当日期格式吃掉（glibc 给 `026`）。边车里的 `durationSec` 取 ffmpeg
-  `-segment_list` 的 csv（**这一片**的真实时长），不是整个 job 的时长。
+  `%03d` 当日期格式吃掉（glibc 给 `026`）。边车里的 `durationSec` 取文件自己的
+  `mvhd`（读不到才退回 `-segment_list` 的 csv / job 时长），所以**每一片**写的是它
+  自己的真实时长，不是整个 job 的。
 - **`list` 不返回正在录的文件**：客户端可能传半截 mp4；`stop` 会等 ffmpeg 写完
   边车再返回（`job.finished`），所以「停 → list」是安全的。
 - **`delete` 只认 `<planId>/<文件名>.mp4`**：路径穿越、`..`、非 mp4 一律拒绝。

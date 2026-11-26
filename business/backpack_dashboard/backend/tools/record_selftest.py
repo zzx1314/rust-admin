@@ -141,6 +141,15 @@ def main():
         args,
     )
     failures += not check(
+        # 不关掉时 mov 封装器会为「第一帧 DTS ≠ 0」写一段空 edit，mvhd 比画面长，
+        # 进度条尾巴播不动（2026-11-26 现场 leg3-cam1 / mvhd 65.35s vs 实际 52.4s）
+        "航段切片关掉 edit list（use_editlist=0）",
+        "-segment_format_options" in args
+        and "use_editlist=0" in args[args.index("-segment_format_options") + 1]
+        and "+faststart" in args[args.index("-segment_format_options") + 1],
+        args,
+    )
+    failures += not check(
         "航段文件名带起点下标",
         any("/leg2-" in path for path in PROCS),
         PROCS,
@@ -222,6 +231,13 @@ def main():
         "三路输出文件名各不相同",
         len({args[-1] for args in ARGS}) == 3,
         [args[-1] for args in ARGS],
+    )
+    failures += not check(
+        # 航点录像是单文件（不走 segment），同样不能留空 edit
+        "航点录像也关掉 edit list（-use_editlist 0）",
+        all("-use_editlist" in args
+            and args[args.index("-use_editlist") + 1] == "0" for args in ARGS),
+        ARGS,
     )
     again = record.start({"planId": "TK-4", "scope": "point", "pointIndex": 1,
                           "seconds": 5, "cameras": ["cam0", "cam1", "dogcam"]})
@@ -309,6 +325,7 @@ def main():
     #    上面把 Popen 换成了假进程，这里先换回来
     subprocess.Popen = real_popen
     failures += real_segment_naming(tmp)
+    failures += real_mp4_timeline(tmp)
 
     print("record selftest: %s" % ("FAILED" if failures else "ok"))
     return 1 if failures else 0
@@ -369,6 +386,73 @@ def real_segment_naming(tmp):
     listed = record._segment_durations(list_path)
     failures += not check("切片清单能读出每片时长",
                           len(listed) == len(names), (listed, names))
+    return failures
+
+
+def real_mp4_timeline(tmp):
+    """真 ffmpeg 验「进度条尾巴能播」：mvhd 必须等于内容时长（没有空 edit）。
+
+    现场 bug（2026-11-26 `leg3-cam1-20261126-144815-000.mp4`）：ffmpeg 从 RTSP 拉流时
+    第一帧 DTS 不是 0（要等源的下一个关键帧），mov 封装器把这段偏移写成**空 edit**，
+    于是 `mvhd.duration = 内容 + 偏移`（65.35s vs 52.4s）。播放器按 mvhd 画进度条、
+    按第一帧开播——最后那段偏移只有进度条没有画面。
+
+    这里用 `-itsoffset 5` 复刻「第一帧 DTS ≠ 0」：先确认**不带** `use_editlist=0` 时
+    真能造出 `mvhd > 内容`（否则这条用例没验到东西，直接 skip），再用
+    `record._ffmpeg_cmd()` 的真实输出参数验 `mvhd == 内容` 且 `start_time == 0`。
+    """
+    import subprocess
+
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if not (ffmpeg and ffprobe):
+        print("  skip 真 ffmpeg 验 mvhd（本机没有 ffmpeg/ffprobe）")
+        return 0
+    folder = os.path.join(tmp, "timeline")
+    os.makedirs(folder, exist_ok=True)
+    # `record._ffmpeg_cmd()` 的输出侧参数原样复用（`-t` 之后那段）
+    args = record._ffmpeg_cmd(os.path.join(folder, "pt0-cam1-20260101-000000.mp4"),
+                              "point", 12, 12, "rtsp://127.0.0.1:8554/cam1")
+    tail = args[args.index("-t"):]
+    copy_at = tail.index("-c") if "-c" in tail else -1
+    if copy_at >= 0:
+        tail[copy_at:copy_at + 2] = ["-c:v", "libx264", "-preset", "ultrafast",
+                                     "-pix_fmt", "yuv420p", "-g", "15"]
+
+    def run(path, extra):
+        # `extra` 放在 tail 之后：同一个选项后写的那份生效（对照组要盖掉 `use_editlist 0`）
+        cmd = ([ffmpeg, "-hide_banner", "-loglevel", "error",
+                "-itsoffset", "5", "-f", "lavfi", "-i",
+                "testsrc2=size=320x180:rate=15"] + tail[:-2] + extra + ["-y", path])
+        subprocess.run(cmd, check=True, timeout=180,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        probe = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=start_time,duration",
+             "-of", "default=nw=1", path], capture_output=True, text=True)
+        info = dict(
+            line.split("=", 1) for line in probe.stdout.strip().splitlines() if "=" in line
+        )
+        content = float(info.get("duration") or 0)
+        start = float(info.get("start_time") or 0)
+        return content, start, record._mp4_duration(path)
+
+    failures = 0
+    control = os.path.join(folder, "control.mp4")
+    content, _start, mvhd = run(control, ["-use_editlist", "1"])
+    if mvhd is None or mvhd < content + 4:
+        print("  skip 真 ffmpeg 验 mvhd（造不出空 edit：content=%s mvhd=%s）"
+              % (content, mvhd))
+        return failures
+    failures += not check("造出空 edit：mvhd 比画面长（复现现场 bug）",
+                          mvhd > content + 4, (content, mvhd))
+
+    fixed = os.path.join(folder, "fixed.mp4")
+    content, start, mvhd = run(fixed, [])
+    failures += not check("航点录像的 mvhd == 画面时长（进度条尾巴能播）",
+                          mvhd is not None and abs(mvhd - content) <= 0.2,
+                          (content, mvhd))
+    failures += not check("mvhd 时间轴从 0 开始（没有空 edit）",
+                          abs(start) < 0.05, start)
     return failures
 
 

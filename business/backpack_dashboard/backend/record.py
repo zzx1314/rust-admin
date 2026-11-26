@@ -34,9 +34,22 @@
 
 ⚠️ **切片文件名必须带 `-%03d`**（`leg0-cam1-20261126-110421-000.mp4`、`-001.mp4`…）：
 只用开始时间戳命名时，每一片都写同一个文件、后一片把前一片**覆盖**掉，一段 8 分钟的
-航段最后只剩最后一片（现场表现：「航段录像只有最后几秒」）。同时 `-segment_list` 的 csv
-给出每片的真实时长（`-segment_time` 是按关键帧就近切），边车写的是**这一片**的时长，
-不是整个 job 的——否则平台「任务录像」里每一片都显示成整段航段。
+航段最后只剩最后一片（现场表现：「航段录像只有最后几秒」）。边车写的是**这一片**的
+时长，不是整个 job 的——否则平台「任务录像」里每一片都显示成整段航段。
+
+⚠️ **mp4 必须关掉 edit list**（`use_editlist=0`，2026-11-26 起）：ffmpeg 从 RTSP 拉流时
+第一帧的 DTS 不是 0（要等源的下一个关键帧：`dogcam` 约 2s、USB 相机 `cam0`~`cam3`
+关键帧间隔 8~13s）。mov 封装器把这段「开头的空白」写成**空 edit**（`elst`
+`{duration: <DTS>, media_time: -1}`），于是 `mvhd.duration = 内容 + 那段偏移`：
+现场 `leg3-cam1-20261126-144815-000.mp4` 的 `mvhd` 是 65.35s，而真正能解的只有
+52.4s。播放器按 `mvhd` 画进度条、从第一帧开始播，**最后那段偏移（最多十几秒）
+只有进度条、没有画面**——就是「视频最后还有进度条，但后面几秒不能播放」。
+`use_editlist=0` 之后 `mvhd.duration == 内容时长`，各播放器（浏览器 / 手机相册 /
+微信）都对得上。ffmpeg 内部本来就按 0 写 sample 时间戳，关掉 edit list 不丢内容。
+
+> 顺带说明：那段偏移本身确实是**没录到**的画面（ffmpeg 要等源的关键帧才开始
+> 写第一帧）。想缩短它只能让相机推流的关键帧间隔变小（`cam0`~`cam3` 现在是 8~13s），
+> 别用 `-copyinkf` 硬补：关键帧之前的 P 帧没法解码，补进来只是把「空白」挪到片头。
 """
 import json
 import os
@@ -54,6 +67,9 @@ import relay
 _SAFE_NAME = re.compile(r"^[0-9A-Za-z_\-\u4e00-\u9fff]+$")
 # 边车里不需要对外的字段（源地址含凭据，绝不进接口 / 日志）
 _SCRUB = ("cmd",)
+# 读 mp4 头部找 `mvhd` 用多少字节：`+faststart` 之后 moov 一定在最前面，
+# 几秒的切片 moov 才几 KB；留 2MB 兜住「一次录很久、千帧以上」的 stsz。
+_MP4_HEAD_BYTES = 2 * 1024 * 1024
 
 _LOCK = threading.RLock()
 # job key -> _Job；key = "<planId>|<scope>|<pointIndex>|<camera>"（每一路一个 job）
@@ -214,14 +230,19 @@ def _ffmpeg_cmd(path_template, scope, seconds, segment_seconds, source,
     else:
         # 源已是 H264：只封装，不重编码（省 CPU / 不抢 MPP）
         cmd += ["-c", "copy", "-an"]
+    # ⚠️ `use_editlist=0` 不能去掉：不关掉时 mov 封装器会给「第一帧 DTS ≠ 0」写一段
+    # **空 edit**，`mvhd.duration` 就变成「内容 + 这段偏移」，播放器画出的进度条比
+    # 真实画面长（最多十几秒），尾巴上只有进度条没有画面（2026-11-26 现场
+    # `leg3-cam1-20261126-144815-000.mp4`：mvhd 65.35s / 实际 52.4s）。
     if scope in ("leg", "task"):
         cmd += [
             "-f", "segment",
             "-segment_time", str(segment_seconds),
             "-reset_timestamps", "1",
             "-segment_format", "mp4",
-            # 片段也要 faststart：客户端上传后浏览器边下边播
-            "-segment_format_options", "movflags=+faststart",
+            # 片段也要 faststart：客户端上传后浏览器边下边播。
+            # `-segment_format_options` 的多个选项用 `:` 分隔（整串交给内层 mp4 封装器）。
+            "-segment_format_options", "movflags=+faststart:use_editlist=0",
             # ⚠️ 别再加 `-strftime 1`：时间戳（`<kind>-<cam>-<开始时间>`）已经在模板里，
             # 它还会把 `%03d` 当日期格式吃掉（glibc 给 "026"），于是每片写同一个文件、
             # 后一片覆盖前一片。片段序号只交给 segment 复用器的 `%03d`。
@@ -231,7 +252,7 @@ def _ffmpeg_cmd(path_template, scope, seconds, segment_seconds, source,
             # 写进边车，平台「任务录像」才不会每片都显示成整段航段的时长。
             cmd += ["-segment_list", segment_list, "-segment_list_type", "csv"]
     else:
-        cmd += ["-movflags", "+faststart"]
+        cmd += ["-movflags", "+faststart", "-use_editlist", "0"]
     cmd += ["-y", path_template]
     return cmd
 
@@ -240,6 +261,9 @@ class _Job:
     def __init__(self, key, plan_id, scope, point_index, point_name, camera,
                  path_template, prefix, before, started_at, cmd, segment_list=None):
         self.key = key
+        # 停止原因：`stop()` 知道真实原因（离开航点 / 到达下一个航点 / 任务终态），
+        # 但 `_watch` 的 `proc.wait()` 往往先返回、抢先写边车，所以原因先记在 job 上
+        self.reason = None
         self.plan_id = plan_id
         self.scope = scope
         self.point_index = point_index
@@ -318,6 +342,8 @@ def _segment_durations(list_path):
     边车里写整个 job 的时长会让平台「任务录像」里每一片都显示成整段航段
     （2026-11-26：航段只剩最后一片 + 每片时长都不对，一并修）。
 
+    现在只当**兜底**：首选 [`_mp4_duration`]（读文件自己的 `mvhd`——播放器看到的就是它，
+    而 csv 的起止是输入时间轴上的窗口，会把等关键帧那几秒也算进去）。
     读不到（老 ffmpeg / 清单被清掉 / 还没写）就返回空，调用方退回 job 时长。
     """
     if not list_path:
@@ -341,6 +367,64 @@ def _segment_durations(list_path):
     return durations
 
 
+def _mp4_duration(path):
+    """读 mp4 的 `mvhd.duration`（秒）；读不到返回 `None`。
+
+    边车里的 `durationSec` 要跟**播放器看到的**一致：`mvhd` 正是播放器画进度条用的
+    那个值。以前一律拿 job 的墙钟时长（`started→stopped`），ffmpeg 等源关键帧的那
+    十几秒也被算进去，平台「任务录像」就写成 65.4s 而实际只有 52.4s（比进度条还
+    让人以为是视频坏了）。
+
+    只读文件头部（`+faststart` 之后 `moov` 一定在最前面），不扫整个文件：
+    13MB 的切片全读一遍会在板子上多一份内存 / IO。
+
+    > 老文件（还没升级 `use_editlist=0`）的 `mvhd` 包含了那段空 edit，比内容长；
+    > 这里取到的就是「播放器认为的长度」，与新文件一个口径。
+    """
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(_MP4_HEAD_BYTES)
+    except OSError:
+        return None
+
+    def walk(start, end):
+        pos = start
+        while pos + 8 <= end:
+            size = int.from_bytes(data[pos:pos + 4], "big")
+            kind = data[pos + 4:pos + 8]
+            header = 8
+            if size == 1:
+                # 64 位长度（大 box 用得上）
+                if pos + 16 > end:
+                    return None
+                size = int.from_bytes(data[pos + 8:pos + 16], "big")
+                header = 16
+            elif size == 0:
+                size = end - pos
+            if size < header or pos + size > end:
+                return None
+            body = pos + header
+            if kind == b"mvhd":
+                version = data[body] if body < len(data) else 0
+                if version == 0:
+                    timescale = int.from_bytes(data[body + 12:body + 16], "big")
+                    duration = int.from_bytes(data[body + 16:body + 20], "big")
+                else:
+                    timescale = int.from_bytes(data[body + 20:body + 24], "big")
+                    duration = int.from_bytes(data[body + 24:body + 32], "big")
+                if not timescale or duration <= 0:
+                    return None
+                return duration / float(timescale)
+            if kind == b"moov":
+                found = walk(body, pos + size)
+                if found:
+                    return found
+            pos += size
+        return None
+
+    return walk(0, len(data))
+
+
 def _finalize(job, reason):
     """ffmpeg 退出后写边车：客户端按边车里的元数据回传，不用再猜文件名。"""
     with _LOCK:
@@ -349,6 +433,8 @@ def _finalize(job, reason):
         job.stopped_at = time.time()
         job.files = _files_of(job)
         _FINALIZING.update(os.path.basename(path) for path in job.files)
+    # `stop()` 知道真实原因，「自行退出」才用 `_watch` 的理由（谁先到用谁的消息）
+    reason = job.reason or reason
     duration = max(0.0, job.stopped_at - job.started_ts)
     segments = _segment_durations(job.segment_list)
     if job.segment_list:
@@ -359,6 +445,10 @@ def _finalize(job, reason):
             pass
     for path in job.files:
         name = os.path.basename(path)
+        # 片长优先级：文件自己的 `mvhd`（播放器看到的就是它）> 切片清单 > job 墙钟时长
+        seconds = _mp4_duration(path)
+        if seconds is None:
+            seconds = segments.get(name, duration)
         meta = {
             "planId": job.plan_id,
             "scope": job.scope,
@@ -367,8 +457,7 @@ def _finalize(job, reason):
             "camera": job.camera,
             "startedAt": _fmt(job.started_at),
             "endedAt": _fmt(job.stopped_at),
-            # 有切片清单就写这一片自己的时长，没有（航点录像 / 老 ffmpeg）才用 job 时长
-            "durationSec": round(segments.get(name, duration), 1),
+            "durationSec": round(seconds, 1),
             "size": os.path.getsize(path) if os.path.exists(path) else 0,
             "recordedOn": "backpack",
             "reason": reason,
@@ -382,7 +471,7 @@ def _finalize(job, reason):
         _FINALIZING.difference_update(os.path.basename(path) for path in job.files)
         _JOBS.pop(job.key, None)
         job.finished.set()
-    _log("录像结束 plan=%s scope=%s point=%s cam=%s 时长=%.1fs 文件=%d 原因=%s"
+    _log("录像结束 plan=%s scope=%s point=%s cam=%s 窗口=%.1fs 文件=%d 原因=%s"
          % (job.plan_id, job.scope, job.point_index, job.camera, duration,
             len(job.files), reason))
 
@@ -391,8 +480,10 @@ def _watch(job):
     try:
         job.proc.wait()
     finally:
-        reason = "到点自动停" if job.scope == "point" else "到上限自动停"
-        _finalize(job, reason)
+        # 客户端的 stop 会带真实原因（离开航点 / 到达下一个航点）；这里只处理
+        # 「ffmpeg 自己退出」（源断了 / 撞上 `-t` 上限）——以前这里写「到上限自动停」，
+        # 结果每条边车的 reason 都是它，现场排障时把 `-t` 都当成了凶手。
+        _finalize(job, "ffmpeg 自行退出")
 
 
 def start(body):
@@ -571,6 +662,8 @@ def start(body):
 
 
 def _terminate(job, reason):
+    # 先把原因记在 job 上：`_watch` 的 `proc.wait()` 会先返回、抢先写边车
+    job.reason = job.reason or reason
     proc = job.proc
     if proc is not None and proc.poll() is None:
         try:
