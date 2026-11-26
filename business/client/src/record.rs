@@ -35,6 +35,7 @@ use crate::media_sync;
 use reqwest::multipart;
 use robodog_device_client::config::Config;
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -319,6 +320,34 @@ fn record_action(node: &Value) -> Option<&Value> {
         })
 }
 
+/// `(scope, 下标)` 去重键：一段长路上 5009 每 500ms 一帧，起录失败只记一次。
+fn failure_key(scope: &str, index: i64) -> (String, i64) {
+    (scope.to_string(), index)
+}
+
+/// 板端 `/api/record/start` 回执里确认起录的相机。
+///
+/// `None` = 回执里压根没有 `cameras` 字段：**单路旧版 Agent**（2026-11-25 现场那个），
+/// 它不读请求里的 `cameras`，只按 `RECORD_SOURCE_CAM` 录一路，必须单独提示升级。
+fn started_cameras(value: &Value) -> Option<Vec<String>> {
+    value.get("cameras").and_then(Value::as_array).map(|items| {
+        items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect()
+    })
+}
+
+/// 配置了但没起录的相机（回执确认了哪几路之后才算得出来）。
+fn missing_cameras(requested: &[String], started: &[String]) -> Vec<String> {
+    requested
+        .iter()
+        .filter(|camera| !started.contains(camera))
+        .cloned()
+        .collect()
+}
+
 /// 板端 `/api/record/list` 返回的一条待回传录像
 #[derive(Debug, Clone)]
 pub struct RecordingFile {
@@ -437,6 +466,12 @@ struct State {
     finished: bool,
     /// 板端 Agent 不支持录像（404 / 老版本）：本轮不再尝试
     unsupported: bool,
+    /// 这一轮任务里**起不来**的 (scope, 下标)：点 / 段级的起录失败不能每帧重试。
+    ///
+    /// 5009 行进中每 500ms 一帧，`leg_started` 每帧都会调到：相机名写错、那条流没推、
+    /// 相机全被拒之时，不记下来就是「一段长路每分钟 120 条 WARN + 120 次 HTTP」。
+    /// 失败一次就记一笔，这条任务里不再试这一段（新任务重置）。
+    failed: HashSet<(String, i64)>,
 }
 
 /// 巡检录像运行态（进程内唯一）
@@ -450,8 +485,15 @@ pub struct Recorder {
     /// 起停串行化：到点开录是后台任务，和紧随其后的「离开航点停录」交错会出现
     /// 「stop 先到、start 后到」→ 录像一直录到板端 `-t` 上限。
     gate: Mutex<()>,
-    /// 同一时间只跑一轮上传（终态 / 启动 / 手动都只是触发，不叠加）
+    /// 同一时间只能跑一轮上传（终态 / 启动 / 手动都只是触发，不叠加）
     uploading: AtomicBool,
+    /// 已经提示过「板端 Agent 不认 `cameras`」：只记一次，不每帧刷日志。
+    ///
+    /// 2026-11-25 现场事故：路线给航段配了右前（`cam1`），录下来是正前（`dogcam`）——
+    /// 因为板上的 `backpack-agent` 还是单路旧版，它**根本不读**请求里的 `cameras`，
+    /// 回执也只有 `{ok,created,job}`，客户端干憋着不报警。这个标志位把
+    /// 「板端 Agent 没升级」写成一行明确的 WARN，别让人再去翻画面。
+    multicam_warned: AtomicBool,
 }
 
 /// 起一路录像的参数（相机 / 时长 / 原因都属于「这一次请求」，整包传省得参数一长串）
@@ -482,6 +524,7 @@ impl Recorder {
             state: Mutex::new(State::default()),
             gate: Mutex::new(()),
             uploading: AtomicBool::new(false),
+            multicam_warned: AtomicBool::new(false),
         }
     }
 
@@ -547,6 +590,14 @@ impl Recorder {
         state.leg_active = None;
         state.last_point = None;
         state.finished = false;
+        // 「本轮不再尝试」的标记跟着任务走：板端 Agent 升级 / 相机重新推流后，
+        // 下一条任务应该重新试，而不是一直静默到客户端重启。
+        state.unsupported = false;
+        state.failed.clear();
+        drop(state);
+        // 每条任务提示一次「板端 Agent 不认 cameras」（板端可能中途才升级）：
+        // 一次任务里 7 个航段只打一行，不刷日志。
+        self.multicam_warned.store(false, Ordering::Relaxed);
     }
 
     /// 起步了（离开 `index` 这个航点，阶段不再是 `patrol.point_*`）：
@@ -583,7 +634,11 @@ impl Recorder {
         let _gate = self.gate.lock().await;
         {
             let state = self.state.lock().await;
-            if state.finished || state.unsupported || state.leg_active == Some(leg.index) {
+            if state.finished
+                || state.unsupported
+                || state.leg_active == Some(leg.index)
+                || state.failed.contains(&failure_key("leg", leg.index))
+            {
                 return;
             }
         }
@@ -609,7 +664,14 @@ impl Recorder {
                     camera_list(&leg.cameras)
                 );
             }
-            Err(error) => self.note_failure(task_code, "航段录像", &error).await,
+            Err(error) => {
+                self.note_failure(task_code, "航段录像", &error).await;
+                self.state
+                    .lock()
+                    .await
+                    .failed
+                    .insert(failure_key("leg", leg.index));
+            }
         }
     }
 
@@ -656,7 +718,11 @@ impl Recorder {
         let _gate = self.gate.lock().await;
         {
             let state = self.state.lock().await;
-            if state.finished || state.unsupported || state.point_active == Some(point_index) {
+            if state.finished
+                || state.unsupported
+                || state.point_active == Some(point_index)
+                || state.failed.contains(&failure_key("point", point_index))
+            {
                 return;
             }
         }
@@ -689,7 +755,14 @@ impl Recorder {
                     camera_list(&point.cameras)
                 );
             }
-            Err(error) => self.note_failure(task_code, "航点录像", &error).await,
+            Err(error) => {
+                self.note_failure(task_code, "航点录像", &error).await;
+                self.state
+                    .lock()
+                    .await
+                    .failed
+                    .insert(failure_key("point", point.index));
+            }
         }
     }
 
@@ -815,7 +888,46 @@ impl Recorder {
                 );
             }
         }
+        self.check_started_cameras(task_code, scope, cameras, &value);
         Ok(())
+    }
+
+    /// 回执里确认起录的相机 vs 配置的相机：不一致就留一条可读日志。
+    ///
+    /// 两种不一致都要说话（2026-11-25 现场：航段配 `cam1` 录成 `dogcam`）：
+    /// 1. 回执里**没有** `cameras` 字段 = 板端 Agent 还是单路旧版（它不读 `cameras`，
+    ///    只按 `RECORD_SOURCE_CAM` 录一路）。这条只提示一次，但要直接写出「升级
+    ///    backpack-agent」，否则现场只能靠看画面发现录错了相机。
+    /// 2. 回执里有 `cameras` 但少了配置的那几路 = 板端拒了 / ffmpeg 起不来
+    ///    （通常 `errors` 里也有原因，比如 mediamtx 上那条流没推）。
+    fn check_started_cameras(
+        &self,
+        task_code: &str,
+        scope: &str,
+        requested: &[String],
+        value: &Value,
+    ) {
+        if requested.is_empty() {
+            return;
+        }
+        let Some(started) = started_cameras(value) else {
+            if !self.multicam_warned.swap(true, Ordering::Relaxed) {
+                warn!(
+                    "任务 {task_code} {scope} 录像：板端回执里没有 `cameras`，说明 backpack-agent \
+                     仍是单路旧版——配置的相机（{}）不生效，实际只录默认源。升级板端 Agent 后生效",
+                    camera_list(requested)
+                );
+            }
+            return;
+        };
+        let missing = missing_cameras(requested, &started);
+        if !missing.is_empty() {
+            warn!(
+                "任务 {task_code} {scope} 录像：配置的相机 [{}] 没起录，板端实际只录了 [{}]（看板端 record.log / 回执 errors）",
+                missing.join(", "),
+                started.join(", ")
+            );
+        }
     }
 
     async fn post(&self, path: &str, body: Value) -> Result<Value, String> {
@@ -1291,18 +1403,24 @@ mod tests {
     type Calls = Arc<tokio::sync::Mutex<Vec<Value>>>;
 
     async fn spawn_agent(calls: Calls) -> String {
+        spawn_agent_with_start_reply(calls, json!({"ok": true})).await
+    }
+
+    /// 假 Agent，`/api/record/start` 回指定的包体（用于模拟老 Agent / 缺相机的回执）。
+    async fn spawn_agent_with_start_reply(calls: Calls, reply: Value) -> String {
         let app = axum::Router::new()
             .route(
                 "/api/record/start",
-                post(
-                    |State(calls): State<Calls>, Json(body): Json<Value>| async move {
+                post(move |State(calls): State<Calls>, Json(body): Json<Value>| {
+                    let reply = reply.clone();
+                    async move {
                         calls
                             .lock()
                             .await
                             .push(json!({"path": "start", "body": body}));
-                        Json(json!({"ok": true}))
-                    },
-                ),
+                        Json(reply)
+                    }
+                }),
             )
             .route(
                 "/api/record/stop",
@@ -1465,6 +1583,110 @@ mod tests {
         // 第二次不再发请求（连接被拒会立刻返回；这里只看状态，不引入额外依赖）
         let state = recorder.state.lock().await;
         assert!(state.unsupported || state.point_active.is_none());
+    }
+
+    /// 板端是**单路旧版 Agent**（回执里没有 `cameras`）：它不读请求里的相机，
+    /// 只按 `RECORD_SOURCE_CAM` 录一路——2026-11-25 现场“航段配了右前、录下来是正前”
+    /// 就是这么来的。客户端不能装作没事，要明确提示升级（每条任务只打一行），
+    /// 但**不能**因此不录（录像失败不能拖垮巡检）。
+    #[tokio::test]
+    async fn old_agent_that_ignores_cameras_is_called_out_once_per_task() {
+        let calls: Calls = Default::default();
+        let agent = spawn_agent_with_start_reply(calls.clone(), json!({"ok": true})).await;
+        let recorder = Arc::new(Recorder::new(Arc::new(test_config(&agent)), true));
+
+        recorder.start_task("TK-1", plan()).await;
+        recorder.point_arrived("TK-1", 1).await;
+
+        let state = recorder.state.lock().await;
+        assert_eq!(
+            state.point_active,
+            Some(1),
+            "旧 Agent 也要照录：诊断不能把巡检拖坏"
+        );
+        drop(state);
+        assert!(
+            recorder.multicam_warned.load(Ordering::Relaxed),
+            "回执没有 cameras 时必须提示「板端 Agent 没升级」"
+        );
+
+        // 下一条任务重新提示一次（板端可能中途才升级）
+        recorder.start_task("TK-2", plan()).await;
+        assert!(!recorder.multicam_warned.load(Ordering::Relaxed));
+    }
+
+    fn leg_plan() -> RecordPlan {
+        RecordPlan {
+            points: Vec::new(),
+            legs: vec![RecordLeg {
+                index: 0,
+                name: "航段 1→2".to_string(),
+                segment_seconds: 300,
+                cameras: vec!["cam1".to_string()],
+            }],
+        }
+    }
+
+    /// 起录被板端拒掉（相机名错 / 那条流没推）：记一笔，**这条任务这一趟不再重试**。
+    ///
+    /// 反例（修之前）：`leg_started` 每 500ms 一帧都发一次 HTTP + 一条 WARN，
+    /// 一段十几分钟的路能刷出成百上千行。
+    #[tokio::test]
+    async fn failing_leg_is_recorded_once_and_not_retried_every_frame() {
+        let calls: Calls = Default::default();
+        let agent = spawn_agent_with_start_reply(
+            calls.clone(),
+            json!({"ok": false, "error": "cam1: ffmpeg 启动后立即退出"}),
+        )
+        .await;
+        let recorder = Arc::new(Recorder::new(Arc::new(test_config(&agent)), true));
+
+        recorder.start_task("TK-1", leg_plan()).await;
+        recorder.point_arrived("TK-1", 0).await;
+        for _ in 0..5 {
+            recorder.leg_started("TK-1").await;
+        }
+
+        let calls = calls.lock().await.clone();
+        let starts = calls.iter().filter(|call| call["path"] == "start").count();
+        assert_eq!(starts, 1, "失败后不能每帧重试：{calls:?}");
+        assert!(
+            recorder
+                .state
+                .lock()
+                .await
+                .failed
+                .contains(&failure_key("leg", 0)),
+            "失败的段要记下来"
+        );
+
+        // 新任务重新试（相机重新推流 / Agent 升级后不用重启客户端）
+        recorder.start_task("TK-2", leg_plan()).await;
+        assert!(recorder.state.lock().await.failed.is_empty());
+    }
+
+    /// 回执确认了相机、但少了配置的那几路：只算「没起录」的那几路，不动其余的。
+    #[test]
+    fn started_cameras_tell_apart_old_agents_and_missing_streams() {
+        // 老 Agent：回执里根本没有 cameras
+        assert_eq!(started_cameras(&json!({"ok": true})), None);
+        assert_eq!(
+            started_cameras(&json!({"ok": true, "cameras": ["dogcam", "cam1"]})),
+            Some(vec!["dogcam".to_string(), "cam1".to_string()])
+        );
+
+        let requested = vec!["cam0".to_string(), "cam1".to_string()];
+        assert_eq!(
+            missing_cameras(&requested, &["cam1".to_string()]),
+            vec!["cam0".to_string()],
+            "只报没起来的左前，右前不能跟着被抹掉"
+        );
+        assert!(missing_cameras(&requested, &requested).is_empty());
+        assert_eq!(
+            missing_cameras(&["cam1".to_string()], &["dogcam".to_string()]),
+            vec!["cam1".to_string()],
+            "板端退回默认源也算没起录"
+        );
     }
 
     /// 任务终态**不再**主动回传：录像就留在板端，等平台下发「回传录像」。

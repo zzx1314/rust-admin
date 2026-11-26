@@ -126,9 +126,13 @@ def source_url(camera=None):
 def cameras_of(body):
     """请求里的相机列表：`cameras: [...]`，兼容单个 `camera`；去重 + 白名单 + 截断。
 
-    返回 `(picked, rejected)`：不认识的相机名只丢这一路，并在回执里带上，
+    返回 `(picked, rejected, asked)`：不认识的相机名只丢这一路，并在回执里带上，
     不能让一个打字错误把整条录像废掉（现场改配置比改任务容易）。
-    一个都没给 / 全都不认识时退到 `RECORD_SOURCE_CAM`（默认 dogcam）。
+
+    `asked` = 请求里**明确点了相机**（哪怕全是不认识的名字）。只有「一个都没点」
+    才退到 `RECORD_SOURCE_CAM`（历史路线 / 老客户端的行为）；点了却全都不可用时
+    **绝不拿默认源顶替**——那会录出一段和配置不符的画面，现场还以为录对了
+    （2026-11-25 现场：航段配了右前 `cam1`，录下来是正前 `dogcam`）。
     """
     raw = body.get("cameras")
     if isinstance(raw, str):
@@ -139,24 +143,26 @@ def cameras_of(body):
     allowed = allowed_cameras()
     picked = []
     rejected = []
+    asked = False
     for item in raw:
         cam = str(item or "").strip()
         if not cam:
             continue
+        asked = True
         if cam not in allowed:
             rejected.append(cam)
             continue
         if cam in picked:
             continue
         picked.append(cam)
-    if not picked:
+    if not picked and not asked:
         fallback = str(config.RECORD_SOURCE_CAM or "dogcam").strip()
         picked = [fallback if fallback in allowed else "dogcam"]
     max_cams = max(1, int(getattr(config, "RECORD_MAX_CAMERAS", 4)))
     if len(picked) > max_cams:
         rejected.extend(picked[max_cams:])
         picked = picked[:max_cams]
-    return picked, rejected
+    return picked, rejected, asked
 
 
 def _plan_dir(plan_id):
@@ -339,7 +345,9 @@ def start(body):
     只看 `segmentSeconds`（切片长度，总上限 `RECORD_TASK_MAX_SECS`）。
     `pointIndex` 在 `leg` 下是**起点航点下标**（`legs[i]` 从 P{i+1} 出发）。
     `cameras` 是多选：**每一路一个独立 ffmpeg + 一个独立 mp4**，任何一路起不来
-    只丢那一路（回执里带 `errors`），其余照录；不配就退到 `RECORD_SOURCE_CAM`。
+    只丢那一路（回执里带 `errors`），其余照录；没点相机才退到 `RECORD_SOURCE_CAM`。
+    点了相机但**全都不可用**时直接 `ok=false`（回执带 `rejected`），**不拿默认源顶替**
+    ——否则会录出一段与配置不符的画面，现场以为录对了（2026-11-25 现场事故）。
     """
     plan_id = _safe_name(body.get("planId"))
     if not plan_id:
@@ -361,7 +369,17 @@ def start(body):
                                10, config.RECORD_TASK_MAX_SECS)
         seconds = _int(body.get("maxSeconds"), config.RECORD_TASK_MAX_SECS,
                        30, config.RECORD_TASK_MAX_SECS)
-    cameras, rejected = cameras_of(body)
+    cameras, rejected, asked = cameras_of(body)
+    if asked and not cameras:
+        # 点了相机却一路都不可用：**不要**退到默认源（那会录成另一路画面，
+        # 与配置不符且不报错）。直接拒掉，让客户端在日志里说清楚。
+        return {
+            "ok": False,
+            "error": "配置的相机都不可用（%s），不按默认源顶替"
+                     % (", ".join(rejected) or "未给出"),
+            "cameras": [],
+            "rejected": rejected,
+        }
 
     started = []
     skipped = []

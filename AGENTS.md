@@ -196,7 +196,13 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 （板端每一路一个 ffmpeg + 一个 mp4，文件名带相机名）。不配 / 老数据 = 板端默认源
 （`RECORD_SOURCE_CAM`，默认 `dogcam`）；上限 `RECORD_MAX_CAMERAS`（默认 4）。
 某一路上游没推流 / 相机名写错**只丢那一路**（回执 `errors` / `rejected`），
-其余照录 —— 不能让一路的问题把整条录像废掉。
+其余照录 —— 不能让一路的问题把整条录像废掉。但**点了相机却一路都不可用时直接
+`ok=false`，不拿 `RECORD_SOURCE_CAM` 顶替**（顶替会录成另一路画面还不报错，
+2026-11-25 现场“航段配右前 `cam1`、录下来是正前 `dogcam`”）；只有请求里一个相机都
+没点（历史路线 / 老客户端）才退到默认源。客户端还会对回执做一次核对：回执里没有
+`cameras`（单路旧版 Agent）或少了配置的那几路，就在 `robodog-device-client` 日志里
+直接写「相机没起录 / 升级 backpack-agent」（每条任务一行），起录失败的段本轮不再
+每帧重试（`Recorder.failed`）。
 板端 Agent `POST /api/record/start|stop` 用 ffmpeg 从本机 mediamtx 拉对应流，
 `-c copy` 封装 mp4（不重编码、不抢 MPP），落 `RECORD_DIR/<计划>/`，停下写同名边车。
 **回传是「平台按需」的（2026-11-25 起）**：任务终态 / 取消 / 客户端启动都**只留在

@@ -859,6 +859,9 @@ ssh root@192.168.41.246 'mv /tmp/rdc.new /opt/robodog/client/robodog-device-clie
 
 **恢复前必须确认（缺一不可）**：
 
+0. 先跑一遍只读体检（省掉手工一条条比）：在 `.246` 上执行
+   `bash deploy/robodog-body/check-nav-mode.sh`，A~E 全 PASS 再往下；
+   判据与功能验证步骤见 [`deploy/robodog-body.md`](../../deploy/robodog-body.md) §11；
 1. 两台机器的消息定义已经一致：
    `md5sum /opt/ros/humble/share/robots_dog_msgs/msg/NavigationState.msg`（`.234` 与 `.1` 各跑一次，值必须相同）；
 2. 用 `5000 kind=2` 跑一次短任务，`.1` 的 `dog_task.stdout` 不再出现

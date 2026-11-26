@@ -224,6 +224,20 @@ def main():
     record.start({"planId": "TK-7", "scope": "point", "pointIndex": 0})
     failures += not check("不配相机仍录默认源", len(ARGS) == 1, ARGS)
     record.stop({"planId": "TK-7", "reason": "清理"})
+    # 点了相机却一路都不可用：**不拿默认源顶替**（否则录成另一路画面还不报错，
+    # 2026-11-25 现场“航段配右前、录下来是正前”就是这个坑）
+    ARGS.clear()
+    r = record.start({"planId": "TK-8", "scope": "point", "pointIndex": 0,
+                      "cameras": ["cam9"]})
+    failures += not check("相机全不可用时 ok=false", r.get("ok") is False, r)
+    failures += not check("相机全不可用时不启 ffmpeg", len(ARGS) == 0, ARGS)
+    failures += not check("相机全不可用时回执带 rejected",
+                          "cam9" in (r.get("rejected") or []), r)
+    ARGS.clear()
+    r = record.start({"planId": "TK-9", "scope": "leg", "pointIndex": 0,
+                      "segmentSeconds": 60, "cameras": ["nope", ""]})
+    failures += not check("航段相机全不可用时 ok=false", r.get("ok") is False, r)
+    failures += not check("航段相机全不可用时不启 ffmpeg", len(ARGS) == 0, ARGS)
 
     # 3) 删除：只认 plan/文件名，越界一律拒绝
     name = files[0]["name"] if files else ""

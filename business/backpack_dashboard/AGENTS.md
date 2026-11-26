@@ -158,7 +158,10 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
   这一点的所有相机一起停。可选相机与 `photo.py::allowed_cameras()` 同一份
   （`dogcam` / `cam0`~`cam3` / `dog-ipcam`，`dogcam` = 正前 = 机器狗前置）。
   不认识的名字只丢那一路（回执 `rejected`），上游没推流的那一路起不来也只丢它
-  （回执 `errors`）——**绝不让一路的失败拖垮整条录像**。
+  （回执 `errors`）——**绝不让一路的失败拖垮整条录像**。但**点了相机却一路都不可用时
+  直接 `ok=false`，不拿 `RECORD_SOURCE_CAM` 顶替**：那会录成另一路画面还不报错
+  （2026-11-25 现场“航段配右前 `cam1`、录下来是正前 `dogcam`”）。只有请求里
+  一个相机都没点（历史路线 / 老客户端）才退到默认源。
 - **不重编码**：源已经是 H264，`-c copy` 封装成 mp4，不与实时视频抢 MPP；
   `-movflags +faststart` 让浏览器边下边播。多路也是 `-c copy`，只多几路拉流 + 封装。
 - **范围（`scope`）**：`point` = 航点录像（`-t seconds` 一个 mp4）、`leg` = 航段录像

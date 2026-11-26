@@ -720,3 +720,41 @@ def clearance(x, y):
 > 注意 trinary 语义：`map.yaml` 是 `free_thresh 0.2 / occupied_thresh 0.5`，
 > 只有 `p > 204` 才算 free，`p≈128` 是**未知**。所以「在白色区」和「在灰色区」完全是两件事，
 > 后者在 `track_unknown_space: true` 的代价地图上规划不出来。
+
+## 11. 导航模式（`5000 kind=2`）就绪度自检（2026-11-25 起）
+
+准备恢复逐点导航（或判断「厂商升级后能不能用 `kind=2` 了」）时，先跑这一份**只读**体检，
+不要先改客户端配置。崩溃是**概率性**的，静态条件不过就一点机会都没有。
+
+```bash
+scp deploy/robodog-body/check-nav-mode.sh root@192.168.41.246:/tmp/
+ssh root@192.168.41.246 'bash /tmp/check-nav-mode.sh'
+# 判读跑多次不用重采：bash /tmp/check-nav-mode.sh --analyze /tmp/nav-mode-check-<时间戳>
+```
+
+脚本从 `.246` 跳 `.234`/`.1`（账号见 §1.1），**只读**：不发 `5000`、不重启服务、不清
+`/dev/shm`，原始证据落在 `/tmp/nav-mode-check-<时间戳>/{orin,ctrl}.txt`（可打包带回）。
+
+判据（全部 PASS 才谈得上「具备条件」）：
+
+| 项 | 判据 | 不过说明什么 |
+| --- | --- | --- |
+| A 消息定义 | 两台 `NavigationState.msg` **md5 相同**、行数相同、都有 `current_floor` | 就是 11-14 崩的根因（§10.7、`robodog-issues-2026-11-14.md` §3），升级没覆盖到 |
+| B 二进制 | `dog_task` 的 mtime ≥ 2026-11-15，且不再是 `dog-task 0.7.5-linux`（commit `f3c4374` / 08-04） | 只换 `.msg` 文件不重编 `dog_task` 是无效的：它编进去的布局才算数 |
+| C 运行态 | `robot-launch list` 里 `dog_task` 是 `running`，`retry_count` 不涨、uptime 分钟级 | 已经在崩循环里，`/navigation_state` 只是诱因 |
+| D 历史报错 | `dog_task.stdout` 的 `could not deserialize ... /navigation_state` / `bad_alloc` / `exit code -6` 计数 | 非 0 要结合时间戳和 §10.6 判是不是本轮 |
+| E 共享内存 | `/dev/shm` < 50% | zenoh 段残留会让新起的 `dog_task` 直接 `OS error 12`（§4.5、§7） |
+
+**静态全过后还差一步功能验证**（崩溃概率性，且 `dog_task` 也可能在「看起来正常」时偶发）：
+
+1. 在 `.1` 上盯日志：`tail -f /home/firefly/.robot_launch_logs/dog_task.stdout`，另开一个窗口
+   `watch -n2 'robot-launch list | grep dog_task'`（看 `retry_count` / uptime）。
+2. 用**零位移 goal**（`goals` 取 `1401` 上报的当前位姿）发一条 `5000 kind=2`：只要它真的
+   起了导航，就会走 `/navigation_state` 反序列化这条路径，够用来复现崩溃；狗不会移动。
+3. 判据：`dog_task.stdout` 不再出现 `could not deserialize ROS message ... /navigation_state`、
+   `retry_count` 保持 0、`/dev/shm` 不涨、平台侧 `5009` 出现 `navigation.goal_arrived` /
+   `navigation.succeeded`。四条都过才算真具备条件，可以进「恢复导航模式」那一步
+   （见 `business/client/README.md`「以后要恢复逐点导航」）。
+
+> 别拿「跑一次巡检（`kind=4`）不崩」当证据：巡检同样订阅 `/navigation_state`，
+> 11-14 那次就是**巡检报 822 次反序列化错误但没崩、一开导航就连续崩 15 次**（§3.3）。
