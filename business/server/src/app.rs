@@ -1,4 +1,4 @@
-use crate::auth::{list_accounts, login_handler, me_handler, require_auth};
+use crate::auth::{list_accounts, login_handler, me_handler, refresh_handler, require_auth};
 use crate::backpack;
 use crate::config::Config;
 use crate::error::ApiResponse;
@@ -15,7 +15,7 @@ use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::HeaderValue;
 use axum::http::{Method, StatusCode, header};
 use axum::middleware::{Next, from_fn, from_fn_with_state};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
@@ -99,6 +99,8 @@ async fn health(State(state): State<AppState>) -> Json<ApiResponse<Value>> {
 pub fn build_router(state: AppState) -> Router {
     let protected = Router::new()
         .route("/auth/me", get(me_handler))
+        // 滑动续期：当前令牌仍有效时换一枚新的（前端剩余不足 2h 时调用）
+        .route("/auth/refresh", post(refresh_handler))
         // 责任人「关联平台账号」下拉：只读账号元数据（不含敏感列）
         .route("/accounts", get(list_accounts))
         .route("/parks", get(parks::list_parks).post(parks::create_park))
@@ -412,6 +414,59 @@ pub fn build_router(state: AppState) -> Router {
     }
 
     router.layer(from_fn(static_cache_headers))
+}
+
+/// 「浏览器页面统一走 https」：把 `Accept: text/html` 的页面请求 302 到 `public_url`。
+///
+/// 为什么需要：同一个进程同时挂在 `:port`（http，设备客户端）与 `https_port` 上，
+/// 而浏览器的 localStorage 按**源**隔离 —— `http://ip:3008` 与 `https://ip:3443`
+/// 各存一份登录态。操作员从企业微信告警链接（`public_url` = https）、或为了用网页
+/// 对讲切到 https 之后，另一个源上就是「未登录」，看起来像被自动退出；回到原来的
+/// 标签刷新又能进（2026-11-26 现场反馈）。收敛到一个源后这整类问题消失。
+///
+/// 三条约束（改这块先看）：
+/// 1. **只重定向页面**（`GET`/`HEAD` + `Accept` 含 `text/html`）：设备客户端走
+///    `ws://` 与 `/api/*`，板子在 4G 上，不能因为这条规则要上塔改地址；
+/// 2. **`/api`、`/ws` 一律不碰**（双保险，防止某个客户端带了 HTML Accept）；
+/// 3. **只在 https 监听真的起来了才挂这一层**（见 `main.rs`），否则会把整个控制台
+///    重定向到一个连不上的地址。
+pub async fn redirect_pages_to_https(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if let Some(origin) = state.config.https_page_origin()
+        && is_browser_navigation(&request)
+    {
+        let path = request
+            .uri()
+            .path_and_query()
+            .map_or("/", |value| value.as_str());
+        if let Ok(location) = HeaderValue::from_str(&format!("{origin}{path}")) {
+            return (StatusCode::FOUND, [(header::LOCATION, location)]).into_response();
+        }
+    }
+    next.run(request).await
+}
+
+/// 是否是一次「浏览器打开页面」的请求（而不是 API / WebSocket / 设备客户端）。
+fn is_browser_navigation(request: &Request) -> bool {
+    if !matches!(*request.method(), Method::GET | Method::HEAD) {
+        return false;
+    }
+    let path = request.uri().path();
+    if path.starts_with("/api") || path.starts_with("/ws") {
+        return false;
+    }
+    // 前面已经有反向代理终止过 TLS（X-Forwarded-Proto: https）：别再套一层，避免重定向环
+    if request.headers().contains_key("x-forwarded-proto") {
+        return false;
+    }
+    request
+        .headers()
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/html"))
 }
 
 /// 静态资源缓存策略：`index.html` 必须每次回源，`/assets/*` 可以长缓存。

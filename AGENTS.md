@@ -635,6 +635,28 @@ cd ../backend && APP_SERVER__STATIC_DIR=../frontend/dist ./run.sh
 
 ## Deployment
 
+### 业务平台的登录态（会话只有一份、会自己续期）
+
+同一份 `business/web/dist` 同时挂在 `:port`(http，设备客户端 / `ws://`) 与
+`https_port`(https，操作员浏览器) 上，**浏览器 localStorage 按「源」隔离**：
+`http://ip:3008` 与 `https://ip:3443` 各存一份 `robodog_token`。所以配了 https 的
+`public_url` 后，明文入口上的**页面请求**会被 `app::redirect_pages_to_https` 302 到
+`public_url`（只认 `GET/HEAD` + `Accept: text/html`，`/api`、`/ws` 一律不动，设备侧
+不用改地址；https 起不来时这一层不挂）。2026-11-26 现场反馈的「自动退出以后刷新又能
+重新进入」就是两套登录态：在企业微信告警链接（`public_url` = https）或对讲用的 https
+源上看着没登录，回到原来那个源刷新令牌还在。**别把这条重定向去掉，也不要给两个源各配
+一个入口**（真要保留明文页面入口，就得自己做跨源令牌交接）。
+
+会话本身是**绝对过期**的 JWT（`ROBODOG_JWT_TTL_HOURS`，默认 24h），靠
+`POST /api/auth/refresh`（`auth.rs::refresh_handler` + `stores/auth.ts::renew`，剩余
+不足 2h 就在页面上静默换新，10 分钟检查一次 + 切回前台立即检查）撑着。两条别改回去：
+`loadMe()` **只有 401 才登出**（网络抖动 / 发布重启 / 中台 503 不能把人踢出去，现场
+一天重启 8 次）；`http.ts::handleUnauthorized` 清 localStorage 的同时要通过
+`onSessionExpired` 把 pinia 里的令牌一起清掉（否则出现「令牌已作废但 UI 还能操作」的
+幽灵会话）。回归：`api_smoke::refresh_rotates_the_session_token` /
+`plain_http_pages_redirect_to_https_but_api_does_not` /
+`pages_are_not_redirected_without_an_https_public_url`。
+
 外网正式环境：`root@39.107.55.13`，安装目录 `/opt/hz/rust-admin`，
 中台 <http://39.107.55.13:3007>（3000 被本机 frps 占用）、业务平台/设备网关
 <http://39.107.55.13:3008>。一键发布：

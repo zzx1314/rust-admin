@@ -28,6 +28,10 @@ let clockTimer = 0;
 let pollTimer = 0;
 let warmTimer = 0;
 let controlTimer = 0;
+/** 滑动续期检查（令牌快到期时换新，否则每次都空转） */
+let renewTimer = 0;
+/** 多久看一次「令牌是不是快到期了」（真正换新只在剩余不足 2h 时发生） */
+const RENEW_CHECK_MS = 10 * 60 * 1000;
 
 const currentTitle = computed(() => (route.meta.title as string) || "总览驾驶舱");
 const displayName = computed(() => auth.user?.displayName || "管理员");
@@ -137,6 +141,11 @@ function logout() {
   router.push("/login");
 }
 
+/** 切回前台立刻检查一次：后台标签页的定时器会被浏览器节流 */
+function renewOnVisible() {
+  if (document.visibilityState === "visible") void auth.renew();
+}
+
 /** 控制源监控：本体控制权跑出平台（1315 `ctrl_source=3`）时全局弹提示。
  *
  * 现场最难受的一种状态：控制台显示「在线待命、电量正常」，摇杆推不动、任务也下发不了。
@@ -221,6 +230,11 @@ onMounted(async () => {
   tick();
   clockTimer = window.setInterval(tick, 1000);
   await auth.loadMe();
+  // 令牌快到期就静默换一枚新的：业务平台的 JWT 是绝对过期的（默认 24h），
+  // 没有续期的话操作员干着活就会被 401 踢回登录页（每天必掉一次）。
+  void auth.renew();
+  renewTimer = window.setInterval(() => void auth.renew(), RENEW_CHECK_MS);
+  document.addEventListener("visibilitychange", renewOnVisible);
   await refreshStatus();
   pollTimer = window.setInterval(refreshStatus, 15000);
   // 控制权抢占随时会发生：10s 一轮够及时，也不会给后端添压力
@@ -237,7 +251,9 @@ onBeforeUnmount(() => {
   window.clearInterval(clockTimer);
   window.clearInterval(pollTimer);
   window.clearInterval(controlTimer);
+  window.clearInterval(renewTimer);
   window.clearTimeout(warmTimer);
+  document.removeEventListener("visibilitychange", renewOnVisible);
   for (const notice of ctrlNotices.values()) notice.close();
   ctrlNotices.clear();
   document.removeEventListener("click", onDocumentClick);

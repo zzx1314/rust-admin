@@ -7,9 +7,12 @@
  * （路线/任务都引用它），中台侧却换成了新的 `dog_map.id` —— 所以页面上要直接给出
  * 「中台地图编号 + 地图名称 + 设备编号」，别指望从业务编号反推。
  *
- * 中台控制台地址：外网部署与业务平台同机（中台 :3005 / 业务平台 :3100），
- * 默认按**业务 API 的 host** 推 :3005（「现场入口」模式下页面在内网、后端在云端，
+ * 中台控制台地址：外网部署中台在 **:3007**（3000 被 frps、3005 被同机其它业务占着），
+ * 默认按**业务 API 的 host** 推 :3007（「现场入口」模式下页面在内网、后端在云端，
  * 不能用页面自身的 host）；本地开发中台在 :3000，用 VITE_ZENTAI_CONSOLE_URL 覆盖。
+ *
+ * 以前默认拼的是 :3005 —— 那是同机另一个业务系统，点「在中台查看地图」会跳到别人的
+ * 登录页，现场看着很像「被退出 / 串系统」（2026-11-26 发现）。
  */
 import { apiBaseUrl } from "@/utils/runtime";
 
@@ -22,12 +25,12 @@ const CONSOLE_BASE = (() => {
   const apiBase = apiBaseUrl();
   if (/^https?:\/\//.test(apiBase)) {
     try {
-      return `${new URL(apiBase).origin.replace(/:\d+$/, "")}:3005`;
+      return `${new URL(apiBase).origin.replace(/:\d+$/, "")}:3007`;
     } catch {
       /* 回落到页面 host */
     }
   }
-  return `${window.location.protocol}//${window.location.hostname}:3005`;
+  return `${window.location.protocol}//${window.location.hostname}:3007`;
 })();
 
 /** 中台「地图管理」页面（`p_sys_menu` 菜单 path_url） */

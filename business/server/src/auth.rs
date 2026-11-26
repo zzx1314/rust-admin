@@ -201,6 +201,28 @@ async fn upsert_zentai_user(
     .map_err(AppError::from)
 }
 
+/// `POST /api/auth/refresh` —— 用当前令牌换一枚新令牌（滑动续期）。
+///
+/// 业务平台的 JWT 是**绝对过期**的（`jwt_ttl_hours`，默认 24h），没有续期手段时
+/// 操作员干着活就会忽然被踢回登录页（`http.ts::handleUnauthorized` 判定 401 后
+/// 清令牌 + 硬跳）。前端在令牌剩余不足 2 小时时调这里换新（`stores/auth.ts::renew`），
+/// 只要页面还开着就不会掉登录态。
+///
+/// 只认「当前令牌仍然有效」：`require_auth` 已经验过签名与 `exp`，这里再确认账号还在，
+/// 然后从库里重新读角色 / 中台绑定再签发 —— 改过的权限立刻生效，不会把旧 claims 续下去。
+pub async fn refresh_handler(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> Result<Json<ApiResponse<LoginResponse>>, AppError> {
+    let user =
+        sqlx::query_as::<_, UserRow>(&format!("SELECT {USER_COLUMNS} FROM users WHERE id = ?1"))
+            .bind(claims.sub)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::Unauthorized("用户不存在，请重新登录".to_string()))?;
+    issue_token(&state, user)
+}
+
 pub async fn me_handler(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,

@@ -1,4 +1,5 @@
 use robodog_ops_server::app::{AppState, build_router};
+use axum::middleware::from_fn_with_state;
 use robodog_ops_server::config::Config;
 use robodog_ops_server::{control_plane, db, gateway, notify, seed};
 use std::sync::Arc;
@@ -74,11 +75,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(rx) = notify_rx {
         notify::spawn(state.notify(), rx);
     }
-    let router = build_router(state);
+    let router = build_router(state.clone());
 
     // HTTPS（自签证书即可）：浏览器只在安全上下文里开放麦克风 / AudioWorklet（网页对讲）。
     // 设备客户端仍走明文 `:port`（`ws://`），不用上塔改配置；这里起不来只记 warning。
-    if let Err(error) = robodog_ops_server::tls::spawn(
+    let tls_started = match robodog_ops_server::tls::spawn(
         router.clone(),
         config.https_port,
         config.tls_cert.as_deref(),
@@ -86,8 +87,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await
     {
-        tracing::warn!("HTTPS 未启动：{error}");
-    }
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!("HTTPS 未启动：{error}");
+            false
+        }
+    };
+
+    // 明文入口只服务设备客户端与 API；浏览器页面统一 302 到 `public_url`（https）。
+    // 不这么做时 `http://ip:3008` 与 `https://ip:3443` 是两个「源」、各存一份登录态，
+    // 从告警链接 / 对讲切过去看着就像被自动退出（见 `app::redirect_pages_to_https`）。
+    let router = if tls_started && config.https_page_origin().is_some() {
+        tracing::info!(
+            public_url = %config.public_url.as_deref().unwrap_or_default(),
+            "明文入口的页面请求将重定向到 https（登录态只保留一份）"
+        );
+        router.layer(from_fn_with_state(
+            state.clone(),
+            robodog_ops_server::app::redirect_pages_to_https,
+        ))
+    } else {
+        router
+    };
 
     let address = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&address).await?;

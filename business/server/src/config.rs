@@ -488,6 +488,17 @@ impl Config {
         format!("sqlite://{}", self.database_path.display())
     }
 
+    /// 浏览器里统一的页面入口（只有 `public_url` 是 https 时才算数）。
+    ///
+    /// 同一个进程同时挂在 `:port`（http，设备客户端用）与 `https_port` 上，而浏览器
+    /// 的 localStorage 按**源**隔离 —— `http://ip:3008` 与 `https://ip:3443` 各存一份
+    /// 登录态。配了 https 的 `public_url` 后，http 入口上的页面请求会被
+    /// `app::redirect_pages_to_https` 302 过去，平台就只剩一份登录态。
+    pub fn https_page_origin(&self) -> Option<String> {
+        let url = self.public_url.as_deref()?.trim().trim_end_matches('/');
+        url.starts_with("https://").then(|| url.to_string())
+    }
+
     /// 与中台通信是否就绪：地址 + （共享服务令牌 或 服务账号）。
     ///
     /// 只要有令牌就走内部接口 `/api/dogInternal/*`，不需要中台账号。

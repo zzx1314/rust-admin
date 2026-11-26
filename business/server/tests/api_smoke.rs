@@ -5579,3 +5579,130 @@ async fn map_status_syncs_from_zentai() {
         .expect("重复同步不应失败");
     assert_eq!(again, 0);
 }
+
+/// `POST /api/auth/refresh`：拿当前令牌换一枚新令牌（滑动续期）。
+///
+/// 业务平台的 JWT 是绝对过期的（默认 24h），没有续期手段时操作员干着活就会因为
+/// 某个接口 401 被踢回登录页。这里钉住三件事：能换到新令牌、新令牌可用、
+/// 没带令牌时不能凭空续期（401）。
+#[tokio::test]
+async fn refresh_rotates_the_session_token() {
+    let (state, _db) = test_state().await;
+    let app = build_router(state);
+    let token = login(&app).await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/auth/refresh")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "有效令牌应能续期");
+    let body = json_body(response).await;
+    let fresh = body["data"]["token"]
+        .as_str()
+        .expect("续期响应缺少 token")
+        .to_string();
+    assert_eq!(body["data"]["user"]["username"], "admin");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/api/auth/me")
+                .header(header::AUTHORIZATION, format!("Bearer {fresh}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "续期后的令牌要能直接用");
+
+    let response = app
+        .oneshot(
+            Request::post("/api/auth/refresh")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "没带令牌不能续期"
+    );
+}
+
+/// 配了 https 的 `public_url` 后：明文入口上的**页面**请求 302 到 https，
+/// 而 `/api/*`（设备客户端 / 板端 SDK 走的就是这条）一律不动。
+///
+/// 同一份 localStorage 存不下两个源的登录态：`http://ip:3008` 与 `https://ip:3443`
+/// 各存一份，操作员从企业微信告警链接过去就像被自动退出（2026-11-26 现场反馈）。
+#[tokio::test]
+async fn plain_http_pages_redirect_to_https_but_api_does_not() {
+    let (state, _db) = test_state().await;
+    let mut config = (*state.config).clone();
+    config.public_url = Some("https://ops.example.com:3443".to_string());
+    let state = AppState {
+        config: std::sync::Arc::new(config),
+        ..state
+    };
+    let app = build_router(state.clone()).layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        robodog_ops_server::app::redirect_pages_to_https,
+    ));
+
+    // 浏览器打开页面：302，路径与查询串原样带过去
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/devices?q=RD-1")
+                .header(header::ACCEPT, "text/html,application/xhtml+xml")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(
+        response.headers()[header::LOCATION],
+        "https://ops.example.com:3443/devices?q=RD-1"
+    );
+
+    // 接口请求哪怕带了 HTML Accept 也不能重定向
+    let response = app
+        .oneshot(
+            Request::get("/api/health")
+                .header(header::ACCEPT, "text/html")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "API 不该被重定向到 https");
+}
+
+/// 没配 https 的 `public_url` 时不做任何重定向（否则整个控制台会跳到连不上的地址，
+/// 比如只在明文上部署、或者 https 起不来的时候）。
+#[tokio::test]
+async fn pages_are_not_redirected_without_an_https_public_url() {
+    let (state, _db) = test_state().await;
+    let app = build_router(state.clone()).layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        robodog_ops_server::app::redirect_pages_to_https,
+    ));
+
+    let response = app
+        .oneshot(
+            Request::get("/")
+                .header(header::ACCEPT, "text/html")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(response.status(), StatusCode::FOUND);
+}

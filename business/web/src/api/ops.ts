@@ -38,7 +38,13 @@ import type {
 export const authApi = {
   login: (username: string, password: string) =>
     post<LoginResponse>("/auth/login", { username, password }),
-  me: () => get<UserInfo>("/auth/me")
+  me: () => get<UserInfo>("/auth/me"),
+  /**
+   * 滑动续期：当前令牌仍有效时换一枚新的（`stores/auth.ts::renew` 在快到期时调）。
+   *
+   * 业务平台的 JWT 是绝对过期的（默认 24h），没有这一步的话操作员每天必被踢一次。
+   */
+  refresh: () => post<LoginResponse>("/auth/refresh")
 };
 
 export const parkApi = {

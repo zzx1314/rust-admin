@@ -27,6 +27,13 @@ function tokenExp(token: string): number | null {
   }
 }
 
+/** 令牌过期时刻（毫秒）；解析不出来返回 `null`。滑动续期要按它判断「快到期了」 */
+export function tokenExpiresAt(token: string | null | undefined): number | null {
+  if (!token) return null;
+  const exp = tokenExp(token);
+  return exp === null ? null : exp * 1000;
+}
+
 /**
  * 本地判断令牌是否已过期（不再向服务端问一次）。
  *
@@ -37,9 +44,9 @@ function tokenExp(token: string): number | null {
  */
 export function tokenExpired(token: string | null | undefined): boolean {
   if (!token) return true;
-  const exp = tokenExp(token);
-  if (exp === null) return true;
-  return exp * 1000 <= Date.now();
+  const expiresAt = tokenExpiresAt(token);
+  if (expiresAt === null) return true;
+  return expiresAt <= Date.now();
 }
 
 /** 是否已经站在登录页上（含「现场入口」模式下的子路径） */
@@ -58,8 +65,22 @@ let lastUnauthorizedAt = 0;
 /** 跳登录页前留个记号：登录页挂载时提示一次「登录已过期」（硬跳转会清掉内存里的 ElMessage） */
 export const SESSION_EXPIRED_KEY = "robodog_session_expired";
 
+/**
+ * 会话被判失效时的收尾回调（由 `stores/auth` 注册）。
+ *
+ * 以前只清了 localStorage，pinia 里的 `token` 还是旧值：那一刻页面"自认为已登录"，
+ * 直到硬跳转生效；如果跳转被拦（已在登录页 / 3s 去重），就会出现「已经过期但 UI 还在
+ * 正常用」的幽灵会话。这里让 store 自己把内存里的令牌一起清掉。
+ */
+let sessionExpiredHandler: (() => void) | null = null;
+
+export function onSessionExpired(handler: () => void) {
+  sessionExpiredHandler = handler;
+}
+
 function handleUnauthorized() {
   tokenStorage.clear();
+  sessionExpiredHandler?.();
   // 已经在登录页上：用户本来就要重新登录，不要再弹「请先登录」
   if (onLoginPage()) return;
   const now = Date.now();
