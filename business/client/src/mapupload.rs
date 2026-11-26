@@ -1009,6 +1009,45 @@ pub fn merge_edit_info(existing: Option<&[u8]>, incoming: &[u8]) -> Option<Vec<u
             .and_then(Value::as_array)
             .is_some_and(|ops| !ops.is_empty());
 
+    let mut changed = false;
+
+    // 禁止区域：**整表以中台包为准**。平台是这张图禁止区域的管理方（新增/删除都在
+    // 平台上做），所以本体的列表要跟包一致；同时把旧 ops 里对应区域已不在列表中的
+    // `upsert_forbidden` 丢掉——遥控器保存时按「根图 + ops」重算，留着它就会把
+    // 已经删掉的禁止区域又画回来。
+    let mut forbidden_ops_removed = false;
+    if let Some(incoming_areas) = incoming_object
+        .get("forbidden_areas")
+        .and_then(Value::as_array)
+    {
+        let incoming_ids: std::collections::HashSet<i64> = incoming_areas
+            .iter()
+            .filter_map(|area| area.get("id").and_then(Value::as_i64))
+            .collect();
+        if let Some(Value::Array(ops)) = root.get_mut("edit_ops") {
+            let before = ops.len();
+            ops.retain(|op| {
+                if op.get("type").and_then(Value::as_str) != Some("upsert_forbidden") {
+                    return true;
+                }
+                op.get("area")
+                    .and_then(|area| area.get("id"))
+                    .and_then(Value::as_i64)
+                    .is_some_and(|id| incoming_ids.contains(&id))
+            });
+            forbidden_ops_removed = ops.len() != before;
+        }
+        let wanted = Value::Array(incoming_areas.clone());
+        let current = root.get("forbidden_areas").cloned().unwrap_or(Value::Null);
+        if current != wanted {
+            root.insert("forbidden_areas".to_string(), wanted);
+            changed = true;
+        }
+    }
+    if forbidden_ops_removed {
+        changed = true;
+    }
+
     let mut added: Vec<Value> = Vec::new();
     for circle in incoming_object
         .get("erase_areas")
@@ -1047,7 +1086,7 @@ pub fn merge_edit_info(existing: Option<&[u8]>, incoming: &[u8]) -> Option<Vec<u
         new_ops.push(op.clone());
     }
 
-    if added.is_empty() && new_ops.is_empty() {
+    if added.is_empty() && new_ops.is_empty() && !changed {
         if creating && has_incoming {
             return serde_json::to_vec_pretty(&Value::Object(root.clone()))
                 .ok()
@@ -1602,5 +1641,43 @@ mod tests {
             ("model.yaml", b"image: model.pgm\n".to_vec()),
         ]);
         assert!(!package_uses_original_raster(&package));
+    }
+
+    const BODY_WITH_FORBIDDEN: &[u8] = br#"{
+  "erase_areas": [],
+  "forbidden_areas": [{"id": 1, "center": {"x": 10.0, "y": 10.0}, "width": 20.0, "height": 20.0, "rotation": 0.0, "kind": "area"}],
+  "fences": [],
+  "edit_ops": [{"type": "upsert_forbidden", "area": {"id": 1, "center": {"x": 10.0, "y": 10.0}, "width": 20.0, "height": 20.0, "rotation": 0.0, "kind": "area"}}]
+}"#;
+
+    /// 禁止区域以中台包为准：新列表里没有的旧区域（连同它的 ops）要清掉，
+    /// 否则遥控器保存时按 ops 重算会把它画回来。
+    #[test]
+    fn merge_edit_info_replaces_forbidden_list() {
+        let incoming = br#"{
+  "erase_areas": [],
+  "forbidden_areas": [{"id": 2, "center": {"x": 30.0, "y": 30.0}, "width": 40.0, "height": 20.0, "rotation": 0.0, "kind": "area"}],
+  "fences": [],
+  "edit_ops": [{"type": "upsert_forbidden", "area": {"id": 2, "center": {"x": 30.0, "y": 30.0}, "width": 40.0, "height": 20.0, "rotation": 0.0, "kind": "area"}}]
+}"#;
+        let merged = merge_edit_info(Some(BODY_WITH_FORBIDDEN), incoming).expect("must merge");
+        let value: Value = serde_json::from_slice(&merged).unwrap();
+        let areas = value["forbidden_areas"].as_array().unwrap();
+        assert_eq!(areas.len(), 1, "旧区域要被平台的列表替换掉");
+        assert_eq!(areas[0]["id"], 2);
+        let ops = value["edit_ops"].as_array().unwrap();
+        assert!(
+            ops.iter().all(|op| op["area"]["id"] != 1),
+            "id=1 的 upsert_forbidden 必须被清掉"
+        );
+        assert!(ops.iter().any(|op| op["area"]["id"] == 2));
+    }
+
+    /// 包里的禁止区域和本体一致时不产生改动（避免每次下发都重写文件）
+    #[test]
+    fn merge_edit_info_keeps_forbidden_when_unchanged() {
+        let incoming = BODY_WITH_FORBIDDEN;
+        let merged = merge_edit_info(Some(BODY_WITH_FORBIDDEN), incoming).expect("must merge");
+        assert_eq!(merged, BODY_WITH_FORBIDDEN);
     }
 }

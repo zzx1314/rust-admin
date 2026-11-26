@@ -1,8 +1,9 @@
 use crate::api::AppState;
 use crate::api::middleware::RequestUser;
 use crate::business::dog::map::domain::{
-    CreateMapRequest, MapEditRequest, MapImageVO, MapPageQuery, MapShareResult, MapShareVO, MapVO,
-    PushMapRequest, ShareMapRequest, UpdateMapRequest, UploadMapRequest,
+    CreateMapRequest, MapEditRequest, MapForbiddenRequest, MapImageVO, MapPageQuery,
+    MapShareResult, MapShareVO, MapVO, PushMapRequest, ShareMapRequest, UpdateMapRequest,
+    UploadMapRequest,
 };
 use crate::common::error::{ApiResponse, AppError};
 use crate::common::pagination::PageResponse;
@@ -156,6 +157,25 @@ pub async fn edit_map_handler(
     let image = state
         .dog_map_service
         .erase(params.id, req, &state.upload_dir, &user.data_scope())
+        .await?;
+    Ok(Json(ApiResponse::ok(image)))
+}
+
+/// `POST /api/dogMap/{id}/forbidden` — 设置禁止区域（**整表替换**）。
+///
+/// 请求体：`{ areas: [{ id?, center: {x,y}, width, height, rotation }] }`，
+/// 坐标与边长都是栅格像素（左上角原点）。新增/保留的区域在编辑版栅格上刷成 `0`
+/// （占据，与遥控器一致），删掉的按建图原图还原；`edit_info.json` 的
+/// `forbidden_areas` / `edit_ops` 同步换掉。返回新 PNG 与当前禁止区域列表。
+pub async fn set_forbidden_areas_handler(
+    State(state): State<AppState>,
+    Extension(user): Extension<RequestUser>,
+    Path(params): Path<IdParam>,
+    Json(req): Json<MapForbiddenRequest>,
+) -> Result<Json<ApiResponse<MapImageVO>>, AppError> {
+    let image = state
+        .dog_map_service
+        .set_forbidden_areas(params.id, req, &state.upload_dir, &user.data_scope())
         .await?;
     Ok(Json(ApiResponse::ok(image)))
 }

@@ -1,5 +1,6 @@
 use crate::business::dog::map::entity::ActiveModel as MapActiveModel;
 use crate::business::dog::map::entity::Model as MapModel;
+use crate::common::error::AppError;
 use crate::common::util::format_datetime;
 use chrono::{DateTime, Utc};
 use sea_orm::ActiveValue;
@@ -263,11 +264,68 @@ pub struct MapEditStroke {
 }
 
 /// 栅格像素坐标（左上角为原点，`x` 向右、`y` 向下）。
-#[derive(Debug, Deserialize, Clone, Copy)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
 pub struct MapEditPoint {
     pub x: f64,
     pub y: f64,
+}
+
+/// 禁止区域（遥控器 `map_edit/edit_info.json` 的 `forbidden_areas` 条目）。
+///
+/// 逆向自遥控器自己写出来的结构：**轴对齐/可旋转矩形，像素坐标**，
+/// `width` / `height` 是像素边长，`rotation` 绕 `center` 旋转（遥控器样本里是 `0`，
+/// 单位按弧度处理）。栅格上的表现是这块矩形被刷成 **0（占据）**，
+/// 导航规划自然绕开——这就是遥控器界面上那块“禁止区域”。
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MapForbiddenArea {
+    /// 遥控器用毫秒时间戳做 id；平台新增的也按同一规则生成。
+    pub id: i64,
+    pub center: MapEditPoint,
+    pub width: f64,
+    pub height: f64,
+    #[serde(default)]
+    pub rotation: f64,
+    /// 遥控器样本里是 `"area"`。
+    #[serde(default = "default_forbidden_kind")]
+    pub kind: String,
+}
+
+fn default_forbidden_kind() -> String {
+    "area".to_string()
+}
+
+impl MapForbiddenArea {
+    /// 校验尺寸 / 坐标（像素坐标，必须落在栅格内由调用方再判）。
+    pub fn validate(&self) -> Result<(), AppError> {
+        if !self.center.x.is_finite() || !self.center.y.is_finite() {
+            return Err(AppError::BadRequest("禁止区域中心点无效".to_string()));
+        }
+        if !self.width.is_finite() || !self.height.is_finite() {
+            return Err(AppError::BadRequest("禁止区域尺寸无效".to_string()));
+        }
+        // 太小没意义，太大（超过 2 万像素）基本是误操作
+        if self.width < 1.0 || self.height < 1.0 {
+            return Err(AppError::BadRequest(
+                "禁止区域至少 1×1 像素（0.05 m/px 下约 5 cm）".to_string(),
+            ));
+        }
+        if self.width > 20_000.0 || self.height > 20_000.0 {
+            return Err(AppError::BadRequest("禁止区域尺寸过大".to_string()));
+        }
+        if !self.rotation.is_finite() {
+            return Err(AppError::BadRequest("禁止区域旋转角无效".to_string()));
+        }
+        Ok(())
+    }
+}
+
+/// 设置禁止区域（整表替换：本次提交的列表就是最终状态）。
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MapForbiddenRequest {
+    pub areas: Vec<MapForbiddenArea>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -285,6 +343,9 @@ pub struct MapImageVO {
     /// 编辑接口返回：本次实际改写的像素数。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub erased_pixels: Option<usize>,
+    /// 这张图当前的禁止区域（`map_edit/edit_info.json` 的 `forbidden_areas`）。
+    #[serde(default)]
+    pub forbidden_areas: Vec<MapForbiddenArea>,
 }
 
 impl From<DogMap> for MapVO {

@@ -14,7 +14,7 @@ use std::io::{Cursor, Write};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use sha2::{Digest, Sha256};
 
-use crate::business::dog::map::domain::{MapEditPoint, MapEditStroke};
+use crate::business::dog::map::domain::{MapEditPoint, MapEditStroke, MapForbiddenArea};
 use crate::common::error::AppError;
 
 /// 地图包解析结果（未编码的中间结构）
@@ -537,6 +537,315 @@ pub fn merge_edit_info_circles(
         return None;
     }
     Some(out)
+}
+
+/// 地图包里与栅格编辑相关的条目名（`map_edit/` 优先）。
+struct PackageEditNames {
+    edit_pgm: Option<String>,
+    root_map: Option<String>,
+    root_model: Option<String>,
+    root_other: Option<String>,
+    edit_info: Option<String>,
+}
+
+impl PackageEditNames {
+    fn root_pgm(&self) -> Option<&str> {
+        self.root_map
+            .as_deref()
+            .or(self.root_model.as_deref())
+            .or(self.root_other.as_deref())
+    }
+}
+
+fn collect_edit_names<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> PackageEditNames {
+    let mut names = PackageEditNames {
+        edit_pgm: None,
+        root_map: None,
+        root_model: None,
+        root_other: None,
+        edit_info: None,
+    };
+    for index in 0..archive.len() {
+        let Ok(entry) = archive.by_index(index) else {
+            continue;
+        };
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let lower = name.to_lowercase();
+        let base = lower.rsplit('/').next().unwrap_or(lower.as_str());
+        if base == "edit_info.json" {
+            if is_map_edit_entry(&lower) {
+                names.edit_info.get_or_insert(name);
+            }
+            continue;
+        }
+        if !lower.ends_with(".pgm") {
+            continue;
+        }
+        if is_map_edit_entry(&lower) {
+            names.edit_pgm.get_or_insert(name);
+        } else if base == "map.pgm" {
+            names.root_map.get_or_insert(name);
+        } else if base == "model.pgm" {
+            names.root_model.get_or_insert(name);
+        } else {
+            names.root_other.get_or_insert(name);
+        }
+    }
+    names
+}
+
+/// 读地图包里的禁止区域（`map_edit/edit_info.json` 的 `forbidden_areas`）。
+pub fn read_forbidden_areas(bytes: &[u8]) -> Vec<MapForbiddenArea> {
+    let Ok(mut archive) = zip::ZipArchive::new(Cursor::new(bytes)) else {
+        return Vec::new();
+    };
+    let names = collect_edit_names(&mut archive);
+    let Some(name) = names.edit_info else {
+        return Vec::new();
+    };
+    let Ok(raw) = read_entry(&mut archive, &name) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+        return Vec::new();
+    };
+    value
+        .get("forbidden_areas")
+        .and_then(|items| serde_json::from_value::<Vec<MapForbiddenArea>>(items.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// 某个像素是否落在禁止区域矩形内（绕 `center` 旋转 `rotation` 弧度）。
+fn point_in_forbidden(x: f64, y: f64, area: &MapForbiddenArea) -> bool {
+    let dx = x - area.center.x;
+    let dy = y - area.center.y;
+    let (sin, cos) = area.rotation.sin_cos();
+    // 反向旋转到矩形自身坐标系
+    let local_x = dx * cos + dy * sin;
+    let local_y = -dx * sin + dy * cos;
+    local_x.abs() <= area.width / 2.0 && local_y.abs() <= area.height / 2.0
+}
+
+/// 把禁止区域刷成 `value`（遥控器写的是 `0` = 占据），返回改写像素数。
+pub fn paint_forbidden_area(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    area: &MapForbiddenArea,
+    value: u8,
+) -> usize {
+    if pixels.len() != width as usize * height as usize {
+        return 0;
+    }
+    let half_diag = area.width.hypot(area.height) / 2.0 + 1.0;
+    let x0 = ((area.center.x - half_diag).floor().max(0.0)) as u32;
+    let x1 = ((area.center.x + half_diag).ceil().min(width as f64 - 1.0)).max(0.0) as u32;
+    let y0 = ((area.center.y - half_diag).floor().max(0.0)) as u32;
+    let y1 = ((area.center.y + half_diag).ceil().min(height as f64 - 1.0)).max(0.0) as u32;
+    let mut changed = 0usize;
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            if !point_in_forbidden(x as f64, y as f64, area) {
+                continue;
+            }
+            let index = y as usize * width as usize + x as usize;
+            if pixels[index] != value {
+                pixels[index] = value;
+                changed += 1;
+            }
+        }
+    }
+    changed
+}
+
+/// 设置整张图的禁止区域（**整表替换**：本次提交的列表就是最终状态）。
+///
+/// - 新增 / 保留的区域在编辑版栅格上刷成 `0`（占据）——遥控器就是这么表达的；
+/// - 被删掉的区域按**建图原图**同位置的像素还原（精确还原它挡住之前的样子）；
+/// - `edit_info.json` 的 `forbidden_areas` 换成新列表，`edit_ops` 里旧的
+///   `upsert_forbidden` 全部换掉（否则遥控器下次保存会把删掉的区域画回来）。
+pub fn set_forbidden_areas(bytes: &[u8], areas: &[MapForbiddenArea]) -> Result<Vec<u8>, AppError> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
+        .map_err(|error| AppError::BadRequest(format!("地图包解析失败: {error}")))?;
+    let names = collect_edit_names(&mut archive);
+    let edit_pgm = names.edit_pgm.clone().ok_or_else(|| {
+        AppError::BadRequest("这张地图没有编辑版（手工上传的地图包），不能设置禁止区域".to_string())
+    })?;
+    let root_name = names.root_pgm().map(str::to_string).ok_or_else(|| {
+        AppError::BadRequest("地图包里没有建图原图（根目录 map.pgm），无法设置禁止区域".to_string())
+    })?;
+
+    let mut raster = parse_pgm_raster(&read_entry(&mut archive, &edit_pgm)?)?;
+    let root_raster = parse_pgm_raster(&read_entry(&mut archive, &root_name)?)?;
+    if raster.width != root_raster.width || raster.height != root_raster.height {
+        return Err(AppError::BadRequest(
+            "编辑版与建图原图的尺寸不一致，无法设置禁止区域".to_string(),
+        ));
+    }
+
+    let mut info: serde_json::Value = match names.edit_info.as_deref() {
+        Some(name) => {
+            let raw = read_entry(&mut archive, name)?;
+            serde_json::from_slice(&raw).map_err(|_| {
+                AppError::BadRequest(
+                    "遥控器的编辑记录（edit_info.json）解析失败，无法安全地设置禁止区域"
+                        .to_string(),
+                )
+            })?
+        }
+        None => serde_json::json!({
+            "erase_areas": [],
+            "forbidden_areas": [],
+            "fences": [],
+            "edit_ops": [],
+        }),
+    };
+    let object = info.as_object_mut().ok_or_else(|| {
+        AppError::BadRequest("遥控器的编辑记录不是 JSON 对象，无法设置禁止区域".to_string())
+    })?;
+    for key in ["erase_areas", "forbidden_areas", "fences", "edit_ops"] {
+        if !object.get(key).is_some_and(serde_json::Value::is_array) {
+            object.insert(key.to_string(), serde_json::Value::Array(Vec::new()));
+        }
+    }
+
+    let previous: Vec<MapForbiddenArea> = object
+        .get("forbidden_areas")
+        .and_then(|items| serde_json::from_value(items.clone()).ok())
+        .unwrap_or_default();
+    let keep: std::collections::HashSet<i64> = areas.iter().map(|area| area.id).collect();
+
+    // 删掉的区域：按建图原图还原（含旋转，逐像素取原值）
+    for area in &previous {
+        if keep.contains(&area.id) {
+            continue;
+        }
+        let width = raster.width;
+        let height = raster.height;
+        let mut restored = 0usize;
+        for y in 0..height {
+            for x in 0..width {
+                if !point_in_forbidden(x as f64, y as f64, area) {
+                    continue;
+                }
+                let index = y as usize * width as usize + x as usize;
+                let original = root_raster.pixels[index];
+                if raster.pixels[index] != original {
+                    raster.pixels[index] = original;
+                    restored += 1;
+                }
+            }
+        }
+        let _ = restored;
+    }
+
+    // 新增 / 保留的区域：刷成占据（0），与遥控器一致
+    for area in areas {
+        area.validate()?;
+        paint_forbidden_area(
+            &mut raster.pixels,
+            raster.width,
+            raster.height,
+            area,
+            FORBIDDEN_VALUE,
+        );
+    }
+
+    if let Some(serde_json::Value::Array(list)) = object.get_mut("forbidden_areas") {
+        list.clear();
+        for area in areas {
+            list.push(serde_json::to_value(area).map_err(|error| {
+                AppError::InternalError(format!("序列化禁止区域失败: {error}"))
+            })?);
+        }
+    }
+    if let Some(serde_json::Value::Array(ops)) = object.get_mut("edit_ops") {
+        ops.retain(|op| {
+            !op.get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|kind| kind == "upsert_forbidden")
+        });
+        for area in areas {
+            ops.push(serde_json::json!({
+                "type": "upsert_forbidden",
+                "area": serde_json::to_value(area).unwrap_or(serde_json::Value::Null),
+            }));
+        }
+    }
+
+    write_edited_package(
+        &mut archive,
+        &edit_pgm,
+        &raster.to_p5(),
+        names.edit_info.as_deref(),
+        &serde_json::to_vec_pretty(&info)
+            .map_err(|error| AppError::InternalError(format!("序列化编辑记录失败: {error}")))?,
+    )
+}
+
+/// 禁止区域在栅格里的灰度值：`0`（占据）。遥控器实测就是写 0。
+pub const FORBIDDEN_VALUE: u8 = 0;
+
+/// 按「替换编辑版栅格 + 可选替换编辑记录」重写 zip，其余条目原样复制。
+fn write_edited_package<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    edit_pgm_name: &str,
+    edited_pgm: &[u8],
+    edit_info_name: Option<&str>,
+    edit_info: &[u8],
+) -> Result<Vec<u8>, AppError> {
+    let mut buffer = Cursor::new(Vec::new());
+    let mut wrote_info = false;
+    {
+        let mut writer = zip::ZipWriter::new(&mut buffer);
+        let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for index in 0..archive.len() {
+            let mut entry = archive
+                .by_index(index)
+                .map_err(|error| AppError::BadRequest(format!("读取地图包失败: {error}")))?;
+            let name = entry.name().to_string();
+            if entry.is_dir() {
+                writer
+                    .add_directory(name, options)
+                    .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+                continue;
+            }
+            writer
+                .start_file(name.clone(), options)
+                .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+            if name == edit_pgm_name {
+                writer
+                    .write_all(edited_pgm)
+                    .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+            } else if Some(name.as_str()) == edit_info_name {
+                writer
+                    .write_all(edit_info)
+                    .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+                wrote_info = true;
+            } else {
+                std::io::copy(&mut entry, &mut writer)
+                    .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+            }
+        }
+        if !wrote_info {
+            writer
+                .start_file("map_edit/edit_info.json".to_string(), options)
+                .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+            writer
+                .write_all(edit_info)
+                .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+        }
+        writer
+            .finish()
+            .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+    }
+    Ok(buffer.into_inner())
 }
 
 /// 遥控器「没有编辑」时的空 `edit_info.json`（结构与它自己写出来的一致）。
@@ -1425,5 +1734,103 @@ mod tests {
         let out = restore_original_package(&zip).unwrap();
         let raster = parse_pgm_raster(&read_zip_entry(&out, "map_edit/map.pgm").unwrap()).unwrap();
         assert_eq!(raster.pixels, vec![255u8; 64]);
+    }
+
+    // ---- 禁止区域（forbidden_areas / upsert_forbidden）----
+
+    fn forbidden_area(id: i64, x: f64, y: f64, w: f64, h: f64, rotation: f64) -> MapForbiddenArea {
+        MapForbiddenArea {
+            id,
+            center: MapEditPoint { x, y },
+            width: w,
+            height: h,
+            rotation,
+            kind: "area".to_string(),
+        }
+    }
+
+    fn forbidden_package() -> Vec<u8> {
+        // 根图全是「未知」(128)，编辑版全是「可通行」(254)
+        let info = br#"{"erase_areas":[],"forbidden_areas":[],"fences":[],"edit_ops":[]}"#;
+        build_zip(&[
+            ("map.pgm", solid_pgm(8, 8, 128)),
+            ("map_edit/map.pgm", solid_pgm(8, 8, 254)),
+            ("map_edit/map.yaml", b"image: map.pgm\n".to_vec()),
+            ("map_edit/edit_info.json", info.to_vec()),
+        ])
+    }
+
+    fn raster_of(bytes: &[u8]) -> PgmRaster {
+        parse_pgm_raster(&read_zip_entry(bytes, "map_edit/map.pgm").unwrap()).unwrap()
+    }
+
+    #[test]
+    fn forbidden_area_is_painted_occupied_and_recorded() {
+        let area = forbidden_area(1, 4.0, 4.0, 4.0, 2.0, 0.0);
+        let out = set_forbidden_areas(&forbidden_package(), std::slice::from_ref(&area)).unwrap();
+
+        let raster = raster_of(&out);
+        // 矩形 (2..6, 3..5) 内是占据 0，外面还是 254
+        assert_eq!(raster.pixels[3 * 8 + 2], FORBIDDEN_VALUE);
+        assert_eq!(raster.pixels[4 * 8 + 5], FORBIDDEN_VALUE);
+        assert_eq!(raster.pixels[0], 254);
+
+        let info_text =
+            String::from_utf8(read_zip_entry(&out, "map_edit/edit_info.json").unwrap()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&info_text).unwrap();
+        let areas: Vec<MapForbiddenArea> =
+            serde_json::from_value(value["forbidden_areas"].clone()).unwrap();
+        assert_eq!(areas.len(), 1);
+        assert_eq!(areas[0].id, 1);
+        assert_eq!(areas[0].width, 4.0);
+        assert_eq!(
+            value["edit_ops"][0]["type"].as_str(),
+            Some("upsert_forbidden")
+        );
+        assert_eq!(read_forbidden_areas(&out).len(), 1);
+    }
+
+    /// 删掉禁止区域：栅格按建图原图还原（这块原本是 128 未知，不能留成 254）
+    #[test]
+    fn removing_forbidden_area_restores_pixels_from_original() {
+        let area = forbidden_area(7, 4.0, 4.0, 4.0, 2.0, 0.0);
+        let with_area = set_forbidden_areas(&forbidden_package(), &[area]).unwrap();
+        assert_eq!(raster_of(&with_area).pixels[3 * 8 + 2], FORBIDDEN_VALUE);
+
+        let cleared = set_forbidden_areas(&with_area, &[]).unwrap();
+        let raster = raster_of(&cleared);
+        assert_eq!(raster.pixels[3 * 8 + 2], 128, "要还原成建图原图的未知");
+        let info_text =
+            String::from_utf8(read_zip_entry(&cleared, "map_edit/edit_info.json").unwrap())
+                .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&info_text).unwrap();
+        assert!(value["forbidden_areas"].as_array().unwrap().is_empty());
+        assert!(
+            value["edit_ops"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|op| op["type"].as_str() != Some("upsert_forbidden")),
+            "旧的 upsert_forbidden 必须清掉，否则遥控器会把它画回来"
+        );
+    }
+
+    /// 旋转 90°：宽 6 高 2 的条会立起来
+    #[test]
+    fn rotated_forbidden_area_rotates_around_center() {
+        let area = forbidden_area(2, 4.0, 4.0, 6.0, 2.0, std::f64::consts::FRAC_PI_2);
+        let out = set_forbidden_areas(&forbidden_package(), &[area]).unwrap();
+        let raster = raster_of(&out);
+        // 旋转后变成竖条：x 在 3..5、y 在 1..7
+        assert_eq!(raster.pixels[8 + 4], FORBIDDEN_VALUE);
+        assert_eq!(raster.pixels[7 * 8 + 4], FORBIDDEN_VALUE);
+        assert_eq!(raster.pixels[3 * 8 + 1], 254, "横条的位置现在不该被占");
+    }
+
+    #[test]
+    fn forbidden_area_rejects_tiny_size() {
+        let area = forbidden_area(3, 4.0, 4.0, 0.2, 2.0, 0.0);
+        let error = set_forbidden_areas(&forbidden_package(), &[area]).unwrap_err();
+        assert!(format!("{error:?}").contains("至少 1×1"));
     }
 }

@@ -66,6 +66,7 @@ GET    /api/dogMedia/{id}/image     单张预览（JSON + base64 data URL；手�
 GET    /api/dogMedia/{id}/file      下载单张原图（attachment；手工登记的行返回 404）
 GET    /api/dogMedia/export         批量下载 zip（ids 或筛选条件；原图 + manifest.json；上限 200 张 / 100MB）
 POST   /api/dogMap/{id}/restore       恢复原图：编辑版栅格换回建图原图 + 清空遥控器编辑记录
+POST   /api/dogMap/{id}/forbidden     禁止区域：整表替换（栅格刷占据 + edit_info 同步）
 POST   /api/dogMap/{id}/edit        橡皮擦：按像素笔画改写包内 model.pgm 噪点
 POST   /api/dogMap/{id}/push        把编辑后的地图下发到狗体（本体）并重新载图
 POST   /api/dogMap/{id}/share       把地图分享给其他设备使用（`deviceCodes` + `mode: append|replace`）
@@ -127,6 +128,14 @@ ROS `model.pgm` 包）时才退回 `model.pgm` / `map.pgm`。编辑只改写编�
 只登记**擦成可通行 254** 的笔画——遥控器的橡皮擦只有这一种落值，`擦成未知 128`
 表达不了（那类编辑只能靠栅格本身传达）。包内没有 `edit_info.json` 时，只有
 `map_edit/` 存在才补一份；根目录栅格（老固件）不建档。
+
+「禁止区域」（`POST /api/dogMap/{id}/forbidden`，请求体 `{ areas: [...] }`）是**整表替换**：
+遥控器界面上那块红色禁区，结构是 `edit_info.json` 的
+`forbidden_areas: [{id, center:{x,y}, width, height, rotation, kind:"area"}]`（像素坐标、
+`rotation` 按弧度），栅格上把该矩形刷成 **`0`（占据）**，导航规划绕开；同时写一条
+`edit_ops {type:"upsert_forbidden", area}`。提交的列表就是最终状态：不在列表里的按建图
+原图还原那块像素，并清掉对应的 `upsert_forbidden`（否则遥控器保存时会把它画回来）。
+`GET /api/dogMap/{id}/image` 会带回 `forbiddenAreas`，前端据此在预览里画出红块。
 
 「恢复原图」（`POST /api/dogMap/{id}/restore`）把 `map_edit/map.pgm` 换回根目录的
 **建图原图**，并把 `map_edit/edit_info.json` 重置成空记录——遥控器保存时按「根图 +

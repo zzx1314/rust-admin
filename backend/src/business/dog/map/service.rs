@@ -1,11 +1,13 @@
 use crate::business::dog::map::domain::{
     CreateMapRequest, DogMap, MAP_STATUS_ARCHIVED, MAP_STATUS_DRAFT, MAP_STATUS_PARTIAL,
-    MAP_STATUS_PUBLISHED, MapEditRequest, MapEditStroke, MapImageVO, MapPageQuery, MapShareResult,
-    MapShareVO, MapVO, ShareMapRequest, UpdateMapRequest, UploadMapRequest, is_valid_map_status,
+    MAP_STATUS_PUBLISHED, MapEditRequest, MapEditStroke, MapForbiddenRequest, MapImageVO,
+    MapPageQuery, MapShareResult, MapShareVO, MapVO, ShareMapRequest, UpdateMapRequest,
+    UploadMapRequest, is_valid_map_status,
 };
 use crate::business::dog::map::package::{
     MAX_EDIT_POINTS, MAX_EDIT_STROKES, ParsedMapPackage, normalize_erase_value, parse_map_package,
-    restore_original_package, rewrite_map_package, sha256_hex,
+    read_forbidden_areas, restore_original_package, rewrite_map_package,
+    set_forbidden_areas as apply_forbidden_areas, sha256_hex,
 };
 use crate::business::dog::map::repository::SeaOrmDogMapRepository;
 use crate::common::data_scope::DataScope;
@@ -541,6 +543,7 @@ impl DogMapService {
             height: parsed.height,
             map_hash: None,
             erased_pixels: None,
+            forbidden_areas: read_forbidden_areas(&bytes),
         })
     }
 
@@ -587,6 +590,58 @@ impl DogMapService {
             height: parsed.height,
             map_hash: Some(parsed.sha256),
             erased_pixels: Some(erased_pixels),
+            forbidden_areas: read_forbidden_areas(&edited),
+        })
+    }
+
+    /// 设置禁止区域（整表替换）：新增/保留的在栅格上刷成 `0`（占据），
+    /// 删掉的按建图原图还原；`edit_info.json` 的 `forbidden_areas` 与
+    /// `edit_ops` 同步换掉，遥控器下次保存不会把删掉的区域画回来。
+    pub async fn set_forbidden_areas(
+        &self,
+        id: i64,
+        req: MapForbiddenRequest,
+        upload_root: &std::path::Path,
+        scope: &DataScope,
+    ) -> Result<MapImageVO, AppError> {
+        let map = self.get_owned_by_id(id, scope).await?;
+        if !matches!(
+            map.map_status.as_str(),
+            MAP_STATUS_DRAFT | MAP_STATUS_PARTIAL
+        ) {
+            return Err(AppError::BadRequest(format!(
+                "地图「{}」当前状态为 {}，不可直接编辑；请先派生新版本（新版本为草稿）再设置禁止区域",
+                map.map_name, map.map_status
+            )));
+        }
+
+        let bytes = self.read_package(&map, upload_root).await?;
+        // 没给 id 的（前端新画的）按毫秒时间戳生成，与遥控器同一套规则
+        let mut areas = req.areas;
+        let mut stamp = chrono::Utc::now().timestamp_millis();
+        for area in &mut areas {
+            if area.id <= 0 {
+                area.id = stamp;
+                stamp += 1;
+            }
+        }
+        areas.sort_by_key(|area| area.id);
+        areas.dedup_by_key(|area| area.id);
+
+        let updated = apply_forbidden_areas(&bytes, &areas)?;
+        let parsed = parse_map_package(&updated)?;
+        self.store_edited_package(id, &map, &updated, &parsed, upload_root, scope)
+            .await?;
+
+        Ok(MapImageVO {
+            image: parsed.png_data_url(),
+            resolution: parsed.resolution,
+            origin: parsed.origin,
+            width: parsed.width,
+            height: parsed.height,
+            map_hash: Some(parsed.sha256),
+            erased_pixels: None,
+            forbidden_areas: read_forbidden_areas(&updated),
         })
     }
 
@@ -625,6 +680,7 @@ impl DogMapService {
             height: parsed.height,
             map_hash: Some(parsed.sha256),
             erased_pixels: None,
+            forbidden_areas: read_forbidden_areas(&restored),
         })
     }
 

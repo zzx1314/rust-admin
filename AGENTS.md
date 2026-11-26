@@ -422,6 +422,21 @@ resolve_route_map` 同样要放行「别园区的图」（否则园区能绑图�
 `mapupload::tests::package_is_original_when_edit_equals_root` /
 `package_is_not_original_when_edits_remain`。
 
+**禁止区域（2026-11-26 起）**：遥控器界面上那块红色“禁止区域”，逆向出来的结构是
+`map_edit/edit_info.json` 的 `forbidden_areas: [{id, center:{x,y}, width, height,
+rotation, kind:"area"}]`（**像素坐标**，`width/height` 是像素边长，`rotation` 绕 `center`
+按弧度，样本里都是 0），同时有一条 `edit_ops {type:"upsert_forbidden", area}`；栅格上的
+表现是把这块矩形刷成 **`0`（占据）**——现场实测：200×200 px 的矩形让 40,000 个像素从
+`128` 变成 `0`，导航规划自然绕开。平台侧：`POST /api/dogMap/{id}/forbidden`
+（`{areas:[...]}`，**整表替换**：不在列表里的会被撤销，撤销时按建图原图同位置像素还原，
+并清掉对应的 `upsert_forbidden` 动作）；`MapImageVO.forbidden_areas` 回读当前列表。
+前端在预览弹窗里用「禁止区域」工具拖矩形（目前只画轴对齐，`rotation=0`）。
+⚠️ 设备客户端对 `forbidden_areas` 是**整表以中台包为准**（与擦除圆的“只追加”不同）：
+平台是这张图禁止区域的管理方。所以**在遥控器上新画的禁止区域，要先「同步地图」再下发**，
+否则会被平台的列表覆盖掉。回归：`package::tests::forbidden_area_is_painted_occupied_and_recorded` /
+`removing_forbidden_area_restores_pixels_from_original` / `rotated_forbidden_area_rotates_around_center`、
+`mapupload::tests::merge_edit_info_replaces_forbidden_list`。
+
 「返回起点」回的是**起步时本体 `capture_origin_pose` 采的起点位姿**，不是地图原点。载图
 定位（`4030 op=1`）的 `initial_pose` **缺省必须发零四元数**（`Pose::unspecified()`）：协议
 §2.4.1 里只有四元数全零才表示「读上一份位姿文件做完整重定位」，而 `Pose::default()` 的单位

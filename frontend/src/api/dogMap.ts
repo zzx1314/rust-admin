@@ -16,6 +16,7 @@ const dogMapUrls = {
   image: "/api/dogMap/",
   edit: "/api/dogMap/",
   restore: "/api/dogMap/",
+  forbidden: "/api/dogMap/",
   publish: "/api/dogMap/",
   newVersion: "/api/dogMap/",
   push: "/api/dogMap/",
@@ -56,8 +57,41 @@ export type MapImageResult = {
     mapHash?: string;
     /** 编辑接口返回：本次实际改写的像素数 */
     erasedPixels?: number;
+    /** 这张图当前的禁止区域（`map_edit/edit_info.json` 的 forbidden_areas） */
+    forbiddenAreas?: MapForbiddenArea[];
   };
 };
+
+/**
+ * 禁止区域：轴对齐 / 可旋转矩形，坐标与边长都是**栅格像素**。
+ *
+ * 遥控器在栅格上把它刷成 `0`（占据），导航规划自然绕开；`edit_info.json` 里
+ * 同步记 `forbidden_areas` + 一条 `upsert_forbidden` 动作，遥控器保存时按
+ * 「根图 + 这些动作」重算栅格，所以平台改它必须连编辑记录一起改。
+ */
+export type MapForbiddenArea = {
+  /** 秒；新增时省略（后端按毫秒时间戳生成，与遥控器同一套规则） */
+  id?: number;
+  center: { x: number; y: number };
+  width: number;
+  height: number;
+  /** 绕 center 旋转，按弧度（遥控器样本里都是 0） */
+  rotation?: number;
+  kind?: string;
+};
+
+/**
+ * 设置禁止区域（**整表替换**：传进来的列表就是最终状态，不在列表里的会被撤销
+ * 并按建图原图还原那一块栅格）。只有草稿 / 部分标定可改。
+ */
+export const dogMapSetForbiddenAreas = (
+  id: string | number,
+  areas: MapForbiddenArea[]
+) =>
+  http.axiosPostRequest<MapImageResult>(
+    `${dogMapUrls.forbidden}${id}/forbidden`,
+    { areas }
+  );
 
 /** 橡皮擦笔画：坐标是栅格像素坐标（左上角原点，x 向右、y 向下）。 */
 export type MapEditStroke = {

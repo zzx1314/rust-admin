@@ -22,12 +22,15 @@ import {
   dogMapErase,
   dogMapGetImage,
   dogMapPushToDevice,
-  type MapEditStroke
+  dogMapSetForbiddenAreas,
+  type MapEditStroke,
+  type MapForbiddenArea
 } from "@/api/dogMap";
 import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 import EraserIcon from "~icons/ri/eraser-line";
+import ForbiddenIcon from "~icons/ri/forbidden-line";
 import HandIcon from "~icons/ri/hand";
 import ZoomIn from "~icons/ri/zoom-in-line";
 import ZoomOut from "~icons/ri/zoom-out-line";
@@ -39,7 +42,7 @@ defineOptions({ name: "MapEditorDialog" });
 
 const emit = defineEmits<{ saved: [row: any]; pushed: [row: any] }>();
 
-type Tool = "pan" | "eraser";
+type Tool = "pan" | "eraser" | "forbidden";
 
 /** 可编辑的地图状态（与后端 DogMapService::erase 保持一致） */
 const EDITABLE_STATUS = ["草稿", "部分标定"];
@@ -61,6 +64,21 @@ const eraseValue = ref(254);
 const zoom = ref(1);
 const dirty = ref(false);
 const cursor = ref({ x: 0, y: 0, visible: false });
+
+/** 已保存的禁止区域（来自后端；遥控器画的那块也在里面） */
+const savedAreas = ref<MapForbiddenArea[]>([]);
+/** 本次新画的禁止区域（id = 0，保存时后端按毫秒时间戳补 id） */
+const pendingAreas = ref<MapForbiddenArea[]>([]);
+/** 本次要撤销的已有区域 id */
+const removedAreaIds = ref<number[]>([]);
+/** 正在拖拽的矩形（栅格像素） */
+const draftingRect = ref<{
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+} | null>(null);
+const areaSaving = ref(false);
 
 const canvasRef = ref<HTMLCanvasElement>();
 const viewportRef = ref<HTMLDivElement>();
@@ -97,6 +115,16 @@ const pushTargets = computed<string[]>(() => {
   return codes;
 });
 const canPush = computed(() => pushTargets.value.length > 0);
+/** 当前生效的禁止区域：已保存的（去掉撤销的）+ 新画的 */
+const activeAreas = computed<MapForbiddenArea[]>(() => [
+  ...savedAreas.value.filter(area => !removedAreaIds.value.includes(area.id!)),
+  ...pendingAreas.value
+]);
+const areaDirty = computed(
+  () => pendingAreas.value.length > 0 || removedAreaIds.value.length > 0
+);
+const dirtyAny = computed(() => dirty.value || areaDirty.value);
+
 const brushStyle = computed(() => {
   const size = brushRadius.value * 2 * zoom.value;
   return {
@@ -110,6 +138,10 @@ const brushStyle = computed(() => {
 function resetState() {
   strokes = [];
   dirty.value = false;
+  savedAreas.value = [];
+  pendingAreas.value = [];
+  removedAreaIds.value = [];
+  draftingRect.value = null;
   drawing = false;
   currentStroke = null;
   panState = null;
@@ -150,6 +182,9 @@ async function load() {
       width: data.width,
       height: data.height
     };
+    savedAreas.value = data.forbiddenAreas ?? [];
+    pendingAreas.value = [];
+    removedAreaIds.value = [];
     await nextTick();
     // el-dialog 内容是懒挂载：等画布真正挂上再画，避免首帧空白
     for (let tries = 0; tries < 5 && !canvasRef.value; tries++) {
@@ -207,6 +242,44 @@ function render() {
   ctx.drawImage(baseImage, 0, 0);
   for (const stroke of strokes) {
     paintStroke(ctx, stroke);
+  }
+  paintForbiddenAreas(ctx);
+}
+
+/** 画禁止区域（半透明红块 + 边框），以及正在拖拽的矩形。 */
+function paintForbiddenAreas(context: CanvasRenderingContext2D) {
+  const draw = (
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    dashed: boolean
+  ) => {
+    const left = Math.min(x0, x1);
+    const top = Math.min(y0, y1);
+    const width = Math.abs(x1 - x0);
+    const height = Math.abs(y1 - y0);
+    context.save();
+    context.fillStyle = "rgba(220, 38, 38, 0.35)";
+    context.strokeStyle = "rgba(220, 38, 38, 0.95)";
+    context.lineWidth = Math.max(1 / zoom.value, 0.5);
+    if (dashed) context.setLineDash([6 / zoom.value, 4 / zoom.value]);
+    context.fillRect(left, top, width, height);
+    context.strokeRect(left, top, width, height);
+    context.restore();
+  };
+  for (const area of activeAreas.value) {
+    draw(
+      area.center.x - area.width / 2,
+      area.center.y - area.height / 2,
+      area.center.x + area.width / 2,
+      area.center.y + area.height / 2,
+      false
+    );
+  }
+  if (draftingRect.value) {
+    const { x0, y0, x1, y1 } = draftingRect.value;
+    draw(x0, y0, x1, y1, true);
   }
 }
 
@@ -290,8 +363,22 @@ function toPixel(event: PointerEvent) {
 }
 
 function onPointerDown(event: PointerEvent) {
-  if (tool.value !== "eraser" || !canEdit.value) return;
-  if (event.button !== 0) return;
+  if (event.button !== 0 || !canEdit.value) return;
+  if (tool.value === "forbidden") {
+    const canvas = canvasRef.value;
+    if (!canvas) return;
+    canvas.setPointerCapture(event.pointerId);
+    const point = toPixel(event);
+    draftingRect.value = {
+      x0: Math.round(point.x),
+      y0: Math.round(point.y),
+      x1: Math.round(point.x),
+      y1: Math.round(point.y)
+    };
+    render();
+    return;
+  }
+  if (tool.value !== "eraser") return;
   const canvas = canvasRef.value;
   if (!canvas) return;
   canvas.setPointerCapture(event.pointerId);
@@ -310,7 +397,20 @@ function onPointerDown(event: PointerEvent) {
 
 function onPointerMove(event: PointerEvent) {
   const point = toPixel(event);
-  cursor.value = { x: point.x, y: point.y, visible: tool.value === "eraser" };
+  cursor.value = {
+    x: point.x,
+    y: point.y,
+    visible: tool.value === "eraser"
+  };
+  if (tool.value === "forbidden" && draftingRect.value) {
+    draftingRect.value = {
+      ...draftingRect.value,
+      x1: Math.round(point.x),
+      y1: Math.round(point.y)
+    };
+    render();
+    return;
+  }
   if (!drawing || !currentStroke) return;
   const last = currentStroke.points[currentStroke.points.length - 1];
   const minGap = Math.max((currentStroke.radius ?? 4) / 3, 0.8);
@@ -338,6 +438,23 @@ function onPointerMove(event: PointerEvent) {
 }
 
 function onPointerUp(event: PointerEvent) {
+  if (tool.value === "forbidden" && draftingRect.value) {
+    const { x0, y0, x1, y1 } = draftingRect.value;
+    draftingRect.value = null;
+    canvasRef.value?.releasePointerCapture?.(event.pointerId);
+    const width = Math.abs(x1 - x0);
+    const height = Math.abs(y1 - y0);
+    if (width >= 2 && height >= 2) {
+      pendingAreas.value.push({
+        center: { x: (x0 + x1) / 2, y: (y0 + y1) / 2 },
+        width,
+        height,
+        rotation: 0
+      });
+    }
+    render();
+    return;
+  }
   if (drawing) {
     drawing = false;
     currentStroke = null;
@@ -373,15 +490,32 @@ function onViewportPointerMove(event: PointerEvent) {
 }
 
 function undo() {
+  // 优先撤销还没保存的禁止区域，再撤销笔画
+  if (pendingAreas.value.length) {
+    pendingAreas.value.pop();
+    render();
+    return;
+  }
   if (!strokes.length) return;
   strokes.pop();
   dirty.value = strokes.length > 0;
   render();
 }
 
+/** 撤销一个已保存的禁止区域（保存后才会真正删掉并还原栅格）。 */
+function removeArea(area: MapForbiddenArea) {
+  if (!canEdit.value) return;
+  if (!area.id) {
+    pendingAreas.value = pendingAreas.value.filter(item => item !== area);
+  } else if (!removedAreaIds.value.includes(area.id)) {
+    removedAreaIds.value.push(area.id);
+  }
+  render();
+}
+
 function discard() {
-  if (!strokes.length) return;
-  ElMessageBox.confirm("放弃本次尚未保存的擦除？", "放弃编辑", {
+  if (!dirtyAny.value) return;
+  ElMessageBox.confirm("放弃本次尚未保存的擦除 / 禁止区域改动？", "放弃编辑", {
     type: "warning",
     confirmButtonText: "放弃",
     cancelButtonText: "取消"
@@ -389,6 +523,8 @@ function discard() {
     .then(() => {
       strokes = [];
       dirty.value = false;
+      pendingAreas.value = [];
+      removedAreaIds.value = [];
       render();
     })
     .catch(() => {});
@@ -396,29 +532,64 @@ function discard() {
 
 async function save() {
   const row = currentMap.value;
-  if (!row?.id || !strokes.length || saving.value) return;
+  if (!row?.id || saving.value || areaSaving.value) return;
+  if (!dirty.value && !areaDirty.value) return;
   saving.value = true;
   try {
-    const { code, msg, data } = await dogMapErase(
-      row.id,
-      strokes,
-      eraseValue.value
-    );
-    if (code !== SUCCESS || !data) {
-      message(msg || "保存失败", { type: "error" });
-      return;
+    let erasedPixels = 0;
+    let latest: any = null;
+
+    if (strokes.length) {
+      const { code, msg, data } = await dogMapErase(
+        row.id,
+        strokes,
+        eraseValue.value
+      );
+      if (code !== SUCCESS || !data) {
+        message(msg || "保存失败", { type: "error" });
+        return;
+      }
+      strokes = [];
+      dirty.value = false;
+      erasedPixels = data.erasedPixels ?? 0;
+      latest = data;
     }
-    strokes = [];
-    dirty.value = false;
+
+    if (areaDirty.value) {
+      areaSaving.value = true;
+      try {
+        const { code, msg, data } = await dogMapSetForbiddenAreas(
+          row.id,
+          activeAreas.value
+        );
+        if (code !== SUCCESS || !data) {
+          message(msg || "禁止区域保存失败", { type: "error" });
+          return;
+        }
+        savedAreas.value = data.forbiddenAreas ?? [];
+        pendingAreas.value = [];
+        removedAreaIds.value = [];
+        latest = data;
+      } finally {
+        areaSaving.value = false;
+      }
+    }
+
+    if (!latest) return;
     meta.value = {
-      resolution: data.resolution,
-      origin: data.origin ?? [],
-      width: data.width,
-      height: data.height
+      resolution: latest.resolution,
+      origin: latest.origin ?? [],
+      width: latest.width,
+      height: latest.height
     };
-    await drawBase(data.image, false);
+    await drawBase(latest.image, false);
+    render();
+    const parts: string[] = [];
+    if (erasedPixels) parts.push(`擦除 ${erasedPixels} 个像素`);
+    if (activeAreas.value.length)
+      parts.push(`禁止区域 ${activeAreas.value.length} 块`);
     message(
-      `已保存，共擦除 ${data.erasedPixels ?? 0} 个像素（map_hash 已更新）`,
+      `已保存${parts.length ? "：" + parts.join("，") : ""}（map_hash 已更新）`,
       { type: "success" }
     );
     emit("saved", row);
@@ -438,8 +609,8 @@ async function pushToDog() {
     });
     return;
   }
-  if (dirty.value) {
-    message("还有未保存的擦除，请先「保存擦除」再下发到狗体", {
+  if (dirtyAny.value) {
+    message("还有未保存的擦除 / 禁止区域，请先保存再下发到狗体", {
       type: "warning"
     });
     return;
@@ -472,7 +643,7 @@ async function pushToDog() {
 function confirmPushAfterSave() {
   if (!canPush.value) return;
   ElMessageBox.confirm(
-    "地图已保存。是否立即下发到狗体并重新载图？下发会覆盖本体上的地图栅格（有 map_edit/ 时只改编辑版，原始地图保持不动），设备需处于空闲状态。",
+    "地图已保存。是否立即下发到狗体并重新载图？下发会覆盖本体上的地图栅格（有 map_edit/ 时只改编辑版，原始地图保持不动），禁止区域也会连同编辑记录一起写回，设备需处于空闲状态。",
     "下发到狗体",
     { type: "warning", confirmButtonText: "立即下发", cancelButtonText: "稍后" }
   )
@@ -512,7 +683,21 @@ defineExpose({ open });
             <el-icon><EraserIcon /></el-icon>
             橡皮擦
           </el-radio-button>
+          <el-radio-button value="forbidden" :disabled="!canEdit">
+            <el-icon><ForbiddenIcon /></el-icon>
+            禁止区域
+          </el-radio-button>
         </el-radio-group>
+
+        <el-tooltip
+          v-if="tool === 'forbidden'"
+          content="在图上按住左键拖出一个矩形 = 禁止区域（栅格会被刷成「占据」，导航规划绕开它）。保存后点「下发到狗体」写回本体，遥控器上也会看到这块红色区域。"
+          placement="top"
+        >
+          <span class="forbidden-hint">
+            拖拽画矩形 · 已有 {{ activeAreas.length }} 块
+          </span>
+        </el-tooltip>
 
         <el-tooltip
           content="254 = 可通行（擦掉噪点）；128 = 未知/不可通行（本体规划器不会走）"
@@ -543,6 +728,21 @@ defineExpose({ open });
           <span class="value">{{ brushRadius }}px</span>
         </div>
 
+        <div v-if="activeAreas.length" class="forbidden-list">
+          <el-tag
+            v-for="(area, index) in activeAreas"
+            :key="area.id ?? `new-${index}`"
+            type="danger"
+            effect="plain"
+            size="small"
+            closable
+            @close="removeArea(area)"
+          >
+            {{ area.id ? `#${area.id}` : "新" }}
+            {{ Math.round(area.width) }}×{{ Math.round(area.height) }}px
+          </el-tag>
+        </div>
+
         <div class="spacer" />
 
         <el-button-group>
@@ -569,14 +769,14 @@ defineExpose({ open });
         <el-button
           size="small"
           :icon="useRenderIcon(UndoIcon)"
-          :disabled="!dirty"
+          :disabled="!dirtyAny"
           @click="undo"
           >撤销</el-button
         >
         <el-button
           size="small"
           :icon="useRenderIcon(ResetIcon)"
-          :disabled="!dirty"
+          :disabled="!dirtyAny"
           @click="discard"
           >放弃</el-button
         >
@@ -584,9 +784,9 @@ defineExpose({ open });
           size="small"
           type="primary"
           :loading="saving"
-          :disabled="!dirty || !canEdit"
+          :disabled="!dirtyAny || !canEdit"
           @click="save"
-          >保存擦除</el-button
+          >保存</el-button
         >
       </div>
 
@@ -603,7 +803,7 @@ defineExpose({ open });
         type="info"
         show-icon
         :closable="false"
-        title="橡皮擦只改写编辑版栅格（优先 map_edit/map.pgm），不会改根目录的建图原始地图。"
+        title="橡皮擦与禁止区域只改写编辑版栅格（优先 map_edit/map.pgm），不会改根目录的建图原始地图。"
         description="保存后已下载过该图的设备需要重新同步地图；分辨率、原点与版本号保持不变。"
       />
 
@@ -616,7 +816,7 @@ defineExpose({ open });
           共享设备：{{ currentMap.sharedDeviceCodes.join("、") }}
         </span>
         <span>版本：{{ currentMap?.mapVersion || "-" }}</span>
-        <span v-if="dirty" class="dirty">有未保存的擦除</span>
+        <span v-if="dirtyAny" class="dirty">有未保存的擦除 / 禁止区域</span>
       </div>
 
       <div
@@ -704,6 +904,21 @@ defineExpose({ open });
       font-size: var(--dog-font-xs);
       color: var(--dog-text-secondary);
     }
+  }
+
+  .forbidden-hint {
+    font-size: var(--dog-font-sm);
+    color: var(--el-color-danger);
+    white-space: nowrap;
+  }
+
+  .forbidden-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    max-width: 380px;
+    max-height: 56px;
+    overflow-y: auto;
   }
 
   .spacer {
