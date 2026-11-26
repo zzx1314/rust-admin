@@ -30,7 +30,7 @@ import { SUCCESS } from "@/api/base";
 import { message } from "@/utils/message";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 import EraserIcon from "~icons/ri/eraser-line";
-import ForbiddenIcon from "~icons/ri/forbidden-line";
+import ForbiddenIcon from "~icons/ri/forbid-line";
 import HandIcon from "~icons/ri/hand";
 import ZoomIn from "~icons/ri/zoom-in-line";
 import ZoomOut from "~icons/ri/zoom-out-line";
