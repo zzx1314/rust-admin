@@ -1979,6 +1979,8 @@ onBeforeUnmount(() => {
                     </g>
                   </template>
 
+                  <!-- 航点标记：半径按 800×460 内容坐标系取值（2026-11-26 按反馈缩小，
+                       选中圈 / 序号 / 标签偏移一起缩，否则小圆配大光环会显得脱节） -->
                   <g
                     v-for="(point, index) in draft.data.points"
                     :key="`point-${index}`"
@@ -1987,38 +1989,46 @@ onBeforeUnmount(() => {
                     @pointerdown="onPointDown($event, index)"
                     @click.stop="selectPoint(index)"
                   >
-                    <circle
-                      v-if="selType === 'point' && selIdx === index"
-                      :cx="canvasPoints[index].cx"
-                      :cy="canvasPoints[index].cy"
-                      r="21"
-                      fill="none"
-                      stroke="#f59e0b"
-                      stroke-width="2"
-                      stroke-dasharray="4 3"
-                    />
+                    <!-- 隐形的点击区：圆缩到 r=10 后伸手点仍好点（半径保留原来的 14） -->
                     <circle
                       :cx="canvasPoints[index].cx"
                       :cy="canvasPoints[index].cy"
                       r="14"
-                      fill="#fff"
-                      :stroke="
-                        index === 0 ? '#0d9488' : index === draft.data.points.length - 1 ? '#0f172a' : '#0284c7'
-                      "
-                      stroke-width="2.5"
+                      fill="transparent"
+                      pointer-events="all"
+                    />
+                    <circle
+                      v-if="selType === 'point' && selIdx === index"
+                      :cx="canvasPoints[index].cx"
+                      :cy="canvasPoints[index].cy"
+                      r="16"
+                      fill="none"
+                      stroke="#f59e0b"
+                      stroke-width="1.8"
+                      stroke-dasharray="3.5 2.5"
                     />
                     <circle
                       :cx="canvasPoints[index].cx"
                       :cy="canvasPoints[index].cy"
-                      r="7"
+                      r="10"
+                      fill="#fff"
+                      :stroke="
+                        index === 0 ? '#0d9488' : index === draft.data.points.length - 1 ? '#0f172a' : '#0284c7'
+                      "
+                      stroke-width="2"
+                    />
+                    <circle
+                      :cx="canvasPoints[index].cx"
+                      :cy="canvasPoints[index].cy"
+                      r="5"
                       :fill="
                         index === 0 ? '#0d9488' : index === draft.data.points.length - 1 ? '#0f172a' : '#0284c7'
                       "
                     />
                     <text
                       :x="canvasPoints[index].cx"
-                      :y="canvasPoints[index].cy + 3.5"
-                      font-size="9"
+                      :y="canvasPoints[index].cy + 2.5"
+                      font-size="7"
                       fill="#fff"
                       text-anchor="middle"
                       font-weight="700"
@@ -2026,7 +2036,7 @@ onBeforeUnmount(() => {
                       {{ index + 1 }}
                     </text>
                     <g
-                      :transform="`translate(${canvasPoints[index].cx},${canvasPoints[index].cy + (index % 2 ? -29 : 27)}) scale(${labelScale})`"
+                      :transform="`translate(${canvasPoints[index].cx},${canvasPoints[index].cy + (index % 2 ? -24 : 22)}) scale(${labelScale})`"
                     >
                       <rect
                         x="-46"
