@@ -19,7 +19,8 @@ pub const TASK_SELECT: &str = "SELECT t.id, t.task_code, t.task_name, t.task_typ
     t.level, t.device_id, d.device_id AS device_code, t.park_id, p.park_name, t.zone_id,
     z.zone_name, t.route_id, r.route_code, r.route_name, t.plan_start, t.plan_end,
     t.schedule_days, t.last_dispatched_on, t.publish_status, t.published_at,
-    t.task_status, t.progress, t.dispatch_policy, t.description, t.robot_task_id,
+    t.task_status, t.progress, t.last_waypoint_index, t.resume_index,
+    t.dispatch_policy, t.description, t.robot_task_id,
     t.robot_stage, t.robot_updated_at, t.created_at, t.updated_at, t.created_by
     FROM tasks t
     LEFT JOIN devices d ON d.id = t.device_id
@@ -460,9 +461,13 @@ pub(crate) async fn push_task_dispatch(
     let previous_status = task.task_status.clone();
     let previous_progress = task.progress;
     let timestamp = now();
+    // `last_waypoint_index` 必须清掉（续跑时从 resume_index-1 起算）：留着上一轮的值，
+    // 新一轮在第一个点之前就卡住时看门狗会把「上一轮到过的点」当成断点，直接跳过中间段。
     sqlx::query(
         "UPDATE tasks SET task_status = '执行中', progress = 0, progress_updated_at = ?1,
-            robot_task_id = NULL, robot_stage = NULL, robot_updated_at = NULL, updated_at = ?1
+            robot_task_id = NULL, robot_stage = NULL, robot_updated_at = NULL,
+            last_waypoint_index = CASE WHEN resume_index > 0 THEN resume_index - 1 ELSE NULL END,
+            updated_at = ?1
          WHERE id = ?2",
     )
     .bind(&timestamp)
@@ -597,7 +602,13 @@ async fn warn_parking_clearance(state: &AppState, task: &Task) {
 }
 
 /// 下发任务；设备不在线时返回可读错误，绝不把状态单独改成「执行中」。
-async fn dispatch_task_or_error(state: &AppState, task: &Task) -> Result<(), AppError> {
+///
+/// `note` 只影响事件流文案（例如「从 P4 继续」），不参与下发。
+async fn dispatch_task_or_error(
+    state: &AppState,
+    task: &Task,
+    note: Option<&str>,
+) -> Result<(), AppError> {
     if task.task_status == crate::status::DONE {
         return Err(AppError::BadRequest(format!(
             "任务 {} 已完成，如需重跑请新建任务",
@@ -633,7 +644,10 @@ async fn dispatch_task_or_error(state: &AppState, task: &Task) -> Result<(), App
                 state,
                 "dispatch",
                 format!("任务 {} 已下发", task.task_code),
-                format!("已下发到设备 {code}"),
+                match note {
+                    Some(note) => format!("已下发到设备 {code}（{note}）"),
+                    None => format!("已下发到设备 {code}"),
+                },
                 task.device_id,
                 Some(task.id),
             )
@@ -646,19 +660,130 @@ async fn dispatch_task_or_error(state: &AppState, task: &Task) -> Result<(), App
     }
 }
 
+/// `POST /tasks/{id}/dispatch` 的请求体（可以整段不传）。
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DispatchRequest {
+    /// 断点续跑：`true` = 用记录的中断点（`tasks.resume_index`）继续。
+    ///
+    /// 缺省 / `false` = **从起点重跑**（老行为，也是「重新下发」的语义）。
+    #[serde(default)]
+    pub resume: bool,
+    /// 显式指定起始航点（0 基）：给了就以它为准（忽略 `resume`），用于人工挑一个点。
+    #[serde(default)]
+    pub start_index: Option<i64>,
+}
+
 /// `POST /tasks/{id}/dispatch` — 真正把任务推给设备（前端「开始执行 / 重新下发」）。
 ///
 /// 与 `PUT /tasks/{id}/status` 的区别：这里会发 `task_dispatch`（带航点 / 地图），
 /// 设备离线时直接报错，不会留下一个假的「执行中」。
+///
+/// **断点续跑**：请求体带 `{ "resume": true }` 时用 `tasks.resume_index`（中断时记下的
+/// 航点），载荷里带 `startIndex`，客户端只把「断点之后」的航点写进本体路径——已经走过
+/// 的航点不再执行，带的还是这个计划（任务行、任务号都不变）。
 pub async fn dispatch_task(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     Extension(claims): Extension<Claims>,
+    body: Option<Json<DispatchRequest>>,
 ) -> Result<Json<ApiResponse<Task>>, AppError> {
     let task = fetch_task(&state, id).await?;
     super::parks::ensure_owner(&task, &claims)?;
-    dispatch_task_or_error(&state, &task).await?;
+    let request = body.map(|Json(value)| value).unwrap_or_default();
+
+    let start = resolve_resume_start(&state, &task, &request).await?;
+    // 先落库再取一份新的：`build_dispatch_payload` 读的就是这一列
+    let previous = task.resume_index;
+    sqlx::query("UPDATE tasks SET resume_index = ?1, updated_at = ?2 WHERE id = ?3")
+        .bind(start)
+        .bind(now())
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+    let task = fetch_task(&state, id).await?;
+    let note = start
+        .filter(|index| *index > 0)
+        .map(|index| format!("从 P{} 继续，之前的航点不再执行", index + 1));
+    if let Err(error) = dispatch_task_or_error(&state, &task, note.as_deref()).await {
+        // 没发出去（设备离线 / 急停 / 被接管）时把断点原样还回去：
+        // 否则现场修好设备后「从 Pn 继续」这个入口就消失了，只能整条重跑。
+        sqlx::query("UPDATE tasks SET resume_index = ?1 WHERE id = ?2")
+            .bind(previous)
+            .bind(id)
+            .execute(&state.db)
+            .await
+            .ok();
+        return Err(error);
+    }
     Ok(ApiResponse::ok(fetch_task(&state, id).await?))
+}
+
+/// 解析「这次从哪个航点开始」。
+///
+/// - `startIndex` 显式给了 → 以它为准（`0` = 从起点）；
+/// - `resume: true` → 用中断时记下的 `resume_index`（**不**退回 `last_waypoint_index`：
+///   `resume_index` 已经按航点数校验过，退回原始下标会把「中断在返程」当成「从中断点续跑」）；
+/// - 都不给 → `None`（从起点重跑，并把上一次的断点清掉）。
+///
+/// 越界一律 400：静默钳到最后一个点会让「以为从 P5 继续」变成「又跑了一遍 P5」，
+/// 而静默从头跑会把已经巡检过的点再跑一遍——两种都比报错难查。
+async fn resolve_resume_start(
+    state: &AppState,
+    task: &Task,
+    request: &DispatchRequest,
+) -> Result<Option<i64>, AppError> {
+    let explicit = request.start_index;
+    if explicit.is_none() && !request.resume {
+        return Ok(None);
+    }
+    let index = match explicit {
+        Some(index) => index,
+        None => task.resume_index.ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "任务 {} 没有可续跑的断点：上一轮所有航点都走过了（中断在返程），\
+                 或者还没有上报过任何到达航点；只能从起点执行",
+                task.task_code
+            ))
+        })?,
+    };
+    if index < 0 {
+        return Err(AppError::BadRequest(
+            "起始航点下标不能为负数（0 基，0 = 第一个航点）".to_string(),
+        ));
+    }
+    if index == 0 {
+        // 从第一个航点开始就是「从起点跑」，不需要再校验路线里有没有航点
+        return Ok(Some(0));
+    }
+    // 航点数从路线数据里数（不依赖 SQLite 的 JSON1：正式机上的 sqlite3 版本很老）
+    let route_data: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT r.route_data FROM tasks t LEFT JOIN routes r ON r.id = t.route_id
+          WHERE t.id = ?1",
+    )
+    .bind(task.id)
+    .fetch_optional(&state.db)
+    .await?;
+    let total = route_data
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|value| value.get("points").and_then(Value::as_array).map(Vec::len))
+        .unwrap_or(0);
+    let total = i64::try_from(total).unwrap_or(i64::MAX);
+    if total == 0 {
+        return Err(AppError::BadRequest(format!(
+            "任务 {} 没有关联路线（临时路径没有可续跑的航点），无法指定起始航点",
+            task.task_code
+        )));
+    }
+    if index >= total {
+        return Err(AppError::BadRequest(format!(
+            "起始航点 P{} 超出路线航点数（共 {total} 个）：上一轮所有航点都走过了，\
+             中断发生在返程，只能从起点重跑",
+            index + 1
+        )));
+    }
+    Ok(Some(index))
 }
 
 /// `POST /tasks/{id}/publish` —— 发布计划：此后才会到点自动执行。
@@ -1013,7 +1138,14 @@ pub async fn update_task_status(
     // 「执行中」= 现在就跑：本体从未受理过这条任务时必须走真正的 task_dispatch。
     // 只改状态 + 发 resume 会让客户端在没有执行上下文时假报「执行中」，任务永久卡住。
     if payload.task_status == crate::status::RUNNING && !resumable(&existing) {
-        dispatch_task_or_error(&state, &existing).await?;
+        // 这条路径是「开始 / 恢复执行」，不是「从断点继续」：断点清掉，从起点重跑。
+        // 要续跑走 `POST /tasks/{id}/dispatch` 带 `{ "resume": true }`。
+        sqlx::query("UPDATE tasks SET resume_index = NULL WHERE id = ?1")
+            .bind(id)
+            .execute(&state.db)
+            .await?;
+        let existing = fetch_task(&state, id).await?;
+        dispatch_task_or_error(&state, &existing, None).await?;
         return Ok(ApiResponse::ok(fetch_task(&state, id).await?));
     }
 
@@ -1024,13 +1156,30 @@ pub async fn update_task_status(
             crate::status::PENDING => 0,
             _ => existing.progress,
         });
-    sqlx::query("UPDATE tasks SET task_status = ?1, progress = ?2, updated_at = ?3 WHERE id = ?4")
+    // 拖回「待执行」= 重跑整轮：断点必须清掉，否则自动调度会在无人值守时
+    // 从中间接着跑（现场点回待执行的意思是「从头再来一次」）。
+    if payload.task_status == crate::status::PENDING {
+        sqlx::query(
+            "UPDATE tasks SET task_status = ?1, progress = ?2, resume_index = NULL, updated_at = ?3
+             WHERE id = ?4",
+        )
         .bind(&payload.task_status)
         .bind(progress)
         .bind(now())
         .bind(id)
         .execute(&state.db)
         .await?;
+    } else {
+        sqlx::query(
+            "UPDATE tasks SET task_status = ?1, progress = ?2, updated_at = ?3 WHERE id = ?4",
+        )
+        .bind(&payload.task_status)
+        .bind(progress)
+        .bind(now())
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+    }
 
     // 暂停 / 恢复 / 取消需要真正通知客户端去驱动本体
     if let Some(action) = control_action(&payload.task_status) {

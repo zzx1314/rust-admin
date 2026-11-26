@@ -36,9 +36,20 @@ pub fn spawn_task_watchdog(state: AppState) {
 }
 
 /// 看门狗扫描结果：
-/// (task_pk, task_code, task_name, progress, device_pk, device_code, device_status, kind)，
+/// (task_pk, task_code, task_name, progress, device_pk, device_code, device_status,
+///  last_waypoint_index, kind)，
 /// `kind` 为 `silent`（没有上报）或 `stalled`（有上报但进度不动）。
-pub(crate) type StuckTask = (i64, String, String, i64, i64, String, String, String);
+pub(crate) type StuckTask = (
+    i64,
+    String,
+    String,
+    i64,
+    i64,
+    String,
+    String,
+    Option<i64>,
+    String,
+);
 
 /// 扫描并处理「执行中但不再上报」的任务，返回本次置为异常的条数。
 ///
@@ -60,6 +71,7 @@ pub async fn sweep_stuck_tasks(state: &AppState) -> Result<u64, AppError> {
     //   上报「执行中」）。只看 `updated_at` 时，后一种会让任务永远停在执行中。
     let stale: Vec<StuckTask> = sqlx::query_as(
         "SELECT t.id, t.task_code, t.task_name, t.progress, d.id, d.device_id, d.status,
+                t.last_waypoint_index,
                 CASE WHEN t.updated_at < ?1 THEN 'silent' ELSE 'stalled' END
          FROM tasks t
          JOIN devices d ON d.id = t.device_id
@@ -78,16 +90,33 @@ pub async fn sweep_stuck_tasks(state: &AppState) -> Result<u64, AppError> {
 
     let timestamp = now();
     let mut affected = 0_u64;
-    for (task_pk, task_code, task_name, progress, device_pk, device_code, device_status, kind) in
-        &stale
+    for (
+        task_pk,
+        task_code,
+        task_name,
+        progress,
+        device_pk,
+        device_code,
+        device_status,
+        last_waypoint,
+        kind,
+    ) in &stale
     {
+        // 断点：看门狗手里没有阶段信息（客户端已经不报了），保守地从**最后一次到过的
+        // 航点**继续——那个点的作业可能没做完，重跑一遍比漏检安全。
+        let resume_index = resume_point_index(
+            *last_waypoint,
+            None,
+            route_point_count(&state.db, task_code).await,
+        );
         // 带上 task_status 条件：扫描期间客户端刚好补报终态时不要覆盖真实结果
         let result = sqlx::query(
-            "UPDATE tasks SET task_status = '异常', updated_at = ?1
+            "UPDATE tasks SET task_status = '异常', resume_index = ?3, updated_at = ?1
              WHERE id = ?2 AND task_status = '执行中'",
         )
         .bind(&timestamp)
         .bind(task_pk)
+        .bind(resume_index)
         .execute(&state.db)
         .await?;
         if result.rows_affected() == 0 {
@@ -95,22 +124,34 @@ pub async fn sweep_stuck_tasks(state: &AppState) -> Result<u64, AppError> {
         }
         affected += result.rows_affected();
 
+        // 有断点时直接把「从哪继续」写进事件流：现场要的是可操作的一句话
+        let resume_hint = resume_index.map_or_else(String::new, |index| {
+            format!(
+                "；断点 P{}（第 {} 个航点），修复后可在任务详情点「从 P{} 继续」，之前的航点不再执行",
+                index + 1,
+                index + 1,
+                index + 1
+            )
+        });
         sqlx::query(
             "INSERT INTO task_events (event_type, title, description, device_id, task_id, created_at)
              VALUES ('status', ?1, ?2, ?3, ?4, ?5)",
         )
         .bind(format!("任务 {task_code} 执行中断"))
-        .bind(if kind == "silent" {
-            format!(
-                "超过 {timeout}s 未收到进度上报（设备 {device_code} {device_status}），已判定为异常；\
-                 设备恢复后请重新下发任务"
-            )
-        } else {
-            format!(
-                "进度停在 {progress}% 超过 {stuck}s 没有任何推进（设备 {device_code} {device_status}），\
-                 已判定为异常；请检查本体定位/导航状态后重新下发任务"
-            )
-        })
+        .bind(format!(
+            "{}{resume_hint}",
+            if kind == "silent" {
+                format!(
+                    "超过 {timeout}s 未收到进度上报（设备 {device_code} {device_status}），已判定为异常；\
+                     设备恢复后请重新下发任务"
+                )
+            } else {
+                format!(
+                    "进度停在 {progress}% 超过 {stuck}s 没有任何推进（设备 {device_code} {device_status}），\
+                     已判定为异常；请检查本体定位/导航状态后重新下发任务"
+                )
+            }
+        ))
         .bind(device_pk)
         .bind(task_pk)
         .bind(&timestamp)
@@ -157,6 +198,68 @@ pub async fn sweep_stuck_tasks(state: &AppState) -> Result<u64, AppError> {
 
     Ok(affected)
 }
+
+/// 中断后从第几个航点继续（0 基下标，`None` = 没有可续跑的航点）。
+///
+/// 只有「已到达的航点下标」这一份事实来自客户端（5009 的 `detail_index`）：
+///
+/// - **在航点上中断**（`patrol.point_arrived` / `waiting` / `photographing` /
+///   `point_completed`）→ 重跑这个点：作业（停留 / 拍照 / 识别）是否做完无法确认，
+///   宁可多跑一个点，也不要漏检；
+/// - **阶段未知**（老客户端 / 客户端一次性报的「异常」不带 stage）→ 同「在航点上」，
+///   保守地重跑中断点；
+/// - **正在路上中断**（前往下一个点 / 返航等）→ 从**下一个**点开始，因为当前点已经
+///   到过、作业也做完了；
+/// - 中断点已经是最后一个点（返程失败）→ 没有可续跑的点，`None`（界面只能从起点重跑）。
+///
+/// `total` 拿不到（任务没绑路线 / 路线数据坏了）时不作越界判断，交给下发前的
+/// `dispatch::resolve_start_index` 拒绝。
+pub(crate) fn resume_point_index(
+    last_waypoint: Option<i64>,
+    stage: Option<&str>,
+    total: Option<usize>,
+) -> Option<i64> {
+    let last = last_waypoint.filter(|index| *index >= 0)?;
+    let next = match stage {
+        Some(stage) if !crate::ai_patrol::is_point_stage(stage) => last.saturating_add(1),
+        _ => last,
+    };
+    if let Some(total) = total
+        && (total == 0 || next as usize >= total)
+    {
+        return None;
+    }
+    Some(next)
+}
+
+/// 最近一次上报的已到达航点下标（库里那一份）
+async fn stored_last_waypoint(db: &SqlitePool, task_code: &str) -> Option<i64> {
+    sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT last_waypoint_index FROM tasks WHERE task_code = ?1",
+    )
+    .bind(task_code)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+}
+
+/// 任务路线的航点数（`routeData.points`）：没绑路线 / 解析失败返回 `None`
+async fn route_point_count(db: &SqlitePool, task_code: &str) -> Option<usize> {
+    let raw: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT r.route_data FROM tasks t LEFT JOIN routes r ON r.id = t.route_id
+          WHERE t.task_code = ?1",
+    )
+    .bind(task_code)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+    let value: serde_json::Value = serde_json::from_str(raw.flatten()?.as_str()).ok()?;
+    Some(value.get("points")?.as_array()?.len())
+}
+
 /// 该设备是否有**我们自己下发**的、正在执行的任务。
 ///
 /// 本体在跑导航任务时会把自己报成 `ctrl_source = 3`（控制权在本体自己手里）。
@@ -210,6 +313,22 @@ pub(crate) async fn handle_task_progress(
         .on_progress(state, device_id, payload)
         .await;
 
+    // 断点续跑：把「最近一次到达的航点」落库；异常时据此算「下次从哪个点继续」。
+    // 只认 `waypointIndex`（0 基下标，= 5009 的 `detail_index`）：老客户端不发就只能
+    // 退回库里那一份（上一次上报的），两者都没有就一直从头跑。
+    let waypoint_index = payload.waypoint_index.filter(|index| *index >= 0);
+    let resume_index = if status == crate::status::ABNORMAL {
+        // 客户端一次性报的「异常」往往不带 stage / waypointIndex，用库里最后一次到点兜底
+        let last = waypoint_index.or(stored_last_waypoint(db, &payload.task_code).await);
+        resume_point_index(
+            last,
+            payload.stage.as_deref(),
+            route_point_count(db, &payload.task_code).await,
+        )
+    } else {
+        None
+    };
+
     let result = sqlx::query(
         "UPDATE tasks SET task_status = ?1, progress = ?2, updated_at = ?3,
             progress_updated_at = CASE WHEN progress <> ?2 OR progress_updated_at IS NULL
@@ -217,7 +336,13 @@ pub(crate) async fn handle_task_progress(
             robot_task_id = COALESCE(?5, robot_task_id),
             robot_stage = COALESCE(?6, robot_stage),
             robot_updated_at = CASE WHEN ?5 IS NOT NULL OR ?6 IS NOT NULL THEN ?3
-                                    ELSE robot_updated_at END
+                                    ELSE robot_updated_at END,
+            last_waypoint_index = COALESCE(?7, last_waypoint_index),
+            -- 已完成 = 这一轮跑完了：下次（下一个执行日 / 重新下发）必须从起点跑
+            -- 异常 = 记下断点，等人工确认修复后「从断点继续」
+            resume_index = CASE WHEN ?1 = '已完成' THEN NULL
+                                WHEN ?1 = '异常' THEN ?8
+                                ELSE resume_index END
          WHERE task_code = ?4
            AND (task_status NOT IN ('已完成', '异常') OR ?1 IN ('已完成', '异常'))",
     )
@@ -227,6 +352,8 @@ pub(crate) async fn handle_task_progress(
     .bind(&payload.task_code)
     .bind(payload.robot_task_id.as_deref())
     .bind(payload.stage.as_deref())
+    .bind(waypoint_index)
+    .bind(resume_index)
     .execute(db)
     .await;
 
@@ -296,6 +423,28 @@ pub(crate) async fn handle_task_progress(
                 &format!("客户端上报任务异常：{message}"),
             )
             .await;
+
+            // 断点：在时间线里写清楚「从哪继续」，否则现场只知道断了、不知道能不能接上
+            if let Some(index) = resume_index {
+                sqlx::query(
+                    "INSERT INTO task_events (event_type, title, description, device_id, task_id, created_at)
+                     VALUES ('status', ?1, ?2, (SELECT id FROM devices WHERE device_id = ?3),
+                             (SELECT id FROM tasks WHERE task_code = ?4), ?5)",
+                )
+                .bind(format!("任务 {} 中断于第 {} 个航点", payload.task_code, index + 1))
+                .bind(format!(
+                    "修复后可在任务详情点「从 P{} 继续」：第 {} 个航点之前的航点不再执行，\
+                     带的还是这个计划",
+                    index + 1,
+                    index + 1
+                ))
+                .bind(device_id)
+                .bind(&payload.task_code)
+                .bind(&timestamp)
+                .execute(db)
+                .await
+                .ok();
+            }
         }
 
         // 任务完成时，更新设备当前任务
@@ -402,9 +551,13 @@ pub(crate) async fn dispatch_pending_tasks(
     // 先置态再发：与 `push_task_dispatch` 保持一致，客户端拒单的上报不会被覆盖。
     // 重新下发等于换一条本体任务，旧的 robot_task_id / stage 必须清掉。
     let timestamp = now();
+    // 与 `push_task_dispatch` 一致：清掉上一轮的「已到达航点」，否则这一轮在起步阶段
+    // 卡住时看门狗会拿上一轮的点当断点（跳过中间航段）。
     sqlx::query(
         "UPDATE tasks SET task_status = '执行中', progress = 0, progress_updated_at = ?1,
-            robot_task_id = NULL, robot_stage = NULL, robot_updated_at = NULL, updated_at = ?1
+            robot_task_id = NULL, robot_stage = NULL, robot_updated_at = NULL,
+            last_waypoint_index = CASE WHEN resume_index > 0 THEN resume_index - 1 ELSE NULL END,
+            updated_at = ?1
          WHERE id = ?2",
     )
     .bind(&timestamp)

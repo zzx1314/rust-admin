@@ -335,6 +335,21 @@ AudioWorklet 做 48k⇄16k 与抖动缓冲。**不需要填 IP、公网可用；
 `tests/schedule_window.rs::draft_plan_is_not_dispatched_until_published`、
 `tests/api_smoke.rs::task_publish_status_gates_auto_scheduling`。
 
+**任务「异常」后可以「从断点继续」**（迁移 038：`tasks.last_waypoint_index` / `resume_index`）：
+`task_progress` 的 `waypointIndex`（= 5009 `detail_index`，0 基原始下标）每次落库；判「异常」时按
+阶段算断点——在航点上中断（`patrol.point_arrived/waiting/photographing/point_completed`，或老客户端
+没带 stage）**重跑该点**（作业可能没做完），正在前往下一点时中断**从下一点开始**，看门狗按
+「最后一次到过的点」；同时写一条「中断于第 N 个航点」的 `task_events`。人工
+`POST /tasks/{id}/dispatch {"resume": true}`（或显式 `{"startIndex": n}`）→ 载荷带 `startIndex`，
+客户端只把 `routeData.points[startIndex..]` 写进本体路径（任务行 / 任务号 / 计划都不变），
+`ActiveTask.start_index` 把 5009 的本轮 `detail_index` 加回偏移——AI / 灯光 / 录像 / 播报 / 拍照
+与上报的 `waypointIndex` 全按**原始**下标，**不加偏移续跑那一轮会把 P4 当成 P1**。
+不带 `resume` 的「开始执行 / 重新下发」= 从起点重跑并清断点；报「已完成」清断点；所有航点都走过
+（返程失败）时 `resume_index = NULL`、续跑请求直接 400（不静默从头跑）。回归
+`tests/task_resume.rs`、`gateway::tests::resume_point::*`、
+`client pump::tests::resumed_run_reports_the_original_waypoint_index`、
+`client dispatch::tests::start_index_is_parsed_for_breakpoint_resume`。
+
 「跑完要不要返航」是**任务属性**（`tasks.end_task` → 载荷 `endTaskMode`，
 `none` / `return_to_start` / `return_to_charge`，不配 = 跟随路线），不是路线属性：
 巡检 `5000 kind=4` 只把原始 `points` 写成本体路径，返程由本体按 `end_task` 自己规划。

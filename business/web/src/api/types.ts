@@ -202,6 +202,19 @@ export interface Task {
   publishedAt: string | null;
   taskStatus: string;
   progress: number;
+  /**
+   * 最近一次上报的「已到达航点」0 基下标（`waypointIndex` = 5009 的 `detail_index`）。
+   * 只用于「中断后从哪继续」，不参与下发。
+   */
+  lastWaypointIndex?: number | null;
+  /**
+   * 断点续跑：下次下发从这个航点（0 基，`routeData.points` 下标）开始。
+   *
+   * `null` = 从起点跑。任务报「异常」时由服务端按「最后一次到过的航点」记下，
+   * 人工确认修复后点「从 Pn 继续」（`dispatch` 带 `resume`）才会生效；
+   * 跑完 / 拖回待执行 / 重新下发都会清掉。
+   */
+  resumeIndex?: number | null;
   dispatchPolicy: string | null;
   description: string | null;
   /** 智航 Pro 本体侧任务标识 */

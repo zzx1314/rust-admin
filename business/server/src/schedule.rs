@@ -859,6 +859,8 @@ mod tests {
             plan_end: end.map(str::to_string),
             task_status: "待执行".to_string(),
             progress: 0,
+            last_waypoint_index: None,
+            resume_index: None,
             dispatch_policy: None,
             description: None,
             robot_task_id: None,

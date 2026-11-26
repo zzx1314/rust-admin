@@ -237,6 +237,14 @@ pub struct Task {
     pub published_at: Option<String>,
     pub task_status: String,
     pub progress: i64,
+    /// 最近一次上报的「已到达航点」0 基下标（= 客户端 `waypointIndex` / 5009 `detail_index`）。
+    /// 只用于「中断后从哪继续」，不参与下发。
+    pub last_waypoint_index: Option<i64>,
+    /// 断点续跑：下次下发从这个航点（0 基，`routeData.points` 下标）开始。
+    ///
+    /// `NULL` = 从起点跑。只有人工「从断点继续」（`POST /tasks/{id}/dispatch` 带
+    /// `resume`）才会把它带进下发载荷 `startIndex`；执行完成 / 拖回待执行都会清掉。
+    pub resume_index: Option<i64>,
     pub dispatch_policy: Option<String>,
     pub description: Option<String>,
     /// 智航 Pro 本体侧任务标识
@@ -290,6 +298,8 @@ pub struct TaskRow {
     pub published_at: Option<String>,
     pub task_status: String,
     pub progress: i64,
+    pub last_waypoint_index: Option<i64>,
+    pub resume_index: Option<i64>,
     pub dispatch_policy: Option<String>,
     pub description: Option<String>,
     pub robot_task_id: Option<String>,
@@ -332,6 +342,8 @@ impl From<TaskRow> for Task {
             published_at: row.published_at,
             task_status: row.task_status,
             progress: row.progress,
+            last_waypoint_index: row.last_waypoint_index,
+            resume_index: row.resume_index,
             dispatch_policy: row.dispatch_policy,
             description: row.description,
             robot_task_id: row.robot_task_id,

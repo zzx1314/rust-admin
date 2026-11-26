@@ -199,6 +199,14 @@ pub struct FlightPlan {
     /// 电子围栏文件路径；空表示不带围栏
     #[serde(default)]
     pub fence_path: Option<String>,
+    /// 断点续跑起点（0 基，对应业务侧 `routeData.points` 的下标）。
+    ///
+    /// 业务平台「从断点继续」时下发 `startIndex`：本轮**本体路径里只写这个下标之后的
+    /// 航点**（之前走过的点不再执行），5009 的 `detail_index` 因此是本轮下标，
+    /// 查本地动作表 / 上报平台都要加回这个偏移（见 `ActiveTask.start_index`）。
+    /// `0` / 缺省 = 从起点跑。
+    #[serde(default)]
+    pub start_index: usize,
 }
 
 fn default_map_type() -> u32 {
@@ -245,6 +253,17 @@ impl FlightPlan {
         } else {
             last.to_string()
         }
+    }
+
+    /// 断点续跑起点（0 基）；`None` = 下发了一个越界的起点，直接拒绝执行。
+    ///
+    /// 不静默夹到最后一个点：那会让「从 P5 继续」变成「又跑了一遍 P5」，
+    /// 而静默从头跑会把已经巡检过的点全部重来——两种都比报错难查。
+    pub fn resume_offset(&self) -> Option<usize> {
+        if self.start_index == 0 {
+            return Some(0);
+        }
+        (self.start_index < self.waypoints.len()).then_some(self.start_index)
     }
 
     /// 地图路径推导：优先使用显式 mapPath，否则用 `map_root/history_map/<目录名>`
@@ -644,9 +663,13 @@ impl RouteRunner {
     }
 
     /// 准备执行计划：总点数 = 路线点数（巡检由本体按 `nav_paths` 里的点执行，不做闭环补点）
+    ///
+    /// 断点续跑：`completed` 从起点下标开始，进度条 / 「已完成 n/N」直接体现
+    /// 「前 N 个点已巡检」；`total` 始终是**整条路线**的点数（不是切片后的）。
     pub async fn prepare(&self, plan: FlightPlan) {
-        *self.total.lock().await = plan.waypoints.len();
-        *self.completed.lock().await = 0;
+        let total = plan.waypoints.len();
+        *self.total.lock().await = total;
+        *self.completed.lock().await = plan.start_index.min(total);
         *self.skipped.lock().await = 0;
         *self.plan.lock().await = Some(plan);
         self.cancelled.store(false, Ordering::SeqCst);
@@ -759,10 +782,32 @@ impl RouteRunner {
         plan: &FlightPlan,
         total: usize,
     ) -> Result<ExecutionOutcome, String> {
-        // 巡检只用原始航点：闭环/返程由 `end_task` 让本体处理，不再补回首点
-        let points = plan.waypoints.clone();
+        // 巡检只用原始航点：闭环/返程由 `end_task` 让本体处理，不再补回首点。
+        //
+        // 断点续跑：**只把断点之后的航点写进本体路径**（之前走过的点不再执行）。
+        // `offset` 是本轮下标 → 原始下标的偏移，进度上报 / 终点卡死判定都要加回去。
+        let Some(offset) = plan.resume_offset() else {
+            return Ok(self
+                .outcome(
+                    false,
+                    format!(
+                        "断点位置 P{} 超出航点数（共 {total} 个）：请从起点重跑",
+                        plan.start_index + 1
+                    ),
+                    total,
+                )
+                .await);
+        };
+        let points: Vec<Waypoint> = plan.waypoints.iter().skip(offset).cloned().collect();
         if points.is_empty() {
             return Ok(self.outcome(false, "航线没有航点".to_string(), total).await);
+        }
+        if offset > 0 {
+            info!(
+                "断点续跑：跳过前 {offset} 个航点，从 P{} 开始（本体路径只写 {} 个点，共 {total} 个）",
+                offset + 1,
+                points.len()
+            );
         }
         let map_id = plan.robot_map_dir();
         let path_id = format!(
@@ -801,16 +846,22 @@ impl RouteRunner {
 
         // 3) 下发巡检任务并跟到终态（能力忙按 §13897 退避重试）
         let data = patrol_task_payload(plan, &map_id, &path_id, min_battery);
-        debug!("5000 kind=4 载荷（{total} 个航点）: {data}");
+        debug!(
+            "5000 kind=4 载荷（{total} 个航点，本轮 {} 个）: {data}",
+            points.len()
+        );
         let mut busy_waits = 0_u32;
         loop {
             if self.is_cancelled() {
                 return Ok(self.outcome(false, "任务已取消".to_string(), total).await);
             }
             self.wait_body_idle(IDLE_WAIT).await;
-            let error = match self.create_patrol_task(&data, total).await {
+            let error = match self.create_patrol_task(&data, total, offset).await {
                 Ok(()) => {
-                    info!("巡检任务完成: {path_id}（{total} 个航点）");
+                    info!(
+                        "巡检任务完成: {path_id}（{total} 个航点，本轮从 P{} 开始）",
+                        offset + 1
+                    );
                     return Ok(self.outcome(true, "巡检完成".to_string(), total).await);
                 }
                 Err(e) => e,
@@ -878,7 +929,15 @@ impl RouteRunner {
     ///
     /// 进度取 `5009 detail.last_arrived_point.index`（巡检是**0-based**，到点即 `index+1`）；
     /// 其余（终态、boot_id 变化、取消）与导航模式一致。
-    async fn create_patrol_task(&self, data: &Value, total: usize) -> Result<(), String> {
+    ///
+    /// `total` 是**整条路线**的航点数，`offset` 是本轮起点（断点续跑）：本体回报的
+    /// `detail_index` 是本轮下标，进度 / 终点判定都要加回 `offset` 才是原始下标。
+    async fn create_patrol_task(
+        &self,
+        data: &Value,
+        total: usize,
+        offset: usize,
+    ) -> Result<(), String> {
         let mut rx = self.client.subscribe();
         let reply = self.client.call(T_TASK_CREATE, data.clone()).await?;
         debug!("5001 应答（巡检）: {reply}");
@@ -893,8 +952,10 @@ impl RouteRunner {
         *self.nav_task_id.lock().await = Some(task_id.clone());
         info!("巡检任务已受理: {task_id}（{total} 个航点，path 见 5000 载荷）");
 
-        // 官方实测约 80 s/点（vx≈0.5），这里按 180 s/点 给足余量
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(180 * total.max(1) as u64);
+        // 官方实测约 80 s/点（vx≈0.5），这里按 180 s/点 给足余量。
+        // 断点续跑只跑剩下的点：按整条路线的点数算会多等好几倍。
+        let round_points = total.saturating_sub(offset).max(1);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(180 * round_points as u64);
         let mut gate = super::status::SeqGate::default();
         // 任务被本体排进 `pending_task`（已受理、等旧任务停稳 / 释放资源）后多久
         // 还没真正驱动底盘就判失败。这不是「跑得慢」，是那条 5000 根本没生效：
@@ -908,12 +969,12 @@ impl RouteRunner {
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                return Err(format!("巡检任务超时（{total} 个航点）"));
+                return Err(format!("巡检任务超时（本轮 {round_points} 个航点）"));
             }
             let env = match tokio::time::timeout(remaining, rx.recv()).await {
                 Ok(Ok(env)) => env,
                 Ok(Err(_)) => return Err("推送通道关闭".to_string()),
-                Err(_) => return Err(format!("巡检任务超时（{total} 个航点）")),
+                Err(_) => return Err(format!("巡检任务超时（本轮 {round_points} 个航点）")),
             };
             if env.head.msg_type != T_TASK_STATUS {
                 continue;
@@ -954,7 +1015,12 @@ impl RouteRunner {
             }
             // 巡检 `last_arrived_point.index` 从 0 开始；`point_completed` 时才算本点作业做完，
             // 这里用它推进度（至少到点就记 1，避免拍照失败时进度卡住）
-            if let Some(index) = task.detail_index.filter(|index| *index >= 0) {
+            // 本体回报的是**本轮**下标（0 基）：加回断点偏移才是整条路线的进度
+            let absolute = task
+                .detail_index
+                .filter(|index| *index >= 0)
+                .map(|index| index + offset as i64);
+            if let Some(index) = absolute {
                 let done = (index + 1) as usize;
                 let mut completed = self.completed.lock().await;
                 if done > *completed && done <= total {
@@ -963,14 +1029,14 @@ impl RouteRunner {
             }
             // 终点卡死：只剩最后一个航点没到，而本体在反复报「规划不出到目标的轨迹」。
             // 不能等 180 s/点 的总超时：那时现场已经对着「执行中」干等十几分钟了。
-            if total >= 2 && task.detail_index == Some(total as i64 - 2) {
+            if absolute.is_some() && total >= 2 && absolute == Some(total as i64 - 2) {
                 let since = *final_point_since.get_or_insert_with(tokio::time::Instant::now);
                 let faults = self
                     .client
                     .recent_fault_codes(FINAL_POINT_STALL_WINDOW)
                     .await;
                 if let Some(reason) =
-                    final_point_stall_reason(total, task.detail_index, since.elapsed(), &faults)
+                    final_point_stall_reason(total, absolute, since.elapsed(), &faults)
                 {
                     warn!("巡检任务 {task_id} 判定终点不可达: {reason}");
                     return Err(reason);
@@ -1211,6 +1277,7 @@ mod tests {
             end_task_explicit: false,
             road_network: false,
             fence_path: None,
+            start_index: 0,
         }
     }
 

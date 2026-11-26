@@ -334,11 +334,44 @@ async function onDrop(status: string) {
 }
 
 async function startTask(task: Task) {
-  // dispatch 会真正下发 task_dispatch；设备离线时接口报错，状态不会被改成假「执行中」
+  // dispatch 会真正下发 task_dispatch；设备离线时接口报错，状态不会被改成假「执行中」。
+  // 不带 `resume` = 从起点重跑（断点会被清掉），「从断点继续」走 resumeTaskFromBreakpoint
   await taskApi.dispatch(task.id);
   await load();
   ElMessage.success(`${task.taskName} 已下发执行`);
   // 下发成功顺手打开实时监控：执行中要看的就是画面和地图位置
+  openMonitor(task);
+}
+
+/** 这个任务有可用的断点吗（异常 + 服务端记下了中断时的航点） */
+function resumePoint(task: Task): number | null {
+  if (task.taskStatus !== "异常") return null;
+  const index = task.resumeIndex;
+  return typeof index === "number" && index >= 0 ? index : null;
+}
+
+/** 「P3」这种给现场看的航点标签（0 基下标 → 1 基序号） */
+function resumeLabel(task: Task): string {
+  const index = resumePoint(task);
+  return index === null ? "" : `P${index + 1}`;
+}
+
+/**
+ * 从断点继续：修复完本体故障后只跑中断点之后的航点，之前巡检过的点不再执行。
+ *
+ * 服务端拼 `startIndex` 下发，任务 / 任务号 / 计划都不变；断点用完就随本轮进度更新。
+ */
+async function resumeFromBreakpoint(task: Task) {
+  const label = resumeLabel(task);
+  if (!label) return;
+  await ElMessageBox.confirm(
+    `从 ${label} 继续「${task.taskName}」？${label} 之前的航点已经巡检过，本轮不再执行。`,
+    "从断点继续",
+    { type: "info", confirmButtonText: `从 ${label} 继续`, cancelButtonText: "取消" }
+  );
+  await taskApi.dispatch(task.id, { resume: true });
+  await load();
+  ElMessage.success(`${task.taskName} 已从 ${label} 继续执行`);
   openMonitor(task);
 }
 
@@ -1068,6 +1101,9 @@ async function sendFromDetail(command: string) {
   if (command === "start") {
     await taskApi.dispatch(task.id);
     ElMessage.success("任务已下发执行");
+  } else if (command === "continue") {
+    await taskApi.dispatch(task.id, { resume: true });
+    ElMessage.success(`任务已从 ${resumeLabel(task)} 继续执行`);
   } else if (command === "resume") {
     await taskApi.updateStatus(task.id, "执行中");
     ElMessage.success("任务已恢复执行");
@@ -1077,8 +1113,8 @@ async function sendFromDetail(command: string) {
   }
   detailVisible.value = false;
   await load();
-  // 「开始执行 / 重新下发」后直接进监控：和看板上的执行按钮保持一致
-  if (command === "start") openMonitor(task);
+  // 「开始执行 / 重新下发 / 从断点继续」后直接进监控：和看板上的执行按钮保持一致
+  if (command === "start" || command === "continue") openMonitor(task);
 }
 
 function clickStat(status: string) {
@@ -1323,6 +1359,12 @@ onBeforeUnmount(() => {
             <span v-if="isRunning(task)" :title="`实时位置（地图米）：${deviceOf(task)?.position || '未上报'}`">
               <AppIcon name="waypoint" />{{ deviceOf(task)?.position || "位置未上报" }}
             </span>
+            <span
+              v-if="resumePoint(task) !== null"
+              :title="`上一轮中断在 ${resumeLabel(task)}：点「从 ${resumeLabel(task)} 继续」只跑这个点之后的航点`"
+            >
+              <AppIcon name="warn" />断点 {{ resumeLabel(task) }}
+            </span>
           </div>
           <div class="tc-prog">
             <ProgressBar
@@ -1346,6 +1388,15 @@ onBeforeUnmount(() => {
                 class="btn sm ghost icon"
                 title="恢复执行"
                 @click="resumeTask(task)"
+              >
+                <AppIcon name="play" />
+              </button>
+              <button
+                v-if="resumePoint(task) !== null"
+                class="btn sm ghost icon"
+                :title="`从 ${resumeLabel(task)} 继续（之前的航点不再执行）`"
+                style="color: #0f766e"
+                @click="resumeFromBreakpoint(task)"
               >
                 <AppIcon name="play" />
               </button>
@@ -1455,6 +1506,9 @@ onBeforeUnmount(() => {
               <td class="mono muted">{{ scheduleSummary(task) }}</td>
               <td>
                 <StatusBadge :status="task.taskStatus" @click="clickStatusBadge(task.taskStatus)" />
+                <div v-if="resumePoint(task) !== null" class="cell-sub">
+                  断点 {{ resumeLabel(task) }}
+                </div>
               </td>
               <td>
                 <span
@@ -1478,6 +1532,15 @@ onBeforeUnmount(() => {
                     @click="openMonitor(task)"
                   >
                     <AppIcon name="video" />
+                  </button>
+                  <button
+                    v-if="resumePoint(task) !== null"
+                    class="btn sm ghost icon"
+                    :title="`从 ${resumeLabel(task)} 继续（之前的航点不再执行）`"
+                    style="color: #0f766e"
+                    @click="resumeFromBreakpoint(task)"
+                  >
+                    <AppIcon name="play" />
                   </button>
                   <button
                     v-if="task.taskStatus === '待执行'"
@@ -1835,6 +1898,15 @@ onBeforeUnmount(() => {
         </div>
         <div class="kv"><span>下发策略</span><b>{{ detailTask.dispatchPolicy }}</b></div>
         <div class="kv"><span>执行状态</span><b><StatusBadge :status="detailTask.taskStatus" /></b></div>
+        <div v-if="resumePoint(detailTask) !== null" class="kv">
+          <span>中断断点</span>
+          <b>
+            {{ resumeLabel(detailTask) }}
+            <span class="muted" style="font-weight: 400; margin-left: 6px">
+              修复后点「从 {{ resumeLabel(detailTask) }} 继续」，之前的航点不再执行
+            </span>
+          </b>
+        </div>
         <div class="kv"><span>完成进度</span><b>{{ detailTask.progress }}%</b></div>
         <div class="bar" style="margin-top: 12px">
           <i :style="{ width: `${detailTask.progress}%` }" />
@@ -2126,6 +2198,14 @@ onBeforeUnmount(() => {
             @click="sendFromDetail('resume')"
           >
             <AppIcon name="play" />恢复执行
+          </button>
+          <button
+            v-if="resumePoint(detailTask) !== null"
+            class="btn primary sm"
+            :title="`从 ${resumeLabel(detailTask)} 继续：之前的航点不再执行，带的还是这个计划`"
+            @click="sendFromDetail('continue')"
+          >
+            <AppIcon name="play" />从 {{ resumeLabel(detailTask) }} 继续
           </button>
           <button
             v-if="detailTask.taskStatus === '执行中'"

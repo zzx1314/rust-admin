@@ -353,8 +353,13 @@ pub(crate) struct ActiveTask {
     pub(crate) task_name: String,
     pub(crate) nav_task_id: Option<String>,
     pub(crate) stage: Option<String>,
-    /// 当前航点下标（5009 `detail_index`，0 基）：定时摘要里单独作为 `waypointIndex` 上报
+    /// 当前航点下标（5009 `detail_index` + 断点偏移，0 基原始下标）：定时摘要里
+    /// 单独作为 `waypointIndex` 上报
     pub(crate) point_index: Option<i64>,
+    /// 断点续跑起点（0 基，原始路线下标）：本轮本体路径里只有这之后的航点，
+    /// 5009 的 `detail_index` 是本轮下标，查本地动作表 / 上报平台都要加回这个偏移。
+    /// `0` = 从起点跑（正常一轮）。
+    pub(crate) start_index: i64,
     /// 本条路线里带「AI 识别」动作的航点（到点时按 `detail_index` 查）
     pub(crate) ai_points: Vec<AiPoint>,
     /// 本条路线里带「开补光灯 / 开 LED」动作的航点**和航段**（与 `ai_points` 分开：

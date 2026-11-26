@@ -453,6 +453,14 @@ pub struct TaskDispatchPayload {
     pub light_night_start: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub light_night_end: Option<String>,
+    /// 断点续跑：从第几个航点开始（0 基，对应 `routeData.points` 的下标）。
+    ///
+    /// 只有人工「从断点继续」（`tasks.resume_index`）才带；缺省 = 从起点跑。
+    /// 客户端把 `routeData.points` 按这个下标切一刀——**本体路径里只写剩下的航点**，
+    /// 之前走过的点不再重复执行。本轮 5009 的 `detail_index` 是切片后的下标，
+    /// 客户端上报 `waypointIndex` / 本地动作表查询时必须加回这个偏移量。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_index: Option<i64>,
 }
 
 /// 下发载荷中的地图绑定

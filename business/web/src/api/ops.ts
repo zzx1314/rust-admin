@@ -176,8 +176,17 @@ export const taskApi = {
   remove: (id: number) => del<boolean>(`/tasks/${id}`),
   updateStatus: (id: number, taskStatus: string, progress?: number) =>
     put<Task>(`/tasks/${id}/status`, { taskStatus, progress }),
-  /** 真正下发任务（含航点 / 地图）；设备离线时接口直接报错 */
-  dispatch: (id: number) => post<Task>(`/tasks/${id}/dispatch`),
+  /**
+   * 真正下发任务（含航点 / 地图）；设备离线时接口直接报错。
+   *
+   * `resume: true` = 断点续跑：服务端用 `tasks.resumeIndex`（中断时记下的航点）拼
+   * `startIndex` 下发，客户端只把断点之后的航点写进本体路径（之前的点不再执行）。
+   * 不带参数 = 从起点重跑（同时清掉断点）。
+   */
+  dispatch: (
+    id: number,
+    options?: { resume?: boolean; startIndex?: number }
+  ) => post<Task>(`/tasks/${id}/dispatch`, options ?? {}),
   /**
    * 发布计划：之后才会到点自动执行（草稿不参与自动调度）。
    * 服务端会先校验时间窗 / 路线坐标，跑不起来的计划发布时就会报错。

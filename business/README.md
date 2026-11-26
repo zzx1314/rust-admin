@@ -1396,6 +1396,7 @@ service_token = "change-me"
 | `avoidLevel` | 固定 `40`（全避障） | 10 关闭 / 20 仅急停 / 30 感知 / 40 全避障 |
 | `endTask` | `tasks.end_task` → 回退 `executeMode` 推断 | `return_to_charge` / `return_to_start` / `none`；老客端只认这个字段 |
 | `endTaskMode` | `tasks.end_task`（**仅显式配置时才带**） | 同上取值，包括显式 `none`；新客端用它区分「显式原地」与「跟随路线」 |
+| `startIndex` | `tasks.resume_index`（**仅「从断点继续」时才带**） | 0 基航点下标：客户端只把 `routeData.points[startIndex..]` 写进本体路径，之前的航点不再执行 |
 
 ### 跑完要不要返航（`endTask`，2026-11-18）
 
@@ -1669,6 +1670,41 @@ curl -X POST /api/devices/12/locate -H 'Content-Type: application/json' \
 保留到取消完成），否则「暂停后再下发」永远起不来。
 
 `reason` 字段会透传给客户端，便于在机器人日志中定位中断原因。
+
+### 中断续跑：修复后从断点继续（不从头跑）
+
+现场最常见的抱怨：跑到 P5 本体报故障（定位丢失 / `13377` 规划失败 / 底盘报错），
+平台把任务判成「异常」；修好之后**只能整条重跑**——前面已经巡检过的点（AI 识别 / 拍照 /
+停留 / 录像）全部再来一遍，一条 10 个点的路线就是十几分钟，而且「重复巡检」对现场没有价值。
+
+链路（迁移 038）：
+
+| 环节 | 行为 |
+| --- | --- |
+| 记录 | `task_progress` 的 `waypointIndex`（= 5009 `detail_index`，0 基原始下标）随时写进 `tasks.last_waypoint_index` |
+| 中断 | 任务判「异常」时算断点写 `tasks.resume_index`：**在航点上中断**（`patrol.point_arrived/waiting/photographing/point_completed`，或老客户端没带 stage）→ 重跑这个点（作业可能没做完）；**正在前往下一点时中断** → 从下一个点开始（当前点已做完）；看门狗判超时同样按「最后一次到过的点」记 |
+| 时间线 | 写一条 `status` 事件「任务 TK-… 中断于第 N 个航点」，写明点「从 Pn 继续」即可 |
+| 继续 | `POST /api/tasks/{id}/dispatch` 带 `{"resume": true}` → 载荷带 `startIndex`；客户端只把断点之后的航点写进本体路径（`4024/4028`），**任务行 / 任务号 / 计划都不变** |
+| 人工指定 | `POST …/dispatch` 带 `{"startIndex": 3}` 可指定任意起点（0 基），用于「就从这个点开始跑一遍」 |
+| 从起点重跑 | 不带参数（或 `{"resume": false}`）→ `resume_index` 清空、`startIndex` 不下发（老行为） |
+| 跑完 | 报「已完成」时清空断点：下一个执行日 / 下次下发从起点开始 |
+| 没有可续跑的点 | 最后一个点之后（返程失败）时 `resume_index = NULL`；此时 `{"resume": true}` 直接 **400**（不能静默从头跑，也不能偷偷只跑最后一点），要重跑请不带参数 |
+
+客户端（`client/src/zhpro/route.rs` / `client/src/pump.rs`）：`FlightPlan.start_index` 把
+航点切片，`RouteRunner.completed` 从断点下标起算（进度条直接体现「已完成 N/总数」），
+5009 的 `detail_index` 是本轮下标，一切按航点下标查表的地方（AI / 灯光 / 录像 / 播报 /
+拍照）与上报平台的 `waypointIndex` 都加回偏移（`ActiveTask.start_index`）——**不加偏移
+续跑那一轮会把 P4 当成 P1**，该拍照的没拍、该识别的跑了别的点的动作表。进度百分比也按
+整条路线换算（本体只报本轮 1/7，平台显示 (3+2)/10 = 50%，不会在 30% ↔ 14% 之间跳）。
+超时判定（180 s/点）只按本轮剩余点数算，不然从 P8 续跑要白等一整条路线的时间。
+
+控制台：任务卡片 / 表格行 / 详情页在「异常」且断点存在时显示「断点 Pn」+「从 Pn 继续」
+按钮（先二次确认）。「开始执行 / 重新下发」仍然是**从起点重跑**，两条路分开走。
+
+回归：`cargo test --test task_resume`（业务平台）、
+`gateway::tests::resume_point::*`（断点规则）、
+`client pump::tests::resumed_run_reports_the_original_waypoint_index`、
+`client dispatch::tests::start_index_is_parsed_for_breakpoint_resume`。
 
 ## 完全接管：摇杆「走不动」的三种原因
 

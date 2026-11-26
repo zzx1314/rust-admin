@@ -169,6 +169,16 @@ pub(crate) async fn dispatch(
             window.start, window.end
         );
     }
+    // 断点续跑起点（0 基）：业务平台「从断点继续」时下发 `startIndex`，本轮本体路径里
+    // 只有这之后的航点。5009 的 `detail_index` 是本轮下标，后面所有按航点下标查表的地方
+    // （AI / 灯光 / 录像 / 播报 / 拍照）与上报平台的 `waypointIndex` 都要加回这个偏移。
+    let start_index = msg.payload["startIndex"].as_i64().unwrap_or(0).max(0);
+    if start_index > 0 {
+        info!(
+            "任务 {task_code} 断点续跑：从 P{} 开始，前 {start_index} 个航点不再执行",
+            start_index + 1
+        );
+    }
     // 航点 / 航段「录像采集」：与 AI / 灯光同源（路线动作），
     // 但起停时机在 5009 上（航点：到点 / 离开；航段：起步 / 下一个航点；终态兜底），
     // 见 `record` 模块。
@@ -204,6 +214,7 @@ pub(crate) async fn dispatch(
         nav_task_id: None,
         stage: None,
         point_index: None,
+        start_index,
         ai_points,
         light_points,
         light_night_only,

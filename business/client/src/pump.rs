@@ -530,23 +530,42 @@ pub(crate) async fn handle_status_frame(
         return None;
     }
 
+    // 断点续跑：本体路径里只有断点之后的航点，`detail_index` 是**本轮**下标；
+    // 本地动作表（AI / 灯光 / 录像 / 播报 / 拍照）与平台侧的 `routeData.points` 都是
+    // **原始**下标，这里加回偏移。不加的话续跑那一轮会把 P4 当成 P1——
+    // 该拍照的点没拍、该识别的点跑了别的动作表。
+    let start_index = active
+        .lock()
+        .await
+        .as_ref()
+        .map(|task| task.start_index)
+        .unwrap_or(0);
+    let index = task.detail_index.map(|index| index + start_index);
     {
         let mut guard = active.lock().await;
         if let Some(a) = guard.as_mut() {
             a.nav_task_id = Some(task.task_id.clone());
             a.stage = Some(task.stage.clone());
-            a.point_index = task.detail_index;
+            a.point_index = index;
         }
     }
 
     // 阶段 → 业务状态
     let (status, message) = classify_stage(&task);
-    let index = task.detail_index;
-    let progress = task
-        .progress
-        .map(|p| p.round() as i64)
-        .or_else(|| index.map(|i| (i + 1) * 10))
-        .unwrap_or(0);
+    // 断点续跑时本体的百分比只覆盖**本轮**（切片后的）航点，直接上报会让进度条
+    // 在「已完成 3/10 = 30%」和「本轮第 1/7 = 14%」之间来回跳。按偏移换算成
+    // 整条路线的百分比，与 5s 定时摘要（`progress_pct(done, total)`）同一口径。
+    let progress = match (index, task.detail_total) {
+        (Some(absolute), Some(round_total)) if start_index > 0 && round_total > 0 => {
+            let total = round_total + start_index;
+            ((absolute + 1) * 100 / total).clamp(0, 100)
+        }
+        _ => task
+            .progress
+            .map(|p| p.round() as i64)
+            .or_else(|| index.map(|i| (i + 1) * 10))
+            .unwrap_or(0),
+    };
 
     let payload = TaskProgressPayload {
         task_code: {
@@ -757,7 +776,8 @@ pub(crate) async fn handle_status_frame(
             data: Some(json!({
                 "taskId": task.task_id,
                 "stage": task.stage,
-                "index": task.detail_index,
+                // 断点续跑时用加回偏移的原始下标，与事件里的「P{n}」对各
+                "index": index,
                 "total": task.detail_total,
             })),
         };
@@ -1253,6 +1273,44 @@ mod tests {
         let sent = h.drain_progress();
         assert_eq!(sent.len(), 1, "{sent:?}");
         assert_eq!(sent[0]["message"], "已到达航点");
+    }
+
+    /// 断点续跑：本体路径里只有断点之后的航点，`detail_index` 是本轮下标；
+    /// 上报给平台的 `waypointIndex` 与本地动作表查询必须用**原始**下标。
+    ///
+    /// 不加偏移的后果：续跑那一轮平台会以为狗站在 P1（AI 窗口开到错的点上）、
+    /// 本地拍照 / 录像 / 播报 / 灯光全部错位。
+    #[tokio::test]
+    async fn resumed_run_reports_the_original_waypoint_index() {
+        let mut task = active_task("TK-1", Some("robot-1"));
+        // 平台的 `startIndex = 3`：本轮本体路径从原始第 4 个航点（P4）开始
+        task.start_index = 3;
+        let mut h = Harness::new(task);
+        // 本体报「本轮第 2 个点到了」= 原始下标 4（P5）；本轮路径共 7 个点（整条 10 个）
+        let mut reported = task_at("robot-1", "running", "patrol.point_arrived", 1);
+        reported["last_event"]["data"]["total"] = json!(7);
+        h.feed(&frame(reported, Value::Null, json!([]))).await;
+
+        let sent = h.drain_progress();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(
+            sent[0]["waypointIndex"],
+            json!(4),
+            "对上平台 `routeData.points` 的下标：{}",
+            sent[0]
+        );
+        assert_eq!(sent[0]["pointIndex"], json!(4));
+        assert_eq!(
+            sent[0]["progress"],
+            json!(50),
+            "进度要按整条路线算（(4+1)/10），不能拿本体的 1/7=14% 让进度条往回跳：{}",
+            sent[0]
+        );
+        assert_eq!(
+            h.active.lock().await.as_ref().map(|task| task.point_index),
+            Some(Some(4)),
+            "本地动作表（AI / 灯光 / 拍照 / 播报）也按原始下标查"
+        );
     }
 
     /// `pending_task` 是「已受理、等旧任务停稳 / 释放资源」：必须能跟随、能上报，

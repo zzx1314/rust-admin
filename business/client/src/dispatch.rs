@@ -192,6 +192,13 @@ pub fn parse_flight_plan(payload: &Value, map_root: &str) -> Option<FlightPlan> 
         .and_then(Value::as_u64)
         .unwrap_or(40) as u32;
 
+    // 断点续跑起点：业务平台「从断点继续」时带 `startIndex`（0 基，routeData.points 下标）。
+    // 越界不在这里夹：`RouteRunner::run_patrol` 会拒绝执行并把原因报回平台。
+    let start_index = payload
+        .get("startIndex")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .max(0) as usize;
     let mut plan = FlightPlan {
         task_code,
         task_name,
@@ -226,6 +233,7 @@ pub fn parse_flight_plan(payload: &Value, map_root: &str) -> Option<FlightPlan> 
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string),
+        start_index,
     };
     // mapPath 为空时按 map_root 推导一次，便于日志核对
     plan.map_path = plan.resolve_map_path(map_root);
@@ -331,6 +339,33 @@ mod tests {
         let plan = parse_flight_plan(&value, "/m").expect("plan");
         assert_eq!(plan.end_task(), EndTask::None);
         assert!(!plan.end_task_explicit, "没配置就交给闭环兜底");
+    }
+
+    #[test]
+    fn start_index_is_parsed_for_breakpoint_resume() {
+        // 平台「从断点继续」：载荷带 startIndex = 断点航点下标（0 基）
+        let mut value = payload();
+        value["startIndex"] = json!(1);
+        let plan = parse_flight_plan(&value, "/m").expect("plan");
+        assert_eq!(plan.start_index, 1);
+        assert_eq!(plan.resume_offset(), Some(1));
+
+        // 缺省 / 0 / 负数都按「从起点跑」，老平台不发这个字段行为不变
+        for raw in [None, Some(json!(0)), Some(json!(-2))] {
+            let mut value = payload();
+            if let Some(raw) = raw {
+                value["startIndex"] = raw;
+            }
+            let plan = parse_flight_plan(&value, "/m").expect("plan");
+            assert_eq!(plan.start_index, 0, "缺省 = 从起点跑");
+            assert_eq!(plan.resume_offset(), Some(0));
+        }
+
+        // 越界（断点 >= 航点数）不能静默夹到最后一个点：交给 runner 拒绝执行
+        let mut value = payload();
+        value["startIndex"] = json!(9);
+        let plan = parse_flight_plan(&value, "/m").expect("plan");
+        assert_eq!(plan.resume_offset(), None);
     }
 
     #[test]

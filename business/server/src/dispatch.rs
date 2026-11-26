@@ -161,6 +161,9 @@ pub async fn build_dispatch_payload(
         check_route_data(task.route_code.as_deref().unwrap_or("—"), data, &frame)?;
     }
 
+    // 断点续跑：`tasks.resume_index` 是下次下发的起点（0 基）
+    let start_index = resolve_start_index(task, route_data.as_ref())?;
+
     Ok(TaskDispatchPayload {
         task_id: task.id,
         task_code: task.task_code.clone(),
@@ -193,7 +196,46 @@ pub async fn build_dispatch_payload(
         // 计划里自定义的夜间时段：只有两个都有才带（缺省 = 板端默认）
         light_night_start: task.light_night_start.clone(),
         light_night_end: task.light_night_end.clone(),
+        // 断点续跑起点：只有 > 0 才带（`0` 就是「从起点跑」，没必要下发）
+        start_index,
     })
+}
+
+/// 断点续跑起点：`tasks.resume_index` → 载荷 `startIndex`。
+///
+/// 校验放在下发前，而不是在设置 `resume_index` 时：航点数会随路线编排变化，
+/// 一条「中断在 P4」的计划被改成 3 个点后，续跑就没有意义了——这时要报错让现场
+/// 重新选择（从起点重跑），而不是静默地从头跑一遍或下发一个越界下标。
+///
+/// 返回 `None` = 从起点跑（0 或没配）。`routeData` 缺失（临时路径没有航点）时
+/// 也不带：客户端本来就会拒绝执行。
+fn resolve_start_index(task: &Task, route_data: Option<&Value>) -> Result<Option<i64>, AppError> {
+    let Some(index) = task.resume_index else {
+        return Ok(None);
+    };
+    if index <= 0 {
+        return Ok(None);
+    }
+    let total = route_data
+        .and_then(|data| data.get("points"))
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    if total == 0 {
+        return Err(AppError::BadRequest(format!(
+            "任务 {} 没有可续跑的航点（路线缺失或 routeData.points 为空），只能从起点执行",
+            task.task_code
+        )));
+    }
+    if index as usize >= total {
+        return Err(AppError::BadRequest(format!(
+            "任务 {} 的断点 P{} 已超出航点数（共 {total} 个）：上一轮所有航点都走过了，\
+             中断发生在返程；没有可续跑的航点，请从起点重跑",
+            task.task_code,
+            index + 1
+        )));
+    }
+    Ok(Some(index))
 }
 
 /// 下发前的设备就绪快照。
@@ -412,6 +454,8 @@ mod tests {
             published_at: None,
             task_status: "待执行".to_string(),
             progress: 0,
+            last_waypoint_index: None,
+            resume_index: None,
             dispatch_policy: None,
             description: None,
             robot_task_id: None,
