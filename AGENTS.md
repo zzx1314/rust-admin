@@ -465,12 +465,25 @@ rotation, kind:"area"}]`（**像素坐标**，`width/height` 是像素边长，`
 `128` 变成 `0`，导航规划自然绕开。平台侧：`POST /api/dogMap/{id}/forbidden`
 （`{areas:[...]}`，**整表替换**：不在列表里的会被撤销，撤销时按建图原图同位置像素还原，
 并清掉对应的 `upsert_forbidden` 动作）；`MapImageVO.forbidden_areas` 回读当前列表。
-前端在预览弹窗里用「禁止区域」工具拖矩形（目前只画轴对齐，`rotation=0`）。
+前端在预览弹窗里用「禁止区域」工具拖矩形。
 ⚠️ 设备客户端对 `forbidden_areas` 是**整表以中台包为准**（与擦除圆的“只追加”不同）：
 平台是这张图禁止区域的管理方。所以**在遥控器上新画的禁止区域，要先「同步地图」再下发**，
 否则会被平台的列表覆盖掉。回归：`package::tests::forbidden_area_is_painted_occupied_and_recorded` /
 `removing_forbidden_area_restores_pixels_from_original` / `rotated_forbidden_area_rotates_around_center`、
 `mapupload::tests::merge_edit_info_replaces_forbidden_list`。
+
+**地图预览的旋转是「只转显示」，且支持任意角度（2026-11-26 起）**：`frontend/src/views/dog/map/MapEditorDialog.vue`
+里的 `rotation` 只影响 canvas 展示与鼠标坐标换算——栅格、`map.yaml`、原点、分辨率、`map_hash`
+**一个字节都不动**，所以下发到狗体 / 遥控器 / 路线坐标系的图和旋转前完全一致，也没有
+「转过之后路线偏了」这种事。入口两个：工具栏的 ±90° 按钮（一档一档到 0 / 90 / 180 / 270），
+和工具组的「旋转」（按住左键绕着地图中心拖，任意角度，距 90° 整数倍 ±2.5° 内自动吸附）。
+拖动时把地图中心钉在手势开始时的屏幕位置（`rotateState.pin` / `applyRotatePin`），
+否则外接矩形一变图就跳；在中心 12px 以内起手时空着 `startAngle`，离开死区才开始计角度
+（半步就转半圈）。90° 的整数倍下屏幕上轴对齐的禁止区域转回去仍是轴对齐的（`rotation`
+保持 0）；非直角时屏幕上拖出的轴对齐框在栅格里是斜矩形，按 `rotation = -视图角度`（弧度）
+记录——后端 `point_in_forbidden` 就是绕 `center` 转这个角，遥控器那边照样能读，**不用改后端**。
+⚠️ 旋转后画布是栅格的**外接矩形**，四角是空的：鼠标坐标先 `canvasToRasterRaw` 逆变换、
+落在空区就不落笔 / 不画框（`inRaster`），别把裁剪后的坐标当边缘，否则会在图边画出一道路。
 
 「返回起点」回的是**起步时本体 `capture_origin_pose` 采的起点位姿**，不是地图原点。载图
 定位（`4030 op=1`）的 `initial_pose` **缺省必须发零四元数**（`Pose::unspecified()`）：协议

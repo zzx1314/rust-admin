@@ -5,9 +5,11 @@
  * 预览：后端 `GET /api/dogMap/{id}/image` 优先把包内 map_edit/map.pgm（遥控器
  * 编辑后的地图）转成 PNG，没有编辑版时才用 model.pgm / map.pgm，
  * 这里按栅格原始像素尺寸画到 canvas 上，支持缩放、拖动浏览、**视图旋转**
- * （90° 一档，只转显示，不改地图数据——栅格 / yaml / 原点一个字节都不动）。
- * 旋转后橡皮擦、禁止区域的落点仍然换算回**栅格像素坐标**：直角旋转下轴对齐
- * 矩形转回去还是轴对齐的，所以 `rotation`（禁区自身角度）保持 0，遥控器那边不用改。
+ * （任意角度：90° 按钮 + 「旋转」工具里按住鼠标拖，只转显示，不改地图数据——
+ * 栅格 / yaml / 原点一个字节都不动）。旋转后橡皮擦、禁止区域的落点仍然换算回
+ * **栅格像素坐标**：直角旋转下轴对齐矩形转回去还是轴对齐的（`rotation` 保持 0），
+ * 非直角时屏幕上拖出的轴对齐框在栅格里是斜矩形，按 `rotation = -视图角度` 记录
+ * （后端 `point_in_forbidden` 就是绕 center 转这个角度），遥控器那边照样能读。
  *
  * 编辑：橡皮擦按栅格像素坐标记录笔画，每一笔写入 254（可通行）并提交
  * `POST /api/dogMap/{id}/edit`。后端按笔画把这些像素改写为 254 并重算
@@ -19,7 +21,7 @@
  * 现场在遥控器上一保存就被整体冲掉。要标禁行请用「禁止区域」（栅格刷成 0）。
  * 接口仍接受 `128` 与旧 `205`（历史客户端 / 脚本），但本页面不再提供。
  */
-import { computed, nextTick, ref } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { ElMessageBox } from "element-plus";
 import {
   dogMapErase,
@@ -40,6 +42,7 @@ import ZoomOut from "~icons/ri/zoom-out-line";
 import Fullscreen from "~icons/ri/fullscreen-line";
 import RotateLeft from "~icons/ri/anticlockwise-line";
 import RotateRight from "~icons/ri/clockwise-line";
+import RotateIcon from "~icons/ri/refresh-line";
 import UndoIcon from "~icons/ri/arrow-go-back-line";
 import ResetIcon from "~icons/ri/restart-line";
 
@@ -47,7 +50,10 @@ defineOptions({ name: "MapEditorDialog" });
 
 const emit = defineEmits<{ saved: [row: any]; pushed: [row: any] }>();
 
-type Tool = "pan" | "eraser" | "forbidden";
+type Tool = "pan" | "rotate" | "eraser" | "forbidden";
+
+/** `.map-canvas-wrap` 的 margin（px）：画布在滚动内容里的偏移，算旋转吸附点时要用。 */
+const CANVAS_MARGIN = 12;
 
 /** 可编辑的地图状态（与后端 DogMapService::erase 保持一致） */
 const EDITABLE_STATUS = ["草稿", "部分标定"];
@@ -71,8 +77,11 @@ const ERASE_VALUE = 254;
 const ERASE_COLOR = `rgb(${ERASE_VALUE},${ERASE_VALUE},${ERASE_VALUE})`;
 const zoom = ref(1);
 /**
- * 视图旋转（顺时针，度）：0 / 90 / 180 / 270，仅影响展示与鼠标坐标换算。
+ * 视图旋转（顺时针，度）：任意角度，仅影响展示与鼠标坐标换算。
  *
+ * 90° 按钮一档一档地转到 0 / 90 / 180 / 270，再切「旋转」工具用鼠标拖着微调
+ * 到任意角度（拖到 90° 的整数倍附近会自动吸附）——现场常见「地图的北向和
+ * 正前方差十几度」，只按 90° 转永远对不齐。
  * 不动地图数据：栅格、`map.yaml`、原点、分辨率、`map_hash` 全部保持原样，
  * 下发到狗体、遥控器、路线坐标系都跟旋转前完全一致。
  */
@@ -86,7 +95,7 @@ const savedAreas = ref<MapForbiddenArea[]>([]);
 const pendingAreas = ref<MapForbiddenArea[]>([]);
 /** 本次要撤销的已有区域 id */
 const removedAreaIds = ref<number[]>([]);
-/** 正在拖拽的矩形（栅格像素） */
+/** 正在拖拽的矩形（**画布坐标**，屏幕上看着轴对齐；落库时再换算成栅格 + 角度） */
 const draftingRect = ref<{
   x0: number;
   y0: number;
@@ -105,19 +114,58 @@ let strokes: MapEditStroke[] = [];
 let drawing = false;
 let currentStroke: MapEditStroke | null = null;
 let panState: { x: number; y: number; left: number; top: number } | null = null;
+/**
+ * 拖拽旋转手势：`pin` 是手势开始时地图中心在**视口里**的屏幕坐标（整个拖动
+ * 过程把它钉住，否则 canvas 外接矩形一变大地图就跳），`startAngle` 是按下时
+ * 鼠标绕着它的角度。
+ */
+let rotateState: {
+  startRotation: number;
+  startAngle: number | null;
+  pin: { x: number; y: number };
+} | null = null;
 
 const canEdit = computed(() =>
   EDITABLE_STATUS.includes(currentMap.value?.mapStatus ?? "")
 );
-/** 旋转后画布的像素尺寸（90° / 270° 时宽高互换）。 */
-const viewWidth = computed(() =>
-  rotation.value % 180 === 0 ? meta.value.width : meta.value.height
-);
-const viewHeight = computed(() =>
-  rotation.value % 180 === 0 ? meta.value.height : meta.value.width
-);
-/** 是否处于 90° / 270°（宽高互换、鼠标坐标需要换轴）。 */
-const rotatedQuarter = computed(() => rotation.value % 180 !== 0);
+/**
+ * 旋转后画布的外接矩形（任意角度下宽高都变）：
+ * `offsetX / offsetY` 是「栅格原点在旋转后画布里的位置」，`cos / sin` 是旋转矩阵。
+ */
+const viewBox = computed(() => {
+  const width = meta.value.width;
+  const height = meta.value.height;
+  const rad = (rotation.value * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  if (!width || !height) {
+    return { width: 0, height: 0, offsetX: 0, offsetY: 0, cos, sin };
+  }
+  // 四个角绕原点旋转后的范围：min = 平移量，max - min = 画布尺寸
+  const xs = [0, width * cos, -height * sin, width * cos - height * sin];
+  const ys = [0, width * sin, height * cos, width * sin + height * cos];
+  const minX = Math.min(...xs);
+  const minY = Math.min(...ys);
+  // 90° 的整数倍时 cos/sin 带浮点误差，减 1e-6 再 ceil 才不会多出 1px
+  const span = (from: number, to: number) =>
+    Math.max(1, Math.ceil(to - from - 1e-6));
+  return {
+    width: span(minX, Math.max(...xs)),
+    height: span(minY, Math.max(...ys)),
+    offsetX: -minX,
+    offsetY: -minY,
+    cos,
+    sin
+  };
+});
+/** 旋转后画布的像素尺寸（任意角度都按外接矩形算）。 */
+const viewWidth = computed(() => viewBox.value.width);
+const viewHeight = computed(() => viewBox.value.height);
+/** 状态行里显示的角度：-180~180，一位小数（拖动时不会满屏小数）。 */
+const rotationText = computed(() => {
+  const value = Math.round(rotation.value * 10) / 10;
+  return value > 180 ? value - 360 : value;
+});
 const canPreview = computed(() => !!currentMap.value?.filePath);
 const hasPackageHint = computed(() =>
   currentMap.value?.mapWidth && currentMap.value?.mapHeight
@@ -171,6 +219,7 @@ function resetState() {
   drawing = false;
   currentStroke = null;
   panState = null;
+  rotateState = null;
   tool.value = "pan";
   zoom.value = 1;
   rotation.value = 0;
@@ -224,62 +273,145 @@ async function load() {
 
 // ---- 视图旋转（只转显示，不动地图数据）------------------------------------
 //
-// 画布始终是「旋转后」的坐标系（90° / 270° 时宽高互换），底图、未保存笔画、
-// 禁止区域都画在同一个 ctx 变换下；鼠标坐标再逆变换回栅格像素坐标提交给后端。
-// 直角旋转下轴对齐矩形转回去仍是轴对齐的，所以禁止区域自身 `rotation` 保持 0。
+// 画布始终是「旋转后」的坐标系（外接矩形，任意角度下宽高都变），底图、未保存
+// 笔画、禁止区域都画在同一个 ctx 变换下；鼠标坐标再逆变换回栅格像素坐标提交给
+// 后端。90° 的整数倍下轴对齐矩形转回去仍是轴对齐的，禁止区域自身 `rotation`
+// 保持 0；非直角时屏幕上拖出的框在栅格里是斜的，按 -视图角度 记录。
 
 /** 把 ctx 设成「栅格坐标 → 旋转后画布坐标」的变换。 */
 function applyViewTransform(context: CanvasRenderingContext2D) {
-  const width = meta.value.width;
-  const height = meta.value.height;
-  switch (rotation.value) {
-    case 90:
-      context.translate(height, 0);
-      context.rotate(Math.PI / 2);
-      break;
-    case 180:
-      context.translate(width, height);
-      context.rotate(Math.PI);
-      break;
-    case 270:
-      context.translate(0, width);
-      context.rotate(-Math.PI / 2);
-      break;
+  const box = viewBox.value;
+  context.translate(box.offsetX, box.offsetY);
+  if (box.sin || box.cos !== 1) {
+    context.rotate((rotation.value * Math.PI) / 180);
   }
 }
 
 /** 栅格像素坐标 → 旋转后画布坐标。 */
 function rasterToCanvas(point: { x: number; y: number }) {
-  const width = meta.value.width;
-  const height = meta.value.height;
-  switch (rotation.value) {
-    case 90:
-      return { x: height - point.y, y: point.x };
-    case 180:
-      return { x: width - point.x, y: height - point.y };
-    case 270:
-      return { x: point.y, y: width - point.x };
-    default:
-      return { x: point.x, y: point.y };
-  }
+  const box = viewBox.value;
+  return {
+    x: point.x * box.cos - point.y * box.sin + box.offsetX,
+    y: point.x * box.sin + point.y * box.cos + box.offsetY
+  };
 }
 
-/** 旋转后画布坐标 → 栅格像素坐标（`rasterToCanvas` 的逆变换）。 */
+/** 旋转后画布坐标 → 栅格像素坐标（`rasterToCanvas` 的逆变换，不裁剪）。 */
+function canvasToRasterRaw(point: { x: number; y: number }) {
+  const box = viewBox.value;
+  const dx = point.x - box.offsetX;
+  const dy = point.y - box.offsetY;
+  return {
+    x: dx * box.cos + dy * box.sin,
+    y: -dx * box.sin + dy * box.cos
+  };
+}
+
+/** 某个栅格坐标是否落在地图上（旋转后画布的四角有空区，不能拿它当边缘）。 */
+function inRaster(point: { x: number; y: number }) {
+  return (
+    point.x >= 0 &&
+    point.y >= 0 &&
+    point.x <= meta.value.width &&
+    point.y <= meta.value.height
+  );
+}
+
+/** 旋转后画布坐标 → 栅格像素坐标，越界时裁到地图边上。 */
 function canvasToRaster(point: { x: number; y: number }) {
-  const width = meta.value.width;
-  const height = meta.value.height;
-  const clampX = (value: number) => Math.min(Math.max(value, 0), width);
-  const clampY = (value: number) => Math.min(Math.max(value, 0), height);
-  switch (rotation.value) {
-    case 90:
-      return { x: clampX(point.y), y: clampY(height - point.x) };
-    case 180:
-      return { x: clampX(width - point.x), y: clampY(height - point.y) };
-    case 270:
-      return { x: clampX(width - point.y), y: clampY(point.x) };
-    default:
-      return { x: clampX(point.x), y: clampY(point.y) };
+  const raw = canvasToRasterRaw(point);
+  const clamp = (value: number, max: number) =>
+    Math.min(Math.max(value, 0), max);
+  return {
+    x: clamp(raw.x, meta.value.width),
+    y: clamp(raw.y, meta.value.height)
+  };
+}
+
+/**
+ * 设置视图角度（顺时针，度）：任意值都收拢到 0~360，只动显示、不改地图数据。
+ * 拖动浏览时保留 zoom / 滚动位置，不重新适应窗口（否则每转一下图就跳一下）。
+ */
+function setRotation(deg: number) {
+  const value = Number(deg);
+  if (!Number.isFinite(value)) return;
+  let next = Math.round(value * 10) / 10;
+  next = ((next % 360) + 360) % 360;
+  if (next === rotation.value) return;
+  rotation.value = next;
+}
+
+/** 拖到 0 / 90 / 180 / 270 附近（±2.5°）自动吸附，方便把图拿正。 */
+function snapAngle(deg: number) {
+  const nearest = Math.round(deg / 90) * 90;
+  return Math.abs(deg - nearest) <= 2.5 ? nearest : deg;
+}
+
+/** 栅格中心在旋转后画布里的位置（rotate 以它为中心）。 */
+function rasterCenterInCanvas() {
+  return rasterToCanvas({
+    x: meta.value.width / 2,
+    y: meta.value.height / 2
+  });
+}
+
+/** 地图中心当前落在视口的哪个位置（相对 viewport 左上角，px）。 */
+function rasterCenterOnScreen() {
+  const viewport = viewportRef.value;
+  if (!viewport) return null;
+  const center = rasterCenterInCanvas();
+  return {
+    x: center.x * zoom.value + CANVAS_MARGIN - viewport.scrollLeft,
+    y: center.y * zoom.value + CANVAS_MARGIN - viewport.scrollTop
+  };
+}
+
+/** 屏幕上（y 向下）一点的方位角，顺时针为正，度。 */
+function angleAround(
+  center: { x: number; y: number },
+  point: { x: number; y: number }
+) {
+  return (Math.atan2(point.y - center.y, point.x - center.x) * 180) / Math.PI;
+}
+
+/** 「旋转」工具：按住左键绕着地图中心拖 = 手动旋转视图。 */
+function startRotateDrag(event: PointerEvent) {
+  const canvas = canvasRef.value;
+  const viewport = viewportRef.value;
+  const pin = rasterCenterOnScreen();
+  if (!canvas || !viewport || !pin) return;
+  const rect = viewport.getBoundingClientRect();
+  const pointer = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  canvas.setPointerCapture(event.pointerId);
+  // 在中心附近起手时方位角没有意义（半步就转半圈）：先空着，离开死区再开始计
+  const far = Math.hypot(pointer.x - pin.x, pointer.y - pin.y) >= 12;
+  rotateState = {
+    startRotation: rotation.value,
+    startAngle: far ? angleAround(pin, pointer) : null,
+    pin
+  };
+}
+
+function updateRotateDrag(event: PointerEvent) {
+  const viewport = viewportRef.value;
+  if (!viewport || !rotateState) return;
+  const rect = viewport.getBoundingClientRect();
+  const pointer = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  if (rotateState.startAngle === null) {
+    if (
+      Math.hypot(pointer.x - rotateState.pin.x, pointer.y - rotateState.pin.y) <
+      12
+    ) {
+      return;
+    }
+    rotateState.startAngle = angleAround(rotateState.pin, pointer);
+    rotateState.startRotation = rotation.value;
+    return;
   }
+  let delta = angleAround(rotateState.pin, pointer) - rotateState.startAngle;
+  while (delta <= -180) delta += 360;
+  while (delta > 180) delta -= 360;
+  setRotation(snapAngle(rotateState.startRotation + delta));
 }
 
 /** 在栅格坐标系里画东西（底图 / 笔画 / 禁止区域），自动套上视图旋转。 */
@@ -293,14 +425,12 @@ function drawOnRaster(
   context.restore();
 }
 
-/** 按旋转后的方向重排画布尺寸（换宽高会清空 canvas，要重画）。 */
+/** 按旋转后的外接矩形重排画布尺寸（换宽高会清空 canvas，要重画）。 */
 function resizeCanvasForView() {
   const canvas = canvasRef.value;
   if (!canvas || !baseImage) return false;
-  const width = meta.value.width;
-  const height = meta.value.height;
-  const nextWidth = rotatedQuarter.value ? height : width;
-  const nextHeight = rotatedQuarter.value ? width : height;
+  const nextWidth = viewWidth.value;
+  const nextHeight = viewHeight.value;
   if (canvas.width === nextWidth && canvas.height === nextHeight && ctx) {
     return true;
   }
@@ -359,43 +489,91 @@ function render() {
     }
     paintForbiddenAreas(context);
   });
+  // 正在拖的矩形存的是「画布坐标」（屏幕上看着轴对齐），不能套上面的旋转
+  paintDraftingRect(ctx);
 }
 
-/** 画禁止区域（半透明红块 + 边框），以及正在拖拽的矩形。 */
+/** 画一个禁止区域矩形（`rotation` 绕 center，按弧度，栅格坐标系）。 */
+function paintAreaRect(
+  context: CanvasRenderingContext2D,
+  center: { x: number; y: number },
+  width: number,
+  height: number,
+  rotation = 0,
+  dashed = false
+) {
+  context.save();
+  context.translate(center.x, center.y);
+  if (rotation) context.rotate(rotation);
+  context.fillStyle = "rgba(220, 38, 38, 0.35)";
+  context.strokeStyle = "rgba(220, 38, 38, 0.95)";
+  context.lineWidth = Math.max(1 / zoom.value, 0.5);
+  if (dashed) context.setLineDash([6 / zoom.value, 4 / zoom.value]);
+  context.fillRect(-width / 2, -height / 2, width, height);
+  context.strokeRect(-width / 2, -height / 2, width, height);
+  context.restore();
+}
+
+/** 画禁止区域（半透明红块 + 边框），按各自的 `rotation` 绕中心转。 */
 function paintForbiddenAreas(context: CanvasRenderingContext2D) {
-  const draw = (
-    x0: number,
-    y0: number,
-    x1: number,
-    y1: number,
-    dashed: boolean
-  ) => {
-    const left = Math.min(x0, x1);
-    const top = Math.min(y0, y1);
-    const width = Math.abs(x1 - x0);
-    const height = Math.abs(y1 - y0);
-    context.save();
-    context.fillStyle = "rgba(220, 38, 38, 0.35)";
-    context.strokeStyle = "rgba(220, 38, 38, 0.95)";
-    context.lineWidth = Math.max(1 / zoom.value, 0.5);
-    if (dashed) context.setLineDash([6 / zoom.value, 4 / zoom.value]);
-    context.fillRect(left, top, width, height);
-    context.strokeRect(left, top, width, height);
-    context.restore();
-  };
   for (const area of activeAreas.value) {
-    draw(
-      area.center.x - area.width / 2,
-      area.center.y - area.height / 2,
-      area.center.x + area.width / 2,
-      area.center.y + area.height / 2,
-      false
+    paintAreaRect(
+      context,
+      area.center,
+      area.width,
+      area.height,
+      area.rotation ?? 0
     );
   }
-  if (draftingRect.value) {
-    const { x0, y0, x1, y1 } = draftingRect.value;
-    draw(x0, y0, x1, y1, true);
-  }
+}
+
+/** 画正在拖拽的矩形（画布坐标，屏幕上一定是轴对齐的）。 */
+function paintDraftingRect(context: CanvasRenderingContext2D) {
+  const rect = draftingRect.value;
+  if (!rect) return;
+  paintAreaRect(
+    context,
+    { x: (rect.x0 + rect.x1) / 2, y: (rect.y0 + rect.y1) / 2 },
+    Math.abs(rect.x1 - rect.x0),
+    Math.abs(rect.y1 - rect.y0),
+    0,
+    true
+  );
+}
+
+/**
+ * 把屏幕上拖出的轴对齐矩形（画布坐标）换算成禁止区域（栅格坐标）。
+ *
+ * 视图顺时针转了 θ，屏幕上轴对齐的框落到栅格里就是逆时针转了 θ 的斜矩形：
+ * `rotation = -θ`（弧度），90° 的整数倍时就是 0 / ±90°，和以前一样。
+ * 角度收拢到 (-90°, 90°]：同一矩形转 180° 还是它自己，宽高不用换。
+ */
+function createAreaFromDraft(rect: {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}): MapForbiddenArea | null {
+  const width = Math.abs(rect.x1 - rect.x0);
+  const height = Math.abs(rect.y1 - rect.y0);
+  if (width < 2 || height < 2) return null;
+  const center = canvasToRaster({
+    x: (rect.x0 + rect.x1) / 2,
+    y: (rect.y0 + rect.y1) / 2
+  });
+  // 归一到 (-90°, 90°]：同一矩形转 180° 就是它自己，宽高不用动
+  let angle = -rotation.value;
+  while (angle <= -90) angle += 180;
+  while (angle > 90) angle -= 180;
+  return {
+    center: {
+      x: Math.round(center.x * 100) / 100,
+      y: Math.round(center.y * 100) / 100
+    },
+    width: Math.round(width * 100) / 100,
+    height: Math.round(height * 100) / 100,
+    rotation: Math.round(((angle * Math.PI) / 180) * 10000) / 10000
+  };
 }
 
 function paintStroke(context: CanvasRenderingContext2D, stroke: MapEditStroke) {
@@ -441,10 +619,28 @@ function fitToViewport() {
 /** 旋转视图（90° 一档）。只动显示，不改地图数据。 */
 function rotateBy(step: number) {
   if (!baseImage) return;
-  rotation.value = (rotation.value + step + 360) % 360;
-  // 宽高互换会重建 canvas；未保存的笔画 / 禁止区域会自动重画回原位
+  setRotation(rotation.value + step);
+}
+
+// 角度一变（按钮 / 拖动）：外接矩形会变，重建 canvas 再把底图、笔画、禁止区域
+// 重画回原位；zoom 与滚动位置保留，只转图不跳画面。
+watch(rotation, () => {
+  if (!baseImage) return;
   resizeCanvasForView();
   render();
+  // 拖动旋转时把地图中心钉在手势开始时的屏幕位置（画布 CSS 尺寸要下一帧才刷新）
+  if (rotateState) nextTick(applyRotatePin);
+});
+
+/** 旋转后外接矩形会往外撑：把地图中心钉回手势开始时那个屏幕位置。 */
+function applyRotatePin() {
+  const viewport = viewportRef.value;
+  if (!viewport || !rotateState) return;
+  const center = rasterCenterInCanvas();
+  viewport.scrollLeft =
+    center.x * zoom.value + CANVAS_MARGIN - rotateState.pin.x;
+  viewport.scrollTop =
+    center.y * zoom.value + CANVAS_MARGIN - rotateState.pin.y;
 }
 
 function setZoom(next: number) {
@@ -472,30 +668,35 @@ function onWheel(event: WheelEvent) {
   });
 }
 
-/** 屏幕坐标 → 栅格像素坐标（经过视图旋转的逆变换） */
-function toPixel(event: PointerEvent) {
+/** 屏幕坐标 → 旋转后画布坐标（canvas 像素，不经过旋转逆变换） */
+function toCanvasPoint(event: PointerEvent) {
   const canvas = canvasRef.value;
   if (!canvas) return { x: 0, y: 0 };
   const rect = canvas.getBoundingClientRect();
   if (!rect.width || !rect.height) return { x: 0, y: 0 };
-  return canvasToRaster({
+  return {
     x: ((event.clientX - rect.left) / rect.width) * canvas.width,
     y: ((event.clientY - rect.top) / rect.height) * canvas.height
-  });
+  };
 }
 
 function onPointerDown(event: PointerEvent) {
-  if (event.button !== 0 || !canEdit.value) return;
+  if (event.button !== 0) return;
+  // 旋转的起手交给 viewport（canvas 外面那块深色区域也能转，且事件会冒泡上来）
+  if (tool.value === "rotate") return;
+  if (!canEdit.value) return;
   if (tool.value === "forbidden") {
     const canvas = canvasRef.value;
     if (!canvas) return;
+    // 旋转后画布四角是空的：在空区起手不画框
+    const view = toCanvasPoint(event);
+    if (!inRaster(canvasToRasterRaw(view))) return;
     canvas.setPointerCapture(event.pointerId);
-    const point = toPixel(event);
     draftingRect.value = {
-      x0: Math.round(point.x),
-      y0: Math.round(point.y),
-      x1: Math.round(point.x),
-      y1: Math.round(point.y)
+      x0: view.x,
+      y0: view.y,
+      x1: view.x,
+      y1: view.y
     };
     render();
     return;
@@ -503,9 +704,13 @@ function onPointerDown(event: PointerEvent) {
   if (tool.value !== "eraser") return;
   const canvas = canvasRef.value;
   if (!canvas) return;
+  // 旋转后画布四角是空的：在空区起手不落笔
+  const view = toCanvasPoint(event);
+  const raw = canvasToRasterRaw(view);
+  if (!inRaster(raw)) return;
   canvas.setPointerCapture(event.pointerId);
   drawing = true;
-  const point = toPixel(event);
+  const point = canvasToRaster(view);
   currentStroke = { points: [point], radius: brushRadius.value };
   strokes.push(currentStroke);
   dirty.value = true;
@@ -516,17 +721,23 @@ function onPointerDown(event: PointerEvent) {
 }
 
 function onPointerMove(event: PointerEvent) {
-  const point = toPixel(event);
+  if (tool.value === "rotate") {
+    updateRotateDrag(event);
+    return;
+  }
+  const view = toCanvasPoint(event);
+  const point = canvasToRaster(view);
   cursor.value = {
     x: point.x,
     y: point.y,
-    visible: tool.value === "eraser"
+    // 鼠标在旋转后画布的空角上时，光标圆不该被拉到地图边缘
+    visible: tool.value === "eraser" && inRaster(canvasToRasterRaw(view))
   };
   if (tool.value === "forbidden" && draftingRect.value) {
     draftingRect.value = {
       ...draftingRect.value,
-      x1: Math.round(point.x),
-      y1: Math.round(point.y)
+      x1: view.x,
+      y1: view.y
     };
     render();
     return;
@@ -559,20 +770,20 @@ function onPointerMove(event: PointerEvent) {
 }
 
 function onPointerUp(event: PointerEvent) {
+  if (tool.value === "rotate") {
+    // 事件会从 canvas 冒泡到 viewport，这里只收尾一次
+    if (rotateState) {
+      rotateState = null;
+      canvasRef.value?.releasePointerCapture?.(event.pointerId);
+    }
+    return;
+  }
   if (tool.value === "forbidden" && draftingRect.value) {
-    const { x0, y0, x1, y1 } = draftingRect.value;
+    const rect = draftingRect.value;
     draftingRect.value = null;
     canvasRef.value?.releasePointerCapture?.(event.pointerId);
-    const width = Math.abs(x1 - x0);
-    const height = Math.abs(y1 - y0);
-    if (width >= 2 && height >= 2) {
-      pendingAreas.value.push({
-        center: { x: (x0 + x1) / 2, y: (y0 + y1) / 2 },
-        width,
-        height,
-        rotation: 0
-      });
-    }
+    const area = createAreaFromDraft(rect);
+    if (area) pendingAreas.value.push(area);
     render();
     return;
   }
@@ -588,9 +799,15 @@ function onPointerLeave() {
   cursor.value.visible = false;
 }
 
-/** 拖动平移（浏览模式） */
+/** 拖动平移（浏览模式）/ 手动旋转视图（旋转模式） */
 function onViewportPointerDown(event: PointerEvent) {
-  if (tool.value !== "pan" || event.button !== 0) return;
+  if (event.button !== 0) return;
+  if (tool.value === "rotate") {
+    // 旋转只动视图、不改地图数据：已发布 / 已归档的图也允许转
+    startRotateDrag(event);
+    return;
+  }
+  if (tool.value !== "pan") return;
   const viewport = viewportRef.value;
   if (!viewport) return;
   panState = {
@@ -804,7 +1021,21 @@ defineExpose({ open });
             <el-icon><ForbiddenIcon /></el-icon>
             禁止区域
           </el-radio-button>
+          <el-radio-button value="rotate">
+            <el-icon><RotateIcon /></el-icon>
+            旋转
+          </el-radio-button>
         </el-radio-group>
+
+        <el-tooltip
+          v-if="tool === 'rotate'"
+          content="在图上按住左键绕着中心拖动 = 手动旋转视图。拖到 0 / 90 / 180 / 270 附近会自动吸附；也可以直接用右侧的 ±90° 按钮。只转显示，不改地图数据。"
+          placement="top"
+        >
+          <span class="rotate-hint">
+            按住拖动旋转 · 当前 {{ rotationText }}°
+          </span>
+        </el-tooltip>
 
         <el-tooltip
           v-if="tool === 'forbidden'"
@@ -934,7 +1165,7 @@ defineExpose({ open });
         <span>分辨率：{{ meta.resolution || "-" }} m/px</span>
         <span>原点：{{ meta.origin.join(", ") || "-" }}</span>
         <span v-if="rotation" class="rotated">
-          视图已旋转 {{ rotation }}°（不影响地图数据）
+          视图已旋转 {{ rotationText }}°（不影响地图数据）
         </span>
         <span>设备编号：{{ currentMap?.deviceCode || "手工上传" }}</span>
         <span v-if="currentMap?.sharedDeviceCodes?.length">
@@ -949,6 +1180,7 @@ defineExpose({ open });
         class="map-viewport"
         :class="{
           'is-pan': tool === 'pan',
+          'is-rotate': tool === 'rotate',
           'is-erase': tool === 'eraser' && canEdit
         }"
         @wheel.prevent="onWheel"
@@ -1055,6 +1287,12 @@ defineExpose({ open });
   .spacer {
     flex: 1;
   }
+
+  .rotate-hint {
+    font-size: var(--dog-font-sm);
+    color: var(--el-color-primary);
+    white-space: nowrap;
+  }
 }
 
 .map-meta {
@@ -1100,6 +1338,14 @@ defineExpose({ open });
 
   &.is-erase {
     cursor: none;
+  }
+
+  &.is-rotate {
+    cursor: grab;
+
+    &:active {
+      cursor: grabbing;
+    }
   }
 }
 
