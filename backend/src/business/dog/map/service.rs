@@ -217,7 +217,13 @@ impl DogMapService {
             .ok_or_else(|| AppError::NotFound(format!("Map with id {} not found", id)))
     }
 
-    /// 基于当前版本派生下一个不可变版本并立即发布。
+    /// 基于当前版本派生下一个版本，**保持为草稿**（可继续编辑 / 覆盖地图包）。
+    ///
+    /// 为什么不能在这里顺手发布：已发布版本的橡皮擦 / 禁止区域 / 恢复原图 / 原地覆盖
+    /// 都被状态门禁拦住，错误文案统一写着「请先派生新版本（新版本为草稿）」。
+    /// 以前这里派完就 `publish()`，结果新版本也是「已发布」——门禁照样拒，
+    /// 现场只能在「编辑 → 失败 → 新版本 → 还是失败」里打转（2026-11-26 线上）。
+    /// 发布是单独的一步（`POST /api/dogMap/{id}/publish`）。
     pub async fn new_version(&self, id: i64, scope: &DataScope) -> Result<DogMap, AppError> {
         let map = self.get_owned_by_id(id, scope).await?;
         // 派生版本要继承分享设备：否则发一次新版，被分享的设备立刻看不到图了
@@ -250,7 +256,8 @@ impl DogMapService {
             map_height: map.map_height,
         };
         let new_id = generate_id();
-        self.repo
+        let derived = self
+            .repo
             .create(&req, new_id, scope)
             .await
             .map_err(AppError::DatabaseError)?;
@@ -260,7 +267,7 @@ impl DogMapService {
                 .await
                 .map_err(AppError::DatabaseError)?;
         }
-        self.publish(new_id, scope).await
+        Ok(derived)
     }
 
     /// 把地图分享给其他设备使用（不复制地图包，也不重新建图）。

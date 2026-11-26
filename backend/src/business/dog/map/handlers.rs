@@ -314,7 +314,8 @@ pub async fn publish_map_handler(
     Ok(Json(ApiResponse::ok(vo)))
 }
 
-/// `POST /api/dogMap/{id}/newVersion` — 派生并发布下一个不可变版本。
+/// `POST /api/dogMap/{id}/newVersion` — 派生下一个版本（**草稿**，可编辑 / 覆盖包），
+/// 确认后再调 `publish`。
 pub async fn new_map_version_handler(
     State(state): State<AppState>,
     Extension(user): Extension<RequestUser>,

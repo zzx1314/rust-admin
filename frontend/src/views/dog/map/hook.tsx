@@ -418,9 +418,11 @@ export function useDogMap() {
   function newVersionMap(row) {
     dogMapNewVersion(row.id).then(res => {
       if (res.code === SUCCESS) {
-        message(`已派生新版本 ${res.data?.mapVersion || ""}`, {
-          type: "success"
-        });
+        // 新版本是**草稿**（可以直接编辑 / 重新上传地图包），发布要单独点
+        message(
+          `已派生新版本 ${res.data?.mapVersion ?? ""}（草稿），编辑确认后记得点「发布」`,
+          { type: "success", duration: 6000 }
+        );
         onSearch();
       } else {
         message(res.msg, { type: "error" });

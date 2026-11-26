@@ -98,9 +98,11 @@ const handlePublish = row => {
 
 const handleNewVersion = row => {
   ElMessageBox.confirm(
-    `将基于 ${row.mapVersion || row.mapName} 派生下一个版本并立即发布。是否继续？`,
-    "发布新版本",
-    { type: "warning", confirmButtonText: "发布", cancelButtonText: "取消" }
+    `将基于 ${
+      row.mapVersion || row.mapName
+    } 派生下一个版本（草稿）。草稿可以继续编辑 / 重新上传地图包，确认后记得点「发布」。是否继续？`,
+    "派生新版本",
+    { type: "warning", confirmButtonText: "派生", cancelButtonText: "取消" }
   )
     .then(() => newVersionMap(row))
     .catch(() => {});

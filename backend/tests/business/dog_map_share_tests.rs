@@ -397,7 +397,7 @@ async fn new_version_inherits_shared_devices() {
         .await
         .expect("share must work");
 
-    // 派生新版本（发布）后，被分享的设备不应因为换版本而失去这张图
+    // 派生新版本（草稿）后，被分享的设备不应因为换版本而失去这张图
     let derived = state
         .dog_map_service
         .new_version(map.id, &admin)

@@ -73,7 +73,7 @@ POST   /api/dogMap/{id}/share       把地图分享给其他设备使用（`devi
 GET    /api/dogMap/{id}/shares      当前分享给了哪些设备
 DELETE /api/dogMap/{id}/share/{deviceCode}  取消分享给单台设备（幂等）
 POST   /api/dogMap/{id}/publish     发布地图版本（记录发布时间）
-POST   /api/dogMap/{id}/newVersion  派生并发布下一个不可变版本
+POST   /api/dogMap/{id}/newVersion  派生下一个版本（草稿，可编辑 / 覆盖包，确认后 publish）
 GET    /api/dogStatistics/all       地图 / 模型 / 媒体 / 参数配置总量与本周曲线
 GET    /api/dogStatistics/allType   上周 / 本周数量趋势
 
@@ -119,8 +119,18 @@ GET    /api/dogDevice/control-plane/ws       反向控制信道（WebSocket，�
 橡皮擦与下发一律以 `map_edit/` 为准；包内没有 `map_edit/`（例如手工上传的
 ROS `model.pgm` 包）时才退回 `model.pgm` / `map.pgm`。编辑只改写编辑版，
 根目录原始 `map.pgm` 一个字节都不动；`yaml` 与其余条目原样保留，`map_hash`
-按新包重算，旧包留在磁盘上。只有 `草稿` / `部分标定` 版本可编辑，
-已发布 / 已归档请先派生新版本。
+按新包重算，旧包留在磁盘上。只有 `草稿` / `部分标定` 版本可编辑：
+已发布 / 已归档请先 `POST /api/dogMap/{id}/newVersion` 派生一版**草稿**（可直接编辑 / 覆盖包），
+确认后 `publish`。
+
+⚠️ **刚建好图的地图上 `map_edit/` 只有 `map.yaml`，没有 `map_edit/map.pgm`**
+（栅格要等遥控器第一次编辑才生成）。这种包第一次做橡皮擦 / 禁止区域时，平台会
+**派生**一份 `map_edit/map.pgm`（内容 = 建图原图 + 本次编辑），根目录 `map.pgm`
+照旧不动。2026-11-26 现场那两个坑就是漏了这一步：禁止区域直接报「这张地图没有
+编辑版（手工上传的地图包）」存不进去；橡皮擦则写进了根目录，既毁掉「恢复原图」的
+依据，又因为包内没有 `edit_info.json` 被遥控器下一次保存整体冲掉。
+回归：`package::tests::forbidden_area_on_fresh_robot_package_derives_the_edit_raster` /
+`erase_on_fresh_robot_package_derives_the_edit_raster`。
 
 擦除的笔画还会**同时记进包内 `map_edit/edit_info.json`**（`erase_areas` 追加
 `{x,y,r}` + 一条 `edit_ops{type:"erase",circles}`，像素坐标）：遥控器保存地图时按

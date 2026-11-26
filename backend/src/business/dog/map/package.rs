@@ -272,12 +272,31 @@ pub fn rewrite_map_package(
 ) -> Result<(Vec<u8>, usize), AppError> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|error| AppError::BadRequest(format!("地图包解析失败: {error}")))?;
-    let pgm_name = find_entry(&mut archive, "model.pgm", ".pgm").ok_or_else(|| {
-        AppError::BadRequest(
-            "地图包内未找到可用的 .pgm（map_edit/map.pgm、model.pgm 或 map.pgm）".to_string(),
-        )
-    })?;
-    let pgm = read_entry(&mut archive, &pgm_name)?;
+    let names = collect_edit_names(&mut archive);
+    // 目标栅格：优先编辑版；机器人包有 `map_edit/` 但还没有编辑版栅格时，从建图原图
+    // 派生一份 `map_edit/map.pgm`（理由同 `set_forbidden_areas`：写根目录会毁掉建图
+    // 原图，也会因为包内没有编辑记录被遥控器的下一次保存冲掉）。
+    let (pgm_name, seed_from_root) = match names.edit_pgm.clone() {
+        Some(name) => (name, false),
+        None if names.has_edit_dir => (EDIT_RASTER_NAME.to_string(), true),
+        None => (
+            find_entry(&mut archive, "model.pgm", ".pgm").ok_or_else(|| {
+                AppError::BadRequest(
+                    "地图包内未找到可用的 .pgm（map_edit/map.pgm、model.pgm 或 map.pgm）"
+                        .to_string(),
+                )
+            })?,
+            false,
+        ),
+    };
+    let pgm = if seed_from_root {
+        let root_name = names.root_pgm().ok_or_else(|| {
+            AppError::BadRequest("地图包里没有建图原图（根目录 map.pgm），无法编辑".to_string())
+        })?;
+        read_entry(&mut archive, root_name)?
+    } else {
+        read_entry(&mut archive, &pgm_name)?
+    };
     let mut raster = parse_pgm_raster(&pgm)?;
     let erased_pixels = apply_erase_strokes(
         &mut raster.pixels,
@@ -304,8 +323,7 @@ pub fn rewrite_map_package(
         };
         // 包里连 edit_info.json 都没有（老包 / 本体上没编辑过）：只有本体有
         // `map_edit/` 目录时才补一份，避免在纯建图原图上凭空造编辑记录。
-        let has_map_edit_dir = is_map_edit_entry(&pgm_name.to_lowercase());
-        if existing.is_none() && !has_map_edit_dir {
+        if existing.is_none() && !names.has_edit_dir {
             None
         } else {
             merge_edit_info_circles(existing.as_deref(), &circles)
@@ -313,6 +331,7 @@ pub fn rewrite_map_package(
     };
 
     let mut buffer = Cursor::new(Vec::new());
+    let mut wrote_pgm = false;
     {
         let mut writer = zip::ZipWriter::new(&mut buffer);
         let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
@@ -335,6 +354,7 @@ pub fn rewrite_map_package(
                 writer
                     .write_all(&edited)
                     .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+                wrote_pgm = true;
             } else if let Some(merged) = merged_edit_info.as_deref()
                 && Some(name.as_str()) == edit_info_name.as_deref()
             {
@@ -345,6 +365,15 @@ pub fn rewrite_map_package(
                 std::io::copy(&mut entry, &mut writer)
                     .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
             }
+        }
+        // 派生出来的编辑版栅格：包内原本没有 `map_edit/map.pgm`，在这里补写。
+        if !wrote_pgm {
+            writer
+                .start_file(pgm_name.to_string(), options)
+                .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+            writer
+                .write_all(&edited)
+                .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
         }
         // 包内原本没有 `edit_info.json`（本体上这张图还没在遥控器里编辑过）：
         // 补一份只含本次擦除的记录，遥控器下次保存时就能带上。
@@ -539,6 +568,18 @@ pub fn merge_edit_info_circles(
     Some(out)
 }
 
+/// 机器人包内编辑版栅格的标准路径。
+///
+/// 机器人建图完成后，地图目录里本来就有 `map_edit/`（只有 `map.yaml`，栅格要等
+/// 遥控器第一次编辑才生成）。所以「包里有 `map_edit/`、但没有 `map_edit/map.pgm`」
+/// 是**刚建好图、遥控器还没编辑过**的正常形态。平台编辑这时要**派生**一份
+/// `map_edit/map.pgm`，绝不能改写根目录的建图原图：
+///
+/// - 根目录 `map.pgm` 是「恢复原图」和遥控器保存（根图 + edit_info 重算）的唯一依据；
+/// - 包内没有 `map_edit/edit_info.json` 时擦除圆无处登记，遥控器一保存就会把平台的
+///   编辑整体冲掉（2026-11-25 现场复现四次）。
+const EDIT_RASTER_NAME: &str = "map_edit/map.pgm";
+
 /// 地图包里与栅格编辑相关的条目名（`map_edit/` 优先）。
 struct PackageEditNames {
     edit_pgm: Option<String>,
@@ -546,6 +587,9 @@ struct PackageEditNames {
     root_model: Option<String>,
     root_other: Option<String>,
     edit_info: Option<String>,
+    /// 包内是否存在 `map_edit/` 目录下的任何条目（机器人包为 true）。
+    /// 只看 `edit_pgm` 不够：刚建好的图有 `map_edit/map.yaml` 但还没有栅格。
+    has_edit_dir: bool,
 }
 
 impl PackageEditNames {
@@ -566,6 +610,7 @@ fn collect_edit_names<R: std::io::Read + std::io::Seek>(
         root_model: None,
         root_other: None,
         edit_info: None,
+        has_edit_dir: false,
     };
     for index in 0..archive.len() {
         let Ok(entry) = archive.by_index(index) else {
@@ -577,6 +622,9 @@ fn collect_edit_names<R: std::io::Read + std::io::Seek>(
         let name = entry.name().to_string();
         let lower = name.to_lowercase();
         let base = lower.rsplit('/').next().unwrap_or(lower.as_str());
+        if is_map_edit_entry(&lower) {
+            names.has_edit_dir = true;
+        }
         if base == "edit_info.json" {
             if is_map_edit_entry(&lower) {
                 names.edit_info.get_or_insert(name);
@@ -673,15 +721,28 @@ pub fn set_forbidden_areas(bytes: &[u8], areas: &[MapForbiddenArea]) -> Result<V
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|error| AppError::BadRequest(format!("地图包解析失败: {error}")))?;
     let names = collect_edit_names(&mut archive);
-    let edit_pgm = names.edit_pgm.clone().ok_or_else(|| {
-        AppError::BadRequest("这张地图没有编辑版（手工上传的地图包），不能设置禁止区域".to_string())
-    })?;
     let root_name = names.root_pgm().map(str::to_string).ok_or_else(|| {
         AppError::BadRequest("地图包里没有建图原图（根目录 map.pgm），无法设置禁止区域".to_string())
     })?;
+    // 机器人包有 `map_edit/` 却还没有编辑版栅格（刚建好图、遥控器没编辑过）：
+    // 从建图原图派生一份 `map_edit/map.pgm`。写根目录是不行的——那会毁掉建图原图，
+    // 而且包内没有 `edit_info.json`，遥控器下次保存会按「根图 + 空记录」把区域抹掉。
+    let (edit_pgm, seed_from_root) = match names.edit_pgm.clone() {
+        Some(name) => (name, false),
+        None if names.has_edit_dir => (EDIT_RASTER_NAME.to_string(), true),
+        None => {
+            return Err(AppError::BadRequest(
+                "这张地图没有编辑版（手工上传的地图包），不能设置禁止区域".to_string(),
+            ));
+        }
+    };
 
-    let mut raster = parse_pgm_raster(&read_entry(&mut archive, &edit_pgm)?)?;
     let root_raster = parse_pgm_raster(&read_entry(&mut archive, &root_name)?)?;
+    let mut raster = if seed_from_root {
+        root_raster.clone()
+    } else {
+        parse_pgm_raster(&read_entry(&mut archive, &edit_pgm)?)?
+    };
     if raster.width != root_raster.width || raster.height != root_raster.height {
         return Err(AppError::BadRequest(
             "编辑版与建图原图的尺寸不一致，无法设置禁止区域".to_string(),
@@ -792,6 +853,8 @@ pub fn set_forbidden_areas(bytes: &[u8], areas: &[MapForbiddenArea]) -> Result<V
 pub const FORBIDDEN_VALUE: u8 = 0;
 
 /// 按「替换编辑版栅格 + 可选替换编辑记录」重写 zip，其余条目原样复制。
+///
+/// 包内原本没有编辑版栅格（刚从建图原图派生出来）时，在这里补写进去。
 fn write_edited_package<R: std::io::Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     edit_pgm_name: &str,
@@ -801,6 +864,7 @@ fn write_edited_package<R: std::io::Read + std::io::Seek>(
 ) -> Result<Vec<u8>, AppError> {
     let mut buffer = Cursor::new(Vec::new());
     let mut wrote_info = false;
+    let mut wrote_pgm = false;
     {
         let mut writer = zip::ZipWriter::new(&mut buffer);
         let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
@@ -823,6 +887,7 @@ fn write_edited_package<R: std::io::Read + std::io::Seek>(
                 writer
                     .write_all(edited_pgm)
                     .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+                wrote_pgm = true;
             } else if Some(name.as_str()) == edit_info_name {
                 writer
                     .write_all(edit_info)
@@ -832,6 +897,14 @@ fn write_edited_package<R: std::io::Read + std::io::Seek>(
                 std::io::copy(&mut entry, &mut writer)
                     .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
             }
+        }
+        if !wrote_pgm {
+            writer
+                .start_file(edit_pgm_name.to_string(), options)
+                .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+            writer
+                .write_all(edited_pgm)
+                .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
         }
         if !wrote_info {
             writer
@@ -866,7 +939,8 @@ pub fn empty_edit_info() -> Vec<u8> {
 ///   重算栅格的，不清掉它的编辑历史，下次它一保存就把旧擦除又画回来；
 /// - 其余条目（`map.pcd` / `model_*.bin` / `nav_paths` / 根目录原图等）原样保留。
 ///
-/// 包内没有 `map_edit/`（手工上传的 ROS 包）直接拒绝：那种图本来就是原图。
+/// 包内没有 `map_edit/map.pgm`（刚建好图还没在遥控器上编辑，或是手工上传的
+/// ROS 包）直接拒绝：那种图本来就是原图，没有「编辑版」可恢复。
 pub fn restore_original_package(bytes: &[u8]) -> Result<Vec<u8>, AppError> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|error| AppError::BadRequest(format!("地图包解析失败: {error}")))?;
@@ -906,7 +980,10 @@ pub fn restore_original_package(bytes: &[u8]) -> Result<Vec<u8>, AppError> {
     }
 
     let edit_pgm = edit_pgm.ok_or_else(|| {
-        AppError::BadRequest("这张地图没有编辑版（手工上传的地图包），本来就是建图原图".to_string())
+        AppError::BadRequest(
+            "这张地图还没有编辑版（刚建好图，或手工上传的地图包），本来就和建图原图一致"
+                .to_string(),
+        )
     })?;
     let root_name = root_map.or(root_model).or(root_other).ok_or_else(|| {
         AppError::BadRequest("地图包里没有建图原图（根目录 map.pgm），无法恢复".to_string())
@@ -1622,6 +1699,33 @@ mod tests {
         assert!(read_zip_text(&out, "map_edit/edit_info.json").is_none());
     }
 
+    /// 刚建好的机器人包有 `map_edit/` 但没有编辑版栅格（遥控器还没编辑过）：
+    /// 平台擦除要**派生** `map_edit/map.pgm`，根目录的建图原图一个字节都不许动，
+    /// 并且要把擦除圆记进 `edit_info.json`（否则遥控器一保存就把编辑冲掉）。
+    #[test]
+    fn erase_on_fresh_robot_package_derives_the_edit_raster() {
+        let root = solid_pgm(8, 8, 128);
+        let zip = build_zip(&[
+            ("map.pgm", root.clone()),
+            ("map.yaml", b"image: map.pgm\n".to_vec()),
+            ("map_edit/map.yaml", b"image: map.pgm\n".to_vec()),
+        ]);
+        let strokes = erase_all_free(&[(2.0, 2.0)], 1.0, 254);
+        let (out, changed) = rewrite_map_package(&zip, &strokes, 254).unwrap();
+        assert!(changed > 0);
+        assert_eq!(
+            read_zip_entry(&out, "map.pgm").unwrap(),
+            root,
+            "建图原图不能被改写"
+        );
+        let raster = raster_of(&out);
+        assert_eq!(raster.pixels[2 * 8 + 2], 254, "编辑版要带上擦除");
+        assert_eq!(raster.pixels[0], 128, "没擦到的地方保持根图的值");
+        let text = read_zip_text(&out, "map_edit/edit_info.json").expect("要登记擦除圆");
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["erase_areas"].as_array().unwrap().len(), 1);
+    }
+
     /// 遥控器的记录解析不了就原样保留，栅格照旧编辑（不能把别人的数据写坏）
     #[test]
     fn broken_edit_info_is_left_untouched() {
@@ -1807,6 +1911,34 @@ mod tests {
             Some("upsert_forbidden")
         );
         assert_eq!(read_forbidden_areas(&out).len(), 1);
+    }
+
+    /// 刚建好的机器人包有 `map_edit/` 却还没有编辑版栅格：禁止区域不是报
+    /// 「没有编辑版」，而是从建图原图派生一份 `map_edit/map.pgm`（根图不动）。
+    #[test]
+    fn forbidden_area_on_fresh_robot_package_derives_the_edit_raster() {
+        let root = solid_pgm(8, 8, 128);
+        let zip = build_zip(&[
+            ("map.pgm", root.clone()),
+            ("map.yaml", b"image: map.pgm\n".to_vec()),
+            ("map_edit/map.yaml", b"image: map.pgm\n".to_vec()),
+        ]);
+        let area = forbidden_area(1, 4.0, 4.0, 4.0, 2.0, 0.0);
+        let out = set_forbidden_areas(&zip, std::slice::from_ref(&area)).unwrap();
+
+        assert_eq!(
+            read_zip_entry(&out, "map.pgm").unwrap(),
+            root,
+            "建图原图不能被改写"
+        );
+        let raster = raster_of(&out);
+        assert_eq!(raster.pixels[3 * 8 + 2], FORBIDDEN_VALUE);
+        assert_eq!(raster.pixels[0], 128, "区域外保持建图原图");
+        assert_eq!(read_forbidden_areas(&out).len(), 1);
+
+        // 撤销后能按根图还原（编辑版是从根图派生的，不是凭空涂的）
+        let cleared = set_forbidden_areas(&out, &[]).unwrap();
+        assert_eq!(raster_of(&cleared).pixels[3 * 8 + 2], 128);
     }
 
     /// 删掉禁止区域：栅格按建图原图还原（这块原本是 128 未知，不能留成 254）

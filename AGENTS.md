@@ -416,6 +416,16 @@ resolve_route_map` 同样要放行「别园区的图」（否则园区能绑图�
 回归：`dog_map_edit_tests::publish_partial_map_marks_it_published`、
 `api_smoke::map_status_syncs_from_zentai`。
 
+**刚建好的图要先派生 `map_edit/map.pgm`（2026-11-26 起）**：机器人建图完成时
+`map_edit/` 里只有 `map.yaml`，栅格要等遥控器第一次编辑才生成。平台第一次做橡皮擦 /
+禁止区域时必须**从根目录原图派生**一份 `map_edit/map.pgm`（`package.rs` 的
+`EDIT_RASTER_NAME` + `PackageEditNames::has_edit_dir`），否则：禁止区域直接报「这张
+地图没有编辑版」存不进去（2026-11-26 现场 15:55 连点五次都是这个 400）；橡皮擦则
+写进根目录，既毁掉「恢复原图」的依据，又因包内没有 `edit_info.json` 被遥控器下一次
+保存整体冲掉。**根目录 `map.pgm` 任何情况下都不许写**。回归：
+`package::tests::forbidden_area_on_fresh_robot_package_derives_the_edit_raster` /
+`erase_on_fresh_robot_package_derives_the_edit_raster`。
+
 **中台擦除的笔画要记进 `map_edit/edit_info.json`（2026-11-25 起）**：遥控器保存地图时
 是「根目录 `map.pgm` + `edit_info.json` 里的擦除圆」重算栅格——现场实测它的保存结果
 = 根图 `255→254` + 它自己 129 条 `{x,y,r}` 圆擦成 `254`，5,729,130 像素里只差 1,103 个

@@ -12,8 +12,8 @@ use std::sync::Arc;
 use x_rust::api::AppState;
 use x_rust::app::App;
 use x_rust::business::dog::map::domain::{
-    CreateMapRequest, MapEditPoint, MapEditRequest, MapEditStroke, MapForbiddenRequest,
-    UploadMapRequest,
+    CreateMapRequest, MapEditPoint, MapEditRequest, MapEditStroke, MapForbiddenArea,
+    MapForbiddenRequest, UploadMapRequest,
 };
 use x_rust::business::dog::map::package::{parse_map_package, parse_pgm_raster, sha256_hex};
 use x_rust::common::data_scope::DataScope;
@@ -84,6 +84,30 @@ fn package_with_map_edit() -> Vec<u8> {
         writer
             .write_all(b"image: map.pgm\nresolution: 0.05\norigin: [-1.0, -2.0, 0.0]\n")
             .unwrap();
+        writer.finish().unwrap();
+    }
+    buffer.into_inner()
+}
+
+/// 刚建好图的机器人包：`map_edit/` 里只有 `map.yaml`，还没有 `map_edit/map.pgm`
+/// （栅格要等遥控器第一次编辑才生成）。现场 2026-11-26 15:46 同步上来的就是这个形态。
+fn fresh_robot_package() -> Vec<u8> {
+    let mut pixels = vec![255u8; (WIDTH * HEIGHT) as usize];
+    pixels[NOISE_INDEX] = 0;
+    let mut pgm = format!("P5\n{WIDTH} {HEIGHT}\n255\n").into_bytes();
+    pgm.extend_from_slice(&pixels);
+    let yaml = b"image: map.pgm\nresolution: 0.05\norigin: [-1.0, -2.0, 0.0]\n";
+
+    let mut buffer = Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut buffer);
+        let options: zip::write::SimpleFileOptions = Default::default();
+        writer.start_file("map.pgm", options).unwrap();
+        writer.write_all(&pgm).unwrap();
+        writer.start_file("map.yaml", options).unwrap();
+        writer.write_all(yaml).unwrap();
+        writer.start_file("map_edit/map.yaml", options).unwrap();
+        writer.write_all(yaml).unwrap();
         writer.finish().unwrap();
     }
     buffer.into_inner()
@@ -696,4 +720,161 @@ async fn new_forbidden_area_without_id_is_accepted_and_gets_one() {
     );
     // 栅格确实被刷成占据（0）：矩形 3x3 像素，中心 (4,4)
     assert!(image.image.starts_with("data:image/png;base64,"));
+}
+
+/// 刚建好图就同步上来的地图（`map_edit/` 只有 `map.yaml`）：
+/// 第一次设禁止区域必须成功，并且是**派生** `map_edit/map.pgm`，根目录建图原图不动。
+///
+/// 现场 2026-11-26 15:55：这种包直接报「这张地图没有编辑版（手工上传的地图包），
+/// 不能设置禁止区域」，连点五次都存不进去（板子刚建完图，遥控器还没编辑过）。
+#[tokio::test]
+async fn forbidden_area_on_fresh_robot_package_derives_the_edit_raster() {
+    let original = fresh_robot_package();
+    let fixture = fixture_with_package("部分标定", original.clone()).await;
+    let scope = DataScope::new(1, true);
+
+    let request = MapForbiddenRequest {
+        areas: vec![MapForbiddenArea {
+            id: 0,
+            center: MapEditPoint { x: 4.0, y: 4.0 },
+            width: 3.0,
+            height: 3.0,
+            rotation: 0.0,
+            kind: "area".to_string(),
+        }],
+    };
+    let image = fixture
+        .state
+        .dog_map_service
+        .set_forbidden_areas(
+            fixture.map_id,
+            request,
+            &fixture.state.upload_dir,
+            &scope,
+        )
+        .await
+        .expect("刚建好图的地图也要能设置禁止区域");
+    assert_eq!(image.forbidden_areas.len(), 1);
+
+    // 落盘的新包：根目录 map.pgm 与建图原图逐字节一致，编辑版是平台派生的
+    let stored = fixture
+        .state
+        .dog_map_service
+        .get_by_id(fixture.map_id, &scope)
+        .await
+        .expect("map must exist");
+    let bytes = std::fs::read(
+        fixture
+            .state
+            .upload_dir
+            .join(stored.file_path.clone().expect("file_path")),
+    )
+    .expect("edited package must be readable");
+    let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).expect("edited package is a zip");
+    let mut root = Vec::new();
+    std::io::Read::read_to_end(&mut archive.by_name("map.pgm").unwrap(), &mut root).unwrap();
+    let mut original_zip =
+        zip::ZipArchive::new(Cursor::new(&original)).expect("original package is a zip");
+    let mut original_root = Vec::new();
+    std::io::Read::read_to_end(
+        &mut original_zip.by_name("map.pgm").unwrap(),
+        &mut original_root,
+    )
+    .unwrap();
+    assert_eq!(root, original_root, "根目录建图原图不能被改写");
+    assert!(
+        archive.by_name("map_edit/map.pgm").is_ok(),
+        "要派生编辑版栅格，遥控器 / 下发才认这份"
+    );
+    assert!(archive.by_name("map_edit/edit_info.json").is_ok());
+}
+
+/// 同一个包做橡皮擦：写进派生的 `map_edit/map.pgm`，根图不动。
+#[tokio::test]
+async fn erase_on_fresh_robot_package_keeps_the_original_raster() {
+    let original = fresh_robot_package();
+    let fixture = fixture_with_package("部分标定", original.clone()).await;
+    let scope = DataScope::new(1, true);
+
+    let image = fixture
+        .state
+        .dog_map_service
+        .erase(
+            fixture.map_id,
+            center_stroke(0.6),
+            &fixture.state.upload_dir,
+            &scope,
+        )
+        .await
+        .expect("橡皮擦必须成功");
+    assert_eq!(image.erased_pixels, Some(1));
+
+    let stored = fixture
+        .state
+        .dog_map_service
+        .get_by_id(fixture.map_id, &scope)
+        .await
+        .expect("map must exist");
+    let bytes = std::fs::read(
+        fixture
+            .state
+            .upload_dir
+            .join(stored.file_path.clone().expect("file_path")),
+    )
+    .expect("edited package must be readable");
+    let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).expect("edited package is a zip");
+    let mut root = Vec::new();
+    std::io::Read::read_to_end(&mut archive.by_name("map.pgm").unwrap(), &mut root).unwrap();
+    let mut original_zip =
+        zip::ZipArchive::new(Cursor::new(&original)).expect("original package is a zip");
+    let mut original_root = Vec::new();
+    std::io::Read::read_to_end(
+        &mut original_zip.by_name("map.pgm").unwrap(),
+        &mut original_root,
+    )
+    .unwrap();
+    assert_eq!(root, original_root, "根目录建图原图不能被改写");
+
+    let mut edited = Vec::new();
+    std::io::Read::read_to_end(
+        &mut archive.by_name("map_edit/map.pgm").unwrap(),
+        &mut edited,
+    )
+    .unwrap();
+    let raster = parse_pgm_raster(&edited).expect("edit raster must parse");
+    assert_eq!(raster.pixels[NOISE_INDEX], 254, "噪点要在编辑版里被擦掉");
+    assert!(archive.by_name("map_edit/edit_info.json").is_ok());
+}
+
+/// 派生新版本必须是**草稿**，而且真的能编辑。
+///
+/// 已发布版本的擦除 / 禁止区域 / 恢复原图都会被状态门禁拒掉，文案统一写着
+/// 「请先派生新版本（新版本为草稿）」。以前 `newVersion` 派完就顺手发布，
+/// 新版本同样是「已发布」——现场只能在「编辑失败 → 新版本 → 还是失败」里打转
+/// （2026-11-26 线上，`POST /api/dogMap/{id}/newVersion` 之后 PUT 仍报已发布）。
+#[tokio::test]
+async fn new_version_keeps_the_derived_map_editable() {
+    let fixture = fixture("已发布").await;
+    let scope = DataScope::new(1, true);
+
+    let derived = fixture
+        .state
+        .dog_map_service
+        .new_version(fixture.map_id, &scope)
+        .await
+        .expect("派生新版本必须成功");
+    assert_eq!(derived.map_status, "草稿", "派生出来的是可编辑的草稿版");
+
+    let image = fixture
+        .state
+        .dog_map_service
+        .erase(
+            derived.id,
+            center_stroke(0.6),
+            &fixture.state.upload_dir,
+            &scope,
+        )
+        .await
+        .expect("派生的草稿版本必须能编辑");
+    assert_eq!(image.erased_pixels, Some(1));
 }
