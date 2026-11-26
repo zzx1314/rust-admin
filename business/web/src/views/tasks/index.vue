@@ -30,11 +30,9 @@ import ProgressBar from "@/components/ProgressBar.vue";
 import TaskLiveMonitor from "@/components/TaskLiveMonitor.vue";
 import FoldSection from "@/components/FoldSection.vue";
 import {
-  DISPATCH_POLICIES,
   END_ACTIONS,
   EXECUTE_MODES,
   PUBLISH_STATUSES,
-  TASK_LEVELS,
   TASK_STATUSES,
   TASK_TYPES,
   endActionLabel,
@@ -93,6 +91,10 @@ const taskForm = reactive({
    */
   lightNightStart: "" as string | null,
   lightNightEnd: "" as string | null,
+  /**
+   * 优先级 / 下发策略：表单里不再让用户选（现场用不到），但仍随载荷固定送出默认值，
+   * 编辑老任务时也保留原值 —— 后端这两个字段仍是必填。
+   */
   level: "常规",
   parkId: 1,
   zoneId: null as number | null,
@@ -1796,18 +1798,6 @@ onBeforeUnmount(() => {
               {{ taskForm.scheduleDays.length ? daysLabel(taskForm.scheduleDays.join(",")) : "不选 = 每天" }}
             </span>
           </div>
-        </div>
-        <div class="field">
-          <label>优先级</label>
-          <select v-model="taskForm.level" class="select">
-            <option v-for="level in TASK_LEVELS" :key="level">{{ level }}</option>
-          </select>
-        </div>
-        <div class="field">
-          <label>下发策略</label>
-          <select v-model="taskForm.dispatchPolicy" class="select">
-            <option v-for="policy in DISPATCH_POLICIES" :key="policy">{{ policy }}</option>
-          </select>
         </div>
         <div class="field" style="grid-column: 1 / -1">
           <label>任务说明</label>
