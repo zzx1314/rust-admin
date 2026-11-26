@@ -1764,6 +1764,25 @@ mod tests {
         parse_pgm_raster(&read_zip_entry(bytes, "map_edit/map.pgm").unwrap()).unwrap()
     }
 
+    /// 遥控器 / 历史包的 `forbidden_areas` 可能没有 `id`：解析不能把整张列表丢掉
+    /// （整表替换时会被当成「全部删除」，把现场画好的区域连同栅格一起抹掉）。
+    #[test]
+    fn forbidden_area_without_id_is_still_read() {
+        let info = br#"{"erase_areas":[],"fences":[],"edit_ops":[],
+          "forbidden_areas":[{"center":{"x":4,"y":4},"width":4,"height":2}]}"#;
+        let zip = build_zip(&[
+            ("map.pgm", solid_pgm(8, 8, 128)),
+            ("map_edit/map.pgm", solid_pgm(8, 8, 254)),
+            ("map_edit/edit_info.json", info.to_vec()),
+        ]);
+
+        let areas = read_forbidden_areas(&zip);
+        assert_eq!(areas.len(), 1, "缺 id 的那条不能被整张丢掉");
+        assert_eq!(areas[0].id, 0, "缺 id 时按 0 读，由服务层补时间戳");
+        assert_eq!(areas[0].width, 4.0);
+        assert_eq!(areas[0].kind, "area");
+    }
+
     #[test]
     fn forbidden_area_is_painted_occupied_and_recorded() {
         let area = forbidden_area(1, 4.0, 4.0, 4.0, 2.0, 0.0);

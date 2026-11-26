@@ -281,6 +281,12 @@ pub struct MapEditPoint {
 #[serde(rename_all = "camelCase")]
 pub struct MapForbiddenArea {
     /// 遥控器用毫秒时间戳做 id；平台新增的也按同一规则生成。
+    ///
+    /// **必须可缺省**：前端新拖出来的区域不带 `id`（由服务层按时间戳补），
+    /// 遥控器 / 历史包里的 `edit_info.json` 也可能没有这个字段。写成必填的话
+    /// `Json<MapForbiddenRequest>` 会直接回 422（页面只看到「系统错误」），
+    /// `read_forbidden_areas` 也会整张列表丢掉（2026-11-26 线上）。
+    #[serde(default)]
     pub id: i64,
     pub center: MapEditPoint,
     pub width: f64,

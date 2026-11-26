@@ -12,7 +12,8 @@ use std::sync::Arc;
 use x_rust::api::AppState;
 use x_rust::app::App;
 use x_rust::business::dog::map::domain::{
-    CreateMapRequest, MapEditPoint, MapEditRequest, MapEditStroke, UploadMapRequest,
+    CreateMapRequest, MapEditPoint, MapEditRequest, MapEditStroke, MapForbiddenRequest,
+    UploadMapRequest,
 };
 use x_rust::business::dog::map::package::{parse_map_package, parse_pgm_raster, sha256_hex};
 use x_rust::common::data_scope::DataScope;
@@ -660,4 +661,39 @@ fn upload_request_accepts_map_id_alias() {
     }))
     .expect("mapId 应能反序列化到 id");
     assert_eq!(request.id, Some(42));
+}
+
+/// 前端新拖出来的禁止区域**不带 `id`**（服务层按毫秒时间戳补）。
+///
+/// 2026-11-26 线上：DTO 把 `id` 写成必填，`Json<MapForbiddenRequest>` 直接回 422
+/// （纯文本、没有 `msg`），页面只显示「系统错误」，禁止区域根本存不进去。
+#[tokio::test]
+async fn new_forbidden_area_without_id_is_accepted_and_gets_one() {
+    let fixture = fixture_with_package("草稿", package_with_map_edit()).await;
+    // 与前端 `dogMapSetForbiddenAreas` 发出的请求体逐字一致
+    let body = r#"{"areas":[{"center":{"x":4.0,"y":4.0},"width":3.0,"height":3.0,"rotation":0}]}"#;
+    let request: MapForbiddenRequest =
+        serde_json::from_str(body).expect("新画的禁止区域不带 id，必须能反序列化");
+    assert_eq!(request.areas.len(), 1);
+    assert_eq!(request.areas[0].id, 0);
+
+    let image = fixture
+        .state
+        .dog_map_service
+        .set_forbidden_areas(
+            fixture.map_id,
+            request,
+            &fixture.state.upload_dir,
+            &DataScope::new(1, true),
+        )
+        .await
+        .expect("设置禁止区域必须成功");
+
+    assert_eq!(image.forbidden_areas.len(), 1);
+    assert!(
+        image.forbidden_areas[0].id > 0,
+        "服务层要补上毫秒时间戳 id，前端下次保存才能按 id 保留 / 删除"
+    );
+    // 栅格确实被刷成占据（0）：矩形 3x3 像素，中心 (4,4)
+    assert!(image.image.starts_with("data:image/png;base64,"));
 }
