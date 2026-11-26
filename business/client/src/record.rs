@@ -541,7 +541,7 @@ impl Recorder {
                 .timeout(AGENT_TIMEOUT)
                 .build()
                 .unwrap_or_default(),
-            upload_client: reqwest::Client::builder()
+            upload_client: crate::tls::http_builder()
                 .timeout(UPLOAD_TIMEOUT)
                 .build()
                 .unwrap_or_default(),

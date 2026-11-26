@@ -73,6 +73,8 @@ pub const CONFIG_PATH_ENV: &str = "ROBODOG_CLIENT_CONFIG";
 
 // 环境变量名：与配置文件字段一一对应
 pub const ENV_SERVER_URL: &str = "ROBODOG_SERVER_URL";
+/// 平台证书（PEM）：`server.url = wss://…` 且平台用自签证书时必需
+pub const ENV_SERVER_TLS_CA: &str = "ROBODOG_SERVER_TLS_CA";
 /// 覆盖自动探测的设备编号（本地调试 / 多实例模拟用）
 pub const ENV_DEVICE_ID: &str = "ROBODOG_DEVICE_ID";
 /// 覆盖 SN 分区路径（默认 `/dev/mmcblk0p5`，测试与不同分区布局的机型用）
@@ -253,6 +255,11 @@ pub struct ServerSection {
     /// 保存设备密钥的环境变量名，优先级高于 `secret`
     pub secret_env: Option<String>,
     pub heartbeat_secs: Option<u64>,
+    /// 平台证书（PEM 文件路径）：`server.url = wss://…` 且平台用自签证书时必须配。
+    ///
+    /// 现场只开 https 入口（公网 3008 关掉、只留 3443）时，设备 WS 与回传 HTTP 都要
+    /// 信任这张证书；配了它就不需要（也不提供）「跳过校验」那种做法，见 `src/tls.rs`。
+    pub tls_ca: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -639,6 +646,8 @@ pub struct Config {
     /// 业务服务登录账号
     pub api_username: String,
     api_password: String,
+    /// 平台证书（PEM）路径：`wss://` + 自签证书时由 `tls::init` 读成信任根
+    pub tls_ca: Option<PathBuf>,
     /// tracing 过滤器（RUST_LOG 优先）
     pub log_filter: Option<String>,
 }
@@ -770,6 +779,15 @@ impl Config {
         ])
         .unwrap_or(DEFAULT_HEARTBEAT_SECS)
         .max(1);
+
+        // 平台证书：只有 `wss://` 才用得上，但这里不强制（模拟 / 公网 CA 证书的场景
+        // 不需要）；文件读不到 / 不是 PEM 由 `tls::init` 在启动时报错。
+        let tls_ca = pick_string([
+            env.get(ENV_SERVER_TLS_CA),
+            file.server.tls_ca.as_deref(),
+        ])
+        .map(|raw| PathBuf::from(raw.trim()))
+        .filter(|path| !path.as_os_str().is_empty());
 
         let battery = pick_number([cli.battery, file.simulation.battery])
             .unwrap_or(DEFAULT_BATTERY)
@@ -937,6 +955,7 @@ impl Config {
             api_base,
             api_username,
             api_password,
+            tls_ca,
             log_filter: file.log.filter.clone(),
         })
     }
@@ -967,6 +986,11 @@ impl Config {
             .as_deref()
             .map(mask)
             .unwrap_or_else(|| "（未配置）".to_string());
+        let tls_ca = self
+            .tls_ca
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "（未配置：用默认根证书）".to_string());
         format!(
             "\
 # 生效配置（敏感字段已脱敏）
@@ -974,6 +998,7 @@ server.url              = {server_url}
 server.device_id        = {device_id}
 server.secret           = {secret}
 server.heartbeat_secs   = {heartbeat}
+server.tls_ca           = {tls_ca}
 robot.host              = {robot}
 robot.file_base         = {file_base}
 robot.file_port         = {file_port}
@@ -1006,6 +1031,7 @@ log.filter              = {log_filter}",
             device_id = self.device_id,
             secret = secret,
             heartbeat = self.heartbeat_interval,
+            tls_ca = tls_ca,
             robot = self.robot.as_deref().unwrap_or("（模拟模式）"),
             file_base = self
                 .robot_file_base

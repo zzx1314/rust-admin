@@ -681,8 +681,11 @@ pub async fn sync_robot_maps(
 }
 
 /// 构造一个适合长时间传输地图的 HTTP 客户端
+///
+/// 回传目标是**平台** API：平台只开 https 入口时要带 `server.tls_ca` 钉的信任根
+/// （见 `src/tls.rs`），所以必须走 `crate::tls::http_builder()`。
 pub fn build_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    crate::tls::http_builder()
         .timeout(Duration::from_secs(180))
         .build()
         .unwrap_or_default()

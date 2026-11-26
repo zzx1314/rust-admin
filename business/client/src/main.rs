@@ -72,6 +72,8 @@ mod session;
 mod signal;
 mod speak;
 mod state;
+/// 平台链路的 TLS 信任（`server.url = wss://…` + 自签证书）
+mod tls;
 mod wire;
 mod zhpro;
 
@@ -127,6 +129,18 @@ async fn main() {
         config.server_url,
         config.robot.as_deref().unwrap_or("模拟模式")
     );
+
+    // 平台只开 https 入口（公网明文端口关掉）时设备走 wss://，而现场证书是自签的：
+    // 必须在连之前把 `server.tls_ca` 钉成根。读不到 / 不是 PEM 就**直接起不来**——
+    // 否则现场只看到「一直重连 timed out」，根本想不到是证书没拷过来。
+    if let Err(error) = tls::init(config.tls_ca.as_deref()) {
+        eprintln!("TLS 配置错误: {error}");
+        std::process::exit(1);
+    }
+    if let Some(ca) = &config.tls_ca {
+        info!("平台证书已钉为信任根: {}", ca.display());
+    }
+
     debug!("生效配置（脱敏）:\n{}", config.redacted_report());
 
     // 先连本体：配了本体就必须连上，连不上直接退出交给 systemd 重启

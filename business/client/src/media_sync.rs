@@ -457,7 +457,8 @@ pub async fn sync(
         });
     }
 
-    let client = reqwest::Client::builder()
+    // 回传走平台 API：平台只开 https 入口时要带 `server.tls_ca` 钉的信任根
+    let client = crate::tls::http_builder()
         .timeout(UPLOAD_TIMEOUT)
         .build()
         .map_err(|error| format!("构造 HTTP 客户端失败: {error}"))?;

@@ -64,7 +64,20 @@ pub(crate) async fn run_client(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ws_url = format!("{}/ws/device", config.server_url.trim_end_matches('/'));
     info!("正在连接业务服务: {ws_url}");
-    let (ws_stream, _) = connect_async(&ws_url).await?;
+    // 平台只开 https 入口时是 `wss://`：`server.tls_ca` 钉了自签证书就把连接器交下去，
+    // 没配就是 tungstenite 默认（webpki 公共根，公网 CA 证书不用配）
+    let (ws_stream, _) = match tls::ws_connector() {
+        Some(connector) => {
+            tokio_tungstenite::connect_async_tls_with_config(
+                ws_url.as_str(),
+                None,
+                false,
+                Some(connector),
+            )
+            .await?
+        }
+        None => connect_async(&ws_url).await?,
+    };
     let (mut write, mut read) = ws_stream.split();
     let (out_tx, mut out_rx) = mpsc::channel::<WsMessage>(128);
 

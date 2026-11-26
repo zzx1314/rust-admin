@@ -17,6 +17,12 @@ tokio = { version = "1", features = ["full"] }
 # 本体链路是明文 ws://，TLS 仅为了 wss:// 兼容；用 rustls 避免 cross 编译时的 openssl
 # 依赖（部署目标 192.168.41.246 是 aarch64，从 x86\_64 交叉编译）。
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+# 平台只开 https 入口时设备要连 `wss://`，而现场证书是自签的：`server.tls_ca` 把它
+# 钉成根。与 reqwest / tokio-tungstenite 共用同一份 rustls 配置（`src/tls.rs`），
+# 所以 provider 跟 reqwest 一致用 ring（别在这里打开 aws-lc-rs）。
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring", "logging"] }
+rustls-pemfile = "2"
+webpki-roots = "0.26"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # 本体文件服务（robot_http_server）没有 zip 端点，需要在本机打包后回传

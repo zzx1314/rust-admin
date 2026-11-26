@@ -10,7 +10,15 @@
 [server]
 # 业务服务 WebSocket 地址；REST 地址默认由它推导（ws→http / wss→https）
 # 现场：业务服务部署在 192.168.41.246
+#
+# 平台只开 https 入口时（公网明文端口关掉，例如 2026-11-26 起关 3008 只留 3443）：
+#   url = "wss://39.107.55.13:3443"
+#   tls_ca = "/etc/robodog/platform.crt"     # 平台 tls/server.crt 拷过来
+# 平台用的是自签证书，**必须**用 tls_ca 钉住，否则 wss 握手直接失败
+# （没有「跳过校验」这种开关：设备令牌就走这条 WS）。
 url = "ws://192.168.41.246:3100"
+# 平台证书（PEM）路径；`wss://` + 自签证书时必需，公网 CA 证书不用配
+# tls_ca = "/etc/robodog/platform.crt"
 # 设备编号（= 机器狗 SN）**不要写在这里**：客户端启动时自动读本体分区
 #   hexdump -C /dev/mmcblk0p5 | sed -n '3s/.*|\(.*\)|.*/\1/p' | tr -d ' '
 # 本文件里写 device_id 会被当成未知字段直接报错。
