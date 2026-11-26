@@ -227,7 +227,6 @@ export const RETIRED_ACTION_REPLACEMENTS: Record<string, string> = {
 };
 
 export const TRIGGERS = ["到达即执行", "停留后执行", "条件触发", "定时执行"];
-export const FAIL_MODES = ["跳过继续", "重试 1 次", "重试 2 次", "中止路线", "人工接管"];
 export const LEG_MODES = ["沿道路", "直线", "曲线平滑", "原地转向"];
 export const AVOID_LEVELS = ["宽松", "标准", "严格"];
 export const DEVICE_MODELS = ["X30-Pro", "Lite-S", "X30-Standard"];

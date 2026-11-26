@@ -274,7 +274,6 @@ export function newPoint(index: number, x: number, y: number): RoutePoint {
     must: false,
     // 到点机身偏航角（度）：0° = 地图 +X；下发成本体路径点 orientation 的 yaw
     heading: 0,
-    onFail: "跳过继续",
     actions: [
       {
         type: "可见光拍照",

@@ -437,7 +437,6 @@ export interface RoutePoint {
    * 本体协议没有云台/PTZ 指令，这里转的是整只狗。
    */
   heading: number;
-  onFail: string;
   actions: RoutePointAction[];
 }
 

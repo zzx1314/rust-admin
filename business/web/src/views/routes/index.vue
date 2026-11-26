@@ -32,7 +32,6 @@ import {
   ACTION_LIB,
   AVOID_LEVELS,
   DEVICE_MODELS,
-  FAIL_MODES,
   LEG_MODES,
   PHOTO_CAMERAS,
   PHOTO_MAX_FRAMES,
@@ -2219,12 +2218,6 @@ onBeforeUnmount(() => {
                 <div class="rt-field">
                   <label>必经点</label>
                   <label class="chk"><input v-model="selectedPoint.must" type="checkbox" /> 不可跳过</label>
-                </div>
-                <div class="rt-field">
-                  <label>异常策略</label>
-                  <select v-model="selectedPoint.onFail" class="select">
-                    <option v-for="mode in FAIL_MODES" :key="mode">{{ mode }}</option>
-                  </select>
                 </div>
 
                 <div class="rt-sec-title">
