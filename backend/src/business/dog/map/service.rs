@@ -4,8 +4,8 @@ use crate::business::dog::map::domain::{
     MapShareVO, MapVO, ShareMapRequest, UpdateMapRequest, UploadMapRequest, is_valid_map_status,
 };
 use crate::business::dog::map::package::{
-    MAX_EDIT_POINTS, MAX_EDIT_STROKES, normalize_erase_value, parse_map_package,
-    rewrite_map_package, sha256_hex,
+    MAX_EDIT_POINTS, MAX_EDIT_STROKES, ParsedMapPackage, normalize_erase_value, parse_map_package,
+    restore_original_package, rewrite_map_package, sha256_hex,
 };
 use crate::business::dog::map::repository::SeaOrmDogMapRepository;
 use crate::common::data_scope::DataScope;
@@ -576,6 +576,68 @@ impl DogMapService {
         let (edited, erased_pixels) = rewrite_map_package(&bytes, strokes, erase_value)?;
         let parsed = parse_map_package(&edited)?;
 
+        self.store_edited_package(id, &map, &edited, &parsed, upload_root, scope)
+            .await?;
+
+        Ok(MapImageVO {
+            image: parsed.png_data_url(),
+            resolution: parsed.resolution,
+            origin: parsed.origin,
+            width: parsed.width,
+            height: parsed.height,
+            map_hash: Some(parsed.sha256),
+            erased_pixels: Some(erased_pixels),
+        })
+    }
+
+    /// 恢复原图：把编辑版栅格换回建图原图，并清空遥控器的编辑记录。
+    ///
+    /// 和橡皮擦同一套状态约束（只有 `草稿` / `部分标定` 可改）：已发布 / 已归档
+    /// 版本请先 `newVersion` 派生。恢复后需要再「下发到狗体」才会写回本体。
+    pub async fn restore_original(
+        &self,
+        id: i64,
+        upload_root: &std::path::Path,
+        scope: &DataScope,
+    ) -> Result<MapImageVO, AppError> {
+        let map = self.get_owned_by_id(id, scope).await?;
+        if !matches!(
+            map.map_status.as_str(),
+            MAP_STATUS_DRAFT | MAP_STATUS_PARTIAL
+        ) {
+            return Err(AppError::BadRequest(format!(
+                "地图「{}」当前状态为 {}，不可直接编辑；请先派生新版本（新版本为草稿）再恢复原图",
+                map.map_name, map.map_status
+            )));
+        }
+
+        let bytes = self.read_package(&map, upload_root).await?;
+        let restored = restore_original_package(&bytes)?;
+        let parsed = parse_map_package(&restored)?;
+        self.store_edited_package(id, &map, &restored, &parsed, upload_root, scope)
+            .await?;
+
+        Ok(MapImageVO {
+            image: parsed.png_data_url(),
+            resolution: parsed.resolution,
+            origin: parsed.origin,
+            width: parsed.width,
+            height: parsed.height,
+            map_hash: Some(parsed.sha256),
+            erased_pixels: None,
+        })
+    }
+
+    /// 把「改过栅格的新包」落盘并回写地图行（橡皮擦 / 恢复原图共用）。
+    async fn store_edited_package(
+        &self,
+        id: i64,
+        map: &DogMap,
+        bytes: &[u8],
+        parsed: &ParsedMapPackage,
+        upload_root: &std::path::Path,
+        scope: &DataScope,
+    ) -> Result<(), AppError> {
         let original_name = map
             .file_name
             .clone()
@@ -586,11 +648,10 @@ impl DogMapService {
             .await
             .map_err(|error| AppError::InternalError(format!("创建地图目录失败: {error}")))?;
         let stored_name = format!("{}-{}", generate_id(), original_name);
-        tokio::fs::write(dir.join(&stored_name), &edited)
+        tokio::fs::write(dir.join(&stored_name), bytes)
             .await
             .map_err(|error| AppError::InternalError(format!("保存地图包失败: {error}")))?;
 
-        let file_size = i64::try_from(edited.len()).unwrap_or(i64::MAX);
         let req = UpdateMapRequest {
             map_name: None,
             map_type: None,
@@ -601,7 +662,7 @@ impl DogMapService {
             file_name: Some(original_name),
             file_path: Some(format!("maps/{stored_name}")),
             file_format: Some("zip".to_string()),
-            file_size: Some(file_size),
+            file_size: Some(i64::try_from(bytes.len()).unwrap_or(i64::MAX)),
             remarks: None,
             map_version: None,
             frame_id: None,
@@ -617,22 +678,13 @@ impl DogMapService {
             map_height: i32::try_from(parsed.height).ok(),
         };
         // 绕过 `update` 的「已发布不可改坐标」约束：这里改的是栅格内容，
-        // 分辨率 / 原点 / 版本号均未变化，状态校验已在上方完成。
+        // 分辨率 / 原点 / 版本号均未变化，状态校验由调用方完成。
         self.repo
             .update(id, &req, scope)
             .await
             .map_err(AppError::DatabaseError)?
-            .ok_or_else(|| AppError::NotFound(format!("Map with id {} not found", id)))?;
-
-        Ok(MapImageVO {
-            image: parsed.png_data_url(),
-            resolution: parsed.resolution,
-            origin: parsed.origin,
-            width: parsed.width,
-            height: parsed.height,
-            map_hash: Some(parsed.sha256),
-            erased_pixels: Some(erased_pixels),
-        })
+            .ok_or_else(|| AppError::NotFound(format!("Map with id {id} not found")))?;
+        Ok(())
     }
 
     /// 读取地图包字节并校验 `map_hash`（发布后内容不可被偷改）。
@@ -716,7 +768,7 @@ fn validate_edit_request(req: &MapEditRequest) -> Result<&[MapEditStroke], AppEr
 /// 校验前端手填的 resolution / origin 是否与地图包内容一致。
 fn validate_package_metadata(
     info: &UploadMapRequest,
-    parsed: &crate::business::dog::map::package::ParsedMapPackage,
+    parsed: &ParsedMapPackage,
 ) -> Result<(), AppError> {
     if let Some(requested) = info
         .resolution

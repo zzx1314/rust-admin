@@ -12,7 +12,7 @@ import {
 import { useDogMap } from "./hook";
 import MapEditorDialog from "./MapEditorDialog.vue";
 import MapShareDialog from "./MapShareDialog.vue";
-import { dogMapPushToDevice } from "@/api/dogMap";
+import { dogMapPushToDevice, dogMapRestoreOriginal } from "@/api/dogMap";
 import { SUCCESS } from "@/api/base";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 import AddFill from "~icons/ri/add-circle-line";
@@ -106,6 +106,30 @@ const handleNewVersion = row => {
     .catch(() => {});
 };
 
+/** 恢复原图：编辑版栅格换回建图原图，并清空遥控器的编辑记录。 */
+const handleRestoreOriginal = (row: any) => {
+  ElMessageBox.confirm(
+    `将把「${row.mapName}」恢复成建图原图：编辑版栅格换回原始栅格，` +
+      "遥控器在这张图上做过的擦除记录（编辑历史）也会一并清空。\n\n" +
+      "恢复只改平台侧的地图包，写回本体还需点「下发到狗体」。是否继续？",
+    "恢复原图",
+    { type: "warning", confirmButtonText: "恢复", cancelButtonText: "取消" }
+  )
+    .then(() => dogMapRestoreOriginal(row.id))
+    .then(res => {
+      if (res.code === SUCCESS) {
+        message("已恢复为建图原图；需要写回本体请点「下发到狗体」", {
+          type: "success",
+          duration: 8000
+        });
+        onSearch();
+      } else {
+        message(res.msg, { type: "error" });
+      }
+    })
+    .catch(() => {});
+};
+
 /** 把地图包下发到狗体（本体）并重新载图。 */
 const handlePush = (row, target?: string) => {
   const deviceCode = target || pushTargets(row)[0];
@@ -141,12 +165,14 @@ const handlePush = (row, target?: string) => {
     .catch(() => {});
 };
 
-/** 操作列「更多」菜单分发：发布 / 新版本 / 分享设备 / 下发到狗体。 */
+/** 操作列「更多」菜单分发：发布 / 新版本 / 恢复原图 / 分享设备 / 下发到狗体。 */
 const handleRowCommand = (row, command: string) => {
   if (command === "publish") {
     handlePublish(row);
   } else if (command === "newVersion") {
     handleNewVersion(row);
+  } else if (command === "restoreOriginal") {
+    handleRestoreOriginal(row);
   } else if (command === "share") {
     mapShareRef.value?.open(row);
   } else if (command.startsWith("push:")) {
@@ -258,6 +284,14 @@ const submitForm = async (formEl?: FormInstance) => {
                         v-if="current.mapStatus !== '草稿'"
                         command="newVersion"
                         >新版本</el-dropdown-item
+                      >
+                      <el-dropdown-item
+                        v-if="
+                          current.mapStatus === '草稿' ||
+                          current.mapStatus === '部分标定'
+                        "
+                        command="restoreOriginal"
+                        >恢复原图</el-dropdown-item
                       >
                       <el-dropdown-item command="share"
                         >分享设备</el-dropdown-item

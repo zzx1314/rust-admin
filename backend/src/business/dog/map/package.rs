@@ -539,6 +539,122 @@ pub fn merge_edit_info_circles(
     Some(out)
 }
 
+/// 遥控器「没有编辑」时的空 `edit_info.json`（结构与它自己写出来的一致）。
+pub fn empty_edit_info() -> Vec<u8> {
+    let value = serde_json::json!({
+        "erase_areas": [],
+        "forbidden_areas": [],
+        "fences": [],
+        "edit_ops": [],
+    });
+    serde_json::to_vec_pretty(&value).unwrap_or_else(|_| b"{}".to_vec())
+}
+
+/// 把地图包恢复成「建图原图」。
+///
+/// - `map_edit/map.pgm` ← 根目录的建图原图（`map.pgm` / `model.pgm`）；
+/// - `map_edit/edit_info.json` ← 空记录：遥控器保存时是按「根图 + 这些擦除圆」
+///   重算栅格的，不清掉它的编辑历史，下次它一保存就把旧擦除又画回来；
+/// - 其余条目（`map.pcd` / `model_*.bin` / `nav_paths` / 根目录原图等）原样保留。
+///
+/// 包内没有 `map_edit/`（手工上传的 ROS 包）直接拒绝：那种图本来就是原图。
+pub fn restore_original_package(bytes: &[u8]) -> Result<Vec<u8>, AppError> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
+        .map_err(|error| AppError::BadRequest(format!("地图包解析失败: {error}")))?;
+    let mut edit_pgm: Option<String> = None;
+    let mut root_map: Option<String> = None;
+    let mut root_model: Option<String> = None;
+    let mut root_other: Option<String> = None;
+    let mut edit_info: Option<String> = None;
+    for index in 0..archive.len() {
+        let Ok(entry) = archive.by_index(index) else {
+            continue;
+        };
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let lower = name.to_lowercase();
+        let base = lower.rsplit('/').next().unwrap_or(lower.as_str());
+        if base == "edit_info.json" {
+            if is_map_edit_entry(&lower) {
+                edit_info.get_or_insert(name);
+            }
+            continue;
+        }
+        if !lower.ends_with(".pgm") {
+            continue;
+        }
+        if is_map_edit_entry(&lower) {
+            edit_pgm.get_or_insert(name);
+        } else if base == "map.pgm" {
+            root_map.get_or_insert(name);
+        } else if base == "model.pgm" {
+            root_model.get_or_insert(name);
+        } else {
+            root_other.get_or_insert(name);
+        }
+    }
+
+    let edit_pgm = edit_pgm.ok_or_else(|| {
+        AppError::BadRequest("这张地图没有编辑版（手工上传的地图包），本来就是建图原图".to_string())
+    })?;
+    let root_name = root_map.or(root_model).or(root_other).ok_or_else(|| {
+        AppError::BadRequest("地图包里没有建图原图（根目录 map.pgm），无法恢复".to_string())
+    })?;
+    let root_bytes = read_entry(&mut archive, &root_name)?;
+    let root_pgm = parse_pgm_raster(&root_bytes)?;
+    let restored_pgm = root_pgm.to_p5();
+    let reset_edit_info = empty_edit_info();
+
+    let mut buffer = Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut buffer);
+        let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for index in 0..archive.len() {
+            let mut entry = archive
+                .by_index(index)
+                .map_err(|error| AppError::BadRequest(format!("读取地图包失败: {error}")))?;
+            let name = entry.name().to_string();
+            if entry.is_dir() {
+                writer
+                    .add_directory(name, options)
+                    .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+                continue;
+            }
+            writer
+                .start_file(name.clone(), options)
+                .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+            if name == edit_pgm {
+                writer
+                    .write_all(&restored_pgm)
+                    .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+            } else if Some(name.as_str()) == edit_info.as_deref() {
+                writer
+                    .write_all(&reset_edit_info)
+                    .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+            } else {
+                std::io::copy(&mut entry, &mut writer)
+                    .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+            }
+        }
+        // 包里原本没有编辑记录：补一份空的，遥控器下次保存就不会带回旧擦除
+        if edit_info.is_none() {
+            writer
+                .start_file("map_edit/edit_info.json".to_string(), options)
+                .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+            writer
+                .write_all(&reset_edit_info)
+                .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+        }
+        writer
+            .finish()
+            .map_err(|error| AppError::InternalError(format!("写入地图包失败: {error}")))?;
+    }
+    Ok(buffer.into_inner())
+}
+
 /// 把橡皮擦笔画刷进像素缓冲区，返回实际被改写的像素数。
 ///
 /// 每笔写入自己的 `stroke.value`，缺省时用 `erase_value`。两个值都会先过
@@ -1215,5 +1331,99 @@ mod tests {
         use std::io::Read;
         file.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, broken);
+    }
+
+    // ---- 恢复原图（编辑版栅格换回建图原图 + 清空遥控器编辑记录）----
+
+    fn read_zip_entry(bytes: &[u8], name: &str) -> Option<Vec<u8>> {
+        use std::io::Read;
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).ok()?;
+        let mut file = archive.by_name(name).ok()?;
+        let mut out = Vec::new();
+        file.read_to_end(&mut out).ok()?;
+        Some(out)
+    }
+
+    #[test]
+    fn restore_original_swaps_raster_and_clears_edit_record() {
+        let original = solid_pgm(8, 8, 255);
+        let mut edited_pixels = vec![255u8; 64];
+        edited_pixels[0] = 0;
+        edited_pixels[1] = 254;
+        let edited = [b"P5\n8 8\n255\n".to_vec(), edited_pixels].concat();
+        let info = br#"{
+  "erase_areas": [{"x": 2.0, "y": 2.0, "r": 8.0}],
+  "forbidden_areas": [],
+  "fences": [],
+  "edit_ops": [{"type": "erase", "circles": [{"x": 2.0, "y": 2.0, "r": 8.0}]}]
+}"#;
+        let zip = build_zip(&[
+            ("map.pgm", original.clone()),
+            ("map.yaml", b"image: map.pgm\nresolution: 0.05\n".to_vec()),
+            ("map_edit/map.pgm", edited),
+            ("map_edit/map.yaml", b"image: map.pgm\n".to_vec()),
+            ("map_edit/edit_info.json", info.to_vec()),
+            ("nav_paths/rt-1", b"points".to_vec()),
+        ]);
+
+        let out = restore_original_package(&zip).unwrap();
+
+        // 编辑版栅格 = 建图原图（按像素比，重新编码过 header）
+        let restored = read_zip_entry(&out, "map_edit/map.pgm").unwrap();
+        let raster = parse_pgm_raster(&restored).unwrap();
+        assert_eq!(raster.pixels, parse_pgm_raster(&original).unwrap().pixels);
+        // 遥控器的编辑记录被清空
+        let info_text =
+            String::from_utf8(read_zip_entry(&out, "map_edit/edit_info.json").unwrap()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&info_text).unwrap();
+        assert!(value["erase_areas"].as_array().unwrap().is_empty());
+        assert!(value["edit_ops"].as_array().unwrap().is_empty());
+        assert!(value["forbidden_areas"].as_array().unwrap().is_empty());
+        assert!(value["fences"].as_array().unwrap().is_empty());
+        // 其它条目原样保留（根目录原图、路网、yaml）
+        assert_eq!(
+            read_zip_entry(&out, "map.pgm").unwrap(),
+            parse_pgm_raster(&original).unwrap().to_p5()
+        );
+        assert_eq!(read_zip_entry(&out, "nav_paths/rt-1").unwrap(), b"points");
+        assert_eq!(
+            read_zip_entry(&out, "map_edit/map.yaml").unwrap(),
+            b"image: map.pgm\n"
+        );
+    }
+
+    #[test]
+    fn restore_original_creates_empty_edit_info_when_missing() {
+        let zip = build_zip(&[
+            ("map.pgm", solid_pgm(8, 8, 255)),
+            ("map_edit/map.pgm", solid_pgm(8, 8, 254)),
+        ]);
+        let out = restore_original_package(&zip).unwrap();
+        let info = read_zip_entry(&out, "map_edit/edit_info.json").expect("要补一份空记录");
+        let value: serde_json::Value = serde_json::from_slice(&info).unwrap();
+        assert!(value["erase_areas"].as_array().unwrap().is_empty());
+    }
+
+    /// 手工上传的 ROS 包没有 `map_edit/`：本来就是原图，直接拒绝
+    #[test]
+    fn restore_original_rejects_package_without_edit_raster() {
+        let zip = build_zip(&[
+            ("model.pgm", solid_pgm(8, 8, 255)),
+            ("model.yaml", b"image: model.pgm\n".to_vec()),
+        ]);
+        let error = restore_original_package(&zip).unwrap_err();
+        assert!(format!("{error:?}").contains("没有编辑版"));
+    }
+
+    /// 只有 `model.pgm`（没有根 `map.pgm`）时也要能找到原图
+    #[test]
+    fn restore_original_falls_back_to_model_pgm() {
+        let zip = build_zip(&[
+            ("model.pgm", solid_pgm(8, 8, 255)),
+            ("map_edit/map.pgm", solid_pgm(8, 8, 0)),
+        ]);
+        let out = restore_original_package(&zip).unwrap();
+        let raster = parse_pgm_raster(&read_zip_entry(&out, "map_edit/map.pgm").unwrap()).unwrap();
+        assert_eq!(raster.pixels, vec![255u8; 64]);
     }
 }

@@ -316,6 +316,10 @@ pub fn dog_map_routes(state: AppState) -> Router<AppState> {
             post(dog_map_handlers::edit_map_handler).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
         )
         .route(
+            "/dogMap/{id}/restore",
+            post(dog_map_handlers::restore_map_handler),
+        )
+        .route(
             "/dogMap/{id}/publish",
             post(dog_map_handlers::publish_map_handler),
         )

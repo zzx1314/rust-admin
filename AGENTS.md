@@ -410,6 +410,18 @@ resolve_route_map` 同样要放行「别园区的图」（否则园区能绑图�
 `mapupload::tests::merge_edit_info_appends_circles_and_keeps_remote_fields` /
 `merge_edit_info_is_idempotent` / `merge_edit_info_refuses_broken_body_file`。
 
+**「恢复原图」（2026-11-26 起）**：`POST /api/dogMap/{id}/restore` 把 `map_edit/map.pgm`
+换回根目录建图原图，并把 `map_edit/edit_info.json` 重置成空记录（四个数组全空）——
+遥控器是按「根图 + 擦除圆」重算栅格的，不清空它的编辑历史，下次保存就把作废的擦除画回来。
+状态约束同橡皮擦（草稿 / 部分标定；已发布先派生新版本），只改平台侧的包，写回本体仍需
+「下发到狗体」。客户端 `mapupload::package_uses_original_raster` 识别「编辑版栅格与根目录
+栅格逐字节相同且没有擦除圆」的包，此时**覆盖**本体 `edit_info.json` 而不是合并
+（`push_map_to_robot` 里的 `reset_edit_info`）。回归：
+`package::tests::restore_original_swaps_raster_and_clears_edit_record` /
+`restore_original_rejects_package_without_edit_raster`、
+`mapupload::tests::package_is_original_when_edit_equals_root` /
+`package_is_not_original_when_edits_remain`。
+
 「返回起点」回的是**起步时本体 `capture_origin_pose` 采的起点位姿**，不是地图原点。载图
 定位（`4030 op=1`）的 `initial_pose` **缺省必须发零四元数**（`Pose::unspecified()`）：协议
 §2.4.1 里只有四元数全零才表示「读上一份位姿文件做完整重定位」，而 `Pose::default()` 的单位

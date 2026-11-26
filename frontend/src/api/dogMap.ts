@@ -15,6 +15,7 @@ const dogMapUrls = {
   update: "/api/dogMap/",
   image: "/api/dogMap/",
   edit: "/api/dogMap/",
+  restore: "/api/dogMap/",
   publish: "/api/dogMap/",
   newVersion: "/api/dogMap/",
   push: "/api/dogMap/",
@@ -90,6 +91,19 @@ export const dogMapErase = (
     strokes,
     eraseValue
   });
+
+/**
+ * 恢复原图：把编辑版栅格换回**建图原图**，并清空遥控器的编辑记录
+ * （`map_edit/edit_info.json`）——不清空的话遥控器下次保存会按旧擦除圆把图又画回去。
+ *
+ * 只改平台侧的地图包；要写回本体还得点「下发到狗体」。
+ * 与橡皮擦同一套状态约束：只有草稿 / 部分标定可恢复，已发布请先派生新版本。
+ */
+export const dogMapRestoreOriginal = (id: string | number) =>
+  http.axiosPostRequest<MapImageResult>(
+    `${dogMapUrls.restore}${id}/restore`,
+    {}
+  );
 
 /**
  * 把编辑后的地图下发到狗体（本体）。

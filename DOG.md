@@ -65,6 +65,7 @@ GET    /api/dogMap/{id}/image       地图栅格 PNG + 分辨率 / 原点
 GET    /api/dogMedia/{id}/image     单张预览（JSON + base64 data URL；手工登记的行返回 404）
 GET    /api/dogMedia/{id}/file      下载单张原图（attachment；手工登记的行返回 404）
 GET    /api/dogMedia/export         批量下载 zip（ids 或筛选条件；原图 + manifest.json；上限 200 张 / 100MB）
+POST   /api/dogMap/{id}/restore       恢复原图：编辑版栅格换回建图原图 + 清空遥控器编辑记录
 POST   /api/dogMap/{id}/edit        橡皮擦：按像素笔画改写包内 model.pgm 噪点
 POST   /api/dogMap/{id}/push        把编辑后的地图下发到狗体（本体）并重新载图
 POST   /api/dogMap/{id}/share       把地图分享给其他设备使用（`deviceCodes` + `mode: append|replace`）
@@ -126,6 +127,13 @@ ROS `model.pgm` 包）时才退回 `model.pgm` / `map.pgm`。编辑只改写编�
 只登记**擦成可通行 254** 的笔画——遥控器的橡皮擦只有这一种落值，`擦成未知 128`
 表达不了（那类编辑只能靠栅格本身传达）。包内没有 `edit_info.json` 时，只有
 `map_edit/` 存在才补一份；根目录栅格（老固件）不建档。
+
+「恢复原图」（`POST /api/dogMap/{id}/restore`）把 `map_edit/map.pgm` 换回根目录的
+**建图原图**，并把 `map_edit/edit_info.json` 重置成空记录——遥控器保存时按「根图 +
+擦除圆」重算栅格，不清空它的编辑历史，下次一保存就把作废的擦除又画回来。
+状态约束同橡皮擦（只有草稿 / 部分标定可恢复，已发布请先派生新版本）；只改平台侧的包，
+写回本体仍需「下发到狗体」。设备客户端识别这种包（编辑版栅格与根目录栅格逐字节相同
+且无擦除圆）后**覆盖**本体的编辑记录，而不是合并。
 
 编辑完点「下发到狗体」（`POST /api/dogMap/{id}/push`，也可在地图列表「更多」里触发）
 才会真正写回机器人，链路：

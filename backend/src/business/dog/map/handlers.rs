@@ -160,6 +160,23 @@ pub async fn edit_map_handler(
     Ok(Json(ApiResponse::ok(image)))
 }
 
+/// `POST /api/dogMap/{id}/restore` — 恢复原图。
+///
+/// 把 `map_edit/map.pgm` 换回根目录的建图原图，并把遥控器的编辑记录
+/// （`map_edit/edit_info.json`）清空——不清空的话它下次保存会按「根图 + 旧擦除圆」
+/// 把擦除又画回来。只改平台侧的包，写回本体仍需「下发到狗体」。
+pub async fn restore_map_handler(
+    State(state): State<AppState>,
+    Extension(user): Extension<RequestUser>,
+    Path(params): Path<IdParam>,
+) -> Result<Json<ApiResponse<MapImageVO>>, AppError> {
+    let image = state
+        .dog_map_service
+        .restore_original(params.id, &state.upload_dir, &user.data_scope())
+        .await?;
+    Ok(Json(ApiResponse::ok(image)))
+}
+
 /// `POST /api/dogMap/{id}/push` — 把中台编辑后的地图下发到狗体（本体）。
 ///
 /// 链路：中台 → 业务平台（反向控制信道 / 直连 HTTP）→ 设备客户端 → 本体文件服务，

@@ -875,6 +875,84 @@ fn circle_of(value: &Value) -> Option<(i64, i64, i64)> {
     Some(circle_key(x, y, r))
 }
 
+/// 遥控器「没有编辑」时的空 edit_info（与它自己写出来的结构一致）。
+const EMPTY_EDIT_INFO: &[u8] = b"{\n  \"erase_areas\": [],\n  \"forbidden_areas\": [],\n  \"fences\": [],\n  \"edit_ops\": []\n}";
+
+/// 包里的编辑版栅格是不是就是建图原图（中台点了「恢复原图」之后下发的那份）。
+///
+/// 判据：`map_edit/` 下的 pgm 与根目录 pgm（`map.pgm` / `model.pgm`）**逐字节相同**，
+/// 且 `edit_info.json` 里没有任何擦除圆 / 编辑动作。
+///
+/// 为真时客户端要**覆盖**本体的编辑记录（而不是合并）——否则遥控器下次保存会按
+/// 旧 ops 把已经作废的擦除又画回来，「恢复原图」等于没做。
+pub fn package_uses_original_raster(package: &[u8]) -> bool {
+    use std::io::Read;
+
+    let Ok(mut archive) = zip::ZipArchive::new(Cursor::new(package)) else {
+        return false;
+    };
+    let mut edit_pgm: Option<String> = None;
+    let mut root_pgm: Option<String> = None;
+    let mut edit_info: Option<String> = None;
+    for index in 0..archive.len() {
+        let Ok(entry) = archive.by_index(index) else {
+            continue;
+        };
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let lower = name.to_ascii_lowercase();
+        let base = lower
+            .rsplit('/')
+            .next()
+            .unwrap_or(lower.as_str())
+            .to_string();
+        if base == "edit_info.json" {
+            if is_map_edit_path(&lower) {
+                edit_info.get_or_insert(name);
+            }
+            continue;
+        }
+        if !lower.ends_with(".pgm") {
+            continue;
+        }
+        if is_map_edit_path(&lower) {
+            edit_pgm.get_or_insert(name);
+        } else if base == "map.pgm" || base == "model.pgm" {
+            root_pgm.get_or_insert(name);
+        }
+    }
+    let (Some(edit_pgm), Some(root_pgm)) = (edit_pgm, root_pgm) else {
+        return false;
+    };
+    let mut read = |name: &str| -> Option<Vec<u8>> {
+        let mut out = Vec::new();
+        archive.by_name(name).ok()?.read_to_end(&mut out).ok()?;
+        Some(out)
+    };
+    let (Some(edited), Some(original)) = (read(&edit_pgm), read(&root_pgm)) else {
+        return false;
+    };
+    if edited != original {
+        return false;
+    }
+    let Some(info) = edit_info.as_deref().and_then(&mut read) else {
+        // 没有编辑记录 = 没编辑过，同样是“原图”
+        return true;
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(&info) else {
+        return false;
+    };
+    let empty = |key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_array)
+            .is_none_or(|items| items.is_empty())
+    };
+    empty("erase_areas") && empty("edit_ops") && empty("forbidden_areas") && empty("fences")
+}
+
 /// 把平台这次的擦除圆合并进本体的 `map_edit/edit_info.json`。
 ///
 /// 遥控器的编辑记录结构（逆向自它自己写的文件）：
@@ -1154,6 +1232,9 @@ pub async fn push_map_to_robot(
     // `edit_info.json` 不能像栅格那样直接覆盖：它是遥控器的编辑历史
     // （它保存地图时按「根 map.pgm + 这些擦除圆」重算栅格）。这里把平台
     // 这次的擦除圆追加进去，否则遥控器一保存就把平台的编辑整体冲掉。
+    // 中台「恢复原图」下发的那份：编辑版栅格 == 建图原图 → 编辑记录要**覆盖**成空，
+    // 不然遥控器下次保存会按旧 ops 把作废的擦除画回来。
+    let reset_edit_info = has_map_edit && package_uses_original_raster(package);
     let mut payloads: Vec<(String, Vec<u8>)> = Vec::new();
     for (name, bytes) in files {
         if name != "edit_info.json" {
@@ -1164,12 +1245,20 @@ pub async fn push_map_to_robot(
             // 老固件没有 `map_edit/`：编辑记录没有落点，不往根目录塞
             continue;
         }
+        if reset_edit_info {
+            info!("本体编辑记录将按「恢复原图」清空（不再合并旧擦除）");
+            payloads.push((name, bytes));
+            continue;
+        }
         let rel = format!("{target_dir}/edit_info.json");
         let existing = get_robot_file(http, file_base, &rel).await;
         match merge_edit_info(existing.as_deref(), &bytes) {
             Some(merged) => payloads.push((name, merged)),
             None => warn!("本体 {rel} 无法解析，跳过编辑记录合并（保留原文件不动）"),
         }
+    }
+    if reset_edit_info && !payloads.iter().any(|(name, _)| name == "edit_info.json") {
+        payloads.push(("edit_info.json".to_string(), EMPTY_EDIT_INFO.to_vec()));
     }
     let files = payloads;
     let mut written: Vec<String> = Vec::new();
@@ -1447,5 +1536,71 @@ mod tests {
         let incoming = br#"{"erase_areas":[{"x":1.00,"y":1.001,"r":0.5}],"forbidden_areas":[],"fences":[],"edit_ops":[]}"#;
         let merged = merge_edit_info(Some(REMOTE_EDIT_INFO), incoming).expect("must merge");
         assert_eq!(merged, REMOTE_EDIT_INFO);
+    }
+
+    fn build_zip(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        use std::io::Write;
+        let mut buffer = Cursor::new(Vec::new());
+        {
+            let mut writer = ZipWriter::new(&mut buffer);
+            let options = SimpleFileOptions::default();
+            for (name, data) in entries {
+                writer.start_file(*name, options).unwrap();
+                writer.write_all(data).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        buffer.into_inner()
+    }
+
+    const EMPTY_INFO: &[u8] =
+        br#"{"erase_areas":[],"forbidden_areas":[],"fences":[],"edit_ops":[]}"#;
+
+    /// 中台「恢复原图」下发的包：编辑版栅格 == 建图原图 且没有编辑记录
+    #[test]
+    fn package_is_original_when_edit_equals_root() {
+        let pgm = b"P5\n2 2\n255\n\xff\xff\xff\xff".to_vec();
+        let package = build_zip(&[
+            ("map.pgm", pgm.clone()),
+            ("map_edit/map.pgm", pgm),
+            ("map_edit/edit_info.json", EMPTY_INFO.to_vec()),
+        ]);
+        assert!(package_uses_original_raster(&package));
+    }
+
+    #[test]
+    fn package_is_not_original_when_raster_differs() {
+        let package = build_zip(&[
+            ("map.pgm", b"P5\n2 2\n255\n\xff\xff\xff\xff".to_vec()),
+            (
+                "map_edit/map.pgm",
+                b"P5\n2 2\n255\n\x00\xfe\xfe\xfe".to_vec(),
+            ),
+            ("map_edit/edit_info.json", EMPTY_INFO.to_vec()),
+        ]);
+        assert!(!package_uses_original_raster(&package));
+    }
+
+    /// 栅格一样但编辑记录里还有擦除圆 → 不是“原图”，仍然要合并
+    #[test]
+    fn package_is_not_original_when_edits_remain() {
+        let pgm = b"P5\n2 2\n255\n\xff\xff\xff\xff".to_vec();
+        let info = br#"{"erase_areas":[{"x":1.0,"y":1.0,"r":8.0}],"forbidden_areas":[],"fences":[],"edit_ops":[]}"#;
+        let package = build_zip(&[
+            ("map.pgm", pgm.clone()),
+            ("map_edit/map.pgm", pgm),
+            ("map_edit/edit_info.json", info.to_vec()),
+        ]);
+        assert!(!package_uses_original_raster(&package));
+    }
+
+    /// 没有 map_edit/（手工上传的 ROS 包）永远不算“恢复原图”
+    #[test]
+    fn package_without_edit_raster_is_not_original() {
+        let package = build_zip(&[
+            ("model.pgm", b"P5\n2 2\n255\n\xff\xff\xff\xff".to_vec()),
+            ("model.yaml", b"image: model.pgm\n".to_vec()),
+        ]);
+        assert!(!package_uses_original_raster(&package));
     }
 }

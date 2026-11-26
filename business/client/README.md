@@ -317,7 +317,7 @@ jq -c 'select(.dir=="recv" and .frame.head.type==4013)' /tmp/frames.jsonl
 （中台橡皮擦写进去的擦除圆），客户端会把它与本体现有记录**合并**后写入
 （`merge_edit_info`：只追加新圆、保留遥控器的 `fences` / `forbidden_areas` / 未知字段，
 去重、超限或解析不了就不写）——遥控器保存地图是按「根 `map.pgm` + 这些擦除圆」重算的，
-不合并的话它一保存就把平台的编辑冲掉。写完读回逐字节校验后再发 4030
+不合并的话它一保存就把平台的编辑冲掉。**中台「恢复原图」下发的包例外**：编辑版栅格与根目录栅格逐字节相同、且没有擦除圆时，客户端**覆盖**本体 `edit_info.json` 成空记录（`package_uses_original_raster`），否则旧擦除会被遥控器画回来。写完读回逐字节校验后再发 4030
 重新载图。`map.pcd` / `map.geojson` / `nav_paths` 不动；任务 / 建图进行中、
 或本体上没有该地图目录时直接报错。现场固件的上传接口没有正式文档，客户端按
 「`POST /upload`（multipart）→ `PUT /files/<rel>` → `POST /files/<rel>`」三种形状
