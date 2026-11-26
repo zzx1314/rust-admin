@@ -7,7 +7,7 @@
 依据《ffprobe核验回执_分辨率与编码参数修订建议.md》§8.2.5 命令块 D：
   - fps=30 重建均匀时间戳，解决源 NOPTS / 非单调 DTS；
   - 显式 in_range=full:out_range=full，避免 swscale 隐式压成 limited 导致偏灰；
-  - -bf 0 / -g 30 / -color_range pc 与四路干净流 SPS 一致。
+  - -bf 0 / -g <CAPTURE_GOP> / -color_range pc 与四路干净流 SPS 一致。
 
 安全约定：源 URL 含账号密码，只在进程内存中作为 ffmpeg 参数使用，
 不写入 CAMERAS、/api/* 返回值、前端或日志；ffmpeg stderr 直接丢弃，
@@ -180,7 +180,11 @@ def _build_cmd(url, enc):
         "-an", "-vf", vf,
     ] + enc_args + [
         "-b:v", config.H264_BITRATE,
-        "-g", "30", "-bf", "0", "-color_range", "pc",
+        # 关键帧间隔跟四路一致用 `CAPTURE_GOP`（帧数）：以前写死 30，配着
+        # `CAPTURE_OUT_FPS=15` 就是 **2s** 一个关键帧，录像（`-c copy`）等它的时间
+        # 比 cam0/cam1（15 帧 = 1s）多一倍（2026-11-26 部署实测：同为 15s 航点录像，
+        # dogcam 13.6s / cam1 15.0s）。写死 30 只在 30fps 下正好是 1s。
+        "-g", str(config.CAPTURE_GOP), "-bf", "0", "-color_range", "pc",
         "-avoid_negative_ts", "make_zero",
         "-rtsp_transport", "tcp", "-f", "rtsp",
         "rtsp://127.0.0.1:%d/%s" % (config.RTSP_PORT, config.DOG_RELAY_STREAM),

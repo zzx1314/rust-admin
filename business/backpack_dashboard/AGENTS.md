@@ -167,7 +167,8 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
 - ⚠️ **多路录像的「内容起点」差一个 GOP**（2026-11-26 定位并修掉）：录像 `-c copy`
   会丢掉首个关键帧之前的包（`-copyinkf` 关着），所以每个 mp4 的第一帧都是**那一路自己
   的下一帧 I 帧**。以前 `stream.py` 给 `cam0`~`cam3` **没设 `-g`**，走编码器默认
-  （keyint 250，板端 15fps ≈ 16.7s），结果前置 `dogcam`（relay `-g 30`）~2s 就出画面、
+  （keyint 250，板端 15fps ≈ 16.7s），结果前置 `dogcam`（relay，同一份 `CAPTURE_GOP`）
+  ~2s 就出画面、
   左前 / 右前要等 8~13s，两路内容差 ~10s；`-t seconds` 的窗口也被等关键帧吃掉（配 15s
   那一路只录到 7.8s，真 ffmpeg + mediamtx 本地复现）。现在四路推流都带
   `CAPTURE_GOP`（config，默认 = 输出帧率 = **1s**），起点 / 时长差 ≤1s。

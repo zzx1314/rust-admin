@@ -88,7 +88,7 @@ CAPTURE_NOUT_FPS = CAPTURE_OUT_FPS or CAPTURE_FPS
 # 左前 / 右前要等 8~13s，两路内容差 ~10s），而且 `-t seconds` 的窗口还会被等关键帧
 # 吃掉一截（配 15s 只录到 7.8s）。1s → 多路起点差 / 时长差都 ≤1s。
 # 顺带：WHEP 实时视频、AI 抽帧起播也变快（以前要等最多一个 GOP 才出画面）。
-# 代价只是每秒一个 IDR（relay.py 的 dogcam720 一直就是 `-g 30`）。
+# 代价只是每秒一个 IDR（relay.py 的 dogcam720 一直是 1s 一个关键帧，现在也跟着这个值）。
 CAPTURE_GOP = int(os.getenv("CAPTURE_GOP", "0")) or CAPTURE_NOUT_FPS
 if CAPTURE_GOP < 1:
     CAPTURE_GOP = CAPTURE_NOUT_FPS

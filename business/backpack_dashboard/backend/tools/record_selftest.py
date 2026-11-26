@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config  # noqa: E402
 import record  # noqa: E402
+import relay  # noqa: E402
 import stream  # noqa: E402
 
 PROCS = []
@@ -227,9 +228,12 @@ def main():
     failures += not check("多路起了 3 个 job", len(record.status()["jobs"]) == 3,
                           record.status()["jobs"])
     sources = [args[args.index("-i") + 1] for args in ARGS]
+    # 按 `stream_of()` 比，**别写死 `dogcam`**：720p30 档位下它解析成 `dogcam720`
+    # （现场板子是 `dogcam_profile=720p30`，写死会在板端白白报 FAIL）
     failures += not check(
         "每路各拉各的流",
-        sorted(url.rsplit("/", 1)[-1] for url in sources) == ["cam0", "cam1", "dogcam"],
+        sorted(url.rsplit("/", 1)[-1] for url in sources)
+        == sorted(record.stream_of(cam) for cam in ("cam0", "cam1", "dogcam")),
         sources,
     )
     failures += not check(
@@ -288,6 +292,15 @@ def main():
         "默认 GOP = 1 秒（= 输出帧率）",
         gop == config.CAPTURE_NOUT_FPS and gop >= 1,
         (gop, config.CAPTURE_NOUT_FPS),
+    )
+    # dogcam（relay 重编码推 `dogcam720`）必须用同一份 `-g`：写死 30 配上
+    # `CAPTURE_OUT_FPS=15` 就是 2s 一个关键帧，录像里它会比 cam0/cam1 晚一倍
+    # （2026-11-26 部署实测：同为 15s 航点录像，dogcam 13.6s / cam1 15.0s）。
+    relay_cmd = relay._build_cmd("rtsp://127.0.0.1:8554/test", "libx264")
+    failures += not check(
+        "dogcam relay 的关键帧间隔与四路一致",
+        relay_cmd[relay_cmd.index("-g") + 1] == str(gop),
+        relay_cmd,
     )
     too_many = ["cam0", "cam1", "cam2", "cam3", "dogcam", "dog-ipcam"]
     r = record.start({"planId": "TK-6", "scope": "point", "pointIndex": 0,
@@ -351,6 +364,26 @@ def main():
 
     print("record selftest: %s" % ("FAILED" if failures else "ok"))
     return 1 if failures else 0
+
+
+def lavfi_encoder(ffmpeg):
+    """lavfi 假相机没法 `-c copy`，挑本机真有的 H264 编码器。
+
+    板端（现场 `.246`）**没有 libx264**，只有 `h264_rkmpp` / `h264_v4l2m2m`；
+    写死 libx264 会让两条真 ffmpeg 用例在板子上直接 FAIL（exit 8），
+    而文档恰恰要求「改录像先跑这个 selftest」。
+    """
+    import subprocess
+
+    try:
+        listed = subprocess.run([ffmpeg, "-hide_banner", "-encoders"],
+                                capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for name in ("libx264", "h264_rkmpp", "h264_v4l2m2m"):
+        if name in listed:
+            return name
+    return None
 
 
 def real_segment_naming(tmp):
