@@ -8,7 +8,7 @@ import threading
 import time
 import os
 from config import (CAMERAS, RTSP_PORT, CAPTURE_WIDTH, CAPTURE_HEIGHT,
-                     CAPTURE_FPS, CAPTURE_OUT_FPS, CAPTURE_PIXFMT,
+                     CAPTURE_FPS, CAPTURE_OUT_FPS, CAPTURE_PIXFMT, CAPTURE_GOP,
                      H264_ENCODER, H264_BITRATE)
 
 _PROCS = {}
@@ -50,6 +50,11 @@ def _build_cmd(cam):
     cmd += [
         "-c:v", enc,
         "-b:v", H264_BITRATE,
+        # ⚠️ 关键帧间隔别去掉（默认 1s，`CAPTURE_GOP`）：录像（record.py）是 `-c copy`，
+        # 只能从**本路的下一个关键帧**开始写。不设 `-g` 时走编码器默认（keyint 250，
+        # 15fps ≈ 16.7s 一个关键帧），同一时刻起的前置 / 左前 / 右前就会「前置 2s 出画面、
+        # 另两路 8~13s 才轮到」，多路内容差 ~10s，`-t seconds` 也录不满。
+        "-g", str(CAPTURE_GOP),
     ]
     if enc == "libx264":
         cmd += ["-preset", "ultrafast", "-pix_fmt", "yuv420p"]

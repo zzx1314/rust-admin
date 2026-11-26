@@ -183,6 +183,14 @@ Environment=RELAY_SLOW_IFACES=           # 空 = 不按网卡名一刀压档（4
 AI 抽帧是 `max(8, min(12, DETECT_FPS))` = **8fps**，15fps 源完全喂得动。
 **别压到 8 以下**，否则抽帧与源帧率打架、漏检变多。
 
+`CAPTURE_GOP`（新增，默认 = `CAPTURE_NOUT_FPS` = **1s** 一个关键帧）同样是这套参数的一部分：
+录像（`record.py`）是 `-c copy`，只能从**本路的下一个关键帧**开始写，GOP 大就会「前置
+先出画面、左前/右前晚 8~13s」，多路内容差 ~10s，`-t seconds` 也会录不满（2026-11-26 现场
+「前置与左前/右前视频差 10s」就是这个）。只有确实要压码率时才在 unit 里调大
+（`Environment=CAPTURE_GOP=30`），**别设 0 / 负数**（会按 1s 处理）。改完
+`systemctl restart backpack-agent` 生效，复测：`ffprobe ... -show_entries packet=pts_time,flags`
+看 K 帧间隔应 ≤1s。
+
 改后实测：`ffprobe` 四路 `1280,720,15/1`；load average 3.96 → 2.6，CPU idle 73%。
 
 ```bash

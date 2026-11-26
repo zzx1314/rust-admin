@@ -210,7 +210,13 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 那几秒偏移会被 mov 封装器写成**空 edit**，导致 `mvhd.duration` 比画面长（现场
 `leg3-cam1-20261126-144815-000.mp4` 65.35s vs 52.4s）——播放器按 mvhd 画进度条，
 **最后几秒只有进度条没有画面**。边车 `durationSec` 同样以文件的 `mvhd` 为准。
-回归 `python3 business/backpack_dashboard/backend/tools/record_selftest.py`。
+⚠️ **多路录像的内容起点差一个 GOP**（2026-11-26 定位并修掉）：「前置 vs 左前 / 右前差
+~10s」不是起录指令的问题（四路是同一时刻 Popen 的），而是 `-c copy` 只能从**本路自己的
+下一帧关键帧**开始写。板端四路推流（`stream.py`）以前没设 `-g`（编码器默认 keyint 250，
+15fps ≈ 16.7s），`dogcam`（relay `-g 30`）~2s 就出画面、`cam0`/`cam1` 要等 8~13s，且
+`-t seconds` 的窗口被吃掉一截（配 15s 只录到 7.8s）。现在统一 `CAPTURE_GOP`（默认 =
+输出帧率 = 1s），起点 / 时长差 ≤1s；**别拿 `-copyinkf` 补片头**（P 帧解不出来）。
+回归 `python3 business/backpack_dashboard/backend/tools/record_selftest.py`（含「四路推流带 `-g`」）。
 **回传是「平台按需」的（2026-11-25 起）**：任务终态 / 取消 / 客户端启动都**只留在
 板端**（`RECORD_DIR/<计划>/`），平台下发指令 `回传录像` 才由客户端读
 `/api/record/list` 逐段回传 `POST /api/recordings/ingest`（multipart，sha256 去重），

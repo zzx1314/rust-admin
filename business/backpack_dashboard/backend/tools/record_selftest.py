@@ -8,6 +8,10 @@
 `record.start()` 里真正会碰硬件的只有 `subprocess.Popen(ffmpeg …)`，这里把它换成
 「立刻在模板路径写一个假 mp4、`wait()` 挂到收到停止信号」的假进程，其余代码
 （边车、清单、删除、越界校验、清盘）全部走真实实现。
+
+四路推流的关键帧间隔（`stream._build_cmd` 的 `-g`，默认 1s）也在这里验：录像 `-c copy`
+只能从关键帧开始写，GOP 一大，多路内容起点就差一个 GOP（2026-11-26「前置与左前 / 右前
+差 10s」就是这个）。
 """
 import os
 import shutil
@@ -20,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config  # noqa: E402
 import record  # noqa: E402
+import stream  # noqa: E402
 
 PROCS = []
 ARGS = []
@@ -267,6 +272,23 @@ def main():
     failures += not check("只起了 1 路", len(ARGS) == 1, ARGS)
     record.stop({"planId": "TK-5", "reason": "清理"})
     ARGS.clear()
+
+    # 2.4) 四路推流的关键帧间隔：录像（`-c copy`）只能从**本路的下一个关键帧**开始写，
+    #      GOP 一大，同一时刻起的多路「内容起点」就各差一个 GOP（现场 2026-11-26：
+    #      前置 ~2s 出画面、左前 / 右前 8~13s 才轮到 → 两路内容差 ~10s，而且 `-t`
+    #      的窗口也被吃掉一截）。这里钉住「默认 = 输出帧率 = 1s」。
+    gop_cmd = stream._build_cmd({"device": "/dev/usbcam0", "stream": "cam0"})
+    gop = config.CAPTURE_GOP
+    failures += not check(
+        "四路推流带 -g（每秒一个关键帧）",
+        "-g" in gop_cmd and gop_cmd[gop_cmd.index("-g") + 1] == str(gop),
+        gop_cmd,
+    )
+    failures += not check(
+        "默认 GOP = 1 秒（= 输出帧率）",
+        gop == config.CAPTURE_NOUT_FPS and gop >= 1,
+        (gop, config.CAPTURE_NOUT_FPS),
+    )
     too_many = ["cam0", "cam1", "cam2", "cam3", "dogcam", "dog-ipcam"]
     r = record.start({"planId": "TK-6", "scope": "point", "pointIndex": 0,
                       "cameras": too_many})

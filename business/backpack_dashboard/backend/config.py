@@ -81,6 +81,17 @@ H264_BITRATE = os.getenv("H264_BITRATE", "2000k")
 CAPTURE_OUT_FPS = int(os.getenv("CAPTURE_OUT_FPS", "0"))
 # 对外（推给 mediamtx）的帧率：relay.py 的 dogcam720 重编码用它
 CAPTURE_NOUT_FPS = CAPTURE_OUT_FPS or CAPTURE_FPS
+# 四路推流的关键帧间隔（帧）。**默认 = 输出帧率 = 1s**，0 / 负数也按 1s 算。
+# 为什么必须是 1s：录像（record.py）是 `-c copy`，ffmpeg 默认丢掉首个关键帧之前的
+# 包（`-copyinkf` 关着），所以每个 mp4 的第一帧都是**那一路自己的下一帧 I 帧**。GOP 一
+# 大，同一时刻起的多路「内容起点」就各差一个 GOP（现场 2026-11-26：前置 ~2s 出画面、
+# 左前 / 右前要等 8~13s，两路内容差 ~10s），而且 `-t seconds` 的窗口还会被等关键帧
+# 吃掉一截（配 15s 只录到 7.8s）。1s → 多路起点差 / 时长差都 ≤1s。
+# 顺带：WHEP 实时视频、AI 抽帧起播也变快（以前要等最多一个 GOP 才出画面）。
+# 代价只是每秒一个 IDR（relay.py 的 dogcam720 一直就是 `-g 30`）。
+CAPTURE_GOP = int(os.getenv("CAPTURE_GOP", "0")) or CAPTURE_NOUT_FPS
+if CAPTURE_GOP < 1:
+    CAPTURE_GOP = CAPTURE_NOUT_FPS
 
 # ---- 硬件路径（沿用 yd_test_v4.0.sh 的取值） ----
 SHT4X_APP = os.getenv("SHT4X_APP", "/opt/xjpt/wenshidu/sht4x_app")   # 温湿度

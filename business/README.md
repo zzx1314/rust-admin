@@ -797,6 +797,12 @@ axios 还有 120s 硬超时，现场表现就是「点回放没反应」（2026-
   边车写的是**这一片**的时长，不是整个航段的时长——否则「任务录像」里每片都显示成
   8 分钟。回归：`python3 business/backpack_dashboard/backend/tools/record_selftest.py`
   （含真 ffmpeg 切片）。
+- **多路录像的「内容起点」差一个 GOP**（2026-11-26 定位并修掉）：录像 `-c copy` 会丢掉
+  首个关键帧之前的包（`-copyinkf` 关着），每个 mp4 的第一帧都是那一路自己的下一帧 I 帧，
+  所以同一时刻起的多路，内容起点差一个 GOP。板端四路推流以前没设 `-g`（编码器默认
+  keyint 250，15fps ≈ 16.7s），现场就是「前置 2s 出画面、左前 / 右前 8~13s 才轮到」，
+  两路内容差 ~10s，而且 `-t seconds` 的那一路实际只录到 7.8s。现在 `stream.py` 统一用
+  `CAPTURE_GOP`（默认 = 输出帧率 = 1s），差 ≤1s。回归：`record_selftest.py`。
 - **mp4 必须关掉 edit list**（`use_editlist=0`；航段切片走
   `-segment_format_options "movflags=+faststart:use_editlist=0"`）：ffmpeg 要等源的关键帧
   才开始写第一帧，那几秒偏移会被 mov 封装器写成**空 edit**，`mvhd.duration` 就比画面长

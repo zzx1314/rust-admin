@@ -164,10 +164,19 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
   一个相机都没点（历史路线 / 老客户端）才退到默认源。
 - **不重编码**：源已经是 H264，`-c copy` 封装成 mp4，不与实时视频抢 MPP；
   `-movflags +faststart` 让浏览器边下边播。多路也是 `-c copy`，只多几路拉流 + 封装。
+- ⚠️ **多路录像的「内容起点」差一个 GOP**（2026-11-26 定位并修掉）：录像 `-c copy`
+  会丢掉首个关键帧之前的包（`-copyinkf` 关着），所以每个 mp4 的第一帧都是**那一路自己
+  的下一帧 I 帧**。以前 `stream.py` 给 `cam0`~`cam3` **没设 `-g`**，走编码器默认
+  （keyint 250，板端 15fps ≈ 16.7s），结果前置 `dogcam`（relay `-g 30`）~2s 就出画面、
+  左前 / 右前要等 8~13s，两路内容差 ~10s；`-t seconds` 的窗口也被等关键帧吃掉（配 15s
+  那一路只录到 7.8s，真 ffmpeg + mediamtx 本地复现）。现在四路推流都带
+  `CAPTURE_GOP`（config，默认 = 输出帧率 = **1s**），起点 / 时长差 ≤1s。
+  别把 `-g` 拿掉（直播起播也会变慢），也别用 `-copyinkf` 硬补片头（P 帧解不出来，
+  等于把空白挪到片头）。回归：`record_selftest.py` 的「四路推流带 `-g`」。
 - ⚠️ **必须关掉 edit list**（`use_editlist=0`，航点单文件 `-use_editlist 0`；航段切片走
   `-segment_format_options "movflags=+faststart:use_editlist=0"`，多个选项用 `:` 分隔）：
   ffmpeg 从 RTSP 拉流时第一帧的 DTS 不是 0（要等源的下一个关键帧：`dogcam` ~2s、
-  `cam0`~`cam3` **8~13s**），mov 封装器会把这段偏移写成**空 edit**，于是
+  `cam0`~`cam3` 现在也是 **~1s**），mov 封装器会把这段偏移写成**空 edit**，于是
   `mvhd.duration = 画面 + 偏移`。现场 `leg3-cam1-20261126-144815-000.mp4` 的 `mvhd`
   65.35s 而真正能解的只有 52.4s：播放器按 `mvhd` 画进度条、按第一帧开播，**最后那段
   偏移只有进度条没有画面**（现场原话「后面几秒不能播放」，而 Chrome 反而会在片头空
