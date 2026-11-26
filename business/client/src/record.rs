@@ -348,6 +348,30 @@ fn missing_cameras(requested: &[String], started: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// 板端 `/api/record/stop` 回执里「起了 ffmpeg 但一帧都没录到」的相机。
+///
+/// 板端从 2026-11-26 起把 0 帧的 mp4 判为失败（`record.py::_is_empty_capture`）：
+/// 空壳直接删掉、不写边车、不进待回传清单，原因放在回执的 `discarded` 里。
+/// 老 Agent 没有这个字段（返回空）——它那边空壳还是会被当成正常录像。
+fn discarded_cameras(value: &Value) -> Vec<String> {
+    value
+        .get("discarded")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    item.get("camera")
+                        .and_then(Value::as_str)
+                        .filter(|camera| !camera.is_empty())
+                        .unwrap_or("?")
+                        .to_string()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// 板端 `/api/record/list` 返回的一条待回传录像
 #[derive(Debug, Clone)]
 pub struct RecordingFile {
@@ -813,8 +837,9 @@ impl Recorder {
     async fn stop_plan(self: &Arc<Self>, task_code: &str, reason: &str) {
         // 不带 scope：航点 + 航段两路一起停（任务终态 / 取消）
         let body = json!({ "planId": task_code, "reason": reason });
-        if let Err(error) = self.post("/api/record/stop", body).await {
-            warn!("任务 {task_code} 停止录像失败（{reason}）: {error}");
+        match self.post("/api/record/stop", body).await {
+            Ok(value) => self.note_discarded(task_code, "航点/航段", reason, &value),
+            Err(error) => warn!("任务 {task_code} 停止录像失败（{reason}）: {error}"),
         }
     }
 
@@ -829,9 +854,35 @@ impl Recorder {
         if let Some(index) = point_index {
             body["pointIndex"] = json!(index);
         }
-        if let Err(error) = self.post("/api/record/stop", body).await {
-            warn!("任务 {task_code} 停止 {scope} 录像失败（{reason}）: {error}");
+        match self.post("/api/record/stop", body).await {
+            Ok(value) => {
+                let scope = match point_index {
+                    Some(index) => format!("{scope} {index}"),
+                    None => scope.to_string(),
+                };
+                self.note_discarded(task_code, &scope, reason, &value);
+            }
+            Err(error) => warn!("任务 {task_code} 停止 {scope} 录像失败（{reason}）: {error}"),
         }
+    }
+
+    /// 板端回执里「起了 ffmpeg 但一帧都没录到」的那几路：只写日志，不担误巡检。
+    ///
+    /// 板端从 2026-11-26 起把 0 帧的 mp4 判为失败（`record.py::_is_empty_capture`，
+    /// 空壳直接删掉，原因放回执的 `discarded`）。以前这种文件会被当成正常录像：边车拿
+    /// 不到 `mvhd` 就退回**墙钟时长**，于是 293 B 的空壳在平台上是「5.3s 但播不动」的
+    /// 一段视频（`TK-1126-20` P1 右前就是这个）。现场要能直接从设备日志里看出是哪一路、
+    /// 为什么，而不是对着一堆 mp4 猜。
+    fn note_discarded(&self, task_code: &str, scope: &str, reason: &str, value: &Value) {
+        let missing = discarded_cameras(value);
+        if missing.is_empty() {
+            return;
+        }
+        warn!(
+            "任务 {task_code} {scope} 录像没录到画面（{reason}，板端已丢弃空壳）：[{}]——\
+             这一路没在推流 / 关键帧间隔（GOP）比这段录像时长还长；确认相机在推流或把录像时长加长",
+            missing.join(", ")
+        );
     }
 
     async fn start_job(&self, job: JobRequest<'_>) -> Result<(), String> {
@@ -1371,6 +1422,32 @@ mod tests {
             plan.legs[0].cameras,
             vec!["dog-ipcam".to_string(), "cam1".to_string()],
             "航段的相机与航点同一套过滤规则"
+        );
+    }
+
+    /// 板端把「一帧都没录到」的空壳删掉并在 `stop` 回执里说明；客户端只负责把这几个
+    /// 相机写进日志（否则现场只看到平台上少了一段录像，不知道是哪一路、为什么）。
+    #[test]
+    fn discarded_cameras_are_read_from_the_stop_receipt() {
+        // 2026-11-26 现场：`TK-1126-20` P1 配 dogcam + cam1 录 5s，右前只有 293 B
+        let receipt = json!({
+            "ok": true,
+            "stopped": 2,
+            "files": ["pt0-dogcam-20261126-174456.mp4"],
+            "discarded": [{
+                "camera": "cam1",
+                "name": "pt0-cam1-20261126-174456.mp4",
+                "size": 293,
+                "windowSec": 5.3
+            }]
+        });
+        assert_eq!(discarded_cameras(&receipt), vec!["cam1".to_string()]);
+        // 老 Agent 的回执里没有这个字段：不报警（那时空壳还是会被当成正常录像）
+        assert!(discarded_cameras(&json!({"ok": true, "stopped": 1})).is_empty());
+        // 相机名缺失也不能把整条日志吃掉
+        assert_eq!(
+            discarded_cameras(&json!({"discarded": [{"size": 293}]})),
+            vec!["?".to_string()]
         );
     }
 

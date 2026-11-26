@@ -55,6 +55,16 @@
 > 7.8s，用真 ffmpeg + mediamtx 复现过）。现在四路推流都是 `CAPTURE_GOP`（默认 =
 > 输出帧率 = 1s），起点 / 时长差 ≤1s。**别用 `-copyinkf` 硬补片头**：关键帧之前的 P 帧
 > 没法解码，补进来只是把「空白」挪到片头（而且 `mvhd` 那套问题会一起回来）。
+
+⚠️ **空壳 mp4 不能当录像**（2026-11-26 17:44 `TK-1126-20` P1 现场）：`-c copy` 在窗口内
+等不到本路的关键帧时，ffmpeg 仍然会正常退出（码 0），只留一个 `ftyp` + 空 `moov`——
+`pt0-cam1-20261126-174456.mp4` 只有 **293 B、`mvhd.duration = 0`**。以前这种空壳会被
+写成「正常录像」（`mvhd` 读不到就退回**墙钟时长**，于是它显示成 5.3s），回传到平台就是
+一段打不开、时长还不对的视频，现场只看到「录像没了」，真凶（推流 GOP 太大）也被它掩住。
+现在 `_finalize` 用 `_is_empty_capture` 认出来：删空壳、不写边车、不进 `list`，原因写进
+`record.log`，并在 `/api/record/stop` 回执的 `discarded` 里回给客户端
+（`client/src/record.rs` 落一行 warn）。**别改成「宁可留着」**：留一个 0 帧的 mp4 比没有
+更坑人（平台上有进度条但播不动），回传还会白占 4G 带宽。
 """
 import json
 import os
@@ -75,6 +85,11 @@ _SCRUB = ("cmd",)
 # 读 mp4 头部找 `mvhd` 用多少字节：`+faststart` 之后 moov 一定在最前面，
 # 几秒的切片 moov 才几 KB；留 2MB 兜住「一次录很久、千帧以上」的 stsz。
 _MP4_HEAD_BYTES = 2 * 1024 * 1024
+# 一段**真的录到了画面**的 mp4 至少有多大：`-c copy` 一帧都没写出来时，ffmpeg 只留一个
+# `ftyp` + 空 `moov`（现场 2026-11-26 `pt0-cam1-20261126-174456.mp4` = **293 B**，
+# `mvhd.duration = 0`）；而写到画面的文件就算 320x180@8fps 也有几十 KB。
+# 小于它**且**读不出 `mvhd` 时判「这一路没录到画面」（见 `_finalize`）。
+_MIN_PLAYABLE_BYTES = 4096
 
 _LOCK = threading.RLock()
 # job key -> _Job；key = "<planId>|<scope>|<pointIndex>|<camera>"（每一路一个 job）
@@ -275,6 +290,9 @@ class _Job:
         self.point_name = point_name
         self.camera = camera
         self.path_template = path_template
+        # 这一路「起了 ffmpeg 但一帧都没录到」的记录（`_finalize` 里填）：
+        # 空壳 mp4 会被删掉，原因随 `/api/record/stop` 回执回给客户端写日志
+        self.discarded = []
         # 本路录像的文件名前缀（`pt<n>-` / `task-`）：同一计划可能同时有全程 + 航点两路，
         # 只按「开始后新出现的文件」认会互相抢对方的片段
         self.prefix = prefix
@@ -430,6 +448,21 @@ def _mp4_duration(path):
     return walk(0, len(data))
 
 
+def _is_empty_capture(path):
+    """这个 mp4 是不是「一帧都没有」的空壳（ffmpeg 只写了 `ftyp` + 空 `moov`）。
+
+    两个条件都要满足才算：体积小于 [`_MIN_PLAYABLE_BYTES`]（空壳约 300 B，真的写过
+    画面的文件至少几十 KB），**并且**读不出 `mvhd` 时长。只按体积判会误删「刚好很短」
+    的正常片段（宁可留下一段能播的，也不要吞掉现场唯一的证据）。
+    """
+    try:
+        if os.path.getsize(path) >= _MIN_PLAYABLE_BYTES:
+            return False
+    except OSError:
+        return False
+    return _mp4_duration(path) is None
+
+
 def _finalize(job, reason):
     """ffmpeg 退出后写边车：客户端按边车里的元数据回传，不用再猜文件名。"""
     with _LOCK:
@@ -448,10 +481,30 @@ def _finalize(job, reason):
             os.remove(job.segment_list)
         except OSError:
             pass
+    kept = []
     for path in job.files:
         name = os.path.basename(path)
         # 片长优先级：文件自己的 `mvhd`（播放器看到的就是它）> 切片清单 > job 墙钟时长
         seconds = _mp4_duration(path)
+        if seconds is None and _is_empty_capture(path):
+            # 空壳：ffmpeg 起了、窗口也到了，但一帧都没写成（`-c copy` 在窗口内等不到
+            # 本路的关键帧 / 源根本没在推流）。以前它会被当成正常录像：边车拿不到
+            # `mvhd` 就退回**墙钟时长**，于是 293 B 的空壳在平台「任务录像」里变成
+            # 一段「5.3s 但打不开」的假视频，客户端回传核对也发现不了
+            # （2026-11-26 17:44 `TK-1126-20` P1：狗头 3.1s、右前 `cam1` 只有 293 B）。
+            # 现在直接丢：不写边车、不进 `list_files`，原因报到日志 + `stop` 回执。
+            job.discarded.append({
+                "camera": job.camera,
+                "name": name,
+                "size": os.path.getsize(path) if os.path.exists(path) else 0,
+                "windowSec": round(duration, 1),
+            })
+            try:
+                os.remove(path)
+            except OSError as error:
+                _log("删除空壳录像失败（%s）: %s" % (path, error))
+            continue
+        kept.append(path)
         if seconds is None:
             seconds = segments.get(name, duration)
         meta = {
@@ -475,10 +528,17 @@ def _finalize(job, reason):
     with _LOCK:
         _FINALIZING.difference_update(os.path.basename(path) for path in job.files)
         _JOBS.pop(job.key, None)
+        job.files = kept
         job.finished.set()
     _log("录像结束 plan=%s scope=%s point=%s cam=%s 窗口=%.1fs 文件=%d 原因=%s"
          % (job.plan_id, job.scope, job.point_index, job.camera, duration,
-            len(job.files), reason))
+            len(kept), reason))
+    if job.discarded:
+        # 现场排障就靠这一行：是「相机没在推流」还是「推流的关键帧间隔比录像窗口还长」
+        _log("⚠️ 未录到画面，已丢弃空壳 plan=%s scope=%s point=%s cam=%s：窗口 %.1fs 内没有关键帧"
+             "（源 GOP 太大 / 相机没在推流 / `-c copy` 等不到 I 帧），"
+             "检查 `CAPTURE_GOP`（应 = 输出帧率 = 1s）与 mediamtx 上该路是否在推流"
+             % (job.plan_id, job.scope, job.point_index, job.camera, duration))
 
 
 def _watch(job):
@@ -722,6 +782,9 @@ def stop(body):
         "ok": True,
         "stopped": len(targets),
         "files": [os.path.basename(path) for job in targets for path in job.files],
+        # 「起了 ffmpeg 但一帧都没录到」的那几路（空壳已删）：客户端把它写进日志，
+        # 现场才知道是「录像配错了 / 相机没推流」，而不是「录了但平台上找不到」。
+        "discarded": [item for job in targets for item in job.discarded],
     }
 
 

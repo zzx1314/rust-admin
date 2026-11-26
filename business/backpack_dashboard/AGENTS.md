@@ -200,6 +200,16 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
   自己的真实时长，不是整个 job 的。
 - **`list` 不返回正在录的文件**：客户端可能传半截 mp4；`stop` 会等 ffmpeg 写完
   边车再返回（`job.finished`），所以「停 → list」是安全的。
+- ⚠️ **空壳 mp4（一帧都没有）不能当录像**（2026-11-26 17:44 `TK-1126-20` P1 现场）：
+  窗口内等不到本路关键帧时 ffmpeg 仍正常退出（码 0），只留 `ftyp` + 空 `moov`
+  （`pt0-cam1-20261126-174456.mp4` = **293 B**、`mvhd.duration = 0`）。以前它算「正常录像」：
+  边车读不到 `mvhd` 就退回**墙钟时长**（显示 5.3s），回传到平台是一段打不开的假视频，
+  还顺带把真凶（推流 GOP 太大）掩掉。现在 `_is_empty_capture(path)`（体积
+  `< _MIN_PLAYABLE_BYTES`（4KB）**且** 读不出 `mvhd`）在 `_finalize` 里判定：删空壳、
+  **不写边车**、不进 `list`，日志里写「窗口内没有关键帧」，并把 `discarded`
+  （`{camera, name, size, windowSec}`）放在 `/api/record/stop` 回执里，客户端落一行 warn。
+  两个条件必须同时满足——只看体积会误删「刚好很短」的正常片段。
+  回归：`record_selftest.py` 的「空壳 mp4」几条，以及 `client record::tests::discarded_cameras_*`。
 - **`delete` 只认 `<planId>/<文件名>.mp4`**：路径穿越、`..`、非 mp4 一律拒绝。
 - 录像源 URL 可能含账号密码（`DOG_RTSP_URL`），**不进接口、不进日志**。
 

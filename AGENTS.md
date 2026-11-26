@@ -233,7 +233,17 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 `task`（旧版「全程录像」，只为兼容老客户端）；文件名 `pt<n>-…` / `leg<n>-…` / `task-…`
 （航段 / 全程**切片带片段序号** `…-<时间戳>-000.mp4`：模板里没有 `%03d` 时每片都写同一个
 文件、后一片覆盖前一片，8 分钟的航段只剩最后几秒（2026-11-26 现场）；也别加
-`-strftime`，它会把 `%03d` 当日期吃掉）。改板端先读 `business/backpack_dashboard/AGENTS.md`「录像」一节，回归
+`-strftime`，它会把 `%03d` 当日期吃掉）。
+
+**「起了 ffmpeg 但一帧都没录到」不能当录像**（2026-11-26 17:44 `TK-1126-20` P1 现场）：
+`-c copy` 在窗口内等不到本路关键帧时 ffmpeg 仍正常退出，只留一个 `ftyp` + 空 `moov`
+（`pt0-cam1-20261126-174456.mp4` = **293 B**，`mvhd.duration = 0`）。以前它会被写成
+「正常录像」（读不到 `mvhd` 就退回**墙钟时长** → 显示成 5.3s），回传到平台是一段打不开、
+时长还不对的视频，还得让人以为是「录像配错了」。现在 `record.py::_is_empty_capture`
+（体积 < 4KB **且**读不出 `mvhd`）判为没画面：删空壳、不写边车、不进 `list`，原因写
+`record.log` 并在 `stop` 回执的 `discarded` 里回给客户端（`client/src/record.rs` 落一行
+warn）。⛔ 别改成「宁可留着」：0 帧的 mp4 比没有更坑人，回传还会白占 4G 带宽。
+改板端先读 `business/backpack_dashboard/AGENTS.md`「录像」一节，回归
 `python3 business/backpack_dashboard/backend/tools/record_selftest.py`、
 `client record::tests`、`cargo test --test recordings`。
 

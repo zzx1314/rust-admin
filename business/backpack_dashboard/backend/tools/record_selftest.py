@@ -12,6 +12,10 @@
 四路推流的关键帧间隔（`stream._build_cmd` 的 `-g`，默认 1s）也在这里验：录像 `-c copy`
 只能从关键帧开始写，GOP 一大，多路内容起点就差一个 GOP（2026-11-26「前置与左前 / 右前
 差 10s」就是这个）。
+
+「起了 ffmpeg 但一帧都没录到」的空壳 mp4（`ftyp` + 空 `moov`，现场 293 B）也必须验：
+它以前会被当成正常录像回传（边车退回墙钟时长 → 平台上一段打不开的 5.3s 视频），
+现在要删空壳 + 不进清单 + `stop` 回执带 `discarded`。
 """
 import os
 import shutil
@@ -31,6 +35,32 @@ PROCS = []
 ARGS = []
 # 假 ffmpeg 一次写几片（多片用例临时改成 3）：真 ffmpeg 是按 `-segment_time` 自己切的
 SEGMENTS = 1
+# 假 ffmpeg 改成写「空壳 mp4」（一帧都没有）：验 `_finalize` 会不会把空壳当录像
+EMPTY_CAPTURE = False
+
+
+def fake_mp4(seconds=4, playable=True):
+    """假 ffmpeg 写的 mp4 字节。
+
+    `playable=True` 写带 `mvhd` 的（时长 `seconds`）：`record._finalize` 认为「写了画面的」
+    文件 = 体积 ≥ `_MIN_PLAYABLE_BYTES` **或** 读得出 `mvhd`，所以这里体积故意很小
+    （几百字节），正好把「小体积但有 `mvhd` 不许误删」这条也钉住。
+    `playable=False` 写空壳：`ftyp` + 空 `moov`，`mvhd` 读不出来（现场 293 B 那种）。
+    """
+    ftyp = (24).to_bytes(4, "big") + b"ftypmp42" + b"\x00\x00\x00\x00" + b"mp42isom"
+    if not playable:
+        return ftyp + (8).to_bytes(4, "big") + b"moov" + b"\x00" * 40
+    timescale = 1000
+    mvhd = (
+        b"\x00" * 4                                  # version 0 + flags
+        + b"\x00" * 8                                # creation / modification
+        + timescale.to_bytes(4, "big")
+        + int(seconds * timescale).to_bytes(4, "big")
+        + b"\x00" * 80
+    )
+    mvhd_box = (len(mvhd) + 8).to_bytes(4, "big") + b"mvhd" + mvhd
+    moov = (len(mvhd_box) + 8).to_bytes(4, "big") + b"moov" + mvhd_box
+    return ftyp + moov + (16).to_bytes(4, "big") + b"mdat" + b"\x00" * 8
 
 
 class FakeProc:
@@ -49,7 +79,7 @@ class FakeProc:
         os.makedirs(os.path.dirname(names[0]), exist_ok=True)
         for index, path in enumerate(names):
             with open(path, "wb") as handle:
-                handle.write(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 256)
+                handle.write(fake_mp4(playable=not EMPTY_CAPTURE))
             PROCS.append(path)
             # 真 ffmpeg 的 `-segment_list csv` 就是「文件名,起点,终点」
             lines.append("%s,%d,%d" % (os.path.basename(path), index * 4, (index + 1) * 4))
@@ -206,7 +236,7 @@ def main():
     record.start({"planId": "TK-3", "scope": "point", "pointIndex": 0, "seconds": 5})
     # 全程录像的第二段在航点录像开始之后才落盘（segment 切片就是这个时序）
     with open(os.path.join(tmp, "TK-3", "task-dogcam-20991231-000000.mp4"), "wb") as handle:
-        handle.write(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 128)
+        handle.write(fake_mp4())
     record.stop({"planId": "TK-3", "scope": "point", "reason": "离开航点"})
     names = [item["name"] for item in record.list_files("TK-3")]
     failures += not check(
@@ -275,6 +305,45 @@ def main():
     failures += not check("坏相机名进 rejected", "cam9" in (r.get("rejected") or []), r)
     failures += not check("只起了 1 路", len(ARGS) == 1, ARGS)
     record.stop({"planId": "TK-5", "reason": "清理"})
+    ARGS.clear()
+
+    # 2.35) 空壳 mp4（起了 ffmpeg 但窗口内等不到本路关键帧）**不能当录像**：
+    #       现场 2026-11-26 17:44 `TK-1126-20` P1（配 dogcam + cam1 录 5s）：狗头 3.1s，
+    #       右前 `pt0-cam1-20261126-174456.mp4` 只有 **293 B / mvhd=0**（一帧都没有），
+    #       却因为「读不到 mvhd 就退回墙钟时长」被写成 5.3s 的正常录像，回传到平台就是
+    #       一段打不开、时长还不对的视频。现在要：删空壳 + 不进清单 + stop 回执带原因。
+    global EMPTY_CAPTURE
+    EMPTY_CAPTURE = True
+    PROCS.clear()
+    ARGS.clear()
+    r = record.start({"planId": "TK-EMPTY", "scope": "point", "pointIndex": 0,
+                      "seconds": 5, "cameras": ["cam0", "dogcam"]})
+    failures += not check("空壳用例：起录仍 ok（不报错，不影响巡检）", r.get("ok"), r)
+    time.sleep(1.1)
+    stopped = record.stop({"planId": "TK-EMPTY", "reason": "离开航点"})
+    failures += not check(
+        "空壳不进待回传清单（不再回传打不开的视频）",
+        record.list_files("TK-EMPTY") == [],
+        record.list_files("TK-EMPTY"),
+    )
+    failures += not check(
+        "stop 回执里说明哪几路没录到画面",
+        sorted(item.get("camera") for item in (stopped.get("discarded") or []))
+        == ["cam0", "dogcam"],
+        stopped,
+    )
+    failures += not check(
+        "空壳文件已从板端删掉（不占 SSD / 不误传）",
+        not any(os.path.exists(path) for path in PROCS),
+        PROCS,
+    )
+    failures += not check(
+        "空壳不写边车",
+        not any(os.path.exists(path + ".json") for path in PROCS),
+        PROCS,
+    )
+    EMPTY_CAPTURE = False
+    PROCS.clear()
     ARGS.clear()
 
     # 2.4) 四路推流的关键帧间隔：录像（`-c copy`）只能从**本路的下一个关键帧**开始写，
