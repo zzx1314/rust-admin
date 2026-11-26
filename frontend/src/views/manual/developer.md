@@ -198,7 +198,7 @@ Authorization: Bearer <access_token>
 | `/api/dogMap/{id}/shares`             | GET                | 当前分享给了哪些设备：`[{ mapId, deviceCode, createTime }]`                                                                                                                                                                                                                                         |
 | `/api/dogMap/{id}/share/{deviceCode}` | DELETE             | 取消分享给单台设备（幂等，没分享过也返回成功）                                                                                                                                                                                                                                                      |
 | `/api/dogMap/{id}/publish`            | POST               | 发布版本：状态推进为「已发布」（草稿 / 部分标定发布后都是已发布）并记录发布时间；业务平台会跟着同步状态                                                                                                                                                                                             |
-| `/api/dogMap/{id}/newVersion`         | POST               | 基于当前版本派生下一个版本号（新版本是**草稿**：可继续编辑 / 覆盖地图包，确认后调 `publish` 发布）                                                                                                                                                                                                                                                              |
+| `/api/dogMap/{id}/newVersion`         | POST               | 基于当前版本派生下一个版本号（新版本是**草稿**：可继续编辑 / 覆盖地图包，确认后调 `publish` 发布）                                                                                                                                                                                                  |
 | `/api/dogMap/{id}`                    | GET / PUT / DELETE | 详情 / 修改 / 软删除                                                                                                                                                                                                                                                                                |
 
 - 地图包仅支持 `.zip`，保存到 `[dog] upload_dir` 下的 `maps/` 目录；响应中的 `fileName`、`filePath`、`fileFormat`、`fileSize` 由服务端写入。
@@ -217,6 +217,8 @@ Authorization: Bearer <access_token>
 - **橡皮擦**：`POST /api/dogMap/{id}/edit` 的请求体为
   `{ "strokes": [{ "points": [{ "x": 120.5, "y": 88 }], "radius": 6 }], "eraseValue": 254 }`，
   坐标是**栅格像素坐标**（左上角为原点，`x` 向右、`y` 向下，与 `/image` 返回的 `width` / `height` 同一坐标系）。
+  弹窗里的「旋转视图」只转显示（90° 一档），提交的坐标仍是栅格像素坐标，
+  地图数据 / 原点 / `map_hash` 一概不变。
   `eraseValue` 是擦除后写入的灰度值：`254` = 可通行（默认，用来擦掉自由空间里的噪点）、
   `128` = 未知（旧的 `205` 由服务端归一成 `128`）。平台页面只传 `254`（与遥控器一致，
   遥控器橡皮擦只写 254），`128` / `205` 仅为历史客户端保留。
