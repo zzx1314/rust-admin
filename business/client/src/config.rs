@@ -162,8 +162,8 @@ impl std::error::Error for ConfigError {}
 ///
 /// - [`Off`](RoadNetworkMode::Off)：强制 `1`（2D 栅格）。**默认值**：协议文档的导航任务
 ///   示例就是 `1`，且 2D 栅格不依赖本体上真的建好路网，现场最稳；
-/// - [`Auto`](RoadNetworkMode::Auto)：航段全是「沿道路」且本体地图 `map_route_exist=true`
-///   时用 `3`，否则 `1`；
+/// - [`Auto`](RoadNetworkMode::Auto)：服务端判「这张图有路网」（下发 `mapType=3`）
+///   且本体地图 `map_route_exist=true` 时用 `3`，否则 `1`；
 /// - [`On`](RoadNetworkMode::On)：强制 `3`；本体没有 `map.geojson` 时会被固件拒，
 ///   只用于验证路网能力。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -540,7 +540,7 @@ pub fn print_help() {
   --min-recharge-battery <N> 巡检返充电量阈值 min_recharge_battery (默认: 25)
   --road-network <MODE>  5000 的 map_type/goal_type: off|auto|on
                          off(默认)=强制 1(2D 栅格)；on=强制 3(路网)；
-                         auto=航段全「沿道路」且本体地图有 map.geojson 时才用 3
+                         auto=服务端判这张图有路网（mapType=3）且本体地图有 map.geojson 时才用 3
                          （巡检 kind=4 时按巡检枚举换算：2D=0、路网=1）
   --model <型号>         设备型号：本体 1201 `type` 为空时用它（留空则不报）
   --heartbeat <秒>       心跳间隔 (默认: {DEFAULT_HEARTBEAT_SECS})

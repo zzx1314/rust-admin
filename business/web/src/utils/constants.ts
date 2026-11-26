@@ -227,8 +227,6 @@ export const RETIRED_ACTION_REPLACEMENTS: Record<string, string> = {
 };
 
 export const TRIGGERS = ["到达即执行", "停留后执行", "条件触发", "定时执行"];
-export const LEG_MODES = ["沿道路", "直线", "曲线平滑", "原地转向"];
-export const AVOID_LEVELS = ["宽松", "标准", "严格"];
 export const DEVICE_MODELS = ["X30-Pro", "Lite-S", "X30-Standard"];
 export const PARK_TYPES = ["生产制造", "仓储物流", "研发办公", "综合园区"];
 export const ZONE_TYPES = ["生产区", "仓储区", "周界", "办公区", "公共区", "地下", "作业区"];

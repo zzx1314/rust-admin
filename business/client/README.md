@@ -456,21 +456,21 @@ jq -c 'select(.dir=="recv" and .frame.head.type==4013)' /tmp/frames.jsonl
   客户端对此有兜底：只剩最后一个点没到且 150 s 内 `4021` 报了 ≥3 次规划类故障，就
   提前以一句可执行的原因结束任务（`src/zhpro/route.rs::final_point_stall_reason`），
   不再干等 `180 s/点` 的总超时。判据与平台侧校验见 `business/docs/waypoint-clearance.md`。
-- `avoidLevel`：10 关闭 / 20 仅急停 / 30 感知 / 40 全避障。任务级生效，
-  进入 STANDBY 后本体自动恢复 40。
-- `routeData.legs[].mode` / `map_type`：**默认一律下发 `1`（2D 栅格）**，与协议文档的
+- `avoidLevel`：10 关闭 / 20 仅急停 / 30 感知 / 40 全避障。**任务级**固定 `40`，
+  进入 STANDBY 后本体自动恢复 40。路线编辑器里的航段级「避障等级」从来没被读取过，
+  2026-11-26 已移除（连同从来不下发的「过渡方式」）。
+- `routeData.legs[]` / `map_type`：**默认一律下发 `1`（2D 栅格）**，与协议文档的
   导航任务示例完全一致；`goal_type` 与 `map_type` 相同（协议只允许 `1` 和 `3`，`2` 是 3D
-  预留、下发了会被拒，两者不一致导航不会启动）。客户端不信任服务端的 `mapType`，按
-  `--road-network` 策略自己定：
+  预留、下发了会被拒，两者不一致导航不会启动）。客户端按 `--road-network` 策略自己定：
   - `off`（默认）：恒 `1`；
-  - `auto`：航段写「沿道路」且本体地图 `4013 map_route_exist=true`（目录下有
-    `map.geojson`）时用 `3`；
+  - `auto`：服务端判这张图有路网（`mapType=3`）且本体地图 `4013 map_route_exist=true`
+    （目录下有 `map.geojson`）时用 `3`；
   - `on`：恒 `3`（验证本体路网能力用，本体没路网会被固件拒）。
 
   每次派发都会打一行判定原因：
 
   ```text
-  INFO 5000 地图类型 map_type/goal_type = 1（road_network 策略=off，航线全沿道路=true，本体 map.geojson=true）
+  INFO 5000 地图类型 map_type/goal_type = 1（road_network 策略=off，这张图有路网=true，本体 map.geojson=true）
   ```
 - `routeData.fencePath` / `payload.fencePath`：非空时作为 5000 `params.fence_path`
   下发；空串/空白不下发，避免固件把它当非法路径（现场会回“导航指令非法”）。

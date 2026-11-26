@@ -204,19 +204,12 @@ pub fn parse_flight_plan(payload: &Value, map_root: &str) -> Option<FlightPlan> 
         avoid_level,
         end_task: end_task.as_str().to_string(),
         end_task_explicit,
-        // 官方 App 的 cruise_mode 是整条任务级开关：只有所有航段都写
-        // “沿道路”才走路网；任意一段是直线/曲线平滑/原地转向就按自由导航，
-        // 避免混合路线被整体强推到路网。
-        road_network: route_data
-            .get("legs")
-            .and_then(Value::as_array)
-            .map(|legs| {
-                !legs.is_empty()
-                    && legs
-                        .iter()
-                        .all(|leg| leg.get("mode").and_then(Value::as_str) == Some("沿道路"))
-            })
-            .unwrap_or(false),
+        // 官方 App 的 cruise_mode 是整条任务级开关，判据是「这张图有没有路网」。
+        // 以前是从每条航段的「过渡方式（沿道路）」推，但那个字段没人下发、
+        // 默认配置（`--road-network off`）也完全不看它，2026-11-26 已连同
+        // 「避障等级」一起从路线编辑器移除。现在直接认服务端的地图类型
+        // （`mapType=3` = 地图包带 road_count，见 server 的 `DispatchMap`）。
+        road_network: binding.map_type == 3,
         fence_path: payload
             .get("fencePath")
             .and_then(Value::as_str)
@@ -311,6 +304,20 @@ mod tests {
         );
         // 闭环仅在航点数 > 2 时补回首点；本例 2 个点保持原样
         assert_eq!(plan.waypoints.len(), 2);
+    }
+
+    #[test]
+    fn road_network_follows_the_server_map_type() {
+        // 路网与否只看服务端下发的地图类型（按地图包 road_count 算）；
+        // 以前是从每条航段的「过渡方式」推，那个字段 2026-11-26 已从编辑器移除。
+        let mut value = payload();
+        value["map"]["mapType"] = json!(3);
+        let plan = parse_flight_plan(&value, "/m").expect("plan");
+        assert!(plan.road_network, "服务端说这张图有路网才走路网");
+
+        value["map"]["mapType"] = json!(1);
+        let plan = parse_flight_plan(&value, "/m").expect("plan");
+        assert!(!plan.road_network, "2D 栅格图不该被航段文字强行推成路网");
     }
 
     #[test]

@@ -30,9 +30,7 @@ const MapPolicyDialog = defineAsyncComponent(
 );
 import {
   ACTION_LIB,
-  AVOID_LEVELS,
   DEVICE_MODELS,
-  LEG_MODES,
   PHOTO_CAMERAS,
   PHOTO_MAX_FRAMES,
   RECORD_CAMERAS,
@@ -1029,9 +1027,7 @@ async function persist(silent = true) {
     if (!draft.value) return;
     if (draft.value.data.loop === "闭环" && !draft.value.data.returnLeg) {
       draft.value.data.returnLeg = {
-        mode: "沿道路",
         speed: draft.value.defaultSpeed,
-        avoid: "标准",
         actions: [{ type: "静默通行", param: "返航不采集" }]
       };
     }
@@ -1286,9 +1282,7 @@ async function saveBaseInfo() {
     draft.value.loopMode = routeForm.loopMode;
     if (routeForm.loopMode === "闭环" && !draft.value.data.returnLeg) {
       draft.value.data.returnLeg = {
-        mode: "沿道路",
         speed: draft.value.defaultSpeed,
-        avoid: "标准",
         actions: [{ type: "静默通行", param: "返航不采集" }]
       };
     }
@@ -2278,21 +2272,9 @@ onBeforeUnmount(() => {
                   <input class="input mono" :value="`${isReturnLeg ? legDistance(draft.data.points.length - 1) : legDistance(selIdx)} m`" readonly />
                 </div>
                 <div class="rt-field">
-                  <label>过渡方式</label>
-                  <select v-model="selectedLeg.mode" class="select">
-                    <option v-for="mode in LEG_MODES" :key="mode">{{ mode }}</option>
-                  </select>
-                </div>
-                <div class="rt-field">
                   <label>段内速度</label>
                   <input v-model.number="selectedLeg.speed" class="input" type="number" step="0.1" min="0.2" />
                   <span class="muted" style="font-size: 11px">m/s</span>
-                </div>
-                <div class="rt-field">
-                  <label>避障等级</label>
-                  <select v-model="selectedLeg.avoid" class="select">
-                    <option v-for="level in AVOID_LEVELS" :key="level">{{ level }}</option>
-                  </select>
                 </div>
 
                 <div class="rt-sec-title">

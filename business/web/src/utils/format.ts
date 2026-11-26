@@ -259,7 +259,7 @@ export function newRouteData(loop = "闭环"): RouteData {
     legs: [],
     returnLeg:
       loop === "闭环"
-        ? { mode: "沿道路", speed: 1.5, avoid: "标准", actions: [] }
+        ? { speed: 1.5, actions: [] }
         : null
   };
 }
@@ -286,9 +286,7 @@ export function newPoint(index: number, x: number, y: number): RoutePoint {
 
 export function newLeg(speed: number): RouteLeg {
   return {
-    mode: "沿道路",
     speed,
-    avoid: "标准",
     actions: [{ type: "录像采集", param: "1080P / 25fps / 连续" }]
   };
 }

@@ -599,7 +599,7 @@ fn empty_route_data(loop_mode: &str) -> Value {
         "points": [],
         "legs": [],
         "returnLeg": if loop_mode == "闭环" {
-            json!({"mode": "沿道路", "speed": 1.5, "avoid": "标准", "actions": []})
+            json!({"speed": 1.5, "actions": []})
         } else {
             Value::Null
         }

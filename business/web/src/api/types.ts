@@ -439,9 +439,7 @@ export interface RoutePoint {
 }
 
 export interface RouteLeg {
-  mode: string;
   speed: number;
-  avoid: string;
   actions: RoutePointAction[];
 }
 

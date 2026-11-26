@@ -513,17 +513,18 @@ pub(crate) async fn dispatch(
             // 用本体上报的真实目录路径（L2/M1 地图根不同，不能靠平台拼）
             plan.map_path = robot_map.path.clone();
 
-            // 对齐官方 cruise_mode：只有整条路线都走「沿道路」且本体地图
+            // 对齐官方 cruise_mode：服务端判这张图有路网（mapType=3）且本体地图
             // 有 map.geojson 时才用路网（map_type=3）；否则一律 2D 栅格（1）。
-            // 不能只看服务端 mapType：服务端可能按 road_count 给了 3，
-            // 但这条路线实际是自由导航。`--road-network on/off` 可强制。
+            // （以前还要求「航段全是沿道路」，那个字段已从路线编辑器移除，
+            // 见 dispatch.rs::parse_flight_plan 的 road_network。）
+            // `--road-network on/off` 可强制。
             let target_map_type = config
                 .road_network
                 .map_type(plan.road_network, robot_map.route_exist);
             info!(
                 "地图类型：本体能力 map_type={target_map_type}（导航枚举 1/3）→ 巡检 \
                          5000 kind=4 会发 {}（0=2D 栅格 / 1=路网）（road_network 策略={}，\
-                         航线全沿道路={}，本体 map.geojson={}）",
+                         这张图有路网={}，本体 map.geojson={}）",
                 if target_map_type == 3 { 1 } else { 0 },
                 config.road_network.as_str(),
                 plan.road_network,

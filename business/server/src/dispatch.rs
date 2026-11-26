@@ -184,6 +184,8 @@ pub async fn build_dispatch_payload(
         description: task.description.clone(),
         map,
         speed_limit: default_speed,
+        // 避障等级是**任务级**固定 40（全避障）：路线编辑器里的航段级「避障等级」
+        // 从来没被读取过（客户端只认这个 `avoidLevel`），2026-11-26 已移除。
         avoid_level: Some(40),
         end_task: Some(end_task.to_string()),
         // 仅显式配置才带：客户端用它覆盖「闭环路线自动返航」的兜底

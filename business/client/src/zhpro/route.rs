@@ -177,7 +177,8 @@ pub struct FlightPlan {
     /// 「显式原地」，而这两种在 [`patrol_end_task`] 里的结果完全不同（闭环兜底 vs 0）。
     #[serde(default)]
     pub end_task_explicit: bool,
-    /// 航段是否为「沿道路」：决定 5000 用 2D 栅格还是路网地图
+    /// 这张图是否走路网（决定 5000 用 2D 栅格还是路网地图）：
+    /// 来自服务端下发的地图类型（`mapType=3`），不再看航段的过渡方式
     #[serde(default)]
     pub road_network: bool,
     /// 电子围栏文件路径；空表示不带围栏
