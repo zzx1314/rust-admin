@@ -425,6 +425,41 @@ systemctl is-active alarmlight; pgrep -af 'test_rgbrun|alarmlight'              
 日志可验：`journalctl -u backpack-agent | grep 'gop'` → `fps [15:1:fix] … gop 15`；
 中继进程 `pgrep -af dogcam720` → `-g 15`；K 帧间隔见 §4.6 开头那条 `ffmpeg -skip_frame nokey`。
 
+## 4.7 2026-11-26 晚：空壳 mp4（一帧都没录到）不再当录像回传
+
+**起因**：现场反馈「航点 1 配了狗头 + 左前录像 5s，狗头只有 3s，另一路干脆没有」。
+翻 `TK-1126-20`（17:44:56 起录，路线里那条动作实际配的是 `dogcam` + `cam1`（右前）5s）：
+
+| 相机 | 文件 | 大小 | 边车 `durationSec` |
+| --- | --- | --- | --- |
+| dogcam | `pt0-dogcam-20261126-174456.mp4` | 804 KB | 3.1s（= 5s 减去等 relay 2s 关键帧） |
+| cam1 | `pt0-cam1-20261126-174456.mp4` | **293 B** | 5.3s（**墙钟**，不是画面） |
+
+293 B 那个只有 `ftyp` + 空 `moov`（一帧都没有）：当时 `stream.py` 还没 `-g`（keyint 250 →
+16.7s 一个关键帧），5s 窗口里等不到 I 帧。真因已在 §4.6 修掉，但**空壳本身被当成
+正常录像**这件事是个独立缺陷——`_finalize` 读不到 `mvhd` 就退回墙钟时长，回传到平台
+就是一段「进度条 5.3s 但打不开」的假视频，还会把真凶掩掉。
+
+| 对象 | 改成什么 | 备份 |
+| --- | --- | --- |
+| `backend/record.py` | 新增 `_is_empty_capture()`（体积 `< 4KB` **且** 读不出 `mvhd`）+ `_MIN_PLAYABLE_BYTES`；`_finalize` 把空壳删掉、不写边车、不进 `list`，日志写「窗口内没有关键帧」；`stop` 回执多一个 `discarded:[{camera,name,size,windowSec}]` | `record.py.bak-20261126-195310` |
+| `backend/tools/record_selftest.py` | 假 ffmpeg 改成写带 `mvhd` 的真 mp4（同时钉住「小体积但有 `mvhd` 不许误删」），新增「空壳 mp4」4 条 | `tools/record_selftest.py.bak-20261126-195310` |
+| `robodog-device-client` | `stop` 回执里的 `discarded` 写一行 warn（哪一路没画面、为什么） | `robodog-device-client.bak-20261126-1954xx`（`md5 b658a487…`，GLIBC_2.34） |
+
+实测（2026-11-26 19:54，板端当前代码）：
+
+```
+# 现场那三个文件直接用新口径判
+现场空壳(293B)      size=293     mvhd=None  empty=True     ← 会被丢掉
+现场正常(804KB/3.1s) size=804416  mvhd=3.134 empty=False
+现场航段(8MB)       size=8184115  mvhd=32.734 empty=False
+# 同一时刻起录、配 5s：dogcam 5.0s / cam0 4.4s，stop 回执 discarded=[]
+```
+
+回归：`python3 backend/tools/record_selftest.py`（板端 ok，只有「造不出空 edit」那条 skip）、
+`cargo test record::`。回滚：把上表两个 `.bak` 拷回去 + `systemctl restart backpack-agent`
+（客户端回滚后 `discarded` 只烂在回执里，不影响任何行为）。
+
 ## 5. 备份文件现状与清理建议
 
 | 位置 | 数量 / 体积 | 说明 |
