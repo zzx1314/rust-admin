@@ -168,10 +168,15 @@ rsync -av business/backpack_dashboard/rknn/ root@192.168.41.246:/opt/xjpt/backpa
   （起步开、到下一个航点停，`-f segment` 按 `segmentSeconds` 切；`pointIndex` 是
   **起点航点下标**）、`task` = 旧版「全程录像」（整条任务一条流，只为兼容老客户端保留）。
   `stop` 带 `scope` / `pointIndex` 时只停那一段，不带就停该计划全部。
-- **文件名 + 边车**：`RECORD_DIR/<planId>/<pt<n>|leg<n>|task>-<相机>-<时间戳>.mp4`，停下时
+- **文件名 + 边车**：`RECORD_DIR/<planId>/<pt<n>|leg<n>|task>-<相机>-<时间戳>[-<片段>].mp4`，停下时
   写同名 `.json`（planId / scope / pointIndex / pointName / camera / 起止时间 / 时长）。客户端按
   边车拼回传元数据（含 `camera`），传成功才调 `/api/record/delete` 删文件。
   老文件（没有相机段的文件名 / 边车没 `camera`）回执里按 `RECORD_SOURCE_CAM` 兑底。
+- ⚠️ **切片模板必须带 `%03d`**（`leg0-cam1-20261126-110421-000.mp4`…）：只靠开始时间戳
+  时 segment 每片都写同一个文件、后一片把前一片**覆盖**掉（2026-11-26 现场：航段
+  8 分钟只剩最后几秒）。也**别再加 `-strftime 1`**：时间戳已经在模板里，它还会把
+  `%03d` 当日期格式吃掉（glibc 给 `026`）。边车里的 `durationSec` 取 ffmpeg
+  `-segment_list` 的 csv（**这一片**的真实时长），不是整个 job 的时长。
 - **`list` 不返回正在录的文件**：客户端可能传半截 mp4；`stop` 会等 ffmpeg 写完
   边车再返回（`job.finished`），所以「停 → list」是安全的。
 - **`delete` 只认 `<planId>/<文件名>.mp4`**：路径穿越、`..`、非 mp4 一律拒绝。

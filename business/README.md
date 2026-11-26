@@ -768,7 +768,7 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
   → 设备客户端在 5009 状态机上起停（`client/src/record.rs`）
     → 板端 Agent POST /api/record/start|stop（`backpack_dashboard/backend/record.py`）
       → 每选一路一个 ffmpeg，从本机 mediamtx 对应流拉流（-c copy，不重编码）
-        → RECORD_DIR/<计划>/<pt?-相机-时间戳>.mp4（文件名带相机名）
+        → RECORD_DIR/<计划>/<pt<n>|leg<n>|task>-相机-时间戳[-片段].mp4（文件名带相机名）
         （**就攒在这里，任务终态 / 客户端启动都不自动回传**）
         → 平台下发指令「回传录像」：GET /api/record/list → POST /api/recordings/ingest（multipart）
           → 平台落盘 <recording_dir>/<设备>/<任务号>/…mp4 + 一条 task_recordings（带 camera）
@@ -791,6 +791,12 @@ axios 还有 120s 硬超时，现场表现就是「点回放没反应」（2026-
   它要等**起步（离开起点航点）**才开，到**下一个航点**停（这一段走完），终态 / 取消兜底。
   `pending_task`（已受理、等上一条任务停稳）不算起步，那时起录只会录到静止画面。
   回归：`client pump::tests::leg_recording_starts_on_departure_and_stops_at_the_next_point`。
+- **航段切片每片一个文件**：`-f segment` 的模板必须带片段序号（`leg0-cam1-<时间戳>-000.mp4`
+  / `-001.mp4`…）。只用开始时间戳命名时每片都写同一个文件、**后一片覆盖前一片**，
+  一段 8 分钟的航段最后只剩最后几秒（2026-11-26 现场 `leg0-cam1-20261126-110421.mp4`）。
+  边车写的是**这一片**的时长（ffmpeg `-segment_list` 的 csv 给出，`-segment_time` 是按
+  关键帧就近切），不是整个航段的时长——否则「任务录像」里每片都显示成 8 分钟。
+  回归：`python3 business/backpack_dashboard/backend/tools/record_selftest.py`（含真 ffmpeg 切片）。
 - **每一段各录一份**：`legs[i]` 从 P{i+1} 出发、`returnLeg` 从最后一个点出发，
   切片长度与相机各取各的（`client/src/record.rs::RecordPlan.legs`）；同一个点既有
   出发段又有返航段时出发段优先（客户端日志会说明另一条被忽略）。

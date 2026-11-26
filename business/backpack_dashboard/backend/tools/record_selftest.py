@@ -10,6 +10,7 @@
 （边车、清单、删除、越界校验、清盘）全部走真实实现。
 """
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -22,10 +23,12 @@ import record  # noqa: E402
 
 PROCS = []
 ARGS = []
+# 假 ffmpeg 一次写几片（多片用例临时改成 3）：真 ffmpeg 是按 `-segment_time` 自己切的
+SEGMENTS = 1
 
 
 class FakeProc:
-    """假 ffmpeg：起手写一个 mp4，`wait()` 一直挂到收到停止信号。"""
+    """假 ffmpeg：起手写 mp4（切片范围按 `%03d` 写多片 + 清单），`wait()` 挂到收到停止信号。"""
 
     def __init__(self, args, **_kwargs):
         self.pid = 424242
@@ -34,12 +37,20 @@ class FakeProc:
         ARGS.append(list(args))
         self._code = None
         template = args[-1]
-        path = time.strftime(template, time.localtime())
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as handle:
-            handle.write(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 256)
-        self.path = path
-        PROCS.append(path)
+        count = SEGMENTS if "%03d" in template else 1
+        names = [template.replace("%03d", "%03d" % index) for index in range(count)]
+        lines = []
+        os.makedirs(os.path.dirname(names[0]), exist_ok=True)
+        for index, path in enumerate(names):
+            with open(path, "wb") as handle:
+                handle.write(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 256)
+            PROCS.append(path)
+            # 真 ffmpeg 的 `-segment_list csv` 就是「文件名,起点,终点」
+            lines.append("%s,%d,%d" % (os.path.basename(path), index * 4, (index + 1) * 4))
+        self.path = names[0]
+        if "-segment_list" in args:
+            with open(args[args.index("-segment_list") + 1], "w", encoding="utf-8") as handle:
+                handle.write("\n".join(lines) + "\n")
 
     def poll(self):
         return self._code
@@ -71,6 +82,7 @@ def main():
     config.RECORD_MIN_FREE_MB = 0
     import subprocess
 
+    real_popen = subprocess.Popen
     subprocess.Popen = FakeProc
 
     failures = 0
@@ -146,6 +158,33 @@ def main():
         failures += not check("清单带起点下标", items[0]["pointIndex"] == 2, items)
         failures += not check("清单带航段名", items[0]["pointName"] == "航段 3→4", items)
     record.stop({"planId": "TK-LEG", "reason": "任务终态"})
+
+    # 2.0.1) 航段切片：每片一个文件 + 每片自己的时长（2026-11-26 现场 bug）
+    #       以前模板只有开始时间戳、没有片段序号，segment 每片都写同一个文件、
+    #       后一片覆盖前一片，一段 8 分钟的航段最后只剩最后几秒。
+    ARGS.clear()
+    global SEGMENTS
+    SEGMENTS = 3
+    r = record.start({"planId": "TK-SEG", "scope": "leg", "pointIndex": 0,
+                      "pointName": "航段 1→2", "segmentSeconds": 60})
+    failures += not check("切片用例 start ok", r.get("ok") and r.get("created"), r)
+    args = ARGS[-1] if ARGS else []
+    failures += not check("切片模板带片段序号 %03d", args[-1].endswith("-%03d.mp4"), args[-1])
+    failures += not check("切片不再用 -strftime（会把 %03d 当日期吃掉）",
+                          "-strftime" not in args, args)
+    failures += not check("切片带 segment_list（每片真实时长）",
+                          "-segment_list" in args, args)
+    list_path = args[args.index("-segment_list") + 1] if "-segment_list" in args else ""
+    record.stop({"planId": "TK-SEG", "scope": "leg", "pointIndex": 0,
+                 "reason": "到达下一个航点"})
+    items = record.list_files("TK-SEG")
+    failures += not check("切 3 片就有 3 个片段（不互相覆盖）", len(items) == 3, items)
+    failures += not check("每片都带自己的时长（不是整段航段）",
+                          sorted(item["durationSec"] for item in items) == [4.0, 4.0, 4.0],
+                          [item["durationSec"] for item in items])
+    failures += not check("切片清单用完就删", not list_path or not os.path.exists(list_path),
+                          list_path)
+    SEGMENTS = 1
 
     # 2.1) 同一计划同时有全程（老 scope=task）+ 航点两路：各自只认自己的文件（前缀 + 相机）
     record.start({"planId": "TK-3", "scope": "task", "segmentSeconds": 60})
@@ -266,8 +305,71 @@ def main():
         failures += not check("超期清盘删了 1 段", removed == 1, removed)
         failures += not check("清完清单为空", record.list_files("TK-2") == [])
 
+    # 6) 真 ffmpeg 跑一遍切片（本机没装 ffmpeg / ffprobe 就跳过）：
+    #    上面把 Popen 换成了假进程，这里先换回来
+    subprocess.Popen = real_popen
+    failures += real_segment_naming(tmp)
+
     print("record selftest: %s" % ("FAILED" if failures else "ok"))
     return 1 if failures else 0
+
+
+def real_segment_naming(tmp):
+    """用真 ffmpeg 验「切 3 片必须落 3 个文件」。
+
+    假进程只能证明「参数里写了 `%03d`」，证明不了 ffmpeg 真的按它分文件；
+    而这个 bug 就是「模板没序号 → 后一片覆盖前一片」，只有真 ffmpeg 能坐实。
+    输入换成 lavfi 假相机（本机不需要 mediamtx / 板子），输出侧参数全部取
+    `record._ffmpeg_cmd()` 生成的那一份。
+    """
+    import subprocess
+
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if not (ffmpeg and ffprobe):
+        print("  skip 真 ffmpeg 切片（本机没有 ffmpeg/ffprobe）")
+        return 0
+    folder = os.path.join(tmp, "real")
+    os.makedirs(folder, exist_ok=True)
+    template = os.path.join(folder, "leg0-cam1-20260101-000000-%03d.mp4")
+    list_path = os.path.join(folder, "leg0-cam1-20260101-000000.csv")
+    args = record._ffmpeg_cmd(template, "leg", 9, 3,
+                              "rtsp://127.0.0.1:8554/cam1", list_path)
+    # 输出侧参数（`-t` 之后：编码 + 切片命名 + 清单 + faststart）原样复用
+    tail = args[args.index("-t"):]
+    copy_at = tail.index("-c") if "-c" in tail else -1
+    if copy_at >= 0:
+        # `-c copy` 对 lavfi 不适用：换成 x264（不影响切片命名相关参数）
+        tail[copy_at:copy_at + 2] = ["-c:v", "libx264", "-preset", "ultrafast",
+                                     "-pix_fmt", "yuv420p", "-g", "15"]
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+           "-i", "testsrc2=size=320x180:rate=15"] + tail
+    failures = 0
+    try:
+        subprocess.run(cmd, check=True, timeout=180,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    except (subprocess.SubprocessError, OSError) as error:
+        print("  FAIL 真 ffmpeg 切片跑不起来 %s" % error)
+        return 1
+    names = sorted(name for name in os.listdir(folder) if name.endswith(".mp4"))
+    failures += not check("真 ffmpeg：切 3 片落 3 个文件（不互相覆盖）",
+                          len(names) == 3, names)
+    durations = []
+    for name in names:
+        probe = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", os.path.join(folder, name)],
+            capture_output=True, text=True)
+        try:
+            durations.append(float(probe.stdout.strip()))
+        except ValueError:
+            durations.append(0.0)
+    failures += not check("真 ffmpeg：3 片加起来是整段（没有被覆盖掉的部分）",
+                          sum(durations) > 8.0, durations)
+    listed = record._segment_durations(list_path)
+    failures += not check("切片清单能读出每片时长",
+                          len(listed) == len(names), (listed, names))
+    return failures
 
 
 if __name__ == "__main__":

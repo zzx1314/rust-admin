@@ -24,13 +24,19 @@
   任何一路起不来只丢那一路，其余照录。
 - **编码**：`-c copy` 直接封装 H264（源已经是 H264），不重编码 —— RK3576 上多一路
   编码会跟实时流抢 MPP；只有确实没有关键帧时才由 `RECORD_TRANSCODE=1` 兜底。
-- **落盘**：`RECORD_DIR/<planId>/<kind>-<相机>-<时间戳>.mp4` + 同名 `.json` 边车
+- **落盘**：`RECORD_DIR/<planId>/<kind>-<相机>-<时间戳>-<片段>.mp4` + 同名 `.json` 边车
   （planId / 航点 / 范围 / 相机 / 起止时间 / 时长）。客户端传完调 `/api/record/delete` 删。
   断电/断网没传走的由 `sweep()` 按 `RECORD_RETENTION_HOURS` 清掉，不会写满 SSD。
 
 为什么要切片：一段路 / 一趟任务可能几十分钟，4G 上一次传几百 MB 必然断。`scope=leg`
 （以及兼容保留的老 `scope=task`）用 ffmpeg 的 segment 每 `RECORD_SEGMENT_SECS`
 （默认 300s，路线动作可配）切一段，客户端逐段落盘后一段一段传；任何一段失败只影响那一段。
+
+⚠️ **切片文件名必须带 `-%03d`**（`leg0-cam1-20261126-110421-000.mp4`、`-001.mp4`…）：
+只用开始时间戳命名时，每一片都写同一个文件、后一片把前一片**覆盖**掉，一段 8 分钟的
+航段最后只剩最后一片（现场表现：「航段录像只有最后几秒」）。同时 `-segment_list` 的 csv
+给出每片的真实时长（`-segment_time` 是按关键帧就近切），边车写的是**这一片**的时长，
+不是整个 job 的——否则平台「任务录像」里每一片都显示成整段航段。
 """
 import json
 import os
@@ -182,7 +188,8 @@ def _disk_free_mb():
             return -1
 
 
-def _ffmpeg_cmd(path_template, scope, seconds, segment_seconds, source):
+def _ffmpeg_cmd(path_template, scope, seconds, segment_seconds, source,
+                segment_list=None):
     """构造一路 ffmpeg 命令。
 
     - `scope=point`：`-t seconds` 自动停，一个 mp4；
@@ -190,6 +197,10 @@ def _ffmpeg_cmd(path_template, scope, seconds, segment_seconds, source):
       `recordSegmentSeconds`，缺省 `RECORD_SEGMENT_SECS`），总时长上限
       `RECORD_TASK_MAX_SECS`（客户端一定会发 stop，这里只是防跑飞）。
       `leg` = 一段路（起步 → 下一个航点），`task` = 旧版「整条任务一条流」。
+
+    ⚠️ `path_template` 里必须带 `-%03d`（片段序号）：只靠开始时间戳时每一片都写同一个
+    文件，segment 复用器会**覆盖**上一条，一段 8 分钟的航段最后只剩最后一片
+    （2026-11-26 `leg0-cam1-20261126-110421.mp4` 现场）。
     """
     cmd = [
         _ffmpeg_bin(), "-hide_banner", "-loglevel", "warning", "-nostdin",
@@ -211,8 +222,14 @@ def _ffmpeg_cmd(path_template, scope, seconds, segment_seconds, source):
             "-segment_format", "mp4",
             # 片段也要 faststart：客户端上传后浏览器边下边播
             "-segment_format_options", "movflags=+faststart",
-            "-strftime", "1",
+            # ⚠️ 别再加 `-strftime 1`：时间戳（`<kind>-<cam>-<开始时间>`）已经在模板里，
+            # 它还会把 `%03d` 当日期格式吃掉（glibc 给 "026"），于是每片写同一个文件、
+            # 后一片覆盖前一片。片段序号只交给 segment 复用器的 `%03d`。
         ]
+        if segment_list:
+            # 每片的真实时长只有 ffmpeg 知道（`-segment_time` 是「按关键帧就近切」）：
+            # 写进边车，平台「任务录像」才不会每片都显示成整段航段的时长。
+            cmd += ["-segment_list", segment_list, "-segment_list_type", "csv"]
     else:
         cmd += ["-movflags", "+faststart"]
     cmd += ["-y", path_template]
@@ -221,7 +238,7 @@ def _ffmpeg_cmd(path_template, scope, seconds, segment_seconds, source):
 
 class _Job:
     def __init__(self, key, plan_id, scope, point_index, point_name, camera,
-                 path_template, prefix, before, started_at, cmd):
+                 path_template, prefix, before, started_at, cmd, segment_list=None):
         self.key = key
         self.plan_id = plan_id
         self.scope = scope
@@ -233,8 +250,11 @@ class _Job:
         # 只按「开始后新出现的文件」认会互相抢对方的片段
         self.prefix = prefix
         # 开始前目录里已有的文件名：收尾时用「差集」认自己写出来的（segment 会生成多个，
-        # 文件名带的是各段自己的时间戳，靠前缀认会把上一轮没传走的录像一起吞进来）
+        # 文件名带的是 start 时的时间戳 + 片段序号，靠前缀认会把上一轮没传走的录像一起吞进来）
         self.before = set(before)
+        # segment 复用器写的切片清单（`<kind>-<cam>-<时间戳>.csv`）：
+        # 每片的真实时长从这里取，写完就删（`_finalize`）
+        self.segment_list = segment_list
         self.started_at = started_at
         self.started_ts = time.time()
         self.cmd = cmd
@@ -290,6 +310,37 @@ def _files_of(job):
     return found
 
 
+def _segment_durations(list_path):
+    """读 `-segment_list csv`（`文件名,起点秒,终点秒`）→ `{basename: 时长}`。
+
+    一个 job 会切好几片（`recordSegmentSeconds`，默认 300s），每片的真实时长只有
+    ffmpeg 知道：`-segment_time` 是「按关键帧就近切」，不是精确的 300s。
+    边车里写整个 job 的时长会让平台「任务录像」里每一片都显示成整段航段
+    （2026-11-26：航段只剩最后一片 + 每片时长都不对，一并修）。
+
+    读不到（老 ffmpeg / 清单被清掉 / 还没写）就返回空，调用方退回 job 时长。
+    """
+    if not list_path:
+        return {}
+    durations = {}
+    try:
+        with open(list_path, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                parts = [item.strip() for item in line.strip().split(",")]
+                if len(parts) < 3:
+                    continue
+                try:
+                    start = float(parts[1])
+                    end = float(parts[2])
+                except ValueError:
+                    continue
+                if end > start:
+                    durations[os.path.basename(parts[0])] = end - start
+    except OSError:
+        return {}
+    return durations
+
+
 def _finalize(job, reason):
     """ffmpeg 退出后写边车：客户端按边车里的元数据回传，不用再猜文件名。"""
     with _LOCK:
@@ -299,7 +350,15 @@ def _finalize(job, reason):
         job.files = _files_of(job)
         _FINALIZING.update(os.path.basename(path) for path in job.files)
     duration = max(0.0, job.stopped_at - job.started_ts)
+    segments = _segment_durations(job.segment_list)
+    if job.segment_list:
+        # 切片清单只是中间产物：内容已经落到每片边车，留着只会让回传目录变脏
+        try:
+            os.remove(job.segment_list)
+        except OSError:
+            pass
     for path in job.files:
+        name = os.path.basename(path)
         meta = {
             "planId": job.plan_id,
             "scope": job.scope,
@@ -308,7 +367,8 @@ def _finalize(job, reason):
             "camera": job.camera,
             "startedAt": _fmt(job.started_at),
             "endedAt": _fmt(job.stopped_at),
-            "durationSec": round(duration, 1),
+            # 有切片清单就写这一片自己的时长，没有（航点录像 / 老 ffmpeg）才用 job 时长
+            "durationSec": round(segments.get(name, duration), 1),
             "size": os.path.getsize(path) if os.path.exists(path) else 0,
             "recordedOn": "backpack",
             "reason": reason,
@@ -427,15 +487,28 @@ def start(body):
                 jobs.append(existing.status())
                 continue
 
-            template = os.path.join(out_dir, "%s-%s-%s.mp4" % (kind, cam, stamp))
+            base = "%s-%s-%s" % (kind, cam, stamp)
             suffix = 0
-            while os.path.exists(template) and suffix < 50:
+            # 撞名（同一秒里两次 start / 上一轮没删干净）：只往后加号，不要动前缀，
+            # `_files_of` 是按 `<kind>-<cam>-` 前缀认文件的
+            while any(name.startswith(base + "-") or name.startswith(base + ".")
+                      for name in os.listdir(out_dir)) and suffix < 50:
                 suffix += 1
-                template = os.path.join(
-                    out_dir, "%s-%s-%s-%d.mp4" % (kind, cam, stamp, suffix))
-            cmd = _ffmpeg_cmd(template, scope, seconds, segment_seconds, source)
+                base = "%s-%s-%s-%d" % (kind, cam, stamp, suffix)
+            # ⚠️ 片段序号 `%03d` 必须留着（只给 leg / task：航点录像是单文件）：
+            # 没有它时 segment 每一片都写同一个文件，后一片把前一片覆盖掉
+            # （2026-11-26 现场「航段录了 8 分钟只剩最后几秒」）
+            template = os.path.join(
+                out_dir, base + ("-%03d.mp4" if scope in ("leg", "task") else ".mp4"))
+            segment_list = (
+                os.path.join(out_dir, base + ".csv")
+                if scope in ("leg", "task") else None
+            )
+            cmd = _ffmpeg_cmd(template, scope, seconds, segment_seconds, source,
+                              segment_list)
             job = _Job(key, plan_id, scope, point_index, point_name, cam,
-                       template, "%s-%s-" % (kind, cam), before, time.time(), cmd)
+                       template, "%s-%s-" % (kind, cam), before, time.time(), cmd,
+                       segment_list)
             try:
                 log = open(config.RECORD_LOG, "ab")
             except OSError:
@@ -463,6 +536,12 @@ def start(body):
                 errors.append(
                     "%s: ffmpeg 启动后立即退出（相机没在推流？见 %s）"
                     % (cam, config.RECORD_LOG))
+                # 这一路没录成：segment 可能已经开始写清单了，顺手清掉
+                if segment_list:
+                    try:
+                        os.remove(segment_list)
+                    except OSError:
+                        pass
                 continue
             _JOBS[key] = job
             threading.Thread(target=_watch, args=(job,), daemon=True).start()
@@ -721,9 +800,20 @@ def sweep():
         if not os.path.isdir(folder):
             continue
         for name in os.listdir(folder):
-            if not name.endswith(".mp4") or name in busy:
+            if name in busy:
                 continue
             path = os.path.join(folder, name)
+            if name.endswith(".csv"):
+                # 切片清单的残留（Agent 在录像中途被杀时不会走到 `_finalize`）：
+                # 只需按 mtime 清，不是回传产物
+                try:
+                    if os.path.getmtime(path) < cutoff:
+                        os.remove(path)
+                except OSError:
+                    pass
+                continue
+            if not name.endswith(".mp4"):
+                continue
             try:
                 if os.path.getmtime(path) >= cutoff:
                     continue

@@ -218,8 +218,10 @@ mediamtx 被反压且实测码率明显低于目标档位就就地换 `640x360@1
 **5009 幂等**（每帧都会调用，按「任务+航点 / 任务+航段起点」去重，Agent 侧也幂等）；
 **视频不进中台「媒体资源」**（那边是训练图：JPG/PNG、sha256 去重、批量导出）。
 板端 `scope` = `point`（航点）/ `leg`（航段，`pointIndex` = **起点航点下标**）/
-`task`（旧版「全程录像」，只为兼容老客户端）；文件名 `pt<n>-…` / `leg<n>-…` / `task-…`。
-改板端先读 `business/backpack_dashboard/AGENTS.md`「录像」一节，回归
+`task`（旧版「全程录像」，只为兼容老客户端）；文件名 `pt<n>-…` / `leg<n>-…` / `task-…`
+（航段 / 全程**切片带片段序号** `…-<时间戳>-000.mp4`：模板里没有 `%03d` 时每片都写同一个
+文件、后一片覆盖前一片，8 分钟的航段只剩最后几秒（2026-11-26 现场）；也别加
+`-strftime`，它会把 `%03d` 当日期吃掉）。改板端先读 `business/backpack_dashboard/AGENTS.md`「录像」一节，回归
 `python3 business/backpack_dashboard/backend/tools/record_selftest.py`、
 `client record::tests`、`cargo test --test recordings`。
 
