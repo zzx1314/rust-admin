@@ -68,21 +68,8 @@ pub struct Waypoint {
     /// 本体协议没有云台/PTZ 指令，这里转的是整只狗（roll/pitch 恒 0）。
     #[serde(default)]
     pub heading: f64,
-    /// 到点容差（米）
-    #[serde(default = "default_radius")]
-    pub radius: f64,
-    /// 必经点：失败时不跳过
-    #[serde(default)]
-    pub must: bool,
-    /// 失败策略：跳过继续 / 重试 N 次 / 终止任务
-    #[serde(default)]
-    pub on_fail: String,
     #[serde(default)]
     pub actions: Vec<WaypointAction>,
-}
-
-fn default_radius() -> f64 {
-    0.3
 }
 
 impl Waypoint {
@@ -181,9 +168,6 @@ pub struct FlightPlan {
     /// 避障等级 10/20/30/40
     #[serde(default = "default_avoid")]
     pub avoid_level: u32,
-    /// 到点容差
-    #[serde(default = "default_tolerance")]
-    pub goal_tolerance: f64,
     /// 结束后动作
     #[serde(default)]
     pub end_task: String,
@@ -217,9 +201,6 @@ fn default_speed() -> f64 {
 }
 fn default_avoid() -> u32 {
     40
-}
-fn default_tolerance() -> f64 {
-    0.25
 }
 
 impl FlightPlan {
@@ -1254,9 +1235,6 @@ mod tests {
             y: 0.0,
             dwell: 0,
             heading: 90.0,
-            radius: 0.3,
-            must: true,
-            on_fail: "重试 2 次".to_string(),
             actions: vec![],
         }
     }
@@ -1272,7 +1250,6 @@ mod tests {
             loop_mode: loop_mode.to_string(),
             speed_limit: 1.2,
             avoid_level: 40,
-            goal_tolerance: 0.25,
             end_task: "返回充电".to_string(),
             end_task_explicit: false,
             road_network: false,

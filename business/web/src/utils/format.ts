@@ -270,8 +270,6 @@ export function newPoint(index: number, x: number, y: number): RoutePoint {
     x,
     y,
     dwell: 5,
-    radius: 0.4,
-    must: false,
     // 到点机身偏航角（度）：0° = 地图 +X；下发成本体路径点 orientation 的 yaw
     heading: 0,
     actions: [

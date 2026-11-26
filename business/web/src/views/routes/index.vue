@@ -2187,11 +2187,6 @@ onBeforeUnmount(() => {
                   </span>
                 </div>
                 <div class="rt-field">
-                  <label>到达半径</label>
-                  <input v-model.number="selectedPoint.radius" class="input" type="number" step="0.1" min="0.1" />
-                  <span class="muted" style="font-size: 11px">m</span>
-                </div>
-                <div class="rt-field">
                   <label>停留时长</label>
                   <input
                     v-model.number="selectedPoint.dwell"
@@ -2214,10 +2209,6 @@ onBeforeUnmount(() => {
                     title="到点后机身转头对准的偏航角（度），0° = 地图 +X 方向；下发为本体路径点的 orientation 四元数"
                   />
                   <span class="muted" style="font-size: 11px">° 到点转头</span>
-                </div>
-                <div class="rt-field">
-                  <label>必经点</label>
-                  <label class="chk"><input v-model="selectedPoint.must" type="checkbox" /> 不可跳过</label>
                 </div>
 
                 <div class="rt-sec-title">

@@ -427,8 +427,6 @@ export interface RoutePoint {
   x: number;
   y: number;
   dwell: number;
-  radius: number;
-  must: boolean;
   /**
    * 到点后机身转过头对准的偏航角（度），0° = 地图 +X 方向。
    *

@@ -156,13 +156,6 @@ pub fn parse_flight_plan(payload: &Value, map_root: &str) -> Option<FlightPlan> 
                 y,
                 dwell: point.get("dwell").and_then(Value::as_i64).unwrap_or(0),
                 heading: point.get("heading").and_then(Value::as_f64).unwrap_or(0.0),
-                radius: point.get("radius").and_then(Value::as_f64).unwrap_or(0.3),
-                must: point.get("must").and_then(Value::as_bool).unwrap_or(true),
-                on_fail: point
-                    .get("onFail")
-                    .and_then(Value::as_str)
-                    .unwrap_or("重试 2 次")
-                    .to_string(),
                 actions,
             })
         })
@@ -209,7 +202,6 @@ pub fn parse_flight_plan(payload: &Value, map_root: &str) -> Option<FlightPlan> 
         loop_mode,
         speed_limit: speed,
         avoid_level,
-        goal_tolerance: 0.25,
         end_task: end_task.as_str().to_string(),
         end_task_explicit,
         // 官方 App 的 cruise_mode 是整条任务级开关：只有所有航段都写

@@ -258,9 +258,6 @@ pub async fn validate_route(
                 .is_none_or(|actions| actions.is_empty())
         })
         .count();
-    let has_must = points
-        .iter()
-        .any(|point| point.get("must").and_then(Value::as_bool).unwrap_or(false));
     let has_return = data
         .get("returnLeg")
         .map(|value| !value.is_null())
@@ -341,15 +338,6 @@ pub async fn validate_route(
                 "所有航段均配置了持续任务".to_string()
             } else {
                 format!("{silent_legs} 段为静默通行（已确认）")
-            },
-        ),
-        validation_item(
-            has_must,
-            "必经点设置".to_string(),
-            if has_must {
-                "已设置必经点，不可跳过".to_string()
-            } else {
-                "建议至少设置 1 个必经点".to_string()
             },
         ),
         validation_item(
