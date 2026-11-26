@@ -398,6 +398,33 @@ systemctl is-active alarmlight; pgrep -af 'test_rgbrun|alarmlight'              
 升级后第一次开关灯时，Agent 会自动 `pkill -f /opt/xjpt/led/test_rgbrun` 清掉
 老版本留下的孤儿进程（只按完整路径匹配）；现场也可手动清。
 
+## 4.6 2026-11-26 晚：四路推流加关键帧间隔（1s），修「前置与左前/右前录像差 10s」
+
+**起因**：现场反馈航点 / 航段录像里「前置摄像头与背包左前、右前的内容差 ~10s」。
+根因不在起录时序（四路是同一时刻 `Popen` 的）：录像走 `-c copy`，ffmpeg 默认丢掉
+首个关键帧之前的包，所以每个 mp4 都从**那一路自己的下一帧关键帧**开始写；而
+`stream.py` 的四路推流**从来没设过 `-g`**，走编码器默认 keyint 250 → 15fps 下
+**16.66s** 一个关键帧（改前实测：cam1 的 K 帧在 5.08s / 21.75s / 38.42s），
+`dogcam` 那边 relay 是 1s 一个 → 两路内容起点差 8~13s，`-t seconds` 的窗口还被吃掉一截。
+
+| 对象 | 改成什么 | 回滚 |
+| --- | --- | --- |
+| `backend/config.py` | 新增 `CAPTURE_GOP`（默认 = `CAPTURE_NOUT_FPS` = 1s） | `config.py.bak-20261126-193811` |
+| `backend/stream.py` | 四路 `-c:v … -b:v 2000k` 后面加 `-g str(CAPTURE_GOP)` | `stream.py.bak-20261126-193811` |
+| `backend/relay.py` | `-g 30`（配 `CAPTURE_OUT_FPS=15` 其实是 2s）改成 `-g str(CAPTURE_GOP)` | 同名 `.bak-20261126-193811` |
+| `backend/tools/record_selftest.py` | 新增「四路推流带 `-g`」/「relay 关键帧间隔与四路一致」；两条真 ffmpeg 用例不再写死 libx264（板端只有 rkmpp）；「每路各拉各的流」改按 `stream_of()` 比（720p30 档位下 `dogcam`→`dogcam720`） | 同上 |
+
+生效：`systemctl restart backpack-agent`（会重启 stream / relay / 相机流，视频断 ~1.5min；
+`agent.py` 不处理 SIGTERM）。实测（2026-11-26 19:46，同一时刻起录、都配 15s）：
+
+```
+改前（K 帧 16.66s）：cam0 14.8s / cam1 15.0s / dogcam 13.6s        ← relay 还是 -g 30（2s）
+改后（K 帧  1.00s）：cam0 14.9s / cam1 14.7s / dogcam 14.6s        ← 差 ≤0.3s
+```
+
+日志可验：`journalctl -u backpack-agent | grep 'gop'` → `fps [15:1:fix] … gop 15`；
+中继进程 `pgrep -af dogcam720` → `-g 15`；K 帧间隔见 §4.6 开头那条 `ffmpeg -skip_frame nokey`。
+
 ## 5. 备份文件现状与清理建议
 
 | 位置 | 数量 / 体积 | 说明 |

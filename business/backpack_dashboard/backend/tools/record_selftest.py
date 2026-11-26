@@ -410,10 +410,16 @@ def real_segment_naming(tmp):
     # 输出侧参数（`-t` 之后：编码 + 切片命名 + 清单 + faststart）原样复用
     tail = args[args.index("-t"):]
     copy_at = tail.index("-c") if "-c" in tail else -1
+    enc = lavfi_encoder(ffmpeg)
+    if enc is None:
+        print("  skip 真 ffmpeg 切片（本机没有可用的 H264 编码器）")
+        return 0
     if copy_at >= 0:
-        # `-c copy` 对 lavfi 不适用：换成 x264（不影响切片命名相关参数）
-        tail[copy_at:copy_at + 2] = ["-c:v", "libx264", "-preset", "ultrafast",
-                                     "-pix_fmt", "yuv420p", "-g", "15"]
+        # `-c copy` 对 lavfi 不适用：换成本机真有的编码器（不影响切片命名相关参数）
+        enc_args = ["-c:v", enc, "-b:v", "2000k", "-g", "15"]
+        if enc == "libx264":
+            enc_args += ["-preset", "ultrafast", "-pix_fmt", "yuv420p"]
+        tail[copy_at:copy_at + 2] = enc_args
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
            "-i", "testsrc2=size=320x180:rate=15"] + tail
     failures = 0
@@ -470,9 +476,15 @@ def real_mp4_timeline(tmp):
                               "point", 12, 12, "rtsp://127.0.0.1:8554/cam1")
     tail = args[args.index("-t"):]
     copy_at = tail.index("-c") if "-c" in tail else -1
+    enc = lavfi_encoder(ffmpeg)
+    if enc is None:
+        print("  skip 真 ffmpeg 验 mvhd（本机没有可用的 H264 编码器）")
+        return 0
     if copy_at >= 0:
-        tail[copy_at:copy_at + 2] = ["-c:v", "libx264", "-preset", "ultrafast",
-                                     "-pix_fmt", "yuv420p", "-g", "15"]
+        enc_args = ["-c:v", enc, "-b:v", "2000k", "-g", "15"]
+        if enc == "libx264":
+            enc_args += ["-preset", "ultrafast", "-pix_fmt", "yuv420p"]
+        tail[copy_at:copy_at + 2] = enc_args
 
     def run(path, extra):
         # `extra` 放在 tail 之后：同一个选项后写的那份生效（对照组要盖掉 `use_editlist 0`）
