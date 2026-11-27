@@ -1,3 +1,17 @@
 {
-    "cmake.sourceDirectory": "/home/zhangzexin/IdeaProjects/rust-admin/deploy/navstate-bridge"
+    "cmake.sourceDirectory": "/home/zhangzexin/IdeaProjects/rust-admin/deploy/navstate-bridge",
+
+    // 本仓库没有根 Cargo.toml 工作区，三个 crate 各自独立。
+    // rust-analyzer 默认只在工作区根目录找 Cargo.toml（找不到就 cargoTomlNotFound，
+    // 结果只有高亮没有跳转 / 补全 / 类型推导），所以这里显式列出。
+    "rust-analyzer.linkedProjects": [
+        "backend/Cargo.toml",
+        "business/server/Cargo.toml",
+        "business/client/Cargo.toml"
+    ],
+    "rust-analyzer.cargo.allTargets": true,
+    // business/client 的 .cargo/config.toml 只配了 aarch64 交叉链接器，
+    // 不影响本机分析；这里保持默认 host target，避免链接不到 arm 工具链。
+    "rust-analyzer.check.command": "clippy",
+    "rust-analyzer.check.extraArgs": ["--all-targets"]
 }
