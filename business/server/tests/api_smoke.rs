@@ -975,6 +975,87 @@ async fn legacy_robot_maps_get_device_code_from_zentai() {
     assert_eq!(again, 0);
 }
 
+/// 「backend 地图库」的导入接口不再出现在控制台（园区基线只从业务库已发布的设备地图里选），
+/// 这层门禁留在服务端：非「已发布」的中台图不能导入成业务地图 / 园区基线。
+#[tokio::test]
+async fn import_backend_map_requires_a_published_map() {
+    let (state, _db) = test_state().await;
+    let zentai_path = state.config.backend_db_path.clone();
+    let zentai = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&zentai_path)
+                .create_if_missing(true),
+        )
+        .await
+        .expect("创建假中台库失败");
+    sqlx::query(
+        "CREATE TABLE dog_map (
+            id INTEGER PRIMARY KEY, map_name TEXT, park_code TEXT, park_name TEXT,
+            user_id INTEGER, file_name TEXT, file_path TEXT, file_format TEXT, file_size INTEGER,
+            remarks TEXT, map_version TEXT, frame_id TEXT, crs TEXT, map_origin TEXT,
+            resolution TEXT, floors TEXT, road_count INTEGER, nogo_count INTEGER,
+            map_status TEXT, map_hash TEXT, publish_time TEXT, map_width INTEGER,
+            map_height INTEGER, create_time TEXT, is_deleted INTEGER NOT NULL DEFAULT 0)",
+    )
+    .execute(&zentai)
+    .await
+    .unwrap();
+    sqlx::query("CREATE TABLE p_sys_user (id INTEGER PRIMARY KEY, username TEXT)")
+        .execute(&zentai)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO dog_map (id, map_name, file_name, file_path, file_format, map_version,
+            map_status, create_time, is_deleted)
+         VALUES (9, '2026_11_10_16_15_06', 'map.zip', 'maps/map.zip', 'zip', 'v1.0',
+            '部分标定', '2026-11-23T03:06:59Z', 0)",
+    )
+    .execute(&zentai)
+    .await
+    .unwrap();
+
+    let app = build_router(state);
+    let token = login(&app).await;
+    let import = |app: axum::Router, token: String| async move {
+        app.oneshot(
+            Request::post("/api/map-versions/import-backend")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"backendMapId":9,"parkId":1,"bind":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    };
+
+    let response = import(app.clone(), token.clone()).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "未发布的地图不能导入");
+    let body = json_body(response).await;
+    let msg = body["msg"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("已发布"),
+        "错误要说清「先在中台发布」: {msg}"
+    );
+
+    // 中台发布之后才允许导入
+    sqlx::query("UPDATE dog_map SET map_status = '已发布' WHERE id = 9")
+        .execute(&zentai)
+        .await
+        .unwrap();
+    zentai.close().await;
+    let response = import(app, token).await;
+    assert_eq!(response.status(), StatusCode::OK, "中台已发布后应能导入");
+    let body = json_body(response).await;
+    assert_eq!(
+        body["data"]["sourceId"].as_str(),
+        Some("9"),
+        "导入行要挂上中台链接: {body}"
+    );
+    assert_eq!(body["data"]["status"].as_str(), Some("已发布"));
+}
+
 #[tokio::test]
 async fn internal_sync_endpoint_requires_service_token() {
     let (state, _db) = test_state().await;

@@ -557,13 +557,19 @@ HTTP 链路（②）的三个约定：
   （`dog_map_share`，中台地图页「更多 → 分享设备」），因此同一张图可以直接给多台设备用，不用重新建图。
   根库还没有该表时退回原行为。
 - `POST /api/map-versions/import-backend` 把 `{ backendMapId, parkId?, bind }` 指定的地图导入本业务库；
+  **只接受中台「已发布」的地图**（状态由中台统一管理）；
   `parkId` 缺省时按中台地图携带的 `parkCode` 反查业务园区，园区编码未登记会报错。
   导入权限与上面的列表同一口径：自己名下的地图、自己管辖设备上报的地图，或分享给自己管辖设备的中台地图。
   导入时会从 `.zip` 内解析 `model.yaml` 的 `resolution` / `origin` 和 `model.pgm` 的宽高，并可选绑定为园区当前基线。
+  ⚠️ 控制台（园区表单「地图基线绑定」）**不再展示「backend 地图库」这一组**：基线只从
+  业务库已有、且中台已发布的设备地图里选（设备建图回传 / 中台下发进来的那些）。
+  这两个接口保留给脚本与排查用。
 - `GET /api/map-versions/{id}/raster` 解析地图包里的 `model.pgm`，转成 PNG data URL，返回分辨率、原点与栅格宽高；路线编辑画布可切换「真实地图」底图。
 - `GET /api/map-versions/{id}/refs` 返回引用该版本的路线、任务与园区设备数。
-- `POST /api/map-versions/{id}/publish` 发布版本并切换园区基线指针，同园区旧版本归档。
-- `POST /api/map-versions/{id}/new-version` 派生下一版本并发布，历史路线保持旧版引用。
+- `POST /api/map-versions/{id}/publish` 把一个**中台已发布**的地图设为园区当前基线（状态由中台决定，
+  这里不再改状态、也不再归档同园区旧版本）；非「已发布」直接 400。
+- `POST /api/map-versions/{id}/new-version` 给**没有中台链接**的本地地图派生下一版本；
+  有中台链接的图版本由中台在「同步地图」时自动创建（未发布→原地更新，已发布→新建版本），这里会 400。
 - `POST /api/map-versions/ingest` 一次性完成「推中台 + 写业务库」，是设备客户端建图回传的入口（见下节）。
 
 ### 本体地图目录名：`mapId` ≠ 目录名
@@ -665,7 +671,8 @@ RT-001 ~ RT-004 写入对应的冻结版本引用。
 ```
 
 中台地图带上园区后，业务平台从中台拉取地图时（`/api/map-versions/backend`）
-可以按 `parkCode` 过滤或直接导入，`import-backend` 未显式指定园区时会自动按园区编码回填。
+可以按 `parkCode` 过滤或直接导入（仅限已发布），`import-backend` 未显式指定园区时会自动按园区编码回填。
+控制台不再提供这个入口。
 
 > 园区归属用 `parks.park_code` 做跨服务关联，请尽量不要修改已绑定地图的园区编码；
 > 确有变更时，中台历史地图仍指向旧编码，需重新导入或手工修正 `dog_map.park_code`。

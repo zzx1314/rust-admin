@@ -746,7 +746,8 @@ M1 文件根 `/ota/alg_data`；文档 §2.2.4.1「4013 地图列表」明确单�
 
 建好的地图落盘在本体 `--map-root` 下。若走 A 方案自动回传，中台 `dog_map` 与业务库
 `map_versions` 都会写入，无需再手工导入；否则业务侧需要用
-`POST /api/map-versions/import-backend` 或在前端「地图基线」页做导入后才能绑定路线。
+`POST /api/map-versions/import-backend`（仅限中台已发布的地图）才能在园区里绑定路线——
+控制台的园区表单已不再提供「backend 地图库」这个入口。
 
 ## 航线执行流程
 

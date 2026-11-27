@@ -65,6 +65,9 @@ export const mapApi = {
     get<MapRefs>(`/map-versions/${encodeURIComponent(id)}/refs`),
   publish: (id: string) =>
     post<MapVersion>(`/map-versions/${encodeURIComponent(id)}/publish`),
+  // backend / import-backend：中台 `dog_map` 的读接口与导入接口。
+  // 控制台（`views/parks`）已不再列「backend 地图库」——地图基线只从业务库已发布的
+  // 设备地图里选；接口保留给脚本 / 排查用（导入仍要求中台「已发布」）。
   backendMaps: (params?: object) =>
     get<BackendMap[]>("/map-versions/backend", params),
   importBackend: (backendMapId: number, parkId?: number, bind = true) =>

@@ -397,11 +397,14 @@ AudioWorklet 做 48k⇄16k 与抖动缓冲。**不需要填 IP、公网可用；
 （同 `device_code` + 同 `map_name`）的旧已发布版本归档。业务平台侧跟着走：中台返回新 id
 → 业务库也新增一行（`source_id` 指新版本、版本号取中台 `mapVersion`），旧行继续指向旧版本
 （路线 / 任务引用它）；只有「中台那条记录被删了」才复用原业务行。园区基线只能绑
-**中台已发布**的图（当前基线原样提交时例外，否则编辑园区会被自己已绑的图卡住）。
+**中台已发布**的图（当前基线原样提交时例外，否则编辑园区会被自己已绑的图卡住），
+而且只从**业务库已有**的地图里选——园区表单的「backend 地图库」那一组已经移除
+（`/api/map-versions/backend` / `import-backend` 接口仍保留给脚本，导入同样要求中台已发布）。
 回归：`dog_map_edit_tests::upload_with_id_creates_new_version_when_published` /
 `publish_archives_previous_version_of_the_same_map`、
 `api_smoke::ingest_new_zentai_version_creates_a_business_row` /
-`park_baseline_requires_a_published_map`。
+`park_baseline_requires_a_published_map` /
+`import_backend_map_requires_a_published_map`。
 
 **⛔ `use_preconfigured_tls` 只能收裸的 `rustls::ClientConfig`**（2026-11-27 事故）：
 `business/client/src/tls.rs` 以前写成 `use_preconfigured_tls(Some(config))`，reqwest 内部

@@ -3,7 +3,7 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { parkApi, mapApi, zoneApi } from "@/api/ops";
-import type { BackendMap, MapVersion, Park, Zone } from "@/api/types";
+import type { MapVersion, Park, Zone } from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import AppIcon from "@/components/AppIcon.vue";
 import MiniMap from "@/components/MiniMap.vue";
@@ -17,7 +17,6 @@ const router = useRouter();
 const parks = ref<Park[]>([]);
 const zones = ref<Zone[]>([]);
 const maps = ref<MapVersion[]>([]);
-const backendMaps = ref<BackendMap[]>([]);
 const search = ref("");
 const parkStatus = ref("全部");
 const viewMode = ref<"card" | "table">("card");
@@ -140,27 +139,6 @@ const otherParkMapOptions = computed(() => {
   );
 });
 
-const availableBackendMaps = computed(() => {
-  const parkId = editingPark.value?.id;
-  const parkCode = editingPark.value?.parkCode ?? parkForm.parkCode;
-  const imported = new Set(
-    (parkId ? mapsOfPark(parkId) : [])
-      .map(item => item.sourceId)
-      .filter((value): value is string => Boolean(value))
-  );
-  return backendMaps.value
-    .filter(item => {
-      if (imported.has(String(item.id))) return false;
-      // 中台地图若已带上园区编码，只展示本园区的，避免导错
-      return !item.parkCode || !parkCode || item.parkCode === parkCode;
-    })
-    .sort((a, b) => {
-      const matchA = a.parkCode && a.parkCode === parkCode ? 0 : 1;
-      const matchB = b.parkCode && b.parkCode === parkCode ? 0 : 1;
-      return matchA - matchB;
-    });
-});
-
 const boundParkCount = computed(
   () => parks.value.filter(park => park.mapVersionId).length
 );
@@ -174,11 +152,6 @@ async function load() {
   parks.value = parkList;
   zones.value = zoneList;
   maps.value = mapList;
-  try {
-    backendMaps.value = await mapApi.backendMaps();
-  } catch {
-    backendMaps.value = [];
-  }
   if (!zoneForm.parkId && parkList.length) zoneForm.parkId = parkList[0].id;
 }
 
@@ -231,25 +204,15 @@ async function savePark() {
     ElMessage.warning("请填写园区名称与面积");
     return;
   }
-  const backendMapId = parkForm.mapVersionId.startsWith("backend:")
-    ? Number(parkForm.mapVersionId.slice("backend:".length))
-    : null;
-  const payload = {
-    ...parkForm,
-    mapVersionId: backendMapId ? "" : parkForm.mapVersionId,
-    area: Number(parkForm.area)
-  };
-  let targetPark: Park;
+  // 基线只能是业务库里已有的地图（设备回传 / 中台下发），且必须中台已发布：
+  // 不再提供「backend 地图库导入」，见 `resolve_park_map`。
+  const payload = { ...parkForm, area: Number(parkForm.area) };
   if (editingPark.value) {
-    targetPark = await parkApi.update(editingPark.value.id, payload);
+    await parkApi.update(editingPark.value.id, payload);
     ElMessage.success("园区信息已更新");
   } else {
-    targetPark = await parkApi.create(payload);
+    await parkApi.create(payload);
     ElMessage.success(`园区「${parkForm.parkName}」已创建`);
-  }
-  if (backendMapId) {
-    const imported = await mapApi.importBackend(backendMapId, targetPark.id, true);
-    ElMessage.success(`已从 backend 导入地图「${imported.id}」并绑定为园区基线`);
   }
   parkDialog.value = false;
   await load();
@@ -681,20 +644,6 @@ onMounted(load);
                 {{ map.status === "已发布" ? "" : "（未发布·仅保持现状）" }} ·
                 {{ map.sourceId ? `中台 #${map.sourceId}` : "无中台记录" }} ·
                 {{ map.deviceCode ? `设备 ${map.deviceCode}` : "设备未知" }}
-              </option>
-            </optgroup>
-            <optgroup
-              v-if="availableBackendMaps.length"
-              label="backend 地图库 · ROS / 激光雷达地图"
-            >
-              <option
-                v-for="map in availableBackendMaps"
-                :key="map.id"
-                :value="`backend:${map.id}`"
-              >
-                {{ map.mapName }} · {{ map.mapStatus || "草稿" }}
-                {{ map.fileName ? `· ${map.fileName}` : "" }}
-                {{ map.fileSize ? `· ${(map.fileSize / 1024).toFixed(0)} KB` : "" }}
               </option>
             </optgroup>
           </select>

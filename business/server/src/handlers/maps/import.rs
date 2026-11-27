@@ -46,6 +46,15 @@ pub async fn import_backend_map(
     }
 
     // 园区：请求优先；否则按中台地图携带的园区编码反查
+    // 状态由中台统一管理：只允许导入「已发布」的图，与园区基线绑定同一道门禁
+    // （控制台已不再列「backend 地图库」，这里留着给脚本 / 排查用）。
+    if source.map_status.as_deref() != Some("已发布") {
+        return Err(AppError::BadRequest(format!(
+            "中台地图 #{} 当前状态为 {}：只能导入中台「已发布」的地图（请先在中台发布）",
+            source.id,
+            source.map_status.as_deref().unwrap_or("草稿")
+        )));
+    }
     let park_id = match payload.park_id {
         Some(park_id) => park_id,
         None => {
