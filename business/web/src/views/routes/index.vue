@@ -757,12 +757,17 @@ function undo() {
  * 的话放大 2 倍后点一下画布，新航点会落在鼠标旁边的别处。
  */
 const ZOOM_MIN = 0.6;
-const ZOOM_MAX = 4;
+// 窄路线的航点间距常常只有几十厘米，400% 也就是十几个像素，根本分不开：放到 800%
+const ZOOM_MAX = 8;
 const ZOOM_WHEEL_STEP = 1.15;
 const zoom = ref(1);
 const panX = ref(0);
 const panY = ref(0);
 const panning = ref(false);
+/** 鼠标悬停中的航点：名称牌密集时被隐藏，悬停这一点要能临时露出来 */
+const hoverIdx = ref<number | null>(null);
+/** 键盘微调步长（米）：窄路线上比鼠标拖准得多，Shift ×10 */
+const NUDGE_METERS = 0.05;
 let panOrigin = { x: 0, y: 0, panX: 0, panY: 0, moved: false, button: 0 };
 /** 平移结束时吞掉随之而来的那次 click（否则 Shift+拖拽会顺手落一个航点） */
 let swallowClick = false;
@@ -773,6 +778,93 @@ const viewTransform = computed(
 /** 标注 / 徽标反向缩放：地图放大 4 倍时航点名称不该跟着变成巨字 */
 const labelScale = computed(() => 1 / zoom.value);
 const zoomPct = computed(() => Math.round(zoom.value * 100));
+
+/**
+ * 航点标记的反向缩放：**放大只拉开间距，不把圆点一起吹大**。
+ *
+ * 以前圆点写在内容坐标里（r=10），放大到 400% 屏幕上就是 40px 的实心大圆，
+ * 窄路线（相邻航点 0.5 m ≈ 十几个像素）一点就被自己盖住，既看不见也摸不到。
+ * 现在标记恒定为 10px 屏幕尺寸（缩小到 100% 以下时仍随图一起缩，不至于糊成一团）。
+ */
+const markerScale = computed(() => Math.min(1, 1 / zoom.value));
+
+/** 两个画布点之间在**屏幕上**的像素距离（名称牌 / 徽标是否叠字全看它） */
+function screenGap(
+  a?: { cx: number; cy: number },
+  b?: { cx: number; cy: number }
+) {
+  if (!a || !b) return Number.POSITIVE_INFINITY;
+  return Math.hypot(a.cx - b.cx, a.cy - b.cy) * zoom.value;
+}
+
+/** 名称牌宽 92px：间距小于它就叠字；奇偶交替挂在上下两侧，所以只有同侧才算冲突 */
+const LABEL_MIN_GAP = 62;
+/** 挤到这个程度，不管挂哪一侧都读不出来 */
+const LABEL_MIN_GAP_ANY = 22;
+/** 航段「N 项」徽标宽 40px：段太短就不画，否则窄路线上全是白块 */
+const LEG_BADGE_MIN_GAP = 56;
+
+/**
+ * 需要隐藏名称牌的航点下标。
+ *
+ * 窄路线上每个航点都挂一块 92×18 的白底名牌，它们互相盖住、也盖住邻居的点击区，
+ * 现场只能靠序号认点。这里按屏幕间距去重：同侧且靠得太近的，只留序号小的那个；
+ * **选中 / 悬停的点永远显示**，所以「点一下就知道是哪个」这条没丢。
+ */
+const hiddenLabels = computed(() => {
+  const hidden = new Set<number>();
+  const points = canvasPoints.value;
+  for (let j = 0; j < points.length; j += 1) {
+    for (let i = 0; i < j; i += 1) {
+      if (hidden.has(i)) continue;
+      const gap = screenGap(points[i], points[j]);
+      const sameSide = i % 2 === j % 2;
+      if (gap < LABEL_MIN_GAP_ANY || (sameSide && gap < LABEL_MIN_GAP)) {
+        hidden.add(j);
+        break;
+      }
+    }
+  }
+  if (selType.value === "point") hidden.delete(selIdx.value);
+  if (hoverIdx.value !== null) hidden.delete(hoverIdx.value);
+  return hidden;
+});
+
+function labelVisible(index: number) {
+  return !hiddenLabels.value.has(index);
+}
+
+/** 起点 / 途经 / 终点的配色（图例同款） */
+function pointColor(index: number) {
+  const last = (draft.value?.data.points.length ?? 1) - 1;
+  if (index === 0) return "#0d9488";
+  if (index === last) return "#0f172a";
+  return "#0284c7";
+}
+
+/**
+ * 屏幕位置命中的是哪个航点：**按屏幕距离取最近的一个**，不按 DOM 顺序。
+ *
+ * 窄路线上相邻两点常常只隔十几像素、点击区（r=14）互相重叠，按 DOM 顺序永远
+ * 命中后画的那个 —— 想调前一个得先把后一个挪开，这就是「不好调整」的主因。
+ */
+function nearestPointIndex(event: MouseEvent | PointerEvent, limit = 18) {
+  const view = viewBoxCoords(event);
+  let best: number | null = null;
+  let bestDistance = limit;
+  const points = canvasPoints.value;
+  for (let index = 0; index < points.length; index += 1) {
+    const distance = Math.hypot(
+      points[index].cx * zoom.value + panX.value - view.x,
+      points[index].cy * zoom.value + panY.value - view.y
+    );
+    if (distance <= bestDistance) {
+      bestDistance = distance;
+      best = index;
+    }
+  }
+  return best;
+}
 
 function clampAxis(position: number, size: number, view: number) {
   const span = size * view;
@@ -869,13 +961,23 @@ function onCanvasDown(event: PointerEvent) {
   (event.currentTarget as Element).setPointerCapture?.(event.pointerId);
 }
 
+/**
+ * 落点量化 / 道路吸附。
+ *
+ * 两点都按**屏幕像素**取值，不再写死内容坐标：吸附范围以前是 ±30 内容像素，
+ * 在 0.05 m/px 的地图上等于 ±1.5 m —— 窄路线整条都在「道路」吸引力范围内，
+ * 想拖到路旁边一点会被反复拽回中线。量化同理，放大后 5 像素的网格在窄路线上
+ * 就是 25 cm 一格，怎么拖都对不准。
+ */
 function snapPoint(point: { x: number; y: number }) {
   let { x, y } = point;
   if (snap.value) {
-    if (Math.abs(y - 210) < 30) y = 210;
-    if (Math.abs(x - 430) < 26) x = 430;
+    if (Math.abs(y - 210) * zoom.value < 12) y = 210;
+    if (Math.abs(x - 430) * zoom.value < 10) x = 430;
   }
-  return { x: Math.round(x / 5) * 5, y: Math.round(y / 5) * 5 };
+  // 放大到 200% 以上按 1px 量化：窄路线才有落点精度
+  const step = zoom.value >= 2 ? 1 : 5;
+  return { x: Math.round(x / step) * step, y: Math.round(y / step) * step };
 }
 
 function onCanvasClick(event: MouseEvent) {
@@ -907,9 +1009,22 @@ function onPointDown(event: PointerEvent, index: number) {
   event.stopPropagation();
   event.preventDefault();
   snapshot();
-  dragIndex.value = index;
+  // 抓最近的那个点（见 nearestPointIndex）：窄路线上按 DOM 顺序抓永远抓错
+  dragIndex.value = nearestPointIndex(event) ?? index;
   justDragged.value = false;
   (event.currentTarget as Element).setPointerCapture?.(event.pointerId);
+}
+
+/** 放大到某个航点（双击航点 / 「定位」按钮）：窄路线上这是唯一能看清间距的办法 */
+function focusPoint(index: number) {
+  const point = canvasPoints.value[index];
+  if (!point) return;
+  const view = Math.max(2.5, Math.min(ZOOM_MAX, zoom.value));
+  applyView(view, CANVAS_WIDTH / 2 - point.cx * view, CANVAS_HEIGHT / 2 - point.cy * view);
+}
+
+function focusSelected() {
+  if (selType.value === "point") focusPoint(selIdx.value);
 }
 
 function onCanvasMove(event: PointerEvent) {
@@ -960,6 +1075,49 @@ function selectPoint(index: number) {
   selType.value = "point";
   selIdx.value = index;
   activeTab.value = "point";
+}
+
+/**
+ * 方向键微调选中航点（0.05 m，Shift 0.5 m）。
+ *
+ * 窄路线（相邻两点几十厘米）在画布上就几个像素，鼠标拖根本落不准，
+ * 键盘微调 + 放大定位才是能落地的操作；拖动整条路线前先微调到位。
+ * 连续按只记一次撤销快照（800 ms 静默后重新开一段）。
+ */
+let nudgeTimer = 0;
+let nudging = false;
+
+function onNudgeKey(event: KeyboardEvent) {
+  if (!draft.value || selType.value !== "point") return;
+  if (routeDialog.value || baseDialog.value || baselineDialog.value || actionDialog.value) return;
+  const target = event.target as HTMLElement | null;
+  const tag = target?.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) return;
+  // 带修饰键的是浏览器 / 系统快捷键（Ctrl+↑ 之类），不抢
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  const deltas: Record<string, [number, number]> = {
+    ArrowLeft: [-1, 0],
+    ArrowRight: [1, 0],
+    ArrowUp: [0, 1],
+    ArrowDown: [0, -1]
+  };
+  const delta = deltas[event.key];
+  if (!delta) return;
+  const point = draft.value.data.points[selIdx.value];
+  if (!point) return;
+  event.preventDefault();
+  if (!nudging) {
+    snapshot();
+    nudging = true;
+  }
+  window.clearTimeout(nudgeTimer);
+  nudgeTimer = window.setTimeout(() => {
+    nudging = false;
+  }, 800);
+  const step = NUDGE_METERS * (event.shiftKey ? 10 : 1);
+  // 画布 y 向下、地图 y 向上：ArrowUp 是地图 +y
+  point.x = round3(point.x + delta[0] * step);
+  point.y = round3(point.y + delta[1] * step);
 }
 
 function selectLeg(index: number) {
@@ -1651,6 +1809,7 @@ onMounted(() => {
   if (routeId) currentId.value = routeId;
   const zoneId = Number(vueRoute.query.zoneId);
   load(zoneId || undefined);
+  window.addEventListener("keydown", onNudgeKey);
   skeletonTimer = window.setTimeout(() => {
     if (!draft.value) showSkeleton.value = true;
   }, 120);
@@ -1659,6 +1818,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.clearInterval(simTimer);
   window.clearTimeout(skeletonTimer);
+  window.clearTimeout(nudgeTimer);
+  window.removeEventListener("keydown", onNudgeKey);
   // 还在 400ms 防抖窗口里就离开页面：立刻补一次写库，别把最后一次动作改动丢掉
   if (autoSaveTimer) {
     window.clearTimeout(autoSaveTimer);
@@ -1918,6 +2079,7 @@ onBeforeUnmount(() => {
                         @click.stop="selectLeg(index)"
                       />
                       <g
+                        v-if="screenGap(canvasPoints[index], canvasPoints[index + 1]) >= LEG_BADGE_MIN_GAP"
                         style="cursor: pointer"
                         :transform="`translate(${(canvasPoints[index].cx + canvasPoints[index + 1].cx) / 2},${(canvasPoints[index].cy + canvasPoints[index + 1].cy) / 2 - 17}) scale(${labelScale})`"
                         @click.stop="selectLeg(index)"
@@ -1971,6 +2133,12 @@ onBeforeUnmount(() => {
                       @click.stop="selectLeg(draft.data.legs.length)"
                     />
                     <g
+                      v-if="
+                        screenGap(
+                          canvasPoints[draft.data.points.length - 1],
+                          canvasPoints[0]
+                        ) >= LEG_BADGE_MIN_GAP
+                      "
                       style="cursor: pointer"
                       :transform="`translate(${(canvasPoints[draft.data.points.length - 1].cx + canvasPoints[0].cx) / 2},${(canvasPoints[draft.data.points.length - 1].cy + canvasPoints[0].cy) / 2 - 2}) scale(${labelScale})`"
                       @click.stop="selectLeg(draft.data.legs.length)"
@@ -1997,55 +2165,35 @@ onBeforeUnmount(() => {
                     </g>
                   </template>
 
-                  <!-- 航点标记：半径按 800×460 内容坐标系取值（2026-11-26 按反馈缩小，
-                       选中圈 / 序号 / 标签偏移一起缩，否则小圆配大光环会显得脱节） -->
+                  <!-- 航点标记：半径按**屏幕像素**取值（外层 markerScale 反向缩放）。
+                       放大只拉开间距，圆点不跟着变成 40px 的大圆盖住相邻点；名称牌按
+                       屏幕密度自动隐藏（labelVisible），否则窄路线上全是白块互相盖住。 -->
                   <g
                     v-for="(point, index) in draft.data.points"
                     :key="`point-${index}`"
                     class="wp-hit"
                     style="cursor: pointer"
+                    :transform="`translate(${canvasPoints[index].cx},${canvasPoints[index].cy}) scale(${markerScale})`"
+                    @pointerenter="hoverIdx = index"
+                    @pointerleave="hoverIdx = null"
                     @pointerdown="onPointDown($event, index)"
-                    @click.stop="selectPoint(index)"
+                    @click.stop="selectPoint(nearestPointIndex($event) ?? index)"
+                    @dblclick.stop="focusPoint(index)"
                   >
-                    <!-- 隐形的点击区：圆缩到 r=10 后伸手点仍好点（半径保留原来的 14） -->
-                    <circle
-                      :cx="canvasPoints[index].cx"
-                      :cy="canvasPoints[index].cy"
-                      r="14"
-                      fill="transparent"
-                      pointer-events="all"
-                    />
+                    <!-- 隐形的点击区：18px 屏幕半径，两个点叠得很近时由「取最近」定夺 -->
+                    <circle r="14" fill="transparent" pointer-events="all" />
                     <circle
                       v-if="selType === 'point' && selIdx === index"
-                      :cx="canvasPoints[index].cx"
-                      :cy="canvasPoints[index].cy"
                       r="16"
                       fill="none"
                       stroke="#f59e0b"
                       stroke-width="1.8"
                       stroke-dasharray="3.5 2.5"
                     />
-                    <circle
-                      :cx="canvasPoints[index].cx"
-                      :cy="canvasPoints[index].cy"
-                      r="10"
-                      fill="#fff"
-                      :stroke="
-                        index === 0 ? '#0d9488' : index === draft.data.points.length - 1 ? '#0f172a' : '#0284c7'
-                      "
-                      stroke-width="2"
-                    />
-                    <circle
-                      :cx="canvasPoints[index].cx"
-                      :cy="canvasPoints[index].cy"
-                      r="5"
-                      :fill="
-                        index === 0 ? '#0d9488' : index === draft.data.points.length - 1 ? '#0f172a' : '#0284c7'
-                      "
-                    />
+                    <circle r="10" fill="#fff" :stroke="pointColor(index)" stroke-width="2" />
+                    <circle r="5" :fill="pointColor(index)" />
                     <text
-                      :x="canvasPoints[index].cx"
-                      :y="canvasPoints[index].cy + 2.5"
+                      y="2.5"
                       font-size="7"
                       fill="#fff"
                       text-anchor="middle"
@@ -2054,7 +2202,8 @@ onBeforeUnmount(() => {
                       {{ index + 1 }}
                     </text>
                     <g
-                      :transform="`translate(${canvasPoints[index].cx},${canvasPoints[index].cy + (index % 2 ? -24 : 22)}) scale(${labelScale})`"
+                      v-if="labelVisible(index)"
+                      :transform="`translate(0,${index % 2 ? -24 : 22}) scale(${labelScale / markerScale})`"
                     >
                       <rect
                         x="-46"
@@ -2066,7 +2215,6 @@ onBeforeUnmount(() => {
                         :stroke="selType === 'point' && selIdx === index ? '#f59e0b' : '#e2e8f0'"
                       />
                       <text
-                        x="0"
                         y="3.5"
                         font-size="9.5"
                         fill="#334155"
@@ -2100,7 +2248,8 @@ onBeforeUnmount(() => {
             <div class="rt-canvas-tag">
               <AppIcon name="info" />
               {{ mode === "add" ? "点击画布新增航点 · 拖拽航点调整位置" : "点选航点或航段编辑属性" }}
-              · 滚轮缩放 · Shift / 中键拖动平移
+              · 滚轮缩放 · Shift / 中键拖动平移 · 双击航点定位
+              · 方向键微调 {{ NUDGE_METERS }} m（Shift ×10）
               · {{ rasterVisible && raster ? "ROS 栅格底图" : "示意图底图" }}
               · 航点存地图米制坐标
             </div>
@@ -2120,6 +2269,14 @@ onBeforeUnmount(() => {
               <button title="放大" :disabled="zoom >= ZOOM_MAX" @click="zoomBy(1.25)">+</button>
               <button class="fit" title="恢复 100% 并居中" @click="resetView">
                 <AppIcon name="maximize" />适配
+              </button>
+              <button
+                class="fit"
+                :disabled="selType !== 'point'"
+                title="放大到选中的航点（也可双击航点）"
+                @click="focusSelected"
+              >
+                <AppIcon name="pin" />定位
               </button>
             </div>
           </div>
@@ -2196,8 +2353,8 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="rt-field">
                   <label>航点坐标（地图米）</label>
-                  <input v-model.number="selectedPoint.x" class="input mono" type="number" step="0.1" />
-                  <input v-model.number="selectedPoint.y" class="input mono" type="number" step="0.1" />
+                  <input v-model.number="selectedPoint.x" class="input mono" type="number" step="0.05" />
+                  <input v-model.number="selectedPoint.y" class="input mono" type="number" step="0.05" />
                 </div>
                 <div class="rt-field">
                   <label>坐标系</label>
