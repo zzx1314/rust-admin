@@ -20,6 +20,13 @@
  * 保存时按「根图 + 擦除圆」重算栅格，根本表达不了「未知」——平台这边能擦成 128 的话，
  * 现场在遥控器上一保存就被整体冲掉。要标禁行请用「禁止区域」（栅格刷成 0）。
  * 接口仍接受 `128` 与旧 `205`（历史客户端 / 脚本），但本页面不再提供。
+ *
+ * 禁止区域一多就认不出「哪块是哪块」，所以：
+ * - 画布上按列表顺序给每块打**序号**（视图坐标，旋转时不歪）；
+ * - 右侧列表行 hover / 点击 → 对应矩形高亮并平移到视口中心，反过来点图上的矩形
+ *   也会高亮对应行；
+ * - 列表显示**米制**尺寸 / 面积 / 中心坐标（与路线坐标系同一套换算）；
+ * - 「删区域」工具：在图上点哪块删哪块，删掉的可以用「撤销」找回。
  */
 import { computed, nextTick, ref, watch } from "vue";
 import { ElMessageBox } from "element-plus";
@@ -45,12 +52,13 @@ import RotateRight from "~icons/ri/clockwise-line";
 import RotateIcon from "~icons/ri/refresh-line";
 import UndoIcon from "~icons/ri/arrow-go-back-line";
 import ResetIcon from "~icons/ri/restart-line";
+import DeleteIcon from "~icons/ri/delete-bin-line";
 
 defineOptions({ name: "MapEditorDialog" });
 
 const emit = defineEmits<{ saved: [row: any]; pushed: [row: any] }>();
 
-type Tool = "pan" | "rotate" | "eraser" | "forbidden";
+type Tool = "pan" | "rotate" | "eraser" | "forbidden" | "remove";
 
 /** `.map-canvas-wrap` 的 margin（px）：画布在滚动内容里的偏移，算旋转吸附点时要用。 */
 const CANVAS_MARGIN = 12;
@@ -103,9 +111,12 @@ const draftingRect = ref<{
   y1: number;
 } | null>(null);
 const areaSaving = ref(false);
+/** 悬停 / 选中的禁止区域：与列表行同一个键（见 `areaKey`），画布据此高亮 */
+const activeAreaKey = ref<string | null>(null);
 
 const canvasRef = ref<HTMLCanvasElement>();
 const viewportRef = ref<HTMLDivElement>();
+const areaRowsRef = ref<HTMLDivElement>();
 
 let ctx: CanvasRenderingContext2D | null = null;
 let baseImage: HTMLImageElement | null = null;
@@ -197,6 +208,58 @@ const areaDirty = computed(
 );
 const dirtyAny = computed(() => dirty.value || areaDirty.value);
 
+/** 列表行的稳定键：已保存的用 id，本次新画的用下标（与保存时的排序无关） */
+function areaKey(area: MapForbiddenArea, index: number) {
+  return area.id ? `id-${area.id}` : `new-${index}`;
+}
+
+function formatLength(value: number) {
+  return value >= 10 ? value.toFixed(1) : value.toFixed(2);
+}
+
+/** 尺寸 / 面积：有分辨率就换米，没有就退回像素（手工上传的包可能没有 yaml）。 */
+function areaSizeText(area: MapForbiddenArea) {
+  const resolution = meta.value.resolution;
+  if (!resolution) {
+    return `${Math.round(area.width)}×${Math.round(area.height)} px`;
+  }
+  const width = area.width * resolution;
+  const height = area.height * resolution;
+  return `${formatLength(width)}×${formatLength(height)} m（${formatLength(
+    width * height
+  )} m²）`;
+}
+
+/**
+ * 中心坐标（米）：与本体 / 路线坐标系一致——PGM 行 0 在图顶，米制 y 要翻过来
+ * （同一套换算见 `business/server/src/handlers/maps/clearance.rs::cell`）。
+ */
+function areaCenterText(area: MapForbiddenArea) {
+  const resolution = meta.value.resolution;
+  const origin = meta.value.origin;
+  if (!resolution || origin.length < 2) {
+    return `中心 (${Math.round(area.center.x)}, ${Math.round(
+      area.center.y
+    )}) px`;
+  }
+  const x = origin[0] + area.center.x * resolution;
+  const y =
+    origin[1] + ((meta.value.height || 0) - 1 - area.center.y) * resolution;
+  return `中心 (${x.toFixed(1)}, ${y.toFixed(1)}) m`;
+}
+
+/** 画布序号 + 右侧列表共用的行数据（顺序 = 画布上的编号） */
+const areaRows = computed(() =>
+  activeAreas.value.map((area, index) => ({
+    area,
+    index,
+    key: areaKey(area, index),
+    no: index + 1,
+    sizeText: areaSizeText(area),
+    centerText: areaCenterText(area)
+  }))
+);
+
 const brushStyle = computed(() => {
   const size = brushRadius.value * 2 * zoom.value;
   // canvas 是旋转后的坐标系，光标圆要按视图坐标定位（否则 90° 后会跑偏）
@@ -215,6 +278,7 @@ function resetState() {
   savedAreas.value = [];
   pendingAreas.value = [];
   removedAreaIds.value = [];
+  activeAreaKey.value = null;
   draftingRect.value = null;
   drawing = false;
   currentStroke = null;
@@ -260,6 +324,7 @@ async function load() {
     savedAreas.value = data.forbiddenAreas ?? [];
     pendingAreas.value = [];
     removedAreaIds.value = [];
+    activeAreaKey.value = null;
     await nextTick();
     // el-dialog 内容是懒挂载：等画布真正挂上再画，避免首帧空白
     for (let tries = 0; tries < 5 && !canvasRef.value; tries++) {
@@ -491,6 +556,8 @@ function render() {
   });
   // 正在拖的矩形存的是「画布坐标」（屏幕上看着轴对齐），不能套上面的旋转
   paintDraftingRect(ctx);
+  // 序号画在最上层（视图坐标，旋转时不歪）
+  paintAreaLabels(ctx);
 }
 
 /** 画一个禁止区域矩形（`rotation` 绕 center，按弧度，栅格坐标系）。 */
@@ -500,31 +567,167 @@ function paintAreaRect(
   width: number,
   height: number,
   rotation = 0,
-  dashed = false
+  dashed = false,
+  active = false
 ) {
   context.save();
   context.translate(center.x, center.y);
   if (rotation) context.rotate(rotation);
-  context.fillStyle = "rgba(220, 38, 38, 0.35)";
+  context.fillStyle = active
+    ? "rgba(220, 38, 38, 0.6)"
+    : "rgba(220, 38, 38, 0.35)";
   context.strokeStyle = "rgba(220, 38, 38, 0.95)";
   context.lineWidth = Math.max(1 / zoom.value, 0.5);
   if (dashed) context.setLineDash([6 / zoom.value, 4 / zoom.value]);
   context.fillRect(-width / 2, -height / 2, width, height);
   context.strokeRect(-width / 2, -height / 2, width, height);
+  if (active) {
+    // 选中时再加一圈白边：红底图上红框容易看不出来
+    context.setLineDash([]);
+    context.strokeStyle = "rgba(255, 255, 255, 0.95)";
+    context.lineWidth = Math.max(2 / zoom.value, 0.8);
+    context.strokeRect(-width / 2, -height / 2, width, height);
+  }
   context.restore();
 }
 
 /** 画禁止区域（半透明红块 + 边框），按各自的 `rotation` 绕中心转。 */
 function paintForbiddenAreas(context: CanvasRenderingContext2D) {
-  for (const area of activeAreas.value) {
+  const list = activeAreas.value;
+  for (let index = 0; index < list.length; index++) {
+    const area = list[index];
     paintAreaRect(
       context,
       area.center,
       area.width,
       area.height,
-      area.rotation ?? 0
+      area.rotation ?? 0,
+      false,
+      areaKey(area, index) === activeAreaKey.value
     );
   }
+}
+
+/**
+ * 在**视图坐标**里给每块禁止区域打序号（与右侧列表顺序一致）。
+ *
+ * 不套 `drawOnRaster` 的旋转：数字始终正着看；字号按 zoom 反向缩放，
+ * 屏幕上大小恒定（zoom 变化时要重画，见文件末尾的 watch）。
+ */
+function paintAreaLabels(context: CanvasRenderingContext2D) {
+  const list = activeAreas.value;
+  if (!list.length) return;
+  const basePx = Math.min(Math.max(13 / zoom.value, 7), 40);
+  context.save();
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.lineJoin = "round";
+  for (let index = 0; index < list.length; index++) {
+    const area = list[index];
+    if (!inRaster(area.center)) continue;
+    const point = rasterToCanvas(area.center);
+    const active = areaKey(area, index) === activeAreaKey.value;
+    const fontPx = active ? basePx * 1.25 : basePx;
+    context.font = `600 ${fontPx}px ui-sans-serif, system-ui, sans-serif`;
+    context.lineWidth = Math.max(fontPx / 4, 1);
+    context.strokeStyle = "rgba(15, 23, 42, 0.9)";
+    context.fillStyle = active ? "#ffffff" : "#fecdd3";
+    const label = String(index + 1);
+    context.strokeText(label, point.x, point.y);
+    context.fillText(label, point.x, point.y);
+  }
+  context.restore();
+}
+
+/** 某个栅格坐标是否落在区域内（与后端 `point_in_forbidden` 同一套几何）。 */
+function pointInArea(point: { x: number; y: number }, area: MapForbiddenArea) {
+  const dx = point.x - area.center.x;
+  const dy = point.y - area.center.y;
+  const rotation = area.rotation ?? 0;
+  const sin = Math.sin(rotation);
+  const cos = Math.cos(rotation);
+  // 反向旋转到矩形自身坐标系
+  const localX = dx * cos + dy * sin;
+  const localY = -dx * sin + dy * cos;
+  return (
+    Math.abs(localX) <= area.width / 2 && Math.abs(localY) <= area.height / 2
+  );
+}
+
+/** 命中最上层（后画在上）的那块区域；点空白返回 null。 */
+function hitTestArea(point: { x: number; y: number }) {
+  const rows = areaRows.value;
+  for (let index = rows.length - 1; index >= 0; index--) {
+    if (pointInArea(point, rows[index].area)) return rows[index];
+  }
+  return null;
+}
+
+/** 把视口滚到某块区域的中心（列表点击定位用）。 */
+function focusArea(area: MapForbiddenArea) {
+  const viewport = viewportRef.value;
+  if (!viewport) return;
+  const point = rasterToCanvas(area.center);
+  viewport.scrollLeft =
+    point.x * zoom.value + CANVAS_MARGIN - viewport.clientWidth / 2;
+  viewport.scrollTop =
+    point.y * zoom.value + CANVAS_MARGIN - viewport.clientHeight / 2;
+}
+
+/** 列表行 hover / 点击：高亮对应矩形，点击时顺便把它滚到视口中心。 */
+function highlightArea(
+  row: { key: string; area: MapForbiddenArea },
+  focus = false
+) {
+  activeAreaKey.value = row.key;
+  if (focus) focusArea(row.area);
+  render();
+  // 从画布点中的行可能在列表可视区外：滚到最近处（不抢页面滚动）
+  nextTick(() => {
+    const key = row.key;
+    areaRowsRef.value
+      ?.querySelector(`[data-key="${key}"]`)
+      ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  });
+}
+
+function clearHighlight() {
+  if (!activeAreaKey.value) return;
+  activeAreaKey.value = null;
+  render();
+}
+
+/** 屏幕事件 → 命中的区域行（不在图上 / 没命中返回 null）。 */
+function areaRowAtEvent(event: MouseEvent | PointerEvent) {
+  const canvas = canvasRef.value;
+  if (!canvas) return null;
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  const view = {
+    x: ((event.clientX - rect.left) / rect.width) * canvas.width,
+    y: ((event.clientY - rect.top) / rect.height) * canvas.height
+  };
+  const point = canvasToRasterRaw(view);
+  if (!inRaster(point)) return null;
+  return hitTestArea(point);
+}
+
+/** 浏览模式点图：选中那块（与右侧列表联动）。 */
+function selectAreaAt(event: PointerEvent) {
+  const row = areaRowAtEvent(event);
+  if (row) highlightArea(row);
+  else clearHighlight();
+}
+
+/** 「删区域」点图：删掉点到的那块（保存后才会改栅格）。 */
+function removeAreaAt(event: PointerEvent) {
+  const row = areaRowAtEvent(event);
+  if (!row) {
+    message("这里没有禁止区域", { type: "info" });
+    return;
+  }
+  removeArea(row.area);
+  message(`已删除区域 ${row.no}（点「保存」后栅格才会还原）`, { type: "info" });
 }
 
 /** 画正在拖拽的矩形（画布坐标，屏幕上一定是轴对齐的）。 */
@@ -632,6 +835,11 @@ watch(rotation, () => {
   if (rotateState) nextTick(applyRotatePin);
 });
 
+// 序号字号按 zoom 反向缩放（屏幕上恒定大小）：缩放后要重画一次
+watch(zoom, () => {
+  if (baseImage) render();
+});
+
 /** 旋转后外接矩形会往外撑：把地图中心钉回手势开始时那个屏幕位置。 */
 function applyRotatePin() {
   const viewport = viewportRef.value;
@@ -684,6 +892,17 @@ function onPointerDown(event: PointerEvent) {
   if (event.button !== 0) return;
   // 旋转的起手交给 viewport（canvas 外面那块深色区域也能转，且事件会冒泡上来）
   if (tool.value === "rotate") return;
+  // 点选 / 点删在**按下**时处理：平移会给 viewport 设 pointer capture，
+  // 随后那次 click 的 target 不一定还是 canvas，挂在 click 上会漏。
+  if (tool.value === "pan" || tool.value === "remove") {
+    if (tool.value === "remove") {
+      if (canEdit.value) removeAreaAt(event);
+    } else {
+      // 已发布 / 已归档的图也允许点一下看是哪块
+      selectAreaAt(event);
+    }
+    return;
+  }
   if (!canEdit.value) return;
   if (tool.value === "forbidden") {
     const canvas = canvasRef.value;
@@ -828,9 +1047,14 @@ function onViewportPointerMove(event: PointerEvent) {
 }
 
 function undo() {
-  // 优先撤销还没保存的禁止区域，再撤销笔画
+  // 优先撤销还没保存的禁止区域，再撤销「刚删掉的已有区域」，最后撤销笔画
   if (pendingAreas.value.length) {
     pendingAreas.value.pop();
+    render();
+    return;
+  }
+  if (removedAreaIds.value.length) {
+    removedAreaIds.value.pop();
     render();
     return;
   }
@@ -848,7 +1072,27 @@ function removeArea(area: MapForbiddenArea) {
   } else if (!removedAreaIds.value.includes(area.id)) {
     removedAreaIds.value.push(area.id);
   }
+  activeAreaKey.value = null;
   render();
+}
+
+/** 一次删掉本次视图里的全部区域（保存后才落盘，撤销 / 放弃都能退回）。 */
+function clearAllAreas() {
+  if (!canEdit.value || !areaRows.value.length) return;
+  ElMessageBox.confirm(
+    `确定要删除全部 ${areaRows.value.length} 块禁止区域？点「保存」后栅格才会按建图原图还原（没保存前可用「放弃」整体退回）。`,
+    "清空禁止区域",
+    { type: "warning", confirmButtonText: "全部删除", cancelButtonText: "取消" }
+  )
+    .then(() => {
+      pendingAreas.value = [];
+      removedAreaIds.value = savedAreas.value
+        .map(area => area.id)
+        .filter((id): id is number => typeof id === "number");
+      activeAreaKey.value = null;
+      render();
+    })
+    .catch(() => {});
 }
 
 function discard() {
@@ -903,6 +1147,7 @@ async function save() {
         savedAreas.value = data.forbiddenAreas ?? [];
         pendingAreas.value = [];
         removedAreaIds.value = [];
+        activeAreaKey.value = null;
         latest = data;
       } finally {
         areaSaving.value = false;
@@ -1021,6 +1266,10 @@ defineExpose({ open });
             <el-icon><ForbiddenIcon /></el-icon>
             禁止区域
           </el-radio-button>
+          <el-radio-button value="remove" :disabled="!canEdit">
+            <el-icon><DeleteIcon /></el-icon>
+            删区域
+          </el-radio-button>
           <el-radio-button value="rotate">
             <el-icon><RotateIcon /></el-icon>
             旋转
@@ -1039,11 +1288,21 @@ defineExpose({ open });
 
         <el-tooltip
           v-if="tool === 'forbidden'"
-          content="在图上按住左键拖出一个矩形 = 禁止区域（栅格会被刷成「占据」，导航规划绕开它）。保存后点「下发到狗体」写回本体，遥控器上也会看到这块红色区域。"
+          content="在图上按住左键拖出一个矩形 = 禁止区域（栅格会被刷成「占据」，导航规划绕开它）。在图上点已有的红框可以选中它（与右侧列表联动）。保存后点「下发到狗体」写回本体，遥控器上也会看到这块红色区域。"
           placement="top"
         >
           <span class="forbidden-hint">
             拖拽画矩形 · 已有 {{ activeAreas.length }} 块
+          </span>
+        </el-tooltip>
+
+        <el-tooltip
+          v-if="tool === 'remove'"
+          content="在图上点一下已有的红色区域就能删掉它（也可以点右侧列表行的「删除」）。保存后栅格才会按建图原图还原；删错了用「撤销」找回。"
+          placement="top"
+        >
+          <span class="forbidden-hint">
+            在图上点哪块删哪块 · 已有 {{ activeAreas.length }} 块
           </span>
         </el-tooltip>
 
@@ -1069,19 +1328,9 @@ defineExpose({ open });
           <span class="value">{{ brushRadius }}px</span>
         </div>
 
-        <div v-if="activeAreas.length" class="forbidden-list">
-          <el-tag
-            v-for="(area, index) in activeAreas"
-            :key="area.id ?? `new-${index}`"
-            type="danger"
-            effect="plain"
-            size="small"
-            closable
-            @close="removeArea(area)"
-          >
-            {{ area.id ? `#${area.id}` : "新" }}
-            {{ Math.round(area.width) }}×{{ Math.round(area.height) }}px
-          </el-tag>
+        <div v-if="activeAreas.length" class="forbidden-count">
+          禁止区域 {{ activeAreas.length }} 块（画布上标着序号，右侧可定位 /
+          删除）
         </div>
 
         <div class="spacer" />
@@ -1175,38 +1424,84 @@ defineExpose({ open });
         <span v-if="dirtyAny" class="dirty">有未保存的擦除 / 禁止区域</span>
       </div>
 
-      <div
-        ref="viewportRef"
-        class="map-viewport"
-        :class="{
-          'is-pan': tool === 'pan',
-          'is-rotate': tool === 'rotate',
-          'is-erase': tool === 'eraser' && canEdit
-        }"
-        @wheel.prevent="onWheel"
-        @pointerdown="onViewportPointerDown"
-        @pointermove="onViewportPointerMove"
-        @pointerup="onPointerUp"
-        @pointercancel="onPointerUp"
-      >
-        <div class="map-canvas-wrap">
-          <canvas
-            ref="canvasRef"
-            :style="{
-              width: `${viewWidth * zoom}px`,
-              height: `${viewHeight * zoom}px`
-            }"
-            @pointerdown="onPointerDown"
-            @pointermove="onPointerMove"
-            @pointerup="onPointerUp"
-            @pointercancel="onPointerUp"
-            @pointerleave="onPointerLeave"
-          />
-          <div
-            v-show="tool === 'eraser' && canEdit && cursor.visible"
-            class="brush-cursor"
-            :style="brushStyle"
-          />
+      <div class="map-body">
+        <div
+          ref="viewportRef"
+          class="map-viewport"
+          :class="{
+            'is-pan': tool === 'pan',
+            'is-rotate': tool === 'rotate',
+            'is-erase': tool === 'eraser' && canEdit,
+            'is-remove': tool === 'remove' && canEdit
+          }"
+          @wheel.prevent="onWheel"
+          @pointerdown="onViewportPointerDown"
+          @pointermove="onViewportPointerMove"
+          @pointerup="onPointerUp"
+          @pointercancel="onPointerUp"
+        >
+          <div class="map-canvas-wrap">
+            <canvas
+              ref="canvasRef"
+              :style="{
+                width: `${viewWidth * zoom}px`,
+                height: `${viewHeight * zoom}px`
+              }"
+              @pointerdown="onPointerDown"
+              @pointermove="onPointerMove"
+              @pointerup="onPointerUp"
+              @pointercancel="onPointerUp"
+              @pointerleave="onPointerLeave"
+            />
+            <div
+              v-show="tool === 'eraser' && canEdit && cursor.visible"
+              class="brush-cursor"
+              :style="brushStyle"
+            />
+          </div>
+        </div>
+
+        <div v-if="areaRows.length" class="area-panel">
+          <div class="area-panel-head">
+            <span>禁止区域 {{ areaRows.length }} 块</span>
+            <el-button
+              size="small"
+              type="danger"
+              link
+              :disabled="!canEdit"
+              @click="clearAllAreas"
+              >清空</el-button
+            >
+          </div>
+          <div ref="areaRowsRef" class="area-rows">
+            <div
+              v-for="row in areaRows"
+              :key="row.key"
+              :data-key="row.key"
+              class="area-row"
+              :class="{ active: row.key === activeAreaKey }"
+              @mouseenter="highlightArea(row)"
+              @mouseleave="clearHighlight"
+              @click="highlightArea(row, true)"
+            >
+              <span class="no">{{ row.no }}</span>
+              <span class="text">
+                <span class="size">{{ row.sizeText }}</span>
+                <span class="muted">{{ row.centerText }}</span>
+              </span>
+              <el-button
+                size="small"
+                type="danger"
+                link
+                :disabled="!canEdit"
+                @click.stop="removeArea(row.area)"
+                >删除</el-button
+              >
+            </div>
+          </div>
+          <div class="area-panel-foot">
+            删除后需点「保存」才会按建图原图还原该块栅格；没保存可用「放弃」整体退回。
+          </div>
         </div>
       </div>
     </div>
@@ -1275,13 +1570,10 @@ defineExpose({ open });
     white-space: nowrap;
   }
 
-  .forbidden-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    max-width: 380px;
-    max-height: 56px;
-    overflow-y: auto;
+  .forbidden-count {
+    font-size: var(--dog-font-sm);
+    color: var(--el-color-danger);
+    white-space: nowrap;
   }
 
   .spacer {
@@ -1312,8 +1604,97 @@ defineExpose({ open });
   }
 }
 
+.map-body {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+  min-height: 0;
+}
+
+.area-panel {
+  display: flex;
+  flex: 0 0 268px;
+  flex-direction: column;
+  max-height: 62vh;
+  border: 1px solid var(--el-border-color);
+  border-radius: 6px;
+
+  .area-panel-head {
+    display: flex;
+    flex: none;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 8px;
+    font-size: var(--dog-font-sm);
+    font-weight: 600;
+    border-bottom: 1px solid var(--el-border-color-lighter);
+  }
+
+  .area-rows {
+    flex: 1;
+    overflow-y: auto;
+  }
+
+  .area-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    padding: 5px 8px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--el-border-color-lighter);
+
+    &:hover {
+      background-color: var(--el-color-danger-light-9);
+    }
+
+    &.active {
+      background-color: var(--el-color-danger-light-8);
+      box-shadow: inset 3px 0 0 var(--el-color-danger);
+    }
+
+    .no {
+      display: inline-flex;
+      flex: none;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      font-size: var(--dog-font-xs);
+      font-weight: 600;
+      color: #fff;
+      background-color: var(--el-color-danger);
+      border-radius: 50%;
+    }
+
+    .text {
+      display: flex;
+      flex: 1;
+      flex-direction: column;
+      min-width: 0;
+      font-size: var(--dog-font-xs);
+      line-height: 1.35;
+      color: var(--dog-text-primary);
+
+      .muted {
+        color: var(--dog-text-secondary);
+      }
+    }
+  }
+
+  .area-panel-foot {
+    flex: none;
+    padding: 6px 8px;
+    font-size: var(--dog-font-xs);
+    line-height: 1.4;
+    color: var(--dog-text-secondary);
+    border-top: 1px solid var(--el-border-color-lighter);
+  }
+}
+
 .map-viewport {
   position: relative;
+  flex: 1;
+  min-width: 0;
   height: 62vh;
   overflow: auto;
   touch-action: none;
@@ -1338,6 +1719,10 @@ defineExpose({ open });
 
   &.is-erase {
     cursor: none;
+  }
+
+  &.is-remove {
+    cursor: crosshair;
   }
 
   &.is-rotate {
