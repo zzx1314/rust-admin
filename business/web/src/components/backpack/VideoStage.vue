@@ -12,6 +12,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { captureVideoPoster, getVideoPoster, setVideoPoster } from "@/composables/useVideoPoster";
 import { startWhep, type WhepPhase, type WhepSession } from "@/lib/whep";
+import { relayRoom } from "@/lib/videoNaming";
 import type { BackpackBox } from "@/api/backpack";
 import AppIcon from "@/components/AppIcon.vue";
 
@@ -20,6 +21,12 @@ const props = defineProps<{
   whepBase: string | null;
   /** mediamtx path */
   stream: string;
+  /**
+   * 设备编号（多设备部署）：只用来给「最后一帧」分槽 ——
+   * 直连板端时 mediamtx 的 path 是板子自己的（不带设备号），
+   * 换设备靠的就是 `whepBase` 不同。不传 = 默认设备。
+   */
+  device?: string | null;
   title: string;
   /** 是否在 AI 识别中（画角标 + 「AI」徽标） */
   aiActive: boolean;
@@ -57,7 +64,9 @@ const phase = ref<WhepPhase>("connecting");
  * 上一路的最后一帧：切通道 / 从平台中继切回直连时，WHEP 要 0.3~2s 才出画，
  * 这期间用共享的最后一帧顶着 —— 现场才不会说「一切就卡住」。
  */
-const poster = ref(getVideoPoster());
+/** 静帧槽位：换设备时不能顶上一台的最后一帧 */
+const posterKey = () => relayRoom(props.device, props.stream);
+const poster = ref(getVideoPoster(undefined, posterKey()));
 /** 静帧最多顶 6s：WHEP 真连不上时要露出「连接中/失败」，不能拿上一帧冒充直播 */
 const POSTER_MAX_MS = 6_000;
 let posterTimer: ReturnType<typeof setTimeout> | null = null;
@@ -118,7 +127,7 @@ function restart() {
   const shot = captureVideoPoster(videoEl.value);
   if (shot) {
     poster.value = shot;
-    setVideoPoster(shot);
+    setVideoPoster(shot, posterKey());
     armPosterTimeout();
   }
   session?.close();
@@ -149,7 +158,7 @@ function publishSize() {
     emit("meta", { w: element.videoWidth, h: element.videoHeight });
 }
 
-watch(() => [props.whepBase, props.stream], restart);
+watch(() => [props.whepBase, props.device, props.stream], restart);
 
 /* ---------------- 画框叠加（cover 反算 + 缓动） ---------------- */
 
@@ -275,7 +284,7 @@ function snapshot() {
 
 onMounted(() => {
   // 从别的页面 / 另一条通道切过来时，先顶上一帧（有时效，见 armPosterTimeout）
-  poster.value = getVideoPoster();
+  poster.value = getVideoPoster(undefined, posterKey());
   armPosterTimeout();
   document.addEventListener("fullscreenchange", onFullscreenChange);
   if (videoEl.value) {
@@ -301,7 +310,7 @@ onBeforeUnmount(() => {
   clearPoster();
   // 交给共享缓存：切到平台中继时由 VideoPlayer 先顶这一帧
   const shot = captureVideoPoster(videoEl.value);
-  if (shot) setVideoPoster(shot);
+  if (shot) setVideoPoster(shot, posterKey());
   session?.close();
   session = null;
   resizeObserver?.disconnect();

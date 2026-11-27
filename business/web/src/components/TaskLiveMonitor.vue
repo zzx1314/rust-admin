@@ -81,6 +81,7 @@ const healthNote = computed(() => {
         <FrontCameraVideo
           v-if="device"
           :title="`${device.deviceId} · 前置摄像头`"
+          :device="device.deviceId"
         />
         <div v-else class="tlmon-empty">
           <AppIcon name="video" />

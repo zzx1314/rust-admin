@@ -14,64 +14,91 @@
  *
  * 状态共享：`/api/backpack/status` 要聚合板端四个接口，多开几个抽屉/弹窗时
  * 不能各拉一份。这里做进程内缓存 + 单飞（in-flight 合并），TTL 15s。
+ *
+ * **多设备**（2026-11-26）：调用方可以带设备编号（设备抽屉 / 任务监控天然知道是哪台狗）。
+ * 但单机部署里板端 relay 没有 `RELAY_DEVICE_ID`，房间还是 `bp:dogcam`、平台也没配
+ * `[[backpack.devices]]` —— 这时代码里传进来的设备号在平台上是「不存在」的，
+ * 必须落回默认设备，否则抽屉会对着一条不存在的流永远「起流中」。
+ * 判据就是 `GET /api/backpack/devices`（配置清单 + 实际在线的推流房间）。
  */
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import {
   backpackApi,
   loadStatus,
-  type BackpackStatus,
-  type BackpackVideoRoom
+  type BackpackDevice,
+  type BackpackStatus
 } from "@/api/backpack";
 import { isPrivateOrigin } from "@/utils/runtime";
 
 /** 前置通道在 mediamtx / 平台中继里的固定名字（与板端 `mediamtx.yml` 一致） */
 export const FRONT_STREAM = "dogcam";
-/** 平台中继的房间名前缀（与服务端 `video.rs::BACKPACK_ROOM_PREFIX` 一致） */
-const RELAY_ROOM_PREFIX = "bp:";
 
 /** 多个组件共享一份 status：15s 内的重复调用直接用缓存 */
 const SHARE_TTL_MS = 15_000;
 /** 打开页面期间的低频刷新：换网 / 板端重启后不用手动刷新 */
 const POLL_MS = 20_000;
 
-let shared: { at: number; data: BackpackStatus } | null = null;
-let pending: Promise<BackpackStatus> | null = null;
-/** 中继房间快照（同样共享缓存）：判断板端 relay 是否在线 */
-let sharedRooms: { at: number; rooms: BackpackVideoRoom[] } | null = null;
-let pendingRooms: Promise<BackpackVideoRoom[]> | null = null;
+/**
+ * status 缓存**按设备编号分开**：多设备部署时设备抽屉 / 任务监控 / 实时视频页会同时看
+ * 不同的狗，共用一份会把别人的相机清单与 AI 状态显示出来。
+ * 键是规范化后的设备编号，空串 = 默认设备。
+ */
+const statusCache = new Map<string, { at: number; data: BackpackStatus }>();
+const statusPending = new Map<string, Promise<BackpackStatus>>();
+/** 设备清单（配置里的 + 实际在线的推流房间）：全局一份 */
+let devicesCache: { at: number; list: BackpackDevice[] } | null = null;
+let devicesPending: Promise<BackpackDevice[]> | null = null;
 
-async function sharedStatus(force = false): Promise<BackpackStatus> {
-  if (!force && shared && Date.now() - shared.at < SHARE_TTL_MS) return shared.data;
+function cacheKey(device?: string | null): string {
+  return (device ?? "").trim();
+}
+
+async function sharedStatus(device: string, force = false): Promise<BackpackStatus> {
+  const cached = statusCache.get(device);
+  if (!force && cached && Date.now() - cached.at < SHARE_TTL_MS) return cached.data;
+  let pending = statusPending.get(device);
   if (!pending) {
-    pending = loadStatus()
+    pending = loadStatus(device)
       .then(data => {
-        shared = { at: Date.now(), data };
+        statusCache.set(device, { at: Date.now(), data });
         return data;
       })
       .finally(() => {
-        pending = null;
+        statusPending.delete(device);
       });
+    statusPending.set(device, pending);
   }
   return pending;
 }
 
-async function sharedRelayRooms(force = false): Promise<BackpackVideoRoom[]> {
-  if (!force && sharedRooms && Date.now() - sharedRooms.at < SHARE_TTL_MS) {
-    return sharedRooms.rooms;
+async function sharedDevices(force = false): Promise<BackpackDevice[]> {
+  if (!force && devicesCache && Date.now() - devicesCache.at < SHARE_TTL_MS) {
+    return devicesCache.list;
   }
-  if (!pendingRooms) {
-    pendingRooms = backpackApi
-      .videoState()
+  if (!devicesPending) {
+    devicesPending = backpackApi
+      .devices()
       .then(data => {
-        const rooms = data.rooms ?? [];
-        sharedRooms = { at: Date.now(), rooms };
-        return rooms;
+        const list = data.devices ?? [];
+        devicesCache = { at: Date.now(), list };
+        return list;
       })
       .finally(() => {
-        pendingRooms = null;
+        devicesPending = null;
       });
   }
-  return pendingRooms;
+  return devicesPending;
+}
+
+/**
+ * 实际能用的设备编号：清单里没有这台就落回默认设备。
+ *
+ * 单机部署（没有 `[[backpack.devices]]`、relay 也没配 `RELAY_DEVICE_ID`）时，
+ * 抽屉传进来的 `deviceId` 在平台设备清单里不存在 → 走默认设备的 `bp:dogcam`。
+ */
+function resolveDevice(wanted: string, list: BackpackDevice[]): string {
+  if (!wanted) return "";
+  return list.some(item => item.id === wanted) ? wanted : "";
 }
 
 /**
@@ -89,7 +116,7 @@ export type FrontCameraPath = "direct" | "relay" | "none";
 export function frontCameraPath(
   status: BackpackStatus | null,
   relayOnline: boolean,
-  /** 有没有拿到「中继房间」快照；`false` = 还不知道（接口刚失败过），此时不能判成离线 */
+  /** 有没有拿到「设备清单」快照；`false` = 还不知道（接口刚失败过），此时不能判成离线 */
   relayKnown = true
 ): FrontCameraPath {
   if (!status?.configured) return "none";
@@ -102,33 +129,38 @@ export function frontCameraPath(
   return isPrivateOrigin() && status.webrtc.base ? "direct" : "relay";
 }
 
-export function useFrontCamera() {
+/**
+ * `device` = 设备编号（多设备部署）：决定 Agent 地址、WHEP 基址与中继房间名。
+ * 空 = 默认设备（旧单机部署，行为与以前完全一致）。
+ *
+ * 返回的 `device` 是**解析后**真正在用的编号（可能因为清单里没有而落回 `""`），
+ * 播放器要用它去拼房间名 —— 直接拿调用方传进来的值会对着不存在的流等起流。
+ */
+export function useFrontCamera(device?: () => string | null | undefined) {
   const status = ref<BackpackStatus | null>(null);
-  const rooms = ref<BackpackVideoRoom[]>([]);
-  /** 房间快照是否拿到过：接口偶发失败时保留上一次结果，别把「中继在线」误判成离线 */
-  const roomsKnown = ref(false);
+  const devices = ref<BackpackDevice[]>([]);
+  /** 设备清单是否拿到过：接口偶发失败时保留上一次结果，别把「中继在线」误判成离线 */
+  const devicesKnown = ref(false);
+  /** 解析后的设备编号（空 = 默认设备） */
+  const activeDevice = ref("");
   const error = ref("");
   let timer: ReturnType<typeof setInterval> | null = null;
 
   async function refresh(force = false) {
-    const [statusResult, roomsResult] = await Promise.allSettled([
-      sharedStatus(force),
-      sharedRelayRooms(force)
-    ]);
-    if (statusResult.status === "fulfilled") {
-      status.value = statusResult.value;
-      error.value = "";
-    } else {
-      error.value =
-        statusResult.reason instanceof Error
-          ? statusResult.reason.message
-          : "读取背包状态失败";
+    // 先拿设备清单：它决定「调用方要的那台在平台里有没有」
+    try {
+      devices.value = await sharedDevices(force);
+      devicesKnown.value = true;
+    } catch {
+      // 清单失败**不能清空**：清空会让 relayOnline 变假 → 页面切到直连 →
+      // 公网页面必然「连不上板端视频服务（mediamtx :8889）」。保留上一次结果。
     }
-    // 房间快照失败**不能清空**：清空会让 `relayOnline` 变假 → 页面切到直连 →
-    // 公网页面必然「连不上板端视频服务（mediamtx :8889）」。保留上一次结果、标记未知。
-    if (roomsResult.status === "fulfilled") {
-      rooms.value = roomsResult.value;
-      roomsKnown.value = true;
+    activeDevice.value = resolveDevice(cacheKey(device?.()), devices.value);
+    try {
+      status.value = await sharedStatus(activeDevice.value, force);
+      error.value = "";
+    } catch (cause) {
+      error.value = cause instanceof Error ? cause.message : "读取背包状态失败";
     }
   }
 
@@ -147,16 +179,19 @@ export function useFrontCamera() {
     }
   });
 
-  /** 板端 relay 是否连着平台（决定中继能不能看） */
+  /** 这台设备的前置通道是否在线（板端 relay 连着平台，决定中继能不能看） */
   const relayOnline = computed(() =>
-    rooms.value.some(
-      room => room.room === `${RELAY_ROOM_PREFIX}${FRONT_STREAM}` && room.publisher
-    )
+    devices.value
+      .find(item => item.id === activeDevice.value)
+      ?.streams.includes(FRONT_STREAM) ?? false
   );
 
-  const path = computed(() =>
-    frontCameraPath(status.value, relayOnline.value, roomsKnown.value)
-  );
+  const path = computed(() => {
+    // 现场直连只对默认设备有意义：部署级 `webrtc` 基址只指向其中一台板子，
+    // 多设备时用它「直连」另一台就是看到别的狗的画面（比黑屏更糟）。
+    if (activeDevice.value) return "relay";
+    return frontCameraPath(status.value, relayOnline.value, devicesKnown.value);
+  });
   const whepBase = computed(() => status.value?.webrtc.base ?? null);
 
   /** 直连模式下压在画面中央的可读原因（中继模式的报错由 VideoPlayer 自己显示） */
@@ -179,5 +214,5 @@ export function useFrontCamera() {
     return "";
   });
 
-  return { path, whepBase, hint, detail };
+  return { path, whepBase, hint, detail, device: activeDevice };
 }

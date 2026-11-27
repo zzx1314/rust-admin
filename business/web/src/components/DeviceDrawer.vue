@@ -449,7 +449,7 @@ async function emergencyStop() {
       <!-- ── 实时监控 ─────────────────────────────── -->
       <template v-if="tab === 'monitor'">
         <!-- 与「实时视频」页的前置摄像头同源同路（背包 dogcam） -->
-        <FrontCameraVideo :title="`${device.deviceId} · 前置摄像头`" />
+        <FrontCameraVideo :title="`${device.deviceId} · 前置摄像头`" :device="device.deviceId" />
 
         <div class="drawer-section-head">
           <div class="card-title"><AppIcon name="activity" />运行指标</div>
@@ -600,7 +600,7 @@ async function emergencyStop() {
       <template v-else>
         <div class="teleop-layout">
           <div class="teleop-visual">
-            <FrontCameraVideo :title="`${device.deviceId} · 前置摄像头`" />
+            <FrontCameraVideo :title="`${device.deviceId} · 前置摄像头`" :device="device.deviceId" />
             <div class="visual-strip">
               <span class="chip"><AppIcon name="battery" />{{ device.battery }}%</span>
               <span class="chip"><AppIcon name="activity" />{{ device.robotMode || "—" }}</span>

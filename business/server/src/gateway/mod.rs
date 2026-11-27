@@ -302,8 +302,11 @@ async fn route_message(
         "agent_hello" => on_agent_hello(ctx, device_id.as_deref(), message.payload).await,
         // 隧道回执：唤醒 `/api/backpack/*` 那个正在等的 HTTP 请求
         "agent_result" => on_agent_result(ctx, message.payload).await,
-        // Agent SSE 事件（页面画框 / 刷新状态）：原样广播给背包页
-        "agent_event" => ctx.state.agent_tunnel.publish(&message.payload),
+        // Agent SSE 事件（页面画框 / 刷新状态）：带上来源设备转发给背包页
+        "agent_event" => ctx
+            .state
+            .agent_tunnel
+            .publish(device_id.as_deref(), &message.payload),
         // 数量核对不一致（板端已判定）：告警落库 + 企业微信
         "ai_alert" => {
             if let Some(device) = registered(device_id.as_deref(), "ai_alert") {

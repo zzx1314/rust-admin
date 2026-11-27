@@ -16,17 +16,23 @@ import VideoPlayer from "./VideoPlayer.vue";
 import VideoStage from "./backpack/VideoStage.vue";
 import { FRONT_STREAM, useFrontCamera } from "@/composables/useFrontCamera";
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     /** 直连模式下画面左上角的标题 */
     title?: string;
+    /**
+     * 设备编号（多设备部署）：决定看的是哪一台背包。
+     * 空 = 默认设备（旧单机部署），房间名仍是 `bp:dogcam`。
+     */
+    device?: string;
   }>(),
-  { title: "机器狗前置" }
+  { title: "机器狗前置", device: "" }
 );
 
 const emit = defineEmits<{ (event: "meta", size: { w: number; h: number }): void }>();
 
-const { path, whepBase, hint, detail } = useFrontCamera();
+// `device` 是**解析后**真正在用的编号（单机部署会落回默认设备），播放器要用它
+const { path, whepBase, hint, detail, device: activeDevice } = useFrontCamera(() => props.device);
 
 const emptyText = computed(() => {
   if (hint.value) return hint.value;
@@ -41,6 +47,7 @@ const emptyText = computed(() => {
       v-if="path === 'direct'"
       :whep-base="whepBase"
       :stream="FRONT_STREAM"
+      :device="activeDevice"
       :title="title"
       :ai-active="false"
       :ai-badge="''"
@@ -54,7 +61,12 @@ const emptyText = computed(() => {
     />
 
     <!-- 跨网段 / 公网入口：板端 relay 推到平台，浏览器同源播放 -->
-    <VideoPlayer v-else-if="path === 'relay'" :stream="FRONT_STREAM" @meta="size => emit('meta', size)" />
+    <VideoPlayer
+      v-else-if="path === 'relay'"
+      :stream="FRONT_STREAM"
+      :device="activeDevice"
+      @meta="size => emit('meta', size)"
+    />
 
     <!-- 未接背包：给配置说明，不放一块永远黑屏的播放器 -->
     <div v-else class="front-cam-empty">

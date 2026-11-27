@@ -27,7 +27,7 @@
 use crate::app::AppState;
 use crate::auth::Claims;
 use crate::error::AppError;
-use crate::video::{BACKPACK_MEDIAMTX_PATH_PREFIX, BACKPACK_STREAMS};
+use crate::video::{BACKPACK_STREAMS, mediamtx_path_of, normalize_device};
 use axum::body::{Body, Bytes};
 use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
@@ -54,7 +54,14 @@ fn client() -> &'static reqwest::Client {
     })
 }
 
-/// `OPTIONS|POST|PATCH|DELETE /api/backpack/whep/<stream>/whep[/<session>]`
+/// `OPTIONS|POST|PATCH|DELETE /api/backpack/whep/<stream>/whep[/<session>]?device=<id>`
+///
+/// **路径模板是固定的**，设备编号走查询串（和 `token` 一样）：
+/// 部署侧的 nginx / 抓包 / 日志规则只要认这一条 `/api/backpack/whep/` 前缀即可，
+/// 不用为每台背包再拼一段。`<device>` 是板端 relay 自动上报的设备编号，
+/// 同一个 `cam0` 在多台背包上对应不同的 mediamtx path
+/// （`bp_<SN-A>_cam0` / `bp_<SN-B>_cam0`）；不带 `device` 走旧路径 `bp_<stream>`，
+/// 现场已部署的单机不受影响。
 ///
 /// `<stream>` 必须在白名单里（与观看通道共用 [`BACKPACK_STREAMS`]）：路径来自 URL，
 /// 不限制就能被拿来让 mediamtx 创建任意 path。
@@ -70,6 +77,14 @@ pub async fn proxy(
     // 先校验路径、再看部署配置：白名单与端点形状跟「有没有开 mediamtx」无关，
     // 顺序反过来会让 `/whep/backdoor/...` 也回「本部署没开 WebRTC」这种误导性文案。
     let (stream, tail) = split_path(&rest)?;
+    // 设备编号从查询串取（与 `token` 同一个位置）。它只允许 `[A-Za-z0-9._-]`，
+    // 不需要百分号解码 —— `encodeURIComponent` 对这些字符原样输出。
+    let device = match query_param(uri.query().unwrap_or_default(), "device").map(str::trim) {
+        Some(raw) if !raw.is_empty() => Some(normalize_device(raw).ok_or_else(|| {
+            AppError::BadRequest(format!("设备编号不合法：{raw}（只允许字母数字与 . _ -）"))
+        })?),
+        _ => None,
+    };
     if !BACKPACK_STREAMS.contains(&stream.as_str()) {
         return Err(AppError::BadRequest(format!("未知的背包通道：{stream}")));
     }
@@ -85,7 +100,7 @@ pub async fn proxy(
         ));
     };
 
-    let upstream_url = upstream_url(&base, &stream, &tail);
+    let upstream_url = upstream_url(&base, device.as_deref(), &stream, &tail);
     debug!("WHEP {method} {upstream_url}");
 
     let mut request = client().request(method.clone(), &upstream_url);
@@ -117,9 +132,11 @@ pub async fn proxy(
     let location = upstream.headers().get(header::LOCATION).and_then(|value| {
         let raw = value.to_str().ok()?;
         let session = raw.trim_end_matches('/').rsplit('/').next()?;
+        // 路径保持固定模板，设备号继续走查询串：收尾的 DELETE 必须打到同一台设备的
+        // 会话上（丢了 device 会删不掉自己的会话，还可能误删别人的）
         Some(format!(
             "/api/backpack/whep/{stream}/whep/{session}{}",
-            token_query(uri.query())
+            session_query(device.as_deref(), uri.query())
         ))
     });
     let payload = upstream.bytes().await.unwrap_or_default();
@@ -135,36 +152,49 @@ pub async fn proxy(
         .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response()))
 }
 
-/// 把原请求里的 `?token=` 原样带到改写后的会话地址上
+/// 改写后的会话地址的查询串：`?token=…&device=…`
 ///
 /// `whep.ts` 的会话地址来自 `Location`，它不会自己再拼令牌；不带就意味着收尾的
 /// `DELETE` 会被 `require_auth` 挡在 401 上，mediamtx 里留一条僵尸会话到超时。
-fn token_query(query: Option<&str>) -> String {
+/// `device` 用**解析后**的值重建（而不是原样回显），非法值早就在上面 400 掉了。
+fn session_query(device: Option<&str>, query: Option<&str>) -> String {
+    match (query_param(query.unwrap_or_default(), "token"), device) {
+        (None, None) => String::new(),
+        (Some(token), None) => format!("?token={token}"),
+        (None, Some(device)) => format!("?device={device}"),
+        (Some(token), Some(device)) => format!("?token={token}&device={device}"),
+    }
+}
+
+/// 从原始查询串里取一个参数（只认第一个，值原样返回）
+fn query_param<'q>(query: &'q str, name: &str) -> Option<&'q str> {
     query
-        .and_then(|query| {
-            query
-                .split('&')
-                .find(|pair| pair.starts_with("token="))
-                .map(|pair| format!("?{pair}"))
-        })
-        .unwrap_or_default()
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == name)
+        .map(|(_, value)| value)
 }
 
 /// 上游地址：`{mediamtx}/bp_<stream>/whep[/<session>]`
+/// （带设备号时是 `bp_<device>_<stream>`，见 [`crate::video::mediamtx_path_of`]）
 ///
 /// ⚠️ `tail` 里**已经含** `/whep`（那是 mediamtx 的 WHEP 端点），不能再拼一次 ——
 /// 多余的那一段会被 mediamtx 当成 path 名（它的报错是
 /// `no stream is available on path 'bp_dogcam/whep'`，看着像「没推流」，其实是路径拼错）。
 /// 只有裸 `<stream>`（前面不带 `/whep`）才需要补上。
-fn upstream_url(base: &str, stream: &str, tail: &str) -> String {
+fn upstream_url(base: &str, device: Option<&str>, stream: &str, tail: &str) -> String {
     let tail = if tail.is_empty() { "/whep" } else { tail };
     format!(
-        "{base}/{BACKPACK_MEDIAMTX_PATH_PREFIX}{stream}{tail}",
+        "{base}/{path}{tail}",
         base = base.trim_end_matches('/'),
+        path = mediamtx_path_of(device, stream),
     )
 }
 
 /// `dogcam/whep/<session>` → (`dogcam`, `/whep/<session>`)
+///
+/// 只允许 `<stream>[/whep[/<session>]]`：mediamtx 的其它端点（配置 / 控制 API）
+/// 不能透出去。设备编号不走路径（见 [`proxy`] 的说明）。
 fn split_path(rest: &str) -> Result<(String, String), AppError> {
     let rest = rest.trim_matches('/');
     let mut parts = rest.splitn(2, '/');
@@ -172,7 +202,6 @@ fn split_path(rest: &str) -> Result<(String, String), AppError> {
     if stream.is_empty() {
         return Err(AppError::BadRequest("缺少通道名".to_string()));
     }
-    // 只允许 `<stream>/whep[/<session>]`：mediamtx 的其它端点（配置 / 控制 API）不能透出去
     let tail = match parts.next() {
         None | Some("") => String::new(),
         Some(tail) => format!("/{}", tail.trim_matches('/')),
@@ -210,23 +239,44 @@ mod tests {
     #[test]
     fn upstream_url_points_at_the_whep_endpoint_exactly_once() {
         assert_eq!(
-            upstream_url("http://127.0.0.1:8889", "dogcam", "/whep"),
+            upstream_url("http://127.0.0.1:8889", None, "dogcam", "/whep"),
             "http://127.0.0.1:8889/bp_dogcam/whep"
         );
         assert_eq!(
-            upstream_url("http://127.0.0.1:8889/", "dogcam", "/whep/abc-1"),
+            upstream_url("http://127.0.0.1:8889/", None, "dogcam", "/whep/abc-1"),
             "http://127.0.0.1:8889/bp_dogcam/whep/abc-1"
         );
         assert_eq!(
-            upstream_url("http://127.0.0.1:8889", "dogcam", ""),
+            upstream_url("http://127.0.0.1:8889", None, "dogcam", ""),
             "http://127.0.0.1:8889/bp_dogcam/whep"
         );
     }
 
+    /// 带设备号时上游是 `bp_<device>_<stream>`：两台背包的 `cam0` 是两条流，
+    /// 否则第二台推上来会被 mediamtx 当「同一 path 重复发布」拒掉。
     #[test]
-    fn token_query_only_forwards_token() {
-        assert_eq!(token_query(Some("token=abc&stream=x")), "?token=abc");
-        assert_eq!(token_query(Some("stream=x")), "");
-        assert_eq!(token_query(None), "");
+    fn upstream_url_carries_the_device_prefix() {
+        assert_eq!(
+            upstream_url("http://127.0.0.1:8889", Some("RD-001"), "cam0", "/whep"),
+            "http://127.0.0.1:8889/bp_RD-001_cam0/whep"
+        );
+        assert_eq!(
+            upstream_url("http://127.0.0.1:8889", Some("RD-002"), "cam0", "/whep/s-1"),
+            "http://127.0.0.1:8889/bp_RD-002_cam0/whep/s-1"
+        );
+    }
+
+    /// 会话地址的查询串：令牌必须带（收尾的 DELETE 要过鉴权），设备号也必须带
+    /// （否则删除会落到另一台设备的会话上）。
+    #[test]
+    fn session_query_carries_token_and_device() {
+        assert_eq!(
+            session_query(None, Some("token=abc&device=RD-001")),
+            "?token=abc"
+        );
+        assert_eq!(session_query(Some("RD-001"), Some("token=abc")), "?token=abc&device=RD-001");
+        assert_eq!(session_query(Some("RD-001"), None), "?device=RD-001");
+        assert_eq!(session_query(None, Some("stream=x")), "");
+        assert_eq!(session_query(None, None), "");
     }
 }

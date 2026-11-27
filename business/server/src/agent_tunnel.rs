@@ -49,6 +49,17 @@ pub const ACTIONS: [&str; 3] = ["start", "stop", "config"];
 /// 事件流里值得往平台转的类型：页面只消费这四种（框、清框、状态变化、异常）
 const FORWARDED_EVENTS: [&str; 4] = ["detect", "detect_clear", "detect_state", "detect_error"];
 
+/// 隧道事件：带上来源设备，SSE 才能只推「正在看的那一台」
+///
+/// 多背包时两台板子的 Agent 事件会混在同一条广播里：不过滤的话，
+/// 看 RD-002 的页面会画上 RD-001 的框（`detect` 里只有 `cam`，没有设备）。
+#[derive(Debug, Clone)]
+pub struct TunnelEvent {
+    /// 来源设备编号（`agent_hello` 登记的那台）；`None` = 不知道来源
+    pub device: Option<String>,
+    pub text: String,
+}
+
 /// 板端 Agent 隧道的服务端侧状态
 ///
 /// 一个进程一份：设备上线时打招呼登记（[`AgentTunnel::hello`]），页面请求进来时
@@ -60,7 +71,7 @@ pub struct AgentTunnel {
     /// 请求表：requestId → 回执通道（与指令回执同一套「登记 → 唤醒」模型）
     waiters: Mutex<HashMap<String, oneshot::Sender<Value>>>,
     /// 检出事件广播（SSE 订阅者）
-    events: broadcast::Sender<String>,
+    events: broadcast::Sender<TunnelEvent>,
     /// requestId 自增段：同一进程内唯一即可，不需要全局唯一
     seq: AtomicU64,
 }
@@ -238,7 +249,10 @@ impl AgentTunnel {
     }
 
     /// 广播一帧 Agent 事件；页面没开背包页时直接丢掉（不缓存、不补发）
-    pub fn publish(&self, event: &Value) {
+    ///
+    /// `device` 是发这条事件的设备客户端的设备码（`gateway` 里那一条连接的
+    /// `device_id`）：SSE 订阅者按它过滤，多背包才不会串台。
+    pub fn publish(&self, device: Option<&str>, event: &Value) {
         let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
         if !FORWARDED_EVENTS.contains(&kind) {
             return;
@@ -251,10 +265,13 @@ impl AgentTunnel {
             return;
         };
         // 没有订阅者时 send 会报错，属正常情况
-        let _ = self.events.send(text);
+        let _ = self.events.send(TunnelEvent {
+            device: device.map(str::to_string),
+            text,
+        });
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<String> {
+    pub fn subscribe(&self) -> broadcast::Receiver<TunnelEvent> {
         self.events.subscribe()
     }
 }
@@ -319,11 +336,27 @@ mod tests {
     async fn only_detect_events_are_broadcast() {
         let tunnel = AgentTunnel::new();
         let mut rx = tunnel.subscribe();
-        tunnel.publish(&json!({"type": "telemetry", "battery": 80}));
-        tunnel.publish(&json!({"type": "detect", "boxes": []}));
+        tunnel.publish(Some("RD-001"), &json!({"type": "telemetry", "battery": 80}));
+        tunnel.publish(Some("RD-001"), &json!({"type": "detect", "boxes": []}));
         // `recv` 只能拿到被放行的那一条：遥测不进背包页的 SSE
-        let text = rx.try_recv().expect("detect 事件应被转发");
-        assert!(text.contains("\"detect\""));
+        let event = rx.try_recv().expect("detect 事件应被转发");
+        assert!(event.text.contains("\"detect\""));
+        assert_eq!(event.device.as_deref(), Some("RD-001"));
         assert!(rx.try_recv().is_err());
+    }
+
+    /// 多背包：事件必须带来源设备，SSE 才敢按设备过滤。
+    #[tokio::test]
+    async fn events_carry_the_source_device() {
+        let tunnel = AgentTunnel::new();
+        let mut rx = tunnel.subscribe();
+        tunnel.publish(Some("RD-001"), &json!({"type": "detect", "boxes": []}));
+        tunnel.publish(None, &json!({"type": "detect_clear"}));
+        assert_eq!(rx.try_recv().unwrap().device.as_deref(), Some("RD-001"));
+        assert_eq!(
+            rx.try_recv().unwrap().device,
+            None,
+            "不知道来源时不能编一个设备"
+        );
     }
 }

@@ -126,6 +126,10 @@ export type BackpackMode = "direct" | "proxy" | "tunnel" | "none";
 
 export interface BackpackStatus {
   configured: boolean;
+  /** 设备编号（多设备部署）：空 = 默认设备（旧单机配置） */
+  device?: string;
+  /** 设备显示名（配置里的 label，没有时后端给编号 / 「默认设备」） */
+  deviceLabel?: string | null;
   mode?: BackpackMode;
   /**
    * 设备客户端隧道是否在位。
@@ -367,11 +371,11 @@ export async function loadDirectStatus(shell: BackpackStatus): Promise<BackpackS
  * 3. 探不通但后端报 `tunnel.available`（板端客户端在线）→ 带 `?transport=tunnel` 重拉，
  *    改由平台经设备客户端代调。这样「不在同一个网络」不再等于「AI 不能用」。
  */
-export async function loadStatus(): Promise<BackpackStatus> {
-  const shell = await backpackApi.status();
+export async function loadStatus(device?: string | null): Promise<BackpackStatus> {
+  const shell = await backpackApi.status(undefined, device);
   const data = shell.mode === "direct" ? await loadDirectStatus(shell) : shell;
   if (data.mode === "direct" && !data.agent.reachable && shell.tunnel?.available) {
-    return await backpackApi.status("tunnel");
+    return await backpackApi.status("tunnel", device);
   }
   return data;
 }
@@ -379,6 +383,8 @@ export async function loadStatus(): Promise<BackpackStatus> {
 /** 统一入口：代理模式走业务服务，直连模式走板端；页面只认这一层 */
 export interface AgentClient {
   mode: BackpackMode;
+  /** 这台客户端对应的设备编号（空 = 默认设备）；AI 动作必须打到同一台 */
+  device: string;
   start: (body: BackpackStartBody) => Promise<BackpackActionPayload>;
   stop: () => Promise<BackpackActionPayload>;
   config: (body: Partial<BackpackStartBody>) => Promise<BackpackActionPayload>;
@@ -386,19 +392,23 @@ export interface AgentClient {
 }
 
 export function clientFor(status: BackpackStatus | null): AgentClient {
+  // 设备编号必须一路带到端点：多设备下「看 RD-002、AI 起在 RD-001」是最难发现的事故
+  const device = (status?.device ?? "").trim();
   if (status?.mode !== "direct" || !status.direct) {
     return {
       // tunnel 与 proxy 的页面行为一致（都走业务服务），只是排障时看得见区别
       mode: status?.mode === "tunnel" ? "tunnel" : "proxy",
-      start: async body => (await backpackApi.start(body)) ?? {},
-      stop: async () => (await backpackApi.stop()) ?? {},
-      config: async body => (await backpackApi.config(body)) ?? {},
-      eventsUrl: backpackEventUrl()
+      device,
+      start: async body => (await backpackApi.start(body, device)) ?? {},
+      stop: async () => (await backpackApi.stop(device)) ?? {},
+      config: async body => (await backpackApi.config(body, device)) ?? {},
+      eventsUrl: backpackEventUrl(device)
     };
   }
   const api = status.direct.apiBase.replace(/\/+$/, "");
   return {
     mode: "direct",
+    device,
     start: body => postJson(`${api}/api/detect/start`, body, 60000),
     stop: () => postJson(`${api}/api/detect/stop`, {}, 30000),
     config: body => postJson(`${api}/api/detect/config`, body, 20000),
@@ -408,8 +418,12 @@ export function clientFor(status: BackpackStatus | null): AgentClient {
 
 /** 平台中继房间状态（`GET /api/backpack/video/state`，服务端内存快照） */
 export interface BackpackVideoRoom {
-  /** 房间名，背包板端是 `bp:<stream>` */
+  /** 房间名：`bp:<stream>`（默认设备）/ `bp:<device>:<stream>`（多设备） */
   room: string;
+  /** 设备编号；`null` = 不是背包房间。空串 = 默认设备 */
+  device?: string | null;
+  /** mediamtx 通道名（`cam0` / `dogcam` …） */
+  stream?: string | null;
   /** 板端 relay 的推流连接是否在线（否则中继一定没有画面） */
   publisher: boolean;
   streaming: boolean;
@@ -420,19 +434,48 @@ export interface BackpackVideoRoom {
   transport: "rtsp" | "ws" | null;
 }
 
+/** 视频页「设备编号」下拉的一项（`GET /api/backpack/devices`） */
+export interface BackpackDevice {
+  /** 设备编号；空串 = 默认设备（旧单机配置） */
+  id: string;
+  /** 下拉里显示的名字 */
+  label: string;
+  /** 板端 relay 至少一路在线 */
+  online: boolean;
+  /** 配了 Agent 地址（没配只能看视频，AI 不可用） */
+  configured: boolean;
+  /** 当前在线的通道 */
+  streams: string[];
+  /** 板端上报的媒体通路：`rtsp` = 正常；null/`ws` = relay 没升级 */
+  transport?: "rtsp" | "ws" | null;
+}
+
+/** 给 `/api/backpack/*` 的 POST 带上设备编号（AI 动作必须打到选中的那台） */
+function withDevice(path: string, device?: string | null): string {
+  const id = (device ?? "").trim();
+  return id ? `${path}?device=${encodeURIComponent(id)}` : path;
+}
+
 export const backpackApi = {
   /**
    * @param transport 传 `tunnel` 表示「跳过浏览器直连/服务端直连，走设备客户端代调」
    *   （直连模式探测失败后的回退，见 `BackpackStatus.tunnel`）
+   * @param device 设备编号；空 = 默认设备
    */
-  status: (transport?: "tunnel") =>
-    get<BackpackStatus>(`/backpack/status${transport ? `?transport=${transport}` : ""}`),
-  start: (body: BackpackStartBody) =>
+  status: (transport?: "tunnel", device?: string | null) =>
+    get<BackpackStatus>("/backpack/status", {
+      transport: transport || undefined,
+      device: (device ?? "").trim() || undefined
+    }),
+  /** 设备下拉：配置清单 + 实际在线的推流房间（服务端合并） */
+  devices: () => get<{ devices: BackpackDevice[] }>("/backpack/devices"),
+  start: (body: BackpackStartBody, device?: string | null) =>
     // 板端要加载模型（最多 30s）+ 启动画框（8s 确认窗口），20s 默认超时不够
-    post<BackpackActionPayload>("/backpack/detect/start", body, 60000),
-  stop: () => post<BackpackActionPayload>("/backpack/detect/stop"),
-  config: (body: Partial<BackpackStartBody>) =>
-    post<BackpackActionPayload>("/backpack/detect/config", body as object),
+    post<BackpackActionPayload>(withDevice("/backpack/detect/start", device), body, 60000),
+  stop: (device?: string | null) =>
+    post<BackpackActionPayload>(withDevice("/backpack/detect/stop", device)),
+  config: (body: Partial<BackpackStartBody>, device?: string | null) =>
+    post<BackpackActionPayload>(withDevice("/backpack/detect/config", device), body as object),
   /** 中继房间快照：设备/任务页据此判断「默认走中继」时中继到底在不在 */
   videoState: () => get<{ rooms: BackpackVideoRoom[] }>("/backpack/video/state")
 };
@@ -443,9 +486,13 @@ export const backpackApi = {
  * `EventSource` 不能自定义请求头，令牌只能放查询串（后端 `require_auth`
  * 对无 Authorization 头的请求会回落到 `?token=`，与视频 WS 端点同一套约定）。
  */
-export function backpackEventUrl(): string {
+export function backpackEventUrl(device?: string | null): string {
   const token = localStorage.getItem("robodog_token") || "";
+  const id = (device ?? "").trim();
   // 用运行时基址拼绝对地址：「现场入口」模式下页面在内网静态服务上，
   // 相对路径 /api 会打到静态服务（404），必须显式指向云端 API。
-  return `${apiBaseUrl()}/backpack/events?token=${encodeURIComponent(token)}`;
+  const query = [`token=${encodeURIComponent(token)}`];
+  // 多设备：只订阅选中那台的 Agent 事件（后端按来源设备过滤）
+  if (id) query.push(`device=${encodeURIComponent(id)}`);
+  return `${apiBaseUrl()}/backpack/events?${query.join("&")}`;
 }

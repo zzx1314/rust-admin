@@ -26,6 +26,60 @@ pub const CONFIG_FILE_ENV: &str = "ROBODOG_SERVER_CONFIG";
 /// 这里配了但页面没配时才用它 —— 适合「锁定地址、不许页面上改」的部署。
 pub const WECOM_WEBHOOK_ENV: &str = "ROBODOG_WECOM_WEBHOOK";
 
+/// 一台数据采集背包（多设备部署时按**设备编号**区分）
+///
+/// 设备编号就是平台设备台账里的编号（与设备客户端的 `ROBODOG_DEVICE_ID`、
+/// 板端 relay 的 `RELAY_DEVICE_ID` 同一个值），它同时决定了视频房间名
+/// （`bp:<device>:<stream>`）与平台 mediamtx 的 path（`bp_<device>_<stream>`）。
+/// 字符集由 [`crate::video::normalize_device`] 约束，不合法会在启动时被丢弃并告警。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BackpackDevice {
+    pub id: String,
+    /// 页面下拉里显示的名字（为空时显示设备编号）
+    pub label: Option<String>,
+    /// 服务端直连 Agent（`http://192.168.1.10:8000`）
+    pub base_url: Option<String>,
+    /// 浏览器直连 Agent（现场入口）
+    pub browser_url: Option<String>,
+    /// 设备客户端隧道用的设备码；不配就是自己的 `id`（客户端本来就按它登记）
+    pub tunnel_device: Option<String>,
+}
+
+impl BackpackDevice {
+    /// 浏览器侧 WHEP 基址：由浏览器可达的 Agent 地址推导（同主机 :8889）。
+    ///
+    /// **不需要配置**：Agent 在 `:8000`、板端 mediamtx 在 `:8889` 是背包的固定布局。
+    /// 平台中继那条路（绝大多数部署）用的是**固定**的同源路径
+    /// `/api/backpack/whep/<stream>/whep`，和这里无关 —— 这里只服务「现场直连」。
+    pub fn webrtc_base(&self) -> Option<String> {
+        self.browser_url
+            .as_deref()
+            .and_then(derive_webrtc_base)
+            .or_else(|| self.base_url.as_deref().and_then(derive_webrtc_base))
+    }
+
+    /// 接法：`direct`（浏览器直连 Agent）优先，其次 `proxy`（业务服务代理）
+    pub fn mode(&self) -> Option<&'static str> {
+        if self.browser_url.is_some() {
+            Some("direct")
+        } else if self.base_url.is_some() {
+            Some("proxy")
+        } else {
+            None
+        }
+    }
+
+    /// 隧道的目标设备码：显式配置优先，否则就是设备自己的编号
+    ///
+    /// 多设备下**不能**回退到 `backpack_tunnel_device`：那是默认设备的值，
+    /// 用它会把「看 RD-002 却控到了 RD-001」这种事故焊死在代码里。
+    pub fn tunnel_target(&self) -> Option<String> {
+        self.tunnel_device
+            .clone()
+            .or_else(|| (!self.id.is_empty()).then(|| self.id.clone()))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub port: u16,
@@ -140,6 +194,12 @@ pub struct Config {
     /// 板端客户端连得上本机 Agent，且有一条到平台的常驻 WS（见 `agent_tunnel.rs`）。
     /// 多背包部署必须显式指定；只有一台时留空即可（取最近上报的那台）。
     pub backpack_tunnel_device: Option<String>,
+    /// 多设备部署的背包清单（`[[backpack.devices]]` / `ROBODOG_BACKPACK_DEVICES`）。
+    ///
+    /// 为空 = 只有一台，全部走上面的单机字段（不带设备号，房间名仍是 `bp:<stream>`）。
+    /// 配了以后，页面按设备编号切换：`/api/backpack/*?device=<id>` 用这里的地址，
+    /// 视频房间 / mediamtx path 带设备维度。
+    pub backpack_devices: Vec<BackpackDevice>,
     /// 控制台对外访问地址（如 `http://39.107.55.13:3100`），用于拼告警消息里的链接。
     ///
     /// 为空时企业微信消息不带链接：猜一个地址比不给更容易误导人。
@@ -244,6 +304,22 @@ struct BackpackFile {
     /// 浏览器 → 板端 Agent（直连模式；正式环境用这个）
     browser_url: Option<String>,
     /// 板端 Agent 隧道指定的设备码（多背包部署时用）
+    tunnel_device: Option<String>,
+    /// 多设备部署：每台一个 `[[backpack.devices]]`
+    devices: Option<Vec<BackpackDeviceFile>>,
+}
+
+/// `[[backpack.devices]]` 的一台设备（`ROBODOG_BACKPACK_DEVICES` 的 JSON 数组也用同一形状）
+///
+/// 字段名与 TOML 一致（snake_case），不跟页面的 camelCase 混：
+/// 这份结构只用于**配置解析**，对外响应是 `backpack.rs` 里另拼的 JSON。
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct BackpackDeviceFile {
+    id: String,
+    label: Option<String>,
+    base_url: Option<String>,
+    browser_url: Option<String>,
     tunnel_device: Option<String>,
 }
 
@@ -430,6 +506,9 @@ impl Config {
             mediamtx_url: url("ROBODOG_MEDIAMTX_URL", file.backpack.mediamtx_url),
             backpack_tunnel_device: env_text(&env, "ROBODOG_BACKPACK_TUNNEL_DEVICE")
                 .or_else(|| file.backpack.tunnel_device.and_then(clean)),
+            // 多设备清单：环境变量（JSON 数组）优先，否则用 `[[backpack.devices]]`。
+            // 空 = 只有一台，所有请求走上面的单机字段（房间名仍是 `bp:<stream>`）。
+            backpack_devices: parse_backpack_devices(&env, file.backpack.devices),
             point_ai: point_ai_source(
                 env_text(&env, "ROBODOG_POINT_AI")
                     .or_else(|| file.backpack.point_ai.and_then(clean)),
@@ -456,9 +535,12 @@ impl Config {
         }
     }
 
-    /// 浏览器侧 WHEP 基址：显式配置优先，否则由浏览器可达的 Agent 地址推导（同主机 :8889）。
+    /// 浏览器侧 WHEP 基址（部署级固定值）：显式配置优先，否则由浏览器可达的 Agent
+    /// 地址推导（同主机 :8889）。
     ///
     /// 直连模式看 `browser_url`（浏览器真正访问的地址），代理模式看 `base_url`。
+    /// 多设备部署的「现场直连」按设备取，见 [`BackpackDevice::webrtc_base`]；
+    /// 平台中继那条路用的是**固定**同源路径 `/api/backpack/whep/…`，与这里无关。
     pub fn backpack_webrtc_base(&self) -> Option<String> {
         self.backpack_webrtc_url.clone().or_else(|| {
             self.backpack_browser_url
@@ -470,6 +552,36 @@ impl Config {
                         .and_then(derive_webrtc_base)
                 })
         })
+    }
+
+    /// 默认设备（旧单机字段组装出来的那一份，`id` 为空 = 旧命名）
+    ///
+    /// 不带 `webrtc` 基址：那个值是**部署级**的，由
+    /// [`Self::backpack_webrtc_base`] 统一算（`webrtc_url` 显式配置优先），
+    /// 不放进设备条目里，否则「显式 webrtc_url」这条规则会出现两份。
+    fn legacy_backpack_device(&self) -> BackpackDevice {
+        BackpackDevice {
+            id: String::new(),
+            label: None,
+            base_url: self.backpack_base_url.clone(),
+            browser_url: self.backpack_browser_url.clone(),
+            tunnel_device: self.backpack_tunnel_device.clone(),
+        }
+    }
+
+    /// 按设备编号取一台背包：`None` / 空 = 默认设备（旧单机字段）
+    ///
+    /// 配了 `device` 但清单里没有时返回 `None`：**不能回退到默认设备**，
+    /// 否则「切到 RD-002 却把 AI 起在 RD-001 上」，现场很难发现。
+    pub fn backpack_device(&self, id: Option<&str>) -> Option<BackpackDevice> {
+        match id.map(str::trim).filter(|value| !value.is_empty()) {
+            None => Some(self.legacy_backpack_device()),
+            Some(id) => self
+                .backpack_devices
+                .iter()
+                .find(|device| device.id == id)
+                .cloned(),
+        }
     }
 
     /// 背包接法：`direct`（浏览器直连 Agent）优先，其次 `proxy`（业务服务代理），
@@ -622,6 +734,56 @@ fn point_ai_source(raw: Option<String>) -> String {
             "auto".to_string()
         }
     }
+}
+
+/// 多设备清单：`ROBODOG_BACKPACK_DEVICES`（JSON 数组）> `[[backpack.devices]]`。
+///
+/// 非法 / 重复的设备编号一律丢弃并告警：这个编号会被拼进视频房间名
+/// （`bp:<device>:<stream>`）与平台 mediamtx 的 path（`bp_<device>_<stream>`），
+/// 放过一个带冒号或斜杠的值，另一台板子的推流就会被顶掉。
+fn parse_backpack_devices<F>(env: &F, file: Option<Vec<BackpackDeviceFile>>) -> Vec<BackpackDevice>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let entries: Vec<BackpackDeviceFile> = match env_text(env, "ROBODOG_BACKPACK_DEVICES") {
+        Some(raw) => match serde_json::from_str::<Vec<BackpackDeviceFile>>(&raw) {
+            Ok(list) => list,
+            Err(error) => {
+                tracing::warn!(
+                    "ROBODOG_BACKPACK_DEVICES 解析失败（要 JSON 数组，每项 id 必填）：{error}"
+                );
+                Vec::new()
+            }
+        },
+        None => file.unwrap_or_default(),
+    };
+    let url = |value: Option<String>| -> Option<String> {
+        value
+            .and_then(clean)
+            .map(|value| value.trim_end_matches('/').to_string())
+    };
+    let mut devices: Vec<BackpackDevice> = Vec::new();
+    for entry in entries {
+        let Some(id) = crate::video::normalize_device(&entry.id) else {
+            tracing::warn!(
+                "背包设备编号 {:?} 不合法（只允许字母数字与 . _ -），已忽略",
+                entry.id
+            );
+            continue;
+        };
+        if devices.iter().any(|device| device.id == id) {
+            tracing::warn!("背包设备编号重复，只保留第一条：{id}");
+            continue;
+        }
+        devices.push(BackpackDevice {
+            id,
+            label: entry.label.and_then(clean),
+            base_url: url(entry.base_url),
+            browser_url: url(entry.browser_url),
+            tunnel_device: entry.tunnel_device.and_then(clean),
+        });
+    }
+    devices
 }
 
 /// 配置文件所在目录（相对路径的解析基准）。

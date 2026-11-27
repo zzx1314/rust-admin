@@ -139,6 +139,10 @@ default via 192.168.234.1  dev eth0            metric 1000   # netplan 兜底
 ```ini
 Environment=RELAY_PLATFORM=http://39.107.55.13:3008
 Environment=RELAY_STREAMS=cam0,cam1,cam2,cam3,dogcam,dog-ipcam,preview
+# 设备编号**自动读本体 SN 分区**（/dev/mmcblk0p5，与设备客户端同一套规则），不需要配：
+# 推流 path 变成 bp_<SN>_<stream>、房间 bp:<SN>:<stream>，多台背包互不干扰。
+# 只有调试 / 非真机（读不到分区）才需要显式覆盖：
+# Environment=RELAY_DEVICE_ID=RD-002
 Environment=RELAY_RTSP_BASE=rtsp://127.0.0.1:8554
 Environment=RELAY_PROFILE=light          # 配置档：1280x720@15 / 1000k
 Environment=RELAY_BITRATE=1000k

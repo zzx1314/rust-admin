@@ -83,6 +83,7 @@ fn config_with(
         // 平台侧 mediamtx 反代（这里不涉及视频，保持未配置）
         mediamtx_url: None,
         backpack_tunnel_device: None,
+        backpack_devices: Vec::new(),
         point_ai: "auto".to_string(),
         ai_window_max_secs: 300,
         public_url: None,
@@ -432,6 +433,133 @@ async fn unconfigured_deployment_reports_configured_false() {
         .await
         .unwrap();
     assert_eq!(blocked.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    drop(temp);
+}
+
+/// 多设备：按 `?device=` 切设备时，Agent 地址 / 隧道目标 / WHEP 基址都按那台解析。
+///
+/// 三条红线：
+/// 1. 设备编号不合法（会拼进 mediamtx path / 房间名）→ 400；
+/// 2. 清单里没配的设备**不报 500**、也不回退到默认设备：`configured=true`（视频
+///    仍能看）+ `agent.reachable=false` + 错误里点名这台设备；
+/// 3. AI 动作同样拒绝落回默认设备（否则「看 RD-002、AI 控 RD-001」）。
+#[tokio::test]
+async fn device_query_switches_target_without_falling_back_to_the_default() {
+    use robodog_ops_server::config::BackpackDevice;
+
+    let dir = temp_dir();
+    let temp = TempDb { dir: dir.clone() };
+    let mut state = state_with(None, dir).await;
+    let mut config = (*state.config).clone();
+    config.backpack_devices = vec![BackpackDevice {
+        id: "RD-002".to_string(),
+        label: Some("2号背包".to_string()),
+        ..Default::default()
+    }];
+    state.config = Arc::new(config);
+    let router = build_router(state);
+    let token = login_token(&router).await;
+
+    let call = |path: String, method: &'static str| {
+        let router = router.clone();
+        let token = token.clone();
+        async move {
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap();
+            let response = router.oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+            )
+        }
+    };
+
+    // 清单里配了名字但没配 Agent 地址：视频照样能看，AI 用不了
+    let (status, body) = call("/api/backpack/status?device=RD-002".to_string(), "GET").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["configured"], json!(true));
+    assert_eq!(body["data"]["device"], json!("RD-002"));
+    assert_eq!(body["data"]["deviceLabel"], json!("2号背包"));
+    assert_eq!(body["data"]["agent"]["reachable"], json!(false));
+    assert_eq!(body["data"]["webrtc"]["base"], Value::Null);
+
+    // 清单里完全没有的设备：也不能回退到默认设备
+    let (status, body) = call("/api/backpack/status?device=RD-999".to_string(), "GET").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["device"], json!("RD-999"));
+    assert_eq!(body["data"]["mode"], json!("none"));
+    let hint = body["data"]["agent"]["error"].as_str().unwrap_or_default();
+    assert!(hint.contains("RD-999"), "错误里要点名是哪台设备: {hint}");
+
+    // 设备编号会拼进 URL / 房间名 / mediamtx path，非法值直接 400
+    let (status, _) = call("/api/backpack/status?device=a%3Ab".to_string(), "GET").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // AI 动作：没配 Agent 地址 + 隧道不匹配 → 503，且不静默控到默认设备
+    let (status, body) = call(
+        "/api/backpack/detect/stop?device=RD-002".to_string(),
+        "POST",
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let message = body["msg"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("RD-002"),
+        "拒绝时要说清是哪台设备：{message}"
+    );
+
+    drop(temp);
+}
+
+/// 「现场直连」的板端 mediamtx 地址是**部署级固定值**，不按设备配。
+///
+/// 平台中继那条路（默认）用的是固定同源路径 `/api/backpack/whep/<stream>/whep`，
+/// 连这个值都不需要；只有现场入口的「直连板端」才用到它，而且一个部署一个值就够了。
+#[tokio::test]
+async fn named_device_uses_the_fixed_deployment_webrtc_base() {
+    let dir = temp_dir();
+    let temp = TempDb { dir: dir.clone() };
+    // 部署级：浏览器可达的 Agent 地址 → 推导出同主机 :8889
+    let state = state_with_browser(
+        None,
+        Some("http://192.168.41.246:8000".to_string()),
+        dir,
+    )
+    .await;
+    let router = build_router(state);
+    let token = login_token(&router).await;
+
+    let response = router
+        .oneshot(
+            Request::get("/api/backpack/status?device=0202222672400230")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        body["data"]["webrtc"]["base"],
+        json!("http://192.168.41.246:8889"),
+        "没配 per-device webrtc_url 时用部署级固定值"
+    );
+    // 设备编号没配 Agent 地址 → 不会误用默认设备的直连地址（那会把 AI 起在别的狗上）
+    assert_eq!(body["data"]["mode"], json!("none"));
+    assert_eq!(body["data"]["agent"]["reachable"], json!(false));
 
     drop(temp);
 }

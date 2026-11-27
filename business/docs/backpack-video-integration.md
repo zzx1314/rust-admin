@@ -240,7 +240,8 @@ Chromium 的 **Local Network Access**（PNA 继任者）实测拦截，`Network.
     ——板端另起一路 ffmpeg 从本机 mediamtx 的 dogcam `-c copy` 落 mp4（不经过平台中继的
     观看链路，也不受「有没有人看」影响），客户端在 5009 状态机上起停、终态回传平台
     `task_recordings`，任务详情里回放 / 下载。见 `business/README.md`「巡检录像」。
-  - ⏳ 多背包 / 设备-用户分配：未做。
+  - ✅ **多背包（按设备编号切换视频）**：视频链路全段带设备维度，见 §6.11；
+    设备-用户分配仍未做。
 
 ---
 
@@ -609,8 +610,10 @@ Agent 挂了」立刻表现为 `reachable=false`，没有一份迟早过期的�
 3. 只差框不动、数量也不变：看板端 Agent 是不是根本没在识别
    （`/api/detect/status` 的 `running`），隧道只负责搬数据。
 
-**多背包**：隧道默认取「最近上报且在线」的那台。园区里有多台背包时必须配
-`ROBODOG_BACKPACK_TUNNEL_DEVICE=<设备号>`，否则页面可能问到另一台狗上。
+**多背包**：接口/AI 的隧道目标按「当前选中的设备」解析（`?device=<设备号>`，见 §6.11）。
+单机部署不用配任何东西；多台部署要给每台配 `[[backpack.devices]]`（或
+`ROBODOG_BACKPACK_DEVICES`），否则那台设备的 AI 会明确报「没配 Agent 地址」，
+**不会**悄悄回退到默认设备。
 
 ### 6.9 设备管理 / 计划管理的视频统一到前置 `dogcam`
 
@@ -1400,6 +1403,69 @@ ssh root@<背包IP> 'python3 /tmp/bw.py'              # 见 §6.10② 的量法�
 | 服务端看着全健康（`lastFrameAgeSecs=0` / `pendingBytes=0` / `viewerLagSecs=0`）但**画面定住**，探针实测帧率也正常 | 新开一个观看端，看它前几个 tag 的关键帧时间戳 vs 直播时间戳（差几百秒 = 有问题）；`video/state` 的 `gopBytes`/`gopAgeSecs` | ⑬ 补流头是本轮第一个关键帧（已修）。`gopBytes>0` 才是新逻辑 |
 
 ---
+
+### 6.11 多背包：按设备编号切换视频（2026-11-26）
+
+**要解决的问题**：以前整条视频链路没有设备维度 —— 板端 relay 推 `bp_cam0`、房间是
+`bp:cam0`、WHEP 是 `/api/backpack/whep/cam0/whep`。园区里第二台背包上线后：
+
+1. 两台板子推同一条 mediamtx path，后推上来的那台被拒（`path ... already in use`）；
+2. 即使推上去了，`bp:cam0` 房间的控制通道会被后注册的那台接管 —— `video_start`
+   打给错的那台，观看者看到的是另一只狗的画面，而被顶掉的那台永远不起流；
+3. 前端只有一个设备、一套通道，页面根本没法表达「看哪一台」。
+
+**命名规则**（唯一实现：`server/src/video.rs::room_of` / `mediamtx_path_of`，
+前端 `web/src/lib/videoNaming.ts` 与之逐字对应）：
+
+| | 默认设备（没配编号） | 多设备 |
+| --- | --- | --- |
+| 平台房间 | `bp:<stream>` | `bp:<device>:<stream>` |
+| mediamtx path | `bp_<stream>` | `bp_<device>_<stream>` |
+| WHEP 反代（固定模板） | `/api/backpack/whep/<stream>/whep` | `/api/backpack/whep/<stream>/whep?device=<device>` |
+| 观看心跳 | `?stream=<stream>` | `?stream=<stream>&device=<device>` |
+
+设备编号 = **本体 SN 分区**（`/dev/mmcblk0p5`，板端 relay 与设备客户端各读一次，
+是同一个值）= 平台设备台账的编号，字符集 `^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$`
+（同时进 RTSP path / 房间名 / 查询参数，三处限制取交集）。**读不到 SN 才是旧命名**
+（`bp:<stream>`），调试时可用 `RELAY_DEVICE_ID` / `ROBODOG_DEVICE_ID` 覆盖。
+
+**接口**：所有 `/api/backpack/*` 都接受 `?device=`（POST 动作同理）；
+新增 `GET /api/backpack/devices` 给页面下拉用，返回「配置清单 + 实际在线的推流房间」，
+每项带 `online` / `configured` / `streams` / `transport`。**配了编号但清单里没有那台时
+不回退到默认设备**：视频照看（板端自己推到平台），Agent/AI 报明确错误 —— 多设备下
+「看 RD-002、AI 起在 RD-001」是最难发现的事故。
+
+**事件流**：隧道里的 `agent_event` 现在带来源设备（`agent_tunnel::TunnelEvent`），
+`/api/backpack/events?device=` 按它过滤。不过滤的话另一台狗跑巡检时的 `detect`
+会把框画到这台画面上（`detect` 里只有 `cam`，没有设备）。
+
+**部署：两边都不用配。**
+
+1. **板端**：relay 启动时自己读本体 SN 分区（`/dev/mmcblk0p5`，与设备客户端
+   `business/client/src/device_sn.rs` **同一套读法**，`RELAY_SN_PATH` /
+   `ROBODOG_SN_PATH` 可改路径）—— 设备编号是资产级身份（一台狗一个），
+   抄配置文件最容易抄错、换狗还得改配置，所以两边都不要求配置。
+   `RELAY_DEVICE_ID` / `ROBODOG_DEVICE_ID` 只在调试 / 非真机上覆盖。
+   读不到分区（非 root、模拟器）才退回旧命名，日志会写清原因 ——
+   **多台部署必须能读到 SN**，否则两台板子的 `cam0` 会撞成同一条 path。
+2. **平台**：`GET /api/backpack/devices` 直接按 relay 注册的房间发现设备
+   （房间名里就带 SN），不需要 `[[backpack.devices]]`；AI 走设备客户端隧道，
+   `agent_hello` 已经带设备号与 Agent 地址（`tunnel_device` 默认就是设备编号）。
+   只有「想给设备起中文名」或「服务端/浏览器能直连板端 Agent、想省掉隧道一跳」
+   才需要在 `server.toml` 配 `[[backpack.devices]]`（`id` + `label` [+ `base_url` /
+   `browser_url` / `tunnel_device`]）或 `ROBODOG_BACKPACK_DEVICES`。
+3. **mediamtx**：不用改 —— 推流 / 读的 path 鉴权是正则 `~^bp_`（允许设备段）。
+4. **WHEP 路径是固定的**：`/api/backpack/whep/<stream>/whep`（多设备时设备编号走查询串：
+   `/api/backpack/whep/<stream>/whep?device=<device>`，与 `token` 同一个位置），
+   业务平台不再需要任何 per-device 的 `webrtc_url`；`ROBODOG_BACKPACK_WEBRTC_URL`
+   一直是**部署级固定值**，只服务「现场直连板端」那一条路。也正因为它是部署级固定值，
+   **「现场直连」只对默认设备成立**：多设备时页面禁用该按钮（直播走平台中继），
+   否则「直连」打到的是部署里那台板子 —— 看到另一只狗的画面比黑屏更糟。
+
+回归：`server/src/video.rs`（命名 / 两设备隔离 / 设备快照）、
+`server/tests/video_relay.rs::two_backpacks_keep_their_own_rooms_and_control_channels`、
+`server/tests/backpack_proxy.rs::device_query_switches_target_without_falling_back_to_the_default`、
+`deploy/backpack-relay/test_relay_push.py::test_device_id_scopes_the_rtsp_path_and_room`。
 
 ## 7. 平台侧 WebRTC 出口（mediamtx，2026-11-19）：把「1~2s」砍到「~300ms」
 

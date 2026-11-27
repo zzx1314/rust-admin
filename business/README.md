@@ -1771,7 +1771,14 @@ AI 可对除红外外的五路开启，画框方式二选一：
   注册成功后发一条 `agent_hello`，平台据此把 `/api/backpack/*` 的请求挂到这条设备 WS 上
   （服务端 `agent_tunnel.rs`，客户端 `agent_relay.rs`）。只放行 4 个只读接口
   （`cameras` / `relay/status` / `detect/tasks` / `detect/status`）+ 3 个 AI 动作，
-  检出事件只转 `detect` 四类；多背包部署用 `ROBODOG_BACKPACK_TUNNEL_DEVICE` 指定设备号。
+  检出事件只转 `detect` 四类。
+- **多背包（按设备编号切换视频）**：所有 `/api/backpack/*` 都接受 `?device=<设备编号>`，
+  视频房间 / mediamtx path 随之带设备维度（`bp:<id>:<stream>` / `bp_<id>_<stream>`），
+  新增 `GET /api/backpack/devices` 给「实时视频」页的下拉用。**两边都不用配**：
+  板端 relay 自动读本体 SN 分区当设备编号（与设备客户端同一套规则，`RELAY_DEVICE_ID`
+  仅调试时覆盖），平台按 relay 注册的房间自动发现设备、AI 走设备客户端隧道；
+  平台中继的 WHEP 是固定同源路径。读不到 SN 时退回旧命名（`bp:<stream>`）。
+  设计见 `business/docs/backpack-video-integration.md` §6.11。
 - **视频跨网段走平台中继**（「平台中继」按钮，或用云端入口时自动选）：
   延时 1~2 s，延时敏感场景仍建议现场入口。中继模式下浏览器画不了框，想让框跟着画面走就切
   「背包烧录」——板端把中文标签烧进 `preview` 流，中继也把这一路推上来

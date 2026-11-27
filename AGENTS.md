@@ -78,8 +78,15 @@ HTTP」模式。两者共用同一个服务令牌，见 `business/README.md`。
 `client/src/agent_relay.rs`，走已有设备 WS，只放行 4 个只读接口 + 3 个 AI 动作）。
 所以「浏览器和背包不在同一网段」不再等于「AI 不能用」；视频跨网段仍走平台中继
 （`deploy/backpack-relay/`），想看到框要让板端烧录（`preview` 流）。
-多背包部署配 `ROBODOG_BACKPACK_TUNNEL_DEVICE`。详见
-`business/docs/backpack-video-integration.md` §6.8。
+**多背包按设备编号切换**：视频房间 / mediamtx path / WHEP 路径全段带设备维度
+（`bp:<id>:<stream>` / `bp_<id>_<stream>` / `/api/backpack/whep/<stream>/whep?device=<id>`），
+`/api/backpack/*` 都接受 `?device=`，`GET /api/backpack/devices` 供页面下拉。
+**设备和平台两边都不用配**：板端 relay 和设备客户端同一套规则自动读本体 SN 分区
+（`/dev/mmcblk0p5`，可用 `RELAY_DEVICE_ID` 覆盖），平台按 relay 注册的房间自动发现设备、
+AI 走设备客户端隧道（`agent_hello` 已带设备号与 Agent 地址）；平台中继的 WHEP 是**固定**
+同源路径 `/api/backpack/whep/<stream>/whep`。读不到 SN 才是旧命名（`bp:<stream>`）。
+**编号没配 Agent 地址时不回退到默认设备**（视频照看、AI 明确报错），否则会把 AI 起在
+另一台狗上。详见 `business/docs/backpack-video-integration.md` §6.8 / §6.11。
 **媒体只有一条路：WebRTC**（2026-11-19 起）。板端 relay 用 RTSP/TCP 把流转推到平台
 mediamtx（`deploy/external-hz/mediamtx/`，TCP 8554 进 / UDP 8189 出）→ 浏览器 WHEP
 （`/api/backpack/whep/*`，业务平台反代到只绑回环的 `:8889`），延时 ~300ms。

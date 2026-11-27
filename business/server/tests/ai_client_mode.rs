@@ -75,6 +75,7 @@ fn config_with(dir: &std::path::Path, point_ai: &str) -> Config {
         backpack_base_url: None,
         backpack_webrtc_url: None,
         backpack_tunnel_device: None,
+        backpack_devices: Vec::new(),
         backpack_browser_url: Some("http://192.168.41.246:8000".to_string()),
         mediamtx_url: None,
         point_ai: point_ai.to_string(),

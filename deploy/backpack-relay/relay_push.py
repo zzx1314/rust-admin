@@ -6,11 +6,11 @@
     └─ ffmpeg -vf scale=720p,fps=20 -b:v 1200k -f rtsp -rtsp_transport tcp
          或 -c:v copy（RELAY_PROFILE=copy：只换容器，不重编码）
          └─ 127.0.0.1:<临时端口>（RtspUplink 透明中转，字节从这里过 → 记账）
-              └─ rtsp://relay:<口令>@<平台>:8554/bp_<stream>   ← 平台 mediamtx
-                   └─ 浏览器 WHEP：/api/backpack/whep/<stream>/whep   延时 ~300ms
+              └─ rtsp://relay:<口令>@<平台>:8554/bp_[<device>_]<stream>   ← 平台 mediamtx
+                   └─ 浏览器 WHEP：/api/backpack/whep/[<device>/]<stream>/whep   延时 ~300ms
 ```
 
-控制面是另一条常驻 WS（`ws://<平台>/ws/device/video`，房间 `bp:<stream>`）：
+控制面是另一条常驻 WS（`ws://<平台>/ws/device/video`，房间 `bp:[<device>:]<stream>`）：
 平台按需下发 `video_start` / `video_stop` / `video_config`，本进程上报
 `video_reset`（新一轮流）/ `video_transport`（媒体通路）。
 
@@ -48,6 +48,8 @@
 | `RELAY_RTSP_CONNECT_TIMEOUT` | `10` | 等 ffmpeg 连上本地中转端口的时限（秒） |
 | `RELAY_RTSP_BATCH_BYTES` / `_SECS` | `24576` / `0.06` | rtsp 通路攒这么多字节 / 这么久再写。**别关**：逐包转发会把上行 TCP 卡在 cwnd=10，高 RTT 下吞吐只有 ~0.5Mbps（实测聚合后 0.55 → 1.03Mbps） |
 | `RELAY_ROOM_PREFIX` | `bp:` | 房间前缀，必须与服务端 `video.rs::BACKPACK_ROOM_PREFIX` 一致 |
+| `RELAY_DEVICE_ID` | 自动 | 设备编号。**默认自动读本体 SN 分区**（与设备客户端同一套规则，`business/client/src/device_sn.rs`），只在调试 / 非真机上才需要显式指定。配了之后推流 path 是 `bp_<device>_<stream>`、房间是 `bp:<device>:<stream>` |
+| `RELAY_SN_PATH` | `/dev/mmcblk0p5` | 本体 SN 分区（与客户端的 `ROBODOG_SN_PATH` 同一个值）；读不到时退回旧命名 `bp_<stream>` |
 | `RELAY_FFMPEG` | `ffmpeg` | ffmpeg 路径 |
 | `RELAY_PROFILE` | `light` | 输出档位：`light`（默认，缩到 720p20 / 1.2Mbps）/ `copy`（只换容器）/ `transcode`（同 light）。**平台页面「系统设置 → 视频中继」下发默认档位后以平台为准**（见下面「平台默认档位」） |
 | `RELAY_WIDTH` / `RELAY_HEIGHT` | `1280` / `720` | `light` 档位的目标外框（只缩不放，保持比例） |
@@ -156,6 +158,91 @@ STREAMS = [
 ]
 RTSP_BASE = os.environ.get("RELAY_RTSP_BASE", "rtsp://127.0.0.1:8554").rstrip("/")
 ROOM_PREFIX = os.environ.get("RELAY_ROOM_PREFIX", "bp:")
+
+# 设备编号（= 平台设备台账里的编号）
+#
+# **默认自动读本体 SN 分区**（见下面的 `resolve_device_id`）：真机上不需要配置，
+# 与设备客户端的编号天然是同一个值。`RELAY_DEVICE_ID` 只是调试 / 非真机上的覆盖。
+# 有了它之后：
+#   1. 平台 mediamtx 的 path 变成 `bp_<device>_<stream>` —— 两台板子的 `cam0`
+#      不再抢同一条 path（以前后推上来的那台会被 mediamtx 以「path 已被占用」拒绝，
+#      而平台上的房间也会被后注册的顶掉，`video_start` 打给错的那台）；
+#   2. 房间名变成 `bp:<device>:<stream>`，观看者 / 看门狗 / 档位广播都按它找推流端。
+# 字符集必须与平台 `video.rs::normalize_device` 一致（字母数字开头 + `.` `_` `-`，
+# 最长 32）：这个值会进 RTSP path、房间名与 WHEP 的 URL 段。
+# 空串 = 旧命名（`bp_<stream>` / `bp:<stream>`），只在读不到 SN 时出现。
+DEVICE_ID = os.environ.get("RELAY_DEVICE_ID", "").strip()
+DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
+
+
+def device_scope() -> str:
+    """RTSP path 前缀里的设备段（`RD-001_`）；没配设备号时为空串（旧命名）"""
+    return f"{DEVICE_ID}_" if DEVICE_ID else ""
+
+
+def room_name(stream: str) -> str:
+    """平台推流房间：`bp:<device>:<stream>`；没配设备号时是 `bp:<stream>`"""
+    return f"{ROOM_PREFIX}{DEVICE_ID}:{stream}" if DEVICE_ID else f"{ROOM_PREFIX}{stream}"
+
+
+# 本体 SN 分区（= 业务平台的设备编号）
+#
+# 与设备客户端 `business/client/src/device_sn.rs` **同一套读法**：真机上编号是资产级
+# 身份（一台狗一个），抄配置文件最容易抄错，换狗还得改配置 —— 所以两边都不要求配置，
+# 直接读分区。`RELAY_DEVICE_ID` / `ROBODOG_DEVICE_ID` 只是调试 / 非真机上的覆盖。
+SN_PATH = (
+    os.environ.get("RELAY_SN_PATH")
+    or os.environ.get("ROBODOG_SN_PATH")
+    or "/dev/mmcblk0p5"
+)
+# 读 4KB：块设备上 read 长度必须是逻辑块大小的整数倍，现场 SN 在偏移 0x200
+SN_READ_BYTES = 4096
+# 等价 `hexdump -C` 的一行（16 字节 = 一行的 ASCII 列）
+SN_LINE_BYTES = 16
+SN_MIN_LEN = 8
+SN_MAX_LEN = 32
+
+
+def sn_from_bytes(data: bytes) -> str:
+    """从分区前几 KB 里取设备编号（与 `device_sn.rs::sn_from_bytes` 同一规则）。
+
+    16 位十六进制优先（现场 SN 就是这个形态），否则取第一条「全字母数字」的候选。
+    """
+    fallback = ""
+    for offset in range(0, len(data) - SN_LINE_BYTES + 1, SN_LINE_BYTES):
+        line = data[offset : offset + SN_LINE_BYTES]
+        text = "".join(chr(byte) if 0x21 <= byte <= 0x7E else " " for byte in line)
+        candidate = "".join(text.split())
+        if not (SN_MIN_LEN <= len(candidate) <= SN_MAX_LEN):
+            continue
+        if not (candidate.isascii() and candidate.isalnum()):
+            continue
+        if len(candidate) == 16 and all(ch in "0123456789abcdefABCDEF" for ch in candidate):
+            return candidate
+        if not fallback:
+            fallback = candidate
+    return fallback
+
+
+def resolve_device_id() -> tuple[str, str, str]:
+    """→ `(设备编号, 来源, 读 SN 的失败原因)`
+
+    优先级：`RELAY_DEVICE_ID` > `ROBODOG_DEVICE_ID` > 本体 SN 分区。
+    都拿不到就回旧命名（`bp_<stream>`）并在日志里说清原因。
+    """
+    for name in ("RELAY_DEVICE_ID", "ROBODOG_DEVICE_ID"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value, name, ""
+    try:
+        with open(SN_PATH, "rb") as handle:
+            data = handle.read(SN_READ_BYTES)
+    except OSError as exc:
+        return "", "", f"读不到 {SN_PATH}：{exc}"
+    sn = sn_from_bytes(data)
+    if sn:
+        return sn, SN_PATH, ""
+    return "", "", f"{SN_PATH} 前 {SN_READ_BYTES}B 里没有找到设备编号"
 
 # ---- 媒体通路：RTSP 推平台 mediamtx（WebRTC）--------------------------------------
 #
@@ -1221,8 +1308,9 @@ def ffmpeg_args(stream: str, target: str) -> list[str]:
 def rtsp_publish_plan(stream: str) -> tuple[str, int, str, str]:
     """解析 `RELAY_RTSP_URL` → `(host, port, path, userinfo)`
 
-    配的是前缀（`…/bp_`），每路拼上自己的名字。解析不了就报错（拿不到口令推不上去，
-    没必要带着错配置去试）。
+    配的是前缀（`…/bp_`），每路拼上自己的名字；**配了 `RELAY_DEVICE_ID` 时先插设备段**
+    （`…/bp_RD-001_cam0`），否则两台板子的同名通道会撞成一条 path。
+    解析不了就报错（拿不到口令推不上去，没必要带着错配置去试）。
     """
     parts = urllib.parse.urlsplit(RTSP_PUSH)
     if parts.scheme != "rtsp" or not parts.hostname:
@@ -1235,7 +1323,7 @@ def rtsp_publish_plan(stream: str) -> tuple[str, int, str, str]:
         password = urllib.parse.quote(urllib.parse.unquote(parts.password or ""), safe="")
         userinfo = f"{user}:{password}@"
     path_prefix = parts.path.lstrip("/")
-    return parts.hostname, parts.port or 8554, f"{path_prefix}{stream}", userinfo
+    return parts.hostname, parts.port or 8554, f"{path_prefix}{device_scope()}{stream}", userinfo
 
 
 class RtpScanner:
@@ -1951,7 +2039,7 @@ async def stream_worker(stream: str) -> None:
     """一条流一个长连接：注册房间 → 等 video_start / video_stop → 重连退避"""
     import websockets  # 局部导入：状态机可以脱离依赖被测试
 
-    room = f"{ROOM_PREFIX}{stream}"
+    room = room_name(stream)
     session = StreamSession(stream)
     # 登记进去：降档/回档要看有谁在跑（`restream_all` 用）
     _sessions[stream] = session
@@ -2034,10 +2122,31 @@ async def stream_worker(stream: str) -> None:
 
 
 async def main() -> int:
+    global DEVICE_ID
+
     if not STREAMS:
         log("RELAY_STREAMS 为空，没有要中继的流")
         return 2
-    log(f"目标平台 {endpoint()}；通道 {', '.join(STREAMS)}；源 {RTSP_BASE}")
+    # 设备编号默认从本体 SN 分区自动读（与设备客户端同一套规则），不需要配置。
+    DEVICE_ID, device_source, sn_error = resolve_device_id()
+    # 显式配错必须启动就报出来：悄悄按旧命名推会让两台板子抢同一条 path，
+    # 现场表现是「一台有画面、另一台怎么点都黑」，很难查到根因。
+    if DEVICE_ID and not DEVICE_ID_RE.fullmatch(DEVICE_ID):
+        log(
+            f"设备编号 {DEVICE_ID!r}（来源 {device_source}）不合法："
+            "字母数字开头，可含 . _ -，最长 32（与平台设备编号一致）"
+        )
+        return 2
+    if not DEVICE_ID:
+        log(
+            f"⚠️ 没识别出设备编号（{sn_error or '未知原因'}）：按旧命名推流（bp_<stream>）。"
+            "单台背包没问题；**多台必须能读到本体 SN**（以 root 运行）或显式配 RELAY_DEVICE_ID"
+        )
+    log(
+        f"目标平台 {endpoint()}；通道 {', '.join(STREAMS)}；源 {RTSP_BASE}；"
+        f"设备 {DEVICE_ID or '（默认）'}（来源 {device_source or '无'}，"
+        f"房间如 {room_name(STREAMS[0])}）"
+    )
     log(
         "媒体通路：rtsp → 平台 mediamtx（浏览器 WebRTC）"
         + (

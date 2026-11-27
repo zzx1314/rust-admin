@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { tokenStorage } from "@/api/http";
 import { apiBaseUrl, wsOrigin } from "@/utils/runtime";
 import { startWhep, type WhepSession } from "@/lib/whep";
+import { relayRoom, whepPath } from "@/lib/videoNaming";
 import {
   captureVideoPoster,
   clearVideoPoster,
@@ -40,11 +41,17 @@ import AppIcon from "./AppIcon.vue";
  */
 const props = defineProps<{
   /**
-   * 背包通道（`cam0`…`dogcam` / `preview`）：房间名是 `bp:<stream>`。
+   * 背包通道（`cam0`…`dogcam` / `preview`）。
    *
    * 这条通路不经过浏览器直连板端，因此不受「换 WiFi / 换浏览器 / LNA 许可」影响。
    */
   stream?: string | null;
+  /**
+   * 设备编号（多设备部署）：房间 / mediamtx path 都带设备维度
+   * （`bp:<device>:<stream>` / `bp_<device>_<stream>`，见 `lib/videoNaming`）。
+   * 空 = 默认设备，与升级前的行为完全一致。
+   */
+  device?: string | null;
 }>();
 
 /** 实际解码分辨率：页面用它显示「1920×1080」而不是写死一个规格 */
@@ -53,6 +60,9 @@ const emit = defineEmits<{
 }>();
 
 type Status = "idle" | "loading" | "playing" | "retrying" | "error";
+
+/** 静帧槽位：按房间名分槽，切设备时不能顶上一台的最后一帧 */
+const posterKey = computed(() => relayRoom(props.device, props.stream ?? ""));
 
 /** WebRTC 会话句柄（`lib/whep.ts` 自带指数退避重连，我们只负责建与拆） */
 let whep: WhepSession | null = null;
@@ -136,7 +146,10 @@ const playable = computed(() => !!props.stream);
 const whepUrl = computed(() => {
   if (!props.stream) return "";
   const token = tokenStorage.get() || "";
-  return `${apiBaseUrl()}/backpack/whep/${encodeURIComponent(props.stream)}/whep?token=${encodeURIComponent(token)}`;
+  const path = whepPath(props.device, props.stream);
+  // 带设备号时 path 里已经有 `?device=`，令牌用 `&` 接
+  const separator = path.includes("?") ? "&" : "?";
+  return `${apiBaseUrl()}${path}${separator}token=${encodeURIComponent(token)}`;
 });
 /** 全屏错误层只在这些状态出现：不能播 / 连续重连失败 */
 const showFallback = computed(() => !playable.value || status.value === "error");
@@ -202,7 +215,7 @@ function armPosterTimeout() {
   posterTimer = setTimeout(() => {
     posterTimer = null;
     poster.value = "";
-    clearVideoPoster();
+    clearVideoPoster(posterKey.value);
   }, POSTER_MAX_MS);
 }
 
@@ -243,7 +256,8 @@ function teardownWhep() {
 }
 
 /**
- * 问服务端：这台板子的 relay 报的媒体通路是什么（`bp:<stream>` 房间的 `transport`）。
+ * 问服务端：这台板子的 relay 报的媒体通路是什么（`bp:<device>:<stream>` 房间的
+ * `transport`；默认设备是 `bp:<stream>`）。
  *
  * 只用来识别老版本板端：`ws` = 它还在往平台上推 FLV（平台已丢弃），永远不会出画面，
  * 直接把话说明白。查不到（没登录 / 推流端刚连上还没上报）返回 `null`，照常起 WHEP ——
@@ -258,7 +272,8 @@ async function probeTransport(): Promise<"rtsp" | "ws" | null> {
     });
     if (!response.ok) return null;
     const body = (await response.json()) as { data?: { rooms?: Array<Record<string, unknown>> } };
-    const room = body?.data?.rooms?.find(item => item.room === `bp:${props.stream}`);
+    const wanted = relayRoom(props.device, props.stream);
+    const room = body?.data?.rooms?.find(item => item.room === wanted);
     return room?.transport === "rtsp" ? "rtsp" : room?.transport === "ws" ? "ws" : null;
   } catch {
     return null;
@@ -271,8 +286,10 @@ function openPresence() {
   presenceWanted = true;
   if (presence) return;
   const token = tokenStorage.get() || "";
+  // 房间按设备区分：不带 device 时是默认设备的 `bp:<stream>`
+  const scope = props.device ? `&device=${encodeURIComponent(props.device)}` : "";
   const socket = new WebSocket(
-    `${wsOrigin()}/api/backpack/video/ws?media=0&stream=${encodeURIComponent(props.stream)}&token=${encodeURIComponent(token)}`
+    `${wsOrigin()}/api/backpack/video/ws?media=0&stream=${encodeURIComponent(props.stream)}${scope}&token=${encodeURIComponent(token)}`
   );
   presence = socket;
   socket.onclose = () => {
@@ -335,7 +352,7 @@ function capturePoster() {
   const shot = captureVideoPoster(videoRef.value);
   if (!shot) return;
   poster.value = shot;
-  setVideoPoster(shot); // 切到直连 / 切通道时由下一个播放器接着顶
+  setVideoPoster(shot, posterKey.value); // 切到直连 / 切通道时由下一个播放器接着顶
 }
 
 /** 断流：先留帧，再按退避重连；前几次不弹错误，只改角标 */
@@ -392,7 +409,7 @@ function fail(message: string) {
   errorText.value = message;
   // 失败就别再挂着静帧：让错误层和「重连中 N」角标说人话
   clearPoster();
-  clearVideoPoster();
+  clearVideoPoster(posterKey.value);
 }
 
 async function attach() {
@@ -411,7 +428,7 @@ async function attach() {
   // 上一路（直连 / 上一个通道）的最后一帧先顶着：切流期间不能是黑屏。
   // 顶到一次连接尝试超时为止（见 armPosterTimeout）：板端复位后中继要几十秒才回来，
   // 那时候静帧已经过期，遮罩会接管（不能拿静帧冒充直播）。
-  if (!poster.value) poster.value = getVideoPoster();
+  if (!poster.value) poster.value = getVideoPoster(undefined, posterKey.value);
   if (poster.value) armPosterTimeout();
   waitingSecs.value = 0;
   armSlowStartHint();
@@ -528,9 +545,9 @@ async function enterFullscreen() {
 }
 
 watch(
-  () => props.stream,
+  // 换设备或换通道都视为全新播放：房间 / WHEP 地址全都变了
+  () => [props.device, props.stream],
   () => {
-    // 通道变化视为全新播放：清掉重连状态
     retryAttempt.value = 0;
     destroy();
     // 等 DOM 更新完再挂载播放器

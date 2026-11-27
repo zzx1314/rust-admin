@@ -24,10 +24,12 @@ import VideoStage from "@/components/backpack/VideoStage.vue";
 import SourceRail from "@/components/backpack/SourceRail.vue";
 import AiPanel from "@/components/backpack/AiPanel.vue";
 import {
+  backpackApi,
   clientFor,
   loadStatus,
   type BackpackBox,
   type BackpackDetectEvent,
+  type BackpackDevice,
   type BackpackSource,
   type BackpackStatus
 } from "@/api/backpack";
@@ -44,6 +46,16 @@ const busy = ref(false);
 const updatedAt = ref("");
 
 const activeKey = ref("");
+/**
+ * 当前看的设备编号（多设备部署）。
+ *
+ * 空 = 默认设备（旧单机部署，房间仍是 `bp:<stream>`）。选中值记在 localStorage：
+ * 现场多半固定看某一只狗，刷新页面 / 切出去再回来不该跳回第一台。
+ * 设备→视频的整条链路（Agent 地址、WHEP 基址、房间名、SSE 事件）都按它解析。
+ */
+const DEVICE_STORE = "robodog_backpack_device";
+const devices = ref<BackpackDevice[]>([]);
+const activeDevice = ref(localStorage.getItem(DEVICE_STORE) || "");
 const overlay = ref<"browser" | "osd">("browser");
 const form = reactive({
   task: "",
@@ -198,12 +210,17 @@ const detailText = computed(() => {
 });
 
 const aiDisabledReason = computed(() => {
-  if (!status.value?.agent.reachable) {
-    // 直连探不通、隧道也没登记：把两条路都写清楚，现场不用猜
-    return status.value?.tunnel?.available
-      ? "背包不可达（隧道设备在线但 Agent 未响应），暂不能开启 AI"
-      : "背包不可达，暂不能开启 AI";
+  const current = status.value;
+  if (current && !current.agent.reachable) {
+    // 后端文案里已经点名是哪台设备 / 该配哪个变量（多设备时这是关键信息）
+    return (
+      current.agent.error ||
+      (current.tunnel?.available
+        ? "背包不可达（隧道设备在线但 Agent 未响应），暂不能开启 AI"
+        : "背包不可达，暂不能开启 AI")
+    );
   }
+  if (!status.value) return "正在读取背包状态…";
   if (!activeSource.value) return "没有可用的视频源";
   if (!activeSource.value.available) return activeSource.value.hint;
   if (!activeSource.value.ai) return `${activeSource.value.label}通道不支持 AI 识别，请切到可见光相机`;
@@ -290,11 +307,55 @@ function labelsOfTask(taskId: string) {
   return (task?.labels ?? []).filter(label => !label.ignored);
 }
 
+/** 选中设备的显示名（链路状态卡片用） */
+const activeDeviceLabel = computed(() => {
+  if (!activeDevice.value) return "默认设备";
+  const found = devices.value.find(item => item.id === activeDevice.value);
+  return found?.label || activeDevice.value;
+});
+
+/**
+ * 设备清单：配置里的 + 实际在线的推流房间（服务端合并）。
+ *
+ * 失败不影响看视频（清单只是下拉选项），保持上一次的列表即可。
+ */
+async function refreshDevices() {
+  try {
+    const list = (await backpackApi.devices()).devices ?? [];
+    devices.value = list;
+    // 选中的设备已经不在了（改名 / 拆机 / 换了编号）→ 回默认设备。
+    // 只处理非空值：默认设备没配 Agent 时它可能不在清单里，不能因此反复重铺。
+    if (activeDevice.value && !list.some(item => item.id === activeDevice.value)) {
+      switchDevice("");
+    }
+  } catch {
+    /* 清单接口偶发失败：保留旧列表，下次轮询再补 */
+  }
+}
+
+/** 切设备：清掉上一台的框 / 计数 / 选中通道，状态与事件流由 watch 重建 */
+function switchDevice(id: string) {
+  const next = (id || "").trim();
+  if (next === activeDevice.value) return;
+  activeDevice.value = next;
+  if (next) localStorage.setItem(DEVICE_STORE, next);
+  else localStorage.removeItem(DEVICE_STORE);
+}
+
+function onDeviceChange(event: Event) {
+  switchDevice((event.target as HTMLSelectElement).value);
+}
+
 async function refreshStatus(quiet = false) {
   if (!quiet) refreshing.value = true;
+  const requested = activeDevice.value;
   try {
-    // 三条通道（浏览器直连 → 平台代理 → 设备客户端隧道）的退让在 loadStatus 里
-    const data = await loadStatus();
+    // 三条通道（浏览器直连 → 平台代理 → 设备客户端隧道）的退让在 loadStatus 里；
+    // 设备编号决定问的是哪一台背包
+    const [data] = await Promise.all([loadStatus(requested), refreshDevices()]);
+    // 这轮请求期间切了设备（或清单把选中项纠正回默认设备）：结果作废，
+    // 否则会用上一台的数据覆盖新设备的状态（AI 开关的禁用原因、相机清单全错）
+    if (requested !== activeDevice.value) return;
     const previous = status.value;
     status.value = data;
     loadError.value = "";
@@ -461,6 +522,28 @@ watch(watchMode, mode => {
   if (mode === "relay" && overlay.value !== "osd") overlay.value = "osd";
 });
 
+/**
+ * 换设备 = 换了一台板子：上一台的框、计数、检出流水、选中通道全部作废。
+ *
+ * `activeKey` 置空让 `refreshStatus` 重新挑源（另一台的可用通道可能不一样）；
+ * 事件流地址里带设备编号，`client.value.eventsUrl` 一变就自动重连（见下面的 watch）。
+ */
+watch(activeDevice, () => {
+  boxes.value = [];
+  counts.value = [];
+  feed.value = [];
+  lastDetectAt.value = 0;
+  videoMeta.value = null;
+  activeKey.value = "";
+  // 先清空状态：新设备的状态回来之前，AI 开关必须处于「读不到」而不是「上一台的状态」，
+  // 否则这 200ms 里点一下「开启 AI」会打到上一台狗上。
+  status.value = null;
+  // 现场直连只对默认设备成立（部署级 webrtc 基址只指向一台板子），
+  // 切到多设备就回中继，避免「点开直连看到的是另一台狗」。
+  if (activeDevice.value) watchMode.value = "relay";
+  void refreshStatus(true);
+});
+
 /* ---------------- SSE：识别框与检出事件 ---------------- */
 
 function zhOf(label: string, fallback?: string) {
@@ -584,15 +667,29 @@ defineExpose({ refreshStatus });
   <div>
     <PageHeader
       title="实时视频"
-      subtitle="数据采集背包 · 单路视频 + AI 识别（另可切换为背包烧录画框）"
+      subtitle="数据采集背包 · 单路视频 + AI 识别（多设备可按编号切换，另可切换为背包烧录画框）"
     >
       <template #actions>
+        <!-- 多设备：按设备编号切换（只有一台时不占地方） -->
+        <label v-if="devices.length > 1" class="device-pick" title="按设备编号切换要看的背包">
+          <AppIcon name="board" :size="13" />
+          <select :value="activeDevice" @change="onDeviceChange">
+            <option v-for="item in devices" :key="item.id || '__default__'" :value="item.id">
+              {{ item.label }}{{ item.online ? "" : "（离线）" }}
+            </option>
+          </select>
+        </label>
         <div class="seg">
           <button
             type="button"
             class="btn"
             :class="{ primary: watchMode === 'direct' }"
-            title="浏览器直连板端（WHEP）：延时最低，要求与背包同网段且浏览器放行本地网络访问"
+            :disabled="!!activeDevice"
+            :title="
+              activeDevice
+                ? '多设备时请用「平台中继」：现场直连的板端地址是部署级配置，只对应其中一台'
+                : '浏览器直连板端（WHEP）：延时最低，要求与背包同网段且浏览器放行本地网络访问'
+            "
             @click="switchWatchMode('direct')"
           >
             现场直连
@@ -660,12 +757,14 @@ defineExpose({ refreshStatus });
         <VideoPlayer
           v-if="watchMode === 'relay'"
           :stream="relayStream"
+          :device="activeDevice"
           @meta="onVideoMeta"
         />
 
         <VideoStage
           v-else
           :whep-base="status?.webrtc.base ?? null"
+          :device="activeDevice"
           :stream="playStream"
           :title="activeSource?.label || '—'"
           :ai-active="aiRunning"
@@ -772,6 +871,10 @@ defineExpose({ refreshStatus });
           </div>
           <div class="card-body">
             <dl class="link-list">
+              <div v-if="devices.length > 1">
+                <dt>当前设备</dt>
+                <dd class="ok">{{ activeDeviceLabel }}</dd>
+              </div>
               <div>
                 <dt>接入通道</dt>
                 <dd :class="status?.configured ? 'ok' : ''">{{ channelText }}</dd>
@@ -838,6 +941,32 @@ defineExpose({ refreshStatus });
   background: var(--brand-soft, #e6f2fb);
   color: var(--brand, #0284c7);
   font-weight: 600;
+}
+
+/* 多设备：按设备编号切换（与「现场直连 / 平台中继」同一条操作栏） */
+.device-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 8px 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.device-pick select {
+  height: 26px;
+  max-width: 190px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  outline: none;
 }
 
 .conn-tag {

@@ -20,20 +20,35 @@ interface Shot {
 /** 共享静帧的有效期：和播放器一次连接尝试的超时（`CONNECT_TIMEOUT_MS`）对齐 */
 const MAX_AGE_MS = 20_000;
 
-let shot: Shot | null = null;
+/**
+ * 静帧按**流**分槽存放（多设备部署）。
+ *
+ * 以前只有一张：切到另一台背包时，画面上会先顶上一台狗的最后一帧 —— 现场会
+ * 以为「视频串台了」。槽位 key 用房间名（`bp:<device>:<stream>`），不传 key 时
+ * 落到默认槽位（老调用方行为不变）。
+ */
+const shots = new Map<string, Shot>();
+const DEFAULT_KEY = "";
 
-export function setVideoPoster(src: string): void {
-  shot = src ? { src, at: Date.now() } : null;
+function keyOf(key?: string | null): string {
+  return (key ?? DEFAULT_KEY).trim();
 }
 
-export function getVideoPoster(maxAgeMs = MAX_AGE_MS): string {
+export function setVideoPoster(src: string, key?: string): void {
+  const slot = keyOf(key);
+  if (src) shots.set(slot, { src, at: Date.now() });
+  else shots.delete(slot);
+}
+
+export function getVideoPoster(maxAgeMs = MAX_AGE_MS, key?: string): string {
+  const shot = shots.get(keyOf(key));
   if (!shot) return "";
   if (Date.now() - shot.at > maxAgeMs) return "";
   return shot.src;
 }
 
-export function clearVideoPoster(): void {
-  shot = null;
+export function clearVideoPoster(key?: string): void {
+  shots.delete(keyOf(key));
 }
 
 /** `<video>` 当前帧 → 320px jpeg 的 dataURL；取不到（跨域 / 还没出画）返回空串 */

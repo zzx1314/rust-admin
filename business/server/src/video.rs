@@ -10,15 +10,19 @@
 //! 浏览器 ⇄ 平台 mediamtx（UDP 8189，SRTP）
 //! ```
 //!
+//! 多条设备（多台背包）时房间名 / mediamtx path 都带设备维度：
+//! `bp:<device>:<stream>` / `bp_<device>_<stream>`（见 [`room_of`] / [`mediamtx_path_of`]）。
+//! 不配设备号的板子仍是 `bp:<stream>` / `bp_<stream>`，升级不会影响现场已部署的单机。
+//!
 //! 三条约定：
 //!
 //! 1. **按需推流**：第一个观看者进来才给推流端下发 `video_start`，最后一个离开后留
 //!    [`STREAM_IDLE_GRACE`] 宽限再由看门狗 `video_stop`，没人看的时候现场侧不耗 CPU / 带宽。
 //! 2. **观看通道只存在性**：`/api/backpack/video/ws` 不再发二进制帧。没有它就没有
 //!    「第一个观看者」→ 平台不下发 `video_start`，看门狗也会在宽限后把流停掉。
-//! 3. **房间名前缀**：板端推流没有设备台账，房间名用 [`BACKPACK_ROOM_PREFIX`]
-//!    （`bp:<stream>`），控制消息直接走它自己那条连接（文本帧），见 `handle_publisher`
-//!    里的 `controls`。
+//! 3. **房间名 = 设备 + 通道**：板端推流没有设备台账，房间名用
+//!    [`BACKPACK_ROOM_PREFIX`]（`bp:<stream>` / `bp:<device>:<stream>`），控制消息直接走
+//!    它自己那条连接（文本帧），见 `handle_publisher` 里的 `controls`。
 //!
 //! 历史：2026-11-19 之前媒体走「HTTP-FLV over WebSocket」（平台环形缓冲扇出给 flv.js），
 //! 那一整套（补流头 / 当前 GOP / 积压量化 / 滞后断开 / `media=` 开关）已随 WebRTC 出口
@@ -97,6 +101,67 @@ pub const BACKPACK_STREAMS: [&str; 7] = [
     "preview",
 ];
 
+/// 设备编号里允许出现的字符（**不要放宽**）
+///
+/// 同一个值会出现在三个地方：mediamtx 的 path 片段（`bp_<device>_<stream>`）、
+/// 平台房间名（`bp:<device>:<stream>`）、WHEP 反代的查询参数
+/// （`/api/backpack/whep/<stream>/whep?device=<device>`）。三处的限制取交集：
+/// mediamtx 的 path 不能带冒号、URL 段不能带 `/` 与 `..`、房间名用 `:` 分隔。
+/// 所以只放行「字母数字开头 + 字母数字/`.`/`_`/`-`」，长度 1~32。
+fn device_chars_ok(raw: &str) -> bool {
+    let mut chars = raw.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphanumeric() => {}
+        _ => return false,
+    }
+    raw.len() <= 32 && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// 规范化设备编号：空 / 非法一律 `None`（= 默认设备，沿用旧命名）
+///
+/// 调用方**不要**自己 `trim` 后直接拼名字：非法值会污染房间名与 mediamtx path，
+/// 让一台板子的推流把另一台顶掉（多设备下这是最难查的一类故障）。
+pub fn normalize_device(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    device_chars_ok(value).then(|| value.to_string())
+}
+
+/// 推流房间名：无设备号 = `bp:<stream>`（旧单机命名），有设备号 = `bp:<device>:<stream>`
+///
+/// 房间名是平台侧唯一的「这是哪台板子的哪一路」标识，看门狗、观看计数、
+/// `video_start` / `video_stop` 全部按它找推流端，**必须带设备维度**，否则
+/// 两台板子的 `cam0` 会被当成同一路（后注册的那台把控制通道接管，
+/// 观看者看到的是另一台狗的画面，而被顶掉的那台永远收不到 `video_start`）。
+pub fn room_of(device: Option<&str>, stream: &str) -> String {
+    match device.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(device) => format!("{BACKPACK_ROOM_PREFIX}{device}:{stream}"),
+        None => format!("{BACKPACK_ROOM_PREFIX}{stream}"),
+    }
+}
+
+/// 平台 mediamtx 上的 path 名：`bp_<stream>` / `bp_<device>_<stream>`
+///
+/// 板端 relay 用 `RELAY_RTSP_URL` 的前缀拼这个名字推上来（见
+/// `deploy/backpack-relay/relay_push.py::rtsp_publish_plan`），WHEP 反代按同一规则
+/// 找它，两边**只能有一处实现**（就是这里）。
+pub fn mediamtx_path_of(device: Option<&str>, stream: &str) -> String {
+    match device.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(device) => format!("{BACKPACK_MEDIAMTX_PATH_PREFIX}{device}_{stream}"),
+        None => format!("{BACKPACK_MEDIAMTX_PATH_PREFIX}{stream}"),
+    }
+}
+
+/// 房间名 → `(设备编号, 通道)`；不是背包房间（没有 `bp:` 前缀）返回 `None`
+///
+/// 默认设备的房间没有第二段（`bp:dogcam`），设备房间是 `bp:RD-001:dogcam`。
+pub fn split_room(room: &str) -> Option<(String, String)> {
+    let rest = room.strip_prefix(BACKPACK_ROOM_PREFIX)?;
+    Some(match rest.split_once(':') {
+        Some((device, stream)) => (device.to_string(), stream.to_string()),
+        None => (String::new(), rest.to_string()),
+    })
+}
+
 /// 系统设置里「中继默认档位」的键（页面：系统设置 → 视频中继）
 ///
 /// 板端 relay 起流时按它选起点（`video_start.payload.profile`），不用再去板子上改
@@ -165,8 +230,10 @@ pub async fn broadcast_relay_profile(state: &AppState) -> usize {
     })
     .to_string();
     let mut sent = 0;
-    for stream in BACKPACK_STREAMS {
-        let room = format!("{BACKPACK_ROOM_PREFIX}{stream}");
+    // 按**已登记的控制通道**广播，而不是按固定的七路通道名：
+    // 多设备部署时房间名是 `bp:<device>:<stream>`，按名字枚举会漏掉全部设备房间，
+    // 现场表现就是「改了中继档位，正在看的另一台狗没换档」。
+    for room in state.video_hub.control_rooms().await {
         if state.video_hub.send_control(&room, message.clone()).await {
             sent += 1;
         }
@@ -221,6 +288,19 @@ fn new_room(publisher: Option<u64>) -> Room {
         idle_since: None,
         transport: None,
     }
+}
+
+/// 一路背包通道的对外快照（`GET /api/backpack/devices` 用）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelState {
+    /// 设备编号；空字符串 = 默认设备（旧命名 `bp:<stream>`）
+    pub device: String,
+    pub stream: String,
+    /// 板端 relay 的推流连接是否在线
+    pub publisher: bool,
+    pub viewers: usize,
+    /// `rtsp` = WebRTC 出口；`None`/`ws` = 板端 relay 没升级
+    pub transport: Option<String>,
 }
 
 impl VideoHub {
@@ -363,6 +443,46 @@ impl VideoHub {
             .insert(room.to_string(), (session, tx));
     }
 
+    /// 当前有控制通道的房间（= 在线板端的全部通道，带设备维度）
+    ///
+    /// `broadcast_relay_profile` 用它广播：多设备下房间名不再是固定的七路，
+    /// 按名字枚举必漏。
+    pub async fn control_rooms(&self) -> Vec<String> {
+        let mut rooms: Vec<String> = self.controls.read().await.keys().cloned().collect();
+        rooms.sort();
+        rooms
+    }
+
+    /// 所有**背包**通道的现场快照（`GET /api/backpack/devices` 用）
+    ///
+    /// 只看 `bp:` 房间：设备客户端那条老视频通路已经删除，它们不是背包相机。
+    /// 通道名不在 [`BACKPACK_STREAMS`] 里的房间也不给前端：WHEP 反代会拒绝它
+    /// （不限制就能被拿来让 mediamtx 创建任意 path）。
+    pub async fn channels(&self) -> Vec<ChannelState> {
+        let rooms = self.rooms.read().await;
+        let viewers = self.viewers.read().await;
+        let mut list: Vec<ChannelState> = rooms
+            .iter()
+            .filter_map(|(room, state)| {
+                let (device, stream) = split_room(room)?;
+                if !BACKPACK_STREAMS.contains(&stream.as_str()) {
+                    return None;
+                }
+                Some(ChannelState {
+                    device,
+                    stream,
+                    publisher: state.publisher.is_some(),
+                    viewers: viewers.get(room).copied().unwrap_or(0),
+                    transport: state.transport.clone(),
+                })
+            })
+            .collect();
+        list.sort_by(|a, b| {
+            (a.device.as_str(), a.stream.as_str()).cmp(&(b.device.as_str(), b.stream.as_str()))
+        });
+        list
+    }
+
     /// 推流连接断开：只清理自己那条通道，旧连接迟到的清理不能删掉新连接的
     pub async fn unregister_control(&self, room: &str, session: u64) {
         let mut controls = self.controls.write().await;
@@ -411,8 +531,12 @@ impl VideoHub {
         let mut list: Vec<serde_json::Value> = rooms
             .iter()
             .map(|(key, room)| {
+                let split = split_room(key);
                 json!({
                     "room": key,
+                    // 设备编号 / 通道：`null` = 不是背包房间（老通路已删除）
+                    "device": split.as_ref().map(|(device, _)| device.clone()),
+                    "stream": split.as_ref().map(|(_, stream)| stream.clone()),
                     "publisher": room.publisher.is_some(),
                     "viewers": viewers.get(key).copied().unwrap_or(0),
                     // 秒；null = 还有人在看（或从没人看过）
@@ -558,10 +682,12 @@ async fn handle_publisher(socket: WebSocket, state: AppState) {
                                     // 这里补发一次，否则他要一直黑到前端的重连（现场＝「起流黑
                                     // 好大一会」）。板端 `StreamSession.start()` 幂等。
                                     if state.video_hub.viewers_waiting(&code).await {
-                                        let stream_name = code
-                                            .strip_prefix(BACKPACK_ROOM_PREFIX)
-                                            .unwrap_or(&code)
-                                            .to_string();
+                                        // 房间名带设备维度（`bp:<device>:<stream>`）：
+                                        // 补发的 `video_start.stream` 只能是通道名，
+                                        // 直接 strip 前缀会发出 `RD-001:cam0`，板端认不出来。
+                                        let stream_name = split_room(&code)
+                                            .map(|(_, stream)| stream)
+                                            .unwrap_or_else(|| code.clone());
                                         let profile = relay_profile(&state).await;
                                         let resent = state
                                             .video_hub
@@ -657,12 +783,16 @@ async fn handle_publisher(socket: WebSocket, state: AppState) {
     }
 }
 
-/// 背包观看通道：`GET /api/backpack/video/ws?token=…&stream=dogcam`
+/// 背包观看通道：`GET /api/backpack/video/ws?token=…&stream=dogcam[&device=RD-001]`
 ///
 /// **只当在场心跳用**：一个媒体字节都不转发（媒体是浏览器 ⇄ mediamtx 的 WebRTC）。
 /// 它仍然必须存在，否则：
 ///   - `video_start` 永远不发出，板端不会起 ffmpeg（按需推流就没了）；
 ///   - 看门狗数不到观看者，宽限后下发 `video_stop` 把流停掉。
+///
+/// `device` 是设备编号（与板端 relay 的 `RELAY_DEVICE_ID`、设备客户端的
+/// `ROBODOG_DEVICE_ID` 同一个值）。不传 = 默认设备，走旧房间名 `bp:<stream>`；
+/// 传了就是 `bp:<device>:<stream>` —— 同一个 `cam0` 在多台背包上是不同的房间。
 ///
 /// 历史上这条连接承载过 FLV 媒体（`?media=1` 的老前端会这么连）；参数现在被忽略，
 /// 老前端连上来只会拿到一条安静的连接，不会报错。
@@ -681,11 +811,21 @@ pub async fn backpack_viewer_ws(
     if !BACKPACK_STREAMS.contains(&stream.as_str()) {
         return Err(AppError::BadRequest(format!("未知的背包通道：{stream}")));
     }
-    let room = format!("{BACKPACK_ROOM_PREFIX}{stream}");
+    let device = match params.get("device").map(|value| value.trim()) {
+        Some(raw) if !raw.is_empty() => Some(normalize_device(raw).ok_or_else(|| {
+            AppError::BadRequest(format!("设备编号不合法：{raw}（只允许字母数字与 . _ -）"))
+        })?),
+        _ => None,
+    };
+    let room = room_of(device.as_deref(), &stream);
     if !state.video_hub.has_publisher(&room).await {
-        return Err(AppError::BadRequest(
-            "板端推流服务未连接：确认背包上 backpack-relay 服务在运行".to_string(),
-        ));
+        return Err(AppError::BadRequest(format!(
+            "{} 的推流服务未连接：确认背包上 backpack-relay 服务在运行",
+            device
+                .as_deref()
+                .map(|device| format!("设备 {device}"))
+                .unwrap_or_else(|| "板端".to_string())
+        )));
     }
 
     Ok(ws.on_upgrade(move |socket| handle_viewer(socket, state, stream, room)))
@@ -749,7 +889,7 @@ async fn handle_viewer(socket: WebSocket, state: AppState, stream_name: String, 
 
 #[cfg(test)]
 mod tests {
-    use super::VideoHub;
+    use super::*;
 
     #[tokio::test]
     async fn first_viewer_requests_stream_and_last_one_stops_it() {
@@ -969,5 +1109,117 @@ mod tests {
         assert!(hub.viewers_waiting("bp:dogcam").await);
         hub.viewer_leave("bp:dogcam").await;
         assert!(!hub.viewers_waiting("bp:dogcam").await);
+    }
+
+    /* ---------------- 多设备命名 ---------------- */
+
+    /// 设备编号会同时进 URL / 房间名 / mediamtx path，所以只能放行安全字符；
+    /// 空串 = 默认设备（旧命名，绝不能因为前端传了个空 ``device`` 就变成 `bp::dogcam`）。
+    #[test]
+    fn device_ids_are_restricted_to_path_safe_characters() {
+        assert_eq!(normalize_device(" RD-001 "), Some("RD-001".to_string()));
+        assert_eq!(
+            normalize_device("gh-test_2.1"),
+            Some("gh-test_2.1".to_string())
+        );
+        assert_eq!(normalize_device(""), None);
+        assert_eq!(normalize_device("   "), None);
+        // 冒号会撞房间分隔符、斜杠/点会撞 URL 与 path、中文不在白名单（上游 SN 是 ASCII）
+        assert_eq!(normalize_device("a:b"), None);
+        assert_eq!(normalize_device("../x"), None);
+        assert_eq!(normalize_device("1号狗"), None);
+        assert_eq!(normalize_device(&"a".repeat(33)), None);
+    }
+
+    /// 三个名字必须一一对应，而且旧命名（无设备号）一个字节都不变：
+    /// 现场已部署的 relay 仍推 `bp_cam0` / 注册 `bp:cam0`。
+    #[test]
+    fn naming_keeps_legacy_shape_and_adds_the_device_dimension() {
+        assert_eq!(room_of(None, "dogcam"), "bp:dogcam");
+        assert_eq!(room_of(Some(""), "dogcam"), "bp:dogcam");
+        assert_eq!(room_of(Some("RD-001"), "dogcam"), "bp:RD-001:dogcam");
+
+        assert_eq!(mediamtx_path_of(None, "dogcam"), "bp_dogcam");
+        assert_eq!(
+            mediamtx_path_of(Some("RD-001"), "dogcam"),
+            "bp_RD-001_dogcam"
+        );
+
+        assert_eq!(
+            split_room("bp:dogcam"),
+            Some((String::new(), "dogcam".into()))
+        );
+        assert_eq!(
+            split_room("bp:RD-001:dogcam"),
+            Some(("RD-001".to_string(), "dogcam".to_string()))
+        );
+        assert_eq!(split_room("RD-001"), None, "设备客户端老房间不是背包房间");
+    }
+
+    /// 两台板子的同名通道必须是两个房间：以前都拼 `bp:cam0`，后注册的那台会接管
+    /// 控制通道、把前一台的 `video_start` 抢走（现场就是「点开是另一台狗的画面」）。
+    #[tokio::test]
+    async fn two_devices_keep_separate_rooms_viewers_and_controls() {
+        let hub = VideoHub::default();
+        let first = room_of(Some("RD-001"), "cam0");
+        let second = room_of(Some("RD-002"), "cam0");
+        assert_ne!(first, second);
+
+        hub.publisher_attach(&first, 1).await;
+        hub.publisher_attach(&second, 2).await;
+        assert!(hub.has_publisher(&first).await);
+        assert!(hub.has_publisher(&second).await);
+
+        // 观看者计数分开：看 RD-001 的人不能把 RD-002 的看门狗按下去
+        assert!(hub.viewer_join(&first).await);
+        assert_eq!(hub.viewers(&first).await, 1);
+        assert_eq!(hub.viewers(&second).await, 0);
+
+        // 控制通道分开：`video_start` 只能落到对应的那台板子
+        let (tx1, mut rx1) = tokio::sync::mpsc::channel(4);
+        let (tx2, mut rx2) = tokio::sync::mpsc::channel(4);
+        hub.register_control(&first, 1, tx1).await;
+        hub.register_control(&second, 2, tx2).await;
+        assert!(
+            hub.send_control(&first, "video_start".into()).await,
+            "第一台要收到"
+        );
+        assert_eq!(rx1.recv().await.as_deref(), Some("video_start"));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), rx2.recv())
+                .await
+                .is_err(),
+            "第二台不能收到另一台的控制消息"
+        );
+
+        assert_eq!(
+            hub.control_rooms().await,
+            vec![first.clone(), second.clone()],
+            "广播中继档位时要能枚举到全部设备房间"
+        );
+    }
+
+    /// `GET /api/backpack/devices` 的快照：设备/通道拆开、老房间归到默认设备、
+    /// 不在白名单里的通道不给前端。
+    #[tokio::test]
+    async fn channels_expose_device_and_stream_for_the_console() {
+        let hub = VideoHub::default();
+        hub.publisher_attach(&room_of(None, "dogcam"), 1).await;
+        hub.publisher_attach(&room_of(Some("RD-002"), "cam1"), 2)
+            .await;
+        hub.set_transport(&room_of(Some("RD-002"), "cam1"), Some("rtsp".into()))
+            .await;
+        // 不在白名单：WHEP 反代会拒绝，前端也不该列出来
+        hub.publisher_attach(&room_of(Some("RD-002"), "evil"), 3)
+            .await;
+
+        let list = hub.channels().await;
+        assert_eq!(list.len(), 2, "只列白名单通道: {list:?}");
+        assert_eq!(list[0].device, "", "默认设备排在最前");
+        assert_eq!(list[0].stream, "dogcam");
+        assert!(list[0].publisher);
+        assert_eq!(list[1].device, "RD-002");
+        assert_eq!(list[1].stream, "cam1");
+        assert_eq!(list[1].transport.as_deref(), Some("rtsp"));
     }
 }

@@ -75,6 +75,7 @@ fn config_with(dir: &std::path::Path) -> Config {
         backpack_browser_url: None,
         mediamtx_url: None,
         backpack_tunnel_device: None,
+        backpack_devices: Vec::new(),
         point_ai: "auto".to_string(),
         ai_window_max_secs: 300,
         public_url: None,

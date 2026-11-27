@@ -331,6 +331,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/dashboard/summary", get(dashboard::summary))
         // 数据采集背包（板端 Agent）同源代理：REST 聚合 + SSE 透传 + AI 启停
         .route("/backpack/status", get(backpack::status))
+        // 多设备：视频页的「设备编号」下拉（配置清单 + 实际在线的推流房间）
+        .route("/backpack/devices", get(backpack::devices))
         .route("/backpack/events", get(backpack::events))
         .route("/backpack/ai-window", get(backpack::ai_window))
         .route("/backpack/detect/start", post(backpack::detect_start))

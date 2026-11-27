@@ -901,6 +901,103 @@ def test_plain_ws_never_builds_ssl_context() -> None:
             os.environ["RELAY_PLATFORM_CA"] = real_ca
 
 
+def test_device_id_scopes_the_rtsp_path_and_room() -> None:
+    """多设备：配了 `RELAY_DEVICE_ID` 才加设备段，不配时命名一个字节都不变。
+
+    两台板子都推 `bp_cam0` 时，后推上来的那台会被 mediamtx 拒绝（path already in use），
+    平台上的房间也会被后注册的顶掉 —— `video_start` 打给另一台，现场就是
+    「一台有画面、另一台怎么点都黑」。
+    """
+    real_rtsp = relay.RTSP_PUSH
+    real_device = relay.DEVICE_ID
+    try:
+        relay.RTSP_PUSH = "rtsp://relay:pass@39.107.55.13:8554/bp_"
+
+        # 不配设备号 = 旧命名（现场已部署的单机不用改任何东西）
+        relay.DEVICE_ID = ""
+        host, port, path, userinfo = relay.rtsp_publish_plan("cam0")
+        assert (host, port) == ("39.107.55.13", 8554), (host, port)
+        assert path == "bp_cam0", path
+        assert userinfo == "relay:pass@", userinfo
+        assert relay.room_name("cam0") == "bp:cam0"
+
+        # 配了设备号：path 与房间都带设备维度，两台板子互不影响
+        relay.DEVICE_ID = "RD-002"
+        _, _, path, _ = relay.rtsp_publish_plan("cam0")
+        assert path == "bp_RD-002_cam0", path
+        assert path.startswith("bp_"), "平台 mediamtx 的推流鉴权是 ~^bp_，前缀不能变"
+        assert relay.room_name("cam0") == "bp:RD-002:cam0"
+        assert relay.room_name("dogcam") == "bp:RD-002:dogcam"
+    finally:
+        relay.RTSP_PUSH = real_rtsp
+        relay.DEVICE_ID = real_device
+
+
+def test_device_id_charset_matches_the_platform() -> None:
+    """字符集必须与平台 `video.rs::normalize_device` 一致（它会进 RTSP path / 房间 / URL）。"""
+    for good in ("RD-001", "gh-test_2.1", "a"):
+        assert relay.DEVICE_ID_RE.fullmatch(good), good
+    for bad in ("", "a:b", "../x", "1号狗", "a" * 33, "-lead", "with space"):
+        assert not relay.DEVICE_ID_RE.fullmatch(bad), bad
+
+
+def _partition(sn: str, offset: int) -> bytes:
+    """造一个「SN 分区镜像」：SN 写在指定的 16 字节行（现场在 0x200）。"""
+    data = bytearray(4096)
+    data[offset : offset + 16] = f"{sn:<16}".encode()
+    return bytes(data)
+
+
+def test_device_id_is_read_from_the_sn_partition() -> None:
+    """真机零配置：设备编号 = 本体 SN，与设备客户端同一套读法。
+
+    以前要手工在 unit 里配 `RELAY_DEVICE_ID`：换一台狗就得改一次，抄错就是
+    「两台板子抢同一条 path」。客户端早就不要求配置（读分区），relay 也照做。
+    """
+    assert relay.sn_from_bytes(_partition("0202222672400230", 0x200)) == "0202222672400230"
+    # 不依赖行号：0x20 / 0x200 / 0x800 都能取到
+    for offset in (0x20, 0x200, 0x800):
+        assert relay.sn_from_bytes(_partition("0202222672400230", offset)) == "0202222672400230", hex(offset)
+    # 前面的普通文字不能抢走 16 位十六进制
+    data = bytearray(_partition("0202222672400230", 0x200))
+    data[0:16] = f"{'MAPDATA1':<16}".encode()
+    assert relay.sn_from_bytes(bytes(data)) == "0202222672400230"
+    # 空白 / 全 0 分区不能编出一个编号（宁可回旧命名，也不能推错房间）
+    assert relay.sn_from_bytes(bytes(4096)) == ""
+
+
+def test_device_id_resolution_order() -> None:
+    """`RELAY_DEVICE_ID` > `ROBODOG_DEVICE_ID` > 本体 SN 分区。"""
+    import tempfile
+
+    real_path = relay.SN_PATH
+    saved = {key: os.environ.pop(key, None) for key in ("RELAY_DEVICE_ID", "ROBODOG_DEVICE_ID")}
+    path = ""
+    try:
+        handle = tempfile.NamedTemporaryFile(delete=False)
+        path = handle.name
+        handle.write(_partition("0202222672400230", 0x200))
+        handle.close()
+        relay.SN_PATH = path
+
+        # 真机（零配置）：直接用分区里的 SN
+        assert relay.resolve_device_id()[:2] == ("0202222672400230", path)
+
+        # 调试 / 非真机：环境变量优先
+        os.environ["ROBODOG_DEVICE_ID"] = "RD-002"
+        assert relay.resolve_device_id()[:2] == ("RD-002", "ROBODOG_DEVICE_ID")
+        os.environ["RELAY_DEVICE_ID"] = "RD-001"
+        assert relay.resolve_device_id()[:2] == ("RD-001", "RELAY_DEVICE_ID")
+    finally:
+        relay.SN_PATH = real_path
+        for key, value in saved.items():
+            os.environ.pop(key, None)
+            if value is not None:
+                os.environ[key] = value
+        if path:
+            os.unlink(path)
+
+
 def main() -> int:
     tests = [value for name, value in sorted(globals().items()) if name.startswith("test_")]
     failed = 0

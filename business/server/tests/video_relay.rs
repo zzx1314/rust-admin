@@ -88,6 +88,7 @@ async fn test_state() -> (AppState, TempDb) {
         backpack_browser_url: None,
         mediamtx_url: None,
         backpack_tunnel_device: None,
+        backpack_devices: Vec::new(),
         point_ai: "auto".to_string(),
         ai_window_max_secs: 300,
         public_url: None,
@@ -190,6 +191,50 @@ async fn viewer_for(
     .await
     .expect("观看通道连接失败");
     viewer
+}
+
+/// 指定设备 / 通道的观看通道（多设备用例）
+async fn viewer_device(
+    port: u16,
+    token: &str,
+    device: &str,
+    stream: &str,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    let (viewer, _) = connect_async(format!(
+        "ws://127.0.0.1:{port}/api/backpack/video/ws?stream={stream}&device={device}&media=0&token={token}"
+    ))
+    .await
+    .expect("观看通道连接失败");
+    viewer
+}
+
+/// 以任意房间名注册一台推流端（多设备用例；`publisher_for` 固定是 `bp:dogcam`）
+async fn publisher_room(
+    port: u16,
+    state: &AppState,
+    room: &str,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    let (mut publisher, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/device/video"))
+        .await
+        .expect("推流通道连接失败");
+    publisher
+        .send(Message::Text(
+            json!({
+                "msgType": "video_register",
+                "payload": { "deviceId": room },
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !state.video_hub.has_publisher(room).await {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("推流端 {room} 注册未被平台登记"));
+    publisher
 }
 
 /// 等下一条指定类型的文本消息，超时即失败（避免用例挂死）
@@ -412,6 +457,36 @@ async fn relay_reconnect_resends_video_start_to_waiting_viewers() {
     );
 }
 
+/// 多设备下补发的 `video_start.stream` 必须只是通道名。
+///
+/// 房间名是 `bp:RD-002:cam0`，早先的实现直接 strip `bp:` 前缀 → 发出
+/// `"stream": "RD-002:cam0"`，板端 STREAMS 里没有这个名字，重连后就永远起不了流
+/// （现场表现：看得好好的，板子抖一下就一直黑到前端超时重连）。
+#[tokio::test]
+async fn relay_reconnect_resends_the_bare_stream_name_for_device_rooms() {
+    let (state, _db) = test_state().await;
+    let (port, router) = spawn_server(state.clone()).await;
+    let token = login_token(&router).await;
+
+    let room = "bp:RD-002:cam0";
+    let _old = publisher_room(port, &state, room).await;
+    let _viewer = viewer_device(port, &token, "RD-002", "cam0").await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.video_hub.viewers(room).await == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("观看者未被登记");
+
+    let mut reconnected = publisher_room(port, &state, room).await;
+    let start = next_msg(&mut reconnected, "video_start").await;
+    assert_eq!(
+        start["payload"]["stream"], "cam0",
+        "补发时要带通道名而不是整段房间名: {start}"
+    );
+}
+
 #[tokio::test]
 async fn viewer_without_publisher_is_rejected_before_upgrade() {
     let (state, _db) = test_state().await;
@@ -623,9 +698,11 @@ async fn whep_proxy_rejects_unknown_streams_and_unconfigured_deployments() {
         let method = method.to_string();
         let path = path.to_string();
         async move {
+            // path 可能自带查询串（`?device=`）：令牌要接在后面
+            let separator = if path.contains('?') { '&' } else { '?' };
             let request = Request::builder()
                 .method(method.as_str())
-                .uri(format!("{path}?token={token}"))
+                .uri(format!("{path}{separator}token={token}"))
                 .body(Body::empty())
                 .unwrap();
             router.oneshot(request).await.unwrap().status()
@@ -651,4 +728,89 @@ async fn whep_proxy_rejects_unknown_streams_and_unconfigured_deployments() {
         StatusCode::BAD_REQUEST,
         "只反代 WHEP，mediamtx 的其它端点不能出去"
     );
+    // 设备编号走**固定的**路径模板 + 查询串（不用为每台背包再拼一段路径）
+    assert_eq!(
+        call("POST", "/api/backpack/whep/dogcam/whep?device=bad%20device").await,
+        StatusCode::BAD_REQUEST,
+        "设备编号要过白名单（会拼进 mediamtx path，不能带空格/斜杠）"
+    );
+    assert_eq!(
+        call("POST", "/api/backpack/whep/dogcam/whep?device=RD-001").await,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "带设备号的合法请求照样走到「本部署没开 WebRTC 出口」这一步"
+    );
+}
+
+/// 多设备：两台背包各自注册 `bp:<device>:<cam0>`，房间 / 观看计数 / 控制通道互不干扰。
+///
+/// 以前两台板子的同名通道都拼成 `bp:cam0`：后注册的那台会把前一台的控制通道接管，
+/// 观看端收到的是「另一台狗的画面」，而被顶掉的那台永远收不到 `video_start`。
+#[tokio::test]
+async fn two_backpacks_keep_their_own_rooms_and_control_channels() {
+    let (state, _db) = test_state().await;
+    let (port, router) = spawn_server(state.clone()).await;
+    let token = login_token(&router).await;
+
+    let room_a = "bp:RD-001:cam0";
+    let room_b = "bp:RD-002:cam0";
+    let mut publisher_a = publisher_room(port, &state, room_a).await;
+    let mut publisher_b = publisher_room(port, &state, room_b).await;
+    assert!(state.video_hub.has_publisher(room_a).await);
+    assert!(state.video_hub.has_publisher(room_b).await);
+
+    // 看 RD-001：只有第一台收到 video_start
+    let mut viewer_a = viewer_device(port, &token, "RD-001", "cam0").await;
+    let start_a = next_msg(&mut publisher_a, "video_start").await;
+    assert_eq!(start_a["payload"]["stream"], "cam0");
+    let leaked = tokio::time::timeout(
+        Duration::from_millis(500),
+        next_msg(&mut publisher_b, "video_start"),
+    )
+    .await;
+    assert!(leaked.is_err(), "看 RD-001 不能给 RD-002 起流");
+
+    // 看 RD-002：第二台自己收到一条，两台各自一个观看者
+    let _viewer_b = viewer_device(port, &token, "RD-002", "cam0").await;
+    next_msg(&mut publisher_b, "video_start").await;
+    assert_eq!(state.video_hub.viewers(room_a).await, 1);
+    assert_eq!(state.video_hub.viewers(room_b).await, 1);
+
+    // 设备下拉：两台都要在，各自带在线通道
+    let request = Request::get("/api/backpack/devices")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    let devices = body["data"]["devices"].as_array().expect("devices 数组");
+    let of = |id: &str| {
+        devices
+            .iter()
+            .find(|item| item["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("设备下拉里缺少 {id}: {body}"))
+    };
+    let a = of("RD-001");
+    let b = of("RD-002");
+    assert_eq!(a["online"], true);
+    assert_eq!(a["streams"], json!(["cam0"]));
+    assert_eq!(b["online"], true);
+    assert_eq!(b["streams"], json!(["cam0"]));
+
+    // 诊断接口：房间名拆出设备 / 通道，排障时能对上具体是哪台
+    let diagnostic = state.video_hub.debug_state().await;
+    let room = diagnostic["rooms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["room"] == room_a)
+        .expect("诊断里应有 RD-001 房间");
+    assert_eq!(room["device"], "RD-001");
+    assert_eq!(room["stream"], "cam0");
+
+    viewer_a.close(None).await.unwrap();
 }

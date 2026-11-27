@@ -85,6 +85,7 @@ async fn test_state_with_token(service_token: Option<&str>) -> (AppState, TempDb
         backpack_browser_url: None,
         mediamtx_url: None,
         backpack_tunnel_device: None,
+        backpack_devices: Vec::new(),
         point_ai: "auto".to_string(),
         ai_window_max_secs: 300,
         public_url: None,
@@ -2108,6 +2109,7 @@ mod zentai_service_token {
             backpack_browser_url: None,
             mediamtx_url: None,
             backpack_tunnel_device: None,
+            backpack_devices: Vec::new(),
             point_ai: "auto".to_string(),
             ai_window_max_secs: 300,
             public_url: None,
@@ -5682,7 +5684,11 @@ async fn plain_http_pages_redirect_to_https_but_api_does_not() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK, "API 不该被重定向到 https");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "API 不该被重定向到 https"
+    );
 }
 
 /// 没配 https 的 `public_url` 时不做任何重定向（否则整个控制台会跳到连不上的地址，
