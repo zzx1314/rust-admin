@@ -2687,18 +2687,6 @@ onBeforeUnmount(() => {
             <label>失败重试次数</label>
             <input v-model.number="actionForm.retry" class="input" type="number" min="0" max="5" />
           </div>
-          <div v-if="isAiAction" class="rt-hint" style="margin: 0; grid-column: 1 / -1">
-            到点后平台用<b>与实时视频同一套 AI 模型</b>开识别窗口：场景 = 模型包，类别 = 勾选的标签，
-            阈值 = 置信度下限；检出目标写入「告警中心」。命中帧与 result.json 会落到板端
-            detect_jobs/计划ID/pt航点下标/（计划 ID = 业务任务号）。检测类型二选一：
-            <b>检测是否存在</b>（找到就存证/上报，勾上「未找到目标也告警」后反过来——
-            适合灭火器、气体钢瓶这类「必须有」的东西）、
-            <b>检测数量是否正确</b>（再核对数量，不一致——含一个都没找到——上报数量告警；
-            适合「必须有 N 个」的点；勾上「数量一致也通知」后核对一致也会发一条群消息回执，
-            但不落告警、不建工单）。
-            窗口时长跟着「停留时长」走（停留 + 8s，最短 10s、最长 300s，离开航点立即结束），
-            不额外占用停留时长。模型目录读不到时可以手填场景关键词，后端仍有关键词兜底。
-          </div>
         </template>
         <div v-else-if="isTaskRecordAction" class="field" style="grid-column: 1 / -1">
           <label>切片长度（秒）</label>
