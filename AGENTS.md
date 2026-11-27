@@ -367,6 +367,26 @@ AudioWorklet 做 48k⇄16k 与抖动缓冲。**不需要填 IP、公网可用；
 `dog_internal_tests::map_sync_status_report_updates_its_own_audit`、
 `business/server` 的 `gateway::commands::map_sync_progress_text_counts_processed_maps`。
 
+**「同步地图」对平台已有记录只认「本体回传的那一份」**（2026-11-27 起，
+`business/server/src/handlers/ingest.rs`）：
+- **中台把图删了 → 内容没变也要重传**。以前 `mode=refresh` 先比「内容指纹」，一致就
+  `skipped`，根本不看中台那张图还在不在，于是「在中台删掉一张图 → 点同步地图」永远
+  补不回来（现场删掉 `2026_11_27_09_54_17` 后回执「无需更新 4」，列表里还是没有）。
+  现在先看 `alive_map_ids`：中台已删就按新图入库（沿用业务地图 id，`mapInfo` 不带 `id`）。
+- **归档行 / 派生占位行 → 跳过，不算失败**。选行顺序是「同设备 > `source=robot-mapping`
+  > 有 `source_id` > 未归档 > 最新」；命中不是本体副本的行（`已归档`、控制台
+  「派生新版本」建的占位行、中台导入行）一律 `skipped` 并在原因里写明。
+  以前拿归档行去覆盖会撞「已发布不可原地覆盖」的 400，整条同步报失败；换成
+  「未归档优先」又会把派生占位行（`2026_11_23_10_49_02@v1.1`，园区基线）覆盖成机器人
+  原始包、还改指一张新建的中台地图——两头都踩过，别只修一头。
+- **跳过原因要回执给中台**：`SyncReport.notes`（「内容未变化」不收，只收归档 / 派生 /
+  无中台链接）拼进 `command_result.message`（「…无需更新 5，失败 0；跳过说明：…」），
+  中台审计和设备页才解释得清「同步成功、图却没更新」。
+回归：`api_smoke::ingest_refresh_reuploads_map_deleted_in_zentai` /
+`ingest_refresh_skips_archived_business_row_instead_of_failing` /
+`ingest_refresh_leaves_derived_map_versions_untouched`、
+`client mapupload::tests::summary_surfaces_meaningful_skip_reasons`。
+
 **⛔ `use_preconfigured_tls` 只能收裸的 `rustls::ClientConfig`**（2026-11-27 事故）：
 `business/client/src/tls.rs` 以前写成 `use_preconfigured_tls(Some(config))`，reqwest 内部
 自己会包一层 `Option`，再包一次 downcast 打不中 → `build()` 报 `Unknown TLS backend`；
