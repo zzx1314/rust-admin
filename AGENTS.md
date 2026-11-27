@@ -352,6 +352,32 @@ AudioWorklet 做 48k⇄16k 与抖动缓冲。**不需要填 IP、公网可用；
 `dog_internal_tests::media_sync_status_report_updates_only_its_own_audit`、
 `client media_sync::tests::collect_files_drains_every_frame_of_the_point`。
 
+**「同步地图」也是长任务**（2026-11-27 起，`LONG_TASK_ACTIONS = 同步媒体 / 回传录像 /
+同步地图`）：`POST /api/dogDevice/{id}/syncMaps` 以前直接走 `deliver`，**连审计行都不写**，
+中台点一次只会看到按钮转一下，图有没有上来完全靠人去地图列表里数。现在它走 `forward`
+（审计 `pending` + `awaitingDevice`），中台的 `requestId` 一路透传：
+`forward` → 业务平台 `apply_sync_maps` 塞进指令参数 `params.requestId` → 客户端
+`command_progress`（每张图一条「已处理 2/5 张」）/ `command_result`（共几张 / 传了几张 /
+哪几张失败、原因）→ 业务平台 `on_command_progress|result`（认这三条指令）→
+`POST /api/dogInternal/media/sync-status` → 审计；设备页「更多 → 地图同步状态」轮询
+`GET /api/dogDevice/{id}/mediaSyncStatus?action=同步地图`（前端点完「同步地图」自动打开）。
+⛔ 别再把它改回同步指令：`deliver` 不落审计，`is_long_task_action` 也不认它，
+「同步失败」就永远是黑盒。回归：
+`dog_command_control_tests` 的同步地图用例（下发即 `pending`）、
+`dog_internal_tests::map_sync_status_report_updates_its_own_audit`、
+`business/server` 的 `gateway::commands::map_sync_progress_text_counts_processed_maps`。
+
+**⛔ `use_preconfigured_tls` 只能收裸的 `rustls::ClientConfig`**（2026-11-27 事故）：
+`business/client/src/tls.rs` 以前写成 `use_preconfigured_tls(Some(config))`，reqwest 内部
+自己会包一层 `Option`，再包一次 downcast 打不中 → `build()` 报 `Unknown TLS backend`；
+调用方的 `.build().unwrap_or_default()` 把它变成**没有 TLS 后端**的客户端，之后所有
+`https://` 请求只报 `error sending request for url`。现场表现：从 2026-11-26 20:06
+（客户端切 https）起到 11-27 11:47，**同步地图全量失败**（中台一张新图都没上来）、
+同步媒体 / 回传录像 / 照片上传同样静默失败，日志里只有一句看不出原因的
+`登录业务服务失败: error sending request`。现在统一走 `tls::platform_client(timeout)`
+（构建失败直接炸出原因，不再 `unwrap_or_default()` 兜底），回归
+`client tls::tests::preconfigured_tls_accepts_the_bare_client_config`。
+
 **计划的「发布状态」不是执行状态**：`tasks.publish_status`（`草稿` / `已发布`，迁移 029）
 决定自动调度，`task_status` 只管执行进度。**只有已发布的计划才会自动执行定时任务**；
 草稿在建计划（`create_task_core`）、设备上线补发（`gateway::dispatch_pending_tasks`）、
