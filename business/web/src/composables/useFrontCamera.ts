@@ -187,9 +187,10 @@ export function useFrontCamera(device?: () => string | null | undefined) {
   );
 
   const path = computed(() => {
-    // 现场直连只对默认设备有意义：部署级 `webrtc` 基址只指向其中一台板子，
+    // 现场直连只对「部署里唯一的那台」有意义：部署级 `webrtc` 基址只指向一台板子，
     // 多设备时用它「直连」另一台就是看到别的狗的画面（比黑屏更糟）。
-    if (activeDevice.value) return "relay";
+    // 单台部署（绝大多数）即使板端自动带上了 SN，也仍然允许直连。
+    if (activeDevice.value && devices.value.length > 1) return "relay";
     return frontCameraPath(status.value, relayOnline.value, devicesKnown.value);
   });
   const whepBase = computed(() => status.value?.webrtc.base ?? null);

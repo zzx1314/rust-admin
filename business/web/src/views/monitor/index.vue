@@ -323,6 +323,10 @@ async function refreshDevices() {
   try {
     const list = (await backpackApi.devices()).devices ?? [];
     devices.value = list;
+    // 第二台背包上线后，多设备的「现场直连」不再成立 → 自动回中继（用户手动切过的也收）
+    if (activeDevice.value && list.length > 1 && watchMode.value === "direct") {
+      watchMode.value = "relay";
+    }
     // 选中的设备已经不在了（改名 / 拆机 / 换了编号）→ 回默认设备。
     // 只处理非空值：默认设备没配 Agent 时它可能不在清单里，不能因此反复重铺。
     if (activeDevice.value && !list.some(item => item.id === activeDevice.value)) {
@@ -538,9 +542,9 @@ watch(activeDevice, () => {
   // 先清空状态：新设备的状态回来之前，AI 开关必须处于「读不到」而不是「上一台的状态」，
   // 否则这 200ms 里点一下「开启 AI」会打到上一台狗上。
   status.value = null;
-  // 现场直连只对默认设备成立（部署级 webrtc 基址只指向一台板子），
-  // 切到多设备就回中继，避免「点开直连看到的是另一台狗」。
-  if (activeDevice.value) watchMode.value = "relay";
+  // 现场直连只对「部署里唯一的那台」成立（部署级 webrtc 基址只指向一台板子），
+  // 多设备下切过去就回中继，避免「点开直连看到的是另一台狗」。
+  if (activeDevice.value && devices.value.length > 1) watchMode.value = "relay";
   void refreshStatus(true);
 });
 
@@ -684,9 +688,9 @@ defineExpose({ refreshStatus });
             type="button"
             class="btn"
             :class="{ primary: watchMode === 'direct' }"
-            :disabled="!!activeDevice"
+            :disabled="!!activeDevice && devices.length > 1"
             :title="
-              activeDevice
+              activeDevice && devices.length > 1
                 ? '多设备时请用「平台中继」：现场直连的板端地址是部署级配置，只对应其中一台'
                 : '浏览器直连板端（WHEP）：延时最低，要求与背包同网段且浏览器放行本地网络访问'
             "

@@ -604,8 +604,15 @@ pub async fn devices(
     for device in &state.config.backpack_devices {
         order.push(device.id.clone());
     }
-    if state.config.backpack_mode().is_some() || channels.iter().any(|item| item.device.is_empty())
-    {
+    // 默认设备（旧命名 `bp:<stream>`）只在**它真的存在**时列出来：
+    //   - 有旧命名的推流房间（老板端 relay），或
+    //   - 这个部署还没有任何按编号命名的设备（单机老部署，页面仍是默认设备语义）。
+    // 否则会出现一个「默认设备（离线）」的幻影条目：板端升级后自动带 SN，
+    // 而部署级 `ROBODOG_BACKPACK_BROWSER_URL` 还在，页面下拉会多出一台空设备。
+    let has_named = !state.config.backpack_devices.is_empty()
+        || channels.iter().any(|item| !item.device.is_empty());
+    let legacy_online = channels.iter().any(|item| item.device.is_empty());
+    if legacy_online || (!has_named && state.config.backpack_mode().is_some()) {
         order.insert(0, String::new());
     }
     for item in &channels {

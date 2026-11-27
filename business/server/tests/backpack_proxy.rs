@@ -520,6 +520,58 @@ async fn device_query_switches_target_without_falling_back_to_the_default() {
     drop(temp);
 }
 
+/// 设备下拉：默认设备（旧命名 `bp:<stream>`）只在它真的存在时才出现。
+///
+/// 现场真实场景：板端 relay 升级后自动带上 SN（房间变 `bp:<SN>:cam0`），而部署级
+/// `ROBODOG_BACKPACK_BROWSER_URL` 还在 —— 这时如果按「有没有配接法」判断，会多出一台
+/// 「默认设备（离线）」，操作员会以为园区里有两台背包。
+#[tokio::test]
+async fn default_device_entry_only_shows_up_while_it_still_exists() {
+    async fn list_of(state: AppState) -> Vec<String> {
+        let router = build_router(state);
+        let token = login_token(&router).await;
+        let response = router
+            .oneshot(
+                Request::get("/api/backpack/devices")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        body["data"]["devices"]
+            .as_array()
+            .expect("devices 数组")
+            .iter()
+            .map(|item| item["id"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    // ① 老板端（旧命名、relay 未升级）：只有默认设备
+    let dir_a = temp_dir();
+    let _temp_a = TempDb { dir: dir_a.clone() };
+    let state_a = state_with_browser(None, Some("http://192.168.41.246:8000".into()), dir_a).await;
+    assert_eq!(list_of(state_a).await, vec![String::new()]);
+
+    // ② 板端升级后自动带 SN：默认设备的幻影条目消失
+    let dir_b = temp_dir();
+    let _temp_b = TempDb { dir: dir_b.clone() };
+    let state_b = state_with_browser(None, Some("http://192.168.41.246:8000".into()), dir_b).await;
+    state_b
+        .video_hub
+        .publisher_attach("bp:0202222672400230:cam0", 1)
+        .await;
+    assert_eq!(
+        list_of(state_b).await,
+        vec!["0202222672400230".to_string()]
+    );
+}
+
 /// 「现场直连」的板端 mediamtx 地址是**部署级固定值**，不按设备配。
 ///
 /// 平台中继那条路（默认）用的是固定同源路径 `/api/backpack/whep/<stream>/whep`，
