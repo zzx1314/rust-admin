@@ -49,12 +49,58 @@ use futures_util::{SinkExt, StreamExt};
 /// 下次断开的退避从 1s 重新开始，别一路飙到 30s。
 pub(crate) const HEALTHY_CONNECTION: Duration = Duration::from_secs(30);
 
+/// 建连超时（TCP + TLS + HTTP 101 一共）。
+///
+/// 4G 拨号后会换 IP、默认路由可能短暂指向**没有出口的网卡**（现场 `.246` 的
+/// `eth0` 是机器人内网）：这时 TCP 会停在 `SYN-SENT`，内核重试两分多钟甚至更久，
+/// 而 tungstenite 的 `connect_async` **没有超时**——客户端就「挂在连接中」再也不重试，
+/// 日志里连一句错都没有（2026-11-27 13:47 现场：4G 换 IP，客户端抢先走了 eth0，
+/// 平台侧看不到任何连接，只能人工重启进程）。超时后交给外层 1s→30s 退避重连。
+pub(crate) const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// 业务连接重连次数：连接稳定存活过 [`HEALTHY_CONNECTION`] 就重新从 1 开始退避。
 pub(crate) fn next_retry(previous: u64, elapsed: Duration) -> u64 {
     if elapsed >= HEALTHY_CONNECTION {
         1
     } else {
         previous + 1
+    }
+}
+
+/// 建一条设备 WS（带超时）。
+///
+/// 抽出来是为了能测「连不上时必须超时返回、不能永远挂着」——现场 `.246` 走 4G，
+/// 拨号换 IP 的那几秒默认路由可能指向没有出口的内网网卡，SYN 会一直重传。
+async fn connect_with_timeout(
+    ws_url: &str,
+    timeout: Duration,
+) -> Result<
+    (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tokio_tungstenite::tungstenite::handshake::client::Response,
+    ),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let connect = async {
+        match tls::ws_connector() {
+            Some(connector) => {
+                tokio_tungstenite::connect_async_tls_with_config(ws_url, None, false, Some(connector))
+                    .await
+            }
+            None => connect_async(ws_url).await,
+        }
+    };
+    match tokio::time::timeout(timeout, connect).await {
+        Ok(result) => Ok(result?),
+        Err(_) => Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "连接业务服务超时（>{}s）：检查网络 / 默认路由（4G 拨号换 IP 后可能还指着内网网卡）",
+                timeout.as_secs()
+            ),
+        ))),
     }
 }
 
@@ -66,18 +112,7 @@ pub(crate) async fn run_client(
     info!("正在连接业务服务: {ws_url}");
     // 平台只开 https 入口时是 `wss://`：`server.tls_ca` 钉了自签证书就把连接器交下去，
     // 没配就是 tungstenite 默认（webpki 公共根，公网 CA 证书不用配）
-    let (ws_stream, _) = match tls::ws_connector() {
-        Some(connector) => {
-            tokio_tungstenite::connect_async_tls_with_config(
-                ws_url.as_str(),
-                None,
-                false,
-                Some(connector),
-            )
-            .await?
-        }
-        None => connect_async(&ws_url).await?,
-    };
+    let (ws_stream, _) = connect_with_timeout(&ws_url, WS_CONNECT_TIMEOUT).await?;
     let (mut write, mut read) = ws_stream.split();
     let (out_tx, mut out_rx) = mpsc::channel::<WsMessage>(128);
 
@@ -600,5 +635,44 @@ pub(crate) async fn run_client(
     match close_reason {
         Some(reason) => Err(reason.into()),
         None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod connect_timeout_tests {
+    use super::{WS_CONNECT_TIMEOUT, connect_with_timeout};
+    use std::time::{Duration, Instant};
+
+    /// 回归 2026-11-27 13:47 现场：4G 换 IP 时客户端抢到了没有出口的内网路由，
+    /// TCP 停在 `SYN-SENT`，`connect_async` 没有超时 → 客户端「挂在连接中」，
+    /// 平台收不到任何连接、日志里也没有一行错，只能人工重启进程。
+    ///
+    /// 这里用一个「接 TCP 但不回 HTTP 101」的假服务模拟半通不通的链路：
+    /// 建连必须自己超时返回错误（外层据此走 1s→30s 退避重连），不能永远挂着。
+    #[tokio::test]
+    async fn half_open_handshake_times_out_instead_of_hanging() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("绑定本地端口");
+        let addr = listener.local_addr().expect("取本地地址");
+        tokio::spawn(async move {
+            // 收下连接就不管了：既不写 101，也不关闭
+            if let Ok((stream, _)) = listener.accept().await {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                drop(stream);
+            }
+        });
+
+        let started = Instant::now();
+        let result =
+            connect_with_timeout(&format!("ws://{addr}/ws/device"), Duration::from_millis(300)).await;
+        assert!(result.is_err(), "半开的握手必须超时失败，不能一直等");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "超时要按配置生效（实际 {:?}）",
+            started.elapsed()
+        );
+        // 真实现场的超时值必须有限，别被人改成天文数字
+        assert!(WS_CONNECT_TIMEOUT <= Duration::from_secs(60));
     }
 }
