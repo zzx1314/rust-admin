@@ -2393,10 +2393,6 @@ onBeforeUnmount(() => {
           <textarea v-model="routeForm.routeDescription" class="textarea" rows="3" placeholder="描述覆盖点位与巡检目标" />
         </div>
       </div>
-      <div class="rt-hint">
-        闭环方式默认「闭环」，创建后可在「编辑基础信息」里改（闭环 → 跑完返航回起点，往返 / 单向 → 停在最后一个航点）。
-        航点坐标以所选地图版本的原点与分辨率为基准（存地图米制，1 位小数，画布只是显示换算）；创建后引用冻结，后续地图发新版不会自动改写本路线坐标。没有真实 ROS 地图包的示意基线只能编排、不能下发任务。创建后进入画布点击添加航点。
-      </div>
       <template #footer>
         <button class="btn" @click="routeDialog = false"><AppIcon name="close" />取消</button>
         <button class="btn primary" @click="createRoute"><AppIcon name="check" />创建路线</button>
