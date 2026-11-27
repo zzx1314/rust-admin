@@ -1,39 +1,26 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { ElMessage } from "element-plus";
 import { mapApi } from "@/api/ops";
-import type { MapRaster, MapRefs, MapVersion } from "@/api/types";
+import type { MapRaster, MapRefs } from "@/api/types";
 import AppIcon from "@/components/AppIcon.vue";
 import MapChip from "@/components/MapChip.vue";
-import { zentaiMapConsoleLink, zentaiMapId } from "@/utils/zentai";
+import { zentaiMapId } from "@/utils/zentai";
 
 const props = withDefaults(
   defineProps<{ modelValue: boolean; mapId?: string | null }>(),
   { mapId: null }
 );
-const emit = defineEmits<{
-  "update:modelValue": [value: boolean];
-  updated: [map: MapVersion];
-  "data-source": [];
-}>();
+const emit = defineEmits<{ "update:modelValue": [value: boolean] }>();
 
 const loading = ref(false);
 const refsData = ref<MapRefs | null>(null);
 const raster = ref<MapRaster | null>(null);
-const view = ref<"detail" | "impact">("detail");
-const strategy = ref("保留旧版本继续运行，仅新建路线使用新版");
-const note = ref("园区二期改造后重新建图标定");
-const submitting = ref(false);
 
 const map = computed(() => refsData.value?.map ?? null);
 const routes = computed(() => refsData.value?.routes ?? []);
-const tasks = computed(() => refsData.value?.tasks ?? []);
 
 /** 中台地图编号：业务库 `source_id` → 中台 `dog_map.id` */
 const zentaiMapNumber = computed(() => zentaiMapId(map.value?.sourceId));
-
-/** 中台「地图管理」直达链接（按地图名称 / 设备编号预填筛选） */
-const zentaiLink = computed(() => zentaiMapConsoleLink(map.value));
 
 /** 业务编号里的数字是首次入库时的中台 id，跟中台当前编号可能不一致 */
 const idHint = computed(() => {
@@ -146,10 +133,7 @@ async function load() {
 watch(
   () => props.modelValue,
   visible => {
-    if (visible) {
-      view.value = "detail";
-      void load();
-    }
+    if (visible) void load();
   },
   { immediate: true }
 );
@@ -160,26 +144,12 @@ watch(
     if (props.modelValue) void load();
   }
 );
-
-async function publishNewVersion() {
-  if (!props.mapId) return;
-  submitting.value = true;
-  try {
-    const created = await mapApi.newVersion(props.mapId, note.value);
-    ElMessage.success(`地图 ${created.id} 已发布；历史路线保持旧版引用`);
-    emit("updated", created);
-    view.value = "detail";
-    await load();
-  } finally {
-    submitting.value = false;
-  }
-}
 </script>
 
 <template>
   <el-dialog
     :model-value="modelValue"
-    :title="view === 'detail' ? '地图基线详情' : '地图版本变更 · 影响分析'"
+    title="地图基线详情"
     width="900px"
     @update:model-value="emit('update:modelValue', $event)"
   >
@@ -190,133 +160,64 @@ async function publishNewVersion() {
           <span class="muted">{{ map.parkName || "未归属园区" }} · {{ map.note }}</span>
         </div>
 
-        <template v-if="view === 'detail'">
-          <div class="rt-hint" style="margin: 10px 0 12px">
-            本页为<b>只读</b>，所有值来自后端地图服务已发布的版本。「数据来源」标明每个字段由谁产生，前端不生产地图数据。
-          </div>
-          <div class="table-wrap">
-            <table class="table">
-              <thead>
-                <tr><th>字段</th><th>当前值</th><th>数据来源</th></tr>
-              </thead>
-              <tbody>
-                <tr v-for="row in sourceRows" :key="row[0]">
-                  <td>{{ row[0] }}</td>
-                  <td><span :class="{ mono: row[0] !== '所属园区' }">{{ row[1] }}</span></td>
-                  <td><span class="tag" :class="row[3]">{{ row[2] }}</span></td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
+        <div class="rt-hint" style="margin: 10px 0 12px">
+          本页为<b>只读</b>，所有值来自后端地图服务已发布的版本。「数据来源」标明每个字段由谁产生，前端不生产地图数据。
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr><th>字段</th><th>当前值</th><th>数据来源</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in sourceRows" :key="row[0]">
+                <td>{{ row[0] }}</td>
+                <td><span :class="{ mono: row[0] !== '所属园区' }">{{ row[1] }}</span></td>
+                <td><span class="tag" :class="row[3]">{{ row[2] }}</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
 
-          <div v-if="raster" class="map-raster-preview">
-            <div class="map-raster-head">
-              <b><AppIcon name="layers" />ROS 栅格地图</b>
-              <span class="muted mono">
-                {{ raster.width }} × {{ raster.height }} px · {{ raster.resolution }} · origin
-                {{ raster.origin }}
-              </span>
-            </div>
-            <img :src="raster.image" alt="ROS model.pgm 栅格地图" />
+        <div v-if="raster" class="map-raster-preview">
+          <div class="map-raster-head">
+            <b><AppIcon name="layers" />ROS 栅格地图</b>
+            <span class="muted mono">
+              {{ raster.width }} × {{ raster.height }} px · {{ raster.resolution }} · origin
+              {{ raster.origin }}
+            </span>
           </div>
+          <img :src="raster.image" alt="ROS model.pgm 栅格地图" />
+        </div>
 
-          <div v-if="idHint" class="rt-hint" style="margin-top: 12px">
-            <b>中台对照：</b>{{ idHint }}
-          </div>
+        <div v-if="idHint" class="rt-hint" style="margin-top: 12px">
+          <b>中台对照：</b>{{ idHint }}
+        </div>
 
-          <div class="card-head" style="margin-top: 16px">
-            <div class="card-title">
-              <AppIcon name="route" />引用该基线的路线
-              <span class="card-sub">版本不可变，发布新版不会自动迁移这些路线</span>
-            </div>
+        <div class="card-head" style="margin-top: 16px">
+          <div class="card-title">
+            <AppIcon name="route" />引用该基线的路线
+            <span class="card-sub">版本不可变，发布新版不会自动迁移这些路线</span>
           </div>
-          <div class="table-wrap">
-            <table class="table">
-              <thead>
-                <tr><th>路线编号</th><th>路线名称</th><th>状态</th><th>版本</th><th>航点</th></tr>
-              </thead>
-              <tbody>
-                <tr v-for="route in routes" :key="route.id">
-                  <td class="mono">{{ route.routeCode }}</td>
-                  <td>{{ route.routeName }}</td>
-                  <td>{{ route.status }}</td>
-                  <td class="mono">{{ route.version }}</td>
-                  <td>{{ route.pointCount }} 个</td>
-                </tr>
-                <tr v-if="!routes.length">
-                  <td colspan="5"><div class="empty-box">暂无路线引用该版本</div></td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-          <div class="actions" style="margin-top: 14px">
-            <a
-              v-if="zentaiLink"
-              class="btn"
-              :href="zentaiLink"
-              target="_blank"
-              rel="noreferrer"
-            >
-              <AppIcon name="layers" />在中台地图管理查看
-            </a>
-            <button class="btn" @click="emit('data-source')">
-              <AppIcon name="cpu" />数据来源与接口
-            </button>
-            <button class="btn" @click="view = 'impact'">
-              <AppIcon name="refresh" />发布新版本 / 查看变更影响
-            </button>
-          </div>
-        </template>
-
-        <template v-else>
-          <div class="rt-hint" style="margin-top: 12px">
-            发布新版本不会改写任何历史路线的坐标。以下引用对象需逐条确认迁移策略，旧版本将保留至引用清零后归档。
-          </div>
-          <div class="table-wrap" style="margin-top: 14px">
-            <table class="table">
-              <thead>
-                <tr><th>路线编号</th><th>路线名称</th><th>航点数</th><th>处理状态</th></tr>
-              </thead>
-              <tbody>
-                <tr v-for="route in routes" :key="route.id">
-                  <td class="mono">{{ route.routeCode }}</td>
-                  <td>{{ route.routeName }}</td>
-                  <td>{{ route.pointCount }} 个</td>
-                  <td><span class="tag orange">待人工确认迁移</span></td>
-                </tr>
-                <tr v-if="!routes.length">
-                  <td colspan="4"><div class="empty-box">该版本无引用路线，可直接发布</div></td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-          <div class="form-grid" style="margin-top: 16px">
-            <div class="field" style="grid-column: 1 / -1">
-              <label>坐标迁移策略</label>
-              <select v-model="strategy" class="select">
-                <option>仿射变换自动迁移（原点/比例尺变化时）</option>
-                <option>保留旧版本继续运行，仅新建路线使用新版</option>
-                <option>作废并重绘受影响路线</option>
-              </select>
-            </div>
-            <div class="field" style="grid-column: 1 / -1">
-              <label>变更说明</label>
-              <input v-model="note" class="input" />
-            </div>
-          </div>
-          <div class="rt-hint">
-            影响范围：{{ routes.length }} 条路线 · {{ tasks.length }} 个关联任务 ·
-            {{ refsData?.deviceCount ?? 0 }} 台设备需同步地图包。下发前设备会校验地图 hash。
-          </div>
-          <div class="actions" style="margin-top: 14px">
-            <button class="btn" @click="view = 'detail'">返回详情</button>
-            <button class="btn primary" :disabled="submitting" @click="publishNewVersion">
-              <AppIcon name="send" />{{ submitting ? "发布中…" : "发布新版本" }}
-            </button>
-          </div>
-        </template>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr><th>路线编号</th><th>路线名称</th><th>状态</th><th>版本</th><th>航点</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="route in routes" :key="route.id">
+                <td class="mono">{{ route.routeCode }}</td>
+                <td>{{ route.routeName }}</td>
+                <td>{{ route.status }}</td>
+                <td class="mono">{{ route.version }}</td>
+                <td>{{ route.pointCount }} 个</td>
+              </tr>
+              <tr v-if="!routes.length">
+                <td colspan="5"><div class="empty-box">暂无路线引用该版本</div></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </template>
       <div v-else-if="!loading" class="empty-box">该园区尚未绑定地图基线</div>
     </div>

@@ -177,11 +177,6 @@ function openBaseline(mapId: string | null | undefined) {
   baselineDialog.value = true;
 }
 
-function onBaselineUpdated(map: MapVersion) {
-  baselineMapId.value = map.id;
-  void load();
-}
-
 function openPolicy(mode: "policy" | "lineage") {
   policyMode.value = mode;
   policyDialog.value = true;
@@ -774,8 +769,6 @@ onMounted(load);
     <MapBaselineDialog
       v-model="baselineDialog"
       :map-id="baselineMapId"
-      @updated="onBaselineUpdated"
-      @data-source="openPolicy('lineage')"
     />
     <MapPolicyDialog v-model="policyDialog" :mode="policyMode" />
   </div>

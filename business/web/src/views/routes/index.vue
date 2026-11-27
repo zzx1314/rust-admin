@@ -25,9 +25,6 @@ import AiActionPicker from "@/components/backpack/AiActionPicker.vue";
 const MapBaselineDialog = defineAsyncComponent(
   () => import("@/components/MapBaselineDialog.vue")
 );
-const MapPolicyDialog = defineAsyncComponent(
-  () => import("@/components/MapPolicyDialog.vue")
-);
 import {
   ACTION_LIB,
   PHOTO_CAMERAS,
@@ -115,8 +112,6 @@ const routeDialog = ref(false);
 const baseDialog = ref(false);
 const baselineDialog = ref(false);
 const baselineMapId = ref<string | null>(null);
-const policyDialog = ref(false);
-const policyMode = ref<"policy" | "lineage">("policy");
 const actionDialog = ref(false);
 const validateVisible = ref(false);
 const validation = ref<RouteValidation | null>(null);
@@ -570,16 +565,6 @@ function goParks() {
 function openBaseline(mapId: string | null | undefined) {
   baselineMapId.value = mapId ?? null;
   baselineDialog.value = true;
-}
-
-function openPolicy(mode: "policy" | "lineage") {
-  policyMode.value = mode;
-  policyDialog.value = true;
-}
-
-async function onBaselineUpdated() {
-  maps.value = await mapApi.list();
-  await load();
 }
 
 const metrics = computed(() =>
@@ -2855,9 +2840,6 @@ onBeforeUnmount(() => {
       v-if="baselineDialog"
       v-model="baselineDialog"
       :map-id="baselineMapId"
-      @updated="onBaselineUpdated"
-      @data-source="openPolicy('lineage')"
     />
-    <MapPolicyDialog v-if="policyDialog" v-model="policyDialog" :mode="policyMode" />
   </div>
 </template>

@@ -65,10 +65,6 @@ export const mapApi = {
     get<MapRefs>(`/map-versions/${encodeURIComponent(id)}/refs`),
   publish: (id: string) =>
     post<MapVersion>(`/map-versions/${encodeURIComponent(id)}/publish`),
-  newVersion: (id: string, note?: string) =>
-    post<MapVersion>(`/map-versions/${encodeURIComponent(id)}/new-version`, {
-      note
-    }),
   backendMaps: (params?: object) =>
     get<BackendMap[]>("/map-versions/backend", params),
   importBackend: (backendMapId: number, parkId?: number, bind = true) =>

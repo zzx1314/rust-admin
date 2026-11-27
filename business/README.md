@@ -539,8 +539,7 @@ HTTP 链路（②）的三个约定：
   创建后不可变（路线/任务用 `map_version_id` 引用）。中台把某张图删掉后重新上传时会
   **复用业务编号**，中台侧却换成了新的 `dog_map.id` —— 所以编号里的数字可能跟中台当前编号对不上。
 - 业务库 `map_versions.source_id` 是**当前**中台 `dog_map.id`，两库关联以它为准。
-- 控制台「地图基线详情」直接列出「中台地图编号 / 地图名称 / 采集设备」，并提供
-  「在中台地图管理查看」直达链接（`/dogPark/map/index?mapName=…&deviceCode=…`）；
+- 控制台「地图基线详情」直接列出「中台地图编号 / 地图名称 / 采集设备」；
   中台地图列表也有「地图编号」列，两边按编号或名称对照即可。
 - 迁移 015 之前入库的历史地图没有 `device_code`，服务启动时按
   `source_id = dog_map.id` 从只读中台库回填一次（幂等）。
@@ -562,7 +561,7 @@ HTTP 链路（②）的三个约定：
   导入权限与上面的列表同一口径：自己名下的地图、自己管辖设备上报的地图，或分享给自己管辖设备的中台地图。
   导入时会从 `.zip` 内解析 `model.yaml` 的 `resolution` / `origin` 和 `model.pgm` 的宽高，并可选绑定为园区当前基线。
 - `GET /api/map-versions/{id}/raster` 解析地图包里的 `model.pgm`，转成 PNG data URL，返回分辨率、原点与栅格宽高；路线编辑画布可切换「真实地图」底图。
-- `GET /api/map-versions/{id}/refs` 返回引用该版本的路线、任务与园区设备数，用于影响分析。
+- `GET /api/map-versions/{id}/refs` 返回引用该版本的路线、任务与园区设备数。
 - `POST /api/map-versions/{id}/publish` 发布版本并切换园区基线指针，同园区旧版本归档。
 - `POST /api/map-versions/{id}/new-version` 派生下一版本并发布，历史路线保持旧版引用。
 - `POST /api/map-versions/ingest` 一次性完成「推中台 + 写业务库」，是设备客户端建图回传的入口（见下节）。

@@ -1,69 +1,15 @@
 /**
- * 跨服务跳转：业务控制台 → 中台「地图管理」。
+ * 业务库 ⇄ 中台地图的编号对照。
  *
  * 业务库 `map_versions.source_id` 就是中台 `dog_map.id`（机器人建图回传 / 中台导入
  * 都会写入），这是两个库之间唯一可靠的关联键。但业务地图编号 `ROS-MAP-<id>@版本`
  * 里的数字是**首次入库时**的中台 id：地图在中台被删掉后重传，业务编号保持不变
  * （路线/任务都引用它），中台侧却换成了新的 `dog_map.id` —— 所以页面上要直接给出
  * 「中台地图编号 + 地图名称 + 设备编号」，别指望从业务编号反推。
- *
- * 中台控制台地址：外网部署中台在 **:3007**（3000 被 frps、3005 被同机其它业务占着），
- * 默认按**业务 API 的 host** 推 :3007（「现场入口」模式下页面在内网、后端在云端，
- * 不能用页面自身的 host）；本地开发中台在 :3000，用 VITE_ZENTAI_CONSOLE_URL 覆盖。
- *
- * 以前默认拼的是 :3005 —— 那是同机另一个业务系统，点「在中台查看地图」会跳到别人的
- * 登录页，现场看着很像「被退出 / 串系统」（2026-11-26 发现）。
  */
-import { apiBaseUrl } from "@/utils/runtime";
-
-const CONSOLE_BASE = (() => {
-  const configured = (
-    import.meta.env.VITE_ZENTAI_CONSOLE_URL as string | undefined
-  )?.trim();
-  if (configured) return configured.replace(/\/+$/, "");
-  if (typeof window === "undefined") return "";
-  const apiBase = apiBaseUrl();
-  if (/^https?:\/\//.test(apiBase)) {
-    try {
-      return `${new URL(apiBase).origin.replace(/:\d+$/, "")}:3007`;
-    } catch {
-      /* 回落到页面 host */
-    }
-  }
-  return `${window.location.protocol}//${window.location.hostname}:3007`;
-})();
-
-/** 中台「地图管理」页面（`p_sys_menu` 菜单 path_url） */
-const ZENTAI_MAP_PAGE = "/dogPark/map/index";
 
 /** 中台地图编号：`map_versions.source_id` → `dog_map.id` */
 export function zentaiMapId(sourceId: string | null | undefined) {
   const value = (sourceId ?? "").trim();
   return /^\d+$/.test(value) ? value : null;
-}
-
-/**
- * 中台「地图管理」的直达链接（按地图名称 / 设备编号预填筛选）。
- * 返回 `null` 表示拿不到足够信息（例如本地演示基线没有中台记录）。
- */
-export function zentaiMapConsoleLink(
-  map:
-    | {
-        mapName?: string | null;
-        deviceCode?: string | null;
-        fileName?: string | null;
-      }
-    | null
-    | undefined
-): string | null {
-  if (!CONSOLE_BASE || !map) return null;
-  const params = new URLSearchParams();
-  const mapName = (map.mapName ?? "").trim();
-  const deviceCode = (map.deviceCode ?? "").trim();
-  const fileName = (map.fileName ?? "").trim();
-  if (mapName) params.set("mapName", mapName);
-  else if (fileName) params.set("fileName", fileName);
-  if (deviceCode) params.set("deviceCode", deviceCode);
-  if (!params.size) return null;
-  return `${CONSOLE_BASE}${ZENTAI_MAP_PAGE}?${params.toString()}`;
 }
