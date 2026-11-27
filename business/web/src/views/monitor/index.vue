@@ -327,10 +327,21 @@ async function refreshDevices() {
     if (activeDevice.value && list.length > 1 && watchMode.value === "direct") {
       watchMode.value = "relay";
     }
-    // 选中的设备已经不在了（改名 / 拆机 / 换了编号）→ 回默认设备。
-    // 只处理非空值：默认设备没配 Agent 时它可能不在清单里，不能因此反复重铺。
+    // 选中的设备已经不在了（改名 / 拆机 / 换了编号）→ 回默认设备
     if (activeDevice.value && !list.some(item => item.id === activeDevice.value)) {
       switchDevice("");
+      return;
+    }
+    // 首次进入（没选过 / 没有本地记录）：自动挑一台能看的。
+    // 板端升级后房间已经带上了设备编号（`bp:<SN>:dogcam`），再按默认设备
+    // （`bp:dogcam`）去拉就是黑屏 —— 所以这里必须自己选中。
+    // 优先「在线的命名设备」，其次是「先命名设备，再默认设备」。
+    if (!activeDevice.value) {
+      const fallback =
+        list.find(item => item.online && item.id) ??
+        list.find(item => item.id) ??
+        (list.some(item => item.online) ? list.find(item => item.online) : undefined);
+      if (fallback) switchDevice(fallback.id);
     }
   } catch {
     /* 清单接口偶发失败：保留旧列表，下次轮询再补 */
@@ -674,8 +685,8 @@ defineExpose({ refreshStatus });
       subtitle="数据采集背包 · 单路视频 + AI 识别（多设备可按编号切换，另可切换为背包烧录画框）"
     >
       <template #actions>
-        <!-- 多设备：按设备编号切换（只有一台时不占地方） -->
-        <label v-if="devices.length > 1" class="device-pick" title="按设备编号切换要看的背包">
+        <!-- 设备编号：一台也显示（确认「正在看哪台」），多台时就是切换器 -->
+        <label v-if="devices.length" class="device-pick" title="按设备编号切换要看的背包">
           <AppIcon name="board" :size="13" />
           <select :value="activeDevice" @change="onDeviceChange">
             <option v-for="item in devices" :key="item.id || '__default__'" :value="item.id">
@@ -875,7 +886,7 @@ defineExpose({ refreshStatus });
           </div>
           <div class="card-body">
             <dl class="link-list">
-              <div v-if="devices.length > 1">
+              <div v-if="devices.length">
                 <dt>当前设备</dt>
                 <dd class="ok">{{ activeDeviceLabel }}</dd>
               </div>
