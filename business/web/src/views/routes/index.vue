@@ -2474,15 +2474,37 @@ onBeforeUnmount(() => {
         </div>
 
         <div v-if="!isSpeakAction" class="field" style="grid-column: 1 / -1">
-          <label>
-            执行参数
-            <span v-if="aiParamAuto" class="muted">（由所选场景与类别自动生成）</span>
-            <span v-else-if="isAiAction" class="muted">（可填模型场景关键词，如「烟火 / 人员」）</span>
+          <!-- 模型目录可用时由场景 + 类别自动生成，不让手填（手填也存不进去：保存写 scene/） -->
+          <label v-if="aiParamAuto">
+            识别说明
+            <span class="muted">（由所选场景与类别自动生成，无需填写）</span>
           </label>
+          <label v-else>
+            执行参数
+            <span v-if="isAiAction" class="muted">
+              （读不到模型目录时才用：填模型场景关键词，如「烟火 / 人员」）
+            </span>
+          </label>
+          <div
+            v-if="aiParamAuto"
+            style="
+              display: flex;
+              align-items: center;
+              min-height: 34px;
+              padding: 6px 12px;
+              font-size: 13px;
+              color: var(--text-2);
+              background: #f7f9fc;
+              border: 1px dashed var(--line);
+              border-radius: var(--r-sm);
+            "
+          >
+            {{ composeAiParam() }}
+          </div>
           <input
+            v-else
             v-model="actionForm.param"
             class="input"
-            :readonly="aiParamAuto"
             :placeholder="isAiAction ? '烟火检测 · 火焰 / 烟雾' : ''"
           />
         </div>
