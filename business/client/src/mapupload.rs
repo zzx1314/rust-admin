@@ -488,7 +488,19 @@ pub async fn ingest_map(
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             if skipped {
-                return UploadOutcome::Skipped("sourceRef 已存在，跳过重复同步".to_string());
+                // 用服务端给的原因：「sourceRef 已存在，跳过重复同步」（增量）与
+                // 「地图包内容未变化，平台副本已是最新」（刷新）是两种完全不同的结论，
+                // 以前这里写死成前者，刷新模式跑完日志也在说「跳过重复同步」，
+                // 运维会以为 refresh 没生效（2026-11-27 现场就是这么误判的）。
+                let reason = value
+                    .get("data")
+                    .and_then(|d| d.get("reason"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("服务端判定无需上传，跳过")
+                    .to_string();
+                return UploadOutcome::Skipped(reason);
             }
             let map_id = value
                 .get("data")
