@@ -323,6 +323,17 @@ const aiParamAuto = computed(
 );
 
 /**
+ * 「告警阈值」只在动作本身有阈值语义时才显示（动作库里 `threshold` 不是 `—` 的那些，
+ * 例如红外测温）。拍照 / 录像 / 补光 / 播报 / 扫码 上的阈值没人读（板端不解析），
+ * 摆出来只会让人当成必填项乱填；老动作上已存的值仍然原样保存，不丢数据。
+ */
+const showThresholdField = computed(() => {
+  if (isAiAction.value) return true;
+  const threshold = (ACTION_LIB[actionForm.type]?.threshold ?? "").trim();
+  return !!threshold && threshold !== "—";
+});
+
+/**
  * 已保存动作是不是「AI 识别」：与后端 `is_ai_action` 同规则
  * （类型名含 `AI` 或 `识别`），只用于在动作卡片上展示任务类型。
  */
@@ -1421,6 +1432,46 @@ watch(
   }
 );
 
+/**
+ * 对话框里「执行参数」那一栏是**只读展示**，不能手填。
+ *
+ * 文案由表单里的结构化字段生成，与 `saveAction` 写进动作 `param` 的是同一份（动作卡片 /
+ * 列表都读 `param`）：语音播报 = 话术本身（有专门的「播报内容」输入框，这一栏不显示）、
+ * 拍照 = 相机 + 张数、AI 识别 = 场景 + 类别、录像 / 补光 = 时长与相机 / 开了哪几盏灯。
+ * 读不到模型目录时沿用已存的关键词（老动作编辑时不会把它抹掉）。
+ */
+const actionParamPreview = computed(() => {
+  if (isSpeakAction.value) return normalizeSpeakText(actionForm.speakText).text;
+  if (isPhotoAction.value) {
+    return photoParamLabel(actionForm.photoCamera, actionForm.photoFrames);
+  }
+  if (isAiAction.value) {
+    return aiParamAuto.value ? composeAiParam() : actionForm.param;
+  }
+  if (isRecordAction.value) {
+    return actionRecordLabel(
+      {
+        type: actionForm.type,
+        recordSeconds: actionForm.recordSeconds,
+        recordSegmentSeconds: actionForm.recordSegmentSeconds,
+        recordCameras: actionForm.recordCameras
+      },
+      actionKind.value
+    );
+  }
+  if (isLightAction.value) {
+    const lights = [
+      actionForm.lightFill ? "补光灯" : "",
+      actionForm.lightLed ? "LED 灯带" : ""
+    ].filter(Boolean);
+    return `${actionKind.value === "leg" ? "整段开" : "到点开"}${
+      lights.length ? lights.join(" + ") : "（未选灯光）"
+    }`;
+  }
+  // 其它动作（红外测温 / 二维码扫码 …）：动作库里那句统一的说明
+  return actionForm.param;
+});
+
 function saveAction() {
   const target =
     actionKind.value === "point" ? selectedPoint.value?.actions : selectedLeg.value?.actions;
@@ -1451,15 +1502,8 @@ function saveAction() {
   const ai = isAiAction.value;
   const action = {
     type: actionForm.type,
-    // 语音播报的「执行参数」就是话术本身；拍照是「哪一路 + 几张」（卡片 / 列表都读 param）
-    param:
-      speak && speakText
-        ? speakText.text
-        : photo
-          ? photoParamLabel(actionForm.photoCamera, actionForm.photoFrames)
-          : ai && aiParamAuto.value
-            ? composeAiParam()
-            : actionForm.param,
+    // 执行参数只是给人看的摘要：与对话框里只读展示的是同一份文案
+    param: actionParamPreview.value,
     ...(actionKind.value === "point"
       ? {
           trigger: actionForm.trigger,
@@ -2462,39 +2506,44 @@ onBeforeUnmount(() => {
         </div>
 
         <div v-if="!isSpeakAction" class="field" style="grid-column: 1 / -1">
-          <!-- 模型目录可用时由场景 + 类别自动生成，不让手填（手填也存不进去：保存写 scene/） -->
-          <label v-if="aiParamAuto">
-            识别说明
-            <span class="muted">（由所选场景与类别自动生成，无需填写）</span>
-          </label>
-          <label v-else>
-            执行参数
-            <span v-if="isAiAction" class="muted">
-              （读不到模型目录时才用：填模型场景关键词，如「烟火 / 人员」）
-            </span>
-          </label>
-          <div
-            v-if="aiParamAuto"
-            style="
-              display: flex;
-              align-items: center;
-              min-height: 34px;
-              padding: 6px 12px;
-              font-size: 13px;
-              color: var(--text-2);
-              background: #f7f9fc;
-              border: 1px dashed var(--line);
-              border-radius: var(--r-sm);
-            "
-          >
-            {{ composeAiParam() }}
-          </div>
-          <input
-            v-else
-            v-model="actionForm.param"
-            class="input"
-            :placeholder="isAiAction ? '烟火检测 · 火焰 / 烟雾' : ''"
-          />
+          <!--
+            执行参数 = 配置结果的摘要，只读（与写进动作 `param` 的同一份文案）。
+            唯一的例外：AI 识别读不到模型目录时，后端只能按 `param` 里的关键词兜底，
+            那时候需要能填（选到场景后会被场景 + 类别覆盖）。
+          -->
+          <template v-if="isAiAction && !aiParamAuto">
+            <label>
+              执行参数
+              <span class="muted">（读不到模型目录时才用：填模型场景关键词，如「烟火 / 人员」）</span>
+            </label>
+            <input v-model="actionForm.param" class="input" placeholder="烟火检测 · 火焰 / 烟雾" />
+            <div class="rt-hint" style="margin: 4px 0 0">
+              在上方选到场景后，这一栏会自动换成「场景 · 类别」的只读摘要。
+            </div>
+          </template>
+          <template v-else>
+            <label>
+              执行参数
+              <span class="muted">（只读，由所配参数自动生成）</span>
+            </label>
+            <div
+              class="param-readonly"
+              title="执行参数是配置结果的摘要：要改请改表单里对应的项（场景 / 拍照 / 时长 / 灯光 …）"
+              style="
+                display: flex;
+                align-items: center;
+                min-height: 34px;
+                padding: 6px 12px;
+                font-size: 13px;
+                color: var(--text-2);
+                background: #f7f9fc;
+                border: 1px dashed var(--line);
+                border-radius: var(--r-sm);
+              "
+            >
+              {{ actionParamPreview || "—" }}
+            </div>
+          </template>
         </div>
         <template v-if="actionKind === 'point'">
           <div class="field">
@@ -2503,11 +2552,11 @@ onBeforeUnmount(() => {
               <option v-for="trigger in TRIGGERS" :key="trigger">{{ trigger }}</option>
             </select>
           </div>
-          <div v-if="!isAiAction" class="field">
+          <div v-if="!isAiAction && showThresholdField" class="field">
             <label>告警阈值</label>
             <input v-model="actionForm.threshold" class="input" />
           </div>
-          <div v-else class="field">
+          <div v-else-if="isAiAction" class="field">
             <label>告警阈值</label>
             <input
               class="input mono"
