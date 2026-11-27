@@ -70,7 +70,6 @@ interface RouteDraft {
   zoneId: number | null;
   status: string;
   version: string;
-  loopMode: string;
   defaultSpeed: number;
   routeDescription: string;
   data: RouteData;
@@ -129,7 +128,6 @@ const routeForm = reactive({
   routeName: "",
   parkId: 1,
   zoneId: null as number | null,
-  loopMode: "闭环",
   defaultSpeed: 1.2,
   status: "草稿",
   routeDescription: "",
@@ -718,7 +716,6 @@ function selectRoute(route: Route, notify = true) {
       zoneId: route.zoneId,
       status: route.status,
       version: route.version,
-      loopMode: route.loopMode,
       defaultSpeed: route.defaultSpeed,
       routeDescription: route.routeDescription ?? "",
       data: parseRouteData(route.routeData),
@@ -1194,7 +1191,6 @@ function openNewRoute() {
     parkId,
     // 区域必须属于所选园区，否则选中的是别的园区的区域
     zoneId: zones.value.find(zone => zone.parkId === parkId)?.id ?? null,
-    loopMode: "闭环",
     defaultSpeed: 1.2,
     status: "草稿",
     routeDescription: "",
@@ -1214,7 +1210,9 @@ async function createRoute() {
   }
   const created = await routeApi.create({
     ...routeForm,
-    routeData: newRouteData(routeForm.loopMode)
+    // 闭环方式不再让用户选（路线模板固定「闭环」：跑完返航回起点）。
+    // 要「原地待命」在巡检计划的「结束动作」里选，那里优先级更高。
+    routeData: newRouteData()
   });
   routeDialog.value = false;
   currentId.value = created.id;
@@ -1266,7 +1264,6 @@ function openBaseDialog() {
     routeName: draft.value.routeName,
     parkId: draft.value.parkId ?? parks.value[0]?.id ?? 1,
     zoneId: draft.value.zoneId ?? zones.value[0]?.id ?? 1,
-    loopMode: draft.value.data.loop,
     defaultSpeed: draft.value.defaultSpeed,
     status: draft.value.status,
     routeDescription: draft.value.routeDescription,
@@ -1284,21 +1281,6 @@ async function saveBaseInfo() {
   draft.value.defaultSpeed = Number(routeForm.defaultSpeed) || 1.2;
   draft.value.status = routeForm.status;
   draft.value.routeDescription = routeForm.routeDescription;
-  // data 上的改动（循环方式 + 返航段）紧接着就 persist(false)，不用再等自动保存
-  withoutAutoSave(() => {
-    if (!draft.value) return;
-    draft.value.data.loop = routeForm.loopMode;
-    draft.value.loopMode = routeForm.loopMode;
-    if (routeForm.loopMode === "闭环" && !draft.value.data.returnLeg) {
-      draft.value.data.returnLeg = {
-        speed: draft.value.defaultSpeed,
-        actions: [{ type: "静默通行", param: "返航不采集" }]
-      };
-    }
-    if (routeForm.loopMode !== "闭环") {
-      draft.value.data.returnLeg = null;
-    }
-  });
   baseDialog.value = false;
   await persist(false);
 }
@@ -2433,14 +2415,6 @@ onBeforeUnmount(() => {
               创建后引用冻结，不随园区当前基线变化
             </span>
           </div>
-        </div>
-        <div class="field">
-          <label>闭环方式</label>
-          <select v-model="routeForm.loopMode" class="select">
-            <option>闭环</option>
-            <option>往返</option>
-            <option>单向</option>
-          </select>
         </div>
         <div class="field">
           <label>默认速度 (m/s)</label>
