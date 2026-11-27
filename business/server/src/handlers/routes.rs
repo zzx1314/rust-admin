@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use sqlx::QueryBuilder;
 
 const ROUTE_SELECT: &str = "SELECT r.id, r.route_code, r.route_name, r.park_id, p.park_name,
-    r.zone_id, z.zone_name, r.model, r.status, r.version, r.loop_mode, r.default_speed,
+    r.zone_id, z.zone_name, r.status, r.version, r.loop_mode, r.default_speed,
     r.route_description, r.route_data, r.point_count, r.distance_m, r.duration_s, r.battery_pct,
     r.published_at, r.map_version_id, mv.status AS map_status, r.created_at, r.updated_at,
     r.created_by,
@@ -93,16 +93,15 @@ pub async fn create_route(
     let map = resolve_route_map(&state, payload.park_id, payload.map_version_id.as_deref()).await?;
 
     let result = sqlx::query(
-        "INSERT INTO routes (route_code, route_name, park_id, zone_id, model, status, version,
+        "INSERT INTO routes (route_code, route_name, park_id, zone_id, status, version,
             loop_mode, default_speed, route_description, route_data, point_count, distance_m,
             duration_s, battery_pct, published_at, map_version_id, created_at, updated_at, created_by)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, NULL, ?16, ?17, ?18, ?19)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, NULL, ?15, ?16, ?17, ?18)",
     )
     .bind(&route_code)
     .bind(payload.route_name.trim())
     .bind(payload.park_id.or_else(|| map.as_ref().map(|item| item.1)))
     .bind(payload.zone_id)
-    .bind(payload.model)
     .bind(payload.status.unwrap_or_else(|| "草稿".to_string()))
     .bind(payload.version.unwrap_or_else(|| "v0.1".to_string()))
     .bind(&loop_mode)
@@ -159,11 +158,11 @@ pub async fn update_route(
     };
 
     sqlx::query(
-        "UPDATE routes SET route_name = ?1, park_id = ?2, zone_id = ?3, model = ?4,
-            status = ?5, version = ?6, loop_mode = ?7, default_speed = ?8,
-            route_description = ?9, route_data = ?10, point_count = ?11, distance_m = ?12,
-            duration_s = ?13, battery_pct = ?14, map_version_id = ?15, updated_at = ?16
-         WHERE id = ?17",
+        "UPDATE routes SET route_name = ?1, park_id = ?2, zone_id = ?3,
+            status = ?4, version = ?5, loop_mode = ?6, default_speed = ?7,
+            route_description = ?8, route_data = ?9, point_count = ?10, distance_m = ?11,
+            duration_s = ?12, battery_pct = ?13, map_version_id = ?14, updated_at = ?15
+         WHERE id = ?16",
     )
     .bind(if payload.route_name.trim().is_empty() {
         existing.route_name
@@ -172,7 +171,6 @@ pub async fn update_route(
     })
     .bind(park_id)
     .bind(payload.zone_id.or(existing.zone_id))
-    .bind(payload.model.or(existing.model))
     .bind(payload.status.unwrap_or(existing.status))
     .bind(payload.version.unwrap_or(existing.version))
     .bind(loop_mode)

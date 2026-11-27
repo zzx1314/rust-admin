@@ -30,7 +30,6 @@ const MapPolicyDialog = defineAsyncComponent(
 );
 import {
   ACTION_LIB,
-  DEVICE_MODELS,
   PHOTO_CAMERAS,
   PHOTO_MAX_FRAMES,
   RECORD_CAMERAS,
@@ -69,7 +68,6 @@ interface RouteDraft {
   routeName: string;
   parkId: number | null;
   zoneId: number | null;
-  model: string;
   status: string;
   version: string;
   loopMode: string;
@@ -131,7 +129,6 @@ const routeForm = reactive({
   routeName: "",
   parkId: 1,
   zoneId: null as number | null,
-  model: "X30-Pro",
   loopMode: "闭环",
   defaultSpeed: 1.2,
   status: "草稿",
@@ -719,7 +716,6 @@ function selectRoute(route: Route, notify = true) {
       routeName: route.routeName,
       parkId: route.parkId,
       zoneId: route.zoneId,
-      model: route.model ?? "X30-Pro",
       status: route.status,
       version: route.version,
       loopMode: route.loopMode,
@@ -1057,7 +1053,6 @@ async function persist(silent = true) {
     routeName: draft.value.routeName,
     parkId: draft.value.parkId,
     zoneId: draft.value.zoneId,
-    model: draft.value.model,
     status: draft.value.status,
     version: draft.value.version,
     loopMode: draft.value.data.loop,
@@ -1199,7 +1194,6 @@ function openNewRoute() {
     parkId,
     // 区域必须属于所选园区，否则选中的是别的园区的区域
     zoneId: zones.value.find(zone => zone.parkId === parkId)?.id ?? null,
-    model: "X30-Pro",
     loopMode: "闭环",
     defaultSpeed: 1.2,
     status: "草稿",
@@ -1272,7 +1266,6 @@ function openBaseDialog() {
     routeName: draft.value.routeName,
     parkId: draft.value.parkId ?? parks.value[0]?.id ?? 1,
     zoneId: draft.value.zoneId ?? zones.value[0]?.id ?? 1,
-    model: draft.value.model,
     loopMode: draft.value.data.loop,
     defaultSpeed: draft.value.defaultSpeed,
     status: draft.value.status,
@@ -1288,7 +1281,6 @@ async function saveBaseInfo() {
   draft.value.routeName = routeForm.routeName || draft.value.routeName;
   draft.value.parkId = routeForm.parkId;
   draft.value.zoneId = routeForm.zoneId;
-  draft.value.model = routeForm.model;
   draft.value.defaultSpeed = Number(routeForm.defaultSpeed) || 1.2;
   draft.value.status = routeForm.status;
   draft.value.routeDescription = routeForm.routeDescription;
@@ -1730,7 +1722,6 @@ onBeforeUnmount(() => {
         </div>
         <div class="rs-meta">
           <span><AppIcon name="park" />{{ draftParkName }} · {{ draftZoneName }}</span>
-          <span><AppIcon name="cpu" />{{ draft.model }}</span>
           <span><AppIcon name="route" />{{ draft.data.loop }}</span>
           <span><AppIcon name="clock" />{{ draft.defaultSpeed }} m/s</span>
           <span class="rs-map">
@@ -2387,20 +2378,6 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="field">
-          <label>适用机型</label>
-          <select v-model="routeForm.model" class="select">
-            <option v-for="model in DEVICE_MODELS" :key="model">{{ model }}</option>
-          </select>
-        </div>
-        <div class="field">
-          <label>闭环方式</label>
-          <select v-model="routeForm.loopMode" class="select">
-            <option>闭环</option>
-            <option>往返</option>
-            <option>单向</option>
-          </select>
-        </div>
-        <div class="field">
           <label>默认速度 (m/s)</label>
           <input v-model.number="routeForm.defaultSpeed" class="input" type="number" step="0.1" min="0.2" />
         </div>
@@ -2417,6 +2394,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <div class="rt-hint">
+        闭环方式默认「闭环」，创建后可在「编辑基础信息」里改（闭环 → 跑完返航回起点，往返 / 单向 → 停在最后一个航点）。
         航点坐标以所选地图版本的原点与分辨率为基准（存地图米制，1 位小数，画布只是显示换算）；创建后引用冻结，后续地图发新版不会自动改写本路线坐标。没有真实 ROS 地图包的示意基线只能编排、不能下发任务。创建后进入画布点击添加航点。
       </div>
       <template #footer>
@@ -2459,12 +2437,6 @@ onBeforeUnmount(() => {
               创建后引用冻结，不随园区当前基线变化
             </span>
           </div>
-        </div>
-        <div class="field">
-          <label>适用机型</label>
-          <select v-model="routeForm.model" class="select">
-            <option v-for="model in DEVICE_MODELS" :key="model">{{ model }}</option>
-          </select>
         </div>
         <div class="field">
           <label>闭环方式</label>

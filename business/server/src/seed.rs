@@ -936,7 +936,6 @@ async fn seed_routes(pool: &SqlitePool, created: &str) -> Result<(), sqlx::Error
         let route_name = route["routeName"].as_str().unwrap_or("未命名路线");
         let park_id = route["parkId"].as_i64();
         let zone_id = route["zoneId"].as_i64();
-        let model = route["model"].as_str();
         let status = route["status"].as_str().unwrap_or("草稿");
         let version = route["version"].as_str().unwrap_or("v0.1");
         let loop_mode = route["loopMode"].as_str().unwrap_or("闭环");
@@ -951,16 +950,15 @@ async fn seed_routes(pool: &SqlitePool, created: &str) -> Result<(), sqlx::Error
         };
 
         sqlx::query(
-            "INSERT INTO routes (route_code, route_name, park_id, zone_id, model, status, version,
+            "INSERT INTO routes (route_code, route_name, park_id, zone_id, status, version,
                 loop_mode, default_speed, route_description, route_data, point_count, distance_m,
                 duration_s, battery_pct, published_at, created_at, updated_at, created_by)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, 1)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, 1)",
         )
         .bind(route_code)
         .bind(route_name)
         .bind(park_id)
         .bind(zone_id)
-        .bind(model)
         .bind(status)
         .bind(version)
         .bind(loop_mode)

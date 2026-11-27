@@ -464,7 +464,6 @@ export interface Route {
   parkName: string | null;
   zoneId: number | null;
   zoneName: string | null;
-  model: string | null;
   status: string;
   version: string;
   loopMode: string;
