@@ -455,6 +455,8 @@ pub(crate) async fn handle(
                 "mode": if refresh { "refresh" } else { "incremental" },
                 // 失败原因可能很长（每张图一条），只带前几条，完整文案在 message 里
                 "errors": done.report.errors.iter().take(5).cloned().collect::<Vec<_>>(),
+                // 跳过但值得说明的（已归档 / 派生版本 / 无中台链接）
+                "notes": done.report.notes.clone(),
             }),
             Err(_) => json!({}),
         };

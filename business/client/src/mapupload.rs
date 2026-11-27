@@ -536,6 +536,12 @@ pub struct SyncReport {
     pub unchanged: usize,
     pub failed: usize,
     pub errors: Vec<String>,
+    /// 跳过但值得说明的原因（已归档 / 派生版本 / 无中台链接…）。
+    ///
+    /// 「内容未变化」是最常见的跳过原因，写进回执只会刷屏，所以不收；
+    /// 其它跳过（平台上有派生版本、记录已归档）必须让运维看见——
+    /// 否则「同步成功、图却没更新」又是一个黑盒。
+    pub notes: Vec<String>,
     pub refresh: bool,
     /// 预检就失败了（业务服务 / 中台不可达），一张图都没处理：
     /// 定时轮询不为它刷事件，免得后台每次重试都在事件流里留一条红字。
@@ -557,6 +563,9 @@ impl SyncReport {
         };
         if !self.errors.is_empty() {
             summary.push_str(&format!("；失败原因：{}", self.errors.join("；")));
+        }
+        if !self.notes.is_empty() {
+            summary.push_str(&format!("；跳过说明：{}", self.notes.join("；")));
         }
         summary
     }
@@ -712,6 +721,10 @@ pub async fn sync_robot_maps(
                 info!("地图 {} 无需上传: {reason}", map.map_id);
                 if cfg.refresh {
                     report.unchanged += 1;
+                }
+                // 「内容未变化」不占回执篇幅，其它跳过原因要让运维看到
+                if !reason.contains("内容未变化") && report.notes.len() < 5 {
+                    report.notes.push(format!("{}: {reason}", map.map_id));
                 }
             }
             UploadOutcome::Failed { reason } => {
@@ -1385,6 +1398,35 @@ pub async fn push_map_to_robot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 回执文案：跳过「内容未变化」是常态不进回执；「已归档 / 派生版本」这种
+    /// 明明同步成功、图却没更新的情况必须写出来（2026-11-27 现场：
+    /// 审计只有「无需更新 5」，运维看不出那张已发布的地图根本没被刷新）。
+    #[test]
+    fn summary_surfaces_meaningful_skip_reasons() {
+        let mut report = SyncReport {
+            total: 5,
+            refresh: true,
+            ..Default::default()
+        };
+        report.skipped = 1;
+        report.unchanged = 1;
+        report.notes.push(
+            "2026_11_23_10_49_02: 业务记录 ROS-MAP-1@v1.0 已归档，同步不改动".to_string(),
+        );
+        let summary = report.summary();
+        assert!(summary.contains("无需更新 1"), "{summary}");
+        assert!(summary.contains("跳过说明"), "{summary}");
+        assert!(summary.contains("已归档"), "{summary}");
+        // 只有「无需更新」时不要多出空话
+        let plain = SyncReport {
+            total: 2,
+            refresh: true,
+            unchanged: 2,
+            ..Default::default()
+        };
+        assert!(!plain.summary().contains("跳过说明"));
+    }
 
     #[test]
     fn explicit_base_wins_and_trims_slash() {
