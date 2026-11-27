@@ -174,6 +174,7 @@ const actionForm = reactive({
   /**
    * 到点开补光灯（背包板 GPIO，走板端 Agent `/api/lights`）。
    * 离开航点 / 任务结束时自动关；计划勾了「仅夜间自动开灯」时只在夜间开。
+   * 界面上只有动作类型选「补光」时才显示这两个勾（见 `showLightFields`）。
    */
   lightFill: false,
   /** 到点开 LED 灯带（板端拉起厂商 `test_rgbrun`，循环闪烁） */
@@ -256,6 +257,22 @@ function pickSpeakPreset(event: Event) {
   const value = (event.target as HTMLSelectElement | null)?.value ?? "";
   if (value) actionForm.speakText = value;
 }
+
+/**
+ * 当前动作是不是「补光」（航点 / 航段都叫这个，`kind: "both"`）。
+ *
+ * 灯光开关只挂在「补光」动作上：以前这两个勾出现在所有动作类型的表单里，
+ * 现场分不清灯到底是谁开的（AI 识别 / 拍照 / 播报的表单里都能勾灯）。
+ */
+const isLightAction = computed(() => actionForm.type === "补光");
+
+/**
+ * 灯光开关要不要显示：**选「补光」时显示**，另外老数据里别的动作类型已经配了灯
+ * （客户端仍按 `lightFill` / `lightLed` 字段生效）也要显示出来，否则操作员改不掉它。
+ */
+const showLightFields = computed(
+  () => isLightAction.value || actionForm.lightFill === true || actionForm.lightLed === true
+);
 
 /** 动作卡片上的播报文案：没配内容返回空串（不占一行） */
 function actionSpeakLabel(action: {
@@ -1455,6 +1472,11 @@ function saveAction() {
   }
   // 可见光拍照：参数就是「哪一路 + 几张」（列表 / 卡片都读 param）
   const photo = isPhotoAction.value && actionKind.value === "point";
+  // 补光：两盏灯一个都没勾就是空动作（板端什么都不做），保存时直接拦住
+  if (isLightAction.value && !actionForm.lightFill && !actionForm.lightLed) {
+    ElMessage.error("「补光」动作至少要勾一盏灯（补光灯 / LED 灯带）");
+    return;
+  }
   // 语音播报：内容必须能过板端 TTS 的白名单（越界字被板端丢掉就成了半句话）
   const speak = isSpeakAction.value;
   const speakText = speak ? normalizeSpeakText(actionForm.speakText) : null;
@@ -2694,8 +2716,8 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <!-- 航点灯光：补光灯 / LED 灯带（与 AI 识别无关，不配 AI 也能只开灯） -->
-          <div class="field" style="grid-column: 1 / -1">
+          <!-- 航点灯光：只有动作类型「补光」才显示（老数据里其它类型上已配的灯也放出来，能改掉） -->
+          <div v-if="showLightFields" class="field" style="grid-column: 1 / -1">
             <label>
               到点开灯
               <span class="muted">（背包板上的补光灯 / LED 灯带，离开航点与任务结束时自动关）</span>
@@ -2711,6 +2733,8 @@ onBeforeUnmount(() => {
               </label>
             </div>
             <div class="rt-hint" style="margin: 4px 0 0">
+              <b>只有动作类型选「补光」才显示这两个勾</b>；老路线里其它类型动作上已经配的灯仍会生效，
+              在这里可以取消。<br />
               <b>计划里配了「自动开灯」时以计划为准</b>：这里的到点开灯 / 离开关灯都不生效，
               灯从任务开始一直亮到结束。计划里没配才按这里走——
               而计划勾了「仅夜间」时，只有夜间时段（板端默认 18:00-06:00）到达该航点才真的开灯，
@@ -2815,8 +2839,12 @@ onBeforeUnmount(() => {
         <div v-else class="field" style="grid-column: 1 / -1">
           <div class="rt-hint" style="margin: 0">该动作在两航点之间移动过程中持续执行，不占用停留时长。</div>
         </div>
-        <!-- 航段灯光：与航点动作同一对开关，但时机是「起步开 / 走完这一段关」 -->
-        <div v-if="actionKind === 'leg'" class="field" style="grid-column: 1 / -1">
+        <!-- 航段灯光：与航点动作同一对开关，但时机是「起步开 / 走完这一段关」；同样只有「补光」动作才显示 -->
+        <div
+          v-if="actionKind === 'leg' && showLightFields"
+          class="field"
+          style="grid-column: 1 / -1"
+        >
           <label>
             航段开灯
             <span class="muted">（背包板上的补光灯 / LED 灯带，起步离开这个航点时开，走完这一段才关）</span>
@@ -2832,6 +2860,8 @@ onBeforeUnmount(() => {
             </label>
           </div>
           <div class="rt-hint" style="margin: 4px 0 0">
+            <b>只有动作类型选「补光」才显示这两个勾</b>；老路线里其它类型动作上已经配的灯仍会生效，
+            在这里可以取消。<br />
             狗离开这个航点（航点任务跑完、真正起步）时开，到达下一个航点（这一段走完）才关——
             到点那一刻不会开（这个航点还要跑 AI 识别 / 拍照 / 停留，亮灯会把画面和存证图污染）；
             中途由客户端定时续命，不会走到一半被板端看门狗灭灯。
