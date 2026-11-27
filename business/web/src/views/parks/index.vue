@@ -97,6 +97,61 @@ function mapsOfPark(parkId: number | null | undefined) {
 }
 
 /**
+ * 园区名下**绑定的全部地图**：归属本园区的（`map_versions.park_id`，可以有很多版本）
+ * 加上园区当前基线。基线可能是别的园区的图（共用同一张基线），这时它不在
+ * `parkId === park.id` 里，只按归属筛就会「明明绑着却看不到」。
+ * 园区基线只有一个（路线未指定地图时的兜底），这里列的是园区可用的整批地图，
+ * 新建巡检路线时能任选一张（与 `routes/index.vue::mapsOfPark` 同一口径）。
+ */
+function mapsBoundToPark(parkId: number | null | undefined) {
+  if (!parkId) return [];
+  const baselineId = parks.value.find(park => park.id === parkId)?.mapVersionId ?? null;
+  const own = maps.value.filter(item => item.parkId === parkId);
+  const baseline = baselineId ? maps.value.find(item => item.id === baselineId) : null;
+  const list =
+    baseline && !own.some(item => item.id === baseline.id) ? [baseline, ...own] : own;
+  return [...list].sort((a, b) => {
+    if (a.id === baselineId) return -1;
+    if (b.id === baselineId) return 1;
+    return (b.publishedAt ?? b.createdAt).localeCompare(a.publishedAt ?? a.createdAt);
+  });
+}
+
+/** 卡片 / 表格上提示的地图数量：不含已归档（归档图只在弹窗里作为历史版本可见） */
+function usableMapCount(parkId: number | null | undefined) {
+  return mapsBoundToPark(parkId).filter(item => item.status !== "已归档").length;
+}
+
+const mapsDialog = ref(false);
+const mapsParkId = ref<number | null>(null);
+const mapsParkName = computed(
+  () => parks.value.find(park => park.id === mapsParkId.value)?.parkName ?? ""
+);
+const parkBoundMaps = computed(() => mapsBoundToPark(mapsParkId.value));
+
+function openParkMaps(park: Park) {
+  mapsParkId.value = park.id;
+  mapsDialog.value = true;
+}
+
+function isCurrentBaseline(parkId: number | null, mapId: string) {
+  return parks.value.find(park => park.id === parkId)?.mapVersionId === mapId;
+}
+
+/**
+ * 把某张地图设为园区基线：打开编辑弹窗并把地图预选好，由用户确认保存。
+ * 不做静默保存——后端只接受「中台已发布」的图（`resolve_park_map`），
+ * 让保存动作把 400 原因直接显示出来。
+ */
+function useAsBaseline(map: MapVersion) {
+  const park = parks.value.find(item => item.id === mapsParkId.value);
+  if (!park) return;
+  mapsDialog.value = false;
+  openEditPark(park);
+  parkForm.mapVersionId = map.id;
+}
+
+/**
  * 地图状态由中台统一管理（草稿 / 部分标定 / 已发布 / 已归档），业务平台只照搬：
  * 园区基线只能选「中台已发布」的图。未发布的图仅在「当前就是本园区基线」时保留，
  * 用来显示现状（保存时提交同一个 id 不会被拒），否则会把正在用的基线从下拉里弄消失。
@@ -401,6 +456,9 @@ onMounted(load);
             >
               <AppIcon name="layers" />地图基线
             </button>
+            <button class="btn sm ghost" @click="openParkMaps(park)">
+              <AppIcon name="grid" />绑定地图 {{ usableMapCount(park.id) }}
+            </button>
           </div>
           <div class="park-foot">
             <div class="park-owner">
@@ -440,7 +498,7 @@ onMounted(load);
               <th>设备数</th>
               <th>今日巡检</th>
               <th>负责人</th>
-              <th>地图基线</th>
+              <th>地图（基线 / 全部）</th>
               <th>状态</th>
               <th>操作</th>
             </tr>
@@ -475,6 +533,13 @@ onMounted(load);
                     @click="openBaseline(park.mapVersionId)"
                   >
                     <AppIcon name="layers" />
+                  </button>
+                  <button
+                    class="btn sm ghost"
+                    :title="`查看 ${park.parkName} 绑定的全部地图`"
+                    @click="openParkMaps(park)"
+                  >
+                    全部 {{ usableMapCount(park.id) }}
                   </button>
                 </div>
               </td>
@@ -719,6 +784,67 @@ onMounted(load);
         <button class="btn primary" @click="saveZone">
           <AppIcon name="check" />保存
         </button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="mapsDialog" :title="`${mapsParkName} · 绑定的地图`" width="780px">
+      <div class="rt-hint" style="margin: 0 0 10px">
+        园区基线只有一个（路线未指定地图时的兜底）；同一个园区名下的地图可以有多个版本，
+        新建巡检路线时能在这里任选一张，路线创建即冻结引用。
+        已归档的历史版本仍列出来（灰色），但不能再用于新建路线。
+      </div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>地图名称 / 编号</th>
+              <th>版本</th>
+              <th>状态</th>
+              <th>采集设备</th>
+              <th>引用路线</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="map in parkBoundMaps" :key="map.id">
+              <td>
+                <div class="cell-main">
+                  {{ map.mapName }}
+                  <span v-if="isCurrentBaseline(mapsParkId, map.id)" class="tag teal">当前基线</span>
+                  <span v-else-if="map.parkId !== mapsParkId" class="tag orange">共用其他园区的图</span>
+                </div>
+                <div class="cell-sub mono">{{ map.id }}</div>
+              </td>
+              <td>{{ map.version }}</td>
+              <td><StatusBadge :status="map.status" /></td>
+              <td>{{ map.deviceCode || "—" }}</td>
+              <td>{{ map.routeCount }} 条</td>
+              <td>
+                <div class="actions">
+                  <button class="btn sm ghost" @click="openBaseline(map.id)">查看</button>
+                  <button
+                    class="btn sm"
+                    :disabled="isCurrentBaseline(mapsParkId, map.id) || map.status !== '已发布'"
+                    :title="
+                      map.status !== '已发布'
+                        ? '地图状态由中台统一管理，只有中台「已发布」的地图能当园区基线'
+                        : '设为园区基线（打开编辑弹窗确认保存）'
+                    "
+                    @click="useAsBaseline(map)"
+                  >
+                    设为基线
+                  </button>
+                </div>
+              </td>
+            </tr>
+            <tr v-if="!parkBoundMaps.length">
+              <td colspan="6"><div class="empty-box">该园区还没有绑定任何地图</div></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <template #footer>
+        <button class="btn" @click="mapsDialog = false"><AppIcon name="close" />关闭</button>
       </template>
     </el-dialog>
 
