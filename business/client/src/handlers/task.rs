@@ -456,6 +456,12 @@ pub(crate) async fn dispatch(
             // 13897 resource conflict (capability busy)，而任务被暂停（5004）后
             // 不会自动结束——平台直接重新下发时第一个 5000 必然被拒。
             if let Some(previous) = local_runner.lock().await.take() {
+                // 先标「被顶替」再取消：上一轮的收尾会异步跑完，那时它**不能**再上报
+                // 「任务已取消」—— 否则会把平台刚下发的这一轮翻成异常，
+                // 新一轮的「执行中」上报又被终态不可回退的守卫丢掉
+                // （2026-11-27 `TK-1127-22`：17:12:30 旧 runner 报「任务已取消」，
+                // 平台 17:12~17:16 一条进度都没有）。
+                previous.mark_superseded();
                 let had_robot_task = previous.current_nav_task().await.is_some();
                 match previous.control(Control::Cancel).await {
                     Ok(()) => {
@@ -639,6 +645,18 @@ pub(crate) async fn dispatch(
             let photographer = photographer.clone();
             tokio::spawn(async move {
                 let outcome = runner.run().await;
+                // 已被同一 taskCode 的新一轮顶替：这一轮的结论、以及按 taskCode 共享的
+                // AI / 灯光 / 播报 / 拍照状态**全部归新一轮**，这里一个都不能动。
+                // 以前照常上报，于是平台先收到「任务已取消」→ 任务翻成异常，
+                // 新一轮的进度上报再被「终态不可回退」全部丢掉。
+                if runner.is_superseded() {
+                    info!(
+                        "任务 {code}：本轮已被新一轮下发顶替，不再上报终态（结果：{:?}）",
+                        outcome.as_ref().map(|o| o.success)
+                    );
+                    clear_local_runner(&runner_slot, &runner).await;
+                    return;
+                }
                 let (status, message) = match outcome {
                     Ok(o) if o.success => (
                         "已完成",
@@ -672,12 +690,20 @@ pub(crate) async fn dispatch(
                 // 收尾必须把槽位里的 runner 摘掉：业务侧的下发地图 / 继续任务等
                 // 门禁都看这个槽位，残留的 runner 会让设备在任务早已结束（甚至
                 // 取消）之后仍报「设备正在执行任务」（2026-11-19 现场事故）。
-                clear_local_runner(&runner_slot, &runner).await;
+                let still_current = clear_local_runner(&runner_slot, &runner).await;
                 // 同理，`active` 也只能摘「自己这一份」：上一轮 runner 的收尾是异步的，
                 // 跑到这里时平台可能已经下发了新任务；无条件 `*active = None` 会把新
                 // 任务的上下文清掉（5009 不再跟随、进度定时器停报、AI/灯光全失效），
                 // 平台看到的是「已下发但没有进度」，狗其实已经在跑。
-                clear_active_task_if(&active, &state, &code).await;
+                //
+                // 只比 `taskCode` 还不够：同一个任务会被反复下发（2026-11-27
+                // `TK-1127-22` 在 17:12 / 17:15 / 17:23 各下发一次），旧 runner 的收尾
+                // 会把新一轮的上下文一起清掉——只有当槽位里**还是自己这一份**时才允许清。
+                if still_current {
+                    clear_active_task_if(&active, &state, &code).await;
+                } else {
+                    info!("任务 {code}：槽位已换成新一轮 runner，本次收尾不动 active 上下文");
+                }
             });
         }
     }

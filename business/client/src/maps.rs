@@ -131,17 +131,24 @@ pub(crate) async fn upload_mapping_to_zentai(
 ///
 /// 用的是 `Arc::ptr_eq` 而不是无条件 `= None`：任务结束的瞬间平台可能已经下发了
 /// 下一轮任务（槽位里换成了新 runner），无条件清空会误伤新任务。
+///
+/// 返回 `true` = 真的摘掉了自己（槽位当时就是这一份）。调用方据此判「`active`
+/// 上下文是不是也归自己清」——同一个 `task_code` 被反复下发时，旧 runner 的收尾
+/// 不能把新一轮的 `active` 清掉（否则 5009 不再跟随、进度停报，平台看到
+/// 「已下发没进度」而狗在跑）。
 pub(crate) async fn clear_local_runner(
     local_runner: &Shared<Option<Arc<RouteRunner>>>,
     finished: &Arc<RouteRunner>,
-) {
+) -> bool {
     let mut slot = local_runner.lock().await;
     if slot
         .as_ref()
         .is_some_and(|current| Arc::ptr_eq(current, finished))
     {
         *slot = None;
+        return true;
     }
+    false
 }
 
 /// 槽位里现在是不是这一轮 runner。

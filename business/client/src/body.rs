@@ -331,7 +331,21 @@ pub(crate) async fn prepare_body_reconnect(
     .await;
 
     // 3) 运行态清理
+    //
+    // 断链时本体**可能还在跑那条任务**（任务在 `.1` 的 `dog_task` 里，我们断链不会让它停）。
+    // 这里把它的本体任务号记进登记簿，`finish_relink` 拿到新链路后补发 `5002`；
+    // 不记的话就是「平台已判异常、狗还在跑」（2026-11-27 `TK-1127-22`：17:14:03
+    // 遥控器抢权断链，17:18:46 平台判超时，狗 17:22:23 还在跑）。
+    // 巡检的 `nav_task_id` 只在 runner 里有（`bind_nav_task` 也会写进 active），
+    // 两边都取一次，不靠单一路径。
+    let runner_nav_task = match ctx.local_runner.lock().await.clone() {
+        Some(runner) => runner.current_nav_task().await,
+        None => None,
+    };
     if let Some(task) = ctx.active.lock().await.clone() {
+        if let Some(nav_task_id) = task.nav_task_id.as_deref() {
+            crate::orphan::remember(nav_task_id).await;
+        }
         report_progress(
             &ctx.out_tx,
             &task.task_code,
@@ -345,6 +359,9 @@ pub(crate) async fn prepare_body_reconnect(
             None,
         )
         .await;
+    }
+    if let Some(nav_task_id) = runner_nav_task {
+        crate::orphan::remember(&nav_task_id).await;
     }
     *ctx.active.lock().await = None;
     *ctx.local_runner.lock().await = None;
@@ -447,7 +464,15 @@ pub(crate) async fn finish_relink(
         }
         guard.mode = "robot";
     }
-    body.attach(ctx, client);
+    body.attach(ctx, client.clone());
+    // 断链前没送出去的 5002 在这里补：本体一直在跑那条任务，而它已经不归我们跟踪了。
+    // 放到后台跑，别把主循环（心跳 / 指令）堵在 5002 + 等 idle 上。
+    if crate::orphan::len().await > 0 {
+        let cancel_client = client.clone();
+        tokio::spawn(async move {
+            zhpro::route::flush_pending_cancels(&cancel_client, zhpro::route::IDLE_WAIT).await;
+        });
+    }
     info!(
         "本体链路已重建：client_id={}，型号={}（业务连接未中断）",
         session.client_id, session.device_type

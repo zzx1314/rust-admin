@@ -444,6 +444,36 @@ AudioWorklet 做 48k⇄16k 与抖动缓冲。**不需要填 IP、公网可用；
 `client pump::tests::resumed_run_reports_the_original_waypoint_index`、
 `client dispatch::tests::start_index_is_parsed_for_breakpoint_resume`。
 
+**巡检的「超时 / 断链 / 重复下发」三条红线**（2026-11-27 `TK-1127-22` 现场复盘；
+`client/src/zhpro/route.rs`）：
+
+1. **总超时预算按航段几何算，`180 s/点` 只是下界**（`patrol_timeout_secs`）。
+   现场一条 P1→P2 是 **181 m** 直线，2 个点只给 360 s，狗差 1 秒跑完却被判
+   「巡检任务超时」直接取消。现在预算 = `90 s 固定开销 + (里程/0.4 m/s + 各点
+   dwell/录像) × 1.15`，与 `180 × 本轮点数` 取大（短航线行为不变）；文案里带上
+   「本轮 N 个航点，超时预算 Xs」，现场不用再猜。
+2. **本体链路一断，正在跑的 runner 必须立刻失败**（`BODY_LINK_LOST`）。断链后重连会
+   **换一个新的 `ZhProClient`**，旧 runner 握着死链：收不到 5009、发不出 5002，以前
+   只能等满 `180 s/点` 然后误报「超时」（平台 17:18:46 判超时，狗 17:22:23 还在跑）。
+   它的 `5002` 失败时把任务号登记进 `client/src/orphan.rs`，重连成功后
+   `body::finish_relink` → `flush_pending_cancels` **按任务号**补发（UUID 不复用，
+   补错只会拿到 `13896`，误伤不了重连后新下发的任务）。
+3. **同一 `taskCode` 被反复下发时，旧一轮不许再动平台/共享状态**。下发前
+   `previous.mark_superseded()`，旧 runner 收尾时**不上报终态、不动 AI / 灯光 / 播报 /
+   拍照**（那些按 `taskCode` 共享，已经归新一轮）；`active` 上下文只在
+   `clear_local_runner` 返回 `true`（槽位里还是自己）时才清。以前 17:12:30 旧 runner
+   报了一条「任务已取消」把平台任务翻成异常，新一轮的「执行中」上报被「终态不可回退」
+   全部丢掉，平台 17:12~17:16 一条进度都没有。
+
+回归：`client zhpro::route::tests::patrol_timeout_keeps_the_per_point_floor` /
+`patrol_timeout_grows_with_long_legs` /
+`body_link_loss_fails_fast_instead_of_waiting_for_the_deadline` /
+`superseded_flag_is_per_round`、`client orphan::tests::remember_dedups_and_take_all_drains`。
+⚠️ 平台侧「任务超时容忍」设置（`platform.task_timeout_minutes`）**只播种、没接线**，
+真正生效的是 `server.toml` 的 `task_timeout_secs`（默认 120）/ `task_stuck_secs`（600）；
+而且看门狗判异常**只改库 + 推群**，不给狗下发任何指令——所以「平台判失败、狗还在跑」
+这条只能靠上面第 1~3 条在客户端收口。
+
 「跑完要不要返航」是**任务属性**（`tasks.end_task` → 载荷 `endTaskMode`，
 `none` / `return_to_start` / `return_to_charge`，不配 = 跟随路线），不是路线属性：
 巡检 `5000 kind=4` 只把原始 `points` 写成本体路径，返程由本体按 `end_task` 自己规划。

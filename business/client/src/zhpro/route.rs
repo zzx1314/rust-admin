@@ -305,6 +305,91 @@ pub const IDLE_WAIT: Duration = Duration::from_secs(15);
 /// 又不会让现场对着一条永远不会开始的任务等到 180s/点 的截止时间。
 pub const PENDING_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// 本体链路断了（`control` / `bulkdata` 任一关闭）时给平台的结论。
+///
+/// 断链之后**重连会换一个新的 `ZhProClient`**，还在跑的 `RouteRunner` 握着旧 client：
+/// 它既收不到 `5009`（旧广播没人再写），也发不出 `5002`（旧 control 通道永久关闭）。
+/// 以前这里什么都不做，一直等到 `180 s/点` 的预算用完才报「巡检任务超时」——
+/// 2026-11-27 `TK-1127-22` 现场就是这样：17:14:03 遥控器抢权断链，17:18:46 平台判
+/// 「超时」，而狗 17:22:23 还在跑那条任务。所以断链要**立刻失败**并说明真因。
+pub const BODY_LINK_LOST: &str = "本体连接已断开（control/bulkdata 通道关闭），本轮任务已无法跟踪；\
+     断链期间本体上的那条任务会在链路恢复后取消，请重新下发";
+
+/// 巡检总超时的**估速**（m/s）。
+///
+/// 官方实测 `vx≈0.5`，绕障 / 让行会掉到 0.3 左右；估速宁小勿大——估大了长航段
+/// 又被误判「超时」（2026-11-27 现场：181 m 航段、2 个点只给 360 s，狗差 1 秒
+/// 跑完却被取消）。
+pub const PATROL_EST_SPEED: f64 = 0.4;
+
+/// 单个航点作业的固定开销（AI 识别窗口 / 拍照 / 播报 / 收尾），秒
+pub const PATROL_POINT_OVERHEAD: f64 = 15.0;
+
+/// 一轮巡检的固定开销（切导航模式 / 采起点位姿 / 写路径 / 建任务 / 终态收尾），秒
+pub const PATROL_FIXED_OVERHEAD: f64 = 90.0;
+
+/// 绕障 / 让行 / 重试的余量：按「行进 + 作业」之和的 15% 加，不按点数加
+pub const PATROL_TIMEOUT_SLACK: f64 = 0.15;
+
+/// 本轮航线的总里程（米）：只算相邻航点直连，不含返程（返程由本体自己规划）
+pub fn route_length(points: &[Waypoint]) -> f64 {
+    points
+        .windows(2)
+        .map(|leg| (leg[1].x - leg[0].x).hypot(leg[1].y - leg[0].y))
+        .sum()
+}
+
+/// 巡检一轮的总超时预算（秒）。
+///
+/// **下界仍是 `180 s/点`**（老行为，短航线一点不变），上界由航段几何与航点作业决定：
+/// 长航段按 [`PATROL_EST_SPEED`] 估的行进时间会把它顶上去。
+/// `points` 是**本轮**要走的点（断点续跑就是切片后的那几个），`round_points` 与之一致。
+pub fn patrol_timeout_secs(points: &[Waypoint], speed_limit: f64, round_points: usize) -> u64 {
+    let speed = if speed_limit > 0.0 {
+        speed_limit.min(PATROL_EST_SPEED)
+    } else {
+        PATROL_EST_SPEED
+    };
+    let travel = route_length(points) / speed;
+    let mut work = 0.0_f64;
+    for point in points {
+        // 本体把「停留」拉长到至少录像时长（见 [`point_path_tasks`]），预算也要跟上
+        let dwell = point
+            .record_seconds()
+            .map_or(point.dwell, |seconds| point.dwell.max(i64::from(seconds)))
+            .max(0);
+        work += dwell as f64;
+        if point.has_on_point_work() {
+            work += PATROL_POINT_OVERHEAD;
+        }
+    }
+    let estimate = PATROL_FIXED_OVERHEAD + (travel + work) * (1.0 + PATROL_TIMEOUT_SLACK);
+    let floor = 180.0 * round_points.max(1) as f64;
+    estimate.max(floor).round() as u64
+}
+
+/// 「巡检任务超时」的文案：带上本轮点数和预算，现场一眼能看出是走慢了还是阈值不够。
+fn timeout_message(round_points: usize, budget: Duration) -> String {
+    format!(
+        "巡检任务超时（本轮 {round_points} 个航点，超时预算 {}s）",
+        budget.as_secs()
+    )
+}
+
+/// 等本体链路断开（`true` = control / bulkdata 已断，旧 client 的通道永久关闭）。
+///
+/// `watch` 的发送端被丢弃也算断（旧 `ZhProClient` 被回收，再也不会有人写推送）。
+async fn wait_link_down(down: &mut tokio::sync::watch::Receiver<bool>) {
+    if *down.borrow() {
+        return;
+    }
+    while down.changed().await.is_ok() {
+        if *down.borrow() {
+            return;
+        }
+    }
+}
+
 /// 终态帧到「本体真的把导航能力放开」之间的容忍窗口。
 ///
 /// 5009 的终态由算法侧给出，`dog_task` 把 `task_state` 改回 `idle` 往往晚几百毫秒
@@ -601,6 +686,15 @@ pub struct RouteRunner {
     /// 之后可能还残留着上一轮的 runner（2026-11-19 现场 `0202222672400230`
     /// 下发地图连续 6 次报「设备正在执行任务」的根因）。
     running: AtomicBool,
+    /// 本 runner 是不是被「同一 taskCode 的新一轮下发」顶替了。
+    ///
+    /// 与 [`Self::cancelled`] 分开是因为两者的**对外语义完全相反**：
+    /// - 取消：平台在等一个结论，必须报「任务已取消」；
+    /// - 顶替：平台已经把这条任务下成新的一轮了，旧一轮再报终态就是**撞车**——
+    ///   2026-11-27 `TK-1127-22` 现场 17:12:30 旧 runner 报了一条「任务已取消」，
+    ///   把平台任务翻成「异常」，紧接着新一轮的「执行中」上报全被终态不可回退
+    ///   的守卫丢掉，平台从 17:12 到 17:16 一条进度都没有。
+    superseded: AtomicBool,
     total: Mutex<usize>,
     completed: Mutex<usize>,
     skipped: Mutex<usize>,
@@ -610,10 +704,16 @@ pub struct RouteRunner {
     min_recharge_battery: Mutex<f64>,
     /// 本体可用电量（双电池取较低那节，%）：巡检下发前做低电守卫
     battery_percent: Mutex<i64>,
+    /// 本体链路监视（`true` = control / bulkdata 已断）
+    ///
+    /// 断链后重连会换一个新的 `ZhProClient`，本 runner 里的 `client` 就永久死了：
+    /// 只能靠这个信号**立刻失败**，不能干等到 `180 s/点` 的预算用完（见 [`BODY_LINK_LOST`]）。
+    body_down: tokio::sync::watch::Receiver<bool>,
 }
 
 impl RouteRunner {
     pub fn new(client: Arc<ZhProClient>) -> Self {
+        let body_down = client.body_link();
         Self {
             client,
             plan: Mutex::new(None),
@@ -621,13 +721,20 @@ impl RouteRunner {
             cancelled: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             running: AtomicBool::new(false),
+            superseded: AtomicBool::new(false),
             total: Mutex::new(0),
             completed: Mutex::new(0),
             skipped: Mutex::new(0),
             patrol_path_prefix: Mutex::new("平台".to_string()),
             min_recharge_battery: Mutex::new(25.0),
             battery_percent: Mutex::new(100),
+            body_down,
         }
+    }
+
+    /// 本体链路是不是已经断了（断了就不要再等任何东西）
+    fn body_link_lost(&self) -> bool {
+        *self.body_down.borrow()
     }
 
     /// 本体可用电量（双电池取较低那节）。巡检下发前用它和 `min_recharge_battery` 比：
@@ -656,6 +763,19 @@ impl RouteRunner {
         *self.plan.lock().await = Some(plan);
         self.cancelled.store(false, Ordering::SeqCst);
         self.paused.store(false, Ordering::SeqCst);
+        self.superseded.store(false, Ordering::SeqCst);
+    }
+
+    /// 被「同一 taskCode 的新一轮下发」顶替：收尾时**不许**再上报终态、
+    /// 也不许再动 AI / 灯光 / 播报 / 拍照的按 `taskCode` 共享的状态——
+    /// 那些现在归新一轮了。
+    pub fn mark_superseded(&self) {
+        self.superseded.store(true, Ordering::SeqCst);
+    }
+
+    /// 是不是已被新一轮顶替（见 [`Self::mark_superseded`]）
+    pub fn is_superseded(&self) -> bool {
+        self.superseded.load(Ordering::SeqCst)
     }
 
     pub async fn progress(&self) -> (usize, usize) {
@@ -681,7 +801,8 @@ impl RouteRunner {
         match control {
             Control::Cancel => {
                 self.cancelled.store(true, Ordering::SeqCst);
-                if let Some(task_id) = self.current_nav_task().await {
+                let current = self.current_nav_task().await;
+                if let Some(task_id) = current {
                     // 5002 只保证受理，终态以 5009 为准。
                     // 本体上已经没有这个任务（已终态 / 固件不认这个 id）时目的已达到，不报错。
                     match self
@@ -693,7 +814,15 @@ impl RouteRunner {
                         Err(e) if is_task_not_found(&e) => {
                             warn!("取消任务时本体报 task not found，视为已收尾: {e}");
                         }
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            // 链路断了：这条取消没送到本体，狗会继续跑。登记进补发队列，
+                            // 链路重建后由 `body::finish_relink` 补（见 [`crate::orphan`]）。
+                            if self.body_link_lost() {
+                                crate::orphan::remember(&task_id).await;
+                                warn!("取消导航任务失败: {e}（已登记，链路恢复后补发 5002）");
+                            }
+                            return Err(e);
+                        }
                     }
                     *self.nav_task_id.lock().await = None;
                 }
@@ -816,6 +945,14 @@ impl RouteRunner {
             return Ok(self.outcome(false, message, total).await);
         }
 
+        // 0) 链路已经死了就别装下发：断链后重连会换新的 `ZhProClient`，本 runner 的
+        //    通道永久关闭（收不到 5009、发不出 5002）。再往下走只能等到预算用完，
+        //    报一句假的「巡检任务超时」——见 [`BODY_LINK_LOST`]。
+        if self.body_link_lost() {
+            warn!("巡检任务 {} 拒绝下发: 本体链路已断", plan.task_code);
+            return Err(BODY_LINK_LOST.to_string());
+        }
+
         // 1) 控制权 + 导航模式：4044/5000 都在 4000~5999 非白名单区间，没控制权网关不转发
         if let Err(e) = super::teleop::enter_navigation_mode(&self.client).await {
             warn!("切导航模式失败（继续尝试下发，但本体可能拒任务）: {e}");
@@ -833,12 +970,26 @@ impl RouteRunner {
             points.len()
         );
         let mut busy_waits = 0_u32;
+        // 本轮超时预算：`180 s/点` 是**下界**，长航段按几何估出来的时间会把它顶上去
+        // （见 [`patrol_timeout_secs`]）。不按几何算的话，一条 181 m 的航段就吃掉
+        // 2 个点的全部预算，狗差 1 秒跑完也会被判「超时」。
+        let round_points = total.saturating_sub(offset).max(1);
+        let budget =
+            Duration::from_secs(patrol_timeout_secs(&points, speed_vx(plan), round_points));
+        info!(
+            "巡检超时预算: {}s（本轮 {round_points} 个航点，总里程 {:.0} m，估速 {PATROL_EST_SPEED} m/s）",
+            budget.as_secs(),
+            route_length(&points)
+        );
         loop {
             if self.is_cancelled() {
                 return Ok(self.outcome(false, "任务已取消".to_string(), total).await);
             }
+            if self.body_link_lost() {
+                return Err(BODY_LINK_LOST.to_string());
+            }
             self.wait_body_idle(IDLE_WAIT).await;
-            let error = match self.create_patrol_task(&data, total, offset).await {
+            let error = match self.create_patrol_task(&data, total, offset, budget).await {
                 Ok(()) => {
                     info!(
                         "巡检任务完成: {path_id}（{total} 个航点，本轮从 P{} 开始）",
@@ -914,11 +1065,14 @@ impl RouteRunner {
     ///
     /// `total` 是**整条路线**的航点数，`offset` 是本轮起点（断点续跑）：本体回报的
     /// `detail_index` 是本轮下标，进度 / 终点判定都要加回 `offset` 才是原始下标。
+    ///
+    /// `budget` 是本轮的总超时（见 [`patrol_timeout_secs`]）。
     async fn create_patrol_task(
         &self,
         data: &Value,
         total: usize,
         offset: usize,
+        budget: Duration,
     ) -> Result<(), String> {
         let mut rx = self.client.subscribe();
         let reply = self.client.call(T_TASK_CREATE, data.clone()).await?;
@@ -934,10 +1088,9 @@ impl RouteRunner {
         *self.nav_task_id.lock().await = Some(task_id.clone());
         info!("巡检任务已受理: {task_id}（{total} 个航点，path 见 5000 载荷）");
 
-        // 官方实测约 80 s/点（vx≈0.5），这里按 180 s/点 给足余量。
-        // 断点续跑只跑剩下的点：按整条路线的点数算会多等好几倍。
+        // 预算的下界是 180 s/点（老行为），长航段由几何估出来顶上去；断点续跑只算剩下的点。
         let round_points = total.saturating_sub(offset).max(1);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(180 * round_points as u64);
+        let deadline = tokio::time::Instant::now() + budget;
         let mut gate = super::status::SeqGate::default();
         // 任务被本体排进 `pending_task`（已受理、等旧任务停稳 / 释放资源）后多久
         // 还没真正驱动底盘就判失败。这不是「跑得慢」，是那条 5000 根本没生效：
@@ -951,12 +1104,18 @@ impl RouteRunner {
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                return Err(format!("巡检任务超时（本轮 {round_points} 个航点）"));
+                return Err(timeout_message(round_points, budget));
             }
-            let env = match tokio::time::timeout(remaining, rx.recv()).await {
-                Ok(Ok(env)) => env,
-                Ok(Err(_)) => return Err("推送通道关闭".to_string()),
-                Err(_) => return Err(format!("巡检任务超时（本轮 {round_points} 个航点）")),
+            // 等 5009，同时盯本体链路：断链后旧 client 的推送/发送都没了，
+            // 与其干等满预算报假的「超时」，不如当场说清楚（见 [`BODY_LINK_LOST`]）。
+            let mut down = self.body_down.clone();
+            let env = tokio::select! {
+                () = wait_link_down(&mut down) => return Err(BODY_LINK_LOST.to_string()),
+                result = tokio::time::timeout(remaining, rx.recv()) => match result {
+                    Ok(Ok(env)) => env,
+                    Ok(Err(_)) => return Err("推送通道关闭".to_string()),
+                    Err(_) => return Err(timeout_message(round_points, budget)),
+                },
             };
             if env.head.msg_type != T_TASK_STATUS {
                 continue;
@@ -1079,9 +1238,19 @@ impl RouteRunner {
             Err(e) if is_task_not_found(&e) => {
                 debug!("取消导航任务时本体报 task not found，视为已收尾: {e}");
             }
-            Err(e) => warn!("取消导航任务失败: {e}"),
+            Err(e) => {
+                // 链路断了（断链后重连换了新 client，本 runner 的通道永久关闭）：
+                // 这条 5002 没送到本体，狗会继续跑这条任务。只打 warn 就等于
+                // 「平台判异常、狗还在跑」（2026-11-27 `TK-1127-22`）。
+                // 登记下来，`body::finish_relink` 拿到新链路后补发（按任务号，误伤不了新任务）。
+                crate::orphan::remember(&task_id).await;
+                warn!("取消导航任务失败: {e}（已登记任务号，本体链路恢复后补发 5002）");
+            }
         }
-        self.wait_body_idle(IDLE_WAIT).await;
+        // 链路已断就不要再等 15s 的 idle（旧广播不会再有人写）
+        if !self.body_link_lost() {
+            self.wait_body_idle(IDLE_WAIT).await;
+        }
     }
 
     async fn apply_avoid_level(&self, level: u32) {
@@ -1108,6 +1277,48 @@ impl RouteRunner {
             Err(e) => warn!("设置避障等级失败: {e}"),
         }
     }
+}
+
+/// 补发断链期间没送出去的 `5002`（登记见 [`crate::orphan`]），返回实际补发的条数。
+///
+/// 做两件事：
+/// 1. 按**任务号**逐个 `5002`：本体上的任务号是 UUID、不会复用，补一条早就不在的
+///    只会拿到 `13896 task not found`，不会误伤重连后新下发的任务；
+/// 2. 有真的发出去的，再等一次 `idle`，让紧接着的 `5000` 不会因能力没释放被
+///    `13897` 拒。
+///
+/// 补发失败的重新登记，下一轮重连再试。
+pub async fn flush_pending_cancels(client: &ZhProClient, wait: Duration) -> usize {
+    let pending = crate::orphan::take_all().await;
+    if pending.is_empty() {
+        return 0;
+    }
+    let mut sent = 0_usize;
+    for task_id in &pending {
+        match client
+            .call(T_TASK_CANCEL, json!({ "task_id": task_id }))
+            .await
+        {
+            Ok(_) => {
+                sent += 1;
+                info!("链路恢复后补发 5002 取消本体任务 {task_id}");
+            }
+            Err(e) if is_task_not_found(&e) => {
+                debug!("补 5002：本体上已没有任务 {task_id}（13896），视为已收尾");
+            }
+            Err(e) => {
+                warn!("补发 5002 取消 {task_id} 失败: {e}（保留登记，下次重连再补）");
+                crate::orphan::remember(task_id).await;
+            }
+        }
+    }
+    if sent > 0 && !wait_body_idle(client, wait).await {
+        warn!(
+            "补发 5002 后 {}s 内本体仍未回到 idle：下一条 5000 可能被 13897 拒",
+            wait.as_secs()
+        );
+    }
+    sent
 }
 
 /// 等本体导航能力回到 idle：`robot.task_state == idle` **且**没有 current / pending。
@@ -1573,5 +1784,93 @@ mod tests {
         let window = FINAL_POINT_STALL_WINDOW;
         let faults = [13377, 13446, 13377];
         assert!(final_point_stall_reason(3, Some(2), window, &faults).is_none());
+    }
+
+    /// 短航线不能因为几何估算变宽容：下界仍是 `180 s/点`（老行为）
+    #[test]
+    fn patrol_timeout_keeps_the_per_point_floor() {
+        // 5 个点、相邻 1 m：几何估出来不到 400 s，但下界 5×180 = 900 s
+        let points: Vec<Waypoint> = (0..5)
+            .map(|i| point(&format!("P{i}"), f64::from(i)))
+            .collect();
+        assert_eq!(patrol_timeout_secs(&points, 1.2, 5), 900);
+        // 单点也是 180 s
+        assert_eq!(patrol_timeout_secs(&points[..1], 1.2, 1), 180);
+        // 断点续跑只算本轮的 2 个点
+        assert_eq!(patrol_timeout_secs(&points[3..], 1.2, 2), 360);
+    }
+
+    /// 长航段要按几何放宽：2026-11-27 现场 181 m 的两个点只给 360 s，
+    /// 狗差 1 秒跑完却被判「巡检任务超时」
+    #[test]
+    fn patrol_timeout_grows_with_long_legs() {
+        let mut far = point("A", 0.0);
+        let mut far2 = point("B", 0.0);
+        far2.y = 181.0;
+        far.dwell = 5;
+        far2.dwell = 5;
+        let budget = patrol_timeout_secs(&[far, far2], 1.0, 2);
+        // 181 m / 0.4 m/s ≈ 453 s + 作业 + 15% 余量 + 固定开销 → 远超老的 360 s
+        assert!(
+            budget > 600,
+            "181 m 的航段必须给足预算（实际 {budget}s，老逻辑只有 360s）"
+        );
+        assert!(
+            budget < 1800,
+            "也不能宽到「狗卡住了要干等半小时」：{budget}s"
+        );
+
+        // 里程为 0（原地转圈的配置错误）时不能算成 0 秒
+        assert_eq!(
+            patrol_timeout_secs(&[point("A", 1.0), point("B", 1.0)], 1.0, 2),
+            360
+        );
+    }
+
+    /// 断链后旧 `client` 永久死掉：runner 必须立刻失败，
+    /// 不能等满 `180 s/点` 的预算才误报「巡检任务超时」
+    /// （2026-11-27 `TK-1127-22`：17:14:03 遥控器抢权断链，17:18:46 判超时，狗 17:22:23 还在跑）
+    #[tokio::test]
+    async fn body_link_loss_fails_fast_instead_of_waiting_for_the_deadline() {
+        let host = crate::mock_body::start(0, Duration::from_millis(100), vec![], true)
+            .await
+            .expect("假本体启动失败");
+        let client = Arc::new(ZhProClient::connect(&host).await.expect("连接假本体失败"));
+        let runner = RouteRunner::new(client.clone());
+        // 3 个点 → 预算是 540 s；按老逻辑这个用例要跑 9 分钟
+        runner.prepare(plan("往返")).await;
+        client.force_link_down();
+
+        let started = tokio::time::Instant::now();
+        let error = runner.run().await.expect_err("链路断了必须失败");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "断链要立刻失败，实际等了 {:?}",
+            started.elapsed()
+        );
+        assert!(
+            error.contains("本体连接已断开"),
+            "要说清是断链，不是「超时」: {error}"
+        );
+        assert!(!runner.is_running(), "退出后必须复位执行中标记");
+    }
+
+    /// 「被新一轮顶替」的标记只属于这一轮：`prepare()` 必须清掉，
+    /// 否则同一个 runner 被复用时新版永远不报终态
+    #[tokio::test]
+    async fn superseded_flag_is_per_round() {
+        let host = crate::mock_body::start(0, Duration::from_millis(100), vec![], true)
+            .await
+            .expect("假本体启动失败");
+        let client = Arc::new(ZhProClient::connect(&host).await.expect("连接假本体失败"));
+        let runner = RouteRunner::new(client);
+        assert!(!runner.is_superseded());
+        runner.mark_superseded();
+        assert!(runner.is_superseded());
+        runner.prepare(plan("往返")).await;
+        assert!(
+            !runner.is_superseded(),
+            "新一轮 prepare 必须清掉上一轮的顶替标记"
+        );
     }
 }

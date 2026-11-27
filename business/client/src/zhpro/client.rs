@@ -226,6 +226,9 @@ pub struct ZhProClient {
     request_timeout: Duration,
     /// 本体链路是否已断（control / bulkdata 任一读循环结束即置 true）
     link_down: watch::Receiver<bool>,
+    /// 同一信号的写端：只给测试用（真实链路由读/写循环置位）
+    #[cfg(test)]
+    link_down_tx: watch::Sender<bool>,
     /// 最近收到的本体故障码（`4021`）与到达时刻。
     ///
     /// 只有航线执行引擎用：巡检卡在最后一个航点时，要能区分「跑得慢」和
@@ -390,6 +393,8 @@ impl ZhProClient {
             control_owned: Arc::new(Mutex::new(false)),
             request_timeout: REQUEST_TIMEOUT,
             link_down: link_rx,
+            #[cfg(test)]
+            link_down_tx: link_tx.clone(),
             recent_faults: Arc::new(Mutex::new(Vec::new())),
         };
 
@@ -407,6 +412,15 @@ impl ZhProClient {
     /// 进程交给 systemd（`Restart=always`）兜底。
     pub fn body_link(&self) -> watch::Receiver<bool> {
         self.link_down.clone()
+    }
+
+    /// 测试用：把链路标记成「已断」。
+    ///
+    /// 真实场景由 control / bulkdata 读写循环置位（本体重启、网关踢会话、网线抖动）。
+    /// 单元测试里要复现「断链后旧 client 永久死掉」而模拟本体恰好不会断，只能从这里造。
+    #[cfg(test)]
+    pub(crate) fn force_link_down(&self) {
+        let _ = self.link_down_tx.send(true);
     }
 
     /// 网关 1300 心跳，保持 control 会话保活

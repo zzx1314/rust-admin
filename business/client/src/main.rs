@@ -62,6 +62,8 @@ mod mapupload;
 mod media_sync;
 /// 联调用「假本体」：`--robot mock` 时在进程内起一个智航 Pro 网关模拟器
 mod mock_body;
+/// 断链时没送出去的 `5002`（重连后补发）
+mod orphan;
 mod phone;
 mod phone_relay;
 mod photo;
