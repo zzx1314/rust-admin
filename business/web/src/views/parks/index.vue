@@ -686,12 +686,6 @@ onMounted(load);
             </optgroup>
           </select>
         </div>
-        <div class="field" style="grid-column: 1 / -1">
-          <div class="rt-hint" style="margin: 0">
-            建档时必须确定坐标系（原点 / 分辨率 / CRS / 楼层），并登记地图基线状态。只有「已发布」的地图版本才允许创建巡检路线；建图完成后再发布不可变版本。<br />
-            地图只跟设备有关系：机器人建图回传的地图先入库为「设备地图」（未归属园区），设备绑定人在这里挑一张即绑定为本园区基线；已经归属别的园区的设备地图也能选，**不同园区可以共用同一张图**（只写本园区的基线，不改图的归属园区）。也可以选「backend 地图库」中的 ROS 地图，保存园区时会导入到本业务库。
-          </div>
-        </div>
         <div class="field">
           <label>园区地址</label>
           <input v-model="parkForm.parkAddress" class="input" placeholder="选填" />
