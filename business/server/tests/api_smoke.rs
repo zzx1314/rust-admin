@@ -4281,12 +4281,13 @@ async fn ingest_refresh_reuploads_map_deleted_in_zentai() {
 }
 
 /// 回归 2026-11-27 现场（第二条）：同一个本体目录在业务库里可能留着**已归档**的历史行
-/// （曾指向一张「已发布」的中台地图）。刷新时拿它去覆盖只会被中台
-/// 「已发布不可原地覆盖」400 拒掉，整条同步跟着报失败。
+/// （曾指向一张「已发布」的中台地图）。以前刷新时拿它去覆盖，被中台
+/// 「已发布不可原地覆盖」400 拒掉，整条同步跟着报失败——运维只看到「同步失败」。
 ///
-/// 归档行不是有效副本：按新图入库，别去动那张已发布的中台地图。
+/// 归档行不是这张图的副本：**跳过、不算失败**，既不去覆盖已发布的中台地图，
+/// 也不新建重复副本。
 #[tokio::test]
-async fn ingest_refresh_does_not_overwrite_published_map_through_archived_row() {
+async fn ingest_refresh_skips_archived_business_row_instead_of_failing() {
     const SOURCE_REF: &str = "/ota/alg_data/map/history_map/2026_11_23_10_49_02";
     // 中台那张「已发布」的图还在（exists 返回 42）
     let (base, uploads) = fake_zentai("test-service-token", vec![42], 100).await;
@@ -4314,31 +4315,78 @@ async fn ingest_refresh_does_not_overwrite_published_map_through_archived_row() 
     });
     let body = post_ingest(&app, &token, &package, info).await;
 
-    assert_eq!(body["data"]["skipped"], false, "归档行不能当副本跳过: {body}");
-    assert_eq!(
-        body["data"]["replaced"], false,
-        "归档行不能拿去覆盖那张已发布的中台地图: {body}"
+    assert_eq!(body["data"]["skipped"], true, "归档行应跳过: {body}");
+    assert!(
+        body["data"]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("已归档"),
+        "跳过原因要说清是归档记录: {body}"
     );
     assert_eq!(
         body["data"]["zentaiMapId"].as_i64(),
-        Some(100),
-        "应按新图入库: {body}"
+        Some(42),
+        "已发布的中台地图原样保留: {body}"
     );
-    let sent = uploads.lock().unwrap().clone();
-    assert_eq!(sent.len(), 1, "应上传一次中台: {sent:?}");
     assert!(
-        sent[0]["id"].is_null(),
-        "新建不能带 id，否则中台会走「原地覆盖」并拒绝已发布版本: {:?}",
-        sent[0]
+        uploads.lock().unwrap().is_empty(),
+        "跳过不能上传 → 不新建重复副本，也不撞「已发布不可覆盖」"
     );
-    // 归档行原样留着（不会被复活成 部分标定）
-    let archived: String = sqlx::query_scalar(
-        "SELECT status FROM map_versions WHERE id = 'ROS-MAP-42@v1.0'",
+    let status: String = sqlx::query_scalar("SELECT status FROM map_versions WHERE id = 'ROS-MAP-42@v1.0'")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(status, "已归档");
+}
+
+/// 回归 2026-11-27 现场（第三条）：控制台「派生新版本」建出来的**占位行**
+/// （`source = local`、没有 `source_id`、没有本地包）不能被「同步地图」当成机器人副本。
+///
+/// 以前它会被覆盖成机器人原始包、`source_id` 被改指一张新建的中台地图，
+/// 连带把绑在它上面的园区基线换掉（现场：园区「广汇产业园二期」的 v1.1 基线被改）。
+#[tokio::test]
+async fn ingest_refresh_leaves_derived_map_versions_untouched() {
+    const SOURCE_REF: &str = "/ota/alg_data/map/history_map/2026_11_23_10_49_02";
+    let (base, uploads) = fake_zentai("test-service-token", vec![42], 100).await;
+    let (state, _db_dir, app, token, package) = ingest_state(&base).await;
+    // 派生版本：没有 source_id、没有 file_path/file_size（控制台只记标定信息）
+    sqlx::query(
+        "INSERT INTO map_versions (id, park_id, device_code, map_name, version, status,
+            source, source_id, source_ref, created_at)
+         VALUES ('2026_11_23_10_49_02@v1.1', NULL, 'RD-001', '2026_11_23_10_49_02', 'v1.1',
+            '已发布', 'local', NULL, ?1, '2026-11-27 09:49:17')",
     )
-    .fetch_one(&state.db)
+    .bind(SOURCE_REF)
+    .execute(&state.db)
     .await
     .unwrap();
-    assert_eq!(archived, "已归档");
+
+    let info = serde_json::json!({
+        "mapName": "2026_11_23_10_49_02",
+        "deviceId": "RD-001",
+        "sourceRef": SOURCE_REF,
+        "mode": "refresh",
+    });
+    let body = post_ingest(&app, &token, &package, info).await;
+
+    assert_eq!(body["data"]["skipped"], true, "派生行应跳过: {body}");
+    assert!(
+        uploads.lock().unwrap().is_empty(),
+        "派生行不该触发中台上传（会凭空多出一张重复地图）"
+    );
+    // 派生行一个字段都不许动
+    let (status, source, source_id, file_path): (String, String, Option<String>, Option<String>) =
+        sqlx::query_as(
+            "SELECT status, source, source_id, file_path FROM map_versions
+             WHERE id = '2026_11_23_10_49_02@v1.1'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(status, "已发布");
+    assert_eq!(source, "local");
+    assert_eq!(source_id, None, "派生行不该被挂上中台 id");
+    assert_eq!(file_path, None, "派生行不该被塞进机器人包");
 }
 
 /// 排班 / 工单主流程：责任人库 → 排班（冲突拦截）→ 告警转工单 → 状态流转留痕。

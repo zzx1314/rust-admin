@@ -24,6 +24,20 @@ use axum::extract::{Multipart, State};
 use serde_json::{Value, json};
 use tracing::{info, warn};
 
+/// 业务库里「同一个本体目录」已经登记过的一行。
+///
+/// `source` / `source_id` / `status` 决定这一行**是不是本体这张图的副本**：
+/// 派生版本（`source=local` + 无 `source_id`）与已归档的历史行都不是，
+/// 同步不能拿它们去覆盖中台地图（见 [`ingest_map`] 里的判断）。
+#[derive(Debug, sqlx::FromRow)]
+struct ExistingMapRow {
+    id: String,
+    source_id: Option<String>,
+    file_path: Option<String>,
+    status: String,
+    source: String,
+}
+
 pub async fn ingest_map(
     State(state): State<AppState>,
     mut multipart: Multipart,
@@ -119,17 +133,21 @@ pub async fn ingest_map(
         .filter(|value| !value.is_empty())
     {
         // 同一台机器人的同一个本体目录可能留下**好几行**（历史重复回传 / 派生版本 /
-        // 归档）。以前 `LIMIT 1` 不带任何排序，踩到哪行算哪行：2026-11-27 现场就是
-        // 挑中了已归档的 `ROS-MAP-1795402650069@v1.0`（指向一张「已发布」的中台地图），
-        // 之后每次「同步地图」都去覆盖那张已发布图、被 400 拒掉，整条同步报失败。
-        // 现在按「同一设备的行优先、未归档的优先、最新的优先」挑。
-        let existing: Option<(String, Option<String>, Option<String>, String)> =
-            match device_code.as_deref() {
+        // 归档 / 中台导入）。以前 `LIMIT 1` 不带任何排序，踩到哪行算哪行：
+        // 2026-11-27 现场挑中了已归档的 `ROS-MAP-1795402650069@v1.0`（指向一张
+        // 「已发布」的中台地图），之后每次「同步地图」都去覆盖那张已发布图、被 400 拒掉；
+        // 换成「未归档优先」后又踩到另一头：把控制台派生出来的占位行
+        // `2026_11_23_10_49_02@v1.1` 当成机器人副本，覆盖成机器人原始包、还改指了一张新图。
+        // 所以排序要按「谁才是本体这张图的那一份」来：同设备 > 本体回传入库 > 有中台链接 >
+        // 未归档 > 最新。命中不算副本的行由下面显式跳过（不覆盖、也不报失败）。
+        let existing: Option<ExistingMapRow> = match device_code.as_deref() {
                 Some(code) => {
                     sqlx::query_as(
-                        "SELECT id, source_id, file_path, status FROM map_versions
+                        "SELECT id, source_id, file_path, status, source FROM map_versions
                      WHERE (device_code = ?1 OR device_code IS NULL) AND source_ref = ?2
                      ORDER BY CASE WHEN device_code = ?1 THEN 0 ELSE 1 END,
+                              CASE WHEN source = 'robot-mapping' THEN 0 ELSE 1 END,
+                              CASE WHEN source_id IS NULL OR TRIM(source_id) = '' THEN 1 ELSE 0 END,
                               CASE WHEN status = '已归档' THEN 1 ELSE 0 END,
                               created_at DESC, id DESC
                      LIMIT 1",
@@ -141,9 +159,11 @@ pub async fn ingest_map(
                 }
                 None => {
                     sqlx::query_as(
-                        "SELECT id, source_id, file_path, status FROM map_versions
+                        "SELECT id, source_id, file_path, status, source FROM map_versions
                      WHERE source_ref = ?1
-                     ORDER BY CASE WHEN status = '已归档' THEN 1 ELSE 0 END,
+                     ORDER BY CASE WHEN source = 'robot-mapping' THEN 0 ELSE 1 END,
+                              CASE WHEN source_id IS NULL OR TRIM(source_id) = '' THEN 1 ELSE 0 END,
+                              CASE WHEN status = '已归档' THEN 1 ELSE 0 END,
                               created_at DESC, id DESC
                      LIMIT 1",
                     )
@@ -152,8 +172,20 @@ pub async fn ingest_map(
                     .await?
                 }
             };
-        if let Some((map_id, source_id, stored_file, status)) = existing {
+        if let Some(row) = existing {
+            let ExistingMapRow {
+                id: map_id,
+                source_id,
+                file_path: stored_file,
+                status,
+                source,
+            } = row;
             let archived = status.trim() == "已归档";
+            let robot_copy = source.trim() == "robot-mapping";
+            let has_zentai_link = source_id
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty());
             let stale_zentai_id = source_id
                 .as_deref()
                 .map(str::trim)
@@ -174,15 +206,37 @@ pub async fn ingest_map(
                 None => None,
             };
 
-            if refresh && archived {
-                // 归档行不是这个本体目录的「有效副本」：拿它去覆盖中台只会撞上
-                // 「已发布不可原地覆盖」，也不能把它复活。按新图入库，归档行原样留档。
-                info!(
-                    "地图 {source_ref} 的业务行 {map_id} 已归档，按新图回传（中台 {} 不动）",
-                    stale_zentai_id
-                        .map(|id| format!("#{id}"))
-                        .unwrap_or_else(|| "记录".to_string())
-                );
+            // 平台这条记录不是「本体这张图的副本」：派生版本（控制台「派生新版本」建的
+            // 占位行，没有 source_id / 没有本地包）、或已归档的历史行。
+            //
+            // 同步绝不覆盖它们：拿归档行去覆盖只会撞上「已发布不可原地覆盖」被 400 拒掉，
+            // 拿派生占位行去当副本则会把它换成机器人原始包、还改指一张新的中台地图
+            // （2026-11-27 现场：园区基线 `2026_11_23_10_49_02@v1.1` 被这么改掉了）。
+            // 这两种情况**跳过就好，不算失败**——否则每点一次「同步地图」都报失败，
+            // 真正的原因（这张图平台已有派生版本）反而看不出来。
+            let not_a_robot_copy = archived || !robot_copy || !has_zentai_link;
+            if refresh && not_a_robot_copy {
+                let reason = if archived {
+                    format!("业务记录 {map_id} 已归档，同步不改动（如需更新请派生新版本）")
+                } else if !robot_copy {
+                    format!("业务记录 {map_id} 不是本体回传入库的图（来源 {}），同步不改动", source.trim())
+                } else {
+                    format!("业务记录 {map_id} 没有中台链接（派生 / 手工登记），同步不改动")
+                };
+                info!("地图 {source_ref} 跳过：{reason}");
+                let map = crate::handlers::maps::fetch_map(&state, &map_id).await?;
+                return Ok(ApiResponse::ok(json!({
+                    "mapId": map.id,
+                    "mapName": map.map_name,
+                    "parkId": map.park_id,
+                    "zentaiMapId": stale_zentai_id,
+                    "bound": false,
+                    "skipped": true,
+                    "mode": request.mode.as_str(),
+                    "reason": reason,
+                    "stashPath": Value::Null,
+                    "map": map,
+                })));
             } else if refresh {
                 // 刷新：内容没变就不折腾中台（客户端每次现场重打包，zip 时间戳不同，
                 // 所以比的是「内容指纹」而不是整包哈希）。
