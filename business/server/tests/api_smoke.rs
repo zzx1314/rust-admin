@@ -5983,7 +5983,8 @@ async fn map_status_syncs_from_zentai() {
     .execute(&pool)
     .await
     .unwrap();
-    // 业务库自己归档的历史图：中台还标着已发布，同步不能把它复活
+    // 业务库遗留的「已归档」（旧版 `publish_map` 自己归档的痕迹）：中台标着已发布时，
+    // 同步要把它纠正回来——业务平台已不再自己归档，中台才是唯一真源。
     sqlx::query(
         "INSERT INTO map_versions
             (id, park_id, device_code, map_name, version, status, created_at, source,
@@ -6037,7 +6038,7 @@ async fn map_status_syncs_from_zentai() {
     let changed = robodog_ops_server::handlers::maps::sync_map_statuses(&state)
         .await
         .expect("状态同步不应失败");
-    assert_eq!(changed, 1, "应同步 1 张地图");
+    assert_eq!(changed, 2, "应同步 2 张地图（含被纠正的遗留归档行）");
 
     let status: String = sqlx::query_scalar(
         "SELECT status FROM map_versions WHERE id = 'ROS-MAP-1795402650069@v1.0'",
@@ -6059,13 +6060,88 @@ async fn map_status_syncs_from_zentai() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(archived, "已归档", "业务侧归档的图不许被中台状态复活");
+    assert_eq!(
+        archived, "已发布",
+        "业务侧遗留的归档行要跟着中台回到已发布（业务平台不再自己归档）"
+    );
 
     // 幂等：再同步一次不该再改动任何行
     let again = robodog_ops_server::handlers::maps::sync_map_statuses(&state)
         .await
         .expect("重复同步不应失败");
     assert_eq!(again, 0);
+}
+
+/// 业务平台不再自己归档地图（2026-11-27 起）。
+///
+/// 「派生新版本」以前会把同园区其他 `已发布` 的图改成 `已归档`，于是出现
+/// 「中台已发布 + 业务已归档」两套生命周期（金澳国际 `ROS-MAP-1794793550232@v1.0`
+/// 就是这么变脏的，又被 `sync_map_statuses` 的 `status <> '已归档'` 钉死修不回来）。
+/// 现在派生只把园区基线指向新版本，旧版本 / 同园区图的状态一个字节都不动。
+#[tokio::test]
+async fn deriving_a_version_does_not_archive_maps() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    for (id, name) in [
+        ("MAP-LOCAL-1@v1.0", "MAP-LOCAL-1"),
+        ("MAP-LOCAL-2@v1.0", "MAP-LOCAL-2"),
+    ] {
+        sqlx::query(
+            "INSERT INTO map_versions (id, park_id, map_name, version, status, created_at, source)
+             VALUES (?1, 1, ?2, 'v1.0', '已发布', '2026-01-01 00:00:00', 'local')",
+        )
+        .bind(id)
+        .bind(name)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "UPDATE parks SET map_version_id = 'MAP-LOCAL-1@v1.0', map_status = '已标定' WHERE id = 1",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = build_router(state);
+    let token = login(&app).await;
+    let request = Request::post("/api/map-versions/MAP-LOCAL-1@v1.0/new-version")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "派生新版本应成功");
+    let body = json_body(response).await;
+    let new_id = body["data"]["id"]
+        .as_str()
+        .expect("缺少新版本 id")
+        .to_string();
+    assert_eq!(new_id, "MAP-LOCAL-1@v1.1");
+
+    let old: String = sqlx::query_scalar("SELECT status FROM map_versions WHERE id = ?1")
+        .bind("MAP-LOCAL-1@v1.0")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(old, "已发布", "派生新版本不许归档旧版本（状态由中台维护）");
+
+    let sibling: String = sqlx::query_scalar("SELECT status FROM map_versions WHERE id = ?1")
+        .bind("MAP-LOCAL-2@v1.0")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(sibling, "已发布", "同园区的其他地图也不许被顺手归档");
+
+    let baseline: Option<String> = sqlx::query_scalar("SELECT map_version_id FROM parks WHERE id = 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        baseline.as_deref(),
+        Some(new_id.as_str()),
+        "园区基线应指向新版本"
+    );
 }
 
 /// `POST /api/auth/refresh`：拿当前令牌换一枚新令牌（滑动续期）。

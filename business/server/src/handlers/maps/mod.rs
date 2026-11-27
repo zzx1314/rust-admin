@@ -208,10 +208,13 @@ pub async fn sync_map_statuses(state: &AppState) -> Result<usize, AppError> {
             continue;
         }
         let result = sqlx::query(
-            // 业务库自己归档的（`publish_map` 会把同园区旧基线归档）不许被中台的状态复活：
-            // 归档是业务侧的退役动作，同步只负责把发布 / 恢复带回业务库。
+            // 中台是地图状态的唯一主库：业务库只照搬，包括把遗留的「已归档」纠正回中台的
+            // 实际状态。以前这里带 `AND status <> '已归档'`（当时的业务侧会自己归档），
+            // 结果「中台已发布 + 业务已归档」这种脏行永远修不回来——2026-11-27 金澳国际
+            // 的 `ROS-MAP-1794793550232@v1.0` 就是那么卡住的。
+            // 业务平台不再自己归档（`new_map_version` 里的归档已删除），所以这个例外没有必要。
             "UPDATE map_versions SET status = ?1
-             WHERE source_id = ?2 AND status <> ?1 AND status <> '已归档'",
+             WHERE source_id = ?2 AND status <> ?1",
         )
         .bind(status)
         .bind(&source_id)
@@ -404,14 +407,9 @@ pub async fn new_map_version(
     .execute(&mut *transaction)
     .await?;
     if let Some(park_id) = map.park_id {
-        sqlx::query(
-            "UPDATE map_versions SET status = '已归档'
-             WHERE park_id = ?1 AND id <> ?2 AND status = '已发布'",
-        )
-        .bind(park_id)
-        .bind(&new_id)
-        .execute(&mut *transaction)
-        .await?;
+        // 只把园区基线指针指向新版本。**不归档旧版本**：状态由中台统一维护，
+        // 业务平台一旦自己写「已归档」就会出现「中台已发布 + 业务已归档」的两套
+        // 生命周期（`sync_map_statuses` 也据中台为准）。
         let park_status = if map.status == "部分标定" {
             "部分标定"
         } else {

@@ -499,8 +499,11 @@ resolve_route_map` 同样要放行「别园区的图」（否则园区能绑图�
 拉回（启动一次 + `schedule::sweep` 每 30s + `GET /api/maps` 顺手拉但 10s 节流，
 节流器在 `Caches::map_status_sync`），园区 `map_status` 一起收敛
 （已发布→已标定 / 部分标定→部分标定 / 其余→待标定）。该函数只同步状态，
-**不动 `park_id` / `owner_user_id`**（否则会把共用同一张图的园区基线拧坏），
-也**不会复活业务侧已归档的行**（`UPDATE ... AND status <> '已归档'`）。
+**不动 `park_id` / `owner_user_id`**（否则会把共用同一张图的园区基线拧坏）。
+**业务平台不再写 `已归档`**（2026-11-27 起，只照搬中台）：`new_map_version` 派生新版本时
+只把园区基线指向新版本、不再归档同园区旧图，`sync_map_statuses` 也不再有
+`AND status <> '已归档'` 那个例外——遗留的「中台已发布 + 业务已归档」脏行
+（金澳国际 `ROS-MAP-1794793550232@v1.0`）就是被那个例外钉死的。
 回归：`dog_map_edit_tests::publish_partial_map_marks_it_published`、
 `api_smoke::map_status_syncs_from_zentai`。
 
