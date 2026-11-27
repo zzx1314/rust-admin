@@ -4123,6 +4123,224 @@ async fn ingest_refresh_overwrites_existing_map_only_when_content_changes() {
     assert_eq!(sha256_hex(&refreshed), sha256_hex(&changed));
 }
 
+/// 假中台：`/exists` 只认 `existing` 里的 id（模拟「其余地图已被软删除」），
+/// `/upload` 记录收到的 mapInfo 并回 `upload_id`。
+async fn fake_zentai(
+    token: &'static str,
+    existing: Vec<i64>,
+    upload_id: i64,
+) -> (String, Arc<std::sync::Mutex<Vec<Value>>>) {
+    use axum::extract::Multipart;
+    use axum::http::HeaderMap;
+    use axum::routing::{get, post};
+    use std::sync::Mutex as StdMutex;
+
+    let uploads: Arc<StdMutex<Vec<Value>>> = Arc::new(StdMutex::new(Vec::new()));
+    let recorded = uploads.clone();
+    let zentai = axum::Router::new()
+        .route(
+            "/api/dogInternal/maps/exists",
+            post(move |_headers: HeaderMap, _body: axum::Json<Value>| {
+                let existing = existing.clone();
+                async move {
+                    axum::Json(serde_json::json!({
+                        "code": 10200,
+                        "msg": "success",
+                        "data": {"existing": existing},
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/api/dogInternal/devices/assignments",
+            get(|_headers: HeaderMap| async move {
+                axum::Json(serde_json::json!({"code": 10200, "msg": "success", "data": []}))
+            }),
+        )
+        .route(
+            "/api/dogInternal/maps/upload",
+            post(move |headers: HeaderMap, mut multipart: Multipart| {
+                let recorded = recorded.clone();
+                async move {
+                    assert_eq!(
+                        headers.get("x-service-token").and_then(|v| v.to_str().ok()),
+                        Some(token)
+                    );
+                    let mut map_name = String::new();
+                    while let Some(field) = multipart.next_field().await.unwrap() {
+                        match field.name() {
+                            Some("file") => {
+                                let _ = field.bytes().await.unwrap();
+                            }
+                            Some("mapInfo") => {
+                                let text = field.text().await.unwrap();
+                                let info: Value = serde_json::from_str(&text).unwrap();
+                                map_name = info["mapName"].as_str().unwrap_or_default().to_string();
+                                recorded.lock().unwrap().push(info);
+                            }
+                            _ => {}
+                        }
+                    }
+                    axum::Json(serde_json::json!({
+                        "code": 10200,
+                        "msg": "success",
+                        "data": {"id": upload_id, "mapName": map_name, "fileName": "map.zip"},
+                    }))
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake zentai");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, zentai).await;
+    });
+    (format!("http://{addr}"), uploads)
+}
+
+/// 用假中台搭一个「业务库里已经有一行 + 本地存了同一份包」的现场。
+async fn ingest_state(
+    zentai_base: &str,
+) -> (AppState, TempDb, axum::Router, String, Vec<u8>) {
+    let (state, db_dir) = test_state_with_token(Some("test-service-token")).await;
+    let mut config = (*state.config).clone();
+    config.zentai_base_url = Some(zentai_base.to_string());
+    let state = AppState {
+        db: state.db,
+        notifier: robodog_ops_server::notify::Notifier::disabled(),
+        config: Arc::new(config),
+        device_connections: state.device_connections,
+        command_results: state.command_results,
+        video_hub: Default::default(),
+        agent_tunnel: Default::default(),
+        phone_audio: Default::default(),
+        ai_patrol: Default::default(),
+        caches: Default::default(),
+    };
+    let app = build_router(state.clone());
+    let token = login(&app).await;
+    let package = robot_map_zip(b"P5\n4 4\n255\n\x01\x02\x03\x04", (2026, 11, 27, 9, 54, 17));
+    (state, db_dir, app, token, package)
+}
+
+/// 回归 2026-11-27 现场：在中台**删掉**一张机器人地图后点「同步地图」，
+/// 以前因为「本体包内容没变」直接跳过（回执「无需更新」），中台永远补不回来。
+///
+/// 中台是地图主库，被删的图必须能靠同步重传回来：内容没变也要新建一条。
+#[tokio::test]
+async fn ingest_refresh_reuploads_map_deleted_in_zentai() {
+    const SOURCE_REF: &str = "/ota/alg_data/map/history_map/2026_11_27_09_54_17";
+    // 中台里这张图已被软删（exists 不返回 42）
+    let (base, uploads) = fake_zentai("test-service-token", Vec::new(), 99).await;
+    let (state, db_dir, app, token, package) = ingest_state(&base).await;
+    let stored = db_dir.dir.join("stored-map.zip");
+    std::fs::write(&stored, &package).expect("写入本地副本");
+    sqlx::query(
+        "INSERT INTO map_versions (id, park_id, device_code, map_name, version, status,
+            file_name, file_path, file_size, source, source_id, source_ref, created_at)
+         VALUES ('ROS-MAP-42@v1.0', NULL, 'RD-001', '2026_11_27_09_54_17', 'v1.0', '部分标定',
+            'map.zip', ?1, ?2, 'robot-mapping', '42', ?3, '2026-11-27 13:52:06')",
+    )
+    .bind(stored.display().to_string())
+    .bind(package.len() as i64)
+    .bind(SOURCE_REF)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let info = serde_json::json!({
+        "mapName": "2026_11_27_09_54_17",
+        "deviceId": "RD-001",
+        "sourceRef": SOURCE_REF,
+        "mode": "refresh",
+    });
+    let body = post_ingest(&app, &token, &package, info).await;
+
+    assert_eq!(
+        body["data"]["skipped"], false,
+        "中台已经删了这张图，即使内容和本地副本一致也必须重传: {body}"
+    );
+    assert_eq!(
+        body["data"]["replaced"], false,
+        "中台没有这张图了，不能带 id 去覆盖（会撞「地图不存在」）: {body}"
+    );
+    assert_eq!(
+        body["data"]["mapId"].as_str(),
+        Some("ROS-MAP-42@v1.0"),
+        "重传要沿用原业务地图 id（路线 / 任务引用它）: {body}"
+    );
+    assert_eq!(body["data"]["zentaiMapId"].as_i64(), Some(99));
+    let sent = uploads.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "应重新上传一次中台: {sent:?}");
+    assert!(
+        sent[0]["id"].is_null(),
+        "中台已没有这条记录，mapInfo 不能带 id: {:?}",
+        sent[0]
+    );
+}
+
+/// 回归 2026-11-27 现场（第二条）：同一个本体目录在业务库里可能留着**已归档**的历史行
+/// （曾指向一张「已发布」的中台地图）。刷新时拿它去覆盖只会被中台
+/// 「已发布不可原地覆盖」400 拒掉，整条同步跟着报失败。
+///
+/// 归档行不是有效副本：按新图入库，别去动那张已发布的中台地图。
+#[tokio::test]
+async fn ingest_refresh_does_not_overwrite_published_map_through_archived_row() {
+    const SOURCE_REF: &str = "/ota/alg_data/map/history_map/2026_11_23_10_49_02";
+    // 中台那张「已发布」的图还在（exists 返回 42）
+    let (base, uploads) = fake_zentai("test-service-token", vec![42], 100).await;
+    let (state, db_dir, app, token, package) = ingest_state(&base).await;
+    let stored = db_dir.dir.join("archived-map.zip");
+    std::fs::write(&stored, &package).expect("写入本地副本");
+    sqlx::query(
+        "INSERT INTO map_versions (id, park_id, device_code, map_name, version, status,
+            file_name, file_path, file_size, source, source_id, source_ref, created_at)
+         VALUES ('ROS-MAP-42@v1.0', NULL, 'RD-001', '2026_11_23_10_49_02', 'v1.0', '已归档',
+            'map.zip', ?1, ?2, 'robot-mapping', '42', ?3, '2026-11-23 10:57:30')",
+    )
+    .bind(stored.display().to_string())
+    .bind(package.len() as i64)
+    .bind(SOURCE_REF)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let info = serde_json::json!({
+        "mapName": "2026_11_23_10_49_02",
+        "deviceId": "RD-001",
+        "sourceRef": SOURCE_REF,
+        "mode": "refresh",
+    });
+    let body = post_ingest(&app, &token, &package, info).await;
+
+    assert_eq!(body["data"]["skipped"], false, "归档行不能当副本跳过: {body}");
+    assert_eq!(
+        body["data"]["replaced"], false,
+        "归档行不能拿去覆盖那张已发布的中台地图: {body}"
+    );
+    assert_eq!(
+        body["data"]["zentaiMapId"].as_i64(),
+        Some(100),
+        "应按新图入库: {body}"
+    );
+    let sent = uploads.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "应上传一次中台: {sent:?}");
+    assert!(
+        sent[0]["id"].is_null(),
+        "新建不能带 id，否则中台会走「原地覆盖」并拒绝已发布版本: {:?}",
+        sent[0]
+    );
+    // 归档行原样留着（不会被复活成 部分标定）
+    let archived: String = sqlx::query_scalar(
+        "SELECT status FROM map_versions WHERE id = 'ROS-MAP-42@v1.0'",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(archived, "已归档");
+}
+
 /// 排班 / 工单主流程：责任人库 → 排班（冲突拦截）→ 告警转工单 → 状态流转留痕。
 #[tokio::test]
 async fn schedules_and_work_orders_flow() {

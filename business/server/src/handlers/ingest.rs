@@ -118,13 +118,21 @@ pub async fn ingest_map(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let existing: Option<(String, Option<String>, Option<String>)> =
+        // 同一台机器人的同一个本体目录可能留下**好几行**（历史重复回传 / 派生版本 /
+        // 归档）。以前 `LIMIT 1` 不带任何排序，踩到哪行算哪行：2026-11-27 现场就是
+        // 挑中了已归档的 `ROS-MAP-1795402650069@v1.0`（指向一张「已发布」的中台地图），
+        // 之后每次「同步地图」都去覆盖那张已发布图、被 400 拒掉，整条同步报失败。
+        // 现在按「同一设备的行优先、未归档的优先、最新的优先」挑。
+        let existing: Option<(String, Option<String>, Option<String>, String)> =
             match device_code.as_deref() {
                 Some(code) => {
                     sqlx::query_as(
-                        "SELECT id, source_id, file_path FROM map_versions
+                        "SELECT id, source_id, file_path, status FROM map_versions
                      WHERE (device_code = ?1 OR device_code IS NULL) AND source_ref = ?2
-                     ORDER BY CASE WHEN device_code = ?1 THEN 0 ELSE 1 END LIMIT 1",
+                     ORDER BY CASE WHEN device_code = ?1 THEN 0 ELSE 1 END,
+                              CASE WHEN status = '已归档' THEN 1 ELSE 0 END,
+                              created_at DESC, id DESC
+                     LIMIT 1",
                     )
                     .bind(code)
                     .bind(source_ref)
@@ -133,15 +141,19 @@ pub async fn ingest_map(
                 }
                 None => {
                     sqlx::query_as(
-                        "SELECT id, source_id, file_path FROM map_versions
-                     WHERE source_ref = ?1 LIMIT 1",
+                        "SELECT id, source_id, file_path, status FROM map_versions
+                     WHERE source_ref = ?1
+                     ORDER BY CASE WHEN status = '已归档' THEN 1 ELSE 0 END,
+                              created_at DESC, id DESC
+                     LIMIT 1",
                     )
                     .bind(source_ref)
                     .fetch_optional(&state.db)
                     .await?
                 }
             };
-        if let Some((map_id, source_id, stored_file)) = existing {
+        if let Some((map_id, source_id, stored_file, status)) = existing {
+            let archived = status.trim() == "已归档";
             let stale_zentai_id = source_id
                 .as_deref()
                 .map(str::trim)
@@ -162,10 +174,28 @@ pub async fn ingest_map(
                 None => None,
             };
 
-            if refresh {
+            if refresh && archived {
+                // 归档行不是这个本体目录的「有效副本」：拿它去覆盖中台只会撞上
+                // 「已发布不可原地覆盖」，也不能把它复活。按新图入库，归档行原样留档。
+                info!(
+                    "地图 {source_ref} 的业务行 {map_id} 已归档，按新图回传（中台 {} 不动）",
+                    stale_zentai_id
+                        .map(|id| format!("#{id}"))
+                        .unwrap_or_else(|| "记录".to_string())
+                );
+            } else if refresh {
                 // 刷新：内容没变就不折腾中台（客户端每次现场重打包，zip 时间戳不同，
                 // 所以比的是「内容指纹」而不是整包哈希）。
-                if package_matches_stored(&state, stored_file.as_deref(), &package).await {
+                //
+                // ⚠️ 但「中台那张图被删了」必须重传：中台是地图主库，运维在中台删掉
+                // 一张机器人地图后点「同步地图」，唯一的指望就是把图拿回来。以前这里
+                // 不看 `alive` 就按内容未变化跳过，等于**删了就永远补不回来**
+                // （2026-11-27 现场：删掉 2026_11_27_09_54_17 再同步，回执「无需更新 4」，
+                // 中台列表里依然没有那张图）。
+                let deleted_in_zentai = alive == Some(false);
+                if !deleted_in_zentai
+                    && package_matches_stored(&state, stored_file.as_deref(), &package).await
+                {
                     let map = crate::handlers::maps::fetch_map(&state, &map_id).await?;
                     info!("地图 {source_ref} 内容未变化，刷过同步（{map_id}）");
                     return Ok(ApiResponse::ok(json!({
