@@ -355,7 +355,7 @@ pub struct CommandResultPayload {
     pub extra: HashMap<String, Value>,
 }
 
-/// 客户端 → 服务端：长任务中间进度（目前只有「同步媒体」用）。
+/// 客户端 → 服务端：长任务中间进度（「同步媒体」/「回传录像」/「同步地图」）。
 ///
 /// 同步一场在 4G 上可能跑几分钟，中台设备页需要看到「已上传 8/24」而不是干等
 /// 最终的 `command_result`。
@@ -371,6 +371,10 @@ pub struct CommandProgressPayload {
     pub failed: u64,
     #[serde(default)]
     pub total: u64,
+    /// 「同步地图」用：已经处理完几张（含跳过/失败的），
+    /// 地图不是「上传」而是逐张处理，`uploaded` 单独统计新增/覆盖
+    #[serde(default)]
+    pub done: u64,
     #[serde(default)]
     pub batches_done: u64,
     #[serde(default)]

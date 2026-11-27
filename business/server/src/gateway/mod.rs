@@ -669,15 +669,19 @@ async fn on_command_result(ctx: &ConnectionCtx<'_>, device: &str, payload: Value
         )
         .await;
     }
-    // 长任务（「同步媒体」/「回传录像」）：中台下发时只拿到「已送达」，真实进度/结论
-    // 由这里回写中台审计（否则设备页只能猜）。
-    if matches!(payload.command.as_str(), "同步媒体" | "回传录像") {
+    // 长任务（「同步媒体」/「回传录像」/「同步地图」）：中台下发时只拿到「已送达」，
+    // 真实进度/结论由这里回写中台审计（否则设备页只能猜：点了「同步地图」，
+    // 图没上来、审计却一直是「已下发」）。
+    if matches!(
+        payload.command.as_str(),
+        "同步媒体" | "回传录像" | "同步地图"
+    ) {
         report_long_task_to_zentai(state, device, &payload);
     }
     send_msg(ctx.tx, "command_result_ack", json!({"received": true})).await;
 }
 
-/// `command_progress`：长任务进度（「同步媒体」/「回传录像」）。
+/// `command_progress`：长任务进度（「同步媒体」/「回传录像」/「同步地图」）。
 ///
 /// 只回写中台审计，不动 `command_results` 等待表 —— 等待表只关心「最终结论」。
 fn on_command_progress(ctx: &ConnectionCtx<'_>, device: &str, payload: Value) {
@@ -687,7 +691,10 @@ fn on_command_progress(ctx: &ConnectionCtx<'_>, device: &str, payload: Value) {
         warn!("设备 {device} 的 command_progress 缺少 requestId");
         return;
     }
-    if !matches!(payload.command.as_str(), "同步媒体" | "回传录像") {
+    if !matches!(
+        payload.command.as_str(),
+        "同步媒体" | "回传录像" | "同步地图"
+    ) {
         return;
     }
     let body = long_task_progress_body(device, &payload);

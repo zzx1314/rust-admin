@@ -62,6 +62,15 @@ export const MEDIA_SYNC_COMMAND = "同步媒体";
 export const RECORD_SYNC_COMMAND = "回传录像";
 
 /**
+ * 「同步地图」：把本体 4012 列表里的图逐张回传中台（新增/变化才传）。
+ *
+ * 与上面两条同一套长任务回执：下发只回「已下发」，扫了几张、传上去没有要看
+ * `mediaSyncStatus?action=同步地图`。2026-11-27 之前中台把它当同步指令，
+ * 图没上来审计也已经写「成功」，现场只能靠人去地图列表里数。
+ */
+export const SYNC_MAP_COMMAND = "同步地图";
+
+/**
  * 设备页「更多 → 下发指令」里暴露的指令。
  *
  * **只留长任务**：巡检启停、召回充电、远程接管/释放这些动作都在业务平台
@@ -402,6 +411,12 @@ export function useDogDevice() {
     }
   }
 
+  /**
+   * 同步地图：确认 → 下发 → 打开状态弹窗轮询。
+   *
+   * 下发接口只回「已下发」，真正的结论（传了几张、哪张失败）要等设备回报，
+   * 所以下发成功就顺手把状态弹窗打开，省得再回菜单里点一次。
+   */
   async function syncMaps(row: DogDevice) {
     try {
       await ElMessageBox.confirm(
@@ -420,9 +435,10 @@ export function useDogDevice() {
     }
     syncingId.value = row.id;
     try {
-      const res = await dogDeviceSyncMaps(row.id);
+      const res = await dogDeviceSyncMaps(row.id, newRequestId(row.deviceId));
       if (res.code === SUCCESS) {
         message("同步指令已下发，设备会上报同步结果", { type: "success" });
+        openMediaSync(row, SYNC_MAP_COMMAND);
       } else {
         message(res.msg || "下发失败", { type: "error" });
       }
@@ -528,6 +544,18 @@ export function useDogDevice() {
     startMediaSyncPolling();
   }
 
+  /** 状态弹窗「还没有记录」时的说明（按当前看的指令区分） */
+  const mediaSyncEmptyHint = computed(() => {
+    switch (mediaSyncAction.value) {
+      case RECORD_SYNC_COMMAND:
+        return "在「下发指令」里点「回传录像」，板端会把 RECORD_DIR 里攒着的巡检录像回传到业务平台「任务录像」（录像不再自动回传）。";
+      case SYNC_MAP_COMMAND:
+        return "在「更多 → 同步地图」里点一次，设备会按本体 4012 的地图列表逐张回传，这里能看到传了几张、哪张失败。";
+      default:
+        return "在「下发指令」里点「同步媒体」，板端会把 /media/media-data/picture 下的存证图回传到媒体资源。";
+    }
+  });
+
   /** 停掉轮询（弹窗关闭 / 有结论 / 组件卸载） */
   function stopMediaSyncPolling() {
     mediaSyncPolling.value = false;
@@ -624,6 +652,9 @@ export function useDogDevice() {
       case "sync":
         syncMaps(row);
         break;
+      case "mapSync":
+        openMediaSync(row, SYNC_MAP_COMMAND);
+        break;
       case "runtime":
         openRuntime(row);
         break;
@@ -696,6 +727,7 @@ export function useDogDevice() {
     mediaSyncAction,
     mediaSyncStatus,
     mediaSyncPolling,
+    mediaSyncEmptyHint,
     onSearch,
     handleSizeChange,
     handleCurrentChange,

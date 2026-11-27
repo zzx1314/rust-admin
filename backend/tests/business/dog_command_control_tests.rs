@@ -1113,6 +1113,7 @@ mod control_channel_transport {
             axum::extract::State(state.clone()),
             axum::Extension(admin()),
             AxumPath(IdParam { id: device_id }),
+            None,
         )
         .await
         .expect("sync maps over channel must succeed")
@@ -1120,7 +1121,10 @@ mod control_channel_transport {
         .data;
 
         business.await.expect("business side must finish");
-        assert_eq!(data["dispatched"], true);
+        // 同步地图是长任务：下发只是「已下发」，结论等设备回报
+        assert_eq!(data["status"], audit::STATUS_PENDING, "{data}");
+        assert_eq!(data["awaitingDevice"], true, "{data}");
+        assert_eq!(data["result"]["dispatched"], true);
     }
 
     /// 中台下发的「下发地图」必须把设备真实结果带回中台：

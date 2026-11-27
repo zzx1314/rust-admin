@@ -381,11 +381,108 @@ pub(crate) async fn handle(
         .await;
         return;
     };
+    // 「同步地图」：长任务（4012 拉列表 → 逐张从本体文件服务吞包 → 回传中台）。
+    //
+    // 中台下发接口只回「已下发」，扫了几张、传上去没有只有设备知道，所以这里（与
+    // 「同步媒体」/「回传录像」同一套机制）自己发 `command_progress` / `command_result`，
+    // 经业务平台回写中台审计；不回的话设备页只能显示「已下发」，看不出同步到底成没成。
+    if command == "同步地图" {
+        // 服务端在指令里带上了台账当前园区归属（`params.params.parkId`），
+        // 显式 null 表示设备确实没绑园区，不能拿本地缓存的旧值充数
+        let outer = msg.payload.get("params");
+        let params = outer.and_then(|p| p.get("params")).or(outer);
+        let park_hint = params
+            .and_then(|p| p.get("parkId"))
+            .map(|value| value.as_i64());
+        // 刷新语义由服务端 `mode` / `refresh` / `onlyMissing` 共同决定：
+        // 中台按钮（manual）要求全量刷新，auto / onlyMissing 只补缺。
+        let mode = params
+            .and_then(|p| p.get("mode"))
+            .and_then(Value::as_str)
+            .unwrap_or("manual");
+        let refresh = params
+            .and_then(|p| p.get("refresh"))
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| {
+                let only_missing = params
+                    .and_then(|p| p.get("onlyMissing"))
+                    .and_then(Value::as_bool);
+                only_missing.map(|only| !only).unwrap_or(mode != "auto")
+            });
+        // 进度：4G 上一张图十几秒，中台设备页要看到「已处理 2/5」
+        let progress_tx = out_tx.clone();
+        let progress_request_id = command_request_id(&msg);
+        let progress = move |p: crate::mapupload::MapSyncProgress| {
+            let Some(request_id) = progress_request_id.clone() else {
+                return;
+            };
+            let _ = progress_tx.try_send(WsMessage {
+                msg_type: "command_progress".to_string(),
+                ts: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                payload: json!({
+                    "requestId": request_id,
+                    "command": "同步地图",
+                    "uploaded": p.uploaded,
+                    "failed": p.failed,
+                    "total": p.total,
+                    "done": p.done,
+                }),
+            });
+        };
+        let outcome = sync_maps_from_robot(
+            config,
+            &client,
+            out_tx,
+            park_hint,
+            refresh,
+            true,
+            Some(&progress),
+        )
+        .await;
+        let result: Result<String, String> = match &outcome {
+            Ok(done) if done.report.failed == 0 => Ok(done.summary.clone()),
+            // 有失败项就是失败：平台要能一眼看出「没同步上」而不是「已完成」
+            Ok(done) => Err(done.summary.clone()),
+            Err(error) => Err(error.clone()),
+        };
+        let extra = match &outcome {
+            Ok(done) => json!({
+                "total": done.report.total,
+                "uploaded": done.report.uploaded,
+                "skipped": done.report.skipped,
+                "unchanged": done.report.unchanged,
+                "failed": done.report.failed,
+                "mode": if refresh { "refresh" } else { "incremental" },
+                // 失败原因可能很长（每张图一条），只带前几条，完整文案在 message 里
+                "errors": done.report.errors.iter().take(5).cloned().collect::<Vec<_>>(),
+            }),
+            Err(_) => json!({}),
+        };
+        send_command_result_with(out_tx, &msg, command, &result, extra).await;
+        match result {
+            Ok(note) => info!("指令 {command} 执行: {note}"),
+            Err(error) => {
+                warn!("指令 {command} 执行失败: {error}");
+                let event = DeviceEventPayload {
+                    event_type: "error".to_string(),
+                    message: format!("指令 {command} 执行失败: {error}"),
+                    data: None,
+                };
+                send(
+                    out_tx,
+                    "event",
+                    serde_json::to_value(event).unwrap_or_default(),
+                )
+                .await;
+            }
+        }
+        return;
+    }
+
     // 遥控类指令（接管 / 释放 / 急停 / 本体动作）由 teleop 模块处理，
     // 其余是业务任务指令，仍走原来的路径
     let teleop_result =
         zhpro::teleop::handle_command(&client, teleop, command, Some(&msg.payload)).await;
-
     let result: Result<String, String> = match teleop_result {
         Some(result) => result,
         None => match command {
@@ -422,31 +519,6 @@ pub(crate) async fn handle(
                     .call(T_RETURN_TO_CHARGE, json!({ "map_id": map_id }))
                     .await
                     .map(|_| "已请求返回充电点".to_string())
-            }
-            "同步地图" => {
-                // 服务端在指令里带上了台账当前园区归属（`params.params.parkId`），
-                // 显式 null 表示设备确实没绑园区，不能拿本地缓存的旧值充数
-                let outer = msg.payload.get("params");
-                let params = outer.and_then(|p| p.get("params")).or(outer);
-                let park_hint = params
-                    .and_then(|p| p.get("parkId"))
-                    .map(|value| value.as_i64());
-                // 刷新语义由服务端 `mode` / `refresh` / `onlyMissing` 共同决定：
-                // 中台按钮（manual）要求全量刷新，auto / onlyMissing 只补缺。
-                let mode = params
-                    .and_then(|p| p.get("mode"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("manual");
-                let refresh = params
-                    .and_then(|p| p.get("refresh"))
-                    .and_then(Value::as_bool)
-                    .unwrap_or_else(|| {
-                        let only_missing = params
-                            .and_then(|p| p.get("onlyMissing"))
-                            .and_then(Value::as_bool);
-                        only_missing.map(|only| !only).unwrap_or(mode != "auto")
-                    });
-                sync_maps_from_robot(config, &client, out_tx, park_hint, refresh, true).await
             }
             "下发地图" => {
                 let result =

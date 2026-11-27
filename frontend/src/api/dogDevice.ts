@@ -84,9 +84,22 @@ export const dogDeviceUnassign = (deviceIds: number[], userIds: number[]) =>
     userIds
   });
 
-/** 中台手动触发设备同步地图（经业务平台下发 `同步地图` 指令） */
-export const dogDeviceSyncMaps = (id: string | number) =>
-  http.axiosPostRequest<Result>(`/api/dogDevice/${id}/syncMaps`, {});
+/**
+ * 中台手动触发设备同步地图（经业务平台下发 `同步地图` 指令）。
+ *
+ * 它是长任务：接口只回「已下发」，传了几张 / 哪张失败由设备客户端回报，
+ * 状态用 `dogDeviceMediaSyncStatus(id, "同步地图")` 轮询。
+ * `requestId` 是幂等键，也是设备回执关联审计的键，一次点击一个值、重试复用。
+ */
+export const dogDeviceSyncMaps = (
+  id: string | number,
+  requestId?: string,
+  mode?: "manual" | "auto"
+) =>
+  http.axiosPostRequest<Result>(`/api/dogDevice/${id}/syncMaps`, {
+    requestId,
+    mode
+  });
 
 /**
  * 中台向设备下发一条指令。
@@ -135,10 +148,10 @@ export const dogDeviceRuntime = (id: string | number) =>
   http.axiosGetRequest<Result>(`/api/dogDevice/${id}/runtime`, {});
 
 /**
- * 最近一次长任务（「同步媒体」/「回传录像」）的状态（只读）。
+ * 最近一次长任务（「同步媒体」/「回传录像」/「同步地图」）的状态（只读）。
  *
- * 两条都是长任务：下发接口只回「已下发」，扫了多少 / 传了多少 / 板端目录
- * 清没清由设备客户端异步回报。设备页用它轮询，`status=pending` 表示还在跑。
+ * 三条都是长任务：下发接口只回「已下发」，扫了多少 / 传了多少 / 哪张失败由
+ * 设备客户端异步回报。设备页用它轮询，`status=pending` 表示还在跑。
  * `action` 缺省是「同步媒体」（保持老页面兼容）。
  */
 export const dogDeviceMediaSyncStatus = (

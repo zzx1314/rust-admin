@@ -27,8 +27,12 @@ const MEDIA_SYNC_ACTION: &str = "同步媒体";
 /// 「回传录像」：同一类长任务。2026-11-25 起录像不再自动回传，
 /// 板端把 mp4 攺在 `RECORD_DIR`，由中台/业务平台下发这条指令才传。
 const RECORD_SYNC_ACTION: &str = "回传录像";
+/// 「同步地图」：同样是长任务（4012 列本体地图 → 逐张从本体文件服务吞包 →
+/// 回传中台）。2026-11-27 之前中台把它当同步指令处理：一发出审计就记「成功」，
+/// 实际一张图都没上来也看不出来，所以现在与上面两条同一套进度/结论回报。
+const SYNC_MAPS_ACTION: &str = "同步地图";
 /// 长任务指令（下发后审计停在 pending，等客户端异步回报进度与结论）。
-const LONG_TASK_ACTIONS: [&str; 2] = [MEDIA_SYNC_ACTION, RECORD_SYNC_ACTION];
+const LONG_TASK_ACTIONS: [&str; 3] = [MEDIA_SYNC_ACTION, RECORD_SYNC_ACTION, SYNC_MAPS_ACTION];
 const MEDIA_SYNC_STALE_SECS: i64 = 600;
 
 /// 这条指令是不是「长任务」（下发后审计停在 pending，等客户端异步回报进度与结论）。
@@ -215,10 +219,18 @@ pub async fn list_assignable_users_handler(
 ///
 /// 中台不直连设备，而是调用业务平台内部接口，由业务平台通过设备 WebSocket
 /// 下发 `同步地图` 指令；客户端再用 4012 拉取地图列表并从文件服务下载后回传。
+///
+/// 它是**长任务**（一张图 10MB+，4G 上传十几秒，一轮可能几分钟），所以走
+/// [`forward`]：审计停在 `pending`，真实进度/结论由设备客户端回报
+/// （`command_progress` / `command_result` → 业务平台 →
+/// `POST /api/dogInternal/media/sync-status`），设备页用
+/// `GET /api/dogDevice/{id}/mediaSyncStatus?action=同步地图` 看。
+/// 回执里的 `requestId` 就是设备侧关联键，必须与下发时一致。
 pub async fn sync_device_maps_handler(
     State(state): State<AppState>,
     Extension(user): Extension<RequestUser>,
     Path(params): Path<IdParam>,
+    payload: Option<Json<SyncMapsRequest>>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     if !user.is_admin {
         return Err(AppError::AuthError(
@@ -229,17 +241,40 @@ pub async fn sync_device_maps_handler(
         .dog_device_service
         .get(params.id, &user.data_scope())
         .await?;
-    let data = deliver(
+    let (mode, request_id) = match payload {
+        Some(Json(request)) => (
+            request
+                .mode
+                .map(|mode| mode.trim().to_string())
+                .filter(|mode| !mode.is_empty())
+                .unwrap_or_else(|| "manual".to_string()),
+            resolve_request_id(request.request_id),
+        ),
+        None => ("manual".to_string(), resolve_request_id(None)),
+    };
+    let data = forward(
         &state,
         &user,
         &device.device_id,
+        SYNC_MAPS_ACTION,
         "sync-maps",
-        "同步地图",
-        "",
-        json!({ "mode": "manual" }),
+        &request_id,
+        json!({ "mode": mode }),
     )
     .await?;
     Ok(Json(ApiResponse::ok(data)))
+}
+
+/// 中台手动触发地图同步的请求体（字段都可省，老前端直接发 `{}`）。
+#[derive(Debug, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncMapsRequest {
+    /// `manual`（默认，全量刷新）/ `auto`（只补平台没有的图）
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// 幂等键：页面每次点击生成一个，设备回报按它关联审计
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 /// 幂等键：调用方未指定时由中台生成一个，重试需原样回传。
@@ -426,6 +461,8 @@ pub(crate) async fn forward(
                         Some(&data.to_string()),
                         Some(if action == RECORD_SYNC_ACTION {
                             "已下发，等待设备客户端回传录像"
+                        } else if action == SYNC_MAPS_ACTION {
+                            "已下发，等待设备客户端回报同步结果（本体地图 → 中台）"
                         } else {
                             "已下发，等待设备客户端回传同步结果"
                         }),

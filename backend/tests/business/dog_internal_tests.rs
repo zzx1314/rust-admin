@@ -364,6 +364,109 @@ async fn media_sync_status_report_updates_only_its_own_audit() {
     assert_eq!(wrong_action.status(), 400);
 }
 
+/// 「同步地图」也是长任务：发给它的进度/结论要能写进它自己的审计行。
+///
+/// 2026-11-27 现场：中台点「同步地图」后审计立刻是「成功」，设备其实一张图都没传
+/// （客户端 TLS 客户端构造失败），设备页看不出任何异常。这条用例守住两件事：
+/// ①「同步地图」被认作长任务，回报能落库；② 指令名对不上仍然拒。
+#[tokio::test]
+async fn map_sync_status_report_updates_its_own_audit() {
+    let state = test_state(Some(TOKEN)).await;
+    for (request_id, action) in [
+        ("req-map-sync-1", "同步地图"),
+        ("req-media-2", "同步媒体"),
+    ] {
+        state
+            .dog_device_service
+            .begin_command(NewCommandAudit {
+                user_id: 1,
+                username: "admin",
+                device_code: "RD-300",
+                action,
+                request_id,
+                params: None,
+            })
+            .await
+            .expect("写入 pending 审计");
+    }
+    let base = spawn_zentai(state.clone()).await;
+    let url = format!("{base}/api/dogInternal/media/sync-status");
+    let client = reqwest::Client::new();
+    let report = |body: Value| {
+        let client = client.clone();
+        let url = url.clone();
+        async move {
+            client
+                .post(&url)
+                .header("x-service-token", TOKEN)
+                .json(&body)
+                .send()
+                .await
+                .expect("请求成功但状态码异常")
+        }
+    };
+
+    // 进度：审计仍是 pending，只刷新文案（设备页显示「已处理 2/5 张」）
+    let running = report(json!({
+        "deviceCode": "RD-300",
+        "action": "同步地图",
+        "requestId": "req-map-sync-1",
+        "status": "running",
+        "message": "同步中：已处理 2/5 张（新增/更新 1）",
+        "detail": {"running": true, "done": 2, "total": 5},
+    }))
+    .await;
+    assert_eq!(running.status(), 200);
+    let record = state
+        .dog_device_service
+        .find_command("req-map-sync-1")
+        .await
+        .expect("查询审计")
+        .expect("审计存在");
+    assert_eq!(record.status, audit::STATUS_PENDING);
+    assert!(record.message.unwrap_or_default().contains("2/5"));
+
+    // 结论：失败也要落库（哪张图失败、为什么，就是靠这里的 message）
+    let done = report(json!({
+        "deviceCode": "RD-300",
+        "action": "同步地图",
+        "requestId": "req-map-sync-1",
+        "status": "failed",
+        "message": "地图刷新完成：共 5 张，新增/更新 0，失败 5；失败原因：2026_11_27_09_54_17: 登录业务服务失败",
+        "detail": {"total": 5, "uploaded": 0, "failed": 5},
+    }))
+    .await;
+    assert_eq!(done.status(), 200);
+    let record = state
+        .dog_device_service
+        .find_command("req-map-sync-1")
+        .await
+        .expect("查询审计")
+        .expect("审计存在");
+    assert_eq!(record.status, audit::STATUS_FAILED);
+    assert!(
+        record
+            .message
+            .unwrap_or_default()
+            .contains("2026_11_27_09_54_17"),
+        "失败原因要留在审计里，设备页才说得清哪张没上来"
+    );
+    let detail: Value =
+        serde_json::from_str(&record.result.unwrap_or_default()).expect("细节是 JSON");
+    assert_eq!(detail["failed"], 5);
+
+    // 指令名对不上（拿「同步地图」的 requestId 报「同步媒体」）→ 拒绝
+    let mismatched = report(json!({
+        "deviceCode": "RD-300",
+        "action": "同步媒体",
+        "requestId": "req-map-sync-1",
+        "status": "succeeded",
+        "message": "不该生效",
+    }))
+    .await;
+    assert_eq!(mismatched.status(), 400);
+}
+
 #[tokio::test]
 async fn map_upload_lands_in_dog_map_with_owner() {
     let state = test_state(Some(TOKEN)).await;

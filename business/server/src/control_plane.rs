@@ -195,7 +195,8 @@ async fn handle_request(state: &AppState, payload: &Value) -> Result<Value, AppE
         "runtime" => service::runtime_snapshot(state, device_code).await,
         "sync-maps" => {
             let mode = payload["body"]["mode"].as_str().unwrap_or("manual");
-            service::apply_sync_maps(state, device_code, mode).await
+            // 中台 requestId 透传给设备，客户端回报进度/结论时带回来
+            service::apply_sync_maps(state, device_code, mode, &meta.request_id).await
         }
         "task" => {
             let body: TaskDispatchRequest = serde_json::from_value(payload["body"].clone())

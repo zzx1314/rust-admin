@@ -561,11 +561,16 @@ pub(crate) async fn run_client(
                         false,
                         // 没变化就不发事件，有新增/失败才发
                         false,
+                        // 后台轮询不上报进度（没有中台 requestId）
+                        None,
                     )
                     .await;
                     match result {
-                        Ok(summary) => info!("定时地图同步结束: {summary}"),
-                        Err(error) => warn!("定时地图同步有失败项: {error}"),
+                        Ok(done) if done.report.failed > 0 => {
+                            warn!("定时地图同步有失败项: {}", done.summary)
+                        }
+                        Ok(done) => info!("定时地图同步结束: {}", done.summary),
+                        Err(error) => warn!("定时地图同步失败: {error}"),
                     }
                 });
             }

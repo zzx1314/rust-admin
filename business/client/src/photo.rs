@@ -201,10 +201,7 @@ impl Photographer {
                 .timeout(CAPTURE_TIMEOUT)
                 .build()
                 .unwrap_or_default(),
-            upload_client: crate::tls::http_builder()
-                .timeout(UPLOAD_TIMEOUT)
-                .build()
-                .unwrap_or_default(),
+            upload_client: crate::tls::platform_client(UPLOAD_TIMEOUT),
             state: Mutex::new(State::default()),
             uploading: AtomicBool::new(false),
         }

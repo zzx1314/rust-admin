@@ -594,6 +594,21 @@ pub async fn synced_sources(
         .unwrap_or_default())
 }
 
+/// 一轮地图同步的进度（每处理完一张回调一次）。
+///
+/// 4G 上一张图（10MB+）要传十几秒，中台设备页不能干等最终结论：
+/// 下发「同步地图」后审计停在 `pending`，这里每张结束就上报「已处理 2/5（失败 0）」。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct MapSyncProgress {
+    pub total: usize,
+    pub done: usize,
+    pub uploaded: usize,
+    pub failed: usize,
+}
+
+/// 进度回调（同步地图是长任务，没法等 `command_result` 才知道进展）。
+pub type MapSyncProgressFn<'a> = &'a (dyn Fn(MapSyncProgress) + Send + Sync);
+
 /// 同步地图：按 4012 返回的地图列表逐张处理。
 ///
 /// - 增量（`cfg.refresh == false`，设备定时轮询用）：只补业务库没有的图，
@@ -609,11 +624,23 @@ pub async fn sync_robot_maps(
     cfg: &IngestConfig,
     file_base: &str,
     maps: &[RobotMap],
+    progress: Option<MapSyncProgressFn<'_>>,
 ) -> SyncReport {
     let mut report = SyncReport {
         total: maps.len(),
         refresh: cfg.refresh,
         ..Default::default()
+    };
+    let mut done = 0usize;
+    let notify = |report: &SyncReport, done: usize| {
+        if let Some(progress) = progress {
+            progress(MapSyncProgress {
+                total: report.total,
+                done,
+                uploaded: report.uploaded,
+                failed: report.failed,
+            });
+        }
     };
     // 刷新模式不预检：已同步列表只能告诉「平台有没有这张图」，
     // 回答不了「本体上的图变没变」，还是要逐张比对内容指纹。
@@ -635,6 +662,8 @@ pub async fn sync_robot_maps(
         if synced.iter().any(|source| source == &map.path) {
             report.skipped += 1;
             info!("地图 {} 已同步过，跳过", map.path);
+            done += 1;
+            notify(&report, done);
             continue;
         }
         let package = match fetch_map_package(http, file_base, &map.map_id, Some(&map.path)).await {
@@ -642,6 +671,8 @@ pub async fn sync_robot_maps(
             Err(error) => {
                 report.failed += 1;
                 report.errors.push(format!("{}: {error}", map.map_id));
+                done += 1;
+                notify(&report, done);
                 continue;
             }
         };
@@ -676,6 +707,8 @@ pub async fn sync_robot_maps(
                 report.errors.push(format!("{}: {reason}", map.map_id));
             }
         }
+        done += 1;
+        notify(&report, done);
     }
     report
 }
@@ -683,12 +716,12 @@ pub async fn sync_robot_maps(
 /// 构造一个适合长时间传输地图的 HTTP 客户端
 ///
 /// 回传目标是**平台** API：平台只开 https 入口时要带 `server.tls_ca` 钉的信任根
-/// （见 `src/tls.rs`），所以必须走 `crate::tls::http_builder()`。
+/// （见 `src/tls.rs`），所以必须走 [`crate::tls::platform_client`]——
+/// ⛔ 不要再写 `.build().unwrap_or_default()`：TLS 配置一旦没生效，兜底出来的客户端
+/// 连 https 都发不出去，同步地图只会报「登录业务服务失败: error sending request」
+/// （2026-11-27 现场就是这么把所有地图同步搞挂的）。
 pub fn build_http_client() -> reqwest::Client {
-    crate::tls::http_builder()
-        .timeout(Duration::from_secs(180))
-        .build()
-        .unwrap_or_default()
+    crate::tls::platform_client(Duration::from_secs(180))
 }
 
 /// 本体文件服务基地址：显式配置优先，否则由 `--robot` 推导

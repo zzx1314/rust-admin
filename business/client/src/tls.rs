@@ -183,12 +183,33 @@ pub fn ws_connector() -> Option<Connector> {
 /// 平台侧 HTTP 客户端构造器（回传录像 / 同步媒体 / 照片 / 地图上传都走它）。
 ///
 /// 没配 `server.tls_ca` 时与 `reqwest::Client::builder()` 完全等价，行为不变。
+///
+/// ⛔ **不要把 config 包成 `Some(config)`**：`use_preconfigured_tls` 自己会包一层
+/// `Option`（内部按 `Option<rustls::ClientConfig>` 做 downcast），再包一次就
+/// downcast 失败 → `build()` 报 `Unknown TLS backend passed to use_preconfigured_tls`；
+/// 调用方以前用 `.build().unwrap_or_default()` 兜底，等于退回一个**没有 TLS 后端**的
+/// 客户端，之后所有 `https://` 请求都只报一句 `error sending request for url`。
+/// 2026-11-26 20:06 之后同步地图 / 同步媒体 / 回传录像 / 照片上传全挂在这上面
+/// （现场表现就是「点了同步地图，中台一直没图、也不报错」）。
 pub fn http_builder() -> reqwest::ClientBuilder {
     let builder = reqwest::Client::builder();
     match config() {
-        Some(config) => builder.use_preconfigured_tls(Some((*config).clone())),
+        Some(config) => builder.use_preconfigured_tls((*config).clone()),
         None => builder,
     }
+}
+
+/// 到平台的 HTTP 客户端（带超时），**构建失败直接炸**。
+///
+/// 以前各处写的是 `crate::tls::http_builder().timeout(..).build().unwrap_or_default()`：
+/// 一旦 TLS 配置没生效，兜底出来的客户端连 https 都发不出去，而报错只剩
+/// `error sending request`，现场根本查不到原因。宁可启动/执行时炸出清楚的原因。
+pub fn platform_client(timeout: std::time::Duration) -> reqwest::Client {
+    http_builder().timeout(timeout).build().unwrap_or_else(|error| {
+        panic!(
+            "构造平台 HTTP 客户端失败：{error}（TLS 配置没有生效，检查 server.tls_ca / tls::http_builder）"
+        )
+    })
 }
 
 #[cfg(test)]
@@ -253,6 +274,30 @@ mod tests {
 
     /// 现场那张证书是「CA 和 leaf 同一张」（`CA:TRUE`），webpki 会拿
     /// `CaUsedAsEndEntity` 拒掉——所以必须靠钉死这条路过（2026-11-26 20:05 现场）。
+    /// 回归 2026-11-27：`use_preconfigured_tls` 必须收到**裸的** `rustls::ClientConfig`。
+    ///
+    /// 以前传的是 `Some(config)`，reqwest 内部再包一层 `Option` 后 downcast 打不中，
+    /// `build()` 直接报 `Unknown TLS backend`；调用方的 `.unwrap_or_default()` 把它
+    /// 变成一个没有 TLS 后端的客户端，所有 https 请求只报 `error sending request`
+    /// → 现场「同步地图」连登录都过不去（2026-11-26 20:06 ~ 11-27 11:47 全量失败）。
+    #[test]
+    fn preconfigured_tls_accepts_the_bare_client_config() {
+        let dir = std::env::temp_dir().join(format!("tls-reqwest-{}", std::process::id()));
+        let pem = openssl_self_signed(&dir, "39.107.55.13", "39.107.55.13");
+        if pem.is_empty() {
+            eprintln!("跳过：本机没有 openssl");
+            return;
+        }
+        let path = dir.join("platform.crt");
+        write_pem(&path, &pem);
+        let config = build(&path).expect("自签证书应当能钉");
+        reqwest::Client::builder()
+            .use_preconfigured_tls(config)
+            .build()
+            .expect("预置 TLS 配置必须能被 reqwest 接受（不能包成 Some）");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn ca_used_as_end_entity_is_accepted_only_when_pinned() {
         let dir = std::env::temp_dir().join(format!("tls-selftest-{}", std::process::id()));

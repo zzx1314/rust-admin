@@ -21,13 +21,34 @@ pub struct CommandResult {
 pub type CommandResultWaiters = Arc<Mutex<HashMap<String, oneshot::Sender<CommandResult>>>>;
 pub type CommandResultReceiver = oneshot::Receiver<CommandResult>;
 
-/// 长任务（目前是「同步媒体」与「回传录像」）的进度文案。
+/// 长任务（「同步媒体」/「回传录像」/「同步地图」）的进度文案。
 ///
 /// 中台设备页直接展示 `message`，所以这里把「已传 / 总数 / 第几个包」拼成一句
-/// 人看得懂的话；单位按指令区分（图片论「张」、录像论「段」）。
+/// 人看得懂的话；单位按指令区分（图片论「张」、录像论「段」、地图论「张」）。
 pub(crate) fn long_task_progress_text(
     payload: &crate::gateway_types::CommandProgressPayload,
 ) -> String {
+    // 「同步地图」是逐张处理（4012 列目录 → 下载 → 回传），不是「上传」，
+    // 所以用它自己的计数与文案，别让设备页显示「已上传 0/5 张」而实际在处理。
+    if payload.command == "同步地图" {
+        let done = if payload.done > 0 {
+            payload.done
+        } else {
+            payload.uploaded
+        };
+        let mut text = if payload.total > 0 {
+            format!("同步中：已处理 {done}/{} 张", payload.total)
+        } else {
+            format!("同步中：已处理 {done} 张")
+        };
+        if payload.uploaded > 0 {
+            text.push_str(&format!("（新增/更新 {}）", payload.uploaded));
+        }
+        if payload.failed > 0 {
+            text.push_str(&format!("，失败 {} 张", payload.failed));
+        }
+        return text;
+    }
     let total = payload.total;
     let uploaded = payload.uploaded;
     let unit = if payload.command == "回传录像" {
@@ -57,7 +78,7 @@ pub(crate) fn long_task_progress_text(
     text
 }
 
-/// 把长任务（「同步媒体」/「回传录像」）的最终结果回报给中台审计
+/// 把长任务（「同步媒体」/「回传录像」/「同步地图」）的最终结果回报给中台审计
 /// （异步后台跑，不堵 WS 循环）。`action` 让中台能核对「这条回执属于哪条指令」。
 pub(crate) fn report_long_task_to_zentai(
     state: &AppState,
@@ -95,6 +116,7 @@ pub(crate) fn long_task_progress_body(
             "uploaded": payload.uploaded,
             "failed": payload.failed,
             "total": payload.total,
+            "done": payload.done,
             "batchesDone": payload.batches_done,
             "batchesTotal": payload.batches_total,
         },
@@ -408,6 +430,29 @@ mod tests {
         .expect("进度应能解析");
         let text = long_task_progress_text(&media);
         assert!(text.contains("同步中：已上传 8/24 张"), "{text}");
+    }
+
+    /// 「同步地图」是逐张处理（4012 列表 → 下载 → 回传），进度文案用「已处理 n/m 张」，
+    /// 不能沿用「已上传」（否则设备页一直显示「已上传 0/5」，实际在处理）。
+    #[test]
+    fn map_sync_progress_text_counts_processed_maps() {
+        let payload = serde_json::from_value::<crate::gateway_types::CommandProgressPayload>(
+            json!({
+                "requestId": "req-map",
+                "command": "同步地图",
+                "uploaded": 1,
+                "failed": 0,
+                "total": 5,
+                "done": 2,
+            }),
+        )
+        .expect("进度应能解析");
+        let text = long_task_progress_text(&payload);
+        assert!(text.contains("已处理 2/5 张"), "{text}");
+        assert!(text.contains("新增/更新 1"), "{text}");
+        let body = long_task_progress_body("DOG-1", &payload);
+        assert_eq!(body["action"], "同步地图");
+        assert_eq!(body["detail"]["done"], 2);
     }
 
     /// 进度回写中台要带指令名：中台按它核对这条回执属于哪一条审计。

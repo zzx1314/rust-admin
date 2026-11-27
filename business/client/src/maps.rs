@@ -290,12 +290,23 @@ pub(crate) async fn push_map_to_body(
     ))
 }
 
+/// 一轮地图同步的结果：给平台回执用的文案 + 结构化统计。
+///
+/// 中台「同步地图」现在按长任务处理（审计停在 `pending`，设备回报才出结论），
+/// 所以调用方拿得到 `report` 才能把「共几张 / 传了几张 / 哪几张失败」写回调执。
+pub(crate) struct MapSyncOutcome {
+    pub summary: String,
+    pub report: mapupload::SyncReport,
+}
+
 /// 同步本体地图到平台。
 ///
 /// - `refresh`：`true` = 中台/控制台显式「同步地图」，要求把本体最新图全部刷上去（内容未变的仍会跳过）；
 ///   `false` = 设备定时轮询，只补平台没有的图，**绝不覆盖已有记录**。
 /// - `announce`：为 `false` 时不往事件流里发「无事可做」汇总，避免轮询每十分钟刷一条；
 ///   新增/更新/失败仍然会发，运维能看到实际动作。
+/// - `progress`：中台手动触发时上报「已处理 n/m」（设备页看得到进度，不用干等）。
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn sync_maps_from_robot(
     config: &Config,
     client: &Arc<ZhProClient>,
@@ -303,7 +314,8 @@ pub(crate) async fn sync_maps_from_robot(
     park_hint: Option<Option<i64>>,
     refresh: bool,
     announce: bool,
-) -> Result<String, String> {
+    progress: Option<mapupload::MapSyncProgressFn<'_>>,
+) -> Result<MapSyncOutcome, String> {
     // 服务端下发的园区优先；没有就用本地配置 / 注册回执里的绑定
     let park_id = match park_hint {
         Some(park_id) => park_id,
@@ -343,7 +355,7 @@ pub(crate) async fn sync_maps_from_robot(
         bind: false,
         refresh,
     };
-    let report = mapupload::sync_robot_maps(&http, &ingest, &file_base, &maps).await;
+    let report = mapupload::sync_robot_maps(&http, &ingest, &file_base, &maps, progress).await;
     let summary = report.summary();
     if announce || report.has_changes() {
         let event = DeviceEventPayload {
@@ -367,11 +379,7 @@ pub(crate) async fn sync_maps_from_robot(
     } else {
         debug!("定时同步无变化: {summary}");
     }
-    if report.failed > 0 {
-        Err(summary)
-    } else {
-        Ok(summary)
-    }
+    Ok(MapSyncOutcome { summary, report })
 }
 
 #[cfg(test)]

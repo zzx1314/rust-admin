@@ -61,15 +61,23 @@ pub async fn sync_device_maps(
     let mode = payload
         .and_then(|Json(request)| request.mode)
         .unwrap_or_else(|| "manual".to_string());
-    let data = apply_sync_maps(&state, &device_id, &mode).await?;
+    // 中台的 `requestId` 要原样透传给设备：客户端回报 `command_progress` /
+    // `command_result` 时靠它关联回中台那条审计，否则状态回不到设备页。
+    let meta = ControlMeta::from_headers(&headers, None);
+    let data = apply_sync_maps(&state, &device_id, &mode, &meta.request_id).await?;
     Ok(ApiResponse::ok(data))
 }
 
 /// 地图同步的实际实现：HTTP 链路与反向控制信道共用。
+///
+/// `request_id`：中台本次下发的幂等键。它会被塞进 `同步地图` 的指令参数，
+/// 客户端执行时原样带回来（`command_progress` / `command_result`），业务平台据此
+/// 回写中台审计——没有它，设备页只会看到「已下发」，同步到底成没成永远不知道。
 pub async fn apply_sync_maps(
     state: &AppState,
     device_id: &str,
     mode: &str,
+    request_id: &str,
 ) -> Result<Value, AppError> {
     let device_id = device_id.trim();
     let mode = mode.trim();
@@ -106,6 +114,8 @@ pub async fn apply_sync_maps(
             "parkId": park_id,
             "deviceId": device_id.trim(),
             "requestedAt": timestamp,
+            // 中台审计的关联键：客户端回执（进度 / 结论）原样带回来
+            "requestId": request_id.trim(),
         })),
     )
     .await;
@@ -148,6 +158,7 @@ pub async fn apply_sync_maps(
         "parkId": park_id,
         "mode": mode,
         "dispatched": true,
+        "requestId": request_id.trim(),
         "requestedAt": timestamp,
     }))
 }
