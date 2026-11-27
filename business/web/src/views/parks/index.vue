@@ -162,24 +162,36 @@ function selectableBaseline(item: MapVersion) {
 }
 
 /**
- * 编辑弹窗里展示的「本园区绑定的地图」：归属本园区的全部地图 + 当前基线。
- *
- * 下拉只展示一张「当前基线」是不够的：园区名下往往有多张地图（多个建图版本），
- * 用户编完园区就去建路线，看不到清单就以为园区只能绑一张。
+ * 园区名下**绑定的地图**：归属本园区的（`map_versions.park_id`，可含多个版本）+ 当前基线。
+ * 只用于「这个园区有哪些图」的展示与基线候选，**不再扩成下拉里的可选值**。
  */
 const editParkMaps = computed(() => mapsBoundToPark(editingPark.value?.id));
 
-/** 下拉候选：本园区名下全部未归档图（未发布的仍然列出来，只是 `:disabled`，不再凭空消失） */
-const activeMapOptions = computed(() =>
-  editParkMaps.value.filter(item => item.status !== "已归档")
+/**
+ * 能当园区基线的地图：**只有中台「已发布」的**（后端 `resolve_park_map` 同样只收这个），
+ * 外加「园区当前基线」那一条。
+ *
+ * 当前基线即使中台退回了草稿 / 部分标定也要留在候选里：否则下拉会变成空白、
+ * 保存时也认不出原值（提交同一个 id 后端是放行的，只想「保持现状」）。
+ * 未发布的其它图一律不进候选：选了也存不进去，列出来只会让人以为能绑。
+ */
+const baselineCandidates = computed(() => editParkMaps.value.filter(selectableBaseline));
+
+/** 本园区名下因「中台未发布」而不能当基线的张数（只在提示里露数，不列具体条目） */
+const unpublishedMapCount = computed(
+  () => editParkMaps.value.length - baselineCandidates.value.length
 );
+
+/** 下拉候选（与「本园区绑定的地图」清单同一份） */
+const activeMapOptions = baselineCandidates;
 
 /**
  * 设备地图：机器人回传的地图先只跟设备挂钩（`parkId` 为空），
  * 设备绑定人登录后在这里挑一张绑为本园区基线（选中即认领到本园区）。
+ * 同样只列中台「已发布」的：设备刚传上来的是「部分标定」，要等中台发布后才能选。
  */
 const deviceMapOptions = computed(() =>
-  maps.value.filter(item => !item.parkId && item.status !== "已归档")
+  maps.value.filter(item => !item.parkId && selectableBaseline(item))
 );
 
 /**
@@ -202,7 +214,7 @@ const otherParkMapOptions = computed(() => {
       item.parkId != null &&
       item.parkId !== parkId &&
       item.id !== baselineId &&
-      item.status !== "已归档"
+      selectableBaseline(item)
   );
 });
 
@@ -696,12 +708,7 @@ onMounted(load);
           <select v-model="parkForm.mapVersionId" class="select">
             <option value="">待标定 · 已登记坐标系，建图采集中（不可编排路线）</option>
             <option value="__none__">暂不绑定 · 仅资产台账（不可编排路线）</option>
-            <option
-              v-for="map in activeMapOptions"
-              :key="map.id"
-              :value="map.id"
-              :disabled="!selectableBaseline(map)"
-            >
+            <option v-for="map in activeMapOptions" :key="map.id" :value="map.id">
               {{ map.mapName }} · {{ map.id }} · {{ map.status }}
               {{ map.status === "已发布" ? "" : "（未发布·仅保持现状）" }} ·
               {{ map.parkId !== editingPark?.id ? "共用其他园区的图 · " : "" }}{{
@@ -712,12 +719,7 @@ onMounted(load);
               v-if="deviceMapOptions.length"
               label="我的设备地图 · 未归属园区（选中即绑定到本园区）"
             >
-              <option
-                v-for="map in deviceMapOptions"
-                :key="map.id"
-                :value="map.id"
-                :disabled="!selectableBaseline(map)"
-              >
+              <option v-for="map in deviceMapOptions" :key="map.id" :value="map.id">
                 {{ map.mapName }} · {{ map.id }} · {{ map.status }}
                 {{ map.status === "已发布" ? "" : "（未发布·仅保持现状）" }} ·
                 {{ map.sourceId ? `中台 #${map.sourceId}` : "无中台记录" }} ·
@@ -728,12 +730,7 @@ onMounted(load);
               v-if="otherParkMapOptions.length"
               label="我的设备地图 · 已有其他园区在用（可共用同一张）"
             >
-              <option
-                v-for="map in otherParkMapOptions"
-                :key="map.id"
-                :value="map.id"
-                :disabled="!selectableBaseline(map)"
-              >
+              <option v-for="map in otherParkMapOptions" :key="map.id" :value="map.id">
                 {{ map.mapName }} · {{ map.id }} · {{ map.status }}
                 {{ map.status === "已发布" ? "" : "（未发布·仅保持现状）" }} ·
                 {{ map.sourceId ? `中台 #${map.sourceId}` : "无中台记录" }} ·
@@ -745,10 +742,10 @@ onMounted(load);
           <!-- 园区名下可以有多张地图（多个建图版本）：只给一个基线下拉看不出家底 -->
           <div v-if="editingPark" class="bound-maps">
             <div class="bm-head">
-              <b>本园区绑定的地图</b>
-              <span class="tag blue">{{ editParkMaps.length }} 张</span>
+              <b>本园区可用的地图</b>
+              <span class="tag blue">{{ baselineCandidates.length }} 张</span>
               <span class="bm-hint">
-                基线只有一个（路线未指定地图时的兜底）；路线创建时可选本园区任意一张
+                只列中台「已发布」的图（业务平台不维护地图状态）；路线创建时可选本园区任意一张
               </span>
               <button class="btn sm ghost" @click="openParkMaps(editingPark)">
                 <AppIcon name="grid" />查看全部
@@ -756,7 +753,7 @@ onMounted(load);
             </div>
             <div v-if="editParkMaps.length" class="bm-list">
               <div
-                v-for="map in editParkMaps"
+                v-for="map in baselineCandidates"
                 :key="map.id"
                 class="bm-row"
                 :class="{ on: parkForm.mapVersionId === map.id }"
@@ -775,16 +772,16 @@ onMounted(load);
                 <span v-else-if="map.parkId !== editingPark?.id" class="tag orange">共用</span>
                 <button
                   class="btn sm ghost"
-                  :disabled="parkForm.mapVersionId === map.id || map.status !== '已发布'"
-                  :title="
-                    map.status !== '已发布'
-                      ? '只有中台「已发布」的地图能当园区基线'
-                      : '设为园区基线（保存后生效）'
-                  "
+                  :disabled="parkForm.mapVersionId === map.id"
+                  title="设为园区基线（保存后生效）"
                   @click="pickBaseline(map)"
                 >
                   设为基线
                 </button>
+              </div>
+              <div v-if="unpublishedMapCount > 0" class="bm-hint" style="padding: 0 8px">
+                另有 {{ unpublishedMapCount }} 张本园区的地图是中台「草稿 / 部分标定」，
+                发布后才能设为基线（可在「查看全部」里看到明细）。
               </div>
             </div>
             <div v-else class="rt-hint" style="margin-top: 8px">
