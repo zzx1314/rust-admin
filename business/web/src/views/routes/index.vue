@@ -902,7 +902,9 @@ function onCanvasClick(event: MouseEvent) {
   selType.value = "point";
   activeTab.value = "point";
   selIdx.value = draft.value.data.points.length - 1;
-  ElMessage.success(`已添加航点 P${selIdx.value + 1}，并自动生成行进航段`);
+  // 新增航点 / 航段都只建壳：采集动作（拍照 / 录像 / AI 识别 / 播报 …）由操作员
+  // 在右侧「添加航点动作 / 添加行进任务」里自己配，平台不再预置
+  ElMessage.success(`已添加航点 P${selIdx.value + 1}，并自动生成行进航段；点动作 / 段任务请手动添加`);
 }
 
 function onPointDown(event: PointerEvent, index: number) {
@@ -1032,13 +1034,14 @@ function timelineSteps() {
 async function persist(silent = true) {
   if (!draft.value) return null;
   // 下面两段是服务端要求的规范化（闭环必须有返航段）：属于「补数据」不是用户改动，
-  // 不能让它再触发一次自动保存
+  // 不能让它再触发一次自动保存。返航段只补壳（速度为默认值、动作留空），
+  // 不要预置「静默通行」之类的东西——动作一律等操作员在右侧自己加。
   withoutAutoSave(() => {
     if (!draft.value) return;
     if (draft.value.data.loop === "闭环" && !draft.value.data.returnLeg) {
       draft.value.data.returnLeg = {
         speed: draft.value.defaultSpeed,
-        actions: [{ type: "静默通行", param: "返航不采集" }]
+        actions: []
       };
     }
     if (draft.value.data.loop !== "闭环") {

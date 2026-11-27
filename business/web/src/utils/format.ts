@@ -272,22 +272,18 @@ export function newPoint(index: number, x: number, y: number): RoutePoint {
     dwell: 5,
     // 到点机身偏航角（度）：0° = 地图 +X；下发成本体路径点 orientation 的 yaw
     heading: 0,
-    actions: [
-      {
-        type: "可见光拍照",
-        param: "1080P / 广角 / 单帧",
-        trigger: "到达即执行",
-        threshold: "—",
-        retry: 1
-      }
-    ]
+    // 新航点**不带默认动作**（以前这里预置「可见光拍照」、`newLeg` 预置「录像采集」，
+    // 结果每点一下地图就多拍一张照、每加一段就多录一段，现场既费带宽又费磁盘）。
+    // 要采集由操作员在右侧「添加航点动作 / 添加行进任务」里自己加。
+    actions: []
   };
 }
 
 export function newLeg(speed: number): RouteLeg {
   return {
     speed,
-    actions: [{ type: "录像采集", param: "1080P / 25fps / 连续" }]
+    // 同上：新航段默认静默通行（空动作），不预置录像
+    actions: []
   };
 }
 
