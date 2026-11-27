@@ -36,8 +36,7 @@ import {
   SPEAK_LEG_DEFAULT_SECS,
   SPEAK_MAX_CHARS,
   SPEAK_MAX_SECS,
-  SPEAK_PRESETS,
-  TRIGGERS
+  SPEAK_PRESETS
 } from "@/utils/constants";
 import { normalizeSpeakText } from "@/utils/speak";
 import {
@@ -132,7 +131,7 @@ const routeForm = reactive({
 const actionForm = reactive({
   type: "可见光拍照",
   param: "",
-  trigger: "到达即执行",
+  // 动作一律**到点执行**（2026-02 起表单不再提供「触发时机」，见 saveAction 里的 trigger）
   threshold: "—",
   retry: 1,
   /** AI 识别：从「实时视频」同一份模型目录里选的模型包 / 类别 / 置信度 */
@@ -1313,7 +1312,6 @@ function openActionDialog(kind: "point" | "leg", index: number | null = null) {
     Object.assign(actionForm, {
       type: RETIRED_ACTION_REPLACEMENTS[existing.type] ?? existing.type,
       param: existing.param ?? "",
-      trigger: existing.trigger ?? "到达即执行",
       threshold: existing.threshold ?? "—",
       retry: existing.retry ?? 1,
       scene: existing.scene ?? "",
@@ -1353,7 +1351,6 @@ function openActionDialog(kind: "point" | "leg", index: number | null = null) {
   Object.assign(actionForm, {
     type,
     param: meta.param,
-    trigger: meta.trigger ?? "到达即执行",
     threshold: meta.threshold ?? "—",
     retry: 1,
     scene: "",
@@ -1382,7 +1379,6 @@ function openActionDialog(kind: "point" | "leg", index: number | null = null) {
 function syncActionDefaults() {
   const meta = actionMeta(actionForm.type);
   actionForm.param = meta.param;
-  actionForm.trigger = meta.trigger ?? "到达即执行";
   actionForm.threshold = meta.threshold ?? "—";
   actionForm.scene = "";
   actionForm.labels = [];
@@ -1506,7 +1502,9 @@ function saveAction() {
     param: actionParamPreview.value,
     ...(actionKind.value === "point"
       ? {
-          trigger: actionForm.trigger,
+          // 触发时机固定：客户端收到 5009 到点就按序执行（表单已不再提供选择，
+          // 原来那四项「到达即执行 / 停留后执行 / 条件触发 / 定时执行」没人读）
+          trigger: "到达即执行",
           threshold: ai
             ? `置信度 ≥ ${(Number(actionForm.aiConf) || 0.35).toFixed(2)}`
             : actionForm.threshold,
@@ -2546,12 +2544,6 @@ onBeforeUnmount(() => {
           </template>
         </div>
         <template v-if="actionKind === 'point'">
-          <div class="field">
-            <label>触发时机</label>
-            <select v-model="actionForm.trigger" class="select">
-              <option v-for="trigger in TRIGGERS" :key="trigger">{{ trigger }}</option>
-            </select>
-          </div>
           <div v-if="!isAiAction && showThresholdField" class="field">
             <label>告警阈值</label>
             <input v-model="actionForm.threshold" class="input" />

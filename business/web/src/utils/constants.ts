@@ -2,6 +2,12 @@ export interface ActionMeta {
   icon: string;
   tone: string;
   param: string;
+  /**
+   * 语义备注：这类动作用什么时机执行。
+   *
+   * 表单里**不再提供「触发时机」下拉**（动作一律到点执行，客户端也只认 5009 到点；
+   * 以前那四项 到达即执行 / 停留后执行 / 条件触发 / 定时执行 没有任何地方读）。
+   */
   trigger?: string;
   threshold?: string;
   /**
@@ -226,7 +232,6 @@ export const RETIRED_ACTION_REPLACEMENTS: Record<string, string> = {
   全程录像: "录像采集"
 };
 
-export const TRIGGERS = ["到达即执行", "停留后执行", "条件触发", "定时执行"];
 export const DEVICE_MODELS = ["X30-Pro", "Lite-S", "X30-Standard"];
 export const PARK_TYPES = ["生产制造", "仓储物流", "研发办公", "综合园区"];
 export const ZONE_TYPES = ["生产区", "仓储区", "周界", "办公区", "公共区", "地下", "作业区"];
