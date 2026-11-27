@@ -125,6 +125,11 @@ impl IngestRequest {
 pub struct ZentaiMap {
     pub id: i64,
     pub map_name: String,
+    /// 中台记录上的版本号（`v1.0` / `v1.1`）。
+    ///
+    /// 中台为「已发布」地图新建版本时会在这里返回新版本号，业务平台要跟着用它，
+    /// 否则业务库里一张 `v1.1` 的图会被写成 `v1.0`，版本号与中台对不上。
+    pub map_version: Option<String>,
     pub file_name: Option<String>,
 }
 
@@ -215,11 +220,18 @@ pub async fn push_to_zentai(
         .get("fileName")
         .and_then(Value::as_str)
         .map(str::to_string);
+    let map_version = data
+        .get("mapVersion")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
 
     info!("地图已上传中台: dog_map.id={id} name={map_name}");
     Ok(ZentaiMap {
         id,
         map_name,
+        map_version,
         file_name,
     })
 }

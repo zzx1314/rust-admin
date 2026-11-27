@@ -289,57 +289,67 @@ pub async fn map_refs(
     }))
 }
 
+/// 业务平台不再维护地图状态：状态（草稿 / 部分标定 / 已发布 / 已归档）只在中台改，
+/// 业务库靠 `sync_map_statuses` 照搬。所以这里的「发布」只剩一个含义：
+/// **把一张中台已发布的地图设为园区当前基线**。
+///
+/// 以前这里会自己 `UPDATE status='已发布'` 并把同园区其他已发布图归档，
+/// 于是出现了「中台已发布 + 业务已归档」两套生命周期（两边的图表数量永远对不上）。
+/// 归档同图旧版本的动作搬到了中台 `publish`（见 `dog/map/service.rs`）。
 pub async fn publish_map(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<MapVersion>>, AppError> {
+    // 先按中台最新状态刷一次，避免刚在中台发布、业务库还停在上一个状态
+    if let Err(error) = sync_map_statuses(&state).await {
+        tracing::warn!("发布前同步中台地图状态失败，按业务库快照判定: {error}");
+    }
     let map = fetch_map(&state, &id).await?;
-    if map.status == "已归档" {
-        return Err(AppError::BadRequest(
-            "已归档的地图基线不能重新发布".to_string(),
-        ));
+    if map.status.trim() != "已发布" {
+        return Err(AppError::BadRequest(format!(
+            "地图「{}」当前状态为 {}：地图状态由中台统一管理，请先在中台「发布基线」，\
+             业务平台会自动同步状态后再绑定",
+            map.map_name, map.status
+        )));
     }
     let timestamp = now();
-    let mut transaction = state.db.begin().await?;
-    sqlx::query(
-        "UPDATE map_versions SET status = '已归档'
-         WHERE park_id = ?1 AND id <> ?2 AND status = '已发布'",
-    )
-    .bind(map.park_id)
-    .bind(&id)
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query("UPDATE map_versions SET status = '已发布', published_at = ?1 WHERE id = ?2")
-        .bind(&timestamp)
-        .bind(&id)
-        .execute(&mut *transaction)
-        .await?;
     if let Some(park_id) = map.park_id {
-        let park_status = if map.status == "部分标定" {
-            "部分标定"
-        } else {
-            "已标定"
-        };
         sqlx::query(
-            "UPDATE parks SET map_version_id = ?1, map_status = ?2, updated_at = ?3 WHERE id = ?4",
+            "UPDATE parks SET map_version_id = ?1, map_status = '已标定', updated_at = ?2 WHERE id = ?3",
         )
         .bind(&id)
-        .bind(park_status)
         .bind(&timestamp)
         .bind(park_id)
-        .execute(&mut *transaction)
+        .execute(&state.db)
         .await?;
     }
-    transaction.commit().await?;
     Ok(ApiResponse::ok(fetch_map(&state, &id).await?))
 }
 
+/// 派生新版本（本地地图专用）。
+///
+/// 有中台链接的图不再允许在业务平台派生：版本由中台在「同步地图」时自动创建
+/// （已发布 → 新建版本，未发布 → 原地更新），业务平台派生只会造出一行
+/// 「中台没有对应」的占位行（`2026_11_23_10_49_02@v1.1` 就是这么来的）。
 pub async fn new_map_version(
     State(state): State<AppState>,
     Path(id): Path<String>,
     payload: Option<Json<MapVersionRequest>>,
 ) -> Result<Json<ApiResponse<MapVersion>>, AppError> {
     let map = fetch_map(&state, &id).await?;
+    if map
+        .source_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+    {
+        return Err(AppError::BadRequest(format!(
+            "地图「{}」是中台地图 #{}：版本由中台在同步时自动创建（已发布 → 新建版本，\
+             未发布 → 原地更新），业务平台不再派生本地版本",
+            map.map_name,
+            map.source_id.clone().unwrap_or_default()
+        )));
+    }
     let payload = payload.map(|Json(value)| value);
     let timestamp = now();
     let version = bump_version(&map.version);

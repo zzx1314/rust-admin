@@ -205,7 +205,8 @@ impl DogMapService {
             )));
         }
 
-        self.repo
+        let published = self
+            .repo
             .update_status(
                 id,
                 MAP_STATUS_PUBLISHED,
@@ -214,7 +215,28 @@ impl DogMapService {
             )
             .await
             .map_err(AppError::DatabaseError)?
-            .ok_or_else(|| AppError::NotFound(format!("Map with id {} not found", id)))
+            .ok_or_else(|| AppError::NotFound(format!("Map with id {} not found", id)))?;
+
+        // 发布 = 这张**本体图**的新版本生效：同一台设备上报的同名地图，旧已发布版本
+        // 退役成「已归档」。这一步以前在业务平台做（`publish_map` 归档同园区旧图），
+        // 状态改由中台统一决定后搬到这里，业务平台只照搬结果。
+        let archived = self
+            .repo
+            .archive_published_siblings(
+                id,
+                published.device_code.as_deref(),
+                &published.map_name,
+                scope,
+            )
+            .await
+            .map_err(AppError::DatabaseError)?;
+        if archived > 0 {
+            tracing::info!(
+                "发布地图 #{id}（{}）：旧版本已归档 {archived} 条",
+                published.map_name
+            );
+        }
+        Ok(published)
     }
 
     /// 基于当前版本派生下一个版本，**保持为草稿**（可继续编辑 / 覆盖地图包）。
@@ -436,18 +458,41 @@ impl DogMapService {
         let map_width = i32::try_from(parsed.width).ok();
         let map_height = i32::try_from(parsed.height).ok();
 
-        // 原地覆盖（业务平台「同步地图」刷新）时先校验状态，再落盘：
-        // 已发布 / 已归档不可改包，与橡皮擦同一套规则（草稿 + 部分标定可编辑）。
+        // 遥控器 / 设备「同步地图」带 `id` 时走两条路（状态由中台统一决定）：
+        // - 草稿 / 部分标定：原地换包，还是同一版本（改的是「还没定稿」的图）；
+        // - 已发布 / 已归档：已发布版本不可变，**自动新建下一个版本**（`部分标定`，
+        //   等中台发布）。以前这里直接 400 逼现场先手动派生版本再刷新，结果每次都
+        //   卡在「派生 → 还是被拒 → 再派生」，中台里堆了 16 条软删记录。
+        let mut info = info;
+        let mut replace_id = info.id;
         if let Some(id) = info.id {
             let existing = self.get_owned_by_id(id, write_scope).await?;
             if !matches!(
                 existing.map_status.as_str(),
                 MAP_STATUS_DRAFT | MAP_STATUS_PARTIAL
             ) {
-                return Err(AppError::BadRequest(format!(
-                    "地图「{}」当前状态为 {}，不可原地覆盖地图包；请先派生新版本（新版本为草稿）再刷新",
-                    existing.map_name, existing.map_status
-                )));
+                let next_version = bump_minor_version(existing.map_version.as_deref());
+                let derived = format!(
+                    "由 #{}（{}）的{}版本派生 · 遥控器改动同步",
+                    id,
+                    existing.map_version.clone().unwrap_or_else(|| "v0".to_string()),
+                    existing.map_status
+                );
+                let base_note = info.remarks.clone().unwrap_or_default();
+                info.remarks = Some(match base_note.trim() {
+                    "" => derived,
+                    note => format!("{note} · {derived}"),
+                });
+                // 新版本必须还叫同一个名字：名字 + 设备号就是「同一张本体图」的身份，
+                // 发布时靠它把旧版本归档（见 `publish`）。中台里改过名也不跟着漂。
+                info.map_name = existing.map_name.clone();
+                info.map_version = Some(next_version.clone());
+                info.map_status = Some(MAP_STATUS_PARTIAL.to_string());
+                replace_id = None;
+                tracing::info!(
+                    "地图 #{id} 为{}，同步改为新建版本 {next_version}",
+                    existing.map_status
+                );
             }
         }
 
@@ -463,7 +508,7 @@ impl DogMapService {
         let file_path = format!("maps/{stored_name}");
         let file_size = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
 
-        match info.id {
+        match replace_id {
             Some(id) => {
                 let req = UpdateMapRequest {
                     map_name: Some(info.map_name),
@@ -493,7 +538,7 @@ impl DogMapService {
                     map_height,
                 };
                 // 走 repo 而不是 `update()`：`update()` 会拦住「已发布/部分标定不可改包」，
-                // 而刷新语义正是只替换栅格内容（状态阈值已在上面校验过）。
+                // 而刷新语义正是只替换栅格内容（状态门禁已在上面分流：只有草稿 / 部分标定会走到这里）。
                 self.repo
                     .update(id, &req, write_scope)
                     .await

@@ -356,8 +356,25 @@ pub async fn ingest_map(
 
     // 第二跳：写入业务库 map_versions
     let source_id = zentai.id.to_string();
-    let version = ingest::ROBOT_MAP_VERSION.to_string();
+    // 版本号以中台记录为准：中台给「已发布」地图新建版本时会带回来 `v1.1`，
+    // 业务库必须跟着写同一个版本号，否则两张库的版本号对不上。
+    let version = zentai
+        .map_version
+        .clone()
+        .unwrap_or_else(|| ingest::ROBOT_MAP_VERSION.to_string());
     let timestamp = now();
+    // 中台给「已发布」地图新建了版本（遥控器改动同步）：业务平台也跟着新增一行，
+    // 旧行继续指向旧版本（路线 / 任务还引用它），等中台发布新版本后状态再照搬回来。
+    // 只有「中台那条记录被删了」的重传才复用旧业务行，免得把路线绑的 id 弄丢。
+    if let Some(old_id) = replace_zentai_id
+        && zentai.id != old_id
+    {
+        info!(
+            "中台为已发布地图 #{old_id} 新建版本 #{}（{version}），业务平台新增版本行",
+            zentai.id
+        );
+        reuse_map_id = None;
+    }
     // 中台删掉后重传时沿用原业务地图 id（路线/任务引用它），否则按中台新 id 生成
     let map_id = reuse_map_id
         .clone()

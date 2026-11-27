@@ -97,9 +97,18 @@ function mapsOfPark(parkId: number | null | undefined) {
   return maps.value.filter(item => item.parkId === parkId && item.status !== "已归档");
 }
 
+/**
+ * 地图状态由中台统一管理（草稿 / 部分标定 / 已发布 / 已归档），业务平台只照搬：
+ * 园区基线只能选「中台已发布」的图。未发布的图仅在「当前就是本园区基线」时保留，
+ * 用来显示现状（保存时提交同一个 id 不会被拒），否则会把正在用的基线从下拉里弄消失。
+ */
+function selectableBaseline(item: MapVersion) {
+  return item.status === "已发布" || item.id === parkForm.mapVersionId;
+}
+
 const activeMapOptions = computed(() => {
   const parkId = editingPark.value?.id;
-  return mapsOfPark(parkId).filter(item => item.status !== "已归档");
+  return mapsOfPark(parkId).filter(selectableBaseline);
 });
 
 /**
@@ -107,7 +116,7 @@ const activeMapOptions = computed(() => {
  * 设备绑定人登录后在这里挑一张绑为本园区基线（选中即认领到本园区）。
  */
 const deviceMapOptions = computed(() =>
-  maps.value.filter(item => !item.parkId && item.status !== "已归档")
+  maps.value.filter(item => !item.parkId && item.status !== "已归档" && selectableBaseline(item))
 );
 
 /**
@@ -126,7 +135,8 @@ const otherParkMapOptions = computed(() => {
       Boolean(item.deviceCode) &&
       item.parkId != null &&
       item.parkId !== parkId &&
-      item.status !== "已归档"
+      item.status !== "已归档" &&
+      selectableBaseline(item)
   );
 });
 
@@ -647,7 +657,8 @@ onMounted(load);
             <option value="">待标定 · 已登记坐标系，建图采集中（不可编排路线）</option>
             <option value="__none__">暂不绑定 · 仅资产台账（不可编排路线）</option>
             <option v-for="map in activeMapOptions" :key="map.id" :value="map.id">
-              {{ map.mapName }} · {{ map.id }} · {{ map.status }} ·
+              {{ map.mapName }} · {{ map.id }} · {{ map.status }}
+              {{ map.status === "已发布" ? "" : "（未发布·仅保持现状）" }} ·
               {{ map.sourceId ? `中台 #${map.sourceId}` : "无中台记录" }}
             </option>
             <optgroup
@@ -655,7 +666,8 @@ onMounted(load);
               label="我的设备地图 · 未归属园区（选中即绑定到本园区）"
             >
               <option v-for="map in deviceMapOptions" :key="map.id" :value="map.id">
-                {{ map.mapName }} · {{ map.id }} · {{ map.status }} ·
+                {{ map.mapName }} · {{ map.id }} · {{ map.status }}
+                {{ map.status === "已发布" ? "" : "（未发布·仅保持现状）" }} ·
                 {{ map.sourceId ? `中台 #${map.sourceId}` : "无中台记录" }} ·
                 {{ map.deviceCode ? `设备 ${map.deviceCode}` : "设备未知" }}
               </option>
@@ -665,7 +677,8 @@ onMounted(load);
               label="我的设备地图 · 已有其他园区在用（可共用同一张）"
             >
               <option v-for="map in otherParkMapOptions" :key="map.id" :value="map.id">
-                {{ map.mapName }} · {{ map.id }} · {{ map.status }} ·
+                {{ map.mapName }} · {{ map.id }} · {{ map.status }}
+                {{ map.status === "已发布" ? "" : "（未发布·仅保持现状）" }} ·
                 {{ map.sourceId ? `中台 #${map.sourceId}` : "无中台记录" }} ·
                 {{ map.deviceCode ? `设备 ${map.deviceCode}` : "设备未知" }}
               </option>

@@ -635,9 +635,10 @@ async fn upload_with_id_replaces_package_in_place() {
     assert_eq!(sha256_hex(&stored), sha256_hex(&refreshed));
 }
 
-/// 已发布版本不可原地覆盖：返回可操作的原因，且不落盘新文件。
+/// 已发布版本不可原地改包，但**不再报错**：同步时自动新建下一个版本（`部分标定`），
+/// 等中台发布后生效。状态由中台统一决定（未发布 → 原地更新，已发布 → 新版本）。
 #[tokio::test]
-async fn upload_with_id_rejects_published_map() {
+async fn upload_with_id_creates_new_version_when_published() {
     let fixture = fixture("已发布").await;
     let scope = DataScope::new(1, true);
     let before = fixture
@@ -647,33 +648,112 @@ async fn upload_with_id_rejects_published_map() {
         .await
         .expect("map must exist");
 
+    // 遥控器上改完图，设备客户端「同步地图」把新包推上来（带着旧的已发布 id）
     let refreshed = sample_package(false);
-    let error = fixture
+    let map = fixture
         .state
         .dog_map_service
         .save_upload(
-            upload_request(Some(fixture.map_id), None, "部分标定"),
+            upload_request(Some(fixture.map_id), Some("v9.9"), "部分标定"),
             "map.zip",
             &refreshed,
             &fixture.state.upload_dir,
             &scope,
         )
         .await
-        .expect_err("published maps must not be overwritten");
-    let message = format!("{error}");
+        .expect("已发布版本应自动新建下一个版本，而不是报错");
+
+    assert_ne!(map.id, fixture.map_id, "已发布版本不可变，必须新建一行");
+    assert_eq!(map.map_name, before.map_name, "新版本还是同一张本体图");
+    assert_eq!(
+        map.map_status, "部分标定",
+        "新版本落在部分标定，等中台发布（不再要求现场手动派生）"
+    );
+    assert_eq!(
+        map.map_version.as_deref(),
+        Some("v1.1"),
+        "版本号由中台自动 +1，回传里的 v9.9 不能覆盖"
+    );
     assert!(
-        message.contains("派生新版本"),
-        "错误要告诉现场怎么办: {message}"
+        map.remarks.clone().unwrap_or_default().contains("派生"),
+        "备注要写清楚它是从哪个已发布版本派生的: {:?}",
+        map.remarks
+    );
+    assert_eq!(
+        sha256_hex(&refreshed),
+        map.map_hash.clone().unwrap_or_default(),
+        "新版本拿到的是新包"
     );
 
+    // 旧版本纹丝不动，路线 / 任务照旧引用它
     let after = fixture
         .state
         .dog_map_service
         .get_by_id(fixture.map_id, &scope)
         .await
         .unwrap();
-    assert_eq!(after.map_hash, before.map_hash, "中台记录不能被改动");
-    assert_eq!(after.file_path, before.file_path, "包路径不能被改动");
+    assert_eq!(after.map_status, "已发布");
+    assert_eq!(after.map_hash, before.map_hash, "已发布版本的地图包不能被改");
+    assert_eq!(after.file_path, before.file_path);
+}
+
+/// 发布新版本 = 这张**本体图**的新版本生效：同一台设备上报的同名地图，
+/// 旧已发布版本退役成「已归档」。业务平台不再自己归档，只照搬中台状态。
+#[tokio::test]
+async fn publish_archives_previous_version_of_the_same_map() {
+    let fixture = fixture("已发布").await;
+    let scope = DataScope::new(1, true);
+    let before = fixture
+        .state
+        .dog_map_service
+        .get_by_id(fixture.map_id, &scope)
+        .await
+        .expect("map must exist");
+
+    // 遥控器改动同步 → 中台自动新建 v1.1
+    let mut request = upload_request(Some(fixture.map_id), None, "部分标定");
+    request.map_name = before.map_name.clone();
+    let derived = fixture
+        .state
+        .dog_map_service
+        .save_upload(
+            request,
+            "map.zip",
+            &sample_package(false),
+            &fixture.state.upload_dir,
+            &scope,
+        )
+        .await
+        .expect("应新建 v1.1");
+    assert_eq!(derived.map_version.as_deref(), Some("v1.1"));
+
+    // 新版本发布前，旧版本仍是已发布
+    let old = fixture
+        .state
+        .dog_map_service
+        .get_by_id(fixture.map_id, &scope)
+        .await
+        .unwrap();
+    assert_eq!(old.map_status, "已发布");
+
+    let published = fixture
+        .state
+        .dog_map_service
+        .publish(derived.id, &scope)
+        .await
+        .expect("发布新版本必须成功");
+    assert_eq!(published.map_status, "已发布");
+
+    let retired = fixture
+        .state
+        .dog_map_service
+        .get_by_id(fixture.map_id, &scope)
+        .await
+        .unwrap();
+    assert_eq!(
+        retired.map_status, "已归档",
+        "同一张本体图的旧已发布版本要退役，否则中台一图多版本都算已发布"
+    );
 }
 
 /// 中台 `mapInfo` 的 `mapId` 也要认（业务平台旧版本用这个字段名）。

@@ -578,14 +578,15 @@ async fn synced_sources_scopes_by_device() {
 
 #[tokio::test]
 async fn creating_park_adopts_unbound_device_map() {
-    // 「设备建图 → 人创建园区时挑一张自己的设备地图绑为基线」
+    // 「设备建图 → 人在中台发布 → 创建园区时挑一张自己的设备地图绑为基线」
     let (state, _db) = test_state().await;
     let pool = state.db.clone();
     sqlx::query(
         "INSERT INTO map_versions
-            (id, park_id, device_code, map_name, version, status, created_at, source, source_ref)
+            (id, park_id, device_code, map_name, version, status, created_at, source, source_id,
+             source_ref)
          VALUES ('RD-002@history-0715', NULL, 'RD-002', 'RD-002@history-0715', 'v1.0',
-            '部分标定', '2026-01-01 00:00:00', 'robot-mapping',
+            '已发布', '2026-01-01 00:00:00', 'robot-mapping', '88',
             '/ota/alg_data/map/history_map/0715')",
     )
     .execute(&pool)
@@ -627,15 +628,17 @@ async fn creating_park_adopts_unbound_device_map() {
 /// 广汇产业园二期编辑时下拉里一张图都没有（`deviceMapOptions` 只列 `park_id IS NULL`）。
 /// 现在**不同园区可以绑定同一张地图基线**：保存只写本园区的基线，
 /// `map_versions.park_id`（采集 / 主归属园区）和旧园区的基线都不动。
+/// 地图状态由中台统一管理，所以这里用的是「中台已发布」的图——只有已发布才能当基线。
 #[tokio::test]
 async fn parks_can_share_the_same_map_baseline() {
     let (state, _db) = test_state().await;
     let pool = state.db.clone();
     sqlx::query(
         "INSERT INTO map_versions
-            (id, park_id, device_code, map_name, version, status, created_at, source, source_ref)
+            (id, park_id, device_code, map_name, version, status, created_at, source, source_id,
+             source_ref)
          VALUES ('RD-002@history-0715', 1, 'RD-002', 'RD-002@history-0715', 'v1.0',
-            '部分标定', '2026-01-01 00:00:00', 'robot-mapping',
+            '已发布', '2026-01-01 00:00:00', 'robot-mapping', '95',
             '/ota/alg_data/map/history_map/0715')",
     )
     .execute(&pool)
@@ -689,6 +692,12 @@ async fn parks_can_share_the_same_map_baseline() {
         "原园区的基线不该被共用方拖走"
     );
     assert_eq!(old_status, "部分标定");
+    // 共用方拿到的是「已标定」（基线是一张中台已发布的图）
+    let shared_status: String = sqlx::query_scalar("SELECT map_status FROM parks WHERE id = 2")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(shared_status, "已标定");
 
     // 园区可用地图接口要把共用的基线算进去（新建路线的版本下拉靠它）
     let maps = app
@@ -707,6 +716,63 @@ async fn parks_can_share_the_same_map_baseline() {
             .as_array()
             .is_some_and(|rows| rows.iter().any(|row| row["id"] == "RD-002@history-0715")),
         "园区可用地图应包含共用的基线: {maps}"
+    );
+}
+
+/// 地图状态由中台统一管理：**未发布**（草稿 / 部分标定）的图不能新绑为园区基线，
+/// 只有中台「已发布」的图可以。园区当前基线就是它时（中台把图退回草稿）原样提交要放过，
+/// 否则编辑园区信息会被自己已经绑着的基线下卡住。
+#[tokio::test]
+async fn park_baseline_requires_a_published_map() {
+    let (state, _db) = test_state().await;
+    let pool = state.db.clone();
+    sqlx::query(
+        "INSERT INTO map_versions
+            (id, park_id, device_code, map_name, version, status, created_at, source, source_id,
+             source_ref)
+         VALUES ('RD-009@draft', NULL, 'RD-009', 'RD-009@draft', 'v1.0', '部分标定',
+            '2026-01-01 00:00:00', 'robot-mapping', '77',
+            '/ota/alg_data/map/history_map/draft')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = build_router(state);
+    let token = login(&app).await;
+    let put_baseline = |id: &'static str| {
+        Request::put("/api/parks/1")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(format!(
+                r#"{{"parkName":"智造园区","area":12.5,"mapVersionId":"{id}"}}"#
+            )))
+            .unwrap()
+    };
+
+    let response = app.clone().oneshot(put_baseline("RD-009@draft")).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "未发布的地图不能绑成园区基线"
+    );
+    let body = json_body(response).await;
+    let msg = body["msg"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("已发布"),
+        "错误要说清楚「状态由中台管理、先在中台发布」: {msg}"
+    );
+
+    // 已经是它：原样提交不能报错（中台把某张图退回草稿时也要能继续编辑园区）
+    sqlx::query("UPDATE parks SET map_version_id = 'RD-009@draft' WHERE id = 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let response = app.oneshot(put_baseline("RD-009@draft")).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "保持现状的基线不该被状态门禁挡住"
     );
 }
 
@@ -4129,6 +4195,7 @@ async fn fake_zentai(
     token: &'static str,
     existing: Vec<i64>,
     upload_id: i64,
+    upload_version: Option<&'static str>,
 ) -> (String, Arc<std::sync::Mutex<Vec<Value>>>) {
     use axum::extract::Multipart;
     use axum::http::HeaderMap;
@@ -4184,7 +4251,12 @@ async fn fake_zentai(
                     axum::Json(serde_json::json!({
                         "code": 10200,
                         "msg": "success",
-                        "data": {"id": upload_id, "mapName": map_name, "fileName": "map.zip"},
+                        "data": {
+                            "id": upload_id,
+                            "mapName": map_name,
+                            "mapVersion": upload_version,
+                            "fileName": "map.zip",
+                        },
                     }))
                 }
             }),
@@ -4232,7 +4304,7 @@ async fn ingest_state(
 async fn ingest_refresh_reuploads_map_deleted_in_zentai() {
     const SOURCE_REF: &str = "/ota/alg_data/map/history_map/2026_11_27_09_54_17";
     // 中台里这张图已被软删（exists 不返回 42）
-    let (base, uploads) = fake_zentai("test-service-token", Vec::new(), 99).await;
+    let (base, uploads) = fake_zentai("test-service-token", Vec::new(), 99, None).await;
     let (state, db_dir, app, token, package) = ingest_state(&base).await;
     let stored = db_dir.dir.join("stored-map.zip");
     std::fs::write(&stored, &package).expect("写入本地副本");
@@ -4280,6 +4352,73 @@ async fn ingest_refresh_reuploads_map_deleted_in_zentai() {
     );
 }
 
+/// 遥控器改完同步到一张**中台已发布**的地图：中台自动新建下一个版本（返回新 id + v1.1），
+/// 业务平台也跟着**新增一行**；旧行继续指向旧版本（路线 / 任务还引用它）。
+///
+/// 以前这种事只会撞「已发布不可原地覆盖」400，现场只能人工派生版本，派生出来的占位行
+/// 又没有中台链接，于是两边的地图数量越差越多（2026-11-27 现场 7 : 12）。
+#[tokio::test]
+async fn ingest_new_zentai_version_creates_a_business_row() {
+    const SOURCE_REF: &str = "/ota/alg_data/map/history_map/2026_11_26_15_21_40";
+    // 中台那张图还在（exists 返回 42），但因为它已发布，中台把这次同步做成了新版本 #100
+    let (base, uploads) = fake_zentai("test-service-token", vec![42], 100, Some("v1.1")).await;
+    let (state, _db_dir, app, token, package) = ingest_state(&base).await;
+    sqlx::query(
+        "INSERT INTO map_versions (id, park_id, device_code, map_name, version, status,
+            file_name, file_path, file_size, source, source_id, source_ref, created_at)
+         VALUES ('ROS-MAP-42@v1.0', 1, 'RD-001', '2026_11_26_15_21_40', 'v1.0', '已发布',
+            'map.zip', 'maps/missing.zip', 1, 'robot-mapping', '42', ?1, '2026-11-26 15:46:13')",
+    )
+    .bind(SOURCE_REF)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let info = serde_json::json!({
+        "mapName": "2026_11_26_15_21_40",
+        "deviceId": "RD-001",
+        "sourceRef": SOURCE_REF,
+        "mode": "refresh",
+    });
+    let body = post_ingest(&app, &token, &package, info).await;
+
+    assert_eq!(body["data"]["zentaiMapId"].as_i64(), Some(100), "{body}");
+    assert_eq!(
+        body["data"]["mapId"].as_str(),
+        Some("ROS-MAP-100@v1.1"),
+        "中台新建版本 → 业务也新增一行，版本号跟中台走: {body}"
+    );
+    let sent = uploads.lock().unwrap().clone();
+    assert_eq!(
+        sent[0]["id"].as_i64(),
+        Some(42),
+        "仍然带着旧 id 请求覆盖（要不要新版本由中台决定）: {sent:?}"
+    );
+
+    // 旧行不动：已发布、仍指向 #42（路线 / 任务还在用它）
+    let (status, source_id): (String, String) =
+        sqlx::query_as("SELECT status, source_id FROM map_versions WHERE id = 'ROS-MAP-42@v1.0'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(status, "已发布");
+    assert_eq!(source_id, "42");
+
+    // 新行：部分标定（等中台发布）、指向 #100、保留本体路径
+    let (status, version, source_id, source_ref): (String, String, String, Option<String>) =
+        sqlx::query_as(
+            "SELECT status, version, source_id, source_ref FROM map_versions
+             WHERE id = 'ROS-MAP-100@v1.1'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(status, "部分标定");
+    assert_eq!(version, "v1.1");
+    assert_eq!(source_id, "100");
+    assert_eq!(source_ref.as_deref(), Some(SOURCE_REF));
+}
+
 /// 回归 2026-11-27 现场（第二条）：同一个本体目录在业务库里可能留着**已归档**的历史行
 /// （曾指向一张「已发布」的中台地图）。以前刷新时拿它去覆盖，被中台
 /// 「已发布不可原地覆盖」400 拒掉，整条同步跟着报失败——运维只看到「同步失败」。
@@ -4290,7 +4429,7 @@ async fn ingest_refresh_reuploads_map_deleted_in_zentai() {
 async fn ingest_refresh_skips_archived_business_row_instead_of_failing() {
     const SOURCE_REF: &str = "/ota/alg_data/map/history_map/2026_11_23_10_49_02";
     // 中台那张「已发布」的图还在（exists 返回 42）
-    let (base, uploads) = fake_zentai("test-service-token", vec![42], 100).await;
+    let (base, uploads) = fake_zentai("test-service-token", vec![42], 100, None).await;
     let (state, db_dir, app, token, package) = ingest_state(&base).await;
     let stored = db_dir.dir.join("archived-map.zip");
     std::fs::write(&stored, &package).expect("写入本地副本");
@@ -4347,7 +4486,7 @@ async fn ingest_refresh_skips_archived_business_row_instead_of_failing() {
 #[tokio::test]
 async fn ingest_refresh_leaves_derived_map_versions_untouched() {
     const SOURCE_REF: &str = "/ota/alg_data/map/history_map/2026_11_23_10_49_02";
-    let (base, uploads) = fake_zentai("test-service-token", vec![42], 100).await;
+    let (base, uploads) = fake_zentai("test-service-token", vec![42], 100, None).await;
     let (state, _db_dir, app, token, package) = ingest_state(&base).await;
     // 派生版本：没有 source_id、没有 file_path/file_size（控制台只记标定信息）
     sqlx::query(

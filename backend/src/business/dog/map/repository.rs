@@ -1,4 +1,6 @@
-use crate::business::dog::map::domain::{CreateMapRequest, MapPageQuery, UpdateMapRequest};
+use crate::business::dog::map::domain::{
+    CreateMapRequest, MAP_STATUS_ARCHIVED, MAP_STATUS_PUBLISHED, MapPageQuery, UpdateMapRequest,
+};
 use crate::business::dog::map::entity::ActiveModel as MapActiveModel;
 use crate::business::dog::map::entity::Column as MapColumn;
 use crate::business::dog::map::entity::Entity as MapEntity;
@@ -11,6 +13,7 @@ use crate::common::base::{BaseRepository, order_asc, order_desc};
 use crate::common::data_scope::DataScope;
 use crate::common::util::{generate_id, parse_beijing_datetime};
 use chrono::{DateTime, Utc};
+use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveValue, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, DbBackend,
     EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Statement,
@@ -371,6 +374,45 @@ impl SeaOrmDogMapRepository {
         }
         update.exec(&*self.conn).await?;
         self.find_by_id(id, scope).await
+    }
+
+    /// 发布新版本时把「同一张本体图」的旧已发布版本归档。
+    ///
+    /// 本体图 = 同一台设备上报的同名地图（`device_code` + `map_name`）。
+    /// 地图状态统一由中台维护：业务平台只照搬（`sync_map_statuses`），不再自己归档，
+    /// 否则两边各有一套生命周期，「中台已发布、业务已归档」这种对不上的行只会越积越多。
+    /// 没有 `device_code` 的手工 / 演示地图不归档任何东西（同名不代表同一张图）。
+    ///
+    /// 返回被归档的行数（0 = 没有旧版本需要退役）。
+    pub async fn archive_published_siblings(
+        &self,
+        id: i64,
+        device_code: Option<&str>,
+        map_name: &str,
+        scope: &DataScope,
+    ) -> Result<u64, sea_orm::DbErr> {
+        let Some(device_code) = device_code.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Ok(0);
+        };
+        if map_name.trim().is_empty() {
+            return Ok(0);
+        }
+        let mut update = MapEntity::update_many()
+            .col_expr(MapColumn::MapStatus, Expr::value(MAP_STATUS_ARCHIVED))
+            .col_expr(
+                MapColumn::UpdateTime,
+                Expr::value(Some(chrono::Utc::now())),
+            )
+            .filter(MapColumn::Id.ne(id))
+            .filter(MapColumn::IsDeleted.eq(0))
+            .filter(MapColumn::MapStatus.eq(MAP_STATUS_PUBLISHED))
+            .filter(MapColumn::MapName.eq(map_name.trim()))
+            .filter(MapColumn::DeviceCode.eq(device_code));
+        if let Some(owner) = scope.owner_filter() {
+            update = update.filter(MapColumn::UserId.eq(owner));
+        }
+        let result = update.exec(&*self.conn).await?;
+        Ok(result.rows_affected)
     }
 
     /// 当前分享给了哪些设备（按分享时间排序）。

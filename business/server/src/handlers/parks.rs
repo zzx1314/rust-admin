@@ -107,7 +107,7 @@ pub async fn create_park(
     // 建档时选的地图基线：地图跟着设备走，设备地图默认 `park_id IS NULL`，
     // 这里把它认领到新园区，园区才会真正拿到「当前生效基线」。
     if let Some((map_version_id, map_status)) =
-        resolve_park_map(&state, id, payload.map_version_id, &claims).await?
+        resolve_park_map(&state, id, payload.map_version_id, &claims, None).await?
         && map_version_id.is_some()
     {
         sqlx::query(
@@ -138,10 +138,15 @@ pub async fn update_park(
     {
         return Err(AppError::NotFound("园区不存在".to_string()));
     }
-    let (map_version_id, map_status) =
-        resolve_park_map(&state, id, payload.map_version_id, &claims)
-            .await?
-            .unwrap_or((existing.map_version_id, existing.map_status));
+    let (map_version_id, map_status) = resolve_park_map(
+        &state,
+        id,
+        payload.map_version_id,
+        &claims,
+        existing.map_version_id.as_deref(),
+    )
+    .await?
+    .unwrap_or((existing.map_version_id, existing.map_status));
     sqlx::query(
         "UPDATE parks SET park_name = ?1, park_description = ?2, park_address = ?3, area = ?4,
             owner_name = ?5, park_type = ?6, status = ?7, color = ?8, map_version_id = ?9,
@@ -246,11 +251,17 @@ async fn fetch_park(state: &AppState, id: i64) -> Result<Park, AppError> {
 /// 时不改归属，只校验调用者对这张图有没有使用权，见 [`ensure_map_usable`]。
 /// 历史 / 演示地图（没有 `device_code`、没有上传人）只给管理员用，
 /// 免得随手把演示园区的基线挂到业务园区上。
+///
+/// **只认中台已发布的地图**：状态由中台统一维护（业务库只照搬），能当园区基线的
+/// 就是「中台已发布」那一张。未发布（草稿 / 部分标定）只能在园区里维持现状
+/// （`current` 就是这张，比如中台把某张图退回草稿），换绑 / 新绑一律拒绝，
+/// 否则会再次出现「业务平台基线指向一张中台未发布 / 已删除的图」。
 pub(crate) async fn resolve_park_map(
     state: &AppState,
     park_id: i64,
     requested: Option<String>,
     claims: &Claims,
+    current: Option<&str>,
 ) -> Result<Option<(Option<String>, String)>, AppError> {
     let Some(requested) = requested else {
         return Ok(None);
@@ -269,10 +280,25 @@ pub(crate) async fn resolve_park_map(
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::BadRequest(format!("地图基线 {requested} 不存在")))?;
+    // 先判「你能不能碰这张图」再判状态：没权限的人得到的仍是「无法绑定」，
+    // 不会因为图恰好未发布而把授权问题的原因盖掉。
+    if let Some(owner) = map.0
+        && owner != park_id
+    {
+        ensure_map_usable(state, claims, requested, map.2.as_deref(), map.3).await?;
+    }
+    // 未发布的地图只能「保持现状」：编辑园区时前端会把当前基线原样提交回来，
+    // 那一次不能把人卡住；真正换绑时一律要求已发布。
+    if map.1.trim() != "已发布" && current != Some(requested) {
+        return Err(AppError::BadRequest(format!(
+            "地图基线 {requested} 当前状态为 {}：地图状态由中台统一管理，\
+             只有中台「已发布」的地图能绑定为园区基线（请先在中台发布）",
+            map.1
+        )));
+    }
     match map.0 {
         Some(owner) if owner != park_id => {
-            // 共用：归属不动，只确认这张图你可以用。
-            ensure_map_usable(state, claims, requested, map.2.as_deref(), map.3).await?;
+            // 共用：归属不动，只确认这张图你可以用（授权已在上面做过）。
             tracing::info!("园区 {park_id} 共用设备地图 {requested}（原归属园区 {owner}）");
         }
         // 设备地图还没归属园区：绑定动作就是认领
@@ -288,8 +314,11 @@ pub(crate) async fn resolve_park_map(
     }
     let status = if map.1 == "部分标定" {
         "部分标定".to_string()
-    } else {
+    } else if map.1 == "已发布" {
         "已标定".to_string()
+    } else {
+        // 现状基线（中台退回草稿 / 已归档）：园区徽章跟着地图状态走，不要假标成已标定
+        map.1.trim().to_string()
     };
     Ok(Some((Some(requested.to_string()), status)))
 }
