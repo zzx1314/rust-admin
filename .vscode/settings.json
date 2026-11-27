@@ -12,6 +12,7 @@
     "rust-analyzer.cargo.allTargets": true,
     // business/client 的 .cargo/config.toml 只配了 aarch64 交叉链接器，
     // 不影响本机分析；这里保持默认 host target，避免链接不到 arm 工具链。
-    "rust-analyzer.check.command": "clippy",
-    "rust-analyzer.check.extraArgs": ["--all-targets"]
+    // 注意：不要再给 check.extraArgs 加 --all-targets —— cargo.allTargets 已经会传一次，
+    // 重复传会让 flycheck 直接失败（error: the argument '--all-targets' cannot be used multiple times）。
+    "rust-analyzer.check.command": "clippy"
 }
